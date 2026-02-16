@@ -97,6 +97,14 @@ fn print_type_name(ty: TypeEntry) with IO, Mut, Panic, Div, Alloc {
             print("fn#")
             print_int(ty.fn_sig_id)
         }
+        TyKnowledge => {
+            print("Knowledge<")
+            match ty.inner {
+                Some(inner) => print_type_name(*inner)
+                None => print("?")
+            }
+            print(">")
+        }
         TyNever => print("!")
         TyError => print("<error>")
         TyUnknown => print("<unknown>")
@@ -200,6 +208,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 19 { print("cannot call method on this type") }
     else if code == 20 { print("array element type mismatch") }
     else if code == 21 { print("compound assign type mismatch") }
+    else if code == 22 { print("invalid epsilon bound (must be 0.0..1.0)") }
     else { print("unknown error") }
 }
 
@@ -992,6 +1001,18 @@ impl Checker {
             } else {
                 (c, ty_error())
             }
+        } else if base_ty.kind == TypeKind::TyKnowledge {
+            // Knowledge<T> field access: .value -> T, .epsilon -> f64
+            if name_matches_str5(e.name, 118, 97, 108, 117, 101) {
+                // "value" = [118, 97, 108, 117, 101]
+                (c, knowledge_inner(base_ty))
+            } else if name_matches_str7(e.name, 101, 112, 115, 105, 108, 111, 110) {
+                // "epsilon" = [101, 112, 115, 105, 108, 111, 110]
+                (c, ty_f64())
+            } else {
+                c = c.report_error_at(e.span, 12, 0, 0, 0)
+                (c, ty_error())
+            }
         } else if base_ty.kind == TypeKind::TyTuple {
             // Tuple field access by index (e.g. t.0, t.1)
             // The field name contains the index as ascii digits
@@ -1043,7 +1064,18 @@ impl Checker {
         let base_pair = self.check_opt_expr(e.left)
         var c = base_pair.0
         let base_ty = base_pair.1
-        if base_ty.kind == TypeKind::TyNamed {
+        if base_ty.kind == TypeKind::TyKnowledge {
+            // Knowledge<T>.unwrap() -> T
+            if name_matches_str6(e.name, 117, 110, 119, 114, 97, 112) {
+                // "unwrap" = [117, 110, 119, 114, 97, 112]
+                c = c.check_expr_list_no_type(e.args)
+                (c, knowledge_inner(base_ty))
+            } else {
+                c = c.report_error_at(e.span, 11, 0, 0, 0)
+                c = c.check_expr_list_no_type(e.args)
+                (c, ty_error())
+            }
+        } else if base_ty.kind == TypeKind::TyNamed {
             let sig_id = c.fn_sigs.find_method(base_ty.name, e.name)
             if sig_id >= 0 {
                 let sig = c.fn_sigs.get(sig_id)

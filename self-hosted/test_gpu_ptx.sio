@@ -444,10 +444,136 @@ fn gpu_ptx_test_66_tiled_gemm_predication_contract() -> bool with Mut, Panic, Di
 
 fn gpu_ptx_test_67_predicated_store_guard() -> bool with Mut, Panic, Div, Alloc {
     let s = ptx_to_string(gpu_lower_to_ptx(gpu_build_gemm_shared_f32_ir()))
-    let has_predicated_store = ptx_str_contains(s, "@%p0 st.global.f32")
-    if !has_predicated_store { return false }
-    // Ensure global stores remain predicate-guarded in this kernel (no unconditional write path).
-    !ptx_str_contains(s, "\n    st.global.f32 [")
+    let has_predicated_store = ptx_has_predicated_opcode(s, "st.global.f32")
+    let has_unguarded_store = ptx_has_unpredicated_opcode(s, "st.global.f32")
+    has_predicated_store && !has_unguarded_store
+}
+
+// Additional stronger contracts: explicit predicate register checks by line semantics.
+// These catch regressions where a later pass accidentally emits unguarded global/shared
+// memory instructions that a prior substring-only check might miss.
+fn gpu_ptx_test_68_predicated_global_load_guard_contract() -> bool with Mut, Panic, Div, Alloc {
+    let s = ptx_to_string(gpu_lower_to_ptx(gpu_build_gemm_shared_f32_ir()))
+    let has_predicated_load = ptx_has_predicated_opcode(s, "ld.global.f32")
+    let has_unguarded_load = ptx_has_unpredicated_opcode(s, "ld.global.f32")
+    has_predicated_load && !has_unguarded_load
+}
+
+fn gpu_ptx_test_69_predicated_shared_load_guard_contract() -> bool with Mut, Panic, Div, Alloc {
+    let s = ptx_to_string(gpu_lower_to_ptx(gpu_build_gemm_shared_f32_ir()))
+    ptx_has_predicated_opcode(s, "ld.shared.f32") &&
+    !ptx_has_unpredicated_opcode(s, "ld.shared.f32")
+}
+
+fn gpu_ptx_test_70_predicated_shared_store_guard_contract() -> bool with Mut, Panic, Div, Alloc {
+    let s = ptx_to_string(gpu_lower_to_ptx(gpu_build_gemm_shared_f32_ir()))
+    ptx_has_predicated_opcode(s, "st.shared.f32") &&
+    !ptx_has_unpredicated_opcode(s, "st.shared.f32")
+}
+
+fn gpu_ptx_test_71_selp_guard_presence() -> bool with Mut, Panic, Div, Alloc {
+    let s = ptx_to_string(gpu_lower_to_ptx(gpu_build_gemm_shared_f32_ir()))
+    ptx_str_contains(s, "selp") &&
+    ptx_str_contains(s, "setp.")
+}
+
+fn gpu_ptx_test_72_tiled_gemm_no_unpredicated_global_store() -> bool with Mut, Panic, Div, Alloc {
+    let s = ptx_to_string(gpu_lower_to_ptx(gpu_build_gemm_shared_f32_ir()))
+    !ptx_has_unpredicated_opcode(s, "st.global.f32")
+}
+
+fn gpu_ptx_test_73_tiled_gemm_f64_no_unpredicated_global_store() -> bool with Mut, Panic, Div, Alloc {
+    let s = ptx_to_string(gpu_lower_to_ptx(gpu_build_gemm_shared_f64_ir()))
+    !ptx_has_unpredicated_opcode(s, "st.global.f64")
+}
+
+fn gpu_ptx_test_74_tiled_gemm_f64_predication_full_contract() -> bool with Mut, Panic, Div, Alloc {
+    let s = ptx_to_string(gpu_lower_to_ptx(gpu_build_gemm_shared_f64_ir()))
+    ptx_has_predicated_opcode(s, "st.global.f64") &&
+    ptx_has_predicated_opcode(s, "ld.global.f64") &&
+    ptx_has_predicated_opcode(s, "ld.shared.f64") &&
+    ptx_has_predicated_opcode(s, "st.shared.f64") &&
+    ptx_str_contains(s, "selp") &&
+    ptx_str_contains(s, "setp.")
+}
+
+fn gpu_ptx_test_75_conv1d_f32_bounds_predicated_global_io() -> bool with Mut, Panic, Div, Alloc {
+    let s = ptx_to_string(gpu_lower_to_ptx(gpu_build_conv1d_f32_ir()))
+    let has_bounds = ptx_has_predicated_opcode(s, "ld.global.f32") &&
+                     ptx_has_predicated_opcode(s, "st.global.f32") &&
+                     ptx_str_contains(s, "setp.")
+    has_bounds && 
+    !ptx_has_unpredicated_opcode(s, "ld.global.f32") &&
+    !ptx_has_unpredicated_opcode(s, "st.global.f32")
+}
+
+fn gpu_ptx_test_76_conv1d_f64_bounds_predicated_global_io() -> bool with Mut, Panic, Div, Alloc {
+    let s = ptx_to_string(gpu_lower_to_ptx(gpu_build_conv1d_f64_ir()))
+    let has_bounds = ptx_has_predicated_opcode(s, "ld.global.f64") &&
+                     ptx_has_predicated_opcode(s, "st.global.f64") &&
+                     ptx_str_contains(s, "setp.")
+    has_bounds &&
+    !ptx_has_unpredicated_opcode(s, "ld.global.f64") &&
+    !ptx_has_unpredicated_opcode(s, "st.global.f64")
+}
+
+fn gpu_ptx_test_77_kernel_max_ops_is_1024() -> bool with Mut, Panic, Div, Alloc {
+    gpu_kernel_max_ops() == 1024
+}
+
+fn gpu_ptx_test_78_complex_kernels_within_op_capacity() -> bool with Mut, Panic, Div, Alloc {
+    let gemm = gpu_build_gemm_shared_f64_ir()
+    let conv2d = gpu_build_conv2d_f64_ir()
+    let vec = gpu_build_vec_sum_f64_ir()
+    let max_ops = gpu_kernel_max_ops()
+    gemm.op_count <= max_ops && conv2d.op_count <= max_ops && vec.op_count <= max_ops
+}
+
+fn gpu_ptx_test_85_checked_append_preserves_last_op() -> bool with Mut, Panic, Div, Alloc {
+    let mut_kernel = gpu_kernel_new()
+    var filler = gpu_op_new()
+    filler.dst_reg = -1
+    var k = mut_kernel
+    var i: i64 = 0
+    while i < gpu_kernel_max_ops() - 1 {
+        filler.dst_reg = i
+        let appended = gpu_append_op_checked(k, filler)
+        if appended.error != GpuError::GpuOk { return false }
+        k = appended.kernel
+        i = i + 1
+    }
+
+    // Fill final in-bound slot with a marker op.
+    filler.dst_reg = 4242
+    let terminal = gpu_append_op_checked(k, filler)
+    if terminal.error != GpuError::GpuOk { return false }
+    if terminal.kernel.op_count != gpu_kernel_max_ops() { return false }
+    if terminal.kernel.ops[(gpu_kernel_max_ops() - 1) as usize].dst_reg != 4242 { return false }
+
+    // One more op must fail without mutating the terminal slot.
+    let overflow = gpu_append_op_checked(terminal.kernel, filler)
+    if overflow.error != GpuError::GpuOpBufferOverflow { return false }
+    overflow.kernel.ops[(gpu_kernel_max_ops() - 1) as usize].dst_reg == 4242
+}
+
+fn gpu_ptx_test_86_unchecked_append_never_shortens_terminal_state() -> bool with Mut, Panic, Div, Alloc {
+    let mut_kernel = gpu_kernel_new()
+    var filler = gpu_op_new()
+    var k = mut_kernel
+    var i: i64 = 0
+    while i < gpu_kernel_max_ops() {
+        filler.dst_reg = i
+        let appended = gpu_append_op_checked(k, filler)
+        if appended.error != GpuError::GpuOk { return false }
+        k = appended.kernel
+        i = i + 1
+    }
+
+    // Unchecked append should preserve last-op contents and capacity.
+    filler.dst_reg = 9001
+    let after_overflow = gpu_append_op(k, filler)
+    after_overflow.op_count == gpu_kernel_max_ops() &&
+    after_overflow.ops[(gpu_kernel_max_ops() - 1) as usize].dst_reg == gpu_kernel_max_ops() - 1
 }
 
 fn gpu_ptx_test_50_op_buffer_append_ok() -> bool with Mut, Panic, Div, Alloc {
@@ -570,37 +696,37 @@ fn gpu_ptx_test_61_stencil_larger_than_elemwise() -> bool with Mut, Panic, Div, 
 
 // ===== Phase 5b: Stencil (conv2d 3x3) tests =====
 
-fn gpu_ptx_test_68_conv2d_f32_entry() -> bool with Mut, Panic, Div, Alloc {
+fn gpu_ptx_test_79_conv2d_f32_entry() -> bool with Mut, Panic, Div, Alloc {
     let s = ptx_to_string(gpu_lower_to_ptx(gpu_build_conv2d_f32_ir()))
     ptx_str_contains(s, ".entry conv2d_f32") &&
     ptx_str_contains(s, "bar.sync 0")
 }
 
-fn gpu_ptx_test_69_conv2d_f32_shared() -> bool with Mut, Panic, Div, Alloc {
+fn gpu_ptx_test_80_conv2d_f32_shared() -> bool with Mut, Panic, Div, Alloc {
     let s = ptx_to_string(gpu_lower_to_ptx(gpu_build_conv2d_f32_ir()))
     ptx_str_contains(s, "ld.shared") &&
     ptx_str_contains(s, "st.shared")
 }
 
-fn gpu_ptx_test_70_conv2d_f32_fma() -> bool with Mut, Panic, Div, Alloc {
+fn gpu_ptx_test_81_conv2d_f32_fma() -> bool with Mut, Panic, Div, Alloc {
     let s = ptx_to_string(gpu_lower_to_ptx(gpu_build_conv2d_f32_ir()))
     ptx_str_contains(s, "fma.rn.f32") &&
     ptx_str_contains(s, "mul.rn.f32")
 }
 
-fn gpu_ptx_test_71_conv2d_2d_blocks() -> bool with Mut, Panic, Div, Alloc {
+fn gpu_ptx_test_82_conv2d_2d_blocks() -> bool with Mut, Panic, Div, Alloc {
     let s = ptx_to_string(gpu_lower_to_ptx(gpu_build_conv2d_f32_ir()))
     ptx_str_contains(s, "%ctaid.x") &&
     ptx_str_contains(s, "%ctaid.y")
 }
 
-fn gpu_ptx_test_72_conv2d_2d_threads() -> bool with Mut, Panic, Div, Alloc {
+fn gpu_ptx_test_83_conv2d_2d_threads() -> bool with Mut, Panic, Div, Alloc {
     let s = ptx_to_string(gpu_lower_to_ptx(gpu_build_conv2d_f32_ir()))
     ptx_str_contains(s, "%tid.x") &&
     ptx_str_contains(s, "%tid.y")
 }
 
-fn gpu_ptx_test_73_conv2d_f64() -> bool with Mut, Panic, Div, Alloc {
+fn gpu_ptx_test_84_conv2d_f64() -> bool with Mut, Panic, Div, Alloc {
     let s = ptx_to_string(gpu_lower_to_ptx(gpu_build_conv2d_f64_ir()))
     ptx_str_contains(s, ".entry conv2d_f64") &&
     ptx_str_contains(s, "fma.rn.f64")
@@ -759,20 +885,47 @@ fn run_gpu_ptx_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     if gpu_ptx_test_66_tiled_gemm_predication_contract() { passed = passed + 1; print("  T66 OK (tiled gemm predicate)\n") } else { print("  FAIL T66\n") }
     total = total + 1
     if gpu_ptx_test_67_predicated_store_guard() { passed = passed + 1; print("  T67 OK (predicated store guard)\n") } else { print("  FAIL T67\n") }
+    total = total + 1
+    if gpu_ptx_test_68_predicated_global_load_guard_contract() { passed = passed + 1; print("  T68 OK (predicated global load contract)\n") } else { print("  FAIL T68\n") }
+    total = total + 1
+    if gpu_ptx_test_69_predicated_shared_load_guard_contract() { passed = passed + 1; print("  T69 OK (predicated shared load contract)\n") } else { print("  FAIL T69\n") }
+    total = total + 1
+    if gpu_ptx_test_70_predicated_shared_store_guard_contract() { passed = passed + 1; print("  T70 OK (predicated shared store contract)\n") } else { print("  FAIL T70\n") }
+    total = total + 1
+    if gpu_ptx_test_71_selp_guard_presence() { passed = passed + 1; print("  T71 OK (selp guard presence)\n") } else { print("  FAIL T71\n") }
+    total = total + 1
+    if gpu_ptx_test_72_tiled_gemm_no_unpredicated_global_store() { passed = passed + 1; print("  T72 OK (no unpredicated global store)\n") } else { print("  FAIL T72\n") }
+    total = total + 1
+    if gpu_ptx_test_73_tiled_gemm_f64_no_unpredicated_global_store() { passed = passed + 1; print("  T73 OK (f64 tiled gemm no unpredicated global store)\n") } else { print("  FAIL T73\n") }
+    total = total + 1
+    if gpu_ptx_test_74_tiled_gemm_f64_predication_full_contract() { passed = passed + 1; print("  T74 OK (f64 tiled gemm predicate contract)\n") } else { print("  FAIL T74\n") }
+    total = total + 1
+    if gpu_ptx_test_75_conv1d_f32_bounds_predicated_global_io() { passed = passed + 1; print("  T75 OK (conv1d f32 bounds predication)\n") } else { print("  FAIL T75\n") }
+    total = total + 1
+    if gpu_ptx_test_76_conv1d_f64_bounds_predicated_global_io() { passed = passed + 1; print("  T76 OK (conv1d f64 bounds predication)\n") } else { print("  FAIL T76\n") }
+    total = total + 1
+    if gpu_ptx_test_77_kernel_max_ops_is_1024() { passed = passed + 1; print("  T77 OK (kernel max ops = 1024)\n") } else { print("  FAIL T77\n") }
+    total = total + 1
+    if gpu_ptx_test_78_complex_kernels_within_op_capacity() { passed = passed + 1; print("  T78 OK (complex kernels within op capacity)\n") } else { print("  FAIL T78\n") }
 
-    // Phase 5b tests (T68-T73): Conv2d stencil kernels
     total = total + 1
-    if gpu_ptx_test_68_conv2d_f32_entry() { passed = passed + 1; print("  T68 OK (conv2d f32 entry)\n") } else { print("  FAIL T68\n") }
+    if gpu_ptx_test_85_checked_append_preserves_last_op() { passed = passed + 1; print("  T85 OK (checked append preserves terminal op)\n") } else { print("  FAIL T85\n") }
     total = total + 1
-    if gpu_ptx_test_69_conv2d_f32_shared() { passed = passed + 1; print("  T69 OK (conv2d shared mem)\n") } else { print("  FAIL T69\n") }
+    if gpu_ptx_test_86_unchecked_append_never_shortens_terminal_state() { passed = passed + 1; print("  T86 OK (unchecked append preserves capacity state)\n") } else { print("  FAIL T86\n") }
+
+    // Phase 5b tests (T79-T84): Conv2d stencil kernels
     total = total + 1
-    if gpu_ptx_test_70_conv2d_f32_fma() { passed = passed + 1; print("  T70 OK (conv2d fma+mul)\n") } else { print("  FAIL T70\n") }
+    if gpu_ptx_test_79_conv2d_f32_entry() { passed = passed + 1; print("  T79 OK (conv2d f32 entry)\n") } else { print("  FAIL T79\n") }
     total = total + 1
-    if gpu_ptx_test_71_conv2d_2d_blocks() { passed = passed + 1; print("  T71 OK (conv2d 2d blocks)\n") } else { print("  FAIL T71\n") }
+    if gpu_ptx_test_80_conv2d_f32_shared() { passed = passed + 1; print("  T80 OK (conv2d shared mem)\n") } else { print("  FAIL T80\n") }
     total = total + 1
-    if gpu_ptx_test_72_conv2d_2d_threads() { passed = passed + 1; print("  T72 OK (conv2d 2d threads)\n") } else { print("  FAIL T72\n") }
+    if gpu_ptx_test_81_conv2d_f32_fma() { passed = passed + 1; print("  T81 OK (conv2d fma+mul)\n") } else { print("  FAIL T81\n") }
     total = total + 1
-    if gpu_ptx_test_73_conv2d_f64() { passed = passed + 1; print("  T73 OK (conv2d f64)\n") } else { print("  FAIL T73\n") }
+    if gpu_ptx_test_82_conv2d_2d_blocks() { passed = passed + 1; print("  T82 OK (conv2d 2d blocks)\n") } else { print("  FAIL T82\n") }
+    total = total + 1
+    if gpu_ptx_test_83_conv2d_2d_threads() { passed = passed + 1; print("  T83 OK (conv2d 2d threads)\n") } else { print("  FAIL T83\n") }
+    total = total + 1
+    if gpu_ptx_test_84_conv2d_f64() { passed = passed + 1; print("  T84 OK (conv2d f64)\n") } else { print("  FAIL T84\n") }
 
     if passed == total { print("GPU PTX tests: all passed\n") } else { print("GPU PTX tests: suite fail\n") }
 

@@ -96,6 +96,8 @@ struct GpuKernelIr {
     kernel_name: Name,
     params: [GpuParam; 8],
     param_count: i64,
+    // Stage-5 hardening target: allow up to 1024 IR ops per kernel
+    // (large enough for the shared-memory/tiled-family kernels in this phase).
     ops: [GpuOp; 1024],
     op_count: i64,
 
@@ -2057,13 +2059,28 @@ fn gpu_build_conv1d_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr with 
     op.ty = GpuType::GpuPtr; op.dst_ty = GpuType::GpuU64
     k.ops[idx] = op; idx = idx + 1
 
+    // rd9 = ld.param param_n
+    op = default_op; op.opcode = GpuOpcode::GpuLoadParam; op.dst_reg = 10; op.param_idx = 3
+    op.ty = GpuType::GpuU32; op.dst_ty = GpuType::GpuU32; op.src_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
+    // r11 = cvt.u64.u32 param_n
+    op = default_op; op.opcode = GpuOpcode::GpuCvt; op.dst_reg = 11; op.src_reg = 10
+    op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64; op.src_ty = GpuType::GpuU32
+    k.ops[idx] = op; idx = idx + 1
+
     // rd9 = rd6 + rd5 (addr for in[gid])
     op = default_op; op.opcode = GpuOpcode::GpuAdd; op.dst_reg = 9; op.lhs_reg = 6; op.rhs_reg = 5
     op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64
     k.ops[idx] = op; idx = idx + 1
 
+    // p0 = (gid < n)
+    op = default_op; op.opcode = GpuOpcode::GpuSetpLt; op.dst_reg = 0; op.lhs_reg = 4; op.rhs_reg = 11
+    op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64; op.src_ty = GpuType::GpuU64
+    k.ops[idx] = op; idx = idx + 1
+
     // Load in[gid] -> f1
-    op = default_op; op.opcode = GpuOpcode::GpuLoadGlobal; op.dst_reg = 1; op.addr_reg = 9
+    op = default_op; op.opcode = GpuOpcode::GpuLoadGlobalPred; op.dst_reg = 1; op.addr_reg = 9; op.lhs_reg = 0
     op.ty = elem_ty; op.dst_ty = elem_ty
     k.ops[idx] = op; idx = idx + 1
 
@@ -2090,9 +2107,9 @@ fn gpu_build_conv1d_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr with 
     op.ty = elem_ty; op.dst_ty = elem_ty
     k.ops[idx] = op; idx = idx + 1
 
-    // Load 3 weights from global: w[0], w[1], w[2]
+    // Load 3 weights from global with the same bounds predicate as the main lane.
     // rd10 = rd7 (weight base), rd11 = rd7 + sizeof, rd12 = rd7 + 2*sizeof
-    op = default_op; op.opcode = GpuOpcode::GpuLoadGlobal; op.dst_reg = 4; op.addr_reg = 7
+    op = default_op; op.opcode = GpuOpcode::GpuLoadGlobalPred; op.dst_reg = 4; op.addr_reg = 7; op.lhs_reg = 0
     op.ty = elem_ty; op.dst_ty = elem_ty
     k.ops[idx] = op; idx = idx + 1
 
@@ -2100,7 +2117,7 @@ fn gpu_build_conv1d_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr with 
     op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64
     k.ops[idx] = op; idx = idx + 1
 
-    op = default_op; op.opcode = GpuOpcode::GpuLoadGlobal; op.dst_reg = 5; op.addr_reg = 10
+    op = default_op; op.opcode = GpuOpcode::GpuLoadGlobalPred; op.dst_reg = 5; op.addr_reg = 10; op.lhs_reg = 0
     op.ty = elem_ty; op.dst_ty = elem_ty
     k.ops[idx] = op; idx = idx + 1
 
@@ -2108,7 +2125,7 @@ fn gpu_build_conv1d_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr with 
     op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64
     k.ops[idx] = op; idx = idx + 1
 
-    op = default_op; op.opcode = GpuOpcode::GpuLoadGlobal; op.dst_reg = 6; op.addr_reg = 11
+    op = default_op; op.opcode = GpuOpcode::GpuLoadGlobalPred; op.dst_reg = 6; op.addr_reg = 11; op.lhs_reg = 0
     op.ty = elem_ty; op.dst_ty = elem_ty
     k.ops[idx] = op; idx = idx + 1
 
@@ -2138,8 +2155,8 @@ fn gpu_build_conv1d_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr with 
     op.ty = GpuType::GpuU64; op.dst_ty = GpuType::GpuU64
     k.ops[idx] = op; idx = idx + 1
 
-    // Store result
-    op = default_op; op.opcode = GpuOpcode::GpuStoreGlobal; op.addr_reg = 12; op.src_reg = 9
+    // Store result only when gid < n
+    op = default_op; op.opcode = GpuOpcode::GpuStoreGlobalPred; op.addr_reg = 12; op.src_reg = 9; op.lhs_reg = 0
     op.ty = elem_ty; op.dst_ty = elem_ty
     k.ops[idx] = op; idx = idx + 1
 
