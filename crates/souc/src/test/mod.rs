@@ -26,6 +26,7 @@ pub mod attrs;
 pub mod bench;
 pub mod coverage;
 pub mod discovery;
+pub mod pipeline;
 pub mod runner;
 
 pub use attrs::{BenchAttr, TestAttr, TestAttributes};

@@ -64,17 +64,17 @@ fn selfhost_native_multimodule() -> anyhow::Result<()> {
     todo!("Wire multi-module native compilation");
 }
 
-/// Parse source and lower to IR using Rust frontend
-fn parse_and_lower_to_ir(_source: &str) -> anyhow::Result<sounio::ir::IrModule> {
+/// Parse source and lower to HIR using Rust frontend
+fn parse_and_lower_to_ir(_source: &str) -> anyhow::Result<sounio::hir::Hir> {
     todo!("Use Rust parser/checker/lowerer")
 }
 
 /// Call self-hosted compile_to_elf() via interpreter
-fn call_selfhosted_compile_to_elf(_ir: &sounio::ir::IrModule) -> anyhow::Result<Vec<u8>> {
+fn call_selfhosted_compile_to_elf(_ir: &sounio::hir::Hir) -> anyhow::Result<Vec<u8>> {
     // Strategy:
-    // 1. Serialize IrModule to self-hosted format
+    // 1. Serialize HIR to self-hosted format
     // 2. Load self-hosted/native/codegen.sio into interpreter
-    // 3. Call compile_to_elf(ir_module)
+    // 3. Call compile_to_elf(hir_module)
     // 4. Extract Elf64Binary struct
     // 5. Return bytes[0..len]
 
