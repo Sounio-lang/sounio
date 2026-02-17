@@ -1181,11 +1181,18 @@ fn compile_native(args: &BuildArgs) -> Result<(PathBuf, Option<NativeMetrics>), 
                 LinkMode::SharedLib
             };
 
-            let linker_config = if format == OutputFormat::Executable {
-                LinkerConfig::default().with_library("m")
-            } else {
-                LinkerConfig::default()
-            };
+            // Auto-detect required libraries from extern function declarations
+            let mut linker_config = LinkerConfig::default();
+            if !sir_module.externs.is_empty() {
+                // Any extern functions likely need libm and libc
+                linker_config = linker_config.with_library("m");
+            }
+            if format == OutputFormat::Executable {
+                // Executables always get libm for math builtins
+                if sir_module.externs.is_empty() {
+                    linker_config = linker_config.with_library("m");
+                }
+            }
             let linker = Linker::new(linker_config)
                 .map_err(|e| format!("Linker initialization error: {}", e))?;
 
