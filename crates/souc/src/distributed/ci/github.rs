@@ -510,7 +510,7 @@ impl WorkflowGenerator {
 
     /// Generate to YAML string
     pub fn to_yaml(&self, workflow: &Workflow) -> String {
-        serde_yaml::to_string(workflow).unwrap()
+        serde_yaml::to_string(workflow).unwrap_or_default()
     }
 
     /// Write workflow to file

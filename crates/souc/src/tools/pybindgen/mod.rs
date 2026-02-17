@@ -170,8 +170,10 @@ _lib = _load_library("{library_path}")
             HirType::I64 => "c_int64".to_string(),
             HirType::U64 => "c_uint64".to_string(),
             HirType::I128 | HirType::U128 => {
-                // Python ctypes doesn't have 128-bit types, use two 64-bit values
-                "c_int64".to_string()
+                // Python ctypes doesn't have 128-bit types
+                // Generate a two-field structure for proper representation
+                tracing::warn!("128-bit type mapped to two c_uint64 fields (lo, hi)");
+                "Int128".to_string()
             }
             HirType::Isize => "c_long".to_string(),
             HirType::Usize => "c_size_t".to_string(),
@@ -239,7 +241,10 @@ _lib = _load_library("{library_path}")
             HirType::Mat4 => "c_float * 16".to_string(),
             HirType::Quat => "c_float * 4".to_string(),
             HirType::Dual => "c_double * 2".to_string(),
-            _ => "c_void_p".to_string(), // Fallback for unknown types
+            _ => {
+                tracing::warn!("Unknown HIR type {:?} mapped to c_void_p in Python bindings", ty);
+                "c_void_p".to_string()
+            }
         }
     }
 
@@ -282,6 +287,24 @@ class {name}(Structure):
 "#,
                         len = elements.len(),
                         fields = fields.join(",\n")
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+            }
+            HirType::I128 | HirType::U128 => {
+                let name = "Int128";
+                if !self.generated_types.contains(name) {
+                    self.generated_types.insert(name.to_string());
+                    writeln!(
+                        self.output,
+                        r#"
+class Int128(Structure):
+    """128-bit integer represented as two 64-bit halves (little-endian)"""
+    _fields_ = [
+        ('lo', ctypes.c_uint64),
+        ('hi', ctypes.c_uint64)
+    ]
+"#
                     )
                     .map_err(|e| e.to_string())?;
                 }

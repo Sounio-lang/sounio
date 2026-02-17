@@ -181,7 +181,7 @@ impl PipelineGenerator {
         PipelineGenerator {
             project_name: project_name.to_string(),
             targets: vec!["x86_64-unknown-linux-gnu".into()],
-            image: "d-lang/d:latest".into(),
+            image: format!("sounio/sounio:{}", env!("CARGO_PKG_VERSION")),
         }
     }
 
@@ -387,7 +387,7 @@ impl PipelineGenerator {
 
     /// Generate to YAML string
     pub fn to_yaml(&self, pipeline: &Pipeline) -> String {
-        serde_yaml::to_string(pipeline).unwrap()
+        serde_yaml::to_string(pipeline).unwrap_or_default()
     }
 
     /// Write pipeline to file
