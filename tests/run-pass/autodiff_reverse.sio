@@ -1,0 +1,549 @@
+//@ run-pass
+// Reverse-Mode Automatic Differentiation Test Suite
+//
+// Self-contained implementation of reverse-mode AD using a Wengert tape.
+// The tape records operations during the forward pass, then the backward pass
+// propagates gradients (adjoints) from output to inputs.
+//
+// All functions are inlined since tests cannot import.
+//
+// References:
+//   Wengert, "A simple automatic derivative evaluation program",
+//       Comm. ACM 7:8 (1964), 463-464
+//   Griewank & Walther, "Evaluating Derivatives" (2nd ed., SIAM, 2008)
+
+// ============================================================================
+// HELPERS (must precede callers)
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+    abs_f64(a - b) < tol
+}
+
+// ============================================================================
+// TAPE DATA STRUCTURE
+// ============================================================================
+
+// Operation codes for the tape
+// 0 = INPUT (leaf variable)
+// 1 = CONST (constant value)
+// 2 = ADD
+// 3 = MUL
+// 4 = SUB
+// 5 = DIV
+
+// Fixed-size tape: up to 64 nodes
+// Each node stores: op code, two argument indices, value, and adjoint (gradient)
+struct Tape {
+    op: [i32; 64],      // operation code
+    arg1: [i32; 64],    // first argument index (-1 for leaves)
+    arg2: [i32; 64],    // second argument index (-1 for leaves)
+    val: [f64; 64],     // computed value (forward pass)
+    adj: [f64; 64],     // adjoint / gradient (backward pass)
+    len: i32,           // number of nodes on tape
+}
+
+// ============================================================================
+// TAPE OPERATIONS
+// ============================================================================
+
+fn tape_new() -> Tape with Mut, Panic {
+    Tape {
+        op: [0; 64],
+        arg1: [-1; 64],
+        arg2: [-1; 64],
+        val: [0.0; 64],
+        adj: [0.0; 64],
+        len: 0,
+    }
+}
+
+// Push an input variable onto the tape. Returns its index.
+fn tape_input(tape: Tape, x: f64) -> Tape with Mut, Panic {
+    var t = tape
+    let idx = t.len
+    t.op[idx] = 0      // INPUT
+    t.arg1[idx] = -1
+    t.arg2[idx] = -1
+    t.val[idx] = x
+    t.adj[idx] = 0.0
+    t.len = idx + 1
+    return t
+}
+
+// Push a constant onto the tape. Returns modified tape.
+fn tape_const(tape: Tape, c: f64) -> Tape with Mut, Panic {
+    var t = tape
+    let idx = t.len
+    t.op[idx] = 1      // CONST
+    t.arg1[idx] = -1
+    t.arg2[idx] = -1
+    t.val[idx] = c
+    t.adj[idx] = 0.0
+    t.len = idx + 1
+    return t
+}
+
+// Record addition: result = tape[a] + tape[b]
+fn tape_add(tape: Tape, a: i32, b: i32) -> Tape with Mut, Panic {
+    var t = tape
+    let idx = t.len
+    t.op[idx] = 2      // ADD
+    t.arg1[idx] = a
+    t.arg2[idx] = b
+    t.val[idx] = t.val[a] + t.val[b]
+    t.adj[idx] = 0.0
+    t.len = idx + 1
+    return t
+}
+
+// Record multiplication: result = tape[a] * tape[b]
+fn tape_mul(tape: Tape, a: i32, b: i32) -> Tape with Mut, Panic {
+    var t = tape
+    let idx = t.len
+    t.op[idx] = 3      // MUL
+    t.arg1[idx] = a
+    t.arg2[idx] = b
+    t.val[idx] = t.val[a] * t.val[b]
+    t.adj[idx] = 0.0
+    t.len = idx + 1
+    return t
+}
+
+// Record subtraction: result = tape[a] - tape[b]
+fn tape_sub(tape: Tape, a: i32, b: i32) -> Tape with Mut, Panic {
+    var t = tape
+    let idx = t.len
+    t.op[idx] = 4      // SUB
+    t.arg1[idx] = a
+    t.arg2[idx] = b
+    t.val[idx] = t.val[a] - t.val[b]
+    t.adj[idx] = 0.0
+    t.len = idx + 1
+    return t
+}
+
+// Record division: result = tape[a] / tape[b]
+fn tape_div(tape: Tape, a: i32, b: i32) -> Tape with Mut, Panic, Div {
+    var t = tape
+    let idx = t.len
+    t.op[idx] = 5      // DIV
+    t.arg1[idx] = a
+    t.arg2[idx] = b
+    t.val[idx] = t.val[a] / t.val[b]
+    t.adj[idx] = 0.0
+    t.len = idx + 1
+    return t
+}
+
+// ============================================================================
+// BACKWARD PASS
+// ============================================================================
+
+// Propagate adjoints backward from the output node (last node on tape).
+// Sets adj[output_idx] = 1.0, then walks tape in reverse.
+fn tape_backward(tape: Tape, output_idx: i32) -> Tape with Mut, Panic, Div {
+    var t = tape
+
+    // Seed the output adjoint
+    t.adj[output_idx] = 1.0
+
+    // Walk tape in reverse
+    var i = output_idx
+    while i >= 0 {
+        let op = t.op[i]
+        let a1 = t.arg1[i]
+        let a2 = t.arg2[i]
+        let g = t.adj[i]
+
+        if op == 2 {
+            // ADD: d(a+b)/da = 1, d(a+b)/db = 1
+            t.adj[a1] = t.adj[a1] + g
+            t.adj[a2] = t.adj[a2] + g
+        } else if op == 3 {
+            // MUL: d(a*b)/da = b, d(a*b)/db = a
+            t.adj[a1] = t.adj[a1] + g * t.val[a2]
+            t.adj[a2] = t.adj[a2] + g * t.val[a1]
+        } else if op == 4 {
+            // SUB: d(a-b)/da = 1, d(a-b)/db = -1
+            t.adj[a1] = t.adj[a1] + g
+            t.adj[a2] = t.adj[a2] - g
+        } else if op == 5 {
+            // DIV: d(a/b)/da = 1/b, d(a/b)/db = -a/b^2
+            t.adj[a1] = t.adj[a1] + g / t.val[a2]
+            t.adj[a2] = t.adj[a2] - g * t.val[a1] / (t.val[a2] * t.val[a2])
+        }
+        // op == 0 (INPUT) or op == 1 (CONST): nothing to propagate
+
+        i = i - 1
+    }
+
+    return t
+}
+
+// ============================================================================
+// TEST FUNCTIONS
+// ============================================================================
+
+// Test 1: f(x,y) = x*y at (3,4)
+// df/dx = y = 4, df/dy = x = 3
+fn test_mul_grad() -> bool with IO, Mut, Panic, Div {
+    var t = tape_new()
+    t = tape_input(t, 3.0)     // node 0: x = 3
+    t = tape_input(t, 4.0)     // node 1: y = 4
+    t = tape_mul(t, 0, 1)      // node 2: x * y = 12
+
+    let output_idx = t.len - 1
+    t = tape_backward(t, output_idx)
+
+    let tol = 1.0e-10
+    let val_ok = approx_eq(t.val[2], 12.0, tol)
+    let dx_ok = approx_eq(t.adj[0], 4.0, tol)    // df/dx = y = 4
+    let dy_ok = approx_eq(t.adj[1], 3.0, tol)    // df/dy = x = 3
+    return val_ok && dx_ok && dy_ok
+}
+
+// Test 2: f(x) = x^2 at x=5
+// Record as x*x, df/dx = 2x = 10
+fn test_square_grad() -> bool with IO, Mut, Panic, Div {
+    var t = tape_new()
+    t = tape_input(t, 5.0)     // node 0: x = 5
+    t = tape_mul(t, 0, 0)      // node 1: x * x = 25
+
+    let output_idx = t.len - 1
+    t = tape_backward(t, output_idx)
+
+    let tol = 1.0e-10
+    let val_ok = approx_eq(t.val[1], 25.0, tol)
+    let dx_ok = approx_eq(t.adj[0], 10.0, tol)   // df/dx = 2*5 = 10
+    return val_ok && dx_ok
+}
+
+// Test 3: f(x,y) = x^2 + x*y at (2,3)
+// df/dx = 2x + y = 4 + 3 = 7, df/dy = x = 2
+fn test_mixed_grad() -> bool with IO, Mut, Panic, Div {
+    var t = tape_new()
+    t = tape_input(t, 2.0)     // node 0: x = 2
+    t = tape_input(t, 3.0)     // node 1: y = 3
+    t = tape_mul(t, 0, 0)      // node 2: x^2 = 4
+    t = tape_mul(t, 0, 1)      // node 3: x*y = 6
+    t = tape_add(t, 2, 3)      // node 4: x^2 + x*y = 10
+
+    let output_idx = t.len - 1
+    t = tape_backward(t, output_idx)
+
+    let tol = 1.0e-10
+    let val_ok = approx_eq(t.val[4], 10.0, tol)
+    let dx_ok = approx_eq(t.adj[0], 7.0, tol)     // df/dx = 2x + y = 7
+    let dy_ok = approx_eq(t.adj[1], 2.0, tol)     // df/dy = x = 2
+    return val_ok && dx_ok && dy_ok
+}
+
+// Test 4: f(x) = x + x at x=3
+// This tests that the adjoint of a shared variable accumulates correctly.
+// df/dx = 2
+fn test_add_shared() -> bool with IO, Mut, Panic, Div {
+    var t = tape_new()
+    t = tape_input(t, 3.0)     // node 0: x = 3
+    t = tape_add(t, 0, 0)      // node 1: x + x = 6
+
+    let output_idx = t.len - 1
+    t = tape_backward(t, output_idx)
+
+    let tol = 1.0e-10
+    let val_ok = approx_eq(t.val[1], 6.0, tol)
+    let dx_ok = approx_eq(t.adj[0], 2.0, tol)
+    return val_ok && dx_ok
+}
+
+// Test 5: f(x,y) = (x + y)^2 at (1,2)
+// f(x,y) = (x+y)^2 = 9, df/dx = 2(x+y) = 6, df/dy = 2(x+y) = 6
+fn test_sum_squared() -> bool with IO, Mut, Panic, Div {
+    var t = tape_new()
+    t = tape_input(t, 1.0)     // node 0: x = 1
+    t = tape_input(t, 2.0)     // node 1: y = 2
+    t = tape_add(t, 0, 1)      // node 2: x + y = 3
+    t = tape_mul(t, 2, 2)      // node 3: (x+y)^2 = 9
+
+    let output_idx = t.len - 1
+    t = tape_backward(t, output_idx)
+
+    let tol = 1.0e-10
+    let val_ok = approx_eq(t.val[3], 9.0, tol)
+    let dx_ok = approx_eq(t.adj[0], 6.0, tol)
+    let dy_ok = approx_eq(t.adj[1], 6.0, tol)
+    return val_ok && dx_ok && dy_ok
+}
+
+// Test 6: f(x,y) = x - y at (5,3)
+// df/dx = 1, df/dy = -1
+fn test_sub_grad() -> bool with IO, Mut, Panic, Div {
+    var t = tape_new()
+    t = tape_input(t, 5.0)     // node 0: x = 5
+    t = tape_input(t, 3.0)     // node 1: y = 3
+    t = tape_sub(t, 0, 1)      // node 2: x - y = 2
+
+    let output_idx = t.len - 1
+    t = tape_backward(t, output_idx)
+
+    let tol = 1.0e-10
+    let val_ok = approx_eq(t.val[2], 2.0, tol)
+    let dx_ok = approx_eq(t.adj[0], 1.0, tol)
+    let dy_ok = approx_eq(t.adj[1], 0.0 - 1.0, tol)
+    return val_ok && dx_ok && dy_ok
+}
+
+// Test 7: f(x,y) = x / y at (6,3)
+// df/dx = 1/y = 1/3, df/dy = -x/y^2 = -6/9 = -2/3
+fn test_div_grad() -> bool with IO, Mut, Panic, Div {
+    var t = tape_new()
+    t = tape_input(t, 6.0)     // node 0: x = 6
+    t = tape_input(t, 3.0)     // node 1: y = 3
+    t = tape_div(t, 0, 1)      // node 2: x / y = 2
+
+    let output_idx = t.len - 1
+    t = tape_backward(t, output_idx)
+
+    let tol = 1.0e-10
+    let val_ok = approx_eq(t.val[2], 2.0, tol)
+    let dx_ok = approx_eq(t.adj[0], 1.0 / 3.0, tol)
+    let dy_ok = approx_eq(t.adj[1], 0.0 - 2.0 / 3.0, tol)
+    return val_ok && dx_ok && dy_ok
+}
+
+// Test 8: Longer expression: f(x) = (x+1)*(x-1) at x=3
+// f(x) = x^2 - 1 = 8, f'(x) = 2x = 6
+fn test_difference_of_squares() -> bool with IO, Mut, Panic, Div {
+    var t = tape_new()
+    t = tape_input(t, 3.0)     // node 0: x = 3
+    t = tape_const(t, 1.0)     // node 1: const 1
+    t = tape_add(t, 0, 1)      // node 2: x + 1 = 4
+    t = tape_sub(t, 0, 1)      // node 3: x - 1 = 2
+    t = tape_mul(t, 2, 3)      // node 4: (x+1)*(x-1) = 8
+
+    let output_idx = t.len - 1
+    t = tape_backward(t, output_idx)
+
+    let tol = 1.0e-10
+    let val_ok = approx_eq(t.val[4], 8.0, tol)
+    let dx_ok = approx_eq(t.adj[0], 6.0, tol)     // df/dx = 2x = 6
+    // Constant should have zero gradient (it's not an input we differentiate)
+    // But constants accumulate adjoints from the expression too -- they just aren't used.
+    return val_ok && dx_ok
+}
+
+// Test 9: f(x,y,z) = x*y + y*z at (2,3,4)
+// df/dx = y = 3, df/dy = x + z = 6, df/dz = y = 3
+fn test_three_vars() -> bool with IO, Mut, Panic, Div {
+    var t = tape_new()
+    t = tape_input(t, 2.0)     // node 0: x = 2
+    t = tape_input(t, 3.0)     // node 1: y = 3
+    t = tape_input(t, 4.0)     // node 2: z = 4
+    t = tape_mul(t, 0, 1)      // node 3: x*y = 6
+    t = tape_mul(t, 1, 2)      // node 4: y*z = 12
+    t = tape_add(t, 3, 4)      // node 5: x*y + y*z = 18
+
+    let output_idx = t.len - 1
+    t = tape_backward(t, output_idx)
+
+    let tol = 1.0e-10
+    let val_ok = approx_eq(t.val[5], 18.0, tol)
+    let dx_ok = approx_eq(t.adj[0], 3.0, tol)     // df/dx = y = 3
+    let dy_ok = approx_eq(t.adj[1], 6.0, tol)     // df/dy = x + z = 6
+    let dz_ok = approx_eq(t.adj[2], 3.0, tol)     // df/dz = y = 3
+    return val_ok && dx_ok && dy_ok && dz_ok
+}
+
+// Test 10: f(x) = x^3 via x*x*x at x=2
+// f(2) = 8, f'(2) = 3*4 = 12
+fn test_cube_via_tape() -> bool with IO, Mut, Panic, Div {
+    var t = tape_new()
+    t = tape_input(t, 2.0)     // node 0: x = 2
+    t = tape_mul(t, 0, 0)      // node 1: x^2 = 4
+    t = tape_mul(t, 1, 0)      // node 2: x^2 * x = x^3 = 8
+
+    let output_idx = t.len - 1
+    t = tape_backward(t, output_idx)
+
+    let tol = 1.0e-10
+    let val_ok = approx_eq(t.val[2], 8.0, tol)
+    // The adjoint of x accumulates from: x^2*x = mul(x^2, x)
+    //   adj[0] += adj[2] * val[1]  (from second arg of mul at node 2) = 1*4 = 4
+    //   adj[1] += adj[2] * val[0]  (from first arg of mul at node 2)  = 1*2 = 2
+    // Then from node 1: x*x = mul(x,x)
+    //   adj[0] += adj[1] * val[0]  (from first arg) = 2*2 = 4
+    //   adj[0] += adj[1] * val[0]  (from second arg) = 2*2 = 4
+    // Total: adj[0] = 4 + 4 + 4 = 12
+    let dx_ok = approx_eq(t.adj[0], 12.0, tol)    // 3*x^2 = 3*4 = 12
+    return val_ok && dx_ok
+}
+
+// Test 11: Gradient of constant function f(x) = 5 should be 0
+fn test_constant_grad() -> bool with IO, Mut, Panic, Div {
+    var t = tape_new()
+    t = tape_input(t, 3.0)     // node 0: x = 3 (unused in output)
+    t = tape_const(t, 5.0)     // node 1: const 5
+
+    // The output is just the constant
+    t = tape_backward(t, 1)
+
+    let tol = 1.0e-10
+    let val_ok = approx_eq(t.val[1], 5.0, tol)
+    let dx_ok = approx_eq(t.adj[0], 0.0, tol)     // df/dx = 0
+    return val_ok && dx_ok
+}
+
+// Test 12: f(x) = c*x where c=7, at x=4
+// f(4) = 28, df/dx = c = 7
+fn test_scale_grad() -> bool with IO, Mut, Panic, Div {
+    var t = tape_new()
+    t = tape_input(t, 4.0)     // node 0: x = 4
+    t = tape_const(t, 7.0)     // node 1: c = 7
+    t = tape_mul(t, 1, 0)      // node 2: c * x = 28
+
+    let output_idx = t.len - 1
+    t = tape_backward(t, output_idx)
+
+    let tol = 1.0e-10
+    let val_ok = approx_eq(t.val[2], 28.0, tol)
+    let dx_ok = approx_eq(t.adj[0], 7.0, tol)     // df/dx = c = 7
+    return val_ok && dx_ok
+}
+
+// ============================================================================
+// MAIN TEST RUNNER
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== Reverse-Mode Autodiff (Wengert Tape) Tests ===")
+    println("")
+
+    var passed = 0
+    var failed = 0
+
+    print("Test  1: f(x,y) = x*y grad........ ")
+    if test_mul_grad() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  2: f(x) = x^2 grad.......... ")
+    if test_square_grad() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  3: f(x,y) = x^2 + x*y....... ")
+    if test_mixed_grad() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  4: f(x) = x + x shared...... ")
+    if test_add_shared() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  5: f(x,y) = (x+y)^2......... ")
+    if test_sum_squared() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  6: f(x,y) = x - y grad...... ")
+    if test_sub_grad() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  7: f(x,y) = x / y grad...... ")
+    if test_div_grad() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  8: (x+1)*(x-1) diff of sq... ")
+    if test_difference_of_squares() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  9: f(x,y,z) three vars....... ")
+    if test_three_vars() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 10: x^3 via tape.............. ")
+    if test_cube_via_tape() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 11: constant gradient = 0..... ")
+    if test_constant_grad() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 12: scale f(x) = c*x......... ")
+    if test_scale_grad() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    println("")
+    print("Passed: ")
+    println(passed)
+    print("Failed: ")
+    println(failed)
+
+    if failed > 0 {
+        println("SOME TESTS FAILED")
+        return 1
+    }
+    println("ALL 12 TESTS PASSED")
+    return 0
+}

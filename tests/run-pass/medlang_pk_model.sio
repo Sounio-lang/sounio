@@ -1,0 +1,348 @@
+//@ run-pass
+// medlang_pk_model.sio - One-compartment PK model simulation and verification
+//
+// This test builds and simulates a simple one-compartment pharmacokinetic model:
+//   - Defines a drug with physicochemical properties (MW, logP, fu)
+//   - Defines a one-compartment IV bolus model (CL, V -> ke)
+//   - Simulates 100 mg IV bolus dose over 24 hours using Euler integration
+//   - Verifies exponential decay of concentration
+//   - Checks mass balance: eliminated + remaining = dose
+
+// ============================================================================
+// Math helpers (self-contained, no stdlib dependency)
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn exp_approx(x: f64) -> f64 with Panic, Mut, Div {
+    // Taylor series approximation of exp(x) with range reduction
+    let ln2 = 0.6931471805599453
+    var v = x
+    if v > 700.0 { v = 700.0 }
+    if v < 0.0 - 700.0 { return 0.0 }
+    let k = (v / ln2) as i64
+    let r = v - (k as f64) * ln2
+    var result = 1.0
+    var term = 1.0
+    var i: i64 = 1
+    while i <= 15 {
+        term = term * r / (i as f64)
+        result = result + term
+        i = i + 1
+    }
+    if k >= 0 {
+        var j: i64 = 0
+        while j < k { result = result * 2.0; j = j + 1 }
+    } else {
+        var j: i64 = 0
+        while j < 0 - k { result = result / 2.0; j = j + 1 }
+    }
+    result
+}
+
+// ============================================================================
+// Drug definition
+// ============================================================================
+
+struct Drug {
+    mw: f64,       // molecular weight (g/mol)
+    logp: f64,     // lipophilicity
+    fu: f64,       // fraction unbound (0-1)
+}
+
+fn drug_theophylline() -> Drug {
+    Drug {
+        mw: 180.16,
+        logp: 0.02,
+        fu: 0.4,
+    }
+}
+
+// ============================================================================
+// One-compartment PK model
+// ============================================================================
+
+struct OneCompModel {
+    cl: f64,    // clearance (L/h)
+    v: f64,     // volume of distribution (L)
+    ke: f64,    // elimination rate constant (1/h)
+}
+
+fn one_comp_model(cl: f64, v: f64) -> OneCompModel with Panic {
+    OneCompModel {
+        cl: cl,
+        v: v,
+        ke: cl / v,
+    }
+}
+
+// ============================================================================
+// Simulation state
+// ============================================================================
+
+struct SimState {
+    amount: f64,            // drug amount in central compartment (mg)
+    concentration: f64,     // concentration (mg/L)
+    time: f64,              // current time (h)
+    eliminated: f64,        // cumulative amount eliminated (mg)
+}
+
+fn sim_state_new() -> SimState {
+    SimState {
+        amount: 0.0,
+        concentration: 0.0,
+        time: 0.0,
+        eliminated: 0.0,
+    }
+}
+
+// ============================================================================
+// Euler integration for one-compartment elimination
+// ============================================================================
+
+// dA/dt = -ke * A
+// Eliminated per step = ke * A * dt
+fn euler_step(state: SimState, model: OneCompModel, dt: f64) -> SimState with Panic {
+    let dAdt = 0.0 - model.ke * state.amount
+    let elim_this_step = model.ke * state.amount * dt
+    let new_amount = state.amount + dAdt * dt
+
+    SimState {
+        amount: new_amount,
+        concentration: new_amount / model.v,
+        time: state.time + dt,
+        eliminated: state.eliminated + elim_this_step,
+    }
+}
+
+// ============================================================================
+// Simulation result storage
+// ============================================================================
+
+struct SimResult {
+    times: [f64; 250],
+    concentrations: [f64; 250],
+    amounts: [f64; 250],
+    n_points: i64,
+}
+
+fn sim_result_new() -> SimResult {
+    SimResult {
+        times: [0.0; 250],
+        concentrations: [0.0; 250],
+        amounts: [0.0; 250],
+        n_points: 0,
+    }
+}
+
+// ============================================================================
+// Main simulation
+// ============================================================================
+
+fn simulate_iv_bolus(
+    dose: f64,
+    model: OneCompModel,
+    t_end: f64,
+    dt: f64
+) -> SimResult with Panic, Mut, Div {
+    var result = sim_result_new()
+
+    // Initialize: IV bolus at t=0
+    var state = sim_state_new()
+    state.amount = dose
+    state.concentration = dose / model.v
+    state.time = 0.0
+    state.eliminated = 0.0
+
+    var idx: i64 = 0
+
+    while state.time <= t_end && idx < 250 {
+        result.times[idx as usize] = state.time
+        result.concentrations[idx as usize] = state.concentration
+        result.amounts[idx as usize] = state.amount
+        idx = idx + 1
+
+        state = euler_step(state, model, dt)
+    }
+
+    result.n_points = idx
+    result
+}
+
+// ============================================================================
+// Verification functions
+// ============================================================================
+
+fn verify_exponential_decay(result: SimResult) -> bool with Panic, Mut, Div {
+    // Concentration should be monotonically decreasing
+    if result.n_points < 10 {
+        return false
+    }
+
+    var i: i64 = 1
+    while i < result.n_points {
+        if result.concentrations[i as usize] > result.concentrations[(i - 1) as usize] + 1e-10 {
+            // Concentration increased -- not exponential decay
+            return false
+        }
+        i = i + 1
+    }
+
+    // First concentration should be highest
+    let c_max = result.concentrations[0]
+    if c_max <= 0.0 {
+        return false
+    }
+
+    // Last concentration should be much lower
+    let c_last = result.concentrations[(result.n_points - 1) as usize]
+    if c_last >= c_max {
+        return false
+    }
+
+    true
+}
+
+fn verify_initial_concentration(result: SimResult, dose: f64, v: f64) -> bool with Panic {
+    // C(0) = dose / V
+    let expected_c0 = dose / v
+    let actual_c0 = result.concentrations[0]
+    abs_f64(actual_c0 - expected_c0) < 0.01
+}
+
+fn verify_half_life(result: SimResult, ke: f64, dt: f64) -> bool with Panic {
+    // t_half = ln(2) / ke
+    let t_half = 0.693147 / ke
+
+    // Find concentration at approximately t_half
+    let idx_half = (t_half / dt) as i64
+    if idx_half <= 0 || idx_half >= result.n_points {
+        return false
+    }
+
+    let c0 = result.concentrations[0]
+    let c_half = result.concentrations[idx_half as usize]
+
+    // At t_half, concentration should be approximately C0/2
+    // Allow 5% tolerance due to Euler discretization
+    let ratio = c_half / c0
+    abs_f64(ratio - 0.5) < 0.05
+}
+
+fn verify_mass_balance(result: SimResult, dose: f64, model: OneCompModel, dt: f64) -> bool with Panic, Mut, Div {
+    // Recompute to track elimination
+    var state = sim_state_new()
+    state.amount = dose
+    state.time = 0.0
+    state.eliminated = 0.0
+
+    var steps: i64 = 0
+    let max_steps = result.n_points
+
+    while steps < max_steps {
+        state = euler_step(state, model, dt)
+        steps = steps + 1
+    }
+
+    // Mass balance: remaining + eliminated should equal dose
+    let total = state.amount + state.eliminated
+    let error = abs_f64(total - dose)
+
+    // Allow small numerical drift from Euler integration
+    error < 0.5
+}
+
+fn verify_analytical_solution(result: SimResult, dose: f64, model: OneCompModel, dt: f64) -> bool with Panic, Mut, Div {
+    // Compare numerical solution against analytical: C(t) = (dose/V) * exp(-ke * t)
+    var max_rel_error = 0.0
+    var i: i64 = 1
+    while i < result.n_points && i < 100 {
+        let t = result.times[i as usize]
+        let c_numerical = result.concentrations[i as usize]
+        let c_analytical = (dose / model.v) * exp_approx(0.0 - model.ke * t)
+
+        if c_analytical > 0.01 {
+            let rel_error = abs_f64(c_numerical - c_analytical) / c_analytical
+            if rel_error > max_rel_error {
+                max_rel_error = rel_error
+            }
+        }
+        i = i + 1
+    }
+
+    // Euler with dt=0.1 should be within 2% of analytical
+    max_rel_error < 0.02
+}
+
+// ============================================================================
+// Entry point
+// ============================================================================
+
+fn main() -> i32 with IO, Panic, Mut, Div {
+    // Define drug: Theophylline-like
+    let drug = drug_theophylline()
+
+    // Define one-compartment model
+    // CL = 2.8 L/h, V = 25 L -> ke = 0.112 /h, t1/2 ~ 6.2 h
+    let model = one_comp_model(2.8, 25.0)
+
+    // Dose: 100 mg IV bolus
+    let dose: f64 = 100.0
+
+    // Simulate for 24 hours with dt = 0.1 h
+    let t_end = 24.0
+    let dt = 0.1
+    let result = simulate_iv_bolus(dose, model, t_end, dt)
+
+    // Verification 1: Check we got enough data points
+    if result.n_points < 200 {
+        print_int(1)
+        return 1
+    }
+
+    // Verification 2: Concentration starts high and decays exponentially
+    if !verify_exponential_decay(result) {
+        print_int(2)
+        return 2
+    }
+
+    // Verification 3: Initial concentration = dose / V = 100 / 25 = 4.0 mg/L
+    if !verify_initial_concentration(result, dose, model.v) {
+        print_int(3)
+        return 3
+    }
+
+    // Verification 4: Half-life check
+    if !verify_half_life(result, model.ke, dt) {
+        print_int(4)
+        return 4
+    }
+
+    // Verification 5: Mass balance (eliminated + remaining = dose)
+    if !verify_mass_balance(result, dose, model, dt) {
+        print_int(5)
+        return 5
+    }
+
+    // Verification 6: Numerical vs analytical solution agreement
+    if !verify_analytical_solution(result, dose, model, dt) {
+        print_int(6)
+        return 6
+    }
+
+    // Verification 7: Drug properties are sensible
+    if drug.mw <= 0.0 {
+        print_int(7)
+        return 7
+    }
+    if drug.fu <= 0.0 || drug.fu > 1.0 {
+        print_int(8)
+        return 8
+    }
+
+    // All checks passed
+    print_int(0)
+    0
+}

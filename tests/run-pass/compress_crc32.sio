@@ -1,0 +1,389 @@
+//@ run-pass
+// CRC32 Test Suite
+//
+// Self-contained CRC32 implementation and tests.
+// Uses the standard CRC-32/ISO-HDLC polynomial (0xEDB88320 reflected).
+//
+// Known test vectors (ITU-T / ISO 3309):
+//   CRC32("123456789") = 0xCBF43926
+//   CRC32("")          = 0x00000000
+//   CRC32("a")         = 0xE8B7BE43
+//
+// Reference: "A Painless Guide to CRC Error Detection Algorithms"
+//            by Ross N. Williams
+
+// ============================================================================
+// HELPERS (must precede callers)
+// ============================================================================
+
+// Unsigned 32-bit operations simulated via i64 to avoid sign issues.
+// CRC32 works on 32-bit unsigned values; we use i64 and mask to 0xFFFFFFFF.
+
+fn u32_mask() -> i64 {
+    return 4294967295  // 0xFFFFFFFF
+}
+
+// Bitwise XOR for i64 (Sounio supports ^ operator)
+fn xor64(a: i64, b: i64) -> i64 {
+    return a ^ b
+}
+
+// Logical right shift by 1 for a 32-bit value stored in i64
+fn shr1_u32(x: i64) -> i64 with Panic, Div {
+    // Mask to 32 bits first, then shift
+    let masked = x & u32_mask()
+    return masked / 2
+}
+
+// Logical right shift by 8 for a 32-bit value stored in i64
+fn shr8_u32(x: i64) -> i64 with Panic, Div {
+    let masked = x & u32_mask()
+    return masked / 256
+}
+
+// ============================================================================
+// CRC32 TABLE GENERATION
+// ============================================================================
+
+// The reflected polynomial for CRC-32: 0xEDB88320
+fn crc32_polynomial() -> i64 {
+    return 3988292384  // 0xEDB88320
+}
+
+// Compute a single CRC32 table entry for byte value `n`.
+// This uses the standard bit-by-bit reflected algorithm.
+fn crc32_table_entry(n: i32) -> i64 with Mut, Panic, Div {
+    var crc = n as i64
+    var bit = 0
+    while bit < 8 {
+        if (crc & 1) == 1 {
+            crc = xor64(shr1_u32(crc), crc32_polynomial())
+        } else {
+            crc = shr1_u32(crc)
+        }
+        bit = bit + 1
+    }
+    return crc & u32_mask()
+}
+
+// CRC32 lookup table: 256 entries
+struct Crc32Table {
+    entries: [i64; 256],
+}
+
+fn crc32_make_table() -> Crc32Table with Mut, Panic, Div {
+    var entries: [i64; 256] = [0; 256]
+    var i = 0
+    while i < 256 {
+        entries[i] = crc32_table_entry(i)
+        i = i + 1
+    }
+    Crc32Table { entries: entries }
+}
+
+// ============================================================================
+// CRC32 COMPUTATION
+// ============================================================================
+
+// Update CRC32 with a single byte
+fn crc32_update_byte(table: Crc32Table, crc: i64, byte_val: i32) -> i64 with Mut, Panic, Div {
+    let index = (crc ^ (byte_val as i64)) & 255
+    let idx = index as i32
+    let table_val = table.entries[idx]
+    let shifted = shr8_u32(crc)
+    return xor64(shifted, table_val) & u32_mask()
+}
+
+// Compute CRC32 of an array of byte values
+// Input: byte values as i32 array, length
+// Returns: CRC32 value as i64
+fn crc32_compute(table: Crc32Table, data: [i32; 64], len: i32) -> i64 with Mut, Panic, Div {
+    // CRC32 starts with all bits set (0xFFFFFFFF)
+    var crc = u32_mask()
+    var i = 0
+    while i < len && i < 64 {
+        crc = crc32_update_byte(table, crc, data[i])
+        i = i + 1
+    }
+    // Final XOR with 0xFFFFFFFF
+    return xor64(crc, u32_mask()) & u32_mask()
+}
+
+// Compute CRC32 of an empty input (0 bytes)
+fn crc32_empty(table: Crc32Table) -> i64 with Mut {
+    var crc = u32_mask()
+    // No data to process
+    return xor64(crc, u32_mask()) & u32_mask()
+}
+
+// ============================================================================
+// TEST FUNCTIONS
+// ============================================================================
+
+// Test 1: CRC32 table entry 0 should be 0
+fn test_table_entry_zero() -> bool with IO, Mut, Panic, Div {
+    let entry = crc32_table_entry(0)
+    return entry == 0
+}
+
+// Test 2: CRC32 table entry 1 should be the polynomial (0xEDB88320)
+fn test_table_entry_one() -> bool with IO, Mut, Panic, Div {
+    let entry = crc32_table_entry(1)
+    return entry == crc32_polynomial()
+}
+
+// Test 3: CRC32 table is monotonically consistent (entry for 128 is nonzero)
+fn test_table_nonzero() -> bool with IO, Mut, Panic, Div {
+    let table = crc32_make_table()
+    // Entries for nonzero indices should generally be nonzero
+    let ok1 = table.entries[1] != 0
+    let ok2 = table.entries[128] != 0
+    let ok3 = table.entries[255] != 0
+    return ok1 && ok2 && ok3
+}
+
+// Test 4: CRC32("") = 0x00000000
+fn test_crc32_empty() -> bool with IO, Mut, Panic, Div {
+    let table = crc32_make_table()
+    let crc = crc32_empty(table)
+    return crc == 0
+}
+
+// Test 5: CRC32("a") = 0xE8B7BE43 (3904355907 in decimal)
+fn test_crc32_single_a() -> bool with IO, Mut, Panic, Div {
+    let table = crc32_make_table()
+    var data: [i32; 64] = [0; 64]
+    data[0] = 97  // ASCII 'a'
+    let crc = crc32_compute(table, data, 1)
+    // 0xE8B7BE43 = 3904355907
+    return crc == 3904355907
+}
+
+// Test 6: CRC32("123456789") = 0xCBF43926 (3421780262 in decimal)
+fn test_crc32_check_value() -> bool with IO, Mut, Panic, Div {
+    let table = crc32_make_table()
+    var data: [i32; 64] = [0; 64]
+    // "123456789" = ASCII 49,50,51,52,53,54,55,56,57
+    data[0] = 49
+    data[1] = 50
+    data[2] = 51
+    data[3] = 52
+    data[4] = 53
+    data[5] = 54
+    data[6] = 55
+    data[7] = 56
+    data[8] = 57
+    let crc = crc32_compute(table, data, 9)
+    // 0xCBF43926 = 3421780262
+    return crc == 3421780262
+}
+
+// Test 7: CRC32 of single null byte (0x00)
+// Known value: CRC32("\x00") = 0xD202EF8D (3523407885)
+fn test_crc32_null_byte() -> bool with IO, Mut, Panic, Div {
+    let table = crc32_make_table()
+    var data: [i32; 64] = [0; 64]
+    data[0] = 0
+    let crc = crc32_compute(table, data, 1)
+    // 0xD202EF8D = 3523407885
+    return crc == 3523407885
+}
+
+// Test 8: CRC32 of 0xFF byte
+// Known value: CRC32("\xFF") = 0xFF000000 (4278190080)
+fn test_crc32_ff_byte() -> bool with IO, Mut, Panic, Div {
+    let table = crc32_make_table()
+    var data: [i32; 64] = [0; 64]
+    data[0] = 255
+    let crc = crc32_compute(table, data, 1)
+    // 0xFF000000 = 4278190080
+    return crc == 4278190080
+}
+
+// Test 9: CRC32 is different for different inputs
+fn test_crc32_different_inputs() -> bool with IO, Mut, Panic, Div {
+    let table = crc32_make_table()
+    var data_a: [i32; 64] = [0; 64]
+    data_a[0] = 97  // 'a'
+    var data_b: [i32; 64] = [0; 64]
+    data_b[0] = 98  // 'b'
+    let crc_a = crc32_compute(table, data_a, 1)
+    let crc_b = crc32_compute(table, data_b, 1)
+    return crc_a != crc_b
+}
+
+// Test 10: CRC32 of "abc"
+// Known value: CRC32("abc") = 0x352441C2 (891568578)
+fn test_crc32_abc() -> bool with IO, Mut, Panic, Div {
+    let table = crc32_make_table()
+    var data: [i32; 64] = [0; 64]
+    data[0] = 97  // 'a'
+    data[1] = 98  // 'b'
+    data[2] = 99  // 'c'
+    let crc = crc32_compute(table, data, 3)
+    // 0x352441C2 = 891568578
+    return crc == 891568578
+}
+
+// Test 11: Table has exactly 256 entries and entry[0] is 0
+fn test_table_structure() -> bool with IO, Mut, Panic, Div {
+    let table = crc32_make_table()
+    let ok1 = table.entries[0] == 0
+    // All entries should be in 32-bit range
+    var all_in_range = true
+    var i = 0
+    while i < 256 {
+        if table.entries[i] < 0 || table.entries[i] > u32_mask() {
+            all_in_range = false
+        }
+        i = i + 1
+    }
+    return ok1 && all_in_range
+}
+
+// Test 12: CRC32 of repeated bytes (all 0x61 = 'a', 4 bytes)
+// Known value: CRC32("aaaa") = 0xAD98E545 (2912709957)
+fn test_crc32_repeated() -> bool with IO, Mut, Panic, Div {
+    let table = crc32_make_table()
+    var data: [i32; 64] = [0; 64]
+    data[0] = 97
+    data[1] = 97
+    data[2] = 97
+    data[3] = 97
+    let crc = crc32_compute(table, data, 4)
+    // 0xAD98E545 = 2912709957
+    return crc == 2912709957
+}
+
+// ============================================================================
+// MAIN TEST RUNNER
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== CRC32 Compression Tests ===")
+    println("")
+
+    var passed = 0
+    var failed = 0
+
+    print("Test  1: table entry 0............. ")
+    if test_table_entry_zero() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  2: table entry 1 = poly...... ")
+    if test_table_entry_one() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  3: table nonzero entries..... ")
+    if test_table_nonzero() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  4: CRC32(\"\") = 0x00000000.... ")
+    if test_crc32_empty() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  5: CRC32(\"a\") = 0xE8B7BE43.. ")
+    if test_crc32_single_a() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  6: CRC32(\"123456789\")........ ")
+    if test_crc32_check_value() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  7: CRC32(0x00)............... ")
+    if test_crc32_null_byte() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  8: CRC32(0xFF)............... ")
+    if test_crc32_ff_byte() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  9: different inputs differ... ")
+    if test_crc32_different_inputs() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 10: CRC32(\"abc\").............. ")
+    if test_crc32_abc() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 11: table structure........... ")
+    if test_table_structure() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 12: CRC32(\"aaaa\")............. ")
+    if test_crc32_repeated() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    println("")
+    print("Passed: ")
+    println(passed)
+    print("Failed: ")
+    println(failed)
+
+    if failed > 0 {
+        println("SOME TESTS FAILED")
+        return 1
+    }
+    println("ALL 12 TESTS PASSED")
+    return 0
+}

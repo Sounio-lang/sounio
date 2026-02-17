@@ -1,0 +1,570 @@
+//@ run-pass
+// Forward-Mode Automatic Differentiation Test Suite
+//
+// Self-contained implementation of forward-mode AD using dual numbers.
+// A dual number (a + b*epsilon) where epsilon^2 = 0 carries both a value
+// and its derivative through arithmetic operations automatically.
+//
+// All functions are inlined since tests cannot import.
+//
+// References:
+//   Griewank & Walther, "Evaluating Derivatives" (2nd ed., SIAM, 2008)
+//   Baydin et al., "Automatic Differentiation in Machine Learning: a Survey"
+//       (JMLR 18, 2018)
+
+// ============================================================================
+// HELPERS (must precede callers)
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+    abs_f64(a - b) < tol
+}
+
+// ============================================================================
+// DUAL NUMBER STRUCT AND OPERATIONS
+// ============================================================================
+
+// A dual number represents value + derivative*epsilon
+// where epsilon is an infinitesimal with epsilon^2 = 0.
+struct Dual {
+    val: f64,   // primal value f(x)
+    dot: f64,   // derivative f'(x) (tangent)
+}
+
+// Create a dual number representing a variable with derivative 1
+fn dual_var(x: f64) -> Dual with Mut, Panic {
+    Dual { val: x, dot: 1.0 }
+}
+
+// Create a dual number representing a constant (derivative 0)
+fn dual_const(c: f64) -> Dual with Mut, Panic {
+    Dual { val: c, dot: 0.0 }
+}
+
+// Addition: (a + b*eps) + (c + d*eps) = (a+c) + (b+d)*eps
+fn dual_add(a: Dual, b: Dual) -> Dual with Mut, Panic {
+    Dual { val: a.val + b.val, dot: a.dot + b.dot }
+}
+
+// Subtraction: (a + b*eps) - (c + d*eps) = (a-c) + (b-d)*eps
+fn dual_sub(a: Dual, b: Dual) -> Dual with Mut, Panic {
+    Dual { val: a.val - b.val, dot: a.dot - b.dot }
+}
+
+// Multiplication (product rule):
+// (a + b*eps)(c + d*eps) = ac + (ad + bc)*eps  (eps^2 = 0)
+fn dual_mul(a: Dual, b: Dual) -> Dual with Mut, Panic {
+    Dual {
+        val: a.val * b.val,
+        dot: a.val * b.dot + a.dot * b.val,
+    }
+}
+
+// Division (quotient rule):
+// (a + b*eps)/(c + d*eps) = a/c + (b*c - a*d)/(c^2) * eps
+fn dual_div(a: Dual, b: Dual) -> Dual with Mut, Panic, Div {
+    let val = a.val / b.val
+    let dot = (a.dot * b.val - a.val * b.dot) / (b.val * b.val)
+    Dual { val: val, dot: dot }
+}
+
+// Scale by a constant: c * (a + b*eps) = c*a + c*b*eps
+fn dual_scale(c: f64, d: Dual) -> Dual with Mut, Panic {
+    Dual { val: c * d.val, dot: c * d.dot }
+}
+
+// Power by integer exponent (repeated multiplication)
+fn dual_powi(base: Dual, n: i32) -> Dual with Mut, Panic, Div {
+    if n == 0 {
+        return dual_const(1.0)
+    }
+    if n == 1 {
+        return base
+    }
+    var result = base
+    var i = 1
+    while i < n {
+        result = dual_mul(result, base)
+        i = i + 1
+    }
+    return result
+}
+
+// Reciprocal: 1/(a + b*eps) = 1/a + (-b/a^2)*eps
+fn dual_recip(d: Dual) -> Dual with Mut, Panic, Div {
+    let val = 1.0 / d.val
+    let dot = (0.0 - d.dot) / (d.val * d.val)
+    Dual { val: val, dot: dot }
+}
+
+// Negate: -(a + b*eps) = -a + (-b)*eps
+fn dual_neg(d: Dual) -> Dual with Mut, Panic {
+    Dual { val: 0.0 - d.val, dot: 0.0 - d.dot }
+}
+
+// ============================================================================
+// TRIGONOMETRIC FUNCTIONS ON DUALS (for extended tests)
+// ============================================================================
+
+fn floor_f64(x: f64) -> f64 with Mut, Panic, Div {
+    let i = x as i32
+    let f = i as f64
+    if x < 0.0 && f != x { return f - 1.0 }
+    return f
+}
+
+fn sin_f64(x: f64) -> f64 with Mut, Panic, Div {
+    let pi = 3.141592653589793
+    let two_pi = 6.283185307179586
+    var t = x - floor_f64(x / two_pi) * two_pi
+    if t > pi { t = t - two_pi }
+    if t < 0.0 - pi { t = t + two_pi }
+    var sum = t
+    var term = t
+    var n = 1
+    while n <= 20 {
+        term = 0.0 - term * t * t / (((2 * n) as f64) * ((2 * n + 1) as f64))
+        sum = sum + term
+        n = n + 1
+    }
+    return sum
+}
+
+fn cos_f64(x: f64) -> f64 with Mut, Panic, Div {
+    return sin_f64(x + 1.5707963267948966)
+}
+
+// sin(a + b*eps) = sin(a) + b*cos(a)*eps
+fn dual_sin(d: Dual) -> Dual with Mut, Panic, Div {
+    Dual { val: sin_f64(d.val), dot: d.dot * cos_f64(d.val) }
+}
+
+// cos(a + b*eps) = cos(a) - b*sin(a)*eps
+fn dual_cos(d: Dual) -> Dual with Mut, Panic, Div {
+    Dual { val: cos_f64(d.val), dot: 0.0 - d.dot * sin_f64(d.val) }
+}
+
+// exp(a + b*eps) = exp(a) + b*exp(a)*eps
+fn exp_f64(x: f64) -> f64 with Mut, Panic, Div {
+    let ln2 = 0.6931471805599453
+    let k_f = floor_f64(x / ln2 + 0.5)
+    let k = k_f as i32
+    let r = x - k_f * ln2
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n <= 25 {
+        term = term * r / (n as f64)
+        sum = sum + term
+        n = n + 1
+    }
+    var result = sum
+    if k > 0 {
+        var j = 0
+        while j < k { result = result * 2.0; j = j + 1 }
+    } else if k < 0 {
+        var j = 0
+        let neg_k = 0 - k
+        while j < neg_k { result = result / 2.0; j = j + 1 }
+    }
+    return result
+}
+
+fn dual_exp(d: Dual) -> Dual with Mut, Panic, Div {
+    let e = exp_f64(d.val)
+    Dual { val: e, dot: d.dot * e }
+}
+
+// ============================================================================
+// TEST FUNCTIONS
+// ============================================================================
+
+// Test 1: d/dx(x^2) at x=3
+// f(x) = x^2, f'(x) = 2x, f'(3) = 6
+fn test_x_squared() -> bool with IO, Mut, Panic, Div {
+    let x = dual_var(3.0)
+    let result = dual_mul(x, x)
+    let tol = 1.0e-10
+    let val_ok = approx_eq(result.val, 9.0, tol)
+    let dot_ok = approx_eq(result.dot, 6.0, tol)
+    return val_ok && dot_ok
+}
+
+// Test 2: d/dx(x^3) at x=2
+// f(x) = x^3, f'(x) = 3x^2, f'(2) = 12
+fn test_x_cubed() -> bool with IO, Mut, Panic, Div {
+    let x = dual_var(2.0)
+    let result = dual_powi(x, 3)
+    let tol = 1.0e-10
+    let val_ok = approx_eq(result.val, 8.0, tol)
+    let dot_ok = approx_eq(result.dot, 12.0, tol)
+    return val_ok && dot_ok
+}
+
+// Test 3: d/dx(1/x) at x=4
+// f(x) = 1/x, f'(x) = -1/x^2, f'(4) = -1/16 = -0.0625
+fn test_reciprocal() -> bool with IO, Mut, Panic, Div {
+    let x = dual_var(4.0)
+    let one = dual_const(1.0)
+    let result = dual_div(one, x)
+    let tol = 1.0e-10
+    let val_ok = approx_eq(result.val, 0.25, tol)
+    let dot_ok = approx_eq(result.dot, 0.0 - 0.0625, tol)
+    return val_ok && dot_ok
+}
+
+// Test 4: Chain rule: d/dx(f(g(x))) where f(u)=u^2, g(x)=3x+1, at x=2
+// g(2) = 7, f(7) = 49
+// f'(g(x)) * g'(x) = 2*(3*2+1)*3 = 2*7*3 = 42
+fn test_chain_rule() -> bool with IO, Mut, Panic, Div {
+    let x = dual_var(2.0)
+    let three = dual_const(3.0)
+    let one = dual_const(1.0)
+
+    // g(x) = 3x + 1
+    let g = dual_add(dual_mul(three, x), one)
+
+    // f(g) = g^2
+    let f = dual_mul(g, g)
+
+    let tol = 1.0e-10
+    let val_ok = approx_eq(f.val, 49.0, tol)
+    let dot_ok = approx_eq(f.dot, 42.0, tol)
+    return val_ok && dot_ok
+}
+
+// Test 5: Product rule: d/dx(x^2 * x^3) = d/dx(x^5) = 5x^4 at x=2
+// f(x) = x^2 * x^3 = x^5, f'(2) = 5*16 = 80
+fn test_product_rule() -> bool with IO, Mut, Panic, Div {
+    let x = dual_var(2.0)
+    let x2 = dual_mul(x, x)           // x^2
+    let x3 = dual_mul(x2, x)          // x^3 (using x as the same seed)
+    let result = dual_mul(x2, x3)     // x^2 * x^3
+
+    let tol = 1.0e-10
+    let val_ok = approx_eq(result.val, 32.0, tol)   // 2^5 = 32
+    let dot_ok = approx_eq(result.dot, 80.0, tol)   // 5*2^4 = 80
+    return val_ok && dot_ok
+}
+
+// Test 6: Quotient rule: d/dx(x^2 / (x+1)) at x=3
+// f(x) = x^2/(x+1), f'(x) = (2x(x+1) - x^2)/(x+1)^2 = (x^2 + 2x)/(x+1)^2
+// f'(3) = (9 + 6)/(16) = 15/16 = 0.9375
+fn test_quotient_rule() -> bool with IO, Mut, Panic, Div {
+    let x = dual_var(3.0)
+    let one = dual_const(1.0)
+    let numer = dual_mul(x, x)          // x^2
+    let denom = dual_add(x, one)        // x+1
+    let result = dual_div(numer, denom)
+
+    let tol = 1.0e-10
+    let val_ok = approx_eq(result.val, 2.25, tol)       // 9/4 = 2.25
+    let dot_ok = approx_eq(result.dot, 0.9375, tol)     // 15/16
+    return val_ok && dot_ok
+}
+
+// Test 7: d/dx(constant) = 0
+fn test_constant_derivative() -> bool with IO, Mut, Panic, Div {
+    let c = dual_const(42.0)
+    let tol = 1.0e-12
+    let val_ok = approx_eq(c.val, 42.0, tol)
+    let dot_ok = approx_eq(c.dot, 0.0, tol)
+    return val_ok && dot_ok
+}
+
+// Test 8: d/dx(x) = 1 (identity derivative)
+fn test_identity_derivative() -> bool with IO, Mut, Panic, Div {
+    let x = dual_var(7.0)
+    let tol = 1.0e-12
+    let val_ok = approx_eq(x.val, 7.0, tol)
+    let dot_ok = approx_eq(x.dot, 1.0, tol)
+    return val_ok && dot_ok
+}
+
+// Test 9: d/dx(sin(x)) = cos(x) at x=pi/4
+// sin(pi/4) ~ 0.7071, cos(pi/4) ~ 0.7071
+fn test_sin_derivative() -> bool with IO, Mut, Panic, Div {
+    let pi_4 = 0.7853981633974483
+    let x = dual_var(pi_4)
+    let result = dual_sin(x)
+    let expected_val = sin_f64(pi_4)
+    let expected_dot = cos_f64(pi_4)
+    let tol = 1.0e-8
+    let val_ok = approx_eq(result.val, expected_val, tol)
+    let dot_ok = approx_eq(result.dot, expected_dot, tol)
+    return val_ok && dot_ok
+}
+
+// Test 10: d/dx(exp(x)) = exp(x) at x=1
+// exp(1) ~ 2.71828
+fn test_exp_derivative() -> bool with IO, Mut, Panic, Div {
+    let x = dual_var(1.0)
+    let result = dual_exp(x)
+    let e = exp_f64(1.0)
+    let tol = 1.0e-8
+    let val_ok = approx_eq(result.val, e, tol)
+    let dot_ok = approx_eq(result.dot, e, tol)  // d/dx(e^x) = e^x
+    return val_ok && dot_ok
+}
+
+// Test 11: Polynomial d/dx(3x^4 - 2x^2 + x - 5) at x=1
+// f'(x) = 12x^3 - 4x + 1, f'(1) = 12 - 4 + 1 = 9
+fn test_polynomial_derivative() -> bool with IO, Mut, Panic, Div {
+    let x = dual_var(1.0)
+    let three = dual_const(3.0)
+    let two = dual_const(2.0)
+    let five = dual_const(5.0)
+
+    let x2 = dual_mul(x, x)
+    let x4 = dual_mul(x2, x2)
+
+    // 3x^4
+    let term1 = dual_mul(three, x4)
+    // -2x^2
+    let term2 = dual_neg(dual_mul(two, x2))
+    // x
+    let term3 = x
+    // -5
+    let term4 = dual_neg(five)
+
+    let result = dual_add(dual_add(term1, term2), dual_add(term3, term4))
+
+    let tol = 1.0e-10
+    // f(1) = 3 - 2 + 1 - 5 = -3
+    let val_ok = approx_eq(result.val, 0.0 - 3.0, tol)
+    // f'(1) = 12 - 4 + 1 = 9
+    let dot_ok = approx_eq(result.dot, 9.0, tol)
+    return val_ok && dot_ok
+}
+
+// Test 12: d/dx(sin(x)^2) = 2*sin(x)*cos(x) at x = pi/6
+// sin(pi/6) = 0.5, cos(pi/6) ~ 0.866
+// d/dx = 2 * 0.5 * 0.866 = 0.866
+fn test_sin_squared() -> bool with IO, Mut, Panic, Div {
+    let pi_6 = 0.5235987755982988
+    let x = dual_var(pi_6)
+    let sx = dual_sin(x)
+    let result = dual_mul(sx, sx)  // sin(x)^2
+
+    let s = sin_f64(pi_6)
+    let c = cos_f64(pi_6)
+    let expected_val = s * s
+    let expected_dot = 2.0 * s * c
+
+    let tol = 1.0e-8
+    let val_ok = approx_eq(result.val, expected_val, tol)
+    let dot_ok = approx_eq(result.dot, expected_dot, tol)
+    return val_ok && dot_ok
+}
+
+// Test 13: Composition d/dx(exp(sin(x))) at x = 0
+// f(x) = exp(sin(x)), f'(x) = exp(sin(x)) * cos(x)
+// f'(0) = exp(0) * cos(0) = 1 * 1 = 1
+fn test_exp_sin_composition() -> bool with IO, Mut, Panic, Div {
+    let x = dual_var(0.0)
+    let result = dual_exp(dual_sin(x))
+    let tol = 1.0e-8
+    let val_ok = approx_eq(result.val, 1.0, tol)  // exp(sin(0)) = exp(0) = 1
+    let dot_ok = approx_eq(result.dot, 1.0, tol)  // exp(sin(0))*cos(0) = 1*1 = 1
+    return val_ok && dot_ok
+}
+
+// Test 14: d/dx(x / (1 + x^2)) at x = 1
+// f(x) = x/(1+x^2), f'(x) = (1+x^2 - 2x^2)/(1+x^2)^2 = (1-x^2)/(1+x^2)^2
+// f'(1) = (1-1)/(1+1)^2 = 0/4 = 0
+fn test_lorentzian_derivative() -> bool with IO, Mut, Panic, Div {
+    let x = dual_var(1.0)
+    let one = dual_const(1.0)
+    let numer = x
+    let denom = dual_add(one, dual_mul(x, x))
+    let result = dual_div(numer, denom)
+
+    let tol = 1.0e-10
+    let val_ok = approx_eq(result.val, 0.5, tol)   // 1/(1+1) = 0.5
+    let dot_ok = approx_eq(result.dot, 0.0, tol)    // (1-1)/(2)^2 = 0
+    return val_ok && dot_ok
+}
+
+// Test 15: Higher-order: d^2/dx^2(x^3) at x=2, computed via nested duals
+// We approximate by differentiating through a function that itself uses duals.
+// d/dx(x^3) = 3x^2, d^2/dx^2(x^3) = 6x, so at x=2 => 12
+// We verify by computing d/dx(3x^2) using a fresh dual pass.
+fn test_second_derivative_via_composition() -> bool with IO, Mut, Panic, Div {
+    // First pass: d/dx(x^3) at x=2 gives 3*4=12 (verified in test 2)
+    // Second pass: compute d/dx(3x^2) at x=2
+    //   3x^2 with x as dual_var(2): val=12, dot=12 (since d/dx(3x^2) = 6x = 12)
+    let x = dual_var(2.0)
+    let three = dual_const(3.0)
+    let x2 = dual_mul(x, x)
+    let result = dual_mul(three, x2)  // 3x^2
+
+    let tol = 1.0e-10
+    let val_ok = approx_eq(result.val, 12.0, tol)   // 3*4 = 12
+    let dot_ok = approx_eq(result.dot, 12.0, tol)   // 6*2 = 12
+    return val_ok && dot_ok
+}
+
+// ============================================================================
+// MAIN TEST RUNNER
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== Forward-Mode Autodiff Tests ===")
+    println("")
+
+    var passed = 0
+    var failed = 0
+
+    print("Test  1: d/dx(x^2) = 2x........... ")
+    if test_x_squared() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  2: d/dx(x^3) = 3x^2......... ")
+    if test_x_cubed() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  3: d/dx(1/x) = -1/x^2....... ")
+    if test_reciprocal() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  4: chain rule................ ")
+    if test_chain_rule() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  5: product rule (x^5)........ ")
+    if test_product_rule() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  6: quotient rule............. ")
+    if test_quotient_rule() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  7: constant derivative = 0... ")
+    if test_constant_derivative() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  8: identity derivative = 1... ")
+    if test_identity_derivative() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  9: d/dx(sin(x)) = cos(x).... ")
+    if test_sin_derivative() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 10: d/dx(exp(x)) = exp(x).... ")
+    if test_exp_derivative() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 11: polynomial derivative..... ")
+    if test_polynomial_derivative() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 12: d/dx(sin(x)^2)........... ")
+    if test_sin_squared() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 13: d/dx(exp(sin(x)))......... ")
+    if test_exp_sin_composition() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 14: Lorentzian derivative...... ")
+    if test_lorentzian_derivative() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 15: second derivative approx.. ")
+    if test_second_derivative_via_composition() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    println("")
+    print("Passed: ")
+    println(passed)
+    print("Failed: ")
+    println(failed)
+
+    if failed > 0 {
+        println("SOME TESTS FAILED")
+        return 1
+    }
+    println("ALL 15 TESTS PASSED")
+    return 0
+}

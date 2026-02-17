@@ -1,0 +1,909 @@
+//@ run-pass
+// SHA-256 Cryptographic Hash Test Suite
+//
+// Self-contained implementation of SHA-256 verified against NIST test vectors.
+// All functions are inlined since tests cannot import.
+//
+// References:
+//   FIPS 180-4 "Secure Hash Standard" (NIST, 2015)
+//   RFC 6234 "US Secure Hash Algorithms"
+
+// ============================================================================
+// BIT MANIPULATION HELPERS (must precede callers)
+// ============================================================================
+
+// Right-rotate a 32-bit value by n positions.
+// We work with i64 to avoid overflow issues, masking to 32 bits.
+fn rotr32(x: i64, n: i32) -> i64 with Mut, Panic, Div {
+    let mask = 4294967295  // 0xFFFFFFFF
+    let xm = x & mask
+    let right = xm >> n
+    let left = xm << (32 - n)
+    return (right | left) & mask
+}
+
+// Right-shift (logical) of 32-bit value by n positions
+fn shr32(x: i64, n: i32) -> i64 with Mut, Panic, Div {
+    let mask = 4294967295  // 0xFFFFFFFF
+    return (x & mask) >> n
+}
+
+// 32-bit addition with wraparound
+fn add32(a: i64, b: i64) -> i64 with Mut, Panic, Div {
+    let mask = 4294967295  // 0xFFFFFFFF
+    return (a + b) & mask
+}
+
+// SHA-256 functions
+fn ch(x: i64, y: i64, z: i64) -> i64 with Mut, Panic, Div {
+    let mask = 4294967295
+    return ((x & y) ^ ((mask ^ x) & z)) & mask
+}
+
+fn maj(x: i64, y: i64, z: i64) -> i64 with Mut, Panic, Div {
+    let mask = 4294967295
+    return ((x & y) ^ (x & z) ^ (y & z)) & mask
+}
+
+fn big_sigma0(x: i64) -> i64 with Mut, Panic, Div {
+    let mask = 4294967295
+    return (rotr32(x, 2) ^ rotr32(x, 13) ^ rotr32(x, 22)) & mask
+}
+
+fn big_sigma1(x: i64) -> i64 with Mut, Panic, Div {
+    let mask = 4294967295
+    return (rotr32(x, 6) ^ rotr32(x, 11) ^ rotr32(x, 25)) & mask
+}
+
+fn small_sigma0(x: i64) -> i64 with Mut, Panic, Div {
+    let mask = 4294967295
+    return (rotr32(x, 7) ^ rotr32(x, 18) ^ shr32(x, 3)) & mask
+}
+
+fn small_sigma1(x: i64) -> i64 with Mut, Panic, Div {
+    let mask = 4294967295
+    return (rotr32(x, 17) ^ rotr32(x, 19) ^ shr32(x, 10)) & mask
+}
+
+// ============================================================================
+// SHA-256 CONSTANTS (K)
+// ============================================================================
+
+// Return the i-th SHA-256 round constant
+fn sha256_k(i: i32) -> i64 with Mut, Panic, Div {
+    // First 32 fractional parts of cube roots of first 64 primes
+    if i == 0 { return 1116352408 }
+    if i == 1 { return 1899447441 }
+    if i == 2 { return 3049323471 }
+    if i == 3 { return 3921009573 }
+    if i == 4 { return 961987163 }
+    if i == 5 { return 1508970993 }
+    if i == 6 { return 2453635748 }
+    if i == 7 { return 2870763221 }
+    if i == 8 { return 3624381080 }
+    if i == 9 { return 310598401 }
+    if i == 10 { return 607225278 }
+    if i == 11 { return 1426881987 }
+    if i == 12 { return 1925078388 }
+    if i == 13 { return 2162078206 }
+    if i == 14 { return 2614888103 }
+    if i == 15 { return 3248222580 }
+    if i == 16 { return 3835390401 }
+    if i == 17 { return 4022224774 }
+    if i == 18 { return 264347078 }
+    if i == 19 { return 604807628 }
+    if i == 20 { return 770255983 }
+    if i == 21 { return 1249150122 }
+    if i == 22 { return 1555081692 }
+    if i == 23 { return 1996064986 }
+    if i == 24 { return 2554220882 }
+    if i == 25 { return 2821834349 }
+    if i == 26 { return 2952996808 }
+    if i == 27 { return 3210313671 }
+    if i == 28 { return 3336571891 }
+    if i == 29 { return 3584528711 }
+    if i == 30 { return 113926993 }
+    if i == 31 { return 338241895 }
+    if i == 32 { return 666307205 }
+    if i == 33 { return 773529912 }
+    if i == 34 { return 1294757372 }
+    if i == 35 { return 1396182291 }
+    if i == 36 { return 1695183700 }
+    if i == 37 { return 1986661051 }
+    if i == 38 { return 2177026350 }
+    if i == 39 { return 2456956037 }
+    if i == 40 { return 2730485921 }
+    if i == 41 { return 2820302411 }
+    if i == 42 { return 3259730800 }
+    if i == 43 { return 3345764771 }
+    if i == 44 { return 3516065817 }
+    if i == 45 { return 3600352804 }
+    if i == 46 { return 4094571909 }
+    if i == 47 { return 275423344 }
+    if i == 48 { return 430227734 }
+    if i == 49 { return 506948616 }
+    if i == 50 { return 659060556 }
+    if i == 51 { return 883997877 }
+    if i == 52 { return 958139571 }
+    if i == 53 { return 1322822218 }
+    if i == 54 { return 1537002063 }
+    if i == 55 { return 1747873779 }
+    if i == 56 { return 1955562222 }
+    if i == 57 { return 2024104815 }
+    if i == 58 { return 2227730452 }
+    if i == 59 { return 2361852424 }
+    if i == 60 { return 2428436474 }
+    if i == 61 { return 2756734187 }
+    if i == 62 { return 3204031479 }
+    if i == 63 { return 3329325298 }
+    return 0
+}
+
+// ============================================================================
+// SHA-256 STATE
+// ============================================================================
+
+struct Sha256State {
+    h0: i64,
+    h1: i64,
+    h2: i64,
+    h3: i64,
+    h4: i64,
+    h5: i64,
+    h6: i64,
+    h7: i64,
+}
+
+fn sha256_init() -> Sha256State with Mut, Panic {
+    Sha256State {
+        h0: 1779033703,   // 0x6a09e667
+        h1: 3144134277,   // 0xbb67ae85
+        h2: 1013904242,   // 0x3c6ef372
+        h3: 2773480762,   // 0xa54ff53a
+        h4: 1359893119,   // 0x510e527f
+        h5: 2600822924,   // 0x9b05688c
+        h6: 528734635,    // 0x1f83d9ab
+        h7: 1541459225,   // 0x5be0cd19
+    }
+}
+
+// ============================================================================
+// SHA-256 BLOCK COMPRESSION
+// ============================================================================
+
+// Process a single 512-bit (64-byte) block stored as 16 i64 words (big-endian 32-bit)
+fn sha256_compress(state: Sha256State, block: [i64; 64]) -> Sha256State with Mut, Panic, Div {
+    let mask = 4294967295  // 0xFFFFFFFF
+
+    // Prepare message schedule W[0..63]
+    var w: [i64; 64] = [0; 64]
+    var i = 0
+    while i < 16 {
+        w[i] = block[i] & mask
+        i = i + 1
+    }
+    while i < 64 {
+        w[i] = add32(add32(small_sigma1(w[i - 2]), w[i - 7]),
+                      add32(small_sigma0(w[i - 15]), w[i - 16]))
+        i = i + 1
+    }
+
+    // Working variables
+    var a = state.h0
+    var b = state.h1
+    var c = state.h2
+    var d = state.h3
+    var e = state.h4
+    var f = state.h5
+    var g = state.h6
+    var h = state.h7
+
+    // 64 rounds
+    i = 0
+    while i < 64 {
+        let t1 = add32(add32(h, big_sigma1(e)),
+                       add32(ch(e, f, g), add32(sha256_k(i), w[i])))
+        let t2 = add32(big_sigma0(a), maj(a, b, c))
+
+        h = g
+        g = f
+        f = e
+        e = add32(d, t1)
+        d = c
+        c = b
+        b = a
+        a = add32(t1, t2)
+
+        i = i + 1
+    }
+
+    // Add compressed chunk to hash state
+    Sha256State {
+        h0: add32(state.h0, a),
+        h1: add32(state.h1, b),
+        h2: add32(state.h2, c),
+        h3: add32(state.h3, d),
+        h4: add32(state.h4, e),
+        h5: add32(state.h5, f),
+        h6: add32(state.h6, g),
+        h7: add32(state.h7, h),
+    }
+}
+
+// ============================================================================
+// SHA-256 ON SHORT MESSAGES (up to 55 bytes fits in a single block)
+// ============================================================================
+
+// Hash an array of bytes (given as i64 values 0..255) of length `len` (max 55).
+// Returns the 8-word hash state.
+fn sha256_short(data: [i64; 64], len: i32) -> Sha256State with Mut, Panic, Div {
+    // Build padded block: data || 0x80 || zeros || big-endian 64-bit length
+    // For messages up to 55 bytes, padding fits in a single 64-byte block.
+    var padded: [i64; 64] = [0; 64]
+
+    // Copy data bytes into padded
+    var i = 0
+    while i < len {
+        padded[i] = data[i]
+        i = i + 1
+    }
+
+    // Append the 0x80 byte
+    padded[len] = 128
+
+    // Append length in bits as big-endian 64-bit integer at bytes 56..63
+    let bit_len = (len * 8) as i64
+    // For messages up to 55 bytes, the high 4 bytes of the 64-bit length are 0.
+    padded[60] = (bit_len >> 24) & 255
+    padded[61] = (bit_len >> 16) & 255
+    padded[62] = (bit_len >> 8) & 255
+    padded[63] = bit_len & 255
+
+    // Convert 64 bytes to 16 big-endian 32-bit words
+    var block: [i64; 64] = [0; 64]
+    i = 0
+    while i < 16 {
+        let base = i * 4
+        block[i] = (padded[base] << 24) | (padded[base + 1] << 16) |
+                   (padded[base + 2] << 8) | padded[base + 3]
+        i = i + 1
+    }
+
+    let state = sha256_init()
+    return sha256_compress(state, block)
+}
+
+// ============================================================================
+// HEX OUTPUT HELPERS
+// ============================================================================
+
+// Convert a 4-bit nibble (0..15) to its hex character code
+fn nibble_to_hex_char(n: i64) -> i64 with Mut, Panic, Div {
+    if n < 10 {
+        return 48 + n  // '0' = 48
+    }
+    return 87 + n  // 'a' = 97, so 97-10 = 87
+}
+
+// Extract byte at position `pos` (0=MSB, 3=LSB) from a 32-bit word
+fn extract_byte(word: i64, pos: i32) -> i64 with Mut, Panic, Div {
+    let shift = (3 - pos) * 8
+    return (word >> shift) & 255
+}
+
+// Compare a 32-bit hash word against 8 expected hex characters in a reference array
+// starting at `offset`. Returns true if they match.
+fn word_matches_hex(word: i64, expected: [i64; 64], offset: i32) -> bool with Mut, Panic, Div {
+    var byte_idx = 0
+    while byte_idx < 4 {
+        let b = extract_byte(word, byte_idx)
+        let hi = nibble_to_hex_char((b >> 4) & 15)
+        let lo = nibble_to_hex_char(b & 15)
+        let char_idx = offset + byte_idx * 2
+        if hi != expected[char_idx] { return false }
+        if lo != expected[char_idx + 1] { return false }
+        byte_idx = byte_idx + 1
+    }
+    return true
+}
+
+// Check full 256-bit hash (8 words) against a 64-character hex string stored as char codes
+fn hash_matches(state: Sha256State, expected: [i64; 64]) -> bool with Mut, Panic, Div {
+    if word_matches_hex(state.h0, expected, 0) == false { return false }
+    if word_matches_hex(state.h1, expected, 8) == false { return false }
+    if word_matches_hex(state.h2, expected, 16) == false { return false }
+    if word_matches_hex(state.h3, expected, 24) == false { return false }
+    if word_matches_hex(state.h4, expected, 32) == false { return false }
+    if word_matches_hex(state.h5, expected, 40) == false { return false }
+    if word_matches_hex(state.h6, expected, 48) == false { return false }
+    if word_matches_hex(state.h7, expected, 56) == false { return false }
+    return true
+}
+
+// ============================================================================
+// CONSTANT-TIME COMPARISON
+// ============================================================================
+
+// Compare two byte arrays of length `len` in constant time.
+// Returns true if all bytes match.
+fn hash_equals_ct(a: [i64; 64], b: [i64; 64], len: i32) -> bool with Mut, Panic, Div {
+    var diff = 0 as i64
+    var i = 0
+    while i < len {
+        diff = diff | (a[i] ^ b[i])
+        i = i + 1
+    }
+    return diff == 0
+}
+
+// ============================================================================
+// HELPER: Build hex string as char code array
+// ============================================================================
+
+// Store a hex string's ASCII codes into an array.
+// "e3b0c442..." becomes [101, 51, 98, 48, 99, 52, 52, 50, ...]
+fn hex_char_code(c: i32) -> i64 with Mut, Panic, Div {
+    // '0'-'9' = 48-57, 'a'-'f' = 97-102
+    if c == 0 { return 48 }
+    if c == 1 { return 49 }
+    if c == 2 { return 50 }
+    if c == 3 { return 51 }
+    if c == 4 { return 52 }
+    if c == 5 { return 53 }
+    if c == 6 { return 54 }
+    if c == 7 { return 55 }
+    if c == 8 { return 56 }
+    if c == 9 { return 57 }
+    if c == 10 { return 97 }   // 'a'
+    if c == 11 { return 98 }   // 'b'
+    if c == 12 { return 99 }   // 'c'
+    if c == 13 { return 100 }  // 'd'
+    if c == 14 { return 101 }  // 'e'
+    if c == 15 { return 102 }  // 'f'
+    return 0
+}
+
+// ============================================================================
+// TEST FUNCTIONS
+// ============================================================================
+
+// Test 1: SHA-256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e17c95868209a04551d8410d27
+fn test_empty_string() -> bool with IO, Mut, Panic, Div {
+    var data: [i64; 64] = [0; 64]
+    let state = sha256_short(data, 0)
+
+    // Expected hash as ASCII char codes
+    // e3b0c44298fc1c149afbf4c8996fb92427ae41e17c95868209a04551d8410d27
+    var expected: [i64; 64] = [0; 64]
+    expected[0] = 101   // e
+    expected[1] = 51    // 3
+    expected[2] = 98    // b
+    expected[3] = 48    // 0
+    expected[4] = 99    // c
+    expected[5] = 52    // 4
+    expected[6] = 52    // 4
+    expected[7] = 50    // 2
+    expected[8] = 57    // 9
+    expected[9] = 56    // 8
+    expected[10] = 102  // f
+    expected[11] = 99   // c
+    expected[12] = 49   // 1
+    expected[13] = 99   // c
+    expected[14] = 49   // 1
+    expected[15] = 52   // 4
+    expected[16] = 57   // 9
+    expected[17] = 97   // a
+    expected[18] = 102  // f
+    expected[19] = 98   // b
+    expected[20] = 102  // f
+    expected[21] = 52   // 4
+    expected[22] = 99   // c
+    expected[23] = 56   // 8
+    expected[24] = 57   // 9
+    expected[25] = 57   // 9
+    expected[26] = 54   // 6
+    expected[27] = 102  // f
+    expected[28] = 98   // b
+    expected[29] = 57   // 9
+    expected[30] = 50   // 2
+    expected[31] = 52   // 4
+    expected[32] = 50   // 2
+    expected[33] = 55   // 7
+    expected[34] = 97   // a
+    expected[35] = 101  // e
+    expected[36] = 52   // 4
+    expected[37] = 49   // 1
+    expected[38] = 101  // e
+    expected[39] = 49   // 1
+    expected[40] = 55   // 7
+    expected[41] = 99   // c
+    expected[42] = 57   // 9
+    expected[43] = 53   // 5
+    expected[44] = 56   // 8
+    expected[45] = 54   // 6
+    expected[46] = 56   // 8
+    expected[47] = 50   // 2
+    expected[48] = 48   // 0
+    expected[49] = 57   // 9
+    expected[50] = 97   // a
+    expected[51] = 48   // 0
+    expected[52] = 52   // 4
+    expected[53] = 53   // 5
+    expected[54] = 53   // 5
+    expected[55] = 49   // 1
+    expected[56] = 100  // d
+    expected[57] = 56   // 8
+    expected[58] = 52   // 4
+    expected[59] = 49   // 1
+    expected[60] = 48   // 0
+    expected[61] = 100  // d
+    expected[62] = 50   // 2
+    expected[63] = 55   // 7
+
+    return hash_matches(state, expected)
+}
+
+// Test 2: SHA-256("abc") = ba7816bf8f01cfea414140de5dae2223b095261d69c1fba18e849f55a5381455
+fn test_abc() -> bool with IO, Mut, Panic, Div {
+    var data: [i64; 64] = [0; 64]
+    data[0] = 97   // 'a'
+    data[1] = 98   // 'b'
+    data[2] = 99   // 'c'
+    let state = sha256_short(data, 3)
+
+    // ba7816bf8f01cfea414140de5dae2223b095261d69c1fba18e849f55a5381455
+    var expected: [i64; 64] = [0; 64]
+    expected[0] = 98    // b
+    expected[1] = 97    // a
+    expected[2] = 55    // 7
+    expected[3] = 56    // 8
+    expected[4] = 49    // 1
+    expected[5] = 54    // 6
+    expected[6] = 98    // b
+    expected[7] = 102   // f
+    expected[8] = 56    // 8
+    expected[9] = 102   // f
+    expected[10] = 48   // 0
+    expected[11] = 49   // 1
+    expected[12] = 99   // c
+    expected[13] = 102  // f
+    expected[14] = 101  // e
+    expected[15] = 97   // a
+    expected[16] = 52   // 4
+    expected[17] = 49   // 1
+    expected[18] = 52   // 4
+    expected[19] = 49   // 1
+    expected[20] = 52   // 4
+    expected[21] = 48   // 0
+    expected[22] = 100  // d
+    expected[23] = 101  // e
+    expected[24] = 53   // 5
+    expected[25] = 100  // d
+    expected[26] = 97   // a
+    expected[27] = 101  // e
+    expected[28] = 50   // 2
+    expected[29] = 50   // 2
+    expected[30] = 50   // 2
+    expected[31] = 51   // 3
+    expected[32] = 98   // b
+    expected[33] = 48   // 0
+    expected[34] = 57   // 9
+    expected[35] = 53   // 5
+    expected[36] = 50   // 2
+    expected[37] = 54   // 6
+    expected[38] = 49   // 1
+    expected[39] = 100  // d
+    expected[40] = 54   // 6
+    expected[41] = 57   // 9
+    expected[42] = 99   // c
+    expected[43] = 49   // 1
+    expected[44] = 102  // f
+    expected[45] = 98   // b
+    expected[46] = 97   // a
+    expected[47] = 49   // 1
+    expected[48] = 56   // 8
+    expected[49] = 101  // e
+    expected[50] = 56   // 8
+    expected[51] = 52   // 4
+    expected[52] = 57   // 9
+    expected[53] = 102  // f
+    expected[54] = 53   // 5
+    expected[55] = 53   // 5
+    expected[56] = 97   // a
+    expected[57] = 53   // 5
+    expected[58] = 51   // 3
+    expected[59] = 56   // 8
+    expected[60] = 49   // 1
+    expected[61] = 52   // 4
+    expected[62] = 53   // 5
+    expected[63] = 53   // 5
+
+    return hash_matches(state, expected)
+}
+
+// Test 3: SHA-256("hello") = 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+fn test_hello() -> bool with IO, Mut, Panic, Div {
+    var data: [i64; 64] = [0; 64]
+    data[0] = 104  // 'h'
+    data[1] = 101  // 'e'
+    data[2] = 108  // 'l'
+    data[3] = 108  // 'l'
+    data[4] = 111  // 'o'
+    let state = sha256_short(data, 5)
+
+    // 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+    var expected: [i64; 64] = [0; 64]
+    expected[0] = 50    // 2
+    expected[1] = 99    // c
+    expected[2] = 102   // f
+    expected[3] = 50    // 2
+    expected[4] = 52    // 4
+    expected[5] = 100   // d
+    expected[6] = 98    // b
+    expected[7] = 97    // a
+    expected[8] = 53    // 5
+    expected[9] = 102   // f
+    expected[10] = 98   // b
+    expected[11] = 48   // 0
+    expected[12] = 97   // a
+    expected[13] = 51   // 3
+    expected[14] = 48   // 0
+    expected[15] = 101  // e
+    expected[16] = 50   // 2
+    expected[17] = 54   // 6
+    expected[18] = 101  // e
+    expected[19] = 56   // 8
+    expected[20] = 51   // 3
+    expected[21] = 98   // b
+    expected[22] = 50   // 2
+    expected[23] = 97   // a
+    expected[24] = 99   // c
+    expected[25] = 53   // 5
+    expected[26] = 98   // b
+    expected[27] = 57   // 9
+    expected[28] = 101  // e
+    expected[29] = 50   // 2
+    expected[30] = 57   // 9
+    expected[31] = 101  // e
+    expected[32] = 49   // 1
+    expected[33] = 98   // b
+    expected[34] = 49   // 1
+    expected[35] = 54   // 6
+    expected[36] = 49   // 1
+    expected[37] = 101  // e
+    expected[38] = 53   // 5
+    expected[39] = 99   // c
+    expected[40] = 49   // 1
+    expected[41] = 102  // f
+    expected[42] = 97   // a
+    expected[43] = 55   // 7
+    expected[44] = 52   // 4
+    expected[45] = 50   // 2
+    expected[46] = 53   // 5
+    expected[47] = 101  // e
+    expected[48] = 55   // 7
+    expected[49] = 51   // 3
+    expected[50] = 48   // 0
+    expected[51] = 52   // 4
+    expected[52] = 51   // 3
+    expected[53] = 51   // 3
+    expected[54] = 54   // 6
+    expected[55] = 50   // 2
+    expected[56] = 57   // 9
+    expected[57] = 51   // 3
+    expected[58] = 56   // 8
+    expected[59] = 98   // b
+    expected[60] = 57   // 9
+    expected[61] = 56   // 8
+    expected[62] = 50   // 2
+    expected[63] = 52   // 4
+
+    return hash_matches(state, expected)
+}
+
+// Test 4: Determinism -- hashing the same input twice produces the same result
+fn test_determinism() -> bool with IO, Mut, Panic, Div {
+    var data1: [i64; 64] = [0; 64]
+    data1[0] = 120  // 'x'
+    data1[1] = 121  // 'y'
+    data1[2] = 122  // 'z'
+    let s1 = sha256_short(data1, 3)
+
+    var data2: [i64; 64] = [0; 64]
+    data2[0] = 120
+    data2[1] = 121
+    data2[2] = 122
+    let s2 = sha256_short(data2, 3)
+
+    return s1.h0 == s2.h0 && s1.h1 == s2.h1 && s1.h2 == s2.h2 && s1.h3 == s2.h3 &&
+           s1.h4 == s2.h4 && s1.h5 == s2.h5 && s1.h6 == s2.h6 && s1.h7 == s2.h7
+}
+
+// Test 5: Avalanche -- changing one bit in input changes at least 25% of output bits
+fn test_avalanche() -> bool with IO, Mut, Panic, Div {
+    var data1: [i64; 64] = [0; 64]
+    data1[0] = 0
+    let s1 = sha256_short(data1, 1)
+
+    var data2: [i64; 64] = [0; 64]
+    data2[0] = 1  // differ by one bit
+    let s2 = sha256_short(data2, 1)
+
+    // Count differing bits in XOR of hash words
+    var diff_bits = 0
+    var xor_val = s1.h0 ^ s2.h0
+    var j = 0
+    while j < 32 {
+        if (xor_val & 1) != 0 { diff_bits = diff_bits + 1 }
+        xor_val = xor_val >> 1
+        j = j + 1
+    }
+    xor_val = s1.h1 ^ s2.h1
+    j = 0
+    while j < 32 {
+        if (xor_val & 1) != 0 { diff_bits = diff_bits + 1 }
+        xor_val = xor_val >> 1
+        j = j + 1
+    }
+    xor_val = s1.h2 ^ s2.h2
+    j = 0
+    while j < 32 {
+        if (xor_val & 1) != 0 { diff_bits = diff_bits + 1 }
+        xor_val = xor_val >> 1
+        j = j + 1
+    }
+    xor_val = s1.h3 ^ s2.h3
+    j = 0
+    while j < 32 {
+        if (xor_val & 1) != 0 { diff_bits = diff_bits + 1 }
+        xor_val = xor_val >> 1
+        j = j + 1
+    }
+    xor_val = s1.h4 ^ s2.h4
+    j = 0
+    while j < 32 {
+        if (xor_val & 1) != 0 { diff_bits = diff_bits + 1 }
+        xor_val = xor_val >> 1
+        j = j + 1
+    }
+    xor_val = s1.h5 ^ s2.h5
+    j = 0
+    while j < 32 {
+        if (xor_val & 1) != 0 { diff_bits = diff_bits + 1 }
+        xor_val = xor_val >> 1
+        j = j + 1
+    }
+    xor_val = s1.h6 ^ s2.h6
+    j = 0
+    while j < 32 {
+        if (xor_val & 1) != 0 { diff_bits = diff_bits + 1 }
+        xor_val = xor_val >> 1
+        j = j + 1
+    }
+    xor_val = s1.h7 ^ s2.h7
+    j = 0
+    while j < 32 {
+        if (xor_val & 1) != 0 { diff_bits = diff_bits + 1 }
+        xor_val = xor_val >> 1
+        j = j + 1
+    }
+
+    // At least 64 of 256 bits should differ (25%)
+    // In practice SHA-256 flips ~128 bits on average
+    return diff_bits >= 64
+}
+
+// Test 6: Constant-time comparison works correctly
+fn test_ct_equal() -> bool with IO, Mut, Panic, Div {
+    var a: [i64; 64] = [0; 64]
+    var b: [i64; 64] = [0; 64]
+    var c: [i64; 64] = [0; 64]
+
+    var i = 0
+    while i < 32 {
+        a[i] = (i * 17 + 3) as i64
+        b[i] = (i * 17 + 3) as i64
+        c[i] = (i * 17 + 4) as i64   // differ by 1 in every byte
+        i = i + 1
+    }
+
+    let eq_ok = hash_equals_ct(a, b, 32)
+    let neq_ok = hash_equals_ct(a, c, 32) == false
+
+    return eq_ok && neq_ok
+}
+
+// Test 7: Constant-time comparison catches single-byte difference
+fn test_ct_single_diff() -> bool with IO, Mut, Panic, Div {
+    var a: [i64; 64] = [0; 64]
+    var b: [i64; 64] = [0; 64]
+
+    var i = 0
+    while i < 32 {
+        a[i] = 42
+        b[i] = 42
+        i = i + 1
+    }
+
+    // Identical should match
+    let ok1 = hash_equals_ct(a, b, 32)
+
+    // Change just the last byte
+    b[31] = 43
+    let ok2 = hash_equals_ct(a, b, 32) == false
+
+    return ok1 && ok2
+}
+
+// Test 8: Different messages produce different hashes
+fn test_collision_resistance() -> bool with IO, Mut, Panic, Div {
+    var d1: [i64; 64] = [0; 64]
+    d1[0] = 97  // "a"
+    let s1 = sha256_short(d1, 1)
+
+    var d2: [i64; 64] = [0; 64]
+    d2[0] = 98  // "b"
+    let s2 = sha256_short(d2, 1)
+
+    // Hashes must differ in at least one word
+    let any_diff = (s1.h0 != s2.h0) || (s1.h1 != s2.h1) || (s1.h2 != s2.h2) || (s1.h3 != s2.h3) ||
+                   (s1.h4 != s2.h4) || (s1.h5 != s2.h5) || (s1.h6 != s2.h6) || (s1.h7 != s2.h7)
+    return any_diff
+}
+
+// Test 9: Bit manipulation primitives -- rotr32 correctness
+fn test_rotr32() -> bool with IO, Mut, Panic, Div {
+    let mask = 4294967295
+
+    // rotr32(1, 1) = 0x80000000 = 2147483648
+    let ok1 = rotr32(1, 1) == 2147483648
+
+    // rotr32(0x80000000, 1) = 0x40000000 = 1073741824
+    let ok2 = rotr32(2147483648, 1) == 1073741824
+
+    // rotr32(0xFF, 4) = 0x0F00000F
+    // 0xFF = 255, rotated right 4: low 4 bits (0xF) go to high, rest shift right
+    // 0x0F00000F = 251658255
+    let ok3 = rotr32(255, 4) == 251658255
+
+    return ok1 && ok2 && ok3
+}
+
+// Test 10: SHA-256 initial hash values match FIPS 180-4
+fn test_init_values() -> bool with IO, Mut, Panic, Div {
+    let s = sha256_init()
+    let ok1 = s.h0 == 1779033703
+    let ok2 = s.h1 == 3144134277
+    let ok3 = s.h2 == 1013904242
+    let ok4 = s.h3 == 2773480762
+    let ok5 = s.h4 == 1359893119
+    let ok6 = s.h5 == 2600822924
+    let ok7 = s.h6 == 528734635
+    let ok8 = s.h7 == 1541459225
+    return ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8
+}
+
+// ============================================================================
+// MAIN TEST RUNNER
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== SHA-256 Crypto Hash Tests ===")
+    println("")
+
+    var passed = 0
+    var failed = 0
+
+    // Test 1
+    print("Test  1: SHA-256(\"\")............... ")
+    if test_empty_string() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 2
+    print("Test  2: SHA-256(\"abc\")............ ")
+    if test_abc() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 3
+    print("Test  3: SHA-256(\"hello\").......... ")
+    if test_hello() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 4
+    print("Test  4: determinism............... ")
+    if test_determinism() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 5
+    print("Test  5: avalanche (>25%% bits).... ")
+    if test_avalanche() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 6
+    print("Test  6: constant-time equal....... ")
+    if test_ct_equal() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 7
+    print("Test  7: constant-time single diff. ")
+    if test_ct_single_diff() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 8
+    print("Test  8: collision resistance....... ")
+    if test_collision_resistance() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 9
+    print("Test  9: rotr32 primitives......... ")
+    if test_rotr32() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 10
+    print("Test 10: init hash values.......... ")
+    if test_init_values() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    println("")
+    print("Passed: ")
+    println(passed)
+    print("Failed: ")
+    println(failed)
+
+    if failed > 0 {
+        println("SOME TESTS FAILED")
+        return 1
+    }
+    println("ALL 10 TESTS PASSED")
+    return 0
+}
