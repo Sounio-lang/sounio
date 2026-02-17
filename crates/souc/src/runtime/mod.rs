@@ -142,4 +142,7 @@ pub mod elf;
 pub mod ffi;
 pub mod runtime;
 pub mod syscalls;
-pub use ffi::{ffi_alloc, ffi_chiuratto, ffi_io, ffi_path, ffi_process, ffi_stdio, ffi_time};
+pub use ffi::{
+    ffi_alloc, ffi_chiuratto, ffi_compress, ffi_gpu, ffi_io, ffi_path, ffi_process, ffi_stdio,
+    ffi_time,
+};

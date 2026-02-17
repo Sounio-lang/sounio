@@ -1,6 +1,6 @@
 //! File I/O FFI Functions
 //!
-//! Implements 8 file I/O functions:
+//! Implements 9 file I/O functions:
 //! - __sounio_read_file
 //! - __sounio_write_file
 //! - __sounio_append_file
@@ -9,6 +9,7 @@
 //! - __sounio_rename_file
 //! - __sounio_file_exists
 //! - __sounio_file_metadata
+//! - __sounio_read_bytes
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -325,6 +326,72 @@ pub extern "C" fn __sounio_file_metadata(path_ptr: *const u8, path_len: usize) -
         }
         Err(e) => {
             tracing::error!("metadata failed: {}", e);
+            -1
+        }
+    }
+}
+
+/// Read raw bytes from a file, returning data through out-pointers.
+///
+/// The caller provides pointers where the function writes the address and
+/// length of a heap-allocated buffer containing the file contents.  The
+/// buffer is leaked intentionally so that the Sounio runtime can manage
+/// its lifetime.
+///
+/// # Arguments
+///
+/// * `path_ptr` - Pointer to the file path (UTF-8 bytes)
+/// * `path_len` - Length of the file path
+/// * `out_ptr` - Out-parameter: receives a pointer to the allocated byte buffer
+/// * `out_len` - Out-parameter: receives the length of the data read
+///
+/// # Returns
+///
+/// * `0` on success
+/// * `-1` on error (null pointers, invalid UTF-8, I/O failure)
+#[unsafe(no_mangle)]
+pub extern "C" fn __sounio_read_bytes(
+    path_ptr: *const u8,
+    path_len: i64,
+    out_ptr: *mut *mut u8,
+    out_len: *mut i64,
+) -> i32 {
+    let span = tracing::trace_span!("ffi::read_bytes", path_len);
+    let _guard = span.enter();
+
+    // Safety checks
+    if path_ptr.is_null() || out_ptr.is_null() || out_len.is_null() {
+        tracing::error!("null pointer");
+        return -1;
+    }
+
+    if path_len < 0 {
+        tracing::error!("negative path_len: {}", path_len);
+        return -1;
+    }
+
+    let path_slice = unsafe { slice::from_raw_parts(path_ptr, path_len as usize) };
+    let path_str = match std::str::from_utf8(path_slice) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("invalid utf8: {}", e);
+            return -1;
+        }
+    };
+
+    match fs::read(path_str) {
+        Ok(bytes) => {
+            let len = bytes.len();
+            let ptr = bytes.leak().as_mut_ptr();
+            unsafe {
+                *out_ptr = ptr;
+                *out_len = len as i64;
+            }
+            tracing::trace!("read_bytes: {} bytes from {}", len, path_str);
+            0
+        }
+        Err(e) => {
+            tracing::error!("read_bytes failed: {}", e);
             -1
         }
     }
