@@ -1,0 +1,309 @@
+//@ run-pass
+// genome_motif_scanner.sio — DNA sequence analysis with epistemic uncertainty
+//
+// Scans a DNA sequence for transcription factor binding site motifs using
+// position weight matrices (PWMs). Each motif hit is scored with epistemic
+// confidence derived from the information content of the PWM columns.
+//
+// Features: arrays, structs, epistemic uncertainty, numerical computation,
+//           bioinformatics algorithms
+//
+// Reference: Stormo (2000) "DNA binding sites: representation and discovery"
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+fn ln_approx(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return -100.0 }  // sentinel for log(0)
+    var y = x - 1.0
+    if abs_f64(y) < 0.5 {
+        // Series around x=1: ln(1+y) = y - y^2/2 + y^3/3 - ...
+        var sum = 0.0
+        var term = y
+        var n = 1
+        while n <= 30 {
+            sum = sum + term / (n as f64)
+            term = 0.0 - term * y
+            n = n + 1
+        }
+        return sum
+    }
+    // Newton iteration on e^y = x
+    var guess = 0.0
+    if x > 1.0 { guess = x / 2.0 }
+    if guess > 10.0 { guess = 10.0 }
+    var iter = 0
+    while iter < 50 {
+        let eg = exp_approx(guess)
+        if abs_f64(eg) < 1e-30 { break }
+        guess = guess - (eg - x) / eg
+        iter = iter + 1
+    }
+    guess
+}
+
+fn exp_approx(x: f64) -> f64 with Mut, Panic, Div {
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n <= 30 {
+        term = term * x / (n as f64)
+        sum = sum + term
+        n = n + 1
+    }
+    sum
+}
+
+fn log2_approx(x: f64) -> f64 with Mut, Panic, Div {
+    let ln2 = 0.6931471805599453
+    ln_approx(x) / ln2
+}
+
+// ============================================================================
+// DNA ENCODING — A=0, C=1, G=2, T=3
+// ============================================================================
+
+fn base_to_idx(base: i32) -> i32 {
+    // ASCII: A=65, C=67, G=71, T=84
+    if base == 65 { return 0 }  // A
+    if base == 67 { return 1 }  // C
+    if base == 71 { return 2 }  // G
+    if base == 84 { return 3 }  // T
+    return -1
+}
+
+fn idx_to_base(idx: i32) -> i32 {
+    if idx == 0 { return 65 }
+    if idx == 1 { return 67 }
+    if idx == 2 { return 71 }
+    if idx == 3 { return 84 }
+    return 78  // N
+}
+
+// ============================================================================
+// POSITION WEIGHT MATRIX
+// ============================================================================
+
+// PWM stored as flat array: pwm[pos * 4 + base]
+// Each column sums to ~1.0 (probability distribution)
+
+struct PWM {
+    weights: [f64],   // flat array: positions * 4 bases
+    length: i32       // motif length (number of positions)
+}
+
+struct ScoredHit {
+    position: i32,
+    score: f64,
+    confidence: f64   // epistemic: based on information content
+}
+
+// Information content of a PWM column (bits)
+// IC = 2 + sum(p * log2(p)) for each base
+fn column_information(pwm: PWM, col: i32) -> f64 with Mut, Panic, Div {
+    var ic = 2.0  // max entropy for 4 bases
+    var base = 0
+    while base < 4 {
+        let p = pwm.weights[col * 4 + base]
+        if p > 0.001 {
+            ic = ic + p * log2_approx(p)
+        }
+        base = base + 1
+    }
+    if ic < 0.0 { ic = 0.0 }
+    ic
+}
+
+// Total information content of the PWM
+fn total_information(pwm: PWM) -> f64 with Mut, Panic, Div {
+    var total = 0.0
+    var pos = 0
+    while pos < pwm.length {
+        total = total + column_information(pwm, pos)
+        pos = pos + 1
+    }
+    total
+}
+
+// Score a sequence window against the PWM
+// Score = sum of log2(freq / 0.25) for each position
+fn score_window(pwm: PWM, sequence: [i32], start: i32) -> f64 with Mut, Panic, Div {
+    var score = 0.0
+    var pos = 0
+    while pos < pwm.length {
+        let base_idx = base_to_idx(sequence[start + pos])
+        if base_idx >= 0 {
+            let freq = pwm.weights[pos * 4 + base_idx]
+            if freq > 0.001 {
+                score = score + log2_approx(freq / 0.25)
+            } else {
+                score = score - 10.0  // heavy penalty for near-zero
+            }
+        }
+        pos = pos + 1
+    }
+    score
+}
+
+// Epistemic confidence for a hit
+// Based on: (1) how much the score exceeds threshold
+//           (2) information content of matched positions
+fn hit_confidence(score: f64, threshold: f64, max_possible: f64) -> f64 with Panic, Div {
+    if score < threshold { return 0.0 }
+    let normalized = (score - threshold) / (max_possible - threshold + 0.001)
+    if normalized > 1.0 { return 0.95 }
+    if normalized < 0.0 { return 0.0 }
+    // Sigmoid-like mapping to confidence
+    normalized * 0.9 + 0.05
+}
+
+// ============================================================================
+// SCANNER — find all hits above threshold
+// ============================================================================
+
+fn scan_sequence(
+    pwm: PWM,
+    sequence: [i32],
+    seq_len: i32,
+    threshold: f64
+) -> [ScoredHit] with Mut, Panic, Div {
+    // Pre-compute max possible score
+    var max_score = 0.0
+    var pos = 0
+    while pos < pwm.length {
+        var max_col = -100.0
+        var b = 0
+        while b < 4 {
+            let w = pwm.weights[pos * 4 + b]
+            if w > 0.001 {
+                let s = log2_approx(w / 0.25)
+                if s > max_col { max_col = s }
+            }
+            b = b + 1
+        }
+        max_score = max_score + max_col
+        pos = pos + 1
+    }
+
+    // Scan all windows
+    let sentinel = ScoredHit { position: -1, score: 0.0, confidence: 0.0 }
+    var hits = [sentinel, sentinel, sentinel, sentinel, sentinel,
+                sentinel, sentinel, sentinel, sentinel, sentinel]
+    var hit_count = 0
+    let max_start = seq_len - pwm.length
+
+    var i = 0
+    while i <= max_start && hit_count < 10 {
+        let score = score_window(pwm, sequence, i)
+        if score >= threshold {
+            let conf = hit_confidence(score, threshold, max_score)
+            hits[hit_count] = ScoredHit {
+                position: i,
+                score: score,
+                confidence: conf
+            }
+            hit_count = hit_count + 1
+        }
+        i = i + 1
+    }
+
+    hits
+}
+
+// ============================================================================
+// EXAMPLE: E. coli CRP binding site motif
+// ============================================================================
+
+fn main() with IO, Mut, Panic, Div {
+    println("==============================================")
+    println("  Sounio Genome Motif Scanner")
+    println("  with Epistemic Confidence Scoring")
+    println("==============================================")
+    println("")
+
+    // Simplified CRP (cAMP receptor protein) binding motif
+    // Consensus: TGTGA-N6-TCACA (we use positions 1-5 of half-site)
+    // PWM for 6-base motif (simplified)
+    let pwm = PWM {
+        weights: [
+            // pos 0: strong T
+            0.05, 0.05, 0.05, 0.85,
+            // pos 1: strong G
+            0.05, 0.05, 0.85, 0.05,
+            // pos 2: T preferred
+            0.10, 0.10, 0.10, 0.70,
+            // pos 3: G preferred
+            0.10, 0.10, 0.70, 0.10,
+            // pos 4: A preferred
+            0.70, 0.10, 0.10, 0.10,
+            // pos 5: mixed (lower info)
+            0.30, 0.20, 0.20, 0.30
+        ],
+        length: 6
+    }
+
+    // Information content analysis
+    println("PWM Information Content (bits per position):")
+    var total_ic = 0.0
+    var p = 0
+    while p < pwm.length {
+        let ic = column_information(pwm, p)
+        total_ic = total_ic + ic
+        println(ic)
+        p = p + 1
+    }
+    println("Total information content:")
+    println(total_ic)
+    println("")
+
+    // Scan a test sequence (ASCII codes for bases)
+    // Sequence: ACGTGTGAACTTGTGATCACATGTGAATCG
+    //           Contains TGTGA at positions 4 and 14
+    let seq = [
+        65, 67, 71, 84,   // ACGT
+        84, 71, 84, 71,   // TGTG  <- motif at pos 4
+        65, 65, 67, 84,   // AACT
+        84, 71, 84, 71,   // TGTG  <- motif at pos 12
+        65, 84, 67, 65,   // ATCA
+        67, 65, 84, 71,   // CATG
+        84, 71, 65, 65,   // TGAA  <- partial match
+        84, 67, 71, 65    // TCGA
+    ]
+    let seq_len = 32
+
+    println("Scanning sequence (length 32)...")
+    println("Threshold: 2.0 bits")
+    println("")
+
+    let hits = scan_sequence(pwm, seq, seq_len, 2.0)
+
+    println("Hits found:")
+    var h = 0
+    while h < 10 {
+        if hits[h].position >= 0 {
+            println("  Position:")
+            println(hits[h].position)
+            println("  Score (bits):")
+            println(hits[h].score)
+            println("  Epistemic confidence:")
+            println(hits[h].confidence)
+            println("")
+        }
+        h = h + 1
+    }
+
+    println("==============================================")
+    println("Confidence reflects information content of")
+    println("the matched PWM positions — low-entropy")
+    println("columns contribute more to confidence.")
+    println("==============================================")
+}

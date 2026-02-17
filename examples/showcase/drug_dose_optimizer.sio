@@ -1,0 +1,306 @@
+//@ run-pass
+// drug_dose_optimizer.sio — Pharmacokinetic modeling with uncertainty
+//
+// Models drug absorption, distribution, and elimination using a
+// two-compartment pharmacokinetic model. Propagates epistemic
+// uncertainty through the simulation to determine confidence
+// intervals on plasma drug concentration over time.
+//
+// Features: ODE integration (Euler), structs, epistemic uncertainty,
+//           units of measure (conceptual), effects, medical computing
+//
+// Reference: Rowland & Tozer "Clinical Pharmacokinetics and
+//            Pharmacodynamics" (4th ed.)
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var g = x / 2.0
+    if g < 1.0 { g = 1.0 }
+    var i = 0
+    while i < 60 { g = (g + x / g) / 2.0; i = i + 1 }
+    g
+}
+
+fn exp_decay(x: f64) -> f64 with Mut, Panic, Div {
+    // e^(-x) for positive x via Taylor series
+    let neg_x = 0.0 - x
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n <= 30 {
+        term = term * neg_x / (n as f64)
+        sum = sum + term
+        n = n + 1
+    }
+    if sum < 0.0 { return 0.0 }
+    sum
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+fn min_f64(a: f64, b: f64) -> f64 {
+    if a < b { a } else { b }
+}
+
+// ============================================================================
+// PHARMACOKINETIC PARAMETERS — with uncertainty
+// ============================================================================
+
+struct PKParam {
+    value: f64,
+    uncertainty: f64   // standard uncertainty
+}
+
+struct TwoCompartmentParams {
+    ka: PKParam,       // absorption rate constant (1/h)
+    ke: PKParam,       // elimination rate constant (1/h)
+    k12: PKParam,      // central→peripheral transfer rate (1/h)
+    k21: PKParam,      // peripheral→central transfer rate (1/h)
+    v_central: PKParam, // central compartment volume (L)
+    dose: PKParam      // administered dose (mg)
+}
+
+// ============================================================================
+// COMPARTMENT STATE
+// ============================================================================
+
+struct PKState {
+    gut: f64,      // drug in GI tract (mg)
+    central: f64,  // drug in central compartment (mg)
+    peripheral: f64 // drug in peripheral compartment (mg)
+    // plasma concentration = central / V_central
+}
+
+// ============================================================================
+// TWO-COMPARTMENT ODE — dx/dt
+// ============================================================================
+
+fn pk_derivatives(state: PKState, ka: f64, ke: f64, k12: f64, k21: f64) -> PKState {
+    // dGut/dt = -ka * Gut
+    let d_gut = 0.0 - ka * state.gut
+
+    // dCentral/dt = ka*Gut - ke*Central - k12*Central + k21*Peripheral
+    let d_central = ka * state.gut - ke * state.central
+                  - k12 * state.central + k21 * state.peripheral
+
+    // dPeripheral/dt = k12*Central - k21*Peripheral
+    let d_peripheral = k12 * state.central - k21 * state.peripheral
+
+    PKState {
+        gut: d_gut,
+        central: d_central,
+        peripheral: d_peripheral
+    }
+}
+
+// Euler integration step
+fn euler_step(state: PKState, ka: f64, ke: f64, k12: f64, k21: f64, dt: f64) -> PKState {
+    let deriv = pk_derivatives(state, ka, ke, k12, k21)
+    PKState {
+        gut:        max_f64(0.0, state.gut + dt * deriv.gut),
+        central:    max_f64(0.0, state.central + dt * deriv.central),
+        peripheral: max_f64(0.0, state.peripheral + dt * deriv.peripheral)
+    }
+}
+
+// ============================================================================
+// SIMULATION WITH UNCERTAINTY BANDS
+// ============================================================================
+
+struct TimePoint {
+    time: f64,
+    conc_nominal: f64,
+    conc_lo: f64,
+    conc_hi: f64,
+    confidence: f64
+}
+
+fn simulate_pk(params: TwoCompartmentParams, t_end: f64, dt: f64, report_dt: f64) with IO, Mut, Panic, Div {
+    // Nominal parameters
+    let ka = params.ka.value
+    let ke = params.ke.value
+    let k12 = params.k12.value
+    let k21 = params.k21.value
+    let vc = params.v_central.value
+    let dose = params.dose.value
+
+    // Perturbed parameters (±1 sigma)
+    let ka_lo = params.ka.value - params.ka.uncertainty
+    let ke_lo = params.ke.value - params.ke.uncertainty
+    let k12_lo = params.k12.value - params.k12.uncertainty
+    let k21_lo = params.k21.value - params.k21.uncertainty
+    let vc_hi = params.v_central.value + params.v_central.uncertainty
+    let dose_lo = params.dose.value - params.dose.uncertainty
+
+    let ka_hi = params.ka.value + params.ka.uncertainty
+    let ke_hi = params.ke.value + params.ke.uncertainty
+    let k12_hi = params.k12.value + params.k12.uncertainty
+    let k21_hi = params.k21.value + params.k21.uncertainty
+    let vc_lo = params.v_central.value - params.v_central.uncertainty
+    let dose_hi = params.dose.value + params.dose.uncertainty
+
+    // Initial states
+    var state_nom = PKState { gut: dose, central: 0.0, peripheral: 0.0 }
+    var state_lo = PKState { gut: dose_lo, central: 0.0, peripheral: 0.0 }
+    var state_hi = PKState { gut: dose_hi, central: 0.0, peripheral: 0.0 }
+
+    var t = 0.0
+    var next_report = 0.0
+    let total_steps = ((t_end / dt) as i32) + 1
+    var step = 0
+
+    println("Time(h) | Conc_nom(mg/L) | Conc_lo | Conc_hi | Confidence")
+    println("--------|----------------|---------|---------|----------")
+
+    while step < total_steps && t <= t_end {
+        if t >= next_report - dt * 0.5 {
+            let c_nom = state_nom.central / vc
+            let c_lo = min_f64(state_lo.central / vc_hi, state_hi.central / vc_hi)
+            let c_hi = max_f64(state_lo.central / vc_lo, state_hi.central / vc_lo)
+
+            // Confidence: high when band is narrow relative to value
+            let band_width = abs_f64(c_hi - c_lo)
+            let conf = if c_nom > 0.01 {
+                let relative_width = band_width / c_nom
+                if relative_width < 0.1 { 0.95 }
+                else if relative_width < 0.3 { 0.80 }
+                else if relative_width < 0.5 { 0.60 }
+                else { 0.40 }
+            } else { 0.20 }
+
+            println(t)
+            println(c_nom)
+            println(c_lo)
+            println(c_hi)
+            println(conf)
+            println("---")
+
+            next_report = next_report + report_dt
+        }
+
+        state_nom = euler_step(state_nom, ka, ke, k12, k21, dt)
+        state_lo = euler_step(state_lo, ka_lo, ke_lo, k12_lo, k21_lo, dt)
+        state_hi = euler_step(state_hi, ka_hi, ke_hi, k12_hi, k21_hi, dt)
+
+        t = t + dt
+        step = step + 1
+    }
+}
+
+// ============================================================================
+// THERAPEUTIC WINDOW CHECK
+// ============================================================================
+
+fn check_therapeutic_window(params: TwoCompartmentParams, min_conc: f64, max_conc: f64) with IO, Mut, Panic, Div {
+    let ka = params.ka.value
+    let ke = params.ke.value
+    let k12 = params.k12.value
+    let k21 = params.k21.value
+    let vc = params.v_central.value
+    let dose = params.dose.value
+
+    var state = PKState { gut: dose, central: 0.0, peripheral: 0.0 }
+    let dt = 0.01
+    var t = 0.0
+    var t_above_min = -1.0
+    var t_below_max = -1.0
+    var peak_conc = 0.0
+    var peak_time = 0.0
+
+    var step = 0
+    while step < 4800 {  // 48 hours
+        state = euler_step(state, ka, ke, k12, k21, dt)
+        let conc = state.central / vc
+
+        if conc > peak_conc {
+            peak_conc = conc
+            peak_time = t
+        }
+
+        if conc >= min_conc && t_above_min < 0.0 {
+            t_above_min = t
+        }
+
+        if conc > max_conc && t_below_max < 0.0 {
+            t_below_max = t
+        }
+
+        t = t + dt
+        step = step + 1
+    }
+
+    println("")
+    println("=== Therapeutic Window Analysis ===")
+    println("Minimum effective concentration (mg/L):")
+    println(min_conc)
+    println("Maximum safe concentration (mg/L):")
+    println(max_conc)
+    println("Peak concentration (mg/L):")
+    println(peak_conc)
+    println("Time to peak (h):")
+    println(peak_time)
+
+    if peak_conc > max_conc {
+        println("WARNING: Peak exceeds maximum safe concentration!")
+    }
+    if peak_conc < min_conc {
+        println("WARNING: Drug never reaches therapeutic levels!")
+    }
+    if peak_conc >= min_conc && peak_conc <= max_conc {
+        println("Drug remains within therapeutic window at peak.")
+    }
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() with IO, Mut, Panic, Div {
+    println("==============================================")
+    println("  Sounio Drug Dose Optimizer")
+    println("  Two-Compartment PK with Uncertainty")
+    println("==============================================")
+    println("")
+
+    // Typical oral drug parameters (e.g., a common antibiotic)
+    let params = TwoCompartmentParams {
+        ka:        PKParam { value: 1.5,   uncertainty: 0.15 },  // 1/h
+        ke:        PKParam { value: 0.2,   uncertainty: 0.03 },  // 1/h
+        k12:       PKParam { value: 0.3,   uncertainty: 0.05 },  // 1/h
+        k21:       PKParam { value: 0.1,   uncertainty: 0.02 },  // 1/h
+        v_central: PKParam { value: 25.0,  uncertainty: 3.0 },   // L
+        dose:      PKParam { value: 500.0, uncertainty: 5.0 }    // mg
+    }
+
+    println("Drug: Generic Antibiotic 500mg oral dose")
+    println("Parameters (value +/- uncertainty):")
+    println("  ka  = 1.5  +/- 0.15  (1/h)")
+    println("  ke  = 0.2  +/- 0.03  (1/h)")
+    println("  k12 = 0.3  +/- 0.05  (1/h)")
+    println("  k21 = 0.1  +/- 0.02  (1/h)")
+    println("  Vc  = 25.0 +/- 3.0   (L)")
+    println("  Dose= 500  +/- 5     (mg)")
+    println("")
+
+    // Simulate 24 hours, report every 2 hours
+    simulate_pk(params, 24.0, 0.01, 2.0)
+
+    // Check therapeutic window
+    check_therapeutic_window(params, 4.0, 20.0)
+
+    println("")
+    println("==============================================")
+    println("Uncertainty bands show inter-patient variability")
+    println("in PK parameters — critical for dosing safety.")
+    println("==============================================")
+}

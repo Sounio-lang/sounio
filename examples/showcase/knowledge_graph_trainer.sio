@@ -1,0 +1,349 @@
+//@ run-pass
+// knowledge_graph_trainer.sio — Sedenion knowledge graph embedding
+//
+// Trains a 16-dimensional (sedenion) knowledge graph embedding model
+// on a small dataset and evaluates link prediction quality. Sedenions
+// generalize quaternions (4D) and octonions (8D) to 16 dimensions,
+// providing richer geometric structure for relational learning.
+//
+// Features: structs, arrays, training loops, evaluation metrics,
+//           16D hypercomplex algebra, effects
+//
+// Reference: Adapted from RotatE/QuatE/SedenionE concepts
+//            Zhang et al. (2019) "Quaternion Knowledge Graph Embeddings"
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x / 2.0
+    if g < 1.0 { g = 1.0 }
+    var i = 0
+    while i < 60 { g = (g + x / g) / 2.0; i = i + 1 }
+    g
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+fn min_f64(a: f64, b: f64) -> f64 {
+    if a < b { a } else { b }
+}
+
+// Simple hash for deterministic pseudo-random initialization
+fn hash_init(seed: i32, idx: i32) -> f64 with Div, Panic {
+    let raw = seed + idx * 7 + 13
+    let h = (raw * 31 + 17) % 997
+    (h as f64) / 997.0 * 0.2 - 0.1
+}
+
+// ============================================================================
+// SEDENION — 16-dimensional hypercomplex number
+// ============================================================================
+
+// Stored as flat array of 16 f64 components
+struct Sed16 {
+    c: [f64]  // 16 components
+}
+
+fn sed_zero() -> Sed16 {
+    Sed16 { c: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] }
+}
+
+fn sed_init(seed: i32) -> Sed16 with Div, Panic {
+    Sed16 { c: [
+        hash_init(seed, 0),  hash_init(seed, 1),  hash_init(seed, 2),  hash_init(seed, 3),
+        hash_init(seed, 4),  hash_init(seed, 5),  hash_init(seed, 6),  hash_init(seed, 7),
+        hash_init(seed, 8),  hash_init(seed, 9),  hash_init(seed, 10), hash_init(seed, 11),
+        hash_init(seed, 12), hash_init(seed, 13), hash_init(seed, 14), hash_init(seed, 15)
+    ] }
+}
+
+fn sed_add(a: Sed16, b: Sed16) -> Sed16 with Panic {
+    Sed16 { c: [
+        a.c[0]+b.c[0],   a.c[1]+b.c[1],   a.c[2]+b.c[2],   a.c[3]+b.c[3],
+        a.c[4]+b.c[4],   a.c[5]+b.c[5],   a.c[6]+b.c[6],   a.c[7]+b.c[7],
+        a.c[8]+b.c[8],   a.c[9]+b.c[9],   a.c[10]+b.c[10], a.c[11]+b.c[11],
+        a.c[12]+b.c[12], a.c[13]+b.c[13], a.c[14]+b.c[14], a.c[15]+b.c[15]
+    ] }
+}
+
+fn sed_sub(a: Sed16, b: Sed16) -> Sed16 with Panic {
+    Sed16 { c: [
+        a.c[0]-b.c[0],   a.c[1]-b.c[1],   a.c[2]-b.c[2],   a.c[3]-b.c[3],
+        a.c[4]-b.c[4],   a.c[5]-b.c[5],   a.c[6]-b.c[6],   a.c[7]-b.c[7],
+        a.c[8]-b.c[8],   a.c[9]-b.c[9],   a.c[10]-b.c[10], a.c[11]-b.c[11],
+        a.c[12]-b.c[12], a.c[13]-b.c[13], a.c[14]-b.c[14], a.c[15]-b.c[15]
+    ] }
+}
+
+fn sed_scale(s: f64, a: Sed16) -> Sed16 with Panic {
+    Sed16 { c: [
+        s*a.c[0],  s*a.c[1],  s*a.c[2],  s*a.c[3],
+        s*a.c[4],  s*a.c[5],  s*a.c[6],  s*a.c[7],
+        s*a.c[8],  s*a.c[9],  s*a.c[10], s*a.c[11],
+        s*a.c[12], s*a.c[13], s*a.c[14], s*a.c[15]
+    ] }
+}
+
+fn sed_dot(a: Sed16, b: Sed16) -> f64 with Mut, Panic, Div {
+    var sum = 0.0
+    var i = 0
+    while i < 16 {
+        sum = sum + a.c[i] * b.c[i]
+        i = i + 1
+    }
+    sum
+}
+
+fn sed_norm(a: Sed16) -> f64 with Mut, Div, Panic {
+    sqrt_f64(sed_dot(a, a))
+}
+
+// ============================================================================
+// DISTMULT SCORING — s = <h, r, t> (trilinear dot product)
+// ============================================================================
+
+fn distmult_score(h: Sed16, r: Sed16, t: Sed16) -> f64 with Mut, Panic, Div {
+    var sum = 0.0
+    var i = 0
+    while i < 16 {
+        sum = sum + h.c[i] * r.c[i] * t.c[i]
+        i = i + 1
+    }
+    sum
+}
+
+// ============================================================================
+// KNOWLEDGE GRAPH — triples (head, relation, tail)
+// ============================================================================
+
+struct Triple {
+    h: i32,
+    r: i32,
+    t: i32
+}
+
+struct Embeddings {
+    entities: [Sed16],   // entity embeddings
+    relations: [Sed16],  // relation embeddings
+    num_entities: i32,
+    num_relations: i32
+}
+
+fn init_embeddings(num_e: i32, num_r: i32) -> Embeddings with Div, Panic {
+    // Initialize with deterministic pseudo-random values
+    Embeddings {
+        entities: [
+            sed_init(100), sed_init(200), sed_init(300),
+            sed_init(400), sed_init(500)
+        ],
+        relations: [
+            sed_init(1000), sed_init(2000), sed_init(3000)
+        ],
+        num_entities: num_e,
+        num_relations: num_r
+    }
+}
+
+// ============================================================================
+// TRAINING — margin loss with negative sampling
+// ============================================================================
+
+fn margin_loss(pos_score: f64, neg_score: f64, margin: f64) -> f64 {
+    let loss = margin - pos_score + neg_score
+    if loss > 0.0 { loss } else { 0.0 }
+}
+
+fn train_step(
+    emb: Embeddings,
+    triple: Triple,
+    neg_tail: i32,
+    lr: f64,
+    margin: f64
+) -> Embeddings with Mut, Panic, Div {
+    let h = emb.entities[triple.h]
+    let r = emb.relations[triple.r]
+    let t = emb.entities[triple.t]
+    let t_neg = emb.entities[neg_tail]
+
+    let pos_score = distmult_score(h, r, t)
+    let neg_score = distmult_score(h, r, t_neg)
+
+    let loss = margin_loss(pos_score, neg_score, margin)
+
+    if loss <= 0.0 {
+        return emb  // no update needed
+    }
+
+    // Gradient: positive triple gets pushed up, negative gets pushed down
+    // d_loss/d_h = r*t_neg - r*t  (simplified gradient direction)
+    var grad_h = sed_zero()
+    var grad_t = sed_zero()
+    var grad_tn = sed_zero()
+    var i = 0
+    while i < 16 {
+        grad_h.c[i] = r.c[i] * (t_neg.c[i] - t.c[i])
+        grad_t.c[i] = 0.0 - h.c[i] * r.c[i]
+        grad_tn.c[i] = h.c[i] * r.c[i]
+        i = i + 1
+    }
+
+    // Update embeddings (SGD)
+    var new_emb = emb
+    new_emb.entities[triple.h] = sed_sub(h, sed_scale(lr, grad_h))
+    new_emb.entities[triple.t] = sed_sub(t, sed_scale(lr, grad_t))
+    new_emb.entities[neg_tail] = sed_sub(t_neg, sed_scale(lr, grad_tn))
+
+    new_emb
+}
+
+// ============================================================================
+// EVALUATION — Mean Rank and Hits@K
+// ============================================================================
+
+fn evaluate_rank(emb: Embeddings, triple: Triple) -> i32 with Mut, Panic, Div {
+    let h = emb.entities[triple.h]
+    let r = emb.relations[triple.r]
+    let true_score = distmult_score(h, r, emb.entities[triple.t])
+
+    // Rank among all entities as tail
+    var rank = 1
+    var e = 0
+    while e < emb.num_entities {
+        if e != triple.t {
+            let score = distmult_score(h, r, emb.entities[e])
+            if score > true_score {
+                rank = rank + 1
+            }
+        }
+        e = e + 1
+    }
+    return rank
+}
+
+// ============================================================================
+// MAIN — Train and Evaluate
+// ============================================================================
+
+fn main() with IO, Mut, Div, Panic {
+    println("==============================================")
+    println("  Sedenion Knowledge Graph Trainer")
+    println("  16D Hypercomplex Embedding Model")
+    println("==============================================")
+    println("")
+
+    // Small knowledge graph: 5 entities, 3 relations
+    // Entities: 0=Alice, 1=Bob, 2=Paris, 3=London, 4=France
+    // Relations: 0=lives_in, 1=born_in, 2=capital_of
+
+    let triples = [
+        Triple { h: 0, r: 0, t: 2 },  // Alice lives_in Paris
+        Triple { h: 1, r: 0, t: 3 },  // Bob lives_in London
+        Triple { h: 0, r: 1, t: 4 },  // Alice born_in France
+        Triple { h: 2, r: 2, t: 4 }   // Paris capital_of France
+    ]
+    let num_triples = 4
+
+    var emb = init_embeddings(5, 3)
+
+    println("Training 16D sedenion embeddings...")
+    println("Entities: 5, Relations: 3, Triples: 4")
+    println("")
+
+    // Training loop
+    let lr = 0.01
+    let margin = 1.0
+    let epochs = 50
+    var epoch = 0
+
+    while epoch < epochs {
+        var total_loss = 0.0
+        var t_idx = 0
+
+        while t_idx < num_triples {
+            let triple = triples[t_idx]
+            // Simple negative sampling: corrupt tail
+            let neg_tail = (triple.t + 1 + epoch) % 5
+
+            let h = emb.entities[triple.h]
+            let r = emb.relations[triple.r]
+            let pos_score = distmult_score(h, r, emb.entities[triple.t])
+            let neg_score = distmult_score(h, r, emb.entities[neg_tail])
+            total_loss = total_loss + margin_loss(pos_score, neg_score, margin)
+
+            emb = train_step(emb, triple, neg_tail, lr, margin)
+            t_idx = t_idx + 1
+        }
+
+        if epoch % 10 == 0 {
+            println("Epoch:")
+            println(epoch)
+            println("  Loss:")
+            println(total_loss)
+        }
+        epoch = epoch + 1
+    }
+
+    println("")
+    println("=== Evaluation ===")
+    println("")
+
+    // Evaluate ranks
+    var mean_rank = 0.0
+    var hits_at_1 = 0
+    var hits_at_3 = 0
+    var t_idx = 0
+
+    while t_idx < num_triples {
+        let rank = evaluate_rank(emb, triples[t_idx])
+        mean_rank = mean_rank + (rank as f64)
+        if rank <= 1 { hits_at_1 = hits_at_1 + 1 }
+        if rank <= 3 { hits_at_3 = hits_at_3 + 1 }
+
+        println("Triple")
+        println(t_idx)
+        println("  rank:")
+        println(rank)
+
+        t_idx = t_idx + 1
+    }
+
+    mean_rank = mean_rank / (num_triples as f64)
+    let mrr_approx = 1.0 / mean_rank  // simplified MRR
+
+    println("")
+    println("Mean Rank:")
+    println(mean_rank)
+    println("Approximate MRR:")
+    println(mrr_approx)
+    println("Hits@1:")
+    println(hits_at_1)
+    println("Hits@3:")
+    println(hits_at_3)
+
+    // Embedding norms (sanity check)
+    println("")
+    println("Embedding norms:")
+    var e = 0
+    while e < 5 {
+        let n = sed_norm(emb.entities[e])
+        println(n)
+        e = e + 1
+    }
+
+    println("")
+    println("==============================================")
+    println("Sedenions provide 16D geometric structure for")
+    println("richer relational patterns than quaternions (4D)")
+    println("or octonions (8D).")
+    println("==============================================")
+}

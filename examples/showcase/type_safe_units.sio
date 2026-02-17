@@ -1,0 +1,307 @@
+//@ run-pass
+// type_safe_units.sio — Dimensional analysis at the type level
+//
+// Demonstrates Sounio's unit-of-measure system: compile-time prevention
+// of dimensional mismatches in physics simulations. You cannot add meters
+// to kilograms — the type checker catches it before your code ever runs.
+//
+// Features: units of measure, structs, effects, dimensional safety
+//
+// This example manually tracks dimensions as a proof-of-concept.
+// With Sounio's built-in `unit` declarations, the compiler does this
+// automatically.
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x / 2.0
+    if g < 1.0 { g = 1.0 }
+    var i = 0
+    while i < 60 { g = (g + x / g) / 2.0; i = i + 1 }
+    g
+}
+
+// ============================================================================
+// DIMENSIONAL QUANTITY — value + dimension tag
+// ============================================================================
+
+// Dimension encoding: [M, L, T] exponents
+// e.g., velocity = [0, 1, -1]  (m/s)
+//       force    = [1, 1, -2]  (kg*m/s^2)
+//       energy   = [1, 2, -2]  (kg*m^2/s^2)
+
+struct Dim {
+    mass: i32,
+    length: i32,
+    time: i32
+}
+
+struct Quantity {
+    value: f64,
+    dim: Dim
+}
+
+fn dim_eq(a: Dim, b: Dim) -> bool {
+    a.mass == b.mass && a.length == b.length && a.time == b.time
+}
+
+// Base dimensions
+fn dimensionless() -> Dim { Dim { mass: 0, length: 0, time: 0 } }
+fn dim_mass() -> Dim      { Dim { mass: 1, length: 0, time: 0 } }
+fn dim_length() -> Dim    { Dim { mass: 0, length: 1, time: 0 } }
+fn dim_time() -> Dim      { Dim { mass: 0, length: 0, time: 1 } }
+
+// Derived dimensions
+fn dim_velocity() -> Dim     { Dim { mass: 0, length: 1, time: -1 } }
+fn dim_acceleration() -> Dim { Dim { mass: 0, length: 1, time: -2 } }
+fn dim_force() -> Dim        { Dim { mass: 1, length: 1, time: -2 } }
+fn dim_energy() -> Dim       { Dim { mass: 1, length: 2, time: -2 } }
+fn dim_power() -> Dim        { Dim { mass: 1, length: 2, time: -3 } }
+
+// Constructors
+fn kg(v: f64) -> Quantity     { Quantity { value: v, dim: dim_mass() } }
+fn meters(v: f64) -> Quantity { Quantity { value: v, dim: dim_length() } }
+fn seconds(v: f64) -> Quantity { Quantity { value: v, dim: dim_time() } }
+fn mps(v: f64) -> Quantity    { Quantity { value: v, dim: dim_velocity() } }
+fn mps2(v: f64) -> Quantity   { Quantity { value: v, dim: dim_acceleration() } }
+fn newtons(v: f64) -> Quantity { Quantity { value: v, dim: dim_force() } }
+fn joules(v: f64) -> Quantity { Quantity { value: v, dim: dim_energy() } }
+
+// ============================================================================
+// DIMENSIONAL ARITHMETIC — checked operations
+// ============================================================================
+
+// Add: dimensions must match
+fn q_add(a: Quantity, b: Quantity) -> Quantity with IO, Div, Panic {
+    if !dim_eq(a.dim, b.dim) {
+        println("DIMENSION ERROR: cannot add incompatible units!")
+        return Quantity { value: 0.0 / 0.0, dim: dimensionless() }
+    }
+    Quantity { value: a.value + b.value, dim: a.dim }
+}
+
+// Subtract: dimensions must match
+fn q_sub(a: Quantity, b: Quantity) -> Quantity with IO, Div, Panic {
+    if !dim_eq(a.dim, b.dim) {
+        println("DIMENSION ERROR: cannot subtract incompatible units!")
+        return Quantity { value: 0.0 / 0.0, dim: dimensionless() }
+    }
+    Quantity { value: a.value - b.value, dim: a.dim }
+}
+
+// Multiply: dimensions add
+fn q_mul(a: Quantity, b: Quantity) -> Quantity {
+    Quantity {
+        value: a.value * b.value,
+        dim: Dim {
+            mass: a.dim.mass + b.dim.mass,
+            length: a.dim.length + b.dim.length,
+            time: a.dim.time + b.dim.time
+        }
+    }
+}
+
+// Divide: dimensions subtract
+fn q_div(a: Quantity, b: Quantity) -> Quantity with Div, Panic {
+    Quantity {
+        value: a.value / b.value,
+        dim: Dim {
+            mass: a.dim.mass - b.dim.mass,
+            length: a.dim.length - b.dim.length,
+            time: a.dim.time - b.dim.time
+        }
+    }
+}
+
+// Scale by dimensionless number
+fn q_scale(c: f64, q: Quantity) -> Quantity {
+    Quantity { value: c * q.value, dim: q.dim }
+}
+
+fn dim_name(d: Dim) -> i32 {
+    // Return a code for the dimension name
+    if dim_eq(d, dimensionless()) { return 0 }
+    if dim_eq(d, dim_mass()) { return 1 }
+    if dim_eq(d, dim_length()) { return 2 }
+    if dim_eq(d, dim_time()) { return 3 }
+    if dim_eq(d, dim_velocity()) { return 4 }
+    if dim_eq(d, dim_acceleration()) { return 5 }
+    if dim_eq(d, dim_force()) { return 6 }
+    if dim_eq(d, dim_energy()) { return 7 }
+    if dim_eq(d, dim_power()) { return 8 }
+    return 99
+}
+
+// ============================================================================
+// PHYSICS SIMULATION: Projectile motion
+// ============================================================================
+
+struct ProjectileState {
+    x: Quantity,
+    y: Quantity,
+    vx: Quantity,
+    vy: Quantity,
+    t: Quantity
+}
+
+fn simulate_projectile(
+    v0: f64,
+    angle_deg: f64,
+    dt_val: f64,
+    steps: i32
+) -> ProjectileState with IO, Mut, Div, Panic {
+    let pi = 3.141592653589793
+    let angle_rad = angle_deg * pi / 180.0
+
+    // sin/cos via Taylor series
+    var sin_a = angle_rad
+    var cos_a = 1.0
+    var term_s = angle_rad
+    var term_c = 1.0
+    var n = 1
+    while n <= 15 {
+        term_s = 0.0 - term_s * angle_rad * angle_rad / (((2 * n) as f64) * ((2 * n + 1) as f64))
+        sin_a = sin_a + term_s
+        term_c = 0.0 - term_c * angle_rad * angle_rad / (((2 * n - 1) as f64) * ((2 * n) as f64))
+        cos_a = cos_a + term_c
+        n = n + 1
+    }
+
+    let g = mps2(9.81)
+    var state = ProjectileState {
+        x:  meters(0.0),
+        y:  meters(0.0),
+        vx: mps(v0 * cos_a),
+        vy: mps(v0 * sin_a),
+        t:  seconds(0.0)
+    }
+
+    let dt = seconds(dt_val)
+
+    var step = 0
+    while step < steps {
+        // v_y = v_y - g * dt  (dimension check: m/s - m/s^2 * s = m/s)
+        let dvy = q_mul(g, dt)                // m/s^2 * s = m/s
+        state.vy = q_sub(state.vy, dvy)       // m/s - m/s = m/s
+
+        // x = x + vx * dt  (dimension check: m + m/s * s = m)
+        let dx = q_mul(state.vx, dt)          // m/s * s = m
+        state.x = q_add(state.x, dx)          // m + m = m
+
+        // y = y + vy * dt
+        let dy = q_mul(state.vy, dt)
+        state.y = q_add(state.y, dy)
+
+        // t = t + dt
+        state.t = q_add(state.t, dt)
+
+        // Stop when projectile hits ground
+        if state.y.value < 0.0 && step > 0 {
+            break
+        }
+
+        step = step + 1
+    }
+
+    state
+}
+
+// ============================================================================
+// EXAMPLE: Kinetic energy — KE = 0.5 * m * v^2
+// ============================================================================
+
+fn kinetic_energy_example() with IO {
+    println("=== Kinetic Energy: KE = 0.5 * m * v^2 ===")
+    println("")
+
+    let mass = kg(75.0)
+    let velocity = mps(10.0)
+
+    // KE = 0.5 * m * v * v
+    let v_squared = q_mul(velocity, velocity)  // m^2/s^2
+    let mv2 = q_mul(mass, v_squared)           // kg * m^2/s^2 = J
+    let ke = q_scale(0.5, mv2)                 // 0.5 * J = J
+
+    println("Mass: 75.0 kg")
+    println("Velocity: 10.0 m/s")
+    println("Kinetic energy (J):")
+    println(ke.value)
+
+    // Verify dimensions are energy [1, 2, -2]
+    let is_energy = dim_eq(ke.dim, dim_energy())
+    println("Dimension is energy:")
+    println(is_energy)
+    println("")
+}
+
+// ============================================================================
+// EXAMPLE: F = ma
+// ============================================================================
+
+fn force_example() with IO {
+    println("=== Newton's Second Law: F = m * a ===")
+    println("")
+
+    let mass = kg(1200.0)           // car mass
+    let accel = mps2(3.5)           // acceleration
+
+    let force = q_mul(mass, accel)  // kg * m/s^2 = N
+
+    println("Mass: 1200.0 kg")
+    println("Acceleration: 3.5 m/s^2")
+    println("Force (N):")
+    println(force.value)
+
+    let is_force = dim_eq(force.dim, dim_force())
+    println("Dimension is force:")
+    println(is_force)
+    println("")
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() with IO, Mut, Div, Panic {
+    println("==============================================")
+    println("  Sounio Type-Safe Units - Dimensional Safety")
+    println("==============================================")
+    println("")
+
+    kinetic_energy_example()
+    force_example()
+
+    println("=== Projectile Motion Simulation ===")
+    println("")
+    println("Launching at 50 m/s, 45 degrees")
+
+    let final_state = simulate_projectile(50.0, 45.0, 0.01, 100000)
+
+    println("Final x (m):")
+    println(final_state.x.value)
+    println("Final y (m):")
+    println(final_state.y.value)
+    println("Flight time (s):")
+    println(final_state.t.value)
+
+    // Verify dimensions are correct
+    let x_is_length = dim_eq(final_state.x.dim, dim_length())
+    let t_is_time = dim_eq(final_state.t.dim, dim_time())
+    println("x dimension is length:")
+    println(x_is_length)
+    println("t dimension is time:")
+    println(t_is_time)
+    println("")
+
+    println("==============================================")
+    println("All operations are dimensionally checked.")
+    println("Adding meters to kilograms would be caught!")
+    println("==============================================")
+}

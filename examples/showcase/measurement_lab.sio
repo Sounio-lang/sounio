@@ -1,0 +1,272 @@
+//@ run-pass
+// measurement_lab.sio — ISO GUM-compliant uncertainty propagation
+//
+// Demonstrates Sounio's epistemic computing: propagating measurement
+// uncertainty through calculations using first-order Taylor expansion
+// (GUM framework). Combines multiple measurement sources with different
+// uncertainties and computes expanded uncertainty with coverage factors.
+//
+// Features: Knowledge types (manual), uncertainty propagation, structs,
+//           effects, first-order sensitivity analysis
+//
+// Reference: JCGM 100:2008 "Guide to the expression of uncertainty in
+//            measurement" (GUM)
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var g = x / 2.0
+    if g < 1.0 { g = 1.0 }
+    var i = 0
+    while i < 60 { g = (g + x / g) / 2.0; i = i + 1 }
+    g
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+// ============================================================================
+// MEASUREMENT TYPE — a value with standard uncertainty
+// ============================================================================
+
+struct Measurement {
+    value: f64,
+    std_uncertainty: f64,
+    source: i32      // 0=direct, 1=derived, 2=combined
+}
+
+fn measurement(val: f64, u: f64) -> Measurement {
+    Measurement { value: val, std_uncertainty: u, source: 0 }
+}
+
+fn derived(val: f64, u: f64) -> Measurement {
+    Measurement { value: val, std_uncertainty: u, source: 1 }
+}
+
+// ============================================================================
+// GUM OPERATIONS — propagate uncertainty through arithmetic
+// ============================================================================
+
+// Addition: u(a+b) = sqrt(u(a)^2 + u(b)^2)  (uncorrelated)
+fn gum_add(a: Measurement, b: Measurement) -> Measurement with Mut, Panic, Div {
+    let val = a.value + b.value
+    let u = sqrt_f64(a.std_uncertainty * a.std_uncertainty
+                   + b.std_uncertainty * b.std_uncertainty)
+    derived(val, u)
+}
+
+// Subtraction: u(a-b) = sqrt(u(a)^2 + u(b)^2)
+fn gum_sub(a: Measurement, b: Measurement) -> Measurement with Mut, Panic, Div {
+    let val = a.value - b.value
+    let u = sqrt_f64(a.std_uncertainty * a.std_uncertainty
+                   + b.std_uncertainty * b.std_uncertainty)
+    derived(val, u)
+}
+
+// Multiplication: u(a*b)/|a*b| = sqrt((u(a)/a)^2 + (u(b)/b)^2)
+fn gum_mul(a: Measurement, b: Measurement) -> Measurement with Mut, Panic, Div {
+    let val = a.value * b.value
+    let rel_a = if abs_f64(a.value) > 1e-15 { a.std_uncertainty / abs_f64(a.value) } else { 0.0 }
+    let rel_b = if abs_f64(b.value) > 1e-15 { b.std_uncertainty / abs_f64(b.value) } else { 0.0 }
+    let u = abs_f64(val) * sqrt_f64(rel_a * rel_a + rel_b * rel_b)
+    derived(val, u)
+}
+
+// Division: u(a/b)/|a/b| = sqrt((u(a)/a)^2 + (u(b)/b)^2)
+fn gum_div(a: Measurement, b: Measurement) -> Measurement with Mut, Panic, Div {
+    let val = a.value / b.value
+    let rel_a = if abs_f64(a.value) > 1e-15 { a.std_uncertainty / abs_f64(a.value) } else { 0.0 }
+    let rel_b = if abs_f64(b.value) > 1e-15 { b.std_uncertainty / abs_f64(b.value) } else { 0.0 }
+    let u = abs_f64(val) * sqrt_f64(rel_a * rel_a + rel_b * rel_b)
+    derived(val, u)
+}
+
+// Scalar multiplication: u(c*x) = |c| * u(x)
+fn gum_scale(c: f64, x: Measurement) -> Measurement {
+    derived(c * x.value, abs_f64(c) * x.std_uncertainty)
+}
+
+// ============================================================================
+// EXPANDED UNCERTAINTY — coverage factor for confidence interval
+// ============================================================================
+
+// Coverage factor k for approximate 95% confidence (k=2)
+fn expanded_uncertainty(m: Measurement, k: f64) -> f64 {
+    k * m.std_uncertainty
+}
+
+fn confidence_interval_lo(m: Measurement, k: f64) -> f64 {
+    m.value - k * m.std_uncertainty
+}
+
+fn confidence_interval_hi(m: Measurement, k: f64) -> f64 {
+    m.value + k * m.std_uncertainty
+}
+
+// ============================================================================
+// SENSITIVITY ANALYSIS — partial derivative magnitudes
+// ============================================================================
+
+// Numerical sensitivity via finite difference: df/dx ≈ (f(x+h) - f(x-h)) / 2h
+fn sensitivity_linear(x: Measurement, a: f64, b: f64) -> f64 {
+    // For f(x) = a*x + b, df/dx = a
+    abs_f64(a)
+}
+
+// Contribution index: how much each input contributes to total uncertainty
+fn contribution_index(u_component: f64, u_total: f64) -> f64 with Panic, Div {
+    if u_total > 1e-15 {
+        (u_component * u_component) / (u_total * u_total) * 100.0
+    } else {
+        0.0
+    }
+}
+
+// ============================================================================
+// EXAMPLE: Ohm's Law — R = V / I
+// ============================================================================
+
+fn ohms_law_example() with IO, Mut, Panic, Div {
+    println("=== Ohm's Law: R = V / I ===")
+    println("")
+
+    // Voltage measurement: 12.34 V ± 0.02 V
+    let voltage = measurement(12.34, 0.02)
+    // Current measurement: 0.256 A ± 0.005 A
+    let current = measurement(0.256, 0.005)
+
+    // Resistance = V / I
+    let resistance = gum_div(voltage, current)
+
+    let k95 = 2.0  // coverage factor for ~95% confidence
+    let u_expanded = expanded_uncertainty(resistance, k95)
+
+    println("Voltage:    12.34 V +/- 0.02 V")
+    println("Current:    0.256 A +/- 0.005 A")
+    println("Resistance (R = V/I):")
+    println(resistance.value)
+    println("Standard uncertainty u(R):")
+    println(resistance.std_uncertainty)
+    println("Expanded uncertainty U(R), k=2 (95%):")
+    println(u_expanded)
+    println("95% confidence interval:")
+    println(confidence_interval_lo(resistance, k95))
+    println(confidence_interval_hi(resistance, k95))
+
+    // Contribution analysis
+    let rel_v = voltage.std_uncertainty / voltage.value
+    let rel_i = current.std_uncertainty / current.value
+    let u_from_v = abs_f64(resistance.value) * rel_v
+    let u_from_i = abs_f64(resistance.value) * rel_i
+    let ci_v = contribution_index(u_from_v, resistance.std_uncertainty)
+    let ci_i = contribution_index(u_from_i, resistance.std_uncertainty)
+    println("")
+    println("Contribution from voltage (%):")
+    println(ci_v)
+    println("Contribution from current (%):")
+    println(ci_i)
+    println("")
+}
+
+// ============================================================================
+// EXAMPLE: Power dissipation — P = V^2 / R
+// ============================================================================
+
+fn power_example() with IO, Mut, Panic, Div {
+    println("=== Power Dissipation: P = V^2 / R ===")
+    println("")
+
+    let voltage = measurement(5.00, 0.01)
+    let resistance = measurement(100.0, 0.5)
+
+    // P = V * V / R
+    let v_squared = gum_mul(voltage, voltage)
+    let power = gum_div(v_squared, resistance)
+
+    let k95 = 2.0
+    println("Voltage:    5.00 V +/- 0.01 V")
+    println("Resistance: 100.0 ohm +/- 0.5 ohm")
+    println("Power (P = V^2/R):")
+    println(power.value)
+    println("Standard uncertainty u(P):")
+    println(power.std_uncertainty)
+    println("Expanded uncertainty U(P), k=2:")
+    println(expanded_uncertainty(power, k95))
+    println("")
+}
+
+// ============================================================================
+// EXAMPLE: Thermal expansion — L = L0 * (1 + alpha * dT)
+// ============================================================================
+
+fn thermal_expansion_example() with IO, Mut, Panic, Div {
+    println("=== Thermal Expansion: L = L0 * (1 + alpha * dT) ===")
+    println("")
+
+    // Steel bar: L0 = 1.0000 m ± 0.0001 m
+    let l0 = measurement(1.0000, 0.0001)
+    // Thermal expansion coefficient: 12e-6 /K ± 0.5e-6 /K
+    let alpha = measurement(12.0e-6, 0.5e-6)
+    // Temperature change: 80 K ± 2 K
+    let dt = measurement(80.0, 2.0)
+
+    // expansion = alpha * dT
+    let expansion = gum_mul(alpha, dt)
+    // one_plus_expansion = 1 + alpha*dT ≈ 1.00096
+    let factor = gum_add(measurement(1.0, 0.0), expansion)
+    // final length
+    let length = gum_mul(l0, factor)
+
+    let k95 = 2.0
+    println("L0:    1.0000 m +/- 0.0001 m")
+    println("alpha: 12e-6 /K +/- 0.5e-6 /K")
+    println("dT:    80 K +/- 2 K")
+    println("Final length L:")
+    println(length.value)
+    println("Standard uncertainty u(L):")
+    println(length.std_uncertainty)
+    println("Expanded uncertainty U(L), k=2:")
+    println(expanded_uncertainty(length, k95))
+
+    // Dominant uncertainty source
+    let u_from_alpha = abs_f64(l0.value * dt.value) * alpha.std_uncertainty
+    let u_from_dt = abs_f64(l0.value * alpha.value) * dt.std_uncertainty
+    let u_from_l0 = abs_f64(1.0 + alpha.value * dt.value) * l0.std_uncertainty
+    println("")
+    println("Uncertainty contributions:")
+    println("  From L0:")
+    println(u_from_l0)
+    println("  From alpha:")
+    println(u_from_alpha)
+    println("  From dT:")
+    println(u_from_dt)
+    println("")
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() with IO, Mut, Panic, Div {
+    println("==============================================")
+    println("  Sounio Measurement Lab - GUM Uncertainty")
+    println("==============================================")
+    println("")
+
+    ohms_law_example()
+    power_example()
+    thermal_expansion_example()
+
+    println("==============================================")
+    println("All measurements reported with GUM-compliant")
+    println("first-order uncertainty propagation.")
+    println("==============================================")
+}

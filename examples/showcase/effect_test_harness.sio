@@ -1,0 +1,306 @@
+//@ run-pass
+// effect_test_harness.sio — Algebraic effects for testable I/O
+//
+// Demonstrates Sounio's algebraic effect system: functions declare what
+// effects they perform, and callers provide handlers. This enables
+// testing I/O-heavy code without actually touching the filesystem —
+// the test handler captures operations instead of executing them.
+//
+// Features: effects, handlers (simulated), function composition,
+//           structs, arrays, pure computation
+//
+// In a full Sounio program, `effect IO { ... }` and `handle` blocks
+// provide real algebraic effect handlers. This example simulates the
+// pattern using explicit handler structs.
+
+// ============================================================================
+// LOG CAPTURE — simulated effect handler
+// ============================================================================
+
+struct LogEntry {
+    level: i32,    // 0=debug, 1=info, 2=warn, 3=error
+    message: i32   // simplified: message as integer code
+}
+
+struct LogCapture {
+    entries: [LogEntry],
+    count: i32,
+    max_entries: i32
+}
+
+fn new_capture() -> LogCapture {
+    // Pre-allocate entries array
+    let empty = LogEntry { level: 0, message: 0 }
+    LogCapture {
+        entries: [empty, empty, empty, empty, empty,
+                  empty, empty, empty, empty, empty],
+        count: 0,
+        max_entries: 10
+    }
+}
+
+fn capture_log(capture: LogCapture, level: i32, msg: i32) -> LogCapture with Mut, Panic {
+    if capture.count >= capture.max_entries {
+        return capture
+    }
+    var new_capture_val = capture
+    new_capture_val.entries[capture.count] = LogEntry { level: level, message: msg }
+    new_capture_val.count = capture.count + 1
+    new_capture_val
+}
+
+fn level_name(level: i32) -> i32 {
+    level  // simplified
+}
+
+// ============================================================================
+// BUSINESS LOGIC — declares effects but doesn't execute them directly
+// ============================================================================
+
+// Message codes for our simplified system
+// 100 = "processing started"
+// 101 = "item validated"
+// 102 = "item rejected"
+// 200 = "processing complete"
+// 300 = "validation warning"
+// 400 = "processing error"
+
+struct Item {
+    id: i32,
+    value: f64,
+    valid: bool
+}
+
+struct ProcessResult {
+    accepted: i32,
+    rejected: i32,
+    total_value: f64,
+    log: LogCapture
+}
+
+fn validate_item(item: Item) -> bool {
+    // Business rule: value must be positive and less than 10000
+    item.value > 0.0 && item.value < 10000.0
+}
+
+fn process_items(items: [Item], count: i32) -> ProcessResult with Mut, Panic, Div {
+    var log = new_capture()
+    var accepted = 0
+    var rejected = 0
+    var total = 0.0
+
+    // Log start
+    log = capture_log(log, 1, 100)  // info: processing started
+
+    var i = 0
+    while i < count {
+        let item = items[i]
+        if validate_item(item) {
+            accepted = accepted + 1
+            total = total + item.value
+            log = capture_log(log, 0, 101)  // debug: item validated
+        } else {
+            rejected = rejected + 1
+            if item.value < 0.0 {
+                log = capture_log(log, 3, 400)  // error: negative value
+            } else {
+                log = capture_log(log, 2, 300)  // warn: invalid item
+            }
+            log = capture_log(log, 1, 102)  // info: item rejected
+        }
+        i = i + 1
+    }
+
+    // Log completion
+    log = capture_log(log, 1, 200)  // info: processing complete
+
+    ProcessResult {
+        accepted: accepted,
+        rejected: rejected,
+        total_value: total,
+        log: log
+    }
+}
+
+// ============================================================================
+// TEST ASSERTIONS — verify behavior through captured effects
+// ============================================================================
+
+struct TestResult {
+    name: i32,        // test id
+    passed: bool,
+    checks: i32,
+    failures: i32
+}
+
+fn assert_eq_i32(actual: i32, expected: i32, result: TestResult) -> TestResult {
+    if actual == expected {
+        TestResult {
+            name: result.name,
+            passed: result.passed,
+            checks: result.checks + 1,
+            failures: result.failures
+        }
+    } else {
+        TestResult {
+            name: result.name,
+            passed: false,
+            checks: result.checks + 1,
+            failures: result.failures + 1
+        }
+    }
+}
+
+fn assert_true(condition: bool, result: TestResult) -> TestResult {
+    if condition {
+        TestResult {
+            name: result.name,
+            passed: result.passed,
+            checks: result.checks + 1,
+            failures: result.failures
+        }
+    } else {
+        TestResult {
+            name: result.name,
+            passed: false,
+            checks: result.checks + 1,
+            failures: result.failures + 1
+        }
+    }
+}
+
+fn new_test(name: i32) -> TestResult {
+    TestResult { name: name, passed: true, checks: 0, failures: 0 }
+}
+
+// ============================================================================
+// TEST SUITE
+// ============================================================================
+
+fn test_all_valid_items() -> TestResult with Mut, Panic, Div {
+    var t = new_test(1)
+
+    let items = [
+        Item { id: 1, value: 100.0, valid: true },
+        Item { id: 2, value: 250.0, valid: true },
+        Item { id: 3, value: 50.0,  valid: true }
+    ]
+
+    let result = process_items(items, 3)
+
+    // All items should be accepted
+    t = assert_eq_i32(result.accepted, 3, t)
+    t = assert_eq_i32(result.rejected, 0, t)
+
+    // Total value should be sum
+    let expected_total = 400.0
+    let total_ok = result.total_value > 399.0 && result.total_value < 401.0
+    t = assert_true(total_ok, t)
+
+    // Log should have: start + 3 validated + complete = 5 entries
+    t = assert_eq_i32(result.log.count, 5, t)
+
+    // First entry should be info (level 1, message 100 = start)
+    t = assert_eq_i32(result.log.entries[0].level, 1, t)
+    t = assert_eq_i32(result.log.entries[0].message, 100, t)
+
+    // Last entry should be completion
+    let last_idx = result.log.count - 1
+    t = assert_eq_i32(result.log.entries[last_idx].message, 200, t)
+
+    t
+}
+
+fn test_mixed_items() -> TestResult with Mut, Panic, Div {
+    var t = new_test(2)
+
+    let items = [
+        Item { id: 1, value: 100.0, valid: true },
+        Item { id: 2, value: -50.0, valid: false },  // negative: error
+        Item { id: 3, value: 99999.0, valid: false }  // too large: warning
+    ]
+
+    let result = process_items(items, 3)
+
+    // 1 accepted, 2 rejected
+    t = assert_eq_i32(result.accepted, 1, t)
+    t = assert_eq_i32(result.rejected, 2, t)
+
+    // Total should be just the first item
+    let total_ok = result.total_value > 99.0 && result.total_value < 101.0
+    t = assert_true(total_ok, t)
+
+    // Log should contain error entries for invalid items
+    // start + validated + (error + rejected) + (warn + rejected) + complete
+    // = 1 + 1 + 2 + 2 + 1 = 7
+    t = assert_eq_i32(result.log.count, 7, t)
+
+    t
+}
+
+fn test_empty_input() -> TestResult with Mut, Panic, Div {
+    var t = new_test(3)
+
+    let items = [Item { id: 0, value: 0.0, valid: false }]
+
+    let result = process_items(items, 0)  // 0 count = empty
+
+    t = assert_eq_i32(result.accepted, 0, t)
+    t = assert_eq_i32(result.rejected, 0, t)
+    // Log: start + complete = 2
+    t = assert_eq_i32(result.log.count, 2, t)
+
+    t
+}
+
+fn print_test_result(t: TestResult) with IO {
+    if t.passed {
+        println("  PASS")
+    } else {
+        println("  FAIL")
+    }
+    println("  test id:")
+    println(t.name)
+    println("  checks:")
+    println(t.checks)
+    println("  failures:")
+    println(t.failures)
+    println("")
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() with IO, Mut, Panic, Div {
+    println("==============================================")
+    println("  Sounio Effect Test Harness")
+    println("  Testing I/O without doing I/O")
+    println("==============================================")
+    println("")
+    println("Effects are captured, not executed.")
+    println("We verify behavior through the log.")
+    println("")
+
+    let t1 = test_all_valid_items()
+    println("Test 1: All valid items")
+    print_test_result(t1)
+
+    let t2 = test_mixed_items()
+    println("Test 2: Mixed valid/invalid items")
+    print_test_result(t2)
+
+    let t3 = test_empty_input()
+    println("Test 3: Empty input")
+    print_test_result(t3)
+
+    let total_passed = (if t1.passed { 1 } else { 0 })
+                     + (if t2.passed { 1 } else { 0 })
+                     + (if t3.passed { 1 } else { 0 })
+
+    println("==============================================")
+    println("Results:")
+    println(total_passed)
+    println("out of 3 tests passed")
+    println("==============================================")
+}

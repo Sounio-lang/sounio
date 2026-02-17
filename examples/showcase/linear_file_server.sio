@@ -1,0 +1,254 @@
+//@ run-pass
+// linear_file_server.sio — Linear types for resource safety
+//
+// Demonstrates how Sounio's linear type system prevents resource leaks
+// and double-free bugs at compile time. A linear struct MUST be consumed
+// exactly once — you can't forget to close a file handle, and you can't
+// close it twice.
+//
+// Features: linear struct, affine struct, must-consume semantics,
+//           effects, resource management
+//
+// In a real Sounio program with the ownership checker enabled,
+// forgetting to call `close()` on a linear handle is a compile error.
+// This example simulates the pattern.
+
+// ============================================================================
+// SIMULATED LINEAR FILE HANDLE
+// ============================================================================
+
+// In real Sounio: `linear struct FileHandle { fd: i32 }`
+// The `linear` modifier means this MUST be consumed exactly once.
+// We simulate it here with explicit tracking.
+
+struct FileHandle {
+    fd: i32,
+    path: i32,     // simplified: path as integer ID
+    is_open: bool
+}
+
+struct WriteResult {
+    bytes_written: i32,
+    handle: FileHandle   // returns the handle back (linear ownership transfer)
+}
+
+struct ReadResult {
+    data: i32,           // simplified: data as integer
+    bytes_read: i32,
+    handle: FileHandle   // handle returned to caller
+}
+
+// Open: creates a new linear resource
+fn file_open(path: i32) -> FileHandle with IO {
+    println("  [OPEN] file descriptor allocated")
+    FileHandle { fd: 42, path: path, is_open: true }
+}
+
+// Write: consumes handle, returns it back (linear transfer)
+fn file_write(handle: FileHandle, data: i32) -> WriteResult with IO {
+    if !handle.is_open {
+        println("  [ERROR] write to closed handle!")
+        return WriteResult { bytes_written: 0, handle: handle }
+    }
+    println("  [WRITE] data written")
+    WriteResult {
+        bytes_written: 4,
+        handle: FileHandle { fd: handle.fd, path: handle.path, is_open: true }
+    }
+}
+
+// Read: consumes handle, returns it back
+fn file_read(handle: FileHandle) -> ReadResult with IO {
+    if !handle.is_open {
+        println("  [ERROR] read from closed handle!")
+        return ReadResult { data: 0, bytes_read: 0, handle: handle }
+    }
+    println("  [READ] data read")
+    ReadResult {
+        data: 12345,
+        bytes_read: 4,
+        handle: FileHandle { fd: handle.fd, path: handle.path, is_open: true }
+    }
+}
+
+// Close: consumes the handle permanently (linear consumption)
+fn file_close(handle: FileHandle) with IO {
+    if handle.is_open {
+        println("  [CLOSE] file descriptor released")
+    } else {
+        println("  [WARN] closing already-closed handle")
+    }
+    // Handle is consumed here — it cannot be used again
+}
+
+// ============================================================================
+// AFFINE CONNECTION POOL
+// ============================================================================
+
+// Affine types: may be used AT MOST once (can be dropped without use)
+// Perfect for connection pools where connections can be returned or dropped.
+
+struct Connection {
+    id: i32,
+    active: bool
+}
+
+struct Pool {
+    size: i32,
+    available: i32
+}
+
+fn pool_create(size: i32) -> Pool with IO {
+    println("  [POOL] created with capacity:")
+    println(size)
+    Pool { size: size, available: size }
+}
+
+fn pool_acquire(pool: Pool) -> Connection with IO {
+    if pool.available <= 0 {
+        println("  [POOL] exhausted! No connections available")
+        return Connection { id: -1, active: false }
+    }
+    let conn_id = pool.size - pool.available + 1
+    println("  [POOL] connection acquired, id:")
+    println(conn_id)
+    Connection { id: conn_id, active: true }
+}
+
+fn pool_release(conn: Connection) with IO {
+    if conn.active {
+        println("  [POOL] connection released, id:")
+        println(conn.id)
+    }
+    // Connection is consumed here
+}
+
+// ============================================================================
+// EXAMPLE: Safe file processing pipeline
+// ============================================================================
+
+fn process_file() with IO, Mut {
+    println("--- File Processing Pipeline ---")
+    println("")
+
+    // 1. Open the file (creates linear resource)
+    var handle = file_open(1)
+
+    // 2. Write data (handle transferred in, transferred out)
+    let w1 = file_write(handle, 100)
+    handle = w1.handle
+    println("  Bytes written:")
+    println(w1.bytes_written)
+
+    // 3. Write more data
+    let w2 = file_write(handle, 200)
+    handle = w2.handle
+    println("  Bytes written:")
+    println(w2.bytes_written)
+
+    // 4. Read data back
+    let r1 = file_read(handle)
+    handle = r1.handle
+    println("  Data read:")
+    println(r1.data)
+
+    // 5. MUST close — linear types enforce this!
+    file_close(handle)
+
+    // At this point, `handle` is consumed.
+    // Any attempt to use it again would be a compile error:
+    //   file_write(handle, 300)  // ERROR: use after move
+    //   file_close(handle)       // ERROR: double close
+
+    println("")
+    println("File handle properly consumed.")
+    println("No resource leak possible!")
+    println("")
+}
+
+// ============================================================================
+// EXAMPLE: Connection pool with affine types
+// ============================================================================
+
+fn use_connections() with IO {
+    println("--- Connection Pool (Affine Types) ---")
+    println("")
+
+    let pool = pool_create(3)
+
+    // Acquire connections
+    let c1 = pool_acquire(pool)
+    // Note: pool is consumed here — can't double-acquire
+
+    // Use the connection
+    println("  Using connection:")
+    println(c1.id)
+
+    // Release it (affine: we choose to release, but could also drop)
+    pool_release(c1)
+
+    println("")
+    println("Connection properly returned to pool.")
+    println("")
+}
+
+// ============================================================================
+// EXAMPLE: RAII-style scope guard
+// ============================================================================
+
+struct ScopeGuard {
+    name: i32,
+    active: bool
+}
+
+fn guard_enter(name: i32) -> ScopeGuard with IO {
+    println("  [GUARD] entering scope")
+    ScopeGuard { name: name, active: true }
+}
+
+fn guard_exit(g: ScopeGuard) with IO {
+    println("  [GUARD] exiting scope, cleanup performed")
+    // Guard is consumed — cleanup guaranteed
+}
+
+fn scoped_operation() with IO {
+    println("--- Scope Guard Pattern ---")
+    println("")
+
+    let guard = guard_enter(1)
+
+    // Do some work...
+    println("  Doing critical work...")
+    println("  More work...")
+
+    // Must exit the guard (linear consumption)
+    guard_exit(guard)
+
+    println("  Scope guard ensures cleanup happened!")
+    println("")
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() with IO, Mut {
+    println("==============================================")
+    println("  Sounio Linear Types - Resource Safety")
+    println("==============================================")
+    println("")
+    println("Linear types guarantee:")
+    println("  - Resources are ALWAYS released (no leaks)")
+    println("  - Resources are NEVER double-freed")
+    println("  - The compiler checks this statically")
+    println("")
+
+    process_file()
+    use_connections()
+    scoped_operation()
+
+    println("==============================================")
+    println("All resources properly managed.")
+    println("Zero leaks, zero double-frees — by construction.")
+    println("==============================================")
+}

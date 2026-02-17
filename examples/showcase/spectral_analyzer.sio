@@ -1,0 +1,270 @@
+//@ run-pass
+// spectral_analyzer.sio — FFT-based signal analysis with epistemic confidence
+//
+// Performs Discrete Fourier Transform on a signal composed of known
+// frequencies plus noise, then identifies spectral peaks and assigns
+// epistemic confidence scores based on signal-to-noise ratio.
+//
+// Features: arrays, complex arithmetic, DFT algorithm, peak detection,
+//           epistemic confidence scoring, numerical computation
+//
+// Reference: Cooley & Tukey (1965) "An algorithm for the machine
+//            calculation of complex Fourier series"
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x / 2.0
+    if g < 1.0 { g = 1.0 }
+    var i = 0
+    while i < 60 { g = (g + x / g) / 2.0; i = i + 1 }
+    g
+}
+
+fn floor_f64(x: f64) -> f64 with Panic {
+    let i = x as i32
+    let f = i as f64
+    if x < 0.0 && f != x { f - 1.0 } else { f }
+}
+
+fn sin_f64(x: f64) -> f64 with Mut, Div, Panic {
+    let pi = 3.141592653589793
+    let two_pi = 6.283185307179586
+    var t = x - floor_f64(x / two_pi) * two_pi
+    if t > pi { t = t - two_pi }
+    if t < 0.0 - pi { t = t + two_pi }
+    var sum = t
+    var term = t
+    var n = 1
+    while n <= 20 {
+        term = 0.0 - term * t * t / (((2 * n) as f64) * ((2 * n + 1) as f64))
+        sum = sum + term
+        n = n + 1
+    }
+    sum
+}
+
+fn cos_f64(x: f64) -> f64 with Mut, Div, Panic {
+    sin_f64(x + 1.5707963267948966)
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+// Simple hash for pseudo-random noise
+fn noise(seed: i32) -> f64 with Div, Panic {
+    let h = ((seed * 2654435761) % 1000000) as f64
+    (h / 1000000.0 - 0.5) * 0.3  // noise amplitude ±0.15
+}
+
+// ============================================================================
+// COMPLEX NUMBER ARITHMETIC
+// ============================================================================
+
+struct Complex {
+    re: f64,
+    im: f64
+}
+
+fn c_add(a: Complex, b: Complex) -> Complex {
+    Complex { re: a.re + b.re, im: a.im + b.im }
+}
+
+fn c_mul(a: Complex, b: Complex) -> Complex {
+    Complex {
+        re: a.re * b.re - a.im * b.im,
+        im: a.re * b.im + a.im * b.re
+    }
+}
+
+fn c_magnitude(a: Complex) -> f64 with Mut, Div, Panic {
+    sqrt_f64(a.re * a.re + a.im * a.im)
+}
+
+// ============================================================================
+// DISCRETE FOURIER TRANSFORM (naive O(N^2) for small N)
+// ============================================================================
+
+fn dft(signal: [f64], n: i32) -> [Complex] with Mut, Div, Panic {
+    let pi2 = 6.283185307179586
+    // Pre-allocate output
+    let zero = Complex { re: 0.0, im: 0.0 }
+    var spectrum = [zero, zero, zero, zero, zero, zero, zero, zero,
+                    zero, zero, zero, zero, zero, zero, zero, zero,
+                    zero, zero, zero, zero, zero, zero, zero, zero,
+                    zero, zero, zero, zero, zero, zero, zero, zero]
+
+    var k = 0
+    while k < n {
+        var sum_re = 0.0
+        var sum_im = 0.0
+        var j = 0
+        while j < n {
+            let angle = pi2 * (k as f64) * (j as f64) / (n as f64)
+            sum_re = sum_re + signal[j] * cos_f64(angle)
+            sum_im = sum_im - signal[j] * sin_f64(angle)
+            j = j + 1
+        }
+        spectrum[k] = Complex { re: sum_re / (n as f64), im: sum_im / (n as f64) }
+        k = k + 1
+    }
+    spectrum
+}
+
+// ============================================================================
+// PEAK DETECTION with epistemic confidence
+// ============================================================================
+
+struct SpectralPeak {
+    bin: i32,
+    frequency: f64,
+    magnitude: f64,
+    snr: f64,         // signal-to-noise ratio
+    confidence: f64   // epistemic confidence [0, 1]
+}
+
+fn find_peaks(
+    spectrum: [Complex],
+    n: i32,
+    sample_rate: f64,
+    noise_floor: f64
+) -> [SpectralPeak] with Mut, Div, Panic {
+    let sentinel = SpectralPeak {
+        bin: -1, frequency: 0.0, magnitude: 0.0, snr: 0.0, confidence: 0.0
+    }
+    var peaks = [sentinel, sentinel, sentinel, sentinel, sentinel]
+    var peak_count = 0
+    let half_n = n / 2
+
+    var k = 1  // skip DC
+    while k < half_n && peak_count < 5 {
+        let mag = c_magnitude(spectrum[k])
+        let prev_mag = if k > 0 { c_magnitude(spectrum[k - 1]) } else { 0.0 }
+        let next_mag = if k < half_n - 1 { c_magnitude(spectrum[k + 1]) } else { 0.0 }
+
+        // Peak: local maximum above noise floor
+        if mag > prev_mag && mag > next_mag && mag > noise_floor * 2.0 {
+            let freq = (k as f64) * sample_rate / (n as f64)
+            let snr = mag / max_f64(noise_floor, 0.001)
+
+            // Epistemic confidence from SNR
+            // High SNR → high confidence, low SNR → low confidence
+            let conf = if snr > 10.0 { 0.95 }
+                       else if snr > 5.0 { 0.80 }
+                       else if snr > 3.0 { 0.60 }
+                       else if snr > 2.0 { 0.40 }
+                       else { 0.20 }
+
+            peaks[peak_count] = SpectralPeak {
+                bin: k,
+                frequency: freq,
+                magnitude: mag,
+                snr: snr,
+                confidence: conf
+            }
+            peak_count = peak_count + 1
+        }
+        k = k + 1
+    }
+    peaks
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() with IO, Mut, Div, Panic {
+    println("==============================================")
+    println("  Sounio Spectral Analyzer")
+    println("  FFT with Epistemic Peak Confidence")
+    println("==============================================")
+    println("")
+
+    // Generate test signal: 3 Hz + 7 Hz + noise, sampled at 32 Hz
+    let n = 32
+    let sample_rate = 32.0
+    let pi2 = 6.283185307179586
+
+    var signal = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                  0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                  0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                  0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+    var i = 0
+    while i < n {
+        let t = (i as f64) / sample_rate
+        // 3 Hz component (amplitude 1.0) + 7 Hz component (amplitude 0.5) + noise
+        signal[i] = 1.0 * sin_f64(pi2 * 3.0 * t)
+                   + 0.5 * sin_f64(pi2 * 7.0 * t)
+                   + noise(i * 137 + 42)
+        i = i + 1
+    }
+
+    println("Signal: 3 Hz (amp=1.0) + 7 Hz (amp=0.5) + noise")
+    println("Sample rate: 32 Hz, N=32 samples")
+    println("")
+
+    // Compute DFT
+    let spectrum = dft(signal, n)
+
+    // Estimate noise floor (median of all magnitudes)
+    var mag_sum = 0.0
+    var k = 0
+    while k < n / 2 {
+        mag_sum = mag_sum + c_magnitude(spectrum[k])
+        k = k + 1
+    }
+    let noise_floor = mag_sum / ((n / 2) as f64)
+
+    println("Estimated noise floor:")
+    println(noise_floor)
+    println("")
+
+    // Print magnitude spectrum
+    println("Magnitude Spectrum:")
+    k = 0
+    while k < n / 2 {
+        let freq = (k as f64) * sample_rate / (n as f64)
+        let mag = c_magnitude(spectrum[k])
+        println(freq)
+        println(mag)
+        k = k + 1
+    }
+    println("")
+
+    // Find peaks
+    let peaks = find_peaks(spectrum, n, sample_rate, noise_floor)
+
+    println("=== Detected Peaks ===")
+    println("")
+    var p = 0
+    while p < 5 {
+        if peaks[p].bin >= 0 {
+            println("Peak:")
+            println("  Frequency (Hz):")
+            println(peaks[p].frequency)
+            println("  Magnitude:")
+            println(peaks[p].magnitude)
+            println("  SNR:")
+            println(peaks[p].snr)
+            println("  Epistemic confidence:")
+            println(peaks[p].confidence)
+            println("")
+        }
+        p = p + 1
+    }
+
+    println("==============================================")
+    println("Epistemic confidence reflects signal-to-noise")
+    println("ratio: peaks well above the noise floor get")
+    println("high confidence; borderline peaks get low.")
+    println("==============================================")
+}
