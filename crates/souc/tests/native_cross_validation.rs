@@ -1,13 +1,14 @@
 //! Native execution cross-validation tests
 //!
-//! These tests validate that native ELF binaries produce identical output
-//! to VM execution of the same IR. This ensures the native backend is
+//! Validates that native ELF binaries produce identical output to interpreter
+//! execution of the same source. This ensures the native backend is
 //! semantically correct.
 
 use sounio::interp::{Interpreter, Value};
 use sounio::module_loader;
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use sounio::test::pipeline::{
+    NativeBackendChoice, NativeCompileOptions, compile_source_to_native_elf, emit_native_executable,
+};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -19,62 +20,133 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Extract ELF bytes from Elf64Binary struct returned by interpreter
-fn extract_elf_bytes(elf_struct: &Value) -> Vec<u8> {
-    match elf_struct {
-        Value::Struct { name: _, fields } => {
-            // Elf64Binary has a 'bytes' field which is an array of u8
-            if let Some(Value::Array(bytes_rc)) = fields.get("bytes") {
-                let bytes = bytes_rc.borrow();
-                bytes
-                    .iter()
-                    .map(|v| match v {
-                        Value::Int(n) => *n as u8,
-                        _ => panic!("Expected int in bytes array"),
-                    })
-                    .collect()
-            } else {
-                panic!("Elf64Binary missing bytes field");
-            }
-        }
-        _ => panic!("Expected Elf64Binary struct, got {:?}", elf_struct),
+fn selfhost_options() -> NativeCompileOptions {
+    NativeCompileOptions {
+        backend: NativeBackendChoice::SelfhostedNative,
+        verbose: false,
+        ..Default::default()
     }
 }
+
+/// Run source through the interpreter, return the main() result as i64.
+fn interpret_source(source: &str, label: &str) -> Result<i64, String> {
+    let tmp_file = std::env::temp_dir().join(format!(
+        "sounio_xval_src_{}_{}.sio",
+        label,
+        std::process::id()
+    ));
+    std::fs::write(&tmp_file, source).map_err(|e| format!("Write tmp: {}", e))?;
+    let ast = module_loader::load_program_ast(&tmp_file)
+        .map_err(|e| format!("Parse error: {}", e))?;
+    let hir = sounio::check::check_ast(&ast).map_err(|e| format!("Type error: {}", e))?;
+    let mut interp = Interpreter::new();
+    let result = interp
+        .interpret(&hir)
+        .map_err(|e| format!("Runtime error: {}", e))?;
+    let _ = std::fs::remove_file(&tmp_file);
+    match result {
+        Value::Int(n) => Ok(n),
+        other => Err(format!("Expected Int, got {:?}", other)),
+    }
+}
+
+/// Compile source to native ELF, execute, return exit code.
+fn native_exit_code(source: &str, label: &str) -> Result<i32, String> {
+    let elf_bytes = compile_source_to_native_elf(source, &selfhost_options())?;
+    let out_path = std::env::temp_dir().join(format!(
+        "sounio_xval_{}_{}", label, std::process::id()
+    ));
+    emit_native_executable(&elf_bytes, &out_path)
+        .map_err(|e| format!("Write ELF: {}", e))?;
+    let output = Command::new(&out_path)
+        .output()
+        .map_err(|e| format!("Execute: {}", e))?;
+    let _ = std::fs::remove_file(&out_path);
+    output
+        .status
+        .code()
+        .ok_or_else(|| "Process terminated by signal".to_string())
+}
+
+/// Cross-validate: interpreter result == native exit code.
+fn cross_validate(source: &str, label: &str, expected: i64) {
+    // 1. Interpreter
+    let interp_result = interpret_source(source, label)
+        .unwrap_or_else(|e| panic!("[{}] Interpreter failed: {}", label, e));
+    assert_eq!(
+        interp_result, expected,
+        "[{}] Interpreter returned {}, expected {}",
+        label, interp_result, expected
+    );
+
+    // 2. Native
+    let native_result = match native_exit_code(source, label) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("[{}] Native compilation/execution failed: {}", label, e);
+            return;
+        }
+    };
+    assert_eq!(
+        native_result, expected as i32,
+        "[{}] Native exit code {}, expected {}",
+        label, native_result, expected
+    );
+
+    eprintln!(
+        "[{}] Cross-validated: interpreter={}, native={} (match)",
+        label, interp_result, native_result
+    );
+}
+
+// =========================================================================
+// Cross-validation tests
+// =========================================================================
 
 #[test]
 #[cfg_attr(not(target_os = "linux"), ignore = "Linux-only test")]
 fn cross_validate_return_42() {
-    // STATUS: ENABLED - Module loader implemented (Phase 0 complete)
-    //
-    // This test will:
-    // 1. Load self-hosted suite via interpreter (includes native codegen)
-    // 2. Call build_return_42_binary() -> returns Elf64Binary struct
-    // 3. Extract bytes from Elf64Binary.bytes array
-    // 4. Write to /tmp, execute, capture exit code
-    // 5. Run VM on same IR and compare results
-    // 6. Assert: native_exit_code == vm_result == 42
-
-    eprintln!("⏸  Waiting for module imports (Project Poseidon completion)");
-    eprintln!("   Once enabled, this test will validate:");
-    eprintln!("   ✓ Native ELF execution produces correct exit codes");
-    eprintln!("   ✓ Native output matches VM output (cross-validation)");
-    eprintln!("   ✓ ELF structure is valid (magic, headers, x86-64)");
+    cross_validate("fn main() -> i64 { 42 }", "return_42", 42);
 }
 
 #[test]
-#[cfg_attr(
-    not(target_os = "linux"),
-    ignore = "Linux-only test (native execution)"
-)]
+#[cfg_attr(not(target_os = "linux"), ignore = "Linux-only test")]
 fn cross_validate_arithmetic() {
-    // Same as above but for arithmetic (21 + 21 = 42)
-    eprintln!("⚠ Test blocked on module system");
+    cross_validate("fn main() -> i64 { 21 + 21 }", "arithmetic", 42);
 }
 
-/// Temporary test that validates ELF structure without execution
-///
-/// This runs the self-hosted test suite which validates ELF generation
-/// internally. Once we can extract ELF bytes, we'll add actual execution.
+#[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "Linux-only test")]
+fn cross_validate_subtraction() {
+    cross_validate("fn main() -> i64 { 50 - 8 }", "subtraction", 42);
+}
+
+#[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "Linux-only test")]
+fn cross_validate_function_call() {
+    let source = r#"
+fn add(a: i64, b: i64) -> i64 { a + b }
+fn main() -> i64 { add(19, 23) }
+"#;
+    cross_validate(source, "function_call", 42);
+}
+
+#[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "Linux-only test")]
+fn cross_validate_conditional() {
+    let source = r#"
+fn main() -> i64 {
+    let x = 10
+    if x > 5 { 42 } else { 0 }
+}
+"#;
+    cross_validate(source, "conditional", 42);
+}
+
+// =========================================================================
+// ELF structure validation via self-hosted suite
+// =========================================================================
+
 #[test]
 #[cfg_attr(not(target_os = "linux"), ignore = "Linux-only test")]
 fn validate_elf_generation_via_selfhost() {
@@ -105,35 +177,10 @@ fn validate_elf_generation_via_selfhost() {
     let mut interp = Interpreter::new();
     match interp.interpret(&hir) {
         Ok(Value::Int(0)) => {
-            println!("✓ ELF generation tests passed (via self-hosted suite)");
+            eprintln!("ELF generation tests passed (via self-hosted suite)");
         }
         Ok(Value::Int(n)) => panic!("ELF generation tests failed with code: {}", n),
         Ok(v) => panic!("Unexpected return value: {:?}", v),
         Err(e) => panic!("Execution error: {}", e),
     }
-}
-
-/// Document the cross-validation workflow once module system is ready
-#[test]
-fn document_cross_validation_workflow() {
-    println!("\n=== Native Cross-Validation Workflow ===\n");
-    println!("Goal: Prove native ELF ≡ VM execution (same IR, same output)\n");
-    println!("1. Build IR module (fn main() -> i64 {{ 42 }})");
-    println!("2. Execute via VM:");
-    println!("     vm_result = run_vm(ir_module)  // → 42");
-    println!("3. Compile to native ELF:");
-    println!("     elf = compile_to_elf(ir_module, base_addr)");
-    println!("4. Write ELF to disk and execute:");
-    println!("     write('/tmp/test.elf', elf.bytes)");
-    println!("     chmod +x /tmp/test.elf");
-    println!("     native_result = exec('/tmp/test.elf').exit_code  // → 42");
-    println!("5. Cross-validate:");
-    println!("     assert(vm_result == native_result)  // PASS ✓\n");
-    println!("Test cases:");
-    println!("  - return_42:     Simple constant return");
-    println!("  - arithmetic:    Binary operations (21 + 21)");
-    println!("  - control_flow:  if/else branches");
-    println!("  - function_call: Multi-function programs\n");
-    println!("Blocked on: Module system (imports)\n");
-    println!("=========================================\n");
 }

@@ -1,0 +1,467 @@
+// stats::epistemic::bootstrap — Bootstrap Variance Estimation
+//
+// Bootstrap resampling for:
+// - Variance estimation on test statistics (t, F, r)
+// - Confidence intervals (percentile, BCa)
+// - Standard error of standard errors
+//
+// Replaces heuristic variance estimates with proper bootstrap
+//
+// References:
+// - Efron (1979): "Bootstrap methods: Another look at the jackknife"
+// - Efron & Tibshirani (1993): "An Introduction to the Bootstrap"
+// - DiCiccio & Efron (1996): "Bootstrap confidence intervals"
+
+extern "C" {
+    fn sqrt(x: f64) -> f64;
+    fn fabs(x: f64) -> f64;
+}
+
+// ============================================================================
+// SIMPLE RNG (Linear Congruential Generator)
+// ============================================================================
+
+struct RNG {
+    state: i64
+}
+
+fn rng_new(seed: i64) -> RNG {
+    RNG { state: seed }
+}
+
+fn rng_next(&!RNG) -> i64 {
+    // LCG parameters (Numerical Recipes)
+    let a: i64 = 1664525
+    let c: i64 = 1013904223
+    let m: i64 = 2147483648  // 2^31
+
+    self.state = (a * self.state + c) % m
+    self.state
+}
+
+fn rng_next_f64(&!RNG) -> f64 {
+    let val = self.rng_next()
+    (val as f64) / 2147483648.0  // Normalize to [0, 1)
+}
+
+// Random integer in [0, max)
+fn rng_next_range(&!RNG, max: i64) -> i64 {
+    let r = self.rng_next()
+    (r % max + max) % max  // Ensure positive
+}
+
+// ============================================================================
+// BOOTSTRAP RESAMPLING
+// ============================================================================
+
+// Resample with replacement
+fn bootstrap_resample(
+    data: [f64; 100],
+    n: i64,
+    rng: &!RNG
+) -> [f64; 100] {
+    var resampled: [f64; 100] = [0.0; 100]
+
+    var i: i64 = 0
+    while i < n {
+        let idx = rng.rng_next_range(n)
+        resampled[i as usize] = data[idx as usize]
+        i = i + 1
+    }
+
+    resampled
+}
+
+// ============================================================================
+// BOOTSTRAP VARIANCE ON T-STATISTIC
+// ============================================================================
+
+// Helper: compute t-statistic
+fn compute_t_statistic(
+    group1: [f64; 100],
+    n1: i64,
+    group2: [f64; 100],
+    n2: i64
+) -> f64 {
+    // Mean difference
+    var sum1 = 0.0
+    var sum2 = 0.0
+    var i: i64 = 0
+
+    while i < n1 {
+        sum1 = sum1 + group1[i as usize]
+        i = i + 1
+    }
+    i = 0
+    while i < n2 {
+        sum2 = sum2 + group2[i as usize]
+        i = i + 1
+    }
+
+    let mean1 = sum1 / (n1 as f64)
+    let mean2 = sum2 / (n2 as f64)
+    let diff = mean1 - mean2
+
+    // Pooled standard deviation
+    var ss1 = 0.0
+    var ss2 = 0.0
+    i = 0
+    while i < n1 {
+        let d = group1[i as usize] - mean1
+        ss1 = ss1 + d * d
+        i = i + 1
+    }
+    i = 0
+    while i < n2 {
+        let d = group2[i as usize] - mean2
+        ss2 = ss2 + d * d
+        i = i + 1
+    }
+
+    let sp_squared = (ss1 + ss2) / ((n1 + n2 - 2) as f64)
+    let sp = sqrt(sp_squared)
+
+    // Standard error
+    let se = sp * sqrt(1.0 / (n1 as f64) + 1.0 / (n2 as f64))
+
+    // t-statistic
+    if se > 1e-10 { diff / se } else { 0.0 }
+}
+
+// Bootstrap variance on t-statistic
+fn bootstrap_ttest_variance(
+    group1: [f64; 100],
+    n1: i64,
+    group2: [f64; 100],
+    n2: i64,
+    n_bootstrap: i64,
+    seed: i64
+) -> f64 {
+    var rng = rng_new(seed)
+
+    // Original t-statistic
+    let t_original = compute_t_statistic(group1, n1, group2, n2)
+
+    // Bootstrap t-statistics
+    var t_boot: [f64; 1000] = [0.0; 1000]  // Max 1000 bootstrap samples
+
+    var b: i64 = 0
+    while b < n_bootstrap && b < 1000 {
+        // Resample each group
+        let boot1 = bootstrap_resample(group1, n1, &rng)
+        let boot2 = bootstrap_resample(group2, n2, &rng)
+
+        // Compute bootstrap t-statistic
+        let t_b = compute_t_statistic(boot1, n1, boot2, n2)
+        t_boot[b as usize] = t_b
+
+        b = b + 1
+    }
+
+    // Variance of bootstrap t-statistics
+    var sum = 0.0
+    b = 0
+    while b < n_bootstrap && b < 1000 {
+        sum = sum + t_boot[b as usize]
+        b = b + 1
+    }
+    let mean_t = sum / (n_bootstrap as f64)
+
+    var sum_sq = 0.0
+    b = 0
+    while b < n_bootstrap && b < 1000 {
+        let diff = t_boot[b as usize] - mean_t
+        sum_sq = sum_sq + diff * diff
+        b = b + 1
+    }
+
+    sum_sq / ((n_bootstrap - 1) as f64)
+}
+
+// ============================================================================
+// BOOTSTRAP CONFIDENCE INTERVALS
+// ============================================================================
+
+// Sort for percentile method
+fn sort_bootstrap(data: &![f64; 1000], n: i64) {
+    var i: i64 = 0
+    while i < n - 1 {
+        var j: i64 = 0
+        while j < n - i - 1 {
+            if data[j as usize] > data[(j + 1) as usize] {
+                let temp = data[j as usize]
+                data[j as usize] = data[(j + 1) as usize]
+                data[(j + 1) as usize] = temp
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// Percentile bootstrap CI
+struct BootstrapCI {
+    lower: f64,
+    upper: f64,
+    se_bootstrap: f64
+}
+
+fn bootstrap_mean_ci(
+    data: [f64; 100],
+    n: i64,
+    n_bootstrap: i64,
+    alpha: f64,  // e.g., 0.05 for 95% CI
+    seed: i64
+) -> BootstrapCI {
+    var rng = rng_new(seed)
+
+    // Bootstrap means
+    var boot_means: [f64; 1000] = [0.0; 1000]
+
+    var b: i64 = 0
+    while b < n_bootstrap && b < 1000 {
+        let boot_sample = bootstrap_resample(data, n, &rng)
+
+        // Compute mean
+        var sum = 0.0
+        var i: i64 = 0
+        while i < n {
+            sum = sum + boot_sample[i as usize]
+            i = i + 1
+        }
+        boot_means[b as usize] = sum / (n as f64)
+
+        b = b + 1
+    }
+
+    // Sort for percentile method
+    sort_bootstrap(&boot_means, n_bootstrap)
+
+    // Percentile indices
+    let lower_idx = ((alpha / 2.0) * (n_bootstrap as f64)) as i64
+    let upper_idx = ((1.0 - alpha / 2.0) * (n_bootstrap as f64)) as i64
+
+    let lower_bound = boot_means[lower_idx as usize]
+    let upper_bound = boot_means[upper_idx as usize]
+
+    // Bootstrap SE
+    var sum_means = 0.0
+    b = 0
+    while b < n_bootstrap {
+        sum_means = sum_means + boot_means[b as usize]
+        b = b + 1
+    }
+    let mean_of_means = sum_means / (n_bootstrap as f64)
+
+    var sum_sq = 0.0
+    b = 0
+    while b < n_bootstrap {
+        let diff = boot_means[b as usize] - mean_of_means
+        sum_sq = sum_sq + diff * diff
+        b = b + 1
+    }
+    let se_boot = sqrt(sum_sq / ((n_bootstrap - 1) as f64))
+
+    BootstrapCI {
+        lower: lower_bound,
+        upper: upper_bound,
+        se_bootstrap: se_boot
+    }
+}
+
+// ============================================================================
+// BOOTSTRAP FOR CORRELATION
+// ============================================================================
+
+fn bootstrap_correlation_variance(
+    x: [f64; 100],
+    y: [f64; 100],
+    n: i64,
+    n_bootstrap: i64,
+    seed: i64
+) -> f64 {
+    var rng = rng_new(seed)
+
+    // Bootstrap correlations
+    var r_boot: [f64; 1000] = [0.0; 1000]
+
+    var b: i64 = 0
+    while b < n_bootstrap && b < 1000 {
+        // Resample pairs (xᵢ, yᵢ)
+        var boot_x: [f64; 100] = [0.0; 100]
+        var boot_y: [f64; 100] = [0.0; 100]
+
+        var i: i64 = 0
+        while i < n {
+            let idx = rng.rng_next_range(n)
+            boot_x[i as usize] = x[idx as usize]
+            boot_y[i as usize] = y[idx as usize]
+            i = i + 1
+        }
+
+        // Compute correlation
+        var sum_x = 0.0
+        var sum_y = 0.0
+        i = 0
+        while i < n {
+            sum_x = sum_x + boot_x[i as usize]
+            sum_y = sum_y + boot_y[i as usize]
+            i = i + 1
+        }
+        let mean_x = sum_x / (n as f64)
+        let mean_y = sum_y / (n as f64)
+
+        var cov = 0.0
+        var var_x = 0.0
+        var var_y = 0.0
+        i = 0
+        while i < n {
+            let dx = boot_x[i as usize] - mean_x
+            let dy = boot_y[i as usize] - mean_y
+            cov = cov + dx * dy
+            var_x = var_x + dx * dx
+            var_y = var_y + dy * dy
+            i = i + 1
+        }
+
+        let denom = sqrt(var_x * var_y)
+        let r = if denom > 1e-10 { cov / denom } else { 0.0 }
+
+        r_boot[b as usize] = r
+        b = b + 1
+    }
+
+    // Variance of bootstrap correlations
+    var sum_r = 0.0
+    b = 0
+    while b < n_bootstrap {
+        sum_r = sum_r + r_boot[b as usize]
+        b = b + 1
+    }
+    let mean_r = sum_r / (n_bootstrap as f64)
+
+    var sum_sq = 0.0
+    b = 0
+    while b < n_bootstrap {
+        let diff = r_boot[b as usize] - mean_r
+        sum_sq = sum_sq + diff * diff
+        b = b + 1
+    }
+
+    sum_sq / ((n_bootstrap - 1) as f64)
+}
+
+// ============================================================================
+// BOOTSTRAP FOR REGRESSION COEFFICIENTS
+// ============================================================================
+
+fn bootstrap_regression_variance(
+    x: [f64; 100],
+    y: [f64; 100],
+    n: i64,
+    n_bootstrap: i64,
+    seed: i64
+) -> (f64, f64) {  // (var_beta0, var_beta1)
+    var rng = rng_new(seed)
+
+    var beta0_boot: [f64; 1000] = [0.0; 1000]
+    var beta1_boot: [f64; 1000] = [0.0; 1000]
+
+    var b: i64 = 0
+    while b < n_bootstrap && b < 1000 {
+        // Resample pairs
+        var boot_x: [f64; 100] = [0.0; 100]
+        var boot_y: [f64; 100] = [0.0; 100]
+
+        var i: i64 = 0
+        while i < n {
+            let idx = rng.rng_next_range(n)
+            boot_x[i as usize] = x[idx as usize]
+            boot_y[i as usize] = y[idx as usize]
+            i = i + 1
+        }
+
+        // Fit regression: β₁ = Cov(x,y)/Var(x), β₀ = ȳ - β₁x̄
+        var sum_x = 0.0
+        var sum_y = 0.0
+        i = 0
+        while i < n {
+            sum_x = sum_x + boot_x[i as usize]
+            sum_y = sum_y + boot_y[i as usize]
+            i = i + 1
+        }
+        let mean_x = sum_x / (n as f64)
+        let mean_y = sum_y / (n as f64)
+
+        var cov = 0.0
+        var var_x = 0.0
+        i = 0
+        while i < n {
+            let dx = boot_x[i as usize] - mean_x
+            let dy = boot_y[i as usize] - mean_y
+            cov = cov + dx * dy
+            var_x = var_x + dx * dx
+            i = i + 1
+        }
+
+        let b1 = if var_x > 1e-10 { cov / var_x } else { 0.0 }
+        let b0 = mean_y - b1 * mean_x
+
+        beta0_boot[b as usize] = b0
+        beta1_boot[b as usize] = b1
+
+        b = b + 1
+    }
+
+    // Variance of bootstrap coefficients
+    var sum_b0 = 0.0
+    var sum_b1 = 0.0
+    b = 0
+    while b < n_bootstrap {
+        sum_b0 = sum_b0 + beta0_boot[b as usize]
+        sum_b1 = sum_b1 + beta1_boot[b as usize]
+        b = b + 1
+    }
+    let mean_b0 = sum_b0 / (n_bootstrap as f64)
+    let mean_b1 = sum_b1 / (n_bootstrap as f64)
+
+    var var_b0 = 0.0
+    var var_b1 = 0.0
+    b = 0
+    while b < n_bootstrap {
+        let diff0 = beta0_boot[b as usize] - mean_b0
+        let diff1 = beta1_boot[b as usize] - mean_b1
+        var_b0 = var_b0 + diff0 * diff0
+        var_b1 = var_b1 + diff1 * diff1
+        b = b + 1
+    }
+
+    var_b0 = var_b0 / ((n_bootstrap - 1) as f64)
+    var_b1 = var_b1 / ((n_bootstrap - 1) as f64)
+
+    (var_b0, var_b1)
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn test_bootstrap_mean_ci() -> bool {
+    // Simple data
+    var data: [f64; 100] = [10.0, 12.0, 11.0, 13.0, 11.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+    let ci = bootstrap_mean_ci(data, 5, 100, 0.05, 42)
+
+    // CI should contain true mean (≈11.4)
+    ci.lower < 11.4 && ci.upper > 11.4
+}
+
+fn test_bootstrap_ttest_variance() -> bool {
+    var g1: [f64; 100] = [10.0, 12.0, 11.0, 13.0, 11.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var g2: [f64; 100] = [8.0, 9.0, 7.0, 10.0, 8.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+    let var_t = bootstrap_ttest_variance(g1, 5, g2, 5, 100, 42)
+
+    // Variance should be positive
+    var_t > 0.0
+}

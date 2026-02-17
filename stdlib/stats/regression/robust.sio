@@ -1,0 +1,502 @@
+// stats::regression::robust — Robust Regression with M-Estimators
+//
+// Outlier-resistant regression using:
+// - Huber M-estimator (ψ = min(|r|, k))
+// - Tukey bisquare M-estimator (fully redescending)
+// - Iteratively Reweighted Least Squares (IRLS)
+// - Breakdown point analysis
+//
+// Returns Knowledge<RobustModel> with confidence and diagnostics
+//
+// References:
+// - Huber (1964): "Robust estimation of a location parameter"
+// - Tukey (1977): "Exploratory Data Analysis" (bisquare)
+// - Maronna et al. (2019): "Robust Statistics: Theory and Methods"
+// - Rousseeuw & Leroy (1987): "Robust Regression and Outlier Detection"
+
+// =============================================================================
+// Math Helpers
+// =============================================================================
+
+fn rob_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn rob_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 25 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn rob_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+fn rob_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+fn rob_sign(x: f64) -> f64 {
+    if x > 0.0 { 1.0 }
+    else if x < 0.0 { -1.0 }
+    else { 0.0 }
+}
+
+// =============================================================================
+// Types
+// =============================================================================
+
+struct RobustModel {
+    coefficients: [f64; 10],
+    std_errors: [f64; 10],
+    n_predictors: i64,
+    n_obs: i64,
+    residual_scale: f64,       // Robust scale (MAD-based)
+    weights: [f64; 100],       // IRLS weights (low for outliers)
+    n_outliers: i64,           // Observations with weight < 0.01
+    n_iterations: i64,
+    converged: bool,
+    breakdown_point: f64       // Fraction of contamination tolerable
+}
+
+struct BetaConfidence {
+    alpha: f64,
+    beta: f64
+}
+
+fn beta_new(alpha: f64, beta: f64) -> BetaConfidence {
+    BetaConfidence { alpha: alpha, beta: beta }
+}
+
+fn beta_mean(b: &BetaConfidence) -> f64 {
+    b.alpha / (b.alpha + b.beta)
+}
+
+fn beta_combine(b1: &BetaConfidence, b2: &BetaConfidence) -> BetaConfidence {
+    BetaConfidence {
+        alpha: b1.alpha + b2.alpha - 1.0,
+        beta: b1.beta + b2.beta - 1.0
+    }
+}
+
+struct RobustDiagnostics {
+    outlier_fraction: f64,
+    scale_estimate: f64,    // MAD
+    efficiency: f64,         // Asymptotic efficiency relative to OLS
+    convergence_conf: BetaConfidence,
+    outlier_impact_conf: BetaConfidence
+}
+
+struct RobustProvenance {
+    method: String,  // "Huber", "TukeyBisquare"
+    tuning_constant: f64,
+    n_obs: i64,
+    n_outliers: i64,
+    n_iterations: i64,
+    diagnostics: RobustDiagnostics
+}
+
+struct KnowledgeRobust {
+    value: RobustModel,
+    variance: f64,
+    confidence: BetaConfidence,
+    provenance: RobustProvenance
+}
+
+// =============================================================================
+// Robust Scale Estimation: MAD (Median Absolute Deviation)
+// =============================================================================
+
+fn median(data: [f64; 100], n: i64) -> f64 with Mut {
+    // Copy and sort
+    var sorted: [f64; 100] = [0.0; 100]
+    var i: i64 = 0
+    while i < n {
+        sorted[i as usize] = data[i as usize]
+        i = i + 1
+    }
+
+    // Bubble sort (small n)
+    i = 0
+    while i < n - 1 {
+        var j: i64 = 0
+        while j < n - i - 1 {
+            if sorted[j as usize] > sorted[(j + 1) as usize] {
+                let temp = sorted[j as usize]
+                sorted[j as usize] = sorted[(j + 1) as usize]
+                sorted[(j + 1) as usize] = temp
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    if n % 2 == 1 {
+        sorted[(n / 2) as usize]
+    } else {
+        (sorted[(n / 2 - 1) as usize] + sorted[(n / 2) as usize]) / 2.0
+    }
+}
+
+fn mad(data: [f64; 100], n: i64) -> f64 with Mut {
+    // MAD = median(|xᵢ - median(x)|) * 1.4826
+    // Factor 1.4826 makes MAD consistent estimator for σ at normal
+
+    let med = median(data, n)
+
+    var abs_dev: [f64; 100] = [0.0; 100]
+    var i: i64 = 0
+    while i < n {
+        abs_dev[i as usize] = rob_abs(data[i as usize] - med)
+        i = i + 1
+    }
+
+    let mad_raw = median(abs_dev, n)
+    mad_raw * 1.4826
+}
+
+// =============================================================================
+// Influence Functions (ψ)
+// =============================================================================
+
+// Huber ψ: ψ(r) = max(-k, min(k, r))
+fn huber_psi(r: f64, k: f64) -> f64 {
+    rob_max(-k, rob_min(k, r))
+}
+
+// Huber weight: w(r) = min(1, k/|r|)
+fn huber_weight(r: f64, k: f64) -> f64 with Div {
+    let abs_r = rob_abs(r)
+    if abs_r < 1.0e-10 { return 1.0 }
+    rob_min(1.0, k / abs_r)
+}
+
+// Tukey bisquare ψ: ψ(r) = r(1 - (r/c)²)² if |r| ≤ c, else 0
+fn tukey_psi(r: f64, c: f64) -> f64 {
+    if rob_abs(r) > c { return 0.0 }
+    let u = r / c
+    r * (1.0 - u * u) * (1.0 - u * u)
+}
+
+// Tukey bisquare weight: w(r) = (1 - (r/c)²)² if |r| ≤ c, else 0
+fn tukey_weight(r: f64, c: f64) -> f64 {
+    if rob_abs(r) > c { return 0.0 }
+    let u = r / c
+    (1.0 - u * u) * (1.0 - u * u)
+}
+
+// =============================================================================
+// IRLS for Robust Regression
+// =============================================================================
+
+fn mean_arr(data: [f64; 100], n: i64) -> f64 with Mut, Div {
+    var sum = 0.0
+    var i: i64 = 0
+    while i < n { sum = sum + data[i as usize]; i = i + 1 }
+    sum / (n as f64)
+}
+
+fn fit_robust_simple(
+    x: [f64; 100],
+    y: [f64; 100],
+    n: i64,
+    method: String,    // "huber" or "tukey"
+    tuning: f64        // k=1.345 for Huber, c=4.685 for Tukey
+) -> RobustModel with Mut, Div, Panic {
+    let max_iter = 50
+    let tol = 1.0e-6
+
+    // Initial OLS fit
+    let x_mean = mean_arr(x, n)
+    let y_mean = mean_arr(y, n)
+
+    var cov = 0.0
+    var var_x = 0.0
+    var i: i64 = 0
+    while i < n {
+        let dx = x[i as usize] - x_mean
+        let dy = y[i as usize] - y_mean
+        cov = cov + dx * dy
+        var_x = var_x + dx * dx
+        i = i + 1
+    }
+
+    var beta1 = if var_x > 1.0e-10 { cov / var_x } else { 0.0 }
+    var beta0 = y_mean - beta1 * x_mean
+
+    var weights: [f64; 100] = [1.0; 100]
+    var residuals: [f64; 100] = [0.0; 100]
+
+    // IRLS iterations
+    var converged = false
+    var iter: i64 = 0
+
+    while iter < max_iter {
+        // Compute residuals
+        i = 0
+        while i < n {
+            residuals[i as usize] = y[i as usize] - beta0 - beta1 * x[i as usize]
+            i = i + 1
+        }
+
+        // Robust scale estimate (MAD of residuals)
+        let scale = rob_max(mad(residuals, n), 1.0e-10)
+
+        // Compute weights based on standardized residuals
+        i = 0
+        while i < n {
+            let r_std = residuals[i as usize] / scale
+            if method == "huber" {
+                weights[i as usize] = huber_weight(r_std, tuning)
+            } else {
+                weights[i as usize] = tukey_weight(r_std, tuning)
+            }
+            i = i + 1
+        }
+
+        // Weighted least squares
+        var sum_w = 0.0
+        var sum_wx = 0.0
+        var sum_wy = 0.0
+        var sum_wxx = 0.0
+        var sum_wxy = 0.0
+
+        i = 0
+        while i < n {
+            let w = weights[i as usize]
+            let xi = x[i as usize]
+            let yi = y[i as usize]
+            sum_w = sum_w + w
+            sum_wx = sum_wx + w * xi
+            sum_wy = sum_wy + w * yi
+            sum_wxx = sum_wxx + w * xi * xi
+            sum_wxy = sum_wxy + w * xi * yi
+            i = i + 1
+        }
+
+        let det = sum_w * sum_wxx - sum_wx * sum_wx
+        if rob_abs(det) < 1.0e-10 { break }
+
+        let new_beta0 = (sum_wxx * sum_wy - sum_wx * sum_wxy) / det
+        let new_beta1 = (sum_w * sum_wxy - sum_wx * sum_wy) / det
+
+        // Convergence check
+        let delta0 = rob_abs(new_beta0 - beta0)
+        let delta1 = rob_abs(new_beta1 - beta1)
+
+        beta0 = new_beta0
+        beta1 = new_beta1
+
+        if delta0 < tol && delta1 < tol {
+            converged = true
+            break
+        }
+
+        iter = iter + 1
+    }
+
+    // Final residuals and scale
+    i = 0
+    while i < n {
+        residuals[i as usize] = y[i as usize] - beta0 - beta1 * x[i as usize]
+        i = i + 1
+    }
+    let final_scale = mad(residuals, n)
+
+    // Count outliers (weight < 0.01)
+    var n_outliers: i64 = 0
+    i = 0
+    while i < n {
+        if weights[i as usize] < 0.01 { n_outliers = n_outliers + 1 }
+        i = i + 1
+    }
+
+    // SE from weighted regression
+    var sum_w = 0.0
+    var sum_wxx = 0.0
+    var sum_wx = 0.0
+    i = 0
+    while i < n {
+        let w = weights[i as usize]
+        sum_w = sum_w + w
+        sum_wx = sum_wx + w * x[i as usize]
+        sum_wxx = sum_wxx + w * x[i as usize] * x[i as usize]
+        i = i + 1
+    }
+    let det = sum_w * sum_wxx - sum_wx * sum_wx
+    let se_beta0 = if rob_abs(det) > 1.0e-10 {
+        rob_sqrt(final_scale * final_scale * sum_wxx / det)
+    } else { 0.0 }
+    let se_beta1 = if rob_abs(det) > 1.0e-10 {
+        rob_sqrt(final_scale * final_scale * sum_w / det)
+    } else { 0.0 }
+
+    // Breakdown point
+    let breakdown = if method == "tukey" { 0.50 } else { 0.0 }  // Huber: 0, Tukey: up to 50%
+
+    var coefficients: [f64; 10] = [0.0; 10]
+    coefficients[0] = beta0
+    coefficients[1] = beta1
+
+    var std_errors: [f64; 10] = [0.0; 10]
+    std_errors[0] = se_beta0
+    std_errors[1] = se_beta1
+
+    RobustModel {
+        coefficients: coefficients,
+        std_errors: std_errors,
+        n_predictors: 1,
+        n_obs: n,
+        residual_scale: final_scale,
+        weights: weights,
+        n_outliers: n_outliers,
+        n_iterations: iter,
+        converged: converged,
+        breakdown_point: breakdown
+    }
+}
+
+// =============================================================================
+// Epistemic Robust Regression
+// =============================================================================
+
+fn fit_huber_epistemic(
+    x: [f64; 100],
+    y: [f64; 100],
+    n: i64
+) -> KnowledgeRobust with Mut, Div, Panic {
+    // Huber with k = 1.345 (95% efficiency at normal)
+    fit_robust_epistemic(x, y, n, "huber", 1.345)
+}
+
+fn fit_tukey_epistemic(
+    x: [f64; 100],
+    y: [f64; 100],
+    n: i64
+) -> KnowledgeRobust with Mut, Div, Panic {
+    // Tukey bisquare with c = 4.685 (95% efficiency at normal)
+    fit_robust_epistemic(x, y, n, "tukey", 4.685)
+}
+
+fn fit_robust_epistemic(
+    x: [f64; 100],
+    y: [f64; 100],
+    n: i64,
+    method: String,
+    tuning: f64
+) -> KnowledgeRobust with Mut, Div, Panic {
+    let model = fit_robust_simple(x, y, n, method, tuning)
+
+    // Compute diagnostics
+    let outlier_frac = (model.n_outliers as f64) / (n as f64)
+    let efficiency = if method == "huber" { 0.95 } else { 0.95 }
+
+    // Confidence: higher if few outliers, converged, enough data
+    let conv_conf = if model.converged { 0.90 } else { 0.50 }
+    let conv_beta = beta_new(conv_conf * (n as f64) * 0.3, (1.0 - conv_conf) * (n as f64) * 0.3)
+
+    let outlier_conf = if outlier_frac < 0.10 { 0.90 }
+                       else if outlier_frac < 0.20 { 0.75 }
+                       else if outlier_frac < 0.30 { 0.60 }
+                       else { 0.40 }
+    let outlier_beta = beta_new(outlier_conf * (n as f64) * 0.3, (1.0 - outlier_conf) * (n as f64) * 0.3)
+
+    let overall_conf = beta_combine(&conv_beta, &outlier_beta)
+
+    let diag = RobustDiagnostics {
+        outlier_fraction: outlier_frac,
+        scale_estimate: model.residual_scale,
+        efficiency: efficiency,
+        convergence_conf: conv_beta,
+        outlier_impact_conf: outlier_beta
+    }
+
+    let prov = RobustProvenance {
+        method: method,
+        tuning_constant: tuning,
+        n_obs: n,
+        n_outliers: model.n_outliers,
+        n_iterations: model.n_iterations,
+        diagnostics: diag
+    }
+
+    KnowledgeRobust {
+        value: model,
+        variance: model.std_errors[1] * model.std_errors[1],
+        confidence: overall_conf,
+        provenance: prov
+    }
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+fn test_huber_with_outliers() -> bool with Mut, Div, Panic {
+    // y = 2 + 3x with outliers
+    var x: [f64; 100] = [0.0; 100]
+    var y: [f64; 100] = [0.0; 100]
+
+    // Clean data: y = 2 + 3x
+    x[0] = 0.0;  y[0] = 2.0
+    x[1] = 1.0;  y[1] = 5.0
+    x[2] = 2.0;  y[2] = 8.0
+    x[3] = 3.0;  y[3] = 11.0
+    x[4] = 4.0;  y[4] = 14.0
+    x[5] = 5.0;  y[5] = 17.0
+    x[6] = 6.0;  y[6] = 20.0
+    x[7] = 7.0;  y[7] = 23.0
+
+    // Outliers
+    x[8] = 3.0;  y[8] = 50.0   // Outlier!
+    x[9] = 5.0;  y[9] = -10.0  // Outlier!
+
+    let result = fit_huber_epistemic(x, y, 10)
+
+    // Slope should be close to 3.0 despite outliers
+    let slope = result.value.coefficients[1]
+    let slope_ok = rob_abs(slope - 3.0) < 1.5  // Within 1.5 of true slope
+
+    // Should detect outliers
+    let outliers_detected = result.value.n_outliers > 0
+
+    slope_ok && outliers_detected
+}
+
+fn test_tukey_with_outliers() -> bool with Mut, Div, Panic {
+    var x: [f64; 100] = [0.0; 100]
+    var y: [f64; 100] = [0.0; 100]
+
+    x[0] = 0.0;  y[0] = 2.0
+    x[1] = 1.0;  y[1] = 5.0
+    x[2] = 2.0;  y[2] = 8.0
+    x[3] = 3.0;  y[3] = 11.0
+    x[4] = 4.0;  y[4] = 14.0
+    x[5] = 5.0;  y[5] = 17.0
+    x[6] = 6.0;  y[6] = 20.0
+    x[7] = 7.0;  y[7] = 23.0
+    x[8] = 3.0;  y[8] = 50.0
+    x[9] = 5.0;  y[9] = -10.0
+
+    let result = fit_tukey_epistemic(x, y, 10)
+
+    // Tukey bisquare should be even more resistant
+    let slope = result.value.coefficients[1]
+    let slope_ok = rob_abs(slope - 3.0) < 1.5
+
+    // Tukey gives zero weight to extreme outliers
+    let outliers_zero_weight = result.value.n_outliers >= 2
+
+    slope_ok && outliers_zero_weight
+}
+
+fn test_mad() -> bool with Mut {
+    var data: [f64; 100] = [0.0; 100]
+    data[0] = 1.0
+    data[1] = 2.0
+    data[2] = 3.0
+    data[3] = 4.0
+    data[4] = 5.0
+
+    let m = mad(data, 5)
+
+    // MAD of {1,2,3,4,5}: deviations from median (3) = {2,1,0,1,2}
+    // Median of deviations = 1
+    // MAD = 1.4826 * 1 ≈ 1.4826
+    rob_abs(m - 1.4826) < 0.01
+}
