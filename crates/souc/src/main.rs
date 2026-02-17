@@ -1698,8 +1698,10 @@ fn main() -> Result<()> {
                 #[cfg(not(feature = "glm"))]
                 eprintln!("Warning: --glm-enabled requires --features glm");
             }
-            // If native backend, use new CLI integration
-            if backend == sounio::cli::backend::Backend::Native {
+            // If native or cranelift backend, use new CLI integration
+            if backend == sounio::cli::backend::Backend::Native
+                || backend == sounio::cli::backend::Backend::Cranelift
+            {
                 // Build args from command line
                 let build_args = sounio::cli::backend::BuildArgs {
                     input: vec![input],
@@ -3310,10 +3312,15 @@ fn jit_run(
         let ast = sounio::module_loader::load_program_ast(input)?;
         let hir = sounio::check::check_ast(&ast)?;
         let hlir = sounio::hlir::lower(&hir);
-        let main_returns_value = hlir
-            .find_function("main")
+        let main_func = hlir.find_function("main");
+        let main_returns_value = main_func
+            .as_ref()
             .map(|func| !matches!(func.return_type, sounio::hlir::HlirType::Void))
             .unwrap_or(true);
+        let main_returns_f64 = main_func
+            .as_ref()
+            .map(|func| matches!(func.return_type, sounio::hlir::HlirType::F64 | sounio::hlir::HlirType::F32))
+            .unwrap_or(false);
 
         if use_mir {
             let jit = if optimize {
@@ -3334,7 +3341,11 @@ fn jit_run(
                 .compile_hlir_via_mir(&hlir)
                 .map_err(|e| miette::miette!("JIT error: {}", e))?;
 
-            if main_returns_value {
+            if main_returns_f64 {
+                let result = unsafe { compiled.call_f64("main") }
+                    .map_err(|e| miette::miette!("JIT error: {}", e))?;
+                println!("{}", result);
+            } else if main_returns_value {
                 let result = unsafe { compiled.call_i64("main") }
                     .map_err(|e| miette::miette!("JIT error: {}", e))?;
                 println!("{}", result);
@@ -3356,7 +3367,11 @@ fn jit_run(
             .compile(&hlir)
             .map_err(|e| miette::miette!("JIT error: {}", e))?;
 
-        if main_returns_value {
+        if main_returns_f64 {
+            let result = unsafe { compiled.call_f64("main") }
+                .map_err(|e| miette::miette!("JIT error: {}", e))?;
+            println!("{}", result);
+        } else if main_returns_value {
             let result = unsafe { compiled.call_i64("main") }
                 .map_err(|e| miette::miette!("JIT error: {}", e))?;
             println!("{}", result);

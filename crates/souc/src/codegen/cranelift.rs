@@ -2007,7 +2007,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 #[cfg(feature = "jit")]
 use cranelift_jit::{JITBuilder, JITModule};
 #[cfg(feature = "jit")]
-use cranelift_module::{FuncId, Linkage, Module};
+use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
 
 /// Compile HLIR module to native code via Cranelift JIT
 #[cfg(feature = "jit")]
@@ -2158,6 +2158,19 @@ impl CompiledModule {
         self.run_on_thread(move || func())
     }
 
+    /// Call a function with no arguments returning f64
+    ///
+    /// # Safety
+    /// The caller must ensure the function signature matches.
+    pub unsafe fn call_f64(&self, name: &str) -> Result<f64, String> {
+        let ptr = self
+            .get_function(name)
+            .ok_or_else(|| format!("Function not found: {}", name))?;
+
+        let func: extern "C" fn() -> f64 = unsafe { std::mem::transmute(ptr) };
+        self.run_on_thread(move || func())
+    }
+
     /// Call a function with one i64 argument returning i64
     ///
     /// # Safety
@@ -2287,6 +2300,8 @@ struct AotCompiler {
     isa: std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>,
     /// Type definitions for calculating struct sizes
     type_defs: Vec<crate::hlir::HlirTypeDef>,
+    /// Map from string content to DataId for AOT string constants
+    string_data_ids: HashMap<String, DataId>,
 }
 
 #[cfg(feature = "jit")]
@@ -2308,7 +2323,46 @@ impl AotCompiler {
             variadic_funcs: HashMap::new(),
             isa,
             type_defs: Vec::new(),
+            string_data_ids: HashMap::new(),
         })
+    }
+
+    /// Collect all string constants from the HLIR module and declare them as
+    /// data objects in the ObjectModule. This is required for AOT compilation
+    /// where JIT heap pointers are invalid at runtime.
+    fn declare_string_constants(&mut self, module: &HlirModule) -> Result<(), String> {
+        let mut str_counter = 0usize;
+        for func in &module.functions {
+            for block in &func.blocks {
+                for instr in &block.instructions {
+                    let strings_to_declare: Vec<String> = match &instr.op {
+                        Op::Const(HlirConstant::String(s)) => vec![s.clone()],
+                        Op::Const(HlirConstant::CString(s)) => vec![s.clone()],
+                        _ => vec![],
+                    };
+                    for s in strings_to_declare {
+                        if self.string_data_ids.contains_key(&s) {
+                            continue;
+                        }
+                        let name = format!(".str.{}", str_counter);
+                        str_counter += 1;
+                        let data_id = self
+                            .obj_module
+                            .declare_data(&name, Linkage::Local, false, false)
+                            .map_err(|e| format!("Failed to declare string data: {}", e))?;
+                        let mut desc = DataDescription::new();
+                        let mut bytes = s.as_bytes().to_vec();
+                        bytes.push(0); // null-terminate
+                        desc.define(bytes.into_boxed_slice());
+                        self.obj_module
+                            .define_data(data_id, &desc)
+                            .map_err(|e| format!("Failed to define string data: {}", e))?;
+                        self.string_data_ids.insert(s, data_id);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn compile_module(&mut self, module: &HlirModule) -> Result<(), String> {
@@ -2317,6 +2371,9 @@ impl AotCompiler {
 
         // Declare runtime functions first
         self.declare_runtime_functions()?;
+
+        // Declare all string constants as data objects (AOT requires this)
+        self.declare_string_constants(module)?;
 
         // First pass: declare all user functions
         for func in &module.functions {
@@ -2472,9 +2529,19 @@ impl AotCompiler {
                     .get(name)
                     .cloned()
                     .expect("function signature must exist for declared function");
-                let sig_ref = builder.import_signature(sig);
+                let _sig_ref = builder.import_signature(sig);
                 let func_ref = self.obj_module.declare_func_in_func(id, builder.func);
                 func_refs.insert(name.clone(), func_ref);
+            }
+
+            // Declare string data objects in this function (AOT: relocatable references)
+            let mut string_globals: HashMap<String, cranelift_codegen::ir::GlobalValue> =
+                HashMap::new();
+            for (s, &data_id) in &self.string_data_ids {
+                let gv = self
+                    .obj_module
+                    .declare_data_in_func(data_id, builder.func);
+                string_globals.insert(s.clone(), gv);
             }
 
             // Translate the function body
@@ -2485,6 +2552,7 @@ impl AotCompiler {
                 &self.variadic_funcs,
                 &self.func_sigs,
                 &self.type_defs,
+                Some(&string_globals),
             )?;
 
             builder.finalize();
@@ -3771,6 +3839,7 @@ impl JitCompiler {
                 &self.variadic_funcs,
                 &self.func_sigs,
                 &self.type_defs,
+                None, // JIT: strings use STRING_STORAGE heap pointers
             )?;
             builder.finalize();
         }
@@ -3863,6 +3932,9 @@ fn hlir_to_cranelift_type(ty: &HlirType) -> types::Type {
 }
 
 /// Translate an entire HLIR function to Cranelift IR
+///
+/// `string_globals`: For AOT compilation, a map from string content to GlobalValue
+/// references in the data section. `None` for JIT (uses STRING_STORAGE heap pointers).
 #[cfg(feature = "jit")]
 fn translate_function(
     builder: &mut FunctionBuilder,
@@ -3871,6 +3943,7 @@ fn translate_function(
     variadic_funcs: &HashMap<String, usize>,
     func_sigs: &HashMap<String, Signature>,
     type_defs: &[crate::hlir::HlirTypeDef],
+    string_globals: Option<&HashMap<String, cranelift_codegen::ir::GlobalValue>>,
 ) -> Result<(), String> {
     let mut values: HashMap<ValueId, cranelift_codegen::ir::Value> = HashMap::new();
     let mut blocks: HashMap<BlockId, cranelift_codegen::ir::Block> = HashMap::new();
@@ -3910,6 +3983,7 @@ fn translate_function(
             func_sigs,
             type_defs,
             first,
+            string_globals,
         )?;
         first = false;
     }
@@ -3932,6 +4006,7 @@ fn translate_block(
     func_sigs: &HashMap<String, Signature>,
     type_defs: &[crate::hlir::HlirTypeDef],
     is_entry: bool,
+    string_globals: Option<&HashMap<String, cranelift_codegen::ir::GlobalValue>>,
 ) -> Result<(), String> {
     let cl_block = blocks[&block.id];
 
@@ -3951,6 +4026,7 @@ fn translate_block(
             variadic_funcs,
             func_sigs,
             type_defs,
+            string_globals,
         )?;
         if let (Some(res_id), Some(val)) = (instr.result, result) {
             values.insert(res_id, val);
@@ -3973,6 +4049,7 @@ fn translate_instruction(
     variadic_funcs: &HashMap<String, usize>,
     func_sigs: &HashMap<String, Signature>,
     type_defs: &[crate::hlir::HlirTypeDef],
+    string_globals: Option<&HashMap<String, cranelift_codegen::ir::GlobalValue>>,
 ) -> Result<Option<cranelift_codegen::ir::Value>, String> {
     let ty = hlir_to_cranelift_type(&instr.ty);
 
@@ -3984,7 +4061,7 @@ fn translate_instruction(
                     string_values.insert(result_id);
                 }
             }
-            let val = translate_constant(builder, constant, &instr.ty, func_refs)?;
+            let val = translate_constant(builder, constant, &instr.ty, func_refs, string_globals)?;
             Ok(Some(val))
         }
 
@@ -6507,6 +6584,7 @@ fn translate_constant(
     constant: &HlirConstant,
     ty: &HlirType,
     func_refs: &HashMap<String, cranelift_codegen::ir::FuncRef>,
+    string_globals: Option<&HashMap<String, cranelift_codegen::ir::GlobalValue>>,
 ) -> Result<cranelift_codegen::ir::Value, String> {
     let cl_ty = hlir_to_cranelift_type(ty);
 
@@ -6521,30 +6599,16 @@ fn translate_constant(
                 Ok(builder.ins().f64const(*f))
             }
         }
-        HlirConstant::String(s) => {
-            // Store the string in global storage so it survives during JIT execution
-            // Use CString for null-termination so runtime_print_cstr can use it
-            let cstring = std::ffi::CString::new(s.as_str())
-                .unwrap_or_else(|_| std::ffi::CString::new("").unwrap());
-
-            // Store in global storage to keep alive, then get pointer from stored CString
-            if let Ok(mut storage) = STRING_STORAGE.lock() {
-                storage.push(cstring);
-                // Get pointer from the stored CString (it's now at the end of the vec)
-                let stored_ptr =
-                    storage.last().expect("storage must have elements").as_ptr() as i64;
-                Ok(builder.ins().iconst(types::I64, stored_ptr))
-            } else {
-                // Fallback to null if lock fails
-                Ok(builder.ins().iconst(types::I64, 0))
+        HlirConstant::String(s) | HlirConstant::CString(s) => {
+            // AOT mode: use relocatable data section references
+            if let Some(globals) = string_globals {
+                if let Some(&gv) = globals.get(s) {
+                    return Ok(builder.ins().global_value(types::I64, gv));
+                }
             }
-        }
-        HlirConstant::CString(s) => {
-            // C string literal - already null-terminated, store for FFI use
+            // JIT mode: store string in heap (valid during JIT execution)
             let cstring = std::ffi::CString::new(s.as_str())
                 .unwrap_or_else(|_| std::ffi::CString::new("").unwrap());
-
-            // Store in global storage to keep alive
             if let Ok(mut storage) = STRING_STORAGE.lock() {
                 storage.push(cstring);
                 let stored_ptr =
