@@ -97,6 +97,21 @@ fn types_compatible(a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Al
         return types_compatible_inner(a.inner, b.inner)
     }
 
+    // Hyper types: algebra kind must match, inner compatible
+    // For Clifford: (p,q) signatures must also match
+    if a.kind == TypeKind::TyHyper && b.kind == TypeKind::TyHyper {
+        if a.algebra_kind != b.algebra_kind {
+            return false
+        }
+        // Clifford: check signature match
+        if a.algebra_kind == 5 {
+            if a.clifford_p != b.clifford_p || a.clifford_q != b.clifford_q {
+                return false
+            }
+        }
+        return types_compatible_inner(a.inner, b.inner)
+    }
+
     false
 }
 
@@ -167,6 +182,10 @@ fn is_error_or_unknown(ty: TypeEntry) -> bool {
     ty.kind == TypeKind::TyError || ty.kind == TypeKind::TyUnknown || ty.kind == TypeKind::TyNever
 }
 
+fn is_hyper_type(ty: TypeEntry) -> bool {
+    ty.kind == TypeKind::TyHyper
+}
+
 // ============================================================
 // Binary operator result types
 // ============================================================
@@ -187,6 +206,8 @@ fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> TypeEn
                 left
             } else if left.kind == TypeKind::TyString && right.kind == TypeKind::TyString {
                 ty_string()
+            } else if is_hyper_type(left) && is_hyper_type(right) {
+                hyper_binary_result_type(left, right)
             } else {
                 ty_error()
             }
@@ -194,6 +215,8 @@ fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> TypeEn
         OpSub => {
             if is_numeric_type(left) && types_compatible(left, right) {
                 left
+            } else if is_hyper_type(left) && is_hyper_type(right) {
+                hyper_binary_result_type(left, right)
             } else {
                 ty_error()
             }
@@ -201,6 +224,8 @@ fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> TypeEn
         OpMul => {
             if is_numeric_type(left) && types_compatible(left, right) {
                 left
+            } else if is_hyper_type(left) && is_hyper_type(right) {
+                hyper_binary_result_type(left, right)
             } else {
                 ty_error()
             }
@@ -208,6 +233,8 @@ fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> TypeEn
         OpDiv => {
             if is_numeric_type(left) && types_compatible(left, right) {
                 left
+            } else if is_hyper_type(left) && is_hyper_type(right) {
+                hyper_division_result_type(left, right)
             } else {
                 ty_error()
             }
@@ -370,6 +397,46 @@ fn unary_result_type(op: UnaryOp, operand: TypeEntry) -> TypeEntry with Alloc {
 }
 
 // ============================================================
+// Hypercomplex binary result types
+// ============================================================
+
+// Hyper binary result: both must be same algebra (or Cayley-Dickson widening)
+fn hyper_binary_result_type(left: TypeEntry, right: TypeEntry) -> TypeEntry with Alloc {
+    // Same algebra: result is same type
+    if left.algebra_kind == right.algebra_kind {
+        // Clifford: signatures must match
+        if left.algebra_kind == 5 {
+            if left.clifford_p != right.clifford_p || left.clifford_q != right.clifford_q {
+                return ty_error()  // E030: incompatible Clifford signatures
+            }
+        }
+        return left
+    }
+    // Cayley-Dickson tower widening: R < C < H < O < S
+    if left.algebra_kind <= 4 && right.algebra_kind <= 4 {
+        if left.algebra_kind > right.algebra_kind {
+            return left
+        }
+        return right
+    }
+    // Clifford + Cayley-Dickson or different Clifford: incompatible
+    ty_error()
+}
+
+// Division: only allowed for division algebras (R, C, H, O)
+fn hyper_division_result_type(left: TypeEntry, right: TypeEntry) -> TypeEntry with Alloc {
+    let result = hyper_binary_result_type(left, right)
+    if result.kind == TypeKind::TyError {
+        return result
+    }
+    // Division only valid for division algebras (Hurwitz: alg <= 3)
+    if result.algebra_kind > 3 {
+        return ty_error()  // E032: division on non-division algebra
+    }
+    result
+}
+
+// ============================================================
 // Name helpers for builtin type checking
 // ============================================================
 
@@ -391,6 +458,11 @@ fn compound_assign_to_binop(op: AssignOp) -> BinaryOp {
 // ============================================================
 // Name helpers for builtin type checking
 // ============================================================
+
+fn name_matches_str1(n: Name, a: i8) -> bool with Panic, Div {
+    if n.len != 1 { return false }
+    n.buf[0] == a
+}
 
 fn name_matches_str2(n: Name, a: i8, b: i8) -> bool with Panic, Div {
     if n.len != 2 { return false }
@@ -420,6 +492,21 @@ fn name_matches_str6(n: Name, a: i8, b: i8, c: i8, d: i8, e: i8, f: i8) -> bool 
 fn name_matches_str7(n: Name, a: i8, b: i8, c: i8, d: i8, e: i8, f: i8, g: i8) -> bool with Panic, Div {
     if n.len != 7 { return false }
     n.buf[0] == a && n.buf[1] == b && n.buf[2] == c && n.buf[3] == d && n.buf[4] == e && n.buf[5] == f && n.buf[6] == g
+}
+
+fn name_matches_str8(n: Name, a: i8, b: i8, c: i8, d: i8, e: i8, f: i8, g: i8, h: i8) -> bool with Panic, Div {
+    if n.len != 8 { return false }
+    n.buf[0] == a && n.buf[1] == b && n.buf[2] == c && n.buf[3] == d && n.buf[4] == e && n.buf[5] == f && n.buf[6] == g && n.buf[7] == h
+}
+
+fn name_matches_str9(n: Name, a: i8, b: i8, c: i8, d: i8, e: i8, f: i8, g: i8, h: i8, i: i8) -> bool with Panic, Div {
+    if n.len != 9 { return false }
+    n.buf[0] == a && n.buf[1] == b && n.buf[2] == c && n.buf[3] == d && n.buf[4] == e && n.buf[5] == f && n.buf[6] == g && n.buf[7] == h && n.buf[8] == i
+}
+
+fn name_matches_str10(n: Name, a: i8, b: i8, c: i8, d: i8, e: i8, f: i8, g: i8, h: i8, i: i8, j: i8) -> bool with Panic, Div {
+    if n.len != 10 { return false }
+    n.buf[0] == a && n.buf[1] == b && n.buf[2] == c && n.buf[3] == d && n.buf[4] == e && n.buf[5] == f && n.buf[6] == g && n.buf[7] == h && n.buf[8] == i && n.buf[9] == j
 }
 
 // "i8" = [105, 56]

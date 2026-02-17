@@ -105,6 +105,28 @@ fn print_type_name(ty: TypeEntry) with IO, Mut, Panic, Div, Alloc {
             }
             print(">")
         }
+        TyHyper => {
+            print("Hyper<")
+            if ty.algebra_kind == 0 { print("Real") }
+            else if ty.algebra_kind == 1 { print("Complex") }
+            else if ty.algebra_kind == 2 { print("Quaternion") }
+            else if ty.algebra_kind == 3 { print("Octonion") }
+            else if ty.algebra_kind == 4 { print("Sedenion") }
+            else if ty.algebra_kind == 5 {
+                print("Clifford(")
+                print_int(ty.clifford_p)
+                print(",")
+                print_int(ty.clifford_q)
+                print(")")
+            }
+            else { print("?") }
+            print(", ")
+            match ty.inner {
+                Some(inner) => print_type_name(*inner)
+                None => print("?")
+            }
+            print(">")
+        }
         TyNever => print("!")
         TyError => print("<error>")
         TyUnknown => print("<unknown>")
@@ -209,6 +231,11 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 20 { print("array element type mismatch") }
     else if code == 21 { print("compound assign type mismatch") }
     else if code == 22 { print("invalid epsilon bound (must be 0.0..1.0)") }
+    else if code == 30 { print("binary operation on incompatible Hyper algebras") }
+    else if code == 31 { print("missing Div effect for type with zero divisors") }
+    else if code == 32 { print("division on non-division algebra") }
+    else if code == 33 { print("Clifford embedding mismatch (different signatures)") }
+    else if code == 34 { print("Cayley-Dickson coercion direction error (no narrowing)") }
     else { print("unknown error") }
 }
 
@@ -1029,6 +1056,41 @@ impl Checker {
                 c = c.report_error_at(e.span, 12, 0, 0, 0)
                 (c, ty_error())
             }
+        } else if base_ty.kind == TypeKind::TyHyper {
+            // Hyper field access: delegates to hyper.sio predicates
+            // Complex: .real, .imag -> inner type
+            // Quaternion: .w, .x, .y, .z -> inner type
+            // Octonion: .e0.e7 -> inner type
+            let alg = base_ty.algebra_kind
+            let inner_ty = match base_ty.inner {
+                Some(inner) => *inner
+                None => ty_error()
+            }
+            // Complex fields
+            if alg == 1 {
+                // "real" = [114, 101, 97, 108], "imag" = [105, 109, 97, 103]
+                if name_matches_str4(e.name, 114, 101, 97, 108) { (c, inner_ty) }
+                else if name_matches_str4(e.name, 105, 109, 97, 103) { (c, inner_ty) }
+                else {
+                    c = c.report_error_at(e.span, 12, 0, 0, 0)
+                    (c, ty_error())
+                }
+            // Quaternion fields
+            } else if alg == 2 {
+                // .w .x .y .z (119, 120, 121, 122)
+                if name_matches_str1(e.name, 119) { (c, inner_ty) }
+                else if name_matches_str1(e.name, 120) { (c, inner_ty) }
+                else if name_matches_str1(e.name, 121) { (c, inner_ty) }
+                else if name_matches_str1(e.name, 122) { (c, inner_ty) }
+                else {
+                    c = c.report_error_at(e.span, 12, 0, 0, 0)
+                    (c, ty_error())
+                }
+            } else {
+                // Octonion/Sedenion/Clifford: field access by component index
+                // For now accept any short field name and return inner type
+                (c, inner_ty)
+            }
         } else if base_ty.kind == TypeKind::TyTuple {
             // Tuple field access by index (e.g. t.0, t.1)
             // The field name contains the index as ascii digits
@@ -1086,6 +1148,36 @@ impl Checker {
                 // "unwrap" = [117, 110, 119, 114, 97, 112]
                 c = c.check_expr_list_no_type(e.args)
                 (c, knowledge_inner(base_ty))
+            } else {
+                c = c.report_error_at(e.span, 11, 0, 0, 0)
+                c = c.check_expr_list_no_type(e.args)
+                (c, ty_error())
+            }
+        } else if base_ty.kind == TypeKind::TyHyper {
+            // Hyper method calls: .conjugate() .norm() .inverse()
+            let alg = base_ty.algebra_kind
+            let inner_ty = match base_ty.inner {
+                Some(inner) => *inner
+                None => ty_error()
+            }
+            // "conjugate" = [99,111,110,106,117,103,97,116,101] (9 chars)
+            if name_matches_str9(e.name, 99, 111, 110, 106, 117, 103, 97, 116, 101) {
+                c = c.check_expr_list_no_type(e.args)
+                (c, base_ty)  // conjugate returns same Hyper type
+            // "norm" = [110,111,114,109] (4 chars)
+            } else if name_matches_str4(e.name, 110, 111, 114, 109) {
+                c = c.check_expr_list_no_type(e.args)
+                (c, inner_ty)  // norm returns scalar
+            // "inverse" = [105,110,118,101,114,115,101] (7 chars)
+            } else if name_matches_str7(e.name, 105, 110, 118, 101, 114, 115, 101) {
+                c = c.check_expr_list_no_type(e.args)
+                // Only division algebras have inverse (alg <= 3)
+                if alg > 3 {
+                    c = c.report_error_at(e.span, 32, 0, 0, 0)
+                    (c, ty_error())
+                } else {
+                    (c, base_ty)
+                }
             } else {
                 c = c.report_error_at(e.span, 11, 0, 0, 0)
                 c = c.check_expr_list_no_type(e.args)

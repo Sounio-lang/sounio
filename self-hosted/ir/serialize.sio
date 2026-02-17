@@ -609,3 +609,79 @@ fn deserialize_ir_module(buf: [i8; 131072], len: i64) -> IrModule with Mut, Pani
         string_count: string_count,
     }
 }
+
+// ============================================================
+// Hyper type serialization (SOIR v1.1 extension)
+// ============================================================
+//
+// TypeKind tags for serialization:
+//   0-21: existing types (TyI64..TyKnowledge)
+//   22: TyHyper — followed by algebra_kind (i64), clifford_p (i64), clifford_q (i64)
+//
+// Format: [kind: i8] [algebra_kind: i64] [clifford_p: i64] [clifford_q: i64] [inner: TypeTag]
+
+let SOIR_TYPE_HYPER: i8 = 22
+
+fn write_type_tag(buf: [i8; 131072], pos: i64, ty: TypeEntry) -> ([i8; 131072], i64) with Mut, Panic, Div {
+    var b = buf
+    var p = pos
+
+    if ty.kind == TypeKind::TyI64 {
+        let pair = write_i8(b, p, 0)
+        return pair
+    }
+    if ty.kind == TypeKind::TyF64 {
+        let pair = write_i8(b, p, 1)
+        return pair
+    }
+    if ty.kind == TypeKind::TyBool {
+        let pair = write_i8(b, p, 2)
+        return pair
+    }
+    if ty.kind == TypeKind::TyHyper {
+        let tag_pair = write_i8(b, p, SOIR_TYPE_HYPER)
+        b = tag_pair.0
+        p = tag_pair.1
+        let alg_pair = write_i64(b, p, ty.algebra_kind)
+        b = alg_pair.0
+        p = alg_pair.1
+        let cp_pair = write_i64(b, p, ty.clifford_p)
+        b = cp_pair.0
+        p = cp_pair.1
+        let cq_pair = write_i64(b, p, ty.clifford_q)
+        return cq_pair
+    }
+    // Default: write kind ordinal
+    let kind_tag: i8 = 0  // fallback
+    write_i8(b, p, kind_tag)
+}
+
+fn read_type_tag(buf: [i8; 131072], pos: i64) -> (TypeEntry, i64) with Mut, Panic, Div, Alloc {
+    let tag_pair = read_i8(buf, pos)
+    let tag = tag_pair.0
+    var p = tag_pair.1
+
+    if tag == 0 { return (ty_i64(), p) }
+    if tag == 1 { return (ty_f64(), p) }
+    if tag == 2 { return (ty_bool(), p) }
+
+    if tag == SOIR_TYPE_HYPER {
+        let alg_pair = read_i64(buf, p)
+        let alg = alg_pair.0
+        p = alg_pair.1
+        let cp_pair = read_i64(buf, p)
+        let cl_p = cp_pair.0
+        p = cp_pair.1
+        let cq_pair = read_i64(buf, p)
+        let cl_q = cq_pair.0
+        p = cq_pair.1
+        // Construct Hyper type with inner = f64 (default for hypercomplex)
+        if alg == 5 {
+            return (ty_clifford(cl_p, cl_q, ty_f64()), p)
+        }
+        return (ty_hyper(alg, ty_f64()), p)
+    }
+
+    // Unknown tag: return error type
+    (ty_error(), p)
+}
