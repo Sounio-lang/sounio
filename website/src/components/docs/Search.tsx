@@ -195,7 +195,7 @@ export default function Search({ locale, strings }: Props) {
         aria-modal="true"
         aria-label="Search documentation"
       >
-        <div className="bg-white dark:bg-[var(--color-navy-900)] w-full max-w-2xl rounded-xl shadow-2xl border border-[var(--color-border)] overflow-hidden">
+        <div className="glass glass-elevated w-full max-w-2xl rounded-xl border border-[var(--glass-border)] overflow-hidden">
           {/* Search input */}
           <div className="flex items-center gap-3 p-4 border-b border-[var(--color-border)]">
             <svg className="w-5 h-5 text-[var(--color-text-muted)]" fill="none" stroke="currentColor" viewBox="0 0 24 24">

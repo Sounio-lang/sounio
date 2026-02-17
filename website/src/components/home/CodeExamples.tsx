@@ -1,16 +1,29 @@
 import { useState } from 'react';
 
-interface CodeExample {
+interface TabExample {
   id: string;
   label: string;
-  code: string;
+  python: string;
+  sounio: string;
 }
 
-const examples: CodeExample[] = [
+const examples: TabExample[] = [
   {
     id: 'uncertainty',
     label: 'Uncertainty',
-    code: `// Epistemic computing with native uncertainty
+    python: `# Python: bare floats, no uncertainty
+mass = 75.3        # kg... probably?
+height = 1.82      # meters... maybe?
+
+bmi = mass / (height ** 2)
+# bmi = 22.74
+# No idea how confident we are
+# No idea where the data came from
+
+if bmi < 25:
+    print("Normal weight")
+# What if the scale was off by 2kg?`,
+    sounio: `// Sounio: epistemic computing
 let mass: Knowledge<kg> = measure(
     value: 75.3,
     uncertainty: 0.5,
@@ -23,11 +36,10 @@ let height: Knowledge<m> = measure(
     source: "stadiometer_001"
 )
 
-// Uncertainty propagates automatically (GUM-compliant)
+// Uncertainty propagates automatically
 let bmi = mass / (height * height)
-// bmi.uncertainty computed via error propagation
+// bmi = 22.74 \u00b1 0.31 (confidence: 97.1%)
 
-// Confidence gates control execution
 if bmi.confidence > 0.95 {
     report_bmi(bmi)
 } else {
@@ -37,7 +49,23 @@ if bmi.confidence > 0.95 {
   {
     id: 'effects',
     label: 'Effects',
-    code: `// Algebraic effects for controlled side effects
+    python: `# Python: hidden side effects
+def read_sensor():
+    raw = open("/dev/sensor0").read()
+    value = float(raw)
+    return value
+    # What can go wrong? Everything.
+    # File IO? Network? Parse errors?
+    # The signature doesn't tell you.
+
+def main():
+    try:
+        v = read_sensor()
+    except Exception as e:
+        print(f"Error: {e}")
+        v = 0.0
+    # Catching 'Exception' \u2014 hoping for the best`,
+    sounio: `// Sounio: effects are tracked in types
 fn read_sensor() -> f64 with IO, Fail {
     let raw = perform IO::read("/dev/sensor0")?
     let value = parse_float(raw)?
@@ -47,20 +75,34 @@ fn read_sensor() -> f64 with IO, Fail {
 // Effect handlers provide the implementation
 fn main() with IO {
     handle read_sensor() {
-        IO::read(path) => resume(fs::read_to_string(path)),
+        IO::read(path) => resume(fs::read(path)),
         Fail::error(msg) => {
             log_error(msg)
-            resume(0.0)  // Default fallback
+            resume(0.0)
         }
     }
 }
-
-// Effects are tracked in types—no hidden side effects`,
+// The type system guarantees: no hidden effects`,
   },
   {
     id: 'gpu',
-    label: 'GPU Kernels',
-    code: `// Native GPU kernel syntax with automatic memory management
+    label: 'GPU',
+    python: `# Python: string-based GPU code
+import cupy as cp
+
+kernel = cp.RawKernel(r'''
+extern "C" __global__
+void matmul(const float* a, const float* b,
+            float* c, int M, int K, int N) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    float sum = 0.0f;
+    for (int k = 0; k < K; k++)
+        sum += a[row*K+k] * b[k*N+col];
+    c[row*N+col] = sum;
+}
+''', 'matmul')  # No type checking inside string`,
+    sounio: `// Sounio: native GPU kernel syntax
 @kernel
 fn matrix_multiply(
     a: &Tensor<f32, [M, K]>,
@@ -76,29 +118,7 @@ fn matrix_multiply(
     }
     c[row, col] = sum
 }
-
-// Launch with automatic grid/block sizing
-let result = matrix_multiply<<<grid, block>>>(a, b)`,
-  },
-  {
-    id: 'units',
-    label: 'Units',
-    code: `// Type-safe units of measure
-let dose: mg = 500.0
-let volume: mL = 250.0
-let concentration: mg/mL = dose / volume  // 2.0 mg/mL
-
-// Compile-time dimension checking
-let mass: kg = 1.5
-// let error = mass + volume  // Compile error: kg ≠ mL
-
-// Unit conversions are explicit
-let mass_mg: mg = mass.to::<mg>()  // 1500.0 mg
-
-// Scientific constants with units
-let c: m/s = SPEED_OF_LIGHT
-let h: J*s = PLANCK_CONSTANT
-let energy: J = mass * c * c`,
+// Type-safe. Dimension-checked. No strings.`,
   },
 ];
 
@@ -108,57 +128,84 @@ export default function CodeExamples() {
   const activeExample = examples.find((e) => e.id === activeTab) || examples[0];
 
   return (
-    <section id="code" className="py-24 bg-[var(--color-bg)]">
-      <div className="container">
-        <h2 className="text-4xl font-semibold text-center mb-4 text-[var(--color-navy-900)] dark:text-white">
-          Hello, Uncertainty
-        </h2>
-        <p className="text-lg text-center text-[var(--color-text-muted)] mb-12 max-w-3xl mx-auto">
-          See how Sounio handles real scientific computing challenges with native language support.
-        </p>
-
-        {/* Tabs */}
-        <div className="flex flex-wrap gap-2 mb-6 justify-center">
-          {examples.map((example) => (
-            <button
-              key={example.id}
-              onClick={() => setActiveTab(example.id)}
-              className={`px-6 py-3 rounded-lg font-medium transition-all duration-200 ${
-                activeTab === example.id
-                  ? 'bg-[var(--color-navy-900)] text-white shadow-lg'
-                  : 'bg-transparent text-[var(--color-navy-900)] dark:text-white border-2 border-[var(--color-navy-900)] dark:border-white/30 hover:bg-[var(--color-navy-900)]/10'
-              }`}
-            >
-              {example.label}
-            </button>
-          ))}
+    <section id="code" className="py-32 bg-[var(--color-surface-primary)]">
+      <div className="container px-4">
+        <div className="text-center mb-16">
+          <h2 className="text-4xl md:text-5xl font-bold text-[var(--color-text-primary)] mb-4">
+            See the Difference
+          </h2>
+          <p className="text-lg text-[var(--color-text-secondary)] max-w-2xl mx-auto">
+            Python computes the number. Sounio computes what you can trust.
+          </p>
         </div>
 
-        {/* Code block */}
-        <div className="max-w-4xl mx-auto">
-          <div className="relative">
-            <pre className="bg-[var(--color-navy-900)] text-[#e2e8f0] p-6 rounded-xl overflow-x-auto text-sm leading-relaxed shadow-2xl">
-              <code>{activeExample.code}</code>
+        {/* Tab bar */}
+        <div className="flex justify-center mb-8">
+          <div className="inline-flex gap-1 p-1 rounded-full glass">
+            {examples.map((example) => (
+              <button
+                key={example.id}
+                onClick={() => setActiveTab(example.id)}
+                className={`px-6 py-2.5 rounded-full text-sm font-medium transition-all duration-200 ${
+                  activeTab === example.id
+                    ? 'bg-[var(--color-text-primary)] text-[var(--color-surface-primary)]'
+                    : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
+                }`}
+              >
+                {example.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Side-by-side comparison */}
+        <div className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {/* Python panel */}
+          <div className="rounded-2xl overflow-hidden border border-[var(--glass-border)]">
+            <div className="flex items-center gap-2 px-4 py-3 bg-[rgba(255,255,255,0.03)] border-b border-[var(--glass-border)]">
+              <div className="flex gap-1.5">
+                <div className="w-3 h-3 rounded-full bg-[#ff5f57]"></div>
+                <div className="w-3 h-3 rounded-full bg-[#febc2e]"></div>
+                <div className="w-3 h-3 rounded-full bg-[#28c840]"></div>
+              </div>
+              <span className="flex-1 text-center text-[var(--color-text-tertiary)] text-sm font-mono">
+                example.py
+              </span>
+            </div>
+            <pre className="p-6 bg-[#0d1117] text-sm leading-relaxed overflow-x-auto min-h-[400px]">
+              <code className="text-[#e6edf3]">{activeExample.python}</code>
             </pre>
-            <button
-              onClick={() => navigator.clipboard.writeText(activeExample.code)}
-              className="absolute top-4 right-4 px-3 py-1.5 bg-white/10 hover:bg-white/20 text-white/80 hover:text-white rounded text-sm transition-colors"
-            >
-              Copy
-            </button>
           </div>
 
-          <div className="mt-6 text-center">
-            <a
-              href="/playground"
-              className="inline-flex items-center gap-2 text-[var(--color-navy-900)] dark:text-[var(--color-gold-500)] hover:underline font-medium"
-            >
-              Try in Playground
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" />
-              </svg>
-            </a>
+          {/* Sounio panel */}
+          <div className="rounded-2xl overflow-hidden border border-[var(--color-accent-gold)]/20">
+            <div className="flex items-center gap-2 px-4 py-3 bg-[rgba(201,169,110,0.05)] border-b border-[var(--color-accent-gold)]/20">
+              <div className="flex gap-1.5">
+                <div className="w-3 h-3 rounded-full bg-[#ff5f57]"></div>
+                <div className="w-3 h-3 rounded-full bg-[#febc2e]"></div>
+                <div className="w-3 h-3 rounded-full bg-[#28c840]"></div>
+              </div>
+              <span className="flex-1 text-center text-[var(--color-accent-gold)] text-sm font-mono">
+                example.sio
+              </span>
+            </div>
+            <pre className="p-6 bg-[#0d1117] text-sm leading-relaxed overflow-x-auto min-h-[400px]">
+              <code className="text-[#e6edf3]">{activeExample.sounio}</code>
+            </pre>
           </div>
+        </div>
+
+        {/* CTA */}
+        <div className="mt-12 text-center">
+          <a
+            href="/playground"
+            className="inline-flex items-center gap-2 text-[var(--color-accent-gold)] font-medium hover:gap-3 transition-all"
+          >
+            Try in Playground
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" />
+            </svg>
+          </a>
         </div>
       </div>
     </section>

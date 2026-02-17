@@ -20,10 +20,11 @@ export default function ThemeToggle() {
     const root = document.documentElement;
     const systemDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
 
+    root.classList.remove('dark', 'light');
     if (theme === 'dark' || (theme === 'system' && systemDark)) {
       root.classList.add('dark');
     } else {
-      root.classList.remove('dark');
+      root.classList.add('light');
     }
 
     if (theme !== 'system') {
@@ -39,10 +40,11 @@ export default function ThemeToggle() {
     const handleChange = () => {
       if (theme === 'system') {
         const root = document.documentElement;
+        root.classList.remove('dark', 'light');
         if (mediaQuery.matches) {
           root.classList.add('dark');
         } else {
-          root.classList.remove('dark');
+          root.classList.add('light');
         }
       }
     };
