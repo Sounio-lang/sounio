@@ -105,13 +105,30 @@ Components: lexer, parser, ast, check, types, effects, hir, hlir,
 
 ## LLM Offload
 
+**Providers**: Grok (`grok`), GLM-5 (`glm`), MiniMax (`minimax`), DeepSeek (`deepseek`), Ollama (`local`)
+
 ```bash
-llm-offload -t expand -p local      # outline → prose (Mistral)
-llm-offload -t scaffold -p local    # boilerplate
-llm-offload -t paraphrase -p grok   # rewrite
+llm-offload -t expand -p grok       # outline → prose
+llm-offload -t scaffold -p glm      # boilerplate code
+llm-offload -t review -p deepseek   # second opinion
+llm-offload -t paraphrase -p minimax # rewrite
+llm-offload --list-providers         # status table
 ```
 
-**Flow**: Claude designs → llm-offload expands → Claude critiques
+**Slash commands** (use inside Claude Code):
+- `/offload-expand [provider] [file]` — expand outline → prose
+- `/offload-scaffold [provider] [file]` — spec → boilerplate
+- `/offload-review [provider] [file]` — independent code review
+- `/offload-paraphrase [provider] [file]` — rewrite text
+
+**Pipelines** (multi-model workflows):
+```bash
+llm-pipeline consensus review -i file.rs    # 3 providers review same code
+llm-pipeline expand-critique outline.md     # Grok expands → DeepSeek critiques
+llm-pipeline multi-scaffold spec.txt        # 2 providers scaffold → diff
+```
+
+**Flow**: Claude designs → `/offload-expand` expands → Claude critiques
 
 ## Session Persistence
 

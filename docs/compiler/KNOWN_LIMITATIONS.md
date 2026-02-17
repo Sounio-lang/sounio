@@ -1,49 +1,57 @@
 # Known Language Limitations
 
 This document tracks limitations in the Sounio language implementation.
+Updated February 2026 after full-project audit.
 
-## v1.0 Release Status
+## Maturity Tiers
 
-As of **v1.0.0**, all core features are implemented. Advanced features require
-external dependencies (LLVM, Z3, CUDA) for full functionality.
+### Production (ship with confidence)
 
-### Native Epistemic Backend
-- **Status**: ✅ Implemented (v1.0.0)
-- `Knowledge<T>` works in interpreter with full GUM uncertainty propagation
-- SIR epistemic insertion pass transforms `BinOp` on epistemic values
-- Native codegen emits uncertainty propagation calls
-- **Files**: `sir/passes/epistemic_insertion.rs`, `backend/native/epistemic_runtime.rs`
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Lexer/Parser/AST | Production | logos-based, error recovery, comprehensive |
+| Type Checker (core) | Production | Bidirectional inference, generics, unification |
+| Epistemic Types | Production | GUM uncertainty, confidence propagation, provenance |
+| Effects System | Production | 8 effects (IO, Mut, Alloc, Panic, Async, GPU, Prob, Div) |
+| HIR + HLIR | Production | SSA generation, async transform |
+| SIR | Production | Domain-specific IR, epistemic passes |
+| Native Backend | Production | ELF/Mach-O, epistemic runtime, continuations |
+| Cranelift Codegen | Production | Full implementation, effect handlers |
+| Interpreter | Production | Full eval, 100+ builtins |
+| Module System | Production | 2-pass resolver, imports, hierarchical namespaces |
+| CLI | Production | check/build/run/repl/format/doc |
+| Formatter | Production | AST-based, all constructs, diff mode |
+| snn/ (sedenion NN) | Production | Training, backward, similarity, 8 scoring functions |
 
-### SMT Refinement Verification
-- **Status**: ✅ Infrastructure complete (v1.0.0)
-- Refinement types parse and typecheck correctly
-- Z3 solver integration in `smt/z3_solver.rs`
-- `refine_assert.rs` pass for compile-time verification
-- **Requires**: Z3 library + `--features smt` for compile-time proofs
-- **Fallback**: Runtime assertions when Z3 unavailable
+### Beta (works for common patterns, edge cases exist)
 
-### GPU Kernel Launch
-- **Status**: ✅ Implemented (v1.0.0)
-- PTX, Metal, and SPIR-V code generation complete
-- `GpuRuntimeBridge` singleton for kernel launch dispatch
-- Thread-safe design with `OnceLock<Mutex<...>>`
-- **Files**: `runtime/gpu_bridge.rs`, `codegen/gpu/runtime.rs`
-- **Requires**: CUDA toolkit for actual kernel execution
+| Component | Status | Limitations |
+|-----------|--------|-------------|
+| Ownership/Borrowing | Beta | Method receiver inference uses heuristic string matching; `infer_method_receiver_use` should look up actual method signatures |
+| LLVM Codegen | Beta | Requires LLVM 15+, feature-gated |
+| Refinement Types + SMT | Beta | Requires Z3, falls back to runtime assertions |
+| LSP | Beta | Cross-file navigation uses legacy symbol index |
+| REPL | Beta | 17 commands, JIT, epistemic badges |
+| Self-hosted Compiler | Beta | Phase 1.2 complete, 30K lines .sio |
+| Ontology | Beta | 10K terms, subsumption, distance |
+| Package Manager | Beta | Manifest parsing works, no public registry exists |
 
-### Package Manager
-- **Status**: ✅ Implemented (v1.0.0)
-- Full `HttpRegistry` with REST API (fetch, search, publish, yank)
-- Manifest parsing with Git dependency support (`git`, `branch`, `tag`, `rev`)
-- Package resolution and caching infrastructure
-- **Files**: `pkg/registry.rs`, `pkg/manifest.rs`, `pkg/build.rs`
+### Known Bugs
 
-### Async Join/Select
-- **Status**: ✅ Implemented (v1.0.0)
-- `TaskScheduler` with ready queue, suspension tracking, dependency graphs
-- `JoinFuture` waits for ALL tasks, `SelectFuture` waits for ANY
-- Bounded/unbounded channels with `Sender<T>`/`Receiver<T>`
-- Full test coverage (37 tests)
-- **Files**: `runtime/async_runtime.rs`, `runtime/handler_stack.rs`
+**Implicit `var` return with `i32` type**: When a function's return type is `i32` and its last expression is a `var` variable (implicit return), the type checker may report `expected I32, found I64`. Workaround: use explicit `return x` instead of trailing `x`. Does not affect `f64` returns or explicit `return` statements.
+
+**Effect checker `Div` propagation**: The effect checker requires `Div` for any operation involving division. It also requires `Panic` alongside `Div` (divide-by-zero potential), and for array access (out-of-bounds potential) and `as` casts. These are strict but correct.
+
+### Pruned/Experimental Modules
+
+The following stdlib modules exist but are stubs or incomplete. They are not part of the default experience:
+
+- `stdlib/gpu/` - requires CUDA runtime (behind `--features gpu`)
+- `stdlib/crypto/` - stub
+- `stdlib/ffi/` - stub
+- `stdlib/compress/` - stub
+- `stdlib/autodiff/` - framework only
+- `stdlib/interop/` - stub
 
 ### Optional External Dependencies
 
@@ -52,6 +60,12 @@ external dependencies (LLVM, Z3, CUDA) for full functionality.
 | `--features llvm` | LLVM 15+ | Use Cranelift JIT instead |
 | `--features smt` | Z3 + cmake | Refinement types fall back to runtime checks |
 | `--features gpu` | CUDA toolkit | GPU codegen works, execution requires runtime |
+
+### Platform Support
+
+- **Linux x86-64**: Primary supported platform
+- **macOS**: Mach-O backend available, not regularly tested
+- **Windows**: Not yet supported
 
 ---
 
