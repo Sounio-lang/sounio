@@ -2965,7 +2965,7 @@ impl Interpreter {
                             if let Some(Value::Array(arr)) = fields.get(field) {
                                 let mut arr = arr.borrow_mut();
                                 if idx < arr.len() {
-                                    arr[idx] = value;
+                                    arr[idx] = value.clone();
                                 }
                                 return Ok(());
                             }
@@ -2977,7 +2977,7 @@ impl Interpreter {
                 if let Value::Array(arr) = base_val {
                     let mut arr = arr.borrow_mut();
                     if idx < arr.len() {
-                        arr[idx] = value;
+                        arr[idx] = value.clone();
                     }
                 }
                 Ok(())
