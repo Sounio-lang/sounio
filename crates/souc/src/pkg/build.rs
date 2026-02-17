@@ -648,8 +648,13 @@ impl BuildExecutor {
         let mut source_hashes = HashMap::new();
 
         for source in &unit.sources {
-            if let Ok(hash) = hash_file(source) {
-                source_hashes.insert(source.clone(), hash);
+            match hash_file(source) {
+                Ok(hash) => {
+                    source_hashes.insert(source.clone(), hash);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to hash source file {:?}: {}", source, e);
+                }
             }
         }
 

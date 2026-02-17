@@ -313,19 +313,22 @@ pub mod async_client {
 
     impl HttpRegistry {
         /// Create new HTTP registry client
-        pub fn new(url: &str) -> Self {
-            Self {
-                client: reqwest::Client::builder()
-                    .user_agent(concat!("souc/", env!("CARGO_PKG_VERSION")))
-                    .build()
-                    .expect("Failed to create HTTP client"),
+        pub fn new(url: &str) -> Result<Self, RegistryError> {
+            let client = reqwest::Client::builder()
+                .user_agent(concat!("souc/", env!("CARGO_PKG_VERSION")))
+                .build()
+                .map_err(|e| {
+                    RegistryError::Network(format!("Failed to create HTTP client: {}", e))
+                })?;
+            Ok(Self {
+                client,
                 url: url.to_string(),
                 token: None,
-            }
+            })
         }
 
         /// Create with default registry URL
-        pub fn default_registry() -> Self {
+        pub fn default_registry() -> Result<Self, RegistryError> {
             Self::new(DefaultRegistry::DEFAULT_URL)
         }
 
@@ -748,13 +751,25 @@ pub mod async_client {
                 .path()
                 .map_err(|e| RegistryError::Invalid(format!("Invalid path: {}", e)))?;
 
-            // Skip entries that try to escape the destination
+            // Reject entries that try to escape the destination
             let path_str = path.to_string_lossy();
             if path_str.contains("..") {
-                continue;
+                return Err(RegistryError::Invalid(format!(
+                    "Path traversal detected in tarball entry: {}",
+                    path_str
+                )));
             }
 
             let dest_path = dest.join(&*path);
+
+            // Defense-in-depth: verify the resolved path stays within dest
+            let canonical_dest = dest.canonicalize().unwrap_or_else(|_| dest.to_path_buf());
+            if !dest_path.starts_with(&canonical_dest) {
+                return Err(RegistryError::Invalid(format!(
+                    "Path escape detected: {}",
+                    dest_path.display()
+                )));
+            }
 
             if entry.header().entry_type().is_dir() {
                 std::fs::create_dir_all(&dest_path)?;

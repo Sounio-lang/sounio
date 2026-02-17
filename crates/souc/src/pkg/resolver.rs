@@ -96,6 +96,9 @@ pub enum ResolveError {
 
     /// Feature not found
     FeatureNotFound { package: String, feature: String },
+
+    /// Unsupported operation
+    Unsupported(String),
 }
 
 impl std::fmt::Display for ResolveError {
@@ -123,6 +126,7 @@ impl std::fmt::Display for ResolveError {
                     feature, package
                 )
             }
+            ResolveError::Unsupported(msg) => write!(f, "Unsupported: {}", msg),
         }
     }
 }
@@ -215,6 +219,35 @@ impl<'a> Resolver<'a> {
             path.pop();
         }
 
+        // Backfill transitive dependency versions from resolved packages.
+        // Collect updates first to avoid borrow conflicts on `resolved`.
+        let version_updates: Vec<(String, Vec<(usize, Version)>)> = resolved
+            .iter()
+            .map(|(pkg_name, pkg)| {
+                let updates: Vec<(usize, Version)> = pkg
+                    .dependencies
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, dep)| dep.version == Version::new(0, 0, 0))
+                    .filter_map(|(i, dep)| {
+                        resolved
+                            .get(&dep.name)
+                            .map(|resolved_dep| (i, resolved_dep.id.version.clone()))
+                    })
+                    .collect();
+                (pkg_name.clone(), updates)
+            })
+            .filter(|(_, updates)| !updates.is_empty())
+            .collect();
+
+        for (pkg_name, updates) in version_updates {
+            if let Some(pkg) = resolved.get_mut(&pkg_name) {
+                for (idx, version) in updates {
+                    pkg.dependencies[idx].version = version;
+                }
+            }
+        }
+
         Ok(Resolution {
             packages: resolved,
             features: self.features.clone(),
@@ -276,9 +309,9 @@ impl<'a> Resolver<'a> {
         }
 
         if dep.git.is_some() {
-            // Would fetch from git and read manifest
-            // For now, return placeholder
-            return Ok(Version::new(0, 0, 0));
+            return Err(ResolveError::Unsupported(
+                "git dependency version resolution not yet implemented".into(),
+            ));
         }
 
         Err(ResolveError::NotFound(name.to_string()))

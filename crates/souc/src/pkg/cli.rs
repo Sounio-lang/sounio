@@ -662,7 +662,10 @@ pub fn cmd_add(
                 use super::auth::TokenManager;
                 use super::registry::async_client::HttpRegistry;
 
-                let mut registry = HttpRegistry::default_registry();
+                let mut registry = HttpRegistry::default_registry()
+                    .map_err(|e| -> Box<dyn std::error::Error> {
+                        format!("Registry init failed: {}", e).into()
+                    })?;
 
                 // Try to load auth token
                 if let Ok(token_manager) = TokenManager::new() {
@@ -761,7 +764,13 @@ pub fn cmd_add(
                         use super::auth::TokenManager;
                         use super::registry::async_client::HttpRegistry;
 
-                        let mut registry_client = HttpRegistry::default_registry();
+                        let mut registry_client = match HttpRegistry::default_registry() {
+                            Ok(r) => r,
+                            Err(e) => {
+                                eprintln!("warning: could not initialize registry client: {}", e);
+                                return;
+                            }
+                        };
 
                         if let Ok(token_manager) = TokenManager::new() {
                             if let Some(token) = token_manager.get_default_token() {
@@ -827,7 +836,13 @@ pub fn cmd_search(query: &str, limit: usize) -> Result<()> {
         rt.block_on(async {
             use super::registry::async_client::HttpRegistry;
 
-            let registry = HttpRegistry::default_registry();
+            let registry = match HttpRegistry::default_registry() {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Registry init failed: {}", e);
+                    return;
+                }
+            };
 
             match registry.search_packages(query, 1, limit).await {
                 Ok(results) => {
@@ -990,7 +1005,11 @@ pub fn cmd_publish(dry_run: bool, allow_dirty: bool, _registry: Option<String>) 
                 .get_default_token()
                 .ok_or("Not logged in. Run `souc login` first.")?;
 
-            let registry = HttpRegistry::default_registry().with_token(token.to_string());
+            let registry = HttpRegistry::default_registry()
+                .map_err(|e| -> Box<dyn std::error::Error> {
+                    format!("Registry init failed: {}", e).into()
+                })?
+                .with_token(token.to_string());
 
             println!(
                 "  Publishing {} v{}...",
