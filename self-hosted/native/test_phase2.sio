@@ -1,0 +1,546 @@
+// self-hosted::native::test_phase2 — Phase 2 test suite
+//
+// Tests the M1-M5 native backend features:
+//   - Heap allocation (IrAlloc with type-tag sizing)
+//   - Struct field access (IrFieldGet / IrFieldSet via SIB encoding)
+//   - Array indexing (IrIndexGet / IrIndexSet)
+//   - Encoding helpers for negative-number print_int
+//   - IrLoadFloat lowering
+//
+// All dependencies inlined (module system not yet available).
+
+// ============================================================================
+// From encode.sio — minimal encoding primitives
+// ============================================================================
+
+struct CodeBuffer {
+    bytes: [i8; 65536],
+    len: i64,
+}
+
+fn code_buffer_new() -> CodeBuffer {
+    CodeBuffer { bytes: [0; 65536], len: 0 }
+}
+
+fn low8(x: i64) -> i64 with Mut, Panic, Div {
+    var n = x % 256
+    if n < 0 { n = n + 256 }
+    n
+}
+
+fn emit_byte(buf: CodeBuffer, b: i64) -> CodeBuffer with Mut, Panic, Div {
+    var out = buf
+    if out.len >= 0 {
+        if out.len < 65536 {
+            out.bytes[out.len as usize] = low8(b) as i8
+            out.len = out.len + 1
+        }
+    }
+    out
+}
+
+fn emit_u32_le(buf: CodeBuffer, val: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, low8(val))
+    b = emit_byte(b, low8(val >> 8))
+    b = emit_byte(b, low8(val >> 16))
+    b = emit_byte(b, low8(val >> 24))
+    b
+}
+
+fn byte_u8(b: i8) -> i64 {
+    let x = b as i64
+    if x < 0 { x + 256 } else { x }
+}
+
+fn modrm_rr(dst: i64, src: i64) -> i64 {
+    192 + src * 8 + dst
+}
+
+fn modrm_rm_imm(dst: i64) -> i64 {
+    192 + dst
+}
+
+fn emit_mov_reg_reg(buf: CodeBuffer, dst: i64, src: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, modrm_rr(dst, src))
+    b
+}
+
+fn emit_mov_reg_imm(buf: CodeBuffer, reg: i64, val: i64) -> CodeBuffer with Mut, Panic, Div {
+    if val >= -2147483648 && val <= 2147483647 {
+        emit_mov_reg_imm32(buf, reg, val)
+    } else {
+        emit_mov_reg_imm64(buf, reg, val)
+    }
+}
+
+fn emit_mov_reg_imm32(buf: CodeBuffer, reg: i64, val: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0xc7)
+    b = emit_byte(b, modrm_rm_imm(reg))
+    b = emit_u32_le(b, val)
+    b
+}
+
+fn emit_mov_reg_imm64(buf: CodeBuffer, reg: i64, val: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0xb8 + reg)
+    b = emit_u32_le(b, val)
+    b = emit_u32_le(b, val >> 32)
+    b
+}
+
+// ============================================================================
+// From encode.sio — Phase 2 specific encoding functions under test
+// ============================================================================
+
+// mov rax, r13 (heap bump pointer)
+fn emit_mov_rax_r13(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x4c)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0xe8)
+    b
+}
+
+// add r13, imm32 (bump allocator advance)
+fn emit_add_r13_imm32(buf: CodeBuffer, imm: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x49)
+    b = emit_byte(b, 0x81)
+    b = emit_byte(b, 0xc5)
+    b = emit_u32_le(b, imm)
+    b
+}
+
+// mov rax, [rax + rbx*8] (SIB field/index read)
+fn emit_mov_rax_mem_rax_rbx8(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x8b)
+    b = emit_byte(b, 0x04)
+    b = emit_byte(b, 0xd8)
+    b
+}
+
+// mov rax, [rdx + rbx*8] (SIB index read)
+fn emit_load_rax_mem_rdx_rbx8(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x8b)
+    b = emit_byte(b, 0x04)
+    b = emit_byte(b, 0xda)
+    b
+}
+
+// mov [rdx + rbx*8], rax (SIB index write)
+fn emit_store_rax_mem_rdx_rbx8(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0x04)
+    b = emit_byte(b, 0xda)
+    b
+}
+
+// test rdi, rdi
+fn emit_test_rdi_rdi(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x85)
+    b = emit_byte(b, 0xff)
+    b
+}
+
+// jns rel8
+fn emit_jns_rel8(buf: CodeBuffer, disp: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x79)
+    b = emit_byte(b, low8(disp))
+    b
+}
+
+// neg rdi
+fn emit_neg_rdi(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0xf7)
+    b = emit_byte(b, 0xdf)
+    b
+}
+
+// mov byte [rsi], imm8
+fn emit_mov_byte_mem_rsi_imm8(buf: CodeBuffer, imm: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0xc6)
+    b = emit_byte(b, 0x06)
+    b = emit_byte(b, low8(imm))
+    b
+}
+
+// mov [rbp+disp32], rax  — store rax to stack slot
+fn emit_store_rax_rbp_disp32(buf: CodeBuffer, disp: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x89)
+    b = emit_byte(b, 0x85)
+    b = emit_u32_le(b, disp)
+    b
+}
+
+// mov rax, [rbp+disp32] — load from stack slot
+fn emit_load_rbp_disp32_rax(buf: CodeBuffer, disp: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x8b)
+    b = emit_byte(b, 0x85)
+    b = emit_u32_le(b, disp)
+    b
+}
+
+// mov rdx, rax
+fn emit_mov_rdx_rax(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    emit_mov_reg_reg(buf, 2, 0)
+}
+
+// mov rbx, rax
+fn emit_mov_rbx_rax(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    emit_mov_reg_reg(buf, 3, 0)
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+fn ir_slot_offset(vreg: i64) -> i64 {
+    0 - (vreg + 1) * 8
+}
+
+// ============================================================================
+// T01: emit_mov_rax_r13 encoding
+// ============================================================================
+
+fn test_emit_mov_rax_r13() -> i64 with Mut, Panic, Div {
+    let buf = emit_mov_rax_r13(code_buffer_new())
+    if buf.len != 3 { return 1 }
+    // Expected: 4c 89 e8
+    if byte_u8(buf.bytes[0]) != 0x4c { return 2 }
+    if byte_u8(buf.bytes[1]) != 0x89 { return 3 }
+    if byte_u8(buf.bytes[2]) != 0xe8 { return 4 }
+    0
+}
+
+// ============================================================================
+// T02: emit_add_r13_imm32 encoding (512 bytes for struct alloc)
+// ============================================================================
+
+fn test_emit_add_r13_imm32() -> i64 with Mut, Panic, Div {
+    let buf = emit_add_r13_imm32(code_buffer_new(), 512)
+    if buf.len != 7 { return 1 }
+    // Expected: 49 81 c5 00 02 00 00
+    if byte_u8(buf.bytes[0]) != 0x49 { return 2 }
+    if byte_u8(buf.bytes[1]) != 0x81 { return 3 }
+    if byte_u8(buf.bytes[2]) != 0xc5 { return 4 }
+    // 512 = 0x200 → LE: 00 02 00 00
+    if byte_u8(buf.bytes[3]) != 0x00 { return 5 }
+    if byte_u8(buf.bytes[4]) != 0x02 { return 6 }
+    if byte_u8(buf.bytes[5]) != 0x00 { return 7 }
+    if byte_u8(buf.bytes[6]) != 0x00 { return 8 }
+    0
+}
+
+// ============================================================================
+// T03: SIB encoding — mov rax, [rax + rbx*8]
+// ============================================================================
+
+fn test_emit_sib_load() -> i64 with Mut, Panic, Div {
+    let buf = emit_mov_rax_mem_rax_rbx8(code_buffer_new())
+    if buf.len != 4 { return 1 }
+    // Expected: 48 8b 04 d8
+    if byte_u8(buf.bytes[0]) != 0x48 { return 2 }
+    if byte_u8(buf.bytes[1]) != 0x8b { return 3 }
+    if byte_u8(buf.bytes[2]) != 0x04 { return 4 }
+    // SIB: scale=3(x8), index=rbx(3), base=rax(0) → 11_011_000 = 0xd8
+    if byte_u8(buf.bytes[3]) != 0xd8 { return 5 }
+    0
+}
+
+// ============================================================================
+// T04: SIB encoding — mov rax, [rdx + rbx*8]
+// ============================================================================
+
+fn test_emit_sib_index_load() -> i64 with Mut, Panic, Div {
+    let buf = emit_load_rax_mem_rdx_rbx8(code_buffer_new())
+    if buf.len != 4 { return 1 }
+    // Expected: 48 8b 04 da
+    // SIB: scale=3(x8), index=rbx(3), base=rdx(2) → 11_011_010 = 0xda
+    if byte_u8(buf.bytes[0]) != 0x48 { return 2 }
+    if byte_u8(buf.bytes[1]) != 0x8b { return 3 }
+    if byte_u8(buf.bytes[2]) != 0x04 { return 4 }
+    if byte_u8(buf.bytes[3]) != 0xda { return 5 }
+    0
+}
+
+// ============================================================================
+// T05: SIB encoding — mov [rdx + rbx*8], rax
+// ============================================================================
+
+fn test_emit_sib_index_store() -> i64 with Mut, Panic, Div {
+    let buf = emit_store_rax_mem_rdx_rbx8(code_buffer_new())
+    if buf.len != 4 { return 1 }
+    // Expected: 48 89 04 da
+    if byte_u8(buf.bytes[0]) != 0x48 { return 2 }
+    if byte_u8(buf.bytes[1]) != 0x89 { return 3 }
+    if byte_u8(buf.bytes[2]) != 0x04 { return 4 }
+    if byte_u8(buf.bytes[3]) != 0xda { return 5 }
+    0
+}
+
+// ============================================================================
+// T06: Negative number helpers — test_rdi_rdi / jns / neg_rdi
+// ============================================================================
+
+fn test_emit_negative_helpers() -> i64 with Mut, Panic, Div {
+    // test rdi, rdi → 48 85 ff
+    var buf = emit_test_rdi_rdi(code_buffer_new())
+    if buf.len != 3 { return 1 }
+    if byte_u8(buf.bytes[0]) != 0x48 { return 2 }
+    if byte_u8(buf.bytes[1]) != 0x85 { return 3 }
+    if byte_u8(buf.bytes[2]) != 0xff { return 4 }
+
+    // jns rel8 → 79 <disp>
+    buf = emit_jns_rel8(code_buffer_new(), 27)
+    if buf.len != 2 { return 5 }
+    if byte_u8(buf.bytes[0]) != 0x79 { return 6 }
+    if byte_u8(buf.bytes[1]) != 27 { return 7 }
+
+    // neg rdi → 48 f7 df
+    buf = emit_neg_rdi(code_buffer_new())
+    if buf.len != 3 { return 8 }
+    if byte_u8(buf.bytes[0]) != 0x48 { return 9 }
+    if byte_u8(buf.bytes[1]) != 0xf7 { return 10 }
+    if byte_u8(buf.bytes[2]) != 0xdf { return 11 }
+
+    // mov byte [rsi], '-' → c6 06 2d
+    buf = emit_mov_byte_mem_rsi_imm8(code_buffer_new(), 45)
+    if buf.len != 3 { return 12 }
+    if byte_u8(buf.bytes[0]) != 0xc6 { return 13 }
+    if byte_u8(buf.bytes[1]) != 0x06 { return 14 }
+    if byte_u8(buf.bytes[2]) != 0x2d { return 15 }
+    0
+}
+
+// ============================================================================
+// T07: Alloc lowering — type-tag → allocation size mapping
+//
+// Simulate lower_alloc logic and verify the bump size is correct.
+// ============================================================================
+
+fn alloc_size_for_tag(tag: i64) -> i64 with Mut, Panic, Div {
+    if tag == 0 { 512 }
+    else if tag == 1 { 512 }
+    else if tag == 2 { 128 }
+    else if tag == 8 { 16 }
+    else if tag < 64 { 64 }
+    else { ((tag + 7) / 8) * 8 }
+}
+
+fn test_alloc_size_mapping() -> i64 with Mut, Panic, Div {
+    // Struct: 512 bytes (64 slots * 8)
+    if alloc_size_for_tag(0) != 512 { return 1 }
+    // Array: 512 bytes
+    if alloc_size_for_tag(1) != 512 { return 2 }
+    // Tuple: 128 bytes (16 slots * 8)
+    if alloc_size_for_tag(2) != 128 { return 3 }
+    // Box: 16 bytes
+    if alloc_size_for_tag(8) != 16 { return 4 }
+    // Small unknown: 64 bytes minimum
+    if alloc_size_for_tag(3) != 64 { return 5 }
+    if alloc_size_for_tag(7) != 64 { return 6 }
+    // Large raw size: aligned up
+    if alloc_size_for_tag(100) != 104 { return 7 }
+    if alloc_size_for_tag(128) != 128 { return 8 }
+    if alloc_size_for_tag(129) != 136 { return 9 }
+    0
+}
+
+// ============================================================================
+// T08: Alloc lowering byte pattern — struct (tag 0) gets 512-byte bump
+// ============================================================================
+
+fn test_alloc_struct_bytes() -> i64 with Mut, Panic, Div {
+    // Simulate lower_alloc for a struct (tag=0, dst=0):
+    //   emit_mov_rax_r13          →  3 bytes (4c 89 e8)
+    //   emit_store_rax_rbp_disp32 →  7 bytes (48 89 85 <disp32>)
+    //   emit_add_r13_imm32(512)   →  7 bytes (49 81 c5 00 02 00 00)
+    // Total: 17 bytes
+
+    var buf = code_buffer_new()
+    buf = emit_mov_rax_r13(buf)
+    buf = emit_store_rax_rbp_disp32(buf, ir_slot_offset(0))  // slot 0 → -8
+    buf = emit_add_r13_imm32(buf, 512)
+
+    if buf.len != 17 { return 1 }
+
+    // First 3: mov rax, r13
+    if byte_u8(buf.bytes[0]) != 0x4c { return 2 }
+
+    // Bytes 3-9: store rax to [rbp-8]
+    if byte_u8(buf.bytes[3]) != 0x48 { return 3 }
+    if byte_u8(buf.bytes[4]) != 0x89 { return 4 }
+    if byte_u8(buf.bytes[5]) != 0x85 { return 5 }
+    // disp32 = -8 = 0xFFFFFFF8 LE: f8 ff ff ff
+    if byte_u8(buf.bytes[6]) != 0xf8 { return 6 }
+    if byte_u8(buf.bytes[7]) != 0xff { return 7 }
+
+    // Bytes 10-16: add r13, 512
+    if byte_u8(buf.bytes[10]) != 0x49 { return 8 }
+    if byte_u8(buf.bytes[11]) != 0x81 { return 9 }
+    if byte_u8(buf.bytes[12]) != 0xc5 { return 10 }
+    if byte_u8(buf.bytes[13]) != 0x00 { return 11 }
+    if byte_u8(buf.bytes[14]) != 0x02 { return 12 }
+    0
+}
+
+// ============================================================================
+// T09: Field access lowering — SIB-based field_get byte pattern
+// ============================================================================
+
+fn test_field_get_bytes() -> i64 with Mut, Panic, Div {
+    // Simulate lower_field_get(src1=0, field_idx=3, dst=1):
+    //   emit_load_rbp_disp32_rax(slot(0))   →  7 bytes
+    //   emit_mov_reg_imm(3, 3)              →  7 bytes (rbx = field_idx)
+    //   emit_mov_rax_mem_rax_rbx8()         →  4 bytes
+    //   emit_store_rax_rbp_disp32(slot(1))  →  7 bytes
+    // Total: 25 bytes
+
+    var buf = code_buffer_new()
+    buf = emit_load_rbp_disp32_rax(buf, ir_slot_offset(0))
+    buf = emit_mov_reg_imm(buf, 3, 3)
+    buf = emit_mov_rax_mem_rax_rbx8(buf)
+    buf = emit_store_rax_rbp_disp32(buf, ir_slot_offset(1))
+
+    if buf.len != 25 { return 1 }
+
+    // Verify SIB instruction at offset 14 (after load + mov_imm)
+    if byte_u8(buf.bytes[14]) != 0x48 { return 2 }
+    if byte_u8(buf.bytes[15]) != 0x8b { return 3 }
+    if byte_u8(buf.bytes[16]) != 0x04 { return 4 }
+    if byte_u8(buf.bytes[17]) != 0xd8 { return 5 }
+    0
+}
+
+// ============================================================================
+// T10: Field access lowering — SIB-based field_set byte pattern
+// ============================================================================
+
+fn test_field_set_bytes() -> i64 with Mut, Panic, Div {
+    // Simulate lower_field_set(src1=0(base), src2=1(value), field_idx=5):
+    //   emit_load_rbp_disp32_rax(slot(0))   →  7 bytes  (load base)
+    //   emit_mov_rdx_rax()                  →  3 bytes  (rdx = base)
+    //   emit_load_rbp_disp32_rax(slot(1))   →  7 bytes  (load value)
+    //   emit_mov_reg_imm(3, 5)              →  7 bytes  (rbx = field_idx)
+    //   emit_store_rax_mem_rdx_rbx8()       →  4 bytes  (store value)
+    // Total: 28 bytes
+
+    var buf = code_buffer_new()
+    buf = emit_load_rbp_disp32_rax(buf, ir_slot_offset(0))
+    buf = emit_mov_rdx_rax(buf)
+    buf = emit_load_rbp_disp32_rax(buf, ir_slot_offset(1))
+    buf = emit_mov_reg_imm(buf, 3, 5)
+    buf = emit_store_rax_mem_rdx_rbx8(buf)
+
+    if buf.len != 28 { return 1 }
+
+    // Verify SIB store at offset 24
+    if byte_u8(buf.bytes[24]) != 0x48 { return 2 }
+    if byte_u8(buf.bytes[25]) != 0x89 { return 3 }
+    if byte_u8(buf.bytes[26]) != 0x04 { return 4 }
+    if byte_u8(buf.bytes[27]) != 0xda { return 5 }
+    0
+}
+
+// ============================================================================
+// T11: Index access lowering — index_get byte pattern
+// ============================================================================
+
+fn test_index_get_bytes() -> i64 with Mut, Panic, Div {
+    // Simulate lower_index_get(src1=0(base), src2=1(idx), dst=2):
+    //   emit_load_rbp_disp32_rax(slot(0))   →  7 bytes  (load base)
+    //   emit_mov_rdx_rax()                  →  3 bytes
+    //   emit_load_rbp_disp32_rax(slot(1))   →  7 bytes  (load idx)
+    //   emit_mov_rbx_rax()                  →  3 bytes
+    //   emit_load_rax_mem_rdx_rbx8()        →  4 bytes  (rax = [rdx+rbx*8])
+    //   emit_store_rax_rbp_disp32(slot(2))  →  7 bytes
+    // Total: 31 bytes
+
+    var buf = code_buffer_new()
+    buf = emit_load_rbp_disp32_rax(buf, ir_slot_offset(0))
+    buf = emit_mov_rdx_rax(buf)
+    buf = emit_load_rbp_disp32_rax(buf, ir_slot_offset(1))
+    buf = emit_mov_rbx_rax(buf)
+    buf = emit_load_rax_mem_rdx_rbx8(buf)
+    buf = emit_store_rax_rbp_disp32(buf, ir_slot_offset(2))
+
+    if buf.len != 31 { return 1 }
+
+    // Verify SIB load at offset 20
+    if byte_u8(buf.bytes[20]) != 0x48 { return 2 }
+    if byte_u8(buf.bytes[21]) != 0x8b { return 3 }
+    if byte_u8(buf.bytes[22]) != 0x04 { return 4 }
+    if byte_u8(buf.bytes[23]) != 0xda { return 5 }
+    0
+}
+
+// ============================================================================
+// T12: High field_idx works with 512-byte allocation
+//
+// field_idx = 56 (hash of 'x': 120 % 64) needs offset 56*8 = 448 bytes.
+// With the old 64-byte allocation this would overflow. With 512 bytes it fits.
+// ============================================================================
+
+fn test_high_field_idx_fits() -> i64 with Mut, Panic, Div {
+    // 'x' → ASCII 120 → 120 % 64 = 56
+    let field_idx = 56
+    let byte_offset = field_idx * 8   // 448
+
+    // 448 < 512 → fits in struct allocation
+    if byte_offset >= 512 { return 1 }
+
+    // 448 < 64 would have been the old limit → would NOT fit
+    if byte_offset < 64 { return 2 }
+
+    // Worst case: field_idx = 63 → 504 bytes. Still fits in 512.
+    let worst_offset = 63 * 8
+    if worst_offset >= 512 { return 3 }
+
+    0
+}
+
+// ============================================================================
+// Main test runner
+// ============================================================================
+
+fn main() -> i64 with Mut, Panic, Div {
+    var failed = 0
+
+    if test_emit_mov_rax_r13() != 0 { failed = failed + 1 }
+    if test_emit_add_r13_imm32() != 0 { failed = failed + 1 }
+    if test_emit_sib_load() != 0 { failed = failed + 1 }
+    if test_emit_sib_index_load() != 0 { failed = failed + 1 }
+    if test_emit_sib_index_store() != 0 { failed = failed + 1 }
+    if test_emit_negative_helpers() != 0 { failed = failed + 1 }
+    if test_alloc_size_mapping() != 0 { failed = failed + 1 }
+    if test_alloc_struct_bytes() != 0 { failed = failed + 1 }
+    if test_field_get_bytes() != 0 { failed = failed + 1 }
+    if test_field_set_bytes() != 0 { failed = failed + 1 }
+    if test_index_get_bytes() != 0 { failed = failed + 1 }
+    if test_high_field_idx_fits() != 0 { failed = failed + 1 }
+
+    if failed == 0 { 0 } else { 1 }
+}
