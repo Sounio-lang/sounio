@@ -70,6 +70,9 @@ pub struct BuildClient {
 
     /// Connected flag
     connected: RwLock<bool>,
+
+    /// Active downloads keyed by transfer_id
+    downloads: RwLock<HashMap<String, DownloadState>>,
 }
 
 /// Active connection
@@ -81,8 +84,19 @@ struct Connection {
 /// Pending request
 struct PendingRequest {
     tx: oneshot::Sender<BuildMessage>,
-    #[allow(dead_code)]
     submitted_at: Instant,
+}
+
+/// State for an in-progress file download
+struct DownloadState {
+    /// Accumulated chunks per file index: file_index -> ordered chunk data
+    chunks: HashMap<usize, Vec<Vec<u8>>>,
+    /// Artifact IDs being downloaded (one per file index)
+    artifact_ids: Vec<String>,
+    /// Output directory for assembled files
+    output_dir: PathBuf,
+    /// Signal sender for when the download is complete
+    completion_tx: Option<oneshot::Sender<Result<Vec<PathBuf>, ClientError>>>,
 }
 
 impl BuildClient {
@@ -94,6 +108,7 @@ impl BuildClient {
             pending: RwLock::new(HashMap::new()),
             capabilities: RwLock::new(None),
             connected: RwLock::new(false),
+            downloads: RwLock::new(HashMap::new()),
         })
     }
 
@@ -221,6 +236,69 @@ impl BuildClient {
                 } else {
                     eprintln!("[{}] {}: {}%", job_id, progress.phase, progress.percent);
                 }
+            }
+
+            BuildMessage::FileChunk {
+                ref transfer_id,
+                file_index,
+                chunk_index: _,
+                ref data,
+                is_last,
+            } => {
+                let mut downloads = self.downloads.write().await;
+                if let Some(state) = downloads.get_mut(transfer_id) {
+                    // Accumulate chunk data for this file index
+                    state
+                        .chunks
+                        .entry(file_index)
+                        .or_insert_with(Vec::new)
+                        .push(data.clone());
+
+                    // If this is the last chunk for the last file, assemble and signal
+                    if is_last && file_index + 1 >= state.artifact_ids.len() {
+                        let output_dir = state.output_dir.clone();
+                        let artifact_ids = state.artifact_ids.clone();
+                        let chunks = std::mem::take(&mut state.chunks);
+                        let completion_tx = state.completion_tx.take();
+
+                        // Assemble files
+                        let mut paths = Vec::new();
+                        let mut write_err = None;
+                        for (idx, artifact_id) in artifact_ids.iter().enumerate() {
+                            let file_path = output_dir.join(artifact_id);
+                            let file_chunks = chunks.get(&idx);
+                            let assembled: Vec<u8> = file_chunks
+                                .map(|c| c.iter().flat_map(|v| v.iter().copied()).collect())
+                                .unwrap_or_default();
+                            match std::fs::write(&file_path, &assembled) {
+                                Ok(()) => paths.push(file_path),
+                                Err(e) => {
+                                    write_err = Some(ClientError::Io(e));
+                                    break;
+                                }
+                            }
+                        }
+
+                        let tid = transfer_id.clone();
+                        drop(downloads);
+
+                        if let Some(tx) = completion_tx {
+                            let result = match write_err {
+                                Some(e) => Err(e),
+                                None => Ok(paths),
+                            };
+                            let _ = tx.send(result);
+                        }
+
+                        // Remove completed download
+                        self.downloads.write().await.remove(&tid);
+                        return;
+                    }
+                }
+            }
+
+            BuildMessage::DownloadReady { .. } => {
+                // Server signals download is ready; FileChunk messages will follow
             }
 
             BuildMessage::Pong { .. } => {
@@ -473,6 +551,69 @@ impl BuildClient {
         }
     }
 
+    /// Download a build artifact from the server.
+    ///
+    /// Sends a RequestDownload for the given artifact IDs, receives file
+    /// chunks, and writes the reassembled data to the output directory.
+    pub async fn download_artifact(
+        &self,
+        artifact_ids: &[String],
+        output_dir: &Path,
+    ) -> Result<Vec<PathBuf>, ClientError> {
+        let conn = self.connection.lock().await;
+        let sender = conn.as_ref().ok_or(ClientError::Disconnected)?.tx.clone();
+        drop(conn);
+
+        let transfer_id = format!("download-{:016x}", rand::random::<u64>());
+
+        // Create output directory
+        tokio::fs::create_dir_all(output_dir)
+            .await
+            .map_err(ClientError::Io)?;
+
+        // Register download state with a completion channel
+        let (completion_tx, completion_rx) = oneshot::channel();
+        {
+            let mut downloads = self.downloads.write().await;
+            downloads.insert(
+                transfer_id.clone(),
+                DownloadState {
+                    chunks: HashMap::new(),
+                    artifact_ids: artifact_ids.to_vec(),
+                    output_dir: output_dir.to_path_buf(),
+                    completion_tx: Some(completion_tx),
+                },
+            );
+        }
+
+        // Send download request
+        sender
+            .send(BuildMessage::RequestDownload {
+                transfer_id: transfer_id.clone(),
+                artifact_ids: artifact_ids.to_vec(),
+            })
+            .await
+            .map_err(|_| ClientError::Disconnected)?;
+
+        // Wait for file assembly to complete (with timeout)
+        let result = tokio::time::timeout(self.config.request_timeout, completion_rx)
+            .await
+            .map_err(|_| ClientError::Timeout)?
+            .map_err(|_| ClientError::Disconnected)?;
+
+        result
+    }
+
+    /// Remove pending requests that have exceeded the configured timeout.
+    ///
+    /// This prevents unbounded growth of the pending map if the server
+    /// never responds to certain requests.
+    pub async fn cleanup_stale_requests(&self) {
+        let mut pending = self.pending.write().await;
+        let timeout = self.config.request_timeout;
+        pending.retain(|_, req| req.submitted_at.elapsed() < timeout);
+    }
+
     /// Cancel a job
     pub async fn cancel_job(&self, job_id: &str) -> Result<(), ClientError> {
         let conn = self.connection.lock().await;
@@ -512,7 +653,7 @@ impl BuildClient {
         let start = Instant::now();
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_millis() as u64;
 
         sender

@@ -43,12 +43,15 @@ pub struct ServerConfig {
 
     /// Server name
     pub server_name: String,
+
+    /// Maximum message size in bytes (limits memory allocation per message)
+    pub max_message_size: usize,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         ServerConfig {
-            address: "0.0.0.0:9876".parse().unwrap(),
+            address: SocketAddr::from(([0, 0, 0, 0], 9876)),
             max_connections: 100,
             max_queue_size: 1000,
             job_timeout: Duration::from_secs(3600),
@@ -57,6 +60,7 @@ impl Default for ServerConfig {
             cache_url: None,
             auth_required: false,
             server_name: "d-build-server".to_string(),
+            max_message_size: 10 * 1024 * 1024, // 10MB
         }
     }
 }
@@ -209,6 +213,8 @@ struct CompletedJob {
     job_id: String,
     result: BuildResult,
     completed_at: Instant,
+    /// Cache key from the original build job, used for exact cache lookups
+    cache_key: Option<String>,
 }
 
 /// Server statistics
@@ -322,8 +328,8 @@ impl BuildServer {
             }
             let len = u32::from_be_bytes(len_buf) as usize;
 
-            // Sanity check
-            if len > 100 * 1024 * 1024 {
+            // Sanity check against configured max message size
+            if len > self.config.max_message_size {
                 let _ = tx
                     .send(BuildMessage::Error {
                         code: ErrorCode::InvalidProtocol,
@@ -420,9 +426,18 @@ impl BuildServer {
                 })
             }
 
-            BuildMessage::Ping { timestamp } => Some(BuildMessage::Pong {
-                timestamp: *timestamp,
-            }),
+            BuildMessage::Ping { timestamp } => {
+                // Update last_heartbeat for workers that send Ping
+                if let Some(cid) = client_id {
+                    let mut workers = self.workers.write().await;
+                    if let Some(worker) = workers.get_mut(cid) {
+                        worker.last_heartbeat = Instant::now();
+                    }
+                }
+                Some(BuildMessage::Pong {
+                    timestamp: *timestamp,
+                })
+            }
 
             BuildMessage::SubmitJob { job_id, job } => {
                 let cid = match client_id {
@@ -636,8 +651,25 @@ impl BuildServer {
     }
 
     /// Check cache for result
-    async fn check_cache(&self, _cache_key: &str) -> Option<BuildResult> {
-        // TODO: Implement cache lookup
+    ///
+    /// Looks up a build result by cache key hash. Checks the in-memory
+    /// completed_jobs store for an exact cache key match.
+    async fn check_cache(&self, cache_key: &str) -> Option<BuildResult> {
+        let completed = self.completed_jobs.read().await;
+        for job in completed.values() {
+            if job.result.cache_hit {
+                // Already a cache-hit result, skip to avoid re-caching
+                continue;
+            }
+            if job.cache_key.as_deref() == Some(cache_key) {
+                let mut result = job.result.clone();
+                result.cache_hit = true;
+                return Some(result);
+            }
+        }
+        drop(completed);
+
+        // Future: query remote cache server via self.config.cache_url
         None
     }
 
@@ -773,14 +805,31 @@ impl BuildServer {
             }
 
             // Cache result
-            self.completed_jobs.write().await.insert(
+            let cache_key = job.job.cache_key.clone();
+            let mut completed = self.completed_jobs.write().await;
+            completed.insert(
                 job_id.to_string(),
                 CompletedJob {
                     job_id: job_id.to_string(),
                     result,
                     completed_at: Instant::now(),
+                    cache_key,
                 },
             );
+
+            // Evict oldest entries if completed_jobs exceeds max_queue_size
+            while completed.len() > self.config.max_queue_size {
+                if let Some(oldest_key) = completed
+                    .iter()
+                    .min_by_key(|(_, v)| v.completed_at)
+                    .map(|(k, _)| k.clone())
+                {
+                    completed.remove(&oldest_key);
+                } else {
+                    break;
+                }
+            }
+            drop(completed);
 
             // Try to schedule more jobs
             self.try_schedule().await;
