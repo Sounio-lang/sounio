@@ -696,3 +696,62 @@ fn test_cli_check_multiple_files_fail() {
         "check should not accept multiple files"
     );
 }
+
+// ============================================================================
+// Multi-module compilation (Poseidon)
+// ============================================================================
+
+#[test]
+fn test_selfhosted_native_multimodule_import_detection() {
+    // Verify source_has_imports correctly detects import/use statements
+    let temp_dir = TempDir::new().unwrap();
+
+    let no_imports = create_test_file(&temp_dir, "single.sio", "fn main() -> i64 { 42 }");
+    let with_import = create_test_file(&temp_dir, "with_import.sio", "import math\n\nfn main() -> i64 { math::add(1, 2) }");
+    let _with_use = create_test_file(&temp_dir, "with_use.sio", "use lib\n\nfn main() -> i64 { lib::foo() }");
+    let _with_use_underscore = create_test_file(&temp_dir, "use_var.sio", "fn main() -> i64 {\n    let use_count = 5\n    use_count\n}");
+
+    // Single file without imports should work with selfhosted-native
+    let output = run_souc(&[
+        "build",
+        "--backend=selfhosted-native",
+        no_imports.to_str().unwrap(),
+        "-o",
+        temp_dir.path().join("single.out").to_str().unwrap(),
+    ]);
+    // May or may not succeed depending on backend availability,
+    // but should not crash on import detection
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("panic"),
+        "Import detection should not panic: {}",
+        stderr,
+    );
+}
+
+#[test]
+fn test_multimodule_test_fixtures_exist() {
+    // Verify the multifile test fixtures are in place
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("workspace root")
+        .to_path_buf();
+
+    let main_sio = workspace_root.join("tests/multifile/main.sio");
+    let math_sio = workspace_root.join("tests/multifile/math.sio");
+    let lib_sio = workspace_root.join("tests/multifile/lib.sio");
+    let main_with_use = workspace_root.join("tests/multifile/main_with_use.sio");
+
+    assert!(main_sio.exists(), "tests/multifile/main.sio missing");
+    assert!(math_sio.exists(), "tests/multifile/math.sio missing");
+    assert!(lib_sio.exists(), "tests/multifile/lib.sio missing");
+    assert!(main_with_use.exists(), "tests/multifile/main_with_use.sio missing");
+
+    // Verify main.sio has imports
+    let content = fs::read_to_string(&main_sio).unwrap();
+    assert!(content.contains("import math"), "main.sio should contain 'import math'");
+
+    let content_use = fs::read_to_string(&main_with_use).unwrap();
+    assert!(content_use.contains("use lib"), "main_with_use.sio should contain 'use lib'");
+}

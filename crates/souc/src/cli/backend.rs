@@ -760,6 +760,23 @@ pub fn compile(args: &BuildArgs) -> CompileOutput {
     output
 }
 
+/// Check if a source file contains import/use statements requiring multi-module compilation.
+fn source_has_imports(path: &std::path::Path) -> bool {
+    if let Ok(content) = std::fs::read_to_string(path) {
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("import ") {
+                return true;
+            }
+            // "use " keyword but not "use_" identifiers
+            if trimmed.starts_with("use ") && !trimmed.starts_with("use_") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Compile using self-hosted native backend (Phase 6: compile_to_elf via Sounio VM)
 fn compile_selfhosted_native(args: &BuildArgs) -> Result<(PathBuf, Option<NativeMetrics>), String> {
     let input_path = &args.input[0];
@@ -768,23 +785,35 @@ fn compile_selfhosted_native(args: &BuildArgs) -> Result<(PathBuf, Option<Native
         .clone()
         .unwrap_or_else(|| PathBuf::from("a.out"));
 
+    let has_imports = source_has_imports(input_path);
+
     if args.verbose {
         println!(
-            "Self-hosted native backend: {} -> {}",
+            "Self-hosted native backend: {} -> {} (multimodule: {})",
             input_path.display(),
-            output_path.display()
+            output_path.display(),
+            has_imports,
         );
     }
 
     let mut compiler = crate::compiler_loader::SounioCompiler::new_embedded()
         .map_err(|e| format!("Failed to initialize self-hosted compiler: {}", e))?;
 
-    compiler
-        .compile_file_to_native(
-            &input_path.to_string_lossy(),
-            &output_path.to_string_lossy(),
-        )
-        .map_err(|e| format!("Self-hosted native compilation failed: {}", e))?;
+    if has_imports {
+        compiler
+            .compile_multimodule_to_native(
+                &input_path.to_string_lossy(),
+                &output_path.to_string_lossy(),
+            )
+            .map_err(|e| format!("Self-hosted multi-module native compilation failed: {}", e))?;
+    } else {
+        compiler
+            .compile_file_to_native(
+                &input_path.to_string_lossy(),
+                &output_path.to_string_lossy(),
+            )
+            .map_err(|e| format!("Self-hosted native compilation failed: {}", e))?;
+    }
 
     Ok((output_path, None))
 }

@@ -1790,6 +1790,73 @@ fn main() -> CompileArtifact with IO, Mut, Div, Panic {
         Ok(())
     }
 
+    /// Compiles a multi-module Sounio program to a native ELF binary.
+    ///
+    /// Uses the self-hosted `compile_multimodule_native()` which:
+    ///   load imports → resolve_modules → check all → lower all → merge IR → compile_to_elf
+    pub fn compile_multimodule_to_native(&mut self, path: &str, output_path: &str) -> LoadResult<()> {
+        tracing::info!("Multi-module compile to native ELF: {} -> {}", path, output_path);
+
+        if !std::path::Path::new(path).exists() {
+            return Err(CompilerLoaderError::IoError(format!(
+                "Input path not found '{}'",
+                path
+            )));
+        }
+
+        let selfhost_dir = "self-hosted/";
+        let bytecode = self.compile_file(selfhost_dir)?;
+
+        // Pass --multimodule --backend=native to the self-hosted driver
+        let user_args: Vec<String> = vec![
+            "compile".to_string(),
+            "--multimodule".to_string(),
+            "--backend=native".to_string(),
+            "-o".to_string(),
+            output_path.to_string(),
+            path.to_string(),
+        ];
+
+        let result = self.execute_bytecode_with_args(&bytecode, &user_args)?;
+
+        let exit_code = match &result {
+            crate::vm::Value::Int(n) => *n,
+            _ => -1,
+        };
+
+        if exit_code != 0 {
+            return Err(CompilerLoaderError::CompileError(format!(
+                "Multi-module native compilation exited with code {}",
+                exit_code
+            )));
+        }
+
+        if !std::path::Path::new(output_path).exists() {
+            return Err(CompilerLoaderError::CompileError(
+                "Multi-module native compilation reported success but output file not found".to_string(),
+            ));
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(metadata) = std::fs::metadata(output_path) {
+                let mut perms = metadata.permissions();
+                perms.set_mode(0o755);
+                let _ = std::fs::set_permissions(output_path, perms);
+            }
+        }
+
+        let file_size = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
+        tracing::info!(
+            "Multi-module native ELF binary: {} ({} bytes, executable)",
+            output_path,
+            file_size
+        );
+
+        Ok(())
+    }
+
     /// Execute precompiled bytecode with the self-hosted VM.
     ///
     /// This allows the self-hosted path to run without falling back to the
