@@ -1,0 +1,403 @@
+// stdlib/genomics/embedding.sio — Sequence Embedding & Motif Discovery
+//
+// k-mer frequency profiles, position weight matrices (PWMs), and motif
+// scanning for DNA/RNA sequences. All operations use the GF(4) base
+// encoding (A=0, C=1, G=2, T=3) from genomics/types.sio.
+//
+// Epistemic uncertainty on motif scores is derived from PWM entropy:
+// high-entropy columns contribute less information, increasing score
+// uncertainty.
+//
+// SOTA: Nucleotide Transformer v3 (2026): single-base tokenization, 1Mb context
+//       BMFM-DNA (2025): SNP-aware DNA foundation model
+//       METAGENE-1 (2025): 7B params, 1.5T bp metagenomic pretraining
+//
+// References:
+//   - Stormo (2000): "DNA binding sites: representation and discovery"
+//   - Altschul+ (2009): "PSI-BLAST position-specific scoring matrices"
+//   - Lin (1991): "Divergence measures based on Shannon entropy"
+
+// =============================================================================
+// Math Helpers
+// =============================================================================
+
+fn emb_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn emb_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 25 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn emb_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 { term = term * t2; sum = sum + term / (2 * k + 1) as f64; k = k + 1 }
+    2.0 * sum + (e as f64) * 0.6931471805599453
+}
+
+fn emb_log2(x: f64) -> f64 with Mut, Div, Panic {
+    emb_ln(x) / 0.6931471805599453
+}
+
+// =============================================================================
+// k-mer Profile
+// =============================================================================
+// A k-mer profile counts all subsequences of length k in a DNA sequence.
+// For k=1: 4 bins (A,C,G,T). For k=2: 16 bins. k=3: 64. k=4: 256.
+
+struct KmerProfile {
+    counts: [f64; 256],     // max 4^4 = 256 k-mers
+    n_kmers: i32,           // 4^k
+    k: i32,
+    total: f64,
+}
+
+// Compute k-mer index from a subsequence of bases (each 0-3)
+fn kmer_index(seq: &[i32; 4096], start: i32, k: i32) -> i32 with Mut, Div, Panic {
+    var idx: i64 = 0
+    var i = 0
+    while i < k {
+        idx = idx * 4 + (seq[start + i]) as i64
+        i = i + 1
+    }
+    idx as i32
+}
+
+fn kmer_count(seq: &[i32; 4096], seq_len: i32, k: i32) -> KmerProfile with Mut, Div, Panic {
+    var n_kmers: i64 = 1
+    var i = 0
+    while i < k { n_kmers = n_kmers * 4; i = i + 1 }
+
+    var profile = KmerProfile {
+        counts: [0.0; 256],
+        n_kmers: n_kmers as i32,
+        k: k,
+        total: 0.0,
+    }
+
+    var pos = 0
+    while pos <= seq_len - k {
+        let idx = kmer_index(seq, pos, k)
+        if idx >= 0 {
+            if idx < 256 {
+                profile.counts[idx] = profile.counts[idx] + 1.0
+                profile.total = profile.total + 1.0
+            }
+        }
+        pos = pos + 1
+    }
+
+    profile
+}
+
+fn kmer_normalize(profile: &!KmerProfile) with Mut, Div, Panic {
+    if profile.total <= 0.0 { return }
+    var i = 0
+    while i < profile.n_kmers {
+        profile.counts[i] = profile.counts[i] / profile.total
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// k-mer Distance (Jensen-Shannon Divergence)
+// =============================================================================
+// JSD(P||Q) = 0.5 * KLD(P||M) + 0.5 * KLD(Q||M), where M = 0.5*(P+Q)
+// Returns sqrt(JSD) which is a proper metric.
+
+fn kmer_distance(a: &KmerProfile, b: &KmerProfile) -> f64 with Mut, Div, Panic {
+    if a.k != b.k { return 0.0 - 1.0 }  // incompatible
+
+    var jsd = 0.0
+    var i = 0
+    while i < a.n_kmers {
+        let p = a.counts[i]
+        let q = b.counts[i]
+        let m = 0.5 * (p + q)
+
+        if m > 1.0e-15 {
+            if p > 1.0e-15 {
+                jsd = jsd + 0.5 * p * emb_log2(p / m)
+            }
+            if q > 1.0e-15 {
+                jsd = jsd + 0.5 * q * emb_log2(q / m)
+            }
+        }
+        i = i + 1
+    }
+
+    emb_sqrt(if jsd > 0.0 { jsd } else { 0.0 })
+}
+
+// =============================================================================
+// Position Weight Matrix (PWM)
+// =============================================================================
+// A PWM represents a DNA binding motif as a matrix of log-odds scores.
+// Rows = positions (up to 256), Columns = 4 bases (A, C, G, T)
+// Weight[pos][base] = log2(freq[pos][base] / background)
+
+struct PWM {
+    weights: [f64; 1024],   // n_positions * 4, row-major
+    n_positions: i32,
+    info_content: [f64; 256],  // information content per position (bits)
+}
+
+struct MotifHit {
+    position: i32,
+    score: f64,
+    u_score: f64,           // uncertainty from low-info columns
+    strand: i32,            // 1 = forward, -1 = reverse complement
+}
+
+struct MotifResult {
+    hits: [MotifHit; 512],
+    n_hits: i32,
+    threshold: f64,
+}
+
+// Build PWM from aligned sequences
+fn pwm_from_alignment(
+    seqs: &[[i32; 256]; 128],
+    n_seqs: i32,
+    seq_len: i32,
+) -> PWM with Mut, Div, Panic {
+    var pwm = PWM {
+        weights: [0.0; 1024],
+        n_positions: seq_len,
+        info_content: [0.0; 256],
+    }
+
+    // Count frequencies at each position
+    var pos = 0
+    while pos < seq_len {
+        var base_counts: [f64; 4] = [0.0; 4]
+        var s = 0
+        while s < n_seqs {
+            let b = seqs[s][pos]
+            if b >= 0 {
+                if b < 4 {
+                    base_counts[b] = base_counts[b] + 1.0
+                }
+            }
+            s = s + 1
+        }
+
+        // Add pseudocount (Laplace smoothing)
+        var total = 0.0
+        var b2 = 0
+        while b2 < 4 {
+            base_counts[b2] = base_counts[b2] + 0.5
+            total = total + base_counts[b2]
+            b2 = b2 + 1
+        }
+
+        // Compute log-odds and information content
+        let bg = 0.25  // uniform background
+        var entropy = 0.0
+        var b3 = 0
+        while b3 < 4 {
+            let freq = base_counts[b3] / total
+            pwm.weights[pos * 4 + b3] = emb_log2(freq / bg)
+            if freq > 1.0e-15 {
+                entropy = entropy - freq * emb_log2(freq)
+            }
+            b3 = b3 + 1
+        }
+
+        // Info content = 2 - H(position) bits
+        pwm.info_content[pos] = 2.0 - entropy
+        pos = pos + 1
+    }
+
+    pwm
+}
+
+// Add pseudocount to existing PWM (re-normalizes)
+fn pwm_add_pseudocount(pwm: &!PWM, pseudo: f64) with Mut, Div, Panic {
+    var pos = 0
+    while pos < pwm.n_positions {
+        var b = 0
+        while b < 4 {
+            // Convert back from log-odds, add pseudo, re-log
+            let w = pwm.weights[pos * 4 + b]
+            // Approximate: just shift weights slightly toward 0
+            pwm.weights[pos * 4 + b] = w * (1.0 - pseudo) + 0.0 * pseudo
+            b = b + 1
+        }
+        pos = pos + 1
+    }
+}
+
+// Score a single position in a sequence against the PWM
+fn pwm_score_position(
+    pwm: &PWM,
+    seq: &[i32; 4096],
+    pos: i32,
+) -> f64 with Mut, Div, Panic {
+    var score = 0.0
+    var i = 0
+    while i < pwm.n_positions {
+        let base = seq[pos + i]
+        if base >= 0 {
+            if base < 4 {
+                score = score + pwm.weights[i * 4 + base]
+            }
+        }
+        i = i + 1
+    }
+    score
+}
+
+// Uncertainty of a score based on PWM information content
+fn pwm_score_uncertainty(pwm: &PWM) -> f64 with Mut, Div, Panic {
+    // Low-info positions contribute more uncertainty
+    var total_info = 0.0
+    var max_info = 2.0 * (pwm.n_positions as f64)  // max 2 bits per position
+    var i = 0
+    while i < pwm.n_positions {
+        total_info = total_info + pwm.info_content[i]
+        i = i + 1
+    }
+    if max_info > 0.0 {
+        1.0 - total_info / max_info  // 0 = certain, 1 = random
+    } else {
+        1.0
+    }
+}
+
+// =============================================================================
+// Motif Scanning
+// =============================================================================
+
+fn pwm_scan(
+    pwm: &PWM,
+    seq: &[i32; 4096],
+    seq_len: i32,
+    threshold: f64,
+) -> MotifResult with Mut, Div, Panic {
+    var result = MotifResult {
+        hits: [MotifHit { position: 0, score: 0.0, u_score: 0.0, strand: 0 }; 512],
+        n_hits: 0,
+        threshold: threshold,
+    }
+
+    let u = pwm_score_uncertainty(pwm)
+
+    var pos = 0
+    while pos <= seq_len - pwm.n_positions {
+        let score = pwm_score_position(pwm, seq, pos)
+        if score >= threshold {
+            if result.n_hits < 512 {
+                result.hits[result.n_hits] = MotifHit {
+                    position: pos,
+                    score: score,
+                    u_score: u * emb_abs(score),
+                    strand: 1,
+                }
+                result.n_hits = result.n_hits + 1
+            }
+        }
+        pos = pos + 1
+    }
+
+    result
+}
+
+// =============================================================================
+// Sequence Embedding via k-mer feature hashing
+// =============================================================================
+// Project k-mer frequencies into a lower-dimensional space using
+// deterministic hash-based projection (no randomness needed).
+
+struct SeqEmbedding {
+    vector: [f64; 64],
+    u_vector: [f64; 64],    // uncertainty per dimension
+    dim: i32,
+}
+
+fn seq_embed_kmer(
+    seq: &[i32; 4096],
+    seq_len: i32,
+    dim: i32,
+) -> SeqEmbedding with Mut, Div, Panic {
+    var emb = SeqEmbedding {
+        vector: [0.0; 64],
+        u_vector: [0.0; 64],
+        dim: dim,
+    }
+
+    // Use k=3 (64 trimers) projected into dim dimensions
+    let profile = kmer_count(seq, seq_len, 3)
+
+    // Hash-based projection: kmer_idx mod dim determines target dimension
+    // Sign: kmer_idx / dim determines +/-
+    var i = 0
+    while i < profile.n_kmers {
+        let target = i % dim
+        let sign = if (i / dim) % 2 == 0 { 1.0 } else { 0.0 - 1.0 }
+        emb.vector[target] = emb.vector[target] + sign * profile.counts[i]
+        i = i + 1
+    }
+
+    // Normalize to unit vector and compute uncertainty
+    var norm = 0.0
+    var j = 0
+    while j < dim {
+        norm = norm + emb.vector[j] * emb.vector[j]
+        j = j + 1
+    }
+    norm = emb_sqrt(norm)
+
+    if norm > 1.0e-15 {
+        var k = 0
+        while k < dim {
+            emb.vector[k] = emb.vector[k] / norm
+            // Uncertainty from counting: sqrt(count) / total
+            emb.u_vector[k] = 1.0 / emb_sqrt(profile.total + 1.0)
+            k = k + 1
+        }
+    }
+
+    emb
+}
+
+// Cosine similarity between two embeddings
+fn seq_cosine_similarity(a: &SeqEmbedding, b: &SeqEmbedding) -> f64 with Mut, Div, Panic {
+    var dot = 0.0
+    var na = 0.0
+    var nb = 0.0
+    var i = 0
+    while i < a.dim {
+        dot = dot + a.vector[i] * b.vector[i]
+        na = na + a.vector[i] * a.vector[i]
+        nb = nb + b.vector[i] * b.vector[i]
+        i = i + 1
+    }
+    let denom = emb_sqrt(na) * emb_sqrt(nb)
+    if denom > 1.0e-15 { dot / denom } else { 0.0 }
+}
+
+// Euclidean distance between embeddings
+fn seq_embedding_distance(a: &SeqEmbedding, b: &SeqEmbedding) -> f64 with Mut, Div, Panic {
+    var sum_sq = 0.0
+    var i = 0
+    while i < a.dim {
+        let d = a.vector[i] - b.vector[i]
+        sum_sq = sum_sq + d * d
+        i = i + 1
+    }
+    emb_sqrt(sum_sq)
+}

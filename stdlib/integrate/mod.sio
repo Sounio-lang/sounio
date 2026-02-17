@@ -1,0 +1,354 @@
+// integrate — Numerical Quadrature Module
+//
+// Provides composite Newton-Cotes rules (trapezoid, Simpson, Simpson 3/8,
+// Boole, midpoint), Gauss-Legendre quadrature (2-5 points + composite),
+// Romberg integration with Richardson extrapolation, and adaptive Simpson
+// refinement.
+//
+// References:
+//   Stoer & Bulirsch, "Introduction to Numerical Analysis" (2002)
+//   Burden & Faires, "Numerical Analysis" (10th ed.)
+//   Abramowitz & Stegun, Table 25.4 (Gauss-Legendre nodes/weights)
+
+// ============================================================================
+// RESULT TYPE
+// ============================================================================
+
+struct QuadResult {
+    value: f64,
+    error_estimate: f64,
+    intervals: i32,
+    converged: bool,
+}
+
+fn quad_result(value: f64, err: f64, intervals: i32, converged: bool) -> QuadResult with Mut, Panic {
+    QuadResult { value: value, error_estimate: err, intervals: intervals, converged: converged }
+}
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+// ============================================================================
+// NEWTON-COTES RULES
+// ============================================================================
+
+// Composite trapezoidal rule
+fn trapezoid(a: f64, b: f64, n: i32, f: fn(f64) -> f64) -> f64 with Mut, Panic, Div {
+    let h = (b - a) / (n as f64)
+    var sum = 0.5 * (f(a) + f(b))
+    var i: i32 = 1
+    while i < n {
+        let x = a + (i as f64) * h
+        sum = sum + f(x)
+        i = i + 1
+    }
+    return sum * h
+}
+
+// Composite Simpson's 1/3 rule (n must be even; if odd, bump to n+1)
+fn simpson(a: f64, b: f64, n: i32, f: fn(f64) -> f64) -> f64 with Mut, Panic, Div {
+    var nn = n
+    if nn < 2 { nn = 2 }
+    // Ensure even
+    let rem = nn - 2 * (nn / 2)
+    if rem != 0 { nn = nn + 1 }
+
+    let h = (b - a) / (nn as f64)
+    var sum = f(a) + f(b)
+
+    var i: i32 = 1
+    while i < nn {
+        let x = a + (i as f64) * h
+        let rem_i = i - 2 * (i / 2)
+        if rem_i != 0 {
+            sum = sum + 4.0 * f(x)
+        } else {
+            sum = sum + 2.0 * f(x)
+        }
+        i = i + 1
+    }
+    return sum * h / 3.0
+}
+
+// Composite Simpson's 3/8 rule (n must be divisible by 3; adjusted if not)
+fn simpson38(a: f64, b: f64, n: i32, f: fn(f64) -> f64) -> f64 with Mut, Panic, Div {
+    var nn = n
+    if nn < 3 { nn = 3 }
+    // Make divisible by 3
+    let r = nn - 3 * (nn / 3)
+    if r != 0 { nn = nn + (3 - r) }
+
+    let h = (b - a) / (nn as f64)
+    var sum = f(a) + f(b)
+
+    var i: i32 = 1
+    while i < nn {
+        let x = a + (i as f64) * h
+        let r3 = i - 3 * (i / 3)
+        if r3 == 0 {
+            sum = sum + 2.0 * f(x)
+        } else {
+            sum = sum + 3.0 * f(x)
+        }
+        i = i + 1
+    }
+    return sum * 3.0 * h / 8.0
+}
+
+// Composite midpoint rule
+fn midpoint(a: f64, b: f64, n: i32, f: fn(f64) -> f64) -> f64 with Mut, Panic, Div {
+    let h = (b - a) / (n as f64)
+    var sum = 0.0
+    var i: i32 = 0
+    while i < n {
+        let x = a + ((i as f64) + 0.5) * h
+        sum = sum + f(x)
+        i = i + 1
+    }
+    return sum * h
+}
+
+// Boole's rule (Newton-Cotes degree 4, n must be divisible by 4)
+fn boole(a: f64, b: f64, n: i32, f: fn(f64) -> f64) -> f64 with Mut, Panic, Div {
+    var nn = n
+    if nn < 4 { nn = 4 }
+    let r = nn - 4 * (nn / 4)
+    if r != 0 { nn = nn + (4 - r) }
+
+    let h = (b - a) / (nn as f64)
+    var sum = 0.0
+    var i: i32 = 0
+    while i < nn / 4 {
+        let x0 = a + (4 * i) as f64 * h
+        let x1 = x0 + h
+        let x2 = x0 + 2.0 * h
+        let x3 = x0 + 3.0 * h
+        let x4 = x0 + 4.0 * h
+        sum = sum + (7.0 * f(x0) + 32.0 * f(x1) + 12.0 * f(x2) + 32.0 * f(x3) + 7.0 * f(x4)) * 2.0 * h / 45.0
+        i = i + 1
+    }
+    return sum
+}
+
+// ============================================================================
+// GAUSS-LEGENDRE QUADRATURE
+// ============================================================================
+
+// Transform from [-1,1] to [a,b]: x = 0.5*(b-a)*t + 0.5*(a+b)
+// dx = 0.5*(b-a)*dt
+
+// 2-point Gauss-Legendre
+// Nodes: +/- 1/sqrt(3) = +/- 0.5773502691896258
+// Weights: 1.0, 1.0
+fn gauss_legendre_2(a: f64, b: f64, f: fn(f64) -> f64) -> f64 with Mut, Panic, Div {
+    let half_len = 0.5 * (b - a)
+    let mid = 0.5 * (a + b)
+    let n1 = 0.5773502691896258
+    let x0 = mid - half_len * n1
+    let x1 = mid + half_len * n1
+    return half_len * (f(x0) + f(x1))
+}
+
+// 3-point Gauss-Legendre
+// Nodes: 0, +/- 0.7745966692414834
+// Weights: 8/9, 5/9, 5/9
+fn gauss_legendre_3(a: f64, b: f64, f: fn(f64) -> f64) -> f64 with Mut, Panic, Div {
+    let half_len = 0.5 * (b - a)
+    let mid = 0.5 * (a + b)
+    let n1 = 0.7745966692414834
+    let w0 = 8.0 / 9.0
+    let w1 = 5.0 / 9.0
+    let x0 = mid
+    let x1 = mid - half_len * n1
+    let x2 = mid + half_len * n1
+    return half_len * (w0 * f(x0) + w1 * f(x1) + w1 * f(x2))
+}
+
+// 4-point Gauss-Legendre
+// Nodes: +/- 0.8611363115940526, +/- 0.3399810435848563
+// Weights: 0.3478548451374538, 0.6521451548625461
+fn gauss_legendre_4(a: f64, b: f64, f: fn(f64) -> f64) -> f64 with Mut, Panic, Div {
+    let half_len = 0.5 * (b - a)
+    let mid = 0.5 * (a + b)
+    let n1 = 0.8611363115940526
+    let n2 = 0.3399810435848563
+    let w1 = 0.3478548451374538
+    let w2 = 0.6521451548625461
+    let x0 = mid - half_len * n1
+    let x1 = mid + half_len * n1
+    let x2 = mid - half_len * n2
+    let x3 = mid + half_len * n2
+    return half_len * (w1 * f(x0) + w1 * f(x1) + w2 * f(x2) + w2 * f(x3))
+}
+
+// 5-point Gauss-Legendre
+// Nodes: +/- 0.9061798459386640, +/- 0.5384693101056831, 0
+// Weights: 0.2369268850561891, 0.4786286704993665, 0.5688888888888889
+fn gauss_legendre_5(a: f64, b: f64, f: fn(f64) -> f64) -> f64 with Mut, Panic, Div {
+    let half_len = 0.5 * (b - a)
+    let mid = 0.5 * (a + b)
+    let n1 = 0.9061798459386640
+    let n2 = 0.5384693101056831
+    let w1 = 0.2369268850561891
+    let w2 = 0.4786286704993665
+    let w0 = 0.5688888888888889
+    let x0 = mid
+    let x1 = mid - half_len * n1
+    let x2 = mid + half_len * n1
+    let x3 = mid - half_len * n2
+    let x4 = mid + half_len * n2
+    return half_len * (w0 * f(x0) + w1 * f(x1) + w1 * f(x2) + w2 * f(x3) + w2 * f(x4))
+}
+
+// Composite Gauss-Legendre: split [a,b] into m sub-intervals, apply n_points GL on each
+fn composite_gauss_legendre(a: f64, b: f64, m: i32, n_points: i32, f: fn(f64) -> f64) -> f64 with Mut, Panic, Div {
+    let h = (b - a) / (m as f64)
+    var sum = 0.0
+    var i: i32 = 0
+    while i < m {
+        let sub_a = a + (i as f64) * h
+        let sub_b = sub_a + h
+        if n_points == 2 {
+            sum = sum + gauss_legendre_2(sub_a, sub_b, f)
+        } else if n_points == 3 {
+            sum = sum + gauss_legendre_3(sub_a, sub_b, f)
+        } else if n_points == 4 {
+            sum = sum + gauss_legendre_4(sub_a, sub_b, f)
+        } else {
+            sum = sum + gauss_legendre_5(sub_a, sub_b, f)
+        }
+        i = i + 1
+    }
+    return sum
+}
+
+// ============================================================================
+// ROMBERG INTEGRATION
+// ============================================================================
+
+// Romberg integration with Richardson extrapolation
+// Uses a triangular table R[level][k], stored flat in [f64; 256]
+// Index: R[level * 16 + k]
+// max_level capped at 15 (so up to 16 rows, 16 cols = 256 entries)
+fn romberg(a: f64, b: f64, max_level: i32, tol: f64, f: fn(f64) -> f64) -> QuadResult with Mut, Panic, Div {
+    var mlev = max_level
+    if mlev > 15 { mlev = 15 }
+    if mlev < 1 { mlev = 1 }
+
+    var R: [f64; 256] = [0.0; 256]
+
+    // R[0,0] = basic trapezoid
+    R[0] = 0.5 * (b - a) * (f(a) + f(b))
+
+    var level: i32 = 1
+    while level <= mlev {
+        // Compute R[level, 0] = trapezoid with 2^level panels
+        let n_panels = 1 << level
+        let h = (b - a) / (n_panels as f64)
+
+        // Sum the new midpoints (odd-indexed points)
+        var mid_sum = 0.0
+        var j: i32 = 1
+        while j < n_panels {
+            let j_rem = j - 2 * (j / 2)
+            if j_rem != 0 {
+                let x = a + (j as f64) * h
+                mid_sum = mid_sum + f(x)
+            }
+            j = j + 1
+        }
+        R[level * 16] = 0.5 * R[(level - 1) * 16] + h * mid_sum
+
+        // Richardson extrapolation
+        var k: i32 = 1
+        while k <= level {
+            let prev = R[level * 16 + (k - 1)]
+            let prev_level = R[(level - 1) * 16 + (k - 1)]
+            let four_k = 1 << (2 * k)
+            R[level * 16 + k] = prev + (prev - prev_level) / ((four_k as f64) - 1.0)
+            k = k + 1
+        }
+
+        // Check convergence
+        let current = R[level * 16 + level]
+        let previous = R[(level - 1) * 16 + (level - 1)]
+        let err = abs_f64(current - previous)
+        if err < tol {
+            return quad_result(current, err, 1 << level, true)
+        }
+
+        level = level + 1
+    }
+
+    let final_val = R[mlev * 16 + mlev]
+    let prev_val = R[(mlev - 1) * 16 + (mlev - 1)]
+    let final_err = abs_f64(final_val - prev_val)
+    return quad_result(final_val, final_err, 1 << mlev, false)
+}
+
+// ============================================================================
+// ADAPTIVE SIMPSON
+// ============================================================================
+
+// Recursive adaptive Simpson step
+fn adaptive_simpson_step(
+    a: f64, b: f64,
+    fa: f64, fb: f64, fm: f64,
+    whole: f64,
+    tol: f64,
+    depth: i32,
+    f: fn(f64) -> f64
+) -> QuadResult with Mut, Panic, Div {
+    let mid = 0.5 * (a + b)
+    let ml = 0.5 * (a + mid)
+    let mr = 0.5 * (mid + b)
+    let fml = f(ml)
+    let fmr = f(mr)
+
+    let h = b - a
+    let left = (h / 12.0) * (fa + 4.0 * fml + fm)
+    let right = (h / 12.0) * (fm + 4.0 * fmr + fb)
+    let refined = left + right
+    let err = (refined - whole) / 15.0
+
+    if depth <= 0 || abs_f64(err) < tol {
+        let val = refined + err
+        return quad_result(val, abs_f64(err), 2, true)
+    }
+
+    let left_result = adaptive_simpson_step(a, mid, fa, fm, fml, left, tol / 2.0, depth - 1, f)
+    let right_result = adaptive_simpson_step(mid, b, fm, fb, fmr, right, tol / 2.0, depth - 1, f)
+
+    let total_val = left_result.value + right_result.value
+    let total_err = left_result.error_estimate + right_result.error_estimate
+    let total_intervals = left_result.intervals + right_result.intervals
+    let conv = left_result.converged && right_result.converged
+
+    return quad_result(total_val, total_err, total_intervals, conv)
+}
+
+// Adaptive Simpson integration
+fn adaptive_simpson(a: f64, b: f64, tol: f64, f: fn(f64) -> f64) -> QuadResult with Mut, Panic, Div {
+    let fa = f(a)
+    let fb = f(b)
+    let fm = f(0.5 * (a + b))
+    let h = b - a
+    let whole = (h / 6.0) * (fa + 4.0 * fm + fb)
+
+    return adaptive_simpson_step(a, b, fa, fb, fm, whole, tol, 20, f)
+}
+
+// ============================================================================
+// CONVENIENCE WRAPPER
+// ============================================================================
+
+// Default integration routine: uses Romberg with tolerance
+fn integrate(a: f64, b: f64, tol: f64, f: fn(f64) -> f64) -> QuadResult with Mut, Panic, Div {
+    return romberg(a, b, 15, tol, f)
+}

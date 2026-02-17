@@ -1,0 +1,783 @@
+// stdlib/medical/kg_reason.sio — Medical Knowledge Graph Reasoning
+//
+// Drug-disease-gene triplet reasoning over a biomedical knowledge graph.
+// Supports TransE, DistMult, and RotatE scoring functions with
+// GUM-compliant uncertainty propagation on every prediction.
+//
+// SOTA references:
+//   MedKGent (2025): 156K biomedical entities, multi-hop reasoning
+//   GALAX (2025): Graph-Aligned LLM for KG completion
+//   LLaDR (2025): LLM-driven drug repurposing via KG traversal
+//   RotatE (Sun+ 2019): arXiv:1902.10197, rotation-based KG embedding
+//   TransE (Bordes+ 2013): Translating Embeddings for Modeling Relations
+//   DistMult (Yang+ 2015): arXiv:1412.6575, bilinear diagonal scoring
+//
+// Theory:
+//   TransE:   score(h,r,t) = -||h + r - t||_2
+//   DistMult: score(h,r,t) = sum_i(h_i * r_i * t_i)
+//   RotatE:   score(h,r,t) = -||h . r - t||_2  (complex rotation)
+//
+//   Uncertainty propagation (GUM first-order):
+//     u_score^2 = sum_i (df/dx_i)^2 * u_{x_i}^2
+
+// =============================================================================
+// Math Helpers
+// =============================================================================
+
+fn kg_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn kg_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 25 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn kg_min(a: f64, b: f64) -> f64 {
+    if a < b { a } else { b }
+}
+
+fn kg_max(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+fn kg_clamp(x: f64, lo: f64, hi: f64) -> f64 {
+    if x < lo { lo } else if x > hi { hi } else { x }
+}
+
+// Approximate sin for RotatE complex rotation
+fn kg_sin(x: f64) -> f64 with Mut, Div, Panic {
+    // Reduce x to [-pi, pi]
+    var t = x
+    let two_pi = 6.283185307179586
+    while t > 3.14159265 { t = t - two_pi }
+    while t < 0.0 - 3.14159265 { t = t + two_pi }
+    // Taylor: sin(t) = t - t^3/6 + t^5/120 - t^7/5040 + ...
+    let t2 = t * t
+    let t3 = t2 * t
+    let t5 = t3 * t2
+    let t7 = t5 * t2
+    let t9 = t7 * t2
+    t - t3 / 6.0 + t5 / 120.0 - t7 / 5040.0 + t9 / 362880.0
+}
+
+// Approximate cos for RotatE complex rotation
+fn kg_cos(x: f64) -> f64 with Mut, Div, Panic {
+    // cos(x) = sin(x + pi/2)
+    kg_sin(x + 1.5707963267948966)
+}
+
+// =============================================================================
+// Core Types
+// =============================================================================
+
+// Entity types: 0=drug, 1=disease, 2=gene, 3=protein, 4=pathway, 5=symptom
+struct MedEntity {
+    embedding: [f64; 16],
+    u_embedding: [f64; 16],
+    entity_type: i32,
+}
+
+// Relation types: 0=treats, 1=causes, 2=targets, 3=interacts,
+//                 4=associated_with, 5=inhibits
+struct MedRelation {
+    embedding: [f64; 16],
+    rel_type: i32,
+}
+
+struct MedTriple {
+    head: i32,
+    relation: i32,
+    tail: i32,
+    confidence: f64,
+}
+
+struct MedKG {
+    entities: [MedEntity; 4096],
+    relations: [MedRelation; 64],
+    triples: [MedTriple; 16384],
+    n_entities: i32,
+    n_relations: i32,
+    n_triples: i32,
+}
+
+struct PathResult {
+    path_entities: [i32; 16],
+    path_relations: [i32; 16],
+    path_len: i32,
+    path_score: f64,
+    u_score: f64,
+}
+
+struct RepurposeCandidate {
+    drug_id: i32,
+    disease_id: i32,
+    score: f64,
+    u_score: f64,
+    confidence: f64,
+}
+
+// =============================================================================
+// Constructors
+// =============================================================================
+
+fn med_entity_zero() -> MedEntity {
+    MedEntity {
+        embedding: [0.0; 16],
+        u_embedding: [1.0; 16],
+        entity_type: 0,
+    }
+}
+
+fn med_relation_zero() -> MedRelation {
+    MedRelation {
+        embedding: [0.0; 16],
+        rel_type: 0,
+    }
+}
+
+fn med_triple_zero() -> MedTriple {
+    MedTriple {
+        head: 0,
+        relation: 0,
+        tail: 0,
+        confidence: 0.0,
+    }
+}
+
+fn med_kg_new() -> MedKG with Mut, Panic {
+    var kg = MedKG {
+        entities: [MedEntity {
+            embedding: [0.0; 16],
+            u_embedding: [1.0; 16],
+            entity_type: 0,
+        }; 4096],
+        relations: [MedRelation {
+            embedding: [0.0; 16],
+            rel_type: 0,
+        }; 64],
+        triples: [MedTriple {
+            head: 0,
+            relation: 0,
+            tail: 0,
+            confidence: 0.0,
+        }; 16384],
+        n_entities: 0,
+        n_relations: 0,
+        n_triples: 0,
+    }
+    kg
+}
+
+// =============================================================================
+// Graph Construction
+// =============================================================================
+
+fn med_kg_add_entity(
+    kg: &!MedKG,
+    emb: &[f64; 16],
+    u_emb: &[f64; 16],
+    etype: i32,
+) -> i32 with Mut, Div, Panic {
+    let idx = kg.n_entities
+    if idx >= 4096 { return 0 - 1 }
+    var i = 0
+    while i < 16 {
+        kg.entities[idx].embedding[i] = emb[i]
+        kg.entities[idx].u_embedding[i] = u_emb[i]
+        i = i + 1
+    }
+    kg.entities[idx].entity_type = etype
+    kg.n_entities = kg.n_entities + 1
+    idx
+}
+
+fn med_kg_add_relation(
+    kg: &!MedKG,
+    emb: &[f64; 16],
+    rtype: i32,
+) -> i32 with Mut, Div, Panic {
+    let idx = kg.n_relations
+    if idx >= 64 { return 0 - 1 }
+    var i = 0
+    while i < 16 {
+        kg.relations[idx].embedding[i] = emb[i]
+        i = i + 1
+    }
+    kg.relations[idx].rel_type = rtype
+    kg.n_relations = kg.n_relations + 1
+    idx
+}
+
+fn med_kg_add_triple(
+    kg: &!MedKG,
+    h: i32,
+    r: i32,
+    t: i32,
+    conf: f64,
+) with Mut, Panic {
+    let idx = kg.n_triples
+    if idx >= 16384 { return }
+    kg.triples[idx].head = h
+    kg.triples[idx].relation = r
+    kg.triples[idx].tail = t
+    kg.triples[idx].confidence = conf
+    kg.n_triples = kg.n_triples + 1
+}
+
+// =============================================================================
+// TransE Scoring: score = -||h + r - t||_2
+// =============================================================================
+
+fn med_score_transe(
+    kg: &MedKG,
+    h: i32,
+    r: i32,
+    t: i32,
+) -> f64 with Mut, Div, Panic {
+    var dist_sq = 0.0
+    var i = 0
+    while i < 16 {
+        let diff = kg.entities[h].embedding[i]
+                 + kg.relations[r].embedding[i]
+                 - kg.entities[t].embedding[i]
+        dist_sq = dist_sq + diff * diff
+        i = i + 1
+    }
+    0.0 - kg_sqrt(dist_sq)
+}
+
+// =============================================================================
+// DistMult Scoring: score = sum_i(h_i * r_i * t_i)
+// =============================================================================
+
+fn med_score_distmult(
+    kg: &MedKG,
+    h: i32,
+    r: i32,
+    t: i32,
+) -> f64 with Mut, Div, Panic {
+    var score = 0.0
+    var i = 0
+    while i < 16 {
+        score = score + kg.entities[h].embedding[i]
+                      * kg.relations[r].embedding[i]
+                      * kg.entities[t].embedding[i]
+        i = i + 1
+    }
+    score
+}
+
+// =============================================================================
+// RotatE Scoring: complex rotation in paired dimensions
+// =============================================================================
+// Treat embedding as 8 complex numbers: (dim 2k, dim 2k+1) = (re, im)
+// Relation acts as rotation: r = (cos(theta), sin(theta))
+// score = -||h . r - t||_2 where . is element-wise complex product
+
+fn med_score_rotate(
+    kg: &MedKG,
+    h: i32,
+    r: i32,
+    t: i32,
+) -> f64 with Mut, Div, Panic {
+    var dist_sq = 0.0
+    var k = 0
+    while k < 8 {
+        let re_idx = (k * 2) as i32
+        let im_idx = (k * 2 + 1) as i32
+
+        let h_re = kg.entities[h].embedding[re_idx]
+        let h_im = kg.entities[h].embedding[im_idx]
+
+        // Relation angle: interpret relation embedding as rotation phase
+        let theta = kg.relations[r].embedding[re_idx]
+        let r_re = kg_cos(theta)
+        let r_im = kg_sin(theta)
+
+        let t_re = kg.entities[t].embedding[re_idx]
+        let t_im = kg.entities[t].embedding[im_idx]
+
+        // Complex multiplication: (h_re + i*h_im) * (r_re + i*r_im)
+        let hr_re = h_re * r_re - h_im * r_im
+        let hr_im = h_re * r_im + h_im * r_re
+
+        let diff_re = hr_re - t_re
+        let diff_im = hr_im - t_im
+        dist_sq = dist_sq + diff_re * diff_re + diff_im * diff_im
+
+        k = k + 1
+    }
+    0.0 - kg_sqrt(dist_sq)
+}
+
+// =============================================================================
+// Uncertainty Scoring (GUM first-order propagation)
+// =============================================================================
+// u_score^2 = sum_i (u_h_i^2 + u_t_i^2)  (TransE sensitivity = 1 per dim)
+
+fn med_score_uncertainty(
+    kg: &MedKG,
+    h: i32,
+    t: i32,
+) -> f64 with Mut, Div, Panic {
+    var u_sq = 0.0
+    var i = 0
+    while i < 16 {
+        let uh = kg.entities[h].u_embedding[i]
+        let ut = kg.entities[t].u_embedding[i]
+        u_sq = u_sq + uh * uh + ut * ut
+        i = i + 1
+    }
+    kg_sqrt(u_sq)
+}
+
+// =============================================================================
+// BFS Path Finding with Confidence
+// =============================================================================
+// Find a path from src to dst of length <= max_len.
+// Uses breadth-first search over the triple adjacency.
+
+fn med_path_bfs(
+    kg: &MedKG,
+    src: i32,
+    dst: i32,
+    max_len: i32,
+    result: &!PathResult,
+) -> bool with Mut, Div, Panic {
+    // BFS state: queue of (entity_id, depth) pairs
+    // visited[i] = 1 if entity i has been visited
+    // parent[i] = entity that led to i
+    // parent_rel[i] = relation used to reach i
+
+    var visited: [i32; 4096] = [0; 4096]
+    var parent: [i32; 4096] = [0 - 1; 4096]
+    var parent_rel: [i32; 4096] = [0 - 1; 4096]
+    var queue_ent: [i32; 4096] = [0; 4096]
+    var queue_depth: [i32; 4096] = [0; 4096]
+    var q_head = 0
+    var q_tail = 0
+
+    // Enqueue source
+    queue_ent[q_tail] = src
+    queue_depth[q_tail] = 0
+    q_tail = q_tail + 1
+    visited[src] = 1
+
+    var found = false
+
+    while q_head < q_tail {
+        if found { q_head = q_tail } else {
+            let cur = queue_ent[q_head]
+            let depth = queue_depth[q_head]
+            q_head = q_head + 1
+
+            if cur == dst {
+                found = true
+            } else {
+                if depth < max_len {
+                    // Scan all triples for edges from cur
+                    var ti = 0
+                    while ti < kg.n_triples {
+                        if found == false {
+                            if kg.triples[ti].head == cur {
+                                let nbr = kg.triples[ti].tail
+                                if visited[nbr] == 0 {
+                                    visited[nbr] = 1
+                                    parent[nbr] = cur
+                                    parent_rel[nbr] = kg.triples[ti].relation
+                                    if q_tail < 4096 {
+                                        queue_ent[q_tail] = nbr
+                                        queue_depth[q_tail] = depth + 1
+                                        q_tail = q_tail + 1
+                                    }
+                                    if nbr == dst { found = true }
+                                }
+                            }
+                            // Also check reverse direction (undirected traversal)
+                            if kg.triples[ti].tail == cur {
+                                let nbr = kg.triples[ti].head
+                                if visited[nbr] == 0 {
+                                    visited[nbr] = 1
+                                    parent[nbr] = cur
+                                    parent_rel[nbr] = kg.triples[ti].relation
+                                    if q_tail < 4096 {
+                                        queue_ent[q_tail] = nbr
+                                        queue_depth[q_tail] = depth + 1
+                                        q_tail = q_tail + 1
+                                    }
+                                    if nbr == dst { found = true }
+                                }
+                            }
+                        }
+                        ti = ti + 1
+                    }
+                }
+            }
+        }
+    }
+
+    if found == false { return false }
+
+    // Reconstruct path from dst back to src
+    var path_buf: [i32; 16] = [0; 16]
+    var rel_buf: [i32; 16] = [0; 16]
+    var path_len = 0
+    var cur = dst
+
+    while cur != src {
+        if path_len >= 16 { return false }  // path too long for buffer
+        path_buf[path_len] = cur
+        rel_buf[path_len] = parent_rel[cur]
+        path_len = path_len + 1
+        cur = parent[cur]
+        if cur < 0 { return false }  // broken chain
+    }
+    path_buf[path_len] = src
+    path_len = path_len + 1
+
+    // Reverse into result (src -> ... -> dst)
+    result.path_len = path_len
+    var ri = 0
+    while ri < path_len {
+        result.path_entities[ri] = path_buf[path_len - 1 - ri]
+        if ri < path_len - 1 {
+            result.path_relations[ri] = rel_buf[path_len - 2 - ri]
+        }
+        ri = ri + 1
+    }
+
+    // Compute path score: product of edge confidences along path
+    var score = 1.0
+    var u_sq = 0.0
+    var pi = 0
+    while pi < path_len - 1 {
+        let ent_a = result.path_entities[pi]
+        let ent_b = result.path_entities[pi + 1]
+        let rel = result.path_relations[pi]
+
+        // Find matching triple to get confidence
+        var conf = 0.5  // default if not found
+        var tj = 0
+        while tj < kg.n_triples {
+            if kg.triples[tj].head == ent_a {
+                if kg.triples[tj].tail == ent_b {
+                    if kg.triples[tj].relation == rel {
+                        conf = kg.triples[tj].confidence
+                        tj = kg.n_triples  // break
+                    }
+                }
+            }
+            if kg.triples[tj].tail == ent_a {
+                if kg.triples[tj].head == ent_b {
+                    if kg.triples[tj].relation == rel {
+                        conf = kg.triples[tj].confidence
+                        tj = kg.n_triples  // break
+                    }
+                }
+            }
+            tj = tj + 1
+        }
+        score = score * conf
+
+        // Uncertainty: propagate from entity embeddings
+        let u_edge = med_score_uncertainty(kg, ent_a, ent_b)
+        u_sq = u_sq + u_edge * u_edge
+
+        pi = pi + 1
+    }
+
+    result.path_score = score
+    result.u_score = kg_sqrt(u_sq)
+    true
+}
+
+// =============================================================================
+// Drug Repurposing
+// =============================================================================
+// Score all diseases for a given drug using TransE + DistMult ensemble.
+// Returns the number of candidates written into the results buffer.
+
+fn med_drug_repurpose(
+    kg: &MedKG,
+    drug_id: i32,
+    top_k: i32,
+    results: &![RepurposeCandidate; 64],
+) -> i32 with Mut, Div, Panic {
+    // Score every disease entity (type=1) against the drug
+    // Use the "treats" relation (type=0)
+
+    // Find the "treats" relation index
+    var treats_rel = 0 - 1
+    var ri = 0
+    while ri < kg.n_relations {
+        if kg.relations[ri].rel_type == 0 {
+            treats_rel = ri
+            ri = kg.n_relations  // break
+        }
+        ri = ri + 1
+    }
+    if treats_rel < 0 { return 0 }
+
+    // Temporary buffer for all disease scores
+    var disease_ids: [i32; 4096] = [0; 4096]
+    var disease_scores: [f64; 4096] = [0.0; 4096]
+    var disease_u: [f64; 4096] = [0.0; 4096]
+    var n_diseases = 0
+
+    var ei = 0
+    while ei < kg.n_entities {
+        if kg.entities[ei].entity_type == 1 {
+            // Ensemble: average of TransE and DistMult scores
+            let s_transe = med_score_transe(kg, drug_id, treats_rel, ei)
+            let s_distmult = med_score_distmult(kg, drug_id, treats_rel, ei)
+            let s_rotate = med_score_rotate(kg, drug_id, treats_rel, ei)
+
+            let ensemble_score = (s_transe + s_distmult + s_rotate) / 3.0
+            let u = med_score_uncertainty(kg, drug_id, ei)
+
+            disease_ids[n_diseases] = ei
+            disease_scores[n_diseases] = ensemble_score
+            disease_u[n_diseases] = u
+            n_diseases = n_diseases + 1
+        }
+        ei = ei + 1
+    }
+
+    // Sort by score (descending) — insertion sort
+    var si = 1
+    while si < n_diseases {
+        let key_id = disease_ids[si]
+        let key_score = disease_scores[si]
+        let key_u = disease_u[si]
+        var sj = si - 1
+        while sj >= 0 {
+            if disease_scores[sj] < key_score {
+                disease_ids[sj + 1] = disease_ids[sj]
+                disease_scores[sj + 1] = disease_scores[sj]
+                disease_u[sj + 1] = disease_u[sj]
+                sj = sj - 1
+            } else {
+                sj = 0 - 1  // break
+            }
+        }
+        disease_ids[sj + 1] = key_id
+        disease_scores[sj + 1] = key_score
+        disease_u[sj + 1] = key_u
+        si = si + 1
+    }
+
+    // Write top_k into results
+    let n_out = if top_k < n_diseases { top_k } else { n_diseases }
+    let n_capped = if n_out > 64 { 64 } else { n_out }
+
+    var wi = 0
+    while wi < n_capped {
+        let sc = disease_scores[wi]
+        let u = disease_u[wi]
+
+        // Confidence: higher score and lower uncertainty = more confident
+        // Sigmoid-like mapping: conf = 1 / (1 + exp(-score)) * (1 - u_norm)
+        let score_factor = 1.0 / (1.0 + kg_sqrt(kg_abs(0.0 - sc) + 1.0))
+        let u_norm = kg_clamp(u / 10.0, 0.0, 1.0)
+        let conf = (1.0 - score_factor) * (1.0 - u_norm)
+
+        results[wi] = RepurposeCandidate {
+            drug_id: drug_id,
+            disease_id: disease_ids[wi],
+            score: sc,
+            u_score: u,
+            confidence: kg_clamp(conf, 0.0, 1.0),
+        }
+        wi = wi + 1
+    }
+
+    n_capped
+}
+
+// =============================================================================
+// TransE Training Step
+// =============================================================================
+// Gradient descent on one triple:
+//   loss = max(0, ||h + r - t||_2 - ||h' + r - t'||_2 + margin)
+//   grad_h = 2*(h + r - t) / ||h + r - t||  (normalised direction)
+//   Update: h -= lr * grad_h, r -= lr * grad_r, t += lr * grad_t
+//   Also update uncertainty: u decreases as gradient signal is received.
+
+fn med_train_step_transe(
+    kg: &!MedKG,
+    triple_idx: i32,
+    lr: f64,
+    margin: f64,
+) with Mut, Div, Panic {
+    if triple_idx < 0 { return }
+    if triple_idx >= kg.n_triples { return }
+
+    let h_id = kg.triples[triple_idx].head
+    let r_id = kg.triples[triple_idx].relation
+    let t_id = kg.triples[triple_idx].tail
+
+    // Compute h + r - t
+    var diff: [f64; 16] = [0.0; 16]
+    var dist_sq = 0.0
+    var i = 0
+    while i < 16 {
+        diff[i] = kg.entities[h_id].embedding[i]
+                + kg.relations[r_id].embedding[i]
+                - kg.entities[t_id].embedding[i]
+        dist_sq = dist_sq + diff[i] * diff[i]
+        i = i + 1
+    }
+    let dist = kg_sqrt(dist_sq)
+
+    // Only update if distance is greater than margin threshold
+    // (In full training, would compare positive vs negative triple)
+    if dist < margin { return }
+
+    // Normalise gradient direction
+    var grad: [f64; 16] = [0.0; 16]
+    if dist > 1.0e-10 {
+        var gi = 0
+        while gi < 16 {
+            grad[gi] = diff[gi] / dist
+            gi = gi + 1
+        }
+    }
+
+    // Apply gradient updates
+    var ui = 0
+    while ui < 16 {
+        // h moves toward t-r direction
+        kg.entities[h_id].embedding[ui] = kg.entities[h_id].embedding[ui] - lr * grad[ui]
+        // r moves toward t-h direction
+        kg.relations[r_id].embedding[ui] = kg.relations[r_id].embedding[ui] - lr * grad[ui]
+        // t moves toward h+r direction
+        kg.entities[t_id].embedding[ui] = kg.entities[t_id].embedding[ui] + lr * grad[ui]
+
+        // Reduce uncertainty (more training signal = less uncertainty)
+        let decay = 0.99
+        kg.entities[h_id].u_embedding[ui] = kg.entities[h_id].u_embedding[ui] * decay
+        kg.entities[t_id].u_embedding[ui] = kg.entities[t_id].u_embedding[ui] * decay
+        ui = ui + 1
+    }
+
+    // Update triple confidence based on new distance
+    var new_dist_sq = 0.0
+    var ni = 0
+    while ni < 16 {
+        let d = kg.entities[h_id].embedding[ni]
+              + kg.relations[r_id].embedding[ni]
+              - kg.entities[t_id].embedding[ni]
+        new_dist_sq = new_dist_sq + d * d
+        ni = ni + 1
+    }
+    let new_dist = kg_sqrt(new_dist_sq)
+    // Confidence increases as distance decreases
+    let conf = 1.0 / (1.0 + new_dist)
+    kg.triples[triple_idx].confidence = conf
+}
+
+// =============================================================================
+// Multi-hop Reasoning Score
+// =============================================================================
+// Given a path (sequence of entities and relations), compute a composite
+// score as the product of individual edge scores (TransE-based).
+
+fn med_path_score_transe(
+    kg: &MedKG,
+    path: &PathResult,
+) -> f64 with Mut, Div, Panic {
+    if path.path_len < 2 { return 0.0 }
+
+    var product = 1.0
+    var i = 0
+    while i < path.path_len - 1 {
+        let h = path.path_entities[i]
+        let r = path.path_relations[i]
+        let t = path.path_entities[i + 1]
+        let s = med_score_transe(kg, h, r, t)
+        // Convert score to probability-like: sigmoid(-score)
+        // TransE score is negative distance, so higher = better
+        let prob = 1.0 / (1.0 + kg_sqrt(kg_abs(0.0 - s) + 1.0))
+        product = product * prob
+        i = i + 1
+    }
+    product
+}
+
+// =============================================================================
+// Entity Similarity Search
+// =============================================================================
+// Find the k most similar entities to a query entity by L2 distance
+// in embedding space.
+
+fn med_find_similar(
+    kg: &MedKG,
+    query_id: i32,
+    etype_filter: i32,
+    top_k: i32,
+    out_ids: &![i32; 64],
+    out_scores: &![f64; 64],
+) -> i32 with Mut, Div, Panic {
+    // Compute distances to all entities of the given type
+    var ids: [i32; 4096] = [0; 4096]
+    var dists: [f64; 4096] = [0.0; 4096]
+    var n = 0
+
+    var ei = 0
+    while ei < kg.n_entities {
+        if ei != query_id {
+            let type_match = if etype_filter < 0 { true }
+                             else { kg.entities[ei].entity_type == etype_filter }
+            if type_match {
+                var d_sq = 0.0
+                var di = 0
+                while di < 16 {
+                    let diff = kg.entities[query_id].embedding[di]
+                             - kg.entities[ei].embedding[di]
+                    d_sq = d_sq + diff * diff
+                    di = di + 1
+                }
+                ids[n] = ei
+                dists[n] = kg_sqrt(d_sq)
+                n = n + 1
+            }
+        }
+        ei = ei + 1
+    }
+
+    // Insertion sort by distance (ascending)
+    var si = 1
+    while si < n {
+        let key_id = ids[si]
+        let key_d = dists[si]
+        var sj = si - 1
+        while sj >= 0 {
+            if dists[sj] > key_d {
+                ids[sj + 1] = ids[sj]
+                dists[sj + 1] = dists[sj]
+                sj = sj - 1
+            } else {
+                sj = 0 - 1  // break
+            }
+        }
+        ids[sj + 1] = key_id
+        dists[sj + 1] = key_d
+        si = si + 1
+    }
+
+    let n_out = if top_k < n { top_k } else { n }
+    let n_capped = if n_out > 64 { 64 } else { n_out }
+
+    var wi = 0
+    while wi < n_capped {
+        out_ids[wi] = ids[wi]
+        // Convert distance to similarity score: 1/(1+d)
+        out_scores[wi] = 1.0 / (1.0 + dists[wi])
+        wi = wi + 1
+    }
+    n_capped
+}

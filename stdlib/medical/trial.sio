@@ -1,0 +1,781 @@
+// stdlib/medical/trial.sio — Bayesian Adaptive Clinical Trial Simulation
+//
+// Bayesian adaptive designs for multi-arm clinical trials with interim
+// analyses, response-adaptive randomisation, futility/efficacy stopping,
+// and GUM-compliant uncertainty on every posterior estimate.
+//
+// SOTA references:
+//   QuantHealth (2025): AI-powered clinical trial simulation, 85 % accuracy
+//   Berry Bayesian adaptive designs (Berry+ 2011): foundational framework
+//   ARES platform (2025, Berry Consultants): automated adaptive engine
+//   BayesCT (Ventz+ 2019): Bayesian platform trials
+//   FACTS (Fixed and Adaptive Clinical Trial Simulator): Berry Consultants
+//
+// Theory:
+//   Beta-Binomial conjugacy:
+//     Prior:     p ~ Beta(alpha, beta)
+//     Data:      s successes in n trials
+//     Posterior: p | data ~ Beta(alpha + s, beta + n - s)
+//
+//   Posterior mean:     E[p] = alpha / (alpha + beta)
+//   Posterior variance: Var[p] = alpha*beta / ((a+b)^2 * (a+b+1))
+//
+//   Probability best arm via Monte Carlo:
+//     P(arm_k best) = (1/N) sum_{i=1}^{N} I[theta_k^{(i)} = max_j theta_j^{(i)}]
+//
+//   Sample size (normal approx):
+//     n = (z_{1-alpha/2} + z_{1-beta})^2 / effect_size^2
+
+// =============================================================================
+// Math Helpers
+// =============================================================================
+
+fn trial_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn trial_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 25 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn trial_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 {
+        term = term * t2
+        sum = sum + term / (2 * k + 1) as f64
+        k = k + 1
+    }
+    2.0 * sum + (e as f64) * 0.6931471805599453
+}
+
+fn trial_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 500.0 { return 1.0e200 }
+    if x < -500.0 { return 0.0 }
+    let ln2 = 0.6931471805599453
+    var k_f = x / ln2
+    var k: i32 = 0
+    if k_f >= 0.0 { k = k_f as i32 } else { k = (k_f as i32) - 1 }
+    let r = x - (k as f64) * ln2
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 25 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var result = sum
+    if k >= 0 {
+        var i = 0
+        while i < k { result = result * 2.0; i = i + 1 }
+    } else {
+        var i = 0
+        while i < (0 - k) { result = result / 2.0; i = i + 1 }
+    }
+    result
+}
+
+fn trial_min(a: f64, b: f64) -> f64 {
+    if a < b { a } else { b }
+}
+
+fn trial_max(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+fn trial_clamp(x: f64, lo: f64, hi: f64) -> f64 {
+    if x < lo { lo } else if x > hi { hi } else { x }
+}
+
+// =============================================================================
+// RNG — Inline Linear Congruential Generator
+// =============================================================================
+
+struct TrialRng {
+    seed: f64,
+}
+
+fn trial_rng_new(seed: f64) -> TrialRng {
+    TrialRng { seed: seed }
+}
+
+fn trial_frac(x: f64) -> f64 with Mut, Div {
+    let a = trial_abs(x)
+    var floored = a
+    // Iterative floor: subtract 1 until < 1
+    while floored >= 1.0 { floored = floored - 1.0 }
+    // Now floored is the fractional part of |x|
+    floored
+}
+
+fn trial_lcg(rng: &!TrialRng) -> f64 with Mut, Div {
+    // LCG: seed = frac((seed + 1.0) * 6364136223846793005.0)
+    // Same pattern used across stdlib modules
+    rng.seed = trial_frac((rng.seed + 1.0) * 2.328306e-10 + 0.7654321)
+    // Mix further to reduce autocorrelation
+    rng.seed = trial_frac(rng.seed * 9301.0 + 49297.0)
+    rng.seed
+}
+
+// Generate approximately normal(0,1) via Box-Muller-like sum of uniforms
+// (Central Limit Theorem: sum of 12 uniforms ~ N(6, 1), shift to N(0,1))
+fn trial_normal(rng: &!TrialRng) -> f64 with Mut, Div {
+    var sum = 0.0
+    var i = 0
+    while i < 12 {
+        sum = sum + trial_lcg(rng)
+        i = i + 1
+    }
+    sum - 6.0
+}
+
+// =============================================================================
+// Core Types
+// =============================================================================
+
+struct TrialArm {
+    responses: [f64; 4096],
+    n_enrolled: i32,
+    n_events: i32,
+    sum_response: f64,
+    prior_alpha: f64,
+    prior_beta: f64,
+}
+
+struct TrialConfig {
+    n_arms: i32,
+    max_enrollment: i32,
+    interim_interval: i32,
+    futility_bound: f64,
+    efficacy_bound: f64,
+    prior_alpha: f64,
+    prior_beta: f64,
+}
+
+struct InterimResult {
+    posterior_mean: [f64; 8],
+    posterior_var: [f64; 8],
+    prob_best: [f64; 8],
+    recommend_stop: bool,
+    stop_reason: i32,   // 0=continue, 1=efficacy, 2=futility
+}
+
+struct TrialOutcome {
+    final_n: [i32; 8],
+    success_rate: [f64; 8],
+    bayesian_p: f64,
+    u_bayesian_p: f64,
+    early_stopped: bool,
+    stop_reason: i32,   // 0=ran to completion, 1=efficacy, 2=futility
+    confidence: f64,
+}
+
+// =============================================================================
+// Constructor
+// =============================================================================
+
+fn trial_config_default() -> TrialConfig {
+    TrialConfig {
+        n_arms: 2,
+        max_enrollment: 500,
+        interim_interval: 50,
+        futility_bound: 0.05,
+        efficacy_bound: 0.99,
+        prior_alpha: 1.0,
+        prior_beta: 1.0,
+    }
+}
+
+fn trial_arm_new(prior_a: f64, prior_b: f64) -> TrialArm with Mut, Panic {
+    var arm = TrialArm {
+        responses: [0.0; 4096],
+        n_enrolled: 0,
+        n_events: 0,
+        sum_response: 0.0,
+        prior_alpha: prior_a,
+        prior_beta: prior_b,
+    }
+    arm
+}
+
+// =============================================================================
+// Enrollment
+// =============================================================================
+
+fn trial_enroll(arm: &!TrialArm, response: f64) with Mut, Panic {
+    let idx = arm.n_enrolled
+    if idx >= 4096 { return }
+    arm.responses[idx] = response
+    arm.n_enrolled = arm.n_enrolled + 1
+    arm.sum_response = arm.sum_response + response
+    if response > 0.5 {
+        arm.n_events = arm.n_events + 1
+    }
+}
+
+// =============================================================================
+// Beta-Binomial Posterior
+// =============================================================================
+
+// Posterior parameters after observing data
+fn beta_post_alpha(arm: &TrialArm) -> f64 {
+    arm.prior_alpha + (arm.n_events as f64)
+}
+
+fn beta_post_beta(arm: &TrialArm) -> f64 {
+    arm.prior_beta + ((arm.n_enrolled - arm.n_events) as f64)
+}
+
+fn beta_posterior_mean(alpha: f64, beta: f64) -> f64 with Panic {
+    let denom = alpha + beta
+    if denom < 1.0e-30 { return 0.5 }
+    alpha / denom
+}
+
+fn beta_posterior_var(alpha: f64, beta: f64) -> f64 with Panic {
+    let ab = alpha + beta
+    if ab < 1.0e-30 { return 0.0 }
+    let denom = ab * ab * (ab + 1.0)
+    if denom < 1.0e-30 { return 0.0 }
+    (alpha * beta) / denom
+}
+
+// =============================================================================
+// Approximate Beta Sampling
+// =============================================================================
+// Uses the Joehnk method approximation:
+//   If X ~ Gamma(alpha,1), Y ~ Gamma(beta,1) then X/(X+Y) ~ Beta(alpha,beta)
+//   Gamma(a,1) approximated via Marsaglia-Tsang for a >= 1, or
+//   normal approx: Beta(a,b) ~ N(mean, var) when a,b are moderate.
+
+fn gamma_sample_approx(shape: f64, rng: &!TrialRng) -> f64 with Mut, Div, Panic {
+    // For shape >= 1: Marsaglia-Tsang squeeze method (simplified)
+    // For shape < 1: use shape+1 then scale by U^(1/shape)
+    var a = shape
+    if a < 1.0 { a = a + 1.0 }
+
+    let d = a - 1.0 / 3.0
+    let c = 1.0 / trial_sqrt(9.0 * d)
+
+    var result = 0.0
+    var done = false
+    var attempts = 0
+    while done == false {
+        attempts = attempts + 1
+        if attempts > 200 {
+            // Fallback: use normal approximation
+            result = a + trial_sqrt(a) * trial_normal(rng)
+            if result < 0.001 { result = 0.001 }
+            done = true
+        } else {
+            let x = trial_normal(rng)
+            let v_base = 1.0 + c * x
+            if v_base > 0.0 {
+                let v = v_base * v_base * v_base
+                let u = trial_lcg(rng)
+                // Squeeze test
+                if u < 1.0 - 0.0331 * x * x * x * x {
+                    result = d * v
+                    done = true
+                } else {
+                    let log_u = trial_ln(u)
+                    let rhs = 0.5 * x * x + d * (1.0 - v + trial_ln(v))
+                    if log_u < rhs {
+                        result = d * v
+                        done = true
+                    }
+                }
+            }
+        }
+    }
+
+    // Adjust for shape < 1
+    if shape < 1.0 {
+        let u = trial_lcg(rng)
+        let power = 1.0 / shape
+        // u^(1/shape) via exp(ln(u)/shape)
+        let scale = trial_exp(trial_ln(u + 1.0e-30) * power)
+        result = result * scale
+    }
+
+    if result < 1.0e-30 { result = 1.0e-30 }
+    result
+}
+
+fn beta_sample(alpha: f64, beta: f64, rng: &!TrialRng) -> f64 with Mut, Div, Panic {
+    let x = gamma_sample_approx(alpha, rng)
+    let y = gamma_sample_approx(beta, rng)
+    let denom = x + y
+    if denom < 1.0e-30 { return 0.5 }
+    trial_clamp(x / denom, 0.0, 1.0)
+}
+
+// Sample two beta distributions in one borrow scope (avoids double &!rng)
+struct BetaPairSample {
+    first: f64,
+    second: f64,
+}
+
+fn beta_sample_pair(
+    a0: f64, b0: f64,
+    a1: f64, b1: f64,
+    rng: &!TrialRng,
+) -> BetaPairSample with Mut, Div, Panic {
+    let s0 = beta_sample(a0, b0, rng)
+    let s1 = beta_sample(a1, b1, rng)
+    BetaPairSample { first: s0, second: s1 }
+}
+
+// =============================================================================
+// Probability Each Arm Is Best (Monte Carlo)
+// =============================================================================
+
+fn prob_arm_best(
+    arms: &[TrialArm; 8],
+    n_arms: i32,
+    rng: &!TrialRng,
+    n_sims: i32,
+) -> [f64; 8] with Mut, Div, Panic {
+    var counts: [f64; 8] = [0.0; 8]
+
+    var sim = 0
+    while sim < n_sims {
+        // Draw one sample from each arm's posterior
+        var samples: [f64; 8] = [0.0; 8]
+        var k = 0
+        while k < n_arms {
+            let a = beta_post_alpha(&arms[k])
+            let b = beta_post_beta(&arms[k])
+            samples[k] = beta_sample(a, b, rng)
+            k = k + 1
+        }
+
+        // Find the arm with the highest sample
+        var best_idx = 0
+        var best_val = samples[0]
+        var j = 1
+        while j < n_arms {
+            if samples[j] > best_val {
+                best_val = samples[j]
+                best_idx = j
+            }
+            j = j + 1
+        }
+        counts[best_idx] = counts[best_idx] + 1.0
+
+        sim = sim + 1
+    }
+
+    // Normalise counts to probabilities
+    var result: [f64; 8] = [0.0; 8]
+    let n_f = n_sims as f64
+    var m = 0
+    while m < n_arms {
+        result[m] = counts[m] / n_f
+        m = m + 1
+    }
+    result
+}
+
+// =============================================================================
+// Interim Analysis
+// =============================================================================
+
+fn trial_interim(
+    arms: &[TrialArm; 8],
+    config: &TrialConfig,
+    n_arms: i32,
+) -> InterimResult with Mut, Div, Panic {
+    var result = InterimResult {
+        posterior_mean: [0.0; 8],
+        posterior_var: [0.0; 8],
+        prob_best: [0.0; 8],
+        recommend_stop: false,
+        stop_reason: 0,
+    }
+
+    // Compute posteriors for each arm
+    var k = 0
+    while k < n_arms {
+        let a = beta_post_alpha(&arms[k])
+        let b = beta_post_beta(&arms[k])
+        result.posterior_mean[k] = beta_posterior_mean(a, b)
+        result.posterior_var[k] = beta_posterior_var(a, b)
+        k = k + 1
+    }
+
+    // Monte Carlo probability each arm is best
+    var rng = trial_rng_new(42.0)
+    result.prob_best = prob_arm_best(arms, n_arms, &!rng, 2000)
+
+    // Check stopping criteria
+    // Efficacy: any arm has very high probability of being best
+    var ek = 0
+    while ek < n_arms {
+        if result.prob_best[ek] > config.efficacy_bound {
+            result.recommend_stop = true
+            result.stop_reason = 1  // efficacy
+        }
+        ek = ek + 1
+    }
+
+    // Futility: best arm's probability of beating control is too low
+    // (Control is arm 0 by convention)
+    if n_arms >= 2 {
+        var all_futile = true
+        var fk = 1
+        while fk < n_arms {
+            if result.prob_best[fk] > config.futility_bound {
+                all_futile = false
+            }
+            fk = fk + 1
+        }
+        if all_futile {
+            if result.recommend_stop == false {
+                result.recommend_stop = true
+                result.stop_reason = 2  // futility
+            }
+        }
+    }
+
+    result
+}
+
+// =============================================================================
+// Full Trial Simulation
+// =============================================================================
+
+fn trial_simulate(
+    config: &TrialConfig,
+    true_rates: &[f64; 8],
+    rng: &!TrialRng,
+) -> TrialOutcome with Mut, Div, Panic {
+    var outcome = TrialOutcome {
+        final_n: [0; 8],
+        success_rate: [0.0; 8],
+        bayesian_p: 0.0,
+        u_bayesian_p: 0.0,
+        early_stopped: false,
+        stop_reason: 0,
+        confidence: 0.0,
+    }
+
+    // Initialise arms
+    var arms: [TrialArm; 8] = [TrialArm {
+        responses: [0.0; 4096],
+        n_enrolled: 0,
+        n_events: 0,
+        sum_response: 0.0,
+        prior_alpha: config.prior_alpha,
+        prior_beta: config.prior_beta,
+    }; 8]
+
+    // Enroll patients one at a time, performing interims at intervals
+    var total_enrolled = 0
+    var stopped = false
+
+    while total_enrolled < config.max_enrollment {
+        if stopped { total_enrolled = config.max_enrollment } else {
+            // Assign to an arm (round-robin for simplicity)
+            let arm_idx = total_enrolled % config.n_arms
+
+            // Generate binary response from true rate
+            let u = trial_lcg(rng)
+            let response = if u < true_rates[arm_idx] { 1.0 } else { 0.0 }
+
+            trial_enroll(&!arms[arm_idx], response)
+            total_enrolled = total_enrolled + 1
+
+            // Perform interim analysis at intervals
+            if total_enrolled > 0 {
+                if (total_enrolled % config.interim_interval) == 0 {
+                    let interim = trial_interim(&arms, config, config.n_arms)
+                    if interim.recommend_stop {
+                        outcome.early_stopped = true
+                        outcome.stop_reason = interim.stop_reason
+                        stopped = true
+                    }
+                }
+            }
+        }
+    }
+
+    // Gather final results
+    var k = 0
+    while k < config.n_arms {
+        outcome.final_n[k] = arms[k].n_enrolled
+        if arms[k].n_enrolled > 0 {
+            outcome.success_rate[k] = (arms[k].n_events as f64) / (arms[k].n_enrolled as f64)
+        }
+        k = k + 1
+    }
+
+    // Compute final Bayesian posterior probability that arm 1 > arm 0
+    // P(theta_1 > theta_0 | data) via Monte Carlo
+    if config.n_arms >= 2 {
+        var mc_rng = trial_rng_new(123.0)
+        let a0 = beta_post_alpha(&arms[0])
+        let b0 = beta_post_beta(&arms[0])
+        let a1 = beta_post_alpha(&arms[1])
+        let b1 = beta_post_beta(&arms[1])
+
+        var wins = 0.0
+        var n_mc = 5000
+        var si = 0
+        while si < n_mc {
+            let pair = beta_sample_pair(a0, b0, a1, b1, &!mc_rng)
+            if pair.second > pair.first { wins = wins + 1.0 }
+            si = si + 1
+        }
+        outcome.bayesian_p = wins / (n_mc as f64)
+        // Uncertainty on Monte Carlo estimate: se = sqrt(p*(1-p)/n)
+        let p = outcome.bayesian_p
+        outcome.u_bayesian_p = trial_sqrt(p * (1.0 - p) / (n_mc as f64))
+    }
+
+    // Confidence from posterior precision
+    // Higher enrollment + clearer separation = higher confidence
+    let total_n = total_enrolled as f64
+    let max_n = config.max_enrollment as f64
+    let enrollment_factor = trial_min(total_n / max_n, 1.0)
+    let separation = trial_abs(outcome.bayesian_p - 0.5) * 2.0
+    outcome.confidence = enrollment_factor * separation
+
+    outcome
+}
+
+// =============================================================================
+// Sample Size Estimation
+// =============================================================================
+// Normal approximation for two-proportion test:
+//   n = (z_{alpha/2} + z_{beta})^2 * (p1*(1-p1) + p2*(1-p2)) / (p1 - p2)^2
+// Simplified: n ~ (z_a + z_b)^2 / effect_size^2
+
+fn trial_z_from_alpha(alpha: f64) -> f64 {
+    // Common z-quantiles
+    if alpha < 0.002 { 2.576 }
+    else if alpha < 0.006 { 2.326 }
+    else if alpha < 0.02 { 2.054 }
+    else if alpha < 0.06 { 1.96 }
+    else if alpha < 0.11 { 1.645 }
+    else { 1.282 }
+}
+
+fn sample_size_estimate(
+    target_power: f64,
+    effect_size: f64,
+    alpha: f64,
+) -> i32 with Mut, Div, Panic {
+    if trial_abs(effect_size) < 1.0e-10 { return 999999 }
+
+    let z_alpha = trial_z_from_alpha(alpha)
+    let z_beta = trial_z_from_alpha(1.0 - target_power)
+
+    let numerator = (z_alpha + z_beta) * (z_alpha + z_beta)
+    let denominator = effect_size * effect_size
+
+    // Per arm
+    let n_per_arm = numerator / denominator
+    // Round up: add 1.0 then cast
+    let n = (n_per_arm + 1.0) as i32
+    if n < 2 { 2 } else { n }
+}
+
+// =============================================================================
+// Predictive Probability of Success
+// =============================================================================
+// Given current data, what is the probability the trial will declare
+// efficacy at the planned final analysis?  (via forward simulation)
+
+fn trial_predictive_success(
+    arms: &[TrialArm; 8],
+    config: &TrialConfig,
+    rng: &!TrialRng,
+    n_forward_sims: i32,
+) -> f64 with Mut, Div, Panic {
+    var successes = 0.0
+    var sim = 0
+
+    while sim < n_forward_sims {
+        // Sample posterior parameters for each arm
+        var sim_arms: [TrialArm; 8] = [TrialArm {
+            responses: [0.0; 4096],
+            n_enrolled: 0,
+            n_events: 0,
+            sum_response: 0.0,
+            prior_alpha: 1.0,
+            prior_beta: 1.0,
+        }; 8]
+
+        // Copy current state
+        var k = 0
+        while k < config.n_arms {
+            sim_arms[k].n_enrolled = arms[k].n_enrolled
+            sim_arms[k].n_events = arms[k].n_events
+            sim_arms[k].sum_response = arms[k].sum_response
+            sim_arms[k].prior_alpha = arms[k].prior_alpha
+            sim_arms[k].prior_beta = arms[k].prior_beta
+            // Copy enrolled responses
+            var ri = 0
+            while ri < arms[k].n_enrolled {
+                sim_arms[k].responses[ri] = arms[k].responses[ri]
+                ri = ri + 1
+            }
+            k = k + 1
+        }
+
+        // Sample a true rate from current posterior for each arm
+        var true_rates: [f64; 8] = [0.0; 8]
+        var ka = 0
+        while ka < config.n_arms {
+            let a = beta_post_alpha(&arms[ka])
+            let b = beta_post_beta(&arms[ka])
+            true_rates[ka] = beta_sample(a, b, rng)
+            ka = ka + 1
+        }
+
+        // Forward-simulate remaining enrollment
+        var total = arms[0].n_enrolled * config.n_arms  // approximate
+        while total < config.max_enrollment {
+            let arm_idx = total % config.n_arms
+            let u = trial_lcg(rng)
+            let resp = if u < true_rates[arm_idx] { 1.0 } else { 0.0 }
+            trial_enroll(&!sim_arms[arm_idx], resp)
+            total = total + 1
+        }
+
+        // Final analysis: is arm 1 > arm 0 with high posterior probability?
+        if config.n_arms >= 2 {
+            var mc_rng2 = trial_rng_new((sim as f64) + 7.0)
+            let a0 = beta_post_alpha(&sim_arms[0])
+            let b0 = beta_post_beta(&sim_arms[0])
+            let a1 = beta_post_alpha(&sim_arms[1])
+            let b1 = beta_post_beta(&sim_arms[1])
+
+            var wins = 0.0
+            var mi = 0
+            while mi < 500 {
+                let pair = beta_sample_pair(a0, b0, a1, b1, &!mc_rng2)
+                if pair.second > pair.first { wins = wins + 1.0 }
+                mi = mi + 1
+            }
+            let post_p = wins / 500.0
+            if post_p > config.efficacy_bound {
+                successes = successes + 1.0
+            }
+        }
+
+        sim = sim + 1
+    }
+
+    successes / (n_forward_sims as f64)
+}
+
+// =============================================================================
+// Response-Adaptive Randomisation Weights
+// =============================================================================
+// Compute allocation probabilities proportional to posterior probability of
+// being the best arm (Thompson sampling style).
+
+fn trial_adaptive_weights(
+    arms: &[TrialArm; 8],
+    n_arms: i32,
+    rng: &!TrialRng,
+    min_alloc: f64,
+) -> [f64; 8] with Mut, Div, Panic {
+    var probs = prob_arm_best(arms, n_arms, rng, 1000)
+
+    // Enforce minimum allocation to avoid starvation
+    var sum = 0.0
+    var k = 0
+    while k < n_arms {
+        if probs[k] < min_alloc { probs[k] = min_alloc }
+        sum = sum + probs[k]
+        k = k + 1
+    }
+
+    // Normalise
+    var result: [f64; 8] = [0.0; 8]
+    if sum > 1.0e-30 {
+        var j = 0
+        while j < n_arms {
+            result[j] = probs[j] / sum
+            j = j + 1
+        }
+    }
+    result
+}
+
+// =============================================================================
+// Operating Characteristics via Repeated Simulation
+// =============================================================================
+
+struct OperatingChars {
+    power: f64,              // Prob of declaring efficacy when H1 true
+    type1_error: f64,        // Prob of declaring efficacy when H0 true
+    avg_sample_size: f64,
+    early_stop_rate: f64,
+    u_power: f64,
+    u_type1: f64,
+}
+
+fn trial_operating_chars(
+    config: &TrialConfig,
+    true_rates: &[f64; 8],
+    null_rates: &[f64; 8],
+    n_sims: i32,
+) -> OperatingChars with Mut, Div, Panic {
+    var rng = trial_rng_new(2024.0)
+
+    // Under H1 (true effect)
+    var h1_efficacy = 0.0
+    var h1_total_n = 0.0
+    var h1_early = 0.0
+
+    var s1 = 0
+    while s1 < n_sims {
+        let outcome = trial_simulate(config, true_rates, &!rng)
+        if outcome.stop_reason == 1 { h1_efficacy = h1_efficacy + 1.0 }
+        if outcome.early_stopped { h1_early = h1_early + 1.0 }
+        // Sum enrolled across arms
+        var tot = 0
+        var ak = 0
+        while ak < config.n_arms {
+            tot = tot + outcome.final_n[ak]
+            ak = ak + 1
+        }
+        h1_total_n = h1_total_n + (tot as f64)
+        s1 = s1 + 1
+    }
+
+    // Under H0 (no effect)
+    var h0_efficacy = 0.0
+    var s0 = 0
+    while s0 < n_sims {
+        let outcome = trial_simulate(config, null_rates, &!rng)
+        if outcome.stop_reason == 1 { h0_efficacy = h0_efficacy + 1.0 }
+        s0 = s0 + 1
+    }
+
+    let ns = n_sims as f64
+    let power = h1_efficacy / ns
+    let t1e = h0_efficacy / ns
+
+    OperatingChars {
+        power: power,
+        type1_error: t1e,
+        avg_sample_size: h1_total_n / ns,
+        early_stop_rate: h1_early / ns,
+        u_power: trial_sqrt(power * (1.0 - power) / ns),
+        u_type1: trial_sqrt(t1e * (1.0 - t1e) / ns),
+    }
+}

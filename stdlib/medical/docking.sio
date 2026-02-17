@@ -1,0 +1,525 @@
+// stdlib/medical/docking.sio — Molecular Scoring Functions
+//
+// Protein-ligand interaction energy scoring in SE(3).
+// Implements Lennard-Jones van der Waals, Coulomb electrostatics,
+// hydrogen bond geometry, desolvation penalty, and a weighted
+// composite score with epistemic uncertainty.
+//
+// Rigid-body docking model: the ligand is decomposed into rigid
+// fragments connected by rotatable bonds.  Each fragment undergoes
+// SE(3) transformation (rotation + translation) before scoring
+// against the binding-site pocket atoms.
+//
+// SOTA references:
+//   SigmaDock  (Qu+ 2025): diffusion on SE(3), 79.9% success < 2 A RMSD
+//   DiffDock   (Corso+ 2022): generative diffusion docking, arXiv:2210.01776
+//   Matcha     (Hua+ 2025): geometry-aware transformer scoring
+//   AutoDock4  (Morris+ 2009): empirical free-energy scoring function
+//   Vina       (Trott & Olson 2010): improved AutoDock scoring
+//
+// Scoring model (AutoDock4-style):
+//   E_total = w_vdw * E_vdw + w_elec * E_elec + w_hb * E_hb + w_desolv * E_desolv
+//   E_vdw   = sum_ij 4*eps*((sigma/r)^12 - (sigma/r)^6)
+//   E_elec  = sum_ij 332.0637 * q_i*q_j / (eps_r * r_ij)
+//   E_hb    = geometry-dependent (distance + angle)
+//   E_desolv= sum_ij S_i * V_j * exp(-r^2 / (2*sigma_s^2))
+
+// ============================================================================
+// Math Helpers (inline; no libm dependency)
+// ============================================================================
+
+fn dock_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn dock_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 30 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn dock_exp(x: f64) -> f64 with Mut, Div {
+    if x > 500.0 { return 1.0e200 }
+    if x < -500.0 { return 0.0 }
+    let ln2 = 0.6931471805599453
+    var k_f = x / ln2
+    var k: i32 = 0
+    if k_f >= 0.0 { k = k_f as i32 } else { k = (k_f as i32) - 1 }
+    let r = x - (k as f64) * ln2
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 25 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var result = sum
+    if k >= 0 {
+        var i = 0
+        while i < k { result = result * 2.0; i = i + 1 }
+    } else {
+        var i = 0
+        while i < (0 - k) { result = result / 2.0; i = i + 1 }
+    }
+    result
+}
+
+// x^6 via repeated squaring: x^2, x^4, x^6 = x^4 * x^2
+fn dock_pow6(x: f64) -> f64 {
+    let x2 = x * x
+    let x4 = x2 * x2
+    x4 * x2
+}
+
+fn dock_min(a: f64, b: f64) -> f64 {
+    if a < b { a } else { b }
+}
+
+fn dock_max(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+fn dock_clamp(x: f64, lo: f64, hi: f64) -> f64 {
+    if x < lo { lo }
+    else if x > hi { hi }
+    else { x }
+}
+
+// ============================================================================
+// Core Types
+// ============================================================================
+
+// A single atom with 3D coordinates, partial charge, and vdW parameters
+struct Atom3D {
+    x: f64,
+    y: f64,
+    z: f64,
+    charge: f64,        // partial charge (e)
+    element: i32,       // 1=H, 6=C, 7=N, 8=O, 16=S, etc.
+    vdw_radius: f64,    // Lennard-Jones sigma (A)
+    vdw_well: f64,      // Lennard-Jones epsilon (kcal/mol)
+}
+
+// A rigid fragment of the ligand (torsion-free subunit)
+struct RigidFragment {
+    atoms: [Atom3D; 64],
+    n_atoms: i32,
+    centroid_x: f64,
+    centroid_y: f64,
+    centroid_z: f64,
+}
+
+// Full ligand pose: collection of rigid fragments + global SE(3) transform
+struct LigandPose {
+    fragments: [RigidFragment; 8],
+    n_fragments: i32,
+    rotation: [f64; 9],     // 3x3 rotation matrix (row-major)
+    translation: [f64; 3],  // translation vector (A)
+}
+
+// Binding site (protein pocket atoms)
+struct BindingSite {
+    pocket_atoms: [Atom3D; 256],
+    n_atoms: i32,
+    center: [f64; 3],       // geometric center of pocket
+}
+
+// Composite docking score with uncertainty
+struct DockingScore {
+    vdw_energy: f64,        // van der Waals (kcal/mol)
+    electrostatic: f64,     // Coulomb (kcal/mol)
+    hbond: f64,             // hydrogen bond (kcal/mol)
+    desolvation: f64,       // desolvation penalty (kcal/mol)
+    total: f64,             // weighted sum
+    u_total: f64,           // uncertainty on total (GUM propagation)
+    confidence: f64,        // [0,1] confidence based on scoring breakdown
+}
+
+// ============================================================================
+// Distance & Geometry
+// ============================================================================
+
+fn atom3d_distance(a: &Atom3D, b: &Atom3D) -> f64 with Mut, Div, Panic {
+    let dx = a.x - b.x
+    let dy = a.y - b.y
+    let dz = a.z - b.z
+    dock_sqrt(dx * dx + dy * dy + dz * dz)
+}
+
+fn atom3d_distance_sq(a: &Atom3D, b: &Atom3D) -> f64 {
+    let dx = a.x - b.x
+    let dy = a.y - b.y
+    let dz = a.z - b.z
+    dx * dx + dy * dy + dz * dz
+}
+
+// Angle at atom B in the triple A-B-C (returns cosine of angle)
+fn atom3d_cos_angle(a: &Atom3D, b: &Atom3D, c: &Atom3D) -> f64 with Mut, Div, Panic {
+    let bax = a.x - b.x
+    let bay = a.y - b.y
+    let baz = a.z - b.z
+    let bcx = c.x - b.x
+    let bcy = c.y - b.y
+    let bcz = c.z - b.z
+    let dot = bax * bcx + bay * bcy + baz * bcz
+    let mag_ba = dock_sqrt(bax * bax + bay * bay + baz * baz)
+    let mag_bc = dock_sqrt(bcx * bcx + bcy * bcy + bcz * bcz)
+    let denom = mag_ba * mag_bc
+    if denom < 1.0e-15 { return 0.0 }
+    dock_clamp(dot / denom, 0.0 - 1.0, 1.0)
+}
+
+// ============================================================================
+// Lennard-Jones Potential (pure — no effects)
+// ============================================================================
+// V_LJ = 4 * epsilon * ((sigma/r)^12 - (sigma/r)^6)
+
+fn lennard_jones(r: f64, epsilon: f64, sigma: f64) -> f64 {
+    if r < 0.01 { return 1.0e10 }   // prevent singularity
+    let sr = sigma / r
+    let sr6 = dock_pow6(sr)
+    let sr12 = sr6 * sr6
+    4.0 * epsilon * (sr12 - sr6)
+}
+
+// ============================================================================
+// Coulomb Electrostatic Score
+// ============================================================================
+// E = 332.0637 * q1 * q2 / (dielectric * r)
+// 332.0637 converts (e^2 / A) to kcal/mol
+
+fn coulomb_score(q1: f64, q2: f64, r: f64, dielectric: f64) -> f64 with Panic {
+    if r < 0.1 { return 332.0637 * q1 * q2 / (dielectric * 0.1) }
+    332.0637 * q1 * q2 / (dielectric * r)
+}
+
+// ============================================================================
+// Hydrogen Bond Score
+// ============================================================================
+// Geometry-dependent HB: E_hb = E_opt * f(r) * g(angle)
+// f(r) = (r_opt / r)^12 - 2*(r_opt / r)^6  (10-12 is classic, simplified to 6-12 here)
+// g(angle) = cos^2(theta)  where theta = D-H...A angle
+// E_opt = -5.0 kcal/mol (typical strong HB)
+
+fn hbond_score(
+    donor: &Atom3D,
+    acceptor: &Atom3D,
+    h_atom: &Atom3D
+) -> f64 with Mut, Div, Panic {
+    let r = atom3d_distance(h_atom, acceptor)
+    if r < 0.01 { return 0.0 }
+    if r > 3.5 { return 0.0 }   // beyond HB cutoff
+
+    // Distance term: 12-6 potential centered at r_opt = 1.9 A
+    let r_opt = 1.9
+    let sr = r_opt / r
+    let sr6 = dock_pow6(sr)
+    let sr12 = sr6 * sr6
+    let f_r = sr12 - 2.0 * sr6
+
+    // Angle term: cos^2(D-H...A angle)
+    let cos_theta = atom3d_cos_angle(donor, h_atom, acceptor)
+    // Only count if angle > 120 degrees (cos < -0.5 in supplementary)
+    // Actually D-H...A should be roughly linear, so cos_theta should be near -1
+    // Convention: angle at H, vectors H->D and H->A
+    // For a good HB, the D-H...A angle ~ 180 deg -> cos ~ -1
+    let g_angle = cos_theta * cos_theta
+
+    let e_opt = 0.0 - 5.0
+    e_opt * f_r * g_angle
+}
+
+// ============================================================================
+// Aggregate Scoring Functions
+// ============================================================================
+
+// Sum LJ over all ligand-atom / pocket-atom pairs
+fn score_vdw(pose: &LigandPose, site: &BindingSite) -> f64 with Mut, Div, Panic {
+    var total = 0.0
+    var fi = 0
+    while fi < pose.n_fragments {
+        var lai = 0
+        while lai < pose.fragments[fi].n_atoms {
+            var pai = 0
+            while pai < site.n_atoms {
+                let r = atom3d_distance(&pose.fragments[fi].atoms[lai], &site.pocket_atoms[pai])
+                // Combining rules (Lorentz-Berthelot)
+                let eps = dock_sqrt(pose.fragments[fi].atoms[lai].vdw_well * site.pocket_atoms[pai].vdw_well)
+                let sig = 0.5 * (pose.fragments[fi].atoms[lai].vdw_radius + site.pocket_atoms[pai].vdw_radius)
+                // Cutoff at 8 A
+                if r < 8.0 {
+                    total = total + lennard_jones(r, eps, sig)
+                }
+                pai = pai + 1
+            }
+            lai = lai + 1
+        }
+        fi = fi + 1
+    }
+    total
+}
+
+// Sum Coulomb over all ligand-atom / pocket-atom pairs
+fn score_electrostatic(pose: &LigandPose, site: &BindingSite) -> f64 with Mut, Div, Panic {
+    let dielectric = 4.0   // distance-dependent dielectric ~ 4r simplified to const
+    var total = 0.0
+    var fi = 0
+    while fi < pose.n_fragments {
+        var lai = 0
+        while lai < pose.fragments[fi].n_atoms {
+            var pai = 0
+            while pai < site.n_atoms {
+                let r = atom3d_distance(&pose.fragments[fi].atoms[lai], &site.pocket_atoms[pai])
+                if r < 12.0 {
+                    total = total + coulomb_score(
+                        pose.fragments[fi].atoms[lai].charge,
+                        site.pocket_atoms[pai].charge,
+                        r,
+                        dielectric
+                    )
+                }
+                pai = pai + 1
+            }
+            lai = lai + 1
+        }
+        fi = fi + 1
+    }
+    total
+}
+
+// Desolvation penalty (Gaussian burial model from AutoDock4)
+// E_desolv = sum_ij S_i * V_j * exp(-r_ij^2 / (2 * sigma_s^2))
+// S_i = atomic solvation parameter, V_j = fragmental volume
+// Simplified: S ~ charge^2 * 0.01, V ~ vdw_radius^3
+fn score_desolvation(pose: &LigandPose, site: &BindingSite) -> f64 with Mut, Div, Panic {
+    let sigma_s_sq = 3.5 * 3.5   // sigma_s = 3.5 A
+    let two_sigma_sq = 2.0 * sigma_s_sq
+    var total = 0.0
+    var fi = 0
+    while fi < pose.n_fragments {
+        var lai = 0
+        while lai < pose.fragments[fi].n_atoms {
+            let s_i = pose.fragments[fi].atoms[lai].charge * pose.fragments[fi].atoms[lai].charge * 0.01
+            var pai = 0
+            while pai < site.n_atoms {
+                let r_sq = atom3d_distance_sq(&pose.fragments[fi].atoms[lai], &site.pocket_atoms[pai])
+                if r_sq < 64.0 {   // cutoff at 8 A
+                    let v_j = site.pocket_atoms[pai].vdw_radius * site.pocket_atoms[pai].vdw_radius * site.pocket_atoms[pai].vdw_radius
+                    total = total + s_i * v_j * dock_exp(0.0 - r_sq / two_sigma_sq)
+                }
+                pai = pai + 1
+            }
+            lai = lai + 1
+        }
+        fi = fi + 1
+    }
+    total
+}
+
+// ============================================================================
+// Composite Pose Scoring — Weighted Sum with Uncertainty
+// ============================================================================
+// Weights from AutoDock4 calibration (Huey+ 2007):
+//   w_vdw = 0.1662, w_elec = 0.1209, w_hb = 0.1406, w_desolv = 0.1322
+// Uncertainty: propagated from individual score uncertainties (GUM)
+
+fn score_pose(pose: &LigandPose, site: &BindingSite) -> DockingScore with Mut, Div, Panic {
+    let e_vdw = score_vdw(pose, site)
+    let e_elec = score_electrostatic(pose, site)
+    let e_desolv = score_desolvation(pose, site)
+
+    // Hydrogen bond score: check all N/O ligand atoms vs N/O pocket atoms
+    // with H atoms as intermediaries (simplified: skip explicit H search,
+    // use donor-acceptor distance directly with distance-only HB model)
+    var e_hb = 0.0
+    var fi = 0
+    while fi < pose.n_fragments {
+        var lai = 0
+        while lai < pose.fragments[fi].n_atoms {
+            let l_elem = pose.fragments[fi].atoms[lai].element
+            // Check if ligand atom is N(7) or O(8) — potential donor/acceptor
+            if l_elem == 7 {
+                var pai = 0
+                while pai < site.n_atoms {
+                    let p_elem = site.pocket_atoms[pai].element
+                    if p_elem == 7 {
+                        // N...N: use simplified distance-only HB
+                        let r = atom3d_distance(&pose.fragments[fi].atoms[lai], &site.pocket_atoms[pai])
+                        if r > 1.5 {
+                            if r < 3.2 {
+                                let r_opt = 2.9
+                                let sr = r_opt / r
+                                let sr6 = dock_pow6(sr)
+                                let sr12 = sr6 * sr6
+                                e_hb = e_hb + (0.0 - 3.0) * (sr12 - 2.0 * sr6)
+                            }
+                        }
+                    }
+                    if p_elem == 8 {
+                        let r = atom3d_distance(&pose.fragments[fi].atoms[lai], &site.pocket_atoms[pai])
+                        if r > 1.5 {
+                            if r < 3.2 {
+                                let r_opt = 2.8
+                                let sr = r_opt / r
+                                let sr6 = dock_pow6(sr)
+                                let sr12 = sr6 * sr6
+                                e_hb = e_hb + (0.0 - 4.0) * (sr12 - 2.0 * sr6)
+                            }
+                        }
+                    }
+                    pai = pai + 1
+                }
+            }
+            if l_elem == 8 {
+                var pai2 = 0
+                while pai2 < site.n_atoms {
+                    let p_elem2 = site.pocket_atoms[pai2].element
+                    if p_elem2 == 7 {
+                        let r = atom3d_distance(&pose.fragments[fi].atoms[lai], &site.pocket_atoms[pai2])
+                        if r > 1.5 {
+                            if r < 3.2 {
+                                let r_opt = 2.8
+                                let sr = r_opt / r
+                                let sr6 = dock_pow6(sr)
+                                let sr12 = sr6 * sr6
+                                e_hb = e_hb + (0.0 - 4.0) * (sr12 - 2.0 * sr6)
+                            }
+                        }
+                    }
+                    if p_elem2 == 8 {
+                        let r = atom3d_distance(&pose.fragments[fi].atoms[lai], &site.pocket_atoms[pai2])
+                        if r > 1.5 {
+                            if r < 3.2 {
+                                let r_opt = 2.7
+                                let sr = r_opt / r
+                                let sr6 = dock_pow6(sr)
+                                let sr12 = sr6 * sr6
+                                e_hb = e_hb + (0.0 - 5.0) * (sr12 - 2.0 * sr6)
+                            }
+                        }
+                    }
+                    pai2 = pai2 + 1
+                }
+            }
+            lai = lai + 1
+        }
+        fi = fi + 1
+    }
+
+    // Weighted sum
+    let w_vdw = 0.1662
+    let w_elec = 0.1209
+    let w_hb = 0.1406
+    let w_desolv = 0.1322
+
+    let total = w_vdw * e_vdw + w_elec * e_elec + w_hb * e_hb + w_desolv * e_desolv
+
+    // Uncertainty propagation (GUM): u_total = sqrt(sum(w_i^2 * u_i^2))
+    // Estimate component uncertainties as fraction of magnitude
+    let u_vdw = dock_abs(e_vdw) * 0.15      // 15% relative uncertainty
+    let u_elec = dock_abs(e_elec) * 0.20     // 20% (charge model is approximate)
+    let u_hb = dock_abs(e_hb) * 0.25         // 25% (geometry-sensitive)
+    let u_desolv = dock_abs(e_desolv) * 0.30 // 30% (empirical)
+
+    let u_total = dock_sqrt(
+        w_vdw * w_vdw * u_vdw * u_vdw
+        + w_elec * w_elec * u_elec * u_elec
+        + w_hb * w_hb * u_hb * u_hb
+        + w_desolv * w_desolv * u_desolv * u_desolv
+    )
+
+    // Confidence: penalize if any single term dominates (balanced is more reliable)
+    let abs_total = dock_abs(total) + 1.0e-10
+    let frac_vdw = dock_abs(w_vdw * e_vdw) / abs_total
+    let frac_elec = dock_abs(w_elec * e_elec) / abs_total
+    let max_frac = dock_max(frac_vdw, frac_elec)
+    let confidence = dock_clamp(1.0 - max_frac, 0.1, 0.95)
+
+    DockingScore {
+        vdw_energy: e_vdw,
+        electrostatic: e_elec,
+        hbond: e_hb,
+        desolvation: e_desolv,
+        total: total,
+        u_total: u_total,
+        confidence: confidence,
+    }
+}
+
+// ============================================================================
+// SE(3) Rigid-Body Transforms
+// ============================================================================
+
+// Apply 3x3 rotation matrix to all atoms in a fragment (in-place)
+// rot is row-major: rot[0..2] = row 0, rot[3..5] = row 1, rot[6..8] = row 2
+fn rotate_fragment(frag: &!RigidFragment, rot: &[f64; 9]) with Mut, Div, Panic {
+    var i = 0
+    while i < frag.n_atoms {
+        let ox = frag.atoms[i].x
+        let oy = frag.atoms[i].y
+        let oz = frag.atoms[i].z
+        frag.atoms[i].x = rot[0] * ox + rot[1] * oy + rot[2] * oz
+        frag.atoms[i].y = rot[3] * ox + rot[4] * oy + rot[5] * oz
+        frag.atoms[i].z = rot[6] * ox + rot[7] * oy + rot[8] * oz
+        i = i + 1
+    }
+    // Recompute centroid after rotation
+    compute_centroid(frag)
+}
+
+// Translate all atoms in a fragment by (dx, dy, dz)
+fn translate_fragment(frag: &!RigidFragment, dx: f64, dy: f64, dz: f64) with Mut, Div, Panic {
+    var i = 0
+    while i < frag.n_atoms {
+        frag.atoms[i].x = frag.atoms[i].x + dx
+        frag.atoms[i].y = frag.atoms[i].y + dy
+        frag.atoms[i].z = frag.atoms[i].z + dz
+        i = i + 1
+    }
+    frag.centroid_x = frag.centroid_x + dx
+    frag.centroid_y = frag.centroid_y + dy
+    frag.centroid_z = frag.centroid_z + dz
+}
+
+// Recompute centroid from current atom positions
+fn compute_centroid(frag: &!RigidFragment) with Mut, Div, Panic {
+    if frag.n_atoms == 0 {
+        frag.centroid_x = 0.0
+        frag.centroid_y = 0.0
+        frag.centroid_z = 0.0
+        return
+    }
+    var sx = 0.0
+    var sy = 0.0
+    var sz = 0.0
+    var i = 0
+    while i < frag.n_atoms {
+        sx = sx + frag.atoms[i].x
+        sy = sy + frag.atoms[i].y
+        sz = sz + frag.atoms[i].z
+        i = i + 1
+    }
+    let n = frag.n_atoms as f64
+    frag.centroid_x = sx / n
+    frag.centroid_y = sy / n
+    frag.centroid_z = sz / n
+}
+
+// ============================================================================
+// RMSD Between Two Fragments (same atom count assumed)
+// ============================================================================
+// RMSD = sqrt( (1/N) * sum_i ||a_i - b_i||^2 )
+
+fn fragment_rmsd(a: &RigidFragment, b: &RigidFragment) -> f64 with Mut, Div, Panic {
+    let n = if a.n_atoms < b.n_atoms { a.n_atoms } else { b.n_atoms }
+    if n == 0 { return 0.0 }
+    var sum_sq = 0.0
+    var i = 0
+    while i < n {
+        let dx = a.atoms[i].x - b.atoms[i].x
+        let dy = a.atoms[i].y - b.atoms[i].y
+        let dz = a.atoms[i].z - b.atoms[i].z
+        sum_sq = sum_sq + dx * dx + dy * dy + dz * dz
+        i = i + 1
+    }
+    dock_sqrt(sum_sq / (n as f64))
+}
