@@ -4,6 +4,7 @@ import { defineConfig } from 'astro/config';
 import react from '@astrojs/react';
 import tailwindcss from '@tailwindcss/vite';
 import mdx from '@astrojs/mdx';
+import remarkSioAsRust from './src/remark/remark-sio-as-rust.mjs';
 
 // https://astro.build/config
 export default defineConfig({
@@ -12,12 +13,21 @@ export default defineConfig({
   integrations: [
     react(),
     mdx({
+      remarkPlugins: [remarkSioAsRust],
       syntaxHighlight: 'shiki',
       shikiConfig: {
         theme: 'github-dark',
       },
     }),
   ],
+
+  markdown: {
+    remarkPlugins: [remarkSioAsRust],
+    syntaxHighlight: 'shiki',
+    shikiConfig: {
+      theme: 'github-dark',
+    },
+  },
 
   vite: {
     plugins: [tailwindcss()],

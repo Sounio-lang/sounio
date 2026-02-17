@@ -15,6 +15,7 @@ export const localeNames: Record<Locale, string> = {
 };
 
 export const defaultLocale: Locale = 'en';
+export const fullyLocalizedLocales = new Set<Locale>(['en']);
 
 // Translation type (inferred from en.json structure)
 export type Translations = typeof import('../i18n/en.json');
@@ -74,4 +75,11 @@ export function createTranslator(translations: Translations) {
   return function t(key: keyof Translations): string {
     return (translations[key] as string) || key;
   };
+}
+
+/**
+ * Whether a locale has fully rewritten V2 content.
+ */
+export function isLocaleFullyLocalized(locale: Locale): boolean {
+  return fullyLocalizedLocales.has(locale);
 }
