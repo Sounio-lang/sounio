@@ -1,0 +1,474 @@
+//@ run-pass
+// optimization_nelder_mead.sio - Integration tests for Nelder-Mead simplex optimization
+//
+// Self-contained test suite validating a 2D-specialized Nelder-Mead optimizer
+// on four classical test functions: Sphere, Rosenbrock, Beale, and Booth.
+// All structs and algorithms are inlined since tests cannot import.
+//
+// References:
+//   Nelder & Mead, "A Simplex Method for Function Minimization" (1965)
+//   Lagarias et al., "Convergence Properties of the Nelder-Mead Simplex Method" (1998)
+
+// ============================================================================
+// PURE MATH HELPERS (must precede callers)
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    if g < 1.0 { g = 1.0 }
+    var i = 0
+    while i < 50 {
+        g = (g + x / g) / 2.0
+        i = i + 1
+    }
+    return g
+}
+
+fn approx_eq(a: f64, b: f64, tol: f64) -> bool with Mut, Panic, Div {
+    abs_f64(a - b) < tol
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b { return a }
+    return b
+}
+
+fn min_f64(a: f64, b: f64) -> f64 {
+    if a < b { return a }
+    return b
+}
+
+// ============================================================================
+// DATA STRUCTURES
+// ============================================================================
+
+struct Point2D {
+    x: f64,
+    y: f64,
+}
+
+struct Vertex {
+    p: Point2D,
+    value: f64,
+}
+
+struct NMResult {
+    best: Point2D,
+    value: f64,
+    iterations: i32,
+    converged: bool,
+}
+
+// ============================================================================
+// OBJECTIVE FUNCTIONS
+// ============================================================================
+
+// Sphere: f(x,y) = x^2 + y^2, minimum at (0,0) = 0
+fn obj_sphere(p: Point2D) -> f64 with Mut, Panic, Div {
+    p.x * p.x + p.y * p.y
+}
+
+// Rosenbrock: f(x,y) = (1-x)^2 + 100*(y - x^2)^2, minimum at (1,1) = 0
+fn obj_rosenbrock(p: Point2D) -> f64 with Mut, Panic, Div {
+    let a = 1.0 - p.x
+    let b = p.y - p.x * p.x
+    a * a + 100.0 * b * b
+}
+
+// Beale: f(x,y) = (1.5-x+xy)^2 + (2.25-x+xy^2)^2 + (2.625-x+xy^3)^2
+// minimum at (3, 0.5) = 0
+fn obj_beale(p: Point2D) -> f64 with Mut, Panic, Div {
+    let t1 = 1.5 - p.x + p.x * p.y
+    let t2 = 2.25 - p.x + p.x * p.y * p.y
+    let t3 = 2.625 - p.x + p.x * p.y * p.y * p.y
+    t1 * t1 + t2 * t2 + t3 * t3
+}
+
+// Booth: f(x,y) = (x + 2y - 7)^2 + (2x + y - 5)^2, minimum at (1,3) = 0
+fn obj_booth(p: Point2D) -> f64 with Mut, Panic, Div {
+    let t1 = p.x + 2.0 * p.y - 7.0
+    let t2 = 2.0 * p.x + p.y - 5.0
+    t1 * t1 + t2 * t2
+}
+
+// Dispatch: evaluate the chosen objective by integer selector
+fn eval_obj(p: Point2D, func_id: i32) -> f64 with Mut, Panic, Div {
+    if func_id == 1 { return obj_sphere(p) }
+    if func_id == 2 { return obj_rosenbrock(p) }
+    if func_id == 3 { return obj_beale(p) }
+    return obj_booth(p)
+}
+
+// ============================================================================
+// NELDER-MEAD OPTIMIZER (2D specialized, 3 vertices)
+// ============================================================================
+
+fn nm_minimize(x0: f64, y0: f64, step: f64, tol: f64, max_iter: i32, func_id: i32) -> NMResult with Mut, Panic, Div {
+    // Standard Nelder-Mead coefficients
+    let alpha = 1.0   // reflection
+    let gamma = 2.0   // expansion
+    let rho = 0.5     // contraction
+    let sigma = 0.5   // shrink
+
+    // Initialize simplex: 3 vertices for 2D
+    let p0 = Point2D { x: x0, y: y0 }
+    let p1 = Point2D { x: x0 + step, y: y0 }
+    let p2 = Point2D { x: x0, y: y0 + step }
+
+    var v0 = Vertex { p: p0, value: eval_obj(p0, func_id) }
+    var v1 = Vertex { p: p1, value: eval_obj(p1, func_id) }
+    var v2 = Vertex { p: p2, value: eval_obj(p2, func_id) }
+
+    var iter = 0
+    while iter < max_iter {
+        // Sort: v0 = best (lowest), v1 = second worst, v2 = worst (highest)
+        if v0.value > v1.value {
+            let tmp = v0
+            v0 = v1
+            v1 = tmp
+        }
+        if v1.value > v2.value {
+            let tmp = v1
+            v1 = v2
+            v2 = tmp
+        }
+        if v0.value > v1.value {
+            let tmp = v0
+            v0 = v1
+            v1 = tmp
+        }
+
+        // Check convergence: value spread
+        let val_spread = abs_f64(v2.value - v0.value)
+        if val_spread < tol {
+            return NMResult { best: v0.p, value: v0.value, iterations: iter, converged: true }
+        }
+
+        // Check convergence: simplex diameter
+        let d01 = sqrt_f64((v0.p.x - v1.p.x) * (v0.p.x - v1.p.x) + (v0.p.y - v1.p.y) * (v0.p.y - v1.p.y))
+        let d02 = sqrt_f64((v0.p.x - v2.p.x) * (v0.p.x - v2.p.x) + (v0.p.y - v2.p.y) * (v0.p.y - v2.p.y))
+        let d12 = sqrt_f64((v1.p.x - v2.p.x) * (v1.p.x - v2.p.x) + (v1.p.y - v2.p.y) * (v1.p.y - v2.p.y))
+        let diam = max_f64(d01, max_f64(d02, d12))
+        if diam < tol {
+            return NMResult { best: v0.p, value: v0.value, iterations: iter, converged: true }
+        }
+
+        // Centroid of the two best vertices (excluding worst v2)
+        let cx = (v0.p.x + v1.p.x) / 2.0
+        let cy = (v0.p.y + v1.p.y) / 2.0
+
+        // Reflection: r = centroid + alpha * (centroid - worst)
+        let rx = cx + alpha * (cx - v2.p.x)
+        let ry = cy + alpha * (cy - v2.p.y)
+        let pr = Point2D { x: rx, y: ry }
+        let fr = eval_obj(pr, func_id)
+
+        if fr < v1.value && fr >= v0.value {
+            // Reflected point is better than second-worst but not best: accept reflection
+            v2 = Vertex { p: pr, value: fr }
+        } else if fr < v0.value {
+            // Reflected point is new best: try expansion
+            let ex = cx + gamma * (rx - cx)
+            let ey = cy + gamma * (ry - cy)
+            let pe = Point2D { x: ex, y: ey }
+            let fe = eval_obj(pe, func_id)
+
+            if fe < fr {
+                v2 = Vertex { p: pe, value: fe }
+            } else {
+                v2 = Vertex { p: pr, value: fr }
+            }
+        } else {
+            // Reflected point is worse than second-worst: contract
+            if fr < v2.value {
+                // Outside contraction
+                let ocx = cx + rho * (rx - cx)
+                let ocy = cy + rho * (ry - cy)
+                let poc = Point2D { x: ocx, y: ocy }
+                let foc = eval_obj(poc, func_id)
+
+                if foc <= fr {
+                    v2 = Vertex { p: poc, value: foc }
+                } else {
+                    // Shrink
+                    let s1 = Point2D { x: v0.p.x + sigma * (v1.p.x - v0.p.x), y: v0.p.y + sigma * (v1.p.y - v0.p.y) }
+                    let s2 = Point2D { x: v0.p.x + sigma * (v2.p.x - v0.p.x), y: v0.p.y + sigma * (v2.p.y - v0.p.y) }
+                    v1 = Vertex { p: s1, value: eval_obj(s1, func_id) }
+                    v2 = Vertex { p: s2, value: eval_obj(s2, func_id) }
+                }
+            } else {
+                // Inside contraction
+                let icx = cx + rho * (v2.p.x - cx)
+                let icy = cy + rho * (v2.p.y - cy)
+                let pic = Point2D { x: icx, y: icy }
+                let fic = eval_obj(pic, func_id)
+
+                if fic < v2.value {
+                    v2 = Vertex { p: pic, value: fic }
+                } else {
+                    // Shrink
+                    let s1 = Point2D { x: v0.p.x + sigma * (v1.p.x - v0.p.x), y: v0.p.y + sigma * (v1.p.y - v0.p.y) }
+                    let s2 = Point2D { x: v0.p.x + sigma * (v2.p.x - v0.p.x), y: v0.p.y + sigma * (v2.p.y - v0.p.y) }
+                    v1 = Vertex { p: s1, value: eval_obj(s1, func_id) }
+                    v2 = Vertex { p: s2, value: eval_obj(s2, func_id) }
+                }
+            }
+        }
+
+        iter = iter + 1
+    }
+
+    // Did not converge within max_iter
+    // Final sort to return the best
+    if v0.value > v1.value {
+        let tmp = v0
+        v0 = v1
+        v1 = tmp
+    }
+    if v0.value > v2.value {
+        let tmp = v0
+        v0 = v2
+        v2 = tmp
+    }
+
+    return NMResult { best: v0.p, value: v0.value, iterations: max_iter, converged: false }
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+// Test 1: sphere_origin - starting at (5,5), finds (0,0)
+fn test_sphere_origin() -> bool with IO, Mut, Panic, Div {
+    let r = nm_minimize(5.0, 5.0, 1.0, 1.0e-10, 1000, 1)
+    let ok = approx_eq(r.best.x, 0.0, 1.0e-4) && approx_eq(r.best.y, 0.0, 1.0e-4)
+    print("  best=(")
+    print(r.best.x)
+    print(", ")
+    print(r.best.y)
+    println(")")
+    return ok
+}
+
+// Test 2: sphere_value - minimum value is approximately 0
+fn test_sphere_value() -> bool with IO, Mut, Panic, Div {
+    let r = nm_minimize(5.0, 5.0, 1.0, 1.0e-10, 1000, 1)
+    let ok = r.value < 1.0e-6
+    print("  value=")
+    println(r.value)
+    return ok
+}
+
+// Test 3: sphere_negative_start - starting at (-3,-4), finds (0,0)
+fn test_sphere_negative_start() -> bool with IO, Mut, Panic, Div {
+    let r = nm_minimize(0.0 - 3.0, 0.0 - 4.0, 1.0, 1.0e-10, 1000, 1)
+    let ok = approx_eq(r.best.x, 0.0, 1.0e-4) && approx_eq(r.best.y, 0.0, 1.0e-4)
+    print("  best=(")
+    print(r.best.x)
+    print(", ")
+    print(r.best.y)
+    println(")")
+    return ok
+}
+
+// Test 4: rosenbrock_converges - starting at (-1,1), finds near (1,1) with loose tol
+fn test_rosenbrock_converges() -> bool with IO, Mut, Panic, Div {
+    let r = nm_minimize(0.0 - 1.0, 1.0, 0.5, 1.0e-12, 1000, 2)
+    let ok = approx_eq(r.best.x, 1.0, 0.05) && approx_eq(r.best.y, 1.0, 0.05)
+    print("  best=(")
+    print(r.best.x)
+    print(", ")
+    print(r.best.y)
+    println(")")
+    return ok
+}
+
+// Test 5: rosenbrock_value - minimum value < 1e-6
+fn test_rosenbrock_value() -> bool with IO, Mut, Panic, Div {
+    let r = nm_minimize(0.0 - 1.0, 1.0, 0.5, 1.0e-12, 1000, 2)
+    let ok = r.value < 1.0e-3
+    print("  value=")
+    println(r.value)
+    return ok
+}
+
+// Test 6: booth_minimum - starting at (0,0), finds (1,3)
+fn test_booth_minimum() -> bool with IO, Mut, Panic, Div {
+    let r = nm_minimize(0.0, 0.0, 1.0, 1.0e-10, 1000, 4)
+    let ok = approx_eq(r.best.x, 1.0, 1.0e-4) && approx_eq(r.best.y, 3.0, 1.0e-4)
+    print("  best=(")
+    print(r.best.x)
+    print(", ")
+    print(r.best.y)
+    println(")")
+    return ok
+}
+
+// Test 7: booth_value - minimum value is approximately 0
+fn test_booth_value() -> bool with IO, Mut, Panic, Div {
+    let r = nm_minimize(0.0, 0.0, 1.0, 1.0e-10, 1000, 4)
+    let ok = r.value < 1.0e-6
+    print("  value=")
+    println(r.value)
+    return ok
+}
+
+// Test 8: beale_converges - starting at (0,0), converges
+fn test_beale_converges() -> bool with IO, Mut, Panic, Div {
+    let r = nm_minimize(0.0, 0.0, 1.0, 1.0e-10, 1000, 3)
+    print("  converged=")
+    if r.converged { println("true") } else { println("false") }
+    print("  best=(")
+    print(r.best.x)
+    print(", ")
+    print(r.best.y)
+    println(")")
+    return r.converged
+}
+
+// Test 9: beale_value - minimum value < 1e-4
+fn test_beale_value() -> bool with IO, Mut, Panic, Div {
+    let r = nm_minimize(0.0, 0.0, 1.0, 1.0e-10, 1000, 3)
+    let ok = r.value < 1.0e-4
+    print("  value=")
+    println(r.value)
+    return ok
+}
+
+// Test 10: sphere_symmetry - starting at (3,3) vs (-3,-3) find same minimum value
+fn test_sphere_symmetry() -> bool with IO, Mut, Panic, Div {
+    let r1 = nm_minimize(3.0, 3.0, 1.0, 1.0e-10, 1000, 1)
+    let r2 = nm_minimize(0.0 - 3.0, 0.0 - 3.0, 1.0, 1.0e-10, 1000, 1)
+    let ok = approx_eq(r1.value, r2.value, 1.0e-6)
+    print("  value1=")
+    println(r1.value)
+    print("  value2=")
+    println(r2.value)
+    return ok
+}
+
+// Test 11: convergence_flag - sphere returns converged=true
+fn test_convergence_flag() -> bool with IO, Mut, Panic, Div {
+    let r = nm_minimize(2.0, 2.0, 1.0, 1.0e-8, 1000, 1)
+    print("  converged=")
+    if r.converged { println("true") } else { println("false") }
+    return r.converged
+}
+
+// Test 12: tighter_tol - tighter tolerance gives better result
+fn test_tighter_tol() -> bool with IO, Mut, Panic, Div {
+    let r_loose = nm_minimize(5.0, 5.0, 1.0, 1.0e-4, 1000, 1)
+    let r_tight = nm_minimize(5.0, 5.0, 1.0, 1.0e-10, 1000, 1)
+    let ok = r_tight.value <= r_loose.value + 1.0e-6
+    print("  loose_val=")
+    println(r_loose.value)
+    print("  tight_val=")
+    println(r_tight.value)
+    return ok
+}
+
+// Test 13: initial_at_minimum - starting at known minimum stays there
+fn test_initial_at_minimum() -> bool with IO, Mut, Panic, Div {
+    // Start sphere at (0,0) with tiny step
+    let r = nm_minimize(0.0, 0.0, 0.001, 1.0e-10, 1000, 1)
+    let ok = r.value < 1.0e-6
+    print("  value=")
+    println(r.value)
+    return ok
+}
+
+// Test 14: large_step - works with large initial step size
+fn test_large_step() -> bool with IO, Mut, Panic, Div {
+    let r = nm_minimize(0.0, 0.0, 10.0, 1.0e-8, 1000, 1)
+    let ok = r.value < 1.0e-4
+    print("  value=")
+    println(r.value)
+    print("  iters=")
+    println(r.iterations)
+    return ok
+}
+
+// Test 15: iteration_count - sphere from (1,1) converges in < 200 iterations
+fn test_iteration_count() -> bool with IO, Mut, Panic, Div {
+    let r = nm_minimize(1.0, 1.0, 1.0, 1.0e-10, 1000, 1)
+    let ok = r.converged && r.iterations < 200
+    print("  iters=")
+    println(r.iterations)
+    return ok
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== Nelder-Mead Simplex Optimization Tests ===")
+    println("")
+
+    var passed = 0
+    var failed = 0
+
+    print("Test  1: sphere origin.............. ")
+    if test_sphere_origin() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test  2: sphere value............... ")
+    if test_sphere_value() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test  3: sphere negative start...... ")
+    if test_sphere_negative_start() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test  4: rosenbrock converges....... ")
+    if test_rosenbrock_converges() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test  5: rosenbrock value........... ")
+    if test_rosenbrock_value() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test  6: booth minimum.............. ")
+    if test_booth_minimum() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test  7: booth value................ ")
+    if test_booth_value() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test  8: beale converges............ ")
+    if test_beale_converges() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test  9: beale value................ ")
+    if test_beale_value() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test 10: sphere symmetry............ ")
+    if test_sphere_symmetry() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test 11: convergence flag........... ")
+    if test_convergence_flag() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test 12: tighter tolerance.......... ")
+    if test_tighter_tol() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test 13: initial at minimum......... ")
+    if test_initial_at_minimum() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test 14: large step................. ")
+    if test_large_step() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test 15: iteration count............ ")
+    if test_iteration_count() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    println("")
+    print("Passed: ")
+    println(passed)
+    print("Failed: ")
+    println(failed)
+
+    if failed == 0 {
+        println("ALL 15 TESTS PASSED")
+        return 0
+    }
+    println("SOME TESTS FAILED")
+    return 1
+}

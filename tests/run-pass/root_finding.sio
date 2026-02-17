@@ -1,0 +1,614 @@
+//@ run-pass
+// root_finding.sio - Integration tests for root-finding algorithms
+//
+// Self-contained test suite validating bisection, Newton-Raphson, secant,
+// fixed-point iteration, Brent's method, and Halley's method.
+// All structs and algorithms are inlined since tests cannot import.
+//
+// References:
+//   Numerical Recipes (Press et al.), Burden & Faires "Numerical Analysis"
+
+// ============================================================================
+// PURE HELPERS (must precede callers)
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var g = x / 2.0
+    if g < 1.0 { g = 1.0 }
+    var i = 0
+    while i < 60 { g = (g + x / g) / 2.0; i = i + 1 }
+    g
+}
+
+fn approx_eq(a: f64, b: f64, tol: f64) -> bool with Mut, Panic, Div {
+    abs_f64(a - b) < tol
+}
+
+// ============================================================================
+// TRIGONOMETRIC HELPERS (pure implementations)
+// ============================================================================
+
+fn floor_f64(x: f64) -> f64 with Mut, Panic, Div {
+    let i = x as i32
+    let f = i as f64
+    if x < 0.0 && f != x { f - 1.0 } else { f }
+}
+
+fn sin_f64(x: f64) -> f64 with Mut, Panic, Div {
+    let pi = 3.141592653589793
+    let two_pi = 6.283185307179586
+    var t = x - floor_f64(x / two_pi) * two_pi
+    if t > pi { t = t - two_pi }
+    if t < 0.0 - pi { t = t + two_pi }
+    var sum = t
+    var term = t
+    var n = 1
+    while n <= 20 {
+        term = 0.0 - term * t * t / (((2 * n) as f64) * ((2 * n + 1) as f64))
+        sum = sum + term
+        n = n + 1
+    }
+    sum
+}
+
+fn cos_f64(x: f64) -> f64 with Mut, Panic, Div {
+    sin_f64(x + 1.5707963267948966)
+}
+
+// ============================================================================
+// DATA STRUCTURE
+// ============================================================================
+
+struct RootResult {
+    root: f64,
+    iterations: i32,
+    converged: bool,
+    function_value: f64,
+}
+
+fn root_success(root: f64, iterations: i32, fval: f64) -> RootResult with Mut, Panic {
+    RootResult { root: root, iterations: iterations, converged: true, function_value: fval }
+}
+
+fn root_failure(root: f64, iterations: i32, fval: f64) -> RootResult with Mut, Panic {
+    RootResult { root: root, iterations: iterations, converged: false, function_value: fval }
+}
+
+// ============================================================================
+// BISECTION METHOD
+// ============================================================================
+
+fn bisection(a: f64, b: f64, tol: f64, max_iter: i32, f: fn(f64) -> f64) -> RootResult with Mut, Panic, Div {
+    var lo = a
+    var hi = b
+    var f_lo = f(lo)
+    var f_hi = f(hi)
+
+    // Check if endpoints bracket a root
+    if f_lo * f_hi > 0.0 {
+        return root_failure((lo + hi) / 2.0, 0, f_lo)
+    }
+
+    // Handle case where endpoint is already a root
+    if f_lo == 0.0 {
+        return root_success(lo, 0, 0.0)
+    }
+    if f_hi == 0.0 {
+        return root_success(hi, 0, 0.0)
+    }
+
+    var iter = 0
+    var mid = (lo + hi) / 2.0
+    var f_mid = f(mid)
+
+    while iter < max_iter {
+        if abs_f64(hi - lo) < tol {
+            return root_success(mid, iter, f_mid)
+        }
+
+        mid = (lo + hi) / 2.0
+        f_mid = f(mid)
+
+        if abs_f64(f_mid) < tol {
+            return root_success(mid, iter + 1, f_mid)
+        }
+
+        if f_lo * f_mid < 0.0 {
+            hi = mid
+            f_hi = f_mid
+        } else {
+            lo = mid
+            f_lo = f_mid
+        }
+
+        iter = iter + 1
+    }
+
+    root_failure(mid, iter, f_mid)
+}
+
+// ============================================================================
+// NEWTON-RAPHSON METHOD
+// ============================================================================
+
+fn newton_raphson(x0: f64, tol: f64, max_iter: i32, f: fn(f64) -> f64, df: fn(f64) -> f64) -> RootResult with Mut, Panic, Div {
+    var x = x0
+    var iter = 0
+
+    while iter < max_iter {
+        let fx = f(x)
+
+        if abs_f64(fx) < tol {
+            return root_success(x, iter, fx)
+        }
+
+        let dfx = df(x)
+
+        // Check for zero derivative
+        if dfx == 0.0 {
+            return root_failure(x, iter, fx)
+        }
+
+        x = x - fx / dfx
+        iter = iter + 1
+    }
+
+    let final_fx = f(x)
+    root_failure(x, iter, final_fx)
+}
+
+// ============================================================================
+// SECANT METHOD
+// ============================================================================
+
+fn secant(x0: f64, x1: f64, tol: f64, max_iter: i32, f: fn(f64) -> f64) -> RootResult with Mut, Panic, Div {
+    var x_prev = x0
+    var x_curr = x1
+    var f_prev = f(x_prev)
+    var f_curr = f(x_curr)
+    var iter = 0
+
+    while iter < max_iter {
+        if abs_f64(f_curr) < tol {
+            return root_success(x_curr, iter, f_curr)
+        }
+
+        let denom = f_curr - f_prev
+        if denom == 0.0 {
+            return root_failure(x_curr, iter, f_curr)
+        }
+
+        let x_next = x_curr - f_curr * (x_curr - x_prev) / denom
+
+        x_prev = x_curr
+        f_prev = f_curr
+        x_curr = x_next
+        f_curr = f(x_curr)
+
+        iter = iter + 1
+    }
+
+    root_failure(x_curr, iter, f_curr)
+}
+
+// ============================================================================
+// FIXED-POINT ITERATION
+// ============================================================================
+
+fn fixed_point(x0: f64, tol: f64, max_iter: i32, g: fn(f64) -> f64) -> RootResult with Mut, Panic, Div {
+    var x = x0
+    var iter = 0
+
+    while iter < max_iter {
+        let x_new = g(x)
+
+        if abs_f64(x_new - x) < tol {
+            return root_success(x_new, iter + 1, x_new - g(x_new))
+        }
+
+        x = x_new
+        iter = iter + 1
+    }
+
+    root_failure(x, iter, x - g(x))
+}
+
+// ============================================================================
+// BRENT'S METHOD
+// ============================================================================
+
+fn brent(a: f64, b: f64, tol: f64, max_iter: i32, f: fn(f64) -> f64) -> RootResult with Mut, Panic, Div {
+    var lo = a
+    var hi = b
+    var f_lo = f(lo)
+    var f_hi = f(hi)
+
+    // Check bracket
+    if f_lo * f_hi > 0.0 {
+        return root_failure((lo + hi) / 2.0, 0, f_lo)
+    }
+
+    // Ensure |f(lo)| >= |f(hi)|
+    if abs_f64(f_lo) < abs_f64(f_hi) {
+        // Swap
+        let tmp = lo
+        lo = hi
+        hi = tmp
+        let tmp_f = f_lo
+        f_lo = f_hi
+        f_hi = tmp_f
+    }
+
+    var c = lo
+    var f_c = f_lo
+    var d = hi - lo
+    var e = d
+
+    var iter = 0
+    while iter < max_iter {
+        if abs_f64(f_hi) < tol {
+            return root_success(hi, iter, f_hi)
+        }
+
+        if abs_f64(hi - lo) < tol {
+            return root_success(hi, iter, f_hi)
+        }
+
+        var use_bisection = true
+        var s = 0.0
+
+        // Try inverse quadratic interpolation if we have 3 distinct points
+        if f_lo != f_c && f_hi != f_c {
+            // Inverse quadratic interpolation
+            let r = f_hi / f_c
+            let q = f_lo / f_c
+            let p = f_hi / f_lo
+            s = p * (q * (r - q) * (c - hi) - (1.0 - r) * (hi - lo)) / ((q - 1.0) * (r - 1.0) * (p - 1.0))
+            s = hi + s
+            use_bisection = false
+        } else if f_lo != f_hi {
+            // Secant method
+            s = hi - f_hi * (hi - lo) / (f_hi - f_lo)
+            use_bisection = false
+        }
+
+        // Check if interpolation is acceptable
+        if !use_bisection {
+            let cond1 = if lo < hi { s < lo || s > hi } else { s < hi || s > lo }
+            let cond2 = abs_f64(s - hi) >= abs_f64(e) / 2.0
+            if cond1 || cond2 {
+                use_bisection = true
+            }
+        }
+
+        if use_bisection {
+            s = (lo + hi) / 2.0
+            e = hi - lo
+            d = e
+        } else {
+            e = d
+            d = s - hi
+        }
+
+        // Update points
+        c = hi
+        f_c = f_hi
+
+        let f_s = f(s)
+
+        if f_lo * f_s < 0.0 {
+            hi = s
+            f_hi = f_s
+        } else {
+            lo = s
+            f_lo = f_s
+        }
+
+        // Ensure |f(lo)| >= |f(hi)|
+        if abs_f64(f_lo) < abs_f64(f_hi) {
+            let tmp = lo
+            lo = hi
+            hi = tmp
+            let tmp_f = f_lo
+            f_lo = f_hi
+            f_hi = tmp_f
+        }
+
+        iter = iter + 1
+    }
+
+    root_failure(hi, iter, f_hi)
+}
+
+// ============================================================================
+// HALLEY'S METHOD
+// ============================================================================
+
+fn halley(x0: f64, tol: f64, max_iter: i32, f: fn(f64) -> f64, df: fn(f64) -> f64, d2f: fn(f64) -> f64) -> RootResult with Mut, Panic, Div {
+    var x = x0
+    var iter = 0
+
+    while iter < max_iter {
+        let fx = f(x)
+
+        if abs_f64(fx) < tol {
+            return root_success(x, iter, fx)
+        }
+
+        let dfx = df(x)
+        let d2fx = d2f(x)
+
+        let denom = 2.0 * dfx * dfx - fx * d2fx
+        if denom == 0.0 {
+            return root_failure(x, iter, fx)
+        }
+
+        x = x - 2.0 * fx * dfx / denom
+        iter = iter + 1
+    }
+
+    let final_fx = f(x)
+    root_failure(x, iter, final_fx)
+}
+
+// ============================================================================
+// TEST FUNCTIONS
+// ============================================================================
+
+// f(x) = x^2 - 4 -- roots at x = +/- 2
+fn f_quadratic(x: f64) -> f64 with Mut, Panic, Div { x * x - 4.0 }
+fn df_quadratic(x: f64) -> f64 with Mut, Panic, Div { 2.0 * x }
+fn d2f_quadratic(x: f64) -> f64 with Mut, Panic, Div { 2.0 }
+
+// f(x) = x^3 - x - 2 -- root near x ~ 1.5214
+fn f_cubic(x: f64) -> f64 with Mut, Panic, Div { x * x * x - x - 2.0 }
+fn df_cubic(x: f64) -> f64 with Mut, Panic, Div { 3.0 * x * x - 1.0 }
+
+// f(x) = cos(x) - x -- root near x ~ 0.7391 (Dottie number)
+fn f_cosine(x: f64) -> f64 with Mut, Panic, Div { cos_f64(x) - x }
+fn df_cosine(x: f64) -> f64 with Mut, Panic, Div { 0.0 - sin_f64(x) - 1.0 }
+
+// g(x) = cos(x) for fixed-point iteration of cos(x) = x
+fn g_cosine(x: f64) -> f64 with Mut, Panic, Div { cos_f64(x) }
+
+// f(x) = x^2 - 2 -- root at sqrt(2)
+fn f_sqrt2(x: f64) -> f64 with Mut, Panic, Div { x * x - 2.0 }
+fn df_sqrt2(x: f64) -> f64 with Mut, Panic, Div { 2.0 * x }
+fn d2f_sqrt2(x: f64) -> f64 with Mut, Panic, Div { 2.0 }
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+// Test 1: Bisection finds root of x^2 - 4 on [0,3] near 2
+fn test_bisection_quadratic() -> bool with IO, Mut, Panic, Div {
+    let r = bisection(0.0, 3.0, 1.0e-10, 200, f_quadratic)
+    let ok = approx_eq(r.root, 2.0, 1.0e-6)
+    print("  root=")
+    println(r.root)
+    ok
+}
+
+// Test 2: Bisection result has converged=true
+fn test_bisection_converged() -> bool with IO, Mut, Panic, Div {
+    let r = bisection(0.0, 3.0, 1.0e-10, 200, f_quadratic)
+    if r.converged {
+        println("  converged=true")
+    } else {
+        println("  converged=false")
+    }
+    r.converged
+}
+
+// Test 3: Newton-Raphson finds root of x^2 - 4 starting at x0=3
+fn test_newton_quadratic() -> bool with IO, Mut, Panic, Div {
+    let r = newton_raphson(3.0, 1.0e-10, 200, f_quadratic, df_quadratic)
+    let ok = approx_eq(r.root, 2.0, 1.0e-6)
+    print("  root=")
+    println(r.root)
+    ok
+}
+
+// Test 4: Newton-Raphson finds root of x^3 - x - 2 starting at 2.0
+fn test_newton_cubic() -> bool with IO, Mut, Panic, Div {
+    let r = newton_raphson(2.0, 1.0e-10, 200, f_cubic, df_cubic)
+    let ok = approx_eq(r.root, 1.5214, 1.0e-3)
+    print("  root=")
+    println(r.root)
+    ok
+}
+
+// Test 5: Secant method finds root of x^2 - 4 with x0=1, x1=3
+fn test_secant_quadratic() -> bool with IO, Mut, Panic, Div {
+    let r = secant(1.0, 3.0, 1.0e-10, 200, f_quadratic)
+    let ok = approx_eq(r.root, 2.0, 1.0e-6)
+    print("  root=")
+    println(r.root)
+    ok
+}
+
+// Test 6: Secant method finds root of x^3 - x - 2 with x0=1, x1=2
+fn test_secant_cubic() -> bool with IO, Mut, Panic, Div {
+    let r = secant(1.0, 2.0, 1.0e-10, 200, f_cubic)
+    let ok = approx_eq(r.root, 1.5214, 1.0e-3)
+    print("  root=")
+    println(r.root)
+    ok
+}
+
+// Test 7: Fixed-point iteration finds Dottie number (cos(x) = x)
+fn test_fixed_point_cosine() -> bool with IO, Mut, Panic, Div {
+    let r = fixed_point(0.5, 1.0e-10, 200, g_cosine)
+    let ok = approx_eq(r.root, 0.7391, 1.0e-3)
+    print("  root=")
+    println(r.root)
+    ok
+}
+
+// Test 8: Brent's method finds root of x^2 - 4 on [0,3]
+fn test_brent_quadratic() -> bool with IO, Mut, Panic, Div {
+    let r = brent(0.0, 3.0, 1.0e-10, 200, f_quadratic)
+    let ok = approx_eq(r.root, 2.0, 1.0e-6)
+    print("  root=")
+    println(r.root)
+    ok
+}
+
+// Test 9: Brent's method finds root of x^3 - x - 2 on [1,2]
+fn test_brent_cubic() -> bool with IO, Mut, Panic, Div {
+    let r = brent(1.0, 2.0, 1.0e-10, 200, f_cubic)
+    let ok = approx_eq(r.root, 1.5214, 1.0e-3)
+    print("  root=")
+    println(r.root)
+    ok
+}
+
+// Test 10: Halley's method finds root of x^2 - 4 with fast convergence
+fn test_halley_quadratic() -> bool with IO, Mut, Panic, Div {
+    let r = halley(3.0, 1.0e-10, 200, f_quadratic, df_quadratic, d2f_quadratic)
+    let ok = approx_eq(r.root, 2.0, 1.0e-6) && r.converged
+    print("  root=")
+    println(r.root)
+    print("  iters=")
+    println(r.iterations)
+    ok
+}
+
+// Test 11: Halley's method finds sqrt(2) from x^2 - 2
+fn test_halley_sqrt2() -> bool with IO, Mut, Panic, Div {
+    let r = halley(1.5, 1.0e-10, 200, f_sqrt2, df_sqrt2, d2f_sqrt2)
+    let ok = approx_eq(r.root, 1.4142, 1.0e-3)
+    print("  root=")
+    println(r.root)
+    ok
+}
+
+// Test 12: All methods agree on root of x^2 - 4 near 2
+fn test_methods_agree() -> bool with IO, Mut, Panic, Div {
+    let r_bis = bisection(0.0, 3.0, 1.0e-10, 200, f_quadratic)
+    let r_new = newton_raphson(3.0, 1.0e-10, 200, f_quadratic, df_quadratic)
+    let r_sec = secant(1.0, 3.0, 1.0e-10, 200, f_quadratic)
+    let r_bre = brent(0.0, 3.0, 1.0e-10, 200, f_quadratic)
+    let r_hal = halley(3.0, 1.0e-10, 200, f_quadratic, df_quadratic, d2f_quadratic)
+
+    let tol = 1.0e-6
+    let ok1 = approx_eq(r_bis.root, r_new.root, tol)
+    let ok2 = approx_eq(r_new.root, r_sec.root, tol)
+    let ok3 = approx_eq(r_sec.root, r_bre.root, tol)
+    let ok4 = approx_eq(r_bre.root, r_hal.root, tol)
+
+    print("  bis=")
+    println(r_bis.root)
+    print("  new=")
+    println(r_new.root)
+    print("  sec=")
+    println(r_sec.root)
+    print("  bre=")
+    println(r_bre.root)
+    print("  hal=")
+    println(r_hal.root)
+
+    ok1 && ok2 && ok3 && ok4
+}
+
+// Test 13: Bisection finds negative root of x^2 - 4 on [-3,0] near -2
+fn test_bisection_negative_root() -> bool with IO, Mut, Panic, Div {
+    let r = bisection(0.0 - 3.0, 0.0, 1.0e-10, 200, f_quadratic)
+    let ok = approx_eq(r.root, 0.0 - 2.0, 1.0e-6)
+    print("  root=")
+    println(r.root)
+    ok
+}
+
+// Test 14: Bisection with non-bracketing interval returns converged=false
+fn test_no_bracket() -> bool with IO, Mut, Panic, Div {
+    // [3, 5] does not bracket a root of x^2 - 4 (both positive)
+    let r = bisection(3.0, 5.0, 1.0e-10, 200, f_quadratic)
+    if r.converged {
+        println("  converged=true (unexpected)")
+    } else {
+        println("  converged=false (expected)")
+    }
+    !r.converged
+}
+
+// Test 15: Newton converges in fewer iterations than bisection
+fn test_newton_iterations_fewer() -> bool with IO, Mut, Panic, Div {
+    let r_bis = bisection(0.0, 3.0, 1.0e-10, 200, f_quadratic)
+    let r_new = newton_raphson(3.0, 1.0e-10, 200, f_quadratic, df_quadratic)
+    print("  bisection_iters=")
+    println(r_bis.iterations)
+    print("  newton_iters=")
+    println(r_new.iterations)
+    r_new.iterations < r_bis.iterations
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== Root-Finding Algorithm Tests ===")
+    println("")
+
+    var passed = 0
+    var failed = 0
+
+    print("Test  1: bisection quadratic........ ")
+    if test_bisection_quadratic() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test  2: bisection converged........ ")
+    if test_bisection_converged() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test  3: newton quadratic........... ")
+    if test_newton_quadratic() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test  4: newton cubic............... ")
+    if test_newton_cubic() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test  5: secant quadratic........... ")
+    if test_secant_quadratic() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test  6: secant cubic............... ")
+    if test_secant_cubic() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test  7: fixed point cosine......... ")
+    if test_fixed_point_cosine() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test  8: brent quadratic............ ")
+    if test_brent_quadratic() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test  9: brent cubic................ ")
+    if test_brent_cubic() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test 10: halley quadratic........... ")
+    if test_halley_quadratic() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test 11: halley sqrt2............... ")
+    if test_halley_sqrt2() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test 12: methods agree.............. ")
+    if test_methods_agree() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test 13: bisection negative root.... ")
+    if test_bisection_negative_root() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test 14: no bracket................. ")
+    if test_no_bracket() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test 15: newton fewer iterations.... ")
+    if test_newton_iterations_fewer() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    println("")
+    print("Passed: ")
+    println(passed)
+    print("Failed: ")
+    println(failed)
+
+    if failed > 0 { 1 } else { 0 }
+}

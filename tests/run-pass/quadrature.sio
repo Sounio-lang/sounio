@@ -1,0 +1,925 @@
+//@ run-pass
+// quadrature.sio - Integration tests for numerical quadrature algorithms
+//
+// Tests trapezoid, Simpson 1/3, Simpson 3/8, midpoint, Boole,
+// Gauss-Legendre (2-5 point + composite), Romberg, and adaptive Simpson.
+// All functions inlined since tests cannot import.
+//
+// References:
+//   Stoer & Bulirsch, "Introduction to Numerical Analysis" (2002)
+//   Burden & Faires, "Numerical Analysis" (10th ed.)
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+fn pi_val() -> f64 {
+    3.141592653589793
+}
+
+fn two_pi_val() -> f64 {
+    6.283185307179586
+}
+
+fn ln2_val() -> f64 {
+    0.6931471805599453
+}
+
+fn e_val() -> f64 {
+    2.718281828459045
+}
+
+// ============================================================================
+// PURE MATH HELPERS (must precede callers)
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn floor_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x >= 0.0 {
+        if x < 1.0 { return 0.0 }
+        var result = 0.0
+        var remaining = x
+        var power = 1000000000000000.0
+        while power >= 1.0 {
+            while remaining >= power {
+                remaining = remaining - power
+                result = result + power
+            }
+            power = power / 10.0
+        }
+        return result
+    } else {
+        let pos = 0.0 - x
+        let pos_floor = floor_f64(pos)
+        if pos > pos_floor {
+            return 0.0 - pos_floor - 1.0
+        }
+        return 0.0 - pos_floor
+    }
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var scaled = x
+    var scale_back = 1.0
+    while scaled < 1.0 {
+        scaled = scaled * 4.0
+        scale_back = scale_back * 2.0
+    }
+    while scaled > 4.0 {
+        scaled = scaled * 0.25
+        scale_back = scale_back * 0.5
+    }
+    var y = 1.5
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    return y / scale_back
+}
+
+fn exp_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x > 20.0 { return exp_f64(x / 2.0) * exp_f64(x / 2.0) }
+    if x < 0.0 - 20.0 { return 1.0 / exp_f64(0.0 - x) }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 25 {
+        term = term * x / (i as f64)
+        sum = sum + term
+        i = i + 1
+    }
+    return sum
+}
+
+fn ln_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    if x == 1.0 { return 0.0 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 {
+        term = term * t2
+        sum = sum + term / ((2 * k + 1) as f64)
+        k = k + 1
+    }
+    return 2.0 * sum + (e as f64) * ln2_val()
+}
+
+fn sin_f64(x: f64) -> f64 with Mut, Panic, Div {
+    var a = x
+    let tp = two_pi_val()
+    if a > tp || a < 0.0 - tp {
+        let n = floor_f64(a / tp)
+        a = a - n * tp
+    }
+    while a > pi_val() { a = a - tp }
+    while a < 0.0 - pi_val() { a = a + tp }
+    let a2 = a * a
+    var sum = a
+    var term = a
+    var n = 1
+    while n < 18 {
+        term = 0.0 - term * a2 / ((2 * n) * (2 * n + 1)) as f64
+        sum = sum + term
+        n = n + 1
+    }
+    return sum
+}
+
+fn cos_f64(x: f64) -> f64 with Mut, Panic, Div {
+    return sin_f64(x + pi_val() / 2.0)
+}
+
+// ============================================================================
+// RESULT TYPE
+// ============================================================================
+
+struct QuadResult {
+    value: f64,
+    error_estimate: f64,
+    intervals: i32,
+    converged: bool,
+}
+
+fn quad_result(value: f64, err: f64, intervals: i32, converged: bool) -> QuadResult with Mut, Panic {
+    QuadResult { value: value, error_estimate: err, intervals: intervals, converged: converged }
+}
+
+// ============================================================================
+// NEWTON-COTES RULES
+// ============================================================================
+
+fn trapezoid(a: f64, b: f64, n: i32, f: fn(f64) -> f64) -> f64 with Mut, Panic, Div {
+    let h = (b - a) / (n as f64)
+    var sum = 0.5 * (f(a) + f(b))
+    var i: i32 = 1
+    while i < n {
+        let x = a + (i as f64) * h
+        sum = sum + f(x)
+        i = i + 1
+    }
+    return sum * h
+}
+
+fn simpson(a: f64, b: f64, n: i32, f: fn(f64) -> f64) -> f64 with Mut, Panic, Div {
+    var nn = n
+    if nn < 2 { nn = 2 }
+    let rem = nn - 2 * (nn / 2)
+    if rem != 0 { nn = nn + 1 }
+
+    let h = (b - a) / (nn as f64)
+    var sum = f(a) + f(b)
+
+    var i: i32 = 1
+    while i < nn {
+        let x = a + (i as f64) * h
+        let rem_i = i - 2 * (i / 2)
+        if rem_i != 0 {
+            sum = sum + 4.0 * f(x)
+        } else {
+            sum = sum + 2.0 * f(x)
+        }
+        i = i + 1
+    }
+    return sum * h / 3.0
+}
+
+fn simpson38(a: f64, b: f64, n: i32, f: fn(f64) -> f64) -> f64 with Mut, Panic, Div {
+    var nn = n
+    if nn < 3 { nn = 3 }
+    let r = nn - 3 * (nn / 3)
+    if r != 0 { nn = nn + (3 - r) }
+
+    let h = (b - a) / (nn as f64)
+    var sum = f(a) + f(b)
+
+    var i: i32 = 1
+    while i < nn {
+        let x = a + (i as f64) * h
+        let r3 = i - 3 * (i / 3)
+        if r3 == 0 {
+            sum = sum + 2.0 * f(x)
+        } else {
+            sum = sum + 3.0 * f(x)
+        }
+        i = i + 1
+    }
+    return sum * 3.0 * h / 8.0
+}
+
+fn midpoint(a: f64, b: f64, n: i32, f: fn(f64) -> f64) -> f64 with Mut, Panic, Div {
+    let h = (b - a) / (n as f64)
+    var sum = 0.0
+    var i: i32 = 0
+    while i < n {
+        let x = a + ((i as f64) + 0.5) * h
+        sum = sum + f(x)
+        i = i + 1
+    }
+    return sum * h
+}
+
+fn boole(a: f64, b: f64, n: i32, f: fn(f64) -> f64) -> f64 with Mut, Panic, Div {
+    var nn = n
+    if nn < 4 { nn = 4 }
+    let r = nn - 4 * (nn / 4)
+    if r != 0 { nn = nn + (4 - r) }
+
+    let h = (b - a) / (nn as f64)
+    var sum = 0.0
+    var i: i32 = 0
+    while i < nn / 4 {
+        let x0 = a + (4 * i) as f64 * h
+        let x1 = x0 + h
+        let x2 = x0 + 2.0 * h
+        let x3 = x0 + 3.0 * h
+        let x4 = x0 + 4.0 * h
+        sum = sum + (7.0 * f(x0) + 32.0 * f(x1) + 12.0 * f(x2) + 32.0 * f(x3) + 7.0 * f(x4)) * 2.0 * h / 45.0
+        i = i + 1
+    }
+    return sum
+}
+
+// ============================================================================
+// GAUSS-LEGENDRE QUADRATURE
+// ============================================================================
+
+fn gauss_legendre_2(a: f64, b: f64, f: fn(f64) -> f64) -> f64 with Mut, Panic, Div {
+    let half_len = 0.5 * (b - a)
+    let mid = 0.5 * (a + b)
+    let n1 = 0.5773502691896258
+    let x0 = mid - half_len * n1
+    let x1 = mid + half_len * n1
+    return half_len * (f(x0) + f(x1))
+}
+
+fn gauss_legendre_3(a: f64, b: f64, f: fn(f64) -> f64) -> f64 with Mut, Panic, Div {
+    let half_len = 0.5 * (b - a)
+    let mid = 0.5 * (a + b)
+    let n1 = 0.7745966692414834
+    let w0 = 8.0 / 9.0
+    let w1 = 5.0 / 9.0
+    let x0 = mid
+    let x1 = mid - half_len * n1
+    let x2 = mid + half_len * n1
+    return half_len * (w0 * f(x0) + w1 * f(x1) + w1 * f(x2))
+}
+
+fn gauss_legendre_4(a: f64, b: f64, f: fn(f64) -> f64) -> f64 with Mut, Panic, Div {
+    let half_len = 0.5 * (b - a)
+    let mid = 0.5 * (a + b)
+    let n1 = 0.8611363115940526
+    let n2 = 0.3399810435848563
+    let w1 = 0.3478548451374538
+    let w2 = 0.6521451548625461
+    let x0 = mid - half_len * n1
+    let x1 = mid + half_len * n1
+    let x2 = mid - half_len * n2
+    let x3 = mid + half_len * n2
+    return half_len * (w1 * f(x0) + w1 * f(x1) + w2 * f(x2) + w2 * f(x3))
+}
+
+fn gauss_legendre_5(a: f64, b: f64, f: fn(f64) -> f64) -> f64 with Mut, Panic, Div {
+    let half_len = 0.5 * (b - a)
+    let mid = 0.5 * (a + b)
+    let n1 = 0.9061798459386640
+    let n2 = 0.5384693101056831
+    let w1 = 0.2369268850561891
+    let w2 = 0.4786286704993665
+    let w0 = 0.5688888888888889
+    let x0 = mid
+    let x1 = mid - half_len * n1
+    let x2 = mid + half_len * n1
+    let x3 = mid - half_len * n2
+    let x4 = mid + half_len * n2
+    return half_len * (w0 * f(x0) + w1 * f(x1) + w1 * f(x2) + w2 * f(x3) + w2 * f(x4))
+}
+
+fn composite_gauss_legendre(a: f64, b: f64, m: i32, n_points: i32, f: fn(f64) -> f64) -> f64 with Mut, Panic, Div {
+    let h = (b - a) / (m as f64)
+    var sum = 0.0
+    var i: i32 = 0
+    while i < m {
+        let sub_a = a + (i as f64) * h
+        let sub_b = sub_a + h
+        if n_points == 2 {
+            sum = sum + gauss_legendre_2(sub_a, sub_b, f)
+        } else if n_points == 3 {
+            sum = sum + gauss_legendre_3(sub_a, sub_b, f)
+        } else if n_points == 4 {
+            sum = sum + gauss_legendre_4(sub_a, sub_b, f)
+        } else {
+            sum = sum + gauss_legendre_5(sub_a, sub_b, f)
+        }
+        i = i + 1
+    }
+    return sum
+}
+
+// ============================================================================
+// ROMBERG INTEGRATION
+// ============================================================================
+
+fn romberg(a: f64, b: f64, max_level: i32, tol: f64, f: fn(f64) -> f64) -> QuadResult with Mut, Panic, Div {
+    var mlev = max_level
+    if mlev > 15 { mlev = 15 }
+    if mlev < 1 { mlev = 1 }
+
+    var R: [f64; 256] = [0.0; 256]
+
+    R[0] = 0.5 * (b - a) * (f(a) + f(b))
+
+    var level: i32 = 1
+    while level <= mlev {
+        let n_panels = 1 << level
+        let h = (b - a) / (n_panels as f64)
+
+        var mid_sum = 0.0
+        var j: i32 = 1
+        while j < n_panels {
+            let j_rem = j - 2 * (j / 2)
+            if j_rem != 0 {
+                let x = a + (j as f64) * h
+                mid_sum = mid_sum + f(x)
+            }
+            j = j + 1
+        }
+        R[level * 16] = 0.5 * R[(level - 1) * 16] + h * mid_sum
+
+        var k: i32 = 1
+        while k <= level {
+            let prev = R[level * 16 + (k - 1)]
+            let prev_level = R[(level - 1) * 16 + (k - 1)]
+            let four_k = 1 << (2 * k)
+            R[level * 16 + k] = prev + (prev - prev_level) / ((four_k as f64) - 1.0)
+            k = k + 1
+        }
+
+        let current = R[level * 16 + level]
+        let previous = R[(level - 1) * 16 + (level - 1)]
+        let err = abs_f64(current - previous)
+        if err < tol {
+            return quad_result(current, err, 1 << level, true)
+        }
+
+        level = level + 1
+    }
+
+    let final_val = R[mlev * 16 + mlev]
+    let prev_val = R[(mlev - 1) * 16 + (mlev - 1)]
+    let final_err = abs_f64(final_val - prev_val)
+    return quad_result(final_val, final_err, 1 << mlev, false)
+}
+
+// ============================================================================
+// ADAPTIVE SIMPSON
+// ============================================================================
+
+fn adaptive_simpson_step(
+    a: f64, b: f64,
+    fa: f64, fb: f64, fm: f64,
+    whole: f64,
+    tol: f64,
+    depth: i32,
+    f: fn(f64) -> f64
+) -> QuadResult with Mut, Panic, Div {
+    let mid = 0.5 * (a + b)
+    let ml = 0.5 * (a + mid)
+    let mr = 0.5 * (mid + b)
+    let fml = f(ml)
+    let fmr = f(mr)
+
+    let h = b - a
+    let left = (h / 12.0) * (fa + 4.0 * fml + fm)
+    let right = (h / 12.0) * (fm + 4.0 * fmr + fb)
+    let refined = left + right
+    let err = (refined - whole) / 15.0
+
+    if depth <= 0 || abs_f64(err) < tol {
+        let val = refined + err
+        return quad_result(val, abs_f64(err), 2, true)
+    }
+
+    let left_result = adaptive_simpson_step(a, mid, fa, fm, fml, left, tol / 2.0, depth - 1, f)
+    let right_result = adaptive_simpson_step(mid, b, fm, fb, fmr, right, tol / 2.0, depth - 1, f)
+
+    let total_val = left_result.value + right_result.value
+    let total_err = left_result.error_estimate + right_result.error_estimate
+    let total_intervals = left_result.intervals + right_result.intervals
+    let conv = left_result.converged && right_result.converged
+
+    return quad_result(total_val, total_err, total_intervals, conv)
+}
+
+fn adaptive_simpson(a: f64, b: f64, tol: f64, f: fn(f64) -> f64) -> QuadResult with Mut, Panic, Div {
+    let fa = f(a)
+    let fb = f(b)
+    let fm = f(0.5 * (a + b))
+    let h = b - a
+    let whole = (h / 6.0) * (fa + 4.0 * fm + fb)
+
+    return adaptive_simpson_step(a, b, fa, fb, fm, whole, tol, 20, f)
+}
+
+fn integrate(a: f64, b: f64, tol: f64, f: fn(f64) -> f64) -> QuadResult with Mut, Panic, Div {
+    return romberg(a, b, 15, tol, f)
+}
+
+// ============================================================================
+// TEST INTEGRANDS
+// ============================================================================
+
+fn f_x_squared(x: f64) -> f64 with Mut, Panic, Div { x * x }
+
+fn f_x_cubed(x: f64) -> f64 with Mut, Panic, Div { x * x * x }
+
+fn f_constant(x: f64) -> f64 with Mut, Panic, Div { 1.0 }
+
+fn f_linear(x: f64) -> f64 with Mut, Panic, Div { x }
+
+fn f_sin(x: f64) -> f64 with Mut, Panic, Div { sin_f64(x) }
+
+fn f_exp(x: f64) -> f64 with Mut, Panic, Div { exp_f64(x) }
+
+fn f_arctan_deriv(x: f64) -> f64 with Mut, Panic, Div { 1.0 / (1.0 + x * x) }
+
+fn f_x_fourth(x: f64) -> f64 with Mut, Panic, Div { x * x * x * x }
+
+fn f_sqrt(x: f64) -> f64 with Mut, Panic, Div { sqrt_f64(x) }
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+// Test 1: Trapezoid x^2 on [0,1], expected 1/3, tol 1e-4
+fn test_trapezoid_x_squared() -> bool with IO, Mut, Panic, Div {
+    let result = trapezoid(0.0, 1.0, 100, f_x_squared)
+    let expected = 1.0 / 3.0
+    let err = abs_f64(result - expected)
+    print("  err=")
+    println(err)
+    return err < 1.0e-4
+}
+
+// Test 2: Trapezoid constant on [0,5], expected 5.0 (exact)
+fn test_trapezoid_constant() -> bool with IO, Mut, Panic, Div {
+    let result = trapezoid(0.0, 5.0, 10, f_constant)
+    let expected = 5.0
+    let err = abs_f64(result - expected)
+    print("  err=")
+    println(err)
+    return err < 1.0e-12
+}
+
+// Test 3: Simpson x^2 on [0,1], exact for degree <= 3, n=4
+fn test_simpson_x_squared() -> bool with IO, Mut, Panic, Div {
+    let result = simpson(0.0, 1.0, 4, f_x_squared)
+    let expected = 1.0 / 3.0
+    let err = abs_f64(result - expected)
+    print("  err=")
+    println(err)
+    return err < 1.0e-12
+}
+
+// Test 4: Simpson x^3 on [0,1], exact, n=4
+fn test_simpson_x_cubed() -> bool with IO, Mut, Panic, Div {
+    let result = simpson(0.0, 1.0, 4, f_x_cubed)
+    let expected = 0.25
+    let err = abs_f64(result - expected)
+    print("  err=")
+    println(err)
+    return err < 1.0e-12
+}
+
+// Test 5: Simpson sin [0,pi], expected 2.0, tol 1e-6, n=20
+fn test_simpson_sin() -> bool with IO, Mut, Panic, Div {
+    let result = simpson(0.0, pi_val(), 20, f_sin)
+    let expected = 2.0
+    let err = abs_f64(result - expected)
+    print("  err=")
+    println(err)
+    return err < 1.0e-6
+}
+
+// Test 6: Simpson 3/8 x^3 on [0,1], tol 1e-10, n=6
+fn test_simpson38_x_cubed() -> bool with IO, Mut, Panic, Div {
+    let result = simpson38(0.0, 1.0, 6, f_x_cubed)
+    let expected = 0.25
+    let err = abs_f64(result - expected)
+    print("  err=")
+    println(err)
+    return err < 1.0e-10
+}
+
+// Test 7: GL2 linear on [0,1], exact
+fn test_gl2_linear() -> bool with IO, Mut, Panic, Div {
+    let result = gauss_legendre_2(0.0, 1.0, f_linear)
+    let expected = 0.5
+    let err = abs_f64(result - expected)
+    print("  err=")
+    println(err)
+    return err < 1.0e-12
+}
+
+// Test 8: GL3 x^4 on [0,1], GL3 exact for degree <= 5
+fn test_gl3_x_fourth() -> bool with IO, Mut, Panic, Div {
+    let result = gauss_legendre_3(0.0, 1.0, f_x_fourth)
+    let expected = 0.2
+    let err = abs_f64(result - expected)
+    print("  err=")
+    println(err)
+    return err < 1.0e-12
+}
+
+// Test 9: GL4 x^4 on [0,1], GL4 exact for degree <= 7
+fn test_gl4_x_fourth() -> bool with IO, Mut, Panic, Div {
+    let result = gauss_legendre_4(0.0, 1.0, f_x_fourth)
+    let expected = 0.2
+    let err = abs_f64(result - expected)
+    print("  err=")
+    println(err)
+    return err < 1.0e-12
+}
+
+// Test 10: GL5 sin on [0,pi], tol 1e-4
+fn test_gl5_sin() -> bool with IO, Mut, Panic, Div {
+    let result = gauss_legendre_5(0.0, pi_val(), f_sin)
+    let expected = 2.0
+    let err = abs_f64(result - expected)
+    print("  err=")
+    println(err)
+    return err < 1.0e-4
+}
+
+// Test 11: Composite GL exp on [0,1], m=4, 3-point, tol 1e-10
+fn test_composite_gl_exp() -> bool with IO, Mut, Panic, Div {
+    let result = composite_gauss_legendre(0.0, 1.0, 4, 3, f_exp)
+    let expected = e_val() - 1.0
+    let err = abs_f64(result - expected)
+    print("  err=")
+    println(err)
+    return err < 1.0e-10
+}
+
+// Test 12: Romberg x^2 on [0,1], tol 1e-10
+fn test_romberg_x_squared() -> bool with IO, Mut, Panic, Div {
+    let result = romberg(0.0, 1.0, 10, 1.0e-10, f_x_squared)
+    let expected = 1.0 / 3.0
+    let err = abs_f64(result.value - expected)
+    print("  err=")
+    println(err)
+    return err < 1.0e-10
+}
+
+// Test 13: Romberg sin [0,pi], tol 1e-8
+fn test_romberg_sin() -> bool with IO, Mut, Panic, Div {
+    let result = romberg(0.0, pi_val(), 12, 1.0e-8, f_sin)
+    let expected = 2.0
+    let err = abs_f64(result.value - expected)
+    print("  err=")
+    println(err)
+    return err < 1.0e-8
+}
+
+// Test 14: Romberg converges flag
+fn test_romberg_converged() -> bool with IO, Mut, Panic, Div {
+    let result = romberg(0.0, 1.0, 10, 1.0e-8, f_x_squared)
+    print("  converged=")
+    if result.converged {
+        println("true")
+    } else {
+        println("false")
+    }
+    return result.converged
+}
+
+// Test 15: Adaptive arctan_deriv on [0,1], expected pi/4, tol 1e-8
+fn test_adaptive_arctan_deriv() -> bool with IO, Mut, Panic, Div {
+    let result = adaptive_simpson(0.0, 1.0, 1.0e-8, f_arctan_deriv)
+    let expected = pi_val() / 4.0
+    let err = abs_f64(result.value - expected)
+    print("  err=")
+    println(err)
+    return err < 1.0e-8
+}
+
+// Test 16: Adaptive exp on [0,1], expected e-1, tol 1e-8
+fn test_adaptive_exp() -> bool with IO, Mut, Panic, Div {
+    let result = adaptive_simpson(0.0, 1.0, 1.0e-8, f_exp)
+    let expected = e_val() - 1.0
+    let err = abs_f64(result.value - expected)
+    print("  err=")
+    println(err)
+    return err < 1.0e-8
+}
+
+// Test 17: Midpoint x^2 on [0,1], tol 1e-4, n=100
+fn test_midpoint_x_squared() -> bool with IO, Mut, Panic, Div {
+    let result = midpoint(0.0, 1.0, 100, f_x_squared)
+    let expected = 1.0 / 3.0
+    let err = abs_f64(result - expected)
+    print("  err=")
+    println(err)
+    return err < 1.0e-4
+}
+
+// Test 18: Boole x^4 on [0,1], exact for degree <= 5, n=4
+fn test_boole_x_fourth() -> bool with IO, Mut, Panic, Div {
+    let result = boole(0.0, 1.0, 4, f_x_fourth)
+    let expected = 0.2
+    let err = abs_f64(result - expected)
+    print("  err=")
+    println(err)
+    return err < 1.0e-12
+}
+
+// Test 19: Boole sin [0,pi], tol 1e-6, n=8
+fn test_boole_sin() -> bool with IO, Mut, Panic, Div {
+    let result = boole(0.0, pi_val(), 8, f_sin)
+    let expected = 2.0
+    let err = abs_f64(result - expected)
+    print("  err=")
+    println(err)
+    return err < 1.0e-6
+}
+
+// Test 20: All methods agree on sqrt(x) [0,1], expected 2/3, tol 1e-3
+fn test_all_agree_sqrt() -> bool with IO, Mut, Panic, Div {
+    let expected = 2.0 / 3.0
+
+    let v_trap = trapezoid(0.0, 1.0, 200, f_sqrt)
+    let v_simp = simpson(0.0, 1.0, 200, f_sqrt)
+    let v_mid = midpoint(0.0, 1.0, 200, f_sqrt)
+    let v_boole = boole(0.0, 1.0, 200, f_sqrt)
+    let v_rom = romberg(0.0, 1.0, 12, 1.0e-6, f_sqrt)
+    let v_adap = adaptive_simpson(0.0, 1.0, 1.0e-6, f_sqrt)
+
+    let e_trap = abs_f64(v_trap - expected)
+    let e_simp = abs_f64(v_simp - expected)
+    let e_mid = abs_f64(v_mid - expected)
+    let e_boole = abs_f64(v_boole - expected)
+    let e_rom = abs_f64(v_rom.value - expected)
+    let e_adap = abs_f64(v_adap.value - expected)
+
+    print("  trap_err=")
+    println(e_trap)
+    print("  simp_err=")
+    println(e_simp)
+    print("  mid_err=")
+    println(e_mid)
+    print("  boole_err=")
+    println(e_boole)
+    print("  rom_err=")
+    println(e_rom)
+    print("  adap_err=")
+    println(e_adap)
+
+    return e_trap < 1.0e-3 && e_simp < 1.0e-3 && e_mid < 1.0e-3 && e_boole < 1.0e-3 && e_rom < 1.0e-3 && e_adap < 1.0e-3
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== Numerical Quadrature Tests ===")
+    println("")
+
+    var passed: i32 = 0
+    var failed: i32 = 0
+
+    // Test 1
+    print("Test  1: Trapezoid x^2.............. ")
+    if test_trapezoid_x_squared() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 2
+    print("Test  2: Trapezoid constant......... ")
+    if test_trapezoid_constant() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 3
+    print("Test  3: Simpson x^2 exact.......... ")
+    if test_simpson_x_squared() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 4
+    print("Test  4: Simpson x^3 exact.......... ")
+    if test_simpson_x_cubed() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 5
+    print("Test  5: Simpson sin [0,pi]......... ")
+    if test_simpson_sin() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 6
+    print("Test  6: Simpson 3/8 x^3............ ")
+    if test_simpson38_x_cubed() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 7
+    print("Test  7: GL2 linear exact........... ")
+    if test_gl2_linear() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 8
+    print("Test  8: GL3 x^4 exact.............. ")
+    if test_gl3_x_fourth() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 9
+    print("Test  9: GL4 x^4 exact.............. ")
+    if test_gl4_x_fourth() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 10
+    print("Test 10: GL5 sin [0,pi]............. ")
+    if test_gl5_sin() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 11
+    print("Test 11: Composite GL exp........... ")
+    if test_composite_gl_exp() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 12
+    print("Test 12: Romberg x^2................ ")
+    if test_romberg_x_squared() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 13
+    print("Test 13: Romberg sin [0,pi]......... ")
+    if test_romberg_sin() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 14
+    print("Test 14: Romberg converges.......... ")
+    if test_romberg_converged() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 15
+    print("Test 15: Adaptive arctan deriv...... ")
+    if test_adaptive_arctan_deriv() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 16
+    print("Test 16: Adaptive exp............... ")
+    if test_adaptive_exp() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 17
+    print("Test 17: Midpoint x^2............... ")
+    if test_midpoint_x_squared() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 18
+    print("Test 18: Boole x^4 exact............ ")
+    if test_boole_x_fourth() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 19
+    print("Test 19: Boole sin [0,pi]........... ")
+    if test_boole_sin() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 20
+    print("Test 20: All methods agree sqrt..... ")
+    if test_all_agree_sqrt() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    println("")
+    print("Passed: ")
+    println(passed)
+    print("Failed: ")
+    println(failed)
+
+    if failed == 0 {
+        println("ALL 20 TESTS PASSED")
+        return 0
+    }
+    println("SOME TESTS FAILED")
+    return 1
+}

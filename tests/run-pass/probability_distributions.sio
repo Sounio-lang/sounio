@@ -1,0 +1,646 @@
+//@ run-pass
+// Probability Distribution Function Tests
+//
+// Self-contained test suite validating probability distribution functions:
+//   Uniform, Normal, Exponential, Poisson, Binomial
+//
+// All functions are inlined since tests cannot import.
+//
+// References:
+//   Feller, "An Introduction to Probability Theory" (3rd ed.)
+//   Abramowitz & Stegun (1964), Table 7.1 (erf approximation)
+//   NIST Digital Library of Mathematical Functions
+
+// ============================================================================
+// PURE MATH HELPERS (must precede callers)
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    if g < 1.0 { g = 1.0 }
+    var i = 0
+    while i < 50 {
+        g = (g + x / g) / 2.0
+        i = i + 1
+    }
+    return g
+}
+
+fn exp_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x > 20.0 { return exp_f64(x / 2.0) * exp_f64(x / 2.0) }
+    if x < 0.0 - 20.0 { return 1.0 / exp_f64(0.0 - x) }
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n <= 25 {
+        term = term * x / (n as f64)
+        sum = sum + term
+        n = n + 1
+    }
+    return sum
+}
+
+fn ln_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 {
+        term = term * t2
+        sum = sum + term / ((2 * k + 1) as f64)
+        k = k + 1
+    }
+    return 2.0 * sum + (e as f64) * 0.6931471805599453
+}
+
+fn pow_f64(base: f64, exp_val: f64) -> f64 with Mut, Panic, Div {
+    if base <= 0.0 { return 0.0 }
+    return exp_f64(exp_val * ln_f64(base))
+}
+
+fn approx_eq(a: f64, b: f64, tol: f64) -> bool with Mut, Panic, Div {
+    abs_f64(a - b) < tol
+}
+
+// ============================================================================
+// UNIFORM DISTRIBUTION
+// ============================================================================
+
+struct Uniform {
+    a: f64,
+    b: f64,
+}
+
+fn uniform_pdf(d: Uniform, x: f64) -> f64 with Mut, Panic, Div {
+    if x < d.a || x > d.b { return 0.0 }
+    return 1.0 / (d.b - d.a)
+}
+
+fn uniform_cdf(d: Uniform, x: f64) -> f64 with Mut, Panic, Div {
+    if x <= d.a { return 0.0 }
+    if x >= d.b { return 1.0 }
+    return (x - d.a) / (d.b - d.a)
+}
+
+fn uniform_mean(d: Uniform) -> f64 with Mut, Panic, Div {
+    return (d.a + d.b) / 2.0
+}
+
+fn uniform_variance(d: Uniform) -> f64 with Mut, Panic, Div {
+    let range = d.b - d.a
+    return range * range / 12.0
+}
+
+// ============================================================================
+// NORMAL DISTRIBUTION
+// ============================================================================
+
+struct Normal {
+    mu: f64,
+    sigma: f64,
+}
+
+// Error function approximation (Abramowitz & Stegun 7.1.26)
+fn erf_approx(x: f64) -> f64 with Mut, Panic, Div {
+    let sign = if x < 0.0 { 0.0 - 1.0 } else { 1.0 }
+    let a = if x < 0.0 { 0.0 - x } else { x }
+    let t = 1.0 / (1.0 + 0.3275911 * a)
+    let poly = t * (0.254829592 + t * (0.0 - 0.284496736 + t * (1.421413741 + t * (0.0 - 1.453152027 + t * 1.061405429))))
+    let result = 1.0 - poly * exp_f64(0.0 - a * a)
+    return sign * result
+}
+
+fn normal_pdf(d: Normal, x: f64) -> f64 with Mut, Panic, Div {
+    let pi = 3.141592653589793
+    let z = (x - d.mu) / d.sigma
+    return exp_f64(0.0 - 0.5 * z * z) / (d.sigma * sqrt_f64(2.0 * pi))
+}
+
+fn normal_cdf(d: Normal, x: f64) -> f64 with Mut, Panic, Div {
+    let z = (x - d.mu) / d.sigma
+    return 0.5 * (1.0 + erf_approx(z / sqrt_f64(2.0)))
+}
+
+// ============================================================================
+// EXPONENTIAL DISTRIBUTION
+// ============================================================================
+
+struct Exponential {
+    lambda: f64,
+}
+
+fn exponential_pdf(d: Exponential, x: f64) -> f64 with Mut, Panic, Div {
+    if x < 0.0 { return 0.0 }
+    return d.lambda * exp_f64(0.0 - d.lambda * x)
+}
+
+fn exponential_cdf(d: Exponential, x: f64) -> f64 with Mut, Panic, Div {
+    if x < 0.0 { return 0.0 }
+    return 1.0 - exp_f64(0.0 - d.lambda * x)
+}
+
+// ============================================================================
+// POISSON DISTRIBUTION
+// ============================================================================
+
+struct Poisson {
+    lambda: f64,
+}
+
+fn poisson_pmf(d: Poisson, k: i32) -> f64 with Mut, Panic, Div {
+    // P(X=k) = lambda^k * e^(-lambda) / k!
+    // Use log-space to avoid overflow
+    var log_pmf = (k as f64) * ln_f64(d.lambda) - d.lambda
+    var i = 1
+    while i <= k {
+        log_pmf = log_pmf - ln_f64(i as f64)
+        i = i + 1
+    }
+    return exp_f64(log_pmf)
+}
+
+// ============================================================================
+// BINOMIAL DISTRIBUTION
+// ============================================================================
+
+struct Binomial {
+    n: i32,
+    p: f64,
+}
+
+fn binomial_pmf(d: Binomial, k: i32) -> f64 with Mut, Panic, Div {
+    // P(X=k) = C(n,k) * p^k * (1-p)^(n-k)
+    // Use log-space: log C(n,k) = sum log(n-i+1) - sum log(i) for i=1..k
+    var log_pmf = 0.0
+    var i = 1
+    while i <= k {
+        log_pmf = log_pmf + ln_f64((d.n - i + 1) as f64) - ln_f64(i as f64)
+        i = i + 1
+    }
+    log_pmf = log_pmf + (k as f64) * ln_f64(d.p) + ((d.n - k) as f64) * ln_f64(1.0 - d.p)
+    return exp_f64(log_pmf)
+}
+
+// ============================================================================
+// TEST FUNCTIONS
+// ============================================================================
+
+// Test 1: Uniform PDF inside [0,1] at x=0.5 should be 1.0
+fn test_uniform_pdf_inside() -> bool with IO, Mut, Panic, Div {
+    let d = Uniform { a: 0.0, b: 1.0 }
+    let pdf = uniform_pdf(d, 0.5)
+    print("  pdf(0.5)=")
+    println(pdf)
+    return approx_eq(pdf, 1.0, 1.0e-10)
+}
+
+// Test 2: Uniform PDF outside [0,1] at x=2.0 should be 0.0
+fn test_uniform_pdf_outside() -> bool with IO, Mut, Panic, Div {
+    let d = Uniform { a: 0.0, b: 1.0 }
+    let pdf = uniform_pdf(d, 2.0)
+    print("  pdf(2.0)=")
+    println(pdf)
+    return approx_eq(pdf, 0.0, 1.0e-10)
+}
+
+// Test 3: Uniform CDF boundaries: CDF(a)=0, CDF(b)=1
+fn test_uniform_cdf_boundaries() -> bool with IO, Mut, Panic, Div {
+    let d = Uniform { a: 2.0, b: 5.0 }
+    let cdf_a = uniform_cdf(d, 2.0)
+    let cdf_b = uniform_cdf(d, 5.0)
+    print("  cdf(a)=")
+    println(cdf_a)
+    print("  cdf(b)=")
+    println(cdf_b)
+    return approx_eq(cdf_a, 0.0, 1.0e-10) && approx_eq(cdf_b, 1.0, 1.0e-10)
+}
+
+// Test 4: Uniform CDF midpoint: CDF of U(0,1) at x=0.5 equals 0.5
+fn test_uniform_cdf_midpoint() -> bool with IO, Mut, Panic, Div {
+    let d = Uniform { a: 0.0, b: 1.0 }
+    let cdf = uniform_cdf(d, 0.5)
+    print("  cdf(0.5)=")
+    println(cdf)
+    return approx_eq(cdf, 0.5, 1.0e-10)
+}
+
+// Test 5: Uniform mean and variance
+fn test_uniform_mean_variance() -> bool with IO, Mut, Panic, Div {
+    let d = Uniform { a: 2.0, b: 8.0 }
+    let m = uniform_mean(d)
+    let v = uniform_variance(d)
+    let expected_mean = 5.0
+    let expected_var = 36.0 / 12.0
+    print("  mean=")
+    println(m)
+    print("  var=")
+    println(v)
+    return approx_eq(m, expected_mean, 1.0e-10) && approx_eq(v, expected_var, 1.0e-10)
+}
+
+// Test 6: Normal PDF peak: N(0,1) at x=0 ~ 1/sqrt(2*pi) ~ 0.3989
+fn test_normal_pdf_peak() -> bool with IO, Mut, Panic, Div {
+    let d = Normal { mu: 0.0, sigma: 1.0 }
+    let pdf = normal_pdf(d, 0.0)
+    let pi = 3.141592653589793
+    let expected = 1.0 / sqrt_f64(2.0 * pi)
+    print("  pdf(0)=")
+    println(pdf)
+    print("  expected=")
+    println(expected)
+    return approx_eq(pdf, expected, 1.0e-6)
+}
+
+// Test 7: Normal PDF symmetry: PDF(mu+d) = PDF(mu-d)
+fn test_normal_pdf_symmetry() -> bool with IO, Mut, Panic, Div {
+    let d = Normal { mu: 3.0, sigma: 2.0 }
+    let delta = 1.5
+    let pdf_plus = normal_pdf(d, 3.0 + delta)
+    let pdf_minus = normal_pdf(d, 3.0 - delta)
+    print("  pdf(mu+d)=")
+    println(pdf_plus)
+    print("  pdf(mu-d)=")
+    println(pdf_minus)
+    return approx_eq(pdf_plus, pdf_minus, 1.0e-10)
+}
+
+// Test 8: Normal CDF symmetry: CDF(mu) = 0.5
+fn test_normal_cdf_symmetry() -> bool with IO, Mut, Panic, Div {
+    let d = Normal { mu: 5.0, sigma: 2.0 }
+    let cdf_at_mu = normal_cdf(d, 5.0)
+    print("  cdf(mu)=")
+    println(cdf_at_mu)
+    return approx_eq(cdf_at_mu, 0.5, 1.0e-4)
+}
+
+// Test 9: Normal CDF tails: CDF(mu-3*sigma) ~ 0.00135, CDF(mu+3*sigma) ~ 0.99865
+fn test_normal_cdf_tails() -> bool with IO, Mut, Panic, Div {
+    let d = Normal { mu: 0.0, sigma: 1.0 }
+    let cdf_lower = normal_cdf(d, 0.0 - 3.0)
+    let cdf_upper = normal_cdf(d, 3.0)
+    print("  cdf(-3)=")
+    println(cdf_lower)
+    print("  cdf(+3)=")
+    println(cdf_upper)
+    return approx_eq(cdf_lower, 0.00135, 0.001) && approx_eq(cdf_upper, 0.99865, 0.001)
+}
+
+// Test 10: Normal PDF scales with sigma: narrower sigma gives taller peak
+fn test_normal_pdf_scales_with_sigma() -> bool with IO, Mut, Panic, Div {
+    let narrow = Normal { mu: 0.0, sigma: 0.5 }
+    let wide = Normal { mu: 0.0, sigma: 2.0 }
+    let pdf_narrow = normal_pdf(narrow, 0.0)
+    let pdf_wide = normal_pdf(wide, 0.0)
+    print("  pdf(narrow,0)=")
+    println(pdf_narrow)
+    print("  pdf(wide,0)=")
+    println(pdf_wide)
+    return pdf_narrow > pdf_wide
+}
+
+// Test 11: Exponential PDF at zero: PDF(0) = lambda
+fn test_exponential_pdf_at_zero() -> bool with IO, Mut, Panic, Div {
+    let d = Exponential { lambda: 3.0 }
+    let pdf = exponential_pdf(d, 0.0)
+    print("  pdf(0)=")
+    println(pdf)
+    return approx_eq(pdf, 3.0, 1.0e-6)
+}
+
+// Test 12: Exponential CDF at zero: CDF(0) = 0
+fn test_exponential_cdf_at_zero() -> bool with IO, Mut, Panic, Div {
+    let d = Exponential { lambda: 2.0 }
+    let cdf = exponential_cdf(d, 0.0)
+    print("  cdf(0)=")
+    println(cdf)
+    return approx_eq(cdf, 0.0, 1.0e-10)
+}
+
+// Test 13: Exponential memoryless: CDF(t) = 1 - e^(-lambda*t)
+fn test_exponential_memoryless() -> bool with IO, Mut, Panic, Div {
+    let d = Exponential { lambda: 1.5 }
+    let t = 2.0
+    let cdf = exponential_cdf(d, t)
+    let expected = 1.0 - exp_f64(0.0 - 1.5 * 2.0)
+    print("  cdf(2.0)=")
+    println(cdf)
+    print("  expected=")
+    println(expected)
+    return approx_eq(cdf, expected, 1.0e-8)
+}
+
+// Test 14: Exponential mean: numerical integral of x*PDF ~ 1/lambda
+fn test_exponential_mean_check() -> bool with IO, Mut, Panic, Div {
+    let d = Exponential { lambda: 2.0 }
+    // Numerically integrate x * f(x) from 0 to 10 using trapezoid
+    let n = 1000
+    let upper = 10.0
+    let h = upper / (n as f64)
+    var sum = 0.0
+    var i = 0
+    while i <= n {
+        let x = (i as f64) * h
+        let fx = x * exponential_pdf(d, x)
+        if i == 0 || i == n {
+            sum = sum + 0.5 * fx
+        } else {
+            sum = sum + fx
+        }
+        i = i + 1
+    }
+    let integral = sum * h
+    let expected = 1.0 / 2.0
+    print("  integral=")
+    println(integral)
+    print("  expected=")
+    println(expected)
+    return approx_eq(integral, expected, 0.01)
+}
+
+// Test 15: Poisson PMF sum: P(0)+...+P(20) ~ 1.0 for lambda=5
+fn test_poisson_pmf_sum() -> bool with IO, Mut, Panic, Div {
+    let d = Poisson { lambda: 5.0 }
+    var sum = 0.0
+    var k = 0
+    while k <= 20 {
+        sum = sum + poisson_pmf(d, k)
+        k = k + 1
+    }
+    print("  sum(P(k),k=0..20)=")
+    println(sum)
+    return approx_eq(sum, 1.0, 1.0e-4)
+}
+
+// Test 16: Poisson mode: for lambda=5, mode is at k=4 or k=5
+//   (floor(lambda) = 5; PMF at 4 and 5 should be close and both > P(3) and P(6))
+fn test_poisson_mode() -> bool with IO, Mut, Panic, Div {
+    let d = Poisson { lambda: 5.0 }
+    let p3 = poisson_pmf(d, 3)
+    let p4 = poisson_pmf(d, 4)
+    let p5 = poisson_pmf(d, 5)
+    let p6 = poisson_pmf(d, 6)
+    print("  P(3)=")
+    println(p3)
+    print("  P(4)=")
+    println(p4)
+    print("  P(5)=")
+    println(p5)
+    print("  P(6)=")
+    println(p6)
+    // Mode: P(4) >= P(3) and P(4) >= P(6)
+    let ok1 = p4 >= p3
+    let ok2 = p4 >= p6
+    return ok1 && ok2
+}
+
+// Test 17: Binomial PMF sum: sum of P(k) for k=0..n ~ 1.0
+fn test_binomial_pmf_sum() -> bool with IO, Mut, Panic, Div {
+    let d = Binomial { n: 10, p: 0.3 }
+    var sum = 0.0
+    var k = 0
+    while k <= 10 {
+        sum = sum + binomial_pmf(d, k)
+        k = k + 1
+    }
+    print("  sum(P(k),k=0..10)=")
+    println(sum)
+    return approx_eq(sum, 1.0, 1.0e-6)
+}
+
+// Test 18: Binomial fair coin: B(10, 0.5): P(5) is the maximum PMF value
+fn test_binomial_fair_coin() -> bool with IO, Mut, Panic, Div {
+    let d = Binomial { n: 10, p: 0.5 }
+    let p5 = binomial_pmf(d, 5)
+    // Check P(5) > P(k) for k != 5 (or at least >= for neighbors)
+    var is_max = true
+    var k = 0
+    while k <= 10 {
+        if k != 5 {
+            let pk = binomial_pmf(d, k)
+            if pk > p5 {
+                is_max = false
+            }
+        }
+        k = k + 1
+    }
+    print("  P(5)=")
+    println(p5)
+    return is_max
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== Probability Distribution Tests ===")
+    println("")
+
+    var passed = 0
+    var failed = 0
+
+    // Test 1
+    print("Test  1: uniform PDF inside......... ")
+    if test_uniform_pdf_inside() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 2
+    print("Test  2: uniform PDF outside........ ")
+    if test_uniform_pdf_outside() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 3
+    print("Test  3: uniform CDF boundaries..... ")
+    if test_uniform_cdf_boundaries() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 4
+    print("Test  4: uniform CDF midpoint....... ")
+    if test_uniform_cdf_midpoint() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 5
+    print("Test  5: uniform mean/variance...... ")
+    if test_uniform_mean_variance() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 6
+    print("Test  6: normal PDF peak............ ")
+    if test_normal_pdf_peak() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 7
+    print("Test  7: normal PDF symmetry........ ")
+    if test_normal_pdf_symmetry() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 8
+    print("Test  8: normal CDF symmetry........ ")
+    if test_normal_cdf_symmetry() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 9
+    print("Test  9: normal CDF tails........... ")
+    if test_normal_cdf_tails() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 10
+    print("Test 10: normal PDF sigma scaling... ")
+    if test_normal_pdf_scales_with_sigma() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 11
+    print("Test 11: exponential PDF at zero.... ")
+    if test_exponential_pdf_at_zero() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 12
+    print("Test 12: exponential CDF at zero.... ")
+    if test_exponential_cdf_at_zero() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 13
+    print("Test 13: exponential memoryless..... ")
+    if test_exponential_memoryless() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 14
+    print("Test 14: exponential mean check..... ")
+    if test_exponential_mean_check() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 15
+    print("Test 15: Poisson PMF sum............ ")
+    if test_poisson_pmf_sum() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 16
+    print("Test 16: Poisson mode............... ")
+    if test_poisson_mode() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 17
+    print("Test 17: binomial PMF sum........... ")
+    if test_binomial_pmf_sum() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 18
+    print("Test 18: binomial fair coin......... ")
+    if test_binomial_fair_coin() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    println("")
+    print("Passed: ")
+    println(passed)
+    print("Failed: ")
+    println(failed)
+
+    if failed == 0 {
+        println("ALL 18 TESTS PASSED")
+        return 0
+    }
+    println("SOME TESTS FAILED")
+    return 1
+}

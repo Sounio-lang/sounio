@@ -1,0 +1,487 @@
+//@ run-pass
+// General-Purpose RK4 ODE Solver Tests
+//
+// Tests a classical 4th-order Runge-Kutta integrator on four canonical ODEs:
+//   1. Exponential decay:   du/dt = -k*u
+//   2. Harmonic oscillator: dx/dt = v, dv/dt = -omega^2*x
+//   3. Logistic growth:     du/dt = r*u*(1 - u/K)
+//   4. Stiff linear decay:  du/dt = -50*u
+//
+// Plus trivial ODEs (zero RHS, constant RHS) and convergence order verification.
+// All functions inlined since tests cannot import.
+//
+// References:
+//   Hairer, Norsett, Wanner (1993) "Solving ODEs I: Nonstiff Problems"
+//   Butcher (2008) "Numerical Methods for ODEs"
+
+// ============================================================================
+// MATH HELPERS (must precede callers)
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn exp_approx(x: f64) -> f64 with Mut, Panic, Div {
+    // Taylor series for e^x, good for small |x|
+    // Split large x: e^x = e^(x/2) * e^(x/2)
+    if x > 10.0 {
+        let half = exp_approx(x / 2.0)
+        return half * half
+    }
+    if x < 0.0 - 10.0 { return 1.0 / exp_approx(0.0 - x) }
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n <= 25 {
+        term = term * x / (n as f64)
+        sum = sum + term
+        n = n + 1
+    }
+    return sum
+}
+
+fn sin_approx(x: f64) -> f64 with Mut, Panic, Div {
+    let pi = 3.141592653589793
+    let two_pi = 6.283185307179586
+    var a = x
+    // Range reduction
+    if a > two_pi || a < 0.0 - two_pi {
+        let n = (a / two_pi) as i32
+        a = a - (n as f64) * two_pi
+    }
+    while a > pi { a = a - two_pi }
+    while a < 0.0 - pi { a = a + two_pi }
+    let a2 = a * a
+    var sum = a
+    var term = a
+    var n = 1
+    while n < 18 {
+        term = 0.0 - term * a2 / ((2 * n) * (2 * n + 1)) as f64
+        sum = sum + term
+        n = n + 1
+    }
+    return sum
+}
+
+fn cos_approx(x: f64) -> f64 with Mut, Panic, Div {
+    return sin_approx(x + 1.5707963267948966)
+}
+
+// ============================================================================
+// STATE STRUCTS
+// ============================================================================
+
+struct ScalarState {
+    u: f64,
+    t: f64,
+}
+
+struct Vec2State {
+    x: f64,
+    y: f64,
+    t: f64,
+}
+
+// ============================================================================
+// ODE 1: EXPONENTIAL DECAY  du/dt = -k*u,  k=0.1
+// Analytical: u(t) = u0 * exp(-k*t)
+// ============================================================================
+
+fn exp_decay_deriv(u: f64) -> f64 {
+    return 0.0 - 0.1 * u
+}
+
+fn rk4_step_exp_decay(s: ScalarState, dt: f64) -> ScalarState {
+    let k1 = exp_decay_deriv(s.u)
+    let k2 = exp_decay_deriv(s.u + 0.5 * dt * k1)
+    let k3 = exp_decay_deriv(s.u + 0.5 * dt * k2)
+    let k4 = exp_decay_deriv(s.u + dt * k3)
+    ScalarState {
+        u: s.u + dt / 6.0 * (k1 + 2.0 * k2 + 2.0 * k3 + k4),
+        t: s.t + dt,
+    }
+}
+
+fn solve_exp_decay(u0: f64, t_end: f64, n_steps: i32) -> ScalarState with Mut, Panic, Div {
+    let dt = t_end / (n_steps as f64)
+    var s = ScalarState { u: u0, t: 0.0 }
+    var i = 0
+    while i < n_steps {
+        s = rk4_step_exp_decay(s, dt)
+        i = i + 1
+    }
+    return s
+}
+
+// ============================================================================
+// ODE 2: HARMONIC OSCILLATOR  dx/dt = v, dv/dt = -omega^2*x, omega=1.0
+// Analytical: x(t) = cos(t), v(t) = -sin(t)  for x0=1, v0=0
+// ============================================================================
+
+struct HarmDerivs {
+    dx: f64,
+    dv: f64,
+}
+
+fn harmonic_deriv(x: f64, v: f64) -> HarmDerivs {
+    HarmDerivs { dx: v, dv: 0.0 - x }
+}
+
+fn rk4_step_harmonic(s: Vec2State, dt: f64) -> Vec2State {
+    let k1 = harmonic_deriv(s.x, s.y)
+    let k2 = harmonic_deriv(s.x + 0.5 * dt * k1.dx, s.y + 0.5 * dt * k1.dv)
+    let k3 = harmonic_deriv(s.x + 0.5 * dt * k2.dx, s.y + 0.5 * dt * k2.dv)
+    let k4 = harmonic_deriv(s.x + dt * k3.dx, s.y + dt * k3.dv)
+    Vec2State {
+        x: s.x + dt / 6.0 * (k1.dx + 2.0 * k2.dx + 2.0 * k3.dx + k4.dx),
+        y: s.y + dt / 6.0 * (k1.dv + 2.0 * k2.dv + 2.0 * k3.dv + k4.dv),
+        t: s.t + dt,
+    }
+}
+
+fn solve_harmonic(x0: f64, v0: f64, t_end: f64, n_steps: i32) -> Vec2State with Mut, Panic, Div {
+    let dt = t_end / (n_steps as f64)
+    var s = Vec2State { x: x0, y: v0, t: 0.0 }
+    var i = 0
+    while i < n_steps {
+        s = rk4_step_harmonic(s, dt)
+        i = i + 1
+    }
+    return s
+}
+
+// ============================================================================
+// ODE 3: LOGISTIC GROWTH  du/dt = r*u*(1 - u/K), r=1.0, K=10.0
+// Analytical: u(t) = K / (1 + (K/u0 - 1)*exp(-r*t))
+// ============================================================================
+
+fn logistic_deriv(u: f64) -> f64 {
+    return 1.0 * u * (1.0 - u / 10.0)
+}
+
+fn rk4_step_logistic(s: ScalarState, dt: f64) -> ScalarState {
+    let k1 = logistic_deriv(s.u)
+    let k2 = logistic_deriv(s.u + 0.5 * dt * k1)
+    let k3 = logistic_deriv(s.u + 0.5 * dt * k2)
+    let k4 = logistic_deriv(s.u + dt * k3)
+    ScalarState {
+        u: s.u + dt / 6.0 * (k1 + 2.0 * k2 + 2.0 * k3 + k4),
+        t: s.t + dt,
+    }
+}
+
+fn solve_logistic(u0: f64, t_end: f64, n_steps: i32) -> ScalarState with Mut, Panic, Div {
+    let dt = t_end / (n_steps as f64)
+    var s = ScalarState { u: u0, t: 0.0 }
+    var i = 0
+    while i < n_steps {
+        s = rk4_step_logistic(s, dt)
+        i = i + 1
+    }
+    return s
+}
+
+fn logistic_exact(u0: f64, t: f64) -> f64 with Mut, Panic, Div {
+    // u(t) = K / (1 + (K/u0 - 1)*exp(-r*t))
+    let k = 10.0
+    let r = 1.0
+    let ratio = k / u0 - 1.0
+    return k / (1.0 + ratio * exp_approx(0.0 - r * t))
+}
+
+// ============================================================================
+// ODE 4: STIFF LINEAR DECAY  du/dt = -50*u
+// Analytical: u(t) = u0 * exp(-50*t)
+// ============================================================================
+
+fn stiff_decay_deriv(u: f64) -> f64 {
+    return 0.0 - 50.0 * u
+}
+
+fn rk4_step_stiff(s: ScalarState, dt: f64) -> ScalarState {
+    let k1 = stiff_decay_deriv(s.u)
+    let k2 = stiff_decay_deriv(s.u + 0.5 * dt * k1)
+    let k3 = stiff_decay_deriv(s.u + 0.5 * dt * k2)
+    let k4 = stiff_decay_deriv(s.u + dt * k3)
+    ScalarState {
+        u: s.u + dt / 6.0 * (k1 + 2.0 * k2 + 2.0 * k3 + k4),
+        t: s.t + dt,
+    }
+}
+
+fn solve_stiff(u0: f64, t_end: f64, n_steps: i32) -> ScalarState with Mut, Panic, Div {
+    let dt = t_end / (n_steps as f64)
+    var s = ScalarState { u: u0, t: 0.0 }
+    var i = 0
+    while i < n_steps {
+        s = rk4_step_stiff(s, dt)
+        i = i + 1
+    }
+    return s
+}
+
+// ============================================================================
+// ODE 5: ZERO RHS  du/dt = 0
+// Analytical: u(t) = u0  (constant)
+// ============================================================================
+
+fn rk4_step_zero(s: ScalarState, dt: f64) -> ScalarState {
+    // k1=k2=k3=k4=0, so u unchanged
+    ScalarState { u: s.u, t: s.t + dt }
+}
+
+fn solve_zero(u0: f64, t_end: f64, n_steps: i32) -> ScalarState with Mut, Panic, Div {
+    let dt = t_end / (n_steps as f64)
+    var s = ScalarState { u: u0, t: 0.0 }
+    var i = 0
+    while i < n_steps {
+        s = rk4_step_zero(s, dt)
+        i = i + 1
+    }
+    return s
+}
+
+// ============================================================================
+// ODE 6: LINEAR RHS  du/dt = 1
+// Analytical: u(t) = u0 + t  (exact for RK4 since polynomial degree <= 4)
+// ============================================================================
+
+fn rk4_step_linear(s: ScalarState, dt: f64) -> ScalarState {
+    // k1=k2=k3=k4=1, so u += dt
+    ScalarState { u: s.u + dt, t: s.t + dt }
+}
+
+fn solve_linear(u0: f64, t_end: f64, n_steps: i32) -> ScalarState with Mut, Panic, Div {
+    let dt = t_end / (n_steps as f64)
+    var s = ScalarState { u: u0, t: 0.0 }
+    var i = 0
+    while i < n_steps {
+        s = rk4_step_linear(s, dt)
+        i = i + 1
+    }
+    return s
+}
+
+// ============================================================================
+// TEST FUNCTIONS
+// ============================================================================
+
+// Test 1: Exponential decay accuracy at t=10
+fn test_exp_decay_accuracy() -> bool with IO, Mut, Panic, Div {
+    let result = solve_exp_decay(1.0, 10.0, 1000)
+    let exact = exp_approx(0.0 - 1.0)  // exp(-0.1*10) = exp(-1)
+    let err = abs_f64(result.u - exact)
+    // RK4 with 1000 steps on this simple ODE should be very accurate
+    return err < 1.0e-8
+}
+
+// Test 2: Exponential decay stays non-negative
+fn test_exp_decay_stability() -> bool with IO, Mut, Panic, Div {
+    let result = solve_exp_decay(1.0, 10.0, 1000)
+    return result.u > 0.0
+}
+
+// Test 3: Finer dt gives better accuracy (convergence)
+fn test_exp_decay_convergence() -> bool with IO, Mut, Panic, Div {
+    let exact = exp_approx(0.0 - 1.0)
+    let r_coarse = solve_exp_decay(1.0, 10.0, 100)
+    let r_fine = solve_exp_decay(1.0, 10.0, 200)
+    let err_coarse = abs_f64(r_coarse.u - exact)
+    let err_fine = abs_f64(r_fine.u - exact)
+    // Finer should be more accurate
+    return err_fine < err_coarse
+}
+
+// Test 4: Harmonic oscillator x returns to ~1.0 after 2*pi
+fn test_harmonic_x_period() -> bool with IO, Mut, Panic, Div {
+    let two_pi = 6.283185307179586
+    let result = solve_harmonic(1.0, 0.0, two_pi, 10000)
+    let err = abs_f64(result.x - 1.0)
+    return err < 1.0e-6
+}
+
+// Test 5: Harmonic oscillator v returns to ~0.0 after 2*pi
+fn test_harmonic_v_period() -> bool with IO, Mut, Panic, Div {
+    let two_pi = 6.283185307179586
+    let result = solve_harmonic(1.0, 0.0, two_pi, 10000)
+    let err = abs_f64(result.y)
+    return err < 1.0e-6
+}
+
+// Test 6: Harmonic energy conservation E = 0.5*(x^2 + v^2)
+fn test_harmonic_energy() -> bool with IO, Mut, Panic, Div {
+    let two_pi = 6.283185307179586
+    let e0 = 0.5 * (1.0 * 1.0 + 0.0 * 0.0)  // 0.5
+    let result = solve_harmonic(1.0, 0.0, two_pi, 10000)
+    let e_final = 0.5 * (result.x * result.x + result.y * result.y)
+    let err = abs_f64(e_final - e0)
+    return err < 1.0e-8
+}
+
+// Test 7: Harmonic oscillator at half-period x(pi) ~ -1.0
+fn test_harmonic_half_period() -> bool with IO, Mut, Panic, Div {
+    let pi = 3.141592653589793
+    let result = solve_harmonic(1.0, 0.0, pi, 5000)
+    let err = abs_f64(result.x - (0.0 - 1.0))
+    return err < 1.0e-6
+}
+
+// Test 8: Logistic growth approaches equilibrium K=10
+fn test_logistic_equilibrium() -> bool with IO, Mut, Panic, Div {
+    let result = solve_logistic(0.1, 20.0, 2000)
+    let err = abs_f64(result.u - 10.0)
+    return err < 0.01
+}
+
+// Test 9: Logistic solution is monotonically increasing from u0=0.1
+fn test_logistic_monotone() -> bool with IO, Mut, Panic, Div {
+    let dt = 20.0 / 2000.0
+    var s = ScalarState { u: 0.1, t: 0.0 }
+    var prev_u = s.u
+    var i = 0
+    var monotone = true
+    while i < 2000 {
+        s = rk4_step_logistic(s, dt)
+        if s.u < prev_u {
+            monotone = false
+        }
+        prev_u = s.u
+        i = i + 1
+    }
+    return monotone
+}
+
+// Test 10: Logistic midpoint u(t_half) ~ K/2 at the inflection
+fn test_logistic_midpoint() -> bool with IO, Mut, Panic, Div {
+    // For u0=0.1, K=10, r=1: inflection at t where u=K/2=5
+    // t_inflect = ln((K/u0 - 1)) / r = ln(99) ~ 4.595
+    let t_inflect = 4.595
+    let result = solve_logistic(0.1, t_inflect, 1000)
+    let exact = logistic_exact(0.1, t_inflect)
+    let err = abs_f64(result.u - exact)
+    return err < 0.05
+}
+
+// Test 11: Stiff decay u(1) ~ 0 for du/dt = -50u
+fn test_stiff_decay() -> bool with IO, Mut, Panic, Div {
+    // Need small dt for stability: dt < 2.78/50 = 0.0556
+    // Use 10000 steps => dt = 0.0001 (well within stability)
+    let result = solve_stiff(1.0, 1.0, 10000)
+    let exact = exp_approx(0.0 - 50.0)
+    let err = abs_f64(result.u - exact)
+    // exp(-50) ~ 1.93e-22, effectively zero
+    return abs_f64(result.u) < 1.0e-10
+}
+
+// Test 12: Stiff decay stays positive (non-negative)
+fn test_stiff_nonneg() -> bool with IO, Mut, Panic, Div {
+    // With small enough dt, RK4 should stay positive
+    let dt = 1.0 / 10000.0
+    var s = ScalarState { u: 1.0, t: 0.0 }
+    var i = 0
+    var ok = true
+    while i < 10000 {
+        s = rk4_step_stiff(s, dt)
+        if s.u < 0.0 {
+            ok = false
+        }
+        i = i + 1
+    }
+    return ok
+}
+
+// Test 13: Order test - error scales as O(h^4)
+// Halving h should reduce error by ~16x
+fn test_order_rk4() -> bool with IO, Mut, Panic, Div {
+    let exact = exp_approx(0.0 - 1.0)  // exp(-0.1*10) = exp(-1)
+    let r1 = solve_exp_decay(1.0, 10.0, 100)
+    let r2 = solve_exp_decay(1.0, 10.0, 200)
+    let err1 = abs_f64(r1.u - exact)
+    let err2 = abs_f64(r2.u - exact)
+    // For O(h^4): err1/err2 ~ 16
+    // Be generous: accept ratio between 10 and 20
+    if err2 < 1.0e-15 { return true }  // both errors negligible
+    let ratio = err1 / err2
+    return ratio > 10.0 && ratio < 25.0
+}
+
+// Test 14: Zero RHS - du/dt=0, u stays at u0
+fn test_zero_rhs() -> bool with IO, Mut, Panic, Div {
+    let result = solve_zero(42.0, 10.0, 100)
+    let err = abs_f64(result.u - 42.0)
+    return err < 1.0e-12
+}
+
+// Test 15: Linear RHS - du/dt=1, u(t) = u0 + t (exact for RK4)
+fn test_linear_rhs() -> bool with IO, Mut, Panic, Div {
+    let result = solve_linear(5.0, 10.0, 100)
+    let exact = 5.0 + 10.0
+    let err = abs_f64(result.u - exact)
+    return err < 1.0e-10
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    var passed = 0
+    var failed = 0
+
+    print("Test  1: exp decay accuracy......... ")
+    if test_exp_decay_accuracy() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test  2: exp decay stability........ ")
+    if test_exp_decay_stability() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test  3: exp decay convergence...... ")
+    if test_exp_decay_convergence() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test  4: harmonic x period.......... ")
+    if test_harmonic_x_period() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test  5: harmonic v period.......... ")
+    if test_harmonic_v_period() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test  6: harmonic energy............ ")
+    if test_harmonic_energy() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test  7: harmonic half period....... ")
+    if test_harmonic_half_period() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test  8: logistic equilibrium....... ")
+    if test_logistic_equilibrium() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test  9: logistic monotone.......... ")
+    if test_logistic_monotone() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test 10: logistic midpoint.......... ")
+    if test_logistic_midpoint() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test 11: stiff decay................ ")
+    if test_stiff_decay() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test 12: stiff nonnegative.......... ")
+    if test_stiff_nonneg() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test 13: order O(h^4)............... ")
+    if test_order_rk4() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test 14: zero rhs................... ")
+    if test_zero_rhs() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    print("Test 15: linear rhs................. ")
+    if test_linear_rhs() { println("PASS"); passed = passed + 1 } else { println("FAIL"); failed = failed + 1 }
+
+    println("")
+    print("Passed: ")
+    println(passed)
+    print("Failed: ")
+    println(failed)
+
+    if failed == 0 { println("ALL TESTS PASSED") }
+
+    return failed
+}

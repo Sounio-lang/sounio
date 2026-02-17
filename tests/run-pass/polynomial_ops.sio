@@ -1,0 +1,729 @@
+//@ run-pass
+// polynomial_ops.sio - Integration tests for polynomial library
+//
+// Validates polynomial construction, arithmetic, evaluation, calculus,
+// and root-finding operations. All structs and functions inlined since
+// tests cannot import from stdlib.
+//
+// Polynomials stored in ascending order: p(x) = c[0] + c[1]*x + ... + c[n]*x^n
+
+// ============================================================================
+// HELPERS (must precede callers)
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+    abs_f64(a - b) < tol
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var g = x / 2.0
+    if g < 1.0 { g = 1.0 }
+    var i = 0
+    while i < 60 {
+        g = (g + x / g) / 2.0
+        i = i + 1
+    }
+    return g
+}
+
+// ============================================================================
+// POLYNOMIAL DATA STRUCTURES
+// ============================================================================
+
+struct Polynomial {
+    coeffs: [f64; 64],
+    degree: i32,
+}
+
+struct QuadraticRoots {
+    r1: f64,
+    r2: f64,
+    discriminant: f64,
+    has_real_roots: bool,
+}
+
+// ============================================================================
+// POLYNOMIAL CONSTRUCTION
+// ============================================================================
+
+// Create the zero polynomial (degree -1 by convention)
+fn poly_zero() -> Polynomial with Mut, Panic {
+    var coeffs: [f64; 64] = [0.0; 64]
+    Polynomial { coeffs: coeffs, degree: -1 }
+}
+
+// Create a constant polynomial: p(x) = c
+fn poly_constant(c: f64) -> Polynomial with Mut, Panic {
+    var coeffs: [f64; 64] = [0.0; 64]
+    coeffs[0] = c
+    let deg = if c == 0.0 { -1 } else { 0 }
+    Polynomial { coeffs: coeffs, degree: deg }
+}
+
+// Create a linear polynomial: p(x) = a*x + b
+fn poly_linear(a: f64, b: f64) -> Polynomial with Mut, Panic {
+    var coeffs: [f64; 64] = [0.0; 64]
+    coeffs[0] = b
+    coeffs[1] = a
+    let deg = if a != 0.0 { 1 } else { if b != 0.0 { 0 } else { -1 } }
+    Polynomial { coeffs: coeffs, degree: deg }
+}
+
+// Create a quadratic polynomial: p(x) = a*x^2 + b*x + c
+fn poly_quadratic(a: f64, b: f64, c: f64) -> Polynomial with Mut, Panic {
+    var coeffs: [f64; 64] = [0.0; 64]
+    coeffs[0] = c
+    coeffs[1] = b
+    coeffs[2] = a
+    let deg = if a != 0.0 { 2 } else { if b != 0.0 { 1 } else { if c != 0.0 { 0 } else { -1 } } }
+    Polynomial { coeffs: coeffs, degree: deg }
+}
+
+// Create a monomial: p(x) = c * x^n
+fn poly_monomial(c: f64, n: i32) -> Polynomial with Mut, Panic {
+    var coeffs: [f64; 64] = [0.0; 64]
+    if n >= 0 && n < 64 {
+        coeffs[n] = c
+    }
+    let deg = if c == 0.0 { -1 } else { n }
+    Polynomial { coeffs: coeffs, degree: deg }
+}
+
+// ============================================================================
+// POLYNOMIAL EVALUATION
+// ============================================================================
+
+// Evaluate polynomial at x using Horner's method
+fn poly_eval(p: Polynomial, x: f64) -> f64 with Mut, Panic, Div {
+    if p.degree < 0 {
+        return 0.0
+    }
+    var result = p.coeffs[p.degree]
+    var i = p.degree - 1
+    while i >= 0 {
+        result = result * x + p.coeffs[i]
+        i = i - 1
+    }
+    return result
+}
+
+// Get coefficient at index i (returns 0.0 if out of range)
+fn poly_coeff(p: Polynomial, i: i32) -> f64 with Panic {
+    if i < 0 || i > p.degree {
+        return 0.0
+    }
+    return p.coeffs[i]
+}
+
+// Get the degree of the polynomial (-1 for zero polynomial)
+fn poly_degree(p: Polynomial) -> i32 {
+    return p.degree
+}
+
+// Check if polynomial is zero
+fn poly_is_zero(p: Polynomial) -> bool {
+    return p.degree < 0
+}
+
+// ============================================================================
+// POLYNOMIAL ARITHMETIC
+// ============================================================================
+
+// Add two polynomials
+fn poly_add(a: Polynomial, b: Polynomial) -> Polynomial with Mut, Panic, Div {
+    let max_deg = if a.degree > b.degree { a.degree } else { b.degree }
+    if max_deg < 0 {
+        return poly_zero()
+    }
+
+    var coeffs: [f64; 64] = [0.0; 64]
+    var i = 0
+    while i <= max_deg {
+        let ca = if i <= a.degree { a.coeffs[i] } else { 0.0 }
+        let cb = if i <= b.degree { b.coeffs[i] } else { 0.0 }
+        coeffs[i] = ca + cb
+        i = i + 1
+    }
+
+    // Trim leading zeros
+    var deg = max_deg
+    while deg > 0 && coeffs[deg] == 0.0 {
+        deg = deg - 1
+    }
+    if deg == 0 && coeffs[0] == 0.0 {
+        deg = -1
+    }
+
+    Polynomial { coeffs: coeffs, degree: deg }
+}
+
+// Subtract two polynomials: a - b
+fn poly_sub(a: Polynomial, b: Polynomial) -> Polynomial with Mut, Panic, Div {
+    let max_deg = if a.degree > b.degree { a.degree } else { b.degree }
+    if max_deg < 0 {
+        return poly_zero()
+    }
+
+    var coeffs: [f64; 64] = [0.0; 64]
+    var i = 0
+    while i <= max_deg {
+        let ca = if i <= a.degree { a.coeffs[i] } else { 0.0 }
+        let cb = if i <= b.degree { b.coeffs[i] } else { 0.0 }
+        coeffs[i] = ca - cb
+        i = i + 1
+    }
+
+    // Trim leading zeros
+    var deg = max_deg
+    while deg > 0 && coeffs[deg] == 0.0 {
+        deg = deg - 1
+    }
+    if deg == 0 && coeffs[0] == 0.0 {
+        deg = -1
+    }
+
+    Polynomial { coeffs: coeffs, degree: deg }
+}
+
+// Multiply two polynomials (convolution of coefficients)
+fn poly_mul(a: Polynomial, b: Polynomial) -> Polynomial with Mut, Panic, Div {
+    if a.degree < 0 || b.degree < 0 {
+        return poly_zero()
+    }
+
+    let result_deg = a.degree + b.degree
+    let max_deg = if result_deg > 63 { 63 } else { result_deg }
+
+    var coeffs: [f64; 64] = [0.0; 64]
+    var i = 0
+    while i <= a.degree {
+        var j = 0
+        while j <= b.degree {
+            let k = i + j
+            if k <= max_deg {
+                coeffs[k] = coeffs[k] + a.coeffs[i] * b.coeffs[j]
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Trim leading zeros
+    var deg = max_deg
+    while deg > 0 && coeffs[deg] == 0.0 {
+        deg = deg - 1
+    }
+    if deg == 0 && coeffs[0] == 0.0 {
+        deg = -1
+    }
+
+    Polynomial { coeffs: coeffs, degree: deg }
+}
+
+// Scale polynomial by a constant: c * p(x)
+fn poly_scale(p: Polynomial, c: f64) -> Polynomial with Mut, Panic, Div {
+    if c == 0.0 || p.degree < 0 {
+        return poly_zero()
+    }
+
+    var coeffs: [f64; 64] = [0.0; 64]
+    var i = 0
+    while i <= p.degree {
+        coeffs[i] = p.coeffs[i] * c
+        i = i + 1
+    }
+
+    Polynomial { coeffs: coeffs, degree: p.degree }
+}
+
+// Negate polynomial: -p(x)
+fn poly_neg(p: Polynomial) -> Polynomial with Mut, Panic, Div {
+    return poly_scale(p, 0.0 - 1.0)
+}
+
+// ============================================================================
+// CALCULUS
+// ============================================================================
+
+// Compute the derivative: d/dx[c[i]*x^i] = i*c[i]*x^(i-1)
+fn poly_derivative(p: Polynomial) -> Polynomial with Mut, Panic, Div {
+    if p.degree <= 0 {
+        return poly_zero()
+    }
+
+    let new_deg = p.degree - 1
+    var coeffs: [f64; 64] = [0.0; 64]
+    var i = 0
+    while i <= new_deg {
+        coeffs[i] = (i + 1) as f64 * p.coeffs[i + 1]
+        i = i + 1
+    }
+
+    // Trim leading zeros
+    var deg = new_deg
+    while deg > 0 && coeffs[deg] == 0.0 {
+        deg = deg - 1
+    }
+    if deg == 0 && coeffs[0] == 0.0 {
+        deg = -1
+    }
+
+    Polynomial { coeffs: coeffs, degree: deg }
+}
+
+// Compute the indefinite integral with constant c: integral p(x) dx + c
+fn poly_integral(p: Polynomial, c: f64) -> Polynomial with Mut, Panic, Div {
+    if p.degree < 0 {
+        return poly_constant(c)
+    }
+
+    let new_deg = if p.degree < 63 { p.degree + 1 } else { 63 }
+    var coeffs: [f64; 64] = [0.0; 64]
+    coeffs[0] = c
+
+    var i = 0
+    while i <= p.degree && i < 63 {
+        coeffs[i + 1] = p.coeffs[i] / ((i + 1) as f64)
+        i = i + 1
+    }
+
+    Polynomial { coeffs: coeffs, degree: new_deg }
+}
+
+// ============================================================================
+// ROOT FINDING
+// ============================================================================
+
+// Solve quadratic equation ax^2 + bx + c = 0
+fn poly_roots_quadratic(a: f64, b: f64, c: f64) -> QuadraticRoots with Mut, Panic, Div {
+    if a == 0.0 {
+        if b == 0.0 {
+            return QuadraticRoots { r1: 0.0, r2: 0.0, discriminant: 0.0, has_real_roots: false }
+        }
+        let r = 0.0 - c / b
+        return QuadraticRoots { r1: r, r2: r, discriminant: 0.0, has_real_roots: true }
+    }
+    let disc = b * b - 4.0 * a * c
+    if disc < 0.0 {
+        return QuadraticRoots { r1: 0.0, r2: 0.0, discriminant: disc, has_real_roots: false }
+    }
+    let sqrt_disc = sqrt_f64(disc)
+    let r1 = (0.0 - b + sqrt_disc) / (2.0 * a)
+    let r2 = (0.0 - b - sqrt_disc) / (2.0 * a)
+    QuadraticRoots { r1: r1, r2: r2, discriminant: disc, has_real_roots: true }
+}
+
+// ============================================================================
+// TEST FUNCTIONS
+// ============================================================================
+
+// Test 1: Zero polynomial has degree -1 and is_zero returns true
+fn test_zero() -> bool with IO, Mut, Panic, Div {
+    let z = poly_zero()
+    let deg_ok = poly_degree(z) == -1
+    let is_zero_ok = poly_is_zero(z)
+    let eval_ok = approx_eq(poly_eval(z, 42.0), 0.0, 1.0e-12)
+    return deg_ok && is_zero_ok && eval_ok
+}
+
+// Test 2: Constant polynomial evaluates to the constant everywhere
+fn test_constant() -> bool with IO, Mut, Panic, Div {
+    let c = poly_constant(5.0)
+    let ok1 = approx_eq(poly_eval(c, 0.0), 5.0, 1.0e-12)
+    let ok2 = approx_eq(poly_eval(c, 100.0), 5.0, 1.0e-12)
+    let ok3 = approx_eq(poly_eval(c, 0.0 - 7.0), 5.0, 1.0e-12)
+    let ok4 = poly_degree(c) == 0
+    return ok1 && ok2 && ok3 && ok4
+}
+
+// Test 3: Linear polynomial p(x) = 2x + 3 at x=4 gives 11
+fn test_linear_eval() -> bool with IO, Mut, Panic, Div {
+    let p = poly_linear(2.0, 3.0)
+    let val = poly_eval(p, 4.0)
+    let ok1 = approx_eq(val, 11.0, 1.0e-12)
+    let ok2 = poly_degree(p) == 1
+    let ok3 = approx_eq(poly_coeff(p, 0), 3.0, 1.0e-12)
+    let ok4 = approx_eq(poly_coeff(p, 1), 2.0, 1.0e-12)
+    return ok1 && ok2 && ok3 && ok4
+}
+
+// Test 4: Quadratic p(x) = x^2 - 2x + 1 at x=3 gives 4
+fn test_quadratic_eval() -> bool with IO, Mut, Panic, Div {
+    let p = poly_quadratic(1.0, 0.0 - 2.0, 1.0)
+    let val = poly_eval(p, 3.0)
+    let ok1 = approx_eq(val, 4.0, 1.0e-12)
+    let ok2 = poly_degree(p) == 2
+    // Also check at x=1 where (1-1)^2 = 0
+    let val_at_1 = poly_eval(p, 1.0)
+    let ok3 = approx_eq(val_at_1, 0.0, 1.0e-12)
+    return ok1 && ok2 && ok3
+}
+
+// Test 5: Addition: (x+1) + (x-1) = 2x
+fn test_add() -> bool with IO, Mut, Panic, Div {
+    let p1 = poly_linear(1.0, 1.0)
+    let p2 = poly_linear(1.0, 0.0 - 1.0)
+    let sum = poly_add(p1, p2)
+    let ok1 = poly_degree(sum) == 1
+    let ok2 = approx_eq(poly_coeff(sum, 0), 0.0, 1.0e-12)
+    let ok3 = approx_eq(poly_coeff(sum, 1), 2.0, 1.0e-12)
+    // Evaluate: 2*5 = 10
+    let ok4 = approx_eq(poly_eval(sum, 5.0), 10.0, 1.0e-12)
+    return ok1 && ok2 && ok3 && ok4
+}
+
+// Test 6: Subtraction: (x^2 + x) - (x) = x^2
+fn test_sub() -> bool with IO, Mut, Panic, Div {
+    let p1 = poly_quadratic(1.0, 1.0, 0.0)
+    let p2 = poly_linear(1.0, 0.0)
+    let diff = poly_sub(p1, p2)
+    let ok1 = poly_degree(diff) == 2
+    let ok2 = approx_eq(poly_coeff(diff, 0), 0.0, 1.0e-12)
+    let ok3 = approx_eq(poly_coeff(diff, 1), 0.0, 1.0e-12)
+    let ok4 = approx_eq(poly_coeff(diff, 2), 1.0, 1.0e-12)
+    // Evaluate: 3^2 = 9
+    let ok5 = approx_eq(poly_eval(diff, 3.0), 9.0, 1.0e-12)
+    return ok1 && ok2 && ok3 && ok4 && ok5
+}
+
+// Test 7: Multiplication: (x+1)*(x-1) = x^2 - 1
+fn test_mul() -> bool with IO, Mut, Panic, Div {
+    let p1 = poly_linear(1.0, 1.0)
+    let p2 = poly_linear(1.0, 0.0 - 1.0)
+    let prod = poly_mul(p1, p2)
+    let ok1 = poly_degree(prod) == 2
+    let ok2 = approx_eq(poly_coeff(prod, 0), 0.0 - 1.0, 1.0e-12)
+    let ok3 = approx_eq(poly_coeff(prod, 1), 0.0, 1.0e-12)
+    let ok4 = approx_eq(poly_coeff(prod, 2), 1.0, 1.0e-12)
+    // Evaluate at x=3: 9-1=8
+    let ok5 = approx_eq(poly_eval(prod, 3.0), 8.0, 1.0e-12)
+    return ok1 && ok2 && ok3 && ok4 && ok5
+}
+
+// Test 8: Multiply by zero gives zero
+fn test_mul_by_zero() -> bool with IO, Mut, Panic, Div {
+    let p = poly_quadratic(1.0, 2.0, 3.0)
+    let z = poly_zero()
+    let prod = poly_mul(p, z)
+    let ok1 = poly_is_zero(prod)
+    let ok2 = poly_degree(prod) == -1
+    let ok3 = approx_eq(poly_eval(prod, 99.0), 0.0, 1.0e-12)
+    return ok1 && ok2 && ok3
+}
+
+// Test 9: Scaling: 3*(2x+1) = 6x+3
+fn test_scale() -> bool with IO, Mut, Panic, Div {
+    let p = poly_linear(2.0, 1.0)
+    let scaled = poly_scale(p, 3.0)
+    let ok1 = poly_degree(scaled) == 1
+    let ok2 = approx_eq(poly_coeff(scaled, 0), 3.0, 1.0e-12)
+    let ok3 = approx_eq(poly_coeff(scaled, 1), 6.0, 1.0e-12)
+    // Evaluate at x=2: 6*2+3 = 15
+    let ok4 = approx_eq(poly_eval(scaled, 2.0), 15.0, 1.0e-12)
+    return ok1 && ok2 && ok3 && ok4
+}
+
+// Test 10: Derivative of x^2 + 2x + 1 = 2x + 2
+fn test_derivative_quadratic() -> bool with IO, Mut, Panic, Div {
+    let p = poly_quadratic(1.0, 2.0, 1.0)
+    let dp = poly_derivative(p)
+    let ok1 = poly_degree(dp) == 1
+    let ok2 = approx_eq(poly_coeff(dp, 0), 2.0, 1.0e-12)
+    let ok3 = approx_eq(poly_coeff(dp, 1), 2.0, 1.0e-12)
+    // Evaluate at x=5: 2*5+2 = 12
+    let ok4 = approx_eq(poly_eval(dp, 5.0), 12.0, 1.0e-12)
+    return ok1 && ok2 && ok3 && ok4
+}
+
+// Test 11: Derivative of x^3 = 3x^2
+fn test_derivative_cubic() -> bool with IO, Mut, Panic, Div {
+    let p = poly_monomial(1.0, 3)
+    let dp = poly_derivative(p)
+    let ok1 = poly_degree(dp) == 2
+    let ok2 = approx_eq(poly_coeff(dp, 0), 0.0, 1.0e-12)
+    let ok3 = approx_eq(poly_coeff(dp, 1), 0.0, 1.0e-12)
+    let ok4 = approx_eq(poly_coeff(dp, 2), 3.0, 1.0e-12)
+    // Evaluate at x=2: 3*4 = 12
+    let ok5 = approx_eq(poly_eval(dp, 2.0), 12.0, 1.0e-12)
+    return ok1 && ok2 && ok3 && ok4 && ok5
+}
+
+// Test 12: Integral of 2x (with c=0) = x^2
+fn test_integral_linear() -> bool with IO, Mut, Panic, Div {
+    let p = poly_linear(2.0, 0.0)
+    let ip = poly_integral(p, 0.0)
+    let ok1 = poly_degree(ip) == 2
+    let ok2 = approx_eq(poly_coeff(ip, 0), 0.0, 1.0e-12)
+    let ok3 = approx_eq(poly_coeff(ip, 1), 0.0, 1.0e-12)
+    let ok4 = approx_eq(poly_coeff(ip, 2), 1.0, 1.0e-12)
+    // Evaluate at x=3: 9
+    let ok5 = approx_eq(poly_eval(ip, 3.0), 9.0, 1.0e-12)
+    return ok1 && ok2 && ok3 && ok4 && ok5
+}
+
+// Test 13: Derivative of integral of p = p (roundtrip)
+fn test_derivative_integral_roundtrip() -> bool with IO, Mut, Panic, Div {
+    let p = poly_quadratic(3.0, 0.0 - 2.0, 5.0)
+    let ip = poly_integral(p, 0.0)
+    let dip = poly_derivative(ip)
+    // dip should equal p: coefficients should match
+    let ok1 = poly_degree(dip) == poly_degree(p)
+    let ok2 = approx_eq(poly_coeff(dip, 0), poly_coeff(p, 0), 1.0e-10)
+    let ok3 = approx_eq(poly_coeff(dip, 1), poly_coeff(p, 1), 1.0e-10)
+    let ok4 = approx_eq(poly_coeff(dip, 2), poly_coeff(p, 2), 1.0e-10)
+    // Also verify by evaluation at several points
+    let ok5 = approx_eq(poly_eval(dip, 1.0), poly_eval(p, 1.0), 1.0e-10)
+    let ok6 = approx_eq(poly_eval(dip, 0.0 - 2.0), poly_eval(p, 0.0 - 2.0), 1.0e-10)
+    return ok1 && ok2 && ok3 && ok4 && ok5 && ok6
+}
+
+// Test 14: Roots of x^2 - 4 = 0 are +2 and -2
+fn test_roots_distinct() -> bool with IO, Mut, Panic, Div {
+    let roots = poly_roots_quadratic(1.0, 0.0, 0.0 - 4.0)
+    let ok1 = roots.has_real_roots
+    let ok2 = approx_eq(roots.discriminant, 16.0, 1.0e-10)
+    // r1 and r2 should be 2 and -2 (order may vary)
+    let r_sum = roots.r1 + roots.r2
+    let r_prod = roots.r1 * roots.r2
+    let ok3 = approx_eq(r_sum, 0.0, 1.0e-10)
+    let ok4 = approx_eq(r_prod, 0.0 - 4.0, 1.0e-10)
+    return ok1 && ok2 && ok3 && ok4
+}
+
+// Test 15: Roots of x^2 - 2x + 1 = 0 is repeated root at 1
+fn test_roots_repeated() -> bool with IO, Mut, Panic, Div {
+    let roots = poly_roots_quadratic(1.0, 0.0 - 2.0, 1.0)
+    let ok1 = roots.has_real_roots
+    let ok2 = approx_eq(roots.discriminant, 0.0, 1.0e-10)
+    let ok3 = approx_eq(roots.r1, 1.0, 1.0e-10)
+    let ok4 = approx_eq(roots.r2, 1.0, 1.0e-10)
+    return ok1 && ok2 && ok3 && ok4
+}
+
+// Test 16: x^2 + 1 = 0 has no real roots
+fn test_roots_no_real() -> bool with IO, Mut, Panic, Div {
+    let roots = poly_roots_quadratic(1.0, 0.0, 1.0)
+    let ok1 = roots.has_real_roots == false
+    let ok2 = roots.discriminant < 0.0
+    return ok1 && ok2
+}
+
+// Test 17: Negation: -(2x+3) = -2x - 3
+fn test_neg() -> bool with IO, Mut, Panic, Div {
+    let p = poly_linear(2.0, 3.0)
+    let neg = poly_neg(p)
+    let ok1 = poly_degree(neg) == 1
+    let ok2 = approx_eq(poly_coeff(neg, 0), 0.0 - 3.0, 1.0e-12)
+    let ok3 = approx_eq(poly_coeff(neg, 1), 0.0 - 2.0, 1.0e-12)
+    // Evaluate at x=4: -(2*4+3) = -11
+    let ok4 = approx_eq(poly_eval(neg, 4.0), 0.0 - 11.0, 1.0e-12)
+    return ok1 && ok2 && ok3 && ok4
+}
+
+// Test 18: Monomial 5x^3 evaluates correctly
+fn test_monomial() -> bool with IO, Mut, Panic, Div {
+    let p = poly_monomial(5.0, 3)
+    let ok1 = poly_degree(p) == 3
+    let ok2 = approx_eq(poly_coeff(p, 3), 5.0, 1.0e-12)
+    let ok3 = approx_eq(poly_coeff(p, 0), 0.0, 1.0e-12)
+    let ok4 = approx_eq(poly_coeff(p, 1), 0.0, 1.0e-12)
+    let ok5 = approx_eq(poly_coeff(p, 2), 0.0, 1.0e-12)
+    // 5 * 2^3 = 40
+    let ok6 = approx_eq(poly_eval(p, 2.0), 40.0, 1.0e-12)
+    // 5 * 0^3 = 0
+    let ok7 = approx_eq(poly_eval(p, 0.0), 0.0, 1.0e-12)
+    return ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7
+}
+
+// ============================================================================
+// MAIN TEST RUNNER
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== Polynomial Operations Tests ===")
+    println("")
+
+    var passed = 0
+    var failed = 0
+
+    print("Test  1: zero polynomial......... ")
+    if test_zero() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  2: constant polynomial..... ")
+    if test_constant() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  3: linear evaluation....... ")
+    if test_linear_eval() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  4: quadratic evaluation.... ")
+    if test_quadratic_eval() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  5: polynomial addition..... ")
+    if test_add() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  6: polynomial subtraction.. ")
+    if test_sub() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  7: polynomial multiply..... ")
+    if test_mul() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  8: multiply by zero........ ")
+    if test_mul_by_zero() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  9: scalar scaling.......... ")
+    if test_scale() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 10: derivative quadratic.... ")
+    if test_derivative_quadratic() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 11: derivative cubic........ ")
+    if test_derivative_cubic() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 12: integral linear......... ")
+    if test_integral_linear() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 13: d/dx integral roundtrip. ")
+    if test_derivative_integral_roundtrip() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 14: roots distinct.......... ")
+    if test_roots_distinct() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 15: roots repeated.......... ")
+    if test_roots_repeated() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 16: roots no real........... ")
+    if test_roots_no_real() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 17: negation................ ")
+    if test_neg() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 18: monomial................ ")
+    if test_monomial() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    println("")
+    print("Passed: ")
+    println(passed)
+    print("Failed: ")
+    println(failed)
+
+    if failed > 0 {
+        println("SOME TESTS FAILED")
+        return 1
+    }
+    println("ALL 18 TESTS PASSED")
+    return 0
+}
