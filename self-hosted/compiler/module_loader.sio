@@ -192,10 +192,24 @@ fn ir_merge_modules(dst: IrModule, src: IrModule) -> IrModule with Mut, Panic, D
 }
 
 // ============================================================
-// Multi-module compilation pipeline
+// Multi-module IR loading (shared by bytecode + native paths)
 // ============================================================
 
-fn compile_multimodule_program(main_path: string) -> CompileResult with IO, Mut, Div, Panic, Alloc {
+struct MultiModuleIrResult {
+    ok: bool,
+    module: IrModule,
+    error_msg: string,
+}
+
+fn multimodule_ir_ok(m: IrModule) -> MultiModuleIrResult {
+    MultiModuleIrResult { ok: true, module: m, error_msg: "" }
+}
+
+fn multimodule_ir_error(msg: string) -> MultiModuleIrResult {
+    MultiModuleIrResult { ok: false, module: ir_empty_module(), error_msg: msg }
+}
+
+fn load_multimodule_ir(main_path: string) -> MultiModuleIrResult with IO, Mut, Div, Panic, Alloc {
     // Step 1: Parse main file
     let main_prog = load_module_file(main_path)
     let main_items = count_items(main_prog)
@@ -214,7 +228,6 @@ fn compile_multimodule_program(main_path: string) -> CompileResult with IO, Mut,
 
     var i: i64 = 0
     while i < imports.count && loaded < 64 {
-        // Try stdlib/ first, then relative to main file
         let file_path = use_path_to_file_path(imports.paths[i], "stdlib")
         if file_exists(file_path) {
             print("Loading module: ")
@@ -241,7 +254,7 @@ fn compile_multimodule_program(main_path: string) -> CompileResult with IO, Mut,
         print("Module resolution failed: ")
         print_int(resolve_result.error_count)
         print(" errors\n")
-        return compile_result_error("module_resolution_failed")
+        return multimodule_ir_error("module_resolution_failed")
     }
 
     // Step 5: Type check all modules
@@ -252,7 +265,7 @@ fn compile_multimodule_program(main_path: string) -> CompileResult with IO, Mut,
             print("Type check failed for module ")
             print_int(i)
             print("\n")
-            return compile_result_error("type_check_failed")
+            return multimodule_ir_error("type_check_failed")
         }
         i = i + 1
     }
@@ -267,7 +280,7 @@ fn compile_multimodule_program(main_path: string) -> CompileResult with IO, Mut,
             print("IR lowering failed for module ")
             print_int(i)
             print("\n")
-            return compile_result_error("ir_lowering_failed")
+            return multimodule_ir_error("ir_lowering_failed")
         }
         merged_module = ir_merge_modules(merged_module, lower_result.module)
         i = i + 1
@@ -277,10 +290,57 @@ fn compile_multimodule_program(main_path: string) -> CompileResult with IO, Mut,
     print_int(merged_module.fn_count)
     print(" functions\n")
 
-    // Step 7: Serialize to bytecode
-    let serialized = serialize_ir_module(merged_module)
+    multimodule_ir_ok(merged_module)
+}
 
+// ============================================================
+// Multi-module compilation pipeline (bytecode output)
+// ============================================================
+
+fn compile_multimodule_program(main_path: string) -> CompileResult with IO, Mut, Div, Panic, Alloc {
+    let ir_result = load_multimodule_ir(main_path)
+    if !ir_result.ok {
+        return compile_result_error(ir_result.error_msg)
+    }
+
+    let serialized = serialize_ir_module(ir_result.module)
     compile_result_ok(serialized.0, serialized.1)
+}
+
+// ============================================================
+// Multi-module native compilation pipeline (ELF output)
+// ============================================================
+
+fn compile_multimodule_native(main_path: string, output_path: string) -> i32 with IO, Mut, Div, Panic, Alloc {
+    let ir_result = load_multimodule_ir(main_path)
+    if !ir_result.ok {
+        print("Multi-module IR failed: ")
+        print(ir_result.error_msg)
+        print("\n")
+        return 1
+    }
+
+    // Compile merged IR to native ELF64 binary
+    print("Compiling to native x86-64 ELF...\n")
+    let base_addr: i64 = 4194304  // 0x400000
+    let elf = compile_to_elf(ir_result.module, base_addr)
+
+    print("ELF size: ")
+    print_int(elf.len)
+    print(" bytes\n")
+
+    let write_ok = write_elf_to_file(output_path, elf)
+    if !write_ok {
+        print("Error: Failed to write ELF to ")
+        print(output_path)
+        print("\n")
+        return 1
+    }
+
+    print("Written to ")
+    print(output_path)
+    print("\n")
+    return 0
 }
 
 // ============================================================
