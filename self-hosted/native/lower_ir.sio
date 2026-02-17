@@ -17,6 +17,8 @@ fn lower_instr(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, P
         lower_load_bool(nc, instr)
     } else if instr.op == IrOpcode::IrLoadString {
         lower_load_string(nc, instr)
+    } else if instr.op == IrOpcode::IrLoadFloat {
+        lower_load_float(nc, instr)
     } else if instr.op == IrOpcode::IrAlloc {
         lower_alloc(nc, instr)
     } else if instr.op == IrOpcode::IrFieldGet {
@@ -62,10 +64,20 @@ fn lower_alloc(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, P
 
     // Return pointer to start of newly allocated object in dst slot.
     // Heap objects are backed by a monotonic bump allocator starting at r13.
-    // imm_i64 carries the actual allocation size in bytes (computed during IR lowering).
-    // Minimum 64 bytes to handle edge cases; align up to 8-byte boundary.
-    let raw_size = instr.imm_i64
-    let alloc_size = if raw_size < 64 { 64 } else { ((raw_size + 7) / 8) * 8 }
+    //
+    // imm_i64 carries a type tag from IR lowering:
+    //   0 = struct  → 512 bytes (64 slots * 8B, covers hash-based field_idx up to 63)
+    //   1 = array   → 512 bytes (same layout as struct for indexed access)
+    //   2 = tuple   → 128 bytes (16 slots * 8B, tuples are small)
+    //   8 = Box     →  16 bytes (single value, aligned)
+    //   other       → treat as byte size, minimum 64, aligned to 8
+    let tag = instr.imm_i64
+    let alloc_size = if tag == 0 { 512 }
+        else if tag == 1 { 512 }
+        else if tag == 2 { 128 }
+        else if tag == 8 { 16 }
+        else if tag < 64 { 64 }
+        else { ((tag + 7) / 8) * 8 }
     c.code = emit_mov_rax_r13(c.code)                // rax = current heap pointer
     if instr.dst >= 0 {
         c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
@@ -155,6 +167,19 @@ fn lower_load_bool(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mu
     var c = nc
     let val = instr.imm_i64   // 1 for true, 0 for false
     c.code = emit_mov_rax_imm(c.code, val)
+    if instr.dst >= 0 {
+        c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
+    }
+    c
+}
+
+fn lower_load_float(nc: NativeCompiler, instr: IrInstr) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    // Store f64 as truncated i64 in stack slot.
+    // FIXME: needs proper IEEE 754 bit reinterpretation (f64_to_bits builtin)
+    // when float arithmetic is added to the native backend.
+    let bits = instr.imm_f64 as i64
+    c.code = emit_mov_rax_imm(c.code, bits)
     if instr.dst >= 0 {
         c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(instr.dst))
     }
