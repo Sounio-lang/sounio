@@ -183,6 +183,15 @@ pub enum TokenKind {
     #[token("Tensor")]
     Tensor,
 
+    // Epsilon symbol: ε (U+03B5) for epistemic type annotations like ε < 0.05
+    #[token("ε")]
+    Epsilon,
+
+    // Knightian undefined sentinel: ⊥ (U+22A5) or ASCII fallback _|_
+    #[token("⊥")]
+    #[token("_|_")]
+    Bottom,
+
     // Linear algebra primitive types
     #[token("vec2")]
     Vec2,
@@ -808,6 +817,8 @@ impl TokenKind {
             TokenKind::Initial => "initial",
             TokenKind::PlusMinus => "±",
             TokenKind::Partial => "∂",
+            TokenKind::Epsilon => "ε",
+            TokenKind::Bottom => "⊥",
         }
     }
 }
