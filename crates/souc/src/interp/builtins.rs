@@ -619,6 +619,217 @@ impl BuiltinRegistry {
                 Ok(Value::Float(a.max(b)))
             }),
         );
+
+        // Inverse trigonometric functions
+
+        self.register(
+            "asin",
+            Rc::new(|args| {
+                if args.len() != 1 {
+                    return Err(format!("asin expects 1 argument, got {}", args.len()));
+                }
+                match &args[0] {
+                    Value::Float(f) => Ok(Value::Float(f.asin())),
+                    Value::Int(n) => Ok(Value::Float((*n as f64).asin())),
+                    _ => Err("asin expects numeric argument".to_string()),
+                }
+            }),
+        );
+
+        self.register(
+            "acos",
+            Rc::new(|args| {
+                if args.len() != 1 {
+                    return Err(format!("acos expects 1 argument, got {}", args.len()));
+                }
+                match &args[0] {
+                    Value::Float(f) => Ok(Value::Float(f.acos())),
+                    Value::Int(n) => Ok(Value::Float((*n as f64).acos())),
+                    _ => Err("acos expects numeric argument".to_string()),
+                }
+            }),
+        );
+
+        self.register(
+            "atan",
+            Rc::new(|args| {
+                if args.len() != 1 {
+                    return Err(format!("atan expects 1 argument, got {}", args.len()));
+                }
+                match &args[0] {
+                    Value::Float(f) => Ok(Value::Float(f.atan())),
+                    Value::Int(n) => Ok(Value::Float((*n as f64).atan())),
+                    _ => Err("atan expects numeric argument".to_string()),
+                }
+            }),
+        );
+
+        self.register(
+            "atan2",
+            Rc::new(|args| {
+                if args.len() != 2 {
+                    return Err(format!("atan2 expects 2 arguments, got {}", args.len()));
+                }
+                let y = match &args[0] {
+                    Value::Float(f) => *f,
+                    Value::Int(n) => *n as f64,
+                    _ => return Err("atan2 expects numeric arguments".to_string()),
+                };
+                let x = match &args[1] {
+                    Value::Float(f) => *f,
+                    Value::Int(n) => *n as f64,
+                    _ => return Err("atan2 expects numeric arguments".to_string()),
+                };
+                Ok(Value::Float(y.atan2(x)))
+            }),
+        );
+
+        // Logarithmic variants
+
+        self.register(
+            "log2",
+            Rc::new(|args| {
+                if args.len() != 1 {
+                    return Err(format!("log2 expects 1 argument, got {}", args.len()));
+                }
+                match &args[0] {
+                    Value::Float(f) => Ok(Value::Float(f.log2())),
+                    Value::Int(n) => Ok(Value::Float((*n as f64).log2())),
+                    _ => Err("log2 expects numeric argument".to_string()),
+                }
+            }),
+        );
+
+        self.register(
+            "log10",
+            Rc::new(|args| {
+                if args.len() != 1 {
+                    return Err(format!("log10 expects 1 argument, got {}", args.len()));
+                }
+                match &args[0] {
+                    Value::Float(f) => Ok(Value::Float(f.log10())),
+                    Value::Int(n) => Ok(Value::Float((*n as f64).log10())),
+                    _ => Err("log10 expects numeric argument".to_string()),
+                }
+            }),
+        );
+
+        // Hyperbolic functions
+
+        self.register(
+            "sinh",
+            Rc::new(|args| {
+                if args.len() != 1 {
+                    return Err(format!("sinh expects 1 argument, got {}", args.len()));
+                }
+                match &args[0] {
+                    Value::Float(f) => Ok(Value::Float(f.sinh())),
+                    Value::Int(n) => Ok(Value::Float((*n as f64).sinh())),
+                    _ => Err("sinh expects numeric argument".to_string()),
+                }
+            }),
+        );
+
+        self.register(
+            "cosh",
+            Rc::new(|args| {
+                if args.len() != 1 {
+                    return Err(format!("cosh expects 1 argument, got {}", args.len()));
+                }
+                match &args[0] {
+                    Value::Float(f) => Ok(Value::Float(f.cosh())),
+                    Value::Int(n) => Ok(Value::Float((*n as f64).cosh())),
+                    _ => Err("cosh expects numeric argument".to_string()),
+                }
+            }),
+        );
+
+        self.register(
+            "tanh",
+            Rc::new(|args| {
+                if args.len() != 1 {
+                    return Err(format!("tanh expects 1 argument, got {}", args.len()));
+                }
+                match &args[0] {
+                    Value::Float(f) => Ok(Value::Float(f.tanh())),
+                    Value::Int(n) => Ok(Value::Float((*n as f64).tanh())),
+                    _ => Err("tanh expects numeric argument".to_string()),
+                }
+            }),
+        );
+
+        // Cube root
+
+        self.register(
+            "cbrt",
+            Rc::new(|args| {
+                if args.len() != 1 {
+                    return Err(format!("cbrt expects 1 argument, got {}", args.len()));
+                }
+                match &args[0] {
+                    Value::Float(f) => Ok(Value::Float(f.cbrt())),
+                    Value::Int(n) => Ok(Value::Float((*n as f64).cbrt())),
+                    _ => Err("cbrt expects numeric argument".to_string()),
+                }
+            }),
+        );
+
+        // Float classification
+
+        self.register(
+            "is_nan",
+            Rc::new(|args| {
+                if args.len() != 1 {
+                    return Err(format!("is_nan expects 1 argument, got {}", args.len()));
+                }
+                match &args[0] {
+                    Value::Float(f) => Ok(Value::Bool(f.is_nan())),
+                    Value::Int(_) => Ok(Value::Bool(false)),
+                    _ => Err("is_nan expects numeric argument".to_string()),
+                }
+            }),
+        );
+
+        self.register(
+            "is_inf",
+            Rc::new(|args| {
+                if args.len() != 1 {
+                    return Err(format!("is_inf expects 1 argument, got {}", args.len()));
+                }
+                match &args[0] {
+                    Value::Float(f) => Ok(Value::Bool(f.is_infinite())),
+                    Value::Int(_) => Ok(Value::Bool(false)),
+                    _ => Err("is_inf expects numeric argument".to_string()),
+                }
+            }),
+        );
+
+        // Clamping
+
+        self.register(
+            "clamp",
+            Rc::new(|args| {
+                if args.len() != 3 {
+                    return Err(format!("clamp expects 3 arguments, got {}", args.len()));
+                }
+                let value = match &args[0] {
+                    Value::Float(f) => *f,
+                    Value::Int(n) => *n as f64,
+                    _ => return Err("clamp expects numeric arguments".to_string()),
+                };
+                let min_val = match &args[1] {
+                    Value::Float(f) => *f,
+                    Value::Int(n) => *n as f64,
+                    _ => return Err("clamp expects numeric arguments".to_string()),
+                };
+                let max_val = match &args[2] {
+                    Value::Float(f) => *f,
+                    Value::Int(n) => *n as f64,
+                    _ => return Err("clamp expects numeric arguments".to_string()),
+                };
+                Ok(Value::Float(value.clamp(min_val, max_val)))
+            }),
+        );
     }
 
     /// Register utility builtins (len, type_of, assert, etc)
@@ -1103,6 +1314,180 @@ impl BuiltinRegistry {
                     }
                     _ => Err("ones expects integer dimension".to_string()),
                 }
+            }),
+        );
+
+        // linspace(start, end, n) -> array of n evenly-spaced floats [start, end] inclusive
+        self.register(
+            "linspace",
+            Rc::new(|args| {
+                if args.len() != 3 {
+                    return Err(format!(
+                        "linspace expects 3 arguments, got {}",
+                        args.len()
+                    ));
+                }
+                let start = match &args[0] {
+                    Value::Float(f) => *f,
+                    Value::Int(n) => *n as f64,
+                    _ => return Err("linspace expects numeric start".to_string()),
+                };
+                let end = match &args[1] {
+                    Value::Float(f) => *f,
+                    Value::Int(n) => *n as f64,
+                    _ => return Err("linspace expects numeric end".to_string()),
+                };
+                let n = match &args[2] {
+                    Value::Int(n) => *n,
+                    _ => return Err("linspace expects integer count".to_string()),
+                };
+                if n < 0 {
+                    return Err("linspace count must be non-negative".to_string());
+                }
+                let n = n as usize;
+                let mut data = Vec::with_capacity(n);
+                if n == 0 {
+                    // empty array
+                } else if n == 1 {
+                    data.push(Value::Float(start));
+                } else {
+                    let step = (end - start) / (n as f64 - 1.0);
+                    for i in 0..n {
+                        data.push(Value::Float(start + step * i as f64));
+                    }
+                }
+                Ok(Value::Array(Rc::new(RefCell::new(data))))
+            }),
+        );
+
+        // range(start, end) -> array of integers [start, end) exclusive end
+        self.register(
+            "range",
+            Rc::new(|args| {
+                if args.len() != 2 {
+                    return Err(format!("range expects 2 arguments, got {}", args.len()));
+                }
+                let start = match &args[0] {
+                    Value::Int(n) => *n,
+                    _ => return Err("range expects integer start".to_string()),
+                };
+                let end = match &args[1] {
+                    Value::Int(n) => *n,
+                    _ => return Err("range expects integer end".to_string()),
+                };
+                let data: Vec<Value> = (start..end).map(Value::Int).collect();
+                Ok(Value::Array(Rc::new(RefCell::new(data))))
+            }),
+        );
+
+        // array_sum(array) -> f64 sum of all numeric elements
+        self.register(
+            "array_sum",
+            Rc::new(|args| {
+                if args.len() != 1 {
+                    return Err(format!(
+                        "array_sum expects 1 argument, got {}",
+                        args.len()
+                    ));
+                }
+                let values = match &args[0] {
+                    Value::Array(arr) => arr.borrow().clone(),
+                    Value::Ref(r) => match &*r.borrow() {
+                        Value::Array(arr) => arr.borrow().clone(),
+                        other => {
+                            return Err(format!(
+                                "array_sum expects an array, got {}",
+                                other.type_name()
+                            ));
+                        }
+                    },
+                    other => {
+                        return Err(format!(
+                            "array_sum expects an array, got {}",
+                            other.type_name()
+                        ));
+                    }
+                };
+                let mut sum = 0.0_f64;
+                for v in &values {
+                    match v {
+                        Value::Float(f) => sum += f,
+                        Value::Int(n) => sum += *n as f64,
+                        other => {
+                            return Err(format!(
+                                "array_sum expects numeric elements, got {}",
+                                other.type_name()
+                            ));
+                        }
+                    }
+                }
+                Ok(Value::Float(sum))
+            }),
+        );
+
+        // array_push(array, value) -> appends value to the array in place
+        self.register(
+            "array_push",
+            Rc::new(|args| {
+                if args.len() != 2 {
+                    return Err(format!(
+                        "array_push expects 2 arguments, got {}",
+                        args.len()
+                    ));
+                }
+                match &args[0] {
+                    Value::Array(arr) => {
+                        arr.borrow_mut().push(args[1].clone());
+                        Ok(Value::Unit)
+                    }
+                    Value::Ref(r) => match &*r.borrow() {
+                        Value::Array(arr) => {
+                            arr.borrow_mut().push(args[1].clone());
+                            Ok(Value::Unit)
+                        }
+                        other => Err(format!(
+                            "array_push expects an array as first argument, got {}",
+                            other.type_name()
+                        )),
+                    },
+                    other => Err(format!(
+                        "array_push expects an array as first argument, got {}",
+                        other.type_name()
+                    )),
+                }
+            }),
+        );
+
+        // array_reverse(array) -> new reversed array
+        self.register(
+            "array_reverse",
+            Rc::new(|args| {
+                if args.len() != 1 {
+                    return Err(format!(
+                        "array_reverse expects 1 argument, got {}",
+                        args.len()
+                    ));
+                }
+                let values = match &args[0] {
+                    Value::Array(arr) => arr.borrow().clone(),
+                    Value::Ref(r) => match &*r.borrow() {
+                        Value::Array(arr) => arr.borrow().clone(),
+                        other => {
+                            return Err(format!(
+                                "array_reverse expects an array, got {}",
+                                other.type_name()
+                            ));
+                        }
+                    },
+                    other => {
+                        return Err(format!(
+                            "array_reverse expects an array, got {}",
+                            other.type_name()
+                        ));
+                    }
+                };
+                let reversed: Vec<Value> = values.into_iter().rev().collect();
+                Ok(Value::Array(Rc::new(RefCell::new(reversed))))
             }),
         );
 
