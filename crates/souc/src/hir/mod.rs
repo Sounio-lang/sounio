@@ -404,10 +404,13 @@ pub enum HirType {
     Error,
 
     // ==================== EPISTEMIC TYPES ====================
-    /// Knowledge type: Knowledge[T, ε >= bound]
+    /// Knowledge type: Knowledge[T, ε >= bound] or Knowledge[T, ε=⊥]
     Knowledge {
         inner: Box<HirType>,
+        /// Numeric epsilon bound (None if ε=⊥ or unspecified)
         epsilon_bound: Option<f64>,
+        /// Knightian undefined flag: true means ε=⊥ (no probability model applies)
+        knightian: bool,
         provenance: Option<HirProvenanceConstraint>,
     },
     /// Physical quantity with unit: Quantity[f64, kg*m/s^2]

@@ -357,11 +357,13 @@ impl UnificationContext {
                 HirType::Knowledge {
                     inner: i_e,
                     epsilon_bound: e_e,
+                    knightian: false,
                     ..
                 },
                 HirType::Knowledge {
                     inner: i_f,
                     epsilon_bound: e_f,
+                    knightian: false,
                     ..
                 },
             ) => {
@@ -607,10 +609,12 @@ impl UnificationContext {
             HirType::Knowledge {
                 inner,
                 epsilon_bound,
+                knightian,
                 provenance,
             } => HirType::Knowledge {
                 inner: Box::new(self.apply_substitutions(inner)),
                 epsilon_bound: *epsilon_bound,
+                knightian: *knightian,
                 provenance: provenance.clone(),
             },
             HirType::Quantity { numeric, unit } => HirType::Quantity {

@@ -338,6 +338,7 @@ impl HlirType {
                 inner,
                 epsilon_bound,
                 provenance,
+                ..
             } => {
                 let mode = if provenance.is_some() {
                     EpistemicMode::Full

@@ -5039,7 +5039,8 @@ impl TypeChecker {
                 let inner_ty = value_expr.ty.clone();
                 let result_ty = HirType::Knowledge {
                     inner: Box::new(inner_ty),
-                    epsilon_bound: None, // Could extract from epsilon if constant
+                    epsilon_bound: None,
+                    knightian: false, // Could extract from epsilon if constant
                     provenance: None,
                 };
 
@@ -5175,6 +5176,7 @@ impl TypeChecker {
                 let result_ty = HirType::Knowledge {
                     inner: Box::new(HirType::F64),
                     epsilon_bound: causal_confidence,
+                    knightian: false,
                     provenance: None,
                 };
 
@@ -5227,6 +5229,7 @@ impl TypeChecker {
                 let result_ty = HirType::Knowledge {
                     inner: Box::new(inner_ty),
                     epsilon_bound: Some(0.95),
+                    knightian: false,
                     provenance: None,
                 };
 
@@ -6232,6 +6235,7 @@ impl TypeChecker {
             return HirType::Knowledge {
                 inner: Box::new(result_inner),
                 epsilon_bound: Some(left_bound.min(right_bound)),
+                    knightian: false,
                 provenance: None,
             };
         }
@@ -6246,7 +6250,11 @@ impl TypeChecker {
 
         let eps = epsilon.as_ref()?;
         match eps.operator {
-            ComparisonOp::Ge | ComparisonOp::Gt | ComparisonOp::Eq => self.const_f64(&eps.value),
+            ComparisonOp::Ge | ComparisonOp::Gt | ComparisonOp::Eq => match &eps.value {
+                EpsilonValue::Float(f) => Some(*f),
+                EpsilonValue::Expression(expr) => self.const_f64(expr),
+                EpsilonValue::KnightianUndefined => None,
+            },
             ComparisonOp::Lt | ComparisonOp::Le => None,
         }
     }
@@ -8394,6 +8402,7 @@ impl TypeChecker {
                     HirType::Knowledge {
                         inner: Box::new(self.type_to_hir(&args[0])),
                         epsilon_bound: None,
+                    knightian: false,
                         provenance: None,
                     }
                 } else {
