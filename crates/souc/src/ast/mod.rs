@@ -1292,13 +1292,28 @@ pub struct TypeVarDecl {
 
 // ==================== EPISTEMIC TYPE COMPONENTS ====================
 
-/// Uncertainty bound: ε < 0.05, ε = σ
+/// The value side of an epsilon bound expression
+///
+/// ε=⊥ (KnightianUndefined) is categorically distinct from ε=0.0:
+/// - ε=0.0 means "known false" — a real number in [0,1]
+/// - ε=⊥ means "probability model does not apply" — a type-level sentinel
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum EpsilonValue {
+    /// Literal float: ε < 0.05, ε = 0.73
+    Float(f64),
+    /// General expression: ε = sigma, ε < threshold
+    Expression(Box<Expr>),
+    /// Knightian undefined (⊥ or _|_): model space unknown, no probability applies
+    KnightianUndefined,
+}
+
+/// Uncertainty bound: ε < 0.05, ε = σ, ε = ⊥
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EpsilonBound {
     /// Comparison operator: "<", "<=", "=", ">", ">="
     pub operator: ComparisonOp,
-    /// The bound value (can be a literal or expression)
-    pub value: Box<Expr>,
+    /// The bound value — float, expression, or Knightian ⊥
+    pub value: EpsilonValue,
 }
 
 /// Comparison operators for epsilon bounds
