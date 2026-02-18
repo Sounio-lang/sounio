@@ -1,0 +1,311 @@
+//@ run-pass
+//@ expect-stdout: PASSED
+// Lotka-Volterra Predator-Prey Ecosystem Dynamics
+//
+// Classical ecological model with RK4 integration, oscillation detection,
+// conservation invariant verification, phase portrait analysis, and
+// sensitivity analysis via parameter perturbation.
+//
+// Equations:
+//   dx/dt = alpha*x - beta*x*y    (prey: growth minus predation)
+//   dy/dt = delta*x*y - gamma*y   (predator: growth minus death)
+//
+// Conservation quantity (Volterra integral):
+//   V = delta*x - gamma*ln(x) + beta*y - alpha*ln(y)
+//
+// References:
+//   Lotka (1925) "Elements of Physical Biology"
+//   Volterra (1926) "Variazioni e fluttuazioni del numero d'individui"
+//   Murray (2002) "Mathematical Biology" Ch.3
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn ln_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 {
+        term = term * t2
+        sum = sum + term / ((2 * k + 1) as f64)
+        k = k + 1
+    }
+    return 2.0 * sum + (e as f64) * 0.6931471805599453
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 30 { y = 0.5 * (y + x / y); i = i + 1 }
+    return y
+}
+
+// ============================================================================
+// STATE AND DERIVATIVES
+// ============================================================================
+
+struct EcoState {
+    x: f64,
+    y: f64,
+    t: f64,
+}
+
+struct EcoDerivs {
+    dx: f64,
+    dy: f64,
+}
+
+fn lv_derivs(x: f64, y: f64, alpha: f64, beta: f64, delta: f64, gamma: f64) -> EcoDerivs {
+    EcoDerivs {
+        dx: alpha * x - beta * x * y,
+        dy: delta * x * y - gamma * y,
+    }
+}
+
+fn rk4_step(s: EcoState, dt: f64, alpha: f64, beta: f64, delta: f64, gamma: f64) -> EcoState {
+    let k1 = lv_derivs(s.x, s.y, alpha, beta, delta, gamma)
+    let k2 = lv_derivs(s.x + 0.5 * dt * k1.dx, s.y + 0.5 * dt * k1.dy, alpha, beta, delta, gamma)
+    let k3 = lv_derivs(s.x + 0.5 * dt * k2.dx, s.y + 0.5 * dt * k2.dy, alpha, beta, delta, gamma)
+    let k4 = lv_derivs(s.x + dt * k3.dx, s.y + dt * k3.dy, alpha, beta, delta, gamma)
+    EcoState {
+        x: s.x + dt / 6.0 * (k1.dx + 2.0 * k2.dx + 2.0 * k3.dx + k4.dx),
+        y: s.y + dt / 6.0 * (k1.dy + 2.0 * k2.dy + 2.0 * k3.dy + k4.dy),
+        t: s.t + dt,
+    }
+}
+
+// ============================================================================
+// CONSERVATION INVARIANT
+// ============================================================================
+
+fn volterra_invariant(x: f64, y: f64, alpha: f64, beta: f64, delta: f64, gamma: f64) -> f64 with Mut, Panic, Div {
+    return delta * x - gamma * ln_f64(x) + beta * y - alpha * ln_f64(y)
+}
+
+// ============================================================================
+// SIMULATION DRIVER
+// ============================================================================
+
+fn simulate(alpha: f64, beta: f64, delta: f64, gamma: f64, x0: f64, y0: f64, t_end: f64, dt: f64) -> EcoState with Mut, Panic, Div {
+    var s = EcoState { x: x0, y: y0, t: 0.0 }
+    let n_steps = (t_end / dt) as i32
+    var i = 0
+    while i < n_steps {
+        s = rk4_step(s, dt, alpha, beta, delta, gamma)
+        i = i + 1
+    }
+    return s
+}
+
+// ============================================================================
+// PEAK DETECTION: find period from prey peaks
+// ============================================================================
+
+struct PeakResult {
+    period: f64,
+    n_peaks: i32,
+}
+
+fn detect_oscillation(alpha: f64, beta: f64, delta: f64, gamma: f64, x0: f64, y0: f64, dt: f64) -> PeakResult with Mut, Panic, Div {
+    // Run for T=50 and collect prey peaks
+    let n_steps = (50.0 / dt) as i32
+    var s = EcoState { x: x0, y: y0, t: 0.0 }
+    var prev_x = x0
+    var prev_prev_x = x0
+    var first_peak_t = 0.0
+    var last_peak_t = 0.0
+    var n_peaks = 0
+    var i = 0
+    while i < n_steps {
+        s = rk4_step(s, dt, alpha, beta, delta, gamma)
+        // A peak occurs when prev_x > prev_prev_x and prev_x > s.x (local max)
+        if i > 1 {
+            if prev_x > prev_prev_x && prev_x > s.x {
+                n_peaks = n_peaks + 1
+                if n_peaks == 1 { first_peak_t = s.t - dt }
+                last_peak_t = s.t - dt
+            }
+        }
+        prev_prev_x = prev_x
+        prev_x = s.x
+        i = i + 1
+    }
+    var period = 0.0
+    if n_peaks > 1 {
+        period = (last_peak_t - first_peak_t) / ((n_peaks - 1) as f64)
+    }
+    return PeakResult { period: period, n_peaks: n_peaks }
+}
+
+// ============================================================================
+// PHASE PORTRAIT AREA (Shoelace formula on orbit points)
+// ============================================================================
+
+fn phase_area(alpha: f64, beta: f64, delta: f64, gamma: f64, x0: f64, y0: f64, dt: f64) -> f64 with Mut, Panic, Div {
+    // Sample one full period's worth of points
+    let peak = detect_oscillation(alpha, beta, delta, gamma, x0, y0, dt)
+    var period_steps = (peak.period / dt) as i32
+    if period_steps < 100 { period_steps = 5000 }
+    // Skip transient (first 1000 steps), then collect one period
+    var s = EcoState { x: x0, y: y0, t: 0.0 }
+    var skip = 0
+    while skip < 1000 {
+        s = rk4_step(s, dt, alpha, beta, delta, gamma)
+        skip = skip + 1
+    }
+    // Shoelace: sum (x_i * y_{i+1} - x_{i+1} * y_i)
+    var area_sum = 0.0
+    var prev_state = s
+    var j = 0
+    while j < period_steps {
+        s = rk4_step(s, dt, alpha, beta, delta, gamma)
+        area_sum = area_sum + (prev_state.x * s.y - s.x * prev_state.y)
+        prev_state = s
+        j = j + 1
+    }
+    return abs_f64(area_sum) / 2.0
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== Lotka-Volterra Predator-Prey Ecosystem ===")
+    println("alpha=1.1 beta=0.4 delta=0.1 gamma=0.4")
+    println("")
+
+    let alpha = 1.1
+    let beta = 0.4
+    let delta = 0.1
+    let gamma = 0.4
+    let x0 = 10.0
+    let y0 = 10.0
+    let dt = 0.01
+
+    // --- Print populations at t=0,10,20,30,40,50 ---
+    println("Population dynamics:")
+    var s = EcoState { x: x0, y: y0, t: 0.0 }
+    let v0 = volterra_invariant(s.x, s.y, alpha, beta, delta, gamma)
+    print("  t=0   prey=")
+    print(s.x)
+    print("  pred=")
+    println(s.y)
+
+    let n_total = 5000
+    var step = 0
+    var target = 1
+    while step < n_total {
+        s = rk4_step(s, dt, alpha, beta, delta, gamma)
+        step = step + 1
+        let t_now = s.t
+        if target == 1 && t_now >= 9.995 && t_now < 10.005 {
+            print("  t=10  prey=")
+            print(s.x)
+            print("  pred=")
+            println(s.y)
+            target = 2
+        }
+        if target == 2 && t_now >= 19.995 && t_now < 20.005 {
+            print("  t=20  prey=")
+            print(s.x)
+            print("  pred=")
+            println(s.y)
+            target = 3
+        }
+        if target == 3 && t_now >= 29.995 && t_now < 30.005 {
+            print("  t=30  prey=")
+            print(s.x)
+            print("  pred=")
+            println(s.y)
+            target = 4
+        }
+        if target == 4 && t_now >= 39.995 && t_now < 40.005 {
+            print("  t=40  prey=")
+            print(s.x)
+            print("  pred=")
+            println(s.y)
+            target = 5
+        }
+        if target == 5 && t_now >= 49.995 && t_now < 50.005 {
+            print("  t=50  prey=")
+            print(s.x)
+            print("  pred=")
+            println(s.y)
+            target = 6
+        }
+    }
+    println("")
+
+    // --- Conservation invariant ---
+    let v_final = volterra_invariant(s.x, s.y, alpha, beta, delta, gamma)
+    let v_drift = abs_f64(v_final - v0) / abs_f64(v0)
+    print("Conservation V(0)=")
+    print(v0)
+    print("  V(50)=")
+    print(v_final)
+    print("  drift=")
+    println(v_drift)
+
+    // --- Oscillation detection ---
+    let peaks = detect_oscillation(alpha, beta, delta, gamma, x0, y0, dt)
+    print("Oscillation: period=")
+    print(peaks.period)
+    print("  peaks_found=")
+    println(peaks.n_peaks)
+
+    // --- Phase portrait area ---
+    let area = phase_area(alpha, beta, delta, gamma, x0, y0, dt)
+    print("Phase orbit area=")
+    println(area)
+
+    // --- Sensitivity analysis: perturb alpha by 1% ---
+    let alpha_pert = alpha * 1.01
+    let peaks_pert = detect_oscillation(alpha_pert, beta, delta, gamma, x0, y0, dt)
+    let period_change = abs_f64(peaks_pert.period - peaks.period) / peaks.period
+    print("Sensitivity: alpha+1% period=")
+    print(peaks_pert.period)
+    print("  change=")
+    println(period_change)
+
+    println("")
+
+    // === VALIDATION ===
+    var all_ok = true
+
+    print("Check 1: Oscillation detected (>=2 peaks) ... ")
+    if peaks.n_peaks >= 2 { println("OK") } else { println("FAIL"); all_ok = false }
+
+    print("Check 2: Period > 0 ... ")
+    if peaks.period > 0.0 { println("OK") } else { println("FAIL"); all_ok = false }
+
+    print("Check 3: Conservation drift < 1% ... ")
+    if v_drift < 0.01 { println("OK") } else { println("FAIL"); all_ok = false }
+
+    print("Check 4: Populations stay positive ... ")
+    if s.x > 0.0 && s.y > 0.0 { println("OK") } else { println("FAIL"); all_ok = false }
+
+    print("Check 5: Phase area > 0 ... ")
+    if area > 0.0 { println("OK") } else { println("FAIL"); all_ok = false }
+
+    print("Check 6: Sensitivity detectable ... ")
+    if period_change > 0.0 && period_change < 0.5 { println("OK") } else { println("FAIL"); all_ok = false }
+
+    println("")
+    if all_ok { println("LOTKA-VOLTERRA PASSED") } else { println("LOTKA-VOLTERRA FAILED") }
+    return 0
+}

@@ -1,0 +1,334 @@
+//@ run-pass
+//@ expect-stdout: PASSED
+// 1D Kalman Filter for State Estimation
+//
+// Tracks a moving object with constant-velocity model.
+// State vector: [position, velocity] (2D state, 1D measurement).
+// True trajectory: constant velocity v=3.0, position = v*t, with small
+// random accelerations (process noise). The filter observes only noisy
+// position measurements and must recover both position and velocity.
+//
+// This is the canonical Kalman filter test: measurement noise is large
+// (std=5.0) but the filter fuses predictions with observations to
+// produce estimates far superior to raw measurements alone.
+//
+// Implements predict/update cycle with 2x2 inline matrix operations.
+// Demonstrates filtering improvement, velocity inference from position-only
+// observations, and gain convergence.
+//
+// References:
+//   Kalman (1960) "A New Approach to Linear Filtering and Prediction"
+//   Maybeck (1979) "Stochastic Models, Estimation and Control"
+//   Bar-Shalom, Li, Kirubarajan (2001) "Estimation with Applications"
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 30 { y = 0.5 * (y + x / y); i = i + 1 }
+    return y
+}
+
+fn ln_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 {
+        term = term * t2
+        sum = sum + term / ((2 * k + 1) as f64)
+        k = k + 1
+    }
+    return 2.0 * sum + (e as f64) * 0.6931471805599453
+}
+
+fn cos_approx(x: f64) -> f64 with Mut, Panic, Div {
+    let pi = 3.141592653589793
+    let two_pi = 6.283185307179586
+    var a = x
+    while a >= two_pi { a = a - two_pi }
+    while a < 0.0 { a = a + two_pi }
+    if a > pi { a = a - two_pi }
+    let a2 = a * a
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 15 {
+        term = 0.0 - term * a2 / ((2 * n - 1) * 2 * n) as f64
+        sum = sum + term
+        n = n + 1
+    }
+    return sum
+}
+
+// ============================================================================
+// LCG PRNG + Box-Muller
+// ============================================================================
+
+struct RngState {
+    seed: i64,
+}
+
+fn lcg_next(rng: &!RngState) -> f64 with Mut, Panic, Div {
+    let a: i64 = 1664525
+    let c: i64 = 1013904223
+    let modulus: i64 = 4294967296
+    rng.seed = (a * rng.seed + c) % modulus
+    if rng.seed < 0 { rng.seed = rng.seed + modulus }
+    return (rng.seed as f64) / 4294967296.0
+}
+
+fn randn(rng: &!RngState) -> f64 with Mut, Panic, Div {
+    var u1 = lcg_next(rng)
+    if u1 < 1.0e-10 { u1 = 1.0e-10 }
+    let u2 = lcg_next(rng)
+    let pi = 3.141592653589793
+    return sqrt_f64(0.0 - 2.0 * ln_f64(u1)) * cos_approx(2.0 * pi * u2)
+}
+
+// ============================================================================
+// 2x2 MATRIX OPERATIONS (inline)
+// ============================================================================
+
+struct Mat2 {
+    a00: f64, a01: f64,
+    a10: f64, a11: f64,
+}
+
+struct Vec2 {
+    x: f64,
+    y: f64,
+}
+
+fn mat2_mul(m: Mat2, n: Mat2) -> Mat2 {
+    Mat2 {
+        a00: m.a00 * n.a00 + m.a01 * n.a10,
+        a01: m.a00 * n.a01 + m.a01 * n.a11,
+        a10: m.a10 * n.a00 + m.a11 * n.a10,
+        a11: m.a10 * n.a01 + m.a11 * n.a11,
+    }
+}
+
+fn mat2_transpose(m: Mat2) -> Mat2 {
+    Mat2 { a00: m.a00, a01: m.a10, a10: m.a01, a11: m.a11 }
+}
+
+fn mat2_add(m: Mat2, n: Mat2) -> Mat2 {
+    Mat2 {
+        a00: m.a00 + n.a00, a01: m.a01 + n.a01,
+        a10: m.a10 + n.a10, a11: m.a11 + n.a11,
+    }
+}
+
+fn mat2_vec(m: Mat2, v: Vec2) -> Vec2 {
+    Vec2 {
+        x: m.a00 * v.x + m.a01 * v.y,
+        y: m.a10 * v.x + m.a11 * v.y,
+    }
+}
+
+// ============================================================================
+// KALMAN FILTER STATE
+// ============================================================================
+
+struct KalmanState {
+    x: Vec2,
+    p: Mat2,
+}
+
+fn kalman_predict(ks: KalmanState, f_mat: Mat2, q: Mat2) -> KalmanState {
+    let x_pred = mat2_vec(f_mat, ks.x)
+    let ft = mat2_transpose(f_mat)
+    let fp = mat2_mul(f_mat, ks.p)
+    let p_pred = mat2_add(mat2_mul(fp, ft), q)
+    return KalmanState { x: x_pred, p: p_pred }
+}
+
+fn kalman_update(ks: KalmanState, z: f64, r: f64) -> KalmanState with Mut, Panic, Div {
+    // H = [1, 0] so H*x = x[0], H*P*H' = P[0,0]
+    let y_innov = z - ks.x.x
+    let s = ks.p.a00 + r
+    if abs_f64(s) < 1.0e-30 {
+        return ks
+    }
+    // Kalman gain K = P * H' / S = [P[0,0]/S, P[1,0]/S]
+    let k0 = ks.p.a00 / s
+    let k1 = ks.p.a10 / s
+
+    let x_new = Vec2 {
+        x: ks.x.x + k0 * y_innov,
+        y: ks.x.y + k1 * y_innov,
+    }
+
+    // P_new = (I - K*H) * P
+    // K*H = [[k0, 0], [k1, 0]]
+    let p_new = Mat2 {
+        a00: (1.0 - k0) * ks.p.a00,
+        a01: (1.0 - k0) * ks.p.a01,
+        a10: ks.p.a10 - k1 * ks.p.a00,
+        a11: ks.p.a11 - k1 * ks.p.a01,
+    }
+
+    return KalmanState { x: x_new, p: p_new }
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== Kalman Filter: 1D Position+Velocity Tracking ===")
+    println("True trajectory: constant velocity v=3.0 with process noise")
+    println("Measurements: position only, noise_std = 5.0")
+    println("")
+
+    let dt = 1.0
+    let true_vel = 3.0
+    let process_noise_std = 0.5
+    let meas_noise_std = 5.0
+    let n_steps = 30
+    let r = meas_noise_std * meas_noise_std
+
+    // State transition: x_k = x_{k-1} + v_{k-1}*dt, v_k = v_{k-1}
+    let f_mat = Mat2 { a00: 1.0, a01: dt, a10: 0.0, a11: 1.0 }
+
+    // Process noise covariance Q (piecewise constant white noise jerk model)
+    let q_var = process_noise_std * process_noise_std
+    let q = Mat2 {
+        a00: q_var * dt * dt * dt * dt / 4.0,
+        a01: q_var * dt * dt * dt / 2.0,
+        a10: q_var * dt * dt * dt / 2.0,
+        a11: q_var * dt * dt,
+    }
+
+    // Initial state estimate: uncertain about position and velocity
+    var ks = KalmanState {
+        x: Vec2 { x: 0.0, y: 0.0 },
+        p: Mat2 { a00: 100.0, a01: 0.0, a10: 0.0, a11: 100.0 },
+    }
+
+    // Generate true trajectory and noisy measurements
+    var rng = RngState { seed: 42 }
+
+    var true_pos = 0.0
+    var actual_vel = true_vel
+    var sum_meas_err_sq = 0.0
+    var sum_filt_err_sq = 0.0
+    var initial_gain = 0.0
+
+    println("Step | TruePos  | Meas     | FiltPos  | FiltVel  | Gain")
+
+    var step = 1
+    while step <= n_steps {
+        // Evolve true state with small process noise
+        let proc_noise = process_noise_std * randn(&!rng)
+        actual_vel = true_vel + proc_noise * 0.1
+        true_pos = true_pos + actual_vel * dt
+
+        // Noisy measurement of position
+        let noise = meas_noise_std * randn(&!rng)
+        let z = true_pos + noise
+
+        // Predict
+        ks = kalman_predict(ks, f_mat, q)
+
+        // Update
+        ks = kalman_update(ks, z, r)
+
+        // Track errors
+        let meas_err = z - true_pos
+        let filt_err = ks.x.x - true_pos
+        sum_meas_err_sq = sum_meas_err_sq + meas_err * meas_err
+        sum_filt_err_sq = sum_filt_err_sq + filt_err * filt_err
+
+        // Kalman gain for position (post-update)
+        let current_gain = ks.p.a00 / (ks.p.a00 + r)
+        if step == 1 { initial_gain = current_gain }
+
+        // Print every 5th step and first/last
+        let mod5 = step - 5 * (step / 5)
+        if mod5 == 0 || step == 1 || step == n_steps {
+            print("  t=")
+            print(step)
+            print("  true=")
+            print(true_pos)
+            print("  meas=")
+            print(z)
+            print("  filt_pos=")
+            print(ks.x.x)
+            print("  filt_vel=")
+            print(ks.x.y)
+            print("  gain=")
+            println(current_gain)
+        }
+
+        step = step + 1
+    }
+
+    println("")
+
+    let rms_meas = sqrt_f64(sum_meas_err_sq / (n_steps as f64))
+    let rms_filt = sqrt_f64(sum_filt_err_sq / (n_steps as f64))
+    let improvement = rms_meas / rms_filt
+    print("RMS measurement error: ")
+    println(rms_meas)
+    print("RMS filter error:      ")
+    println(rms_filt)
+    print("Improvement ratio:     ")
+    println(improvement)
+
+    let vel_est = ks.x.y
+    let vel_err_frac = abs_f64(vel_est - true_vel) / true_vel
+    print("Velocity estimate: ")
+    print(vel_est)
+    print("  true: ")
+    println(true_vel)
+    print("Velocity error fraction: ")
+    println(vel_err_frac)
+
+    let final_gain = ks.p.a00 / (ks.p.a00 + r)
+    print("Initial gain: ")
+    println(initial_gain)
+    print("Final gain:   ")
+    println(final_gain)
+    print("Gain reduction: ")
+    println(initial_gain / final_gain)
+    println("")
+
+    // === VALIDATION ===
+    var all_ok = true
+
+    print("Check 1: RMS filter < RMS measurement ... ")
+    if rms_filt < rms_meas { println("OK") } else { println("FAIL"); all_ok = false }
+
+    print("Check 2: Velocity within 50% of true at t=30 ... ")
+    if vel_err_frac < 0.50 { println("OK") } else { println("FAIL"); all_ok = false }
+
+    print("Check 3: Gain stabilizes (final < 0.5) ... ")
+    if final_gain < 0.5 { println("OK") } else { println("FAIL"); all_ok = false }
+
+    print("Check 4: Filter improvement > 1.0x ... ")
+    if improvement > 1.0 { println("OK") } else { println("FAIL"); all_ok = false }
+
+    print("Check 5: Gain converges (final < initial) ... ")
+    if final_gain < initial_gain { println("OK") } else { println("FAIL"); all_ok = false }
+
+    println("")
+    if all_ok { println("KALMAN FILTER PASSED") } else { println("KALMAN FILTER FAILED") }
+    return 0
+}

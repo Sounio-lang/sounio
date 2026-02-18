@@ -1,0 +1,195 @@
+//@ run-pass
+//@ expect-stdout: EPISTEMIC CASCADE PASSED
+// Epistemic Uncertainty Cascade Through a Measurement Chain
+// How measurement uncertainty propagates and AMPLIFIES through clinical
+// calculations -- the core problem Sounio's Knowledge<T> solves.
+// Scenario: Drug dosage from weight -> CrCl -> drug clearance -> dose
+// Reference: Cockcroft & Gault (1976), GUM JCGM 100:2008
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut {
+    if x <= 0.0 { return 0.0 }
+    var g = x / 2.0
+    if g < 0.001 { g = 0.001 }
+    var i = 0
+    while i < 50 { g = (g + x / g) / 2.0; i = i + 1 }
+    return g
+}
+
+struct Meas { value: f64, uncert: f64, source: i32 }
+struct Prov { vw: f64, va: f64, vs: f64, vm: f64, total: f64 }
+
+fn empty_prov() -> Prov { return Prov { vw: 0.0, va: 0.0, vs: 0.0, vm: 0.0, total: 0.0 } }
+
+fn frac(p: Prov, src: i32) -> f64 {
+    if p.total < 1.0e-15 { return 0.0 }
+    if src == 0 { return p.vw / p.total }
+    if src == 1 { return p.va / p.total }
+    if src == 2 { return p.vs / p.total }
+    if src == 3 { return p.vm / p.total }
+    return 0.0
+}
+
+struct CrClResult { value: f64, uncert: f64, prov: Prov }
+struct CLResult { value: f64, uncert: f64, prov: Prov }
+struct DoseResult { value: f64, uncert: f64, rel_pct: f64, prov: Prov }
+
+// CrCl = (140 - age) * weight / (72 * SCr)
+fn compute_crcl(w: Meas, a: Meas, s: Meas) -> CrClResult with Mut {
+    let crcl = (140.0 - a.value) * w.value / (72.0 * s.value)
+    let dw = (140.0 - a.value) / (72.0 * s.value)
+    let da = 0.0 - w.value / (72.0 * s.value)
+    let ds = 0.0 - (140.0 - a.value) * w.value / (72.0 * s.value * s.value)
+    let vw = dw * dw * w.uncert * w.uncert
+    let va = da * da * a.uncert * a.uncert
+    let vs = ds * ds * s.uncert * s.uncert
+    let tot = vw + va + vs
+    return CrClResult { value: crcl, uncert: sqrt_f64(tot), prov: Prov { vw: vw, va: va, vs: vs, vm: 0.0, total: tot } }
+}
+
+// CL_drug = 0.8 * CrCl + 2.1, with model uncertainty
+fn compute_cl(cr: CrClResult, mu: f64) -> CLResult with Mut {
+    let cl = 0.8 * cr.value + 2.1
+    let s2 = 0.64  // 0.8^2
+    let vw = s2 * cr.prov.vw
+    let va = s2 * cr.prov.va
+    let vs = s2 * cr.prov.vs
+    let vm = mu * mu
+    let tot = vw + va + vs + vm
+    return CLResult { value: cl, uncert: sqrt_f64(tot), prov: Prov { vw: vw, va: va, vs: vs, vm: vm, total: tot } }
+}
+
+// dose = Ctarget * CL * tau
+fn compute_dose(cl: CLResult, ctarg: f64, tau: f64) -> DoseResult with Mut {
+    let dose = ctarg * cl.value * tau
+    let s2 = ctarg * tau * ctarg * tau
+    let vw = s2 * cl.prov.vw
+    let va = s2 * cl.prov.va
+    let vs = s2 * cl.prov.vs
+    let vm = s2 * cl.prov.vm
+    let tot = vw + va + vs + vm
+    let u = sqrt_f64(tot)
+    var rp = 0.0
+    if dose > 0.001 { rp = 100.0 * u / dose }
+    return DoseResult { value: dose, uncert: u, rel_pct: rp, prov: Prov { vw: vw, va: va, vs: vs, vm: vm, total: tot } }
+}
+
+fn print_prov(p: Prov) -> i32 with IO {
+    print("    Weight=")
+    print(100.0 * frac(p, 0))
+    print("% Age=")
+    print(100.0 * frac(p, 1))
+    print("% SCr=")
+    print(100.0 * frac(p, 2))
+    print("% Model=")
+    print(100.0 * frac(p, 3))
+    println("%")
+    return 0
+}
+
+fn main() -> i32 with IO, Mut {
+    println("=== Epistemic Uncertainty Cascade ===")
+    println("Drug dosage from uncertain measurement chain")
+    println("")
+    let weight = Meas { value: 75.0, uncert: 3.5, source: 0 }
+    let age = Meas { value: 65.0, uncert: 1.0, source: 1 }
+    let scr = Meas { value: 1.1, uncert: 0.06, source: 2 }
+
+    println("--- Stage 1: Measurements ---")
+    print("  Weight: ")
+    print(weight.value)
+    print(" +/- ")
+    print(weight.uncert)
+    println(" kg")
+    print("  Age: ")
+    print(age.value)
+    print(" +/- ")
+    print(age.uncert)
+    println(" yr")
+    print("  SCr: ")
+    print(scr.value)
+    print(" +/- ")
+    print(scr.uncert)
+    println(" mg/dL")
+
+    println("--- Stage 2: CrCl (Cockcroft-Gault) ---")
+    let cr = compute_crcl(weight, age, scr)
+    print("  CrCl = ")
+    print(cr.value)
+    print(" +/- ")
+    print(cr.uncert)
+    println(" mL/min")
+    let d2 = print_prov(cr.prov)
+
+    println("--- Stage 3: Drug Clearance ---")
+    let cl = compute_cl(cr, 1.5)
+    print("  CL = ")
+    print(cl.value)
+    print(" +/- ")
+    print(cl.uncert)
+    println(" L/hr")
+    let d3 = print_prov(cl.prov)
+
+    println("--- Stage 4: Final Dose ---")
+    let dose = compute_dose(cl, 0.5, 12.0)
+    print("  Dose = ")
+    print(dose.value)
+    print(" +/- ")
+    print(dose.uncert)
+    println(" mg")
+    print("  Relative uncertainty: ")
+    print(dose.rel_pct)
+    println("%")
+    let d4 = print_prov(dose.prov)
+
+    // Cascade analysis
+    let init_rel = 100.0 * weight.uncert / weight.value
+    let amp = dose.rel_pct / init_rel
+    print("  Amplification: ")
+    print(amp)
+    println("x")
+
+    let fw = frac(dose.prov, 0)
+    let fa = frac(dose.prov, 1)
+    let fs = frac(dose.prov, 2)
+    let fm = frac(dose.prov, 3)
+    if fs > fw && fs > fa && fs > fm {
+        println("  DOMINANT: Serum creatinine -> recommend cystatin C eGFR")
+    } else if fw > fs { println("  DOMINANT: Weight -> recommend calibrated scale") }
+    println("")
+
+    // Validation
+    var ok = true
+    print("Check 1: Dose uncertainty > 5% ... ")
+    print(dose.rel_pct)
+    if dose.rel_pct > 5.0 { println("% OK") } else { println("% FAIL"); ok = false }
+
+    print("Check 2: Weight > 10% of variance ... ")
+    print(100.0 * fw)
+    if 100.0 * fw > 10.0 { println("% OK") } else { println("% FAIL"); ok = false }
+
+    print("Check 3: SCr > 40% of variance ... ")
+    print(100.0 * fs)
+    if 100.0 * fs > 40.0 { println("% OK") } else { println("% FAIL"); ok = false }
+
+    print("Check 4: Amplification > 1x ... ")
+    print(amp)
+    if amp > 1.0 { println("x OK") } else { println("x FAIL"); ok = false }
+
+    let psum = fw + fa + fs + fm
+    print("Check 5: Provenance sums to 1.0 ... err=")
+    print(abs_f64(psum - 1.0))
+    if abs_f64(psum - 1.0) < 0.01 { println(" OK") } else { println(" FAIL"); ok = false }
+
+    print("Check 6: CrCl in [30,120] ... ")
+    print(cr.value)
+    if cr.value > 30.0 && cr.value < 120.0 { println(" OK") } else { println(" FAIL"); ok = false }
+
+    println("")
+    if ok { println("EPISTEMIC CASCADE PASSED") } else { println("EPISTEMIC CASCADE FAILED") }
+    return 0
+}

@@ -1,0 +1,147 @@
+//@ run-pass
+//@ expect-stdout: UNCERTAINTY PROPAGATION PASSED
+// Measurement Uncertainty Propagation (GUM)
+//
+// BMI = mass/height^2, BSA = sqrt(h_cm*mass/3600) (Mosteller)
+// Inputs: mass=75.0+/-0.5 kg, height=1.80+/-0.01 m
+// Expected: BMI~23.148+/-0.300, BSA~1.936+/-0.008
+// Reference: JCGM 100:2008 (GUM), Mosteller RD, NEJM 317:1098 (1987)
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var guess = x / 2.0
+    if guess < 0.001 { guess = 0.001 }
+    var i = 0
+    while i < 40 { guess = (guess + x / guess) / 2.0; i = i + 1 }
+    return guess
+}
+
+struct Measurement { value: f64, uncertainty: f64 }
+
+fn compute_bmi(mass: Measurement, height: Measurement) -> Measurement with Mut, Panic, Div {
+    let m = mass.value
+    let h = height.value
+    let bmi = m / (h * h)
+    let dbmi_dm = 1.0 / (h * h)
+    let dbmi_dh = 0.0 - 2.0 * m / (h * h * h)
+    let tm = dbmi_dm * mass.uncertainty
+    let th = dbmi_dh * height.uncertainty
+    return Measurement { value: bmi, uncertainty: sqrt_f64(tm * tm + th * th) }
+}
+
+fn compute_bsa(mass: Measurement, height: Measurement) -> Measurement with Mut, Panic, Div {
+    let m = mass.value
+    let h = height.value
+    let h_cm = h * 100.0
+    let bsa = sqrt_f64(h_cm * m / 3600.0)
+    let dbsa_dm = h_cm / (7200.0 * bsa)
+    let dbsa_dh = 100.0 * m / (7200.0 * bsa)
+    let tm = dbsa_dm * mass.uncertainty
+    let th = dbsa_dh * height.uncertainty
+    return Measurement { value: bsa, uncertainty: sqrt_f64(tm * tm + th * th) }
+}
+
+fn mass_pct_bmi(mass: Measurement, height: Measurement) -> f64 with Mut, Panic, Div {
+    let h = height.value
+    let m = mass.value
+    let tm = (1.0 / (h * h)) * mass.uncertainty
+    let th = (0.0 - 2.0 * m / (h * h * h)) * height.uncertainty
+    let total = tm * tm + th * th
+    if total < 1.0e-15 { return 0.0 }
+    return 100.0 * tm * tm / total
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== Measurement Uncertainty Propagation ===")
+    println("Reference: JCGM 100:2008 (GUM)")
+    println("")
+
+    let mass = Measurement { value: 75.0, uncertainty: 0.5 }
+    let height = Measurement { value: 1.80, uncertainty: 0.01 }
+
+    print("  mass   = ")
+    print(mass.value)
+    print(" +/- ")
+    print(mass.uncertainty)
+    println(" kg")
+    print("  height = ")
+    print(height.value)
+    print(" +/- ")
+    print(height.uncertainty)
+    println(" m")
+    println("")
+
+    // BMI
+    let bmi = compute_bmi(mass, height)
+    println("--- BMI = m/h^2 ---")
+    print("  BMI = ")
+    print(bmi.value)
+    print(" +/- ")
+    print(bmi.uncertainty)
+    println(" kg/m^2")
+
+    let h = height.value
+    let m = mass.value
+    print("  dBMI/dm = ")
+    println(1.0 / (h * h))
+    print("  dBMI/dh = ")
+    println(0.0 - 2.0 * m / (h * h * h))
+
+    let pct_m = mass_pct_bmi(mass, height)
+    let pct_h = 100.0 - pct_m
+    print("  Variance: mass=")
+    print(pct_m)
+    print("%, height=")
+    print(pct_h)
+    println("%")
+    println("")
+
+    // BSA
+    let bsa = compute_bsa(mass, height)
+    println("--- BSA (Mosteller): sqrt(h_cm*m/3600) ---")
+    print("  BSA = ")
+    print(bsa.value)
+    print(" +/- ")
+    print(bsa.uncertainty)
+    println(" m^2")
+    println("")
+
+    // Validation
+    var all_ok = true
+
+    let e1 = abs_f64(bmi.value - 23.148)
+    print("Check 1: BMI ~ 23.148 ... err=")
+    print(e1)
+    if e1 < 0.01 { println(" OK") } else { println(" FAIL"); all_ok = false }
+
+    let e2 = abs_f64(bmi.uncertainty - 0.300)
+    print("Check 2: sigma_BMI ~ 0.300 ... err=")
+    print(e2)
+    if e2 < 0.01 { println(" OK") } else { println(" FAIL"); all_ok = false }
+
+    print("Check 3: Height dominates BMI (>50%) ... pct=")
+    print(pct_h)
+    if pct_h > 50.0 { println(" OK") } else { println(" FAIL"); all_ok = false }
+
+    let e4 = abs_f64(bsa.value - 1.936)
+    print("Check 4: BSA ~ 1.936 ... err=")
+    print(e4)
+    if e4 < 0.01 { println(" OK") } else { println(" FAIL"); all_ok = false }
+
+    let e5 = abs_f64(bsa.uncertainty - 0.008)
+    print("Check 5: sigma_BSA ~ 0.008 ... err=")
+    print(e5)
+    if e5 < 0.005 { println(" OK") } else { println(" FAIL"); all_ok = false }
+
+    print("Check 6: BMI in normal range [18.5, 25.0] ... ")
+    if bmi.value > 18.5 && bmi.value < 25.0 { println("OK") } else { println("FAIL"); all_ok = false }
+
+    println("")
+    if all_ok { println("UNCERTAINTY PROPAGATION PASSED") } else { println("UNCERTAINTY PROPAGATION FAILED") }
+    return 0
+}

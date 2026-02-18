@@ -1,0 +1,129 @@
+//@ run-pass
+//@ expect-stdout: PKPD SIMULATION PASSED
+// One-Compartment PK Model with RK4 Integration
+//
+// dC/dt = (ka*dose/V)*exp(-ka*t) - ke*C
+// Parameters: dose=500mg, ka=1.0/hr, ke=0.1/hr, V=50L
+// Analytical: C(t) = dose*ka/(V*(ka-ke)) * (exp(-ke*t) - exp(-ka*t))
+// Reference: Rowland & Tozer, "Clinical Pharmacokinetics" (4th ed.)
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn exp_approx(x: f64) -> f64 with Mut, Panic, Div {
+    if x > 10.0 { let h = exp_approx(x / 2.0); return h * h }
+    if x < 0.0 - 10.0 { return 1.0 / exp_approx(0.0 - x) }
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n <= 30 { term = term * x / (n as f64); sum = sum + term; n = n + 1 }
+    return sum
+}
+
+struct PKState { c: f64, t: f64 }
+
+fn pk_deriv(t: f64, c: f64) -> f64 with Mut, Panic, Div {
+    return (1.0 * 500.0 / 50.0) * exp_approx(0.0 - 1.0 * t) - 0.1 * c
+}
+
+fn rk4_step(s: PKState, dt: f64) -> PKState with Mut, Panic, Div {
+    let k1 = pk_deriv(s.t, s.c)
+    let k2 = pk_deriv(s.t + 0.5 * dt, s.c + 0.5 * dt * k1)
+    let k3 = pk_deriv(s.t + 0.5 * dt, s.c + 0.5 * dt * k2)
+    let k4 = pk_deriv(s.t + dt, s.c + dt * k3)
+    PKState { c: s.c + dt / 6.0 * (k1 + 2.0 * k2 + 2.0 * k3 + k4), t: s.t + dt }
+}
+
+fn pk_analytical(t: f64) -> f64 with Mut, Panic, Div {
+    let factor = 500.0 * 1.0 / (50.0 * (1.0 - 0.1))
+    return factor * (exp_approx(0.0 - 0.1 * t) - exp_approx(0.0 - 1.0 * t))
+}
+
+fn print_row(label: f64, c_num: f64, c_exact: f64) -> i32 with IO {
+    print("  t=")
+    print(label)
+    print("  C=")
+    print(c_num)
+    print("  exact=")
+    println(c_exact)
+    return 0
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== One-Compartment PK Simulation ===")
+    println("dose=500mg, ka=1.0/hr, ke=0.1/hr, V=50L")
+    println("")
+
+    let dt = 0.001
+    let n_steps = 24000
+    var s = PKState { c: 0.0, t: 0.0 }
+    var cmax = 0.0
+    var tmax = 0.0
+    var target_idx = 0
+
+    let dummy0 = print_row(0.0, 0.0, pk_analytical(0.0))
+
+    var i = 0
+    while i < n_steps {
+        s = rk4_step(s, dt)
+        if s.c > cmax { cmax = s.c; tmax = s.t }
+        let t_now = s.t
+
+        if target_idx == 0 && t_now >= 1.9995 && t_now < 2.0005 {
+            let d = print_row(2.0, s.c, pk_analytical(2.0)); target_idx = 1
+        }
+        if target_idx == 1 && t_now >= 3.9995 && t_now < 4.0005 {
+            let d = print_row(4.0, s.c, pk_analytical(4.0)); target_idx = 2
+        }
+        if target_idx == 2 && t_now >= 5.9995 && t_now < 6.0005 {
+            let d = print_row(6.0, s.c, pk_analytical(6.0)); target_idx = 3
+        }
+        if target_idx == 3 && t_now >= 7.9995 && t_now < 8.0005 {
+            let d = print_row(8.0, s.c, pk_analytical(8.0)); target_idx = 4
+        }
+        if target_idx == 4 && t_now >= 9.9995 && t_now < 10.0005 {
+            let d = print_row(10.0, s.c, pk_analytical(10.0)); target_idx = 5
+        }
+        if target_idx == 5 && t_now >= 11.9995 && t_now < 12.0005 {
+            let d = print_row(12.0, s.c, pk_analytical(12.0)); target_idx = 6
+        }
+        if target_idx == 6 && t_now >= 23.9995 && t_now < 24.0005 {
+            let d = print_row(24.0, s.c, pk_analytical(24.0)); target_idx = 7
+        }
+        i = i + 1
+    }
+
+    println("")
+    print("Cmax = ")
+    print(cmax)
+    println(" mg/L")
+    print("Tmax = ")
+    print(tmax)
+    println(" hr")
+    print("Cmax (analytical) = ")
+    print(pk_analytical(2.5584))
+    println(" mg/L")
+    println("")
+
+    var all_ok = true
+
+    print("Check 1: Cmax in [5.0, 15.0] mg/L ... ")
+    if cmax > 5.0 && cmax < 15.0 { println("OK") } else { println("FAIL"); all_ok = false }
+
+    print("Check 2: Tmax in [2.0, 3.5] hr ... ")
+    if tmax > 2.0 && tmax < 3.5 { println("OK") } else { println("FAIL"); all_ok = false }
+
+    let err_24 = abs_f64(s.c - pk_analytical(24.0))
+    print("Check 3: |C_rk4(24)-C_exact(24)| < 0.01 ... err=")
+    print(err_24)
+    if err_24 < 0.01 { println(" OK") } else { println(" FAIL"); all_ok = false }
+
+    print("Check 4: C(24) in [0.5, 2.0] mg/L ... ")
+    if s.c > 0.5 && s.c < 2.0 { println("OK") } else { println("FAIL"); all_ok = false }
+
+    println("")
+    if all_ok { println("PKPD SIMULATION PASSED") } else { println("PKPD SIMULATION FAILED") }
+    return 0
+}

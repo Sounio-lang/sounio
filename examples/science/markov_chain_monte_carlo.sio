@@ -1,0 +1,338 @@
+//@ run-pass
+//@ expect-stdout: PASSED
+// Metropolis-Hastings MCMC for Bayesian Posterior Inference
+//
+// Samples the joint posterior of (mu, sigma) for a Normal likelihood
+// given 20 hardcoded observations. Uses LCG PRNG with Box-Muller
+// transform for proposals, log-space density evaluation, and
+// convergence diagnostics.
+//
+// Prior: mu ~ Normal(0, 10), sigma ~ HalfNormal(0, 5)
+// Likelihood: data_i ~ Normal(mu, sigma^2)
+// True generating params: mu=5.0, sigma=2.0
+//
+// References:
+//   Metropolis et al. (1953) "Equation of state calculations"
+//   Hastings (1970) "Monte Carlo sampling methods using Markov chains"
+//   Gelman et al. (2013) "Bayesian Data Analysis" 3rd ed.
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn ln_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 {
+        term = term * t2
+        sum = sum + term / ((2 * k + 1) as f64)
+        k = k + 1
+    }
+    return 2.0 * sum + (e as f64) * 0.6931471805599453
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 30 { y = 0.5 * (y + x / y); i = i + 1 }
+    return y
+}
+
+fn cos_approx(x: f64) -> f64 with Mut, Panic, Div {
+    let pi = 3.141592653589793
+    let two_pi = 6.283185307179586
+    var a = x
+    while a >= two_pi { a = a - two_pi }
+    while a < 0.0 { a = a + two_pi }
+    if a > pi { a = a - two_pi }
+    let a2 = a * a
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 15 {
+        term = 0.0 - term * a2 / ((2 * n - 1) * 2 * n) as f64
+        sum = sum + term
+        n = n + 1
+    }
+    return sum
+}
+
+// ============================================================================
+// LCG PSEUDO-RANDOM NUMBER GENERATOR
+// ============================================================================
+
+struct RngState {
+    seed: i64,
+}
+
+fn lcg_next(rng: &!RngState) -> f64 with Mut, Panic, Div {
+    // next = (1664525 * prev + 1013904223) % 2^32
+    let a: i64 = 1664525
+    let c: i64 = 1013904223
+    let modulus: i64 = 4294967296
+    rng.seed = (a * rng.seed + c) % modulus
+    if rng.seed < 0 { rng.seed = rng.seed + modulus }
+    return (rng.seed as f64) / 4294967296.0
+}
+
+fn box_muller_normal(rng: &!RngState) -> f64 with Mut, Panic, Div {
+    var u1 = lcg_next(rng)
+    if u1 < 1.0e-10 { u1 = 1.0e-10 }
+    let u2 = lcg_next(rng)
+    let pi = 3.141592653589793
+    return sqrt_f64(0.0 - 2.0 * ln_f64(u1)) * cos_approx(2.0 * pi * u2)
+}
+
+// ============================================================================
+// LOG-DENSITIES
+// ============================================================================
+
+fn log_normal_density(x: f64, mu: f64, sigma: f64) -> f64 with Mut, Panic, Div {
+    if sigma <= 0.0 { return 0.0 - 1.0e30 }
+    let z = (x - mu) / sigma
+    let log_2pi = 1.8378770664093453
+    return 0.0 - 0.5 * log_2pi - ln_f64(sigma) - 0.5 * z * z
+}
+
+fn log_prior_mu(mu: f64) -> f64 with Mut, Panic, Div {
+    // mu ~ Normal(0, 10)
+    return log_normal_density(mu, 0.0, 10.0)
+}
+
+fn log_prior_sigma(sigma: f64) -> f64 with Mut, Panic, Div {
+    // sigma ~ HalfNormal(0, 5): proportional to Normal(0,5) for sigma > 0
+    if sigma <= 0.0 { return 0.0 - 1.0e30 }
+    return log_normal_density(sigma, 0.0, 5.0)
+}
+
+// ============================================================================
+// LOG-LIKELIHOOD AND POSTERIOR
+// ============================================================================
+
+fn log_likelihood(mu: f64, sigma: f64) -> f64 with Mut, Panic, Div {
+    if sigma <= 0.0 { return 0.0 - 1.0e30 }
+    // 20 observations from Normal(5.0, 2.0)
+    // Hardcoded values (generated from that distribution):
+    var ll = 0.0
+    ll = ll + log_normal_density(4.12, mu, sigma)
+    ll = ll + log_normal_density(6.34, mu, sigma)
+    ll = ll + log_normal_density(3.87, mu, sigma)
+    ll = ll + log_normal_density(5.91, mu, sigma)
+    ll = ll + log_normal_density(7.23, mu, sigma)
+    ll = ll + log_normal_density(4.56, mu, sigma)
+    ll = ll + log_normal_density(3.21, mu, sigma)
+    ll = ll + log_normal_density(5.67, mu, sigma)
+    ll = ll + log_normal_density(6.78, mu, sigma)
+    ll = ll + log_normal_density(4.89, mu, sigma)
+    ll = ll + log_normal_density(5.43, mu, sigma)
+    ll = ll + log_normal_density(2.98, mu, sigma)
+    ll = ll + log_normal_density(6.12, mu, sigma)
+    ll = ll + log_normal_density(4.76, mu, sigma)
+    ll = ll + log_normal_density(7.54, mu, sigma)
+    ll = ll + log_normal_density(3.65, mu, sigma)
+    ll = ll + log_normal_density(5.28, mu, sigma)
+    ll = ll + log_normal_density(4.91, mu, sigma)
+    ll = ll + log_normal_density(6.45, mu, sigma)
+    ll = ll + log_normal_density(5.02, mu, sigma)
+    return ll
+}
+
+fn log_posterior(mu: f64, sigma: f64) -> f64 with Mut, Panic, Div {
+    return log_likelihood(mu, sigma) + log_prior_mu(mu) + log_prior_sigma(sigma)
+}
+
+// ============================================================================
+// MCMC CHAIN STORAGE
+// ============================================================================
+
+struct MCMCResult {
+    mu_mean: f64,
+    sigma_mean: f64,
+    accept_rate: f64,
+    mu_first_half: f64,
+    mu_second_half: f64,
+}
+
+fn run_mcmc(rng: &!RngState) -> MCMCResult with Mut, Panic, Div {
+    let n_iter = 5000
+    let n_burnin = 1000
+    let step_mu = 0.5
+    let step_sigma = 0.3
+
+    var cur_mu = 0.0
+    var cur_sigma = 1.0
+    var cur_lp = log_posterior(cur_mu, cur_sigma)
+
+    var n_accepted = 0
+    var n_total = 0
+    var sum_mu = 0.0
+    var sum_sigma = 0.0
+    var n_samples = 0
+
+    // For convergence check: first half and second half means
+    var sum_mu_h1 = 0.0
+    var count_h1 = 0
+    var sum_mu_h2 = 0.0
+    var count_h2 = 0
+    let half_post_burnin = (n_iter - n_burnin) / 2
+
+    var iter = 0
+    while iter < n_iter {
+        // Propose new (mu, sigma)
+        let prop_mu = cur_mu + step_mu * box_muller_normal(rng)
+        let prop_sigma = cur_sigma + step_sigma * box_muller_normal(rng)
+
+        if prop_sigma > 0.0 {
+            let prop_lp = log_posterior(prop_mu, prop_sigma)
+            let log_alpha = prop_lp - cur_lp
+            let u = lcg_next(rng)
+            let ln_u = ln_f64(u)
+
+            if ln_u < log_alpha {
+                cur_mu = prop_mu
+                cur_sigma = prop_sigma
+                cur_lp = prop_lp
+                n_accepted = n_accepted + 1
+            }
+        }
+        n_total = n_total + 1
+
+        // Collect post-burnin samples
+        if iter >= n_burnin {
+            sum_mu = sum_mu + cur_mu
+            sum_sigma = sum_sigma + cur_sigma
+            n_samples = n_samples + 1
+
+            let post_idx = iter - n_burnin
+            if post_idx < half_post_burnin {
+                sum_mu_h1 = sum_mu_h1 + cur_mu
+                count_h1 = count_h1 + 1
+            } else {
+                sum_mu_h2 = sum_mu_h2 + cur_mu
+                count_h2 = count_h2 + 1
+            }
+        }
+        iter = iter + 1
+    }
+
+    let mu_mean = sum_mu / (n_samples as f64)
+    let sigma_mean = sum_sigma / (n_samples as f64)
+    let accept_rate = (n_accepted as f64) / (n_total as f64)
+    let mu_h1 = sum_mu_h1 / (count_h1 as f64)
+    let mu_h2 = sum_mu_h2 / (count_h2 as f64)
+
+    return MCMCResult {
+        mu_mean: mu_mean,
+        sigma_mean: sigma_mean,
+        accept_rate: accept_rate,
+        mu_first_half: mu_h1,
+        mu_second_half: mu_h2,
+    }
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== Metropolis-Hastings MCMC Posterior Inference ===")
+    println("Data: 20 obs from Normal(5.0, 2.0)")
+    println("Prior: mu~N(0,10), sigma~HalfN(0,5)")
+    println("Iterations: 5000, Burn-in: 1000")
+    println("")
+
+    // Data statistics for reference
+    let data_mean = (4.12 + 6.34 + 3.87 + 5.91 + 7.23 + 4.56 + 3.21 + 5.67 + 6.78 + 4.89 + 5.43 + 2.98 + 6.12 + 4.76 + 7.54 + 3.65 + 5.28 + 4.91 + 6.45 + 5.02) / 20.0
+    print("Data sample mean: ")
+    println(data_mean)
+
+    // Compute sample std
+    var ss = 0.0
+    ss = ss + (4.12 - data_mean) * (4.12 - data_mean)
+    ss = ss + (6.34 - data_mean) * (6.34 - data_mean)
+    ss = ss + (3.87 - data_mean) * (3.87 - data_mean)
+    ss = ss + (5.91 - data_mean) * (5.91 - data_mean)
+    ss = ss + (7.23 - data_mean) * (7.23 - data_mean)
+    ss = ss + (4.56 - data_mean) * (4.56 - data_mean)
+    ss = ss + (3.21 - data_mean) * (3.21 - data_mean)
+    ss = ss + (5.67 - data_mean) * (5.67 - data_mean)
+    ss = ss + (6.78 - data_mean) * (6.78 - data_mean)
+    ss = ss + (4.89 - data_mean) * (4.89 - data_mean)
+    ss = ss + (5.43 - data_mean) * (5.43 - data_mean)
+    ss = ss + (2.98 - data_mean) * (2.98 - data_mean)
+    ss = ss + (6.12 - data_mean) * (6.12 - data_mean)
+    ss = ss + (4.76 - data_mean) * (4.76 - data_mean)
+    ss = ss + (7.54 - data_mean) * (7.54 - data_mean)
+    ss = ss + (3.65 - data_mean) * (3.65 - data_mean)
+    ss = ss + (5.28 - data_mean) * (5.28 - data_mean)
+    ss = ss + (4.91 - data_mean) * (4.91 - data_mean)
+    ss = ss + (6.45 - data_mean) * (6.45 - data_mean)
+    ss = ss + (5.02 - data_mean) * (5.02 - data_mean)
+    let data_std = sqrt_f64(ss / 19.0)
+    print("Data sample std:  ")
+    println(data_std)
+    println("")
+
+    // Run MCMC
+    var rng = RngState { seed: 123456789 }
+    let result = run_mcmc(&!rng)
+
+    println("MCMC Results:")
+    print("  Posterior mean of mu:    ")
+    println(result.mu_mean)
+    print("  Posterior mean of sigma: ")
+    println(result.sigma_mean)
+    print("  Acceptance rate:         ")
+    println(result.accept_rate)
+    print("  mu first-half mean:      ")
+    println(result.mu_first_half)
+    print("  mu second-half mean:     ")
+    println(result.mu_second_half)
+    println("")
+
+    // === VALIDATION ===
+    var all_ok = true
+
+    print("Check 1: |posterior_mu - 5.0| < 1.0 ... ")
+    let mu_err = abs_f64(result.mu_mean - 5.0)
+    print("err=")
+    print(mu_err)
+    if mu_err < 1.0 { println(" OK") } else { println(" FAIL"); all_ok = false }
+
+    print("Check 2: |posterior_sigma - 2.0| < 1.0 ... ")
+    let sigma_err = abs_f64(result.sigma_mean - 2.0)
+    print("err=")
+    print(sigma_err)
+    if sigma_err < 1.0 { println(" OK") } else { println(" FAIL"); all_ok = false }
+
+    print("Check 3: Acceptance rate in [0.15, 0.60] ... ")
+    if result.accept_rate >= 0.15 && result.accept_rate <= 0.60 {
+        println("OK")
+    } else {
+        println("FAIL"); all_ok = false
+    }
+
+    print("Check 4: Convergence (half-means close) ... ")
+    let convergence_gap = abs_f64(result.mu_first_half - result.mu_second_half)
+    print("gap=")
+    print(convergence_gap)
+    if convergence_gap < 1.0 { println(" OK") } else { println(" FAIL"); all_ok = false }
+
+    println("")
+    if all_ok { println("MCMC PASSED") } else { println("MCMC FAILED") }
+    return 0
+}

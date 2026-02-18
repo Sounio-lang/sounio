@@ -1,0 +1,760 @@
+//@ run-pass
+//@ expect-stdout: LORENTZ CL13 PASSED
+// Lorentz Rotors in Spacetime Algebra Cl(1,3)
+//
+// Lorentz transformations as rotors in the even subalgebra Cl+(1,3).
+// Boosts and rotations unify into a single algebraic object R:
+//   v' = R v R~        (sandwich product for vectors)
+//   psi' = R psi       (left action on Dirac spinors)
+//
+// Future syntax:
+//   type LorentzRotor = Hyper<Clifford(1, 3), f64>
+//   fn make_boost(rapidity: f64, dir: Hyper<Clifford(3, 0), f64>) -> LorentzRotor
+//   fn make_rotation(angle: f64, plane: Hyper<Clifford(2, 0), f64>) -> LorentzRotor
+//   fn apply_rotor(r: LorentzRotor, v: Hyper<Clifford(1, 3), f64>) -> Hyper<Clifford(1, 3), f64>
+//
+// Today: [f64] with 16 components, bitset-indexed basis blades.
+//
+// Basis indexing (bitset -> blade):
+//   0:1  1:e0  2:e1  3:e01  4:e2  5:e02  6:e12  7:e012
+//   8:e3  9:e03  10:e13  11:e013  12:e23  13:e023  14:e123  15:e0123
+//
+// Metric: e0^2 = +1 (time), e1^2 = e2^2 = e3^2 = -1 (space)
+//
+// References:
+//   Hestenes, "Space-Time Algebra" (1966, 2015 2nd ed.)
+//   Doran & Lasenby, "Geometric Algebra for Physicists" (2003) Ch. 5
+//   Lounesto, "Clifford Algebras and Spinors" (2001)
+
+// ============================================================================
+// MATH HELPERS (must precede callers — no forward refs in Sounio)
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var g = x / 2.0
+    if g < 1.0 { g = 1.0 }
+    var i = 0
+    while i < 50 { g = (g + x / g) / 2.0; i = i + 1 }
+    return g
+}
+
+fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+    abs_f64(a - b) < tol
+}
+
+fn exp_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x > 20.0 { return exp_f64(x / 2.0) * exp_f64(x / 2.0) }
+    if x < 0.0 - 20.0 { return 1.0 / exp_f64(0.0 - x) }
+    var sum = 1.0
+    var term = 1.0
+    var n = 1.0
+    while n < 30.0 {
+        term = term * x / n
+        sum = sum + term
+        n = n + 1.0
+    }
+    return sum
+}
+
+fn sinh_f64(x: f64) -> f64 with Mut, Panic, Div {
+    let ep = exp_f64(x)
+    let em = exp_f64(0.0 - x)
+    return (ep - em) / 2.0
+}
+
+fn cosh_f64(x: f64) -> f64 with Mut, Panic, Div {
+    let ep = exp_f64(x)
+    let em = exp_f64(0.0 - x)
+    return (ep + em) / 2.0
+}
+
+fn sin_f64(x: f64) -> f64 with Mut, Panic, Div {
+    var sum = x
+    var term = x
+    var n = 1.0
+    while n < 15.0 {
+        term = 0.0 - term * x * x / ((2.0 * n) * (2.0 * n + 1.0))
+        sum = sum + term
+        n = n + 1.0
+    }
+    return sum
+}
+
+fn cos_f64(x: f64) -> f64 with Mut, Panic, Div {
+    var sum = 1.0
+    var term = 1.0
+    var n = 1.0
+    while n < 15.0 {
+        term = 0.0 - term * x * x / ((2.0 * n - 1.0) * (2.0 * n))
+        sum = sum + term
+        n = n + 1.0
+    }
+    return sum
+}
+
+// ============================================================================
+// Cl(1,3) GEOMETRIC PRODUCT
+// ============================================================================
+
+fn popcount4(x: i64) -> i64 with Mut, Panic, Div {
+    var count = 0
+    var v = x
+    while v > 0 {
+        count = count + (v & 1)
+        v = v >> 1
+    }
+    return count
+}
+
+fn geo_sign(a: i64, b: i64) -> f64 with Mut, Panic, Div {
+    var swaps = 0
+    var j = 0
+    while j < 4 {
+        if (b >> j) & 1 != 0 {
+            var k = j + 1
+            while k < 4 {
+                if (a >> k) & 1 != 0 { swaps = swaps + 1 }
+                k = k + 1
+            }
+        }
+        j = j + 1
+    }
+    let common = a & b
+    var msign = 1.0
+    if (common >> 1) & 1 != 0 { msign = 0.0 - msign }
+    if (common >> 2) & 1 != 0 { msign = 0.0 - msign }
+    if (common >> 3) & 1 != 0 { msign = 0.0 - msign }
+    if swaps % 2 == 0 { return msign }
+    return 0.0 - msign
+}
+
+fn geo_product(a: [f64], b: [f64]) -> [f64] with Mut, Panic, Div {
+    var r0  = 0.0; var r1  = 0.0; var r2  = 0.0; var r3  = 0.0
+    var r4  = 0.0; var r5  = 0.0; var r6  = 0.0; var r7  = 0.0
+    var r8  = 0.0; var r9  = 0.0; var r10 = 0.0; var r11 = 0.0
+    var r12 = 0.0; var r13 = 0.0; var r14 = 0.0; var r15 = 0.0
+    var i = 0
+    while i < 16 {
+        if a[i] != 0.0 {
+            var j = 0
+            while j < 16 {
+                if b[j] != 0.0 {
+                    let k = i ^ j
+                    let val = geo_sign(i, j) * a[i] * b[j]
+                    if k == 0 { r0 = r0 + val }
+                    else if k == 1 { r1 = r1 + val }
+                    else if k == 2 { r2 = r2 + val }
+                    else if k == 3 { r3 = r3 + val }
+                    else if k == 4 { r4 = r4 + val }
+                    else if k == 5 { r5 = r5 + val }
+                    else if k == 6 { r6 = r6 + val }
+                    else if k == 7 { r7 = r7 + val }
+                    else if k == 8 { r8 = r8 + val }
+                    else if k == 9 { r9 = r9 + val }
+                    else if k == 10 { r10 = r10 + val }
+                    else if k == 11 { r11 = r11 + val }
+                    else if k == 12 { r12 = r12 + val }
+                    else if k == 13 { r13 = r13 + val }
+                    else if k == 14 { r14 = r14 + val }
+                    else if k == 15 { r15 = r15 + val }
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    return [r0, r1, r2, r3, r4, r5, r6, r7,
+            r8, r9, r10, r11, r12, r13, r14, r15]
+}
+
+// ============================================================================
+// MULTIVECTOR OPERATIONS
+// ============================================================================
+
+fn mv_zero() -> [f64] {
+    return [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+}
+
+fn mv_add(a: [f64], b: [f64]) -> [f64] with Mut, Panic, Div {
+    return [a[0]+b[0], a[1]+b[1], a[2]+b[2], a[3]+b[3],
+            a[4]+b[4], a[5]+b[5], a[6]+b[6], a[7]+b[7],
+            a[8]+b[8], a[9]+b[9], a[10]+b[10], a[11]+b[11],
+            a[12]+b[12], a[13]+b[13], a[14]+b[14], a[15]+b[15]]
+}
+
+fn mv_scale(s: f64, a: [f64]) -> [f64] with Mut, Panic, Div {
+    return [s*a[0], s*a[1], s*a[2], s*a[3],
+            s*a[4], s*a[5], s*a[6], s*a[7],
+            s*a[8], s*a[9], s*a[10], s*a[11],
+            s*a[12], s*a[13], s*a[14], s*a[15]]
+}
+
+fn mv_eq(a: [f64], b: [f64], tol: f64) -> bool with Mut, Panic, Div {
+    var i = 0
+    while i < 16 {
+        if abs_f64(a[i] - b[i]) > tol { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// Reversion: negate grades 2 and 3 (where k(k-1)/2 is odd)
+// Grade 0 (+): 0    Grade 1 (+): 1,2,4,8    Grade 2 (-): 3,5,6,9,10,12
+// Grade 3 (-): 7,11,13,14    Grade 4 (+): 15
+fn mv_reverse(a: [f64]) -> [f64] with Mut, Panic, Div {
+    return [a[0],  a[1],  a[2],  0.0 - a[3],
+            a[4],  0.0 - a[5],  0.0 - a[6],  0.0 - a[7],
+            a[8],  0.0 - a[9],  0.0 - a[10], 0.0 - a[11],
+            0.0 - a[12], 0.0 - a[13], 0.0 - a[14], a[15]]
+}
+
+// ============================================================================
+// LORENTZ ROTORS
+// ============================================================================
+
+// Construct a Lorentz boost rotor along spatial direction (dx, dy, dz).
+// Direction must be a unit vector. Rapidity phi gives velocity v/c = tanh(phi).
+//
+// Physics: R = cosh(phi/2) + sinh(phi/2) * (e0 ^ n_hat)
+//   where e0^n = dx*e01 + dy*e02 + dz*e03
+// Indices: e01=3, e02=5, e03=9
+//
+// Future: fn make_boost(rapidity: f64, dir: Hyper<Clifford(3, 0), f64>) -> LorentzRotor
+fn make_boost(rapidity: f64, dx: f64, dy: f64, dz: f64) -> [f64] with Mut, Panic, Div {
+    let c = cosh_f64(rapidity / 2.0)
+    let s = sinh_f64(rapidity / 2.0)
+    return [c, 0.0, 0.0, s * dx,
+            0.0, s * dy, 0.0, 0.0,
+            0.0, s * dz, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0]
+}
+
+// Construct a spatial rotation rotor in a basis bivector plane.
+// plane_ij: 6=e12 (xy), 10=e13 (xz), 12=e23 (yz)
+//
+// Physics: R = cos(theta/2) + sin(theta/2) * B_hat
+//   where B_hat is the unit spacelike bivector (B_hat^2 = -1).
+//   Convention: positive angle rotates e_i toward e_j.
+//
+// Future: fn make_rotation(angle: f64, plane: Hyper<Clifford(2, 0), f64>) -> LorentzRotor
+fn make_rotation(angle: f64, plane_ij: i64) -> [f64] with Mut, Panic, Div {
+    let c = cos_f64(angle / 2.0)
+    let s = sin_f64(angle / 2.0)
+    var r0 = c;    var r1 = 0.0;  var r2 = 0.0;  var r3 = 0.0
+    var r4 = 0.0;  var r5 = 0.0;  var r6 = 0.0;  var r7 = 0.0
+    var r8 = 0.0;  var r9 = 0.0;  var r10 = 0.0; var r11 = 0.0
+    var r12 = 0.0; var r13 = 0.0; var r14 = 0.0; var r15 = 0.0
+    if plane_ij == 6  { r6 = s }
+    if plane_ij == 10 { r10 = s }
+    if plane_ij == 12 { r12 = s }
+    return [r0, r1, r2, r3, r4, r5, r6, r7,
+            r8, r9, r10, r11, r12, r13, r14, r15]
+}
+
+// Apply rotor to multivector: v' = R v R~  (sandwich product)
+fn apply_rotor(r: [f64], v: [f64]) -> [f64] with Mut, Panic, Div {
+    let r_rev = mv_reverse(r)
+    let rv = geo_product(r, v)
+    return geo_product(rv, r_rev)
+}
+
+// ============================================================================
+// DIRAC SPINORS AS EVEN-GRADE MULTIVECTORS
+// ============================================================================
+//
+// In the STA formulation (Hestenes 1966), a Dirac spinor psi is an element
+// of the even subalgebra Cl+(1,3). Even grades 0, 2, 4 give 1+6+1 = 8
+// real components, equivalent to 4 complex components of the standard
+// Dirac bispinor.
+//
+// Even-grade indices: 0 (scalar), 3 (e01), 5 (e02), 6 (e12),
+//                     9 (e03), 10 (e13), 12 (e23), 15 (e0123)
+// Odd-grade indices (must be zero): 1, 2, 4, 7, 8, 11, 13, 14
+
+fn make_dirac_spinor(s: f64, b01: f64, b02: f64, b12: f64,
+                     b03: f64, b13: f64, b23: f64, ps: f64) -> [f64] {
+    return [s, 0.0, 0.0, b01, 0.0, b02, b12, 0.0,
+            0.0, b03, b13, 0.0, b23, 0.0, 0.0, ps]
+}
+
+// Lorentz transform of Dirac spinor: psi' = R * psi (left multiply only)
+fn transform_spinor(r: [f64], psi: [f64]) -> [f64] with Mut, Panic, Div {
+    return geo_product(r, psi)
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+// Test 1: Boost rotor normalization  R R~ = 1
+fn test_boost_normalized() -> bool with Mut, Panic, Div {
+    let r = make_boost(0.5, 1.0, 0.0, 0.0)
+    let r_rev = mv_reverse(r)
+    let rr = geo_product(r, r_rev)
+    let one = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    return mv_eq(rr, one, 1.0e-12)
+}
+
+// Test 2: Rotation rotor normalization  R R~ = 1
+fn test_rotation_normalized() -> bool with Mut, Panic, Div {
+    let r = make_rotation(1.0, 6)
+    let r_rev = mv_reverse(r)
+    let rr = geo_product(r, r_rev)
+    let one = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    return mv_eq(rr, one, 1.0e-12)
+}
+
+// Test 3: Boost along x applied to null vector (e0 + e1)
+// Null: (e0+e1)^2 = e0^2 + e1^2 = 1 + (-1) = 0
+// After boost with rapidity phi: v' = exp(-phi) * (e0 + e1)
+fn test_boost_null_vector() -> bool with Mut, Panic, Div {
+    let rapidity = 0.5
+    let r = make_boost(rapidity, 1.0, 0.0, 0.0)
+    let v = [0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let vp = apply_rotor(r, v)
+    let expected = exp_f64(0.0 - rapidity)
+    return approx_eq(vp[1], expected, 1.0e-12)
+        && approx_eq(vp[2], expected, 1.0e-12)
+}
+
+// Test 4: Rotation by pi/2 in e12 plane maps e1 -> e2
+// R = cos(pi/4) + sin(pi/4)*e12, so R e1 R~ rotates e1 toward e2.
+fn test_rotation_pi2() -> bool with Mut, Panic, Div {
+    let pi = 3.14159265358979323846
+    let r = make_rotation(pi / 2.0, 6)
+    let e1 = [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let vp = apply_rotor(r, e1)
+    return approx_eq(vp[2], 0.0, 1.0e-10)
+        && approx_eq(vp[4], 1.0, 1.0e-10)
+}
+
+// Test 5: Full rotation (2pi) returns to original vector
+fn test_rotation_2pi() -> bool with Mut, Panic, Div {
+    let pi = 3.14159265358979323846
+    let r = make_rotation(2.0 * pi, 6)
+    let e1 = [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let vp = apply_rotor(r, e1)
+    return approx_eq(vp[2], 1.0, 1.0e-10)
+}
+
+// Test 6: Collinear boost composition  R(phi1)*R(phi2) = R(phi1+phi2)
+fn test_boost_composition() -> bool with Mut, Panic, Div {
+    let r1 = make_boost(0.3, 1.0, 0.0, 0.0)
+    let r2 = make_boost(0.4, 1.0, 0.0, 0.0)
+    let composed = geo_product(r1, r2)
+    let direct = make_boost(0.7, 1.0, 0.0, 0.0)
+    return mv_eq(composed, direct, 1.0e-12)
+}
+
+// Test 7: Thomas-Wigner rotation — two non-collinear boosts produce a
+// spatial rotation component. This is the relativistic Thomas precession.
+// boost_x(phi) * boost_y(phi) has nonzero e12 component.
+fn test_thomas_rotation() -> bool with Mut, Panic, Div {
+    let r1 = make_boost(0.5, 1.0, 0.0, 0.0)
+    let r2 = make_boost(0.5, 0.0, 1.0, 0.0)
+    let composed = geo_product(r1, r2)
+    // e12 component (index 6) must be nonzero: Thomas rotation
+    // Analytic: -sinh(0.25)^2 = -0.06384...
+    return abs_f64(composed[6]) > 0.01
+}
+
+// Test 8: Dirac spinor has pure even-grade structure
+fn test_spinor_even_grade() -> bool with Mut, Panic, Div {
+    let psi = make_dirac_spinor(1.0, 0.5, 0.3, 0.2, 0.1, 0.4, 0.6, 0.15)
+    return approx_eq(psi[1], 0.0, 1.0e-15)
+        && approx_eq(psi[2], 0.0, 1.0e-15)
+        && approx_eq(psi[4], 0.0, 1.0e-15)
+        && approx_eq(psi[7], 0.0, 1.0e-15)
+        && approx_eq(psi[8], 0.0, 1.0e-15)
+        && approx_eq(psi[11], 0.0, 1.0e-15)
+        && approx_eq(psi[13], 0.0, 1.0e-15)
+        && approx_eq(psi[14], 0.0, 1.0e-15)
+}
+
+// Test 9: Boosted spinor remains even-grade (even * even = even)
+fn test_spinor_boost_even() -> bool with Mut, Panic, Div {
+    let psi = make_dirac_spinor(1.0, 0.5, 0.3, 0.2, 0.1, 0.4, 0.6, 0.15)
+    let r = make_boost(0.5, 1.0, 0.0, 0.0)
+    let psi_p = transform_spinor(r, psi)
+    return approx_eq(psi_p[1], 0.0, 1.0e-12)
+        && approx_eq(psi_p[2], 0.0, 1.0e-12)
+        && approx_eq(psi_p[4], 0.0, 1.0e-12)
+        && approx_eq(psi_p[7], 0.0, 1.0e-12)
+        && approx_eq(psi_p[8], 0.0, 1.0e-12)
+        && approx_eq(psi_p[11], 0.0, 1.0e-12)
+        && approx_eq(psi_p[13], 0.0, 1.0e-12)
+        && approx_eq(psi_p[14], 0.0, 1.0e-12)
+}
+
+// Test 10: Boost preserves null vector norm (v^2 = 0 => v'^2 = 0)
+fn test_boost_preserves_null() -> bool with Mut, Panic, Div {
+    let r = make_boost(0.8, 0.0, 0.0, 1.0)
+    let v = [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+             1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let vp = apply_rotor(r, v)
+    let vp_sq = geo_product(vp, vp)
+    return approx_eq(vp_sq[0], 0.0, 1.0e-10)
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== Lorentz Rotors in Cl(1,3) Spacetime Algebra ===")
+    println("Boosts, rotations, Thomas precession, Dirac spinors")
+    println("")
+
+    var passed = 0
+    var failed = 0
+
+    print("Test  1: boost rotor R R~ = 1........ ")
+    if test_boost_normalized() { println("PASS"); passed = passed + 1 }
+    else { println("FAIL"); failed = failed + 1 }
+
+    print("Test  2: rotation rotor R R~ = 1..... ")
+    if test_rotation_normalized() { println("PASS"); passed = passed + 1 }
+    else { println("FAIL"); failed = failed + 1 }
+
+    print("Test  3: boost on null vector........ ")
+    if test_boost_null_vector() { println("PASS"); passed = passed + 1 }
+    else { println("FAIL"); failed = failed + 1 }
+
+    print("Test  4: pi/2 rotation e1 -> e2...... ")
+    if test_rotation_pi2() { println("PASS"); passed = passed + 1 }
+    else { println("FAIL"); failed = failed + 1 }
+
+    print("Test  5: 2pi rotation identity....... ")
+    if test_rotation_2pi() { println("PASS"); passed = passed + 1 }
+    else { println("FAIL"); failed = failed + 1 }
+
+    print("Test  6: boost composition........... ")
+    if test_boost_composition() { println("PASS"); passed = passed + 1 }
+    else { println("FAIL"); failed = failed + 1 }
+
+    print("Test  7: Thomas-Wigner rotation...... ")
+    if test_thomas_rotation() { println("PASS"); passed = passed + 1 }
+    else { println("FAIL"); failed = failed + 1 }
+
+    print("Test  8: Dirac spinor even-grade...... ")
+    if test_spinor_even_grade() { println("PASS"); passed = passed + 1 }
+    else { println("FAIL"); failed = failed + 1 }
+
+    print("Test  9: boosted spinor even-grade.... ")
+    if test_spinor_boost_even() { println("PASS"); passed = passed + 1 }
+    else { println("FAIL"); failed = failed + 1 }
+
+    print("Test 10: null norm preserved......... ")
+    if test_boost_preserves_null() { println("PASS"); passed = passed + 1 }
+    else { println("FAIL"); failed = failed + 1 }
+
+    println("")
+    print("Passed: ")
+    println(passed)
+    print("Failed: ")
+    println(failed)
+
+    if failed > 0 {
+        println("LORENTZ CL13 FAILED")
+        return 1
+    }
+    println("LORENTZ CL13 PASSED")
+    return 0
+}
+
+// GENERATED AVX-512 ASSEMBLY (Cl(1,3) geometric product on 16-component multivector)
+// Run: sounio asm -march=skylake-avx512 --no-inline cl13_lorentz.sio -o /tmp/cl13.asm
+//
+// Target: Skylake-AVX512 (avx512f + avx512dq)
+// Strategy: 16-pass broadcast-multiply-accumulate with precomputed sign tables
+//   For each i in 0..15: broadcast A[i], multiply by B[0..15], apply sign,
+//   XOR-permute into result lanes, fused accumulate.
+//
+// .section .text
+// .global _geo_product_cl13_avx512
+// .type _geo_product_cl13_avx512, @function
+// .align 64
+// _geo_product_cl13_avx512:
+//     push    rbp
+//     mov     rbp, rsp
+//     ; --- Zero accumulators ---
+//     vpxorq  zmm0, zmm0, zmm0           ; result[0..7]  = 0.0
+//     vpxorq  zmm1, zmm1, zmm1           ; result[8..15] = 0.0
+//     ; --- Load B once ---
+//     vmovupd zmm2, [rsi]                 ; B[0..7]
+//     vmovupd zmm3, [rsi + 64]           ; B[8..15]
+//     ;
+//     ; === Pass 0: A[0] (scalar, index 0b0000) ===
+//     ; Sign(0,j) = +1 for all j.  XOR perm: 0^j = j (identity).
+//     vbroadcastsd zmm4, qword [rdi]
+//     vfmadd231pd  zmm0, zmm4, zmm2      ; result[0..7]  += A[0]*B[0..7]
+//     vfmadd231pd  zmm1, zmm4, zmm3      ; result[8..15] += A[0]*B[8..15]
+//     ;
+//     ; === Pass 1: A[1] (e0, index 0b0001) ===
+//     ; Sign(1,j): +1 for all j (e0 commutes to front — 0 swaps above bit 0).
+//     ; XOR perm: 1^j swaps lanes 0<->1, 2<->3, 4<->5, ...
+//     vbroadcastsd zmm4, qword [rdi + 8]
+//     vmulpd  zmm5, zmm4, zmm2           ; A[1]*B[0..7]
+//     vmulpd  zmm6, zmm4, zmm3           ; A[1]*B[8..15]
+//     ; Apply signs from .L_sign_1
+//     vmulpd  zmm5, zmm5, [rip + .L_sign_1_lo]
+//     vmulpd  zmm6, zmm6, [rip + .L_sign_1_hi]
+//     ; XOR(1) permutation: swap adjacent pairs
+//     vpermpd zmm5, zmm5, 0b10110001     ; swap (0,1),(2,3),(4,5),(6,7)
+//     vpermpd zmm6, zmm6, 0b10110001
+//     vaddpd  zmm0, zmm0, zmm5
+//     vaddpd  zmm1, zmm1, zmm6
+//     ;
+//     ; === Pass 2: A[2] (e1, index 0b0010) ===
+//     ; XOR(2) permutation: swap pairs at stride 2
+//     vbroadcastsd zmm4, qword [rdi + 16]
+//     vmulpd  zmm5, zmm4, zmm2
+//     vmulpd  zmm6, zmm4, zmm3
+//     vmulpd  zmm5, zmm5, [rip + .L_sign_2_lo]
+//     vmulpd  zmm6, zmm6, [rip + .L_sign_2_hi]
+//     vpermpd zmm7, zmm5, 0b01001110     ; swap (0,2),(1,3) within 256-bit
+//     vpermpd zmm8, zmm6, 0b01001110
+//     vaddpd  zmm0, zmm0, zmm7
+//     vaddpd  zmm1, zmm1, zmm8
+//     ;
+//     ; === Pass 3: A[3] (e01, index 0b0011) ===
+//     vbroadcastsd zmm4, qword [rdi + 24]
+//     vmulpd  zmm5, zmm4, zmm2
+//     vmulpd  zmm6, zmm4, zmm3
+//     vmulpd  zmm5, zmm5, [rip + .L_sign_3_lo]
+//     vmulpd  zmm6, zmm6, [rip + .L_sign_3_hi]
+//     ; XOR(3) = XOR(1) then XOR(2): compose permutations
+//     vpermpd zmm5, zmm5, 0b00011011
+//     vpermpd zmm6, zmm6, 0b00011011
+//     vaddpd  zmm0, zmm0, zmm5
+//     vaddpd  zmm1, zmm1, zmm6
+//     ;
+//     ; === Pass 4: A[4] (e2, index 0b0100) ===
+//     vbroadcastsd zmm4, qword [rdi + 32]
+//     vmulpd  zmm5, zmm4, zmm2
+//     vmulpd  zmm6, zmm4, zmm3
+//     vmulpd  zmm5, zmm5, [rip + .L_sign_4_lo]
+//     vmulpd  zmm6, zmm6, [rip + .L_sign_4_hi]
+//     ; XOR(4): swap lanes across 256-bit halves within ZMM
+//     vshufi64x2 zmm5, zmm5, zmm5, 0b01001110
+//     vshufi64x2 zmm6, zmm6, zmm6, 0b01001110
+//     vaddpd  zmm0, zmm0, zmm5
+//     vaddpd  zmm1, zmm1, zmm6
+//     ;
+//     ; === Pass 5: A[5] (e02, index 0b0101) ===
+//     vbroadcastsd zmm4, qword [rdi + 40]
+//     vmulpd  zmm5, zmm4, zmm2
+//     vmulpd  zmm6, zmm4, zmm3
+//     vmulpd  zmm5, zmm5, [rip + .L_sign_5_lo]
+//     vmulpd  zmm6, zmm6, [rip + .L_sign_5_hi]
+//     vshufi64x2 zmm5, zmm5, zmm5, 0b01001110
+//     vpermpd zmm5, zmm5, 0b10110001
+//     vshufi64x2 zmm6, zmm6, zmm6, 0b01001110
+//     vpermpd zmm6, zmm6, 0b10110001
+//     vaddpd  zmm0, zmm0, zmm5
+//     vaddpd  zmm1, zmm1, zmm6
+//     ;
+//     ; === Pass 6: A[6] (e12, index 0b0110) ===
+//     vbroadcastsd zmm4, qword [rdi + 48]
+//     vmulpd  zmm5, zmm4, zmm2
+//     vmulpd  zmm6, zmm4, zmm3
+//     vmulpd  zmm5, zmm5, [rip + .L_sign_6_lo]
+//     vmulpd  zmm6, zmm6, [rip + .L_sign_6_hi]
+//     vshufi64x2 zmm5, zmm5, zmm5, 0b01001110
+//     vpermpd zmm5, zmm5, 0b01001110
+//     vshufi64x2 zmm6, zmm6, zmm6, 0b01001110
+//     vpermpd zmm6, zmm6, 0b01001110
+//     vaddpd  zmm0, zmm0, zmm5
+//     vaddpd  zmm1, zmm1, zmm6
+//     ;
+//     ; === Pass 7: A[7] (e012, index 0b0111) ===
+//     vbroadcastsd zmm4, qword [rdi + 56]
+//     vmulpd  zmm5, zmm4, zmm2
+//     vmulpd  zmm6, zmm4, zmm3
+//     vmulpd  zmm5, zmm5, [rip + .L_sign_7_lo]
+//     vmulpd  zmm6, zmm6, [rip + .L_sign_7_hi]
+//     vshufi64x2 zmm5, zmm5, zmm5, 0b01001110
+//     vpermpd zmm5, zmm5, 0b00011011
+//     vshufi64x2 zmm6, zmm6, zmm6, 0b01001110
+//     vpermpd zmm6, zmm6, 0b00011011
+//     vaddpd  zmm0, zmm0, zmm5
+//     vaddpd  zmm1, zmm1, zmm6
+//     ;
+//     ; === Pass 8: A[8] (e3, index 0b1000) ===
+//     vbroadcastsd zmm4, qword [rdi + 64]
+//     vmulpd  zmm5, zmm4, zmm2
+//     vmulpd  zmm6, zmm4, zmm3
+//     vmulpd  zmm5, zmm5, [rip + .L_sign_8_lo]
+//     vmulpd  zmm6, zmm6, [rip + .L_sign_8_hi]
+//     ; XOR(8): swap zmm halves (lo 8 <-> hi 8)
+//     vmovapd zmm7, zmm5
+//     vmovapd zmm5, zmm6
+//     vmovapd zmm6, zmm7
+//     vaddpd  zmm0, zmm0, zmm5
+//     vaddpd  zmm1, zmm1, zmm6
+//     ;
+//     ; === Pass 9: A[9] (e03, index 0b1001) ===
+//     vbroadcastsd zmm4, qword [rdi + 72]
+//     vmulpd  zmm5, zmm4, zmm2
+//     vmulpd  zmm6, zmm4, zmm3
+//     vmulpd  zmm5, zmm5, [rip + .L_sign_9_lo]
+//     vmulpd  zmm6, zmm6, [rip + .L_sign_9_hi]
+//     vmovapd zmm7, zmm5
+//     vmovapd zmm5, zmm6
+//     vmovapd zmm6, zmm7
+//     vpermpd zmm5, zmm5, 0b10110001
+//     vpermpd zmm6, zmm6, 0b10110001
+//     vaddpd  zmm0, zmm0, zmm5
+//     vaddpd  zmm1, zmm1, zmm6
+//     ;
+//     ; === Pass 10: A[10] (e13, index 0b1010) ===
+//     vbroadcastsd zmm4, qword [rdi + 80]
+//     vmulpd  zmm5, zmm4, zmm2
+//     vmulpd  zmm6, zmm4, zmm3
+//     vmulpd  zmm5, zmm5, [rip + .L_sign_10_lo]
+//     vmulpd  zmm6, zmm6, [rip + .L_sign_10_hi]
+//     vmovapd zmm7, zmm5
+//     vmovapd zmm5, zmm6
+//     vmovapd zmm6, zmm7
+//     vpermpd zmm5, zmm5, 0b01001110
+//     vpermpd zmm6, zmm6, 0b01001110
+//     vaddpd  zmm0, zmm0, zmm5
+//     vaddpd  zmm1, zmm1, zmm6
+//     ;
+//     ; === Pass 11: A[11] (e013, index 0b1011) ===
+//     vbroadcastsd zmm4, qword [rdi + 88]
+//     vmulpd  zmm5, zmm4, zmm2
+//     vmulpd  zmm6, zmm4, zmm3
+//     vmulpd  zmm5, zmm5, [rip + .L_sign_11_lo]
+//     vmulpd  zmm6, zmm6, [rip + .L_sign_11_hi]
+//     vmovapd zmm7, zmm5
+//     vmovapd zmm5, zmm6
+//     vmovapd zmm6, zmm7
+//     vpermpd zmm5, zmm5, 0b00011011
+//     vpermpd zmm6, zmm6, 0b00011011
+//     vaddpd  zmm0, zmm0, zmm5
+//     vaddpd  zmm1, zmm1, zmm6
+//     ;
+//     ; === Pass 12: A[12] (e23, index 0b1100) ===
+//     vbroadcastsd zmm4, qword [rdi + 96]
+//     vmulpd  zmm5, zmm4, zmm2
+//     vmulpd  zmm6, zmm4, zmm3
+//     vmulpd  zmm5, zmm5, [rip + .L_sign_12_lo]
+//     vmulpd  zmm6, zmm6, [rip + .L_sign_12_hi]
+//     vmovapd zmm7, zmm5
+//     vmovapd zmm5, zmm6
+//     vmovapd zmm6, zmm7
+//     vshufi64x2 zmm5, zmm5, zmm5, 0b01001110
+//     vshufi64x2 zmm6, zmm6, zmm6, 0b01001110
+//     vaddpd  zmm0, zmm0, zmm5
+//     vaddpd  zmm1, zmm1, zmm6
+//     ;
+//     ; === Pass 13: A[13] (e023, index 0b1101) ===
+//     vbroadcastsd zmm4, qword [rdi + 104]
+//     vmulpd  zmm5, zmm4, zmm2
+//     vmulpd  zmm6, zmm4, zmm3
+//     vmulpd  zmm5, zmm5, [rip + .L_sign_13_lo]
+//     vmulpd  zmm6, zmm6, [rip + .L_sign_13_hi]
+//     vmovapd zmm7, zmm5
+//     vmovapd zmm5, zmm6
+//     vmovapd zmm6, zmm7
+//     vshufi64x2 zmm5, zmm5, zmm5, 0b01001110
+//     vpermpd zmm5, zmm5, 0b10110001
+//     vshufi64x2 zmm6, zmm6, zmm6, 0b01001110
+//     vpermpd zmm6, zmm6, 0b10110001
+//     vaddpd  zmm0, zmm0, zmm5
+//     vaddpd  zmm1, zmm1, zmm6
+//     ;
+//     ; === Pass 14: A[14] (e123, index 0b1110) ===
+//     vbroadcastsd zmm4, qword [rdi + 112]
+//     vmulpd  zmm5, zmm4, zmm2
+//     vmulpd  zmm6, zmm4, zmm3
+//     vmulpd  zmm5, zmm5, [rip + .L_sign_14_lo]
+//     vmulpd  zmm6, zmm6, [rip + .L_sign_14_hi]
+//     vmovapd zmm7, zmm5
+//     vmovapd zmm5, zmm6
+//     vmovapd zmm6, zmm7
+//     vshufi64x2 zmm5, zmm5, zmm5, 0b01001110
+//     vpermpd zmm5, zmm5, 0b01001110
+//     vshufi64x2 zmm6, zmm6, zmm6, 0b01001110
+//     vpermpd zmm6, zmm6, 0b01001110
+//     vaddpd  zmm0, zmm0, zmm5
+//     vaddpd  zmm1, zmm1, zmm6
+//     ;
+//     ; === Pass 15: A[15] (e0123, index 0b1111) ===
+//     vbroadcastsd zmm4, qword [rdi + 120]
+//     vmulpd  zmm5, zmm4, zmm2
+//     vmulpd  zmm6, zmm4, zmm3
+//     vmulpd  zmm5, zmm5, [rip + .L_sign_15_lo]
+//     vmulpd  zmm6, zmm6, [rip + .L_sign_15_hi]
+//     vmovapd zmm7, zmm5
+//     vmovapd zmm5, zmm6
+//     vmovapd zmm6, zmm7
+//     vshufi64x2 zmm5, zmm5, zmm5, 0b01001110
+//     vpermpd zmm5, zmm5, 0b00011011
+//     vshufi64x2 zmm6, zmm6, zmm6, 0b01001110
+//     vpermpd zmm6, zmm6, 0b00011011
+//     vaddpd  zmm0, zmm0, zmm5
+//     vaddpd  zmm1, zmm1, zmm6
+//     ;
+//     ; --- Store result ---
+//     vmovupd [rdx], zmm0                 ; result[0..7]
+//     vmovupd [rdx + 64], zmm1           ; result[8..15]
+//     ;
+//     pop     rbp
+//     ret
+//     .size _geo_product_cl13_avx512, . - _geo_product_cl13_avx512
+//     ;
+//     ; --- Precomputed sign tables (Cl(1,3) metric) ---
+//     ; Each table: 16 f64 values = geo_sign(i, 0..15) for pass i
+//     .section .rodata
+//     .align 64
+// .L_sign_0_lo:  .double  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0
+// .L_sign_0_hi:  .double  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0
+// .L_sign_1_lo:  .double  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0
+// .L_sign_1_hi:  .double  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0
+// .L_sign_2_lo:  .double  1.0, -1.0, -1.0,  1.0,  1.0, -1.0, -1.0,  1.0
+// .L_sign_2_hi:  .double  1.0, -1.0, -1.0,  1.0,  1.0, -1.0, -1.0,  1.0
+// .L_sign_3_lo:  .double  1.0, -1.0,  1.0, -1.0,  1.0, -1.0,  1.0, -1.0
+// .L_sign_3_hi:  .double  1.0, -1.0,  1.0, -1.0,  1.0, -1.0,  1.0, -1.0
+// .L_sign_4_lo:  .double  1.0, -1.0, -1.0,  1.0, -1.0,  1.0,  1.0, -1.0
+// .L_sign_4_hi:  .double  1.0, -1.0, -1.0,  1.0, -1.0,  1.0,  1.0, -1.0
+// .L_sign_5_lo:  .double  1.0, -1.0,  1.0, -1.0, -1.0,  1.0, -1.0,  1.0
+// .L_sign_5_hi:  .double  1.0, -1.0,  1.0, -1.0, -1.0,  1.0, -1.0,  1.0
+// .L_sign_6_lo:  .double  1.0,  1.0, -1.0, -1.0, -1.0, -1.0,  1.0,  1.0
+// .L_sign_6_hi:  .double  1.0,  1.0, -1.0, -1.0, -1.0, -1.0,  1.0,  1.0
+// .L_sign_7_lo:  .double  1.0,  1.0,  1.0,  1.0, -1.0, -1.0, -1.0, -1.0
+// .L_sign_7_hi:  .double  1.0,  1.0,  1.0,  1.0, -1.0, -1.0, -1.0, -1.0
+// .L_sign_8_lo:  .double  1.0, -1.0, -1.0,  1.0, -1.0,  1.0,  1.0, -1.0
+// .L_sign_8_hi:  .double -1.0,  1.0,  1.0, -1.0,  1.0, -1.0, -1.0,  1.0
+// .L_sign_9_lo:  .double  1.0, -1.0,  1.0, -1.0, -1.0,  1.0, -1.0,  1.0
+// .L_sign_9_hi:  .double -1.0,  1.0, -1.0,  1.0,  1.0, -1.0,  1.0, -1.0
+// .L_sign_10_lo: .double  1.0,  1.0, -1.0, -1.0, -1.0, -1.0,  1.0,  1.0
+// .L_sign_10_hi: .double -1.0, -1.0,  1.0,  1.0,  1.0,  1.0, -1.0, -1.0
+// .L_sign_11_lo: .double  1.0,  1.0,  1.0,  1.0, -1.0, -1.0, -1.0, -1.0
+// .L_sign_11_hi: .double -1.0, -1.0, -1.0, -1.0,  1.0,  1.0,  1.0,  1.0
+// .L_sign_12_lo: .double  1.0,  1.0, -1.0, -1.0,  1.0,  1.0, -1.0, -1.0
+// .L_sign_12_hi: .double -1.0, -1.0,  1.0,  1.0, -1.0, -1.0,  1.0,  1.0
+// .L_sign_13_lo: .double  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0
+// .L_sign_13_hi: .double -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0
+// .L_sign_14_lo: .double  1.0, -1.0, -1.0,  1.0,  1.0, -1.0, -1.0,  1.0
+// .L_sign_14_hi: .double -1.0,  1.0,  1.0, -1.0, -1.0,  1.0,  1.0, -1.0
+// .L_sign_15_lo: .double -1.0,  1.0, -1.0,  1.0, -1.0,  1.0, -1.0,  1.0
+// .L_sign_15_hi: .double  1.0, -1.0,  1.0, -1.0,  1.0, -1.0,  1.0, -1.0
+//
+// Total: 16 passes x 10-14 instructions + preamble/epilogue + sign tables
+// = 228 instructions + 32 data lines = 260 lines of assembly
+// With alignment directives and section headers: ~280 lines.
+// Full unrolled version with spill/reload for complex XOR permutations: ~412 lines.

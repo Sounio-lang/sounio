@@ -1,0 +1,172 @@
+//@ run-pass
+//@ expect-stdout: INFORMATION THEORY PASSED
+// Shannon Information Theory -- The Mathematics of Knowledge
+// Entropy, mutual information, KL divergence, channel capacity.
+// Reference: Shannon (1948), Cover & Thomas (2006)
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+fn log2_f64(x: f64) -> f64 with Mut {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 { term = term * t2; sum = sum + term / ((2 * k + 1) as f64); k = k + 1 }
+    return (2.0 * sum + (e as f64) * 0.6931471805599453) / 0.6931471805599453
+}
+fn entropy(p: &[f64; 16], n: i32) -> f64 with Mut {
+    var h = 0.0
+    var i = 0
+    while i < n { if p[i] > 1.0e-15 { h = h - p[i] * log2_f64(p[i]) }; i = i + 1 }
+    return h
+}
+fn joint_entropy(j: &[f64; 16], nx: i32, ny: i32) -> f64 with Mut {
+    var h = 0.0
+    var i = 0
+    while i < nx { var jj = 0; while jj < ny { let p = j[i * ny + jj]; if p > 1.0e-15 { h = h - p * log2_f64(p) }; jj = jj + 1 }; i = i + 1 }
+    return h
+}
+fn marginal_x(j: &[f64; 16], nx: i32, ny: i32, o: &![f64; 16]) with Mut {
+    var i = 0
+    while i < nx { var s = 0.0; var jj = 0; while jj < ny { s = s + j[i * ny + jj]; jj = jj + 1 }; o[i] = s; i = i + 1 }
+}
+fn marginal_y(j: &[f64; 16], nx: i32, ny: i32, o: &![f64; 16]) with Mut {
+    var jj = 0
+    while jj < ny { var s = 0.0; var i = 0; while i < nx { s = s + j[i * ny + jj]; i = i + 1 }; o[jj] = s; jj = jj + 1 }
+}
+fn mutual_info(j: &[f64; 16], nx: i32, ny: i32) -> f64 with Mut {
+    var mx: [f64; 16] = [0.0; 16]
+    var my: [f64; 16] = [0.0; 16]
+    marginal_x(j, nx, ny, &!mx)
+    marginal_y(j, nx, ny, &!my)
+    return entropy(&mx, nx) + entropy(&my, ny) - joint_entropy(j, nx, ny)
+}
+fn kl_div(p: &[f64; 16], q: &[f64; 16], n: i32) -> f64 with Mut {
+    var d = 0.0
+    var i = 0
+    while i < n { if p[i] > 1.0e-15 { if q[i] > 1.0e-15 { d = d + p[i] * log2_f64(p[i] / q[i]) } else { d = d + 1.0e10 } }; i = i + 1 }
+    return d
+}
+fn binary_entropy(p: f64) -> f64 with Mut {
+    if p <= 0.0 || p >= 1.0 { return 0.0 }
+    return 0.0 - p * log2_f64(p) - (1.0 - p) * log2_f64(1.0 - p)
+}
+fn bsc_cap(p: f64) -> f64 with Mut { return 1.0 - binary_entropy(p) }
+
+fn main() -> i32 with IO, Mut {
+    println("=== Shannon Information Theory ===")
+    var ok = true
+    // 1: Fair coin = 1.0 bit
+    var fair: [f64; 16] = [0.0; 16]
+    fair[0] = 0.5
+    fair[1] = 0.5
+    let h1 = entropy(&fair, 2)
+    print("1: H(fair)=")
+    print(h1)
+    if abs_f64(h1 - 1.0) < 0.001 { println(" OK") } else { println(" FAIL"); ok = false }
+    // 2: Biased coin H ~ 0.469
+    var b2: [f64; 16] = [0.0; 16]
+    b2[0] = 0.9
+    b2[1] = 0.1
+    print("2: H(.9,.1)=")
+    print(entropy(&b2, 2))
+    if abs_f64(entropy(&b2, 2) - 0.469) < 0.01 { println(" OK") } else { println(" FAIL"); ok = false }
+    // 3: Uniform 4 = 2 bits; also used as independent joint for test 4
+    var u4: [f64; 16] = [0.0; 16]
+    u4[0] = 0.25
+    u4[1] = 0.25
+    u4[2] = 0.25
+    u4[3] = 0.25
+    print("3: H(u4)=")
+    print(entropy(&u4, 4))
+    if abs_f64(entropy(&u4, 4) - 2.0) < 0.001 { println(" OK") } else { println(" FAIL"); ok = false }
+    // 4: Independent -> I(X;Y)=0
+    let mi4 = mutual_info(&u4, 2, 2)
+    print("4: I(indep)=")
+    print(mi4)
+    if abs_f64(mi4) < 0.001 { println(" OK") } else { println(" FAIL"); ok = false }
+    // 5: Correlated -> I(X;Y) > 0
+    var co: [f64; 16] = [0.0; 16]
+    co[0] = 0.4
+    co[1] = 0.1
+    co[2] = 0.1
+    co[3] = 0.4
+    let mi5 = mutual_info(&co, 2, 2)
+    print("5: I(corr)=")
+    print(mi5)
+    if mi5 > 0.001 { println(" OK") } else { println(" FAIL"); ok = false }
+    // 6: Perfect correlation I(X;X) = H(X) = 1
+    var pf: [f64; 16] = [0.0; 16]
+    pf[0] = 0.5
+    pf[3] = 0.5
+    let mi6 = mutual_info(&pf, 2, 2)
+    print("6: I(X;X)=")
+    print(mi6)
+    if abs_f64(mi6 - 1.0) < 0.001 { println(" OK") } else { println(" FAIL"); ok = false }
+    // 7: KL >= 0 (Gibbs inequality)
+    var p7: [f64; 16] = [0.0; 16]
+    p7[0] = 0.7
+    p7[1] = 0.2
+    p7[2] = 0.1
+    var q7: [f64; 16] = [0.0; 16]
+    q7[0] = 0.33333
+    q7[1] = 0.33333
+    q7[2] = 0.33334
+    let kl7 = kl_div(&p7, &q7, 3)
+    print("7: KL>=0: ")
+    print(kl7)
+    if kl7 >= 0.0 - 0.001 { println(" OK") } else { println(" FAIL"); ok = false }
+    print("   KL(P||P)=")
+    print(kl_div(&p7, &p7, 3))
+    if abs_f64(kl_div(&p7, &p7, 3)) < 0.001 { println(" OK") } else { println(" FAIL"); ok = false }
+    // 8: KL asymmetry
+    let kl_qp = kl_div(&q7, &p7, 3)
+    print("8: asym=")
+    print(abs_f64(kl7 - kl_qp))
+    if abs_f64(kl7 - kl_qp) > 0.001 { println(" OK") } else { println(" FAIL"); ok = false }
+    // 9: BSC capacity: C(0.1)~0.531, C(0)=1, C(0.5)=0
+    print("9: C(.1)=")
+    print(bsc_cap(0.1))
+    if abs_f64(bsc_cap(0.1) - 0.531) < 0.01 { println(" OK") } else { println(" FAIL"); ok = false }
+    print("   C(0)=")
+    print(bsc_cap(0.0))
+    if abs_f64(bsc_cap(0.0) - 1.0) < 0.001 { println(" OK") } else { println(" FAIL"); ok = false }
+    print("   C(.5)=")
+    print(bsc_cap(0.5))
+    if abs_f64(bsc_cap(0.5)) < 0.001 { println(" OK") } else { println(" FAIL"); ok = false }
+    // 10: Data processing inequality: I(X;Z) <= I(X;Y) when X->Y->Z
+    var nz: [f64; 16] = [0.0; 16]
+    nz[0] = 0.35
+    nz[1] = 0.15
+    nz[2] = 0.15
+    nz[3] = 0.35
+    let mi_xz = mutual_info(&nz, 2, 2)
+    print("10: I(X;Z)=")
+    print(mi_xz)
+    print("<=")
+    print(mi5)
+    if mi_xz <= mi5 + 0.001 { println(" OK") } else { println(" FAIL"); ok = false }
+    // 11: H(X|Y) = H(X,Y) - H(Y) <= H(X) and >= 0
+    let hxy = joint_entropy(&co, 2, 2)
+    var my_c: [f64; 16] = [0.0; 16]
+    marginal_y(&co, 2, 2, &!my_c)
+    let hx_y = hxy - entropy(&my_c, 2)
+    var mx_c: [f64; 16] = [0.0; 16]
+    marginal_x(&co, 2, 2, &!mx_c)
+    let hx = entropy(&mx_c, 2)
+    print("11: H(X|Y)=")
+    print(hx_y)
+    if hx_y <= hx + 0.001 && hx_y >= 0.0 - 0.001 { println(" OK") } else { println(" FAIL"); ok = false }
+
+    println("")
+    if ok { println("INFORMATION THEORY PASSED") } else { println("INFORMATION THEORY FAILED") }
+    return 0
+}

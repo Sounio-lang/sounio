@@ -1,0 +1,165 @@
+//@ run-pass
+//@ expect-stdout: SIMPSONS PARADOX PASSED
+// Simpson's Paradox Detection and Causal Correction
+// The statistical phenomenon where a trend in aggregated data reverses
+// within every subgroup. Without causal reasoning, naive statistics lie.
+// Reference: Simpson (1951), Pearl "Causality" (2009)
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn ln_f64(x: f64) -> f64 with Mut {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 { term = term * t2; sum = sum + term / ((2 * k + 1) as f64); k = k + 1 }
+    return 2.0 * sum + (e as f64) * 0.6931471805599453
+}
+
+fn exp_f64(x: f64) -> f64 with Mut {
+    if x > 20.0 { return exp_f64(x / 2.0) * exp_f64(x / 2.0) }
+    if x < 0.0 - 20.0 { return 1.0 / exp_f64(0.0 - x) }
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n <= 25 { term = term * x / (n as f64); sum = sum + term; n = n + 1 }
+    return sum
+}
+
+struct Table { treat_ok: f64, treat_n: f64, ctrl_ok: f64, ctrl_n: f64 }
+
+fn odds_ratio(t: Table) -> f64 {
+    let c = t.treat_n - t.treat_ok
+    let d = t.ctrl_n - t.ctrl_ok
+    if t.ctrl_ok * c < 0.001 { return 99.99 }
+    return (t.treat_ok * d) / (t.ctrl_ok * c)
+}
+
+fn mh_num(t: Table) -> f64 {
+    let n = t.treat_n + t.ctrl_n
+    return t.treat_ok * (t.ctrl_n - t.ctrl_ok) / n
+}
+
+fn mh_den(t: Table) -> f64 {
+    let n = t.treat_n + t.ctrl_n
+    return t.ctrl_ok * (t.treat_n - t.treat_ok) / n
+}
+
+fn print_stratum(name: i32, t: Table) -> i32 with IO {
+    if name == 0 { println("  --- Group A (Mild) ---") }
+    else if name == 1 { println("  --- Group B (Severe) ---") }
+    else { println("  --- Combined ---") }
+    let tr = 100.0 * t.treat_ok / t.treat_n
+    let cr = 100.0 * t.ctrl_ok / t.ctrl_n
+    print("    Treatment: ")
+    print(t.treat_ok)
+    print("/")
+    print(t.treat_n)
+    print(" = ")
+    print(tr)
+    println("%")
+    print("    Control:   ")
+    print(t.ctrl_ok)
+    print("/")
+    print(t.ctrl_n)
+    print(" = ")
+    print(cr)
+    println("%")
+    let or_val = odds_ratio(t)
+    print("    OR=")
+    print(or_val)
+    if or_val > 1.0 { println("  -> BENEFICIAL") } else { println("  -> HARMFUL") }
+    return 0
+}
+
+fn main() -> i32 with IO, Mut {
+    println("=== Simpson's Paradox: Causal Reasoning ===")
+    println("")
+    // Group A (mild): 81/87 treated, 234/270 control
+    let a = Table { treat_ok: 81.0, treat_n: 87.0, ctrl_ok: 234.0, ctrl_n: 270.0 }
+    // Group B (severe): 192/263 treated, 55/80 control
+    let b = Table { treat_ok: 192.0, treat_n: 263.0, ctrl_ok: 55.0, ctrl_n: 80.0 }
+    // Combined: 273/350 treated, 289/350 control
+    let c = Table { treat_ok: 273.0, treat_n: 350.0, ctrl_ok: 289.0, ctrl_n: 350.0 }
+
+    let d1 = print_stratum(0, a)
+    let d2 = print_stratum(1, b)
+    let d3 = print_stratum(2, c)
+    println("")
+
+    let or_a = odds_ratio(a)
+    let or_b = odds_ratio(b)
+    let or_c = odds_ratio(c)
+    let strat_good = or_a > 1.0 && or_b > 1.0
+    let crude_bad = or_c < 1.0
+
+    print("  Paradox: strata beneficial, combined harmful? ")
+    if strat_good && crude_bad { println("YES") } else { println("NO") }
+
+    // Mantel-Haenszel adjusted OR
+    let mh_total_n = mh_num(a) + mh_num(b)
+    let mh_total_d = mh_den(a) + mh_den(b)
+    var mh_or = 1.0
+    if mh_total_d > 0.001 { mh_or = mh_total_n / mh_total_d }
+    print("  MH adjusted OR: ")
+    println(mh_or)
+    if mh_or > 1.0 { println("  -> CORRECT: Treatment IS beneficial") }
+
+    // Confounding quantification
+    let bias = ln_f64(or_c) - ln_f64(mh_or)
+    print("  Confounding bias (log): ")
+    println(bias)
+    let bias_pct = 100.0 * abs_f64(exp_f64(bias) - 1.0)
+    print("  Bias magnitude: ")
+    print(bias_pct)
+    println("%")
+
+    // Why: severity is a confounder
+    let ts = 100.0 * 263.0 / 350.0
+    let cs = 100.0 * 80.0 / 350.0
+    println("")
+    println("  Severity is a CONFOUNDER:")
+    print("    Treatment group: ")
+    print(ts)
+    println("% severe")
+    print("    Control group:   ")
+    print(cs)
+    println("% severe")
+    println("")
+
+    // Validation
+    var all_ok = true
+    print("Check 1: Paradox detected ... ")
+    if strat_good && crude_bad { println("OK") } else { println("FAIL"); all_ok = false }
+    print("Check 2: Crude OR < 1 ... OR=")
+    print(or_c)
+    if or_c < 1.0 { println(" OK") } else { println(" FAIL"); all_ok = false }
+    print("Check 3: Both strata OR > 1 ... A=")
+    print(or_a)
+    print(" B=")
+    print(or_b)
+    if or_a > 1.0 && or_b > 1.0 { println(" OK") } else { println(" FAIL"); all_ok = false }
+    print("Check 4: MH OR > 1 ... ")
+    print(mh_or)
+    if mh_or > 1.0 { println(" OK") } else { println(" FAIL"); all_ok = false }
+    print("Check 5: Bias substantial ... |bias|=")
+    print(abs_f64(bias))
+    if abs_f64(bias) > 0.1 { println(" OK") } else { println(" FAIL"); all_ok = false }
+    let sdiff = abs_f64(ts - cs)
+    print("Check 6: Severity imbalance > 20% ... diff=")
+    print(sdiff)
+    if sdiff > 20.0 { println("% OK") } else { println("% FAIL"); all_ok = false }
+
+    println("")
+    if all_ok { println("SIMPSONS PARADOX PASSED") } else { println("SIMPSONS PARADOX FAILED") }
+    return 0
+}

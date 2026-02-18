@@ -1,0 +1,189 @@
+//@ run-pass
+//@ expect-stdout: SIGNAL ANALYSIS PASSED
+// DFT-Based Signal Analysis
+//
+// Signal: x[n] = sin(2*pi*8*n/64) + 0.5*sin(2*pi*16*n/64), N=64
+// Expected peaks: |X[8]|=32.0 (N/2), |X[16]|=16.0 (N/2*0.5)
+// Reference: Oppenheim & Schafer, "Discrete-Time Signal Processing"
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var iter = 0
+    while iter < 15 { y = 0.5 * (y + s / y); iter = iter + 1 }
+    return y / sb
+}
+
+fn floor_f64(x: f64) -> f64 {
+    if x >= 0.0 { let i = x as i32; return i as f64 }
+    let i = x as i32
+    let f = i as f64
+    if f > x { return f - 1.0 }
+    return f
+}
+
+fn sin_f64(x: f64) -> f64 with Mut, Panic, Div {
+    let pi = 3.141592653589793
+    let two_pi = 6.283185307179586
+    var t = x - floor_f64(x / two_pi) * two_pi
+    if t > pi { t = t - two_pi }
+    if t < 0.0 - pi { t = t + two_pi }
+    var sum = t
+    var term = t
+    var n = 1
+    while n <= 20 {
+        term = 0.0 - term * t * t / (((2 * n) as f64) * ((2 * n + 1) as f64))
+        sum = sum + term
+        n = n + 1
+    }
+    return sum
+}
+
+fn cos_f64(x: f64) -> f64 with Mut, Panic, Div {
+    return sin_f64(x + 1.5707963267948966)
+}
+
+fn magnitude(re: f64, im: f64) -> f64 with Mut, Panic, Div {
+    sqrt_f64(re * re + im * im)
+}
+
+struct DFTResult { re: [f64; 64], im: [f64; 64] }
+
+// Direct DFT: X[k] = sum_{n=0}^{N-1} x[n]*exp(-j*2*pi*k*n/N)
+fn dft(signal: [f64; 64], n: i32) -> DFTResult with Mut, Panic, Div {
+    var re_out: [f64; 64] = [0.0; 64]
+    var im_out: [f64; 64] = [0.0; 64]
+    let two_pi = 6.283185307179586
+    var k = 0
+    while k < n {
+        var sr = 0.0
+        var si = 0.0
+        var idx = 0
+        while idx < n {
+            let angle = 0.0 - two_pi * (k as f64) * (idx as f64) / (n as f64)
+            sr = sr + signal[idx] * cos_f64(angle)
+            si = si + signal[idx] * sin_f64(angle)
+            idx = idx + 1
+        }
+        re_out[k] = sr
+        im_out[k] = si
+        k = k + 1
+    }
+    return DFTResult { re: re_out, im: im_out }
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== DFT Signal Analysis ===")
+    println("x[n] = sin(2*pi*8*n/64) + 0.5*sin(2*pi*16*n/64)")
+    println("")
+
+    let pi = 3.141592653589793
+    let n = 64
+
+    // Generate signal
+    var signal: [f64; 64] = [0.0; 64]
+    var i = 0
+    while i < n {
+        let t = (i as f64) / (n as f64)
+        signal[i] = sin_f64(2.0 * pi * 8.0 * t) + 0.5 * sin_f64(2.0 * pi * 16.0 * t)
+        i = i + 1
+    }
+
+    let result = dft(signal, n)
+
+    // Compute magnitude spectrum
+    var mag: [f64; 64] = [0.0; 64]
+    i = 0
+    while i < n { mag[i] = magnitude(result.re[i], result.im[i]); i = i + 1 }
+
+    // Print significant bins
+    println("Significant bins (|X[k]| > 0.5):")
+    i = 0
+    while i < 33 {
+        if mag[i] > 0.5 {
+            print("  k=")
+            print(i)
+            print("  |X|=")
+            println(mag[i])
+        }
+        i = i + 1
+    }
+    println("")
+
+    // Find two largest peaks in first half (k=1..31)
+    var p1k = 0
+    var p1m = 0.0
+    var p2k = 0
+    var p2m = 0.0
+    i = 1
+    while i < 32 {
+        if mag[i] > p1m {
+            p2k = p1k; p2m = p1m; p1k = i; p1m = mag[i]
+        } else if mag[i] > p2m {
+            p2k = i; p2m = mag[i]
+        }
+        i = i + 1
+    }
+    // Ensure p1 is lower frequency
+    if p1k > p2k {
+        let tk = p1k; let tm = p1m
+        p1k = p2k; p1m = p2m; p2k = tk; p2m = tm
+    }
+
+    print("Peak 1: k=")
+    print(p1k)
+    print(" |X|=")
+    println(p1m)
+    print("Peak 2: k=")
+    print(p2k)
+    print(" |X|=")
+    println(p2m)
+    println("")
+
+    var all_ok = true
+
+    print("Check 1: Peak 1 at k=8 ... ")
+    if p1k == 8 { println("OK") } else { println("FAIL"); all_ok = false }
+
+    print("Check 2: Peak 2 at k=16 ... ")
+    if p2k == 16 { println("OK") } else { println("FAIL"); all_ok = false }
+
+    let err8 = abs_f64(p1m - 32.0)
+    print("Check 3: |X[8]| ~ 32.0 ... err=")
+    print(err8)
+    if err8 < 0.5 { println(" OK") } else { println(" FAIL"); all_ok = false }
+
+    let err16 = abs_f64(p2m - 16.0)
+    print("Check 4: |X[16]| ~ 16.0 ... err=")
+    print(err16)
+    if err16 < 0.5 { println(" OK") } else { println(" FAIL"); all_ok = false }
+
+    let ratio = p1m / p2m
+    print("Check 5: Ratio ~ 2.0 ... ratio=")
+    print(ratio)
+    if abs_f64(ratio - 2.0) < 0.1 { println(" OK") } else { println(" FAIL"); all_ok = false }
+
+    // Verify non-peak bins have near-zero magnitude
+    var max_noise = 0.0
+    i = 0
+    while i < 33 {
+        if i != 8 && i != 16 { if mag[i] > max_noise { max_noise = mag[i] } }
+        i = i + 1
+    }
+    print("Check 6: Non-peak noise < 1.0 ... max=")
+    print(max_noise)
+    if max_noise < 1.0 { println(" OK") } else { println(" FAIL"); all_ok = false }
+
+    println("")
+    if all_ok { println("SIGNAL ANALYSIS PASSED") } else { println("SIGNAL ANALYSIS FAILED") }
+    return 0
+}

@@ -1,0 +1,150 @@
+//@ run-pass
+//@ expect-stdout: BAYESIAN CLINICAL TRIAL PASSED
+// Bayesian Sequential Clinical Trial -- Beta-Binomial Model
+// Demonstrates Bayesian updating for adaptive clinical trial design,
+// the methodology that accelerated COVID-19 vaccine approval.
+// Prior: Beta(1,1) = uniform (epistemic ignorance)
+// Reference: Berry et al. "Bayesian Adaptive Methods for Clinical Trials" (2011)
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut {
+    if x <= 0.0 { return 0.0 }
+    var g = x / 2.0
+    if g < 0.001 { g = 0.001 }
+    var i = 0
+    while i < 50 { g = (g + x / g) / 2.0; i = i + 1 }
+    return g
+}
+
+struct LCG { state: f64 }
+
+fn lcg_next(rng: &!LCG) -> f64 with Mut {
+    let a = 1664525.0
+    let c = 1013904223.0
+    let m = 4294967296.0
+    var next = a * rng.state + c
+    while next >= m { next = next - m }
+    while next < 0.0 { next = next + m }
+    rng.state = next
+    return next / m
+}
+
+struct BetaPosterior { alpha: f64, beta_param: f64, n_success: i32, n_failure: i32 }
+
+fn beta_mean(p: BetaPosterior) -> f64 { return p.alpha / (p.alpha + p.beta_param) }
+
+fn beta_std(p: BetaPosterior) -> f64 with Mut {
+    let a = p.alpha
+    let b = p.beta_param
+    let ab = a + b
+    return sqrt_f64((a * b) / (ab * ab * (ab + 1.0)))
+}
+
+fn beta_ci_lower(p: BetaPosterior) -> f64 with Mut {
+    let lo = beta_mean(p) - 1.96 * beta_std(p)
+    if lo < 0.0 { return 0.0 }
+    return lo
+}
+
+fn beta_ci_upper(p: BetaPosterior) -> f64 with Mut {
+    let hi = beta_mean(p) + 1.96 * beta_std(p)
+    if hi > 1.0 { return 1.0 }
+    return hi
+}
+
+fn update_posterior(prior: BetaPosterior, succ: i32, fail: i32) -> BetaPosterior {
+    return BetaPosterior {
+        alpha: prior.alpha + (succ as f64), beta_param: prior.beta_param + (fail as f64),
+        n_success: prior.n_success + succ, n_failure: prior.n_failure + fail
+    }
+}
+
+fn run_batch(rng: &!LCG, n: i32, eff: f64) -> i32 with Mut {
+    var succ = 0
+    var i = 0
+    while i < n {
+        if lcg_next(rng) < eff { succ = succ + 1 }
+        i = i + 1
+    }
+    return succ
+}
+
+fn print_round(r: i32, p: BetaPosterior) -> i32 with IO, Mut {
+    print("  Round ")
+    print(r)
+    print(": n=")
+    print(p.n_success + p.n_failure)
+    print("  successes=")
+    print(p.n_success)
+    print("  mean=")
+    println(beta_mean(p))
+    print("    95% CI: [")
+    print(beta_ci_lower(p))
+    print(", ")
+    print(beta_ci_upper(p))
+    print("]  sd=")
+    println(beta_std(p))
+    return 0
+}
+
+fn main() -> i32 with IO, Mut {
+    println("=== Bayesian Sequential Clinical Trial ===")
+    println("Prior: Beta(1,1) = uniform | True efficacy: 0.72")
+    println("")
+    let true_eff = 0.72
+    var post = BetaPosterior { alpha: 1.0, beta_param: 1.0, n_success: 0, n_failure: 0 }
+    var rng = LCG { state: 42.0 }
+
+    // 5 rounds of 20 patients each
+    let s1 = run_batch(&!rng, 20, true_eff)
+    post = update_posterior(post, s1, 20 - s1)
+    let d1 = print_round(1, post)
+    let s2 = run_batch(&!rng, 20, true_eff)
+    post = update_posterior(post, s2, 20 - s2)
+    let d2 = print_round(2, post)
+    let s3 = run_batch(&!rng, 20, true_eff)
+    post = update_posterior(post, s3, 20 - s3)
+    let d3 = print_round(3, post)
+    let s4 = run_batch(&!rng, 20, true_eff)
+    post = update_posterior(post, s4, 20 - s4)
+    let d4 = print_round(4, post)
+    let s5 = run_batch(&!rng, 20, true_eff)
+    post = update_posterior(post, s5, 20 - s5)
+    let d5 = print_round(5, post)
+    println("")
+
+    // Validation
+    var all_ok = true
+    let m = beta_mean(post)
+    let sd = beta_std(post)
+    let ci_lo = beta_ci_lower(post)
+    let ci_hi = beta_ci_upper(post)
+
+    let err = abs_f64(m - true_eff)
+    print("Check 1: |mean - 0.72| < 0.1 ... err=")
+    print(err)
+    if err < 0.1 { println(" OK") } else { println(" FAIL"); all_ok = false }
+
+    print("Check 2: 95% CI contains 0.72 ... ")
+    if ci_lo < true_eff && ci_hi > true_eff { println("OK") } else { println("FAIL"); all_ok = false }
+
+    print("Check 3: sd < 0.1 ... sd=")
+    print(sd)
+    if sd < 0.1 { println(" OK") } else { println(" FAIL"); all_ok = false }
+
+    print("Check 4: mean > 0.5 (drug effective) ... ")
+    if m > 0.5 { println("OK") } else { println("FAIL"); all_ok = false }
+
+    let ci_w = ci_hi - ci_lo
+    print("Check 5: CI width < 0.3 ... w=")
+    print(ci_w)
+    if ci_w < 0.3 { println(" OK") } else { println(" FAIL"); all_ok = false }
+
+    println("")
+    if all_ok { println("BAYESIAN CLINICAL TRIAL PASSED") } else { println("BAYESIAN CLINICAL TRIAL FAILED") }
+    return 0
+}
