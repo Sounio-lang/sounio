@@ -187,6 +187,10 @@ pub enum TokenKind {
     #[token("ε")]
     Epsilon,
 
+    // Phi symbol: Φ (U+03A6) for provenance annotations like Φ="ASHP_2020"
+    #[token("Φ")]
+    Phi,
+
     // Knightian undefined sentinel: ⊥ (U+22A5) or ASCII fallback _|_
     #[token("⊥")]
     #[token("_|_")]
@@ -818,6 +822,7 @@ impl TokenKind {
             TokenKind::PlusMinus => "±",
             TokenKind::Partial => "∂",
             TokenKind::Epsilon => "ε",
+            TokenKind::Phi => "Φ",
             TokenKind::Bottom => "⊥",
         }
     }

@@ -1352,11 +1352,13 @@ impl Interpreter {
                 // Evaluate the inner value
                 let val = self.eval_expr(value)?;
 
-                // Extract confidence from epsilon (uncertainty)
+                // ε is confidence directly (0.0 = no confidence, 1.0 = certain).
+                // Consistent with: ε = posterior mean of Beta(α,β) = α/(α+β),
+                // and with type-level predicates like `ε >= 0.82`.
                 let eps = self.eval_expr(epsilon)?;
                 let confidence = match eps {
-                    Value::Float(e) => (1.0 - e).max(0.0).min(1.0),
-                    Value::Int(e) => (1.0 - (e as f64)).max(0.0).min(1.0),
+                    Value::Float(e) => e.max(0.0).min(1.0),
+                    Value::Int(e) => (e as f64).max(0.0).min(1.0),
                     _ => 1.0, // Default to certain if epsilon is not numeric
                 };
 
@@ -1468,8 +1470,14 @@ impl Interpreter {
             }
 
             HirExprKind::EpsilonOf(expr) => {
-                // Extract epsilon - return 1.0 (perfect confidence) for now
-                Ok(Value::Float(1.0))
+                // Extract the confidence (ε) from a Knowledge value.
+                // Returns 1.0 for non-Knowledge values (full confidence).
+                let val = self.eval_expr(expr)?;
+                let confidence = match val {
+                    Value::Knowledge { confidence, .. } => confidence,
+                    _ => 1.0,
+                };
+                Ok(Value::Float(confidence))
             }
 
             HirExprKind::ProvenanceOf(expr) => {

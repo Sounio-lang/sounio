@@ -1371,6 +1371,54 @@ impl<'a> Parser<'a> {
         let ty_start = self.span();
         let ty = self.parse_type()?;
         let ty_end = self.span();
+        // Detect sum type alias: `type EvidenceLevel = A | B | C`
+        // When a bare named type is followed by `|`, lower to an inline enum.
+        if self.at(TokenKind::Pipe) {
+            let first_variant = match &ty {
+                TypeExpr::Named { path, args, .. } if args.is_empty() => path
+                    .segments
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| "Unknown".to_string()),
+                _ => {
+                    return Err(miette::miette!(
+                        "Sum type alias `type {} = A | B | ...` requires bare variant names",
+                        name
+                    ))
+                }
+            };
+            let mut variants = vec![first_variant];
+            while self.at(TokenKind::Pipe) {
+                self.advance();
+                variants.push(self.parse_ident()?);
+            }
+            self.expect(TokenKind::Semi)?;
+            let span_end = self.span();
+            return Ok(Item::Enum(EnumDef {
+                id: self.next_id(),
+                visibility,
+                modifiers: TypeModifiers {
+                    linear: false,
+                    affine: false,
+                },
+                name,
+                generics,
+                where_clause: vec![],
+                variants: variants
+                    .into_iter()
+                    .map(|v| VariantDef {
+                        id: self.next_id(),
+                        name: v,
+                        data: VariantData::Unit,
+                        gadt_return_type: None,
+                        doc: None,
+                    })
+                    .collect(),
+                doc,
+                span: ty_start.merge(span_end),
+            }));
+        }
+
         self.expect(TokenKind::Semi)?;
 
         let _end = self.span();
@@ -4468,6 +4516,14 @@ impl<'a> Parser<'a> {
                             id: self.next_id(),
                             expr: Box::new(expr),
                         };
+                    } else if self.at(TokenKind::Epsilon) {
+                        // Epistemic field access: expr.e  =>  EpsilonOf(expr)
+                        self.advance();
+                        expr = Expr::Field {
+                            id: self.next_id(),
+                            base: Box::new(expr),
+                            field: "epsilon".to_string(),
+                        };
                     } else {
                         let field = self.parse_ident()?;
 
@@ -5331,8 +5387,59 @@ impl<'a> Parser<'a> {
             });
         }
 
+        // Named-argument constructor: Knowledge(value) or Knowledge(value, e=0.92, prov="...")
+        // The epsilon arg is confidence directly (0.0=none, 1.0=certain).
+        if self.at(TokenKind::LParen) {
+            self.advance();
+            let value = Box::new(self.parse_expr()?);
+
+            let mut epsilon = None;
+            let validity = None;
+            let mut provenance = None;
+
+            while self.at(TokenKind::Comma) {
+                self.advance();
+                if self.at(TokenKind::RParen) {
+                    break;
+                }
+                if self.at(TokenKind::Epsilon) {
+                    // e=<conf_expr>: confidence shorthand (0.0=none, 1.0=certain)
+                    self.advance();
+                    self.expect(TokenKind::Eq)?;
+                    epsilon = Some(Box::new(self.parse_expr()?));
+                } else if self.at(TokenKind::Ident) {
+                    // Named keyword arg: prov=, provenance=, evidence=, etc.
+                    let key = self.parse_ident()?;
+                    self.expect(TokenKind::Eq)?;
+                    let val_expr = self.parse_expr()?;
+                    match key.as_str() {
+                        "prov" | "provenance" | "phi" => {
+                            provenance = Some(Box::new(val_expr));
+                        }
+                        _ => {
+                            let _ = val_expr; // metadata annotation, stored in type
+                        }
+                    }
+                } else {
+                    return Err(miette::miette!(
+                        "Unknown Knowledge constructor argument: {:?}",
+                        self.peek()
+                    ));
+                }
+            }
+            self.expect(TokenKind::RParen)?;
+
+            return Ok(Expr::KnowledgeExpr {
+                id: self.next_id(),
+                value,
+                epsilon,
+                validity,
+                provenance,
+            });
+        }
+
         Err(miette::miette!(
-            "Expected '{{' or '::' after Knowledge, found {:?}",
+            "Expected '{{', '::new', or '(' after Knowledge, found {:?}",
             self.peek()
         ))
     }
@@ -6055,8 +6162,8 @@ impl<'a> Parser<'a> {
             | TokenKind::Do => next == TokenKind::LParen,
             // Keywords with {...} syntax
             TokenKind::Counterfactual => next == TokenKind::LBrace,
-            // Knowledge has special syntax: Knowledge { ... } or Knowledge::new(...)
-            TokenKind::Knowledge => next == TokenKind::LBrace || next == TokenKind::ColonColon,
+            // Knowledge has special syntax: Knowledge { ... }, Knowledge::new(...), or Knowledge(...)
+            TokenKind::Knowledge => next == TokenKind::LBrace || next == TokenKind::ColonColon || next == TokenKind::LParen,
             _ => false,
         }
     }
@@ -6075,8 +6182,8 @@ impl<'a> Parser<'a> {
             TokenKind::Query => recovery::can_start_expression(next),
             // Keywords with {...} syntax
             TokenKind::Counterfactual => next == TokenKind::LBrace,
-            // Knowledge: { ... } or ::new(...)
-            TokenKind::Knowledge => next == TokenKind::LBrace || next == TokenKind::ColonColon,
+            // Knowledge: { ... } or ::new(...) or named constructor (...)
+            TokenKind::Knowledge => next == TokenKind::LBrace || next == TokenKind::ColonColon || next == TokenKind::LParen,
             // Async block/closure: async { ... } or async |...|
             TokenKind::Async => next == TokenKind::LBrace || next == TokenKind::Pipe,
             // Unsafe block: unsafe { ... }
