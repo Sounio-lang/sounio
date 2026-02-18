@@ -99,6 +99,7 @@ run_case() {
     SOUNIO_SELFHOST_STRICT="$STRICT_MODE" \
     SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT="0" \
     SOUNIO_SELFHOST_PIPELINE="rust" \
+    SOUNIO_RUST_GHOST="1" \
     "$SOUC_BIN" run "$program_path" >"$rust_stdout_file" 2>"$rust_stderr_file"
   local rust_code=$?
   set -e
@@ -199,4 +200,3 @@ if [ "$FAIL_COUNT" -gt 0 ]; then
 fi
 
 exit 0
-

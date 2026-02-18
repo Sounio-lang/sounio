@@ -6,6 +6,7 @@ use crate::embedded_stdlib;
 use crate::lexer;
 use crate::parser;
 use crate::vm::{Bytecode, BytecodeVM};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -15,7 +16,11 @@ const BOOTSTRAP_DRIVER_MODULE: &str = "bootstrap::driver";
 const REQUIRED_DRIVER_ENTRYPOINTS: [&str; 3] = ["compile_file", "compile_source", "run_pipeline"];
 const DIR_BYTECODE_CACHE_FILENAME: &str = ".sounio_bytecode.sobc";
 // Keep in sync with stdlib/compiler/bootstrap/driver.sio CompileArtifact.code capacity.
-const DIR_BYTECODE_CACHE_MAX_BYTES: usize = 1_048_576;
+const DIR_BYTECODE_CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;
+const DEFAULT_BOOTSTRAP_SEED_PATH: &str = "bootstrap/seeds/sounio-bootstrap-linux-x86_64.sio.bin";
+const BOOTSTRAP_SEED_MAGIC: &[u8; 8] = b"SNSDSEED";
+const BOOTSTRAP_SEED_VERSION: u16 = 1;
+const BOOTSTRAP_SEED_HEADER_LEN: usize = 20;
 
 fn env_flag_enabled(name: &str) -> bool {
     std::env::var(name)
@@ -24,6 +29,82 @@ fn env_flag_enabled(name: &str) -> bool {
             matches!(value.as_str(), "1" | "true" | "yes" | "on")
         })
         .unwrap_or(false)
+}
+
+fn env_flag_or_default(name: &str, default: bool) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|v| {
+            let value = v.trim().to_ascii_lowercase();
+            matches!(value.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(default)
+}
+
+fn rust_ghost_mode_enabled() -> bool {
+    env_flag_enabled("SOUNIO_RUST_GHOST")
+}
+
+fn emit_rust_ghost_warning(path_kind: &str) {
+    if !rust_ghost_mode_enabled() {
+        return;
+    }
+    eprintln!(
+        "\x1b[1;31mGHOST MODE — Rust is dead. This path will vanish in 0.x.y+1 ({})\x1b[0m",
+        path_kind
+    );
+}
+
+fn bootstrap_seed_enforced() -> bool {
+    env_flag_or_default("SOUNIO_BOOTSTRAP_SEED_ENFORCE", !cfg!(debug_assertions))
+}
+
+fn bootstrap_seed_signature_required() -> bool {
+    env_flag_or_default("SOUNIO_BOOTSTRAP_SEED_REQUIRE_SIGNATURE", true)
+}
+
+fn bootstrap_seed_path() -> PathBuf {
+    std::env::var_os("SOUNIO_BOOTSTRAP_SEED_PATH")
+        .filter(|raw| !raw.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_BOOTSTRAP_SEED_PATH))
+}
+
+fn bootstrap_seed_checksum_path(seed_path: &Path) -> PathBuf {
+    std::env::var_os("SOUNIO_BOOTSTRAP_SEED_SHA256_PATH")
+        .filter(|raw| !raw.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(format!("{}.sha256", seed_path.display())))
+}
+
+fn bootstrap_seed_signature_path(seed_path: &Path) -> PathBuf {
+    std::env::var_os("SOUNIO_BOOTSTRAP_SEED_SIG_PATH")
+        .filter(|raw| !raw.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(format!("{}.sig", seed_path.display())))
+}
+
+fn parse_hex_digest(source: &str) -> Option<String> {
+    for raw_token in source.split_whitespace() {
+        let token = raw_token.trim_matches(|c: char| {
+            matches!(c, '"' | '\'' | ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}')
+        });
+        if token.is_empty() {
+            continue;
+        }
+
+        let candidate = token
+            .rsplit_once('=')
+            .map(|(_, rhs)| rhs)
+            .or_else(|| token.rsplit_once(':').map(|(_, rhs)| rhs))
+            .unwrap_or(token)
+            .trim();
+
+        if candidate.len() == 64 && candidate.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Some(candidate.to_ascii_lowercase());
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,7 +122,17 @@ impl SelfhostCompilePipeline {
             .to_lowercase();
         match raw.as_str() {
             "driver" => Self::DriverPreferred,
-            "rust" => Self::RustBridge,
+            "rust" => {
+                if rust_ghost_mode_enabled() {
+                    emit_rust_ghost_warning("SOUNIO_SELFHOST_PIPELINE=rust");
+                    Self::RustBridge
+                } else {
+                    tracing::warn!(
+                        "SOUNIO_SELFHOST_PIPELINE=rust is deprecated; using driver pipeline instead (set SOUNIO_RUST_GHOST=1 for temporary legacy access)"
+                    );
+                    Self::DriverPreferred
+                }
+            }
             other => {
                 tracing::warn!(
                     "Unknown SOUNIO_SELFHOST_PIPELINE='{}', defaulting to driver",
@@ -309,6 +400,159 @@ impl SounioCompiler {
         }
     }
 
+    fn is_self_hosted_suite_root(path: &Path) -> bool {
+        path.is_dir()
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == "self-hosted")
+    }
+
+    fn verify_bootstrap_seed_checksum(
+        seed_path: &Path,
+        seed_bytes: &[u8],
+    ) -> LoadResult<String> {
+        let checksum_path = bootstrap_seed_checksum_path(seed_path);
+        let checksum_raw = std::fs::read_to_string(&checksum_path).map_err(|e| {
+            CompilerLoaderError::CompileError(format!(
+                "BOOTSTRAP_SEED_CHECKSUM_MISSING seed={} checksum_path={} cause={}",
+                seed_path.display(),
+                checksum_path.display(),
+                e
+            ))
+        })?;
+        let expected = parse_hex_digest(&checksum_raw).ok_or_else(|| {
+            CompilerLoaderError::CompileError(format!(
+                "BOOTSTRAP_SEED_CHECKSUM_INVALID_FORMAT checksum_path={} expected_hex_len=64",
+                checksum_path.display()
+            ))
+        })?;
+        let mut hasher = Sha256::new();
+        hasher.update(seed_bytes);
+        let actual = hex::encode(hasher.finalize());
+        if actual != expected {
+            return Err(CompilerLoaderError::CompileError(format!(
+                "BOOTSTRAP_SEED_CHECKSUM_MISMATCH seed={} checksum_path={} expected={} actual={}",
+                seed_path.display(),
+                checksum_path.display(),
+                expected,
+                actual
+            )));
+        }
+        Ok(actual)
+    }
+
+    fn verify_bootstrap_seed_signature(seed_path: &Path, seed_hash: &str) -> LoadResult<()> {
+        if !bootstrap_seed_signature_required() {
+            return Ok(());
+        }
+
+        let signature_path = bootstrap_seed_signature_path(seed_path);
+        let signature = std::fs::read_to_string(&signature_path).map_err(|e| {
+            CompilerLoaderError::CompileError(format!(
+                "BOOTSTRAP_SEED_SIGNATURE_MISSING seed={} signature_path={} cause={}",
+                seed_path.display(),
+                signature_path.display(),
+                e
+            ))
+        })?;
+        if !signature.contains("SOUNIO-SEED-SIG-V1") {
+            return Err(CompilerLoaderError::CompileError(format!(
+                "BOOTSTRAP_SEED_SIGNATURE_INVALID_FORMAT signature_path={} required_marker=SOUNIO-SEED-SIG-V1",
+                signature_path.display()
+            )));
+        }
+        let signed_hash = parse_hex_digest(&signature).ok_or_else(|| {
+            CompilerLoaderError::CompileError(format!(
+                "BOOTSTRAP_SEED_SIGNATURE_INVALID_DIGEST signature_path={}",
+                signature_path.display()
+            ))
+        })?;
+        if signed_hash != seed_hash {
+            return Err(CompilerLoaderError::CompileError(format!(
+                "BOOTSTRAP_SEED_SIGNATURE_HASH_MISMATCH signature_path={} expected={} actual={}",
+                signature_path.display(),
+                seed_hash,
+                signed_hash
+            )));
+        }
+        Ok(())
+    }
+
+    fn decode_bootstrap_seed(seed_path: &Path, seed_bytes: &[u8]) -> LoadResult<Vec<Bytecode>> {
+        if seed_bytes.len() < BOOTSTRAP_SEED_HEADER_LEN {
+            return Err(CompilerLoaderError::CompileError(format!(
+                "BOOTSTRAP_SEED_INVALID_HEADER seed={} reason=too_small bytes={} min={}",
+                seed_path.display(),
+                seed_bytes.len(),
+                BOOTSTRAP_SEED_HEADER_LEN
+            )));
+        }
+        if &seed_bytes[..8] != BOOTSTRAP_SEED_MAGIC {
+            return Err(CompilerLoaderError::CompileError(format!(
+                "BOOTSTRAP_SEED_INVALID_MAGIC seed={} expected={:?}",
+                seed_path.display(),
+                std::str::from_utf8(BOOTSTRAP_SEED_MAGIC).unwrap_or("SNSDSEED")
+            )));
+        }
+        let version = u16::from_le_bytes([seed_bytes[8], seed_bytes[9]]);
+        if version != BOOTSTRAP_SEED_VERSION {
+            return Err(CompilerLoaderError::CompileError(format!(
+                "BOOTSTRAP_SEED_UNSUPPORTED_VERSION seed={} expected={} actual={}",
+                seed_path.display(),
+                BOOTSTRAP_SEED_VERSION,
+                version
+            )));
+        }
+        let payload_len = u64::from_le_bytes([
+            seed_bytes[12],
+            seed_bytes[13],
+            seed_bytes[14],
+            seed_bytes[15],
+            seed_bytes[16],
+            seed_bytes[17],
+            seed_bytes[18],
+            seed_bytes[19],
+        ]) as usize;
+        if seed_bytes.len() != BOOTSTRAP_SEED_HEADER_LEN + payload_len {
+            return Err(CompilerLoaderError::CompileError(format!(
+                "BOOTSTRAP_SEED_LENGTH_MISMATCH seed={} header_payload_len={} actual_payload_len={}",
+                seed_path.display(),
+                payload_len,
+                seed_bytes.len().saturating_sub(BOOTSTRAP_SEED_HEADER_LEN)
+            )));
+        }
+        let payload = &seed_bytes[BOOTSTRAP_SEED_HEADER_LEN..];
+        let decoded = crate::vm::serialize::deserialize(payload).map_err(|e| {
+            CompilerLoaderError::CompileError(format!(
+                "BOOTSTRAP_SEED_DESERIALIZE_FAILED seed={} cause={}",
+                seed_path.display(),
+                e
+            ))
+        })?;
+        if decoded.is_empty() {
+            return Err(CompilerLoaderError::CompileError(format!(
+                "BOOTSTRAP_SEED_EMPTY seed={}",
+                seed_path.display()
+            )));
+        }
+        Ok(decoded)
+    }
+
+    fn load_bootstrap_seed_bytecode() -> LoadResult<Vec<Bytecode>> {
+        let seed_path = bootstrap_seed_path();
+        let seed_bytes = std::fs::read(&seed_path).map_err(|e| {
+            CompilerLoaderError::CompileError(format!(
+                "BOOTSTRAP_SEED_MISSING seed={} cause={}",
+                seed_path.display(),
+                e
+            ))
+        })?;
+        let seed_hash = Self::verify_bootstrap_seed_checksum(&seed_path, &seed_bytes)?;
+        Self::verify_bootstrap_seed_signature(&seed_path, &seed_hash)?;
+        Self::decode_bootstrap_seed(&seed_path, &seed_bytes)
+    }
+
     /// Compiles Sounio source code to bytecode.
     ///
     /// Driver-first bootstrap flow:
@@ -340,6 +584,10 @@ impl SounioCompiler {
 
     fn rust_oracle_mode() -> SelfhostRustOracleMode {
         SelfhostRustOracleMode::from_env()
+    }
+
+    fn driver_output_required(strict: bool) -> bool {
+        strict || env_flag_or_default("SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT", !cfg!(debug_assertions))
     }
 
     fn bool_bit(value: bool) -> u8 {
@@ -415,8 +663,7 @@ impl SounioCompiler {
         let strict = Self::driver_orchestration_strict();
         let oracle_mode = Self::rust_oracle_mode();
         // In strict mode, disallow stage-boundary fallback: driver must produce a valid artifact.
-        let require_driver_output =
-            strict || env_flag_enabled("SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT");
+        let require_driver_output = Self::driver_output_required(strict);
         Self::emit_driver_compile_start_marker(entrypoint, strict, oracle_mode);
         let mut driver_output: Option<Vec<Bytecode>> = None;
         match self.run_driver_orchestration(entrypoint, Some(source)) {
@@ -498,8 +745,7 @@ impl SounioCompiler {
         let strict = Self::driver_orchestration_strict();
         let oracle_mode = Self::rust_oracle_mode();
         // In strict mode, disallow stage-boundary fallback: driver must produce a valid artifact.
-        let require_driver_output =
-            strict || env_flag_enabled("SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT");
+        let require_driver_output = Self::driver_output_required(strict);
         let path = std::path::Path::new(path);
         if !path.exists() {
             return Err(CompilerLoaderError::IoError(format!(
@@ -1544,6 +1790,7 @@ fn main() -> CompileArtifact with IO, Mut, Div, Panic {
         driver_fingerprint: u64,
         harness_source: &str,
     ) -> LoadResult<Vec<Bytecode>> {
+        emit_rust_ghost_warning("driver harness lowering");
         let tag = match entrypoint {
             DriverEntrypoint::CompileSource => "compile_source",
             DriverEntrypoint::CompileFile => "compile_file",
@@ -1628,6 +1875,7 @@ fn main() -> CompileArtifact with IO, Mut, Div, Panic {
     }
 
     fn compile_via_rust_bridge(&self, source: &str) -> LoadResult<Vec<Bytecode>> {
+        emit_rust_ghost_warning("source compile");
         tracing::debug!("Compiling source through Rust bridge backend");
 
         // Lex source code to tokens using Rust lexer
@@ -1661,6 +1909,7 @@ fn main() -> CompileArtifact with IO, Mut, Div, Panic {
     }
 
     fn compile_path_via_rust_bridge(&self, path: &str) -> LoadResult<Vec<Bytecode>> {
+        emit_rust_ghost_warning("path compile");
         tracing::debug!("Compiling path through Rust bridge backend: {}", path);
 
         let ast = crate::module_loader::load_program_ast(std::path::Path::new(path))
@@ -1690,6 +1939,27 @@ fn main() -> CompileArtifact with IO, Mut, Div, Panic {
     pub fn compile_file(&self, path: &str) -> LoadResult<Vec<Bytecode>> {
         tracing::info!("Compiling file: {}", path);
         let compile_path = Self::normalize_self_hosted_suite_entrypoint(path);
+        if Self::is_self_hosted_suite_root(&compile_path) {
+            match Self::load_bootstrap_seed_bytecode() {
+                Ok(bytecode) => {
+                    eprintln!(
+                        "SELFHOST=seed schema=v1 event=bootstrap_seed status=ok bytecode_len={} path={}",
+                        bytecode.len(),
+                        bootstrap_seed_path().display()
+                    );
+                    return Ok(bytecode);
+                }
+                Err(err) => {
+                    if bootstrap_seed_enforced() {
+                        return Err(err);
+                    }
+                    tracing::warn!(
+                        "Bootstrap seed unavailable; falling back to dynamic self-host compile path: {}",
+                        err
+                    );
+                }
+            }
+        }
         match SelfhostCompilePipeline::from_env() {
             SelfhostCompilePipeline::DriverPreferred => {
                 let compile_path = compile_path.to_string_lossy();
@@ -2265,6 +2535,7 @@ impl std::fmt::Debug for SounioCompiler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
 
     #[test]
     fn test_compiler_creation_filesystem() {
@@ -2714,5 +2985,207 @@ fn main() -> i64 { add(10, 32) }
         let decoded = decode_driver_artifact("fn main() -> i64 { if true { 1 } else { 0 } }\n");
         let result = execute_bytecode(&decoded);
         assert_eq!(result, crate::vm::Value::Int(1));
+    }
+
+    #[test]
+    fn test_parse_hex_digest_checksum_format() {
+        let digest = "8cb2237d0679ca88db6464eac60da96345513964f4f5b4f9cd67f3f8a4c9f2d1";
+        let parsed = parse_hex_digest(&format!("{}  seed.bin\n", digest));
+        assert_eq!(parsed.as_deref(), Some(digest));
+    }
+
+    #[test]
+    fn test_parse_hex_digest_signature_format() {
+        let digest = "8cb2237d0679ca88db6464eac60da96345513964f4f5b4f9cd67f3f8a4c9f2d1";
+        let parsed = parse_hex_digest(&format!(
+            "SOUNIO-SEED-SIG-V1 key=sounio-dev sha256={}\n",
+            digest
+        ));
+        assert_eq!(parsed.as_deref(), Some(digest));
+    }
+
+    fn make_seed_blob(bytecode: &[Bytecode], version: u16) -> Vec<u8> {
+        let payload = crate::vm::serialize::serialize(bytecode).expect("serialize bytecode");
+        let mut bytes = Vec::with_capacity(BOOTSTRAP_SEED_HEADER_LEN + payload.len());
+        bytes.extend_from_slice(BOOTSTRAP_SEED_MAGIC);
+        bytes.extend_from_slice(&version.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&payload);
+        bytes
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        hex::encode(hasher.finalize())
+    }
+
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<OsString>,
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(prev) = &self.prev {
+                // SAFETY: test-only helper updates process env deterministically and restores it in Drop.
+                unsafe { std::env::set_var(self.key, prev) };
+            } else {
+                // SAFETY: test-only helper updates process env deterministically and restores it in Drop.
+                unsafe { std::env::remove_var(self.key) };
+            }
+        }
+    }
+
+    fn set_env_var(key: &'static str, value: Option<&str>) -> EnvGuard {
+        let prev = std::env::var_os(key);
+        if let Some(value) = value {
+            // SAFETY: test-only helper updates process env for the duration of a single test.
+            unsafe { std::env::set_var(key, value) };
+        } else {
+            // SAFETY: test-only helper updates process env for the duration of a single test.
+            unsafe { std::env::remove_var(key) };
+        }
+        EnvGuard { key, prev }
+    }
+
+    #[test]
+    fn test_bootstrap_seed_valid_roundtrip() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let seed_path = temp.path().join("sounio-bootstrap-linux-x86_64.sio.bin");
+        let checksum_path = temp.path().join("seed.sha256");
+        let sig_path = temp.path().join("seed.sig");
+
+        let bytecode = vec![Bytecode::Push(crate::vm::Value::Int(42)), Bytecode::Return];
+        let seed_blob = make_seed_blob(&bytecode, BOOTSTRAP_SEED_VERSION);
+        std::fs::write(&seed_path, &seed_blob).expect("write seed");
+
+        let digest = sha256_hex(&seed_blob);
+        std::fs::write(&checksum_path, format!("{}  seed.bin\n", digest)).expect("write checksum");
+        std::fs::write(&sig_path, format!("SOUNIO-SEED-SIG-V1 sha256={}\n", digest))
+            .expect("write signature");
+
+        let _g1 = set_env_var(
+            "SOUNIO_BOOTSTRAP_SEED_PATH",
+            Some(seed_path.to_str().expect("seed path utf8")),
+        );
+        let _g2 = set_env_var(
+            "SOUNIO_BOOTSTRAP_SEED_SHA256_PATH",
+            Some(checksum_path.to_str().expect("checksum path utf8")),
+        );
+        let _g3 = set_env_var(
+            "SOUNIO_BOOTSTRAP_SEED_SIG_PATH",
+            Some(sig_path.to_str().expect("sig path utf8")),
+        );
+        let _g4 = set_env_var("SOUNIO_BOOTSTRAP_SEED_REQUIRE_SIGNATURE", Some("1"));
+
+        let decoded =
+            SounioCompiler::load_bootstrap_seed_bytecode().expect("seed should decode successfully");
+        assert_eq!(decoded, bytecode);
+    }
+
+    #[test]
+    fn test_bootstrap_seed_rejects_checksum_mismatch() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let seed_path = temp.path().join("sounio-bootstrap-linux-x86_64.sio.bin");
+        let checksum_path = temp.path().join("seed.sha256");
+        let sig_path = temp.path().join("seed.sig");
+
+        let bytecode = vec![Bytecode::Push(crate::vm::Value::Int(42)), Bytecode::Return];
+        let mut seed_blob = make_seed_blob(&bytecode, BOOTSTRAP_SEED_VERSION);
+        std::fs::write(&seed_path, &seed_blob).expect("write seed");
+
+        let digest = sha256_hex(&seed_blob);
+        std::fs::write(&checksum_path, format!("{}  seed.bin\n", digest)).expect("write checksum");
+        std::fs::write(&sig_path, format!("SOUNIO-SEED-SIG-V1 sha256={}\n", digest))
+            .expect("write signature");
+
+        seed_blob[BOOTSTRAP_SEED_HEADER_LEN] ^= 0x01;
+        std::fs::write(&seed_path, &seed_blob).expect("corrupt seed");
+
+        let _g1 = set_env_var(
+            "SOUNIO_BOOTSTRAP_SEED_PATH",
+            Some(seed_path.to_str().expect("seed path utf8")),
+        );
+        let _g2 = set_env_var(
+            "SOUNIO_BOOTSTRAP_SEED_SHA256_PATH",
+            Some(checksum_path.to_str().expect("checksum path utf8")),
+        );
+        let _g3 = set_env_var(
+            "SOUNIO_BOOTSTRAP_SEED_SIG_PATH",
+            Some(sig_path.to_str().expect("sig path utf8")),
+        );
+        let _g4 = set_env_var("SOUNIO_BOOTSTRAP_SEED_REQUIRE_SIGNATURE", Some("1"));
+
+        let err = SounioCompiler::load_bootstrap_seed_bytecode().expect_err("must reject mismatch");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("BOOTSTRAP_SEED_CHECKSUM_MISMATCH"),
+            "unexpected error: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_bootstrap_seed_rejects_wrong_version() {
+        let bytecode = vec![Bytecode::Push(crate::vm::Value::Int(1)), Bytecode::Return];
+        let seed_blob = make_seed_blob(&bytecode, BOOTSTRAP_SEED_VERSION + 1);
+        let err = SounioCompiler::decode_bootstrap_seed(Path::new("seed.bin"), &seed_blob)
+            .expect_err("version mismatch should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("BOOTSTRAP_SEED_UNSUPPORTED_VERSION"),
+            "unexpected error: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_bootstrap_seed_missing_is_reported() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let missing_seed = temp.path().join("missing-seed.sio.bin");
+        let _g1 = set_env_var(
+            "SOUNIO_BOOTSTRAP_SEED_PATH",
+            Some(missing_seed.to_str().expect("seed path utf8")),
+        );
+        let _g2 = set_env_var(
+            "SOUNIO_BOOTSTRAP_SEED_SHA256_PATH",
+            Some(
+                temp.path()
+                    .join("missing-seed.sio.bin.sha256")
+                    .to_str()
+                    .expect("checksum path utf8"),
+            ),
+        );
+        let _g3 = set_env_var(
+            "SOUNIO_BOOTSTRAP_SEED_SIG_PATH",
+            Some(
+                temp.path()
+                    .join("missing-seed.sio.bin.sig")
+                    .to_str()
+                    .expect("sig path utf8"),
+            ),
+        );
+
+        let err = SounioCompiler::load_bootstrap_seed_bytecode().expect_err("missing seed must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("BOOTSTRAP_SEED_MISSING"), "unexpected error: {}", msg);
+    }
+
+    #[test]
+    fn test_selfhost_pipeline_rust_requires_ghost_mode() {
+        let _g1 = set_env_var("SOUNIO_SELFHOST_PIPELINE", Some("rust"));
+        let _g2 = set_env_var("SOUNIO_RUST_GHOST", None);
+        assert_eq!(
+            SelfhostCompilePipeline::from_env(),
+            SelfhostCompilePipeline::DriverPreferred
+        );
+
+        let _g3 = set_env_var("SOUNIO_RUST_GHOST", Some("1"));
+        assert_eq!(
+            SelfhostCompilePipeline::from_env(),
+            SelfhostCompilePipeline::RustBridge
+        );
     }
 }

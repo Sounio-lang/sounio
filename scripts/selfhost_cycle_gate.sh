@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+SOUC_BIN="${SOUC_BIN:-./target/debug/souc}"
+WORK_DIR="${WORK_DIR:-/tmp/sounio-selfhost-cycle-gate}"
+LOG_DIR="$WORK_DIR/logs"
+ARTIFACT_DIR="$WORK_DIR/artifacts"
+
+STAGE1_PATH="${STAGE1_PATH:-$ARTIFACT_DIR/selfhost.stage1.sobc}"
+STAGE2_PATH="${STAGE2_PATH:-$ARTIFACT_DIR/selfhost.stage2.sobc}"
+CACHE_PATH="${CACHE_PATH:-self-hosted/.sounio_bytecode.sobc}"
+
+BUILD_TIMEOUT_SECS="${BUILD_TIMEOUT_SECS:-900}"
+COMPILE_TIMEOUT_SECS="${COMPILE_TIMEOUT_SECS:-900}"
+SKIP_BUILD="${SOUNIO_SELFHOST_CYCLE_SKIP_BUILD:-0}"
+SEED_ENFORCE="${SOUNIO_SELFHOST_CYCLE_SEED_ENFORCE:-0}"
+SEED_PATH="${SOUNIO_SELFHOST_CYCLE_SEED_PATH:-bootstrap/seeds/sounio-bootstrap-linux-x86_64.sio.bin}"
+SEED_SHA256_PATH="${SOUNIO_SELFHOST_CYCLE_SEED_SHA256_PATH:-${SEED_PATH}.sha256}"
+SEED_SIG_PATH="${SOUNIO_SELFHOST_CYCLE_SEED_SIG_PATH:-${SEED_PATH}.sig}"
+CYCLE_FORCE_DYNAMIC="${SOUNIO_SELFHOST_CYCLE_FORCE_DYNAMIC:-1}"
+
+if [ "$CYCLE_FORCE_DYNAMIC" = "1" ]; then
+  # Cycle reproducibility should remain testable even when a seed is present.
+  # Force the bootstrap seed loader down the dynamic path for this gate.
+  SEED_PATH="${SEED_PATH}.missing"
+  SEED_SHA256_PATH="${SEED_SHA256_PATH}.missing"
+  SEED_SIG_PATH="${SEED_SIG_PATH}.missing"
+fi
+
+run_with_timeout() {
+  local seconds="$1"
+  shift
+
+  if command -v timeout >/dev/null 2>&1; then
+    timeout --preserve-status "${seconds}s" "$@"
+    return $?
+  fi
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$seconds" "$@" <<'PY'
+import subprocess
+import sys
+
+seconds = int(sys.argv[1])
+command = sys.argv[2:]
+try:
+    completed = subprocess.run(command, timeout=seconds)
+    sys.exit(completed.returncode)
+except subprocess.TimeoutExpired:
+    sys.exit(124)
+PY
+    return $?
+  fi
+
+  "$@"
+}
+
+mkdir -p "$LOG_DIR" "$ARTIFACT_DIR"
+
+BUILD_LOG="$LOG_DIR/build.log"
+STAGE1_LOG="$LOG_DIR/stage1.log"
+STAGE2_LOG="$LOG_DIR/stage2.log"
+SUMMARY_FILE="$ARTIFACT_DIR/summary.txt"
+
+echo "SELFHOST_CYCLE_GATE_START"
+echo "stage1_path=$STAGE1_PATH"
+echo "stage2_path=$STAGE2_PATH"
+echo "cache_path=$CACHE_PATH"
+echo "seed_enforce=$SEED_ENFORCE"
+echo "seed_path=$SEED_PATH"
+echo "cycle_force_dynamic=$CYCLE_FORCE_DYNAMIC"
+
+if [ "$SKIP_BUILD" = "1" ]; then
+  : >"$BUILD_LOG"
+else
+  run_with_timeout "$BUILD_TIMEOUT_SECS" cargo build -p souc >"$BUILD_LOG" 2>&1
+fi
+
+if [ ! -x "$SOUC_BIN" ]; then
+  echo "error: missing compiler binary at $SOUC_BIN" >&2
+  exit 1
+fi
+
+# Stage1: compile self-hosted suite and persist deterministic directory cache bytes.
+rm -f "$CACHE_PATH"
+run_with_timeout "$COMPILE_TIMEOUT_SECS" env \
+  SOUNIO_BOOTSTRAP_SEED_ENFORCE="$SEED_ENFORCE" \
+  SOUNIO_BOOTSTRAP_SEED_PATH="$SEED_PATH" \
+  SOUNIO_BOOTSTRAP_SEED_SHA256_PATH="$SEED_SHA256_PATH" \
+  SOUNIO_BOOTSTRAP_SEED_SIG_PATH="$SEED_SIG_PATH" \
+  SOUNIO_SELFHOST_WRITE_DIR_CACHE="1" \
+  SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT="0" \
+  SOUNIO_SELFHOST_PIPELINE="driver" \
+  "$SOUC_BIN" run self-hosted/ -- parse-all shard 0 1 balanced >"$STAGE1_LOG" 2>&1
+
+if [ ! -f "$CACHE_PATH" ]; then
+  echo "error: missing stage1 cache artifact at $CACHE_PATH" >&2
+  exit 1
+fi
+cp "$CACHE_PATH" "$STAGE1_PATH"
+
+# Stage2: repeat the self-hosted build and compare resulting cache bytes.
+rm -f "$CACHE_PATH"
+run_with_timeout "$COMPILE_TIMEOUT_SECS" env \
+  SOUNIO_BOOTSTRAP_SEED_ENFORCE="$SEED_ENFORCE" \
+  SOUNIO_BOOTSTRAP_SEED_PATH="$SEED_PATH" \
+  SOUNIO_BOOTSTRAP_SEED_SHA256_PATH="$SEED_SHA256_PATH" \
+  SOUNIO_BOOTSTRAP_SEED_SIG_PATH="$SEED_SIG_PATH" \
+  SOUNIO_SELFHOST_WRITE_DIR_CACHE="1" \
+  SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT="0" \
+  SOUNIO_SELFHOST_PIPELINE="driver" \
+  "$SOUC_BIN" run self-hosted/ -- parse-all shard 0 1 balanced >"$STAGE2_LOG" 2>&1
+
+if [ ! -f "$CACHE_PATH" ]; then
+  echo "error: missing stage2 cache artifact at $CACHE_PATH" >&2
+  exit 1
+fi
+cp "$CACHE_PATH" "$STAGE2_PATH"
+
+if ! cmp -s "$STAGE1_PATH" "$STAGE2_PATH"; then
+  echo "error: self-host cycle mismatch: $STAGE1_PATH != $STAGE2_PATH" >&2
+  exit 1
+fi
+
+SHA_STAGE1="$(sha256sum "$STAGE1_PATH" | awk '{print $1}')"
+SHA_STAGE2="$(sha256sum "$STAGE2_PATH" | awk '{print $1}')"
+
+{
+  echo "stage1_sha256=$SHA_STAGE1"
+  echo "stage2_sha256=$SHA_STAGE2"
+  echo "stage_bytes=$(wc -c <"$STAGE1_PATH")"
+  echo "cache_path=$CACHE_PATH"
+} >"$SUMMARY_FILE"
+
+echo "SELFHOST_CYCLE_GATE_DONE sha=$SHA_STAGE1 bytes=$(wc -c <"$STAGE1_PATH")"
