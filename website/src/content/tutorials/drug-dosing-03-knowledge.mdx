@@ -1,0 +1,120 @@
+---
+title: "Uncertain Measurements with Knowledge<T>"
+description: "Replace raw numbers with epistemic types that track measurement uncertainty"
+series: "drug-dosing"
+order: 3
+estimatedMinutes: 10
+prerequisites: ["drug-dosing-02-pk-model"]
+---
+
+# Uncertain Measurements with Knowledge&lt;T&gt;
+
+In the previous lesson, we built a PK model with exact `f64` values. Now we'll upgrade it to track uncertainty using Sounio's `Knowledge<T>` type.
+
+## From f64 to Knowledge&lt;f64&gt;
+
+Every clinical measurement has uncertainty. A serum creatinine of 1.2 mg/dL really means "somewhere around 1.2, with a standard deviation of about 0.06." In Sounio:
+
+```sio
+// Before: raw number, uncertainty unknown
+let scr: f64 = 1.2
+
+// After: value + standard uncertainty
+let scr: Knowledge<f64> = measure(1.2, uncertainty: 0.06)
+```
+
+The `measure()` constructor creates a `Knowledge<f64>` with:
+- **value**: the best estimate (1.2)
+- **uncertainty**: the standard uncertainty (0.06, representing ±5% CV)
+
+## Building an Epistemic PK Model
+
+Let's redefine our PK parameters to carry uncertainty:
+
+```sio
+struct EpistemicPK {
+    clearance: Knowledge<f64>,    // L/h ± uncertainty
+    volume: Knowledge<f64>,       // L ± uncertainty
+    dose: f64,                    // mg (known exactly — we control the dose)
+    tau: f64,                     // hours (known exactly — we set the schedule)
+}
+```
+
+Notice that `dose` and `tau` remain plain `f64` — these are **decisions** we make, not measurements. Only measured quantities carry uncertainty.
+
+## Creating Patient-Specific Parameters
+
+A real clinical scenario for vancomycin dosing:
+
+```sio
+fn create_patient_pk() -> EpistemicPK {
+    EpistemicPK {
+        // Clearance: estimated from Cockcroft-Gault
+        // Population mean 4.5 L/h, but 30% inter-individual variability
+        clearance: measure(4.5, uncertainty: 1.35),
+
+        // Volume: estimated from body weight
+        // 50 L ± 10% (weight-based estimation error)
+        volume: measure(50.0, uncertainty: 5.0),
+
+        dose: 1000.0,   // 1g vancomycin (exact)
+        tau: 12.0,       // q12h (exact)
+    }
+}
+```
+
+The clearance uncertainty of 1.35 L/h (30% CV) reflects real clinical variability — vancomycin clearance depends on renal function, age, weight, and genetics, none of which we know precisely for a given patient.
+
+## Arithmetic with Knowledge Values
+
+When you perform arithmetic on `Knowledge<T>` values, Sounio automatically propagates uncertainty using first-order error propagation (the delta method):
+
+```sio
+// Division propagates uncertainty from both operands
+fn epistemic_half_life(pk: EpistemicPK) -> Knowledge<f64> {
+    0.693 * pk.volume / pk.clearance
+}
+
+// The result carries combined uncertainty:
+// σ(t½) = t½ × √((σ_V/V)² + (σ_CL/CL)²)
+```
+
+You don't write the propagation formula — the `Knowledge<T>` type handles it. The compiler verifies that all operations are uncertainty-safe.
+
+## Extracting Information
+
+You can query a `Knowledge<f64>` value for its components:
+
+```sio
+fn main() with IO {
+    let pk = create_patient_pk()
+    let t_half = epistemic_half_life(pk)
+
+    // Access the best estimate
+    let value = t_half.value        // ~7.7 hours
+
+    // Access the standard uncertainty
+    let uncert = t_half.uncertainty // ~2.7 hours
+
+    // Relative uncertainty (coefficient of variation)
+    let cv = uncert / value         // ~35%
+
+    print("Half-life: ")
+    println(value)
+    print(" ± ")
+    println(uncert)
+    print(" hours (CV: ")
+    println(cv)
+    print(")\n")
+}
+```
+
+A 35% CV on half-life means our dosing predictions are significantly uncertain. This is *critical* clinical information that plain `f64` arithmetic would hide.
+
+## Key Takeaways
+
+- `Knowledge<f64>` wraps a value with its standard uncertainty
+- Use `measure(value, uncertainty: sigma)` to create epistemic values
+- Arithmetic operations automatically propagate uncertainty
+- Decisions (dose, schedule) stay as plain `f64` — only measurements carry uncertainty
+- The compiler ensures you never accidentally mix certain and uncertain values incorrectly

@@ -1,0 +1,122 @@
+---
+title: "Building a PK Model"
+description: "Define pharmacokinetic parameters as typed structs with effect annotations"
+series: "drug-dosing"
+order: 2
+estimatedMinutes: 10
+prerequisites: ["drug-dosing-01-intro"]
+---
+
+# Building a PK Model
+
+A one-compartment pharmacokinetic (PK) model describes how a drug moves through the body. It has three core parameters:
+
+- **Clearance (CL)**: how fast the body eliminates the drug (L/h)
+- **Volume of distribution (Vd)**: the apparent volume the drug distributes into (L)
+- **Half-life (t½)**: time for plasma concentration to halve (h)
+
+These are related: `t½ = 0.693 × Vd / CL`.
+
+## Defining the Model
+
+In Sounio, we represent PK parameters as a struct:
+
+```sio
+struct PKParams {
+    clearance: f64,    // L/h
+    volume: f64,       // L
+    dose: f64,         // mg
+    tau: f64,          // dosing interval, hours
+}
+```
+
+Now let's write functions that compute derived quantities. Notice the effect annotations:
+
+```sio
+fn half_life(pk: PKParams) -> f64 with Div {
+    0.693 * pk.volume / pk.clearance
+}
+
+fn elimination_rate(pk: PKParams) -> f64 with Div {
+    pk.clearance / pk.volume
+}
+
+fn peak_concentration(pk: PKParams) -> f64 with Div {
+    // Cmax after first dose (IV bolus, 1-compartment)
+    pk.dose / pk.volume
+}
+
+fn trough_concentration(pk: PKParams, ke: f64) -> f64 with Div, Mut, Panic {
+    // Cmin at steady state
+    let cmax = peak_concentration(pk)
+    let numerator = cmax * exp_approx(0.0 - ke * pk.tau)
+    let denominator = 1.0 - exp_approx(0.0 - ke * pk.tau)
+    numerator / denominator
+}
+```
+
+Each function declares exactly which effects it needs:
+- `with Div` — performs division (could divide by zero if CL = 0)
+- `with Mut` — uses mutable state internally
+- `with Panic` — can access struct fields (bounds-checked)
+
+## Computing a Dosing Scenario
+
+Let's put it together with a realistic vancomycin scenario:
+
+```sio
+fn exp_approx(x: f64) -> f64 with Mut, Panic, Div {
+    if x > 10.0 {
+        let half = exp_approx(x / 2.0)
+        return half * half
+    }
+    if x < 0.0 - 10.0 { return 1.0 / exp_approx(0.0 - x) }
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n <= 25 {
+        term = term * x / (n as f64)
+        sum = sum + term
+        n = n + 1
+    }
+    sum
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    let pk = PKParams {
+        clearance: 4.5,  // L/h (typical for vancomycin)
+        volume: 50.0,    // L
+        dose: 1000.0,    // mg
+        tau: 12.0,       // q12h dosing
+    }
+
+    let ke = elimination_rate(pk)
+    let t_half = half_life(pk)
+    let cmax = peak_concentration(pk)
+    let cmin = trough_concentration(pk, ke)
+
+    print("Half-life: ")
+    println(t_half)            // ~7.7 hours
+    print("Peak (Cmax): ")
+    println(cmax)              // 20.0 mg/L
+    print("Trough (Cmin): ")
+    println(cmin)              // ~6.8 mg/L
+
+    0
+}
+```
+
+## The Problem: Hidden Uncertainty
+
+This model gives precise-looking numbers: Cmin = 6.8 mg/L. But how reliable is that? The clearance value of 4.5 L/h came from a population average. For *this* patient, it could be anywhere from 3.0 to 6.0 L/h depending on their renal function.
+
+The vancomycin therapeutic window is 15–20 mg/L for trough (AUC-guided dosing). Is 6.8 mg/L safely below the toxicity threshold, or is the uncertainty large enough that the true trough might be dangerously high?
+
+With raw `f64` values, we have no way to answer this question. In the next lesson, we'll replace our parameters with `Knowledge<T>` values that carry uncertainty.
+
+## Key Takeaways
+
+- Sounio structs model PK parameters naturally
+- Effect annotations (`with Div, Mut, Panic`) make computational requirements explicit
+- Traditional `f64` models give false precision — they hide uncertainty behind exact numbers
+- The next step is to make uncertainty a first-class part of the model

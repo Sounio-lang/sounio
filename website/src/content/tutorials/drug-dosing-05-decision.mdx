@@ -1,0 +1,168 @@
+---
+title: "Clinical Decisions with Confidence Bounds"
+description: "Use uncertainty information to make safer dosing decisions"
+series: "drug-dosing"
+order: 5
+estimatedMinutes: 10
+prerequisites: ["drug-dosing-04-propagation"]
+---
+
+# Clinical Decisions with Confidence Bounds
+
+We now have a predicted trough concentration with uncertainty. The final — and most important — step is using that information to make a clinical decision.
+
+## The Decision Problem
+
+Vancomycin has a narrow therapeutic window:
+- **Below 10 mg/L**: subtherapeutic (infection not adequately treated)
+- **10–20 mg/L**: therapeutic range
+- **Above 20 mg/L**: risk of nephrotoxicity
+
+Our model predicts a trough of, say, 14.2 ± 4.8 mg/L. Is this dose safe?
+
+With a point estimate of 14.2, a traditional system would say "yes, it's in range." But the uncertainty of ±4.8 means the true trough could plausibly be anywhere from ~5 to ~24 mg/L — spanning the entire range from subtherapeutic to toxic.
+
+## Confidence-Bounded Decisions
+
+Sounio lets you ask probability questions about `Knowledge` values:
+
+```sio
+struct DosingDecision {
+    recommendation: i32,    // 0 = safe, 1 = adjust up, 2 = adjust down, 3 = contraindicated
+    confidence: f64,        // probability of being in therapeutic range
+    risk_below: f64,        // probability of subtherapeutic
+    risk_above: f64,        // probability of supratherapeutic
+}
+
+fn evaluate_dose(trough: Knowledge<f64>,
+                 lower: f64, upper: f64) -> DosingDecision
+    with Mut, Panic, Div
+{
+    // Compute probability of being in [lower, upper]
+    // Using normal distribution assumption (CLT)
+    let z_lower = (lower - trough.value) / trough.uncertainty
+    let z_upper = (upper - trough.value) / trough.uncertainty
+
+    let p_below = normal_cdf(z_lower)
+    let p_above = 1.0 - normal_cdf(z_upper)
+    let p_in_range = 1.0 - p_below - p_above
+
+    // Decision logic
+    let rec = if p_in_range > 0.80 {
+        0  // Safe: >80% probability of therapeutic
+    } else if p_below > p_above {
+        1  // More likely subtherapeutic → increase dose
+    } else if p_above > 0.20 {
+        2  // >20% risk of toxicity → decrease dose
+    } else {
+        3  // High uncertainty → get more data before dosing
+    }
+
+    DosingDecision {
+        recommendation: rec,
+        confidence: p_in_range,
+        risk_below: p_below,
+        risk_above: p_above,
+    }
+}
+```
+
+## The Normal CDF Approximation
+
+For the probability calculations, we need a normal CDF. Here's a Taylor series approximation suitable for Sounio:
+
+```sio
+fn normal_cdf(z: f64) -> f64 with Mut, Panic, Div {
+    // Abramowitz & Stegun approximation (7.1.26)
+    if z < 0.0 - 6.0 { return 0.0 }
+    if z > 6.0 { return 1.0 }
+
+    let abs_z = if z < 0.0 { 0.0 - z } else { z }
+    let t = 1.0 / (1.0 + 0.2316419 * abs_z)
+    let d = 0.3989422804014327  // 1/sqrt(2*pi)
+    let p = d * exp_approx(0.0 - abs_z * abs_z / 2.0)
+          * (t * (0.319381530
+          + t * (0.0 - 0.356563782
+          + t * (1.781477937
+          + t * (0.0 - 1.821255978
+          + t * 1.330274429)))))
+
+    if z >= 0.0 { 1.0 - p } else { p }
+}
+```
+
+## Making the Decision
+
+```sio
+fn main() -> i32 with IO, Mut, Panic, Div {
+    let labs = measure_patient()
+    let cl = estimate_clearance(labs)
+    let vd = estimate_volume(labs)
+
+    let dose = 1000.0
+    let tau = 12.0
+
+    let trough = predict_trough(cl, vd, dose, tau)
+    let decision = evaluate_dose(trough, 10.0, 20.0)
+
+    print("Predicted trough: ")
+    println(trough.value)
+    print(" ± ")
+    println(trough.uncertainty)
+    print(" mg/L\n")
+
+    print("P(therapeutic): ")
+    println(decision.confidence)
+    print("P(subtherapeutic): ")
+    println(decision.risk_below)
+    print("P(supratherapeutic): ")
+    println(decision.risk_above)
+    print("\n")
+
+    if decision.recommendation == 0 {
+        print("SAFE: proceed with current dose\n")
+    }
+    if decision.recommendation == 1 {
+        print("ADJUST: consider increasing dose\n")
+    }
+    if decision.recommendation == 2 {
+        print("ADJUST: consider decreasing dose\n")
+    }
+    if decision.recommendation == 3 {
+        print("HOLD: obtain additional labs before dosing\n")
+    }
+
+    0
+}
+```
+
+## What Sounio Gives You
+
+Compare this to a traditional approach:
+
+| Approach | Output | Clinical Value |
+|----------|--------|---------------|
+| Spreadsheet | "Trough = 14.2 mg/L" | False precision, no risk assessment |
+| Python + uncertainties | 14.2 ± 4.8 (manual library) | Uncertainty visible but not enforced |
+| **Sounio** | 14.2 ± 4.8, P(therapeutic) = 62% | Compiler-enforced, decision-ready |
+
+The key difference: in Sounio, you **cannot accidentally ignore uncertainty**. The type system ensures that every function consuming a `Knowledge<f64>` must handle the uncertainty. If you try to use `trough.value` without considering `trough.uncertainty`, the compiler nudges you to address it.
+
+## Congratulations!
+
+You've built a complete uncertainty-aware drug dosing system:
+
+1. **Lesson 1**: Understood epistemic computing and why it matters
+2. **Lesson 2**: Built a pharmacokinetic model with typed structs and effects
+3. **Lesson 3**: Upgraded to `Knowledge<T>` for uncertain measurements
+4. **Lesson 4**: Propagated uncertainty through the full pipeline
+5. **Lesson 5**: Made confidence-bounded clinical decisions
+
+This pattern — measure, propagate, decide with confidence — applies to any scientific domain: climate modeling, structural engineering, financial risk, epidemiology. Sounio makes it a language primitive, not an afterthought.
+
+## Next Steps
+
+- Explore the [Effect System Reference](/learn/effects) for more on `with IO, Mut, Div`
+- Read about [Units of Measure](/learn/units) for dimensional analysis
+- See the [PK Uncertainty test suite](https://github.com/sounio/sounio/blob/main/tests/run-pass/pk_uncertainty.sio) for the full implementation
+- Try modifying the therapeutic window or uncertainty values to see how decisions change

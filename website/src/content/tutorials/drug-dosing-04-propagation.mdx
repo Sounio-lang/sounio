@@ -1,0 +1,151 @@
+---
+title: "Uncertainty Propagation Through the Model"
+description: "Watch uncertainty flow through a complete pharmacokinetic calculation"
+series: "drug-dosing"
+order: 4
+estimatedMinutes: 12
+prerequisites: ["drug-dosing-03-knowledge"]
+---
+
+# Uncertainty Propagation Through the Model
+
+We've defined our PK parameters with uncertainty. Now let's trace how that uncertainty flows through an entire dosing calculation — from patient measurements to predicted drug concentrations.
+
+## The Full Pipeline
+
+A clinical pharmacokinetic workflow looks like this:
+
+1. **Measure** patient labs (creatinine, weight) → uncertain inputs
+2. **Estimate** PK parameters (clearance, volume) → derived uncertainty
+3. **Predict** drug concentrations (Cmax, Cmin) → compounded uncertainty
+4. **Decide** if the dose is safe → confidence-bounded decision
+
+In Sounio, each step preserves and propagates uncertainty automatically.
+
+## Step 1: Patient Measurements
+
+```sio
+struct PatientLabs {
+    serum_creatinine: Knowledge<f64>,  // mg/dL
+    weight: Knowledge<f64>,            // kg
+    age: f64,                          // years (from records, exact)
+}
+
+fn measure_patient() -> PatientLabs {
+    PatientLabs {
+        serum_creatinine: measure(1.2, uncertainty: 0.06),  // 5% assay CV
+        weight: measure(70.0, uncertainty: 1.0),            // ±1 kg scale precision
+        age: 65.0,
+    }
+}
+```
+
+## Step 2: Estimate PK Parameters
+
+The Cockcroft-Gault equation estimates creatinine clearance from patient labs. Because the inputs are `Knowledge<f64>`, the output automatically carries propagated uncertainty:
+
+```sio
+fn estimate_clearance(labs: PatientLabs) -> Knowledge<f64> {
+    // CrCl (mL/min) = (140 - age) × weight / (72 × SCr)
+    let numerator = (140.0 - labs.age) * labs.weight
+    let denominator = 72.0 * labs.serum_creatinine
+    numerator / denominator
+}
+
+fn estimate_volume(labs: PatientLabs) -> Knowledge<f64> {
+    // Vd ≈ 0.7 L/kg × weight (with model uncertainty)
+    0.7 * labs.weight
+}
+```
+
+The clearance estimate inherits uncertainty from both `weight` and `serum_creatinine`. The volume estimate inherits uncertainty from `weight`. Sounio computes these automatically.
+
+## Step 3: Predict Concentrations
+
+```sio
+fn predict_trough(cl: Knowledge<f64>, vd: Knowledge<f64>,
+                  dose: f64, tau: f64) -> Knowledge<f64> {
+    let ke = cl / vd                          // elimination rate
+    let cmax = dose / vd                      // peak concentration
+    let decay = exp_k(0.0 - ke * tau)         // exp(-ke × tau)
+    let accumulation = 1.0 / (1.0 - decay)   // steady-state factor
+    cmax * decay * accumulation
+}
+```
+
+Each operation compounds the uncertainty. By the time we reach the trough prediction, it reflects the combined uncertainty of all upstream measurements.
+
+## Step 4: Sensitivity Analysis
+
+Which measurement contributes most to the final uncertainty? Sounio can decompose variance contributions:
+
+```sio
+struct SensitivityResult {
+    scr_contribution: f64,     // fraction from creatinine
+    weight_contribution: f64,  // fraction from weight
+    total_cv: f64,             // overall coefficient of variation
+}
+
+fn analyze_sensitivity(labs: PatientLabs, dose: f64, tau: f64) -> SensitivityResult
+    with Mut, Panic, Div
+{
+    let cl = estimate_clearance(labs)
+    let vd = estimate_volume(labs)
+    let trough = predict_trough(cl, vd, dose, tau)
+
+    // Variance decomposition via Sobol-style analysis
+    let total_var = trough.uncertainty * trough.uncertainty
+
+    // Contribution from SCr (through clearance)
+    let scr_var = cl.uncertainty * cl.uncertainty
+    let scr_frac = scr_var / total_var
+
+    // Contribution from weight (through both CL and Vd)
+    let wt_frac = 1.0 - scr_frac  // remainder
+
+    SensitivityResult {
+        scr_contribution: scr_frac,
+        weight_contribution: wt_frac,
+        total_cv: trough.uncertainty / trough.value,
+    }
+}
+```
+
+This tells the clinician: *"67% of your dosing uncertainty comes from the creatinine assay. If you want a more precise dose, get a better creatinine measurement (e.g., cystatin C) rather than a more precise scale."*
+
+## Putting It All Together
+
+```sio
+fn main() -> i32 with IO, Mut, Panic, Div {
+    let labs = measure_patient()
+    let cl = estimate_clearance(labs)
+    let vd = estimate_volume(labs)
+
+    let dose = 1000.0   // 1g vancomycin
+    let tau = 12.0       // q12h
+
+    let trough = predict_trough(cl, vd, dose, tau)
+
+    print("Predicted trough: ")
+    println(trough.value)
+    print(" ± ")
+    println(trough.uncertainty)
+    print(" mg/L\n")
+
+    let sens = analyze_sensitivity(labs, dose, tau)
+    print("SCr contribution: ")
+    println(sens.scr_contribution)
+    print("Weight contribution: ")
+    println(sens.weight_contribution)
+
+    0
+}
+```
+
+## Key Takeaways
+
+- Uncertainty propagates automatically through all arithmetic operations
+- Sensitivity analysis reveals which measurements matter most
+- The full pipeline (measure → estimate → predict → analyze) is type-safe
+- Effect annotations ensure every potentially-failing operation is declared
+- No manual error propagation formulas needed — Sounio handles it
