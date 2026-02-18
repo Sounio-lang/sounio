@@ -164,6 +164,14 @@ fn term_to_smt(term: &Term, ctx: &mut SmtContext) -> SmtTerm {
             Box::new(term_to_smt(then_t, ctx)),
             Box::new(term_to_smt(else_t, ctx)),
         ),
+
+        Term::EpsilonOf(name) => {
+            let eps_name = format!("eps_{}", name);
+            if !ctx.has_var(&eps_name) {
+                ctx.declare_var(eps_name.clone(), SmtSort::Real);
+            }
+            SmtTerm::Var(eps_name)
+        }
     }
 }
 

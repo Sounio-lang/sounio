@@ -92,6 +92,22 @@ pub enum EpistemicProperty {
         /// Direction: true = increasing, false = decreasing
         increasing: bool,
     },
+
+    /// Confidence comparison: left_var.ε >= right_var.ε (or >= threshold)
+    ///
+    /// Enables SMT verification of refinement types like:
+    ///   `fn perceive(model: Knowledge[W]) -> Knowledge[W] where result.ε >= model.ε`
+    ///
+    /// ε is the posterior mean of Beta(α,β) = α/(α+β), a real in [0,1].
+    /// Z3 real arithmetic handles this directly.
+    ConfidenceComparison {
+        /// Left-hand epsilon variable (e.g., "result")
+        left_var: String,
+        /// Right-hand: either a variable name (compare two epsilons) or None for threshold
+        right_var: Option<String>,
+        /// Threshold (used when right_var is None): left.ε >= threshold
+        threshold: Option<f64>,
+    },
 }
 
 impl EpistemicProperty {
@@ -266,6 +282,42 @@ impl EpistemicProperty {
 
                 SmtFormula::Implies(Box::new(input_relation), Box::new(output_relation))
             }
+
+            EpistemicProperty::ConfidenceComparison {
+                left_var,
+                right_var,
+                threshold,
+            } => {
+                // Declare left epsilon as a real in [0,1]
+                let eps_left_name = format!("eps_{}", left_var);
+                ctx.declare_var(eps_left_name.clone(), SmtSort::Real);
+                let eps_left = SmtTerm::var(eps_left_name);
+
+                // Right side: either another epsilon variable or a literal threshold
+                let eps_right = match (right_var, threshold) {
+                    (Some(rv), _) => {
+                        let eps_right_name = format!("eps_{}", rv);
+                        ctx.declare_var(eps_right_name.clone(), SmtSort::Real);
+                        SmtTerm::var(eps_right_name)
+                    }
+                    (None, Some(t)) => SmtTerm::real(*t),
+                    (None, None) => SmtTerm::real(0.0), // Degenerate: left.ε >= 0 (always true)
+                };
+
+                // Formula: eps_left >= eps_right
+                // ε ∈ [0,1] constraint for well-formedness
+                SmtFormula::And(vec![
+                    SmtFormula::Ge(
+                        Box::new(SmtTerm::var(format!("eps_{}", left_var))),
+                        Box::new(SmtTerm::real(0.0)),
+                    ),
+                    SmtFormula::Le(
+                        Box::new(SmtTerm::var(format!("eps_{}", left_var))),
+                        Box::new(SmtTerm::real(1.0)),
+                    ),
+                    SmtFormula::Ge(Box::new(eps_left), Box::new(eps_right)),
+                ])
+            }
         }
     }
 }
@@ -321,6 +373,15 @@ impl fmt::Display for EpistemicProperty {
                 let arrow = if *increasing { "↑" } else { "↓" };
                 write!(f, "Monotonic({} {} {})", input, arrow, output)
             }
+            EpistemicProperty::ConfidenceComparison {
+                left_var,
+                right_var,
+                threshold,
+            } => match (right_var, threshold) {
+                (Some(rv), _) => write!(f, "ConfidenceComparison(ε_{} >= ε_{})", left_var, rv),
+                (None, Some(t)) => write!(f, "ConfidenceComparison(ε_{} >= {})", left_var, t),
+                (None, None) => write!(f, "ConfidenceComparison(ε_{} >= 0)", left_var),
+            },
         }
     }
 }

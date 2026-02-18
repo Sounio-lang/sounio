@@ -498,6 +498,12 @@ pub enum Term {
 
     /// Conditional expression: `if c then t else e`
     Ite(Box<Term>, Box<Term>, Box<Term>),
+
+    /// Epsilon (confidence) of a Knowledge variable: `result.ε`
+    ///
+    /// Used in refinement predicates like `where result.ε >= model.ε`.
+    /// Translates to SMT real variable `eps_<name>`.
+    EpsilonOf(String),
 }
 
 impl Term {
@@ -596,6 +602,9 @@ impl Term {
                 Box::new(t.substitute(from, to)),
                 Box::new(e.substitute(from, to)),
             ),
+
+            // EpsilonOf carries a variable name, not a general term — no substitution
+            Term::EpsilonOf(_) => self.clone(),
         }
     }
 
@@ -623,6 +632,12 @@ impl Term {
                 vars.extend(e.free_vars());
                 vars
             }
+            // EpsilonOf introduces eps_<name> as a free variable
+            Term::EpsilonOf(name) => {
+                let mut set = HashSet::new();
+                set.insert(format!("eps_{}", name));
+                set
+            }
         }
     }
 
@@ -648,6 +663,7 @@ impl fmt::Display for Term {
             Term::Field(base, field) => write!(f, "{}.{}", base, field),
             Term::Len(t) => write!(f, "len({})", t),
             Term::Ite(c, t, e) => write!(f, "(if {} then {} else {})", c, t, e),
+            Term::EpsilonOf(name) => write!(f, "{}.ε", name),
         }
     }
 }
