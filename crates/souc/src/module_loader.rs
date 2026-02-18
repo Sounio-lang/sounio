@@ -1781,7 +1781,10 @@ fn rewrite_type_expr(ty: &mut TypeExpr, prefixes: &[Vec<String>]) {
         } => {
             rewrite_type_expr(value_type, prefixes);
             if let Some(epsilon) = epsilon {
-                rewrite_expr(&mut epsilon.value, prefixes);
+                if let EpsilonValue::Expression(expr) = &mut epsilon.value {
+                    rewrite_expr(expr, prefixes);
+                }
+                // Float and KnightianUndefined have no sub-expressions to rewrite
             }
             if let Some(validity) = validity {
                 rewrite_expr(&mut validity.condition, prefixes);
@@ -2535,7 +2538,9 @@ fn annotate_type_expr(
         } => {
             annotate_type_expr(value_type, prefixes, sm, im);
             if let Some(e) = epsilon {
-                annotate_expr(&mut e.value, prefixes, sm, im);
+                if let crate::ast::EpsilonValue::Expression(expr) = &mut e.value {
+                    annotate_expr(expr, prefixes, sm, im);
+                }
             }
             if let Some(v) = validity {
                 annotate_expr(&mut v.condition, prefixes, sm, im);

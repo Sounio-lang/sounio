@@ -3625,9 +3625,10 @@ impl<'a> Parser<'a> {
             // Check what kind of parameter this is
             match self.peek() {
                 // Epsilon bound: ε < 0.05 or epsilon < 0.05
-                TokenKind::Ident
-                    if self.current().text == "ε" || self.current().text == "epsilon" =>
-                {
+                TokenKind::Epsilon => {
+                    epsilon = Some(self.parse_epsilon_bound()?);
+                }
+                TokenKind::Ident if self.current().text == "epsilon" => {
                     epsilon = Some(self.parse_epsilon_bound()?);
                 }
                 // Validity conditions
@@ -3692,7 +3693,17 @@ impl<'a> Parser<'a> {
             _ => return Err(miette::miette!("Expected comparison operator after ε")),
         };
 
-        let value = Box::new(self.parse_expr()?);
+        // Check for Knightian ⊥ sentinel before trying to parse a general expression
+        let value = if self.peek() == TokenKind::Bottom {
+            self.advance();
+            EpsilonValue::KnightianUndefined
+        } else if self.peek() == TokenKind::FloatLit {
+            let s = self.advance().text.clone();
+            let f: f64 = s.parse().map_err(|_| miette::miette!("Invalid float in ε bound: {}", s))?;
+            EpsilonValue::Float(f)
+        } else {
+            EpsilonValue::Expression(Box::new(self.parse_expr()?))
+        };
 
         Ok(EpsilonBound { operator, value })
     }
