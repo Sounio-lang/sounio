@@ -236,6 +236,61 @@ _demetrios_print_newline:
     jmp _demetrios_print
 .size _demetrios_print_newline, .-_demetrios_print_newline
 
+# -----------------------------------------------------------------------------
+# Cranelift runtime print compatibility shims
+# -----------------------------------------------------------------------------
+# The Cranelift JIT/AOT pipelines emit calls to runtime_print_* helpers.
+# For native AOT links, provide these symbols as thin wrappers.
+
+.globl runtime_print_i64
+.type runtime_print_i64, @function
+runtime_print_i64:
+    jmp _demetrios_print_i64
+.size runtime_print_i64, .-runtime_print_i64
+
+.globl runtime_print_f64
+.type runtime_print_f64, @function
+runtime_print_f64:
+    jmp _demetrios_print_f64
+.size runtime_print_f64, .-runtime_print_f64
+
+.globl runtime_print_bool
+.type runtime_print_bool, @function
+runtime_print_bool:
+    jmp _demetrios_print_bool
+.size runtime_print_bool, .-runtime_print_bool
+
+.globl runtime_print_newline
+.type runtime_print_newline, @function
+runtime_print_newline:
+    jmp _demetrios_print_newline
+.size runtime_print_newline, .-runtime_print_newline
+
+.globl runtime_print_str
+.type runtime_print_str, @function
+runtime_print_str:
+    # rdi = ptr, rsi = len
+    jmp _demetrios_print
+.size runtime_print_str, .-runtime_print_str
+
+.globl runtime_print_cstr
+.type runtime_print_cstr, @function
+runtime_print_cstr:
+    # rdi = ptr (null-terminated C string)
+    testq %rdi, %rdi
+    je .Lruntime_print_cstr_done
+    xorq %rsi, %rsi
+.Lruntime_print_cstr_loop:
+    cmpb $0, (%rdi,%rsi,1)
+    je .Lruntime_print_cstr_len_ready
+    incq %rsi
+    jmp .Lruntime_print_cstr_loop
+.Lruntime_print_cstr_len_ready:
+    jmp _demetrios_print
+.Lruntime_print_cstr_done:
+    retq
+.size runtime_print_cstr, .-runtime_print_cstr
+
 .section .rodata
 .Ldemetrios_fmt_i64:
     .asciz "%ld"

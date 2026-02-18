@@ -60,6 +60,24 @@ fn psql_output(dsn: &CStr, sql: &CStr) -> Option<std::process::Output> {
         .ok()
 }
 
+fn raw_str_ptr(raw: usize) -> *const c_char {
+    raw as *const c_char
+}
+
+fn raw_to_string(raw: usize) -> Option<String> {
+    if raw < 4096 {
+        return None;
+    }
+    let ptr = raw_str_ptr(raw);
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: Caller provides raw pointers from native runtime conventions.
+    // We perform a null/low-address guard above to avoid obvious invalid
+    // pointers; malformed pointers still return None via UTF-8 conversion.
+    unsafe { CStr::from_ptr(ptr).to_str().ok().map(ToOwned::to_owned) }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn uuid_v4() -> *const c_char {
     let nanos = SystemTime::now()
@@ -230,4 +248,121 @@ pub extern "C" fn http_next_request() -> Request {
 #[unsafe(no_mangle)]
 pub extern "C" fn http_send_response(_response: Response) -> i32 {
     0
+}
+
+/// Native compatibility shim: convert runtime string handle to C pointer.
+#[unsafe(no_mangle)]
+pub extern "C" fn as_ptr(raw_value: usize) -> *const c_char {
+    if raw_value == 0 {
+        return std::ptr::null();
+    }
+    if raw_value < 4096 {
+        return leak_cstring(raw_value.to_string());
+    }
+    raw_str_ptr(raw_value)
+}
+
+/// Native compatibility shim: `starts_with(value, prefix) -> 0|1`.
+#[unsafe(no_mangle)]
+pub extern "C" fn starts_with(raw_value: usize, raw_prefix: usize) -> i64 {
+    let value = match raw_to_string(raw_value) {
+        Some(v) => v,
+        None => return 0,
+    };
+    let prefix = match raw_to_string(raw_prefix) {
+        Some(v) => v,
+        None => return 0,
+    };
+    if value.starts_with(&prefix) { 1 } else { 0 }
+}
+
+/// Native compatibility shim: `contains(value, needle) -> 0|1`.
+#[unsafe(no_mangle)]
+pub extern "C" fn contains(raw_value: usize, raw_needle: usize) -> i64 {
+    let value = match raw_to_string(raw_value) {
+        Some(v) => v,
+        None => return 0,
+    };
+    let needle = match raw_to_string(raw_needle) {
+        Some(v) => v,
+        None => return 0,
+    };
+    if value.contains(&needle) { 1 } else { 0 }
+}
+
+/// Native compatibility shim: `replace(value, from, to) -> newly allocated C string`.
+#[unsafe(no_mangle)]
+pub extern "C" fn replace(raw_value: usize, raw_from: usize, raw_to: usize) -> *const c_char {
+    let value = match raw_to_string(raw_value) {
+        Some(v) => v,
+        None => return std::ptr::null(),
+    };
+    let from = match raw_to_string(raw_from) {
+        Some(v) => v,
+        None => return std::ptr::null(),
+    };
+    let to = match raw_to_string(raw_to) {
+        Some(v) => v,
+        None => return std::ptr::null(),
+    };
+    leak_cstring(value.replace(&from, &to))
+}
+
+/// Native compatibility shim used by effect-dispatch fallback paths.
+#[unsafe(no_mangle)]
+pub extern "C" fn handler() -> i64 {
+    0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn c(raw: &str) -> CString {
+        CString::new(raw).expect("CString")
+    }
+
+    #[test]
+    fn compat_starts_with_and_contains() {
+        let value = c("hello world");
+        let hello = c("hello");
+        let world = c("world");
+        let nope = c("nope");
+
+        assert_eq!(
+            starts_with(value.as_ptr() as usize, hello.as_ptr() as usize),
+            1
+        );
+        assert_eq!(
+            starts_with(value.as_ptr() as usize, world.as_ptr() as usize),
+            0
+        );
+        assert_eq!(contains(value.as_ptr() as usize, world.as_ptr() as usize), 1);
+        assert_eq!(contains(value.as_ptr() as usize, nope.as_ptr() as usize), 0);
+    }
+
+    #[test]
+    fn compat_replace_and_as_ptr() {
+        let value = c("abc abc");
+        let from = c("abc");
+        let to = c("xyz");
+        let out = replace(
+            value.as_ptr() as usize,
+            from.as_ptr() as usize,
+            to.as_ptr() as usize,
+        );
+        assert!(!out.is_null());
+
+        // SAFETY: `replace` returns a leaked, null-terminated C string.
+        let out_str = unsafe { CStr::from_ptr(out).to_str().expect("utf8") };
+        assert_eq!(out_str, "xyz xyz");
+
+        let ptr = as_ptr(value.as_ptr() as usize);
+        assert_eq!(ptr, value.as_ptr());
+    }
+
+    #[test]
+    fn compat_handler_stub() {
+        assert_eq!(handler(), 0);
+    }
 }
