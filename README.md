@@ -71,6 +71,45 @@ if concentration.confidence > 0.95 {
 }
 ```
 
+### Before / After: March 2020 COVID Kernel
+
+**Before (implicit assumptions):**
+
+```sio
+let r_t = estimate_r_t(march_2020_cases)
+if r_t > 1.0 {
+    trigger_lockdown()
+}
+```
+
+**After (typed refusal in Sounio):**
+
+```sio
+fn authorize_lockdown(signal: Knowledge[f64, ε >= 0.95]) -> Knowledge[f64, ε >= 0.95] {
+    signal
+}
+
+let march_signal: Knowledge[f64, ε=⊥] = Knowledge { value: 1.4 }
+let _decision = authorize_lockdown(march_signal) // compile-time refusal
+```
+
+Shipped fixtures:
+- `tests/run-pass/covid_2020_kernel.sio` (`//@ check-only`)
+- `tests/compile-fail/covid_2020_knightian_refusal.sio`
+- `tests/compile-fail/covid_2020_temporal_expiration.sio`
+
+Validation commands:
+
+```bash
+cargo run -q --bin souc -- check tests/run-pass/covid_2020_kernel.sio --error-format=json
+cargo run -q --bin souc -- check tests/compile-fail/covid_2020_knightian_refusal.sio --error-format=json
+cargo run -q --bin souc -- check tests/compile-fail/covid_2020_temporal_expiration.sio --error-format=json
+```
+
+Expected refusal diagnostics include:
+- `Knightian uncertainty (ε=⊥) cannot satisfy required confidence`
+- `Temporal validity window`
+
 ---
 
 ## Features

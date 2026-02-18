@@ -241,6 +241,11 @@ fn epoch_to_iso_date(epoch_secs: i64) -> String {
     format!("{:04}-{:02}-{:02}", year, month, day)
 }
 
+/// Public helper for converting Unix epoch seconds to an ISO date string.
+pub fn epoch_secs_to_iso_date(epoch_secs: i64) -> String {
+    epoch_to_iso_date(epoch_secs)
+}
+
 /// A dependent ontological type with epistemic constraints
 #[derive(Debug, Clone)]
 pub struct OntologicalType {

@@ -54,7 +54,9 @@ use crate::refinement::{
 use crate::refinement::{Constraint, ConstraintReason, solver::VerifyResult};
 use crate::resolve;
 use crate::types::{
-    self, DimSize, TensorShape, Type, TypeVar, effects::EffectInference, units::UnitChecker,
+    self, DimSize, KnowledgeProvenanceConstraint, KnowledgeValidityConstraint,
+    KnowledgeValidityKind, TensorShape, Type, TypeVar, effects::EffectInference,
+    units::UnitChecker,
 };
 use miette::Result;
 use std::collections::HashMap;
@@ -1089,6 +1091,19 @@ impl TypeChecker {
                 effects: effects.clone(),
                 abi: abi.clone(),
             },
+            Type::Knowledge {
+                inner,
+                epsilon_bound,
+                knightian,
+                validity,
+                provenance,
+            } => Type::Knowledge {
+                inner: Box::new(self.expand_type_alias_inner(inner, visited)),
+                epsilon_bound: *epsilon_bound,
+                knightian: *knightian,
+                validity: validity.clone(),
+                provenance: provenance.clone(),
+            },
             _ => ty.clone(),
         }
     }
@@ -1150,6 +1165,19 @@ impl TypeChecker {
                 effects: effects.clone(),
                 abi: abi.clone(),
             },
+            Type::Knowledge {
+                inner,
+                epsilon_bound,
+                knightian,
+                validity,
+                provenance,
+            } => Type::Knowledge {
+                inner: Box::new(self.substitute_type_params(inner, params, args)),
+                epsilon_bound: *epsilon_bound,
+                knightian: *knightian,
+                validity: validity.clone(),
+                provenance: provenance.clone(),
+            },
             Type::RawPointer { mutable, inner } => Type::RawPointer {
                 mutable: *mutable,
                 inner: Box::new(self.substitute_type_params(inner, params, args)),
@@ -1175,6 +1203,44 @@ impl TypeChecker {
             Type::F32 => "f32".to_string(),
             Type::F64 => "f64".to_string(),
             Type::String => "string".to_string(),
+            Type::Knowledge {
+                inner,
+                epsilon_bound,
+                knightian,
+                validity,
+                ..
+            } => {
+                let mut meta = Vec::new();
+                if *knightian {
+                    meta.push("ε=⊥".to_string());
+                } else if let Some(bound) = epsilon_bound {
+                    meta.push(format!("ε >= {}", bound));
+                }
+                if let Some(validity) = validity {
+                    let kind = match validity.kind {
+                        KnowledgeValidityKind::Valid => "Valid",
+                        KnowledgeValidityKind::ValidUntil => "ValidUntil",
+                        KnowledgeValidityKind::ValidWhile => "ValidWhile",
+                    };
+                    let rendered = match (validity.normalized_constant, validity.iso_hint.as_ref()) {
+                        (Some(v), Some(iso)) => format!("{}({}, iso={})", kind, v, iso),
+                        (Some(v), None) => format!("{}({})", kind, v),
+                        (None, Some(iso)) => format!("{}(iso={})", kind, iso),
+                        (None, None) => format!("{}(?)", kind),
+                    };
+                    meta.push(rendered);
+                }
+
+                if meta.is_empty() {
+                    format!("Knowledge[{}]", self.type_display_name(inner))
+                } else {
+                    format!(
+                        "Knowledge[{}, {}]",
+                        self.type_display_name(inner),
+                        meta.join(", ")
+                    )
+                }
+            }
             Type::Named { name, args } => {
                 if args.is_empty() {
                     name.clone()
@@ -2450,6 +2516,543 @@ impl TypeChecker {
         }
     }
 
+    /// Unified compatibility checking for typed boundaries (let bindings, call arguments, etc.).
+    ///
+    /// Layers:
+    /// 1. Structural type compatibility
+    /// 2. Knowledge-specific epistemic compatibility (epsilon/knightian/validity/provenance)
+    /// 3. Ontology semantic-threshold compatibility
+    fn check_typed_boundary_compatibility(
+        &mut self,
+        expected: &Type,
+        found: &Type,
+        threshold: f64,
+        span: Span,
+    ) {
+        let expected_expanded =
+            self.normalize_legacy_knowledge_type(self.expand_type_alias(expected));
+        let found_expanded = self.normalize_legacy_knowledge_type(self.expand_type_alias(found));
+
+        let knowledge_violation =
+            self.first_knowledge_boundary_violation(&expected_expanded, &found_expanded);
+        if let Some(message) = &knowledge_violation {
+            self.error(message.clone(), span);
+        }
+
+        if !self.types_compatible(&expected_expanded, &found_expanded)
+            && knowledge_violation.is_none()
+        {
+            let expected_name = self.type_display_name(&expected_expanded);
+            let found_name = self.type_display_name(&found_expanded);
+            self.error(
+                format!(
+                    "Type mismatch: expected `{}`, found `{}`",
+                    expected_name, found_name
+                ),
+                span,
+            );
+        }
+
+        let expected_hir = self.type_to_hir(&expected_expanded);
+        let found_hir = self.type_to_hir(&found_expanded);
+        self.check_type_compatibility_with_threshold(&expected_hir, &found_hir, threshold, span);
+    }
+
+    /// Normalize legacy `Named("Knowledge", [T])` into `Type::Knowledge`.
+    fn normalize_legacy_knowledge_type(&self, ty: Type) -> Type {
+        match ty {
+            Type::Named { name, args } if name == "Knowledge" && args.len() == 1 => {
+                let inner = self.normalize_legacy_knowledge_type(args[0].clone());
+                Type::Knowledge {
+                    inner: Box::new(inner),
+                    epsilon_bound: None,
+                    knightian: false,
+                    validity: None,
+                    provenance: None,
+                }
+            }
+            Type::Named { name, args } => Type::Named {
+                name,
+                args: args
+                    .into_iter()
+                    .map(|arg| self.normalize_legacy_knowledge_type(arg))
+                    .collect(),
+            },
+            Type::Ref {
+                mutable,
+                lifetime,
+                inner,
+            } => Type::Ref {
+                mutable,
+                lifetime,
+                inner: Box::new(self.normalize_legacy_knowledge_type(*inner)),
+            },
+            Type::RawPointer { mutable, inner } => Type::RawPointer {
+                mutable,
+                inner: Box::new(self.normalize_legacy_knowledge_type(*inner)),
+            },
+            Type::Array { element, size } => Type::Array {
+                element: Box::new(self.normalize_legacy_knowledge_type(*element)),
+                size,
+            },
+            Type::ScientificArray { element, dim } => Type::ScientificArray {
+                element: Box::new(self.normalize_legacy_knowledge_type(*element)),
+                dim,
+            },
+            Type::Matrix {
+                element,
+                rows,
+                cols,
+            } => Type::Matrix {
+                element: Box::new(self.normalize_legacy_knowledge_type(*element)),
+                rows,
+                cols,
+            },
+            Type::Tensor { element, shape } => Type::Tensor {
+                element: Box::new(self.normalize_legacy_knowledge_type(*element)),
+                shape,
+            },
+            Type::Quantity { numeric, unit } => Type::Quantity {
+                numeric: Box::new(self.normalize_legacy_knowledge_type(*numeric)),
+                unit,
+            },
+            Type::Tuple(items) => Type::Tuple(
+                items
+                    .into_iter()
+                    .map(|item| self.normalize_legacy_knowledge_type(item))
+                    .collect(),
+            ),
+            Type::Function {
+                params,
+                return_type,
+                effects,
+                abi,
+            } => Type::Function {
+                params: params
+                    .into_iter()
+                    .map(|param| self.normalize_legacy_knowledge_type(param))
+                    .collect(),
+                return_type: Box::new(self.normalize_legacy_knowledge_type(*return_type)),
+                effects,
+                abi,
+            },
+            Type::Forall { vars, inner } => Type::Forall {
+                vars,
+                inner: Box::new(self.normalize_legacy_knowledge_type(*inner)),
+            },
+            Type::Knowledge {
+                inner,
+                epsilon_bound,
+                knightian,
+                validity,
+                provenance,
+            } => Type::Knowledge {
+                inner: Box::new(self.normalize_legacy_knowledge_type(*inner)),
+                epsilon_bound,
+                knightian,
+                validity,
+                provenance,
+            },
+            other => other,
+        }
+    }
+
+    fn first_knowledge_boundary_violation(&self, expected: &Type, found: &Type) -> Option<String> {
+        match (expected, found) {
+            (
+                Type::Knowledge {
+                    inner: expected_inner,
+                    epsilon_bound: expected_epsilon,
+                    knightian: expected_knightian,
+                    validity: expected_validity,
+                    provenance: expected_provenance,
+                },
+                Type::Knowledge {
+                    inner: found_inner,
+                    epsilon_bound: found_epsilon,
+                    knightian: found_knightian,
+                    validity: found_validity,
+                    provenance: found_provenance,
+                },
+            ) => {
+                if *expected_knightian && !*found_knightian {
+                    return Some(
+                        "Type mismatch: expected Knightian uncertainty (ε=⊥), found probabilistic confidence model"
+                            .to_string(),
+                    );
+                }
+
+                if !*expected_knightian && *found_knightian {
+                    return Some(
+                        "Knightian uncertainty (ε=⊥) cannot satisfy required confidence"
+                            .to_string(),
+                    );
+                }
+
+                if !*expected_knightian && let Some(required) = expected_epsilon {
+                    match found_epsilon {
+                        Some(actual) if actual + f64::EPSILON >= *required => {}
+                        Some(actual) => {
+                            return Some(format!(
+                                "Type mismatch: expected confidence ε >= {}, found ε >= {}",
+                                required, actual
+                            ));
+                        }
+                        None => {
+                            return Some(format!(
+                                "Type mismatch: expected confidence ε >= {}, found unspecified confidence",
+                                required
+                            ));
+                        }
+                    }
+                }
+
+                if let Some(required_validity) = expected_validity
+                    && !self.validity_constraint_satisfied(
+                        required_validity,
+                        found_validity.as_ref(),
+                    )
+                {
+                    return Some(
+                        self.temporal_validity_window_diagnostic(
+                            required_validity,
+                            found_validity.as_ref(),
+                        ),
+                    );
+                }
+
+                if let Some(required_provenance) = expected_provenance
+                    && !self.provenance_constraint_satisfied(
+                        required_provenance,
+                        found_provenance.as_ref(),
+                    )
+                {
+                    return Some(
+                        "Type mismatch: Knowledge provenance constraint not satisfied".to_string(),
+                    );
+                }
+
+                self.first_knowledge_boundary_violation(expected_inner, found_inner)
+            }
+            (
+                Type::Ref {
+                    inner: expected_inner,
+                    ..
+                },
+                Type::Ref {
+                    inner: found_inner, ..
+                },
+            ) => self.first_knowledge_boundary_violation(expected_inner, found_inner),
+            (
+                Type::RawPointer {
+                    inner: expected_inner,
+                    ..
+                },
+                Type::RawPointer {
+                    inner: found_inner, ..
+                },
+            ) => self.first_knowledge_boundary_violation(expected_inner, found_inner),
+            (
+                Type::Array {
+                    element: expected_elem,
+                    ..
+                },
+                Type::Array {
+                    element: found_elem,
+                    ..
+                },
+            ) => self.first_knowledge_boundary_violation(expected_elem, found_elem),
+            (
+                Type::ScientificArray {
+                    element: expected_elem,
+                    ..
+                },
+                Type::ScientificArray {
+                    element: found_elem,
+                    ..
+                },
+            ) => self.first_knowledge_boundary_violation(expected_elem, found_elem),
+            (
+                Type::Matrix {
+                    element: expected_elem,
+                    ..
+                },
+                Type::Matrix {
+                    element: found_elem,
+                    ..
+                },
+            ) => self.first_knowledge_boundary_violation(expected_elem, found_elem),
+            (
+                Type::Tensor {
+                    element: expected_elem,
+                    ..
+                },
+                Type::Tensor {
+                    element: found_elem,
+                    ..
+                },
+            ) => self.first_knowledge_boundary_violation(expected_elem, found_elem),
+            (
+                Type::Quantity {
+                    numeric: expected_numeric,
+                    ..
+                },
+                Type::Quantity {
+                    numeric: found_numeric,
+                    ..
+                },
+            ) => self.first_knowledge_boundary_violation(expected_numeric, found_numeric),
+            (Type::Quantity { numeric, .. }, other) | (other, Type::Quantity { numeric, .. }) => {
+                self.first_knowledge_boundary_violation(numeric, other)
+            }
+            (Type::Tuple(expected_items), Type::Tuple(found_items))
+                if expected_items.len() == found_items.len() =>
+            {
+                expected_items
+                    .iter()
+                    .zip(found_items.iter())
+                    .find_map(|(expected_item, found_item)| {
+                        self.first_knowledge_boundary_violation(expected_item, found_item)
+                    })
+            }
+            (
+                Type::Named {
+                    name: expected_name,
+                    args: expected_args,
+                },
+                Type::Named {
+                    name: found_name,
+                    args: found_args,
+                },
+            ) if expected_name == found_name && expected_args.len() == found_args.len() => {
+                expected_args
+                    .iter()
+                    .zip(found_args.iter())
+                    .find_map(|(expected_arg, found_arg)| {
+                        self.first_knowledge_boundary_violation(expected_arg, found_arg)
+                    })
+            }
+            (
+                Type::Function {
+                    params: expected_params,
+                    return_type: expected_return,
+                    ..
+                },
+                Type::Function {
+                    params: found_params,
+                    return_type: found_return,
+                    ..
+                },
+            ) if expected_params.len() == found_params.len() => expected_params
+                .iter()
+                .zip(found_params.iter())
+                .find_map(|(expected_param, found_param)| {
+                    self.first_knowledge_boundary_violation(expected_param, found_param)
+                })
+                .or_else(|| self.first_knowledge_boundary_violation(expected_return, found_return)),
+            (Type::Forall { inner, .. }, other) | (other, Type::Forall { inner, .. }) => {
+                self.first_knowledge_boundary_violation(inner, other)
+            }
+            _ => None,
+        }
+    }
+
+    fn validity_constraint_satisfied(
+        &self,
+        required: &KnowledgeValidityConstraint,
+        provided: Option<&KnowledgeValidityConstraint>,
+    ) -> bool {
+        let Some(provided) = provided else {
+            return false;
+        };
+
+        if required.kind != provided.kind {
+            return false;
+        }
+
+        match (required.normalized_constant, provided.normalized_constant) {
+            (Some(required_window), Some(provided_window)) => {
+                provided_window + f64::EPSILON >= required_window
+            }
+            _ => false,
+        }
+    }
+
+    fn temporal_validity_window_diagnostic(
+        &self,
+        required: &KnowledgeValidityConstraint,
+        provided: Option<&KnowledgeValidityConstraint>,
+    ) -> String {
+        match provided {
+            None => format!(
+                "Temporal validity window mismatch: required {}, found missing validity metadata",
+                self.render_validity_constraint(required)
+            ),
+            Some(found) if required.kind != found.kind => format!(
+                "Temporal validity window mismatch: required {}, found incompatible validity {}",
+                self.render_validity_constraint(required),
+                self.render_validity_constraint(found)
+            ),
+            Some(found)
+                if required.normalized_constant.is_none()
+                    || found.normalized_constant.is_none() =>
+            {
+                format!(
+                    "Temporal validity window mismatch: required {}, found non-comparable validity {}",
+                    self.render_validity_constraint(required),
+                    self.render_validity_constraint(found)
+                )
+            }
+            Some(found) => format!(
+                "Temporal validity window mismatch: required {}, found {}",
+                self.render_validity_constraint(required),
+                self.render_validity_constraint(found)
+            ),
+        }
+    }
+
+    fn render_validity_constraint(&self, validity: &KnowledgeValidityConstraint) -> String {
+        let kind = match validity.kind {
+            KnowledgeValidityKind::Valid => "Valid",
+            KnowledgeValidityKind::ValidUntil => "ValidUntil",
+            KnowledgeValidityKind::ValidWhile => "ValidWhile",
+        };
+
+        match (validity.normalized_constant, validity.iso_hint.as_ref()) {
+            (Some(window), Some(iso)) => format!(
+                "{}(epoch_days={}, iso={})",
+                kind,
+                self.format_validity_epoch_days(window),
+                iso
+            ),
+            (Some(window), None) => {
+                let derived_iso = self.epoch_days_to_iso_string(window);
+                if let Some(iso) = derived_iso {
+                    format!(
+                        "{}(epoch_days={}, iso={})",
+                        kind,
+                        self.format_validity_epoch_days(window),
+                        iso
+                    )
+                } else {
+                    format!("{}(epoch_days={})", kind, self.format_validity_epoch_days(window))
+                }
+            }
+            (None, Some(iso)) => format!("{}(iso={})", kind, iso),
+            (None, None) => format!("{}(?)", kind),
+        }
+    }
+
+    fn format_validity_epoch_days(&self, value: f64) -> String {
+        if value.fract().abs() < f64::EPSILON {
+            format!("{:.0}", value)
+        } else {
+            format!("{:.3}", value)
+        }
+    }
+
+    fn provenance_constraint_satisfied(
+        &self,
+        required: &KnowledgeProvenanceConstraint,
+        provided: Option<&KnowledgeProvenanceConstraint>,
+    ) -> bool {
+        let Some(provided) = provided else {
+            return false;
+        };
+
+        match (required, provided) {
+            (
+                KnowledgeProvenanceConstraint::FromSource(required_source),
+                KnowledgeProvenanceConstraint::FromSource(found_source),
+            ) => required_source == found_source,
+            (
+                KnowledgeProvenanceConstraint::FromSource(required_source),
+                KnowledgeProvenanceConstraint::DerivedFrom(found_sources),
+            ) => found_sources.iter().any(|source| source == required_source),
+            (
+                KnowledgeProvenanceConstraint::DerivedFrom(required_sources),
+                KnowledgeProvenanceConstraint::DerivedFrom(found_sources),
+            ) => required_sources
+                .iter()
+                .all(|required_source| found_sources.contains(required_source)),
+            (
+                KnowledgeProvenanceConstraint::DerivedFrom(required_sources),
+                KnowledgeProvenanceConstraint::FromSource(found_source),
+            ) => required_sources.len() == 1 && required_sources[0] == *found_source,
+            (
+                KnowledgeProvenanceConstraint::UserInput,
+                KnowledgeProvenanceConstraint::UserInput,
+            ) => true,
+            (
+                KnowledgeProvenanceConstraint::PeerReviewed,
+                KnowledgeProvenanceConstraint::PeerReviewed,
+            ) => true,
+            (
+                KnowledgeProvenanceConstraint::RegulatoryCompliant(required_standard),
+                KnowledgeProvenanceConstraint::RegulatoryCompliant(found_standard),
+            ) => required_standard == found_standard,
+            _ => false,
+        }
+    }
+
+    fn combine_knowledge_validity_for_binary(
+        &self,
+        left: Option<&KnowledgeValidityConstraint>,
+        right: Option<&KnowledgeValidityConstraint>,
+    ) -> Option<KnowledgeValidityConstraint> {
+        match (left, right) {
+            (Some(l), Some(r)) if l.kind == r.kind => {
+                let (normalized_constant, iso_hint) = match (
+                    l.normalized_constant,
+                    r.normalized_constant,
+                    l.iso_hint.as_ref(),
+                    r.iso_hint.as_ref(),
+                ) {
+                    (Some(a), Some(b), l_iso, _) if a <= b => (Some(a), l_iso.cloned()),
+                    (Some(_), Some(b), l_iso, r_iso) => {
+                        (Some(b), r_iso.cloned().or(l_iso.cloned()))
+                    }
+                    (Some(a), None, l_iso, _) => (Some(a), l_iso.cloned()),
+                    (None, Some(b), _, r_iso) => (Some(b), r_iso.cloned()),
+                    (None, None, l_iso, r_iso) => (None, l_iso.cloned().or(r_iso.cloned())),
+                };
+                Some(KnowledgeValidityConstraint {
+                    kind: l.kind,
+                    normalized_constant,
+                    iso_hint,
+                })
+            }
+            (Some(l), None) => Some(l.clone()),
+            (None, Some(r)) => Some(r.clone()),
+            _ => None,
+        }
+    }
+
+    fn combine_knowledge_provenance_for_binary(
+        &self,
+        left: Option<&KnowledgeProvenanceConstraint>,
+        right: Option<&KnowledgeProvenanceConstraint>,
+    ) -> Option<KnowledgeProvenanceConstraint> {
+        match (left, right) {
+            (Some(l), Some(r)) if l == r => Some(l.clone()),
+            (
+                Some(KnowledgeProvenanceConstraint::DerivedFrom(left_sources)),
+                Some(KnowledgeProvenanceConstraint::DerivedFrom(right_sources)),
+            ) => {
+                let mut merged = left_sources.clone();
+                for source in right_sources {
+                    if !merged.contains(source) {
+                        merged.push(source.clone());
+                    }
+                }
+                Some(KnowledgeProvenanceConstraint::DerivedFrom(merged))
+            }
+            (Some(l), None) => Some(l.clone()),
+            (None, Some(r)) => Some(r.clone()),
+            _ => None,
+        }
+    }
+
     /// Check type compatibility with semantic distance threshold
     fn check_type_compatibility_with_threshold(
         &mut self,
@@ -3427,59 +4030,14 @@ impl TypeChecker {
                             .and_then(|name| self.fn_thresholds.get(name).copied())
                             .unwrap_or(self.default_threshold);
 
-                        // First check structural compatibility (use expanded type for comparison)
-                        // Only check if we have an explicit annotation (otherwise we're inferring)
-                        if has_annotation && !self.types_compatible(&expanded_ty, &actual_ty) {
-                            let decl_name = self.type_display_name(&expanded_ty);
-                            let actual_name = self.type_display_name(&actual_ty);
-                            self.error(
-                                format!(
-                                    "Type mismatch: expected `{}`, found `{}`",
-                                    decl_name, actual_name
-                                ),
+                        if has_annotation {
+                            self.check_typed_boundary_compatibility(
+                                &expanded_ty,
+                                &actual_ty,
+                                threshold,
                                 value_span,
                             );
                         }
-
-                        // Epistemic confidence bound check (MV core): do not allow claiming
-                        // `Knowledge[..., epsilon >= x]` unless the expression provides at least x.
-                        if has_annotation {
-                            if let Some(type_expr) = ty.as_ref() {
-                                if let Some(required) =
-                                    self.extract_knowledge_confidence_lower_bound(type_expr)
-                                {
-                                    if let HirType::Knowledge { epsilon_bound, .. } = &v_expr.ty {
-                                        let actual = epsilon_bound.unwrap_or(0.0);
-                                        if actual + f64::EPSILON < required {
-                                            self.error(
-                                                format!(
-                                                    "Type mismatch: expected `Knowledge[...]` with epsilon >= {}, found epsilon >= {}",
-                                                    required, actual
-                                                ),
-                                                value_span,
-                                            );
-                                        }
-                                    } else {
-                                        self.error(
-                                            format!(
-                                                "Type mismatch: expected `Knowledge[...]` with epsilon >= {}, found `{:?}`",
-                                                required, v_expr.ty
-                                            ),
-                                            value_span,
-                                        );
-                                    }
-                                }
-                            }
-                        }
-
-                        // Also check semantic/ontology type compatibility with threshold
-                        let declared_hir = self.type_to_hir(&expanded_ty);
-                        self.check_type_compatibility_with_threshold(
-                            &declared_hir,
-                            &v_expr.ty,
-                            threshold,
-                            value_span,
-                        );
                     }
 
                     // Check refinement type constraint on let-binding
@@ -3598,8 +4156,26 @@ impl TypeChecker {
                 }
                 Stmt::Assign { target, op, value } => {
                     let target_expr = self.check_expr(target, None)?;
-                    let value_expr =
-                        self.check_expr(value, Some(&self.hir_type_to_type(&target_expr.ty)))?;
+                    let expected_ty = self.hir_type_to_type(&target_expr.ty);
+                    let value_expr = self.check_expr(value, Some(&expected_ty))?;
+
+                    let threshold = self
+                        .current_fn
+                        .as_ref()
+                        .and_then(|name| self.fn_thresholds.get(name).copied())
+                        .unwrap_or(self.default_threshold);
+                    let value_span = if let Some(ast_ref) = &self.ast {
+                        self.expr_span(value, ast_ref.as_ref())
+                    } else {
+                        Span::dummy()
+                    };
+                    let actual_ty = self.hir_type_to_type(&value_expr.ty);
+                    self.check_typed_boundary_compatibility(
+                        &expected_ty,
+                        &actual_ty,
+                        threshold,
+                        value_span,
+                    );
 
                     stmts.push(HirStmt::Assign {
                         target: target_expr,
@@ -4149,9 +4725,11 @@ impl TypeChecker {
                         Span::dummy()
                     };
 
-                    self.check_type_compatibility_with_threshold(
-                        param_ty,
-                        &checked_arg.ty,
+                    let expected_ty = self.hir_type_to_type(param_ty);
+                    let actual_ty = self.hir_type_to_type(&checked_arg.ty);
+                    self.check_typed_boundary_compatibility(
+                        &expected_ty,
+                        &actual_ty,
                         threshold,
                         arg_span,
                     );
@@ -4258,6 +4836,28 @@ impl TypeChecker {
                     .as_ref()
                     .map(|v| self.check_expr(v, expected))
                     .transpose()?;
+
+                if let (Some(expected_ty), Some(ret_expr), Some(ret_ast_expr)) =
+                    (expected, val.as_ref(), value.as_ref())
+                {
+                    let threshold = self
+                        .current_fn
+                        .as_ref()
+                        .and_then(|name| self.fn_thresholds.get(name).copied())
+                        .unwrap_or(self.default_threshold);
+                    let return_span = if let Some(ast_ref) = &self.ast {
+                        self.expr_span(ret_ast_expr, ast_ref.as_ref())
+                    } else {
+                        Span::dummy()
+                    };
+                    let actual_ty = self.hir_type_to_type(&ret_expr.ty);
+                    self.check_typed_boundary_compatibility(
+                        expected_ty,
+                        &actual_ty,
+                        threshold,
+                        return_span,
+                    );
+                }
 
                 // Return has Never type since control doesn't continue
                 (HirExprKind::Return(val.map(Box::new)), HirType::Never)
@@ -4468,6 +5068,18 @@ impl TypeChecker {
 
             Expr::Field { id, base, field } => {
                 let base_expr = self.check_expr(base, None)?;
+
+                // Epistemic field access: expr.ε / expr.epsilon / expr.confidence
+                // on a Knowledge-typed value → returns the confidence as f64.
+                if matches!(field.as_str(), "ε" | "epsilon" | "confidence")
+                    && matches!(&base_expr.ty, HirType::Knowledge { .. })
+                {
+                    return Ok(HirExpr {
+                        id: *id,
+                        kind: HirExprKind::EpsilonOf(Box::new(base_expr)),
+                        ty: HirType::F64,
+                    });
+                }
 
                 // Look up field type from struct definition
                 let field_ty = if let HirType::Named { name, .. } = &base_expr.ty {
@@ -5019,35 +5631,117 @@ impl TypeChecker {
             } => {
                 let value_expr = self.check_expr(value, None)?;
 
-                // Epsilon is optional
+                let expected_knowledge = expected.and_then(|expected_ty| {
+                    let expanded = self
+                        .normalize_legacy_knowledge_type(self.expand_type_alias(expected_ty));
+                    match expanded {
+                        Type::Knowledge {
+                            epsilon_bound,
+                            knightian,
+                            validity,
+                            provenance,
+                            ..
+                        } => Some((epsilon_bound, knightian, validity, provenance)),
+                        _ => None,
+                    }
+                });
+
+                // Epsilon is optional; inherit expected epistemic class when available.
                 let epsilon_expr = if let Some(eps) = epsilon {
                     self.check_expr(eps, Some(&Type::F64))?
                 } else {
-                    // Default epsilon of 1.0 (perfect confidence)
+                    let fallback = expected_knowledge
+                        .as_ref()
+                        .and_then(|(bound, knightian, _, _)| {
+                            if *knightian {
+                                None
+                            } else {
+                                Some(bound.unwrap_or(1.0))
+                            }
+                        })
+                        .unwrap_or(1.0);
                     HirExpr {
                         id: NodeId::dummy(),
-                        kind: HirExprKind::Literal(HirLiteral::Float(1.0)),
+                        kind: HirExprKind::Literal(HirLiteral::Float(fallback)),
                         ty: HirType::F64,
                     }
                 };
-
                 let validity_expr = validity
                     .as_ref()
                     .map(|v| self.check_expr(v, None))
                     .transpose()?;
 
+                let mut epsilon_bound = match &epsilon_expr.kind {
+                    HirExprKind::Literal(HirLiteral::Float(v)) => Some(*v),
+                    HirExprKind::Literal(HirLiteral::Int(v)) => Some(*v as f64),
+                    _ => None,
+                };
+                let mut knightian = false;
+                if let Some((expected_bound, expected_knightian, _, _)) = expected_knowledge.as_ref() {
+                    knightian = *expected_knightian;
+                    if knightian {
+                        epsilon_bound = None;
+                    } else if epsilon.is_none() {
+                        epsilon_bound = *expected_bound;
+                    }
+                }
+
+                let expected_validity = expected_knowledge
+                    .as_ref()
+                    .and_then(|(_, _, validity, _)| validity.clone());
+                let validity_constraint = if let Some(validity_value) = validity_expr.as_ref() {
+                    let kind = expected_validity
+                        .as_ref()
+                        .map(|v| v.kind)
+                        .unwrap_or(KnowledgeValidityKind::Valid);
+                    Some(KnowledgeValidityConstraint {
+                        kind,
+                        normalized_constant: self
+                            .const_hir_temporal_scalar(validity_value)
+                            .or_else(|| {
+                                expected_validity
+                                    .as_ref()
+                                    .and_then(|v| v.normalized_constant)
+                            }),
+                        iso_hint: self.hir_temporal_iso_hint(validity_value).or_else(|| {
+                            expected_validity
+                                .as_ref()
+                                .and_then(|v| v.iso_hint.clone())
+                        }),
+                    })
+                } else {
+                    expected_validity
+                };
+
+                let expected_provenance = expected_knowledge
+                    .as_ref()
+                    .and_then(|(_, _, _, provenance)| provenance.clone());
+                let provenance_constraint = expected_provenance.or_else(|| {
+                    provenance
+                        .as_ref()
+                        .and_then(|p| self.extract_expr_string(p.as_ref()))
+                        .map(KnowledgeProvenanceConstraint::FromSource)
+                });
+
                 let inner_ty = value_expr.ty.clone();
                 let result_ty = HirType::Knowledge {
                     inner: Box::new(inner_ty),
-                    epsilon_bound: None,
-                    knightian: false, // Could extract from epsilon if constant
-                    provenance: None,
+                    epsilon_bound,
+                    knightian,
+                    provenance: self.encode_knowledge_metadata(
+                        validity_constraint.as_ref(),
+                        provenance_constraint.as_ref(),
+                    ),
                 };
 
                 // Provenance is an expression, not a ProvenanceMarker - convert it
                 let prov = provenance
                     .as_ref()
-                    .map(|_| HirProvenance::Derived { sources: vec![] });
+                    .and_then(|p| {
+                        self.extract_expr_string(p.as_ref())
+                            .map(|source| HirProvenance::Measured { source })
+                    })
+                    .or_else(|| provenance.as_ref().map(|_| HirProvenance::Derived { sources: vec![] }));
 
                 (
                     HirExprKind::Knowledge {
@@ -5976,21 +6670,52 @@ impl TypeChecker {
 
     /// Check unit compatibility for binary operations and compute result type
     fn check_binary_units(&mut self, op: BinaryOp, left: &HirType, right: &HirType) -> HirType {
-        let (left_inner, left_conf, left_is_knowledge) = match left {
+        let (left_inner, left_conf, left_knightian, left_validity, left_provenance, left_is_knowledge) = match left {
             HirType::Knowledge {
                 inner,
                 epsilon_bound,
-                ..
-            } => ((**inner).clone(), *epsilon_bound, true),
-            _ => (left.clone(), None, false),
+                knightian,
+                provenance,
+            } => {
+                let (validity, provenance_constraint) =
+                    self.decode_knowledge_metadata(provenance.as_ref());
+                (
+                    (**inner).clone(),
+                    *epsilon_bound,
+                    *knightian,
+                    validity,
+                    provenance_constraint,
+                    true,
+                )
+            }
+            _ => (left.clone(), None, false, None, None, false),
         };
-        let (right_inner, right_conf, right_is_knowledge) = match right {
+        let (
+            right_inner,
+            right_conf,
+            right_knightian,
+            right_validity,
+            right_provenance,
+            right_is_knowledge,
+        ) = match right {
             HirType::Knowledge {
                 inner,
                 epsilon_bound,
-                ..
-            } => ((**inner).clone(), *epsilon_bound, true),
-            _ => (right.clone(), None, false),
+                knightian,
+                provenance,
+            } => {
+                let (validity, provenance_constraint) =
+                    self.decode_knowledge_metadata(provenance.as_ref());
+                (
+                    (**inner).clone(),
+                    *epsilon_bound,
+                    *knightian,
+                    validity,
+                    provenance_constraint,
+                    true,
+                )
+            }
+            _ => (right.clone(), None, false, None, None, false),
         };
 
         let wrap_knowledge = matches!(
@@ -6231,12 +6956,25 @@ impl TypeChecker {
             } else {
                 1.0
             };
+            let knightian = left_knightian || right_knightian;
+            let validity = self.combine_knowledge_validity_for_binary(
+                left_validity.as_ref(),
+                right_validity.as_ref(),
+            );
+            let provenance = self.combine_knowledge_provenance_for_binary(
+                left_provenance.as_ref(),
+                right_provenance.as_ref(),
+            );
 
             return HirType::Knowledge {
                 inner: Box::new(result_inner),
-                epsilon_bound: Some(left_bound.min(right_bound)),
-                    knightian: false,
-                provenance: None,
+                epsilon_bound: if knightian {
+                    None
+                } else {
+                    Some(left_bound.min(right_bound))
+                },
+                knightian,
+                provenance: self.encode_knowledge_metadata(validity.as_ref(), provenance.as_ref()),
             };
         }
 
@@ -6271,6 +7009,55 @@ impl TypeChecker {
             } => Some(*i as f64),
             _ => None,
         }
+    }
+
+    fn const_temporal_scalar(&self, expr: &Expr) -> Option<f64> {
+        self.const_f64(expr).or_else(|| match expr {
+            Expr::Literal {
+                value: Literal::String(s),
+                ..
+            } => self.iso_date_to_epoch_days(s),
+            _ => None,
+        })
+    }
+
+    fn temporal_iso_hint(&self, expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Literal {
+                value: Literal::String(s),
+                ..
+            } => Some(s.clone()),
+            _ => None,
+        }
+    }
+
+    fn const_hir_temporal_scalar(&self, expr: &HirExpr) -> Option<f64> {
+        match &expr.kind {
+            HirExprKind::Literal(HirLiteral::Float(v)) => Some(*v),
+            HirExprKind::Literal(HirLiteral::Int(v)) => Some(*v as f64),
+            HirExprKind::Literal(HirLiteral::String(s)) => self.iso_date_to_epoch_days(s),
+            _ => None,
+        }
+    }
+
+    fn hir_temporal_iso_hint(&self, expr: &HirExpr) -> Option<String> {
+        match &expr.kind {
+            HirExprKind::Literal(HirLiteral::String(s)) => Some(s.clone()),
+            _ => None,
+        }
+    }
+
+    fn iso_date_to_epoch_days(&self, raw: &str) -> Option<f64> {
+        let temporal = self::epistemic::TemporalIndex::from_iso(raw.trim());
+        temporal.epoch_secs.map(|secs| secs as f64 / 86_400.0)
+    }
+
+    fn epoch_days_to_iso_string(&self, epoch_days: f64) -> Option<String> {
+        if !epoch_days.is_finite() {
+            return None;
+        }
+        let epoch_secs = (epoch_days * 86_400.0).round() as i64;
+        Some(self::epistemic::epoch_secs_to_iso_date(epoch_secs))
     }
 
     /// Extract the numeric type and optional unit from a type
@@ -8116,10 +8903,25 @@ impl TypeChecker {
                 }
             }
 
-            TypeExpr::Knowledge { value_type, .. } => Type::Named {
-                name: "Knowledge".to_string(),
-                args: vec![self.lower_type_expr(value_type)],
-            },
+            TypeExpr::Knowledge {
+                value_type,
+                epsilon,
+                validity,
+                provenance,
+            } => {
+                let (epsilon_bound, knightian) = self.lower_knowledge_epsilon(epsilon.as_ref());
+                Type::Knowledge {
+                    inner: Box::new(self.lower_type_expr(value_type)),
+                    epsilon_bound,
+                    knightian,
+                    validity: validity
+                        .as_ref()
+                        .map(|v| self.lower_knowledge_validity_constraint(v)),
+                    provenance: provenance
+                        .as_ref()
+                        .map(|p| self.lower_knowledge_provenance_constraint(p)),
+                }
+            }
             TypeExpr::Quantity { numeric_type, .. } => {
                 // For now, treat Quantity[T, unit] as just T
                 self.lower_type_expr(numeric_type)
@@ -8308,6 +9110,25 @@ impl TypeChecker {
                 element: Box::new(self.lower_type_expr_with_type_vars(element, type_vars)),
                 size: size.as_ref().and_then(|s| self.eval_const_usize(s)),
             },
+            TypeExpr::Knowledge {
+                value_type,
+                epsilon,
+                validity,
+                provenance,
+            } => {
+                let (epsilon_bound, knightian) = self.lower_knowledge_epsilon(epsilon.as_ref());
+                Type::Knowledge {
+                    inner: Box::new(self.lower_type_expr_with_type_vars(value_type, type_vars)),
+                    epsilon_bound,
+                    knightian,
+                    validity: validity
+                        .as_ref()
+                        .map(|v| self.lower_knowledge_validity_constraint(v)),
+                    provenance: provenance
+                        .as_ref()
+                        .map(|p| self.lower_knowledge_provenance_constraint(p)),
+                }
+            }
             TypeExpr::Tuple(elems) => Type::Tuple(
                 elems
                     .iter()
@@ -8397,12 +9218,24 @@ impl TypeChecker {
                 params: params.iter().map(|p| self.type_to_hir(p)).collect(),
                 return_type: Box::new(self.type_to_hir(return_type)),
             },
+            Type::Knowledge {
+                inner,
+                epsilon_bound,
+                knightian,
+                validity,
+                provenance,
+            } => HirType::Knowledge {
+                inner: Box::new(self.type_to_hir(inner)),
+                epsilon_bound: *epsilon_bound,
+                knightian: *knightian,
+                provenance: self.encode_knowledge_metadata(validity.as_ref(), provenance.as_ref()),
+            },
             Type::Named { name, args } => {
                 if name == "Knowledge" && args.len() == 1 {
                     HirType::Knowledge {
                         inner: Box::new(self.type_to_hir(&args[0])),
                         epsilon_bound: None,
-                    knightian: false,
+                        knightian: false,
                         provenance: None,
                     }
                 } else {
@@ -8644,10 +9477,22 @@ impl TypeChecker {
             HirType::Never => Type::Never,
             HirType::Error => Type::Error,
 
-            HirType::Knowledge { inner, .. } => Type::Named {
-                name: "Knowledge".to_string(),
-                args: vec![self.hir_type_to_type(inner)],
-            },
+            HirType::Knowledge {
+                inner,
+                epsilon_bound,
+                knightian,
+                provenance,
+            } => {
+                let (validity, provenance_constraint) =
+                    self.decode_knowledge_metadata(provenance.as_ref());
+                Type::Knowledge {
+                    inner: Box::new(self.hir_type_to_type(inner)),
+                    epsilon_bound: *epsilon_bound,
+                    knightian: *knightian,
+                    validity,
+                    provenance: provenance_constraint,
+                }
+            }
             HirType::Quantity { numeric, unit } => Type::Quantity {
                 numeric: Box::new(self.hir_type_to_type(numeric)),
                 unit: unit.format(),
@@ -8726,6 +9571,119 @@ impl TypeChecker {
             },
             // Sedenion type (16D hypercomplex)
             HirType::Sedenion => Type::Sedenion,
+        }
+    }
+
+    fn knowledge_validity_to_hir(
+        &self,
+        validity: &KnowledgeValidityConstraint,
+    ) -> HirValidityConstraint {
+        HirValidityConstraint {
+            kind: match validity.kind {
+                KnowledgeValidityKind::Valid => HirValidityKind::Valid,
+                KnowledgeValidityKind::ValidUntil => HirValidityKind::ValidUntil,
+                KnowledgeValidityKind::ValidWhile => HirValidityKind::ValidWhile,
+            },
+            normalized_constant: validity.normalized_constant,
+            iso_hint: validity.iso_hint.clone(),
+        }
+    }
+
+    fn hir_validity_to_knowledge(
+        &self,
+        validity: &HirValidityConstraint,
+    ) -> KnowledgeValidityConstraint {
+        KnowledgeValidityConstraint {
+            kind: match validity.kind {
+                HirValidityKind::Valid => KnowledgeValidityKind::Valid,
+                HirValidityKind::ValidUntil => KnowledgeValidityKind::ValidUntil,
+                HirValidityKind::ValidWhile => KnowledgeValidityKind::ValidWhile,
+            },
+            normalized_constant: validity.normalized_constant,
+            iso_hint: validity.iso_hint.clone(),
+        }
+    }
+
+    fn knowledge_provenance_to_hir(
+        &self,
+        provenance: &KnowledgeProvenanceConstraint,
+    ) -> HirProvenanceConstraint {
+        match provenance {
+            KnowledgeProvenanceConstraint::FromSource(source) => {
+                HirProvenanceConstraint::FromSource(source.clone())
+            }
+            KnowledgeProvenanceConstraint::DerivedFrom(sources) => {
+                HirProvenanceConstraint::DerivedFrom(sources.clone())
+            }
+            KnowledgeProvenanceConstraint::UserInput => HirProvenanceConstraint::UserInput,
+            KnowledgeProvenanceConstraint::PeerReviewed => HirProvenanceConstraint::PeerReviewed,
+            KnowledgeProvenanceConstraint::RegulatoryCompliant(standard) => {
+                HirProvenanceConstraint::RegulatoryCompliant(standard.clone())
+            }
+        }
+    }
+
+    fn hir_provenance_to_knowledge(
+        &self,
+        provenance: &HirProvenanceConstraint,
+    ) -> Option<KnowledgeProvenanceConstraint> {
+        match provenance {
+            HirProvenanceConstraint::FromSource(source) => {
+                Some(KnowledgeProvenanceConstraint::FromSource(source.clone()))
+            }
+            HirProvenanceConstraint::DerivedFrom(sources) => {
+                Some(KnowledgeProvenanceConstraint::DerivedFrom(sources.clone()))
+            }
+            HirProvenanceConstraint::UserInput => Some(KnowledgeProvenanceConstraint::UserInput),
+            HirProvenanceConstraint::PeerReviewed => {
+                Some(KnowledgeProvenanceConstraint::PeerReviewed)
+            }
+            HirProvenanceConstraint::RegulatoryCompliant(standard) => Some(
+                KnowledgeProvenanceConstraint::RegulatoryCompliant(standard.clone()),
+            ),
+            HirProvenanceConstraint::KnowledgeMetadata { provenance, .. } => provenance
+                .as_deref()
+                .and_then(|inner| self.hir_provenance_to_knowledge(inner)),
+        }
+    }
+
+    fn encode_knowledge_metadata(
+        &self,
+        validity: Option<&KnowledgeValidityConstraint>,
+        provenance: Option<&KnowledgeProvenanceConstraint>,
+    ) -> Option<HirProvenanceConstraint> {
+        let hir_validity = validity.map(|v| self.knowledge_validity_to_hir(v));
+        let hir_provenance = provenance.map(|p| self.knowledge_provenance_to_hir(p));
+
+        match (hir_validity, hir_provenance) {
+            (None, None) => None,
+            (None, Some(provenance_only)) => Some(provenance_only),
+            (validity, provenance) => Some(HirProvenanceConstraint::KnowledgeMetadata {
+                validity,
+                provenance: provenance.map(Box::new),
+            }),
+        }
+    }
+
+    fn decode_knowledge_metadata(
+        &self,
+        provenance: Option<&HirProvenanceConstraint>,
+    ) -> (
+        Option<KnowledgeValidityConstraint>,
+        Option<KnowledgeProvenanceConstraint>,
+    ) {
+        match provenance {
+            None => (None, None),
+            Some(HirProvenanceConstraint::KnowledgeMetadata {
+                validity,
+                provenance,
+            }) => (
+                validity.as_ref().map(|v| self.hir_validity_to_knowledge(v)),
+                provenance
+                    .as_deref()
+                    .and_then(|p| self.hir_provenance_to_knowledge(p)),
+            ),
+            Some(other) => (None, self.hir_provenance_to_knowledge(other)),
         }
     }
 
@@ -8886,6 +9844,94 @@ impl TypeChecker {
                 source: "measurement".to_string(),
             },
             ProvenanceKind::Input => HirProvenance::UserInput,
+        }
+    }
+
+    /// Lower AST epsilon metadata for Knowledge type annotations.
+    fn lower_knowledge_epsilon(&self, epsilon: Option<&EpsilonBound>) -> (Option<f64>, bool) {
+        let Some(eps) = epsilon else {
+            return (None, false);
+        };
+
+        match &eps.value {
+            EpsilonValue::KnightianUndefined => (None, true),
+            EpsilonValue::Float(v) => {
+                let bound = match eps.operator {
+                    ComparisonOp::Ge | ComparisonOp::Gt | ComparisonOp::Eq => Some(*v),
+                    ComparisonOp::Lt | ComparisonOp::Le => None,
+                };
+                (bound, false)
+            }
+            EpsilonValue::Expression(expr) => {
+                let bound = match eps.operator {
+                    ComparisonOp::Ge | ComparisonOp::Gt | ComparisonOp::Eq => self.const_f64(expr),
+                    ComparisonOp::Lt | ComparisonOp::Le => None,
+                };
+                (bound, false)
+            }
+        }
+    }
+
+    /// Lower AST validity metadata for Knowledge type annotations.
+    fn lower_knowledge_validity_constraint(
+        &self,
+        validity: &ValidityCondition,
+    ) -> KnowledgeValidityConstraint {
+        let kind = match validity.kind {
+            ValidityKind::Valid => KnowledgeValidityKind::Valid,
+            ValidityKind::ValidUntil => KnowledgeValidityKind::ValidUntil,
+            ValidityKind::ValidWhile => KnowledgeValidityKind::ValidWhile,
+        };
+
+        KnowledgeValidityConstraint {
+            kind,
+            normalized_constant: self.const_temporal_scalar(validity.condition.as_ref()),
+            iso_hint: self.temporal_iso_hint(validity.condition.as_ref()),
+        }
+    }
+
+    /// Lower AST provenance metadata for Knowledge type annotations.
+    fn lower_knowledge_provenance_constraint(
+        &self,
+        provenance: &ProvenanceMarker,
+    ) -> KnowledgeProvenanceConstraint {
+        match provenance.kind {
+            ProvenanceKind::Derived => {
+                let sources = provenance
+                    .source
+                    .as_deref()
+                    .and_then(|expr| self.extract_expr_string(expr))
+                    .map(|s| vec![s])
+                    .unwrap_or_default();
+                KnowledgeProvenanceConstraint::DerivedFrom(sources)
+            }
+            ProvenanceKind::Source => {
+                let source = provenance
+                    .source
+                    .as_deref()
+                    .and_then(|expr| self.extract_expr_string(expr))
+                    .unwrap_or_else(|| "source".to_string());
+                KnowledgeProvenanceConstraint::FromSource(source)
+            }
+            ProvenanceKind::Computed => {
+                KnowledgeProvenanceConstraint::DerivedFrom(vec!["computed".to_string()])
+            }
+            ProvenanceKind::Literature => KnowledgeProvenanceConstraint::PeerReviewed,
+            ProvenanceKind::Measured => {
+                KnowledgeProvenanceConstraint::DerivedFrom(vec!["measured".to_string()])
+            }
+            ProvenanceKind::Input => KnowledgeProvenanceConstraint::UserInput,
+        }
+    }
+
+    fn extract_expr_string(&self, expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Literal {
+                value: Literal::String(s),
+                ..
+            } => Some(s.clone()),
+            Expr::Path { path, .. } => Some(path.to_string()),
+            _ => None,
         }
     }
 
@@ -9167,9 +10213,9 @@ impl TypeChecker {
 
     fn types_compatible(&mut self, t1: &Type, t2: &Type) -> bool {
         // Expand type aliases before comparison so aliases are transparent
-        let t1 = &self.expand_type_alias(t1);
-        let t2 = &self.expand_type_alias(t2);
-        match (t1, t2) {
+        let t1 = self.normalize_legacy_knowledge_type(self.expand_type_alias(t1));
+        let t2 = self.normalize_legacy_knowledge_type(self.expand_type_alias(t2));
+        match (&t1, &t2) {
             (Type::Var(_), _) | (_, Type::Var(_)) => true, // Type variables unify with anything
             (Type::Unknown, _) | (_, Type::Unknown) => true,
             (Type::Error, _) | (_, Type::Error) => true,
@@ -9238,6 +10284,51 @@ impl TypeChecker {
                         .iter()
                         .zip(a2.iter())
                         .all(|(a, b)| self.types_compatible(a, b))
+            }
+            (
+                Type::Knowledge {
+                    inner: i1,
+                    epsilon_bound: e1,
+                    knightian: k1,
+                    validity: v1,
+                    provenance: p1,
+                },
+                Type::Knowledge {
+                    inner: i2,
+                    epsilon_bound: e2,
+                    knightian: k2,
+                    validity: v2,
+                    provenance: p2,
+                },
+            ) => {
+                if k1 != k2 {
+                    return false;
+                }
+
+                if *k1 {
+                    return self.types_compatible(i1, i2);
+                }
+
+                if let Some(required_eps) = e1 {
+                    match e2 {
+                        Some(found_eps) if found_eps + f64::EPSILON >= *required_eps => {}
+                        _ => return false,
+                    }
+                }
+
+                if let Some(required_validity) = v1
+                    && !self.validity_constraint_satisfied(required_validity, v2.as_ref())
+                {
+                    return false;
+                }
+
+                if let Some(required_provenance) = p1
+                    && !self.provenance_constraint_satisfied(required_provenance, p2.as_ref())
+                {
+                    return false;
+                }
+
+                self.types_compatible(i1, i2)
             }
             // Quantity type compatibility - same unit and compatible numeric types
             (

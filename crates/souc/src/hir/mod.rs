@@ -593,6 +593,32 @@ pub enum HirProvenanceConstraint {
     PeerReviewed,
     /// Must comply with regulatory standard
     RegulatoryCompliant(String),
+    /// Wrapper used to preserve Knowledge metadata without changing
+    /// the HirType::Knowledge field shape.
+    KnowledgeMetadata {
+        validity: Option<HirValidityConstraint>,
+        provenance: Option<Box<HirProvenanceConstraint>>,
+    },
+}
+
+/// HIR temporal validity kind
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HirValidityKind {
+    Valid,
+    ValidUntil,
+    ValidWhile,
+}
+
+/// HIR temporal validity constraint.
+///
+/// `normalized_constant` is present when the checker normalized the validity
+/// expression to a comparable constant window.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HirValidityConstraint {
+    pub kind: HirValidityKind,
+    pub normalized_constant: Option<f64>,
+    /// Optional original ISO-8601 string used to derive `normalized_constant`.
+    pub iso_hint: Option<String>,
 }
 
 impl HirType {
@@ -808,12 +834,30 @@ impl HirType {
             HirType::Knowledge {
                 inner,
                 epsilon_bound,
-                ..
+                knightian,
+                provenance,
             } => {
-                let eps = epsilon_bound
-                    .map(|e| format!(", e >= {:.2}", e))
-                    .unwrap_or_default();
-                format!("Knowledge[{}{}]", inner.format_short(), eps)
+                let mut meta = Vec::new();
+                if *knightian {
+                    meta.push("ε=⊥".to_string());
+                } else if let Some(e) = epsilon_bound {
+                    meta.push(format!("ε >= {:.2}", e));
+                }
+
+                if let Some(HirProvenanceConstraint::KnowledgeMetadata {
+                    validity: Some(validity),
+                    ..
+                }) = provenance
+                    && let Some(window) = validity.normalized_constant
+                {
+                    meta.push(format!("validity >= {:.2}", window));
+                }
+
+                if meta.is_empty() {
+                    format!("Knowledge[{}]", inner.format_short())
+                } else {
+                    format!("Knowledge[{}, {}]", inner.format_short(), meta.join(", "))
+                }
             }
             HirType::Quantity { numeric, unit } => {
                 format!("{}@{}", numeric.format_short(), unit.format())

@@ -319,6 +319,44 @@ impl EffectVar {
     }
 }
 
+/// Temporal validity kinds for knowledge constraints
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnowledgeValidityKind {
+    /// Valid(duration)
+    Valid,
+    /// ValidUntil(timestamp)
+    ValidUntil,
+    /// ValidWhile(condition)
+    ValidWhile,
+}
+
+/// Temporal validity constraint attached to a Knowledge type.
+///
+/// `normalized_constant` is present when the checker can normalize the validity
+/// condition into a comparable constant window.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KnowledgeValidityConstraint {
+    pub kind: KnowledgeValidityKind,
+    pub normalized_constant: Option<f64>,
+    /// Optional original ISO-8601 string used to derive `normalized_constant`.
+    pub iso_hint: Option<String>,
+}
+
+/// Provenance constraints attached to a Knowledge type.
+#[derive(Debug, Clone, PartialEq)]
+pub enum KnowledgeProvenanceConstraint {
+    /// Must come from a specific source identifier
+    FromSource(String),
+    /// Must be derived from listed sources
+    DerivedFrom(Vec<String>),
+    /// Must originate from user input
+    UserInput,
+    /// Must be peer reviewed
+    PeerReviewed,
+    /// Must comply with a named regulatory standard
+    RegulatoryCompliant(String),
+}
+
 /// Core type representation
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
@@ -397,6 +435,18 @@ pub enum Type {
     Quantity {
         numeric: Box<Type>,
         unit: String,
+    },
+    /// Knowledge type carrying epistemic metadata
+    Knowledge {
+        inner: Box<Type>,
+        /// Numeric confidence lower bound (if known)
+        epsilon_bound: Option<f64>,
+        /// Knightian undefined flag (`ε = ⊥`)
+        knightian: bool,
+        /// Temporal validity constraint
+        validity: Option<KnowledgeValidityConstraint>,
+        /// Provenance constraint
+        provenance: Option<KnowledgeProvenanceConstraint>,
     },
 
     // Polymorphism
@@ -769,6 +819,7 @@ impl Type {
             Type::Matrix { element, .. } => element.collect_free_vars(vars),
             Type::Tensor { element, .. } => element.collect_free_vars(vars),
             Type::Quantity { numeric, .. } => numeric.collect_free_vars(vars),
+            Type::Knowledge { inner, .. } => inner.collect_free_vars(vars),
             Type::Tuple(elems) => {
                 for elem in elems {
                     elem.collect_free_vars(vars);
@@ -843,6 +894,19 @@ impl Type {
             Type::Quantity { numeric, unit } => Type::Quantity {
                 numeric: Box::new(numeric.substitute(subst)),
                 unit: unit.clone(),
+            },
+            Type::Knowledge {
+                inner,
+                epsilon_bound,
+                knightian,
+                validity,
+                provenance,
+            } => Type::Knowledge {
+                inner: Box::new(inner.substitute(subst)),
+                epsilon_bound: *epsilon_bound,
+                knightian: *knightian,
+                validity: validity.clone(),
+                provenance: provenance.clone(),
             },
             Type::Tuple(elems) => Type::Tuple(elems.iter().map(|e| e.substitute(subst)).collect()),
             Type::Function {

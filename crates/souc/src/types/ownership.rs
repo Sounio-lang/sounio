@@ -84,6 +84,9 @@ pub fn ownership_of(ty: &Type) -> Ownership {
         // Quantity types: ownership follows the numeric type (usually Copy)
         Type::Quantity { numeric, .. } => ownership_of(numeric),
 
+        // Knowledge wrappers follow the ownership of the wrapped value.
+        Type::Knowledge { inner, .. } => ownership_of(inner),
+
         // Type variables are Affine by default
         Type::Var(_) | Type::Forall { .. } => Ownership::Affine,
 
