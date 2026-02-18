@@ -1,0 +1,1039 @@
+// self-hosted::gpu::runtime::cuda — CUDA Driver API FFI bindings and safe wrappers
+//
+// Two-layer architecture:
+//   1. Raw extern "C" declarations for the CUDA Driver API (libcuda.so)
+//   2. Safe wrappers using linear structs for RAII lifecycle management
+//
+// All CUDA Driver API handles (CUcontext, CUmodule, CUstream, CUevent) are
+// opaque pointers represented as i64 in Sounio. Device memory pointers
+// (CUdeviceptr) are also i64. The safe wrapper layer provides linear struct
+// types that enforce single-use consumption, preventing double-free and
+// use-after-free at the type level.
+//
+// State-threading convention:
+//   Each operation that "borrows" a linear struct consumes it and returns a
+//   rebuilt copy alongside the result. This is the canonical Sounio pattern
+//   for linearity-safe FFI — no &! references on linear structs.
+//
+// Error convention:
+//   CUDA_SUCCESS = 0. All other values are error codes. Safe wrappers return
+//   the raw i32 error code so callers can branch on success/failure. A future
+//   CudaResult<T> enum could replace this once the self-hosted type-checker
+//   supports generic enums with payloads.
+//
+// Requires linking against the CUDA driver library (-lcuda).
+
+// ============================================================================
+// CUDA Driver API constants
+// ============================================================================
+
+let CUDA_SUCCESS: i32 = 0
+
+// cuCtxCreate flags
+let CU_CTX_SCHED_AUTO: i32           = 0
+let CU_CTX_SCHED_SPIN: i32           = 1
+let CU_CTX_SCHED_YIELD: i32          = 2
+let CU_CTX_SCHED_BLOCKING_SYNC: i32  = 4
+let CU_CTX_MAP_HOST: i32             = 8
+
+// cuEventCreate flags
+let CU_EVENT_DEFAULT: i32        = 0
+let CU_EVENT_BLOCKING_SYNC: i32  = 1
+let CU_EVENT_DISABLE_TIMING: i32 = 2
+
+// cuStreamCreate flags
+let CU_STREAM_DEFAULT: i32      = 0
+let CU_STREAM_NON_BLOCKING: i32 = 1
+
+// cuMemAllocManaged flags
+let CU_MEM_ATTACH_GLOBAL: i32 = 1
+let CU_MEM_ATTACH_HOST: i32   = 2
+
+// Device attribute IDs (subset — extend as needed)
+let CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK: i32            = 1
+let CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_X: i32                  = 2
+let CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Y: i32                  = 3
+let CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Z: i32                  = 4
+let CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_X: i32                   = 5
+let CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Y: i32                   = 6
+let CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Z: i32                   = 7
+let CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK: i32      = 8
+let CU_DEVICE_ATTRIBUTE_WARP_SIZE: i32                        = 10
+let CU_DEVICE_ATTRIBUTE_MAX_REGISTERS_PER_BLOCK: i32          = 12
+let CU_DEVICE_ATTRIBUTE_CLOCK_RATE: i32                       = 13
+let CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT: i32             = 16
+let CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR: i32         = 75
+let CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR: i32         = 76
+let CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR: i32   = 39
+let CU_DEVICE_ATTRIBUTE_UNIFIED_ADDRESSING: i32               = 41
+let CU_DEVICE_ATTRIBUTE_MANAGED_MEMORY: i32                   = 83
+let CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS: i32        = 89
+
+// Common CUDA error codes (for diagnostic messages)
+let CUDA_ERROR_INVALID_VALUE: i32         = 1
+let CUDA_ERROR_OUT_OF_MEMORY: i32         = 2
+let CUDA_ERROR_NOT_INITIALIZED: i32       = 3
+let CUDA_ERROR_DEINITIALIZED: i32         = 4
+let CUDA_ERROR_NO_DEVICE: i32             = 100
+let CUDA_ERROR_INVALID_DEVICE: i32        = 101
+let CUDA_ERROR_INVALID_IMAGE: i32         = 200
+let CUDA_ERROR_INVALID_CONTEXT: i32       = 201
+let CUDA_ERROR_INVALID_HANDLE: i32        = 400
+let CUDA_ERROR_NOT_FOUND: i32             = 500
+let CUDA_ERROR_NOT_READY: i32             = 600
+let CUDA_ERROR_LAUNCH_FAILED: i32         = 719
+let CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES: i32 = 701
+let CUDA_ERROR_LAUNCH_TIMEOUT: i32        = 702
+let CUDA_ERROR_UNKNOWN: i32               = 999
+
+
+// ============================================================================
+// Section 1: Raw extern "C" declarations — CUDA Driver API
+// ============================================================================
+// All handles/pointers are i64. Out-parameters use *const (the pointer itself
+// is passed by value; the driver writes through it).
+
+// ----------------------------------------------------------------------------
+// Initialization
+// ----------------------------------------------------------------------------
+
+extern "C" {
+    fn cuInit(flags: i32) -> i32;
+}
+
+// ----------------------------------------------------------------------------
+// Device management
+// ----------------------------------------------------------------------------
+
+extern "C" {
+    fn cuDeviceGet(device: *const i32, ordinal: i32) -> i32;
+    fn cuDeviceGetCount(count: *const i32) -> i32;
+    fn cuDeviceGetName(name: *const i8, len: i32, dev: i32) -> i32;
+    fn cuDeviceGetAttribute(pi: *const i32, attrib: i32, dev: i32) -> i32;
+    fn cuDeviceTotalMem(bytes: *const i64, dev: i32) -> i32;
+}
+
+// ----------------------------------------------------------------------------
+// Context management
+// ----------------------------------------------------------------------------
+
+extern "C" {
+    fn cuCtxCreate(ctx: *const i64, flags: i32, dev: i32) -> i32;
+    fn cuCtxDestroy(ctx: i64) -> i32;
+    fn cuCtxSynchronize() -> i32;
+    fn cuCtxGetDevice(device: *const i32) -> i32;
+    fn cuCtxSetCurrent(ctx: i64) -> i32;
+    fn cuCtxGetCurrent(ctx: *const i64) -> i32;
+    fn cuCtxPushCurrent(ctx: i64) -> i32;
+    fn cuCtxPopCurrent(ctx: *const i64) -> i32;
+}
+
+// ----------------------------------------------------------------------------
+// Module management (load PTX / cubin)
+// ----------------------------------------------------------------------------
+
+extern "C" {
+    fn cuModuleLoadData(module: *const i64, image: *const i8) -> i32;
+    fn cuModuleLoadDataEx(module: *const i64, image: *const i8, numOptions: i32, options: *const i32, optionValues: *const i64) -> i32;
+    fn cuModuleUnload(module: i64) -> i32;
+    fn cuModuleGetFunction(func: *const i64, module: i64, name: *const i8) -> i32;
+    fn cuModuleGetGlobal(dptr: *const i64, size: *const i64, module: i64, name: *const i8) -> i32;
+}
+
+// ----------------------------------------------------------------------------
+// Memory management
+// ----------------------------------------------------------------------------
+
+extern "C" {
+    fn cuMemAlloc(dptr: *const i64, bytesize: i64) -> i32;
+    fn cuMemFree(dptr: i64) -> i32;
+    fn cuMemcpyHtoD(dstDevice: i64, srcHost: *const i8, byteCount: i64) -> i32;
+    fn cuMemcpyDtoH(dstHost: *const i8, srcDevice: i64, byteCount: i64) -> i32;
+    fn cuMemcpyDtoD(dstDevice: i64, srcDevice: i64, byteCount: i64) -> i32;
+    fn cuMemsetD8(dstDevice: i64, uc: i8, n: i64) -> i32;
+    fn cuMemsetD32(dstDevice: i64, ui: i32, n: i64) -> i32;
+    fn cuMemAllocManaged(dptr: *const i64, bytesize: i64, flags: i32) -> i32;
+    fn cuMemAllocHost(pp: *const i64, bytesize: i64) -> i32;
+    fn cuMemFreeHost(p: i64) -> i32;
+    fn cuMemcpyHtoDAsync(dstDevice: i64, srcHost: *const i8, byteCount: i64, hStream: i64) -> i32;
+    fn cuMemcpyDtoHAsync(dstHost: *const i8, srcDevice: i64, byteCount: i64, hStream: i64) -> i32;
+}
+
+// ----------------------------------------------------------------------------
+// Kernel launch
+// ----------------------------------------------------------------------------
+
+extern "C" {
+    fn cuLaunchKernel(
+        f: i64,
+        gridDimX: i32, gridDimY: i32, gridDimZ: i32,
+        blockDimX: i32, blockDimY: i32, blockDimZ: i32,
+        sharedMemBytes: i32,
+        hStream: i64,
+        kernelParams: *const i64,
+        extra: *const i64
+    ) -> i32;
+}
+
+// ----------------------------------------------------------------------------
+// Stream management
+// ----------------------------------------------------------------------------
+
+extern "C" {
+    fn cuStreamCreate(phStream: *const i64, flags: i32) -> i32;
+    fn cuStreamDestroy(hStream: i64) -> i32;
+    fn cuStreamSynchronize(hStream: i64) -> i32;
+    fn cuStreamWaitEvent(hStream: i64, hEvent: i64, flags: i32) -> i32;
+    fn cuStreamQuery(hStream: i64) -> i32;
+}
+
+// ----------------------------------------------------------------------------
+// Event management
+// ----------------------------------------------------------------------------
+
+extern "C" {
+    fn cuEventCreate(phEvent: *const i64, flags: i32) -> i32;
+    fn cuEventDestroy(hEvent: i64) -> i32;
+    fn cuEventRecord(hEvent: i64, hStream: i64) -> i32;
+    fn cuEventSynchronize(hEvent: i64) -> i32;
+    fn cuEventElapsedTime(pMilliseconds: *const f32, hStart: i64, hEnd: i64) -> i32;
+    fn cuEventQuery(hEvent: i64) -> i32;
+}
+
+// ----------------------------------------------------------------------------
+// Error string query
+// ----------------------------------------------------------------------------
+
+extern "C" {
+    fn cuGetErrorName(error: i32, pStr: *const *const i8) -> i32;
+    fn cuGetErrorString(error: i32, pStr: *const *const i8) -> i32;
+}
+
+// ----------------------------------------------------------------------------
+// Occupancy queries (optional — useful for launch config tuning)
+// ----------------------------------------------------------------------------
+
+extern "C" {
+    fn cuOccupancyMaxActiveBlocksPerMultiprocessor(
+        numBlocks: *const i32,
+        func: i64,
+        blockSize: i32,
+        dynamicSMemSize: i64
+    ) -> i32;
+    fn cuOccupancyMaxPotentialBlockSize(
+        minGridSize: *const i32,
+        blockSize: *const i32,
+        func: i64,
+        blockSizeToDynamicSMemSize: i64,
+        dynamicSMemSize: i64,
+        blockSizeLimit: i32
+    ) -> i32;
+}
+
+
+// ============================================================================
+// Section 2: Safe wrappers — linear structs for RAII lifecycle
+// ============================================================================
+//
+// Each linear struct wraps a raw CUDA handle (i64). Because linear types in
+// Sounio must be consumed exactly once, the wrapper functions follow the
+// state-threading pattern:
+//
+//   fn operation(resource: LinearStruct, ...) -> (LinearStruct, result) with IO
+//
+// The struct is consumed by extracting its field, the FFI call is made, and
+// a fresh struct is rebuilt from the (unchanged) raw handle. This guarantees
+// that the handle is never aliased and the linear obligation is fulfilled.
+//
+// Destroy functions consume the struct without returning it (final use).
+
+// ============================================================================
+// CudaContext — wraps CUcontext
+// ============================================================================
+
+linear struct CudaContext {
+    handle: i64,
+}
+
+// ============================================================================
+// CudaModule — wraps CUmodule (loaded PTX/cubin)
+// ============================================================================
+
+linear struct CudaModule {
+    handle: i64,
+}
+
+// ============================================================================
+// CudaBuffer — wraps a device memory allocation (CUdeviceptr + size)
+// ============================================================================
+
+linear struct CudaBuffer {
+    ptr: i64,
+    size: i64,
+}
+
+// ============================================================================
+// CudaStream — wraps CUstream
+// ============================================================================
+
+linear struct CudaStream {
+    handle: i64,
+}
+
+// ============================================================================
+// CudaEvent — wraps CUevent
+// ============================================================================
+
+linear struct CudaEvent {
+    handle: i64,
+}
+
+
+// ============================================================================
+// Initialization
+// ============================================================================
+
+/// Initialize the CUDA driver. Must be called before any other CUDA call.
+/// Returns CUDA_SUCCESS (0) on success.
+fn cuda_init() -> i32 with IO {
+    cuInit(0)
+}
+
+
+// ============================================================================
+// Device queries
+// ============================================================================
+
+/// Returns (device_count, error_code).
+fn cuda_device_count() -> (i32, i32) with IO {
+    var count: i32 = 0
+    let err = cuDeviceGetCount(&count as *const i32)
+    (count, err)
+}
+
+/// Returns (device_handle, error_code) for the given ordinal.
+fn cuda_device_get(ordinal: i32) -> (i32, i32) with IO {
+    var dev: i32 = 0
+    let err = cuDeviceGet(&dev as *const i32, ordinal)
+    (dev, err)
+}
+
+/// Query a device attribute. Returns (value, error_code).
+fn cuda_device_get_attribute(attrib: i32, dev: i32) -> (i32, i32) with IO {
+    var value: i32 = 0
+    let err = cuDeviceGetAttribute(&value as *const i32, attrib, dev)
+    (value, err)
+}
+
+/// Query total device memory in bytes. Returns (bytes, error_code).
+fn cuda_device_total_mem(dev: i32) -> (i64, i32) with IO {
+    var bytes: i64 = 0
+    let err = cuDeviceTotalMem(&bytes as *const i64, dev)
+    (bytes, err)
+}
+
+/// Query device name into a fixed buffer. Returns (name_buf, error_code).
+/// The name is written into the first `len` bytes of the buffer.
+fn cuda_device_get_name(dev: i32) -> ([i8; 256], i32) with IO, Mut {
+    var buf: [i8; 256] = [0; 256]
+    let err = cuDeviceGetName(&buf as *const i8, 256, dev)
+    (buf, err)
+}
+
+
+// ============================================================================
+// Context management
+// ============================================================================
+
+/// Create a CUDA context on the given device with the specified flags.
+/// Returns (CudaContext, error_code).
+fn cuda_context_create(flags: i32, dev: i32) -> (CudaContext, i32) with IO {
+    var raw_ctx: i64 = 0
+    let err = cuCtxCreate(&raw_ctx as *const i64, flags, dev)
+    (CudaContext { handle: raw_ctx }, err)
+}
+
+/// Create a CUDA context with default scheduling on device 0.
+/// Convenience wrapper around cuda_context_create.
+fn cuda_context_create_default(dev: i32) -> (CudaContext, i32) with IO {
+    cuda_context_create(CU_CTX_SCHED_AUTO, dev)
+}
+
+/// Destroy a CUDA context. Consumes the linear struct (final use).
+/// Returns the error code.
+fn cuda_context_destroy(ctx: CudaContext) -> i32 with IO {
+    let raw = ctx.handle
+    cuCtxDestroy(raw)
+}
+
+/// Synchronize the current CUDA context.
+/// State-threading: consumes and rebuilds the context.
+fn cuda_context_synchronize(ctx: CudaContext) -> (CudaContext, i32) with IO {
+    let raw = ctx.handle
+    let err = cuCtxSynchronize()
+    (CudaContext { handle: raw }, err)
+}
+
+/// Query which device the current context is bound to.
+/// Returns (CudaContext, device_ordinal, error_code).
+fn cuda_context_get_device(ctx: CudaContext) -> (CudaContext, i32, i32) with IO {
+    let raw = ctx.handle
+    var dev: i32 = 0
+    let err = cuCtxGetDevice(&dev as *const i32)
+    (CudaContext { handle: raw }, dev, err)
+}
+
+/// Set the current context on the calling thread.
+/// State-threading: consumes and rebuilds.
+fn cuda_context_set_current(ctx: CudaContext) -> (CudaContext, i32) with IO {
+    let raw = ctx.handle
+    let err = cuCtxSetCurrent(raw)
+    (CudaContext { handle: raw }, err)
+}
+
+
+// ============================================================================
+// Module management (PTX / cubin loading)
+// ============================================================================
+
+/// Load a PTX module from a null-terminated string image.
+/// Returns (CudaModule, error_code).
+fn cuda_module_load_ptx(image: *const i8) -> (CudaModule, i32) with IO {
+    var raw_mod: i64 = 0
+    let err = cuModuleLoadData(&raw_mod as *const i64, image)
+    (CudaModule { handle: raw_mod }, err)
+}
+
+/// Load a PTX module with JIT compilation options.
+/// `numOptions` is the count of options/optionValues arrays.
+/// Returns (CudaModule, error_code).
+fn cuda_module_load_ptx_ex(
+    image: *const i8,
+    numOptions: i32,
+    options: *const i32,
+    optionValues: *const i64
+) -> (CudaModule, i32) with IO {
+    var raw_mod: i64 = 0
+    let err = cuModuleLoadDataEx(&raw_mod as *const i64, image, numOptions, options, optionValues)
+    (CudaModule { handle: raw_mod }, err)
+}
+
+/// Look up a kernel function handle by name within a loaded module.
+/// State-threading: consumes and rebuilds the module.
+/// Returns (CudaModule, kernel_function_handle, error_code).
+fn cuda_module_get_function(m: CudaModule, name: *const i8) -> (CudaModule, i64, i32) with IO {
+    let raw = m.handle
+    var func_handle: i64 = 0
+    let err = cuModuleGetFunction(&func_handle as *const i64, raw, name)
+    (CudaModule { handle: raw }, func_handle, err)
+}
+
+/// Look up a global variable by name within a loaded module.
+/// Returns (CudaModule, device_ptr, size_bytes, error_code).
+fn cuda_module_get_global(m: CudaModule, name: *const i8) -> (CudaModule, i64, i64, i32) with IO {
+    let raw = m.handle
+    var dptr: i64 = 0
+    var size: i64 = 0
+    let err = cuModuleGetGlobal(&dptr as *const i64, &size as *const i64, raw, name)
+    (CudaModule { handle: raw }, dptr, size, err)
+}
+
+/// Unload a CUDA module. Consumes the linear struct (final use).
+/// Returns the error code.
+fn cuda_module_unload(m: CudaModule) -> i32 with IO {
+    let raw = m.handle
+    cuModuleUnload(raw)
+}
+
+
+// ============================================================================
+// Memory management
+// ============================================================================
+
+/// Allocate device memory. Returns (CudaBuffer, error_code).
+fn cuda_malloc(bytesize: i64) -> (CudaBuffer, i32) with IO {
+    var dptr: i64 = 0
+    let err = cuMemAlloc(&dptr as *const i64, bytesize)
+    (CudaBuffer { ptr: dptr, size: bytesize }, err)
+}
+
+/// Free device memory. Consumes the linear struct (final use).
+/// Returns the error code.
+fn cuda_free(buf: CudaBuffer) -> i32 with IO {
+    let raw = buf.ptr
+    // buf.size is consumed implicitly (linear struct fully consumed)
+    let _size = buf.size
+    cuMemFree(raw)
+}
+
+/// Copy host memory to device.
+/// State-threading: consumes and rebuilds the CudaBuffer.
+/// `src` is a host pointer, `byteCount` is the number of bytes to copy.
+fn cuda_memcpy_h2d(buf: CudaBuffer, src: *const i8, byteCount: i64) -> (CudaBuffer, i32) with IO {
+    let raw_ptr = buf.ptr
+    let raw_size = buf.size
+    let err = cuMemcpyHtoD(raw_ptr, src, byteCount)
+    (CudaBuffer { ptr: raw_ptr, size: raw_size }, err)
+}
+
+/// Copy device memory to host.
+/// State-threading: consumes and rebuilds the CudaBuffer.
+/// `dst` is a host pointer, `byteCount` is the number of bytes to copy.
+fn cuda_memcpy_d2h(buf: CudaBuffer, dst: *const i8, byteCount: i64) -> (CudaBuffer, i32) with IO {
+    let raw_ptr = buf.ptr
+    let raw_size = buf.size
+    let err = cuMemcpyDtoH(dst, raw_ptr, byteCount)
+    (CudaBuffer { ptr: raw_ptr, size: raw_size }, err)
+}
+
+/// Copy device-to-device.
+/// State-threading: consumes and rebuilds both buffers.
+fn cuda_memcpy_d2d(
+    dst: CudaBuffer,
+    src: CudaBuffer,
+    byteCount: i64
+) -> (CudaBuffer, CudaBuffer, i32) with IO {
+    let dst_ptr = dst.ptr
+    let dst_size = dst.size
+    let src_ptr = src.ptr
+    let src_size = src.size
+    let err = cuMemcpyDtoD(dst_ptr, src_ptr, byteCount)
+    (CudaBuffer { ptr: dst_ptr, size: dst_size }, CudaBuffer { ptr: src_ptr, size: src_size }, err)
+}
+
+/// Fill device memory with a byte value.
+/// State-threading: consumes and rebuilds the CudaBuffer.
+fn cuda_memset_d8(buf: CudaBuffer, value: i8, count: i64) -> (CudaBuffer, i32) with IO {
+    let raw_ptr = buf.ptr
+    let raw_size = buf.size
+    let err = cuMemsetD8(raw_ptr, value, count)
+    (CudaBuffer { ptr: raw_ptr, size: raw_size }, err)
+}
+
+/// Fill device memory with a 32-bit value.
+/// State-threading: consumes and rebuilds the CudaBuffer.
+fn cuda_memset_d32(buf: CudaBuffer, value: i32, count: i64) -> (CudaBuffer, i32) with IO {
+    let raw_ptr = buf.ptr
+    let raw_size = buf.size
+    let err = cuMemsetD32(raw_ptr, value, count)
+    (CudaBuffer { ptr: raw_ptr, size: raw_size }, err)
+}
+
+/// Allocate managed (unified) memory. Returns (CudaBuffer, error_code).
+/// Managed memory is accessible from both host and device.
+fn cuda_malloc_managed(bytesize: i64, flags: i32) -> (CudaBuffer, i32) with IO {
+    var dptr: i64 = 0
+    let err = cuMemAllocManaged(&dptr as *const i64, bytesize, flags)
+    (CudaBuffer { ptr: dptr, size: bytesize }, err)
+}
+
+/// Async host-to-device copy on a given stream.
+/// State-threading: consumes and rebuilds both CudaBuffer and CudaStream.
+fn cuda_memcpy_h2d_async(
+    buf: CudaBuffer,
+    src: *const i8,
+    byteCount: i64,
+    stream: CudaStream
+) -> (CudaBuffer, CudaStream, i32) with IO {
+    let raw_ptr = buf.ptr
+    let raw_size = buf.size
+    let stream_raw = stream.handle
+    let err = cuMemcpyHtoDAsync(raw_ptr, src, byteCount, stream_raw)
+    (CudaBuffer { ptr: raw_ptr, size: raw_size }, CudaStream { handle: stream_raw }, err)
+}
+
+/// Async device-to-host copy on a given stream.
+/// State-threading: consumes and rebuilds both CudaBuffer and CudaStream.
+fn cuda_memcpy_d2h_async(
+    buf: CudaBuffer,
+    dst: *const i8,
+    byteCount: i64,
+    stream: CudaStream
+) -> (CudaBuffer, CudaStream, i32) with IO {
+    let raw_ptr = buf.ptr
+    let raw_size = buf.size
+    let stream_raw = stream.handle
+    let err = cuMemcpyDtoHAsync(dst, raw_ptr, byteCount, stream_raw)
+    (CudaBuffer { ptr: raw_ptr, size: raw_size }, CudaStream { handle: stream_raw }, err)
+}
+
+/// Extract the raw device pointer from a CudaBuffer (for building kernel params).
+/// State-threading: consumes and rebuilds the buffer.
+fn cuda_buffer_raw_ptr(buf: CudaBuffer) -> (CudaBuffer, i64) {
+    let raw_ptr = buf.ptr
+    let raw_size = buf.size
+    (CudaBuffer { ptr: raw_ptr, size: raw_size }, raw_ptr)
+}
+
+/// Query the allocated size of a CudaBuffer.
+/// State-threading: consumes and rebuilds the buffer.
+fn cuda_buffer_size(buf: CudaBuffer) -> (CudaBuffer, i64) {
+    let raw_ptr = buf.ptr
+    let raw_size = buf.size
+    (CudaBuffer { ptr: raw_ptr, size: raw_size }, raw_size)
+}
+
+
+// ============================================================================
+// Kernel launch
+// ============================================================================
+
+/// Launch a kernel function.
+///
+/// `func` is the kernel handle obtained from cuda_module_get_function.
+/// Grid and block dimensions are specified as (x, y, z) triples.
+/// `sharedMemBytes` is the dynamic shared memory size.
+/// `stream_handle` is the raw stream handle (0 for the default stream).
+/// `kernelParams` is a pointer to an array of pointers to kernel arguments.
+///
+/// Returns the error code.
+fn cuda_launch_kernel(
+    func: i64,
+    gridDimX: i32,
+    gridDimY: i32,
+    gridDimZ: i32,
+    blockDimX: i32,
+    blockDimY: i32,
+    blockDimZ: i32,
+    sharedMemBytes: i32,
+    stream_handle: i64,
+    kernelParams: *const i64
+) -> i32 with IO {
+    let null_extra: i64 = 0
+    cuLaunchKernel(
+        func,
+        gridDimX, gridDimY, gridDimZ,
+        blockDimX, blockDimY, blockDimZ,
+        sharedMemBytes,
+        stream_handle,
+        kernelParams,
+        &null_extra as *const i64
+    )
+}
+
+/// Launch a 1D kernel (common case: gridDimY=1, gridDimZ=1, blockDimY=1, blockDimZ=1).
+/// Convenience wrapper for the most common launch pattern.
+fn cuda_launch_kernel_1d(
+    func: i64,
+    gridDim: i32,
+    blockDim: i32,
+    sharedMemBytes: i32,
+    stream_handle: i64,
+    kernelParams: *const i64
+) -> i32 with IO {
+    cuda_launch_kernel(
+        func,
+        gridDim, 1, 1,
+        blockDim, 1, 1,
+        sharedMemBytes,
+        stream_handle,
+        kernelParams
+    )
+}
+
+/// Launch a kernel on a managed CudaStream.
+/// State-threading: consumes and rebuilds the stream.
+fn cuda_launch_kernel_on_stream(
+    func: i64,
+    gridDimX: i32,
+    gridDimY: i32,
+    gridDimZ: i32,
+    blockDimX: i32,
+    blockDimY: i32,
+    blockDimZ: i32,
+    sharedMemBytes: i32,
+    stream: CudaStream,
+    kernelParams: *const i64
+) -> (CudaStream, i32) with IO {
+    let stream_raw = stream.handle
+    let err = cuda_launch_kernel(
+        func,
+        gridDimX, gridDimY, gridDimZ,
+        blockDimX, blockDimY, blockDimZ,
+        sharedMemBytes,
+        stream_raw,
+        kernelParams
+    )
+    (CudaStream { handle: stream_raw }, err)
+}
+
+
+// ============================================================================
+// Stream management
+// ============================================================================
+
+/// Create a new CUDA stream. Returns (CudaStream, error_code).
+fn cuda_stream_create(flags: i32) -> (CudaStream, i32) with IO {
+    var raw_stream: i64 = 0
+    let err = cuStreamCreate(&raw_stream as *const i64, flags)
+    (CudaStream { handle: raw_stream }, err)
+}
+
+/// Create a default (non-blocking) CUDA stream.
+fn cuda_stream_create_default() -> (CudaStream, i32) with IO {
+    cuda_stream_create(CU_STREAM_DEFAULT)
+}
+
+/// Destroy a CUDA stream. Consumes the linear struct (final use).
+/// Returns the error code.
+fn cuda_stream_destroy(stream: CudaStream) -> i32 with IO {
+    let raw = stream.handle
+    cuStreamDestroy(raw)
+}
+
+/// Synchronize a stream (block until all operations complete).
+/// State-threading: consumes and rebuilds the stream.
+fn cuda_stream_synchronize(stream: CudaStream) -> (CudaStream, i32) with IO {
+    let raw = stream.handle
+    let err = cuStreamSynchronize(raw)
+    (CudaStream { handle: raw }, err)
+}
+
+/// Query whether all operations on a stream have completed.
+/// Returns (CudaStream, error_code) where CUDA_SUCCESS means complete
+/// and CUDA_ERROR_NOT_READY means operations are still pending.
+fn cuda_stream_query(stream: CudaStream) -> (CudaStream, i32) with IO {
+    let raw = stream.handle
+    let err = cuStreamQuery(raw)
+    (CudaStream { handle: raw }, err)
+}
+
+/// Make a stream wait on an event.
+/// State-threading: consumes and rebuilds both the stream and the event.
+fn cuda_stream_wait_event(
+    stream: CudaStream,
+    event: CudaEvent,
+    flags: i32
+) -> (CudaStream, CudaEvent, i32) with IO {
+    let stream_raw = stream.handle
+    let event_raw = event.handle
+    let err = cuStreamWaitEvent(stream_raw, event_raw, flags)
+    (CudaStream { handle: stream_raw }, CudaEvent { handle: event_raw }, err)
+}
+
+/// Extract the raw handle from a CudaStream (for passing to kernel launch).
+/// State-threading: consumes and rebuilds.
+fn cuda_stream_raw_handle(stream: CudaStream) -> (CudaStream, i64) {
+    let raw = stream.handle
+    (CudaStream { handle: raw }, raw)
+}
+
+
+// ============================================================================
+// Event management
+// ============================================================================
+
+/// Create a new CUDA event. Returns (CudaEvent, error_code).
+fn cuda_event_create(flags: i32) -> (CudaEvent, i32) with IO {
+    var raw_event: i64 = 0
+    let err = cuEventCreate(&raw_event as *const i64, flags)
+    (CudaEvent { handle: raw_event }, err)
+}
+
+/// Create a default CUDA event (with timing enabled).
+fn cuda_event_create_default() -> (CudaEvent, i32) with IO {
+    cuda_event_create(CU_EVENT_DEFAULT)
+}
+
+/// Destroy a CUDA event. Consumes the linear struct (final use).
+/// Returns the error code.
+fn cuda_event_destroy(event: CudaEvent) -> i32 with IO {
+    let raw = event.handle
+    cuEventDestroy(raw)
+}
+
+/// Record an event on a stream.
+/// State-threading: consumes and rebuilds both event and stream.
+fn cuda_event_record(event: CudaEvent, stream: CudaStream) -> (CudaEvent, CudaStream, i32) with IO {
+    let event_raw = event.handle
+    let stream_raw = stream.handle
+    let err = cuEventRecord(event_raw, stream_raw)
+    (CudaEvent { handle: event_raw }, CudaStream { handle: stream_raw }, err)
+}
+
+/// Record an event on the default stream (handle = 0).
+/// State-threading: consumes and rebuilds the event.
+fn cuda_event_record_default(event: CudaEvent) -> (CudaEvent, i32) with IO {
+    let event_raw = event.handle
+    let err = cuEventRecord(event_raw, 0)
+    (CudaEvent { handle: event_raw }, err)
+}
+
+/// Synchronize (wait for) an event.
+/// State-threading: consumes and rebuilds the event.
+fn cuda_event_synchronize(event: CudaEvent) -> (CudaEvent, i32) with IO {
+    let raw = event.handle
+    let err = cuEventSynchronize(raw)
+    (CudaEvent { handle: raw }, err)
+}
+
+/// Query whether an event has completed.
+/// Returns (CudaEvent, error_code) where CUDA_SUCCESS means completed,
+/// CUDA_ERROR_NOT_READY means still pending.
+fn cuda_event_query(event: CudaEvent) -> (CudaEvent, i32) with IO {
+    let raw = event.handle
+    let err = cuEventQuery(raw)
+    (CudaEvent { handle: raw }, err)
+}
+
+/// Compute elapsed time in milliseconds between two events.
+/// Both events must have been recorded and completed.
+/// State-threading: consumes and rebuilds both events.
+/// Returns (start_event, end_event, elapsed_ms, error_code).
+fn cuda_event_elapsed(
+    start: CudaEvent,
+    end: CudaEvent
+) -> (CudaEvent, CudaEvent, f32, i32) with IO {
+    let start_raw = start.handle
+    let end_raw = end.handle
+    var ms: f32 = 0.0
+    let err = cuEventElapsedTime(&ms as *const f32, start_raw, end_raw)
+    (CudaEvent { handle: start_raw }, CudaEvent { handle: end_raw }, ms, err)
+}
+
+
+// ============================================================================
+// Diagnostic helpers
+// ============================================================================
+
+/// Check whether a CUDA error code represents success.
+fn cuda_is_success(err: i32) -> bool {
+    err == CUDA_SUCCESS
+}
+
+/// Check whether a CUDA error code represents failure.
+fn cuda_is_error(err: i32) -> bool {
+    err != CUDA_SUCCESS
+}
+
+/// Print a CUDA error code with a descriptive prefix.
+/// Useful for debugging; does not abort.
+fn cuda_print_error(prefix: string, err: i32) with IO {
+    print(prefix)
+    if err == CUDA_SUCCESS {
+        print(": CUDA_SUCCESS\n")
+    } else if err == CUDA_ERROR_INVALID_VALUE {
+        print(": CUDA_ERROR_INVALID_VALUE (1)\n")
+    } else if err == CUDA_ERROR_OUT_OF_MEMORY {
+        print(": CUDA_ERROR_OUT_OF_MEMORY (2)\n")
+    } else if err == CUDA_ERROR_NOT_INITIALIZED {
+        print(": CUDA_ERROR_NOT_INITIALIZED (3)\n")
+    } else if err == CUDA_ERROR_NO_DEVICE {
+        print(": CUDA_ERROR_NO_DEVICE (100)\n")
+    } else if err == CUDA_ERROR_INVALID_DEVICE {
+        print(": CUDA_ERROR_INVALID_DEVICE (101)\n")
+    } else if err == CUDA_ERROR_INVALID_IMAGE {
+        print(": CUDA_ERROR_INVALID_IMAGE (200)\n")
+    } else if err == CUDA_ERROR_INVALID_CONTEXT {
+        print(": CUDA_ERROR_INVALID_CONTEXT (201)\n")
+    } else if err == CUDA_ERROR_INVALID_HANDLE {
+        print(": CUDA_ERROR_INVALID_HANDLE (400)\n")
+    } else if err == CUDA_ERROR_NOT_FOUND {
+        print(": CUDA_ERROR_NOT_FOUND (500)\n")
+    } else if err == CUDA_ERROR_NOT_READY {
+        print(": CUDA_ERROR_NOT_READY (600)\n")
+    } else if err == CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES {
+        print(": CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES (701)\n")
+    } else if err == CUDA_ERROR_LAUNCH_TIMEOUT {
+        print(": CUDA_ERROR_LAUNCH_TIMEOUT (702)\n")
+    } else if err == CUDA_ERROR_LAUNCH_FAILED {
+        print(": CUDA_ERROR_LAUNCH_FAILED (719)\n")
+    } else {
+        print(": CUDA_ERROR_UNKNOWN (")
+        print_int(err as i64)
+        print(")\n")
+    }
+}
+
+/// Assert that a CUDA call succeeded. Prints a message and returns false on error.
+/// Returns true on success.
+fn cuda_check(label: string, err: i32) -> bool with IO {
+    if cuda_is_success(err) {
+        true
+    } else {
+        cuda_print_error(label, err)
+        false
+    }
+}
+
+
+// ============================================================================
+// Compute helpers — grid/block dimension calculators
+// ============================================================================
+
+/// Compute the number of grid blocks needed for `n` elements with `block_size`
+/// threads per block (ceiling division).
+fn cuda_grid_dim(n: i64, block_size: i32) -> i32 with Div {
+    let bs = block_size as i64
+    if bs <= 0 {
+        1
+    } else {
+        let blocks = (n + bs - 1) / bs
+        blocks as i32
+    }
+}
+
+/// Standard 1D block size for simple element-wise kernels.
+fn cuda_default_block_size() -> i32 {
+    256
+}
+
+/// Standard 1D block size for reduction kernels.
+fn cuda_reduction_block_size() -> i32 {
+    512
+}
+
+/// Standard warp size (all current NVIDIA architectures).
+fn cuda_warp_size() -> i32 {
+    32
+}
+
+
+// ============================================================================
+// End-to-end convenience: load PTX + get kernel in one call
+// ============================================================================
+
+/// Load a PTX image and look up a kernel function by name.
+/// Returns (CudaModule, kernel_handle, error_code).
+/// On module load failure, kernel_handle is 0 and the module is still
+/// returned (caller must unload it even on error to satisfy linearity).
+fn cuda_load_kernel(ptx_image: *const i8, kernel_name: *const i8) -> (CudaModule, i64, i32) with IO {
+    var raw_mod: i64 = 0
+    let load_err = cuModuleLoadData(&raw_mod as *const i64, ptx_image)
+    if load_err != CUDA_SUCCESS {
+        // Return a dummy module (handle may be 0); caller must still unload.
+        (CudaModule { handle: raw_mod }, 0, load_err)
+    } else {
+        var func_handle: i64 = 0
+        let func_err = cuModuleGetFunction(&func_handle as *const i64, raw_mod, kernel_name)
+        (CudaModule { handle: raw_mod }, func_handle, func_err)
+    }
+}
+
+
+// ============================================================================
+// Occupancy queries (safe wrappers)
+// ============================================================================
+
+/// Query the maximum number of active blocks per SM for a kernel.
+/// Returns (max_blocks, error_code).
+fn cuda_occupancy_max_active_blocks(
+    func: i64,
+    block_size: i32,
+    dynamic_smem: i64
+) -> (i32, i32) with IO {
+    var num_blocks: i32 = 0
+    let err = cuOccupancyMaxActiveBlocksPerMultiprocessor(
+        &num_blocks as *const i32,
+        func,
+        block_size,
+        dynamic_smem
+    )
+    (num_blocks, err)
+}
+
+/// Query the optimal block size for a kernel.
+/// Returns (min_grid_size, optimal_block_size, error_code).
+fn cuda_occupancy_max_potential_block_size(
+    func: i64,
+    dynamic_smem: i64,
+    block_size_limit: i32
+) -> (i32, i32, i32) with IO {
+    var min_grid: i32 = 0
+    var block_sz: i32 = 0
+    let err = cuOccupancyMaxPotentialBlockSize(
+        &min_grid as *const i32,
+        &block_sz as *const i32,
+        func,
+        0,
+        dynamic_smem,
+        block_size_limit
+    )
+    (min_grid, block_sz, err)
+}
+
+
+// ============================================================================
+// Runtime availability probe
+// ============================================================================
+
+/// Attempt to initialize the CUDA driver and detect at least one device.
+/// Returns true if CUDA is usable, false otherwise.
+/// This is a destructive probe (calls cuInit) — call at program start.
+fn cuda_runtime_available() -> bool with IO {
+    let init_err = cuda_init()
+    if init_err != CUDA_SUCCESS {
+        false
+    } else {
+        let count_result = cuda_device_count()
+        let count = count_result.0
+        let count_err = count_result.1
+        if count_err != CUDA_SUCCESS {
+            false
+        } else {
+            count > 0
+        }
+    }
+}
+
+/// Print a summary of all detected CUDA devices. Useful for diagnostics.
+fn cuda_print_device_summary() with IO, Mut, Div {
+    let count_result = cuda_device_count()
+    let count = count_result.0
+    let count_err = count_result.1
+
+    if count_err != CUDA_SUCCESS {
+        print("CUDA: failed to query device count\n")
+        return
+    }
+
+    print("CUDA devices: ")
+    print_int(count as i64)
+    print("\n")
+
+    var i: i32 = 0
+    while i < count {
+        let dev_result = cuda_device_get(i)
+        let dev = dev_result.0
+        let dev_err = dev_result.1
+
+        if dev_err == CUDA_SUCCESS {
+            print("  Device ")
+            print_int(i as i64)
+            print(": ")
+
+            // Query compute capability
+            let major_result = cuda_device_get_attribute(CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, dev)
+            let minor_result = cuda_device_get_attribute(CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, dev)
+            let major = major_result.0
+            let minor = minor_result.0
+
+            print("sm_")
+            print_int(major as i64)
+            print_int(minor as i64)
+
+            // Query total memory
+            let mem_result = cuda_device_total_mem(dev)
+            let mem_bytes = mem_result.0
+            let mem_mb = mem_bytes / 1048576
+
+            print(" (")
+            print_int(mem_mb)
+            print(" MB")
+
+            // Query SM count
+            let sm_result = cuda_device_get_attribute(CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, dev)
+            let sm_count = sm_result.0
+
+            print(", ")
+            print_int(sm_count as i64)
+            print(" SMs)\n")
+        } else {
+            print("  Device ")
+            print_int(i as i64)
+            print(": <query failed>\n")
+        }
+
+        i = i + 1
+    }
+}

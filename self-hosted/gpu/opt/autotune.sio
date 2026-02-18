@@ -1,0 +1,1402 @@
+// self-hosted::gpu::opt::autotune — Static auto-tuning for GpuKernelIr
+//
+// Phase 4B goals:
+// - Analyze flattened GpuKernelIr instruction streams
+// - Detect broad kernel pattern + memory behavior
+// - Estimate occupancy from architecture constraints
+// - Recommend launch block shape + shared memory usage
+// - Optionally apply tuning hints directly to kernels
+//
+// This pass is deterministic and fixed-size only (no dynamic allocations).
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+let GPU_AUTOTUNE_MAX_KERNELS: i64 = 64
+let GPU_AUTOTUNE_MAX_CANDIDATES: i64 = 8
+
+let GPU_PATTERN_ELEMENTWISE: i64 = 0
+let GPU_PATTERN_REDUCTION: i64 = 1
+let GPU_PATTERN_STENCIL: i64 = 2
+let GPU_PATTERN_MATMUL: i64 = 3
+let GPU_PATTERN_SCAN: i64 = 4
+let GPU_PATTERN_HISTOGRAM: i64 = 5
+let GPU_PATTERN_SPARSE: i64 = 6
+let GPU_PATTERN_GENERAL: i64 = 7
+
+let GPU_MEMORY_COALESCED: i64 = 0
+let GPU_MEMORY_STRIDED: i64 = 1
+let GPU_MEMORY_RANDOM: i64 = 2
+let GPU_MEMORY_TILED2D: i64 = 3
+let GPU_MEMORY_MIXED: i64 = 4
+
+let GPU_LIMITER_BLOCKS: i64 = 0
+let GPU_LIMITER_WARPS: i64 = 1
+let GPU_LIMITER_REGISTERS: i64 = 2
+let GPU_LIMITER_SHARED: i64 = 3
+let GPU_LIMITER_THREADS_PER_BLOCK: i64 = 4
+
+let GPU_TUNE_MAX_OCCUPANCY: i64 = 0
+let GPU_TUNE_BALANCED_ILP: i64 = 1
+let GPU_TUNE_MEMORY_THROUGHPUT: i64 = 2
+let GPU_TUNE_TENSOR_CORE: i64 = 3
+let GPU_TUNE_MIN_SHARED: i64 = 4
+let GPU_TUNE_SAFE_DEFAULTS: i64 = 5
+
+// ============================================================================
+// Core structs
+// ============================================================================
+
+struct GpuInstructionMix {
+    int_ops: i64,
+    fp32_ops: i64,
+    fp64_ops: i64,
+    fp16_ops: i64,
+    tensor_ops: i64,
+    memory_ops: i64,
+    sync_ops: i64,
+    sfu_ops: i64,
+    control_ops: i64,
+    atomic_ops: i64,
+    warp_ops: i64,
+    pred_ops: i64,
+    total: i64,
+}
+
+fn gpu_instruction_mix_new() -> GpuInstructionMix {
+    GpuInstructionMix {
+        int_ops: 0,
+        fp32_ops: 0,
+        fp64_ops: 0,
+        fp16_ops: 0,
+        tensor_ops: 0,
+        memory_ops: 0,
+        sync_ops: 0,
+        sfu_ops: 0,
+        control_ops: 0,
+        atomic_ops: 0,
+        warp_ops: 0,
+        pred_ops: 0,
+        total: 0,
+    }
+}
+
+struct GpuKernelPattern {
+    tag: i64,
+    m: i64,
+    n: i64,
+    k: i64,
+    radius: i64,
+}
+
+fn gpu_kernel_pattern_general() -> GpuKernelPattern {
+    GpuKernelPattern {
+        tag: GPU_PATTERN_GENERAL,
+        m: 0,
+        n: 0,
+        k: 0,
+        radius: 0,
+    }
+}
+
+struct GpuMemoryPatternInfo {
+    tag: i64,
+    stride: i64,
+    tile_x: i64,
+    tile_y: i64,
+}
+
+fn gpu_memory_pattern_mixed() -> GpuMemoryPatternInfo {
+    GpuMemoryPatternInfo {
+        tag: GPU_MEMORY_MIXED,
+        stride: 1,
+        tile_x: 0,
+        tile_y: 0,
+    }
+}
+
+struct GpuKernelProfile {
+    pattern: GpuKernelPattern,
+    memory_pattern: GpuMemoryPatternInfo,
+    instruction_mix: GpuInstructionMix,
+    estimated_registers: i64,
+    static_shared_mem: i64,
+    uses_tensor_cores: bool,
+    primary_dtype: GpuType,
+    op_count: i64,
+    loop_depth: i64,
+}
+
+fn gpu_kernel_profile_new() -> GpuKernelProfile {
+    GpuKernelProfile {
+        pattern: gpu_kernel_pattern_general(),
+        memory_pattern: gpu_memory_pattern_mixed(),
+        instruction_mix: gpu_instruction_mix_new(),
+        estimated_registers: 32,
+        static_shared_mem: 0,
+        uses_tensor_cores: false,
+        primary_dtype: GpuType::GpuF32,
+        op_count: 0,
+        loop_depth: 0,
+    }
+}
+
+struct GpuBlockShape {
+    x: i64,
+    y: i64,
+    z: i64,
+}
+
+fn gpu_block_shape_new_1d(x: i64) -> GpuBlockShape {
+    GpuBlockShape { x: x, y: 1, z: 1 }
+}
+
+fn gpu_block_shape_new_2d(x: i64, y: i64) -> GpuBlockShape {
+    GpuBlockShape { x: x, y: y, z: 1 }
+}
+
+fn gpu_block_shape_new_3d(x: i64, y: i64, z: i64) -> GpuBlockShape {
+    GpuBlockShape { x: x, y: y, z: z }
+}
+
+fn gpu_block_shape_total_threads(shape: GpuBlockShape) -> i64 {
+    shape.x * shape.y * shape.z
+}
+
+fn gpu_block_shape_warps(shape: GpuBlockShape) -> i64 with Div {
+    let threads = gpu_block_shape_total_threads(shape)
+    if threads <= 0 {
+        0
+    } else {
+        (threads + 31) / 32
+    }
+}
+
+struct GpuTileConfig {
+    tile_m: i64,
+    tile_n: i64,
+    tile_k: i64,
+    pipeline_stages: i64,
+    swizzled: bool,
+}
+
+fn gpu_tile_config_default() -> GpuTileConfig {
+    GpuTileConfig {
+        tile_m: 16,
+        tile_n: 16,
+        tile_k: 16,
+        pipeline_stages: 2,
+        swizzled: false,
+    }
+}
+
+struct GpuOccupancyInfo {
+    occupancy_pct: i64,
+    active_warps: i64,
+    max_warps: i64,
+    active_blocks: i64,
+    limiter: i64,
+}
+
+fn gpu_occupancy_info_zero() -> GpuOccupancyInfo {
+    GpuOccupancyInfo {
+        occupancy_pct: 0,
+        active_warps: 0,
+        max_warps: 1,
+        active_blocks: 0,
+        limiter: GPU_LIMITER_THREADS_PER_BLOCK,
+    }
+}
+
+struct GpuTunedConfig {
+    block_shape: GpuBlockShape,
+    shared_mem_bytes: i64,
+    has_tile_config: bool,
+    tile_config: GpuTileConfig,
+    occupancy: GpuOccupancyInfo,
+    confidence_pct: i64,
+    strategy: i64,
+    rationale: string,
+}
+
+fn gpu_tuned_config_default() -> GpuTunedConfig {
+    GpuTunedConfig {
+        block_shape: gpu_block_shape_new_1d(256),
+        shared_mem_bytes: 0,
+        has_tile_config: false,
+        tile_config: gpu_tile_config_default(),
+        occupancy: gpu_occupancy_info_zero(),
+        confidence_pct: 50,
+        strategy: GPU_TUNE_SAFE_DEFAULTS,
+        rationale: "default",
+    }
+}
+
+struct GpuArchConstants {
+    sm_version: i64,
+    max_warps_per_sm: i64,
+    max_blocks_per_sm: i64,
+    registers_per_sm: i64,
+    register_alloc_granularity: i64,
+    shared_memory_per_sm: i64,
+    shared_alloc_granularity: i64,
+    max_threads_per_block: i64,
+    warp_size: i64,
+}
+
+struct GpuAutoTuneConfig {
+    target: GpuTarget,
+    sm_major: i64,
+    sm_minor: i64,
+    default_strategy: i64,
+    prefer_tensor_cores: bool,
+    min_occupancy_pct: i64,
+}
+
+fn gpu_autotune_config_default() -> GpuAutoTuneConfig {
+    GpuAutoTuneConfig {
+        target: GpuTarget::GpuTargetPtx,
+        sm_major: 8,
+        sm_minor: 0,
+        default_strategy: GPU_TUNE_BALANCED_ILP,
+        prefer_tensor_cores: true,
+        min_occupancy_pct: 25,
+    }
+}
+
+struct GpuAutoTuneReport {
+    tuned: [GpuTunedConfig; 64],
+    tuned_count: i64,
+}
+
+fn gpu_autotune_report_new() -> GpuAutoTuneReport {
+    GpuAutoTuneReport {
+        tuned: [gpu_tuned_config_default(); 64],
+        tuned_count: 0,
+    }
+}
+
+// ============================================================================
+// Scalar helpers
+// ============================================================================
+
+fn gpu_autotune_max(a: i64, b: i64) -> i64 {
+    if a > b { a } else { b }
+}
+
+fn gpu_autotune_min(a: i64, b: i64) -> i64 {
+    if a < b { a } else { b }
+}
+
+fn gpu_autotune_max3(a: i64, b: i64, c: i64) -> i64 {
+    gpu_autotune_max(gpu_autotune_max(a, b), c)
+}
+
+fn gpu_autotune_min4(a: i64, b: i64, c: i64, d: i64) -> i64 {
+    gpu_autotune_min(gpu_autotune_min(a, b), gpu_autotune_min(c, d))
+}
+
+fn gpu_autotune_clamp(x: i64, lo: i64, hi: i64) -> i64 {
+    if x < lo {
+        lo
+    } else if x > hi {
+        hi
+    } else {
+        x
+    }
+}
+
+fn gpu_autotune_ceil_div(x: i64, y: i64) -> i64 with Div {
+    if y <= 0 {
+        0
+    } else {
+        (x + y - 1) / y
+    }
+}
+
+fn gpu_autotune_round_up(x: i64, align: i64) -> i64 with Div {
+    if align <= 0 {
+        x
+    } else {
+        gpu_autotune_ceil_div(x, align) * align
+    }
+}
+
+fn gpu_autotune_i64_to_string(n: i64) -> string with Mut, Panic, Div, Alloc {
+    if n < 0 {
+        return "0"
+    }
+    if n == 0 {
+        return "0"
+    }
+
+    var digits: [i8; 32] = [0; 32]
+    var rev_len: i64 = 0
+    var value: i64 = n
+
+    while value > 0 {
+        let digit = value % 10
+        digits[rev_len as usize] = 48 + digit as i8
+        rev_len = rev_len + 1
+        value = value / 10
+    }
+
+    var bytes: [i8; 32] = [0; 32]
+    var i: i64 = 0
+    while i < rev_len {
+        bytes[i as usize] = digits[(rev_len - i - 1) as usize]
+        i = i + 1
+    }
+
+    str_from_bytes(bytes, rev_len)
+}
+
+fn gpu_autotune_is_predicate_op(code: GpuOpcode) -> bool {
+    code == GpuOpcode::GpuSetpLt ||
+    code == GpuOpcode::GpuSetpLe ||
+    code == GpuOpcode::GpuSetpEq ||
+    code == GpuOpcode::GpuSetpGe ||
+    code == GpuOpcode::GpuSetpGt ||
+    code == GpuOpcode::GpuSetpNe ||
+    code == GpuOpcode::GpuSelp
+}
+
+// ============================================================================
+// Instruction mix analysis
+// ============================================================================
+
+fn gpu_autotune_categorize_op(mix: GpuInstructionMix, op: GpuOp) -> GpuInstructionMix {
+    var out = mix
+    let code = op.opcode
+
+    if code == GpuOpcode::GpuAdd ||
+       code == GpuOpcode::GpuSub ||
+       code == GpuOpcode::GpuMul ||
+       code == GpuOpcode::GpuDiv ||
+       code == GpuOpcode::GpuMulImm ||
+       code == GpuOpcode::GpuAddImm ||
+       code == GpuOpcode::GpuCvt ||
+       code == GpuOpcode::GpuMax ||
+       code == GpuOpcode::GpuMin {
+        out.int_ops = out.int_ops + 1
+    } else if code == GpuOpcode::GpuFma {
+        out.fp32_ops = out.fp32_ops + 1
+    } else if code == GpuOpcode::GpuWmma || code == GpuOpcode::GpuMma {
+        out.tensor_ops = out.tensor_ops + 1
+    } else if code == GpuOpcode::GpuLoadParam ||
+              code == GpuOpcode::GpuLoadGlobal ||
+              code == GpuOpcode::GpuStoreGlobal ||
+              code == GpuOpcode::GpuLoadShared ||
+              code == GpuOpcode::GpuStoreShared ||
+              code == GpuOpcode::GpuLoadGlobalPred ||
+              code == GpuOpcode::GpuStoreGlobalPred ||
+              code == GpuOpcode::GpuLoadSharedPred ||
+              code == GpuOpcode::GpuStoreSharedPred ||
+              code == GpuOpcode::GpuLdGlobalCached ||
+              code == GpuOpcode::GpuStGlobalWriteback ||
+              code == GpuOpcode::GpuPrefetch ||
+              code == GpuOpcode::GpuTmaLoad ||
+              code == GpuOpcode::GpuTmaStore {
+        out.memory_ops = out.memory_ops + 1
+    } else if code == GpuOpcode::GpuBarrierSync {
+        out.sync_ops = out.sync_ops + 1
+    } else if code == GpuOpcode::GpuShflDown ||
+              code == GpuOpcode::GpuShflUp ||
+              code == GpuOpcode::GpuShflBfly ||
+              code == GpuOpcode::GpuShflIdx ||
+              code == GpuOpcode::GpuVote ||
+              code == GpuOpcode::GpuBallot {
+        out.warp_ops = out.warp_ops + 1
+    } else if code == GpuOpcode::GpuAtomicAdd {
+        out.atomic_ops = out.atomic_ops + 1
+    } else if code == GpuOpcode::GpuSqrt ||
+              code == GpuOpcode::GpuRsqrt ||
+              code == GpuOpcode::GpuExp2 ||
+              code == GpuOpcode::GpuLg2 ||
+              code == GpuOpcode::GpuSin ||
+              code == GpuOpcode::GpuCos ||
+              code == GpuOpcode::GpuAbs ||
+              code == GpuOpcode::GpuRcp {
+        out.sfu_ops = out.sfu_ops + 1
+    } else if code == GpuOpcode::GpuBra ||
+              code == GpuOpcode::GpuExit ||
+              code == GpuOpcode::GpuRet {
+        out.control_ops = out.control_ops + 1
+    } else if code == GpuOpcode::GpuGetTid ||
+              code == GpuOpcode::GpuGetBid ||
+              code == GpuOpcode::GpuGetNtid ||
+              code == GpuOpcode::GpuGetGridDim ||
+              code == GpuOpcode::GpuGetLaneId ||
+              code == GpuOpcode::GpuGetWarpId ||
+              code == GpuOpcode::GpuGetSmId {
+        out.int_ops = out.int_ops + 1
+    }
+
+    if gpu_autotune_is_predicate_op(code) {
+        out.pred_ops = out.pred_ops + 1
+    }
+
+    out
+}
+
+fn gpu_autotune_finalize_mix(mix: GpuInstructionMix) -> GpuInstructionMix {
+    var out = mix
+    out.total = out.int_ops + out.fp32_ops + out.fp64_ops + out.fp16_ops +
+                out.tensor_ops + out.memory_ops + out.sync_ops + out.sfu_ops +
+                out.control_ops + out.atomic_ops + out.warp_ops + out.pred_ops
+    out
+}
+
+fn gpu_autotune_analyze_instruction_mix(kernel: GpuKernelIr) -> GpuInstructionMix {
+    var mix = gpu_instruction_mix_new()
+    var i: i64 = 0
+    while i < kernel.op_count {
+        let op = kernel.ops[i as usize]
+        mix = gpu_autotune_categorize_op(mix, op)
+        i = i + 1
+    }
+    gpu_autotune_finalize_mix(mix)
+}
+
+fn gpu_autotune_compute_intensity_x100(mix: GpuInstructionMix) -> i64 with Div {
+    let flops = mix.fp32_ops + (mix.fp64_ops * 2) + mix.fp16_ops + (mix.tensor_ops * 512) + (mix.sfu_ops * 4)
+    let mem = if mix.memory_ops <= 0 { 1 } else { mix.memory_ops }
+    (flops * 100) / mem
+}
+
+fn gpu_autotune_is_memory_bound(mix: GpuInstructionMix) -> bool with Div {
+    gpu_autotune_compute_intensity_x100(mix) < 1000
+}
+
+fn gpu_autotune_is_compute_bound(mix: GpuInstructionMix) -> bool with Div {
+    gpu_autotune_compute_intensity_x100(mix) >= 1000
+}
+
+// ============================================================================
+// Pattern + profile analysis
+// ============================================================================
+
+fn gpu_autotune_uses_tensor_cores(kernel: GpuKernelIr) -> bool {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        let code = kernel.ops[i as usize].opcode
+        if code == GpuOpcode::GpuWmma || code == GpuOpcode::GpuMma {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn gpu_autotune_detect_pattern(kernel: GpuKernelIr, mix: GpuInstructionMix) -> GpuKernelPattern with Div {
+    var pattern = gpu_kernel_pattern_general()
+
+    if mix.tensor_ops > 0 {
+        pattern.tag = GPU_PATTERN_MATMUL
+        pattern.m = 16
+        pattern.n = 16
+        pattern.k = 16
+
+        if kernel.max_threads >= 256 {
+            pattern.m = 16
+            pattern.n = 16
+        } else if kernel.max_threads >= 128 {
+            pattern.m = 16
+            pattern.n = 8
+        }
+
+        return pattern
+    }
+
+    if mix.warp_ops > 0 {
+        // Warp-shuffle heavy kernels are usually reductions or scans.
+        var has_shfl_up: bool = false
+        var has_shfl_down: bool = false
+        var i: i64 = 0
+        while i < kernel.op_count {
+            let code = kernel.ops[i as usize].opcode
+            if code == GpuOpcode::GpuShflUp {
+                has_shfl_up = true
+            }
+            if code == GpuOpcode::GpuShflDown {
+                has_shfl_down = true
+            }
+            i = i + 1
+        }
+        if has_shfl_up && has_shfl_down {
+            pattern.tag = GPU_PATTERN_SCAN
+            return pattern
+        }
+
+        pattern.tag = GPU_PATTERN_REDUCTION
+        return pattern
+    }
+
+    if mix.atomic_ops > 4 && (mix.atomic_ops * 10) > mix.total {
+        pattern.tag = GPU_PATTERN_HISTOGRAM
+        return pattern
+    }
+
+    if mix.memory_ops > (mix.int_ops + mix.fp32_ops + mix.sfu_ops) && mix.sync_ops > 0 {
+        pattern.tag = GPU_PATTERN_STENCIL
+        pattern.radius = 1
+        return pattern
+    }
+
+    if mix.pred_ops > 8 && mix.memory_ops > 0 {
+        pattern.tag = GPU_PATTERN_SPARSE
+        return pattern
+    }
+
+    if mix.sync_ops == 0 && mix.atomic_ops == 0 && mix.warp_ops == 0 && mix.control_ops <= 1 {
+        pattern.tag = GPU_PATTERN_ELEMENTWISE
+        return pattern
+    }
+
+    pattern
+}
+
+fn gpu_autotune_detect_memory_pattern(kernel: GpuKernelIr) -> GpuMemoryPatternInfo {
+    var info = gpu_memory_pattern_mixed()
+
+    var has_shared: bool = false
+    var has_predicated_mem: bool = false
+    var has_cached: bool = false
+    var stride_guess: i64 = 1
+
+    var i: i64 = 0
+    while i < kernel.op_count {
+        let op = kernel.ops[i as usize]
+        let code = op.opcode
+
+        if code == GpuOpcode::GpuLoadShared || code == GpuOpcode::GpuStoreShared ||
+           code == GpuOpcode::GpuLoadSharedPred || code == GpuOpcode::GpuStoreSharedPred {
+            has_shared = true
+        }
+
+        if code == GpuOpcode::GpuLoadGlobalPred || code == GpuOpcode::GpuStoreGlobalPred {
+            has_predicated_mem = true
+        }
+
+        if code == GpuOpcode::GpuLdGlobalCached || code == GpuOpcode::GpuPrefetch {
+            has_cached = true
+        }
+
+        if code == GpuOpcode::GpuMulImm && op.rhs_imm > 1 {
+            stride_guess = gpu_autotune_max(stride_guess, op.rhs_imm)
+        }
+
+        i = i + 1
+    }
+
+    if has_shared && kernel.shared_mem_bytes > 0 {
+        info.tag = GPU_MEMORY_TILED2D
+        info.tile_x = 16
+        info.tile_y = 16
+        return info
+    }
+
+    if has_predicated_mem {
+        info.tag = GPU_MEMORY_RANDOM
+        return info
+    }
+
+    if stride_guess > 1 {
+        info.tag = GPU_MEMORY_STRIDED
+        info.stride = stride_guess
+        return info
+    }
+
+    if has_cached || (kernel.shared_mem_bytes == 0 && kernel.shared_bytes == 0) {
+        info.tag = GPU_MEMORY_COALESCED
+        return info
+    }
+
+    info
+}
+
+fn gpu_autotune_estimate_registers(kernel: GpuKernelIr, mix: GpuInstructionMix) -> i64 with Div {
+    let explicit = gpu_autotune_max3(
+        gpu_autotune_max(kernel.max_reg_u32, kernel.max_reg_i32),
+        gpu_autotune_max(kernel.max_reg_u64, kernel.max_reg_i64),
+        gpu_autotune_max(kernel.max_reg_f32, kernel.max_reg_f64)
+    )
+
+    if explicit > 0 {
+        return gpu_autotune_clamp(explicit, 8, 255)
+    }
+
+    let param_regs = kernel.param_count * 2
+    let value_regs = (kernel.op_count * 3) / 2
+    let tensor_regs = if mix.tensor_ops > 0 { 32 } else { 0 }
+    let pred_regs = mix.pred_ops / 2
+    let estimate = param_regs + value_regs + tensor_regs + pred_regs
+    gpu_autotune_clamp(estimate, 16, 255)
+}
+
+fn gpu_autotune_detect_primary_dtype(kernel: GpuKernelIr) -> GpuType {
+    var i: i64 = 0
+    while i < kernel.param_count {
+        let ty = kernel.params[i as usize].ty
+        if ty == GpuType::GpuF64 { return GpuType::GpuF64 }
+        if ty == GpuType::GpuF32 { return GpuType::GpuF32 }
+        if ty == GpuType::GpuI64 || ty == GpuType::GpuU64 || ty == GpuType::GpuPtr {
+            return GpuType::GpuI64
+        }
+        i = i + 1
+    }
+
+    i = 0
+    while i < kernel.op_count {
+        let ty = kernel.ops[i as usize].ty
+        if ty == GpuType::GpuF64 { return GpuType::GpuF64 }
+        if ty == GpuType::GpuF32 { return GpuType::GpuF32 }
+        i = i + 1
+    }
+
+    GpuType::GpuF32
+}
+
+fn gpu_autotune_estimate_loop_depth(kernel: GpuKernelIr) -> i64 {
+    var branches: i64 = 0
+    var exits: i64 = 0
+    var i: i64 = 0
+
+    while i < kernel.op_count {
+        let code = kernel.ops[i as usize].opcode
+        if code == GpuOpcode::GpuBra {
+            branches = branches + 1
+        }
+        if code == GpuOpcode::GpuExit {
+            exits = exits + 1
+        }
+        i = i + 1
+    }
+
+    if branches == 0 {
+        0
+    } else if branches <= 2 && exits <= 2 {
+        1
+    } else if branches <= 8 {
+        2
+    } else {
+        3
+    }
+}
+
+fn gpu_autotune_is_simple_profile(p: GpuKernelProfile) -> bool {
+    p.estimated_registers <= 32 && p.static_shared_mem <= 4096 && p.op_count <= 200
+}
+
+fn gpu_autotune_is_complex_profile(p: GpuKernelProfile) -> bool {
+    p.estimated_registers > 64 || p.loop_depth > 2 || p.op_count > 600
+}
+
+fn gpu_autotune_analyze_kernel(kernel: GpuKernelIr) -> GpuKernelProfile with Div {
+    var p = gpu_kernel_profile_new()
+    let mix = gpu_autotune_analyze_instruction_mix(kernel)
+
+    p.instruction_mix = mix
+    p.pattern = gpu_autotune_detect_pattern(kernel, mix)
+    p.memory_pattern = gpu_autotune_detect_memory_pattern(kernel)
+    p.estimated_registers = gpu_autotune_estimate_registers(kernel, mix)
+    p.static_shared_mem = if kernel.shared_mem_bytes > kernel.shared_bytes { kernel.shared_mem_bytes } else { kernel.shared_bytes }
+    p.uses_tensor_cores = gpu_autotune_uses_tensor_cores(kernel)
+    p.primary_dtype = gpu_autotune_detect_primary_dtype(kernel)
+    p.op_count = kernel.op_count
+    p.loop_depth = gpu_autotune_estimate_loop_depth(kernel)
+
+    p
+}
+
+// ============================================================================
+// Naming helpers
+// ============================================================================
+
+fn gpu_autotune_pattern_name(pattern: GpuKernelPattern) -> string {
+    if pattern.tag == GPU_PATTERN_ELEMENTWISE {
+        "elementwise"
+    } else if pattern.tag == GPU_PATTERN_REDUCTION {
+        "reduction"
+    } else if pattern.tag == GPU_PATTERN_STENCIL {
+        "stencil"
+    } else if pattern.tag == GPU_PATTERN_MATMUL {
+        "matmul"
+    } else if pattern.tag == GPU_PATTERN_SCAN {
+        "scan"
+    } else if pattern.tag == GPU_PATTERN_HISTOGRAM {
+        "histogram"
+    } else if pattern.tag == GPU_PATTERN_SPARSE {
+        "sparse"
+    } else {
+        "general"
+    }
+}
+
+fn gpu_autotune_memory_pattern_name(mp: GpuMemoryPatternInfo) -> string {
+    if mp.tag == GPU_MEMORY_COALESCED {
+        "coalesced"
+    } else if mp.tag == GPU_MEMORY_STRIDED {
+        "strided"
+    } else if mp.tag == GPU_MEMORY_RANDOM {
+        "random"
+    } else if mp.tag == GPU_MEMORY_TILED2D {
+        "tiled2d"
+    } else {
+        "mixed"
+    }
+}
+
+fn gpu_autotune_strategy_name(strategy: i64) -> string {
+    if strategy == GPU_TUNE_MAX_OCCUPANCY {
+        "max-occupancy"
+    } else if strategy == GPU_TUNE_BALANCED_ILP {
+        "balanced-ilp"
+    } else if strategy == GPU_TUNE_MEMORY_THROUGHPUT {
+        "memory-throughput"
+    } else if strategy == GPU_TUNE_TENSOR_CORE {
+        "tensor-core"
+    } else if strategy == GPU_TUNE_MIN_SHARED {
+        "min-shared-mem"
+    } else {
+        "safe-defaults"
+    }
+}
+
+fn gpu_autotune_limiter_name(limiter: i64) -> string {
+    if limiter == GPU_LIMITER_BLOCKS {
+        "max blocks/SM"
+    } else if limiter == GPU_LIMITER_WARPS {
+        "max warps/SM"
+    } else if limiter == GPU_LIMITER_REGISTERS {
+        "register file"
+    } else if limiter == GPU_LIMITER_SHARED {
+        "shared memory"
+    } else {
+        "threads/block"
+    }
+}
+
+// ============================================================================
+// Architecture constants
+// ============================================================================
+
+fn gpu_arch_constants_turing() -> GpuArchConstants {
+    GpuArchConstants {
+        sm_version: 75,
+        max_warps_per_sm: 32,
+        max_blocks_per_sm: 16,
+        registers_per_sm: 65536,
+        register_alloc_granularity: 256,
+        shared_memory_per_sm: 65536,
+        shared_alloc_granularity: 256,
+        max_threads_per_block: 1024,
+        warp_size: 32,
+    }
+}
+
+fn gpu_arch_constants_ampere() -> GpuArchConstants {
+    GpuArchConstants {
+        sm_version: 80,
+        max_warps_per_sm: 64,
+        max_blocks_per_sm: 32,
+        registers_per_sm: 65536,
+        register_alloc_granularity: 256,
+        shared_memory_per_sm: 167936,
+        shared_alloc_granularity: 128,
+        max_threads_per_block: 1024,
+        warp_size: 32,
+    }
+}
+
+fn gpu_arch_constants_ada() -> GpuArchConstants {
+    GpuArchConstants {
+        sm_version: 89,
+        max_warps_per_sm: 48,
+        max_blocks_per_sm: 24,
+        registers_per_sm: 65536,
+        register_alloc_granularity: 256,
+        shared_memory_per_sm: 102400,
+        shared_alloc_granularity: 128,
+        max_threads_per_block: 1024,
+        warp_size: 32,
+    }
+}
+
+fn gpu_arch_constants_hopper() -> GpuArchConstants {
+    GpuArchConstants {
+        sm_version: 90,
+        max_warps_per_sm: 64,
+        max_blocks_per_sm: 32,
+        registers_per_sm: 65536,
+        register_alloc_granularity: 256,
+        shared_memory_per_sm: 233472,
+        shared_alloc_granularity: 128,
+        max_threads_per_block: 1024,
+        warp_size: 32,
+    }
+}
+
+fn gpu_arch_constants_blackwell() -> GpuArchConstants {
+    GpuArchConstants {
+        sm_version: 100,
+        max_warps_per_sm: 64,
+        max_blocks_per_sm: 32,
+        registers_per_sm: 65536,
+        register_alloc_granularity: 256,
+        shared_memory_per_sm: 262144,
+        shared_alloc_granularity: 128,
+        max_threads_per_block: 1024,
+        warp_size: 32,
+    }
+}
+
+fn gpu_arch_constants_metal() -> GpuArchConstants {
+    GpuArchConstants {
+        sm_version: 70,
+        max_warps_per_sm: 32,
+        max_blocks_per_sm: 16,
+        registers_per_sm: 65536,
+        register_alloc_granularity: 256,
+        shared_memory_per_sm: 32768,
+        shared_alloc_granularity: 128,
+        max_threads_per_block: 1024,
+        warp_size: 32,
+    }
+}
+
+fn gpu_arch_constants_spirv() -> GpuArchConstants {
+    GpuArchConstants {
+        sm_version: 70,
+        max_warps_per_sm: 32,
+        max_blocks_per_sm: 16,
+        registers_per_sm: 32768,
+        register_alloc_granularity: 256,
+        shared_memory_per_sm: 32768,
+        shared_alloc_granularity: 128,
+        max_threads_per_block: 1024,
+        warp_size: 32,
+    }
+}
+
+fn gpu_arch_constants_from_sm(sm_major: i64, sm_minor: i64) -> GpuArchConstants {
+    let sm = sm_major * 10 + sm_minor
+
+    if sm >= 100 {
+        gpu_arch_constants_blackwell()
+    } else if sm >= 90 {
+        gpu_arch_constants_hopper()
+    } else if sm >= 89 {
+        gpu_arch_constants_ada()
+    } else if sm >= 80 {
+        gpu_arch_constants_ampere()
+    } else {
+        gpu_arch_constants_turing()
+    }
+}
+
+fn gpu_autotune_arch_constants(cfg: GpuAutoTuneConfig) -> GpuArchConstants {
+    if cfg.target == GpuTarget::GpuTargetPtx {
+        gpu_arch_constants_from_sm(cfg.sm_major, cfg.sm_minor)
+    } else if cfg.target == GpuTarget::GpuTargetMetal {
+        gpu_arch_constants_metal()
+    } else {
+        gpu_arch_constants_spirv()
+    }
+}
+
+// ============================================================================
+// Occupancy
+// ============================================================================
+
+fn gpu_autotune_calculate_occupancy(
+    arch: GpuArchConstants,
+    block_threads: i64,
+    registers_per_thread: i64,
+    shared_mem_per_block: i64
+) -> GpuOccupancyInfo with Div {
+    if block_threads <= 0 || block_threads > arch.max_threads_per_block {
+        var invalid = gpu_occupancy_info_zero()
+        invalid.limiter = GPU_LIMITER_THREADS_PER_BLOCK
+        return invalid
+    }
+
+    let warps_per_block = gpu_autotune_ceil_div(block_threads, arch.warp_size)
+    if warps_per_block <= 0 {
+        return gpu_occupancy_info_zero()
+    }
+
+    let blocks_by_warps = arch.max_warps_per_sm / warps_per_block
+
+    let regs_per_block = registers_per_thread * block_threads
+    let aligned_regs = gpu_autotune_round_up(regs_per_block, arch.register_alloc_granularity)
+    let blocks_by_regs = if aligned_regs > 0 {
+        arch.registers_per_sm / aligned_regs
+    } else {
+        arch.max_blocks_per_sm
+    }
+
+    let aligned_shared = gpu_autotune_round_up(shared_mem_per_block, arch.shared_alloc_granularity)
+    let blocks_by_shared = if aligned_shared > 0 {
+        arch.shared_memory_per_sm / aligned_shared
+    } else {
+        arch.max_blocks_per_sm
+    }
+
+    let active_blocks = gpu_autotune_min4(blocks_by_warps, blocks_by_regs, blocks_by_shared, arch.max_blocks_per_sm)
+    let active_warps = active_blocks * warps_per_block
+
+    var occupancy_pct: i64 = 0
+    if arch.max_warps_per_sm > 0 {
+        occupancy_pct = (active_warps * 100) / arch.max_warps_per_sm
+    }
+
+    var limiter = GPU_LIMITER_BLOCKS
+    if active_blocks == blocks_by_regs {
+        limiter = GPU_LIMITER_REGISTERS
+    } else if active_blocks == blocks_by_shared {
+        limiter = GPU_LIMITER_SHARED
+    } else if active_blocks == blocks_by_warps {
+        limiter = GPU_LIMITER_WARPS
+    }
+
+    GpuOccupancyInfo {
+        occupancy_pct: occupancy_pct,
+        active_warps: active_warps,
+        max_warps: arch.max_warps_per_sm,
+        active_blocks: active_blocks,
+        limiter: limiter,
+    }
+}
+
+fn gpu_autotune_candidates_for_strategy(strategy: i64) -> ([i64; 8], i64) {
+    var cands: [i64; 8] = [0; 8]
+
+    if strategy == GPU_TUNE_MAX_OCCUPANCY {
+        cands[0] = 64
+        cands[1] = 128
+        cands[2] = 256
+        cands[3] = 512
+        cands[4] = 1024
+        return (cands, 5)
+    }
+
+    if strategy == GPU_TUNE_BALANCED_ILP {
+        cands[0] = 128
+        cands[1] = 256
+        cands[2] = 384
+        cands[3] = 512
+        return (cands, 4)
+    }
+
+    if strategy == GPU_TUNE_TENSOR_CORE {
+        cands[0] = 128
+        cands[1] = 256
+        return (cands, 2)
+    }
+
+    if strategy == GPU_TUNE_MEMORY_THROUGHPUT {
+        cands[0] = 256
+        cands[1] = 512
+        return (cands, 2)
+    }
+
+    if strategy == GPU_TUNE_MIN_SHARED {
+        cands[0] = 128
+        cands[1] = 256
+        return (cands, 2)
+    }
+
+    cands[0] = 256
+    (cands, 1)
+}
+
+fn gpu_autotune_score_candidate(strategy: i64, occ: GpuOccupancyInfo, threads: i64) -> i64 with Div {
+    var score = occ.occupancy_pct
+
+    if strategy == GPU_TUNE_BALANCED_ILP {
+        if occ.occupancy_pct >= 50 && occ.occupancy_pct <= 75 {
+            score = score + (threads / 64)
+        }
+    }
+
+    if strategy == GPU_TUNE_MEMORY_THROUGHPUT {
+        score = score + (threads / 128)
+    }
+
+    if strategy == GPU_TUNE_TENSOR_CORE {
+        if threads == 128 || threads == 256 {
+            score = score + 10
+        }
+    }
+
+    score
+}
+
+fn gpu_autotune_find_optimal_block_shape(
+    arch: GpuArchConstants,
+    registers_per_thread: i64,
+    shared_mem_per_block: i64,
+    strategy: i64
+) -> GpuBlockShape with Div {
+    let pair = gpu_autotune_candidates_for_strategy(strategy)
+    let cands = pair.0
+    let count = pair.1
+
+    var best_threads: i64 = 256
+    var best_score: i64 = -1000000
+
+    var i: i64 = 0
+    while i < count {
+        let threads = cands[i as usize]
+
+        if threads > 0 && threads <= arch.max_threads_per_block {
+            let occ = gpu_autotune_calculate_occupancy(arch, threads, registers_per_thread, shared_mem_per_block)
+            let score = gpu_autotune_score_candidate(strategy, occ, threads)
+            if score > best_score {
+                best_score = score
+                best_threads = threads
+            }
+        }
+
+        i = i + 1
+    }
+
+    gpu_block_shape_new_1d(best_threads)
+}
+
+// ============================================================================
+// Strategy + recommendations
+// ============================================================================
+
+fn gpu_autotune_select_strategy(profile: GpuKernelProfile, cfg: GpuAutoTuneConfig) -> i64 with Div {
+    let tag = profile.pattern.tag
+
+    if tag == GPU_PATTERN_ELEMENTWISE {
+        return GPU_TUNE_BALANCED_ILP
+    }
+    if tag == GPU_PATTERN_REDUCTION {
+        return GPU_TUNE_MAX_OCCUPANCY
+    }
+    if tag == GPU_PATTERN_MATMUL {
+        if profile.uses_tensor_cores && cfg.prefer_tensor_cores {
+            return GPU_TUNE_TENSOR_CORE
+        }
+        return GPU_TUNE_MEMORY_THROUGHPUT
+    }
+    if tag == GPU_PATTERN_SCAN {
+        return GPU_TUNE_MAX_OCCUPANCY
+    }
+    if tag == GPU_PATTERN_STENCIL {
+        return GPU_TUNE_MEMORY_THROUGHPUT
+    }
+    if tag == GPU_PATTERN_HISTOGRAM {
+        return GPU_TUNE_MIN_SHARED
+    }
+    if tag == GPU_PATTERN_SPARSE {
+        return GPU_TUNE_BALANCED_ILP
+    }
+
+    if gpu_autotune_is_simple_profile(profile) {
+        GPU_TUNE_MAX_OCCUPANCY
+    } else if gpu_autotune_is_complex_profile(profile) {
+        GPU_TUNE_BALANCED_ILP
+    } else {
+        cfg.default_strategy
+    }
+}
+
+fn gpu_autotune_recommend_block_shape(
+    profile: GpuKernelProfile,
+    strategy: i64,
+    arch: GpuArchConstants
+) -> GpuBlockShape with Div {
+    let tag = profile.pattern.tag
+
+    if tag == GPU_PATTERN_MATMUL {
+        if strategy == GPU_TUNE_TENSOR_CORE {
+            if profile.pattern.m >= 16 && profile.pattern.n >= 16 {
+                return gpu_block_shape_new_2d(16, 16)
+            }
+            return gpu_block_shape_new_2d(16, 8)
+        }
+        return gpu_block_shape_new_2d(16, 16)
+    }
+
+    if tag == GPU_PATTERN_STENCIL {
+        return gpu_block_shape_new_2d(16, 16)
+    }
+
+    gpu_autotune_find_optimal_block_shape(
+        arch,
+        profile.estimated_registers,
+        profile.static_shared_mem,
+        strategy
+    )
+}
+
+fn gpu_autotune_recommend_shared_memory(profile: GpuKernelProfile, shape: GpuBlockShape) -> i64 with Div {
+    var shared = profile.static_shared_mem
+    let tag = profile.pattern.tag
+
+    if tag == GPU_PATTERN_REDUCTION {
+        let warp_scratch = gpu_block_shape_warps(shape) * 4 * 32
+        shared = gpu_autotune_max(shared, warp_scratch)
+    }
+
+    if tag == GPU_PATTERN_STENCIL {
+        let radius = if profile.pattern.radius <= 0 { 1 } else { profile.pattern.radius }
+        let halo_x = shape.x + (2 * radius)
+        let halo_y = shape.y + (2 * radius)
+        let bytes = halo_x * halo_y * 4
+        shared = gpu_autotune_max(shared, bytes)
+    }
+
+    if tag == GPU_PATTERN_MATMUL && profile.uses_tensor_cores {
+        // Two FP16 tiles (A and B) plus conservative accumulator scratch.
+        let tile_a = 16 * 16 * 2
+        let tile_b = 16 * 16 * 2
+        let scratch = 16 * 16 * 4
+        shared = gpu_autotune_max(shared, tile_a + tile_b + scratch)
+    }
+
+    if tag == GPU_PATTERN_HISTOGRAM {
+        shared = gpu_autotune_max(shared, 1024)
+    }
+
+    if shared < 0 {
+        shared = 0
+    }
+
+    shared
+}
+
+fn gpu_autotune_recommend_tile_config(
+    profile: GpuKernelProfile,
+    cfg: GpuAutoTuneConfig
+) -> (bool, GpuTileConfig) {
+    if !profile.uses_tensor_cores {
+        return (false, gpu_tile_config_default())
+    }
+
+    var tile_cfg = gpu_tile_config_default()
+
+    if profile.pattern.tag == GPU_PATTERN_MATMUL {
+        if profile.pattern.m > 0 { tile_cfg.tile_m = profile.pattern.m }
+        if profile.pattern.n > 0 { tile_cfg.tile_n = profile.pattern.n }
+        if profile.pattern.k > 0 { tile_cfg.tile_k = profile.pattern.k }
+    }
+
+    let sm = cfg.sm_major * 10 + cfg.sm_minor
+    if cfg.target == GpuTarget::GpuTargetPtx {
+        if sm >= 90 {
+            tile_cfg.pipeline_stages = 4
+        } else {
+            tile_cfg.pipeline_stages = 2
+        }
+        tile_cfg.swizzled = true
+    } else {
+        tile_cfg.pipeline_stages = 2
+        tile_cfg.swizzled = false
+    }
+
+    (true, tile_cfg)
+}
+
+fn gpu_autotune_calculate_confidence(
+    profile: GpuKernelProfile,
+    occupancy: GpuOccupancyInfo,
+    cfg: GpuAutoTuneConfig
+) -> i64 with Div {
+    var confidence: i64 = 50
+
+    let tag = profile.pattern.tag
+    if tag == GPU_PATTERN_ELEMENTWISE {
+        confidence = confidence + 30
+    } else if tag == GPU_PATTERN_REDUCTION {
+        confidence = confidence + 25
+    } else if tag == GPU_PATTERN_MATMUL {
+        confidence = confidence + 20
+    } else if tag == GPU_PATTERN_SCAN {
+        confidence = confidence + 20
+    } else if tag == GPU_PATTERN_GENERAL {
+        confidence = confidence - 10
+    }
+
+    if occupancy.occupancy_pct >= 50 {
+        confidence = confidence + 10
+    } else if occupancy.occupancy_pct < cfg.min_occupancy_pct {
+        confidence = confidence - 20
+    }
+
+    if gpu_autotune_is_simple_profile(profile) {
+        confidence = confidence + 10
+    }
+    if gpu_autotune_is_complex_profile(profile) {
+        confidence = confidence - 10
+    }
+
+    gpu_autotune_clamp(confidence, 0, 100)
+}
+
+fn gpu_autotune_generate_rationale(
+    profile: GpuKernelProfile,
+    block_shape: GpuBlockShape,
+    occupancy: GpuOccupancyInfo,
+    strategy: i64
+) -> string with Mut, Panic, Div, Alloc {
+    var r = str_concat("pattern=", gpu_autotune_pattern_name(profile.pattern))
+    r = str_concat(r, ", memory=")
+    r = str_concat(r, gpu_autotune_memory_pattern_name(profile.memory_pattern))
+    r = str_concat(r, ", strategy=")
+    r = str_concat(r, gpu_autotune_strategy_name(strategy))
+    r = str_concat(r, ", block=")
+    r = str_concat(r, gpu_autotune_i64_to_string(block_shape.x))
+    if block_shape.y > 1 {
+        r = str_concat(r, "x")
+        r = str_concat(r, gpu_autotune_i64_to_string(block_shape.y))
+    }
+    if block_shape.z > 1 {
+        r = str_concat(r, "x")
+        r = str_concat(r, gpu_autotune_i64_to_string(block_shape.z))
+    }
+    r = str_concat(r, ", occ=")
+    r = str_concat(r, gpu_autotune_i64_to_string(occupancy.occupancy_pct))
+    r = str_concat(r, "%")
+    r = str_concat(r, ", limiter=")
+    r = str_concat(r, gpu_autotune_limiter_name(occupancy.limiter))
+
+    if profile.uses_tensor_cores {
+        r = str_concat(r, ", tensor")
+    }
+    if gpu_autotune_is_memory_bound(profile.instruction_mix) {
+        r = str_concat(r, ", memory-bound")
+    } else if gpu_autotune_is_compute_bound(profile.instruction_mix) {
+        r = str_concat(r, ", compute-bound")
+    }
+
+    r
+}
+
+// ============================================================================
+// Top-level tuning API
+// ============================================================================
+
+fn gpu_autotune_tune_kernel(
+    kernel: GpuKernelIr,
+    cfg: GpuAutoTuneConfig
+) -> GpuTunedConfig with Mut, Panic, Div, Alloc {
+    var tuned = gpu_tuned_config_default()
+    let profile = gpu_autotune_analyze_kernel(kernel)
+    let strategy = gpu_autotune_select_strategy(profile, cfg)
+    let arch = gpu_autotune_arch_constants(cfg)
+    let shape = gpu_autotune_recommend_block_shape(profile, strategy, arch)
+    let shared = gpu_autotune_recommend_shared_memory(profile, shape)
+    let occ = gpu_autotune_calculate_occupancy(
+        arch,
+        gpu_block_shape_total_threads(shape),
+        profile.estimated_registers,
+        shared
+    )
+    let tile_pair = gpu_autotune_recommend_tile_config(profile, cfg)
+    let confidence = gpu_autotune_calculate_confidence(profile, occ, cfg)
+    let rationale = gpu_autotune_generate_rationale(profile, shape, occ, strategy)
+
+    tuned.block_shape = shape
+    tuned.shared_mem_bytes = shared
+    tuned.has_tile_config = tile_pair.0
+    tuned.tile_config = tile_pair.1
+    tuned.occupancy = occ
+    tuned.confidence_pct = confidence
+    tuned.strategy = strategy
+    tuned.rationale = rationale
+
+    tuned
+}
+
+fn gpu_autotune_apply_to_kernel(
+    kernel: GpuKernelIr,
+    cfg: GpuAutoTuneConfig
+) -> (GpuKernelIr, GpuTunedConfig) with Mut, Panic, Div, Alloc {
+    let tuned = gpu_autotune_tune_kernel(kernel, cfg)
+    var out = kernel
+
+    let threads = gpu_block_shape_total_threads(tuned.block_shape)
+    if threads > 0 {
+        out.max_threads = threads
+    }
+
+    let shared = tuned.shared_mem_bytes
+    if shared > out.shared_mem_bytes {
+        out.shared_mem_bytes = shared
+    }
+    if shared > out.shared_bytes {
+        out.shared_bytes = shared
+    }
+
+    (out, tuned)
+}
+
+fn gpu_autotune_apply_to_kernels(
+    kernels: [GpuKernelIr; 64],
+    count: i64,
+    cfg: GpuAutoTuneConfig
+) -> ([GpuKernelIr; 64], GpuAutoTuneReport) with Mut, Panic, Div, Alloc {
+    var out_kernels = kernels
+    var report = gpu_autotune_report_new()
+
+    var i: i64 = 0
+    while i < count && i < GPU_AUTOTUNE_MAX_KERNELS {
+        let pair = gpu_autotune_apply_to_kernel(out_kernels[i as usize], cfg)
+        out_kernels[i as usize] = pair.0
+        report.tuned[i as usize] = pair.1
+        report.tuned_count = report.tuned_count + 1
+        i = i + 1
+    }
+
+    (out_kernels, report)
+}
+
+fn gpu_autotune_tune_kernels(
+    kernels: [GpuKernelIr; 64],
+    count: i64,
+    cfg: GpuAutoTuneConfig
+) -> GpuAutoTuneReport with Mut, Panic, Div, Alloc {
+    let result = gpu_autotune_apply_to_kernels(kernels, count, cfg)
+    result.1
+}
+
+fn hlir_gpu_apply_autotune(
+    lowered: HlirGpuLoweredModule,
+    cfg: GpuAutoTuneConfig
+) -> HlirGpuLoweredModule with Mut, Panic, Div, Alloc {
+    var out = lowered
+    let applied = gpu_autotune_apply_to_kernels(out.kernels, out.kernel_count, cfg)
+    out.kernels = applied.0
+    out
+}
+
+fn hlir_gpu_apply_autotune_default(
+    lowered: HlirGpuLoweredModule
+) -> HlirGpuLoweredModule with Mut, Panic, Div, Alloc {
+    hlir_gpu_apply_autotune(lowered, gpu_autotune_config_default())
+}
+
+fn hlir_gpu_apply_fusion_then_autotune(
+    lowered: HlirGpuLoweredModule,
+    fusion_cfg: GpuFusionConfig,
+    tune_cfg: GpuAutoTuneConfig
+) -> HlirGpuLoweredModule with Mut, Panic, Div, Alloc {
+    let fused = hlir_gpu_apply_fusion(lowered, fusion_cfg)
+    hlir_gpu_apply_autotune(fused, tune_cfg)
+}
+
+fn hlir_gpu_apply_fusion_then_autotune_default(
+    lowered: HlirGpuLoweredModule
+) -> HlirGpuLoweredModule with Mut, Panic, Div, Alloc {
+    let fused = hlir_gpu_apply_fusion_default(lowered)
+    hlir_gpu_apply_autotune_default(fused)
+}
+
+// End of gpu/opt/autotune.sio

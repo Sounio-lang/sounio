@@ -1,0 +1,691 @@
+// self-hosted::collections::graph — Directed graph for call graphs and CFG
+//
+// A fixed-capacity directed graph backed by flat arrays. Nodes store i64
+// payloads; edges are (src, dst) pairs. Replaces Rust `petgraph`.
+//
+// Capacity: 1024 nodes, 4096 edges. Node IDs are indices in [0, node_count).
+// Edge lookup is O(edge_count). DFS uses an explicit stack. Topological sort
+// uses Kahn's algorithm with in-degree counting.
+//
+// All mutating operations consume and return the struct (state threading).
+
+// ============================================================================
+// STRUCT
+// ============================================================================
+
+struct DiGraph {
+    nodes: [i64; 1024],         // node data (payload)
+    node_count: i64,
+    edges_src: [i64; 4096],     // edge source node
+    edges_dst: [i64; 4096],     // edge destination node
+    edge_count: i64,
+}
+
+// ============================================================================
+// CAPACITY CONSTANTS
+// ============================================================================
+
+fn graph_max_nodes() -> i64 {
+    1024
+}
+
+fn graph_max_edges() -> i64 {
+    4096
+}
+
+// ============================================================================
+// CONSTRUCTOR
+// ============================================================================
+
+fn graph_new() -> DiGraph {
+    DiGraph {
+        nodes: [0; 1024],
+        node_count: 0,
+        edges_src: [0; 4096],
+        edges_dst: [0; 4096],
+        edge_count: 0,
+    }
+}
+
+// ============================================================================
+// VALIDITY HELPERS (must precede callers)
+// ============================================================================
+
+fn graph_is_valid_node(g: DiGraph, node: i64) -> bool {
+    node >= 0 && node < g.node_count
+}
+
+// ============================================================================
+// ADD NODE — appends a node with the given data payload, returns (graph, id)
+// ============================================================================
+//
+// If the graph is at capacity, the returned id is -1 (caller must check).
+
+fn graph_add_node(g: DiGraph, data: i64) -> (DiGraph, i64) with Mut {
+    var graph = g
+    if graph.node_count >= graph_max_nodes() {
+        return (graph, -1)
+    }
+    let id = graph.node_count
+    graph.nodes[id] = data
+    graph.node_count = graph.node_count + 1
+    (graph, id)
+}
+
+// ============================================================================
+// ADD EDGE — adds a directed edge from src to dst
+// ============================================================================
+//
+// No-op if either endpoint is invalid or edge capacity is reached.
+// Duplicate edges are allowed (multigraph semantics for simplicity).
+
+fn graph_add_edge(g: DiGraph, src: i64, dst: i64) -> DiGraph with Mut {
+    var graph = g
+    if !graph_is_valid_node(graph, src) {
+        return graph
+    }
+    if !graph_is_valid_node(graph, dst) {
+        return graph
+    }
+    if graph.edge_count >= graph_max_edges() {
+        return graph
+    }
+    let idx = graph.edge_count
+    graph.edges_src[idx] = src
+    graph.edges_dst[idx] = dst
+    graph.edge_count = graph.edge_count + 1
+    graph
+}
+
+// ============================================================================
+// HAS EDGE — check whether a directed edge from src to dst exists
+// ============================================================================
+
+fn graph_has_edge(g: DiGraph, src: i64, dst: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < g.edge_count {
+        if g.edges_src[i] == src && g.edges_dst[i] == dst {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// ============================================================================
+// SUCCESSORS — collect all nodes reachable by one edge from `node`
+// ============================================================================
+//
+// Writes into the caller-provided `out` array. Returns (count, filled_array).
+
+fn graph_successors(g: DiGraph, node: i64, out: [i64; 64]) -> (i64, [i64; 64]) with Mut, Panic, Div {
+    var result = out
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < g.edge_count {
+        if g.edges_src[i] == node && count < 64 {
+            result[count] = g.edges_dst[i]
+            count = count + 1
+        }
+        i = i + 1
+    }
+    (count, result)
+}
+
+// ============================================================================
+// PREDECESSORS — collect all nodes with an edge pointing to `node`
+// ============================================================================
+
+fn graph_predecessors(g: DiGraph, node: i64, out: [i64; 64]) -> (i64, [i64; 64]) with Mut, Panic, Div {
+    var result = out
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < g.edge_count {
+        if g.edges_dst[i] == node && count < 64 {
+            result[count] = g.edges_src[i]
+            count = count + 1
+        }
+        i = i + 1
+    }
+    (count, result)
+}
+
+// ============================================================================
+// NODE COUNT / EDGE COUNT
+// ============================================================================
+
+fn graph_node_count(g: DiGraph) -> i64 {
+    g.node_count
+}
+
+fn graph_edge_count(g: DiGraph) -> i64 {
+    g.edge_count
+}
+
+// ============================================================================
+// NODE DATA — retrieve the payload stored at a node
+// ============================================================================
+//
+// Returns 0 if the node id is out of bounds. Callers needing to distinguish
+// "stored zero" from "invalid" should use graph_is_valid_node first.
+
+fn graph_node_data(g: DiGraph, node_id: i64) -> i64 with Panic, Div {
+    if !graph_is_valid_node(g, node_id) {
+        return 0
+    }
+    g.nodes[node_id]
+}
+
+// ============================================================================
+// DFS TRAVERSAL — iterative depth-first using explicit stack
+// ============================================================================
+//
+// Visits nodes reachable from `start` in depth-first order. Uses a
+// visited-bitmap array and an explicit stack (array + stack pointer).
+// Returns the number of nodes written into `out`.
+
+fn graph_dfs_order(g: DiGraph, start: i64, out: [i64; 1024]) -> i64 with Mut, Panic, Div {
+    var result = out
+    var result_count: i64 = 0
+
+    // Bail on invalid start node
+    if !graph_is_valid_node(g, start) {
+        return 0
+    }
+
+    // Visited flags — one per possible node
+    var visited: [i64; 1024] = [0; 1024]
+
+    // Explicit stack — stores node ids. Top is at stack[sp - 1].
+    var stack: [i64; 1024] = [0; 1024]
+    var sp: i64 = 0
+
+    // Push start node
+    stack[sp] = start
+    sp = sp + 1
+
+    while sp > 0 {
+        // Pop
+        sp = sp - 1
+        let current = stack[sp]
+
+        // Skip if already visited
+        if visited[current] != 0 {
+            // continue to next iteration
+        } else {
+            // Mark visited
+            visited[current] = 1
+
+            // Record in output
+            if result_count < graph_max_nodes() {
+                result[result_count] = current
+                result_count = result_count + 1
+            }
+
+            // Push successors in reverse order so that the lowest-id
+            // successor is visited first (popped last = visited first
+            // when we reverse). First, collect successors into a temp buf.
+            var succ_buf: [i64; 64] = [0; 64]
+            var succ_count: i64 = 0
+
+            var ei: i64 = 0
+            while ei < g.edge_count {
+                if g.edges_src[ei] == current && succ_count < 64 {
+                    succ_buf[succ_count] = g.edges_dst[ei]
+                    succ_count = succ_count + 1
+                }
+                ei = ei + 1
+            }
+
+            // Push in reverse so lowest-id successor ends up on top
+            var si: i64 = succ_count - 1
+            while si >= 0 {
+                let succ_node = succ_buf[si]
+                if visited[succ_node] == 0 && sp < graph_max_nodes() {
+                    stack[sp] = succ_node
+                    sp = sp + 1
+                }
+                si = si - 1
+            }
+        }
+    }
+
+    result_count
+}
+
+// ============================================================================
+// TOPOLOGICAL SORT — Kahn's algorithm with in-degree counting
+// ============================================================================
+//
+// Produces a linear ordering of nodes such that for every edge (u, v),
+// u appears before v. Returns the number of nodes written into `out`.
+// If the graph contains a cycle, returns -1 (not all nodes processed).
+
+fn graph_topo_sort(g: DiGraph, out: [i64; 1024]) -> i64 with Mut, Panic, Div {
+    var result = out
+    var result_count: i64 = 0
+
+    if g.node_count == 0 {
+        return 0
+    }
+
+    // Step 1: Compute in-degree for every node
+    var in_degree: [i64; 1024] = [0; 1024]
+    var ei: i64 = 0
+    while ei < g.edge_count {
+        let dst = g.edges_dst[ei]
+        in_degree[dst] = in_degree[dst] + 1
+        ei = ei + 1
+    }
+
+    // Step 2: Initialize queue with all zero-in-degree nodes.
+    // Using a ring buffer: queue array with front/back pointers.
+    var queue: [i64; 1024] = [0; 1024]
+    var q_front: i64 = 0
+    var q_back: i64 = 0
+
+    var ni: i64 = 0
+    while ni < g.node_count {
+        if in_degree[ni] == 0 {
+            queue[q_back] = ni
+            q_back = q_back + 1
+        }
+        ni = ni + 1
+    }
+
+    // Step 3: Process queue — dequeue, record, decrement successors
+    while q_front < q_back {
+        let current = queue[q_front]
+        q_front = q_front + 1
+
+        // Record in output
+        if result_count < graph_max_nodes() {
+            result[result_count] = current
+            result_count = result_count + 1
+        }
+
+        // For each edge from current, decrement in-degree of destination
+        var ej: i64 = 0
+        while ej < g.edge_count {
+            if g.edges_src[ej] == current {
+                let dest = g.edges_dst[ej]
+                in_degree[dest] = in_degree[dest] - 1
+                if in_degree[dest] == 0 {
+                    if q_back < graph_max_nodes() {
+                        queue[q_back] = dest
+                        q_back = q_back + 1
+                    }
+                }
+            }
+            ej = ej + 1
+        }
+    }
+
+    // Step 4: If we didn't process all nodes, a cycle exists
+    if result_count != g.node_count {
+        return -1
+    }
+
+    result_count
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn test_graph_new() -> bool {
+    let g = graph_new()
+    let ok1 = graph_node_count(g) == 0
+    let ok2 = graph_edge_count(g) == 0
+    ok1 && ok2
+}
+
+fn test_graph_add_nodes() -> bool with Mut, Panic, Div {
+    var g = graph_new()
+
+    let r0 = graph_add_node(g, 100)
+    g = r0.0
+    let id0 = r0.1
+
+    let r1 = graph_add_node(g, 200)
+    g = r1.0
+    let id1 = r1.1
+
+    let r2 = graph_add_node(g, 300)
+    g = r2.0
+    let id2 = r2.1
+
+    let ok1 = id0 == 0
+    let ok2 = id1 == 1
+    let ok3 = id2 == 2
+    let ok4 = graph_node_count(g) == 3
+    let ok5 = graph_node_data(g, 0) == 100
+    let ok6 = graph_node_data(g, 1) == 200
+    let ok7 = graph_node_data(g, 2) == 300
+    ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7
+}
+
+fn test_graph_add_edges() -> bool with Mut, Panic, Div {
+    var g = graph_new()
+
+    let r0 = graph_add_node(g, 10)
+    g = r0.0
+    let r1 = graph_add_node(g, 20)
+    g = r1.0
+    let r2 = graph_add_node(g, 30)
+    g = r2.0
+
+    g = graph_add_edge(g, 0, 1)
+    g = graph_add_edge(g, 1, 2)
+
+    let ok1 = graph_edge_count(g) == 2
+    let ok2 = graph_has_edge(g, 0, 1)
+    let ok3 = graph_has_edge(g, 1, 2)
+    let ok4 = !graph_has_edge(g, 0, 2)
+    let ok5 = !graph_has_edge(g, 1, 0)
+    ok1 && ok2 && ok3 && ok4 && ok5
+}
+
+fn test_graph_add_edge_invalid_nodes() -> bool with Mut, Panic, Div {
+    var g = graph_new()
+    let r0 = graph_add_node(g, 10)
+    g = r0.0
+
+    // Edge to non-existent node should be no-op
+    g = graph_add_edge(g, 0, 5)
+    g = graph_add_edge(g, 5, 0)
+
+    graph_edge_count(g) == 0
+}
+
+fn test_graph_successors() -> bool with Mut, Panic, Div {
+    var g = graph_new()
+
+    let r0 = graph_add_node(g, 0)
+    g = r0.0
+    let r1 = graph_add_node(g, 0)
+    g = r1.0
+    let r2 = graph_add_node(g, 0)
+    g = r2.0
+    let r3 = graph_add_node(g, 0)
+    g = r3.0
+
+    // 0 -> 1, 0 -> 2, 0 -> 3
+    g = graph_add_edge(g, 0, 1)
+    g = graph_add_edge(g, 0, 2)
+    g = graph_add_edge(g, 0, 3)
+
+    var buf: [i64; 64] = [0; 64]
+    let result = graph_successors(g, 0, buf)
+    let count = result.0
+    buf = result.1
+
+    let ok1 = count == 3
+    let ok2 = buf[0] == 1
+    let ok3 = buf[1] == 2
+    let ok4 = buf[2] == 3
+    ok1 && ok2 && ok3 && ok4
+}
+
+fn test_graph_predecessors() -> bool with Mut, Panic, Div {
+    var g = graph_new()
+
+    let r0 = graph_add_node(g, 0)
+    g = r0.0
+    let r1 = graph_add_node(g, 0)
+    g = r1.0
+    let r2 = graph_add_node(g, 0)
+    g = r2.0
+
+    // 0 -> 2, 1 -> 2
+    g = graph_add_edge(g, 0, 2)
+    g = graph_add_edge(g, 1, 2)
+
+    var buf: [i64; 64] = [0; 64]
+    let result = graph_predecessors(g, 2, buf)
+    let count = result.0
+    buf = result.1
+
+    let ok1 = count == 2
+    let ok2 = buf[0] == 0
+    let ok3 = buf[1] == 1
+    ok1 && ok2 && ok3
+}
+
+fn test_graph_node_data_invalid() -> bool with Panic, Div {
+    let g = graph_new()
+    let ok1 = graph_node_data(g, 0) == 0
+    let ok2 = graph_node_data(g, -1) == 0
+    let ok3 = graph_node_data(g, 9999) == 0
+    ok1 && ok2 && ok3
+}
+
+// ============================================================================
+// DFS TESTS
+// ============================================================================
+
+fn test_graph_dfs_linear_chain() -> bool with Mut, Panic, Div {
+    // 0 -> 1 -> 2 -> 3
+    var g = graph_new()
+    let r0 = graph_add_node(g, 0)
+    g = r0.0
+    let r1 = graph_add_node(g, 0)
+    g = r1.0
+    let r2 = graph_add_node(g, 0)
+    g = r2.0
+    let r3 = graph_add_node(g, 0)
+    g = r3.0
+
+    g = graph_add_edge(g, 0, 1)
+    g = graph_add_edge(g, 1, 2)
+    g = graph_add_edge(g, 2, 3)
+
+    var buf: [i64; 1024] = [0; 1024]
+    let count = graph_dfs_order(g, 0, buf)
+
+    let ok1 = count == 4
+    // Linear chain: DFS visits 0, 1, 2, 3
+    ok1
+}
+
+fn test_graph_dfs_diamond() -> bool with Mut, Panic, Div {
+    // Diamond: 0 -> 1, 0 -> 2, 1 -> 3, 2 -> 3
+    var g = graph_new()
+    let r0 = graph_add_node(g, 0)
+    g = r0.0
+    let r1 = graph_add_node(g, 0)
+    g = r1.0
+    let r2 = graph_add_node(g, 0)
+    g = r2.0
+    let r3 = graph_add_node(g, 0)
+    g = r3.0
+
+    g = graph_add_edge(g, 0, 1)
+    g = graph_add_edge(g, 0, 2)
+    g = graph_add_edge(g, 1, 3)
+    g = graph_add_edge(g, 2, 3)
+
+    var buf: [i64; 1024] = [0; 1024]
+    let count = graph_dfs_order(g, 0, buf)
+
+    // All 4 nodes visited exactly once
+    count == 4
+}
+
+fn test_graph_dfs_unreachable() -> bool with Mut, Panic, Div {
+    // 0 -> 1, 2 (isolated)
+    var g = graph_new()
+    let r0 = graph_add_node(g, 0)
+    g = r0.0
+    let r1 = graph_add_node(g, 0)
+    g = r1.0
+    let r2 = graph_add_node(g, 0)
+    g = r2.0
+
+    g = graph_add_edge(g, 0, 1)
+
+    var buf: [i64; 1024] = [0; 1024]
+    let count = graph_dfs_order(g, 0, buf)
+
+    // Only 0 and 1 are reachable from 0; node 2 is isolated
+    count == 2
+}
+
+fn test_graph_dfs_cycle() -> bool with Mut, Panic, Div {
+    // 0 -> 1 -> 2 -> 0 (cycle)
+    var g = graph_new()
+    let r0 = graph_add_node(g, 0)
+    g = r0.0
+    let r1 = graph_add_node(g, 0)
+    g = r1.0
+    let r2 = graph_add_node(g, 0)
+    g = r2.0
+
+    g = graph_add_edge(g, 0, 1)
+    g = graph_add_edge(g, 1, 2)
+    g = graph_add_edge(g, 2, 0)
+
+    var buf: [i64; 1024] = [0; 1024]
+    let count = graph_dfs_order(g, 0, buf)
+
+    // Visited set prevents infinite loop — each node visited once
+    count == 3
+}
+
+fn test_graph_dfs_invalid_start() -> bool with Mut, Panic, Div {
+    let g = graph_new()
+    var buf: [i64; 1024] = [0; 1024]
+    let count = graph_dfs_order(g, 0, buf)
+    count == 0
+}
+
+// ============================================================================
+// TOPOLOGICAL SORT TESTS
+// ============================================================================
+
+fn test_graph_topo_sort_linear() -> bool with Mut, Panic, Div {
+    // 0 -> 1 -> 2 -> 3
+    var g = graph_new()
+    let r0 = graph_add_node(g, 0)
+    g = r0.0
+    let r1 = graph_add_node(g, 0)
+    g = r1.0
+    let r2 = graph_add_node(g, 0)
+    g = r2.0
+    let r3 = graph_add_node(g, 0)
+    g = r3.0
+
+    g = graph_add_edge(g, 0, 1)
+    g = graph_add_edge(g, 1, 2)
+    g = graph_add_edge(g, 2, 3)
+
+    var buf: [i64; 1024] = [0; 1024]
+    let count = graph_topo_sort(g, buf)
+
+    // All 4 nodes sorted; unique valid order is 0, 1, 2, 3
+    count == 4
+}
+
+fn test_graph_topo_sort_diamond() -> bool with Mut, Panic, Div {
+    // Diamond: 0 -> 1, 0 -> 2, 1 -> 3, 2 -> 3
+    var g = graph_new()
+    let r0 = graph_add_node(g, 0)
+    g = r0.0
+    let r1 = graph_add_node(g, 0)
+    g = r1.0
+    let r2 = graph_add_node(g, 0)
+    g = r2.0
+    let r3 = graph_add_node(g, 0)
+    g = r3.0
+
+    g = graph_add_edge(g, 0, 1)
+    g = graph_add_edge(g, 0, 2)
+    g = graph_add_edge(g, 1, 3)
+    g = graph_add_edge(g, 2, 3)
+
+    var buf: [i64; 1024] = [0; 1024]
+    let count = graph_topo_sort(g, buf)
+
+    // All 4 nodes sorted, node 0 must come first, node 3 last
+    let ok1 = count == 4
+    // With Kahn's (ascending queue init), expect 0 first, 3 last
+    ok1
+}
+
+fn test_graph_topo_sort_cycle() -> bool with Mut, Panic, Div {
+    // 0 -> 1 -> 2 -> 0 (cycle)
+    var g = graph_new()
+    let r0 = graph_add_node(g, 0)
+    g = r0.0
+    let r1 = graph_add_node(g, 0)
+    g = r1.0
+    let r2 = graph_add_node(g, 0)
+    g = r2.0
+
+    g = graph_add_edge(g, 0, 1)
+    g = graph_add_edge(g, 1, 2)
+    g = graph_add_edge(g, 2, 0)
+
+    var buf: [i64; 1024] = [0; 1024]
+    let count = graph_topo_sort(g, buf)
+
+    // Cycle detected — returns -1
+    count == -1
+}
+
+fn test_graph_topo_sort_disconnected() -> bool with Mut, Panic, Div {
+    // 0 -> 1, 2 -> 3 (two disconnected chains)
+    var g = graph_new()
+    let r0 = graph_add_node(g, 0)
+    g = r0.0
+    let r1 = graph_add_node(g, 0)
+    g = r1.0
+    let r2 = graph_add_node(g, 0)
+    g = r2.0
+    let r3 = graph_add_node(g, 0)
+    g = r3.0
+
+    g = graph_add_edge(g, 0, 1)
+    g = graph_add_edge(g, 2, 3)
+
+    var buf: [i64; 1024] = [0; 1024]
+    let count = graph_topo_sort(g, buf)
+
+    // All 4 nodes sorted successfully
+    count == 4
+}
+
+fn test_graph_topo_sort_empty() -> bool with Mut, Panic, Div {
+    let g = graph_new()
+    var buf: [i64; 1024] = [0; 1024]
+    let count = graph_topo_sort(g, buf)
+    count == 0
+}
+
+fn test_graph_topo_sort_single_node() -> bool with Mut, Panic, Div {
+    var g = graph_new()
+    let r0 = graph_add_node(g, 42)
+    g = r0.0
+
+    var buf: [i64; 1024] = [0; 1024]
+    let count = graph_topo_sort(g, buf)
+
+    count == 1
+}
+
+fn test_graph_topo_sort_no_edges() -> bool with Mut, Panic, Div {
+    // Three isolated nodes — all have in-degree 0
+    var g = graph_new()
+    let r0 = graph_add_node(g, 0)
+    g = r0.0
+    let r1 = graph_add_node(g, 0)
+    g = r1.0
+    let r2 = graph_add_node(g, 0)
+    g = r2.0
+
+    var buf: [i64; 1024] = [0; 1024]
+    let count = graph_topo_sort(g, buf)
+
+    // All three nodes in some valid order
+    count == 3
+}

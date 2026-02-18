@@ -1,0 +1,1642 @@
+// self-hosted::gpu::ptx_advanced — Full PTX code generator with register allocation
+//
+// Builds on ptx.sio (PtxBuf) to provide:
+//   1. Register allocation (PtxRegCounters) with typed register pools
+//   2. Value→register mapping (PtxValueMap)
+//   3. Full opcode dispatch from GpuKernelIr → PTX text
+//   4. Architecture feature detection (sm_50 through sm_120)
+//   5. PTX version selection per compute capability
+//   6. Kernel metadata emission (.maxntid, shared memory)
+//
+// Architecture: GpuKernelIr → ptx_codegen_kernel() → PtxBuf (text)
+
+// ── Register Allocation ─────────────────────────────────────────────
+
+struct PtxRegCounters {
+    pred: i64,   // predicate register count
+    r16: i64,    // 16-bit register count
+    r32: i64,    // 32-bit register count
+    r64: i64,    // 64-bit register count
+    f32_cnt: i64, // 32-bit float register count
+    f64_cnt: i64, // 64-bit float register count
+}
+
+fn ptx_reg_counters_new() -> PtxRegCounters {
+    PtxRegCounters {
+        pred: 0, r16: 0, r32: 0, r64: 0,
+        f32_cnt: 0, f64_cnt: 0,
+    }
+}
+
+// Allocate a register and return its name as a string
+fn ptx_alloc_pred(rc: PtxRegCounters) -> (PtxRegCounters, string) with Alloc {
+    let idx = rc.pred
+    var out = rc
+    out.pred = idx + 1
+    (out, "p" + i64_to_string(idx))
+}
+
+fn ptx_alloc_r16(rc: PtxRegCounters) -> (PtxRegCounters, string) with Alloc {
+    let idx = rc.r16
+    var out = rc
+    out.r16 = idx + 1
+    (out, "r16_" + i64_to_string(idx))
+}
+
+fn ptx_alloc_r32(rc: PtxRegCounters) -> (PtxRegCounters, string) with Alloc {
+    let idx = rc.r32
+    var out = rc
+    out.r32 = idx + 1
+    (out, "r32_" + i64_to_string(idx))
+}
+
+fn ptx_alloc_r64(rc: PtxRegCounters) -> (PtxRegCounters, string) with Alloc {
+    let idx = rc.r64
+    var out = rc
+    out.r64 = idx + 1
+    (out, "r64_" + i64_to_string(idx))
+}
+
+fn ptx_alloc_f32(rc: PtxRegCounters) -> (PtxRegCounters, string) with Alloc {
+    let idx = rc.f32_cnt
+    var out = rc
+    out.f32_cnt = idx + 1
+    (out, "f32_" + i64_to_string(idx))
+}
+
+fn ptx_alloc_f64(rc: PtxRegCounters) -> (PtxRegCounters, string) with Alloc {
+    let idx = rc.f64_cnt
+    var out = rc
+    out.f64_cnt = idx + 1
+    (out, "f64_" + i64_to_string(idx))
+}
+
+// Allocate register for a given GpuType
+fn ptx_alloc_for_type(rc: PtxRegCounters, ty: GpuType) -> (PtxRegCounters, string) with Alloc {
+    if ty == GpuF32 {
+        return ptx_alloc_f32(rc)
+    }
+    if ty == GpuF64 {
+        return ptx_alloc_f64(rc)
+    }
+    if ty == GpuU64 || ty == GpuI64 || ty == GpuPtr {
+        return ptx_alloc_r64(rc)
+    }
+    if ty == GpuU32 || ty == GpuI32 {
+        return ptx_alloc_r32(rc)
+    }
+    // Default: 32-bit
+    ptx_alloc_r32(rc)
+}
+
+// ── Value → Register Map ────────────────────────────────────────────
+
+struct PtxValueMap {
+    op_ids: [i64; 4096],       // GpuOp index → unique id
+    reg_names: [i64; 4096],    // index → offset into name_buf
+    reg_lens: [i64; 4096],     // index → length in name_buf
+    types: [i64; 4096],        // index → GpuType as i64
+    count: i64,
+    name_buf: [i8; 32768],     // flat name storage
+    name_buf_len: i64,
+}
+
+fn ptx_value_map_new() -> PtxValueMap {
+    PtxValueMap {
+        op_ids: [0; 4096],
+        reg_names: [0; 4096],
+        reg_lens: [0; 4096],
+        types: [0; 4096],
+        count: 0,
+        name_buf: [0; 32768],
+        name_buf_len: 0,
+    }
+}
+
+fn ptx_value_map_insert(vm: PtxValueMap, op_idx: i64, name: string, ty: GpuType) -> PtxValueMap with Mut, Panic, Div {
+    var out = vm
+    let c = out.count
+    if c >= 4096 { return out }
+
+    out.op_ids[c as usize] = op_idx
+
+    // Copy name into flat buffer
+    let name_start = out.name_buf_len
+    let nlen = str_len(name)
+    var i: i64 = 0
+    while i < nlen {
+        if out.name_buf_len < 32768 {
+            out.name_buf[out.name_buf_len as usize] = str_char_at(name, i) as i8
+            out.name_buf_len = out.name_buf_len + 1
+        }
+        i = i + 1
+    }
+    out.reg_names[c as usize] = name_start
+    out.reg_lens[c as usize] = nlen
+
+    // Store type as integer for comparison
+    var ty_val: i64 = 0
+    if ty == GpuU32 { ty_val = 1 }
+    if ty == GpuU64 { ty_val = 2 }
+    if ty == GpuF32 { ty_val = 3 }
+    if ty == GpuF64 { ty_val = 4 }
+    if ty == GpuI32 { ty_val = 5 }
+    if ty == GpuI64 { ty_val = 6 }
+    if ty == GpuPtr { ty_val = 7 }
+    out.types[c as usize] = ty_val
+
+    out.count = c + 1
+    out
+}
+
+fn ptx_value_map_get_name(vm: PtxValueMap, op_idx: i64) -> string with Mut, Panic, Div, Alloc {
+    var i: i64 = 0
+    while i < vm.count {
+        if vm.op_ids[i as usize] == op_idx {
+            let start = vm.reg_names[i as usize]
+            let len = vm.reg_lens[i as usize]
+            return str_from_bytes(vm.name_buf, len)
+        }
+        i = i + 1
+    }
+    // Not found — return placeholder
+    "UNKNOWN"
+}
+
+// ── Architecture Capabilities ───────────────────────────────────────
+
+struct PtxArch {
+    sm_major: i64,
+    sm_minor: i64,
+}
+
+fn ptx_arch_new(major: i64, minor: i64) -> PtxArch {
+    PtxArch { sm_major: major, sm_minor: minor }
+}
+
+fn ptx_sm_version(arch: PtxArch) -> i64 {
+    arch.sm_major * 10 + arch.sm_minor
+}
+
+fn ptx_recommended_version_major(arch: PtxArch) -> i64 {
+    let sm = ptx_sm_version(arch)
+    if sm <= 69 { return 6 }
+    if sm >= 70 && sm <= 74 { return 6 }
+    if sm == 75 { return 6 }
+    if sm >= 80 && sm <= 86 { return 7 }
+    if sm == 87 { return 7 }
+    if sm == 89 { return 8 }
+    if sm == 90 { return 8 }
+    if sm == 100 { return 8 }
+    if sm == 120 { return 8 }
+    8
+}
+
+fn ptx_recommended_version_minor(arch: PtxArch) -> i64 {
+    let sm = ptx_sm_version(arch)
+    if sm <= 69 { return 0 }
+    if sm >= 70 && sm <= 74 { return 3 }
+    if sm == 75 { return 4 }
+    if sm >= 80 && sm <= 86 { return 1 }
+    if sm == 87 { return 4 }
+    if sm == 89 { return 1 }
+    if sm == 90 { return 3 }
+    if sm == 100 { return 5 }
+    if sm == 120 { return 6 }
+    5
+}
+
+fn ptx_supports_bf16(arch: PtxArch) -> bool { ptx_sm_version(arch) >= 80 }
+fn ptx_supports_fp8(arch: PtxArch) -> bool { ptx_sm_version(arch) >= 89 }
+fn ptx_supports_tma(arch: PtxArch) -> bool { ptx_sm_version(arch) >= 90 }
+fn ptx_supports_clusters(arch: PtxArch) -> bool { ptx_sm_version(arch) >= 90 }
+fn ptx_supports_wgmma(arch: PtxArch) -> bool { ptx_sm_version(arch) >= 90 }
+fn ptx_supports_fp4(arch: PtxArch) -> bool { ptx_sm_version(arch) >= 100 }
+fn ptx_supports_tensor_gen5(arch: PtxArch) -> bool { ptx_sm_version(arch) >= 100 }
+fn ptx_supports_nvlink5(arch: PtxArch) -> bool { ptx_sm_version(arch) >= 100 }
+
+// ── PTX Type Strings ────────────────────────────────────────────────
+
+fn ptx_type_suffix(ty: GpuType) -> string {
+    if ty == GpuF32 { return "f32" }
+    if ty == GpuF64 { return "f64" }
+    if ty == GpuI32 { return "s32" }
+    if ty == GpuI64 { return "s64" }
+    if ty == GpuU32 { return "u32" }
+    if ty == GpuU64 { return "u64" }
+    if ty == GpuPtr { return "u64" }
+    "b32"
+}
+
+fn ptx_type_decl(ty: GpuType) -> string {
+    if ty == GpuF32 { return ".f32" }
+    if ty == GpuF64 { return ".f64" }
+    if ty == GpuI32 { return ".b32" }
+    if ty == GpuI64 { return ".b64" }
+    if ty == GpuU32 { return ".b32" }
+    if ty == GpuU64 { return ".b64" }
+    if ty == GpuPtr { return ".b64" }
+    ".b32"
+}
+
+fn ptx_is_float(ty: GpuType) -> bool {
+    ty == GpuF32 || ty == GpuF64
+}
+
+fn ptx_is_signed(ty: GpuType) -> bool {
+    ty == GpuI32 || ty == GpuI64
+}
+
+fn ptx_is_64bit(ty: GpuType) -> bool {
+    ty == GpuU64 || ty == GpuI64 || ty == GpuF64 || ty == GpuPtr
+}
+
+fn ptx_bit_width(ty: GpuType) -> string {
+    if ptx_is_64bit(ty) { return "64" }
+    "32"
+}
+
+// ── Codegen State ───────────────────────────────────────────────────
+
+struct PtxCodegenState {
+    buf: PtxBuf,
+    regs: PtxRegCounters,
+    values: PtxValueMap,
+    arch: PtxArch,
+    label_count: i64,
+}
+
+fn ptx_codegen_new(arch: PtxArch) -> PtxCodegenState {
+    PtxCodegenState {
+        buf: ptx_buf_new(),
+        regs: ptx_reg_counters_new(),
+        values: ptx_value_map_new(),
+        arch: arch,
+        label_count: 0,
+    }
+}
+
+fn ptx_codegen_alloc_label(st: PtxCodegenState) -> (PtxCodegenState, string) with Alloc {
+    let idx = st.label_count
+    var out = st
+    out.label_count = idx + 1
+    (out, "L" + i64_to_string(idx))
+}
+
+// ── Header Emission ─────────────────────────────────────────────────
+
+fn ptx_emit_versioned_header(st: PtxCodegenState) -> PtxCodegenState with Mut, Panic, Div, Alloc {
+    var out = st
+    let vmaj = ptx_recommended_version_major(out.arch)
+    let vmin = ptx_recommended_version_minor(out.arch)
+    let sm = ptx_sm_version(out.arch)
+
+    out.buf = ptx_push_str(out.buf, ".version ")
+    out.buf = ptx_push_str(out.buf, i64_to_string(vmaj))
+    out.buf = ptx_push_str(out.buf, ".")
+    out.buf = ptx_push_str(out.buf, i64_to_string(vmin))
+    out.buf = ptx_push_str(out.buf, "\n")
+    out.buf = ptx_push_str(out.buf, ".target sm_")
+    out.buf = ptx_push_str(out.buf, i64_to_string(sm))
+    out.buf = ptx_push_str(out.buf, "\n")
+    out.buf = ptx_push_str(out.buf, ".address_size 64\n\n")
+    out
+}
+
+// ── Register Pool Declaration ───────────────────────────────────────
+
+fn ptx_emit_reg_pool(st: PtxCodegenState) -> PtxCodegenState with Mut, Panic, Div, Alloc {
+    var out = st
+
+    // Predicate registers
+    let pred_cnt = out.regs.pred
+    if pred_cnt < 16 { out.buf = ptx_push_str(out.buf, "    .reg .pred p<16>;\n") }
+    else { out.buf = ptx_push_str(out.buf, "    .reg .pred p<64>;\n") }
+
+    // 16-bit registers
+    if out.regs.r16 > 0 {
+        out.buf = ptx_push_str(out.buf, "    .reg .b16 r16_<64>;\n")
+    }
+
+    // 32-bit registers
+    let r32_pool = if out.regs.r32 < 64 { 64 } else { 128 }
+    out.buf = ptx_push_str(out.buf, "    .reg .b32 r32_<")
+    out.buf = ptx_push_str(out.buf, i64_to_string(r32_pool))
+    out.buf = ptx_push_str(out.buf, ">;\n")
+
+    // 64-bit registers
+    let r64_pool = if out.regs.r64 < 64 { 64 } else { 128 }
+    out.buf = ptx_push_str(out.buf, "    .reg .b64 r64_<")
+    out.buf = ptx_push_str(out.buf, i64_to_string(r64_pool))
+    out.buf = ptx_push_str(out.buf, ">;\n")
+
+    // f32 registers
+    let f32_pool = if out.regs.f32_cnt < 64 { 64 } else { 128 }
+    out.buf = ptx_push_str(out.buf, "    .reg .f32 f32_<")
+    out.buf = ptx_push_str(out.buf, i64_to_string(f32_pool))
+    out.buf = ptx_push_str(out.buf, ">;\n")
+
+    // f64 registers
+    if out.regs.f64_cnt > 0 {
+        let f64_pool = if out.regs.f64_cnt < 32 { 32 } else { 64 }
+        out.buf = ptx_push_str(out.buf, "    .reg .f64 f64_<")
+        out.buf = ptx_push_str(out.buf, i64_to_string(f64_pool))
+        out.buf = ptx_push_str(out.buf, ">;\n")
+    }
+
+    out.buf = ptx_push_str(out.buf, "\n")
+    out
+}
+
+// ── Kernel Entry + Parameters ───────────────────────────────────────
+
+fn ptx_emit_kernel_entry(
+    st: PtxCodegenState,
+    kernel: GpuKernelIr
+) -> PtxCodegenState with Mut, Panic, Div, Alloc {
+    var out = st
+
+    out.buf = ptx_push_str(out.buf, ".visible .entry ")
+    out.buf = ptx_push_str(out.buf, kernel.name)
+    out.buf = ptx_push_str(out.buf, "(\n")
+
+    // Emit parameters from the kernel's param_types array
+    var pi: i64 = 0
+    while pi < kernel.param_count {
+        let pty = kernel.param_types[pi as usize]
+        out.buf = ptx_push_str(out.buf, "    .param ")
+        out.buf = ptx_push_str(out.buf, ptx_type_decl(pty))
+        out.buf = ptx_push_str(out.buf, " param_")
+        out.buf = ptx_push_str(out.buf, i64_to_string(pi))
+        if pi < kernel.param_count - 1 {
+            out.buf = ptx_push_str(out.buf, ",")
+        }
+        out.buf = ptx_push_str(out.buf, "\n")
+        pi = pi + 1
+    }
+
+    out.buf = ptx_push_str(out.buf, ")\n")
+
+    // Max threads hint
+    if kernel.max_threads > 0 {
+        out.buf = ptx_push_str(out.buf, ".maxntid ")
+        out.buf = ptx_push_str(out.buf, i64_to_string(kernel.max_threads))
+        out.buf = ptx_push_str(out.buf, ", 1, 1\n")
+    }
+
+    out.buf = ptx_push_str(out.buf, "{\n")
+    out
+}
+
+// ── Shared Memory Declaration ───────────────────────────────────────
+
+fn ptx_emit_shared_memory(
+    st: PtxCodegenState,
+    name: string,
+    elem_type: GpuType,
+    num_elements: i64,
+    align: i64
+) -> PtxCodegenState with Mut, Panic, Div, Alloc {
+    var out = st
+    out.buf = ptx_push_str(out.buf, "    .shared .align ")
+    out.buf = ptx_push_str(out.buf, i64_to_string(align))
+    out.buf = ptx_push_str(out.buf, " ")
+    out.buf = ptx_push_str(out.buf, ptx_type_decl(elem_type))
+    out.buf = ptx_push_str(out.buf, " ")
+    out.buf = ptx_push_str(out.buf, name)
+    out.buf = ptx_push_str(out.buf, "[")
+    out.buf = ptx_push_str(out.buf, i64_to_string(num_elements))
+    out.buf = ptx_push_str(out.buf, "];\n")
+    out
+}
+
+// ── Instruction Emission ────────────────────────────────────────────
+
+// Emit a single GpuOp instruction. Returns updated state.
+// op_idx: index into kernel.ops[] for this instruction
+fn ptx_emit_op(
+    st: PtxCodegenState,
+    kernel: GpuKernelIr,
+    op_idx: i64
+) -> PtxCodegenState with Mut, Panic, Div, Alloc {
+    let opcode = kernel.opcodes[op_idx as usize]
+    let dst_type = kernel.dst_types[op_idx as usize]
+    let src0 = kernel.src0[op_idx as usize]
+    let src1 = kernel.src1[op_idx as usize]
+    let src2 = kernel.src2[op_idx as usize]
+    let imm = kernel.immediates[op_idx as usize]
+    let pred_reg = kernel.pred_regs[op_idx as usize]
+    let mem_space = kernel.memory_spaces[op_idx as usize]
+    let mask = kernel.masks[op_idx as usize]
+
+    var out = st
+
+    // ── Thread/Block ID ─────────────────────────────────────────
+    if opcode == GpuGetTid {
+        let alloc_result = ptx_alloc_r32(out.regs)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, GpuU32)
+        // axis from immediate: 0=x, 1=y, 2=z
+        let axis = if imm == 1 { "y" } else if imm == 2 { "z" } else { "x" }
+        out.buf = ptx_push_str(out.buf, "    mov.u32 ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", %tid.")
+        out.buf = ptx_push_str(out.buf, axis)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        return out
+    }
+
+    if opcode == GpuGetBid {
+        let alloc_result = ptx_alloc_r32(out.regs)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, GpuU32)
+        let axis = if imm == 1 { "y" } else if imm == 2 { "z" } else { "x" }
+        out.buf = ptx_push_str(out.buf, "    mov.u32 ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", %ctaid.")
+        out.buf = ptx_push_str(out.buf, axis)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        return out
+    }
+
+    if opcode == GpuGetNtid {
+        let alloc_result = ptx_alloc_r32(out.regs)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, GpuU32)
+        let axis = if imm == 1 { "y" } else if imm == 2 { "z" } else { "x" }
+        out.buf = ptx_push_str(out.buf, "    mov.u32 ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", %ntid.")
+        out.buf = ptx_push_str(out.buf, axis)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        return out
+    }
+
+    if opcode == GpuGetGridDim {
+        let alloc_result = ptx_alloc_r32(out.regs)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, GpuU32)
+        let axis = if imm == 1 { "y" } else if imm == 2 { "z" } else { "x" }
+        out.buf = ptx_push_str(out.buf, "    mov.u32 ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", %nctaid.")
+        out.buf = ptx_push_str(out.buf, axis)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        return out
+    }
+
+    if opcode == GpuGetLaneId {
+        let alloc_result = ptx_alloc_r32(out.regs)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, GpuU32)
+        out.buf = ptx_push_str(out.buf, "    mov.u32 ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", %laneid;\n")
+        return out
+    }
+
+    if opcode == GpuGetWarpId {
+        let alloc_result = ptx_alloc_r32(out.regs)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, GpuU32)
+        out.buf = ptx_push_str(out.buf, "    mov.u32 ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", %warpid;\n")
+        return out
+    }
+
+    if opcode == GpuGetSmId {
+        let alloc_result = ptx_alloc_r32(out.regs)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, GpuU32)
+        out.buf = ptx_push_str(out.buf, "    mov.u32 ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", %smid;\n")
+        return out
+    }
+
+    // ── Type Conversion ─────────────────────────────────────────
+    if opcode == GpuCvt {
+        let alloc_result = ptx_alloc_for_type(out.regs, dst_type)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, dst_type)
+        let src_name = ptx_value_map_get_name(out.values, src0)
+        out.buf = ptx_push_str(out.buf, "    cvt.")
+        out.buf = ptx_push_str(out.buf, ptx_type_suffix(dst_type))
+        out.buf = ptx_push_str(out.buf, ".")
+        // Source type from kernel
+        let src_ty = kernel.dst_types[src0 as usize]
+        out.buf = ptx_push_str(out.buf, ptx_type_suffix(src_ty))
+        out.buf = ptx_push_str(out.buf, " ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, src_name)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        return out
+    }
+
+    // ── Arithmetic: Add, Sub, Mul, Div ──────────────────────────
+    if opcode == GpuAdd {
+        let alloc_result = ptx_alloc_for_type(out.regs, dst_type)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, dst_type)
+        let lhs = ptx_value_map_get_name(out.values, src0)
+        let rhs = ptx_value_map_get_name(out.values, src1)
+        if ptx_is_float(dst_type) {
+            out.buf = ptx_push_str(out.buf, "    add.")
+        } else {
+            out.buf = ptx_push_str(out.buf, "    add.")
+        }
+        out.buf = ptx_push_str(out.buf, ptx_type_suffix(dst_type))
+        out.buf = ptx_push_str(out.buf, " ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, lhs)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, rhs)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        return out
+    }
+
+    if opcode == GpuSub {
+        let alloc_result = ptx_alloc_for_type(out.regs, dst_type)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, dst_type)
+        let lhs = ptx_value_map_get_name(out.values, src0)
+        let rhs = ptx_value_map_get_name(out.values, src1)
+        out.buf = ptx_push_str(out.buf, "    sub.")
+        out.buf = ptx_push_str(out.buf, ptx_type_suffix(dst_type))
+        out.buf = ptx_push_str(out.buf, " ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, lhs)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, rhs)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        return out
+    }
+
+    if opcode == GpuMul {
+        let alloc_result = ptx_alloc_for_type(out.regs, dst_type)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, dst_type)
+        let lhs = ptx_value_map_get_name(out.values, src0)
+        let rhs = ptx_value_map_get_name(out.values, src1)
+        if ptx_is_float(dst_type) {
+            out.buf = ptx_push_str(out.buf, "    mul.rn.")
+        } else {
+            out.buf = ptx_push_str(out.buf, "    mul.lo.")
+        }
+        out.buf = ptx_push_str(out.buf, ptx_type_suffix(dst_type))
+        out.buf = ptx_push_str(out.buf, " ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, lhs)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, rhs)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        return out
+    }
+
+    if opcode == GpuMulImm {
+        let alloc_result = ptx_alloc_for_type(out.regs, dst_type)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, dst_type)
+        let lhs = ptx_value_map_get_name(out.values, src0)
+        if ptx_is_float(dst_type) {
+            out.buf = ptx_push_str(out.buf, "    mul.rn.")
+        } else {
+            out.buf = ptx_push_str(out.buf, "    mul.lo.")
+        }
+        out.buf = ptx_push_str(out.buf, ptx_type_suffix(dst_type))
+        out.buf = ptx_push_str(out.buf, " ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, lhs)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, i64_to_string(imm))
+        out.buf = ptx_push_str(out.buf, ";\n")
+        return out
+    }
+
+    if opcode == GpuDiv {
+        let alloc_result = ptx_alloc_for_type(out.regs, dst_type)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, dst_type)
+        let lhs = ptx_value_map_get_name(out.values, src0)
+        let rhs = ptx_value_map_get_name(out.values, src1)
+        if ptx_is_float(dst_type) {
+            out.buf = ptx_push_str(out.buf, "    div.rn.")
+        } else {
+            out.buf = ptx_push_str(out.buf, "    div.")
+        }
+        out.buf = ptx_push_str(out.buf, ptx_type_suffix(dst_type))
+        out.buf = ptx_push_str(out.buf, " ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, lhs)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, rhs)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        return out
+    }
+
+    if opcode == GpuMax {
+        let alloc_result = ptx_alloc_for_type(out.regs, dst_type)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, dst_type)
+        let lhs = ptx_value_map_get_name(out.values, src0)
+        let rhs = ptx_value_map_get_name(out.values, src1)
+        out.buf = ptx_push_str(out.buf, "    max.")
+        out.buf = ptx_push_str(out.buf, ptx_type_suffix(dst_type))
+        out.buf = ptx_push_str(out.buf, " ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, lhs)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, rhs)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        return out
+    }
+
+    if opcode == GpuMin {
+        let alloc_result = ptx_alloc_for_type(out.regs, dst_type)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, dst_type)
+        let lhs = ptx_value_map_get_name(out.values, src0)
+        let rhs = ptx_value_map_get_name(out.values, src1)
+        out.buf = ptx_push_str(out.buf, "    min.")
+        out.buf = ptx_push_str(out.buf, ptx_type_suffix(dst_type))
+        out.buf = ptx_push_str(out.buf, " ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, lhs)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, rhs)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        return out
+    }
+
+    if opcode == GpuAddImm {
+        let alloc_result = ptx_alloc_for_type(out.regs, dst_type)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, dst_type)
+        let lhs = ptx_value_map_get_name(out.values, src0)
+        out.buf = ptx_push_str(out.buf, "    add.")
+        out.buf = ptx_push_str(out.buf, ptx_type_suffix(dst_type))
+        out.buf = ptx_push_str(out.buf, " ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, lhs)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, i64_to_string(imm))
+        out.buf = ptx_push_str(out.buf, ";\n")
+        return out
+    }
+
+    // ── FMA: dst = src0 * src1 + src2 ───────────────────────────
+    if opcode == GpuFma {
+        let alloc_result = ptx_alloc_for_type(out.regs, dst_type)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, dst_type)
+        let a = ptx_value_map_get_name(out.values, src0)
+        let b = ptx_value_map_get_name(out.values, src1)
+        let c = ptx_value_map_get_name(out.values, src2)
+        if ptx_is_float(dst_type) {
+            out.buf = ptx_push_str(out.buf, "    fma.rn.")
+            out.buf = ptx_push_str(out.buf, ptx_type_suffix(dst_type))
+        } else {
+            out.buf = ptx_push_str(out.buf, "    mad.lo.")
+            out.buf = ptx_push_str(out.buf, ptx_type_suffix(dst_type))
+        }
+        out.buf = ptx_push_str(out.buf, " ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, a)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, b)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, c)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        return out
+    }
+
+    // ── Math Intrinsics (fast approximations) ───────────────────
+    if opcode == GpuSqrt {
+        let alloc_result = ptx_alloc_for_type(out.regs, dst_type)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, dst_type)
+        let src = ptx_value_map_get_name(out.values, src0)
+        out.buf = ptx_push_str(out.buf, "    sqrt.approx.")
+        out.buf = ptx_push_str(out.buf, ptx_type_suffix(dst_type))
+        out.buf = ptx_push_str(out.buf, " ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, src)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        return out
+    }
+
+    if opcode == GpuRsqrt {
+        let alloc_result = ptx_alloc_for_type(out.regs, dst_type)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, dst_type)
+        let src = ptx_value_map_get_name(out.values, src0)
+        out.buf = ptx_push_str(out.buf, "    rsqrt.approx.")
+        out.buf = ptx_push_str(out.buf, ptx_type_suffix(dst_type))
+        out.buf = ptx_push_str(out.buf, " ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, src)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        return out
+    }
+
+    if opcode == GpuExp2 {
+        let alloc_result = ptx_alloc_for_type(out.regs, dst_type)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, dst_type)
+        let src = ptx_value_map_get_name(out.values, src0)
+        out.buf = ptx_push_str(out.buf, "    ex2.approx.")
+        out.buf = ptx_push_str(out.buf, ptx_type_suffix(dst_type))
+        out.buf = ptx_push_str(out.buf, " ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, src)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        return out
+    }
+
+    if opcode == GpuLg2 {
+        let alloc_result = ptx_alloc_for_type(out.regs, dst_type)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, dst_type)
+        let src = ptx_value_map_get_name(out.values, src0)
+        out.buf = ptx_push_str(out.buf, "    lg2.approx.")
+        out.buf = ptx_push_str(out.buf, ptx_type_suffix(dst_type))
+        out.buf = ptx_push_str(out.buf, " ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, src)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        return out
+    }
+
+    if opcode == GpuSin {
+        let alloc_result = ptx_alloc_for_type(out.regs, dst_type)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, dst_type)
+        let src = ptx_value_map_get_name(out.values, src0)
+        out.buf = ptx_push_str(out.buf, "    sin.approx.")
+        out.buf = ptx_push_str(out.buf, ptx_type_suffix(dst_type))
+        out.buf = ptx_push_str(out.buf, " ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, src)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        return out
+    }
+
+    if opcode == GpuCos {
+        let alloc_result = ptx_alloc_for_type(out.regs, dst_type)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, dst_type)
+        let src = ptx_value_map_get_name(out.values, src0)
+        out.buf = ptx_push_str(out.buf, "    cos.approx.")
+        out.buf = ptx_push_str(out.buf, ptx_type_suffix(dst_type))
+        out.buf = ptx_push_str(out.buf, " ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, src)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        return out
+    }
+
+    if opcode == GpuAbs {
+        let alloc_result = ptx_alloc_for_type(out.regs, dst_type)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, dst_type)
+        let src = ptx_value_map_get_name(out.values, src0)
+        out.buf = ptx_push_str(out.buf, "    abs.")
+        out.buf = ptx_push_str(out.buf, ptx_type_suffix(dst_type))
+        out.buf = ptx_push_str(out.buf, " ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, src)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        return out
+    }
+
+    if opcode == GpuRcp {
+        let alloc_result = ptx_alloc_for_type(out.regs, dst_type)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, dst_type)
+        let src = ptx_value_map_get_name(out.values, src0)
+        out.buf = ptx_push_str(out.buf, "    rcp.approx.")
+        out.buf = ptx_push_str(out.buf, ptx_type_suffix(dst_type))
+        out.buf = ptx_push_str(out.buf, " ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, src)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        return out
+    }
+
+    // ── Memory: Load/Store ──────────────────────────────────────
+    if opcode == GpuLoadParam {
+        let alloc_result = ptx_alloc_for_type(out.regs, dst_type)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, dst_type)
+        out.buf = ptx_push_str(out.buf, "    ld.param")
+        out.buf = ptx_push_str(out.buf, ptx_type_decl(dst_type))
+        out.buf = ptx_push_str(out.buf, " ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", [param_")
+        out.buf = ptx_push_str(out.buf, i64_to_string(imm))
+        out.buf = ptx_push_str(out.buf, "];\n")
+        return out
+    }
+
+    if opcode == GpuLoadGlobal {
+        let alloc_result = ptx_alloc_for_type(out.regs, dst_type)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, dst_type)
+        let addr = ptx_value_map_get_name(out.values, src0)
+        out.buf = ptx_push_str(out.buf, "    ld.global")
+        out.buf = ptx_push_str(out.buf, ptx_type_decl(dst_type))
+        out.buf = ptx_push_str(out.buf, " ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", [")
+        out.buf = ptx_push_str(out.buf, addr)
+        out.buf = ptx_push_str(out.buf, "];\n")
+        return out
+    }
+
+    if opcode == GpuStoreGlobal {
+        let addr = ptx_value_map_get_name(out.values, src0)
+        let val = ptx_value_map_get_name(out.values, src1)
+        out.buf = ptx_push_str(out.buf, "    st.global")
+        out.buf = ptx_push_str(out.buf, ptx_type_decl(dst_type))
+        out.buf = ptx_push_str(out.buf, " [")
+        out.buf = ptx_push_str(out.buf, addr)
+        out.buf = ptx_push_str(out.buf, "], ")
+        out.buf = ptx_push_str(out.buf, val)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        return out
+    }
+
+    if opcode == GpuLdGlobalCached {
+        let alloc_result = ptx_alloc_for_type(out.regs, dst_type)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, dst_type)
+        let addr = ptx_value_map_get_name(out.values, src0)
+        out.buf = ptx_push_str(out.buf, "    ld.global.ca")
+        out.buf = ptx_push_str(out.buf, ptx_type_decl(dst_type))
+        out.buf = ptx_push_str(out.buf, " ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", [")
+        out.buf = ptx_push_str(out.buf, addr)
+        out.buf = ptx_push_str(out.buf, "];\n")
+        return out
+    }
+
+    if opcode == GpuStGlobalWriteback {
+        let addr = ptx_value_map_get_name(out.values, src0)
+        let val = ptx_value_map_get_name(out.values, src1)
+        out.buf = ptx_push_str(out.buf, "    st.global.wb")
+        out.buf = ptx_push_str(out.buf, ptx_type_decl(dst_type))
+        out.buf = ptx_push_str(out.buf, " [")
+        out.buf = ptx_push_str(out.buf, addr)
+        out.buf = ptx_push_str(out.buf, "], ")
+        out.buf = ptx_push_str(out.buf, val)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        return out
+    }
+
+    if opcode == GpuPrefetch {
+        let addr = ptx_value_map_get_name(out.values, src0)
+        // imm: 0=L1, 1=L2
+        if imm == 1 {
+            out.buf = ptx_push_str(out.buf, "    prefetch.global.L2 [")
+        } else {
+            out.buf = ptx_push_str(out.buf, "    prefetch.global.L1 [")
+        }
+        out.buf = ptx_push_str(out.buf, addr)
+        out.buf = ptx_push_str(out.buf, "];\n")
+        return out
+    }
+
+    if opcode == GpuLoadShared {
+        let alloc_result = ptx_alloc_for_type(out.regs, dst_type)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, dst_type)
+        let addr = ptx_value_map_get_name(out.values, src0)
+        out.buf = ptx_push_str(out.buf, "    ld.shared")
+        out.buf = ptx_push_str(out.buf, ptx_type_decl(dst_type))
+        out.buf = ptx_push_str(out.buf, " ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", [")
+        out.buf = ptx_push_str(out.buf, addr)
+        out.buf = ptx_push_str(out.buf, "];\n")
+        return out
+    }
+
+    if opcode == GpuStoreShared {
+        let addr = ptx_value_map_get_name(out.values, src0)
+        let val = ptx_value_map_get_name(out.values, src1)
+        out.buf = ptx_push_str(out.buf, "    st.shared")
+        out.buf = ptx_push_str(out.buf, ptx_type_decl(dst_type))
+        out.buf = ptx_push_str(out.buf, " [")
+        out.buf = ptx_push_str(out.buf, addr)
+        out.buf = ptx_push_str(out.buf, "], ")
+        out.buf = ptx_push_str(out.buf, val)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        return out
+    }
+
+    // Predicated load/store
+    if opcode == GpuLoadGlobalPred {
+        let alloc_result = ptx_alloc_for_type(out.regs, dst_type)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, dst_type)
+        let pred = ptx_value_map_get_name(out.values, pred_reg)
+        let addr = ptx_value_map_get_name(out.values, src0)
+        out.buf = ptx_push_str(out.buf, "    @")
+        out.buf = ptx_push_str(out.buf, pred)
+        out.buf = ptx_push_str(out.buf, " ld.global")
+        out.buf = ptx_push_str(out.buf, ptx_type_decl(dst_type))
+        out.buf = ptx_push_str(out.buf, " ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", [")
+        out.buf = ptx_push_str(out.buf, addr)
+        out.buf = ptx_push_str(out.buf, "];\n")
+        return out
+    }
+
+    if opcode == GpuStoreGlobalPred {
+        let pred = ptx_value_map_get_name(out.values, pred_reg)
+        let addr = ptx_value_map_get_name(out.values, src0)
+        let val = ptx_value_map_get_name(out.values, src1)
+        out.buf = ptx_push_str(out.buf, "    @")
+        out.buf = ptx_push_str(out.buf, pred)
+        out.buf = ptx_push_str(out.buf, " st.global")
+        out.buf = ptx_push_str(out.buf, ptx_type_decl(dst_type))
+        out.buf = ptx_push_str(out.buf, " [")
+        out.buf = ptx_push_str(out.buf, addr)
+        out.buf = ptx_push_str(out.buf, "], ")
+        out.buf = ptx_push_str(out.buf, val)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        return out
+    }
+
+    if opcode == GpuLoadSharedPred {
+        let alloc_result = ptx_alloc_for_type(out.regs, dst_type)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, dst_type)
+        let pred = ptx_value_map_get_name(out.values, pred_reg)
+        let addr = ptx_value_map_get_name(out.values, src0)
+        out.buf = ptx_push_str(out.buf, "    @")
+        out.buf = ptx_push_str(out.buf, pred)
+        out.buf = ptx_push_str(out.buf, " ld.shared")
+        out.buf = ptx_push_str(out.buf, ptx_type_decl(dst_type))
+        out.buf = ptx_push_str(out.buf, " ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", [")
+        out.buf = ptx_push_str(out.buf, addr)
+        out.buf = ptx_push_str(out.buf, "];\n")
+        return out
+    }
+
+    if opcode == GpuStoreSharedPred {
+        let pred = ptx_value_map_get_name(out.values, pred_reg)
+        let addr = ptx_value_map_get_name(out.values, src0)
+        let val = ptx_value_map_get_name(out.values, src1)
+        out.buf = ptx_push_str(out.buf, "    @")
+        out.buf = ptx_push_str(out.buf, pred)
+        out.buf = ptx_push_str(out.buf, " st.shared")
+        out.buf = ptx_push_str(out.buf, ptx_type_decl(dst_type))
+        out.buf = ptx_push_str(out.buf, " [")
+        out.buf = ptx_push_str(out.buf, addr)
+        out.buf = ptx_push_str(out.buf, "], ")
+        out.buf = ptx_push_str(out.buf, val)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        return out
+    }
+
+    // ── Comparisons (setp) ──────────────────────────────────────
+    if opcode == GpuSetpLt {
+        let alloc_result = ptx_alloc_pred(out.regs)
+        out.regs = alloc_result.0
+        let preg = alloc_result.1
+        // Store as pred type (use GpuU32 as placeholder)
+        out.values = ptx_value_map_insert(out.values, op_idx, preg, GpuU32)
+        let lhs = ptx_value_map_get_name(out.values, src0)
+        let rhs = ptx_value_map_get_name(out.values, src1)
+        if ptx_is_float(dst_type) {
+            out.buf = ptx_push_str(out.buf, "    setp.lt.")
+        } else if ptx_is_signed(dst_type) {
+            out.buf = ptx_push_str(out.buf, "    setp.lt.")
+        } else {
+            out.buf = ptx_push_str(out.buf, "    setp.lo.")
+        }
+        out.buf = ptx_push_str(out.buf, ptx_type_suffix(dst_type))
+        out.buf = ptx_push_str(out.buf, " ")
+        out.buf = ptx_push_str(out.buf, preg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, lhs)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, rhs)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        return out
+    }
+
+    if opcode == GpuSetpLe {
+        let alloc_result = ptx_alloc_pred(out.regs)
+        out.regs = alloc_result.0
+        let preg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, preg, GpuU32)
+        let lhs = ptx_value_map_get_name(out.values, src0)
+        let rhs = ptx_value_map_get_name(out.values, src1)
+        if ptx_is_float(dst_type) {
+            out.buf = ptx_push_str(out.buf, "    setp.le.")
+        } else if ptx_is_signed(dst_type) {
+            out.buf = ptx_push_str(out.buf, "    setp.le.")
+        } else {
+            out.buf = ptx_push_str(out.buf, "    setp.ls.")
+        }
+        out.buf = ptx_push_str(out.buf, ptx_type_suffix(dst_type))
+        out.buf = ptx_push_str(out.buf, " ")
+        out.buf = ptx_push_str(out.buf, preg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, lhs)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, rhs)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        return out
+    }
+
+    if opcode == GpuSetpGe {
+        let alloc_result = ptx_alloc_pred(out.regs)
+        out.regs = alloc_result.0
+        let preg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, preg, GpuU32)
+        let lhs = ptx_value_map_get_name(out.values, src0)
+        let rhs = ptx_value_map_get_name(out.values, src1)
+        if ptx_is_float(dst_type) {
+            out.buf = ptx_push_str(out.buf, "    setp.ge.")
+        } else if ptx_is_signed(dst_type) {
+            out.buf = ptx_push_str(out.buf, "    setp.ge.")
+        } else {
+            out.buf = ptx_push_str(out.buf, "    setp.hs.")
+        }
+        out.buf = ptx_push_str(out.buf, ptx_type_suffix(dst_type))
+        out.buf = ptx_push_str(out.buf, " ")
+        out.buf = ptx_push_str(out.buf, preg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, lhs)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, rhs)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        return out
+    }
+
+    if opcode == GpuSetpGt {
+        let alloc_result = ptx_alloc_pred(out.regs)
+        out.regs = alloc_result.0
+        let preg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, preg, GpuU32)
+        let lhs = ptx_value_map_get_name(out.values, src0)
+        let rhs = ptx_value_map_get_name(out.values, src1)
+        if ptx_is_float(dst_type) {
+            out.buf = ptx_push_str(out.buf, "    setp.gt.")
+        } else if ptx_is_signed(dst_type) {
+            out.buf = ptx_push_str(out.buf, "    setp.gt.")
+        } else {
+            out.buf = ptx_push_str(out.buf, "    setp.hi.")
+        }
+        out.buf = ptx_push_str(out.buf, ptx_type_suffix(dst_type))
+        out.buf = ptx_push_str(out.buf, " ")
+        out.buf = ptx_push_str(out.buf, preg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, lhs)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, rhs)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        return out
+    }
+
+    if opcode == GpuSetpEq {
+        let alloc_result = ptx_alloc_pred(out.regs)
+        out.regs = alloc_result.0
+        let preg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, preg, GpuU32)
+        let lhs = ptx_value_map_get_name(out.values, src0)
+        let rhs = ptx_value_map_get_name(out.values, src1)
+        out.buf = ptx_push_str(out.buf, "    setp.eq.")
+        out.buf = ptx_push_str(out.buf, ptx_type_suffix(dst_type))
+        out.buf = ptx_push_str(out.buf, " ")
+        out.buf = ptx_push_str(out.buf, preg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, lhs)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, rhs)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        return out
+    }
+
+    if opcode == GpuSetpNe {
+        let alloc_result = ptx_alloc_pred(out.regs)
+        out.regs = alloc_result.0
+        let preg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, preg, GpuU32)
+        let lhs = ptx_value_map_get_name(out.values, src0)
+        let rhs = ptx_value_map_get_name(out.values, src1)
+        out.buf = ptx_push_str(out.buf, "    setp.ne.")
+        out.buf = ptx_push_str(out.buf, ptx_type_suffix(dst_type))
+        out.buf = ptx_push_str(out.buf, " ")
+        out.buf = ptx_push_str(out.buf, preg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, lhs)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, rhs)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        return out
+    }
+
+    // ── Select (selp) ───────────────────────────────────────────
+    if opcode == GpuSelp {
+        let alloc_result = ptx_alloc_for_type(out.regs, dst_type)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, dst_type)
+        let true_val = ptx_value_map_get_name(out.values, src0)
+        let false_val = ptx_value_map_get_name(out.values, src1)
+        let pred = ptx_value_map_get_name(out.values, src2)
+        if ptx_is_float(dst_type) {
+            out.buf = ptx_push_str(out.buf, "    selp.")
+            out.buf = ptx_push_str(out.buf, ptx_type_suffix(dst_type))
+        } else {
+            out.buf = ptx_push_str(out.buf, "    selp.b")
+            out.buf = ptx_push_str(out.buf, ptx_bit_width(dst_type))
+        }
+        out.buf = ptx_push_str(out.buf, " ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, true_val)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, false_val)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, pred)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        return out
+    }
+
+    // ── Warp Operations ─────────────────────────────────────────
+    if opcode == GpuShflDown {
+        let alloc_result = ptx_alloc_for_type(out.regs, dst_type)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, dst_type)
+        let src = ptx_value_map_get_name(out.values, src0)
+        let offset = ptx_value_map_get_name(out.values, src1)
+        out.buf = ptx_push_str(out.buf, "    shfl.sync.down.b")
+        out.buf = ptx_push_str(out.buf, ptx_bit_width(dst_type))
+        out.buf = ptx_push_str(out.buf, " ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, src)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, offset)
+        out.buf = ptx_push_str(out.buf, ", 0xffffffff;\n")
+        return out
+    }
+
+    if opcode == GpuShflUp {
+        let alloc_result = ptx_alloc_for_type(out.regs, dst_type)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, dst_type)
+        let src = ptx_value_map_get_name(out.values, src0)
+        let offset = ptx_value_map_get_name(out.values, src1)
+        out.buf = ptx_push_str(out.buf, "    shfl.sync.up.b")
+        out.buf = ptx_push_str(out.buf, ptx_bit_width(dst_type))
+        out.buf = ptx_push_str(out.buf, " ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, src)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, offset)
+        out.buf = ptx_push_str(out.buf, ", 0xffffffff;\n")
+        return out
+    }
+
+    if opcode == GpuShflBfly {
+        let alloc_result = ptx_alloc_for_type(out.regs, dst_type)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, dst_type)
+        let src = ptx_value_map_get_name(out.values, src0)
+        let lane_mask = ptx_value_map_get_name(out.values, src1)
+        out.buf = ptx_push_str(out.buf, "    shfl.sync.bfly.b")
+        out.buf = ptx_push_str(out.buf, ptx_bit_width(dst_type))
+        out.buf = ptx_push_str(out.buf, " ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, src)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, lane_mask)
+        out.buf = ptx_push_str(out.buf, ", 0xffffffff;\n")
+        return out
+    }
+
+    if opcode == GpuShflIdx {
+        let alloc_result = ptx_alloc_for_type(out.regs, dst_type)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, dst_type)
+        let src = ptx_value_map_get_name(out.values, src0)
+        let idx = ptx_value_map_get_name(out.values, src1)
+        out.buf = ptx_push_str(out.buf, "    shfl.sync.idx.b")
+        out.buf = ptx_push_str(out.buf, ptx_bit_width(dst_type))
+        out.buf = ptx_push_str(out.buf, " ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, src)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, idx)
+        out.buf = ptx_push_str(out.buf, ", 0xffffffff;\n")
+        return out
+    }
+
+    if opcode == GpuVote {
+        let alloc_result = ptx_alloc_pred(out.regs)
+        out.regs = alloc_result.0
+        let preg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, preg, GpuU32)
+        let src_pred = ptx_value_map_get_name(out.values, src0)
+        // imm: 0=all, 1=any, 2=uni
+        let mode = if imm == 1 { "any" } else if imm == 2 { "uni" } else { "all" }
+        out.buf = ptx_push_str(out.buf, "    vote.sync.")
+        out.buf = ptx_push_str(out.buf, mode)
+        out.buf = ptx_push_str(out.buf, ".pred ")
+        out.buf = ptx_push_str(out.buf, preg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, src_pred)
+        out.buf = ptx_push_str(out.buf, ", 0xffffffff;\n")
+        return out
+    }
+
+    if opcode == GpuBallot {
+        let alloc_result = ptx_alloc_r32(out.regs)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, GpuU32)
+        let src_pred = ptx_value_map_get_name(out.values, src0)
+        out.buf = ptx_push_str(out.buf, "    vote.sync.ballot.b32 ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, src_pred)
+        out.buf = ptx_push_str(out.buf, ", 0xffffffff;\n")
+        return out
+    }
+
+    // ── Atomic Operations ───────────────────────────────────────
+    if opcode == GpuAtomicAdd {
+        let alloc_result = ptx_alloc_for_type(out.regs, dst_type)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, dst_type)
+        let addr = ptx_value_map_get_name(out.values, src0)
+        let val = ptx_value_map_get_name(out.values, src1)
+        out.buf = ptx_push_str(out.buf, "    atom.global.add.")
+        out.buf = ptx_push_str(out.buf, ptx_type_suffix(dst_type))
+        out.buf = ptx_push_str(out.buf, " ")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, ", [")
+        out.buf = ptx_push_str(out.buf, addr)
+        out.buf = ptx_push_str(out.buf, "], ")
+        out.buf = ptx_push_str(out.buf, val)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        return out
+    }
+
+    // ── Synchronization ─────────────────────────────────────────
+    if opcode == GpuBarrierSync {
+        out.buf = ptx_push_str(out.buf, "    bar.sync 0;\n")
+        return out
+    }
+
+    // ── Control Flow ────────────────────────────────────────────
+    if opcode == GpuBra {
+        // imm = target label index
+        if pred_reg >= 0 {
+            let pred = ptx_value_map_get_name(out.values, pred_reg)
+            out.buf = ptx_push_str(out.buf, "    @")
+            out.buf = ptx_push_str(out.buf, pred)
+            out.buf = ptx_push_str(out.buf, " bra L")
+            out.buf = ptx_push_str(out.buf, i64_to_string(imm))
+            out.buf = ptx_push_str(out.buf, ";\n")
+        } else {
+            out.buf = ptx_push_str(out.buf, "    bra L")
+            out.buf = ptx_push_str(out.buf, i64_to_string(imm))
+            out.buf = ptx_push_str(out.buf, ";\n")
+        }
+        return out
+    }
+
+    if opcode == GpuExit {
+        out.buf = ptx_push_str(out.buf, "    exit;\n")
+        return out
+    }
+
+    if opcode == GpuRet {
+        out.buf = ptx_push_str(out.buf, "    ret;\n")
+        return out
+    }
+
+    // ── TMA Operations (sm_90+) ─────────────────────────────────
+    if opcode == GpuTmaLoad {
+        if ptx_supports_tma(out.arch) {
+            let alloc_result = ptx_alloc_for_type(out.regs, dst_type)
+            out.regs = alloc_result.0
+            let reg = alloc_result.1
+            out.values = ptx_value_map_insert(out.values, op_idx, reg, dst_type)
+            let desc = ptx_value_map_get_name(out.values, src0)
+            let coords = ptx_value_map_get_name(out.values, src1)
+            out.buf = ptx_push_str(out.buf, "    cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes [")
+            out.buf = ptx_push_str(out.buf, reg)
+            out.buf = ptx_push_str(out.buf, "], [")
+            out.buf = ptx_push_str(out.buf, desc)
+            out.buf = ptx_push_str(out.buf, "], {")
+            out.buf = ptx_push_str(out.buf, coords)
+            out.buf = ptx_push_str(out.buf, "};\n")
+        }
+        return out
+    }
+
+    if opcode == GpuTmaStore {
+        if ptx_supports_tma(out.arch) {
+            let desc = ptx_value_map_get_name(out.values, src0)
+            let src = ptx_value_map_get_name(out.values, src1)
+            let coords = ptx_value_map_get_name(out.values, src2)
+            out.buf = ptx_push_str(out.buf, "    cp.async.bulk.tensor.2d.global.shared::cta [")
+            out.buf = ptx_push_str(out.buf, desc)
+            out.buf = ptx_push_str(out.buf, "], {")
+            out.buf = ptx_push_str(out.buf, coords)
+            out.buf = ptx_push_str(out.buf, "}, [")
+            out.buf = ptx_push_str(out.buf, src)
+            out.buf = ptx_push_str(out.buf, "];\n")
+        }
+        return out
+    }
+
+    // ── Tensor Core (WMMA/MMA) ──────────────────────────────────
+    if opcode == GpuWmma {
+        // WMMA m16n16k16 f16 → f32
+        let alloc_result = ptx_alloc_for_type(out.regs, GpuF32)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, GpuF32)
+        let a = ptx_value_map_get_name(out.values, src0)
+        let b = ptx_value_map_get_name(out.values, src1)
+        let c = ptx_value_map_get_name(out.values, src2)
+        out.buf = ptx_push_str(out.buf, "    wmma.mma.sync.aligned.m16n16k16.row.col.f32.f16.f16.f32 {")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, "}, {")
+        out.buf = ptx_push_str(out.buf, a)
+        out.buf = ptx_push_str(out.buf, "}, {")
+        out.buf = ptx_push_str(out.buf, b)
+        out.buf = ptx_push_str(out.buf, "}, {")
+        out.buf = ptx_push_str(out.buf, c)
+        out.buf = ptx_push_str(out.buf, "};\n")
+        return out
+    }
+
+    if opcode == GpuMma {
+        // MMA m16n8k16 instruction (Ampere+)
+        let alloc_result = ptx_alloc_for_type(out.regs, GpuF32)
+        out.regs = alloc_result.0
+        let reg = alloc_result.1
+        out.values = ptx_value_map_insert(out.values, op_idx, reg, GpuF32)
+        let a = ptx_value_map_get_name(out.values, src0)
+        let b = ptx_value_map_get_name(out.values, src1)
+        let c = ptx_value_map_get_name(out.values, src2)
+        out.buf = ptx_push_str(out.buf, "    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {")
+        out.buf = ptx_push_str(out.buf, reg)
+        out.buf = ptx_push_str(out.buf, "}, {")
+        out.buf = ptx_push_str(out.buf, a)
+        out.buf = ptx_push_str(out.buf, "}, {")
+        out.buf = ptx_push_str(out.buf, b)
+        out.buf = ptx_push_str(out.buf, "}, {")
+        out.buf = ptx_push_str(out.buf, c)
+        out.buf = ptx_push_str(out.buf, "};\n")
+        return out
+    }
+
+    // Unknown opcode — emit comment
+    out.buf = ptx_push_str(out.buf, "    // UNHANDLED opcode at index ")
+    out.buf = ptx_push_str(out.buf, i64_to_string(op_idx))
+    out.buf = ptx_push_str(out.buf, "\n")
+    out
+}
+
+// ── Full Kernel Codegen ─────────────────────────────────────────────
+
+// Two-pass codegen:
+// Pass 1: Walk all ops to count registers (dry run)
+// Pass 2: Emit actual PTX with correct register pool sizes
+
+fn ptx_count_regs_for_kernel(kernel: GpuKernelIr) -> PtxRegCounters with Mut, Panic, Div, Alloc {
+    var rc = ptx_reg_counters_new()
+    var i: i64 = 0
+    while i < kernel.op_count {
+        let ty = kernel.dst_types[i as usize]
+        let opcode = kernel.opcodes[i as usize]
+
+        // Predicate-producing ops
+        if opcode == GpuSetpLt || opcode == GpuSetpLe || opcode == GpuSetpEq ||
+           opcode == GpuSetpGe || opcode == GpuSetpGt || opcode == GpuSetpNe ||
+           opcode == GpuVote {
+            rc.pred = rc.pred + 1
+        }
+        // No-destination ops (stores, barrier, ret, exit, branch)
+        else if opcode == GpuStoreGlobal || opcode == GpuStGlobalWriteback ||
+                opcode == GpuStoreShared || opcode == GpuStoreGlobalPred ||
+                opcode == GpuStoreSharedPred || opcode == GpuBarrierSync ||
+                opcode == GpuRet || opcode == GpuExit || opcode == GpuBra ||
+                opcode == GpuPrefetch || opcode == GpuTmaStore {
+            // No register allocated
+        }
+        // Float registers
+        else if ty == GpuF32 {
+            rc.f32_cnt = rc.f32_cnt + 1
+        } else if ty == GpuF64 {
+            rc.f64_cnt = rc.f64_cnt + 1
+        }
+        // 64-bit integer/pointer
+        else if ty == GpuU64 || ty == GpuI64 || ty == GpuPtr {
+            rc.r64 = rc.r64 + 1
+        }
+        // 32-bit integer
+        else {
+            rc.r32 = rc.r32 + 1
+        }
+
+        i = i + 1
+    }
+    rc
+}
+
+fn ptx_codegen_kernel(kernel: GpuKernelIr, arch: PtxArch) -> PtxBuf with Mut, Panic, Div, Alloc {
+    // Pass 1: count registers
+    let counted_regs = ptx_count_regs_for_kernel(kernel)
+
+    // Initialize codegen state with counted registers
+    var st = ptx_codegen_new(arch)
+    st.regs = ptx_reg_counters_new()  // Reset — pass 2 allocates fresh
+
+    // Emit header
+    st = ptx_emit_versioned_header(st)
+
+    // Emit kernel entry + parameters
+    st = ptx_emit_kernel_entry(st, kernel)
+
+    // Emit register pools (sized from pass 1)
+    // Temporarily set reg counters to pass-1 counts for pool sizing
+    let saved_regs = st.regs
+    st.regs = counted_regs
+    st = ptx_emit_reg_pool(st)
+    st.regs = saved_regs
+
+    // Emit shared memory if needed
+    if kernel.shared_mem_bytes > 0 {
+        st = ptx_emit_shared_memory(st, "shared_buf", GpuF32, kernel.shared_mem_bytes / 4, 4)
+    }
+
+    // Pass 2: emit all instructions
+    var oi: i64 = 0
+    while oi < kernel.op_count {
+        st = ptx_emit_op(st, kernel, oi)
+        oi = oi + 1
+    }
+
+    // Close kernel body
+    st.buf = ptx_push_str(st.buf, "}\n")
+    st.buf
+}
+
+// Convenience: codegen for default sm_50 architecture
+fn ptx_codegen_kernel_default(kernel: GpuKernelIr) -> PtxBuf with Mut, Panic, Div, Alloc {
+    ptx_codegen_kernel(kernel, ptx_arch_new(5, 0))
+}
+
+// Convenience: codegen for Ampere (sm_80)
+fn ptx_codegen_kernel_ampere(kernel: GpuKernelIr) -> PtxBuf with Mut, Panic, Div, Alloc {
+    ptx_codegen_kernel(kernel, ptx_arch_new(8, 0))
+}
+
+// Convenience: codegen for Hopper (sm_90)
+fn ptx_codegen_kernel_hopper(kernel: GpuKernelIr) -> PtxBuf with Mut, Panic, Div, Alloc {
+    ptx_codegen_kernel(kernel, ptx_arch_new(9, 0))
+}
+
+// Convenience: codegen for Blackwell (sm_100)
+fn ptx_codegen_kernel_blackwell(kernel: GpuKernelIr) -> PtxBuf with Mut, Panic, Div, Alloc {
+    ptx_codegen_kernel(kernel, ptx_arch_new(10, 0))
+}
+
+// ── Multi-kernel Module Codegen ─────────────────────────────────────
+
+// Compile multiple kernels into a single PTX module.
+// kernels: array of GpuKernelIr, count: number of kernels
+fn ptx_codegen_module(
+    kernels: [GpuKernelIr; 64],
+    count: i64,
+    arch: PtxArch
+) -> PtxBuf with Mut, Panic, Div, Alloc {
+    var buf = ptx_buf_new()
+
+    // Emit module header once
+    let vmaj = ptx_recommended_version_major(arch)
+    let vmin = ptx_recommended_version_minor(arch)
+    let sm = ptx_sm_version(arch)
+
+    buf = ptx_push_str(buf, ".version ")
+    buf = ptx_push_str(buf, i64_to_string(vmaj))
+    buf = ptx_push_str(buf, ".")
+    buf = ptx_push_str(buf, i64_to_string(vmin))
+    buf = ptx_push_str(buf, "\n")
+    buf = ptx_push_str(buf, ".target sm_")
+    buf = ptx_push_str(buf, i64_to_string(sm))
+    buf = ptx_push_str(buf, "\n")
+    buf = ptx_push_str(buf, ".address_size 64\n\n")
+
+    // Emit each kernel
+    var ki: i64 = 0
+    while ki < count {
+        let k = kernels[ki as usize]
+        let counted = ptx_count_regs_for_kernel(k)
+
+        var st = ptx_codegen_new(arch)
+        st.buf = buf  // Continue appending to module buffer
+
+        // Kernel entry
+        st = ptx_emit_kernel_entry(st, k)
+
+        // Register pools
+        let saved = st.regs
+        st.regs = counted
+        st = ptx_emit_reg_pool(st)
+        st.regs = saved
+
+        // Shared memory
+        if k.shared_mem_bytes > 0 {
+            st = ptx_emit_shared_memory(st, "shared_buf", GpuF32, k.shared_mem_bytes / 4, 4)
+        }
+
+        // Instructions
+        var oi: i64 = 0
+        while oi < k.op_count {
+            st = ptx_emit_op(st, k, oi)
+            oi = oi + 1
+        }
+
+        st.buf = ptx_push_str(st.buf, "}\n\n")
+        buf = st.buf
+
+        ki = ki + 1
+    }
+
+    buf
+}

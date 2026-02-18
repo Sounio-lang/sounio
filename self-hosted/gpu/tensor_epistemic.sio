@@ -1,0 +1,1471 @@
+// self-hosted::gpu::tensor_epistemic — Tensor core epistemic operations
+//
+// WMMA with uncertainty tracking: every tensor operation propagates
+// epsilon (uncertainty bound) alongside the computed values.
+//
+// Architecture:
+//   EpistemicTensor = data + epsilon + provenance
+//   Each intrinsic maps to a category, a propagation rule, and
+//   (optionally) a direct PTX instruction for tensor core dispatch.
+//
+// Epsilon propagation rules:
+//   Passthrough:     ε_out = ε_in
+//   Maximum:         ε_out = max(ε_a, ε_b)
+//   Additive:        ε_out = ε_a + ε_b
+//   Multiplicative:  ε_out = |b|·ε_a + |a|·ε_b
+//   Computed:        runtime-specific (WMMA, softmax, ReLU, etc.)
+//   WeightedMean:    inverse-epsilon weighting
+//   SoftmaxScaled:   softmax(x)·(1 - softmax(x))·ε / temperature
+//   Reset:           ε_out = 0 (fresh assignment)
+//
+// Catalog: 39 intrinsics across 8 categories, each with:
+//   - full name (e.g. "epistemic.wmma.mma_sync")
+//   - short name (e.g. "wmma_mma")
+//   - category, tensor core op, epsilon rule
+//   - PTX instruction mapping (when applicable)
+
+// ── Tag Constants: TensorCoreOp ──────────────────────────────────────
+
+// 0 = Wmma, 1 = Mma, 2 = Contract, 3 = BatchMm
+let TENSOR_OP_WMMA: i64 = 0
+let TENSOR_OP_MMA: i64 = 1
+let TENSOR_OP_CONTRACT: i64 = 2
+let TENSOR_OP_BATCH_MM: i64 = 3
+let TENSOR_OP_NONE: i64 = -1
+
+// ── Tag Constants: EpistemicTensorCategory ────────────────────────────
+
+let ECAT_MATRIX_OPS: i64 = 0
+let ECAT_ELEMENTWISE: i64 = 1
+let ECAT_REDUCTION: i64 = 2
+let ECAT_ATTENTION: i64 = 3
+let ECAT_ACTIVATION: i64 = 4
+let ECAT_NORMALIZATION: i64 = 5
+let ECAT_MEMORY: i64 = 6
+let ECAT_CONFIDENCE: i64 = 7
+
+// ── Tag Constants: EpsilonPropagationRule ─────────────────────────────
+
+let ERULE_PASSTHROUGH: i64 = 0
+let ERULE_MAXIMUM: i64 = 1
+let ERULE_ADDITIVE: i64 = 2
+let ERULE_COMPUTED: i64 = 3
+let ERULE_MULTIPLICATIVE: i64 = 4
+let ERULE_WEIGHTED_MEAN: i64 = 5
+let ERULE_SOFTMAX_SCALED: i64 = 6
+let ERULE_RESET: i64 = 7
+
+// ── EpistemicTensorIntrinsic ─────────────────────────────────────────
+
+struct EpistemicTensorIntrinsic {
+    name: [i8; 64],
+    name_len: i64,
+    short_name: [i8; 32],
+    short_name_len: i64,
+    category: i64,
+    tensor_op: i64,
+    epsilon_rule: i64,
+    ptx_instruction: [i8; 64],
+    ptx_len: i64,
+}
+
+fn empty_epistemic_tensor_intrinsic() -> EpistemicTensorIntrinsic {
+    EpistemicTensorIntrinsic {
+        name: [0; 64],
+        name_len: 0,
+        short_name: [0; 32],
+        short_name_len: 0,
+        category: 0,
+        tensor_op: TENSOR_OP_NONE,
+        epsilon_rule: ERULE_PASSTHROUGH,
+        ptx_instruction: [0; 64],
+        ptx_len: 0,
+    }
+}
+
+// ── String-to-i8-array helpers ───────────────────────────────────────
+
+fn copy_str_to_i8_64(dst: [i8; 64], s: string) -> ([i8; 64], i64) with Mut, Panic, Div {
+    var out = dst
+    let len = str_len(s)
+    var i: i64 = 0
+    while i < len && i < 64 {
+        out[i as usize] = str_char_at(s, i) as i8
+        i = i + 1
+    }
+    let final_len = if len > 64 { 64 } else { len }
+    (out, final_len)
+}
+
+fn copy_str_to_i8_32(dst: [i8; 32], s: string) -> ([i8; 32], i64) with Mut, Panic, Div {
+    var out = dst
+    let len = str_len(s)
+    var i: i64 = 0
+    while i < len && i < 32 {
+        out[i as usize] = str_char_at(s, i) as i8
+        i = i + 1
+    }
+    let final_len = if len > 32 { 32 } else { len }
+    (out, final_len)
+}
+
+// Build a single intrinsic from string parameters
+fn make_intrinsic(
+    full_name: string,
+    short: string,
+    cat: i64,
+    top: i64,
+    rule: i64,
+    ptx: string
+) -> EpistemicTensorIntrinsic with Mut, Panic, Div {
+    var intr = empty_epistemic_tensor_intrinsic()
+    let name_result = copy_str_to_i8_64(intr.name, full_name)
+    intr.name = name_result.0
+    intr.name_len = name_result.1
+    let short_result = copy_str_to_i8_32(intr.short_name, short)
+    intr.short_name = short_result.0
+    intr.short_name_len = short_result.1
+    intr.category = cat
+    intr.tensor_op = top
+    intr.epsilon_rule = rule
+    let ptx_result = copy_str_to_i8_64(intr.ptx_instruction, ptx)
+    intr.ptx_instruction = ptx_result.0
+    intr.ptx_len = ptx_result.1
+    intr
+}
+
+// ── Intrinsic Catalog ────────────────────────────────────────────────
+//
+// 39 intrinsics across 8 categories. The catalog is built as a
+// fixed-size array populated by epistemic_tensor_build_catalog().
+
+let EPISTEMIC_TENSOR_INTRINSIC_COUNT: i64 = 39
+
+fn epistemic_tensor_intrinsic_count() -> i64 {
+    EPISTEMIC_TENSOR_INTRINSIC_COUNT
+}
+
+fn epistemic_tensor_build_catalog(
+    catalog: [EpistemicTensorIntrinsic; 64]
+) -> [EpistemicTensorIntrinsic; 64] with Mut, Panic, Div {
+    var out = catalog
+
+    // ── MatrixOps (5) ─────────────────────────────────────────────
+    // 0: epistemic.wmma.mma_sync
+    out[0 as usize] = make_intrinsic(
+        "epistemic.wmma.mma_sync",
+        "wmma_mma",
+        ECAT_MATRIX_OPS,
+        TENSOR_OP_WMMA,
+        ERULE_COMPUTED,
+        "wmma.mma.sync.aligned.m16n16k16.row.col.f32.f32"
+    )
+    // 1: epistemic.wmma.load_a
+    out[1 as usize] = make_intrinsic(
+        "epistemic.wmma.load_a",
+        "wmma_load_a",
+        ECAT_MATRIX_OPS,
+        TENSOR_OP_WMMA,
+        ERULE_PASSTHROUGH,
+        "wmma.load.a.sync.aligned.m16n16k16.shared"
+    )
+    // 2: epistemic.wmma.load_b
+    out[2 as usize] = make_intrinsic(
+        "epistemic.wmma.load_b",
+        "wmma_load_b",
+        ECAT_MATRIX_OPS,
+        TENSOR_OP_WMMA,
+        ERULE_PASSTHROUGH,
+        ""
+    )
+    // 3: epistemic.wmma.store_d
+    out[3 as usize] = make_intrinsic(
+        "epistemic.wmma.store_d",
+        "wmma_store_d",
+        ECAT_MATRIX_OPS,
+        TENSOR_OP_WMMA,
+        ERULE_PASSTHROUGH,
+        ""
+    )
+    // 4: epistemic.batch_matmul
+    out[4 as usize] = make_intrinsic(
+        "epistemic.batch_matmul",
+        "batch_matmul",
+        ECAT_MATRIX_OPS,
+        TENSOR_OP_BATCH_MM,
+        ERULE_COMPUTED,
+        ""
+    )
+
+    // ── Elementwise (4) ───────────────────────────────────────────
+    // 5: epistemic.add
+    out[5 as usize] = make_intrinsic(
+        "epistemic.add", "add",
+        ECAT_ELEMENTWISE, TENSOR_OP_NONE, ERULE_ADDITIVE, ""
+    )
+    // 6: epistemic.mul
+    out[6 as usize] = make_intrinsic(
+        "epistemic.mul", "mul",
+        ECAT_ELEMENTWISE, TENSOR_OP_NONE, ERULE_MULTIPLICATIVE, ""
+    )
+    // 7: epistemic.div
+    out[7 as usize] = make_intrinsic(
+        "epistemic.div", "div",
+        ECAT_ELEMENTWISE, TENSOR_OP_NONE, ERULE_COMPUTED, ""
+    )
+    // 8: epistemic.fma
+    out[8 as usize] = make_intrinsic(
+        "epistemic.fma", "fma",
+        ECAT_ELEMENTWISE, TENSOR_OP_NONE, ERULE_COMPUTED, ""
+    )
+
+    // ── Reduction (5) ─────────────────────────────────────────────
+    // 9: epistemic.reduce.sum
+    out[9 as usize] = make_intrinsic(
+        "epistemic.reduce.sum", "reduce_sum",
+        ECAT_REDUCTION, TENSOR_OP_NONE, ERULE_ADDITIVE, ""
+    )
+    // 10: epistemic.reduce.mean
+    out[10 as usize] = make_intrinsic(
+        "epistemic.reduce.mean", "reduce_mean",
+        ECAT_REDUCTION, TENSOR_OP_NONE, ERULE_WEIGHTED_MEAN, ""
+    )
+    // 11: epistemic.reduce.max
+    out[11 as usize] = make_intrinsic(
+        "epistemic.reduce.max", "reduce_max",
+        ECAT_REDUCTION, TENSOR_OP_NONE, ERULE_PASSTHROUGH, ""
+    )
+    // 12: epistemic.reduce.confidence_weighted
+    out[12 as usize] = make_intrinsic(
+        "epistemic.reduce.confidence_weighted", "reduce_conf",
+        ECAT_REDUCTION, TENSOR_OP_NONE, ERULE_WEIGHTED_MEAN, ""
+    )
+    // 13: epistemic.warp_reduce_confidence
+    out[13 as usize] = make_intrinsic(
+        "epistemic.warp_reduce_confidence", "warp_reduce_conf",
+        ECAT_REDUCTION, TENSOR_OP_NONE, ERULE_COMPUTED, ""
+    )
+
+    // ── Attention (5) ─────────────────────────────────────────────
+    // 14: epistemic.attention.scores — Q*K^T
+    out[14 as usize] = make_intrinsic(
+        "epistemic.attention.scores", "attn_scores",
+        ECAT_ATTENTION, TENSOR_OP_MMA, ERULE_MULTIPLICATIVE, ""
+    )
+    // 15: epistemic.attention.softmax
+    out[15 as usize] = make_intrinsic(
+        "epistemic.attention.softmax", "attn_softmax",
+        ECAT_ATTENTION, TENSOR_OP_NONE, ERULE_SOFTMAX_SCALED, ""
+    )
+    // 16: epistemic.attention.weighted_values
+    out[16 as usize] = make_intrinsic(
+        "epistemic.attention.weighted_values", "attn_wv",
+        ECAT_ATTENTION, TENSOR_OP_MMA, ERULE_MULTIPLICATIVE, ""
+    )
+    // 17: epistemic.attention.full
+    out[17 as usize] = make_intrinsic(
+        "epistemic.attention.full", "attn_full",
+        ECAT_ATTENTION, TENSOR_OP_NONE, ERULE_COMPUTED, ""
+    )
+    // 18: epistemic.attention.confidence_mask
+    out[18 as usize] = make_intrinsic(
+        "epistemic.attention.confidence_mask", "attn_conf_mask",
+        ECAT_ATTENTION, TENSOR_OP_NONE, ERULE_RESET, ""
+    )
+
+    // ── Activation (5) ────────────────────────────────────────────
+    // 19: epistemic.relu
+    out[19 as usize] = make_intrinsic(
+        "epistemic.relu", "relu",
+        ECAT_ACTIVATION, TENSOR_OP_NONE, ERULE_COMPUTED, ""
+    )
+    // 20: epistemic.gelu
+    out[20 as usize] = make_intrinsic(
+        "epistemic.gelu", "gelu",
+        ECAT_ACTIVATION, TENSOR_OP_NONE, ERULE_COMPUTED, ""
+    )
+    // 21: epistemic.silu
+    out[21 as usize] = make_intrinsic(
+        "epistemic.silu", "silu",
+        ECAT_ACTIVATION, TENSOR_OP_NONE, ERULE_COMPUTED, ""
+    )
+    // 22: epistemic.softmax
+    out[22 as usize] = make_intrinsic(
+        "epistemic.softmax", "softmax",
+        ECAT_ACTIVATION, TENSOR_OP_NONE, ERULE_SOFTMAX_SCALED, ""
+    )
+    // 23: epistemic.tanh
+    out[23 as usize] = make_intrinsic(
+        "epistemic.tanh", "tanh",
+        ECAT_ACTIVATION, TENSOR_OP_NONE, ERULE_COMPUTED, ""
+    )
+
+    // ── Normalization (3) ─────────────────────────────────────────
+    // 24: epistemic.layer_norm
+    out[24 as usize] = make_intrinsic(
+        "epistemic.layer_norm", "layer_norm",
+        ECAT_NORMALIZATION, TENSOR_OP_NONE, ERULE_COMPUTED, ""
+    )
+    // 25: epistemic.rms_norm
+    out[25 as usize] = make_intrinsic(
+        "epistemic.rms_norm", "rms_norm",
+        ECAT_NORMALIZATION, TENSOR_OP_NONE, ERULE_COMPUTED, ""
+    )
+    // 26: epistemic.batch_norm
+    out[26 as usize] = make_intrinsic(
+        "epistemic.batch_norm", "batch_norm",
+        ECAT_NORMALIZATION, TENSOR_OP_NONE, ERULE_COMPUTED, ""
+    )
+
+    // ── Memory (5) ────────────────────────────────────────────────
+    // 27: epistemic.load_tensor
+    out[27 as usize] = make_intrinsic(
+        "epistemic.load_tensor", "load_tensor",
+        ECAT_MEMORY, TENSOR_OP_NONE, ERULE_PASSTHROUGH, ""
+    )
+    // 28: epistemic.store_tensor
+    out[28 as usize] = make_intrinsic(
+        "epistemic.store_tensor", "store_tensor",
+        ECAT_MEMORY, TENSOR_OP_NONE, ERULE_PASSTHROUGH, ""
+    )
+    // 29: epistemic.load_ontology
+    out[29 as usize] = make_intrinsic(
+        "epistemic.load_ontology", "load_ontology",
+        ECAT_MEMORY, TENSOR_OP_NONE, ERULE_PASSTHROUGH, ""
+    )
+    // 30: epistemic.transpose
+    out[30 as usize] = make_intrinsic(
+        "epistemic.transpose", "transpose",
+        ECAT_MEMORY, TENSOR_OP_NONE, ERULE_PASSTHROUGH, ""
+    )
+    // 31: epistemic.reshape
+    out[31 as usize] = make_intrinsic(
+        "epistemic.reshape", "reshape",
+        ECAT_MEMORY, TENSOR_OP_NONE, ERULE_PASSTHROUGH, ""
+    )
+
+    // ── Confidence (7) ────────────────────────────────────────────
+    // 32: epistemic.get_confidence
+    out[32 as usize] = make_intrinsic(
+        "epistemic.get_confidence", "get_conf",
+        ECAT_CONFIDENCE, TENSOR_OP_NONE, ERULE_PASSTHROUGH, ""
+    )
+    // 33: epistemic.set_confidence
+    out[33 as usize] = make_intrinsic(
+        "epistemic.set_confidence", "set_conf",
+        ECAT_CONFIDENCE, TENSOR_OP_NONE, ERULE_RESET, ""
+    )
+    // 34: epistemic.threshold_confidence
+    out[34 as usize] = make_intrinsic(
+        "epistemic.threshold_confidence", "thresh_conf",
+        ECAT_CONFIDENCE, TENSOR_OP_NONE, ERULE_COMPUTED, ""
+    )
+    // 35: epistemic.calibrate
+    out[35 as usize] = make_intrinsic(
+        "epistemic.calibrate", "calibrate",
+        ECAT_CONFIDENCE, TENSOR_OP_NONE, ERULE_COMPUTED, ""
+    )
+    // 36: epistemic.provenance_and
+    out[36 as usize] = make_intrinsic(
+        "epistemic.provenance_and", "prov_and",
+        ECAT_CONFIDENCE, TENSOR_OP_NONE, ERULE_COMPUTED, ""
+    )
+    // 37: epistemic.provenance_or
+    out[37 as usize] = make_intrinsic(
+        "epistemic.provenance_or", "prov_or",
+        ECAT_CONFIDENCE, TENSOR_OP_NONE, ERULE_COMPUTED, ""
+    )
+    // 38: epistemic.merge_provenance
+    out[38 as usize] = make_intrinsic(
+        "epistemic.merge_provenance", "merge_prov",
+        ECAT_CONFIDENCE, TENSOR_OP_NONE, ERULE_COMPUTED, ""
+    )
+
+    out
+}
+
+// ── Catalog Access ───────────────────────────────────────────────────
+
+fn epistemic_tensor_get_intrinsic(index: i64) -> EpistemicTensorIntrinsic with Mut, Panic, Div {
+    if index < 0 || index >= EPISTEMIC_TENSOR_INTRINSIC_COUNT {
+        return empty_epistemic_tensor_intrinsic()
+    }
+    var catalog: [EpistemicTensorIntrinsic; 64] = [empty_epistemic_tensor_intrinsic(); 64]
+    catalog = epistemic_tensor_build_catalog(catalog)
+    catalog[index as usize]
+}
+
+// Compare two i8 arrays for equality up to a given length
+fn i8_arrays_equal_64(a: [i8; 64], a_len: i64, b: [i8; 64], b_len: i64) -> bool {
+    if a_len != b_len { return false }
+    var i: i64 = 0
+    while i < a_len {
+        if a[i as usize] != b[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn epistemic_tensor_find_by_name(name: [i8; 64], name_len: i64) -> i64 with Mut, Panic, Div {
+    var catalog: [EpistemicTensorIntrinsic; 64] = [empty_epistemic_tensor_intrinsic(); 64]
+    catalog = epistemic_tensor_build_catalog(catalog)
+    var i: i64 = 0
+    while i < EPISTEMIC_TENSOR_INTRINSIC_COUNT {
+        let intr = catalog[i as usize]
+        if i8_arrays_equal_64(intr.name, intr.name_len, name, name_len) {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+// ── Category Queries ─────────────────────────────────────────────────
+
+fn epistemic_tensor_category_name(cat: i64) -> string {
+    if cat == ECAT_MATRIX_OPS { return "MatrixOps" }
+    if cat == ECAT_ELEMENTWISE { return "Elementwise" }
+    if cat == ECAT_REDUCTION { return "Reduction" }
+    if cat == ECAT_ATTENTION { return "Attention" }
+    if cat == ECAT_ACTIVATION { return "Activation" }
+    if cat == ECAT_NORMALIZATION { return "Normalization" }
+    if cat == ECAT_MEMORY { return "Memory" }
+    if cat == ECAT_CONFIDENCE { return "Confidence" }
+    "Unknown"
+}
+
+fn epistemic_tensor_propagation_rule_name(rule: i64) -> string {
+    if rule == ERULE_PASSTHROUGH { return "Passthrough" }
+    if rule == ERULE_MAXIMUM { return "Maximum" }
+    if rule == ERULE_ADDITIVE { return "Additive" }
+    if rule == ERULE_COMPUTED { return "Computed" }
+    if rule == ERULE_MULTIPLICATIVE { return "Multiplicative" }
+    if rule == ERULE_WEIGHTED_MEAN { return "WeightedMean" }
+    if rule == ERULE_SOFTMAX_SCALED { return "SoftmaxScaled" }
+    if rule == ERULE_RESET { return "Reset" }
+    "Unknown"
+}
+
+fn epistemic_tensor_op_name(op: i64) -> string {
+    if op == TENSOR_OP_WMMA { return "Wmma" }
+    if op == TENSOR_OP_MMA { return "Mma" }
+    if op == TENSOR_OP_CONTRACT { return "Contract" }
+    if op == TENSOR_OP_BATCH_MM { return "BatchMm" }
+    "None"
+}
+
+fn epistemic_tensor_get_by_category(
+    cat: i64,
+    out: [EpistemicTensorIntrinsic; 64]
+) -> ([EpistemicTensorIntrinsic; 64], i64) with Mut, Panic, Div {
+    var result = out
+    var catalog: [EpistemicTensorIntrinsic; 64] = [empty_epistemic_tensor_intrinsic(); 64]
+    catalog = epistemic_tensor_build_catalog(catalog)
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < EPISTEMIC_TENSOR_INTRINSIC_COUNT {
+        if catalog[i as usize].category == cat {
+            if count < 64 {
+                result[count as usize] = catalog[i as usize]
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    (result, count)
+}
+
+fn epistemic_tensor_get_tensor_core_ops(
+    out: [EpistemicTensorIntrinsic; 16]
+) -> ([EpistemicTensorIntrinsic; 16], i64) with Mut, Panic, Div {
+    var result = out
+    var catalog: [EpistemicTensorIntrinsic; 64] = [empty_epistemic_tensor_intrinsic(); 64]
+    catalog = epistemic_tensor_build_catalog(catalog)
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < EPISTEMIC_TENSOR_INTRINSIC_COUNT {
+        if catalog[i as usize].tensor_op != TENSOR_OP_NONE {
+            if count < 16 {
+                result[count as usize] = catalog[i as usize]
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    (result, count)
+}
+
+// Check whether a name starts with "epistemic." (10 chars)
+fn epistemic_tensor_is_intrinsic(name: [i8; 64], name_len: i64) -> bool {
+    if name_len < 10 { return false }
+    // 'e'=101 'p'=112 'i'=105 's'=115 't'=116 'e'=101 'm'=109 'i'=105 'c'=99 '.'=46
+    if name[0 as usize] != 101 { return false }  // e
+    if name[1 as usize] != 112 { return false }  // p
+    if name[2 as usize] != 105 { return false }  // i
+    if name[3 as usize] != 115 { return false }  // s
+    if name[4 as usize] != 116 { return false }  // t
+    if name[5 as usize] != 101 { return false }  // e
+    if name[6 as usize] != 109 { return false }  // m
+    if name[7 as usize] != 105 { return false }  // i
+    if name[8 as usize] != 99 { return false }   // c
+    if name[9 as usize] != 46 { return false }   // .
+    true
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Epsilon Computation Algorithms — Reference Implementations
+// ════════════════════════════════════════════════════════════════════
+//
+// These operate on flat f32 arrays sized [f32; 4096], with explicit
+// dimension parameters. They serve as reference implementations that
+// can be lowered to GPU kernels via the epistemic_ptx module.
+
+// ── Helper: abs_f32 ──────────────────────────────────────────────────
+
+fn abs_f32(x: f32) -> f32 {
+    if x < 0.0 { return 0.0 - x }
+    x
+}
+
+fn max_f32(a: f32, b: f32) -> f32 {
+    if a > b { return a }
+    b
+}
+
+fn min_f32(a: f32, b: f32) -> f32 {
+    if a < b { return a }
+    b
+}
+
+// ── Helper: sqrt_approx_f32 (Newton's method, 8 iterations) ─────────
+
+fn sqrt_approx_f32(x: f32) -> f32 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    // Initial guess: x/2
+    var guess: f32 = x / 2.0
+    if guess < 0.001 { guess = 0.001 }
+    // Newton iterations: guess = (guess + x/guess) / 2
+    var i: i64 = 0
+    while i < 8 {
+        if guess > 0.0 {
+            guess = (guess + x / guess) / 2.0
+        }
+        i = i + 1
+    }
+    guess
+}
+
+// ── Helper: exp_approx_f32 (Taylor series, 12 terms) ────────────────
+
+fn exp_approx_f32(x: f32) -> f32 with Mut, Div {
+    // Clamp to avoid overflow
+    var clamped: f32 = x
+    if clamped > 88.0 { clamped = 88.0 }
+    if clamped < -88.0 { clamped = -88.0 }
+    // Taylor: e^x = 1 + x + x^2/2! + x^3/3! + ...
+    var result: f32 = 1.0
+    var term: f32 = 1.0
+    var n: i64 = 1
+    while n <= 12 {
+        term = term * clamped / (n as f32)
+        result = result + term
+        n = n + 1
+    }
+    if result < 0.0 { result = 0.0 }
+    result
+}
+
+// ── WMMA Epsilon Propagation ─────────────────────────────────────────
+//
+// For C = A * B where A is m x k and B is k x n, producing C of m x n:
+//   ε_C[i,j] = Σ_l (|A[i,l]| * ε_B[l,j] + |B[l,j]| * ε_A[i,l]
+//               + ε_A[i,l] * ε_B[l,j])
+//
+// Row-major layout: A[i,l] = a_values[i*k + l], etc.
+
+fn compute_wmma_epsilon(
+    a_values: [f32; 4096], a_epsilon: [f32; 4096],
+    b_values: [f32; 4096], b_epsilon: [f32; 4096],
+    m: i64, k: i64, n: i64,
+    c_epsilon: [f32; 4096]
+) -> [f32; 4096] with Mut, Panic, Div {
+    var out = c_epsilon
+    // Clamp dimensions to array bounds
+    let max_m = if m > 64 { 64 } else { m }
+    let max_k = if k > 64 { 64 } else { k }
+    let max_n = if n > 64 { 64 } else { n }
+
+    var i: i64 = 0
+    while i < max_m {
+        var j: i64 = 0
+        while j < max_n {
+            var eps_sum: f32 = 0.0
+            var l: i64 = 0
+            while l < max_k {
+                let a_idx = i * k + l
+                let b_idx = l * n + j
+                if a_idx < 4096 && b_idx < 4096 {
+                    let abs_a = abs_f32(a_values[a_idx as usize])
+                    let abs_b = abs_f32(b_values[b_idx as usize])
+                    let eps_a = a_epsilon[a_idx as usize]
+                    let eps_b = b_epsilon[b_idx as usize]
+                    // First-order: |A|*ε_B + |B|*ε_A
+                    // Second-order: ε_A * ε_B (cross-term)
+                    eps_sum = eps_sum + abs_a * eps_b + abs_b * eps_a + eps_a * eps_b
+                }
+                l = l + 1
+            }
+            let c_idx = i * n + j
+            if c_idx < 4096 {
+                out[c_idx as usize] = eps_sum
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    out
+}
+
+// ── Softmax Epsilon ──────────────────────────────────────────────────
+//
+// For softmax output s_i = exp(x_i) / Σ exp(x_j):
+//   ε_out_i ≈ s_i * (1 - s_i) * ε_in_i / temperature
+//
+// This is the Jacobian-based first-order propagation. The diagonal
+// of the softmax Jacobian is s_i*(1-s_i); off-diagonal terms are
+// -s_i*s_j, which we omit for computational efficiency.
+
+fn compute_softmax_epsilon(
+    values: [f32; 4096], epsilons: [f32; 4096],
+    count: i64, temperature: f32,
+    out: [f32; 4096]
+) -> [f32; 4096] with Mut, Panic, Div {
+    var result = out
+    let n = if count > 4096 { 4096 } else { count }
+
+    // Step 1: compute softmax values
+    // Find max for numerical stability
+    var max_val: f32 = values[0 as usize]
+    var i: i64 = 1
+    while i < n {
+        if values[i as usize] > max_val {
+            max_val = values[i as usize]
+        }
+        i = i + 1
+    }
+
+    // Compute exp(x_i - max) and sum
+    var exp_buf: [f32; 4096] = [0.0; 4096]
+    var exp_sum: f32 = 0.0
+    i = 0
+    while i < n {
+        let scaled = (values[i as usize] - max_val) / temperature
+        let e = exp_approx_f32(scaled)
+        exp_buf[i as usize] = e
+        exp_sum = exp_sum + e
+        i = i + 1
+    }
+
+    // Guard against zero sum
+    if exp_sum < 0.000001 { exp_sum = 0.000001 }
+
+    // Step 2: softmax and epsilon propagation
+    i = 0
+    while i < n {
+        let s_i = exp_buf[i as usize] / exp_sum
+        // Jacobian diagonal: s_i * (1 - s_i)
+        let jacobian = s_i * (1.0 - s_i)
+        // Propagated epsilon
+        let eps_in = epsilons[i as usize]
+        var eps_out: f32 = jacobian * eps_in / temperature
+        // Clamp to reasonable range
+        if eps_out < 0.0 { eps_out = 0.0 }
+        result[i as usize] = eps_out
+        i = i + 1
+    }
+    result
+}
+
+// ── ReLU Epsilon ─────────────────────────────────────────────────────
+//
+// Three regions:
+//   x >> 0  (positive):    ε_out = ε_in  (gradient = 1)
+//   x << 0  (negative):    ε_out = 0     (gradient = 0)
+//   |x| ≤ ε (boundary):   ε_out = 2*ε_in (uncertainty widens —
+//                          we don't know which side of zero we're on)
+
+fn compute_relu_epsilon(
+    values: [f32; 4096], epsilons: [f32; 4096],
+    count: i64, out: [f32; 4096]
+) -> [f32; 4096] with Mut, Panic, Div {
+    var result = out
+    let n = if count > 4096 { 4096 } else { count }
+    var i: i64 = 0
+    while i < n {
+        let v = values[i as usize]
+        let eps = epsilons[i as usize]
+        let abs_v = abs_f32(v)
+
+        if abs_v <= eps {
+            // Boundary region: uncertainty widens because the sign
+            // is uncertain — output could be 0 or v
+            result[i as usize] = 2.0 * eps
+        } else if v > 0.0 {
+            // Positive region: gradient is 1, pass through
+            result[i as usize] = eps
+        } else {
+            // Negative region: gradient is 0, killed
+            result[i as usize] = 0.0
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ── GELU Epsilon ─────────────────────────────────────────────────────
+//
+// GELU(x) = x * Φ(x) where Φ is the CDF of the standard normal.
+// The derivative is: GELU'(x) ≈ Φ(x) + x·φ(x)
+// where φ(x) is the PDF of the standard normal.
+//
+// For epsilon propagation: ε_out ≈ |GELU'(x)| * ε_in
+// We use the tanh approximation:
+//   GELU(x) ≈ 0.5 * x * (1 + tanh(√(2/π) * (x + 0.044715*x³)))
+
+fn compute_gelu_epsilon(
+    values: [f32; 4096], epsilons: [f32; 4096],
+    count: i64, out: [f32; 4096]
+) -> [f32; 4096] with Mut, Panic, Div {
+    var result = out
+    let n = if count > 4096 { 4096 } else { count }
+    var i: i64 = 0
+    while i < n {
+        let x = values[i as usize]
+        let eps = epsilons[i as usize]
+        // Approximate |GELU'(x)| as a smooth function
+        // Near x=0: derivative ≈ 0.5
+        // For large positive x: derivative ≈ 1
+        // For large negative x: derivative ≈ 0
+        let abs_x = abs_f32(x)
+        var deriv: f32 = 0.5
+        if abs_x > 3.0 {
+            if x > 0.0 {
+                deriv = 1.0
+            } else {
+                deriv = 0.0
+            }
+        } else {
+            // Smooth transition region
+            // Approximate via sigmoid: σ(1.702*x) ≈ Φ(x)
+            let sig_arg = 1.702 * x
+            let sig = 1.0 / (1.0 + exp_approx_f32(0.0 - sig_arg))
+            deriv = sig + x * sig * (1.0 - sig) * 1.702
+            if deriv < 0.0 { deriv = 0.0 }
+            if deriv > 2.0 { deriv = 2.0 }
+        }
+        result[i as usize] = deriv * eps
+        i = i + 1
+    }
+    result
+}
+
+// ── SiLU Epsilon (Swish) ─────────────────────────────────────────────
+//
+// SiLU(x) = x * σ(x) where σ is the sigmoid function.
+// SiLU'(x) = σ(x) + x * σ(x) * (1 - σ(x)) = σ(x) * (1 + x*(1-σ(x)))
+// ε_out = |SiLU'(x)| * ε_in
+
+fn compute_silu_epsilon(
+    values: [f32; 4096], epsilons: [f32; 4096],
+    count: i64, out: [f32; 4096]
+) -> [f32; 4096] with Mut, Panic, Div {
+    var result = out
+    let n = if count > 4096 { 4096 } else { count }
+    var i: i64 = 0
+    while i < n {
+        let x = values[i as usize]
+        let eps = epsilons[i as usize]
+        let sig = 1.0 / (1.0 + exp_approx_f32(0.0 - x))
+        let deriv = sig * (1.0 + x * (1.0 - sig))
+        let abs_deriv = abs_f32(deriv)
+        result[i as usize] = abs_deriv * eps
+        i = i + 1
+    }
+    result
+}
+
+// ── Tanh Epsilon ─────────────────────────────────────────────────────
+//
+// tanh'(x) = 1 - tanh²(x)
+// At saturation (|x| >> 0): tanh'(x) → 0, so ε gets compressed.
+// ε_out = (1 - tanh²(x)) * ε_in
+
+fn compute_tanh_epsilon(
+    values: [f32; 4096], epsilons: [f32; 4096],
+    count: i64, out: [f32; 4096]
+) -> [f32; 4096] with Mut, Panic, Div {
+    var result = out
+    let n = if count > 4096 { 4096 } else { count }
+    var i: i64 = 0
+    while i < n {
+        let x = values[i as usize]
+        let eps = epsilons[i as usize]
+        // tanh via exp: tanh(x) = (e^2x - 1) / (e^2x + 1)
+        let e2x = exp_approx_f32(2.0 * x)
+        var t: f32 = 0.0
+        if e2x + 1.0 > 0.0 {
+            t = (e2x - 1.0) / (e2x + 1.0)
+        }
+        // Derivative: 1 - tanh^2
+        let deriv = 1.0 - t * t
+        result[i as usize] = deriv * eps
+        i = i + 1
+    }
+    result
+}
+
+// ── Layer Norm Epsilon ───────────────────────────────────────────────
+//
+// Layer normalization: y_i = (x_i - mean) / std_dev
+// Epsilon propagation (approximate):
+//   ε_out_i ≈ ε_in_i / std_dev
+// This assumes independence between the uncertainty in x_i and the
+// uncertainty in the computed mean/variance (conservative simplification).
+
+fn compute_layer_norm_epsilon(
+    values: [f32; 4096], epsilons: [f32; 4096],
+    count: i64, out: [f32; 4096]
+) -> [f32; 4096] with Mut, Panic, Div {
+    var result = out
+    let n = if count > 4096 { 4096 } else { count }
+    if n <= 0 { return result }
+
+    // Compute mean
+    var sum: f32 = 0.0
+    var i: i64 = 0
+    while i < n {
+        sum = sum + values[i as usize]
+        i = i + 1
+    }
+    let mean = sum / (n as f32)
+
+    // Compute variance
+    var var_sum: f32 = 0.0
+    i = 0
+    while i < n {
+        let diff = values[i as usize] - mean
+        var_sum = var_sum + diff * diff
+        i = i + 1
+    }
+    let variance = var_sum / (n as f32)
+    // std_dev with stability epsilon
+    let std_dev = sqrt_approx_f32(variance + 0.00001)
+
+    // Propagate: ε_out = ε_in / std_dev
+    if std_dev > 0.0 {
+        i = 0
+        while i < n {
+            result[i as usize] = epsilons[i as usize] / std_dev
+            i = i + 1
+        }
+    }
+    result
+}
+
+// ── RMS Norm Epsilon ─────────────────────────────────────────────────
+//
+// RMS normalization: y_i = x_i / RMS(x)  where RMS = √(mean(x²))
+// Epsilon propagation: ε_out_i ≈ ε_in_i / RMS(x)
+
+fn compute_rms_norm_epsilon(
+    values: [f32; 4096], epsilons: [f32; 4096],
+    count: i64, out: [f32; 4096]
+) -> [f32; 4096] with Mut, Panic, Div {
+    var result = out
+    let n = if count > 4096 { 4096 } else { count }
+    if n <= 0 { return result }
+
+    // Compute mean of squares
+    var sq_sum: f32 = 0.0
+    var i: i64 = 0
+    while i < n {
+        let v = values[i as usize]
+        sq_sum = sq_sum + v * v
+        i = i + 1
+    }
+    let mean_sq = sq_sum / (n as f32)
+    let rms = sqrt_approx_f32(mean_sq + 0.00001)
+
+    // Propagate
+    if rms > 0.0 {
+        i = 0
+        while i < n {
+            result[i as usize] = epsilons[i as usize] / rms
+            i = i + 1
+        }
+    }
+    result
+}
+
+// ── Batch Norm Epsilon ───────────────────────────────────────────────
+//
+// Batch normalization: y = (x - μ_B) / σ_B * γ + β
+// For epsilon propagation, γ (scale) and β (bias) are treated as
+// exact (learned parameters), so:
+//   ε_out ≈ γ * ε_in / σ_B
+// Without knowing γ, we approximate γ = 1.0:
+//   ε_out ≈ ε_in / σ_B
+
+fn compute_batch_norm_epsilon(
+    values: [f32; 4096], epsilons: [f32; 4096],
+    count: i64, out: [f32; 4096]
+) -> [f32; 4096] with Mut, Panic, Div {
+    // Functionally identical to layer norm epsilon for the default case
+    compute_layer_norm_epsilon(values, epsilons, count, out)
+}
+
+// ── Division Epsilon ─────────────────────────────────────────────────
+//
+// For z = a / b:
+//   ε_z = (|a|·ε_b + |b|·ε_a) / b²
+// With near-zero guard when |b| < threshold.
+
+fn compute_div_epsilon(
+    a_values: [f32; 4096], a_epsilons: [f32; 4096],
+    b_values: [f32; 4096], b_epsilons: [f32; 4096],
+    count: i64, out: [f32; 4096]
+) -> [f32; 4096] with Mut, Panic, Div {
+    var result = out
+    let n = if count > 4096 { 4096 } else { count }
+    var i: i64 = 0
+    while i < n {
+        let a = a_values[i as usize]
+        let b = b_values[i as usize]
+        let ea = a_epsilons[i as usize]
+        let eb = b_epsilons[i as usize]
+        let abs_a = abs_f32(a)
+        let abs_b = abs_f32(b)
+
+        if abs_b < 0.0001 {
+            // Near-zero denominator: max out uncertainty
+            result[i as usize] = 1.0
+        } else {
+            let numerator = abs_a * eb + abs_b * ea
+            let denominator = b * b
+            result[i as usize] = numerator / denominator
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ── FMA Epsilon ──────────────────────────────────────────────────────
+//
+// For z = a*b + c:
+//   ε_z = √((|a|·ε_b + |b|·ε_a)² + ε_c²)
+
+fn compute_fma_epsilon(
+    a_values: [f32; 4096], a_epsilons: [f32; 4096],
+    b_values: [f32; 4096], b_epsilons: [f32; 4096],
+    c_epsilons: [f32; 4096],
+    count: i64, out: [f32; 4096]
+) -> [f32; 4096] with Mut, Panic, Div {
+    var result = out
+    let n = if count > 4096 { 4096 } else { count }
+    var i: i64 = 0
+    while i < n {
+        let abs_a = abs_f32(a_values[i as usize])
+        let abs_b = abs_f32(b_values[i as usize])
+        let ea = a_epsilons[i as usize]
+        let eb = b_epsilons[i as usize]
+        let ec = c_epsilons[i as usize]
+        // Multiplicative part
+        let mul_eps = abs_a * eb + abs_b * ea
+        // Quadrature with additive part
+        let combined = mul_eps * mul_eps + ec * ec
+        result[i as usize] = sqrt_approx_f32(combined)
+        i = i + 1
+    }
+    result
+}
+
+// ── Additive Epsilon ─────────────────────────────────────────────────
+//
+// For z = a + b (assuming independent errors):
+//   ε_z = ε_a + ε_b (conservative, linear sum)
+// Note: quadrature √(ε_a² + ε_b²) is tighter but we use the
+// simpler additive bound here as the reference implementation.
+
+fn compute_additive_epsilon(
+    a_epsilons: [f32; 4096], b_epsilons: [f32; 4096],
+    count: i64, out: [f32; 4096]
+) -> [f32; 4096] with Mut, Panic, Div {
+    var result = out
+    let n = if count > 4096 { 4096 } else { count }
+    var i: i64 = 0
+    while i < n {
+        result[i as usize] = a_epsilons[i as usize] + b_epsilons[i as usize]
+        i = i + 1
+    }
+    result
+}
+
+// ── Multiplicative Epsilon ───────────────────────────────────────────
+//
+// For z = a * b:
+//   ε_z = |b|·ε_a + |a|·ε_b
+
+fn compute_multiplicative_epsilon(
+    a_values: [f32; 4096], a_epsilons: [f32; 4096],
+    b_values: [f32; 4096], b_epsilons: [f32; 4096],
+    count: i64, out: [f32; 4096]
+) -> [f32; 4096] with Mut, Panic, Div {
+    var result = out
+    let n = if count > 4096 { 4096 } else { count }
+    var i: i64 = 0
+    while i < n {
+        let abs_a = abs_f32(a_values[i as usize])
+        let abs_b = abs_f32(b_values[i as usize])
+        result[i as usize] = abs_b * a_epsilons[i as usize] + abs_a * b_epsilons[i as usize]
+        i = i + 1
+    }
+    result
+}
+
+// ── Confidence-Weighted Mean ─────────────────────────────────────────
+//
+// Inverse-epsilon weighting:
+//   w_i = 1 / (1 + ε_i)
+//   mean = Σ(v_i * w_i) / Σ(w_i)
+//   ε_result = Σ(ε_i * w_i) / Σ(w_i)
+//
+// Returns (result_value, result_epsilon).
+
+fn confidence_weighted_mean(
+    values: [f32; 4096], epsilons: [f32; 4096],
+    count: i64
+) -> (f32, f32) with Mut, Panic, Div {
+    let n = if count > 4096 { 4096 } else { count }
+    if n <= 0 { return (0.0, 1.0) }
+
+    var weighted_val_sum: f32 = 0.0
+    var weighted_eps_sum: f32 = 0.0
+    var weight_sum: f32 = 0.0
+
+    var i: i64 = 0
+    while i < n {
+        let eps = epsilons[i as usize]
+        // Weight: higher confidence (lower epsilon) gets higher weight
+        let w = 1.0 / (1.0 + eps)
+        weighted_val_sum = weighted_val_sum + values[i as usize] * w
+        weighted_eps_sum = weighted_eps_sum + eps * w
+        weight_sum = weight_sum + w
+        i = i + 1
+    }
+
+    if weight_sum < 0.000001 {
+        return (0.0, 1.0)
+    }
+
+    let result_value = weighted_val_sum / weight_sum
+    let result_epsilon = weighted_eps_sum / weight_sum
+    (result_value, result_epsilon)
+}
+
+// ── Attention Scores Epsilon ─────────────────────────────────────────
+//
+// Attention scores: S = Q * K^T / √d_k
+// This is a scaled matrix multiply, so epsilon propagation is:
+//   ε_S[i,j] = (Σ_l |Q[i,l]|·ε_K[j,l] + |K[j,l]|·ε_Q[i,l]) / √d_k
+//
+// We reuse WMMA epsilon for the matmul part, then scale.
+
+fn compute_attention_score_epsilon(
+    q_values: [f32; 4096], q_epsilon: [f32; 4096],
+    k_values: [f32; 4096], k_epsilon: [f32; 4096],
+    seq_len: i64, d_k: i64,
+    out: [f32; 4096]
+) -> [f32; 4096] with Mut, Panic, Div {
+    var result = out
+    // Compute Q * K^T epsilon using the WMMA formula
+    // Q is seq_len x d_k, K^T is d_k x seq_len
+    result = compute_wmma_epsilon(
+        q_values, q_epsilon,
+        k_values, k_epsilon,
+        seq_len, d_k, seq_len,
+        result
+    )
+    // Scale by 1/√d_k
+    let scale = 1.0 / sqrt_approx_f32(d_k as f32)
+    let n = seq_len * seq_len
+    let max_n = if n > 4096 { 4096 } else { n }
+    var i: i64 = 0
+    while i < max_n {
+        result[i as usize] = result[i as usize] * scale
+        i = i + 1
+    }
+    result
+}
+
+// ── Full Attention Epsilon ───────────────────────────────────────────
+//
+// Full attention: output = softmax(Q*K^T/√d_k) * V
+// Composed pipeline:
+//   1. Score epsilon (multiplicative, scaled)
+//   2. Softmax epsilon (SoftmaxScaled rule)
+//   3. Weighted values epsilon (multiplicative)
+
+fn compute_full_attention_epsilon(
+    q_values: [f32; 4096], q_epsilon: [f32; 4096],
+    k_values: [f32; 4096], k_epsilon: [f32; 4096],
+    v_values: [f32; 4096], v_epsilon: [f32; 4096],
+    seq_len: i64, d_k: i64,
+    out: [f32; 4096]
+) -> [f32; 4096] with Mut, Panic, Div {
+    var result = out
+
+    // Step 1: score epsilon
+    var score_eps: [f32; 4096] = [0.0; 4096]
+    score_eps = compute_attention_score_epsilon(
+        q_values, q_epsilon,
+        k_values, k_epsilon,
+        seq_len, d_k,
+        score_eps
+    )
+
+    // Step 2: softmax epsilon row-wise
+    // For simplicity, treat each row of the score matrix independently.
+    // Each row has seq_len elements.
+    var softmax_eps: [f32; 4096] = [0.0; 4096]
+    var row: i64 = 0
+    let max_seq = if seq_len > 64 { 64 } else { seq_len }
+    while row < max_seq {
+        // Extract row from score_eps into a temporary slice
+        var row_vals: [f32; 4096] = [0.0; 4096]
+        var row_eps: [f32; 4096] = [0.0; 4096]
+        var col: i64 = 0
+        while col < max_seq {
+            let idx = row * seq_len + col
+            if idx < 4096 {
+                row_vals[col as usize] = 0.0  // placeholder scores
+                row_eps[col as usize] = score_eps[idx as usize]
+            }
+            col = col + 1
+        }
+        var row_out: [f32; 4096] = [0.0; 4096]
+        row_out = compute_softmax_epsilon(row_vals, row_eps, max_seq, 1.0, row_out)
+        // Write back
+        col = 0
+        while col < max_seq {
+            let idx = row * seq_len + col
+            if idx < 4096 {
+                softmax_eps[idx as usize] = row_out[col as usize]
+            }
+            col = col + 1
+        }
+        row = row + 1
+    }
+
+    // Step 3: weighted values = softmax_weights * V
+    // Epsilon of the final multiplication
+    result = compute_wmma_epsilon(
+        [0.0; 4096], softmax_eps,   // softmax weights (values approx, eps known)
+        v_values, v_epsilon,
+        seq_len, seq_len, d_k,
+        result
+    )
+    result
+}
+
+// ── Reduction Sum Epsilon ────────────────────────────────────────────
+//
+// Sum of n values with independent errors:
+//   ε_sum = Σ ε_i (conservative additive)
+
+fn compute_reduce_sum_epsilon(
+    epsilons: [f32; 4096], count: i64
+) -> f32 with Mut, Panic, Div {
+    let n = if count > 4096 { 4096 } else { count }
+    var sum: f32 = 0.0
+    var i: i64 = 0
+    while i < n {
+        sum = sum + epsilons[i as usize]
+        i = i + 1
+    }
+    sum
+}
+
+// ── Reduction Max Epsilon ────────────────────────────────────────────
+//
+// Max of n values: the epsilon of the max element passes through.
+
+fn compute_reduce_max_epsilon(
+    values: [f32; 4096], epsilons: [f32; 4096],
+    count: i64
+) -> f32 {
+    let n = if count > 4096 { 4096 } else { count }
+    if n <= 0 { return 0.0 }
+    var max_val: f32 = values[0 as usize]
+    var max_eps: f32 = epsilons[0 as usize]
+    var i: i64 = 1
+    while i < n {
+        if values[i as usize] > max_val {
+            max_val = values[i as usize]
+            max_eps = epsilons[i as usize]
+        }
+        i = i + 1
+    }
+    max_eps
+}
+
+// ── Passthrough Epsilon ──────────────────────────────────────────────
+//
+// Memory and structural ops: epsilon unchanged.
+
+fn compute_passthrough_epsilon(
+    epsilons: [f32; 4096], count: i64, out: [f32; 4096]
+) -> [f32; 4096] with Mut, Panic, Div {
+    var result = out
+    let n = if count > 4096 { 4096 } else { count }
+    var i: i64 = 0
+    while i < n {
+        result[i as usize] = epsilons[i as usize]
+        i = i + 1
+    }
+    result
+}
+
+// ── Reset Epsilon ────────────────────────────────────────────────────
+//
+// Confidence assignment / mask: epsilon set to zero.
+
+fn compute_reset_epsilon(count: i64, out: [f32; 4096]) -> [f32; 4096] with Mut, Panic, Div {
+    var result = out
+    let n = if count > 4096 { 4096 } else { count }
+    var i: i64 = 0
+    while i < n {
+        result[i as usize] = 0.0
+        i = i + 1
+    }
+    result
+}
+
+// ── Maximum Epsilon ──────────────────────────────────────────────────
+//
+// Conservative: take the larger uncertainty.
+
+fn compute_maximum_epsilon(
+    a_epsilons: [f32; 4096], b_epsilons: [f32; 4096],
+    count: i64, out: [f32; 4096]
+) -> [f32; 4096] with Mut, Panic, Div {
+    var result = out
+    let n = if count > 4096 { 4096 } else { count }
+    var i: i64 = 0
+    while i < n {
+        result[i as usize] = max_f32(a_epsilons[i as usize], b_epsilons[i as usize])
+        i = i + 1
+    }
+    result
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Dispatch — route an intrinsic to its epsilon computation
+// ════════════════════════════════════════════════════════════════════
+
+// Dispatch epsilon propagation by rule tag.
+// For binary operations: a_* and b_* are the two operands.
+// For unary operations: only a_* is used; b_* can be zeroed.
+fn dispatch_epsilon_propagation(
+    rule: i64,
+    a_values: [f32; 4096], a_epsilons: [f32; 4096],
+    b_values: [f32; 4096], b_epsilons: [f32; 4096],
+    count: i64, out: [f32; 4096]
+) -> [f32; 4096] with Mut, Panic, Div {
+    if rule == ERULE_PASSTHROUGH {
+        return compute_passthrough_epsilon(a_epsilons, count, out)
+    }
+    if rule == ERULE_MAXIMUM {
+        return compute_maximum_epsilon(a_epsilons, b_epsilons, count, out)
+    }
+    if rule == ERULE_ADDITIVE {
+        return compute_additive_epsilon(a_epsilons, b_epsilons, count, out)
+    }
+    if rule == ERULE_MULTIPLICATIVE {
+        return compute_multiplicative_epsilon(a_values, a_epsilons, b_values, b_epsilons, count, out)
+    }
+    if rule == ERULE_RESET {
+        return compute_reset_epsilon(count, out)
+    }
+    if rule == ERULE_SOFTMAX_SCALED {
+        return compute_softmax_epsilon(a_values, a_epsilons, count, 1.0, out)
+    }
+    if rule == ERULE_WEIGHTED_MEAN {
+        // WeightedMean reduces to a scalar; fill output with that scalar
+        let result = confidence_weighted_mean(a_values, a_epsilons, count)
+        var filled = out
+        let n = if count > 4096 { 4096 } else { count }
+        var i: i64 = 0
+        while i < n {
+            filled[i as usize] = result.1
+            i = i + 1
+        }
+        return filled
+    }
+    // ERULE_COMPUTED: requires operation-specific logic; fall back to passthrough
+    compute_passthrough_epsilon(a_epsilons, count, out)
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Confidence Utilities
+// ════════════════════════════════════════════════════════════════════
+
+// Convert epsilon to confidence: confidence = 1 / (1 + ε)
+fn epsilon_to_confidence(epsilon: f32) -> f32 with Div {
+    if epsilon < 0.0 { return 1.0 }
+    1.0 / (1.0 + epsilon)
+}
+
+// Convert confidence to epsilon: ε = (1 / confidence) - 1
+fn confidence_to_epsilon(confidence: f32) -> f32 with Div {
+    if confidence <= 0.0 { return 1000000.0 }
+    if confidence >= 1.0 { return 0.0 }
+    (1.0 / confidence) - 1.0
+}
+
+// Threshold: set epsilon to max if confidence is below threshold
+fn threshold_confidence_epsilon(
+    epsilons: [f32; 4096], count: i64,
+    confidence_threshold: f32,
+    out: [f32; 4096]
+) -> [f32; 4096] with Mut, Panic, Div {
+    var result = out
+    let n = if count > 4096 { 4096 } else { count }
+    var i: i64 = 0
+    while i < n {
+        let eps = epsilons[i as usize]
+        let conf = 1.0 / (1.0 + eps)
+        if conf < confidence_threshold {
+            result[i as usize] = 1.0  // maximum uncertainty
+        } else {
+            result[i as usize] = eps
+        }
+        i = i + 1
+    }
+    result
+}
+
+// Calibrate: scale all epsilons by a learned calibration factor
+fn calibrate_epsilon(
+    epsilons: [f32; 4096], count: i64,
+    scale_factor: f32,
+    out: [f32; 4096]
+) -> [f32; 4096] with Mut, Panic, Div {
+    var result = out
+    let n = if count > 4096 { 4096 } else { count }
+    var i: i64 = 0
+    while i < n {
+        var scaled = epsilons[i as usize] * scale_factor
+        if scaled < 0.0 { scaled = 0.0 }
+        result[i as usize] = scaled
+        i = i + 1
+    }
+    result
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Provenance Utilities
+// ════════════════════════════════════════════════════════════════════
+
+// Provenance AND: bitwise intersection of two provenance masks
+fn provenance_and(a: i64, b: i64) -> i64 {
+    a & b
+}
+
+// Provenance OR: bitwise union of two provenance masks
+fn provenance_or(a: i64, b: i64) -> i64 {
+    a | b
+}
+
+// Merge provenance from two arrays: element-wise OR
+fn merge_provenance(
+    a_prov: [i64; 4096], b_prov: [i64; 4096],
+    count: i64, out: [i64; 4096]
+) -> [i64; 4096] with Mut, Panic, Div {
+    var result = out
+    let n = if count > 4096 { 4096 } else { count }
+    var i: i64 = 0
+    while i < n {
+        result[i as usize] = a_prov[i as usize] | b_prov[i as usize]
+        i = i + 1
+    }
+    result
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Summary / Diagnostics
+// ════════════════════════════════════════════════════════════════════
+
+// Compute aggregate statistics over an epsilon array.
+// Returns (min_eps, max_eps, mean_eps, count_above_threshold).
+fn epsilon_array_stats(
+    epsilons: [f32; 4096], count: i64,
+    threshold: f32
+) -> (f32, f32, f32, i64) with Mut, Panic, Div {
+    let n = if count > 4096 { 4096 } else { count }
+    if n <= 0 { return (0.0, 0.0, 0.0, 0) }
+
+    var min_e: f32 = epsilons[0 as usize]
+    var max_e: f32 = epsilons[0 as usize]
+    var sum_e: f32 = 0.0
+    var above: i64 = 0
+
+    var i: i64 = 0
+    while i < n {
+        let e = epsilons[i as usize]
+        if e < min_e { min_e = e }
+        if e > max_e { max_e = e }
+        sum_e = sum_e + e
+        let conf = 1.0 / (1.0 + e)
+        if conf < threshold {
+            above = above + 1
+        }
+        i = i + 1
+    }
+    let mean_e = sum_e / (n as f32)
+    (min_e, max_e, mean_e, above)
+}
+
+// Check if any element has confidence below threshold
+fn has_low_confidence(
+    epsilons: [f32; 4096], count: i64,
+    confidence_threshold: f32
+) -> bool with Div {
+    let n = if count > 4096 { 4096 } else { count }
+    var i: i64 = 0
+    while i < n {
+        let conf = 1.0 / (1.0 + epsilons[i as usize])
+        if conf < confidence_threshold {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Count elements with confidence above threshold
+fn count_high_confidence(
+    epsilons: [f32; 4096], count: i64,
+    confidence_threshold: f32
+) -> i64 with Div {
+    let n = if count > 4096 { 4096 } else { count }
+    var high: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        let conf = 1.0 / (1.0 + epsilons[i as usize])
+        if conf >= confidence_threshold {
+            high = high + 1
+        }
+        i = i + 1
+    }
+    high
+}

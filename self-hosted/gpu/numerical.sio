@@ -1,0 +1,1871 @@
+// self-hosted::gpu::numerical — Numerical stability analysis and FP error as epistemic uncertainty
+//
+// Bridges floating-point numerical analysis with the epistemic type system.
+// Every floating-point operation accumulates rounding error; this module
+// reifies that error as first-class uncertainty bounds compatible with
+// Knowledge<T, epsilon, validity, provenance>.
+//
+// Core concepts:
+//   ULP error          — distance in Units of Last Place between computed and exact
+//   Error bounds       — interval enclosing the true error with a confidence level
+//   Error propagation  — how bounds flow through arithmetic (add, mul, div, transcendentals)
+//   Stability analysis — detecting catastrophic cancellation, overflow, ill-conditioning
+//   Precision advisory — recommending FP width (FP8/16/32/64) for a given computation
+//
+// Integration with epistemic system:
+//   ErrorBound  → epsilon  (uncertainty bound in Knowledge<T>)
+//   StabilityRisk → validity confidence  (1.0 - severity)
+//   ErrorEvent history → provenance hash  (XOR of operation hashes)
+//
+// Usage pattern:
+//   let ep = error_propagator_new(3, 0)   // FP64, conservative mode
+//   let (ep2, bound_a) = error_propagator_add(ep, x_bound, y_bound)
+//   let eps = error_to_epistemic_epsilon(bound_a)
+//   let conf = risk_to_validity_confidence(risk)
+
+// ============================================================================
+// Floating-point helper functions
+// ============================================================================
+// These must precede all callers (no forward references in Sounio).
+
+fn f64_abs(x: f64) -> f64 {
+    if x < 0.0 {
+        0.0 - x
+    } else {
+        x
+    }
+}
+
+fn f64_max(a: f64, b: f64) -> f64 {
+    if a >= b { a } else { b }
+}
+
+fn f64_min(a: f64, b: f64) -> f64 {
+    if a <= b { a } else { b }
+}
+
+fn f64_sqrt(x: f64) -> f64 {
+    // Newton-Raphson square root, sufficient for error-bound arithmetic.
+    // For negative inputs, return 0.0 (caller guards domain).
+    if x <= 0.0 {
+        return 0.0
+    }
+    // Initial guess via bit manipulation approximation
+    var guess = x
+    if x > 1.0 {
+        guess = x / 2.0
+    } else {
+        guess = 1.0
+    }
+    // 20 iterations of Newton-Raphson: guess = (guess + x/guess) / 2
+    var i: i64 = 0
+    while i < 20 {
+        guess = (guess + x / guess) / 2.0
+        i = i + 1
+    }
+    guess
+}
+
+fn f64_log2_approx(x: f64) -> f64 {
+    // Approximate log2 via repeated halving + linear interpolation.
+    // Only valid for x > 0.  Returns 0.0 for x <= 0.
+    if x <= 0.0 {
+        return 0.0
+    }
+    // Normalize: find integer part such that 1.0 <= mantissa < 2.0
+    var mantissa = x
+    var exponent: f64 = 0.0
+    // Scale up for small numbers
+    while mantissa < 1.0 {
+        mantissa = mantissa * 2.0
+        exponent = exponent - 1.0
+    }
+    // Scale down for large numbers
+    while mantissa >= 2.0 {
+        mantissa = mantissa / 2.0
+        exponent = exponent + 1.0
+    }
+    // Now 1.0 <= mantissa < 2.0, log2(x) = exponent + log2(mantissa)
+    // Approximate log2(mantissa) with a minimax polynomial on [1, 2]:
+    //   log2(m) ~ -1.6404 + m*(2.8824 + m*(-1.7418 + m*0.4996))
+    let m = mantissa
+    let frac = 0.0 - 1.6404 + m * (2.8824 + m * (0.0 - 1.7418 + m * 0.4996))
+    exponent + frac
+}
+
+fn f64_log10(x: f64) -> f64 {
+    // log10(x) = log2(x) / log2(10)
+    // log2(10) ~ 3.321928
+    if x <= 0.0 {
+        return 0.0
+    }
+    f64_log2_approx(x) / 3.321928
+}
+
+fn f64_clamp(x: f64, lo: f64, hi: f64) -> f64 {
+    if x < lo {
+        lo
+    } else if x > hi {
+        hi
+    } else {
+        x
+    }
+}
+
+fn i64_abs(x: i64) -> i64 {
+    if x < 0 { 0 - x } else { x }
+}
+
+// ============================================================================
+// Precision (tag-based, 4 variants)
+// ============================================================================
+// 0 = FP8, 1 = FP16, 2 = FP32, 3 = FP64
+
+fn precision_epsilon(prec: i64) -> f64 {
+    if prec == 0 {
+        0.125             // FP8:  2^(-3)
+    } else if prec == 1 {
+        0.000977          // FP16: 2^(-10) ~ 9.77e-4
+    } else if prec == 2 {
+        0.000000119       // FP32: 2^(-23) ~ 1.19e-7
+    } else {
+        0.000000000000000222  // FP64: 2^(-52) ~ 2.22e-16
+    }
+}
+
+fn precision_max_value(prec: i64) -> f64 {
+    if prec == 0 {
+        448.0
+    } else if prec == 1 {
+        65504.0
+    } else if prec == 2 {
+        3.4e38
+    } else {
+        1.8e308
+    }
+}
+
+fn precision_min_normal(prec: i64) -> f64 {
+    if prec == 0 {
+        0.015625          // FP8: 2^(-6)
+    } else if prec == 1 {
+        0.000061           // FP16: ~ 6.1e-5
+    } else if prec == 2 {
+        1.18e-38
+    } else {
+        2.23e-308
+    }
+}
+
+fn precision_mantissa_bits(prec: i64) -> i64 {
+    if prec == 0 {
+        3
+    } else if prec == 1 {
+        10
+    } else if prec == 2 {
+        23
+    } else {
+        52
+    }
+}
+
+fn precision_can_represent(prec: i64, value: f64) -> bool {
+    let abs_val = f64_abs(value)
+    // Zero is always representable
+    if abs_val == 0.0 {
+        return true
+    }
+    // Check overflow
+    if abs_val > precision_max_value(prec) {
+        return false
+    }
+    // Check underflow (below minimum normal)
+    if abs_val < precision_min_normal(prec) {
+        return false
+    }
+    true
+}
+
+fn precision_quantization_error(prec: i64, value: f64) -> f64 {
+    // Quantization error ~ |value| * machine_epsilon
+    f64_abs(value) * precision_epsilon(prec)
+}
+
+// ============================================================================
+// UlpError — distance in Units of Last Place
+// ============================================================================
+
+struct UlpError {
+    ulps: i64,
+    relative_error: f64,
+    absolute_error: f64,
+}
+
+fn ulp_error_new(ulps: i64, rel: f64, abs_err: f64) -> UlpError {
+    UlpError {
+        ulps: ulps,
+        relative_error: rel,
+        absolute_error: abs_err,
+    }
+}
+
+fn ulp_error_from_values(computed: f64, exact: f64) -> UlpError {
+    let abs_err = f64_abs(computed - exact)
+    var rel: f64 = 0.0
+    if f64_abs(exact) > 1e-300 {
+        rel = abs_err / f64_abs(exact)
+    }
+    // Estimate ULPs: relative_error / machine_epsilon(FP64)
+    let eps64 = precision_epsilon(3)
+    var ulps: i64 = 0
+    if eps64 > 0.0 {
+        // Approximate ULP count
+        let ulp_f = rel / eps64
+        // Clamp to i64 range
+        if ulp_f > 9223372036854775000.0 {
+            ulps = 9223372036854775000
+        } else {
+            ulps = ulp_f as i64
+        }
+    }
+    UlpError {
+        ulps: ulps,
+        relative_error: rel,
+        absolute_error: abs_err,
+    }
+}
+
+fn ulp_error_is_acceptable(err: UlpError, max_ulps: i64, max_relative: f64) -> bool {
+    if i64_abs(err.ulps) > max_ulps {
+        return false
+    }
+    if err.relative_error > max_relative {
+        return false
+    }
+    true
+}
+
+fn ulp_error_to_epsilon(err: UlpError) -> f32 {
+    // Convert ULP error to an epistemic epsilon (f32)
+    // Use relative error as the epsilon bound, clamped to [0, 1]
+    let clamped = f64_clamp(err.relative_error, 0.0, 1.0)
+    clamped as f32
+}
+
+fn ulp_error_combine(a: UlpError, b: UlpError) -> UlpError {
+    // Combine two ULP errors via quadrature (root-sum-of-squares)
+    let rel = f64_sqrt(a.relative_error * a.relative_error + b.relative_error * b.relative_error)
+    let abs_err = f64_sqrt(a.absolute_error * a.absolute_error + b.absolute_error * b.absolute_error)
+    let ulps_a = a.ulps
+    let ulps_b = b.ulps
+    // ULPs: conservative sum
+    let combined_ulps = i64_abs(ulps_a) + i64_abs(ulps_b)
+    UlpError {
+        ulps: combined_ulps,
+        relative_error: rel,
+        absolute_error: abs_err,
+    }
+}
+
+fn ulp_error_scale(err: UlpError, factor: f64) -> UlpError {
+    let abs_factor = f64_abs(factor)
+    let scaled_rel = err.relative_error * abs_factor
+    let scaled_abs = err.absolute_error * abs_factor
+    // Scale ULPs proportionally
+    let scaled_ulps_f = (i64_abs(err.ulps) as f64) * abs_factor
+    var scaled_ulps: i64 = 0
+    if scaled_ulps_f > 9223372036854775000.0 {
+        scaled_ulps = 9223372036854775000
+    } else {
+        scaled_ulps = scaled_ulps_f as i64
+    }
+    UlpError {
+        ulps: scaled_ulps,
+        relative_error: scaled_rel,
+        absolute_error: scaled_abs,
+    }
+}
+
+// ============================================================================
+// ErrorBound — interval enclosing the true error
+// ============================================================================
+
+struct ErrorBound {
+    min_error: f64,
+    max_error: f64,
+    expected_error: f64,
+    confidence: f64,
+}
+
+fn error_bound_new(min_err: f64, max_err: f64, expected: f64, conf: f64) -> ErrorBound {
+    ErrorBound {
+        min_error: min_err,
+        max_error: max_err,
+        expected_error: expected,
+        confidence: f64_clamp(conf, 0.0, 1.0),
+    }
+}
+
+fn error_bound_from_estimate(error: f64, conf: f64) -> ErrorBound {
+    // Construct a symmetric bound around the given error estimate
+    let abs_err = f64_abs(error)
+    ErrorBound {
+        min_error: abs_err * 0.5,
+        max_error: abs_err * 2.0,
+        expected_error: abs_err,
+        confidence: f64_clamp(conf, 0.0, 1.0),
+    }
+}
+
+fn error_bound_zero() -> ErrorBound {
+    ErrorBound {
+        min_error: 0.0,
+        max_error: 0.0,
+        expected_error: 0.0,
+        confidence: 1.0,
+    }
+}
+
+fn error_bound_machine_epsilon(prec: i64) -> ErrorBound {
+    let eps = precision_epsilon(prec)
+    ErrorBound {
+        min_error: 0.0,
+        max_error: eps,
+        expected_error: eps / 2.0,
+        confidence: 0.99,
+    }
+}
+
+fn error_bound_is_stable(eb: ErrorBound, threshold: f64) -> bool {
+    eb.max_error <= threshold
+}
+
+fn error_bound_widen(eb: ErrorBound, factor: f64) -> ErrorBound {
+    // Widen the bound by the given factor (>1.0 widens, <1.0 narrows)
+    let abs_factor = f64_abs(factor)
+    ErrorBound {
+        min_error: eb.min_error,
+        max_error: eb.max_error * abs_factor,
+        expected_error: eb.expected_error * abs_factor,
+        confidence: eb.confidence * (1.0 / abs_factor), // wider bound = lower confidence
+    }
+}
+
+fn error_bound_combine(a: ErrorBound, b: ErrorBound) -> ErrorBound {
+    // Combine two independent error bounds via quadrature
+    // (root-sum-of-squares for uncorrelated errors)
+    let min_err = f64_sqrt(a.min_error * a.min_error + b.min_error * b.min_error)
+    let max_err = f64_sqrt(a.max_error * a.max_error + b.max_error * b.max_error)
+    let exp_err = f64_sqrt(a.expected_error * a.expected_error + b.expected_error * b.expected_error)
+    // Combined confidence: product of independent confidences
+    let conf = a.confidence * b.confidence
+    ErrorBound {
+        min_error: min_err,
+        max_error: max_err,
+        expected_error: exp_err,
+        confidence: conf,
+    }
+}
+
+fn error_bound_to_epsilon(eb: ErrorBound) -> f32 {
+    // Map max_error to an epistemic epsilon, clamped to [0, 1]
+    let clamped = f64_clamp(eb.max_error, 0.0, 1.0)
+    clamped as f32
+}
+
+// ============================================================================
+// StabilityRisk (tag-based, 4 variants)
+// ============================================================================
+// 0 = Stable, 1 = MildInstability, 2 = Severe, 3 = Catastrophic
+
+struct StabilityRisk {
+    tag: i64,
+    condition_number: f64,
+    overflow_risk: f64,
+    underflow_risk: f64,
+    cancellation_risk: f64,
+}
+
+fn stability_risk_stable() -> StabilityRisk {
+    StabilityRisk {
+        tag: 0,
+        condition_number: 0.0,
+        overflow_risk: 0.0,
+        underflow_risk: 0.0,
+        cancellation_risk: 0.0,
+    }
+}
+
+fn stability_risk_mild(condition_number: f64) -> StabilityRisk {
+    StabilityRisk {
+        tag: 1,
+        condition_number: condition_number,
+        overflow_risk: 0.0,
+        underflow_risk: 0.0,
+        cancellation_risk: 0.0,
+    }
+}
+
+fn stability_risk_severe(overflow: f64, underflow: f64) -> StabilityRisk {
+    StabilityRisk {
+        tag: 2,
+        condition_number: 0.0,
+        overflow_risk: f64_clamp(overflow, 0.0, 1.0),
+        underflow_risk: f64_clamp(underflow, 0.0, 1.0),
+        cancellation_risk: 0.0,
+    }
+}
+
+fn stability_risk_catastrophic(cancellation: f64) -> StabilityRisk {
+    StabilityRisk {
+        tag: 3,
+        condition_number: 0.0,
+        overflow_risk: 0.0,
+        underflow_risk: 0.0,
+        cancellation_risk: f64_clamp(cancellation, 0.0, 1.0),
+    }
+}
+
+fn stability_risk_is_unacceptable(r: StabilityRisk) -> bool {
+    // Severe or Catastrophic are unacceptable
+    r.tag >= 2
+}
+
+fn stability_risk_severity(r: StabilityRisk) -> f64 {
+    // Map risk to a scalar severity in [0.0, 1.0]
+    if r.tag == 0 {
+        // Stable
+        0.0
+    } else if r.tag == 1 {
+        // Mild: log10(kappa) / 16, capped at 0.5
+        let kappa = f64_max(r.condition_number, 1.0)
+        let log_kappa = f64_log10(kappa)
+        f64_min(log_kappa / 16.0, 0.5)
+    } else if r.tag == 2 {
+        // Severe: 0.5 + 0.3 * max(overflow, underflow)
+        let worst = f64_max(r.overflow_risk, r.underflow_risk)
+        0.5 + 0.3 * f64_clamp(worst, 0.0, 1.0)
+    } else {
+        // Catastrophic: 0.8 + 0.2 * cancellation
+        0.8 + 0.2 * f64_clamp(r.cancellation_risk, 0.0, 1.0)
+    }
+}
+
+fn stability_risk_mitigation(r: StabilityRisk) -> i64 {
+    // Returns MitigationStrategy tag, or -1 if none needed
+    // 0=UpgradePrecision, 1=KahanSummation, 2=CompensatedAlgorithm,
+    // 3=Rescaling, 4=Reordering
+    if r.tag == 0 {
+        0 - 1  // No mitigation needed
+    } else if r.tag == 1 {
+        // Mild instability: compensated algorithm
+        2
+    } else if r.tag == 2 {
+        // Severe: rescaling to avoid overflow/underflow
+        3
+    } else {
+        // Catastrophic cancellation: Kahan summation
+        1
+    }
+}
+
+// ============================================================================
+// MitigationStrategy (tag-based)
+// ============================================================================
+// 0 = UpgradePrecision, 1 = KahanSummation, 2 = CompensatedAlgorithm,
+// 3 = Rescaling, 4 = Reordering
+
+// ============================================================================
+// PropagationMode (tag-based)
+// ============================================================================
+// 0 = Conservative (worst-case bounds)
+// 1 = Expected (average-case, quadrature)
+// 2 = Interval (tight interval arithmetic)
+
+// ============================================================================
+// ErrorEvent — record of one propagation step
+// ============================================================================
+
+struct ErrorEvent {
+    operation: [i8; 32],
+    op_len: i64,
+    input_error_0: ErrorBound,
+    input_error_1: ErrorBound,
+    output_error: ErrorBound,
+    amplification: f64,
+}
+
+fn error_event_new() -> ErrorEvent {
+    ErrorEvent {
+        operation: [0; 32],
+        op_len: 0,
+        input_error_0: error_bound_zero(),
+        input_error_1: error_bound_zero(),
+        output_error: error_bound_zero(),
+        amplification: 1.0,
+    }
+}
+
+fn error_event_set_op_name(ev: ErrorEvent, c0: i8, c1: i8, c2: i8, c3: i8, len: i64) -> ErrorEvent with Mut, Panic {
+    // Set up to 4-character operation name
+    var out = ev
+    out.operation[0] = c0
+    out.operation[1] = c1
+    out.operation[2] = c2
+    out.operation[3] = c3
+    out.op_len = len
+    out
+}
+
+// ============================================================================
+// ErrorPropagator — tracks error through a chain of operations
+// ============================================================================
+
+struct ErrorPropagator {
+    precision: i64,
+    mode: i64,
+    history: [ErrorEvent; 1024],
+    history_count: i64,
+}
+
+fn error_propagator_new(prec: i64, mode: i64) -> ErrorPropagator {
+    ErrorPropagator {
+        precision: prec,
+        mode: mode,
+        history: [error_event_new(); 1024],
+        history_count: 0,
+    }
+}
+
+fn error_propagator_record(
+    ep: ErrorPropagator,
+    ev: ErrorEvent
+) -> ErrorPropagator with Mut, Panic {
+    var out = ep
+    let idx = out.history_count
+    if idx < 1024 {
+        out.history[idx as usize] = ev
+        out.history_count = idx + 1
+    }
+    out
+}
+
+fn error_propagator_make_event(
+    c0: i8, c1: i8, c2: i8, c3: i8, name_len: i64,
+    in0: ErrorBound, in1: ErrorBound, result: ErrorBound,
+    amp: f64
+) -> ErrorEvent with Mut, Panic {
+    var ev = error_event_new()
+    ev.operation[0] = c0
+    ev.operation[1] = c1
+    ev.operation[2] = c2
+    ev.operation[3] = c3
+    ev.op_len = name_len
+    ev.input_error_0 = in0
+    ev.input_error_1 = in1
+    ev.output_error = result
+    ev.amplification = amp
+    ev
+}
+
+// ── Addition ──────────────────────────────────────────────────────────
+
+fn error_propagator_add(
+    ep: ErrorPropagator,
+    x: ErrorBound,
+    y: ErrorBound
+) -> (ErrorPropagator, ErrorBound) with Mut, Panic {
+    let eps = precision_epsilon(ep.precision)
+    var result = error_bound_zero()
+
+    if ep.mode == 0 {
+        // Conservative: worst-case
+        result.min_error = x.min_error + y.min_error
+        result.max_error = x.max_error + y.max_error + eps
+        result.expected_error = x.expected_error + y.expected_error + eps / 2.0
+        result.confidence = f64_min(x.confidence, y.confidence)
+    } else if ep.mode == 1 {
+        // Expected: quadrature (sqrt of sum of squares)
+        result.min_error = f64_sqrt(x.min_error * x.min_error + y.min_error * y.min_error)
+        result.max_error = f64_sqrt(x.max_error * x.max_error + y.max_error * y.max_error) + eps
+        result.expected_error = f64_sqrt(x.expected_error * x.expected_error + y.expected_error * y.expected_error)
+        result.confidence = x.confidence * y.confidence
+    } else {
+        // Interval: tight interval arithmetic
+        result.min_error = x.min_error + y.min_error
+        result.max_error = x.max_error + y.max_error + eps
+        result.expected_error = (result.min_error + result.max_error) / 2.0
+        result.confidence = f64_min(x.confidence, y.confidence)
+    }
+
+    // Compute amplification
+    let in_max = f64_max(x.max_error, y.max_error)
+    var amp: f64 = 1.0
+    if in_max > 1e-300 {
+        amp = result.max_error / in_max
+    }
+
+    // 'a' 'd' 'd' '\0' => 97, 100, 100, 0
+    let ev = error_propagator_make_event(97, 100, 100, 0, 3, x, y, result, amp)
+    let ep2 = error_propagator_record(ep, ev)
+    (ep2, result)
+}
+
+// ── Subtraction ───────────────────────────────────────────────────────
+
+fn error_propagator_sub(
+    ep: ErrorPropagator,
+    x: ErrorBound,
+    y: ErrorBound
+) -> (ErrorPropagator, ErrorBound) with Mut, Panic {
+    // Same error propagation as addition, but confidence degraded
+    // because subtraction can cause catastrophic cancellation
+    let eps = precision_epsilon(ep.precision)
+    var result = error_bound_zero()
+
+    if ep.mode == 0 {
+        result.min_error = x.min_error + y.min_error
+        result.max_error = x.max_error + y.max_error + eps
+        result.expected_error = x.expected_error + y.expected_error + eps / 2.0
+        result.confidence = f64_min(x.confidence, y.confidence) * 0.95
+    } else if ep.mode == 1 {
+        result.min_error = f64_sqrt(x.min_error * x.min_error + y.min_error * y.min_error)
+        result.max_error = f64_sqrt(x.max_error * x.max_error + y.max_error * y.max_error) + eps
+        result.expected_error = f64_sqrt(x.expected_error * x.expected_error + y.expected_error * y.expected_error)
+        result.confidence = x.confidence * y.confidence * 0.95
+    } else {
+        result.min_error = x.min_error + y.min_error
+        result.max_error = x.max_error + y.max_error + eps
+        result.expected_error = (result.min_error + result.max_error) / 2.0
+        result.confidence = f64_min(x.confidence, y.confidence) * 0.95
+    }
+
+    let in_max = f64_max(x.max_error, y.max_error)
+    var amp: f64 = 1.0
+    if in_max > 1e-300 {
+        amp = result.max_error / in_max
+    }
+
+    // 's' 'u' 'b' '\0' => 115, 117, 98, 0
+    let ev = error_propagator_make_event(115, 117, 98, 0, 3, x, y, result, amp)
+    let ep2 = error_propagator_record(ep, ev)
+    (ep2, result)
+}
+
+// ── Multiplication ────────────────────────────────────────────────────
+
+fn error_propagator_mul(
+    ep: ErrorPropagator,
+    x: ErrorBound,
+    y: ErrorBound,
+    x_val: f64,
+    y_val: f64
+) -> (ErrorPropagator, ErrorBound) with Mut, Panic {
+    // For multiplication, relative errors add:
+    //   |err(x*y)| / |x*y| <= |err(x)|/|x| + |err(y)|/|y| + epsilon
+    let eps = precision_epsilon(ep.precision)
+    let ax = f64_abs(x_val)
+    let ay = f64_abs(y_val)
+    var result = error_bound_zero()
+
+    if ep.mode == 0 {
+        // Conservative: |y|*err_x + |x|*err_y + epsilon*|x*y|
+        result.max_error = ay * x.max_error + ax * y.max_error + eps * ax * ay
+        result.min_error = ay * x.min_error + ax * y.min_error
+        result.expected_error = ay * x.expected_error + ax * y.expected_error + eps * ax * ay / 2.0
+        result.confidence = f64_min(x.confidence, y.confidence)
+    } else if ep.mode == 1 {
+        // Expected: quadrature of the product error terms
+        let term_x = ay * x.expected_error
+        let term_y = ax * y.expected_error
+        let term_eps = eps * ax * ay
+        result.expected_error = f64_sqrt(term_x * term_x + term_y * term_y) + term_eps / 2.0
+        result.max_error = f64_sqrt((ay * x.max_error) * (ay * x.max_error) + (ax * y.max_error) * (ax * y.max_error)) + term_eps
+        result.min_error = f64_sqrt((ay * x.min_error) * (ay * x.min_error) + (ax * y.min_error) * (ax * y.min_error))
+        result.confidence = x.confidence * y.confidence
+    } else {
+        // Interval
+        result.max_error = ay * x.max_error + ax * y.max_error + eps * ax * ay
+        result.min_error = ay * x.min_error + ax * y.min_error
+        result.expected_error = (result.min_error + result.max_error) / 2.0
+        result.confidence = f64_min(x.confidence, y.confidence)
+    }
+
+    let in_max = f64_max(x.max_error, y.max_error)
+    var amp: f64 = 1.0
+    if in_max > 1e-300 {
+        amp = result.max_error / in_max
+    }
+
+    // 'm' 'u' 'l' '\0' => 109, 117, 108, 0
+    let ev = error_propagator_make_event(109, 117, 108, 0, 3, x, y, result, amp)
+    let ep2 = error_propagator_record(ep, ev)
+    (ep2, result)
+}
+
+// ── Division ──────────────────────────────────────────────────────────
+
+fn error_propagator_div(
+    ep: ErrorPropagator,
+    x: ErrorBound,
+    y: ErrorBound,
+    x_val: f64,
+    y_val: f64
+) -> (ErrorPropagator, ErrorBound) with Mut, Panic {
+    // Division: relative errors add, plus near-zero guard on divisor
+    let eps = precision_epsilon(ep.precision)
+    let ax = f64_abs(x_val)
+    let ay = f64_abs(y_val)
+    var result = error_bound_zero()
+
+    // Near-zero guard: if |y_val| < min_normal, return worst-case bound
+    let min_n = precision_min_normal(ep.precision)
+    if ay < min_n {
+        result.min_error = 0.0
+        result.max_error = precision_max_value(ep.precision)
+        result.expected_error = precision_max_value(ep.precision) / 2.0
+        result.confidence = 0.0
+        // 'd' 'i' 'v' '\0' => 100, 105, 118, 0
+        let ev = error_propagator_make_event(100, 105, 118, 0, 3, x, y, result, 1e16)
+        let ep2 = error_propagator_record(ep, ev)
+        return (ep2, result)
+    }
+
+    let ay_sq = ay * ay
+
+    if ep.mode == 0 {
+        // Conservative: (|y|*err_x + |x|*err_y) / y^2 + eps*|x/y|
+        let quotient = ax / ay
+        result.max_error = (ay * x.max_error + ax * y.max_error) / ay_sq + eps * quotient
+        result.min_error = (ay * x.min_error + ax * y.min_error) / ay_sq
+        result.expected_error = (ay * x.expected_error + ax * y.expected_error) / ay_sq + eps * quotient / 2.0
+        result.confidence = f64_min(x.confidence, y.confidence) * 0.95
+    } else if ep.mode == 1 {
+        // Expected: quadrature
+        let quotient = ax / ay
+        let term_x = x.expected_error / ay
+        let term_y = ax * y.expected_error / ay_sq
+        result.expected_error = f64_sqrt(term_x * term_x + term_y * term_y) + eps * quotient / 2.0
+        let mx = x.max_error / ay
+        let my = ax * y.max_error / ay_sq
+        result.max_error = f64_sqrt(mx * mx + my * my) + eps * quotient
+        result.min_error = f64_sqrt((x.min_error / ay) * (x.min_error / ay) + (ax * y.min_error / ay_sq) * (ax * y.min_error / ay_sq))
+        result.confidence = x.confidence * y.confidence * 0.95
+    } else {
+        // Interval
+        let quotient = ax / ay
+        result.max_error = (ay * x.max_error + ax * y.max_error) / ay_sq + eps * quotient
+        result.min_error = (ay * x.min_error + ax * y.min_error) / ay_sq
+        result.expected_error = (result.min_error + result.max_error) / 2.0
+        result.confidence = f64_min(x.confidence, y.confidence) * 0.95
+    }
+
+    let in_max = f64_max(x.max_error, y.max_error)
+    var amp: f64 = 1.0
+    if in_max > 1e-300 {
+        amp = result.max_error / in_max
+    }
+
+    let ev = error_propagator_make_event(100, 105, 118, 0, 3, x, y, result, amp)
+    let ep2 = error_propagator_record(ep, ev)
+    (ep2, result)
+}
+
+// ── Square Root ───────────────────────────────────────────────────────
+
+fn error_propagator_sqrt(
+    ep: ErrorPropagator,
+    x: ErrorBound,
+    x_val: f64
+) -> (ErrorPropagator, ErrorBound) with Mut, Panic {
+    // sqrt error: err(sqrt(x)) ~ err(x) / (2 * sqrt(x))
+    // Relative error is halved: rel_err(sqrt(x)) = rel_err(x) / 2
+    let eps = precision_epsilon(ep.precision)
+    let ax = f64_abs(x_val)
+    var result = error_bound_zero()
+    let zero_bound = error_bound_zero()
+
+    if ax < 1e-300 {
+        // Near-zero input: sqrt(0) = 0, error dominated by epsilon
+        result.max_error = eps
+        result.expected_error = eps / 2.0
+        result.confidence = x.confidence * 0.9
+    } else {
+        let sqrt_x = f64_sqrt(ax)
+        let two_sqrt_x = 2.0 * sqrt_x
+
+        if ep.mode == 0 {
+            result.max_error = x.max_error / two_sqrt_x + eps * sqrt_x
+            result.min_error = x.min_error / two_sqrt_x
+            result.expected_error = x.expected_error / two_sqrt_x + eps * sqrt_x / 2.0
+            result.confidence = x.confidence
+        } else if ep.mode == 1 {
+            result.expected_error = x.expected_error / two_sqrt_x
+            result.max_error = x.max_error / two_sqrt_x + eps * sqrt_x
+            result.min_error = x.min_error / two_sqrt_x
+            result.confidence = x.confidence
+        } else {
+            result.max_error = x.max_error / two_sqrt_x + eps * sqrt_x
+            result.min_error = x.min_error / two_sqrt_x
+            result.expected_error = (result.min_error + result.max_error) / 2.0
+            result.confidence = x.confidence
+        }
+    }
+
+    let in_max = x.max_error
+    var amp: f64 = 0.5
+    if in_max > 1e-300 {
+        amp = result.max_error / in_max
+    }
+
+    // 's' 'q' 'r' 't' => 115, 113, 114, 116
+    let ev = error_propagator_make_event(115, 113, 114, 116, 4, x, zero_bound, result, amp)
+    let ep2 = error_propagator_record(ep, ev)
+    (ep2, result)
+}
+
+// ── Exponential ───────────────────────────────────────────────────────
+
+fn error_propagator_exp(
+    ep: ErrorPropagator,
+    x: ErrorBound,
+    x_val: f64
+) -> (ErrorPropagator, ErrorBound) with Mut, Panic {
+    // exp amplifies error: err(exp(x)) ~ exp(x) * err(x)
+    // Condition number of exp is |x|, so this can be severe for large x
+    let eps = precision_epsilon(ep.precision)
+    var result = error_bound_zero()
+    let zero_bound = error_bound_zero()
+
+    // Approximate exp(x_val) using series: 1 + x + x^2/2 + x^3/6 + ...
+    // For error propagation, we need the magnitude only
+    var exp_approx: f64 = 1.0
+    var term: f64 = 1.0
+    var k: i64 = 1
+    while k < 20 {
+        term = term * x_val / (k as f64)
+        exp_approx = exp_approx + term
+        if f64_abs(term) < 1e-15 {
+            k = 20  // break
+        }
+        k = k + 1
+    }
+    let abs_exp = f64_abs(exp_approx)
+
+    if ep.mode == 0 {
+        result.max_error = abs_exp * x.max_error + eps * abs_exp
+        result.min_error = abs_exp * x.min_error
+        result.expected_error = abs_exp * x.expected_error + eps * abs_exp / 2.0
+        result.confidence = x.confidence * 0.9
+    } else if ep.mode == 1 {
+        result.expected_error = abs_exp * x.expected_error
+        result.max_error = abs_exp * x.max_error + eps * abs_exp
+        result.min_error = abs_exp * x.min_error
+        result.confidence = x.confidence * 0.9
+    } else {
+        result.max_error = abs_exp * x.max_error + eps * abs_exp
+        result.min_error = abs_exp * x.min_error
+        result.expected_error = (result.min_error + result.max_error) / 2.0
+        result.confidence = x.confidence * 0.9
+    }
+
+    var amp = f64_abs(x_val)
+    if amp < 1.0 {
+        amp = 1.0
+    }
+
+    // 'e' 'x' 'p' '\0' => 101, 120, 112, 0
+    let ev = error_propagator_make_event(101, 120, 112, 0, 3, x, zero_bound, result, amp)
+    let ep2 = error_propagator_record(ep, ev)
+    (ep2, result)
+}
+
+// ── Natural Logarithm ─────────────────────────────────────────────────
+
+fn error_propagator_log(
+    ep: ErrorPropagator,
+    x: ErrorBound,
+    x_val: f64
+) -> (ErrorPropagator, ErrorBound) with Mut, Panic {
+    // log error: err(log(x)) ~ err(x) / |x|
+    // Condition number is 1/|log(x)|, singular at x=1 and x=0
+    let eps = precision_epsilon(ep.precision)
+    let ax = f64_abs(x_val)
+    var result = error_bound_zero()
+    let zero_bound = error_bound_zero()
+
+    if ax < 1e-300 {
+        // Near-zero: log diverges, return worst-case
+        result.max_error = precision_max_value(ep.precision)
+        result.expected_error = precision_max_value(ep.precision) / 2.0
+        result.confidence = 0.0
+    } else {
+        let inv_x = 1.0 / ax
+        if ep.mode == 0 {
+            result.max_error = x.max_error * inv_x + eps
+            result.min_error = x.min_error * inv_x
+            result.expected_error = x.expected_error * inv_x + eps / 2.0
+            result.confidence = x.confidence * 0.95
+        } else if ep.mode == 1 {
+            result.expected_error = x.expected_error * inv_x
+            result.max_error = x.max_error * inv_x + eps
+            result.min_error = x.min_error * inv_x
+            result.confidence = x.confidence * 0.95
+        } else {
+            result.max_error = x.max_error * inv_x + eps
+            result.min_error = x.min_error * inv_x
+            result.expected_error = (result.min_error + result.max_error) / 2.0
+            result.confidence = x.confidence * 0.95
+        }
+    }
+
+    var amp: f64 = 1.0
+    if x.max_error > 1e-300 {
+        amp = result.max_error / x.max_error
+    }
+
+    // 'l' 'o' 'g' '\0' => 108, 111, 103, 0
+    let ev = error_propagator_make_event(108, 111, 103, 0, 3, x, zero_bound, result, amp)
+    let ep2 = error_propagator_record(ep, ev)
+    (ep2, result)
+}
+
+// ── Sine ──────────────────────────────────────────────────────────────
+
+fn error_propagator_sin(
+    ep: ErrorPropagator,
+    x: ErrorBound,
+    x_val: f64
+) -> (ErrorPropagator, ErrorBound) with Mut, Panic {
+    // sin error: err(sin(x)) ~ |cos(x)| * err(x)
+    // |cos(x)| <= 1, so sin never amplifies error
+    // Approximate |cos(x)| via cos(x) ~ 1 - x^2/2 + x^4/24
+    let eps = precision_epsilon(ep.precision)
+    let x2 = x_val * x_val
+    let x4 = x2 * x2
+    var cos_approx = 1.0 - x2 / 2.0 + x4 / 24.0
+    let abs_cos = f64_abs(cos_approx)
+    // Clamp to [0, 1] since |cos| <= 1
+    let clamped_cos = f64_min(abs_cos, 1.0)
+    var result = error_bound_zero()
+    let zero_bound = error_bound_zero()
+
+    if ep.mode == 0 {
+        result.max_error = clamped_cos * x.max_error + eps
+        result.min_error = clamped_cos * x.min_error
+        result.expected_error = clamped_cos * x.expected_error + eps / 2.0
+        result.confidence = x.confidence
+    } else if ep.mode == 1 {
+        result.expected_error = clamped_cos * x.expected_error
+        result.max_error = clamped_cos * x.max_error + eps
+        result.min_error = clamped_cos * x.min_error
+        result.confidence = x.confidence
+    } else {
+        result.max_error = clamped_cos * x.max_error + eps
+        result.min_error = clamped_cos * x.min_error
+        result.expected_error = (result.min_error + result.max_error) / 2.0
+        result.confidence = x.confidence
+    }
+
+    var amp = clamped_cos
+    if amp < 0.01 { amp = 0.01 }
+
+    // 's' 'i' 'n' '\0' => 115, 105, 110, 0
+    let ev = error_propagator_make_event(115, 105, 110, 0, 3, x, zero_bound, result, amp)
+    let ep2 = error_propagator_record(ep, ev)
+    (ep2, result)
+}
+
+// ── Cosine ────────────────────────────────────────────────────────────
+
+fn error_propagator_cos(
+    ep: ErrorPropagator,
+    x: ErrorBound,
+    x_val: f64
+) -> (ErrorPropagator, ErrorBound) with Mut, Panic {
+    // cos error: err(cos(x)) ~ |sin(x)| * err(x)
+    // Approximate |sin(x)| via sin(x) ~ x - x^3/6 + x^5/120
+    let eps = precision_epsilon(ep.precision)
+    let x2 = x_val * x_val
+    let x3 = x2 * x_val
+    let x5 = x3 * x2
+    var sin_approx = x_val - x3 / 6.0 + x5 / 120.0
+    let abs_sin = f64_abs(sin_approx)
+    let clamped_sin = f64_min(abs_sin, 1.0)
+    var result = error_bound_zero()
+    let zero_bound = error_bound_zero()
+
+    if ep.mode == 0 {
+        result.max_error = clamped_sin * x.max_error + eps
+        result.min_error = clamped_sin * x.min_error
+        result.expected_error = clamped_sin * x.expected_error + eps / 2.0
+        result.confidence = x.confidence
+    } else if ep.mode == 1 {
+        result.expected_error = clamped_sin * x.expected_error
+        result.max_error = clamped_sin * x.max_error + eps
+        result.min_error = clamped_sin * x.min_error
+        result.confidence = x.confidence
+    } else {
+        result.max_error = clamped_sin * x.max_error + eps
+        result.min_error = clamped_sin * x.min_error
+        result.expected_error = (result.min_error + result.max_error) / 2.0
+        result.confidence = x.confidence
+    }
+
+    var amp = clamped_sin
+    if amp < 0.01 { amp = 0.01 }
+
+    // 'c' 'o' 's' '\0' => 99, 111, 115, 0
+    let ev = error_propagator_make_event(99, 111, 115, 0, 3, x, zero_bound, result, amp)
+    let ep2 = error_propagator_record(ep, ev)
+    (ep2, result)
+}
+
+// ── Summation (Kahan-aware) ───────────────────────────────────────────
+
+fn error_propagator_sum(
+    ep: ErrorPropagator,
+    bounds: [ErrorBound; 256],
+    count: i64
+) -> (ErrorPropagator, ErrorBound) with Mut, Panic {
+    // Summation of N terms: error grows as sqrt(N) * max_individual_error
+    // (for uncorrelated errors in expected mode)
+    // In conservative mode: N * max_individual_error
+    let eps = precision_epsilon(ep.precision)
+    var max_expected: f64 = 0.0
+    var max_max: f64 = 0.0
+    var sum_sq_expected: f64 = 0.0
+    var sum_sq_max: f64 = 0.0
+    var min_confidence: f64 = 1.0
+
+    var i: i64 = 0
+    while i < count {
+        let b = bounds[i as usize]
+        if b.expected_error > max_expected {
+            max_expected = b.expected_error
+        }
+        if b.max_error > max_max {
+            max_max = b.max_error
+        }
+        sum_sq_expected = sum_sq_expected + b.expected_error * b.expected_error
+        sum_sq_max = sum_sq_max + b.max_error * b.max_error
+        if b.confidence < min_confidence {
+            min_confidence = b.confidence
+        }
+        i = i + 1
+    }
+
+    let n_f = count as f64
+    let sqrt_n = f64_sqrt(n_f)
+    var result = error_bound_zero()
+
+    if ep.mode == 0 {
+        // Conservative: N * max_error + N * eps
+        result.max_error = n_f * max_max + n_f * eps
+        result.expected_error = n_f * max_expected + n_f * eps / 2.0
+        result.confidence = min_confidence
+    } else if ep.mode == 1 {
+        // Expected: sqrt(sum of squares)
+        result.max_error = f64_sqrt(sum_sq_max) + sqrt_n * eps
+        result.expected_error = f64_sqrt(sum_sq_expected)
+        result.confidence = min_confidence
+    } else {
+        // Interval: tight bound
+        result.max_error = n_f * max_max + n_f * eps
+        result.expected_error = f64_sqrt(sum_sq_expected)
+        result.confidence = min_confidence
+    }
+
+    var amp = sqrt_n
+    if amp < 1.0 { amp = 1.0 }
+
+    let zero_bound = error_bound_zero()
+    // 's' 'u' 'm' '\0' => 115, 117, 109, 0
+    let ev = error_propagator_make_event(115, 117, 109, 0, 3, zero_bound, zero_bound, result, amp)
+    let ep2 = error_propagator_record(ep, ev)
+    (ep2, result)
+}
+
+// ============================================================================
+// StabilityIssue — a single detected stability problem
+// ============================================================================
+
+struct StabilityIssue {
+    risk: StabilityRisk,
+    operation: [i8; 32],
+    op_len: i64,
+    location: [i8; 64],
+    loc_len: i64,
+    mitigation: i64,
+}
+
+fn stability_issue_new(risk: StabilityRisk) -> StabilityIssue {
+    StabilityIssue {
+        risk: risk,
+        operation: [0; 32],
+        op_len: 0,
+        location: [0; 64],
+        loc_len: 0,
+        mitigation: stability_risk_mitigation(risk),
+    }
+}
+
+// ============================================================================
+// StabilitySummary — aggregate view of analysis results
+// ============================================================================
+
+struct StabilitySummary {
+    total_checks: i64,
+    stable: i64,
+    mild: i64,
+    severe: i64,
+    catastrophic: i64,
+}
+
+fn stability_summary_new() -> StabilitySummary {
+    StabilitySummary {
+        total_checks: 0,
+        stable: 0,
+        mild: 0,
+        severe: 0,
+        catastrophic: 0,
+    }
+}
+
+fn stability_summary_is_acceptable(s: StabilitySummary) -> bool {
+    // Acceptable if no severe or catastrophic issues
+    s.severe == 0 && s.catastrophic == 0
+}
+
+// ============================================================================
+// StabilityAnalyzer — stateful checker for numerical stability
+// ============================================================================
+
+struct StabilityAnalyzer {
+    precision: i64,
+    condition_threshold: f64,
+    cancellation_threshold: f64,
+    issues: [StabilityIssue; 256],
+    issue_count: i64,
+}
+
+fn stability_analyzer_new(prec: i64) -> StabilityAnalyzer {
+    StabilityAnalyzer {
+        precision: prec,
+        condition_threshold: 1e8,
+        cancellation_threshold: 1e-6,
+        issues: [stability_issue_new(stability_risk_stable()); 256],
+        issue_count: 0,
+    }
+}
+
+fn stability_analyzer_record_issue(
+    sa: StabilityAnalyzer,
+    issue: StabilityIssue
+) -> StabilityAnalyzer with Mut, Panic {
+    var out = sa
+    let idx = out.issue_count
+    if idx < 256 {
+        out.issues[idx as usize] = issue
+        out.issue_count = idx + 1
+    }
+    out
+}
+
+// ── Cancellation Check ────────────────────────────────────────────────
+
+fn stability_check_cancellation(
+    sa: StabilityAnalyzer,
+    x: f64,
+    y: f64
+) -> (StabilityAnalyzer, StabilityRisk) with Mut, Panic {
+    // Detect catastrophic cancellation in x - y (or x + y when signs differ)
+    // relative_diff = |x - y| / max(|x|, |y|)
+    let ax = f64_abs(x)
+    let ay = f64_abs(y)
+    let denom = f64_max(ax, ay)
+
+    // If both are zero, no cancellation
+    if denom < 1e-300 {
+        return (sa, stability_risk_stable())
+    }
+
+    let diff = f64_abs(x - y)
+    let relative_diff = diff / denom
+
+    var risk = stability_risk_stable()
+    if relative_diff < sa.cancellation_threshold {
+        // Catastrophic: nearly complete cancellation
+        let severity = 1.0 - relative_diff / sa.cancellation_threshold
+        risk = stability_risk_catastrophic(f64_clamp(severity, 0.0, 1.0))
+    } else if relative_diff < 0.01 {
+        // Mild: significant cancellation but not catastrophic
+        let condition = 1.0 / relative_diff
+        risk = stability_risk_mild(condition)
+    }
+    // else: Stable, risk remains default
+
+    // Record if non-trivial
+    if risk.tag > 0 {
+        let issue = stability_issue_new(risk)
+        let sa2 = stability_analyzer_record_issue(sa, issue)
+        return (sa2, risk)
+    }
+
+    (sa, risk)
+}
+
+// ── Division Check ────────────────────────────────────────────────────
+
+fn stability_check_division(
+    sa: StabilityAnalyzer,
+    dividend: f64,
+    divisor: f64
+) -> (StabilityAnalyzer, StabilityRisk) with Mut, Panic {
+    let abs_divisor = f64_abs(divisor)
+    let min_n = precision_min_normal(sa.precision)
+
+    var risk = stability_risk_stable()
+
+    if abs_divisor < min_n {
+        // Division by (near) zero: catastrophic
+        risk = stability_risk_catastrophic(1.0)
+    } else if abs_divisor < min_n * 1000.0 {
+        // Near-zero divisor: severe with overflow risk
+        let overflow_risk = min_n * 1000.0 / abs_divisor
+        let clamped = f64_clamp(overflow_risk / 1000.0, 0.0, 1.0)
+        risk = stability_risk_severe(clamped, 0.0)
+    } else {
+        // Check condition number of the division
+        let abs_dividend = f64_abs(dividend)
+        if abs_dividend > 1e-300 {
+            let ratio = abs_dividend / abs_divisor
+            if ratio > sa.condition_threshold {
+                risk = stability_risk_mild(ratio)
+            }
+        }
+    }
+
+    if risk.tag > 0 {
+        let issue = stability_issue_new(risk)
+        let sa2 = stability_analyzer_record_issue(sa, issue)
+        return (sa2, risk)
+    }
+
+    (sa, risk)
+}
+
+// ── Overflow Check ────────────────────────────────────────────────────
+
+fn stability_check_overflow(
+    sa: StabilityAnalyzer,
+    value: f64
+) -> (StabilityAnalyzer, StabilityRisk) with Mut, Panic {
+    let abs_val = f64_abs(value)
+    let max_val = precision_max_value(sa.precision)
+
+    var risk = stability_risk_stable()
+
+    if abs_val > max_val {
+        // Already overflowed
+        risk = stability_risk_catastrophic(1.0)
+    } else if abs_val > max_val * 0.9 {
+        // Within 10% of overflow: severe
+        let overflow_fraction = (abs_val - max_val * 0.9) / (max_val * 0.1)
+        risk = stability_risk_severe(f64_clamp(overflow_fraction, 0.0, 1.0), 0.0)
+    } else if abs_val > max_val * 0.5 {
+        // Within 50% of overflow: mild
+        let condition = abs_val / max_val
+        risk = stability_risk_mild(1.0 / (1.0 - condition))
+    }
+
+    if risk.tag > 0 {
+        let issue = stability_issue_new(risk)
+        let sa2 = stability_analyzer_record_issue(sa, issue)
+        return (sa2, risk)
+    }
+
+    (sa, risk)
+}
+
+// ── Underflow Check ───────────────────────────────────────────────────
+
+fn stability_check_underflow(
+    sa: StabilityAnalyzer,
+    value: f64
+) -> (StabilityAnalyzer, StabilityRisk) with Mut, Panic {
+    let abs_val = f64_abs(value)
+    // Zero is not underflow
+    if abs_val == 0.0 {
+        return (sa, stability_risk_stable())
+    }
+    let min_n = precision_min_normal(sa.precision)
+
+    var risk = stability_risk_stable()
+
+    if abs_val < min_n {
+        // Below minimum normal: in subnormal territory
+        // Underflow risk proportional to how deep into subnormals we are
+        let depth = min_n / abs_val
+        var underflow_frac: f64 = 0.0
+        if depth > 1e6 {
+            underflow_frac = 1.0
+        } else {
+            underflow_frac = f64_log10(depth) / 6.0
+        }
+        risk = stability_risk_severe(0.0, f64_clamp(underflow_frac, 0.0, 1.0))
+    } else if abs_val < min_n * 100.0 {
+        // Close to subnormal range: mild
+        let condition = min_n * 100.0 / abs_val
+        risk = stability_risk_mild(condition)
+    }
+
+    if risk.tag > 0 {
+        let issue = stability_issue_new(risk)
+        let sa2 = stability_analyzer_record_issue(sa, issue)
+        return (sa2, risk)
+    }
+
+    (sa, risk)
+}
+
+// ── Condition Number Check ────────────────────────────────────────────
+
+fn stability_check_condition(
+    sa: StabilityAnalyzer,
+    cond_num: f64
+) -> (StabilityAnalyzer, StabilityRisk) with Mut, Panic {
+    // Classify based on condition number magnitude
+    let abs_cond = f64_abs(cond_num)
+
+    var risk = stability_risk_stable()
+
+    if abs_cond < 1.0 {
+        // Well-conditioned (kappa < 1 is unusual but fine)
+        return (sa, risk)
+    }
+
+    let log_cond = f64_log10(abs_cond)
+    let mantissa_bits = precision_mantissa_bits(sa.precision)
+
+    if log_cond > (mantissa_bits as f64) {
+        // Condition number exceeds precision: catastrophic
+        // All significant digits are lost
+        risk = stability_risk_catastrophic(1.0)
+    } else if abs_cond > sa.condition_threshold {
+        // Above threshold: severe
+        let overflow_fraction = f64_clamp(log_cond / (mantissa_bits as f64), 0.0, 1.0)
+        risk = stability_risk_severe(overflow_fraction, 0.0)
+    } else if abs_cond > 100.0 {
+        // Moderately ill-conditioned: mild
+        risk = stability_risk_mild(abs_cond)
+    }
+
+    if risk.tag > 0 {
+        let issue = stability_issue_new(risk)
+        let sa2 = stability_analyzer_record_issue(sa, issue)
+        return (sa2, risk)
+    }
+
+    (sa, risk)
+}
+
+// ── Aggregate Queries ─────────────────────────────────────────────────
+
+fn stability_has_catastrophic(sa: StabilityAnalyzer) -> bool with Mut, Panic {
+    var i: i64 = 0
+    while i < sa.issue_count {
+        if sa.issues[i as usize].risk.tag == 3 {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn stability_summary(sa: StabilityAnalyzer) -> StabilitySummary with Mut, Panic {
+    var s = stability_summary_new()
+    s.total_checks = sa.issue_count
+
+    var i: i64 = 0
+    while i < sa.issue_count {
+        let tag = sa.issues[i as usize].risk.tag
+        if tag == 0 {
+            s.stable = s.stable + 1
+        } else if tag == 1 {
+            s.mild = s.mild + 1
+        } else if tag == 2 {
+            s.severe = s.severe + 1
+        } else {
+            s.catastrophic = s.catastrophic + 1
+        }
+        i = i + 1
+    }
+    s
+}
+
+// ============================================================================
+// PrecisionAdvisor — recommend FP width for a given computation
+// ============================================================================
+
+struct PrecisionAdvisor {
+    default_precision: i64,
+    error_tolerance: f64,
+    recommendations: [i64; 256],
+    rec_count: i64,
+}
+
+fn precision_advisor_new(default_prec: i64, tolerance: f64) -> PrecisionAdvisor {
+    PrecisionAdvisor {
+        default_precision: default_prec,
+        error_tolerance: tolerance,
+        recommendations: [0; 256],
+        rec_count: 0,
+    }
+}
+
+fn precision_advisor_recommend(
+    pa: PrecisionAdvisor,
+    error: ErrorBound,
+    value_range: f64
+) -> (PrecisionAdvisor, i64) with Mut, Panic {
+    // Recommend minimum precision that keeps error within tolerance
+    var out = pa
+
+    // Compute required relative precision
+    let abs_range = f64_abs(value_range)
+    var required_relative: f64 = 0.0
+    if abs_range > 1e-300 {
+        required_relative = error.max_error / abs_range
+    } else {
+        required_relative = error.max_error
+    }
+
+    // Try each precision from lowest to highest
+    var recommended: i64 = 3  // default to FP64
+
+    // FP8
+    if precision_epsilon(0) < pa.error_tolerance && required_relative < precision_epsilon(0) * 10.0 {
+        recommended = 0
+    }
+    // FP16
+    else if precision_epsilon(1) < pa.error_tolerance && required_relative < precision_epsilon(1) * 10.0 {
+        recommended = 1
+    }
+    // FP32
+    else if precision_epsilon(2) < pa.error_tolerance && required_relative < precision_epsilon(2) * 10.0 {
+        recommended = 2
+    }
+    // else FP64 stays
+
+    // Also check if value_range fits in the precision
+    if recommended < 3 {
+        if !precision_can_represent(recommended, value_range) {
+            // Upgrade until it fits
+            if recommended == 0 {
+                recommended = 1
+            }
+            if recommended == 1 && !precision_can_represent(1, value_range) {
+                recommended = 2
+            }
+            if recommended == 2 && !precision_can_represent(2, value_range) {
+                recommended = 3
+            }
+        }
+    }
+
+    // Record the recommendation
+    let idx = out.rec_count
+    if idx < 256 {
+        out.recommendations[idx as usize] = recommended
+        out.rec_count = idx + 1
+    }
+
+    (out, recommended)
+}
+
+fn precision_advisor_recommend_for_risk(
+    pa: PrecisionAdvisor,
+    risk: StabilityRisk
+) -> (PrecisionAdvisor, i64) with Mut, Panic {
+    // Recommend precision upgrade based on stability risk
+    var out = pa
+    var recommended = pa.default_precision
+
+    let severity = stability_risk_severity(risk)
+
+    if severity > 0.8 {
+        // Catastrophic: must use FP64
+        recommended = 3
+    } else if severity > 0.5 {
+        // Severe: at least FP32, prefer FP64
+        if recommended < 2 {
+            recommended = 2
+        }
+        if severity > 0.7 {
+            recommended = 3
+        }
+    } else if severity > 0.1 {
+        // Mild: upgrade by one level
+        if recommended < 3 {
+            recommended = recommended + 1
+        }
+    }
+    // else: Stable, keep default
+
+    let idx = out.rec_count
+    if idx < 256 {
+        out.recommendations[idx as usize] = recommended
+        out.rec_count = idx + 1
+    }
+
+    (out, recommended)
+}
+
+fn precision_advisor_is_quantization_safe(
+    pa: PrecisionAdvisor,
+    value_range: f64,
+    error: ErrorBound
+) -> bool {
+    // Check whether quantizing to the default precision would keep
+    // the quantization error below the tolerance
+    let q_err = precision_quantization_error(pa.default_precision, value_range)
+    let total_error = error.max_error + q_err
+    total_error <= pa.error_tolerance
+}
+
+// ============================================================================
+// Integration with the epistemic type system
+// ============================================================================
+// These functions bridge numerical analysis → Knowledge<T> layers.
+//
+// Knowledge<T> has 4 layers:
+//   T         — the computed value
+//   epsilon   — uncertainty bound (f32)
+//   validity  — boolean predicate (with confidence)
+//   provenance — data lineage hash
+
+fn error_to_epistemic_epsilon(eb: ErrorBound) -> f32 {
+    // Map an ErrorBound to the epsilon layer of Knowledge<T>
+    // Use max_error as a conservative epsilon, clamped to [0, 1]
+    let clamped = f64_clamp(eb.max_error, 0.0, 1.0)
+    clamped as f32
+}
+
+fn risk_to_validity_confidence(risk: StabilityRisk) -> f64 {
+    // Map a StabilityRisk to a validity confidence in [0, 1]
+    // Confidence = 1.0 - severity
+    let severity = stability_risk_severity(risk)
+    let confidence = 1.0 - severity
+    f64_clamp(confidence, 0.0, 1.0)
+}
+
+fn synthesize_provenance(
+    history: [ErrorEvent; 1024],
+    count: i64
+) -> i64 with Mut, Panic {
+    // Compute a provenance hash by XOR-folding the operation names
+    // across the entire propagation history.
+    //
+    // This gives a fingerprint of the computational path that produced
+    // a value, suitable for the provenance layer of Knowledge<T>.
+    var hash: i64 = 0
+
+    var i: i64 = 0
+    while i < count {
+        let ev = history[i as usize]
+        // Hash each byte of the operation name
+        var j: i64 = 0
+        while j < ev.op_len {
+            let byte = ev.operation[j as usize]
+            let byte_i64 = byte as i64
+            // Rotate hash left by 7 bits, then XOR
+            let rotated = (hash * 128) + (hash / 72057594037927936)
+            hash = rotated ^ byte_i64
+            j = j + 1
+        }
+        // Mix in the event index for ordering sensitivity
+        hash = hash ^ (i * 2654435761)
+        i = i + 1
+    }
+
+    hash
+}
+
+// ============================================================================
+// Composite stability analysis helpers
+// ============================================================================
+
+fn analyze_dot_product_stability(
+    sa: StabilityAnalyzer,
+    values_a: [f64; 256],
+    values_b: [f64; 256],
+    count: i64
+) -> (StabilityAnalyzer, StabilityRisk) with Mut, Panic {
+    // Analyze the numerical stability of a dot product:
+    //   sum_i (a_i * b_i)
+    //
+    // Key risks:
+    //   1. Catastrophic cancellation when terms have mixed signs
+    //   2. Overflow when individual products are large
+    //   3. Condition number grows with the ratio of max(|a_i*b_i|) to |sum|
+    var out = sa
+    var worst_risk = stability_risk_stable()
+    var worst_severity: f64 = 0.0
+
+    // Compute the dot product and track sign changes
+    var dot_sum: f64 = 0.0
+    var positive_sum: f64 = 0.0
+    var negative_sum: f64 = 0.0
+    var max_product: f64 = 0.0
+
+    var i: i64 = 0
+    while i < count {
+        let product = values_a[i as usize] * values_b[i as usize]
+        dot_sum = dot_sum + product
+        if product >= 0.0 {
+            positive_sum = positive_sum + product
+        } else {
+            negative_sum = negative_sum - product  // accumulate positive magnitude
+        }
+        let abs_prod = f64_abs(product)
+        if abs_prod > max_product {
+            max_product = abs_prod
+        }
+
+        // Check each multiplication for overflow
+        let pair = stability_check_overflow(out, product)
+        out = pair.0
+        let prod_risk = pair.1
+        let sev = stability_risk_severity(prod_risk)
+        if sev > worst_severity {
+            worst_severity = sev
+            worst_risk = prod_risk
+        }
+
+        i = i + 1
+    }
+
+    // Check for cancellation: if positive_sum and negative_sum are close,
+    // the result may have lost most significant digits
+    let total_magnitude = positive_sum + negative_sum
+    let abs_result = f64_abs(dot_sum)
+
+    if total_magnitude > 1e-300 && abs_result < total_magnitude * sa.cancellation_threshold {
+        // Catastrophic cancellation in the sum
+        let cancellation_ratio = 1.0 - abs_result / total_magnitude
+        let cancel_risk = stability_risk_catastrophic(f64_clamp(cancellation_ratio, 0.0, 1.0))
+        let sev = stability_risk_severity(cancel_risk)
+        if sev > worst_severity {
+            worst_severity = sev
+            worst_risk = cancel_risk
+        }
+        let issue = stability_issue_new(cancel_risk)
+        out = stability_analyzer_record_issue(out, issue)
+    }
+
+    // Check condition number: kappa ~ total_magnitude / |result|
+    if abs_result > 1e-300 {
+        let cond = total_magnitude / abs_result
+        let pair2 = stability_check_condition(out, cond)
+        out = pair2.0
+        let cond_risk = pair2.1
+        let sev2 = stability_risk_severity(cond_risk)
+        if sev2 > worst_severity {
+            worst_severity = sev2
+            worst_risk = cond_risk
+        }
+    }
+
+    (out, worst_risk)
+}
+
+fn analyze_polynomial_stability(
+    sa: StabilityAnalyzer,
+    coeffs: [f64; 256],
+    degree: i64,
+    x: f64
+) -> (StabilityAnalyzer, StabilityRisk) with Mut, Panic {
+    // Analyze stability of polynomial evaluation at point x.
+    // Uses Horner's method perspective: p(x) = c[n]*x^n + ... + c[1]*x + c[0]
+    //
+    // Key risk: for large |x|, higher-order terms dominate and can cause
+    // cancellation with lower-order terms of opposite sign.
+    var out = sa
+    var worst_risk = stability_risk_stable()
+    var worst_severity: f64 = 0.0
+
+    // Evaluate using Horner's method, tracking stability at each step
+    var result: f64 = 0.0
+    if degree >= 0 {
+        result = coeffs[degree as usize]
+    }
+
+    var i: i64 = degree - 1
+    while i >= 0 {
+        let prev = result
+        result = result * x + coeffs[i as usize]
+
+        // Check cancellation at this Horner step
+        let product_term = prev * x
+        let pair = stability_check_cancellation(out, product_term, 0.0 - coeffs[i as usize])
+        out = pair.0
+        let step_risk = pair.1
+        let sev = stability_risk_severity(step_risk)
+        if sev > worst_severity {
+            worst_severity = sev
+            worst_risk = step_risk
+        }
+
+        // Check overflow
+        let pair2 = stability_check_overflow(out, result)
+        out = pair2.0
+        let ovf_risk = pair2.1
+        let sev2 = stability_risk_severity(ovf_risk)
+        if sev2 > worst_severity {
+            worst_severity = sev2
+            worst_risk = ovf_risk
+        }
+
+        i = i - 1
+    }
+
+    (out, worst_risk)
+}
+
+// ============================================================================
+// Error propagation through compound expressions
+// ============================================================================
+
+fn propagate_fma_error(
+    ep: ErrorPropagator,
+    a_bound: ErrorBound,
+    b_bound: ErrorBound,
+    c_bound: ErrorBound,
+    a_val: f64,
+    b_val: f64,
+    c_val: f64
+) -> (ErrorPropagator, ErrorBound) with Mut, Panic {
+    // Fused multiply-add: result = a * b + c
+    // Error: sqrt((|a|*eps_b + |b|*eps_a)^2 + eps_c^2) + machine_eps
+    let eps = precision_epsilon(ep.precision)
+    let aa = f64_abs(a_val)
+    let ab = f64_abs(b_val)
+
+    // Multiplication error component
+    let mul_err_max = ab * a_bound.max_error + aa * b_bound.max_error + eps * aa * ab
+    let mul_err_exp = ab * a_bound.expected_error + aa * b_bound.expected_error
+
+    // Combined with addition error via quadrature
+    var result = error_bound_zero()
+
+    if ep.mode == 0 {
+        result.max_error = mul_err_max + c_bound.max_error + eps
+        result.min_error = 0.0
+        result.expected_error = f64_sqrt(mul_err_exp * mul_err_exp + c_bound.expected_error * c_bound.expected_error) + eps / 2.0
+        result.confidence = f64_min(f64_min(a_bound.confidence, b_bound.confidence), c_bound.confidence)
+    } else if ep.mode == 1 {
+        result.expected_error = f64_sqrt(mul_err_exp * mul_err_exp + c_bound.expected_error * c_bound.expected_error)
+        result.max_error = f64_sqrt(mul_err_max * mul_err_max + c_bound.max_error * c_bound.max_error) + eps
+        result.min_error = 0.0
+        result.confidence = a_bound.confidence * b_bound.confidence * c_bound.confidence
+    } else {
+        result.max_error = mul_err_max + c_bound.max_error + eps
+        result.min_error = 0.0
+        result.expected_error = (result.min_error + result.max_error) / 2.0
+        result.confidence = f64_min(f64_min(a_bound.confidence, b_bound.confidence), c_bound.confidence)
+    }
+
+    let zero_bound = error_bound_zero()
+    // 'f' 'm' 'a' '\0' => 102, 109, 97, 0
+    let ev = error_propagator_make_event(102, 109, 97, 0, 3, a_bound, b_bound, result, 1.5)
+    let ep2 = error_propagator_record(ep, ev)
+    (ep2, result)
+}
+
+fn propagate_norm_error(
+    ep: ErrorPropagator,
+    component_bounds: [ErrorBound; 256],
+    component_values: [f64; 256],
+    count: i64
+) -> (ErrorPropagator, ErrorBound) with Mut, Panic {
+    // Error propagation through L2 norm: ||v|| = sqrt(sum(v_i^2))
+    //
+    // err(||v||) ~ sum(|v_i| * err_i) / ||v||
+    let eps = precision_epsilon(ep.precision)
+
+    // Compute norm
+    var norm_sq: f64 = 0.0
+    var i: i64 = 0
+    while i < count {
+        let v = component_values[i as usize]
+        norm_sq = norm_sq + v * v
+        i = i + 1
+    }
+    let norm = f64_sqrt(norm_sq)
+
+    var result = error_bound_zero()
+
+    if norm < 1e-300 {
+        // Zero vector: error is just machine epsilon
+        result.max_error = eps
+        result.expected_error = eps / 2.0
+        result.confidence = 0.5
+    } else {
+        // Weighted sum of component errors
+        var weighted_max: f64 = 0.0
+        var weighted_exp_sq: f64 = 0.0
+        i = 0
+        while i < count {
+            let v = f64_abs(component_values[i as usize])
+            let b = component_bounds[i as usize]
+            weighted_max = weighted_max + v * b.max_error
+            let w_exp = v * b.expected_error
+            weighted_exp_sq = weighted_exp_sq + w_exp * w_exp
+            i = i + 1
+        }
+
+        result.max_error = weighted_max / norm + eps * norm
+        result.min_error = 0.0
+        result.expected_error = f64_sqrt(weighted_exp_sq) / norm
+        result.confidence = 0.95
+    }
+
+    let zero_bound = error_bound_zero()
+    // 'n' 'r' 'm' '\0' => 110, 114, 109, 0
+    let ev = error_propagator_make_event(110, 114, 109, 0, 3, zero_bound, zero_bound, result, 1.0)
+    let ep2 = error_propagator_record(ep, ev)
+    (ep2, result)
+}
+
+// ============================================================================
+// Full stability report: end-to-end pipeline
+// ============================================================================
+
+fn full_stability_report(
+    sa: StabilityAnalyzer,
+    ep: ErrorPropagator
+) -> (StabilitySummary, f64, i64) with Mut, Panic {
+    // Produce a complete stability report from an analyzer and propagator:
+    //   1. StabilitySummary — counts by severity level
+    //   2. Overall confidence — product of all event confidences
+    //   3. Provenance hash — XOR-fold of operation history
+    let summary = stability_summary(sa)
+
+    // Compute overall confidence from propagation history
+    var overall_conf: f64 = 1.0
+    var i: i64 = 0
+    while i < ep.history_count {
+        let ev = ep.history[i as usize]
+        overall_conf = overall_conf * ev.output_error.confidence
+        // Prevent underflow to exactly 0
+        if overall_conf < 1e-300 {
+            overall_conf = 1e-300
+        }
+        i = i + 1
+    }
+
+    let prov = synthesize_provenance(ep.history, ep.history_count)
+
+    (summary, overall_conf, prov)
+}

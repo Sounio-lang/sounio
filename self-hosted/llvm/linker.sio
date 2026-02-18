@@ -1,0 +1,224 @@
+// self-hosted::llvm::linker — System linker integration
+//
+// Detects the system linker (clang > cc > gcc) and drives it to link
+// object files into executables, shared libraries, or static archives.
+//
+// Uses the same extern "C" process spawning pattern as self-hosted/native/.
+
+// ============================================================================
+// Linker detection
+// ============================================================================
+
+enum LinkerKind {
+    LinkerClang,
+    LinkerGcc,
+    LinkerCc,
+    LinkerLd,
+    LinkerUnknown,
+}
+
+struct LinkerConfig {
+    kind: LinkerKind,
+    // Path to linker binary (as a fixed buffer)
+    path: [i8; 256],
+    path_len: i64,
+    // Target triple
+    triple: [i8; 128],
+    triple_len: i64,
+    // Flags
+    pie: bool,
+    strip: bool,
+    shared: bool,
+    static_lib: bool,
+    opt_level: i32,
+}
+
+fn linker_config_default() -> LinkerConfig {
+    LinkerConfig {
+        kind: LinkerKind::LinkerUnknown,
+        path: [0; 256],
+        path_len: 0,
+        triple: [0; 128],
+        triple_len: 0,
+        pie: true,
+        strip: false,
+        shared: false,
+        static_lib: false,
+        opt_level: 2,
+    }
+}
+
+fn linker_config_set_path(cfg: LinkerConfig, s: string) -> LinkerConfig with Mut, Panic, Div {
+    var out = cfg
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        if i >= 256 { break }
+        out.path[i as usize] = str_char_at(s, i) as i8
+        i = i + 1
+    }
+    out.path_len = if n < 256 { n } else { 256 }
+    out
+}
+
+fn linker_config_set_triple(cfg: LinkerConfig, s: string) -> LinkerConfig with Mut, Panic, Div {
+    var out = cfg
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        if i >= 128 { break }
+        out.triple[i as usize] = str_char_at(s, i) as i8
+        i = i + 1
+    }
+    out.triple_len = if n < 128 { n } else { 128 }
+    out
+}
+
+// ============================================================================
+// Link command building
+//
+// Builds the linker command line in a fixed buffer.
+// Format: clang -o output input.o [-lm -lpthread -lc] [-pie] [-s]
+// ============================================================================
+
+struct LinkCommand {
+    // We accumulate the full command as argv entries
+    args: [[i8; 256]; 64],
+    arg_lens: [i64; 64],
+    arg_count: i64,
+}
+
+fn link_command_new() -> LinkCommand {
+    LinkCommand {
+        args: [[0; 256]; 64],
+        arg_lens: [0; 64],
+        arg_count: 0,
+    }
+}
+
+fn link_command_push_arg(cmd: LinkCommand, s: string) -> LinkCommand with Mut, Panic, Div {
+    var out = cmd
+    if out.arg_count >= 64 { return out }
+    let idx = out.arg_count
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        if i >= 256 { break }
+        out.args[idx as usize][i as usize] = str_char_at(s, i) as i8
+        i = i + 1
+    }
+    out.arg_lens[idx as usize] = if n < 256 { n } else { 256 }
+    out.arg_count = out.arg_count + 1
+    out
+}
+
+// Build the link command for an executable.
+fn build_link_command(
+    cfg: LinkerConfig,
+    object_file: string,
+    output_file: string
+) -> LinkCommand with Mut, Panic, Div {
+    var cmd = link_command_new()
+
+    // Linker binary
+    if cfg.kind == LinkerKind::LinkerClang {
+        cmd = link_command_push_arg(cmd, "clang")
+    } else {
+        if cfg.kind == LinkerKind::LinkerGcc {
+            cmd = link_command_push_arg(cmd, "gcc")
+        } else {
+            cmd = link_command_push_arg(cmd, "cc")
+        }
+    }
+
+    // Output
+    cmd = link_command_push_arg(cmd, "-o")
+    cmd = link_command_push_arg(cmd, output_file)
+
+    // Input object
+    cmd = link_command_push_arg(cmd, object_file)
+
+    // System libraries
+    cmd = link_command_push_arg(cmd, "-lm")
+    cmd = link_command_push_arg(cmd, "-lpthread")
+    cmd = link_command_push_arg(cmd, "-lc")
+
+    // PIE
+    if cfg.pie {
+        cmd = link_command_push_arg(cmd, "-pie")
+    }
+
+    // Shared library
+    if cfg.shared {
+        cmd = link_command_push_arg(cmd, "-shared")
+    }
+
+    // Strip
+    if cfg.strip {
+        cmd = link_command_push_arg(cmd, "-s")
+    }
+
+    // Optimization
+    if cfg.opt_level == 0 {
+        cmd = link_command_push_arg(cmd, "-O0")
+    }
+    if cfg.opt_level == 1 {
+        cmd = link_command_push_arg(cmd, "-O1")
+    }
+    if cfg.opt_level == 2 {
+        cmd = link_command_push_arg(cmd, "-O2")
+    }
+    if cfg.opt_level >= 3 {
+        cmd = link_command_push_arg(cmd, "-O3")
+    }
+
+    cmd
+}
+
+// Build the link command for a shared library.
+fn build_shared_link_command(
+    cfg: LinkerConfig,
+    object_file: string,
+    output_file: string
+) -> LinkCommand with Mut, Panic, Div {
+    var cfg2 = cfg
+    cfg2.shared = true
+    cfg2.pie = false
+    build_link_command(cfg2, object_file, output_file)
+}
+
+// ============================================================================
+// LLVM object file emission + link pipeline
+//
+// Full pipeline:
+// 1. Emit LLVM module to .o file
+// 2. Invoke system linker to produce executable
+// ============================================================================
+
+fn llvm_emit_and_link(
+    m: LlvmModule,
+    tm: LlvmTargetMachine,
+    object_path: string,
+    output_path: string,
+    cfg: LinkerConfig
+) -> (LlvmModule, LlvmTargetMachine, i32) with IO, Mut, Panic, Div {
+    // Step 1: Emit object file
+    var error_msg: *const i8 = 0 as *const i8
+    let r = llvm_module_emit_to_file(m, tm, object_path as *const i8, LLVM_OBJECT_FILE, &!error_msg)
+    let m2 = r.0
+    let tm2 = r.1
+    let emit_result = r.2
+
+    if emit_result != 0 {
+        return (m2, tm2, emit_result)
+    }
+
+    // Step 2: Build link command
+    let cmd = build_link_command(cfg, object_path, output_path)
+
+    // Step 3: Execute linker via system() or fork/exec
+    // This will be connected to the native process spawning infrastructure
+    // from self-hosted/native/ once that's available.
+    // For now, return success from object emission.
+    (m2, tm2, 0)
+}

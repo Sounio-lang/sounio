@@ -1,0 +1,269 @@
+// self-hosted::collections::arena — Type-erased arena allocator
+//
+// A fixed-capacity arena that hands out integer IDs for O(1) access.
+// Replaces Rust `id-arena`. Capacity is 8192 entries of i64. IDs are
+// indices into the backing array, valid in [0, count). Allocation is
+// bump-pointer (O(1) append); random access by ID is O(1).
+//
+// All mutating operations consume and return the struct (state threading).
+
+// ============================================================================
+// STRUCT
+// ============================================================================
+
+struct Arena {
+    data: [i64; 8192],
+    count: i64,
+}
+
+// ============================================================================
+// CONSTRUCTOR
+// ============================================================================
+
+fn arena_new() -> Arena {
+    Arena {
+        data: [0; 8192],
+        count: 0,
+    }
+}
+
+// ============================================================================
+// INTERNAL CONSTANTS
+// ============================================================================
+
+// Maximum number of entries the arena can hold.
+fn arena_capacity() -> i64 {
+    8192
+}
+
+// ============================================================================
+// ALLOC — bump-allocate the next slot, return (arena, id)
+// ============================================================================
+//
+// The returned id is the index of the newly allocated slot, initialised to 0.
+// If the arena is full, the id is -1 (caller must check).
+
+fn arena_alloc(a: Arena) -> (Arena, i64) with Mut {
+    var arena = a
+    if arena.count >= arena_capacity() {
+        // Out of capacity — signal with sentinel id
+        return (arena, -1)
+    }
+    let id = arena.count
+    arena.data[id] = 0
+    arena.count = arena.count + 1
+    (arena, id)
+}
+
+// ============================================================================
+// IS_VALID_ID — bounds check (helpers must precede callers)
+// ============================================================================
+
+fn arena_is_valid_id(a: Arena, id: i64) -> bool {
+    id >= 0 && id < a.count
+}
+
+// ============================================================================
+// GET — read the value stored at the given id
+// ============================================================================
+//
+// Returns the stored i64, or 0 if the id is out of bounds.
+// Callers that need to distinguish "stored zero" from "invalid id" should
+// call arena_is_valid_id first.
+
+fn arena_get(a: Arena, id: i64) -> i64 with Panic, Div {
+    if !arena_is_valid_id(a, id) {
+        return 0
+    }
+    a.data[id]
+}
+
+// ============================================================================
+// SET — write a value into the slot at the given id
+// ============================================================================
+//
+// If the id is out of bounds the arena is returned unchanged.
+
+fn arena_set(a: Arena, id: i64, value: i64) -> Arena with Mut, Panic, Div {
+    var arena = a
+    if !arena_is_valid_id(arena, id) {
+        return arena
+    }
+    arena.data[id] = value
+    arena
+}
+
+// ============================================================================
+// LEN — number of allocated slots
+// ============================================================================
+
+fn arena_len(a: Arena) -> i64 {
+    a.count
+}
+
+// ============================================================================
+// CLEAR — reset the arena to empty, preserving the backing storage
+// ============================================================================
+
+fn arena_clear(a: Arena) -> Arena with Mut, Panic, Div {
+    var arena = a
+    var i: i64 = 0
+    while i < arena.count {
+        arena.data[i] = 0
+        i = i + 1
+    }
+    arena.count = 0
+    arena
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn test_arena_new() -> bool {
+    let a = arena_new()
+    arena_len(a) == 0
+}
+
+fn test_arena_alloc_single() -> bool with Mut, Panic, Div {
+    let a = arena_new()
+    let result = arena_alloc(a)
+    let a2 = result.0
+    let id = result.1
+    let ok1 = id == 0
+    let ok2 = arena_len(a2) == 1
+    let ok3 = arena_get(a2, id) == 0
+    ok1 && ok2 && ok3
+}
+
+fn test_arena_alloc_multiple() -> bool with Mut, Panic, Div {
+    var a = arena_new()
+
+    let r0 = arena_alloc(a)
+    a = r0.0
+    let id0 = r0.1
+
+    let r1 = arena_alloc(a)
+    a = r1.0
+    let id1 = r1.1
+
+    let r2 = arena_alloc(a)
+    a = r2.0
+    let id2 = r2.1
+
+    let ok1 = id0 == 0
+    let ok2 = id1 == 1
+    let ok3 = id2 == 2
+    let ok4 = arena_len(a) == 3
+    ok1 && ok2 && ok3 && ok4
+}
+
+fn test_arena_set_and_get() -> bool with Mut, Panic, Div {
+    var a = arena_new()
+
+    let r0 = arena_alloc(a)
+    a = r0.0
+    let id0 = r0.1
+
+    let r1 = arena_alloc(a)
+    a = r1.0
+    let id1 = r1.1
+
+    a = arena_set(a, id0, 42)
+    a = arena_set(a, id1, 99)
+
+    let ok1 = arena_get(a, id0) == 42
+    let ok2 = arena_get(a, id1) == 99
+    ok1 && ok2
+}
+
+fn test_arena_get_out_of_bounds() -> bool with Panic, Div {
+    let a = arena_new()
+    let ok1 = arena_get(a, 0) == 0
+    let ok2 = arena_get(a, -1) == 0
+    let ok3 = arena_get(a, 9999) == 0
+    ok1 && ok2 && ok3
+}
+
+fn test_arena_set_out_of_bounds() -> bool with Mut, Panic, Div {
+    var a = arena_new()
+
+    let r0 = arena_alloc(a)
+    a = r0.0
+
+    // Setting out-of-bounds should be a no-op
+    a = arena_set(a, 5, 123)
+    a = arena_set(a, -1, 456)
+
+    let ok1 = arena_len(a) == 1
+    let ok2 = arena_get(a, 0) == 0
+    ok1 && ok2
+}
+
+fn test_arena_is_valid_id() -> bool with Mut {
+    var a = arena_new()
+
+    let ok1 = !arena_is_valid_id(a, 0)
+    let ok2 = !arena_is_valid_id(a, -1)
+
+    let r0 = arena_alloc(a)
+    a = r0.0
+
+    let ok3 = arena_is_valid_id(a, 0)
+    let ok4 = !arena_is_valid_id(a, 1)
+    let ok5 = !arena_is_valid_id(a, -1)
+    ok1 && ok2 && ok3 && ok4 && ok5
+}
+
+fn test_arena_clear() -> bool with Mut, Panic, Div {
+    var a = arena_new()
+
+    let r0 = arena_alloc(a)
+    a = r0.0
+    a = arena_set(a, 0, 77)
+
+    let r1 = arena_alloc(a)
+    a = r1.0
+    a = arena_set(a, 1, 88)
+
+    a = arena_clear(a)
+
+    let ok1 = arena_len(a) == 0
+    let ok2 = !arena_is_valid_id(a, 0)
+    let ok3 = !arena_is_valid_id(a, 1)
+    ok1 && ok2 && ok3
+}
+
+fn test_arena_alloc_after_clear() -> bool with Mut, Panic, Div {
+    var a = arena_new()
+
+    let r0 = arena_alloc(a)
+    a = r0.0
+    a = arena_set(a, 0, 111)
+
+    a = arena_clear(a)
+
+    // New allocation after clear reuses slot 0
+    let r1 = arena_alloc(a)
+    a = r1.0
+    let id = r1.1
+
+    let ok1 = id == 0
+    let ok2 = arena_len(a) == 1
+    let ok3 = arena_get(a, 0) == 0
+    ok1 && ok2 && ok3
+}
+
+fn test_arena_overwrite() -> bool with Mut, Panic, Div {
+    var a = arena_new()
+
+    let r0 = arena_alloc(a)
+    a = r0.0
+    let id = r0.1
+
+    a = arena_set(a, id, 10)
+    a = arena_set(a, id, 20)
+    a = arena_set(a, id, 30)
+
+    arena_get(a, id) == 30
+}

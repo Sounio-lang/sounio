@@ -1,0 +1,903 @@
+// self-hosted::gpu::epistemic_ptx — Epistemic shadow register PTX codegen
+//
+// World-first: every Knowledge<T> value on GPU gets 4 shadow registers:
+//   %r_val      (f32/f64) — computed value
+//   %r_eps      (f32)     — uncertainty bound (epsilon)
+//   %p_valid    (pred)    — validity predicate
+//   %r_prov     (u64)     — bit-packed provenance (data lineage)
+//
+// Uncertainty propagation rules:
+//   Add/Sub: ε_c = √(ε_a² + ε_b²)              [quadrature]
+//   Mul:     ε_c = |a|·ε_b + |b|·ε_a            [first-order]
+//   Div:     ε_c = (|a|·ε_b + |b|·ε_a) / b²    [+ near-zero guard]
+//   FMA:     ε_c = √((|a|·ε_b + |b|·ε_a)² + ε_c²)
+//
+// Warp-level aggregation:
+//   vote.sync.ballot for consensus
+//   shfl.sync.down for epsilon reduction (min/max/avg)
+//   OR reduction for provenance merge
+
+// ── Configuration ───────────────────────────────────────────────────
+
+struct EpistemicPtxConfig {
+    sm_major: i64,
+    sm_minor: i64,
+    default_epsilon: i64,       // f32 bits (IEEE 754)
+    confidence_threshold: i64,  // f32 bits
+    quadrature_propagation: bool,
+    warp_aggregation: bool,
+    provenance_tracking: bool,
+    provenance_bits: i64,
+}
+
+fn epistemic_config_default() -> EpistemicPtxConfig {
+    EpistemicPtxConfig {
+        sm_major: 8,
+        sm_minor: 0,
+        default_epsilon: 0,           // 0.0f
+        confidence_threshold: 1028443341, // 0.05f in IEEE 754
+        quadrature_propagation: true,
+        warp_aggregation: true,
+        provenance_tracking: true,
+        provenance_bits: 8,
+    }
+}
+
+// ── Shadow Register Set ─────────────────────────────────────────────
+
+struct EpistemicShadow {
+    val_name: string,    // e.g. "%r_a"
+    eps_name: string,    // e.g. "%r_a_eps"
+    valid_name: string,  // e.g. "%p_a_valid"
+    prov_name: string,   // e.g. "%r_a_prov"
+}
+
+fn epistemic_shadow_new(base: string) -> EpistemicShadow with Alloc {
+    EpistemicShadow {
+        val_name: "%r_" + base,
+        eps_name: "%r_" + base + "_eps",
+        valid_name: "%p_" + base + "_valid",
+        prov_name: "%r_" + base + "_prov",
+    }
+}
+
+// ── Emitter State ───────────────────────────────────────────────────
+
+struct EpistemicPtxState {
+    buf: PtxBuf,
+    config: EpistemicPtxConfig,
+    shadow_counter: i64,
+    // Track allocated shadows: up to 256 epistemic values
+    shadow_bases: [i64; 256],   // hash of base name
+    shadow_count: i64,
+    // Temporary register counters for epistemic intermediates
+    temp_f32_count: i64,
+    temp_pred_count: i64,
+    temp_u64_count: i64,
+}
+
+fn epistemic_ptx_new(config: EpistemicPtxConfig) -> EpistemicPtxState {
+    EpistemicPtxState {
+        buf: ptx_buf_new(),
+        config: config,
+        shadow_counter: 0,
+        shadow_bases: [0; 256],
+        shadow_count: 0,
+        temp_f32_count: 0,
+        temp_pred_count: 0,
+        temp_u64_count: 0,
+    }
+}
+
+fn epistemic_alloc_shadow(
+    st: EpistemicPtxState,
+    base: string
+) -> (EpistemicPtxState, EpistemicShadow) with Alloc {
+    var out = st
+    let idx = out.shadow_counter
+    out.shadow_counter = idx + 1
+    let name = base + "_" + i64_to_string(idx)
+    let shadow = epistemic_shadow_new(name)
+    (out, shadow)
+}
+
+fn epistemic_alloc_temp_f32(st: EpistemicPtxState) -> (EpistemicPtxState, string) with Alloc {
+    var out = st
+    let idx = out.temp_f32_count
+    out.temp_f32_count = idx + 1
+    (out, "%r_eps_t" + i64_to_string(idx))
+}
+
+fn epistemic_alloc_temp_pred(st: EpistemicPtxState) -> (EpistemicPtxState, string) with Alloc {
+    var out = st
+    let idx = out.temp_pred_count
+    out.temp_pred_count = idx + 1
+    (out, "%p_eps_t" + i64_to_string(idx))
+}
+
+// ── Register Pool Declaration ───────────────────────────────────────
+
+fn epistemic_emit_shadow_reg_pool(
+    st: EpistemicPtxState,
+    num_shadows: i64
+) -> EpistemicPtxState with Mut, Panic, Div, Alloc {
+    var out = st
+    // Value registers (f32)
+    out.buf = ptx_push_str(out.buf, "    // Epistemic shadow registers\n")
+    out.buf = ptx_push_str(out.buf, "    .reg .f32 %r_<")
+    out.buf = ptx_push_str(out.buf, i64_to_string(num_shadows * 2))
+    out.buf = ptx_push_str(out.buf, ">;  // values + epsilons\n")
+
+    // Epsilon registers (f32) — shared pool with values
+    // Validity predicates
+    out.buf = ptx_push_str(out.buf, "    .reg .pred %p_<")
+    out.buf = ptx_push_str(out.buf, i64_to_string(num_shadows + 16))
+    out.buf = ptx_push_str(out.buf, ">;  // validity + temporaries\n")
+
+    // Provenance registers (u64)
+    if out.config.provenance_tracking {
+        out.buf = ptx_push_str(out.buf, "    .reg .b64 %r_prov_<")
+        out.buf = ptx_push_str(out.buf, i64_to_string(num_shadows))
+        out.buf = ptx_push_str(out.buf, ">;  // provenance\n")
+    }
+
+    // Temporary registers for epsilon calculations
+    out.buf = ptx_push_str(out.buf, "    .reg .f32 %r_eps_t<16>;  // epsilon temporaries\n")
+    out.buf = ptx_push_str(out.buf, "    .reg .pred %p_eps_t<8>;  // predicate temporaries\n")
+    out.buf = ptx_push_str(out.buf, "    .reg .b64 %r_prov_t<4>;  // provenance temporaries\n")
+    out.buf = ptx_push_str(out.buf, "\n")
+    out
+}
+
+// ── Initialization ──────────────────────────────────────────────────
+
+fn epistemic_emit_init_shadow(
+    st: EpistemicPtxState,
+    shadow: EpistemicShadow,
+    initial_value: string,
+    initial_epsilon: string
+) -> EpistemicPtxState with Mut, Panic, Div, Alloc {
+    var out = st
+    // Initialize value
+    out.buf = ptx_push_str(out.buf, "    mov.f32 ")
+    out.buf = ptx_push_str(out.buf, shadow.val_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, initial_value)
+    out.buf = ptx_push_str(out.buf, ";\n")
+
+    // Initialize epsilon
+    out.buf = ptx_push_str(out.buf, "    mov.f32 ")
+    out.buf = ptx_push_str(out.buf, shadow.eps_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, initial_epsilon)
+    out.buf = ptx_push_str(out.buf, ";\n")
+
+    // Initialize validity = true
+    out.buf = ptx_push_str(out.buf, "    setp.eq.s32 ")
+    out.buf = ptx_push_str(out.buf, shadow.valid_name)
+    out.buf = ptx_push_str(out.buf, ", 1, 1;\n")
+
+    // Initialize provenance
+    if out.config.provenance_tracking {
+        out.buf = ptx_push_str(out.buf, "    mov.u64 ")
+        out.buf = ptx_push_str(out.buf, shadow.prov_name)
+        out.buf = ptx_push_str(out.buf, ", 0;\n")
+    }
+    out
+}
+
+// ── Additive Propagation: ε_c = √(ε_a² + ε_b²) ────────────────────
+
+fn epistemic_emit_add(
+    st: EpistemicPtxState,
+    result: EpistemicShadow,
+    left: EpistemicShadow,
+    right: EpistemicShadow,
+    is_sub: bool
+) -> EpistemicPtxState with Mut, Panic, Div, Alloc {
+    var out = st
+
+    // Value computation
+    if is_sub {
+        out.buf = ptx_push_str(out.buf, "    sub.f32 ")
+    } else {
+        out.buf = ptx_push_str(out.buf, "    add.f32 ")
+    }
+    out.buf = ptx_push_str(out.buf, result.val_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, left.val_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, right.val_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+
+    // Epsilon: quadrature propagation
+    if out.config.quadrature_propagation {
+        // ε_a²
+        out.buf = ptx_push_str(out.buf, "    mul.f32 %r_eps_t0, ")
+        out.buf = ptx_push_str(out.buf, left.eps_name)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, left.eps_name)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        // ε_b²
+        out.buf = ptx_push_str(out.buf, "    mul.f32 %r_eps_t1, ")
+        out.buf = ptx_push_str(out.buf, right.eps_name)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, right.eps_name)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        // ε_a² + ε_b²
+        out.buf = ptx_push_str(out.buf, "    add.f32 %r_eps_t2, %r_eps_t0, %r_eps_t1;\n")
+        // √(ε_a² + ε_b²)
+        out.buf = ptx_push_str(out.buf, "    sqrt.approx.f32 ")
+        out.buf = ptx_push_str(out.buf, result.eps_name)
+        out.buf = ptx_push_str(out.buf, ", %r_eps_t2;\n")
+    } else {
+        // Simple max propagation (cheaper)
+        out.buf = ptx_push_str(out.buf, "    max.f32 ")
+        out.buf = ptx_push_str(out.buf, result.eps_name)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, left.eps_name)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, right.eps_name)
+        out.buf = ptx_push_str(out.buf, ";\n")
+    }
+
+    // Validity: conjunction
+    out.buf = ptx_push_str(out.buf, "    and.pred ")
+    out.buf = ptx_push_str(out.buf, result.valid_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, left.valid_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, right.valid_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+
+    // Provenance: XOR merge
+    if out.config.provenance_tracking {
+        out.buf = ptx_push_str(out.buf, "    xor.b64 ")
+        out.buf = ptx_push_str(out.buf, result.prov_name)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, left.prov_name)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, right.prov_name)
+        out.buf = ptx_push_str(out.buf, ";\n")
+    }
+    out
+}
+
+// ── Multiplicative Propagation: ε_c = |a|·ε_b + |b|·ε_a ───────────
+
+fn epistemic_emit_mul(
+    st: EpistemicPtxState,
+    result: EpistemicShadow,
+    left: EpistemicShadow,
+    right: EpistemicShadow
+) -> EpistemicPtxState with Mut, Panic, Div, Alloc {
+    var out = st
+
+    // Value computation
+    out.buf = ptx_push_str(out.buf, "    mul.rn.f32 ")
+    out.buf = ptx_push_str(out.buf, result.val_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, left.val_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, right.val_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+
+    // Epsilon: first-order error propagation
+    // |a|
+    out.buf = ptx_push_str(out.buf, "    abs.f32 %r_eps_t0, ")
+    out.buf = ptx_push_str(out.buf, left.val_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    // |b|
+    out.buf = ptx_push_str(out.buf, "    abs.f32 %r_eps_t1, ")
+    out.buf = ptx_push_str(out.buf, right.val_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    // |a| * ε_b
+    out.buf = ptx_push_str(out.buf, "    mul.f32 %r_eps_t2, %r_eps_t0, ")
+    out.buf = ptx_push_str(out.buf, right.eps_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    // |b| * ε_a
+    out.buf = ptx_push_str(out.buf, "    mul.f32 %r_eps_t3, %r_eps_t1, ")
+    out.buf = ptx_push_str(out.buf, left.eps_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    // Sum
+    out.buf = ptx_push_str(out.buf, "    add.f32 ")
+    out.buf = ptx_push_str(out.buf, result.eps_name)
+    out.buf = ptx_push_str(out.buf, ", %r_eps_t2, %r_eps_t3;\n")
+
+    // Validity: conjunction
+    out.buf = ptx_push_str(out.buf, "    and.pred ")
+    out.buf = ptx_push_str(out.buf, result.valid_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, left.valid_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, right.valid_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+
+    // Provenance: XOR
+    if out.config.provenance_tracking {
+        out.buf = ptx_push_str(out.buf, "    xor.b64 ")
+        out.buf = ptx_push_str(out.buf, result.prov_name)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, left.prov_name)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, right.prov_name)
+        out.buf = ptx_push_str(out.buf, ";\n")
+    }
+    out
+}
+
+// ── Division Propagation: ε_c = (|a|·ε_b + |b|·ε_a) / b² ─────────
+
+fn epistemic_emit_div(
+    st: EpistemicPtxState,
+    result: EpistemicShadow,
+    left: EpistemicShadow,
+    right: EpistemicShadow
+) -> EpistemicPtxState with Mut, Panic, Div, Alloc {
+    var out = st
+
+    // Value computation
+    out.buf = ptx_push_str(out.buf, "    div.approx.f32 ")
+    out.buf = ptx_push_str(out.buf, result.val_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, left.val_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, right.val_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+
+    // Epsilon numerator: |a|·ε_b + |b|·ε_a
+    out.buf = ptx_push_str(out.buf, "    abs.f32 %r_eps_t0, ")
+    out.buf = ptx_push_str(out.buf, left.val_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out.buf = ptx_push_str(out.buf, "    abs.f32 %r_eps_t1, ")
+    out.buf = ptx_push_str(out.buf, right.val_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out.buf = ptx_push_str(out.buf, "    mul.f32 %r_eps_t2, %r_eps_t0, ")
+    out.buf = ptx_push_str(out.buf, right.eps_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out.buf = ptx_push_str(out.buf, "    mul.f32 %r_eps_t3, %r_eps_t1, ")
+    out.buf = ptx_push_str(out.buf, left.eps_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out.buf = ptx_push_str(out.buf, "    add.f32 %r_eps_t0, %r_eps_t2, %r_eps_t3;\n")
+
+    // Denominator: b²
+    out.buf = ptx_push_str(out.buf, "    mul.f32 %r_eps_t1, ")
+    out.buf = ptx_push_str(out.buf, right.val_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, right.val_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+
+    // ε_c = numerator / b²
+    out.buf = ptx_push_str(out.buf, "    div.approx.f32 ")
+    out.buf = ptx_push_str(out.buf, result.eps_name)
+    out.buf = ptx_push_str(out.buf, ", %r_eps_t0, %r_eps_t1;\n")
+
+    // Near-zero guard: if |b| < 0.0001, max out uncertainty
+    out.buf = ptx_push_str(out.buf, "    abs.f32 %r_eps_t2, ")
+    out.buf = ptx_push_str(out.buf, right.val_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out.buf = ptx_push_str(out.buf, "    setp.lt.f32 %p_eps_t0, %r_eps_t2, 0f38D1B717;\n")  // 0.0001 in hex float
+    out.buf = ptx_push_str(out.buf, "    @%p_eps_t0 mov.f32 ")
+    out.buf = ptx_push_str(out.buf, result.eps_name)
+    out.buf = ptx_push_str(out.buf, ", 0f3F800000;\n")  // 1.0 = max uncertainty
+
+    // Validity: conjunction AND not-near-zero
+    out.buf = ptx_push_str(out.buf, "    and.pred ")
+    out.buf = ptx_push_str(out.buf, result.valid_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, left.valid_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, right.valid_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+
+    // Provenance: XOR
+    if out.config.provenance_tracking {
+        out.buf = ptx_push_str(out.buf, "    xor.b64 ")
+        out.buf = ptx_push_str(out.buf, result.prov_name)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, left.prov_name)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, right.prov_name)
+        out.buf = ptx_push_str(out.buf, ";\n")
+    }
+    out
+}
+
+// ── FMA Propagation: ε = √((|a|·ε_b + |b|·ε_a)² + ε_c²) ──────────
+
+fn epistemic_emit_fma(
+    st: EpistemicPtxState,
+    result: EpistemicShadow,
+    a: EpistemicShadow,
+    b: EpistemicShadow,
+    c: EpistemicShadow
+) -> EpistemicPtxState with Mut, Panic, Div, Alloc {
+    var out = st
+
+    // Value: fma(a, b, c)
+    out.buf = ptx_push_str(out.buf, "    fma.rn.f32 ")
+    out.buf = ptx_push_str(out.buf, result.val_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, a.val_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, b.val_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, c.val_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+
+    // Epsilon: mul part = |a|·ε_b + |b|·ε_a
+    out.buf = ptx_push_str(out.buf, "    abs.f32 %r_eps_t0, ")
+    out.buf = ptx_push_str(out.buf, a.val_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out.buf = ptx_push_str(out.buf, "    abs.f32 %r_eps_t1, ")
+    out.buf = ptx_push_str(out.buf, b.val_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out.buf = ptx_push_str(out.buf, "    mul.f32 %r_eps_t2, %r_eps_t0, ")
+    out.buf = ptx_push_str(out.buf, b.eps_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out.buf = ptx_push_str(out.buf, "    mul.f32 %r_eps_t3, %r_eps_t1, ")
+    out.buf = ptx_push_str(out.buf, a.eps_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out.buf = ptx_push_str(out.buf, "    add.f32 %r_eps_t0, %r_eps_t2, %r_eps_t3;\n")
+
+    // Square the mul part
+    out.buf = ptx_push_str(out.buf, "    mul.f32 %r_eps_t0, %r_eps_t0, %r_eps_t0;\n")
+    // ε_c²
+    out.buf = ptx_push_str(out.buf, "    mul.f32 %r_eps_t1, ")
+    out.buf = ptx_push_str(out.buf, c.eps_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, c.eps_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    // Sum
+    out.buf = ptx_push_str(out.buf, "    add.f32 %r_eps_t2, %r_eps_t0, %r_eps_t1;\n")
+    // Final sqrt
+    out.buf = ptx_push_str(out.buf, "    sqrt.approx.f32 ")
+    out.buf = ptx_push_str(out.buf, result.eps_name)
+    out.buf = ptx_push_str(out.buf, ", %r_eps_t2;\n")
+
+    // Validity: 3-way conjunction
+    out.buf = ptx_push_str(out.buf, "    and.pred %p_eps_t0, ")
+    out.buf = ptx_push_str(out.buf, a.valid_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, b.valid_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out.buf = ptx_push_str(out.buf, "    and.pred ")
+    out.buf = ptx_push_str(out.buf, result.valid_name)
+    out.buf = ptx_push_str(out.buf, ", %p_eps_t0, ")
+    out.buf = ptx_push_str(out.buf, c.valid_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+
+    // Provenance: 3-way XOR
+    if out.config.provenance_tracking {
+        out.buf = ptx_push_str(out.buf, "    xor.b64 %r_prov_t0, ")
+        out.buf = ptx_push_str(out.buf, a.prov_name)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, b.prov_name)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        out.buf = ptx_push_str(out.buf, "    xor.b64 ")
+        out.buf = ptx_push_str(out.buf, result.prov_name)
+        out.buf = ptx_push_str(out.buf, ", %r_prov_t0, ")
+        out.buf = ptx_push_str(out.buf, c.prov_name)
+        out.buf = ptx_push_str(out.buf, ";\n")
+    }
+    out
+}
+
+// ── Confidence Gating ───────────────────────────────────────────────
+
+fn epistemic_emit_confidence_gate(
+    st: EpistemicPtxState,
+    shadow: EpistemicShadow,
+    threshold_hex: string,
+    high_conf_label: string,
+    low_conf_label: string
+) -> EpistemicPtxState with Mut, Panic, Div, Alloc {
+    var out = st
+
+    // Check if ε < threshold (high confidence)
+    out.buf = ptx_push_str(out.buf, "    setp.lt.f32 %p_eps_t0, ")
+    out.buf = ptx_push_str(out.buf, shadow.eps_name)
+    out.buf = ptx_push_str(out.buf, ", 0f")
+    out.buf = ptx_push_str(out.buf, threshold_hex)
+    out.buf = ptx_push_str(out.buf, ";\n")
+
+    // AND with validity predicate
+    out.buf = ptx_push_str(out.buf, "    and.pred %p_eps_t0, %p_eps_t0, ")
+    out.buf = ptx_push_str(out.buf, shadow.valid_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+
+    // Branch
+    out.buf = ptx_push_str(out.buf, "    @%p_eps_t0 bra ")
+    out.buf = ptx_push_str(out.buf, high_conf_label)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out.buf = ptx_push_str(out.buf, "    @!%p_eps_t0 bra ")
+    out.buf = ptx_push_str(out.buf, low_conf_label)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out
+}
+
+// Skip expensive operation if confidence is below threshold
+fn epistemic_emit_predicated_on_validity(
+    st: EpistemicPtxState,
+    shadow: EpistemicShadow,
+    instruction: string
+) -> EpistemicPtxState with Mut, Panic, Div, Alloc {
+    var out = st
+    out.buf = ptx_push_str(out.buf, "    @")
+    out.buf = ptx_push_str(out.buf, shadow.valid_name)
+    out.buf = ptx_push_str(out.buf, " ")
+    out.buf = ptx_push_str(out.buf, instruction)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out
+}
+
+// ── Warp-Level Consensus Aggregation ────────────────────────────────
+
+// vote.sync.ballot: get bitmask of valid lanes across warp
+fn epistemic_emit_warp_confidence_vote(
+    st: EpistemicPtxState,
+    shadow: EpistemicShadow,
+    ballot_reg: string,
+    count_reg: string
+) -> EpistemicPtxState with Mut, Panic, Div, Alloc {
+    var out = st
+
+    // Get ballot of valid lanes
+    out.buf = ptx_push_str(out.buf, "    vote.sync.ballot.b32 ")
+    out.buf = ptx_push_str(out.buf, ballot_reg)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, shadow.valid_name)
+    out.buf = ptx_push_str(out.buf, ", 0xffffffff;\n")
+
+    // Count valid lanes (popcount)
+    out.buf = ptx_push_str(out.buf, "    popc.b32 ")
+    out.buf = ptx_push_str(out.buf, count_reg)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, ballot_reg)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out
+}
+
+// Epsilon tree reduction across warp via shfl.sync.down
+// mode: 0 = min, 1 = max, 2 = sum (then /32 for average)
+fn epistemic_emit_warp_epsilon_reduce(
+    st: EpistemicPtxState,
+    shadow: EpistemicShadow,
+    result_reg: string,
+    mode: i64
+) -> EpistemicPtxState with Mut, Panic, Div, Alloc {
+    var out = st
+
+    // Initialize result from this lane's epsilon
+    out.buf = ptx_push_str(out.buf, "    mov.f32 ")
+    out.buf = ptx_push_str(out.buf, result_reg)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, shadow.eps_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+
+    // Tree reduction: offsets 16, 8, 4, 2, 1
+    var offset: i64 = 16
+    while offset >= 1 {
+        // Shuffle down
+        out.buf = ptx_push_str(out.buf, "    shfl.sync.down.b32 %r_eps_t0, ")
+        out.buf = ptx_push_str(out.buf, result_reg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, i64_to_string(offset))
+        out.buf = ptx_push_str(out.buf, ", 31, 0xffffffff;\n")
+
+        // Reduce operation
+        if mode == 0 {
+            // Min (most confident)
+            out.buf = ptx_push_str(out.buf, "    min.f32 ")
+        } else if mode == 1 {
+            // Max (least confident)
+            out.buf = ptx_push_str(out.buf, "    max.f32 ")
+        } else {
+            // Sum (for average)
+            out.buf = ptx_push_str(out.buf, "    add.f32 ")
+        }
+        out.buf = ptx_push_str(out.buf, result_reg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, result_reg)
+        out.buf = ptx_push_str(out.buf, ", %r_eps_t0;\n")
+
+        offset = offset / 2
+    }
+
+    // For average mode: divide by 32 (multiply by 0.03125)
+    if mode == 2 {
+        out.buf = ptx_push_str(out.buf, "    mul.f32 ")
+        out.buf = ptx_push_str(out.buf, result_reg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, result_reg)
+        out.buf = ptx_push_str(out.buf, ", 0f3D000000;\n")  // 0.03125 in hex float
+    }
+    out
+}
+
+// Provenance OR-reduction across warp
+fn epistemic_emit_warp_provenance_merge(
+    st: EpistemicPtxState,
+    shadow: EpistemicShadow,
+    result_reg: string
+) -> EpistemicPtxState with Mut, Panic, Div, Alloc {
+    var out = st
+    if !out.config.provenance_tracking { return out }
+
+    // Initialize from this lane's provenance
+    out.buf = ptx_push_str(out.buf, "    mov.u64 ")
+    out.buf = ptx_push_str(out.buf, result_reg)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, shadow.prov_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+
+    // Tree OR-reduction: offsets 16, 8, 4, 2, 1
+    var offset: i64 = 16
+    while offset >= 1 {
+        // Note: shfl operates on b32 — for b64 we need two shuffles
+        // For simplicity, use the low 32 bits (provenance typically fits)
+        out.buf = ptx_push_str(out.buf, "    shfl.sync.down.b32 %r_prov_t0, ")
+        out.buf = ptx_push_str(out.buf, result_reg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, i64_to_string(offset))
+        out.buf = ptx_push_str(out.buf, ", 31, 0xffffffff;\n")
+        out.buf = ptx_push_str(out.buf, "    or.b64 ")
+        out.buf = ptx_push_str(out.buf, result_reg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, result_reg)
+        out.buf = ptx_push_str(out.buf, ", %r_prov_t0;\n")
+
+        offset = offset / 2
+    }
+    out
+}
+
+// ── Epistemic Compare ───────────────────────────────────────────────
+
+// Compare with confidence estimation:
+// confidence = min(1.0, |a - b| / √(ε_a² + ε_b²))
+fn epistemic_emit_compare(
+    st: EpistemicPtxState,
+    result_pred: string,
+    result_conf: string,
+    left: EpistemicShadow,
+    right: EpistemicShadow,
+    cmp_op: string        // "lt", "le", "gt", "ge", "eq", "ne"
+) -> EpistemicPtxState with Mut, Panic, Div, Alloc {
+    var out = st
+
+    // Standard comparison for the predicate
+    out.buf = ptx_push_str(out.buf, "    setp.")
+    out.buf = ptx_push_str(out.buf, cmp_op)
+    out.buf = ptx_push_str(out.buf, ".f32 ")
+    out.buf = ptx_push_str(out.buf, result_pred)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, left.val_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, right.val_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+
+    // Confidence: |a - b| / √(ε_a² + ε_b²)
+    // |a - b|
+    out.buf = ptx_push_str(out.buf, "    sub.f32 %r_eps_t0, ")
+    out.buf = ptx_push_str(out.buf, left.val_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, right.val_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out.buf = ptx_push_str(out.buf, "    abs.f32 %r_eps_t0, %r_eps_t0;\n")
+
+    // √(ε_a² + ε_b²)
+    out.buf = ptx_push_str(out.buf, "    mul.f32 %r_eps_t1, ")
+    out.buf = ptx_push_str(out.buf, left.eps_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, left.eps_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out.buf = ptx_push_str(out.buf, "    mul.f32 %r_eps_t2, ")
+    out.buf = ptx_push_str(out.buf, right.eps_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, right.eps_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out.buf = ptx_push_str(out.buf, "    add.f32 %r_eps_t3, %r_eps_t1, %r_eps_t2;\n")
+    out.buf = ptx_push_str(out.buf, "    sqrt.approx.f32 %r_eps_t3, %r_eps_t3;\n")
+
+    // Confidence = |a-b| / combined_ε
+    out.buf = ptx_push_str(out.buf, "    div.approx.f32 ")
+    out.buf = ptx_push_str(out.buf, result_conf)
+    out.buf = ptx_push_str(out.buf, ", %r_eps_t0, %r_eps_t3;\n")
+
+    // Clamp to [0, 1]
+    out.buf = ptx_push_str(out.buf, "    min.f32 ")
+    out.buf = ptx_push_str(out.buf, result_conf)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, result_conf)
+    out.buf = ptx_push_str(out.buf, ", 0f3F800000;\n")  // 1.0
+    out
+}
+
+// ── Epistemic Select ────────────────────────────────────────────────
+
+// Select with epistemic propagation:
+// ε_result = max(ε_true, ε_false)
+// prov_result = prov_true | prov_false
+fn epistemic_emit_select(
+    st: EpistemicPtxState,
+    result: EpistemicShadow,
+    pred: string,
+    true_val: EpistemicShadow,
+    false_val: EpistemicShadow
+) -> EpistemicPtxState with Mut, Panic, Div, Alloc {
+    var out = st
+
+    // Value select
+    out.buf = ptx_push_str(out.buf, "    selp.f32 ")
+    out.buf = ptx_push_str(out.buf, result.val_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, true_val.val_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, false_val.val_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, pred)
+    out.buf = ptx_push_str(out.buf, ";\n")
+
+    // Epsilon: conservative = max(ε_true, ε_false)
+    out.buf = ptx_push_str(out.buf, "    max.f32 ")
+    out.buf = ptx_push_str(out.buf, result.eps_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, true_val.eps_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, false_val.eps_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+
+    // Validity: select
+    out.buf = ptx_push_str(out.buf, "    selp.b32 %r_eps_t0, 1, 0, ")
+    out.buf = ptx_push_str(out.buf, true_val.valid_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out.buf = ptx_push_str(out.buf, "    selp.b32 %r_eps_t1, 1, 0, ")
+    out.buf = ptx_push_str(out.buf, false_val.valid_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out.buf = ptx_push_str(out.buf, "    selp.b32 %r_eps_t2, %r_eps_t0, %r_eps_t1, ")
+    out.buf = ptx_push_str(out.buf, pred)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out.buf = ptx_push_str(out.buf, "    setp.ne.s32 ")
+    out.buf = ptx_push_str(out.buf, result.valid_name)
+    out.buf = ptx_push_str(out.buf, ", %r_eps_t2, 0;\n")
+
+    // Provenance: OR (union of both paths — conservative)
+    if out.config.provenance_tracking {
+        out.buf = ptx_push_str(out.buf, "    or.b64 ")
+        out.buf = ptx_push_str(out.buf, result.prov_name)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, true_val.prov_name)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, false_val.prov_name)
+        out.buf = ptx_push_str(out.buf, ";\n")
+    }
+    out
+}
+
+// ── Epistemic Reduction (sum with uncertainty) ──────────────────────
+
+// Sum reduction with epistemic tracking:
+// ε_sum = √(Σ ε_i²)  [quadrature for independent errors]
+fn epistemic_emit_warp_reduce_sum(
+    st: EpistemicPtxState,
+    shadow: EpistemicShadow,
+    result: EpistemicShadow
+) -> EpistemicPtxState with Mut, Panic, Div, Alloc {
+    var out = st
+
+    // Value: tree sum via shfl
+    out.buf = ptx_push_str(out.buf, "    mov.f32 ")
+    out.buf = ptx_push_str(out.buf, result.val_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, shadow.val_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+
+    // Epsilon²: accumulate squares
+    out.buf = ptx_push_str(out.buf, "    mul.f32 %r_eps_t4, ")
+    out.buf = ptx_push_str(out.buf, shadow.eps_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, shadow.eps_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+
+    var offset: i64 = 16
+    while offset >= 1 {
+        // Value reduction
+        out.buf = ptx_push_str(out.buf, "    shfl.sync.down.b32 %r_eps_t0, ")
+        out.buf = ptx_push_str(out.buf, result.val_name)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, i64_to_string(offset))
+        out.buf = ptx_push_str(out.buf, ", 31, 0xffffffff;\n")
+        out.buf = ptx_push_str(out.buf, "    add.f32 ")
+        out.buf = ptx_push_str(out.buf, result.val_name)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, result.val_name)
+        out.buf = ptx_push_str(out.buf, ", %r_eps_t0;\n")
+
+        // Epsilon² reduction (add squares)
+        out.buf = ptx_push_str(out.buf, "    shfl.sync.down.b32 %r_eps_t1, %r_eps_t4, ")
+        out.buf = ptx_push_str(out.buf, i64_to_string(offset))
+        out.buf = ptx_push_str(out.buf, ", 31, 0xffffffff;\n")
+        out.buf = ptx_push_str(out.buf, "    add.f32 %r_eps_t4, %r_eps_t4, %r_eps_t1;\n")
+
+        offset = offset / 2
+    }
+
+    // Final epsilon = sqrt(sum of squares)
+    out.buf = ptx_push_str(out.buf, "    sqrt.approx.f32 ")
+    out.buf = ptx_push_str(out.buf, result.eps_name)
+    out.buf = ptx_push_str(out.buf, ", %r_eps_t4;\n")
+
+    // Validity: all-reduce via vote.sync.all
+    out.buf = ptx_push_str(out.buf, "    vote.sync.all.pred ")
+    out.buf = ptx_push_str(out.buf, result.valid_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, shadow.valid_name)
+    out.buf = ptx_push_str(out.buf, ", 0xffffffff;\n")
+
+    // Provenance: OR-reduce
+    if out.config.provenance_tracking {
+        out = epistemic_emit_warp_provenance_merge(out, shadow, result.prov_name)
+    }
+    out
+}
+
+// ── Weighted Mean (inverse-epsilon weighting) ───────────────────────
+
+// Weighted mean: w_i = 1/(1 + ε_i), result = Σ(v_i · w_i) / Σ(w_i)
+fn epistemic_emit_weighted_mean(
+    st: EpistemicPtxState,
+    shadow: EpistemicShadow,
+    result: EpistemicShadow
+) -> EpistemicPtxState with Mut, Panic, Div, Alloc {
+    var out = st
+
+    // Compute weight: w = 1.0 / (1.0 + ε)
+    out.buf = ptx_push_str(out.buf, "    add.f32 %r_eps_t0, ")
+    out.buf = ptx_push_str(out.buf, shadow.eps_name)
+    out.buf = ptx_push_str(out.buf, ", 0f3F800000;\n")  // 1.0 + ε
+    out.buf = ptx_push_str(out.buf, "    rcp.approx.f32 %r_eps_t0, %r_eps_t0;\n")  // w = 1/(1+ε)
+
+    // Weighted value: v * w
+    out.buf = ptx_push_str(out.buf, "    mul.f32 %r_eps_t1, ")
+    out.buf = ptx_push_str(out.buf, shadow.val_name)
+    out.buf = ptx_push_str(out.buf, ", %r_eps_t0;\n")
+
+    // Warp-reduce weighted value sum + weight sum
+    // (uses %r_eps_t1 for weighted val sum, %r_eps_t0 for weight sum)
+    var offset: i64 = 16
+    while offset >= 1 {
+        out.buf = ptx_push_str(out.buf, "    shfl.sync.down.b32 %r_eps_t2, %r_eps_t1, ")
+        out.buf = ptx_push_str(out.buf, i64_to_string(offset))
+        out.buf = ptx_push_str(out.buf, ", 31, 0xffffffff;\n")
+        out.buf = ptx_push_str(out.buf, "    add.f32 %r_eps_t1, %r_eps_t1, %r_eps_t2;\n")
+
+        out.buf = ptx_push_str(out.buf, "    shfl.sync.down.b32 %r_eps_t3, %r_eps_t0, ")
+        out.buf = ptx_push_str(out.buf, i64_to_string(offset))
+        out.buf = ptx_push_str(out.buf, ", 31, 0xffffffff;\n")
+        out.buf = ptx_push_str(out.buf, "    add.f32 %r_eps_t0, %r_eps_t0, %r_eps_t3;\n")
+
+        offset = offset / 2
+    }
+
+    // Result = weighted sum / total weight
+    out.buf = ptx_push_str(out.buf, "    div.approx.f32 ")
+    out.buf = ptx_push_str(out.buf, result.val_name)
+    out.buf = ptx_push_str(out.buf, ", %r_eps_t1, %r_eps_t0;\n")
+
+    // Epsilon of weighted mean = Σ(ε_i · w_i) / Σ(w_i)
+    // Simplified: use min epsilon across warp
+    out = epistemic_emit_warp_epsilon_reduce(out, shadow, result.eps_name, 0)
+
+    // Validity: all valid
+    out.buf = ptx_push_str(out.buf, "    vote.sync.all.pred ")
+    out.buf = ptx_push_str(out.buf, result.valid_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, shadow.valid_name)
+    out.buf = ptx_push_str(out.buf, ", 0xffffffff;\n")
+
+    if out.config.provenance_tracking {
+        out = epistemic_emit_warp_provenance_merge(out, shadow, result.prov_name)
+    }
+    out
+}

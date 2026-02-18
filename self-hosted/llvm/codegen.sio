@@ -1,0 +1,1189 @@
+// self-hosted::llvm::codegen — HLIR → LLVM IR compilation
+//
+// Core code generator that converts HLIR (SSA form) to LLVM IR via the C API.
+// This is the most critical module in the LLVM backend — hand-written for
+// correctness of SSA value mapping, phi node handling, and effect dispatch.
+//
+// Architecture:
+//   1. Declare all functions (forward references)
+//   2. Compile function bodies (basic blocks → instructions → terminators)
+//   3. Create main wrapper if needed
+//
+// Consumes: LlvmContext (linear), LlvmModule (linear), LlvmBuilder (linear)
+// Uses: TypeConverter, HlirModule
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+let CODEGEN_MAX_VALUES: i64 = 8192
+let CODEGEN_MAX_BLOCKS: i64 = 4096
+let CODEGEN_MAX_FUNCTIONS: i64 = 512
+let CODEGEN_MAX_STRINGS: i64 = 256
+
+// ============================================================================
+// SSA value map: ValueId (i64) → LlvmValue
+// ============================================================================
+
+struct SsaValueMap {
+    ids: [i64; 8192],
+    vals: [i64; 8192],       // LlvmValue.ptr
+    types: [HlirTypeKind; 8192],
+    count: i64,
+}
+
+fn ssa_map_new() -> SsaValueMap {
+    SsaValueMap {
+        ids: [0; 8192],
+        vals: [0; 8192],
+        types: [HlirTypeKind::HlirTypeVoid; 8192],
+        count: 0,
+    }
+}
+
+fn ssa_map_insert(m: SsaValueMap, id: i64, val: LlvmValue, ty_kind: HlirTypeKind) -> SsaValueMap with Mut, Panic {
+    var out = m
+    // Check for existing entry (update in place)
+    var i: i64 = 0
+    while i < out.count {
+        if out.ids[i as usize] == id {
+            out.vals[i as usize] = val.ptr
+            out.types[i as usize] = ty_kind
+            return out
+        }
+        i = i + 1
+    }
+    // New entry
+    if out.count < CODEGEN_MAX_VALUES {
+        out.ids[out.count as usize] = id
+        out.vals[out.count as usize] = val.ptr
+        out.types[out.count as usize] = ty_kind
+        out.count = out.count + 1
+    }
+    out
+}
+
+fn ssa_map_get(m: SsaValueMap, id: i64) -> LlvmValue {
+    if id == HLIR_UNIT_VALUE {
+        // Unit value → null (empty struct constant is created separately)
+        return llvm_value_null()
+    }
+    var i: i64 = 0
+    while i < m.count {
+        if m.ids[i as usize] == id {
+            return LlvmValue { ptr: m.vals[i as usize] }
+        }
+        i = i + 1
+    }
+    llvm_value_null()
+}
+
+fn ssa_map_clear(m: SsaValueMap) -> SsaValueMap with Mut {
+    var out = m
+    out.count = 0
+    out
+}
+
+// ============================================================================
+// Block map: BlockId (i64) → LlvmBlock
+// ============================================================================
+
+struct BlockMap {
+    ids: [i64; 4096],
+    blocks: [i64; 4096],    // LlvmBlock.ptr
+    count: i64,
+}
+
+fn block_map_new() -> BlockMap {
+    BlockMap {
+        ids: [0; 4096],
+        blocks: [0; 4096],
+        count: 0,
+    }
+}
+
+fn block_map_insert(m: BlockMap, id: i64, bb: LlvmBlock) -> BlockMap with Mut, Panic {
+    var out = m
+    if out.count < CODEGEN_MAX_BLOCKS {
+        out.ids[out.count as usize] = id
+        out.blocks[out.count as usize] = bb.ptr
+        out.count = out.count + 1
+    }
+    out
+}
+
+fn block_map_get(m: BlockMap, id: i64) -> LlvmBlock {
+    var i: i64 = 0
+    while i < m.count {
+        if m.ids[i as usize] == id {
+            return LlvmBlock { ptr: m.blocks[i as usize] }
+        }
+        i = i + 1
+    }
+    llvm_block_null()
+}
+
+fn block_map_clear(m: BlockMap) -> BlockMap with Mut {
+    var out = m
+    out.count = 0
+    out
+}
+
+// ============================================================================
+// Function map: name hash → LlvmValue (function)
+// ============================================================================
+
+struct FuncMap {
+    hashes: [i64; 512],
+    funcs: [i64; 512],     // LlvmValue.ptr
+    count: i64,
+}
+
+fn func_map_new() -> FuncMap {
+    FuncMap {
+        hashes: [0; 512],
+        funcs: [0; 512],
+        count: 0,
+    }
+}
+
+fn func_map_insert(m: FuncMap, hash: i64, func: LlvmValue) -> FuncMap with Mut, Panic {
+    var out = m
+    if out.count < CODEGEN_MAX_FUNCTIONS {
+        out.hashes[out.count as usize] = hash
+        out.funcs[out.count as usize] = func.ptr
+        out.count = out.count + 1
+    }
+    out
+}
+
+fn func_map_get(m: FuncMap, hash: i64) -> LlvmValue {
+    var i: i64 = 0
+    while i < m.count {
+        if m.hashes[i as usize] == hash {
+            return LlvmValue { ptr: m.funcs[i as usize] }
+        }
+        i = i + 1
+    }
+    llvm_value_null()
+}
+
+// ============================================================================
+// LlvmCodegen — main state struct
+//
+// Linear resources (context, module, builder) are threaded through.
+// Non-linear maps are owned directly.
+// ============================================================================
+
+struct LlvmCodegenState {
+    values: SsaValueMap,
+    blocks: BlockMap,
+    functions: FuncMap,
+    type_conv: TypeConverter,
+    opt_level: i32,
+    debug_info: bool,
+}
+
+fn codegen_state_new(opt_level: i32, debug_info: bool) -> LlvmCodegenState {
+    LlvmCodegenState {
+        values: ssa_map_new(),
+        blocks: block_map_new(),
+        functions: func_map_new(),
+        type_conv: type_converter_new(),
+        opt_level: opt_level,
+        debug_info: debug_info,
+    }
+}
+
+// ============================================================================
+// Entry point: compile an entire HLIR module to LLVM IR
+//
+// Returns (context, module, builder) for further processing or disposal.
+// ============================================================================
+
+fn llvm_compile_module(
+    ctx: LlvmContext,
+    module: LlvmModule,
+    builder: LlvmBuilder,
+    hlir: HlirModule,
+    opt_level: i32,
+    debug_info: bool
+) -> (LlvmContext, LlvmModule, LlvmBuilder, LlvmCodegenState) with IO, Mut, Panic, Div {
+    var state = codegen_state_new(opt_level, debug_info)
+    var c = ctx
+    var m = module
+    var b = builder
+
+    // Phase 1: Declare all functions (forward references)
+    var fi: i64 = 0
+    while fi < hlir.function_count {
+        let func = hlir.functions[fi as usize]
+        let r = llvm_declare_function(c, m, state, func)
+        c = r.0
+        m = r.1
+        state = r.2
+        fi = fi + 1
+    }
+
+    // Phase 2: Compile function bodies
+    var fi2: i64 = 0
+    while fi2 < hlir.function_count {
+        let func = hlir.functions[fi2 as usize]
+        let r = llvm_compile_function(c, m, b, state, func)
+        c = r.0
+        m = r.1
+        b = r.2
+        state = r.3
+        fi2 = fi2 + 1
+    }
+
+    (c, m, b, state)
+}
+
+// ============================================================================
+// Phase 1: Declare function (create forward reference)
+// ============================================================================
+
+fn llvm_declare_function(
+    ctx: LlvmContext,
+    module: LlvmModule,
+    state: LlvmCodegenState,
+    func: HlirFunction
+) -> (LlvmContext, LlvmModule, LlvmCodegenState) with IO, Mut, Panic, Div {
+    var c = ctx
+    var m = module
+    var s = state
+
+    // Convert return type
+    let r1 = convert_hlir_type(c, s.type_conv, func.return_type)
+    c = r1.0
+    s.type_conv = r1.1
+    let ret_ty = r1.2
+
+    // Build parameter type array
+    var param_ptrs: [i64; 64] = [0; 64]
+    var pi: i64 = 0
+    while pi < func.param_count {
+        let r2 = convert_hlir_type(c, s.type_conv, func.param_types[pi as usize])
+        c = r2.0
+        s.type_conv = r2.1
+        param_ptrs[pi as usize] = r2.2.ptr
+        pi = pi + 1
+    }
+
+    // Create function type
+    let fn_ty = llvm_function_type(ret_ty, &param_ptrs as *const i64, func.param_count as i32, 0)
+
+    // Determine symbol name
+    // If name is "main", use "__sounio_main" to allow C-wrapper
+    let name_hash = hlir_name_hash(func.name)
+    let is_main = hlir_name_eq(func.name, hlir_name_from_str("main"))
+
+    // Add function to module
+    if is_main {
+        let r3 = llvm_module_add_function(m, "__sounio_main\0" as *const i8, fn_ty)
+        m = r3.0
+        let fn_val = r3.1
+        s.functions = func_map_insert(s.functions, name_hash, fn_val)
+    } else {
+        let r3 = llvm_module_add_function(m, &func.name.buf as *const i8, fn_ty)
+        m = r3.0
+        let fn_val = r3.1
+
+        // Set linkage for extern functions
+        if func.is_extern {
+            llvm_set_linkage(fn_val, LLVM_EXTERNAL_LINKAGE)
+        }
+
+        s.functions = func_map_insert(s.functions, name_hash, fn_val)
+    }
+
+    (c, m, s)
+}
+
+// ============================================================================
+// Phase 2: Compile function body
+// ============================================================================
+
+fn llvm_compile_function(
+    ctx: LlvmContext,
+    module: LlvmModule,
+    builder: LlvmBuilder,
+    state: LlvmCodegenState,
+    func: HlirFunction
+) -> (LlvmContext, LlvmModule, LlvmBuilder, LlvmCodegenState) with IO, Mut, Panic, Div {
+    var c = ctx
+    var m = module
+    var b = builder
+    var s = state
+
+    // Skip extern declarations (no body)
+    if func.is_extern {
+        return (c, m, b, s)
+    }
+
+    let name_hash = hlir_name_hash(func.name)
+    let fn_val = func_map_get(s.functions, name_hash)
+    if llvm_value_is_null(fn_val) {
+        return (c, m, b, s)
+    }
+
+    // Clear per-function maps
+    s.values = ssa_map_clear(s.values)
+    s.blocks = block_map_clear(s.blocks)
+
+    // Create all basic blocks upfront (needed for phi nodes and branches)
+    var bi: i64 = 0
+    while bi < func.block_count {
+        let block = func.blocks[bi as usize]
+        let r1 = llvm_append_basic_block(c, fn_val, &block.label.buf as *const i8)
+        c = r1.0
+        let bb = r1.1
+        s.blocks = block_map_insert(s.blocks, block.id, bb)
+        bi = bi + 1
+    }
+
+    // Map function parameters to SSA values
+    var pi: i64 = 0
+    while pi < func.param_count {
+        let param_val = llvm_get_param(fn_val, pi as i32)
+        let param_value_id = func.param_value_ids[pi as usize]
+        let param_ty_kind = func.param_types[pi as usize].kind
+        s.values = ssa_map_insert(s.values, param_value_id, param_val, param_ty_kind)
+        pi = pi + 1
+    }
+
+    // Compile each block
+    var bi2: i64 = 0
+    while bi2 < func.block_count {
+        let block = func.blocks[bi2 as usize]
+        let r2 = llvm_compile_block(c, m, b, s, block)
+        c = r2.0
+        m = r2.1
+        b = r2.2
+        s = r2.3
+        bi2 = bi2 + 1
+    }
+
+    (c, m, b, s)
+}
+
+// ============================================================================
+// Compile a basic block: position builder, emit instructions, emit terminator
+// ============================================================================
+
+fn llvm_compile_block(
+    ctx: LlvmContext,
+    module: LlvmModule,
+    builder: LlvmBuilder,
+    state: LlvmCodegenState,
+    block: HlirBlock
+) -> (LlvmContext, LlvmModule, LlvmBuilder, LlvmCodegenState) with IO, Mut, Panic, Div {
+    var c = ctx
+    var m = module
+    var b = builder
+    var s = state
+
+    // Position builder at end of this block
+    let bb = block_map_get(s.blocks, block.id)
+    if llvm_block_is_null(bb) {
+        return (c, m, b, s)
+    }
+    b = llvm_builder_position_at_end(b, bb)
+
+    // Compile all instructions
+    var ii: i64 = 0
+    while ii < block.instr_count {
+        let instr = block.instructions[ii as usize]
+        let r = llvm_compile_instruction(c, m, b, s, instr)
+        c = r.0
+        m = r.1
+        b = r.2
+        s = r.3
+        let result_val = r.4
+
+        // Store result in SSA map if this instruction produces a value
+        if instr.result != HLIR_INVALID_VALUE {
+            if !llvm_value_is_null(result_val) {
+                s.values = ssa_map_insert(s.values, instr.result, result_val, instr.ty.kind)
+            }
+        }
+        ii = ii + 1
+    }
+
+    // Compile terminator
+    let r2 = llvm_compile_terminator(c, m, b, s, block.terminator)
+    c = r2.0
+    m = r2.1
+    b = r2.2
+    s = r2.3
+
+    (c, m, b, s)
+}
+
+// ============================================================================
+// Compile a single instruction — dispatch on op_kind
+// ============================================================================
+
+fn llvm_compile_instruction(
+    ctx: LlvmContext,
+    module: LlvmModule,
+    builder: LlvmBuilder,
+    state: LlvmCodegenState,
+    instr: HlirInstr
+) -> (LlvmContext, LlvmModule, LlvmBuilder, LlvmCodegenState, LlvmValue) with IO, Mut, Panic, Div {
+    var c = ctx
+    var m = module
+    var b = builder
+    var s = state
+    let kind = instr.op_kind
+
+    // ---- Const ----
+    if kind == HlirOpKind::HlirOpConst {
+        let r = llvm_compile_constant(c, s, instr.constant, instr.ty)
+        return (r.0, m, b, r.1, r.2)
+    }
+
+    // ---- Copy ----
+    if kind == HlirOpKind::HlirOpCopy {
+        let val = ssa_map_get(s.values, instr.src)
+        return (c, m, b, s, val)
+    }
+
+    // ---- Binary ----
+    if kind == HlirOpKind::HlirOpBinary {
+        let lhs = ssa_map_get(s.values, instr.lhs)
+        let rhs = ssa_map_get(s.values, instr.rhs)
+        let r = llvm_compile_binary(b, s, instr.bin_op, lhs, rhs, instr.ty)
+        return (c, m, r.0, r.1, r.2)
+    }
+
+    // ---- Unary ----
+    if kind == HlirOpKind::HlirOpUnary {
+        let operand = ssa_map_get(s.values, instr.src)
+        let r = llvm_compile_unary(b, s, instr.unary_op, operand, instr.ty)
+        return (c, m, r.0, r.1, r.2)
+    }
+
+    // ---- Load ----
+    if kind == HlirOpKind::HlirOpLoad {
+        let ptr_val = ssa_map_get(s.values, instr.src)
+        let r = convert_hlir_type(c, s.type_conv, instr.ty)
+        c = r.0
+        s.type_conv = r.1
+        let load_ty = r.2
+        let r2 = llvm_build_load(b, load_ty, ptr_val, "load\0" as *const i8)
+        return (c, m, r2.0, s, r2.1)
+    }
+
+    // ---- Store ----
+    if kind == HlirOpKind::HlirOpStore {
+        let ptr_val = ssa_map_get(s.values, instr.lhs)
+        let store_val = ssa_map_get(s.values, instr.rhs)
+        let r = llvm_build_store(b, store_val, ptr_val)
+        return (c, m, r.0, s, r.1)
+    }
+
+    // ---- Alloca ----
+    if kind == HlirOpKind::HlirOpAlloca {
+        let r = convert_hlir_type(c, s.type_conv, instr.ty)
+        c = r.0
+        s.type_conv = r.1
+        let alloc_ty = r.2
+        let r2 = llvm_build_alloca(b, alloc_ty, "alloca\0" as *const i8)
+        return (c, m, r2.0, s, r2.1)
+    }
+
+    // ---- GetFieldPtr (struct GEP) ----
+    if kind == HlirOpKind::HlirOpGetFieldPtr {
+        let base_val = ssa_map_get(s.values, instr.src)
+        let r = convert_hlir_type(c, s.type_conv, instr.ty)
+        c = r.0
+        s.type_conv = r.1
+        let struct_ty = r.2
+        let r2 = llvm_build_struct_gep(b, struct_ty, base_val, instr.field_index as i32, "gep_field\0" as *const i8)
+        return (c, m, r2.0, s, r2.1)
+    }
+
+    // ---- GetElementPtr (array GEP) ----
+    if kind == HlirOpKind::HlirOpGetElemPtr {
+        let base_val = ssa_map_get(s.values, instr.src)
+        let idx_val = ssa_map_get(s.values, instr.lhs)
+        let r = convert_hlir_type(c, s.type_conv, instr.ty)
+        c = r.0
+        s.type_conv = r.1
+        let elem_ty = r.2
+        var indices: [i64; 2] = [0; 2]
+        indices[0] = idx_val.ptr
+        let r2 = llvm_build_gep(b, elem_ty, base_val, &indices as *const i64, 1, "gep_elem\0" as *const i8)
+        return (c, m, r2.0, s, r2.1)
+    }
+
+    // ---- Cast ----
+    if kind == HlirOpKind::HlirOpCast {
+        let src_val = ssa_map_get(s.values, instr.src)
+        let r = llvm_compile_cast(c, b, s, src_val, instr.cast_src_ty, instr.ty)
+        return (r.0, m, r.1, r.2, r.3)
+    }
+
+    // ---- Phi ----
+    if kind == HlirOpKind::HlirOpPhi {
+        let r = convert_hlir_type(c, s.type_conv, instr.ty)
+        c = r.0
+        s.type_conv = r.1
+        let phi_ty = r.2
+        let r2 = llvm_build_phi(b, phi_ty, "phi\0" as *const i8)
+        b = r2.0
+        let phi_val = r2.1
+
+        // Add incoming values
+        var pi: i64 = 0
+        while pi < instr.phi_count {
+            let incoming_val = ssa_map_get(s.values, instr.phi_values[pi as usize])
+            let incoming_bb = block_map_get(s.blocks, instr.phi_blocks[pi as usize])
+            if !llvm_value_is_null(incoming_val) {
+                if !llvm_block_is_null(incoming_bb) {
+                    var vals: [i64; 1] = [0; 1]
+                    var bbs: [i64; 1] = [0; 1]
+                    vals[0] = incoming_val.ptr
+                    bbs[0] = incoming_bb.ptr
+                    llvm_add_incoming(phi_val, &vals as *const i64, &bbs as *const i64, 1)
+                }
+            }
+            pi = pi + 1
+        }
+        return (c, m, b, s, phi_val)
+    }
+
+    // ---- ExtractValue ----
+    if kind == HlirOpKind::HlirOpExtractValue {
+        let agg_val = ssa_map_get(s.values, instr.src)
+        let r = llvm_build_extract_value(b, agg_val, instr.field_index as i32, "extract\0" as *const i8)
+        return (c, m, r.0, s, r.1)
+    }
+
+    // ---- InsertValue ----
+    if kind == HlirOpKind::HlirOpInsertValue {
+        let agg_val = ssa_map_get(s.values, instr.src)
+        let elem_val = ssa_map_get(s.values, instr.lhs)
+        let r = llvm_build_insert_value(b, agg_val, elem_val, instr.field_index as i32, "insert\0" as *const i8)
+        return (c, m, r.0, s, r.1)
+    }
+
+    // ---- Call ----
+    if kind == HlirOpKind::HlirOpCall {
+        let callee_hash = hlir_name_hash(instr.call_target)
+        let callee = func_map_get(s.functions, callee_hash)
+
+        // Build argument array
+        var arg_ptrs: [i64; 64] = [0; 64]
+        var ai: i64 = 0
+        while ai < instr.call_arg_count {
+            let arg_val = ssa_map_get(s.values, instr.call_args[ai as usize])
+            arg_ptrs[ai as usize] = arg_val.ptr
+            ai = ai + 1
+        }
+
+        // Get function type for call
+        let r = convert_hlir_type(c, s.type_conv, instr.ty)
+        c = r.0
+        s.type_conv = r.1
+        let ret_ty = r.2
+
+        // Build param types for function type reconstruction
+        // For simplicity, use the callee's existing type from LLVM
+        let fn_ty = llvm_type_null()  // LLVM will infer from the function value
+
+        let r2 = llvm_build_call(b, fn_ty, callee, &arg_ptrs as *const i64, instr.call_arg_count as i32, "call\0" as *const i8)
+        return (c, m, r2.0, s, r2.1)
+    }
+
+    // ---- Select ----
+    if kind == HlirOpKind::HlirOpSelect {
+        let cond_val = ssa_map_get(s.values, instr.src)
+        let true_val = ssa_map_get(s.values, instr.lhs)
+        let false_val = ssa_map_get(s.values, instr.rhs)
+        let r = llvm_build_select(b, cond_val, true_val, false_val, "select\0" as *const i8)
+        return (c, m, r.0, s, r.1)
+    }
+
+    // Fallback: no value
+    (c, m, b, s, llvm_value_null())
+}
+
+// ============================================================================
+// Compile a constant
+// ============================================================================
+
+fn llvm_compile_constant(
+    ctx: LlvmContext,
+    state: LlvmCodegenState,
+    constant: HlirConstant,
+    ty: HlirType
+) -> (LlvmContext, LlvmCodegenState, LlvmValue) with IO, Mut, Panic {
+    var c = ctx
+    var s = state
+
+    let ck = constant.kind
+
+    // Integer constant
+    if ck == HlirConstKind::HlirConstInt {
+        let r = convert_hlir_type(c, s.type_conv, ty)
+        c = r.0
+        s.type_conv = r.1
+        let int_ty = r.2
+        let is_signed = if hlir_type_is_signed(ty) { 1 } else { 0 }
+        let val = llvm_const_int(int_ty, constant.int_val, is_signed)
+        return (c, s, val)
+    }
+
+    // Float constant
+    if ck == HlirConstKind::HlirConstFloat {
+        let r = convert_hlir_type(c, s.type_conv, ty)
+        c = r.0
+        s.type_conv = r.1
+        let float_ty = r.2
+        let val = llvm_const_real(float_ty, constant.float_val)
+        return (c, s, val)
+    }
+
+    // Bool constant
+    if ck == HlirConstKind::HlirConstBool {
+        let r = llvm_int1_type(c)
+        c = r.0
+        let bool_ty = r.1
+        let val = llvm_const_int(bool_ty, if constant.bool_val { 1 } else { 0 }, 0)
+        return (c, s, val)
+    }
+
+    // Null constant
+    if ck == HlirConstKind::HlirConstNull {
+        let r = convert_hlir_type(c, s.type_conv, ty)
+        c = r.0
+        s.type_conv = r.1
+        let lty = r.2
+        let val = llvm_const_null(lty)
+        return (c, s, val)
+    }
+
+    // Fallback
+    (c, s, llvm_value_null())
+}
+
+// ============================================================================
+// Compile binary operation — dispatch on op + type signedness/float
+// ============================================================================
+
+fn llvm_compile_binary(
+    builder: LlvmBuilder,
+    state: LlvmCodegenState,
+    op: HlirBinaryOp,
+    lhs: LlvmValue,
+    rhs: LlvmValue,
+    ty: HlirType
+) -> (LlvmBuilder, LlvmCodegenState, LlvmValue) with IO {
+    var b = builder
+    let is_float = hlir_type_is_float(ty)
+    let is_signed = hlir_type_is_signed(ty)
+
+    // ---- ADD ----
+    if op == HlirBinaryOp::HlirBinAdd {
+        if is_float {
+            let r = llvm_build_fadd(b, lhs, rhs, "fadd\0" as *const i8)
+            return (r.0, state, r.1)
+        }
+        let r = llvm_build_add(b, lhs, rhs, "add\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+
+    // ---- SUB ----
+    if op == HlirBinaryOp::HlirBinSub {
+        if is_float {
+            let r = llvm_build_fsub(b, lhs, rhs, "fsub\0" as *const i8)
+            return (r.0, state, r.1)
+        }
+        let r = llvm_build_sub(b, lhs, rhs, "sub\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+
+    // ---- MUL ----
+    if op == HlirBinaryOp::HlirBinMul {
+        if is_float {
+            let r = llvm_build_fmul(b, lhs, rhs, "fmul\0" as *const i8)
+            return (r.0, state, r.1)
+        }
+        let r = llvm_build_mul(b, lhs, rhs, "mul\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+
+    // ---- DIV (signed/unsigned/float) ----
+    if op == HlirBinaryOp::HlirBinSDiv {
+        let r = llvm_build_sdiv(b, lhs, rhs, "sdiv\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+    if op == HlirBinaryOp::HlirBinUDiv {
+        let r = llvm_build_udiv(b, lhs, rhs, "udiv\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+    if op == HlirBinaryOp::HlirBinDiv {
+        if is_float {
+            let r = llvm_build_fdiv(b, lhs, rhs, "fdiv\0" as *const i8)
+            return (r.0, state, r.1)
+        }
+        if is_signed {
+            let r = llvm_build_sdiv(b, lhs, rhs, "sdiv\0" as *const i8)
+            return (r.0, state, r.1)
+        }
+        let r = llvm_build_udiv(b, lhs, rhs, "udiv\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+
+    // ---- REM ----
+    if op == HlirBinaryOp::HlirBinSRem {
+        let r = llvm_build_srem(b, lhs, rhs, "srem\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+    if op == HlirBinaryOp::HlirBinURem {
+        let r = llvm_build_urem(b, lhs, rhs, "urem\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+    if op == HlirBinaryOp::HlirBinRem {
+        if is_float {
+            let r = llvm_build_frem(b, lhs, rhs, "frem\0" as *const i8)
+            return (r.0, state, r.1)
+        }
+        if is_signed {
+            let r = llvm_build_srem(b, lhs, rhs, "srem\0" as *const i8)
+            return (r.0, state, r.1)
+        }
+        let r = llvm_build_urem(b, lhs, rhs, "urem\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+
+    // ---- Bitwise ----
+    if op == HlirBinaryOp::HlirBinAnd {
+        let r = llvm_build_and(b, lhs, rhs, "and\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+    if op == HlirBinaryOp::HlirBinOr {
+        let r = llvm_build_or(b, lhs, rhs, "or\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+    if op == HlirBinaryOp::HlirBinXor {
+        let r = llvm_build_xor(b, lhs, rhs, "xor\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+    if op == HlirBinaryOp::HlirBinShl {
+        let r = llvm_build_shl(b, lhs, rhs, "shl\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+    if op == HlirBinaryOp::HlirBinAShr {
+        let r = llvm_build_ashr(b, lhs, rhs, "ashr\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+    if op == HlirBinaryOp::HlirBinLShr {
+        let r = llvm_build_lshr(b, lhs, rhs, "lshr\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+
+    // ---- Integer comparisons ----
+    if op == HlirBinaryOp::HlirBinEq {
+        if is_float {
+            let r = llvm_build_fcmp(b, LLVM_REAL_OEQ, lhs, rhs, "fcmp_eq\0" as *const i8)
+            return (r.0, state, r.1)
+        }
+        let r = llvm_build_icmp(b, LLVM_INT_EQ, lhs, rhs, "icmp_eq\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+    if op == HlirBinaryOp::HlirBinNe {
+        if is_float {
+            let r = llvm_build_fcmp(b, LLVM_REAL_UNE, lhs, rhs, "fcmp_ne\0" as *const i8)
+            return (r.0, state, r.1)
+        }
+        let r = llvm_build_icmp(b, LLVM_INT_NE, lhs, rhs, "icmp_ne\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+    if op == HlirBinaryOp::HlirBinSLt {
+        let r = llvm_build_icmp(b, LLVM_INT_SLT, lhs, rhs, "icmp_slt\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+    if op == HlirBinaryOp::HlirBinSLe {
+        let r = llvm_build_icmp(b, LLVM_INT_SLE, lhs, rhs, "icmp_sle\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+    if op == HlirBinaryOp::HlirBinSGt {
+        let r = llvm_build_icmp(b, LLVM_INT_SGT, lhs, rhs, "icmp_sgt\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+    if op == HlirBinaryOp::HlirBinSGe {
+        let r = llvm_build_icmp(b, LLVM_INT_SGE, lhs, rhs, "icmp_sge\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+    if op == HlirBinaryOp::HlirBinULt {
+        let r = llvm_build_icmp(b, LLVM_INT_ULT, lhs, rhs, "icmp_ult\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+    if op == HlirBinaryOp::HlirBinULe {
+        let r = llvm_build_icmp(b, LLVM_INT_ULE, lhs, rhs, "icmp_ule\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+    if op == HlirBinaryOp::HlirBinUGt {
+        let r = llvm_build_icmp(b, LLVM_INT_UGT, lhs, rhs, "icmp_ugt\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+    if op == HlirBinaryOp::HlirBinUGe {
+        let r = llvm_build_icmp(b, LLVM_INT_UGE, lhs, rhs, "icmp_uge\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+
+    // ---- Float comparisons ----
+    if op == HlirBinaryOp::HlirBinFOLt {
+        let r = llvm_build_fcmp(b, LLVM_REAL_OLT, lhs, rhs, "fcmp_olt\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+    if op == HlirBinaryOp::HlirBinFOLe {
+        let r = llvm_build_fcmp(b, LLVM_REAL_OLE, lhs, rhs, "fcmp_ole\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+    if op == HlirBinaryOp::HlirBinFOGt {
+        let r = llvm_build_fcmp(b, LLVM_REAL_OGT, lhs, rhs, "fcmp_ogt\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+    if op == HlirBinaryOp::HlirBinFOGe {
+        let r = llvm_build_fcmp(b, LLVM_REAL_OGE, lhs, rhs, "fcmp_oge\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+    if op == HlirBinaryOp::HlirBinFOEq {
+        let r = llvm_build_fcmp(b, LLVM_REAL_OEQ, lhs, rhs, "fcmp_oeq\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+    if op == HlirBinaryOp::HlirBinFONe {
+        let r = llvm_build_fcmp(b, LLVM_REAL_ONE, lhs, rhs, "fcmp_one\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+
+    // ---- Lt/Le/Gt/Ge (generic, dispatch by signedness) ----
+    if op == HlirBinaryOp::HlirBinLt {
+        if is_float {
+            let r = llvm_build_fcmp(b, LLVM_REAL_OLT, lhs, rhs, "fcmp_lt\0" as *const i8)
+            return (r.0, state, r.1)
+        }
+        if is_signed {
+            let r = llvm_build_icmp(b, LLVM_INT_SLT, lhs, rhs, "icmp_lt\0" as *const i8)
+            return (r.0, state, r.1)
+        }
+        let r = llvm_build_icmp(b, LLVM_INT_ULT, lhs, rhs, "icmp_lt\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+    if op == HlirBinaryOp::HlirBinLe {
+        if is_float {
+            let r = llvm_build_fcmp(b, LLVM_REAL_OLE, lhs, rhs, "fcmp_le\0" as *const i8)
+            return (r.0, state, r.1)
+        }
+        if is_signed {
+            let r = llvm_build_icmp(b, LLVM_INT_SLE, lhs, rhs, "icmp_le\0" as *const i8)
+            return (r.0, state, r.1)
+        }
+        let r = llvm_build_icmp(b, LLVM_INT_ULE, lhs, rhs, "icmp_le\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+    if op == HlirBinaryOp::HlirBinGt {
+        if is_float {
+            let r = llvm_build_fcmp(b, LLVM_REAL_OGT, lhs, rhs, "fcmp_gt\0" as *const i8)
+            return (r.0, state, r.1)
+        }
+        if is_signed {
+            let r = llvm_build_icmp(b, LLVM_INT_SGT, lhs, rhs, "icmp_gt\0" as *const i8)
+            return (r.0, state, r.1)
+        }
+        let r = llvm_build_icmp(b, LLVM_INT_UGT, lhs, rhs, "icmp_gt\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+    if op == HlirBinaryOp::HlirBinGe {
+        if is_float {
+            let r = llvm_build_fcmp(b, LLVM_REAL_OGE, lhs, rhs, "fcmp_ge\0" as *const i8)
+            return (r.0, state, r.1)
+        }
+        if is_signed {
+            let r = llvm_build_icmp(b, LLVM_INT_SGE, lhs, rhs, "icmp_ge\0" as *const i8)
+            return (r.0, state, r.1)
+        }
+        let r = llvm_build_icmp(b, LLVM_INT_UGE, lhs, rhs, "icmp_ge\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+
+    // Fallback
+    (b, state, llvm_value_null())
+}
+
+// ============================================================================
+// Compile unary operation
+// ============================================================================
+
+fn llvm_compile_unary(
+    builder: LlvmBuilder,
+    state: LlvmCodegenState,
+    op: HlirUnaryOp,
+    operand: LlvmValue,
+    ty: HlirType
+) -> (LlvmBuilder, LlvmCodegenState, LlvmValue) with IO {
+    let is_float = hlir_type_is_float(ty)
+
+    if op == HlirUnaryOp::HlirUnNeg {
+        if is_float {
+            let r = llvm_build_fneg(builder, operand, "fneg\0" as *const i8)
+            return (r.0, state, r.1)
+        }
+        let r = llvm_build_neg(builder, operand, "neg\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+
+    if op == HlirUnaryOp::HlirUnNot {
+        let r = llvm_build_not(builder, operand, "not\0" as *const i8)
+        return (r.0, state, r.1)
+    }
+
+    (builder, state, llvm_value_null())
+}
+
+// ============================================================================
+// Compile type cast
+// ============================================================================
+
+fn llvm_compile_cast(
+    ctx: LlvmContext,
+    builder: LlvmBuilder,
+    state: LlvmCodegenState,
+    src_val: LlvmValue,
+    src_ty: HlirType,
+    dst_ty: HlirType
+) -> (LlvmContext, LlvmBuilder, LlvmCodegenState, LlvmValue) with IO, Mut, Panic {
+    var c = ctx
+    var s = state
+
+    // Convert destination type
+    let r1 = convert_hlir_type(c, s.type_conv, dst_ty)
+    c = r1.0
+    s.type_conv = r1.1
+    let dest_llvm_ty = r1.2
+
+    let src_is_float = hlir_type_is_float(src_ty)
+    let dst_is_float = hlir_type_is_float(dst_ty)
+    let src_is_int = hlir_type_is_integer(src_ty)
+    let dst_is_int = hlir_type_is_integer(dst_ty)
+    let src_is_signed = hlir_type_is_signed(src_ty)
+    let src_bits = hlir_type_int_bits(src_ty)
+    let dst_bits = hlir_type_int_bits(dst_ty)
+
+    // Int → Int
+    if src_is_int {
+        if dst_is_int {
+            if src_bits < dst_bits {
+                // Widening
+                if src_is_signed {
+                    let r = llvm_build_sext(builder, src_val, dest_llvm_ty, "sext\0" as *const i8)
+                    return (c, r.0, s, r.1)
+                }
+                let r = llvm_build_zext(builder, src_val, dest_llvm_ty, "zext\0" as *const i8)
+                return (c, r.0, s, r.1)
+            }
+            if src_bits > dst_bits {
+                // Narrowing
+                let r = llvm_build_trunc(builder, src_val, dest_llvm_ty, "trunc\0" as *const i8)
+                return (c, r.0, s, r.1)
+            }
+            // Same size (sign change) — bitcast
+            let r = llvm_build_int_cast(builder, src_val, dest_llvm_ty, if src_is_signed { 1 } else { 0 }, "icast\0" as *const i8)
+            return (c, r.0, s, r.1)
+        }
+        // Int → Float
+        if dst_is_float {
+            if src_is_signed {
+                let r = llvm_build_si_to_fp(builder, src_val, dest_llvm_ty, "sitofp\0" as *const i8)
+                return (c, r.0, s, r.1)
+            }
+            let r = llvm_build_ui_to_fp(builder, src_val, dest_llvm_ty, "uitofp\0" as *const i8)
+            return (c, r.0, s, r.1)
+        }
+    }
+
+    // Float → Int
+    if src_is_float {
+        if dst_is_int {
+            let dst_is_signed = hlir_type_is_signed(dst_ty)
+            if dst_is_signed {
+                let r = llvm_build_fp_to_si(builder, src_val, dest_llvm_ty, "fptosi\0" as *const i8)
+                return (c, r.0, s, r.1)
+            }
+            let r = llvm_build_fp_to_ui(builder, src_val, dest_llvm_ty, "fptoui\0" as *const i8)
+            return (c, r.0, s, r.1)
+        }
+        // Float → Float (extend/truncate)
+        if dst_is_float {
+            let r = llvm_build_fpcast(builder, src_val, dest_llvm_ty, "fpcast\0" as *const i8)
+            return (c, r.0, s, r.1)
+        }
+    }
+
+    // Ptr → Int
+    if src_ty.kind == HlirTypeKind::HlirTypePtr {
+        if dst_is_int {
+            let r = llvm_build_ptr_to_int(builder, src_val, dest_llvm_ty, "ptrtoint\0" as *const i8)
+            return (c, r.0, s, r.1)
+        }
+    }
+
+    // Int → Ptr
+    if src_is_int {
+        if dst_ty.kind == HlirTypeKind::HlirTypePtr {
+            let r = llvm_build_int_to_ptr(builder, src_val, dest_llvm_ty, "inttoptr\0" as *const i8)
+            return (c, r.0, s, r.1)
+        }
+    }
+
+    // Fallback: bitcast
+    let r = llvm_build_bitcast(builder, src_val, dest_llvm_ty, "bitcast\0" as *const i8)
+    (c, r.0, s, r.1)
+}
+
+// ============================================================================
+// Compile terminator
+// ============================================================================
+
+fn llvm_compile_terminator(
+    ctx: LlvmContext,
+    module: LlvmModule,
+    builder: LlvmBuilder,
+    state: LlvmCodegenState,
+    term: HlirTerminator
+) -> (LlvmContext, LlvmModule, LlvmBuilder, LlvmCodegenState) with IO, Mut, Panic {
+    var c = ctx
+    var m = module
+    var b = builder
+    var s = state
+
+    let tk = term.kind
+
+    // ---- Return ----
+    if tk == HlirTermKind::HlirTermReturn {
+        if term.return_value == HLIR_INVALID_VALUE {
+            let r = llvm_build_ret_void(b)
+            b = r.0
+        } else {
+            let ret_val = ssa_map_get(s.values, term.return_value)
+            if llvm_value_is_null(ret_val) {
+                let r = llvm_build_ret_void(b)
+                b = r.0
+            } else {
+                let r = llvm_build_ret(b, ret_val)
+                b = r.0
+            }
+        }
+        return (c, m, b, s)
+    }
+
+    // ---- Unconditional branch ----
+    if tk == HlirTermKind::HlirTermBranch {
+        let target_bb = block_map_get(s.blocks, term.target_block)
+        if !llvm_block_is_null(target_bb) {
+            let r = llvm_build_br(b, target_bb)
+            b = r.0
+        }
+        return (c, m, b, s)
+    }
+
+    // ---- Conditional branch ----
+    if tk == HlirTermKind::HlirTermCondBranch {
+        let cond_val = ssa_map_get(s.values, term.condition)
+        let then_bb = block_map_get(s.blocks, term.then_block)
+        let else_bb = block_map_get(s.blocks, term.else_block)
+        if !llvm_value_is_null(cond_val) {
+            if !llvm_block_is_null(then_bb) {
+                if !llvm_block_is_null(else_bb) {
+                    let r = llvm_build_cond_br(b, cond_val, then_bb, else_bb)
+                    b = r.0
+                }
+            }
+        }
+        return (c, m, b, s)
+    }
+
+    // ---- Switch ----
+    if tk == HlirTermKind::HlirTermSwitch {
+        let switch_val = ssa_map_get(s.values, term.condition)
+        let default_bb = block_map_get(s.blocks, term.target_block)
+        if !llvm_value_is_null(switch_val) {
+            if !llvm_block_is_null(default_bb) {
+                let r = llvm_build_switch(b, switch_val, default_bb, term.switch_case_count as i32)
+                b = r.0
+                let switch_instr = r.1
+
+                var ci: i64 = 0
+                while ci < term.switch_case_count {
+                    let case_val_id = term.switch_case_values[ci as usize]
+                    let case_bb = block_map_get(s.blocks, term.switch_case_blocks[ci as usize])
+                    if !llvm_block_is_null(case_bb) {
+                        // Case value is an integer constant
+                        let r2 = llvm_int64_type(c)
+                        c = r2.0
+                        let i64_ty = r2.1
+                        let case_const = llvm_const_int(i64_ty, case_val_id, 1)
+                        llvm_add_case(switch_instr, case_const, case_bb)
+                    }
+                    ci = ci + 1
+                }
+            }
+        }
+        return (c, m, b, s)
+    }
+
+    // ---- Unreachable ----
+    if tk == HlirTermKind::HlirTermUnreachable {
+        let r = llvm_build_unreachable(b)
+        b = r.0
+        return (c, m, b, s)
+    }
+
+    (c, m, b, s)
+}
+
+// ============================================================================
+// Top-level compilation pipeline
+//
+// Creates context, module, builder, compiles HLIR, optionally optimizes,
+// and returns all resources for emission or disposal.
+// ============================================================================
+
+fn llvm_full_compile(
+    hlir: HlirModule,
+    module_name: *const i8,
+    opt_level: i32,
+    debug_info: bool
+) -> (LlvmContext, LlvmModule, LlvmBuilder, LlvmCodegenState) with IO, Mut, Panic, Div {
+    // Create LLVM context + module + builder
+    var ctx = llvm_context_create()
+
+    let r1 = llvm_module_create(ctx, module_name)
+    ctx = r1.0
+    var module = r1.1
+
+    let r2 = llvm_builder_create(ctx)
+    ctx = r2.0
+    var builder = r2.1
+
+    // Initialize host target (for native compilation)
+    llvm_init_all_targets()
+
+    // Set module target triple and data layout
+    let triple = llvm_get_default_target_triple()
+    module = llvm_module_set_target(module, triple)
+
+    // Compile HLIR to LLVM IR
+    let r3 = llvm_compile_module(ctx, module, builder, hlir, opt_level, debug_info)
+    ctx = r3.0
+    module = r3.1
+    builder = r3.2
+    let state = r3.3
+
+    (ctx, module, builder, state)
+}

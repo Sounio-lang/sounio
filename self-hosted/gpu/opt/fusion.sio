@@ -1,0 +1,732 @@
+// self-hosted::gpu::opt::fusion — Kernel fusion pass for GpuKernelIr
+//
+// Phase 4A bootstrap implementation:
+// - Discover adjacent fusion candidates
+// - Score and pick best candidate per round
+// - Fuse kernel pairs with parameter dedup + register remapping
+// - Keep hard safety guards (op count, params, shared bytes, register pressure)
+//
+// This pass operates on fixed arrays to stay deterministic in self-hosted mode.
+
+// ============================================================================
+// Config and metadata
+// ============================================================================
+
+let GPU_FUSION_MAX_KERNELS: i64 = 64
+let GPU_FUSION_MAX_PARAMS: i64 = 8
+let GPU_FUSION_MAX_OPS: i64 = 1024
+let GPU_FUSION_MAX_SHARED_BYTES: i64 = 233472
+
+struct GpuFusionConfig {
+    max_rounds: i64,
+    max_ops_per_kernel: i64,
+    max_shared_bytes: i64,
+    min_benefit_score: i64,
+    max_register_sum: i64,
+}
+
+fn gpu_fusion_config_default() -> GpuFusionConfig {
+    GpuFusionConfig {
+        max_rounds: 8,
+        max_ops_per_kernel: GPU_FUSION_MAX_OPS,
+        max_shared_bytes: GPU_FUSION_MAX_SHARED_BYTES,
+        min_benefit_score: 20,
+        max_register_sum: 160,
+    }
+}
+
+struct GpuFusionResource {
+    op_count: i64,
+    shared_bytes: i64,
+    reg_b32: i64,
+    reg_b64: i64,
+    reg_f32: i64,
+    reg_f64: i64,
+    reg_pred: i64,
+}
+
+fn gpu_fusion_resource_from_kernel(k: GpuKernelIr) -> GpuFusionResource {
+    GpuFusionResource {
+        op_count: k.op_count,
+        shared_bytes: if k.shared_mem_bytes > k.shared_bytes { k.shared_mem_bytes } else { k.shared_bytes },
+        reg_b32: if k.max_reg_i32 > k.max_reg_u32 { k.max_reg_i32 } else { k.max_reg_u32 },
+        reg_b64: if k.max_reg_i64 > k.max_reg_u64 { k.max_reg_i64 } else { k.max_reg_u64 },
+        reg_f32: k.max_reg_f32,
+        reg_f64: k.max_reg_f64,
+        reg_pred: k.max_reg_pred,
+    }
+}
+
+fn gpu_fusion_resource_sum(a: GpuFusionResource, b: GpuFusionResource) -> GpuFusionResource {
+    GpuFusionResource {
+        op_count: a.op_count + b.op_count,
+        shared_bytes: a.shared_bytes + b.shared_bytes,
+        reg_b32: a.reg_b32 + b.reg_b32,
+        reg_b64: a.reg_b64 + b.reg_b64,
+        reg_f32: a.reg_f32 + b.reg_f32,
+        reg_f64: a.reg_f64 + b.reg_f64,
+        reg_pred: a.reg_pred + b.reg_pred,
+    }
+}
+
+fn gpu_fusion_resource_pressure(r: GpuFusionResource) -> i64 {
+    r.reg_b32 + r.reg_b64 + r.reg_f32 + r.reg_f64 + r.reg_pred
+}
+
+struct GpuFusionCandidate {
+    left_index: i64,
+    right_index: i64,
+    can_fuse: bool,
+    score: i64,
+}
+
+fn gpu_fusion_candidate_none() -> GpuFusionCandidate {
+    GpuFusionCandidate {
+        left_index: -1,
+        right_index: -1,
+        can_fuse: false,
+        score: -1000000,
+    }
+}
+
+struct GpuFusionRegOffsets {
+    b32: i64,
+    b64: i64,
+    f32: i64,
+    f64: i64,
+    pred: i64,
+    shared_addr: i64,
+}
+
+fn gpu_fusion_reg_offsets_from(left: GpuKernelIr) -> GpuFusionRegOffsets {
+    let b32 = if left.max_reg_i32 > left.max_reg_u32 { left.max_reg_i32 } else { left.max_reg_u32 }
+    let b64 = if left.max_reg_i64 > left.max_reg_u64 { left.max_reg_i64 } else { left.max_reg_u64 }
+    let shared = if left.shared_mem_bytes > left.shared_bytes { left.shared_mem_bytes } else { left.shared_bytes }
+    GpuFusionRegOffsets {
+        b32: b32,
+        b64: b64,
+        f32: left.max_reg_f32,
+        f64: left.max_reg_f64,
+        pred: left.max_reg_pred,
+        shared_addr: shared,
+    }
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+fn gpu_fusion_max(a: i64, b: i64) -> i64 {
+    if a > b { a } else { b }
+}
+
+fn gpu_fusion_min(a: i64, b: i64) -> i64 {
+    if a < b { a } else { b }
+}
+
+fn gpu_fusion_merge_thread_hint(a: GpuKernelIr, b: GpuKernelIr) -> i64 {
+    if a.max_threads > 0 && b.max_threads > 0 {
+        if a.max_threads < b.max_threads { a.max_threads } else { b.max_threads }
+    } else if a.max_threads > 0 {
+        a.max_threads
+    } else {
+        b.max_threads
+    }
+}
+
+fn gpu_fusion_param_eq(a: GpuParam, b: GpuParam) -> bool with Mut, Panic, Div {
+    ir_name_eq(a.name, b.name) && a.ty == b.ty
+}
+
+fn gpu_fusion_param_find_index(params: [GpuParam; 8], count: i64, p: GpuParam) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < count {
+        if gpu_fusion_param_eq(params[i as usize], p) {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn gpu_fusion_overlap_params(a: GpuKernelIr, b: GpuKernelIr) -> i64 with Mut, Panic, Div {
+    var overlap: i64 = 0
+    var i: i64 = 0
+    while i < a.param_count {
+        let p = a.params[i as usize]
+        if gpu_fusion_param_find_index(b.params, b.param_count, p) >= 0 {
+            overlap = overlap + 1
+        }
+        i = i + 1
+    }
+    overlap
+}
+
+fn gpu_fusion_has_side_effects(k: GpuKernelIr) -> bool {
+    var i: i64 = 0
+    while i < k.op_count {
+        let op = k.ops[i as usize]
+        if op.opcode == GpuOpcode::GpuAtomicAdd ||
+           op.opcode == GpuOpcode::GpuStoreGlobal ||
+           op.opcode == GpuOpcode::GpuStoreGlobalPred ||
+           op.opcode == GpuOpcode::GpuStGlobalWriteback {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn gpu_fusion_is_heavy_control(k: GpuKernelIr) -> bool {
+    var branches: i64 = 0
+    var exits: i64 = 0
+    var i: i64 = 0
+    while i < k.op_count {
+        let op = k.ops[i as usize]
+        if op.opcode == GpuOpcode::GpuBra { branches = branches + 1 }
+        if op.opcode == GpuOpcode::GpuExit || op.opcode == GpuOpcode::GpuRet { exits = exits + 1 }
+        i = i + 1
+    }
+    branches > 8 || exits > 8
+}
+
+// ============================================================================
+// Candidate analysis
+// ============================================================================
+
+fn gpu_fusion_can_fuse_pair(left: GpuKernelIr, right: GpuKernelIr, cfg: GpuFusionConfig) -> bool with Mut, Panic, Div {
+    if left.op_count <= 0 || right.op_count <= 0 {
+        return false
+    }
+
+    let rl = gpu_fusion_resource_from_kernel(left)
+    let rr = gpu_fusion_resource_from_kernel(right)
+    let rs = gpu_fusion_resource_sum(rl, rr)
+
+    if rs.op_count > cfg.max_ops_per_kernel {
+        return false
+    }
+    if rs.shared_bytes > cfg.max_shared_bytes {
+        return false
+    }
+    if gpu_fusion_resource_pressure(rs) > cfg.max_register_sum {
+        return false
+    }
+
+    // If both kernels set explicit launch hints, require compatibility.
+    if left.max_threads > 0 && right.max_threads > 0 && left.max_threads != right.max_threads {
+        return false
+    }
+
+    // Baseline safety: avoid fusing two strongly side-effecting kernels in this pass.
+    if gpu_fusion_has_side_effects(left) && gpu_fusion_has_side_effects(right) {
+        return false
+    }
+
+    // Avoid aggressive CFG-heavy fusion until explicit branch labels are modeled.
+    if gpu_fusion_is_heavy_control(left) || gpu_fusion_is_heavy_control(right) {
+        return false
+    }
+
+    true
+}
+
+fn gpu_fusion_score_pair(left: GpuKernelIr, right: GpuKernelIr) -> i64 with Mut, Panic, Div {
+    let rl = gpu_fusion_resource_from_kernel(left)
+    let rr = gpu_fusion_resource_from_kernel(right)
+
+    var score: i64 = 100
+
+    // Launch overhead savings
+    score = score + 40
+
+    // Reward parameter overlap (producer-consumer style call shapes)
+    let overlap = gpu_fusion_overlap_params(left, right)
+    score = score + (overlap * 20)
+
+    // Penalize register growth and excessive instruction counts
+    let reg_penalty = (gpu_fusion_resource_pressure(rl) + gpu_fusion_resource_pressure(rr)) / 4
+    let op_penalty = (rl.op_count + rr.op_count) / 8
+    score = score - reg_penalty
+    score = score - op_penalty
+
+    // Penalize shared memory pressure
+    let shared_sum = rl.shared_bytes + rr.shared_bytes
+    score = score - (shared_sum / 2048)
+
+    // Side effect penalty
+    if gpu_fusion_has_side_effects(left) { score = score - 20 }
+    if gpu_fusion_has_side_effects(right) { score = score - 20 }
+
+    score
+}
+
+fn gpu_fusion_find_best_adjacent(
+    kernels: [GpuKernelIr; 64],
+    count: i64,
+    cfg: GpuFusionConfig
+) -> GpuFusionCandidate with Mut, Panic, Div {
+    var best = gpu_fusion_candidate_none()
+
+    if count <= 1 {
+        return best
+    }
+
+    var i: i64 = 0
+    while i < (count - 1) {
+        let left = kernels[i as usize]
+        let right = kernels[(i + 1) as usize]
+
+        let can = gpu_fusion_can_fuse_pair(left, right, cfg)
+        if can {
+            let score = gpu_fusion_score_pair(left, right)
+            if score > best.score {
+                best.left_index = i
+                best.right_index = i + 1
+                best.can_fuse = true
+                best.score = score
+            }
+        }
+
+        i = i + 1
+    }
+
+    best
+}
+
+// ============================================================================
+// Register remap
+// ============================================================================
+
+fn gpu_fusion_remap_data_reg(reg: i64, ty: GpuType, off: GpuFusionRegOffsets) -> i64 {
+    if reg < 0 {
+        return reg
+    }
+
+    if ty == GpuType::GpuF32 {
+        return reg + off.f32
+    }
+    if ty == GpuType::GpuF64 {
+        return reg + off.f64
+    }
+    if ty == GpuType::GpuU64 || ty == GpuType::GpuI64 || ty == GpuType::GpuPtr {
+        return reg + off.b64
+    }
+
+    reg + off.b32
+}
+
+fn gpu_fusion_remap_ptr_reg(reg: i64, off: GpuFusionRegOffsets) -> i64 {
+    if reg < 0 { reg } else { reg + off.b64 }
+}
+
+fn gpu_fusion_remap_pred_reg(reg: i64, off: GpuFusionRegOffsets) -> i64 {
+    if reg < 0 { reg } else { reg + off.pred }
+}
+
+fn gpu_fusion_remap_shared_addr(addr: i64, off: GpuFusionRegOffsets) -> i64 {
+    if addr < 0 { addr } else { addr + off.shared_addr }
+}
+
+fn gpu_fusion_remap_load_param_type(ty: GpuType) -> GpuType {
+    if ty == GpuType::GpuI32 { GpuType::GpuU32 }
+    else if ty == GpuType::GpuI64 { GpuType::GpuU64 }
+    else { ty }
+}
+
+fn gpu_fusion_remap_op_param_idx(op: GpuOp, param_map: [i64; 8]) -> GpuOp with Mut, Panic {
+    var out = op
+    if op.opcode == GpuOpcode::GpuLoadParam {
+        let idx = op.param_idx
+        if idx >= 0 && idx < 8 {
+            out.param_idx = param_map[idx as usize]
+        }
+    }
+    out
+}
+
+fn gpu_fusion_remap_op(op: GpuOp, off: GpuFusionRegOffsets) -> GpuOp with Mut, Panic {
+    var out = op
+    let code = op.opcode
+
+    // Simple ID readers
+    if code == GpuOpcode::GpuGetTid || code == GpuOpcode::GpuGetBid || code == GpuOpcode::GpuGetNtid ||
+       code == GpuOpcode::GpuGetGridDim || code == GpuOpcode::GpuGetLaneId || code == GpuOpcode::GpuGetWarpId ||
+       code == GpuOpcode::GpuGetSmId {
+        out.dst_reg = gpu_fusion_remap_data_reg(op.dst_reg, GpuType::GpuU32, off)
+        return out
+    }
+
+    if code == GpuOpcode::GpuCvt {
+        out.dst_reg = gpu_fusion_remap_data_reg(op.dst_reg, GpuType::GpuU64, off)
+        out.src_reg = gpu_fusion_remap_data_reg(op.src_reg, GpuType::GpuU32, off)
+        return out
+    }
+
+    if code == GpuOpcode::GpuLoadParam {
+        let lty = gpu_fusion_remap_load_param_type(op.ty)
+        out.dst_reg = gpu_fusion_remap_data_reg(op.dst_reg, lty, off)
+        return out
+    }
+
+    if code == GpuOpcode::GpuLoadGlobal || code == GpuOpcode::GpuLdGlobalCached {
+        out.dst_reg = gpu_fusion_remap_data_reg(op.dst_reg, op.ty, off)
+        out.addr_reg = gpu_fusion_remap_ptr_reg(op.addr_reg, off)
+        return out
+    }
+
+    if code == GpuOpcode::GpuStoreGlobal || code == GpuOpcode::GpuStGlobalWriteback {
+        out.src_reg = gpu_fusion_remap_data_reg(op.src_reg, op.ty, off)
+        out.addr_reg = gpu_fusion_remap_ptr_reg(op.addr_reg, off)
+        return out
+    }
+
+    if code == GpuOpcode::GpuLoadShared || code == GpuOpcode::GpuLoadSharedPred {
+        out.dst_reg = gpu_fusion_remap_data_reg(op.dst_reg, op.ty, off)
+        out.shared_addr = gpu_fusion_remap_shared_addr(op.shared_addr, off)
+        out.lhs_reg = gpu_fusion_remap_pred_reg(op.lhs_reg, off)
+        return out
+    }
+
+    if code == GpuOpcode::GpuStoreShared || code == GpuOpcode::GpuStoreSharedPred {
+        out.src_reg = gpu_fusion_remap_data_reg(op.src_reg, op.ty, off)
+        out.shared_addr = gpu_fusion_remap_shared_addr(op.shared_addr, off)
+        out.lhs_reg = gpu_fusion_remap_pred_reg(op.lhs_reg, off)
+        return out
+    }
+
+    if code == GpuOpcode::GpuLoadGlobalPred {
+        out.dst_reg = gpu_fusion_remap_data_reg(op.dst_reg, op.ty, off)
+        out.addr_reg = gpu_fusion_remap_ptr_reg(op.addr_reg, off)
+        out.lhs_reg = gpu_fusion_remap_pred_reg(op.lhs_reg, off)
+        return out
+    }
+
+    if code == GpuOpcode::GpuStoreGlobalPred {
+        out.src_reg = gpu_fusion_remap_data_reg(op.src_reg, op.ty, off)
+        out.addr_reg = gpu_fusion_remap_ptr_reg(op.addr_reg, off)
+        out.lhs_reg = gpu_fusion_remap_pred_reg(op.lhs_reg, off)
+        return out
+    }
+
+    if code == GpuOpcode::GpuSetpLt || code == GpuOpcode::GpuSetpLe ||
+       code == GpuOpcode::GpuSetpEq || code == GpuOpcode::GpuSetpGe ||
+       code == GpuOpcode::GpuSetpGt || code == GpuOpcode::GpuSetpNe {
+        out.dst_reg = gpu_fusion_remap_pred_reg(op.dst_reg, off)
+        out.lhs_reg = gpu_fusion_remap_data_reg(op.lhs_reg, op.ty, off)
+        out.rhs_reg = gpu_fusion_remap_data_reg(op.rhs_reg, op.ty, off)
+        return out
+    }
+
+    if code == GpuOpcode::GpuSelp {
+        out.dst_reg = gpu_fusion_remap_data_reg(op.dst_reg, op.ty, off)
+        out.lhs_reg = gpu_fusion_remap_data_reg(op.lhs_reg, op.ty, off)
+        out.rhs_reg = gpu_fusion_remap_data_reg(op.rhs_reg, op.ty, off)
+        out.src_reg = gpu_fusion_remap_pred_reg(op.src_reg, off)
+        return out
+    }
+
+    if code == GpuOpcode::GpuShflDown || code == GpuOpcode::GpuShflUp ||
+       code == GpuOpcode::GpuShflBfly || code == GpuOpcode::GpuShflIdx {
+        out.dst_reg = gpu_fusion_remap_data_reg(op.dst_reg, op.ty, off)
+        out.src_reg = gpu_fusion_remap_data_reg(op.src_reg, op.ty, off)
+        return out
+    }
+
+    if code == GpuOpcode::GpuVote || code == GpuOpcode::GpuBallot {
+        out.dst_reg = gpu_fusion_remap_data_reg(op.dst_reg, op.ty, off)
+        out.src_reg = gpu_fusion_remap_pred_reg(op.src_reg, off)
+        return out
+    }
+
+    if code == GpuOpcode::GpuAtomicAdd {
+        out.dst_reg = gpu_fusion_remap_data_reg(op.dst_reg, op.ty, off)
+        out.addr_reg = gpu_fusion_remap_ptr_reg(op.addr_reg, off)
+        out.src_reg = gpu_fusion_remap_data_reg(op.src_reg, op.ty, off)
+        return out
+    }
+
+    if code == GpuOpcode::GpuBarrierSync || code == GpuOpcode::GpuRet || code == GpuOpcode::GpuExit || code == GpuOpcode::GpuBra {
+        return out
+    }
+
+    // Arithmetic and math intrinsics
+    out.dst_reg = gpu_fusion_remap_data_reg(op.dst_reg, op.ty, off)
+    out.src_reg = gpu_fusion_remap_data_reg(op.src_reg, op.ty, off)
+    out.lhs_reg = gpu_fusion_remap_data_reg(op.lhs_reg, op.ty, off)
+    out.rhs_reg = gpu_fusion_remap_data_reg(op.rhs_reg, op.ty, off)
+    out.addr_reg = gpu_fusion_remap_ptr_reg(op.addr_reg, off)
+    out.pred_reg = gpu_fusion_remap_pred_reg(op.pred_reg, off)
+    out
+}
+
+// ============================================================================
+// Fusion transform
+// ============================================================================
+
+fn gpu_fusion_build_param_map(
+    left: GpuKernelIr,
+    right: GpuKernelIr
+) -> (GpuKernelIr, [i64; 8], bool) with Mut, Panic, Div {
+    var fused = gpu_kernel_new()
+    var map: [i64; 8] = [-1; 8]
+    var ok = true
+
+    // Keep left kernel identity and params first.
+    fused.kernel_name = left.kernel_name
+
+    var i: i64 = 0
+    while i < left.param_count && i < GPU_FUSION_MAX_PARAMS {
+        fused.params[i as usize] = left.params[i as usize]
+        i = i + 1
+    }
+    fused.param_count = gpu_fusion_min(left.param_count, GPU_FUSION_MAX_PARAMS)
+
+    // For each right param, reuse existing slot or append if capacity allows.
+    var r: i64 = 0
+    while r < right.param_count && r < GPU_FUSION_MAX_PARAMS {
+        let rp = right.params[r as usize]
+        let found = gpu_fusion_param_find_index(fused.params, fused.param_count, rp)
+        if found >= 0 {
+            map[r as usize] = found
+        } else {
+            if fused.param_count < GPU_FUSION_MAX_PARAMS {
+                fused.params[fused.param_count as usize] = rp
+                map[r as usize] = fused.param_count
+                fused.param_count = fused.param_count + 1
+            } else {
+                ok = false
+                map[r as usize] = 0
+            }
+        }
+        r = r + 1
+    }
+
+    // Preserve any trailing right params > 8 as invalid map entries.
+    while r < 8 {
+        map[r as usize] = map[r as usize]
+        r = r + 1
+    }
+
+    (fused, map, ok)
+}
+
+fn gpu_fusion_append_ops(
+    fused: GpuKernelIr,
+    source: GpuKernelIr,
+    offsets: GpuFusionRegOffsets,
+    param_map: [i64; 8],
+    skip_terminal_ret: bool
+) -> (GpuKernelIr, bool) with Mut, Panic, Div {
+    var out = fused
+    var ok = true
+
+    var i: i64 = 0
+    while i < source.op_count {
+        let src_op = source.ops[i as usize]
+
+        if skip_terminal_ret && i == (source.op_count - 1) && src_op.opcode == GpuOpcode::GpuRet {
+            i = i + 1
+            continue
+        }
+
+        var remapped = gpu_fusion_remap_op(src_op, offsets)
+        remapped = gpu_fusion_remap_op_param_idx(remapped, param_map)
+
+        let append = gpu_append_op_checked(out, remapped)
+        out = append.kernel
+        if append.error == GpuError::GpuOpBufferOverflow {
+            ok = false
+            break
+        }
+
+        i = i + 1
+    }
+
+    (out, ok)
+}
+
+fn gpu_fuse_pair(left: GpuKernelIr, right: GpuKernelIr) -> (GpuKernelIr, bool) with Mut, Panic, Div {
+    let prepared = gpu_fusion_build_param_map(left, right)
+    var fused = prepared.0
+    let right_param_map = prepared.1
+    var ok = prepared.2
+
+    if !ok {
+        return (gpu_kernel_new(), false)
+    }
+
+    // Start from left metadata.
+    fused.shared_bytes = 0
+    fused.shared_mem_bytes = 0
+    fused.max_threads = gpu_fusion_merge_thread_hint(left, right)
+
+    // Append left ops first, but drop terminal ret to allow straight-line fusion.
+    let append_left = gpu_fusion_append_ops(
+        fused,
+        left,
+        GpuFusionRegOffsets { b32: 0, b64: 0, f32: 0, f64: 0, pred: 0, shared_addr: 0 },
+        [-1; 8],
+        true
+    )
+    fused = append_left.0
+    ok = ok && append_left.1
+
+    if !ok {
+        return (gpu_kernel_new(), false)
+    }
+
+    let right_offsets = gpu_fusion_reg_offsets_from(left)
+
+    let append_right = gpu_fusion_append_ops(
+        fused,
+        right,
+        right_offsets,
+        right_param_map,
+        false
+    )
+    fused = append_right.0
+    ok = ok && append_right.1
+
+    if !ok {
+        return (gpu_kernel_new(), false)
+    }
+
+    // Combine shared memory declarations.
+    fused.shared_bytes = right_offsets.shared_addr + (if right.shared_mem_bytes > right.shared_bytes { right.shared_mem_bytes } else { right.shared_bytes })
+    fused.shared_mem_bytes = fused.shared_bytes
+
+    // Combine register maxima.
+    fused.max_reg_u32 = left.max_reg_u32 + right.max_reg_u32
+    fused.max_reg_u64 = left.max_reg_u64 + right.max_reg_u64
+    fused.max_reg_f32 = left.max_reg_f32 + right.max_reg_f32
+    fused.max_reg_f64 = left.max_reg_f64 + right.max_reg_f64
+    fused.max_reg_i32 = left.max_reg_i32 + right.max_reg_i32
+    fused.max_reg_i64 = left.max_reg_i64 + right.max_reg_i64
+    fused.max_reg_pred = left.max_reg_pred + right.max_reg_pred
+
+    // If fusion removed left ret and right had no ret, append one.
+    var has_ret = false
+    var oi: i64 = 0
+    while oi < fused.op_count {
+        if fused.ops[oi as usize].opcode == GpuOpcode::GpuRet {
+            has_ret = true
+            break
+        }
+        oi = oi + 1
+    }
+    if !has_ret {
+        var ret_op = gpu_op_new()
+        ret_op.opcode = GpuOpcode::GpuRet
+        let appended = gpu_append_op_checked(fused, ret_op)
+        fused = appended.kernel
+        if appended.error == GpuError::GpuOpBufferOverflow {
+            return (gpu_kernel_new(), false)
+        }
+    }
+
+    (fused, true)
+}
+
+// ============================================================================
+// Top-level API
+// ============================================================================
+
+fn gpu_fusion_apply_once(
+    kernels: [GpuKernelIr; 64],
+    count: i64,
+    cfg: GpuFusionConfig
+) -> ([GpuKernelIr; 64], i64, bool) with Mut, Panic, Div {
+    var out: [GpuKernelIr; 64] = kernels
+    var out_count = count
+
+    let cand = gpu_fusion_find_best_adjacent(kernels, count, cfg)
+    if !cand.can_fuse {
+        return (out, out_count, false)
+    }
+    if cand.score < cfg.min_benefit_score {
+        return (out, out_count, false)
+    }
+
+    let left_idx = cand.left_index
+    let right_idx = cand.right_index
+
+    if left_idx < 0 || right_idx < 0 || right_idx != (left_idx + 1) {
+        return (out, out_count, false)
+    }
+
+    let fused_pair = gpu_fuse_pair(kernels[left_idx as usize], kernels[right_idx as usize])
+    if !fused_pair.1 {
+        return (out, out_count, false)
+    }
+
+    // Rebuild compact kernel list with the fused kernel replacing [left,right].
+    var dst: i64 = 0
+    var src: i64 = 0
+    while src < count {
+        if src == left_idx {
+            out[dst as usize] = fused_pair.0
+            dst = dst + 1
+            src = src + 2
+            continue
+        }
+        out[dst as usize] = kernels[src as usize]
+        dst = dst + 1
+        src = src + 1
+    }
+
+    // Zero trailing slots for deterministic output.
+    while dst < GPU_FUSION_MAX_KERNELS {
+        out[dst as usize] = gpu_kernel_new()
+        dst = dst + 1
+    }
+
+    out_count = count - 1
+    (out, out_count, true)
+}
+
+fn gpu_fusion_run(
+    kernels: [GpuKernelIr; 64],
+    count: i64,
+    cfg: GpuFusionConfig
+) -> ([GpuKernelIr; 64], i64) with Mut, Panic, Div {
+    var current = kernels
+    var current_count = count
+
+    var round: i64 = 0
+    while round < cfg.max_rounds {
+        let step = gpu_fusion_apply_once(current, current_count, cfg)
+        current = step.0
+        current_count = step.1
+        if !step.2 {
+            break
+        }
+        round = round + 1
+    }
+
+    (current, current_count)
+}
+
+fn gpu_fusion_run_default(
+    kernels: [GpuKernelIr; 64],
+    count: i64
+) -> ([GpuKernelIr; 64], i64) with Mut, Panic, Div {
+    gpu_fusion_run(kernels, count, gpu_fusion_config_default())
+}
+
+fn hlir_gpu_apply_fusion(
+    lowered: HlirGpuLoweredModule,
+    cfg: GpuFusionConfig
+) -> HlirGpuLoweredModule with Mut, Panic, Div {
+    var out = lowered
+    let fused = gpu_fusion_run(out.kernels, out.kernel_count, cfg)
+    out.kernels = fused.0
+    out.kernel_count = fused.1
+    out
+}
+
+fn hlir_gpu_apply_fusion_default(lowered: HlirGpuLoweredModule) -> HlirGpuLoweredModule with Mut, Panic, Div {
+    hlir_gpu_apply_fusion(lowered, gpu_fusion_config_default())
+}
+
+// End of gpu/opt/fusion.sio

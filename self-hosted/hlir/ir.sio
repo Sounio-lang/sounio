@@ -1,0 +1,1355 @@
+// self-hosted::hlir::ir — HLIR (High-Level Intermediate Representation) data structures
+//
+// SSA-form IR consumed by LLVM and GPU codegen backends.
+// Follows the same patterns as self-hosted/ir/ir.sio:
+//   - Fixed-size arrays with counts
+//   - i64 IDs with sentinel values
+//   - Struct-based instruction encoding (no enum field destructuring)
+//   - Name type for identifiers
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+let HLIR_MAX_FUNCTIONS: i64 = 1024
+let HLIR_MAX_GLOBALS: i64 = 512
+let HLIR_MAX_TYPEDEFS: i64 = 512
+let HLIR_MAX_BLOCKS: i64 = 4096
+let HLIR_MAX_INSTRS: i64 = 16384
+let HLIR_MAX_PARAMS: i64 = 64
+let HLIR_MAX_LOCALS: i64 = 8192
+let HLIR_MAX_EFFECTS: i64 = 16
+let HLIR_MAX_BLOCK_PARAMS: i64 = 32
+let HLIR_MAX_PHI_INCOMING: i64 = 64
+let HLIR_MAX_SWITCH_CASES: i64 = 256
+let HLIR_MAX_CALL_ARGS: i64 = 64
+let HLIR_MAX_STRUCT_FIELDS: i64 = 128
+let HLIR_MAX_CONST_ELEMS: i64 = 256
+
+let HLIR_INVALID_VALUE: i64 = -1
+let HLIR_INVALID_BLOCK: i64 = -1
+let HLIR_INVALID_FUNC: i64 = -1
+let HLIR_UNIT_VALUE: i64 = 2147483647   // u32::MAX equivalent
+
+// ============================================================================
+// Identifiers (opaque i64 wrappers, same pattern as IR module)
+// ============================================================================
+
+// ValueId, BlockId, FunctionId are plain i64.
+// We use naming conventions rather than wrapper structs for clarity.
+//   value_id: i64   — SSA value identifier
+//   block_id: i64   — basic block identifier
+//   func_id:  i64   — function identifier
+
+// ============================================================================
+// Name type (128-byte fixed buffer, same as ir/ir.sio)
+// ============================================================================
+
+struct HlirName {
+    buf: [i8; 128],
+    len: i64,
+}
+
+fn hlir_empty_name() -> HlirName {
+    HlirName { buf: [0; 128], len: 0 }
+}
+
+fn hlir_name_from_str(s: string) -> HlirName with Mut, Panic, Div {
+    var name = hlir_empty_name()
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        if i >= 128 { break }
+        name.buf[i as usize] = str_char_at(s, i) as i8
+        i = i + 1
+    }
+    name.len = if n < 128 { n } else { 128 }
+    name
+}
+
+fn hlir_name_eq(a: HlirName, b: HlirName) -> bool {
+    if a.len != b.len { return false }
+    var i: i64 = 0
+    while i < a.len {
+        if a.buf[i as usize] != b.buf[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn hlir_name_to_string(n: HlirName) -> string with Mut, Panic, Div, Alloc {
+    str_from_bytes(n.buf, n.len)
+}
+
+// ============================================================================
+// HLIR Type System
+// ============================================================================
+
+enum HlirTypeKind {
+    HlirTypeVoid,
+    HlirTypeBool,
+    HlirTypeI8,
+    HlirTypeI16,
+    HlirTypeI32,
+    HlirTypeI64,
+    HlirTypeI128,
+    HlirTypeU8,
+    HlirTypeU16,
+    HlirTypeU32,
+    HlirTypeU64,
+    HlirTypeU128,
+    HlirTypeF32,
+    HlirTypeF64,
+    HlirTypePtr,        // pointer to inner type (index into type table)
+    HlirTypeArray,       // array of inner type with length
+    HlirTypeStruct,      // named struct (name field)
+    HlirTypeTuple,       // tuple (element types in type_elems)
+    HlirTypeFunction,    // function type (params + return in type_elems)
+    // Linear algebra (SIMD)
+    HlirTypeVec2,        // 2x f32
+    HlirTypeVec3,        // 3x f32 (padded to 4)
+    HlirTypeVec4,        // 4x f32
+    HlirTypeMat2,        // 2x2 f32
+    HlirTypeMat3,        // 3x3 f32
+    HlirTypeMat4,        // 4x4 f32
+    HlirTypeQuat,        // 4x f32 quaternion
+    // Hypercomplex (Cayley-Dickson)
+    HlirTypeOctonion,    // 8x f32
+    HlirTypeSedenion,    // 16x f32
+    // Quaternionic NN
+    HlirTypeQuatLinear,
+    HlirTypeQuatConv2d,
+    HlirTypeQuatRnnState,
+    HlirTypeQuatGate,
+    // f64 vectors
+    HlirTypeVec2d,       // 2x f64
+    HlirTypeVec3d,       // 3x f64
+    HlirTypeVec4d,       // 4x f64
+    // Automatic differentiation
+    HlirTypeDual,        // (value: f64, derivative: f64)
+    // Epistemic
+    HlirTypeKnowledge,   // Knowledge<inner> with epsilon/provenance
+}
+
+// Epistemic mode for Knowledge types
+enum EpistemicMode {
+    EpistemicDefault,
+    EpistemicStrict,
+    EpistemicRelaxed,
+}
+
+// Full type descriptor (flat struct, no recursive Box<HlirType>)
+// For compound types, inner_type_idx points into a type table.
+struct HlirType {
+    kind: HlirTypeKind,
+    // For Ptr: index of pointed-to type in module type table
+    inner_type_idx: i64,
+    // For Array: element count
+    array_len: i64,
+    // For Struct: struct name
+    name: HlirName,
+    // For Tuple/Function: element type indices stored in type_elems
+    type_elems: [i64; 32],
+    type_elem_count: i64,
+    // For Function: index of return type (last elem is return)
+    // For Knowledge: epistemic metadata
+    epistemic_mode: EpistemicMode,
+    epsilon_bound: f64,         // -1.0 = not set
+    provenance_id: i64,         // -1 = not set
+}
+
+fn hlir_type_void() -> HlirType {
+    HlirType {
+        kind: HlirTypeKind::HlirTypeVoid,
+        inner_type_idx: -1,
+        array_len: 0,
+        name: hlir_empty_name(),
+        type_elems: [0; 32],
+        type_elem_count: 0,
+        epistemic_mode: EpistemicMode::EpistemicDefault,
+        epsilon_bound: -1.0,
+        provenance_id: -1,
+    }
+}
+
+fn hlir_type_bool() -> HlirType {
+    let base = hlir_type_void()
+    HlirType {
+        kind: HlirTypeKind::HlirTypeBool,
+        inner_type_idx: base.inner_type_idx,
+        array_len: base.array_len,
+        name: base.name,
+        type_elems: base.type_elems,
+        type_elem_count: base.type_elem_count,
+        epistemic_mode: base.epistemic_mode,
+        epsilon_bound: base.epsilon_bound,
+        provenance_id: base.provenance_id,
+    }
+}
+
+fn hlir_type_i8() -> HlirType {
+    let base = hlir_type_void()
+    HlirType {
+        kind: HlirTypeKind::HlirTypeI8,
+        inner_type_idx: base.inner_type_idx,
+        array_len: base.array_len,
+        name: base.name,
+        type_elems: base.type_elems,
+        type_elem_count: base.type_elem_count,
+        epistemic_mode: base.epistemic_mode,
+        epsilon_bound: base.epsilon_bound,
+        provenance_id: base.provenance_id,
+    }
+}
+
+fn hlir_type_i16() -> HlirType {
+    let base = hlir_type_void()
+    HlirType {
+        kind: HlirTypeKind::HlirTypeI16,
+        inner_type_idx: base.inner_type_idx,
+        array_len: base.array_len,
+        name: base.name,
+        type_elems: base.type_elems,
+        type_elem_count: base.type_elem_count,
+        epistemic_mode: base.epistemic_mode,
+        epsilon_bound: base.epsilon_bound,
+        provenance_id: base.provenance_id,
+    }
+}
+
+fn hlir_type_i32() -> HlirType {
+    let base = hlir_type_void()
+    HlirType {
+        kind: HlirTypeKind::HlirTypeI32,
+        inner_type_idx: base.inner_type_idx,
+        array_len: base.array_len,
+        name: base.name,
+        type_elems: base.type_elems,
+        type_elem_count: base.type_elem_count,
+        epistemic_mode: base.epistemic_mode,
+        epsilon_bound: base.epsilon_bound,
+        provenance_id: base.provenance_id,
+    }
+}
+
+fn hlir_type_i64() -> HlirType {
+    let base = hlir_type_void()
+    HlirType {
+        kind: HlirTypeKind::HlirTypeI64,
+        inner_type_idx: base.inner_type_idx,
+        array_len: base.array_len,
+        name: base.name,
+        type_elems: base.type_elems,
+        type_elem_count: base.type_elem_count,
+        epistemic_mode: base.epistemic_mode,
+        epsilon_bound: base.epsilon_bound,
+        provenance_id: base.provenance_id,
+    }
+}
+
+fn hlir_type_i128() -> HlirType {
+    let base = hlir_type_void()
+    HlirType {
+        kind: HlirTypeKind::HlirTypeI128,
+        inner_type_idx: base.inner_type_idx,
+        array_len: base.array_len,
+        name: base.name,
+        type_elems: base.type_elems,
+        type_elem_count: base.type_elem_count,
+        epistemic_mode: base.epistemic_mode,
+        epsilon_bound: base.epsilon_bound,
+        provenance_id: base.provenance_id,
+    }
+}
+
+fn hlir_type_u8() -> HlirType {
+    let base = hlir_type_void()
+    HlirType {
+        kind: HlirTypeKind::HlirTypeU8,
+        inner_type_idx: base.inner_type_idx,
+        array_len: base.array_len,
+        name: base.name,
+        type_elems: base.type_elems,
+        type_elem_count: base.type_elem_count,
+        epistemic_mode: base.epistemic_mode,
+        epsilon_bound: base.epsilon_bound,
+        provenance_id: base.provenance_id,
+    }
+}
+
+fn hlir_type_u16() -> HlirType {
+    let base = hlir_type_void()
+    HlirType {
+        kind: HlirTypeKind::HlirTypeU16,
+        inner_type_idx: base.inner_type_idx,
+        array_len: base.array_len,
+        name: base.name,
+        type_elems: base.type_elems,
+        type_elem_count: base.type_elem_count,
+        epistemic_mode: base.epistemic_mode,
+        epsilon_bound: base.epsilon_bound,
+        provenance_id: base.provenance_id,
+    }
+}
+
+fn hlir_type_u32() -> HlirType {
+    let base = hlir_type_void()
+    HlirType {
+        kind: HlirTypeKind::HlirTypeU32,
+        inner_type_idx: base.inner_type_idx,
+        array_len: base.array_len,
+        name: base.name,
+        type_elems: base.type_elems,
+        type_elem_count: base.type_elem_count,
+        epistemic_mode: base.epistemic_mode,
+        epsilon_bound: base.epsilon_bound,
+        provenance_id: base.provenance_id,
+    }
+}
+
+fn hlir_type_u64() -> HlirType {
+    let base = hlir_type_void()
+    HlirType {
+        kind: HlirTypeKind::HlirTypeU64,
+        inner_type_idx: base.inner_type_idx,
+        array_len: base.array_len,
+        name: base.name,
+        type_elems: base.type_elems,
+        type_elem_count: base.type_elem_count,
+        epistemic_mode: base.epistemic_mode,
+        epsilon_bound: base.epsilon_bound,
+        provenance_id: base.provenance_id,
+    }
+}
+
+fn hlir_type_u128() -> HlirType {
+    let base = hlir_type_void()
+    HlirType {
+        kind: HlirTypeKind::HlirTypeU128,
+        inner_type_idx: base.inner_type_idx,
+        array_len: base.array_len,
+        name: base.name,
+        type_elems: base.type_elems,
+        type_elem_count: base.type_elem_count,
+        epistemic_mode: base.epistemic_mode,
+        epsilon_bound: base.epsilon_bound,
+        provenance_id: base.provenance_id,
+    }
+}
+
+fn hlir_type_f32() -> HlirType {
+    let base = hlir_type_void()
+    HlirType {
+        kind: HlirTypeKind::HlirTypeF32,
+        inner_type_idx: base.inner_type_idx,
+        array_len: base.array_len,
+        name: base.name,
+        type_elems: base.type_elems,
+        type_elem_count: base.type_elem_count,
+        epistemic_mode: base.epistemic_mode,
+        epsilon_bound: base.epsilon_bound,
+        provenance_id: base.provenance_id,
+    }
+}
+
+fn hlir_type_f64() -> HlirType {
+    let base = hlir_type_void()
+    HlirType {
+        kind: HlirTypeKind::HlirTypeF64,
+        inner_type_idx: base.inner_type_idx,
+        array_len: base.array_len,
+        name: base.name,
+        type_elems: base.type_elems,
+        type_elem_count: base.type_elem_count,
+        epistemic_mode: base.epistemic_mode,
+        epsilon_bound: base.epsilon_bound,
+        provenance_id: base.provenance_id,
+    }
+}
+
+fn hlir_type_ptr(inner_idx: i64) -> HlirType {
+    let base = hlir_type_void()
+    HlirType {
+        kind: HlirTypeKind::HlirTypePtr,
+        inner_type_idx: inner_idx,
+        array_len: base.array_len,
+        name: base.name,
+        type_elems: base.type_elems,
+        type_elem_count: base.type_elem_count,
+        epistemic_mode: base.epistemic_mode,
+        epsilon_bound: base.epsilon_bound,
+        provenance_id: base.provenance_id,
+    }
+}
+
+fn hlir_type_array(elem_idx: i64, length: i64) -> HlirType {
+    let base = hlir_type_void()
+    HlirType {
+        kind: HlirTypeKind::HlirTypeArray,
+        inner_type_idx: elem_idx,
+        array_len: length,
+        name: base.name,
+        type_elems: base.type_elems,
+        type_elem_count: base.type_elem_count,
+        epistemic_mode: base.epistemic_mode,
+        epsilon_bound: base.epsilon_bound,
+        provenance_id: base.provenance_id,
+    }
+}
+
+fn hlir_type_struct(struct_name: HlirName) -> HlirType {
+    let base = hlir_type_void()
+    HlirType {
+        kind: HlirTypeKind::HlirTypeStruct,
+        inner_type_idx: base.inner_type_idx,
+        array_len: base.array_len,
+        name: struct_name,
+        type_elems: base.type_elems,
+        type_elem_count: base.type_elem_count,
+        epistemic_mode: base.epistemic_mode,
+        epsilon_bound: base.epsilon_bound,
+        provenance_id: base.provenance_id,
+    }
+}
+
+fn hlir_type_is_integer(ty: HlirType) -> bool {
+    ty.kind == HlirTypeKind::HlirTypeI8
+    || ty.kind == HlirTypeKind::HlirTypeI16
+    || ty.kind == HlirTypeKind::HlirTypeI32
+    || ty.kind == HlirTypeKind::HlirTypeI64
+    || ty.kind == HlirTypeKind::HlirTypeI128
+    || ty.kind == HlirTypeKind::HlirTypeU8
+    || ty.kind == HlirTypeKind::HlirTypeU16
+    || ty.kind == HlirTypeKind::HlirTypeU32
+    || ty.kind == HlirTypeKind::HlirTypeU64
+    || ty.kind == HlirTypeKind::HlirTypeU128
+}
+
+fn hlir_type_is_signed(ty: HlirType) -> bool {
+    ty.kind == HlirTypeKind::HlirTypeI8
+    || ty.kind == HlirTypeKind::HlirTypeI16
+    || ty.kind == HlirTypeKind::HlirTypeI32
+    || ty.kind == HlirTypeKind::HlirTypeI64
+    || ty.kind == HlirTypeKind::HlirTypeI128
+}
+
+fn hlir_type_is_float(ty: HlirType) -> bool {
+    ty.kind == HlirTypeKind::HlirTypeF32
+    || ty.kind == HlirTypeKind::HlirTypeF64
+}
+
+fn hlir_type_is_vector(ty: HlirType) -> bool {
+    ty.kind == HlirTypeKind::HlirTypeVec2
+    || ty.kind == HlirTypeKind::HlirTypeVec3
+    || ty.kind == HlirTypeKind::HlirTypeVec4
+    || ty.kind == HlirTypeKind::HlirTypeVec2d
+    || ty.kind == HlirTypeKind::HlirTypeVec3d
+    || ty.kind == HlirTypeKind::HlirTypeVec4d
+}
+
+fn hlir_type_is_hypercomplex(ty: HlirType) -> bool {
+    ty.kind == HlirTypeKind::HlirTypeQuat
+    || ty.kind == HlirTypeKind::HlirTypeOctonion
+    || ty.kind == HlirTypeKind::HlirTypeSedenion
+}
+
+// ============================================================================
+// Binary and Unary Operators
+// ============================================================================
+
+enum HlirBinaryOp {
+    // Integer arithmetic
+    HlirOpAdd,
+    HlirOpSub,
+    HlirOpMul,
+    HlirOpSDiv,
+    HlirOpUDiv,
+    HlirOpSRem,
+    HlirOpURem,
+    // Float arithmetic
+    HlirOpFAdd,
+    HlirOpFSub,
+    HlirOpFMul,
+    HlirOpFDiv,
+    HlirOpFRem,
+    // Bitwise
+    HlirOpAnd,
+    HlirOpOr,
+    HlirOpXor,
+    HlirOpShl,
+    HlirOpAShr,
+    HlirOpLShr,
+    // Integer comparison (signed)
+    HlirOpEq,
+    HlirOpNe,
+    HlirOpSLt,
+    HlirOpSLe,
+    HlirOpSGt,
+    HlirOpSGe,
+    // Integer comparison (unsigned)
+    HlirOpULt,
+    HlirOpULe,
+    HlirOpUGt,
+    HlirOpUGe,
+    // Float comparison (ordered)
+    HlirOpFOEq,
+    HlirOpFONe,
+    HlirOpFOLt,
+    HlirOpFOLe,
+    HlirOpFOGt,
+    HlirOpFOGe,
+    // Array
+    HlirOpConcat,
+}
+
+enum HlirUnaryOp {
+    HlirOpNeg,
+    HlirOpFNeg,
+    HlirOpNot,
+}
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+enum HlirConstKind {
+    HlirConstUnit,
+    HlirConstBool,
+    HlirConstInt,
+    HlirConstFloat,
+    HlirConstString,
+    HlirConstCString,
+    HlirConstArray,
+    HlirConstStruct,
+    HlirConstNull,
+    HlirConstUndef,
+    HlirConstFunctionRef,
+    HlirConstGlobalRef,
+}
+
+struct HlirConstant {
+    kind: HlirConstKind,
+    bool_val: bool,
+    int_val: i64,
+    float_val: f64,
+    string_val: HlirName,
+    ty: HlirType,
+    // For Array/Struct constants: child constant indices in a const table
+    elem_indices: [i64; 64],
+    elem_count: i64,
+    // For FunctionRef/GlobalRef
+    ref_name: HlirName,
+}
+
+fn hlir_const_unit() -> HlirConstant {
+    HlirConstant {
+        kind: HlirConstKind::HlirConstUnit,
+        bool_val: false,
+        int_val: 0,
+        float_val: 0.0,
+        string_val: hlir_empty_name(),
+        ty: hlir_type_void(),
+        elem_indices: [0; 64],
+        elem_count: 0,
+        ref_name: hlir_empty_name(),
+    }
+}
+
+fn hlir_const_int(value: i64, ty: HlirType) -> HlirConstant {
+    let base = hlir_const_unit()
+    HlirConstant {
+        kind: HlirConstKind::HlirConstInt,
+        bool_val: base.bool_val,
+        int_val: value,
+        float_val: base.float_val,
+        string_val: base.string_val,
+        ty: ty,
+        elem_indices: base.elem_indices,
+        elem_count: base.elem_count,
+        ref_name: base.ref_name,
+    }
+}
+
+fn hlir_const_float(value: f64, ty: HlirType) -> HlirConstant {
+    let base = hlir_const_unit()
+    HlirConstant {
+        kind: HlirConstKind::HlirConstFloat,
+        bool_val: base.bool_val,
+        int_val: base.int_val,
+        float_val: value,
+        string_val: base.string_val,
+        ty: ty,
+        elem_indices: base.elem_indices,
+        elem_count: base.elem_count,
+        ref_name: base.ref_name,
+    }
+}
+
+fn hlir_const_bool(value: bool) -> HlirConstant {
+    let base = hlir_const_unit()
+    HlirConstant {
+        kind: HlirConstKind::HlirConstBool,
+        bool_val: value,
+        int_val: base.int_val,
+        float_val: base.float_val,
+        string_val: base.string_val,
+        ty: hlir_type_bool(),
+        elem_indices: base.elem_indices,
+        elem_count: base.elem_count,
+        ref_name: base.ref_name,
+    }
+}
+
+fn hlir_const_string(s: HlirName) -> HlirConstant {
+    let base = hlir_const_unit()
+    HlirConstant {
+        kind: HlirConstKind::HlirConstString,
+        bool_val: base.bool_val,
+        int_val: base.int_val,
+        float_val: base.float_val,
+        string_val: s,
+        ty: base.ty,
+        elem_indices: base.elem_indices,
+        elem_count: base.elem_count,
+        ref_name: base.ref_name,
+    }
+}
+
+fn hlir_const_null(ty: HlirType) -> HlirConstant {
+    let base = hlir_const_unit()
+    HlirConstant {
+        kind: HlirConstKind::HlirConstNull,
+        bool_val: base.bool_val,
+        int_val: base.int_val,
+        float_val: base.float_val,
+        string_val: base.string_val,
+        ty: ty,
+        elem_indices: base.elem_indices,
+        elem_count: base.elem_count,
+        ref_name: base.ref_name,
+    }
+}
+
+fn hlir_const_func_ref(name: HlirName) -> HlirConstant {
+    let base = hlir_const_unit()
+    HlirConstant {
+        kind: HlirConstKind::HlirConstFunctionRef,
+        bool_val: base.bool_val,
+        int_val: base.int_val,
+        float_val: base.float_val,
+        string_val: base.string_val,
+        ty: base.ty,
+        elem_indices: base.elem_indices,
+        elem_count: base.elem_count,
+        ref_name: name,
+    }
+}
+
+// ============================================================================
+// Instructions (SSA operations)
+// ============================================================================
+
+enum HlirOpKind {
+    HlirOpConst,
+    HlirOpCopy,
+    HlirOpBinary,
+    HlirOpUnary,
+    HlirOpCall,
+    HlirOpCallDirect,
+    HlirOpLoad,
+    HlirOpStore,
+    HlirOpGetFieldPtr,
+    HlirOpGetElementPtr,
+    HlirOpAlloca,
+    HlirOpCast,
+    HlirOpPhi,
+    HlirOpExtractValue,
+    HlirOpInsertValue,
+    HlirOpTuple,
+    HlirOpArray,
+    HlirOpStruct,
+    HlirOpPerformEffect,
+    HlirOpPushHandler,
+    HlirOpPopHandler,
+    HlirOpDispatchEffect,
+    HlirOpSelect,
+}
+
+// Flat instruction struct — all fields present, meaning depends on op_kind.
+// This is the self-hosted pattern (no enum field destructuring).
+struct HlirInstr {
+    result: i64,              // ValueId (-1 = no result, e.g. Store)
+    op_kind: HlirOpKind,
+    ty: HlirType,             // result type
+
+    // For Const
+    constant: HlirConstant,
+
+    // For Copy, Load, Unary
+    src: i64,                 // ValueId
+
+    // For Binary
+    bin_op: HlirBinaryOp,
+    lhs: i64,                 // ValueId
+    rhs: i64,                 // ValueId
+
+    // For Unary
+    un_op: HlirUnaryOp,
+
+    // For Call/CallDirect
+    call_func: i64,           // ValueId (for indirect Call)
+    call_name: HlirName,      // function name (for CallDirect)
+    call_args: [i64; 64],     // ValueId array
+    call_arg_count: i64,
+
+    // For GetFieldPtr, ExtractValue, InsertValue
+    base: i64,                // ValueId
+    field_index: i64,
+
+    // For GetElementPtr
+    index: i64,               // ValueId
+
+    // For Store
+    store_ptr: i64,           // ValueId
+    store_value: i64,         // ValueId
+
+    // For Alloca
+    alloca_ty: HlirType,
+
+    // For Cast
+    cast_value: i64,          // ValueId
+    cast_source: HlirType,
+    cast_target: HlirType,
+
+    // For Phi
+    phi_incoming: [HlirPhiEntry; 64],
+    phi_count: i64,
+
+    // For InsertValue
+    insert_value: i64,        // ValueId
+
+    // For Tuple/Array
+    elems: [i64; 64],         // ValueId array
+    elem_count: i64,
+
+    // For Struct
+    struct_name: HlirName,
+    struct_fields: [HlirStructFieldEntry; 128],
+    struct_field_count: i64,
+
+    // For PerformEffect/DispatchEffect
+    effect_name: HlirName,
+    effect_op: HlirName,
+    effect_args: [i64; 16],
+    effect_arg_count: i64,
+
+    // For PushHandler
+    handler_name: HlirName,
+    handler_id: i64,
+
+    // For Select
+    select_cond: i64,         // ValueId
+    select_true: i64,         // ValueId
+    select_false: i64,        // ValueId
+}
+
+struct HlirPhiEntry {
+    block_id: i64,
+    value_id: i64,
+}
+
+struct HlirStructFieldEntry {
+    name: HlirName,
+    value_id: i64,
+}
+
+fn hlir_phi_entry_empty() -> HlirPhiEntry {
+    HlirPhiEntry { block_id: HLIR_INVALID_BLOCK, value_id: HLIR_INVALID_VALUE }
+}
+
+fn hlir_struct_field_empty() -> HlirStructFieldEntry {
+    HlirStructFieldEntry { name: hlir_empty_name(), value_id: HLIR_INVALID_VALUE }
+}
+
+fn hlir_instr_new(op: HlirOpKind) -> HlirInstr {
+    HlirInstr {
+        result: HLIR_INVALID_VALUE,
+        op_kind: op,
+        ty: hlir_type_void(),
+        constant: hlir_const_unit(),
+        src: HLIR_INVALID_VALUE,
+        bin_op: HlirBinaryOp::HlirOpAdd,
+        lhs: HLIR_INVALID_VALUE,
+        rhs: HLIR_INVALID_VALUE,
+        un_op: HlirUnaryOp::HlirOpNeg,
+        call_func: HLIR_INVALID_VALUE,
+        call_name: hlir_empty_name(),
+        call_args: [HLIR_INVALID_VALUE; 64],
+        call_arg_count: 0,
+        base: HLIR_INVALID_VALUE,
+        field_index: -1,
+        index: HLIR_INVALID_VALUE,
+        store_ptr: HLIR_INVALID_VALUE,
+        store_value: HLIR_INVALID_VALUE,
+        alloca_ty: hlir_type_void(),
+        cast_value: HLIR_INVALID_VALUE,
+        cast_source: hlir_type_void(),
+        cast_target: hlir_type_void(),
+        phi_incoming: [hlir_phi_entry_empty(); 64],
+        phi_count: 0,
+        insert_value: HLIR_INVALID_VALUE,
+        elems: [HLIR_INVALID_VALUE; 64],
+        elem_count: 0,
+        struct_name: hlir_empty_name(),
+        struct_fields: [hlir_struct_field_empty(); 128],
+        struct_field_count: 0,
+        effect_name: hlir_empty_name(),
+        effect_op: hlir_empty_name(),
+        effect_args: [HLIR_INVALID_VALUE; 16],
+        effect_arg_count: 0,
+        handler_name: hlir_empty_name(),
+        handler_id: -1,
+        select_cond: HLIR_INVALID_VALUE,
+        select_true: HLIR_INVALID_VALUE,
+        select_false: HLIR_INVALID_VALUE,
+    }
+}
+
+// ============================================================================
+// Terminators
+// ============================================================================
+
+enum HlirTermKind {
+    HlirTermReturn,
+    HlirTermBranch,
+    HlirTermCondBranch,
+    HlirTermSwitch,
+    HlirTermUnreachable,
+}
+
+struct HlirSwitchCase {
+    value: i64,
+    target: i64,    // BlockId
+}
+
+fn hlir_switch_case_empty() -> HlirSwitchCase {
+    HlirSwitchCase { value: 0, target: HLIR_INVALID_BLOCK }
+}
+
+struct HlirTerminator {
+    kind: HlirTermKind,
+    // Return
+    return_value: i64,       // ValueId (-1 = void return)
+    // Branch
+    branch_target: i64,      // BlockId
+    // CondBranch
+    cond_value: i64,         // ValueId
+    then_block: i64,         // BlockId
+    else_block: i64,         // BlockId
+    // Switch
+    switch_value: i64,       // ValueId
+    switch_default: i64,     // BlockId
+    switch_cases: [HlirSwitchCase; 256],
+    switch_case_count: i64,
+}
+
+fn hlir_term_unreachable() -> HlirTerminator {
+    HlirTerminator {
+        kind: HlirTermKind::HlirTermUnreachable,
+        return_value: HLIR_INVALID_VALUE,
+        branch_target: HLIR_INVALID_BLOCK,
+        cond_value: HLIR_INVALID_VALUE,
+        then_block: HLIR_INVALID_BLOCK,
+        else_block: HLIR_INVALID_BLOCK,
+        switch_value: HLIR_INVALID_VALUE,
+        switch_default: HLIR_INVALID_BLOCK,
+        switch_cases: [hlir_switch_case_empty(); 256],
+        switch_case_count: 0,
+    }
+}
+
+fn hlir_term_return(value_id: i64) -> HlirTerminator {
+    let base = hlir_term_unreachable()
+    HlirTerminator {
+        kind: HlirTermKind::HlirTermReturn,
+        return_value: value_id,
+        branch_target: base.branch_target,
+        cond_value: base.cond_value,
+        then_block: base.then_block,
+        else_block: base.else_block,
+        switch_value: base.switch_value,
+        switch_default: base.switch_default,
+        switch_cases: base.switch_cases,
+        switch_case_count: base.switch_case_count,
+    }
+}
+
+fn hlir_term_branch(target: i64) -> HlirTerminator {
+    let base = hlir_term_unreachable()
+    HlirTerminator {
+        kind: HlirTermKind::HlirTermBranch,
+        return_value: base.return_value,
+        branch_target: target,
+        cond_value: base.cond_value,
+        then_block: base.then_block,
+        else_block: base.else_block,
+        switch_value: base.switch_value,
+        switch_default: base.switch_default,
+        switch_cases: base.switch_cases,
+        switch_case_count: base.switch_case_count,
+    }
+}
+
+fn hlir_term_cond_branch(cond: i64, then_blk: i64, else_blk: i64) -> HlirTerminator {
+    let base = hlir_term_unreachable()
+    HlirTerminator {
+        kind: HlirTermKind::HlirTermCondBranch,
+        return_value: base.return_value,
+        branch_target: base.branch_target,
+        cond_value: cond,
+        then_block: then_blk,
+        else_block: else_blk,
+        switch_value: base.switch_value,
+        switch_default: base.switch_default,
+        switch_cases: base.switch_cases,
+        switch_case_count: base.switch_case_count,
+    }
+}
+
+// ============================================================================
+// Basic Blocks
+// ============================================================================
+
+struct HlirBlockParam {
+    value_id: i64,
+    ty: HlirType,
+}
+
+fn hlir_block_param_empty() -> HlirBlockParam {
+    HlirBlockParam { value_id: HLIR_INVALID_VALUE, ty: hlir_type_void() }
+}
+
+struct HlirBlock {
+    id: i64,                  // BlockId
+    label: HlirName,
+    params: [HlirBlockParam; 32],
+    param_count: i64,
+    instrs: [HlirInstr; 16384],
+    instr_count: i64,
+    terminator: HlirTerminator,
+}
+
+fn hlir_block_new(block_id: i64, label: HlirName) -> HlirBlock {
+    HlirBlock {
+        id: block_id,
+        label: label,
+        params: [hlir_block_param_empty(); 32],
+        param_count: 0,
+        instrs: [hlir_instr_new(HlirOpKind::HlirOpConst); 16384],
+        instr_count: 0,
+        terminator: hlir_term_unreachable(),
+    }
+}
+
+// ============================================================================
+// ABI
+// ============================================================================
+
+enum HlirAbi {
+    HlirAbiSounio,      // Default Sounio calling convention
+    HlirAbiC,           // C calling convention
+    HlirAbiSystem,      // Platform default
+    HlirAbiCUnwind,     // C with unwind
+}
+
+// ============================================================================
+// Function Parameters
+// ============================================================================
+
+struct HlirParam {
+    value_id: i64,
+    name: HlirName,
+    ty: HlirType,
+}
+
+fn hlir_param_empty() -> HlirParam {
+    HlirParam { value_id: HLIR_INVALID_VALUE, name: hlir_empty_name(), ty: hlir_type_void() }
+}
+
+// ============================================================================
+// Local variable type mapping (ValueId -> HlirType)
+// ============================================================================
+
+struct HlirLocalEntry {
+    value_id: i64,
+    ty: HlirType,
+}
+
+fn hlir_local_empty() -> HlirLocalEntry {
+    HlirLocalEntry { value_id: HLIR_INVALID_VALUE, ty: hlir_type_void() }
+}
+
+// ============================================================================
+// Functions
+// ============================================================================
+
+struct HlirFunction {
+    id: i64,                  // FunctionId
+    name: HlirName,
+    link_name: HlirName,     // empty = no link name
+    params: [HlirParam; 64],
+    param_count: i64,
+    return_type: HlirType,
+    effects: [HlirName; 16],
+    effect_count: i64,
+    blocks: [HlirBlock; 4096],
+    block_count: i64,
+    is_kernel: bool,
+    locals: [HlirLocalEntry; 8192],
+    local_count: i64,
+    is_variadic: bool,
+    abi: HlirAbi,
+    is_exported: bool,
+}
+
+fn hlir_function_new(func_id: i64, name: HlirName) -> HlirFunction {
+    HlirFunction {
+        id: func_id,
+        name: name,
+        link_name: hlir_empty_name(),
+        params: [hlir_param_empty(); 64],
+        param_count: 0,
+        return_type: hlir_type_void(),
+        effects: [hlir_empty_name(); 16],
+        effect_count: 0,
+        blocks: [hlir_block_new(0, hlir_empty_name()); 4096],
+        block_count: 0,
+        is_kernel: false,
+        locals: [hlir_local_empty(); 8192],
+        local_count: 0,
+        is_variadic: false,
+        abi: HlirAbi::HlirAbiSounio,
+        is_exported: false,
+    }
+}
+
+// ============================================================================
+// Globals
+// ============================================================================
+
+struct HlirGlobal {
+    id: i64,                  // ValueId
+    name: HlirName,
+    ty: HlirType,
+    init: HlirConstant,      // HlirConstUnit = no initializer
+    has_init: bool,
+    is_const: bool,
+}
+
+fn hlir_global_new(id: i64, name: HlirName, ty: HlirType) -> HlirGlobal {
+    HlirGlobal {
+        id: id,
+        name: name,
+        ty: ty,
+        init: hlir_const_unit(),
+        has_init: false,
+        is_const: false,
+    }
+}
+
+// ============================================================================
+// Type Definitions
+// ============================================================================
+
+enum HlirTypeDefKind {
+    HlirTypeDefStruct,
+    HlirTypeDefEnum,
+}
+
+struct HlirTypeDefField {
+    name: HlirName,
+    ty: HlirType,
+}
+
+fn hlir_typedef_field_empty() -> HlirTypeDefField {
+    HlirTypeDefField { name: hlir_empty_name(), ty: hlir_type_void() }
+}
+
+struct HlirTypeDef {
+    name: HlirName,
+    kind: HlirTypeDefKind,
+    // Struct fields or enum variants
+    fields: [HlirTypeDefField; 128],
+    field_count: i64,
+}
+
+fn hlir_typedef_struct(name: HlirName) -> HlirTypeDef {
+    HlirTypeDef {
+        name: name,
+        kind: HlirTypeDefKind::HlirTypeDefStruct,
+        fields: [hlir_typedef_field_empty(); 128],
+        field_count: 0,
+    }
+}
+
+// ============================================================================
+// Module (top-level compilation unit)
+// ============================================================================
+
+struct HlirModule {
+    name: HlirName,
+    functions: [HlirFunction; 1024],
+    fn_count: i64,
+    globals: [HlirGlobal; 512],
+    global_count: i64,
+    typedefs: [HlirTypeDef; 512],
+    typedef_count: i64,
+}
+
+fn hlir_module_new(name: HlirName) -> HlirModule {
+    HlirModule {
+        name: name,
+        functions: [hlir_function_new(0, hlir_empty_name()); 1024],
+        fn_count: 0,
+        globals: [hlir_global_new(0, hlir_empty_name(), hlir_type_void()); 512],
+        global_count: 0,
+        typedefs: [hlir_typedef_struct(hlir_empty_name()); 512],
+        typedef_count: 0,
+    }
+}
+
+// ============================================================================
+// Module accessors
+// ============================================================================
+
+fn hlir_module_add_function(m: HlirModule, f: HlirFunction) -> HlirModule with Mut, Panic {
+    var module = m
+    if module.fn_count < HLIR_MAX_FUNCTIONS {
+        module.functions[module.fn_count as usize] = f
+        module.fn_count = module.fn_count + 1
+    }
+    module
+}
+
+fn hlir_module_add_global(m: HlirModule, g: HlirGlobal) -> HlirModule with Mut, Panic {
+    var module = m
+    if module.global_count < HLIR_MAX_GLOBALS {
+        module.globals[module.global_count as usize] = g
+        module.global_count = module.global_count + 1
+    }
+    module
+}
+
+fn hlir_module_add_typedef(m: HlirModule, td: HlirTypeDef) -> HlirModule with Mut, Panic {
+    var module = m
+    if module.typedef_count < HLIR_MAX_TYPEDEFS {
+        module.typedefs[module.typedef_count as usize] = td
+        module.typedef_count = module.typedef_count + 1
+    }
+    module
+}
+
+// ============================================================================
+// Instruction builders (convenience functions)
+// ============================================================================
+
+fn hlir_instr_const(result: i64, c: HlirConstant, ty: HlirType) -> HlirInstr {
+    var instr = hlir_instr_new(HlirOpKind::HlirOpConst)
+    instr.result = result
+    instr.constant = c
+    instr.ty = ty
+    instr
+}
+
+fn hlir_instr_copy(result: i64, src: i64, ty: HlirType) -> HlirInstr {
+    var instr = hlir_instr_new(HlirOpKind::HlirOpCopy)
+    instr.result = result
+    instr.src = src
+    instr.ty = ty
+    instr
+}
+
+fn hlir_instr_binary(result: i64, op: HlirBinaryOp, lhs: i64, rhs: i64, ty: HlirType) -> HlirInstr {
+    var instr = hlir_instr_new(HlirOpKind::HlirOpBinary)
+    instr.result = result
+    instr.bin_op = op
+    instr.lhs = lhs
+    instr.rhs = rhs
+    instr.ty = ty
+    instr
+}
+
+fn hlir_instr_unary(result: i64, op: HlirUnaryOp, src: i64, ty: HlirType) -> HlirInstr {
+    var instr = hlir_instr_new(HlirOpKind::HlirOpUnary)
+    instr.result = result
+    instr.un_op = op
+    instr.src = src
+    instr.ty = ty
+    instr
+}
+
+fn hlir_instr_load(result: i64, ptr: i64, ty: HlirType) -> HlirInstr {
+    var instr = hlir_instr_new(HlirOpKind::HlirOpLoad)
+    instr.result = result
+    instr.src = ptr
+    instr.ty = ty
+    instr
+}
+
+fn hlir_instr_store(ptr: i64, value: i64) -> HlirInstr {
+    var instr = hlir_instr_new(HlirOpKind::HlirOpStore)
+    instr.store_ptr = ptr
+    instr.store_value = value
+    instr
+}
+
+fn hlir_instr_alloca(result: i64, ty: HlirType) -> HlirInstr {
+    var instr = hlir_instr_new(HlirOpKind::HlirOpAlloca)
+    instr.result = result
+    instr.alloca_ty = ty
+    instr.ty = hlir_type_ptr(-1)
+    instr
+}
+
+fn hlir_instr_get_field_ptr(result: i64, base_val: i64, field_idx: i64, ty: HlirType) -> HlirInstr {
+    var instr = hlir_instr_new(HlirOpKind::HlirOpGetFieldPtr)
+    instr.result = result
+    instr.base = base_val
+    instr.field_index = field_idx
+    instr.ty = ty
+    instr
+}
+
+fn hlir_instr_get_element_ptr(result: i64, base_val: i64, index_val: i64, ty: HlirType) -> HlirInstr {
+    var instr = hlir_instr_new(HlirOpKind::HlirOpGetElementPtr)
+    instr.result = result
+    instr.base = base_val
+    instr.index = index_val
+    instr.ty = ty
+    instr
+}
+
+fn hlir_instr_call_direct(result: i64, name: HlirName, args: [i64; 64], arg_count: i64, ty: HlirType) -> HlirInstr {
+    var instr = hlir_instr_new(HlirOpKind::HlirOpCallDirect)
+    instr.result = result
+    instr.call_name = name
+    instr.call_args = args
+    instr.call_arg_count = arg_count
+    instr.ty = ty
+    instr
+}
+
+fn hlir_instr_cast(result: i64, value: i64, source: HlirType, target: HlirType) -> HlirInstr {
+    var instr = hlir_instr_new(HlirOpKind::HlirOpCast)
+    instr.result = result
+    instr.cast_value = value
+    instr.cast_source = source
+    instr.cast_target = target
+    instr.ty = target
+    instr
+}
+
+fn hlir_instr_extract_value(result: i64, base_val: i64, idx: i64, ty: HlirType) -> HlirInstr {
+    var instr = hlir_instr_new(HlirOpKind::HlirOpExtractValue)
+    instr.result = result
+    instr.base = base_val
+    instr.field_index = idx
+    instr.ty = ty
+    instr
+}
+
+fn hlir_instr_insert_value(result: i64, base_val: i64, value: i64, idx: i64, ty: HlirType) -> HlirInstr {
+    var instr = hlir_instr_new(HlirOpKind::HlirOpInsertValue)
+    instr.result = result
+    instr.base = base_val
+    instr.insert_value = value
+    instr.field_index = idx
+    instr.ty = ty
+    instr
+}
+
+fn hlir_instr_ret(value: i64) -> HlirInstr {
+    var instr = hlir_instr_new(HlirOpKind::HlirOpConst)
+    instr.result = HLIR_INVALID_VALUE
+    instr
+}
+
+fn hlir_instr_select(result: i64, cond: i64, true_val: i64, false_val: i64, ty: HlirType) -> HlirInstr {
+    var instr = hlir_instr_new(HlirOpKind::HlirOpSelect)
+    instr.result = result
+    instr.select_cond = cond
+    instr.select_true = true_val
+    instr.select_false = false_val
+    instr.ty = ty
+    instr
+}
+
+// ============================================================================
+// Block helpers
+// ============================================================================
+
+fn hlir_block_append_instr(block: HlirBlock, instr: HlirInstr) -> HlirBlock with Mut, Panic {
+    var b = block
+    if b.instr_count < HLIR_MAX_INSTRS {
+        b.instrs[b.instr_count as usize] = instr
+        b.instr_count = b.instr_count + 1
+    }
+    b
+}
+
+fn hlir_block_set_terminator(block: HlirBlock, term: HlirTerminator) -> HlirBlock with Mut {
+    var b = block
+    b.terminator = term
+    b
+}
+
+// ============================================================================
+// Function helpers
+// ============================================================================
+
+fn hlir_function_add_param(f: HlirFunction, p: HlirParam) -> HlirFunction with Mut, Panic {
+    var func = f
+    if func.param_count < HLIR_MAX_PARAMS {
+        func.params[func.param_count as usize] = p
+        func.param_count = func.param_count + 1
+    }
+    func
+}
+
+fn hlir_function_add_block(f: HlirFunction, block: HlirBlock) -> HlirFunction with Mut, Panic {
+    var func = f
+    if func.block_count < HLIR_MAX_BLOCKS {
+        func.blocks[func.block_count as usize] = block
+        func.block_count = func.block_count + 1
+    }
+    func
+}
+
+fn hlir_function_register_local(f: HlirFunction, value_id: i64, ty: HlirType) -> HlirFunction with Mut, Panic {
+    var func = f
+    if func.local_count < HLIR_MAX_LOCALS {
+        func.locals[func.local_count as usize] = HlirLocalEntry { value_id: value_id, ty: ty }
+        func.local_count = func.local_count + 1
+    }
+    func
+}
+
+fn hlir_function_lookup_local_type(f: HlirFunction, value_id: i64) -> HlirType {
+    var i: i64 = 0
+    while i < f.local_count {
+        if f.locals[i as usize].value_id == value_id {
+            return f.locals[i as usize].ty
+        }
+        i = i + 1
+    }
+    hlir_type_void()
+}
+
+fn hlir_function_add_effect(f: HlirFunction, effect: HlirName) -> HlirFunction with Mut, Panic {
+    var func = f
+    if func.effect_count < HLIR_MAX_EFFECTS {
+        func.effects[func.effect_count as usize] = effect
+        func.effect_count = func.effect_count + 1
+    }
+    func
+}

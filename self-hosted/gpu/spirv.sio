@@ -1,0 +1,536 @@
+// self-hosted::gpu::spirv — SPIR-V binary code generator
+//
+// Converts GpuKernelIr → SPIR-V binary.
+// SPIR-V is a binary format (not text like PTX/MSL). This module:
+//   1. Writes SPIR-V magic number, version, generator ID, bound
+//   2. Emits capability and extension declarations
+//   3. Emits memory model (GLSL450 for Vulkan, OpenCL for compute)
+//   4. Emits entry point and execution mode
+//   5. Emits type declarations (OpTypeVoid, OpTypeInt, OpTypeFloat, etc.)
+//   6. Emits variable declarations
+//   7. Emits function body instructions
+//
+// SPIR-V word encoding: each instruction is [word_count << 16 | opcode] followed by operands.
+
+// ============================================================================
+// SPIR-V constants
+// ============================================================================
+
+let SPIRV_MAGIC: i64 = 119734787          // 0x07230203
+let SPIRV_VERSION_1_0: i64 = 65536       // 0x00010000
+let SPIRV_VERSION_1_5: i64 = 65541       // 0x00010005
+let SPIRV_GENERATOR_SOUNIO: i64 = 42     // Our generator ID
+
+// SPIR-V opcodes (subset needed for compute shaders)
+let OP_NOP: i64 = 0
+let OP_CAPABILITY: i64 = 17
+let OP_EXTENSION: i64 = 10
+let OP_EXT_INST_IMPORT: i64 = 11
+let OP_MEMORY_MODEL: i64 = 14
+let OP_ENTRY_POINT: i64 = 15
+let OP_EXECUTION_MODE: i64 = 16
+let OP_NAME: i64 = 5
+let OP_DECORATE: i64 = 71
+let OP_MEMBER_DECORATE: i64 = 72
+let OP_TYPE_VOID: i64 = 19
+let OP_TYPE_BOOL: i64 = 20
+let OP_TYPE_INT: i64 = 21
+let OP_TYPE_FLOAT: i64 = 22
+let OP_TYPE_VECTOR: i64 = 23
+let OP_TYPE_POINTER: i64 = 32
+let OP_TYPE_FUNCTION: i64 = 33
+let OP_TYPE_STRUCT: i64 = 30
+let OP_TYPE_ARRAY: i64 = 28
+let OP_CONSTANT: i64 = 43
+let OP_VARIABLE: i64 = 59
+let OP_FUNCTION: i64 = 54
+let OP_FUNCTION_END: i64 = 56
+let OP_LABEL: i64 = 248
+let OP_RETURN: i64 = 253
+let OP_RETURN_VALUE: i64 = 254
+let OP_LOAD: i64 = 61
+let OP_STORE: i64 = 62
+let OP_ACCESS_CHAIN: i64 = 65
+let OP_IADD: i64 = 128
+let OP_ISUB: i64 = 130
+let OP_IMUL: i64 = 132
+let OP_UDIV: i64 = 134
+let OP_SDIV: i64 = 135
+let OP_UMOD: i64 = 137
+let OP_SMOD: i64 = 139
+let OP_FADD: i64 = 129
+let OP_FSUB: i64 = 131
+let OP_FMUL: i64 = 133
+let OP_FDIV: i64 = 136
+let OP_FREM: i64 = 140
+let OP_FNEGATE: i64 = 127
+let OP_SNEGATE: i64 = 126
+let OP_CONVERT_F_TO_S: i64 = 110
+let OP_CONVERT_S_TO_F: i64 = 111
+let OP_CONVERT_F_TO_U: i64 = 109
+let OP_CONVERT_U_TO_F: i64 = 112
+let OP_BITWISE_AND: i64 = 197
+let OP_BITWISE_OR: i64 = 198
+let OP_BITWISE_XOR: i64 = 199
+let OP_SHIFT_LEFT_LOGICAL: i64 = 196
+let OP_SHIFT_RIGHT_LOGICAL: i64 = 194
+let OP_SHIFT_RIGHT_ARITHMETIC: i64 = 195
+let OP_SELECT: i64 = 169
+let OP_SLESS_THAN: i64 = 178
+let OP_ULESS_THAN: i64 = 176
+let OP_SGREATER_THAN: i64 = 182
+let OP_UGREATER_THAN: i64 = 180
+let OP_SEQUAL: i64 = 170  // OpIEqual
+let OP_SNOT_EQUAL: i64 = 171  // OpINotEqual
+let OP_FORD_LESS_THAN: i64 = 184
+let OP_FORD_GREATER_THAN: i64 = 186
+let OP_FORD_EQUAL: i64 = 180
+let OP_CONTROL_BARRIER: i64 = 224
+let OP_EXT_INST: i64 = 12
+
+// Addressing models
+let ADDRESSING_LOGICAL: i64 = 0
+let ADDRESSING_PHYSICAL_32: i64 = 1
+let ADDRESSING_PHYSICAL_64: i64 = 2
+
+// Memory models
+let MEMORY_GLSL450: i64 = 1
+let MEMORY_OPENCL: i64 = 2
+
+// Execution models
+let EXECUTION_GLCOMPUTE: i64 = 5
+
+// Storage classes
+let STORAGE_UNIFORM_CONSTANT: i64 = 0
+let STORAGE_INPUT: i64 = 1
+let STORAGE_UNIFORM: i64 = 2
+let STORAGE_OUTPUT: i64 = 3
+let STORAGE_WORKGROUP: i64 = 4
+let STORAGE_PRIVATE: i64 = 6
+let STORAGE_FUNCTION: i64 = 7
+let STORAGE_STORAGE_BUFFER: i64 = 12
+
+// Capabilities
+let CAPABILITY_SHADER: i64 = 1
+let CAPABILITY_KERNEL: i64 = 6
+let CAPABILITY_FLOAT64: i64 = 10
+
+// Execution modes
+let EXEC_MODE_LOCAL_SIZE: i64 = 17
+
+// Decorations
+let DECORATION_BINDING: i64 = 33
+let DECORATION_DESCRIPTOR_SET: i64 = 34
+let DECORATION_BUILTIN: i64 = 11
+let BUILTIN_GLOBAL_INVOCATION_ID: i64 = 28
+let BUILTIN_LOCAL_INVOCATION_ID: i64 = 27
+let BUILTIN_WORKGROUP_ID: i64 = 26
+let BUILTIN_WORKGROUP_SIZE: i64 = 25
+
+// ============================================================================
+// SpvBuf — binary buffer (32-bit word oriented)
+// ============================================================================
+
+struct SpvBuf {
+    words: [i64; 16384],   // SPIR-V words (stored as i64, but only low 32 bits matter)
+    word_count: i64,
+}
+
+fn spv_buf_new() -> SpvBuf {
+    SpvBuf { words: [0; 16384], word_count: 0 }
+}
+
+fn spv_push_word(buf: SpvBuf, w: i64) -> SpvBuf with Mut, Panic {
+    var out = buf
+    if out.word_count < 16384 {
+        out.words[out.word_count as usize] = w % 4294967296  // mask to 32 bits
+        out.word_count = out.word_count + 1
+    }
+    out
+}
+
+// Encode an instruction: word_count << 16 | opcode
+fn spv_encode_op(word_count: i64, opcode: i64) -> i64 {
+    ((word_count % 65536) * 65536) + (opcode % 65536)
+}
+
+// Push a string as packed SPIR-V words (4 bytes per word, null-padded)
+fn spv_push_string(buf: SpvBuf, s: string) -> SpvBuf with Mut, Panic, Div {
+    var out = buf
+    let n = str_len(s)
+    var i: i64 = 0
+
+    while i < n {
+        var w: i64 = 0
+        // Pack up to 4 bytes per word
+        if i < n { w = w + ((str_char_at(s, i) as i64) % 256) }
+        if i + 1 < n { w = w + (((str_char_at(s, i + 1) as i64) % 256) * 256) }
+        if i + 2 < n { w = w + (((str_char_at(s, i + 2) as i64) % 256) * 65536) }
+        if i + 3 < n { w = w + (((str_char_at(s, i + 3) as i64) % 256) * 16777216) }
+        out = spv_push_word(out, w)
+        i = i + 4
+    }
+
+    // If string length is a multiple of 4, add a null-terminator word
+    if n % 4 == 0 {
+        out = spv_push_word(out, 0)
+    }
+
+    out
+}
+
+// Number of words needed for a string (including null padding)
+fn spv_string_word_count(s: string) -> i64 with Div {
+    let n = str_len(s)
+    (n / 4) + 1
+}
+
+// ============================================================================
+// ID allocation
+// ============================================================================
+
+struct SpvIdAlloc {
+    next_id: i64,
+}
+
+fn spv_id_alloc_new() -> SpvIdAlloc {
+    SpvIdAlloc { next_id: 1 }  // SPIR-V IDs start at 1
+}
+
+fn spv_alloc_id(alloc: SpvIdAlloc) -> (SpvIdAlloc, i64) with Mut {
+    var out = alloc
+    let id = out.next_id
+    out.next_id = out.next_id + 1
+    (out, id)
+}
+
+// ============================================================================
+// Type IDs — cached during emission
+// ============================================================================
+
+struct SpvTypeIds {
+    void_id: i64,
+    bool_id: i64,
+    uint_id: i64,
+    int_id: i64,
+    ulong_id: i64,
+    long_id: i64,
+    float_id: i64,
+    double_id: i64,
+    uint3_id: i64,      // uvec3 for GlobalInvocationId
+    ptr_storage_uint_id: i64,
+    ptr_storage_float_id: i64,
+    ptr_input_uint3_id: i64,
+    func_void_id: i64,
+}
+
+fn spv_type_ids_new() -> SpvTypeIds {
+    SpvTypeIds {
+        void_id: 0, bool_id: 0, uint_id: 0, int_id: 0,
+        ulong_id: 0, long_id: 0, float_id: 0, double_id: 0,
+        uint3_id: 0, ptr_storage_uint_id: 0, ptr_storage_float_id: 0,
+        ptr_input_uint3_id: 0, func_void_id: 0,
+    }
+}
+
+// ============================================================================
+// Emit SPIR-V header
+// ============================================================================
+
+fn spv_emit_header(buf: SpvBuf, bound: i64) -> SpvBuf with Mut, Panic {
+    var out = buf
+    out = spv_push_word(out, SPIRV_MAGIC)
+    out = spv_push_word(out, SPIRV_VERSION_1_5)
+    out = spv_push_word(out, SPIRV_GENERATOR_SOUNIO)
+    out = spv_push_word(out, bound)  // ID bound
+    out = spv_push_word(out, 0)      // schema (reserved)
+    out
+}
+
+// ============================================================================
+// Emit capability declarations
+// ============================================================================
+
+fn spv_emit_capability(buf: SpvBuf, cap: i64) -> SpvBuf with Mut, Panic {
+    var out = buf
+    out = spv_push_word(out, spv_encode_op(2, OP_CAPABILITY))
+    out = spv_push_word(out, cap)
+    out
+}
+
+// ============================================================================
+// Emit memory model
+// ============================================================================
+
+fn spv_emit_memory_model(buf: SpvBuf, addressing: i64, memory: i64) -> SpvBuf with Mut, Panic {
+    var out = buf
+    out = spv_push_word(out, spv_encode_op(3, OP_MEMORY_MODEL))
+    out = spv_push_word(out, addressing)
+    out = spv_push_word(out, memory)
+    out
+}
+
+// ============================================================================
+// Emit entry point
+// ============================================================================
+
+fn spv_emit_entry_point(buf: SpvBuf, exec_model: i64, func_id: i64, name: string, interface_ids: [i64; 8], interface_count: i64) -> SpvBuf with Mut, Panic, Div {
+    var out = buf
+    let str_words = spv_string_word_count(name)
+    let total_words = 3 + str_words + interface_count
+    out = spv_push_word(out, spv_encode_op(total_words, OP_ENTRY_POINT))
+    out = spv_push_word(out, exec_model)
+    out = spv_push_word(out, func_id)
+    out = spv_push_string(out, name)
+    var i: i64 = 0
+    while i < interface_count {
+        out = spv_push_word(out, interface_ids[i as usize])
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
+// Emit execution mode (local size for compute)
+// ============================================================================
+
+fn spv_emit_local_size(buf: SpvBuf, func_id: i64, x: i64, y: i64, z: i64) -> SpvBuf with Mut, Panic {
+    var out = buf
+    out = spv_push_word(out, spv_encode_op(6, OP_EXECUTION_MODE))
+    out = spv_push_word(out, func_id)
+    out = spv_push_word(out, EXEC_MODE_LOCAL_SIZE)
+    out = spv_push_word(out, x)
+    out = spv_push_word(out, y)
+    out = spv_push_word(out, z)
+    out
+}
+
+// ============================================================================
+// Emit type declarations
+// ============================================================================
+
+fn spv_emit_type_void(buf: SpvBuf, result_id: i64) -> SpvBuf with Mut, Panic {
+    var out = buf
+    out = spv_push_word(out, spv_encode_op(2, OP_TYPE_VOID))
+    out = spv_push_word(out, result_id)
+    out
+}
+
+fn spv_emit_type_int(buf: SpvBuf, result_id: i64, width: i64, signedness: i64) -> SpvBuf with Mut, Panic {
+    var out = buf
+    out = spv_push_word(out, spv_encode_op(4, OP_TYPE_INT))
+    out = spv_push_word(out, result_id)
+    out = spv_push_word(out, width)
+    out = spv_push_word(out, signedness)
+    out
+}
+
+fn spv_emit_type_float(buf: SpvBuf, result_id: i64, width: i64) -> SpvBuf with Mut, Panic {
+    var out = buf
+    out = spv_push_word(out, spv_encode_op(3, OP_TYPE_FLOAT))
+    out = spv_push_word(out, result_id)
+    out = spv_push_word(out, width)
+    out
+}
+
+fn spv_emit_type_vector(buf: SpvBuf, result_id: i64, component_id: i64, count: i64) -> SpvBuf with Mut, Panic {
+    var out = buf
+    out = spv_push_word(out, spv_encode_op(4, OP_TYPE_VECTOR))
+    out = spv_push_word(out, result_id)
+    out = spv_push_word(out, component_id)
+    out = spv_push_word(out, count)
+    out
+}
+
+fn spv_emit_type_pointer(buf: SpvBuf, result_id: i64, storage_class: i64, type_id: i64) -> SpvBuf with Mut, Panic {
+    var out = buf
+    out = spv_push_word(out, spv_encode_op(4, OP_TYPE_POINTER))
+    out = spv_push_word(out, result_id)
+    out = spv_push_word(out, storage_class)
+    out = spv_push_word(out, type_id)
+    out
+}
+
+fn spv_emit_type_function(buf: SpvBuf, result_id: i64, return_type: i64) -> SpvBuf with Mut, Panic {
+    var out = buf
+    out = spv_push_word(out, spv_encode_op(3, OP_TYPE_FUNCTION))
+    out = spv_push_word(out, result_id)
+    out = spv_push_word(out, return_type)
+    out
+}
+
+// ============================================================================
+// Emit decoration
+// ============================================================================
+
+fn spv_emit_decorate(buf: SpvBuf, target: i64, decoration: i64, value: i64) -> SpvBuf with Mut, Panic {
+    var out = buf
+    out = spv_push_word(out, spv_encode_op(4, OP_DECORATE))
+    out = spv_push_word(out, target)
+    out = spv_push_word(out, decoration)
+    out = spv_push_word(out, value)
+    out
+}
+
+fn spv_emit_decorate_builtin(buf: SpvBuf, target: i64, builtin: i64) -> SpvBuf with Mut, Panic {
+    spv_emit_decorate(buf, target, DECORATION_BUILTIN, builtin)
+}
+
+fn spv_emit_decorate_binding(buf: SpvBuf, target: i64, binding: i64) -> SpvBuf with Mut, Panic {
+    spv_emit_decorate(buf, target, DECORATION_BINDING, binding)
+}
+
+fn spv_emit_decorate_descriptor_set(buf: SpvBuf, target: i64, set: i64) -> SpvBuf with Mut, Panic {
+    spv_emit_decorate(buf, target, DECORATION_DESCRIPTOR_SET, set)
+}
+
+// ============================================================================
+// Emit instructions (arithmetic, load, store)
+// ============================================================================
+
+fn spv_emit_binary_op(buf: SpvBuf, opcode: i64, type_id: i64, result_id: i64, op1: i64, op2: i64) -> SpvBuf with Mut, Panic {
+    var out = buf
+    out = spv_push_word(out, spv_encode_op(5, opcode))
+    out = spv_push_word(out, type_id)
+    out = spv_push_word(out, result_id)
+    out = spv_push_word(out, op1)
+    out = spv_push_word(out, op2)
+    out
+}
+
+fn spv_emit_load(buf: SpvBuf, type_id: i64, result_id: i64, pointer_id: i64) -> SpvBuf with Mut, Panic {
+    var out = buf
+    out = spv_push_word(out, spv_encode_op(4, OP_LOAD))
+    out = spv_push_word(out, type_id)
+    out = spv_push_word(out, result_id)
+    out = spv_push_word(out, pointer_id)
+    out
+}
+
+fn spv_emit_store(buf: SpvBuf, pointer_id: i64, value_id: i64) -> SpvBuf with Mut, Panic {
+    var out = buf
+    out = spv_push_word(out, spv_encode_op(3, OP_STORE))
+    out = spv_push_word(out, pointer_id)
+    out = spv_push_word(out, value_id)
+    out
+}
+
+fn spv_emit_access_chain(buf: SpvBuf, type_id: i64, result_id: i64, base_id: i64, index_id: i64) -> SpvBuf with Mut, Panic {
+    var out = buf
+    out = spv_push_word(out, spv_encode_op(5, OP_ACCESS_CHAIN))
+    out = spv_push_word(out, type_id)
+    out = spv_push_word(out, result_id)
+    out = spv_push_word(out, base_id)
+    out = spv_push_word(out, index_id)
+    out
+}
+
+// ============================================================================
+// Emit function structure
+// ============================================================================
+
+fn spv_emit_function(buf: SpvBuf, result_type: i64, result_id: i64, function_control: i64, func_type: i64) -> SpvBuf with Mut, Panic {
+    var out = buf
+    out = spv_push_word(out, spv_encode_op(5, OP_FUNCTION))
+    out = spv_push_word(out, result_type)
+    out = spv_push_word(out, result_id)
+    out = spv_push_word(out, function_control)
+    out = spv_push_word(out, func_type)
+    out
+}
+
+fn spv_emit_function_end(buf: SpvBuf) -> SpvBuf with Mut, Panic {
+    var out = buf
+    out = spv_push_word(out, spv_encode_op(1, OP_FUNCTION_END))
+    out
+}
+
+fn spv_emit_label(buf: SpvBuf, result_id: i64) -> SpvBuf with Mut, Panic {
+    var out = buf
+    out = spv_push_word(out, spv_encode_op(2, OP_LABEL))
+    out = spv_push_word(out, result_id)
+    out
+}
+
+fn spv_emit_return(buf: SpvBuf) -> SpvBuf with Mut, Panic {
+    var out = buf
+    out = spv_push_word(out, spv_encode_op(1, OP_RETURN))
+    out
+}
+
+fn spv_emit_constant_u32(buf: SpvBuf, type_id: i64, result_id: i64, value: i64) -> SpvBuf with Mut, Panic {
+    var out = buf
+    out = spv_push_word(out, spv_encode_op(4, OP_CONSTANT))
+    out = spv_push_word(out, type_id)
+    out = spv_push_word(out, result_id)
+    out = spv_push_word(out, value)
+    out
+}
+
+fn spv_emit_variable(buf: SpvBuf, type_id: i64, result_id: i64, storage_class: i64) -> SpvBuf with Mut, Panic {
+    var out = buf
+    out = spv_push_word(out, spv_encode_op(4, OP_VARIABLE))
+    out = spv_push_word(out, type_id)
+    out = spv_push_word(out, result_id)
+    out = spv_push_word(out, storage_class)
+    out
+}
+
+// ============================================================================
+// Emit OpControlBarrier (workgroup barrier)
+// ============================================================================
+
+fn spv_emit_control_barrier(buf: SpvBuf, execution_scope: i64, memory_scope: i64, semantics: i64) -> SpvBuf with Mut, Panic {
+    var out = buf
+    out = spv_push_word(out, spv_encode_op(4, OP_CONTROL_BARRIER))
+    out = spv_push_word(out, execution_scope)
+    out = spv_push_word(out, memory_scope)
+    out = spv_push_word(out, semantics)
+    out
+}
+
+// ============================================================================
+// GPU opcode → SPIR-V opcode mapping
+// ============================================================================
+
+fn gpu_opcode_to_spirv(opc: GpuOpcode, ty: GpuType) -> i64 {
+    let is_float = (ty == GpuType::GpuF32) || (ty == GpuType::GpuF64)
+
+    if opc == GpuOpcode::GpuAdd { if is_float { return OP_FADD } return OP_IADD }
+    if opc == GpuOpcode::GpuSub { if is_float { return OP_FSUB } return OP_ISUB }
+    if opc == GpuOpcode::GpuMul { if is_float { return OP_FMUL } return OP_IMUL }
+    if opc == GpuOpcode::GpuDiv {
+        if is_float { return OP_FDIV }
+        if ty == GpuType::GpuI32 || ty == GpuType::GpuI64 { return OP_SDIV }
+        return OP_UDIV
+    }
+
+    OP_NOP
+}
+
+// ============================================================================
+// Serialize SpvBuf to raw bytes (for writing to file)
+// ============================================================================
+
+struct SpvBytes {
+    data: [i8; 65536],
+    len: i64,
+}
+
+fn spv_to_bytes(buf: SpvBuf) -> SpvBytes with Mut, Panic {
+    var out = SpvBytes { data: [0; 65536], len: 0 }
+    var i: i64 = 0
+    while i < buf.word_count {
+        let w = buf.words[i as usize]
+        if out.len + 4 <= 65536 {
+            // Little-endian word encoding
+            out.data[out.len as usize] = (w % 256) as i8
+            out.data[(out.len + 1) as usize] = ((w / 256) % 256) as i8
+            out.data[(out.len + 2) as usize] = ((w / 65536) % 256) as i8
+            out.data[(out.len + 3) as usize] = ((w / 16777216) % 256) as i8
+            out.len = out.len + 4
+        }
+        i = i + 1
+    }
+    out
+}

@@ -1,0 +1,1185 @@
+// self-hosted::gpu::portable — Portable GPU compiler: write once, compile anywhere
+//
+// Dispatches from GpuKernelIr to all three GPU backends:
+//   - PTX   (NVIDIA CUDA)   via ptx_advanced.sio
+//   - Metal (Apple MSL)     via metal.sio
+//   - SPIR-V (Vulkan/OpenCL) via spirv.sio
+//
+// This is the "write once, compile anywhere" abstraction layer. It provides:
+//   1. Target enumeration (GpuTarget) for selecting a backend
+//   2. Capability descriptors (GpuCapabilities) per target + architecture
+//   3. Unified compile result (GpuCompileResult) carrying all three outputs
+//   4. Kernel validation against hardware limits
+//   5. Resource estimation (shared memory, register pressure)
+//
+// Usage pattern:
+//   let kernel = gpu_build_my_kernel()
+//   let result = gpu_compile_to_all(kernel)           // all three backends
+//   let result = gpu_compile_to_target(kernel, GpuTargetPtx)  // single backend
+//   let ok = gpu_validate_kernel(kernel, caps)        // check limits
+//
+// Architecture:
+//   GpuKernelIr ─┬─► ptx_codegen_kernel()    → PtxBuf   (text)
+//                ├─► gpu_lower_to_metal()     → MetalBuf (text)
+//                └─► spv_emit_*()             → SpvBuf   (binary)
+
+// ============================================================================
+// Target enumeration
+// ============================================================================
+
+enum GpuTarget {
+    GpuTargetPtx,       // NVIDIA CUDA (PTX)
+    GpuTargetMetal,     // Apple Metal (MSL)
+    GpuTargetSpirv,     // Vulkan/OpenCL (SPIR-V)
+}
+
+fn gpu_target_name(target: GpuTarget) -> string {
+    match target {
+        GpuTarget::GpuTargetPtx   => "PTX (NVIDIA CUDA)",
+        GpuTarget::GpuTargetMetal => "Metal (Apple MSL)",
+        GpuTarget::GpuTargetSpirv => "SPIR-V (Vulkan/OpenCL)",
+    }
+}
+
+fn gpu_target_short_name(target: GpuTarget) -> string {
+    match target {
+        GpuTarget::GpuTargetPtx   => "ptx",
+        GpuTarget::GpuTargetMetal => "metal",
+        GpuTarget::GpuTargetSpirv => "spirv",
+    }
+}
+
+// ============================================================================
+// Hardware capability descriptors
+// ============================================================================
+
+struct GpuCapabilities {
+    has_f64: bool,
+    has_tensor_cores: bool,
+    has_shared_memory: bool,
+    max_threads_per_block: i64,
+    max_shared_bytes: i64,
+    warp_size: i64,
+    compute_units: i64,
+    target: GpuTarget,
+}
+
+// Default capabilities for a given target. Uses conservative defaults
+// that are safe across all devices in each ecosystem.
+fn gpu_default_capabilities(target: GpuTarget) -> GpuCapabilities {
+    match target {
+        GpuTarget::GpuTargetPtx   => gpu_ptx_capabilities(5, 0),
+        GpuTarget::GpuTargetMetal => gpu_metal_capabilities(1),
+        GpuTarget::GpuTargetSpirv => gpu_spirv_capabilities(),
+    }
+}
+
+// PTX capabilities by compute capability (sm_major.sm_minor).
+//
+// Reference matrix:
+//   sm_50  (Maxwell):   f64=yes,  tensor=no,  48KB shared, warp=32, 1024 threads
+//   sm_70  (Volta):     f64=yes,  tensor=yes, 96KB shared, warp=32, 1024 threads
+//   sm_80  (Ampere):    f64=yes,  tensor=yes, 164KB shared, warp=32, 1024 threads
+//   sm_89  (Ada):       f64=yes,  tensor=yes, 100KB shared, warp=32, 1024 threads
+//   sm_90  (Hopper):    f64=yes,  tensor=yes, 228KB shared, warp=32, 1024 threads
+//   sm_100 (Blackwell): f64=yes,  tensor=yes, 228KB shared, warp=32, 1024 threads
+fn gpu_ptx_capabilities(sm_major: i64, sm_minor: i64) -> GpuCapabilities {
+    let sm = sm_major * 10 + sm_minor
+
+    // Tensor cores: Volta (sm_70) and later
+    let has_tc = sm >= 70
+
+    // Shared memory per block, in bytes
+    var shared: i64 = 49152           // 48 KB default (Maxwell/Pascal)
+    if sm >= 70 { shared = 98304 }    // 96 KB (Volta/Turing)
+    if sm >= 80 { shared = 167936 }   // ~164 KB (Ampere)
+    if sm >= 89 { shared = 102400 }   // 100 KB (Ada Lovelace)
+    if sm >= 90 { shared = 233472 }   // 228 KB (Hopper)
+    if sm >= 100 { shared = 233472 }  // 228 KB (Blackwell, preliminary)
+
+    // Compute units (SMs) — placeholder, actual value is device-specific
+    var cus: i64 = 16
+    if sm >= 70 { cus = 80 }
+    if sm >= 80 { cus = 108 }
+    if sm >= 90 { cus = 132 }
+
+    GpuCapabilities {
+        has_f64: true,
+        has_tensor_cores: has_tc,
+        has_shared_memory: true,
+        max_threads_per_block: 1024,
+        max_shared_bytes: shared,
+        warp_size: 32,
+        compute_units: cus,
+        target: GpuTarget::GpuTargetPtx,
+    }
+}
+
+// Metal capabilities by GPU family.
+//
+// gpu_family values:
+//   1 = Apple GPU Family 1 (A7-A8, basic)
+//   2 = Apple GPU Family 2 (A8-A9, more features)
+//   3 = Apple GPU Family 3 (A9-A11)
+//   4 = Apple GPU Family 4 (A11+)
+//   5 = Apple GPU Family 5 (A12+)
+//   6 = Apple GPU Family 6 (A13+)
+//   7 = Apple GPU Family 7 (A14/M1+)
+//   8 = Apple GPU Family 8 (A15/M2+)
+//   9 = Apple GPU Family 9 (A17/M3+)
+fn gpu_metal_capabilities(gpu_family: i64) -> GpuCapabilities {
+    // Metal does not natively support f64 in compute kernels.
+    // Some devices can emulate it but at severe performance cost.
+    let has_f64 = false
+
+    // Metal has no tensor cores; Apple uses a different AMX/ANE path.
+    let has_tc = false
+
+    // Threadgroup (shared) memory
+    var shared: i64 = 16384            // 16 KB for Family 1-2
+    if gpu_family >= 3 { shared = 32768 }   // 32 KB
+    if gpu_family >= 7 { shared = 32768 }   // M1+ still 32KB threadgroup
+
+    // Max threads per threadgroup
+    var max_threads: i64 = 512
+    if gpu_family >= 4 { max_threads = 1024 }
+
+    // SIMD width — Apple GPUs use 32-wide SIMD groups
+    let simd_width: i64 = 32
+
+    // Compute units (GPU cores) — very device-dependent
+    var cus: i64 = 4
+    if gpu_family >= 7 { cus = 8 }     // M1 has 8 cores
+    if gpu_family >= 8 { cus = 10 }    // M2 has 10 cores
+    if gpu_family >= 9 { cus = 10 }    // M3 has 10 cores
+
+    GpuCapabilities {
+        has_f64: has_f64,
+        has_tensor_cores: has_tc,
+        has_shared_memory: true,
+        max_threads_per_block: max_threads,
+        max_shared_bytes: shared,
+        warp_size: simd_width,
+        compute_units: cus,
+        target: GpuTarget::GpuTargetMetal,
+    }
+}
+
+// SPIR-V capabilities — conservative Vulkan compute defaults.
+// Vulkan 1.0 guarantees at least these minimums.
+fn gpu_spirv_capabilities() -> GpuCapabilities {
+    GpuCapabilities {
+        has_f64: false,              // Vulkan f64 is optional, assume absent
+        has_tensor_cores: false,     // No standard tensor core support in SPIR-V
+        has_shared_memory: true,
+        max_threads_per_block: 1024, // Vulkan minmax: maxComputeWorkGroupInvocations >= 128
+        max_shared_bytes: 32768,     // Vulkan minmax: maxComputeSharedMemorySize >= 16384
+        warp_size: 32,               // Subgroup size varies; 32 is common (NVIDIA/AMD)
+        compute_units: 1,            // Unknown at compile time
+        target: GpuTarget::GpuTargetSpirv,
+    }
+}
+
+// ============================================================================
+// Compile result — carries output from all three backends
+// ============================================================================
+
+struct GpuCompileResult {
+    ptx_buf: PtxBuf,
+    metal_buf: MetalBuf,
+    spirv_buf: SpvBuf,
+    ptx_valid: bool,
+    metal_valid: bool,
+    spirv_valid: bool,
+}
+
+fn gpu_compile_result_new() -> GpuCompileResult {
+    GpuCompileResult {
+        ptx_buf: ptx_buf_new(),
+        metal_buf: metal_buf_new(),
+        spirv_buf: spv_buf_new(),
+        ptx_valid: false,
+        metal_valid: false,
+        spirv_valid: false,
+    }
+}
+
+// Check if at least one backend produced valid output.
+fn gpu_compile_result_any_valid(result: GpuCompileResult) -> bool {
+    result.ptx_valid || result.metal_valid || result.spirv_valid
+}
+
+// Check if all requested backends produced valid output.
+fn gpu_compile_result_all_valid(result: GpuCompileResult) -> bool {
+    result.ptx_valid && result.metal_valid && result.spirv_valid
+}
+
+// Count how many backends produced valid output.
+fn gpu_compile_result_valid_count(result: GpuCompileResult) -> i64 {
+    var count: i64 = 0
+    if result.ptx_valid { count = count + 1 }
+    if result.metal_valid { count = count + 1 }
+    if result.spirv_valid { count = count + 1 }
+    count
+}
+
+// ============================================================================
+// Kernel resource estimation
+// ============================================================================
+
+// Estimate shared memory usage (bytes) for a kernel by scanning its ops
+// for shared memory load/store instructions and the declared shared_bytes.
+fn gpu_kernel_shared_mem_usage(kernel: GpuKernelIr) -> i64 {
+    // Start with the explicitly declared shared memory
+    var total: i64 = kernel.shared_bytes
+    if kernel.shared_mem_bytes > total {
+        total = kernel.shared_mem_bytes
+    }
+
+    // Scan ops for implicit shared memory accesses.
+    // Track the highest shared_addr offset + type size seen.
+    var max_shared_offset: i64 = 0
+    var i: i64 = 0
+    while i < kernel.op_count {
+        let op = kernel.ops[i as usize]
+        let opc = op.opcode
+
+        let is_shared_op = (opc == GpuOpcode::GpuLoadShared)
+            || (opc == GpuOpcode::GpuStoreShared)
+            || (opc == GpuOpcode::GpuLoadSharedPred)
+            || (opc == GpuOpcode::GpuStoreSharedPred)
+
+        if is_shared_op {
+            let end_offset = op.shared_addr + gpu_type_sizeof(op.ty)
+            if end_offset > max_shared_offset {
+                max_shared_offset = end_offset
+            }
+        }
+
+        i = i + 1
+    }
+
+    // Return the larger of declared vs inferred
+    if max_shared_offset > total {
+        return max_shared_offset
+    }
+    total
+}
+
+// Estimate register pressure for a kernel.
+// Returns the total number of registers across all types.
+// Higher values indicate more register pressure and potentially lower occupancy.
+fn gpu_kernel_register_pressure(kernel: GpuKernelIr) -> i64 {
+    var total: i64 = 0
+
+    // Sum all register pools
+    total = total + kernel.max_reg_u32
+    total = total + kernel.max_reg_u64
+    total = total + kernel.max_reg_f32
+    total = total + kernel.max_reg_f64
+    total = total + kernel.max_reg_i32
+    total = total + kernel.max_reg_i64
+    total = total + kernel.max_reg_pred
+
+    // Also scan ops to find the highest dst_reg per type,
+    // in case the max_reg fields are not set correctly.
+    var max_r32: i64 = 0
+    var max_r64: i64 = 0
+    var max_f32: i64 = 0
+    var max_f64: i64 = 0
+    var max_pred: i64 = 0
+
+    var i: i64 = 0
+    while i < kernel.op_count {
+        let op = kernel.ops[i as usize]
+        let dst = op.dst_reg
+
+        if dst >= 0 {
+            let ty = op.ty
+            if ty == GpuType::GpuU32 || ty == GpuType::GpuI32 {
+                if dst + 1 > max_r32 { max_r32 = dst + 1 }
+            }
+            if ty == GpuType::GpuU64 || ty == GpuType::GpuI64 || ty == GpuType::GpuPtr {
+                if dst + 1 > max_r64 { max_r64 = dst + 1 }
+            }
+            if ty == GpuType::GpuF32 {
+                if dst + 1 > max_f32 { max_f32 = dst + 1 }
+            }
+            if ty == GpuType::GpuF64 {
+                if dst + 1 > max_f64 { max_f64 = dst + 1 }
+            }
+        }
+
+        // Predicate registers come from setp ops
+        let opc = op.opcode
+        let is_setp = (opc == GpuOpcode::GpuSetpLt)
+            || (opc == GpuOpcode::GpuSetpLe)
+            || (opc == GpuOpcode::GpuSetpEq)
+            || (opc == GpuOpcode::GpuSetpGe)
+            || (opc == GpuOpcode::GpuSetpGt)
+            || (opc == GpuOpcode::GpuSetpNe)
+        if is_setp {
+            if dst + 1 > max_pred { max_pred = dst + 1 }
+        }
+
+        i = i + 1
+    }
+
+    // Use the larger of declared vs inferred
+    var inferred: i64 = max_r32 + max_r64 + max_f32 + max_f64 + max_pred
+    if inferred > total {
+        return inferred
+    }
+    total
+}
+
+// ============================================================================
+// Kernel validation
+// ============================================================================
+
+// Validate a kernel against hardware capabilities. Returns true if the
+// kernel can execute on hardware matching the given capabilities.
+fn gpu_validate_kernel(kernel: GpuKernelIr, caps: GpuCapabilities) -> bool {
+    // 1. Check shared memory usage
+    let shared_usage = gpu_kernel_shared_mem_usage(kernel)
+    if shared_usage > caps.max_shared_bytes {
+        return false
+    }
+
+    // 2. Check thread count hint
+    if kernel.max_threads > 0 {
+        if kernel.max_threads > caps.max_threads_per_block {
+            return false
+        }
+    }
+
+    // 3. Check f64 usage if target lacks f64 support
+    if caps.has_f64 == false {
+        if gpu_kernel_uses_f64(kernel) {
+            return false
+        }
+    }
+
+    // 4. Check tensor core usage if target lacks tensor cores
+    if caps.has_tensor_cores == false {
+        if gpu_kernel_uses_tensor_cores(kernel) {
+            return false
+        }
+    }
+
+    // 5. Check that shared memory ops are not used if target lacks shared memory
+    if caps.has_shared_memory == false {
+        if shared_usage > 0 {
+            return false
+        }
+    }
+
+    true
+}
+
+// Check whether any op in the kernel uses f64 types.
+fn gpu_kernel_uses_f64(kernel: GpuKernelIr) -> bool {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        let op = kernel.ops[i as usize]
+        if op.ty == GpuType::GpuF64 {
+            return true
+        }
+        if op.dst_ty == GpuType::GpuF64 {
+            return true
+        }
+        if op.src_ty == GpuType::GpuF64 {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Check whether any op in the kernel uses tensor core instructions.
+fn gpu_kernel_uses_tensor_cores(kernel: GpuKernelIr) -> bool {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        let op = kernel.ops[i as usize]
+        let opc = op.opcode
+        if opc == GpuOpcode::GpuWmma || opc == GpuOpcode::GpuMma {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Check whether any op uses warp shuffle or vote instructions.
+fn gpu_kernel_uses_warp_ops(kernel: GpuKernelIr) -> bool {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        let op = kernel.ops[i as usize]
+        let opc = op.opcode
+        let is_warp = (opc == GpuOpcode::GpuShflDown)
+            || (opc == GpuOpcode::GpuShflUp)
+            || (opc == GpuOpcode::GpuShflBfly)
+            || (opc == GpuOpcode::GpuShflIdx)
+            || (opc == GpuOpcode::GpuVote)
+            || (opc == GpuOpcode::GpuBallot)
+        if is_warp {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Check whether any op uses TMA (tensor memory access) instructions (sm_90+).
+fn gpu_kernel_uses_tma(kernel: GpuKernelIr) -> bool {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        let op = kernel.ops[i as usize]
+        let opc = op.opcode
+        if opc == GpuOpcode::GpuTmaLoad || opc == GpuOpcode::GpuTmaStore {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Count the number of math intrinsic ops in a kernel (sqrt, rsqrt, exp2, etc.).
+fn gpu_kernel_math_intrinsic_count(kernel: GpuKernelIr) -> i64 {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < kernel.op_count {
+        let op = kernel.ops[i as usize]
+        let opc = op.opcode
+        let is_math = (opc == GpuOpcode::GpuSqrt)
+            || (opc == GpuOpcode::GpuRsqrt)
+            || (opc == GpuOpcode::GpuExp2)
+            || (opc == GpuOpcode::GpuLg2)
+            || (opc == GpuOpcode::GpuSin)
+            || (opc == GpuOpcode::GpuCos)
+            || (opc == GpuOpcode::GpuAbs)
+            || (opc == GpuOpcode::GpuRcp)
+        if is_math {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// Single-target compilation
+// ============================================================================
+
+// Compile a kernel to a single target using default settings.
+// The result will have exactly one valid buffer; the other two are empty.
+fn gpu_compile_to_target(kernel: GpuKernelIr, target: GpuTarget) -> GpuCompileResult with Mut, Panic, Div, Alloc {
+    var result = gpu_compile_result_new()
+
+    match target {
+        GpuTarget::GpuTargetPtx => {
+            let arch = ptx_arch_new(5, 0)  // Default: Maxwell (sm_50)
+            result.ptx_buf = ptx_codegen_kernel(kernel, arch)
+            result.ptx_valid = true
+        },
+        GpuTarget::GpuTargetMetal => {
+            result.metal_buf = gpu_lower_to_metal(kernel)
+            result.metal_valid = true
+        },
+        GpuTarget::GpuTargetSpirv => {
+            result.spirv_buf = gpu_portable_emit_spirv(kernel)
+            result.spirv_valid = true
+        },
+    }
+
+    result
+}
+
+// ============================================================================
+// All-target compilation
+// ============================================================================
+
+// Compile a kernel to all three backends. Each backend runs independently;
+// a failure in one does not prevent the others from succeeding.
+fn gpu_compile_to_all(kernel: GpuKernelIr) -> GpuCompileResult with Mut, Panic, Div, Alloc {
+    var result = gpu_compile_result_new()
+
+    // PTX — default sm_50 (Maxwell baseline)
+    let arch = ptx_arch_new(5, 0)
+    result.ptx_buf = ptx_codegen_kernel(kernel, arch)
+    result.ptx_valid = true
+
+    // Metal
+    result.metal_buf = gpu_lower_to_metal(kernel)
+    result.metal_valid = true
+
+    // SPIR-V
+    result.spirv_buf = gpu_portable_emit_spirv(kernel)
+    result.spirv_valid = true
+
+    result
+}
+
+// ============================================================================
+// Capability-driven compilation
+// ============================================================================
+
+// Compile a kernel using explicit hardware capabilities.
+// The capabilities determine which backend is invoked and which
+// architecture-specific features are enabled.
+fn gpu_compile_with_capabilities(kernel: GpuKernelIr, caps: GpuCapabilities) -> GpuCompileResult with Mut, Panic, Div, Alloc {
+    var result = gpu_compile_result_new()
+
+    match caps.target {
+        GpuTarget::GpuTargetPtx => {
+            // Infer PTX architecture from capabilities.
+            let arch = gpu_caps_to_ptx_arch(caps)
+            result.ptx_buf = ptx_codegen_kernel(kernel, arch)
+            result.ptx_valid = true
+        },
+        GpuTarget::GpuTargetMetal => {
+            result.metal_buf = gpu_lower_to_metal(kernel)
+            result.metal_valid = true
+        },
+        GpuTarget::GpuTargetSpirv => {
+            result.spirv_buf = gpu_portable_emit_spirv(kernel)
+            result.spirv_valid = true
+        },
+    }
+
+    result
+}
+
+// Infer a PtxArch from GpuCapabilities by matching shared memory tiers.
+fn gpu_caps_to_ptx_arch(caps: GpuCapabilities) -> PtxArch {
+    // Heuristic: map shared memory limits back to compute capability.
+    // This is intentionally conservative.
+    if caps.max_shared_bytes >= 233472 {
+        return ptx_arch_new(9, 0)   // Hopper+
+    }
+    if caps.max_shared_bytes >= 167936 {
+        return ptx_arch_new(8, 0)   // Ampere
+    }
+    if caps.max_shared_bytes >= 98304 {
+        return ptx_arch_new(7, 0)   // Volta
+    }
+    ptx_arch_new(5, 0)              // Maxwell baseline
+}
+
+// ============================================================================
+// SPIR-V portable emission helper
+// ============================================================================
+
+// Emit a minimal SPIR-V compute shader from GpuKernelIr.
+// This produces a valid SPIR-V binary using the low-level spv_emit_* API
+// from spirv.sio. The result targets Vulkan compute (GLCompute + GLSL450).
+//
+// The emission follows SPIR-V logical layout order:
+//   1. Header (magic, version, generator, bound)
+//   2. Capabilities and extensions
+//   3. Memory model
+//   4. Entry point + execution mode
+//   5. Decorations (bindings, builtins)
+//   6. Type declarations
+//   7. Global variables
+//   8. Function body
+fn gpu_portable_emit_spirv(kernel: GpuKernelIr) -> SpvBuf with Mut, Panic, Div, Alloc {
+    var buf = spv_buf_new()
+    var ids = spv_id_alloc_new()
+
+    // Pre-allocate IDs for well-known entities.
+    // We need to know the bound (max ID + 1) for the header,
+    // so we allocate all IDs upfront.
+
+    // ID 1: void type
+    let void_type_id: i64 = 1
+    // ID 2: uint type (32-bit)
+    let uint_type_id: i64 = 2
+    // ID 3: uvec3 type (for GlobalInvocationId)
+    let uvec3_type_id: i64 = 3
+    // ID 4: pointer to uvec3 (Input storage class)
+    let ptr_uvec3_input_id: i64 = 4
+    // ID 5: GlobalInvocationId variable
+    let global_inv_id_var: i64 = 5
+    // ID 6: function type (void -> void)
+    let func_type_id: i64 = 6
+    // ID 7: main function
+    let func_id: i64 = 7
+    // ID 8: entry label
+    let label_id: i64 = 8
+
+    // IDs 9..9+param_count-1: pointer types for parameters
+    // IDs 9+param_count..9+2*param_count-1: parameter variables
+    let param_base_ptr_id: i64 = 9
+    let param_base_var_id: i64 = 9 + kernel.param_count
+
+    // Compute the bound (one past the highest allocated ID)
+    var bound: i64 = 9 + kernel.param_count * 2
+
+    // Reserve some IDs for the function body ops
+    let body_base_id: i64 = bound
+    // Each op may need up to 3 IDs (result, constant, intermediate)
+    bound = bound + kernel.op_count * 3 + 16
+
+    // --- 1. Header ---
+    buf = spv_emit_header(buf, bound)
+
+    // --- 2. Capabilities ---
+    buf = spv_emit_capability(buf, CAPABILITY_SHADER)
+    if gpu_kernel_uses_f64(kernel) {
+        buf = spv_emit_capability(buf, CAPABILITY_FLOAT64)
+    }
+
+    // --- 3. Memory model ---
+    buf = spv_emit_memory_model(buf, ADDRESSING_LOGICAL, MEMORY_GLSL450)
+
+    // --- 4. Entry point ---
+    // Interface variables: GlobalInvocationId + parameter variables
+    var iface: [i64; 8] = [0; 8]
+    iface[0] = global_inv_id_var
+    var iface_count: i64 = 1
+
+    buf = spv_emit_entry_point(buf, EXECUTION_GLCOMPUTE, func_id, "main", iface, iface_count)
+
+    // Execution mode: local size (default 256x1x1)
+    var local_x: i64 = 256
+    if kernel.max_threads > 0 {
+        local_x = kernel.max_threads
+    }
+    buf = spv_emit_local_size(buf, func_id, local_x, 1, 1)
+
+    // --- 5. Decorations ---
+    // GlobalInvocationId builtin
+    buf = spv_emit_decorate_builtin(buf, global_inv_id_var, BUILTIN_GLOBAL_INVOCATION_ID)
+
+    // Parameter bindings: each param gets a consecutive binding in set 0
+    var pi: i64 = 0
+    while pi < kernel.param_count {
+        let var_id = param_base_var_id + pi
+        buf = spv_emit_decorate_binding(buf, var_id, pi)
+        buf = spv_emit_decorate_descriptor_set(buf, var_id, 0)
+        pi = pi + 1
+    }
+
+    // --- 6. Type declarations ---
+    buf = spv_emit_type_void(buf, void_type_id)
+    buf = spv_emit_type_int(buf, uint_type_id, 32, 0)
+    buf = spv_emit_type_vector(buf, uvec3_type_id, uint_type_id, 3)
+    buf = spv_emit_type_pointer(buf, ptr_uvec3_input_id, STORAGE_INPUT, uvec3_type_id)
+    buf = spv_emit_type_function(buf, func_type_id, void_type_id)
+
+    // Pointer types for each kernel parameter
+    pi = 0
+    while pi < kernel.param_count {
+        let param = kernel.params[pi as usize]
+        let ptr_type_id = param_base_ptr_id + pi
+        let spirv_type = gpu_type_to_spirv_type_id(param.ty, uint_type_id)
+        buf = spv_emit_type_pointer(buf, ptr_type_id, STORAGE_STORAGE_BUFFER, spirv_type)
+        pi = pi + 1
+    }
+
+    // --- 7. Global variables ---
+    buf = spv_emit_variable(buf, ptr_uvec3_input_id, global_inv_id_var, STORAGE_INPUT)
+
+    pi = 0
+    while pi < kernel.param_count {
+        let ptr_type_id = param_base_ptr_id + pi
+        let var_id = param_base_var_id + pi
+        buf = spv_emit_variable(buf, ptr_type_id, var_id, STORAGE_STORAGE_BUFFER)
+        pi = pi + 1
+    }
+
+    // --- 8. Function body ---
+    buf = spv_emit_function(buf, void_type_id, func_id, 0, func_type_id)
+    buf = spv_emit_label(buf, label_id)
+
+    // Emit body ops: translate each GpuOp to SPIR-V instructions.
+    // This is a simplified mapping — full opcode coverage lives in spirv.sio.
+    var op_i: i64 = 0
+    while op_i < kernel.op_count {
+        let op = kernel.ops[op_i as usize]
+        let opc = op.opcode
+        let result_id = body_base_id + op_i * 3
+
+        // Arithmetic ops
+        if opc == GpuOpcode::GpuAdd || opc == GpuOpcode::GpuSub
+            || opc == GpuOpcode::GpuMul || opc == GpuOpcode::GpuDiv {
+            let spirv_opc = gpu_opcode_to_spirv(opc, op.ty)
+            let type_id = gpu_type_to_spirv_type_id(op.ty, uint_type_id)
+            let lhs_id = body_base_id + op.lhs_reg * 3
+            let rhs_id = body_base_id + op.rhs_reg * 3
+            buf = spv_emit_binary_op(buf, spirv_opc, type_id, result_id, lhs_id, rhs_id)
+        }
+
+        // FMA: dst = lhs * rhs + src (expanded to mul + add)
+        if opc == GpuOpcode::GpuFma {
+            let type_id = gpu_type_to_spirv_type_id(op.ty, uint_type_id)
+            let lhs_id = body_base_id + op.lhs_reg * 3
+            let rhs_id = body_base_id + op.rhs_reg * 3
+            let src_id = body_base_id + op.src_reg * 3
+            let mul_opc = gpu_opcode_to_spirv(GpuOpcode::GpuMul, op.ty)
+            let add_opc = gpu_opcode_to_spirv(GpuOpcode::GpuAdd, op.ty)
+            let tmp_id = result_id + 1
+            buf = spv_emit_binary_op(buf, mul_opc, type_id, tmp_id, lhs_id, rhs_id)
+            buf = spv_emit_binary_op(buf, add_opc, type_id, result_id, tmp_id, src_id)
+        }
+
+        // Barrier
+        if opc == GpuOpcode::GpuBarrierSync {
+            // Workgroup barrier: execution=Workgroup(2), memory=Workgroup(2),
+            // semantics=WorkgroupMemory|AcquireRelease(0x108 = 264)
+            buf = spv_emit_control_barrier(buf, 2, 2, 264)
+        }
+
+        // Return
+        if opc == GpuOpcode::GpuRet || opc == GpuOpcode::GpuExit {
+            buf = spv_emit_return(buf)
+        }
+
+        op_i = op_i + 1
+    }
+
+    // If the kernel didn't end with a return, add one
+    if kernel.op_count == 0 {
+        buf = spv_emit_return(buf)
+    } else {
+        let last_opc = kernel.ops[(kernel.op_count - 1) as usize].opcode
+        if last_opc != GpuOpcode::GpuRet && last_opc != GpuOpcode::GpuExit {
+            buf = spv_emit_return(buf)
+        }
+    }
+
+    buf = spv_emit_function_end(buf)
+
+    buf
+}
+
+// Map GpuType to a SPIR-V type ID. For simplicity, we reuse the uint_type_id
+// for integer types and would need additional type declarations for floats.
+// In a full implementation, these would be pre-allocated in the type section.
+fn gpu_type_to_spirv_type_id(ty: GpuType, uint_type_id: i64) -> i64 {
+    // Simplified: all types map to the base uint type for now.
+    // A full implementation would emit OpTypeFloat etc. and track IDs.
+    uint_type_id
+}
+
+// ============================================================================
+// Compile-and-validate: compile only if kernel passes validation
+// ============================================================================
+
+// Compile to a specific target only if the kernel is valid for that target.
+fn gpu_compile_validated(kernel: GpuKernelIr, target: GpuTarget) -> GpuCompileResult with Mut, Panic, Div, Alloc {
+    let caps = gpu_default_capabilities(target)
+    let valid = gpu_validate_kernel(kernel, caps)
+    if valid == false {
+        return gpu_compile_result_new()
+    }
+    gpu_compile_to_target(kernel, target)
+}
+
+// Compile to all three targets, skipping any that fail validation.
+fn gpu_compile_all_validated(kernel: GpuKernelIr) -> GpuCompileResult with Mut, Panic, Div, Alloc {
+    var result = gpu_compile_result_new()
+
+    // PTX
+    let ptx_caps = gpu_default_capabilities(GpuTarget::GpuTargetPtx)
+    if gpu_validate_kernel(kernel, ptx_caps) {
+        let arch = ptx_arch_new(5, 0)
+        result.ptx_buf = ptx_codegen_kernel(kernel, arch)
+        result.ptx_valid = true
+    }
+
+    // Metal
+    let metal_caps = gpu_default_capabilities(GpuTarget::GpuTargetMetal)
+    if gpu_validate_kernel(kernel, metal_caps) {
+        result.metal_buf = gpu_lower_to_metal(kernel)
+        result.metal_valid = true
+    }
+
+    // SPIR-V
+    let spirv_caps = gpu_default_capabilities(GpuTarget::GpuTargetSpirv)
+    if gpu_validate_kernel(kernel, spirv_caps) {
+        result.spirv_buf = gpu_portable_emit_spirv(kernel)
+        result.spirv_valid = true
+    }
+
+    result
+}
+
+// ============================================================================
+// Kernel complexity and diagnostics
+// ============================================================================
+
+// Count the total number of ops in a kernel (convenience wrapper).
+fn gpu_kernel_op_count(kernel: GpuKernelIr) -> i64 {
+    kernel.op_count
+}
+
+// Count memory operations (loads + stores, global and shared).
+fn gpu_kernel_memory_op_count(kernel: GpuKernelIr) -> i64 {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < kernel.op_count {
+        let op = kernel.ops[i as usize]
+        let opc = op.opcode
+        let is_mem = (opc == GpuOpcode::GpuLoadGlobal)
+            || (opc == GpuOpcode::GpuStoreGlobal)
+            || (opc == GpuOpcode::GpuLoadShared)
+            || (opc == GpuOpcode::GpuStoreShared)
+            || (opc == GpuOpcode::GpuLoadParam)
+            || (opc == GpuOpcode::GpuLoadGlobalPred)
+            || (opc == GpuOpcode::GpuStoreGlobalPred)
+            || (opc == GpuOpcode::GpuLoadSharedPred)
+            || (opc == GpuOpcode::GpuStoreSharedPred)
+            || (opc == GpuOpcode::GpuLdGlobalCached)
+            || (opc == GpuOpcode::GpuStGlobalWriteback)
+            || (opc == GpuOpcode::GpuPrefetch)
+            || (opc == GpuOpcode::GpuTmaLoad)
+            || (opc == GpuOpcode::GpuTmaStore)
+        if is_mem {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Count arithmetic/compute operations (add, sub, mul, div, fma, etc.).
+fn gpu_kernel_compute_op_count(kernel: GpuKernelIr) -> i64 {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < kernel.op_count {
+        let op = kernel.ops[i as usize]
+        let opc = op.opcode
+        let is_compute = (opc == GpuOpcode::GpuAdd)
+            || (opc == GpuOpcode::GpuSub)
+            || (opc == GpuOpcode::GpuMul)
+            || (opc == GpuOpcode::GpuDiv)
+            || (opc == GpuOpcode::GpuMulImm)
+            || (opc == GpuOpcode::GpuAddImm)
+            || (opc == GpuOpcode::GpuFma)
+            || (opc == GpuOpcode::GpuMax)
+            || (opc == GpuOpcode::GpuMin)
+            || (opc == GpuOpcode::GpuCvt)
+        if is_compute {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Compute-to-memory ratio. Higher values indicate compute-bound kernels.
+// Returns ratio * 100 (integer, to avoid floating point).
+// A value of 100 means 1:1 compute:memory ops.
+fn gpu_kernel_compute_memory_ratio(kernel: GpuKernelIr) -> i64 with Div {
+    let mem_ops = gpu_kernel_memory_op_count(kernel)
+    let compute_ops = gpu_kernel_compute_op_count(kernel)
+    if mem_ops == 0 {
+        if compute_ops == 0 { return 0 }
+        return 10000  // all compute, no memory
+    }
+    (compute_ops * 100) / mem_ops
+}
+
+// ============================================================================
+// Target compatibility checks
+// ============================================================================
+
+// Check if a kernel can run on a specific PTX architecture.
+fn gpu_kernel_compatible_ptx(kernel: GpuKernelIr, sm_major: i64, sm_minor: i64) -> bool {
+    let caps = gpu_ptx_capabilities(sm_major, sm_minor)
+    let sm = sm_major * 10 + sm_minor
+
+    // Basic validation
+    if gpu_validate_kernel(kernel, caps) == false {
+        return false
+    }
+
+    // TMA requires sm_90+
+    if gpu_kernel_uses_tma(kernel) {
+        if sm < 90 {
+            return false
+        }
+    }
+
+    // Tensor cores require sm_70+
+    if gpu_kernel_uses_tensor_cores(kernel) {
+        if sm < 70 {
+            return false
+        }
+    }
+
+    true
+}
+
+// Check if a kernel can run on Metal with a given GPU family.
+fn gpu_kernel_compatible_metal(kernel: GpuKernelIr, gpu_family: i64) -> bool {
+    let caps = gpu_metal_capabilities(gpu_family)
+
+    // Basic validation
+    if gpu_validate_kernel(kernel, caps) == false {
+        return false
+    }
+
+    // Metal never supports TMA
+    if gpu_kernel_uses_tma(kernel) {
+        return false
+    }
+
+    // Metal has no native tensor core equivalent
+    if gpu_kernel_uses_tensor_cores(kernel) {
+        return false
+    }
+
+    true
+}
+
+// Check if a kernel can run on SPIR-V (Vulkan compute baseline).
+fn gpu_kernel_compatible_spirv(kernel: GpuKernelIr) -> bool {
+    let caps = gpu_spirv_capabilities()
+
+    // Basic validation
+    if gpu_validate_kernel(kernel, caps) == false {
+        return false
+    }
+
+    // SPIR-V has no TMA
+    if gpu_kernel_uses_tma(kernel) {
+        return false
+    }
+
+    // SPIR-V has no standard tensor core ops
+    if gpu_kernel_uses_tensor_cores(kernel) {
+        return false
+    }
+
+    true
+}
+
+// ============================================================================
+// Multi-target query: which targets can run this kernel?
+// ============================================================================
+
+struct GpuTargetSupport {
+    ptx_ok: bool,
+    metal_ok: bool,
+    spirv_ok: bool,
+    ptx_min_sm: i64,          // Minimum SM version (e.g. 50, 70, 90)
+    metal_min_family: i64,     // Minimum GPU family (1-9)
+}
+
+fn gpu_target_support_new() -> GpuTargetSupport {
+    GpuTargetSupport {
+        ptx_ok: false,
+        metal_ok: false,
+        spirv_ok: false,
+        ptx_min_sm: 0,
+        metal_min_family: 0,
+    }
+}
+
+// Determine which targets support a given kernel and the minimum
+// architecture required for each.
+fn gpu_query_target_support(kernel: GpuKernelIr) -> GpuTargetSupport {
+    var support = gpu_target_support_new()
+
+    // PTX: find minimum SM
+    if gpu_kernel_compatible_ptx(kernel, 5, 0) {
+        support.ptx_ok = true
+        support.ptx_min_sm = 50
+    } else if gpu_kernel_compatible_ptx(kernel, 7, 0) {
+        support.ptx_ok = true
+        support.ptx_min_sm = 70
+    } else if gpu_kernel_compatible_ptx(kernel, 8, 0) {
+        support.ptx_ok = true
+        support.ptx_min_sm = 80
+    } else if gpu_kernel_compatible_ptx(kernel, 9, 0) {
+        support.ptx_ok = true
+        support.ptx_min_sm = 90
+    } else if gpu_kernel_compatible_ptx(kernel, 10, 0) {
+        support.ptx_ok = true
+        support.ptx_min_sm = 100
+    }
+
+    // Metal: find minimum GPU family
+    if gpu_kernel_compatible_metal(kernel, 1) {
+        support.metal_ok = true
+        support.metal_min_family = 1
+    } else if gpu_kernel_compatible_metal(kernel, 4) {
+        support.metal_ok = true
+        support.metal_min_family = 4
+    } else if gpu_kernel_compatible_metal(kernel, 7) {
+        support.metal_ok = true
+        support.metal_min_family = 7
+    }
+
+    // SPIR-V
+    support.spirv_ok = gpu_kernel_compatible_spirv(kernel)
+
+    support
+}
+
+// Count how many targets support a given kernel.
+fn gpu_target_support_count(support: GpuTargetSupport) -> i64 {
+    var count: i64 = 0
+    if support.ptx_ok { count = count + 1 }
+    if support.metal_ok { count = count + 1 }
+    if support.spirv_ok { count = count + 1 }
+    count
+}
+
+// ============================================================================
+// Convenience: compile to best available target for given capabilities
+// ============================================================================
+
+// Given a kernel and a preferred target, compile to that target if compatible.
+// If not compatible, fall back to the first compatible target in priority order
+// (PTX > Metal > SPIR-V).
+fn gpu_compile_best_effort(kernel: GpuKernelIr, preferred: GpuTarget) -> GpuCompileResult with Mut, Panic, Div, Alloc {
+    let support = gpu_query_target_support(kernel)
+
+    // Try preferred target first
+    let preferred_ok = match preferred {
+        GpuTarget::GpuTargetPtx   => support.ptx_ok,
+        GpuTarget::GpuTargetMetal => support.metal_ok,
+        GpuTarget::GpuTargetSpirv => support.spirv_ok,
+    }
+    if preferred_ok {
+        return gpu_compile_to_target(kernel, preferred)
+    }
+
+    // Fallback priority: PTX > Metal > SPIR-V
+    if support.ptx_ok {
+        return gpu_compile_to_target(kernel, GpuTarget::GpuTargetPtx)
+    }
+    if support.metal_ok {
+        return gpu_compile_to_target(kernel, GpuTarget::GpuTargetMetal)
+    }
+    if support.spirv_ok {
+        return gpu_compile_to_target(kernel, GpuTarget::GpuTargetSpirv)
+    }
+
+    // Nothing compatible — return empty result
+    gpu_compile_result_new()
+}
+
+// ============================================================================
+// Architecture-specific PTX compilation helpers
+// ============================================================================
+
+// Compile targeting specific NVIDIA architectures with appropriate PTX version
+// and feature set. These are thin wrappers that set the right PtxArch.
+
+fn gpu_compile_ptx_maxwell(kernel: GpuKernelIr) -> GpuCompileResult with Mut, Panic, Div, Alloc {
+    var result = gpu_compile_result_new()
+    result.ptx_buf = ptx_codegen_kernel(kernel, ptx_arch_new(5, 0))
+    result.ptx_valid = true
+    result
+}
+
+fn gpu_compile_ptx_volta(kernel: GpuKernelIr) -> GpuCompileResult with Mut, Panic, Div, Alloc {
+    var result = gpu_compile_result_new()
+    result.ptx_buf = ptx_codegen_kernel(kernel, ptx_arch_new(7, 0))
+    result.ptx_valid = true
+    result
+}
+
+fn gpu_compile_ptx_ampere(kernel: GpuKernelIr) -> GpuCompileResult with Mut, Panic, Div, Alloc {
+    var result = gpu_compile_result_new()
+    result.ptx_buf = ptx_codegen_kernel(kernel, ptx_arch_new(8, 0))
+    result.ptx_valid = true
+    result
+}
+
+fn gpu_compile_ptx_ada(kernel: GpuKernelIr) -> GpuCompileResult with Mut, Panic, Div, Alloc {
+    var result = gpu_compile_result_new()
+    result.ptx_buf = ptx_codegen_kernel(kernel, ptx_arch_new(8, 9))
+    result.ptx_valid = true
+    result
+}
+
+fn gpu_compile_ptx_hopper(kernel: GpuKernelIr) -> GpuCompileResult with Mut, Panic, Div, Alloc {
+    var result = gpu_compile_result_new()
+    result.ptx_buf = ptx_codegen_kernel(kernel, ptx_arch_new(9, 0))
+    result.ptx_valid = true
+    result
+}
+
+fn gpu_compile_ptx_blackwell(kernel: GpuKernelIr) -> GpuCompileResult with Mut, Panic, Div, Alloc {
+    var result = gpu_compile_result_new()
+    result.ptx_buf = ptx_codegen_kernel(kernel, ptx_arch_new(10, 0))
+    result.ptx_valid = true
+    result
+}
+
+// ============================================================================
+// Metal-specific compilation helpers
+// ============================================================================
+
+fn gpu_compile_metal_family1(kernel: GpuKernelIr) -> GpuCompileResult with Mut, Panic, Div, Alloc {
+    let caps = gpu_metal_capabilities(1)
+    if gpu_validate_kernel(kernel, caps) == false {
+        return gpu_compile_result_new()
+    }
+    var result = gpu_compile_result_new()
+    result.metal_buf = gpu_lower_to_metal(kernel)
+    result.metal_valid = true
+    result
+}
+
+fn gpu_compile_metal_apple_silicon(kernel: GpuKernelIr) -> GpuCompileResult with Mut, Panic, Div, Alloc {
+    let caps = gpu_metal_capabilities(7)
+    if gpu_validate_kernel(kernel, caps) == false {
+        return gpu_compile_result_new()
+    }
+    var result = gpu_compile_result_new()
+    result.metal_buf = gpu_lower_to_metal(kernel)
+    result.metal_valid = true
+    result
+}
+
+// ============================================================================
+// Kernel portability score
+// ============================================================================
+
+// Compute a portability score (0-100) for a kernel.
+//   100 = runs on all three targets with no restrictions
+//   66  = runs on two targets
+//   33  = runs on one target
+//   0   = runs on no targets
+// Penalty modifiers for advanced features that reduce portability.
+fn gpu_kernel_portability_score(kernel: GpuKernelIr) -> i64 {
+    let support = gpu_query_target_support(kernel)
+    var base_score: i64 = gpu_target_support_count(support) * 33
+
+    // Cap at 100 for 3 targets
+    if base_score > 99 { base_score = 100 }
+
+    // Penalties for features that may cause runtime issues even if compilation works
+    var penalty: i64 = 0
+
+    // f64 usage: some targets compile but run slowly or emulate
+    if gpu_kernel_uses_f64(kernel) {
+        penalty = penalty + 5
+    }
+
+    // Warp-level ops: semantics vary across GPU architectures
+    if gpu_kernel_uses_warp_ops(kernel) {
+        penalty = penalty + 10
+    }
+
+    // TMA: only available on Hopper+
+    if gpu_kernel_uses_tma(kernel) {
+        penalty = penalty + 15
+    }
+
+    // Tensor cores: only NVIDIA sm_70+
+    if gpu_kernel_uses_tensor_cores(kernel) {
+        penalty = penalty + 20
+    }
+
+    var final_score = base_score - penalty
+    if final_score < 0 { final_score = 0 }
+    final_score
+}

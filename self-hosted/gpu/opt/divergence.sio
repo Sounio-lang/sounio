@@ -1,0 +1,1125 @@
+// self-hosted::gpu::opt::divergence — Warp divergence analysis for GpuKernelIr
+//
+// Phase 4D goals:
+// - Classify branch divergence severity from flattened GPU IR
+// - Track approximate divergence depth + reconvergence points
+// - Provide predication heuristics and branch cost estimation
+// - Generate optimization reports that can feed launch tuning decisions
+//
+// Note: GpuKernelIr is a linear op stream (no explicit CFG blocks), so this
+// analysis uses conservative heuristics over predicate/data uniformity.
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+let GPU_DIV_MAX_BRANCHES: i64 = 256
+let GPU_DIV_MAX_DATA_REGS: i64 = 1024
+let GPU_DIV_MAX_PRED_REGS: i64 = 64
+let GPU_DIV_MAX_OPT: i64 = 128
+let GPU_DIV_STACK_MAX: i64 = 64
+let GPU_DIV_MAX_KERNELS: i64 = 64
+
+let GPU_DIV_KIND_UNIFORM: i64 = 0
+let GPU_DIV_KIND_DIVERGENT: i64 = 1
+let GPU_DIV_KIND_PARTIAL: i64 = 2
+let GPU_DIV_KIND_DATA_DEP: i64 = 3
+
+let GPU_CF_OPT_NONE: i64 = 0
+let GPU_CF_OPT_PREDICATE: i64 = 1
+let GPU_CF_OPT_HOIST_UNIFORM: i64 = 2
+let GPU_CF_OPT_SPLIT_KERNEL: i64 = 3
+
+let GPU_THREAD_MASK_ALL_32: i64 = 4294967295
+let GPU_THREAD_MASK_NONE: i64 = 0
+
+// ============================================================================
+// Mask primitives
+// ============================================================================
+
+struct GpuThreadMask {
+    bits: i64,
+    warp_size: i64,
+}
+
+fn gpu_thread_mask_all(warp_size: i64) -> GpuThreadMask {
+    if warp_size >= 32 {
+        GpuThreadMask { bits: GPU_THREAD_MASK_ALL_32, warp_size: warp_size }
+    } else if warp_size <= 0 {
+        GpuThreadMask { bits: GPU_THREAD_MASK_NONE, warp_size: 0 }
+    } else {
+        GpuThreadMask { bits: (1 << warp_size) - 1, warp_size: warp_size }
+    }
+}
+
+fn gpu_thread_mask_none(warp_size: i64) -> GpuThreadMask {
+    GpuThreadMask { bits: GPU_THREAD_MASK_NONE, warp_size: warp_size }
+}
+
+fn gpu_thread_mask_from_bits(bits: i64, warp_size: i64) -> GpuThreadMask {
+    GpuThreadMask { bits: bits, warp_size: warp_size }
+}
+
+fn gpu_thread_mask_is_full(mask: GpuThreadMask) -> bool {
+    let all = gpu_thread_mask_all(mask.warp_size)
+    mask.bits == all.bits
+}
+
+fn gpu_thread_mask_is_empty(mask: GpuThreadMask) -> bool {
+    mask.bits == 0
+}
+
+fn gpu_thread_mask_intersect(a: GpuThreadMask, b: GpuThreadMask) -> GpuThreadMask {
+    GpuThreadMask { bits: a.bits & b.bits, warp_size: a.warp_size }
+}
+
+fn gpu_thread_mask_union(a: GpuThreadMask, b: GpuThreadMask) -> GpuThreadMask {
+    GpuThreadMask { bits: a.bits | b.bits, warp_size: a.warp_size }
+}
+
+fn gpu_thread_mask_complement(a: GpuThreadMask) -> GpuThreadMask {
+    let all = gpu_thread_mask_all(a.warp_size)
+    GpuThreadMask { bits: all.bits ^ a.bits, warp_size: a.warp_size }
+}
+
+fn gpu_thread_mask_overlaps(a: GpuThreadMask, b: GpuThreadMask) -> bool {
+    (a.bits & b.bits) != 0
+}
+
+fn gpu_thread_mask_count(mask: GpuThreadMask) -> i64 with Div {
+    var v = mask.bits
+    var c: i64 = 0
+    var i: i64 = 0
+
+    while i < 32 {
+        if (v & 1) != 0 {
+            c = c + 1
+        }
+        v = v / 2
+        i = i + 1
+    }
+
+    c
+}
+
+// ============================================================================
+// Divergence data model
+// ============================================================================
+
+struct GpuDivergenceInfo {
+    kind: i64,
+    divergence_depth: i64,
+    branch_op_index: i64,
+    reconverge_op_index: i64,
+    affected_threads: GpuThreadMask,
+    cost_multiplier_x100: i64,
+    pred_reg: i64,
+}
+
+fn gpu_divergence_info_uniform() -> GpuDivergenceInfo {
+    GpuDivergenceInfo {
+        kind: GPU_DIV_KIND_UNIFORM,
+        divergence_depth: 0,
+        branch_op_index: -1,
+        reconverge_op_index: -1,
+        affected_threads: gpu_thread_mask_all(32),
+        cost_multiplier_x100: 100,
+        pred_reg: -1,
+    }
+}
+
+fn gpu_divergence_kind_is_optimizable(kind: i64) -> bool {
+    kind == GPU_DIV_KIND_UNIFORM || kind == GPU_DIV_KIND_PARTIAL
+}
+
+fn gpu_divergence_kind_severity_x100(kind: i64) -> i64 {
+    if kind == GPU_DIV_KIND_UNIFORM {
+        0
+    } else if kind == GPU_DIV_KIND_PARTIAL {
+        30
+    } else if kind == GPU_DIV_KIND_DATA_DEP {
+        50
+    } else {
+        100
+    }
+}
+
+fn gpu_divergence_is_divergent(info: GpuDivergenceInfo) -> bool {
+    info.kind != GPU_DIV_KIND_UNIFORM
+}
+
+fn gpu_divergence_overhead_percent(info: GpuDivergenceInfo) -> i64 {
+    if info.cost_multiplier_x100 <= 100 {
+        0
+    } else {
+        info.cost_multiplier_x100 - 100
+    }
+}
+
+struct GpuKernelDivergenceAnalysis {
+    branch_info: [GpuDivergenceInfo; 256],
+    branch_count: i64,
+    divergent_branches: i64,
+    partially_uniform_branches: i64,
+    data_dependent_branches: i64,
+    uniform_branches: i64,
+    divergence_ratio_pct: i64,
+    max_divergence_depth: i64,
+    estimated_overhead_pct: i64,
+}
+
+fn gpu_kernel_divergence_analysis_new() -> GpuKernelDivergenceAnalysis {
+    GpuKernelDivergenceAnalysis {
+        branch_info: [gpu_divergence_info_uniform(); 256],
+        branch_count: 0,
+        divergent_branches: 0,
+        partially_uniform_branches: 0,
+        data_dependent_branches: 0,
+        uniform_branches: 0,
+        divergence_ratio_pct: 0,
+        max_divergence_depth: 0,
+        estimated_overhead_pct: 0,
+    }
+}
+
+fn gpu_kernel_divergence_has_significant(analysis: GpuKernelDivergenceAnalysis) -> bool {
+    analysis.divergence_ratio_pct > 20 || analysis.max_divergence_depth > 2
+}
+
+fn gpu_kernel_divergence_severity_pct(analysis: GpuKernelDivergenceAnalysis) -> i64 {
+    var sev = analysis.divergence_ratio_pct + (analysis.max_divergence_depth * 10)
+    if sev > 100 { sev = 100 }
+    sev
+}
+
+// ============================================================================
+// Uniformity tracker
+// ============================================================================
+
+struct GpuUniformState {
+    data_uniform: [bool; 1024],
+    data_known: [bool; 1024],
+    pred_uniform: [bool; 64],
+    pred_known: [bool; 64],
+}
+
+fn gpu_uniform_state_new() -> GpuUniformState {
+    GpuUniformState {
+        data_uniform: [false; 1024],
+        data_known: [false; 1024],
+        pred_uniform: [false; 64],
+        pred_known: [false; 64],
+    }
+}
+
+fn gpu_uniform_state_mark_data(state: GpuUniformState, reg: i64, uniform: bool) -> GpuUniformState with Mut {
+    var out = state
+    if reg >= 0 && reg < GPU_DIV_MAX_DATA_REGS {
+        out.data_uniform[reg as usize] = uniform
+        out.data_known[reg as usize] = true
+    }
+    out
+}
+
+fn gpu_uniform_state_mark_pred(state: GpuUniformState, reg: i64, uniform: bool) -> GpuUniformState with Mut {
+    var out = state
+    if reg >= 0 && reg < GPU_DIV_MAX_PRED_REGS {
+        out.pred_uniform[reg as usize] = uniform
+        out.pred_known[reg as usize] = true
+    }
+    out
+}
+
+fn gpu_uniform_state_data_known(state: GpuUniformState, reg: i64) -> bool {
+    if reg < 0 || reg >= GPU_DIV_MAX_DATA_REGS {
+        false
+    } else {
+        state.data_known[reg as usize]
+    }
+}
+
+fn gpu_uniform_state_pred_known(state: GpuUniformState, reg: i64) -> bool {
+    if reg < 0 || reg >= GPU_DIV_MAX_PRED_REGS {
+        false
+    } else {
+        state.pred_known[reg as usize]
+    }
+}
+
+fn gpu_uniform_state_data_is_uniform(state: GpuUniformState, reg: i64) -> bool {
+    if reg < 0 || reg >= GPU_DIV_MAX_DATA_REGS {
+        false
+    } else if !state.data_known[reg as usize] {
+        false
+    } else {
+        state.data_uniform[reg as usize]
+    }
+}
+
+fn gpu_uniform_state_pred_is_uniform(state: GpuUniformState, reg: i64) -> bool {
+    if reg < 0 || reg >= GPU_DIV_MAX_PRED_REGS {
+        false
+    } else if !state.pred_known[reg as usize] {
+        false
+    } else {
+        state.pred_uniform[reg as usize]
+    }
+}
+
+struct GpuUniformEval {
+    writes_data: bool,
+    data_reg: i64,
+    data_uniform: bool,
+    writes_pred: bool,
+    pred_reg: i64,
+    pred_uniform: bool,
+}
+
+fn gpu_uniform_eval_none() -> GpuUniformEval {
+    GpuUniformEval {
+        writes_data: false,
+        data_reg: -1,
+        data_uniform: false,
+        writes_pred: false,
+        pred_reg: -1,
+        pred_uniform: false,
+    }
+}
+
+fn gpu_divergence_eval_data_binop(state: GpuUniformState, op: GpuOp) -> GpuUniformEval {
+    var out = gpu_uniform_eval_none()
+    out.writes_data = op.dst_reg >= 0
+    out.data_reg = op.dst_reg
+    out.data_uniform = gpu_uniform_state_data_is_uniform(state, op.lhs_reg) &&
+                       gpu_uniform_state_data_is_uniform(state, op.rhs_reg)
+    out
+}
+
+fn gpu_divergence_eval_data_unop(state: GpuUniformState, op: GpuOp) -> GpuUniformEval {
+    var out = gpu_uniform_eval_none()
+    out.writes_data = op.dst_reg >= 0
+    out.data_reg = op.dst_reg
+    out.data_uniform = gpu_uniform_state_data_is_uniform(state, op.src_reg)
+    out
+}
+
+fn gpu_divergence_eval_op_uniform(state: GpuUniformState, op: GpuOp) -> GpuUniformEval {
+    let code = op.opcode
+
+    // Thread/lane identifiers are divergent by definition.
+    if code == GpuOpcode::GpuGetTid || code == GpuOpcode::GpuGetLaneId {
+        var e = gpu_uniform_eval_none()
+        e.writes_data = op.dst_reg >= 0
+        e.data_reg = op.dst_reg
+        e.data_uniform = false
+        return e
+    }
+
+    // Block/grid metadata are uniform within a warp.
+    if code == GpuOpcode::GpuGetBid ||
+       code == GpuOpcode::GpuGetNtid ||
+       code == GpuOpcode::GpuGetGridDim ||
+       code == GpuOpcode::GpuGetWarpId ||
+       code == GpuOpcode::GpuGetSmId {
+        var e = gpu_uniform_eval_none()
+        e.writes_data = op.dst_reg >= 0
+        e.data_reg = op.dst_reg
+        e.data_uniform = true
+        return e
+    }
+
+    if code == GpuOpcode::GpuLoadParam {
+        var e = gpu_uniform_eval_none()
+        e.writes_data = op.dst_reg >= 0
+        e.data_reg = op.dst_reg
+        e.data_uniform = true
+        return e
+    }
+
+    if code == GpuOpcode::GpuCvt {
+        var e = gpu_uniform_eval_none()
+        e.writes_data = op.dst_reg >= 0
+        e.data_reg = op.dst_reg
+        e.data_uniform = gpu_uniform_state_data_is_uniform(state, op.src_reg)
+        return e
+    }
+
+    if code == GpuOpcode::GpuAdd ||
+       code == GpuOpcode::GpuSub ||
+       code == GpuOpcode::GpuMul ||
+       code == GpuOpcode::GpuDiv ||
+       code == GpuOpcode::GpuMax ||
+       code == GpuOpcode::GpuMin {
+        return gpu_divergence_eval_data_binop(state, op)
+    }
+
+    if code == GpuOpcode::GpuMulImm || code == GpuOpcode::GpuAddImm {
+        var e = gpu_uniform_eval_none()
+        e.writes_data = op.dst_reg >= 0
+        e.data_reg = op.dst_reg
+        e.data_uniform = gpu_uniform_state_data_is_uniform(state, op.src_reg)
+        return e
+    }
+
+    if code == GpuOpcode::GpuFma {
+        var e = gpu_uniform_eval_none()
+        e.writes_data = op.dst_reg >= 0
+        e.data_reg = op.dst_reg
+        e.data_uniform = gpu_uniform_state_data_is_uniform(state, op.src_reg) &&
+                         gpu_uniform_state_data_is_uniform(state, op.lhs_reg) &&
+                         gpu_uniform_state_data_is_uniform(state, op.rhs_reg)
+        return e
+    }
+
+    if code == GpuOpcode::GpuSqrt || code == GpuOpcode::GpuRsqrt ||
+       code == GpuOpcode::GpuExp2 || code == GpuOpcode::GpuLg2 ||
+       code == GpuOpcode::GpuSin || code == GpuOpcode::GpuCos ||
+       code == GpuOpcode::GpuAbs || code == GpuOpcode::GpuRcp {
+        return gpu_divergence_eval_data_unop(state, op)
+    }
+
+    if code == GpuOpcode::GpuLoadGlobal || code == GpuOpcode::GpuLdGlobalCached ||
+       code == GpuOpcode::GpuLoadShared || code == GpuOpcode::GpuLoadGlobalPred ||
+       code == GpuOpcode::GpuLoadSharedPred {
+        var e = gpu_uniform_eval_none()
+        e.writes_data = op.dst_reg >= 0
+        e.data_reg = op.dst_reg
+        e.data_uniform = gpu_uniform_state_data_is_uniform(state, op.addr_reg)
+        return e
+    }
+
+    if code == GpuOpcode::GpuShflDown || code == GpuOpcode::GpuShflUp ||
+       code == GpuOpcode::GpuShflBfly || code == GpuOpcode::GpuShflIdx {
+        var e = gpu_uniform_eval_none()
+        e.writes_data = op.dst_reg >= 0
+        e.data_reg = op.dst_reg
+        e.data_uniform = gpu_uniform_state_data_is_uniform(state, op.src_reg)
+        return e
+    }
+
+    if code == GpuOpcode::GpuVote || code == GpuOpcode::GpuBallot {
+        var e = gpu_uniform_eval_none()
+        e.writes_data = op.dst_reg >= 0
+        e.data_reg = op.dst_reg
+        e.data_uniform = true
+        return e
+    }
+
+    if code == GpuOpcode::GpuSetpLt || code == GpuOpcode::GpuSetpLe ||
+       code == GpuOpcode::GpuSetpEq || code == GpuOpcode::GpuSetpGe ||
+       code == GpuOpcode::GpuSetpGt || code == GpuOpcode::GpuSetpNe {
+        var e = gpu_uniform_eval_none()
+        e.writes_pred = op.dst_reg >= 0
+        e.pred_reg = op.dst_reg
+        e.pred_uniform = gpu_uniform_state_data_is_uniform(state, op.lhs_reg) &&
+                         gpu_uniform_state_data_is_uniform(state, op.rhs_reg)
+        return e
+    }
+
+    if code == GpuOpcode::GpuSelp {
+        var e = gpu_uniform_eval_none()
+        e.writes_data = op.dst_reg >= 0
+        e.data_reg = op.dst_reg
+        e.data_uniform = gpu_uniform_state_pred_is_uniform(state, op.src_reg) &&
+                         gpu_uniform_state_data_is_uniform(state, op.lhs_reg) &&
+                         gpu_uniform_state_data_is_uniform(state, op.rhs_reg)
+        return e
+    }
+
+    if code == GpuOpcode::GpuWmma || code == GpuOpcode::GpuMma {
+        var e = gpu_uniform_eval_none()
+        e.writes_data = op.dst_reg >= 0
+        e.data_reg = op.dst_reg
+        e.data_uniform = false
+        return e
+    }
+
+    if code == GpuOpcode::GpuAtomicAdd {
+        var e = gpu_uniform_eval_none()
+        e.writes_data = op.dst_reg >= 0
+        e.data_reg = op.dst_reg
+        e.data_uniform = false
+        return e
+    }
+
+    // Unknown producer: conservative divergent write if it has dst_reg.
+    var e = gpu_uniform_eval_none()
+    if op.dst_reg >= 0 {
+        e.writes_data = true
+        e.data_reg = op.dst_reg
+        e.data_uniform = false
+    }
+    e
+}
+
+fn gpu_divergence_apply_eval(state: GpuUniformState, eval: GpuUniformEval) -> GpuUniformState with Mut {
+    var out = state
+
+    if eval.writes_data {
+        out = gpu_uniform_state_mark_data(out, eval.data_reg, eval.data_uniform)
+    }
+
+    if eval.writes_pred {
+        out = gpu_uniform_state_mark_pred(out, eval.pred_reg, eval.pred_uniform)
+    }
+
+    out
+}
+
+// ============================================================================
+// Branch classification
+// ============================================================================
+
+fn gpu_divergence_branch_mask(op: GpuOp) -> GpuThreadMask {
+    if op.mask <= 0 {
+        gpu_thread_mask_all(32)
+    } else {
+        gpu_thread_mask_from_bits(op.mask, 32)
+    }
+}
+
+fn gpu_divergence_branch_kind(op: GpuOp, state: GpuUniformState) -> i64 {
+    if op.pred_reg < 0 {
+        return GPU_DIV_KIND_UNIFORM
+    }
+
+    let pred_known = gpu_uniform_state_pred_known(state, op.pred_reg)
+    let pred_uniform = gpu_uniform_state_pred_is_uniform(state, op.pred_reg)
+
+    if pred_uniform {
+        return GPU_DIV_KIND_UNIFORM
+    }
+
+    if !pred_known {
+        return GPU_DIV_KIND_DATA_DEP
+    }
+
+    if op.mask != GPU_THREAD_MASK_ALL_32 {
+        return GPU_DIV_KIND_PARTIAL
+    }
+
+    GPU_DIV_KIND_DIVERGENT
+}
+
+fn gpu_divergence_cost_multiplier(kind: i64, depth: i64) -> i64 {
+    if kind == GPU_DIV_KIND_UNIFORM {
+        return 100
+    }
+
+    let sev = gpu_divergence_kind_severity_x100(kind)
+    var cost = 100 + sev + (depth * 15)
+    if kind == GPU_DIV_KIND_DIVERGENT {
+        cost = cost + 10
+    }
+    if cost < 100 { cost = 100 }
+    cost
+}
+
+fn gpu_divergence_record_reconvergence(
+    analysis: GpuKernelDivergenceAnalysis,
+    branch_slot: i64,
+    reconv_op_idx: i64
+) -> GpuKernelDivergenceAnalysis with Mut {
+    var out = analysis
+    if branch_slot >= 0 && branch_slot < out.branch_count {
+        var info = out.branch_info[branch_slot as usize]
+        if info.reconverge_op_index < 0 {
+            info.reconverge_op_index = reconv_op_idx
+            out.branch_info[branch_slot as usize] = info
+        }
+    }
+    out
+}
+
+fn gpu_divergence_finalize_stats(analysis: GpuKernelDivergenceAnalysis) -> GpuKernelDivergenceAnalysis with Div {
+    var out = analysis
+
+    if out.branch_count <= 0 {
+        out.divergence_ratio_pct = 0
+        out.estimated_overhead_pct = 0
+        return out
+    }
+
+    out.divergence_ratio_pct = (out.divergent_branches * 100) / out.branch_count
+
+    var total_overhead: i64 = 0
+    var i: i64 = 0
+    while i < out.branch_count {
+        total_overhead = total_overhead + gpu_divergence_overhead_percent(out.branch_info[i as usize])
+        i = i + 1
+    }
+
+    out.estimated_overhead_pct = total_overhead / out.branch_count
+    out
+}
+
+fn gpu_divergence_analyze_kernel(kernel: GpuKernelIr) -> GpuKernelDivergenceAnalysis with Mut, Panic, Div {
+    var out = gpu_kernel_divergence_analysis_new()
+    var state = gpu_uniform_state_new()
+
+    var depth: i64 = 0
+    var branch_stack: [i64; 64] = [-1; 64]
+    var stack_len: i64 = 0
+
+    var i: i64 = 0
+    while i < kernel.op_count {
+        let op = kernel.ops[i as usize]
+
+        let eval = gpu_divergence_eval_op_uniform(state, op)
+        state = gpu_divergence_apply_eval(state, eval)
+
+        if op.opcode == GpuOpcode::GpuBra {
+            if out.branch_count < GPU_DIV_MAX_BRANCHES {
+                var info = gpu_divergence_info_uniform()
+                info.branch_op_index = i
+                info.pred_reg = op.pred_reg
+                info.affected_threads = gpu_divergence_branch_mask(op)
+                info.kind = gpu_divergence_branch_kind(op, state)
+
+                if info.kind == GPU_DIV_KIND_UNIFORM {
+                    out.uniform_branches = out.uniform_branches + 1
+                } else {
+                    depth = depth + 1
+                    info.divergence_depth = depth
+                    if depth > out.max_divergence_depth {
+                        out.max_divergence_depth = depth
+                    }
+                    info.cost_multiplier_x100 = gpu_divergence_cost_multiplier(info.kind, depth)
+
+                    if info.kind == GPU_DIV_KIND_DIVERGENT {
+                        out.divergent_branches = out.divergent_branches + 1
+                    } else if info.kind == GPU_DIV_KIND_PARTIAL {
+                        out.partially_uniform_branches = out.partially_uniform_branches + 1
+                        out.divergent_branches = out.divergent_branches + 1
+                    } else {
+                        out.data_dependent_branches = out.data_dependent_branches + 1
+                        out.divergent_branches = out.divergent_branches + 1
+                    }
+
+                    if stack_len < GPU_DIV_STACK_MAX {
+                        branch_stack[stack_len as usize] = out.branch_count
+                        stack_len = stack_len + 1
+                    }
+                }
+
+                out.branch_info[out.branch_count as usize] = info
+                out.branch_count = out.branch_count + 1
+            }
+        }
+
+        // Reconvergence heuristic: barriers/returns collapse one nesting level.
+        if op.opcode == GpuOpcode::GpuBarrierSync ||
+           op.opcode == GpuOpcode::GpuRet ||
+           op.opcode == GpuOpcode::GpuExit {
+            if depth > 0 {
+                depth = depth - 1
+            }
+
+            if stack_len > 0 {
+                stack_len = stack_len - 1
+                let slot = branch_stack[stack_len as usize]
+                out = gpu_divergence_record_reconvergence(out, slot, i)
+            }
+        }
+
+        i = i + 1
+    }
+
+    // Any remaining divergent branches reconverge at kernel end.
+    while stack_len > 0 {
+        stack_len = stack_len - 1
+        let slot = branch_stack[stack_len as usize]
+        out = gpu_divergence_record_reconvergence(out, slot, kernel.op_count - 1)
+    }
+
+    gpu_divergence_finalize_stats(out)
+}
+
+// ============================================================================
+// Predicate compilation heuristics
+// ============================================================================
+
+struct GpuPredicateReg {
+    index: i64,
+}
+
+fn gpu_predicate_reg_new(index: i64) -> GpuPredicateReg {
+    GpuPredicateReg { index: index }
+}
+
+struct GpuPredicateMask {
+    cond_pred: GpuPredicateReg,
+    true_pred: GpuPredicateReg,
+    false_pred: GpuPredicateReg,
+    nesting_level: i64,
+}
+
+struct GpuPredicateCompiler {
+    next_pred_reg: i64,
+    max_pred_regs: i64,
+}
+
+fn gpu_predicate_compiler_new(max_pred_regs: i64) -> GpuPredicateCompiler {
+    GpuPredicateCompiler {
+        next_pred_reg: 0,
+        max_pred_regs: max_pred_regs,
+    }
+}
+
+fn gpu_predicate_compiler_allocate(pc: GpuPredicateCompiler) -> (GpuPredicateCompiler, GpuPredicateReg, bool) {
+    var out = pc
+    if out.next_pred_reg >= out.max_pred_regs {
+        return (out, gpu_predicate_reg_new(-1), false)
+    }
+
+    let reg = gpu_predicate_reg_new(out.next_pred_reg)
+    out.next_pred_reg = out.next_pred_reg + 1
+    (out, reg, true)
+}
+
+fn gpu_predicate_compiler_generate(
+    pc: GpuPredicateCompiler,
+    cond_reg: i64,
+    nesting_level: i64
+) -> (GpuPredicateCompiler, GpuPredicateMask, bool) {
+    var out = pc
+
+    let alloc_true = gpu_predicate_compiler_allocate(out)
+    out = alloc_true.0
+    if !alloc_true.2 {
+        return (
+            out,
+            GpuPredicateMask {
+                cond_pred: gpu_predicate_reg_new(cond_reg),
+                true_pred: gpu_predicate_reg_new(-1),
+                false_pred: gpu_predicate_reg_new(-1),
+                nesting_level: nesting_level,
+            },
+            false,
+        )
+    }
+
+    let alloc_false = gpu_predicate_compiler_allocate(out)
+    out = alloc_false.0
+    if !alloc_false.2 {
+        return (
+            out,
+            GpuPredicateMask {
+                cond_pred: gpu_predicate_reg_new(cond_reg),
+                true_pred: alloc_true.1,
+                false_pred: gpu_predicate_reg_new(-1),
+                nesting_level: nesting_level,
+            },
+            false,
+        )
+    }
+
+    (
+        out,
+        GpuPredicateMask {
+            cond_pred: gpu_predicate_reg_new(cond_reg),
+            true_pred: alloc_true.1,
+            false_pred: alloc_false.1,
+            nesting_level: nesting_level,
+        },
+        true,
+    )
+}
+
+fn gpu_predicate_compiler_should_predicate(
+    pc: GpuPredicateCompiler,
+    info: GpuDivergenceInfo,
+    branch_region_ops: i64
+) -> bool {
+    if !gpu_divergence_is_divergent(info) {
+        return false
+    }
+
+    if branch_region_ops > 12 {
+        return false
+    }
+
+    if info.divergence_depth > 2 {
+        return false
+    }
+
+    if info.pred_reg < 0 {
+        return false
+    }
+
+    if pc.next_pred_reg + 2 > pc.max_pred_regs {
+        return false
+    }
+
+    true
+}
+
+fn gpu_predicate_compiler_reset(pc: GpuPredicateCompiler) -> GpuPredicateCompiler {
+    GpuPredicateCompiler {
+        next_pred_reg: 0,
+        max_pred_regs: pc.max_pred_regs,
+    }
+}
+
+// ============================================================================
+// Branch cost model
+// ============================================================================
+
+struct GpuBranchCost {
+    base_cost_x100: i64,
+    serialization_penalty_x100: i64,
+    reconvergence_overhead_x100: i64,
+    instruction_cost_x100: i64,
+    total_cost_x100: i64,
+}
+
+fn gpu_branch_cost_overhead_ratio_pct(cost: GpuBranchCost) -> i64 with Div {
+    if cost.base_cost_x100 <= 0 {
+        0
+    } else {
+        let delta = cost.total_cost_x100 - cost.base_cost_x100
+        if delta <= 0 {
+            0
+        } else {
+            (delta * 100) / cost.base_cost_x100
+        }
+    }
+}
+
+fn gpu_divergence_estimate_branch_cost(info: GpuDivergenceInfo, branch_size: i64) -> GpuBranchCost {
+    let base = 100
+
+    let serialization = if info.cost_multiplier_x100 > 100 {
+        info.cost_multiplier_x100 - 100
+    } else {
+        0
+    }
+
+    let reconv = if info.reconverge_op_index < 0 {
+        40
+    } else {
+        10 + (info.divergence_depth * 5)
+    }
+
+    let inst = if branch_size <= 0 {
+        0
+    } else {
+        branch_size * info.cost_multiplier_x100
+    }
+
+    GpuBranchCost {
+        base_cost_x100: base,
+        serialization_penalty_x100: serialization,
+        reconvergence_overhead_x100: reconv,
+        instruction_cost_x100: inst,
+        total_cost_x100: base + serialization + reconv + inst,
+    }
+}
+
+fn gpu_divergence_estimate_predicated_cost(branch_size: i64) -> i64 {
+    if branch_size <= 0 {
+        0
+    } else {
+        (branch_size * 100) + 30
+    }
+}
+
+fn gpu_divergence_should_use_predication_cost(info: GpuDivergenceInfo, branch_size: i64) -> bool {
+    let branch_cost = gpu_divergence_estimate_branch_cost(info, branch_size)
+    let pred_cost = gpu_divergence_estimate_predicated_cost(branch_size)
+    pred_cost < branch_cost.total_cost_x100
+}
+
+// ============================================================================
+// Control-flow optimization report
+// ============================================================================
+
+struct GpuControlFlowOptimization {
+    tag: i64,
+    branch_op_index: i64,
+    score: i64,
+}
+
+fn gpu_control_flow_optimization_none() -> GpuControlFlowOptimization {
+    GpuControlFlowOptimization {
+        tag: GPU_CF_OPT_NONE,
+        branch_op_index: -1,
+        score: 0,
+    }
+}
+
+struct GpuControlFlowOptReport {
+    analysis: GpuKernelDivergenceAnalysis,
+    optimizations: [GpuControlFlowOptimization; 128],
+    optimization_count: i64,
+    estimated_speedup_pct: i64,
+}
+
+fn gpu_control_flow_opt_report_new() -> GpuControlFlowOptReport {
+    GpuControlFlowOptReport {
+        analysis: gpu_kernel_divergence_analysis_new(),
+        optimizations: [gpu_control_flow_optimization_none(); 128],
+        optimization_count: 0,
+        estimated_speedup_pct: 0,
+    }
+}
+
+fn gpu_control_flow_opt_report_has_optimizations(report: GpuControlFlowOptReport) -> bool {
+    report.optimization_count > 0
+}
+
+fn gpu_divergence_estimate_branch_region_size(kernel: GpuKernelIr, branch_op_index: i64) -> i64 {
+    if branch_op_index < 0 || branch_op_index >= kernel.op_count {
+        return 0
+    }
+
+    var size: i64 = 0
+    var i = branch_op_index + 1
+
+    while i < kernel.op_count && size < 64 {
+        let code = kernel.ops[i as usize].opcode
+
+        if code == GpuOpcode::GpuBra {
+            break
+        }
+        if code == GpuOpcode::GpuRet || code == GpuOpcode::GpuExit || code == GpuOpcode::GpuBarrierSync {
+            size = size + 1
+            break
+        }
+
+        size = size + 1
+        i = i + 1
+    }
+
+    size
+}
+
+fn gpu_control_flow_opt_add(
+    report: GpuControlFlowOptReport,
+    tag: i64,
+    branch_op_index: i64,
+    score: i64
+) -> GpuControlFlowOptReport with Mut {
+    var out = report
+
+    if out.optimization_count < GPU_DIV_MAX_OPT {
+        out.optimizations[out.optimization_count as usize] = GpuControlFlowOptimization {
+            tag: tag,
+            branch_op_index: branch_op_index,
+            score: score,
+        }
+        out.optimization_count = out.optimization_count + 1
+    }
+
+    out
+}
+
+fn gpu_control_flow_estimate_speedup(report: GpuControlFlowOptReport) -> i64 with Div {
+    if report.optimization_count <= 0 {
+        return 0
+    }
+
+    let sev = gpu_kernel_divergence_severity_pct(report.analysis)
+    var speedup = (report.optimization_count * 8) + (sev / 4)
+
+    if speedup > 75 {
+        speedup = 75
+    }
+
+    speedup
+}
+
+fn gpu_control_flow_optimize(kernel: GpuKernelIr) -> GpuControlFlowOptReport with Mut, Panic, Div {
+    var report = gpu_control_flow_opt_report_new()
+    let analysis = gpu_divergence_analyze_kernel(kernel)
+    report.analysis = analysis
+
+    var pred_compiler = gpu_predicate_compiler_new(16)
+
+    var i: i64 = 0
+    while i < analysis.branch_count {
+        let info = analysis.branch_info[i as usize]
+        let region_size = gpu_divergence_estimate_branch_region_size(kernel, info.branch_op_index)
+
+        if gpu_predicate_compiler_should_predicate(pred_compiler, info, region_size) &&
+           gpu_divergence_should_use_predication_cost(info, region_size) {
+            report = gpu_control_flow_opt_add(
+                report,
+                GPU_CF_OPT_PREDICATE,
+                info.branch_op_index,
+                80 - (info.divergence_depth * 5)
+            )
+
+            let gen = gpu_predicate_compiler_generate(pred_compiler, info.pred_reg, info.divergence_depth)
+            pred_compiler = gen.0
+        } else if info.kind == GPU_DIV_KIND_PARTIAL {
+            report = gpu_control_flow_opt_add(
+                report,
+                GPU_CF_OPT_HOIST_UNIFORM,
+                info.branch_op_index,
+                55
+            )
+        } else if info.kind == GPU_DIV_KIND_DIVERGENT && info.divergence_depth > 2 {
+            report = gpu_control_flow_opt_add(
+                report,
+                GPU_CF_OPT_SPLIT_KERNEL,
+                info.branch_op_index,
+                50
+            )
+        }
+
+        i = i + 1
+    }
+
+    report.estimated_speedup_pct = gpu_control_flow_estimate_speedup(report)
+    report
+}
+
+// ============================================================================
+// Adaptive dispatch hints
+// ============================================================================
+
+struct GpuAdaptiveDispatcher {
+    divergence_threshold_pct: i64,
+    has_uniform_variant: bool,
+    has_divergent_variant: bool,
+}
+
+fn gpu_adaptive_dispatcher_new() -> GpuAdaptiveDispatcher {
+    GpuAdaptiveDispatcher {
+        divergence_threshold_pct: 35,
+        has_uniform_variant: false,
+        has_divergent_variant: false,
+    }
+}
+
+fn gpu_adaptive_dispatcher_register_uniform(dispatcher: GpuAdaptiveDispatcher) -> GpuAdaptiveDispatcher {
+    var out = dispatcher
+    out.has_uniform_variant = true
+    out
+}
+
+fn gpu_adaptive_dispatcher_register_divergent(dispatcher: GpuAdaptiveDispatcher) -> GpuAdaptiveDispatcher {
+    var out = dispatcher
+    out.has_divergent_variant = true
+    out
+}
+
+fn gpu_adaptive_dispatcher_set_threshold(dispatcher: GpuAdaptiveDispatcher, threshold_pct: i64) -> GpuAdaptiveDispatcher {
+    var out = dispatcher
+    out.divergence_threshold_pct = threshold_pct
+    out
+}
+
+// Returns: 0=none, 1=uniform variant, 2=divergent variant.
+fn gpu_adaptive_dispatcher_select_variant(dispatcher: GpuAdaptiveDispatcher, expected_divergence_pct: i64) -> i64 {
+    if expected_divergence_pct <= dispatcher.divergence_threshold_pct {
+        if dispatcher.has_uniform_variant {
+            return 1
+        }
+    } else {
+        if dispatcher.has_divergent_variant {
+            return 2
+        }
+    }
+
+    if dispatcher.has_uniform_variant {
+        1
+    } else if dispatcher.has_divergent_variant {
+        2
+    } else {
+        0
+    }
+}
+
+// ============================================================================
+// Module-level helpers
+// ============================================================================
+
+struct GpuDivergenceModuleReport {
+    analyses: [GpuKernelDivergenceAnalysis; 64],
+    kernel_count: i64,
+    significant_count: i64,
+}
+
+fn gpu_divergence_module_report_new() -> GpuDivergenceModuleReport {
+    GpuDivergenceModuleReport {
+        analyses: [gpu_kernel_divergence_analysis_new(); 64],
+        kernel_count: 0,
+        significant_count: 0,
+    }
+}
+
+fn gpu_divergence_analyze_kernels(
+    kernels: [GpuKernelIr; 64],
+    count: i64
+) -> GpuDivergenceModuleReport with Mut, Panic, Div {
+    var report = gpu_divergence_module_report_new()
+
+    var i: i64 = 0
+    while i < count && i < GPU_DIV_MAX_KERNELS {
+        let analysis = gpu_divergence_analyze_kernel(kernels[i as usize])
+        report.analyses[i as usize] = analysis
+        report.kernel_count = report.kernel_count + 1
+
+        if gpu_kernel_divergence_has_significant(analysis) {
+            report.significant_count = report.significant_count + 1
+        }
+
+        i = i + 1
+    }
+
+    report
+}
+
+fn hlir_gpu_analyze_divergence(lowered: HlirGpuLoweredModule) -> GpuDivergenceModuleReport with Mut, Panic, Div {
+    gpu_divergence_analyze_kernels(lowered.kernels, lowered.kernel_count)
+}
+
+// A lightweight heuristic pass that reduces launch width for strongly divergent kernels.
+fn gpu_divergence_adjust_launch_threads(kernel: GpuKernelIr, analysis: GpuKernelDivergenceAnalysis) -> GpuKernelIr with Div {
+    var out = kernel
+
+    if out.max_threads <= 0 {
+        return out
+    }
+
+    if analysis.divergence_ratio_pct > 50 || analysis.max_divergence_depth > 3 {
+        // Reduce by 2x to improve scheduling flexibility under heavy divergence.
+        out.max_threads = out.max_threads / 2
+
+        // Preserve warp alignment and lower bound.
+        if out.max_threads < 64 {
+            out.max_threads = 64
+        }
+        if (out.max_threads % 32) != 0 {
+            out.max_threads = ((out.max_threads / 32) + 1) * 32
+        }
+    }
+
+    out
+}
+
+fn gpu_divergence_apply_launch_adjustments(
+    kernels: [GpuKernelIr; 64],
+    count: i64
+) -> [GpuKernelIr; 64] with Mut, Panic, Div {
+    var out = kernels
+
+    var i: i64 = 0
+    while i < count && i < GPU_DIV_MAX_KERNELS {
+        let analysis = gpu_divergence_analyze_kernel(out[i as usize])
+        out[i as usize] = gpu_divergence_adjust_launch_threads(out[i as usize], analysis)
+        i = i + 1
+    }
+
+    out
+}
+
+fn hlir_gpu_apply_divergence_launch_adjustments(lowered: HlirGpuLoweredModule) -> HlirGpuLoweredModule with Mut, Panic, Div {
+    var out = lowered
+    out.kernels = gpu_divergence_apply_launch_adjustments(out.kernels, out.kernel_count)
+    out
+}
+
+// End of gpu/opt/divergence.sio

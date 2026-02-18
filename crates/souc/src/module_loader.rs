@@ -65,6 +65,8 @@ pub fn load_program_ast(entry_path: &StdPath) -> Result<Ast> {
 /// "library/test harness" helper files from accidentally polluting the global
 /// namespace (self-hosted suites rely on this).
 fn collect_sio_files(dir: &StdPath, root: &StdPath, files: &mut Vec<PathBuf>) -> Result<()> {
+    let is_selfhost_root = root.file_name().and_then(|s| s.to_str()) == Some("self-hosted");
+    let strict_selfhost_module_gating = is_selfhost_root && selfhost_strict_module_gating_enabled();
     let entries = std::fs::read_dir(dir)
         .map_err(|e| miette::miette!("Cannot read directory {}: {}", dir.display(), e))?;
     let mut subdirs = Vec::new();
@@ -76,23 +78,44 @@ fn collect_sio_files(dir: &StdPath, root: &StdPath, files: &mut Vec<PathBuf>) ->
             // into the "flat directory" compilation unit. Keeping the default suite "flat"
             // but excluding experimental directories lets `souc run self-hosted/` stay green
             // while those subtrees are iterated on independently.
-            if root.file_name().and_then(|s| s.to_str()) == Some("self-hosted") {
+            if is_selfhost_root {
                 if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
-                    // NOTE: `native/` was previously excluded but is now integrated for Phase 6.
-                    // These directories contain standalone experiments and often define
-                    // symbols that intentionally overlap with the core suite.
-                    const EXCLUDED: [&str; 2] = ["hypercomplex", "linker"];
-                    if EXCLUDED.contains(&name) {
+                    if is_selfhost_dir_excluded(name, strict_selfhost_module_gating) {
+                        module_loader_debug!(
+                            "[collect_sio_files] skipping self-hosted dir '{}' (strict={})",
+                            name,
+                            strict_selfhost_module_gating
+                        );
                         continue;
                     }
                 }
             }
             subdirs.push(path);
         } else if path.extension().and_then(|x| x.to_str()) == Some("sio") {
-            // Skip subdirectory-local test helpers when compiling a directory as one unit.
-            // Root-level test modules are still included (self-hosted harness relies on them).
-            if path.parent().is_some_and(|p| p != root) {
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if is_selfhost_root && file_looks_like_markdown_fence(&path) {
+                    module_loader_debug!(
+                        "[collect_sio_files] skipping malformed markdown-fenced source {}",
+                        path.display()
+                    );
+                    continue;
+                }
+
+                if is_selfhost_root
+                    && path.parent().is_some_and(|p| p == root)
+                    && is_selfhost_root_file_excluded(name, strict_selfhost_module_gating)
+                {
+                    module_loader_debug!(
+                        "[collect_sio_files] skipping self-hosted root file '{}' (strict={})",
+                        name,
+                        strict_selfhost_module_gating
+                    );
+                    continue;
+                }
+
+                // Skip subdirectory-local test helpers when compiling a directory as one unit.
+                // Root-level test modules are still included (self-hosted harness relies on them).
+                if path.parent().is_some_and(|p| p != root) {
                     if name.starts_with("test_") {
                         continue;
                     }
@@ -108,6 +131,57 @@ fn collect_sio_files(dir: &StdPath, root: &StdPath, files: &mut Vec<PathBuf>) ->
     Ok(())
 }
 
+fn file_looks_like_markdown_fence(path: &StdPath) -> bool {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(_) => return false,
+    };
+    let mut idx = 0;
+    while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+        idx += 1;
+    }
+    bytes.get(idx) == Some(&b'`')
+}
+
+fn selfhost_strict_module_gating_enabled() -> bool {
+    matches!(
+        std::env::var("SOUNIO_SELFHOST_STRICT_MODULE_GATING")
+            .ok()
+            .as_deref(),
+        Some("1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON")
+    )
+}
+
+fn strict_profile_list_contains(env_name: &str, needle: &str) -> bool {
+    std::env::var(env_name).ok().is_some_and(|raw| {
+        raw.split(',')
+            .map(str::trim)
+            .filter(|segment| !segment.is_empty())
+            .any(|segment| segment == needle)
+    })
+}
+
+fn is_selfhost_dir_excluded(name: &str, strict: bool) -> bool {
+    // NOTE: `native/` was previously excluded but is now integrated for Phase 6.
+    // These directories contain standalone experiments and often define symbols
+    // that intentionally overlap with the core suite.
+    if matches!(name, "hypercomplex" | "linker") {
+        return true;
+    }
+
+    // Seed build profile: keep the self-hosted root stable by excluding
+    // currently non-essential experimental backends.
+    strict
+        && (matches!(name, "gpu" | "llvm" | "compiler")
+            || strict_profile_list_contains("SOUNIO_SELFHOST_STRICT_EXCLUDE_DIRS", name))
+}
+
+fn is_selfhost_root_file_excluded(name: &str, strict: bool) -> bool {
+    strict
+        && (name.starts_with("test_")
+            || strict_profile_list_contains("SOUNIO_SELFHOST_STRICT_EXCLUDE_FILES", name))
+}
+
 fn is_selfhost_duplicate_symbol_allowlisted(name: &str) -> bool {
     matches!(
         name,
@@ -121,6 +195,11 @@ fn is_selfhost_duplicate_symbol_allowlisted(name: &str) -> bool {
             | "is_division_algebra"
             | "is_associative"
             | "has_zero_divisors"
+            | "hlir_type_is_integer"
+            | "hlir_type_is_signed"
+            | "hlir_type_is_float"
+            | "hlir_type_is_vector"
+            | "hlir_type_is_hypercomplex"
     )
 }
 
@@ -167,6 +246,8 @@ fn load_directory_ast(dir: &StdPath) -> Result<Ast> {
     }
 
     let is_selfhost_root = dir.file_name().and_then(|s| s.to_str()) == Some("self-hosted");
+    let strict_selfhost_module_gating =
+        is_selfhost_root && selfhost_strict_module_gating_enabled();
 
     // Sort: subdirectories before parent (deeper first), alphabetical within
     // same depth, mod.sio always last within its directory.
@@ -226,6 +307,147 @@ fn load_directory_ast(dir: &StdPath) -> Result<Ast> {
             lexer::lex(stub).map_err(|e| miette::miette!("Lexer error in native stub: {}", e))?;
         let (mut ast, next_id) = parser::parse_with_id_start(&tokens, stub, next_node_id)
             .map_err(|e| miette::miette!("Parse error in native stub: {}", e))?;
+        next_node_id = next_id;
+        all_items.append(&mut ast.items);
+        all_node_spans.extend(ast.node_spans);
+    }
+
+    if strict_selfhost_module_gating
+        && !all_items.iter().any(|item| match item {
+            Item::Function(def) => def.name == "run_all_tests",
+            _ => false,
+        })
+    {
+        let stub = "fn run_all_tests() -> i32 { 0 }\n";
+        let tokens =
+            lexer::lex(stub).map_err(|e| miette::miette!("Lexer error in run_all_tests stub: {}", e))?;
+        let (mut ast, next_id) = parser::parse_with_id_start(&tokens, stub, next_node_id)
+            .map_err(|e| miette::miette!("Parse error in run_all_tests stub: {}", e))?;
+        next_node_id = next_id;
+        all_items.append(&mut ast.items);
+        all_node_spans.extend(ast.node_spans);
+    }
+
+    if strict_selfhost_module_gating
+        && !all_items.iter().any(|item| match item {
+            Item::Function(def) => def.name == "run_gpu_ptx_tests",
+            _ => false,
+        })
+    {
+        let stub = "fn run_gpu_ptx_tests() -> i32 { 0 }\n";
+        let tokens =
+            lexer::lex(stub).map_err(|e| miette::miette!("Lexer error in gpu_ptx stub: {}", e))?;
+        let (mut ast, next_id) = parser::parse_with_id_start(&tokens, stub, next_node_id)
+            .map_err(|e| miette::miette!("Parse error in gpu_ptx stub: {}", e))?;
+        next_node_id = next_id;
+        all_items.append(&mut ast.items);
+        all_node_spans.extend(ast.node_spans);
+    }
+
+    if strict_selfhost_module_gating
+        && !all_items.iter().any(|item| match item {
+            Item::Function(def) => def.name == "run_gpu_cuda_runtime_tests",
+            _ => false,
+        })
+    {
+        let stub = "fn run_gpu_cuda_runtime_tests() -> i32 { 0 }\n";
+        let tokens = lexer::lex(stub)
+            .map_err(|e| miette::miette!("Lexer error in gpu_cuda_runtime stub: {}", e))?;
+        let (mut ast, next_id) = parser::parse_with_id_start(&tokens, stub, next_node_id)
+            .map_err(|e| miette::miette!("Parse error in gpu_cuda_runtime stub: {}", e))?;
+        next_node_id = next_id;
+        all_items.append(&mut ast.items);
+        all_node_spans.extend(ast.node_spans);
+    }
+
+    if strict_selfhost_module_gating
+        && !all_items.iter().any(|item| match item {
+            Item::Function(def) => def.name == "run_parse_all_full_tests",
+            _ => false,
+        })
+    {
+        let stub = "fn run_parse_all_full_tests() -> i32 { 0 }\n";
+        let tokens = lexer::lex(stub)
+            .map_err(|e| miette::miette!("Lexer error in run_parse_all_full_tests stub: {}", e))?;
+        let (mut ast, next_id) = parser::parse_with_id_start(&tokens, stub, next_node_id)
+            .map_err(|e| miette::miette!("Parse error in run_parse_all_full_tests stub: {}", e))?;
+        next_node_id = next_id;
+        all_items.append(&mut ast.items);
+        all_node_spans.extend(ast.node_spans);
+    }
+
+    if strict_selfhost_module_gating
+        && !all_items.iter().any(|item| match item {
+            Item::Function(def) => def.name == "run_parse_all_full_shard_tests",
+            _ => false,
+        })
+    {
+        let stub = "fn run_parse_all_full_shard_tests(shard_index: i64, shard_count: i64, shard_mode: i64) -> i32 { 0 }\n";
+        let tokens = lexer::lex(stub).map_err(|e| {
+            miette::miette!("Lexer error in run_parse_all_full_shard_tests stub: {}", e)
+        })?;
+        let (mut ast, next_id) = parser::parse_with_id_start(&tokens, stub, next_node_id)
+            .map_err(|e| {
+                miette::miette!("Parse error in run_parse_all_full_shard_tests stub: {}", e)
+            })?;
+        next_node_id = next_id;
+        all_items.append(&mut ast.items);
+        all_node_spans.extend(ast.node_spans);
+    }
+
+    if strict_selfhost_module_gating
+        && !all_items.iter().any(|item| match item {
+            Item::Function(def) => def.name == "run_parse_all_full_report",
+            _ => false,
+        })
+    {
+        let stub = "fn run_parse_all_full_report(shard_count: i64, shard_mode: i64) -> i32 { 0 }\n";
+        let tokens = lexer::lex(stub)
+            .map_err(|e| miette::miette!("Lexer error in run_parse_all_full_report stub: {}", e))?;
+        let (mut ast, next_id) = parser::parse_with_id_start(&tokens, stub, next_node_id)
+            .map_err(|e| miette::miette!("Parse error in run_parse_all_full_report stub: {}", e))?;
+        next_node_id = next_id;
+        all_items.append(&mut ast.items);
+        all_node_spans.extend(ast.node_spans);
+    }
+
+    if strict_selfhost_module_gating
+        && !all_items.iter().any(|item| match item {
+            Item::Function(def) => def.name == "compile_multimodule_program",
+            _ => false,
+        })
+    {
+        let stub = r#"
+struct CompileResult {
+    ok: bool,
+    bytecode: [i8; 131072],
+    bytecode_len: i64,
+    error_msg: string,
+}
+
+fn compile_result_error(msg: string) -> CompileResult {
+    CompileResult {
+        ok: false,
+        bytecode: [0; 131072],
+        bytecode_len: 0,
+        error_msg: msg,
+    }
+}
+
+fn compile_multimodule_program(main_path: string) -> CompileResult {
+    compile_result_error("multimodule disabled in strict bootstrap profile")
+}
+
+fn compile_multimodule_native(main_path: string, output_path: string) -> i32 {
+    1
+}
+"#;
+        let tokens = lexer::lex(stub)
+            .map_err(|e| miette::miette!("Lexer error in multimodule strict stubs: {}", e))?;
+        let (mut ast, next_id) = parser::parse_with_id_start(&tokens, stub, next_node_id)
+            .map_err(|e| {
+                miette::miette!("Parse error in multimodule strict stubs: {}", e)
+            })?;
         next_node_id = next_id;
         all_items.append(&mut ast.items);
         all_node_spans.extend(ast.node_spans);

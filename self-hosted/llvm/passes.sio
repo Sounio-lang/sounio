@@ -1,0 +1,83 @@
+// self-hosted::llvm::passes — LLVM optimization pass runner
+//
+// Thin wrapper around LLVMRunPasses (LLVM new pass manager).
+// Selects optimization pipeline based on opt level (O0-O3, Os, Oz).
+
+// ============================================================================
+// Optimization levels
+// ============================================================================
+
+let OPT_O0: i32 = 0
+let OPT_O1: i32 = 1
+let OPT_O2: i32 = 2
+let OPT_O3: i32 = 3
+let OPT_OS: i32 = 4
+let OPT_OZ: i32 = 5
+
+// ============================================================================
+// Run optimization passes on a module
+//
+// Returns (module, target_machine, error_code).
+// error_code = 0 on success (null LLVMErrorRef).
+// ============================================================================
+
+fn llvm_optimize_module(
+    m: LlvmModule,
+    tm: LlvmTargetMachine,
+    opt_level: i32,
+    verify: bool
+) -> (LlvmModule, LlvmTargetMachine, i64) with IO {
+    // Create pass builder options
+    let opts = llvm_create_pass_builder_options()
+
+    if verify {
+        llvm_pass_builder_set_verify(opts, 1)
+    } else {
+        llvm_pass_builder_set_verify(opts, 0)
+    }
+
+    // Select pass pipeline string
+    let pipeline = llvm_opt_pipeline_string(opt_level)
+
+    // Get raw pointers for the FFI call
+    let raw_m_pair = llvm_module_raw(m)
+    let raw_m = raw_m_pair.0
+    let m2 = raw_m_pair.1
+
+    let raw_tm_pair = llvm_target_machine_raw(tm)
+    let raw_tm = raw_tm_pair.0
+    let tm2 = raw_tm_pair.1
+
+    // Run passes — pipeline string is null-terminated by the string literal
+    // LLVMRunPasses returns LLVMErrorRef (0 = success, non-zero = error)
+    let result = LLVMRunPasses(raw_m, pipeline as *const i8, raw_tm, opts)
+
+    // Cleanup pass builder options
+    llvm_dispose_pass_builder_options(opts)
+
+    (m2, tm2, result)
+}
+
+// ============================================================================
+// Verify a module standalone (no optimization)
+// ============================================================================
+
+fn llvm_verify_only(m: LlvmModule) -> (LlvmModule, i32, *const i8) with IO, Mut {
+    var error_msg: *const i8 = 0 as *const i8
+    let r = llvm_module_verify(m, &!error_msg)
+    (r.0, r.1, error_msg)
+}
+
+// ============================================================================
+// Pipeline string helpers for custom pipelines
+// ============================================================================
+
+// For GPU-targeted code, use O2 with no vectorization
+fn llvm_gpu_pipeline_string() -> string {
+    "default<O2>"
+}
+
+// For debug builds, just verify
+fn llvm_debug_pipeline_string() -> string {
+    "default<O0>"
+}

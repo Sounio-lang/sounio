@@ -1,0 +1,356 @@
+// self-hosted::intern -- String interning module
+//
+// Flat-array string interner that replaces the Rust `string-interner` crate.
+// All interned strings are stored in a single contiguous byte buffer. Intern
+// IDs are stable indices into the offsets/lengths arrays. Deduplication uses
+// a DJB2 hash with linear probing and byte-by-byte comparison on collision.
+//
+// Capacity:
+//   - Up to 4096 unique strings
+//   - Up to 65536 total bytes of string data
+//
+// State threading: every mutating operation consumes the interner and returns
+// a new one (Sounio linear/value semantics, no &mut).
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+// Buffer capacity for interned byte data.
+let INTERN_BUF_CAP: i64 = 65536
+
+// Maximum number of interned strings.
+let INTERN_MAX_STRINGS: i64 = 4096
+
+// Hash table size -- must be a power of two for masking.
+// We use a table larger than INTERN_MAX_STRINGS to keep load factor low.
+let INTERN_HASH_TABLE_SIZE: i64 = 8192
+
+// Sentinel value for empty hash table slots.
+let INTERN_HASH_EMPTY: i64 = -1
+
+// ============================================================================
+// INTERNER STRUCT
+// ============================================================================
+
+struct StringInterner {
+    buf: [i8; 65536],          // flat byte buffer for interned strings
+    buf_len: i64,              // next free byte offset in buf
+    offsets: [i64; 4096],      // intern_id -> start offset in buf
+    lengths: [i64; 4096],      // intern_id -> length of string
+    count: i64,                // number of interned strings
+    hashes: [i64; 4096],       // intern_id -> precomputed DJB2 hash
+    hash_table: [i64; 8192],   // hash -> intern_id (open addressing)
+}
+
+// ============================================================================
+// CONSTRUCTOR
+// ============================================================================
+
+fn interner_new() -> StringInterner {
+    StringInterner {
+        buf: [0; 65536],
+        buf_len: 0,
+        offsets: [0; 4096],
+        lengths: [0; 4096],
+        count: 0,
+        hashes: [0; 4096],
+        hash_table: [-1; 8192],
+    }
+}
+
+// ============================================================================
+// DJB2 HASH
+// ============================================================================
+
+// Compute DJB2 hash over the bytes of a string.
+// Formula: hash = hash * 33 + byte
+// We keep the hash positive by masking with 0x7FFFFFFFFFFFFFFF.
+fn intern_hash_string(s: string) -> i64 with Mut, Div {
+    let len = str_len(s)
+    var hash: i64 = 5381
+    var i: i64 = 0
+    while i < len {
+        let ch = str_char_at(s, i)
+        hash = hash * 33 + ch
+        // Keep positive by masking off the sign bit.
+        hash = hash & 9223372036854775807
+        i = i + 1
+    }
+    hash
+}
+
+// Compute DJB2 hash over a byte range in the intern buffer.
+fn intern_hash_buf_range(buf: [i8; 65536], offset: i64, length: i64) -> i64 with Mut, Panic, Div {
+    var hash: i64 = 5381
+    var i: i64 = 0
+    while i < length {
+        let ch = buf[(offset + i) as usize]
+        hash = hash * 33 + ch
+        hash = hash & 9223372036854775807
+        i = i + 1
+    }
+    hash
+}
+
+// ============================================================================
+// STRING COMPARISON HELPERS
+// ============================================================================
+
+// Compare a string against a range in the intern buffer byte-by-byte.
+fn intern_str_eq_buf(s: string, buf: [i8; 65536], offset: i64, length: i64) -> bool with Mut, Panic, Div {
+    let slen = str_len(s)
+    if slen != length {
+        return false
+    }
+    var i: i64 = 0
+    while i < slen {
+        let ch_s = str_char_at(s, i)
+        let ch_b = buf[(offset + i) as usize]
+        if ch_s != ch_b {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// ============================================================================
+// HASH TABLE PROBING
+// ============================================================================
+
+// Compute the starting slot index from a hash value.
+fn intern_slot_index(hash: i64) -> i64 with Div {
+    // INTERN_HASH_TABLE_SIZE is 8192 = 2^13, so mask is 8191.
+    hash & 8191
+}
+
+// Look up a string in the hash table. Returns the intern ID if found,
+// or INTERN_HASH_EMPTY (-1) if not present.
+fn intern_find(si: StringInterner, s: string, hash: i64) -> i64 with Mut, Panic, Div {
+    var slot = intern_slot_index(hash)
+    var probes: i64 = 0
+    while probes < INTERN_HASH_TABLE_SIZE {
+        let entry = si.hash_table[slot as usize]
+        if entry == INTERN_HASH_EMPTY {
+            // Empty slot: string is not interned.
+            return INTERN_HASH_EMPTY
+        }
+        // Slot occupied -- check if hash matches first (fast reject).
+        if si.hashes[entry as usize] == hash {
+            // Hash matches -- compare actual bytes.
+            let off = si.offsets[entry as usize]
+            let len = si.lengths[entry as usize]
+            if intern_str_eq_buf(s, si.buf, off, len) {
+                return entry
+            }
+        }
+        // Linear probe to next slot.
+        slot = (slot + 1) & 8191
+        probes = probes + 1
+    }
+    // Table full (should not happen if load factor < 0.5).
+    INTERN_HASH_EMPTY
+}
+
+// ============================================================================
+// COPY STRING BYTES INTO BUFFER
+// ============================================================================
+
+// Copy the bytes of string s into buf starting at offset. Returns the
+// number of bytes written (equal to str_len(s)).
+fn intern_copy_string_to_buf(buf_ref: &![i8; 65536], s: string, offset: i64) -> i64 with Mut, Panic, Div {
+    let slen = str_len(s)
+    var i: i64 = 0
+    while i < slen {
+        let ch = str_char_at(s, i)
+        buf_ref[(offset + i) as usize] = ch
+        i = i + 1
+    }
+    slen
+}
+
+// ============================================================================
+// INTERN
+// ============================================================================
+
+// Intern a string. If the string is already present, returns its existing ID.
+// Otherwise, inserts it and returns the new ID.
+//
+// Returns: (updated interner, intern ID)
+//
+// If the interner is at capacity (strings or buffer full), the string is NOT
+// inserted and the returned ID is -1.
+fn interner_intern(si: StringInterner, s: string) -> (StringInterner, i64) with Mut, Panic, Div {
+    let hash = intern_hash_string(s)
+
+    // Check if already interned.
+    let existing = intern_find(si, s, hash)
+    if existing != INTERN_HASH_EMPTY {
+        return (si, existing)
+    }
+
+    // Check capacity.
+    let slen = str_len(s)
+    if si.count >= INTERN_MAX_STRINGS {
+        return (si, -1)
+    }
+    if si.buf_len + slen > INTERN_BUF_CAP {
+        return (si, -1)
+    }
+
+    // Assign new intern ID.
+    let id = si.count
+    var result = si
+
+    // Copy string bytes into the buffer.
+    let buf_ref = &!result.buf
+    let written = intern_copy_string_to_buf(buf_ref, s, result.buf_len)
+
+    // Record metadata.
+    result.offsets[id as usize] = result.buf_len
+    result.lengths[id as usize] = slen
+    result.hashes[id as usize] = hash
+    result.buf_len = result.buf_len + slen
+    result.count = id + 1
+
+    // Insert into hash table.
+    var slot = intern_slot_index(hash)
+    var placed: bool = false
+    var probes: i64 = 0
+    while !placed && probes < INTERN_HASH_TABLE_SIZE {
+        if result.hash_table[slot as usize] == INTERN_HASH_EMPTY {
+            result.hash_table[slot as usize] = id
+            placed = true
+        } else {
+            slot = (slot + 1) & 8191
+            probes = probes + 1
+        }
+    }
+
+    (result, id)
+}
+
+// ============================================================================
+// RESOLVE
+// ============================================================================
+
+// Resolve an intern ID back to the original string.
+// Relies on the runtime builtin `str_from_bytes(buf, offset, len)`.
+fn interner_resolve(si: StringInterner, id: i64) -> string with Panic, Div {
+    if id < 0 || id >= si.count {
+        return ""
+    }
+    let offset = si.offsets[id as usize]
+    let length = si.lengths[id as usize]
+    str_from_bytes(si.buf, offset, length)
+}
+
+// ============================================================================
+// CONTAINS
+// ============================================================================
+
+// Check whether a string has already been interned.
+fn interner_contains(si: StringInterner, s: string) -> bool with Mut, Panic, Div {
+    let hash = intern_hash_string(s)
+    let found = intern_find(si, s, hash)
+    found != INTERN_HASH_EMPTY
+}
+
+// ============================================================================
+// LENGTH
+// ============================================================================
+
+// Return the number of interned strings.
+fn interner_len(si: StringInterner) -> i64 {
+    si.count
+}
+
+// ============================================================================
+// CONVENIENCE HELPERS
+// ============================================================================
+
+// Intern a string and return only the ID (discarding the updated interner).
+// Useful in read-only contexts where the caller already has the string
+// interned and just needs the ID. Panics conceptually if the string is not
+// already present (returns -1).
+fn interner_get_id(si: StringInterner, s: string) -> i64 with Mut, Panic, Div {
+    let hash = intern_hash_string(s)
+    intern_find(si, s, hash)
+}
+
+// Return the byte length of the interned string with the given ID.
+fn interner_resolve_len(si: StringInterner, id: i64) -> i64 with Panic, Div {
+    if id < 0 || id >= si.count {
+        return 0
+    }
+    si.lengths[id as usize]
+}
+
+// Return the hash of the interned string with the given ID.
+fn interner_resolve_hash(si: StringInterner, id: i64) -> i64 with Panic, Div {
+    if id < 0 || id >= si.count {
+        return 0
+    }
+    si.hashes[id as usize]
+}
+
+// ============================================================================
+// BULK OPERATIONS
+// ============================================================================
+
+// Intern multiple strings from a flat array of string values.
+// Returns the updated interner and an array of corresponding IDs.
+// Stops early if the interner runs out of capacity.
+fn interner_intern_batch(si: StringInterner, strings: [string; 64], count: i64) -> (StringInterner, [i64; 64]) with Mut, Panic, Div {
+    var result = si
+    var ids: [i64; 64] = [-1; 64]
+    var i: i64 = 0
+    while i < count && i < 64 {
+        let pair = interner_intern(result, strings[i as usize])
+        result = pair.0
+        ids[i as usize] = pair.1
+        i = i + 1
+    }
+    (result, ids)
+}
+
+// ============================================================================
+// DEBUG / DIAGNOSTICS
+// ============================================================================
+
+// Print all interned strings and their IDs to stdout.
+fn interner_dump(si: StringInterner) with IO, Mut, Panic, Div {
+    print("StringInterner: ")
+    print_int(si.count)
+    print(" strings, ")
+    print_int(si.buf_len)
+    print(" bytes used / ")
+    print_int(INTERN_BUF_CAP)
+    print(" capacity\n")
+
+    var i: i64 = 0
+    while i < si.count {
+        print("  [")
+        print_int(i)
+        print("] hash=")
+        print_int(si.hashes[i as usize])
+        print(" off=")
+        print_int(si.offsets[i as usize])
+        print(" len=")
+        print_int(si.lengths[i as usize])
+        print(" \"")
+        let s = interner_resolve(si, i)
+        print(s)
+        print("\"\n")
+        i = i + 1
+    }
+}
+
+// Return the load factor of the hash table as a percentage (0..100).
+fn interner_load_factor_pct(si: StringInterner) -> i64 with Div {
+    if INTERN_HASH_TABLE_SIZE == 0 {
+        return 0
+    }
+    (si.count * 100) / INTERN_HASH_TABLE_SIZE
+}

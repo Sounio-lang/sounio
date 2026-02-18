@@ -1,0 +1,609 @@
+// self-hosted::llvm::type_convert — HlirType → LlvmType conversion
+//
+// Maps all Sounio types in the HLIR to their LLVM IR representations.
+// Uses the safe wrapper types from context.sio, types.sio, values.sio.
+//
+// Key design choices:
+//   - All pointers are opaque `ptr` (LLVM 15+)
+//   - Hypercomplex types use SIMD vectors (Quaternion → <4 x float>, etc.)
+//   - Vec3/Vec3d are padded to 4 elements for SIMD alignment
+//   - Knowledge<T> is Full mode by default (T + 64 bytes metadata)
+//   - Dual is { double, double }
+//   - Void is mapped to empty struct {} (LLVM void can't be a value type)
+
+// ============================================================================
+// TypeConverter state — caches struct types for forward references
+// ============================================================================
+
+struct TypeConverter {
+    // Cached struct types: name hash → LlvmType
+    // Fixed-size associative array (name hash, type pointer)
+    struct_cache_keys: [i64; 256],    // name hashes
+    struct_cache_vals: [i64; 256],    // LlvmType.ptr values
+    struct_cache_count: i64,
+}
+
+fn type_converter_new() -> TypeConverter {
+    TypeConverter {
+        struct_cache_keys: [0; 256],
+        struct_cache_vals: [0; 256],
+        struct_cache_count: 0,
+    }
+}
+
+// Simple hash for struct name lookup
+fn hlir_name_hash(n: HlirName) -> i64 {
+    var h: i64 = 5381
+    var i: i64 = 0
+    while i < n.len {
+        h = ((h * 33) + (n.buf[i as usize] as i64)) % 1000000007
+        i = i + 1
+    }
+    if h < 0 { h = 0 - h }
+    h
+}
+
+fn type_converter_lookup_struct(tc: TypeConverter, name_hash: i64) -> i64 {
+    var i: i64 = 0
+    while i < tc.struct_cache_count {
+        if tc.struct_cache_keys[i as usize] == name_hash {
+            return tc.struct_cache_vals[i as usize]
+        }
+        i = i + 1
+    }
+    0
+}
+
+fn type_converter_cache_struct(tc: TypeConverter, name_hash: i64, ty_ptr: i64) -> TypeConverter with Mut, Panic {
+    var out = tc
+    if out.struct_cache_count < 256 {
+        out.struct_cache_keys[out.struct_cache_count as usize] = name_hash
+        out.struct_cache_vals[out.struct_cache_count as usize] = ty_ptr
+        out.struct_cache_count = out.struct_cache_count + 1
+    }
+    out
+}
+
+// ============================================================================
+// Core conversion: HlirTypeKind → LlvmType
+//
+// Takes the LlvmContext by state-threading for type factories.
+// ============================================================================
+
+fn convert_hlir_type(
+    ctx: LlvmContext,
+    tc: TypeConverter,
+    ty: HlirType
+) -> (LlvmContext, TypeConverter, LlvmType) with IO, Mut, Panic {
+    let kind = ty.kind
+
+    // Void → empty struct (can be used as a value, unlike LLVM void)
+    if kind == HlirTypeKind::HlirTypeVoid {
+        let r = llvm_struct_type(ctx, 0 as *const i64, 0, 0)
+        let ctx2 = r.0
+        let lty = r.1
+        return (ctx2, tc, lty)
+    }
+
+    // Bool → i1
+    if kind == HlirTypeKind::HlirTypeBool {
+        let r = llvm_int1_type(ctx)
+        return (r.0, tc, r.1)
+    }
+
+    // Integer types
+    if kind == HlirTypeKind::HlirTypeI8 {
+        let r = llvm_int8_type(ctx)
+        return (r.0, tc, r.1)
+    }
+    if kind == HlirTypeKind::HlirTypeU8 {
+        let r = llvm_int8_type(ctx)
+        return (r.0, tc, r.1)
+    }
+    if kind == HlirTypeKind::HlirTypeI16 {
+        let r = llvm_int16_type(ctx)
+        return (r.0, tc, r.1)
+    }
+    if kind == HlirTypeKind::HlirTypeU16 {
+        let r = llvm_int16_type(ctx)
+        return (r.0, tc, r.1)
+    }
+    if kind == HlirTypeKind::HlirTypeI32 {
+        let r = llvm_int32_type(ctx)
+        return (r.0, tc, r.1)
+    }
+    if kind == HlirTypeKind::HlirTypeU32 {
+        let r = llvm_int32_type(ctx)
+        return (r.0, tc, r.1)
+    }
+    if kind == HlirTypeKind::HlirTypeI64 {
+        let r = llvm_int64_type(ctx)
+        return (r.0, tc, r.1)
+    }
+    if kind == HlirTypeKind::HlirTypeU64 {
+        let r = llvm_int64_type(ctx)
+        return (r.0, tc, r.1)
+    }
+    if kind == HlirTypeKind::HlirTypeI128 {
+        let r = llvm_int128_type(ctx)
+        return (r.0, tc, r.1)
+    }
+    if kind == HlirTypeKind::HlirTypeU128 {
+        let r = llvm_int128_type(ctx)
+        return (r.0, tc, r.1)
+    }
+
+    // Floating-point types
+    if kind == HlirTypeKind::HlirTypeF32 {
+        let r = llvm_float_type(ctx)
+        return (r.0, tc, r.1)
+    }
+    if kind == HlirTypeKind::HlirTypeF64 {
+        let r = llvm_double_type(ctx)
+        return (r.0, tc, r.1)
+    }
+
+    // Pointer → opaque ptr (LLVM 15+)
+    if kind == HlirTypeKind::HlirTypePtr {
+        let r = llvm_ptr_type(ctx, 0)
+        return (r.0, tc, r.1)
+    }
+
+    // Array → [element x count]
+    if kind == HlirTypeKind::HlirTypeArray {
+        // inner_type_idx references the type table — for now, we need
+        // the element type to be passed in via type_elems[0].
+        // Use i8 as fallback if no element type info available.
+        let elem_idx = ty.inner_type_idx
+        if elem_idx < 0 {
+            let r = llvm_int8_type(ctx)
+            let ctx2 = r.0
+            let elem_ty = r.1
+            let arr_ty = llvm_array_type(elem_ty, ty.array_len)
+            return (ctx2, tc, arr_ty)
+        }
+        // When a full type table is available, look up element type.
+        // For now, treat as i8 array.
+        let r = llvm_int8_type(ctx)
+        let ctx2 = r.0
+        let elem_ty = r.1
+        let arr_ty = llvm_array_type(elem_ty, ty.array_len)
+        return (ctx2, tc, arr_ty)
+    }
+
+    // ============================================================================
+    // SIMD vector types (f32)
+    // ============================================================================
+
+    // Vec2 → <2 x float>
+    if kind == HlirTypeKind::HlirTypeVec2 {
+        let r = llvm_float_type(ctx)
+        let ctx2 = r.0
+        let f32_ty = r.1
+        let vec_ty = llvm_vector_type(f32_ty, 2)
+        return (ctx2, tc, vec_ty)
+    }
+
+    // Vec3 → <4 x float> (padded to 4 for SIMD alignment)
+    if kind == HlirTypeKind::HlirTypeVec3 {
+        let r = llvm_float_type(ctx)
+        let ctx2 = r.0
+        let f32_ty = r.1
+        let vec_ty = llvm_vector_type(f32_ty, 4)
+        return (ctx2, tc, vec_ty)
+    }
+
+    // Vec4 → <4 x float>
+    if kind == HlirTypeKind::HlirTypeVec4 {
+        let r = llvm_float_type(ctx)
+        let ctx2 = r.0
+        let f32_ty = r.1
+        let vec_ty = llvm_vector_type(f32_ty, 4)
+        return (ctx2, tc, vec_ty)
+    }
+
+    // ============================================================================
+    // SIMD vector types (f64)
+    // ============================================================================
+
+    // Vec2d → <2 x double>
+    if kind == HlirTypeKind::HlirTypeVec2d {
+        let r = llvm_double_type(ctx)
+        let ctx2 = r.0
+        let f64_ty = r.1
+        let vec_ty = llvm_vector_type(f64_ty, 2)
+        return (ctx2, tc, vec_ty)
+    }
+
+    // Vec3d → <4 x double> (padded to 4 for SIMD alignment)
+    if kind == HlirTypeKind::HlirTypeVec3d {
+        let r = llvm_double_type(ctx)
+        let ctx2 = r.0
+        let f64_ty = r.1
+        let vec_ty = llvm_vector_type(f64_ty, 4)
+        return (ctx2, tc, vec_ty)
+    }
+
+    // Vec4d → <4 x double>
+    if kind == HlirTypeKind::HlirTypeVec4d {
+        let r = llvm_double_type(ctx)
+        let ctx2 = r.0
+        let f64_ty = r.1
+        let vec_ty = llvm_vector_type(f64_ty, 4)
+        return (ctx2, tc, vec_ty)
+    }
+
+    // ============================================================================
+    // Matrix types → flat float arrays
+    // ============================================================================
+
+    // Mat2 → [4 x float]
+    if kind == HlirTypeKind::HlirTypeMat2 {
+        let r = llvm_float_type(ctx)
+        let ctx2 = r.0
+        let f32_ty = r.1
+        let arr_ty = llvm_array_type(f32_ty, 4)
+        return (ctx2, tc, arr_ty)
+    }
+
+    // Mat3 → [12 x float] (3x4 for alignment)
+    if kind == HlirTypeKind::HlirTypeMat3 {
+        let r = llvm_float_type(ctx)
+        let ctx2 = r.0
+        let f32_ty = r.1
+        let arr_ty = llvm_array_type(f32_ty, 12)
+        return (ctx2, tc, arr_ty)
+    }
+
+    // Mat4 → [16 x float]
+    if kind == HlirTypeKind::HlirTypeMat4 {
+        let r = llvm_float_type(ctx)
+        let ctx2 = r.0
+        let f32_ty = r.1
+        let arr_ty = llvm_array_type(f32_ty, 16)
+        return (ctx2, tc, arr_ty)
+    }
+
+    // ============================================================================
+    // Hypercomplex types (Cayley-Dickson hierarchy)
+    // ============================================================================
+
+    // Quaternion → <4 x float>
+    if kind == HlirTypeKind::HlirTypeQuat {
+        let r = llvm_float_type(ctx)
+        let ctx2 = r.0
+        let f32_ty = r.1
+        let vec_ty = llvm_vector_type(f32_ty, 4)
+        return (ctx2, tc, vec_ty)
+    }
+
+    // Octonion → <8 x float>
+    if kind == HlirTypeKind::HlirTypeOctonion {
+        let r = llvm_float_type(ctx)
+        let ctx2 = r.0
+        let f32_ty = r.1
+        let vec_ty = llvm_vector_type(f32_ty, 8)
+        return (ctx2, tc, vec_ty)
+    }
+
+    // Sedenion → <16 x float>
+    if kind == HlirTypeKind::HlirTypeSedenion {
+        let r = llvm_float_type(ctx)
+        let ctx2 = r.0
+        let f32_ty = r.1
+        let vec_ty = llvm_vector_type(f32_ty, 16)
+        return (ctx2, tc, vec_ty)
+    }
+
+    // ============================================================================
+    // Quaternionic NN types → struct representations
+    // ============================================================================
+
+    // QuatLinear: weights <4 x float> array + bias <4 x float>
+    if kind == HlirTypeKind::HlirTypeQuatLinear {
+        let r = llvm_float_type(ctx)
+        let ctx2 = r.0
+        let f32_ty = r.1
+        let quat_ty = llvm_vector_type(f32_ty, 4)
+        // struct { <4 x float> weights, <4 x float> bias, i64 in_features, i64 out_features }
+        var elems: [i64; 4] = [0; 4]
+        elems[0] = quat_ty.ptr    // weights (pointer to array, simplified)
+        elems[1] = quat_ty.ptr    // bias
+        let r2 = llvm_int64_type(ctx2)
+        let ctx3 = r2.0
+        let i64_ty = r2.1
+        elems[2] = i64_ty.ptr     // in_features
+        elems[3] = i64_ty.ptr     // out_features
+        let r3 = llvm_struct_type(ctx3, &elems as *const i64, 4, 0)
+        return (r3.0, tc, r3.1)
+    }
+
+    // QuatConv2d, QuatRnnState, QuatGate → opaque struct placeholders
+    if kind == HlirTypeKind::HlirTypeQuatConv2d {
+        let r = llvm_ptr_type(ctx, 0)
+        return (r.0, tc, r.1)
+    }
+    if kind == HlirTypeKind::HlirTypeQuatRnnState {
+        let r = llvm_ptr_type(ctx, 0)
+        return (r.0, tc, r.1)
+    }
+    if kind == HlirTypeKind::HlirTypeQuatGate {
+        let r = llvm_ptr_type(ctx, 0)
+        return (r.0, tc, r.1)
+    }
+
+    // ============================================================================
+    // Automatic differentiation
+    // ============================================================================
+
+    // Dual → { double, double }
+    if kind == HlirTypeKind::HlirTypeDual {
+        let r = llvm_double_type(ctx)
+        let ctx2 = r.0
+        let f64_ty = r.1
+        var elems: [i64; 2] = [0; 2]
+        elems[0] = f64_ty.ptr
+        elems[1] = f64_ty.ptr
+        let r2 = llvm_struct_type(ctx2, &elems as *const i64, 2, 0)
+        return (r2.0, tc, r2.1)
+    }
+
+    // ============================================================================
+    // Epistemic Knowledge<T>
+    //
+    // Full mode (default):
+    //   { T value, f64 confidence, f64 lower, f64 upper,
+    //     [32 x i8] provenance, u64 timestamp }
+    // Total overhead: 64 bytes beyond the inner type.
+    // ============================================================================
+
+    if kind == HlirTypeKind::HlirTypeKnowledge {
+        // Inner type is referenced by inner_type_idx. For now, default to f64.
+        let r = llvm_double_type(ctx)
+        let ctx2 = r.0
+        let inner_ty = r.1
+
+        let r2 = llvm_int8_type(ctx2)
+        let ctx3 = r2.0
+        let i8_ty = r2.1
+
+        let r3 = llvm_int64_type(ctx3)
+        let ctx4 = r3.0
+        let i64_ty = r3.1
+
+        let prov_ty = llvm_array_type(i8_ty, 32)  // [32 x i8] provenance hash
+
+        // Build the Knowledge struct: { T, f64, f64, f64, [32 x i8], i64 }
+        var elems: [i64; 6] = [0; 6]
+        elems[0] = inner_ty.ptr     // value
+        elems[1] = inner_ty.ptr     // confidence (f64)
+        elems[2] = inner_ty.ptr     // lower bound (f64)
+        elems[3] = inner_ty.ptr     // upper bound (f64)
+        elems[4] = prov_ty.ptr      // provenance hash
+        elems[5] = i64_ty.ptr       // timestamp
+
+        let r4 = llvm_struct_type(ctx4, &elems as *const i64, 6, 0)
+        return (r4.0, tc, r4.1)
+    }
+
+    // ============================================================================
+    // Struct type (named)
+    // ============================================================================
+
+    if kind == HlirTypeKind::HlirTypeStruct {
+        let nh = hlir_name_hash(ty.name)
+        let cached = type_converter_lookup_struct(tc, nh)
+        if cached != 0 {
+            // Already created (possibly opaque). Return cached.
+            return (ctx, tc, LlvmType { ptr: cached })
+        }
+        // Create opaque named struct (body will be set later)
+        let r = llvm_struct_create_named(ctx, &ty.name.buf as *const i8)
+        let ctx2 = r.0
+        let sty = r.1
+        let tc2 = type_converter_cache_struct(tc, nh, sty.ptr)
+        return (ctx2, tc2, sty)
+    }
+
+    // ============================================================================
+    // Function type
+    // ============================================================================
+
+    if kind == HlirTypeKind::HlirTypeFunction {
+        // type_elems[0..type_elem_count-1] = param types
+        // type_elems[type_elem_count-1] = return type
+        // For now: convert to ptr (function pointers are opaque in LLVM 15+)
+        let r = llvm_ptr_type(ctx, 0)
+        return (r.0, tc, r.1)
+    }
+
+    // ============================================================================
+    // Tuple → anonymous struct
+    // ============================================================================
+
+    if kind == HlirTypeKind::HlirTypeTuple {
+        // Tuple elements are in type_elems. Without full recursive conversion
+        // (needs type table), use ptr as placeholder.
+        let r = llvm_ptr_type(ctx, 0)
+        return (r.0, tc, r.1)
+    }
+
+    // Fallback: i64 (should not happen in well-typed programs)
+    let r = llvm_int64_type(ctx)
+    (r.0, tc, r.1)
+}
+
+// ============================================================================
+// Type size/alignment queries (for alloca, GEP, memcpy planning)
+// ============================================================================
+
+// Returns the size in bytes for a given HLIR type.
+fn hlir_type_size_bytes(ty: HlirType) -> i64 {
+    let kind = ty.kind
+
+    if kind == HlirTypeKind::HlirTypeVoid { return 0 }
+    if kind == HlirTypeKind::HlirTypeBool { return 1 }
+    if kind == HlirTypeKind::HlirTypeI8 { return 1 }
+    if kind == HlirTypeKind::HlirTypeU8 { return 1 }
+    if kind == HlirTypeKind::HlirTypeI16 { return 2 }
+    if kind == HlirTypeKind::HlirTypeU16 { return 2 }
+    if kind == HlirTypeKind::HlirTypeI32 { return 4 }
+    if kind == HlirTypeKind::HlirTypeU32 { return 4 }
+    if kind == HlirTypeKind::HlirTypeI64 { return 8 }
+    if kind == HlirTypeKind::HlirTypeU64 { return 8 }
+    if kind == HlirTypeKind::HlirTypeI128 { return 16 }
+    if kind == HlirTypeKind::HlirTypeU128 { return 16 }
+    if kind == HlirTypeKind::HlirTypeF32 { return 4 }
+    if kind == HlirTypeKind::HlirTypeF64 { return 8 }
+    if kind == HlirTypeKind::HlirTypePtr { return 8 }
+
+    // SIMD f32
+    if kind == HlirTypeKind::HlirTypeVec2 { return 8 }
+    if kind == HlirTypeKind::HlirTypeVec3 { return 16 }   // padded
+    if kind == HlirTypeKind::HlirTypeVec4 { return 16 }
+    if kind == HlirTypeKind::HlirTypeMat2 { return 16 }
+    if kind == HlirTypeKind::HlirTypeMat3 { return 48 }
+    if kind == HlirTypeKind::HlirTypeMat4 { return 64 }
+
+    // SIMD f64
+    if kind == HlirTypeKind::HlirTypeVec2d { return 16 }
+    if kind == HlirTypeKind::HlirTypeVec3d { return 32 }  // padded
+    if kind == HlirTypeKind::HlirTypeVec4d { return 32 }
+
+    // Hypercomplex
+    if kind == HlirTypeKind::HlirTypeQuat { return 16 }
+    if kind == HlirTypeKind::HlirTypeOctonion { return 32 }
+    if kind == HlirTypeKind::HlirTypeSedenion { return 64 }
+
+    // Autodiff
+    if kind == HlirTypeKind::HlirTypeDual { return 16 }
+
+    // Epistemic (full mode: inner + 64 bytes)
+    if kind == HlirTypeKind::HlirTypeKnowledge { return 72 }  // 8 (f64 inner) + 64
+
+    // Array
+    if kind == HlirTypeKind::HlirTypeArray {
+        // Approximate: assume i8 elements if inner unknown
+        return ty.array_len
+    }
+
+    8  // fallback
+}
+
+// Returns the alignment in bytes for a given HLIR type.
+fn hlir_type_alignment(ty: HlirType) -> i64 {
+    let kind = ty.kind
+
+    if kind == HlirTypeKind::HlirTypeVoid { return 1 }
+    if kind == HlirTypeKind::HlirTypeBool { return 1 }
+    if kind == HlirTypeKind::HlirTypeI8 { return 1 }
+    if kind == HlirTypeKind::HlirTypeU8 { return 1 }
+    if kind == HlirTypeKind::HlirTypeI16 { return 2 }
+    if kind == HlirTypeKind::HlirTypeU16 { return 2 }
+    if kind == HlirTypeKind::HlirTypeI32 { return 4 }
+    if kind == HlirTypeKind::HlirTypeU32 { return 4 }
+    if kind == HlirTypeKind::HlirTypeI64 { return 8 }
+    if kind == HlirTypeKind::HlirTypeU64 { return 8 }
+    if kind == HlirTypeKind::HlirTypeI128 { return 16 }
+    if kind == HlirTypeKind::HlirTypeU128 { return 16 }
+    if kind == HlirTypeKind::HlirTypeF32 { return 4 }
+    if kind == HlirTypeKind::HlirTypeF64 { return 8 }
+    if kind == HlirTypeKind::HlirTypePtr { return 8 }
+
+    // SIMD types get stricter alignment
+    if kind == HlirTypeKind::HlirTypeVec2 { return 8 }
+    if kind == HlirTypeKind::HlirTypeVec3 { return 16 }
+    if kind == HlirTypeKind::HlirTypeVec4 { return 16 }
+    if kind == HlirTypeKind::HlirTypeVec2d { return 16 }
+    if kind == HlirTypeKind::HlirTypeVec3d { return 32 }
+    if kind == HlirTypeKind::HlirTypeVec4d { return 32 }
+
+    if kind == HlirTypeKind::HlirTypeMat2 { return 16 }
+    if kind == HlirTypeKind::HlirTypeMat3 { return 16 }
+    if kind == HlirTypeKind::HlirTypeMat4 { return 16 }
+
+    if kind == HlirTypeKind::HlirTypeQuat { return 16 }
+    if kind == HlirTypeKind::HlirTypeOctonion { return 32 }
+    if kind == HlirTypeKind::HlirTypeSedenion { return 64 }
+
+    if kind == HlirTypeKind::HlirTypeDual { return 16 }
+    if kind == HlirTypeKind::HlirTypeKnowledge { return 8 }
+
+    8  // conservative default
+}
+
+// ============================================================================
+// Type signedness query (for choosing signed vs unsigned LLVM ops)
+// ============================================================================
+
+fn hlir_type_is_signed(ty: HlirType) -> bool {
+    let kind = ty.kind
+    if kind == HlirTypeKind::HlirTypeI8 { return true }
+    if kind == HlirTypeKind::HlirTypeI16 { return true }
+    if kind == HlirTypeKind::HlirTypeI32 { return true }
+    if kind == HlirTypeKind::HlirTypeI64 { return true }
+    if kind == HlirTypeKind::HlirTypeI128 { return true }
+    false
+}
+
+fn hlir_type_is_float(ty: HlirType) -> bool {
+    let kind = ty.kind
+    if kind == HlirTypeKind::HlirTypeF32 { return true }
+    if kind == HlirTypeKind::HlirTypeF64 { return true }
+    false
+}
+
+fn hlir_type_is_integer(ty: HlirType) -> bool {
+    let kind = ty.kind
+    if kind == HlirTypeKind::HlirTypeBool { return true }
+    if kind == HlirTypeKind::HlirTypeI8 { return true }
+    if kind == HlirTypeKind::HlirTypeU8 { return true }
+    if kind == HlirTypeKind::HlirTypeI16 { return true }
+    if kind == HlirTypeKind::HlirTypeU16 { return true }
+    if kind == HlirTypeKind::HlirTypeI32 { return true }
+    if kind == HlirTypeKind::HlirTypeU32 { return true }
+    if kind == HlirTypeKind::HlirTypeI64 { return true }
+    if kind == HlirTypeKind::HlirTypeU64 { return true }
+    if kind == HlirTypeKind::HlirTypeI128 { return true }
+    if kind == HlirTypeKind::HlirTypeU128 { return true }
+    false
+}
+
+fn hlir_type_is_vector(ty: HlirType) -> bool {
+    let kind = ty.kind
+    if kind == HlirTypeKind::HlirTypeVec2 { return true }
+    if kind == HlirTypeKind::HlirTypeVec3 { return true }
+    if kind == HlirTypeKind::HlirTypeVec4 { return true }
+    if kind == HlirTypeKind::HlirTypeVec2d { return true }
+    if kind == HlirTypeKind::HlirTypeVec3d { return true }
+    if kind == HlirTypeKind::HlirTypeVec4d { return true }
+    if kind == HlirTypeKind::HlirTypeQuat { return true }
+    if kind == HlirTypeKind::HlirTypeOctonion { return true }
+    if kind == HlirTypeKind::HlirTypeSedenion { return true }
+    false
+}
+
+fn hlir_type_is_hypercomplex(ty: HlirType) -> bool {
+    let kind = ty.kind
+    if kind == HlirTypeKind::HlirTypeQuat { return true }
+    if kind == HlirTypeKind::HlirTypeOctonion { return true }
+    if kind == HlirTypeKind::HlirTypeSedenion { return true }
+    false
+}
+
+// Returns the LLVM integer bit width for integer types (0 for non-integer).
+fn hlir_type_int_bits(ty: HlirType) -> i64 {
+    let kind = ty.kind
+    if kind == HlirTypeKind::HlirTypeBool { return 1 }
+    if kind == HlirTypeKind::HlirTypeI8 { return 8 }
+    if kind == HlirTypeKind::HlirTypeU8 { return 8 }
+    if kind == HlirTypeKind::HlirTypeI16 { return 16 }
+    if kind == HlirTypeKind::HlirTypeU16 { return 16 }
+    if kind == HlirTypeKind::HlirTypeI32 { return 32 }
+    if kind == HlirTypeKind::HlirTypeU32 { return 32 }
+    if kind == HlirTypeKind::HlirTypeI64 { return 64 }
+    if kind == HlirTypeKind::HlirTypeU64 { return 64 }
+    if kind == HlirTypeKind::HlirTypeI128 { return 128 }
+    if kind == HlirTypeKind::HlirTypeU128 { return 128 }
+    0
+}

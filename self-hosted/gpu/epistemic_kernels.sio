@@ -1,0 +1,1093 @@
+// self-hosted::gpu::epistemic_kernels -- WGSL compute shaders for Knowledge<T>
+//
+// Generates WebGPU Shading Language (WGSL) compute shader source code as text
+// strings for operating on Knowledge<T> values on the GPU.
+//
+// Knowledge<T> memory layout (16 bytes, 4x f32):
+//   { value: f32, uncertainty: f32, confidence: f32, _padding: f32 }
+//
+// Uncertainty propagation rules (GPU-side, matching epistemic_ptx.sio):
+//   Add/Sub: sigma_c = sqrt(sigma_a^2 + sigma_b^2)       [quadrature]
+//   Mul:     relative error propagation                    [sqrt(rel_a^2 + rel_b^2) * |result|]
+//   Div:     relative error + near-zero guard              [zero divisor -> zero confidence]
+//
+// Confidence aggregation modes:
+//   Minimum:    min(c_i) -- most conservative
+//   Product:    prod(c_i) -- independent events
+//   Quadrature: sqrt(mean(c_i^2)) -- RMS
+//
+// Architecture:
+//   Uses the same text-buffer emission pattern as ptx.sio and metal.sio.
+//   WgslBuf = fixed-size byte array (32 KB) + length counter.
+//   Each wgsl_emit_* function appends WGSL source text to the buffer.
+
+// ============================================================================
+// CPU-side Knowledge representation
+// ============================================================================
+
+struct GpuKnowledge {
+    value: f32,
+    uncertainty: f32,
+    confidence: f32,
+    padding: f32,
+}
+
+// ============================================================================
+// Kernel identification (tag-based enum)
+// ============================================================================
+//
+// EpistemicKernelId tags:
+//   0 = UncertaintyAdd
+//   1 = UncertaintySub
+//   2 = UncertaintyMul
+//   3 = UncertaintyDiv
+//   4 = ConfidenceAggregate
+//   5 = KnowledgeTransform
+
+struct EpistemicKernelId {
+    tag: i64,
+}
+
+fn epistemic_kernel_uncertainty_add() -> EpistemicKernelId {
+    EpistemicKernelId { tag: 0 }
+}
+
+fn epistemic_kernel_uncertainty_sub() -> EpistemicKernelId {
+    EpistemicKernelId { tag: 1 }
+}
+
+fn epistemic_kernel_uncertainty_mul() -> EpistemicKernelId {
+    EpistemicKernelId { tag: 2 }
+}
+
+fn epistemic_kernel_uncertainty_div() -> EpistemicKernelId {
+    EpistemicKernelId { tag: 3 }
+}
+
+fn epistemic_kernel_confidence_aggregate() -> EpistemicKernelId {
+    EpistemicKernelId { tag: 4 }
+}
+
+fn epistemic_kernel_knowledge_transform() -> EpistemicKernelId {
+    EpistemicKernelId { tag: 5 }
+}
+
+// ============================================================================
+// Aggregate mode (tag-based enum)
+// ============================================================================
+//
+// AggregateMode tags:
+//   0 = Minimum (most conservative)
+//   1 = Product (independent events)
+//   2 = Quadrature (RMS)
+
+struct AggregateMode {
+    tag: i64,
+}
+
+fn aggregate_mode_minimum() -> AggregateMode {
+    AggregateMode { tag: 0 }
+}
+
+fn aggregate_mode_product() -> AggregateMode {
+    AggregateMode { tag: 1 }
+}
+
+fn aggregate_mode_quadrature() -> AggregateMode {
+    AggregateMode { tag: 2 }
+}
+
+// ============================================================================
+// Transform parameters (uniform buffer layout, 16 bytes)
+// ============================================================================
+
+struct TransformParams {
+    scale: f32,
+    offset: f32,
+    confidence_factor: f32,
+    padding: f32,
+}
+
+// ============================================================================
+// Aggregate parameters (uniform buffer layout, 16 bytes)
+// ============================================================================
+
+struct AggregateParams {
+    mode: i32,      // 0=min, 1=product, 2=quadrature
+    count: i32,
+    pad0: i32,
+    pad1: i32,
+}
+
+// ============================================================================
+// WgslBuf -- text buffer for WGSL source emission (32 KB)
+// ============================================================================
+
+struct WgslBuf {
+    data: [i8; 32768],
+    len: i64,
+}
+
+fn wgsl_buf_new() -> WgslBuf {
+    WgslBuf { data: [0; 32768], len: 0 }
+}
+
+fn wgsl_push_str(buf: WgslBuf, s: string) -> WgslBuf with Mut, Panic, Div {
+    var out = buf
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        if out.len < 32768 {
+            out.data[out.len as usize] = str_char_at(s, i) as i8
+            out.len = out.len + 1
+        }
+        i = i + 1
+    }
+    out
+}
+
+fn wgsl_push_line(buf: WgslBuf, s: string) -> WgslBuf with Mut, Panic, Div {
+    var out = wgsl_push_str(buf, s)
+    if out.len < 32768 {
+        out.data[out.len as usize] = 10  // '\n'
+        out.len = out.len + 1
+    }
+    out
+}
+
+fn wgsl_push_i64(buf: WgslBuf, n: i64) -> WgslBuf with Mut, Panic, Div {
+    wgsl_push_str(buf, i64_to_string(n))
+}
+
+// Push an f32 as its integer-valued string form when possible,
+// otherwise a fixed decimal representation for common constants.
+// This is for emitting WGSL source text, not runtime computation.
+fn wgsl_push_f32(buf: WgslBuf, f: f32) -> WgslBuf with Mut, Panic, Div {
+    // We emit as a string literal in the WGSL source.
+    // For the kernels in this module, f32 values appear only as
+    // literal constants (0.0, 1.0, 0.95, etc.) passed via the
+    // GPU Knowledge constructors at the CPU side; the WGSL shaders
+    // themselves use storage buffer reads rather than embedded constants.
+    // This helper is provided for completeness.
+    //
+    // Convert the float bits to a fixed-point string: we truncate to
+    // integer and emit "N.0" form, which covers the constants we use.
+    let int_part = f as i64
+    var out = wgsl_push_str(buf, i64_to_string(int_part))
+    out = wgsl_push_str(out, ".0")
+    out
+}
+
+fn wgsl_push_newline(buf: WgslBuf) -> WgslBuf with Mut, Panic {
+    var out = buf
+    if out.len < 32768 {
+        out.data[out.len as usize] = 10  // '\n'
+        out.len = out.len + 1
+    }
+    out
+}
+
+fn wgsl_buf_contains(buf: WgslBuf, needle: string) -> bool with Mut, Panic, Div {
+    let nlen = str_len(needle)
+    if nlen == 0 { return true }
+    if buf.len < nlen { return false }
+
+    var i: i64 = 0
+    while i <= (buf.len - nlen) {
+        var j: i64 = 0
+        var ok: bool = true
+        while j < nlen {
+            if buf.data[(i + j) as usize] != (str_char_at(needle, j) as i8) {
+                ok = false
+                break
+            }
+            j = j + 1
+        }
+        if ok { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn wgsl_to_string(buf: WgslBuf) -> string with Mut, Panic, Div, Alloc {
+    str_from_bytes(buf.data, buf.len)
+}
+
+// ============================================================================
+// GPU Knowledge constructors (CPU-side)
+// ============================================================================
+
+fn gpu_knowledge_new(value: f32, uncertainty: f32, confidence: f32) -> GpuKnowledge {
+    GpuKnowledge {
+        value: value,
+        uncertainty: uncertainty,
+        confidence: confidence,
+        padding: 0.0,
+    }
+}
+
+fn gpu_knowledge_from_measurement(value: f32, uncertainty: f32) -> GpuKnowledge {
+    GpuKnowledge {
+        value: value,
+        uncertainty: uncertainty,
+        confidence: 0.95,
+        padding: 0.0,
+    }
+}
+
+fn gpu_knowledge_axiomatic(value: f32) -> GpuKnowledge {
+    GpuKnowledge {
+        value: value,
+        uncertainty: 0.0,
+        confidence: 1.0,
+        padding: 0.0,
+    }
+}
+
+fn gpu_knowledge_is_valid(k: GpuKnowledge) -> bool {
+    if k.confidence <= 0.0 { return false }
+    if k.uncertainty < 0.0 { return false }
+    true
+}
+
+// ============================================================================
+// WGSL common preamble: Knowledge struct declaration
+// ============================================================================
+
+fn wgsl_emit_knowledge_struct(buf: WgslBuf) -> WgslBuf with Mut, Panic, Div {
+    var out = buf
+    out = wgsl_push_line(out, "struct Knowledge {")
+    out = wgsl_push_line(out, "    value: f32,")
+    out = wgsl_push_line(out, "    uncertainty: f32,")
+    out = wgsl_push_line(out, "    confidence: f32,")
+    out = wgsl_push_line(out, "    _padding: f32,")
+    out = wgsl_push_line(out, "};")
+    out = wgsl_push_newline(out)
+    out
+}
+
+// ============================================================================
+// Shader: uncertainty_add
+// ============================================================================
+//
+// Elementwise addition of two Knowledge arrays.
+// result.value       = a.value + b.value
+// result.uncertainty  = sqrt(a.uncertainty^2 + b.uncertainty^2)
+// result.confidence   = min(a.confidence, b.confidence)
+
+fn wgsl_emit_uncertainty_add(buf: WgslBuf) -> WgslBuf with Mut, Panic, Div {
+    var out = buf
+    out = wgsl_emit_knowledge_struct(out)
+
+    // Bindings
+    out = wgsl_push_line(out, "@group(0) @binding(0) var<storage, read> input_a: array<Knowledge>;")
+    out = wgsl_push_line(out, "@group(0) @binding(1) var<storage, read> input_b: array<Knowledge>;")
+    out = wgsl_push_line(out, "@group(0) @binding(2) var<storage, read_write> output: array<Knowledge>;")
+    out = wgsl_push_newline(out)
+
+    // Kernel
+    out = wgsl_push_line(out, "@compute @workgroup_size(256)")
+    out = wgsl_push_line(out, "fn uncertainty_add(@builtin(global_invocation_id) gid: vec3<u32>) {")
+    out = wgsl_push_line(out, "    let idx = gid.x;")
+    out = wgsl_push_line(out, "    let a = input_a[idx];")
+    out = wgsl_push_line(out, "    let b = input_b[idx];")
+    out = wgsl_push_newline(out)
+
+    // Value: a + b
+    out = wgsl_push_line(out, "    let result_value = a.value + b.value;")
+    out = wgsl_push_newline(out)
+
+    // Uncertainty: quadrature propagation
+    out = wgsl_push_line(out, "    // Quadrature: sigma_c = sqrt(sigma_a^2 + sigma_b^2)")
+    out = wgsl_push_line(out, "    let unc_a_sq = a.uncertainty * a.uncertainty;")
+    out = wgsl_push_line(out, "    let unc_b_sq = b.uncertainty * b.uncertainty;")
+    out = wgsl_push_line(out, "    let unc_sq = unc_a_sq + unc_b_sq;")
+    out = wgsl_push_line(out, "    let result_uncertainty = sqrt(max(unc_sq, 0.0));")
+    out = wgsl_push_newline(out)
+
+    // Confidence: conservative minimum
+    out = wgsl_push_line(out, "    let result_confidence = min(a.confidence, b.confidence);")
+    out = wgsl_push_newline(out)
+
+    // Store
+    out = wgsl_push_line(out, "    output[idx] = Knowledge(result_value, result_uncertainty, result_confidence, 0.0);")
+    out = wgsl_push_line(out, "}")
+    out
+}
+
+// ============================================================================
+// Shader: uncertainty_sub
+// ============================================================================
+//
+// Elementwise subtraction. Same uncertainty formula as add (quadrature).
+// result.value       = a.value - b.value
+// result.uncertainty  = sqrt(a.uncertainty^2 + b.uncertainty^2)
+// result.confidence   = min(a.confidence, b.confidence)
+
+fn wgsl_emit_uncertainty_sub(buf: WgslBuf) -> WgslBuf with Mut, Panic, Div {
+    var out = buf
+    out = wgsl_emit_knowledge_struct(out)
+
+    // Bindings
+    out = wgsl_push_line(out, "@group(0) @binding(0) var<storage, read> input_a: array<Knowledge>;")
+    out = wgsl_push_line(out, "@group(0) @binding(1) var<storage, read> input_b: array<Knowledge>;")
+    out = wgsl_push_line(out, "@group(0) @binding(2) var<storage, read_write> output: array<Knowledge>;")
+    out = wgsl_push_newline(out)
+
+    // Kernel
+    out = wgsl_push_line(out, "@compute @workgroup_size(256)")
+    out = wgsl_push_line(out, "fn uncertainty_sub(@builtin(global_invocation_id) gid: vec3<u32>) {")
+    out = wgsl_push_line(out, "    let idx = gid.x;")
+    out = wgsl_push_line(out, "    let a = input_a[idx];")
+    out = wgsl_push_line(out, "    let b = input_b[idx];")
+    out = wgsl_push_newline(out)
+
+    // Value: a - b
+    out = wgsl_push_line(out, "    let result_value = a.value - b.value;")
+    out = wgsl_push_newline(out)
+
+    // Uncertainty: same quadrature as add (subtraction does not change variance)
+    out = wgsl_push_line(out, "    // Quadrature: sigma_c = sqrt(sigma_a^2 + sigma_b^2)")
+    out = wgsl_push_line(out, "    let unc_a_sq = a.uncertainty * a.uncertainty;")
+    out = wgsl_push_line(out, "    let unc_b_sq = b.uncertainty * b.uncertainty;")
+    out = wgsl_push_line(out, "    let unc_sq = unc_a_sq + unc_b_sq;")
+    out = wgsl_push_line(out, "    let result_uncertainty = sqrt(max(unc_sq, 0.0));")
+    out = wgsl_push_newline(out)
+
+    // Confidence: conservative minimum
+    out = wgsl_push_line(out, "    let result_confidence = min(a.confidence, b.confidence);")
+    out = wgsl_push_newline(out)
+
+    // Store
+    out = wgsl_push_line(out, "    output[idx] = Knowledge(result_value, result_uncertainty, result_confidence, 0.0);")
+    out = wgsl_push_line(out, "}")
+    out
+}
+
+// ============================================================================
+// Shader: uncertainty_mul
+// ============================================================================
+//
+// Elementwise multiplication with relative error propagation.
+// result.value       = a.value * b.value
+// rel_a              = a.uncertainty / |a.value| if |a.value| > 1e-10 else 0
+// rel_b              = b.uncertainty / |b.value| if |b.value| > 1e-10 else 0
+// result.uncertainty  = sqrt(rel_a^2 + rel_b^2) * |result.value|
+// result.confidence   = min(a.confidence, b.confidence)
+
+fn wgsl_emit_uncertainty_mul(buf: WgslBuf) -> WgslBuf with Mut, Panic, Div {
+    var out = buf
+    out = wgsl_emit_knowledge_struct(out)
+
+    // Bindings
+    out = wgsl_push_line(out, "@group(0) @binding(0) var<storage, read> input_a: array<Knowledge>;")
+    out = wgsl_push_line(out, "@group(0) @binding(1) var<storage, read> input_b: array<Knowledge>;")
+    out = wgsl_push_line(out, "@group(0) @binding(2) var<storage, read_write> output: array<Knowledge>;")
+    out = wgsl_push_newline(out)
+
+    // Kernel
+    out = wgsl_push_line(out, "@compute @workgroup_size(256)")
+    out = wgsl_push_line(out, "fn uncertainty_mul(@builtin(global_invocation_id) gid: vec3<u32>) {")
+    out = wgsl_push_line(out, "    let idx = gid.x;")
+    out = wgsl_push_line(out, "    let a = input_a[idx];")
+    out = wgsl_push_line(out, "    let b = input_b[idx];")
+    out = wgsl_push_newline(out)
+
+    // Value
+    out = wgsl_push_line(out, "    let result_value = a.value * b.value;")
+    out = wgsl_push_newline(out)
+
+    // Relative error propagation
+    out = wgsl_push_line(out, "    // Relative error propagation for multiplication")
+    out = wgsl_push_line(out, "    let abs_a = abs(a.value);")
+    out = wgsl_push_line(out, "    let abs_b = abs(b.value);")
+    out = wgsl_push_line(out, "    let epsilon = 1e-10;")
+    out = wgsl_push_newline(out)
+
+    // Compute relative uncertainties with near-zero guard
+    out = wgsl_push_line(out, "    var rel_a: f32 = 0.0;")
+    out = wgsl_push_line(out, "    if (abs_a > epsilon) {")
+    out = wgsl_push_line(out, "        rel_a = a.uncertainty / abs_a;")
+    out = wgsl_push_line(out, "    }")
+    out = wgsl_push_newline(out)
+
+    out = wgsl_push_line(out, "    var rel_b: f32 = 0.0;")
+    out = wgsl_push_line(out, "    if (abs_b > epsilon) {")
+    out = wgsl_push_line(out, "        rel_b = b.uncertainty / abs_b;")
+    out = wgsl_push_line(out, "    }")
+    out = wgsl_push_newline(out)
+
+    // Combined relative error -> absolute uncertainty
+    out = wgsl_push_line(out, "    let rel_combined = sqrt(rel_a * rel_a + rel_b * rel_b);")
+    out = wgsl_push_line(out, "    let result_uncertainty = rel_combined * abs(result_value);")
+    out = wgsl_push_newline(out)
+
+    // Confidence
+    out = wgsl_push_line(out, "    let result_confidence = min(a.confidence, b.confidence);")
+    out = wgsl_push_newline(out)
+
+    // Store
+    out = wgsl_push_line(out, "    output[idx] = Knowledge(result_value, result_uncertainty, result_confidence, 0.0);")
+    out = wgsl_push_line(out, "}")
+    out
+}
+
+// ============================================================================
+// Shader: uncertainty_div
+// ============================================================================
+//
+// Elementwise division with near-zero guard.
+// If |b.value| < 1e-10: output = Knowledge(0.0, 0.0, 0.0, 0.0)
+// Otherwise: same relative error formula as multiplication.
+// result.value       = a.value / b.value
+// rel_a              = a.uncertainty / |a.value| if |a.value| > 1e-10 else 0
+// rel_b              = b.uncertainty / |b.value| (b guaranteed nonzero)
+// result.uncertainty  = sqrt(rel_a^2 + rel_b^2) * |result.value|
+// result.confidence   = min(a.confidence, b.confidence)
+
+fn wgsl_emit_uncertainty_div(buf: WgslBuf) -> WgslBuf with Mut, Panic, Div {
+    var out = buf
+    out = wgsl_emit_knowledge_struct(out)
+
+    // Bindings
+    out = wgsl_push_line(out, "@group(0) @binding(0) var<storage, read> input_a: array<Knowledge>;")
+    out = wgsl_push_line(out, "@group(0) @binding(1) var<storage, read> input_b: array<Knowledge>;")
+    out = wgsl_push_line(out, "@group(0) @binding(2) var<storage, read_write> output: array<Knowledge>;")
+    out = wgsl_push_newline(out)
+
+    // Kernel
+    out = wgsl_push_line(out, "@compute @workgroup_size(256)")
+    out = wgsl_push_line(out, "fn uncertainty_div(@builtin(global_invocation_id) gid: vec3<u32>) {")
+    out = wgsl_push_line(out, "    let idx = gid.x;")
+    out = wgsl_push_line(out, "    let a = input_a[idx];")
+    out = wgsl_push_line(out, "    let b = input_b[idx];")
+    out = wgsl_push_newline(out)
+
+    // Near-zero divisor guard
+    out = wgsl_push_line(out, "    let epsilon = 1e-10;")
+    out = wgsl_push_line(out, "    let abs_b = abs(b.value);")
+    out = wgsl_push_newline(out)
+
+    out = wgsl_push_line(out, "    // Near-zero divisor: emit zero Knowledge with zero confidence")
+    out = wgsl_push_line(out, "    if (abs_b < epsilon) {")
+    out = wgsl_push_line(out, "        output[idx] = Knowledge(0.0, 0.0, 0.0, 0.0);")
+    out = wgsl_push_line(out, "        return;")
+    out = wgsl_push_line(out, "    }")
+    out = wgsl_push_newline(out)
+
+    // Value
+    out = wgsl_push_line(out, "    let result_value = a.value / b.value;")
+    out = wgsl_push_newline(out)
+
+    // Relative error propagation (same as mul, b guaranteed nonzero)
+    out = wgsl_push_line(out, "    // Relative error propagation for division")
+    out = wgsl_push_line(out, "    let abs_a = abs(a.value);")
+    out = wgsl_push_newline(out)
+
+    out = wgsl_push_line(out, "    var rel_a: f32 = 0.0;")
+    out = wgsl_push_line(out, "    if (abs_a > epsilon) {")
+    out = wgsl_push_line(out, "        rel_a = a.uncertainty / abs_a;")
+    out = wgsl_push_line(out, "    }")
+    out = wgsl_push_newline(out)
+
+    out = wgsl_push_line(out, "    let rel_b = b.uncertainty / abs_b;")
+    out = wgsl_push_newline(out)
+
+    // Combined relative error -> absolute uncertainty
+    out = wgsl_push_line(out, "    let rel_combined = sqrt(rel_a * rel_a + rel_b * rel_b);")
+    out = wgsl_push_line(out, "    let result_uncertainty = rel_combined * abs(result_value);")
+    out = wgsl_push_newline(out)
+
+    // Confidence
+    out = wgsl_push_line(out, "    let result_confidence = min(a.confidence, b.confidence);")
+    out = wgsl_push_newline(out)
+
+    // Store
+    out = wgsl_push_line(out, "    output[idx] = Knowledge(result_value, result_uncertainty, result_confidence, 0.0);")
+    out = wgsl_push_line(out, "}")
+    out
+}
+
+// ============================================================================
+// Shader: confidence_aggregate
+// ============================================================================
+//
+// Parallel reduction over Knowledge array confidence values.
+// Uses workgroup shared memory (256 elements) with stride-halving reduction.
+//
+// Mode 0 (Minimum): identity = 1.0, op = min(a, b)
+// Mode 1 (Product): identity = 1.0, op = a * b
+// Mode 2 (Quadrature): identity = 0.0, op = a + b (on squared values, sqrt at end)
+//
+// Uniform params: AggregateParams { mode: i32, count: i32, pad0, pad1 }
+//
+// Output: single f32 per workgroup written to output[workgroup_id].
+
+fn wgsl_emit_confidence_aggregate(buf: WgslBuf) -> WgslBuf with Mut, Panic, Div {
+    var out = buf
+    out = wgsl_emit_knowledge_struct(out)
+
+    // AggregateParams struct
+    out = wgsl_push_line(out, "struct AggregateParams {")
+    out = wgsl_push_line(out, "    mode: i32,")
+    out = wgsl_push_line(out, "    count: i32,")
+    out = wgsl_push_line(out, "    pad0: i32,")
+    out = wgsl_push_line(out, "    pad1: i32,")
+    out = wgsl_push_line(out, "};")
+    out = wgsl_push_newline(out)
+
+    // Bindings
+    out = wgsl_push_line(out, "@group(0) @binding(0) var<storage, read> input: array<Knowledge>;")
+    out = wgsl_push_line(out, "@group(0) @binding(1) var<storage, read_write> output: array<f32>;")
+    out = wgsl_push_line(out, "@group(0) @binding(2) var<uniform> params: AggregateParams;")
+    out = wgsl_push_newline(out)
+
+    // Shared memory
+    out = wgsl_push_line(out, "var<workgroup> shared_data: array<f32, 256>;")
+    out = wgsl_push_newline(out)
+
+    // Kernel
+    out = wgsl_push_line(out, "@compute @workgroup_size(256)")
+    out = wgsl_push_line(out, "fn confidence_aggregate(")
+    out = wgsl_push_line(out, "    @builtin(local_invocation_id) lid: vec3<u32>,")
+    out = wgsl_push_line(out, "    @builtin(global_invocation_id) gid: vec3<u32>,")
+    out = wgsl_push_line(out, "    @builtin(workgroup_id) wid: vec3<u32>")
+    out = wgsl_push_line(out, ") {")
+    out = wgsl_push_line(out, "    let local_idx = lid.x;")
+    out = wgsl_push_line(out, "    let global_idx = gid.x;")
+    out = wgsl_push_newline(out)
+
+    // Load to shared memory with mode-appropriate identity value
+    out = wgsl_push_line(out, "    // Load confidence to shared memory with identity for OOB elements")
+    out = wgsl_push_line(out, "    var identity: f32;")
+    out = wgsl_push_line(out, "    if (params.mode == 0) {")
+    out = wgsl_push_line(out, "        // Minimum: identity = 1.0 (neutral for min)")
+    out = wgsl_push_line(out, "        identity = 1.0;")
+    out = wgsl_push_line(out, "    } else if (params.mode == 1) {")
+    out = wgsl_push_line(out, "        // Product: identity = 1.0 (neutral for multiplication)")
+    out = wgsl_push_line(out, "        identity = 1.0;")
+    out = wgsl_push_line(out, "    } else {")
+    out = wgsl_push_line(out, "        // Quadrature: identity = 0.0 (neutral for addition of squares)")
+    out = wgsl_push_line(out, "        identity = 0.0;")
+    out = wgsl_push_line(out, "    }")
+    out = wgsl_push_newline(out)
+
+    // Load phase: valid elements get their confidence, OOB get identity
+    out = wgsl_push_line(out, "    var val: f32;")
+    out = wgsl_push_line(out, "    if (global_idx < u32(params.count)) {")
+    out = wgsl_push_line(out, "        let k = input[global_idx];")
+    out = wgsl_push_line(out, "        if (params.mode == 2) {")
+    out = wgsl_push_line(out, "            // Quadrature: store c^2")
+    out = wgsl_push_line(out, "            val = k.confidence * k.confidence;")
+    out = wgsl_push_line(out, "        } else {")
+    out = wgsl_push_line(out, "            val = k.confidence;")
+    out = wgsl_push_line(out, "        }")
+    out = wgsl_push_line(out, "    } else {")
+    out = wgsl_push_line(out, "        val = identity;")
+    out = wgsl_push_line(out, "    }")
+    out = wgsl_push_line(out, "    shared_data[local_idx] = val;")
+    out = wgsl_push_line(out, "    workgroupBarrier();")
+    out = wgsl_push_newline(out)
+
+    // Parallel reduction: stride halving from 128 down to 1
+    out = wgsl_push_line(out, "    // Parallel reduction with stride halving")
+    out = wgsl_push_line(out, "    var stride: u32 = 128u;")
+    out = wgsl_push_line(out, "    while (stride > 0u) {")
+    out = wgsl_push_line(out, "        if (local_idx < stride) {")
+    out = wgsl_push_line(out, "            let other = shared_data[local_idx + stride];")
+    out = wgsl_push_line(out, "            if (params.mode == 0) {")
+    out = wgsl_push_line(out, "                // Minimum")
+    out = wgsl_push_line(out, "                shared_data[local_idx] = min(shared_data[local_idx], other);")
+    out = wgsl_push_line(out, "            } else if (params.mode == 1) {")
+    out = wgsl_push_line(out, "                // Product")
+    out = wgsl_push_line(out, "                shared_data[local_idx] = shared_data[local_idx] * other;")
+    out = wgsl_push_line(out, "            } else {")
+    out = wgsl_push_line(out, "                // Quadrature: sum of squares")
+    out = wgsl_push_line(out, "                shared_data[local_idx] = shared_data[local_idx] + other;")
+    out = wgsl_push_line(out, "            }")
+    out = wgsl_push_line(out, "        }")
+    out = wgsl_push_line(out, "        workgroupBarrier();")
+    out = wgsl_push_line(out, "        stride = stride >> 1u;")
+    out = wgsl_push_line(out, "    }")
+    out = wgsl_push_newline(out)
+
+    // Thread 0 writes the final result
+    out = wgsl_push_line(out, "    // Thread 0 writes the final reduced value")
+    out = wgsl_push_line(out, "    if (local_idx == 0u) {")
+    out = wgsl_push_line(out, "        var result: f32 = shared_data[0];")
+    out = wgsl_push_line(out, "        if (params.mode == 2) {")
+    out = wgsl_push_line(out, "            // Quadrature: sqrt(sum_of_squares / count)")
+    out = wgsl_push_line(out, "            let n = f32(params.count);")
+    out = wgsl_push_line(out, "            if (n > 0.0) {")
+    out = wgsl_push_line(out, "                result = sqrt(result / n);")
+    out = wgsl_push_line(out, "            }")
+    out = wgsl_push_line(out, "        }")
+    out = wgsl_push_line(out, "        output[wid.x] = result;")
+    out = wgsl_push_line(out, "    }")
+    out = wgsl_push_line(out, "}")
+    out
+}
+
+// ============================================================================
+// Shader: knowledge_transform
+// ============================================================================
+//
+// Applies an affine transformation to each Knowledge element:
+//   output.value       = scale * k.value + offset
+//   output.uncertainty  = |scale| * k.uncertainty
+//   output.confidence   = k.confidence * confidence_factor
+//
+// TransformParams are passed via uniform buffer.
+
+fn wgsl_emit_knowledge_transform(buf: WgslBuf) -> WgslBuf with Mut, Panic, Div {
+    var out = buf
+    out = wgsl_emit_knowledge_struct(out)
+
+    // TransformParams struct
+    out = wgsl_push_line(out, "struct TransformParams {")
+    out = wgsl_push_line(out, "    scale: f32,")
+    out = wgsl_push_line(out, "    offset: f32,")
+    out = wgsl_push_line(out, "    confidence_factor: f32,")
+    out = wgsl_push_line(out, "    _padding: f32,")
+    out = wgsl_push_line(out, "};")
+    out = wgsl_push_newline(out)
+
+    // Bindings
+    out = wgsl_push_line(out, "@group(0) @binding(0) var<storage, read> input: array<Knowledge>;")
+    out = wgsl_push_line(out, "@group(0) @binding(1) var<storage, read_write> output: array<Knowledge>;")
+    out = wgsl_push_line(out, "@group(0) @binding(2) var<uniform> params: TransformParams;")
+    out = wgsl_push_newline(out)
+
+    // Kernel
+    out = wgsl_push_line(out, "@compute @workgroup_size(256)")
+    out = wgsl_push_line(out, "fn knowledge_transform(@builtin(global_invocation_id) gid: vec3<u32>) {")
+    out = wgsl_push_line(out, "    let idx = gid.x;")
+    out = wgsl_push_line(out, "    let k = input[idx];")
+    out = wgsl_push_newline(out)
+
+    // Affine transform on value
+    out = wgsl_push_line(out, "    // Affine transformation: value' = scale * value + offset")
+    out = wgsl_push_line(out, "    let result_value = params.scale * k.value + params.offset;")
+    out = wgsl_push_newline(out)
+
+    // Uncertainty scales with |scale| (offset does not add uncertainty)
+    out = wgsl_push_line(out, "    // Uncertainty scales linearly with |scale|; offset adds no uncertainty")
+    out = wgsl_push_line(out, "    let result_uncertainty = abs(params.scale) * k.uncertainty;")
+    out = wgsl_push_newline(out)
+
+    // Confidence is attenuated by the confidence factor
+    out = wgsl_push_line(out, "    // Confidence attenuated by the transform's confidence factor")
+    out = wgsl_push_line(out, "    let result_confidence = k.confidence * params.confidence_factor;")
+    out = wgsl_push_newline(out)
+
+    // Store
+    out = wgsl_push_line(out, "    output[idx] = Knowledge(result_value, result_uncertainty, result_confidence, 0.0);")
+    out = wgsl_push_line(out, "}")
+    out
+}
+
+// ============================================================================
+// Shader registry / dispatch
+// ============================================================================
+
+// Generates the complete WGSL shader source for a given kernel ID.
+// kernel_id tags: 0=Add, 1=Sub, 2=Mul, 3=Div, 4=ConfidenceAggregate, 5=KnowledgeTransform
+fn wgsl_get_shader_source(kernel_id: i64) -> WgslBuf with Mut, Panic, Div {
+    var buf = wgsl_buf_new()
+
+    // Emit a header comment identifying the kernel
+    buf = wgsl_push_line(buf, "// Sounio epistemic compute shader")
+    buf = wgsl_push_line(buf, "// Generated by self-hosted::gpu::epistemic_kernels")
+    buf = wgsl_push_newline(buf)
+
+    if kernel_id == 0 {
+        buf = wgsl_emit_uncertainty_add(buf)
+    } else if kernel_id == 1 {
+        buf = wgsl_emit_uncertainty_sub(buf)
+    } else if kernel_id == 2 {
+        buf = wgsl_emit_uncertainty_mul(buf)
+    } else if kernel_id == 3 {
+        buf = wgsl_emit_uncertainty_div(buf)
+    } else if kernel_id == 4 {
+        buf = wgsl_emit_confidence_aggregate(buf)
+    } else if kernel_id == 5 {
+        buf = wgsl_emit_knowledge_transform(buf)
+    } else {
+        buf = wgsl_push_line(buf, "// ERROR: unknown epistemic kernel id")
+    }
+
+    buf
+}
+
+// Returns the WGSL entry point function name for each kernel.
+fn wgsl_get_entry_point_name(kernel_id: i64) -> string {
+    if kernel_id == 0 { return "uncertainty_add" }
+    if kernel_id == 1 { return "uncertainty_sub" }
+    if kernel_id == 2 { return "uncertainty_mul" }
+    if kernel_id == 3 { return "uncertainty_div" }
+    if kernel_id == 4 { return "confidence_aggregate" }
+    if kernel_id == 5 { return "knowledge_transform" }
+    "unknown"
+}
+
+// Total number of epistemic kernels in the registry.
+fn wgsl_get_all_shader_count() -> i64 {
+    6
+}
+
+// ============================================================================
+// CPU-side uncertainty propagation (reference implementations)
+// ============================================================================
+//
+// These provide exact f64 reference values for validating the GPU f32 shaders.
+// Same formulas, higher precision.
+
+// Additive propagation (add or sub): sigma_c = sqrt(sigma_a^2 + sigma_b^2)
+fn propagate_uncertainty_add(sigma_a: f64, sigma_b: f64) -> f64 with Div {
+    let sum_sq = sigma_a * sigma_a + sigma_b * sigma_b
+    // Manual sqrt via Newton-Raphson (6 iterations, f64 precision)
+    if sum_sq <= 0.0 { return 0.0 }
+    var guess: f64 = sum_sq
+    if guess > 1.0 { guess = guess / 2.0 }
+    if guess < 1.0 { guess = 1.0 }
+
+    var i: i64 = 0
+    while i < 6 {
+        guess = (guess + sum_sq / guess) / 2.0
+        i = i + 1
+    }
+    guess
+}
+
+// Multiplicative propagation: relative error formula
+// sigma_c = |result| * sqrt((sigma_a/|val_a|)^2 + (sigma_b/|val_b|)^2)
+fn propagate_uncertainty_mul(
+    val_a: f64, sigma_a: f64,
+    val_b: f64, sigma_b: f64
+) -> f64 with Div {
+    let result = val_a * val_b
+    let abs_result = if result >= 0.0 { result } else { 0.0 - result }
+
+    let abs_a = if val_a >= 0.0 { val_a } else { 0.0 - val_a }
+    let abs_b = if val_b >= 0.0 { val_b } else { 0.0 - val_b }
+
+    let epsilon: f64 = 1.0e-15
+
+    var rel_a: f64 = 0.0
+    if abs_a > epsilon {
+        rel_a = sigma_a / abs_a
+    }
+
+    var rel_b: f64 = 0.0
+    if abs_b > epsilon {
+        rel_b = sigma_b / abs_b
+    }
+
+    let rel_sq = rel_a * rel_a + rel_b * rel_b
+    if rel_sq <= 0.0 { return 0.0 }
+
+    // sqrt via Newton-Raphson
+    var guess: f64 = rel_sq
+    if guess > 1.0 { guess = guess / 2.0 }
+    if guess < 1.0 { guess = 1.0 }
+
+    var i: i64 = 0
+    while i < 6 {
+        guess = (guess + rel_sq / guess) / 2.0
+        i = i + 1
+    }
+
+    abs_result * guess
+}
+
+// Division propagation: same relative error as mul, with zero guard
+fn propagate_uncertainty_div(
+    val_a: f64, sigma_a: f64,
+    val_b: f64, sigma_b: f64
+) -> f64 with Div {
+    let abs_b = if val_b >= 0.0 { val_b } else { 0.0 - val_b }
+    let epsilon: f64 = 1.0e-15
+
+    // Zero guard: if denominator is near zero, return a sentinel large value
+    if abs_b < epsilon { return 1.0e30 }
+
+    let result = val_a / val_b
+    let abs_result = if result >= 0.0 { result } else { 0.0 - result }
+    let abs_a = if val_a >= 0.0 { val_a } else { 0.0 - val_a }
+
+    var rel_a: f64 = 0.0
+    if abs_a > epsilon {
+        rel_a = sigma_a / abs_a
+    }
+
+    let rel_b = sigma_b / abs_b
+
+    let rel_sq = rel_a * rel_a + rel_b * rel_b
+    if rel_sq <= 0.0 { return 0.0 }
+
+    // sqrt via Newton-Raphson
+    var guess: f64 = rel_sq
+    if guess > 1.0 { guess = guess / 2.0 }
+    if guess < 1.0 { guess = 1.0 }
+
+    var i: i64 = 0
+    while i < 6 {
+        guess = (guess + rel_sq / guess) / 2.0
+        i = i + 1
+    }
+
+    abs_result * guess
+}
+
+// ============================================================================
+// Workgroup dispatch helpers
+// ============================================================================
+
+// Compute the number of workgroups needed for a given element count.
+// Returns ceil(element_count / workgroup_size).
+fn epistemic_workgroup_count(element_count: i64, workgroup_size: i64) -> i64 with Div {
+    if workgroup_size <= 0 { return 0 }
+    if element_count <= 0 { return 0 }
+    // ceil division: (n + d - 1) / d
+    (element_count + workgroup_size - 1) / workgroup_size
+}
+
+// Compute the buffer size in bytes for a Knowledge array.
+// Each Knowledge element is 16 bytes (4x f32).
+fn epistemic_buffer_size(element_count: i64) -> i64 {
+    element_count * 16
+}
+
+// ============================================================================
+// Shader generation helpers (full pipeline convenience)
+// ============================================================================
+
+// Generate all six shaders and return their total source size in bytes.
+// Useful for verifying that all shaders can be generated without overflow.
+fn wgsl_generate_all_shaders_total_len() -> i64 with Mut, Panic, Div {
+    var total: i64 = 0
+    var kid: i64 = 0
+    while kid < 6 {
+        let shader = wgsl_get_shader_source(kid)
+        total = total + shader.len
+        kid = kid + 1
+    }
+    total
+}
+
+// Check if a kernel ID is valid (in range 0..5).
+fn wgsl_is_valid_kernel_id(kernel_id: i64) -> bool {
+    if kernel_id < 0 { return false }
+    if kernel_id >= 6 { return false }
+    true
+}
+
+// Return the number of storage bindings required by each kernel.
+// Add/Sub/Mul/Div: 3 (input_a, input_b, output)
+// ConfidenceAggregate: 3 (input, output, params)
+// KnowledgeTransform: 3 (input, output, params)
+fn wgsl_get_binding_count(kernel_id: i64) -> i64 {
+    // All current kernels use exactly 3 bindings
+    if kernel_id >= 0 {
+        if kernel_id < 6 {
+            return 3
+        }
+    }
+    0
+}
+
+// Return whether the kernel requires a uniform buffer binding.
+// ConfidenceAggregate (4) and KnowledgeTransform (5) use uniform params.
+fn wgsl_kernel_has_uniform(kernel_id: i64) -> bool {
+    if kernel_id == 4 { return true }
+    if kernel_id == 5 { return true }
+    false
+}
+
+// Return the workgroup size used by a given kernel.
+// All current kernels use 256.
+fn wgsl_get_workgroup_size(kernel_id: i64) -> i64 {
+    if kernel_id >= 0 {
+        if kernel_id < 6 {
+            return 256
+        }
+    }
+    0
+}
+
+// ============================================================================
+// Shader validation: check that generated WGSL contains expected markers
+// ============================================================================
+
+// Validate a generated shader buffer by checking for structural WGSL markers.
+fn wgsl_validate_shader(buf: WgslBuf) -> bool with Mut, Panic, Div {
+    // Must contain a struct declaration
+    if wgsl_buf_contains(buf, "struct Knowledge") == false { return false }
+
+    // Must contain a compute decorator
+    if wgsl_buf_contains(buf, "@compute") == false { return false }
+
+    // Must contain at least one binding
+    if wgsl_buf_contains(buf, "@group(0)") == false { return false }
+
+    // Must contain a workgroup_size
+    if wgsl_buf_contains(buf, "@workgroup_size") == false { return false }
+
+    // Must not be empty
+    if buf.len < 100 { return false }
+
+    true
+}
+
+// Validate all six shaders in the registry.
+fn wgsl_validate_all_shaders() -> bool with Mut, Panic, Div {
+    var kid: i64 = 0
+    while kid < 6 {
+        let shader = wgsl_get_shader_source(kid)
+        if wgsl_validate_shader(shader) == false {
+            return false
+        }
+        kid = kid + 1
+    }
+    true
+}
+
+// ============================================================================
+// Knowledge buffer layout helpers
+// ============================================================================
+
+// Offset in bytes to the 'value' field of the i-th Knowledge element.
+fn knowledge_value_offset(index: i64) -> i64 {
+    index * 16
+}
+
+// Offset in bytes to the 'uncertainty' field of the i-th Knowledge element.
+fn knowledge_uncertainty_offset(index: i64) -> i64 {
+    index * 16 + 4
+}
+
+// Offset in bytes to the 'confidence' field of the i-th Knowledge element.
+fn knowledge_confidence_offset(index: i64) -> i64 {
+    index * 16 + 8
+}
+
+// Total stride in bytes between consecutive Knowledge elements.
+fn knowledge_stride() -> i64 {
+    16
+}
+
+// ============================================================================
+// Dispatch configuration for two-input kernels (add, sub, mul, div)
+// ============================================================================
+
+struct EpistemicDispatch {
+    workgroup_count_x: i64,
+    workgroup_count_y: i64,
+    workgroup_count_z: i64,
+    workgroup_size: i64,
+    element_count: i64,
+    input_a_size: i64,    // bytes
+    input_b_size: i64,    // bytes
+    output_size: i64,     // bytes
+}
+
+fn epistemic_dispatch_binary(element_count: i64) -> EpistemicDispatch with Div {
+    let wg_size: i64 = 256
+    let wg_count = epistemic_workgroup_count(element_count, wg_size)
+    let buf_size = epistemic_buffer_size(element_count)
+
+    EpistemicDispatch {
+        workgroup_count_x: wg_count,
+        workgroup_count_y: 1,
+        workgroup_count_z: 1,
+        workgroup_size: wg_size,
+        element_count: element_count,
+        input_a_size: buf_size,
+        input_b_size: buf_size,
+        output_size: buf_size,
+    }
+}
+
+// ============================================================================
+// Dispatch configuration for single-input kernels (transform, aggregate)
+// ============================================================================
+
+struct EpistemicDispatchUnary {
+    workgroup_count_x: i64,
+    workgroup_count_y: i64,
+    workgroup_count_z: i64,
+    workgroup_size: i64,
+    element_count: i64,
+    input_size: i64,      // bytes
+    output_size: i64,     // bytes
+    uniform_size: i64,    // bytes (16 for TransformParams/AggregateParams)
+}
+
+fn epistemic_dispatch_transform(element_count: i64) -> EpistemicDispatchUnary with Div {
+    let wg_size: i64 = 256
+    let wg_count = epistemic_workgroup_count(element_count, wg_size)
+    let buf_size = epistemic_buffer_size(element_count)
+
+    EpistemicDispatchUnary {
+        workgroup_count_x: wg_count,
+        workgroup_count_y: 1,
+        workgroup_count_z: 1,
+        workgroup_size: wg_size,
+        element_count: element_count,
+        input_size: buf_size,
+        output_size: buf_size,
+        uniform_size: 16,
+    }
+}
+
+fn epistemic_dispatch_aggregate(element_count: i64) -> EpistemicDispatchUnary with Div {
+    let wg_size: i64 = 256
+    let wg_count = epistemic_workgroup_count(element_count, wg_size)
+    let in_size = epistemic_buffer_size(element_count)
+    // Output: one f32 per workgroup
+    let out_size = wg_count * 4
+
+    EpistemicDispatchUnary {
+        workgroup_count_x: wg_count,
+        workgroup_count_y: 1,
+        workgroup_count_z: 1,
+        workgroup_size: wg_size,
+        element_count: element_count,
+        input_size: in_size,
+        output_size: out_size,
+        uniform_size: 16,
+    }
+}
+
+// ============================================================================
+// Kernel metadata
+// ============================================================================
+
+struct EpistemicKernelMeta {
+    kernel_id: i64,
+    entry_point: string,
+    binding_count: i64,
+    has_uniform: bool,
+    workgroup_size: i64,
+    is_binary: bool,       // true for add/sub/mul/div (two input arrays)
+    uses_shared_mem: bool,  // true for confidence_aggregate
+}
+
+fn epistemic_kernel_meta(kernel_id: i64) -> EpistemicKernelMeta {
+    let is_bin = (kernel_id >= 0) && (kernel_id <= 3)
+    let uses_shared = (kernel_id == 4)
+
+    EpistemicKernelMeta {
+        kernel_id: kernel_id,
+        entry_point: wgsl_get_entry_point_name(kernel_id),
+        binding_count: wgsl_get_binding_count(kernel_id),
+        has_uniform: wgsl_kernel_has_uniform(kernel_id),
+        workgroup_size: wgsl_get_workgroup_size(kernel_id),
+        is_binary: is_bin,
+        uses_shared_mem: uses_shared,
+    }
+}
+
+// ============================================================================
+// End of module
+// ============================================================================

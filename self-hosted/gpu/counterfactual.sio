@@ -1,0 +1,561 @@
+// self-hosted::gpu::counterfactual — Pearl's Ladder of Causation as GPU primitives
+//
+// World-first: causal inference at GPU hardware speed.
+//
+// Architecture: Warp lanes encode parallel worlds.
+//   Even lanes (0,2,4,...,30) → Factual World (W₀)
+//   Odd lanes  (1,3,5,...,31) → Counterfactual World (W₁)
+//
+// Pearl's Three Levels:
+//   Level 1 (Association):   Standard GPU execution — P(Y|X=x)
+//   Level 2 (Intervention):  do-operator — P(Y|do(X=x))
+//   Level 3 (Counterfactual): Parallel worlds — P(Y_x'|X=x, Y=y)
+//
+// ITE (Individual Treatment Effect) via warp shuffle:
+//   ITE_i = outcome_cf[lane i] - outcome_factual[lane i-1]
+//
+// ATE (Average Treatment Effect) via warp reduction:
+//   ATE = (1/16) Σ ITE_i across 16 lane pairs
+
+// ── Configuration ───────────────────────────────────────────────────
+
+struct CfPtxConfig {
+    sm_major: i64,
+    sm_minor: i64,
+    worlds_per_warp: i64,    // 2 = factual/cf, 4 = multi-world
+    track_divergence: bool,
+    max_causal_depth: i64,
+}
+
+fn cf_config_default() -> CfPtxConfig {
+    CfPtxConfig {
+        sm_major: 8,
+        sm_minor: 0,
+        worlds_per_warp: 2,
+        track_divergence: true,
+        max_causal_depth: 8,
+    }
+}
+
+// ── World Identifiers ───────────────────────────────────────────────
+
+// Factual world ID: 0
+// Counterfactual world ID: 0xCAFEBABE_00000000 | intervention_id
+// Encoding allows 32-bit intervention namespace
+
+fn cf_world_factual() -> i64 { 0 }
+
+fn cf_world_counterfactual(intervention_id: i64) -> i64 {
+    // 0xCAFEBABE00000000 = -3819410108757049344 in i64
+    let marker: i64 = -3819410108757049344
+    marker + intervention_id
+}
+
+// ── Emitter State ───────────────────────────────────────────────────
+
+struct CfPtxState {
+    buf: PtxBuf,
+    config: CfPtxConfig,
+    next_intervention_id: i64,
+    temp_count: i64,
+    label_count: i64,
+}
+
+fn cf_ptx_new(config: CfPtxConfig) -> CfPtxState {
+    CfPtxState {
+        buf: ptx_buf_new(),
+        config: config,
+        next_intervention_id: 0,
+        temp_count: 0,
+        label_count: 0,
+    }
+}
+
+fn cf_alloc_label(st: CfPtxState) -> (CfPtxState, string) with Alloc {
+    var out = st
+    let idx = out.label_count
+    out.label_count = idx + 1
+    (out, "cf_L" + i64_to_string(idx))
+}
+
+// ── Register Declarations ───────────────────────────────────────────
+
+fn cf_emit_reg_decl(st: CfPtxState) -> CfPtxState with Mut, Panic, Div, Alloc {
+    var out = st
+    out.buf = ptx_push_str(out.buf, "    // Counterfactual execution state\n")
+    out.buf = ptx_push_str(out.buf, "    .reg .u64 %r_world_id;\n")
+    out.buf = ptx_push_str(out.buf, "    .reg .u32 %r_causal_depth;\n")
+    out.buf = ptx_push_str(out.buf, "    .reg .pred %p_is_factual, %p_is_cf;\n")
+    out.buf = ptx_push_str(out.buf, "    .reg .f32 %r_outcome, %r_ite, %r_ate;\n")
+    out.buf = ptx_push_str(out.buf, "    .reg .f32 %r_cf_ftemp<8>;\n")
+    out.buf = ptx_push_str(out.buf, "    .reg .u32 %r_cf_temp<8>;\n")
+    out.buf = ptx_push_str(out.buf, "    .reg .pred %p_cf_temp<8>;\n")
+    if out.config.track_divergence {
+        out.buf = ptx_push_str(out.buf, "    .reg .f32 %r_divergence;\n")
+    }
+    out.buf = ptx_push_str(out.buf, "\n")
+    out
+}
+
+// ── World Initialization ────────────────────────────────────────────
+
+fn cf_emit_init_factual(st: CfPtxState) -> CfPtxState with Mut, Panic, Div, Alloc {
+    var out = st
+    out.buf = ptx_push_str(out.buf, "    // Initialize factual world\n")
+    out.buf = ptx_push_str(out.buf, "    mov.u64 %r_world_id, 0;\n")
+    out.buf = ptx_push_str(out.buf, "    mov.u32 %r_causal_depth, 0;\n")
+    out
+}
+
+// ── Lane Assignment: Factual vs Counterfactual ──────────────────────
+
+fn cf_emit_lane_assignment(st: CfPtxState) -> CfPtxState with Mut, Panic, Div, Alloc {
+    var out = st
+    let worlds = out.config.worlds_per_warp
+
+    out.buf = ptx_push_str(out.buf, "    // Assign lanes to worlds\n")
+    out.buf = ptx_push_str(out.buf, "    mov.u32 %r_cf_temp0, %laneid;\n")
+
+    if worlds == 2 {
+        // Bit 0: 0=factual, 1=counterfactual
+        out.buf = ptx_push_str(out.buf, "    and.b32 %r_cf_temp1, %r_cf_temp0, 0x1;\n")
+    } else if worlds == 4 {
+        // Bits 0-1: 0=factual, 1-3=counterfactual worlds
+        out.buf = ptx_push_str(out.buf, "    and.b32 %r_cf_temp1, %r_cf_temp0, 0x3;\n")
+    } else {
+        // Default to 2 worlds
+        out.buf = ptx_push_str(out.buf, "    and.b32 %r_cf_temp1, %r_cf_temp0, 0x1;\n")
+    }
+
+    out.buf = ptx_push_str(out.buf, "    setp.eq.u32 %p_is_factual, %r_cf_temp1, 0;\n")
+    out.buf = ptx_push_str(out.buf, "    setp.ne.u32 %p_is_cf, %r_cf_temp1, 0;\n")
+    out
+}
+
+// ── Level 2: do-Operator (Intervention) ─────────────────────────────
+
+// Emit PTX for: do(variable = value)
+// Counterfactual lanes get the new value; factual lanes keep original.
+fn cf_emit_intervention(
+    st: CfPtxState,
+    var_reg: string,
+    value_hex: string     // IEEE 754 hex for the forced value
+) -> CfPtxState with Mut, Panic, Div, Alloc {
+    var out = st
+    let int_id = out.next_intervention_id
+    out.next_intervention_id = int_id + 1
+
+    out.buf = ptx_push_str(out.buf, "    // Intervention #")
+    out.buf = ptx_push_str(out.buf, i64_to_string(int_id))
+    out.buf = ptx_push_str(out.buf, ": do(")
+    out.buf = ptx_push_str(out.buf, var_reg)
+    out.buf = ptx_push_str(out.buf, " = 0f")
+    out.buf = ptx_push_str(out.buf, value_hex)
+    out.buf = ptx_push_str(out.buf, ")\n")
+
+    // Update world ID: XOR with marker + intervention_id
+    out.buf = ptx_push_str(out.buf, "    xor.b64 %r_world_id, %r_world_id, 0xCAFEBABE0000000")
+    out.buf = ptx_push_str(out.buf, i64_to_string(int_id + 1))
+    out.buf = ptx_push_str(out.buf, ";\n")
+
+    // Increment causal depth
+    out.buf = ptx_push_str(out.buf, "    add.u32 %r_causal_depth, %r_causal_depth, 1;\n")
+
+    // Check depth limit
+    out.buf = ptx_push_str(out.buf, "    setp.lt.u32 %p_cf_temp0, %r_causal_depth, ")
+    out.buf = ptx_push_str(out.buf, i64_to_string(out.config.max_causal_depth))
+    out.buf = ptx_push_str(out.buf, ";\n")
+
+    // Conditional value selection: cf lanes get forced value
+    out.buf = ptx_push_str(out.buf, "    mov.f32 %r_cf_ftemp0, 0f")
+    out.buf = ptx_push_str(out.buf, value_hex)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out.buf = ptx_push_str(out.buf, "    @%p_is_cf selp.f32 ")
+    out.buf = ptx_push_str(out.buf, var_reg)
+    out.buf = ptx_push_str(out.buf, ", %r_cf_ftemp0, ")
+    out.buf = ptx_push_str(out.buf, var_reg)
+    out.buf = ptx_push_str(out.buf, ", %p_cf_temp0;\n")
+    out
+}
+
+// Integer intervention variant
+fn cf_emit_intervention_i32(
+    st: CfPtxState,
+    var_reg: string,
+    value: i64
+) -> CfPtxState with Mut, Panic, Div, Alloc {
+    var out = st
+    let int_id = out.next_intervention_id
+    out.next_intervention_id = int_id + 1
+
+    out.buf = ptx_push_str(out.buf, "    // Intervention #")
+    out.buf = ptx_push_str(out.buf, i64_to_string(int_id))
+    out.buf = ptx_push_str(out.buf, " (i32)\n")
+
+    out.buf = ptx_push_str(out.buf, "    xor.b64 %r_world_id, %r_world_id, 0xCAFEBABE0000000")
+    out.buf = ptx_push_str(out.buf, i64_to_string(int_id + 1))
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out.buf = ptx_push_str(out.buf, "    add.u32 %r_causal_depth, %r_causal_depth, 1;\n")
+
+    out.buf = ptx_push_str(out.buf, "    mov.s32 %r_cf_temp2, ")
+    out.buf = ptx_push_str(out.buf, i64_to_string(value))
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out.buf = ptx_push_str(out.buf, "    @%p_is_cf mov.s32 ")
+    out.buf = ptx_push_str(out.buf, var_reg)
+    out.buf = ptx_push_str(out.buf, ", %r_cf_temp2;\n")
+    out
+}
+
+// ── Level 3: ITE Computation via Warp Shuffle ───────────────────────
+
+// Compute Individual Treatment Effect:
+//   ITE_i = outcome_cf[lane i] - outcome_factual[lane i-1]
+// Uses shfl.sync.xor to exchange between paired lanes.
+fn cf_emit_ite(
+    st: CfPtxState,
+    outcome_reg: string,
+    ite_reg: string
+) -> CfPtxState with Mut, Panic, Div, Alloc {
+    var out = st
+
+    out.buf = ptx_push_str(out.buf, "    // Compute ITE via warp shuffle\n")
+
+    // Exchange outcome between paired threads (XOR with 1 swaps lane pairs)
+    out.buf = ptx_push_str(out.buf, "    shfl.sync.xor.b32 %r_cf_ftemp0, ")
+    out.buf = ptx_push_str(out.buf, outcome_reg)
+    out.buf = ptx_push_str(out.buf, ", 1, 0xffffffff;\n")
+
+    // ITE = outcome_this - outcome_partner
+    out.buf = ptx_push_str(out.buf, "    sub.f32 ")
+    out.buf = ptx_push_str(out.buf, ite_reg)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, outcome_reg)
+    out.buf = ptx_push_str(out.buf, ", %r_cf_ftemp0;\n")
+
+    // Correct sign for factual threads
+    // Factual: ITE = cf - factual = -(factual - cf)
+    out.buf = ptx_push_str(out.buf, "    @%p_is_factual neg.f32 ")
+    out.buf = ptx_push_str(out.buf, ite_reg)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, ite_reg)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out
+}
+
+// ── ATE: Average Treatment Effect via Warp Reduction ────────────────
+
+// ATE = (1/n) Σ ITE_i  where n = 16 (warp_size / worlds_per_warp)
+fn cf_emit_ate(
+    st: CfPtxState,
+    ite_reg: string,
+    ate_reg: string
+) -> CfPtxState with Mut, Panic, Div, Alloc {
+    var out = st
+
+    out.buf = ptx_push_str(out.buf, "    // Compute ATE via warp reduction\n")
+
+    // Initialize accumulator
+    out.buf = ptx_push_str(out.buf, "    mov.f32 ")
+    out.buf = ptx_push_str(out.buf, ate_reg)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, ite_reg)
+    out.buf = ptx_push_str(out.buf, ";\n")
+
+    // 5-stage logarithmic reduction: 16 → 8 → 4 → 2 → 1
+    var offset: i64 = 16
+    while offset >= 1 {
+        out.buf = ptx_push_str(out.buf, "    shfl.sync.down.b32 %r_cf_ftemp0, ")
+        out.buf = ptx_push_str(out.buf, ate_reg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, i64_to_string(offset))
+        out.buf = ptx_push_str(out.buf, ", 31, 0xffffffff;\n")
+        out.buf = ptx_push_str(out.buf, "    add.f32 ")
+        out.buf = ptx_push_str(out.buf, ate_reg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, ate_reg)
+        out.buf = ptx_push_str(out.buf, ", %r_cf_ftemp0;\n")
+        offset = offset / 2
+    }
+
+    // Divide by number of pairs
+    let pairs = 32 / out.config.worlds_per_warp
+    if pairs == 16 {
+        // ×(1/16) = 0.0625 = 0x3D800000
+        out.buf = ptx_push_str(out.buf, "    mul.f32 ")
+        out.buf = ptx_push_str(out.buf, ate_reg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, ate_reg)
+        out.buf = ptx_push_str(out.buf, ", 0f3D800000;\n")
+    } else if pairs == 8 {
+        // ×(1/8) = 0.125 = 0x3E000000
+        out.buf = ptx_push_str(out.buf, "    mul.f32 ")
+        out.buf = ptx_push_str(out.buf, ate_reg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, ate_reg)
+        out.buf = ptx_push_str(out.buf, ", 0f3E000000;\n")
+    }
+    out
+}
+
+// ── World Divergence Tracking ───────────────────────────────────────
+
+fn cf_emit_divergence(
+    st: CfPtxState,
+    outcome_reg: string,
+    divergence_reg: string
+) -> CfPtxState with Mut, Panic, Div, Alloc {
+    var out = st
+    if !out.config.track_divergence { return out }
+
+    out.buf = ptx_push_str(out.buf, "    // Track world divergence\n")
+
+    // Exchange outcomes between worlds
+    out.buf = ptx_push_str(out.buf, "    shfl.sync.xor.b32 %r_cf_ftemp0, ")
+    out.buf = ptx_push_str(out.buf, outcome_reg)
+    out.buf = ptx_push_str(out.buf, ", 1, 0xffffffff;\n")
+
+    // Absolute divergence: |outcome_this - outcome_partner|
+    out.buf = ptx_push_str(out.buf, "    sub.f32 ")
+    out.buf = ptx_push_str(out.buf, divergence_reg)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, outcome_reg)
+    out.buf = ptx_push_str(out.buf, ", %r_cf_ftemp0;\n")
+    out.buf = ptx_push_str(out.buf, "    abs.f32 ")
+    out.buf = ptx_push_str(out.buf, divergence_reg)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, divergence_reg)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out
+}
+
+// ── Probability of Causation ────────────────────────────────────────
+
+// P(Y_x'=1 | X=x, Y=y) = probability that X caused Y
+fn cf_emit_probability_of_causation(
+    st: CfPtxState,
+    x_reg: string,        // Treatment variable
+    y_reg: string,        // Outcome variable
+    y_cf_reg: string,     // Counterfactual outcome
+    poc_reg: string       // Output: probability of causation
+) -> CfPtxState with Mut, Panic, Div, Alloc {
+    var out = st
+
+    out.buf = ptx_push_str(out.buf, "    // Probability of Causation\n")
+
+    // Check preconditions: X=0, Y=0
+    out.buf = ptx_push_str(out.buf, "    setp.eq.f32 %p_cf_temp0, ")
+    out.buf = ptx_push_str(out.buf, x_reg)
+    out.buf = ptx_push_str(out.buf, ", 0f00000000;\n")  // X == 0.0
+    out.buf = ptx_push_str(out.buf, "    setp.eq.f32 %p_cf_temp1, ")
+    out.buf = ptx_push_str(out.buf, y_reg)
+    out.buf = ptx_push_str(out.buf, ", 0f00000000;\n")  // Y == 0.0
+    out.buf = ptx_push_str(out.buf, "    and.pred %p_cf_temp2, %p_cf_temp0, %p_cf_temp1;\n")
+
+    // Check counterfactual outcome > 0.5
+    out.buf = ptx_push_str(out.buf, "    setp.gt.f32 %p_cf_temp3, ")
+    out.buf = ptx_push_str(out.buf, y_cf_reg)
+    out.buf = ptx_push_str(out.buf, ", 0f3F000000;\n")  // > 0.5
+
+    // P(causation) = 1 if preconditions met AND cf outcome > 0.5
+    out.buf = ptx_push_str(out.buf, "    and.pred %p_cf_temp4, %p_cf_temp2, %p_cf_temp3;\n")
+    out.buf = ptx_push_str(out.buf, "    selp.f32 ")
+    out.buf = ptx_push_str(out.buf, poc_reg)
+    out.buf = ptx_push_str(out.buf, ", 0f3F800000, 0f00000000, %p_cf_temp4;\n")
+
+    // Population-level PoC via warp reduction
+    var offset: i64 = 16
+    while offset >= 1 {
+        out.buf = ptx_push_str(out.buf, "    shfl.sync.down.b32 %r_cf_ftemp1, ")
+        out.buf = ptx_push_str(out.buf, poc_reg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, i64_to_string(offset))
+        out.buf = ptx_push_str(out.buf, ", 31, 0xffffffff;\n")
+        out.buf = ptx_push_str(out.buf, "    add.f32 ")
+        out.buf = ptx_push_str(out.buf, poc_reg)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, poc_reg)
+        out.buf = ptx_push_str(out.buf, ", %r_cf_ftemp1;\n")
+        offset = offset / 2
+    }
+
+    // Normalize: /32
+    out.buf = ptx_push_str(out.buf, "    mul.f32 ")
+    out.buf = ptx_push_str(out.buf, poc_reg)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, poc_reg)
+    out.buf = ptx_push_str(out.buf, ", 0f3D000000;\n")  // 0.03125 = 1/32
+    out
+}
+
+// ── Nested Interventions ────────────────────────────────────────────
+
+// Apply multiple interventions using different lane bit positions.
+// First intervention uses bit 0, second uses bit 1, etc.
+fn cf_emit_nested_intervention(
+    st: CfPtxState,
+    var_reg: string,
+    value_hex: string,
+    depth: i64          // 0-based depth (0 = first intervention, 1 = second, etc.)
+) -> CfPtxState with Mut, Panic, Div, Alloc {
+    var out = st
+    let int_id = out.next_intervention_id
+    out.next_intervention_id = int_id + 1
+
+    out.buf = ptx_push_str(out.buf, "    // Nested intervention (depth=")
+    out.buf = ptx_push_str(out.buf, i64_to_string(depth))
+    out.buf = ptx_push_str(out.buf, ")\n")
+
+    // Check depth limit
+    out.buf = ptx_push_str(out.buf, "    setp.lt.u32 %p_cf_temp0, %r_causal_depth, ")
+    out.buf = ptx_push_str(out.buf, i64_to_string(out.config.max_causal_depth))
+    out.buf = ptx_push_str(out.buf, ";\n")
+
+    // Extract bit at position 'depth' from laneid
+    if depth == 0 {
+        out.buf = ptx_push_str(out.buf, "    and.b32 %r_cf_temp1, %laneid, 0x1;\n")
+    } else if depth == 1 {
+        out.buf = ptx_push_str(out.buf, "    shr.b32 %r_cf_temp0, %laneid, 1;\n")
+        out.buf = ptx_push_str(out.buf, "    and.b32 %r_cf_temp1, %r_cf_temp0, 0x1;\n")
+    } else if depth == 2 {
+        out.buf = ptx_push_str(out.buf, "    shr.b32 %r_cf_temp0, %laneid, 2;\n")
+        out.buf = ptx_push_str(out.buf, "    and.b32 %r_cf_temp1, %r_cf_temp0, 0x1;\n")
+    } else {
+        out.buf = ptx_push_str(out.buf, "    shr.b32 %r_cf_temp0, %laneid, ")
+        out.buf = ptx_push_str(out.buf, i64_to_string(depth))
+        out.buf = ptx_push_str(out.buf, ";\n")
+        out.buf = ptx_push_str(out.buf, "    and.b32 %r_cf_temp1, %r_cf_temp0, 0x1;\n")
+    }
+
+    out.buf = ptx_push_str(out.buf, "    setp.ne.u32 %p_cf_temp1, %r_cf_temp1, 0;\n")
+
+    // Apply intervention conditionally
+    out.buf = ptx_push_str(out.buf, "    mov.f32 %r_cf_ftemp0, 0f")
+    out.buf = ptx_push_str(out.buf, value_hex)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out.buf = ptx_push_str(out.buf, "    and.pred %p_cf_temp2, %p_cf_temp0, %p_cf_temp1;\n")
+    out.buf = ptx_push_str(out.buf, "    @%p_cf_temp2 mov.f32 ")
+    out.buf = ptx_push_str(out.buf, var_reg)
+    out.buf = ptx_push_str(out.buf, ", %r_cf_ftemp0;\n")
+
+    // Increment depth
+    out.buf = ptx_push_str(out.buf, "    add.u32 %r_causal_depth, %r_causal_depth, 1;\n")
+    out
+}
+
+// ── Structural Equation Models ──────────────────────────────────────
+
+// Linear: Y = β₀ + β₁X₁ + β₂X₂ + ... + βₙXₙ
+fn cf_emit_linear_model(
+    st: CfPtxState,
+    result_reg: string,
+    intercept_hex: string,
+    x_regs: [string; 8],      // input variable registers
+    beta_hex: [string; 8],     // coefficient hex values
+    num_terms: i64
+) -> CfPtxState with Mut, Panic, Div, Alloc {
+    var out = st
+
+    out.buf = ptx_push_str(out.buf, "    // Linear structural equation\n")
+    out.buf = ptx_push_str(out.buf, "    mov.f32 ")
+    out.buf = ptx_push_str(out.buf, result_reg)
+    out.buf = ptx_push_str(out.buf, ", 0f")
+    out.buf = ptx_push_str(out.buf, intercept_hex)
+    out.buf = ptx_push_str(out.buf, ";\n")
+
+    var i: i64 = 0
+    while i < num_terms {
+        out.buf = ptx_push_str(out.buf, "    mov.f32 %r_cf_ftemp0, 0f")
+        out.buf = ptx_push_str(out.buf, beta_hex[i as usize])
+        out.buf = ptx_push_str(out.buf, ";\n")
+        out.buf = ptx_push_str(out.buf, "    fma.rn.f32 ")
+        out.buf = ptx_push_str(out.buf, result_reg)
+        out.buf = ptx_push_str(out.buf, ", %r_cf_ftemp0, ")
+        out.buf = ptx_push_str(out.buf, x_regs[i as usize])
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, result_reg)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        i = i + 1
+    }
+    out
+}
+
+// Logistic (Sigmoid): Y = 1 / (1 + exp(-z))
+// z must already be computed in z_reg
+fn cf_emit_sigmoid(
+    st: CfPtxState,
+    z_reg: string,
+    result_reg: string
+) -> CfPtxState with Mut, Panic, Div, Alloc {
+    var out = st
+
+    out.buf = ptx_push_str(out.buf, "    // Sigmoid activation\n")
+    // -z
+    out.buf = ptx_push_str(out.buf, "    neg.f32 %r_cf_ftemp0, ")
+    out.buf = ptx_push_str(out.buf, z_reg)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    // exp(-z) — use base-2 exponential: exp(x) ≈ 2^(x * log2(e))
+    // log2(e) = 1.4426950408... ≈ 0x3FB8AA3B
+    out.buf = ptx_push_str(out.buf, "    mul.f32 %r_cf_ftemp0, %r_cf_ftemp0, 0f3FB8AA3B;\n")
+    out.buf = ptx_push_str(out.buf, "    ex2.approx.f32 %r_cf_ftemp0, %r_cf_ftemp0;\n")
+    // 1 + exp(-z)
+    out.buf = ptx_push_str(out.buf, "    add.f32 %r_cf_ftemp0, %r_cf_ftemp0, 0f3F800000;\n")
+    // 1 / (1 + exp(-z))
+    out.buf = ptx_push_str(out.buf, "    rcp.approx.f32 ")
+    out.buf = ptx_push_str(out.buf, result_reg)
+    out.buf = ptx_push_str(out.buf, ", %r_cf_ftemp0;\n")
+    out
+}
+
+// Threshold: Y = 1 if X > θ, else 0
+fn cf_emit_threshold(
+    st: CfPtxState,
+    x_reg: string,
+    threshold_hex: string,
+    result_reg: string
+) -> CfPtxState with Mut, Panic, Div, Alloc {
+    var out = st
+
+    out.buf = ptx_push_str(out.buf, "    // Threshold model\n")
+    out.buf = ptx_push_str(out.buf, "    setp.gt.f32 %p_cf_temp0, ")
+    out.buf = ptx_push_str(out.buf, x_reg)
+    out.buf = ptx_push_str(out.buf, ", 0f")
+    out.buf = ptx_push_str(out.buf, threshold_hex)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out.buf = ptx_push_str(out.buf, "    selp.f32 ")
+    out.buf = ptx_push_str(out.buf, result_reg)
+    out.buf = ptx_push_str(out.buf, ", 0f3F800000, 0f00000000, %p_cf_temp0;\n")
+    out
+}
+
+// ── Complete Causal Inference Pipeline ───────────────────────────────
+
+// Full pipeline: init → lane assign → intervene → model → ITE → ATE
+fn cf_emit_full_pipeline(
+    st: CfPtxState,
+    treatment_reg: string,
+    treatment_value_hex: string,
+    outcome_reg: string
+) -> CfPtxState with Mut, Panic, Div, Alloc {
+    var out = st
+
+    // 1. Initialize factual world
+    out = cf_emit_init_factual(out)
+
+    // 2. Assign lanes
+    out = cf_emit_lane_assignment(out)
+
+    // 3. Intervention: do(treatment = value)
+    out = cf_emit_intervention(out, treatment_reg, treatment_value_hex)
+
+    // 4. ITE computation
+    out = cf_emit_ite(out, outcome_reg, "%r_ite")
+
+    // 5. ATE computation
+    out = cf_emit_ate(out, "%r_ite", "%r_ate")
+
+    // 6. Divergence tracking
+    if out.config.track_divergence {
+        out = cf_emit_divergence(out, outcome_reg, "%r_divergence")
+    }
+    out
+}

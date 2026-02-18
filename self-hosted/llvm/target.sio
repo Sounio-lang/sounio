@@ -1,0 +1,187 @@
+// self-hosted::llvm::target — Safe wrapper for LLVMTargetMachineRef and target init
+//
+// LlvmTargetMachine is a linear struct — must be disposed exactly once.
+// Provides target initialization, host detection, and code emission.
+
+// ============================================================================
+// LlvmTargetMachine — linear wrapper around LLVMTargetMachineRef
+// ============================================================================
+
+linear struct LlvmTargetMachine {
+    ptr: i64,
+}
+
+fn llvm_target_machine_dispose(tm: LlvmTargetMachine) -> () with IO {
+    let raw = tm.ptr
+    LLVMDisposeTargetMachine(raw)
+}
+
+fn llvm_target_machine_raw(tm: LlvmTargetMachine) -> (i64, LlvmTargetMachine) {
+    let raw = tm.ptr
+    (raw, LlvmTargetMachine { ptr: raw })
+}
+
+// ============================================================================
+// Target initialization — call these before creating a target machine
+// ============================================================================
+
+fn llvm_init_x86() -> () with IO {
+    LLVMInitializeX86TargetInfo()
+    LLVMInitializeX86Target()
+    LLVMInitializeX86TargetMC()
+    LLVMInitializeX86AsmPrinter()
+    LLVMInitializeX86AsmParser()
+}
+
+fn llvm_init_aarch64() -> () with IO {
+    LLVMInitializeAArch64TargetInfo()
+    LLVMInitializeAArch64Target()
+    LLVMInitializeAArch64TargetMC()
+    LLVMInitializeAArch64AsmPrinter()
+    LLVMInitializeAArch64AsmParser()
+}
+
+fn llvm_init_nvptx() -> () with IO {
+    LLVMInitializeNVPTXTargetInfo()
+    LLVMInitializeNVPTXTarget()
+    LLVMInitializeNVPTXTargetMC()
+    LLVMInitializeNVPTXAsmPrinter()
+}
+
+fn llvm_init_amdgpu() -> () with IO {
+    LLVMInitializeAMDGPUTargetInfo()
+    LLVMInitializeAMDGPUTarget()
+    LLVMInitializeAMDGPUTargetMC()
+    LLVMInitializeAMDGPUAsmPrinter()
+}
+
+fn llvm_init_all_targets() -> () with IO {
+    llvm_init_x86()
+    llvm_init_aarch64()
+    llvm_init_nvptx()
+    llvm_init_amdgpu()
+}
+
+// ============================================================================
+// Host detection
+// ============================================================================
+
+fn llvm_get_default_target_triple() -> *const i8 with IO {
+    LLVMGetDefaultTargetTriple()
+}
+
+fn llvm_get_host_cpu_name() -> *const i8 with IO {
+    LLVMGetHostCPUName()
+}
+
+fn llvm_get_host_cpu_features() -> *const i8 with IO {
+    LLVMGetHostCPUFeatures()
+}
+
+// ============================================================================
+// Target machine creation
+// ============================================================================
+
+// Look up a target by triple. Returns 0 on success, non-zero on failure.
+// On success, target_out is set to the LLVMTargetRef.
+fn llvm_get_target_from_triple(triple: *const i8, target_out: *const i64, error_msg: *const *const i8) -> i32 with IO {
+    LLVMGetTargetFromTriple(triple, target_out, error_msg)
+}
+
+// Create a target machine from a target ref.
+fn llvm_create_target_machine(
+    target: i64,
+    triple: *const i8,
+    cpu: *const i8,
+    features: *const i8,
+    opt_level: i32,
+    reloc: i32,
+    code_model: i32
+) -> LlvmTargetMachine with IO {
+    let tm = LLVMCreateTargetMachine(target, triple, cpu, features, opt_level, reloc, code_model)
+    LlvmTargetMachine { ptr: tm }
+}
+
+// ============================================================================
+// Convenience: create a host-native target machine
+// ============================================================================
+
+// Initialize the host target and create a target machine for it.
+// Returns (target_machine, error_code). error_code = 0 on success.
+fn llvm_create_host_target_machine(opt_level: i32) -> (LlvmTargetMachine, i32) with IO, Mut {
+    // Detect host triple
+    let triple = llvm_get_default_target_triple()
+    let cpu = llvm_get_host_cpu_name()
+    let features = llvm_get_host_cpu_features()
+
+    // Look up target
+    var target_ref: i64 = 0
+    var error_msg_ptr: *const i8 = 0 as *const i8
+    let result = llvm_get_target_from_triple(triple, &!target_ref, &!error_msg_ptr)
+
+    if result != 0 {
+        // Failed to find target
+        return (LlvmTargetMachine { ptr: 0 }, result)
+    }
+
+    let tm = llvm_create_target_machine(
+        target_ref,
+        triple,
+        cpu,
+        features,
+        opt_level,
+        LLVM_RELOC_PIC,
+        LLVM_CODE_MODEL_DEFAULT
+    )
+    (tm, 0)
+}
+
+// ============================================================================
+// Data layout from target machine
+// ============================================================================
+
+fn llvm_target_data_layout_string(tm: LlvmTargetMachine) -> (LlvmTargetMachine, *const i8) with IO {
+    let raw = tm.ptr
+    let td = LLVMCreateTargetDataLayout(raw)
+    let layout_str = LLVMCopyStringRepOfTargetData(td)
+    LLVMDisposeTargetData(td)
+    (LlvmTargetMachine { ptr: raw }, layout_str)
+}
+
+// ============================================================================
+// Pass builder options
+// ============================================================================
+
+fn llvm_create_pass_builder_options() -> i64 with IO {
+    LLVMCreatePassBuilderOptions()
+}
+
+fn llvm_dispose_pass_builder_options(opts: i64) -> () with IO {
+    LLVMDisposePassBuilderOptions(opts)
+}
+
+fn llvm_pass_builder_set_verify(opts: i64, val: i32) -> () with IO {
+    LLVMPassBuilderOptionsSetVerifyEach(opts, val)
+}
+
+fn llvm_pass_builder_set_debug(opts: i64, val: i32) -> () with IO {
+    LLVMPassBuilderOptionsSetDebugLogging(opts, val)
+}
+
+// ============================================================================
+// Optimization pass strings
+// ============================================================================
+
+// Returns the LLVM pass pipeline string for a given optimization level (0-3).
+fn llvm_opt_pipeline_string(level: i32) -> string {
+    if level == 0 { return "default<O0>" }
+    if level == 1 { return "default<O1>" }
+    if level == 2 { return "default<O2>" }
+    if level == 3 { return "default<O3>" }
+    "default<O2>"
+}
+
+fn llvm_size_opt_pipeline_string(prefer_size: bool) -> string {
+    if prefer_size { return "default<Oz>" }
+    "default<Os>"
+}

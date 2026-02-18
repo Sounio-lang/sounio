@@ -1,0 +1,684 @@
+// self-hosted::gpu::metal — Metal Shading Language (MSL) code generator
+//
+// Converts GpuKernelIr → MSL text (C++-like compute shaders).
+// Same buffer pattern as ptx.sio (MetalBuf = fixed-size byte array + length).
+//
+// MSL output format:
+//   #include <metal_stdlib>
+//   using namespace metal;
+//   kernel void kernel_name(
+//       device float* param_a [[buffer(0)]],
+//       device float* param_b [[buffer(1)]],
+//       uint tid [[thread_position_in_grid]]
+//   ) { ... }
+
+// ============================================================================
+// MetalBuf — text buffer (same pattern as PtxBuf)
+// ============================================================================
+
+struct MetalBuf {
+    data: [i8; 65536],
+    len: i64,
+}
+
+fn metal_buf_new() -> MetalBuf {
+    MetalBuf { data: [0; 65536], len: 0 }
+}
+
+fn metal_push_byte(buf: MetalBuf, b: i8) -> MetalBuf with Mut, Panic {
+    var out = buf
+    if out.len < 65536 {
+        out.data[out.len as usize] = b
+        out.len = out.len + 1
+    }
+    out
+}
+
+fn metal_push_str(buf: MetalBuf, s: string) -> MetalBuf with Mut, Panic, Div {
+    var out = buf
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        if out.len < 65536 {
+            out.data[out.len as usize] = str_char_at(s, i) as i8
+            out.len = out.len + 1
+        }
+        i = i + 1
+    }
+    out
+}
+
+fn metal_push_i64(buf: MetalBuf, n: i64) -> MetalBuf with Mut, Panic, Div {
+    metal_push_str(buf, i64_to_string(n))
+}
+
+fn metal_push_newline(buf: MetalBuf) -> MetalBuf with Mut, Panic {
+    metal_push_byte(buf, 10)  // '\n'
+}
+
+fn metal_push_indent(buf: MetalBuf, depth: i64) -> MetalBuf with Mut, Panic {
+    var out = buf
+    var i: i64 = 0
+    while i < depth {
+        out = metal_push_str(out, "    ")
+        i = i + 1
+    }
+    out
+}
+
+fn metal_to_string(buf: MetalBuf) -> string with Mut, Panic, Div, Alloc {
+    str_from_bytes(buf.data, buf.len)
+}
+
+// ============================================================================
+// Type mapping: GpuType → MSL type string
+// ============================================================================
+
+fn gpu_type_to_msl(ty: GpuType) -> string {
+    match ty {
+        GpuType::GpuU32 => "uint",
+        GpuType::GpuU64 => "ulong",
+        GpuType::GpuF32 => "float",
+        GpuType::GpuF64 => "double",
+        GpuType::GpuI32 => "int",
+        GpuType::GpuI64 => "long",
+        GpuType::GpuPtr => "device void*",
+    }
+}
+
+// MSL pointer type for kernel parameters
+fn gpu_type_to_msl_param(ty: GpuType) -> string {
+    match ty {
+        GpuType::GpuU32 => "device uint*",
+        GpuType::GpuU64 => "device ulong*",
+        GpuType::GpuF32 => "device float*",
+        GpuType::GpuF64 => "device double*",
+        GpuType::GpuI32 => "device int*",
+        GpuType::GpuI64 => "device long*",
+        GpuType::GpuPtr => "device void*",
+    }
+}
+
+// Memory space → MSL address space qualifier
+fn gpu_memspace_to_msl(space: GpuMemorySpace) -> string {
+    match space {
+        GpuMemorySpace::GpuMemGlobal => "device",
+        GpuMemorySpace::GpuMemShared => "threadgroup",
+        GpuMemorySpace::GpuMemConstant => "constant",
+        GpuMemorySpace::GpuMemLocal => "thread",
+    }
+}
+
+// ============================================================================
+// Header emission
+// ============================================================================
+
+fn metal_emit_header(buf: MetalBuf) -> MetalBuf with Mut, Panic, Div {
+    var out = buf
+    out = metal_push_str(out, "#include <metal_stdlib>\n")
+    out = metal_push_str(out, "using namespace metal;\n")
+    out = metal_push_newline(out)
+    out
+}
+
+// ============================================================================
+// Kernel signature emission
+// ============================================================================
+
+fn metal_emit_kernel_signature(buf: MetalBuf, kernel: GpuKernelIr) -> MetalBuf with Mut, Panic, Div {
+    var out = buf
+    out = metal_push_str(out, "kernel void ")
+    out = metal_push_str(out, name_to_string(kernel.kernel_name))
+    out = metal_push_str(out, "(\n")
+
+    // Emit buffer parameters
+    var pi: i64 = 0
+    while pi < kernel.param_count {
+        let param = kernel.params[pi as usize]
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, gpu_type_to_msl_param(param.ty))
+        out = metal_push_str(out, " ")
+        out = metal_push_str(out, name_to_string(param.name))
+        out = metal_push_str(out, " [[buffer(")
+        out = metal_push_i64(out, pi)
+        out = metal_push_str(out, ")]]")
+        if pi < kernel.param_count - 1 {
+            out = metal_push_str(out, ",\n")
+        } else {
+            out = metal_push_str(out, ",\n")
+        }
+        pi = pi + 1
+    }
+
+    // Thread position in grid
+    out = metal_push_str(out, "    uint tid [[thread_position_in_grid]],\n")
+    out = metal_push_str(out, "    uint bid [[threadgroup_position_in_grid]],\n")
+    out = metal_push_str(out, "    uint ntid [[threads_per_threadgroup]]\n")
+    out = metal_push_str(out, ") {\n")
+    out
+}
+
+// ============================================================================
+// Variable declarations
+// ============================================================================
+
+fn metal_emit_var_decls(buf: MetalBuf, kernel: GpuKernelIr) -> MetalBuf with Mut, Panic, Div {
+    var out = buf
+
+    // Declare registers based on max_reg counts
+    // u32 registers
+    if kernel.max_reg_u32 > 0 {
+        var i: i64 = 0
+        while i < kernel.max_reg_u32 {
+            out = metal_push_str(out, "    uint r")
+            out = metal_push_i64(out, i)
+            out = metal_push_str(out, ";\n")
+            i = i + 1
+        }
+    }
+
+    // u64 / pointer registers
+    if kernel.max_reg_u64 > 0 {
+        var i: i64 = 0
+        while i < kernel.max_reg_u64 {
+            out = metal_push_str(out, "    ulong rd")
+            out = metal_push_i64(out, i)
+            out = metal_push_str(out, ";\n")
+            i = i + 1
+        }
+    }
+
+    // f32 registers
+    if kernel.max_reg_f32 > 0 {
+        var i: i64 = 0
+        while i < kernel.max_reg_f32 {
+            out = metal_push_str(out, "    float f")
+            out = metal_push_i64(out, i)
+            out = metal_push_str(out, ";\n")
+            i = i + 1
+        }
+    }
+
+    // f64 registers
+    if kernel.max_reg_f64 > 0 {
+        var i: i64 = 0
+        while i < kernel.max_reg_f64 {
+            out = metal_push_str(out, "    double fd")
+            out = metal_push_i64(out, i)
+            out = metal_push_str(out, ";\n")
+            i = i + 1
+        }
+    }
+
+    // i32 registers
+    if kernel.max_reg_i32 > 0 {
+        var i: i64 = 0
+        while i < kernel.max_reg_i32 {
+            out = metal_push_str(out, "    int sr")
+            out = metal_push_i64(out, i)
+            out = metal_push_str(out, ";\n")
+            i = i + 1
+        }
+    }
+
+    // i64 registers
+    if kernel.max_reg_i64 > 0 {
+        var i: i64 = 0
+        while i < kernel.max_reg_i64 {
+            out = metal_push_str(out, "    long srd")
+            out = metal_push_i64(out, i)
+            out = metal_push_str(out, ";\n")
+            i = i + 1
+        }
+    }
+
+    // Predicate registers
+    if kernel.max_reg_pred > 0 {
+        var i: i64 = 0
+        while i < kernel.max_reg_pred {
+            out = metal_push_str(out, "    bool p")
+            out = metal_push_i64(out, i)
+            out = metal_push_str(out, ";\n")
+            i = i + 1
+        }
+    }
+
+    // Shared memory (threadgroup)
+    if kernel.shared_bytes > 0 {
+        out = metal_push_str(out, "    threadgroup float shared_mem[")
+        out = metal_push_i64(out, kernel.shared_bytes / 4)
+        out = metal_push_str(out, "];\n")
+    }
+
+    out = metal_push_newline(out)
+    out
+}
+
+// ============================================================================
+// MSL register name for a given register index and type
+// ============================================================================
+
+fn metal_reg_name(ty: GpuType, idx: i64) -> string with Mut, Panic, Div, Alloc {
+    match ty {
+        GpuType::GpuU32 => str_concat("r", i64_to_string(idx)),
+        GpuType::GpuU64 => str_concat("rd", i64_to_string(idx)),
+        GpuType::GpuF32 => str_concat("f", i64_to_string(idx)),
+        GpuType::GpuF64 => str_concat("fd", i64_to_string(idx)),
+        GpuType::GpuI32 => str_concat("sr", i64_to_string(idx)),
+        GpuType::GpuI64 => str_concat("srd", i64_to_string(idx)),
+        GpuType::GpuPtr => str_concat("rd", i64_to_string(idx)),
+    }
+}
+
+// ============================================================================
+// Lower operations → MSL statements
+// ============================================================================
+
+fn metal_lower_ops(buf: MetalBuf, kernel: GpuKernelIr) -> MetalBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    var i: i64 = 0
+
+    while i < kernel.op_count {
+        let op = kernel.ops[i as usize]
+        out = metal_lower_single_op(out, op, kernel)
+        i = i + 1
+    }
+
+    out
+}
+
+fn metal_lower_single_op(buf: MetalBuf, op: GpuOp, kernel: GpuKernelIr) -> MetalBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    let opc = op.opcode
+
+    // ---- GetTid ----
+    if opc == GpuOpcode::GpuGetTid {
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = tid;\n")
+        return out
+    }
+
+    // ---- GetBid ----
+    if opc == GpuOpcode::GpuGetBid {
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = bid;\n")
+        return out
+    }
+
+    // ---- GetNtid ----
+    if opc == GpuOpcode::GpuGetNtid {
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = ntid;\n")
+        return out
+    }
+
+    // ---- Add ----
+    if opc == GpuOpcode::GpuAdd {
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.lhs_reg))
+        out = metal_push_str(out, " + ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.rhs_reg))
+        out = metal_push_str(out, ";\n")
+        return out
+    }
+
+    // ---- Sub ----
+    if opc == GpuOpcode::GpuSub {
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.lhs_reg))
+        out = metal_push_str(out, " - ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.rhs_reg))
+        out = metal_push_str(out, ";\n")
+        return out
+    }
+
+    // ---- Mul ----
+    if opc == GpuOpcode::GpuMul {
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.lhs_reg))
+        out = metal_push_str(out, " * ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.rhs_reg))
+        out = metal_push_str(out, ";\n")
+        return out
+    }
+
+    // ---- Div ----
+    if opc == GpuOpcode::GpuDiv {
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.lhs_reg))
+        out = metal_push_str(out, " / ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.rhs_reg))
+        out = metal_push_str(out, ";\n")
+        return out
+    }
+
+    // ---- Fma ----
+    if opc == GpuOpcode::GpuFma {
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = fma(")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.lhs_reg))
+        out = metal_push_str(out, ", ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.rhs_reg))
+        out = metal_push_str(out, ", ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.src_reg))
+        out = metal_push_str(out, ");\n")
+        return out
+    }
+
+    // ---- MulImm ----
+    if opc == GpuOpcode::GpuMulImm {
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.src_reg))
+        out = metal_push_str(out, " * ")
+        out = metal_push_i64(out, op.rhs_imm)
+        out = metal_push_str(out, ";\n")
+        return out
+    }
+
+    // ---- AddImm ----
+    if opc == GpuOpcode::GpuAddImm {
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.src_reg))
+        out = metal_push_str(out, " + ")
+        out = metal_push_i64(out, op.rhs_imm)
+        out = metal_push_str(out, ";\n")
+        return out
+    }
+
+    // ---- Cvt ----
+    if opc == GpuOpcode::GpuCvt {
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.dst_ty, op.dst_reg))
+        out = metal_push_str(out, " = (")
+        out = metal_push_str(out, gpu_type_to_msl(op.dst_ty))
+        out = metal_push_str(out, ")")
+        out = metal_push_str(out, metal_reg_name(op.src_ty, op.src_reg))
+        out = metal_push_str(out, ";\n")
+        return out
+    }
+
+    // ---- LoadParam ----
+    if opc == GpuOpcode::GpuLoadParam {
+        let param = kernel.params[op.param_idx as usize]
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = (")
+        out = metal_push_str(out, gpu_type_to_msl(op.ty))
+        out = metal_push_str(out, ")(ulong)")
+        out = metal_push_str(out, name_to_string(param.name))
+        out = metal_push_str(out, ";\n")
+        return out
+    }
+
+    // ---- LoadGlobal ----
+    if opc == GpuOpcode::GpuLoadGlobal {
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = ((device ")
+        out = metal_push_str(out, gpu_type_to_msl(op.ty))
+        out = metal_push_str(out, "*)")
+        out = metal_push_str(out, metal_reg_name(GpuType::GpuPtr, op.addr_reg))
+        out = metal_push_str(out, ")[0];\n")
+        return out
+    }
+
+    // ---- StoreGlobal ----
+    if opc == GpuOpcode::GpuStoreGlobal {
+        out = metal_push_str(out, "    ((device ")
+        out = metal_push_str(out, gpu_type_to_msl(op.ty))
+        out = metal_push_str(out, "*)")
+        out = metal_push_str(out, metal_reg_name(GpuType::GpuPtr, op.addr_reg))
+        out = metal_push_str(out, ")[0] = ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.src_reg))
+        out = metal_push_str(out, ";\n")
+        return out
+    }
+
+    // ---- LoadShared ----
+    if opc == GpuOpcode::GpuLoadShared {
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = shared_mem[")
+        out = metal_push_i64(out, op.shared_addr / 4)
+        out = metal_push_str(out, "];\n")
+        return out
+    }
+
+    // ---- StoreShared ----
+    if opc == GpuOpcode::GpuStoreShared {
+        out = metal_push_str(out, "    shared_mem[")
+        out = metal_push_i64(out, op.shared_addr / 4)
+        out = metal_push_str(out, "] = ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.src_reg))
+        out = metal_push_str(out, ";\n")
+        return out
+    }
+
+    // ---- BarrierSync ----
+    if opc == GpuOpcode::GpuBarrierSync {
+        out = metal_push_str(out, "    threadgroup_barrier(mem_flags::mem_threadgroup);\n")
+        return out
+    }
+
+    // ---- Max ----
+    if opc == GpuOpcode::GpuMax {
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = max(")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.lhs_reg))
+        out = metal_push_str(out, ", ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.rhs_reg))
+        out = metal_push_str(out, ");\n")
+        return out
+    }
+
+    // ---- Min ----
+    if opc == GpuOpcode::GpuMin {
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = min(")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.lhs_reg))
+        out = metal_push_str(out, ", ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.rhs_reg))
+        out = metal_push_str(out, ");\n")
+        return out
+    }
+
+    // ---- AtomicAdd ----
+    if opc == GpuOpcode::GpuAtomicAdd {
+        out = metal_push_str(out, "    atomic_fetch_add_explicit((device atomic_uint*)")
+        out = metal_push_str(out, metal_reg_name(GpuType::GpuPtr, op.addr_reg))
+        out = metal_push_str(out, ", ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.src_reg))
+        out = metal_push_str(out, ", memory_order_relaxed);\n")
+        return out
+    }
+
+    // ---- Comparisons (SetpLt/Le/Eq/Ge/Gt/Ne) ----
+    if opc == GpuOpcode::GpuSetpLt {
+        out = metal_push_str(out, "    p")
+        out = metal_push_i64(out, op.dst_reg)
+        out = metal_push_str(out, " = ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.lhs_reg))
+        out = metal_push_str(out, " < ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.rhs_reg))
+        out = metal_push_str(out, ";\n")
+        return out
+    }
+    if opc == GpuOpcode::GpuSetpLe {
+        out = metal_push_str(out, "    p")
+        out = metal_push_i64(out, op.dst_reg)
+        out = metal_push_str(out, " = ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.lhs_reg))
+        out = metal_push_str(out, " <= ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.rhs_reg))
+        out = metal_push_str(out, ";\n")
+        return out
+    }
+    if opc == GpuOpcode::GpuSetpEq {
+        out = metal_push_str(out, "    p")
+        out = metal_push_i64(out, op.dst_reg)
+        out = metal_push_str(out, " = ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.lhs_reg))
+        out = metal_push_str(out, " == ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.rhs_reg))
+        out = metal_push_str(out, ";\n")
+        return out
+    }
+    if opc == GpuOpcode::GpuSetpGe {
+        out = metal_push_str(out, "    p")
+        out = metal_push_i64(out, op.dst_reg)
+        out = metal_push_str(out, " = ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.lhs_reg))
+        out = metal_push_str(out, " >= ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.rhs_reg))
+        out = metal_push_str(out, ";\n")
+        return out
+    }
+    if opc == GpuOpcode::GpuSetpGt {
+        out = metal_push_str(out, "    p")
+        out = metal_push_i64(out, op.dst_reg)
+        out = metal_push_str(out, " = ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.lhs_reg))
+        out = metal_push_str(out, " > ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.rhs_reg))
+        out = metal_push_str(out, ";\n")
+        return out
+    }
+    if opc == GpuOpcode::GpuSetpNe {
+        out = metal_push_str(out, "    p")
+        out = metal_push_i64(out, op.dst_reg)
+        out = metal_push_str(out, " = ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.lhs_reg))
+        out = metal_push_str(out, " != ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.rhs_reg))
+        out = metal_push_str(out, ";\n")
+        return out
+    }
+
+    // ---- Selp (predicate select) ----
+    if opc == GpuOpcode::GpuSelp {
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = p")
+        out = metal_push_i64(out, op.src_reg)
+        out = metal_push_str(out, " ? ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.lhs_reg))
+        out = metal_push_str(out, " : ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.rhs_reg))
+        out = metal_push_str(out, ";\n")
+        return out
+    }
+
+    // ---- Math intrinsics ----
+    if opc == GpuOpcode::GpuSqrt {
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = sqrt(")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.src_reg))
+        out = metal_push_str(out, ");\n")
+        return out
+    }
+    if opc == GpuOpcode::GpuRsqrt {
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = rsqrt(")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.src_reg))
+        out = metal_push_str(out, ");\n")
+        return out
+    }
+    if opc == GpuOpcode::GpuExp2 {
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = exp2(")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.src_reg))
+        out = metal_push_str(out, ");\n")
+        return out
+    }
+    if opc == GpuOpcode::GpuLg2 {
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = log2(")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.src_reg))
+        out = metal_push_str(out, ");\n")
+        return out
+    }
+    if opc == GpuOpcode::GpuSin {
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = sin(")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.src_reg))
+        out = metal_push_str(out, ");\n")
+        return out
+    }
+    if opc == GpuOpcode::GpuCos {
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = cos(")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.src_reg))
+        out = metal_push_str(out, ");\n")
+        return out
+    }
+    if opc == GpuOpcode::GpuAbs {
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = abs(")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.src_reg))
+        out = metal_push_str(out, ");\n")
+        return out
+    }
+    if opc == GpuOpcode::GpuRcp {
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = 1.0 / ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.src_reg))
+        out = metal_push_str(out, ";\n")
+        return out
+    }
+
+    // ---- Ret ----
+    if opc == GpuOpcode::GpuRet {
+        out = metal_push_str(out, "    return;\n")
+        return out
+    }
+
+    // ---- Exit ----
+    if opc == GpuOpcode::GpuExit {
+        out = metal_push_str(out, "    return;\n")
+        return out
+    }
+
+    // Default: comment for unhandled opcode
+    out = metal_push_str(out, "    // unhandled opcode\n")
+    out
+}
+
+// ============================================================================
+// Main entry: GpuKernelIr → MetalBuf
+// ============================================================================
+
+fn gpu_lower_to_metal(kernel: GpuKernelIr) -> MetalBuf with Mut, Panic, Div, Alloc {
+    var buf = metal_buf_new()
+    buf = metal_emit_header(buf)
+    buf = metal_emit_kernel_signature(buf, kernel)
+    buf = metal_emit_var_decls(buf, kernel)
+    buf = metal_lower_ops(buf, kernel)
+    buf = metal_push_str(buf, "}\n")
+    buf
+}
