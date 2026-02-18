@@ -241,9 +241,12 @@ fn read_source_file(path: string) -> LexerState with IO, Mut, Div, Panic {
     let data = read_file(path)
     let size = file_size(path)
     var buf: [i8; 1048576] = [0; 1048576]
+    // Convert `buf` to an exclusive reference-backed value so repeated indexed
+    // writes mutate in place instead of cloning the sparse backing map.
+    let buf_ref = &!buf
     var i: i64 = 0
     while i < size && i < 1048576 {
-        buf[i as usize] = data[i as usize]
+        buf_ref[i as usize] = data[i as usize]
         i = i + 1
     }
     lex(buf, size, 0)
@@ -339,6 +342,16 @@ fn write_bytes_to_file(path: string, data: [i8; 4194304], len: i64) -> bool with
     result == 0
 }
 
+fn write_small_bytes_to_file(path: string, data: [i8; 131072], len: i64) -> bool with IO, Mut, Div, Panic {
+    var wide: [i8; 4194304] = [0; 4194304]
+    var i: i64 = 0
+    while i < len && i < 131072 {
+        wide[i as usize] = data[i as usize]
+        i = i + 1
+    }
+    write_bytes_to_file(path, wide, len)
+}
+
 // Write ELF binary to disk
 fn write_elf_to_file(path: string, elf: Elf64Binary) -> bool with IO, Mut {
     write_bytes_to_file(path, elf.bytes, elf.len)
@@ -348,9 +361,15 @@ fn write_elf_to_file(path: string, elf: Elf64Binary) -> bool with IO, Mut {
 // COMPILE PIPELINE (--compile mode)
 // ============================================================================
 
-fn run_compile_pipeline(path: string) -> i32 with IO, Mut, Div, Panic, Alloc {
+fn run_compile_pipeline(path: string, fast_skip_blocks: bool) -> i32 with IO, Mut, Div, Panic, Alloc {
     let state = read_source_file(path)
+    if fast_skip_blocks {
+        parser_set_fast_skip_blocks(true)
+    }
     let prog = parse_program_preloaded(state.token_count)
+    if fast_skip_blocks {
+        parser_set_fast_skip_blocks(false)
+    }
     let ic = count_items(prog)
 
     print("Items: ")
@@ -394,9 +413,15 @@ fn run_compile_pipeline(path: string) -> i32 with IO, Mut, Div, Panic, Alloc {
     0
 }
 
-fn run_compile_pipeline_with_output(path: string, output_path: string) -> i32 with IO, Mut, Div, Panic, Alloc {
+fn run_compile_pipeline_with_output(path: string, output_path: string, fast_skip_blocks: bool) -> i32 with IO, Mut, Div, Panic, Alloc {
     let state = read_source_file(path)
+    if fast_skip_blocks {
+        parser_set_fast_skip_blocks(true)
+    }
     let prog = parse_program_preloaded(state.token_count)
+    if fast_skip_blocks {
+        parser_set_fast_skip_blocks(false)
+    }
     let ic = count_items(prog)
 
     print("Items: ")
@@ -434,7 +459,7 @@ fn run_compile_pipeline_with_output(path: string, output_path: string) -> i32 wi
     let serialized = serialize_ir_module(lower_result.module)
     let bytecode_len = serialized.1
 
-    let write_ok = write_bytes_to_file(output_path, serialized.0, bytecode_len)
+    let write_ok = write_small_bytes_to_file(output_path, serialized.0, bytecode_len)
     if !write_ok {
         print("Error: Failed to write bytecode artifact to ")
         print(output_path)
@@ -455,9 +480,15 @@ fn run_compile_pipeline_with_output(path: string, output_path: string) -> i32 wi
 // COMPILE PIPELINE (NATIVE) — Phase 6: Native ELF Backend
 // ============================================================================
 
-fn run_compile_pipeline_native(path: string, output_path: string) -> i32 with IO, Mut, Div, Panic, Alloc {
+fn run_compile_pipeline_native(path: string, output_path: string, fast_skip_blocks: bool) -> i32 with IO, Mut, Div, Panic, Alloc {
     let state = read_source_file(path)
+    if fast_skip_blocks {
+        parser_set_fast_skip_blocks(true)
+    }
     let prog = parse_program_preloaded(state.token_count)
+    if fast_skip_blocks {
+        parser_set_fast_skip_blocks(false)
+    }
     let ic = count_items(prog)
 
     print("Items: ")
@@ -857,7 +888,7 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
             return 1
         }
         print("[Compiling]\n")
-        let code = run_compile_pipeline(get_arg(1))
+        let code = run_compile_pipeline(get_arg(1), false)
         if code == 0 {
             print("\n[Running via Poseidon VM - output above]\n")
         }
@@ -885,13 +916,14 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
 
     if str_eq(cmd, "compile") {
         if argc < 2 {
-            print("Usage: sounio compile [--backend=native] [-o output] <path.sio>\n")
+            print("Usage: sounio compile [--backend=native] [--fast-skip-blocks] [-o output] <path.sio>\n")
             return 1
         }
 
         // Parse flags
         var use_native: bool = false
         var use_multimodule: bool = false
+        var fast_skip_blocks: bool = false
         var output_path: string = "a.out"
         var output_explicit: bool = false
         var source_path: string = ""
@@ -902,6 +934,9 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
 
             if str_eq(arg, "--backend=native") {
                 use_native = true
+                arg_idx = arg_idx + 1
+            } else if str_eq(arg, "--fast-skip-blocks") {
+                fast_skip_blocks = true
                 arg_idx = arg_idx + 1
             } else if str_eq(arg, "--multimodule") {
                 use_multimodule = true
@@ -946,12 +981,12 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
             }
         }
         if use_native {
-            return run_compile_pipeline_native(source_path, output_path)
+            return run_compile_pipeline_native(source_path, output_path, fast_skip_blocks)
         } else {
             if output_explicit {
-                return run_compile_pipeline_with_output(source_path, output_path)
+                return run_compile_pipeline_with_output(source_path, output_path, fast_skip_blocks)
             }
-            return run_compile_pipeline(source_path)
+            return run_compile_pipeline(source_path, fast_skip_blocks)
         }
     }
 

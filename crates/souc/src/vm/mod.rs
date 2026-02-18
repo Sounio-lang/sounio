@@ -36,6 +36,17 @@ pub struct CallFrame {
     pub locals: Vec<Value>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FastCallKind {
+    CursorIsEof,
+    IsWhitespace,
+    IsWhitespaceOrNewline,
+    IsDigit,
+    IsAlpha,
+    IsIdentStart,
+    IsIdentContinue,
+}
+
 /// The bytecode virtual machine
 pub struct BytecodeVM {
     pub stack: Vec<Value>,
@@ -51,9 +62,630 @@ pub struct BytecodeVM {
     user_args: Vec<String>,
     progress_mode: bool,
     ffi_call_counter: u64,
+    fast_call_kinds: HashMap<usize, Option<FastCallKind>>,
 }
 
 impl BytecodeVM {
+    fn should_take_local_for_storeback(
+        bytecode: &[Bytecode],
+        ip: usize,
+        slot: usize,
+    ) -> bool {
+        let mut saw_store_index = false;
+        let hi = (ip + 33).min(bytecode.len());
+        let mut j = ip + 1;
+        while j < hi {
+            match &bytecode[j] {
+                Bytecode::Store(s) if *s == slot => return saw_store_index,
+                Bytecode::Store(_) => {}
+                Bytecode::StoreIndex => saw_store_index = true,
+                Bytecode::Load(s) if *s == slot => return false,
+                Bytecode::Call(_)
+                | Bytecode::CallExtern(_, _)
+                | Bytecode::Jump(_)
+                | Bytecode::JumpIf(_)
+                | Bytecode::Return => return false,
+                _ => {}
+            }
+            j += 1;
+        }
+        false
+    }
+
+    fn should_promote_local_for_index_read(bytecode: &[Bytecode], ip: usize) -> bool {
+        if ip + 2 >= bytecode.len() {
+            return false;
+        }
+        match (&bytecode[ip + 1], &bytecode[ip + 2]) {
+            (Bytecode::Load(_), Bytecode::IndexOp) => true,
+            (Bytecode::Load(_), Bytecode::ToInt) => {
+                ip + 3 < bytecode.len() && matches!(bytecode[ip + 3], Bytecode::IndexOp)
+            }
+            _ => false,
+        }
+    }
+
+    fn read_index_value(value: &Value, idx: usize) -> VmResult<Value> {
+        match value {
+            Value::List(items) => items.get(idx).cloned().ok_or_else(|| {
+                VmError::MemoryError(format!(
+                    "Index {} out of bounds for list of length {}",
+                    idx,
+                    items.len()
+                ))
+            }),
+            Value::SparseList {
+                len,
+                default,
+                overrides,
+            } => {
+                if idx < *len {
+                    Ok(overrides
+                        .get(&idx)
+                        .cloned()
+                        .unwrap_or_else(|| (**default).clone()))
+                } else {
+                    Err(VmError::MemoryError(format!(
+                        "Index {} out of bounds for list of length {}",
+                        idx, len
+                    )))
+                }
+            }
+            Value::String(s) => {
+                if s.is_ascii() {
+                    s.as_bytes()
+                        .get(idx)
+                        .map(|b| Value::Int((*b as i8) as i64))
+                        .ok_or_else(|| {
+                            VmError::MemoryError(format!(
+                                "Index {} out of bounds for string of length {}",
+                                idx,
+                                s.len()
+                            ))
+                        })
+                } else {
+                    s.chars()
+                        .nth(idx)
+                        .map(|c| Value::Int(c as i64))
+                        .ok_or_else(|| {
+                            VmError::MemoryError(format!(
+                                "Index {} out of bounds for string of length {}",
+                                idx,
+                                s.len()
+                            ))
+                        })
+                }
+            }
+            Value::Ref(rc) => {
+                let inner = rc.lock().unwrap();
+                Self::read_index_value(&inner, idx)
+            }
+            _ => Err(VmError::TypeMismatch(
+                "IndexOp requires list/string and integer".to_string(),
+            )),
+        }
+    }
+
+    fn write_index_value(target: &mut Value, idx: usize, value: Value) -> VmResult<()> {
+        match target {
+            Value::List(items) => {
+                if idx < items.len() {
+                    items[idx] = value;
+                    Ok(())
+                } else {
+                    Err(VmError::MemoryError(format!(
+                        "Index {} out of bounds for list of length {}",
+                        idx,
+                        items.len()
+                    )))
+                }
+            }
+            Value::SparseList {
+                len,
+                default,
+                overrides,
+            } => {
+                if idx < *len {
+                    if value == **default {
+                        overrides.remove(&idx);
+                    } else {
+                        overrides.insert(idx, value);
+                    }
+                    Ok(())
+                } else {
+                    Err(VmError::MemoryError(format!(
+                        "Index {} out of bounds for list of length {}",
+                        idx, len
+                    )))
+                }
+            }
+            Value::Ref(rc) => {
+                let mut inner = rc.lock().unwrap();
+                Self::write_index_value(&mut inner, idx, value)
+            }
+            _ => Err(VmError::TypeMismatch(
+                "StoreIndex requires list and integer index".to_string(),
+            )),
+        }
+    }
+
+    fn try_fuse_local_copy_loop(&mut self, bytecode: &[Bytecode], ip: usize) -> VmResult<Option<usize>> {
+        let at = |off: usize| bytecode.get(ip + off);
+        let (
+            idx_slot,
+            limit_slot,
+            cap,
+            end_ip,
+            dst_slot,
+            src_slot,
+        ) = match (
+            at(0),
+            at(1),
+            at(2),
+            at(3),
+            at(4),
+            at(5),
+            at(6),
+            at(7),
+            at(8),
+            at(9),
+            at(10),
+            at(11),
+            at(12),
+            at(13),
+            at(14),
+            at(15),
+            at(16),
+            at(17),
+            at(18),
+            at(19),
+            at(20),
+            at(21),
+            at(22),
+            at(23),
+            at(24),
+            at(25),
+        ) {
+            (
+                Some(Bytecode::Load(idx0)),
+                Some(Bytecode::Load(limit)),
+                Some(Bytecode::Lt),
+                Some(Bytecode::Dup),
+                Some(Bytecode::JumpIf(j_true)),
+                Some(Bytecode::Jump(j_false)),
+                Some(Bytecode::Pop),
+                Some(Bytecode::Load(idx1)),
+                Some(Bytecode::Push(Value::Int(cap))),
+                Some(Bytecode::Lt),
+                Some(Bytecode::Not),
+                Some(Bytecode::JumpIf(end)),
+                Some(Bytecode::Load(dst0)),
+                Some(Bytecode::Load(idx2)),
+                Some(Bytecode::ToInt),
+                Some(Bytecode::Load(src)),
+                Some(Bytecode::Load(idx3)),
+                Some(Bytecode::ToInt),
+                Some(Bytecode::IndexOp),
+                Some(Bytecode::StoreIndex),
+                Some(Bytecode::Store(dst1)),
+                Some(Bytecode::Load(idx4)),
+                Some(Bytecode::Push(Value::Int(1))),
+                Some(Bytecode::Add),
+                Some(Bytecode::Store(idx5)),
+                Some(Bytecode::Jump(loop_back)),
+            ) if *idx0 == *idx1
+                && *idx0 == *idx2
+                && *idx0 == *idx3
+                && *idx0 == *idx4
+                && *idx0 == *idx5
+                && *dst0 == *dst1
+                && *j_true == ip + 6
+                && *j_false == ip + 10
+                && *loop_back == ip =>
+            {
+                (*idx0, *limit, *cap, *end, *dst0, *src)
+            }
+            _ => return Ok(None),
+        };
+
+        if cap < 0 {
+            return Ok(None);
+        }
+
+        let i = match self.locals.get(idx_slot) {
+            Some(Value::Int(v)) => *v,
+            _ => return Ok(None),
+        };
+        let limit_raw = match self.locals.get(limit_slot) {
+            Some(Value::Int(v)) => *v,
+            _ => return Ok(None),
+        };
+
+        if i < 0 || limit_raw < 0 {
+            return Ok(None);
+        }
+
+        let upper = std::cmp::min(limit_raw, cap);
+        if i >= upper {
+            return Ok(Some(end_ip));
+        }
+
+        let src_value = self
+            .locals
+            .get(src_slot)
+            .cloned()
+            .ok_or_else(|| VmError::TypeMismatch("StoreIndex requires list and integer index".to_string()))?;
+
+        {
+            let dst_value = self
+                .locals
+                .get_mut(dst_slot)
+                .ok_or_else(|| VmError::TypeMismatch("StoreIndex requires list and integer index".to_string()))?;
+
+            let mut idx = i as usize;
+            let stop = upper as usize;
+            while idx < stop {
+                let copied = Self::read_index_value(&src_value, idx)?;
+                Self::write_index_value(dst_value, idx, copied)?;
+                idx += 1;
+            }
+        }
+
+        self.locals[idx_slot] = Value::Int(upper);
+        Ok(Some(end_ip))
+    }
+
+    fn try_fuse_global_copy_loop(&mut self, bytecode: &[Bytecode], ip: usize) -> VmResult<Option<usize>> {
+        let at = |off: usize| bytecode.get(ip + off);
+        let (idx_slot, limit_slot, end_ip, dst_name, src_slot) = match (
+            at(0),
+            at(1),
+            at(2),
+            at(3),
+            at(4),
+            at(5),
+            at(6),
+            at(7),
+            at(8),
+            at(9),
+            at(10),
+            at(11),
+            at(12),
+            at(13),
+            at(14),
+            at(15),
+            at(16),
+            at(17),
+            at(18),
+            at(19),
+            at(20),
+            at(21),
+            at(22),
+        ) {
+            (
+                Some(Bytecode::Load(idx0)),
+                Some(Bytecode::Load(limit)),
+                Some(Bytecode::Lt),
+                Some(Bytecode::Not),
+                Some(Bytecode::JumpIf(end)),
+                Some(Bytecode::Push(Value::String(dst0))),
+                Some(Bytecode::CallExtern(get_name, 1)),
+                Some(Bytecode::Load(idx1)),
+                Some(Bytecode::ToInt),
+                Some(Bytecode::Load(src)),
+                Some(Bytecode::Load(idx2)),
+                Some(Bytecode::ToInt),
+                Some(Bytecode::IndexOp),
+                Some(Bytecode::StoreIndex),
+                Some(Bytecode::Push(Value::String(dst1))),
+                Some(Bytecode::Swap),
+                Some(Bytecode::CallExtern(set_name, 2)),
+                Some(Bytecode::Pop),
+                Some(Bytecode::Load(idx3)),
+                Some(Bytecode::Push(Value::Int(1))),
+                Some(Bytecode::Add),
+                Some(Bytecode::Store(idx4)),
+                Some(Bytecode::Jump(loop_back)),
+            ) if *idx0 == *idx1
+                && *idx0 == *idx2
+                && *idx0 == *idx3
+                && *idx0 == *idx4
+                && dst0 == dst1
+                && get_name == "__sounio_get_global"
+                && set_name == "__sounio_set_global"
+                && *loop_back == ip =>
+            {
+                (*idx0, *limit, *end, dst0.clone(), *src)
+            }
+            _ => return Ok(None),
+        };
+
+        let i = match self.locals.get(idx_slot) {
+            Some(Value::Int(v)) => *v,
+            _ => return Ok(None),
+        };
+        let limit = match self.locals.get(limit_slot) {
+            Some(Value::Int(v)) => *v,
+            _ => return Ok(None),
+        };
+        if i < 0 || limit < 0 {
+            return Ok(None);
+        }
+        if i >= limit {
+            return Ok(Some(end_ip));
+        }
+
+        let src_value = self
+            .locals
+            .get(src_slot)
+            .cloned()
+            .ok_or_else(|| VmError::TypeMismatch("StoreIndex requires list and integer index".to_string()))?;
+
+        let dst_value = self
+            .globals
+            .get_mut(&dst_name)
+            .ok_or_else(|| VmError::TypeMismatch("StoreIndex requires list and integer index".to_string()))?;
+
+        let mut idx = i as usize;
+        let stop = limit as usize;
+        while idx < stop {
+            let copied = Self::read_index_value(&src_value, idx)?;
+            Self::write_index_value(dst_value, idx, copied)?;
+            idx += 1;
+        }
+
+        self.locals[idx_slot] = Value::Int(limit);
+        Ok(Some(end_ip))
+    }
+
+    fn try_fuse_copy_loops(&mut self, bytecode: &[Bytecode], ip: usize) -> VmResult<Option<usize>> {
+        if let Some(next_ip) = self.try_fuse_local_copy_loop(bytecode, ip)? {
+            return Ok(Some(next_ip));
+        }
+        self.try_fuse_global_copy_loop(bytecode, ip)
+    }
+
+    fn is_whitespace_byte(ch: i64) -> bool {
+        ch == 32 || ch == 9 || ch == 13
+    }
+
+    fn is_whitespace_or_newline_byte(ch: i64) -> bool {
+        Self::is_whitespace_byte(ch) || ch == 10
+    }
+
+    fn is_digit_byte(ch: i64) -> bool {
+        ch >= 48 && ch <= 57
+    }
+
+    fn is_alpha_byte(ch: i64) -> bool {
+        (ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122)
+    }
+
+    fn cursor_field_i64(fields: &HashMap<String, Value>, name: &str) -> VmResult<i64> {
+        match fields.get(name) {
+            Some(Value::Int(v)) => Ok(*v),
+            Some(other) => Err(VmError::TypeMismatch(format!(
+                "cursor field '{}' expected int, got {:?}",
+                name, other
+            ))),
+            None => Err(VmError::TypeMismatch(format!(
+                "cursor field '{}' missing",
+                name
+            ))),
+        }
+    }
+
+    fn cursor_is_eof_value(value: &Value) -> VmResult<bool> {
+        match value {
+            Value::Struct(fields) => {
+                let pos = Self::cursor_field_i64(fields, "pos")?;
+                let source_len = Self::cursor_field_i64(fields, "source_len")?;
+                Ok(pos >= source_len)
+            }
+            Value::Ref(rc) => {
+                let inner = rc.lock().unwrap();
+                Self::cursor_is_eof_value(&inner)
+            }
+            other => Err(VmError::TypeMismatch(format!(
+                "cursor expected struct/ref, got {:?}",
+                other
+            ))),
+        }
+    }
+
+    fn classify_fast_call_kind(bytecode: &[Bytecode], fn_id: usize) -> Option<FastCallKind> {
+        let at = |off: usize| bytecode.get(fn_id + off);
+
+        if matches!(at(0), Some(Bytecode::Store(0)))
+            && matches!(at(1), Some(Bytecode::Load(0)))
+            && matches!(at(2), Some(Bytecode::GetField(name)) if name == "pos")
+            && matches!(at(3), Some(Bytecode::Load(0)))
+            && matches!(at(4), Some(Bytecode::GetField(name)) if name == "source_len")
+            && matches!(at(5), Some(Bytecode::Ge))
+            && matches!(at(6), Some(Bytecode::Return))
+        {
+            return Some(FastCallKind::CursorIsEof);
+        }
+
+        if matches!(at(0), Some(Bytecode::Store(0)))
+            && matches!(at(1), Some(Bytecode::Load(0)))
+            && matches!(at(2), Some(Bytecode::Push(Value::Int(32))))
+            && matches!(at(3), Some(Bytecode::Eq))
+            && matches!(at(4), Some(Bytecode::Dup))
+            && matches!(at(5), Some(Bytecode::JumpIf(_)))
+            && matches!(at(6), Some(Bytecode::Pop))
+            && matches!(at(7), Some(Bytecode::Load(0)))
+            && matches!(at(8), Some(Bytecode::Push(Value::Int(9))))
+            && matches!(at(9), Some(Bytecode::Eq))
+            && matches!(at(10), Some(Bytecode::Dup))
+            && matches!(at(11), Some(Bytecode::JumpIf(_)))
+            && matches!(at(12), Some(Bytecode::Pop))
+            && matches!(at(13), Some(Bytecode::Load(0)))
+            && matches!(at(14), Some(Bytecode::Push(Value::Int(13))))
+            && matches!(at(15), Some(Bytecode::Eq))
+            && matches!(at(16), Some(Bytecode::Return))
+        {
+            return Some(FastCallKind::IsWhitespace);
+        }
+
+        if matches!(at(0), Some(Bytecode::Store(0)))
+            && matches!(at(1), Some(Bytecode::Load(0)))
+            && matches!(at(2), Some(Bytecode::Push(Value::Int(32))))
+            && matches!(at(3), Some(Bytecode::Eq))
+            && matches!(at(4), Some(Bytecode::Dup))
+            && matches!(at(5), Some(Bytecode::JumpIf(_)))
+            && matches!(at(6), Some(Bytecode::Pop))
+            && matches!(at(7), Some(Bytecode::Load(0)))
+            && matches!(at(8), Some(Bytecode::Push(Value::Int(9))))
+            && matches!(at(9), Some(Bytecode::Eq))
+            && matches!(at(10), Some(Bytecode::Dup))
+            && matches!(at(11), Some(Bytecode::JumpIf(_)))
+            && matches!(at(12), Some(Bytecode::Pop))
+            && matches!(at(13), Some(Bytecode::Load(0)))
+            && matches!(at(14), Some(Bytecode::Push(Value::Int(13))))
+            && matches!(at(15), Some(Bytecode::Eq))
+            && matches!(at(16), Some(Bytecode::Dup))
+            && matches!(at(17), Some(Bytecode::JumpIf(_)))
+            && matches!(at(18), Some(Bytecode::Pop))
+            && matches!(at(19), Some(Bytecode::Load(0)))
+            && matches!(at(20), Some(Bytecode::Push(Value::Int(10))))
+            && matches!(at(21), Some(Bytecode::Eq))
+            && matches!(at(22), Some(Bytecode::Return))
+        {
+            return Some(FastCallKind::IsWhitespaceOrNewline);
+        }
+
+        if matches!(at(0), Some(Bytecode::Store(0)))
+            && matches!(at(1), Some(Bytecode::Load(0)))
+            && matches!(at(2), Some(Bytecode::Push(Value::Int(48))))
+            && matches!(at(3), Some(Bytecode::Ge))
+            && matches!(at(4), Some(Bytecode::Dup))
+            && matches!(at(5), Some(Bytecode::JumpIf(_)))
+            && matches!(at(6), Some(Bytecode::Jump(_)))
+            && matches!(at(7), Some(Bytecode::Pop))
+            && matches!(at(8), Some(Bytecode::Load(0)))
+            && matches!(at(9), Some(Bytecode::Push(Value::Int(57))))
+            && matches!(at(10), Some(Bytecode::Le))
+            && matches!(at(11), Some(Bytecode::Return))
+        {
+            return Some(FastCallKind::IsDigit);
+        }
+
+        if matches!(at(0), Some(Bytecode::Store(0)))
+            && matches!(at(1), Some(Bytecode::Load(0)))
+            && matches!(at(2), Some(Bytecode::Push(Value::Int(65))))
+            && matches!(at(3), Some(Bytecode::Ge))
+            && matches!(at(4), Some(Bytecode::Dup))
+            && matches!(at(5), Some(Bytecode::JumpIf(_)))
+            && matches!(at(6), Some(Bytecode::Jump(_)))
+            && matches!(at(7), Some(Bytecode::Pop))
+            && matches!(at(8), Some(Bytecode::Load(0)))
+            && matches!(at(9), Some(Bytecode::Push(Value::Int(90))))
+            && matches!(at(10), Some(Bytecode::Le))
+            && matches!(at(11), Some(Bytecode::Dup))
+            && matches!(at(12), Some(Bytecode::JumpIf(_)))
+            && matches!(at(13), Some(Bytecode::Pop))
+            && matches!(at(14), Some(Bytecode::Load(0)))
+            && matches!(at(15), Some(Bytecode::Push(Value::Int(97))))
+            && matches!(at(16), Some(Bytecode::Ge))
+            && matches!(at(17), Some(Bytecode::Dup))
+            && matches!(at(18), Some(Bytecode::JumpIf(_)))
+            && matches!(at(19), Some(Bytecode::Jump(_)))
+            && matches!(at(20), Some(Bytecode::Pop))
+            && matches!(at(21), Some(Bytecode::Load(0)))
+            && matches!(at(22), Some(Bytecode::Push(Value::Int(122))))
+            && matches!(at(23), Some(Bytecode::Le))
+            && matches!(at(24), Some(Bytecode::Return))
+        {
+            return Some(FastCallKind::IsAlpha);
+        }
+
+        if matches!(at(0), Some(Bytecode::Store(0)))
+            && matches!(at(1), Some(Bytecode::Load(0)))
+            && matches!(at(2), Some(Bytecode::Call(_)))
+            && matches!(at(3), Some(Bytecode::Dup))
+            && matches!(at(4), Some(Bytecode::JumpIf(_)))
+            && matches!(at(5), Some(Bytecode::Pop))
+            && matches!(at(6), Some(Bytecode::Load(0)))
+            && matches!(at(7), Some(Bytecode::Push(Value::Int(95))))
+            && matches!(at(8), Some(Bytecode::Eq))
+            && matches!(at(9), Some(Bytecode::Return))
+        {
+            return Some(FastCallKind::IsIdentStart);
+        }
+
+        if matches!(at(0), Some(Bytecode::Store(0)))
+            && matches!(at(1), Some(Bytecode::Load(0)))
+            && matches!(at(2), Some(Bytecode::Call(_)))
+            && matches!(at(3), Some(Bytecode::Dup))
+            && matches!(at(4), Some(Bytecode::JumpIf(_)))
+            && matches!(at(5), Some(Bytecode::Pop))
+            && matches!(at(6), Some(Bytecode::Load(0)))
+            && matches!(at(7), Some(Bytecode::Call(_)))
+            && matches!(at(8), Some(Bytecode::Dup))
+            && matches!(at(9), Some(Bytecode::JumpIf(_)))
+            && matches!(at(10), Some(Bytecode::Pop))
+            && matches!(at(11), Some(Bytecode::Load(0)))
+            && matches!(at(12), Some(Bytecode::Push(Value::Int(95))))
+            && matches!(at(13), Some(Bytecode::Eq))
+            && matches!(at(14), Some(Bytecode::Return))
+        {
+            return Some(FastCallKind::IsIdentContinue);
+        }
+
+        None
+    }
+
+    fn resolve_fast_call_kind(&mut self, bytecode: &[Bytecode], fn_id: usize) -> Option<FastCallKind> {
+        if let Some(cached) = self.fast_call_kinds.get(&fn_id) {
+            return *cached;
+        }
+        let kind = Self::classify_fast_call_kind(bytecode, fn_id);
+        self.fast_call_kinds.insert(fn_id, kind);
+        kind
+    }
+
+    fn execute_fast_call(&mut self, kind: FastCallKind) -> VmResult<Value> {
+        match kind {
+            FastCallKind::CursorIsEof => {
+                let arg = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                Ok(Value::Bool(Self::cursor_is_eof_value(&arg)?))
+            }
+            FastCallKind::IsWhitespace => {
+                let arg = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                let ch = if let Value::Int(i) = arg { i } else { return Ok(Value::Bool(false)); };
+                Ok(Value::Bool(Self::is_whitespace_byte(ch)))
+            }
+            FastCallKind::IsWhitespaceOrNewline => {
+                let arg = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                let ch = if let Value::Int(i) = arg { i } else { return Ok(Value::Bool(false)); };
+                Ok(Value::Bool(Self::is_whitespace_or_newline_byte(ch)))
+            }
+            FastCallKind::IsDigit => {
+                let arg = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                let ch = if let Value::Int(i) = arg { i } else { return Ok(Value::Bool(false)); };
+                Ok(Value::Bool(Self::is_digit_byte(ch)))
+            }
+            FastCallKind::IsAlpha => {
+                let arg = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                let ch = if let Value::Int(i) = arg { i } else { return Ok(Value::Bool(false)); };
+                Ok(Value::Bool(Self::is_alpha_byte(ch)))
+            }
+            FastCallKind::IsIdentStart => {
+                let arg = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                let ch = if let Value::Int(i) = arg { i } else { return Ok(Value::Bool(false)); };
+                Ok(Value::Bool(Self::is_alpha_byte(ch) || ch == 95))
+            }
+            FastCallKind::IsIdentContinue => {
+                let arg = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                let ch = if let Value::Int(i) = arg { i } else { return Ok(Value::Bool(false)); };
+                Ok(Value::Bool(
+                    Self::is_alpha_byte(ch) || Self::is_digit_byte(ch) || ch == 95,
+                ))
+            }
+        }
+    }
+
     /// Creates a new VM instance
     pub fn new() -> Self {
         Self {
@@ -69,6 +701,7 @@ impl BytecodeVM {
             user_args: Vec::new(),
             progress_mode: false,
             ffi_call_counter: 0,
+            fast_call_kinds: HashMap::default(),
         }
     }
 
@@ -125,6 +758,35 @@ impl BytecodeVM {
                     .unwrap_or_else(|| "none".to_string())
             );
         }
+        if let Ok(spec) = std::env::var("SOUNIO_VM_DUMP_RANGE") {
+            let trimmed = spec.trim();
+            if let Some((start_raw, end_raw)) = trimmed.split_once(':') {
+                if let (Ok(start), Ok(end)) = (
+                    start_raw.trim().parse::<usize>(),
+                    end_raw.trim().parse::<usize>(),
+                ) {
+                    let hi = end.min(bytecode_len);
+                    if start < hi {
+                        eprintln!(
+                            "VM_DUMP range={} resolved={}..{} bytecode_len={}",
+                            trimmed, start, hi, bytecode_len
+                        );
+                        for ip in start..hi {
+                            eprintln!("VM_DUMP ip={} instr={:?}", ip, bytecode[ip]);
+                        }
+                    } else {
+                        eprintln!(
+                            "VM_DUMP empty_range={} resolved_start={} resolved_end={} bytecode_len={}",
+                            trimmed, start, hi, bytecode_len
+                        );
+                    }
+                } else {
+                    eprintln!("VM_DUMP invalid_range={}", trimmed);
+                }
+            } else {
+                eprintln!("VM_DUMP invalid_spec={}", trimmed);
+            }
+        }
 
         while ip < bytecode_len {
             instruction_count = instruction_count.saturating_add(1);
@@ -171,6 +833,11 @@ impl BytecodeVM {
                     hot_summary
                 );
                 next_progress_tick = next_progress_tick.saturating_add(progress_every);
+            }
+
+            if let Some(next_ip) = self.try_fuse_copy_loops(bytecode, ip)? {
+                ip = next_ip;
+                continue;
             }
 
             match instr {
@@ -519,15 +1186,23 @@ impl BytecodeVM {
                     if let Some(call_counts) = call_counts.as_mut() {
                         *call_counts.entry(*fn_id).or_insert(0) += 1;
                     }
+
+                    if *fn_id >= bytecode_len {
+                        return Err(VmError::InvalidFunctionCall(*fn_id));
+                    }
+
+                    if let Some(kind) = self.resolve_fast_call_kind(bytecode, *fn_id) {
+                        let fast_result = self.execute_fast_call(kind)?;
+                        self.stack.push(fast_result);
+                        ip += 1;
+                        continue;
+                    }
+
                     let frame = CallFrame {
                         return_ip: ip + 1,
                         locals: std::mem::take(&mut self.locals),
                     };
                     self.call_stack.push(frame);
-
-                    if *fn_id >= bytecode_len {
-                        return Err(VmError::InvalidFunctionCall(*fn_id));
-                    }
 
                     ip = *fn_id;
                     continue;
@@ -555,7 +1230,24 @@ impl BytecodeVM {
                     // instructions for structured memory operations; implicit
                     // pointer-sensitive behavior here causes nondeterministic
                     // local corruption when pointers are on the stack.
-                    let value = self.locals.get(*offset).cloned().unwrap_or(Value::Unit);
+                    let value = if *offset < self.locals.len() {
+                        if Self::should_take_local_for_storeback(bytecode, ip, *offset) {
+                            std::mem::replace(&mut self.locals[*offset], Value::Unit)
+                        } else if Self::should_promote_local_for_index_read(bytecode, ip) {
+                            let slot = &mut self.locals[*offset];
+                            let should_wrap = matches!(slot, Value::List(items) if items.len() >= 256)
+                                || matches!(slot, Value::SparseList { len, .. } if *len >= 256);
+                            if should_wrap && !matches!(slot, Value::Ref(_)) {
+                                let moved = std::mem::replace(slot, Value::Unit);
+                                *slot = Value::Ref(Arc::new(Mutex::new(moved)));
+                            }
+                            slot.clone()
+                        } else {
+                            self.locals[*offset].clone()
+                        }
+                    } else {
+                        Value::Unit
+                    };
                     self.stack.push(value);
                 }
                 Bytecode::Store(offset) => {
@@ -1964,7 +2656,15 @@ impl BytecodeVM {
                 let name = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                 match name {
                     Value::String(name) => {
-                        Ok(self.globals.get(&name).cloned().unwrap_or(Value::Unit))
+                        if let Some(value) = self.globals.get_mut(&name) {
+                            if name == "CURSOR_SOURCE" && !matches!(value, Value::Ref(_)) {
+                                let moved = std::mem::replace(value, Value::Unit);
+                                *value = Value::Ref(Arc::new(Mutex::new(moved)));
+                            }
+                            Ok(value.clone())
+                        } else {
+                            Ok(Value::Unit)
+                        }
                     }
                     _ => Err(VmError::TypeMismatch(
                         "get_global expects a string name".to_string(),
@@ -1981,6 +2681,13 @@ impl BytecodeVM {
                 let name = self.stack.pop().ok_or(VmError::StackUnderflow)?;
                 match name {
                     Value::String(name) => {
+                        if name == "CURSOR_SOURCE"
+                            && let Some(Value::Ref(existing)) = self.globals.get(&name)
+                            && let Value::Ref(incoming) = &value
+                            && Arc::ptr_eq(existing, incoming)
+                        {
+                            return Ok(Value::Unit);
+                        }
                         self.globals.insert(name, value);
                         Ok(Value::Unit)
                     }
