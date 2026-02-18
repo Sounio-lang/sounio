@@ -9,7 +9,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use crate::epistemic::{Confidence, EpistemicStatus, Evidence, EvidenceKind, Revisability, Source};
+use crate::epistemic::{Confidence, EpistemicStatus, Evidence, EvidenceKind, KnightianMode, Revisability, Source};
 
 use super::{CurationStatus, TermEntry};
 
@@ -57,6 +57,7 @@ impl EpistemicAugmenter {
 
         EpistemicStatus {
             confidence: Confidence::new(final_confidence),
+            knightian: KnightianMode::Defined,
             revisability: Revisability::Revisable {
                 conditions: vec!["ontology_update".into()],
             },

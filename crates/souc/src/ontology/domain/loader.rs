@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 #[cfg(feature = "ontology")]
 use crate::epistemic::TermId;
-use crate::epistemic::{Confidence, EpistemicStatus, Evidence, EvidenceKind, Revisability, Source};
+use crate::epistemic::{Confidence, EpistemicStatus, Evidence, EvidenceKind, KnightianMode, Revisability, Source};
 use crate::ontology::OntologyError;
 
 #[cfg(feature = "ontology")]
@@ -236,6 +236,7 @@ fn load_ancestors(
 fn default_epistemic(term_id: &str, ontology: &str) -> EpistemicStatus {
     EpistemicStatus {
         confidence: Confidence::new(0.90), // Domain ontologies are expert-curated
+        knightian: KnightianMode::Defined,
         revisability: Revisability::Revisable {
             conditions: vec!["ontology_update".into(), "domain_evidence".into()],
         },

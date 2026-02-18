@@ -48,7 +48,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use super::{OntologyError, OntologyResult};
-use crate::epistemic::{Confidence, EpistemicStatus, Evidence, EvidenceKind, Revisability, Source};
+use crate::epistemic::{Confidence, EpistemicStatus, Evidence, EvidenceKind, KnightianMode, Revisability, Source};
 
 #[cfg(feature = "network")]
 use serde::Deserialize;
@@ -235,6 +235,7 @@ impl FederatedTerm {
 
         EpistemicStatus {
             confidence: Confidence::new(final_confidence),
+            knightian: KnightianMode::Defined,
             revisability: Revisability::Revisable {
                 conditions: vec!["ontology_update".into(), "federated_refresh".into()],
             },
