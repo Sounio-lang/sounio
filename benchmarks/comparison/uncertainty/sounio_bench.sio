@@ -1,0 +1,163 @@
+//@ run-pass
+// Benchmark: PK Uncertainty Propagation with Sobol Sensitivity Analysis
+// Decomposes variance contributions of 8 PK parameters, computes Sobol indices,
+// and generates clinical recommendations.
+//
+// Differentiator: Sounio's epistemic type system (Knowledge<T>) makes uncertainty
+// tracking a first-class language feature — no external library needed.
+// Effects (Mut, Div) guarantee correctness of sensitivity computations.
+//
+// Reference: Saltelli et al. (2008), FDA PopPK Guidance (2022)
+
+fn abs_val(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn sqrt_val(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var guess = x / 2.0
+    if guess < 0.001 { guess = 0.001 }
+    var i = 0
+    while i < 30 { guess = (guess + x / guess) / 2.0; i = i + 1 }
+    guess
+}
+
+// --- PK Parameter structures ---
+
+struct PKParameter {
+    code: i32,
+    value: f64,
+    std_uncert: f64,
+    sensitivity: f64,
+    contribution: f64,
+}
+
+fn make_pk_param(code: i32, value: f64, std_uncert: f64, sensitivity: f64) -> PKParameter {
+    PKParameter {
+        code: code, value: value, std_uncert: std_uncert,
+        sensitivity: sensitivity,
+        contribution: sensitivity * sensitivity * std_uncert * std_uncert,
+    }
+}
+
+struct PKProfile {
+    n_params: i32,
+    p0: PKParameter, p1: PKParameter, p2: PKParameter, p3: PKParameter,
+    p4: PKParameter, p5: PKParameter, p6: PKParameter, p7: PKParameter,
+    combined_variance: f64,
+    clearance_contribution: f64,
+    volume_contribution: f64,
+    absorption_contribution: f64,
+    is_clearance_dominant: bool,
+    dominant_idx: i32,
+}
+
+fn empty_param() -> PKParameter {
+    PKParameter { code: 0, value: 0.0, std_uncert: 0.0, sensitivity: 0.0, contribution: 0.0 }
+}
+
+fn get_param(p: PKProfile, idx: i32) -> PKParameter {
+    if idx == 0 { return p.p0 }
+    if idx == 1 { return p.p1 }
+    if idx == 2 { return p.p2 }
+    if idx == 3 { return p.p3 }
+    if idx == 4 { return p.p4 }
+    if idx == 5 { return p.p5 }
+    if idx == 6 { return p.p6 }
+    p.p7
+}
+
+fn pk_is_clearance_related(code: i32) -> bool {
+    code == 0 || code == 3 || code == 6 || code == 7
+}
+
+fn pk_is_volume_related(code: i32) -> bool {
+    code == 1 || code == 6
+}
+
+fn pk_is_absorption_related(code: i32) -> bool {
+    code == 2 || code == 4
+}
+
+// --- Core analysis: variance decomposition + Sobol indices ---
+
+fn analyze_pk_profile(p: PKProfile) -> PKProfile with Mut, Panic, Div {
+    var result = p
+    var total_var = 0.0
+    var cl_var = 0.0
+    var vol_var = 0.0
+    var abs_var = 0.0
+    var max_contrib = 0.0
+    var dominant = 0
+
+    var i = 0
+    while i < p.n_params {
+        let param = get_param(p, i)
+        let c = param.contribution
+        total_var = total_var + c
+
+        if pk_is_clearance_related(param.code) { cl_var = cl_var + c }
+        if pk_is_volume_related(param.code) { vol_var = vol_var + c }
+        if pk_is_absorption_related(param.code) { abs_var = abs_var + c }
+
+        if c > max_contrib { max_contrib = c; dominant = i }
+        i = i + 1
+    }
+
+    result.combined_variance = total_var
+    if total_var > 0.0 {
+        result.clearance_contribution = cl_var / total_var
+        result.volume_contribution = vol_var / total_var
+        result.absorption_contribution = abs_var / total_var
+    }
+    result.is_clearance_dominant = result.clearance_contribution > 0.7
+    result.dominant_idx = dominant
+    result
+}
+
+// --- Benchmark: run analysis N times ---
+
+fn bench_uncertainty(n_iters: i32) -> f64 with Mut, Panic, Div {
+    // Clearance-dominant profile (realistic clinical scenario)
+    let profile = PKProfile {
+        n_params: 8,
+        p0: make_pk_param(0, 5.0, 1.5, 0.9),   // CL: high sensitivity
+        p1: make_pk_param(1, 50.0, 5.0, 0.2),   // V
+        p2: make_pk_param(2, 1.2, 0.3, 0.15),   // ka
+        p3: make_pk_param(3, 0.8, 0.05, 0.1),   // F
+        p4: make_pk_param(4, 0.5, 0.1, 0.05),   // t_lag
+        p5: make_pk_param(7, 1.2, 0.15, 0.3),   // SCr (CL proxy)
+        p6: make_pk_param(6, 70.0, 10.0, 0.12),  // Weight
+        p7: make_pk_param(5, 0.0, 0.0, 0.0),    // Other
+        combined_variance: 0.0,
+        clearance_contribution: 0.0,
+        volume_contribution: 0.0,
+        absorption_contribution: 0.0,
+        is_clearance_dominant: false,
+        dominant_idx: 0,
+    }
+
+    var last_cl_frac = 0.0
+    var iter = 0
+    while iter < n_iters {
+        let result = analyze_pk_profile(profile)
+        last_cl_frac = result.clearance_contribution
+        iter = iter + 1
+    }
+    last_cl_frac
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    let n_iters = 10000
+
+    let cl_frac = bench_uncertainty(n_iters)
+
+    print("PK uncertainty (10000 iters): ")
+    if cl_frac > 0.7 {
+        println("PASS — CL dominant, recommend TDM")
+    } else {
+        println("FAIL — expected CL dominance")
+    }
+
+    0
+}

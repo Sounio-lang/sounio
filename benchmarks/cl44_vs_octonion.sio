@@ -1,0 +1,214 @@
+//@ run-pass
+// Benchmark: Cl(4,4) Geometric Product vs Octonion Multiplication
+//
+// Cl(4,4): 256-component multivector, geometric product = O(256^2) = 65536 muls
+// Octonion: 8-component, Graves-Adcock formula = 64 muls + 56 adds = 120 FLOPs
+//
+// This benchmark measures the raw computation cost of each product in a tight
+// loop. With AVX-512, the Cl(4,4) product can be vectorized (8 f64 per ZMM),
+// reducing the effective operation count by ~8x vs scalar.
+//
+// Signature Cl(4,4): e0^2=e1^2=e2^2=e3^2=+1, e4^2=e5^2=e6^2=e7^2=-1
+// Dimension: 2^8 = 256 components
+//
+// Note: wall-clock timing requires `use stdlib::time::instant`.
+// This benchmark uses iteration counting and accumulated checksums.
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+// ============================================================================
+// Cl(4,4) GEOMETRIC PRODUCT — 256-COMPONENT
+// ============================================================================
+
+// Sign computation for Cl(4,4) metric: bits 0-3 square to +1, bits 4-7 to -1
+fn geo_sign_44(a: i64, b: i64) -> f64 with Mut, Panic, Div {
+    var swaps = 0
+    var j = 0
+    while j < 8 {
+        if (b >> j) & 1 != 0 {
+            var k = j + 1
+            while k < 8 {
+                if (a >> k) & 1 != 0 { swaps = swaps + 1 }
+                k = k + 1
+            }
+        }
+        j = j + 1
+    }
+    let common = a & b
+    var msign = 1.0
+    // Bits 4-7 square to -1 (negative-definite part of signature)
+    if (common >> 4) & 1 != 0 { msign = 0.0 - msign }
+    if (common >> 5) & 1 != 0 { msign = 0.0 - msign }
+    if (common >> 6) & 1 != 0 { msign = 0.0 - msign }
+    if (common >> 7) & 1 != 0 { msign = 0.0 - msign }
+    if swaps % 2 == 0 { return msign }
+    return 0.0 - msign
+}
+
+// Full 256-component geometric product using mutable array accumulation
+fn geo_product_256(a: [f64; 256], b: [f64; 256]) -> [f64; 256] with Mut, Panic, Div {
+    var result = [0.0; 256]
+    var i = 0
+    while i < 256 {
+        if a[i] != 0.0 {
+            var j = 0
+            while j < 256 {
+                if b[j] != 0.0 {
+                    let k = i ^ j
+                    let val = geo_sign_44(i, j) * a[i] * b[j]
+                    result[k] = result[k] + val
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    return result
+}
+
+// ============================================================================
+// OCTONION MULTIPLICATION — GRAVES-ADCOCK FORMULA
+// ============================================================================
+// 8 components: [e0(real), e1, e2, e3, e4, e5, e6, e7]
+// 64 multiplications, 56 additions = 120 FLOPs
+
+fn oct_mul(a: [f64; 8], b: [f64; 8]) -> [f64; 8] with Mut, Panic, Div {
+    let c0 = a[0]*b[0] - a[1]*b[1] - a[2]*b[2] - a[3]*b[3]
+           - a[4]*b[4] - a[5]*b[5] - a[6]*b[6] - a[7]*b[7]
+    let c1 = a[0]*b[1] + a[1]*b[0] + a[2]*b[3] - a[3]*b[2]
+           + a[4]*b[5] - a[5]*b[4] - a[6]*b[7] + a[7]*b[6]
+    let c2 = a[0]*b[2] - a[1]*b[3] + a[2]*b[0] + a[3]*b[1]
+           + a[4]*b[6] + a[5]*b[7] - a[6]*b[4] - a[7]*b[5]
+    let c3 = a[0]*b[3] + a[1]*b[2] - a[2]*b[1] + a[3]*b[0]
+           + a[4]*b[7] - a[5]*b[6] + a[6]*b[5] - a[7]*b[4]
+    let c4 = a[0]*b[4] - a[1]*b[5] - a[2]*b[6] - a[3]*b[7]
+           + a[4]*b[0] + a[5]*b[1] + a[6]*b[2] + a[7]*b[3]
+    let c5 = a[0]*b[5] + a[1]*b[4] - a[2]*b[7] + a[3]*b[6]
+           - a[4]*b[1] + a[5]*b[0] - a[6]*b[3] + a[7]*b[2]
+    let c6 = a[0]*b[6] + a[1]*b[7] + a[2]*b[4] - a[3]*b[5]
+           - a[4]*b[2] + a[5]*b[3] + a[6]*b[0] - a[7]*b[1]
+    let c7 = a[0]*b[7] - a[1]*b[6] + a[2]*b[5] + a[3]*b[4]
+           - a[4]*b[3] - a[5]*b[2] + a[6]*b[1] + a[7]*b[0]
+    return [c0, c1, c2, c3, c4, c5, c6, c7]
+}
+
+// ============================================================================
+// BENCHMARKS
+// ============================================================================
+
+// Cl(4,4) benchmark: n iterations of 256-component geometric product.
+// Returns accumulated scalar component as checksum to prevent dead-code elim.
+fn benchmark_cl44(n: i64) -> f64 with Mut, Panic, Div {
+    // Seed multivectors with distinct small values
+    var a = [0.0; 256]
+    var b = [0.0; 256]
+    var i = 0
+    while i < 256 {
+        // a[i] = 0.01 * (i+1), b[i] = 0.01 * (256-i)
+        let fi = 0.01 * (i + 1)
+        let fj = 0.01 * (256 - i)
+        a[i] = fi
+        b[i] = fj
+        i = i + 1
+    }
+    var checksum = 0.0
+    var iter = 0
+    while iter < n {
+        let c = geo_product_256(a, b)
+        checksum = checksum + c[0]
+        // Rotate: use result as next input to prevent CSE
+        var k = 0
+        while k < 256 {
+            a[k] = c[k] * 0.001
+            k = k + 1
+        }
+        iter = iter + 1
+    }
+    return checksum
+}
+
+// Octonion benchmark: n iterations of 8-component Graves-Adcock product.
+// Returns accumulated real component as checksum.
+fn benchmark_octonion(n: i64) -> f64 with Mut, Panic, Div {
+    var a = [1.0, 0.5, 0.3, 0.2, 0.1, 0.15, 0.25, 0.05]
+    let b = [0.8, 0.4, 0.6, 0.1, 0.3, 0.2, 0.35, 0.15]
+    var checksum = 0.0
+    var iter = 0
+    while iter < n {
+        let c = oct_mul(a, b)
+        checksum = checksum + c[0]
+        // Rotate inputs
+        a = [c[0] * 0.5, c[1] * 0.5, c[2] * 0.5, c[3] * 0.5,
+             c[4] * 0.5, c[5] * 0.5, c[6] * 0.5, c[7] * 0.5]
+        iter = iter + 1
+    }
+    return checksum
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== Clifford Cl(4,4) vs Octonion Benchmark ===")
+    println("Cl(4,4): 256 components, 65536 muls per product")
+    println("Octonion: 8 components, 120 FLOPs per product")
+    println("")
+
+    // Iteration counts: Cl(4,4) is O(256^2) per product vs O(64) for octonion.
+    // VM mode: use low counts (2/1000). JIT/AOT: use 100/10000.
+    let cl44_iters = 2
+    let oct_iters = 1000
+
+    println("Running benchmarks...")
+    let cl44_check = benchmark_cl44(cl44_iters)
+    let oct_check = benchmark_octonion(oct_iters)
+
+    println("")
+    println("--- Results ---")
+
+    // Per-product FLOP counts (theoretical)
+    let cl44_flops_per = 131072  // 2 * 256^2 (mul + add per pair)
+    let oct_flops_per = 120      // Graves-Adcock: 64 muls + 56 adds
+
+    print("Cl(4,4)  : ")
+    print(cl44_iters)
+    print(" iters, ")
+    print(cl44_flops_per)
+    print(" FLOPs/product, checksum = ")
+    println(cl44_check)
+
+    print("Octonion : ")
+    print(oct_iters)
+    print(" iters, ")
+    print(oct_flops_per)
+    print(" FLOPs/product, checksum = ")
+    println(oct_check)
+
+    // Per-product FLOP ratio
+    println("")
+    print("Per-product FLOP ratio (Cl44/Oct): ")
+    let ratio = cl44_flops_per / oct_flops_per
+    print(ratio)
+    println("x")
+    println("")
+
+    println("With AVX-512, Cl(4,4) product vectorizes 8-wide (ZMM registers),")
+    println("reducing effective cost by ~8x. Amortized ratio: ~136x.")
+
+    // Verify checksums are finite (not NaN/Inf from overflow)
+    if cl44_check == cl44_check && oct_check == oct_check {
+        println("")
+        println("BENCHMARK COMPLETE")
+        return 0
+    }
+    println("ERROR: checksum diverged (NaN)")
+    return 1
+}

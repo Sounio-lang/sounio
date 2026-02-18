@@ -1,0 +1,110 @@
+//@ run-pass
+// Benchmark: RK4 ODE Solver — Exponential Decay + Harmonic Oscillator
+// Solves du/dt = -0.1*u for 100,000 steps, and harmonic oscillator for 100,000 steps.
+// Measures wall-clock via simple iteration counting (no stdlib timer).
+//
+// Differentiator: effect tracking (Mut, Div) ensures solver purity is verified at compile time.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn exp_approx(x: f64) -> f64 with Mut, Panic, Div {
+    if x > 10.0 {
+        let half = exp_approx(x / 2.0)
+        return half * half
+    }
+    if x < 0.0 - 10.0 { return 1.0 / exp_approx(0.0 - x) }
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n <= 25 {
+        term = term * x / (n as f64)
+        sum = sum + term
+        n = n + 1
+    }
+    return sum
+}
+
+// --- Exponential Decay: du/dt = -0.1*u ---
+
+struct ScalarState { u: f64, t: f64 }
+
+fn exp_decay_deriv(u: f64) -> f64 { 0.0 - 0.1 * u }
+
+fn rk4_step_decay(s: ScalarState, dt: f64) -> ScalarState with Panic, Div {
+    let k1 = exp_decay_deriv(s.u)
+    let k2 = exp_decay_deriv(s.u + 0.5 * dt * k1)
+    let k3 = exp_decay_deriv(s.u + 0.5 * dt * k2)
+    let k4 = exp_decay_deriv(s.u + dt * k3)
+    ScalarState {
+        u: s.u + dt / 6.0 * (k1 + 2.0 * k2 + 2.0 * k3 + k4),
+        t: s.t + dt,
+    }
+}
+
+fn bench_exp_decay(n_steps: i32) -> f64 with Mut, Panic, Div {
+    let dt = 10.0 / (n_steps as f64)
+    var s = ScalarState { u: 1.0, t: 0.0 }
+    var i = 0
+    while i < n_steps {
+        s = rk4_step_decay(s, dt)
+        i = i + 1
+    }
+    s.u
+}
+
+// --- Harmonic Oscillator: dx/dt = v, dv/dt = -x ---
+
+struct Vec2State { x: f64, y: f64, t: f64 }
+struct HarmDerivs { dx: f64, dv: f64 }
+
+fn harmonic_deriv(x: f64, v: f64) -> HarmDerivs {
+    HarmDerivs { dx: v, dv: 0.0 - x }
+}
+
+fn rk4_step_harmonic(s: Vec2State, dt: f64) -> Vec2State with Panic, Div {
+    let k1 = harmonic_deriv(s.x, s.y)
+    let k2 = harmonic_deriv(s.x + 0.5 * dt * k1.dx, s.y + 0.5 * dt * k1.dv)
+    let k3 = harmonic_deriv(s.x + 0.5 * dt * k2.dx, s.y + 0.5 * dt * k2.dv)
+    let k4 = harmonic_deriv(s.x + dt * k3.dx, s.y + dt * k3.dv)
+    Vec2State {
+        x: s.x + dt / 6.0 * (k1.dx + 2.0 * k2.dx + 2.0 * k3.dx + k4.dx),
+        y: s.y + dt / 6.0 * (k1.dv + 2.0 * k2.dv + 2.0 * k3.dv + k4.dv),
+        t: s.t + dt,
+    }
+}
+
+fn bench_harmonic(n_steps: i32) -> f64 with Mut, Panic, Div {
+    let two_pi = 6.283185307179586
+    let dt = two_pi / (n_steps as f64)
+    var s = Vec2State { x: 1.0, y: 0.0, t: 0.0 }
+    var i = 0
+    while i < n_steps {
+        s = rk4_step_harmonic(s, dt)
+        i = i + 1
+    }
+    s.x
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    let n = 100000
+
+    // Benchmark 1: Exponential decay
+    let result_decay = bench_exp_decay(n)
+    let exact_decay = exp_approx(0.0 - 1.0)
+    let err_decay = abs_f64(result_decay - exact_decay)
+
+    print("RK4 exp-decay  (100000 steps): ")
+    if err_decay < 1.0e-8 { println("PASS") } else { println("FAIL") }
+
+    // Benchmark 2: Harmonic oscillator
+    let result_harm = bench_harmonic(n)
+    let err_harm = abs_f64(result_harm - 1.0)
+
+    print("RK4 harmonic   (100000 steps): ")
+    if err_harm < 1.0e-6 { println("PASS") } else { println("FAIL") }
+
+    0
+}

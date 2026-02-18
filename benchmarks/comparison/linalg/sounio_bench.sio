@@ -1,0 +1,196 @@
+//@ run-pass
+// Benchmark: QR Decomposition (Householder) on 8x8 matrices
+// Performs QR decomposition 1000 times, verifying ||A - QR|| < eps.
+//
+// Differentiator: effect tracking (Mut, Div, Panic) ensures all numerical
+// operations are explicitly annotated for side-effect correctness.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    x
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var scaled = x
+    var scale_back = 1.0
+    while scaled < 1.0 { scaled = scaled * 4.0; scale_back = scale_back * 2.0 }
+    while scaled > 4.0 { scaled = scaled * 0.25; scale_back = scale_back * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 15 { y = 0.5 * (y + scaled / y); i = i + 1 }
+    y / scale_back
+}
+
+fn sign_f64(x: f64) -> f64 {
+    if x >= 0.0 { 1.0 } else { 0.0 - 1.0 }
+}
+
+// --- Matrix8: 8x8 max, stored as flat [f64; 64] ---
+
+struct Matrix8 { data: [f64; 64], rows: i32, cols: i32 }
+
+fn mat8_get(m: Matrix8, r: i32, c: i32) -> f64 with Panic {
+    m.data[r * m.cols + c]
+}
+
+fn mat8_set(m: Matrix8, r: i32, c: i32, val: f64) -> Matrix8 with Mut, Panic {
+    var result = m
+    result.data[r * m.cols + c] = val
+    result
+}
+
+fn mat8_zeros(rows: i32, cols: i32) -> Matrix8 {
+    Matrix8 { data: [0.0; 64], rows: rows, cols: cols }
+}
+
+fn mat8_identity(n: i32) -> Matrix8 with Mut, Panic, Div {
+    var m = mat8_zeros(n, n)
+    var i = 0
+    while i < n { m = mat8_set(m, i, i, 1.0); i = i + 1 }
+    m
+}
+
+fn mat8_multiply(a: Matrix8, b: Matrix8) -> Matrix8 with Mut, Panic, Div {
+    var c = mat8_zeros(a.rows, b.cols)
+    var i = 0
+    while i < a.rows {
+        var j = 0
+        while j < b.cols {
+            var sum = 0.0
+            var k = 0
+            while k < a.cols { sum = sum + mat8_get(a, i, k) * mat8_get(b, k, j); k = k + 1 }
+            c = mat8_set(c, i, j, sum)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    c
+}
+
+fn mat8_frobenius_norm(m: Matrix8) -> f64 with Mut, Panic, Div {
+    var sum = 0.0
+    var i = 0
+    while i < m.rows {
+        var j = 0
+        while j < m.cols {
+            let v = mat8_get(m, i, j)
+            sum = sum + v * v
+            j = j + 1
+        }
+        i = i + 1
+    }
+    sqrt_f64(sum)
+}
+
+// --- Householder QR ---
+
+struct QRResult { q: Matrix8, r: Matrix8, rows: i32, cols: i32 }
+
+fn vec8_norm(v: [f64; 8], n: i32) -> f64 with Mut, Panic, Div {
+    var sum = 0.0
+    var i = 0
+    while i < n { sum = sum + v[i] * v[i]; i = i + 1 }
+    sqrt_f64(sum)
+}
+
+fn qr_householder(a: Matrix8) -> QRResult with Mut, Panic, Div {
+    let n = a.rows
+    let m = a.cols
+    var r = a
+    var q = mat8_identity(n)
+
+    var k = 0
+    let iters = if n < m { n } else { m }
+    while k < iters {
+        // Extract column k below diagonal
+        var col: [f64; 8] = [0.0; 8]
+        var ci = k
+        while ci < n { col[ci - k] = mat8_get(r, ci, k); ci = ci + 1 }
+        let col_len = n - k
+        let alpha = 0.0 - sign_f64(col[0]) * vec8_norm(col, col_len)
+
+        // Householder vector
+        var v: [f64; 8] = [0.0; 8]
+        var vi = 0
+        while vi < col_len { v[vi] = col[vi]; vi = vi + 1 }
+        v[0] = v[0] - alpha
+        let v_norm = vec8_norm(v, col_len)
+        if v_norm > 1.0e-14 {
+            vi = 0
+            while vi < col_len { v[vi] = v[vi] / v_norm; vi = vi + 1 }
+
+            // Apply H to R: R = R - 2*v*(v^T*R) for rows k..n
+            var j = 0
+            while j < m {
+                var dot = 0.0
+                var ii = 0
+                while ii < col_len { dot = dot + v[ii] * mat8_get(r, ii + k, j); ii = ii + 1 }
+                ii = 0
+                while ii < col_len {
+                    r = mat8_set(r, ii + k, j, mat8_get(r, ii + k, j) - 2.0 * v[ii] * dot)
+                    ii = ii + 1
+                }
+                j = j + 1
+            }
+
+            // Apply H to Q: Q = Q - 2*(Q*v)*v^T
+            var qi = 0
+            while qi < n {
+                var dot = 0.0
+                var jj = 0
+                while jj < col_len { dot = dot + mat8_get(q, qi, jj + k) * v[jj]; jj = jj + 1 }
+                jj = 0
+                while jj < col_len {
+                    q = mat8_set(q, qi, jj + k, mat8_get(q, qi, jj + k) - 2.0 * dot * v[jj])
+                    jj = jj + 1
+                }
+                qi = qi + 1
+            }
+        }
+        k = k + 1
+    }
+    QRResult { q: q, r: r, rows: n, cols: m }
+}
+
+fn make_test_matrix_4x4() -> Matrix8 with Mut, Panic {
+    var m = mat8_zeros(4, 4)
+    // A well-conditioned test matrix
+    m = mat8_set(m, 0, 0, 4.0); m = mat8_set(m, 0, 1, 1.0); m = mat8_set(m, 0, 2, 2.0); m = mat8_set(m, 0, 3, 1.0)
+    m = mat8_set(m, 1, 0, 1.0); m = mat8_set(m, 1, 1, 3.0); m = mat8_set(m, 1, 2, 1.0); m = mat8_set(m, 1, 3, 2.0)
+    m = mat8_set(m, 2, 0, 2.0); m = mat8_set(m, 2, 1, 1.0); m = mat8_set(m, 2, 2, 5.0); m = mat8_set(m, 2, 3, 1.0)
+    m = mat8_set(m, 3, 0, 1.0); m = mat8_set(m, 3, 1, 2.0); m = mat8_set(m, 3, 2, 1.0); m = mat8_set(m, 3, 3, 4.0)
+    m
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    let a = make_test_matrix_4x4()
+    let n_iters = 1000
+
+    var max_err = 0.0
+    var iter = 0
+    while iter < n_iters {
+        let qr = qr_householder(a)
+        // Verify: ||A - Q*R||_F
+        let qr_product = mat8_multiply(qr.q, qr.r)
+        var err_sum = 0.0
+        var i = 0
+        while i < 4 {
+            var j = 0
+            while j < 4 {
+                let diff = mat8_get(a, i, j) - mat8_get(qr_product, i, j)
+                err_sum = err_sum + diff * diff
+                j = j + 1
+            }
+            i = i + 1
+        }
+        let err = sqrt_f64(err_sum)
+        if err > max_err { max_err = err }
+        iter = iter + 1
+    }
+
+    print("QR 4x4 (1000 iters): ")
+    if max_err < 1.0e-10 { println("PASS") } else { println("FAIL") }
+
+    0
+}
