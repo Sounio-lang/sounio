@@ -817,7 +817,7 @@ pub fn check_combination_integrity(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::epistemic::Confidence;
+    use crate::epistemic::{Confidence, KnightianMode};
 
     #[test]
     fn test_low_confidence_warning() {
@@ -880,6 +880,7 @@ mod tests {
     fn test_revision_required_error() {
         let status = EpistemicStatus {
             confidence: Confidence::new(0.8),
+            knightian: KnightianMode::Defined,
             revisability: Revisability::MustRevise {
                 reason: "provisional data".into(),
             },
