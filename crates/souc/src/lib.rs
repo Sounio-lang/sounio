@@ -333,7 +333,7 @@ pub mod wasm {
         };
 
         // Type check
-        let hir = match check::check(&ast) {
+        let hir = match check::check_ast(&ast) {
             Ok(hir) => hir,
             Err(e) => {
                 return Ok(serde_json::json!({
@@ -433,7 +433,7 @@ pub mod wasm {
         };
 
         // Type check
-        let hir = match check::check(&ast) {
+        let hir = match check::check_ast(&ast) {
             Ok(hir) => hir,
             Err(e) => {
                 return Ok(serde_json::json!({
@@ -517,7 +517,7 @@ pub mod wasm {
     pub fn typecheck_to_json(source: &str) -> String {
         match lexer::lex(source)
             .and_then(|tokens| parser::parse(&tokens, source))
-            .and_then(|ast| check::check(&ast))
+            .and_then(|ast| check::check_ast(&ast))
         {
             Ok(hir) => {
                 // Return a summary instead of the full HIR structure
