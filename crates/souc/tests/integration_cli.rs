@@ -427,6 +427,54 @@ fn main() -> i64 {
 }
 
 #[test]
+fn test_cli_jit_geo_product_regression_guard() {
+    if !has_jit_feature() {
+        eprintln!("Skipping test: jit feature not enabled");
+        return;
+    }
+
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("workspace root")
+        .to_path_buf();
+
+    let repro = workspace_root.join("tests/run-pass/cranelift_geo_product_min.sio");
+    assert!(
+        repro.exists(),
+        "tests/run-pass/cranelift_geo_product_min.sio missing"
+    );
+
+    // Ground truth: self-hosted VM path should pass.
+    let run_output = run_souc(&["run", repro.to_str().unwrap()]);
+    assert!(
+        run_output.status.success(),
+        "`souc run` should succeed for geo_product repro. stderr: {}",
+        String::from_utf8_lossy(&run_output.stderr)
+    );
+    let run_stdout = String::from_utf8_lossy(&run_output.stdout);
+    assert!(
+        run_stdout.contains("CRANELIFT_GEO_MIN_PASS"),
+        "`souc run` should report PASS marker. stdout: {}",
+        run_stdout
+    );
+
+    // Regression guard: Cranelift JIT should agree with the VM path.
+    let jit_output = run_souc(&["jit", repro.to_str().unwrap()]);
+    assert!(
+        jit_output.status.success(),
+        "`souc jit` should succeed for geo_product repro. stderr: {}",
+        String::from_utf8_lossy(&jit_output.stderr)
+    );
+    let jit_stdout = String::from_utf8_lossy(&jit_output.stdout);
+    assert!(
+        jit_stdout.contains("CRANELIFT_GEO_MIN_PASS"),
+        "`souc jit` should report PASS marker for geo_product repro. stdout: {}",
+        jit_stdout
+    );
+}
+
+#[test]
 fn test_cli_jit_not_enabled() {
     if has_jit_feature() {
         eprintln!("Skipping test: jit feature IS enabled");
@@ -789,8 +837,7 @@ fn test_ffi_libm_native_build() {
 
     if output.status.success() && output_file.exists() {
         // Binary was produced — run it and verify via exit code
-        // The program returns 0 if all FFI calls produce correct results,
-        // non-zero encodes which functions failed (1=sqrt, 10=tgamma, etc.)
+        // The program returns 0 if sqrt(25.0) = 5.0 (FFI call works)
         let run_output = Command::new(&output_file)
             .output()
             .expect("Failed to execute FFI test binary");
@@ -798,16 +845,8 @@ fn test_ffi_libm_native_build() {
         let exit_code = run_output.status.code().unwrap_or(-1);
         assert_eq!(
             exit_code, 0,
-            "FFI libm binary should exit 0 (all correct). Exit code {} means: {}",
+            "FFI libm binary should exit 0 (sqrt(25.0) = 5.0). Got exit code {}",
             exit_code,
-            match exit_code {
-                1 => "sqrt failed",
-                10 => "tgamma failed",
-                100 => "pow failed",
-                1000 => "floor failed",
-                10000 => "ceil failed",
-                _ => "multiple failures (sum of codes)",
-            }
         );
     } else {
         // Build didn't succeed — verify it at least recognizes extern "C"

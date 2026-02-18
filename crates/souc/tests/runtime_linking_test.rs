@@ -46,6 +46,12 @@ fn test_runtime_symbols_present() {
         "__sounio_dispatch_io_print",
         "__sounio_dispatch_mut_get",
         "__sounio_dispatch_div_div",
+        // Native compatibility shims used by HTTP/Postgres lowering paths.
+        "starts_with",
+        "contains",
+        "replace",
+        "as_ptr",
+        "handler",
     ];
 
     for symbol in &required_symbols {

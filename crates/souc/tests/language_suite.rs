@@ -4,6 +4,8 @@
 //! - `//@ run-pass`
 //! - `//@ compile-fail`
 //! - `//@ error-pattern: ...`
+//! - `//@ expect-stdout: ...`
+//! - `//@ expect-exit-code: N`
 //! - `//@ ignore`
 //! - `//@ ignore-platform: <linux|macos|windows>`
 
@@ -23,6 +25,8 @@ enum TestKind {
 struct Directives {
     kind: Option<TestKind>,
     error_patterns: Vec<String>,
+    expect_stdout: Vec<String>,
+    expect_exit_code: Option<i32>,
     ignore: bool,
     ignore_platforms: Vec<String>,
     check_only: bool,
@@ -125,6 +129,14 @@ fn parse_directives(source: &str) -> Directives {
             }
             if let Some(rest) = rest.strip_prefix("run-timeout-ms:") {
                 directives.run_timeout_ms = parse_u64_directive_value(rest);
+                continue;
+            }
+            if let Some(pat) = rest.strip_prefix("expect-stdout:") {
+                directives.expect_stdout.push(pat.trim().to_string());
+                continue;
+            }
+            if let Some(code) = rest.strip_prefix("expect-exit-code:") {
+                directives.expect_exit_code = code.trim().parse::<i32>().ok();
                 continue;
             }
         }
@@ -341,11 +353,25 @@ fn language_suite() {
                     ));
                     continue;
                 }
-                if result.code != 0 {
+                let expected_code = directives.expect_exit_code.unwrap_or(0);
+                if result.code != expected_code {
                     failures.push(format!(
-                        "{rel}: expected run success\n--- stdout ---\n{}\n--- stderr ---\n{}",
-                        result.stdout, result.stderr
+                        "{rel}: expected exit code {expected_code}, got {}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+                        result.code, result.stdout, result.stderr
                     ));
+                    continue;
+                }
+
+                if !directives.expect_stdout.is_empty() {
+                    for pat in &directives.expect_stdout {
+                        if !result.stdout.contains(pat.as_str()) {
+                            failures.push(format!(
+                                "{rel}: expected stdout to contain: \"{pat}\"\n--- actual stdout ---\n{}",
+                                result.stdout
+                            ));
+                            break;
+                        }
+                    }
                 }
             }
         }
