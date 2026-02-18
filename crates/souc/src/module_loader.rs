@@ -108,6 +108,48 @@ fn collect_sio_files(dir: &StdPath, root: &StdPath, files: &mut Vec<PathBuf>) ->
     Ok(())
 }
 
+fn is_selfhost_duplicate_symbol_allowlisted(name: &str) -> bool {
+    matches!(
+        name,
+        "is_hyper_type"
+            | "ALG_REAL"
+            | "ALG_COMPLEX"
+            | "ALG_QUATERNION"
+            | "ALG_OCTONION"
+            | "ALG_SEDENION"
+            | "ALG_CLIFFORD"
+            | "is_division_algebra"
+            | "is_associative"
+            | "has_zero_divisors"
+    )
+}
+
+fn filter_selfhost_duplicate_items(items: &mut Vec<Item>) {
+    let mut filtered = Vec::with_capacity(items.len());
+    let mut seen = std::collections::HashSet::<String>::new();
+
+    for item in std::mem::take(items) {
+        let mut keep = true;
+        if let Some(name) = item_name(&item) {
+            if seen.contains(&name) && is_selfhost_duplicate_symbol_allowlisted(&name) {
+                module_loader_debug!(
+                    "[load_directory_ast] skipping allowlisted duplicate symbol '{}'",
+                    name
+                );
+                keep = false;
+            } else {
+                seen.insert(name);
+            }
+        }
+
+        if keep {
+            filtered.push(item);
+        }
+    }
+
+    *items = filtered;
+}
+
 /// Load all `.sio` files in a directory tree as a single flat compilation unit.
 /// Files are sorted: subdirectories before parent (deeper first), alphabetical
 /// within same depth, `mod.sio` always last within its directory.
@@ -163,6 +205,10 @@ fn load_directory_ast(dir: &StdPath) -> Result<Ast> {
         next_node_id = next_id;
         all_items.append(&mut ast.items);
         all_node_spans.extend(ast.node_spans);
+    }
+
+    if is_selfhost_root {
+        filter_selfhost_duplicate_items(&mut all_items);
     }
 
     // Self-hosted suite currently references `run_native_tests()` from the aggregated
