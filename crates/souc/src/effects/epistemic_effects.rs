@@ -462,7 +462,7 @@ pub fn apply_epistemic_tracking(
     knowledge: &crate::epistemic::Knowledge,
     tracker: &EpistemicTracker,
 ) -> crate::epistemic::Knowledge {
-    use crate::epistemic::{Confidence, EpistemicStatus};
+    use crate::epistemic::{Confidence, EpistemicStatus, KnightianMode};
 
     // Calculate new confidence
     let original_confidence = knowledge.epistemic.confidence.value();
@@ -471,6 +471,7 @@ pub fn apply_epistemic_tracking(
     // Create new epistemic status with updated confidence
     let new_epistemic = EpistemicStatus {
         confidence: Confidence::new(new_confidence),
+        knightian: KnightianMode::Defined,
         revisability: knowledge.epistemic.revisability.clone(),
         source: knowledge.epistemic.source.clone(),
         evidence: knowledge.epistemic.evidence.clone(),

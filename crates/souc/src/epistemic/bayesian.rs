@@ -79,7 +79,7 @@
 
 use std::f64::consts::PI;
 
-use super::{Confidence, EpistemicStatus, Evidence, EvidenceKind, Revisability, Source};
+use super::{Confidence, EpistemicStatus, Evidence, EvidenceKind, KnightianMode, Revisability, Source};
 
 /// Beta distribution for modeling confidence with uncertainty
 ///
@@ -897,6 +897,7 @@ impl BayesianFusionResult {
     pub fn to_epistemic_status(&self) -> EpistemicStatus {
         EpistemicStatus {
             confidence: self.confidence.to_confidence(),
+            knightian: KnightianMode::Defined,
             revisability: self.revisability.clone(),
             source: Source::Derivation(format!(
                 "bayesian_fusion(n={}, conflict={:.3})",

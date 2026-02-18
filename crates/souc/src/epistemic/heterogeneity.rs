@@ -21,7 +21,7 @@
 
 use std::collections::HashMap;
 
-use super::{Confidence, EpistemicStatus, Evidence, Revisability, Source};
+use super::{Confidence, EpistemicStatus, Evidence, KnightianMode, Revisability, Source};
 
 /// Strategy for resolving epistemic heterogeneity
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -254,6 +254,7 @@ impl HeterogeneityResolver {
         ResolutionResult {
             status: EpistemicStatus {
                 confidence: Confidence::new(final_confidence),
+                knightian: KnightianMode::Defined,
                 revisability: self.combine_revisability(statuses),
                 source: Source::Derivation("bayesian_combination".into()),
                 evidence: combined_evidence,
@@ -307,6 +308,7 @@ impl HeterogeneityResolver {
         ResolutionResult {
             status: EpistemicStatus {
                 confidence: Confidence::new(final_confidence),
+                knightian: KnightianMode::Defined,
                 revisability: revised.revisability.clone(),
                 source: revised.source.clone(),
                 evidence: if self.config.preserve_evidence {
@@ -358,6 +360,7 @@ impl HeterogeneityResolver {
         ResolutionResult {
             status: EpistemicStatus {
                 confidence: Confidence::new(final_confidence),
+                knightian: KnightianMode::Defined,
                 revisability: self.combine_revisability(statuses),
                 source: Source::Derivation("consensus".into()),
                 evidence: statuses.iter().flat_map(|s| s.evidence.clone()).collect(),
@@ -394,6 +397,7 @@ impl HeterogeneityResolver {
         ResolutionResult {
             status: EpistemicStatus {
                 confidence: min.confidence,
+                knightian: KnightianMode::Defined,
                 revisability: self.combine_revisability(statuses),
                 source: Source::Derivation("conservative".into()),
                 evidence: statuses.iter().flat_map(|s| s.evidence.clone()).collect(),
@@ -428,6 +432,7 @@ impl HeterogeneityResolver {
         ResolutionResult {
             status: EpistemicStatus {
                 confidence: max.confidence,
+                knightian: KnightianMode::Defined,
                 revisability: self.combine_revisability(statuses),
                 source: Source::Derivation("optimistic".into()),
                 evidence: statuses.iter().flat_map(|s| s.evidence.clone()).collect(),
@@ -474,6 +479,7 @@ impl HeterogeneityResolver {
         ResolutionResult {
             status: EpistemicStatus {
                 confidence: Confidence::new(weighted_avg),
+                knightian: KnightianMode::Defined,
                 revisability: self.combine_revisability(statuses),
                 source: Source::Derivation("weighted_average".into()),
                 evidence: statuses.iter().flat_map(|s| s.evidence.clone()).collect(),

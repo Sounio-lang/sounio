@@ -27,7 +27,7 @@
 use std::collections::HashMap;
 
 use crate::epistemic::{
-    Confidence, EpistemicStatus, Evidence, OntologyBinding, Revisability, Source,
+    Confidence, EpistemicStatus, Evidence, KnightianMode, OntologyBinding, Revisability, Source,
 };
 use crate::ontology::{FoundationOntologies, OntologyResolver, ParsedTermRef, SubsumptionResult};
 
@@ -871,6 +871,7 @@ pub fn combine_epistemic_bayesian(statuses: &[EpistemicStatus]) -> EpistemicStat
 
     EpistemicStatus {
         confidence: Confidence::new(combined_confidence),
+        knightian: KnightianMode::Defined,
         revisability: combined_revisability,
         source: Source::Derivation("bayesian_combination".into()),
         evidence: combined_evidence,
@@ -941,6 +942,7 @@ pub fn combine_epistemic_weighted_bayesian(statuses: &[EpistemicStatus]) -> Epis
 
     EpistemicStatus {
         confidence: Confidence::new(combined_confidence),
+        knightian: KnightianMode::Defined,
         revisability: combined_revisability,
         source,
         evidence: combined_evidence,
@@ -2171,12 +2173,14 @@ mod tests {
     fn test_weighted_bayesian_revisability_non_revisable() {
         let s1 = EpistemicStatus {
             confidence: Confidence::new(0.9),
+            knightian: KnightianMode::Defined,
             revisability: Revisability::NonRevisable,
             ..Default::default()
         };
 
         let s2 = EpistemicStatus {
             confidence: Confidence::new(0.8),
+            knightian: KnightianMode::Defined,
             revisability: Revisability::Revisable {
                 conditions: vec!["new_data".to_string()],
             },

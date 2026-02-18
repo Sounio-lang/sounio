@@ -16,7 +16,7 @@
 use tower_lsp::lsp_types::*;
 
 use crate::diagnostic::epistemic::{EpistemicDiagnostic, EpistemicSeverity};
-use crate::epistemic::{Confidence, EpistemicStatus, Revisability, Source};
+use crate::epistemic::{Confidence, EpistemicStatus, KnightianMode, Revisability, Source};
 
 /// Epistemic hover provider
 pub struct EpistemicHoverProvider;
@@ -696,6 +696,7 @@ mod tests {
     fn test_format_epistemic_hover() {
         let status = EpistemicStatus {
             confidence: Confidence::new(0.85),
+            knightian: KnightianMode::Defined,
             revisability: Revisability::Revisable {
                 conditions: vec!["new_data".into()],
             },

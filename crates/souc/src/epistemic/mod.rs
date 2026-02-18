@@ -77,7 +77,9 @@ pub mod temporal_validity;
 #[cfg(test)]
 mod integration_tests;
 
-pub use confidence::{Confidence, EpistemicStatus, Evidence, EvidenceKind, Revisability, Source};
+pub use confidence::{
+    Confidence, EpistemicStatus, Evidence, EvidenceKind, KnightianMode, Revisability, Source,
+};
 pub use heterogeneity::{
     HeterogeneityConfig, HeterogeneityResolver, ResolutionResult, ResolutionStrategy,
 };
