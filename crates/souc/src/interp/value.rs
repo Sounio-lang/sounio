@@ -147,8 +147,11 @@ pub enum Value {
     Knowledge {
         /// The wrapped value
         value: Box<Value>,
-        /// Confidence level (0.0 to 1.0)
+        /// Confidence level (0.0 to 1.0); meaningless when knightian=true
         confidence: f64,
+        /// Knightian undefined: true means ε=⊥ (no probability model applies).
+        /// Distinct from confidence=0.0 ("known false"). Propagates through computation.
+        knightian: bool,
         /// Provenance ID for tracking
         provenance_id: u32,
     },
@@ -455,13 +458,18 @@ impl fmt::Debug for Value {
             Value::Knowledge {
                 value,
                 confidence,
+                knightian,
                 provenance_id,
             } => {
-                write!(
-                    f,
-                    "Knowledge({:?}, conf={:.3}, prov={})",
-                    value, confidence, provenance_id
-                )
+                if *knightian {
+                    write!(f, "Knowledge({:?}, ε=⊥, prov={})", value, provenance_id)
+                } else {
+                    write!(
+                        f,
+                        "Knowledge({:?}, conf={:.3}, prov={})",
+                        value, confidence, provenance_id
+                    )
+                }
             }
         }
     }
@@ -596,9 +604,13 @@ impl fmt::Display for Value {
                 }
             }
             Value::Knowledge {
-                value, confidence, ..
+                value, confidence, knightian, ..
             } => {
-                write!(f, "Knowledge({}, {:.3})", value, confidence)
+                if *knightian {
+                    write!(f, "Knowledge({}, ε=⊥)", value)
+                } else {
+                    write!(f, "Knowledge({}, {:.3})", value, confidence)
+                }
             }
         }
     }
