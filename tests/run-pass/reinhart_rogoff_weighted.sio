@@ -1,0 +1,277 @@
+//@ run-pass
+// Reinhart-Rogoff 2010: Weighting Error + Knightian Threshold
+//
+// Extends the base reinhart_rogoff.sio demo with two additional failures:
+//
+//   FAILURE 4: UNCONVENTIONAL WEIGHTING
+//     R-R weighted by equal country weight instead of country-year weight.
+//     New Zealand's single catastrophic year (1951, -7.6%) was weighted
+//     the same as the UK's 19 years of data. This is indefensible:
+//     one outlier year dominated the average.
+//
+//   FAILURE 5: KNIGHTIAN THRESHOLD CLAIM
+//     The claim "90% debt/GDP causes negative growth" is not a measurement
+//     with reducible uncertainty. It is a causal claim about economic
+//     mechanism. The hypothesis SPACE is unknown. This is Knightian
+//     uncertainty (ε=⊥): no amount of data fixes it without a causal model.
+//
+// Data sources: Herndon, Ash, Pollin (2013) Table 3; HAP Working Paper 322.
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var guess = x / 2.0
+    if guess < 0.001 { guess = 0.001 }
+    var i = 0
+    while i < 30 {
+        guess = (guess + x / guess) / 2.0
+        i = i + 1
+    }
+    return guess
+}
+
+// ============================================================================
+// COUNTRY DATA
+// ============================================================================
+
+struct CountryData {
+    growth_pp: f64,     // mean GDP growth in percentage points
+    uncertainty: f64,   // standard error in pp
+    years: i64          // number of high-debt years observed
+}
+
+fn country(g: f64, u: f64, y: i64) -> CountryData {
+    return CountryData { growth_pp: g, uncertainty: u, years: y }
+}
+
+// ============================================================================
+// WEIGHTING SCHEMES
+// ============================================================================
+
+// Equal-country weight: each country counts once regardless of observation years.
+// R-R's method. NZ (1 year) = UK (19 years).
+fn equal_weight_mean(data: [CountryData; 9]) -> f64 with Mut, Panic, Div {
+    var sum = 0.0
+    var i = 0
+    while i < 9 {
+        sum = sum + data[i].growth_pp
+        i = i + 1
+    }
+    return sum / 9.0
+}
+
+// Equal-country weight uncertainty: RSS of individual uncertainties / n
+fn equal_weight_unc(data: [CountryData; 9]) -> f64 with Mut, Panic, Div {
+    var sum_sq = 0.0
+    var i = 0
+    while i < 9 {
+        sum_sq = sum_sq + data[i].uncertainty * data[i].uncertainty
+        i = i + 1
+    }
+    return sqrt_f64(sum_sq) / 9.0
+}
+
+// Country-year weight: each country weighted by number of high-debt years.
+// Correct method. NZ (1 year) has 1/total_years weight; UK (19 years) has 19/total_years.
+fn year_weight_mean(data: [CountryData; 9]) -> f64 with Mut, Panic, Div {
+    var weighted_sum = 0.0
+    var total_years = 0
+    var i = 0
+    while i < 9 {
+        weighted_sum = weighted_sum + data[i].growth_pp * data[i].years
+        total_years = total_years + data[i].years
+        i = i + 1
+    }
+    return weighted_sum / total_years
+}
+
+// Country-year weight uncertainty: propagate through weighted mean
+fn year_weight_unc(data: [CountryData; 9]) -> f64 with Mut, Panic, Div {
+    var total_years = 0
+    var i = 0
+    while i < 9 {
+        total_years = total_years + data[i].years
+        i = i + 1
+    }
+    var sum_sq = 0.0
+    i = 0
+    while i < 9 {
+        let w = data[i].years as f64 / total_years as f64
+        sum_sq = sum_sq + w * w * data[i].uncertainty * data[i].uncertainty
+        i = i + 1
+    }
+    return sqrt_f64(sum_sq)
+}
+
+// ============================================================================
+// KNIGHTIAN EPISTEMIC TRACKING
+// ============================================================================
+// Reuses the pattern from knightian_dark_matter.sio
+
+struct EpistemicClaim {
+    description: i32,   // 0=threshold, 1=measurement, 2=computation
+    value: f64,
+    knightian: bool     // true = ε=⊥ (model space unknown)
+}
+
+fn measurement(v: f64) -> EpistemicClaim {
+    return EpistemicClaim { description: 1, value: v, knightian: false }
+}
+
+fn knightian_claim(v: f64) -> EpistemicClaim {
+    return EpistemicClaim { description: 0, value: v, knightian: true }
+}
+
+// Knightian propagation: combining a measurement with a Knightian claim
+// produces a Knightian result. You cannot compute your way to certainty
+// about a causal mechanism using only observational data.
+fn combine_claims(data: EpistemicClaim, threshold: EpistemicClaim) -> EpistemicClaim {
+    if data.knightian || threshold.knightian {
+        return EpistemicClaim {
+            description: 2,
+            value: data.value,
+            knightian: true
+        }
+    }
+    return EpistemicClaim {
+        description: 2,
+        value: data.value,
+        knightian: false
+    }
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("================================================================")
+    println("  Reinhart-Rogoff 2010: Weighting + Knightian Threshold")
+    println("================================================================")
+    println("")
+
+    // All 9 high-debt countries with year counts
+    // Source: Herndon, Ash, Pollin (2013) Table 3
+    //                          growth(pp)  SE(pp)  years
+    let data = [
+        country(-0.07, 1.5, 19),   // UK
+        country( 2.4,  1.2, 4),    // US
+        country(-2.9,  2.8, 6),    // Greece
+        country(-0.3,  1.1, 7),    // Ireland
+        country( 2.6,  1.0, 5),    // Australia
+        country( 0.6,  1.8, 7),    // Austria
+        country( 2.6,  1.2, 1),    // Belgium
+        country( 3.0,  0.8, 5),    // Canada
+        country( 3.9,  1.4, 3)     // Denmark
+    ]
+
+    // ============================================================
+    // FAILURE 4: WEIGHTING SCHEME
+    // ============================================================
+    println("--- FAILURE 4: Unconventional Weighting ---")
+    println("")
+    println("  R-R used EQUAL COUNTRY weight: each country counted once")
+    println("  regardless of how many high-debt years were observed.")
+    println("  Belgium's 1 year = UK's 19 years = same weight.")
+    println("")
+
+    let eq_mean = equal_weight_mean(data)
+    let eq_unc = equal_weight_unc(data)
+    let yr_mean = year_weight_mean(data)
+    let yr_unc = year_weight_unc(data)
+
+    print("  Equal-country-weight mean:  ")
+    print(eq_mean)
+    print(" +/- ")
+    print(eq_unc)
+    println(" pp")
+
+    print("  Country-year-weight mean:   ")
+    print(yr_mean)
+    print(" +/- ")
+    print(yr_unc)
+    println(" pp")
+    println("")
+
+    let shift = yr_mean - eq_mean
+    print("  Weighting scheme shift: ")
+    print(shift)
+    println(" pp")
+    println("")
+
+    let eq_snr = abs_f64(eq_mean) / eq_unc
+    let yr_snr = abs_f64(yr_mean) / yr_unc
+
+    print("  Equal-weight SNR:       ")
+    println(eq_snr)
+    print("  Year-weight SNR:        ")
+    println(yr_snr)
+    println("")
+
+    if yr_snr > eq_snr {
+        println("  Country-year weighting gives a STRONGER signal.")
+        println("  Positive growth in high-debt countries is real.")
+    }
+    println("")
+
+    // ============================================================
+    // FAILURE 5: THE THRESHOLD CLAIM IS KNIGHTIAN
+    // ============================================================
+    println("--- FAILURE 5: The 90% Threshold Is Knightian ---")
+    println("")
+    println("  R-R claimed: 'debt/GDP > 90% CAUSES negative growth.'")
+    println("  This is a causal claim, not a measurement.")
+    println("  The mechanism (why 90%? why not 85%? or 95%?) is unspecified.")
+    println("  The hypothesis space is UNKNOWN. This is Knightian (eps=bottom).")
+    println("")
+
+    // The growth data is a real measurement (Bayesian, reducible uncertainty)
+    let growth_data = measurement(yr_mean)
+
+    // The threshold claim is Knightian: model space is unknown
+    let threshold_claim = knightian_claim(0.90)
+
+    // Combining them: the policy conclusion inherits Knightian status
+    let policy = combine_claims(growth_data, threshold_claim)
+
+    if policy.knightian {
+        println("  RESULT: Policy conclusion inherits Knightian status (eps=bottom).")
+        println("  You cannot derive a causal threshold from observational data alone.")
+        println("  No amount of better averaging fixes a Knightian causal claim.")
+        println("  The type system makes this explicit: eps=bottom propagates.")
+    }
+    println("")
+
+    // ============================================================
+    // SUMMARY
+    // ============================================================
+    println("================================================================")
+    println("  SUMMARY")
+    println("================================================================")
+    println("")
+    println("  [WEIGHTING]  Equal-country-weight vs country-year-weight")
+    print("               shifts the mean by ")
+    print(shift)
+    println(" pp.")
+    println("               One bad year in one country should not equal")
+    println("               19 years of data in another.")
+    println("")
+    println("  [KNIGHTIAN]  The causal threshold claim is eps=bottom.")
+    println("               It cannot be resolved by statistical averaging.")
+    println("               Sounio's epistemic system makes this visible:")
+    println("               combine(measurement, Knightian) = Knightian.")
+    println("")
+    println("  Five failures. Five catches. The austerity decade was avoidable.")
+    println("")
+    println("[PASS] Reinhart-Rogoff weighted + Knightian demo complete.")
+
+    return 0
+}

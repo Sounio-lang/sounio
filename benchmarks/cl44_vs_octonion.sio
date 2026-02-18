@@ -27,6 +27,12 @@ fn abs_f64(x: f64) -> f64 {
 // Cl(4,4) GEOMETRIC PRODUCT — 256-COMPONENT
 // ============================================================================
 
+// Precomputed sign table for Cl(4,4): 256x256 = 65536 entries.
+// Each entry is +/-1.0. Filled once, then every geo_sign_44 call in the
+// hot loop becomes a single indexed load instead of a bit-scanning loop.
+var cl44_table: [f64; 65536] = [0.0; 65536]
+var cl44_ready: bool = false
+
 // Sign computation for Cl(4,4) metric: bits 0-3 square to +1, bits 4-7 to -1
 fn geo_sign_44(a: i64, b: i64) -> f64 with Mut, Panic, Div {
     var swaps = 0
@@ -52,8 +58,27 @@ fn geo_sign_44(a: i64, b: i64) -> f64 with Mut, Panic, Div {
     return 0.0 - msign
 }
 
+fn init_cl44_table() with Mut, Panic, Div {
+    if cl44_ready { return }
+    var i = 0
+    while i < 256 {
+        var j = 0
+        while j < 256 {
+            cl44_table[i * 256 + j] = geo_sign_44(i, j)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    cl44_ready = true
+}
+
+fn geo_sign_44_fast(a: i64, b: i64) -> f64 with Panic {
+    return cl44_table[a * 256 + b]
+}
+
 // Full 256-component geometric product using mutable array accumulation
 fn geo_product_256(a: [f64; 256], b: [f64; 256]) -> [f64; 256] with Mut, Panic, Div {
+    init_cl44_table()
     var result = [0.0; 256]
     var i = 0
     while i < 256 {
@@ -62,7 +87,7 @@ fn geo_product_256(a: [f64; 256], b: [f64; 256]) -> [f64; 256] with Mut, Panic, 
             while j < 256 {
                 if b[j] != 0.0 {
                     let k = i ^ j
-                    let val = geo_sign_44(i, j) * a[i] * b[j]
+                    let val = geo_sign_44_fast(i, j) * a[i] * b[j]
                     result[k] = result[k] + val
                 }
                 j = j + 1
