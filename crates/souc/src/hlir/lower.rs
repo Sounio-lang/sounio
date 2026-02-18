@@ -367,6 +367,7 @@ impl<'a> LoweringContext<'a> {
     }
 
     fn lower_block(&mut self, block: &HirBlock) -> Option<ValueId> {
+        self.builder.enter_scope();
         let mut last_value = None;
 
         for stmt in &block.stmts {
@@ -376,6 +377,7 @@ impl<'a> LoweringContext<'a> {
             last_value = self.lower_stmt(stmt);
         }
 
+        self.builder.exit_scope();
         last_value
     }
 

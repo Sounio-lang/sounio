@@ -54,6 +54,14 @@ pub struct FunctionBuilder {
     var_values: HashMap<String, ValueId>,
     /// Map from variable names to their stack slots (for mutable variables)
     var_slots: HashMap<String, ValueId>,
+    /// Lexical scope stack for restoring shadowed bindings.
+    scope_stack: Vec<ScopeFrame>,
+}
+
+#[derive(Default)]
+struct ScopeFrame {
+    var_values_prev: HashMap<String, Option<ValueId>>,
+    var_slots_prev: HashMap<String, Option<ValueId>>,
 }
 
 impl FunctionBuilder {
@@ -78,6 +86,7 @@ impl FunctionBuilder {
             current_block: None,
             var_values: HashMap::new(),
             var_slots: HashMap::new(),
+            scope_stack: Vec::new(),
         }
     }
 
@@ -143,9 +152,57 @@ impl FunctionBuilder {
 
     // ==================== Variable Management ====================
 
+    /// Enter a new lexical scope.
+    pub fn enter_scope(&mut self) {
+        self.scope_stack.push(ScopeFrame::default());
+    }
+
+    /// Exit the current lexical scope, restoring shadowed bindings.
+    pub fn exit_scope(&mut self) {
+        let Some(frame) = self.scope_stack.pop() else {
+            return;
+        };
+
+        for (name, prev) in frame.var_values_prev {
+            if let Some(v) = prev {
+                self.var_values.insert(name, v);
+            } else {
+                self.var_values.remove(&name);
+            }
+        }
+
+        for (name, prev) in frame.var_slots_prev {
+            if let Some(v) = prev {
+                self.var_slots.insert(name, v);
+            } else {
+                self.var_slots.remove(&name);
+            }
+        }
+    }
+
+    fn record_var_value_shadow(&mut self, name: &str) {
+        if let Some(frame) = self.scope_stack.last_mut() {
+            frame
+                .var_values_prev
+                .entry(name.to_string())
+                .or_insert_with(|| self.var_values.get(name).copied());
+        }
+    }
+
+    fn record_var_slot_shadow(&mut self, name: &str) {
+        if let Some(frame) = self.scope_stack.last_mut() {
+            frame
+                .var_slots_prev
+                .entry(name.to_string())
+                .or_insert_with(|| self.var_slots.get(name).copied());
+        }
+    }
+
     /// Bind a variable name to an SSA value
     pub fn bind_var(&mut self, name: impl Into<String>, value: ValueId) {
-        self.var_values.insert(name.into(), value);
+        let name = name.into();
+        self.record_var_value_shadow(&name);
+        self.var_values.insert(name, value);
     }
 
     /// Get the current SSA value for a variable
@@ -157,6 +214,7 @@ impl FunctionBuilder {
     pub fn alloc_var(&mut self, name: impl Into<String>, ty: HlirType) -> ValueId {
         let slot = self.build_alloca(ty.clone());
         let name = name.into();
+        self.record_var_slot_shadow(&name);
         self.var_slots.insert(name.clone(), slot);
         self.func.locals.insert(slot, ty);
         slot
