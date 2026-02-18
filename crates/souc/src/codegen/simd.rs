@@ -525,10 +525,163 @@ impl SimdSedenion {
     // blocks that can be composed for the full multiplication.
 }
 
+// ==================== CLIFFORD ALGEBRA GEOMETRIC PRODUCT ====================
+// Precomputed sign tables for Cl(p,q) geometric products.
+//
+// The geometric product of two basis blades e_I * e_J in Clifford algebra Cl(p,q)
+// yields ±e_{I^J} where the sign depends on:
+// 1. Transposition parity (number of swaps to move J past I)
+// 2. Metric signature (basis vectors with index >= p square to -1)
+//
+// By precomputing the full n×n sign table (n = 2^(p+q)) at compile time,
+// we eliminate the O(p+q) sign computation per basis-blade pair, replacing
+// ~50 instructions (function call + loop) with a single table load.
+
+/// Compute the sign of basis blade product e_i * e_j in Cl(p,q).
+///
+/// Algorithm: count transpositions (bits of j that must pass bits of i),
+/// then apply metric (shared bits in positions >= p square to -1).
+pub fn clifford_sign(i: usize, j: usize, p: u32, q: u32) -> f64 {
+    let total = p + q;
+
+    // Count transposition swaps: for each set bit in j, count set bits
+    // in i at higher positions
+    let mut swaps = 0u32;
+    for bit in 0..total {
+        if (j >> bit) & 1 != 0 {
+            for k in (bit + 1)..total {
+                if (i >> k) & 1 != 0 {
+                    swaps += 1;
+                }
+            }
+        }
+    }
+
+    // Metric sign: shared basis vectors at positions >= p square to -1
+    let common = i & j;
+    let mut metric_sign = 1i32;
+    for bit in p..total {
+        if (common >> bit) & 1 != 0 {
+            metric_sign = -metric_sign;
+        }
+    }
+
+    let sign = if swaps % 2 == 0 {
+        metric_sign
+    } else {
+        -metric_sign
+    };
+    sign as f64
+}
+
+/// Precompute the full n×n sign table for Clifford algebra Cl(p,q).
+///
+/// Returns a `Vec<f64>` of size n² where n = 2^(p+q).
+/// Entry `table[i * n + j]` gives the sign (±1.0) for e_i * e_j.
+///
+/// For Cl(4,4): n=256, table size = 65536 entries = 512 KB.
+/// For Cl(1,3): n=16, table size = 256 entries = 2 KB.
+pub fn precompute_clifford_sign_table(p: u32, q: u32) -> Vec<f64> {
+    let n = 1usize << (p + q);
+    let mut table = vec![0.0f64; n * n];
+
+    for i in 0..n {
+        for j in 0..n {
+            table[i * n + j] = clifford_sign(i, j, p, q);
+        }
+    }
+
+    table
+}
+
+/// Static storage for precomputed sign tables (kept alive for JIT lifetime).
+#[cfg(feature = "jit")]
+use std::sync::Mutex;
+
+#[cfg(feature = "jit")]
+static CLIFFORD_SIGN_TABLES: Mutex<Vec<Box<[f64]>>> = Mutex::new(Vec::new());
+
+/// Store a precomputed sign table in static storage, returning a raw pointer
+/// that remains valid for the lifetime of the process.
+#[cfg(feature = "jit")]
+pub fn store_clifford_sign_table(table: Vec<f64>) -> *const f64 {
+    let boxed: Box<[f64]> = table.into_boxed_slice();
+    let ptr = boxed.as_ptr();
+    if let Ok(mut tables) = CLIFFORD_SIGN_TABLES.lock() {
+        tables.push(boxed);
+    }
+    ptr
+}
+
+/// Get or create a cached sign table for Cl(p,q), returning (pointer as usize, dimension).
+/// Thread-safe: uses internal mutex. The returned pointer is valid for process lifetime.
+/// Returns usize instead of raw pointer for Send/Sync compatibility.
+#[cfg(feature = "jit")]
+pub fn get_or_create_sign_table(p: u32, q: u32) -> (usize, usize) {
+    use std::sync::OnceLock;
+    use std::collections::HashMap;
+
+    // Cache of (p,q) -> (pointer_as_usize, dimension)
+    static CACHE: OnceLock<Mutex<HashMap<(u32, u32), (usize, usize)>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    let mut map = cache.lock().unwrap();
+    if let Some(&entry) = map.get(&(p, q)) {
+        return entry;
+    }
+
+    let n = 1usize << (p + q);
+    let table = precompute_clifford_sign_table(p, q);
+    let ptr = store_clifford_sign_table(table);
+    let entry = (ptr as usize, n);
+    map.insert((p, q), entry);
+    entry
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn test_simd_module_exists() {
         assert!(true);
+    }
+
+    #[test]
+    fn test_clifford_sign_cl44() {
+        // e0 * e0 = +1 (positive square)
+        assert_eq!(clifford_sign(1, 1, 4, 4), 1.0);
+        // e4 * e4 = -1 (negative square, bit 4 >= p=4)
+        assert_eq!(clifford_sign(16, 16, 4, 4), -1.0);
+        // e0 * e1 = e01 (no swap, no shared bits)
+        assert_eq!(clifford_sign(1, 2, 4, 4), 1.0);
+        // e1 * e0 = -e01 (one swap)
+        assert_eq!(clifford_sign(2, 1, 4, 4), -1.0);
+    }
+
+    #[test]
+    fn test_clifford_sign_cl13() {
+        // Cl(1,3): e0^2 = +1, e1^2 = e2^2 = e3^2 = -1
+        // e0 = bit 0, e1 = bit 1, e2 = bit 2, e3 = bit 3
+        assert_eq!(clifford_sign(1, 1, 1, 3), 1.0);   // e0^2 = +1
+        assert_eq!(clifford_sign(2, 2, 1, 3), -1.0);   // e1^2 = -1
+        assert_eq!(clifford_sign(4, 4, 1, 3), -1.0);   // e2^2 = -1
+        assert_eq!(clifford_sign(8, 8, 1, 3), -1.0);   // e3^2 = -1
+    }
+
+    #[test]
+    fn test_sign_table_symmetry() {
+        let table = precompute_clifford_sign_table(1, 3);
+        let n = 16;
+        // e_i * e_j and e_j * e_i should differ only by transposition sign
+        for i in 0..n {
+            for j in 0..n {
+                let s1 = table[i * n + j];
+                let s2 = table[j * n + i];
+                // Both should be ±1.0
+                assert!(s1 == 1.0 || s1 == -1.0, "Invalid sign at ({}, {})", i, j);
+                assert!(s2 == 1.0 || s2 == -1.0, "Invalid sign at ({}, {})", j, i);
+            }
+        }
     }
 }

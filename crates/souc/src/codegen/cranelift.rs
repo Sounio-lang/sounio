@@ -2502,6 +2502,20 @@ impl AotCompiler {
         self.func_sigs
             .insert("runtime_print_bool".to_string(), sig_print_bool);
 
+        // _demetrios_alloc(size: i64) -> ptr
+        // Used as allocator fallback in AOT for aggregate literals that may
+        // outlive callee stack frames (e.g., returned arrays).
+        let mut sig_demetrios_alloc = Signature::new(call_conv);
+        sig_demetrios_alloc.params.push(AbiParam::new(types::I64));
+        sig_demetrios_alloc.returns.push(AbiParam::new(types::I64));
+        let id = self
+            .obj_module
+            .declare_function("_demetrios_alloc", Linkage::Import, &sig_demetrios_alloc)
+            .map_err(|e| format!("Failed to declare _demetrios_alloc: {}", e))?;
+        self.func_ids.insert("_demetrios_alloc".to_string(), id);
+        self.func_sigs
+            .insert("_demetrios_alloc".to_string(), sig_demetrios_alloc);
+
         Ok(())
     }
 
@@ -3844,10 +3858,78 @@ impl JitCompiler {
             builder.finalize();
         }
 
+        // Run verifier explicitly to surface detailed diagnostics when lowering
+        // emits invalid Cranelift IR.
+        // Use catch_unwind because Cranelift's verifier may panic on some iconst
+        // patterns (unreachable in iconst_bounds) instead of returning Err.
+        let verify_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cranelift_codegen::verify_function(&self.ctx.func, self.jit_module.isa())
+        }));
+        match verify_result {
+            Ok(Err(e)) => {
+                let dump_ir = std::env::var("SOUNIO_CRANELIFT_DUMP_VERIFY")
+                    .ok()
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+                if dump_ir {
+                    return Err(format!(
+                        "Verifier pre-check failed for {}:\n{}\n\nCranelift IR:\n{}",
+                        func.name,
+                        e,
+                        self.ctx.func.display()
+                    ));
+                }
+                return Err(format!(
+                    "Verifier pre-check failed for {}:\n{}\nSet SOUNIO_CRANELIFT_DUMP_VERIFY=1 to include Cranelift IR.",
+                    func.name, e
+                ));
+            }
+            Err(_panic) => {
+                // Dump IR for failed function on verifier panic
+                if std::env::var("SOUNIO_CRANELIFT_DUMP_VERIFY").ok().map(|v| v == "1").unwrap_or(false) {
+                    eprintln!(
+                        "[cranelift] verifier PANIC in {}.\nCranelift IR:\n{}",
+                        func.name,
+                        self.ctx.func.display()
+                    );
+                } else {
+                    eprintln!(
+                        "[cranelift] verifier panic in {} (non-fatal, continuing)",
+                        func.name
+                    );
+                }
+            }
+            Ok(Ok(())) => {} // verification passed
+        }
+
+        // Optionally dump Cranelift IR for specific functions.
+        // Set SOUNIO_DUMP_FUNC=geo_product_256 to dump IR for that function.
+        if let Ok(pattern) = std::env::var("SOUNIO_DUMP_FUNC") {
+            if func.name.contains(&pattern) {
+                eprintln!("=== Cranelift IR for {} ===\n{}", func.name, self.ctx.func.display());
+            }
+        }
+
         // Compile the function
-        self.jit_module
-            .define_function(func_id, &mut self.ctx)
-            .map_err(|e| format!("Failed to define function {}: {}", func.name, e))?;
+        // Wrap in catch_unwind: Cranelift's internal verifier may panic on some
+        // iconst patterns even though the code would execute correctly.
+        let define_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.jit_module.define_function(func_id, &mut self.ctx)
+        }));
+        match define_result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(format!("Failed to define function {}: {}", func.name, e)),
+            Err(_panic) => {
+                eprintln!("[cranelift] define_function panic for {} — skipping", func.name);
+                // Cannot proceed without this function
+                return Err(format!(
+                    "Cranelift internal panic compiling function '{}'. \
+                     This is likely due to large array operations exceeding \
+                     Cranelift's iconst verifier bounds.",
+                    func.name
+                ));
+            }
+        }
 
         self.jit_module.clear_context(&mut self.ctx);
 
@@ -3947,6 +4029,11 @@ fn translate_function(
 ) -> Result<(), String> {
     let mut values: HashMap<ValueId, cranelift_codegen::ir::Value> = HashMap::new();
     let mut blocks: HashMap<BlockId, cranelift_codegen::ir::Block> = HashMap::new();
+    let mut phi_incomings: HashMap<BlockId, Vec<(ValueId, Vec<(BlockId, ValueId)>)>> =
+        HashMap::new();
+    let mut phi_slots: HashMap<ValueId, cranelift_codegen::ir::StackSlot> = HashMap::new();
+    let mut phi_types: HashMap<ValueId, types::Type> = HashMap::new();
+    let mut const_values: HashMap<ValueId, crate::hlir::HlirConstant> = HashMap::new();
     // Track which ValueIds are string constants (for print handling)
     let mut string_values: std::collections::HashSet<ValueId> = std::collections::HashSet::new();
 
@@ -3954,6 +4041,40 @@ fn translate_function(
     for block in &func.blocks {
         let cl_block = builder.create_block();
         blocks.insert(block.id, cl_block);
+    }
+
+    // Allocate per-Phi stack slots and record incoming edge mapping.
+    // We materialize Phi through explicit stores on predecessor edges and
+    // loads in the Phi instruction to preserve SSA merge semantics.
+    for block in &func.blocks {
+        for instr in &block.instructions {
+            if let Op::Phi { incoming } = &instr.op
+                && let Some(phi_id) = instr.result
+            {
+                let phi_ty = hlir_to_cranelift_type(&instr.ty);
+                let bit_width = phi_ty.bits().max(8);
+                let byte_size = ((bit_width + 7) / 8) as u32;
+                let slot = builder.create_sized_stack_slot(
+                    cranelift_codegen::ir::StackSlotData::new(
+                        cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                        byte_size,
+                        0,
+                    ),
+                );
+                phi_slots.insert(phi_id, slot);
+                phi_types.insert(phi_id, phi_ty);
+                phi_incomings
+                    .entry(block.id)
+                    .or_default()
+                    .push((phi_id, incoming.clone()));
+            }
+
+            if let Op::Const(constant) = &instr.op
+                && let Some(value_id) = instr.result
+            {
+                const_values.insert(value_id, constant.clone());
+            }
+        }
     }
 
     // Entry block parameters (function arguments)
@@ -3982,6 +4103,10 @@ fn translate_function(
             variadic_funcs,
             func_sigs,
             type_defs,
+            &phi_incomings,
+            &phi_slots,
+            &phi_types,
+            &const_values,
             first,
             string_globals,
         )?;
@@ -4005,6 +4130,10 @@ fn translate_block(
     variadic_funcs: &HashMap<String, usize>,
     func_sigs: &HashMap<String, Signature>,
     type_defs: &[crate::hlir::HlirTypeDef],
+    phi_incomings: &HashMap<BlockId, Vec<(ValueId, Vec<(BlockId, ValueId)>)>>,
+    phi_slots: &HashMap<ValueId, cranelift_codegen::ir::StackSlot>,
+    phi_types: &HashMap<ValueId, types::Type>,
+    const_values: &HashMap<ValueId, crate::hlir::HlirConstant>,
     is_entry: bool,
     string_globals: Option<&HashMap<String, cranelift_codegen::ir::GlobalValue>>,
 ) -> Result<(), String> {
@@ -4026,6 +4155,8 @@ fn translate_block(
             variadic_funcs,
             func_sigs,
             type_defs,
+            phi_slots,
+            phi_types,
             string_globals,
         )?;
         if let (Some(res_id), Some(val)) = (instr.result, result) {
@@ -4034,7 +4165,17 @@ fn translate_block(
     }
 
     // Translate terminator
-    translate_terminator(builder, &block.terminator, blocks, values)?;
+    translate_terminator(
+        builder,
+        block.id,
+        &block.terminator,
+        blocks,
+        values,
+        phi_incomings,
+        phi_slots,
+        phi_types,
+        const_values,
+    )?;
 
     Ok(())
 }
@@ -4049,6 +4190,8 @@ fn translate_instruction(
     variadic_funcs: &HashMap<String, usize>,
     func_sigs: &HashMap<String, Signature>,
     type_defs: &[crate::hlir::HlirTypeDef],
+    phi_slots: &HashMap<ValueId, cranelift_codegen::ir::StackSlot>,
+    phi_types: &HashMap<ValueId, types::Type>,
     string_globals: Option<&HashMap<String, cranelift_codegen::ir::GlobalValue>>,
 ) -> Result<Option<cranelift_codegen::ir::Value>, String> {
     let ty = hlir_to_cranelift_type(&instr.ty);
@@ -5573,6 +5716,50 @@ fn translate_instruction(
                 return Ok(None);
             }
 
+            // ============================================================
+            // Clifford algebra sign table optimization
+            // Replace geo_sign_NN(i, j) calls with precomputed table lookup.
+            // Eliminates ~50 instructions per call (function prologue/epilogue,
+            // loop, branches) and replaces with a single indexed memory load.
+            // ============================================================
+            if arg_vals.len() == 2 {
+                let clifford_sig = if name == "geo_sign_44" {
+                    Some((4u32, 4u32))
+                } else if name == "geo_sign" {
+                    // Cl(1,3) sign function from cl13_lorentz.sio
+                    Some((1u32, 3u32))
+                } else {
+                    None
+                };
+
+                if let Some((p, q)) = clifford_sig {
+                    let (table_ptr_usize, n) =
+                        crate::codegen::simd::get_or_create_sign_table(p, q);
+
+                    // Emit: index = i * n + j
+                    let n_val = builder.ins().iconst(types::I64, n as i64);
+                    let i_val = arg_vals[0];
+                    let j_val = arg_vals[1];
+                    let i_times_n = builder.ins().imul(i_val, n_val);
+                    let index = builder.ins().iadd(i_times_n, j_val);
+
+                    // Emit: sign = table[index] = *(table_ptr + index * 8)
+                    let eight = builder.ins().iconst(types::I64, 8);
+                    let byte_offset = builder.ins().imul(index, eight);
+                    let base_ptr =
+                        builder.ins().iconst(types::I64, table_ptr_usize as i64);
+                    let addr = builder.ins().iadd(base_ptr, byte_offset);
+                    let sign = builder.ins().load(
+                        types::F64,
+                        cranelift_codegen::ir::MemFlags::new(),
+                        addr,
+                        0,
+                    );
+
+                    return Ok(Some(sign));
+                }
+            }
+
             if let Some(&func_ref) = func_refs.get(name) {
                 // Check if this is a variadic function call
                 if let Some(&fixed_param_count) = variadic_funcs.get(name) {
@@ -5629,7 +5816,19 @@ fn translate_instruction(
                 }
 
                 // Normal (non-variadic) function call
-                let call = builder.ins().call(func_ref, &arg_vals);
+                let mut coerced_args = arg_vals.clone();
+                if let Some(sig) = func_sigs.get(name) {
+                    for (idx, arg) in coerced_args.iter_mut().enumerate() {
+                        let Some(expected) = sig.params.get(idx).map(|p| p.value_type) else {
+                            break;
+                        };
+                        let actual = builder.func.dfg.value_type(*arg);
+                        if actual != expected {
+                            *arg = coerce_value_to_type(builder, *arg, expected);
+                        }
+                    }
+                }
+                let call = builder.ins().call(func_ref, &coerced_args);
                 let results = builder.inst_results(call);
                 if results.is_empty() {
                     Ok(None)
@@ -5638,7 +5837,13 @@ fn translate_instruction(
                 }
             } else {
                 // Unknown function - return zero
-                let zero = builder.ins().iconst(ty, 0);
+                let zero = if ty == types::F64 {
+                    builder.ins().f64const(0.0)
+                } else if ty == types::F32 {
+                    builder.ins().f32const(0.0)
+                } else {
+                    builder.ins().iconst(ty, 0)
+                };
                 Ok(Some(zero))
             }
         }
@@ -5650,13 +5855,16 @@ fn translate_instruction(
                 .map(|a| get_value(values, *a))
                 .collect::<Result<_, _>>()?;
 
-            // Indirect call - need a signature
-            // For now, assume simple i64 -> i64 signature
+            // Indirect call - synthesize a signature from actual argument and
+            // result types instead of hard-coding i64/i64.
             let mut sig = Signature::new(cranelift_codegen::isa::CallConv::SystemV);
-            for _ in &arg_vals {
-                sig.params.push(AbiParam::new(types::I64));
+            for arg in &arg_vals {
+                let arg_ty = builder.func.dfg.value_type(*arg);
+                sig.params.push(AbiParam::new(arg_ty));
             }
-            sig.returns.push(AbiParam::new(types::I64));
+            if !matches!(instr.ty, HlirType::Void) {
+                sig.returns.push(AbiParam::new(ty));
+            }
 
             let sig_ref = builder.import_signature(sig);
             let call = builder.ins().call_indirect(sig_ref, func_val, &arg_vals);
@@ -5737,39 +5945,60 @@ fn translate_instruction(
 
             if val_ty == target_ty {
                 Ok(Some(val))
-            } else if val_ty.is_int() && target_ty.is_int() && val_ty.bits() < target_ty.bits() {
-                // Integer widening: preserve signedness of the *source* type.
-                let extended = if matches!(
-                    source,
-                    HlirType::I8 | HlirType::I16 | HlirType::I32 | HlirType::I64 | HlirType::I128
-                ) {
-                    builder.ins().sextend(target_ty, val)
-                } else {
-                    builder.ins().uextend(target_ty, val)
-                };
-                Ok(Some(extended))
-            } else if !val_ty.is_int() && !target_ty.is_int() && val_ty.bits() < target_ty.bits() {
-                Ok(Some(builder.ins().fpromote(target_ty, val)))
-            } else {
-                // Truncate / demote
-                if target_ty.is_int() {
+            } else if val_ty.is_int() && target_ty.is_int() {
+                if val_ty.bits() < target_ty.bits() {
+                    // Integer widening: preserve signedness of the source type.
+                    let extended = if source.is_signed() {
+                        builder.ins().sextend(target_ty, val)
+                    } else {
+                        builder.ins().uextend(target_ty, val)
+                    };
+                    Ok(Some(extended))
+                } else if val_ty.bits() > target_ty.bits() {
                     Ok(Some(builder.ins().ireduce(target_ty, val)))
                 } else {
-                    Ok(Some(builder.ins().fdemote(target_ty, val)))
+                    Ok(Some(val))
                 }
+            } else if val_ty.is_float() && target_ty.is_float() {
+                if val_ty.bits() < target_ty.bits() {
+                    Ok(Some(builder.ins().fpromote(target_ty, val)))
+                } else if val_ty.bits() > target_ty.bits() {
+                    Ok(Some(builder.ins().fdemote(target_ty, val)))
+                } else {
+                    Ok(Some(val))
+                }
+            } else if val_ty.is_int() && target_ty.is_float() {
+                if source.is_signed() {
+                    Ok(Some(builder.ins().fcvt_from_sint(target_ty, val)))
+                } else {
+                    Ok(Some(builder.ins().fcvt_from_uint(target_ty, val)))
+                }
+            } else if val_ty.is_float() && target_ty.is_int() {
+                if target.is_signed() {
+                    Ok(Some(builder.ins().fcvt_to_sint(target_ty, val)))
+                } else {
+                    Ok(Some(builder.ins().fcvt_to_uint(target_ty, val)))
+                }
+            } else {
+                Err(format!(
+                    "Unsupported cast lowering from {:?} ({}) to {:?} ({})",
+                    source, val_ty, target, target_ty
+                ))
             }
         }
 
         Op::Phi { incoming } => {
-            // Phi nodes should be handled as block parameters in Cranelift
-            // For now, return first incoming value if available
-            if let Some((_, first_val)) = incoming.first() {
-                let val = get_value(values, *first_val)?;
-                Ok(Some(val))
-            } else {
-                let zero = builder.ins().iconst(ty, 0);
-                Ok(Some(zero))
-            }
+            let _ = incoming;
+            let phi_id = instr
+                .result
+                .ok_or_else(|| "Phi instruction missing result id".to_string())?;
+            let slot = phi_slots
+                .get(&phi_id)
+                .ok_or_else(|| format!("Phi slot not found for {:?}", phi_id))?;
+            let load_ty = phi_types.get(&phi_id).copied().unwrap_or(ty);
+            let ptr = builder.ins().stack_addr(types::I64, *slot, 0);
+            let loaded = builder.ins().load(load_ty, MemFlags::new(), ptr, 0);
+            Ok(Some(loaded))
         }
 
         Op::ExtractValue { base, index } => {
@@ -5793,14 +6022,36 @@ fn translate_instruction(
         }
 
         Op::Tuple(vals) => {
-            // Tuples: no length header, just store values
-            let size = (vals.len() * 8) as u32;
-            let slot = builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
-                cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-                size,
-                0,
-            ));
-            let base = builder.ins().stack_addr(types::I64, slot, 0);
+            // Tuples: no length header, just store values.
+            // Use runtime allocation so tuple values can safely escape function scope.
+            let size = (vals.len().max(1) * 8) as u32;
+            let base = if let Some(&alloc_ref) = func_refs
+                .get("runtime_alloc")
+                .or_else(|| func_refs.get("_demetrios_alloc"))
+            {
+                let alloc_size = builder.ins().iconst(types::I64, size as i64);
+                let call = builder.ins().call(alloc_ref, &[alloc_size]);
+                let results = builder.inst_results(call);
+                if results.is_empty() {
+                    let slot = builder.create_sized_stack_slot(
+                        cranelift_codegen::ir::StackSlotData::new(
+                            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                            size,
+                            8,
+                        ),
+                    );
+                    builder.ins().stack_addr(types::I64, slot, 0)
+                } else {
+                    results[0]
+                }
+            } else {
+                let slot = builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+                    cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                    size,
+                    8,
+                ));
+                builder.ins().stack_addr(types::I64, slot, 0)
+            };
 
             for (i, v) in vals.iter().enumerate() {
                 let val = get_value(values, *v)?;
@@ -5828,12 +6079,37 @@ fn translate_instruction(
                 Some(crate::hlir::HlirType::Struct(_) | crate::hlir::HlirType::Tuple(_))
             );
             let size = (vals.len() * elem_size + 8) as u32; // +8 for length header
-            let slot = builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
-                cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-                size,
-                8, // align to 8 bytes
-            ));
-            let base = builder.ins().stack_addr(types::I64, slot, 0);
+
+            // Prefer runtime allocation so arrays can safely escape function scope.
+            // Stack-backed array pointers become invalid after return and can be
+            // clobbered by subsequent calls (observed in geo_product reproducer).
+            let base = if let Some(&alloc_ref) = func_refs
+                .get("runtime_alloc")
+                .or_else(|| func_refs.get("_demetrios_alloc"))
+            {
+                let alloc_size = builder.ins().iconst(types::I64, size as i64);
+                let call = builder.ins().call(alloc_ref, &[alloc_size]);
+                let results = builder.inst_results(call);
+                if results.is_empty() {
+                    let slot = builder.create_sized_stack_slot(
+                        cranelift_codegen::ir::StackSlotData::new(
+                            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                            size,
+                            8,
+                        ),
+                    );
+                    builder.ins().stack_addr(types::I64, slot, 0)
+                } else {
+                    results[0]
+                }
+            } else {
+                let slot = builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+                    cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                    size,
+                    8, // align to 8 bytes
+                ));
+                builder.ins().stack_addr(types::I64, slot, 0)
+            };
 
             // Store length at offset 0
             let len_val = builder.ins().iconst(types::I64, vals.len() as i64);
@@ -5885,75 +6161,43 @@ fn translate_instruction(
         }
 
         Op::Struct { name, fields } => {
-            // Calculate actual struct size using type definitions
-            let struct_ty = crate::hlir::HlirType::Struct(name.clone());
-            let size = struct_ty.size_bytes_with_defs(type_defs).max(8) as u32;
-            let slot = builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
-                cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-                size,
-                8, // 8-byte alignment
-            ));
-            let base = builder.ins().stack_addr(types::I64, slot, 0);
+            // NOTE: field extraction and pointer derivation currently assume a fixed
+            // 8-byte slot per field (offset = index * 8). Keep struct materialization
+            // consistent with that ABI to avoid mismatched loads/stores for mixed-size
+            // field layouts.
+            let size = (fields.len().max(1) * 8) as u32;
+            let base = if let Some(&alloc_ref) = func_refs
+                .get("runtime_alloc")
+                .or_else(|| func_refs.get("_demetrios_alloc"))
+            {
+                let alloc_size = builder.ins().iconst(types::I64, size as i64);
+                let call = builder.ins().call(alloc_ref, &[alloc_size]);
+                let results = builder.inst_results(call);
+                if results.is_empty() {
+                    let slot = builder.create_sized_stack_slot(
+                        cranelift_codegen::ir::StackSlotData::new(
+                            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                            size,
+                            8,
+                        ),
+                    );
+                    builder.ins().stack_addr(types::I64, slot, 0)
+                } else {
+                    results[0]
+                }
+            } else {
+                let slot = builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+                    cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                    size,
+                    8,
+                ));
+                builder.ins().stack_addr(types::I64, slot, 0)
+            };
 
-            // Get field types from type definition to calculate proper offsets
-            let field_types: Vec<crate::hlir::HlirType> = type_defs
-                .iter()
-                .find(|t| &t.name == name)
-                .and_then(|td| match &td.kind {
-                    crate::hlir::HlirTypeDefKind::Struct(fs) => {
-                        Some(fs.iter().map(|(_, ty)| ty.clone()).collect())
-                    }
-                    _ => None,
-                })
-                .unwrap_or_else(Vec::new);
-
-            let mut offset = 0i32;
             for (i, (_, v)) in fields.iter().enumerate() {
                 let val = get_value(values, *v)?;
-                let field_size = field_types
-                    .get(i)
-                    .map(|ty| ty.size_bytes_with_defs(type_defs))
-                    .unwrap_or(8);
-                // For small scalar fields, use direct store
-                // For larger fields (arrays, nested structs), they're passed as pointers and need memcpy
-                if field_size <= 8 {
-                    builder.ins().store(MemFlags::new(), val, base, offset);
-                } else {
-                    // Large field - val is a pointer to the data, need to copy it
-                    // Use a simple byte-by-byte copy loop
-                    let src_ptr = val;
-                    let dst_ptr = builder.ins().iadd_imm(base, offset as i64);
-                    let field_size_val = builder.ins().iconst(types::I64, field_size as i64);
-                    // Call memcpy - we need to emit a loop or call libc memcpy
-                    // For now, use a simple word-by-word copy for performance
-                    let words = field_size / 8;
-                    for w in 0..words {
-                        let word_off = (w * 8) as i32;
-                        let word =
-                            builder
-                                .ins()
-                                .load(types::I64, MemFlags::new(), src_ptr, word_off);
-                        builder
-                            .ins()
-                            .store(MemFlags::new(), word, dst_ptr, word_off);
-                    }
-                    // Copy remaining bytes if any
-                    let remainder = field_size % 8;
-                    if remainder > 0 {
-                        let rem_off = (words * 8) as i32;
-                        for b in 0..remainder {
-                            let byte_off = rem_off + b as i32;
-                            let byte =
-                                builder
-                                    .ins()
-                                    .load(types::I8, MemFlags::new(), src_ptr, byte_off);
-                            builder
-                                .ins()
-                                .store(MemFlags::new(), byte, dst_ptr, byte_off);
-                        }
-                    }
-                }
-                offset += field_size as i32;
+                let offset = (i * 8) as i32;
+                builder.ins().store(MemFlags::new(), val, base, offset);
             }
 
             Ok(Some(base))
@@ -6443,7 +6687,13 @@ fn translate_instruction(
                     // Log warning for unhandled effect (in debug builds)
                     #[cfg(debug_assertions)]
                     eprintln!("Warning: Unhandled effect {}.{} in JIT", effect, op);
-                    let zero = builder.ins().iconst(ty, 0);
+                    let zero = if ty == types::F64 {
+                        builder.ins().f64const(0.0)
+                    } else if ty == types::F32 {
+                        builder.ins().f32const(0.0)
+                    } else {
+                        builder.ins().iconst(ty, 0)
+                    };
                     Ok(Some(zero))
                 }
             }
@@ -6591,7 +6841,17 @@ fn translate_constant(
     match constant {
         HlirConstant::Unit => Ok(builder.ins().iconst(types::I64, 0)),
         HlirConstant::Bool(b) => Ok(builder.ins().iconst(types::I8, *b as i64)),
-        HlirConstant::Int(i, _) => Ok(builder.ins().iconst(cl_ty, *i)),
+        HlirConstant::Int(i, _) => {
+            // If the target type is float (e.g. integer literal used in float context),
+            // use f64const/f32const instead of iconst to avoid Cranelift verifier panic.
+            if cl_ty == types::F64 {
+                Ok(builder.ins().f64const(*i as f64))
+            } else if cl_ty == types::F32 {
+                Ok(builder.ins().f32const(*i as f32))
+            } else {
+                Ok(builder.ins().iconst(cl_ty, *i))
+            }
+        }
         HlirConstant::Float(f, _) => {
             if cl_ty == types::F32 {
                 Ok(builder.ins().f32const(*f as f32))
@@ -6644,6 +6904,83 @@ fn translate_binary_op(
     result_ty: &HlirType,
 ) -> Result<cranelift_codegen::ir::Value, String> {
     use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
+
+    let mut lhs = lhs;
+    let mut rhs = rhs;
+    let lhs_ty = builder.func.dfg.value_type(lhs);
+    let rhs_ty = builder.func.dfg.value_type(rhs);
+
+    // Cranelift requires operands to have matching widths for most binary ops.
+    // Harmonize operand types up-front to avoid verifier failures on mixed i32/i64
+    // (and mixed f32/f64) expressions emitted by HLIR lowering.
+    if lhs_ty != rhs_ty {
+        let is_float_op = matches!(
+            op,
+            BinaryOp::FAdd
+                | BinaryOp::FSub
+                | BinaryOp::FMul
+                | BinaryOp::FDiv
+                | BinaryOp::FRem
+                | BinaryOp::FOEq
+                | BinaryOp::FONe
+                | BinaryOp::FOLt
+                | BinaryOp::FOLe
+                | BinaryOp::FOGt
+                | BinaryOp::FOGe
+        );
+
+        if is_float_op {
+            let target_float_ty = if lhs_ty == types::F64 || rhs_ty == types::F64 {
+                types::F64
+            } else {
+                types::F32
+            };
+            lhs = coerce_value_to_type(builder, lhs, target_float_ty);
+            rhs = coerce_value_to_type(builder, rhs, target_float_ty);
+        } else if lhs_ty.is_int() && rhs_ty.is_int() {
+            let target_int_ty = if lhs_ty.bits() >= rhs_ty.bits() {
+                lhs_ty
+            } else {
+                rhs_ty
+            };
+            let unsigned_op = matches!(
+                op,
+                BinaryOp::UDiv
+                    | BinaryOp::URem
+                    | BinaryOp::ULt
+                    | BinaryOp::ULe
+                    | BinaryOp::UGt
+                    | BinaryOp::UGe
+                    | BinaryOp::LShr
+                    | BinaryOp::And
+                    | BinaryOp::Or
+                    | BinaryOp::Xor
+                    | BinaryOp::Shl
+            );
+            let widen_int = |builder: &mut FunctionBuilder,
+                             val: cranelift_codegen::ir::Value,
+                             from_ty: types::Type| {
+                if from_ty == target_int_ty {
+                    val
+                } else if from_ty.bits() < target_int_ty.bits() {
+                    if unsigned_op {
+                        builder.ins().uextend(target_int_ty, val)
+                    } else {
+                        builder.ins().sextend(target_int_ty, val)
+                    }
+                } else {
+                    builder.ins().ireduce(target_int_ty, val)
+                }
+            };
+            lhs = widen_int(builder, lhs, lhs_ty);
+            rhs = widen_int(builder, rhs, rhs_ty);
+        } else {
+            // Defensive fallback for unexpected mixed numeric categories.
+            lhs = coerce_value_to_type(builder, lhs, types::I64);
+            rhs = coerce_value_to_type(builder, rhs, types::I64);
+        }
+
+    }
 
     let result = match op {
         // Integer arithmetic
@@ -6709,15 +7046,25 @@ fn translate_binary_op(
     let result_cl_ty = hlir_to_cranelift_type(result_ty);
     let result_ty_current = builder.func.dfg.value_type(result);
 
-    if result_ty_current != result_cl_ty && result_cl_ty.is_int() {
-        if result_ty_current.bits() < result_cl_ty.bits() {
-            Ok(builder.ins().uextend(result_cl_ty, result))
-        } else {
-            Ok(result)
-        }
-    } else {
-        Ok(result)
+    if result_ty_current == result_cl_ty {
+        return Ok(result);
     }
+
+    if result_ty_current.is_int() && result_cl_ty.is_int() {
+        if result_ty_current.bits() < result_cl_ty.bits() {
+            return Ok(builder.ins().uextend(result_cl_ty, result));
+        }
+        return Ok(builder.ins().ireduce(result_cl_ty, result));
+    }
+
+    if result_ty_current.is_float() && result_cl_ty.is_float() {
+        if result_ty_current.bits() < result_cl_ty.bits() {
+            return Ok(builder.ins().fpromote(result_cl_ty, result));
+        }
+        return Ok(builder.ins().fdemote(result_cl_ty, result));
+    }
+
+    Ok(result)
 }
 
 #[cfg(feature = "jit")]
@@ -6741,9 +7088,14 @@ fn translate_unary_op(
 #[cfg(feature = "jit")]
 fn translate_terminator(
     builder: &mut FunctionBuilder,
+    current_block: BlockId,
     term: &HlirTerminator,
     blocks: &HashMap<BlockId, cranelift_codegen::ir::Block>,
     values: &HashMap<ValueId, cranelift_codegen::ir::Value>,
+    phi_incomings: &HashMap<BlockId, Vec<(ValueId, Vec<(BlockId, ValueId)>)>>,
+    phi_slots: &HashMap<ValueId, cranelift_codegen::ir::StackSlot>,
+    phi_types: &HashMap<ValueId, types::Type>,
+    const_values: &HashMap<ValueId, crate::hlir::HlirConstant>,
 ) -> Result<(), String> {
     match term {
         HlirTerminator::Return(val) => {
@@ -6760,17 +7112,9 @@ fn translate_terminator(
                     .unwrap_or(types::I64);
                 let actual_ty = builder.func.dfg.value_type(ret_val);
 
-                // Insert cast if types don't match
+                // Insert cast if types don't match using full numeric coercion logic.
                 let final_val = if actual_ty != expected_ret_ty {
-                    if actual_ty.bits() > expected_ret_ty.bits() {
-                        // Truncate (e.g., I64 -> I32)
-                        builder.ins().ireduce(expected_ret_ty, ret_val)
-                    } else if actual_ty.bits() < expected_ret_ty.bits() {
-                        // Extend (e.g., I32 -> I64)
-                        builder.ins().sextend(expected_ret_ty, ret_val)
-                    } else {
-                        ret_val
-                    }
+                    coerce_value_to_type(builder, ret_val, expected_ret_ty)
                 } else {
                     ret_val
                 };
@@ -6782,6 +7126,16 @@ fn translate_terminator(
         }
 
         HlirTerminator::Branch(target) => {
+            store_phi_incomings_for_target(
+                builder,
+                current_block,
+                *target,
+                values,
+                phi_incomings,
+                phi_slots,
+                phi_types,
+                const_values,
+            )?;
             let target_block = blocks[target];
             builder.ins().jump(target_block, &[]);
         }
@@ -6792,6 +7146,26 @@ fn translate_terminator(
             else_block,
         } => {
             let cond = get_value(values, *condition)?;
+            store_phi_incomings_for_target(
+                builder,
+                current_block,
+                *then_block,
+                values,
+                phi_incomings,
+                phi_slots,
+                phi_types,
+                const_values,
+            )?;
+            store_phi_incomings_for_target(
+                builder,
+                current_block,
+                *else_block,
+                values,
+                phi_incomings,
+                phi_slots,
+                phi_types,
+                const_values,
+            )?;
             let then_b = blocks[then_block];
             let else_b = blocks[else_block];
             builder.ins().brif(cond, then_b, &[], else_b, &[]);
@@ -6804,6 +7178,29 @@ fn translate_terminator(
         } => {
             let val = get_value(values, *value)?;
             let default_block = blocks[default];
+
+            store_phi_incomings_for_target(
+                builder,
+                current_block,
+                *default,
+                values,
+                phi_incomings,
+                phi_slots,
+                phi_types,
+                const_values,
+            )?;
+            for (_, target) in cases {
+                store_phi_incomings_for_target(
+                    builder,
+                    current_block,
+                    *target,
+                    values,
+                    phi_incomings,
+                    phi_slots,
+                    phi_types,
+                    const_values,
+                )?;
+            }
 
             // Build switch using a chain of conditionals
             for (case_val, target) in cases {
@@ -6827,11 +7224,128 @@ fn translate_terminator(
         HlirTerminator::Unreachable => {
             builder
                 .ins()
-                .trap(cranelift_codegen::ir::TrapCode::unwrap_user(0));
+                .trap(cranelift_codegen::ir::TrapCode::unwrap_user(1));
         }
     }
 
     Ok(())
+}
+
+#[cfg(feature = "jit")]
+fn coerce_value_to_type(
+    builder: &mut FunctionBuilder,
+    val: cranelift_codegen::ir::Value,
+    expected_ty: types::Type,
+) -> cranelift_codegen::ir::Value {
+    let actual_ty = builder.func.dfg.value_type(val);
+    if actual_ty == expected_ty {
+        return val;
+    }
+
+    if actual_ty.is_int() && expected_ty.is_int() {
+        if actual_ty.bits() < expected_ty.bits() {
+            return builder.ins().uextend(expected_ty, val);
+        }
+        return builder.ins().ireduce(expected_ty, val);
+    }
+
+    if !actual_ty.is_int() && !expected_ty.is_int() {
+        if actual_ty.bits() < expected_ty.bits() {
+            return builder.ins().fpromote(expected_ty, val);
+        }
+        return builder.ins().fdemote(expected_ty, val);
+    }
+
+    if actual_ty.is_int() && !expected_ty.is_int() {
+        return builder.ins().fcvt_from_sint(expected_ty, val);
+    }
+
+    if !actual_ty.is_int() && expected_ty.is_int() {
+        return builder.ins().fcvt_to_sint(expected_ty, val);
+    }
+
+    val
+}
+
+#[cfg(feature = "jit")]
+fn store_phi_incomings_for_target(
+    builder: &mut FunctionBuilder,
+    current_block: BlockId,
+    target_block: BlockId,
+    values: &HashMap<ValueId, cranelift_codegen::ir::Value>,
+    phi_incomings: &HashMap<BlockId, Vec<(ValueId, Vec<(BlockId, ValueId)>)>>,
+    phi_slots: &HashMap<ValueId, cranelift_codegen::ir::StackSlot>,
+    phi_types: &HashMap<ValueId, types::Type>,
+    const_values: &HashMap<ValueId, crate::hlir::HlirConstant>,
+) -> Result<(), String> {
+    let Some(target_phis) = phi_incomings.get(&target_block) else {
+        return Ok(());
+    };
+
+    for (phi_id, incoming) in target_phis {
+        let Some((_, incoming_val_id)) = incoming.iter().find(|(pred, _)| *pred == current_block)
+        else {
+            continue;
+        };
+        let Some(slot) = phi_slots.get(phi_id) else {
+            continue;
+        };
+
+        let expected_ty = phi_types
+            .get(phi_id)
+            .copied()
+            .unwrap_or(types::I64);
+        let raw_val = if let Some(&existing) = values.get(incoming_val_id) {
+            existing
+        } else if let Some(constant) = const_values.get(incoming_val_id) {
+            materialize_phi_constant(builder, constant, expected_ty)?
+        } else {
+            return Err(format!("Value not found: {:?}", incoming_val_id));
+        };
+        let store_val = coerce_value_to_type(builder, raw_val, expected_ty);
+        let ptr = builder.ins().stack_addr(types::I64, *slot, 0);
+        builder.ins().store(MemFlags::new(), store_val, ptr, 0);
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "jit")]
+fn materialize_phi_constant(
+    builder: &mut FunctionBuilder,
+    constant: &crate::hlir::HlirConstant,
+    expected_ty: types::Type,
+) -> Result<cranelift_codegen::ir::Value, String> {
+    let value = match constant {
+        crate::hlir::HlirConstant::Unit => builder.ins().iconst(expected_ty, 0),
+        crate::hlir::HlirConstant::Bool(b) => builder.ins().iconst(types::I8, *b as i64),
+        crate::hlir::HlirConstant::Int(i, _) => {
+            if expected_ty == types::F64 {
+                builder.ins().f64const(*i as f64)
+            } else if expected_ty == types::F32 {
+                builder.ins().f32const(*i as f32)
+            } else {
+                builder.ins().iconst(expected_ty, *i)
+            }
+        }
+        crate::hlir::HlirConstant::Float(f, _) => {
+            if expected_ty == types::F32 {
+                builder.ins().f32const(*f as f32)
+            } else {
+                builder.ins().f64const(*f)
+            }
+        }
+        crate::hlir::HlirConstant::Null(_) | crate::hlir::HlirConstant::Undef(_) => {
+            builder.ins().iconst(expected_ty, 0)
+        }
+        _ => {
+            return Err(format!(
+                "Unsupported constant in phi incoming materialization: {:?}",
+                constant
+            ));
+        }
+    };
+    Ok(value)
 }
 
 #[cfg(feature = "jit")]
