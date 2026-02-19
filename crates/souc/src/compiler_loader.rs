@@ -2998,6 +2998,46 @@ RETURN\n";
         vm.execute(bytecode).expect("vm execute")
     }
 
+    fn execute_custom_driver_harness(
+        compiler: &SounioCompiler,
+        entrypoint: DriverEntrypoint,
+        main_source: &str,
+        user_args: Vec<String>,
+    ) -> crate::vm::Value {
+        let driver_source = compiler
+            .resolve_driver_source_snapshot()
+            .expect("driver source snapshot should resolve");
+        let harness_source = format!("{driver_source}\n{main_source}\n");
+        let fingerprint = compiler.fingerprint_driver_dependency_sources();
+        let bytecode = compiler
+            .compile_driver_harness_via_rust_bridge(entrypoint, fingerprint, &harness_source)
+            .expect("custom harness should compile");
+
+        let mut vm = crate::vm::BytecodeVM::new();
+        vm.set_user_args(user_args);
+        vm.execute(&bytecode)
+            .expect("custom harness should execute successfully")
+    }
+
+    fn compile_artifact_diag_string(vm_result: &crate::vm::Value) -> String {
+        let crate::vm::Value::Struct(fields) = vm_result else {
+            panic!("expected compile artifact struct, got {:?}", vm_result);
+        };
+        let diag_len = match fields.get("diagnostics_len") {
+            Some(crate::vm::Value::Int(n)) if *n > 0 => *n as usize,
+            _ => 0,
+        };
+        if diag_len == 0 {
+            return String::new();
+        }
+        let diag_val = fields
+            .get("diagnostics")
+            .expect("compile artifact should include diagnostics bytes");
+        let bytes = SounioCompiler::bytes_from_vm_value(diag_val, diag_len)
+            .expect("diagnostics bytes should decode");
+        String::from_utf8(bytes).expect("diagnostics should be valid UTF-8")
+    }
+
     #[test]
     fn test_driver_artifact_compiles_expression_body_i64() {
         let decoded = decode_driver_artifact("fn main() -> i64 { 42 }\n");
@@ -3053,6 +3093,72 @@ fn main() -> i64 { add(10, 32) }
         let decoded = decode_driver_artifact("fn main() -> i64 { if true { 1 } else { 0 } }\n");
         let result = execute_bytecode(&decoded);
         assert_eq!(result, crate::vm::Value::Int(1));
+    }
+
+    #[test]
+    fn test_driver_multimodule_pipeline_fails_closed_with_explicit_stub_diag() {
+        let _env_guard = env_lock().lock().expect("env lock poisoned");
+        let cache_dir = tempfile::tempdir().expect("temp dir for harness cache");
+        let _cache_guard = set_env_var(
+            "SOUNIO_SELFHOST_DRIVER_HARNESS_CACHE_DIR",
+            Some(cache_dir.path().to_str().expect("cache path utf8")),
+        );
+
+        let compiler = SounioCompiler::new_embedded().expect("embedded compiler");
+        let temp = tempfile::NamedTempFile::new().expect("temp source file");
+        std::fs::write(temp.path(), "fn main() -> i32 { 0 }\n").expect("write temp source");
+
+        let vm_result = execute_custom_driver_harness(
+            &compiler,
+            DriverEntrypoint::CompileFile,
+            r#"
+fn main() -> CompileArtifact with IO, Mut, Div, Panic, Alloc {
+    compile_multimodule_program(get_arg(0))
+}
+"#,
+            vec![temp.path().to_string_lossy().to_string()],
+        );
+
+        let crate::vm::Value::Struct(fields) = &vm_result else {
+            panic!("expected compile artifact struct, got {:?}", vm_result);
+        };
+        assert_eq!(fields.get("ok"), Some(&crate::vm::Value::Bool(false)));
+        assert_eq!(fields.get("exit_code"), Some(&crate::vm::Value::Int(2)));
+        assert_eq!(
+            compile_artifact_diag_string(&vm_result),
+            "bootstrap_lexer_unavailable",
+            "multimodule bootstrap stubs must fail closed with deterministic diagnostics"
+        );
+    }
+
+    #[test]
+    fn test_driver_run_pipeline_native_stage_returns_explicit_failure_code() {
+        let _env_guard = env_lock().lock().expect("env lock poisoned");
+        let cache_dir = tempfile::tempdir().expect("temp dir for harness cache");
+        let _cache_guard = set_env_var(
+            "SOUNIO_SELFHOST_DRIVER_HARNESS_CACHE_DIR",
+            Some(cache_dir.path().to_str().expect("cache path utf8")),
+        );
+
+        let compiler = SounioCompiler::new_embedded().expect("embedded compiler");
+        let vm_result = execute_custom_driver_harness(
+            &compiler,
+            DriverEntrypoint::CompileSource,
+            r#"
+fn main() -> StageOutput with Mut, Panic {
+    var input = StageInput { stage: STAGE_CODEGEN_NATIVE, payload: [0; 65536], payload_len: 0 }
+    run_pipeline(input)
+}
+"#,
+            Vec::new(),
+        );
+
+        let crate::vm::Value::Struct(fields) = &vm_result else {
+            panic!("expected stage output struct, got {:?}", vm_result);
+        };
+        assert_eq!(fields.get("stage"), Some(&crate::vm::Value::Int(5)));
+        assert_eq!(fields.get("ok"), Some(&crate::vm::Value::Bool(false)));
+        assert_eq!(fields.get("diag_code"), Some(&crate::vm::Value::Int(5)));
     }
 
     #[test]

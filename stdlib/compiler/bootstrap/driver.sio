@@ -435,9 +435,16 @@ fn run_pipeline(input: StageInput) -> StageOutput with Mut, Panic {
         }
 
         out
+    } else if input.stage == STAGE_CODEGEN_NATIVE {
+        // Native backend stage is defined but not implemented in this bootstrap driver.
+        var out = stage_output_empty(input.stage)
+        out.diag_code = 5
+        out
     } else {
-        // Future stages: lexer/parser/checker boundaries.
-        stage_output_empty(input.stage)
+        // Future stages (lexer/parser/checker) are intentionally fail-closed for now.
+        var out = stage_output_empty(input.stage)
+        out.diag_code = 4
+        out
     }
 }
 
@@ -2055,8 +2062,33 @@ fn compile_multimodule_program(main_path: string) -> CompileArtifact with IO, Mu
 
     var out = compile_artifact_empty()
 
+    if !file_exists(main_path) {
+        var msg: [i8; 64] = [0; 64]
+        // "main_path_not_found"
+        msg[0] = 109; msg[1] = 97; msg[2] = 105; msg[3] = 110
+        msg[4] = 95
+        msg[5] = 112; msg[6] = 97; msg[7] = 116; msg[8] = 104
+        msg[9] = 95
+        msg[10] = 110; msg[11] = 111; msg[12] = 116
+        msg[13] = 95
+        msg[14] = 102; msg[15] = 111; msg[16] = 117; msg[17] = 110; msg[18] = 100
+        out.exit_code = 2
+        return emit_diag(out, msg, 19)
+    }
+
     // Step 1: Parse main file
     let main_state = read_source_file(main_path)
+    if main_state.token_count <= 0 {
+        var msg: [i8; 64] = [0; 64]
+        // "bootstrap_lexer_unavailable"
+        msg[0] = 98; msg[1] = 111; msg[2] = 111; msg[3] = 116; msg[4] = 115; msg[5] = 116; msg[6] = 114; msg[7] = 97; msg[8] = 112
+        msg[9] = 95
+        msg[10] = 108; msg[11] = 101; msg[12] = 120; msg[13] = 101; msg[14] = 114
+        msg[15] = 95
+        msg[16] = 117; msg[17] = 110; msg[18] = 97; msg[19] = 118; msg[20] = 97; msg[21] = 105; msg[22] = 108; msg[23] = 97; msg[24] = 98; msg[25] = 108; msg[26] = 101
+        out.exit_code = 2
+        return emit_diag(out, msg, 27)
+    }
     let main_prog = parse_program_preloaded(main_state.token_count)
 
     // Step 2: Initialize module registry and programs array
@@ -2102,6 +2134,15 @@ fn compile_multimodule_program(main_path: string) -> CompileArtifact with IO, Mu
         out.exit_code = 2
         return emit_diag(out, msg, 14)
     }
+    if resolve_result.count < loaded {
+        var msg: [i8; 64] = [0; 64]
+        // "resolve_incomplete"
+        msg[0] = 114; msg[1] = 101; msg[2] = 115; msg[3] = 111; msg[4] = 108; msg[5] = 118; msg[6] = 101
+        msg[7] = 95
+        msg[8] = 105; msg[9] = 110; msg[10] = 99; msg[11] = 111; msg[12] = 109; msg[13] = 112; msg[14] = 108; msg[15] = 101; msg[16] = 116; msg[17] = 101
+        out.exit_code = 2
+        return emit_diag(out, msg, 18)
+    }
 
     // Step 5: Type check all loaded modules
     var check_idx: i64 = 0
@@ -2140,6 +2181,28 @@ fn compile_multimodule_program(main_path: string) -> CompileArtifact with IO, Mu
     let serialized = serialize_ir_module(lower_result.module)
     let bytecode_buf = serialized.0
     let bytecode_len = serialized.1
+    if bytecode_len <= 0 {
+        var msg: [i8; 64] = [0; 64]
+        // "bytecode_serialization_failed"
+        msg[0] = 98; msg[1] = 121; msg[2] = 116; msg[3] = 101; msg[4] = 99; msg[5] = 111; msg[6] = 100; msg[7] = 101
+        msg[8] = 95
+        msg[9] = 115; msg[10] = 101; msg[11] = 114; msg[12] = 105; msg[13] = 97; msg[14] = 108; msg[15] = 105; msg[16] = 122; msg[17] = 97; msg[18] = 116; msg[19] = 105; msg[20] = 111; msg[21] = 110
+        msg[22] = 95
+        msg[23] = 102; msg[24] = 97; msg[25] = 105; msg[26] = 108; msg[27] = 101; msg[28] = 100
+        out.exit_code = 2
+        return emit_diag(out, msg, 29)
+    }
+    if bytecode_len > 131072 {
+        var msg: [i8; 64] = [0; 64]
+        // "bytecode_too_large"
+        msg[0] = 98; msg[1] = 121; msg[2] = 116; msg[3] = 101; msg[4] = 99; msg[5] = 111; msg[6] = 100; msg[7] = 101
+        msg[8] = 95
+        msg[9] = 116; msg[10] = 111; msg[11] = 111
+        msg[12] = 95
+        msg[13] = 108; msg[14] = 97; msg[15] = 114; msg[16] = 103; msg[17] = 101
+        out.exit_code = 2
+        return emit_diag(out, msg, 18)
+    }
 
     var copy_idx: i64 = 0
     while copy_idx < bytecode_len && copy_idx < 131072 {
