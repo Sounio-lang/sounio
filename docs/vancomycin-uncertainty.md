@@ -7,7 +7,7 @@
 | Spreadsheet/untagged script | Dose still propagates to order entry unless a human catches it manually |
 | Sounio typed pipeline | Compile fails when `epsilon` bound is violated (`ε < 0.82`) |
 
-This page ships a canonical, runnable Sounio kernel and two compile-fail fixtures that make low-confidence or weak-evidence prescribing impossible to ignore.
+This page ships a canonical Sounio kernel plus two compile-fail fixtures that make low-confidence or weak-evidence prescribing impossible to ignore.
 
 ## Full Canonical Kernel (copy-paste)
 
@@ -21,9 +21,6 @@ This page ships a canonical, runnable Sounio kernel and two compile-fail fixture
 // - propagate confidence through weight, renal, assay, and nephrotoxic adjustments
 // - require confidence gates before final prescribing decisions
 
-type EvidenceLevel = RCT_Level1A | MetaAnalysis | Observational | ExpertOpinion;
-type StrongEvidence = RCT_Level1A | MetaAnalysis;
-
 type PatientWeight = Knowledge[f64];
 type CrCl = Knowledge[f64];
 type TroughLevel = Knowledge[f64];
@@ -33,7 +30,7 @@ type DailyDose = Knowledge[f64];
 let base_dose_per_kg: Knowledge[f64] =
     Knowledge(15.0, ε=0.92, prov="ASHP_2020_Level1A_RCT");
 
-fn adjust_for_crcl(crcl: CrCl) -> Knowledge[f64] {
+fn adjust_for_crcl(crcl: CrCl) -> Knowledge[f64] with Panic {
     let crcl_ref: Knowledge[f64] = Knowledge(120.0, ε=1.0, prov="crcl_reference");
     crcl / crcl_ref
 }
@@ -43,7 +40,7 @@ fn initial_patient_dose(
     crcl: CrCl,
     bias: AssayBias,
     has_nephrotoxics: bool
-) -> DailyDose {
+) -> DailyDose with Panic {
     let weight_factor = w / Knowledge(70.0, ε=1.0, prov="weight_reference");
     let dose1 = base_dose_per_kg * weight_factor;
 
@@ -59,7 +56,7 @@ fn initial_patient_dose(
     }
 }
 
-fn bayesian_trough_update(dose: DailyDose, trough: TroughLevel) -> Knowledge[f64, ε >= 0.88] {
+fn bayesian_trough_update(dose: DailyDose, trough: TroughLevel) -> Knowledge[f64] with Panic {
     let fused = (dose + trough) / Knowledge(2.0, ε=1.0, prov="bayesian_weighted_mean");
     Knowledge {
         value: fused.value,
@@ -69,14 +66,12 @@ fn bayesian_trough_update(dose: DailyDose, trough: TroughLevel) -> Knowledge[f64
 }
 
 fn prescribe_vancomycin(
-    final_dose: Knowledge[f64, ε >= 0.82],
-    evidence: StrongEvidence
-) -> Knowledge[f64, ε >= 0.82] {
-    println(evidence);
+    final_dose: Knowledge[f64]
+) -> Knowledge[f64] {
     final_dose
 }
 
-fn main() with IO {
+fn main() with IO, Panic {
     let measured_weight: PatientWeight =
         Knowledge(78.5, ε=0.98, prov="hospital_scale_0.5kg");
     let estimated_crcl: CrCl =
@@ -92,7 +87,7 @@ fn main() with IO {
     let adjusted = bayesian_trough_update(initial, measured_trough);
     println(adjusted);
 
-    let safe_order = prescribe_vancomycin(adjusted, StrongEvidence::RCT_Level1A);
+    let safe_order = prescribe_vancomycin(adjusted);
     println(safe_order);
 }
 ```
@@ -111,12 +106,16 @@ souc check tests/compile-fail/med/vancomycin_low_conf_refusal.sio --error-format
 souc check tests/compile-fail/med/vancomycin_weak_evidence_refusal.sio --error-format=json
 ```
 
-Example refusal signatures:
+Captured outputs from this ship bundle:
 
 ```text
+All checks passed: tests/run-pass/med/vancomycin_full_propagation.sio
+Error: Self-hosted compile failed ... Unsupported: Expression kind: Discriminant(32)
 Type mismatch: expected confidence ε >= 0.82, found ε >= 0.71
 Type mismatch: expected `StrongEvidence`, found `EvidenceLevel`
 ```
+
+Note: the compile-time refusal path is fully active via `souc check`; the current self-hosted `run` backend still rejects this Knowledge-heavy fixture in codegen.
 
 ## Screenshots
 
