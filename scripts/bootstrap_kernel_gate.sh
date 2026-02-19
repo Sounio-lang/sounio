@@ -14,6 +14,14 @@ BUILD_TIMEOUT_SECS="${BUILD_TIMEOUT_SECS:-900}"
 CYCLE_TIMEOUT_SECS="${CYCLE_TIMEOUT_SECS:-1200}"
 BENCH_TIMEOUT_SECS="${BENCH_TIMEOUT_SECS:-60}"
 BOOTSTRAP_MANIFEST_PATH="${BOOTSTRAP_MANIFEST_PATH:-${SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST:-bootstrap/selfhost-kernel.manifest}}"
+BENCH_COMPILE_TARGET="${BENCH_COMPILE_TARGET:-self-hosted/bench/kernel_smoke.sio}"
+BENCH_CHECK_TARGET="${BENCH_CHECK_TARGET:-self-hosted/bench/kernel_smoke.sio}"
+BENCH_SEED_ENFORCE="${BENCH_SEED_ENFORCE:-1}"
+BENCH_SEED_PATH="${BENCH_SEED_PATH:-bootstrap/seeds/sounio-bootstrap-linux-x86_64.sio.bin}"
+BENCH_SEED_SHA256_PATH="${BENCH_SEED_SHA256_PATH:-${BENCH_SEED_PATH}.sha256}"
+BENCH_SEED_SIG_PATH="${BENCH_SEED_SIG_PATH:-${BENCH_SEED_PATH}.sig}"
+BENCH_NO_ITEM_COUNT="${BENCH_NO_ITEM_COUNT:-1}"
+BENCH_FAST_SKIP_BLOCKS="${BENCH_FAST_SKIP_BLOCKS:-0}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -125,6 +133,10 @@ declare -a BASE_ENV=(
   "SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT=${SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT:-0}"
   "SOUNIO_SELFHOST_STRICT_MODULE_GATING=1"
   "SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST=$BOOTSTRAP_MANIFEST_PATH"
+  "SOUNIO_BOOTSTRAP_SEED_ENFORCE=$BENCH_SEED_ENFORCE"
+  "SOUNIO_BOOTSTRAP_SEED_PATH=$BENCH_SEED_PATH"
+  "SOUNIO_BOOTSTRAP_SEED_SHA256_PATH=$BENCH_SEED_SHA256_PATH"
+  "SOUNIO_BOOTSTRAP_SEED_SIG_PATH=$BENCH_SEED_SIG_PATH"
 )
 
 echo "BOOTSTRAP_KERNEL_GATE_START"
@@ -133,6 +145,12 @@ echo "souc_bin=$SOUC_BIN"
 echo "bench_timeout_secs=$BENCH_TIMEOUT_SECS"
 echo "cycle_timeout_secs=$CYCLE_TIMEOUT_SECS"
 echo "bootstrap_manifest=$BOOTSTRAP_MANIFEST_PATH"
+echo "bench_compile_target=$BENCH_COMPILE_TARGET"
+echo "bench_check_target=$BENCH_CHECK_TARGET"
+echo "bench_seed_enforce=$BENCH_SEED_ENFORCE"
+echo "bench_seed_path=$BENCH_SEED_PATH"
+echo "bench_no_item_count=$BENCH_NO_ITEM_COUNT"
+echo "bench_fast_skip_blocks=$BENCH_FAST_SKIP_BLOCKS"
 
 run_timed_step \
   "build-souc" \
@@ -155,19 +173,38 @@ run_timed_step \
   "$LOG_DIR/selfhost-cycle.stderr.log" \
   env "${CYCLE_ENV[@]}" bash scripts/selfhost_cycle_gate.sh
 
+declare -a COMPILE_CMD=(
+  "$SOUC_BIN" run self-hosted/ -- compile
+)
+declare -a CHECK_CMD=(
+  "$SOUC_BIN" run self-hosted/ -- check
+)
+
+if [ "$BENCH_NO_ITEM_COUNT" = "1" ]; then
+  COMPILE_CMD+=(--no-item-count)
+  CHECK_CMD+=(--no-item-count)
+fi
+
+if [ "$BENCH_FAST_SKIP_BLOCKS" = "1" ]; then
+  COMPILE_CMD+=(--fast-skip-blocks)
+fi
+
+COMPILE_CMD+=("$BENCH_COMPILE_TARGET")
+CHECK_CMD+=("$BENCH_CHECK_TARGET")
+
 run_timed_step \
   "compile-60s" \
   "$BENCH_TIMEOUT_SECS" \
   "$LOG_DIR/compile-60s.stdout.log" \
   "$LOG_DIR/compile-60s.stderr.log" \
-  env "${BASE_ENV[@]}" "$SOUC_BIN" run self-hosted/ -- compile self-hosted/check/check.sio
+  env "${BASE_ENV[@]}" "${COMPILE_CMD[@]}"
 
 run_timed_step \
   "check-60s" \
   "$BENCH_TIMEOUT_SECS" \
   "$LOG_DIR/check-60s.stdout.log" \
   "$LOG_DIR/check-60s.stderr.log" \
-  env "${BASE_ENV[@]}" "$SOUC_BIN" run self-hosted/ -- check stdlib/compiler/bootstrap/driver.sio
+  env "${BASE_ENV[@]}" "${CHECK_CMD[@]}"
 
 TOTAL_END_NS="$(now_ns)"
 TOTAL_ELAPSED_MS=$(( (TOTAL_END_NS - TOTAL_START_NS) / 1000000 ))

@@ -1535,7 +1535,16 @@ impl TypeChecker {
         self.check_unused_imports();
 
         if !self.errors.is_empty() {
-            let messages: Vec<_> = self.errors.iter().map(|e| e.message.clone()).collect();
+            let messages: Vec<_> = self
+                .errors
+                .iter()
+                .map(|e| {
+                    format!(
+                        "{} [code={} span={}..{}]",
+                        e.message, e.code, e.span.start, e.span.end
+                    )
+                })
+                .collect();
             return Err(miette::miette!("Type errors:\n{}", messages.join("\n")));
         }
 
