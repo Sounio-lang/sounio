@@ -191,8 +191,8 @@ fn assert_check_fails_with(path: &str, needle: &str) {
 }
 
 #[test]
-fn test_sedenion_benchmark_reports_known_drift() {
-    assert_check_fails_with("examples/run_sedenion_benchmark.sio", "Resolution errors");
+fn test_sedenion_benchmark_module_import_compiles() {
+    assert_check_passes("examples/run_sedenion_benchmark.sio");
 }
 
 #[test]
@@ -204,8 +204,8 @@ fn test_hsi_classification_reports_known_array_drift() {
 }
 
 #[test]
-fn test_pac_training_module_reports_known_string_drift() {
-    assert_check_fails_with("stdlib/snn/pac_training.sio", "expected Str, found String");
+fn test_pac_training_module_compiles() {
+    assert_check_passes("stdlib/snn/pac_training.sio");
 }
 
 #[test]
@@ -223,8 +223,8 @@ fn test_all_stdlib_sedenion_modules_have_deterministic_status() {
     assert_check_passes("stdlib/math/sedenion.sio");
     assert_check_passes("stdlib/ml/pac.sio");
     assert_check_passes("stdlib/snn/sedenion_layer.sio");
-    assert_check_fails_with("stdlib/snn/pac_training.sio", "Type mismatch");
-    assert_check_fails_with("stdlib/snn/benchmark.sio", "Type mismatch");
+    assert_check_passes("stdlib/snn/pac_training.sio");
+    assert_check_passes("stdlib/snn/benchmark.sio");
     assert_check_fails_with("stdlib/medical/hyperspectral.sio", "Type mismatch");
 }
 
@@ -389,14 +389,10 @@ fn test_benchmark_result() -> bool {
 
     let output = run_cargo_check(&temp_file);
 
+    // benchmark.sio no longer drifted (hyperspectral import removed); expect clean compile
     assert!(
-        !output.status.success(),
-        "BenchmarkResult snippet unexpectedly compiled:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("Resolution errors"),
-        "Expected benchmark import resolution drift, got:\n{}",
+        output.status.success(),
+        "BenchmarkResult import should compile after drift fix, got:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -406,12 +402,12 @@ fn test_benchmark_result() -> bool {
 
 #[test]
 fn test_kill_switch_benchmark_configuration() {
-    assert_check_fails_with("stdlib/snn/benchmark.sio", "Type mismatch");
+    assert_check_passes("stdlib/snn/benchmark.sio");
 }
 
 #[test]
 fn test_pac_config_functions() {
-    assert_check_fails_with("stdlib/snn/pac_training.sio", "expected Str, found String");
+    assert_check_passes("stdlib/snn/pac_training.sio");
 }
 
 #[test]

@@ -2096,7 +2096,7 @@ impl Resolver {
                 if path.segments.len() >= 2 {
                     // Full path like Option::Some
                     let type_name = &path.segments[0];
-                    if self.symbols.lookup_type(type_name).is_none() {
+                    if self.lookup_type_with_imports(type_name).is_none() {
                         let suggestion = self.find_similar_type(type_name);
                         self.errors.push(ResolveError::UndefinedType {
                             name: type_name.clone(),
@@ -2557,6 +2557,38 @@ mod tests {
             }
         "#;
         assert!(resolves_ok(source), "Import type alias should resolve");
+    }
+
+    #[test]
+    fn test_imported_enum_pattern_match_resolves() {
+        let source = r#"
+            module colors {
+                pub enum Color {
+                    Red,
+                    Blue,
+                }
+            }
+
+            module painter {
+                use colors::Color;
+
+                pub fn code(c: Color) -> i32 {
+                    match c {
+                        Color::Red => 1,
+                        Color::Blue => 2,
+                    }
+                }
+            }
+
+            fn main() -> i32 {
+                0
+            }
+        "#;
+
+        assert!(
+            resolves_ok(source),
+            "Imported enum variants in match patterns should resolve through module imports"
+        );
     }
 
     // ==================== Complex Scenarios ====================
