@@ -23,6 +23,7 @@ BENCH_SEED_SHA256_PATH="${BENCH_SEED_SHA256_PATH:-${BENCH_SEED_PATH}.sha256}"
 BENCH_SEED_SIG_PATH="${BENCH_SEED_SIG_PATH:-${BENCH_SEED_PATH}.sig}"
 BENCH_NO_ITEM_COUNT="${BENCH_NO_ITEM_COUNT:-1}"
 BENCH_FAST_SKIP_BLOCKS="${BENCH_FAST_SKIP_BLOCKS:-0}"
+NO_RUST_MARKER_ENFORCE="${NO_RUST_MARKER_ENFORCE:-1}"
 LAST_STEP_RC=0
 
 normalize_bool_01() {
@@ -49,6 +50,7 @@ SKIP_BUILD="$(normalize_bool_01 "$SKIP_BUILD" "SKIP_BUILD")"
 BENCH_SEED_ENFORCE="$(normalize_bool_01 "$BENCH_SEED_ENFORCE" "BENCH_SEED_ENFORCE")"
 BENCH_NO_ITEM_COUNT="$(normalize_bool_01 "$BENCH_NO_ITEM_COUNT" "BENCH_NO_ITEM_COUNT")"
 BENCH_FAST_SKIP_BLOCKS="$(normalize_bool_01 "$BENCH_FAST_SKIP_BLOCKS" "BENCH_FAST_SKIP_BLOCKS")"
+NO_RUST_MARKER_ENFORCE="$(normalize_bool_01 "$NO_RUST_MARKER_ENFORCE" "NO_RUST_MARKER_ENFORCE")"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -180,6 +182,7 @@ echo "bench_seed_enforce=$BENCH_SEED_ENFORCE"
 echo "bench_seed_path=$BENCH_SEED_PATH"
 echo "bench_no_item_count=$BENCH_NO_ITEM_COUNT"
 echo "bench_fast_skip_blocks=$BENCH_FAST_SKIP_BLOCKS"
+echo "no_rust_marker_enforce=$NO_RUST_MARKER_ENFORCE"
 
 if [ "$SKIP_BUILD" = "1" ]; then
   run_timed_step \
@@ -247,6 +250,21 @@ else
     "$LOG_DIR/check-60s.stdout.log" \
     "$LOG_DIR/check-60s.stderr.log" \
     env "${BASE_ENV[@]}" "${CHECK_CMD[@]}"
+
+  if [ "$NO_RUST_MARKER_ENFORCE" = "1" ]; then
+    run_timed_step \
+      "no-rust-markers" \
+      30 \
+      "$LOG_DIR/no-rust-markers.stdout.log" \
+      "$LOG_DIR/no-rust-markers.stderr.log" \
+      bash scripts/assert_no_rust_markers.sh \
+      "$LOG_DIR/selfhost-cycle.stdout.log" \
+      "$LOG_DIR/selfhost-cycle.stderr.log" \
+      "$LOG_DIR/compile-60s.stdout.log" \
+      "$LOG_DIR/compile-60s.stderr.log" \
+      "$LOG_DIR/check-60s.stdout.log" \
+      "$LOG_DIR/check-60s.stderr.log"
+  fi
 fi
 
 TOTAL_END_NS="$(now_ns)"
