@@ -39,6 +39,8 @@ pub mod counterfactual;
 pub mod counterfactual_metal;
 pub mod diagnostics;
 pub mod divergence;
+pub mod epistemic_gemm;
+pub mod epistemic_gemm_intrinsics;
 pub mod epistemic_kernels;
 pub mod epistemic_ptx;
 pub mod example_profiles;
@@ -97,6 +99,14 @@ pub use spirv::SpirvCodegen;
 pub use tensor_epistemic::{
     EpistemicTensorCategory, EpistemicTensorIntrinsic, EpsilonPropagationRule, TensorCoreOp,
     all_epistemic_tensor_intrinsics, get_epistemic_intrinsic, is_epistemic_tensor_intrinsic,
+};
+pub use epistemic_gemm::{
+    EpistemicGemmConfig, EpistemicMatrix, MatrixPrecision, compute_confidence_gated_gemm,
+    compute_epistemic_gemm, compute_gemm_epsilon, generate_epistemic_gemm_ptx,
+    generate_epistemic_gemm_wgsl,
+};
+pub use epistemic_gemm_intrinsics::{
+    all_epistemic_gemm_intrinsics, get_epistemic_gemm_intrinsic, is_epistemic_gemm_intrinsic,
 };
 
 // HLIR to GPU lowering - the critical bridge
