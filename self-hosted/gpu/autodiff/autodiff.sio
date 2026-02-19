@@ -1,0 +1,1357 @@
+// self-hosted::gpu::autodiff — Reverse-mode automatic differentiation via Wengert tape
+//
+// Implements trace-based (Wengert tape) reverse-mode autodiff operating at the
+// GpuKernelIr level.  During the forward pass every differentiable operation is
+// recorded on the tape together with its cached operand values; during the
+// backward pass the chain rule is applied in reverse order through the tape.
+//
+// Two complementary paths are provided:
+//   1. CPU-side tape replay  — tape_backward() propagates f32 gradients through
+//      grad_rule_apply(), using polynomial approximations for transcendentals.
+//   2. GPU-side PTX emission — grad_emit_backward_pass() emits a complete PTX
+//      backward kernel alongside the forward kernel, ready for NVPTX JIT.
+//
+// Naming conventions follow the rest of the self-hosted GPU pipeline:
+//   GradEmitState / ges_* — PTX emission state and helpers
+//   WengertTape  / tape_* — tape management
+//   grad_rule_*           — per-op gradient rules (CPU)
+//   grad_ptx_emit_*       — per-op PTX gradient emitters (GPU)
+//
+// All data structures use fixed-capacity arrays; no dynamic allocation.
+// Every helper precedes its callers (no forward references).
+
+// ============================================================================
+// Tag constants — GRAD_OP_*
+// ============================================================================
+
+let GRAD_OP_ADD: i64      = 0   // ∂(a+b)/∂a = 1,  ∂(a+b)/∂b = 1
+let GRAD_OP_SUB: i64      = 1   // ∂(a-b)/∂a = 1,  ∂(a-b)/∂b = -1
+let GRAD_OP_MUL: i64      = 2   // ∂(ab)/∂a = b,   ∂(ab)/∂b = a
+let GRAD_OP_DIV: i64      = 3   // ∂(a/b)/∂a = 1/b, ∂(a/b)/∂b = -a/b²
+let GRAD_OP_NEG: i64      = 4   // ∂(-a)/∂a = -1
+let GRAD_OP_SQRT: i64     = 5   // ∂sqrt(a)/∂a = 1/(2*sqrt(a))
+let GRAD_OP_EXP: i64      = 6   // ∂exp(a)/∂a = exp(a)
+let GRAD_OP_LOG: i64      = 7   // ∂log(a)/∂a = 1/a
+let GRAD_OP_SIN: i64      = 8   // ∂sin(a)/∂a = cos(a)
+let GRAD_OP_COS: i64      = 9   // ∂cos(a)/∂a = -sin(a)
+let GRAD_OP_POW: i64      = 10  // ∂(a^b)/∂a = b * a^(b-1)
+let GRAD_OP_RELU: i64     = 11  // ∂relu(a)/∂a = 1 if a>0 else 0
+let GRAD_OP_SIGMOID: i64  = 12  // ∂σ(a)/∂a = σ(a)*(1-σ(a))
+let GRAD_OP_TANH: i64     = 13  // ∂tanh(a)/∂a = 1 - tanh²(a)
+let GRAD_OP_FMA: i64      = 14  // ∂(a*b+c)/∂a=b, /∂b=a, /∂c=1
+let GRAD_OP_MAX: i64      = 15  // ∂max(a,b)/∂a = 1 if a>=b else 0
+let GRAD_OP_MIN: i64      = 16  // ∂min(a,b)/∂a = 1 if a<=b else 0
+let GRAD_OP_ABS: i64      = 17  // ∂|a|/∂a = sign(a)
+let GRAD_OP_SOFTMAX: i64  = 18  // Jacobian: softmax_i * (δ_ij - softmax_j)
+let GRAD_OP_CONST: i64    = 19  // constant — no gradient contribution
+let GRAD_OP_INPUT: i64    = 20  // leaf input — accumulate gradient here
+let GRAD_OP_OUTPUT: i64   = 21  // output node — seed gradient = 1.0
+let GRAD_OP_RESHAPE: i64  = 22  // ∂reshape/∂a = 1 (identity)
+let GRAD_OP_MATMUL: i64   = 23  // ∂(AB)/∂A = G*Bᵀ, ∂(AB)/∂B = Aᵀ*G
+
+// ============================================================================
+// TapeEntry — one entry on the Wengert tape
+// ============================================================================
+
+struct TapeEntry {
+    op: i64,        // GRAD_OP_* tag
+    val_id: i64,    // value ID of the result
+    src0: i64,      // first input value ID (-1 if unused)
+    src1: i64,      // second input value ID (-1 if unused)
+    src2: i64,      // third input value ID (for FMA; -1 if unused)
+    fwd_val: f32,   // forward value of the result (used by exp, sqrt, tanh, sigmoid)
+    fwd_src0: f32,  // forward value of src0
+    fwd_src1: f32,  // forward value of src1
+    grad_idx: i64,  // index in grad array (-1 if not yet allocated)
+}
+
+// ============================================================================
+// WengertTape — the complete tape
+// ============================================================================
+
+struct WengertTape {
+    entries: [TapeEntry; 16384],
+    entry_count: i64,
+    grads: [f32; 16384],   // one f32 per value ID
+    grad_count: i64,
+    inputs: [i64; 256],    // leaf input value IDs
+    input_count: i64,
+    outputs: [i64; 64],    // output value IDs (seeded to 1.0)
+    output_count: i64,
+}
+
+// ============================================================================
+// GradEmitState — PTX backward-pass emission state
+// ============================================================================
+
+struct GradEmitState {
+    buf: [i8; 65536],
+    buf_len: i64,
+    reg_counter: i64,
+    // Flat name storage: 16384 slots × 32 bytes each
+    reg_names: [i8; 524288],
+    reg_name_count: i64,
+}
+
+// ============================================================================
+// AutodiffConfig
+// ============================================================================
+
+struct AutodiffConfig {
+    sm_version: i64,
+    accumulate_gradients: bool,  // true → +=, false → =
+    zero_init_grads: bool,       // emit zero-init for gradient registers
+    check_nan: bool,             // emit setp checks for NaN gradients
+    epistemic_mode: bool,        // track gradient uncertainty
+}
+
+// ============================================================================
+// Approx math helpers — polynomial approximations for transcendentals
+// All helpers precede grad_rule_apply which calls them.
+// ============================================================================
+
+// approx_sin — Maclaurin: x - x³/6 + x⁵/120
+// Accurate for |x| < π.
+fn approx_sin(x: f32) -> f32 {
+    let x2 = x * x
+    let x3 = x2 * x
+    let x5 = x3 * x2
+    x - x3 / 6.0 + x5 / 120.0
+}
+
+// approx_cos — Maclaurin: 1 - x²/2 + x⁴/24
+fn approx_cos(x: f32) -> f32 {
+    let x2 = x * x
+    let x4 = x2 * x2
+    1.0 - x2 / 2.0 + x4 / 24.0
+}
+
+// approx_exp — Taylor: 1 + x + x²/2 + x³/6 + x⁴/24  (clamped at ±80)
+fn approx_exp(x: f32) -> f32 {
+    var v = x
+    if v > 80.0 { v = 80.0 }
+    if v < -80.0 { v = -80.0 }
+    let v2 = v * v
+    let v3 = v2 * v
+    let v4 = v3 * v
+    1.0 + v + v2 / 2.0 + v3 / 6.0 + v4 / 24.0
+}
+
+// approx_log — ln(x) ≈ (x-1) - (x-1)²/2 + (x-1)³/3 near x≈1.
+// For x far from 1 the result is rough but avoids undefined behaviour.
+fn approx_log(x: f32) -> f32 with Div {
+    var v = x
+    if v < 0.0001 { v = 0.0001 }
+    let t = v - 1.0
+    let t2 = t * t
+    let t3 = t2 * t
+    t - t2 / 2.0 + t3 / 3.0
+}
+
+// approx_pow — base^exp via exp(exp * log(base))
+fn approx_pow(base: f32, exp: f32) -> f32 with Div {
+    let l = approx_log(base)
+    approx_exp(exp * l)
+}
+
+// ============================================================================
+// TapeEntry constructors
+// ============================================================================
+
+fn tape_entry_new(op: i64, val: i64, s0: i64, s1: i64) -> TapeEntry {
+    TapeEntry {
+        op: op,
+        val_id: val,
+        src0: s0,
+        src1: s1,
+        src2: -1,
+        fwd_val: 0.0,
+        fwd_src0: 0.0,
+        fwd_src1: 0.0,
+        grad_idx: -1,
+    }
+}
+
+fn tape_entry_with_fwd(e: TapeEntry, fwd: f32, s0_val: f32, s1_val: f32) -> TapeEntry {
+    TapeEntry {
+        op: e.op,
+        val_id: e.val_id,
+        src0: e.src0,
+        src1: e.src1,
+        src2: e.src2,
+        fwd_val: fwd,
+        fwd_src0: s0_val,
+        fwd_src1: s1_val,
+        grad_idx: e.grad_idx,
+    }
+}
+
+// ============================================================================
+// WengertTape management
+// ============================================================================
+
+fn tape_new() -> WengertTape {
+    WengertTape {
+        entries: [TapeEntry {
+            op: 0,
+            val_id: -1,
+            src0: -1,
+            src1: -1,
+            src2: -1,
+            fwd_val: 0.0,
+            fwd_src0: 0.0,
+            fwd_src1: 0.0,
+            grad_idx: -1,
+        }; 16384],
+        entry_count: 0,
+        grads: [0.0; 16384],
+        grad_count: 0,
+        inputs: [0; 256],
+        input_count: 0,
+        outputs: [0; 64],
+        output_count: 0,
+    }
+}
+
+fn tape_record(t: WengertTape, entry: TapeEntry) -> WengertTape {
+    var out = t
+    if out.entry_count >= 16384 {
+        return out
+    }
+    out.entries[out.entry_count as usize] = entry
+    out.entry_count = out.entry_count + 1
+    out
+}
+
+fn tape_mark_input(t: WengertTape, val_id: i64) -> WengertTape {
+    var out = t
+    if out.input_count >= 256 {
+        return out
+    }
+    out.inputs[out.input_count as usize] = val_id
+    out.input_count = out.input_count + 1
+    out
+}
+
+fn tape_mark_output(t: WengertTape, val_id: i64) -> WengertTape {
+    var out = t
+    if out.output_count >= 64 {
+        return out
+    }
+    out.outputs[out.output_count as usize] = val_id
+    out.output_count = out.output_count + 1
+    out
+}
+
+// tape_get_grad — return accumulated gradient for val_id (0.0 if out of range)
+fn tape_get_grad(t: WengertTape, val_id: i64) -> f32 {
+    if val_id < 0 {
+        return 0.0
+    }
+    if val_id >= t.grad_count {
+        return 0.0
+    }
+    t.grads[val_id as usize]
+}
+
+// tape_add_grad — accumulate delta into grads[val_id]; grows grad_count if needed
+fn tape_add_grad(t: WengertTape, val_id: i64, delta: f32) -> WengertTape {
+    if val_id < 0 {
+        return t
+    }
+    if val_id >= 16384 {
+        return t
+    }
+    var out = t
+    if val_id >= out.grad_count {
+        out.grad_count = val_id + 1
+    }
+    let old = out.grads[val_id as usize]
+    out.grads[val_id as usize] = old + delta
+    out
+}
+
+// ============================================================================
+// Diagnostic accessors
+// ============================================================================
+
+fn tape_count_ops(t: WengertTape) -> i64 {
+    t.entry_count
+}
+
+fn tape_count_inputs(t: WengertTape) -> i64 {
+    t.input_count
+}
+
+fn tape_grad_of_input(t: WengertTape, input_idx: i64) -> f32 {
+    if input_idx < 0 {
+        return 0.0
+    }
+    if input_idx >= t.input_count {
+        return 0.0
+    }
+    let vid = t.inputs[input_idx as usize]
+    tape_get_grad(t, vid)
+}
+
+fn autodiff_config_default(sm: i64) -> AutodiffConfig {
+    AutodiffConfig {
+        sm_version: sm,
+        accumulate_gradients: true,
+        zero_init_grads: true,
+        check_nan: false,
+        epistemic_mode: false,
+    }
+}
+
+// ============================================================================
+// CPU-side gradient rules — grad_rule_apply
+// Applies chain rule for entry.op, propagating out_grad to src0/src1/src2.
+// ============================================================================
+
+fn grad_rule_apply(entry: TapeEntry, out_grad: f32, t: WengertTape) -> WengertTape with Div {
+    var tape = t
+
+    if entry.op == GRAD_OP_ADD {
+        // ∂(a+b)/∂a = 1, ∂(a+b)/∂b = 1
+        tape = tape_add_grad(tape, entry.src0, out_grad)
+        tape = tape_add_grad(tape, entry.src1, out_grad)
+        return tape
+    }
+
+    if entry.op == GRAD_OP_SUB {
+        // ∂(a-b)/∂a = 1, ∂(a-b)/∂b = -1
+        tape = tape_add_grad(tape, entry.src0, out_grad)
+        tape = tape_add_grad(tape, entry.src1, 0.0 - out_grad)
+        return tape
+    }
+
+    if entry.op == GRAD_OP_MUL {
+        // ∂(ab)/∂a = b, ∂(ab)/∂b = a
+        tape = tape_add_grad(tape, entry.src0, out_grad * entry.fwd_src1)
+        tape = tape_add_grad(tape, entry.src1, out_grad * entry.fwd_src0)
+        return tape
+    }
+
+    if entry.op == GRAD_OP_DIV {
+        // ∂(a/b)/∂a = 1/b, ∂(a/b)/∂b = -a/b²
+        var b = entry.fwd_src1
+        if b == 0.0 { b = 0.0001 }
+        tape = tape_add_grad(tape, entry.src0, out_grad / b)
+        let neg_a_over_b2 = 0.0 - out_grad * entry.fwd_src0 / (b * b)
+        tape = tape_add_grad(tape, entry.src1, neg_a_over_b2)
+        return tape
+    }
+
+    if entry.op == GRAD_OP_NEG {
+        // ∂(-a)/∂a = -1
+        tape = tape_add_grad(tape, entry.src0, 0.0 - out_grad)
+        return tape
+    }
+
+    if entry.op == GRAD_OP_SQRT {
+        // ∂sqrt(a)/∂a = 1/(2*sqrt(a))  — fwd_val = sqrt(a)
+        var denom = entry.fwd_val + entry.fwd_val
+        if denom == 0.0 { denom = 0.0001 }
+        tape = tape_add_grad(tape, entry.src0, out_grad / denom)
+        return tape
+    }
+
+    if entry.op == GRAD_OP_EXP {
+        // ∂exp(a)/∂a = exp(a)  — fwd_val = exp(a)
+        tape = tape_add_grad(tape, entry.src0, out_grad * entry.fwd_val)
+        return tape
+    }
+
+    if entry.op == GRAD_OP_LOG {
+        // ∂log(a)/∂a = 1/a  — fwd_src0 = a
+        var a = entry.fwd_src0
+        if a == 0.0 { a = 0.0001 }
+        tape = tape_add_grad(tape, entry.src0, out_grad / a)
+        return tape
+    }
+
+    if entry.op == GRAD_OP_SIN {
+        // ∂sin(a)/∂a = cos(a)
+        let c = approx_cos(entry.fwd_src0)
+        tape = tape_add_grad(tape, entry.src0, out_grad * c)
+        return tape
+    }
+
+    if entry.op == GRAD_OP_COS {
+        // ∂cos(a)/∂a = -sin(a)
+        let s = approx_sin(entry.fwd_src0)
+        tape = tape_add_grad(tape, entry.src0, 0.0 - out_grad * s)
+        return tape
+    }
+
+    if entry.op == GRAD_OP_POW {
+        // ∂(a^b)/∂a = b * a^(b-1)
+        var base = entry.fwd_src0
+        if base == 0.0 { base = 0.0001 }
+        let exp_m1 = entry.fwd_src1 - 1.0
+        let pw = approx_pow(base, exp_m1)
+        tape = tape_add_grad(tape, entry.src0, out_grad * entry.fwd_src1 * pw)
+        return tape
+    }
+
+    if entry.op == GRAD_OP_RELU {
+        // ∂relu(a)/∂a = 1 if a>0 else 0
+        var mask = 0.0
+        if entry.fwd_src0 > 0.0 { mask = 1.0 }
+        tape = tape_add_grad(tape, entry.src0, out_grad * mask)
+        return tape
+    }
+
+    if entry.op == GRAD_OP_SIGMOID {
+        // ∂σ(a)/∂a = σ(a)*(1-σ(a))  — fwd_val = σ(a)
+        let s = entry.fwd_val
+        tape = tape_add_grad(tape, entry.src0, out_grad * s * (1.0 - s))
+        return tape
+    }
+
+    if entry.op == GRAD_OP_TANH {
+        // ∂tanh(a)/∂a = 1 - tanh²(a)  — fwd_val = tanh(a)
+        let tval = entry.fwd_val
+        tape = tape_add_grad(tape, entry.src0, out_grad * (1.0 - tval * tval))
+        return tape
+    }
+
+    if entry.op == GRAD_OP_FMA {
+        // fwd: a*b+c.  ∂/∂a=b, ∂/∂b=a, ∂/∂c=1
+        tape = tape_add_grad(tape, entry.src0, out_grad * entry.fwd_src1)
+        tape = tape_add_grad(tape, entry.src1, out_grad * entry.fwd_src0)
+        tape = tape_add_grad(tape, entry.src2, out_grad)
+        return tape
+    }
+
+    if entry.op == GRAD_OP_MAX {
+        // ∂max(a,b)/∂a = 1 if a>=b else 0
+        var ma = 0.0
+        var mb = 0.0
+        if entry.fwd_src0 >= entry.fwd_src1 {
+            ma = 1.0
+        } else {
+            mb = 1.0
+        }
+        tape = tape_add_grad(tape, entry.src0, out_grad * ma)
+        tape = tape_add_grad(tape, entry.src1, out_grad * mb)
+        return tape
+    }
+
+    if entry.op == GRAD_OP_MIN {
+        // ∂min(a,b)/∂a = 1 if a<=b else 0
+        var ma = 0.0
+        var mb = 0.0
+        if entry.fwd_src0 <= entry.fwd_src1 {
+            ma = 1.0
+        } else {
+            mb = 1.0
+        }
+        tape = tape_add_grad(tape, entry.src0, out_grad * ma)
+        tape = tape_add_grad(tape, entry.src1, out_grad * mb)
+        return tape
+    }
+
+    if entry.op == GRAD_OP_ABS {
+        // ∂|a|/∂a = sign(a)
+        var sign = 1.0
+        if entry.fwd_src0 < 0.0 { sign = -1.0 }
+        tape = tape_add_grad(tape, entry.src0, out_grad * sign)
+        return tape
+    }
+
+    // GRAD_OP_CONST, GRAD_OP_INPUT, GRAD_OP_OUTPUT, GRAD_OP_RESHAPE,
+    // GRAD_OP_SOFTMAX, GRAD_OP_MATMUL — no scalar gradient propagation here;
+    // SOFTMAX and MATMUL require vector/matrix context handled by the PTX path.
+    tape
+}
+
+// ============================================================================
+// tape_backward — reverse-mode pass over the full tape
+// ============================================================================
+
+fn tape_backward(t: WengertTape) -> WengertTape with Div {
+    var tape = t
+
+    // 1. Seed output gradients to 1.0
+    var oi: i64 = 0
+    while oi < tape.output_count {
+        let vid = tape.outputs[oi as usize]
+        tape = tape_add_grad(tape, vid, 1.0)
+        oi = oi + 1
+    }
+
+    // 2. Traverse entries in reverse order
+    var ei: i64 = tape.entry_count - 1
+    while ei >= 0 {
+        let entry = tape.entries[ei as usize]
+        let g = tape_get_grad(tape, entry.val_id)
+        if g != 0.0 {
+            tape = grad_rule_apply(entry, g, tape)
+        }
+        ei = ei - 1
+    }
+
+    tape
+}
+
+// ============================================================================
+// GradEmitState helpers
+// ============================================================================
+
+fn grad_emit_state_new(sm: i64) -> GradEmitState {
+    GradEmitState {
+        buf: [0; 65536],
+        buf_len: 0,
+        reg_counter: 0,
+        reg_names: [0; 524288],
+        reg_name_count: 0,
+    }
+}
+
+fn ges_append_byte(s: GradEmitState, b: i8) -> GradEmitState with Mut, Panic {
+    var out = s
+    if out.buf_len >= 0 && out.buf_len < 65536 {
+        out.buf[out.buf_len as usize] = b
+        out.buf_len = out.buf_len + 1
+    }
+    out
+}
+
+// ges_alloc_reg — allocate a new register index, return (updated state, index)
+fn ges_alloc_reg(s: GradEmitState) -> (GradEmitState, i64) {
+    var out = s
+    let idx = out.reg_counter
+    out.reg_counter = idx + 1
+    (out, idx)
+}
+
+// i64_write_decimal — write decimal representation of v into a [i8;32] slot.
+// Returns number of bytes written.
+fn i64_write_decimal(v: i64, slot: &![i8; 32]) -> i64 with Mut, Panic, Div {
+    if v == 0 {
+        slot[0 as usize] = 48
+        return 1
+    }
+    var tmp: [i8; 32] = [0; 32]
+    var neg: bool = false
+    var n = v
+    if n < 0 {
+        neg = true
+        n = 0 - n
+    }
+    var pos: i64 = 0
+    while n > 0 {
+        let digit = n - (n / 10) * 10
+        tmp[pos as usize] = (48 + digit) as i8
+        n = n / 10
+        pos = pos + 1
+    }
+    if neg {
+        tmp[pos as usize] = 45
+        pos = pos + 1
+    }
+    var i: i64 = 0
+    while i < pos {
+        slot[(pos - 1 - i) as usize] = tmp[i as usize]
+        i = i + 1
+    }
+    pos
+}
+
+// ges_reg_name — return the 32-byte name slot for register index idx
+fn ges_reg_name(s: GradEmitState, idx: i64) -> [i8; 32] {
+    var slot: [i8; 32] = [0; 32]
+    if idx < 0 { return slot }
+    if idx >= 16384 { return slot }
+    let base = idx * 32
+    var i: i64 = 0
+    while i < 32 {
+        slot[i as usize] = s.reg_names[(base + i) as usize]
+        i = i + 1
+    }
+    slot
+}
+
+// ges_set_reg_name — store a 32-byte name for a given val_id
+fn ges_set_reg_name(s: GradEmitState, val_id: i64, name: [i8; 32]) -> GradEmitState with Mut, Panic {
+    var out = s
+    if val_id < 0 { return out }
+    if val_id >= 16384 { return out }
+    let base = val_id * 32
+    var i: i64 = 0
+    while i < 32 {
+        out.reg_names[(base + i) as usize] = name[i as usize]
+        i = i + 1
+    }
+    if val_id >= out.reg_name_count {
+        out.reg_name_count = val_id + 1
+    }
+    out
+}
+
+// ges_get_reg_for_val — retrieve the stored register name for val_id
+fn ges_get_reg_for_val(s: GradEmitState, val_id: i64) -> [i8; 32] {
+    ges_reg_name(s, val_id)
+}
+
+// ges_make_grad_reg_name — build "%grad_<n>" as a [i8;32] slot
+fn ges_make_grad_reg_name(val_id: i64) -> [i8; 32] with Mut, Panic, Div {
+    // Encodes: % g r a d _ <digits>
+    // ASCII: 37 103 114 97 100 95
+    var slot: [i8; 32] = [0; 32]
+    slot[0 as usize] = 37   // %
+    slot[1 as usize] = 103  // g
+    slot[2 as usize] = 114  // r
+    slot[3 as usize] = 97   // a
+    slot[4 as usize] = 100  // d
+    slot[5 as usize] = 95   // _
+    var digits: [i8; 32] = [0; 32]
+    let dlen = i64_write_decimal(val_id, &!digits)
+    var i: i64 = 0
+    while i < dlen {
+        slot[(6 + i) as usize] = digits[i as usize]
+        i = i + 1
+    }
+    slot
+}
+
+// ges_make_fwd_reg_name — build "%fwd_<n>" as a [i8;32] slot
+fn ges_make_fwd_reg_name(val_id: i64) -> [i8; 32] with Mut, Panic, Div {
+    // ASCII: 37 102 119 100 95
+    var slot: [i8; 32] = [0; 32]
+    slot[0 as usize] = 37   // %
+    slot[1 as usize] = 102  // f
+    slot[2 as usize] = 119  // w
+    slot[3 as usize] = 100  // d
+    slot[4 as usize] = 95   // _
+    var digits: [i8; 32] = [0; 32]
+    let dlen = i64_write_decimal(val_id, &!digits)
+    var i: i64 = 0
+    while i < dlen {
+        slot[(5 + i) as usize] = digits[i as usize]
+        i = i + 1
+    }
+    slot
+}
+
+// ges_append_slot — append up to 32 bytes from a [i8;32] slot to the buffer (stops at NUL)
+fn ges_append_slot(s: GradEmitState, slot: [i8; 32]) -> GradEmitState with Mut, Panic {
+    var out = s
+    var i: i64 = 0
+    while i < 32 {
+        let b = slot[i as usize]
+        if b == 0 { break }
+        out = ges_append_byte(out, b)
+        i = i + 1
+    }
+    out
+}
+
+// ges_append_literal — append a fixed-length [i8; 128] line to the buffer
+fn ges_append_literal(s: GradEmitState, lit: [i8; 128], len: i64) -> GradEmitState with Mut, Panic {
+    var out = s
+    var i: i64 = 0
+    while i < len {
+        if i >= 128 { break }
+        out = ges_append_byte(out, lit[i as usize])
+        i = i + 1
+    }
+    out
+}
+
+// ges_emit_line — append a [i8;128] line followed by newline
+fn ges_emit_line(s: GradEmitState, line: [i8; 128], len: i64) -> GradEmitState with Mut, Panic {
+    var out = ges_append_literal(s, line, len)
+    out = ges_append_byte(out, 10)
+    out
+}
+
+// ges_indent — emit 4 spaces
+fn ges_indent(s: GradEmitState) -> GradEmitState with Mut, Panic {
+    var out = s
+    out = ges_append_byte(out, 32)
+    out = ges_append_byte(out, 32)
+    out = ges_append_byte(out, 32)
+    out = ges_append_byte(out, 32)
+    out
+}
+
+// ges_emit_str8 — emit up to 8 ASCII literal bytes (for short opcodes/tokens)
+fn ges_emit_str8(s: GradEmitState, a: i8, b: i8, c: i8, d: i8, e: i8, f: i8, g: i8, h: i8, n: i64) -> GradEmitState with Mut, Panic {
+    var out = s
+    var bytes: [i8; 8] = [a, b, c, d, e, f, g, h]
+    var i: i64 = 0
+    while i < n {
+        out = ges_append_byte(out, bytes[i as usize])
+        i = i + 1
+    }
+    out
+}
+
+// ges_emit_newline
+fn ges_emit_newline(s: GradEmitState) -> GradEmitState with Mut, Panic {
+    ges_append_byte(s, 10)
+}
+
+// ges_emit_semicolon_newline
+fn ges_emit_semicolon_nl(s: GradEmitState) -> GradEmitState with Mut, Panic {
+    var out = ges_append_byte(s, 59) // ;
+    out = ges_append_byte(out, 10)   // \n
+    out
+}
+
+// ges_emit_comma_space
+fn ges_emit_comma_sp(s: GradEmitState) -> GradEmitState with Mut, Panic {
+    var out = ges_append_byte(s, 44)  // ,
+    out = ges_append_byte(out, 32)    // space
+    out
+}
+
+// Helper: emit "    <opcode> <dst>, <src>;\n"
+fn ges_emit_unary(s: GradEmitState, op: [i8; 32], dst: [i8; 32], src: [i8; 32]) -> GradEmitState with Mut, Panic {
+    var out = ges_indent(s)
+    out = ges_append_slot(out, op)
+    out = ges_append_byte(out, 32)   // space
+    out = ges_append_slot(out, dst)
+    out = ges_emit_comma_sp(out)
+    out = ges_append_slot(out, src)
+    out = ges_emit_semicolon_nl(out)
+    out
+}
+
+// Helper: emit "    <opcode> <dst>, <a>, <b>;\n"
+fn ges_emit_binary(s: GradEmitState, op: [i8; 32], dst: [i8; 32], a: [i8; 32], b: [i8; 32]) -> GradEmitState with Mut, Panic {
+    var out = ges_indent(s)
+    out = ges_append_slot(out, op)
+    out = ges_append_byte(out, 32)
+    out = ges_append_slot(out, dst)
+    out = ges_emit_comma_sp(out)
+    out = ges_append_slot(out, a)
+    out = ges_emit_comma_sp(out)
+    out = ges_append_slot(out, b)
+    out = ges_emit_semicolon_nl(out)
+    out
+}
+
+// Helper: emit "    <opcode> <dst>, <a>, <b>, <c>;\n"
+fn ges_emit_ternary(s: GradEmitState, op: [i8; 32], dst: [i8; 32], a: [i8; 32], b: [i8; 32], c: [i8; 32]) -> GradEmitState with Mut, Panic {
+    var out = ges_indent(s)
+    out = ges_append_slot(out, op)
+    out = ges_append_byte(out, 32)
+    out = ges_append_slot(out, dst)
+    out = ges_emit_comma_sp(out)
+    out = ges_append_slot(out, a)
+    out = ges_emit_comma_sp(out)
+    out = ges_append_slot(out, b)
+    out = ges_emit_comma_sp(out)
+    out = ges_append_slot(out, c)
+    out = ges_emit_semicolon_nl(out)
+    out
+}
+
+// Helper: emit "    <opcode> <dst>, <a>, <b>, <c>, <d>;\n"
+fn ges_emit_quaternary(s: GradEmitState, op: [i8; 32], dst: [i8; 32], a: [i8; 32], b: [i8; 32], c: [i8; 32], d: [i8; 32]) -> GradEmitState with Mut, Panic {
+    var out = ges_indent(s)
+    out = ges_append_slot(out, op)
+    out = ges_append_byte(out, 32)
+    out = ges_append_slot(out, dst)
+    out = ges_emit_comma_sp(out)
+    out = ges_append_slot(out, a)
+    out = ges_emit_comma_sp(out)
+    out = ges_append_slot(out, b)
+    out = ges_emit_comma_sp(out)
+    out = ges_append_slot(out, c)
+    out = ges_emit_comma_sp(out)
+    out = ges_append_slot(out, d)
+    out = ges_emit_semicolon_nl(out)
+    out
+}
+
+// make_op_slot — build a [i8;32] slot from an ASCII byte sequence (up to 20 bytes)
+fn make_op_slot(bytes: [i8; 20], n: i64) -> [i8; 32] {
+    var slot: [i8; 32] = [0; 32]
+    var i: i64 = 0
+    while i < n && i < 20 {
+        slot[i as usize] = bytes[i as usize]
+        i = i + 1
+    }
+    slot
+}
+
+// Convenience: build [i8;32] for "add.f32"
+fn op_add_f32() -> [i8; 32] {
+    // a d d . f 3 2   = 97 100 100 46 102 51 50
+    make_op_slot([97, 100, 100, 46, 102, 51, 50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 7)
+}
+
+// "sub.f32" = 115 117 98 46 102 51 50
+fn op_sub_f32() -> [i8; 32] {
+    make_op_slot([115, 117, 98, 46, 102, 51, 50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 7)
+}
+
+// "mul.rn.f32" = 109 117 108 46 114 110 46 102 51 50
+fn op_mul_f32() -> [i8; 32] {
+    make_op_slot([109, 117, 108, 46, 114, 110, 46, 102, 51, 50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 10)
+}
+
+// "div.rn.f32" = 100 105 118 46 114 110 46 102 51 50
+fn op_div_f32() -> [i8; 32] {
+    make_op_slot([100, 105, 118, 46, 114, 110, 46, 102, 51, 50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 10)
+}
+
+// "fma.rn.f32" = 102 109 97 46 114 110 46 102 51 50
+fn op_fma_f32() -> [i8; 32] {
+    make_op_slot([102, 109, 97, 46, 114, 110, 46, 102, 51, 50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 10)
+}
+
+// "mov.f32" = 109 111 118 46 102 51 50
+fn op_mov_f32() -> [i8; 32] {
+    make_op_slot([109, 111, 118, 46, 102, 51, 50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 7)
+}
+
+// "neg.f32" = 110 101 103 46 102 51 50
+fn op_neg_f32() -> [i8; 32] {
+    make_op_slot([110, 101, 103, 46, 102, 51, 50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 7)
+}
+
+// "setp.gt.f32" = 115 101 116 112 46 103 116 46 102 51 50
+fn op_setp_gt_f32() -> [i8; 32] {
+    make_op_slot([115, 101, 116, 112, 46, 103, 116, 46, 102, 51, 50, 0, 0, 0, 0, 0, 0, 0, 0, 0], 11)
+}
+
+// "setp.ge.f32" = 115 101 116 112 46 103 101 46 102 51 50
+fn op_setp_ge_f32() -> [i8; 32] {
+    make_op_slot([115, 101, 116, 112, 46, 103, 101, 46, 102, 51, 50, 0, 0, 0, 0, 0, 0, 0, 0, 0], 11)
+}
+
+// "selp.f32" = 115 101 108 112 46 102 51 50
+fn op_selp_f32() -> [i8; 32] {
+    make_op_slot([115, 101, 108, 112, 46, 102, 51, 50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 8)
+}
+
+// "0f00000000" (zero constant for mov) = 48 102 48 48 48 48 48 48 48 48
+fn zero_f32_const() -> [i8; 32] {
+    make_op_slot([48, 102, 48, 48, 48, 48, 48, 48, 48, 48, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 10)
+}
+
+// make_tmp_reg — build a unique temporary register name "%t<idx>"
+fn make_tmp_reg(idx: i64) -> [i8; 32] with Mut, Panic, Div {
+    // % t <digits>   = 37 116 ...
+    var slot: [i8; 32] = [0; 32]
+    slot[0 as usize] = 37   // %
+    slot[1 as usize] = 116  // t
+    var digits: [i8; 32] = [0; 32]
+    let dlen = i64_write_decimal(idx, &!digits)
+    var i: i64 = 0
+    while i < dlen {
+        slot[(2 + i) as usize] = digits[i as usize]
+        i = i + 1
+    }
+    slot
+}
+
+// make_pred_reg — build "%p<idx>"
+fn make_pred_reg(idx: i64) -> [i8; 32] with Mut, Panic, Div {
+    var slot: [i8; 32] = [0; 32]
+    slot[0 as usize] = 37   // %
+    slot[1 as usize] = 112  // p
+    var digits: [i8; 32] = [0; 32]
+    let dlen = i64_write_decimal(idx, &!digits)
+    var i: i64 = 0
+    while i < dlen {
+        slot[(2 + i) as usize] = digits[i as usize]
+        i = i + 1
+    }
+    slot
+}
+
+// ============================================================================
+// PTX backward-pass emitters — one per gradient rule
+// ============================================================================
+
+// grad_ptx_emit_zero_grad — mov.f32 %grad_reg, 0f00000000;
+fn grad_ptx_emit_zero_grad(s: GradEmitState, grad_reg: [i8; 32]) -> GradEmitState with Mut, Panic {
+    ges_emit_unary(s, op_mov_f32(), grad_reg, zero_f32_const())
+}
+
+// grad_ptx_emit_add_grad — ADD: both sources receive out_grad
+//   add.f32 src0_grad, src0_grad, out_grad;
+//   add.f32 src1_grad, src1_grad, out_grad;
+fn grad_ptx_emit_add_grad(
+    s: GradEmitState,
+    src0_grad: [i8; 32],
+    src1_grad: [i8; 32],
+    out_grad: [i8; 32]
+) -> GradEmitState with Mut, Panic {
+    var out = ges_emit_binary(s, op_add_f32(), src0_grad, src0_grad, out_grad)
+    out = ges_emit_binary(out, op_add_f32(), src1_grad, src1_grad, out_grad)
+    out
+}
+
+// grad_ptx_emit_sub_grad — SUB: src0 += out_grad, src1 -= out_grad
+//   add.f32 src0_grad, src0_grad, out_grad;
+//   sub.f32 src1_grad, src1_grad, out_grad;
+fn grad_ptx_emit_sub_grad(
+    s: GradEmitState,
+    src0_grad: [i8; 32],
+    src1_grad: [i8; 32],
+    out_grad: [i8; 32]
+) -> GradEmitState with Mut, Panic {
+    var out = ges_emit_binary(s, op_add_f32(), src0_grad, src0_grad, out_grad)
+    out = ges_emit_binary(out, op_sub_f32(), src1_grad, src1_grad, out_grad)
+    out
+}
+
+// grad_ptx_emit_mul_grad — MUL: fma.rn.f32 for both sources
+//   fma.rn.f32 src0_grad, out_grad, fwd_src1, src0_grad;
+//   fma.rn.f32 src1_grad, out_grad, fwd_src0, src1_grad;
+fn grad_ptx_emit_mul_grad(
+    s: GradEmitState,
+    src0_grad: [i8; 32],
+    src1_grad: [i8; 32],
+    out_grad: [i8; 32],
+    fwd_src0: [i8; 32],
+    fwd_src1: [i8; 32]
+) -> GradEmitState with Mut, Panic {
+    // dst = a*b + c  ↔  fma(out_grad, fwd_src1, src0_grad)
+    var out = ges_emit_quaternary(s, op_fma_f32(), src0_grad, out_grad, fwd_src1, src0_grad, src0_grad)
+    out = ges_emit_quaternary(out, op_fma_f32(), src1_grad, out_grad, fwd_src0, src1_grad, src1_grad)
+    out
+}
+
+// grad_ptx_emit_div_grad — DIV:
+//   src0_grad += out_grad / fwd_src1
+//   src1_grad -= out_grad * fwd_src0 / (fwd_src1 * fwd_src1)
+fn grad_ptx_emit_div_grad(
+    s: GradEmitState,
+    src0_grad: [i8; 32],
+    src1_grad: [i8; 32],
+    out_grad: [i8; 32],
+    fwd_src0: [i8; 32],
+    fwd_src1: [i8; 32]
+) -> GradEmitState with Mut, Panic, Div {
+    let tmp_idx = s.reg_counter
+    let tmp_a = make_tmp_reg(tmp_idx)
+    let tmp_b = make_tmp_reg(tmp_idx + 1)
+    let tmp_c = make_tmp_reg(tmp_idx + 2)
+
+    // tmp_a = out_grad / fwd_src1
+    var out = ges_emit_binary(s, op_div_f32(), tmp_a, out_grad, fwd_src1)
+    // src0_grad += tmp_a
+    out = ges_emit_binary(out, op_add_f32(), src0_grad, src0_grad, tmp_a)
+    // tmp_b = fwd_src1 * fwd_src1
+    out = ges_emit_binary(out, op_mul_f32(), tmp_b, fwd_src1, fwd_src1)
+    // tmp_c = out_grad * fwd_src0 / tmp_b
+    out = ges_emit_binary(out, op_mul_f32(), tmp_c, out_grad, fwd_src0)
+    out = ges_emit_binary(out, op_div_f32(), tmp_c, tmp_c, tmp_b)
+    // src1_grad -= tmp_c
+    out = ges_emit_binary(out, op_sub_f32(), src1_grad, src1_grad, tmp_c)
+    var outs = out
+    outs.reg_counter = tmp_idx + 3
+    outs
+}
+
+// grad_ptx_emit_exp_grad — EXP: fma.rn.f32 src_grad, out_grad, fwd_val, src_grad;
+fn grad_ptx_emit_exp_grad(
+    s: GradEmitState,
+    src_grad: [i8; 32],
+    out_grad: [i8; 32],
+    fwd_val: [i8; 32]
+) -> GradEmitState with Mut, Panic {
+    ges_emit_quaternary(s, op_fma_f32(), src_grad, out_grad, fwd_val, src_grad, src_grad)
+}
+
+// grad_ptx_emit_log_grad — LOG: src_grad += out_grad / fwd_src
+fn grad_ptx_emit_log_grad(
+    s: GradEmitState,
+    src_grad: [i8; 32],
+    out_grad: [i8; 32],
+    fwd_src: [i8; 32]
+) -> GradEmitState with Mut, Panic, Div {
+    let tmp_idx = s.reg_counter
+    let tmp = make_tmp_reg(tmp_idx)
+    var out = ges_emit_binary(s, op_div_f32(), tmp, out_grad, fwd_src)
+    out = ges_emit_binary(out, op_add_f32(), src_grad, src_grad, tmp)
+    var outs = out
+    outs.reg_counter = tmp_idx + 1
+    outs
+}
+
+// grad_ptx_emit_sqrt_grad — SQRT: tmp = fwd_val + fwd_val; tmp2 = out_grad/tmp; src_grad += tmp2
+// fwd_val = sqrt(src), so 2*sqrt(src) = fwd_val + fwd_val
+fn grad_ptx_emit_sqrt_grad(
+    s: GradEmitState,
+    src_grad: [i8; 32],
+    out_grad: [i8; 32],
+    fwd_val: [i8; 32]
+) -> GradEmitState with Mut, Panic, Div {
+    let tmp_idx = s.reg_counter
+    let tmp_denom = make_tmp_reg(tmp_idx)
+    let tmp_res = make_tmp_reg(tmp_idx + 1)
+    // tmp_denom = fwd_val + fwd_val  (= 2*sqrt(src))
+    var out = ges_emit_binary(s, op_add_f32(), tmp_denom, fwd_val, fwd_val)
+    // tmp_res = out_grad / tmp_denom
+    out = ges_emit_binary(out, op_div_f32(), tmp_res, out_grad, tmp_denom)
+    // src_grad += tmp_res
+    out = ges_emit_binary(out, op_add_f32(), src_grad, src_grad, tmp_res)
+    var outs = out
+    outs.reg_counter = tmp_idx + 2
+    outs
+}
+
+// grad_ptx_emit_relu_grad — RELU: masked gradient via setp/selp
+//   setp.gt.f32 %p, fwd_src, 0f00000000;
+//   selp.f32    %mask, out_grad, 0f00000000, %p;
+//   add.f32     src_grad, src_grad, %mask;
+fn grad_ptx_emit_relu_grad(
+    s: GradEmitState,
+    src_grad: [i8; 32],
+    out_grad: [i8; 32],
+    fwd_src: [i8; 32]
+) -> GradEmitState with Mut, Panic, Div {
+    let tmp_idx = s.reg_counter
+    let pred = make_pred_reg(tmp_idx)
+    let mask = make_tmp_reg(tmp_idx + 1)
+    let zero = zero_f32_const()
+
+    var out = ges_emit_binary(s, op_setp_gt_f32(), pred, fwd_src, zero)
+    // selp.f32 mask, out_grad, 0, %p
+    out = ges_emit_quaternary(out, op_selp_f32(), mask, out_grad, zero, pred, pred)
+    out = ges_emit_binary(out, op_add_f32(), src_grad, src_grad, mask)
+    var outs = out
+    outs.reg_counter = tmp_idx + 2
+    outs
+}
+
+// grad_ptx_emit_tanh_grad — TANH: fwd_val = tanh(src)
+//   mul.rn.f32 %sq, fwd_val, fwd_val;
+//   sub.f32    %one_m_sq, 1.0, %sq;   -- via neg + add
+//   mul.rn.f32 %tmp, out_grad, %one_m_sq;
+//   add.f32    src_grad, src_grad, %tmp;
+fn grad_ptx_emit_tanh_grad(
+    s: GradEmitState,
+    src_grad: [i8; 32],
+    out_grad: [i8; 32],
+    fwd_val: [i8; 32]
+) -> GradEmitState with Mut, Panic, Div {
+    let tmp_idx = s.reg_counter
+    let sq = make_tmp_reg(tmp_idx)
+    let one_m_sq = make_tmp_reg(tmp_idx + 1)
+    let tmp = make_tmp_reg(tmp_idx + 2)
+
+    // Constant 1.0: build "0f3f800000" — IEEE 754 1.0
+    var one_slot: [i8; 32] = [0; 32]
+    // 0 f 3 f 8 0 0 0 0 0 = 48 102 51 102 56 48 48 48 48 48
+    one_slot[0 as usize] = 48
+    one_slot[1 as usize] = 102
+    one_slot[2 as usize] = 51
+    one_slot[3 as usize] = 102
+    one_slot[4 as usize] = 56
+    one_slot[5 as usize] = 48
+    one_slot[6 as usize] = 48
+    one_slot[7 as usize] = 48
+    one_slot[8 as usize] = 48
+    one_slot[9 as usize] = 48
+
+    // sq = fwd_val * fwd_val
+    var out = ges_emit_binary(s, op_mul_f32(), sq, fwd_val, fwd_val)
+    // one_m_sq = 1.0 - sq  (sub.f32 one_m_sq, 1.0_const, sq)
+    out = ges_emit_binary(out, op_sub_f32(), one_m_sq, one_slot, sq)
+    // tmp = out_grad * one_m_sq
+    out = ges_emit_binary(out, op_mul_f32(), tmp, out_grad, one_m_sq)
+    // src_grad += tmp
+    out = ges_emit_binary(out, op_add_f32(), src_grad, src_grad, tmp)
+    var outs = out
+    outs.reg_counter = tmp_idx + 3
+    outs
+}
+
+// grad_ptx_emit_sigmoid_grad — SIGMOID: s*(1-s)
+//   mul.rn.f32 %sq, fwd_val, fwd_val;
+//   sub.f32    %diff, fwd_val, %sq;      -- = s - s² = s*(1-s)
+//   fma.rn.f32 src_grad, out_grad, %diff, src_grad;
+fn grad_ptx_emit_sigmoid_grad(
+    s: GradEmitState,
+    src_grad: [i8; 32],
+    out_grad: [i8; 32],
+    fwd_val: [i8; 32]
+) -> GradEmitState with Mut, Panic, Div {
+    let tmp_idx = s.reg_counter
+    let sq = make_tmp_reg(tmp_idx)
+    let diff = make_tmp_reg(tmp_idx + 1)
+
+    // sq = fwd_val * fwd_val
+    var out = ges_emit_binary(s, op_mul_f32(), sq, fwd_val, fwd_val)
+    // diff = fwd_val - sq  =  s - s² = s*(1-s)
+    out = ges_emit_binary(out, op_sub_f32(), diff, fwd_val, sq)
+    // src_grad = fma(out_grad, diff, src_grad)
+    out = ges_emit_quaternary(out, op_fma_f32(), src_grad, out_grad, diff, src_grad, src_grad)
+    var outs = out
+    outs.reg_counter = tmp_idx + 2
+    outs
+}
+
+// grad_ptx_emit_abs_grad — ABS: sign via setp.ge/selp
+//   setp.ge.f32 %p, fwd_src, 0f00000000;
+//   neg.f32     %neg_og, out_grad;
+//   selp.f32    %sign, out_grad, %neg_og, %p;
+//   add.f32     src_grad, src_grad, %sign;
+fn grad_ptx_emit_abs_grad(
+    s: GradEmitState,
+    src_grad: [i8; 32],
+    out_grad: [i8; 32],
+    fwd_src: [i8; 32]
+) -> GradEmitState with Mut, Panic, Div {
+    let tmp_idx = s.reg_counter
+    let pred = make_pred_reg(tmp_idx)
+    let neg_og = make_tmp_reg(tmp_idx + 1)
+    let sign = make_tmp_reg(tmp_idx + 2)
+    let zero = zero_f32_const()
+
+    var out = ges_emit_binary(s, op_setp_ge_f32(), pred, fwd_src, zero)
+    out = ges_emit_unary(out, op_neg_f32(), neg_og, out_grad)
+    // selp.f32 sign, out_grad, neg_og, %p
+    out = ges_emit_quaternary(out, op_selp_f32(), sign, out_grad, neg_og, pred, pred)
+    out = ges_emit_binary(out, op_add_f32(), src_grad, src_grad, sign)
+    var outs = out
+    outs.reg_counter = tmp_idx + 3
+    outs
+}
+
+// ============================================================================
+// grad_emit_zero_grad_init — emit zero-init for all input gradient registers
+// ============================================================================
+
+fn grad_emit_zero_grad_init(s: GradEmitState, t: WengertTape) -> GradEmitState with Mut, Panic, Div {
+    var out = s
+    var i: i64 = 0
+    while i < t.input_count {
+        let vid = t.inputs[i as usize]
+        let grad_name = ges_make_grad_reg_name(vid)
+        out = grad_ptx_emit_zero_grad(out, grad_name)
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
+// grad_emit_backward_pass — traverse tape in reverse and emit PTX gradient ops
+// ============================================================================
+
+fn grad_emit_backward_pass(s: GradEmitState, t: WengertTape, cfg: AutodiffConfig) -> GradEmitState with Mut, Panic, Div {
+    var out = s
+
+    // Optionally zero-init gradient registers
+    if cfg.zero_init_grads {
+        out = grad_emit_zero_grad_init(out, t)
+    }
+
+    // Traverse in reverse order
+    var ei: i64 = t.entry_count - 1
+    while ei >= 0 {
+        let entry = t.entries[ei as usize]
+        let out_grad_reg = ges_make_grad_reg_name(entry.val_id)
+        let s0_grad_reg = ges_make_grad_reg_name(entry.src0)
+        let s1_grad_reg = ges_make_grad_reg_name(entry.src1)
+        let fwd_val_reg = ges_make_fwd_reg_name(entry.val_id)
+        let fwd_s0_reg = ges_make_fwd_reg_name(entry.src0)
+        let fwd_s1_reg = ges_make_fwd_reg_name(entry.src1)
+
+        if entry.op == GRAD_OP_ADD {
+            out = grad_ptx_emit_add_grad(out, s0_grad_reg, s1_grad_reg, out_grad_reg)
+        }
+
+        if entry.op == GRAD_OP_SUB {
+            out = grad_ptx_emit_sub_grad(out, s0_grad_reg, s1_grad_reg, out_grad_reg)
+        }
+
+        if entry.op == GRAD_OP_MUL {
+            out = grad_ptx_emit_mul_grad(out, s0_grad_reg, s1_grad_reg, out_grad_reg, fwd_s0_reg, fwd_s1_reg)
+        }
+
+        if entry.op == GRAD_OP_DIV {
+            out = grad_ptx_emit_div_grad(out, s0_grad_reg, s1_grad_reg, out_grad_reg, fwd_s0_reg, fwd_s1_reg)
+        }
+
+        if entry.op == GRAD_OP_NEG {
+            // sub.f32 s0_grad, s0_grad, out_grad
+            out = ges_emit_binary(out, op_sub_f32(), s0_grad_reg, s0_grad_reg, out_grad_reg)
+        }
+
+        if entry.op == GRAD_OP_SQRT {
+            out = grad_ptx_emit_sqrt_grad(out, s0_grad_reg, out_grad_reg, fwd_val_reg)
+        }
+
+        if entry.op == GRAD_OP_EXP {
+            out = grad_ptx_emit_exp_grad(out, s0_grad_reg, out_grad_reg, fwd_val_reg)
+        }
+
+        if entry.op == GRAD_OP_LOG {
+            out = grad_ptx_emit_log_grad(out, s0_grad_reg, out_grad_reg, fwd_s0_reg)
+        }
+
+        if entry.op == GRAD_OP_RELU {
+            out = grad_ptx_emit_relu_grad(out, s0_grad_reg, out_grad_reg, fwd_s0_reg)
+        }
+
+        if entry.op == GRAD_OP_TANH {
+            out = grad_ptx_emit_tanh_grad(out, s0_grad_reg, out_grad_reg, fwd_val_reg)
+        }
+
+        if entry.op == GRAD_OP_SIGMOID {
+            out = grad_ptx_emit_sigmoid_grad(out, s0_grad_reg, out_grad_reg, fwd_val_reg)
+        }
+
+        if entry.op == GRAD_OP_ABS {
+            out = grad_ptx_emit_abs_grad(out, s0_grad_reg, out_grad_reg, fwd_s0_reg)
+        }
+
+        // FMA: ∂/∂a=b, ∂/∂b=a, ∂/∂c=1
+        if entry.op == GRAD_OP_FMA {
+            let s2_grad_reg = ges_make_grad_reg_name(entry.src2)
+            // src0 += out_grad * fwd_src1
+            out = ges_emit_quaternary(out, op_fma_f32(), s0_grad_reg, out_grad_reg, fwd_s1_reg, s0_grad_reg, s0_grad_reg)
+            // src1 += out_grad * fwd_src0
+            out = ges_emit_quaternary(out, op_fma_f32(), s1_grad_reg, out_grad_reg, fwd_s0_reg, s1_grad_reg, s1_grad_reg)
+            // src2 += out_grad
+            out = ges_emit_binary(out, op_add_f32(), s2_grad_reg, s2_grad_reg, out_grad_reg)
+        }
+
+        // MAX: src0 gets grad if src0 >= src1; src1 gets grad otherwise
+        if entry.op == GRAD_OP_MAX {
+            let tmp_idx = out.reg_counter
+            let pred = make_pred_reg(tmp_idx)
+            let mask_a = make_tmp_reg(tmp_idx + 1)
+            let mask_b = make_tmp_reg(tmp_idx + 2)
+            let zero = zero_f32_const()
+            out = ges_emit_binary(out, op_setp_ge_f32(), pred, fwd_s0_reg, fwd_s1_reg)
+            out = ges_emit_quaternary(out, op_selp_f32(), mask_a, out_grad_reg, zero, pred, pred)
+            out = ges_emit_quaternary(out, op_selp_f32(), mask_b, zero, out_grad_reg, pred, pred)
+            out = ges_emit_binary(out, op_add_f32(), s0_grad_reg, s0_grad_reg, mask_a)
+            out = ges_emit_binary(out, op_add_f32(), s1_grad_reg, s1_grad_reg, mask_b)
+            var outs = out
+            outs.reg_counter = tmp_idx + 3
+            out = outs
+        }
+
+        // MIN: src0 gets grad if src0 <= src1; src1 gets grad otherwise
+        if entry.op == GRAD_OP_MIN {
+            // setp.le.f32 for min
+            let setp_le: [i8; 32] = make_op_slot([115, 101, 116, 112, 46, 108, 101, 46, 102, 51, 50, 0, 0, 0, 0, 0, 0, 0, 0, 0], 11)
+            let tmp_idx = out.reg_counter
+            let pred = make_pred_reg(tmp_idx)
+            let mask_a = make_tmp_reg(tmp_idx + 1)
+            let mask_b = make_tmp_reg(tmp_idx + 2)
+            let zero = zero_f32_const()
+            out = ges_emit_binary(out, setp_le, pred, fwd_s0_reg, fwd_s1_reg)
+            out = ges_emit_quaternary(out, op_selp_f32(), mask_a, out_grad_reg, zero, pred, pred)
+            out = ges_emit_quaternary(out, op_selp_f32(), mask_b, zero, out_grad_reg, pred, pred)
+            out = ges_emit_binary(out, op_add_f32(), s0_grad_reg, s0_grad_reg, mask_a)
+            out = ges_emit_binary(out, op_add_f32(), s1_grad_reg, s1_grad_reg, mask_b)
+            var outs = out
+            outs.reg_counter = tmp_idx + 3
+            out = outs
+        }
+
+        // RESHAPE: identity — pass gradient straight through
+        if entry.op == GRAD_OP_RESHAPE {
+            out = ges_emit_binary(out, op_add_f32(), s0_grad_reg, s0_grad_reg, out_grad_reg)
+        }
+
+        // CONST / INPUT / OUTPUT / SOFTMAX / MATMUL: no scalar PTX emission here
+        // (MATMUL/SOFTMAX require vector-level handling by the calling matrix engine)
+
+        ei = ei - 1
+    }
+
+    out
+}
+
+// ============================================================================
+// grad_emit_kernel_wrapper — emit backward kernel PTX preamble
+//
+// Emits a backward kernel named "<fwd_kernel_name>_bwd" with gradient
+// pointer parameters matching the forward kernel plus gradient accumulation
+// pointers for each input.
+// ============================================================================
+
+fn grad_emit_kernel_wrapper(
+    s: GradEmitState,
+    fwd_kernel_name: [i8; 64],
+    name_len: i64
+) -> GradEmitState with Mut, Panic, Div {
+    var out = s
+
+    // .visible .entry
+    var preamble: [i8; 32] = [0; 32]
+    // . v i s i b l e   . e n t r y   = 46 118 105 115 105 98 108 101 32 46 101 110 116 114 121 32
+    preamble[0 as usize] = 46
+    preamble[1 as usize] = 118
+    preamble[2 as usize] = 105
+    preamble[3 as usize] = 115
+    preamble[4 as usize] = 105
+    preamble[5 as usize] = 98
+    preamble[6 as usize] = 108
+    preamble[7 as usize] = 101
+    preamble[8 as usize] = 32
+    preamble[9 as usize] = 46
+    preamble[10 as usize] = 101
+    preamble[11 as usize] = 110
+    preamble[12 as usize] = 116
+    preamble[13 as usize] = 114
+    preamble[14 as usize] = 121
+    preamble[15 as usize] = 32
+    out = ges_append_slot(out, preamble)
+
+    // kernel name
+    var i: i64 = 0
+    while i < name_len && i < 64 {
+        out = ges_append_byte(out, fwd_kernel_name[i as usize])
+        i = i + 1
+    }
+
+    // _bwd  = 95 98 119 100
+    out = ges_append_byte(out, 95)
+    out = ges_append_byte(out, 98)
+    out = ges_append_byte(out, 119)
+    out = ges_append_byte(out, 100)
+
+    // "(\n"
+    out = ges_append_byte(out, 40)
+    out = ges_emit_newline(out)
+
+    // Standard gradient kernel parameters:
+    //   .param .u64 param_grad_out,   — incoming gradient
+    //   .param .u64 param_grad_in     — outgoing gradient for each input
+    // Emit two generic pointers; calling code adds input-specific ones.
+    var param_line: [i8; 128] = [0; 128]
+    // "    .param .u64 param_grad_out,"
+    // 32 32 32 32 46 112 97 114 97 109 32 46 117 54 52 32 112 97 114 97 109 95 103 114 97 100 95 111 117 116 44
+    let pl0 = [32 as i8, 32, 32, 32, 46, 112, 97, 114, 97, 109, 32, 46, 117, 54, 52, 32, 112, 97, 114, 97, 109, 95, 103, 114, 97, 100, 95, 111, 117, 116, 44, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    var pi: i64 = 0
+    while pi < 128 {
+        param_line[pi as usize] = pl0[pi as usize]
+        pi = pi + 1
+    }
+    out = ges_emit_line(out, param_line, 32)
+
+    // "    .param .u64 param_grad_in\n)\n"
+    var param_line2: [i8; 128] = [0; 128]
+    let pl1 = [32 as i8, 32, 32, 32, 46, 112, 97, 114, 97, 109, 32, 46, 117, 54, 52, 32, 112, 97, 114, 97, 109, 95, 103, 114, 97, 100, 95, 105, 110, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    var pi2: i64 = 0
+    while pi2 < 128 {
+        param_line2[pi2 as usize] = pl1[pi2 as usize]
+        pi2 = pi2 + 1
+    }
+    out = ges_emit_line(out, param_line2, 29)
+
+    // ")\n{\n"
+    out = ges_append_byte(out, 41)  // )
+    out = ges_emit_newline(out)
+    out = ges_append_byte(out, 123) // {
+    out = ges_emit_newline(out)
+
+    out
+}

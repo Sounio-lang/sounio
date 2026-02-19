@@ -1,0 +1,1299 @@
+// self-hosted::gpu::kernels::bio — Biomedical and pharmacokinetic GPU kernels
+//
+// Emits PTX text for pharmacokinetic (PK) and pharmacodynamic (PD) models used
+// in Sounio's scientific computing stack, with epistemic uncertainty propagation.
+//
+// Models covered:
+//   PK one-compartment IV bolus   — C(t) = (dose/Vd) * exp(-ke*t)
+//   PK oral one-compartment       — C(t) = F*dose*ka/(Vd*(ka-ke)) * (exp(-ke*t)-exp(-ka*t))
+//   PD linear                     — E = e0 + slope*C
+//   PD Emax                       — E = emax*C/(ec50+C)
+//   PD sigmoidal Hill             — E = emax*C^n/(ec50^n+C^n)
+//
+// Epistemic tracking:
+//   Every concentration output carries a parallel eps register for first-order
+//   uncertainty propagation through dose, Vd, ka, ke uncertainties.
+//
+// Population PK:
+//   Monte Carlo sampling of CL and Vd from log-normal distributions on GPU
+//   using Box-Muller transform with ex2/lg2 approximations.
+//
+// Architecture:
+//   BioPtxState → byte buffer (65536 bytes) + register/predicate/label counters
+//   All helpers precede callers; no forward references.
+//
+// PTX convention: %f<N> for f32 registers, %p<N> for predicates, LBL_<N> for labels.
+
+// ============================================================================
+// PK model tags
+// ============================================================================
+
+let PK_MODEL_ONE_COMPARTMENT: i64 = 0
+let PK_MODEL_TWO_COMPARTMENT: i64 = 1
+let PK_MODEL_ORAL_ONE_COMPARTMENT: i64 = 2
+
+// ============================================================================
+// PD model tags
+// ============================================================================
+
+let PD_MODEL_LINEAR: i64 = 0
+let PD_MODEL_EMAX: i64 = 1
+let PD_MODEL_SIGMOIDAL_HILL: i64 = 2
+let PD_MODEL_INDIRECT: i64 = 3
+
+// ============================================================================
+// Dose route tags
+// ============================================================================
+
+let DOSE_ROUTE_IV_BOLUS: i64 = 0
+let DOSE_ROUTE_ORAL: i64 = 1
+let DOSE_ROUTE_IV_INFUSION: i64 = 2
+
+// ============================================================================
+// Therapeutic window tags
+// ============================================================================
+
+let WINDOW_BELOW: i64 = 0
+let WINDOW_IN: i64 = 1
+let WINDOW_ABOVE: i64 = 2
+let WINDOW_UNCERTAIN: i64 = 3
+
+// ============================================================================
+// Data structures
+// ============================================================================
+
+struct PKParams {
+    cl: f32,
+    vd: f32,
+    ka: f32,
+    ke: f32,
+    cl_eps: f32,
+    vd_eps: f32,
+    ka_eps: f32,
+}
+
+struct PDParams {
+    emax: f32,
+    ec50: f32,
+    hill: f32,
+    e0: f32,
+    emax_eps: f32,
+    ec50_eps: f32,
+}
+
+struct DoseEvent {
+    time: f32,
+    amount_mg: f32,
+    amount_eps: f32,
+    route: i64,
+}
+
+struct PKSimResult {
+    times: [f32; 256],
+    concentrations: [f32; 256],
+    conc_eps: [f32; 256],
+    n_points: i64,
+    model_tag: i64,
+}
+
+struct BioPtxState {
+    buf: [i8; 65536],
+    buf_len: i64,
+    reg_counter: i64,
+    pred_counter: i64,
+    label_counter: i64,
+}
+
+// ============================================================================
+// PTX emit helpers — lowest-level buffer operations
+// ============================================================================
+
+fn bio_new() -> BioPtxState {
+    BioPtxState {
+        buf: [0; 65536],
+        buf_len: 0,
+        reg_counter: 0,
+        pred_counter: 0,
+        label_counter: 0,
+    }
+}
+
+fn bio_append_byte(s: BioPtxState, b: i8) -> BioPtxState {
+    var out = s
+    if out.buf_len < 65536 {
+        out.buf[out.buf_len as usize] = b
+        out.buf_len = out.buf_len + 1
+    }
+    out
+}
+
+fn bio_emit_line(s: BioPtxState, line: [i8; 128], len: i64) -> BioPtxState {
+    var out = s
+    var i: i64 = 0
+    while i < len {
+        if out.buf_len < 65536 {
+            out.buf[out.buf_len as usize] = line[i as usize]
+            out.buf_len = out.buf_len + 1
+        }
+        i = i + 1
+    }
+    out
+}
+
+fn bio_push_str(s: BioPtxState, text: string) -> BioPtxState with Div {
+    var out = s
+    let n = str_len(text)
+    var i: i64 = 0
+    while i < n {
+        if out.buf_len < 65536 {
+            out.buf[out.buf_len as usize] = str_char_at(text, i) as i8
+            out.buf_len = out.buf_len + 1
+        }
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
+// Register and label allocation
+// ============================================================================
+
+fn bio_alloc_reg(s: BioPtxState) -> (BioPtxState, i64) {
+    var out = s
+    let idx = out.reg_counter
+    out.reg_counter = idx + 1
+    (out, idx)
+}
+
+fn bio_alloc_pred(s: BioPtxState) -> (BioPtxState, i64) {
+    var out = s
+    let idx = out.pred_counter
+    out.pred_counter = idx + 1
+    (out, idx)
+}
+
+fn bio_alloc_label(s: BioPtxState) -> (BioPtxState, i64) {
+    var out = s
+    let idx = out.label_counter
+    out.label_counter = idx + 1
+    (out, idx)
+}
+
+// Emit a decimal integer into the buffer
+fn bio_push_i64(s: BioPtxState, v: i64) -> BioPtxState with Div {
+    var out = s
+    out = bio_push_str(out, i64_to_string(v))
+    out
+}
+
+// ============================================================================
+// PTX instruction emitters — helpers before callers
+// ============================================================================
+
+fn bio_emit_fma_f32(s: BioPtxState, d: i64, a: i64, b: i64, c: i64) -> BioPtxState with Div {
+    var out = s
+    out = bio_push_str(out, "    fma.rn.f32 %f")
+    out = bio_push_i64(out, d)
+    out = bio_push_str(out, ", %f")
+    out = bio_push_i64(out, a)
+    out = bio_push_str(out, ", %f")
+    out = bio_push_i64(out, b)
+    out = bio_push_str(out, ", %f")
+    out = bio_push_i64(out, c)
+    out = bio_push_str(out, ";\n")
+    out
+}
+
+fn bio_emit_mul_f32(s: BioPtxState, d: i64, a: i64, b: i64) -> BioPtxState with Div {
+    var out = s
+    out = bio_push_str(out, "    mul.rn.f32 %f")
+    out = bio_push_i64(out, d)
+    out = bio_push_str(out, ", %f")
+    out = bio_push_i64(out, a)
+    out = bio_push_str(out, ", %f")
+    out = bio_push_i64(out, b)
+    out = bio_push_str(out, ";\n")
+    out
+}
+
+fn bio_emit_add_f32(s: BioPtxState, d: i64, a: i64, b: i64) -> BioPtxState with Div {
+    var out = s
+    out = bio_push_str(out, "    add.rn.f32 %f")
+    out = bio_push_i64(out, d)
+    out = bio_push_str(out, ", %f")
+    out = bio_push_i64(out, a)
+    out = bio_push_str(out, ", %f")
+    out = bio_push_i64(out, b)
+    out = bio_push_str(out, ";\n")
+    out
+}
+
+fn bio_emit_sub_f32(s: BioPtxState, d: i64, a: i64, b: i64) -> BioPtxState with Div {
+    var out = s
+    out = bio_push_str(out, "    sub.rn.f32 %f")
+    out = bio_push_i64(out, d)
+    out = bio_push_str(out, ", %f")
+    out = bio_push_i64(out, a)
+    out = bio_push_str(out, ", %f")
+    out = bio_push_i64(out, b)
+    out = bio_push_str(out, ";\n")
+    out
+}
+
+fn bio_emit_div_f32(s: BioPtxState, d: i64, a: i64, b: i64) -> BioPtxState with Div {
+    var out = s
+    out = bio_push_str(out, "    div.approx.f32 %f")
+    out = bio_push_i64(out, d)
+    out = bio_push_str(out, ", %f")
+    out = bio_push_i64(out, a)
+    out = bio_push_str(out, ", %f")
+    out = bio_push_i64(out, b)
+    out = bio_push_str(out, ";\n")
+    out
+}
+
+// ex2.approx.f32 %f<d>, %f<a>   — base-2 exponential approximation
+fn bio_emit_ex2_f32(s: BioPtxState, d: i64, a: i64) -> BioPtxState with Div {
+    var out = s
+    out = bio_push_str(out, "    ex2.approx.f32 %f")
+    out = bio_push_i64(out, d)
+    out = bio_push_str(out, ", %f")
+    out = bio_push_i64(out, a)
+    out = bio_push_str(out, ";\n")
+    out
+}
+
+// lg2.approx.f32 %f<d>, %f<a>   — base-2 logarithm approximation
+fn bio_emit_lg2_f32(s: BioPtxState, d: i64, a: i64) -> BioPtxState with Div {
+    var out = s
+    out = bio_push_str(out, "    lg2.approx.f32 %f")
+    out = bio_push_i64(out, d)
+    out = bio_push_str(out, ", %f")
+    out = bio_push_i64(out, a)
+    out = bio_push_str(out, ";\n")
+    out
+}
+
+// rcp.approx.f32 %f<d>, %f<a>
+fn bio_emit_rcp_f32(s: BioPtxState, d: i64, a: i64) -> BioPtxState with Div {
+    var out = s
+    out = bio_push_str(out, "    rcp.approx.f32 %f")
+    out = bio_push_i64(out, d)
+    out = bio_push_str(out, ", %f")
+    out = bio_push_i64(out, a)
+    out = bio_push_str(out, ";\n")
+    out
+}
+
+// sqrt.approx.f32 %f<d>, %f<a>
+fn bio_emit_sqrt_f32(s: BioPtxState, d: i64, a: i64) -> BioPtxState with Div {
+    var out = s
+    out = bio_push_str(out, "    sqrt.approx.f32 %f")
+    out = bio_push_i64(out, d)
+    out = bio_push_str(out, ", %f")
+    out = bio_push_i64(out, a)
+    out = bio_push_str(out, ";\n")
+    out
+}
+
+// mov.f32 %f<d>, 0f<hex8>;  — 32-bit IEEE constant from bit pattern
+fn bio_emit_const_f32(s: BioPtxState, d: i64, val_hex: i64) -> BioPtxState with Div {
+    var out = s
+    out = bio_push_str(out, "    mov.f32 %f")
+    out = bio_push_i64(out, d)
+    out = bio_push_str(out, ", 0f")
+    out = bio_push_str(out, i64_to_hex8(val_hex))
+    out = bio_push_str(out, ";\n")
+    out
+}
+
+// setp.gt.f32 %p<p>, %f<a>, %f<b>
+fn bio_emit_setp_gt_f32(s: BioPtxState, p: i64, a: i64, b: i64) -> BioPtxState with Div {
+    var out = s
+    out = bio_push_str(out, "    setp.gt.f32 %p")
+    out = bio_push_i64(out, p)
+    out = bio_push_str(out, ", %f")
+    out = bio_push_i64(out, a)
+    out = bio_push_str(out, ", %f")
+    out = bio_push_i64(out, b)
+    out = bio_push_str(out, ";\n")
+    out
+}
+
+// setp.lt.f32 %p<p>, %f<a>, %f<b>
+fn bio_emit_setp_lt_f32(s: BioPtxState, p: i64, a: i64, b: i64) -> BioPtxState with Div {
+    var out = s
+    out = bio_push_str(out, "    setp.lt.f32 %p")
+    out = bio_push_i64(out, p)
+    out = bio_push_str(out, ", %f")
+    out = bio_push_i64(out, a)
+    out = bio_push_str(out, ", %f")
+    out = bio_push_i64(out, b)
+    out = bio_push_str(out, ";\n")
+    out
+}
+
+// selp.f32 %f<d>, %f<a>, %f<b>, %p<p>
+fn bio_emit_selp_f32(s: BioPtxState, d: i64, a: i64, b: i64, p: i64) -> BioPtxState with Div {
+    var out = s
+    out = bio_push_str(out, "    selp.f32 %f")
+    out = bio_push_i64(out, d)
+    out = bio_push_str(out, ", %f")
+    out = bio_push_i64(out, a)
+    out = bio_push_str(out, ", %f")
+    out = bio_push_i64(out, b)
+    out = bio_push_str(out, ", %p")
+    out = bio_push_i64(out, p)
+    out = bio_push_str(out, ";\n")
+    out
+}
+
+// neg.f32 %f<d>, %f<a>
+fn bio_emit_neg_f32(s: BioPtxState, d: i64, a: i64) -> BioPtxState with Div {
+    var out = s
+    out = bio_push_str(out, "    neg.f32 %f")
+    out = bio_push_i64(out, d)
+    out = bio_push_str(out, ", %f")
+    out = bio_push_i64(out, a)
+    out = bio_push_str(out, ";\n")
+    out
+}
+
+// abs.f32 %f<d>, %f<a>
+fn bio_emit_abs_f32(s: BioPtxState, d: i64, a: i64) -> BioPtxState with Div {
+    var out = s
+    out = bio_push_str(out, "    abs.f32 %f")
+    out = bio_push_i64(out, d)
+    out = bio_push_str(out, ", %f")
+    out = bio_push_i64(out, a)
+    out = bio_push_str(out, ";\n")
+    out
+}
+
+// ============================================================================
+// Scalar math helpers (CPU-side, for GPU codegen calibration and testing)
+// ============================================================================
+
+// Returns 32-bit IEEE bit pattern of exp(x) as i64.
+// On GPU computation happens at runtime; this returns a placeholder constant
+// (1.0 = 0x3F800000) so the caller can mark constant-folding slots.
+fn bio_exp_f32_bits(x: f32) -> i64 {
+    // Placeholder: actual exp evaluation occurs on GPU via ex2.approx
+    // 0x3F800000 = 1.0f in IEEE 754 single precision
+    let _ = x
+    0x3F800000
+}
+
+// Approximate exp(-t) via Taylor/Horner: 1 - t + t^2/2 - t^3/6 + t^4/24
+// Valid for small |t|; for large t the series undershoots — caller should
+// clamp result to [0, 1]. Used only on CPU side for simulation calibration.
+fn bio_exp_neg_approx(t: f32) -> f32 with Div {
+    // Horner form: e^(-t) ≈ 1 + t*(-1 + t*(1/2 + t*(-1/6 + t/24)))
+    let t2 = t * t
+    let t3 = t2 * t
+    let t4 = t3 * t
+    let result = 1.0 - t + t2 / 2.0 - t3 / 6.0 + t4 / 24.0
+    // Clamp to [0, 1]: PK concentrations are non-negative and bounded by dose/Vd
+    if result < 0.0 {
+        0.0
+    } else if result > 1.0 {
+        1.0
+    } else {
+        result
+    }
+}
+
+// C(t) = (dose / vd) * exp(-ke * t)
+// Uses polynomial approximation for exp(-ke*t) — sufficient for simulation.
+fn bio_pk_one_compartment_conc(dose_mg: f32, vd: f32, ke: f32, t: f32) -> f32 with Div {
+    let c0 = dose_mg / vd
+    let decay = bio_exp_neg_approx(ke * t)
+    c0 * decay
+}
+
+// C(t) = (F * dose * ka) / (vd * (ka - ke)) * (exp(-ke*t) - exp(-ka*t))
+// When |ka - ke| < 1e-4: use limit C(t) = (F*dose/vd) * ke * t * exp(-ke*t)
+fn bio_pk_oral_conc(dose_mg: f32, f: f32, vd: f32, ka: f32, ke: f32, t: f32) -> f32 with Div {
+    let diff = ka - ke
+    if diff < 0.0001 && diff > -0.0001 {
+        // Limit case: ka ≈ ke
+        let c0 = f * dose_mg / vd
+        let decay = bio_exp_neg_approx(ke * t)
+        c0 * ke * t * decay
+    } else {
+        let numerator = f * dose_mg * ka
+        let denom = vd * diff
+        let exp_ke = bio_exp_neg_approx(ke * t)
+        let exp_ka = bio_exp_neg_approx(ka * t)
+        (numerator / denom) * (exp_ke - exp_ka)
+    }
+}
+
+// E = emax * C / (ec50 + C)
+fn bio_pd_emax(conc: f32, emax: f32, ec50: f32) -> f32 with Div {
+    (emax * conc) / (ec50 + conc)
+}
+
+// C^n via exp approximation: C^n = 2^(n * log2(C))
+// log2(C) ≈ (C - 1) * 1.4427 for C near 1; use iterative refinement for wide range
+fn bio_pow_f32_approx(base: f32, exp: f32) -> f32 with Div {
+    // Guard: base must be positive for real power
+    if base <= 0.0 {
+        return 0.0
+    }
+    // log2(base): use identity log2(x) = (x-1)/ln(2) for x near 1,
+    // apply one Newton step for better accuracy over [0.01, 100]
+    // log2(x) ≈ log2(1) + (x-1)/ln(2) = (x-1)*1.44269504
+    // Refine: let y = (x-1)*LOG2E, then y is log2(x) for x in [0.5,2)
+    // For general range: decompose x = m * 2^e where m in [1,2), then log2(x) = e + log2(m)
+    // Simplified: use linear approx, sufficient for Hill n in [0.5, 4]
+    let log2e: f32 = 1.44269504
+    let ln2: f32 = 0.69314718
+    // ln(base) ≈ (base - 1) - (base-1)^2/2 + (base-1)^3/3 for base near 1
+    // For PD purposes with base = C/ec50 in [0.01, 100], use multi-step approach:
+    // ln(x) = 2 * arctanh((x-1)/(x+1)), approximate with first two terms
+    let r = (base - 1.0) / (base + 1.0)
+    let r3 = r * r * r
+    let ln_base = 2.0 * (r + r3 / 3.0)
+    let log2_base = ln_base * log2e
+    let log2_result = exp * log2_base
+    // 2^y ≈ Taylor: 1 + y*ln2 + (y*ln2)^2/2 for |y*ln2| < 1
+    let y_ln2 = log2_result * ln2
+    let result = 1.0 + y_ln2 + (y_ln2 * y_ln2) / 2.0 + (y_ln2 * y_ln2 * y_ln2) / 6.0
+    if result < 0.0 {
+        0.0
+    } else {
+        result
+    }
+}
+
+// E = emax * C^n / (ec50^n + C^n)
+fn bio_pd_hill(conc: f32, emax: f32, ec50: f32, hill: f32) -> f32 with Div {
+    let cn = bio_pow_f32_approx(conc, hill)
+    let ec50n = bio_pow_f32_approx(ec50, hill)
+    (emax * cn) / (ec50n + cn)
+}
+
+// E = e0 + slope * C
+fn bio_pd_linear(conc: f32, slope: f32, e0: f32) -> f32 {
+    e0 + slope * conc
+}
+
+// ============================================================================
+// PTX emitters for PK models
+// ============================================================================
+
+// Emits PTX for: C = (dose/vd) * exp2(-ke * t / LOG2E)
+// where LOG2E = 1/ln(2) ≈ 1.4426950408 = 0x3FB8AA3B in IEEE 754
+// Returns (updated_state, conc_reg)
+fn bio_emit_pk_one_compartment_ptx(
+    s: BioPtxState,
+    dose_reg: i64,
+    vd_reg: i64,
+    ke_reg: i64,
+    t_reg: i64
+) -> (BioPtxState, i64) with Div {
+    var out = s
+
+    // Allocate working registers
+    let r0 = bio_alloc_reg(out)
+    out = r0.0
+    let c0_reg = r0.1   // dose / vd
+
+    let r1 = bio_alloc_reg(out)
+    out = r1.0
+    let log2e_reg = r1.1  // LOG2E constant
+
+    let r2 = bio_alloc_reg(out)
+    out = r2.0
+    let ke_t_reg = r2.1   // ke * t
+
+    let r3 = bio_alloc_reg(out)
+    out = r3.0
+    let neg_ke_t_over_ln2 = r3.1  // -ke*t / ln(2) = -ke*t * LOG2E
+
+    let r4 = bio_alloc_reg(out)
+    out = r4.0
+    let decay_reg = r4.1  // exp2(neg_ke_t_over_ln2)
+
+    let r5 = bio_alloc_reg(out)
+    out = r5.0
+    let conc_reg = r5.1   // C = c0 * decay
+
+    // c0 = dose / vd
+    out = bio_emit_div_f32(out, c0_reg, dose_reg, vd_reg)
+    // log2e = 1/ln(2) = 1.4426950408 → IEEE 754 bits 0x3FB8AA3B
+    out = bio_emit_const_f32(out, log2e_reg, 0x3FB8AA3B)
+    // ke_t = ke * t
+    out = bio_emit_mul_f32(out, ke_t_reg, ke_reg, t_reg)
+    // neg_ke_t_over_ln2 = -ke_t * log2e (negate via neg then multiply)
+    // Use fma: fma(ke_t, -log2e, 0) ≡ neg; instead use neg + mul
+    out = bio_emit_neg_f32(out, neg_ke_t_over_ln2, ke_t_reg)
+    out = bio_emit_mul_f32(out, neg_ke_t_over_ln2, neg_ke_t_over_ln2, log2e_reg)
+    // decay = 2^(neg_ke_t_over_ln2)
+    out = bio_emit_ex2_f32(out, decay_reg, neg_ke_t_over_ln2)
+    // conc = c0 * decay
+    out = bio_emit_mul_f32(out, conc_reg, c0_reg, decay_reg)
+
+    (out, conc_reg)
+}
+
+// Emits PTX for oral 1-cpt concentration formula:
+//   C = (F * dose * ka) / (vd * (ka - ke)) * (exp(-ke*t) - exp(-ka*t))
+// When ka ≈ ke: limit handled by predicated select (setp + selp).
+// Returns (state, conc_reg)
+fn bio_emit_pk_oral_ptx(
+    s: BioPtxState,
+    dose_reg: i64,
+    f_reg: i64,
+    vd_reg: i64,
+    ka_reg: i64,
+    ke_reg: i64,
+    t_reg: i64
+) -> (BioPtxState, i64) with Div {
+    var out = s
+
+    // Constants
+    let r0 = bio_alloc_reg(out)
+    out = r0.0
+    let log2e_reg = r0.1
+
+    let r1 = bio_alloc_reg(out)
+    out = r1.0
+    let eps_reg = r1.1   // small epsilon 1e-4 for ka≈ke guard
+
+    // Working registers for exponentials
+    let r2 = bio_alloc_reg(out)
+    out = r2.0
+    let ke_t_reg = r2.1
+
+    let r3 = bio_alloc_reg(out)
+    out = r3.0
+    let ka_t_reg = r3.1
+
+    let r4 = bio_alloc_reg(out)
+    out = r4.0
+    let neg_ke_t_log2e = r4.1
+
+    let r5 = bio_alloc_reg(out)
+    out = r5.0
+    let neg_ka_t_log2e = r5.1
+
+    let r6 = bio_alloc_reg(out)
+    out = r6.0
+    let exp_ke_reg = r6.1
+
+    let r7 = bio_alloc_reg(out)
+    out = r7.0
+    let exp_ka_reg = r7.1
+
+    let r8 = bio_alloc_reg(out)
+    out = r8.0
+    let diff_exp_reg = r8.1   // exp_ke - exp_ka
+
+    // Registers for the full formula numerator/denominator
+    let r9 = bio_alloc_reg(out)
+    out = r9.0
+    let fdose_reg = r9.1   // F * dose
+
+    let r10 = bio_alloc_reg(out)
+    out = r10.0
+    let fdose_ka_reg = r10.1  // F * dose * ka
+
+    let r11 = bio_alloc_reg(out)
+    out = r11.0
+    let ka_minus_ke = r11.1   // ka - ke
+
+    let r12 = bio_alloc_reg(out)
+    out = r12.0
+    let vd_diff_reg = r12.1   // vd * (ka - ke)
+
+    let r13 = bio_alloc_reg(out)
+    out = r13.0
+    let conc_full = r13.1     // full formula result
+
+    // Limit-case registers (ka ≈ ke): C = (F*dose/vd) * ke * t * exp(-ke*t)
+    let r14 = bio_alloc_reg(out)
+    out = r14.0
+    let fdose_over_vd = r14.1
+
+    let r15 = bio_alloc_reg(out)
+    out = r15.0
+    let conc_limit = r15.1
+
+    let r16 = bio_alloc_reg(out)
+    out = r16.0
+    let conc_reg = r16.1
+
+    // Predicate for ka ≈ ke guard
+    let p0 = bio_alloc_pred(out)
+    out = p0.0
+    let pred_diff_small = p0.1
+
+    // Emit constants
+    // LOG2E = 0x3FB8AA3B
+    out = bio_emit_const_f32(out, log2e_reg, 0x3FB8AA3B)
+    // eps = 1e-4 ≈ 0x38D1B717
+    out = bio_emit_const_f32(out, eps_reg, 0x38D1B717)
+
+    // ke_t = ke * t
+    out = bio_emit_mul_f32(out, ke_t_reg, ke_reg, t_reg)
+    // ka_t = ka * t
+    out = bio_emit_mul_f32(out, ka_t_reg, ka_reg, t_reg)
+    // neg_ke_t_log2e = -ke_t * log2e
+    out = bio_emit_neg_f32(out, neg_ke_t_log2e, ke_t_reg)
+    out = bio_emit_mul_f32(out, neg_ke_t_log2e, neg_ke_t_log2e, log2e_reg)
+    // neg_ka_t_log2e = -ka_t * log2e
+    out = bio_emit_neg_f32(out, neg_ka_t_log2e, ka_t_reg)
+    out = bio_emit_mul_f32(out, neg_ka_t_log2e, neg_ka_t_log2e, log2e_reg)
+    // exp_ke = ex2(neg_ke_t_log2e)
+    out = bio_emit_ex2_f32(out, exp_ke_reg, neg_ke_t_log2e)
+    // exp_ka = ex2(neg_ka_t_log2e)
+    out = bio_emit_ex2_f32(out, exp_ka_reg, neg_ka_t_log2e)
+    // diff_exp = exp_ke - exp_ka
+    out = bio_emit_sub_f32(out, diff_exp_reg, exp_ke_reg, exp_ka_reg)
+
+    // Full formula: F * dose * ka / (vd * (ka - ke)) * diff_exp
+    out = bio_emit_mul_f32(out, fdose_reg, f_reg, dose_reg)
+    out = bio_emit_mul_f32(out, fdose_ka_reg, fdose_reg, ka_reg)
+    out = bio_emit_sub_f32(out, ka_minus_ke, ka_reg, ke_reg)
+    out = bio_emit_mul_f32(out, vd_diff_reg, vd_reg, ka_minus_ke)
+    out = bio_emit_div_f32(out, conc_full, fdose_ka_reg, vd_diff_reg)
+    out = bio_emit_mul_f32(out, conc_full, conc_full, diff_exp_reg)
+
+    // Limit formula: (F*dose/vd) * ke * t * exp_ke
+    out = bio_emit_div_f32(out, fdose_over_vd, fdose_reg, vd_reg)
+    out = bio_emit_mul_f32(out, conc_limit, fdose_over_vd, ke_reg)
+    out = bio_emit_mul_f32(out, conc_limit, conc_limit, t_reg)
+    out = bio_emit_mul_f32(out, conc_limit, conc_limit, exp_ke_reg)
+
+    // Select: if |ka - ke| < eps use limit case, else full formula
+    out = bio_emit_abs_f32(out, r16, ka_minus_ke)
+    out = bio_emit_setp_lt_f32(out, pred_diff_small, r16, eps_reg)
+    out = bio_emit_selp_f32(out, conc_reg, conc_limit, conc_full, pred_diff_small)
+
+    (out, conc_reg)
+}
+
+// Propagate concentration uncertainty:
+//   eps_C ≈ (eps_dose/dose + eps_vd/vd) * C
+// Returns (state, eps_conc_reg)
+fn bio_emit_pk_conc_uncertainty(
+    s: BioPtxState,
+    conc_reg: i64,
+    dose_eps_reg: i64,
+    vd_eps_reg: i64,
+    ke_eps_reg: i64,
+    t_reg: i64,
+    dose_reg: i64,
+    vd_reg: i64
+) -> (BioPtxState, i64) with Div {
+    var out = s
+
+    let r0 = bio_alloc_reg(out)
+    out = r0.0
+    let rel_dose = r0.1   // eps_dose / dose
+
+    let r1 = bio_alloc_reg(out)
+    out = r1.0
+    let rel_vd = r1.1     // eps_vd / vd
+
+    let r2 = bio_alloc_reg(out)
+    out = r2.0
+    let rel_ke = r2.1     // ke_eps * t (relative contribution from ke uncertainty)
+
+    let r3 = bio_alloc_reg(out)
+    out = r3.0
+    let sum_rel = r3.1    // total relative uncertainty
+
+    let r4 = bio_alloc_reg(out)
+    out = r4.0
+    let eps_conc_reg = r4.1
+
+    // rel_dose = eps_dose / dose
+    out = bio_emit_div_f32(out, rel_dose, dose_eps_reg, dose_reg)
+    // rel_vd = eps_vd / vd
+    out = bio_emit_div_f32(out, rel_vd, vd_eps_reg, vd_reg)
+    // rel_ke = ke_eps * t  (ke affects slope of decay: d/d(ke) of C ≈ -t*C)
+    out = bio_emit_mul_f32(out, rel_ke, ke_eps_reg, t_reg)
+    // sum_rel = rel_dose + rel_vd + rel_ke
+    out = bio_emit_add_f32(out, sum_rel, rel_dose, rel_vd)
+    out = bio_emit_add_f32(out, sum_rel, sum_rel, rel_ke)
+    // eps_conc = sum_rel * C
+    out = bio_emit_mul_f32(out, eps_conc_reg, sum_rel, conc_reg)
+    out = bio_emit_abs_f32(out, eps_conc_reg, eps_conc_reg)
+
+    (out, eps_conc_reg)
+}
+
+// ============================================================================
+// PTX emitters for PD models
+// ============================================================================
+
+// Emits PTX for: E = emax * C / (ec50 + C)
+// Returns (state, effect_reg)
+fn bio_emit_pd_emax_ptx(
+    s: BioPtxState,
+    conc_reg: i64,
+    emax_reg: i64,
+    ec50_reg: i64
+) -> (BioPtxState, i64) with Div {
+    var out = s
+
+    let r0 = bio_alloc_reg(out)
+    out = r0.0
+    let denom_reg = r0.1  // ec50 + C
+
+    let r1 = bio_alloc_reg(out)
+    out = r1.0
+    let effect_reg = r1.1
+
+    // denom = ec50 + C
+    out = bio_emit_add_f32(out, denom_reg, ec50_reg, conc_reg)
+    // effect = emax * C / denom
+    out = bio_emit_mul_f32(out, effect_reg, emax_reg, conc_reg)
+    out = bio_emit_div_f32(out, effect_reg, effect_reg, denom_reg)
+
+    (out, effect_reg)
+}
+
+// Emits PTX for: E = emax * C^n / (ec50^n + C^n)
+// Power computed via: x^n = ex2(n * lg2(x))
+// Returns (state, effect_reg)
+fn bio_emit_pd_hill_ptx(
+    s: BioPtxState,
+    conc_reg: i64,
+    emax_reg: i64,
+    ec50_reg: i64,
+    hill_reg: i64
+) -> (BioPtxState, i64) with Div {
+    var out = s
+
+    let r0 = bio_alloc_reg(out)
+    out = r0.0
+    let lg2_c = r0.1       // lg2(C)
+
+    let r1 = bio_alloc_reg(out)
+    out = r1.0
+    let lg2_ec50 = r1.1    // lg2(ec50)
+
+    let r2 = bio_alloc_reg(out)
+    out = r2.0
+    let n_lg2_c = r2.1     // n * lg2(C)
+
+    let r3 = bio_alloc_reg(out)
+    out = r3.0
+    let n_lg2_ec50 = r3.1  // n * lg2(ec50)
+
+    let r4 = bio_alloc_reg(out)
+    out = r4.0
+    let cn_reg = r4.1      // C^n
+
+    let r5 = bio_alloc_reg(out)
+    out = r5.0
+    let ec50n_reg = r5.1   // ec50^n
+
+    let r6 = bio_alloc_reg(out)
+    out = r6.0
+    let denom_reg = r6.1   // ec50^n + C^n
+
+    let r7 = bio_alloc_reg(out)
+    out = r7.0
+    let effect_reg = r7.1
+
+    // lg2(C) — takes C as argument
+    out = bio_emit_lg2_f32(out, lg2_c, conc_reg)
+    // lg2(ec50)
+    out = bio_emit_lg2_f32(out, lg2_ec50, ec50_reg)
+    // n * lg2(C)
+    out = bio_emit_mul_f32(out, n_lg2_c, hill_reg, lg2_c)
+    // n * lg2(ec50)
+    out = bio_emit_mul_f32(out, n_lg2_ec50, hill_reg, lg2_ec50)
+    // C^n = ex2(n * lg2(C))
+    out = bio_emit_ex2_f32(out, cn_reg, n_lg2_c)
+    // ec50^n = ex2(n * lg2(ec50))
+    out = bio_emit_ex2_f32(out, ec50n_reg, n_lg2_ec50)
+    // denom = ec50^n + C^n
+    out = bio_emit_add_f32(out, denom_reg, ec50n_reg, cn_reg)
+    // effect = emax * C^n / denom
+    out = bio_emit_mul_f32(out, effect_reg, emax_reg, cn_reg)
+    out = bio_emit_div_f32(out, effect_reg, effect_reg, denom_reg)
+
+    (out, effect_reg)
+}
+
+// Chain-rule uncertainty propagation for Emax model:
+//   dE/dC  = emax * ec50 / (ec50 + C)^2
+//   dE/dec50 = -emax * C / (ec50 + C)^2
+//   eps_E ≈ |dE/dC| * eps_C + |E/emax| * eps_emax + |dE/dec50| * eps_ec50
+// Returns (state, eps_effect_reg)
+fn bio_emit_pd_effect_uncertainty(
+    s: BioPtxState,
+    effect_reg: i64,
+    conc_eps_reg: i64,
+    emax_eps_reg: i64,
+    ec50_eps_reg: i64,
+    conc_reg: i64,
+    ec50_reg: i64
+) -> (BioPtxState, i64) with Div {
+    var out = s
+
+    let r0 = bio_alloc_reg(out)
+    out = r0.0
+    let sum_ce = r0.1      // ec50 + C
+
+    let r1 = bio_alloc_reg(out)
+    out = r1.0
+    let sum_ce_sq = r1.1   // (ec50 + C)^2
+
+    // Note: emax is recovered via effect * (ec50 + C) / C (avoid extra param)
+    // Emit emax_eff = effect * (ec50 + C) / C  (approximation from observed E)
+    let r2 = bio_alloc_reg(out)
+    out = r2.0
+    let emax_eff = r2.1
+
+    let r3 = bio_alloc_reg(out)
+    out = r3.0
+    let dedC_reg = r3.1    // |dE/dC| = emax * ec50 / (ec50+C)^2
+
+    let r4 = bio_alloc_reg(out)
+    out = r4.0
+    let e_rel_emax = r4.1  // |E/emax| for emax uncertainty term
+
+    let r5 = bio_alloc_reg(out)
+    out = r5.0
+    let dedec50 = r5.1     // |dE/dec50| = emax * C / (ec50+C)^2
+
+    let r6 = bio_alloc_reg(out)
+    out = r6.0
+    let term_c = r6.1      // |dE/dC| * eps_C
+
+    let r7 = bio_alloc_reg(out)
+    out = r7.0
+    let term_emax = r7.1   // |E/emax| * eps_emax
+
+    let r8 = bio_alloc_reg(out)
+    out = r8.0
+    let term_ec50 = r8.1   // |dE/dec50| * eps_ec50
+
+    let r9 = bio_alloc_reg(out)
+    out = r9.0
+    let eps_effect_reg = r9.1
+
+    // sum_ce = ec50 + conc
+    out = bio_emit_add_f32(out, sum_ce, ec50_reg, conc_reg)
+    // sum_ce_sq = sum_ce * sum_ce
+    out = bio_emit_mul_f32(out, sum_ce_sq, sum_ce, sum_ce)
+    // emax_eff ≈ effect * sum_ce / conc  (recover emax estimate)
+    out = bio_emit_mul_f32(out, emax_eff, effect_reg, sum_ce)
+    out = bio_emit_div_f32(out, emax_eff, emax_eff, conc_reg)
+    // |dE/dC| = emax_eff * ec50 / sum_ce_sq
+    out = bio_emit_mul_f32(out, dedC_reg, emax_eff, ec50_reg)
+    out = bio_emit_div_f32(out, dedC_reg, dedC_reg, sum_ce_sq)
+    out = bio_emit_abs_f32(out, dedC_reg, dedC_reg)
+    // |E/emax| = effect / emax_eff
+    out = bio_emit_div_f32(out, e_rel_emax, effect_reg, emax_eff)
+    out = bio_emit_abs_f32(out, e_rel_emax, e_rel_emax)
+    // |dE/dec50| = emax_eff * conc / sum_ce_sq
+    out = bio_emit_mul_f32(out, dedec50, emax_eff, conc_reg)
+    out = bio_emit_div_f32(out, dedec50, dedec50, sum_ce_sq)
+    out = bio_emit_abs_f32(out, dedec50, dedec50)
+    // term_c = |dE/dC| * eps_C
+    out = bio_emit_mul_f32(out, term_c, dedC_reg, conc_eps_reg)
+    // term_emax = |E/emax| * eps_emax
+    out = bio_emit_mul_f32(out, term_emax, e_rel_emax, emax_eps_reg)
+    // term_ec50 = |dE/dec50| * eps_ec50
+    out = bio_emit_mul_f32(out, term_ec50, dedec50, ec50_eps_reg)
+    // eps_effect = term_c + term_emax + term_ec50
+    out = bio_emit_add_f32(out, eps_effect_reg, term_c, term_emax)
+    out = bio_emit_add_f32(out, eps_effect_reg, eps_effect_reg, term_ec50)
+
+    (out, eps_effect_reg)
+}
+
+// ============================================================================
+// Population PK (Monte Carlo on GPU)
+// ============================================================================
+
+// Sample CL and VD from log-normal distribution using Box-Muller transform.
+// Box-Muller: u1, u2 uniform → z = sqrt(-2*ln(u1)) * cos(2π*u2)
+// On GPU: ln(u) via lg2(u)/log2(e) = lg2(u) * ln2; cos via phase rotation.
+// For log-normal: X = exp(μ + σ*z) via ex2((μ + σ*z) / ln2).
+// rng_state_reg holds a u64 register index from which two f32 uniforms are derived.
+// Returns (state, cl_sample_reg, vd_sample_reg)
+fn bio_emit_pop_pk_sample(
+    s: BioPtxState,
+    mean_cl_reg: i64,
+    std_cl_reg: i64,
+    mean_vd_reg: i64,
+    std_vd_reg: i64,
+    rng_state_reg: i64
+) -> (BioPtxState, i64, i64) with Div {
+    var out = s
+
+    // Constants
+    let r0 = bio_alloc_reg(out)
+    out = r0.0
+    let log2e_reg = r0.1     // 1/ln(2) = LOG2E
+
+    let r1 = bio_alloc_reg(out)
+    out = r1.0
+    let neg2_reg = r1.1      // -2.0
+
+    let r2 = bio_alloc_reg(out)
+    out = r2.0
+    let twopi_reg = r2.1     // 2*pi
+
+    let r3 = bio_alloc_reg(out)
+    out = r3.0
+    let ln2_reg = r3.1       // ln(2) for converting log2 → ln
+
+    // Uniform sample placeholders — on real GPU these come from RNG reads
+    // u1_reg and u2_reg: derived from rng_state via ld.global
+    let r4 = bio_alloc_reg(out)
+    out = r4.0
+    let u1_reg = r4.1
+
+    let r5 = bio_alloc_reg(out)
+    out = r5.0
+    let u2_reg = r5.1
+
+    // Box-Muller working registers
+    let r6 = bio_alloc_reg(out)
+    out = r6.0
+    let lg2_u1 = r6.1        // lg2(u1)
+
+    let r7 = bio_alloc_reg(out)
+    out = r7.0
+    let ln_u1 = r7.1         // ln(u1) = lg2(u1) * ln2
+
+    let r8 = bio_alloc_reg(out)
+    out = r8.0
+    let neg2_ln_u1 = r8.1    // -2 * ln(u1)
+
+    let r9 = bio_alloc_reg(out)
+    out = r9.0
+    let r_bm = r9.1          // sqrt(-2*ln(u1))
+
+    let r10 = bio_alloc_reg(out)
+    out = r10.0
+    let phi_reg = r10.1      // 2*pi*u2 (phase angle)
+
+    // cos(phi) approximation: cos(x) ≈ 1 - x^2/2 + x^4/24 for |x| < pi
+    let r11 = bio_alloc_reg(out)
+    out = r11.0
+    let phi2 = r11.1         // phi^2
+
+    let r12 = bio_alloc_reg(out)
+    out = r12.0
+    let phi4 = r12.1         // phi^4
+
+    let r13 = bio_alloc_reg(out)
+    out = r13.0
+    let cos_phi = r13.1      // cos(2*pi*u2)
+
+    let r14 = bio_alloc_reg(out)
+    out = r14.0
+    let z1_reg = r14.1       // N(0,1) sample z1 = r_bm * cos(phi)
+
+    // Log-normal transform: ln_cl = mean_cl + std_cl * z1
+    let r15 = bio_alloc_reg(out)
+    out = r15.0
+    let ln_cl_reg = r15.1
+
+    let r16 = bio_alloc_reg(out)
+    out = r16.0
+    let ln_cl_over_ln2 = r16.1
+
+    let r17 = bio_alloc_reg(out)
+    out = r17.0
+    let cl_sample_reg = r17.1
+
+    // sin(phi) for second sample: sin(x) ≈ x - x^3/6 + x^5/120
+    let r18 = bio_alloc_reg(out)
+    out = r18.0
+    let phi3 = r18.1
+
+    let r19 = bio_alloc_reg(out)
+    out = r19.0
+    let sin_phi = r19.1
+
+    let r20 = bio_alloc_reg(out)
+    out = r20.0
+    let z2_reg = r20.1       // z2 = r_bm * sin(phi)
+
+    let r21 = bio_alloc_reg(out)
+    out = r21.0
+    let ln_vd_reg = r21.1
+
+    let r22 = bio_alloc_reg(out)
+    out = r22.0
+    let ln_vd_over_ln2 = r22.1
+
+    let r23 = bio_alloc_reg(out)
+    out = r23.0
+    let vd_sample_reg = r23.1
+
+    // Emit constants
+    // LOG2E = 0x3FB8AA3B
+    out = bio_emit_const_f32(out, log2e_reg, 0x3FB8AA3B)
+    // ln(2) = 0x3F317218
+    out = bio_emit_const_f32(out, ln2_reg, 0x3F317218)
+    // -2.0 = 0xC0000000
+    out = bio_emit_const_f32(out, neg2_reg, 0xC0000000)
+    // 2*pi ≈ 6.2831853 = 0x40C90FDB
+    out = bio_emit_const_f32(out, twopi_reg, 0x40C90FDB)
+
+    // Load u1 and u2 from RNG state pointer (symbolic: ld.global.f32 from rng_state_reg)
+    out = bio_push_str(out, "    ld.global.f32 %f")
+    out = bio_push_i64(out, u1_reg)
+    out = bio_push_str(out, ", [%rd")
+    out = bio_push_i64(out, rng_state_reg)
+    out = bio_push_str(out, "];\n")
+    out = bio_push_str(out, "    ld.global.f32 %f")
+    out = bio_push_i64(out, u2_reg)
+    out = bio_push_str(out, ", [%rd")
+    out = bio_push_i64(out, rng_state_reg)
+    out = bio_push_str(out, "+4];\n")
+
+    // lg2(u1)
+    out = bio_emit_lg2_f32(out, lg2_u1, u1_reg)
+    // ln(u1) = lg2(u1) * ln2
+    out = bio_emit_mul_f32(out, ln_u1, lg2_u1, ln2_reg)
+    // -2 * ln(u1)
+    out = bio_emit_mul_f32(out, neg2_ln_u1, neg2_reg, ln_u1)
+    // r_bm = sqrt(-2 * ln(u1))
+    out = bio_emit_sqrt_f32(out, r_bm, neg2_ln_u1)
+    // phi = 2*pi*u2
+    out = bio_emit_mul_f32(out, phi_reg, twopi_reg, u2_reg)
+    // cos(phi) ≈ 1 - phi^2/2 + phi^4/24
+    out = bio_emit_mul_f32(out, phi2, phi_reg, phi_reg)
+    out = bio_emit_mul_f32(out, phi4, phi2, phi2)
+    // cos_phi = 1 - phi2/2 + phi4/24
+    // Use FMA: cos_phi = fma(-0.5, phi2, 1.0) then fma(1/24, phi4, cos_phi)
+    let r_half = bio_alloc_reg(out)
+    out = r_half.0
+    let half_reg = r_half.1
+    let r_one = bio_alloc_reg(out)
+    out = r_one.0
+    let one_reg = r_one.1
+    let r_inv24 = bio_alloc_reg(out)
+    out = r_inv24.0
+    let inv24_reg = r_inv24.1
+    // 0.5 = 0x3F000000
+    out = bio_emit_const_f32(out, half_reg, 0x3F000000)
+    // 1.0 = 0x3F800000
+    out = bio_emit_const_f32(out, one_reg, 0x3F800000)
+    // 1/24 ≈ 0.041667 = 0x3D2AAAAB
+    out = bio_emit_const_f32(out, inv24_reg, 0x3D2AAAAB)
+    // neg_half = -0.5
+    let r_neg_half = bio_alloc_reg(out)
+    out = r_neg_half.0
+    let neg_half_reg = r_neg_half.1
+    out = bio_emit_neg_f32(out, neg_half_reg, half_reg)
+    // cos_phi = fma(-0.5, phi2, 1.0)
+    out = bio_emit_fma_f32(out, cos_phi, neg_half_reg, phi2, one_reg)
+    // cos_phi = fma(1/24, phi4, cos_phi)
+    out = bio_emit_fma_f32(out, cos_phi, inv24_reg, phi4, cos_phi)
+
+    // sin(phi) ≈ phi - phi^3/6
+    out = bio_emit_mul_f32(out, phi3, phi2, phi_reg)
+    let r_inv6 = bio_alloc_reg(out)
+    out = r_inv6.0
+    let inv6_reg = r_inv6.1
+    // 1/6 ≈ 0.166667 = 0x3E2AAAAB
+    out = bio_emit_const_f32(out, inv6_reg, 0x3E2AAAAB)
+    let r_neg_inv6 = bio_alloc_reg(out)
+    out = r_neg_inv6.0
+    let neg_inv6_reg = r_neg_inv6.1
+    out = bio_emit_neg_f32(out, neg_inv6_reg, inv6_reg)
+    // sin_phi = fma(-1/6, phi3, phi)
+    out = bio_emit_fma_f32(out, sin_phi, neg_inv6_reg, phi3, phi_reg)
+
+    // z1 = r_bm * cos_phi
+    out = bio_emit_mul_f32(out, z1_reg, r_bm, cos_phi)
+    // z2 = r_bm * sin_phi
+    out = bio_emit_mul_f32(out, z2_reg, r_bm, sin_phi)
+
+    // CL sample: ln_cl = mean_cl + std_cl * z1; cl = exp(ln_cl) = ex2(ln_cl / ln2 * ln2 * log2e)
+    //   = ex2(ln_cl * log2e)
+    out = bio_emit_fma_f32(out, ln_cl_reg, std_cl_reg, z1_reg, mean_cl_reg)
+    // ln_cl_over_ln2 = ln_cl * log2e = ln_cl / ln2
+    out = bio_emit_mul_f32(out, ln_cl_over_ln2, ln_cl_reg, log2e_reg)
+    out = bio_emit_ex2_f32(out, cl_sample_reg, ln_cl_over_ln2)
+
+    // VD sample: ln_vd = mean_vd + std_vd * z2; vd = ex2(ln_vd * log2e)
+    out = bio_emit_fma_f32(out, ln_vd_reg, std_vd_reg, z2_reg, mean_vd_reg)
+    out = bio_emit_mul_f32(out, ln_vd_over_ln2, ln_vd_reg, log2e_reg)
+    out = bio_emit_ex2_f32(out, vd_sample_reg, ln_vd_over_ln2)
+
+    (out, cl_sample_reg, vd_sample_reg)
+}
+
+// Emit the population PK kernel header in PTX .visible .entry form.
+fn bio_emit_pop_pk_kernel_header(s: BioPtxState) -> BioPtxState with Div {
+    var out = s
+    out = bio_push_str(out, ".visible .entry sounio_pop_pk(\n")
+    out = bio_push_str(out, "    .param .u64 dose_ptr,\n")
+    out = bio_push_str(out, "    .param .u64 params_ptr,\n")
+    out = bio_push_str(out, "    .param .u64 t_ptr,\n")
+    out = bio_push_str(out, "    .param .u64 conc_out,\n")
+    out = bio_push_str(out, "    .param .u64 eps_out,\n")
+    out = bio_push_str(out, "    .param .u32 n_patients,\n")
+    out = bio_push_str(out, "    .param .u32 n_times\n")
+    out = bio_push_str(out, ")\n")
+    out = bio_push_str(out, "{\n")
+    out = bio_push_str(out, "    .reg .u32   %r<8>;\n")
+    out = bio_push_str(out, "    .reg .u64   %rd<16>;\n")
+    out = bio_push_str(out, "    .reg .f32   %f<128>;\n")
+    out = bio_push_str(out, "    .reg .pred  %p<16>;\n")
+    out = bio_push_str(out, "    // Thread index\n")
+    out = bio_push_str(out, "    mov.u32 %r0, %tid.x;\n")
+    out = bio_push_str(out, "    mov.u32 %r1, %ctaid.x;\n")
+    out = bio_push_str(out, "    mov.u32 %r2, %ntid.x;\n")
+    out = bio_push_str(out, "    mad.lo.u32 %r3, %r1, %r2, %r0;  // global thread id\n")
+    out = bio_push_str(out, "    // Load n_patients bound\n")
+    out = bio_push_str(out, "    ld.param.u32 %r4, [n_patients];\n")
+    out = bio_push_str(out, "    setp.ge.u32 %p0, %r3, %r4;\n")
+    out = bio_push_str(out, "    @%p0 bra.uni SOUNIO_POP_PK_EXIT;\n")
+    out = bio_push_str(out, "    // Load dose for this patient\n")
+    out = bio_push_str(out, "    ld.param.u64 %rd0, [dose_ptr];\n")
+    out = bio_push_str(out, "    cvt.u64.u32 %rd1, %r3;\n")
+    out = bio_push_str(out, "    mad.wide.u32 %rd2, %r3, 4, %rd0;  // &dose[tid]\n")
+    out = bio_push_str(out, "    ld.global.f32 %f0, [%rd2];\n")
+    out = bio_push_str(out, "    // Load PK params (mean_cl, std_cl, mean_vd, std_vd)\n")
+    out = bio_push_str(out, "    ld.param.u64 %rd3, [params_ptr];\n")
+    out = bio_push_str(out, "    mad.wide.u32 %rd4, %r3, 16, %rd3;  // &params[tid] (4 floats)\n")
+    out = bio_push_str(out, "    ld.global.f32 %f1, [%rd4];       // mean_cl\n")
+    out = bio_push_str(out, "    ld.global.f32 %f2, [%rd4+4];     // std_cl\n")
+    out = bio_push_str(out, "    ld.global.f32 %f3, [%rd4+8];     // mean_vd\n")
+    out = bio_push_str(out, "    ld.global.f32 %f4, [%rd4+12];    // std_vd\n")
+    out
+}
+
+// ============================================================================
+// CPU-side simulation functions
+// ============================================================================
+
+// Simulate PK one-compartment model over a set of time points.
+// Returns PKSimResult with concentrations and uncertainties at each time point.
+fn bio_sim_pk_one_compartment(
+    dose_mg: f32,
+    params: PKParams,
+    times: [f32; 256],
+    n_times: i64
+) -> PKSimResult with Div {
+    var result: PKSimResult = PKSimResult {
+        times: [0.0; 256],
+        concentrations: [0.0; 256],
+        conc_eps: [0.0; 256],
+        n_points: 0,
+        model_tag: PK_MODEL_ONE_COMPARTMENT,
+    }
+
+    var i: i64 = 0
+    while i < n_times && i < 256 {
+        let t = times[i as usize]
+        let conc = bio_pk_one_compartment_conc(dose_mg, params.vd, params.ke, t)
+
+        // First-order uncertainty propagation:
+        //   eps_C ≈ (eps_dose/dose + eps_vd/vd + eps_ke * t) * C
+        let rel_dose = params.cl_eps / dose_mg
+        let rel_vd = params.vd_eps / params.vd
+        let ke_term = params.ka_eps * t
+        let eps = (rel_dose + rel_vd + ke_term) * conc
+        let eps_abs = if eps < 0.0 { -eps } else { eps }
+
+        result.times[i as usize] = t
+        result.concentrations[i as usize] = conc
+        result.conc_eps[i as usize] = eps_abs
+        i = i + 1
+    }
+
+    result.n_points = n_times
+    result
+}
+
+// Apply a PD model to a PK simulation result.
+// Returns (effects, effect_eps, n_points).
+fn bio_sim_pd_from_pk(
+    pk: PKSimResult,
+    pd: PDParams,
+    model: i64
+) -> ([f32; 256], [f32; 256], i64) with Div {
+    var effects: [f32; 256] = [0.0; 256]
+    var effect_eps: [f32; 256] = [0.0; 256]
+
+    var i: i64 = 0
+    while i < pk.n_points && i < 256 {
+        let c = pk.concentrations[i as usize]
+        let c_eps = pk.conc_eps[i as usize]
+
+        let effect = if model == PD_MODEL_LINEAR {
+            bio_pd_linear(c, pd.emax, pd.e0)
+        } else if model == PD_MODEL_EMAX {
+            bio_pd_emax(c, pd.emax, pd.ec50)
+        } else if model == PD_MODEL_SIGMOIDAL_HILL {
+            bio_pd_hill(c, pd.emax, pd.ec50, pd.hill)
+        } else {
+            // PD_MODEL_INDIRECT: use Emax as base approximation for indirect response
+            // Indirect response: R(t) ≈ R0 * (1 - Emax*C/(ec50+C)) modeled via Emax
+            let e_in = bio_pd_emax(c, pd.emax, pd.ec50)
+            pd.e0 * (1.0 - e_in / pd.emax)
+        }
+
+        // Propagate uncertainty through PD model
+        // dE/dC for Emax: emax * ec50 / (ec50 + C)^2
+        let denom = pd.ec50 + c
+        let denom_sq = denom * denom
+        let dedC = pd.emax * pd.ec50 / denom_sq
+        let e_ratio = effect / pd.emax
+        let e_ratio_abs = if e_ratio < 0.0 { -e_ratio } else { e_ratio }
+        let dedec50 = pd.emax * c / denom_sq
+        let eps_e = dedC * c_eps + e_ratio_abs * pd.emax_eps + dedec50 * pd.ec50_eps
+        let eps_e_abs = if eps_e < 0.0 { -eps_e } else { eps_e }
+
+        effects[i as usize] = effect
+        effect_eps[i as usize] = eps_e_abs
+        i = i + 1
+    }
+
+    (effects, effect_eps, pk.n_points)
+}
+
+// Classify concentration relative to therapeutic window, accounting for
+// epistemic uncertainty: if eps interval overlaps a boundary, return UNCERTAIN.
+fn bio_check_therapeutic_window(conc: f32, min_conc: f32, max_conc: f32, conc_eps: f32) -> i64 {
+    let lower = conc - conc_eps
+    let upper = conc + conc_eps
+
+    // Clearly below window
+    if upper < min_conc {
+        return WINDOW_BELOW
+    }
+    // Clearly above window
+    if lower > max_conc {
+        return WINDOW_ABOVE
+    }
+    // Uncertainty interval overlaps lower boundary
+    if lower < min_conc && upper >= min_conc {
+        return WINDOW_UNCERTAIN
+    }
+    // Uncertainty interval overlaps upper boundary
+    if lower <= max_conc && upper > max_conc {
+        return WINDOW_UNCERTAIN
+    }
+    // Fully within window
+    WINDOW_IN
+}
+
+// ============================================================================
+// Output accessor
+// ============================================================================
+
+// Returns (buffer, length) for downstream use (writing PTX to file, etc.)
+fn bio_get_output(s: BioPtxState) -> ([i8; 65536], i64) {
+    (s.buf, s.buf_len)
+}
+
+// End of gpu/kernels/bio.sio

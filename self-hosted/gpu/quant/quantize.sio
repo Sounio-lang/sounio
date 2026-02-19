@@ -1,0 +1,1105 @@
+// self-hosted::gpu::quant::quantize — GPU quantization pipeline
+//
+// Implements dynamic and static quantization of model weights and activations
+// to INT4, INT8, BF16, and FP8 formats. Provides per-tensor and per-channel
+// quantization, fake quantization for training (STE), and dequantization.
+// Emits PTX for GPU quantization kernels.
+//
+// Supported formats: INT4, INT8, UINT8, BF16, FP8_E4M3, FP8_E5M2, FP4, FP16
+//
+// Design principles:
+// - All state threading via return values (no mutation through refs)
+// - Fixed-size arrays only (no heap allocation)
+// - Helpers precede callers throughout
+// - PTX emission is deterministic byte-by-byte
+
+// ============================================================================
+// Format and granularity tag constants
+// ============================================================================
+
+let QUANT_FMT_INT4: i64       = 0
+let QUANT_FMT_INT8: i64       = 1
+let QUANT_FMT_UINT8: i64      = 2
+let QUANT_FMT_BF16: i64       = 3
+let QUANT_FMT_FP8_E4M3: i64   = 4   // exponent 4, mantissa 3
+let QUANT_FMT_FP8_E5M2: i64   = 5   // exponent 5, mantissa 2
+let QUANT_FMT_FP4: i64        = 6   // Blackwell sm_100
+let QUANT_FMT_FP16: i64       = 7
+
+let QUANT_GRAN_PER_TENSOR: i64  = 0
+let QUANT_GRAN_PER_CHANNEL: i64 = 1
+let QUANT_GRAN_PER_TOKEN: i64   = 2   // LLM activation quantization
+let QUANT_GRAN_BLOCK_WISE: i64  = 3   // group quantization (e.g. group_size=128)
+
+// Kernel operation tags
+let QUANT_OP_QUANTIZE: i64    = 0
+let QUANT_OP_DEQUANTIZE: i64  = 1
+let QUANT_OP_FAKE_QUANT: i64  = 2
+let QUANT_OP_REQUANTIZE: i64  = 3
+
+// ============================================================================
+// Data structures
+// ============================================================================
+
+// QuantParams — scale and zero-point for one quantized tensor
+struct QuantParams {
+    fmt: i64,
+    granularity: i64,
+    // Per-tensor fields
+    scale: f32,
+    zero_point: i64,
+    // Per-channel fields (up to 4096 channels)
+    channel_scales: [f32; 4096],
+    channel_zeros: [i64; 4096],
+    channel_count: i64,
+    // Block-wise fields
+    group_size: i64,
+    // Calibration stats
+    min_val: f32,
+    max_val: f32,
+    // Clamp range
+    q_min: i64,
+    q_max: i64,
+}
+
+// QuantState — accumulates statistics during calibration
+struct QuantState {
+    fmt: i64,
+    running_min: f32,
+    running_max: f32,
+    sample_count: i64,
+    // histogram for percentile calibration (256 buckets)
+    hist_buckets: [i64; 256],
+    hist_min: f32,
+    hist_max: f32,
+}
+
+// QuantKernelSpec — describes a quantization kernel to emit
+struct QuantKernelSpec {
+    fmt: i64,
+    granularity: i64,
+    op: i64,             // QUANT_OP_*
+    sm_version: i64,
+    use_tensor_cores: bool,
+}
+
+// QuantPtxState — for PTX text emission
+struct QuantPtxState {
+    buf: [i8; 65536],
+    buf_len: i64,
+    reg_counter: i64,
+    pred_counter: i64,
+}
+
+// ============================================================================
+// Format metadata helpers
+// ============================================================================
+
+fn quant_fmt_bits(fmt: i64) -> i64 {
+    if fmt == QUANT_FMT_INT4       { return 4 }
+    if fmt == QUANT_FMT_INT8       { return 8 }
+    if fmt == QUANT_FMT_UINT8      { return 8 }
+    if fmt == QUANT_FMT_BF16       { return 16 }
+    if fmt == QUANT_FMT_FP8_E4M3   { return 8 }
+    if fmt == QUANT_FMT_FP8_E5M2   { return 8 }
+    if fmt == QUANT_FMT_FP4        { return 4 }
+    if fmt == QUANT_FMT_FP16       { return 16 }
+    8
+}
+
+fn quant_fmt_is_integer(fmt: i64) -> bool {
+    if fmt == QUANT_FMT_INT4  { return true }
+    if fmt == QUANT_FMT_INT8  { return true }
+    if fmt == QUANT_FMT_UINT8 { return true }
+    false
+}
+
+fn quant_fmt_is_float(fmt: i64) -> bool {
+    if fmt == QUANT_FMT_BF16      { return true }
+    if fmt == QUANT_FMT_FP8_E4M3  { return true }
+    if fmt == QUANT_FMT_FP8_E5M2  { return true }
+    if fmt == QUANT_FMT_FP4       { return true }
+    if fmt == QUANT_FMT_FP16      { return true }
+    false
+}
+
+fn quant_fmt_q_min(fmt: i64) -> i64 {
+    if fmt == QUANT_FMT_INT4      { return -8 }
+    if fmt == QUANT_FMT_INT8      { return -128 }
+    if fmt == QUANT_FMT_UINT8     { return 0 }
+    if fmt == QUANT_FMT_BF16      { return 0 }
+    if fmt == QUANT_FMT_FP8_E4M3  { return -448 }
+    if fmt == QUANT_FMT_FP8_E5M2  { return -57344 }
+    if fmt == QUANT_FMT_FP4       { return -6 }
+    if fmt == QUANT_FMT_FP16      { return 0 }
+    -128
+}
+
+fn quant_fmt_q_max(fmt: i64) -> i64 {
+    if fmt == QUANT_FMT_INT4      { return 7 }
+    if fmt == QUANT_FMT_INT8      { return 127 }
+    if fmt == QUANT_FMT_UINT8     { return 255 }
+    if fmt == QUANT_FMT_BF16      { return 1 }
+    if fmt == QUANT_FMT_FP8_E4M3  { return 448 }
+    if fmt == QUANT_FMT_FP8_E5M2  { return 57344 }
+    if fmt == QUANT_FMT_FP4       { return 6 }
+    if fmt == QUANT_FMT_FP16      { return 1 }
+    127
+}
+
+fn quant_fmt_pack_per_byte(fmt: i64) -> i64 {
+    if fmt == QUANT_FMT_INT4 { return 2 }
+    if fmt == QUANT_FMT_FP4  { return 2 }
+    1
+}
+
+// ============================================================================
+// FP8 / BF16 bit manipulation helpers
+// ============================================================================
+
+// bf16_encode — top 16 bits of the f32 bit pattern
+// BF16 shares the same exponent as f32; only mantissa is truncated.
+fn bf16_encode(x: f32) -> i64 {
+    // Reinterpret f32 bits as i32, take upper 16 bits
+    let bits: i64 = f32_to_bits(x)
+    (bits >> 16) & 0xFFFF
+}
+
+fn bf16_decode(bits: i64) -> f32 {
+    // Shift back to f32 bit position, reinterpret
+    let full: i64 = (bits & 0xFFFF) << 16
+    bits_to_f32(full)
+}
+
+// fp8_e4m3_encode — map f32 to FP8 E4M3 bit pattern
+// Layout: sign(1) | exponent(4) | mantissa(3)
+// E4M3 bias = 7; max normal = 448.0
+fn fp8_e4m3_encode(x: f32) -> i64 {
+    let f32_bits: i64 = f32_to_bits(x)
+    // Extract f32 fields
+    let sign: i64     = (f32_bits >> 31) & 1
+    let exp32: i64    = (f32_bits >> 23) & 0xFF   // biased by 127
+    let mant32: i64   = f32_bits & 0x7FFFFF
+
+    // Handle zero
+    if exp32 == 0 && mant32 == 0 {
+        return sign << 7
+    }
+
+    // Rebias: FP8 E4M3 bias = 7, f32 bias = 127
+    // fp8_exp = exp32 - 127 + 7 = exp32 - 120
+    var fp8_exp: i64 = exp32 - 120
+
+    // Saturate to max normal (±448)
+    if fp8_exp > 15 {
+        // Overflow → saturate to max (0x7E = 01111110 for positive, 0xFE for negative)
+        let max_bits: i64 = 0x7E
+        return (sign << 7) | max_bits
+    }
+
+    // Underflow → flush to zero (subnormals not tracked here)
+    if fp8_exp <= 0 {
+        return sign << 7
+    }
+
+    // Truncate mantissa: keep top 3 bits of 23-bit mantissa
+    let fp8_mant: i64 = (mant32 >> 20) & 0x7
+
+    (sign << 7) | ((fp8_exp & 0xF) << 3) | fp8_mant
+}
+
+fn fp8_e4m3_decode(bits: i64) -> f32 {
+    let sign: i64  = (bits >> 7) & 1
+    let exp8: i64  = (bits >> 3) & 0xF
+    let mant8: i64 = bits & 0x7
+
+    // Zero
+    if exp8 == 0 && mant8 == 0 {
+        if sign == 1 {
+            return bits_to_f32(0x80000000)
+        }
+        return 0.0
+    }
+
+    // Rebias: f32 exponent = exp8 - 7 + 127 = exp8 + 120
+    let exp32: i64  = exp8 + 120
+    // Expand mantissa: 3-bit mantissa → top 3 bits of 23-bit field
+    let mant32: i64 = mant8 << 20
+
+    let f32_bits: i64 = (sign << 31) | (exp32 << 23) | mant32
+    bits_to_f32(f32_bits)
+}
+
+// fp8_e5m2_encode — E5M2: sign(1) | exponent(5) | mantissa(2)
+// E5M2 bias = 15; max normal = 57344.0
+fn fp8_e5m2_encode(x: f32) -> i64 {
+    let f32_bits: i64 = f32_to_bits(x)
+    let sign: i64     = (f32_bits >> 31) & 1
+    let exp32: i64    = (f32_bits >> 23) & 0xFF
+    let mant32: i64   = f32_bits & 0x7FFFFF
+
+    if exp32 == 0 && mant32 == 0 {
+        return sign << 7
+    }
+
+    // E5M2 bias = 15; rebias: fp8_exp = exp32 - 127 + 15 = exp32 - 112
+    var fp8_exp: i64 = exp32 - 112
+
+    if fp8_exp > 30 {
+        // Saturate
+        return (sign << 7) | 0x7B
+    }
+
+    if fp8_exp <= 0 {
+        return sign << 7
+    }
+
+    // Top 2 bits of 23-bit mantissa
+    let fp8_mant: i64 = (mant32 >> 21) & 0x3
+
+    (sign << 7) | ((fp8_exp & 0x1F) << 2) | fp8_mant
+}
+
+fn fp8_e5m2_decode(bits: i64) -> f32 {
+    let sign: i64  = (bits >> 7) & 1
+    let exp8: i64  = (bits >> 2) & 0x1F
+    let mant8: i64 = bits & 0x3
+
+    if exp8 == 0 && mant8 == 0 {
+        if sign == 1 {
+            return bits_to_f32(0x80000000)
+        }
+        return 0.0
+    }
+
+    // f32 exp = exp8 - 15 + 127 = exp8 + 112
+    let exp32: i64  = exp8 + 112
+    let mant32: i64 = mant8 << 21
+
+    let f32_bits: i64 = (sign << 31) | (exp32 << 23) | mant32
+    bits_to_f32(f32_bits)
+}
+
+// ============================================================================
+// Scale computation helpers
+// ============================================================================
+
+fn quant_compute_scale(min_val: f32, max_val: f32, q_min: i64, q_max: i64) -> f32 with Div {
+    let range_f: f32  = max_val - min_val
+    let q_range: i64  = q_max - q_min
+    // Degenerate: zero range → scale = 1.0
+    if range_f == 0.0 { return 1.0 }
+    if q_range == 0   { return 1.0 }
+    range_f / (q_range as f32)
+}
+
+fn quant_clamp_i64(v: i64, lo: i64, hi: i64) -> i64 {
+    if v < lo { return lo }
+    if v > hi { return hi }
+    v
+}
+
+fn quant_round_f32_to_i64(x: f32) -> i64 {
+    // Standard round-to-nearest (not banker's rounding — that is handled separately)
+    let floored: i64 = x as i64
+    let diff: f32    = x - (floored as f32)
+    if diff >= 0.5 {
+        return floored + 1
+    }
+    floored
+}
+
+fn quant_compute_zero_point(min_val: f32, scale: f32, q_min: i64, q_max: i64) -> i64 with Div {
+    if scale == 0.0 { return 0 }
+    let zp_f: f32  = (q_min as f32) - min_val / scale
+    let zp: i64    = quant_round_f32_to_i64(zp_f)
+    quant_clamp_i64(zp, q_min, q_max)
+}
+
+fn quant_params_per_tensor(fmt: i64, min_val: f32, max_val: f32) -> QuantParams with Div {
+    let q_mn: i64  = quant_fmt_q_min(fmt)
+    let q_mx: i64  = quant_fmt_q_max(fmt)
+    let sc: f32    = quant_compute_scale(min_val, max_val, q_mn, q_mx)
+    let zp: i64    = quant_compute_zero_point(min_val, sc, q_mn, q_mx)
+    QuantParams {
+        fmt:            fmt,
+        granularity:    QUANT_GRAN_PER_TENSOR,
+        scale:          sc,
+        zero_point:     zp,
+        channel_scales: [0.0; 4096],
+        channel_zeros:  [0; 4096],
+        channel_count:  0,
+        group_size:     0,
+        min_val:        min_val,
+        max_val:        max_val,
+        q_min:          q_mn,
+        q_max:          q_mx,
+    }
+}
+
+fn quant_params_symmetric(fmt: i64, abs_max: f32) -> QuantParams with Div {
+    let q_mx: i64  = quant_fmt_q_max(fmt)
+    let q_mn: i64  = quant_fmt_q_min(fmt)
+    var sc: f32    = 1.0
+    if q_mx > 0 {
+        sc = abs_max / (q_mx as f32)
+    }
+    if sc == 0.0 { sc = 1.0 }
+    QuantParams {
+        fmt:            fmt,
+        granularity:    QUANT_GRAN_PER_TENSOR,
+        scale:          sc,
+        zero_point:     0,
+        channel_scales: [0.0; 4096],
+        channel_zeros:  [0; 4096],
+        channel_count:  0,
+        group_size:     0,
+        min_val:        -abs_max,
+        max_val:        abs_max,
+        q_min:          q_mn,
+        q_max:          q_mx,
+    }
+}
+
+fn quant_params_per_channel_set_scale(qp: QuantParams, ch: i64, scale: f32, zp: i64) -> QuantParams {
+    var out = qp
+    if ch >= 0 && ch < 4096 {
+        out.channel_scales[ch as usize] = scale
+        out.channel_zeros[ch as usize]  = zp
+        if ch + 1 > out.channel_count {
+            out.channel_count = ch + 1
+        }
+    }
+    out
+}
+
+// ============================================================================
+// Banker's rounding (round half to even)
+// ============================================================================
+
+fn quant_round_to_nearest_even(x: f32) -> f32 {
+    let floored: i64  = x as i64
+    let diff: f32     = x - (floored as f32)
+    // Not a half-way case: use standard rounding
+    if diff > 0.5 {
+        return (floored + 1) as f32
+    }
+    if diff < 0.5 {
+        return floored as f32
+    }
+    // Exactly 0.5: round to even
+    if (floored & 1) == 0 {
+        return floored as f32
+    }
+    (floored + 1) as f32
+}
+
+// ============================================================================
+// Scalar quantize / dequantize (CPU reference)
+// ============================================================================
+
+fn quant_quantize_scalar(x: f32, scale: f32, zero_point: i64, q_min: i64, q_max: i64) -> i64 with Div {
+    if scale == 0.0 { return 0 }
+    let shifted: f32 = x / scale + (zero_point as f32)
+    let rounded: i64 = quant_round_f32_to_i64(shifted)
+    quant_clamp_i64(rounded, q_min, q_max)
+}
+
+fn quant_dequantize_scalar(q: i64, scale: f32, zero_point: i64) -> f32 {
+    ((q - zero_point) as f32) * scale
+}
+
+fn quant_fake_quantize(x: f32, scale: f32, zero_point: i64, q_min: i64, q_max: i64) -> f32 with Div {
+    // Straight-through estimator: quantize then dequantize in f32
+    let q: i64     = quant_quantize_scalar(x, scale, zero_point, q_min, q_max)
+    quant_dequantize_scalar(q, scale, zero_point)
+}
+
+// ============================================================================
+// QuantState calibration
+// ============================================================================
+
+fn quant_state_new(fmt: i64) -> QuantState {
+    QuantState {
+        fmt:          fmt,
+        running_min:  0.0,
+        running_max:  0.0,
+        sample_count: 0,
+        hist_buckets: [0; 256],
+        hist_min:     0.0,
+        hist_max:     0.0,
+    }
+}
+
+fn quant_histogram_bucket(qs: QuantState, val: f32) -> i64 with Div {
+    let span: f32 = qs.hist_max - qs.hist_min
+    if span == 0.0 { return 0 }
+    let ratio: f32 = (val - qs.hist_min) / span
+    var idx: i64   = (ratio * 255.0) as i64
+    if idx < 0   { idx = 0 }
+    if idx > 255 { idx = 255 }
+    idx
+}
+
+fn quant_state_update(qs: QuantState, val: f32) -> QuantState with Div {
+    var out = qs
+    if out.sample_count == 0 {
+        out.running_min = val
+        out.running_max = val
+        out.hist_min    = val
+        out.hist_max    = val
+    } else {
+        if val < out.running_min { out.running_min = val }
+        if val > out.running_max { out.running_max = val }
+        if val < out.hist_min    { out.hist_min    = val }
+        if val > out.hist_max    { out.hist_max    = val }
+    }
+    out.sample_count = out.sample_count + 1
+    // Update histogram
+    let bkt: i64 = quant_histogram_bucket(out, val)
+    out.hist_buckets[bkt as usize] = out.hist_buckets[bkt as usize] + 1
+    out
+}
+
+// Find percentile bucket index given total count and percentile in [0, 100]
+fn quant_hist_percentile_idx(qs: QuantState, pct_thousandths: i64) -> i64 {
+    // pct_thousandths: 10 = 0.01%, 99990 = 99.99%
+    let total: i64  = qs.sample_count
+    if total == 0 { return 0 }
+    let target: i64 = (total * pct_thousandths) / 100000
+    var acc: i64    = 0
+    var i: i64      = 0
+    while i < 256 {
+        acc = acc + qs.hist_buckets[i as usize]
+        if acc >= target { return i }
+        i = i + 1
+    }
+    255
+}
+
+fn quant_state_finalize(qs: QuantState) -> QuantParams with Div {
+    // Use 0.01th and 99.99th percentile from histogram for clipping
+    let lo_bkt: i64 = quant_hist_percentile_idx(qs, 10)       // 0.01%
+    let hi_bkt: i64 = quant_hist_percentile_idx(qs, 99990)    // 99.99%
+
+    let span: f32 = qs.hist_max - qs.hist_min
+
+    var clip_min: f32 = qs.running_min
+    var clip_max: f32 = qs.running_max
+
+    if span > 0.0 {
+        clip_min = qs.hist_min + (lo_bkt as f32) / 255.0 * span
+        clip_max = qs.hist_min + (hi_bkt as f32) / 255.0 * span
+    }
+
+    quant_params_per_tensor(qs.fmt, clip_min, clip_max)
+}
+
+// ============================================================================
+// PTX emission helpers
+// ============================================================================
+
+fn qps_new() -> QuantPtxState {
+    QuantPtxState {
+        buf:          [0; 65536],
+        buf_len:      0,
+        reg_counter:  0,
+        pred_counter: 0,
+    }
+}
+
+fn qps_append_byte(s: QuantPtxState, b: i8) -> QuantPtxState {
+    var out = s
+    if out.buf_len < 65536 {
+        out.buf[out.buf_len as usize] = b
+        out.buf_len = out.buf_len + 1
+    }
+    out
+}
+
+fn qps_emit_line(s: QuantPtxState, line: [i8; 128], len: i64) -> QuantPtxState {
+    var out = s
+    var i: i64 = 0
+    while i < len {
+        if out.buf_len < 65536 {
+            out.buf[out.buf_len as usize] = line[i as usize]
+            out.buf_len = out.buf_len + 1
+        }
+        i = i + 1
+    }
+    out
+}
+
+fn qps_alloc_reg(s: QuantPtxState) -> (QuantPtxState, i64) {
+    var out = s
+    let idx: i64 = out.reg_counter
+    out.reg_counter = idx + 1
+    (out, idx)
+}
+
+fn qps_alloc_pred(s: QuantPtxState) -> (QuantPtxState, i64) {
+    var out = s
+    let idx: i64 = out.pred_counter
+    out.pred_counter = idx + 1
+    (out, idx)
+}
+
+// Helper: append a string literal to QuantPtxState buffer
+fn qps_push_str(s: QuantPtxState, text: string) -> QuantPtxState with Div {
+    var out = s
+    let n: i64 = str_len(text)
+    var i: i64 = 0
+    while i < n {
+        if out.buf_len < 65536 {
+            out.buf[out.buf_len as usize] = str_char_at(text, i) as i8
+            out.buf_len = out.buf_len + 1
+        }
+        i = i + 1
+    }
+    out
+}
+
+// Helper: append decimal i64 to PTX buffer
+fn qps_push_i64(s: QuantPtxState, v: i64) -> QuantPtxState with Div {
+    qps_push_str(s, i64_to_string(v))
+}
+
+// ============================================================================
+// PTX quantization operation emitters
+// ============================================================================
+
+// quant_ptx_emit_int8_quantize_op
+// Emits:
+//   div.rn.f32 %ftmpN, %valR, %scaleR;
+//   cvt.rni.s32.f32 %tmpN, %ftmpN;
+//   add.s32 %tmpN, %tmpN, %zpR;
+//   max.s32 %tmpN, %tmpN, -128;
+//   min.s32 %resultR, %tmpN, 127;
+fn quant_ptx_emit_int8_quantize_op(s: QuantPtxState, val_reg: i64, scale_reg: i64, zp_reg: i64) -> (QuantPtxState, i64) with Div {
+    var st = s
+
+    // Allocate temporaries
+    let tmp0_res = qps_alloc_reg(st)
+    st = tmp0_res.0
+    let tmp0: i64 = tmp0_res.1
+
+    let tmp1_res = qps_alloc_reg(st)
+    st = tmp1_res.0
+    let tmp1: i64 = tmp1_res.1
+
+    let tmp2_res = qps_alloc_reg(st)
+    st = tmp2_res.0
+    let tmp2: i64 = tmp2_res.1
+
+    let tmp3_res = qps_alloc_reg(st)
+    st = tmp3_res.0
+    let tmp3: i64 = tmp3_res.1
+
+    let res_res = qps_alloc_reg(st)
+    st = res_res.0
+    let result: i64 = res_res.1
+
+    // div.rn.f32 %fN, %val, %scale
+    st = qps_push_str(st, "    div.rn.f32 %f")
+    st = qps_push_i64(st, tmp0)
+    st = qps_push_str(st, ", %r")
+    st = qps_push_i64(st, val_reg)
+    st = qps_push_str(st, ", %r")
+    st = qps_push_i64(st, scale_reg)
+    st = qps_push_str(st, ";\n")
+
+    // cvt.rni.s32.f32 %rN, %fM
+    st = qps_push_str(st, "    cvt.rni.s32.f32 %r")
+    st = qps_push_i64(st, tmp1)
+    st = qps_push_str(st, ", %f")
+    st = qps_push_i64(st, tmp0)
+    st = qps_push_str(st, ";\n")
+
+    // add.s32 %rN, %rM, %zp
+    st = qps_push_str(st, "    add.s32 %r")
+    st = qps_push_i64(st, tmp2)
+    st = qps_push_str(st, ", %r")
+    st = qps_push_i64(st, tmp1)
+    st = qps_push_str(st, ", %r")
+    st = qps_push_i64(st, zp_reg)
+    st = qps_push_str(st, ";\n")
+
+    // max.s32 %rN, %rM, -128
+    st = qps_push_str(st, "    max.s32 %r")
+    st = qps_push_i64(st, tmp3)
+    st = qps_push_str(st, ", %r")
+    st = qps_push_i64(st, tmp2)
+    st = qps_push_str(st, ", -128;\n")
+
+    // min.s32 %rResult, %rN, 127
+    st = qps_push_str(st, "    min.s32 %r")
+    st = qps_push_i64(st, result)
+    st = qps_push_str(st, ", %r")
+    st = qps_push_i64(st, tmp3)
+    st = qps_push_str(st, ", 127;\n")
+
+    (st, result)
+}
+
+// quant_ptx_emit_int8_dequantize_op
+// Emits:
+//   sub.s32 %tmpN, %q, %zp;
+//   cvt.f32.s32 %fN, %tmpN;
+//   mul.f32 %resultF, %fN, %scale;
+fn quant_ptx_emit_int8_dequantize_op(s: QuantPtxState, q_reg: i64, scale_reg: i64, zp_reg: i64) -> (QuantPtxState, i64) with Div {
+    var st = s
+
+    let tmp0_res = qps_alloc_reg(st)
+    st = tmp0_res.0
+    let tmp0: i64 = tmp0_res.1
+
+    let ftmp_res = qps_alloc_reg(st)
+    st = ftmp_res.0
+    let ftmp: i64 = ftmp_res.1
+
+    let res_res = qps_alloc_reg(st)
+    st = res_res.0
+    let result: i64 = res_res.1
+
+    // sub.s32 %rN, %q, %zp
+    st = qps_push_str(st, "    sub.s32 %r")
+    st = qps_push_i64(st, tmp0)
+    st = qps_push_str(st, ", %r")
+    st = qps_push_i64(st, q_reg)
+    st = qps_push_str(st, ", %r")
+    st = qps_push_i64(st, zp_reg)
+    st = qps_push_str(st, ";\n")
+
+    // cvt.f32.s32 %fN, %rM
+    st = qps_push_str(st, "    cvt.f32.s32 %f")
+    st = qps_push_i64(st, ftmp)
+    st = qps_push_str(st, ", %r")
+    st = qps_push_i64(st, tmp0)
+    st = qps_push_str(st, ";\n")
+
+    // mul.f32 %fResult, %fN, %scale
+    st = qps_push_str(st, "    mul.f32 %f")
+    st = qps_push_i64(st, result)
+    st = qps_push_str(st, ", %f")
+    st = qps_push_i64(st, ftmp)
+    st = qps_push_str(st, ", %r")
+    st = qps_push_i64(st, scale_reg)
+    st = qps_push_str(st, ";\n")
+
+    (st, result)
+}
+
+// quant_ptx_emit_fp8_e4m3_quantize
+// On sm_89+: use native cvt instruction
+// Fallback: clamp + bit manipulation sequence
+fn quant_ptx_emit_fp8_e4m3_quantize(s: QuantPtxState, val_reg: i64, scale_reg: i64) -> (QuantPtxState, i64) with Div {
+    var st = s
+
+    let scaled_res = qps_alloc_reg(st)
+    st = scaled_res.0
+    let scaled: i64 = scaled_res.1
+
+    let res_res = qps_alloc_reg(st)
+    st = res_res.0
+    let result: i64 = res_res.1
+
+    // div.f32 %fScaled, %fVal, %fScale
+    st = qps_push_str(st, "    div.f32 %f")
+    st = qps_push_i64(st, scaled)
+    st = qps_push_str(st, ", %r")
+    st = qps_push_i64(st, val_reg)
+    st = qps_push_str(st, ", %r")
+    st = qps_push_i64(st, scale_reg)
+    st = qps_push_str(st, ";\n")
+
+    // sm_89+ native FP8 convert (two values packed; use same src twice for scalar)
+    st = qps_push_str(st, "    // sm_89+ native FP8 E4M3 quantization\n")
+    st = qps_push_str(st, "    cvt.rni.f8x2e4m3.f32.rn %r")
+    st = qps_push_i64(st, result)
+    st = qps_push_str(st, ", %f")
+    st = qps_push_i64(st, scaled)
+    st = qps_push_str(st, ", %f")
+    st = qps_push_i64(st, scaled)
+    st = qps_push_str(st, ";\n")
+    st = qps_push_str(st, "    // fallback clamp sequence emitted separately for sm < 89\n")
+
+    (st, result)
+}
+
+// quant_ptx_emit_int4_pack
+// and.b32 %lo_masked, %lo, 0xF;
+// shl.b32 %hi_shifted, %hi, 4;
+// or.b32 %packed, %lo_masked, %hi_shifted;
+fn quant_ptx_emit_int4_pack(s: QuantPtxState, lo_reg: i64, hi_reg: i64) -> (QuantPtxState, i64) with Div {
+    var st = s
+
+    let lo_m_res = qps_alloc_reg(st)
+    st = lo_m_res.0
+    let lo_masked: i64 = lo_m_res.1
+
+    let hi_s_res = qps_alloc_reg(st)
+    st = hi_s_res.0
+    let hi_shifted: i64 = hi_s_res.1
+
+    let res_res = qps_alloc_reg(st)
+    st = res_res.0
+    let packed: i64 = res_res.1
+
+    st = qps_push_str(st, "    and.b32 %r")
+    st = qps_push_i64(st, lo_masked)
+    st = qps_push_str(st, ", %r")
+    st = qps_push_i64(st, lo_reg)
+    st = qps_push_str(st, ", 0xF;\n")
+
+    st = qps_push_str(st, "    shl.b32 %r")
+    st = qps_push_i64(st, hi_shifted)
+    st = qps_push_str(st, ", %r")
+    st = qps_push_i64(st, hi_reg)
+    st = qps_push_str(st, ", 4;\n")
+
+    st = qps_push_str(st, "    or.b32 %r")
+    st = qps_push_i64(st, packed)
+    st = qps_push_str(st, ", %r")
+    st = qps_push_i64(st, lo_masked)
+    st = qps_push_str(st, ", %r")
+    st = qps_push_i64(st, hi_shifted)
+    st = qps_push_str(st, ";\n")
+
+    (st, packed)
+}
+
+// quant_ptx_emit_int4_unpack
+// and.b32 %lo, %packed, 0xF;
+// shr.b32 %hi_raw, %packed, 4;
+// and.b32 %hi, %hi_raw, 0xF;
+fn quant_ptx_emit_int4_unpack(s: QuantPtxState, packed_reg: i64) -> (QuantPtxState, i64, i64) with Div {
+    var st = s
+
+    let lo_res = qps_alloc_reg(st)
+    st = lo_res.0
+    let lo: i64 = lo_res.1
+
+    let hi_raw_res = qps_alloc_reg(st)
+    st = hi_raw_res.0
+    let hi_raw: i64 = hi_raw_res.1
+
+    let hi_res = qps_alloc_reg(st)
+    st = hi_res.0
+    let hi: i64 = hi_res.1
+
+    st = qps_push_str(st, "    and.b32 %r")
+    st = qps_push_i64(st, lo)
+    st = qps_push_str(st, ", %r")
+    st = qps_push_i64(st, packed_reg)
+    st = qps_push_str(st, ", 0xF;\n")
+
+    st = qps_push_str(st, "    shr.b32 %r")
+    st = qps_push_i64(st, hi_raw)
+    st = qps_push_str(st, ", %r")
+    st = qps_push_i64(st, packed_reg)
+    st = qps_push_str(st, ", 4;\n")
+
+    st = qps_push_str(st, "    and.b32 %r")
+    st = qps_push_i64(st, hi)
+    st = qps_push_str(st, ", %r")
+    st = qps_push_i64(st, hi_raw)
+    st = qps_push_str(st, ", 0xF;\n")
+
+    (st, lo, hi)
+}
+
+// quant_ptx_emit_bf16_convert_f32
+// sm_80+: cvt.bf16.f32
+// Fallback: shift right 16 bits
+fn quant_ptx_emit_bf16_convert_f32(s: QuantPtxState, f32_reg: i64) -> (QuantPtxState, i64) with Div {
+    var st = s
+
+    let res_res = qps_alloc_reg(st)
+    st = res_res.0
+    let result: i64 = res_res.1
+
+    // sm_80+ native bf16 conversion
+    st = qps_push_str(st, "    // sm_80+ BF16 native convert\n")
+    st = qps_push_str(st, "    cvt.bf16.f32 %r")
+    st = qps_push_i64(st, result)
+    st = qps_push_str(st, ", %r")
+    st = qps_push_i64(st, f32_reg)
+    st = qps_push_str(st, ";\n")
+    st = qps_push_str(st, "    // fallback: shr.b32 + movb16 for sm < 80\n")
+
+    (st, result)
+}
+
+// quant_ptx_emit_dp4a_int8
+// dp4a.s32.s32 %result, %a, %b, %c;  (sm_61+)
+fn quant_ptx_emit_dp4a_int8(s: QuantPtxState, a_reg: i64, b_reg: i64, c_reg: i64) -> (QuantPtxState, i64) with Div {
+    var st = s
+
+    let res_res = qps_alloc_reg(st)
+    st = res_res.0
+    let result: i64 = res_res.1
+
+    st = qps_push_str(st, "    dp4a.s32.s32 %r")
+    st = qps_push_i64(st, result)
+    st = qps_push_str(st, ", %r")
+    st = qps_push_i64(st, a_reg)
+    st = qps_push_str(st, ", %r")
+    st = qps_push_i64(st, b_reg)
+    st = qps_push_str(st, ", %r")
+    st = qps_push_i64(st, c_reg)
+    st = qps_push_str(st, ";\n")
+
+    (st, result)
+}
+
+// ============================================================================
+// Kernel spec builders
+// ============================================================================
+
+fn quant_kernel_spec_quantize(fmt: i64, gran: i64, sm: i64) -> QuantKernelSpec {
+    QuantKernelSpec {
+        fmt:              fmt,
+        granularity:      gran,
+        op:               QUANT_OP_QUANTIZE,
+        sm_version:       sm,
+        use_tensor_cores: false,
+    }
+}
+
+fn quant_kernel_spec_dequantize(fmt: i64, gran: i64, sm: i64) -> QuantKernelSpec {
+    QuantKernelSpec {
+        fmt:              fmt,
+        granularity:      gran,
+        op:               QUANT_OP_DEQUANTIZE,
+        sm_version:       sm,
+        use_tensor_cores: false,
+    }
+}
+
+fn quant_kernel_spec_fake_quant(fmt: i64, gran: i64, sm: i64) -> QuantKernelSpec {
+    QuantKernelSpec {
+        fmt:              fmt,
+        granularity:      gran,
+        op:               QUANT_OP_FAKE_QUANT,
+        sm_version:       sm,
+        use_tensor_cores: false,
+    }
+}
+
+// ============================================================================
+// PTX kernel header / full kernel emission
+// ============================================================================
+
+// Helper: return kernel name string for spec
+fn quant_kernel_name_str(spec: QuantKernelSpec) -> string {
+    var name: string = "quant_"
+
+    if spec.op == QUANT_OP_QUANTIZE   { name = name + "enc_" }
+    if spec.op == QUANT_OP_DEQUANTIZE { name = name + "dec_" }
+    if spec.op == QUANT_OP_FAKE_QUANT { name = name + "fq_"  }
+    if spec.op == QUANT_OP_REQUANTIZE { name = name + "rq_"  }
+
+    if spec.fmt == QUANT_FMT_INT4     { name = name + "int4" }
+    if spec.fmt == QUANT_FMT_INT8     { name = name + "int8" }
+    if spec.fmt == QUANT_FMT_UINT8    { name = name + "uint8" }
+    if spec.fmt == QUANT_FMT_BF16     { name = name + "bf16" }
+    if spec.fmt == QUANT_FMT_FP8_E4M3 { name = name + "fp8e4m3" }
+    if spec.fmt == QUANT_FMT_FP8_E5M2 { name = name + "fp8e5m2" }
+    if spec.fmt == QUANT_FMT_FP4      { name = name + "fp4" }
+    if spec.fmt == QUANT_FMT_FP16     { name = name + "fp16" }
+
+    if spec.granularity == QUANT_GRAN_PER_TENSOR  { name = name + "_tensor" }
+    if spec.granularity == QUANT_GRAN_PER_CHANNEL { name = name + "_chan" }
+    if spec.granularity == QUANT_GRAN_PER_TOKEN   { name = name + "_token" }
+    if spec.granularity == QUANT_GRAN_BLOCK_WISE  { name = name + "_block" }
+
+    name
+}
+
+// quant_emit_kernel_header
+// Emits .visible .entry header with standard parameters:
+//   input_ptr, output_ptr, scale_ptr, zero_point_ptr, n
+fn quant_emit_kernel_header(s: QuantPtxState, spec: QuantKernelSpec) -> QuantPtxState with Div {
+    var st = s
+
+    // PTX header
+    st = qps_push_str(st, ".version 8.0\n")
+    st = qps_push_str(st, ".target sm_")
+    st = qps_push_i64(st, spec.sm_version)
+    st = qps_push_str(st, "\n.address_size 64\n\n")
+
+    // Kernel signature
+    st = qps_push_str(st, ".visible .entry ")
+    st = qps_push_str(st, quant_kernel_name_str(spec))
+    st = qps_push_str(st, "(\n")
+    st = qps_push_str(st, "    .param .u64 input_ptr,\n")
+    st = qps_push_str(st, "    .param .u64 output_ptr,\n")
+    st = qps_push_str(st, "    .param .u64 scale_ptr,\n")
+    st = qps_push_str(st, "    .param .u64 zero_point_ptr,\n")
+    st = qps_push_str(st, "    .param .u64 n\n")
+    st = qps_push_str(st, ")\n")
+
+    st
+}
+
+// quant_emit_full_kernel
+// Emits the complete kernel:
+//   header + thread index + load + quantize/dequantize + store
+fn quant_emit_full_kernel(s: QuantPtxState, spec: QuantKernelSpec) -> QuantPtxState with Div {
+    var st = s
+
+    // Header
+    st = quant_emit_kernel_header(st, spec)
+
+    // Open body + declare registers
+    st = qps_push_str(st, "{\n")
+    st = qps_push_str(st, "    .reg .pred %p<4>;\n")
+    st = qps_push_str(st, "    .reg .b32 %r<32>;\n")
+    st = qps_push_str(st, "    .reg .b64 %rd<8>;\n")
+    st = qps_push_str(st, "    .reg .f32 %f<16>;\n\n")
+
+    // Compute global thread ID: tid = blockIdx.x * blockDim.x + threadIdx.x
+    st = qps_push_str(st, "    // Compute global thread index\n")
+    st = qps_push_str(st, "    mov.u32 %r0, %ctaid.x;\n")
+    st = qps_push_str(st, "    mov.u32 %r1, %ntid.x;\n")
+    st = qps_push_str(st, "    mov.u32 %r2, %tid.x;\n")
+    st = qps_push_str(st, "    mad.lo.s32 %r3, %r0, %r1, %r2;\n")
+    st = qps_push_str(st, "    cvt.u64.u32 %rd0, %r3;           // tid as 64-bit\n\n")
+
+    // Load n and bounds check
+    st = qps_push_str(st, "    // Bounds check: if tid >= n, return\n")
+    st = qps_push_str(st, "    ld.param.u64 %rd1, [n];\n")
+    st = qps_push_str(st, "    setp.ge.u64 %p0, %rd0, %rd1;\n")
+    st = qps_push_str(st, "    @%p0 bra DONE;\n\n")
+
+    // Load input pointer and element
+    st = qps_push_str(st, "    // Load input element (f32)\n")
+    st = qps_push_str(st, "    ld.param.u64 %rd2, [input_ptr];\n")
+    st = qps_push_str(st, "    mul.wide.u32 %rd3, %r3, 4;\n")
+    st = qps_push_str(st, "    add.u64 %rd4, %rd2, %rd3;\n")
+    st = qps_push_str(st, "    ld.global.f32 %f0, [%rd4];\n\n")
+
+    // Load scale
+    st = qps_push_str(st, "    // Load scale\n")
+    st = qps_push_str(st, "    ld.param.u64 %rd5, [scale_ptr];\n")
+    st = qps_push_str(st, "    ld.global.f32 %f1, [%rd5];\n\n")
+
+    // Emit format-specific operation
+    if spec.op == QUANT_OP_QUANTIZE {
+        if spec.fmt == QUANT_FMT_INT8 {
+            st = qps_push_str(st, "    // INT8 quantize\n")
+            st = qps_push_str(st, "    ld.param.u64 %rd6, [zero_point_ptr];\n")
+            st = qps_push_str(st, "    ld.global.s32 %r4, [%rd6];\n")
+            st = qps_push_str(st, "    div.rn.f32 %f2, %f0, %f1;\n")
+            st = qps_push_str(st, "    cvt.rni.s32.f32 %r5, %f2;\n")
+            st = qps_push_str(st, "    add.s32 %r6, %r5, %r4;\n")
+            st = qps_push_str(st, "    max.s32 %r7, %r6, -128;\n")
+            st = qps_push_str(st, "    min.s32 %r8, %r7, 127;\n")
+            st = qps_push_str(st, "    ld.param.u64 %rd7, [output_ptr];\n")
+            st = qps_push_str(st, "    add.u64 %rd8, %rd7, %rd0;\n")
+            st = qps_push_str(st, "    st.global.s8 [%rd8], %r8;\n")
+        }
+        if spec.fmt == QUANT_FMT_FP8_E4M3 {
+            st = qps_push_str(st, "    // FP8 E4M3 quantize (sm_89+ native)\n")
+            st = qps_push_str(st, "    div.f32 %f2, %f0, %f1;\n")
+            st = qps_push_str(st, "    cvt.rni.f8x2e4m3.f32.rn %r4, %f2, %f2;\n")
+            st = qps_push_str(st, "    ld.param.u64 %rd6, [output_ptr];\n")
+            st = qps_push_str(st, "    add.u64 %rd7, %rd6, %rd0;\n")
+            st = qps_push_str(st, "    st.global.u8 [%rd7], %r4;\n")
+        }
+        if spec.fmt == QUANT_FMT_INT4 {
+            st = qps_push_str(st, "    // INT4 quantize + pack (two adjacent elements)\n")
+            st = qps_push_str(st, "    div.rn.f32 %f2, %f0, %f1;\n")
+            st = qps_push_str(st, "    cvt.rni.s32.f32 %r4, %f2;\n")
+            st = qps_push_str(st, "    max.s32 %r5, %r4, -8;\n")
+            st = qps_push_str(st, "    min.s32 %r6, %r5, 7;\n")
+            st = qps_push_str(st, "    and.b32 %r7, %r6, 0xF;\n")
+            st = qps_push_str(st, "    // second element packed in high nibble omitted (stride-2 variant)\n")
+        }
+    }
+    if spec.op == QUANT_OP_DEQUANTIZE {
+        st = qps_push_str(st, "    // INT8 dequantize\n")
+        st = qps_push_str(st, "    ld.param.u64 %rd6, [zero_point_ptr];\n")
+        st = qps_push_str(st, "    ld.global.s32 %r4, [%rd6];\n")
+        st = qps_push_str(st, "    ld.param.u64 %rd7, [input_ptr];\n")
+        st = qps_push_str(st, "    add.u64 %rd8, %rd7, %rd0;\n")
+        st = qps_push_str(st, "    ld.global.s8 %r5, [%rd8];\n")
+        st = qps_push_str(st, "    sub.s32 %r6, %r5, %r4;\n")
+        st = qps_push_str(st, "    cvt.f32.s32 %f2, %r6;\n")
+        st = qps_push_str(st, "    mul.f32 %f3, %f2, %f1;\n")
+        st = qps_push_str(st, "    ld.param.u64 %rd9, [output_ptr];\n")
+        st = qps_push_str(st, "    mul.wide.u32 %rd10, %r3, 4;\n")
+        st = qps_push_str(st, "    add.u64 %rd11, %rd9, %rd10;\n")
+        st = qps_push_str(st, "    st.global.f32 [%rd11], %f3;\n")
+    }
+    if spec.op == QUANT_OP_FAKE_QUANT {
+        st = qps_push_str(st, "    // Fake quantize: quantize then dequantize in f32\n")
+        st = qps_push_str(st, "    ld.param.u64 %rd6, [zero_point_ptr];\n")
+        st = qps_push_str(st, "    ld.global.s32 %r4, [%rd6];\n")
+        st = qps_push_str(st, "    div.rn.f32 %f2, %f0, %f1;\n")
+        st = qps_push_str(st, "    cvt.rni.s32.f32 %r5, %f2;\n")
+        st = qps_push_str(st, "    add.s32 %r6, %r5, %r4;\n")
+        st = qps_push_str(st, "    max.s32 %r7, %r6, -128;\n")
+        st = qps_push_str(st, "    min.s32 %r8, %r7, 127;\n")
+        st = qps_push_str(st, "    sub.s32 %r9, %r8, %r4;\n")
+        st = qps_push_str(st, "    cvt.f32.s32 %f3, %r9;\n")
+        st = qps_push_str(st, "    mul.f32 %f4, %f3, %f1;\n")
+        st = qps_push_str(st, "    ld.param.u64 %rd7, [output_ptr];\n")
+        st = qps_push_str(st, "    mul.wide.u32 %rd8, %r3, 4;\n")
+        st = qps_push_str(st, "    add.u64 %rd9, %rd7, %rd8;\n")
+        st = qps_push_str(st, "    st.global.f32 [%rd9], %f4;\n")
+    }
+
+    // Epilogue
+    st = qps_push_str(st, "\nDONE:\n")
+    st = qps_push_str(st, "    ret;\n")
+    st = qps_push_str(st, "}\n")
+
+    st
+}
+
+// quant_get_output — extract buffer and length from QuantPtxState
+fn quant_get_output(s: QuantPtxState) -> ([i8; 65536], i64) {
+    (s.buf, s.buf_len)
+}
+
+// ============================================================================
+// Quantization-aware training support
+// ============================================================================
+
+// quant_fake_quantize_range — straight-through estimator for training
+fn quant_fake_quantize_range(min_val: f32, max_val: f32, x: f32, fmt: i64) -> f32 with Div {
+    let q_mn: i64 = quant_fmt_q_min(fmt)
+    let q_mx: i64 = quant_fmt_q_max(fmt)
+    let sc: f32   = quant_compute_scale(min_val, max_val, q_mn, q_mx)
+    let zp: i64   = quant_compute_zero_point(min_val, sc, q_mn, q_mx)
+    quant_fake_quantize(x, sc, zp, q_mn, q_mx)
+}
+
+// quant_ste_gradient — STE: 1.0 if in range, else 0.0
+fn quant_ste_gradient(x: f32, min_val: f32, max_val: f32) -> f32 {
+    if x >= min_val && x <= max_val {
+        return 1.0
+    }
+    0.0
+}
+
+// quant_params_update_running — EMA update of min/max for dynamic quantization
+fn quant_params_update_running(old_params: QuantParams, new_min: f32, new_max: f32, momentum: f32) -> QuantParams with Div {
+    var out = old_params
+
+    // EMA: running = momentum * running + (1 - momentum) * new
+    let one_minus: f32 = 1.0 - momentum
+
+    out.min_val = momentum * out.min_val + one_minus * new_min
+    out.max_val = momentum * out.max_val + one_minus * new_max
+
+    // Recompute scale and zero_point from updated range
+    let sc: f32 = quant_compute_scale(out.min_val, out.max_val, out.q_min, out.q_max)
+    let zp: i64 = quant_compute_zero_point(out.min_val, sc, out.q_min, out.q_max)
+
+    out.scale       = sc
+    out.zero_point  = zp
+
+    out
+}

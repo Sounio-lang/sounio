@@ -1,0 +1,1560 @@
+// self-hosted::gpu::kernels::sparse_collective
+//
+// Sparse tensor operations and collective communication primitives for GPU.
+// Emits PTX text into a byte buffer (SparsePtxState) — pure, no GPU execution.
+//
+// Kernels covered:
+//   SpMV CSR  — Sparse Matrix-Vector Multiply, Compressed Sparse Row format
+//   SpMV ELL  — Sparse Matrix-Vector Multiply, ELLPACK format
+//   Warp reduce / prefix scan (add, max, min)
+//   Block reduce / broadcast / exclusive scan (via shared memory)
+//   allreduce kernel header (sum, max, min)
+//   exclusive scan kernel header
+//
+// Register convention: %f<N> for f32, %r<N> for i32/i64/ptr, %p<N> for predicates.
+// All helpers strictly precede callers — no forward references.
+
+// ============================================================================
+// Format and collective operation tag constants
+// ============================================================================
+
+let SPARSE_FMT_CSR: i64 = 0
+let SPARSE_FMT_ELL: i64 = 1
+let COLL_OP_SUM: i64 = 0
+let COLL_OP_MAX: i64 = 1
+let COLL_OP_MIN: i64 = 2
+
+// ============================================================================
+// Core state and descriptor types
+// ============================================================================
+
+struct SparsePtxState {
+    buf: [i8; 65536],
+    buf_len: i64,
+    reg_counter: i64,
+    pred_counter: i64,
+}
+
+struct CsrDescriptor {
+    rows: i64,
+    cols: i64,
+    nnz: i64,
+    row_ptr_reg: i64,
+    col_idx_reg: i64,
+    values_reg: i64,
+}
+
+struct EllDescriptor {
+    rows: i64,
+    cols: i64,
+    max_nnz_per_row: i64,
+    col_idx_reg: i64,
+    values_reg: i64,
+}
+
+// ============================================================================
+// Helper: write a decimal i64 into a fixed 32-byte buffer
+// Returns number of bytes written.
+// ============================================================================
+
+fn sps_i64_to_buf(v: i64, buf: &![i8; 32]) -> i64 with Div {
+    if v == 0 {
+        buf[0] = 48  // '0'
+        return 1
+    }
+    var digits: [i8; 20] = [0; 20]
+    var n: i64 = 0
+    var rem: i64 = v
+    if rem < 0 { rem = 0 - rem }
+    while rem > 0 {
+        let d: i64 = rem - (rem / 10) * 10
+        digits[n as usize] = (48 + d) as i8
+        rem = rem / 10
+        n = n + 1
+    }
+    var written: i64 = 0
+    if v < 0 {
+        buf[0] = 45  // '-'
+        written = 1
+    }
+    var i: i64 = n - 1
+    while i >= 0 {
+        buf[written as usize] = digits[i as usize]
+        written = written + 1
+        i = i - 1
+    }
+    written
+}
+
+// ============================================================================
+// Core PTX state helpers
+// ============================================================================
+
+fn sps_new() -> SparsePtxState {
+    SparsePtxState {
+        buf: [0; 65536],
+        buf_len: 0,
+        reg_counter: 0,
+        pred_counter: 0,
+    }
+}
+
+fn sps_append_byte(s: SparsePtxState, b: i8) -> SparsePtxState {
+    var out = s
+    if out.buf_len < 65536 {
+        out.buf[out.buf_len as usize] = b
+        out.buf_len = out.buf_len + 1
+    }
+    out
+}
+
+// Append up to len bytes from a fixed 64-byte literal buffer.
+fn sps_push_str_lit(s: SparsePtxState, lit: [i8; 64], len: i64) -> SparsePtxState {
+    var out = s
+    var i: i64 = 0
+    while i < len {
+        if out.buf_len < 65536 {
+            out.buf[out.buf_len as usize] = lit[i as usize]
+            out.buf_len = out.buf_len + 1
+        }
+        i = i + 1
+    }
+    out
+}
+
+// Push an i64 as decimal ASCII into the state buffer.
+fn sps_push_i64(s: SparsePtxState, v: i64) -> SparsePtxState with Div {
+    var tmp: [i8; 32] = [0; 32]
+    let len = sps_i64_to_buf(v, &!tmp)
+    var out = s
+    var i: i64 = 0
+    while i < len {
+        if out.buf_len < 65536 {
+            out.buf[out.buf_len as usize] = tmp[i as usize]
+            out.buf_len = out.buf_len + 1
+        }
+        i = i + 1
+    }
+    out
+}
+
+fn sps_nl(s: SparsePtxState) -> SparsePtxState {
+    sps_append_byte(s, 10)
+}
+
+fn sps_alloc_reg(s: SparsePtxState) -> (SparsePtxState, i64) {
+    var out = s
+    let idx = out.reg_counter
+    out.reg_counter = idx + 1
+    (out, idx)
+}
+
+fn sps_alloc_pred(s: SparsePtxState) -> (SparsePtxState, i64) {
+    var out = s
+    let idx = out.pred_counter
+    out.pred_counter = idx + 1
+    (out, idx)
+}
+
+// ============================================================================
+// Internal string push — uses VM string type for convenience
+// ============================================================================
+
+fn sps_push_str(s: SparsePtxState, text: string) -> SparsePtxState with Div {
+    var out = s
+    let n = str_len(text)
+    var i: i64 = 0
+    while i < n {
+        if out.buf_len < 65536 {
+            out.buf[out.buf_len as usize] = str_char_at(text, i) as i8
+            out.buf_len = out.buf_len + 1
+        }
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
+// PTX opcode emitters
+// All return updated SparsePtxState.
+// Convention: %f<N> = f32 regs, %r<N> = integer/ptr regs, %p<N> = predicates.
+// ============================================================================
+
+// "    ld.global.f32 %f<dst>, [%r<ptr>+<off>];\n"
+fn sps_emit_ld_global_f32(s: SparsePtxState, dst: i64, ptr: i64, off: i64) -> SparsePtxState with Div {
+    var out = s
+    out = sps_push_str(out, "    ld.global.f32 %f")
+    out = sps_push_i64(out, dst)
+    out = sps_push_str(out, ", [%r")
+    out = sps_push_i64(out, ptr)
+    out = sps_push_str(out, "+")
+    out = sps_push_i64(out, off)
+    out = sps_push_str(out, "];\n")
+    out
+}
+
+// "    ld.global.s32 %r<dst>, [%r<ptr>+<off>];\n"
+fn sps_emit_ld_global_s32(s: SparsePtxState, dst: i64, ptr: i64, off: i64) -> SparsePtxState with Div {
+    var out = s
+    out = sps_push_str(out, "    ld.global.s32 %r")
+    out = sps_push_i64(out, dst)
+    out = sps_push_str(out, ", [%r")
+    out = sps_push_i64(out, ptr)
+    out = sps_push_str(out, "+")
+    out = sps_push_i64(out, off)
+    out = sps_push_str(out, "];\n")
+    out
+}
+
+// "    st.global.f32 [%r<ptr>+<off>], %f<val>;\n"
+fn sps_emit_st_global_f32(s: SparsePtxState, ptr: i64, off: i64, val: i64) -> SparsePtxState with Div {
+    var out = s
+    out = sps_push_str(out, "    st.global.f32 [%r")
+    out = sps_push_i64(out, ptr)
+    out = sps_push_str(out, "+")
+    out = sps_push_i64(out, off)
+    out = sps_push_str(out, "], %f")
+    out = sps_push_i64(out, val)
+    out = sps_push_str(out, ";\n")
+    out
+}
+
+// "    fma.rn.f32 %f<dst>, %f<a>, %f<b>, %f<c>;\n"
+fn sps_emit_fma_f32(s: SparsePtxState, dst: i64, a: i64, b: i64, c: i64) -> SparsePtxState with Div {
+    var out = s
+    out = sps_push_str(out, "    fma.rn.f32 %f")
+    out = sps_push_i64(out, dst)
+    out = sps_push_str(out, ", %f")
+    out = sps_push_i64(out, a)
+    out = sps_push_str(out, ", %f")
+    out = sps_push_i64(out, b)
+    out = sps_push_str(out, ", %f")
+    out = sps_push_i64(out, c)
+    out = sps_push_str(out, ";\n")
+    out
+}
+
+// "    mov.f32 %f<dst>, 0f00000000;\n"
+fn sps_emit_mov_f32_zero(s: SparsePtxState, dst: i64) -> SparsePtxState with Div {
+    var out = s
+    out = sps_push_str(out, "    mov.f32 %f")
+    out = sps_push_i64(out, dst)
+    out = sps_push_str(out, ", 0f00000000;\n")
+    out
+}
+
+// "    add.s32 %r<dst>, %r<a>, %r<b>;\n"
+fn sps_emit_add_s32(s: SparsePtxState, dst: i64, a: i64, b: i64) -> SparsePtxState with Div {
+    var out = s
+    out = sps_push_str(out, "    add.s32 %r")
+    out = sps_push_i64(out, dst)
+    out = sps_push_str(out, ", %r")
+    out = sps_push_i64(out, a)
+    out = sps_push_str(out, ", %r")
+    out = sps_push_i64(out, b)
+    out = sps_push_str(out, ";\n")
+    out
+}
+
+// "    mul.lo.s32 %r<dst>, %r<a>, <imm>;\n"
+fn sps_emit_mul_s32_imm(s: SparsePtxState, dst: i64, a: i64, imm: i64) -> SparsePtxState with Div {
+    var out = s
+    out = sps_push_str(out, "    mul.lo.s32 %r")
+    out = sps_push_i64(out, dst)
+    out = sps_push_str(out, ", %r")
+    out = sps_push_i64(out, a)
+    out = sps_push_str(out, ", ")
+    out = sps_push_i64(out, imm)
+    out = sps_push_str(out, ";\n")
+    out
+}
+
+// "    setp.lt.s32 %p<pred>, %r<a>, %r<b>;\n"
+fn sps_emit_setp_lt_s32(s: SparsePtxState, pred: i64, a: i64, b: i64) -> SparsePtxState with Div {
+    var out = s
+    out = sps_push_str(out, "    setp.lt.s32 %p")
+    out = sps_push_i64(out, pred)
+    out = sps_push_str(out, ", %r")
+    out = sps_push_i64(out, a)
+    out = sps_push_str(out, ", %r")
+    out = sps_push_i64(out, b)
+    out = sps_push_str(out, ";\n")
+    out
+}
+
+// "    setp.ge.s32 %p<pred>, %r<a>, %r<b>;\n"
+fn sps_emit_setp_ge_s32(s: SparsePtxState, pred: i64, a: i64, b: i64) -> SparsePtxState with Div {
+    var out = s
+    out = sps_push_str(out, "    setp.ge.s32 %p")
+    out = sps_push_i64(out, pred)
+    out = sps_push_str(out, ", %r")
+    out = sps_push_i64(out, a)
+    out = sps_push_str(out, ", %r")
+    out = sps_push_i64(out, b)
+    out = sps_push_str(out, ";\n")
+    out
+}
+
+// "    @%p<pred> bra label_<label_id>;\n"
+fn sps_emit_cbr(s: SparsePtxState, pred: i64, label_id: i64) -> SparsePtxState with Div {
+    var out = s
+    out = sps_push_str(out, "    @%p")
+    out = sps_push_i64(out, pred)
+    out = sps_push_str(out, " bra label_")
+    out = sps_push_i64(out, label_id)
+    out = sps_push_str(out, ";\n")
+    out
+}
+
+// "    bra label_<label_id>;\n"
+fn sps_emit_br(s: SparsePtxState, label_id: i64) -> SparsePtxState with Div {
+    var out = s
+    out = sps_push_str(out, "    bra label_")
+    out = sps_push_i64(out, label_id)
+    out = sps_push_str(out, ";\n")
+    out
+}
+
+// "label_<label_id>:\n"
+fn sps_emit_label(s: SparsePtxState, label_id: i64) -> SparsePtxState with Div {
+    var out = s
+    out = sps_push_str(out, "label_")
+    out = sps_push_i64(out, label_id)
+    out = sps_push_str(out, ":\n")
+    out
+}
+
+// "    cvt.u64.u32 %r<dst>, %r<src>;\n"
+fn sps_emit_cvt_u64_u32(s: SparsePtxState, dst: i64, src: i64) -> SparsePtxState with Div {
+    var out = s
+    out = sps_push_str(out, "    cvt.u64.u32 %r")
+    out = sps_push_i64(out, dst)
+    out = sps_push_str(out, ", %r")
+    out = sps_push_i64(out, src)
+    out = sps_push_str(out, ";\n")
+    out
+}
+
+// "    mad.wide.u32 %r<dst>, %r<a>, <b_imm>, %r<c>;\n"
+fn sps_emit_mad_u64(s: SparsePtxState, dst: i64, a: i64, b_imm: i64, c: i64) -> SparsePtxState with Div {
+    var out = s
+    out = sps_push_str(out, "    mad.wide.u32 %r")
+    out = sps_push_i64(out, dst)
+    out = sps_push_str(out, ", %r")
+    out = sps_push_i64(out, a)
+    out = sps_push_str(out, ", ")
+    out = sps_push_i64(out, b_imm)
+    out = sps_push_str(out, ", %r")
+    out = sps_push_i64(out, c)
+    out = sps_push_str(out, ";\n")
+    out
+}
+
+// "    add.f32 %f<dst>, %f<a>, %f<b>;\n"
+fn sps_emit_add_f32(s: SparsePtxState, dst: i64, a: i64, b: i64) -> SparsePtxState with Div {
+    var out = s
+    out = sps_push_str(out, "    add.f32 %f")
+    out = sps_push_i64(out, dst)
+    out = sps_push_str(out, ", %f")
+    out = sps_push_i64(out, a)
+    out = sps_push_str(out, ", %f")
+    out = sps_push_i64(out, b)
+    out = sps_push_str(out, ";\n")
+    out
+}
+
+// "    max.f32 %f<dst>, %f<a>, %f<b>;\n"
+fn sps_emit_max_f32(s: SparsePtxState, dst: i64, a: i64, b: i64) -> SparsePtxState with Div {
+    var out = s
+    out = sps_push_str(out, "    max.f32 %f")
+    out = sps_push_i64(out, dst)
+    out = sps_push_str(out, ", %f")
+    out = sps_push_i64(out, a)
+    out = sps_push_str(out, ", %f")
+    out = sps_push_i64(out, b)
+    out = sps_push_str(out, ";\n")
+    out
+}
+
+// "    min.f32 %f<dst>, %f<a>, %f<b>;\n"
+fn sps_emit_min_f32(s: SparsePtxState, dst: i64, a: i64, b: i64) -> SparsePtxState with Div {
+    var out = s
+    out = sps_push_str(out, "    min.f32 %f")
+    out = sps_push_i64(out, dst)
+    out = sps_push_str(out, ", %f")
+    out = sps_push_i64(out, a)
+    out = sps_push_str(out, ", %f")
+    out = sps_push_i64(out, b)
+    out = sps_push_str(out, ";\n")
+    out
+}
+
+// "    shfl.sync.down.b32 %f<dst>, %f<src>, <offset>, 0xffffffff;\n"
+fn sps_emit_shfl_down_f32(s: SparsePtxState, dst: i64, src: i64, offset: i64) -> SparsePtxState with Div {
+    var out = s
+    out = sps_push_str(out, "    shfl.sync.down.b32 %f")
+    out = sps_push_i64(out, dst)
+    out = sps_push_str(out, ", %f")
+    out = sps_push_i64(out, src)
+    out = sps_push_str(out, ", ")
+    out = sps_push_i64(out, offset)
+    out = sps_push_str(out, ", 0xffffffff;\n")
+    out
+}
+
+// "    shfl.sync.up.b32 %f<dst>, %f<src>, <offset>, 0x0;\n"
+fn sps_emit_shfl_up_f32(s: SparsePtxState, dst: i64, src: i64, offset: i64) -> SparsePtxState with Div {
+    var out = s
+    out = sps_push_str(out, "    shfl.sync.up.b32 %f")
+    out = sps_push_i64(out, dst)
+    out = sps_push_str(out, ", %f")
+    out = sps_push_i64(out, src)
+    out = sps_push_str(out, ", ")
+    out = sps_push_i64(out, offset)
+    out = sps_push_str(out, ", 0x0;\n")
+    out
+}
+
+// "    bar.sync <id>;\n"
+fn sps_emit_bar_sync(s: SparsePtxState, id: i64) -> SparsePtxState with Div {
+    var out = s
+    out = sps_push_str(out, "    bar.sync ")
+    out = sps_push_i64(out, id)
+    out = sps_push_str(out, ";\n")
+    out
+}
+
+// "    atom.global.add.f32 %f<dst>, [%r<ptr>], %f<val>;\n"
+fn sps_emit_atom_add_f32(s: SparsePtxState, dst: i64, ptr: i64, val: i64) -> SparsePtxState with Div {
+    var out = s
+    out = sps_push_str(out, "    atom.global.add.f32 %f")
+    out = sps_push_i64(out, dst)
+    out = sps_push_str(out, ", [%r")
+    out = sps_push_i64(out, ptr)
+    out = sps_push_str(out, "], %f")
+    out = sps_push_i64(out, val)
+    out = sps_push_str(out, ";\n")
+    out
+}
+
+// "    st.shared.f32 [_smem+<offset>], %f<val>;\n"
+fn sps_emit_st_shared_f32(s: SparsePtxState, offset: i64, val: i64) -> SparsePtxState with Div {
+    var out = s
+    out = sps_push_str(out, "    st.shared.f32 [_smem+")
+    out = sps_push_i64(out, offset)
+    out = sps_push_str(out, "], %f")
+    out = sps_push_i64(out, val)
+    out = sps_push_str(out, ";\n")
+    out
+}
+
+// "    ld.shared.f32 %f<dst>, [_smem+<offset>];\n"
+fn sps_emit_ld_shared_f32(s: SparsePtxState, dst: i64, offset: i64) -> SparsePtxState with Div {
+    var out = s
+    out = sps_push_str(out, "    ld.shared.f32 %f")
+    out = sps_push_i64(out, dst)
+    out = sps_push_str(out, ", [_smem+")
+    out = sps_push_i64(out, offset)
+    out = sps_push_str(out, "];\n")
+    out
+}
+
+// ============================================================================
+// SpMV CSR kernel body
+// ============================================================================
+
+// Emits the .visible .entry header and register declarations.
+fn sps_emit_spmv_csr_kernel_header(s: SparsePtxState) -> SparsePtxState {
+    var out = s
+    out = sps_push_str(out, "\n.visible .entry sounio_spmv_csr(\n")
+    out = sps_push_str(out, "    .param .u64 row_ptr,\n")
+    out = sps_push_str(out, "    .param .u64 col_idx,\n")
+    out = sps_push_str(out, "    .param .u64 values,\n")
+    out = sps_push_str(out, "    .param .u64 x,\n")
+    out = sps_push_str(out, "    .param .u64 y,\n")
+    out = sps_push_str(out, "    .param .u32 nrows\n")
+    out = sps_push_str(out, ") {\n")
+    out = sps_push_str(out, "    .reg .u64 %rd<8>;\n")
+    out = sps_push_str(out, "    .reg .f32 %f<64>;\n")
+    out = sps_push_str(out, "    .reg .s32 %r<16>;\n")
+    out = sps_push_str(out, "    .reg .pred %p<8>;\n")
+    out
+}
+
+// Emit thread index computation:
+//   tid = blockIdx.x * blockDim.x + threadIdx.x
+// Returns (state, tid_reg, nrows_reg, bounds_pred).
+fn sps_emit_spmv_csr_thread_index(s: SparsePtxState) -> (SparsePtxState, i64, i64, i64) with Div {
+    var out = s
+
+    // Allocate registers
+    let r_bix = sps_alloc_reg(out)
+    out = r_bix.0
+    let bix_reg = r_bix.1
+
+    let r_bdx = sps_alloc_reg(out)
+    out = r_bdx.0
+    let bdx_reg = r_bdx.1
+
+    let r_tix = sps_alloc_reg(out)
+    out = r_tix.0
+    let tix_reg = r_tix.1
+
+    let r_tmp = sps_alloc_reg(out)
+    out = r_tmp.0
+    let tmp_reg = r_tmp.1
+
+    let r_tid = sps_alloc_reg(out)
+    out = r_tid.0
+    let tid_reg = r_tid.1
+
+    let r_nrows = sps_alloc_reg(out)
+    out = r_nrows.0
+    let nrows_reg = r_nrows.1
+
+    let p_bounds = sps_alloc_pred(out)
+    out = p_bounds.0
+    let bounds_pred = p_bounds.1
+
+    // Load special registers
+    out = sps_push_str(out, "    mov.u32 %r")
+    out = sps_push_i64(out, bix_reg)
+    out = sps_push_str(out, ", %ctaid.x;\n")
+
+    out = sps_push_str(out, "    mov.u32 %r")
+    out = sps_push_i64(out, bdx_reg)
+    out = sps_push_str(out, ", %ntid.x;\n")
+
+    out = sps_push_str(out, "    mov.u32 %r")
+    out = sps_push_i64(out, tix_reg)
+    out = sps_push_str(out, ", %tid.x;\n")
+
+    // tmp = blockIdx.x * blockDim.x
+    out = sps_emit_mul_s32_imm(out, tmp_reg, bix_reg, 0)
+    // Override: use actual register multiply (blockIdx * blockDim)
+    out = sps_push_str(out, "    mul.lo.s32 %r")
+    out = sps_push_i64(out, tmp_reg)
+    out = sps_push_str(out, ", %r")
+    out = sps_push_i64(out, bix_reg)
+    out = sps_push_str(out, ", %r")
+    out = sps_push_i64(out, bdx_reg)
+    out = sps_push_str(out, ";\n")
+
+    // tid = tmp + threadIdx.x
+    out = sps_emit_add_s32(out, tid_reg, tmp_reg, tix_reg)
+
+    // Load nrows from param
+    out = sps_push_str(out, "    ld.param.u32 %r")
+    out = sps_push_i64(out, nrows_reg)
+    out = sps_push_str(out, ", [nrows];\n")
+
+    // bounds check: p_bounds = (tid < nrows)
+    out = sps_emit_setp_lt_s32(out, bounds_pred, tid_reg, nrows_reg)
+
+    (out, tid_reg, nrows_reg, bounds_pred)
+}
+
+// Emits the CSR row-iteration loop for SpMV.
+// Loads row_ptr[tid] and row_ptr[tid+1], accumulates dot product, stores to y[tid].
+fn sps_emit_spmv_csr_row_loop(
+    s: SparsePtxState,
+    csr: CsrDescriptor,
+    tid_reg: i64,
+    x_ptr_reg: i64,
+    y_ptr_reg: i64
+) -> SparsePtxState with Div {
+    var out = s
+
+    // Allocate working registers
+    let r_rstart = sps_alloc_reg(out)
+    out = r_rstart.0
+    let rstart = r_rstart.1
+
+    let r_rend = sps_alloc_reg(out)
+    out = r_rend.0
+    let rend = r_rend.1
+
+    let r_acc = sps_alloc_reg(out)
+    out = r_acc.0
+    let acc = r_acc.1
+
+    let r_j = sps_alloc_reg(out)
+    out = r_j.0
+    let j_reg = r_j.1
+
+    let r_col = sps_alloc_reg(out)
+    out = r_col.0
+    let col_reg = r_col.1
+
+    let r_val = sps_alloc_reg(out)
+    out = r_val.0
+    let val_reg = r_val.1
+
+    let r_xj = sps_alloc_reg(out)
+    out = r_xj.0
+    let xj_reg = r_xj.1
+
+    let r_tid1 = sps_alloc_reg(out)
+    out = r_tid1.0
+    let tid1_reg = r_tid1.1
+
+    let r_rptr_off = sps_alloc_reg(out)
+    out = r_rptr_off.0
+    let rptr_off = r_rptr_off.1
+
+    let r_cidx_off = sps_alloc_reg(out)
+    out = r_cidx_off.0
+    let cidx_off = r_cidx_off.1
+
+    let r_vals_off = sps_alloc_reg(out)
+    out = r_vals_off.0
+    let vals_off = r_vals_off.1
+
+    let r_xcol_off = sps_alloc_reg(out)
+    out = r_xcol_off.0
+    let xcol_off = r_xcol_off.1
+
+    let p_loop = sps_alloc_pred(out)
+    out = p_loop.0
+    let loop_pred = p_loop.1
+
+    // label ids: 100 = LOOP, 101 = EXIT
+    let loop_lbl: i64 = 100
+    let exit_lbl: i64 = 101
+
+    // tid+1 for row_ptr[tid+1]
+    let one_reg = sps_alloc_reg(out)
+    out = one_reg.0
+    let one = one_reg.1
+    out = sps_push_str(out, "    mov.s32 %r")
+    out = sps_push_i64(out, one)
+    out = sps_push_str(out, ", 1;\n")
+    out = sps_emit_add_s32(out, tid1_reg, tid_reg, one)
+
+    // row_ptr byte offset = tid * 4 (s32 = 4 bytes)
+    out = sps_emit_mul_s32_imm(out, rptr_off, tid_reg, 4)
+    out = sps_emit_ld_global_s32(out, rstart, csr.row_ptr_reg, 0)
+    // actually use byte-addressed: rstart = row_ptr[tid] → offset rptr_off
+    // Re-emit with correct offset register usage: use ptr + byte offset
+    out = sps_push_str(out, "    // row_start = row_ptr[tid]\n")
+    out = sps_push_str(out, "    mad.wide.s32 %r")
+    out = sps_push_i64(out, rptr_off)
+    out = sps_push_str(out, ", %r")
+    out = sps_push_i64(out, tid_reg)
+    out = sps_push_str(out, ", 4, %r")
+    out = sps_push_i64(out, csr.row_ptr_reg)
+    out = sps_push_str(out, ";\n")
+    out = sps_push_str(out, "    ld.global.s32 %r")
+    out = sps_push_i64(out, rstart)
+    out = sps_push_str(out, ", [%r")
+    out = sps_push_i64(out, rptr_off)
+    out = sps_push_str(out, "];\n")
+
+    // row_end = row_ptr[tid+1]
+    let r_rptr_off2 = sps_alloc_reg(out)
+    out = r_rptr_off2.0
+    let rptr_off2 = r_rptr_off2.1
+    out = sps_push_str(out, "    // row_end = row_ptr[tid+1]\n")
+    out = sps_push_str(out, "    mad.wide.s32 %r")
+    out = sps_push_i64(out, rptr_off2)
+    out = sps_push_str(out, ", %r")
+    out = sps_push_i64(out, tid1_reg)
+    out = sps_push_str(out, ", 4, %r")
+    out = sps_push_i64(out, csr.row_ptr_reg)
+    out = sps_push_str(out, ";\n")
+    out = sps_push_str(out, "    ld.global.s32 %r")
+    out = sps_push_i64(out, rend)
+    out = sps_push_str(out, ", [%r")
+    out = sps_push_i64(out, rptr_off2)
+    out = sps_push_str(out, "];\n")
+
+    // acc = 0.0
+    out = sps_emit_mov_f32_zero(out, acc)
+
+    // j = row_start
+    out = sps_push_str(out, "    mov.s32 %r")
+    out = sps_push_i64(out, j_reg)
+    out = sps_push_str(out, ", %r")
+    out = sps_push_i64(out, rstart)
+    out = sps_push_str(out, ";\n")
+
+    // LOOP:
+    out = sps_emit_label(out, loop_lbl)
+
+    // if j >= row_end: goto EXIT
+    out = sps_emit_setp_ge_s32(out, loop_pred, j_reg, rend)
+    out = sps_emit_cbr(out, loop_pred, exit_lbl)
+
+    // col = col_idx[j * 4]
+    out = sps_push_str(out, "    // col = col_idx[j]\n")
+    out = sps_push_str(out, "    mad.wide.s32 %r")
+    out = sps_push_i64(out, cidx_off)
+    out = sps_push_str(out, ", %r")
+    out = sps_push_i64(out, j_reg)
+    out = sps_push_str(out, ", 4, %r")
+    out = sps_push_i64(out, csr.col_idx_reg)
+    out = sps_push_str(out, ";\n")
+    out = sps_push_str(out, "    ld.global.s32 %r")
+    out = sps_push_i64(out, col_reg)
+    out = sps_push_str(out, ", [%r")
+    out = sps_push_i64(out, cidx_off)
+    out = sps_push_str(out, "];\n")
+
+    // val = values[j * 4]
+    out = sps_push_str(out, "    // val = values[j]\n")
+    out = sps_push_str(out, "    mad.wide.s32 %r")
+    out = sps_push_i64(out, vals_off)
+    out = sps_push_str(out, ", %r")
+    out = sps_push_i64(out, j_reg)
+    out = sps_push_str(out, ", 4, %r")
+    out = sps_push_i64(out, csr.values_reg)
+    out = sps_push_str(out, ";\n")
+    out = sps_push_str(out, "    ld.global.f32 %f")
+    out = sps_push_i64(out, val_reg)
+    out = sps_push_str(out, ", [%r")
+    out = sps_push_i64(out, vals_off)
+    out = sps_push_str(out, "];\n")
+
+    // x_j = x[col * 4]
+    out = sps_push_str(out, "    // x_j = x[col]\n")
+    out = sps_push_str(out, "    mad.wide.s32 %r")
+    out = sps_push_i64(out, xcol_off)
+    out = sps_push_str(out, ", %r")
+    out = sps_push_i64(out, col_reg)
+    out = sps_push_str(out, ", 4, %r")
+    out = sps_push_i64(out, x_ptr_reg)
+    out = sps_push_str(out, ";\n")
+    out = sps_push_str(out, "    ld.global.f32 %f")
+    out = sps_push_i64(out, xj_reg)
+    out = sps_push_str(out, ", [%r")
+    out = sps_push_i64(out, xcol_off)
+    out = sps_push_str(out, "];\n")
+
+    // acc = fma(val, x_j, acc)
+    out = sps_emit_fma_f32(out, acc, val_reg, xj_reg, acc)
+
+    // j++
+    let r_one2 = sps_alloc_reg(out)
+    out = r_one2.0
+    let one2 = r_one2.1
+    out = sps_push_str(out, "    mov.s32 %r")
+    out = sps_push_i64(out, one2)
+    out = sps_push_str(out, ", 1;\n")
+    out = sps_emit_add_s32(out, j_reg, j_reg, one2)
+
+    // goto LOOP
+    out = sps_emit_br(out, loop_lbl)
+
+    // EXIT:
+    out = sps_emit_label(out, exit_lbl)
+
+    // y[tid] = acc
+    out = sps_push_str(out, "    // y[tid] = acc\n")
+    out = sps_push_str(out, "    mad.wide.s32 %r")
+    out = sps_push_i64(out, xcol_off)
+    out = sps_push_str(out, ", %r")
+    out = sps_push_i64(out, tid_reg)
+    out = sps_push_str(out, ", 4, %r")
+    out = sps_push_i64(out, y_ptr_reg)
+    out = sps_push_str(out, ";\n")
+    out = sps_push_str(out, "    st.global.f32 [%r")
+    out = sps_push_i64(out, xcol_off)
+    out = sps_push_str(out, "], %f")
+    out = sps_push_i64(out, acc)
+    out = sps_push_str(out, ";\n")
+
+    out
+}
+
+// ============================================================================
+// SpMV ELL kernel body
+// ============================================================================
+
+fn sps_emit_spmv_ell_kernel_header(s: SparsePtxState) -> SparsePtxState {
+    var out = s
+    out = sps_push_str(out, "\n.visible .entry sounio_spmv_ell(\n")
+    out = sps_push_str(out, "    .param .u64 col_idx,\n")
+    out = sps_push_str(out, "    .param .u64 values,\n")
+    out = sps_push_str(out, "    .param .u64 x,\n")
+    out = sps_push_str(out, "    .param .u64 y,\n")
+    out = sps_push_str(out, "    .param .u32 nrows,\n")
+    out = sps_push_str(out, "    .param .u32 max_nnz_per_row\n")
+    out = sps_push_str(out, ") {\n")
+    out = sps_push_str(out, "    .reg .u64 %rd<8>;\n")
+    out = sps_push_str(out, "    .reg .f32 %f<64>;\n")
+    out = sps_push_str(out, "    .reg .s32 %r<16>;\n")
+    out = sps_push_str(out, "    .reg .pred %p<8>;\n")
+    out
+}
+
+// ELLPACK SpMV row body.
+// ELL layout (column-major): col_idx[tid + j * rows], values[tid + j * rows].
+// Padding marker: col < 0 → skip.
+fn sps_emit_spmv_ell_row_body(
+    s: SparsePtxState,
+    ell: EllDescriptor,
+    tid_reg: i64,
+    x_ptr_reg: i64,
+    y_ptr_reg: i64
+) -> SparsePtxState with Div {
+    var out = s
+
+    // Working registers
+    let r_acc = sps_alloc_reg(out)
+    out = r_acc.0
+    let acc = r_acc.1
+
+    let r_j = sps_alloc_reg(out)
+    out = r_j.0
+    let j_reg = r_j.1
+
+    let r_maxnnz = sps_alloc_reg(out)
+    out = r_maxnnz.0
+    let maxnnz_reg = r_maxnnz.1
+
+    let r_stride = sps_alloc_reg(out)
+    out = r_stride.0
+    let stride_reg = r_stride.1
+
+    let r_ell_idx = sps_alloc_reg(out)
+    out = r_ell_idx.0
+    let ell_idx = r_ell_idx.1
+
+    let r_byte_off = sps_alloc_reg(out)
+    out = r_byte_off.0
+    let byte_off = r_byte_off.1
+
+    let r_col = sps_alloc_reg(out)
+    out = r_col.0
+    let col_reg = r_col.1
+
+    let r_val = sps_alloc_reg(out)
+    out = r_val.0
+    let val_reg = r_val.1
+
+    let r_xj = sps_alloc_reg(out)
+    out = r_xj.0
+    let xj_reg = r_xj.1
+
+    let r_xcol_off = sps_alloc_reg(out)
+    out = r_xcol_off.0
+    let xcol_off = r_xcol_off.1
+
+    let p_skip = sps_alloc_pred(out)
+    out = p_skip.0
+    let skip_pred = p_skip.1
+
+    let p_loop_end = sps_alloc_pred(out)
+    out = p_loop_end.0
+    let loop_end_pred = p_loop_end.1
+
+    let r_zero_s = sps_alloc_reg(out)
+    out = r_zero_s.0
+    let zero_s = r_zero_s.1
+
+    // label ids: 200 = ELL_LOOP, 201 = ELL_SKIP, 202 = ELL_EXIT
+    let ell_loop_lbl: i64 = 200
+    let ell_skip_lbl: i64 = 201
+    let ell_exit_lbl: i64 = 202
+
+    // acc = 0.0
+    out = sps_emit_mov_f32_zero(out, acc)
+
+    // j = 0
+    out = sps_push_str(out, "    mov.s32 %r")
+    out = sps_push_i64(out, j_reg)
+    out = sps_push_str(out, ", 0;\n")
+
+    // zero_s = 0 (for setp comparison with col)
+    out = sps_push_str(out, "    mov.s32 %r")
+    out = sps_push_i64(out, zero_s)
+    out = sps_push_str(out, ", 0;\n")
+
+    // maxnnz = ell.max_nnz_per_row (load from param or use constant)
+    out = sps_push_str(out, "    ld.param.u32 %r")
+    out = sps_push_i64(out, maxnnz_reg)
+    out = sps_push_str(out, ", [max_nnz_per_row];\n")
+
+    // stride = nrows (rows count for column-major ELL indexing)
+    out = sps_push_str(out, "    ld.param.u32 %r")
+    out = sps_push_i64(out, stride_reg)
+    out = sps_push_str(out, ", [nrows];\n")
+
+    // ELL_LOOP:
+    out = sps_emit_label(out, ell_loop_lbl)
+
+    // if j >= max_nnz_per_row: goto ELL_EXIT
+    out = sps_emit_setp_ge_s32(out, loop_end_pred, j_reg, maxnnz_reg)
+    out = sps_emit_cbr(out, loop_end_pred, ell_exit_lbl)
+
+    // ell_idx = tid + j * rows  (column-major)
+    out = sps_push_str(out, "    // ell_idx = tid + j * nrows\n")
+    out = sps_push_str(out, "    mad.lo.s32 %r")
+    out = sps_push_i64(out, ell_idx)
+    out = sps_push_str(out, ", %r")
+    out = sps_push_i64(out, j_reg)
+    out = sps_push_str(out, ", %r")
+    out = sps_push_i64(out, stride_reg)
+    out = sps_push_str(out, ", %r")
+    out = sps_push_i64(out, tid_reg)
+    out = sps_push_str(out, ";\n")
+
+    // byte_off = ell_idx * 4
+    out = sps_emit_mul_s32_imm(out, byte_off, ell_idx, 4)
+
+    // col = col_idx[ell_idx]
+    out = sps_push_str(out, "    // col = col_idx[ell_idx]\n")
+    out = sps_push_str(out, "    mad.wide.s32 %r")
+    out = sps_push_i64(out, byte_off)
+    out = sps_push_str(out, ", %r")
+    out = sps_push_i64(out, ell_idx)
+    out = sps_push_str(out, ", 4, %r")
+    out = sps_push_i64(out, ell.col_idx_reg)
+    out = sps_push_str(out, ";\n")
+    out = sps_push_str(out, "    ld.global.s32 %r")
+    out = sps_push_i64(out, col_reg)
+    out = sps_push_str(out, ", [%r")
+    out = sps_push_i64(out, byte_off)
+    out = sps_push_str(out, "];\n")
+
+    // if col < 0 (padding): goto ELL_SKIP
+    out = sps_emit_setp_lt_s32(out, skip_pred, col_reg, zero_s)
+    out = sps_emit_cbr(out, skip_pred, ell_skip_lbl)
+
+    // val = values[ell_idx]
+    out = sps_push_str(out, "    // val = values[ell_idx]\n")
+    out = sps_push_str(out, "    mad.wide.s32 %r")
+    out = sps_push_i64(out, byte_off)
+    out = sps_push_str(out, ", %r")
+    out = sps_push_i64(out, ell_idx)
+    out = sps_push_str(out, ", 4, %r")
+    out = sps_push_i64(out, ell.values_reg)
+    out = sps_push_str(out, ";\n")
+    out = sps_push_str(out, "    ld.global.f32 %f")
+    out = sps_push_i64(out, val_reg)
+    out = sps_push_str(out, ", [%r")
+    out = sps_push_i64(out, byte_off)
+    out = sps_push_str(out, "];\n")
+
+    // x_j = x[col]
+    out = sps_push_str(out, "    // x_j = x[col]\n")
+    out = sps_push_str(out, "    mad.wide.s32 %r")
+    out = sps_push_i64(out, xcol_off)
+    out = sps_push_str(out, ", %r")
+    out = sps_push_i64(out, col_reg)
+    out = sps_push_str(out, ", 4, %r")
+    out = sps_push_i64(out, x_ptr_reg)
+    out = sps_push_str(out, ";\n")
+    out = sps_push_str(out, "    ld.global.f32 %f")
+    out = sps_push_i64(out, xj_reg)
+    out = sps_push_str(out, ", [%r")
+    out = sps_push_i64(out, xcol_off)
+    out = sps_push_str(out, "];\n")
+
+    // acc = fma(val, x_j, acc)
+    out = sps_emit_fma_f32(out, acc, val_reg, xj_reg, acc)
+
+    // ELL_SKIP:
+    out = sps_emit_label(out, ell_skip_lbl)
+
+    // j++
+    let r_one3 = sps_alloc_reg(out)
+    out = r_one3.0
+    let one3 = r_one3.1
+    out = sps_push_str(out, "    mov.s32 %r")
+    out = sps_push_i64(out, one3)
+    out = sps_push_str(out, ", 1;\n")
+    out = sps_emit_add_s32(out, j_reg, j_reg, one3)
+
+    // goto ELL_LOOP
+    out = sps_emit_br(out, ell_loop_lbl)
+
+    // ELL_EXIT:
+    out = sps_emit_label(out, ell_exit_lbl)
+
+    // y[tid] = acc
+    out = sps_push_str(out, "    // y[tid] = acc\n")
+    out = sps_push_str(out, "    mad.wide.s32 %r")
+    out = sps_push_i64(out, xcol_off)
+    out = sps_push_str(out, ", %r")
+    out = sps_push_i64(out, tid_reg)
+    out = sps_push_str(out, ", 4, %r")
+    out = sps_push_i64(out, y_ptr_reg)
+    out = sps_push_str(out, ";\n")
+    out = sps_push_str(out, "    st.global.f32 [%r")
+    out = sps_push_i64(out, xcol_off)
+    out = sps_push_str(out, "], %f")
+    out = sps_push_i64(out, acc)
+    out = sps_push_str(out, ";\n")
+
+    out
+}
+
+// ============================================================================
+// Warp-level collectives
+// ============================================================================
+
+// Internal: emit a single warp-reduce step using shfl.sync.down.
+// Combine result with op (COLL_OP_SUM / MAX / MIN).
+fn sps_emit_warp_reduce_step(s: SparsePtxState, acc: i64, tmp: i64, offset: i64, op: i64) -> SparsePtxState with Div {
+    var out = s
+    out = sps_emit_shfl_down_f32(out, tmp, acc, offset)
+    if op == COLL_OP_SUM {
+        out = sps_emit_add_f32(out, acc, acc, tmp)
+    }
+    if op == COLL_OP_MAX {
+        out = sps_emit_max_f32(out, acc, acc, tmp)
+    }
+    if op == COLL_OP_MIN {
+        out = sps_emit_min_f32(out, acc, acc, tmp)
+    }
+    out
+}
+
+// 5-stage binary tree warp reduction (offsets 16, 8, 4, 2, 1).
+// Returns (state, result_reg) — result lives in a fresh allocated register.
+fn sps_emit_warp_reduce_f32(s: SparsePtxState, val: i64, op: i64) -> (SparsePtxState, i64) with Div {
+    var out = s
+
+    // Allocate accumulator (copy of val) and temp
+    let r_acc = sps_alloc_reg(out)
+    out = r_acc.0
+    let acc = r_acc.1
+
+    let r_tmp = sps_alloc_reg(out)
+    out = r_tmp.0
+    let tmp = r_tmp.1
+
+    // Copy val → acc
+    out = sps_push_str(out, "    mov.f32 %f")
+    out = sps_push_i64(out, acc)
+    out = sps_push_str(out, ", %f")
+    out = sps_push_i64(out, val)
+    out = sps_push_str(out, ";\n")
+
+    // 5 reduction stages
+    out = sps_emit_warp_reduce_step(out, acc, tmp, 16, op)
+    out = sps_emit_warp_reduce_step(out, acc, tmp, 8, op)
+    out = sps_emit_warp_reduce_step(out, acc, tmp, 4, op)
+    out = sps_emit_warp_reduce_step(out, acc, tmp, 2, op)
+    out = sps_emit_warp_reduce_step(out, acc, tmp, 1, op)
+
+    (out, acc)
+}
+
+// Inclusive prefix sum via shfl.sync.up (5 stages: offsets 1, 2, 4, 8, 16).
+// if lane >= offset: acc += shfl.up(acc, offset)
+// Returns (state, result_reg).
+fn sps_emit_warp_prefix_sum_f32(s: SparsePtxState, val: i64) -> (SparsePtxState, i64) with Div {
+    var out = s
+
+    let r_acc = sps_alloc_reg(out)
+    out = r_acc.0
+    let acc = r_acc.1
+
+    let r_tmp = sps_alloc_reg(out)
+    out = r_tmp.0
+    let tmp = r_tmp.1
+
+    let r_lane = sps_alloc_reg(out)
+    out = r_lane.0
+    let lane_reg = r_lane.1
+
+    let p_cond = sps_alloc_pred(out)
+    out = p_cond.0
+    let cond_pred = p_cond.1
+
+    // Copy val → acc
+    out = sps_push_str(out, "    mov.f32 %f")
+    out = sps_push_i64(out, acc)
+    out = sps_push_str(out, ", %f")
+    out = sps_push_i64(out, val)
+    out = sps_push_str(out, ";\n")
+
+    // lane = threadIdx.x & 31
+    out = sps_push_str(out, "    mov.u32 %r")
+    out = sps_push_i64(out, lane_reg)
+    out = sps_push_str(out, ", %tid.x;\n")
+    out = sps_push_str(out, "    and.b32 %r")
+    out = sps_push_i64(out, lane_reg)
+    out = sps_push_str(out, ", %r")
+    out = sps_push_i64(out, lane_reg)
+    out = sps_push_str(out, ", 31;\n")
+
+    // Stage 1: offset = 1
+    let r_off1 = sps_alloc_reg(out)
+    out = r_off1.0
+    let off1 = r_off1.1
+    out = sps_push_str(out, "    mov.s32 %r")
+    out = sps_push_i64(out, off1)
+    out = sps_push_str(out, ", 1;\n")
+    out = sps_push_str(out, "    shfl.sync.up.b32 %f")
+    out = sps_push_i64(out, tmp)
+    out = sps_push_str(out, ", %f")
+    out = sps_push_i64(out, acc)
+    out = sps_push_str(out, ", 1, 0x0;\n")
+    out = sps_emit_setp_ge_s32(out, cond_pred, lane_reg, off1)
+    out = sps_push_str(out, "    @%p")
+    out = sps_push_i64(out, cond_pred)
+    out = sps_push_str(out, " add.f32 %f")
+    out = sps_push_i64(out, acc)
+    out = sps_push_str(out, ", %f")
+    out = sps_push_i64(out, acc)
+    out = sps_push_str(out, ", %f")
+    out = sps_push_i64(out, tmp)
+    out = sps_push_str(out, ";\n")
+
+    // Stage 2: offset = 2
+    let r_off2 = sps_alloc_reg(out)
+    out = r_off2.0
+    let off2 = r_off2.1
+    out = sps_push_str(out, "    mov.s32 %r")
+    out = sps_push_i64(out, off2)
+    out = sps_push_str(out, ", 2;\n")
+    out = sps_push_str(out, "    shfl.sync.up.b32 %f")
+    out = sps_push_i64(out, tmp)
+    out = sps_push_str(out, ", %f")
+    out = sps_push_i64(out, acc)
+    out = sps_push_str(out, ", 2, 0x0;\n")
+    out = sps_emit_setp_ge_s32(out, cond_pred, lane_reg, off2)
+    out = sps_push_str(out, "    @%p")
+    out = sps_push_i64(out, cond_pred)
+    out = sps_push_str(out, " add.f32 %f")
+    out = sps_push_i64(out, acc)
+    out = sps_push_str(out, ", %f")
+    out = sps_push_i64(out, acc)
+    out = sps_push_str(out, ", %f")
+    out = sps_push_i64(out, tmp)
+    out = sps_push_str(out, ";\n")
+
+    // Stage 3: offset = 4
+    let r_off3 = sps_alloc_reg(out)
+    out = r_off3.0
+    let off3 = r_off3.1
+    out = sps_push_str(out, "    mov.s32 %r")
+    out = sps_push_i64(out, off3)
+    out = sps_push_str(out, ", 4;\n")
+    out = sps_push_str(out, "    shfl.sync.up.b32 %f")
+    out = sps_push_i64(out, tmp)
+    out = sps_push_str(out, ", %f")
+    out = sps_push_i64(out, acc)
+    out = sps_push_str(out, ", 4, 0x0;\n")
+    out = sps_emit_setp_ge_s32(out, cond_pred, lane_reg, off3)
+    out = sps_push_str(out, "    @%p")
+    out = sps_push_i64(out, cond_pred)
+    out = sps_push_str(out, " add.f32 %f")
+    out = sps_push_i64(out, acc)
+    out = sps_push_str(out, ", %f")
+    out = sps_push_i64(out, acc)
+    out = sps_push_str(out, ", %f")
+    out = sps_push_i64(out, tmp)
+    out = sps_push_str(out, ";\n")
+
+    // Stage 4: offset = 8
+    let r_off4 = sps_alloc_reg(out)
+    out = r_off4.0
+    let off4 = r_off4.1
+    out = sps_push_str(out, "    mov.s32 %r")
+    out = sps_push_i64(out, off4)
+    out = sps_push_str(out, ", 8;\n")
+    out = sps_push_str(out, "    shfl.sync.up.b32 %f")
+    out = sps_push_i64(out, tmp)
+    out = sps_push_str(out, ", %f")
+    out = sps_push_i64(out, acc)
+    out = sps_push_str(out, ", 8, 0x0;\n")
+    out = sps_emit_setp_ge_s32(out, cond_pred, lane_reg, off4)
+    out = sps_push_str(out, "    @%p")
+    out = sps_push_i64(out, cond_pred)
+    out = sps_push_str(out, " add.f32 %f")
+    out = sps_push_i64(out, acc)
+    out = sps_push_str(out, ", %f")
+    out = sps_push_i64(out, acc)
+    out = sps_push_str(out, ", %f")
+    out = sps_push_i64(out, tmp)
+    out = sps_push_str(out, ";\n")
+
+    // Stage 5: offset = 16
+    let r_off5 = sps_alloc_reg(out)
+    out = r_off5.0
+    let off5 = r_off5.1
+    out = sps_push_str(out, "    mov.s32 %r")
+    out = sps_push_i64(out, off5)
+    out = sps_push_str(out, ", 16;\n")
+    out = sps_push_str(out, "    shfl.sync.up.b32 %f")
+    out = sps_push_i64(out, tmp)
+    out = sps_push_str(out, ", %f")
+    out = sps_push_i64(out, acc)
+    out = sps_push_str(out, ", 16, 0x0;\n")
+    out = sps_emit_setp_ge_s32(out, cond_pred, lane_reg, off5)
+    out = sps_push_str(out, "    @%p")
+    out = sps_push_i64(out, cond_pred)
+    out = sps_push_str(out, " add.f32 %f")
+    out = sps_push_i64(out, acc)
+    out = sps_push_str(out, ", %f")
+    out = sps_push_i64(out, acc)
+    out = sps_push_str(out, ", %f")
+    out = sps_push_i64(out, tmp)
+    out = sps_push_str(out, ";\n")
+
+    (out, acc)
+}
+
+// ============================================================================
+// Block-level collectives (via shared memory)
+// ============================================================================
+
+// Block reduce:
+//   Phase 1: each warp does a warp-reduce → warp leaders write to smem[warp_id * 4]
+//   Phase 2: bar.sync 0
+//   Phase 3: first warp loads smem values and reduces again
+// Returns (state, result_reg) — valid only in thread 0 of the block.
+fn sps_emit_block_reduce_f32(s: SparsePtxState, val: i64, smem_off: i64, block_size: i64, op: i64) -> (SparsePtxState, i64) with Div {
+    var out = s
+
+    // Phase 1: warp-level reduce
+    let warp_r = sps_emit_warp_reduce_f32(out, val, op)
+    out = warp_r.0
+    let warp_acc = warp_r.1
+
+    // Compute warp_id = threadIdx.x / 32 and lane_id = threadIdx.x & 31
+    let r_lane = sps_alloc_reg(out)
+    out = r_lane.0
+    let lane_reg = r_lane.1
+
+    let r_wid = sps_alloc_reg(out)
+    out = r_wid.0
+    let wid_reg = r_wid.1
+
+    let r_smem_wid = sps_alloc_reg(out)
+    out = r_smem_wid.0
+    let smem_wid = r_smem_wid.1
+
+    let p_lane0 = sps_alloc_pred(out)
+    out = p_lane0.0
+    let lane0_pred = p_lane0.1
+
+    out = sps_push_str(out, "    mov.u32 %r")
+    out = sps_push_i64(out, lane_reg)
+    out = sps_push_str(out, ", %tid.x;\n")
+    out = sps_push_str(out, "    and.b32 %r")
+    out = sps_push_i64(out, lane_reg)
+    out = sps_push_str(out, ", %r")
+    out = sps_push_i64(out, lane_reg)
+    out = sps_push_str(out, ", 31;\n")
+
+    out = sps_push_str(out, "    mov.u32 %r")
+    out = sps_push_i64(out, wid_reg)
+    out = sps_push_str(out, ", %tid.x;\n")
+    out = sps_push_str(out, "    shr.u32 %r")
+    out = sps_push_i64(out, wid_reg)
+    out = sps_push_str(out, ", %r")
+    out = sps_push_i64(out, wid_reg)
+    out = sps_push_str(out, ", 5;\n")
+
+    // smem byte offset for this warp: smem_off + warp_id * 4
+    out = sps_push_str(out, "    mad.lo.s32 %r")
+    out = sps_push_i64(out, smem_wid)
+    out = sps_push_str(out, ", %r")
+    out = sps_push_i64(out, wid_reg)
+    out = sps_push_str(out, ", 4, ")
+    out = sps_push_i64(out, smem_off)
+    out = sps_push_str(out, ";\n")
+
+    // Only lane 0 of each warp stores to smem
+    out = sps_push_str(out, "    setp.eq.s32 %p")
+    out = sps_push_i64(out, lane0_pred)
+    out = sps_push_str(out, ", %r")
+    out = sps_push_i64(out, lane_reg)
+    out = sps_push_str(out, ", 0;\n")
+
+    out = sps_push_str(out, "    @%p")
+    out = sps_push_i64(out, lane0_pred)
+    out = sps_push_str(out, " st.shared.f32 [_smem+")
+    out = sps_push_i64(out, smem_off)
+    out = sps_push_str(out, "], %f")
+    out = sps_push_i64(out, warp_acc)
+    out = sps_push_str(out, ";\n")
+
+    // Phase 2: bar.sync
+    out = sps_emit_bar_sync(out, 0)
+
+    // Phase 3: first warp loads from smem and reduces again
+    // Number of warps = block_size / 32
+    let num_warps: i64 = block_size / 32
+    let r_final_acc = sps_alloc_reg(out)
+    out = r_final_acc.0
+    let final_acc = r_final_acc.1
+
+    let r_smem_val = sps_alloc_reg(out)
+    out = r_smem_val.0
+    let smem_val = r_smem_val.1
+
+    // Thread 0 loads smem[0]
+    out = sps_push_str(out, "    // thread 0 reduces warp results\n")
+    out = sps_push_str(out, "    setp.eq.s32 %p")
+    out = sps_push_i64(out, lane0_pred)
+    out = sps_push_str(out, ", %tid.x, 0;\n")
+
+    out = sps_push_str(out, "    ld.shared.f32 %f")
+    out = sps_push_i64(out, final_acc)
+    out = sps_push_str(out, ", [_smem+")
+    out = sps_push_i64(out, smem_off)
+    out = sps_push_str(out, "];\n")
+
+    // Sequentially reduce remaining warp values (num_warps - 1 iterations)
+    var wi: i64 = 1
+    while wi < num_warps {
+        let byte_i: i64 = smem_off + wi * 4
+        out = sps_push_str(out, "    ld.shared.f32 %f")
+        out = sps_push_i64(out, smem_val)
+        out = sps_push_str(out, ", [_smem+")
+        out = sps_push_i64(out, byte_i)
+        out = sps_push_str(out, "];\n")
+        if op == COLL_OP_SUM {
+            out = sps_emit_add_f32(out, final_acc, final_acc, smem_val)
+        }
+        if op == COLL_OP_MAX {
+            out = sps_emit_max_f32(out, final_acc, final_acc, smem_val)
+        }
+        if op == COLL_OP_MIN {
+            out = sps_emit_min_f32(out, final_acc, final_acc, smem_val)
+        }
+        wi = wi + 1
+    }
+
+    (out, final_acc)
+}
+
+// Block broadcast: thread 0 writes val to smem[smem_off], bar.sync, all read.
+// Returns (state, result_reg).
+fn sps_emit_block_broadcast_f32(s: SparsePtxState, val: i64, smem_off: i64) -> (SparsePtxState, i64) with Div {
+    var out = s
+
+    let p_is_t0 = sps_alloc_pred(out)
+    out = p_is_t0.0
+    let is_t0 = p_is_t0.1
+
+    let r_result = sps_alloc_reg(out)
+    out = r_result.0
+    let result = r_result.1
+
+    // Thread 0 writes to smem
+    out = sps_push_str(out, "    setp.eq.u32 %p")
+    out = sps_push_i64(out, is_t0)
+    out = sps_push_str(out, ", %tid.x, 0;\n")
+
+    out = sps_push_str(out, "    @%p")
+    out = sps_push_i64(out, is_t0)
+    out = sps_push_str(out, " st.shared.f32 [_smem+")
+    out = sps_push_i64(out, smem_off)
+    out = sps_push_str(out, "], %f")
+    out = sps_push_i64(out, val)
+    out = sps_push_str(out, ";\n")
+
+    // Synchronize
+    out = sps_emit_bar_sync(out, 0)
+
+    // All threads load from smem
+    out = sps_emit_ld_shared_f32(out, result, smem_off)
+
+    (out, result)
+}
+
+// Block-level exclusive prefix scan via Hillis-Steele algorithm (shared memory).
+// log2(block_size) passes; each pass: write smem, bar.sync, read smem[tid-stride], add.
+// Returns (state, result_reg) — contains inclusive scan result for this thread.
+fn sps_emit_block_exclusive_scan_f32(s: SparsePtxState, val: i64, smem_off: i64, block_size: i64) -> (SparsePtxState, i64) with Div {
+    var out = s
+
+    let r_acc = sps_alloc_reg(out)
+    out = r_acc.0
+    let acc = r_acc.1
+
+    let r_tmp = sps_alloc_reg(out)
+    out = r_tmp.0
+    let tmp = r_tmp.1
+
+    let r_tid = sps_alloc_reg(out)
+    out = r_tid.0
+    let tid_reg = r_tid.1
+
+    let r_check = sps_alloc_reg(out)
+    out = r_check.0
+    let check_reg = r_check.1
+
+    let p_cond = sps_alloc_pred(out)
+    out = p_cond.0
+    let cond_pred = p_cond.1
+
+    // Initialize acc = val
+    out = sps_push_str(out, "    mov.f32 %f")
+    out = sps_push_i64(out, acc)
+    out = sps_push_str(out, ", %f")
+    out = sps_push_i64(out, val)
+    out = sps_push_str(out, ";\n")
+
+    // tid_reg = threadIdx.x
+    out = sps_push_str(out, "    mov.u32 %r")
+    out = sps_push_i64(out, tid_reg)
+    out = sps_push_str(out, ", %tid.x;\n")
+
+    // Hillis-Steele: log2(block_size) passes
+    var stride: i64 = 1
+    var pass_lbl: i64 = 300
+    while stride < block_size {
+        // Write current acc to smem[smem_off + tid * 4]
+        out = sps_push_str(out, "    // scan pass stride=")
+        out = sps_push_i64(out, stride)
+        out = sps_push_str(out, "\n")
+        out = sps_push_str(out, "    mad.lo.s32 %r")
+        out = sps_push_i64(out, check_reg)
+        out = sps_push_str(out, ", %r")
+        out = sps_push_i64(out, tid_reg)
+        out = sps_push_str(out, ", 4, ")
+        out = sps_push_i64(out, smem_off)
+        out = sps_push_str(out, ";\n")
+        out = sps_push_str(out, "    st.shared.f32 [_smem+")
+        out = sps_push_i64(out, smem_off)
+        out = sps_push_str(out, "], %f")
+        out = sps_push_i64(out, acc)
+        out = sps_push_str(out, "; // write current\n")
+
+        out = sps_emit_bar_sync(out, 0)
+
+        // If tid >= stride: tmp = smem[smem_off + (tid - stride) * 4]; acc += tmp
+        out = sps_push_str(out, "    mov.s32 %r")
+        out = sps_push_i64(out, check_reg)
+        out = sps_push_str(out, ", ")
+        out = sps_push_i64(out, stride)
+        out = sps_push_str(out, ";\n")
+        out = sps_emit_setp_ge_s32(out, cond_pred, tid_reg, check_reg)
+
+        // Compute smem address for (tid - stride)
+        let r_back_off = sps_alloc_reg(out)
+        out = r_back_off.0
+        let back_off = r_back_off.1
+        out = sps_push_str(out, "    sub.s32 %r")
+        out = sps_push_i64(out, back_off)
+        out = sps_push_str(out, ", %r")
+        out = sps_push_i64(out, tid_reg)
+        out = sps_push_str(out, ", ")
+        out = sps_push_i64(out, stride)
+        out = sps_push_str(out, ";\n")
+        out = sps_push_str(out, "    mad.lo.s32 %r")
+        out = sps_push_i64(out, back_off)
+        out = sps_push_str(out, ", %r")
+        out = sps_push_i64(out, back_off)
+        out = sps_push_str(out, ", 4, ")
+        out = sps_push_i64(out, smem_off)
+        out = sps_push_str(out, ";\n")
+
+        out = sps_push_str(out, "    @%p")
+        out = sps_push_i64(out, cond_pred)
+        out = sps_push_str(out, " ld.shared.f32 %f")
+        out = sps_push_i64(out, tmp)
+        out = sps_push_str(out, ", [_smem+")
+        out = sps_push_i64(out, smem_off)
+        out = sps_push_str(out, "];\n")
+
+        out = sps_push_str(out, "    @%p")
+        out = sps_push_i64(out, cond_pred)
+        out = sps_push_str(out, " add.f32 %f")
+        out = sps_push_i64(out, acc)
+        out = sps_push_str(out, ", %f")
+        out = sps_push_i64(out, acc)
+        out = sps_push_str(out, ", %f")
+        out = sps_push_i64(out, tmp)
+        out = sps_push_str(out, ";\n")
+
+        out = sps_emit_bar_sync(out, 0)
+
+        stride = stride * 2
+        pass_lbl = pass_lbl + 1
+    }
+
+    (out, acc)
+}
+
+// ============================================================================
+// Full kernel headers: allreduce and prefix scan
+// ============================================================================
+
+// Emits allreduce kernel header for op (SUM/MAX/MIN).
+// Kernel name: sounio_allreduce_sum / sounio_allreduce_max / sounio_allreduce_min
+fn sps_emit_allreduce_kernel_header(s: SparsePtxState, op: i64) -> SparsePtxState {
+    var out = s
+    out = sps_push_str(out, "\n.visible .entry sounio_allreduce_")
+    if op == COLL_OP_SUM {
+        out = sps_push_str(out, "sum")
+    }
+    if op == COLL_OP_MAX {
+        out = sps_push_str(out, "max")
+    }
+    if op == COLL_OP_MIN {
+        out = sps_push_str(out, "min")
+    }
+    out = sps_push_str(out, "(\n")
+    out = sps_push_str(out, "    .param .u64 data,\n")
+    out = sps_push_str(out, "    .param .u32 count\n")
+    out = sps_push_str(out, ") {\n")
+    out = sps_push_str(out, "    .reg .u64 %rd<4>;\n")
+    out = sps_push_str(out, "    .reg .f32 %f<32>;\n")
+    out = sps_push_str(out, "    .reg .s32 %r<16>;\n")
+    out = sps_push_str(out, "    .reg .pred %p<8>;\n")
+    out = sps_push_str(out, "    .shared .align 4 .b8 _smem[512];\n")
+    out
+}
+
+// Emits exclusive prefix scan kernel header.
+fn sps_emit_prefix_scan_kernel_header(s: SparsePtxState) -> SparsePtxState {
+    var out = s
+    out = sps_push_str(out, "\n.visible .entry sounio_exclusive_scan(\n")
+    out = sps_push_str(out, "    .param .u64 input,\n")
+    out = sps_push_str(out, "    .param .u64 output,\n")
+    out = sps_push_str(out, "    .param .u32 count\n")
+    out = sps_push_str(out, ") {\n")
+    out = sps_push_str(out, "    .reg .u64 %rd<4>;\n")
+    out = sps_push_str(out, "    .reg .f32 %f<32>;\n")
+    out = sps_push_str(out, "    .reg .s32 %r<16>;\n")
+    out = sps_push_str(out, "    .reg .pred %p<8>;\n")
+    out = sps_push_str(out, "    .shared .align 4 .b8 _smem[4096];\n")
+    out
+}
+
+// ============================================================================
+// Output extraction and descriptor constructors
+// ============================================================================
+
+// Extract the buffer and its length from a SparsePtxState.
+fn sps_get_output(s: SparsePtxState) -> ([i8; 65536], i64) {
+    (s.buf, s.buf_len)
+}
+
+// Construct a CSR descriptor.
+fn csr_descriptor_new(rows: i64, cols: i64, nnz: i64, rp: i64, ci: i64, vals: i64) -> CsrDescriptor {
+    CsrDescriptor {
+        rows: rows,
+        cols: cols,
+        nnz: nnz,
+        row_ptr_reg: rp,
+        col_idx_reg: ci,
+        values_reg: vals,
+    }
+}
+
+// Construct an ELL descriptor.
+fn ell_descriptor_new(rows: i64, cols: i64, max_nnz: i64, ci: i64, vals: i64) -> EllDescriptor {
+    EllDescriptor {
+        rows: rows,
+        cols: cols,
+        max_nnz_per_row: max_nnz,
+        col_idx_reg: ci,
+        values_reg: vals,
+    }
+}
+
+// Average non-zeros per row for a CSR matrix; used for ELL padding budget.
+fn csr_nnz_per_row_avg(nnz: i64, rows: i64) -> f32 with Div {
+    if rows == 0 { return 0.0 }
+    (nnz as f32) / (rows as f32)
+}

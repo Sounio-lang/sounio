@@ -1,0 +1,1732 @@
+// self-hosted::gpu::opt::async_pipeline — Async memory pipelining for GpuKernelIr
+//
+// Phase 4C implementation:
+// - Pipeline stages for double/triple buffering
+// - Async op dependency graph (TMA / cp.async families)
+// - Barrier pool allocation and schedule construction
+// - PTX emission helpers for prologue/main/epilogue pipeline code
+//
+// This module targets deterministic fixed-capacity data structures suitable for
+// self-hosted compilation.
+
+// ============================================================================
+// Limits and tags
+// ============================================================================
+
+let GPU_ASYNC_MAX_STAGES: i64 = 8
+let GPU_ASYNC_MAX_STAGE_BUFFERS: i64 = 16
+let GPU_ASYNC_MAX_STAGE_OPS: i64 = 128
+let GPU_ASYNC_MAX_OPS: i64 = 512
+let GPU_ASYNC_MAX_DEPS: i64 = 16
+let GPU_ASYNC_MAX_BARRIERS: i64 = 64
+let GPU_ASYNC_MAX_SCHEDULE_OPS: i64 = 1024
+let GPU_ASYNC_MAX_BUFFER_CONFIGS: i64 = 16
+let GPU_ASYNC_MAX_KERNELS: i64 = 64
+
+let GPU_ASYNC_KIND_TMA_LOAD: i64 = 0
+let GPU_ASYNC_KIND_TMA_STORE: i64 = 1
+let GPU_ASYNC_KIND_TMA_MULTICAST: i64 = 2
+let GPU_ASYNC_KIND_TMA_REDUCE: i64 = 3
+let GPU_ASYNC_KIND_CP_ASYNC: i64 = 4
+let GPU_ASYNC_KIND_CP_COMMIT: i64 = 5
+let GPU_ASYNC_KIND_CP_WAIT: i64 = 6
+
+let GPU_ASYNC_REDUCE_ADD: i64 = 0
+let GPU_ASYNC_REDUCE_MIN: i64 = 1
+let GPU_ASYNC_REDUCE_MAX: i64 = 2
+let GPU_ASYNC_REDUCE_AND: i64 = 3
+let GPU_ASYNC_REDUCE_OR: i64 = 4
+let GPU_ASYNC_REDUCE_XOR: i64 = 5
+
+let GPU_BARRIER_MBAR: i64 = 0
+let GPU_BARRIER_CP_GROUP: i64 = 1
+let GPU_BARRIER_NAMED: i64 = 2
+
+let GPU_SCHED_ASYNC_LOAD: i64 = 0
+let GPU_SCHED_ASYNC_STORE: i64 = 1
+let GPU_SCHED_COMPUTE_SLICE: i64 = 2
+let GPU_SCHED_BARRIER_ARRIVE: i64 = 3
+let GPU_SCHED_BARRIER_WAIT: i64 = 4
+let GPU_SCHED_ADVANCE_PHASE: i64 = 5
+let GPU_SCHED_SYNC_THREADS: i64 = 6
+let GPU_SCHED_CP_COMMIT_GROUP: i64 = 7
+let GPU_SCHED_CP_WAIT: i64 = 8
+
+// ============================================================================
+// IDs and naming
+// ============================================================================
+
+struct GpuStageId {
+    value: i64,
+}
+
+fn gpu_stage_id_new(v: i64) -> GpuStageId {
+    GpuStageId { value: v }
+}
+
+struct GpuBarrierId {
+    value: i64,
+}
+
+fn gpu_barrier_id_new(v: i64) -> GpuBarrierId {
+    GpuBarrierId { value: v }
+}
+
+struct GpuAsyncOpId {
+    value: i64,
+}
+
+fn gpu_async_op_id_new(v: i64) -> GpuAsyncOpId {
+    GpuAsyncOpId { value: v }
+}
+
+fn gpu_async_i64_to_string(n: i64) -> string with Mut, Panic, Div, Alloc {
+    if n < 0 {
+        return "0"
+    }
+    if n == 0 {
+        return "0"
+    }
+
+    var digits: [i8; 32] = [0; 32]
+    var rev_len: i64 = 0
+    var value: i64 = n
+
+    while value > 0 {
+        let digit = value % 10
+        digits[rev_len as usize] = (48 + digit) as i8
+        rev_len = rev_len + 1
+        value = value / 10
+    }
+
+    var bytes: [i8; 32] = [0; 32]
+    var i: i64 = 0
+    while i < rev_len {
+        bytes[i as usize] = digits[(rev_len - i - 1) as usize]
+        i = i + 1
+    }
+
+    str_from_bytes(bytes, rev_len)
+}
+
+fn gpu_async_stage_name(id: GpuStageId) -> string with Mut, Panic, Div, Alloc {
+    str_concat("stage", gpu_async_i64_to_string(id.value))
+}
+
+fn gpu_async_barrier_name(id: GpuBarrierId) -> string with Mut, Panic, Div, Alloc {
+    str_concat("mbar", gpu_async_i64_to_string(id.value))
+}
+
+// ============================================================================
+// Core pipeline data model
+// ============================================================================
+
+struct GpuStageBuffer {
+    name: string,
+    size_bytes: i64,
+    element_type: GpuType,
+    buffer_index: i64,
+}
+
+fn gpu_stage_buffer_new() -> GpuStageBuffer {
+    GpuStageBuffer {
+        name: "",
+        size_bytes: 0,
+        element_type: GpuType::GpuF32,
+        buffer_index: 0,
+    }
+}
+
+fn gpu_stage_buffer_make(name: string, size_bytes: i64, ty: GpuType, index: i64) -> GpuStageBuffer {
+    GpuStageBuffer {
+        name: name,
+        size_bytes: size_bytes,
+        element_type: ty,
+        buffer_index: index,
+    }
+}
+
+struct GpuPipelineStage {
+    id: GpuStageId,
+    buffers: [GpuStageBuffer; 16],
+    buffer_count: i64,
+    async_ops: [GpuAsyncOpId; 128],
+    async_op_count: i64,
+    entry_barrier: i64,
+    exit_barrier: i64,
+}
+
+fn gpu_pipeline_stage_new(id: GpuStageId) -> GpuPipelineStage {
+    GpuPipelineStage {
+        id: id,
+        buffers: [gpu_stage_buffer_new(); 16],
+        buffer_count: 0,
+        async_ops: [gpu_async_op_id_new(-1); 128],
+        async_op_count: 0,
+        entry_barrier: -1,
+        exit_barrier: -1,
+    }
+}
+
+fn gpu_pipeline_stage_add_buffer(stage: GpuPipelineStage, buf: GpuStageBuffer) -> GpuPipelineStage with Mut {
+    var out = stage
+    if out.buffer_count < GPU_ASYNC_MAX_STAGE_BUFFERS {
+        out.buffers[out.buffer_count as usize] = buf
+        out.buffer_count = out.buffer_count + 1
+    }
+    out
+}
+
+fn gpu_pipeline_stage_add_async_op(stage: GpuPipelineStage, op_id: GpuAsyncOpId) -> GpuPipelineStage with Mut {
+    var out = stage
+    if out.async_op_count < GPU_ASYNC_MAX_STAGE_OPS {
+        out.async_ops[out.async_op_count as usize] = op_id
+        out.async_op_count = out.async_op_count + 1
+    }
+    out
+}
+
+fn gpu_pipeline_stage_total_buffer_size(stage: GpuPipelineStage) -> i64 {
+    var total: i64 = 0
+    var i: i64 = 0
+    while i < stage.buffer_count {
+        total = total + stage.buffers[i as usize].size_bytes
+        i = i + 1
+    }
+    total
+}
+
+struct GpuAsyncOp {
+    id: GpuAsyncOpId,
+    kind: i64,
+    stage: GpuStageId,
+    src_reg: i64,
+    dst_reg: i64,
+    size_bytes: i64,
+    multicast_mask: i64,
+    reduce_op: i64,
+    wait_count: i64,
+    depends_on: [GpuAsyncOpId; 16],
+    dep_count: i64,
+    blocks: [GpuAsyncOpId; 16],
+    block_count: i64,
+}
+
+fn gpu_async_op_new() -> GpuAsyncOp {
+    GpuAsyncOp {
+        id: gpu_async_op_id_new(-1),
+        kind: GPU_ASYNC_KIND_CP_ASYNC,
+        stage: gpu_stage_id_new(0),
+        src_reg: -1,
+        dst_reg: -1,
+        size_bytes: 0,
+        multicast_mask: 0,
+        reduce_op: GPU_ASYNC_REDUCE_ADD,
+        wait_count: 0,
+        depends_on: [gpu_async_op_id_new(-1); 16],
+        dep_count: 0,
+        blocks: [gpu_async_op_id_new(-1); 16],
+        block_count: 0,
+    }
+}
+
+fn gpu_async_op_make(id: GpuAsyncOpId, kind: i64, stage: GpuStageId) -> GpuAsyncOp {
+    var out = gpu_async_op_new()
+    out.id = id
+    out.kind = kind
+    out.stage = stage
+    out
+}
+
+fn gpu_async_op_add_dep(op: GpuAsyncOp, dep: GpuAsyncOpId) -> GpuAsyncOp with Mut {
+    var out = op
+    if out.dep_count < GPU_ASYNC_MAX_DEPS {
+        var exists: bool = false
+        var i: i64 = 0
+        while i < out.dep_count {
+            if out.depends_on[i as usize].value == dep.value {
+                exists = true
+                break
+            }
+            i = i + 1
+        }
+        if !exists {
+            out.depends_on[out.dep_count as usize] = dep
+            out.dep_count = out.dep_count + 1
+        }
+    }
+    out
+}
+
+fn gpu_async_op_add_blocks(op: GpuAsyncOp, blocked: GpuAsyncOpId) -> GpuAsyncOp with Mut {
+    var out = op
+    if out.block_count < GPU_ASYNC_MAX_DEPS {
+        var exists: bool = false
+        var i: i64 = 0
+        while i < out.block_count {
+            if out.blocks[i as usize].value == blocked.value {
+                exists = true
+                break
+            }
+            i = i + 1
+        }
+        if !exists {
+            out.blocks[out.block_count as usize] = blocked
+            out.block_count = out.block_count + 1
+        }
+    }
+    out
+}
+
+fn gpu_async_op_is_load(kind: i64) -> bool {
+    kind == GPU_ASYNC_KIND_TMA_LOAD ||
+    kind == GPU_ASYNC_KIND_TMA_MULTICAST ||
+    kind == GPU_ASYNC_KIND_CP_ASYNC
+}
+
+fn gpu_async_op_is_store(kind: i64) -> bool {
+    kind == GPU_ASYNC_KIND_TMA_STORE ||
+    kind == GPU_ASYNC_KIND_TMA_REDUCE
+}
+
+fn gpu_async_op_is_sync(kind: i64) -> bool {
+    kind == GPU_ASYNC_KIND_CP_COMMIT ||
+    kind == GPU_ASYNC_KIND_CP_WAIT
+}
+
+fn gpu_async_op_requires_tma(kind: i64) -> bool {
+    kind == GPU_ASYNC_KIND_TMA_LOAD ||
+    kind == GPU_ASYNC_KIND_TMA_STORE ||
+    kind == GPU_ASYNC_KIND_TMA_MULTICAST ||
+    kind == GPU_ASYNC_KIND_TMA_REDUCE
+}
+
+struct GpuAsyncOpGraph {
+    ops: [GpuAsyncOp; 512],
+    op_count: i64,
+    ready_queue: [GpuAsyncOpId; 512],
+    ready_count: i64,
+    id_keys: [i64; 512],
+    id_values: [i64; 512],
+    map_count: i64,
+}
+
+fn gpu_async_graph_new() -> GpuAsyncOpGraph {
+    GpuAsyncOpGraph {
+        ops: [gpu_async_op_new(); 512],
+        op_count: 0,
+        ready_queue: [gpu_async_op_id_new(-1); 512],
+        ready_count: 0,
+        id_keys: [-1; 512],
+        id_values: [-1; 512],
+        map_count: 0,
+    }
+}
+
+fn gpu_async_graph_find_index(graph: GpuAsyncOpGraph, id: GpuAsyncOpId) -> i64 {
+    var i: i64 = 0
+    while i < graph.map_count {
+        if graph.id_keys[i as usize] == id.value {
+            return graph.id_values[i as usize]
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn gpu_async_graph_add_op(graph: GpuAsyncOpGraph, op: GpuAsyncOp) -> GpuAsyncOpGraph with Mut {
+    var out = graph
+    if out.op_count < GPU_ASYNC_MAX_OPS {
+        out.ops[out.op_count as usize] = op
+        if out.map_count < GPU_ASYNC_MAX_OPS {
+            out.id_keys[out.map_count as usize] = op.id.value
+            out.id_values[out.map_count as usize] = out.op_count
+            out.map_count = out.map_count + 1
+        }
+        out.op_count = out.op_count + 1
+    }
+    out
+}
+
+fn gpu_async_graph_get_op(graph: GpuAsyncOpGraph, id: GpuAsyncOpId) -> (GpuAsyncOp, bool) {
+    let idx = gpu_async_graph_find_index(graph, id)
+    if idx < 0 || idx >= graph.op_count {
+        (gpu_async_op_new(), false)
+    } else {
+        (graph.ops[idx as usize], true)
+    }
+}
+
+fn gpu_async_graph_set_op(graph: GpuAsyncOpGraph, op: GpuAsyncOp) -> GpuAsyncOpGraph with Mut {
+    var out = graph
+    let idx = gpu_async_graph_find_index(out, op.id)
+    if idx >= 0 && idx < out.op_count {
+        out.ops[idx as usize] = op
+    }
+    out
+}
+
+fn gpu_async_graph_add_dependency(graph: GpuAsyncOpGraph, from: GpuAsyncOpId, to: GpuAsyncOpId) -> GpuAsyncOpGraph with Mut {
+    var out = graph
+
+    let op_to = gpu_async_graph_get_op(out, to)
+    if op_to.1 {
+        let updated = gpu_async_op_add_dep(op_to.0, from)
+        out = gpu_async_graph_set_op(out, updated)
+    }
+
+    let op_from = gpu_async_graph_get_op(out, from)
+    if op_from.1 {
+        let updated = gpu_async_op_add_blocks(op_from.0, to)
+        out = gpu_async_graph_set_op(out, updated)
+    }
+
+    out
+}
+
+fn gpu_async_graph_find_roots(graph: GpuAsyncOpGraph) -> ([GpuAsyncOpId; 512], i64) with Mut {
+    var roots: [GpuAsyncOpId; 512] = [gpu_async_op_id_new(-1); 512]
+    var count: i64 = 0
+
+    var i: i64 = 0
+    while i < graph.op_count {
+        let op = graph.ops[i as usize]
+        if op.dep_count == 0 {
+            roots[count as usize] = op.id
+            count = count + 1
+        }
+        i = i + 1
+    }
+
+    (roots, count)
+}
+
+fn gpu_async_graph_topo_sort(graph: GpuAsyncOpGraph) -> ([GpuAsyncOpId; 512], i64) with Mut, Panic, Div {
+    var result: [GpuAsyncOpId; 512] = [gpu_async_op_id_new(-1); 512]
+    var result_count: i64 = 0
+
+    var in_degree: [i64; 512] = [0; 512]
+    var queue: [GpuAsyncOpId; 512] = [gpu_async_op_id_new(-1); 512]
+    var q_head: i64 = 0
+    var q_tail: i64 = 0
+
+    var i: i64 = 0
+    while i < graph.op_count {
+        in_degree[i as usize] = graph.ops[i as usize].dep_count
+        if in_degree[i as usize] == 0 {
+            queue[q_tail as usize] = graph.ops[i as usize].id
+            q_tail = q_tail + 1
+        }
+        i = i + 1
+    }
+
+    while q_head < q_tail {
+        let id = queue[q_head as usize]
+        q_head = q_head + 1
+
+        if result_count < GPU_ASYNC_MAX_OPS {
+            result[result_count as usize] = id
+            result_count = result_count + 1
+        }
+
+        let op_pair = gpu_async_graph_get_op(graph, id)
+        if op_pair.1 {
+            let op = op_pair.0
+            var bi: i64 = 0
+            while bi < op.block_count {
+                let blocked = op.blocks[bi as usize]
+                let bidx = gpu_async_graph_find_index(graph, blocked)
+                if bidx >= 0 {
+                    if in_degree[bidx as usize] > 0 {
+                        in_degree[bidx as usize] = in_degree[bidx as usize] - 1
+                        if in_degree[bidx as usize] == 0 {
+                            queue[q_tail as usize] = blocked
+                            q_tail = q_tail + 1
+                        }
+                    }
+                }
+                bi = bi + 1
+            }
+        }
+    }
+
+    (result, result_count)
+}
+
+// ============================================================================
+// Barriers and architecture helpers
+// ============================================================================
+
+struct GpuBarrier {
+    id: GpuBarrierId,
+    kind: i64,
+    arrive_count: i64,
+    phase: i64,
+    name: string,
+}
+
+fn gpu_barrier_new() -> GpuBarrier {
+    GpuBarrier {
+        id: gpu_barrier_id_new(-1),
+        kind: GPU_BARRIER_NAMED,
+        arrive_count: 32,
+        phase: 0,
+        name: "",
+    }
+}
+
+fn gpu_barrier_make(id: GpuBarrierId, kind: i64, arrive_count: i64) -> GpuBarrier with Mut, Panic, Div, Alloc {
+    GpuBarrier {
+        id: id,
+        kind: kind,
+        arrive_count: arrive_count,
+        phase: 0,
+        name: gpu_async_barrier_name(id),
+    }
+}
+
+fn gpu_barrier_advance_phase(barrier: GpuBarrier) -> GpuBarrier with Mut {
+    var out = barrier
+    out.phase = (out.phase + 1) % 2
+    out
+}
+
+fn gpu_barrier_parity(barrier: GpuBarrier) -> i64 {
+    barrier.phase % 2
+}
+
+struct GpuBarrierPool {
+    barriers: [GpuBarrier; 64],
+    barrier_count: i64,
+    next_id: i64,
+    max_barriers: i64,
+}
+
+fn gpu_barrier_pool_new(sm_major: i64, sm_minor: i64) -> GpuBarrierPool {
+    let sm = sm_major * 10 + sm_minor
+    let maxb = if sm >= 90 { 32 } else { 16 }
+    GpuBarrierPool {
+        barriers: [gpu_barrier_new(); 64],
+        barrier_count: 0,
+        next_id: 0,
+        max_barriers: maxb,
+    }
+}
+
+fn gpu_barrier_pool_allocate(pool: GpuBarrierPool, kind: i64, arrive_count: i64) -> (GpuBarrierPool, GpuBarrierId, bool) with Mut, Panic, Div, Alloc {
+    var out = pool
+    if out.barrier_count >= out.max_barriers || out.barrier_count >= GPU_ASYNC_MAX_BARRIERS {
+        return (out, gpu_barrier_id_new(-1), false)
+    }
+
+    let id = gpu_barrier_id_new(out.next_id)
+    out.next_id = out.next_id + 1
+    out.barriers[out.barrier_count as usize] = gpu_barrier_make(id, kind, arrive_count)
+    out.barrier_count = out.barrier_count + 1
+
+    (out, id, true)
+}
+
+fn gpu_barrier_pool_get(pool: GpuBarrierPool, id: GpuBarrierId) -> (GpuBarrier, bool) {
+    var i: i64 = 0
+    while i < pool.barrier_count {
+        let b = pool.barriers[i as usize]
+        if b.id.value == id.value {
+            return (b, true)
+        }
+        i = i + 1
+    }
+    (gpu_barrier_new(), false)
+}
+
+fn gpu_barrier_pool_set(pool: GpuBarrierPool, barrier: GpuBarrier) -> GpuBarrierPool with Mut {
+    var out = pool
+    var i: i64 = 0
+    while i < out.barrier_count {
+        if out.barriers[i as usize].id.value == barrier.id.value {
+            out.barriers[i as usize] = barrier
+            break
+        }
+        i = i + 1
+    }
+    out
+}
+
+fn gpu_async_supports_tma(sm_major: i64, sm_minor: i64) -> bool {
+    (sm_major * 10 + sm_minor) >= 90
+}
+
+fn gpu_async_supports_mbarrier(sm_major: i64, sm_minor: i64) -> bool {
+    (sm_major * 10 + sm_minor) >= 80
+}
+
+fn gpu_async_preferred_barrier_kind(sm_major: i64, sm_minor: i64) -> i64 {
+    if gpu_async_supports_mbarrier(sm_major, sm_minor) {
+        GPU_BARRIER_MBAR
+    } else {
+        GPU_BARRIER_NAMED
+    }
+}
+
+// ============================================================================
+// Pipeline and schedules
+// ============================================================================
+
+struct GpuAsyncPipeline {
+    stages: [GpuPipelineStage; 8],
+    stage_count: i64,
+    barriers: GpuBarrierPool,
+    op_graph: GpuAsyncOpGraph,
+    depth: i64,
+    sm_major: i64,
+    sm_minor: i64,
+}
+
+fn gpu_async_pipeline_new(depth: i64, sm_major: i64, sm_minor: i64) -> GpuAsyncPipeline {
+    let d = if depth < 2 { 2 } else if depth > 4 { 4 } else { depth }
+    GpuAsyncPipeline {
+        stages: [gpu_pipeline_stage_new(gpu_stage_id_new(0)); 8],
+        stage_count: 0,
+        barriers: gpu_barrier_pool_new(sm_major, sm_minor),
+        op_graph: gpu_async_graph_new(),
+        depth: d,
+        sm_major: sm_major,
+        sm_minor: sm_minor,
+    }
+}
+
+fn gpu_async_pipeline_add_stage(pipeline: GpuAsyncPipeline, stage: GpuPipelineStage) -> GpuAsyncPipeline with Mut {
+    var out = pipeline
+    if out.stage_count < GPU_ASYNC_MAX_STAGES {
+        out.stages[out.stage_count as usize] = stage
+        out.stage_count = out.stage_count + 1
+    }
+    out
+}
+
+fn gpu_async_pipeline_supports_tma(pipeline: GpuAsyncPipeline) -> bool {
+    gpu_async_supports_tma(pipeline.sm_major, pipeline.sm_minor)
+}
+
+fn gpu_async_pipeline_supports_mbarrier(pipeline: GpuAsyncPipeline) -> bool {
+    gpu_async_supports_mbarrier(pipeline.sm_major, pipeline.sm_minor)
+}
+
+fn gpu_async_pipeline_total_shared_memory(pipeline: GpuAsyncPipeline) -> i64 {
+    var total: i64 = 0
+    var i: i64 = 0
+    while i < pipeline.stage_count {
+        total = total + gpu_pipeline_stage_total_buffer_size(pipeline.stages[i as usize])
+        i = i + 1
+    }
+    total
+}
+
+struct GpuScheduledOp {
+    tag: i64,
+    op_id: GpuAsyncOpId,
+    barrier_id: i64,
+    wait_count: i64,
+    compute_begin: i64,
+    compute_end: i64,
+}
+
+fn gpu_scheduled_op_new() -> GpuScheduledOp {
+    GpuScheduledOp {
+        tag: GPU_SCHED_COMPUTE_SLICE,
+        op_id: gpu_async_op_id_new(-1),
+        barrier_id: -1,
+        wait_count: 0,
+        compute_begin: 0,
+        compute_end: 0,
+    }
+}
+
+fn gpu_sched_async_load(id: GpuAsyncOpId) -> GpuScheduledOp {
+    var op = gpu_scheduled_op_new()
+    op.tag = GPU_SCHED_ASYNC_LOAD
+    op.op_id = id
+    op
+}
+
+fn gpu_sched_async_store(id: GpuAsyncOpId) -> GpuScheduledOp {
+    var op = gpu_scheduled_op_new()
+    op.tag = GPU_SCHED_ASYNC_STORE
+    op.op_id = id
+    op
+}
+
+fn gpu_sched_compute_slice(begin: i64, end: i64) -> GpuScheduledOp {
+    var op = gpu_scheduled_op_new()
+    op.tag = GPU_SCHED_COMPUTE_SLICE
+    op.compute_begin = begin
+    op.compute_end = end
+    op
+}
+
+fn gpu_sched_barrier_arrive(id: GpuBarrierId) -> GpuScheduledOp {
+    var op = gpu_scheduled_op_new()
+    op.tag = GPU_SCHED_BARRIER_ARRIVE
+    op.barrier_id = id.value
+    op
+}
+
+fn gpu_sched_barrier_wait(id: GpuBarrierId) -> GpuScheduledOp {
+    var op = gpu_scheduled_op_new()
+    op.tag = GPU_SCHED_BARRIER_WAIT
+    op.barrier_id = id.value
+    op
+}
+
+fn gpu_sched_advance_phase(id: GpuBarrierId) -> GpuScheduledOp {
+    var op = gpu_scheduled_op_new()
+    op.tag = GPU_SCHED_ADVANCE_PHASE
+    op.barrier_id = id.value
+    op
+}
+
+fn gpu_sched_sync_threads() -> GpuScheduledOp {
+    var op = gpu_scheduled_op_new()
+    op.tag = GPU_SCHED_SYNC_THREADS
+    op
+}
+
+fn gpu_sched_cp_commit() -> GpuScheduledOp {
+    var op = gpu_scheduled_op_new()
+    op.tag = GPU_SCHED_CP_COMMIT_GROUP
+    op
+}
+
+fn gpu_sched_cp_wait(count: i64) -> GpuScheduledOp {
+    var op = gpu_scheduled_op_new()
+    op.tag = GPU_SCHED_CP_WAIT
+    op.wait_count = count
+    op
+}
+
+struct GpuPipelineSchedule {
+    prologue: [GpuScheduledOp; 1024],
+    prologue_count: i64,
+    main_loop: [GpuScheduledOp; 1024],
+    main_count: i64,
+    epilogue: [GpuScheduledOp; 1024],
+    epilogue_count: i64,
+    barrier_init: [GpuBarrierId; 64],
+    barrier_init_count: i64,
+}
+
+fn gpu_pipeline_schedule_new() -> GpuPipelineSchedule {
+    GpuPipelineSchedule {
+        prologue: [gpu_scheduled_op_new(); 1024],
+        prologue_count: 0,
+        main_loop: [gpu_scheduled_op_new(); 1024],
+        main_count: 0,
+        epilogue: [gpu_scheduled_op_new(); 1024],
+        epilogue_count: 0,
+        barrier_init: [gpu_barrier_id_new(-1); 64],
+        barrier_init_count: 0,
+    }
+}
+
+fn gpu_pipeline_schedule_add_prologue(schedule: GpuPipelineSchedule, op: GpuScheduledOp) -> GpuPipelineSchedule with Mut {
+    var out = schedule
+    if out.prologue_count < GPU_ASYNC_MAX_SCHEDULE_OPS {
+        out.prologue[out.prologue_count as usize] = op
+        out.prologue_count = out.prologue_count + 1
+    }
+    out
+}
+
+fn gpu_pipeline_schedule_add_main(schedule: GpuPipelineSchedule, op: GpuScheduledOp) -> GpuPipelineSchedule with Mut {
+    var out = schedule
+    if out.main_count < GPU_ASYNC_MAX_SCHEDULE_OPS {
+        out.main_loop[out.main_count as usize] = op
+        out.main_count = out.main_count + 1
+    }
+    out
+}
+
+fn gpu_pipeline_schedule_add_epilogue(schedule: GpuPipelineSchedule, op: GpuScheduledOp) -> GpuPipelineSchedule with Mut {
+    var out = schedule
+    if out.epilogue_count < GPU_ASYNC_MAX_SCHEDULE_OPS {
+        out.epilogue[out.epilogue_count as usize] = op
+        out.epilogue_count = out.epilogue_count + 1
+    }
+    out
+}
+
+fn gpu_pipeline_schedule_add_barrier_init(schedule: GpuPipelineSchedule, barrier_id: GpuBarrierId) -> GpuPipelineSchedule with Mut {
+    var out = schedule
+
+    var i: i64 = 0
+    while i < out.barrier_init_count {
+        if out.barrier_init[i as usize].value == barrier_id.value {
+            return out
+        }
+        i = i + 1
+    }
+
+    if out.barrier_init_count < GPU_ASYNC_MAX_BARRIERS {
+        out.barrier_init[out.barrier_init_count as usize] = barrier_id
+        out.barrier_init_count = out.barrier_init_count + 1
+    }
+
+    out
+}
+
+// ============================================================================
+// Pipeline builder
+// ============================================================================
+
+struct GpuBufferConfig {
+    size: i64,
+    elem_type: GpuType,
+    name_prefix: string,
+    has_prefix: bool,
+}
+
+fn gpu_buffer_config_new(size: i64, elem_type: GpuType) -> GpuBufferConfig {
+    GpuBufferConfig {
+        size: size,
+        elem_type: elem_type,
+        name_prefix: "",
+        has_prefix: false,
+    }
+}
+
+fn gpu_buffer_config_with_name(size: i64, elem_type: GpuType, name: string) -> GpuBufferConfig {
+    GpuBufferConfig {
+        size: size,
+        elem_type: elem_type,
+        name_prefix: name,
+        has_prefix: true,
+    }
+}
+
+struct GpuPipelineBuilder {
+    sm_major: i64,
+    sm_minor: i64,
+    depth: i64,
+    buffer_configs: [GpuBufferConfig; 16],
+    buffer_config_count: i64,
+    warp_count: i64,
+}
+
+fn gpu_pipeline_builder_new(sm_major: i64, sm_minor: i64) -> GpuPipelineBuilder {
+    GpuPipelineBuilder {
+        sm_major: sm_major,
+        sm_minor: sm_minor,
+        depth: 2,
+        buffer_configs: [gpu_buffer_config_new(0, GpuType::GpuF32); 16],
+        buffer_config_count: 0,
+        warp_count: 1,
+    }
+}
+
+fn gpu_pipeline_builder_depth(builder: GpuPipelineBuilder, depth: i64) -> GpuPipelineBuilder with Mut {
+    var out = builder
+    if depth < 2 {
+        out.depth = 2
+    } else if depth > 4 {
+        out.depth = 4
+    } else {
+        out.depth = depth
+    }
+    out
+}
+
+fn gpu_pipeline_builder_add_buffer(builder: GpuPipelineBuilder, cfg: GpuBufferConfig) -> GpuPipelineBuilder with Mut {
+    var out = builder
+    if out.buffer_config_count < GPU_ASYNC_MAX_BUFFER_CONFIGS {
+        out.buffer_configs[out.buffer_config_count as usize] = cfg
+        out.buffer_config_count = out.buffer_config_count + 1
+    }
+    out
+}
+
+fn gpu_pipeline_builder_warp_count(builder: GpuPipelineBuilder, count: i64) -> GpuPipelineBuilder with Mut {
+    var out = builder
+    out.warp_count = if count <= 0 { 1 } else { count }
+    out
+}
+
+fn gpu_pipeline_builder_double_buffer(sm_major: i64, sm_minor: i64, buffer_size: i64, elem_type: GpuType) -> GpuAsyncPipeline with Mut, Panic, Div, Alloc {
+    var b = gpu_pipeline_builder_new(sm_major, sm_minor)
+    b = gpu_pipeline_builder_depth(b, 2)
+    b = gpu_pipeline_builder_add_buffer(b, gpu_buffer_config_new(buffer_size, elem_type))
+    gpu_pipeline_builder_build(b)
+}
+
+fn gpu_pipeline_builder_triple_buffer(sm_major: i64, sm_minor: i64, buffer_size: i64, elem_type: GpuType) -> GpuAsyncPipeline with Mut, Panic, Div, Alloc {
+    var b = gpu_pipeline_builder_new(sm_major, sm_minor)
+    b = gpu_pipeline_builder_depth(b, 3)
+    b = gpu_pipeline_builder_add_buffer(b, gpu_buffer_config_new(buffer_size, elem_type))
+    gpu_pipeline_builder_build(b)
+}
+
+fn gpu_pipeline_builder_from_tile(tcfg: GpuTileConfig, sm_major: i64, sm_minor: i64) -> GpuAsyncPipeline with Mut, Panic, Div, Alloc {
+    let tile_bytes = tcfg.tile_m * tcfg.tile_k * 2
+
+    var b = gpu_pipeline_builder_new(sm_major, sm_minor)
+    b = gpu_pipeline_builder_depth(b, tcfg.pipeline_stages)
+    b = gpu_pipeline_builder_add_buffer(b, gpu_buffer_config_with_name(tile_bytes, GpuType::GpuU32, "a_smem"))
+    b = gpu_pipeline_builder_add_buffer(b, gpu_buffer_config_with_name(tile_bytes, GpuType::GpuU32, "b_smem"))
+    gpu_pipeline_builder_build(b)
+}
+
+fn gpu_pipeline_builder_stage_buffer_name(cfg: GpuBufferConfig, buf_idx: i64, stage_idx: i64) -> string with Mut, Panic, Div, Alloc {
+    let base = if cfg.has_prefix { cfg.name_prefix } else { "buf" }
+    var name = str_concat(base, "_")
+    name = str_concat(name, gpu_async_i64_to_string(buf_idx))
+    name = str_concat(name, "_s")
+    name = str_concat(name, gpu_async_i64_to_string(stage_idx))
+    name
+}
+
+fn gpu_pipeline_builder_build(builder: GpuPipelineBuilder) -> GpuAsyncPipeline with Mut, Panic, Div, Alloc {
+    var pipeline = gpu_async_pipeline_new(builder.depth, builder.sm_major, builder.sm_minor)
+    let barrier_kind = gpu_async_preferred_barrier_kind(builder.sm_major, builder.sm_minor)
+    let arrive_count = builder.warp_count * 32
+
+    var stage_idx: i64 = 0
+    while stage_idx < builder.depth {
+        var stage = gpu_pipeline_stage_new(gpu_stage_id_new(stage_idx))
+
+        var bi: i64 = 0
+        while bi < builder.buffer_config_count {
+            let cfg = builder.buffer_configs[bi as usize]
+            let name = gpu_pipeline_builder_stage_buffer_name(cfg, bi, stage_idx)
+            let buf = gpu_stage_buffer_make(name, cfg.size, cfg.elem_type, stage_idx)
+            stage = gpu_pipeline_stage_add_buffer(stage, buf)
+            bi = bi + 1
+        }
+
+        if stage_idx > 0 {
+            let alloc = gpu_barrier_pool_allocate(pipeline.barriers, barrier_kind, arrive_count)
+            pipeline.barriers = alloc.0
+            if alloc.2 {
+                stage.entry_barrier = alloc.1.value
+            }
+        }
+
+        if stage_idx < (builder.depth - 1) {
+            let alloc = gpu_barrier_pool_allocate(pipeline.barriers, barrier_kind, arrive_count)
+            pipeline.barriers = alloc.0
+            if alloc.2 {
+                stage.exit_barrier = alloc.1.value
+            }
+        }
+
+        pipeline = gpu_async_pipeline_add_stage(pipeline, stage)
+        stage_idx = stage_idx + 1
+    }
+
+    pipeline
+}
+
+// ============================================================================
+// Dependency analyzer
+// ============================================================================
+
+struct GpuDependencyAnalyzer {
+    next_op_id: i64,
+}
+
+fn gpu_dependency_analyzer_new() -> GpuDependencyAnalyzer {
+    GpuDependencyAnalyzer { next_op_id: 0 }
+}
+
+fn gpu_dependency_analyzer_next_id(an: GpuDependencyAnalyzer) -> (GpuDependencyAnalyzer, GpuAsyncOpId) with Mut {
+    var out = an
+    let id = gpu_async_op_id_new(out.next_op_id)
+    out.next_op_id = out.next_op_id + 1
+    (out, id)
+}
+
+fn gpu_dependency_analyzer_classify_op(op: GpuOp) -> (i64, bool) {
+    if op.opcode == GpuOpcode::GpuTmaLoad {
+        return (GPU_ASYNC_KIND_TMA_LOAD, true)
+    }
+    if op.opcode == GpuOpcode::GpuTmaStore {
+        return (GPU_ASYNC_KIND_TMA_STORE, true)
+    }
+    if op.opcode == GpuOpcode::GpuLdGlobalCached || op.opcode == GpuOpcode::GpuPrefetch {
+        return (GPU_ASYNC_KIND_CP_ASYNC, true)
+    }
+    if op.opcode == GpuOpcode::GpuBarrierSync {
+        return (GPU_ASYNC_KIND_CP_WAIT, true)
+    }
+    (GPU_ASYNC_KIND_CP_ASYNC, false)
+}
+
+fn gpu_dependency_analyzer_find_async_ops(
+    an: GpuDependencyAnalyzer,
+    kernel: GpuKernelIr,
+    depth: i64
+) -> (GpuDependencyAnalyzer, GpuAsyncOpGraph) with Mut, Panic, Div {
+    var out_an = an
+    var graph = gpu_async_graph_new()
+
+    var i: i64 = 0
+    while i < kernel.op_count {
+        let op = kernel.ops[i as usize]
+        let cls = gpu_dependency_analyzer_classify_op(op)
+        if cls.1 {
+            let next = gpu_dependency_analyzer_next_id(out_an)
+            out_an = next.0
+
+            let stage_id = if depth <= 0 { 0 } else { i % depth }
+            var async_op = gpu_async_op_make(next.1, cls.0, gpu_stage_id_new(stage_id))
+            async_op.src_reg = if op.src_reg >= 0 { op.src_reg } else { op.addr_reg }
+            async_op.dst_reg = if op.dst_reg >= 0 { op.dst_reg } else { op.addr_reg }
+            async_op.size_bytes = if op.rhs_imm > 0 { op.rhs_imm } else { gpu_type_sizeof(op.ty) }
+
+            if cls.0 == GPU_ASYNC_KIND_CP_WAIT {
+                async_op.wait_count = if op.rhs_imm > 0 { op.rhs_imm } else { 0 }
+            }
+
+            graph = gpu_async_graph_add_op(graph, async_op)
+        }
+
+        i = i + 1
+    }
+
+    (out_an, graph)
+}
+
+fn gpu_dependency_analyzer_compute_dependencies(graph: GpuAsyncOpGraph) -> GpuAsyncOpGraph with Mut {
+    var out = graph
+
+    var last_load = gpu_async_op_id_new(-1)
+    var last_store = gpu_async_op_id_new(-1)
+
+    var i: i64 = 0
+    while i < out.op_count {
+        let op = out.ops[i as usize]
+
+        if gpu_async_op_is_load(op.kind) {
+            if last_store.value >= 0 {
+                out = gpu_async_graph_add_dependency(out, last_store, op.id)
+            }
+            last_load = op.id
+        } else if gpu_async_op_is_store(op.kind) {
+            if last_load.value >= 0 {
+                out = gpu_async_graph_add_dependency(out, last_load, op.id)
+            }
+            last_store = op.id
+        } else if op.kind == GPU_ASYNC_KIND_CP_COMMIT || op.kind == GPU_ASYNC_KIND_CP_WAIT {
+            if last_load.value >= 0 {
+                out = gpu_async_graph_add_dependency(out, last_load, op.id)
+            }
+        }
+
+        i = i + 1
+    }
+
+    out
+}
+
+fn gpu_dependency_analyzer_analyze_kernel(an: GpuDependencyAnalyzer, kernel: GpuKernelIr, depth: i64) -> (GpuDependencyAnalyzer, GpuAsyncOpGraph) with Mut, Panic, Div {
+    let found = gpu_dependency_analyzer_find_async_ops(an, kernel, depth)
+    let deps = gpu_dependency_analyzer_compute_dependencies(found.1)
+    (found.0, deps)
+}
+
+// ============================================================================
+// Stage assignment and schedule generation
+// ============================================================================
+
+fn gpu_async_pipeline_assign_ops_to_stages(pipeline: GpuAsyncPipeline) -> GpuAsyncPipeline with Mut {
+    var out = pipeline
+
+    var si: i64 = 0
+    while si < out.stage_count {
+        out.stages[si as usize].async_op_count = 0
+        si = si + 1
+    }
+
+    var oi: i64 = 0
+    while oi < out.op_graph.op_count {
+        let op = out.op_graph.ops[oi as usize]
+        let sid = op.stage.value
+        if sid >= 0 && sid < out.stage_count {
+            let stage = out.stages[sid as usize]
+            out.stages[sid as usize] = gpu_pipeline_stage_add_async_op(stage, op.id)
+        }
+        oi = oi + 1
+    }
+
+    out
+}
+
+fn gpu_pipeline_schedule_build_prologue(
+    schedule: GpuPipelineSchedule,
+    pipeline: GpuAsyncPipeline,
+    lookahead: i64
+) -> GpuPipelineSchedule with Mut {
+    var out = schedule
+
+    let prefetch_count = if pipeline.depth <= 1 {
+        0
+    } else if (pipeline.depth - 1) < lookahead {
+        pipeline.depth - 1
+    } else {
+        lookahead
+    }
+
+    var i: i64 = 0
+    while i < prefetch_count {
+        let stage_idx = i % pipeline.stage_count
+        let stage = pipeline.stages[stage_idx as usize]
+
+        var ai: i64 = 0
+        while ai < stage.async_op_count {
+            let op_id = stage.async_ops[ai as usize]
+            let op_pair = gpu_async_graph_get_op(pipeline.op_graph, op_id)
+            if op_pair.1 {
+                if gpu_async_op_is_store(op_pair.0.kind) {
+                    out = gpu_pipeline_schedule_add_prologue(out, gpu_sched_async_store(op_id))
+                } else {
+                    out = gpu_pipeline_schedule_add_prologue(out, gpu_sched_async_load(op_id))
+                }
+            }
+            ai = ai + 1
+        }
+
+        if stage.exit_barrier >= 0 {
+            out = gpu_pipeline_schedule_add_prologue(out, gpu_sched_barrier_arrive(gpu_barrier_id_new(stage.exit_barrier)))
+        }
+
+        i = i + 1
+    }
+
+    out
+}
+
+fn gpu_pipeline_schedule_build_main(
+    schedule: GpuPipelineSchedule,
+    pipeline: GpuAsyncPipeline,
+    kernel: GpuKernelIr
+) -> GpuPipelineSchedule with Mut {
+    var out = schedule
+
+    var stage_idx: i64 = 0
+    while stage_idx < pipeline.stage_count {
+        let stage = pipeline.stages[stage_idx as usize]
+
+        if stage.entry_barrier >= 0 {
+            out = gpu_pipeline_schedule_add_main(out, gpu_sched_barrier_wait(gpu_barrier_id_new(stage.entry_barrier)))
+        }
+
+        if stage_idx == (pipeline.stage_count - 1) {
+            out = gpu_pipeline_schedule_add_main(out, gpu_sched_compute_slice(0, kernel.op_count))
+        }
+
+        var ai: i64 = 0
+        while ai < stage.async_op_count {
+            let op_id = stage.async_ops[ai as usize]
+            let op_pair = gpu_async_graph_get_op(pipeline.op_graph, op_id)
+            if op_pair.1 {
+                let op = op_pair.0
+                if op.kind == GPU_ASYNC_KIND_CP_COMMIT {
+                    out = gpu_pipeline_schedule_add_main(out, gpu_sched_cp_commit())
+                } else if op.kind == GPU_ASYNC_KIND_CP_WAIT {
+                    out = gpu_pipeline_schedule_add_main(out, gpu_sched_cp_wait(op.wait_count))
+                } else if gpu_async_op_is_store(op.kind) {
+                    out = gpu_pipeline_schedule_add_main(out, gpu_sched_async_store(op_id))
+                } else {
+                    out = gpu_pipeline_schedule_add_main(out, gpu_sched_async_load(op_id))
+                }
+            }
+            ai = ai + 1
+        }
+
+        if stage.exit_barrier >= 0 {
+            out = gpu_pipeline_schedule_add_main(out, gpu_sched_barrier_arrive(gpu_barrier_id_new(stage.exit_barrier)))
+            out = gpu_pipeline_schedule_add_main(out, gpu_sched_advance_phase(gpu_barrier_id_new(stage.exit_barrier)))
+        }
+
+        stage_idx = stage_idx + 1
+    }
+
+    out
+}
+
+fn gpu_pipeline_schedule_build_epilogue(
+    schedule: GpuPipelineSchedule,
+    pipeline: GpuAsyncPipeline,
+    kernel: GpuKernelIr
+) -> GpuPipelineSchedule with Mut {
+    var out = schedule
+
+    let drain_count = if pipeline.depth > 0 { pipeline.depth - 1 } else { 0 }
+    var i: i64 = 0
+    while i < drain_count {
+        let stage_idx = (pipeline.depth - 1 - i) % pipeline.stage_count
+        let stage = pipeline.stages[stage_idx as usize]
+
+        if stage.entry_barrier >= 0 {
+            out = gpu_pipeline_schedule_add_epilogue(out, gpu_sched_barrier_wait(gpu_barrier_id_new(stage.entry_barrier)))
+        }
+
+        if stage_idx == (pipeline.stage_count - 1) {
+            out = gpu_pipeline_schedule_add_epilogue(out, gpu_sched_compute_slice(0, kernel.op_count))
+        }
+
+        i = i + 1
+    }
+
+    out = gpu_pipeline_schedule_add_epilogue(out, gpu_sched_cp_wait(0))
+    out = gpu_pipeline_schedule_add_epilogue(out, gpu_sched_sync_threads())
+    out
+}
+
+fn gpu_pipeline_schedule_build(
+    pipeline: GpuAsyncPipeline,
+    kernel: GpuKernelIr,
+    lookahead: i64
+) -> GpuPipelineSchedule with Mut {
+    var out = gpu_pipeline_schedule_new()
+
+    var bi: i64 = 0
+    while bi < pipeline.barriers.barrier_count {
+        let b = pipeline.barriers.barriers[bi as usize]
+        out = gpu_pipeline_schedule_add_barrier_init(out, b.id)
+        bi = bi + 1
+    }
+
+    out = gpu_pipeline_schedule_build_prologue(out, pipeline, lookahead)
+    out = gpu_pipeline_schedule_build_main(out, pipeline, kernel)
+    out = gpu_pipeline_schedule_build_epilogue(out, pipeline, kernel)
+    out
+}
+
+// ============================================================================
+// Barrier scheduler
+// ============================================================================
+
+struct GpuBarrierScheduler {
+    minimize_stalls: bool,
+}
+
+fn gpu_barrier_scheduler_new() -> GpuBarrierScheduler {
+    GpuBarrierScheduler { minimize_stalls: true }
+}
+
+fn gpu_barrier_scheduler_minimize_stalls(s: GpuBarrierScheduler, enable: bool) -> GpuBarrierScheduler with Mut {
+    var out = s
+    out.minimize_stalls = enable
+    out
+}
+
+fn gpu_barrier_scheduler_allocate(pipeline: GpuAsyncPipeline) -> GpuAsyncPipeline with Mut, Panic, Div, Alloc {
+    var out = pipeline
+
+    let kind = gpu_async_preferred_barrier_kind(out.sm_major, out.sm_minor)
+    let arrive_count: i64 = 32
+
+    var si: i64 = 0
+    while si < out.stage_count {
+        var stage = out.stages[si as usize]
+
+        if stage.entry_barrier < 0 && stage.id.value > 0 {
+            let alloc = gpu_barrier_pool_allocate(out.barriers, kind, arrive_count)
+            out.barriers = alloc.0
+            if alloc.2 {
+                stage.entry_barrier = alloc.1.value
+            }
+        }
+
+        if stage.exit_barrier < 0 && stage.id.value < (out.depth - 1) {
+            let alloc = gpu_barrier_pool_allocate(out.barriers, kind, arrive_count)
+            out.barriers = alloc.0
+            if alloc.2 {
+                stage.exit_barrier = alloc.1.value
+            }
+        }
+
+        out.stages[si as usize] = stage
+        si = si + 1
+    }
+
+    out
+}
+
+fn gpu_barrier_scheduler_optimize_schedule(scheduler: GpuBarrierScheduler, schedule: GpuPipelineSchedule) -> GpuPipelineSchedule with Mut {
+    // Deterministic placeholder pass:
+    // keep operation ordering stable in self-hosted mode.
+    // We still expose this hook for future local reordering.
+    let _ = scheduler
+    schedule
+}
+
+// ============================================================================
+// PTX codegen
+// ============================================================================
+
+fn gpu_async_ptx_push_line(buf: PtxBuf, line: string) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, line)
+    out = ptx_push_str(out, "\n")
+    out
+}
+
+fn gpu_async_barrier_kind_supported(kind: i64, sm_major: i64, sm_minor: i64) -> bool {
+    if kind == GPU_BARRIER_MBAR {
+        return gpu_async_supports_mbarrier(sm_major, sm_minor)
+    }
+    if kind == GPU_BARRIER_CP_GROUP {
+        return (sm_major * 10 + sm_minor) >= 80
+    }
+    true
+}
+
+fn gpu_async_codegen_emit_barrier_init(buf: PtxBuf, barrier: GpuBarrier, sm_major: i64, sm_minor: i64) -> PtxBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+
+    if !gpu_async_barrier_kind_supported(barrier.kind, sm_major, sm_minor) {
+        return out
+    }
+
+    if barrier.kind == GPU_BARRIER_MBAR {
+        var line = "mbarrier.init.shared.b64 ["
+        line = str_concat(line, barrier.name)
+        line = str_concat(line, "], ")
+        line = str_concat(line, gpu_async_i64_to_string(barrier.arrive_count))
+        line = str_concat(line, ";")
+        out = gpu_async_ptx_push_line(out, line)
+    } else if barrier.kind == GPU_BARRIER_NAMED {
+        var line = "// named barrier "
+        line = str_concat(line, barrier.name)
+        line = str_concat(line, " init")
+        out = gpu_async_ptx_push_line(out, line)
+    }
+
+    out
+}
+
+fn gpu_async_codegen_emit_barrier_arrive(barrier: GpuBarrier) -> string with Mut, Panic, Div, Alloc {
+    if barrier.kind == GPU_BARRIER_MBAR {
+        var line = "mbarrier.arrive.shared.b64 _, ["
+        line = str_concat(line, barrier.name)
+        line = str_concat(line, "];")
+        line
+    } else if barrier.kind == GPU_BARRIER_CP_GROUP {
+        "cp.async.commit_group;"
+    } else {
+        var line = "bar.arrive "
+        line = str_concat(line, gpu_async_i64_to_string(barrier.id.value))
+        line = str_concat(line, ", ")
+        line = str_concat(line, gpu_async_i64_to_string(barrier.arrive_count))
+        line = str_concat(line, ";")
+        line
+    }
+}
+
+fn gpu_async_codegen_emit_barrier_wait(buf: PtxBuf, barrier: GpuBarrier) -> PtxBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+
+    if barrier.kind == GPU_BARRIER_MBAR {
+        var label = "wait_"
+        label = str_concat(label, barrier.name)
+        out = gpu_async_ptx_push_line(out, str_concat(label, ":"))
+
+        var line = "mbarrier.try_wait.parity.shared.b64 %p0, ["
+        line = str_concat(line, barrier.name)
+        line = str_concat(line, "], ")
+        line = str_concat(line, gpu_async_i64_to_string(gpu_barrier_parity(barrier)))
+        line = str_concat(line, ";")
+        out = gpu_async_ptx_push_line(out, line)
+
+        var bra = "@!%p0 bra.uni "
+        bra = str_concat(bra, label)
+        bra = str_concat(bra, ";")
+        out = gpu_async_ptx_push_line(out, bra)
+    } else if barrier.kind == GPU_BARRIER_CP_GROUP {
+        out = gpu_async_ptx_push_line(out, "cp.async.wait_group 0;")
+    } else {
+        var line = "bar.sync "
+        line = str_concat(line, gpu_async_i64_to_string(barrier.id.value))
+        line = str_concat(line, ", ")
+        line = str_concat(line, gpu_async_i64_to_string(barrier.arrive_count))
+        line = str_concat(line, ";")
+        out = gpu_async_ptx_push_line(out, line)
+    }
+
+    out
+}
+
+fn gpu_async_codegen_reduce_name(reduce_op: i64) -> string {
+    if reduce_op == GPU_ASYNC_REDUCE_MIN {
+        "min"
+    } else if reduce_op == GPU_ASYNC_REDUCE_MAX {
+        "max"
+    } else if reduce_op == GPU_ASYNC_REDUCE_AND {
+        "and"
+    } else if reduce_op == GPU_ASYNC_REDUCE_OR {
+        "or"
+    } else if reduce_op == GPU_ASYNC_REDUCE_XOR {
+        "xor"
+    } else {
+        "add"
+    }
+}
+
+fn gpu_async_codegen_emit_async_op(buf: PtxBuf, op: GpuAsyncOp, pipeline: GpuAsyncPipeline) -> PtxBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+
+    if op.kind == GPU_ASYNC_KIND_TMA_LOAD {
+        if gpu_async_pipeline_supports_tma(pipeline) {
+            var line = "cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes "
+            line = str_concat(line, "[smem_")
+            line = str_concat(line, gpu_async_i64_to_string(op.dst_reg))
+            line = str_concat(line, "], [tensor_map_")
+            line = str_concat(line, gpu_async_i64_to_string(op.src_reg))
+            line = str_concat(line, ", {coord_x, coord_y}], [mbar0];")
+            out = gpu_async_ptx_push_line(out, line)
+        } else {
+            var line = "cp.async.cg.shared.global [smem_"
+            line = str_concat(line, gpu_async_i64_to_string(op.dst_reg))
+            line = str_concat(line, "], [gmem_")
+            line = str_concat(line, gpu_async_i64_to_string(op.src_reg))
+            line = str_concat(line, "], ")
+            line = str_concat(line, gpu_async_i64_to_string(op.size_bytes))
+            line = str_concat(line, ";")
+            out = gpu_async_ptx_push_line(out, line)
+            out = gpu_async_ptx_push_line(out, "cp.async.commit_group;")
+        }
+        return out
+    }
+
+    if op.kind == GPU_ASYNC_KIND_CP_ASYNC {
+        var line = "cp.async.cg.shared.global [smem_"
+        line = str_concat(line, gpu_async_i64_to_string(op.dst_reg))
+        line = str_concat(line, "], [gmem_")
+        line = str_concat(line, gpu_async_i64_to_string(op.src_reg))
+        line = str_concat(line, "], ")
+        line = str_concat(line, gpu_async_i64_to_string(op.size_bytes))
+        line = str_concat(line, ";")
+        out = gpu_async_ptx_push_line(out, line)
+        return out
+    }
+
+    if op.kind == GPU_ASYNC_KIND_TMA_MULTICAST {
+        var line = "cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes.multicast::cluster "
+        line = str_concat(line, "[smem_")
+        line = str_concat(line, gpu_async_i64_to_string(op.dst_reg))
+        line = str_concat(line, "], [tensor_map_")
+        line = str_concat(line, gpu_async_i64_to_string(op.src_reg))
+        line = str_concat(line, "], [mbar0], 0x")
+        line = str_concat(line, gpu_async_i64_to_string(op.multicast_mask))
+        line = str_concat(line, ";")
+        out = gpu_async_ptx_push_line(out, line)
+        return out
+    }
+
+    if op.kind == GPU_ASYNC_KIND_TMA_STORE {
+        var line = "cp.async.bulk.tensor.2d.global.shared::cta [gmem_"
+        line = str_concat(line, gpu_async_i64_to_string(op.dst_reg))
+        line = str_concat(line, "], [smem_")
+        line = str_concat(line, gpu_async_i64_to_string(op.src_reg))
+        line = str_concat(line, "];")
+        out = gpu_async_ptx_push_line(out, line)
+        return out
+    }
+
+    if op.kind == GPU_ASYNC_KIND_TMA_REDUCE {
+        var line = "cp.reduce.async.bulk.tensor.2d.global.shared::cta."
+        line = str_concat(line, gpu_async_codegen_reduce_name(op.reduce_op))
+        line = str_concat(line, " [gmem_")
+        line = str_concat(line, gpu_async_i64_to_string(op.dst_reg))
+        line = str_concat(line, "], [smem_")
+        line = str_concat(line, gpu_async_i64_to_string(op.src_reg))
+        line = str_concat(line, "];")
+        out = gpu_async_ptx_push_line(out, line)
+        return out
+    }
+
+    if op.kind == GPU_ASYNC_KIND_CP_COMMIT {
+        out = gpu_async_ptx_push_line(out, "cp.async.commit_group;")
+        return out
+    }
+
+    if op.kind == GPU_ASYNC_KIND_CP_WAIT {
+        var line = "cp.async.wait_group "
+        line = str_concat(line, gpu_async_i64_to_string(op.wait_count))
+        line = str_concat(line, ";")
+        out = gpu_async_ptx_push_line(out, line)
+        return out
+    }
+
+    out
+}
+
+fn gpu_async_codegen_emit_compute_slice(
+    buf: PtxBuf,
+    kernel: GpuKernelIr,
+    begin: i64,
+    end: i64
+) -> PtxBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+
+    var hdr = "// Compute slice "
+    hdr = str_concat(hdr, gpu_async_i64_to_string(begin))
+    hdr = str_concat(hdr, "..")
+    hdr = str_concat(hdr, gpu_async_i64_to_string(end))
+    out = gpu_async_ptx_push_line(out, hdr)
+
+    var i = begin
+    while i < end && i < kernel.op_count {
+        let op = kernel.ops[i as usize]
+
+        // Emit concise placeholders for compute ops to keep schedule visible.
+        if op.opcode == GpuOpcode::GpuAdd {
+            out = gpu_async_ptx_push_line(out, "// add")
+        } else if op.opcode == GpuOpcode::GpuMul {
+            out = gpu_async_ptx_push_line(out, "// mul")
+        } else if op.opcode == GpuOpcode::GpuFma {
+            out = gpu_async_ptx_push_line(out, "// fma")
+        } else if op.opcode == GpuOpcode::GpuLoadShared {
+            out = gpu_async_ptx_push_line(out, "// ld.shared")
+        } else if op.opcode == GpuOpcode::GpuStoreShared {
+            out = gpu_async_ptx_push_line(out, "// st.shared")
+        }
+
+        i = i + 1
+    }
+
+    out
+}
+
+fn gpu_async_codegen_emit_schedule_list(
+    buf: PtxBuf,
+    ops: [GpuScheduledOp; 1024],
+    count: i64,
+    pipeline: GpuAsyncPipeline,
+    kernel: GpuKernelIr
+) -> PtxBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+
+    var i: i64 = 0
+    while i < count {
+        let sop = ops[i as usize]
+
+        if sop.tag == GPU_SCHED_ASYNC_LOAD || sop.tag == GPU_SCHED_ASYNC_STORE {
+            let op_pair = gpu_async_graph_get_op(pipeline.op_graph, sop.op_id)
+            if op_pair.1 {
+                out = gpu_async_codegen_emit_async_op(out, op_pair.0, pipeline)
+            }
+        } else if sop.tag == GPU_SCHED_BARRIER_ARRIVE {
+            let bpair = gpu_barrier_pool_get(pipeline.barriers, gpu_barrier_id_new(sop.barrier_id))
+            if bpair.1 {
+                out = gpu_async_ptx_push_line(out, gpu_async_codegen_emit_barrier_arrive(bpair.0))
+            }
+        } else if sop.tag == GPU_SCHED_BARRIER_WAIT {
+            let bpair = gpu_barrier_pool_get(pipeline.barriers, gpu_barrier_id_new(sop.barrier_id))
+            if bpair.1 {
+                out = gpu_async_codegen_emit_barrier_wait(out, bpair.0)
+            }
+        } else if sop.tag == GPU_SCHED_ADVANCE_PHASE {
+            let bpair = gpu_barrier_pool_get(pipeline.barriers, gpu_barrier_id_new(sop.barrier_id))
+            if bpair.1 {
+                let bnext = gpu_barrier_advance_phase(bpair.0)
+                out = gpu_async_ptx_push_line(out, str_concat("// advance phase ", bnext.name))
+            }
+        } else if sop.tag == GPU_SCHED_CP_COMMIT_GROUP {
+            out = gpu_async_ptx_push_line(out, "cp.async.commit_group;")
+        } else if sop.tag == GPU_SCHED_CP_WAIT {
+            var line = "cp.async.wait_group "
+            line = str_concat(line, gpu_async_i64_to_string(sop.wait_count))
+            line = str_concat(line, ";")
+            out = gpu_async_ptx_push_line(out, line)
+        } else if sop.tag == GPU_SCHED_SYNC_THREADS {
+            out = gpu_async_ptx_push_line(out, "bar.sync 0;")
+        } else if sop.tag == GPU_SCHED_COMPUTE_SLICE {
+            out = gpu_async_codegen_emit_compute_slice(out, kernel, sop.compute_begin, sop.compute_end)
+        }
+
+        i = i + 1
+    }
+
+    out
+}
+
+fn gpu_async_codegen_emit_pipeline(
+    schedule: GpuPipelineSchedule,
+    pipeline: GpuAsyncPipeline,
+    kernel: GpuKernelIr
+) -> PtxBuf with Mut, Panic, Div, Alloc {
+    var out = ptx_buf_new()
+
+    out = gpu_async_ptx_push_line(out, "// Async pipeline prologue")
+    var bi: i64 = 0
+    while bi < schedule.barrier_init_count {
+        let bpair = gpu_barrier_pool_get(pipeline.barriers, schedule.barrier_init[bi as usize])
+        if bpair.1 {
+            out = gpu_async_codegen_emit_barrier_init(out, bpair.0, pipeline.sm_major, pipeline.sm_minor)
+        }
+        bi = bi + 1
+    }
+
+    out = gpu_async_ptx_push_line(out, "// Shared memory declarations")
+    var si: i64 = 0
+    while si < pipeline.stage_count {
+        let stage = pipeline.stages[si as usize]
+        var sj: i64 = 0
+        while sj < stage.buffer_count {
+            let sb = stage.buffers[sj as usize]
+            var line = ".shared .align 16 .b8 "
+            line = str_concat(line, sb.name)
+            line = str_concat(line, "[")
+            line = str_concat(line, gpu_async_i64_to_string(sb.size_bytes))
+            line = str_concat(line, "];")
+            out = gpu_async_ptx_push_line(out, line)
+            sj = sj + 1
+        }
+        si = si + 1
+    }
+
+    out = gpu_async_ptx_push_line(out, "// Pipeline prologue")
+    out = gpu_async_codegen_emit_schedule_list(out, schedule.prologue, schedule.prologue_count, pipeline, kernel)
+
+    out = gpu_async_ptx_push_line(out, "// Pipeline main loop")
+    out = gpu_async_codegen_emit_schedule_list(out, schedule.main_loop, schedule.main_count, pipeline, kernel)
+
+    out = gpu_async_ptx_push_line(out, "// Pipeline epilogue")
+    out = gpu_async_codegen_emit_schedule_list(out, schedule.epilogue, schedule.epilogue_count, pipeline, kernel)
+
+    out
+}
+
+// ============================================================================
+// Public API
+// ============================================================================
+
+fn gpu_async_create_pipeline_from_tile(tcfg: GpuTileConfig, sm_major: i64, sm_minor: i64) -> GpuAsyncPipeline with Mut, Panic, Div, Alloc {
+    gpu_pipeline_builder_from_tile(tcfg, sm_major, sm_minor)
+}
+
+fn gpu_async_schedule_pipeline(pipeline: GpuAsyncPipeline, kernel: GpuKernelIr) -> GpuPipelineSchedule with Mut {
+    gpu_pipeline_schedule_build(pipeline, kernel, 2)
+}
+
+fn gpu_async_apply_pipeline(
+    kernel: GpuKernelIr,
+    pipeline_stages: i64,
+    sm_major: i64,
+    sm_minor: i64
+) -> (GpuAsyncPipeline, GpuPipelineSchedule) with Mut, Panic, Div, Alloc {
+    var analyzer = gpu_dependency_analyzer_new()
+    let analyzed = gpu_dependency_analyzer_analyze_kernel(analyzer, kernel, pipeline_stages)
+    analyzer = analyzed.0
+    let op_graph = analyzed.1
+    let _ = analyzer
+
+    var builder = gpu_pipeline_builder_new(sm_major, sm_minor)
+    builder = gpu_pipeline_builder_depth(builder, pipeline_stages)
+    builder = gpu_pipeline_builder_add_buffer(builder, gpu_buffer_config_new(1024, GpuType::GpuF32))
+
+    var pipeline = gpu_pipeline_builder_build(builder)
+    pipeline.op_graph = op_graph
+    pipeline = gpu_async_pipeline_assign_ops_to_stages(pipeline)
+
+    let bs = gpu_barrier_scheduler_new()
+    pipeline = gpu_barrier_scheduler_allocate(pipeline)
+
+    var schedule = gpu_async_schedule_pipeline(pipeline, kernel)
+    schedule = gpu_barrier_scheduler_optimize_schedule(bs, schedule)
+
+    (pipeline, schedule)
+}
+
+fn gpu_async_emit_pipeline_ptx(
+    kernel: GpuKernelIr,
+    schedule: GpuPipelineSchedule,
+    pipeline: GpuAsyncPipeline
+) -> PtxBuf with Mut, Panic, Div, Alloc {
+    gpu_async_codegen_emit_pipeline(schedule, pipeline, kernel)
+}
+
+struct GpuAsyncKernelResult {
+    pipeline: GpuAsyncPipeline,
+    schedule: GpuPipelineSchedule,
+    ptx: PtxBuf,
+}
+
+fn gpu_async_kernel_result_new() -> GpuAsyncKernelResult {
+    GpuAsyncKernelResult {
+        pipeline: gpu_async_pipeline_new(2, 8, 0),
+        schedule: gpu_pipeline_schedule_new(),
+        ptx: ptx_buf_new(),
+    }
+}
+
+fn gpu_async_build_kernel(
+    kernel: GpuKernelIr,
+    pipeline_stages: i64,
+    sm_major: i64,
+    sm_minor: i64
+) -> GpuAsyncKernelResult with Mut, Panic, Div, Alloc {
+    let applied = gpu_async_apply_pipeline(kernel, pipeline_stages, sm_major, sm_minor)
+    let ptx = gpu_async_emit_pipeline_ptx(kernel, applied.1, applied.0)
+
+    GpuAsyncKernelResult {
+        pipeline: applied.0,
+        schedule: applied.1,
+        ptx: ptx,
+    }
+}
+
+struct GpuAsyncModuleResult {
+    pipelines: [GpuAsyncPipeline; 64],
+    schedules: [GpuPipelineSchedule; 64],
+    ptx_modules: [PtxBuf; 64],
+    count: i64,
+}
+
+fn gpu_async_module_result_new() -> GpuAsyncModuleResult {
+    GpuAsyncModuleResult {
+        pipelines: [gpu_async_pipeline_new(2, 8, 0); 64],
+        schedules: [gpu_pipeline_schedule_new(); 64],
+        ptx_modules: [ptx_buf_new(); 64],
+        count: 0,
+    }
+}
+
+fn gpu_async_apply_to_kernels(
+    kernels: [GpuKernelIr; 64],
+    count: i64,
+    pipeline_stages: i64,
+    sm_major: i64,
+    sm_minor: i64
+) -> GpuAsyncModuleResult with Mut, Panic, Div, Alloc {
+    var out = gpu_async_module_result_new()
+
+    var i: i64 = 0
+    while i < count && i < GPU_ASYNC_MAX_KERNELS {
+        let k = kernels[i as usize]
+        let built = gpu_async_build_kernel(k, pipeline_stages, sm_major, sm_minor)
+        out.pipelines[i as usize] = built.pipeline
+        out.schedules[i as usize] = built.schedule
+        out.ptx_modules[i as usize] = built.ptx
+        out.count = out.count + 1
+        i = i + 1
+    }
+
+    out
+}
+
+fn hlir_gpu_async_apply(
+    lowered: HlirGpuLoweredModule,
+    pipeline_stages: i64,
+    sm_major: i64,
+    sm_minor: i64
+) -> GpuAsyncModuleResult with Mut, Panic, Div, Alloc {
+    gpu_async_apply_to_kernels(lowered.kernels, lowered.kernel_count, pipeline_stages, sm_major, sm_minor)
+}
+
+fn hlir_gpu_async_apply_default(lowered: HlirGpuLoweredModule) -> GpuAsyncModuleResult with Mut, Panic, Div, Alloc {
+    gpu_async_apply_to_kernels(lowered.kernels, lowered.kernel_count, 2, 8, 0)
+}
+
+// End of gpu/opt/async_pipeline.sio

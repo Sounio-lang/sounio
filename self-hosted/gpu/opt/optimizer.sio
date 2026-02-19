@@ -1,0 +1,1412 @@
+// self-hosted::gpu::opt::optimizer — GPU optimization passes for GpuKernelIr
+//
+// Implements low-level optimization passes operating on GpuModuleOpt:
+//   1. Constant folding     — fold constant-expression chains at compile time
+//   2. Dead code elimination — remove unreachable/unused ops
+//   3. Register pressure    — count live registers across blocks
+//   4. Warp divergence      — detect TID-dependent predicate branches
+//   5. Shared memory bank   — analyze access stride/conflict degree
+//   6. Kernel fusion        — merge consecutive element-wise kernels
+//   7. Auto-tune advisor    — suggest block sizes from register/shared stats
+//
+// All data structures use fixed-capacity arrays; no dynamic allocation.
+// Helpers precede callers throughout (no forward references).
+
+// ============================================================================
+// Opcode aliases (mirror kernel_ir context, not reusing GpuOpcode enum)
+// ============================================================================
+
+let OPT_OP_CONST: i64        = 99
+let OPT_OP_ADD: i64          = 4
+let OPT_OP_SUB: i64          = 5
+let OPT_OP_MUL: i64          = 6
+let OPT_OP_DIV: i64          = 7
+let OPT_OP_LOAD_GLOBAL: i64  = 14
+let OPT_OP_STORE_GLOBAL: i64 = 15
+let OPT_OP_RET: i64          = 16
+let OPT_OP_LOAD_SHARED: i64  = 11
+let OPT_OP_STORE_SHARED: i64 = 12
+let OPT_OP_BARRIER: i64      = 10
+let OPT_OP_SETP_LT: i64      = 22
+let OPT_OP_BRANCH: i64       = 98
+let OPT_OP_ATOMIC_ADD: i64   = 50
+let OPT_OP_GET_TID: i64      = 0
+
+// ============================================================================
+// Core IR structs (flat, fixed-capacity)
+// ============================================================================
+
+struct GpuOpEntry {
+    opcode:   i64,
+    type_tag: i64,
+    dst_idx:  i64,
+    src0:     i64,
+    src1:     i64,
+    src2:     i64,
+    imm_int:  i64,
+    imm_f32:  f32,
+    pred:     i64,
+    axis:     i64,
+    dead:     bool,
+}
+
+struct GpuBlockEntry {
+    id:           i64,
+    ops:          [GpuOpEntry; 4096],
+    op_count:     i64,
+    term_tag:     i64,
+    term_src:     i64,
+    term_target0: i64,
+    term_target1: i64,
+}
+
+struct GpuKernelEntry {
+    name:                 [i8; 256],
+    name_len:             i64,
+    is_kernel:            bool,
+    blocks:               [GpuBlockEntry; 256],
+    block_count:          i64,
+    param_count:          i64,
+    shared_mem_bytes:     i64,
+    max_threads_per_block: i64,
+}
+
+struct GpuModuleOpt {
+    kernels:      [GpuKernelEntry; 64],
+    kernel_count: i64,
+}
+
+// ============================================================================
+// Optimizer configuration and statistics
+// ============================================================================
+
+struct OptimizerFlags {
+    dce:          bool,
+    const_fold:   bool,
+    fusion:       bool,
+    reg_pressure: bool,
+    divergence:   bool,
+    bank_conflicts: bool,
+    loop_unroll:  bool,
+    auto_tune:    bool,
+}
+
+struct OptStats {
+    ops_removed:            i64,
+    ops_folded:             i64,
+    kernels_fused:          i64,
+    max_register_pressure:  i64,
+    divergent_branches:     i64,
+    bank_conflicts_detected: i64,
+    loops_unrolled:         i64,
+    recommended_block_size: i64,
+}
+
+// ============================================================================
+// Liveness structures
+// ============================================================================
+
+struct LivenessEntry {
+    value_id:      i64,
+    def_op_idx:    i64,
+    last_use_op_idx: i64,
+    is_live:       bool,
+}
+
+struct BlockLiveness {
+    block_id:      i64,
+    entries:       [LivenessEntry; 512],
+    entry_count:   i64,
+    peak_live:     i64,
+    live_in:       [i64; 128],
+    live_in_count: i64,
+    live_out:      [i64; 128],
+    live_out_count: i64,
+}
+
+// ============================================================================
+// Fusion structures
+// ============================================================================
+
+struct FusionCandidate {
+    kernel_a_idx:   i64,
+    kernel_b_idx:   i64,
+    can_fuse:       bool,
+    reason:         i64,
+    merged_op_count: i64,
+}
+
+// ============================================================================
+// Divergence structures
+// ============================================================================
+
+struct DivergenceInfo {
+    block_id:           i64,
+    op_idx:             i64,
+    is_divergent:       bool,
+    divergence_cause:   i64,
+    reconvergence_block: i64,
+}
+
+// ============================================================================
+// Bank conflict structures
+// ============================================================================
+
+struct BankConflictInfo {
+    op_idx:         i64,
+    stride:         i64,
+    conflict_degree: i64,
+}
+
+// ============================================================================
+// Auto-tune structures
+// ============================================================================
+
+struct AutoTuneAdvice {
+    recommended_threads:     i64,
+    recommended_shared_mem:  i64,
+    occupancy_estimate:      f32,
+    memory_bound:            bool,
+    compute_bound:           bool,
+}
+
+// ============================================================================
+// Stats constructors
+// ============================================================================
+
+fn opt_stats_new() -> OptStats {
+    OptStats {
+        ops_removed:            0,
+        ops_folded:             0,
+        kernels_fused:          0,
+        max_register_pressure:  0,
+        divergent_branches:     0,
+        bank_conflicts_detected: 0,
+        loops_unrolled:         0,
+        recommended_block_size: 256,
+    }
+}
+
+fn opt_stats_merge(a: OptStats, b: OptStats) -> OptStats {
+    let max_reg = if a.max_register_pressure > b.max_register_pressure {
+        a.max_register_pressure
+    } else {
+        b.max_register_pressure
+    }
+    let max_block = if a.recommended_block_size > b.recommended_block_size {
+        a.recommended_block_size
+    } else {
+        b.recommended_block_size
+    }
+    OptStats {
+        ops_removed:             a.ops_removed + b.ops_removed,
+        ops_folded:              a.ops_folded + b.ops_folded,
+        kernels_fused:           a.kernels_fused + b.kernels_fused,
+        max_register_pressure:   max_reg,
+        divergent_branches:      a.divergent_branches + b.divergent_branches,
+        bank_conflicts_detected: a.bank_conflicts_detected + b.bank_conflicts_detected,
+        loops_unrolled:          a.loops_unrolled + b.loops_unrolled,
+        recommended_block_size:  max_block,
+    }
+}
+
+// ============================================================================
+// Flag constructors
+// ============================================================================
+
+fn opt_flags_default() -> OptimizerFlags {
+    OptimizerFlags {
+        dce:          true,
+        const_fold:   true,
+        fusion:       true,
+        reg_pressure: true,
+        divergence:   true,
+        bank_conflicts: true,
+        loop_unroll:  true,
+        auto_tune:    true,
+    }
+}
+
+fn opt_flags_conservative() -> OptimizerFlags {
+    OptimizerFlags {
+        dce:          true,
+        const_fold:   true,
+        fusion:       false,
+        reg_pressure: false,
+        divergence:   false,
+        bank_conflicts: false,
+        loop_unroll:  false,
+        auto_tune:    false,
+    }
+}
+
+// ============================================================================
+// Helper: zero-value constructors
+// ============================================================================
+
+fn opt_gpu_op_entry_zero() -> GpuOpEntry {
+    GpuOpEntry {
+        opcode:   0,
+        type_tag: 0,
+        dst_idx:  -1,
+        src0:     -1,
+        src1:     -1,
+        src2:     -1,
+        imm_int:  0,
+        imm_f32:  0.0,
+        pred:     -1,
+        axis:     0,
+        dead:     false,
+    }
+}
+
+fn opt_liveness_entry_zero() -> LivenessEntry {
+    LivenessEntry {
+        value_id:        -1,
+        def_op_idx:      -1,
+        last_use_op_idx: -1,
+        is_live:         false,
+    }
+}
+
+fn opt_block_liveness_zero(block_id: i64) -> BlockLiveness {
+    BlockLiveness {
+        block_id:       block_id,
+        entries:        [opt_liveness_entry_zero(); 512],
+        entry_count:    0,
+        peak_live:      0,
+        live_in:        [-1; 128],
+        live_in_count:  0,
+        live_out:       [-1; 128],
+        live_out_count: 0,
+    }
+}
+
+fn opt_divergence_info_zero() -> DivergenceInfo {
+    DivergenceInfo {
+        block_id:            -1,
+        op_idx:              -1,
+        is_divergent:        false,
+        divergence_cause:    3,
+        reconvergence_block: -1,
+    }
+}
+
+fn opt_bank_conflict_info_zero() -> BankConflictInfo {
+    BankConflictInfo {
+        op_idx:         -1,
+        stride:         1,
+        conflict_degree: 1,
+    }
+}
+
+fn opt_autotune_advice_default() -> AutoTuneAdvice {
+    AutoTuneAdvice {
+        recommended_threads:    256,
+        recommended_shared_mem: 0,
+        occupancy_estimate:     0.5,
+        memory_bound:           false,
+        compute_bound:          false,
+    }
+}
+
+fn opt_fusion_candidate_none() -> FusionCandidate {
+    FusionCandidate {
+        kernel_a_idx:    -1,
+        kernel_b_idx:    -1,
+        can_fuse:        false,
+        reason:          1,
+        merged_op_count: 0,
+    }
+}
+
+// ============================================================================
+// Helper: integer math
+// ============================================================================
+
+fn opt_abs_i64(x: i64) -> i64 {
+    if x < 0 { -x } else { x }
+}
+
+fn opt_gcd(a: i64, b: i64) -> i64 with Div {
+    var x = if a < 0 { -a } else { a }
+    var y = if b < 0 { -b } else { b }
+    while y != 0 {
+        let tmp = x % y
+        x = y
+        y = tmp
+    }
+    x
+}
+
+fn opt_max_i64(a: i64, b: i64) -> i64 {
+    if a > b { a } else { b }
+}
+
+// ============================================================================
+// Helper: value analysis
+// ============================================================================
+
+fn opt_is_constant_op(op: GpuOpEntry) -> bool {
+    op.opcode == OPT_OP_CONST
+}
+
+fn opt_constant_value_i(op: GpuOpEntry) -> i64 {
+    op.imm_int
+}
+
+fn opt_constant_value_f(op: GpuOpEntry) -> f32 {
+    op.imm_f32
+}
+
+fn opt_op_has_side_effects(op: GpuOpEntry) -> bool {
+    let oc = op.opcode
+    oc == OPT_OP_STORE_GLOBAL ||
+    oc == OPT_OP_STORE_SHARED ||
+    oc == OPT_OP_ATOMIC_ADD   ||
+    oc == OPT_OP_BARRIER      ||
+    oc == OPT_OP_BRANCH       ||
+    oc == OPT_OP_RET
+}
+
+fn opt_op_uses_value(op: GpuOpEntry, value_id: i64) -> bool {
+    op.src0 == value_id || op.src1 == value_id || op.src2 == value_id
+}
+
+fn opt_op_defines_value(op: GpuOpEntry) -> i64 {
+    op.dst_idx
+}
+
+// ============================================================================
+// Constant folding arithmetic helpers
+// ============================================================================
+
+fn opt_fold_add_ii(a: i64, b: i64) -> i64 {
+    a + b
+}
+
+fn opt_fold_sub_ii(a: i64, b: i64) -> i64 {
+    a - b
+}
+
+fn opt_fold_mul_ii(a: i64, b: i64) -> i64 {
+    a * b
+}
+
+fn opt_fold_div_ii(a: i64, b: i64) -> i64 with Div {
+    if b == 0 { 0 } else { a / b }
+}
+
+fn opt_fold_add_ff(a: f32, b: f32) -> f32 {
+    a + b
+}
+
+fn opt_fold_mul_ff(a: f32, b: f32) -> f32 {
+    a * b
+}
+
+fn opt_fold_div_ff(a: f32, b: f32) -> f32 with Div {
+    if b == 0.0 { 0.0 } else { a / b }
+}
+
+// ============================================================================
+// Constant folding: binary op fold
+// ============================================================================
+
+fn opt_const_fold_binary(op: GpuOpEntry, src0_op: GpuOpEntry, src1_op: GpuOpEntry) -> (bool, GpuOpEntry) with Div {
+    if !opt_is_constant_op(src0_op) || !opt_is_constant_op(src1_op) {
+        return (false, op)
+    }
+
+    var folded = op
+    folded.opcode = OPT_OP_CONST
+    folded.src0 = -1
+    folded.src1 = -1
+    folded.src2 = -1
+
+    let oc = op.opcode
+    // Integer folding for integer type_tag == 0
+    if op.type_tag == 0 {
+        let a = opt_constant_value_i(src0_op)
+        let b = opt_constant_value_i(src1_op)
+        if oc == OPT_OP_ADD {
+            folded.imm_int = opt_fold_add_ii(a, b)
+            return (true, folded)
+        }
+        if oc == OPT_OP_SUB {
+            folded.imm_int = opt_fold_sub_ii(a, b)
+            return (true, folded)
+        }
+        if oc == OPT_OP_MUL {
+            folded.imm_int = opt_fold_mul_ii(a, b)
+            return (true, folded)
+        }
+        if oc == OPT_OP_DIV {
+            folded.imm_int = opt_fold_div_ii(a, b)
+            return (true, folded)
+        }
+    }
+
+    // Float folding for type_tag == 1
+    if op.type_tag == 1 {
+        let a = opt_constant_value_f(src0_op)
+        let b = opt_constant_value_f(src1_op)
+        if oc == OPT_OP_ADD {
+            folded.imm_f32 = opt_fold_add_ff(a, b)
+            return (true, folded)
+        }
+        if oc == OPT_OP_MUL {
+            folded.imm_f32 = opt_fold_mul_ff(a, b)
+            return (true, folded)
+        }
+        if oc == OPT_OP_DIV {
+            folded.imm_f32 = opt_fold_div_ff(a, b)
+            return (true, folded)
+        }
+    }
+
+    (false, op)
+}
+
+// ============================================================================
+// Constant folding: block pass
+// ============================================================================
+
+fn opt_const_fold_block(blk: GpuBlockEntry) -> (GpuBlockEntry, i64) with Div {
+    var out = blk
+    var folds: i64 = 0
+
+    var i: i64 = 0
+    while i < out.op_count {
+        let op = out.ops[i as usize]
+        let oc = op.opcode
+
+        if oc == OPT_OP_ADD || oc == OPT_OP_SUB || oc == OPT_OP_MUL || oc == OPT_OP_DIV {
+            // Search backwards for definitions of src0 and src1
+            var src0_op = opt_gpu_op_entry_zero()
+            var src1_op = opt_gpu_op_entry_zero()
+            var found0 = false
+            var found1 = false
+
+            var j: i64 = i - 1
+            while j >= 0 {
+                let candidate = out.ops[j as usize]
+                if !found0 && candidate.dst_idx == op.src0 {
+                    src0_op = candidate
+                    found0 = true
+                }
+                if !found1 && candidate.dst_idx == op.src1 {
+                    src1_op = candidate
+                    found1 = true
+                }
+                if found0 && found1 {
+                    break
+                }
+                j = j - 1
+            }
+
+            if found0 && found1 {
+                let result = opt_const_fold_binary(op, src0_op, src1_op)
+                if result.0 {
+                    out.ops[i as usize] = result.1
+                    folds = folds + 1
+                }
+            }
+        }
+
+        i = i + 1
+    }
+
+    (out, folds)
+}
+
+// ============================================================================
+// Constant folding: kernel pass
+// ============================================================================
+
+fn opt_const_fold_pass(k: GpuKernelEntry) -> (GpuKernelEntry, i64) with Div {
+    var out = k
+    var total: i64 = 0
+
+    var bi: i64 = 0
+    while bi < out.block_count {
+        let blk = out.blocks[bi as usize]
+        let result = opt_const_fold_block(blk)
+        out.blocks[bi as usize] = result.0
+        total = total + result.1
+        bi = bi + 1
+    }
+
+    (out, total)
+}
+
+// ============================================================================
+// DCE: mark live
+// ============================================================================
+
+fn opt_dce_mark_live(blk: GpuBlockEntry, used: [bool; 16384], used_size: i64) -> ([bool; 16384], i64) {
+    var live = used
+    var count = used_size
+
+    // Seed: all side-effecting ops and their destination values are live.
+    var i: i64 = 0
+    while i < blk.op_count {
+        let op = blk.ops[i as usize]
+        if opt_op_has_side_effects(op) {
+            if op.dst_idx >= 0 && op.dst_idx < 16384 {
+                if !live[op.dst_idx as usize] {
+                    live[op.dst_idx as usize] = true
+                    count = count + 1
+                }
+            }
+            // Mark sources of side-effecting ops as live
+            if op.src0 >= 0 && op.src0 < 16384 {
+                if !live[op.src0 as usize] {
+                    live[op.src0 as usize] = true
+                    count = count + 1
+                }
+            }
+            if op.src1 >= 0 && op.src1 < 16384 {
+                if !live[op.src1 as usize] {
+                    live[op.src1 as usize] = true
+                    count = count + 1
+                }
+            }
+            if op.src2 >= 0 && op.src2 < 16384 {
+                if !live[op.src2 as usize] {
+                    live[op.src2 as usize] = true
+                    count = count + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    // Propagate: scan backwards; if dst is live, mark src0/src1/src2 live.
+    var changed = true
+    while changed {
+        changed = false
+        var j: i64 = blk.op_count - 1
+        while j >= 0 {
+            let op = blk.ops[j as usize]
+            let dst = op.dst_idx
+            if dst >= 0 && dst < 16384 && live[dst as usize] {
+                if op.src0 >= 0 && op.src0 < 16384 && !live[op.src0 as usize] {
+                    live[op.src0 as usize] = true
+                    count = count + 1
+                    changed = true
+                }
+                if op.src1 >= 0 && op.src1 < 16384 && !live[op.src1 as usize] {
+                    live[op.src1 as usize] = true
+                    count = count + 1
+                    changed = true
+                }
+                if op.src2 >= 0 && op.src2 < 16384 && !live[op.src2 as usize] {
+                    live[op.src2 as usize] = true
+                    count = count + 1
+                    changed = true
+                }
+            }
+            j = j - 1
+        }
+    }
+
+    (live, count)
+}
+
+// ============================================================================
+// DCE: remove dead ops from block
+// ============================================================================
+
+fn opt_dce_remove_dead(blk: GpuBlockEntry) -> (GpuBlockEntry, i64) {
+    var out = blk
+    var removed: i64 = 0
+
+    // Mark ops dead first
+    var i: i64 = 0
+    while i < out.op_count {
+        let op = out.ops[i as usize]
+        // An op is dead if it defines a value, is not side-effecting, and is marked dead
+        if op.dead && !opt_op_has_side_effects(op) {
+            removed = removed + 1
+        }
+        i = i + 1
+    }
+
+    // Compact: copy non-dead ops into fresh array
+    var compacted: [GpuOpEntry; 4096] = [opt_gpu_op_entry_zero(); 4096]
+    var dst: i64 = 0
+    var src: i64 = 0
+    while src < out.op_count {
+        let op = out.ops[src as usize]
+        if !op.dead || opt_op_has_side_effects(op) {
+            compacted[dst as usize] = op
+            dst = dst + 1
+        }
+        src = src + 1
+    }
+
+    out.ops = compacted
+    out.op_count = dst
+
+    (out, removed)
+}
+
+// ============================================================================
+// DCE: kernel pass
+// ============================================================================
+
+fn opt_dce_pass(k: GpuKernelEntry) -> (GpuKernelEntry, i64) {
+    var out = k
+    var total_removed: i64 = 0
+
+    var bi: i64 = 0
+    while bi < out.block_count {
+        var blk = out.blocks[bi as usize]
+
+        // Build live set
+        var live: [bool; 16384] = [false; 16384]
+        let liveness = opt_dce_mark_live(blk, live, 0)
+        live = liveness.0
+
+        // Mark ops whose dst is dead and have no side effects
+        var oi: i64 = 0
+        while oi < blk.op_count {
+            let op = blk.ops[oi as usize]
+            let dst = op.dst_idx
+            if dst >= 0 && dst < 16384 && !live[dst as usize] && !opt_op_has_side_effects(op) {
+                var marked = op
+                marked.dead = true
+                blk.ops[oi as usize] = marked
+            }
+            oi = oi + 1
+        }
+
+        out.blocks[bi as usize] = blk
+
+        // Remove dead ops
+        let cleaned = opt_dce_remove_dead(out.blocks[bi as usize])
+        out.blocks[bi as usize] = cleaned.0
+        total_removed = total_removed + cleaned.1
+
+        bi = bi + 1
+    }
+
+    (out, total_removed)
+}
+
+// ============================================================================
+// Register pressure: liveness analysis per block
+// ============================================================================
+
+fn opt_liveness_analyze_block(blk: GpuBlockEntry) -> BlockLiveness {
+    var bl = opt_block_liveness_zero(blk.id)
+
+    // Forward scan: for each value defined or used, record def and last-use indices.
+    var i: i64 = 0
+    while i < blk.op_count {
+        let op = blk.ops[i as usize]
+
+        // Track definition
+        let dst = op.dst_idx
+        if dst >= 0 {
+            // Find existing entry
+            var found = false
+            var ei: i64 = 0
+            while ei < bl.entry_count {
+                if bl.entries[ei as usize].value_id == dst {
+                    var entry = bl.entries[ei as usize]
+                    entry.def_op_idx = i
+                    bl.entries[ei as usize] = entry
+                    found = true
+                    break
+                }
+                ei = ei + 1
+            }
+            if !found && bl.entry_count < 512 {
+                var entry = opt_liveness_entry_zero()
+                entry.value_id = dst
+                entry.def_op_idx = i
+                entry.last_use_op_idx = i
+                entry.is_live = true
+                bl.entries[bl.entry_count as usize] = entry
+                bl.entry_count = bl.entry_count + 1
+            }
+        }
+
+        // Track uses for src0, src1, src2
+        let srcs: [i64; 3] = [op.src0, op.src1, op.src2]
+        var si: i64 = 0
+        while si < 3 {
+            let sv = srcs[si as usize]
+            if sv >= 0 {
+                var found_src = false
+                var ei2: i64 = 0
+                while ei2 < bl.entry_count {
+                    if bl.entries[ei2 as usize].value_id == sv {
+                        var entry = bl.entries[ei2 as usize]
+                        entry.last_use_op_idx = i
+                        bl.entries[ei2 as usize] = entry
+                        found_src = true
+                        break
+                    }
+                    ei2 = ei2 + 1
+                }
+                if !found_src && bl.entry_count < 512 {
+                    var entry = opt_liveness_entry_zero()
+                    entry.value_id = sv
+                    entry.def_op_idx = -1
+                    entry.last_use_op_idx = i
+                    entry.is_live = false
+                    bl.entries[bl.entry_count as usize] = entry
+                    bl.entry_count = bl.entry_count + 1
+
+                    // Live-in: defined before block
+                    if bl.live_in_count < 128 {
+                        bl.live_in[bl.live_in_count as usize] = sv
+                        bl.live_in_count = bl.live_in_count + 1
+                    }
+                }
+            }
+            si = si + 1
+        }
+
+        i = i + 1
+    }
+
+    // Compute peak_live: maximum number of values simultaneously live at any point
+    var peak: i64 = 0
+    var pi: i64 = 0
+    while pi < blk.op_count {
+        var live_now: i64 = 0
+        var ei: i64 = 0
+        while ei < bl.entry_count {
+            let entry = bl.entries[ei as usize]
+            let def = entry.def_op_idx
+            let last = entry.last_use_op_idx
+            if def < 0 {
+                // Live-in: live from 0 to last_use
+                if last >= pi {
+                    live_now = live_now + 1
+                }
+            } else if def <= pi && last >= pi {
+                live_now = live_now + 1
+            }
+            ei = ei + 1
+        }
+        if live_now > peak {
+            peak = live_now
+        }
+        pi = pi + 1
+    }
+    bl.peak_live = peak
+
+    // Populate live_out: values whose last use is the final op (still live at exit)
+    var ei3: i64 = 0
+    while ei3 < bl.entry_count {
+        let entry = bl.entries[ei3 as usize]
+        if entry.last_use_op_idx == blk.op_count - 1 && entry.is_live {
+            if bl.live_out_count < 128 {
+                bl.live_out[bl.live_out_count as usize] = entry.value_id
+                bl.live_out_count = bl.live_out_count + 1
+            }
+        }
+        ei3 = ei3 + 1
+    }
+
+    bl
+}
+
+fn opt_liveness_peak(bl: BlockLiveness) -> i64 {
+    bl.peak_live
+}
+
+// ============================================================================
+// Register pressure: kernel pass
+// ============================================================================
+
+fn opt_register_pressure_pass(k: GpuKernelEntry) -> i64 {
+    var peak: i64 = 0
+
+    var bi: i64 = 0
+    while bi < k.block_count {
+        let bl = opt_liveness_analyze_block(k.blocks[bi as usize])
+        let p = opt_liveness_peak(bl)
+        if p > peak {
+            peak = p
+        }
+        bi = bi + 1
+    }
+
+    peak
+}
+
+// ============================================================================
+// Warp divergence: TID dependency tracking helpers
+// ============================================================================
+
+fn opt_is_tid_dependent(op: GpuOpEntry, tid_values: [i64; 256], count: i64) -> bool {
+    var i: i64 = 0
+    while i < count {
+        let tid_v = tid_values[i as usize]
+        if op.src0 == tid_v || op.src1 == tid_v {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// ============================================================================
+// Warp divergence: block analysis
+// ============================================================================
+
+fn opt_divergence_analyze_block(blk: GpuBlockEntry) -> ([DivergenceInfo; 256], i64) {
+    var infos: [DivergenceInfo; 256] = [opt_divergence_info_zero(); 256]
+    var info_count: i64 = 0
+
+    // TID-dependent value set: start with all GET_TID results
+    var tid_values: [i64; 256] = [-1; 256]
+    var tid_count: i64 = 0
+
+    // Forward scan: propagate TID-taintedness
+    // A value is TID-dependent if its definition uses TID-dependent sources.
+    var tainted: [bool; 16384] = [false; 16384]
+
+    var i: i64 = 0
+    while i < blk.op_count {
+        let op = blk.ops[i as usize]
+
+        // GET_TID seeds the tainted set
+        if op.opcode == OPT_OP_GET_TID {
+            let dst = op.dst_idx
+            if dst >= 0 && dst < 16384 {
+                tainted[dst as usize] = true
+                if tid_count < 256 {
+                    tid_values[tid_count as usize] = dst
+                    tid_count = tid_count + 1
+                }
+            }
+        } else {
+            // Propagate taint through arithmetic
+            var src_tainted = false
+            if op.src0 >= 0 && op.src0 < 16384 && tainted[op.src0 as usize] {
+                src_tainted = true
+            }
+            if op.src1 >= 0 && op.src1 < 16384 && tainted[op.src1 as usize] {
+                src_tainted = true
+            }
+            if op.src2 >= 0 && op.src2 < 16384 && tainted[op.src2 as usize] {
+                src_tainted = true
+            }
+
+            if src_tainted && op.dst_idx >= 0 && op.dst_idx < 16384 {
+                tainted[op.dst_idx as usize] = true
+                if tid_count < 256 {
+                    tid_values[tid_count as usize] = op.dst_idx
+                    tid_count = tid_count + 1
+                }
+            }
+
+            // Branch with TID-dependent predicate → divergent
+            if op.opcode == OPT_OP_BRANCH {
+                let pred = op.pred
+                var pred_is_tid = false
+                if pred >= 0 && pred < 16384 && tainted[pred as usize] {
+                    pred_is_tid = true
+                }
+                if opt_is_tid_dependent(op, tid_values, tid_count) {
+                    pred_is_tid = true
+                }
+
+                if info_count < 256 {
+                    var info = opt_divergence_info_zero()
+                    info.block_id = blk.id
+                    info.op_idx = i
+                    info.is_divergent = pred_is_tid
+                    info.divergence_cause = if pred_is_tid { 0 } else { 3 }
+                    info.reconvergence_block = -1
+                    infos[info_count as usize] = info
+                    info_count = info_count + 1
+                }
+            }
+
+            // SETP feeding a predicate: check if comparison sources are TID-tainted
+            if op.opcode == OPT_OP_SETP_LT {
+                var setp_tainted = false
+                if op.src0 >= 0 && op.src0 < 16384 && tainted[op.src0 as usize] {
+                    setp_tainted = true
+                }
+                if op.src1 >= 0 && op.src1 < 16384 && tainted[op.src1 as usize] {
+                    setp_tainted = true
+                }
+                if setp_tainted && op.dst_idx >= 0 && op.dst_idx < 16384 {
+                    tainted[op.dst_idx as usize] = true
+                    if tid_count < 256 {
+                        tid_values[tid_count as usize] = op.dst_idx
+                        tid_count = tid_count + 1
+                    }
+                }
+            }
+        }
+
+        i = i + 1
+    }
+
+    (infos, info_count)
+}
+
+// ============================================================================
+// Warp divergence: kernel pass
+// ============================================================================
+
+fn opt_divergence_pass(k: GpuKernelEntry) -> i64 {
+    var total_divergent: i64 = 0
+
+    var bi: i64 = 0
+    while bi < k.block_count {
+        let blk = k.blocks[bi as usize]
+        let result = opt_divergence_analyze_block(blk)
+        let infos = result.0
+        let count = result.1
+
+        var ii: i64 = 0
+        while ii < count {
+            if infos[ii as usize].is_divergent {
+                total_divergent = total_divergent + 1
+            }
+            ii = ii + 1
+        }
+
+        bi = bi + 1
+    }
+
+    total_divergent
+}
+
+// ============================================================================
+// Shared memory bank conflict detection
+// ============================================================================
+
+fn opt_detect_bank_conflicts_in_op(op: GpuOpEntry) -> BankConflictInfo {
+    var info = opt_bank_conflict_info_zero()
+    info.op_idx = -1
+
+    if op.opcode != OPT_OP_LOAD_SHARED && op.opcode != OPT_OP_STORE_SHARED {
+        return info
+    }
+
+    // stride = address stride in elements; approximated by imm_int field
+    // 32 banks; bank conflict degree = gcd(stride, 32)
+    let stride_bytes = op.imm_int
+    let stride_elems = if stride_bytes <= 0 { 1 } else { stride_bytes / 4 }
+
+    var conflict: i64 = 1
+    if stride_elems > 0 {
+        let g = opt_gcd(stride_elems, 32)
+        conflict = if g <= 0 { 1 } else { g }
+    }
+
+    info.op_idx = op.dst_idx
+    info.stride = stride_elems
+    info.conflict_degree = conflict
+    info
+}
+
+// ============================================================================
+// Bank conflict: kernel pass
+// ============================================================================
+
+fn opt_bank_conflict_pass(k: GpuKernelEntry) -> ([BankConflictInfo; 256], i64) with Div {
+    var results: [BankConflictInfo; 256] = [opt_bank_conflict_info_zero(); 256]
+    var result_count: i64 = 0
+
+    var bi: i64 = 0
+    while bi < k.block_count {
+        let blk = k.blocks[bi as usize]
+
+        var oi: i64 = 0
+        while oi < blk.op_count {
+            let op = blk.ops[oi as usize]
+            if op.opcode == OPT_OP_LOAD_SHARED || op.opcode == OPT_OP_STORE_SHARED {
+                let info = opt_detect_bank_conflicts_in_op(op)
+                if result_count < 256 {
+                    results[result_count as usize] = info
+                    result_count = result_count + 1
+                }
+            }
+            oi = oi + 1
+        }
+
+        bi = bi + 1
+    }
+
+    (results, result_count)
+}
+
+// ============================================================================
+// Kernel fusion: element-wise detection
+// ============================================================================
+
+fn opt_kernel_is_element_wise(k: GpuKernelEntry) -> bool {
+    // Element-wise: no LOAD_SHARED, no BARRIER, no ATOMIC, single block
+    if k.block_count != 1 {
+        return false
+    }
+
+    let blk = k.blocks[0]
+    var i: i64 = 0
+    while i < blk.op_count {
+        let op = blk.ops[i as usize]
+        if op.opcode == OPT_OP_LOAD_SHARED  { return false }
+        if op.opcode == OPT_OP_STORE_SHARED { return false }
+        if op.opcode == OPT_OP_BARRIER      { return false }
+        if op.opcode == OPT_OP_ATOMIC_ADD   { return false }
+        i = i + 1
+    }
+
+    true
+}
+
+// ============================================================================
+// Kernel fusion: compatibility check
+// ============================================================================
+
+fn opt_fusion_check(a: GpuKernelEntry, b: GpuKernelEntry) -> FusionCandidate {
+    var cand = opt_fusion_candidate_none()
+    cand.kernel_a_idx = 0
+    cand.kernel_b_idx = 1
+
+    if !opt_kernel_is_element_wise(a) || !opt_kernel_is_element_wise(b) {
+        cand.can_fuse = false
+        cand.reason = 2   // side_effects or non-elementwise
+        return cand
+    }
+
+    let total_ops = a.blocks[0].op_count + b.blocks[0].op_count
+    if total_ops >= 4096 {
+        cand.can_fuse = false
+        cand.reason = 3   // too_large
+        cand.merged_op_count = total_ops
+        return cand
+    }
+
+    cand.can_fuse = true
+    cand.reason = 0   // elementwise_compatible
+    cand.merged_op_count = total_ops
+    cand
+}
+
+// ============================================================================
+// Kernel fusion: merge two kernels
+// ============================================================================
+
+fn opt_fusion_merge(a: GpuKernelEntry, b: GpuKernelEntry) -> GpuKernelEntry {
+    var merged = a
+
+    // Value ID offset: shift all b's value IDs by a's max value ID + 1
+    // Approximate offset as op_count of a (conservative safe bound)
+    let id_offset = a.blocks[0].op_count
+
+    // Append b's ops to the single block of a, remapping b's value IDs
+    let a_op_count = merged.blocks[0].op_count
+    let b_blk = b.blocks[0]
+
+    var bi: i64 = 0
+    while bi < b_blk.op_count && (a_op_count + bi) < 4096 {
+        var op = b_blk.ops[bi as usize]
+
+        // Remap dst and src IDs
+        if op.dst_idx >= 0 {
+            op.dst_idx = op.dst_idx + id_offset
+        }
+        if op.src0 >= 0 {
+            op.src0 = op.src0 + id_offset
+        }
+        if op.src1 >= 0 {
+            op.src1 = op.src1 + id_offset
+        }
+        if op.src2 >= 0 {
+            op.src2 = op.src2 + id_offset
+        }
+        if op.pred >= 0 {
+            op.pred = op.pred + id_offset
+        }
+
+        merged.blocks[0].ops[(a_op_count + bi) as usize] = op
+        bi = bi + 1
+    }
+
+    merged.blocks[0].op_count = a_op_count + bi
+
+    // Merge shared memory
+    merged.shared_mem_bytes = a.shared_mem_bytes + b.shared_mem_bytes
+
+    // Conservative thread count: min of the two
+    if b.max_threads_per_block > 0 && b.max_threads_per_block < merged.max_threads_per_block {
+        merged.max_threads_per_block = b.max_threads_per_block
+    }
+
+    merged
+}
+
+// ============================================================================
+// Kernel fusion: module pass
+// ============================================================================
+
+fn opt_fusion_pass(m: GpuModuleOpt) -> (GpuModuleOpt, i64) {
+    var out = m
+    var fused_count: i64 = 0
+
+    var i: i64 = 0
+    while i < out.kernel_count - 1 {
+        let ka = out.kernels[i as usize]
+        let kb = out.kernels[(i + 1) as usize]
+        let cand = opt_fusion_check(ka, kb)
+
+        if cand.can_fuse {
+            let merged = opt_fusion_merge(ka, kb)
+
+            // Replace ka with merged, compact kernels array
+            out.kernels[i as usize] = merged
+
+            // Shift remaining kernels left
+            var j: i64 = i + 1
+            while j < out.kernel_count - 1 {
+                out.kernels[j as usize] = out.kernels[(j + 1) as usize]
+                j = j + 1
+            }
+            out.kernel_count = out.kernel_count - 1
+            fused_count = fused_count + 1
+            // Don't advance i; re-check merged kernel with next one
+        } else {
+            i = i + 1
+        }
+    }
+
+    (out, fused_count)
+}
+
+// ============================================================================
+// Auto-tune: shared memory usage estimation
+// ============================================================================
+
+fn opt_autotune_shared_mem_usage(k: GpuKernelEntry) -> i64 {
+    var count: i64 = 0
+
+    var bi: i64 = 0
+    while bi < k.block_count {
+        let blk = k.blocks[bi as usize]
+        var oi: i64 = 0
+        while oi < blk.op_count {
+            let op = blk.ops[oi as usize]
+            if op.opcode == OPT_OP_STORE_SHARED || op.opcode == OPT_OP_LOAD_SHARED {
+                count = count + 1
+            }
+            oi = oi + 1
+        }
+        bi = bi + 1
+    }
+
+    count * 4
+}
+
+// ============================================================================
+// Auto-tune: compute instruction mix counts
+// ============================================================================
+
+fn opt_autotune_count_loads_stores(k: GpuKernelEntry) -> i64 {
+    var count: i64 = 0
+    var bi: i64 = 0
+    while bi < k.block_count {
+        let blk = k.blocks[bi as usize]
+        var oi: i64 = 0
+        while oi < blk.op_count {
+            let oc = blk.ops[oi as usize].opcode
+            if oc == OPT_OP_LOAD_GLOBAL  { count = count + 1 }
+            if oc == OPT_OP_STORE_GLOBAL { count = count + 1 }
+            if oc == OPT_OP_LOAD_SHARED  { count = count + 1 }
+            if oc == OPT_OP_STORE_SHARED { count = count + 1 }
+            oi = oi + 1
+        }
+        bi = bi + 1
+    }
+    count
+}
+
+fn opt_autotune_count_compute(k: GpuKernelEntry) -> i64 {
+    var count: i64 = 0
+    var bi: i64 = 0
+    while bi < k.block_count {
+        let blk = k.blocks[bi as usize]
+        var oi: i64 = 0
+        while oi < blk.op_count {
+            let oc = blk.ops[oi as usize].opcode
+            if oc == OPT_OP_ADD { count = count + 1 }
+            if oc == OPT_OP_SUB { count = count + 1 }
+            if oc == OPT_OP_MUL { count = count + 1 }
+            if oc == OPT_OP_DIV { count = count + 1 }
+            oi = oi + 1
+        }
+        bi = bi + 1
+    }
+    count
+}
+
+// ============================================================================
+// Auto-tune: advise for a single kernel
+// ============================================================================
+
+fn opt_autotune_advise(k: GpuKernelEntry, sm_version: i64) -> AutoTuneAdvice with Div {
+    var advice = opt_autotune_advice_default()
+
+    let reg_pressure = opt_register_pressure_pass(k)
+    let shared_mem   = opt_autotune_shared_mem_usage(k)
+    let mem_ops      = opt_autotune_count_loads_stores(k)
+    let compute_ops  = opt_autotune_count_compute(k)
+
+    // Thread count recommendation based on register pressure
+    var threads: i64 = 256
+    if reg_pressure > 64 {
+        threads = 128
+    } else if reg_pressure >= 32 {
+        threads = 256
+    } else {
+        threads = 512
+    }
+
+    // Large shared memory: reduce thread count
+    if shared_mem > 32768 {
+        threads = 128
+    }
+
+    // Ampere L2 latency hiding: sm >= 80 and low register pressure
+    if sm_version >= 80 && reg_pressure < 32 {
+        threads = 1024
+    }
+
+    // Occupancy: (threads * 32) / 2048  (max warps per SM for sm_80)
+    let max_threads_sm: i64 = 2048
+    let warps = (threads * 32) / 32    // threads / warp_size * warp_size = threads
+    let occupancy_pct = (warps * 100) / max_threads_sm
+    let occupancy_f32 = (occupancy_pct as f32) / 100.0
+
+    let memory_bound  = mem_ops > compute_ops
+    let compute_bound = compute_ops > mem_ops
+
+    advice.recommended_threads    = threads
+    advice.recommended_shared_mem = shared_mem
+    advice.occupancy_estimate     = occupancy_f32
+    advice.memory_bound           = memory_bound
+    advice.compute_bound          = compute_bound
+
+    advice
+}
+
+// ============================================================================
+// Auto-tune: module pass
+// ============================================================================
+
+fn opt_autotune_pass(m: GpuModuleOpt, sm_version: i64) -> ([AutoTuneAdvice; 64], i64) with Div {
+    var advices: [AutoTuneAdvice; 64] = [opt_autotune_advice_default(); 64]
+    var count: i64 = 0
+
+    var ki: i64 = 0
+    while ki < m.kernel_count && ki < 64 {
+        let k = m.kernels[ki as usize]
+        let advice = opt_autotune_advise(k, sm_version)
+        advices[ki as usize] = advice
+        count = count + 1
+        ki = ki + 1
+    }
+
+    (advices, count)
+}
+
+// ============================================================================
+// Top-level optimizer run
+// ============================================================================
+
+fn opt_run_pass(m: GpuModuleOpt, flags: OptimizerFlags, sm_version: i64) -> (GpuModuleOpt, OptStats) with Div {
+    var module = m
+    var stats = opt_stats_new()
+
+    // 1. Constant folding
+    if flags.const_fold {
+        var ki: i64 = 0
+        while ki < module.kernel_count {
+            let k = module.kernels[ki as usize]
+            let result = opt_const_fold_pass(k)
+            module.kernels[ki as usize] = result.0
+            stats.ops_folded = stats.ops_folded + result.1
+            ki = ki + 1
+        }
+    }
+
+    // 2. Dead code elimination (after folding creates dead ops)
+    if flags.dce {
+        var ki: i64 = 0
+        while ki < module.kernel_count {
+            let k = module.kernels[ki as usize]
+            let result = opt_dce_pass(k)
+            module.kernels[ki as usize] = result.0
+            stats.ops_removed = stats.ops_removed + result.1
+            ki = ki + 1
+        }
+    }
+
+    // 3. Register pressure
+    if flags.reg_pressure {
+        var ki: i64 = 0
+        while ki < module.kernel_count {
+            let p = opt_register_pressure_pass(module.kernels[ki as usize])
+            if p > stats.max_register_pressure {
+                stats.max_register_pressure = p
+            }
+            ki = ki + 1
+        }
+    }
+
+    // 4. Warp divergence
+    if flags.divergence {
+        var ki: i64 = 0
+        while ki < module.kernel_count {
+            let d = opt_divergence_pass(module.kernels[ki as usize])
+            stats.divergent_branches = stats.divergent_branches + d
+            ki = ki + 1
+        }
+    }
+
+    // 5. Bank conflict detection
+    if flags.bank_conflicts {
+        var ki: i64 = 0
+        while ki < module.kernel_count {
+            let bc = opt_bank_conflict_pass(module.kernels[ki as usize])
+            let bc_count = bc.1
+            stats.bank_conflicts_detected = stats.bank_conflicts_detected + bc_count
+            ki = ki + 1
+        }
+    }
+
+    // 6. Kernel fusion
+    if flags.fusion {
+        let fused = opt_fusion_pass(module)
+        module = fused.0
+        stats.kernels_fused = fused.1
+    }
+
+    // 7. Auto-tune advice
+    if flags.auto_tune {
+        let advices = opt_autotune_pass(module, sm_version)
+        let advice_arr = advices.0
+        let advice_count = advices.1
+
+        if advice_count > 0 {
+            stats.recommended_block_size = advice_arr[0].recommended_threads
+        }
+    }
+
+    (module, stats)
+}
+
+// End of gpu/opt/optimizer.sio

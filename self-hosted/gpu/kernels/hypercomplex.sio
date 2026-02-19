@@ -1,0 +1,1320 @@
+// self-hosted::gpu::kernels::hypercomplex — GPU PTX kernels for hypercomplex algebra
+//
+// Emits PTX text for octonion, sedenion, and quaternion operations used in
+// Sounio's scientific computing stack (SNN sedenion layers, PAC training, etc.).
+//
+// Algebras covered:
+//   Quaternions  — 4D normed division algebra (Hamilton product, 16 FMAs)
+//   Octonions    — 8D normed division algebra (Cayley algebra, Fano plane table)
+//   Sedenions    — 16D via Cayley-Dickson from octonions; has zero divisors
+//
+// Epistemic tracking:
+//   Every EightVec and SixteenVec carries a parallel shadow register set (eps_regs)
+//   for first-order uncertainty propagation through all algebraic operations.
+//
+// Architecture:
+//   HypercomplexPtxState → byte buffer (65536 bytes) + register/predicate counters
+//   All helpers precede callers; no forward references.
+//
+// PTX convention: %f<N> for f32 registers, %p<N> for predicates.
+
+// ============================================================================
+// Core state and vector types
+// ============================================================================
+
+struct HypercomplexPtxState {
+    buf: [i8; 65536],
+    buf_len: i64,
+    reg_counter: i64,
+    pred_counter: i64,
+}
+
+struct EightVec {
+    regs: [i64; 8],
+    eps_regs: [i64; 8],
+}
+
+struct SixteenVec {
+    regs: [i64; 16],
+    eps_regs: [i64; 16],
+}
+
+struct FourVec {
+    regs: [i64; 4],
+    eps_regs: [i64; 4],
+}
+
+// ============================================================================
+// PTX emit helpers — lowest-level buffer operations
+// ============================================================================
+
+fn hc_new() -> HypercomplexPtxState {
+    HypercomplexPtxState {
+        buf: [0; 65536],
+        buf_len: 0,
+        reg_counter: 0,
+        pred_counter: 0,
+    }
+}
+
+fn hc_append_byte(s: HypercomplexPtxState, b: i8) -> HypercomplexPtxState {
+    var out = s
+    if out.buf_len < 65536 {
+        out.buf[out.buf_len as usize] = b
+        out.buf_len = out.buf_len + 1
+    }
+    out
+}
+
+// Append a fixed-size 128-byte line buffer, up to len bytes
+fn hc_emit_line(s: HypercomplexPtxState, line: [i8; 128], len: i64) -> HypercomplexPtxState {
+    var out = s
+    var i: i64 = 0
+    while i < len {
+        if out.buf_len < 65536 {
+            out.buf[out.buf_len as usize] = line[i as usize]
+            out.buf_len = out.buf_len + 1
+        }
+        i = i + 1
+    }
+    out
+}
+
+// Append a string literal to the buffer
+fn hc_push_str(s: HypercomplexPtxState, text: string) -> HypercomplexPtxState with Div {
+    var out = s
+    let n = str_len(text)
+    var i: i64 = 0
+    while i < n {
+        if out.buf_len < 65536 {
+            out.buf[out.buf_len as usize] = str_char_at(text, i) as i8
+            out.buf_len = out.buf_len + 1
+        }
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
+// Register allocation
+// ============================================================================
+
+fn hc_alloc_reg(s: HypercomplexPtxState) -> (HypercomplexPtxState, i64) {
+    var out = s
+    let idx = out.reg_counter
+    out.reg_counter = idx + 1
+    (out, idx)
+}
+
+fn hc_alloc_pred(s: HypercomplexPtxState) -> (HypercomplexPtxState, i64) {
+    var out = s
+    let idx = out.pred_counter
+    out.pred_counter = idx + 1
+    (out, idx)
+}
+
+fn hc_alloc_four(s: HypercomplexPtxState) -> (HypercomplexPtxState, FourVec) {
+    var out = s
+
+    var regs: [i64; 4] = [0; 4]
+    var eps_regs: [i64; 4] = [0; 4]
+
+    let p0 = hc_alloc_reg(out)
+    out = p0.0
+    regs[0] = p0.1
+
+    let p1 = hc_alloc_reg(out)
+    out = p1.0
+    regs[1] = p1.1
+
+    let p2 = hc_alloc_reg(out)
+    out = p2.0
+    regs[2] = p2.1
+
+    let p3 = hc_alloc_reg(out)
+    out = p3.0
+    regs[3] = p3.1
+
+    let e0 = hc_alloc_reg(out)
+    out = e0.0
+    eps_regs[0] = e0.1
+
+    let e1 = hc_alloc_reg(out)
+    out = e1.0
+    eps_regs[1] = e1.1
+
+    let e2 = hc_alloc_reg(out)
+    out = e2.0
+    eps_regs[2] = e2.1
+
+    let e3 = hc_alloc_reg(out)
+    out = e3.0
+    eps_regs[3] = e3.1
+
+    (out, FourVec { regs: regs, eps_regs: eps_regs })
+}
+
+fn hc_alloc_eight(s: HypercomplexPtxState) -> (HypercomplexPtxState, EightVec) {
+    var out = s
+
+    var regs: [i64; 8] = [0; 8]
+    var eps_regs: [i64; 8] = [0; 8]
+
+    let r0 = hc_alloc_reg(out)
+    out = r0.0
+    regs[0] = r0.1
+    let r1 = hc_alloc_reg(out)
+    out = r1.0
+    regs[1] = r1.1
+    let r2 = hc_alloc_reg(out)
+    out = r2.0
+    regs[2] = r2.1
+    let r3 = hc_alloc_reg(out)
+    out = r3.0
+    regs[3] = r3.1
+    let r4 = hc_alloc_reg(out)
+    out = r4.0
+    regs[4] = r4.1
+    let r5 = hc_alloc_reg(out)
+    out = r5.0
+    regs[5] = r5.1
+    let r6 = hc_alloc_reg(out)
+    out = r6.0
+    regs[6] = r6.1
+    let r7 = hc_alloc_reg(out)
+    out = r7.0
+    regs[7] = r7.1
+
+    let e0 = hc_alloc_reg(out)
+    out = e0.0
+    eps_regs[0] = e0.1
+    let e1 = hc_alloc_reg(out)
+    out = e1.0
+    eps_regs[1] = e1.1
+    let e2 = hc_alloc_reg(out)
+    out = e2.0
+    eps_regs[2] = e2.1
+    let e3 = hc_alloc_reg(out)
+    out = e3.0
+    eps_regs[3] = e3.1
+    let e4 = hc_alloc_reg(out)
+    out = e4.0
+    eps_regs[4] = e4.1
+    let e5 = hc_alloc_reg(out)
+    out = e5.0
+    eps_regs[5] = e5.1
+    let e6 = hc_alloc_reg(out)
+    out = e6.0
+    eps_regs[6] = e6.1
+    let e7 = hc_alloc_reg(out)
+    out = e7.0
+    eps_regs[7] = e7.1
+
+    (out, EightVec { regs: regs, eps_regs: eps_regs })
+}
+
+fn hc_alloc_sixteen(s: HypercomplexPtxState) -> (HypercomplexPtxState, SixteenVec) {
+    var out = s
+
+    var regs: [i64; 16] = [0; 16]
+    var eps_regs: [i64; 16] = [0; 16]
+
+    var i: i64 = 0
+    while i < 16 {
+        let pair = hc_alloc_reg(out)
+        out = pair.0
+        regs[i as usize] = pair.1
+        i = i + 1
+    }
+
+    var j: i64 = 0
+    while j < 16 {
+        let pair = hc_alloc_reg(out)
+        out = pair.0
+        eps_regs[j as usize] = pair.1
+        j = j + 1
+    }
+
+    (out, SixteenVec { regs: regs, eps_regs: eps_regs })
+}
+
+// ============================================================================
+// Octonion Cayley multiplication table (Fano plane)
+//
+// The 7 lines of the Fano plane (indices 1..7):
+//   (1,2,4), (2,3,5), (3,4,6), (4,5,7), (5,6,1), (6,7,2), (7,1,3)
+//
+// For each line (a,b,c):
+//   e_a*e_b = +e_c   e_b*e_a = -e_c
+//   e_b*e_c = +e_a   e_c*e_b = -e_a
+//   e_c*e_a = +e_b   e_a*e_c = -e_b
+//
+// Diagonal: e_0*e_x = e_x, e_x*e_0 = e_x, e_i*e_i = -1 (i>0, returns e_0 with sign -1)
+// ============================================================================
+
+// Returns +1 or -1 for the sign of e_i * e_j.
+// e_0 is the identity so sign is always +1 when either index is 0.
+// e_i * e_i = -1 for i > 0.
+fn oct_mul_sign(i: i64, j: i64) -> i64 {
+    // Identity element
+    if i == 0 { return 1 }
+    if j == 0 { return 1 }
+    // Self-product: e_i * e_i = -1
+    if i == j { return -1 }
+
+    // Fano plane line (1,2,4): e1*e2=+e4, e2*e4=+e1, e4*e1=+e2
+    if i == 1 && j == 2 { return 1 }
+    if i == 2 && j == 1 { return -1 }
+    if i == 2 && j == 4 { return 1 }
+    if i == 4 && j == 2 { return -1 }
+    if i == 4 && j == 1 { return 1 }
+    if i == 1 && j == 4 { return -1 }
+
+    // Fano plane line (2,3,5): e2*e3=+e5, e3*e5=+e2, e5*e2=+e3
+    if i == 2 && j == 3 { return 1 }
+    if i == 3 && j == 2 { return -1 }
+    if i == 3 && j == 5 { return 1 }
+    if i == 5 && j == 3 { return -1 }
+    if i == 5 && j == 2 { return 1 }
+    if i == 2 && j == 5 { return -1 }
+
+    // Fano plane line (3,4,6): e3*e4=+e6, e4*e6=+e3, e6*e3=+e4
+    if i == 3 && j == 4 { return 1 }
+    if i == 4 && j == 3 { return -1 }
+    if i == 4 && j == 6 { return 1 }
+    if i == 6 && j == 4 { return -1 }
+    if i == 6 && j == 3 { return 1 }
+    if i == 3 && j == 6 { return -1 }
+
+    // Fano plane line (4,5,7): e4*e5=+e7, e5*e7=+e4, e7*e4=+e5
+    if i == 4 && j == 5 { return 1 }
+    if i == 5 && j == 4 { return -1 }
+    if i == 5 && j == 7 { return 1 }
+    if i == 7 && j == 5 { return -1 }
+    if i == 7 && j == 4 { return 1 }
+    if i == 4 && j == 7 { return -1 }
+
+    // Fano plane line (5,6,1): e5*e6=+e1, e6*e1=+e5, e1*e5=+e6  (wait: cyclic)
+    // (a,b,c)=(5,6,1): e5*e6=+e1, e6*e1=+e5, e1*e5=+e6
+    if i == 5 && j == 6 { return 1 }
+    if i == 6 && j == 5 { return -1 }
+    if i == 6 && j == 1 { return 1 }
+    if i == 1 && j == 6 { return -1 }
+    if i == 1 && j == 5 { return 1 }
+    if i == 5 && j == 1 { return -1 }
+
+    // Fano plane line (6,7,2): e6*e7=+e2, e7*e2=+e6, e2*e6=+e7
+    if i == 6 && j == 7 { return 1 }
+    if i == 7 && j == 6 { return -1 }
+    if i == 7 && j == 2 { return 1 }
+    if i == 2 && j == 7 { return -1 }
+    if i == 2 && j == 6 { return 1 }
+    if i == 6 && j == 2 { return -1 }
+
+    // Fano plane line (7,1,3): e7*e1=+e3, e1*e3=+e7, e3*e7=+e1
+    if i == 7 && j == 1 { return 1 }
+    if i == 1 && j == 7 { return -1 }
+    if i == 1 && j == 3 { return 1 }
+    if i == 3 && j == 1 { return -1 }
+    if i == 3 && j == 7 { return 1 }
+    if i == 7 && j == 3 { return -1 }
+
+    // Should not reach here for valid indices 0..7
+    0
+}
+
+// Returns index k such that e_i * e_j = sign * e_k.
+// When i==0: result is e_j. When j==0: result is e_i.
+// When i==j && i>0: result is e_0 (scalar, with sign -1).
+fn oct_mul_basis(i: i64, j: i64) -> i64 {
+    if i == 0 { return j }
+    if j == 0 { return i }
+    if i == j { return 0 }
+
+    // Fano line (1,2,4)
+    if i == 1 && j == 2 { return 4 }
+    if i == 2 && j == 1 { return 4 }
+    if i == 2 && j == 4 { return 1 }
+    if i == 4 && j == 2 { return 1 }
+    if i == 4 && j == 1 { return 2 }
+    if i == 1 && j == 4 { return 2 }
+
+    // Fano line (2,3,5)
+    if i == 2 && j == 3 { return 5 }
+    if i == 3 && j == 2 { return 5 }
+    if i == 3 && j == 5 { return 2 }
+    if i == 5 && j == 3 { return 2 }
+    if i == 5 && j == 2 { return 3 }
+    if i == 2 && j == 5 { return 3 }
+
+    // Fano line (3,4,6)
+    if i == 3 && j == 4 { return 6 }
+    if i == 4 && j == 3 { return 6 }
+    if i == 4 && j == 6 { return 3 }
+    if i == 6 && j == 4 { return 3 }
+    if i == 6 && j == 3 { return 4 }
+    if i == 3 && j == 6 { return 4 }
+
+    // Fano line (4,5,7)
+    if i == 4 && j == 5 { return 7 }
+    if i == 5 && j == 4 { return 7 }
+    if i == 5 && j == 7 { return 4 }
+    if i == 7 && j == 5 { return 4 }
+    if i == 7 && j == 4 { return 5 }
+    if i == 4 && j == 7 { return 5 }
+
+    // Fano line (5,6,1)
+    if i == 5 && j == 6 { return 1 }
+    if i == 6 && j == 5 { return 1 }
+    if i == 6 && j == 1 { return 5 }
+    if i == 1 && j == 6 { return 5 }
+    if i == 1 && j == 5 { return 6 }
+    if i == 5 && j == 1 { return 6 }
+
+    // Fano line (6,7,2)
+    if i == 6 && j == 7 { return 2 }
+    if i == 7 && j == 6 { return 2 }
+    if i == 7 && j == 2 { return 6 }
+    if i == 2 && j == 7 { return 6 }
+    if i == 2 && j == 6 { return 7 }
+    if i == 6 && j == 2 { return 7 }
+
+    // Fano line (7,1,3)
+    if i == 7 && j == 1 { return 3 }
+    if i == 1 && j == 7 { return 3 }
+    if i == 1 && j == 3 { return 7 }
+    if i == 3 && j == 1 { return 7 }
+    if i == 3 && j == 7 { return 1 }
+    if i == 7 && j == 3 { return 1 }
+
+    // Unreachable for valid 0..7 inputs
+    0
+}
+
+// ============================================================================
+// Atomic PTX instruction emitters
+// All use register index form: %f<N>
+// ============================================================================
+
+fn hc_emit_fma_f32(s: HypercomplexPtxState, dst: i64, a: i64, b: i64, c: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    fma.rn.f32 %f")
+    out = hc_push_str(out, i64_to_string(dst))
+    out = hc_push_str(out, ", %f")
+    out = hc_push_str(out, i64_to_string(a))
+    out = hc_push_str(out, ", %f")
+    out = hc_push_str(out, i64_to_string(b))
+    out = hc_push_str(out, ", %f")
+    out = hc_push_str(out, i64_to_string(c))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+fn hc_emit_mul_f32(s: HypercomplexPtxState, dst: i64, a: i64, b: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    mul.f32 %f")
+    out = hc_push_str(out, i64_to_string(dst))
+    out = hc_push_str(out, ", %f")
+    out = hc_push_str(out, i64_to_string(a))
+    out = hc_push_str(out, ", %f")
+    out = hc_push_str(out, i64_to_string(b))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+fn hc_emit_add_f32(s: HypercomplexPtxState, dst: i64, a: i64, b: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    add.f32 %f")
+    out = hc_push_str(out, i64_to_string(dst))
+    out = hc_push_str(out, ", %f")
+    out = hc_push_str(out, i64_to_string(a))
+    out = hc_push_str(out, ", %f")
+    out = hc_push_str(out, i64_to_string(b))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+fn hc_emit_sub_f32(s: HypercomplexPtxState, dst: i64, a: i64, b: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    sub.f32 %f")
+    out = hc_push_str(out, i64_to_string(dst))
+    out = hc_push_str(out, ", %f")
+    out = hc_push_str(out, i64_to_string(a))
+    out = hc_push_str(out, ", %f")
+    out = hc_push_str(out, i64_to_string(b))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+fn hc_emit_neg_f32(s: HypercomplexPtxState, dst: i64, src: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    neg.f32 %f")
+    out = hc_push_str(out, i64_to_string(dst))
+    out = hc_push_str(out, ", %f")
+    out = hc_push_str(out, i64_to_string(src))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+fn hc_emit_mov_f32(s: HypercomplexPtxState, dst: i64, src: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    mov.f32 %f")
+    out = hc_push_str(out, i64_to_string(dst))
+    out = hc_push_str(out, ", %f")
+    out = hc_push_str(out, i64_to_string(src))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+fn hc_emit_sqrt_f32(s: HypercomplexPtxState, dst: i64, src: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    sqrt.approx.f32 %f")
+    out = hc_push_str(out, i64_to_string(dst))
+    out = hc_push_str(out, ", %f")
+    out = hc_push_str(out, i64_to_string(src))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+fn hc_emit_rcp_f32(s: HypercomplexPtxState, dst: i64, src: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    rcp.approx.f32 %f")
+    out = hc_push_str(out, i64_to_string(dst))
+    out = hc_push_str(out, ", %f")
+    out = hc_push_str(out, i64_to_string(src))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+// Emit mov.f32 %f<dst>, 0f<hex>; — value encoded as 32-bit IEEE 754 hex.
+// We accept the bit pattern as an i64 (cast of f32 bit representation).
+fn hc_emit_const_f32(s: HypercomplexPtxState, dst: i64, val: f32) -> HypercomplexPtxState with Div {
+    var out = s
+    // Emit as mov with hex literal; format: 0f<8 hex digits>
+    let bits = f32_to_bits(val)
+    out = hc_push_str(out, "    mov.f32 %f")
+    out = hc_push_str(out, i64_to_string(dst))
+    out = hc_push_str(out, ", 0f")
+    out = hc_push_str(out, i64_to_hex8(bits))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+// Emit setp.lt.f32 %p<dst>, %f<a>, %f<b>;
+fn hc_emit_setp_lt_f32(s: HypercomplexPtxState, dst: i64, a: i64, b: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    setp.lt.f32 %p")
+    out = hc_push_str(out, i64_to_string(dst))
+    out = hc_push_str(out, ", %f")
+    out = hc_push_str(out, i64_to_string(a))
+    out = hc_push_str(out, ", %f")
+    out = hc_push_str(out, i64_to_string(b))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+// Emit abs.f32 %f<dst>, %f<src>;
+fn hc_emit_abs_f32(s: HypercomplexPtxState, dst: i64, src: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    abs.f32 %f")
+    out = hc_push_str(out, i64_to_string(dst))
+    out = hc_push_str(out, ", %f")
+    out = hc_push_str(out, i64_to_string(src))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+// Emit max.f32 %f<dst>, %f<a>, %f<b>;
+fn hc_emit_max_f32(s: HypercomplexPtxState, dst: i64, a: i64, b: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    max.f32 %f")
+    out = hc_push_str(out, i64_to_string(dst))
+    out = hc_push_str(out, ", %f")
+    out = hc_push_str(out, i64_to_string(a))
+    out = hc_push_str(out, ", %f")
+    out = hc_push_str(out, i64_to_string(b))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+// ============================================================================
+// Quaternion operations (Hamilton product)
+// ============================================================================
+
+// Hamilton product: (a0+a1i+a2j+a3k)(b0+b1i+b2j+b3k)
+//   r0 = a0b0 - a1b1 - a2b2 - a3b3
+//   r1 = a0b1 + a1b0 + a2b3 - a3b2
+//   r2 = a0b2 - a1b3 + a2b0 + a3b1
+//   r3 = a0b3 + a1b2 - a2b1 + a3b0
+// Emits 16 FMA instructions (4 per output component).
+fn hc_emit_quat_mul(s: HypercomplexPtxState, r: FourVec, a: FourVec, b: FourVec) -> (HypercomplexPtxState, FourVec) with Div {
+    var out = s
+
+    // Allocate negation temporaries for subtraction via sign-flip FMA
+    let n0p = hc_alloc_reg(out)
+    out = n0p.0
+    let neg0 = n0p.1
+
+    let n1p = hc_alloc_reg(out)
+    out = n1p.0
+    let neg1 = n1p.1
+
+    let n2p = hc_alloc_reg(out)
+    out = n2p.0
+    let neg2 = n2p.1
+
+    let n3p = hc_alloc_reg(out)
+    out = n3p.0
+    let neg3 = n3p.1
+
+    // Negate b components for signed FMA accumulation
+    out = hc_emit_neg_f32(out, neg0, b.regs[0])
+    out = hc_emit_neg_f32(out, neg1, b.regs[1])
+    out = hc_emit_neg_f32(out, neg2, b.regs[2])
+    out = hc_emit_neg_f32(out, neg3, b.regs[3])
+
+    // Accumulator temporaries
+    let t0p = hc_alloc_reg(out)
+    out = t0p.0
+    let t0 = t0p.1
+    let t1p = hc_alloc_reg(out)
+    out = t1p.0
+    let t1 = t1p.1
+    let t2p = hc_alloc_reg(out)
+    out = t2p.0
+    let t2 = t2p.1
+
+    // r0 = a0*b0 + a1*(-b1) + a2*(-b2) + a3*(-b3)
+    out = hc_emit_mul_f32(out, r.regs[0], a.regs[0], b.regs[0])
+    out = hc_emit_fma_f32(out, r.regs[0], a.regs[1], neg1, r.regs[0])
+    out = hc_emit_fma_f32(out, r.regs[0], a.regs[2], neg2, r.regs[0])
+    out = hc_emit_fma_f32(out, r.regs[0], a.regs[3], neg3, r.regs[0])
+
+    // r1 = a0*b1 + a1*b0 + a2*b3 + a3*(-b2)
+    out = hc_emit_mul_f32(out, r.regs[1], a.regs[0], b.regs[1])
+    out = hc_emit_fma_f32(out, r.regs[1], a.regs[1], b.regs[0], r.regs[1])
+    out = hc_emit_fma_f32(out, r.regs[1], a.regs[2], b.regs[3], r.regs[1])
+    out = hc_emit_fma_f32(out, r.regs[1], a.regs[3], neg2, r.regs[1])
+
+    // r2 = a0*b2 + a1*(-b3) + a2*b0 + a3*b1
+    out = hc_emit_mul_f32(out, r.regs[2], a.regs[0], b.regs[2])
+    out = hc_emit_fma_f32(out, r.regs[2], a.regs[1], neg3, r.regs[2])
+    out = hc_emit_fma_f32(out, r.regs[2], a.regs[2], b.regs[0], r.regs[2])
+    out = hc_emit_fma_f32(out, r.regs[2], a.regs[3], b.regs[1], r.regs[2])
+
+    // r3 = a0*b3 + a1*b2 + a2*(-b1) + a3*b0
+    out = hc_emit_mul_f32(out, r.regs[3], a.regs[0], b.regs[3])
+    out = hc_emit_fma_f32(out, r.regs[3], a.regs[1], b.regs[2], r.regs[3])
+    out = hc_emit_fma_f32(out, r.regs[3], a.regs[2], neg1, r.regs[3])
+    out = hc_emit_fma_f32(out, r.regs[3], a.regs[3], b.regs[0], r.regs[3])
+
+    (out, r)
+}
+
+// ||q||^2 = q0^2 + q1^2 + q2^2 + q3^2 — returns the accumulator register index
+fn hc_emit_quat_norm_sq(s: HypercomplexPtxState, r: FourVec) -> (HypercomplexPtxState, i64) with Div {
+    var out = s
+    let tp = hc_alloc_reg(out)
+    out = tp.0
+    let t = tp.1
+    let nsqp = hc_alloc_reg(out)
+    out = nsqp.0
+    let nsq = nsqp.1
+
+    // nsq = q0*q0 + q1*q1 + q2*q2 + q3*q3
+    out = hc_emit_mul_f32(out, nsq, r.regs[0], r.regs[0])
+    out = hc_emit_fma_f32(out, nsq, r.regs[1], r.regs[1], nsq)
+    out = hc_emit_fma_f32(out, nsq, r.regs[2], r.regs[2], nsq)
+    out = hc_emit_fma_f32(out, nsq, r.regs[3], r.regs[3], nsq)
+
+    (out, nsq)
+}
+
+// conj(q) = (q0, -q1, -q2, -q3)
+fn hc_emit_quat_conjugate(s: HypercomplexPtxState, a: FourVec) -> (HypercomplexPtxState, FourVec) with Div {
+    var out = s
+    let cp = hc_alloc_four(out)
+    out = cp.0
+    var conj = cp.1
+
+    out = hc_emit_mov_f32(out, conj.regs[0], a.regs[0])
+    out = hc_emit_neg_f32(out, conj.regs[1], a.regs[1])
+    out = hc_emit_neg_f32(out, conj.regs[2], a.regs[2])
+    out = hc_emit_neg_f32(out, conj.regs[3], a.regs[3])
+
+    (out, conj)
+}
+
+// q / ||q|| — normalize quaternion
+fn hc_emit_quat_normalize(s: HypercomplexPtxState, a: FourVec) -> (HypercomplexPtxState, FourVec) with Div {
+    var out = s
+
+    let nsq_pair = hc_emit_quat_norm_sq(out, a)
+    out = nsq_pair.0
+    let nsq = nsq_pair.1
+
+    let len_p = hc_alloc_reg(out)
+    out = len_p.0
+    let len_r = len_p.1
+
+    let rcp_p = hc_alloc_reg(out)
+    out = rcp_p.0
+    let rcp_r = rcp_p.1
+
+    out = hc_emit_sqrt_f32(out, len_r, nsq)
+    out = hc_emit_rcp_f32(out, rcp_r, len_r)
+
+    let rp = hc_alloc_four(out)
+    out = rp.0
+    var result = rp.1
+
+    out = hc_emit_mul_f32(out, result.regs[0], a.regs[0], rcp_r)
+    out = hc_emit_mul_f32(out, result.regs[1], a.regs[1], rcp_r)
+    out = hc_emit_mul_f32(out, result.regs[2], a.regs[2], rcp_r)
+    out = hc_emit_mul_f32(out, result.regs[3], a.regs[3], rcp_r)
+
+    (out, result)
+}
+
+// ============================================================================
+// Octonion operations
+// ============================================================================
+
+// Component-wise add: r_k = a_k + b_k
+fn hc_emit_oct_add(s: HypercomplexPtxState, r: EightVec, a: EightVec, b: EightVec) -> (HypercomplexPtxState, EightVec) with Div {
+    var out = s
+    var i: i64 = 0
+    while i < 8 {
+        out = hc_emit_add_f32(out, r.regs[i as usize], a.regs[i as usize], b.regs[i as usize])
+        i = i + 1
+    }
+    (out, r)
+}
+
+// Component-wise subtract: r_k = a_k - b_k
+fn hc_emit_oct_sub(s: HypercomplexPtxState, r: EightVec, a: EightVec, b: EightVec) -> (HypercomplexPtxState, EightVec) with Div {
+    var out = s
+    var i: i64 = 0
+    while i < 8 {
+        out = hc_emit_sub_f32(out, r.regs[i as usize], a.regs[i as usize], b.regs[i as usize])
+        i = i + 1
+    }
+    (out, r)
+}
+
+// Scale: r_k = a_k * scalar_reg
+fn hc_emit_oct_scale(s: HypercomplexPtxState, r: EightVec, a: EightVec, scalar: i64) -> (HypercomplexPtxState, EightVec) with Div {
+    var out = s
+    var i: i64 = 0
+    while i < 8 {
+        out = hc_emit_mul_f32(out, r.regs[i as usize], a.regs[i as usize], scalar)
+        i = i + 1
+    }
+    (out, r)
+}
+
+// Full octonion (Cayley) multiplication using the Fano plane table.
+// For each result component k, accumulate sign(i,j)*a_i*b_j for all (i,j)
+// where oct_mul_basis(i,j) == k.
+//
+// Strategy: allocate a negation temp per b component, then for each k walk
+// all 64 pairs and emit FMA into r_k.  Since each k gets exactly 8 contributing
+// pairs this emits 64 mul + fma instructions total.
+fn hc_emit_oct_mul(s: HypercomplexPtxState, r: EightVec, a: EightVec, b: EightVec) -> (HypercomplexPtxState, EightVec) with Div {
+    var out = s
+
+    // Negation shadow of b registers (for negative sign terms)
+    var nb: [i64; 8] = [0; 8]
+    var ni: i64 = 0
+    while ni < 8 {
+        let np = hc_alloc_reg(out)
+        out = np.0
+        nb[ni as usize] = np.1
+        out = hc_emit_neg_f32(out, nb[ni as usize], b.regs[ni as usize])
+        ni = ni + 1
+    }
+
+    // For each output component k, collect all contributing (i,j) pairs
+    var k: i64 = 0
+    while k < 8 {
+        var first_term: bool = true
+        var i: i64 = 0
+        while i < 8 {
+            var j: i64 = 0
+            while j < 8 {
+                let basis = oct_mul_basis(i, j)
+                if basis == k {
+                    let sign = oct_mul_sign(i, j)
+                    // Choose b_j or -b_j register depending on sign
+                    var b_reg: i64 = 0
+                    if sign == 1 {
+                        b_reg = b.regs[j as usize]
+                    } else {
+                        b_reg = nb[j as usize]
+                    }
+                    if first_term {
+                        out = hc_emit_mul_f32(out, r.regs[k as usize], a.regs[i as usize], b_reg)
+                        first_term = false
+                    } else {
+                        out = hc_emit_fma_f32(out, r.regs[k as usize], a.regs[i as usize], b_reg, r.regs[k as usize])
+                    }
+                }
+                j = j + 1
+            }
+            i = i + 1
+        }
+        k = k + 1
+    }
+
+    (out, r)
+}
+
+// conj(o) = (o0, -o1, ..., -o7)
+fn hc_emit_oct_conjugate(s: HypercomplexPtxState, a: EightVec) -> (HypercomplexPtxState, EightVec) with Div {
+    var out = s
+    let cp = hc_alloc_eight(out)
+    out = cp.0
+    var conj = cp.1
+
+    out = hc_emit_mov_f32(out, conj.regs[0], a.regs[0])
+    var i: i64 = 1
+    while i < 8 {
+        out = hc_emit_neg_f32(out, conj.regs[i as usize], a.regs[i as usize])
+        i = i + 1
+    }
+
+    (out, conj)
+}
+
+// ||o||^2 = sum_i o_i^2 — returns accumulator register index
+fn hc_emit_oct_norm_sq(s: HypercomplexPtxState, a: EightVec) -> (HypercomplexPtxState, i64) with Div {
+    var out = s
+    let ap = hc_alloc_reg(out)
+    out = ap.0
+    let acc = ap.1
+
+    out = hc_emit_mul_f32(out, acc, a.regs[0], a.regs[0])
+    var i: i64 = 1
+    while i < 8 {
+        out = hc_emit_fma_f32(out, acc, a.regs[i as usize], a.regs[i as usize], acc)
+        i = i + 1
+    }
+
+    (out, acc)
+}
+
+// o / ||o||
+fn hc_emit_oct_normalize(s: HypercomplexPtxState, a: EightVec) -> (HypercomplexPtxState, EightVec) with Div {
+    var out = s
+
+    let nsq_pair = hc_emit_oct_norm_sq(out, a)
+    out = nsq_pair.0
+    let nsq = nsq_pair.1
+
+    let len_p = hc_alloc_reg(out)
+    out = len_p.0
+    let len_r = len_p.1
+
+    let rcp_p = hc_alloc_reg(out)
+    out = rcp_p.0
+    let rcp_r = rcp_p.1
+
+    out = hc_emit_sqrt_f32(out, len_r, nsq)
+    out = hc_emit_rcp_f32(out, rcp_r, len_r)
+
+    let rp = hc_alloc_eight(out)
+    out = rp.0
+    var result = rp.1
+
+    var i: i64 = 0
+    while i < 8 {
+        out = hc_emit_mul_f32(out, result.regs[i as usize], a.regs[i as usize], rcp_r)
+        i = i + 1
+    }
+
+    (out, result)
+}
+
+// Real part of conj(a) * b — the octonion inner product
+// Re(conj(a)*b) = sum_i a_i * b_i  (since conj negates i>0 and table is antisymmetric)
+fn hc_emit_oct_dot(s: HypercomplexPtxState, a: EightVec, b: EightVec) -> (HypercomplexPtxState, i64) with Div {
+    var out = s
+    let ap = hc_alloc_reg(out)
+    out = ap.0
+    let acc = ap.1
+
+    out = hc_emit_mul_f32(out, acc, a.regs[0], b.regs[0])
+    var i: i64 = 1
+    while i < 8 {
+        out = hc_emit_fma_f32(out, acc, a.regs[i as usize], b.regs[i as usize], acc)
+        i = i + 1
+    }
+
+    (out, acc)
+}
+
+// y = W*x + b where W is an 8×8 real matrix stored row-major in w_regs[64].
+// w_regs[row*8 + col] holds the register index for W[row][col].
+// Each output component y_k = sum_j W[k][j] * x_j + bias_k
+fn hc_emit_oct_linear_layer(
+    s: HypercomplexPtxState,
+    x: EightVec,
+    w_regs: [i64; 64],
+    bias: EightVec
+) -> (HypercomplexPtxState, EightVec) with Div {
+    var out = s
+
+    let rp = hc_alloc_eight(out)
+    out = rp.0
+    var result = rp.1
+
+    var k: i64 = 0
+    while k < 8 {
+        // First term: W[k][0] * x[0]
+        out = hc_emit_mul_f32(out, result.regs[k as usize], w_regs[(k * 8) as usize], x.regs[0])
+        // FMA accumulate remaining columns
+        var j: i64 = 1
+        while j < 8 {
+            out = hc_emit_fma_f32(out, result.regs[k as usize], w_regs[(k * 8 + j) as usize], x.regs[j as usize], result.regs[k as usize])
+            j = j + 1
+        }
+        // Add bias
+        out = hc_emit_add_f32(out, result.regs[k as usize], result.regs[k as usize], bias.regs[k as usize])
+        k = k + 1
+    }
+
+    (out, result)
+}
+
+// ============================================================================
+// Sedenion operations (Cayley-Dickson from octonions)
+//
+// A sedenion a = (a_lo, a_hi) where each half is an 8-component octonion.
+// SixteenVec: regs[0..7] = lower octonion, regs[8..15] = upper octonion.
+//
+// Cayley-Dickson product: (a,b)(c,d) = (a*c - d*conj(b), d*a + b*conj(c))
+// where a,b,c,d are octonions.
+// ============================================================================
+
+// Extract lower octonion (components 0..7) from a SixteenVec
+fn sed_lower(v: SixteenVec) -> EightVec {
+    var regs: [i64; 8] = [0; 8]
+    var eps: [i64; 8] = [0; 8]
+    var i: i64 = 0
+    while i < 8 {
+        regs[i as usize] = v.regs[i as usize]
+        eps[i as usize] = v.eps_regs[i as usize]
+        i = i + 1
+    }
+    EightVec { regs: regs, eps_regs: eps }
+}
+
+// Extract upper octonion (components 8..15) from a SixteenVec
+fn sed_upper(v: SixteenVec) -> EightVec {
+    var regs: [i64; 8] = [0; 8]
+    var eps: [i64; 8] = [0; 8]
+    var i: i64 = 0
+    while i < 8 {
+        regs[i as usize] = v.regs[(i + 8) as usize]
+        eps[i as usize] = v.eps_regs[(i + 8) as usize]
+        i = i + 1
+    }
+    EightVec { regs: regs, eps_regs: eps }
+}
+
+// Assemble a SixteenVec from lower + upper EightVecs
+fn sed_assemble(lo: EightVec, hi: EightVec) -> SixteenVec {
+    var regs: [i64; 16] = [0; 16]
+    var eps: [i64; 16] = [0; 16]
+    var i: i64 = 0
+    while i < 8 {
+        regs[i as usize] = lo.regs[i as usize]
+        eps[i as usize] = lo.eps_regs[i as usize]
+        regs[(i + 8) as usize] = hi.regs[i as usize]
+        eps[(i + 8) as usize] = hi.eps_regs[i as usize]
+        i = i + 1
+    }
+    SixteenVec { regs: regs, eps_regs: eps }
+}
+
+// 16 component-wise adds
+fn hc_emit_sed_add(s: HypercomplexPtxState, r: SixteenVec, a: SixteenVec, b: SixteenVec) -> (HypercomplexPtxState, SixteenVec) with Div {
+    var out = s
+    var i: i64 = 0
+    while i < 16 {
+        out = hc_emit_add_f32(out, r.regs[i as usize], a.regs[i as usize], b.regs[i as usize])
+        i = i + 1
+    }
+    (out, r)
+}
+
+// Cayley-Dickson sedenion multiplication:
+//   (a,b)(c,d) = (a*c - d*conj(b), d*a + b*conj(c))
+// where a,b = lower/upper halves of left operand, c,d = halves of right operand.
+// Emits 4 octonion multiplications and 2 octonion additions.
+fn hc_emit_sed_mul(s: HypercomplexPtxState, r: SixteenVec, a: SixteenVec, b: SixteenVec) -> (HypercomplexPtxState, SixteenVec) with Div {
+    var out = s
+
+    let a_lo = sed_lower(a)
+    let a_hi = sed_upper(a)
+    let b_lo = sed_lower(b)
+    let b_hi = sed_upper(b)
+
+    // conj(a_hi) and conj(b_lo)
+    let conj_a_hi_p = hc_emit_oct_conjugate(out, a_hi)
+    out = conj_a_hi_p.0
+    let conj_a_hi = conj_a_hi_p.1
+
+    let conj_b_lo_p = hc_emit_oct_conjugate(out, b_lo)
+    out = conj_b_lo_p.0
+    let conj_b_lo = conj_b_lo_p.1
+
+    // Allocate result octonion temps
+    let tmp1p = hc_alloc_eight(out)
+    out = tmp1p.0
+    var tmp1 = tmp1p.1
+
+    let tmp2p = hc_alloc_eight(out)
+    out = tmp2p.0
+    var tmp2 = tmp2p.1
+
+    let tmp3p = hc_alloc_eight(out)
+    out = tmp3p.0
+    var tmp3 = tmp3p.1
+
+    let tmp4p = hc_alloc_eight(out)
+    out = tmp4p.0
+    var tmp4 = tmp4p.1
+
+    // lo_result = a_lo * b_lo - b_hi * conj(a_hi)
+    let m1p = hc_emit_oct_mul(out, tmp1, a_lo, b_lo)
+    out = m1p.0
+    tmp1 = m1p.1
+
+    let m2p = hc_emit_oct_mul(out, tmp2, b_hi, conj_a_hi)
+    out = m2p.0
+    tmp2 = m2p.1
+
+    let lo_rp = hc_alloc_eight(out)
+    out = lo_rp.0
+    var lo_r = lo_rp.1
+    let lo_subp = hc_emit_oct_sub(out, lo_r, tmp1, tmp2)
+    out = lo_subp.0
+    lo_r = lo_subp.1
+
+    // hi_result = b_hi * a_lo + a_hi * conj(b_lo)
+    let m3p = hc_emit_oct_mul(out, tmp3, b_hi, a_lo)
+    out = m3p.0
+    tmp3 = m3p.1
+
+    let m4p = hc_emit_oct_mul(out, tmp4, a_hi, conj_b_lo)
+    out = m4p.0
+    tmp4 = m4p.1
+
+    let hi_rp = hc_alloc_eight(out)
+    out = hi_rp.0
+    var hi_r = hi_rp.1
+    let hi_addp = hc_emit_oct_add(out, hi_r, tmp3, tmp4)
+    out = hi_addp.0
+    hi_r = hi_addp.1
+
+    let result = sed_assemble(lo_r, hi_r)
+    (out, result)
+}
+
+// (a, b)* = (conj(a_lo), -a_hi)
+fn hc_emit_sed_conjugate(s: HypercomplexPtxState, a: SixteenVec) -> (HypercomplexPtxState, SixteenVec) with Div {
+    var out = s
+
+    let a_lo = sed_lower(a)
+    let a_hi = sed_upper(a)
+
+    let conj_lo_p = hc_emit_oct_conjugate(out, a_lo)
+    out = conj_lo_p.0
+    let conj_lo = conj_lo_p.1
+
+    let neg_hi_p = hc_alloc_eight(out)
+    out = neg_hi_p.0
+    var neg_hi = neg_hi_p.1
+
+    var i: i64 = 0
+    while i < 8 {
+        out = hc_emit_neg_f32(out, neg_hi.regs[i as usize], a_hi.regs[i as usize])
+        i = i + 1
+    }
+
+    let result = sed_assemble(conj_lo, neg_hi)
+    (out, result)
+}
+
+// ||s||^2 = sum of squares of all 16 components
+fn hc_emit_sed_norm_sq(s: HypercomplexPtxState, a: SixteenVec) -> (HypercomplexPtxState, i64) with Div {
+    var out = s
+
+    let ap = hc_alloc_reg(out)
+    out = ap.0
+    let acc = ap.1
+
+    out = hc_emit_mul_f32(out, acc, a.regs[0], a.regs[0])
+    var i: i64 = 1
+    while i < 16 {
+        out = hc_emit_fma_f32(out, acc, a.regs[i as usize], a.regs[i as usize], acc)
+        i = i + 1
+    }
+
+    (out, acc)
+}
+
+// Check for possible zero divisor neighborhood: returns predicate register.
+// setp.lt.f32 %p<N>, %f<norm_sq>, 0f3727C5AC;  (1e-6 in IEEE 754 = 0x3527C5AC)
+fn hc_emit_sed_is_zero_divisor_check(s: HypercomplexPtxState, a: SixteenVec) -> (HypercomplexPtxState, i64) with Div {
+    var out = s
+
+    let nsq_pair = hc_emit_sed_norm_sq(out, a)
+    out = nsq_pair.0
+    let nsq = nsq_pair.1
+
+    let thresh_p = hc_alloc_reg(out)
+    out = thresh_p.0
+    let thresh = thresh_p.1
+
+    let pred_p = hc_alloc_pred(out)
+    out = pred_p.0
+    let pred = pred_p.1
+
+    // 1e-6f IEEE 754 bits = 0x35C28F5C (closest single)
+    // Using mov.f32 with hex literal for the threshold
+    out = hc_push_str(out, "    mov.f32 %f")
+    out = hc_push_str(out, i64_to_string(thresh))
+    out = hc_push_str(out, ", 0f35C28F5C;\n")
+
+    out = hc_emit_setp_lt_f32(out, pred, nsq, thresh)
+
+    (out, pred)
+}
+
+// ============================================================================
+// Epistemic uncertainty propagation for hypercomplex products
+// ============================================================================
+
+// Uncertainty for octonion product using max propagation:
+//   eps_result_k = max over contributing (i,j) pairs of (eps_a_i + eps_b_j)
+// This is a conservative bound that avoids sqrt in the GPU kernel.
+fn hc_emit_oct_eps_mul(s: HypercomplexPtxState, a: EightVec, b: EightVec) -> (HypercomplexPtxState, EightVec) with Div {
+    var out = s
+
+    // Allocate result vector; eps_regs will hold the propagated uncertainties
+    let rp = hc_alloc_eight(out)
+    out = rp.0
+    var result = rp.1
+
+    let scratch_p = hc_alloc_reg(out)
+    out = scratch_p.0
+    let scratch = scratch_p.1
+
+    let pair_eps_p = hc_alloc_reg(out)
+    out = pair_eps_p.0
+    let pair_eps = pair_eps_p.1
+
+    var k: i64 = 0
+    while k < 8 {
+        var first_term: bool = true
+        var i: i64 = 0
+        while i < 8 {
+            var j: i64 = 0
+            while j < 8 {
+                let basis = oct_mul_basis(i, j)
+                if basis == k {
+                    // pair_eps = eps_a_i + eps_b_j
+                    out = hc_emit_add_f32(out, pair_eps, a.eps_regs[i as usize], b.eps_regs[j as usize])
+                    if first_term {
+                        out = hc_emit_mov_f32(out, result.eps_regs[k as usize], pair_eps)
+                        first_term = false
+                    } else {
+                        out = hc_emit_max_f32(out, result.eps_regs[k as usize], result.eps_regs[k as usize], pair_eps)
+                    }
+                }
+                j = j + 1
+            }
+            i = i + 1
+        }
+        k = k + 1
+    }
+
+    (out, result)
+}
+
+// Uncertainty propagation for sedenion product.
+// Delegates to oct_eps_mul on each of the four sub-products in Cayley-Dickson form,
+// then takes component-wise max of the resulting uncertainty vectors.
+fn hc_emit_sed_eps_mul(s: HypercomplexPtxState, a: SixteenVec, b: SixteenVec) -> (HypercomplexPtxState, SixteenVec) with Div {
+    var out = s
+
+    let a_lo = sed_lower(a)
+    let a_hi = sed_upper(a)
+    let b_lo = sed_lower(b)
+    let b_hi = sed_upper(b)
+
+    // Propagate through each of the 4 sub-products contributing to the result
+    let eps1_p = hc_emit_oct_eps_mul(out, a_lo, b_lo)
+    out = eps1_p.0
+    let eps1 = eps1_p.1
+
+    let eps2_p = hc_emit_oct_eps_mul(out, b_hi, a_hi)
+    out = eps2_p.0
+    let eps2 = eps2_p.1
+
+    let eps3_p = hc_emit_oct_eps_mul(out, b_hi, a_lo)
+    out = eps3_p.0
+    let eps3 = eps3_p.1
+
+    let eps4_p = hc_emit_oct_eps_mul(out, a_hi, b_lo)
+    out = eps4_p.0
+    let eps4 = eps4_p.1
+
+    // Lower half uncertainty: max(eps1, eps2) per component
+    let lo_rp = hc_alloc_eight(out)
+    out = lo_rp.0
+    var lo_eps = lo_rp.1
+
+    var i: i64 = 0
+    while i < 8 {
+        out = hc_emit_max_f32(out, lo_eps.eps_regs[i as usize], eps1.eps_regs[i as usize], eps2.eps_regs[i as usize])
+        i = i + 1
+    }
+
+    // Upper half uncertainty: max(eps3, eps4) per component
+    let hi_rp = hc_alloc_eight(out)
+    out = hi_rp.0
+    var hi_eps = hi_rp.1
+
+    var j: i64 = 0
+    while j < 8 {
+        out = hc_emit_max_f32(out, hi_eps.eps_regs[j as usize], eps3.eps_regs[j as usize], eps4.eps_regs[j as usize])
+        j = j + 1
+    }
+
+    let result = sed_assemble(lo_eps, hi_eps)
+    (out, result)
+}
+
+// ============================================================================
+// Full kernel header emitters
+// ============================================================================
+
+// Emit standard PTX file header (.version, .target, .address_size)
+fn hc_emit_ptx_file_header(s: HypercomplexPtxState) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, ".version 8.0\n")
+    out = hc_push_str(out, ".target sm_80\n")
+    out = hc_push_str(out, ".address_size 64\n\n")
+    out
+}
+
+// Emit register declarations block for hypercomplex kernels.
+// reg_count: total f32 registers needed; pred_count: predicate registers.
+fn hc_emit_reg_decls(s: HypercomplexPtxState, reg_count: i64, pred_count: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    .reg .f32 %f<")
+    out = hc_push_str(out, i64_to_string(reg_count))
+    out = hc_push_str(out, ">;\n")
+    out = hc_push_str(out, "    .reg .pred %p<")
+    out = hc_push_str(out, i64_to_string(pred_count))
+    out = hc_push_str(out, ">;\n")
+    out = hc_push_str(out, "    .reg .b64 %rd<16>;\n")
+    out = hc_push_str(out, "    .reg .b32 %r<8>;\n\n")
+    out
+}
+
+// .visible .entry sounio_oct_mul(a_ptr, b_ptr, out_ptr, [eps params], n)
+fn hc_emit_oct_mul_kernel_header(s: HypercomplexPtxState, with_epistemic: bool) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_emit_ptx_file_header(out)
+    out = hc_push_str(out, ".visible .entry sounio_oct_mul(\n")
+    out = hc_push_str(out, "    .param .u64 param_a_ptr,\n")
+    out = hc_push_str(out, "    .param .u64 param_b_ptr,\n")
+    out = hc_push_str(out, "    .param .u64 param_out_ptr,\n")
+    if with_epistemic {
+        out = hc_push_str(out, "    .param .u64 param_a_eps_ptr,\n")
+        out = hc_push_str(out, "    .param .u64 param_b_eps_ptr,\n")
+        out = hc_push_str(out, "    .param .u64 param_out_eps_ptr,\n")
+    }
+    out = hc_push_str(out, "    .param .u64 param_n\n")
+    out = hc_push_str(out, ")\n")
+    out = hc_push_str(out, "{\n")
+    // Register declarations: 8+8 input regs * 2 operands + 8 output + 8 neg temps
+    // plus epistemic shadow regs if requested; use generous fixed pool
+    if with_epistemic {
+        out = hc_emit_reg_decls(out, 256, 32)
+    } else {
+        out = hc_emit_reg_decls(out, 128, 16)
+    }
+    // Thread index computation
+    out = hc_push_str(out, "    // --- thread index ---\n")
+    out = hc_push_str(out, "    mov.u32 %r0, %tid.x;\n")
+    out = hc_push_str(out, "    mov.u32 %r1, %ctaid.x;\n")
+    out = hc_push_str(out, "    mov.u32 %r2, %ntid.x;\n")
+    out = hc_push_str(out, "    mad.lo.u32 %r3, %r1, %r2, %r0;  // global thread id\n\n")
+    out
+}
+
+// .visible .entry sounio_sed_mul(...) for sedenion multiply
+fn hc_emit_sed_mul_kernel_header(s: HypercomplexPtxState, with_epistemic: bool) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_emit_ptx_file_header(out)
+    out = hc_push_str(out, ".visible .entry sounio_sed_mul(\n")
+    out = hc_push_str(out, "    .param .u64 param_a_ptr,\n")
+    out = hc_push_str(out, "    .param .u64 param_b_ptr,\n")
+    out = hc_push_str(out, "    .param .u64 param_out_ptr,\n")
+    if with_epistemic {
+        out = hc_push_str(out, "    .param .u64 param_a_eps_ptr,\n")
+        out = hc_push_str(out, "    .param .u64 param_b_eps_ptr,\n")
+        out = hc_push_str(out, "    .param .u64 param_out_eps_ptr,\n")
+    }
+    out = hc_push_str(out, "    .param .u64 param_n\n")
+    out = hc_push_str(out, ")\n")
+    out = hc_push_str(out, "{\n")
+    // Sedenion mul decomposes into 4 octonion muls; generous register pool
+    if with_epistemic {
+        out = hc_emit_reg_decls(out, 512, 64)
+    } else {
+        out = hc_emit_reg_decls(out, 256, 32)
+    }
+    out = hc_push_str(out, "    // --- thread index ---\n")
+    out = hc_push_str(out, "    mov.u32 %r0, %tid.x;\n")
+    out = hc_push_str(out, "    mov.u32 %r1, %ctaid.x;\n")
+    out = hc_push_str(out, "    mov.u32 %r2, %ntid.x;\n")
+    out = hc_push_str(out, "    mad.lo.u32 %r3, %r1, %r2, %r0;\n\n")
+    out
+}
+
+// .visible .entry sounio_oct_linear_layer(w_ptr, b_ptr, x_ptr, y_ptr, batch_size)
+fn hc_emit_oct_layer_kernel_header(s: HypercomplexPtxState) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_emit_ptx_file_header(out)
+    out = hc_push_str(out, ".visible .entry sounio_oct_linear_layer(\n")
+    out = hc_push_str(out, "    .param .u64 param_w_ptr,\n")
+    out = hc_push_str(out, "    .param .u64 param_b_ptr,\n")
+    out = hc_push_str(out, "    .param .u64 param_x_ptr,\n")
+    out = hc_push_str(out, "    .param .u64 param_y_ptr,\n")
+    out = hc_push_str(out, "    .param .u64 param_batch_size\n")
+    out = hc_push_str(out, ")\n")
+    out = hc_push_str(out, "{\n")
+    // 8 input + 8 bias + 64 weights + 8 output + scratch
+    out = hc_emit_reg_decls(out, 128, 16)
+    out = hc_push_str(out, "    // --- thread = batch element ---\n")
+    out = hc_push_str(out, "    mov.u32 %r0, %tid.x;\n")
+    out = hc_push_str(out, "    mov.u32 %r1, %ctaid.x;\n")
+    out = hc_push_str(out, "    mov.u32 %r2, %ntid.x;\n")
+    out = hc_push_str(out, "    mad.lo.u32 %r3, %r1, %r2, %r0;\n\n")
+    out
+}
+
+// ============================================================================
+// Output extraction
+// ============================================================================
+
+// Return the raw buffer and its length for inspection or serialization
+fn hc_get_output(s: HypercomplexPtxState) -> ([i8; 65536], i64) {
+    (s.buf, s.buf_len)
+}

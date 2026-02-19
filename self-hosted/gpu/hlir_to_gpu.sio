@@ -1,1566 +1,1274 @@
-// self-hosted::gpu::hlir_to_gpu — HLIR -> GPU Kernel IR lowering
+// self-hosted::gpu::hlir_to_gpu — HLIR-to-GPU IR lowering pass
 //
-// This pass bridges SSA-form HLIR into the compact GpuKernelIr format used by
-// the PTX/Metal/SPIR-V backends. The current design goal is compatibility with
-// the existing self-hosted GPU opcode set and deterministic lowering behavior.
+// Translates HLIR (SSA-form IR used by the main compiler) down to GpuKernelIr
+// opcodes used for PTX/Metal/SPIR-V codegen.  This is the bridge between the
+// typed IR and the GPU backend.
 //
-// Notes:
-// - Kernel functions are selected via `HlirFunction.is_kernel`.
-// - Lowering is best-effort for unsupported HLIR ops (graceful fallback).
-// - Local allocas are mapped to shared-memory slots when possible.
-// - The output contract is `GpuKernelIr`, consumed by `gpu_lower_to_ptx()` and
-//   `gpu_compile_*()` in portable.sio.
+// Design principles:
+// - All data structures are fixed-capacity (no heap allocation).
+// - Helpers always precede their callers (no forward references).
+// - State threading via struct return — no global mutation.
+// - Epistemic Knowledge<T> values get four shadow registers each.
+// - Counterfactual mode replicates lanes across the warp.
 
 // ============================================================================
-// Limits and tags
+// Section 1 — HlirTypeTag constants
 // ============================================================================
 
-let HLIR_GPU_MAX_KERNELS: i64 = 64
-let HLIR_GPU_MAX_VALUES: i64 = 8192
-let HLIR_GPU_MAX_SHARED_BYTES: i64 = 65536
-
-let HLIR_GPU_CONST_NONE: i64 = 0
-let HLIR_GPU_CONST_INT: i64 = 1
-let HLIR_GPU_CONST_FLOAT: i64 = 2
-let HLIR_GPU_CONST_BOOL: i64 = 3
-let HLIR_GPU_CONST_NULL: i64 = 4
-
-let HLIR_GPU_REG_B32_LIMIT: i64 = 13     // %r0..%r12
-let HLIR_GPU_REG_B64_LIMIT: i64 = 21     // %rd0..%rd20
-let HLIR_GPU_REG_F32_LIMIT: i64 = 21     // %f0..%f20
-let HLIR_GPU_REG_F64_LIMIT: i64 = 21     // %fd0..%fd20
-let HLIR_GPU_REG_PRED_LIMIT: i64 = 16    // %p0..%p15
+let HlirTypeI32: i64 = 0
+let HlirTypeI64: i64 = 1
+let HlirTypeF32: i64 = 2
+let HlirTypeF64: i64 = 3
+let HlirTypePtr: i64 = 4
+let HlirTypeBool: i64 = 5
+let HlirTypeI8: i64 = 6
+let HlirTypeI16: i64 = 7
+let HlirTypeU32: i64 = 8
+let HlirTypeU64: i64 = 9
+let HlirTypeF16: i64 = 10
+let HlirTypeKnowledge: i64 = 11
+let HlirTypeVec2: i64 = 12
+let HlirTypeVec3: i64 = 13
+let HlirTypeVec4: i64 = 14
+let HlirTypeMat2: i64 = 15
+let HlirTypeMat3: i64 = 16
+let HlirTypeMat4: i64 = 17
+let HlirTypeQuat: i64 = 18
+let HlirTypeOctonion: i64 = 19
+let HlirTypeSedenion: i64 = 20
+let HlirTypeI128: i64 = 21
+let HlirTypeU128: i64 = 22
 
 // ============================================================================
-// Result container
+// Section 2 — HlirOpTag constants
 // ============================================================================
 
-struct HlirGpuLoweredModule {
-    kernels: [GpuKernelIr; 64],
-    kernel_count: i64,
-    skipped_func_ids: [i64; 1024],
-    skipped_count: i64,
-    had_overflow: bool,
+let HlirOpConst: i64 = 0
+let HlirOpAdd: i64 = 1
+let HlirOpSub: i64 = 2
+let HlirOpMul: i64 = 3
+let HlirOpDiv: i64 = 4
+let HlirOpRem: i64 = 5
+let HlirOpNeg: i64 = 6
+let HlirOpFAdd: i64 = 7
+let HlirOpFSub: i64 = 8
+let HlirOpFMul: i64 = 9
+let HlirOpFDiv: i64 = 10
+let HlirOpFNeg: i64 = 11
+let HlirOpAnd: i64 = 12
+let HlirOpOr: i64 = 13
+let HlirOpXor: i64 = 14
+let HlirOpShl: i64 = 15
+let HlirOpShr: i64 = 16
+let HlirOpEq: i64 = 17
+let HlirOpNe: i64 = 18
+let HlirOpLt: i64 = 19
+let HlirOpLe: i64 = 20
+let HlirOpGt: i64 = 21
+let HlirOpGe: i64 = 22
+let HlirOpFEq: i64 = 23
+let HlirOpFNe: i64 = 24
+let HlirOpFLt: i64 = 25
+let HlirOpFLe: i64 = 26
+let HlirOpFGt: i64 = 27
+let HlirOpFGe: i64 = 28
+let HlirOpLoad: i64 = 29
+let HlirOpStore: i64 = 30
+let HlirOpAlloca: i64 = 31
+let HlirOpGEP: i64 = 32
+let HlirOpCall: i64 = 33
+let HlirOpPhi: i64 = 34
+let HlirOpSExt: i64 = 35
+let HlirOpZExt: i64 = 36
+let HlirOpTrunc: i64 = 37
+let HlirOpFpExt: i64 = 38
+let HlirOpFpTrunc: i64 = 39
+let HlirOpBitcast: i64 = 40
+let HlirOpSIToFP: i64 = 41
+let HlirOpFPToSI: i64 = 42
+let HlirOpSelect: i64 = 43
+let HlirOpFMA: i64 = 44
+let HlirOpGetThreadId: i64 = 45
+let HlirOpGetBlockId: i64 = 46
+let HlirOpGetBlockDim: i64 = 47
+let HlirOpGetGridDim: i64 = 48
+let HlirOpAtomicAdd: i64 = 49
+let HlirOpAtomicSub: i64 = 50
+let HlirOpAtomicMin: i64 = 51
+let HlirOpAtomicMax: i64 = 52
+let HlirOpSyncThreads: i64 = 53
+let HlirOpSyncWarp: i64 = 54
+
+// ============================================================================
+// Section 3 — HlirTermTag constants
+// ============================================================================
+
+let HlirTermRet: i64 = 0
+let HlirTermRetVoid: i64 = 1
+let HlirTermBr: i64 = 2
+let HlirTermCondBr: i64 = 3
+let HlirTermSwitch: i64 = 4
+let HlirTermUnreachable: i64 = 5
+
+// ============================================================================
+// Section 4 — GpuTypeTag constants
+// ============================================================================
+
+let GpuTypeU32: i64 = 0
+let GpuTypeU64: i64 = 1
+let GpuTypeF32: i64 = 2
+let GpuTypeF64: i64 = 3
+let GpuTypeI32: i64 = 4
+let GpuTypeI64: i64 = 5
+let GpuTypePtr: i64 = 6
+let GpuTypeF16: i64 = 7
+let GpuTypeBF16: i64 = 8
+let GpuTypeBool: i64 = 9
+let GpuTypeI8: i64 = 10
+
+// ============================================================================
+// Section 5 — GpuOpcodeTag constants
+// ============================================================================
+
+let GpuOpcodeGetTid: i64 = 0
+let GpuOpcodeConst: i64 = 1
+let GpuOpcodeCvt: i64 = 2
+let GpuOpcodeMulImm: i64 = 3
+let GpuOpcodeAdd: i64 = 4
+let GpuOpcodeSub: i64 = 5
+let GpuOpcodeMul: i64 = 6
+let GpuOpcodeDiv: i64 = 7
+let GpuOpcodeMax: i64 = 8
+let GpuOpcodeMin: i64 = 9
+let GpuOpcodeAnd: i64 = 10
+let GpuOpcodeOr: i64 = 11
+let GpuOpcodeXor: i64 = 12
+let GpuOpcodeShl: i64 = 13
+let GpuOpcodeLoadGlobal: i64 = 14
+let GpuOpcodeStoreGlobal: i64 = 15
+let GpuOpcodeRet: i64 = 16
+let GpuOpcodeFma: i64 = 17
+let GpuOpcodeGetBid: i64 = 18
+let GpuOpcodeGetNtid: i64 = 19
+let GpuOpcodeAddImm: i64 = 20
+let GpuOpcodeBarrierSync: i64 = 21
+let GpuOpcodeSetpLt: i64 = 22
+let GpuOpcodeSetpLe: i64 = 23
+let GpuOpcodeSetpEq: i64 = 24
+let GpuOpcodeSetpGe: i64 = 25
+let GpuOpcodeSelp: i64 = 26
+let GpuOpcodeAtomicAdd: i64 = 27
+let GpuOpcodeAtomicSub: i64 = 28
+let GpuOpcodeAtomicMin: i64 = 29
+let GpuOpcodeAtomicMax: i64 = 30
+let GpuOpcodeSqrt: i64 = 31
+let GpuOpcodeAbs: i64 = 32
+let GpuOpcodeNeg: i64 = 33
+let GpuOpcodeSetpGt: i64 = 34
+let GpuOpcodeSetpNe: i64 = 35
+let GpuOpcodeLoadParam: i64 = 36
+let GpuOpcodeShr: i64 = 37
+
+// ============================================================================
+// Section 6 — GpuOpEntry
+// ============================================================================
+
+struct GpuOpEntry {
+    opcode: i64,
+    type_tag: i64,
+    dst_idx: i64,
+    src0: i64,
+    src1: i64,
+    src2: i64,
+    imm_int: i64,
+    imm_f32: f32,
+    pred: i64,
+    axis: i64,
 }
 
-fn hlir_gpu_lowered_module_new() -> HlirGpuLoweredModule {
-    HlirGpuLoweredModule {
-        kernels: [gpu_kernel_new(); 64],
-        kernel_count: 0,
-        skipped_func_ids: [-1; 1024],
-        skipped_count: 0,
-        had_overflow: false,
+fn gpu_op_entry_default() -> GpuOpEntry {
+    GpuOpEntry {
+        opcode: 0,
+        type_tag: 0,
+        dst_idx: -1,
+        src0: -1,
+        src1: -1,
+        src2: -1,
+        imm_int: 0,
+        imm_f32: 0.0,
+        pred: -1,
+        axis: 0,
     }
 }
 
-fn hlir_gpu_lowered_add_kernel(mod: HlirGpuLoweredModule, kernel: GpuKernelIr) -> HlirGpuLoweredModule with Mut, Panic {
-    var out = mod
-    if out.kernel_count < HLIR_GPU_MAX_KERNELS {
-        out.kernels[out.kernel_count as usize] = kernel
+// ============================================================================
+// Section 7 — GpuBlockEntry
+// ============================================================================
+
+struct GpuBlockEntry {
+    id: i64,
+    ops: [GpuOpEntry; 4096],
+    op_count: i64,
+    term_tag: i64,
+    term_src: i64,
+    term_target0: i64,
+    term_target1: i64,
+}
+
+fn gpu_block_entry_default() -> GpuBlockEntry {
+    GpuBlockEntry {
+        id: -1,
+        ops: [gpu_op_entry_default(); 4096],
+        op_count: 0,
+        term_tag: HlirTermRetVoid,
+        term_src: -1,
+        term_target0: -1,
+        term_target1: -1,
+    }
+}
+
+// ============================================================================
+// Section 8 — GpuParamEntry
+// ============================================================================
+
+struct GpuParamEntry {
+    name: [i8; 64],
+    name_len: i64,
+    type_tag: i64,
+    is_restrict: bool,
+}
+
+fn gpu_param_entry_default() -> GpuParamEntry {
+    GpuParamEntry {
+        name: [0; 64],
+        name_len: 0,
+        type_tag: GpuTypeU64,
+        is_restrict: false,
+    }
+}
+
+// ============================================================================
+// Section 9 — GpuKernelEntry
+// ============================================================================
+
+struct GpuKernelEntry {
+    name: [i8; 256],
+    name_len: i64,
+    is_kernel: bool,
+    params: [GpuParamEntry; 32],
+    param_count: i64,
+    blocks: [GpuBlockEntry; 256],
+    block_count: i64,
+}
+
+fn gpu_kernel_entry_default() -> GpuKernelEntry {
+    GpuKernelEntry {
+        name: [0; 256],
+        name_len: 0,
+        is_kernel: true,
+        params: [gpu_param_entry_default(); 32],
+        param_count: 0,
+        blocks: [gpu_block_entry_default(); 256],
+        block_count: 0,
+    }
+}
+
+// ============================================================================
+// Section 10 — GpuModuleOutput
+// ============================================================================
+
+struct GpuModuleOutput {
+    kernels: [GpuKernelEntry; 64],
+    kernel_count: i64,
+    device_fns: [GpuKernelEntry; 64],
+    device_fn_count: i64,
+}
+
+// ============================================================================
+// Section 11 — EpistemicShadowEntry
+// ============================================================================
+
+struct EpistemicShadowEntry {
+    hlir_value: i64,
+    gpu_value: i64,
+    eps_value: i64,
+    valid_value: i64,
+    prov_value: i64,
+}
+
+fn epistemic_shadow_entry_default() -> EpistemicShadowEntry {
+    EpistemicShadowEntry {
+        hlir_value: -1,
+        gpu_value: -1,
+        eps_value: -1,
+        valid_value: -1,
+        prov_value: -1,
+    }
+}
+
+// ============================================================================
+// Section 12 — ValueMapEntry
+// ============================================================================
+
+struct ValueMapEntry {
+    hlir_id: i64,
+    gpu_id: i64,
+    type_tag: i64,
+}
+
+fn value_map_entry_default() -> ValueMapEntry {
+    ValueMapEntry {
+        hlir_id: -1,
+        gpu_id: -1,
+        type_tag: GpuTypeI32,
+    }
+}
+
+// ============================================================================
+// Section 13 — HlirToGpuState
+// ============================================================================
+
+struct HlirToGpuState {
+    next_value_id: i64,
+    next_block_id: i64,
+    value_map: [ValueMapEntry; 8192],
+    value_map_count: i64,
+    block_map_src: [i64; 2048],
+    block_map_dst: [i64; 2048],
+    block_map_count: i64,
+    epistemic_shadows: [EpistemicShadowEntry; 8192],
+    shadow_count: i64,
+    epistemic_enabled: bool,
+    counterfactual_enabled: bool,
+    target_sm: i64,
+    fast_math: bool,
+}
+
+// ============================================================================
+// Section 14 — Top-level constructors
+// ============================================================================
+
+fn hlir_to_gpu_state_new(epistemic: bool, counterfactual: bool, sm_version: i64, fast_math: bool) -> HlirToGpuState {
+    HlirToGpuState {
+        next_value_id: 0,
+        next_block_id: 0,
+        value_map: [value_map_entry_default(); 8192],
+        value_map_count: 0,
+        block_map_src: [-1; 2048],
+        block_map_dst: [-1; 2048],
+        block_map_count: 0,
+        epistemic_shadows: [epistemic_shadow_entry_default(); 8192],
+        shadow_count: 0,
+        epistemic_enabled: epistemic,
+        counterfactual_enabled: counterfactual,
+        target_sm: sm_version,
+        fast_math: fast_math,
+    }
+}
+
+fn hlir_to_gpu_module_new() -> GpuModuleOutput {
+    GpuModuleOutput {
+        kernels: [gpu_kernel_entry_default(); 64],
+        kernel_count: 0,
+        device_fns: [gpu_kernel_entry_default(); 64],
+        device_fn_count: 0,
+    }
+}
+
+// ============================================================================
+// Section 15 — Value/block allocation
+// ============================================================================
+
+fn hlir_gpu_alloc_value(s: HlirToGpuState) -> (HlirToGpuState, i64) with Mut {
+    var out = s
+    let id = out.next_value_id
+    out.next_value_id = id + 1
+    (out, id)
+}
+
+fn hlir_gpu_alloc_block(s: HlirToGpuState) -> (HlirToGpuState, i64) with Mut {
+    var out = s
+    let id = out.next_block_id
+    out.next_block_id = id + 1
+    (out, id)
+}
+
+fn hlir_gpu_map_value(s: HlirToGpuState, hlir_id: i64, type_tag: i64) -> (HlirToGpuState, i64) with Mut {
+    var out = s
+    let result = hlir_gpu_alloc_value(out)
+    out = result.0
+    let gpu_id = result.1
+    if out.value_map_count < 8192 {
+        let idx = out.value_map_count as usize
+        out.value_map[idx] = ValueMapEntry { hlir_id: hlir_id, gpu_id: gpu_id, type_tag: type_tag }
+        out.value_map_count = out.value_map_count + 1
+    }
+    (out, gpu_id)
+}
+
+fn hlir_gpu_lookup_value(s: HlirToGpuState, hlir_id: i64) -> i64 {
+    var i: i64 = 0
+    var found: i64 = -1
+    while i < s.value_map_count {
+        if s.value_map[i as usize].hlir_id == hlir_id {
+            found = s.value_map[i as usize].gpu_id
+        }
+        i = i + 1
+    }
+    found
+}
+
+fn hlir_gpu_map_block(s: HlirToGpuState, hlir_block_id: i64) -> (HlirToGpuState, i64) with Mut {
+    var out = s
+    let result = hlir_gpu_alloc_block(out)
+    out = result.0
+    let gpu_id = result.1
+    if out.block_map_count < 2048 {
+        let idx = out.block_map_count as usize
+        out.block_map_src[idx] = hlir_block_id
+        out.block_map_dst[idx] = gpu_id
+        out.block_map_count = out.block_map_count + 1
+    }
+    (out, gpu_id)
+}
+
+fn hlir_gpu_lookup_block(s: HlirToGpuState, hlir_block_id: i64) -> i64 {
+    var i: i64 = 0
+    var found: i64 = -1
+    while i < s.block_map_count {
+        if s.block_map_src[i as usize] == hlir_block_id {
+            found = s.block_map_dst[i as usize]
+        }
+        i = i + 1
+    }
+    found
+}
+
+// ============================================================================
+// Section 16 — Type lowering
+// ============================================================================
+
+fn hlir_lower_type(type_tag: i64) -> i64 {
+    if type_tag == HlirTypeI32 { return GpuTypeI32 }
+    if type_tag == HlirTypeI64 { return GpuTypeI64 }
+    if type_tag == HlirTypeF32 { return GpuTypeF32 }
+    if type_tag == HlirTypeF64 { return GpuTypeF64 }
+    if type_tag == HlirTypePtr { return GpuTypePtr }
+    if type_tag == HlirTypeBool { return GpuTypeBool }
+    if type_tag == HlirTypeI8 { return GpuTypeI8 }
+    if type_tag == HlirTypeI16 { return GpuTypeI32 }
+    if type_tag == HlirTypeU32 { return GpuTypeU32 }
+    if type_tag == HlirTypeU64 { return GpuTypeU64 }
+    if type_tag == HlirTypeF16 { return GpuTypeF16 }
+    // Knowledge<T>: strip wrapper, default to f32
+    if type_tag == HlirTypeKnowledge { return GpuTypeF32 }
+    // Aggregate types: represented as pointers to their storage
+    if type_tag == HlirTypeVec2 { return GpuTypePtr }
+    if type_tag == HlirTypeVec3 { return GpuTypePtr }
+    if type_tag == HlirTypeVec4 { return GpuTypePtr }
+    if type_tag == HlirTypeMat2 { return GpuTypePtr }
+    if type_tag == HlirTypeMat3 { return GpuTypePtr }
+    if type_tag == HlirTypeMat4 { return GpuTypePtr }
+    if type_tag == HlirTypeQuat { return GpuTypePtr }
+    if type_tag == HlirTypeOctonion { return GpuTypePtr }
+    if type_tag == HlirTypeSedenion { return GpuTypePtr }
+    // 128-bit integers downgraded — GPUs lack native 128-bit
+    if type_tag == HlirTypeI128 { return GpuTypeI64 }
+    if type_tag == HlirTypeU128 { return GpuTypeU64 }
+    // Default fallback
+    GpuTypeI32
+}
+
+// ============================================================================
+// Section 17 — GpuOpEntry builders
+// ============================================================================
+
+fn gpu_op_make(opcode: i64, type_tag: i64, dst: i64, s0: i64, s1: i64, s2: i64) -> GpuOpEntry {
+    GpuOpEntry {
+        opcode: opcode,
+        type_tag: type_tag,
+        dst_idx: dst,
+        src0: s0,
+        src1: s1,
+        src2: s2,
+        imm_int: 0,
+        imm_f32: 0.0,
+        pred: -1,
+        axis: 0,
+    }
+}
+
+fn gpu_op_imm_i(opcode: i64, type_tag: i64, dst: i64, imm: i64) -> GpuOpEntry {
+    GpuOpEntry {
+        opcode: opcode,
+        type_tag: type_tag,
+        dst_idx: dst,
+        src0: -1,
+        src1: -1,
+        src2: -1,
+        imm_int: imm,
+        imm_f32: 0.0,
+        pred: -1,
+        axis: 0,
+    }
+}
+
+fn gpu_op_imm_f(opcode: i64, type_tag: i64, dst: i64, f: f32) -> GpuOpEntry {
+    GpuOpEntry {
+        opcode: opcode,
+        type_tag: type_tag,
+        dst_idx: dst,
+        src0: -1,
+        src1: -1,
+        src2: -1,
+        imm_int: 0,
+        imm_f32: f,
+        pred: -1,
+        axis: 0,
+    }
+}
+
+fn gpu_op_pred(op: GpuOpEntry, pred: i64) -> GpuOpEntry {
+    GpuOpEntry {
+        opcode: op.opcode,
+        type_tag: op.type_tag,
+        dst_idx: op.dst_idx,
+        src0: op.src0,
+        src1: op.src1,
+        src2: op.src2,
+        imm_int: op.imm_int,
+        imm_f32: op.imm_f32,
+        pred: pred,
+        axis: op.axis,
+    }
+}
+
+fn gpu_op_axis(op: GpuOpEntry, axis: i64) -> GpuOpEntry {
+    GpuOpEntry {
+        opcode: op.opcode,
+        type_tag: op.type_tag,
+        dst_idx: op.dst_idx,
+        src0: op.src0,
+        src1: op.src1,
+        src2: op.src2,
+        imm_int: op.imm_int,
+        imm_f32: op.imm_f32,
+        pred: op.pred,
+        axis: axis,
+    }
+}
+
+// ============================================================================
+// Section 18 — Block helpers
+// ============================================================================
+
+fn gpu_block_add_op(blk: GpuBlockEntry, op: GpuOpEntry) -> GpuBlockEntry with Mut, Panic {
+    var out = blk
+    if out.op_count < 4096 {
+        out.ops[out.op_count as usize] = op
+        out.op_count = out.op_count + 1
+    }
+    out
+}
+
+fn gpu_block_set_term_ret(blk: GpuBlockEntry, src: i64) -> GpuBlockEntry {
+    GpuBlockEntry {
+        id: blk.id,
+        ops: blk.ops,
+        op_count: blk.op_count,
+        term_tag: HlirTermRet,
+        term_src: src,
+        term_target0: -1,
+        term_target1: -1,
+    }
+}
+
+fn gpu_block_set_term_ret_void(blk: GpuBlockEntry) -> GpuBlockEntry {
+    GpuBlockEntry {
+        id: blk.id,
+        ops: blk.ops,
+        op_count: blk.op_count,
+        term_tag: HlirTermRetVoid,
+        term_src: -1,
+        term_target0: -1,
+        term_target1: -1,
+    }
+}
+
+fn gpu_block_set_term_br(blk: GpuBlockEntry, target: i64) -> GpuBlockEntry {
+    GpuBlockEntry {
+        id: blk.id,
+        ops: blk.ops,
+        op_count: blk.op_count,
+        term_tag: HlirTermBr,
+        term_src: -1,
+        term_target0: target,
+        term_target1: -1,
+    }
+}
+
+fn gpu_block_set_term_condbr(blk: GpuBlockEntry, cond: i64, then_b: i64, else_b: i64) -> GpuBlockEntry {
+    GpuBlockEntry {
+        id: blk.id,
+        ops: blk.ops,
+        op_count: blk.op_count,
+        term_tag: HlirTermCondBr,
+        term_src: cond,
+        term_target0: then_b,
+        term_target1: else_b,
+    }
+}
+
+// ============================================================================
+// Section 19 — Epistemic shadow management
+// ============================================================================
+
+fn hlir_gpu_find_shadow(s: HlirToGpuState, gpu_val: i64) -> i64 {
+    var i: i64 = 0
+    var found: i64 = -1
+    while i < s.shadow_count {
+        if s.epistemic_shadows[i as usize].gpu_value == gpu_val {
+            found = i
+        }
+        i = i + 1
+    }
+    found
+}
+
+fn hlir_gpu_create_shadow(s: HlirToGpuState, blk: GpuBlockEntry, main_val: i64, hlir_id: i64) -> (HlirToGpuState, GpuBlockEntry) with Mut, Panic {
+    var st = s
+    var b = blk
+
+    // Allocate eps register (f32, init 0.0)
+    let eps_result = hlir_gpu_alloc_value(st)
+    st = eps_result.0
+    let eps_val = eps_result.1
+
+    // Allocate valid register (bool, init true via imm 1)
+    let valid_result = hlir_gpu_alloc_value(st)
+    st = valid_result.0
+    let valid_val = valid_result.1
+
+    // Allocate prov register (i64, init 0)
+    let prov_result = hlir_gpu_alloc_value(st)
+    st = prov_result.0
+    let prov_val = prov_result.1
+
+    // Emit epsilon initialiser: eps = 0.0f
+    let eps_init = gpu_op_imm_f(GpuOpcodeConst, GpuTypeF32, eps_val, 0.0)
+    b = gpu_block_add_op(b, eps_init)
+
+    // Emit valid initialiser: valid = 1 (true)
+    let valid_init = gpu_op_imm_i(GpuOpcodeConst, GpuTypeBool, valid_val, 1)
+    b = gpu_block_add_op(b, valid_init)
+
+    // Emit prov initialiser: prov = 0
+    let prov_init = gpu_op_imm_i(GpuOpcodeConst, GpuTypeI64, prov_val, 0)
+    b = gpu_block_add_op(b, prov_init)
+
+    // Record shadow
+    if st.shadow_count < 8192 {
+        let idx = st.shadow_count as usize
+        st.epistemic_shadows[idx] = EpistemicShadowEntry {
+            hlir_value: hlir_id,
+            gpu_value: main_val,
+            eps_value: eps_val,
+            valid_value: valid_val,
+            prov_value: prov_val,
+        }
+        st.shadow_count = st.shadow_count + 1
+    }
+
+    (st, b)
+}
+
+// Emit quadrature uncertainty propagation for add/sub: eps_c = sqrt(eps_a^2 + eps_b^2)
+fn hlir_gpu_emit_shadow_add(s: HlirToGpuState, blk: GpuBlockEntry, result: i64, lhs: i64, rhs: i64) -> (HlirToGpuState, GpuBlockEntry) with Mut, Panic {
+    var st = s
+    var b = blk
+
+    let lhs_idx = hlir_gpu_find_shadow(st, lhs)
+    let rhs_idx = hlir_gpu_find_shadow(st, rhs)
+
+    // Get shadow register IDs (fallback to -1 treated as 0 uncertainty)
+    var eps_l: i64 = -1
+    var valid_l: i64 = -1
+    var prov_l: i64 = -1
+    var eps_r: i64 = -1
+    var valid_r: i64 = -1
+    var prov_r: i64 = -1
+
+    if lhs_idx >= 0 {
+        eps_l = st.epistemic_shadows[lhs_idx as usize].eps_value
+        valid_l = st.epistemic_shadows[lhs_idx as usize].valid_value
+        prov_l = st.epistemic_shadows[lhs_idx as usize].prov_value
+    }
+    if rhs_idx >= 0 {
+        eps_r = st.epistemic_shadows[rhs_idx as usize].eps_value
+        valid_r = st.epistemic_shadows[rhs_idx as usize].valid_value
+        prov_r = st.epistemic_shadows[rhs_idx as usize].prov_value
+    }
+
+    // Alloc temporaries
+    let sq_l_r = hlir_gpu_alloc_value(st)
+    st = sq_l_r.0
+    let sq_l = sq_l_r.1
+
+    let sq_r_r = hlir_gpu_alloc_value(st)
+    st = sq_r_r.0
+    let sq_r = sq_r_r.1
+
+    let sum_r = hlir_gpu_alloc_value(st)
+    st = sum_r.0
+    let sum = sum_r.1
+
+    let eps_res_r = hlir_gpu_alloc_value(st)
+    st = eps_res_r.0
+    let eps_res = eps_res_r.1
+
+    let valid_res_r = hlir_gpu_alloc_value(st)
+    st = valid_res_r.0
+    let valid_res = valid_res_r.1
+
+    let prov_res_r = hlir_gpu_alloc_value(st)
+    st = prov_res_r.0
+    let prov_res = prov_res_r.1
+
+    // sq_l = eps_l * eps_l
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeMul, GpuTypeF32, sq_l, eps_l, eps_l, -1))
+    // sq_r = eps_r * eps_r
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeMul, GpuTypeF32, sq_r, eps_r, eps_r, -1))
+    // sum = sq_l + sq_r
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAdd, GpuTypeF32, sum, sq_l, sq_r, -1))
+    // eps_res = sqrt(sum)
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeSqrt, GpuTypeF32, eps_res, sum, -1, -1))
+    // valid_res = valid_l AND valid_r
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAnd, GpuTypeBool, valid_res, valid_l, valid_r, -1))
+    // prov_res = prov_l XOR prov_r
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeXor, GpuTypeI64, prov_res, prov_l, prov_r, -1))
+
+    // Record new shadow for result
+    if st.shadow_count < 8192 {
+        let idx = st.shadow_count as usize
+        st.epistemic_shadows[idx] = EpistemicShadowEntry {
+            hlir_value: -1,
+            gpu_value: result,
+            eps_value: eps_res,
+            valid_value: valid_res,
+            prov_value: prov_res,
+        }
+        st.shadow_count = st.shadow_count + 1
+    }
+
+    (st, b)
+}
+
+// Emit first-order uncertainty propagation for mul: eps_c = |lhs|*eps_rhs + |rhs|*eps_lhs
+fn hlir_gpu_emit_shadow_mul(s: HlirToGpuState, blk: GpuBlockEntry, result: i64, lhs_val: i64, rhs_val: i64, lhs_eps_v: i64, rhs_eps_v: i64) -> (HlirToGpuState, GpuBlockEntry) with Mut, Panic {
+    var st = s
+    var b = blk
+
+    let lhs_idx = hlir_gpu_find_shadow(st, lhs_val)
+    let rhs_idx = hlir_gpu_find_shadow(st, rhs_val)
+
+    var eps_l: i64 = lhs_eps_v
+    var valid_l: i64 = -1
+    var prov_l: i64 = -1
+    var eps_r: i64 = rhs_eps_v
+    var valid_r: i64 = -1
+    var prov_r: i64 = -1
+
+    if lhs_idx >= 0 {
+        eps_l = st.epistemic_shadows[lhs_idx as usize].eps_value
+        valid_l = st.epistemic_shadows[lhs_idx as usize].valid_value
+        prov_l = st.epistemic_shadows[lhs_idx as usize].prov_value
+    }
+    if rhs_idx >= 0 {
+        eps_r = st.epistemic_shadows[rhs_idx as usize].eps_value
+        valid_r = st.epistemic_shadows[rhs_idx as usize].valid_value
+        prov_r = st.epistemic_shadows[rhs_idx as usize].prov_value
+    }
+
+    // Alloc temporaries
+    let abs_lhs_r = hlir_gpu_alloc_value(st)
+    st = abs_lhs_r.0
+    let abs_lhs = abs_lhs_r.1
+
+    let abs_rhs_r = hlir_gpu_alloc_value(st)
+    st = abs_rhs_r.0
+    let abs_rhs = abs_rhs_r.1
+
+    let term1_r = hlir_gpu_alloc_value(st)
+    st = term1_r.0
+    let term1 = term1_r.1
+
+    let term2_r = hlir_gpu_alloc_value(st)
+    st = term2_r.0
+    let term2 = term2_r.1
+
+    let eps_res_r = hlir_gpu_alloc_value(st)
+    st = eps_res_r.0
+    let eps_res = eps_res_r.1
+
+    let valid_res_r = hlir_gpu_alloc_value(st)
+    st = valid_res_r.0
+    let valid_res = valid_res_r.1
+
+    let prov_res_r = hlir_gpu_alloc_value(st)
+    st = prov_res_r.0
+    let prov_res = prov_res_r.1
+
+    // abs_lhs = |lhs_val|
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAbs, GpuTypeF32, abs_lhs, lhs_val, -1, -1))
+    // abs_rhs = |rhs_val|
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAbs, GpuTypeF32, abs_rhs, rhs_val, -1, -1))
+    // term1 = abs_lhs * eps_r
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeMul, GpuTypeF32, term1, abs_lhs, eps_r, -1))
+    // term2 = abs_rhs * eps_l
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeMul, GpuTypeF32, term2, abs_rhs, eps_l, -1))
+    // eps_res = term1 + term2
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAdd, GpuTypeF32, eps_res, term1, term2, -1))
+    // valid_res = valid_l AND valid_r
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAnd, GpuTypeBool, valid_res, valid_l, valid_r, -1))
+    // prov_res = prov_l XOR prov_r
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeXor, GpuTypeI64, prov_res, prov_l, prov_r, -1))
+
+    // Record shadow
+    if st.shadow_count < 8192 {
+        let idx = st.shadow_count as usize
+        st.epistemic_shadows[idx] = EpistemicShadowEntry {
+            hlir_value: -1,
+            gpu_value: result,
+            eps_value: eps_res,
+            valid_value: valid_res,
+            prov_value: prov_res,
+        }
+        st.shadow_count = st.shadow_count + 1
+    }
+
+    (st, b)
+}
+
+// Emit uncertainty propagation for div: eps_c = (|lhs|*eps_rhs + |rhs|*eps_lhs) / rhs^2
+// Includes near-zero denominator guard via validity predicate
+fn hlir_gpu_emit_shadow_div(s: HlirToGpuState, blk: GpuBlockEntry, result: i64, lhs_val: i64, rhs_val: i64) -> (HlirToGpuState, GpuBlockEntry) with Mut, Panic {
+    var st = s
+    var b = blk
+
+    let lhs_idx = hlir_gpu_find_shadow(st, lhs_val)
+    let rhs_idx = hlir_gpu_find_shadow(st, rhs_val)
+
+    var eps_l: i64 = -1
+    var valid_l: i64 = -1
+    var prov_l: i64 = -1
+    var eps_r: i64 = -1
+    var valid_r: i64 = -1
+    var prov_r: i64 = -1
+
+    if lhs_idx >= 0 {
+        eps_l = st.epistemic_shadows[lhs_idx as usize].eps_value
+        valid_l = st.epistemic_shadows[lhs_idx as usize].valid_value
+        prov_l = st.epistemic_shadows[lhs_idx as usize].prov_value
+    }
+    if rhs_idx >= 0 {
+        eps_r = st.epistemic_shadows[rhs_idx as usize].eps_value
+        valid_r = st.epistemic_shadows[rhs_idx as usize].valid_value
+        prov_r = st.epistemic_shadows[rhs_idx as usize].prov_value
+    }
+
+    // Alloc temporaries
+    let abs_lhs_r = hlir_gpu_alloc_value(st)
+    st = abs_lhs_r.0
+    let abs_lhs = abs_lhs_r.1
+
+    let abs_rhs_r = hlir_gpu_alloc_value(st)
+    st = abs_rhs_r.0
+    let abs_rhs = abs_rhs_r.1
+
+    let term1_r = hlir_gpu_alloc_value(st)
+    st = term1_r.0
+    let term1 = term1_r.1
+
+    let term2_r = hlir_gpu_alloc_value(st)
+    st = term2_r.0
+    let term2 = term2_r.1
+
+    let numer_r = hlir_gpu_alloc_value(st)
+    st = numer_r.0
+    let numer = numer_r.1
+
+    let rhs_sq_r = hlir_gpu_alloc_value(st)
+    st = rhs_sq_r.0
+    let rhs_sq = rhs_sq_r.1
+
+    let eps_res_r = hlir_gpu_alloc_value(st)
+    st = eps_res_r.0
+    let eps_res = eps_res_r.1
+
+    // Near-zero guard predicate
+    let near_zero_thresh_r = hlir_gpu_alloc_value(st)
+    st = near_zero_thresh_r.0
+    let near_zero_thresh = near_zero_thresh_r.1
+
+    let denom_safe_r = hlir_gpu_alloc_value(st)
+    st = denom_safe_r.0
+    let denom_safe = denom_safe_r.1
+
+    let valid_res_r = hlir_gpu_alloc_value(st)
+    st = valid_res_r.0
+    let valid_res = valid_res_r.1
+
+    let prov_res_r = hlir_gpu_alloc_value(st)
+    st = prov_res_r.0
+    let prov_res = prov_res_r.1
+
+    // Compute uncertainty numerator
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAbs, GpuTypeF32, abs_lhs, lhs_val, -1, -1))
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAbs, GpuTypeF32, abs_rhs, rhs_val, -1, -1))
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeMul, GpuTypeF32, term1, abs_lhs, eps_r, -1))
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeMul, GpuTypeF32, term2, abs_rhs, eps_l, -1))
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAdd, GpuTypeF32, numer, term1, term2, -1))
+    // rhs^2
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeMul, GpuTypeF32, rhs_sq, rhs_val, rhs_val, -1))
+    // eps_res = numer / rhs^2  (may be inf if rhs near zero; validity gate handles it)
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeDiv, GpuTypeF32, eps_res, numer, rhs_sq, -1))
+
+    // near_zero_thresh = 1e-7 (approximately, using f32 literal)
+    b = gpu_block_add_op(b, gpu_op_imm_f(GpuOpcodeConst, GpuTypeF32, near_zero_thresh, 0.0000001))
+    // denom_safe = (abs_rhs >= near_zero_thresh)
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeSetpGe, GpuTypeBool, denom_safe, abs_rhs, near_zero_thresh, -1))
+    // valid_res = valid_l AND valid_r AND denom_safe
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAnd, GpuTypeBool, valid_res, valid_l, valid_r, -1))
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAnd, GpuTypeBool, valid_res, valid_res, denom_safe, -1))
+    // prov_res = prov_l XOR prov_r
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeXor, GpuTypeI64, prov_res, prov_l, prov_r, -1))
+
+    // Record shadow
+    if st.shadow_count < 8192 {
+        let idx = st.shadow_count as usize
+        st.epistemic_shadows[idx] = EpistemicShadowEntry {
+            hlir_value: -1,
+            gpu_value: result,
+            eps_value: eps_res,
+            valid_value: valid_res,
+            prov_value: prov_res,
+        }
+        st.shadow_count = st.shadow_count + 1
+    }
+
+    (st, b)
+}
+
+// ============================================================================
+// Section 20 — Instruction lowering
+// ============================================================================
+
+fn hlir_lower_instr(s: HlirToGpuState, blk: GpuBlockEntry, op_tag: i64, type_tag: i64, hlir_dst: i64, hlir_src0: i64, hlir_src1: i64, hlir_src2: i64, imm_i: i64, imm_f: f32, axis: i64) -> (HlirToGpuState, GpuBlockEntry) with Mut {
+    var st = s
+    var b = blk
+
+    let gpu_type = hlir_lower_type(type_tag)
+
+    // Look up existing GPU IDs for sources
+    let g_src0 = hlir_gpu_lookup_value(st, hlir_src0)
+    let g_src1 = hlir_gpu_lookup_value(st, hlir_src1)
+    let g_src2 = hlir_gpu_lookup_value(st, hlir_src2)
+
+    // Allocate a destination register and record the mapping
+    let dst_result = hlir_gpu_map_value(st, hlir_dst, gpu_type)
+    st = dst_result.0
+    let g_dst = dst_result.1
+
+    if op_tag == HlirOpConst {
+        // Emit integer or float constant depending on type
+        if type_tag == HlirTypeF32 {
+            b = gpu_block_add_op(b, gpu_op_imm_f(GpuOpcodeConst, gpu_type, g_dst, imm_f))
+        } else {
+            b = gpu_block_add_op(b, gpu_op_imm_i(GpuOpcodeConst, gpu_type, g_dst, imm_i))
+        }
+    } else if op_tag == HlirOpAdd {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAdd, gpu_type, g_dst, g_src0, g_src1, -1))
+        if st.epistemic_enabled {
+            let ep = hlir_gpu_emit_shadow_add(st, b, g_dst, g_src0, g_src1)
+            st = ep.0
+            b = ep.1
+        }
+    } else if op_tag == HlirOpFAdd {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAdd, gpu_type, g_dst, g_src0, g_src1, -1))
+        if st.epistemic_enabled {
+            let ep = hlir_gpu_emit_shadow_add(st, b, g_dst, g_src0, g_src1)
+            st = ep.0
+            b = ep.1
+        }
+    } else if op_tag == HlirOpSub {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeSub, gpu_type, g_dst, g_src0, g_src1, -1))
+        if st.epistemic_enabled {
+            // Subtraction: errors still add in quadrature
+            let ep = hlir_gpu_emit_shadow_add(st, b, g_dst, g_src0, g_src1)
+            st = ep.0
+            b = ep.1
+        }
+    } else if op_tag == HlirOpFSub {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeSub, gpu_type, g_dst, g_src0, g_src1, -1))
+        if st.epistemic_enabled {
+            let ep = hlir_gpu_emit_shadow_add(st, b, g_dst, g_src0, g_src1)
+            st = ep.0
+            b = ep.1
+        }
+    } else if op_tag == HlirOpMul {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeMul, gpu_type, g_dst, g_src0, g_src1, -1))
+        if st.epistemic_enabled {
+            let ep = hlir_gpu_emit_shadow_mul(st, b, g_dst, g_src0, g_src1, -1, -1)
+            st = ep.0
+            b = ep.1
+        }
+    } else if op_tag == HlirOpFMul {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeMul, gpu_type, g_dst, g_src0, g_src1, -1))
+        if st.epistemic_enabled {
+            let ep = hlir_gpu_emit_shadow_mul(st, b, g_dst, g_src0, g_src1, -1, -1)
+            st = ep.0
+            b = ep.1
+        }
+    } else if op_tag == HlirOpDiv {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeDiv, gpu_type, g_dst, g_src0, g_src1, -1))
+        if st.epistemic_enabled {
+            let ep = hlir_gpu_emit_shadow_div(st, b, g_dst, g_src0, g_src1)
+            st = ep.0
+            b = ep.1
+        }
+    } else if op_tag == HlirOpFDiv {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeDiv, gpu_type, g_dst, g_src0, g_src1, -1))
+        if st.epistemic_enabled {
+            let ep = hlir_gpu_emit_shadow_div(st, b, g_dst, g_src0, g_src1)
+            st = ep.0
+            b = ep.1
+        }
+    } else if op_tag == HlirOpNeg {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeNeg, gpu_type, g_dst, g_src0, -1, -1))
+    } else if op_tag == HlirOpFNeg {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeNeg, gpu_type, g_dst, g_src0, -1, -1))
+    } else if op_tag == HlirOpRem {
+        // Integer remainder; no direct GPU atomic — lower as sub(a, mul(div(a,b),b))
+        // Emit as placeholder GpuOpcodeSub with available operands for now
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeSub, gpu_type, g_dst, g_src0, g_src1, -1))
+    } else if op_tag == HlirOpAnd {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAnd, gpu_type, g_dst, g_src0, g_src1, -1))
+    } else if op_tag == HlirOpOr {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeOr, gpu_type, g_dst, g_src0, g_src1, -1))
+    } else if op_tag == HlirOpXor {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeXor, gpu_type, g_dst, g_src0, g_src1, -1))
+    } else if op_tag == HlirOpShl {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeShl, gpu_type, g_dst, g_src0, g_src1, -1))
+    } else if op_tag == HlirOpShr {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeShr, gpu_type, g_dst, g_src0, g_src1, -1))
+    } else if op_tag == HlirOpEq {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeSetpEq, GpuTypeBool, g_dst, g_src0, g_src1, -1))
+    } else if op_tag == HlirOpNe {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeSetpNe, GpuTypeBool, g_dst, g_src0, g_src1, -1))
+    } else if op_tag == HlirOpLt {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeSetpLt, GpuTypeBool, g_dst, g_src0, g_src1, -1))
+    } else if op_tag == HlirOpLe {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeSetpLe, GpuTypeBool, g_dst, g_src0, g_src1, -1))
+    } else if op_tag == HlirOpGt {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeSetpGt, GpuTypeBool, g_dst, g_src0, g_src1, -1))
+    } else if op_tag == HlirOpGe {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeSetpGe, GpuTypeBool, g_dst, g_src0, g_src1, -1))
+    } else if op_tag == HlirOpFEq {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeSetpEq, GpuTypeBool, g_dst, g_src0, g_src1, -1))
+    } else if op_tag == HlirOpFNe {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeSetpNe, GpuTypeBool, g_dst, g_src0, g_src1, -1))
+    } else if op_tag == HlirOpFLt {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeSetpLt, GpuTypeBool, g_dst, g_src0, g_src1, -1))
+    } else if op_tag == HlirOpFLe {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeSetpLe, GpuTypeBool, g_dst, g_src0, g_src1, -1))
+    } else if op_tag == HlirOpFGt {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeSetpGt, GpuTypeBool, g_dst, g_src0, g_src1, -1))
+    } else if op_tag == HlirOpFGe {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeSetpGe, GpuTypeBool, g_dst, g_src0, g_src1, -1))
+    } else if op_tag == HlirOpLoad {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeLoadGlobal, gpu_type, g_dst, g_src0, -1, -1))
+    } else if op_tag == HlirOpStore {
+        // Store: dst has no meaningful value — emit with dst_idx = -1
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeStoreGlobal, gpu_type, -1, g_src0, g_src1, -1))
+    } else if op_tag == HlirOpAlloca {
+        // Local allocation: emit placeholder const 0 (address materialised by backend)
+        b = gpu_block_add_op(b, gpu_op_imm_i(GpuOpcodeConst, GpuTypePtr, g_dst, 0))
+    } else if op_tag == HlirOpGEP {
+        // GetElementPtr: base + offset
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAdd, GpuTypePtr, g_dst, g_src0, g_src1, -1))
+    } else if op_tag == HlirOpCall {
+        // Call cannot be lowered here (needs symbol name lookup in a later pass)
+        b = gpu_block_add_op(b, gpu_op_imm_i(GpuOpcodeConst, gpu_type, g_dst, -1))
+    } else if op_tag == HlirOpPhi {
+        // Phi nodes: resolved by block structure — emit identity add(src0, 0) as placeholder
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAdd, gpu_type, g_dst, g_src0, -1, -1))
+    } else if op_tag == HlirOpSExt {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeCvt, gpu_type, g_dst, g_src0, -1, -1))
+    } else if op_tag == HlirOpZExt {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeCvt, gpu_type, g_dst, g_src0, -1, -1))
+    } else if op_tag == HlirOpTrunc {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeCvt, gpu_type, g_dst, g_src0, -1, -1))
+    } else if op_tag == HlirOpFpExt {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeCvt, gpu_type, g_dst, g_src0, -1, -1))
+    } else if op_tag == HlirOpFpTrunc {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeCvt, gpu_type, g_dst, g_src0, -1, -1))
+    } else if op_tag == HlirOpBitcast {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeCvt, gpu_type, g_dst, g_src0, -1, -1))
+    } else if op_tag == HlirOpSIToFP {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeCvt, gpu_type, g_dst, g_src0, -1, -1))
+    } else if op_tag == HlirOpFPToSI {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeCvt, gpu_type, g_dst, g_src0, -1, -1))
+    } else if op_tag == HlirOpSelect {
+        // selp dst, src0, src1, pred_cond
+        let op = gpu_op_make(GpuOpcodeSelp, gpu_type, g_dst, g_src0, g_src1, -1)
+        b = gpu_block_add_op(b, gpu_op_pred(op, g_src2))
+    } else if op_tag == HlirOpFMA {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeFma, gpu_type, g_dst, g_src0, g_src1, g_src2))
+    } else if op_tag == HlirOpGetThreadId {
+        let op = gpu_op_make(GpuOpcodeGetTid, gpu_type, g_dst, -1, -1, -1)
+        b = gpu_block_add_op(b, gpu_op_axis(op, axis))
+    } else if op_tag == HlirOpGetBlockId {
+        let op = gpu_op_make(GpuOpcodeGetBid, gpu_type, g_dst, -1, -1, -1)
+        b = gpu_block_add_op(b, gpu_op_axis(op, axis))
+    } else if op_tag == HlirOpGetBlockDim {
+        let op = gpu_op_make(GpuOpcodeGetNtid, gpu_type, g_dst, -1, -1, -1)
+        b = gpu_block_add_op(b, gpu_op_axis(op, axis))
+    } else if op_tag == HlirOpGetGridDim {
+        // No direct GPU IR for grid dim in this IR version — emit placeholder 0
+        b = gpu_block_add_op(b, gpu_op_imm_i(GpuOpcodeConst, gpu_type, g_dst, 0))
+    } else if op_tag == HlirOpAtomicAdd {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAtomicAdd, gpu_type, g_dst, g_src0, g_src1, -1))
+    } else if op_tag == HlirOpAtomicSub {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAtomicSub, gpu_type, g_dst, g_src0, g_src1, -1))
+    } else if op_tag == HlirOpAtomicMin {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAtomicMin, gpu_type, g_dst, g_src0, g_src1, -1))
+    } else if op_tag == HlirOpAtomicMax {
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAtomicMax, gpu_type, g_dst, g_src0, g_src1, -1))
+    } else if op_tag == HlirOpSyncThreads {
+        // Barrier sync has no destination; emit with dst -1
+        b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeBarrierSync, gpu_type, -1, -1, -1, -1))
+    } else if op_tag == HlirOpSyncWarp {
+        // Warp-level barrier (mask = 0xFFFFFFFF)
+        b = gpu_block_add_op(b, gpu_op_imm_i(GpuOpcodeBarrierSync, gpu_type, -1, -1))
+    } else {
+        // Unknown op — emit a const 0 placeholder to keep value numbering consistent
+        b = gpu_block_add_op(b, gpu_op_imm_i(GpuOpcodeConst, gpu_type, g_dst, 0))
+    }
+
+    (st, b)
+}
+
+// ============================================================================
+// Section 21 — Kernel/function lowering helpers
+// ============================================================================
+
+fn hlir_gpu_lower_kernel_new(s: HlirToGpuState, is_kernel: bool) -> (HlirToGpuState, GpuKernelEntry) with Mut {
+    var out = s
+    var k = gpu_kernel_entry_default()
+    k.is_kernel = is_kernel
+    (out, k)
+}
+
+fn hlir_gpu_add_param(k: GpuKernelEntry, name_bytes: [i8; 64], name_len: i64, type_tag: i64, is_restrict: bool) -> GpuKernelEntry with Mut, Panic {
+    var out = k
+    if out.param_count < 32 {
+        let idx = out.param_count as usize
+        out.params[idx] = GpuParamEntry {
+            name: name_bytes,
+            name_len: name_len,
+            type_tag: type_tag,
+            is_restrict: is_restrict,
+        }
+        out.param_count = out.param_count + 1
+    }
+    out
+}
+
+fn hlir_gpu_emit_param_load(s: HlirToGpuState, blk: GpuBlockEntry, param_idx: i64, type_tag: i64) -> (HlirToGpuState, GpuBlockEntry, i64) with Mut, Panic {
+    var st = s
+    var b = blk
+
+    let dst_result = hlir_gpu_alloc_value(st)
+    st = dst_result.0
+    let dst = dst_result.1
+
+    let op = gpu_op_imm_i(GpuOpcodeLoadParam, type_tag, dst, param_idx)
+    b = gpu_block_add_op(b, op)
+
+    (st, b, dst)
+}
+
+fn hlir_gpu_add_block_to_kernel(k: GpuKernelEntry, blk: GpuBlockEntry) -> GpuKernelEntry with Mut, Panic {
+    var out = k
+    if out.block_count < 256 {
+        let idx = out.block_count as usize
+        out.blocks[idx] = blk
+        out.block_count = out.block_count + 1
+    }
+    out
+}
+
+// ============================================================================
+// Section 22 — Module-level assembly helpers
+// ============================================================================
+
+fn hlir_to_gpu_add_kernel(m: GpuModuleOutput, k: GpuKernelEntry) -> GpuModuleOutput with Mut, Panic {
+    var out = m
+    if out.kernel_count < 64 {
+        out.kernels[out.kernel_count as usize] = k
         out.kernel_count = out.kernel_count + 1
     }
     out
 }
 
-fn hlir_gpu_lowered_skip(mod: HlirGpuLoweredModule, func_id: i64) -> HlirGpuLoweredModule with Mut, Panic {
-    var out = mod
-    if out.skipped_count < 1024 {
-        out.skipped_func_ids[out.skipped_count as usize] = func_id
-        out.skipped_count = out.skipped_count + 1
+fn hlir_to_gpu_add_device_fn(m: GpuModuleOutput, k: GpuKernelEntry) -> GpuModuleOutput with Mut, Panic {
+    var out = m
+    if out.device_fn_count < 64 {
+        out.device_fns[out.device_fn_count as usize] = k
+        out.device_fn_count = out.device_fn_count + 1
     }
     out
+}
+
+fn hlir_to_gpu_finalize(s: HlirToGpuState, m: GpuModuleOutput) -> GpuModuleOutput {
+    // Finalisation is a no-op for now (future: sort blocks, resolve phi targets).
+    // The state is consumed and its diagnostic information can be read before calling.
+    m
 }
 
 // ============================================================================
-// Name helpers
+// Section 23 — Statistics and diagnostics
 // ============================================================================
 
-fn hlir_gpu_hlir_name_to_ir_name(name: HlirName) -> Name with Mut, Panic, Div {
-    var out = ir_empty_name()
-    out.len = if name.len < 128 { name.len } else { 128 }
-    var i: i64 = 0
-    while i < out.len {
-        out.buf[i as usize] = name.buf[i as usize]
-        i = i + 1
-    }
-    out
+fn hlir_to_gpu_count_epistemic_shadows(s: HlirToGpuState) -> i64 {
+    s.shadow_count
 }
 
-fn hlir_gpu_hlir_name_hash(n: HlirName) -> i64 {
-    var h: i64 = 5381
-    var i: i64 = 0
-    while i < n.len {
-        h = ((h * 33) + (n.buf[i as usize] as i64)) % 1000000007
-        i = i + 1
-    }
-    if h < 0 { 0 - h } else { h }
-}
-
-// ============================================================================
-// Type lowering
-// ============================================================================
-
-fn hlir_gpu_type_from_hlir(ty: HlirType) -> GpuType {
-    let kind = ty.kind
-
-    if kind == HlirTypeKind::HlirTypeBool { return GpuType::GpuI32 }
-    if kind == HlirTypeKind::HlirTypeI8 { return GpuType::GpuI32 }
-    if kind == HlirTypeKind::HlirTypeI16 { return GpuType::GpuI32 }
-    if kind == HlirTypeKind::HlirTypeI32 { return GpuType::GpuI32 }
-    if kind == HlirTypeKind::HlirTypeU8 { return GpuType::GpuI32 }
-    if kind == HlirTypeKind::HlirTypeU16 { return GpuType::GpuI32 }
-    if kind == HlirTypeKind::HlirTypeU32 { return GpuType::GpuI32 }
-
-    if kind == HlirTypeKind::HlirTypeI64 { return GpuType::GpuI64 }
-    if kind == HlirTypeKind::HlirTypeU64 { return GpuType::GpuI64 }
-    if kind == HlirTypeKind::HlirTypeI128 { return GpuType::GpuI64 }
-    if kind == HlirTypeKind::HlirTypeU128 { return GpuType::GpuI64 }
-
-    if kind == HlirTypeKind::HlirTypeF32 { return GpuType::GpuF32 }
-    if kind == HlirTypeKind::HlirTypeF64 { return GpuType::GpuF64 }
-
-    // Pointers and aggregates are lowered as 64-bit addresses.
-    if kind == HlirTypeKind::HlirTypePtr { return GpuType::GpuU64 }
-    if kind == HlirTypeKind::HlirTypeArray { return GpuType::GpuU64 }
-    if kind == HlirTypeKind::HlirTypeStruct { return GpuType::GpuU64 }
-    if kind == HlirTypeKind::HlirTypeTuple { return GpuType::GpuU64 }
-    if kind == HlirTypeKind::HlirTypeFunction { return GpuType::GpuU64 }
-
-    if kind == HlirTypeKind::HlirTypeVec2 { return GpuType::GpuU64 }
-    if kind == HlirTypeKind::HlirTypeVec3 { return GpuType::GpuU64 }
-    if kind == HlirTypeKind::HlirTypeVec4 { return GpuType::GpuU64 }
-    if kind == HlirTypeKind::HlirTypeMat2 { return GpuType::GpuU64 }
-    if kind == HlirTypeKind::HlirTypeMat3 { return GpuType::GpuU64 }
-    if kind == HlirTypeKind::HlirTypeMat4 { return GpuType::GpuU64 }
-    if kind == HlirTypeKind::HlirTypeQuat { return GpuType::GpuU64 }
-    if kind == HlirTypeKind::HlirTypeOctonion { return GpuType::GpuU64 }
-    if kind == HlirTypeKind::HlirTypeSedenion { return GpuType::GpuU64 }
-    if kind == HlirTypeKind::HlirTypeQuatLinear { return GpuType::GpuU64 }
-    if kind == HlirTypeKind::HlirTypeQuatConv2d { return GpuType::GpuU64 }
-    if kind == HlirTypeKind::HlirTypeQuatRnnState { return GpuType::GpuU64 }
-    if kind == HlirTypeKind::HlirTypeQuatGate { return GpuType::GpuU64 }
-    if kind == HlirTypeKind::HlirTypeVec2d { return GpuType::GpuU64 }
-    if kind == HlirTypeKind::HlirTypeVec3d { return GpuType::GpuU64 }
-    if kind == HlirTypeKind::HlirTypeVec4d { return GpuType::GpuU64 }
-    if kind == HlirTypeKind::HlirTypeDual { return GpuType::GpuU64 }
-    if kind == HlirTypeKind::HlirTypeKnowledge { return GpuType::GpuU64 }
-
-    GpuType::GpuU64
-}
-
-fn hlir_gpu_param_type_for_load(ty: GpuType) -> GpuType {
-    if ty == GpuType::GpuI32 { return GpuType::GpuU32 }
-    if ty == GpuType::GpuI64 { return GpuType::GpuU64 }
-    ty
-}
-
-fn hlir_gpu_sizeof_hlir(ty: HlirType) -> i64 {
-    let kind = ty.kind
-
-    if kind == HlirTypeKind::HlirTypeBool { return 1 }
-    if kind == HlirTypeKind::HlirTypeI8 || kind == HlirTypeKind::HlirTypeU8 { return 1 }
-    if kind == HlirTypeKind::HlirTypeI16 || kind == HlirTypeKind::HlirTypeU16 { return 2 }
-    if kind == HlirTypeKind::HlirTypeI32 || kind == HlirTypeKind::HlirTypeU32 || kind == HlirTypeKind::HlirTypeF32 { return 4 }
-    if kind == HlirTypeKind::HlirTypeI64 || kind == HlirTypeKind::HlirTypeU64 || kind == HlirTypeKind::HlirTypeF64 { return 8 }
-    if kind == HlirTypeKind::HlirTypeI128 || kind == HlirTypeKind::HlirTypeU128 { return 16 }
-
-    if kind == HlirTypeKind::HlirTypeVec2 { return 8 }
-    if kind == HlirTypeKind::HlirTypeVec3 { return 16 }
-    if kind == HlirTypeKind::HlirTypeVec4 { return 16 }
-    if kind == HlirTypeKind::HlirTypeMat2 { return 16 }
-    if kind == HlirTypeKind::HlirTypeMat3 { return 48 }
-    if kind == HlirTypeKind::HlirTypeMat4 { return 64 }
-    if kind == HlirTypeKind::HlirTypeQuat { return 16 }
-
-    if kind == HlirTypeKind::HlirTypeVec2d { return 16 }
-    if kind == HlirTypeKind::HlirTypeVec3d { return 32 }
-    if kind == HlirTypeKind::HlirTypeVec4d { return 32 }
-    if kind == HlirTypeKind::HlirTypeOctonion { return 32 }
-    if kind == HlirTypeKind::HlirTypeSedenion { return 64 }
-    if kind == HlirTypeKind::HlirTypeDual { return 16 }
-
-    if kind == HlirTypeKind::HlirTypePtr || kind == HlirTypeKind::HlirTypeFunction {
-        return 8
-    }
-
-    if kind == HlirTypeKind::HlirTypeArray {
-        // Without a full type table lookup in this stage, use conservative
-        // element size = 8 bytes and multiply by declared length.
-        if ty.array_len <= 0 { return 8 }
-        return ty.array_len * 8
-    }
-
-    8
-}
-
-// ============================================================================
-// Register allocation state
-// ============================================================================
-
-struct HlirGpuRegState {
-    next_b32: i64,
-    next_b64: i64,
-    next_f32: i64,
-    next_f64: i64,
-    next_pred: i64,
-
-    used_u32: i64,
-    used_u64: i64,
-    used_f32: i64,
-    used_f64: i64,
-    used_i32: i64,
-    used_i64: i64,
-    used_pred: i64,
-}
-
-fn hlir_gpu_reg_state_new() -> HlirGpuRegState {
-    HlirGpuRegState {
-        next_b32: 0,
-        next_b64: 0,
-        next_f32: 0,
-        next_f64: 0,
-        next_pred: 0,
-
-        used_u32: 0,
-        used_u64: 0,
-        used_f32: 0,
-        used_f64: 0,
-        used_i32: 0,
-        used_i64: 0,
-        used_pred: 0,
-    }
-}
-
-fn hlir_gpu_wrap_reg(idx: i64, limit: i64) -> i64 {
-    if limit <= 0 {
-        0
-    } else {
-        let base = limit - 1
-        if base <= 0 {
-            0
-        } else {
-            idx % base
+fn hlir_to_gpu_count_ops(m: GpuModuleOutput) -> i64 {
+    var total: i64 = 0
+    var ki: i64 = 0
+    while ki < m.kernel_count {
+        let k = m.kernels[ki as usize]
+        var bi: i64 = 0
+        while bi < k.block_count {
+            total = total + k.blocks[bi as usize].op_count
+            bi = bi + 1
         }
+        ki = ki + 1
     }
-}
-
-fn hlir_gpu_alloc_pred(rs: HlirGpuRegState) -> (HlirGpuRegState, i64) with Mut {
-    var out = rs
-    let reg = hlir_gpu_wrap_reg(out.next_pred, HLIR_GPU_REG_PRED_LIMIT)
-    out.next_pred = out.next_pred + 1
-    if (reg + 1) > out.used_pred {
-        out.used_pred = reg + 1
-    }
-    (out, reg)
-}
-
-fn hlir_gpu_alloc_reg(rs: HlirGpuRegState, ty: GpuType) -> (HlirGpuRegState, i64) with Mut {
-    var out = rs
-
-    if ty == GpuType::GpuF32 {
-        let reg = hlir_gpu_wrap_reg(out.next_f32, HLIR_GPU_REG_F32_LIMIT)
-        out.next_f32 = out.next_f32 + 1
-        if (reg + 1) > out.used_f32 { out.used_f32 = reg + 1 }
-        return (out, reg)
-    }
-
-    if ty == GpuType::GpuF64 {
-        let reg = hlir_gpu_wrap_reg(out.next_f64, HLIR_GPU_REG_F64_LIMIT)
-        out.next_f64 = out.next_f64 + 1
-        if (reg + 1) > out.used_f64 { out.used_f64 = reg + 1 }
-        return (out, reg)
-    }
-
-    if ty == GpuType::GpuU64 || ty == GpuType::GpuI64 || ty == GpuType::GpuPtr {
-        let reg = hlir_gpu_wrap_reg(out.next_b64, HLIR_GPU_REG_B64_LIMIT)
-        out.next_b64 = out.next_b64 + 1
-        if ty == GpuType::GpuI64 {
-            if (reg + 1) > out.used_i64 { out.used_i64 = reg + 1 }
-        } else {
-            if (reg + 1) > out.used_u64 { out.used_u64 = reg + 1 }
+    var di: i64 = 0
+    while di < m.device_fn_count {
+        let d = m.device_fns[di as usize]
+        var bi: i64 = 0
+        while bi < d.block_count {
+            total = total + d.blocks[bi as usize].op_count
+            bi = bi + 1
         }
-        return (out, reg)
+        di = di + 1
     }
-
-    let reg = hlir_gpu_wrap_reg(out.next_b32, HLIR_GPU_REG_B32_LIMIT)
-    out.next_b32 = out.next_b32 + 1
-    if ty == GpuType::GpuI32 {
-        if (reg + 1) > out.used_i32 { out.used_i32 = reg + 1 }
-    } else {
-        if (reg + 1) > out.used_u32 { out.used_u32 = reg + 1 }
-    }
-    (out, reg)
+    total
 }
 
-fn hlir_gpu_finalize_kernel_regs(kernel: GpuKernelIr, rs: HlirGpuRegState) -> GpuKernelIr with Mut {
-    var out = kernel
-    out.max_reg_u32 = rs.used_u32
-    out.max_reg_u64 = rs.used_u64
-    out.max_reg_f32 = rs.used_f32
-    out.max_reg_f64 = rs.used_f64
-    out.max_reg_i32 = rs.used_i32
-    out.max_reg_i64 = rs.used_i64
-    out.max_reg_pred = rs.used_pred
-    out
+fn hlir_to_gpu_sm_supports_fast_math(sm: i64) -> bool {
+    sm >= 50
 }
-
-// ============================================================================
-// Value map
-// ============================================================================
-
-struct HlirGpuValueMap {
-    has: [bool; 8192],
-    reg: [i64; 8192],
-    ty: [GpuType; 8192],
-    is_pred: [bool; 8192],
-
-    const_kind: [i64; 8192],
-    const_i64: [i64; 8192],
-    const_f64: [f64; 8192],
-
-    is_shared_ptr: [bool; 8192],
-    shared_addr: [i64; 8192],
-}
-
-fn hlir_gpu_value_map_new() -> HlirGpuValueMap {
-    HlirGpuValueMap {
-        has: [false; 8192],
-        reg: [0; 8192],
-        ty: [GpuType::GpuU64; 8192],
-        is_pred: [false; 8192],
-
-        const_kind: [HLIR_GPU_CONST_NONE; 8192],
-        const_i64: [0; 8192],
-        const_f64: [0.0; 8192],
-
-        is_shared_ptr: [false; 8192],
-        shared_addr: [0; 8192],
-    }
-}
-
-fn hlir_gpu_value_valid_id(value_id: i64) -> bool {
-    value_id >= 0 && value_id < HLIR_GPU_MAX_VALUES
-}
-
-fn hlir_gpu_value_bind(
-    map: HlirGpuValueMap,
-    value_id: i64,
-    reg: i64,
-    ty: GpuType,
-    is_pred: bool
-) -> HlirGpuValueMap with Mut, Panic {
-    var out = map
-    if !hlir_gpu_value_valid_id(value_id) {
-        return out
-    }
-    out.has[value_id as usize] = true
-    out.reg[value_id as usize] = reg
-    out.ty[value_id as usize] = ty
-    out.is_pred[value_id as usize] = is_pred
-    out.const_kind[value_id as usize] = HLIR_GPU_CONST_NONE
-    out.is_shared_ptr[value_id as usize] = false
-    out.shared_addr[value_id as usize] = 0
-    out
-}
-
-fn hlir_gpu_value_bind_const_int(map: HlirGpuValueMap, value_id: i64, value: i64, ty: GpuType) -> HlirGpuValueMap with Mut, Panic {
-    var out = map
-    if !hlir_gpu_value_valid_id(value_id) {
-        return out
-    }
-    out.has[value_id as usize] = true
-    out.reg[value_id as usize] = 0
-    out.ty[value_id as usize] = ty
-    out.is_pred[value_id as usize] = false
-    out.const_kind[value_id as usize] = HLIR_GPU_CONST_INT
-    out.const_i64[value_id as usize] = value
-    out.const_f64[value_id as usize] = value as f64
-    out.is_shared_ptr[value_id as usize] = false
-    out.shared_addr[value_id as usize] = 0
-    out
-}
-
-fn hlir_gpu_value_bind_const_float(map: HlirGpuValueMap, value_id: i64, value: f64, ty: GpuType) -> HlirGpuValueMap with Mut, Panic {
-    var out = map
-    if !hlir_gpu_value_valid_id(value_id) {
-        return out
-    }
-    out.has[value_id as usize] = true
-    out.reg[value_id as usize] = 0
-    out.ty[value_id as usize] = ty
-    out.is_pred[value_id as usize] = false
-    out.const_kind[value_id as usize] = HLIR_GPU_CONST_FLOAT
-    out.const_i64[value_id as usize] = value as i64
-    out.const_f64[value_id as usize] = value
-    out.is_shared_ptr[value_id as usize] = false
-    out.shared_addr[value_id as usize] = 0
-    out
-}
-
-fn hlir_gpu_value_bind_const_bool(map: HlirGpuValueMap, value_id: i64, value: bool) -> HlirGpuValueMap with Mut, Panic {
-    var out = map
-    if !hlir_gpu_value_valid_id(value_id) {
-        return out
-    }
-    out.has[value_id as usize] = true
-    out.reg[value_id as usize] = 0
-    out.ty[value_id as usize] = GpuType::GpuI32
-    out.is_pred[value_id as usize] = false
-    out.const_kind[value_id as usize] = HLIR_GPU_CONST_BOOL
-    out.const_i64[value_id as usize] = if value { 1 } else { 0 }
-    out.const_f64[value_id as usize] = if value { 1.0 } else { 0.0 }
-    out.is_shared_ptr[value_id as usize] = false
-    out.shared_addr[value_id as usize] = 0
-    out
-}
-
-fn hlir_gpu_value_bind_shared_ptr(
-    map: HlirGpuValueMap,
-    value_id: i64,
-    shared_addr: i64
-) -> HlirGpuValueMap with Mut, Panic {
-    var out = map
-    if !hlir_gpu_value_valid_id(value_id) {
-        return out
-    }
-    out.has[value_id as usize] = true
-    out.reg[value_id as usize] = 0
-    out.ty[value_id as usize] = GpuType::GpuU64
-    out.is_pred[value_id as usize] = false
-    out.const_kind[value_id as usize] = HLIR_GPU_CONST_NONE
-    out.is_shared_ptr[value_id as usize] = true
-    out.shared_addr[value_id as usize] = shared_addr
-    out
-}
-
-fn hlir_gpu_value_has(map: HlirGpuValueMap, value_id: i64) -> bool {
-    if !hlir_gpu_value_valid_id(value_id) {
-        false
-    } else {
-        map.has[value_id as usize]
-    }
-}
-
-fn hlir_gpu_value_is_const(map: HlirGpuValueMap, value_id: i64) -> bool {
-    if !hlir_gpu_value_valid_id(value_id) {
-        false
-    } else {
-        map.const_kind[value_id as usize] != HLIR_GPU_CONST_NONE
-    }
-}
-
-fn hlir_gpu_value_const_kind(map: HlirGpuValueMap, value_id: i64) -> i64 {
-    if !hlir_gpu_value_valid_id(value_id) {
-        HLIR_GPU_CONST_NONE
-    } else {
-        map.const_kind[value_id as usize]
-    }
-}
-
-fn hlir_gpu_value_const_i64(map: HlirGpuValueMap, value_id: i64) -> i64 {
-    if !hlir_gpu_value_valid_id(value_id) {
-        0
-    } else {
-        map.const_i64[value_id as usize]
-    }
-}
-
-fn hlir_gpu_value_ty(map: HlirGpuValueMap, value_id: i64) -> GpuType {
-    if !hlir_gpu_value_valid_id(value_id) {
-        GpuType::GpuU64
-    } else {
-        map.ty[value_id as usize]
-    }
-}
-
-fn hlir_gpu_value_reg(map: HlirGpuValueMap, value_id: i64) -> i64 {
-    if !hlir_gpu_value_valid_id(value_id) {
-        0
-    } else {
-        map.reg[value_id as usize]
-    }
-}
-
-fn hlir_gpu_value_is_pred(map: HlirGpuValueMap, value_id: i64) -> bool {
-    if !hlir_gpu_value_valid_id(value_id) {
-        false
-    } else {
-        map.is_pred[value_id as usize]
-    }
-}
-
-fn hlir_gpu_value_is_shared_ptr(map: HlirGpuValueMap, value_id: i64) -> bool {
-    if !hlir_gpu_value_valid_id(value_id) {
-        false
-    } else {
-        map.is_shared_ptr[value_id as usize]
-    }
-}
-
-fn hlir_gpu_value_shared_addr(map: HlirGpuValueMap, value_id: i64) -> i64 {
-    if !hlir_gpu_value_valid_id(value_id) {
-        0
-    } else {
-        map.shared_addr[value_id as usize]
-    }
-}
-
-fn hlir_gpu_value_alias(map: HlirGpuValueMap, dst_value_id: i64, src_value_id: i64) -> HlirGpuValueMap with Mut, Panic {
-    var out = map
-    if !hlir_gpu_value_valid_id(dst_value_id) { return out }
-    if !hlir_gpu_value_valid_id(src_value_id) { return out }
-    if !out.has[src_value_id as usize] { return out }
-
-    out.has[dst_value_id as usize] = out.has[src_value_id as usize]
-    out.reg[dst_value_id as usize] = out.reg[src_value_id as usize]
-    out.ty[dst_value_id as usize] = out.ty[src_value_id as usize]
-    out.is_pred[dst_value_id as usize] = out.is_pred[src_value_id as usize]
-
-    out.const_kind[dst_value_id as usize] = out.const_kind[src_value_id as usize]
-    out.const_i64[dst_value_id as usize] = out.const_i64[src_value_id as usize]
-    out.const_f64[dst_value_id as usize] = out.const_f64[src_value_id as usize]
-
-    out.is_shared_ptr[dst_value_id as usize] = out.is_shared_ptr[src_value_id as usize]
-    out.shared_addr[dst_value_id as usize] = out.shared_addr[src_value_id as usize]
-    out
-}
-
-// ============================================================================
-// Lowering state
-// ============================================================================
-
-struct HlirGpuLowerState {
-    kernel: GpuKernelIr,
-    regs: HlirGpuRegState,
-    values: HlirGpuValueMap,
-    next_shared_addr: i64,
-    op_overflow: bool,
-    saw_ret: bool,
-}
-
-fn hlir_gpu_lower_state_new(func_name: HlirName) -> HlirGpuLowerState with Mut, Panic, Div {
-    var kernel = gpu_kernel_new()
-    kernel.kernel_name = hlir_gpu_hlir_name_to_ir_name(func_name)
-    HlirGpuLowerState {
-        kernel: kernel,
-        regs: hlir_gpu_reg_state_new(),
-        values: hlir_gpu_value_map_new(),
-        next_shared_addr: 0,
-        op_overflow: false,
-        saw_ret: false,
-    }
-}
-
-fn hlir_gpu_lower_push_op(state: HlirGpuLowerState, op: GpuOp) -> HlirGpuLowerState with Mut, Panic, Div {
-    var out = state
-    let appended = gpu_append_op_checked(out.kernel, op)
-    out.kernel = appended.kernel
-    if appended.error == GpuError::GpuOpBufferOverflow {
-        out.op_overflow = true
-    }
-    out
-}
-
-fn hlir_gpu_lower_bind_new_reg(
-    state: HlirGpuLowerState,
-    value_id: i64,
-    ty: GpuType
-) -> (HlirGpuLowerState, i64) with Mut, Panic {
-    var out = state
-    let alloc = hlir_gpu_alloc_reg(out.regs, ty)
-    out.regs = alloc.0
-    let reg = alloc.1
-    out.values = hlir_gpu_value_bind(out.values, value_id, reg, ty, false)
-    (out, reg)
-}
-
-fn hlir_gpu_lower_bind_new_pred(state: HlirGpuLowerState, value_id: i64) -> (HlirGpuLowerState, i64) with Mut, Panic {
-    var out = state
-    let alloc = hlir_gpu_alloc_pred(out.regs)
-    out.regs = alloc.0
-    let preg = alloc.1
-    out.values = hlir_gpu_value_bind(out.values, value_id, preg, GpuType::GpuI32, true)
-    (out, preg)
-}
-
-fn hlir_gpu_lower_materialize_unknown(
-    state: HlirGpuLowerState,
-    value_id: i64,
-    expected_ty: GpuType
-) -> (HlirGpuLowerState, i64, GpuType) with Mut, Panic {
-    var out = state
-    if hlir_gpu_value_has(out.values, value_id) {
-        return (out, hlir_gpu_value_reg(out.values, value_id), hlir_gpu_value_ty(out.values, value_id))
-    }
-
-    let alloc = hlir_gpu_alloc_reg(out.regs, expected_ty)
-    out.regs = alloc.0
-    let reg = alloc.1
-    out.values = hlir_gpu_value_bind(out.values, value_id, reg, expected_ty, false)
-    (out, reg, expected_ty)
-}
-
-fn hlir_gpu_lower_ensure_pred(
-    state: HlirGpuLowerState,
-    cond_value: i64,
-    cond_ty_hint: GpuType
-) -> (HlirGpuLowerState, i64) with Mut, Panic, Div {
-    var out = state
-
-    if hlir_gpu_value_has(out.values, cond_value) && hlir_gpu_value_is_pred(out.values, cond_value) {
-        return (out, hlir_gpu_value_reg(out.values, cond_value))
-    }
-
-    // Constants: select can fold instead of predicate materialization when caller wants.
-    if hlir_gpu_value_is_const(out.values, cond_value) {
-        let allocp = hlir_gpu_alloc_pred(out.regs)
-        out.regs = allocp.0
-        // Bind a synthetic predicate register. We do not emit an instruction here
-        // because constant select paths are folded by caller.
-        let preg = allocp.1
-        out.values = hlir_gpu_value_bind(out.values, cond_value, preg, GpuType::GpuI32, true)
-        return (out, preg)
-    }
-
-    // Generic path: compare cond >= 1 to produce predicate.
-    let mat = hlir_gpu_lower_materialize_unknown(out, cond_value, cond_ty_hint)
-    out = mat.0
-    let cond_reg = mat.1
-    let cond_ty = mat.2
-
-    let allocp = hlir_gpu_alloc_pred(out.regs)
-    out.regs = allocp.0
-    let pred_reg = allocp.1
-
-    var setp = gpu_op_new()
-    setp.opcode = GpuOpcode::GpuSetpGe
-    setp.dst_reg = pred_reg
-    setp.lhs_reg = cond_reg
-    setp.rhs_reg = -1
-    setp.rhs_imm = 1
-    setp.ty = cond_ty
-    setp.dst_ty = GpuType::GpuI32
-    setp.src_ty = cond_ty
-    out = hlir_gpu_lower_push_op(out, setp)
-
-    out.values = hlir_gpu_value_bind(out.values, cond_value, pred_reg, GpuType::GpuI32, true)
-    (out, pred_reg)
-}
-
-fn hlir_gpu_lower_const_fold_i64(op: HlirBinaryOp, a: i64, b: i64) -> (bool, i64) with Div {
-    if op == HlirBinaryOp::HlirOpAdd || op == HlirBinaryOp::HlirOpFAdd {
-        return (true, a + b)
-    }
-    if op == HlirBinaryOp::HlirOpSub || op == HlirBinaryOp::HlirOpFSub {
-        return (true, a - b)
-    }
-    if op == HlirBinaryOp::HlirOpMul || op == HlirBinaryOp::HlirOpFMul {
-        return (true, a * b)
-    }
-    if op == HlirBinaryOp::HlirOpSDiv || op == HlirBinaryOp::HlirOpUDiv || op == HlirBinaryOp::HlirOpFDiv {
-        if b == 0 {
-            return (false, 0)
-        }
-        return (true, a / b)
-    }
-    if op == HlirBinaryOp::HlirOpEq || op == HlirBinaryOp::HlirOpFOEq {
-        return (true, if a == b { 1 } else { 0 })
-    }
-    if op == HlirBinaryOp::HlirOpNe || op == HlirBinaryOp::HlirOpFONe {
-        return (true, if a != b { 1 } else { 0 })
-    }
-    if op == HlirBinaryOp::HlirOpSLt || op == HlirBinaryOp::HlirOpULt || op == HlirBinaryOp::HlirOpFOLt {
-        return (true, if a < b { 1 } else { 0 })
-    }
-    if op == HlirBinaryOp::HlirOpSLe || op == HlirBinaryOp::HlirOpULe || op == HlirBinaryOp::HlirOpFOLe {
-        return (true, if a <= b { 1 } else { 0 })
-    }
-    if op == HlirBinaryOp::HlirOpSGt || op == HlirBinaryOp::HlirOpUGt || op == HlirBinaryOp::HlirOpFOGt {
-        return (true, if a > b { 1 } else { 0 })
-    }
-    if op == HlirBinaryOp::HlirOpSGe || op == HlirBinaryOp::HlirOpUGe || op == HlirBinaryOp::HlirOpFOGe {
-        return (true, if a >= b { 1 } else { 0 })
-    }
-
-    (false, 0)
-}
-
-fn hlir_gpu_lower_emit_ret(state: HlirGpuLowerState) -> HlirGpuLowerState with Mut, Panic, Div {
-    var out = state
-    var op = gpu_op_new()
-    op.opcode = GpuOpcode::GpuRet
-    out = hlir_gpu_lower_push_op(out, op)
-    out.saw_ret = true
-    out
-}
-
-// ============================================================================
-// Instruction lowering
-// ============================================================================
-
-fn hlir_gpu_lower_binary_opcode(op: HlirBinaryOp) -> GpuOpcode {
-    if op == HlirBinaryOp::HlirOpAdd || op == HlirBinaryOp::HlirOpFAdd { return GpuOpcode::GpuAdd }
-    if op == HlirBinaryOp::HlirOpSub || op == HlirBinaryOp::HlirOpFSub { return GpuOpcode::GpuSub }
-    if op == HlirBinaryOp::HlirOpMul || op == HlirBinaryOp::HlirOpFMul { return GpuOpcode::GpuMul }
-    if op == HlirBinaryOp::HlirOpSDiv || op == HlirBinaryOp::HlirOpUDiv || op == HlirBinaryOp::HlirOpFDiv { return GpuOpcode::GpuDiv }
-
-    if op == HlirBinaryOp::HlirOpEq || op == HlirBinaryOp::HlirOpFOEq { return GpuOpcode::GpuSetpEq }
-    if op == HlirBinaryOp::HlirOpSLt || op == HlirBinaryOp::HlirOpULt || op == HlirBinaryOp::HlirOpFOLt { return GpuOpcode::GpuSetpLt }
-    if op == HlirBinaryOp::HlirOpSLe || op == HlirBinaryOp::HlirOpULe || op == HlirBinaryOp::HlirOpFOLe { return GpuOpcode::GpuSetpLe }
-
-    // Fallback for comparisons not directly supported by the baseline PTX
-    // lowering table (gt/ne map to ge/eq best-effort).
-    if op == HlirBinaryOp::HlirOpSGt || op == HlirBinaryOp::HlirOpUGt || op == HlirBinaryOp::HlirOpFOGt { return GpuOpcode::GpuSetpGe }
-    if op == HlirBinaryOp::HlirOpSGe || op == HlirBinaryOp::HlirOpUGe || op == HlirBinaryOp::HlirOpFOGe { return GpuOpcode::GpuSetpGe }
-    if op == HlirBinaryOp::HlirOpNe || op == HlirBinaryOp::HlirOpFONe { return GpuOpcode::GpuSetpEq }
-
-    // For unsupported bitwise/remainder ops in this stage, keep deterministic
-    // lowering via arithmetic fallback.
-    GpuOpcode::GpuAdd
-}
-
-fn hlir_gpu_lower_is_compare(op: HlirBinaryOp) -> bool {
-    op == HlirBinaryOp::HlirOpEq ||
-    op == HlirBinaryOp::HlirOpNe ||
-    op == HlirBinaryOp::HlirOpSLt ||
-    op == HlirBinaryOp::HlirOpSLe ||
-    op == HlirBinaryOp::HlirOpSGt ||
-    op == HlirBinaryOp::HlirOpSGe ||
-    op == HlirBinaryOp::HlirOpULt ||
-    op == HlirBinaryOp::HlirOpULe ||
-    op == HlirBinaryOp::HlirOpUGt ||
-    op == HlirBinaryOp::HlirOpUGe ||
-    op == HlirBinaryOp::HlirOpFOEq ||
-    op == HlirBinaryOp::HlirOpFONe ||
-    op == HlirBinaryOp::HlirOpFOLt ||
-    op == HlirBinaryOp::HlirOpFOLe ||
-    op == HlirBinaryOp::HlirOpFOGt ||
-    op == HlirBinaryOp::HlirOpFOGe
-}
-
-fn hlir_gpu_lower_instr(
-    state: HlirGpuLowerState,
-    func: HlirFunction,
-    instr: HlirInstr
-) -> HlirGpuLowerState with Mut, Panic, Div, Alloc {
-    var out = state
-    let op_kind = instr.op_kind
-
-    // --- Const --------------------------------------------------------------
-    if op_kind == HlirOpKind::HlirOpConst {
-        let result = instr.result
-        if result != HLIR_INVALID_VALUE {
-            let out_ty = hlir_gpu_type_from_hlir(instr.ty)
-            if instr.constant.kind == HlirConstKind::HlirConstInt {
-                out.values = hlir_gpu_value_bind_const_int(out.values, result, instr.constant.int_val, out_ty)
-            } else if instr.constant.kind == HlirConstKind::HlirConstFloat {
-                out.values = hlir_gpu_value_bind_const_float(out.values, result, instr.constant.float_val, out_ty)
-            } else if instr.constant.kind == HlirConstKind::HlirConstBool {
-                out.values = hlir_gpu_value_bind_const_bool(out.values, result, instr.constant.bool_val)
-            } else if instr.constant.kind == HlirConstKind::HlirConstNull {
-                out.values = hlir_gpu_value_bind_const_int(out.values, result, 0, GpuType::GpuU64)
-            } else {
-                out.values = hlir_gpu_value_bind_const_int(out.values, result, 0, out_ty)
-            }
-        }
-        return out
-    }
-
-    // --- Copy ---------------------------------------------------------------
-    if op_kind == HlirOpKind::HlirOpCopy {
-        let result = instr.result
-        if result != HLIR_INVALID_VALUE {
-            out.values = hlir_gpu_value_alias(out.values, result, instr.src)
-            if !hlir_gpu_value_has(out.values, result) {
-                let out_ty = hlir_gpu_type_from_hlir(instr.ty)
-                let bound = hlir_gpu_lower_bind_new_reg(out, result, out_ty)
-                out = bound.0
-            }
-        }
-        return out
-    }
-
-    // --- Binary -------------------------------------------------------------
-    if op_kind == HlirOpKind::HlirOpBinary {
-        let result = instr.result
-        if result == HLIR_INVALID_VALUE {
-            return out
-        }
-
-        let lhs_id = instr.lhs
-        let rhs_id = instr.rhs
-        let bin_op = instr.bin_op
-
-        // Fold integer-like constants when both sides are compile-time known.
-        let lhs_const = hlir_gpu_value_is_const(out.values, lhs_id)
-        let rhs_const = hlir_gpu_value_is_const(out.values, rhs_id)
-        if lhs_const && rhs_const {
-            let lhs_i = hlir_gpu_value_const_i64(out.values, lhs_id)
-            let rhs_i = hlir_gpu_value_const_i64(out.values, rhs_id)
-            let folded = hlir_gpu_lower_const_fold_i64(bin_op, lhs_i, rhs_i)
-            if folded.0 {
-                let folded_ty = if hlir_gpu_lower_is_compare(bin_op) { GpuType::GpuI32 } else { hlir_gpu_type_from_hlir(instr.ty) }
-                out.values = hlir_gpu_value_bind_const_int(out.values, result, folded.1, folded_ty)
-                return out
-            }
-        }
-
-        let result_ty = if hlir_gpu_lower_is_compare(bin_op) { GpuType::GpuI32 } else { hlir_gpu_type_from_hlir(instr.ty) }
-
-        if hlir_gpu_lower_is_compare(bin_op) {
-            let pred_alloc = hlir_gpu_lower_bind_new_pred(out, result)
-            out = pred_alloc.0
-            let dst_pred = pred_alloc.1
-
-            let lhs_ty_hint = hlir_gpu_type_from_hlir(hlir_function_lookup_local_type(func, lhs_id))
-            let rhs_ty_hint = hlir_gpu_type_from_hlir(hlir_function_lookup_local_type(func, rhs_id))
-            let lhs_mat = hlir_gpu_lower_materialize_unknown(out, lhs_id, lhs_ty_hint)
-            out = lhs_mat.0
-            let lhs_reg = lhs_mat.1
-            let rhs_mat = hlir_gpu_lower_materialize_unknown(out, rhs_id, rhs_ty_hint)
-            out = rhs_mat.0
-            let rhs_reg = rhs_mat.1
-
-            var op = gpu_op_new()
-            op.opcode = hlir_gpu_lower_binary_opcode(bin_op)
-            op.dst_reg = dst_pred
-            op.lhs_reg = lhs_reg
-            op.rhs_reg = rhs_reg
-            op.ty = lhs_mat.2
-            op.dst_ty = GpuType::GpuI32
-            op.src_ty = lhs_mat.2
-            out = hlir_gpu_lower_push_op(out, op)
-
-            return out
-        }
-
-        let result_bind = hlir_gpu_lower_bind_new_reg(out, result, result_ty)
-        out = result_bind.0
-        let dst_reg = result_bind.1
-
-        let lhs_ty_hint = hlir_gpu_type_from_hlir(hlir_function_lookup_local_type(func, lhs_id))
-        let rhs_ty_hint = hlir_gpu_type_from_hlir(hlir_function_lookup_local_type(func, rhs_id))
-
-        // Immediate fast-path for integer rhs constants.
-        if hlir_gpu_value_is_const(out.values, rhs_id) {
-            let rhs_kind = hlir_gpu_value_const_kind(out.values, rhs_id)
-            if rhs_kind == HLIR_GPU_CONST_INT || rhs_kind == HLIR_GPU_CONST_BOOL || rhs_kind == HLIR_GPU_CONST_NULL {
-                let lhs_mat = hlir_gpu_lower_materialize_unknown(out, lhs_id, lhs_ty_hint)
-                out = lhs_mat.0
-                let lhs_reg = lhs_mat.1
-                let imm = hlir_gpu_value_const_i64(out.values, rhs_id)
-
-                if bin_op == HlirBinaryOp::HlirOpAdd || bin_op == HlirBinaryOp::HlirOpFAdd {
-                    var addi = gpu_op_new()
-                    addi.opcode = GpuOpcode::GpuAddImm
-                    addi.dst_reg = dst_reg
-                    addi.lhs_reg = lhs_reg
-                    addi.rhs_imm = imm
-                    addi.ty = lhs_mat.2
-                    addi.dst_ty = result_ty
-                    addi.src_ty = lhs_mat.2
-                    out = hlir_gpu_lower_push_op(out, addi)
-                    return out
-                }
-
-                if bin_op == HlirBinaryOp::HlirOpSub || bin_op == HlirBinaryOp::HlirOpFSub {
-                    var subi = gpu_op_new()
-                    subi.opcode = GpuOpcode::GpuAddImm
-                    subi.dst_reg = dst_reg
-                    subi.lhs_reg = lhs_reg
-                    subi.rhs_imm = 0 - imm
-                    subi.ty = lhs_mat.2
-                    subi.dst_ty = result_ty
-                    subi.src_ty = lhs_mat.2
-                    out = hlir_gpu_lower_push_op(out, subi)
-                    return out
-                }
-
-                if bin_op == HlirBinaryOp::HlirOpMul || bin_op == HlirBinaryOp::HlirOpFMul {
-                    var muli = gpu_op_new()
-                    muli.opcode = GpuOpcode::GpuMulImm
-                    muli.dst_reg = dst_reg
-                    muli.lhs_reg = lhs_reg
-                    muli.rhs_imm = imm
-                    muli.ty = lhs_mat.2
-                    muli.dst_ty = result_ty
-                    muli.src_ty = lhs_mat.2
-                    out = hlir_gpu_lower_push_op(out, muli)
-                    return out
-                }
-            }
-        }
-
-        let lhs_mat = hlir_gpu_lower_materialize_unknown(out, lhs_id, lhs_ty_hint)
-        out = lhs_mat.0
-        let lhs_reg = lhs_mat.1
-        let rhs_mat = hlir_gpu_lower_materialize_unknown(out, rhs_id, rhs_ty_hint)
-        out = rhs_mat.0
-        let rhs_reg = rhs_mat.1
-
-        var op = gpu_op_new()
-        op.opcode = hlir_gpu_lower_binary_opcode(bin_op)
-        op.dst_reg = dst_reg
-        op.lhs_reg = lhs_reg
-        op.rhs_reg = rhs_reg
-        op.ty = result_ty
-        op.dst_ty = result_ty
-        op.src_ty = result_ty
-        out = hlir_gpu_lower_push_op(out, op)
-
-        return out
-    }
-
-    // --- Unary --------------------------------------------------------------
-    if op_kind == HlirOpKind::HlirOpUnary {
-        let result = instr.result
-        if result == HLIR_INVALID_VALUE {
-            return out
-        }
-
-        // Best-effort unary lowering:
-        // - neg/fneg: multiply by -1 for integer-like values
-        // - not: preserve source value for now (no dedicated opcode yet)
-        if instr.un_op == HlirUnaryOp::HlirOpNot {
-            out.values = hlir_gpu_value_alias(out.values, result, instr.src)
-            if !hlir_gpu_value_has(out.values, result) {
-                let ty = hlir_gpu_type_from_hlir(instr.ty)
-                let bind = hlir_gpu_lower_bind_new_reg(out, result, ty)
-                out = bind.0
-            }
-            return out
-        }
-
-        let out_ty = hlir_gpu_type_from_hlir(instr.ty)
-        let bind = hlir_gpu_lower_bind_new_reg(out, result, out_ty)
-        out = bind.0
-        let dst_reg = bind.1
-
-        let src_hint = hlir_gpu_type_from_hlir(hlir_function_lookup_local_type(func, instr.src))
-        let src_mat = hlir_gpu_lower_materialize_unknown(out, instr.src, src_hint)
-        out = src_mat.0
-        let src_reg = src_mat.1
-
-        // Float neg fallback: dst = src + (-0) is not representable with current
-        // op set, so keep alias behavior for fneg.
-        if instr.un_op == HlirUnaryOp::HlirOpFNeg {
-            out.values = hlir_gpu_value_alias(out.values, result, instr.src)
-            return out
-        }
-
-        var op = gpu_op_new()
-        op.opcode = GpuOpcode::GpuMulImm
-        op.dst_reg = dst_reg
-        op.lhs_reg = src_reg
-        op.rhs_imm = -1
-        op.ty = src_mat.2
-        op.dst_ty = out_ty
-        op.src_ty = src_mat.2
-        out = hlir_gpu_lower_push_op(out, op)
-
-        return out
-    }
-
-    // --- Load ----------------------------------------------------------------
-    if op_kind == HlirOpKind::HlirOpLoad {
-        let result = instr.result
-        if result == HLIR_INVALID_VALUE {
-            return out
-        }
-
-        let load_ty = hlir_gpu_type_from_hlir(instr.ty)
-        let bind = hlir_gpu_lower_bind_new_reg(out, result, load_ty)
-        out = bind.0
-        let dst_reg = bind.1
-
-        let ptr_id = instr.src
-
-        if hlir_gpu_value_is_shared_ptr(out.values, ptr_id) {
-            var op = gpu_op_new()
-            op.opcode = GpuOpcode::GpuLoadShared
-            op.dst_reg = dst_reg
-            op.shared_addr = hlir_gpu_value_shared_addr(out.values, ptr_id)
-            op.ty = load_ty
-            op.dst_ty = load_ty
-            op.src_ty = load_ty
-            op.memory_space = GpuMemorySpace::GpuMemShared
-            out = hlir_gpu_lower_push_op(out, op)
-            return out
-        }
-
-        let ptr_mat = hlir_gpu_lower_materialize_unknown(out, ptr_id, GpuType::GpuU64)
-        out = ptr_mat.0
-        let addr_reg = ptr_mat.1
-
-        var op = gpu_op_new()
-        op.opcode = GpuOpcode::GpuLoadGlobal
-        op.dst_reg = dst_reg
-        op.addr_reg = addr_reg
-        op.ty = load_ty
-        op.dst_ty = load_ty
-        op.src_ty = GpuType::GpuU64
-        op.memory_space = GpuMemorySpace::GpuMemGlobal
-        out = hlir_gpu_lower_push_op(out, op)
-
-        return out
-    }
-
-    // --- Store ---------------------------------------------------------------
-    if op_kind == HlirOpKind::HlirOpStore {
-        let ptr_id = instr.store_ptr
-        let value_id = instr.store_value
-
-        // Shared-path store when pointer originates from alloca lowering.
-        if hlir_gpu_value_is_shared_ptr(out.values, ptr_id) {
-            let val_hint = hlir_gpu_type_from_hlir(hlir_function_lookup_local_type(func, value_id))
-            let val_mat = hlir_gpu_lower_materialize_unknown(out, value_id, val_hint)
-            out = val_mat.0
-            let src_reg = val_mat.1
-
-            var op = gpu_op_new()
-            op.opcode = GpuOpcode::GpuStoreShared
-            op.src_reg = src_reg
-            op.shared_addr = hlir_gpu_value_shared_addr(out.values, ptr_id)
-            op.ty = val_mat.2
-            op.dst_ty = val_mat.2
-            op.src_ty = val_mat.2
-            op.memory_space = GpuMemorySpace::GpuMemShared
-            out = hlir_gpu_lower_push_op(out, op)
-            return out
-        }
-
-        let ptr_mat = hlir_gpu_lower_materialize_unknown(out, ptr_id, GpuType::GpuU64)
-        out = ptr_mat.0
-        let addr_reg = ptr_mat.1
-
-        let val_hint = hlir_gpu_type_from_hlir(hlir_function_lookup_local_type(func, value_id))
-        let val_mat = hlir_gpu_lower_materialize_unknown(out, value_id, val_hint)
-        out = val_mat.0
-        let src_reg = val_mat.1
-
-        var op = gpu_op_new()
-        op.opcode = GpuOpcode::GpuStoreGlobal
-        op.addr_reg = addr_reg
-        op.src_reg = src_reg
-        op.ty = val_mat.2
-        op.dst_ty = val_mat.2
-        op.src_ty = val_mat.2
-        op.memory_space = GpuMemorySpace::GpuMemGlobal
-        out = hlir_gpu_lower_push_op(out, op)
-
-        return out
-    }
-
-    // --- Alloca --------------------------------------------------------------
-    if op_kind == HlirOpKind::HlirOpAlloca {
-        let result = instr.result
-        if result != HLIR_INVALID_VALUE {
-            let alloc_size = hlir_gpu_sizeof_hlir(instr.alloca_ty)
-            let aligned = if alloc_size <= 0 { 8 } else {
-                let rem = alloc_size % 8
-                if rem == 0 { alloc_size } else { alloc_size + (8 - rem) }
-            }
-
-            let base = out.next_shared_addr
-            out.next_shared_addr = out.next_shared_addr + aligned
-            if out.next_shared_addr > HLIR_GPU_MAX_SHARED_BYTES {
-                out.next_shared_addr = HLIR_GPU_MAX_SHARED_BYTES
-                out.op_overflow = true
-            }
-            if out.next_shared_addr > out.kernel.shared_bytes {
-                out.kernel.shared_bytes = out.next_shared_addr
-                out.kernel.shared_mem_bytes = out.next_shared_addr
-            }
-
-            out.values = hlir_gpu_value_bind_shared_ptr(out.values, result, base)
-        }
-        return out
-    }
-
-    // --- GEP field -----------------------------------------------------------
-    if op_kind == HlirOpKind::HlirOpGetFieldPtr {
-        let result = instr.result
-        if result == HLIR_INVALID_VALUE {
-            return out
-        }
-
-        let base_id = instr.base
-        let offset = instr.field_index * 8
-
-        if hlir_gpu_value_is_shared_ptr(out.values, base_id) {
-            let addr = hlir_gpu_value_shared_addr(out.values, base_id) + offset
-            out.values = hlir_gpu_value_bind_shared_ptr(out.values, result, addr)
-            return out
-        }
-
-        let base_mat = hlir_gpu_lower_materialize_unknown(out, base_id, GpuType::GpuU64)
-        out = base_mat.0
-        let base_reg = base_mat.1
-
-        let bind = hlir_gpu_lower_bind_new_reg(out, result, GpuType::GpuU64)
-        out = bind.0
-        let dst_reg = bind.1
-
-        var op = gpu_op_new()
-        op.opcode = GpuOpcode::GpuAddImm
-        op.dst_reg = dst_reg
-        op.lhs_reg = base_reg
-        op.rhs_imm = offset
-        op.ty = GpuType::GpuU64
-        op.dst_ty = GpuType::GpuU64
-        op.src_ty = GpuType::GpuU64
-        out = hlir_gpu_lower_push_op(out, op)
-
-        return out
-    }
-
-    // --- GEP element ---------------------------------------------------------
-    if op_kind == HlirOpKind::HlirOpGetElementPtr {
-        let result = instr.result
-        if result == HLIR_INVALID_VALUE {
-            return out
-        }
-
-        let base_id = instr.base
-        let index_id = instr.index
-        let elem_size = hlir_gpu_sizeof_hlir(instr.ty)
-        let stride = if elem_size <= 0 { 8 } else { elem_size }
-
-        // Shared memory pointer with constant index can stay in shared-address form.
-        if hlir_gpu_value_is_shared_ptr(out.values, base_id) && hlir_gpu_value_is_const(out.values, index_id) {
-            let idx = hlir_gpu_value_const_i64(out.values, index_id)
-            let addr = hlir_gpu_value_shared_addr(out.values, base_id) + (idx * stride)
-            out.values = hlir_gpu_value_bind_shared_ptr(out.values, result, addr)
-            return out
-        }
-
-        let base_mat = hlir_gpu_lower_materialize_unknown(out, base_id, GpuType::GpuU64)
-        out = base_mat.0
-        let base_reg = base_mat.1
-
-        let bind = hlir_gpu_lower_bind_new_reg(out, result, GpuType::GpuU64)
-        out = bind.0
-        let dst_reg = bind.1
-
-        if hlir_gpu_value_is_const(out.values, index_id) {
-            let idx_imm = hlir_gpu_value_const_i64(out.values, index_id) * stride
-            var addi = gpu_op_new()
-            addi.opcode = GpuOpcode::GpuAddImm
-            addi.dst_reg = dst_reg
-            addi.lhs_reg = base_reg
-            addi.rhs_imm = idx_imm
-            addi.ty = GpuType::GpuU64
-            addi.dst_ty = GpuType::GpuU64
-            addi.src_ty = GpuType::GpuU64
-            out = hlir_gpu_lower_push_op(out, addi)
-            return out
-        }
-
-        // Dynamic index: cvt index -> u64, multiply by stride, then add.
-        let idx_hint = hlir_gpu_type_from_hlir(hlir_function_lookup_local_type(func, index_id))
-        let idx_mat = hlir_gpu_lower_materialize_unknown(out, index_id, idx_hint)
-        out = idx_mat.0
-        let idx_reg = idx_mat.1
-        let idx_ty = idx_mat.2
-
-        var idx64_reg: i64 = idx_reg
-        if idx_ty != GpuType::GpuU64 && idx_ty != GpuType::GpuI64 {
-            let alloc64 = hlir_gpu_alloc_reg(out.regs, GpuType::GpuU64)
-            out.regs = alloc64.0
-            idx64_reg = alloc64.1
-
-            var cvt = gpu_op_new()
-            cvt.opcode = GpuOpcode::GpuCvt
-            cvt.dst_reg = idx64_reg
-            cvt.src_reg = idx_reg
-            cvt.ty = GpuType::GpuU64
-            cvt.dst_ty = GpuType::GpuU64
-            cvt.src_ty = idx_ty
-            out = hlir_gpu_lower_push_op(out, cvt)
-        }
-
-        var scaled_reg = idx64_reg
-        if stride != 1 {
-            let alloc_scaled = hlir_gpu_alloc_reg(out.regs, GpuType::GpuU64)
-            out.regs = alloc_scaled.0
-            scaled_reg = alloc_scaled.1
-
-            var muli = gpu_op_new()
-            muli.opcode = GpuOpcode::GpuMulImm
-            muli.dst_reg = scaled_reg
-            muli.lhs_reg = idx64_reg
-            muli.rhs_imm = stride
-            muli.ty = GpuType::GpuU64
-            muli.dst_ty = GpuType::GpuU64
-            muli.src_ty = GpuType::GpuU64
-            out = hlir_gpu_lower_push_op(out, muli)
-        }
-
-        var add = gpu_op_new()
-        add.opcode = GpuOpcode::GpuAdd
-        add.dst_reg = dst_reg
-        add.lhs_reg = base_reg
-        add.rhs_reg = scaled_reg
-        add.ty = GpuType::GpuU64
-        add.dst_ty = GpuType::GpuU64
-        add.src_ty = GpuType::GpuU64
-        out = hlir_gpu_lower_push_op(out, add)
-
-        return out
-    }
-
-    // --- Cast ----------------------------------------------------------------
-    if op_kind == HlirOpKind::HlirOpCast {
-        let result = instr.result
-        if result == HLIR_INVALID_VALUE {
-            return out
-        }
-
-        let src_id = instr.cast_value
-        let src_hint = hlir_gpu_type_from_hlir(instr.cast_source)
-        let dst_ty = hlir_gpu_type_from_hlir(instr.cast_target)
-
-        let src_mat = hlir_gpu_lower_materialize_unknown(out, src_id, src_hint)
-        out = src_mat.0
-        let src_reg = src_mat.1
-
-        // Fast alias when no representable cvt is needed.
-        if (src_mat.2 == dst_ty) {
-            out.values = hlir_gpu_value_alias(out.values, result, src_id)
-            return out
-        }
-
-        // Baseline lower_to_ptx currently supports cvt.u64.u32 directly.
-        // Use cvt only for that lane; otherwise alias in this phase.
-        if (src_mat.2 == GpuType::GpuI32 || src_mat.2 == GpuType::GpuU32) && (dst_ty == GpuType::GpuU64 || dst_ty == GpuType::GpuI64) {
-            let bind = hlir_gpu_lower_bind_new_reg(out, result, GpuType::GpuU64)
-            out = bind.0
-            let dst_reg = bind.1
-
-            var cvt = gpu_op_new()
-            cvt.opcode = GpuOpcode::GpuCvt
-            cvt.dst_reg = dst_reg
-            cvt.src_reg = src_reg
-            cvt.ty = GpuType::GpuU64
-            cvt.dst_ty = GpuType::GpuU64
-            cvt.src_ty = GpuType::GpuU32
-            out = hlir_gpu_lower_push_op(out, cvt)
-            return out
-        }
-
-        out.values = hlir_gpu_value_alias(out.values, result, src_id)
-        if !hlir_gpu_value_has(out.values, result) {
-            let bind = hlir_gpu_lower_bind_new_reg(out, result, dst_ty)
-            out = bind.0
-        }
-        return out
-    }
-
-    // --- Phi -----------------------------------------------------------------
-    if op_kind == HlirOpKind::HlirOpPhi {
-        let result = instr.result
-        if result != HLIR_INVALID_VALUE {
-            if instr.phi_count > 0 {
-                let src_val = instr.phi_incoming[0].value_id
-                out.values = hlir_gpu_value_alias(out.values, result, src_val)
-                if !hlir_gpu_value_has(out.values, result) {
-                    let ty = hlir_gpu_type_from_hlir(instr.ty)
-                    let bind = hlir_gpu_lower_bind_new_reg(out, result, ty)
-                    out = bind.0
-                }
-            } else {
-                let ty = hlir_gpu_type_from_hlir(instr.ty)
-                let bind = hlir_gpu_lower_bind_new_reg(out, result, ty)
-                out = bind.0
-            }
-        }
-        return out
-    }
-
-    // --- Select --------------------------------------------------------------
-    if op_kind == HlirOpKind::HlirOpSelect {
-        let result = instr.result
-        if result == HLIR_INVALID_VALUE {
-            return out
-        }
-
-        // Constant condition can be folded immediately.
-        if hlir_gpu_value_is_const(out.values, instr.select_cond) {
-            let cv = hlir_gpu_value_const_i64(out.values, instr.select_cond)
-            let chosen = if cv != 0 { instr.select_true } else { instr.select_false }
-            out.values = hlir_gpu_value_alias(out.values, result, chosen)
-            if !hlir_gpu_value_has(out.values, result) {
-                let ty = hlir_gpu_type_from_hlir(instr.ty)
-                let bind = hlir_gpu_lower_bind_new_reg(out, result, ty)
-                out = bind.0
-            }
-            return out
-        }
-
-        let out_ty = hlir_gpu_type_from_hlir(instr.ty)
-        let lhs_hint = hlir_gpu_type_from_hlir(hlir_function_lookup_local_type(func, instr.select_true))
-        let rhs_hint = hlir_gpu_type_from_hlir(hlir_function_lookup_local_type(func, instr.select_false))
-
-        let lhs_mat = hlir_gpu_lower_materialize_unknown(out, instr.select_true, lhs_hint)
-        out = lhs_mat.0
-        let lhs_reg = lhs_mat.1
-
-        let rhs_mat = hlir_gpu_lower_materialize_unknown(out, instr.select_false, rhs_hint)
-        out = rhs_mat.0
-        let rhs_reg = rhs_mat.1
-
-        let ensure = hlir_gpu_lower_ensure_pred(out, instr.select_cond, GpuType::GpuI32)
-        out = ensure.0
-        let pred_reg = ensure.1
-
-        let bind = hlir_gpu_lower_bind_new_reg(out, result, out_ty)
-        out = bind.0
-        let dst_reg = bind.1
-
-        var op = gpu_op_new()
-        op.opcode = GpuOpcode::GpuSelp
-        op.dst_reg = dst_reg
-        op.lhs_reg = lhs_reg
-        op.rhs_reg = rhs_reg
-        op.src_reg = pred_reg
-        op.ty = if out_ty == GpuType::GpuU64 { GpuType::GpuU64 } else { out_ty }
-        op.dst_ty = out_ty
-        op.src_ty = out_ty
-        out = hlir_gpu_lower_push_op(out, op)
-
-        return out
-    }
-
-    // --- Call / CallDirect / Aggregate ops / Effects ------------------------
-    if op_kind == HlirOpKind::HlirOpCall || op_kind == HlirOpKind::HlirOpCallDirect {
-        let result = instr.result
-        if result != HLIR_INVALID_VALUE {
-            // Best effort: alias return value to first argument if present.
-            if instr.call_arg_count > 0 {
-                out.values = hlir_gpu_value_alias(out.values, result, instr.call_args[0])
-            }
-            if !hlir_gpu_value_has(out.values, result) {
-                let ty = hlir_gpu_type_from_hlir(instr.ty)
-                let bind = hlir_gpu_lower_bind_new_reg(out, result, ty)
-                out = bind.0
-            }
-        }
-        return out
-    }
-
-    if op_kind == HlirOpKind::HlirOpExtractValue {
-        let result = instr.result
-        if result != HLIR_INVALID_VALUE {
-            out.values = hlir_gpu_value_alias(out.values, result, instr.base)
-            if !hlir_gpu_value_has(out.values, result) {
-                let ty = hlir_gpu_type_from_hlir(instr.ty)
-                let bind = hlir_gpu_lower_bind_new_reg(out, result, ty)
-                out = bind.0
-            }
-        }
-        return out
-    }
-
-    if op_kind == HlirOpKind::HlirOpInsertValue {
-        let result = instr.result
-        if result != HLIR_INVALID_VALUE {
-            out.values = hlir_gpu_value_alias(out.values, result, instr.base)
-            if !hlir_gpu_value_has(out.values, result) {
-                let ty = hlir_gpu_type_from_hlir(instr.ty)
-                let bind = hlir_gpu_lower_bind_new_reg(out, result, ty)
-                out = bind.0
-            }
-        }
-        return out
-    }
-
-    if op_kind == HlirOpKind::HlirOpTuple ||
-       op_kind == HlirOpKind::HlirOpArray ||
-       op_kind == HlirOpKind::HlirOpStruct ||
-       op_kind == HlirOpKind::HlirOpPerformEffect ||
-       op_kind == HlirOpKind::HlirOpPushHandler ||
-       op_kind == HlirOpKind::HlirOpPopHandler ||
-       op_kind == HlirOpKind::HlirOpDispatchEffect {
-        let result = instr.result
-        if result != HLIR_INVALID_VALUE {
-            let ty = hlir_gpu_type_from_hlir(instr.ty)
-            let bind = hlir_gpu_lower_bind_new_reg(out, result, ty)
-            out = bind.0
-        }
-        return out
-    }
-
-    out
-}
-
-fn hlir_gpu_lower_terminator(
-    state: HlirGpuLowerState,
-    term: HlirTerminator
-) -> HlirGpuLowerState with Mut, Panic, Div {
-    var out = state
-
-    if term.kind == HlirTermKind::HlirTermReturn {
-        return hlir_gpu_lower_emit_ret(out)
-    }
-
-    if term.kind == HlirTermKind::HlirTermUnreachable {
-        return hlir_gpu_lower_emit_ret(out)
-    }
-
-    // Branch/cond-branch/switch are represented in HLIR CFG form.
-    // Current GpuKernelIr baseline has no explicit label target fields for
-    // branch lowering in this stage, so we keep block-linearization and defer
-    // control-flow reconstruction to a follow-up pass.
-    out
-}
-
-fn hlir_gpu_lower_block(
-    state: HlirGpuLowerState,
-    func: HlirFunction,
-    block: HlirBlock
-) -> HlirGpuLowerState with Mut, Panic, Div, Alloc {
-    var out = state
-
-    // Bind block parameters if present.
-    var p: i64 = 0
-    while p < block.param_count {
-        let bp = block.params[p as usize]
-        if bp.value_id != HLIR_INVALID_VALUE {
-            let bty = hlir_gpu_type_from_hlir(bp.ty)
-            let bind = hlir_gpu_lower_bind_new_reg(out, bp.value_id, bty)
-            out = bind.0
-        }
-        p = p + 1
-    }
-
-    var i: i64 = 0
-    while i < block.instr_count {
-        out = hlir_gpu_lower_instr(out, func, block.instrs[i as usize])
-        i = i + 1
-    }
-
-    out = hlir_gpu_lower_terminator(out, block.terminator)
-    out
-}
-
-// ============================================================================
-// Function + module entrypoints
-// ============================================================================
-
-fn hlir_lower_function_to_gpu_kernel(func: HlirFunction) -> GpuKernelIr with Mut, Panic, Div, Alloc {
-    var st = hlir_gpu_lower_state_new(func.name)
-
-    // Parameters: map HLIR params to kernel params + emit ld.param ops.
-    var pi: i64 = 0
-    while pi < func.param_count && pi < 8 {
-        let p = func.params[pi as usize]
-        let pty = hlir_gpu_type_from_hlir(p.ty)
-        st.kernel.params[pi as usize] = GpuParam {
-            name: hlir_gpu_hlir_name_to_ir_name(p.name),
-            ty: hlir_gpu_param_type_for_load(pty),
-        }
-        st.kernel.param_count = st.kernel.param_count + 1
-
-        let bind = hlir_gpu_lower_bind_new_reg(st, p.value_id, pty)
-        st = bind.0
-        let dst_reg = bind.1
-
-        var loadp = gpu_op_new()
-        loadp.opcode = GpuOpcode::GpuLoadParam
-        loadp.dst_reg = dst_reg
-        loadp.param_idx = pi
-        loadp.ty = hlir_gpu_param_type_for_load(pty)
-        loadp.dst_ty = pty
-        loadp.src_ty = hlir_gpu_param_type_for_load(pty)
-        st = hlir_gpu_lower_push_op(st, loadp)
-
-        pi = pi + 1
-    }
-
-    // Lower all blocks in source order.
-    var bi: i64 = 0
-    while bi < func.block_count {
-        st = hlir_gpu_lower_block(st, func, func.blocks[bi as usize])
-        bi = bi + 1
-    }
-
-    if !st.saw_ret {
-        st = hlir_gpu_lower_emit_ret(st)
-    }
-
-    // Commit shared-memory allocation and register usage.
-    st.kernel.shared_bytes = st.next_shared_addr
-    st.kernel.shared_mem_bytes = st.next_shared_addr
-    st.kernel = hlir_gpu_finalize_kernel_regs(st.kernel, st.regs)
-    st.kernel
-}
-
-fn hlir_lower_module_to_gpu(module: HlirModule) -> HlirGpuLoweredModule with Mut, Panic, Div, Alloc {
-    var out = hlir_gpu_lowered_module_new()
-
-    var i: i64 = 0
-    while i < module.fn_count {
-        let func = module.functions[i as usize]
-        if func.is_kernel {
-            let kernel = hlir_lower_function_to_gpu_kernel(func)
-            out = hlir_gpu_lowered_add_kernel(out, kernel)
-        } else {
-            out = hlir_gpu_lowered_skip(out, func.id)
-        }
-        i = i + 1
-    }
-
-    out
-}
-
-fn hlir_lower_module_to_gpu_all_functions(module: HlirModule) -> HlirGpuLoweredModule with Mut, Panic, Div, Alloc {
-    var out = hlir_gpu_lowered_module_new()
-
-    var i: i64 = 0
-    while i < module.fn_count {
-        let func = module.functions[i as usize]
-        let kernel = hlir_lower_function_to_gpu_kernel(func)
-        out = hlir_gpu_lowered_add_kernel(out, kernel)
-        i = i + 1
-    }
-
-    out
-}
-
-fn hlir_lower_function_to_ptx(func: HlirFunction) -> PtxBuf with Mut, Panic, Div, Alloc {
-    let kernel = hlir_lower_function_to_gpu_kernel(func)
-    gpu_lower_to_ptx(kernel)
-}
-
-fn hlir_lower_module_kernel_to_ptx(module: HlirModule, kernel_index: i64) -> PtxBuf with Mut, Panic, Div, Alloc {
-    let lowered = hlir_lower_module_to_gpu(module)
-    if kernel_index < 0 || kernel_index >= lowered.kernel_count {
-        return ptx_buf_new()
-    }
-    gpu_lower_to_ptx(lowered.kernels[kernel_index as usize])
-}
-
-fn hlir_gpu_select_kernel_by_name_hash(module: HlirGpuLoweredModule, target_name: HlirName) -> i64 {
-    let target_hash = hlir_gpu_hlir_name_hash(target_name)
-    var i: i64 = 0
-    while i < module.kernel_count {
-        let k = module.kernels[i as usize]
-        let h = hlir_gpu_hlir_name_hash(HlirName { buf: k.kernel_name.buf, len: k.kernel_name.len })
-        if h == target_hash {
-            return i
-        }
-        i = i + 1
-    }
-    -1
-}
-
-fn hlir_lower_module_kernel_named_to_ptx(module: HlirModule, kernel_name: HlirName) -> PtxBuf with Mut, Panic, Div, Alloc {
-    let lowered = hlir_lower_module_to_gpu(module)
-    let idx = hlir_gpu_select_kernel_by_name_hash(lowered, kernel_name)
-    if idx < 0 {
-        return ptx_buf_new()
-    }
-    gpu_lower_to_ptx(lowered.kernels[idx as usize])
-}
-
-// End of gpu/hlir_to_gpu.sio

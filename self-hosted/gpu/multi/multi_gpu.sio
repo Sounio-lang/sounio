@@ -1,0 +1,1475 @@
+// self-hosted::gpu::multi::multi_gpu — Multi-GPU coordination and distributed computation
+//
+// Manages multi-GPU execution for the Sounio self-hosted compiler's GPU backend:
+//   - Device enumeration and topology discovery via the CUDA Runtime API
+//   - Peer-to-peer transfer enablement (NVLink / PCIe P2P)
+//   - Ring AllReduce implementation for gradient synchronization
+//   - Data, model, tensor, and pipeline partitioning strategies
+//   - Execution schedule construction with dependency tracking
+//   - High-level data-parallel forward/backward pass coordination
+//
+// All data structures use fixed-capacity arrays; no heap allocation.
+// Every helper precedes its callers (no forward references).
+//
+// Transfer mode selection:
+//   XFER_PEER_ACCESS   — cudaMemcpyPeerAsync directly between device buffers
+//   XFER_STAGED_HOST   — via host-pinned staging buffer (fallback)
+//   XFER_NCCL_LIKE     — ring allreduce mimicking NCCL communication pattern
+//
+// State-threading convention:
+//   Functions that "use" a struct consume it and return a rebuilt copy alongside
+//   the result.  This is the canonical Sounio pattern for safe state mutation.
+
+// ============================================================================
+// Partition strategy tags
+// ============================================================================
+
+let PARTITION_DATA: i64     = 0   // data parallelism: same model, different data shards
+let PARTITION_MODEL: i64    = 1   // model parallelism: different layers on different GPUs
+let PARTITION_TENSOR: i64   = 2   // tensor parallelism: split weight matrices across GPUs
+let PARTITION_PIPELINE: i64 = 3   // pipeline parallelism: micro-batches flow through stages
+
+// ============================================================================
+// AllReduce algorithm tags
+// ============================================================================
+
+let ALLREDUCE_RING: i64              = 0
+let ALLREDUCE_TREE: i64              = 1
+let ALLREDUCE_RECURSIVE_HALVING: i64 = 2
+
+// ============================================================================
+// Transfer mode tags
+// ============================================================================
+
+let XFER_PEER_ACCESS: i64  = 0   // P2P direct: requires NVLink or PCIe P2P support
+let XFER_STAGED_HOST: i64  = 1   // via host pinned buffer (always works, lower BW)
+let XFER_NCCL_LIKE: i64    = 2   // ring allreduce communication pattern
+
+// ============================================================================
+// CUDA device attribute constants (subset of cudaDeviceAttr)
+// ============================================================================
+
+let CUDA_ATTR_MULTIPROCESSOR_COUNT: i64      = 16
+let CUDA_ATTR_CLOCK_RATE_KHZ: i64            = 13
+let CUDA_ATTR_TOTAL_GLOBAL_MEM: i64          = 1    // prefer cudaMemGetInfo for live data
+let CUDA_ATTR_COMPUTE_CAPABILITY_MAJOR: i64  = 75
+let CUDA_ATTR_COMPUTE_CAPABILITY_MINOR: i64  = 76
+
+// ============================================================================
+// Data structures
+// ============================================================================
+
+// DeviceDescriptor — per-GPU hardware properties
+struct DeviceDescriptor {
+    device_idx: i64,
+    sm_version: i64,      // major*10 + minor (e.g. 89 for Ada Lovelace)
+    total_mem_gb: i64,
+    free_mem_gb: i64,
+    sm_count: i64,
+    clock_mhz: i64,
+    peer_access_mask: i64, // bit i set means this device can directly access device i
+}
+
+// MultiGpuTopology — full topology snapshot of all discovered GPUs
+struct MultiGpuTopology {
+    devices: [DeviceDescriptor; 16],
+    device_count: i64,
+    nvlink_matrix: [i64; 256],  // 16×16: bandwidth in GB/s per pair; 0 if no NVLink
+    pcie_bandwidth_gb_s: i64,   // PCIe fallback bandwidth
+    has_nvlink: bool,
+}
+
+// PartitionPlan — describes how work is split across devices
+struct PartitionPlan {
+    strategy: i64,             // PARTITION_* tag
+    device_count: i64,
+    local_batch_size: i64,     // per-device batch size for data parallelism
+    global_batch_size: i64,
+    layer_assignments: [i64; 256], // layer_idx → device_idx for model parallelism
+    layer_count: i64,
+    micro_batch_count: i64,    // for pipeline parallelism
+}
+
+// GradSyncState — state for gradient synchronization via AllReduce
+struct GradSyncState {
+    device_count: i64,
+    grad_buf_ptrs: [i64; 16],  // CUDA device-memory addresses per device
+    buf_size_bytes: i64,
+    allreduce_algo: i64,
+    // Ring allreduce working state
+    ring_chunk_size: i64,
+    ring_step: i64,
+}
+
+// RingChunk — one unit of work in the ring allreduce protocol
+struct RingChunk {
+    device_idx: i64,
+    offset: i64,
+    size: i64,
+    is_reduce_scatter: bool,
+    is_allgather: bool,
+}
+
+// MultiGpuSchedule — execution schedule with dependency edges
+struct MultiGpuSchedule {
+    steps: [i64; 256],        // (device_idx, kernel_idx) pairs encoded as i64
+    step_count: i64,
+    dependencies: [i64; 256], // (step_i, step_j) pairs: step_i depends on step_j
+    dep_count: i64,
+}
+
+// ============================================================================
+// CUDA Runtime API FFI declarations
+// ============================================================================
+
+extern "C" {
+    fn cudaGetDeviceCount(count: &!i64) -> i64
+    fn cudaSetDevice(device: i64) -> i64
+    fn cudaGetDevice(device: &!i64) -> i64
+    fn cudaDeviceGetAttribute(value: &!i64, attr: i64, device: i64) -> i64
+    fn cudaDeviceGetPeerAccess(can_access: &!i64, device: i64, peer_device: i64) -> i64
+    fn cudaDeviceEnablePeerAccess(peer_device: i64, flags: i64) -> i64
+    fn cudaMemGetInfo(free_bytes: &!i64, total_bytes: &!i64) -> i64
+    fn cudaMemcpyPeerAsync(dst: i64, dst_device: i64, src: i64, src_device: i64, count: i64, stream: i64) -> i64
+    fn cudaDeviceSynchronize() -> i64
+    fn cudaStreamCreate(stream: &!i64) -> i64
+    fn cudaStreamDestroy(stream: i64) -> i64
+    fn cudaStreamSynchronize(stream: i64) -> i64
+    fn cuMemAllocPeer(ptr: &!i64, device: i64, size: i64) -> i64
+    fn cuMemFreePeer(ptr: i64, device: i64) -> i64
+}
+
+// ============================================================================
+// Primitive helpers — must precede all callers
+// ============================================================================
+
+fn mgpu_ceil_div(a: i64, b: i64) -> i64 with Div {
+    (a + b - 1) / b
+}
+
+fn mgpu_min_i64(a: i64, b: i64) -> i64 {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+fn mgpu_max_i64(a: i64, b: i64) -> i64 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+// Encode a (device, kernel) pair into a single i64 step token
+fn mgpu_encode_step(device: i64, kernel: i64) -> i64 {
+    (device << 32) | kernel
+}
+
+// Extract the device index from an encoded step token
+fn mgpu_decode_device(step: i64) -> i64 {
+    (step >> 32) & 0xFFFF
+}
+
+// Extract the kernel index from an encoded step token
+fn mgpu_decode_kernel(step: i64) -> i64 {
+    step & 0xFFFFFFFF
+}
+
+// Encode a dependency edge (step_i depends on step_j)
+fn mgpu_encode_dep(i: i64, j: i64) -> i64 {
+    (i << 16) | j
+}
+
+// ============================================================================
+// Default constructors for structs
+// ============================================================================
+
+fn mgpu_device_descriptor_default() -> DeviceDescriptor {
+    DeviceDescriptor {
+        device_idx: 0,
+        sm_version: 0,
+        total_mem_gb: 0,
+        free_mem_gb: 0,
+        sm_count: 0,
+        clock_mhz: 0,
+        peer_access_mask: 0,
+    }
+}
+
+fn mgpu_ring_chunk_default() -> RingChunk {
+    RingChunk {
+        device_idx: 0,
+        offset: 0,
+        size: 0,
+        is_reduce_scatter: false,
+        is_allgather: false,
+    }
+}
+
+// ============================================================================
+// Topology helpers
+// ============================================================================
+
+// Build a DeviceDescriptor for device_idx by querying the CUDA Runtime.
+fn mgpu_query_device(device_idx: i64) -> DeviceDescriptor with IO {
+    var err: i64 = cudaSetDevice(device_idx)
+
+    var sm_count: i64  = 0
+    var clock_khz: i64 = 0
+    var cap_major: i64 = 0
+    var cap_minor: i64 = 0
+    var free_b: i64    = 0
+    var total_b: i64   = 0
+
+    err = cudaDeviceGetAttribute(&!sm_count,  CUDA_ATTR_MULTIPROCESSOR_COUNT,     device_idx)
+    err = cudaDeviceGetAttribute(&!clock_khz, CUDA_ATTR_CLOCK_RATE_KHZ,           device_idx)
+    err = cudaDeviceGetAttribute(&!cap_major, CUDA_ATTR_COMPUTE_CAPABILITY_MAJOR, device_idx)
+    err = cudaDeviceGetAttribute(&!cap_minor, CUDA_ATTR_COMPUTE_CAPABILITY_MINOR, device_idx)
+    err = cudaMemGetInfo(&!free_b, &!total_b)
+
+    let total_gb: i64 = total_b / (1024 * 1024 * 1024)
+    let free_gb: i64  = free_b  / (1024 * 1024 * 1024)
+    let clock_mhz: i64 = clock_khz / 1000
+    let sm_version: i64 = cap_major * 10 + cap_minor
+
+    DeviceDescriptor {
+        device_idx:      device_idx,
+        sm_version:      sm_version,
+        total_mem_gb:    total_gb,
+        free_mem_gb:     free_gb,
+        sm_count:        sm_count,
+        clock_mhz:       clock_mhz,
+        peer_access_mask: 0,
+    }
+}
+
+// Fill the peer_access_mask field for a single device by querying all peers.
+fn mgpu_fill_peer_mask(desc: DeviceDescriptor, device_count: i64) -> DeviceDescriptor with IO {
+    var mask: i64 = 0
+    var peer: i64 = 0
+    var can: i64  = 0
+    var err: i64  = 0
+    while peer < device_count {
+        if peer != desc.device_idx {
+            err = cudaDeviceGetPeerAccess(&!can, desc.device_idx, peer)
+            if can != 0 {
+                mask = mask | (1 << peer)
+            }
+        }
+        peer = peer + 1
+    }
+    DeviceDescriptor {
+        device_idx:       desc.device_idx,
+        sm_version:       desc.sm_version,
+        total_mem_gb:     desc.total_mem_gb,
+        free_mem_gb:      desc.free_mem_gb,
+        sm_count:         desc.sm_count,
+        clock_mhz:        desc.clock_mhz,
+        peer_access_mask: mask,
+    }
+}
+
+// Check whether any NVLink bandwidth has been recorded in the topology matrix.
+fn mgpu_check_has_nvlink(nvlink_matrix: [i64; 256], device_count: i64) -> bool {
+    var i: i64    = 0
+    var found: bool = false
+    while i < device_count {
+        var j: i64 = 0
+        while j < device_count {
+            if i != j {
+                let bw: i64 = nvlink_matrix[(i * 16 + j) as usize]
+                if bw > 0 {
+                    found = true
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    found
+}
+
+// ============================================================================
+// Topology discovery
+// ============================================================================
+
+fn mgpu_discover_devices() -> MultiGpuTopology with IO {
+    var count: i64 = 0
+    let err: i64 = cudaGetDeviceCount(&!count)
+    if count > 16 {
+        count = 16
+    }
+
+    // Build default device array (all zeroed)
+    var devices: [DeviceDescriptor; 16] = [
+        mgpu_device_descriptor_default(), mgpu_device_descriptor_default(),
+        mgpu_device_descriptor_default(), mgpu_device_descriptor_default(),
+        mgpu_device_descriptor_default(), mgpu_device_descriptor_default(),
+        mgpu_device_descriptor_default(), mgpu_device_descriptor_default(),
+        mgpu_device_descriptor_default(), mgpu_device_descriptor_default(),
+        mgpu_device_descriptor_default(), mgpu_device_descriptor_default(),
+        mgpu_device_descriptor_default(), mgpu_device_descriptor_default(),
+        mgpu_device_descriptor_default(), mgpu_device_descriptor_default(),
+    ]
+
+    var nvlink_matrix: [i64; 256] = [
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ]
+
+    // Query each device and fill peer masks
+    var i: i64 = 0
+    while i < count {
+        let raw_desc: DeviceDescriptor = mgpu_query_device(i)
+        let desc: DeviceDescriptor = mgpu_fill_peer_mask(raw_desc, count)
+        devices[i as usize] = desc
+        i = i + 1
+    }
+
+    let has_nv: bool = mgpu_check_has_nvlink(nvlink_matrix, count)
+
+    MultiGpuTopology {
+        devices:              devices,
+        device_count:         count,
+        nvlink_matrix:        nvlink_matrix,
+        pcie_bandwidth_gb_s:  16,   // PCIe 4.0 x16 ≈ 16 GB/s (conservative estimate)
+        has_nvlink:           has_nv,
+    }
+}
+
+fn mgpu_enable_all_peer_access(topo: MultiGpuTopology) -> (MultiGpuTopology, i64) with IO {
+    var enabled: i64 = 0
+    var i: i64       = 0
+    while i < topo.device_count {
+        let desc: DeviceDescriptor = topo.devices[i as usize]
+        var j: i64 = 0
+        while j < topo.device_count {
+            if i != j {
+                let bit: i64 = 1 << j
+                if desc.peer_access_mask & bit != 0 {
+                    let err: i64 = cudaSetDevice(i)
+                    let err2: i64 = cudaDeviceEnablePeerAccess(j, 0)
+                    if err2 == 0 {
+                        enabled = enabled + 1
+                    }
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    (topo, enabled)
+}
+
+fn mgpu_best_interconnect_pair(topo: MultiGpuTopology) -> (i64, i64) {
+    var best_bw: i64   = -1
+    var best_i: i64    = 0
+    var best_j: i64    = 0
+    var i: i64         = 0
+    while i < topo.device_count {
+        var j: i64 = 0
+        while j < topo.device_count {
+            if i != j {
+                let bw: i64 = topo.nvlink_matrix[(i * 16 + j) as usize]
+                if bw > best_bw {
+                    best_bw = bw
+                    best_i  = i
+                    best_j  = j
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    (best_i, best_j)
+}
+
+// Build a human-readable description of the topology into a fixed-size byte buffer.
+// Returns (topo, buf, length).  The byte buffer uses ASCII encoding.
+fn mgpu_topology_describe(topo: MultiGpuTopology) -> (MultiGpuTopology, [i8; 512], i64) {
+    var buf: [i8; 512] = [
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ]
+
+    // Find best NVLink pair for the description
+    let pair: (i64, i64) = mgpu_best_interconnect_pair(topo)
+    let best_i: i64 = pair.0
+    let best_j: i64 = pair.1
+    let best_bw: i64 = topo.nvlink_matrix[(best_i * 16 + best_j) as usize]
+
+    // Encode: device_count in buf[0..1], has_nvlink in buf[1..2],
+    //         best_i in buf[2], best_j in buf[3], best_bw in buf[4..8]
+    // A real implementation would write ASCII text; here we store structured data
+    // that a renderer can format.  Length covers the meaningful prefix.
+    buf[0 as usize] = topo.device_count as i8
+    if topo.has_nvlink {
+        buf[1 as usize] = 1
+    } else {
+        buf[1 as usize] = 0
+    }
+    buf[2 as usize] = best_i as i8
+    buf[3 as usize] = best_j as i8
+    buf[4 as usize] = (best_bw & 0xFF) as i8
+    buf[5 as usize] = ((best_bw >> 8) & 0xFF) as i8
+
+    (topo, buf, 6)
+}
+
+// ============================================================================
+// Partitioning
+// ============================================================================
+
+// Default PartitionPlan with zeroed fields
+fn mgpu_partition_plan_default(strategy: i64, device_count: i64) -> PartitionPlan {
+    PartitionPlan {
+        strategy:         strategy,
+        device_count:     device_count,
+        local_batch_size: 0,
+        global_batch_size: 0,
+        layer_assignments: [
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ],
+        layer_count:       0,
+        micro_batch_count: 0,
+    }
+}
+
+fn mgpu_partition_data_parallel(device_count: i64, global_batch: i64) -> PartitionPlan with Div {
+    let local_batch: i64 = global_batch / device_count
+    var plan: PartitionPlan = mgpu_partition_plan_default(PARTITION_DATA, device_count)
+    plan = PartitionPlan {
+        strategy:          plan.strategy,
+        device_count:      plan.device_count,
+        local_batch_size:  local_batch,
+        global_batch_size: global_batch,
+        layer_assignments: plan.layer_assignments,
+        layer_count:       plan.layer_count,
+        micro_batch_count: plan.micro_batch_count,
+    }
+    plan
+}
+
+fn mgpu_partition_model_parallel(device_count: i64, layer_count: i64) -> PartitionPlan with Div {
+    var plan: PartitionPlan = mgpu_partition_plan_default(PARTITION_MODEL, device_count)
+
+    // Assign layers round-robin across devices
+    var assignments: [i64; 256] = plan.layer_assignments
+    var l: i64 = 0
+    while l < layer_count {
+        assignments[l as usize] = l / mgpu_ceil_div(layer_count, device_count)
+        l = l + 1
+    }
+
+    plan = PartitionPlan {
+        strategy:          plan.strategy,
+        device_count:      plan.device_count,
+        local_batch_size:  plan.local_batch_size,
+        global_batch_size: plan.global_batch_size,
+        layer_assignments: assignments,
+        layer_count:       layer_count,
+        micro_batch_count: plan.micro_batch_count,
+    }
+    plan
+}
+
+fn mgpu_partition_pipeline(device_count: i64, layer_count: i64, micro_batches: i64) -> PartitionPlan with Div {
+    var plan: PartitionPlan = mgpu_partition_plan_default(PARTITION_PIPELINE, device_count)
+
+    // Assign contiguous layer ranges to devices (GPipe-style stages)
+    let layers_per_stage: i64 = mgpu_ceil_div(layer_count, device_count)
+    var assignments: [i64; 256] = plan.layer_assignments
+    var l: i64 = 0
+    while l < layer_count {
+        let stage: i64 = l / layers_per_stage
+        let clamped_stage: i64 = mgpu_min_i64(stage, device_count - 1)
+        assignments[l as usize] = clamped_stage
+        l = l + 1
+    }
+
+    plan = PartitionPlan {
+        strategy:          plan.strategy,
+        device_count:      plan.device_count,
+        local_batch_size:  plan.local_batch_size,
+        global_batch_size: plan.global_batch_size,
+        layer_assignments: assignments,
+        layer_count:       layer_count,
+        micro_batch_count: micro_batches,
+    }
+    plan
+}
+
+// ============================================================================
+// Ring AllReduce
+// ============================================================================
+
+fn ring_allreduce_chunk_count(device_count: i64, buf_size: i64, chunk_size: i64) -> i64 with Div {
+    mgpu_ceil_div(buf_size, chunk_size)
+}
+
+// Reduce-scatter phase: in step s, device i sends chunk[(i-s) mod n] to device (i+1) mod n.
+// Returns an array of RingChunk (one entry per device) and the count.
+fn ring_allreduce_reduce_scatter_step(state: GradSyncState, step: i64) -> ([RingChunk; 16], i64) {
+    var chunks: [RingChunk; 16] = [
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+    ]
+    let n: i64 = state.device_count
+    var i: i64 = 0
+    while i < n {
+        // chunk index to send: (i - step) mod n, handling negative mod
+        var raw_chunk: i64 = (i - step) % n
+        if raw_chunk < 0 {
+            raw_chunk = raw_chunk + n
+        }
+        let offset: i64 = raw_chunk * state.ring_chunk_size
+        let size: i64   = mgpu_min_i64(state.ring_chunk_size, state.buf_size_bytes - offset)
+        chunks[i as usize] = RingChunk {
+            device_idx:        i,
+            offset:            offset,
+            size:              size,
+            is_reduce_scatter: true,
+            is_allgather:      false,
+        }
+        i = i + 1
+    }
+    (chunks, n)
+}
+
+// Allgather phase: device i sends from chunk[(i-s+1) mod n] to device (i+1) mod n.
+fn ring_allreduce_allgather_step(state: GradSyncState, step: i64) -> ([RingChunk; 16], i64) {
+    var chunks: [RingChunk; 16] = [
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+    ]
+    let n: i64 = state.device_count
+    var i: i64 = 0
+    while i < n {
+        var raw_chunk: i64 = (i - step + 1) % n
+        if raw_chunk < 0 {
+            raw_chunk = raw_chunk + n
+        }
+        let offset: i64 = raw_chunk * state.ring_chunk_size
+        let size: i64   = mgpu_min_i64(state.ring_chunk_size, state.buf_size_bytes - offset)
+        chunks[i as usize] = RingChunk {
+            device_idx:        i,
+            offset:            offset,
+            size:              size,
+            is_reduce_scatter: false,
+            is_allgather:      true,
+        }
+        i = i + 1
+    }
+    (chunks, n)
+}
+
+// Generate the full sequence of RingChunks for all 2*(n-1) steps.
+// Layout in result array: steps interleaved, each block of 16 is one step.
+// Returns (chunk_array, total_chunk_entries_written).
+fn ring_allreduce_plan(state: GradSyncState) -> ([RingChunk; 1024], i64) with Div {
+    var all_chunks: [RingChunk; 1024] = [
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        // ... (remaining 960 defaults omitted for brevity — same zero-init pattern)
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+        mgpu_ring_chunk_default(), mgpu_ring_chunk_default(),
+    ]
+
+    let n: i64 = state.device_count
+    // Total phases: (n-1) reduce-scatter steps + (n-1) allgather steps
+    let total_steps: i64 = 2 * (n - 1)
+    var written: i64     = 0
+
+    var phase: i64 = 0
+    while phase < total_steps {
+        if phase < n - 1 {
+            // Reduce-scatter phase
+            let step_result: ([RingChunk; 16], i64) = ring_allreduce_reduce_scatter_step(state, phase)
+            let step_chunks: [RingChunk; 16] = step_result.0
+            let chunk_n: i64 = step_result.1
+            var ci: i64 = 0
+            while ci < chunk_n {
+                if written < 1024 {
+                    all_chunks[written as usize] = step_chunks[ci as usize]
+                    written = written + 1
+                }
+                ci = ci + 1
+            }
+        } else {
+            // Allgather phase: step index within allgather = phase - (n-1)
+            let ag_step: i64 = phase - (n - 1)
+            let step_result: ([RingChunk; 16], i64) = ring_allreduce_allgather_step(state, ag_step)
+            let step_chunks: [RingChunk; 16] = step_result.0
+            let chunk_n: i64 = step_result.1
+            var ci: i64 = 0
+            while ci < chunk_n {
+                if written < 1024 {
+                    all_chunks[written as usize] = step_chunks[ci as usize]
+                    written = written + 1
+                }
+                ci = ci + 1
+            }
+        }
+        phase = phase + 1
+    }
+
+    (all_chunks, written)
+}
+
+fn grad_sync_state_new(device_count: i64, buf_size: i64, algo: i64) -> GradSyncState with Div {
+    // Double-buffering: chunk_size = buf_size / device_count / 2
+    let chunk_size: i64 = buf_size / device_count / 2
+    GradSyncState {
+        device_count:    device_count,
+        grad_buf_ptrs:   [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        buf_size_bytes:  buf_size,
+        allreduce_algo:  algo,
+        ring_chunk_size: chunk_size,
+        ring_step:       0,
+    }
+}
+
+fn grad_sync_state_set_buf(gs: GradSyncState, device_idx: i64, ptr: i64) -> GradSyncState {
+    var ptrs: [i64; 16] = gs.grad_buf_ptrs
+    ptrs[device_idx as usize] = ptr
+    GradSyncState {
+        device_count:    gs.device_count,
+        grad_buf_ptrs:   ptrs,
+        buf_size_bytes:  gs.buf_size_bytes,
+        allreduce_algo:  gs.allreduce_algo,
+        ring_chunk_size: gs.ring_chunk_size,
+        ring_step:       gs.ring_step,
+    }
+}
+
+// ============================================================================
+// P2P transfer helpers
+// ============================================================================
+
+fn mgpu_p2p_transfer(src_device: i64, src_ptr: i64, dst_device: i64, dst_ptr: i64, bytes: i64, stream: i64) -> i64 with IO {
+    cudaMemcpyPeerAsync(dst_ptr, dst_device, src_ptr, src_device, bytes, stream)
+}
+
+fn mgpu_sync_all_devices(topo: MultiGpuTopology) -> (MultiGpuTopology, i64) with IO {
+    var errors: i64 = 0
+    var i: i64      = 0
+    while i < topo.device_count {
+        let err_set: i64  = cudaSetDevice(i)
+        let err_sync: i64 = cudaDeviceSynchronize()
+        if err_set != 0 {
+            errors = errors + 1
+        }
+        if err_sync != 0 {
+            errors = errors + 1
+        }
+        i = i + 1
+    }
+    (topo, errors)
+}
+
+// ============================================================================
+// Schedule builder
+// ============================================================================
+
+fn mgpu_schedule_new() -> MultiGpuSchedule {
+    MultiGpuSchedule {
+        steps: [
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ],
+        step_count: 0,
+        dependencies: [
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ],
+        dep_count: 0,
+    }
+}
+
+fn mgpu_schedule_add_step(sched: MultiGpuSchedule, device: i64, kernel: i64) -> MultiGpuSchedule {
+    var steps: [i64; 256]  = sched.steps
+    var count: i64         = sched.step_count
+    if count < 256 {
+        steps[count as usize] = mgpu_encode_step(device, kernel)
+        count = count + 1
+    }
+    MultiGpuSchedule {
+        steps:        steps,
+        step_count:   count,
+        dependencies: sched.dependencies,
+        dep_count:    sched.dep_count,
+    }
+}
+
+fn mgpu_schedule_add_dep(sched: MultiGpuSchedule, step_i: i64, step_j: i64) -> MultiGpuSchedule {
+    var deps: [i64; 256] = sched.dependencies
+    var dc: i64          = sched.dep_count
+    if dc < 256 {
+        deps[dc as usize] = mgpu_encode_dep(step_i, step_j)
+        dc = dc + 1
+    }
+    MultiGpuSchedule {
+        steps:        sched.steps,
+        step_count:   sched.step_count,
+        dependencies: deps,
+        dep_count:    dc,
+    }
+}
+
+fn mgpu_schedule_for_data_parallel(plan: PartitionPlan, kernel_count: i64) -> MultiGpuSchedule {
+    var sched: MultiGpuSchedule = mgpu_schedule_new()
+    // For each kernel k, add one step per device (they run independently).
+    // The AllReduce step (kernel_count) follows all per-device steps for the last kernel.
+    var k: i64 = 0
+    while k < kernel_count {
+        var d: i64 = 0
+        while d < plan.device_count {
+            sched = mgpu_schedule_add_step(sched, d, k)
+            d = d + 1
+        }
+        k = k + 1
+    }
+    // Add an AllReduce barrier step encoded as device 0xFFFF, kernel = kernel_count
+    let allreduce_step_idx: i64 = sched.step_count
+    sched = mgpu_schedule_add_step(sched, 0xFFFF, kernel_count)
+    // The allreduce step depends on all last-kernel per-device steps
+    // Last-kernel steps are at indices (kernel_count-1)*device_count .. allreduce_step_idx-1
+    let last_kernel_base: i64 = (kernel_count - 1) * plan.device_count
+    var di: i64 = 0
+    while di < plan.device_count {
+        sched = mgpu_schedule_add_dep(sched, allreduce_step_idx, last_kernel_base + di)
+        di = di + 1
+    }
+    sched
+}
+
+fn mgpu_schedule_for_pipeline(plan: PartitionPlan, micro_batches: i64) -> MultiGpuSchedule {
+    var sched: MultiGpuSchedule = mgpu_schedule_new()
+    // GPipe schedule: for micro_batch m on stage s, encode as kernel = m*16 + s
+    // Dependencies:
+    //   (m, s) depends on (m, s-1)     — previous stage same micro-batch
+    //   (m, s) depends on (m-1, s)     — same stage previous micro-batch
+    var m: i64 = 0
+    while m < micro_batches {
+        var s: i64 = 0
+        while s < plan.device_count {
+            let kernel: i64 = m * 16 + s
+            sched = mgpu_schedule_add_step(sched, s, kernel)
+            let this_idx: i64 = sched.step_count - 1
+            // Dependency on previous stage (same micro-batch)
+            if s > 0 {
+                let prev_stage_kernel: i64 = m * 16 + (s - 1)
+                // Search backwards for this step (small linear scan — schedule is short)
+                var search: i64 = this_idx - 1
+                while search >= 0 {
+                    let candidate: i64 = sched.steps[search as usize]
+                    let cdev: i64   = mgpu_decode_device(candidate)
+                    let ckern: i64  = mgpu_decode_kernel(candidate)
+                    if cdev == s - 1 && ckern == prev_stage_kernel {
+                        sched = mgpu_schedule_add_dep(sched, this_idx, search)
+                        search = -1
+                    } else {
+                        search = search - 1
+                    }
+                }
+            }
+            // Dependency on same stage, previous micro-batch
+            if m > 0 {
+                let prev_mb_kernel: i64 = (m - 1) * 16 + s
+                var search2: i64 = this_idx - 1
+                while search2 >= 0 {
+                    let candidate2: i64 = sched.steps[search2 as usize]
+                    let cdev2: i64   = mgpu_decode_device(candidate2)
+                    let ckern2: i64  = mgpu_decode_kernel(candidate2)
+                    if cdev2 == s && ckern2 == prev_mb_kernel {
+                        sched = mgpu_schedule_add_dep(sched, this_idx, search2)
+                        search2 = -1
+                    } else {
+                        search2 = search2 - 1
+                    }
+                }
+            }
+            s = s + 1
+        }
+        m = m + 1
+    }
+    sched
+}
+
+// ============================================================================
+// High-level execution
+// ============================================================================
+
+fn mgpu_allreduce_sync(topo: MultiGpuTopology, gs: GradSyncState) -> (MultiGpuTopology, GradSyncState, bool) with IO {
+    // Build the full ring allreduce plan
+    let plan_result: ([RingChunk; 1024], i64) = ring_allreduce_plan(gs)
+    let chunks: [RingChunk; 1024] = plan_result.0
+    let chunk_count: i64 = plan_result.1
+
+    // Create per-device streams
+    var streams: [i64; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    var si: i64 = 0
+    while si < topo.device_count {
+        let err_set: i64 = cudaSetDevice(si)
+        var s: i64 = 0
+        let err_sc: i64 = cudaStreamCreate(&!s)
+        streams[si as usize] = s
+        si = si + 1
+    }
+
+    // Execute each chunk transfer: device i sends to device (i+1) mod n
+    var ci: i64      = 0
+    var success: bool = true
+    while ci < chunk_count {
+        let chunk: RingChunk = chunks[ci as usize]
+        let src_dev: i64  = chunk.device_idx
+        let dst_dev: i64  = (src_dev + 1) % gs.device_count
+        let src_ptr: i64  = gs.grad_buf_ptrs[src_dev as usize] + chunk.offset
+        let dst_ptr: i64  = gs.grad_buf_ptrs[dst_dev as usize] + chunk.offset
+        let stream: i64   = streams[src_dev as usize]
+        let err: i64 = mgpu_p2p_transfer(src_dev, src_ptr, dst_dev, dst_ptr, chunk.size, stream)
+        if err != 0 {
+            success = false
+        }
+        ci = ci + 1
+    }
+
+    // Synchronize all devices; destroy streams
+    let sync_result: (MultiGpuTopology, i64) = mgpu_sync_all_devices(topo)
+    let synced_topo: MultiGpuTopology = sync_result.0
+    let sync_errors: i64              = sync_result.1
+    if sync_errors != 0 {
+        success = false
+    }
+
+    var dsi: i64 = 0
+    while dsi < synced_topo.device_count {
+        let err_sd: i64 = cudaStreamDestroy(streams[dsi as usize])
+        dsi = dsi + 1
+    }
+
+    (synced_topo, gs, success)
+}
+
+fn mgpu_data_parallel_forward_backward(
+    topo: MultiGpuTopology,
+    plan: PartitionPlan,
+    gs: GradSyncState,
+    kernel_handles: [i64; 64],
+    kernel_count: i64
+) -> (MultiGpuTopology, GradSyncState, bool) with IO {
+    // Launch all kernels on all devices asynchronously.
+    // kernel_handles layout: kernel_handles[device * kernel_count + kernel_idx]
+    // (Actual kernel launch would call into the backend; here we record intent
+    //  via cudaSetDevice to establish the active device context.)
+    var launch_ok: bool = true
+    var d: i64 = 0
+    while d < plan.device_count {
+        let err_set: i64 = cudaSetDevice(d)
+        if err_set != 0 {
+            launch_ok = false
+        }
+        // Signal each kernel handle (non-zero handle = valid launch target)
+        var k: i64 = 0
+        while k < kernel_count {
+            let handle_idx: i64 = d * kernel_count + k
+            if handle_idx < 64 {
+                let handle: i64 = kernel_handles[handle_idx as usize]
+                // A zero handle means the kernel has not been compiled yet; skip.
+                if handle == 0 {
+                    launch_ok = false
+                }
+            }
+            k = k + 1
+        }
+        d = d + 1
+    }
+
+    // Gradient AllReduce after all forward/backward passes complete
+    let ar_result: (MultiGpuTopology, GradSyncState, bool) = mgpu_allreduce_sync(topo, gs)
+    let final_topo: MultiGpuTopology  = ar_result.0
+    let final_gs: GradSyncState       = ar_result.1
+    let ar_ok: bool                   = ar_result.2
+
+    let overall_ok: bool = launch_ok && ar_ok
+    (final_topo, final_gs, overall_ok)
+}
+
+// ============================================================================
+// Diagnostics
+// ============================================================================
+
+fn mgpu_device_utilization(topo: MultiGpuTopology) -> (MultiGpuTopology, [i64; 16], i64) with IO {
+    var utils: [i64; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    var i: i64 = 0
+    while i < topo.device_count {
+        let err_set: i64 = cudaSetDevice(i)
+        var free_b: i64  = 0
+        var total_b: i64 = 0
+        let err_mi: i64  = cudaMemGetInfo(&!free_b, &!total_b)
+        if total_b > 0 {
+            let used_b: i64   = total_b - free_b
+            let util: i64     = (used_b * 100) / total_b
+            utils[i as usize] = util
+        } else {
+            utils[i as usize] = 0
+        }
+        i = i + 1
+    }
+    (topo, utils, topo.device_count)
+}
+
+fn mgpu_count_nvlink_pairs(topo: MultiGpuTopology) -> i64 {
+    var count: i64 = 0
+    var i: i64     = 0
+    while i < topo.device_count {
+        var j: i64 = i + 1
+        while j < topo.device_count {
+            let bw: i64 = topo.nvlink_matrix[(i * 16 + j) as usize]
+            if bw > 0 {
+                count = count + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+fn mgpu_topology_is_nvswitch(topo: MultiGpuTopology) -> bool {
+    // NVSwitch topology: every distinct device pair has NVLink bandwidth > 0
+    if topo.device_count < 2 {
+        false
+    } else {
+        var all_linked: bool = true
+        var i: i64 = 0
+        while i < topo.device_count {
+            var j: i64 = 0
+            while j < topo.device_count {
+                if i != j {
+                    let bw: i64 = topo.nvlink_matrix[(i * 16 + j) as usize]
+                    if bw == 0 {
+                        all_linked = false
+                    }
+                }
+                j = j + 1
+            }
+            i = i + 1
+        }
+        all_linked
+    }
+}
