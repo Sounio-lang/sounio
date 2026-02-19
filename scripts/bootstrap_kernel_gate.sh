@@ -1,0 +1,199 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+SOUC_BIN="${SOUC_BIN:-./target/debug/souc}"
+WORK_DIR="${WORK_DIR:-/tmp/sounio-bootstrap-kernel-gate}"
+LOG_DIR="$WORK_DIR/logs"
+ARTIFACT_DIR="$WORK_DIR/artifacts"
+CYCLE_WORK_DIR="${CYCLE_WORK_DIR:-$WORK_DIR/cycle}"
+
+BUILD_TIMEOUT_SECS="${BUILD_TIMEOUT_SECS:-900}"
+CYCLE_TIMEOUT_SECS="${CYCLE_TIMEOUT_SECS:-1200}"
+BENCH_TIMEOUT_SECS="${BENCH_TIMEOUT_SECS:-60}"
+BOOTSTRAP_MANIFEST_PATH="${BOOTSTRAP_MANIFEST_PATH:-${SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST:-bootstrap/selfhost-kernel.manifest}}"
+
+PASS_COUNT=0
+FAIL_COUNT=0
+declare -a STEP_RESULTS=()
+
+pass() {
+  PASS_COUNT=$((PASS_COUNT + 1))
+  echo "PASS [$1] $2"
+}
+
+fail() {
+  FAIL_COUNT=$((FAIL_COUNT + 1))
+  echo "FAIL [$1] $2"
+}
+
+run_with_timeout() {
+  local seconds="$1"
+  shift
+
+  if command -v timeout >/dev/null 2>&1; then
+    timeout --preserve-status "${seconds}s" "$@"
+    return $?
+  fi
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$seconds" "$@" <<'PY'
+import subprocess
+import sys
+
+seconds = int(sys.argv[1])
+command = sys.argv[2:]
+try:
+    completed = subprocess.run(command, timeout=seconds)
+    sys.exit(completed.returncode)
+except subprocess.TimeoutExpired:
+    sys.exit(124)
+PY
+    return $?
+  fi
+
+  "$@"
+}
+
+now_ns() {
+  local candidate
+  candidate="$(date +%s%N 2>/dev/null || true)"
+  if [[ "$candidate" =~ ^[0-9]+$ ]]; then
+    echo "$candidate"
+    return 0
+  fi
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - <<'PY'
+import time
+print(time.time_ns())
+PY
+    return 0
+  fi
+
+  date +%s
+}
+
+format_seconds_from_ms() {
+  local millis="$1"
+  awk -v ms="$millis" 'BEGIN { printf "%.3f", ms / 1000 }'
+}
+
+run_timed_step() {
+  local step="$1"
+  local timeout_secs="$2"
+  local stdout_file="$3"
+  local stderr_file="$4"
+  shift 4
+
+  local start_ns
+  local end_ns
+  local elapsed_ms
+  local elapsed_s
+  local rc
+
+  start_ns="$(now_ns)"
+  set +e
+  run_with_timeout "$timeout_secs" "$@" >"$stdout_file" 2>"$stderr_file"
+  rc=$?
+  set -e
+  end_ns="$(now_ns)"
+
+  elapsed_ms=$(( (end_ns - start_ns) / 1000000 ))
+  elapsed_s="$(format_seconds_from_ms "$elapsed_ms")"
+  STEP_RESULTS+=("$step,$rc,$elapsed_ms,$stdout_file,$stderr_file")
+
+  if [ "$rc" -eq 0 ]; then
+    pass "$step" "elapsed=${elapsed_s}s timeout=${timeout_secs}s"
+  # GNU timeout with --preserve-status propagates child TERM as 143 on timeout.
+  elif [ "$rc" -eq 124 ] || [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then
+    fail "$step" "timed out after ${timeout_secs}s (elapsed=${elapsed_s}s)"
+  else
+    fail "$step" "exit=$rc elapsed=${elapsed_s}s"
+  fi
+}
+
+mkdir -p "$LOG_DIR" "$ARTIFACT_DIR"
+
+SUMMARY_FILE="$ARTIFACT_DIR/summary.txt"
+TOTAL_START_NS="$(now_ns)"
+
+declare -a BASE_ENV=(
+  "SOUNIO_SELFHOST_PIPELINE=${SOUNIO_SELFHOST_PIPELINE:-driver}"
+  "SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT=${SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT:-0}"
+  "SOUNIO_SELFHOST_STRICT_MODULE_GATING=1"
+  "SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST=$BOOTSTRAP_MANIFEST_PATH"
+)
+
+echo "BOOTSTRAP_KERNEL_GATE_START"
+echo "work_dir=$WORK_DIR"
+echo "souc_bin=$SOUC_BIN"
+echo "bench_timeout_secs=$BENCH_TIMEOUT_SECS"
+echo "cycle_timeout_secs=$CYCLE_TIMEOUT_SECS"
+echo "bootstrap_manifest=$BOOTSTRAP_MANIFEST_PATH"
+
+run_timed_step \
+  "build-souc" \
+  "$BUILD_TIMEOUT_SECS" \
+  "$LOG_DIR/build.stdout.log" \
+  "$LOG_DIR/build.stderr.log" \
+  cargo build -p souc
+
+declare -a CYCLE_ENV=(
+  "${BASE_ENV[@]}"
+  "WORK_DIR=$CYCLE_WORK_DIR"
+  "SOUC_BIN=$SOUC_BIN"
+  "SOUNIO_SELFHOST_CYCLE_SKIP_BUILD=1"
+)
+
+run_timed_step \
+  "selfhost-cycle" \
+  "$CYCLE_TIMEOUT_SECS" \
+  "$LOG_DIR/selfhost-cycle.stdout.log" \
+  "$LOG_DIR/selfhost-cycle.stderr.log" \
+  env "${CYCLE_ENV[@]}" bash scripts/selfhost_cycle_gate.sh
+
+run_timed_step \
+  "compile-60s" \
+  "$BENCH_TIMEOUT_SECS" \
+  "$LOG_DIR/compile-60s.stdout.log" \
+  "$LOG_DIR/compile-60s.stderr.log" \
+  env "${BASE_ENV[@]}" "$SOUC_BIN" run self-hosted/ -- compile self-hosted/check/check.sio
+
+run_timed_step \
+  "check-60s" \
+  "$BENCH_TIMEOUT_SECS" \
+  "$LOG_DIR/check-60s.stdout.log" \
+  "$LOG_DIR/check-60s.stderr.log" \
+  env "${BASE_ENV[@]}" "$SOUC_BIN" run self-hosted/ -- check stdlib/compiler/bootstrap/driver.sio
+
+TOTAL_END_NS="$(now_ns)"
+TOTAL_ELAPSED_MS=$(( (TOTAL_END_NS - TOTAL_START_NS) / 1000000 ))
+TOTAL_ELAPSED_S="$(format_seconds_from_ms "$TOTAL_ELAPSED_MS")"
+
+{
+  echo "BOOTSTRAP_KERNEL_GATE_SUMMARY"
+  for result in "${STEP_RESULTS[@]}"; do
+    IFS=',' read -r step rc elapsed_ms stdout_file stderr_file <<<"$result"
+    echo "$step rc=$rc elapsed_ms=$elapsed_ms stdout=$stdout_file stderr=$stderr_file"
+  done
+  echo "pass_count=$PASS_COUNT"
+  echo "fail_count=$FAIL_COUNT"
+  echo "total_elapsed_ms=$TOTAL_ELAPSED_MS"
+} >"$SUMMARY_FILE"
+
+echo "BOOTSTRAP_KERNEL_GATE_SUMMARY summary_file=$SUMMARY_FILE total_elapsed=${TOTAL_ELAPSED_S}s pass_count=$PASS_COUNT fail_count=$FAIL_COUNT"
+for result in "${STEP_RESULTS[@]}"; do
+  IFS=',' read -r step rc elapsed_ms _ _ <<<"$result"
+  echo "BOOTSTRAP_KERNEL_GATE_STEP step=$step rc=$rc elapsed_ms=$elapsed_ms"
+done
+
+if [ "$FAIL_COUNT" -eq 0 ]; then
+  echo "BOOTSTRAP_KERNEL_GATE_RESULT PASS total_elapsed=${TOTAL_ELAPSED_S}s"
+  exit 0
+fi
+
+echo "BOOTSTRAP_KERNEL_GATE_RESULT FAIL total_elapsed=${TOTAL_ELAPSED_S}s"
+exit 1

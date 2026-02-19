@@ -63,6 +63,14 @@ bash scripts/build_bootstrap_seed.sh
 This script:
 
 1. builds `souc`
-2. forces self-hosted directory cache emission (`.sounio_bytecode.sobc`)
-3. wraps it into seed binary format v1
-4. emits `.sha256` and `.sig` sidecars
+2. compiles the self-hosted bootstrap kernel profile via `SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST`
+   (default: `bootstrap/selfhost-kernel.manifest`)
+3. forces self-hosted directory cache emission (`.sounio_bytecode.sobc`)
+4. wraps it into seed binary format v1
+5. emits `.sha256` and `.sig` sidecars
+
+Relevant environment overrides:
+
+- `BOOTSTRAP_KERNEL_MANIFEST_PATH`: explicit manifest path used by the seed build script.
+- `SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST`: alternate manifest override; if set, it is used as
+  the default for `BOOTSTRAP_KERNEL_MANIFEST_PATH`.

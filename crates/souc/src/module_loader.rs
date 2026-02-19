@@ -131,6 +131,149 @@ fn collect_sio_files(dir: &StdPath, root: &StdPath, files: &mut Vec<PathBuf>) ->
     Ok(())
 }
 
+fn selfhost_repo_root(selfhost_dir: &StdPath) -> Option<PathBuf> {
+    selfhost_dir
+        .canonicalize()
+        .ok()
+        .and_then(|canonical| canonical.parent().map(StdPath::to_path_buf))
+        .or_else(|| selfhost_dir.parent().map(StdPath::to_path_buf))
+}
+
+fn resolve_manifest_path(selfhost_dir: &StdPath, raw_path: &str) -> PathBuf {
+    let manifest_path = PathBuf::from(raw_path);
+    if manifest_path.is_absolute() {
+        return manifest_path;
+    }
+
+    let mut candidates = Vec::new();
+    if let Some(repo_root) = selfhost_repo_root(selfhost_dir) {
+        candidates.push(repo_root.join(&manifest_path));
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join(&manifest_path));
+    }
+
+    for candidate in candidates {
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+
+    manifest_path
+}
+
+fn resolve_manifest_entry_path(
+    selfhost_dir: &StdPath,
+    manifest_path: &StdPath,
+    raw_entry: &str,
+) -> PathBuf {
+    let entry_path = PathBuf::from(raw_entry);
+    if entry_path.is_absolute() {
+        return entry_path;
+    }
+
+    let mut candidates = Vec::new();
+    if let Some(manifest_dir) = manifest_path.parent() {
+        candidates.push(manifest_dir.join(&entry_path));
+    }
+    if let Some(repo_root) = selfhost_repo_root(selfhost_dir) {
+        candidates.push(repo_root.join(&entry_path));
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join(&entry_path));
+    }
+
+    for candidate in candidates {
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+
+    entry_path
+}
+
+fn load_selfhost_manifest_files(selfhost_dir: &StdPath) -> Result<Option<Vec<PathBuf>>> {
+    let Some(raw_manifest_path) = std::env::var("SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+
+    let manifest_path = resolve_manifest_path(selfhost_dir, &raw_manifest_path);
+    let manifest_content = std::fs::read_to_string(&manifest_path).map_err(|e| {
+        miette::miette!(
+            "Failed to read SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST at {}: {}",
+            manifest_path.display(),
+            e
+        )
+    })?;
+
+    let mut files = Vec::new();
+    let mut seen = std::collections::HashSet::<PathBuf>::new();
+    for (line_no, raw_line) in manifest_content.lines().enumerate() {
+        let line = match raw_line.split_once('#') {
+            Some((prefix, _)) => prefix.trim(),
+            None => raw_line.trim(),
+        };
+        if line.is_empty() {
+            continue;
+        }
+
+        let resolved = resolve_manifest_entry_path(selfhost_dir, &manifest_path, line);
+        if resolved.extension().and_then(|ext| ext.to_str()) != Some("sio") {
+            return Err(miette::miette!(
+                "Manifest {} line {} must reference a .sio file, got {}",
+                manifest_path.display(),
+                line_no + 1,
+                resolved.display()
+            ));
+        }
+        if !resolved.exists() {
+            return Err(miette::miette!(
+                "Manifest {} line {} points to missing file {}",
+                manifest_path.display(),
+                line_no + 1,
+                resolved.display()
+            ));
+        }
+        if resolved.is_dir() {
+            return Err(miette::miette!(
+                "Manifest {} line {} points to directory {}, expected .sio file",
+                manifest_path.display(),
+                line_no + 1,
+                resolved.display()
+            ));
+        }
+
+        let canonical = resolved.canonicalize().unwrap_or(resolved);
+        if !seen.insert(canonical.clone()) {
+            return Err(miette::miette!(
+                "Manifest {} line {} has duplicate entry {}",
+                manifest_path.display(),
+                line_no + 1,
+                canonical.display()
+            ));
+        }
+        files.push(canonical);
+    }
+
+    if files.is_empty() {
+        return Err(miette::miette!(
+            "Manifest {} does not contain any .sio entries",
+            manifest_path.display()
+        ));
+    }
+
+    module_loader_debug!(
+        "[load_directory_ast] using manifest {} with {} files",
+        manifest_path.display(),
+        files.len()
+    );
+    Ok(Some(files))
+}
+
 fn file_looks_like_markdown_fence(path: &StdPath) -> bool {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
@@ -235,8 +378,19 @@ fn filter_selfhost_duplicate_items(items: &mut Vec<Item>) {
 /// This enables multi-file projects where definitions in earlier files are
 /// visible to later files without explicit import statements.
 fn load_directory_ast(dir: &StdPath) -> Result<Ast> {
+    let is_selfhost_root = dir.file_name().and_then(|s| s.to_str()) == Some("self-hosted");
+
     let mut files: Vec<PathBuf> = Vec::new();
-    collect_sio_files(dir, dir, &mut files)?;
+    let mut loaded_from_manifest = false;
+    if is_selfhost_root {
+        if let Some(manifest_files) = load_selfhost_manifest_files(dir)? {
+            files = manifest_files;
+            loaded_from_manifest = true;
+        }
+    }
+    if files.is_empty() {
+        collect_sio_files(dir, dir, &mut files)?;
+    }
 
     if files.is_empty() {
         return Err(miette::miette!(
@@ -245,31 +399,33 @@ fn load_directory_ast(dir: &StdPath) -> Result<Ast> {
         ));
     }
 
-    let is_selfhost_root = dir.file_name().and_then(|s| s.to_str()) == Some("self-hosted");
     let strict_selfhost_module_gating =
         is_selfhost_root && selfhost_strict_module_gating_enabled();
+    let selfhost_bootstrap_stubs_enabled = is_selfhost_root && loaded_from_manifest;
 
-    // Sort: subdirectories before parent (deeper first), alphabetical within
-    // same depth, mod.sio always last within its directory.
-    files.sort_by(|a, b| {
-        let a_dir = a.parent().unwrap_or(StdPath::new(""));
-        let b_dir = b.parent().unwrap_or(StdPath::new(""));
-        if a_dir != b_dir {
-            let a_depth = a_dir.components().count();
-            let b_depth = b_dir.components().count();
-            if a_depth != b_depth {
-                return b_depth.cmp(&a_depth);
+    if !loaded_from_manifest {
+        // Sort: subdirectories before parent (deeper first), alphabetical within
+        // same depth, mod.sio always last within its directory.
+        files.sort_by(|a, b| {
+            let a_dir = a.parent().unwrap_or(StdPath::new(""));
+            let b_dir = b.parent().unwrap_or(StdPath::new(""));
+            if a_dir != b_dir {
+                let a_depth = a_dir.components().count();
+                let b_depth = b_dir.components().count();
+                if a_depth != b_depth {
+                    return b_depth.cmp(&a_depth);
+                }
+                return a_dir.cmp(b_dir);
             }
-            return a_dir.cmp(b_dir);
-        }
-        let a_is_mod = a.file_name().and_then(|f| f.to_str()) == Some("mod.sio");
-        let b_is_mod = b.file_name().and_then(|f| f.to_str()) == Some("mod.sio");
-        match (a_is_mod, b_is_mod) {
-            (true, false) => std::cmp::Ordering::Greater,
-            (false, true) => std::cmp::Ordering::Less,
-            _ => a.cmp(b),
-        }
-    });
+            let a_is_mod = a.file_name().and_then(|f| f.to_str()) == Some("mod.sio");
+            let b_is_mod = b.file_name().and_then(|f| f.to_str()) == Some("mod.sio");
+            match (a_is_mod, b_is_mod) {
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Less,
+                _ => a.cmp(b),
+            }
+        });
+    }
 
     let mut all_items = Vec::new();
     let mut all_node_spans = std::collections::HashMap::new();
@@ -312,7 +468,7 @@ fn load_directory_ast(dir: &StdPath) -> Result<Ast> {
         all_node_spans.extend(ast.node_spans);
     }
 
-    if strict_selfhost_module_gating
+    if (strict_selfhost_module_gating || selfhost_bootstrap_stubs_enabled)
         && !all_items.iter().any(|item| match item {
             Item::Function(def) => def.name == "run_all_tests",
             _ => false,
@@ -328,7 +484,7 @@ fn load_directory_ast(dir: &StdPath) -> Result<Ast> {
         all_node_spans.extend(ast.node_spans);
     }
 
-    if strict_selfhost_module_gating
+    if (strict_selfhost_module_gating || selfhost_bootstrap_stubs_enabled)
         && !all_items.iter().any(|item| match item {
             Item::Function(def) => def.name == "run_gpu_ptx_tests",
             _ => false,
@@ -344,7 +500,7 @@ fn load_directory_ast(dir: &StdPath) -> Result<Ast> {
         all_node_spans.extend(ast.node_spans);
     }
 
-    if strict_selfhost_module_gating
+    if (strict_selfhost_module_gating || selfhost_bootstrap_stubs_enabled)
         && !all_items.iter().any(|item| match item {
             Item::Function(def) => def.name == "run_gpu_cuda_runtime_tests",
             _ => false,
@@ -360,7 +516,7 @@ fn load_directory_ast(dir: &StdPath) -> Result<Ast> {
         all_node_spans.extend(ast.node_spans);
     }
 
-    if strict_selfhost_module_gating
+    if (strict_selfhost_module_gating || selfhost_bootstrap_stubs_enabled)
         && !all_items.iter().any(|item| match item {
             Item::Function(def) => def.name == "run_parse_all_full_tests",
             _ => false,
@@ -376,7 +532,7 @@ fn load_directory_ast(dir: &StdPath) -> Result<Ast> {
         all_node_spans.extend(ast.node_spans);
     }
 
-    if strict_selfhost_module_gating
+    if (strict_selfhost_module_gating || selfhost_bootstrap_stubs_enabled)
         && !all_items.iter().any(|item| match item {
             Item::Function(def) => def.name == "run_parse_all_full_shard_tests",
             _ => false,
@@ -395,7 +551,7 @@ fn load_directory_ast(dir: &StdPath) -> Result<Ast> {
         all_node_spans.extend(ast.node_spans);
     }
 
-    if strict_selfhost_module_gating
+    if (strict_selfhost_module_gating || selfhost_bootstrap_stubs_enabled)
         && !all_items.iter().any(|item| match item {
             Item::Function(def) => def.name == "run_parse_all_full_report",
             _ => false,
@@ -411,7 +567,7 @@ fn load_directory_ast(dir: &StdPath) -> Result<Ast> {
         all_node_spans.extend(ast.node_spans);
     }
 
-    if strict_selfhost_module_gating
+    if (strict_selfhost_module_gating || selfhost_bootstrap_stubs_enabled)
         && !all_items.iter().any(|item| match item {
             Item::Function(def) => def.name == "compile_multimodule_program",
             _ => false,
@@ -2877,7 +3033,114 @@ fn annotate_type_expr(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
     use std::fs;
+    use std::sync::Mutex;
+
+    static SELFHOST_MANIFEST_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<OsString>,
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(prev) = &self.prev {
+                // SAFETY: test helper restores the prior process env value on drop.
+                unsafe { std::env::set_var(self.key, prev) };
+            } else {
+                // SAFETY: test helper restores the prior process env state on drop.
+                unsafe { std::env::remove_var(self.key) };
+            }
+        }
+    }
+
+    fn set_env_var(key: &'static str, value: Option<&str>) -> EnvGuard {
+        let prev = std::env::var_os(key);
+        if let Some(value) = value {
+            // SAFETY: test helper sets env vars in a lock-guarded scope.
+            unsafe { std::env::set_var(key, value) };
+        } else {
+            // SAFETY: test helper clears env vars in a lock-guarded scope.
+            unsafe { std::env::remove_var(key) };
+        }
+        EnvGuard { key, prev }
+    }
+
+    #[test]
+    fn selfhost_manifest_resolves_repo_relative_entries() {
+        let _lock = SELFHOST_MANIFEST_ENV_LOCK.lock().expect("env lock");
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let selfhost_dir = temp.path().join("self-hosted");
+        let bootstrap_dir = temp.path().join("bootstrap");
+        fs::create_dir_all(&selfhost_dir).expect("create self-hosted");
+        fs::create_dir_all(&bootstrap_dir).expect("create bootstrap");
+
+        let first = selfhost_dir.join("alpha.sio");
+        let second = selfhost_dir.join("beta.sio");
+        fs::write(&first, "fn alpha() -> i64 { 1 }\n").expect("write alpha");
+        fs::write(&second, "fn beta() -> i64 { 2 }\n").expect("write beta");
+
+        let manifest = bootstrap_dir.join("manifest.txt");
+        fs::write(
+            &manifest,
+            "# kernel profile\nself-hosted/alpha.sio\n\nself-hosted/beta.sio # keep beta\n",
+        )
+        .expect("write manifest");
+
+        let _env_guard =
+            set_env_var("SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST", Some("bootstrap/manifest.txt"));
+        let files = load_selfhost_manifest_files(&selfhost_dir)
+            .expect("load manifest")
+            .expect("manifest enabled");
+
+        assert_eq!(files.len(), 2);
+        assert_eq!(
+            files[0],
+            first.canonicalize().expect("canonical alpha")
+        );
+        assert_eq!(
+            files[1],
+            second.canonicalize().expect("canonical beta")
+        );
+    }
+
+    #[test]
+    fn selfhost_manifest_preserves_file_order() {
+        let _lock = SELFHOST_MANIFEST_ENV_LOCK.lock().expect("env lock");
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let selfhost_dir = temp.path().join("self-hosted");
+        fs::create_dir_all(&selfhost_dir).expect("create self-hosted");
+
+        let first = selfhost_dir.join("a.sio");
+        let second = selfhost_dir.join("b.sio");
+        fs::write(&first, "fn first() -> i64 { 1 }\n").expect("write a");
+        fs::write(&second, "fn second() -> i64 { 2 }\n").expect("write b");
+
+        let manifest = temp.path().join("kernel.manifest");
+        fs::write(&manifest, "self-hosted/b.sio\nself-hosted/a.sio\n").expect("write manifest");
+
+        let _env_guard = set_env_var(
+            "SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST",
+            manifest.to_str(),
+        );
+
+        let ast = load_program_ast(&selfhost_dir).expect("load self-hosted via manifest");
+        let function_names: Vec<String> = ast
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Function(def) => Some(def.name.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(function_names[0], "second");
+        assert_eq!(function_names[1], "first");
+    }
 
     #[test]
     fn resolves_imports_and_rewrites_qualified_paths() {

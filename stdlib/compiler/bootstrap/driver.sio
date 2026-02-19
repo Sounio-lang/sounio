@@ -3,6 +3,7 @@
 //! This defines a stable Sounio-side orchestration boundary for:
 //! - compile_file(path, options) -> CompileArtifact
 //! - compile_source(source, options) -> CompileArtifact
+//! - compile_source_text(source_text, options) -> CompileArtifact
 //! - run_pipeline(stage_input) -> StageOutput
 //!
 //! NOTE:
@@ -50,7 +51,7 @@ struct CompileArtifact {
 
 struct StageInput {
     stage: i32,
-    payload: [i8; 131072],
+    payload: [i8; 65536],
     payload_len: i64,
 }
 
@@ -230,13 +231,7 @@ fn serialize_ir_module(ir_module: [i8; 131072]) -> ([i8; 131072], i64) with Mut,
 // ============================================================================
 
 fn str_len(s: string) -> i64 with Mut, Panic, Div {
-    // Count bytes until null terminator
-    var n: i64 = 0
-    while n < 65536 {
-        if s[n as usize] == 0 { return n }
-        n = n + 1
-    }
-    65536
+    len(s) as i64
 }
 
 fn str_eq(a: string, b: string) -> bool with Mut, Panic, Div {
@@ -260,7 +255,7 @@ fn str_concat_buf(a: string, b: string, out: [i8; 1024]) -> ([i8; 1024], i64) wi
     let len_a = str_len(a)
     var i: i64 = 0
     while i < len_a && pos < 1024 {
-        buf[pos as usize] = a[i as usize]
+        buf[pos as usize] = a[i as usize] as i8
         pos = pos + 1
         i = i + 1
     }
@@ -268,7 +263,7 @@ fn str_concat_buf(a: string, b: string, out: [i8; 1024]) -> ([i8; 1024], i64) wi
     let len_b = str_len(b)
     var j: i64 = 0
     while j < len_b && pos < 1024 {
-        buf[pos as usize] = b[j as usize]
+        buf[pos as usize] = b[j as usize] as i8
         pos = pos + 1
         j = j + 1
     }
@@ -1017,6 +1012,25 @@ fn emit_unescaped_string_payload(
     (o, p, true)
 }
 
+fn compile_source_text(
+    source_text: string,
+    options: CompileOptions
+) -> CompileArtifact with Mut, Panic, Div {
+    var buf: [i8; 65536] = [0; 65536]
+
+    var n: i64 = str_len(source_text)
+    if n < 0 { n = 0 }
+    if n > 65536 { n = 65536 }
+
+    var i: i64 = 0
+    while i < n {
+        buf[i as usize] = source_text[i as usize] as i8
+        i = i + 1
+    }
+
+    compile_source(buf, n, options)
+}
+
 fn compile_source(
     source: [i8; 65536],
     source_len: i64,
@@ -1594,7 +1608,7 @@ fn compile_source(
                 out = b0.0; pos = b0.1
                 let b1 = emit_ascii(out, pos, 1) // ValueTag::Bool
                 out = b1.0; pos = b1.1
-                let b2 = emit_ascii(out, pos, if if_cond_bool { 1 } else { 0 })
+                let b2 = emit_ascii(out, pos, (if if_cond_bool { 1 } else { 0 }) as i8)
                 out = b2.0; pos = b2.1
 
                 // JumpIf(then=9)
@@ -1657,7 +1671,7 @@ fn compile_source(
                 out = b2.0; pos = b2.1
 
                 // Compare
-                let c0 = emit_ascii(out, pos, if_cmp_opcode)
+                let c0 = emit_ascii(out, pos, if_cmp_opcode as i8)
                 out = c0.0; pos = c0.1
 
                 // JumpIf(then=11)
@@ -1829,7 +1843,7 @@ fn compile_source(
             out = b2.0; pos = b2.1
 
             // Op + Return
-            let ad = emit_ascii(out, pos, bin_opcode)
+            let ad = emit_ascii(out, pos, bin_opcode as i8)
             out = ad.0; pos = ad.1
             let ar = emit_ascii(out, pos, 67)
             out = ar.0; pos = ar.1

@@ -21,6 +21,8 @@ const DEFAULT_BOOTSTRAP_SEED_PATH: &str = "bootstrap/seeds/sounio-bootstrap-linu
 const BOOTSTRAP_SEED_MAGIC: &[u8; 8] = b"SNSDSEED";
 const BOOTSTRAP_SEED_VERSION: u16 = 1;
 const BOOTSTRAP_SEED_HEADER_LEN: usize = 20;
+const DRIVER_HARNESS_STACK_BYTES_DEFAULT: usize = 64 * 1024 * 1024;
+const DRIVER_HARNESS_STACK_BYTES_MIN: usize = 8 * 1024 * 1024;
 
 fn env_flag_enabled(name: &str) -> bool {
     std::env::var(name)
@@ -87,7 +89,10 @@ fn bootstrap_seed_signature_path(seed_path: &Path) -> PathBuf {
 fn parse_hex_digest(source: &str) -> Option<String> {
     for raw_token in source.split_whitespace() {
         let token = raw_token.trim_matches(|c: char| {
-            matches!(c, '"' | '\'' | ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}')
+            matches!(
+                c,
+                '"' | '\'' | ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}'
+            )
         });
         if token.is_empty() {
             continue;
@@ -408,10 +413,7 @@ impl SounioCompiler {
                 .is_some_and(|name| name == "self-hosted")
     }
 
-    fn verify_bootstrap_seed_checksum(
-        seed_path: &Path,
-        seed_bytes: &[u8],
-    ) -> LoadResult<String> {
+    fn verify_bootstrap_seed_checksum(seed_path: &Path, seed_bytes: &[u8]) -> LoadResult<String> {
         let checksum_path = bootstrap_seed_checksum_path(seed_path);
         let checksum_raw = std::fs::read_to_string(&checksum_path).map_err(|e| {
             CompilerLoaderError::CompileError(format!(
@@ -587,11 +589,19 @@ impl SounioCompiler {
     }
 
     fn driver_output_required(strict: bool) -> bool {
-        strict || env_flag_or_default("SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT", !cfg!(debug_assertions))
+        strict
+            || env_flag_or_default(
+                "SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT",
+                !cfg!(debug_assertions),
+            )
     }
 
     fn bool_bit(value: bool) -> u8 {
-        if value { 1 } else { 0 }
+        if value {
+            1
+        } else {
+            0
+        }
     }
 
     fn emit_driver_compile_start_marker(
@@ -1204,19 +1214,7 @@ impl SounioCompiler {
 fn main() -> CompileArtifact with IO, Mut, Div, Panic {
     let source = get_arg(0)
     let opts = compile_options_default()
-
-    var buf: [i8; 65536] = [0; 65536]
-    var n: i64 = str_len(source)
-    if n < 0 { n = 0 }
-    if n > 65536 { n = 65536 }
-
-    var i: i64 = 0
-    while i < n {
-        buf[i as usize] = source[i] as i8
-        i = i + 1
-    }
-
-    compile_source(buf, n, opts)
+    compile_source_text(source, opts)
 }
 "#
             .to_string(),
@@ -1784,6 +1782,50 @@ fn main() -> CompileArtifact with IO, Mut, Div, Panic {
         Ok(CodegenBoundary { bytecode })
     }
 
+    fn driver_harness_stack_bytes() -> usize {
+        std::env::var("SOUNIO_SELFHOST_DRIVER_STACK_BYTES")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<usize>().ok())
+            .map(|v| v.max(DRIVER_HARNESS_STACK_BYTES_MIN))
+            .unwrap_or(DRIVER_HARNESS_STACK_BYTES_DEFAULT)
+    }
+
+    fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send + 'static>) -> String {
+        if let Some(msg) = payload.downcast_ref::<String>() {
+            return msg.clone();
+        }
+        if let Some(msg) = payload.downcast_ref::<&str>() {
+            return (*msg).to_string();
+        }
+        "unknown panic payload".to_string()
+    }
+
+    fn run_with_driver_harness_stack<T, F>(&self, task_label: &str, operation: F) -> LoadResult<T>
+    where
+        T: Send,
+        F: FnOnce() -> LoadResult<T> + Send,
+    {
+        let stack_bytes = Self::driver_harness_stack_bytes();
+        std::thread::scope(|scope| {
+            let builder = std::thread::Builder::new()
+                .name(format!("sounio-driver-{task_label}"))
+                .stack_size(stack_bytes);
+            let handle = builder.spawn_scoped(scope, operation).map_err(|e| {
+                CompilerLoaderError::ExecutionError(format!(
+                    "Failed to spawn driver harness worker '{task_label}' (stack={} bytes): {}",
+                    stack_bytes, e
+                ))
+            })?;
+            match handle.join() {
+                Ok(result) => result,
+                Err(payload) => Err(CompilerLoaderError::ExecutionError(format!(
+                    "Driver harness worker '{task_label}' panicked: {}",
+                    Self::panic_payload_to_string(payload)
+                ))),
+            }
+        })
+    }
+
     fn compile_driver_harness_via_rust_bridge(
         &self,
         entrypoint: DriverEntrypoint,
@@ -1841,9 +1883,13 @@ fn main() -> CompileArtifact with IO, Mut, Div, Panic {
             }
 
             let path_str = path.to_string_lossy().to_string();
-            let compiled = self.compile_path_via_rust_bridge(&path_str);
+            let compiled = self.run_with_driver_harness_stack(tag, || {
+                self.compile_path_via_rust_bridge(&path_str)
+            });
             if self.use_embedded && compiled.is_err() {
-                return self.compile_via_rust_bridge(harness_source);
+                return self.run_with_driver_harness_stack(tag, || {
+                    self.compile_via_rust_bridge(harness_source)
+                });
             }
             return compiled;
         }
@@ -1866,10 +1912,13 @@ fn main() -> CompileArtifact with IO, Mut, Div, Panic {
         })?;
 
         let path_str = tmp_path.to_string_lossy().to_string();
-        let compiled = self.compile_path_via_rust_bridge(&path_str);
+        let compiled = self
+            .run_with_driver_harness_stack(tag, || self.compile_path_via_rust_bridge(&path_str));
         let _ = std::fs::remove_file(&tmp_path);
         if self.use_embedded && compiled.is_err() {
-            return self.compile_via_rust_bridge(harness_source);
+            return self.run_with_driver_harness_stack(tag, || {
+                self.compile_via_rust_bridge(harness_source)
+            });
         }
         compiled
     }
@@ -2064,8 +2113,16 @@ fn main() -> CompileArtifact with IO, Mut, Div, Panic {
     ///
     /// Uses the self-hosted `compile_multimodule_native()` which:
     ///   load imports → resolve_modules → check all → lower all → merge IR → compile_to_elf
-    pub fn compile_multimodule_to_native(&mut self, path: &str, output_path: &str) -> LoadResult<()> {
-        tracing::info!("Multi-module compile to native ELF: {} -> {}", path, output_path);
+    pub fn compile_multimodule_to_native(
+        &mut self,
+        path: &str,
+        output_path: &str,
+    ) -> LoadResult<()> {
+        tracing::info!(
+            "Multi-module compile to native ELF: {} -> {}",
+            path,
+            output_path
+        );
 
         if !std::path::Path::new(path).exists() {
             return Err(CompilerLoaderError::IoError(format!(
@@ -2103,7 +2160,8 @@ fn main() -> CompileArtifact with IO, Mut, Div, Panic {
 
         if !std::path::Path::new(output_path).exists() {
             return Err(CompilerLoaderError::CompileError(
-                "Multi-module native compilation reported success but output file not found".to_string(),
+                "Multi-module native compilation reported success but output file not found"
+                    .to_string(),
             ));
         }
 
@@ -3080,8 +3138,8 @@ fn main() -> i64 { add(10, 32) }
         );
         let _g4 = set_env_var("SOUNIO_BOOTSTRAP_SEED_REQUIRE_SIGNATURE", Some("1"));
 
-        let decoded =
-            SounioCompiler::load_bootstrap_seed_bytecode().expect("seed should decode successfully");
+        let decoded = SounioCompiler::load_bootstrap_seed_bytecode()
+            .expect("seed should decode successfully");
         assert_eq!(decoded, bytecode);
     }
 
@@ -3168,9 +3226,14 @@ fn main() -> i64 { add(10, 32) }
             ),
         );
 
-        let err = SounioCompiler::load_bootstrap_seed_bytecode().expect_err("missing seed must fail");
+        let err =
+            SounioCompiler::load_bootstrap_seed_bytecode().expect_err("missing seed must fail");
         let msg = err.to_string();
-        assert!(msg.contains("BOOTSTRAP_SEED_MISSING"), "unexpected error: {}", msg);
+        assert!(
+            msg.contains("BOOTSTRAP_SEED_MISSING"),
+            "unexpected error: {}",
+            msg
+        );
     }
 
     #[test]
