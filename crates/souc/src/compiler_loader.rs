@@ -2716,6 +2716,40 @@ mod tests {
     }
 
     #[test]
+    fn test_driver_source_pipeline_strict_rejects_fallback_when_driver_unavailable() {
+        let _env_guard = env_lock().lock().expect("env lock poisoned");
+        let _strict_guard = set_env_var("SOUNIO_SELFHOST_STRICT", Some("1"));
+        let _legacy_strict_guard = set_env_var("SOUNIO_SELFHOST_DRIVER_STRICT", None);
+        let _no_fallback_guard = set_env_var("SOUNIO_SELFHOST_NO_RUST_FALLBACK", None);
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let missing_stdlib = temp.path().join("missing-stdlib");
+        let compiler = SounioCompiler::new(
+            missing_stdlib
+                .to_str()
+                .expect("missing stdlib path should be representable as UTF-8"),
+        )
+        .expect("compiler init should succeed even when stdlib path is missing");
+
+        let err = compiler
+            .compile_via_driver_source("fn main() -> i32 { 0 }\n")
+            .expect_err("strict mode should reject stage-boundary fallback");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("SELFHOST_STRICT_DRIVER_FAILURE"),
+            "expected strict failure token, got: {msg}"
+        );
+        assert!(
+            msg.contains("entrypoint=bootstrap::driver::compile_source"),
+            "expected compile_source entrypoint metadata, got: {msg}"
+        );
+        assert!(
+            msg.contains("error_kind=load"),
+            "expected deterministic load error kind, got: {msg}"
+        );
+    }
+
+    #[test]
     fn test_driver_file_pipeline_compiles_simple_file() {
         let compiler = SounioCompiler::new_embedded().unwrap();
 
@@ -2738,6 +2772,46 @@ mod tests {
         assert!(
             !bytecode.is_empty(),
             "driver file pipeline should emit bytecode"
+        );
+    }
+
+    #[test]
+    fn test_driver_file_pipeline_strict_rejects_fallback_when_driver_unavailable() {
+        let _env_guard = env_lock().lock().expect("env lock poisoned");
+        let _strict_guard = set_env_var("SOUNIO_SELFHOST_STRICT", Some("1"));
+        let _legacy_strict_guard = set_env_var("SOUNIO_SELFHOST_DRIVER_STRICT", None);
+        let _no_fallback_guard = set_env_var("SOUNIO_SELFHOST_NO_RUST_FALLBACK", None);
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let missing_stdlib = temp.path().join("missing-stdlib");
+        let compiler = SounioCompiler::new(
+            missing_stdlib
+                .to_str()
+                .expect("missing stdlib path should be representable as UTF-8"),
+        )
+        .expect("compiler init should succeed even when stdlib path is missing");
+
+        let source = temp.path().join("sample.sio");
+        std::fs::write(&source, "fn main() -> i32 { 0 }\n").expect("write temp source");
+        let err = compiler
+            .compile_via_driver_file(
+                source
+                    .to_str()
+                    .expect("temp source path should be representable as UTF-8"),
+            )
+            .expect_err("strict mode should reject stage-boundary fallback");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("SELFHOST_STRICT_DRIVER_FAILURE"),
+            "expected strict failure token, got: {msg}"
+        );
+        assert!(
+            msg.contains("entrypoint=bootstrap::driver::compile_file"),
+            "expected compile_file entrypoint metadata, got: {msg}"
+        );
+        assert!(
+            msg.contains("error_kind=load"),
+            "expected deterministic load error kind, got: {msg}"
         );
     }
 

@@ -9,7 +9,8 @@ SEED_PATH="${SEED_PATH:-bootstrap/seeds/sounio-bootstrap-linux-x86_64.sio.bin}"
 CACHE_PATH="${CACHE_PATH:-self-hosted/.sounio_bytecode.sobc}"
 BUILD_TIMEOUT_SECS="${BUILD_TIMEOUT_SECS:-900}"
 SEED_TIMEOUT_SECS="${SEED_TIMEOUT_SECS:-900}"
-SEED_FALLBACK_ENABLED="${SEED_FALLBACK_ENABLED:-1}"
+# Fail closed by default. Local recovery can opt in with SEED_FALLBACK_ENABLED=1.
+SEED_FALLBACK_ENABLED="${SEED_FALLBACK_ENABLED:-0}"
 TRUSTED_SEED_FALLBACK_PATH="${TRUSTED_SEED_FALLBACK_PATH:-bootstrap/seeds/sounio-bootstrap-linux-x86_64.sio.bin}"
 BOOTSTRAP_KERNEL_MANIFEST_PATH="${BOOTSTRAP_KERNEL_MANIFEST_PATH:-${SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST:-bootstrap/selfhost-kernel.manifest}}"
 
@@ -68,7 +69,7 @@ run_with_timeout "$SEED_TIMEOUT_SECS" env \
   "$SOUC_BIN" run self-hosted/ -- parse-all shard 0 1 balanced >/tmp/sounio-seed-build.log 2>&1 || {
     cat /tmp/sounio-seed-build.log >&2 || true
     if [[ "$SEED_FALLBACK_ENABLED" != "1" ]]; then
-      echo "error: failed to compile self-hosted suite while generating seed" >&2
+      echo "error: failed to compile self-hosted suite while generating seed (fallback disabled; set SEED_FALLBACK_ENABLED=1 to opt in)" >&2
       exit 1
     fi
 
@@ -76,6 +77,64 @@ run_with_timeout "$SEED_TIMEOUT_SECS" env \
       echo "error: failed self-hosted seed build and trusted fallback seed missing at $TRUSTED_SEED_FALLBACK_PATH" >&2
       exit 1
     fi
+
+    local_fallback_checksum="${TRUSTED_SEED_FALLBACK_PATH}.sha256"
+    local_fallback_sig="${TRUSTED_SEED_FALLBACK_PATH}.sig"
+    if [[ ! -f "$local_fallback_checksum" ]]; then
+      echo "error: trusted fallback checksum missing at $local_fallback_checksum" >&2
+      exit 1
+    fi
+    if [[ ! -f "$local_fallback_sig" ]]; then
+      echo "error: trusted fallback signature missing at $local_fallback_sig" >&2
+      exit 1
+    fi
+
+    python3 - "$TRUSTED_SEED_FALLBACK_PATH" "$local_fallback_checksum" "$local_fallback_sig" <<'PY'
+import hashlib
+import pathlib
+import re
+import sys
+
+seed_path = pathlib.Path(sys.argv[1])
+checksum_path = pathlib.Path(sys.argv[2])
+sig_path = pathlib.Path(sys.argv[3])
+
+seed_bytes = seed_path.read_bytes()
+digest = hashlib.sha256(seed_bytes).hexdigest()
+
+def parse_hex_digest(text: str) -> str | None:
+    for raw in text.split():
+        token = raw.strip("\"',;()[]{}")
+        if not token:
+            continue
+        candidate = token
+        if "=" in token:
+            candidate = token.rsplit("=", 1)[1].strip()
+        elif ":" in token:
+            candidate = token.rsplit(":", 1)[1].strip()
+        if len(candidate) == 64 and re.fullmatch(r"[0-9A-Fa-f]{64}", candidate):
+            return candidate.lower()
+    return None
+
+checksum_text = checksum_path.read_text(encoding="utf-8")
+checksum_digest = parse_hex_digest(checksum_text)
+if checksum_digest != digest:
+    raise SystemExit(
+        f"error: trusted fallback checksum mismatch path={checksum_path} expected={digest} actual={checksum_digest}"
+    )
+
+sig_text = sig_path.read_text(encoding="utf-8")
+if "SOUNIO-SEED-SIG-V1" not in sig_text:
+    raise SystemExit(
+        f"error: trusted fallback signature missing marker SOUNIO-SEED-SIG-V1 path={sig_path}"
+    )
+sig_digest = parse_hex_digest(sig_text)
+if sig_digest != digest:
+    raise SystemExit(
+        f"error: trusted fallback signature digest mismatch path={sig_path} expected={digest} actual={sig_digest}"
+    )
+print(f"verified_fallback_seed_sha256={digest}")
+PY
 
     echo "warning: self-hosted seed build failed; extracting payload from trusted seed fallback: $TRUSTED_SEED_FALLBACK_PATH" >&2
     python3 - "$TRUSTED_SEED_FALLBACK_PATH" "$CACHE_PATH" <<'PY'

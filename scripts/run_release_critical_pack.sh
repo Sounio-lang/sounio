@@ -18,11 +18,12 @@ run_step() {
 }
 
 run_step "01-cargo-check" cargo check -p souc
-run_step "02-strict-driver-source" env SOUNIO_SELFHOST_DRIVER_STRICT=1 cargo test -p souc compiler_loader::tests::test_driver_source_pipeline_compiles_simple_source -- --nocapture
-run_step "03-strict-driver-file" env SOUNIO_SELFHOST_DRIVER_STRICT=1 cargo test -p souc compiler_loader::tests::test_driver_file_pipeline_compiles_simple_file -- --nocapture
-run_step "04-cargo-lib-tests" cargo test -p souc --lib
-run_step "05-fast-gate" bash "$ROOT_DIR/scripts/fast_gate.sh"
-run_step "06-website-quality" npm --prefix "$ROOT_DIR/website" run check:quality
+run_step "02-strict-compile-source-fail-closed" env SOUNIO_SELFHOST_STRICT=1 SOUNIO_SELFHOST_NO_RUST_FALLBACK=1 SOUNIO_SELFHOST_PIPELINE=driver cargo test -p souc compiler_loader::tests::test_driver_source_pipeline_strict_rejects_fallback_when_driver_unavailable -- --nocapture
+run_step "03-strict-compile-file-fail-closed" env SOUNIO_SELFHOST_STRICT=1 SOUNIO_SELFHOST_NO_RUST_FALLBACK=1 SOUNIO_SELFHOST_PIPELINE=driver cargo test -p souc compiler_loader::tests::test_driver_file_pipeline_strict_rejects_fallback_when_driver_unavailable -- --nocapture
+run_step "04-strict-check-fail-closed" env SOUNIO_SELFHOST_STRICT=1 SOUNIO_SELFHOST_NO_RUST_FALLBACK=1 SOUNIO_SELFHOST_PIPELINE=driver cargo test -p souc --test selfhost_strict_mode -- selfhost_strict_check_only_rejects_stage_boundary_fallback_when_driver_unavailable --nocapture
+run_step "05-strict-run-fail-closed" env SOUNIO_SELFHOST_STRICT=1 SOUNIO_SELFHOST_NO_RUST_FALLBACK=1 SOUNIO_SELFHOST_PIPELINE=driver cargo test -p souc --test selfhost_strict_mode -- selfhost_strict_rejects_stage_boundary_fallback_when_driver_unavailable --nocapture
+run_step "06-cargo-lib-tests" cargo test -p souc --lib
+run_step "07-warning-baseline" bash "$ROOT_DIR/scripts/check_new_warnings.sh"
+run_step "08-full-gate" bash "$ROOT_DIR/scripts/full_gate.sh"
 
 echo "[release-pack] PASS"
-
