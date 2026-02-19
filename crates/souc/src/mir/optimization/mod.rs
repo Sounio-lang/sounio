@@ -20,6 +20,7 @@ pub mod pipeline_with_validation;
 pub mod alias_analysis;
 pub mod licm;
 pub mod sroa;
+pub mod incremental_query;
 
 // Shared types for ML-guided and heuristic optimization (always available)
 pub mod local_optimizer;
@@ -48,6 +49,7 @@ pub use pipeline_with_validation::{PipelineResult, ValidatedOptimizationPipeline
 pub use alias_analysis::{AliasAnalysis, AliasAnalysisResult, AliasQuery, AliasResult};
 pub use licm::LoopInvariantCodeMotion;
 pub use sroa::Sroa;
+pub use incremental_query::{IncrementalFunctionOptimizer, IncrementalOptimizationOutput};
 
 // Shared optimization types (always available — no feature gate)
 pub use local_optimizer::{DataCollector, HeuristicOptimizer};
