@@ -3131,7 +3131,7 @@ fn run(
         None
     };
 
-    let run_payload = move || -> std::result::Result<(), String> {
+    let run_payload = move || -> std::result::Result<Option<i64>, String> {
         if use_sounio_compiler {
             // Use the self-hosted Sounio compiler (week 2 bootstrap feature)
             tracing::info!("Using self-hosted Sounio compiler from stdin");
@@ -3156,7 +3156,7 @@ fn run(
 
             // check-only with the self-hosted bridge means "compile/type-check only".
             if check_only {
-                return Ok(());
+                return Ok(None);
             }
 
             // Select self-host execution mode.
@@ -3168,10 +3168,15 @@ fn run(
             if mode == "vm" {
                 match compiler.execute_bytecode_with_args(&bytecode, &user_args) {
                     Ok(vm_result) => {
+                        if is_self_hosted_root {
+                            if let sounio::vm::Value::Int(code) = vm_result {
+                                return Ok(Some(code));
+                            }
+                        }
                         if !matches!(vm_result, sounio::vm::Value::Unit) {
                             println!("{}", vm_result);
                         }
-                        return Ok(());
+                        return Ok(None);
                     }
                     Err(vm_error) => {
                         return Err(format!(
@@ -3210,7 +3215,7 @@ fn run(
                 if !matches!(result, sounio::interp::Value::Unit) {
                     println!("{}", result);
                 }
-                Ok(())
+                Ok(None)
             }
             Err(e) => Err(e.to_string()),
         }
@@ -3265,7 +3270,22 @@ fn run(
             .map_err(|_| miette::miette!("interpreter thread panicked"))?
     };
 
-    run_result.map_err(|e| miette::miette!("{}", e))
+    let maybe_exit_code = run_result.map_err(|e| miette::miette!("{}", e))?;
+
+    if let Some(code) = maybe_exit_code {
+        let exit_code = if (0..=i64::from(i32::MAX)).contains(&code) {
+            code as i32
+        } else {
+            eprintln!(
+                "SELFHOST=run schema=v1 event=selfhost_exit_code status=invalid value={}",
+                code
+            );
+            1
+        };
+        std::process::exit(exit_code);
+    }
+
+    Ok(())
 }
 
 fn jit_run(

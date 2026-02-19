@@ -101,3 +101,46 @@ fn main() -> i32 {
         "did not expect rust fallback marker in strict mode, got: {stderr:?}"
     );
 }
+
+#[test]
+fn selfhost_driver_check_returns_non_zero_for_parse_error() {
+    let root = workspace_root();
+    let stdlib_path = root.join("stdlib").join("compiler");
+
+    let dir = TempDir::new().expect("temp dir");
+    let failing_fixture = write_temp_sio_file(
+        &dir,
+        "parse_error.sio",
+        r#"
+fn main() -> i32 {
+    let x =
+}
+"#,
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_souc"))
+        .current_dir(&root)
+        .arg("run")
+        .arg(root.join("self-hosted/"))
+        .arg("--")
+        .arg("check")
+        .arg(&failing_fixture)
+        .env("SOUNIO_STDLIB_PATH", &stdlib_path)
+        .env("SOUNIO_SELFHOST_STRICT", "1")
+        .env("SOUNIO_SELFHOST_PIPELINE", "driver")
+        .env("SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT", "1")
+        .output()
+        .expect("run souc self-hosted check on parse-error fixture");
+
+    assert!(
+        !output.status.success(),
+        "expected non-zero exit for failing self-hosted check, got {:?} (stderr={})",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "expected CLI-level non-zero exit code for failing self-hosted check"
+    );
+}
