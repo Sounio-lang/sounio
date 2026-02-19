@@ -399,3 +399,52 @@ fn selfhost_strict_rejects_stage_boundary_fallback_when_driver_unavailable() {
         "did not expect rust fallback marker in strict mode, got: {stderr:?}"
     );
 }
+
+#[test]
+fn selfhost_no_rust_fallback_rejects_stage_boundary_fallback_when_driver_unavailable() {
+    let root = workspace_root();
+    let program = write_temp_program("fallback_rejected_no_rust");
+    let missing_stdlib = write_temp_dir_path("stdlib_missing_no_rust");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_souc"))
+        .current_dir(&root)
+        .arg("run")
+        .arg(&program)
+        .env("SOUNIO_STDLIB_PATH", &missing_stdlib)
+        .env("SOUNIO_SELFHOST_NO_RUST_FALLBACK", "1")
+        .output()
+        .expect("run souc no-rust-fallback behavior");
+
+    let _ = std::fs::remove_file(&program);
+
+    assert!(
+        !output.status.success(),
+        "expected no-rust-fallback mode to reject fallback when driver orchestration is unavailable"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_stderr_contains(
+        &stderr,
+        &format!(
+            "SELFHOST=driver-first schema=v1 event=driver_orchestration entrypoint={} strict=0 status=strict_error error_kind=load",
+            DRIVER_ENTRYPOINT_COMPILE_FILE
+        ),
+        "expected deterministic strict-error marker without strict mode",
+    );
+    assert!(
+        stderr.contains("Self-hosted compile failed"),
+        "expected no-rust-fallback compile failure message, got: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("SELFHOST_STRICT_DRIVER_FAILURE"),
+        "expected stable strict driver failure token, got: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("error_kind=load"),
+        "expected failure diagnostics to include deterministic error kind, got: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("SELFHOST=fallback backend=rust"),
+        "did not expect rust fallback marker in no-rust-fallback mode, got: {stderr:?}"
+    );
+}

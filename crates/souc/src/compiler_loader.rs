@@ -584,12 +584,16 @@ impl SounioCompiler {
             || env_flag_enabled("SOUNIO_SELFHOST_STRICT")
     }
 
+    fn stage_boundary_fallback_disallowed(strict: bool) -> bool {
+        strict || env_flag_enabled("SOUNIO_SELFHOST_NO_RUST_FALLBACK")
+    }
+
     fn rust_oracle_mode() -> SelfhostRustOracleMode {
         SelfhostRustOracleMode::from_env()
     }
 
-    fn driver_output_required(strict: bool) -> bool {
-        strict
+    fn driver_output_required(fallback_disallow: bool) -> bool {
+        fallback_disallow
             || env_flag_or_default(
                 "SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT",
                 !cfg!(debug_assertions),
@@ -671,10 +675,12 @@ impl SounioCompiler {
     fn compile_via_driver_source(&self, source: &str) -> LoadResult<Vec<Bytecode>> {
         let entrypoint = DriverEntrypoint::CompileSource;
         let strict = Self::driver_orchestration_strict();
+        let fallback_disallow = Self::stage_boundary_fallback_disallowed(strict);
         let oracle_mode = Self::rust_oracle_mode();
-        // In strict mode, disallow stage-boundary fallback: driver must produce a valid artifact.
-        let require_driver_output = Self::driver_output_required(strict);
+        // When fallback is disallowed, the driver must produce a valid artifact.
+        let require_driver_output = Self::driver_output_required(fallback_disallow);
         Self::emit_driver_compile_start_marker(entrypoint, strict, oracle_mode);
+
         let mut driver_output: Option<Vec<Bytecode>> = None;
         match self.run_driver_orchestration(entrypoint, Some(source)) {
             Ok(vm_result) => {
@@ -707,7 +713,7 @@ impl SounioCompiler {
             }
             Err(err) => {
                 let err_kind = err.kind_code();
-                if strict {
+                if fallback_disallow {
                     Self::emit_driver_orchestration_marker(
                         entrypoint,
                         strict,
@@ -753,9 +759,10 @@ impl SounioCompiler {
     fn compile_via_driver_file(&self, path: &str) -> LoadResult<Vec<Bytecode>> {
         let entrypoint = DriverEntrypoint::CompileFile;
         let strict = Self::driver_orchestration_strict();
+        let fallback_disallow = Self::stage_boundary_fallback_disallowed(strict);
         let oracle_mode = Self::rust_oracle_mode();
-        // In strict mode, disallow stage-boundary fallback: driver must produce a valid artifact.
-        let require_driver_output = Self::driver_output_required(strict);
+        // When fallback is disallowed, the driver must produce a valid artifact.
+        let require_driver_output = Self::driver_output_required(fallback_disallow);
         let path = std::path::Path::new(path);
         if !path.exists() {
             return Err(CompilerLoaderError::IoError(format!(
@@ -856,7 +863,7 @@ impl SounioCompiler {
                             }
                             Ok(None) => {}
                             Err(err) => {
-                                if strict {
+                                if fallback_disallow {
                                     return Err(err);
                                 }
                                 tracing::debug!(
@@ -871,7 +878,7 @@ impl SounioCompiler {
             }
             Err(err) => {
                 let err_kind = err.kind_code();
-                if strict {
+                if fallback_disallow {
                     Self::emit_driver_orchestration_marker(
                         entrypoint,
                         strict,
