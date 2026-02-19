@@ -46,3 +46,13 @@ Expected outcome: compile error indicating a missing effect annotation.
 ```
 
 This runs repository-specific quality checks and a focused regression subset.
+
+## 6. Optional Cultural Fidelity Gate
+
+```bash
+python3 scripts/cultural_fidelity_gate.py
+python3 scripts/cultural_fidelity_gate.py --self-test
+```
+
+The gate checks user-facing golden help/error outputs for Rust-term leakage
+(`cargo`, `crate`, `rustc`, etc.) and supports allowlists for internal/dev-only paths.
