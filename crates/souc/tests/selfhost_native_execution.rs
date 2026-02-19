@@ -37,24 +37,24 @@ fn create_minimal_elf_return42() -> Vec<u8> {
     // e_version at offset 20
     elf[20] = 1;
 
-    // e_entry: 0x400000 at offset 32
-    elf[32..40].copy_from_slice(&0x400000u64.to_le_bytes());
+    // e_entry: 0x400000 at offset 24
+    elf[24..32].copy_from_slice(&0x400000u64.to_le_bytes());
 
-    // e_phoff: 64 at offset 40
-    elf[40..48].copy_from_slice(&64u64.to_le_bytes());
+    // e_phoff: 64 at offset 32
+    elf[32..40].copy_from_slice(&64u64.to_le_bytes());
 
-    // e_shoff: 0 at offset 48 (no section headers)
+    // e_shoff: 0 at offset 40 (no section headers)
 
-    // e_flags at offset 56 (0)
+    // e_flags at offset 48 (0)
 
-    // e_ehsize: 64 at offset 58
-    elf[58..60].copy_from_slice(&64u16.to_le_bytes());
+    // e_ehsize: 64 at offset 52
+    elf[52..54].copy_from_slice(&64u16.to_le_bytes());
 
-    // e_phentsize: 56 at offset 60
-    elf[60..62].copy_from_slice(&56u16.to_le_bytes());
+    // e_phentsize: 56 at offset 54
+    elf[54..56].copy_from_slice(&56u16.to_le_bytes());
 
-    // e_phnum: 1 at offset 62
-    elf[62..64].copy_from_slice(&1u16.to_le_bytes());
+    // e_phnum: 1 at offset 56
+    elf[56..58].copy_from_slice(&1u16.to_le_bytes());
 
     // Program header (.text, PT_LOAD) at offset 64
     // ELF64 Phdr structure (56 bytes):
@@ -167,14 +167,14 @@ fn phase6a_elf_structure_valid() {
 
     // Verify entry point (0x400000)
     let entry = u64::from_le_bytes([
-        elf_bytes[32],
-        elf_bytes[33],
-        elf_bytes[34],
-        elf_bytes[35],
-        elf_bytes[36],
-        elf_bytes[37],
-        elf_bytes[38],
-        elf_bytes[39],
+        elf_bytes[24],
+        elf_bytes[25],
+        elf_bytes[26],
+        elf_bytes[27],
+        elf_bytes[28],
+        elf_bytes[29],
+        elf_bytes[30],
+        elf_bytes[31],
     ]);
     assert_eq!(entry, 0x400000, "Entry point should be 0x400000");
 

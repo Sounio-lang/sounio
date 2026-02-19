@@ -770,7 +770,9 @@ impl SounioCompiler {
         // The bootstrap driver is intentionally tiny and can take an unbounded amount of time
         // if we hand it a directory-sized compilation unit (e.g. `self-hosted/`).
         // For non-strict runs, prefer the Rust stage-boundary loader for directories and
-        // the self-hosted suite entrypoint (`self-hosted/main.sio`).
+        // the self-hosted suite entrypoint (`self-hosted/main.sio`), but keep the
+        // compile target anchored to the entrypoint file to avoid loading every file in
+        // `self-hosted/` and introducing duplicate definitions.
         let path_is_self_hosted_suite = path
             .file_name()
             .and_then(|name| name.to_str())
@@ -780,21 +782,16 @@ impl SounioCompiler {
                 .and_then(|parent| parent.file_name())
                 .and_then(|parent| parent.to_str())
                 .is_some_and(|name| name == "self-hosted");
+        let compile_target = path;
         if env_flag_enabled("SOUNIO_SELFHOST_DEBUG_DRIVER_ORCH") {
             eprintln!(
                 "SELFHOST_DEBUG event=driver_orch step=compile_file_path path={} is_dir={} is_self_hosted_suite={} target={}",
                 path.display(),
                 path.is_dir(),
                 path_is_self_hosted_suite,
-                path.parent().unwrap_or(path).display()
+                compile_target.display()
             );
         }
-
-        let compile_target = if path_is_self_hosted_suite {
-            path.parent().unwrap_or(path)
-        } else {
-            path
-        };
 
         if !require_driver_output
             && (path_is_self_hosted_suite || path.is_dir())
@@ -2594,6 +2591,12 @@ impl std::fmt::Debug for SounioCompiler {
 mod tests {
     use super::*;
     use std::ffi::OsString;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn test_compiler_creation_filesystem() {
@@ -3110,6 +3113,7 @@ fn main() -> i64 { add(10, 32) }
 
     #[test]
     fn test_bootstrap_seed_valid_roundtrip() {
+        let _env_guard = env_lock().lock().expect("env lock poisoned");
         let temp = tempfile::tempdir().expect("temp dir");
         let seed_path = temp.path().join("sounio-bootstrap-linux-x86_64.sio.bin");
         let checksum_path = temp.path().join("seed.sha256");
@@ -3145,6 +3149,7 @@ fn main() -> i64 { add(10, 32) }
 
     #[test]
     fn test_bootstrap_seed_rejects_checksum_mismatch() {
+        let _env_guard = env_lock().lock().expect("env lock poisoned");
         let temp = tempfile::tempdir().expect("temp dir");
         let seed_path = temp.path().join("sounio-bootstrap-linux-x86_64.sio.bin");
         let checksum_path = temp.path().join("seed.sha256");
@@ -3201,6 +3206,7 @@ fn main() -> i64 { add(10, 32) }
 
     #[test]
     fn test_bootstrap_seed_missing_is_reported() {
+        let _env_guard = env_lock().lock().expect("env lock poisoned");
         let temp = tempfile::tempdir().expect("temp dir");
         let missing_seed = temp.path().join("missing-seed.sio.bin");
         let _g1 = set_env_var(
@@ -3238,6 +3244,7 @@ fn main() -> i64 { add(10, 32) }
 
     #[test]
     fn test_selfhost_pipeline_rust_requires_ghost_mode() {
+        let _env_guard = env_lock().lock().expect("env lock poisoned");
         let _g1 = set_env_var("SOUNIO_SELFHOST_PIPELINE", Some("rust"));
         let _g2 = set_env_var("SOUNIO_RUST_GHOST", None);
         assert_eq!(

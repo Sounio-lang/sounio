@@ -26,7 +26,6 @@ fn workspace_root() -> PathBuf {
 )]
 fn native_elf_compile_and_execute_return_42() {
     let root = workspace_root();
-    let compiler_dir = root.join("compiler");
 
     // Create a simple test fixture
     let fixture_path = std::env::temp_dir().join("sounio_fixture_42.sio");
@@ -45,7 +44,7 @@ fn native_elf_compile_and_execute_return_42() {
         .arg("-o")
         .arg(&elf_path)
         .arg(&fixture_path)
-        .current_dir(&compiler_dir)
+        .current_dir(&root)
         .output();
 
     let compile_output = match compile_result {

@@ -3,10 +3,37 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUN_DIR="${SOUNIO_DIAG_RUN_DIR:-}"
+DIAG_ROOT="$ROOT_DIR/artifacts/diagnostic"
+KEEP_RUNS="${SOUNIO_DIAG_KEEP_RUNS:-4}"
+
+prune_old_runs() {
+  local root="$1"
+  local keep="$2"
+  local run
+  local -a runs
+
+  [[ -d "$root" ]] || return 0
+  if ! [[ "$keep" =~ ^[0-9]+$ ]] || (( keep < 1 )); then
+    keep=4
+  fi
+
+  mapfile -t runs < <(find "$root" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' | sort -nr | awk '{print $2}')
+  if (( ${#runs[@]} <= keep )); then
+    return 0
+  fi
+
+  for ((i = keep; i < ${#runs[@]}; i++)); do
+    run="${runs[i]}"
+    find "$run" -mindepth 1 -delete 2>/dev/null || true
+    rmdir "$run" 2>/dev/null || true
+  done
+}
 
 if [[ -z "$RUN_DIR" ]]; then
+  mkdir -p "$DIAG_ROOT"
+  prune_old_runs "$DIAG_ROOT" "$KEEP_RUNS"
   TS="$(date -u +%Y%m%dT%H%M%SZ)"
-  RUN_DIR="$ROOT_DIR/artifacts/diagnostic/$TS"
+  RUN_DIR="$DIAG_ROOT/$TS"
 fi
 
 mkdir -p "$RUN_DIR"

@@ -8820,7 +8820,7 @@ impl TypeChecker {
                         "mat2" => Type::Mat2,
                         "mat3" => Type::Mat3,
                         "mat4" => Type::Mat4,
-                        "quat" => Type::Quat,
+                        "quat" | "Quat" => Type::Quat,
                         "dual" => Type::Dual,
                         _ => {
                             let lowered_args: Vec<Type> =
@@ -9068,7 +9068,7 @@ impl TypeChecker {
                         "mat2" => Type::Mat2,
                         "mat3" => Type::Mat3,
                         "mat4" => Type::Mat4,
-                        "quat" => Type::Quat,
+                        "quat" | "Quat" => Type::Quat,
                         "dual" => Type::Dual,
                         _ => Type::Named {
                             name: name.clone(),
@@ -10245,6 +10245,13 @@ impl TypeChecker {
             (Type::Usize, Type::Usize) => true,
             (Type::F32, Type::F32) => true,
             (Type::F64, Type::F64) => true,
+            (Type::Vec2, Type::Vec2) => true,
+            (Type::Vec3, Type::Vec3) => true,
+            (Type::Vec4, Type::Vec4) => true,
+            (Type::Mat2, Type::Mat2) => true,
+            (Type::Mat3, Type::Mat3) => true,
+            (Type::Mat4, Type::Mat4) => true,
+            (Type::Quat, Type::Quat) => true,
             (Type::Char, Type::Char) => true,
             (Type::Str, Type::Str) => true,
             (Type::String, Type::String) => true,
@@ -10295,6 +10302,34 @@ impl TypeChecker {
                         .iter()
                         .zip(t2.iter())
                         .all(|(a, b)| self.types_compatible(a, b))
+            }
+            (
+                Type::Function {
+                    params: p1,
+                    return_type: r1,
+                    effects: e1,
+                    abi: abi1,
+                },
+                Type::Function {
+                    params: p2,
+                    return_type: r2,
+                    effects: e2,
+                    abi: abi2,
+                },
+            ) => {
+                #[allow(deprecated)]
+                let effects_ok = e2.effects.is_subset(&e1.effects)
+                    && e2.effect_vars.is_subset(&e1.effect_vars)
+                    && e2.vars.is_subset(&e1.vars);
+
+                abi1 == abi2
+                    && effects_ok
+                    && p1.len() == p2.len()
+                    && p1
+                        .iter()
+                        .zip(p2.iter())
+                        .all(|(a, b)| self.types_compatible(a, b))
+                    && self.types_compatible(r1, r2)
             }
             (Type::Named { name: n1, args: a1 }, Type::Named { name: n2, args: a2 }) => {
                 n1 == n2

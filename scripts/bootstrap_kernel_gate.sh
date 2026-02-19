@@ -14,6 +14,7 @@ BUILD_TIMEOUT_SECS="${BUILD_TIMEOUT_SECS:-900}"
 CYCLE_TIMEOUT_SECS="${CYCLE_TIMEOUT_SECS:-1200}"
 BENCH_TIMEOUT_SECS="${BENCH_TIMEOUT_SECS:-60}"
 BOOTSTRAP_MANIFEST_PATH="${BOOTSTRAP_MANIFEST_PATH:-${SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST:-bootstrap/selfhost-kernel.manifest}}"
+SKIP_BUILD="${SKIP_BUILD:-0}"
 BENCH_COMPILE_TARGET="${BENCH_COMPILE_TARGET:-self-hosted/bench/kernel_smoke.sio}"
 BENCH_CHECK_TARGET="${BENCH_CHECK_TARGET:-self-hosted/bench/kernel_smoke.sio}"
 BENCH_SEED_ENFORCE="${BENCH_SEED_ENFORCE:-1}"
@@ -22,6 +23,32 @@ BENCH_SEED_SHA256_PATH="${BENCH_SEED_SHA256_PATH:-${BENCH_SEED_PATH}.sha256}"
 BENCH_SEED_SIG_PATH="${BENCH_SEED_SIG_PATH:-${BENCH_SEED_PATH}.sig}"
 BENCH_NO_ITEM_COUNT="${BENCH_NO_ITEM_COUNT:-1}"
 BENCH_FAST_SKIP_BLOCKS="${BENCH_FAST_SKIP_BLOCKS:-0}"
+LAST_STEP_RC=0
+
+normalize_bool_01() {
+  local raw="$1"
+  local name="$2"
+  local normalized
+
+  normalized="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
+  case "$normalized" in
+    1|true|yes|on)
+      echo "1"
+      ;;
+    0|false|no|off)
+      echo "0"
+      ;;
+    *)
+      echo "error: invalid $name=$raw (expected 0/1/true/false/yes/no/on/off)" >&2
+      return 1
+      ;;
+  esac
+}
+
+SKIP_BUILD="$(normalize_bool_01 "$SKIP_BUILD" "SKIP_BUILD")"
+BENCH_SEED_ENFORCE="$(normalize_bool_01 "$BENCH_SEED_ENFORCE" "BENCH_SEED_ENFORCE")"
+BENCH_NO_ITEM_COUNT="$(normalize_bool_01 "$BENCH_NO_ITEM_COUNT" "BENCH_NO_ITEM_COUNT")"
+BENCH_FAST_SKIP_BLOCKS="$(normalize_bool_01 "$BENCH_FAST_SKIP_BLOCKS" "BENCH_FAST_SKIP_BLOCKS")"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -112,6 +139,7 @@ run_timed_step() {
   elapsed_ms=$(( (end_ns - start_ns) / 1000000 ))
   elapsed_s="$(format_seconds_from_ms "$elapsed_ms")"
   STEP_RESULTS+=("$step,$rc,$elapsed_ms,$stdout_file,$stderr_file")
+  LAST_STEP_RC="$rc"
 
   if [ "$rc" -eq 0 ]; then
     pass "$step" "elapsed=${elapsed_s}s timeout=${timeout_secs}s"
@@ -145,6 +173,7 @@ echo "souc_bin=$SOUC_BIN"
 echo "bench_timeout_secs=$BENCH_TIMEOUT_SECS"
 echo "cycle_timeout_secs=$CYCLE_TIMEOUT_SECS"
 echo "bootstrap_manifest=$BOOTSTRAP_MANIFEST_PATH"
+echo "skip_build=$SKIP_BUILD"
 echo "bench_compile_target=$BENCH_COMPILE_TARGET"
 echo "bench_check_target=$BENCH_CHECK_TARGET"
 echo "bench_seed_enforce=$BENCH_SEED_ENFORCE"
@@ -152,59 +181,73 @@ echo "bench_seed_path=$BENCH_SEED_PATH"
 echo "bench_no_item_count=$BENCH_NO_ITEM_COUNT"
 echo "bench_fast_skip_blocks=$BENCH_FAST_SKIP_BLOCKS"
 
-run_timed_step \
-  "build-souc" \
-  "$BUILD_TIMEOUT_SECS" \
-  "$LOG_DIR/build.stdout.log" \
-  "$LOG_DIR/build.stderr.log" \
-  cargo build -p souc
-
-declare -a CYCLE_ENV=(
-  "${BASE_ENV[@]}"
-  "WORK_DIR=$CYCLE_WORK_DIR"
-  "SOUC_BIN=$SOUC_BIN"
-  "SOUNIO_SELFHOST_CYCLE_SKIP_BUILD=1"
-)
-
-run_timed_step \
-  "selfhost-cycle" \
-  "$CYCLE_TIMEOUT_SECS" \
-  "$LOG_DIR/selfhost-cycle.stdout.log" \
-  "$LOG_DIR/selfhost-cycle.stderr.log" \
-  env "${CYCLE_ENV[@]}" bash scripts/selfhost_cycle_gate.sh
-
-declare -a COMPILE_CMD=(
-  "$SOUC_BIN" run self-hosted/ -- compile
-)
-declare -a CHECK_CMD=(
-  "$SOUC_BIN" run self-hosted/ -- check
-)
-
-if [ "$BENCH_NO_ITEM_COUNT" = "1" ]; then
-  COMPILE_CMD+=(--no-item-count)
-  CHECK_CMD+=(--no-item-count)
+if [ "$SKIP_BUILD" = "1" ]; then
+  run_timed_step \
+    "build-souc" \
+    "$BUILD_TIMEOUT_SECS" \
+    "$LOG_DIR/build.stdout.log" \
+    "$LOG_DIR/build.stderr.log" \
+    test -x "$SOUC_BIN"
+else
+  run_timed_step \
+    "build-souc" \
+    "$BUILD_TIMEOUT_SECS" \
+    "$LOG_DIR/build.stdout.log" \
+    "$LOG_DIR/build.stderr.log" \
+    cargo build -p souc
 fi
 
-if [ "$BENCH_FAST_SKIP_BLOCKS" = "1" ]; then
-  COMPILE_CMD+=(--fast-skip-blocks)
+if [ "$LAST_STEP_RC" -ne 0 ]; then
+  echo "BOOTSTRAP_KERNEL_GATE_PREREQ_SKIP reason=build-souc failed"
+else
+
+  declare -a CYCLE_ENV=(
+    "${BASE_ENV[@]}"
+    "WORK_DIR=$CYCLE_WORK_DIR"
+    "SOUC_BIN=$SOUC_BIN"
+    "SOUNIO_SELFHOST_CYCLE_SKIP_BUILD=1"
+  )
+
+  run_timed_step \
+    "selfhost-cycle" \
+    "$CYCLE_TIMEOUT_SECS" \
+    "$LOG_DIR/selfhost-cycle.stdout.log" \
+    "$LOG_DIR/selfhost-cycle.stderr.log" \
+    env "${CYCLE_ENV[@]}" bash scripts/selfhost_cycle_gate.sh
+
+  declare -a COMPILE_CMD=(
+    "$SOUC_BIN" run self-hosted/ -- compile
+  )
+  declare -a CHECK_CMD=(
+    "$SOUC_BIN" run self-hosted/ -- check
+  )
+
+  if [ "$BENCH_NO_ITEM_COUNT" = "1" ]; then
+    COMPILE_CMD+=(--no-item-count)
+    CHECK_CMD+=(--no-item-count)
+  fi
+
+  if [ "$BENCH_FAST_SKIP_BLOCKS" = "1" ]; then
+    COMPILE_CMD+=(--fast-skip-blocks)
+  fi
+
+  COMPILE_CMD+=("$BENCH_COMPILE_TARGET")
+  CHECK_CMD+=("$BENCH_CHECK_TARGET")
+
+  run_timed_step \
+    "compile-60s" \
+    "$BENCH_TIMEOUT_SECS" \
+    "$LOG_DIR/compile-60s.stdout.log" \
+    "$LOG_DIR/compile-60s.stderr.log" \
+    env "${BASE_ENV[@]}" "${COMPILE_CMD[@]}"
+
+  run_timed_step \
+    "check-60s" \
+    "$BENCH_TIMEOUT_SECS" \
+    "$LOG_DIR/check-60s.stdout.log" \
+    "$LOG_DIR/check-60s.stderr.log" \
+    env "${BASE_ENV[@]}" "${CHECK_CMD[@]}"
 fi
-
-COMPILE_CMD+=("$BENCH_COMPILE_TARGET")
-CHECK_CMD+=("$BENCH_CHECK_TARGET")
-
-run_timed_step \
-  "compile-60s" \
-  "$BENCH_TIMEOUT_SECS" \
-  "$LOG_DIR/compile-60s.stdout.log" \
-  "$LOG_DIR/compile-60s.stderr.log" \
-  env "${BASE_ENV[@]}" "${COMPILE_CMD[@]}"
-
-run_timed_step \
-  "check-60s" \
-  "$BENCH_TIMEOUT_SECS" \
-  "$LOG_DIR/check-60s.stdout.log" \
-  "$LOG_DIR/check-60s.stderr.log" \
-  env "${BASE_ENV[@]}" "${CHECK_CMD[@]}"
 
 TOTAL_END_NS="$(now_ns)"
 TOTAL_ELAPSED_MS=$(( (TOTAL_END_NS - TOTAL_START_NS) / 1000000 ))

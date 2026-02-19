@@ -308,7 +308,7 @@ fn is_selfhost_dir_excluded(name: &str, strict: bool) -> bool {
     // NOTE: `native/` was previously excluded but is now integrated for Phase 6.
     // These directories contain standalone experiments and often define symbols
     // that intentionally overlap with the core suite.
-    if matches!(name, "hypercomplex" | "linker") {
+    if matches!(name, "hypercomplex" | "linker" | "bench") {
         return true;
     }
 

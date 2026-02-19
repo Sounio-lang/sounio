@@ -380,6 +380,7 @@ impl SymbolTable {
             "mat3",
             "mat4",
             "quat",
+            "Quat",      // Compatibility alias for quaternion primitive type
             "dual",      // Dual number for automatic differentiation
             "uncertain", // Uncertain value with error propagation
             "Tensor",    // Tensor with compile-time shape verification

@@ -45,7 +45,7 @@ cargo build --release
 
 # 5. Verify installation
 ./target/release/souc --version
-# Expected output: souc 0.100.0
+# Expected output: souc 1.0.0-beta
 ```
 
 ### Quick Verification
@@ -569,7 +569,7 @@ For a complete list of examples, see the `examples/` directory.
 Expected output:
 
 ```
-souc 0.100.0
+souc 1.0.0-beta
 ```
 
 ### Step 2: Run the Test Suite
@@ -981,7 +981,7 @@ If you use Sounio in your research, please cite:
   title = {Sounio: A Systems Language for Epistemic Computing},
   author = {Agourakis, Demetrios Chiuratto},
   year = {2025--2026},
-  version = {0.100.0},
+  version = {1.0.0-beta},
   url = {https://github.com/sounio-lang/sounio},
   note = {Under review at SoftwareX}
 }
@@ -990,5 +990,5 @@ If you use Sounio in your research, please cite:
 ---
 
 *Last updated: February 2026*
-*Sounio version: 0.100.0*
+*Sounio version: 1.0.0-beta*
 *For questions or issues, please open an issue on GitHub: https://github.com/sounio-lang/sounio/issues*
