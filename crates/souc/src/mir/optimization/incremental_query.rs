@@ -110,7 +110,10 @@ impl IncrementalFunctionOptimizer {
             });
         let cache_hit = self.query_db.stats().cache_hits > hits_before;
 
-        let value = cached.as_ref().map_err(Clone::clone)?;
+        let value = cached
+            .as_ref()
+            .as_ref()
+            .map_err(|err: &String| err.clone())?;
 
         Ok(IncrementalOptimizationOutput {
             optimized_function: value.optimized_function.clone(),
