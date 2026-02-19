@@ -11,6 +11,10 @@ Default scope (curated, actionable):
 - `tests/`
 - `README.md`, `DEVELOPER.md`, `tests/README.md`, `docs/LLM_PROGRAMMING_GUIDE.md`
 
+Default excludes (intentional negatives):
+- `tests/compile-fail/**`
+- `tests/error_audit/**`
+
 Opt-in:
 - `--include-stdlib` to scan `stdlib/`
 - `--docs-all` to scan `docs/` broadly (in addition to the guide)
@@ -49,9 +53,32 @@ RULES: list[tuple[str, str, str]] = [
 ]
 
 SOUNIO_MD_LANGS = {"sio", "sounio", "d"}  # `d` appears in older docs as Sounio fence
+DEFAULT_EXCLUDED_PREFIXES = (
+    Path("tests/compile-fail"),
+    Path("tests/error_audit"),
+)
 
 
-def iter_candidate_files(root: Path, include_stdlib: bool, docs_all: bool) -> Iterator[Path]:
+def is_excluded_path(root: Path, path: Path, include_negative_fixtures: bool) -> bool:
+    if include_negative_fixtures:
+        return False
+    try:
+        rel = path.relative_to(root)
+    except ValueError:
+        return False
+    for prefix in DEFAULT_EXCLUDED_PREFIXES:
+        prefix_parts = prefix.parts
+        if rel.parts[: len(prefix_parts)] == prefix_parts:
+            return True
+    return False
+
+
+def iter_candidate_files(
+    root: Path,
+    include_stdlib: bool,
+    docs_all: bool,
+    include_negative_fixtures: bool,
+) -> Iterator[Path]:
     curated = [
         root / "README.md",
         root / "DEVELOPER.md",
@@ -59,7 +86,7 @@ def iter_candidate_files(root: Path, include_stdlib: bool, docs_all: bool) -> It
         root / "docs" / "LLM_PROGRAMMING_GUIDE.md",
     ]
     for path in curated:
-        if path.is_file():
+        if path.is_file() and not is_excluded_path(root, path, include_negative_fixtures):
             yield path
 
     for folder in ("examples", "tests"):
@@ -67,7 +94,11 @@ def iter_candidate_files(root: Path, include_stdlib: bool, docs_all: bool) -> It
         if not base.exists():
             continue
         for path in base.rglob("*"):
-            if path.is_file() and path.suffix in {".sio", ".sounio", ".md"}:
+            if (
+                path.is_file()
+                and path.suffix in {".sio", ".sounio", ".md"}
+                and not is_excluded_path(root, path, include_negative_fixtures)
+            ):
                 yield path
 
     if include_stdlib:
@@ -209,12 +240,22 @@ def main() -> int:
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--include-stdlib", action="store_true")
     parser.add_argument("--docs-all", action="store_true")
+    parser.add_argument(
+        "--include-negative-fixtures",
+        action="store_true",
+        help="Include intentional negative fixture trees (tests/compile-fail, tests/error_audit).",
+    )
     args = parser.parse_args()
 
     root: Path = args.root.resolve()
     findings: list[Finding] = []
 
-    for path in iter_candidate_files(root, include_stdlib=args.include_stdlib, docs_all=args.docs_all):
+    for path in iter_candidate_files(
+        root,
+        include_stdlib=args.include_stdlib,
+        docs_all=args.docs_all,
+        include_negative_fixtures=args.include_negative_fixtures,
+    ):
         findings.extend(scan_file(root, path))
 
     if not findings:

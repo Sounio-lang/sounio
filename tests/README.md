@@ -17,10 +17,10 @@ Tests that should fail to compile. These verify that the compiler correctly reje
 
 ```bash
 # Run the Rust compiler test suite (includes the language suite)
-cd compiler && cargo test
+cargo test -p souc
 
 # Run only the `.sio` language fixtures under `tests/`
-cd compiler && cargo test --test language_suite
+cargo test -p souc --test language_suite
 
 # Fast preflight (drift scan + key tests)
 ./scripts/fast_gate.sh
