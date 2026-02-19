@@ -497,3 +497,81 @@ fn selfhost_root_seed_enforce_fails_closed_when_seed_is_missing() {
         "did not expect rust fallback marker in seed-enforced root mode, got: {stderr:?}"
     );
 }
+
+#[test]
+fn selfhost_pipeline_rust_without_ghost_stays_on_driver_path() {
+    let root = workspace_root();
+    let program = write_temp_program("rust_pipeline_no_ghost");
+    let stdlib_path = root.join("stdlib").join("compiler");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_souc"))
+        .current_dir(&root)
+        .arg("run")
+        .arg(&program)
+        .env("SOUNIO_STDLIB_PATH", &stdlib_path)
+        .env("SOUNIO_SELFHOST_PIPELINE", "rust")
+        .output()
+        .expect("run souc with rust pipeline without ghost");
+
+    let _ = std::fs::remove_file(&program);
+
+    assert!(
+        output.status.success(),
+        "expected rust pipeline request without ghost to succeed on driver path"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.trim() == "42", "expected stdout 42, got: {stdout:?}");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_stderr_contains(
+        &stderr,
+        "SELFHOST=driver-first schema=v1 event=compile_start",
+        "expected driver pipeline marker when rust pipeline is requested without ghost",
+    );
+    assert!(
+        !stderr.contains("GHOST MODE"),
+        "did not expect ghost warning when SOUNIO_RUST_GHOST is not enabled, got: {stderr:?}"
+    );
+}
+
+#[test]
+fn selfhost_pipeline_rust_with_ghost_emits_transition_warning() {
+    let root = workspace_root();
+    let program = write_temp_program("rust_pipeline_with_ghost");
+    let stdlib_path = root.join("stdlib").join("compiler");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_souc"))
+        .current_dir(&root)
+        .arg("run")
+        .arg(&program)
+        .env("SOUNIO_STDLIB_PATH", &stdlib_path)
+        .env("SOUNIO_SELFHOST_PIPELINE", "rust")
+        .env("SOUNIO_RUST_GHOST", "1")
+        .output()
+        .expect("run souc with rust pipeline in ghost mode");
+
+    let _ = std::fs::remove_file(&program);
+
+    assert!(
+        output.status.success(),
+        "expected rust ghost mode to compile and execute successfully"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.trim() == "42", "expected stdout 42, got: {stdout:?}");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("GHOST MODE"),
+        "expected ghost mode warning in stderr, got: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("Rust is dead. This path will vanish in 0.x.y+1"),
+        "expected transition warning payload in stderr, got: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("SELFHOST=driver-first schema=v1 event=compile_start"),
+        "did not expect driver-first compile marker when rust pipeline is explicitly ghost-enabled, got: {stderr:?}"
+    );
+}
