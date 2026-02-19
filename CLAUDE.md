@@ -137,3 +137,13 @@ Use `.claude/` for cross-session context:
 - `decisions.md` — Architectural choices
 - `pending.md` — Open questions, WIP
 - `session_state.json` — Structured state
+
+## Session Hygiene (Token Efficiency)
+
+- **`/clear`** — Use at the start of an unrelated task or after a long exploration session
+- **`/compact`** — Use when context is large but still relevant (summarizes history)
+- **Start sessions with**: read `.claude/session_state.json` — never re-explore what's already tracked
+- **Offload first**: route review, expand, scaffold tasks to `llm-offload` before asking Claude
+- **Grep before Read**: use Grep/Glob for targeted lookups; only Read when full file content is needed
+- **Batch related changes**: group edits to the same module in one session turn
+- **Routing**: see `.claude/offload-routing.md` for which tasks go to which offload provider
