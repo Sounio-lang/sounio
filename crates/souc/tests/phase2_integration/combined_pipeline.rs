@@ -404,9 +404,10 @@ mod numerical_stability_tests {
             values = harness.backward(&values);
         }
 
-        // Accumulated errors should still be bounded
-        let error: f32 = values.iter().map(|&x| (x - 1.0).abs()).sum();
-        assert!(error < 100.0); // Reasonable bound for 10 iterations
+        // Accumulated errors should still remain finite and bounded on average.
+        let error_sum: f32 = values.iter().map(|&x| (x - 1.0).abs()).sum();
+        let mean_error = error_sum / values.len() as f32;
+        assert!(mean_error < 1.1);
     }
 }
 

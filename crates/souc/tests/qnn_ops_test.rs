@@ -28,7 +28,7 @@ fn test_quat_conjugate_compiles() {
 fn test_quat_operations_compile() {
     let source = r#"
         fn test_quat_ops() -> f32 {
-            let q: Quat
+            let q: quat
             let w_component = q.w
             let x_component = q.x
             let y_component = q.y
@@ -50,23 +50,14 @@ fn test_quat_operations_compile() {
 #[test]
 fn test_hamilton_product_types() {
     let source = r#"
-        fn hamilton_product_components(a: Quat, b: Quat) -> f32 {
-            let w1 = a.w
-            let x1 = a.x
-            let y1 = a.y
-            let z1 = a.z
-            let w2 = b.w
-            let x2 = b.x
-            let y2 = b.y
-            let z2 = b.z
-
-            // Return the w component of the Hamilton product
-            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
+        fn hamilton_product_components(a: quat, b: quat) -> f32 {
+            let product = hamilton_product(a, b)
+            product.w
         }
 
         fn main() {
-            let i: Quat
-            let j: Quat
+            let i = quat(0.0, 1.0, 0.0, 0.0)
+            let j = quat(0.0, 0.0, 1.0, 0.0)
             let result = hamilton_product_components(i, j)
         }
     "#;
@@ -108,7 +99,7 @@ fn test_quat_linear_layer_types() {
 #[test]
 fn test_quat_batch_operations() {
     let source = r#"
-        fn process_batch(input: &[Quat], output: &![Quat]) {
+        fn process_batch(input: &[quat; 8], output: &![quat; 8]) {
             let i: i32 = 0
             let n = 8
             while i < n {
@@ -118,8 +109,8 @@ fn test_quat_batch_operations() {
         }
 
         fn main() {
-            let batch: [Quat; 8]
-            var result: [Quat; 8]
+            let batch: [quat; 8]
+            var result: [quat; 8]
             process_batch(&batch, &!result)
         }
     "#;

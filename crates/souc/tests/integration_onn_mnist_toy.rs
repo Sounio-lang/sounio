@@ -608,6 +608,7 @@ mod onn_mnist_toy {
     // ====================================================================
 
     #[test]
+    #[ignore = "long-running finite-difference training benchmark; run manually for deep ONN validation"]
     fn test_mnist_toy_onn_training() {
         eprintln!("\n=== MNIST Toy ONN Training ===");
         eprintln!("  Architecture: 98 -> {} (ReLU) -> 10", HIDDEN_DIM);

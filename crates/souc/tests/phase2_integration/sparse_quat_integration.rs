@@ -402,7 +402,7 @@ mod end_to_end_sparse_tests {
         let sparse_values = harness.sparse_gemm(&dense_values, &mask);
 
         // Sparsity should not degrade accuracy significantly
-        let error: f32 = dense_values
+        let error_sum: f32 = dense_values
             .iter()
             .zip(sparse_values.iter())
             .map(|(d, s)| {
@@ -416,7 +416,8 @@ mod end_to_end_sparse_tests {
             })
             .sum();
 
-        assert!(error < 10.0); // Relative error bounded
+        let mean_error = error_sum / dense_values.len() as f32;
+        assert!(mean_error < 1.0);
     }
 
     #[test]

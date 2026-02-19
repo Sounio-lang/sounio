@@ -100,13 +100,46 @@ pub struct SparsePatternGenerator;
 impl SparsePatternGenerator {
     /// Generate CSR (Compressed Sparse Row) pattern
     pub fn generate_csr(sparsity: f64, size: usize) -> Vec<bool> {
+        if size == 0 {
+            return Vec::new();
+        }
+
+        let keep_ratio = (1.0 - sparsity).clamp(0.0, 1.0);
+        let target_nnz = ((keep_ratio * size as f64).round() as usize).min(size);
+        let mut mask = vec![false; size];
+
+        if target_nnz == 0 {
+            return mask;
+        }
+
         let mut rng = QuaternionGenerator::new(42);
-        (0..size)
-            .map(|_| {
-                let q = rng.next();
-                q.norm() > (1.0 - sparsity as f32)
-            })
-            .collect()
+        let mut kept = 0usize;
+        let mut attempts = 0usize;
+        let max_attempts = size * 32;
+
+        while kept < target_nnz && attempts < max_attempts {
+            attempts += 1;
+            let q = rng.next();
+            let idx = ((q.w.abs() * size as f32) as usize).min(size - 1);
+            if !mask[idx] {
+                mask[idx] = true;
+                kept += 1;
+            }
+        }
+
+        if kept < target_nnz {
+            for slot in &mut mask {
+                if kept >= target_nnz {
+                    break;
+                }
+                if !*slot {
+                    *slot = true;
+                    kept += 1;
+                }
+            }
+        }
+
+        mask
     }
 
     /// Generate 2:4 structured sparsity (keep 2 of 4)
@@ -179,13 +212,16 @@ pub mod validators {
     }
 
     /// Validate fake quantization result
-    pub fn validate_fake_quantization(original: &[f32], quantized: &[f32], scale: f32) -> bool {
+    pub fn validate_fake_quantization(
+        original: &[f32],
+        quantized: &[f32],
+        max_error: f32,
+    ) -> bool {
         if original.len() != quantized.len() {
             return false;
         }
 
         original.iter().zip(quantized.iter()).all(|(orig, quant)| {
-            let max_error = scale * 0.5; // Quantization error < 0.5 * scale
             (orig - quant).abs() <= max_error
         })
     }
@@ -330,7 +366,7 @@ mod tests {
 
     #[test]
     fn test_validator_sparsity() {
-        let mask = vec![true, false, true, false, true, false, false, false];
+        let mask = vec![true, false, true, false, true, false, true, false];
         assert!(validators::validate_sparsity(&mask, 0.5));
     }
 

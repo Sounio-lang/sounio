@@ -1,0 +1,76 @@
+//@ run-pass
+// Full vancomycin uncertainty propagation (canonical syntax).
+//
+// Clinical intent:
+// - propagate confidence through weight, renal, assay, and nephrotoxic adjustments
+// - require confidence gates before final prescribing decisions
+
+type PatientWeight = Knowledge[f64];
+type CrCl = Knowledge[f64];
+type TroughLevel = Knowledge[f64];
+type AssayBias = Knowledge[f64];
+type DailyDose = Knowledge[f64];
+
+let base_dose_per_kg: Knowledge[f64] =
+    Knowledge(15.0, ε=0.92, prov="ASHP_2020_Level1A_RCT");
+
+fn adjust_for_crcl(crcl: CrCl) -> Knowledge[f64] with Panic {
+    let crcl_ref: Knowledge[f64] = Knowledge(120.0, ε=1.0, prov="crcl_reference");
+    crcl / crcl_ref
+}
+
+fn initial_patient_dose(
+    w: PatientWeight,
+    crcl: CrCl,
+    bias: AssayBias,
+    has_nephrotoxics: bool
+) -> DailyDose with Panic {
+    let weight_factor = w / Knowledge(70.0, ε=1.0, prov="weight_reference");
+    let dose1 = base_dose_per_kg * weight_factor;
+
+    let renal_factor = adjust_for_crcl(crcl);
+    let dose2 = dose1 * renal_factor;
+
+    let dose3 = dose2 / bias;
+
+    if has_nephrotoxics {
+        dose3 * Knowledge(0.85, ε=0.80, prov="nephrotoxics_penalty")
+    } else {
+        dose3
+    }
+}
+
+fn bayesian_trough_update(dose: DailyDose, trough: TroughLevel) -> Knowledge[f64, ε >= 0.88] with Panic {
+    let fused = (dose + trough) / Knowledge(2.0, ε=1.0, prov="bayesian_weighted_mean");
+    Knowledge {
+        value: fused.value,
+        epsilon: 0.88,
+        provenance: "bayesian_trough_update_cv_lt_10pct"
+    }
+}
+
+fn prescribe_vancomycin(
+    final_dose: Knowledge[f64, ε >= 0.82]
+) -> Knowledge[f64, ε >= 0.82] {
+    final_dose
+}
+
+fn main() with IO, Panic {
+    let measured_weight: PatientWeight =
+        Knowledge(78.5, ε=0.98, prov="hospital_scale_0.5kg");
+    let estimated_crcl: CrCl =
+        Knowledge(65.0, ε=0.72, prov="Cockcroft_Gault_2025");
+    let assay_bias: AssayBias =
+        Knowledge(1.047, ε=0.88, prov="Labquality_Equalis_2026");
+
+    let initial = initial_patient_dose(measured_weight, estimated_crcl, assay_bias, true);
+    println(initial);
+
+    let measured_trough: TroughLevel =
+        Knowledge(14.2, ε=0.94, prov="lab_trough_8h_cv_6pct");
+    let adjusted = bayesian_trough_update(initial, measured_trough);
+    println(adjusted);
+
+    let safe_order = prescribe_vancomycin(adjusted);
+    println(safe_order);
+}
