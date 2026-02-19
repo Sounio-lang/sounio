@@ -448,3 +448,52 @@ fn selfhost_no_rust_fallback_rejects_stage_boundary_fallback_when_driver_unavail
         "did not expect rust fallback marker in no-rust-fallback mode, got: {stderr:?}"
     );
 }
+
+#[test]
+fn selfhost_root_seed_enforce_fails_closed_when_seed_is_missing() {
+    let root = workspace_root();
+    let stdlib_path = root.join("stdlib").join("compiler");
+    let missing_seed = write_temp_dir_path("missing_seed_root").join("seed.sio.bin");
+    let missing_checksum = missing_seed.with_extension("sio.bin.sha256");
+    let missing_sig = missing_seed.with_extension("sio.bin.sig");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_souc"))
+        .current_dir(&root)
+        .arg("run")
+        .arg("self-hosted")
+        .env("SOUNIO_STDLIB_PATH", &stdlib_path)
+        .env("SOUNIO_BOOTSTRAP_SEED_ENFORCE", "1")
+        .env("SOUNIO_BOOTSTRAP_SEED_PATH", &missing_seed)
+        .env("SOUNIO_BOOTSTRAP_SEED_SHA256_PATH", &missing_checksum)
+        .env("SOUNIO_BOOTSTRAP_SEED_SIG_PATH", &missing_sig)
+        .output()
+        .expect("run souc self-hosted seed-enforced behavior");
+
+    assert!(
+        !output.status.success(),
+        "expected seed-enforced self-hosted root run to fail when seed is missing"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_stderr_contains(
+        &stderr,
+        "SELFHOST=run schema=v1 event=selfhost_input_check status=resolved input=self-hosted/main.sio args=1",
+        "expected deterministic self-hosted root resolution marker",
+    );
+    assert!(
+        stderr.contains("Self-hosted compile failed for self-hosted/main.sio"),
+        "expected compile failure prefix, got: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("BOOTSTRAP_SEED_MISSING"),
+        "expected missing-seed failure token, got: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("SELFHOST=driver-first schema=v1 event=compile_start"),
+        "did not expect driver pipeline markers when seed enforcement is fail-closed, got: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("SELFHOST=fallback backend=rust"),
+        "did not expect rust fallback marker in seed-enforced root mode, got: {stderr:?}"
+    );
+}
