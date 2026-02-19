@@ -10254,6 +10254,16 @@ impl TypeChecker {
                 },
             ) => m1 == m2 && self.types_compatible(i1, i2),
             (
+                Type::RawPointer {
+                    mutable: m1,
+                    inner: i1,
+                },
+                Type::RawPointer {
+                    mutable: m2,
+                    inner: i2,
+                },
+            ) => m1 == m2 && self.types_compatible(i1, i2),
+            (
                 Type::Array {
                     element: e1,
                     size: s1,
