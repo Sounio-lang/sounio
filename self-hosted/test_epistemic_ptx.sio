@@ -1,0 +1,530 @@
+// Self-hosted epistemic PTX codegen tests
+//
+// Validates shadow register naming, configuration defaults, and PTX
+// emission for uncertainty propagation (add/mul/div), warp-level
+// ballot, and epsilon tree reduction.
+
+// ── Configuration ───────────────────────────────────────────────────
+
+fn epistemic_ptx_test_01_config_sm() -> bool {
+    let c = epistemic_config_default()
+    c.sm_major == 8 && c.sm_minor == 0
+}
+
+fn epistemic_ptx_test_02_config_threshold() -> bool {
+    // 0.05f in IEEE 754 = 1028443341
+    let c = epistemic_config_default()
+    c.confidence_threshold == 1028443341
+}
+
+fn epistemic_ptx_test_03_config_default_epsilon() -> bool {
+    let c = epistemic_config_default()
+    c.default_epsilon == 0
+}
+
+fn epistemic_ptx_test_04_config_flags() -> bool {
+    let c = epistemic_config_default()
+    c.quadrature_propagation &&
+    c.warp_aggregation &&
+    c.provenance_tracking &&
+    c.provenance_bits == 8
+}
+
+// ── Shadow Register Naming ──────────────────────────────────────────
+
+fn epistemic_ptx_test_05_shadow_val_name() -> bool with Alloc {
+    let s = epistemic_shadow_new("a")
+    s.val_name == "%r_a"
+}
+
+fn epistemic_ptx_test_06_shadow_eps_name() -> bool with Alloc {
+    let s = epistemic_shadow_new("a")
+    s.eps_name == "%r_a_eps"
+}
+
+fn epistemic_ptx_test_07_shadow_valid_name() -> bool with Alloc {
+    let s = epistemic_shadow_new("a")
+    s.valid_name == "%p_a_valid"
+}
+
+fn epistemic_ptx_test_08_shadow_prov_name() -> bool with Alloc {
+    let s = epistemic_shadow_new("a")
+    s.prov_name == "%r_a_prov"
+}
+
+fn epistemic_ptx_test_09_shadow_different_base() -> bool with Alloc {
+    let s = epistemic_shadow_new("xyz")
+    s.val_name == "%r_xyz" &&
+    s.eps_name == "%r_xyz_eps" &&
+    s.valid_name == "%p_xyz_valid" &&
+    s.prov_name == "%r_xyz_prov"
+}
+
+// ── Emitter State ───────────────────────────────────────────────────
+
+fn epistemic_ptx_test_10_state_init_counters() -> bool {
+    let c = epistemic_config_default()
+    let st = epistemic_ptx_new(c)
+    st.shadow_counter == 0 &&
+    st.shadow_count == 0 &&
+    st.temp_f32_count == 0 &&
+    st.temp_pred_count == 0 &&
+    st.temp_u64_count == 0
+}
+
+fn epistemic_ptx_test_11_alloc_shadow_increments() -> bool with Alloc {
+    let c = epistemic_config_default()
+    let st0 = epistemic_ptx_new(c)
+    let r1 = epistemic_alloc_shadow(st0, "x")
+    let st1 = r1.0
+    let r2 = epistemic_alloc_shadow(st1, "y")
+    let st2 = r2.0
+    st1.shadow_counter == 1 && st2.shadow_counter == 2
+}
+
+fn epistemic_ptx_test_12_alloc_shadow_naming() -> bool with Alloc {
+    let c = epistemic_config_default()
+    let st0 = epistemic_ptx_new(c)
+    let r1 = epistemic_alloc_shadow(st0, "v")
+    let shadow = r1.1
+    // base = "v_0" → names: %r_v_0, %r_v_0_eps, %p_v_0_valid, %r_v_0_prov
+    shadow.val_name == "%r_v_0" &&
+    shadow.eps_name == "%r_v_0_eps"
+}
+
+fn epistemic_ptx_test_13_alloc_temp_f32() -> bool with Alloc {
+    let c = epistemic_config_default()
+    let st0 = epistemic_ptx_new(c)
+    let r1 = epistemic_alloc_temp_f32(st0)
+    let st1 = r1.0
+    let name = r1.1
+    st1.temp_f32_count == 1 && name == "%r_eps_t0"
+}
+
+fn epistemic_ptx_test_14_alloc_temp_pred() -> bool with Alloc {
+    let c = epistemic_config_default()
+    let st0 = epistemic_ptx_new(c)
+    let r1 = epistemic_alloc_temp_pred(st0)
+    let st1 = r1.0
+    let name = r1.1
+    st1.temp_pred_count == 1 && name == "%p_eps_t0"
+}
+
+// ── Additive ε Propagation PTX ──────────────────────────────────────
+
+fn epistemic_ptx_test_15_add_contains_mul_sq() -> bool with Mut, Panic, Div, Alloc {
+    let c = epistemic_config_default()
+    let st0 = epistemic_ptx_new(c)
+    let a = epistemic_shadow_new("a")
+    let b = epistemic_shadow_new("b")
+    let r = epistemic_shadow_new("c")
+    let st1 = epistemic_emit_add(st0, r, a, b, false)
+    // ε_a² step
+    ptx_buf_contains(st1.buf, "mul.f32 %r_eps_t0")
+}
+
+fn epistemic_ptx_test_16_add_contains_sqrt() -> bool with Mut, Panic, Div, Alloc {
+    let c = epistemic_config_default()
+    let st0 = epistemic_ptx_new(c)
+    let a = epistemic_shadow_new("a")
+    let b = epistemic_shadow_new("b")
+    let r = epistemic_shadow_new("c")
+    let st1 = epistemic_emit_add(st0, r, a, b, false)
+    ptx_buf_contains(st1.buf, "sqrt.approx.f32")
+}
+
+fn epistemic_ptx_test_17_add_contains_quadrature_sum() -> bool with Mut, Panic, Div, Alloc {
+    let c = epistemic_config_default()
+    let st0 = epistemic_ptx_new(c)
+    let a = epistemic_shadow_new("a")
+    let b = epistemic_shadow_new("b")
+    let r = epistemic_shadow_new("c")
+    let st1 = epistemic_emit_add(st0, r, a, b, false)
+    // ε_a² + ε_b² step
+    ptx_buf_contains(st1.buf, "add.f32 %r_eps_t2, %r_eps_t0, %r_eps_t1")
+}
+
+fn epistemic_ptx_test_18_add_validity_conjunction() -> bool with Mut, Panic, Div, Alloc {
+    let c = epistemic_config_default()
+    let st0 = epistemic_ptx_new(c)
+    let a = epistemic_shadow_new("a")
+    let b = epistemic_shadow_new("b")
+    let r = epistemic_shadow_new("c")
+    let st1 = epistemic_emit_add(st0, r, a, b, false)
+    ptx_buf_contains(st1.buf, "and.pred %p_c_valid")
+}
+
+fn epistemic_ptx_test_19_add_provenance_xor() -> bool with Mut, Panic, Div, Alloc {
+    let c = epistemic_config_default()
+    let st0 = epistemic_ptx_new(c)
+    let a = epistemic_shadow_new("a")
+    let b = epistemic_shadow_new("b")
+    let r = epistemic_shadow_new("c")
+    let st1 = epistemic_emit_add(st0, r, a, b, false)
+    ptx_buf_contains(st1.buf, "xor.b64 %r_c_prov")
+}
+
+fn epistemic_ptx_test_20_sub_uses_sub_opcode() -> bool with Mut, Panic, Div, Alloc {
+    let c = epistemic_config_default()
+    let st0 = epistemic_ptx_new(c)
+    let a = epistemic_shadow_new("a")
+    let b = epistemic_shadow_new("b")
+    let r = epistemic_shadow_new("c")
+    let st1 = epistemic_emit_add(st0, r, a, b, true)
+    ptx_buf_contains(st1.buf, "sub.f32 %r_c")
+}
+
+// ── Multiplicative ε Propagation PTX ────────────────────────────────
+
+fn epistemic_ptx_test_21_mul_value_op() -> bool with Mut, Panic, Div, Alloc {
+    let c = epistemic_config_default()
+    let st0 = epistemic_ptx_new(c)
+    let a = epistemic_shadow_new("a")
+    let b = epistemic_shadow_new("b")
+    let r = epistemic_shadow_new("c")
+    let st1 = epistemic_emit_mul(st0, r, a, b)
+    ptx_buf_contains(st1.buf, "mul.rn.f32 %r_c")
+}
+
+fn epistemic_ptx_test_22_mul_abs_operands() -> bool with Mut, Panic, Div, Alloc {
+    let c = epistemic_config_default()
+    let st0 = epistemic_ptx_new(c)
+    let a = epistemic_shadow_new("a")
+    let b = epistemic_shadow_new("b")
+    let r = epistemic_shadow_new("c")
+    let st1 = epistemic_emit_mul(st0, r, a, b)
+    // |a| and |b| for first-order propagation
+    ptx_buf_contains(st1.buf, "abs.f32 %r_eps_t0, %r_a") &&
+    ptx_buf_contains(st1.buf, "abs.f32 %r_eps_t1, %r_b")
+}
+
+fn epistemic_ptx_test_23_mul_first_order_sum() -> bool with Mut, Panic, Div, Alloc {
+    let c = epistemic_config_default()
+    let st0 = epistemic_ptx_new(c)
+    let a = epistemic_shadow_new("a")
+    let b = epistemic_shadow_new("b")
+    let r = epistemic_shadow_new("c")
+    let st1 = epistemic_emit_mul(st0, r, a, b)
+    // |a|·ε_b + |b|·ε_a → add.f32 result_eps
+    ptx_buf_contains(st1.buf, "add.f32 %r_c_eps")
+}
+
+// ── Division ε Propagation PTX ──────────────────────────────────────
+
+fn epistemic_ptx_test_24_div_value_op() -> bool with Mut, Panic, Div, Alloc {
+    let c = epistemic_config_default()
+    let st0 = epistemic_ptx_new(c)
+    let a = epistemic_shadow_new("a")
+    let b = epistemic_shadow_new("b")
+    let r = epistemic_shadow_new("c")
+    let st1 = epistemic_emit_div(st0, r, a, b)
+    ptx_buf_contains(st1.buf, "div.approx.f32 %r_c")
+}
+
+fn epistemic_ptx_test_25_div_near_zero_guard() -> bool with Mut, Panic, Div, Alloc {
+    let c = epistemic_config_default()
+    let st0 = epistemic_ptx_new(c)
+    let a = epistemic_shadow_new("a")
+    let b = epistemic_shadow_new("b")
+    let r = epistemic_shadow_new("c")
+    let st1 = epistemic_emit_div(st0, r, a, b)
+    // Near-zero check: setp.lt.f32 on |b| < 0.0001 (0f38D1B717)
+    ptx_buf_contains(st1.buf, "setp.lt.f32 %p_eps_t0") &&
+    ptx_buf_contains(st1.buf, "0f38D1B717")
+}
+
+fn epistemic_ptx_test_26_div_max_uncertainty() -> bool with Mut, Panic, Div, Alloc {
+    let c = epistemic_config_default()
+    let st0 = epistemic_ptx_new(c)
+    let a = epistemic_shadow_new("a")
+    let b = epistemic_shadow_new("b")
+    let r = epistemic_shadow_new("c")
+    let st1 = epistemic_emit_div(st0, r, a, b)
+    // Near-zero → saturate to 1.0 (0f3F800000)
+    ptx_buf_contains(st1.buf, "0f3F800000")
+}
+
+fn epistemic_ptx_test_27_div_b_squared() -> bool with Mut, Panic, Div, Alloc {
+    let c = epistemic_config_default()
+    let st0 = epistemic_ptx_new(c)
+    let a = epistemic_shadow_new("a")
+    let b = epistemic_shadow_new("b")
+    let r = epistemic_shadow_new("c")
+    let st1 = epistemic_emit_div(st0, r, a, b)
+    // b² = b * b → mul.f32 using right.val_name twice
+    ptx_buf_contains(st1.buf, "mul.f32 %r_eps_t1, %r_b, %r_b")
+}
+
+// ── FMA ε Propagation PTX ───────────────────────────────────────────
+
+fn epistemic_ptx_test_28_fma_value_op() -> bool with Mut, Panic, Div, Alloc {
+    let c = epistemic_config_default()
+    let st0 = epistemic_ptx_new(c)
+    let a = epistemic_shadow_new("a")
+    let b = epistemic_shadow_new("b")
+    let d = epistemic_shadow_new("d")
+    let r = epistemic_shadow_new("r")
+    let st1 = epistemic_emit_fma(st0, r, a, b, d)
+    ptx_buf_contains(st1.buf, "fma.rn.f32 %r_r")
+}
+
+fn epistemic_ptx_test_29_fma_combined_sqrt() -> bool with Mut, Panic, Div, Alloc {
+    let c = epistemic_config_default()
+    let st0 = epistemic_ptx_new(c)
+    let a = epistemic_shadow_new("a")
+    let b = epistemic_shadow_new("b")
+    let d = epistemic_shadow_new("d")
+    let r = epistemic_shadow_new("r")
+    let st1 = epistemic_emit_fma(st0, r, a, b, d)
+    // sqrt(mul_part² + ε_c²)
+    ptx_buf_contains(st1.buf, "sqrt.approx.f32 %r_r_eps")
+}
+
+// ── Confidence Gating ───────────────────────────────────────────────
+
+fn epistemic_ptx_test_30_confidence_gate_branch() -> bool with Mut, Panic, Div, Alloc {
+    let c = epistemic_config_default()
+    let st0 = epistemic_ptx_new(c)
+    let s = epistemic_shadow_new("v")
+    let st1 = epistemic_emit_confidence_gate(st0, s, "3D4CCCCD", "hi", "lo")
+    ptx_buf_contains(st1.buf, "setp.lt.f32 %p_eps_t0") &&
+    ptx_buf_contains(st1.buf, "bra hi") &&
+    ptx_buf_contains(st1.buf, "bra lo")
+}
+
+// ── Register Pool ───────────────────────────────────────────────────
+
+fn epistemic_ptx_test_31_reg_pool_f32() -> bool with Mut, Panic, Div, Alloc {
+    let c = epistemic_config_default()
+    let st0 = epistemic_ptx_new(c)
+    let st1 = epistemic_emit_shadow_reg_pool(st0, 4)
+    ptx_buf_contains(st1.buf, ".reg .f32 %r_<8>")
+}
+
+fn epistemic_ptx_test_32_reg_pool_pred() -> bool with Mut, Panic, Div, Alloc {
+    let c = epistemic_config_default()
+    let st0 = epistemic_ptx_new(c)
+    let st1 = epistemic_emit_shadow_reg_pool(st0, 4)
+    // 4 shadows + 16 temporaries = 20
+    ptx_buf_contains(st1.buf, ".reg .pred %p_<20>")
+}
+
+fn epistemic_ptx_test_33_reg_pool_provenance() -> bool with Mut, Panic, Div, Alloc {
+    let c = epistemic_config_default()
+    let st0 = epistemic_ptx_new(c)
+    let st1 = epistemic_emit_shadow_reg_pool(st0, 4)
+    ptx_buf_contains(st1.buf, ".reg .b64 %r_prov_<4>")
+}
+
+fn epistemic_ptx_test_34_reg_pool_eps_temps() -> bool with Mut, Panic, Div, Alloc {
+    let c = epistemic_config_default()
+    let st0 = epistemic_ptx_new(c)
+    let st1 = epistemic_emit_shadow_reg_pool(st0, 2)
+    ptx_buf_contains(st1.buf, ".reg .f32 %r_eps_t<16>") &&
+    ptx_buf_contains(st1.buf, ".reg .pred %p_eps_t<8>")
+}
+
+// ── Warp Aggregation ────────────────────────────────────────────────
+
+fn epistemic_ptx_test_35_warp_ballot() -> bool with Mut, Panic, Div, Alloc {
+    let c = epistemic_config_default()
+    let st0 = epistemic_ptx_new(c)
+    let s = epistemic_shadow_new("v")
+    let st1 = epistemic_emit_warp_confidence_vote(st0, s, "%r_ballot", "%r_count")
+    ptx_buf_contains(st1.buf, "vote.sync.ballot.b32 %r_ballot")
+}
+
+fn epistemic_ptx_test_36_warp_ballot_popcount() -> bool with Mut, Panic, Div, Alloc {
+    let c = epistemic_config_default()
+    let st0 = epistemic_ptx_new(c)
+    let s = epistemic_shadow_new("v")
+    let st1 = epistemic_emit_warp_confidence_vote(st0, s, "%r_ballot", "%r_count")
+    ptx_buf_contains(st1.buf, "popc.b32 %r_count, %r_ballot")
+}
+
+fn epistemic_ptx_test_37_warp_reduce_shfl() -> bool with Mut, Panic, Div, Alloc {
+    let c = epistemic_config_default()
+    let st0 = epistemic_ptx_new(c)
+    let s = epistemic_shadow_new("v")
+    let st1 = epistemic_emit_warp_epsilon_reduce(st0, s, "%r_out", 0)
+    ptx_buf_contains(st1.buf, "shfl.sync.down.b32 %r_eps_t0")
+}
+
+fn epistemic_ptx_test_38_warp_reduce_min_mode() -> bool with Mut, Panic, Div, Alloc {
+    let c = epistemic_config_default()
+    let st0 = epistemic_ptx_new(c)
+    let s = epistemic_shadow_new("v")
+    let st1 = epistemic_emit_warp_epsilon_reduce(st0, s, "%r_out", 0)
+    ptx_buf_contains(st1.buf, "min.f32 %r_out")
+}
+
+fn epistemic_ptx_test_39_warp_reduce_max_mode() -> bool with Mut, Panic, Div, Alloc {
+    let c = epistemic_config_default()
+    let st0 = epistemic_ptx_new(c)
+    let s = epistemic_shadow_new("v")
+    let st1 = epistemic_emit_warp_epsilon_reduce(st0, s, "%r_out", 1)
+    ptx_buf_contains(st1.buf, "max.f32 %r_out")
+}
+
+fn epistemic_ptx_test_40_warp_reduce_sum_mode() -> bool with Mut, Panic, Div, Alloc {
+    let c = epistemic_config_default()
+    let st0 = epistemic_ptx_new(c)
+    let s = epistemic_shadow_new("v")
+    let st1 = epistemic_emit_warp_epsilon_reduce(st0, s, "%r_out", 2)
+    ptx_buf_contains(st1.buf, "add.f32 %r_out")
+}
+
+// ── Shadow Initialization PTX ───────────────────────────────────────
+
+fn epistemic_ptx_test_41_init_shadow_mov_val() -> bool with Mut, Panic, Div, Alloc {
+    let c = epistemic_config_default()
+    let st0 = epistemic_ptx_new(c)
+    let s = epistemic_shadow_new("x")
+    let st1 = epistemic_emit_init_shadow(st0, s, "0f40400000", "0f00000000")
+    ptx_buf_contains(st1.buf, "mov.f32 %r_x, 0f40400000")
+}
+
+fn epistemic_ptx_test_42_init_shadow_mov_eps() -> bool with Mut, Panic, Div, Alloc {
+    let c = epistemic_config_default()
+    let st0 = epistemic_ptx_new(c)
+    let s = epistemic_shadow_new("x")
+    let st1 = epistemic_emit_init_shadow(st0, s, "0f40400000", "0f3C23D70A")
+    ptx_buf_contains(st1.buf, "mov.f32 %r_x_eps, 0f3C23D70A")
+}
+
+fn epistemic_ptx_test_43_init_shadow_validity_true() -> bool with Mut, Panic, Div, Alloc {
+    let c = epistemic_config_default()
+    let st0 = epistemic_ptx_new(c)
+    let s = epistemic_shadow_new("x")
+    let st1 = epistemic_emit_init_shadow(st0, s, "0f40400000", "0f00000000")
+    ptx_buf_contains(st1.buf, "setp.eq.s32 %p_x_valid, 1, 1")
+}
+
+fn epistemic_ptx_test_44_init_shadow_prov_zero() -> bool with Mut, Panic, Div, Alloc {
+    let c = epistemic_config_default()
+    let st0 = epistemic_ptx_new(c)
+    let s = epistemic_shadow_new("x")
+    let st1 = epistemic_emit_init_shadow(st0, s, "0f40400000", "0f00000000")
+    ptx_buf_contains(st1.buf, "mov.u64 %r_x_prov, 0")
+}
+
+// ── No-Quadrature Mode ──────────────────────────────────────────────
+
+fn epistemic_ptx_test_45_no_quadrature_max() -> bool with Mut, Panic, Div, Alloc {
+    var c = epistemic_config_default()
+    c.quadrature_propagation = false
+    let st0 = epistemic_ptx_new(c)
+    let a = epistemic_shadow_new("a")
+    let b = epistemic_shadow_new("b")
+    let r = epistemic_shadow_new("c")
+    let st1 = epistemic_emit_add(st0, r, a, b, false)
+    // Without quadrature, uses max instead of sqrt
+    ptx_buf_contains(st1.buf, "max.f32 %r_c_eps")
+}
+
+// ── Runner ──────────────────────────────────────────────────────────
+
+fn run_gpu_epistemic_ptx_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
+    var passed: i64 = 0
+    var total: i64 = 0
+
+    print("=== Epistemic PTX Tests ===\n")
+
+    total = total + 1
+    if epistemic_ptx_test_01_config_sm() { passed = passed + 1; print("  T01 OK\n") } else { print("  FAIL T01 config sm\n") }
+    total = total + 1
+    if epistemic_ptx_test_02_config_threshold() { passed = passed + 1; print("  T02 OK\n") } else { print("  FAIL T02 threshold\n") }
+    total = total + 1
+    if epistemic_ptx_test_03_config_default_epsilon() { passed = passed + 1; print("  T03 OK\n") } else { print("  FAIL T03 default eps\n") }
+    total = total + 1
+    if epistemic_ptx_test_04_config_flags() { passed = passed + 1; print("  T04 OK\n") } else { print("  FAIL T04 flags\n") }
+    total = total + 1
+    if epistemic_ptx_test_05_shadow_val_name() { passed = passed + 1; print("  T05 OK\n") } else { print("  FAIL T05 val name\n") }
+    total = total + 1
+    if epistemic_ptx_test_06_shadow_eps_name() { passed = passed + 1; print("  T06 OK\n") } else { print("  FAIL T06 eps name\n") }
+    total = total + 1
+    if epistemic_ptx_test_07_shadow_valid_name() { passed = passed + 1; print("  T07 OK\n") } else { print("  FAIL T07 valid name\n") }
+    total = total + 1
+    if epistemic_ptx_test_08_shadow_prov_name() { passed = passed + 1; print("  T08 OK\n") } else { print("  FAIL T08 prov name\n") }
+    total = total + 1
+    if epistemic_ptx_test_09_shadow_different_base() { passed = passed + 1; print("  T09 OK\n") } else { print("  FAIL T09 diff base\n") }
+    total = total + 1
+    if epistemic_ptx_test_10_state_init_counters() { passed = passed + 1; print("  T10 OK\n") } else { print("  FAIL T10 counters\n") }
+    total = total + 1
+    if epistemic_ptx_test_11_alloc_shadow_increments() { passed = passed + 1; print("  T11 OK\n") } else { print("  FAIL T11 alloc inc\n") }
+    total = total + 1
+    if epistemic_ptx_test_12_alloc_shadow_naming() { passed = passed + 1; print("  T12 OK\n") } else { print("  FAIL T12 alloc name\n") }
+    total = total + 1
+    if epistemic_ptx_test_13_alloc_temp_f32() { passed = passed + 1; print("  T13 OK\n") } else { print("  FAIL T13 temp f32\n") }
+    total = total + 1
+    if epistemic_ptx_test_14_alloc_temp_pred() { passed = passed + 1; print("  T14 OK\n") } else { print("  FAIL T14 temp pred\n") }
+    total = total + 1
+    if epistemic_ptx_test_15_add_contains_mul_sq() { passed = passed + 1; print("  T15 OK\n") } else { print("  FAIL T15 add mul sq\n") }
+    total = total + 1
+    if epistemic_ptx_test_16_add_contains_sqrt() { passed = passed + 1; print("  T16 OK\n") } else { print("  FAIL T16 add sqrt\n") }
+    total = total + 1
+    if epistemic_ptx_test_17_add_contains_quadrature_sum() { passed = passed + 1; print("  T17 OK\n") } else { print("  FAIL T17 add quad\n") }
+    total = total + 1
+    if epistemic_ptx_test_18_add_validity_conjunction() { passed = passed + 1; print("  T18 OK\n") } else { print("  FAIL T18 add valid\n") }
+    total = total + 1
+    if epistemic_ptx_test_19_add_provenance_xor() { passed = passed + 1; print("  T19 OK\n") } else { print("  FAIL T19 add prov\n") }
+    total = total + 1
+    if epistemic_ptx_test_20_sub_uses_sub_opcode() { passed = passed + 1; print("  T20 OK\n") } else { print("  FAIL T20 sub op\n") }
+    total = total + 1
+    if epistemic_ptx_test_21_mul_value_op() { passed = passed + 1; print("  T21 OK\n") } else { print("  FAIL T21 mul val\n") }
+    total = total + 1
+    if epistemic_ptx_test_22_mul_abs_operands() { passed = passed + 1; print("  T22 OK\n") } else { print("  FAIL T22 mul abs\n") }
+    total = total + 1
+    if epistemic_ptx_test_23_mul_first_order_sum() { passed = passed + 1; print("  T23 OK\n") } else { print("  FAIL T23 mul sum\n") }
+    total = total + 1
+    if epistemic_ptx_test_24_div_value_op() { passed = passed + 1; print("  T24 OK\n") } else { print("  FAIL T24 div val\n") }
+    total = total + 1
+    if epistemic_ptx_test_25_div_near_zero_guard() { passed = passed + 1; print("  T25 OK\n") } else { print("  FAIL T25 div guard\n") }
+    total = total + 1
+    if epistemic_ptx_test_26_div_max_uncertainty() { passed = passed + 1; print("  T26 OK\n") } else { print("  FAIL T26 div max\n") }
+    total = total + 1
+    if epistemic_ptx_test_27_div_b_squared() { passed = passed + 1; print("  T27 OK\n") } else { print("  FAIL T27 div b2\n") }
+    total = total + 1
+    if epistemic_ptx_test_28_fma_value_op() { passed = passed + 1; print("  T28 OK\n") } else { print("  FAIL T28 fma val\n") }
+    total = total + 1
+    if epistemic_ptx_test_29_fma_combined_sqrt() { passed = passed + 1; print("  T29 OK\n") } else { print("  FAIL T29 fma sqrt\n") }
+    total = total + 1
+    if epistemic_ptx_test_30_confidence_gate_branch() { passed = passed + 1; print("  T30 OK\n") } else { print("  FAIL T30 gate\n") }
+    total = total + 1
+    if epistemic_ptx_test_31_reg_pool_f32() { passed = passed + 1; print("  T31 OK\n") } else { print("  FAIL T31 pool f32\n") }
+    total = total + 1
+    if epistemic_ptx_test_32_reg_pool_pred() { passed = passed + 1; print("  T32 OK\n") } else { print("  FAIL T32 pool pred\n") }
+    total = total + 1
+    if epistemic_ptx_test_33_reg_pool_provenance() { passed = passed + 1; print("  T33 OK\n") } else { print("  FAIL T33 pool prov\n") }
+    total = total + 1
+    if epistemic_ptx_test_34_reg_pool_eps_temps() { passed = passed + 1; print("  T34 OK\n") } else { print("  FAIL T34 pool temps\n") }
+    total = total + 1
+    if epistemic_ptx_test_35_warp_ballot() { passed = passed + 1; print("  T35 OK\n") } else { print("  FAIL T35 ballot\n") }
+    total = total + 1
+    if epistemic_ptx_test_36_warp_ballot_popcount() { passed = passed + 1; print("  T36 OK\n") } else { print("  FAIL T36 popcount\n") }
+    total = total + 1
+    if epistemic_ptx_test_37_warp_reduce_shfl() { passed = passed + 1; print("  T37 OK\n") } else { print("  FAIL T37 reduce shfl\n") }
+    total = total + 1
+    if epistemic_ptx_test_38_warp_reduce_min_mode() { passed = passed + 1; print("  T38 OK\n") } else { print("  FAIL T38 reduce min\n") }
+    total = total + 1
+    if epistemic_ptx_test_39_warp_reduce_max_mode() { passed = passed + 1; print("  T39 OK\n") } else { print("  FAIL T39 reduce max\n") }
+    total = total + 1
+    if epistemic_ptx_test_40_warp_reduce_sum_mode() { passed = passed + 1; print("  T40 OK\n") } else { print("  FAIL T40 reduce sum\n") }
+    total = total + 1
+    if epistemic_ptx_test_41_init_shadow_mov_val() { passed = passed + 1; print("  T41 OK\n") } else { print("  FAIL T41 init val\n") }
+    total = total + 1
+    if epistemic_ptx_test_42_init_shadow_mov_eps() { passed = passed + 1; print("  T42 OK\n") } else { print("  FAIL T42 init eps\n") }
+    total = total + 1
+    if epistemic_ptx_test_43_init_shadow_validity_true() { passed = passed + 1; print("  T43 OK\n") } else { print("  FAIL T43 init valid\n") }
+    total = total + 1
+    if epistemic_ptx_test_44_init_shadow_prov_zero() { passed = passed + 1; print("  T44 OK\n") } else { print("  FAIL T44 init prov\n") }
+    total = total + 1
+    if epistemic_ptx_test_45_no_quadrature_max() { passed = passed + 1; print("  T45 OK\n") } else { print("  FAIL T45 no quad\n") }
+
+    if passed == total {
+        print("Epistemic PTX: all 45 passed\n")
+    } else {
+        print("Epistemic PTX: FAILED\n")
+    }
+    if passed == total { 0 } else { 1 }
+}

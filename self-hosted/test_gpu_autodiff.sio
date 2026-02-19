@@ -1,0 +1,501 @@
+// Self-hosted GPU autodiff tests
+//
+// Validates gradient op constants, tape management, polynomial
+// approximations, individual gradient rules, and the tape_backward
+// finite-difference oracle for f(x) = x² at x=3.
+
+// ── Local Helper ────────────────────────────────────────────────────
+
+fn ad_near(a: f32, b: f32, tol: f32) -> bool {
+    var d = a - b
+    if d < 0.0 { d = 0.0 - d }
+    d < tol
+}
+
+// ── Gradient Op Constants ───────────────────────────────────────────
+
+fn autodiff_test_01_grad_op_add() -> bool {
+    GRAD_OP_ADD == 0
+}
+
+fn autodiff_test_02_grad_op_sub() -> bool {
+    GRAD_OP_SUB == 1
+}
+
+fn autodiff_test_03_grad_op_mul() -> bool {
+    GRAD_OP_MUL == 2
+}
+
+fn autodiff_test_04_grad_op_div() -> bool {
+    GRAD_OP_DIV == 3
+}
+
+fn autodiff_test_05_grad_op_neg() -> bool {
+    GRAD_OP_NEG == 4
+}
+
+fn autodiff_test_06_grad_op_sqrt() -> bool {
+    GRAD_OP_SQRT == 5
+}
+
+fn autodiff_test_07_grad_op_exp() -> bool {
+    GRAD_OP_EXP == 6
+}
+
+fn autodiff_test_08_grad_op_log() -> bool {
+    GRAD_OP_LOG == 7
+}
+
+fn autodiff_test_09_grad_op_sin() -> bool {
+    GRAD_OP_SIN == 8
+}
+
+fn autodiff_test_10_grad_op_cos() -> bool {
+    GRAD_OP_COS == 9
+}
+
+fn autodiff_test_11_grad_op_relu() -> bool {
+    GRAD_OP_RELU == 11
+}
+
+fn autodiff_test_12_grad_op_const() -> bool {
+    GRAD_OP_CONST == 19
+}
+
+fn autodiff_test_13_grad_op_input() -> bool {
+    GRAD_OP_INPUT == 20
+}
+
+fn autodiff_test_14_grad_op_output() -> bool {
+    GRAD_OP_OUTPUT == 21
+}
+
+// ── Tape Entry Construction ─────────────────────────────────────────
+
+fn autodiff_test_15_tape_entry_new() -> bool {
+    let e = tape_entry_new(GRAD_OP_ADD, 2, 0, 1)
+    e.op == GRAD_OP_ADD && e.val_id == 2 &&
+    e.src0 == 0 && e.src1 == 1 && e.src2 == -1 &&
+    e.fwd_val == 0.0 && e.grad_idx == -1
+}
+
+fn autodiff_test_16_tape_entry_with_fwd() -> bool {
+    let e0 = tape_entry_new(GRAD_OP_MUL, 1, 0, 0)
+    let e1 = tape_entry_with_fwd(e0, 9.0, 3.0, 3.0)
+    e1.fwd_val == 9.0 && e1.fwd_src0 == 3.0 && e1.fwd_src1 == 3.0
+}
+
+// ── Tape Management ─────────────────────────────────────────────────
+
+fn autodiff_test_17_tape_new_empty() -> bool {
+    let t = tape_new()
+    t.entry_count == 0 && t.grad_count == 0 &&
+    t.input_count == 0 && t.output_count == 0
+}
+
+fn autodiff_test_18_tape_record() -> bool {
+    let t0 = tape_new()
+    let e = tape_entry_new(GRAD_OP_ADD, 0, -1, -1)
+    let t1 = tape_record(t0, e)
+    t1.entry_count == 1
+}
+
+fn autodiff_test_19_tape_record_multiple() -> bool {
+    var t = tape_new()
+    t = tape_record(t, tape_entry_new(GRAD_OP_INPUT, 0, -1, -1))
+    t = tape_record(t, tape_entry_new(GRAD_OP_MUL, 1, 0, 0))
+    t = tape_record(t, tape_entry_new(GRAD_OP_OUTPUT, 2, 1, -1))
+    t.entry_count == 3
+}
+
+fn autodiff_test_20_tape_mark_input() -> bool {
+    var t = tape_new()
+    t = tape_mark_input(t, 0)
+    t.input_count == 1 && t.inputs[0] == 0
+}
+
+fn autodiff_test_21_tape_mark_output() -> bool {
+    var t = tape_new()
+    t = tape_mark_output(t, 1)
+    t.output_count == 1 && t.outputs[0] == 1
+}
+
+fn autodiff_test_22_tape_add_grad() -> bool {
+    var t = tape_new()
+    t = tape_add_grad(t, 0, 5.0)
+    tape_get_grad(t, 0) == 5.0
+}
+
+fn autodiff_test_23_tape_add_grad_accumulate() -> bool {
+    var t = tape_new()
+    t = tape_add_grad(t, 0, 3.0)
+    t = tape_add_grad(t, 0, 4.0)
+    tape_get_grad(t, 0) == 7.0
+}
+
+fn autodiff_test_24_tape_get_grad_miss() -> bool {
+    let t = tape_new()
+    tape_get_grad(t, 0) == 0.0
+}
+
+fn autodiff_test_25_tape_get_grad_negative() -> bool {
+    let t = tape_new()
+    tape_get_grad(t, -1) == 0.0
+}
+
+fn autodiff_test_26_tape_count_ops() -> bool {
+    var t = tape_new()
+    t = tape_record(t, tape_entry_new(GRAD_OP_ADD, 0, -1, -1))
+    t = tape_record(t, tape_entry_new(GRAD_OP_MUL, 1, 0, 0))
+    tape_count_ops(t) == 2
+}
+
+fn autodiff_test_27_tape_count_inputs() -> bool {
+    var t = tape_new()
+    t = tape_mark_input(t, 0)
+    t = tape_mark_input(t, 1)
+    tape_count_inputs(t) == 2
+}
+
+// ── Polynomial Approximations ───────────────────────────────────────
+
+fn autodiff_test_28_approx_sin_zero() -> bool {
+    ad_near(approx_sin(0.0), 0.0, 0.000001)
+}
+
+fn autodiff_test_29_approx_cos_zero() -> bool {
+    ad_near(approx_cos(0.0), 1.0, 0.000001)
+}
+
+fn autodiff_test_30_approx_exp_zero() -> bool {
+    ad_near(approx_exp(0.0), 1.0, 0.000001)
+}
+
+fn autodiff_test_31_approx_log_one() -> bool with Div {
+    ad_near(approx_log(1.0), 0.0, 0.000001)
+}
+
+fn autodiff_test_32_approx_exp_one() -> bool {
+    // e^1 ≈ 2.718 — polynomial approx has limited accuracy
+    ad_near(approx_exp(1.0), 2.708, 0.1)
+}
+
+// ── Individual Gradient Rules ───────────────────────────────────────
+
+fn autodiff_test_33_grad_add() -> bool with Div {
+    // ADD: grad to both sources = out_grad
+    let e = tape_entry_new(GRAD_OP_ADD, 2, 0, 1)
+    var t = tape_new()
+    t = tape_add_grad(t, 2, 0.0)
+    t = grad_rule_apply(e, 1.0, t)
+    tape_get_grad(t, 0) == 1.0 && tape_get_grad(t, 1) == 1.0
+}
+
+fn autodiff_test_34_grad_sub() -> bool with Div {
+    // SUB: src0 gets +out_grad, src1 gets -out_grad
+    let e = tape_entry_new(GRAD_OP_SUB, 2, 0, 1)
+    var t = tape_new()
+    t = grad_rule_apply(e, 1.0, t)
+    tape_get_grad(t, 0) == 1.0 && tape_get_grad(t, 1) == -1.0
+}
+
+fn autodiff_test_35_grad_mul() -> bool with Div {
+    // MUL: src0 += out_grad * fwd_src1, src1 += out_grad * fwd_src0
+    let e0 = tape_entry_new(GRAD_OP_MUL, 2, 0, 1)
+    let e = tape_entry_with_fwd(e0, 6.0, 2.0, 3.0)
+    var t = tape_new()
+    t = grad_rule_apply(e, 1.0, t)
+    // src0 += 1.0 * 3.0 = 3.0, src1 += 1.0 * 2.0 = 2.0
+    tape_get_grad(t, 0) == 3.0 && tape_get_grad(t, 1) == 2.0
+}
+
+fn autodiff_test_36_grad_neg() -> bool with Div {
+    // NEG: src0 += -out_grad
+    let e = tape_entry_new(GRAD_OP_NEG, 1, 0, -1)
+    var t = tape_new()
+    t = grad_rule_apply(e, 1.0, t)
+    tape_get_grad(t, 0) == -1.0
+}
+
+fn autodiff_test_37_grad_exp_at_zero() -> bool with Div {
+    // EXP at x=0: fwd_val = exp(0) = 1.0
+    // grad_src0 += out_grad * fwd_val = 1.0 * 1.0 = 1.0
+    let e0 = tape_entry_new(GRAD_OP_EXP, 1, 0, -1)
+    let e = tape_entry_with_fwd(e0, 1.0, 0.0, 0.0)
+    var t = tape_new()
+    t = grad_rule_apply(e, 1.0, t)
+    tape_get_grad(t, 0) == 1.0
+}
+
+fn autodiff_test_38_grad_relu_positive() -> bool with Div {
+    // RELU: x > 0 → grad passes through
+    let e0 = tape_entry_new(GRAD_OP_RELU, 1, 0, -1)
+    let e = tape_entry_with_fwd(e0, 5.0, 5.0, 0.0)
+    var t = tape_new()
+    t = grad_rule_apply(e, 1.0, t)
+    tape_get_grad(t, 0) == 1.0
+}
+
+fn autodiff_test_39_grad_relu_negative() -> bool with Div {
+    // RELU: x < 0 → grad blocked
+    let e0 = tape_entry_new(GRAD_OP_RELU, 1, 0, -1)
+    let e = tape_entry_with_fwd(e0, 0.0, -2.0, 0.0)
+    var t = tape_new()
+    t = grad_rule_apply(e, 1.0, t)
+    tape_get_grad(t, 0) == 0.0
+}
+
+fn autodiff_test_40_grad_max() -> bool with Div {
+    // MAX(a=5, b=3): a wins → grad_a=1, grad_b=0
+    let e0 = tape_entry_new(GRAD_OP_MAX, 2, 0, 1)
+    let e = tape_entry_with_fwd(e0, 5.0, 5.0, 3.0)
+    var t = tape_new()
+    t = grad_rule_apply(e, 1.0, t)
+    tape_get_grad(t, 0) == 1.0 && tape_get_grad(t, 1) == 0.0
+}
+
+fn autodiff_test_41_grad_abs_positive() -> bool with Div {
+    // ABS at x=3: sign=+1 → grad=out_grad
+    let e0 = tape_entry_new(GRAD_OP_ABS, 1, 0, -1)
+    let e = tape_entry_with_fwd(e0, 3.0, 3.0, 0.0)
+    var t = tape_new()
+    t = grad_rule_apply(e, 1.0, t)
+    tape_get_grad(t, 0) == 1.0
+}
+
+fn autodiff_test_42_grad_abs_negative() -> bool with Div {
+    // ABS at x=-3: sign=-1 → grad=-out_grad
+    let e0 = tape_entry_new(GRAD_OP_ABS, 1, 0, -1)
+    let e = tape_entry_with_fwd(e0, 3.0, -3.0, 0.0)
+    var t = tape_new()
+    t = grad_rule_apply(e, 1.0, t)
+    tape_get_grad(t, 0) == -1.0
+}
+
+// ── AutodiffConfig ──────────────────────────────────────────────────
+
+fn autodiff_test_43_config_default() -> bool {
+    let c = autodiff_config_default(80)
+    c.sm_version == 80 &&
+    c.accumulate_gradients &&
+    c.zero_init_grads &&
+    !c.check_nan &&
+    !c.epistemic_mode
+}
+
+// ── Finite-Difference Oracle: f(x) = x² at x=3 ────────────────────
+//
+// Tape layout:
+//   entry 0: INPUT,     val_id=0
+//   entry 1: MUL(0,0),  val_id=1, fwd_val=9.0, fwd_src0=3.0, fwd_src1=3.0
+//   entry 2: OUTPUT,    val_id=2, src0=1
+//
+// tape_backward seeds grad[2]=1.0, then:
+//   OUTPUT(2): grad[1] += 1.0 (no, OUTPUT is not propagated by grad_rule_apply)
+//   MUL(1): grad[0] += 1.0 * 3.0 = 3.0, grad[0] += 1.0 * 3.0 = 3.0
+//
+// But tape_backward seeds output vid then walks entries in reverse.
+// Output val_id=1 gets seeded with 1.0 (tape_mark_output marks val_id=1).
+// MUL backward: grad[0] += 1.0*3.0 + 1.0*3.0 = 6.0
+//
+// Expected: grad[0] = 6.0 == 2*x at x=3  ✓
+
+fn autodiff_test_44_x_squared_grad() -> bool with Div {
+    var t = tape_new()
+
+    // Entry 0: INPUT x=3.0
+    var e0 = tape_entry_new(GRAD_OP_INPUT, 0, -1, -1)
+    e0 = tape_entry_with_fwd(e0, 3.0, 0.0, 0.0)
+    t = tape_record(t, e0)
+
+    // Entry 1: MUL(0,0) = x*x = 9.0
+    var e1 = tape_entry_new(GRAD_OP_MUL, 1, 0, 0)
+    e1 = tape_entry_with_fwd(e1, 9.0, 3.0, 3.0)
+    t = tape_record(t, e1)
+
+    // Mark input and output
+    t = tape_mark_input(t, 0)
+    t = tape_mark_output(t, 1)
+
+    // Run backward pass
+    t = tape_backward(t)
+
+    // grad[0] should be 6.0 (= d/dx(x²) = 2x at x=3)
+    let g = tape_grad_of_input(t, 0)
+    g == 6.0
+}
+
+fn autodiff_test_45_exp_grad_at_zero() -> bool with Div {
+    // f(x) = exp(x) at x=0 → f'(0) = exp(0) = 1.0
+    var t = tape_new()
+
+    var e0 = tape_entry_new(GRAD_OP_INPUT, 0, -1, -1)
+    e0 = tape_entry_with_fwd(e0, 0.0, 0.0, 0.0)
+    t = tape_record(t, e0)
+
+    var e1 = tape_entry_new(GRAD_OP_EXP, 1, 0, -1)
+    e1 = tape_entry_with_fwd(e1, 1.0, 0.0, 0.0)
+    t = tape_record(t, e1)
+
+    t = tape_mark_input(t, 0)
+    t = tape_mark_output(t, 1)
+    t = tape_backward(t)
+
+    let g = tape_grad_of_input(t, 0)
+    g == 1.0
+}
+
+fn autodiff_test_46_add_grad_both() -> bool with Div {
+    // f(a,b) = a + b at a=2, b=3 → df/da = 1, df/db = 1
+    var t = tape_new()
+
+    var e0 = tape_entry_new(GRAD_OP_INPUT, 0, -1, -1)
+    e0 = tape_entry_with_fwd(e0, 2.0, 0.0, 0.0)
+    t = tape_record(t, e0)
+
+    var e1 = tape_entry_new(GRAD_OP_INPUT, 1, -1, -1)
+    e1 = tape_entry_with_fwd(e1, 3.0, 0.0, 0.0)
+    t = tape_record(t, e1)
+
+    var e2 = tape_entry_new(GRAD_OP_ADD, 2, 0, 1)
+    e2 = tape_entry_with_fwd(e2, 5.0, 2.0, 3.0)
+    t = tape_record(t, e2)
+
+    t = tape_mark_input(t, 0)
+    t = tape_mark_input(t, 1)
+    t = tape_mark_output(t, 2)
+    t = tape_backward(t)
+
+    tape_grad_of_input(t, 0) == 1.0 &&
+    tape_grad_of_input(t, 1) == 1.0
+}
+
+fn autodiff_test_47_neg_grad() -> bool with Div {
+    // f(x) = -x at x=5 → f'(5) = -1
+    var t = tape_new()
+
+    var e0 = tape_entry_new(GRAD_OP_INPUT, 0, -1, -1)
+    e0 = tape_entry_with_fwd(e0, 5.0, 0.0, 0.0)
+    t = tape_record(t, e0)
+
+    var e1 = tape_entry_new(GRAD_OP_NEG, 1, 0, -1)
+    e1 = tape_entry_with_fwd(e1, -5.0, 5.0, 0.0)
+    t = tape_record(t, e1)
+
+    t = tape_mark_input(t, 0)
+    t = tape_mark_output(t, 1)
+    t = tape_backward(t)
+
+    tape_grad_of_input(t, 0) == -1.0
+}
+
+// ── Runner ──────────────────────────────────────────────────────────
+
+fn run_gpu_autodiff_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
+    var passed: i64 = 0
+    var total: i64 = 0
+
+    print("=== GPU Autodiff Tests ===\n")
+
+    total = total + 1
+    if autodiff_test_01_grad_op_add() { passed = passed + 1; print("  T01 OK\n") } else { print("  FAIL T01 ADD\n") }
+    total = total + 1
+    if autodiff_test_02_grad_op_sub() { passed = passed + 1; print("  T02 OK\n") } else { print("  FAIL T02 SUB\n") }
+    total = total + 1
+    if autodiff_test_03_grad_op_mul() { passed = passed + 1; print("  T03 OK\n") } else { print("  FAIL T03 MUL\n") }
+    total = total + 1
+    if autodiff_test_04_grad_op_div() { passed = passed + 1; print("  T04 OK\n") } else { print("  FAIL T04 DIV\n") }
+    total = total + 1
+    if autodiff_test_05_grad_op_neg() { passed = passed + 1; print("  T05 OK\n") } else { print("  FAIL T05 NEG\n") }
+    total = total + 1
+    if autodiff_test_06_grad_op_sqrt() { passed = passed + 1; print("  T06 OK\n") } else { print("  FAIL T06 SQRT\n") }
+    total = total + 1
+    if autodiff_test_07_grad_op_exp() { passed = passed + 1; print("  T07 OK\n") } else { print("  FAIL T07 EXP\n") }
+    total = total + 1
+    if autodiff_test_08_grad_op_log() { passed = passed + 1; print("  T08 OK\n") } else { print("  FAIL T08 LOG\n") }
+    total = total + 1
+    if autodiff_test_09_grad_op_sin() { passed = passed + 1; print("  T09 OK\n") } else { print("  FAIL T09 SIN\n") }
+    total = total + 1
+    if autodiff_test_10_grad_op_cos() { passed = passed + 1; print("  T10 OK\n") } else { print("  FAIL T10 COS\n") }
+    total = total + 1
+    if autodiff_test_11_grad_op_relu() { passed = passed + 1; print("  T11 OK\n") } else { print("  FAIL T11 RELU\n") }
+    total = total + 1
+    if autodiff_test_12_grad_op_const() { passed = passed + 1; print("  T12 OK\n") } else { print("  FAIL T12 CONST\n") }
+    total = total + 1
+    if autodiff_test_13_grad_op_input() { passed = passed + 1; print("  T13 OK\n") } else { print("  FAIL T13 INPUT\n") }
+    total = total + 1
+    if autodiff_test_14_grad_op_output() { passed = passed + 1; print("  T14 OK\n") } else { print("  FAIL T14 OUTPUT\n") }
+    total = total + 1
+    if autodiff_test_15_tape_entry_new() { passed = passed + 1; print("  T15 OK\n") } else { print("  FAIL T15 entry\n") }
+    total = total + 1
+    if autodiff_test_16_tape_entry_with_fwd() { passed = passed + 1; print("  T16 OK\n") } else { print("  FAIL T16 fwd\n") }
+    total = total + 1
+    if autodiff_test_17_tape_new_empty() { passed = passed + 1; print("  T17 OK\n") } else { print("  FAIL T17 new\n") }
+    total = total + 1
+    if autodiff_test_18_tape_record() { passed = passed + 1; print("  T18 OK\n") } else { print("  FAIL T18 record\n") }
+    total = total + 1
+    if autodiff_test_19_tape_record_multiple() { passed = passed + 1; print("  T19 OK\n") } else { print("  FAIL T19 multi\n") }
+    total = total + 1
+    if autodiff_test_20_tape_mark_input() { passed = passed + 1; print("  T20 OK\n") } else { print("  FAIL T20 mark in\n") }
+    total = total + 1
+    if autodiff_test_21_tape_mark_output() { passed = passed + 1; print("  T21 OK\n") } else { print("  FAIL T21 mark out\n") }
+    total = total + 1
+    if autodiff_test_22_tape_add_grad() { passed = passed + 1; print("  T22 OK\n") } else { print("  FAIL T22 add grad\n") }
+    total = total + 1
+    if autodiff_test_23_tape_add_grad_accumulate() { passed = passed + 1; print("  T23 OK\n") } else { print("  FAIL T23 accum\n") }
+    total = total + 1
+    if autodiff_test_24_tape_get_grad_miss() { passed = passed + 1; print("  T24 OK\n") } else { print("  FAIL T24 miss\n") }
+    total = total + 1
+    if autodiff_test_25_tape_get_grad_negative() { passed = passed + 1; print("  T25 OK\n") } else { print("  FAIL T25 neg id\n") }
+    total = total + 1
+    if autodiff_test_26_tape_count_ops() { passed = passed + 1; print("  T26 OK\n") } else { print("  FAIL T26 count\n") }
+    total = total + 1
+    if autodiff_test_27_tape_count_inputs() { passed = passed + 1; print("  T27 OK\n") } else { print("  FAIL T27 inputs\n") }
+    total = total + 1
+    if autodiff_test_28_approx_sin_zero() { passed = passed + 1; print("  T28 OK\n") } else { print("  FAIL T28 sin(0)\n") }
+    total = total + 1
+    if autodiff_test_29_approx_cos_zero() { passed = passed + 1; print("  T29 OK\n") } else { print("  FAIL T29 cos(0)\n") }
+    total = total + 1
+    if autodiff_test_30_approx_exp_zero() { passed = passed + 1; print("  T30 OK\n") } else { print("  FAIL T30 exp(0)\n") }
+    total = total + 1
+    if autodiff_test_31_approx_log_one() { passed = passed + 1; print("  T31 OK\n") } else { print("  FAIL T31 log(1)\n") }
+    total = total + 1
+    if autodiff_test_32_approx_exp_one() { passed = passed + 1; print("  T32 OK\n") } else { print("  FAIL T32 exp(1)\n") }
+    total = total + 1
+    if autodiff_test_33_grad_add() { passed = passed + 1; print("  T33 OK\n") } else { print("  FAIL T33 g add\n") }
+    total = total + 1
+    if autodiff_test_34_grad_sub() { passed = passed + 1; print("  T34 OK\n") } else { print("  FAIL T34 g sub\n") }
+    total = total + 1
+    if autodiff_test_35_grad_mul() { passed = passed + 1; print("  T35 OK\n") } else { print("  FAIL T35 g mul\n") }
+    total = total + 1
+    if autodiff_test_36_grad_neg() { passed = passed + 1; print("  T36 OK\n") } else { print("  FAIL T36 g neg\n") }
+    total = total + 1
+    if autodiff_test_37_grad_exp_at_zero() { passed = passed + 1; print("  T37 OK\n") } else { print("  FAIL T37 g exp\n") }
+    total = total + 1
+    if autodiff_test_38_grad_relu_positive() { passed = passed + 1; print("  T38 OK\n") } else { print("  FAIL T38 relu+\n") }
+    total = total + 1
+    if autodiff_test_39_grad_relu_negative() { passed = passed + 1; print("  T39 OK\n") } else { print("  FAIL T39 relu-\n") }
+    total = total + 1
+    if autodiff_test_40_grad_max() { passed = passed + 1; print("  T40 OK\n") } else { print("  FAIL T40 g max\n") }
+    total = total + 1
+    if autodiff_test_41_grad_abs_positive() { passed = passed + 1; print("  T41 OK\n") } else { print("  FAIL T41 abs+\n") }
+    total = total + 1
+    if autodiff_test_42_grad_abs_negative() { passed = passed + 1; print("  T42 OK\n") } else { print("  FAIL T42 abs-\n") }
+    total = total + 1
+    if autodiff_test_43_config_default() { passed = passed + 1; print("  T43 OK\n") } else { print("  FAIL T43 config\n") }
+    total = total + 1
+    if autodiff_test_44_x_squared_grad() { passed = passed + 1; print("  T44 OK (x^2 oracle)\n") } else { print("  FAIL T44 x^2 oracle\n") }
+    total = total + 1
+    if autodiff_test_45_exp_grad_at_zero() { passed = passed + 1; print("  T45 OK (exp oracle)\n") } else { print("  FAIL T45 exp oracle\n") }
+    total = total + 1
+    if autodiff_test_46_add_grad_both() { passed = passed + 1; print("  T46 OK (a+b oracle)\n") } else { print("  FAIL T46 a+b oracle\n") }
+    total = total + 1
+    if autodiff_test_47_neg_grad() { passed = passed + 1; print("  T47 OK (neg oracle)\n") } else { print("  FAIL T47 neg oracle\n") }
+
+    if passed == total {
+        print("GPU Autodiff: all 47 passed\n")
+    } else {
+        print("GPU Autodiff: FAILED\n")
+    }
+    if passed == total { 0 } else { 1 }
+}

@@ -1,0 +1,430 @@
+// Self-hosted SPIR-V binary codegen tests
+//
+// Validates constants, word encoding, buffer operations, type/capability
+// emission, and ID allocation for the SPIR-V backend.
+
+// ── Constants ───────────────────────────────────────────────────────
+
+fn spirv_test_01_magic() -> bool {
+    SPIRV_MAGIC == 119734787
+}
+
+fn spirv_test_02_version_1_0() -> bool {
+    SPIRV_VERSION_1_0 == 65536
+}
+
+fn spirv_test_03_version_1_5() -> bool {
+    SPIRV_VERSION_1_5 == 65541
+}
+
+fn spirv_test_04_generator_sounio() -> bool {
+    SPIRV_GENERATOR_SOUNIO == 42
+}
+
+fn spirv_test_05_op_capability() -> bool {
+    OP_CAPABILITY == 17
+}
+
+fn spirv_test_06_op_memory_model() -> bool {
+    OP_MEMORY_MODEL == 14
+}
+
+fn spirv_test_07_op_entry_point() -> bool {
+    OP_ENTRY_POINT == 15
+}
+
+fn spirv_test_08_op_type_void() -> bool {
+    OP_TYPE_VOID == 19
+}
+
+fn spirv_test_09_op_type_int() -> bool {
+    OP_TYPE_INT == 21
+}
+
+fn spirv_test_10_op_type_float() -> bool {
+    OP_TYPE_FLOAT == 22
+}
+
+fn spirv_test_11_op_fadd() -> bool {
+    OP_FADD == 129
+}
+
+fn spirv_test_12_op_iadd() -> bool {
+    OP_IADD == 128
+}
+
+fn spirv_test_13_op_fmul() -> bool {
+    OP_FMUL == 133
+}
+
+// ── Instruction Encoding ────────────────────────────────────────────
+
+fn spirv_test_14_encode_capability() -> bool {
+    // 2 words, opcode 17 → 2*65536 + 17 = 131089
+    spv_encode_op(2, OP_CAPABILITY) == 131089
+}
+
+fn spirv_test_15_encode_memory_model() -> bool {
+    // 3 words, opcode 14 → 3*65536 + 14 = 196622
+    spv_encode_op(3, OP_MEMORY_MODEL) == 196622
+}
+
+fn spirv_test_16_encode_type_void() -> bool {
+    // 2 words, opcode 19 → 2*65536 + 19 = 131091
+    spv_encode_op(2, OP_TYPE_VOID) == 131091
+}
+
+fn spirv_test_17_encode_type_int() -> bool {
+    // 4 words, opcode 21 → 4*65536 + 21 = 262165
+    spv_encode_op(4, OP_TYPE_INT) == 262165
+}
+
+fn spirv_test_18_encode_type_float() -> bool {
+    // 3 words, opcode 22 → 3*65536 + 22 = 196630
+    spv_encode_op(3, OP_TYPE_FLOAT) == 196630
+}
+
+fn spirv_test_19_encode_identity() -> bool {
+    // word_count=1, opcode=0 → 65536
+    spv_encode_op(1, 0) == 65536
+}
+
+fn spirv_test_20_encode_zero() -> bool {
+    // word_count=0, opcode=0 → 0
+    spv_encode_op(0, 0) == 0
+}
+
+// ── SpvBuf Operations ───────────────────────────────────────────────
+
+fn spirv_test_21_buf_new_count() -> bool {
+    let b = spv_buf_new()
+    b.word_count == 0
+}
+
+fn spirv_test_22_push_word() -> bool with Mut, Panic {
+    var b = spv_buf_new()
+    b = spv_push_word(b, SPIRV_MAGIC)
+    b.word_count == 1 && b.words[0] == SPIRV_MAGIC
+}
+
+fn spirv_test_23_push_multiple_words() -> bool with Mut, Panic {
+    var b = spv_buf_new()
+    b = spv_push_word(b, SPIRV_MAGIC)
+    b = spv_push_word(b, SPIRV_VERSION_1_5)
+    b = spv_push_word(b, SPIRV_GENERATOR_SOUNIO)
+    b.word_count == 3 &&
+    b.words[0] == SPIRV_MAGIC &&
+    b.words[1] == SPIRV_VERSION_1_5 &&
+    b.words[2] == SPIRV_GENERATOR_SOUNIO
+}
+
+fn spirv_test_24_push_word_32bit_mask() -> bool with Mut, Panic {
+    var b = spv_buf_new()
+    // Push value > 32 bits; should be masked
+    b = spv_push_word(b, 4294967296 + 42)
+    b.words[0] == 42
+}
+
+// ── String Packing ──────────────────────────────────────────────────
+
+fn spirv_test_25_string_word_count_short() -> bool with Div {
+    // "AB" = 2 chars → (2/4)+1 = 1 word
+    spv_string_word_count("AB") == 1
+}
+
+fn spirv_test_26_string_word_count_4() -> bool with Div {
+    // "ABCD" = 4 chars, 4%4==0 → (4/4)+1 = 2 words (extra null word)
+    spv_string_word_count("ABCD") == 2
+}
+
+fn spirv_test_27_string_word_count_5() -> bool with Div {
+    // "ABCDE" = 5 chars → (5/4)+1 = 2 words
+    spv_string_word_count("ABCDE") == 2
+}
+
+fn spirv_test_28_push_string_word_count() -> bool with Mut, Panic, Div {
+    var b = spv_buf_new()
+    b = spv_push_string(b, "main")
+    // "main" = 4 chars, 4%4==0 → 2 words (string + null)
+    b.word_count == 2
+}
+
+// ── ID Allocation ───────────────────────────────────────────────────
+
+fn spirv_test_29_id_alloc_starts_at_1() -> bool {
+    let a = spv_id_alloc_new()
+    a.next_id == 1
+}
+
+fn spirv_test_30_id_alloc_increments() -> bool with Mut {
+    let a0 = spv_id_alloc_new()
+    let r1 = spv_alloc_id(a0)
+    let r2 = spv_alloc_id(r1.0)
+    r1.1 == 1 && r2.1 == 2 && r2.0.next_id == 3
+}
+
+// ── Capability Emission ─────────────────────────────────────────────
+
+fn spirv_test_31_emit_capability_words() -> bool with Mut, Panic {
+    var b = spv_buf_new()
+    b = spv_emit_capability(b, CAPABILITY_SHADER)
+    b.word_count == 2
+}
+
+fn spirv_test_32_emit_capability_encoding() -> bool with Mut, Panic {
+    var b = spv_buf_new()
+    b = spv_emit_capability(b, CAPABILITY_SHADER)
+    // First word: spv_encode_op(2, 17) = 131089
+    b.words[0] == 131089 && b.words[1] == CAPABILITY_SHADER
+}
+
+fn spirv_test_33_emit_capability_float64() -> bool with Mut, Panic {
+    var b = spv_buf_new()
+    b = spv_emit_capability(b, CAPABILITY_FLOAT64)
+    b.words[1] == CAPABILITY_FLOAT64
+}
+
+// ── Memory Model Emission ───────────────────────────────────────────
+
+fn spirv_test_34_emit_memory_model_words() -> bool with Mut, Panic {
+    var b = spv_buf_new()
+    b = spv_emit_memory_model(b, ADDRESSING_LOGICAL, MEMORY_GLSL450)
+    b.word_count == 3
+}
+
+fn spirv_test_35_emit_memory_model_encoding() -> bool with Mut, Panic {
+    var b = spv_buf_new()
+    b = spv_emit_memory_model(b, ADDRESSING_LOGICAL, MEMORY_GLSL450)
+    b.words[0] == spv_encode_op(3, OP_MEMORY_MODEL) &&
+    b.words[1] == ADDRESSING_LOGICAL &&
+    b.words[2] == MEMORY_GLSL450
+}
+
+// ── Type Emission ───────────────────────────────────────────────────
+
+fn spirv_test_36_emit_type_void_words() -> bool with Mut, Panic {
+    var b = spv_buf_new()
+    b = spv_emit_type_void(b, 1)
+    b.word_count == 2
+}
+
+fn spirv_test_37_emit_type_void_encoding() -> bool with Mut, Panic {
+    var b = spv_buf_new()
+    b = spv_emit_type_void(b, 1)
+    b.words[0] == spv_encode_op(2, OP_TYPE_VOID) &&
+    b.words[1] == 1
+}
+
+fn spirv_test_38_emit_type_int_words() -> bool with Mut, Panic {
+    var b = spv_buf_new()
+    b = spv_emit_type_int(b, 2, 32, 1)
+    b.word_count == 4
+}
+
+fn spirv_test_39_emit_type_int_encoding() -> bool with Mut, Panic {
+    var b = spv_buf_new()
+    b = spv_emit_type_int(b, 2, 32, 1)
+    b.words[0] == spv_encode_op(4, OP_TYPE_INT) &&
+    b.words[1] == 2 &&
+    b.words[2] == 32 &&
+    b.words[3] == 1
+}
+
+fn spirv_test_40_emit_type_float_words() -> bool with Mut, Panic {
+    var b = spv_buf_new()
+    b = spv_emit_type_float(b, 3, 32)
+    b.word_count == 3
+}
+
+fn spirv_test_41_emit_type_float_encoding() -> bool with Mut, Panic {
+    var b = spv_buf_new()
+    b = spv_emit_type_float(b, 3, 32)
+    b.words[0] == spv_encode_op(3, OP_TYPE_FLOAT) &&
+    b.words[1] == 3 &&
+    b.words[2] == 32
+}
+
+// ── Addressing / Memory / Execution Constants ───────────────────────
+
+fn spirv_test_42_addressing_constants() -> bool {
+    ADDRESSING_LOGICAL == 0 &&
+    ADDRESSING_PHYSICAL_32 == 1 &&
+    ADDRESSING_PHYSICAL_64 == 2
+}
+
+fn spirv_test_43_memory_models() -> bool {
+    MEMORY_GLSL450 == 1 && MEMORY_OPENCL == 2
+}
+
+fn spirv_test_44_execution_model() -> bool {
+    EXECUTION_GLCOMPUTE == 5
+}
+
+fn spirv_test_45_storage_classes() -> bool {
+    STORAGE_INPUT == 1 &&
+    STORAGE_UNIFORM == 2 &&
+    STORAGE_OUTPUT == 3 &&
+    STORAGE_WORKGROUP == 4 &&
+    STORAGE_STORAGE_BUFFER == 12
+}
+
+fn spirv_test_46_decorations() -> bool {
+    DECORATION_BINDING == 33 &&
+    DECORATION_DESCRIPTOR_SET == 34 &&
+    DECORATION_BUILTIN == 11
+}
+
+fn spirv_test_47_builtins() -> bool {
+    BUILTIN_GLOBAL_INVOCATION_ID == 28 &&
+    BUILTIN_LOCAL_INVOCATION_ID == 27 &&
+    BUILTIN_WORKGROUP_ID == 26
+}
+
+// ── Composed Emission ───────────────────────────────────────────────
+
+fn spirv_test_48_header_sequence() -> bool with Mut, Panic {
+    // Build a minimal valid SPIR-V module preamble
+    var b = spv_buf_new()
+    b = spv_emit_capability(b, CAPABILITY_SHADER)
+    b = spv_emit_memory_model(b, ADDRESSING_LOGICAL, MEMORY_GLSL450)
+    // 2 (capability) + 3 (memory model) = 5 words
+    b.word_count == 5
+}
+
+fn spirv_test_49_header_magic_position() -> bool with Mut, Panic {
+    // The header function would place magic at words[0]
+    // Here we manually verify that pushing magic first works
+    var b = spv_buf_new()
+    b = spv_push_word(b, SPIRV_MAGIC)
+    b = spv_push_word(b, SPIRV_VERSION_1_5)
+    b = spv_push_word(b, SPIRV_GENERATOR_SOUNIO)
+    b = spv_push_word(b, 0)
+    b = spv_push_word(b, 0)
+    b.words[0] == 119734787 &&
+    b.words[1] == 65541 &&
+    b.words[2] == 42
+}
+
+fn spirv_test_50_opcode_arithmetic() -> bool {
+    // FADD = IADD + 1, FSUB = ISUB + 1, FMUL = IMUL + 1
+    OP_FADD == OP_IADD + 1 &&
+    OP_FSUB == OP_ISUB + 1 &&
+    OP_FMUL == OP_IMUL + 1
+}
+
+// ── Runner ──────────────────────────────────────────────────────────
+
+fn run_gpu_spirv_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
+    var passed: i64 = 0
+    var total: i64 = 0
+
+    print("=== GPU SPIR-V Tests ===\n")
+
+    total = total + 1
+    if spirv_test_01_magic() { passed = passed + 1; print("  T01 OK\n") } else { print("  FAIL T01 magic\n") }
+    total = total + 1
+    if spirv_test_02_version_1_0() { passed = passed + 1; print("  T02 OK\n") } else { print("  FAIL T02 v1.0\n") }
+    total = total + 1
+    if spirv_test_03_version_1_5() { passed = passed + 1; print("  T03 OK\n") } else { print("  FAIL T03 v1.5\n") }
+    total = total + 1
+    if spirv_test_04_generator_sounio() { passed = passed + 1; print("  T04 OK\n") } else { print("  FAIL T04 gen\n") }
+    total = total + 1
+    if spirv_test_05_op_capability() { passed = passed + 1; print("  T05 OK\n") } else { print("  FAIL T05 cap op\n") }
+    total = total + 1
+    if spirv_test_06_op_memory_model() { passed = passed + 1; print("  T06 OK\n") } else { print("  FAIL T06 mem op\n") }
+    total = total + 1
+    if spirv_test_07_op_entry_point() { passed = passed + 1; print("  T07 OK\n") } else { print("  FAIL T07 ep op\n") }
+    total = total + 1
+    if spirv_test_08_op_type_void() { passed = passed + 1; print("  T08 OK\n") } else { print("  FAIL T08 void op\n") }
+    total = total + 1
+    if spirv_test_09_op_type_int() { passed = passed + 1; print("  T09 OK\n") } else { print("  FAIL T09 int op\n") }
+    total = total + 1
+    if spirv_test_10_op_type_float() { passed = passed + 1; print("  T10 OK\n") } else { print("  FAIL T10 flt op\n") }
+    total = total + 1
+    if spirv_test_11_op_fadd() { passed = passed + 1; print("  T11 OK\n") } else { print("  FAIL T11 fadd\n") }
+    total = total + 1
+    if spirv_test_12_op_iadd() { passed = passed + 1; print("  T12 OK\n") } else { print("  FAIL T12 iadd\n") }
+    total = total + 1
+    if spirv_test_13_op_fmul() { passed = passed + 1; print("  T13 OK\n") } else { print("  FAIL T13 fmul\n") }
+    total = total + 1
+    if spirv_test_14_encode_capability() { passed = passed + 1; print("  T14 OK\n") } else { print("  FAIL T14 enc cap\n") }
+    total = total + 1
+    if spirv_test_15_encode_memory_model() { passed = passed + 1; print("  T15 OK\n") } else { print("  FAIL T15 enc mem\n") }
+    total = total + 1
+    if spirv_test_16_encode_type_void() { passed = passed + 1; print("  T16 OK\n") } else { print("  FAIL T16 enc void\n") }
+    total = total + 1
+    if spirv_test_17_encode_type_int() { passed = passed + 1; print("  T17 OK\n") } else { print("  FAIL T17 enc int\n") }
+    total = total + 1
+    if spirv_test_18_encode_type_float() { passed = passed + 1; print("  T18 OK\n") } else { print("  FAIL T18 enc flt\n") }
+    total = total + 1
+    if spirv_test_19_encode_identity() { passed = passed + 1; print("  T19 OK\n") } else { print("  FAIL T19 enc id\n") }
+    total = total + 1
+    if spirv_test_20_encode_zero() { passed = passed + 1; print("  T20 OK\n") } else { print("  FAIL T20 enc zero\n") }
+    total = total + 1
+    if spirv_test_21_buf_new_count() { passed = passed + 1; print("  T21 OK\n") } else { print("  FAIL T21 buf new\n") }
+    total = total + 1
+    if spirv_test_22_push_word() { passed = passed + 1; print("  T22 OK\n") } else { print("  FAIL T22 push\n") }
+    total = total + 1
+    if spirv_test_23_push_multiple_words() { passed = passed + 1; print("  T23 OK\n") } else { print("  FAIL T23 multi\n") }
+    total = total + 1
+    if spirv_test_24_push_word_32bit_mask() { passed = passed + 1; print("  T24 OK\n") } else { print("  FAIL T24 mask\n") }
+    total = total + 1
+    if spirv_test_25_string_word_count_short() { passed = passed + 1; print("  T25 OK\n") } else { print("  FAIL T25 str 2\n") }
+    total = total + 1
+    if spirv_test_26_string_word_count_4() { passed = passed + 1; print("  T26 OK\n") } else { print("  FAIL T26 str 4\n") }
+    total = total + 1
+    if spirv_test_27_string_word_count_5() { passed = passed + 1; print("  T27 OK\n") } else { print("  FAIL T27 str 5\n") }
+    total = total + 1
+    if spirv_test_28_push_string_word_count() { passed = passed + 1; print("  T28 OK\n") } else { print("  FAIL T28 push str\n") }
+    total = total + 1
+    if spirv_test_29_id_alloc_starts_at_1() { passed = passed + 1; print("  T29 OK\n") } else { print("  FAIL T29 id start\n") }
+    total = total + 1
+    if spirv_test_30_id_alloc_increments() { passed = passed + 1; print("  T30 OK\n") } else { print("  FAIL T30 id inc\n") }
+    total = total + 1
+    if spirv_test_31_emit_capability_words() { passed = passed + 1; print("  T31 OK\n") } else { print("  FAIL T31 cap w\n") }
+    total = total + 1
+    if spirv_test_32_emit_capability_encoding() { passed = passed + 1; print("  T32 OK\n") } else { print("  FAIL T32 cap enc\n") }
+    total = total + 1
+    if spirv_test_33_emit_capability_float64() { passed = passed + 1; print("  T33 OK\n") } else { print("  FAIL T33 cap f64\n") }
+    total = total + 1
+    if spirv_test_34_emit_memory_model_words() { passed = passed + 1; print("  T34 OK\n") } else { print("  FAIL T34 mm w\n") }
+    total = total + 1
+    if spirv_test_35_emit_memory_model_encoding() { passed = passed + 1; print("  T35 OK\n") } else { print("  FAIL T35 mm enc\n") }
+    total = total + 1
+    if spirv_test_36_emit_type_void_words() { passed = passed + 1; print("  T36 OK\n") } else { print("  FAIL T36 void w\n") }
+    total = total + 1
+    if spirv_test_37_emit_type_void_encoding() { passed = passed + 1; print("  T37 OK\n") } else { print("  FAIL T37 void enc\n") }
+    total = total + 1
+    if spirv_test_38_emit_type_int_words() { passed = passed + 1; print("  T38 OK\n") } else { print("  FAIL T38 int w\n") }
+    total = total + 1
+    if spirv_test_39_emit_type_int_encoding() { passed = passed + 1; print("  T39 OK\n") } else { print("  FAIL T39 int enc\n") }
+    total = total + 1
+    if spirv_test_40_emit_type_float_words() { passed = passed + 1; print("  T40 OK\n") } else { print("  FAIL T40 flt w\n") }
+    total = total + 1
+    if spirv_test_41_emit_type_float_encoding() { passed = passed + 1; print("  T41 OK\n") } else { print("  FAIL T41 flt enc\n") }
+    total = total + 1
+    if spirv_test_42_addressing_constants() { passed = passed + 1; print("  T42 OK\n") } else { print("  FAIL T42 addr\n") }
+    total = total + 1
+    if spirv_test_43_memory_models() { passed = passed + 1; print("  T43 OK\n") } else { print("  FAIL T43 memmod\n") }
+    total = total + 1
+    if spirv_test_44_execution_model() { passed = passed + 1; print("  T44 OK\n") } else { print("  FAIL T44 exec\n") }
+    total = total + 1
+    if spirv_test_45_storage_classes() { passed = passed + 1; print("  T45 OK\n") } else { print("  FAIL T45 storage\n") }
+    total = total + 1
+    if spirv_test_46_decorations() { passed = passed + 1; print("  T46 OK\n") } else { print("  FAIL T46 decor\n") }
+    total = total + 1
+    if spirv_test_47_builtins() { passed = passed + 1; print("  T47 OK\n") } else { print("  FAIL T47 builtin\n") }
+    total = total + 1
+    if spirv_test_48_header_sequence() { passed = passed + 1; print("  T48 OK\n") } else { print("  FAIL T48 hdr seq\n") }
+    total = total + 1
+    if spirv_test_49_header_magic_position() { passed = passed + 1; print("  T49 OK\n") } else { print("  FAIL T49 magic pos\n") }
+    total = total + 1
+    if spirv_test_50_opcode_arithmetic() { passed = passed + 1; print("  T50 OK\n") } else { print("  FAIL T50 op arith\n") }
+
+    if passed == total {
+        print("GPU SPIR-V: all 50 passed\n")
+    } else {
+        print("GPU SPIR-V: FAILED\n")
+    }
+    if passed == total { 0 } else { 1 }
+}

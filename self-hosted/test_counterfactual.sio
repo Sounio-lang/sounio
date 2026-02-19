@@ -1,0 +1,359 @@
+// Self-hosted counterfactual GPU tests
+//
+// Validates Pearl's Ladder of Causation as GPU primitives:
+// world identifiers, lane partitioning, do-operator emission,
+// ITE via warp shuffle, and ATE reduction.
+
+// ── World Identifiers ───────────────────────────────────────────────
+
+fn cf_test_01_factual_world_zero() -> bool {
+    cf_world_factual() == 0
+}
+
+fn cf_test_02_cf_world_ne_factual() -> bool {
+    cf_world_counterfactual(0) != cf_world_factual()
+}
+
+fn cf_test_03_cf_world_encodes_id() -> bool {
+    // Different intervention IDs → different world IDs
+    cf_world_counterfactual(1) != cf_world_counterfactual(2)
+}
+
+fn cf_test_04_cf_world_marker() -> bool {
+    // 0xCAFEBABE00000000 = -3819410108757049344
+    let marker: i64 = -3819410108757049344
+    cf_world_counterfactual(0) == marker
+}
+
+fn cf_test_05_cf_world_additive() -> bool {
+    let marker: i64 = -3819410108757049344
+    cf_world_counterfactual(42) == marker + 42
+}
+
+// ── Configuration ───────────────────────────────────────────────────
+
+fn cf_test_06_config_sm() -> bool {
+    let c = cf_config_default()
+    c.sm_major == 8 && c.sm_minor == 0
+}
+
+fn cf_test_07_config_worlds() -> bool {
+    let c = cf_config_default()
+    c.worlds_per_warp == 2
+}
+
+fn cf_test_08_config_divergence() -> bool {
+    let c = cf_config_default()
+    c.track_divergence
+}
+
+fn cf_test_09_config_depth() -> bool {
+    let c = cf_config_default()
+    c.max_causal_depth == 8
+}
+
+// ── State Initialization ────────────────────────────────────────────
+
+fn cf_test_10_state_init_counters() -> bool {
+    let c = cf_config_default()
+    let st = cf_ptx_new(c)
+    st.next_intervention_id == 0 &&
+    st.temp_count == 0 &&
+    st.label_count == 0
+}
+
+fn cf_test_11_alloc_label_first() -> bool with Alloc {
+    let c = cf_config_default()
+    let st0 = cf_ptx_new(c)
+    let r = cf_alloc_label(st0)
+    let st1 = r.0
+    let label = r.1
+    label == "cf_L0" && st1.label_count == 1
+}
+
+fn cf_test_12_alloc_label_second() -> bool with Alloc {
+    let c = cf_config_default()
+    let st0 = cf_ptx_new(c)
+    let r1 = cf_alloc_label(st0)
+    let r2 = cf_alloc_label(r1.0)
+    let label2 = r2.1
+    label2 == "cf_L1" && r2.0.label_count == 2
+}
+
+// ── Register Declaration PTX ────────────────────────────────────────
+
+fn cf_test_13_reg_decl_world_id() -> bool with Mut, Panic, Div, Alloc {
+    let c = cf_config_default()
+    let st0 = cf_ptx_new(c)
+    let st1 = cf_emit_reg_decl(st0)
+    ptx_buf_contains(st1.buf, ".reg .u64 %r_world_id")
+}
+
+fn cf_test_14_reg_decl_predicates() -> bool with Mut, Panic, Div, Alloc {
+    let c = cf_config_default()
+    let st0 = cf_ptx_new(c)
+    let st1 = cf_emit_reg_decl(st0)
+    ptx_buf_contains(st1.buf, ".reg .pred %p_is_factual, %p_is_cf")
+}
+
+fn cf_test_15_reg_decl_outcome_regs() -> bool with Mut, Panic, Div, Alloc {
+    let c = cf_config_default()
+    let st0 = cf_ptx_new(c)
+    let st1 = cf_emit_reg_decl(st0)
+    ptx_buf_contains(st1.buf, "%r_outcome") &&
+    ptx_buf_contains(st1.buf, "%r_ite") &&
+    ptx_buf_contains(st1.buf, "%r_ate")
+}
+
+fn cf_test_16_reg_decl_divergence() -> bool with Mut, Panic, Div, Alloc {
+    let c = cf_config_default()
+    let st0 = cf_ptx_new(c)
+    let st1 = cf_emit_reg_decl(st0)
+    ptx_buf_contains(st1.buf, ".reg .f32 %r_divergence")
+}
+
+fn cf_test_17_reg_decl_no_divergence() -> bool with Mut, Panic, Div, Alloc {
+    var c = cf_config_default()
+    c.track_divergence = false
+    let st0 = cf_ptx_new(c)
+    let st1 = cf_emit_reg_decl(st0)
+    !ptx_buf_contains(st1.buf, "%r_divergence")
+}
+
+// ── Factual World Initialization PTX ────────────────────────────────
+
+fn cf_test_18_init_factual_world_id() -> bool with Mut, Panic, Div, Alloc {
+    let c = cf_config_default()
+    let st0 = cf_ptx_new(c)
+    let st1 = cf_emit_init_factual(st0)
+    ptx_buf_contains(st1.buf, "mov.u64 %r_world_id, 0")
+}
+
+fn cf_test_19_init_factual_depth() -> bool with Mut, Panic, Div, Alloc {
+    let c = cf_config_default()
+    let st0 = cf_ptx_new(c)
+    let st1 = cf_emit_init_factual(st0)
+    ptx_buf_contains(st1.buf, "mov.u32 %r_causal_depth, 0")
+}
+
+// ── Lane Assignment PTX ─────────────────────────────────────────────
+
+fn cf_test_20_lane_2_worlds_mask() -> bool with Mut, Panic, Div, Alloc {
+    let c = cf_config_default()
+    let st0 = cf_ptx_new(c)
+    let st1 = cf_emit_lane_assignment(st0)
+    // 2 worlds → bit 0 mask
+    ptx_buf_contains(st1.buf, "and.b32 %r_cf_temp1, %r_cf_temp0, 0x1")
+}
+
+fn cf_test_21_lane_4_worlds_mask() -> bool with Mut, Panic, Div, Alloc {
+    var c = cf_config_default()
+    c.worlds_per_warp = 4
+    let st0 = cf_ptx_new(c)
+    let st1 = cf_emit_lane_assignment(st0)
+    // 4 worlds → bits 0-1 mask
+    ptx_buf_contains(st1.buf, "and.b32 %r_cf_temp1, %r_cf_temp0, 0x3")
+}
+
+fn cf_test_22_lane_factual_pred() -> bool with Mut, Panic, Div, Alloc {
+    let c = cf_config_default()
+    let st0 = cf_ptx_new(c)
+    let st1 = cf_emit_lane_assignment(st0)
+    ptx_buf_contains(st1.buf, "setp.eq.u32 %p_is_factual, %r_cf_temp1, 0")
+}
+
+fn cf_test_23_lane_cf_pred() -> bool with Mut, Panic, Div, Alloc {
+    let c = cf_config_default()
+    let st0 = cf_ptx_new(c)
+    let st1 = cf_emit_lane_assignment(st0)
+    ptx_buf_contains(st1.buf, "setp.ne.u32 %p_is_cf, %r_cf_temp1, 0")
+}
+
+fn cf_test_24_lane_reads_laneid() -> bool with Mut, Panic, Div, Alloc {
+    let c = cf_config_default()
+    let st0 = cf_ptx_new(c)
+    let st1 = cf_emit_lane_assignment(st0)
+    ptx_buf_contains(st1.buf, "mov.u32 %r_cf_temp0, %laneid")
+}
+
+// ── do-Operator (Intervention) PTX ──────────────────────────────────
+
+fn cf_test_25_intervention_world_xor() -> bool with Mut, Panic, Div, Alloc {
+    let c = cf_config_default()
+    let st0 = cf_ptx_new(c)
+    let st1 = cf_emit_intervention(st0, "%r_x", "3F800000")
+    ptx_buf_contains(st1.buf, "xor.b64 %r_world_id")
+}
+
+fn cf_test_26_intervention_depth_inc() -> bool with Mut, Panic, Div, Alloc {
+    let c = cf_config_default()
+    let st0 = cf_ptx_new(c)
+    let st1 = cf_emit_intervention(st0, "%r_x", "3F800000")
+    ptx_buf_contains(st1.buf, "add.u32 %r_causal_depth, %r_causal_depth, 1")
+}
+
+fn cf_test_27_intervention_depth_check() -> bool with Mut, Panic, Div, Alloc {
+    let c = cf_config_default()
+    let st0 = cf_ptx_new(c)
+    let st1 = cf_emit_intervention(st0, "%r_x", "3F800000")
+    ptx_buf_contains(st1.buf, "setp.lt.u32 %p_cf_temp0, %r_causal_depth")
+}
+
+fn cf_test_28_intervention_selp() -> bool with Mut, Panic, Div, Alloc {
+    let c = cf_config_default()
+    let st0 = cf_ptx_new(c)
+    let st1 = cf_emit_intervention(st0, "%r_x", "3F800000")
+    ptx_buf_contains(st1.buf, "selp.f32 %r_x")
+}
+
+fn cf_test_29_intervention_forced_value() -> bool with Mut, Panic, Div, Alloc {
+    let c = cf_config_default()
+    let st0 = cf_ptx_new(c)
+    let st1 = cf_emit_intervention(st0, "%r_x", "3F800000")
+    ptx_buf_contains(st1.buf, "0f3F800000")
+}
+
+fn cf_test_30_intervention_id_increments() -> bool with Mut, Panic, Div, Alloc {
+    let c = cf_config_default()
+    let st0 = cf_ptx_new(c)
+    let st1 = cf_emit_intervention(st0, "%r_x", "3F800000")
+    let st2 = cf_emit_intervention(st1, "%r_y", "40000000")
+    st1.next_intervention_id == 1 && st2.next_intervention_id == 2
+}
+
+// ── Integer Intervention ────────────────────────────────────────────
+
+fn cf_test_31_intervention_i32_mov() -> bool with Mut, Panic, Div, Alloc {
+    let c = cf_config_default()
+    let st0 = cf_ptx_new(c)
+    let st1 = cf_emit_intervention_i32(st0, "%r_k", 42)
+    ptx_buf_contains(st1.buf, "mov.s32 %r_cf_temp2, 42")
+}
+
+fn cf_test_32_intervention_i32_conditional() -> bool with Mut, Panic, Div, Alloc {
+    let c = cf_config_default()
+    let st0 = cf_ptx_new(c)
+    let st1 = cf_emit_intervention_i32(st0, "%r_k", 7)
+    ptx_buf_contains(st1.buf, "@%p_is_cf mov.s32 %r_k")
+}
+
+// ── ITE via Warp Shuffle ────────────────────────────────────────────
+
+fn cf_test_33_ite_shfl_xor() -> bool with Mut, Panic, Div, Alloc {
+    let c = cf_config_default()
+    let st0 = cf_ptx_new(c)
+    let st1 = cf_emit_ite(st0, "%r_outcome", "%r_ite")
+    ptx_buf_contains(st1.buf, "shfl.sync.xor.b32 %r_cf_ftemp0")
+}
+
+fn cf_test_34_ite_subtract() -> bool with Mut, Panic, Div, Alloc {
+    let c = cf_config_default()
+    let st0 = cf_ptx_new(c)
+    let st1 = cf_emit_ite(st0, "%r_outcome", "%r_ite")
+    ptx_buf_contains(st1.buf, "sub.f32 %r_ite, %r_outcome")
+}
+
+fn cf_test_35_ite_sign_correction() -> bool with Mut, Panic, Div, Alloc {
+    let c = cf_config_default()
+    let st0 = cf_ptx_new(c)
+    let st1 = cf_emit_ite(st0, "%r_outcome", "%r_ite")
+    // Factual lanes negate to get correct ITE sign
+    ptx_buf_contains(st1.buf, "@%p_is_factual neg.f32 %r_ite")
+}
+
+fn cf_test_36_ite_xor_mask_1() -> bool with Mut, Panic, Div, Alloc {
+    let c = cf_config_default()
+    let st0 = cf_ptx_new(c)
+    let st1 = cf_emit_ite(st0, "%r_outcome", "%r_ite")
+    // XOR with 1 swaps lane pairs
+    ptx_buf_contains(st1.buf, ", 1, 0xffffffff")
+}
+
+// ── Runner ──────────────────────────────────────────────────────────
+
+fn run_gpu_counterfactual_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
+    var passed: i64 = 0
+    var total: i64 = 0
+
+    print("=== Counterfactual GPU Tests ===\n")
+
+    total = total + 1
+    if cf_test_01_factual_world_zero() { passed = passed + 1; print("  T01 OK\n") } else { print("  FAIL T01 factual=0\n") }
+    total = total + 1
+    if cf_test_02_cf_world_ne_factual() { passed = passed + 1; print("  T02 OK\n") } else { print("  FAIL T02 cf!=fact\n") }
+    total = total + 1
+    if cf_test_03_cf_world_encodes_id() { passed = passed + 1; print("  T03 OK\n") } else { print("  FAIL T03 cf ids\n") }
+    total = total + 1
+    if cf_test_04_cf_world_marker() { passed = passed + 1; print("  T04 OK\n") } else { print("  FAIL T04 marker\n") }
+    total = total + 1
+    if cf_test_05_cf_world_additive() { passed = passed + 1; print("  T05 OK\n") } else { print("  FAIL T05 additive\n") }
+    total = total + 1
+    if cf_test_06_config_sm() { passed = passed + 1; print("  T06 OK\n") } else { print("  FAIL T06 sm\n") }
+    total = total + 1
+    if cf_test_07_config_worlds() { passed = passed + 1; print("  T07 OK\n") } else { print("  FAIL T07 worlds\n") }
+    total = total + 1
+    if cf_test_08_config_divergence() { passed = passed + 1; print("  T08 OK\n") } else { print("  FAIL T08 diverge\n") }
+    total = total + 1
+    if cf_test_09_config_depth() { passed = passed + 1; print("  T09 OK\n") } else { print("  FAIL T09 depth\n") }
+    total = total + 1
+    if cf_test_10_state_init_counters() { passed = passed + 1; print("  T10 OK\n") } else { print("  FAIL T10 counters\n") }
+    total = total + 1
+    if cf_test_11_alloc_label_first() { passed = passed + 1; print("  T11 OK\n") } else { print("  FAIL T11 label0\n") }
+    total = total + 1
+    if cf_test_12_alloc_label_second() { passed = passed + 1; print("  T12 OK\n") } else { print("  FAIL T12 label1\n") }
+    total = total + 1
+    if cf_test_13_reg_decl_world_id() { passed = passed + 1; print("  T13 OK\n") } else { print("  FAIL T13 decl wid\n") }
+    total = total + 1
+    if cf_test_14_reg_decl_predicates() { passed = passed + 1; print("  T14 OK\n") } else { print("  FAIL T14 decl pred\n") }
+    total = total + 1
+    if cf_test_15_reg_decl_outcome_regs() { passed = passed + 1; print("  T15 OK\n") } else { print("  FAIL T15 decl out\n") }
+    total = total + 1
+    if cf_test_16_reg_decl_divergence() { passed = passed + 1; print("  T16 OK\n") } else { print("  FAIL T16 div reg\n") }
+    total = total + 1
+    if cf_test_17_reg_decl_no_divergence() { passed = passed + 1; print("  T17 OK\n") } else { print("  FAIL T17 no div\n") }
+    total = total + 1
+    if cf_test_18_init_factual_world_id() { passed = passed + 1; print("  T18 OK\n") } else { print("  FAIL T18 init wid\n") }
+    total = total + 1
+    if cf_test_19_init_factual_depth() { passed = passed + 1; print("  T19 OK\n") } else { print("  FAIL T19 init depth\n") }
+    total = total + 1
+    if cf_test_20_lane_2_worlds_mask() { passed = passed + 1; print("  T20 OK\n") } else { print("  FAIL T20 2w mask\n") }
+    total = total + 1
+    if cf_test_21_lane_4_worlds_mask() { passed = passed + 1; print("  T21 OK\n") } else { print("  FAIL T21 4w mask\n") }
+    total = total + 1
+    if cf_test_22_lane_factual_pred() { passed = passed + 1; print("  T22 OK\n") } else { print("  FAIL T22 fact pred\n") }
+    total = total + 1
+    if cf_test_23_lane_cf_pred() { passed = passed + 1; print("  T23 OK\n") } else { print("  FAIL T23 cf pred\n") }
+    total = total + 1
+    if cf_test_24_lane_reads_laneid() { passed = passed + 1; print("  T24 OK\n") } else { print("  FAIL T24 laneid\n") }
+    total = total + 1
+    if cf_test_25_intervention_world_xor() { passed = passed + 1; print("  T25 OK\n") } else { print("  FAIL T25 int xor\n") }
+    total = total + 1
+    if cf_test_26_intervention_depth_inc() { passed = passed + 1; print("  T26 OK\n") } else { print("  FAIL T26 int depth\n") }
+    total = total + 1
+    if cf_test_27_intervention_depth_check() { passed = passed + 1; print("  T27 OK\n") } else { print("  FAIL T27 depth chk\n") }
+    total = total + 1
+    if cf_test_28_intervention_selp() { passed = passed + 1; print("  T28 OK\n") } else { print("  FAIL T28 selp\n") }
+    total = total + 1
+    if cf_test_29_intervention_forced_value() { passed = passed + 1; print("  T29 OK\n") } else { print("  FAIL T29 forced\n") }
+    total = total + 1
+    if cf_test_30_intervention_id_increments() { passed = passed + 1; print("  T30 OK\n") } else { print("  FAIL T30 int id\n") }
+    total = total + 1
+    if cf_test_31_intervention_i32_mov() { passed = passed + 1; print("  T31 OK\n") } else { print("  FAIL T31 i32 mov\n") }
+    total = total + 1
+    if cf_test_32_intervention_i32_conditional() { passed = passed + 1; print("  T32 OK\n") } else { print("  FAIL T32 i32 cond\n") }
+    total = total + 1
+    if cf_test_33_ite_shfl_xor() { passed = passed + 1; print("  T33 OK\n") } else { print("  FAIL T33 ite shfl\n") }
+    total = total + 1
+    if cf_test_34_ite_subtract() { passed = passed + 1; print("  T34 OK\n") } else { print("  FAIL T34 ite sub\n") }
+    total = total + 1
+    if cf_test_35_ite_sign_correction() { passed = passed + 1; print("  T35 OK\n") } else { print("  FAIL T35 ite sign\n") }
+    total = total + 1
+    if cf_test_36_ite_xor_mask_1() { passed = passed + 1; print("  T36 OK\n") } else { print("  FAIL T36 ite mask\n") }
+
+    if passed == total {
+        print("Counterfactual: all 36 passed\n")
+    } else {
+        print("Counterfactual: FAILED\n")
+    }
+    if passed == total { 0 } else { 1 }
+}
