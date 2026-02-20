@@ -29,7 +29,7 @@
 //! # Example
 //!
 //! ```rust
-//! use souc::epistemic::nonlinear_propagation::*;
+//! use sounio::epistemic::nonlinear_propagation::*;
 //!
 //! let result = propagate_nonlinear(
 //!     NonlinearOp::Exp,
@@ -703,7 +703,7 @@ impl fmt::Display for FunctionConfidenceSummary {
 /// # Example
 ///
 /// ```rust
-/// use souc::epistemic::nonlinear_propagation::*;
+/// use sounio::epistemic::nonlinear_propagation::*;
 ///
 /// let result = PropagationChainBuilder::new(0.95, 0.02)
 ///     .apply(NonlinearOp::Exp)
