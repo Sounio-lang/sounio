@@ -228,3 +228,139 @@ fn test_forward_mode_composite() {
         assert!((gradient - 6.0).abs() < 1e-6);
     }
 }
+
+// =============================================================================
+// Reverse-mode (tape-based) integration tests
+// =============================================================================
+
+/// Test reverse-mode: f(x,y) = x*y + x
+/// df/dx = y + 1, df/dy = x
+#[test]
+fn test_reverse_mode_basic() {
+    unsafe {
+        let tape = sounio_tape_create(2);
+        let x = sounio_tape_input(tape, 0, 3.0);
+        let y = sounio_tape_input(tape, 1, 5.0);
+        let xy = sounio_tape_mul(tape, x, y);
+        let z = sounio_tape_add(tape, xy, x);
+
+        assert!((sounio_tape_value(tape, z) - 18.0).abs() < 1e-10);
+
+        let mut grads = [0.0f64; 2];
+        sounio_autodiff_reverse(tape, 1.0, grads.as_mut_ptr(), 2);
+
+        assert!((grads[0] - 6.0).abs() < 1e-10); // df/dx = y + 1
+        assert!((grads[1] - 3.0).abs() < 1e-10); // df/dy = x
+
+        sounio_tape_destroy(tape);
+    }
+}
+
+/// Test reverse-mode: f(x) = exp(x²)
+/// f'(x) = 2x * exp(x²)
+#[test]
+fn test_reverse_mode_exp_of_square() {
+    unsafe {
+        let tape = sounio_tape_create(1);
+        let x = sounio_tape_input(tape, 0, 1.5);
+        let x_sq = sounio_tape_mul(tape, x, x);
+        let z = sounio_tape_exp(tape, x_sq);
+
+        let expected_val = (1.5_f64 * 1.5).exp();
+        assert!((sounio_tape_value(tape, z) - expected_val).abs() < 1e-8);
+
+        let mut grad = 0.0f64;
+        sounio_autodiff_reverse(tape, 1.0, &mut grad, 1);
+
+        let expected_grad = 2.0 * 1.5 * expected_val;
+        assert!((grad - expected_grad).abs() < 1e-8);
+
+        sounio_tape_destroy(tape);
+    }
+}
+
+/// Test reverse-mode: Rosenbrock function f(x,y) = (1-x)² + 100(y-x²)²
+/// At (1,1): gradient is (0, 0) (minimum)
+#[test]
+fn test_reverse_mode_rosenbrock_minimum() {
+    unsafe {
+        let tape = sounio_tape_create(2);
+        let x = sounio_tape_input(tape, 0, 1.0);
+        let y = sounio_tape_input(tape, 1, 1.0);
+        let one = sounio_tape_const(tape, 1.0);
+        let hundred = sounio_tape_const(tape, 100.0);
+
+        let one_minus_x = sounio_tape_sub(tape, one, x);
+        let term1 = sounio_tape_mul(tape, one_minus_x, one_minus_x);
+
+        let x_sq = sounio_tape_mul(tape, x, x);
+        let y_minus_xsq = sounio_tape_sub(tape, y, x_sq);
+        let t2_sq = sounio_tape_mul(tape, y_minus_xsq, y_minus_xsq);
+        let term2 = sounio_tape_mul(tape, hundred, t2_sq);
+
+        let z = sounio_tape_add(tape, term1, term2);
+
+        // At the minimum (1,1), f = 0
+        assert!((sounio_tape_value(tape, z) - 0.0).abs() < 1e-10);
+
+        let mut grads = [0.0f64; 2];
+        sounio_autodiff_reverse(tape, 1.0, grads.as_mut_ptr(), 2);
+
+        // Gradient at the minimum should be zero
+        assert!((grads[0]).abs() < 1e-10);
+        assert!((grads[1]).abs() < 1e-10);
+
+        sounio_tape_destroy(tape);
+    }
+}
+
+/// Test reverse-mode: verify forward/reverse agreement
+/// f(x) = sin(x) at x=1.0 → both should give cos(1)
+#[test]
+fn test_forward_reverse_agreement() {
+    let x_val = 1.0;
+
+    // Forward mode
+    let x_dual = Dual::variable(x_val);
+    let mut forward_result = Dual::constant(0.0);
+    unsafe {
+        sounio_dual_sin(&x_dual, &mut forward_result);
+    }
+
+    // Reverse mode
+    unsafe {
+        let tape = sounio_tape_create(1);
+        let x = sounio_tape_input(tape, 0, x_val);
+        let _z = sounio_tape_sin(tape, x);
+
+        let mut reverse_grad = 0.0f64;
+        sounio_autodiff_reverse(tape, 1.0, &mut reverse_grad, 1);
+
+        // Both should give cos(1)
+        assert!(
+            (forward_result.derivative - reverse_grad).abs() < 1e-10,
+            "Forward ({}) and reverse ({}) disagree",
+            forward_result.derivative,
+            reverse_grad
+        );
+
+        sounio_tape_destroy(tape);
+    }
+}
+
+/// Test NativeTape Rust API directly for gradient accumulation
+/// f(x) = x * x * x (built as x*x then result*x)
+/// f'(x) = 3x²
+#[test]
+fn test_reverse_mode_gradient_accumulation() {
+    let mut tape = NativeTape::new(1);
+    let x = tape.record_input(0, 2.0);
+    let x_sq = tape.record_binary(NativeTapeOp::Mul, x, x);
+    let z = tape.record_binary(NativeTapeOp::Mul, x_sq, x);
+
+    assert!((tape.value(z) - 8.0).abs() < 1e-10);
+
+    let grads = tape.backward(z, 1.0);
+    // f'(2) = 3 * 4 = 12
+    assert!((grads[0] - 12.0).abs() < 1e-10);
+}

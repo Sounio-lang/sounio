@@ -14,6 +14,20 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+fn souc_binary() -> PathBuf {
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_souc") {
+        return PathBuf::from(path);
+    }
+
+    let mut fallback = workspace_root().join("target").join("debug");
+    if cfg!(windows) {
+        fallback.push("souc.exe");
+    } else {
+        fallback.push("souc");
+    }
+    fallback
+}
+
 /// Test the full native compilation pipeline:
 /// 1. Write a simple .sio fixture
 /// 2. Run self-hosted compiler with --backend=native
@@ -33,9 +47,8 @@ fn native_elf_compile_and_execute_return_42() {
 
     let elf_path = std::env::temp_dir().join("sounio_e2e_42.elf");
 
-    // Run: cargo run --bin souc -- run self-hosted/ -- compile --backend=native -o <elf> <fixture>
-    let compile_result = Command::new("cargo")
-        .args(["run", "--bin", "souc", "--"])
+    // Run souc directly (avoid nested cargo invocations inside cargo test).
+    let compile_result = Command::new(souc_binary())
         .arg("run")
         .arg(root.join("self-hosted/"))
         .arg("--")

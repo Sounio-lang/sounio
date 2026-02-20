@@ -654,6 +654,11 @@ fn selfhost_root_seed_enforce_accepts_valid_seed_and_emits_seed_marker() {
     );
     assert_stderr_contains(
         &stderr,
+        "SELFHOST=run schema=v1 event=selfhost_preflight status=skipped path=self-hosted/main.sio reason=seed_enforced",
+        "expected wrapper preflight to be skipped when seed enforcement is enabled",
+    );
+    assert_stderr_contains(
+        &stderr,
         "SELFHOST=seed schema=v1 event=bootstrap_seed status=ok",
         "expected bootstrap seed success marker",
     );
@@ -695,6 +700,11 @@ fn selfhost_root_seed_enforce_rejects_corrupted_seed_with_checksum_token() {
         &stderr,
         "SELFHOST=run schema=v1 event=selfhost_input_check status=resolved input=self-hosted/main.sio args=1",
         "expected deterministic self-hosted root resolution marker",
+    );
+    assert_stderr_contains(
+        &stderr,
+        "SELFHOST=run schema=v1 event=selfhost_preflight status=skipped path=self-hosted/main.sio reason=seed_enforced",
+        "expected wrapper preflight to be skipped when seed enforcement is enabled",
     );
     assert!(
         stderr.contains("Self-hosted compile failed for self-hosted/main.sio"),
