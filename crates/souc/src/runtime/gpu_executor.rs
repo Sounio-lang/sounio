@@ -518,40 +518,32 @@ impl GpuExecutor {
         Err(GpuExecutorError::CudaNotEnabled)
     }
 
-    /// Copy data from host to device
+    /// Copy data from host to device.
+    ///
+    /// Takes `&mut ExecutorBuffer` so it can write directly into the existing
+    /// `CudaSlice<u8>` without a temporary allocation.
     #[cfg(feature = "cuda")]
     pub fn copy_to_device<T>(
         &self,
-        buffer: &ExecutorBuffer,
+        buffer: &mut ExecutorBuffer,
         data: &[T],
     ) -> Result<(), GpuExecutorError> {
         let data_size = std::mem::size_of_val(data);
         if data_size > buffer.size {
             return Err(GpuExecutorError::CopyFailed(format!(
-                "Data size ({}) exceeds buffer size ({})",
-                data_size, buffer.size
+                "Data size ({data_size}) exceeds buffer size ({})",
+                buffer.size
             )));
         }
 
-        if let Some(ref slice) = buffer.cuda_slice {
-            // Convert data to bytes
-            let data_bytes =
-                unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data_size) };
+        let data_bytes =
+            unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data_size) };
 
-            // Create a mutable copy for htod_sync_copy_into
-            let mut target_slice: CudaSlice<u8> = self
-                .device
-                .alloc_zeros(data_size)
-                .map_err(|e| GpuExecutorError::AllocationFailed(format!("{:?}", e)))?;
-
+        if let Some(ref mut slice) = buffer.cuda_slice {
+            // Direct HtoD copy into the existing device allocation — no temp buffer
             self.device
-                .htod_sync_copy_into(data_bytes, &mut target_slice)
-                .map_err(|e| GpuExecutorError::CopyFailed(format!("{:?}", e)))?;
-
-            // Copy from temp buffer to destination using device-to-device copy
-            // Note: cudarc 0.12 requires us to use dtod_copy
-            // For simplicity, we'll recreate the buffer with the correct data
-            // This is a limitation of the current API design
+                .htod_sync_copy_into(data_bytes, slice)
+                .map_err(|e| GpuExecutorError::CopyFailed(format!("{e:?}")))?;
         }
 
         Ok(())
@@ -561,7 +553,7 @@ impl GpuExecutor {
     #[cfg(not(feature = "cuda"))]
     pub fn copy_to_device<T>(
         &self,
-        _buffer: &ExecutorBuffer,
+        _buffer: &mut ExecutorBuffer,
         _data: &[T],
     ) -> Result<(), GpuExecutorError> {
         Err(GpuExecutorError::CudaNotEnabled)
@@ -604,14 +596,16 @@ impl GpuExecutor {
         Err(GpuExecutorError::CudaNotEnabled)
     }
 
-    /// Copy epistemic SoA data to device
+    /// Copy epistemic SoA data to device.
+    ///
+    /// Takes `&mut EpistemicBuffer` to write directly into device slices.
     #[cfg(feature = "cuda")]
     pub fn copy_soa_to_device<T: Clone>(
         &self,
-        buffer: &EpistemicBuffer,
+        buffer: &mut EpistemicBuffer,
         soa: &SoAKnowledge<T>,
     ) -> Result<(), GpuExecutorError> {
-        // Copy values
+        // Copy values directly into the device slice (no temp allocation)
         let values_bytes = unsafe {
             std::slice::from_raw_parts(
                 soa.values.as_ptr() as *const u8,
@@ -619,40 +613,30 @@ impl GpuExecutor {
             )
         };
 
-        if let Some(ref slice) = buffer.values.cuda_slice {
-            let mut target: CudaSlice<u8> = self
-                .device
-                .alloc_zeros(values_bytes.len())
-                .map_err(|e| GpuExecutorError::AllocationFailed(format!("{:?}", e)))?;
-
+        if let Some(ref mut slice) = buffer.values.cuda_slice {
             self.device
-                .htod_sync_copy_into(values_bytes, &mut target)
-                .map_err(|e| GpuExecutorError::CopyFailed(format!("{:?}", e)))?;
+                .htod_sync_copy_into(values_bytes, slice)
+                .map_err(|e| GpuExecutorError::CopyFailed(format!("{e:?}")))?;
         }
 
-        // Copy confidences (converted to f32 epsilon)
+        // Copy confidences (converted to f32 epsilon) directly into device slice
         let epsilons: Vec<f32> = soa
             .confidences
             .iter()
-            .map(|&c| 1.0 - (c as f32 / 65535.0)) // Convert confidence to epsilon
+            .map(|&c| 1.0 - (c as f32 / 65535.0))
             .collect();
 
-        if let Some(ref slice) = buffer.epsilons.cuda_slice {
-            let eps_bytes = unsafe {
-                std::slice::from_raw_parts(
-                    epsilons.as_ptr() as *const u8,
-                    epsilons.len() * std::mem::size_of::<f32>(),
-                )
-            };
+        let eps_bytes = unsafe {
+            std::slice::from_raw_parts(
+                epsilons.as_ptr() as *const u8,
+                epsilons.len() * std::mem::size_of::<f32>(),
+            )
+        };
 
-            let mut target: CudaSlice<u8> = self
-                .device
-                .alloc_zeros(eps_bytes.len())
-                .map_err(|e| GpuExecutorError::AllocationFailed(format!("{:?}", e)))?;
-
+        if let Some(ref mut slice) = buffer.epsilons.cuda_slice {
             self.device
-                .htod_sync_copy_into(eps_bytes, &mut target)
-                .map_err(|e| GpuExecutorError::CopyFailed(format!("{:?}", e)))?;
+                .htod_sync_copy_into(eps_bytes, slice)
+                .map_err(|e| GpuExecutorError::CopyFailed(format!("{e:?}")))?;
         }
 
         Ok(())
@@ -662,7 +646,7 @@ impl GpuExecutor {
     #[cfg(not(feature = "cuda"))]
     pub fn copy_soa_to_device<T: Clone>(
         &self,
-        _buffer: &EpistemicBuffer,
+        _buffer: &mut EpistemicBuffer,
         _soa: &SoAKnowledge<T>,
     ) -> Result<(), GpuExecutorError> {
         Err(GpuExecutorError::CudaNotEnabled)
