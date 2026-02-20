@@ -97,66 +97,81 @@ def Modality.join : Modality → Modality → Modality
 
 -- ================================================================
 -- §3. Modality Lattice Theorems
--- All are closed by `decide` (4-element finite type, O(1) check).
+-- All are proved by exhaustive case analysis (16 cases each for 2-arg,
+-- 64 for 3-arg). This is correct and complete for a 4-element type.
 -- ================================================================
 
 theorem modality_meet_comm (m n : Modality) :
-    m.meet n = n.meet m := by decide
+    m.meet n = n.meet m := by
+  cases m <;> cases n <;> rfl
 
 theorem modality_meet_assoc (m n k : Modality) :
-    (m.meet n).meet k = m.meet (n.meet k) := by decide
+    (m.meet n).meet k = m.meet (n.meet k) := by
+  cases m <;> cases n <;> cases k <;> rfl
 
 theorem modality_join_comm (m n : Modality) :
-    m.join n = n.join m := by decide
+    m.join n = n.join m := by
+  cases m <;> cases n <;> rfl
 
 theorem modality_join_assoc (m n k : Modality) :
-    (m.join n).join k = m.join (n.join k) := by decide
+    (m.join n).join k = m.join (n.join k) := by
+  cases m <;> cases n <;> cases k <;> rfl
 
 theorem modality_meet_idempotent (m : Modality) :
-    m.meet m = m := by decide
+    m.meet m = m := by
+  cases m <;> rfl
 
 theorem modality_join_idempotent (m : Modality) :
-    m.join m = m := by decide
+    m.join m = m := by
+  cases m <;> rfl
 
 theorem modality_absorption_meet (m n : Modality) :
-    m.meet (m.join n) = m := by decide
+    m.meet (m.join n) = m := by
+  cases m <;> cases n <;> rfl
 
 theorem modality_absorption_join (m n : Modality) :
-    m.join (m.meet n) = m := by decide
+    m.join (m.meet n) = m := by
+  cases m <;> cases n <;> rfl
 
 /-- Linear is the bottom element: meet with anything gives Linear. -/
 theorem modality_linear_is_bottom (m : Modality) :
-    Linear.meet m = Linear := by decide
+    Linear.meet m = Linear := by
+  cases m <;> rfl
 
 /-- Unrestricted is the top element: join with anything gives Unrestricted. -/
 theorem modality_unrestricted_is_top (m : Modality) :
-    Unrestricted.join m = Unrestricted := by decide
+    Unrestricted.join m = Unrestricted := by
+  cases m <;> rfl
 
 /-- Unrestricted is the identity for meet. -/
 theorem modality_unrestricted_meet_id (m : Modality) :
-    Unrestricted.meet m = m := by decide
+    Unrestricted.meet m = m := by
+  cases m <;> rfl
 
 /-- Linear is the identity for join. -/
 theorem modality_linear_join_id (m : Modality) :
-    Linear.join m = m := by decide
+    Linear.join m = m := by
+  cases m <;> rfl
 
 /-- Affine and Relevant are strictly incomparable:
     their meet is Linear (not either of them). -/
 theorem modality_affine_relevant_incomparable :
-    Affine.meet Relevant = Linear ∧ Relevant.meet Affine = Linear := by decide
+    Affine.meet Relevant = Linear ∧ Relevant.meet Affine = Linear :=
+  ⟨rfl, rfl⟩
 
 -- ================================================================
 -- §4. Structural Rule Properties
 -- ================================================================
 
-theorem linear_no_weakening    : Linear.allowsWeakening    = false := by decide
-theorem linear_no_contraction  : Linear.allowsContraction  = false := by decide
-theorem affine_allows_weakening : Affine.allowsWeakening   = true  := by decide
-theorem affine_no_contraction  : Affine.allowsContraction  = false := by decide
-theorem relevant_no_weakening  : Relevant.allowsWeakening  = false := by decide
-theorem relevant_allows_contraction : Relevant.allowsContraction = true := by decide
+theorem linear_no_weakening    : Linear.allowsWeakening    = false := rfl
+theorem linear_no_contraction  : Linear.allowsContraction  = false := rfl
+theorem affine_allows_weakening : Affine.allowsWeakening   = true  := rfl
+theorem affine_no_contraction  : Affine.allowsContraction  = false := rfl
+theorem relevant_no_weakening  : Relevant.allowsWeakening  = false := rfl
+theorem relevant_allows_contraction : Relevant.allowsContraction = true := rfl
 theorem unrestricted_both_rules :
-    Unrestricted.allowsWeakening = true ∧ Unrestricted.allowsContraction = true := by decide
+    Unrestricted.allowsWeakening = true ∧ Unrestricted.allowsContraction = true :=
+  ⟨rfl, rfl⟩
 
 /-- Weakening is monotone in the lattice:
     if m₁ ≤ m₂ (i.e., m₁.meet m₂ = m₁) and m₁ allows weakening,
@@ -165,9 +180,8 @@ theorem weakening_monotone (m₁ m₂ : Modality)
     (h_le : m₁.meet m₂ = m₁)
     (hw   : m₁.allowsWeakening = true) :
     m₂.allowsWeakening = true := by
-  revert h_le hw
   cases m₁ <;> cases m₂ <;>
-    simp [Modality.meet, Modality.allowsWeakening]
+    simp_all [Modality.meet, Modality.allowsWeakening]
 
 -- ================================================================
 -- §5. Usage Counts
@@ -230,10 +244,10 @@ instance decWellUsed (m : Modality) (u : UsageCount) : Decidable (wellUsed m u) 
   | Relevant,     .One  => isTrue trivial
   | Relevant,     .Many => isTrue trivial
   | Unrestricted, _     => isTrue trivial
-  | Linear,       .Zero => isFalse (fun h => h)
-  | Linear,       .Many => isFalse (fun h => h)
-  | Affine,       .Many => isFalse (fun h => h)
-  | Relevant,     .Zero => isFalse (fun h => h)
+  | Linear,       .Zero => isFalse id
+  | Linear,       .Many => isFalse id
+  | Affine,       .Many => isFalse id
+  | Relevant,     .Zero => isFalse id
 
 -- §6.1  Key structural rule theorems
 
@@ -311,11 +325,10 @@ theorem no_weakening_lemma
   have hu := hΓ ⟨x, τ, m⟩ (List.mem_cons_self _ _)
   intro hzero
   rw [hzero] at hu
-  -- dispatch by modality; Linear and Relevant with Zero are both False
   cases m with
-  | Linear  => exact hu
-  | Affine  => simp [Modality.allowsWeakening] at hm
-  | Relevant => exact hu
+  | Linear       => exact hu
+  | Affine       => simp [Modality.allowsWeakening] at hm
+  | Relevant     => exact hu
   | Unrestricted => simp [Modality.allowsWeakening] at hm
 
 -- ================================================================

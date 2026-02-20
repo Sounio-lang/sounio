@@ -18,7 +18,7 @@ Effect rows are modeled as characteristic functions `Effect → Bool` rather tha
 `Finset Effect`, eliminating any Mathlib dependency. This is mathematically equivalent
 to finite sets via function extensionality.
 
-All proofs use `funext` + `simp` + `split_ifs`. The entire file has no `sorry`.
+All proofs use `funext` + `by_cases` + `simp`. No `sorry`. No Mathlib.
 -/
 
 namespace Sounio.Effects
@@ -83,25 +83,29 @@ def mask (row : EffectRow) (e : Effect) : EffectRow := fun f =>
 /-- Masking is idempotent: applying the same handler twice = once. -/
 theorem mask_idempotent (row : EffectRow) (e : Effect) :
     mask (mask row e) e = mask row e := by
-  funext f
-  simp only [mask]
-  split_ifs with h <;> simp [h]
+  funext f; simp only [mask]
+  by_cases h : f = e <;> simp [h]
 
 /-- Two distinct handlers commute: order of application is irrelevant. -/
 theorem mask_comm (row : EffectRow) (e₁ e₂ : Effect) :
     mask (mask row e₁) e₂ = mask (mask row e₂) e₁ := by
-  funext f
-  simp only [mask]
-  split_ifs with h1 h2 h2 <;> simp_all
+  funext f; simp only [mask]
+  by_cases h1 : f = e₁ <;> by_cases h2 : f = e₂
+  · subst h1; simp        -- both sides false: outer if-pos, inner if-pos → false
+  · subst h1; simp [h2]   -- outer if-neg h2, inner if-pos → false; RHS if-pos → false
+  · subst h2; simp [h1]   -- outer if-pos → false; RHS if-neg h1, inner if-pos → false
+  · simp [h1, h2]          -- all ifs → else branch → row f
 
 /-- Masking an effect not in the row has no effect. -/
 theorem mask_absent_noop (row : EffectRow) (e : Effect)
-    (h : ¬(e ∈ᵣ row)) : mask row e = row := by
-  funext f
-  simp only [mask]
-  split_ifs with heq
-  · subst heq; simp [memberOf] at h; simp [h]
-  · rfl
+    (hab : ¬(e ∈ᵣ row)) : mask row e = row := by
+  funext f; simp only [mask]
+  by_cases h : f = e
+  · subst h
+    cases hrow : row f
+    · rfl
+    · exact absurd hrow hab
+  · simp [h]
 
 /-- Masking removes exactly the target effect. -/
 theorem mask_removes (row : EffectRow) (e : Effect) :
@@ -123,15 +127,17 @@ def rowUnion (r₁ r₂ : EffectRow) : EffectRow := fun e => r₁ e || r₂ e
 
 theorem rowUnion_comm (r₁ r₂ : EffectRow) :
     rowUnion r₁ r₂ = rowUnion r₂ r₁ := by
-  funext e; simp [rowUnion, Bool.or_comm]
+  funext e; simp only [rowUnion]
+  cases r₁ e <;> cases r₂ e <;> rfl
 
 theorem rowUnion_assoc (r₁ r₂ r₃ : EffectRow) :
     rowUnion (rowUnion r₁ r₂) r₃ = rowUnion r₁ (rowUnion r₂ r₃) := by
-  funext e; simp [rowUnion, Bool.or_assoc]
+  funext e; simp only [rowUnion]
+  cases r₁ e <;> cases r₂ e <;> cases r₃ e <;> rfl
 
 theorem rowUnion_idempotent (r : EffectRow) :
     rowUnion r r = r := by
-  funext e; simp [rowUnion]
+  funext e; simp only [rowUnion]; cases r e <;> rfl
 
 theorem rowUnion_pure_left (r : EffectRow) :
     rowUnion pureRow r = r := by
@@ -206,9 +212,9 @@ theorem handler_reduces_effects (r : EffectRow) (e : Effect) :
     effectSubrow (mask r e) r := by
   intro f hf
   simp only [mask] at hf
-  split_ifs at hf with h
-  · simp at hf
-  · exact hf
+  by_cases h : f = e
+  · subst h; simp at hf
+  · simp [h] at hf; exact hf
 
 /-- Applying the same handler twice = applying it once. -/
 theorem handler_idempotent (r : EffectRow) (e : Effect) :
@@ -223,7 +229,8 @@ theorem handler_order_independence (r : EffectRow) (e₁ e₂ : Effect) :
 /-- Handling the sole effect of a single-effect row yields the pure row. -/
 theorem single_mask_pure (e : Effect) :
     mask (singleRow e) e = pureRow := by
-  funext f; simp [mask, singleRow, pureRow]; split_ifs <;> simp_all
+  funext f; simp only [mask, singleRow, pureRow]
+  by_cases h : f = e <;> simp [h]
 
 -- ================================================================
 -- §8. Row Union as Lattice Upper Bound
@@ -244,41 +251,24 @@ theorem effectSubrow_union_lub (r₁ r₂ r : EffectRow)
     (h₁ : effectSubrow r₁ r) (h₂ : effectSubrow r₂ r) :
     effectSubrow (rowUnion r₁ r₂) r :=
   fun e he => by
-    simp [rowUnion] at he
-    exact he.elim (h₁ e) (h₂ e)
+    simp only [rowUnion] at he
+    cases h_r1 : r₁ e
+    · cases h_r2 : r₂ e
+      · simp [h_r1, h_r2] at he
+      · exact h₂ e h_r2
+    · exact h₁ e h_r1
 
 -- ================================================================
--- §9. Row Polymorphism — Effect Preservation
+-- §9. Mask Distributes over Union
 -- ================================================================
 
-/-! ### Row polymorphism soundness
-
-    In Sounio, effect-generic functions are polymorphic over the caller's
-    effect row. After fully handling a local effect set `ρ_local`, only the
-    caller's row `ρ_call` remains.
-
-    The key property: masking all effects in `ρ_local` from
-    `rowUnion ρ_call ρ_local` reduces to `ρ_call` exactly when
-    `ρ_call` and `ρ_local` are disjoint. -/
-
-/-- Two rows are disjoint if no effect appears in both. -/
-def rowDisjoint (r₁ r₂ : EffectRow) : Prop :=
-  ∀ e, ¬(e ∈ᵣ r₁ ∧ e ∈ᵣ r₂)
-
-/-- Masking a disjoint effect from a union preserves the left component. -/
-theorem mask_disjoint_union (r_call r_local : EffectRow) (e : Effect)
-    (he_local : e ∈ᵣ r_local)
-    (hdisj   : rowDisjoint r_call r_local) :
-    mask (rowUnion r_call r_local) e = rowUnion r_call (mask r_local e) := by
-  funext f
-  simp only [mask, rowUnion]
-  split_ifs with h
-  · subst h
-    -- e is in r_local but not r_call (disjointness)
-    have hne_call : r_call e = false := by
-      by_contra hc
-      exact hdisj e ⟨hc, he_local⟩
-    simp [hne_call, memberOf] at *
-  · rfl
+/-- Masking distributes over union when the masked effect is absent from r₁. -/
+theorem mask_union_right (r₁ r₂ : EffectRow) (e : Effect)
+    (h : r₁ e = false) :
+    mask (rowUnion r₁ r₂) e = rowUnion r₁ (mask r₂ e) := by
+  funext f; simp only [mask, rowUnion]
+  by_cases heq : f = e
+  · subst heq; simp [h]
+  · simp [heq]
 
 end Sounio.Effects
