@@ -397,8 +397,13 @@ impl LspClient {
 
 impl Drop for LspClient {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        match self.child.try_wait() {
+            Ok(Some(_status)) => {}
+            Ok(None) | Err(_) => {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+            }
+        }
         if let Some(handle) = self.stderr_reader.take() {
             let _ = handle.join();
         }

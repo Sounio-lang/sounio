@@ -143,12 +143,25 @@ impl ReplSession {
     fn quit_and_collect(mut self) -> Vec<String> {
         self.send(":quit");
 
-        // Give time for graceful shutdown
-        thread::sleep(Duration::from_millis(200));
+        // Close stdin so REPL can observe EOF and exit cleanly.
+        drop(self.child.stdin.take());
 
-        // Try to terminate gracefully
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        // Prefer graceful shutdown before forcing kill.
+        let mut exited = false;
+        for _ in 0..20 {
+            match self.child.try_wait() {
+                Ok(Some(_status)) => {
+                    exited = true;
+                    break;
+                }
+                Ok(None) => thread::sleep(Duration::from_millis(50)),
+                Err(_) => break,
+            }
+        }
+        if !exited {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
 
         // Collect output
         let mut output = self.output_reader.join().unwrap_or_default();
