@@ -34,7 +34,8 @@ run_step "09-ghost-warning-deterministic" cargo test -p souc --test selfhost_str
 run_step "10-cargo-lib-tests" cargo test -p souc --lib
 run_step "11-cultural-fidelity" python3 "$ROOT_DIR/scripts/cultural_fidelity_gate.py"
 run_step "12-r2-parity-spec-lint" python3 "$ROOT_DIR/scripts/r2/parity_spec_lint.py"
-run_step "13-warning-baseline" bash "$ROOT_DIR/scripts/check_new_warnings.sh"
-run_step "14-full-gate" bash "$ROOT_DIR/scripts/full_gate.sh"
+run_step "13-r2-parity-spec-exec" python3 "$ROOT_DIR/scripts/r2/parity_spec_exec.py"
+run_step "14-warning-baseline" bash "$ROOT_DIR/scripts/check_new_warnings.sh"
+run_step "15-full-gate" bash "$ROOT_DIR/scripts/full_gate.sh"
 
 echo "[release-pack] PASS"
