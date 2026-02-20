@@ -5,4 +5,4 @@ package sounio where
   name := "sounio-formal"
 
 lean_lib Sounio where
-  roots := #[`ElfLinker, `TypeChecker]
+  roots := #[`ElfLinker, `TypeChecker, `Effects, `LinearTypes]
