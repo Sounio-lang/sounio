@@ -2552,6 +2552,51 @@ impl BytecodeVM {
                 let a = self.pop_numeric(name)?;
                 Ok(Value::Float(a.max(b)))
             }
+            // ==================== Bit-cast intrinsics ====================
+            "f32_to_bits" => {
+                if arg_count != 1 {
+                    return Err(VmError::FfiError(
+                        "f32_to_bits expects 1 argument".to_string(),
+                    ));
+                }
+                let x = self.pop_numeric(name)?;
+                let bits = (x as f32).to_bits();
+                Ok(Value::Int(bits as i64))
+            }
+            "bits_to_f32" => {
+                if arg_count != 1 {
+                    return Err(VmError::FfiError(
+                        "bits_to_f32 expects 1 argument".to_string(),
+                    ));
+                }
+                let val = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                let bits = match val {
+                    Value::Int(i) => i as u32,
+                    _ => {
+                        return Err(VmError::TypeMismatch(
+                            "bits_to_f32 expects int".to_string(),
+                        ))
+                    }
+                };
+                Ok(Value::Float(f32::from_bits(bits) as f64))
+            }
+            "i64_to_hex8" => {
+                if arg_count != 1 {
+                    return Err(VmError::FfiError(
+                        "i64_to_hex8 expects 1 argument".to_string(),
+                    ));
+                }
+                let val = self.stack.pop().ok_or(VmError::StackUnderflow)?;
+                let bits = match val {
+                    Value::Int(i) => i as u32,
+                    _ => {
+                        return Err(VmError::TypeMismatch(
+                            "i64_to_hex8 expects int".to_string(),
+                        ))
+                    }
+                };
+                Ok(Value::String(format!("{:08X}", bits)))
+            }
             "__sounio_make_list" => {
                 if arg_count < 0 {
                     return Err(VmError::FfiError(

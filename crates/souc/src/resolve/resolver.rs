@@ -254,6 +254,10 @@ impl Resolver {
             "as_mut",
             "size_of",
             "align_of",
+            // Bit-level conversions
+            "f32_to_bits",
+            "bits_to_f32",
+            "i64_to_hex8",
             // Option/Result constructors
             "Some",
             "None",
