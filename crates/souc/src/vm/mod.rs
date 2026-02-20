@@ -2553,6 +2553,16 @@ impl BytecodeVM {
                 Ok(Value::Float(a.max(b)))
             }
             // ==================== Bit-cast intrinsics ====================
+            "f64_to_bits" => {
+                if arg_count != 1 {
+                    return Err(VmError::FfiError(
+                        "f64_to_bits expects 1 argument".to_string(),
+                    ));
+                }
+                let x = self.pop_numeric(name)?;
+                let bits = x.to_bits();
+                Ok(Value::Int(bits as i64))
+            }
             "f32_to_bits" => {
                 if arg_count != 1 {
                     return Err(VmError::FfiError(

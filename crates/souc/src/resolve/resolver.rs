@@ -255,6 +255,7 @@ impl Resolver {
             "size_of",
             "align_of",
             // Bit-level conversions
+            "f64_to_bits",
             "f32_to_bits",
             "bits_to_f32",
             "i64_to_hex8",

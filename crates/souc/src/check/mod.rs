@@ -4452,7 +4452,12 @@ impl TypeChecker {
                 )
             }
 
-            Expr::Call { id, callee, args } => {
+            Expr::Call {
+                id,
+                callee,
+                args,
+                ..
+            } => {
                 // Check if this is a method call disguised as Call(Field(...))
                 if let Expr::Field { base, field, .. } = callee.as_ref() {
                     // This is a method call: base.field(args)
@@ -7176,6 +7181,7 @@ impl TypeChecker {
                 | "min"
                 | "max"
                 // Bit-level conversions
+                | "f64_to_bits"
                 | "f32_to_bits"
                 | "bits_to_f32"
                 | "i64_to_hex8"
@@ -7486,6 +7492,10 @@ impl TypeChecker {
             | "round" | "min" | "max" => HirType::Fn {
                 params: vec![HirType::F64],
                 return_type: Box::new(HirType::F64),
+            },
+            "f64_to_bits" => HirType::Fn {
+                params: vec![HirType::F64],
+                return_type: Box::new(HirType::I64),
             },
             "f32_to_bits" => HirType::Fn {
                 params: vec![HirType::F64],
