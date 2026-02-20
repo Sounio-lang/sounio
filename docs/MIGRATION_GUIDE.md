@@ -587,7 +587,7 @@ SOUNIO_SELFHOST_PIPELINE=rust SOUNIO_RUST_GHOST=1 cargo run -- run your_program.
 
 Without `SOUNIO_RUST_GHOST=1`, `SOUNIO_SELFHOST_PIPELINE=rust` is routed back to the driver path.
 When ghost mode is enabled, stderr emits a deterministic marker:
-`SELFHOST=rust-ghost schema=v1 event=transition_warning ...`
+`SELFHOST=legacy-ghost schema=v1 event=transition_warning ...`
 
 ### Q8: How do I debug self-hosted code?
 

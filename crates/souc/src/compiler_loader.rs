@@ -56,11 +56,11 @@ fn emit_rust_ghost_warning(path_kind: &str) {
     static RUST_GHOST_WARNING_ONCE: Once = Once::new();
     RUST_GHOST_WARNING_ONCE.call_once(|| {
         eprintln!(
-            "SELFHOST=rust-ghost schema=v1 event=transition_warning status=enabled gate=SOUNIO_RUST_GHOST path={}",
+            "SELFHOST=legacy-ghost schema=v1 event=transition_warning status=enabled gate=SOUNIO_RUST_GHOST path={}",
             path_kind
         );
         eprintln!(
-            "\x1b[1;31mGHOST MODE — Rust is dead. This path will vanish in 0.x.y+1 ({})\x1b[0m",
+            "\x1b[1;31mGHOST MODE — Legacy bridge path is end-of-life and will vanish in 0.x.y+1 ({})\x1b[0m",
             path_kind
         );
     });
@@ -235,7 +235,7 @@ impl SelfhostCompilePipeline {
                     Self::RustBridge
                 } else {
                     tracing::warn!(
-                        "SOUNIO_SELFHOST_PIPELINE=rust is deprecated; using driver pipeline instead (set SOUNIO_RUST_GHOST=1 for temporary legacy access)"
+                        "SOUNIO_SELFHOST_PIPELINE=rust is deprecated; using driver pipeline instead (set SOUNIO_RUST_GHOST=1 for temporary legacy-bridge access)"
                     );
                     Self::DriverPreferred
                 }
@@ -1743,7 +1743,7 @@ fn main() -> CompileArtifact with IO, Mut, Div, Panic {
             oracle_bytecode.len()
         );
         let message = format!(
-            "Rust oracle parity mismatch for {}: stage-boundary produced {} instruction(s), oracle produced {} instruction(s)",
+            "Legacy oracle parity mismatch for {}: stage-boundary produced {} instruction(s), oracle produced {} instruction(s)",
             label,
             boundary_bytecode.len(),
             oracle_bytecode.len()
@@ -1767,7 +1767,7 @@ fn main() -> CompileArtifact with IO, Mut, Div, Panic {
             Self::bool_bit(strict),
             err.kind_code()
         );
-        let message = format!("Rust oracle parity check failed for {}: {}", label, err);
+        let message = format!("Legacy oracle parity check failed for {}: {}", label, err);
         if strict {
             Err(CompilerLoaderError::CompileError(message))
         } else {
@@ -2059,7 +2059,7 @@ fn main() -> CompileArtifact with IO, Mut, Div, Panic {
 
     fn compile_via_rust_bridge(&self, source: &str) -> LoadResult<Vec<Bytecode>> {
         emit_rust_ghost_warning("source compile");
-        tracing::debug!("Compiling source through Rust bridge backend");
+        tracing::debug!("Compiling source through legacy bridge backend");
 
         // Lex source code to tokens using Rust lexer
         let tokens = lexer::lex(source)
@@ -2093,7 +2093,7 @@ fn main() -> CompileArtifact with IO, Mut, Div, Panic {
 
     fn compile_path_via_rust_bridge(&self, path: &str) -> LoadResult<Vec<Bytecode>> {
         emit_rust_ghost_warning("path compile");
-        tracing::debug!("Compiling path through Rust bridge backend: {}", path);
+        tracing::debug!("Compiling path through legacy bridge backend: {}", path);
 
         let ast = crate::module_loader::load_program_ast(std::path::Path::new(path))
             .map_err(|e| CompilerLoaderError::CompileError(format!("Parse/load error: {}", e)))?;

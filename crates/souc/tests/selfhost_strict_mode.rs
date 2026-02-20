@@ -1059,7 +1059,7 @@ fn selfhost_root_transition_mode_fails_closed_when_seed_is_missing() {
         "did not expect driver pipeline markers in transition-mode seed failure, got: {stderr:?}"
     );
     assert!(
-        !stderr.contains("SELFHOST=rust-ghost schema=v1 event=transition_warning"),
+        !stderr.contains("SELFHOST=legacy-ghost schema=v1 event=transition_warning"),
         "did not expect rust transition warning on seed-only transition root path, got: {stderr:?}"
     );
     assert!(
@@ -1220,7 +1220,7 @@ fn selfhost_pipeline_rust_with_ghost_emits_transition_warning() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     let transition_warning_count = stderr
-        .matches("SELFHOST=rust-ghost schema=v1 event=transition_warning")
+        .matches("SELFHOST=legacy-ghost schema=v1 event=transition_warning")
         .count();
     assert!(
         transition_warning_count == 1,
@@ -1236,7 +1236,7 @@ fn selfhost_pipeline_rust_with_ghost_emits_transition_warning() {
         "expected ghost mode warning in stderr, got: {stderr:?}"
     );
     assert!(
-        stderr.contains("Rust is dead. This path will vanish in 0.x.y+1"),
+        stderr.contains("Legacy bridge path is end-of-life and will vanish in 0.x.y+1"),
         "expected transition warning payload in stderr, got: {stderr:?}"
     );
     assert!(

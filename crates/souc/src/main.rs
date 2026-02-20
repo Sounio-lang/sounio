@@ -2394,7 +2394,7 @@ fn build_gpu(
     {
         let _ = (input, output, target, verbose);
         Err(miette::miette!(
-            "GPU backend not enabled. Rebuild with: cargo build --features gpu"
+            "GPU backend not enabled in this binary. Rebuild with GPU support enabled."
         ))
     }
 }
@@ -2659,7 +2659,7 @@ fn build(
             input, output, opt_level, debug, emit_llvm, emit_asm, target, strip, verbose, cdylib,
         );
         Err(miette::miette!(
-            "LLVM backend not enabled. Rebuild with: cargo build --features llvm"
+            "LLVM backend not enabled in this binary. Rebuild with LLVM support enabled."
         ))
     }
 }
@@ -3190,7 +3190,7 @@ fn run(
                     }
                     Err(vm_error) => {
                         return Err(format!(
-                            "Self-hosted VM execution failed for {}: {}. Rust fallback execution has been removed.",
+                            "Self-hosted VM execution failed for {}: {}. Legacy fallback execution has been removed.",
                             input_path.display(),
                             vm_error
                         ));
@@ -4165,7 +4165,7 @@ fn info() -> Result<()> {
     println!("  [-] Package manager - rebuild with --features pkg");
 
     println!();
-    println!("Build with all features: cargo build --features full");
+    println!("Build with all feature groups: use your selected build profile configuration.");
     println!();
     println!("For more information: https://sounio-lang.org");
     println!("Report bugs: https://github.com/sounio-lang/sounio/issues");
