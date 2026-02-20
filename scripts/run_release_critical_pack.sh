@@ -3,7 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
-RUN_DIR="$ROOT_DIR/artifacts/diagnostic/$TS"
+DEFAULT_RUN_DIR="$ROOT_DIR/artifacts/diagnostic/$TS"
+RUN_DIR="${SOUNIO_RELEASE_PACK_RUN_DIR:-$DEFAULT_RUN_DIR}"
 SHARED_CARGO_HOME_DEFAULT="$ROOT_DIR/artifacts/diagnostic/.cargo-home"
 
 export SOUNIO_DIAG_SHARED_CARGO_HOME="${SOUNIO_DIAG_SHARED_CARGO_HOME:-$SHARED_CARGO_HOME_DEFAULT}"
@@ -13,13 +14,75 @@ mkdir -p "$RUN_DIR"
 echo "[release-pack] artifacts=$RUN_DIR"
 echo "[release-pack] shared_cargo_home=$SOUNIO_DIAG_SHARED_CARGO_HOME"
 
+SUMMARY_TSV="$RUN_DIR/release-pack-summary.tsv"
+SUMMARY_MD="$RUN_DIR/release-pack-summary.md"
+
+declare -a STEP_LABELS=()
+declare -a STEP_STATUSES=()
+declare -a STEP_DURATIONS=()
+declare -a STEP_LOGS=()
+
+write_summary() {
+  {
+    echo -e "step\tstatus\tduration_s\tlog"
+    local i
+    for ((i = 0; i < ${#STEP_LABELS[@]}; i++)); do
+      echo -e "${STEP_LABELS[$i]}\t${STEP_STATUSES[$i]}\t${STEP_DURATIONS[$i]}\t${STEP_LOGS[$i]}"
+    done
+  } > "$SUMMARY_TSV"
+
+  {
+    echo "# Release-Critical Pack Summary"
+    echo
+    echo "Run directory: \`$RUN_DIR\`"
+    echo
+    echo "| Step | Status | Duration (s) | Log |"
+    echo "|---|---|---:|---|"
+    local i
+    for ((i = 0; i < ${#STEP_LABELS[@]}; i++)); do
+      echo "| ${STEP_LABELS[$i]} | ${STEP_STATUSES[$i]} | ${STEP_DURATIONS[$i]} | \`${STEP_LOGS[$i]}\` |"
+    done
+  } > "$SUMMARY_MD"
+}
+
 run_step() {
   local label="$1"
   shift
+  local started ended elapsed status
+  local step_log="$RUN_DIR/logs/${label}.log"
+
+  started="$(date +%s)"
   echo "[release-pack] >>> $label"
-  SOUNIO_DIAG_RUN_DIR="$RUN_DIR" \
-  SOUNIO_DIAG_LOG_LABEL="$label" \
-  bash "$ROOT_DIR/scripts/with_isolated_env.sh" "$@"
+  if SOUNIO_DIAG_RUN_DIR="$RUN_DIR" \
+    SOUNIO_DIAG_LOG_LABEL="$label" \
+    bash "$ROOT_DIR/scripts/with_isolated_env.sh" "$@"; then
+    status="PASS"
+  else
+    status="FAIL"
+  fi
+
+  ended="$(date +%s)"
+  elapsed="$((ended - started))"
+
+  STEP_LABELS+=("$label")
+  STEP_STATUSES+=("$status")
+  STEP_DURATIONS+=("$elapsed")
+  STEP_LOGS+=("$step_log")
+  write_summary
+
+  if [[ "$status" != "PASS" ]]; then
+    echo "[release-pack] !!! $label failed (${elapsed}s)"
+    echo "[release-pack] log=$step_log"
+    if [[ -f "$step_log" ]]; then
+      echo "[release-pack] --- tail of $step_log ---"
+      tail -n 60 "$step_log" || true
+      echo "[release-pack] --- end tail ---"
+    fi
+    echo "[release-pack] summary=$SUMMARY_MD"
+    return 1
+  fi
+
+  echo "[release-pack] <<< $label PASS (${elapsed}s)"
 }
 
 run_step "01-cargo-check" cargo check -p souc
@@ -41,4 +104,7 @@ run_step "16-selfhost-cycle-release-byte-equality" env WORK_DIR="$RUN_DIR/selfho
 run_step "17-selfhost-cycle-gate-seed-root" env WORK_DIR="$RUN_DIR/selfhost-cycle-gate-seed-root" SOUNIO_SELFHOST_CYCLE_FORCE_DYNAMIC=0 SOUNIO_SELFHOST_CYCLE_SEED_ENFORCE=1 SOUNIO_SELFHOST_CYCLE_SEED_PATH=bootstrap/seeds/sounio-bootstrap-linux-x86_64.sio.bin SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST=bootstrap/selfhost-kernel.manifest bash "$ROOT_DIR/scripts/selfhost_cycle_gate.sh"
 run_step "18-full-gate" bash "$ROOT_DIR/scripts/full_gate.sh"
 
+write_summary
+echo "[release-pack] summary=$SUMMARY_MD"
+echo "[release-pack] summary_tsv=$SUMMARY_TSV"
 echo "[release-pack] PASS"
