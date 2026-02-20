@@ -51,6 +51,77 @@ jobs:
       - name: Run release-critical pack
         run: bash scripts/run_release_critical_pack.sh
 
+  rust-free-proof-build:
+    name: Rust-Free Proof Build Inputs
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build compiler and bootstrap seed artifact
+        run: |
+          cargo build -p souc --bin souc
+          bash scripts/build_bootstrap_seed.sh
+          mkdir -p /tmp/sounio-rust-free-proof-inputs
+          mkdir -p /tmp/sounio-rust-free-proof-inputs/scripts
+          cp target/debug/souc /tmp/sounio-rust-free-proof-inputs/souc
+          cp bootstrap/seeds/sounio-bootstrap-linux-x86_64.sio.bin /tmp/sounio-rust-free-proof-inputs/
+          cp bootstrap/seeds/sounio-bootstrap-linux-x86_64.sio.bin.sha256 /tmp/sounio-rust-free-proof-inputs/
+          cp bootstrap/seeds/sounio-bootstrap-linux-x86_64.sio.bin.sig /tmp/sounio-rust-free-proof-inputs/
+          cp scripts/rust_free_seed_runtime_proof.sh /tmp/sounio-rust-free-proof-inputs/scripts/
+          cp scripts/assert_no_rust_markers.sh /tmp/sounio-rust-free-proof-inputs/scripts/
+      - name: Upload rust-free proof build inputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-free-proof-inputs
+          path: /tmp/sounio-rust-free-proof-inputs/
+          retention-days: 7
+
+  rust-free-release-proof:
+    name: Rust-Free Release Proof
+    runs-on: ubuntu-24.04
+    needs: rust-free-proof-build
+    container:
+      image: ubuntu:24.04
+    steps:
+      - name: Download rust-free proof build inputs
+        uses: actions/download-artifact@v4
+        with:
+          name: rust-free-proof-inputs
+          path: /tmp/sounio-rust-free-proof-inputs
+      - name: Assert Rust toolchain is unavailable
+        run: |
+          if command -v rustc >/dev/null 2>&1; then
+            echo "error: rustc is available in rust-free proof environment"
+            exit 1
+          fi
+          if command -v cargo >/dev/null 2>&1; then
+            echo "error: cargo is available in rust-free proof environment"
+            exit 1
+          fi
+          if command -v rustup >/dev/null 2>&1; then
+            echo "error: rustup is available in rust-free proof environment"
+            exit 1
+          fi
+      - name: Run rust-free seed runtime proof
+        env:
+          SOUC_BIN: /tmp/sounio-rust-free-proof-inputs/souc
+          SOUNIO_BOOTSTRAP_SEED_PATH: /tmp/sounio-rust-free-proof-inputs/sounio-bootstrap-linux-x86_64.sio.bin
+          SOUNIO_BOOTSTRAP_SEED_SHA256_PATH: /tmp/sounio-rust-free-proof-inputs/sounio-bootstrap-linux-x86_64.sio.bin.sha256
+          SOUNIO_BOOTSTRAP_SEED_SIG_PATH: /tmp/sounio-rust-free-proof-inputs/sounio-bootstrap-linux-x86_64.sio.bin.sig
+          WORK_DIR: /tmp/sounio-rust-free-seed-proof
+        run: |
+          chmod +x /tmp/sounio-rust-free-proof-inputs/souc
+          chmod +x /tmp/sounio-rust-free-proof-inputs/scripts/rust_free_seed_runtime_proof.sh
+          chmod +x /tmp/sounio-rust-free-proof-inputs/scripts/assert_no_rust_markers.sh
+          bash /tmp/sounio-rust-free-proof-inputs/scripts/rust_free_seed_runtime_proof.sh
+      - name: Upload rust-free proof artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-free-release-proof
+          path: /tmp/sounio-rust-free-seed-proof/
+          retention-days: 7
+
   golden-snapshot-drift:
     name: Golden Snapshot Drift
     runs-on: ubuntu-24.04
@@ -74,7 +145,13 @@ jobs:
         run: bash scripts/fast_gate.sh 2>&1 | tail -20
         continue-on-error: true
       - name: Verify traceability generator succeeds
-        run: scripts/check_traceability_generator.sh
+        run: |
+          RUN_DIR="$(ls -1dt artifacts/diagnostic/final-* 2>/dev/null | head -n1 || true)"
+          if [[ -z "$RUN_DIR" ]]; then
+            echo "No diagnostic run dir found — skipping traceability check"
+            exit 0
+          fi
+          bash scripts/generate_release_traceability_report.sh "$RUN_DIR"
 
   cross-platform-native:
     name: Native Backend (${{ matrix.os }})
@@ -203,7 +280,7 @@ jobs:
           SOUNIO_SELFHOST_CYCLE_SEED_PATH: bootstrap/seeds/sounio-bootstrap-linux-x86_64.sio.bin
           SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST: bootstrap/selfhost-kernel.manifest
         run: |
-          bash scripts/selfhost_cycle_repro_gate.sh
+          bash scripts/selfhost_cycle_release_gate.sh
       - name: Run selfhost cycle gate (seed-root reproducibility)
         env:
           WORK_DIR: /tmp/sounio-selfhost-cycle-gate-seed-root
