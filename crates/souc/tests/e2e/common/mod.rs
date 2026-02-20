@@ -36,64 +36,67 @@ pub struct TestHarness {
 }
 
 impl TestHarness {
-    /// Create a new test harness
-    pub fn new() -> Self {
-        // Prefer Cargo-provided binary path for this test run. This keeps the
-        // harness aligned with custom CARGO_TARGET_DIR values.
-        if let Ok(path) = std::env::var("CARGO_BIN_EXE_souc") {
-            let compiler_path = PathBuf::from(path);
-            if compiler_path.exists() {
-                // Use both process id and a counter to make temp dirs unique across parallel tests
-                use std::sync::atomic::{AtomicU64, Ordering};
-                static COUNTER: AtomicU64 = AtomicU64::new(0);
-                let unique_id = COUNTER.fetch_add(1, Ordering::SeqCst);
-                let temp_dir = std::env::temp_dir().join(format!(
-                    "sounio_test_{}_{}",
-                    std::process::id(),
-                    unique_id
-                ));
-                fs::create_dir_all(&temp_dir).expect("Failed to create temp dir");
-
-                return Self {
-                    compiler_path,
-                    temp_dir,
-                    env_vars: HashMap::new(),
-                    flags: Vec::new(),
-                    ontology_paths: Vec::new(),
-                    capture_timing: false,
-                };
-            }
-        }
-
-        // Fallback: look for compiler binary (souc / souc.exe on Windows)
-        // Check release first, then fall back to debug
-        // Check both crate-local and workspace-level target directories
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let workspace_dir = manifest_dir
-            .parent()
-            .and_then(|p| p.parent())
-            .unwrap_or(&manifest_dir);
+    fn resolve_compiler_path() -> PathBuf {
         #[cfg(windows)]
         let binary_name = "souc.exe";
         #[cfg(not(windows))]
         let binary_name = "souc";
 
-        // Try workspace paths first (most common with `cargo test`)
-        let workspace_release = workspace_dir.join(format!("target/release/{}", binary_name));
-        let workspace_debug = workspace_dir.join(format!("target/debug/{}", binary_name));
-        // Then try crate-local paths
-        let crate_release = manifest_dir.join(format!("target/release/{}", binary_name));
-        let crate_debug = manifest_dir.join(format!("target/debug/{}", binary_name));
+        if let Ok(override_path) = std::env::var("SOUNIO_TEST_COMPILER_PATH") {
+            let path = PathBuf::from(override_path);
+            if path.exists() {
+                return path;
+            }
+        }
 
-        let compiler_path = if workspace_release.exists() {
-            workspace_release
-        } else if workspace_debug.exists() {
-            workspace_debug
-        } else if crate_release.exists() {
-            crate_release
-        } else {
-            crate_debug
-        };
+        if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
+            let target_root = PathBuf::from(target_dir);
+            let debug = target_root.join("debug").join(binary_name);
+            if debug.exists() {
+                return debug;
+            }
+            let release = target_root.join("release").join(binary_name);
+            if release.exists() {
+                return release;
+            }
+        }
+
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let workspace_dir = manifest_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .unwrap_or(&manifest_dir);
+
+        let workspace_debug = workspace_dir.join(format!("target/debug/{}", binary_name));
+        if workspace_debug.exists() {
+            return workspace_debug;
+        }
+        let workspace_release = workspace_dir.join(format!("target/release/{}", binary_name));
+        if workspace_release.exists() {
+            return workspace_release;
+        }
+        let crate_debug = manifest_dir.join(format!("target/debug/{}", binary_name));
+        if crate_debug.exists() {
+            return crate_debug;
+        }
+        let crate_release = manifest_dir.join(format!("target/release/{}", binary_name));
+        if crate_release.exists() {
+            return crate_release;
+        }
+
+        if let Ok(path) = std::env::var("CARGO_BIN_EXE_souc") {
+            let compiler_path = PathBuf::from(path);
+            if compiler_path.exists() {
+                return compiler_path;
+            }
+        }
+
+        workspace_debug
+    }
+
+    /// Create a new test harness
+    pub fn new() -> Self {
+        let compiler_path = Self::resolve_compiler_path();
 
         // Use both process id and a counter to make temp dirs unique across parallel tests
         use std::sync::atomic::{AtomicU64, Ordering};
