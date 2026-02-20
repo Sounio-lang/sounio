@@ -23,7 +23,8 @@ run_step "03-strict-compile-file-fail-closed" env SOUNIO_SELFHOST_STRICT=1 SOUNI
 run_step "04-strict-check-fail-closed" env SOUNIO_SELFHOST_STRICT=1 SOUNIO_SELFHOST_NO_RUST_FALLBACK=1 SOUNIO_SELFHOST_PIPELINE=driver cargo test -p souc --test selfhost_strict_mode -- selfhost_strict_check_only_rejects_stage_boundary_fallback_when_driver_unavailable --nocapture
 run_step "05-strict-run-fail-closed" env SOUNIO_SELFHOST_STRICT=1 SOUNIO_SELFHOST_NO_RUST_FALLBACK=1 SOUNIO_SELFHOST_PIPELINE=driver cargo test -p souc --test selfhost_strict_mode -- selfhost_strict_rejects_stage_boundary_fallback_when_driver_unavailable --nocapture
 run_step "06-cargo-lib-tests" cargo test -p souc --lib
-run_step "07-warning-baseline" bash "$ROOT_DIR/scripts/check_new_warnings.sh"
-run_step "08-full-gate" bash "$ROOT_DIR/scripts/full_gate.sh"
+run_step "07-cultural-fidelity" python3 "$ROOT_DIR/scripts/cultural_fidelity_gate.py"
+run_step "08-warning-baseline" bash "$ROOT_DIR/scripts/check_new_warnings.sh"
+run_step "09-full-gate" bash "$ROOT_DIR/scripts/full_gate.sh"
 
 echo "[release-pack] PASS"

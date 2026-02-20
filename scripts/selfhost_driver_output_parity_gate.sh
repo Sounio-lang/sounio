@@ -19,6 +19,7 @@ REQUIRE_DRIVER_OUTPUT="${SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT:-1}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
+MATRIX_FAIL_COUNT=0
 
 pass() {
   PASS_COUNT=$((PASS_COUNT + 1))
@@ -28,6 +29,30 @@ pass() {
 fail() {
   FAIL_COUNT=$((FAIL_COUNT + 1))
   echo "FAIL [$1] $2"
+}
+
+init_parity_matrix() {
+  cat >"$PARITY_MATRIX_FILE" <<'EOF'
+case_id	program	driver_exit	rust_exit	driver_output_marker	stdout_parity	parity
+EOF
+}
+
+append_parity_row() {
+  local case_id="$1"
+  local program_path="$2"
+  local driver_exit="$3"
+  local rust_exit="$4"
+  local marker_status="$5"
+  local stdout_status="$6"
+  local parity_status="$7"
+
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$case_id" "$program_path" "$driver_exit" "$rust_exit" "$marker_status" "$stdout_status" "$parity_status" \
+    >>"$PARITY_MATRIX_FILE"
+
+  if [ "$parity_status" != "ok" ]; then
+    MATRIX_FAIL_COUNT=$((MATRIX_FAIL_COUNT + 1))
+  fi
 }
 
 run_with_timeout() {
@@ -79,6 +104,9 @@ run_case() {
   local rust_stdout_file="$LOG_DIR/${case_id}.rust.stdout"
   local rust_stderr_file="$LOG_DIR/${case_id}.rust.stderr"
   local rust_exit_file="$ARTIFACT_DIR/${case_id}.rust.exit"
+  local driver_marker_status="missing"
+  local stdout_status="mismatch"
+  local parity_status="fail"
 
   if ! assert_file_exists "$program_path" "$case_id"; then
     return 1
@@ -105,40 +133,59 @@ run_case() {
   set -e
   echo "$rust_code" >"$rust_exit_file"
 
-  if [ "$driver_code" -ne 0 ]; then
-    fail "$case_id" "driver pipeline non-zero exit (exit=$driver_code)"
-    return 1
-  fi
-  if [ "$rust_code" -ne 0 ]; then
-    fail "$case_id" "rust pipeline non-zero exit (exit=$rust_code)"
-    return 1
-  fi
-
   if command -v rg >/dev/null 2>&1; then
-    if ! rg -n "SELFHOST=driver-first schema=v1 event=driver_output entrypoint=bootstrap::driver::compile_file status=ok" "$driver_stderr_file" >/dev/null; then
-      fail "$case_id" "missing driver_output marker (driver_stderr=$driver_stderr_file)"
-      return 1
+    if rg -n "SELFHOST=driver-first schema=v1 event=driver_output entrypoint=bootstrap::driver::compile_file status=ok" "$driver_stderr_file" >/dev/null; then
+      driver_marker_status="ok"
     fi
   else
-    if ! grep -E -q "SELFHOST=driver-first schema=v1 event=driver_output entrypoint=bootstrap::driver::compile_file status=ok" "$driver_stderr_file"; then
-      fail "$case_id" "missing driver_output marker (driver_stderr=$driver_stderr_file)"
-      return 1
+    if grep -E -q "SELFHOST=driver-first schema=v1 event=driver_output entrypoint=bootstrap::driver::compile_file status=ok" "$driver_stderr_file"; then
+      driver_marker_status="ok"
     fi
   fi
 
-  if ! cmp -s "$driver_stdout_file" "$rust_stdout_file"; then
-    fail "$case_id" "stdout mismatch (driver=$driver_stdout_file rust=$rust_stdout_file)"
-    return 1
+  if cmp -s "$driver_stdout_file" "$rust_stdout_file"; then
+    stdout_status="ok"
   fi
 
-  pass "$case_id" "driver_output stdout matches rust pipeline"
-  return 0
+  if [ "$driver_code" -eq 0 ] && [ "$rust_code" -eq 0 ] \
+    && [ "$driver_marker_status" = "ok" ] && [ "$stdout_status" = "ok" ]; then
+    parity_status="ok"
+  fi
+
+  append_parity_row \
+    "$case_id" \
+    "$program_path" \
+    "$driver_code" \
+    "$rust_code" \
+    "$driver_marker_status" \
+    "$stdout_status" \
+    "$parity_status"
+
+  if [ "$parity_status" = "ok" ]; then
+    pass "$case_id" "driver_output stdout matches rust pipeline"
+    return 0
+  fi
+
+  if [ "$driver_code" -ne 0 ]; then
+    fail "$case_id" "driver pipeline non-zero exit (exit=$driver_code)"
+  elif [ "$rust_code" -ne 0 ]; then
+    fail "$case_id" "rust pipeline non-zero exit (exit=$rust_code)"
+  elif [ "$driver_marker_status" != "ok" ]; then
+    fail "$case_id" "missing driver_output marker (driver_stderr=$driver_stderr_file)"
+  else
+    fail "$case_id" "stdout mismatch (driver=$driver_stdout_file rust=$rust_stdout_file)"
+  fi
+
+  return 1
 }
 
 mkdir -p "$LOG_DIR" "$ARTIFACT_DIR"
 
 BUILD_LOG="$LOG_DIR/build.log"
 SUMMARY_FILE="$ARTIFACT_DIR/summary.txt"
+PARITY_MATRIX_FILE="$ARTIFACT_DIR/parity_matrix.tsv"
+
+init_parity_matrix
 PROGRAM_LIST_FILE="$ARTIFACT_DIR/programs.txt"
 
 echo "SELFHOST_DRIVER_OUTPUT_PARITY_GATE_START"
@@ -191,11 +238,14 @@ fi
   echo "program_dir=$PROGRAM_DIR"
   echo "log_dir=$LOG_DIR"
   echo "program_list_file=$PROGRAM_LIST_FILE"
+  echo "parity_matrix_file=$PARITY_MATRIX_FILE"
+  echo "matrix_fail=$MATRIX_FAIL_COUNT"
 } >"$SUMMARY_FILE"
 
+echo "SELFHOST_DRIVER_OUTPUT_PARITY_MATRIX file=$PARITY_MATRIX_FILE matrix_fail=$MATRIX_FAIL_COUNT"
 echo "SELFHOST_DRIVER_OUTPUT_PARITY_GATE_SUMMARY pass=$PASS_COUNT fail=$FAIL_COUNT artifacts=$WORK_DIR"
 
-if [ "$FAIL_COUNT" -gt 0 ]; then
+if [ "$FAIL_COUNT" -gt 0 ] || [ "$MATRIX_FAIL_COUNT" -gt 0 ]; then
   exit 1
 fi
 
