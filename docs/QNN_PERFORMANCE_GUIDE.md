@@ -485,7 +485,7 @@ Grid: (batch × output_quats) / 256
 
 ```bash
 # All quaternion benchmarks
-cd compiler
+# From repository root
 cargo bench --bench qnn_performance_bench
 
 # Specific benchmark

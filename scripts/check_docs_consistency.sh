@@ -35,6 +35,18 @@ check_no_match 'cd[[:space:]]+compiler' "docs/qnn/PERFORMANCE_HANDBOOK.md" \
 check_no_match '0\.100\.0' "docs/compiler/COMPILER_ARCHITECTURE_OVERVIEW.md" \
   "docs/compiler/COMPILER_ARCHITECTURE_OVERVIEW.md contains stale version expectation 0.100.0:"
 
+check_no_match 'cd[[:space:]]+compiler' "docs/QNN_PERFORMANCE_GUIDE.md" \
+  "docs/QNN_PERFORMANCE_GUIDE.md contains stale 'cd compiler' commands:"
+
+check_no_match 'cd[[:space:]]+compiler' "docs/GLM_4.7_INTEGRATION.md" \
+  "docs/GLM_4.7_INTEGRATION.md contains stale 'cd compiler' commands:"
+
+check_no_match 'GLM_API_KEY="[^"]{20,}"' "docs/GLM_4.7_INTEGRATION.md" \
+  "docs/GLM_4.7_INTEGRATION.md appears to include a non-placeholder API key example:"
+
+check_no_match '\(~400 tests\)|\(3800\+ tests' "INSTALL.md" \
+  "INSTALL.md contains stale hard-coded test suite counts:"
+
 workspace_version="$(awk '
   /^\[workspace\.package\]/ { in_pkg=1; next }
   /^\[/ && in_pkg { in_pkg=0 }

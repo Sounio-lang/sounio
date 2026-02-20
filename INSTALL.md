@@ -111,8 +111,8 @@ With the minimal installation, reviewers can:
    - Examples using stdlib: `uncertainty.sio`, `units_simple.sio`, `ode_demo.sio`
 
 4. **Test Suite**:
-   - `cargo test --lib` runs unit tests (~400 tests)
-   - `cargo test --release` runs full integration suite (3800+ tests, requires optional features)
+   - `cargo test --lib` runs the core unit-test suite
+   - `cargo test --release` runs the broader integration suite (requires optional features)
 
 ### Key Examples for Reviewers
 

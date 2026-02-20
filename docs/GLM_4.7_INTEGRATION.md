@@ -33,7 +33,7 @@ O Sounio agora suporta integração com o GLM-4.7 (um modelo de linguagem avanç
 Defina a variável de ambiente `GLM_API_KEY`:
 
 ```bash
-export GLM_API_KEY="622f603bf3a04a6c91b967d33231df34.BiTCkvs9VxeAywva"
+export GLM_API_KEY="your-glm-api-key"
 ```
 
 ### 2. Habilitar a Feature GLM
@@ -41,7 +41,7 @@ export GLM_API_KEY="622f603bf3a04a6c91b967d33231df34.BiTCkvs9VxeAywva"
 Compile o compilador com a feature GLM habilitada:
 
 ```bash
-cd compiler
+# From repository root
 cargo build --features glm
 ```
 
