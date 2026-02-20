@@ -307,10 +307,10 @@ def Ctx.exhausted (Γ : Ctx) (ρ : UsageEnv) : Prop :=
     Formally proves that Affine/Unrestricted variables may be dropped. -/
 theorem weakening_lemma
     (Γ : Ctx) (ρ : UsageEnv) (x : String) (τ : String) (m : Modality)
-    (hm    : m.allowsWeakening = true)
-    (hzero : lookupUsage ρ x = .Zero)
-    (hΓ    : (⟨x, τ, m⟩ :: Γ).exhausted ρ) :
-    Γ.exhausted ρ :=
+    (_hm    : m.allowsWeakening = true)
+    (_hzero : lookupUsage ρ x = .Zero)
+    (hΓ    : Ctx.exhausted (⟨x, τ, m⟩ :: Γ) ρ) :
+    Ctx.exhausted Γ ρ :=
   fun e he => hΓ e (List.mem_cons.mpr (.inr he))
 
 /-! ### No-weakening lemma
@@ -320,9 +320,9 @@ theorem weakening_lemma
 theorem no_weakening_lemma
     (Γ : Ctx) (ρ : UsageEnv) (x : String) (τ : String) (m : Modality)
     (hm : m.allowsWeakening = false)
-    (hΓ : (⟨x, τ, m⟩ :: Γ).exhausted ρ) :
+    (hΓ : Ctx.exhausted (⟨x, τ, m⟩ :: Γ) ρ) :
     lookupUsage ρ x ≠ .Zero := by
-  have hu := hΓ ⟨x, τ, m⟩ (List.mem_cons_self _ _)
+  have hu := hΓ ⟨x, τ, m⟩ List.mem_cons_self
   intro hzero
   rw [hzero] at hu
   cases m with
@@ -347,8 +347,8 @@ def Ctx.allUnrestricted (Γ : Ctx) : Prop :=
     for Unrestricted contexts. -/
 theorem promotion_exhausted_any
     (Γ : Ctx) (ρ : UsageEnv)
-    (hall : Γ.allUnrestricted) :
-    Γ.exhausted ρ :=
+    (hall : Ctx.allUnrestricted Γ) :
+    Ctx.exhausted Γ ρ :=
   fun e he => by
     have hm : e.modality = Unrestricted := hall e he
     rw [hm]

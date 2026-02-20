@@ -2,10 +2,12 @@ import Lake
 open Lake DSL
 
 package «SounioFormal» where
-  name := "SounioFormal"
 
+@[default_target]
 lean_lib «SounioLinear» where
 
+@[default_target]
 lean_lib «SounioEffects» where
 
+@[default_target]
 lean_lib «SounioFormal» where
