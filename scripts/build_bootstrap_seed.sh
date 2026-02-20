@@ -13,6 +13,7 @@ SEED_TIMEOUT_SECS="${SEED_TIMEOUT_SECS:-900}"
 SEED_FALLBACK_ENABLED="${SEED_FALLBACK_ENABLED:-0}"
 TRUSTED_SEED_FALLBACK_PATH="${TRUSTED_SEED_FALLBACK_PATH:-bootstrap/seeds/sounio-bootstrap-linux-x86_64.sio.bin}"
 BOOTSTRAP_KERNEL_MANIFEST_PATH="${BOOTSTRAP_KERNEL_MANIFEST_PATH:-${SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST:-bootstrap/selfhost-kernel.manifest}}"
+BOOTSTRAP_SEED_TRUSTED_KEY="${SOUNIO_BOOTSTRAP_SEED_TRUSTED_KEY:-sounio-dev}"
 
 run_with_timeout() {
   local seconds="$1"
@@ -46,6 +47,7 @@ echo "BUILD_BOOTSTRAP_SEED_START"
 echo "seed_path=$SEED_PATH"
 echo "cache_path=$CACHE_PATH"
 echo "bootstrap_kernel_manifest=$BOOTSTRAP_KERNEL_MANIFEST_PATH"
+echo "bootstrap_seed_trusted_key=$BOOTSTRAP_SEED_TRUSTED_KEY"
 
 mkdir -p "$(dirname "$SEED_PATH")"
 rm -f "$CACHE_PATH"
@@ -89,7 +91,7 @@ run_with_timeout "$SEED_TIMEOUT_SECS" env \
       exit 1
     fi
 
-    python3 - "$TRUSTED_SEED_FALLBACK_PATH" "$local_fallback_checksum" "$local_fallback_sig" <<'PY'
+    python3 - "$TRUSTED_SEED_FALLBACK_PATH" "$local_fallback_checksum" "$local_fallback_sig" "$BOOTSTRAP_SEED_TRUSTED_KEY" <<'PY'
 import hashlib
 import pathlib
 import re
@@ -98,6 +100,7 @@ import sys
 seed_path = pathlib.Path(sys.argv[1])
 checksum_path = pathlib.Path(sys.argv[2])
 sig_path = pathlib.Path(sys.argv[3])
+trusted_key = sys.argv[4]
 
 seed_bytes = seed_path.read_bytes()
 digest = hashlib.sha256(seed_bytes).hexdigest()
@@ -124,11 +127,31 @@ if checksum_digest != digest:
     )
 
 sig_text = sig_path.read_text(encoding="utf-8")
-if "SOUNIO-SEED-SIG-V1" not in sig_text:
+signature_tokens = sig_text.split()
+if not signature_tokens or signature_tokens[0] != "SOUNIO-SEED-SIG-V1":
     raise SystemExit(
         f"error: trusted fallback signature missing marker SOUNIO-SEED-SIG-V1 path={sig_path}"
     )
-sig_digest = parse_hex_digest(sig_text)
+sig_key = None
+sig_digest = None
+for token in signature_tokens[1:]:
+    if token.startswith("key="):
+        sig_key = token.split("=", 1)[1].strip()
+    elif token.startswith("sha256="):
+        sig_digest = token.split("=", 1)[1].strip()
+if not sig_key:
+    raise SystemExit(
+        f"error: trusted fallback signature missing key field path={sig_path}"
+    )
+if sig_key != trusted_key:
+    raise SystemExit(
+        f"error: trusted fallback signature key mismatch path={sig_path} expected={trusted_key} actual={sig_key}"
+    )
+if not sig_digest or len(sig_digest) != 64 or not re.fullmatch(r"[0-9A-Fa-f]{64}", sig_digest):
+    raise SystemExit(
+        f"error: trusted fallback signature digest malformed path={sig_path} actual={sig_digest}"
+    )
+sig_digest = sig_digest.lower()
 if sig_digest != digest:
     raise SystemExit(
         f"error: trusted fallback signature digest mismatch path={sig_path} expected={digest} actual={sig_digest}"
@@ -154,8 +177,17 @@ if seed[:8] != b"SNSDSEED":
 version = struct.unpack_from("<H", seed, 8)[0]
 if version != 1:
     raise SystemExit(f"error: unsupported trusted seed version={version}: {seed_path}")
+reserved = struct.unpack_from("<H", seed, 10)[0]
+if reserved != 0:
+    raise SystemExit(
+        f"error: unsupported trusted seed reserved header={reserved}: {seed_path}"
+    )
 
 payload_len = struct.unpack_from("<Q", seed, 12)[0]
+if payload_len > 16 * 1024 * 1024:
+    raise SystemExit(
+        f"error: trusted seed payload too large bytes={payload_len} max={16 * 1024 * 1024}: {seed_path}"
+    )
 payload = seed[20:20 + payload_len]
 if len(payload) != payload_len:
     raise SystemExit(
@@ -173,7 +205,7 @@ if [ ! -f "$CACHE_PATH" ]; then
   exit 1
 fi
 
-python3 - "$CACHE_PATH" "$SEED_PATH" <<'PY'
+python3 - "$CACHE_PATH" "$SEED_PATH" "$BOOTSTRAP_SEED_TRUSTED_KEY" <<'PY'
 import hashlib
 import pathlib
 import struct
@@ -181,6 +213,7 @@ import sys
 
 cache_path = pathlib.Path(sys.argv[1])
 seed_path = pathlib.Path(sys.argv[2])
+trusted_key = sys.argv[3]
 
 payload = cache_path.read_bytes()
 if not payload:
@@ -196,7 +229,7 @@ seed_path.write_bytes(seed_bytes)
 digest = hashlib.sha256(seed_bytes).hexdigest()
 seed_path.with_suffix(seed_path.suffix + ".sha256").write_text(f"{digest}  {seed_path.name}\n", encoding="utf-8")
 seed_path.with_suffix(seed_path.suffix + ".sig").write_text(
-    f"SOUNIO-SEED-SIG-V1 key=sounio-dev sha256={digest}\n",
+    f"SOUNIO-SEED-SIG-V1 key={trusted_key} sha256={digest}\n",
     encoding="utf-8",
 )
 print(f"seed={seed_path}")

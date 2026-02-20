@@ -579,6 +579,16 @@ diff -u s1.txt s2.txt
 
 For production use, the self-hosted compiler is now the canonical implementation.
 
+If you must temporarily force the legacy Rust pipeline for transition debugging, opt in explicitly:
+
+```bash
+SOUNIO_SELFHOST_PIPELINE=rust SOUNIO_RUST_GHOST=1 cargo run -- run your_program.sio
+```
+
+Without `SOUNIO_RUST_GHOST=1`, `SOUNIO_SELFHOST_PIPELINE=rust` is routed back to the driver path.
+When ghost mode is enabled, stderr emits a deterministic marker:
+`SELFHOST=rust-ghost schema=v1 event=transition_warning ...`
+
 ### Q8: How do I debug self-hosted code?
 
 **A**: Use VM tracing and IR inspection:

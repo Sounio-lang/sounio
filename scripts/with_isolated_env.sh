@@ -40,14 +40,37 @@ mkdir -p "$RUN_DIR"
 RUN_DIR="$(cd "$RUN_DIR" && pwd)"
 mkdir -p "$RUN_DIR"/{cargo-home,cargo-target,npm-cache,logs}
 
+DEFAULT_CARGO_HOME="$RUN_DIR/cargo-home"
+DEFAULT_CARGO_TARGET_DIR="$RUN_DIR/cargo-target"
+DEFAULT_NPM_CACHE="$RUN_DIR/npm-cache"
+
+# Optional overrides for faster repeated diagnostics:
+# - SOUNIO_DIAG_SHARED_CARGO_HOME=/path/to/shared/cargo-home
+# - SOUNIO_DIAG_CARGO_HOME=/explicit/cargo-home
+# - SOUNIO_DIAG_CARGO_TARGET_DIR=/explicit/target-dir
+# - SOUNIO_DIAG_CARGO_NET_OFFLINE=1   (sets CARGO_NET_OFFLINE=true)
+if [[ -n "${SOUNIO_DIAG_SHARED_CARGO_HOME:-}" ]]; then
+  DEFAULT_CARGO_HOME="$SOUNIO_DIAG_SHARED_CARGO_HOME"
+fi
+
+EFFECTIVE_CARGO_HOME="${SOUNIO_DIAG_CARGO_HOME:-$DEFAULT_CARGO_HOME}"
+EFFECTIVE_CARGO_TARGET_DIR="${SOUNIO_DIAG_CARGO_TARGET_DIR:-$DEFAULT_CARGO_TARGET_DIR}"
+EFFECTIVE_NPM_CACHE="${SOUNIO_DIAG_NPM_CACHE:-$DEFAULT_NPM_CACHE}"
+
+mkdir -p "$EFFECTIVE_CARGO_HOME" "$EFFECTIVE_CARGO_TARGET_DIR" "$EFFECTIVE_NPM_CACHE"
+
 export SOUNIO_DIAG_RUN_DIR="$RUN_DIR"
 export SOUNIO_DIAG_ARTIFACT_DIR="$RUN_DIR"
 export SOUNIO_DIAG_ISOLATED=1
-export CARGO_HOME="$RUN_DIR/cargo-home"
-export CARGO_TARGET_DIR="$RUN_DIR/cargo-target"
+export CARGO_HOME="$EFFECTIVE_CARGO_HOME"
+export CARGO_TARGET_DIR="$EFFECTIVE_CARGO_TARGET_DIR"
 export CARGO_INCREMENTAL=0
-export npm_config_cache="$RUN_DIR/npm-cache"
-export NPM_CONFIG_CACHE="$RUN_DIR/npm-cache"
+export npm_config_cache="$EFFECTIVE_NPM_CACHE"
+export NPM_CONFIG_CACHE="$EFFECTIVE_NPM_CACHE"
+
+if [[ "${SOUNIO_DIAG_CARGO_NET_OFFLINE:-0}" == "1" ]]; then
+  export CARGO_NET_OFFLINE=true
+fi
 
 if [[ $# -eq 0 ]]; then
   cat <<EOF
@@ -56,6 +79,7 @@ SOUNIO_DIAG_ISOLATED=$SOUNIO_DIAG_ISOLATED
 CARGO_HOME=$CARGO_HOME
 CARGO_TARGET_DIR=$CARGO_TARGET_DIR
 npm_config_cache=$npm_config_cache
+CARGO_NET_OFFLINE=${CARGO_NET_OFFLINE:-}
 EOF
   exit 0
 fi

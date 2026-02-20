@@ -5,6 +5,7 @@ use std::process::{Command, Output};
 const DRIVER_ENTRYPOINT_COMPILE_FILE: &str = "bootstrap::driver::compile_file";
 const BOOTSTRAP_SEED_FIXTURE: &str = "sounio-bootstrap-linux-x86_64.sio.bin";
 const BOOTSTRAP_SEED_VERSION_OFFSET: usize = 8;
+const BOOTSTRAP_SEED_TRUSTED_KEY: &str = "sounio-dev";
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -87,8 +88,35 @@ fn run_selfhost_root_with_seed(
         .env("SOUNIO_BOOTSTRAP_SEED_SHA256_PATH", checksum_path)
         .env("SOUNIO_BOOTSTRAP_SEED_SIG_PATH", sig_path)
         .env("SOUNIO_BOOTSTRAP_SEED_REQUIRE_SIGNATURE", "1")
+        .env(
+            "SOUNIO_BOOTSTRAP_SEED_TRUSTED_KEY",
+            BOOTSTRAP_SEED_TRUSTED_KEY,
+        )
         .output()
         .expect("run souc self-hosted root with seed policy")
+}
+
+fn run_selfhost_root_in_transition_mode_with_seed(
+    root: &Path,
+    stdlib_path: &Path,
+    seed_path: &Path,
+    checksum_path: &Path,
+    sig_path: &Path,
+) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_souc"))
+        .current_dir(root)
+        .arg("run")
+        .arg("self-hosted")
+        .env("SOUNIO_STDLIB_PATH", stdlib_path)
+        .env("SOUNIO_SELFHOST_PIPELINE", "rust")
+        .env("SOUNIO_RUST_GHOST", "1")
+        .env("SOUNIO_BOOTSTRAP_SEED_ENFORCE", "0")
+        .env("SOUNIO_BOOTSTRAP_SEED_PATH", seed_path)
+        .env("SOUNIO_BOOTSTRAP_SEED_SHA256_PATH", checksum_path)
+        .env("SOUNIO_BOOTSTRAP_SEED_SIG_PATH", sig_path)
+        .env("SOUNIO_BOOTSTRAP_SEED_REQUIRE_SIGNATURE", "1")
+        .output()
+        .expect("run souc self-hosted root in transition mode with seed policy")
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -100,10 +128,12 @@ fn sha256_hex(bytes: &[u8]) -> String {
 fn write_seed_digest_files(seed_path: &Path, checksum_path: &Path, sig_path: &Path) {
     let seed_bytes = std::fs::read(seed_path).expect("read seed fixture bytes");
     let digest = sha256_hex(&seed_bytes);
-    std::fs::write(checksum_path, format!("{digest}  seed.bin\n"))
-        .expect("write checksum fixture");
-    std::fs::write(sig_path, format!("SOUNIO-SEED-SIG-V1 sha256={digest}\n"))
-        .expect("write signature fixture");
+    std::fs::write(checksum_path, format!("{digest}  seed.bin\n")).expect("write checksum fixture");
+    std::fs::write(
+        sig_path,
+        format!("SOUNIO-SEED-SIG-V1 key={BOOTSTRAP_SEED_TRUSTED_KEY} sha256={digest}\n"),
+    )
+    .expect("write signature fixture");
 }
 
 fn corrupt_seed(seed_path: &Path) {
@@ -817,8 +847,11 @@ fn selfhost_root_seed_enforce_rejects_invalid_signature_digest() {
     let stdlib_path = root.join("stdlib").join("compiler");
     let (temp_dir, seed_path, checksum_path, sig_path) =
         copy_seed_fixture_to_temp("invalid_signature_digest");
-    std::fs::write(&sig_path, "SOUNIO-SEED-SIG-V1 sha256=not-hex-digest\n")
-        .expect("write invalid digest signature fixture");
+    std::fs::write(
+        &sig_path,
+        format!("SOUNIO-SEED-SIG-V1 key={BOOTSTRAP_SEED_TRUSTED_KEY} sha256=not-hex-digest\n"),
+    )
+    .expect("write invalid digest signature fixture");
 
     let output =
         run_selfhost_root_with_seed(&root, &stdlib_path, &seed_path, &checksum_path, &sig_path);
@@ -847,6 +880,53 @@ fn selfhost_root_seed_enforce_rejects_invalid_signature_digest() {
     assert!(
         !stderr.contains("SELFHOST=seed schema=v1 event=bootstrap_seed status=ok"),
         "did not expect seed success marker when signature digest is invalid, got: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("SELFHOST=driver-first schema=v1 event=compile_start"),
+        "did not expect driver pipeline markers when seed enforcement is fail-closed, got: {stderr:?}"
+    );
+}
+
+#[test]
+fn selfhost_root_seed_enforce_rejects_untrusted_signature_key() {
+    let root = workspace_root();
+    let stdlib_path = root.join("stdlib").join("compiler");
+    let (temp_dir, seed_path, checksum_path, sig_path) = copy_seed_fixture_to_temp("untrusted_key");
+    let seed_bytes = std::fs::read(&seed_path).expect("read seed fixture bytes");
+    let digest = sha256_hex(&seed_bytes);
+    std::fs::write(
+        &sig_path,
+        format!("SOUNIO-SEED-SIG-V1 key=staging-key sha256={digest}\n"),
+    )
+    .expect("write untrusted-key signature fixture");
+
+    let output =
+        run_selfhost_root_with_seed(&root, &stdlib_path, &seed_path, &checksum_path, &sig_path);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    assert!(
+        !output.status.success(),
+        "expected seed-enforced self-hosted root run to fail for untrusted signature key"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_stderr_contains(
+        &stderr,
+        "SELFHOST=run schema=v1 event=selfhost_input_check status=resolved input=self-hosted/main.sio args=1",
+        "expected deterministic self-hosted root resolution marker",
+    );
+    assert!(
+        stderr.contains("Self-hosted compile failed for self-hosted/main.sio"),
+        "expected compile failure prefix, got: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("BOOTSTRAP_SEED_SIGNATURE_UNTRUSTED_KEY"),
+        "expected untrusted-signature-key token, got: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("SELFHOST=seed schema=v1 event=bootstrap_seed status=ok"),
+        "did not expect seed success marker when signature key is untrusted, got: {stderr:?}"
     );
     assert!(
         !stderr.contains("SELFHOST=driver-first schema=v1 event=compile_start"),
@@ -940,6 +1020,142 @@ fn selfhost_root_seed_enforce_rejects_unsupported_seed_version() {
 }
 
 #[test]
+fn selfhost_root_transition_mode_fails_closed_when_seed_is_missing() {
+    let root = workspace_root();
+    let stdlib_path = root.join("stdlib").join("compiler");
+    let missing_seed = write_temp_dir_path("missing_seed_root_transition");
+    let missing_checksum = PathBuf::from(format!("{}.sha256", missing_seed.display()));
+    let missing_sig = PathBuf::from(format!("{}.sig", missing_seed.display()));
+
+    let output = run_selfhost_root_in_transition_mode_with_seed(
+        &root,
+        &stdlib_path,
+        &missing_seed,
+        &missing_checksum,
+        &missing_sig,
+    );
+
+    assert!(
+        !output.status.success(),
+        "expected transition-mode self-hosted root run to fail when seed is missing"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_stderr_contains(
+        &stderr,
+        "SELFHOST=run schema=v1 event=selfhost_preflight status=skipped path=self-hosted/main.sio reason=seed_enforced",
+        "expected wrapper preflight to be skipped in transition mode",
+    );
+    assert!(
+        stderr.contains("Self-hosted compile failed for self-hosted/main.sio"),
+        "expected compile failure prefix, got: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("BOOTSTRAP_SEED_MISSING"),
+        "expected missing-seed failure token, got: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("SELFHOST=driver-first schema=v1 event=compile_start"),
+        "did not expect driver pipeline markers in transition-mode seed failure, got: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("SELFHOST=rust-ghost schema=v1 event=transition_warning"),
+        "did not expect rust transition warning on seed-only transition root path, got: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("GHOST MODE"),
+        "did not expect rust bridge warning on seed-only transition root path, got: {stderr:?}"
+    );
+}
+
+#[test]
+fn selfhost_root_transition_mode_rejects_corrupted_seed() {
+    let root = workspace_root();
+    let stdlib_path = root.join("stdlib").join("compiler");
+    let (temp_dir, seed_path, checksum_path, sig_path) =
+        copy_seed_fixture_to_temp("corrupted_seed_transition");
+    corrupt_seed(&seed_path);
+
+    let output = run_selfhost_root_in_transition_mode_with_seed(
+        &root,
+        &stdlib_path,
+        &seed_path,
+        &checksum_path,
+        &sig_path,
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    assert!(
+        !output.status.success(),
+        "expected transition-mode self-hosted root run to fail for corrupted seed"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_stderr_contains(
+        &stderr,
+        "SELFHOST=run schema=v1 event=selfhost_preflight status=skipped path=self-hosted/main.sio reason=seed_enforced",
+        "expected wrapper preflight to be skipped in transition mode",
+    );
+    assert!(
+        stderr.contains("BOOTSTRAP_SEED_CHECKSUM_MISMATCH"),
+        "expected checksum mismatch token for corrupted seed, got: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("SELFHOST=driver-first schema=v1 event=compile_start"),
+        "did not expect driver pipeline markers in transition-mode seed failure, got: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("GHOST MODE"),
+        "did not expect rust bridge warning on seed-only transition root path, got: {stderr:?}"
+    );
+}
+
+#[test]
+fn selfhost_root_transition_mode_rejects_unsupported_seed_version() {
+    let root = workspace_root();
+    let stdlib_path = root.join("stdlib").join("compiler");
+    let (temp_dir, seed_path, checksum_path, sig_path) =
+        copy_seed_fixture_to_temp("unsupported_seed_version_transition");
+    overwrite_seed_version(&seed_path, 2);
+    write_seed_digest_files(&seed_path, &checksum_path, &sig_path);
+
+    let output = run_selfhost_root_in_transition_mode_with_seed(
+        &root,
+        &stdlib_path,
+        &seed_path,
+        &checksum_path,
+        &sig_path,
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    assert!(
+        !output.status.success(),
+        "expected transition-mode self-hosted root run to fail for unsupported seed version"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_stderr_contains(
+        &stderr,
+        "SELFHOST=run schema=v1 event=selfhost_preflight status=skipped path=self-hosted/main.sio reason=seed_enforced",
+        "expected wrapper preflight to be skipped in transition mode",
+    );
+    assert!(
+        stderr.contains("BOOTSTRAP_SEED_UNSUPPORTED_VERSION"),
+        "expected unsupported-version token, got: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("SELFHOST=driver-first schema=v1 event=compile_start"),
+        "did not expect driver pipeline markers in transition-mode seed failure, got: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("GHOST MODE"),
+        "did not expect rust bridge warning on seed-only transition root path, got: {stderr:?}"
+    );
+}
+
+#[test]
 fn selfhost_pipeline_rust_without_ghost_stays_on_driver_path() {
     let root = workspace_root();
     let program = write_temp_program("rust_pipeline_no_ghost");
@@ -1003,6 +1219,18 @@ fn selfhost_pipeline_rust_with_ghost_emits_transition_warning() {
     assert!(stdout.trim() == "42", "expected stdout 42, got: {stdout:?}");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
+    let transition_warning_count = stderr
+        .matches("SELFHOST=rust-ghost schema=v1 event=transition_warning")
+        .count();
+    assert!(
+        transition_warning_count == 1,
+        "expected exactly one deterministic rust ghost transition warning, got count={} stderr={stderr:?}",
+        transition_warning_count
+    );
+    assert!(
+        stderr.contains("gate=SOUNIO_RUST_GHOST path=SOUNIO_SELFHOST_PIPELINE=rust"),
+        "expected transition warning marker to include gate/path payload, got: {stderr:?}"
+    );
     assert!(
         stderr.contains("GHOST MODE"),
         "expected ghost mode warning in stderr, got: {stderr:?}"

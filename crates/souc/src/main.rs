@@ -3053,13 +3053,7 @@ fn run(
             .and_then(|part| part.to_str())
             .is_some_and(|name| name == "self-hosted");
 
-    let seed_enforced_for_wrapper = std::env::var("SOUNIO_BOOTSTRAP_SEED_ENFORCE")
-        .ok()
-        .map(|value| {
-            let normalized = value.trim().to_ascii_lowercase();
-            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
-        })
-        .unwrap_or(!cfg!(debug_assertions));
+    let seed_enforced_for_wrapper = sounio::compiler_loader::selfhost_root_seed_enforced();
 
     if is_self_hosted_root {
         let main_path = input_path.join("main.sio");

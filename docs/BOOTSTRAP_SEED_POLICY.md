@@ -31,8 +31,17 @@ Loader validation:
 2. Verify SHA-256 against `.sha256` sidecar.
 3. Verify `.sig` sidecar contains:
    - marker `SOUNIO-SEED-SIG-V1`
-   - digest matching the seed SHA-256.
+   - `key=<trusted-key>`
+   - `sha256=<digest>` matching the seed SHA-256.
 4. Decode header and payload.
+5. Enforce:
+   - `reserved == 0` in seed header
+   - payload length <= max cache payload budget (`DIR_BYTECODE_CACHE_MAX_BYTES`)
+
+Trusted key source:
+
+- env: `SOUNIO_BOOTSTRAP_SEED_TRUSTED_KEY`
+- default: `sounio-dev`
 
 This is a transition policy: the `.sig` file is an attestation envelope with
 digest binding. A future phase can replace it with asymmetric signature
@@ -45,8 +54,9 @@ fails hard on:
 
 - missing seed
 - checksum mismatch/parse failure
-- signature marker/digest mismatch
-- invalid header/magic/version/length
+- signature marker/key/digest mismatch
+- invalid header/magic/version/reserved/length
+- payload exceeds max seed payload budget
 - payload decode failure
 
 When enforcement is disabled, the loader warns and falls back to dynamic
@@ -54,7 +64,13 @@ self-host compilation paths.
 
 ## Wrapper Behavior (Seed-Enforced)
 
-For `souc run self-hosted/` with seed enforcement enabled:
+For `souc run self-hosted/`, seed-enforced wrapper mode activates when either:
+
+- `SOUNIO_BOOTSTRAP_SEED_ENFORCE=1`, or
+- transition legacy path is explicitly requested:
+  `SOUNIO_SELFHOST_PIPELINE=rust` + `SOUNIO_RUST_GHOST=1`.
+
+In seed-enforced wrapper mode:
 
 1. Wrapper resolves `self-hosted/main.sio`.
 2. Wrapper emits a deterministic preflight skip marker:
@@ -84,3 +100,4 @@ Relevant environment overrides:
 - `BOOTSTRAP_KERNEL_MANIFEST_PATH`: explicit manifest path used by the seed build script.
 - `SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST`: alternate manifest override; if set, it is used as
   the default for `BOOTSTRAP_KERNEL_MANIFEST_PATH`.
+- `SOUNIO_BOOTSTRAP_SEED_TRUSTED_KEY`: key label emitted into `.sig` and required by loader.
