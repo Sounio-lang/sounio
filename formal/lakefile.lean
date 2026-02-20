@@ -1,0 +1,8 @@
+import Lake
+open Lake DSL
+
+package sounio where
+  name := "sounio-formal"
+
+lean_lib Sounio where
+  roots := #[`ElfLinker, `TypeChecker]
