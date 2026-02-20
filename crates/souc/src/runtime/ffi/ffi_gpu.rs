@@ -114,7 +114,7 @@ pub unsafe extern "C" fn __sounio_gpu_copy_htod(
         return -1;
     }
 
-    let data = std::slice::from_raw_parts(src, size);
+    let data = unsafe { std::slice::from_raw_parts(src, size) };
     let bridge = get_gpu_bridge();
     match bridge.lock() {
         Ok(mut b) => match b.copy_htod(buffer_id, data) {
@@ -146,7 +146,7 @@ pub unsafe extern "C" fn __sounio_gpu_copy_dtoh(
         return -1;
     }
 
-    let data = std::slice::from_raw_parts_mut(dst, size);
+    let data = unsafe { std::slice::from_raw_parts_mut(dst, size) };
     let bridge = get_gpu_bridge();
     match bridge.lock() {
         Ok(mut b) => match b.copy_dtoh(buffer_id, data) {
@@ -178,8 +178,8 @@ pub unsafe extern "C" fn __sounio_gpu_load_ptx(
         return 0;
     }
 
-    let ptx_slice = std::slice::from_raw_parts(ptx_ptr, ptx_len);
-    let name_slice = std::slice::from_raw_parts(name_ptr, name_len);
+    let ptx_slice = unsafe { std::slice::from_raw_parts(ptx_ptr, ptx_len) };
+    let name_slice = unsafe { std::slice::from_raw_parts(name_ptr, name_len) };
 
     let ptx_str = match std::str::from_utf8(ptx_slice) {
         Ok(s) => s,
@@ -228,8 +228,8 @@ pub unsafe extern "C" fn __sounio_gpu_launch(
     let kernel_args: Vec<KernelArg> = if args.is_null() || num_args == 0 {
         Vec::new()
     } else {
-        let ffi_args = std::slice::from_raw_parts(args, num_args);
-        ffi_args.iter().map(|a| a.to_kernel_arg()).collect()
+        let ffi_args = unsafe { std::slice::from_raw_parts(args, num_args) };
+        ffi_args.iter().map(|a| unsafe { a.to_kernel_arg() }).collect()
     };
 
     let bridge = get_gpu_bridge();
@@ -256,7 +256,7 @@ pub unsafe extern "C" fn __sounio_gpu_launch(
 pub extern "C" fn __sounio_gpu_sync() -> i32 {
     let bridge = get_gpu_bridge();
     match bridge.lock() {
-        Ok(mut b) => match b.synchronize() {
+        Ok(b) => match b.synchronize() {
             Ok(()) => 0,
             Err(_) => -1,
         },
@@ -290,12 +290,12 @@ pub union KernelArgValue {
 impl KernelArgFFI {
     unsafe fn to_kernel_arg(&self) -> KernelArg {
         match self.tag {
-            0 => KernelArg::Buffer(self.value.buffer_id as *mut std::ffi::c_void),
-            1 => KernelArg::Float32(self.value.f32_val),
-            2 => KernelArg::Float64(self.value.f64_val),
-            3 => KernelArg::Int32(self.value.i32_val),
-            4 => KernelArg::UInt32(self.value.u32_val),
-            _ => KernelArg::Int32(0), // fallback
+            0 => KernelArg::Buffer(unsafe { self.value.buffer_id } as *mut std::ffi::c_void),
+            1 => KernelArg::Float32(unsafe { self.value.f32_val }),
+            2 => KernelArg::Float64(unsafe { self.value.f64_val }),
+            3 => KernelArg::Int32(unsafe { self.value.i32_val }),
+            4 => KernelArg::UInt32(unsafe { self.value.u32_val }),
+            _ => KernelArg::Int32(0),
         }
     }
 }
