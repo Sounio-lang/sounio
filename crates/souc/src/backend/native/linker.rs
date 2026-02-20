@@ -147,7 +147,7 @@ impl LinkerConfig {
 pub enum LinkerFlavor {
     /// GNU ld
     Gnu,
-    /// LLVM lld
+    /// LLVM lld (ELF/Mach-O)
     Lld,
     /// GNU gold
     Gold,
@@ -155,6 +155,10 @@ pub enum LinkerFlavor {
     Mold,
     /// macOS ld64
     Darwin,
+    /// Microsoft link.exe (MSVC toolchain, produces PE/COFF)
+    Msvc,
+    /// LLVM lld-link (COFF/PE, drop-in replacement for link.exe)
+    LldLink,
 }
 
 impl LinkerFlavor {
@@ -166,7 +170,14 @@ impl LinkerFlavor {
             LinkerFlavor::Gold => "ld.gold",
             LinkerFlavor::Mold => "mold",
             LinkerFlavor::Darwin => "ld",
+            LinkerFlavor::Msvc => "link.exe",
+            LinkerFlavor::LldLink => "lld-link",
         }
+    }
+
+    /// Returns true if this linker targets the Windows PE/COFF format.
+    pub fn is_windows(&self) -> bool {
+        matches!(self, LinkerFlavor::Msvc | LinkerFlavor::LldLink)
     }
 }
 

@@ -86,6 +86,7 @@ pub mod effects;
 pub mod elf;
 pub mod epistemic_runtime;
 pub mod linker;
+pub mod pe;
 pub mod metrics;
 pub mod ode_runtime;
 pub mod quat_runtime;
