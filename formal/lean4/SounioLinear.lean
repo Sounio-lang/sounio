@@ -358,4 +358,102 @@ theorem promotion_exhausted_any
     in particular at One (a single use is always valid). -/
 theorem dereliction_one_ok : wellUsed Unrestricted .One := trivial
 
+-- ================================================================
+-- §10. Distributive Lattice
+-- ================================================================
+
+/-- The modality lattice is distributive: meet distributes over join. -/
+theorem modality_meet_distrib (m n k : Modality) :
+    m.meet (n.join k) = (m.meet n).join (m.meet k) := by
+  cases m <;> cases n <;> cases k <;> rfl
+
+/-- The modality lattice is distributive: join distributes over meet. -/
+theorem modality_join_distrib (m n k : Modality) :
+    m.join (n.meet k) = (m.join n).meet (m.join k) := by
+  cases m <;> cases n <;> cases k <;> rfl
+
+-- ================================================================
+-- §11. Extended Structural Rule Monotonicity
+-- ================================================================
+
+/-- Contraction is monotone in the lattice:
+    if m1.meet m2 = m1 and m1 allows contraction, then m2 allows contraction. -/
+theorem contraction_monotone (m1 m2 : Modality)
+    (h_le : m1.meet m2 = m1)
+    (hc   : m1.allowsContraction = true) :
+    m2.allowsContraction = true := by
+  cases m1 <;> cases m2 <;>
+    simp_all [Modality.meet, Modality.allowsContraction]
+
+/-- Weakening is preserved upward by join: if m allows weakening, so does m.join n. -/
+theorem allowsWeakening_join (m n : Modality)
+    (hw : m.allowsWeakening = true) :
+    (m.join n).allowsWeakening = true := by
+  cases m <;> cases n <;>
+    simp_all [Modality.join, Modality.allowsWeakening]
+
+/-- Contraction is preserved upward by join: if m allows contraction, so does m.join n. -/
+theorem allowsContraction_join (m n : Modality)
+    (hc : m.allowsContraction = true) :
+    (m.join n).allowsContraction = true := by
+  cases m <;> cases n <;>
+    simp_all [Modality.join, Modality.allowsContraction]
+
+/-- mustUse is preserved downward by meet:
+    the meet of a must-use modality with anything stays must-use. -/
+theorem mustUse_meet (m n : Modality)
+    (hm : m.mustUse = true) :
+    (m.meet n).mustUse = true := by
+  cases m <;> cases n <;>
+    simp_all [Modality.meet, Modality.mustUse]
+
+-- ================================================================
+-- §12. Additional WellUsed Properties
+-- ================================================================
+
+/-- Using a resource exactly once satisfies every modality. -/
+theorem wellUsed_one_always (m : Modality) : wellUsed m .One := by
+  cases m <;> exact trivial
+
+/-- Relaxing a modality via join preserves well-usedness. -/
+theorem wellUsed_join_left (m n : Modality) (u : UsageCount)
+    (hw : wellUsed m u) : wellUsed (m.join n) u := by
+  cases m <;> cases n <;> cases u <;>
+    simp_all [wellUsed, Modality.join]
+
+/-- Strengthening a modality via meet preserves non-well-usedness. -/
+theorem not_wellUsed_meet (m n : Modality) (u : UsageCount)
+    (hn : ¬wellUsed m u) : ¬wellUsed (m.meet n) u := by
+  cases m <;> cases n <;> cases u <;>
+    simp_all [wellUsed, Modality.meet]
+
+-- ================================================================
+-- §13. Usage Count Arithmetic
+-- ================================================================
+
+/-- Many is a left-absorbing element for usage addition. -/
+theorem usage_many_absorb_left (u : UsageCount) :
+    UsageCount.Many.add u = .Many := by
+  cases u <;> rfl
+
+/-- Many is a right-absorbing element for usage addition. -/
+theorem usage_many_absorb_right (u : UsageCount) :
+    u.add .Many = .Many := by
+  cases u <;> rfl
+
+/-- One plus One equals Many. -/
+theorem usage_one_plus_one :
+    UsageCount.One.add .One = .Many := rfl
+
+/-- The sum is Zero iff both summands are Zero. -/
+theorem usage_add_zero_iff (u v : UsageCount) :
+    u.add v = .Zero ↔ u = .Zero ∧ v = .Zero := by
+  cases u <;> cases v <;> simp [UsageCount.add]
+
+/-- The sum is Many iff at least one is Many, or both are One. -/
+theorem usage_add_many_iff (u v : UsageCount) :
+    u.add v = .Many ↔ u = .Many ∨ v = .Many ∨ (u = .One ∧ v = .One) := by
+  cases u <;> cases v <;> simp [UsageCount.add]
+
+
 end Sounio.Linear

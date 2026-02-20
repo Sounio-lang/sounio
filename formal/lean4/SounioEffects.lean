@@ -271,4 +271,357 @@ theorem mask_union_right (r₁ r₂ : EffectRow) (e : Effect)
   · subst heq; simp [h]
   · simp [heq]
 
+-- ================================================================
+
+
+end Sounio.Effects
+
+-- ================================================================
+-- §10. SingleRow Properties
+-- ================================================================
+
+/-- The target effect is a member of its own singleton row. -/
+theorem singleRow_member (e : Effect) : e ∈ᵣ singleRow e := by
+  simp [memberOf, singleRow]
+
+/-- Any other effect is not a member of a singleton row. -/
+theorem singleRow_not_member (e f : Effect) (hne : f ≠ e) :
+    ¬(f ∈ᵣ singleRow e) := by
+  simp [memberOf, singleRow, hne]
+
+/-- Membership in a singleton row iff equal to the target. -/
+theorem memberOf_single_iff (e f : Effect) :
+    e ∈ᵣ singleRow f ↔ e = f := by
+  show (if e = f then true else false) = true ↔ e = f
+  by_cases h : e = f <;> simp [h]
+
+/-- Masking a different effect from a singleton row is a no-op. -/
+theorem mask_single_other (e1 e2 : Effect) (hne : e1 ≠ e2) :
+    mask (singleRow e1) e2 = singleRow e1 :=
+  mask_absent_noop _ _ (singleRow_not_member e1 e2 hne.symm)
+
+-- ================================================================
+-- §11. Membership Characterizations
+-- ================================================================
+
+/-- No effect is a member of the pure row. -/
+theorem memberOf_pure_false (e : Effect) : ¬(e ∈ᵣ pureRow) := by
+  simp [memberOf, pureRow]
+
+/-- Membership in a union iff membership in either component. -/
+theorem memberOf_union_iff (e : Effect) (r1 r2 : EffectRow) :
+    e ∈ᵣ rowUnion r1 r2 ↔ (e ∈ᵣ r1 ∨ e ∈ᵣ r2) := by
+  show r1 e || r2 e = true ↔ r1 e = true ∨ r2 e = true
+  cases r1 e <;> cases r2 e <;> simp
+
+/-- A row with no members is the pure row. -/
+theorem pureRow_unique (r : EffectRow) (h : ∀ e, ¬(e ∈ᵣ r)) : r = pureRow := by
+  funext e
+  cases hr : r e
+  · rfl
+  · exact absurd hr (h e)
+
+-- ================================================================
+-- §12. Row Intersection
+-- ================================================================
+
+/-- Intersection of two effect rows: an effect is present iff in both. -/
+def rowInter (r1 r2 : EffectRow) : EffectRow := fun e => r1 e && r2 e
+
+theorem rowInter_comm (r1 r2 : EffectRow) :
+    rowInter r1 r2 = rowInter r2 r1 := by
+  funext e; simp only [rowInter]; cases r1 e <;> cases r2 e <;> rfl
+
+theorem rowInter_assoc (r1 r2 r3 : EffectRow) :
+    rowInter (rowInter r1 r2) r3 = rowInter r1 (rowInter r2 r3) := by
+  funext e; simp only [rowInter]; cases r1 e <;> cases r2 e <;> cases r3 e <;> rfl
+
+theorem rowInter_idempotent (r : EffectRow) :
+    rowInter r r = r := by
+  funext e; simp only [rowInter]; cases r e <;> rfl
+
+theorem rowInter_pure_left (r : EffectRow) :
+    rowInter pureRow r = pureRow := by
+  funext e; simp [rowInter, pureRow]
+
+theorem rowInter_pure_right (r : EffectRow) :
+    rowInter r pureRow = pureRow := by
+  funext e; simp [rowInter, pureRow]
+
+/-- Membership in an intersection iff membership in both components. -/
+theorem memberOf_inter_iff (e : Effect) (r1 r2 : EffectRow) :
+    e ∈ᵣ rowInter r1 r2 ↔ (e ∈ᵣ r1 ∧ e ∈ᵣ r2) := by
+  show r1 e && r2 e = true ↔ r1 e = true ∧ r2 e = true
+  cases r1 e <;> cases r2 e <;> simp
+
+/-- Intersection is a lower bound: r1 ∩ r2 ⊆ r1. -/
+theorem effectSubrow_inter_left (r1 r2 : EffectRow) :
+    effectSubrow (rowInter r1 r2) r1 := by
+  intro e he
+  simp only [rowInter] at he
+  cases h1 : r1 e <;> cases h2 : r2 e <;> simp_all
+
+/-- Intersection is a lower bound: r1 ∩ r2 ⊆ r2. -/
+theorem effectSubrow_inter_right (r1 r2 : EffectRow) :
+    effectSubrow (rowInter r1 r2) r2 := by
+  intro e he
+  simp only [rowInter] at he
+  cases h1 : r1 e <;> cases h2 : r2 e <;> simp_all
+
+/-- Intersection is the greatest lower bound: r ⊆ r1 ∧ r ⊆ r2 → r ⊆ r1 ∩ r2. -/
+theorem effectSubrow_inter_glb (r r1 r2 : EffectRow)
+    (h1 : effectSubrow r r1) (h2 : effectSubrow r r2) :
+    effectSubrow r (rowInter r1 r2) := by
+  intro e he
+  simp only [rowInter]
+  simp [h1 e he, h2 e he]
+
+/-- Intersection distributes over union (Boolean law). -/
+theorem rowInter_union_distrib (r1 r2 r3 : EffectRow) :
+    rowInter r1 (rowUnion r2 r3) = rowUnion (rowInter r1 r2) (rowInter r1 r3) := by
+  funext e; simp only [rowInter, rowUnion]
+  cases r1 e <;> cases r2 e <;> cases r3 e <;> rfl
+
+/-- Union distributes over intersection (Boolean law). -/
+theorem rowUnion_inter_distrib (r1 r2 r3 : EffectRow) :
+    rowUnion r1 (rowInter r2 r3) = rowInter (rowUnion r1 r2) (rowUnion r1 r3) := by
+  funext e; simp only [rowUnion, rowInter]
+  cases r1 e <;> cases r2 e <;> cases r3 e <;> rfl
+
+/-- Absorption: r1 ∩ (r1 ∪ r2) = r1. -/
+theorem rowInter_union_absorb (r1 r2 : EffectRow) :
+    rowInter r1 (rowUnion r1 r2) = r1 := by
+  funext e; simp only [rowInter, rowUnion]; cases r1 e <;> cases r2 e <;> rfl
+
+/-- Absorption: r1 ∪ (r1 ∩ r2) = r1. -/
+theorem rowUnion_inter_absorb (r1 r2 : EffectRow) :
+    rowUnion r1 (rowInter r1 r2) = r1 := by
+  funext e; simp only [rowUnion, rowInter]; cases r1 e <;> cases r2 e <;> rfl
+
+-- ================================================================
+-- §13. Monotonicity
+-- ================================================================
+
+/-- Union is monotone on the left: r1 ⊆ r2 implies r1 ∪ r3 ⊆ r2 ∪ r3. -/
+theorem effectSubrow_union_mono_left (r1 r2 r3 : EffectRow)
+    (h : effectSubrow r1 r2) :
+    effectSubrow (rowUnion r1 r3) (rowUnion r2 r3) := by
+  intro e he
+  simp only [rowUnion] at *
+  cases h1 : r1 e <;> cases h3 : r3 e <;> simp_all
+  exact h e h1
+
+/-- Union is monotone on the right: r1 ⊆ r2 implies r3 ∪ r1 ⊆ r3 ∪ r2. -/
+theorem effectSubrow_union_mono_right (r1 r2 r3 : EffectRow)
+    (h : effectSubrow r1 r2) :
+    effectSubrow (rowUnion r3 r1) (rowUnion r3 r2) := by
+  intro e he
+  simp only [rowUnion] at *
+  cases h3 : r3 e <;> cases h1 : r1 e <;> simp_all
+  exact h e h1
+
+/-- Masking is monotone: r1 ⊆ r2 implies mask r1 e ⊆ mask r2 e. -/
+theorem effectSubrow_mask_mono (r1 r2 : EffectRow) (e : Effect)
+    (h : effectSubrow r1 r2) :
+    effectSubrow (mask r1 e) (mask r2 e) := by
+  intro f hf
+  simp only [mask] at *
+  by_cases heq : f = e
+  · subst heq; simp at hf
+  · simp [heq] at hf ⊢; exact h f hf
+
+/-- Intersection is monotone on the left: r1 ⊆ r2 implies r1 ∩ r3 ⊆ r2 ∩ r3. -/
+theorem effectSubrow_inter_mono_left (r1 r2 r3 : EffectRow)
+    (h : effectSubrow r1 r2) :
+    effectSubrow (rowInter r1 r3) (rowInter r2 r3) := by
+  intro e he
+  simp only [rowInter] at *
+  cases h1 : r1 e <;> cases h3 : r3 e <;> simp_all
+  exact h e h1
+
+-- ================================================================
+-- §14. Row Complement (Boolean Algebra)
+-- ================================================================
+
+/-- The complement of an effect row: e is present iff absent in r. -/
+def rowComplement (r : EffectRow) : EffectRow := fun e => !r e
+
+/-- Double complement is the identity (involution). -/
+theorem rowComplement_involution (r : EffectRow) :
+    rowComplement (rowComplement r) = r := by
+  funext e; simp [rowComplement]
+
+/-- De Morgan: complement of union = intersection of complements. -/
+theorem rowComplement_union (r1 r2 : EffectRow) :
+    rowComplement (rowUnion r1 r2) = rowInter (rowComplement r1) (rowComplement r2) := by
+  funext e; simp only [rowComplement, rowUnion, rowInter]
+  cases r1 e <;> cases r2 e <;> rfl
+
+/-- De Morgan: complement of intersection = union of complements. -/
+theorem rowComplement_inter (r1 r2 : EffectRow) :
+    rowComplement (rowInter r1 r2) = rowUnion (rowComplement r1) (rowComplement r2) := by
+  funext e; simp only [rowComplement, rowInter, rowUnion]
+  cases r1 e <;> cases r2 e <;> rfl
+
+/-- A row unioned with its complement covers every effect. -/
+theorem rowUnion_complement_full (r : EffectRow) :
+    rowUnion r (rowComplement r) = fun _ => true := by
+  funext e; simp only [rowUnion, rowComplement]; cases r e <;> rfl
+
+/-- A row intersected with its complement is the pure row. -/
+theorem rowInter_complement_pure (r : EffectRow) :
+    rowInter r (rowComplement r) = pureRow := by
+  funext e; simp only [rowInter, rowComplement, pureRow]; cases r e <;> rfl
+
+/-- Complement is anti-monotone: r1 ⊆ r2 implies complement(r2) ⊆ complement(r1). -/
+theorem effectSubrow_complement_antimono (r1 r2 : EffectRow)
+    (h : effectSubrow r1 r2) :
+    effectSubrow (rowComplement r2) (rowComplement r1) := by
+  intro e he
+  simp only [rowComplement] at *
+  cases h1 : r1 e
+  · rfl
+  · exact absurd (h e h1) (by simp_all)
+
+-- ================================================================
+-- §15. All-Effects Row (Top Element)
+-- ================================================================
+
+/-- The all-effects row: every effect is present. -/
+def allEffectsRow : EffectRow := fun _ => true
+
+/-- allEffectsRow is the top of the effect lattice: everything is a subrow. -/
+theorem effectSubrow_allEffects (r : EffectRow) :
+    effectSubrow r allEffectsRow :=
+  fun _ _ => rfl
+
+/-- Union with allEffectsRow on the right absorbs everything. -/
+theorem rowUnion_allEffects_right (r : EffectRow) :
+    rowUnion r allEffectsRow = allEffectsRow := by
+  funext e; simp [rowUnion, allEffectsRow]
+
+/-- Union with allEffectsRow on the left absorbs everything. -/
+theorem rowUnion_allEffects_left (r : EffectRow) :
+    rowUnion allEffectsRow r = allEffectsRow := by
+  funext e; simp [rowUnion, allEffectsRow]
+
+/-- Intersection with allEffectsRow on the right is the identity. -/
+theorem rowInter_allEffects_right (r : EffectRow) :
+    rowInter r allEffectsRow = r := by
+  funext e; simp [rowInter, allEffectsRow]
+
+/-- Intersection with allEffectsRow on the left is the identity. -/
+theorem rowInter_allEffects_left (r : EffectRow) :
+    rowInter allEffectsRow r = r := by
+  funext e; simp [rowInter, allEffectsRow]
+
+/-- The complement of pureRow is allEffectsRow. -/
+theorem rowComplement_pure_is_all :
+    rowComplement pureRow = allEffectsRow := by
+  funext e; simp [rowComplement, pureRow, allEffectsRow]
+
+/-- The complement of allEffectsRow is pureRow. -/
+theorem rowComplement_all_is_pure :
+    rowComplement allEffectsRow = pureRow := by
+  funext e; simp [rowComplement, allEffectsRow, pureRow]
+
+-- ================================================================
+-- §16. Disjoint Rows
+-- ================================================================
+
+/-- Two rows are disjoint if they share no effects. -/
+def rowDisjoint (r1 r2 : EffectRow) : Prop :=
+  rowInter r1 r2 = pureRow
+
+theorem rowDisjoint_comm (r1 r2 : EffectRow)
+    (h : rowDisjoint r1 r2) : rowDisjoint r2 r1 := by
+  unfold rowDisjoint at *; rw [rowInter_comm]; exact h
+
+theorem rowDisjoint_pure_left (r : EffectRow) : rowDisjoint pureRow r :=
+  rowInter_pure_left r
+
+theorem rowDisjoint_pure_right (r : EffectRow) : rowDisjoint r pureRow :=
+  rowInter_pure_right r
+
+/-- A singleton row is disjoint from any row not containing that effect. -/
+theorem rowDisjoint_single_absent (e : Effect) (r : EffectRow)
+    (hab : ¬(e ∈ᵣ r)) : rowDisjoint (singleRow e) r := by
+  unfold rowDisjoint
+  funext f; simp only [rowInter, pureRow]
+  by_cases heq : f = e
+  · subst heq
+    simp only [singleRow, ite_true]
+    cases hr : r f
+    · rfl
+    · exact absurd hr hab
+  · simp [singleRow, heq]
+
+/-- A singleton {e} is disjoint from the row produced by masking e. -/
+theorem rowDisjoint_single_mask (e : Effect) (r : EffectRow) :
+    rowDisjoint (singleRow e) (mask r e) :=
+  rowDisjoint_single_absent e (mask r e) (mask_removes r e)
+
+/-- Disjointness is preserved under union: (r1 ⊥ r3) ∧ (r2 ⊥ r3) → (r1 ∪ r2) ⊥ r3. -/
+theorem rowDisjoint_union_inter (r1 r2 r3 : EffectRow)
+    (h1 : rowDisjoint r1 r3) (h2 : rowDisjoint r2 r3) :
+    rowDisjoint (rowUnion r1 r2) r3 := by
+  unfold rowDisjoint at *
+  funext e
+  have he1 : r1 e && r3 e = false := by
+    have := congrFun h1 e; simp [rowInter, pureRow] at this; exact this
+  have he2 : r2 e && r3 e = false := by
+    have := congrFun h2 e; simp [rowInter, pureRow] at this; exact this
+  simp only [rowInter, rowUnion, pureRow]
+  cases r1 e <;> cases r2 e <;> cases r3 e <;> simp_all
+
+-- ================================================================
+-- §17. maskAll — Handle All Effects
+-- ================================================================
+
+/-- Apply handlers for all 10 named effects in order. -/
+def maskAll (r : EffectRow) : EffectRow :=
+  mask (mask (mask (mask (mask
+  (mask (mask (mask (mask (mask r
+    .IO) .Mut) .Alloc) .Prob) .GPU)
+    .Epistemic) .Div) .Exn) .Async) .FFI
+
+/-- Applying handlers for all effects always produces the pure row. -/
+theorem maskAll_pure (r : EffectRow) : maskAll r = pureRow := by
+  funext e; cases e <;> simp [maskAll, mask, pureRow]
+
+-- ================================================================
+-- §18. Additional Mask and Union Properties
+-- ================================================================
+
+/-- Masking distributes over union when the effect is absent from the left. -/
+theorem mask_union_left (r1 r2 : EffectRow) (e : Effect)
+    (h : r1 e = false) :
+    mask (rowUnion r1 r2) e = rowUnion r1 (mask r2 e) := by
+  funext f; simp only [mask, rowUnion]
+  by_cases heq : f = e
+  · subst heq; simp [h]
+  · simp [heq]
+
+/-- Masking distributes over intersection. -/
+theorem mask_inter (r1 r2 : EffectRow) (e : Effect) :
+    mask (rowInter r1 r2) e = rowInter (mask r1 e) (mask r2 e) := by
+  funext f; simp only [mask, rowInter]
+  by_cases h : f = e <;> simp [h]
+
+/-- A chain of two handlers reduces effects twice (transitivity of masking). -/
+theorem handler_chain_reduces (r : EffectRow) (e1 e2 : Effect) :
+    effectSubrow (mask (mask r e1) e2) r :=
+  effectSubrow_trans _ _ _
+    (handler_reduces_effects (mask r e1) e2)
+    (handler_reduces_effects r e1)
+
+/-- Mask followed by union with the removed singleton recovers a superset. -/
+theorem mask_union_single_superset (r : EffectRow) (e : Effect) :
+    effectSubrow r (rowUnion (mask r e) (singleRow e)) := by
+  intro f hf
+  simp only [rowUnion, mask, singleRow]
+  by_cases h : f = e
+  · subst h; simp
+  · simp [h, hf]
+
 end Sounio.Effects

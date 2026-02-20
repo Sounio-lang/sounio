@@ -182,15 +182,26 @@ theorem linear_use_once (Δ : UsageEnv) (x : String)
     (h : (x, Mult.One) ∈ Δ) :
     usageEnv_lookup (consume Δ x) x = some Mult.Zero := by
   simp only [usageEnv_lookup, consume]
-  -- After mapping, we need find? to return (x, Zero).
-  -- Strategy: show x appears in the mapped list with value Zero,
-  -- then use List.find?_some.
-  sorry
-  -- Detailed plan: by induction on Δ.
-  --   Base: Δ = [] is impossible because h : (x, One) ∈ [].
-  --   Step: Δ = (y, m) :: t.
-  --     Case y == x: head maps to (x, Zero); find? returns it immediately.
-  --     Case y ≠  x: head is unchanged; recur on tail using IH.
+  induction Δ with
+  | nil => exact absurd h (List.not_mem_nil _)
+  | cons p ps ih =>
+    simp only [List.map_cons, List.find?]
+    by_cases hpx : p.1 == x
+    · simp only [hpx, List.find?]
+      -- head matches; its value is (p.1, Zero); .2 = Zero
+      simp [hpx]
+    · -- head does not match; recurse
+      simp only [hpx, List.find?]
+      -- strip head (value unchanged since p.1 ≠ x), apply IH
+      apply ih
+      simp only [List.mem_cons] at h
+      rcases h with ⟨hpair, _⟩ | hmem
+      · -- h was the head: p = (x, One), but p.1 == x is false — contradiction
+        have : p.1 = x := by
+          simp only [Prod.mk.injEq] at hpair
+          exact hpair.1
+        simp [this] at hpx
+      · exact hmem
 
 /-- **no_second_use** — after consuming `x`, looking up `x` never returns `One`.
 
@@ -199,11 +210,8 @@ theorem linear_use_once (Δ : UsageEnv) (x : String)
 theorem no_second_use (Δ : UsageEnv) (x : String)
     (h : (x, Mult.One) ∈ Δ) :
     usageEnv_lookup (consume Δ x) x ≠ some Mult.One := by
-  -- By linear_use_once the lookup returns Some Zero, not Some One.
-  -- Strategy: rewrite with linear_use_once, then discriminate.
-  sorry
-  -- When linear_use_once is proved, the proof is:
-  --   rw [linear_use_once Δ x h]; decide
+  rw [linear_use_once Δ x h]
+  decide
 
 -- ---------------------------------------------------------------------------
 -- Dropping is a type error
