@@ -29,6 +29,9 @@ use std::sync::{Mutex, OnceLock};
 use crate::codegen::gpu::runtime::{
     DeviceBuffer, GpuBackend, GpuError, GpuRuntime, Kernel, KernelArg, LaunchConfig,
 };
+use crate::codegen::gpu::epistemic_gemm::{
+    EpistemicGemmConfig, format_gemm_profile, generate_epistemic_gemm_ptx_sm, profile_gemm_launch,
+};
 
 /// Global GPU runtime singleton
 static GPU_RUNTIME: OnceLock<Mutex<GpuRuntimeBridge>> = OnceLock::new();
@@ -321,6 +324,53 @@ impl GpuRuntimeBridge {
         self.buffers
             .get(&buffer_id)
             .map(|b| KernelArg::Buffer(b.as_ptr()))
+    }
+
+    // === Epistemic GEMM dispatch ===
+
+    /// Compile, load, and launch an epistemic GEMM kernel using the device's
+    /// SM version for PTX selection and emit a roofline profile line afterwards.
+    ///
+    /// The PTX path (single-buffer vs. double-buffered cp.async vs. WMMA)
+    /// is chosen automatically from `DeviceInfo::compute_capability`.
+    ///
+    /// Returns `(kernel_id, elapsed_ms)` so the caller can reuse the loaded
+    /// kernel on subsequent calls.
+    pub fn launch_epistemic_gemm(
+        &mut self,
+        config: &EpistemicGemmConfig,
+        kernel_name: &str,
+        grid: (u32, u32, u32),
+        block: (u32, u32, u32),
+        args: &[KernelArg],
+    ) -> Result<(u64, f64), GpuBridgeError> {
+        let sm_major = self.runtime.device_info().sm_major();
+        let sm_minor = self.runtime.device_info().sm_minor();
+        let mem_bw = self.runtime.device_info().mem_bandwidth_gbs;
+        let peak_fp32 = self.runtime.device_info().peak_fp32_tflops;
+
+        // SM-aware PTX generation (Goal 1)
+        let ptx = generate_epistemic_gemm_ptx_sm(config, kernel_name, sm_major, sm_minor);
+
+        let kernel_id = self.load_ptx(&ptx, kernel_name)?;
+
+        let start = std::time::Instant::now();
+        self.launch_kernel(kernel_id, grid, block, args)?;
+        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+        // Roofline profiler hook (Goal 2)
+        // Double-buffering is active when sm_major >= 8 and precision is F32
+        let uses_double_buffer = sm_major >= 8
+            && !config.use_tensor_cores;
+        #[cfg(feature = "gpu")]
+        {
+            let profile = profile_gemm_launch(config, elapsed_ms, mem_bw, peak_fp32, uses_double_buffer);
+            eprintln!("{}", format_gemm_profile(kernel_name, config, &profile));
+        }
+        // Suppress unused-variable warnings outside the `gpu` feature gate.
+        let _ = (mem_bw, peak_fp32, uses_double_buffer);
+
+        Ok((kernel_id, elapsed_ms))
     }
 
     // === Synchronization ===

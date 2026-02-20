@@ -1079,9 +1079,27 @@ pub struct DeviceInfo {
     pub max_registers_per_block: u32,
     pub clock_rate_khz: u32,
     pub memory_bus_width: u32,
+    /// Peak memory bandwidth in GB/s (used for roofline profiling).
+    /// Defaults to 936.0 GB/s (A100-class).
+    pub mem_bandwidth_gbs: f64,
+    /// Peak FP32 throughput in TFLOPS (used for roofline profiling).
+    /// Defaults to 19.5 TFLOPS (A100-class).
+    pub peak_fp32_tflops: f64,
 }
 
 impl DeviceInfo {
+    /// SM major version (e.g. 8 for A100, 7 for Volta/Turing).
+    #[inline]
+    pub fn sm_major(&self) -> u32 {
+        self.compute_capability.0
+    }
+
+    /// SM minor version (e.g. 0 for A100, 5 for Turing).
+    #[inline]
+    pub fn sm_minor(&self) -> u32 {
+        self.compute_capability.1
+    }
+
     /// Query device info from cudarc CudaDevice
     /// Note: cudarc 0.12 has limited device query support, so we use defaults
     /// for most values and query what we can.
@@ -1100,6 +1118,8 @@ impl DeviceInfo {
             max_registers_per_block: 65536,
             clock_rate_khz: 1500000,
             memory_bus_width: 256,
+            mem_bandwidth_gbs: 936.0,
+            peak_fp32_tflops: 19.5,
         }
     }
 
@@ -1115,6 +1135,8 @@ impl DeviceInfo {
             max_registers_per_block: 65536,
             clock_rate_khz: 1500000,
             memory_bus_width: 256,
+            mem_bandwidth_gbs: 936.0,
+            peak_fp32_tflops: 19.5,
         }
     }
 
@@ -1130,6 +1152,8 @@ impl DeviceInfo {
             max_registers_per_block: 65536,
             clock_rate_khz: 1500000,
             memory_bus_width: 256,
+            mem_bandwidth_gbs: 936.0,
+            peak_fp32_tflops: 19.5,
         }
     }
 
@@ -1145,6 +1169,8 @@ impl DeviceInfo {
             max_registers_per_block: 65536,
             clock_rate_khz: 1500000,
             memory_bus_width: 256,
+            mem_bandwidth_gbs: 936.0,
+            peak_fp32_tflops: 19.5,
         }
     }
 
@@ -1160,6 +1186,8 @@ impl DeviceInfo {
             max_registers_per_block: 32768,
             clock_rate_khz: 1200000,
             memory_bus_width: 128,
+            mem_bandwidth_gbs: 200.0,
+            peak_fp32_tflops: 10.4,
         }
     }
 
@@ -1175,6 +1203,8 @@ impl DeviceInfo {
             max_registers_per_block: 65536,
             clock_rate_khz: 1000000,
             memory_bus_width: 64,
+            mem_bandwidth_gbs: 936.0,
+            peak_fp32_tflops: 19.5,
         }
     }
 }

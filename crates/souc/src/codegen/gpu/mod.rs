@@ -101,9 +101,10 @@ pub use tensor_epistemic::{
     all_epistemic_tensor_intrinsics, get_epistemic_intrinsic, is_epistemic_tensor_intrinsic,
 };
 pub use epistemic_gemm::{
-    EpistemicGemmConfig, EpistemicMatrix, MatrixPrecision, compute_confidence_gated_gemm,
-    compute_epistemic_gemm, compute_gemm_epsilon, generate_epistemic_gemm_ptx,
-    generate_epistemic_gemm_wgsl,
+    EpistemicGemmConfig, EpistemicMatrix, GemmLaunchProfile, MatrixPrecision,
+    compute_confidence_gated_gemm, compute_epistemic_gemm, compute_gemm_epsilon,
+    format_gemm_profile, generate_epistemic_gemm_ptx, generate_epistemic_gemm_ptx_sm,
+    generate_epistemic_gemm_wgsl, profile_gemm_launch,
 };
 pub use epistemic_gemm_intrinsics::{
     all_epistemic_gemm_intrinsics, get_epistemic_gemm_intrinsic, is_epistemic_gemm_intrinsic,
