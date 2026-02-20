@@ -101,3 +101,87 @@ Relevant environment overrides:
 - `SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST`: alternate manifest override; if set, it is used as
   the default for `BOOTSTRAP_KERNEL_MANIFEST_PATH`.
 - `SOUNIO_BOOTSTRAP_SEED_TRUSTED_KEY`: key label emitted into `.sig` and required by loader.
+
+---
+
+## §4 Diverse Double-Compilation Guarantee
+
+### Threat model
+
+Ken Thompson's *Reflections on Trusting Trust* (1984) demonstrated that a
+compiler can be trojaned to silently inject backdoors into any binary it
+produces — including the next generation of itself — while showing clean source
+code to human reviewers. A SHA-256 checksum or code review cannot detect a
+backdoor that lives only in a compiled artifact.
+
+**Diverse Double-Compilation (DDC)** defeats this attack: if a backdoor was
+planted by host compiler A, compiling `souc` with a *different* host compiler B
+will produce a binary without the backdoor. When both binaries are then run on
+the **same** Sounio source, their outputs must be **byte-identical**. Divergence
+is an unambiguous signal of compromise (or a determinism bug, which is itself a
+defect worth fixing).
+
+Reference: Wheeler, D. (2009). *Fully Countering Trusting Trust through
+Diverse Double-Compilation*. PhD dissertation, George Mason University.
+
+### Guarantee
+
+Before any tagged release of Sounio, the following command **must exit 0**:
+
+```bash
+bash scripts/diverse_double_compile_check.sh
+```
+
+This builds `souc` under two independent host toolchains:
+
+| Variant | Linker       | `CARGO_TARGET_DIR`  |
+|---------|--------------|---------------------|
+| GCC     | GCC 13.3.0   | `target/ddc-gcc/`   |
+| Clang   | Clang 18.1.3 | `target/ddc-clang/` |
+
+Both binaries are executed on the same minimal Sounio reference program:
+
+```sio
+fn main() with IO {
+    print("DDC-REF-PASS\n")
+    print_int(6 * 7)
+    print("\n")
+}
+```
+
+If their combined stdout+stderr outputs are byte-identical the script prints
+`DDC_CHECK_PASS` and exits 0. Any divergence causes an immediate `DDC_CHECK_FAIL`
+with a line-level diff and exit code 1.
+
+### Relationship to the bootstrap seed
+
+The bootstrap seed (`bootstrap/seeds/sounio-bootstrap-linux-x86_64.sio.bin`)
+is itself produced by `souc`. DDC provides an independent evidence trail that
+the `souc` binary used to generate the seed was not trojaned: if both the
+GCC-built and Clang-built `souc` produce identical seed artifacts, neither
+compiler could have silently modified the Sounio code.
+
+### Running the check
+
+```bash
+# Full check (two cargo builds, ~5–10 min):
+bash scripts/diverse_double_compile_check.sh
+
+# Skip rebuild if binaries already exist:
+bash scripts/diverse_double_compile_check.sh --skip-build
+
+# Use a custom reference program:
+bash scripts/diverse_double_compile_check.sh --ref-program path/to/program.sio
+
+# Rust integration test (requires pre-built DDC binaries):
+cargo test -p souc --test ddc_check -- --include-ignored
+```
+
+### Environment
+
+| Variable             | Default           | Purpose                                   |
+|----------------------|-------------------|-------------------------------------------|
+| `GCC_TARGET_DIR`     | `target/ddc-gcc`  | Output dir for GCC-linked build           |
+| `CLANG_TARGET_DIR`   | `target/ddc-clang`| Output dir for Clang-linked build         |
+| `SOUNIO_STDLIB_PATH` | `./stdlib`        | Stdlib path passed to both binaries       |
+| `WORK_DIR`           | `/tmp/sounio-ddc` | Working directory for temp files and logs |
