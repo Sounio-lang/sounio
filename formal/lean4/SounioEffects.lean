@@ -103,7 +103,7 @@ theorem mask_absent_noop (row : EffectRow) (e : Effect)
   by_cases h : f = e
   · subst h
     cases hrow : row f
-    · rfl
+    · simp
     · exact absurd hrow hab
   · simp [h]
 
