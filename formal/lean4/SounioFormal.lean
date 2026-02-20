@@ -1,4 +1,7 @@
 -- formal/lean4/SounioFormal.lean
+import SounioLinear
+import SounioEffects
+
 /-!
 # Sounio Formal Verification — Phase 8
 
@@ -34,7 +37,7 @@ No sorry. No Mathlib dependency. `lake build` completes in < 1 minute.
 - `handler_idempotent` / `handler_order_independence`
 - `single_mask_pure`: masking sole effect yields pure row
 - `effectSubrow_union_left/right/lub`: union is least upper bound
-- `rowDisjoint` / `mask_disjoint_union`: row polymorphism preservation
+- `mask_union_right`: masking distributes over union when effect absent from left
 
 ## Not in scope for Phase 8
 
@@ -43,6 +46,3 @@ No sorry. No Mathlib dependency. `lake build` completes in < 1 minute.
 - Epistemic type `Knowledge[T,ε]` (requires real-number analysis)
 - Causal type system formalization
 -/
-
-import SounioLinear
-import SounioEffects
