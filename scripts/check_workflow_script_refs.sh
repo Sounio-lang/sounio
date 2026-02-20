@@ -33,6 +33,14 @@ for ref in "${REFS[@]}"; do
   if [[ ! -e "$path" ]]; then
     echo "Missing workflow script reference: $ref"
     missing=1
+    continue
+  fi
+
+  # Shell targets referenced by workflows must be executable so direct invocations
+  # do not regress with permission denied errors.
+  if [[ "$path" == *.sh && ! -x "$path" ]]; then
+    echo "Non-executable workflow shell target: $ref"
+    missing=1
   fi
 done
 
@@ -41,4 +49,3 @@ if [[ $missing -ne 0 ]]; then
 fi
 
 echo "Workflow script reference check passed (${#REFS[@]} references)."
-
