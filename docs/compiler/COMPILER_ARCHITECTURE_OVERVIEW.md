@@ -96,7 +96,7 @@ O **Compilador Sounio** (`souc`) é um compilador multi-estágio para a linguage
 | Métrica | Valor |
 |---------|-------|
 | **Linguagem** | Rust 2024 Edition |
-| **Versão** | 0.100.0 |
+| **Versão** | 1.0.0-beta |
 | **Linhas do Compilador** | ~566,719 |
 | **Linhas da Stdlib** | 215,000+ |
 | **Módulos Principais** | 50+ |

@@ -305,7 +305,7 @@ fn clip_quaternion_gradients(grads: &![Quat], max_norm: f32) {
 ### 6.1 Running Benchmarks
 
 ```bash
-cd compiler
+# From repository root
 
 # All QNN benchmarks
 cargo bench --bench qnn_performance_bench

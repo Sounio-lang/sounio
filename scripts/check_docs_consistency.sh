@@ -29,6 +29,12 @@ check_no_match 'Darwin RAG\+\+|FastAPI|api/routers|services/settings\.py' "docs/
 check_no_match 'Astro Starter Kit: Minimal|npm create astro@latest -- --template minimal|Seasoned astronaut\?' "website/README.md" \
   "website/README.md still contains starter template content:"
 
+check_no_match 'cd[[:space:]]+compiler' "docs/qnn/PERFORMANCE_HANDBOOK.md" \
+  "docs/qnn/PERFORMANCE_HANDBOOK.md contains stale 'cd compiler' commands:"
+
+check_no_match '0\.100\.0' "docs/compiler/COMPILER_ARCHITECTURE_OVERVIEW.md" \
+  "docs/compiler/COMPILER_ARCHITECTURE_OVERVIEW.md contains stale version expectation 0.100.0:"
+
 workspace_version="$(awk '
   /^\[workspace\.package\]/ { in_pkg=1; next }
   /^\[/ && in_pkg { in_pkg=0 }
@@ -49,4 +55,3 @@ fi
 
 rm -f /tmp/sounio_doc_check_match.txt
 echo "Documentation consistency check passed."
-
