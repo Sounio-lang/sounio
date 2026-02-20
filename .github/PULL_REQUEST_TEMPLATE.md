@@ -18,6 +18,23 @@
 
 <!-- Link any related issues here, e.g., "Fixes #123" or "Related to #456" -->
 
+## Traceability
+
+<!-- Map this PR to release-readiness tracking when relevant -->
+
+- Traceability Matrix ID(s): <!-- e.g., COMP-001, WEB-001 -->
+- Evidence Log(s): <!-- e.g., artifacts/diagnostic/final-.../logs/... -->
+
+## Release Scope
+
+<!-- Mark with an `x` all that apply -->
+
+- [ ] Compiler
+- [ ] Docs
+- [ ] Website
+- [ ] CI / Workflow contracts
+- [ ] Non-release-blocking change
+
 ## Checklist
 
 <!-- Mark with an `x` all that apply -->

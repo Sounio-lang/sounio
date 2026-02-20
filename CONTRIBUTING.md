@@ -193,9 +193,20 @@ When adding to stdlib:
 
 ## Questions?
 
-- Open an issue for bugs or feature requests
+- Open an issue for bugs or feature requests using the issue forms
 - Use discussions for questions
 - Check existing issues before creating new ones
+
+## Issue Intake Contract
+
+To help maintainers diagnose quickly and prioritize consistently, issue forms require:
+
+1. Release scope selection (`Compiler`, `Docs`, `Website`, `CI`, or other)
+2. `Severity + Confidence + Effort`
+3. Traceability Matrix ID(s) (for example `COMP-001`, `WEB-001`, or `N/A`)
+4. Exact reproduction commands + key output lines for bug/regression reports
+
+Release-critical regressions should use the **Release Readiness Regression** template.
 
 ## License
 

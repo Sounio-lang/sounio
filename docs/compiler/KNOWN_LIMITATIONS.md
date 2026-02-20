@@ -157,4 +157,4 @@ All previously planned features are implemented as of v0.99.0:
 ## Reporting Issues
 
 If you encounter any new issues, please report them at:
-https://github.com/Chiuratto-AI/sounio/issues
+https://github.com/sounio-lang/sounio/issues
