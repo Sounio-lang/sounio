@@ -339,7 +339,7 @@ impl GpuRuntime {
         }
 
         match self.backend {
-            GpuBackend::Cuda => self.cuda_copy_htod(dst.ptr, src.as_ptr() as *const c_void, size),
+            GpuBackend::Cuda => self.cuda_copy_htod(dst, src.as_ptr() as *const c_void, size),
             GpuBackend::Vulkan => {
                 self.vulkan_copy_htod(dst.ptr, src.as_ptr() as *const c_void, size)
             }
@@ -361,7 +361,7 @@ impl GpuRuntime {
         }
 
         match self.backend {
-            GpuBackend::Cuda => self.cuda_copy_dtoh(dst.as_mut_ptr() as *mut c_void, src.ptr, size),
+            GpuBackend::Cuda => self.cuda_copy_dtoh(dst.as_mut_ptr() as *mut c_void, src, size),
             GpuBackend::Vulkan => {
                 self.vulkan_copy_dtoh(dst.as_mut_ptr() as *mut c_void, src.ptr, size)
             }
@@ -513,13 +513,11 @@ impl GpuRuntime {
         Ok(())
     }
 
-    /// Copy host to device with cudarc
-    /// Note: This is a low-level implementation that copies raw memory.
-    /// For proper type-safe transfers, use copy_to_device with DeviceBuffer.
+    /// Copy host to device using the stored CudaSlice in DeviceBuffer.
     #[cfg(feature = "cuda")]
     fn cuda_copy_htod(
         &self,
-        _dst: *mut c_void,
+        dst: &DeviceBuffer,
         src: *const c_void,
         size: usize,
     ) -> Result<(), GpuError> {
@@ -528,17 +526,23 @@ impl GpuRuntime {
             .as_ref()
             .ok_or_else(|| GpuError::DriverError("CUDA device not initialized".into()))?;
 
-        // Create a slice from the source pointer
         let src_slice = unsafe { std::slice::from_raw_parts(src as *const u8, size) };
 
-        // Allocate temporary device buffer and copy
-        // Note: This is inefficient - better to use the CudaSlice stored in DeviceBuffer
-        let mut dev_buf: CudaSlice<u8> = device
-            .alloc_zeros(size)
-            .map_err(|_| GpuError::AllocationFailed)?;
-        device
-            .htod_sync_copy_into(src_slice, &mut dev_buf)
-            .map_err(|_| GpuError::CopyFailed)?;
+        // Use the CudaSlice stored in the DeviceBuffer for a direct copy
+        if let Some(ref cuda_slice) = dst.cuda_slice {
+            // SAFETY: We have shared access to cuda_slice but htod_sync_copy_into
+            // needs &mut. The DeviceBuffer owns this slice exclusively, and we only
+            // write to device memory (no aliasing on GPU side).
+            let slice_ptr = cuda_slice as *const CudaSlice<u8> as *mut CudaSlice<u8>;
+            let mutable_slice = unsafe { &mut *slice_ptr };
+            device
+                .htod_sync_copy_into(src_slice, mutable_slice)
+                .map_err(|_| GpuError::CopyFailed)?;
+        } else {
+            return Err(GpuError::DriverError(
+                "DeviceBuffer has no CudaSlice — was it allocated via cuda_alloc?".into(),
+            ));
+        }
 
         Ok(())
     }
@@ -547,19 +551,19 @@ impl GpuRuntime {
     #[cfg(not(feature = "cuda"))]
     fn cuda_copy_htod(
         &self,
-        _dst: *mut c_void,
+        _dst: &DeviceBuffer,
         _src: *const c_void,
         _size: usize,
     ) -> Result<(), GpuError> {
         Ok(())
     }
 
-    /// Copy device to host with cudarc
+    /// Copy device to host using the stored CudaSlice in DeviceBuffer.
     #[cfg(feature = "cuda")]
     fn cuda_copy_dtoh(
         &self,
         dst: *mut c_void,
-        _src: *mut c_void,
+        src: &DeviceBuffer,
         size: usize,
     ) -> Result<(), GpuError> {
         let device = self
@@ -567,18 +571,18 @@ impl GpuRuntime {
             .as_ref()
             .ok_or_else(|| GpuError::DriverError("CUDA device not initialized".into()))?;
 
-        // Create destination slice
         let dst_slice = unsafe { std::slice::from_raw_parts_mut(dst as *mut u8, size) };
 
-        // Note: In a real implementation, we'd need to track which CudaSlice corresponds
-        // to which raw pointer. For now, this is a placeholder.
-        // The proper way is to use copy_to_host with DeviceBuffer.
-        let dev_buf: CudaSlice<u8> = device
-            .alloc_zeros(size)
-            .map_err(|_| GpuError::AllocationFailed)?;
-        device
-            .dtoh_sync_copy_into(&dev_buf, dst_slice)
-            .map_err(|_| GpuError::CopyFailed)?;
+        // Use the CudaSlice stored in the DeviceBuffer for a direct copy
+        if let Some(ref cuda_slice) = src.cuda_slice {
+            device
+                .dtoh_sync_copy_into(cuda_slice, dst_slice)
+                .map_err(|_| GpuError::CopyFailed)?;
+        } else {
+            return Err(GpuError::DriverError(
+                "DeviceBuffer has no CudaSlice — was it allocated via cuda_alloc?".into(),
+            ));
+        }
 
         Ok(())
     }
@@ -588,7 +592,7 @@ impl GpuRuntime {
     fn cuda_copy_dtoh(
         &self,
         _dst: *mut c_void,
-        _src: *mut c_void,
+        _src: &DeviceBuffer,
         _size: usize,
     ) -> Result<(), GpuError> {
         Ok(())

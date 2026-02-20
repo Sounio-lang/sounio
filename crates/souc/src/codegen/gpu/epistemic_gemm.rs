@@ -3,8 +3,6 @@
 //! GPU-accelerated matrix multiplication with built-in uncertainty propagation.
 //! Supports both standard precision (f32) and Tensor Core (f16) operations.
 
-use std::fmt;
-
 /// Epistemic GEMM configuration
 #[derive(Debug, Clone, Copy)]
 pub struct EpistemicGemmConfig {
