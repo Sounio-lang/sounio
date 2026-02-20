@@ -65,6 +65,12 @@ if ! grep -q "SELFHOST=seed schema=v1 event=bootstrap_seed status=ok" "$RUN_LOG"
   exit 1
 fi
 
+if ! grep -q "SELFHOST=run schema=v1 event=selfhost_preflight status=skipped .*reason=seed_enforced" "$RUN_LOG"; then
+  echo "error: expected seed-enforced wrapper preflight skip marker missing: $RUN_LOG" >&2
+  cat "$RUN_LOG" >&2 || true
+  exit 1
+fi
+
 if ! grep -q "Self-hosted compiler - Rust-free build" "$RUN_LOG"; then
   echo "error: expected self-hosted rust-free runtime banner missing: $RUN_LOG" >&2
   cat "$RUN_LOG" >&2 || true

@@ -61,6 +61,7 @@ pub mod interop;
 pub mod interp;
 pub mod layout;
 pub mod lexer;
+pub mod linalg;
 pub mod linear;
 pub mod lint;
 pub mod llm;

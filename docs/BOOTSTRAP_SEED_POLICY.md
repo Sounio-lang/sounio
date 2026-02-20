@@ -52,6 +52,16 @@ fails hard on:
 When enforcement is disabled, the loader warns and falls back to dynamic
 self-host compilation paths.
 
+## Wrapper Behavior (Seed-Enforced)
+
+For `souc run self-hosted/` with seed enforcement enabled:
+
+1. Wrapper resolves `self-hosted/main.sio`.
+2. Wrapper emits a deterministic preflight skip marker:
+   `SELFHOST=run schema=v1 event=selfhost_preflight status=skipped ... reason=seed_enforced`
+3. Wrapper delegates directly to seed loading (`SELFHOST=seed ...`) without
+   Rust preflight AST parsing of the self-hosted suite.
+
 ## Build Script
 
 Generate/update seed artifact with:

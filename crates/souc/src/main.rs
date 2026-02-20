@@ -3053,6 +3053,14 @@ fn run(
             .and_then(|part| part.to_str())
             .is_some_and(|name| name == "self-hosted");
 
+    let seed_enforced_for_wrapper = std::env::var("SOUNIO_BOOTSTRAP_SEED_ENFORCE")
+        .ok()
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(!cfg!(debug_assertions));
+
     if is_self_hosted_root {
         let main_path = input_path.join("main.sio");
 
@@ -3067,19 +3075,27 @@ fn run(
                 input_path.display()
             ));
         }
-        let preflight_err = sounio::module_loader::load_program_ast(&main_path).map_err(|e| {
+        if seed_enforced_for_wrapper {
             eprintln!(
-                "SELFHOST=run schema=v1 event=selfhost_preflight status=error path={} reason={}",
-                main_path.display(),
-                e
+                "SELFHOST=run schema=v1 event=selfhost_preflight status=skipped path={} reason=seed_enforced",
+                main_path.display()
             );
-            miette::miette!(
-                "Self-hosted preflight parse failed for {}: {}",
-                main_path.display(),
-                e
-            )
-        });
-        preflight_err?;
+        } else {
+            let preflight_err =
+                sounio::module_loader::load_program_ast(&main_path).map_err(|e| {
+                    eprintln!(
+                        "SELFHOST=run schema=v1 event=selfhost_preflight status=error path={} reason={}",
+                        main_path.display(),
+                        e
+                    );
+                    miette::miette!(
+                        "Self-hosted preflight parse failed for {}: {}",
+                        main_path.display(),
+                        e
+                    )
+                });
+            preflight_err?;
+        }
 
         input_path = main_path;
 

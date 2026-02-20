@@ -42,6 +42,7 @@ mkdir -p "$RUN_DIR"/{cargo-home,cargo-target,npm-cache,logs}
 
 export SOUNIO_DIAG_RUN_DIR="$RUN_DIR"
 export SOUNIO_DIAG_ARTIFACT_DIR="$RUN_DIR"
+export SOUNIO_DIAG_ISOLATED=1
 export CARGO_HOME="$RUN_DIR/cargo-home"
 export CARGO_TARGET_DIR="$RUN_DIR/cargo-target"
 export CARGO_INCREMENTAL=0
@@ -51,6 +52,7 @@ export NPM_CONFIG_CACHE="$RUN_DIR/npm-cache"
 if [[ $# -eq 0 ]]; then
   cat <<EOF
 SOUNIO_DIAG_RUN_DIR=$SOUNIO_DIAG_RUN_DIR
+SOUNIO_DIAG_ISOLATED=$SOUNIO_DIAG_ISOLATED
 CARGO_HOME=$CARGO_HOME
 CARGO_TARGET_DIR=$CARGO_TARGET_DIR
 npm_config_cache=$npm_config_cache
