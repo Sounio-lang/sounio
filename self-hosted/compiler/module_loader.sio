@@ -192,6 +192,21 @@ fn ir_merge_modules(dst: IrModule, src: IrModule) -> IrModule with Mut, Panic, D
 }
 
 // ============================================================
+// Visited-set helpers for transitive import resolution
+// ============================================================
+
+fn visited_contains(visited: [string; 64], count: i64, path: string) -> bool with Mut, Panic, Div {
+    var j: i64 = 0
+    while j < count {
+        if str_eq(visited[j], path) {
+            return true
+        }
+        j = j + 1
+    }
+    false
+}
+
+// ============================================================
 // Multi-module IR loading (shared by bytecode + native paths)
 // ============================================================
 
@@ -218,30 +233,46 @@ fn load_multimodule_ir(main_path: string) -> MultiModuleIrResult with IO, Mut, D
     print_int(main_items)
     print(" items\n")
 
-    // Step 2: Extract import paths from main
-    let imports = extract_imports_from_ast(main_prog)
-
-    // Step 3: Load imported modules
+    // Step 3: Load imported modules transitively (BFS with visited-set)
     var programs: [Program; 64] = [empty_program(); 64]
     programs[0] = main_prog
     var loaded: i64 = 1
 
+    // Visited set: tracks file paths already loaded to prevent re-loading and cycles
+    var visited_paths: [string; 64] = [""; 64]
+    var visited_count: i64 = 0
+    visited_paths[0] = main_path
+    visited_count = 1
+
+    // work_front: index into programs[] of the next module whose imports we must process
+    var work_front: i64 = 0
     var i: i64 = 0
-    while i < imports.count && loaded < 64 {
-        let file_path = use_path_to_file_path(imports.paths[i], "stdlib")
-        if file_exists(file_path) {
-            print("Loading module: ")
-            print(file_path)
-            print("\n")
-            programs[loaded] = load_module_file(file_path)
-            loaded = loaded + 1
-        } else {
-            print("Warning: module not found: ")
-            let path_str = use_path_to_string(imports.paths[i])
-            print(path_str)
-            print("\n")
+
+    while work_front < loaded && loaded < 64 {
+        let work_imports = extract_imports_from_ast(programs[work_front])
+        work_front = work_front + 1
+
+        i = 0
+        while i < work_imports.count && loaded < 64 {
+            let file_path = use_path_to_file_path(work_imports.paths[i], "stdlib")
+            if !visited_contains(visited_paths, visited_count, file_path) {
+                visited_paths[visited_count] = file_path
+                visited_count = visited_count + 1
+                if file_exists(file_path) {
+                    print("Loading module: ")
+                    print(file_path)
+                    print("\n")
+                    programs[loaded] = load_module_file(file_path)
+                    loaded = loaded + 1
+                } else {
+                    print("Warning: module not found: ")
+                    let path_str = use_path_to_string(work_imports.paths[i])
+                    print(path_str)
+                    print("\n")
+                }
+            }
+            i = i + 1
         }
-        i = i + 1
     }
 
     print("Loaded ")
