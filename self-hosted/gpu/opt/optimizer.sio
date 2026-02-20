@@ -36,7 +36,7 @@ let OPT_OP_GET_TID: i64      = 0
 // Core IR structs (flat, fixed-capacity)
 // ============================================================================
 
-struct GpuOpEntry {
+struct OptGpuOpEntry {
     opcode:   i64,
     type_tag: i64,
     dst_idx:  i64,
@@ -50,9 +50,9 @@ struct GpuOpEntry {
     dead:     bool,
 }
 
-struct GpuBlockEntry {
+struct OptGpuBlockEntry {
     id:           i64,
-    ops:          [GpuOpEntry; 4096],
+    ops:          [OptGpuOpEntry; 4096],
     op_count:     i64,
     term_tag:     i64,
     term_src:     i64,
@@ -60,11 +60,11 @@ struct GpuBlockEntry {
     term_target1: i64,
 }
 
-struct GpuKernelEntry {
+struct OptGpuKernelEntry {
     name:                 [i8; 256],
     name_len:             i64,
     is_kernel:            bool,
-    blocks:               [GpuBlockEntry; 256],
+    blocks:               [OptGpuBlockEntry; 256],
     block_count:          i64,
     param_count:          i64,
     shared_mem_bytes:     i64,
@@ -72,7 +72,7 @@ struct GpuKernelEntry {
 }
 
 struct GpuModuleOpt {
-    kernels:      [GpuKernelEntry; 64],
+    kernels:      [OptGpuKernelEntry; 64],
     kernel_count: i64,
 }
 
@@ -244,8 +244,8 @@ fn opt_flags_conservative() -> OptimizerFlags {
 // Helper: zero-value constructors
 // ============================================================================
 
-fn opt_gpu_op_entry_zero() -> GpuOpEntry {
-    GpuOpEntry {
+fn opt_gpu_op_entry_zero() -> OptGpuOpEntry {
+    OptGpuOpEntry {
         opcode:   0,
         type_tag: 0,
         dst_idx:  -1,
@@ -253,7 +253,7 @@ fn opt_gpu_op_entry_zero() -> GpuOpEntry {
         src1:     -1,
         src2:     -1,
         imm_int:  0,
-        imm_f32:  0.0,
+        imm_f32:  0.0 as f32,
         pred:     -1,
         axis:     0,
         dead:     false,
@@ -347,19 +347,19 @@ fn opt_max_i64(a: i64, b: i64) -> i64 {
 // Helper: value analysis
 // ============================================================================
 
-fn opt_is_constant_op(op: GpuOpEntry) -> bool {
+fn opt_is_constant_op(op: OptGpuOpEntry) -> bool {
     op.opcode == OPT_OP_CONST
 }
 
-fn opt_constant_value_i(op: GpuOpEntry) -> i64 {
+fn opt_constant_value_i(op: OptGpuOpEntry) -> i64 {
     op.imm_int
 }
 
-fn opt_constant_value_f(op: GpuOpEntry) -> f32 {
+fn opt_constant_value_f(op: OptGpuOpEntry) -> f32 {
     op.imm_f32
 }
 
-fn opt_op_has_side_effects(op: GpuOpEntry) -> bool {
+fn opt_op_has_side_effects(op: OptGpuOpEntry) -> bool {
     let oc = op.opcode
     oc == OPT_OP_STORE_GLOBAL ||
     oc == OPT_OP_STORE_SHARED ||
@@ -369,11 +369,11 @@ fn opt_op_has_side_effects(op: GpuOpEntry) -> bool {
     oc == OPT_OP_RET
 }
 
-fn opt_op_uses_value(op: GpuOpEntry, value_id: i64) -> bool {
+fn opt_op_uses_value(op: OptGpuOpEntry, value_id: i64) -> bool {
     op.src0 == value_id || op.src1 == value_id || op.src2 == value_id
 }
 
-fn opt_op_defines_value(op: GpuOpEntry) -> i64 {
+fn opt_op_defines_value(op: OptGpuOpEntry) -> i64 {
     op.dst_idx
 }
 
@@ -413,7 +413,7 @@ fn opt_fold_div_ff(a: f32, b: f32) -> f32 with Div {
 // Constant folding: binary op fold
 // ============================================================================
 
-fn opt_const_fold_binary(op: GpuOpEntry, src0_op: GpuOpEntry, src1_op: GpuOpEntry) -> (bool, GpuOpEntry) with Div {
+fn opt_const_fold_binary(op: OptGpuOpEntry, src0_op: OptGpuOpEntry, src1_op: OptGpuOpEntry) -> (bool, OptGpuOpEntry) with Div {
     if !opt_is_constant_op(src0_op) || !opt_is_constant_op(src1_op) {
         return (false, op)
     }
@@ -472,7 +472,7 @@ fn opt_const_fold_binary(op: GpuOpEntry, src0_op: GpuOpEntry, src1_op: GpuOpEntr
 // Constant folding: block pass
 // ============================================================================
 
-fn opt_const_fold_block(blk: GpuBlockEntry) -> (GpuBlockEntry, i64) with Div {
+fn opt_const_fold_block(blk: OptGpuBlockEntry) -> (OptGpuBlockEntry, i64) with Div {
     var out = blk
     var folds: i64 = 0
 
@@ -524,7 +524,7 @@ fn opt_const_fold_block(blk: GpuBlockEntry) -> (GpuBlockEntry, i64) with Div {
 // Constant folding: kernel pass
 // ============================================================================
 
-fn opt_const_fold_pass(k: GpuKernelEntry) -> (GpuKernelEntry, i64) with Div {
+fn opt_const_fold_pass(k: OptGpuKernelEntry) -> (OptGpuKernelEntry, i64) with Div {
     var out = k
     var total: i64 = 0
 
@@ -544,7 +544,7 @@ fn opt_const_fold_pass(k: GpuKernelEntry) -> (GpuKernelEntry, i64) with Div {
 // DCE: mark live
 // ============================================================================
 
-fn opt_dce_mark_live(blk: GpuBlockEntry, used: [bool; 16384], used_size: i64) -> ([bool; 16384], i64) {
+fn opt_dce_mark_live(blk: OptGpuBlockEntry, used: [bool; 16384], used_size: i64) -> ([bool; 16384], i64) {
     var live = used
     var count = used_size
 
@@ -618,7 +618,7 @@ fn opt_dce_mark_live(blk: GpuBlockEntry, used: [bool; 16384], used_size: i64) ->
 // DCE: remove dead ops from block
 // ============================================================================
 
-fn opt_dce_remove_dead(blk: GpuBlockEntry) -> (GpuBlockEntry, i64) {
+fn opt_dce_remove_dead(blk: OptGpuBlockEntry) -> (OptGpuBlockEntry, i64) {
     var out = blk
     var removed: i64 = 0
 
@@ -634,7 +634,7 @@ fn opt_dce_remove_dead(blk: GpuBlockEntry) -> (GpuBlockEntry, i64) {
     }
 
     // Compact: copy non-dead ops into fresh array
-    var compacted: [GpuOpEntry; 4096] = [opt_gpu_op_entry_zero(); 4096]
+    var compacted: [OptGpuOpEntry; 4096] = [opt_gpu_op_entry_zero(); 4096]
     var dst: i64 = 0
     var src: i64 = 0
     while src < out.op_count {
@@ -656,7 +656,7 @@ fn opt_dce_remove_dead(blk: GpuBlockEntry) -> (GpuBlockEntry, i64) {
 // DCE: kernel pass
 // ============================================================================
 
-fn opt_dce_pass(k: GpuKernelEntry) -> (GpuKernelEntry, i64) {
+fn opt_dce_pass(k: OptGpuKernelEntry) -> (OptGpuKernelEntry, i64) {
     var out = k
     var total_removed: i64 = 0
 
@@ -699,7 +699,7 @@ fn opt_dce_pass(k: GpuKernelEntry) -> (GpuKernelEntry, i64) {
 // Register pressure: liveness analysis per block
 // ============================================================================
 
-fn opt_liveness_analyze_block(blk: GpuBlockEntry) -> BlockLiveness {
+fn opt_liveness_analyze_block(blk: OptGpuBlockEntry) -> BlockLiveness {
     var bl = opt_block_liveness_zero(blk.id)
 
     // Forward scan: for each value defined or used, record def and last-use indices.
@@ -825,7 +825,7 @@ fn opt_liveness_peak(bl: BlockLiveness) -> i64 {
 // Register pressure: kernel pass
 // ============================================================================
 
-fn opt_register_pressure_pass(k: GpuKernelEntry) -> i64 {
+fn opt_register_pressure_pass(k: OptGpuKernelEntry) -> i64 {
     var peak: i64 = 0
 
     var bi: i64 = 0
@@ -845,7 +845,7 @@ fn opt_register_pressure_pass(k: GpuKernelEntry) -> i64 {
 // Warp divergence: TID dependency tracking helpers
 // ============================================================================
 
-fn opt_is_tid_dependent(op: GpuOpEntry, tid_values: [i64; 256], count: i64) -> bool {
+fn opt_is_tid_dependent(op: OptGpuOpEntry, tid_values: [i64; 256], count: i64) -> bool {
     var i: i64 = 0
     while i < count {
         let tid_v = tid_values[i as usize]
@@ -861,7 +861,7 @@ fn opt_is_tid_dependent(op: GpuOpEntry, tid_values: [i64; 256], count: i64) -> b
 // Warp divergence: block analysis
 // ============================================================================
 
-fn opt_divergence_analyze_block(blk: GpuBlockEntry) -> ([DivergenceInfo; 256], i64) {
+fn opt_divergence_analyze_block(blk: OptGpuBlockEntry) -> ([DivergenceInfo; 256], i64) {
     var infos: [DivergenceInfo; 256] = [opt_divergence_info_zero(); 256]
     var info_count: i64 = 0
 
@@ -960,7 +960,7 @@ fn opt_divergence_analyze_block(blk: GpuBlockEntry) -> ([DivergenceInfo; 256], i
 // Warp divergence: kernel pass
 // ============================================================================
 
-fn opt_divergence_pass(k: GpuKernelEntry) -> i64 {
+fn opt_divergence_pass(k: OptGpuKernelEntry) -> i64 {
     var total_divergent: i64 = 0
 
     var bi: i64 = 0
@@ -988,7 +988,7 @@ fn opt_divergence_pass(k: GpuKernelEntry) -> i64 {
 // Shared memory bank conflict detection
 // ============================================================================
 
-fn opt_detect_bank_conflicts_in_op(op: GpuOpEntry) -> BankConflictInfo {
+fn opt_detect_bank_conflicts_in_op(op: OptGpuOpEntry) -> BankConflictInfo {
     var info = opt_bank_conflict_info_zero()
     info.op_idx = -1
 
@@ -1017,7 +1017,7 @@ fn opt_detect_bank_conflicts_in_op(op: GpuOpEntry) -> BankConflictInfo {
 // Bank conflict: kernel pass
 // ============================================================================
 
-fn opt_bank_conflict_pass(k: GpuKernelEntry) -> ([BankConflictInfo; 256], i64) with Div {
+fn opt_bank_conflict_pass(k: OptGpuKernelEntry) -> ([BankConflictInfo; 256], i64) with Div {
     var results: [BankConflictInfo; 256] = [opt_bank_conflict_info_zero(); 256]
     var result_count: i64 = 0
 
@@ -1048,7 +1048,7 @@ fn opt_bank_conflict_pass(k: GpuKernelEntry) -> ([BankConflictInfo; 256], i64) w
 // Kernel fusion: element-wise detection
 // ============================================================================
 
-fn opt_kernel_is_element_wise(k: GpuKernelEntry) -> bool {
+fn opt_kernel_is_element_wise(k: OptGpuKernelEntry) -> bool {
     // Element-wise: no LOAD_SHARED, no BARRIER, no ATOMIC, single block
     if k.block_count != 1 {
         return false
@@ -1072,7 +1072,7 @@ fn opt_kernel_is_element_wise(k: GpuKernelEntry) -> bool {
 // Kernel fusion: compatibility check
 // ============================================================================
 
-fn opt_fusion_check(a: GpuKernelEntry, b: GpuKernelEntry) -> FusionCandidate {
+fn opt_fusion_check(a: OptGpuKernelEntry, b: OptGpuKernelEntry) -> FusionCandidate {
     var cand = opt_fusion_candidate_none()
     cand.kernel_a_idx = 0
     cand.kernel_b_idx = 1
@@ -1101,7 +1101,7 @@ fn opt_fusion_check(a: GpuKernelEntry, b: GpuKernelEntry) -> FusionCandidate {
 // Kernel fusion: merge two kernels
 // ============================================================================
 
-fn opt_fusion_merge(a: GpuKernelEntry, b: GpuKernelEntry) -> GpuKernelEntry {
+fn opt_fusion_merge(a: OptGpuKernelEntry, b: OptGpuKernelEntry) -> OptGpuKernelEntry {
     var merged = a
 
     // Value ID offset: shift all b's value IDs by a's max value ID + 1
@@ -1191,7 +1191,7 @@ fn opt_fusion_pass(m: GpuModuleOpt) -> (GpuModuleOpt, i64) {
 // Auto-tune: shared memory usage estimation
 // ============================================================================
 
-fn opt_autotune_shared_mem_usage(k: GpuKernelEntry) -> i64 {
+fn opt_autotune_shared_mem_usage(k: OptGpuKernelEntry) -> i64 {
     var count: i64 = 0
 
     var bi: i64 = 0
@@ -1215,7 +1215,7 @@ fn opt_autotune_shared_mem_usage(k: GpuKernelEntry) -> i64 {
 // Auto-tune: compute instruction mix counts
 // ============================================================================
 
-fn opt_autotune_count_loads_stores(k: GpuKernelEntry) -> i64 {
+fn opt_autotune_count_loads_stores(k: OptGpuKernelEntry) -> i64 {
     var count: i64 = 0
     var bi: i64 = 0
     while bi < k.block_count {
@@ -1234,7 +1234,7 @@ fn opt_autotune_count_loads_stores(k: GpuKernelEntry) -> i64 {
     count
 }
 
-fn opt_autotune_count_compute(k: GpuKernelEntry) -> i64 {
+fn opt_autotune_count_compute(k: OptGpuKernelEntry) -> i64 {
     var count: i64 = 0
     var bi: i64 = 0
     while bi < k.block_count {
@@ -1257,7 +1257,7 @@ fn opt_autotune_count_compute(k: GpuKernelEntry) -> i64 {
 // Auto-tune: advise for a single kernel
 // ============================================================================
 
-fn opt_autotune_advise(k: GpuKernelEntry, sm_version: i64) -> AutoTuneAdvice with Div {
+fn opt_autotune_advise(k: OptGpuKernelEntry, sm_version: i64) -> AutoTuneAdvice with Div {
     var advice = opt_autotune_advice_default()
 
     let reg_pressure = opt_register_pressure_pass(k)

@@ -36,7 +36,7 @@ fn ssa_map_new() -> SsaValueMap {
     SsaValueMap {
         ids: [0; 8192],
         vals: [0; 8192],
-        types: [HlirTypeKind::HlirTypeVoid; 8192],
+        types: [HlirTypeVoid; 8192],
         count: 0,
     }
 }
@@ -216,7 +216,7 @@ fn llvm_compile_module(
 
     // Phase 1: Declare all functions (forward references)
     var fi: i64 = 0
-    while fi < hlir.function_count {
+    while fi < hlir.fn_count {
         let func = hlir.functions[fi as usize]
         let r = llvm_declare_function(c, m, state, func)
         c = r.0
@@ -227,7 +227,7 @@ fn llvm_compile_module(
 
     // Phase 2: Compile function bodies
     var fi2: i64 = 0
-    while fi2 < hlir.function_count {
+    while fi2 < hlir.fn_count {
         let func = hlir.functions[fi2 as usize]
         let r = llvm_compile_function(c, m, b, state, func)
         c = r.0
@@ -264,7 +264,7 @@ fn llvm_declare_function(
     var param_ptrs: [i64; 64] = [0; 64]
     var pi: i64 = 0
     while pi < func.param_count {
-        let r2 = convert_hlir_type(c, s.type_conv, func.param_types[pi as usize])
+        let r2 = convert_hlir_type(c, s.type_conv, func.params[pi as usize].ty)
         c = r2.0
         s.type_conv = r2.1
         param_ptrs[pi as usize] = r2.2.ptr
@@ -272,7 +272,7 @@ fn llvm_declare_function(
     }
 
     // Create function type
-    let fn_ty = llvm_function_type(ret_ty, &param_ptrs as *const i64, func.param_count as i32, 0)
+    let fn_ty = llvm_function_type(ret_ty, &param_ptrs, func.param_count as i32, 0 as i32)
 
     // Determine symbol name
     // If name is "main", use "__sounio_main" to allow C-wrapper
@@ -286,12 +286,12 @@ fn llvm_declare_function(
         let fn_val = r3.1
         s.functions = func_map_insert(s.functions, name_hash, fn_val)
     } else {
-        let r3 = llvm_module_add_function(m, &func.name.buf as *const i8, fn_ty)
+        let r3 = llvm_module_add_function(m, &func.name.buf, fn_ty)
         m = r3.0
         let fn_val = r3.1
 
-        // Set linkage for extern functions
-        if func.is_extern {
+        // Set linkage for extern functions (declarations without body)
+        if func.block_count == 0 {
             llvm_set_linkage(fn_val, LLVM_EXTERNAL_LINKAGE)
         }
 
@@ -318,7 +318,7 @@ fn llvm_compile_function(
     var s = state
 
     // Skip extern declarations (no body)
-    if func.is_extern {
+    if func.block_count == 0 {
         return (c, m, b, s)
     }
 
@@ -336,7 +336,7 @@ fn llvm_compile_function(
     var bi: i64 = 0
     while bi < func.block_count {
         let block = func.blocks[bi as usize]
-        let r1 = llvm_append_basic_block(c, fn_val, &block.label.buf as *const i8)
+        let r1 = llvm_append_basic_block(c, fn_val, &block.label.buf)
         c = r1.0
         let bb = r1.1
         s.blocks = block_map_insert(s.blocks, block.id, bb)
@@ -347,8 +347,8 @@ fn llvm_compile_function(
     var pi: i64 = 0
     while pi < func.param_count {
         let param_val = llvm_get_param(fn_val, pi as i32)
-        let param_value_id = func.param_value_ids[pi as usize]
-        let param_ty_kind = func.param_types[pi as usize].kind
+        let param_value_id = func.params[pi as usize].value_id
+        let param_ty_kind = func.params[pi as usize].ty.kind
         s.values = ssa_map_insert(s.values, param_value_id, param_val, param_ty_kind)
         pi = pi + 1
     }
@@ -394,7 +394,7 @@ fn llvm_compile_block(
     // Compile all instructions
     var ii: i64 = 0
     while ii < block.instr_count {
-        let instr = block.instructions[ii as usize]
+        let instr = block.instrs[ii as usize]
         let r = llvm_compile_instruction(c, m, b, s, instr)
         c = r.0
         m = r.1
@@ -461,7 +461,7 @@ fn llvm_compile_instruction(
     // ---- Unary ----
     if kind == HlirOpKind::HlirOpUnary {
         let operand = ssa_map_get(s.values, instr.src)
-        let r = llvm_compile_unary(b, s, instr.unary_op, operand, instr.ty)
+        let r = llvm_compile_unary(b, s, instr.un_op, operand, instr.ty)
         return (c, m, r.0, r.1, r.2)
     }
 
@@ -478,8 +478,8 @@ fn llvm_compile_instruction(
 
     // ---- Store ----
     if kind == HlirOpKind::HlirOpStore {
-        let ptr_val = ssa_map_get(s.values, instr.lhs)
-        let store_val = ssa_map_get(s.values, instr.rhs)
+        let ptr_val = ssa_map_get(s.values, instr.store_ptr)
+        let store_val = ssa_map_get(s.values, instr.store_value)
         let r = llvm_build_store(b, store_val, ptr_val)
         return (c, m, r.0, s, r.1)
     }
@@ -496,7 +496,7 @@ fn llvm_compile_instruction(
 
     // ---- GetFieldPtr (struct GEP) ----
     if kind == HlirOpKind::HlirOpGetFieldPtr {
-        let base_val = ssa_map_get(s.values, instr.src)
+        let base_val = ssa_map_get(s.values, instr.base)
         let r = convert_hlir_type(c, s.type_conv, instr.ty)
         c = r.0
         s.type_conv = r.1
@@ -506,23 +506,23 @@ fn llvm_compile_instruction(
     }
 
     // ---- GetElementPtr (array GEP) ----
-    if kind == HlirOpKind::HlirOpGetElemPtr {
-        let base_val = ssa_map_get(s.values, instr.src)
-        let idx_val = ssa_map_get(s.values, instr.lhs)
+    if kind == HlirOpKind::HlirOpGetElementPtr {
+        let base_val = ssa_map_get(s.values, instr.base)
+        let idx_val = ssa_map_get(s.values, instr.index)
         let r = convert_hlir_type(c, s.type_conv, instr.ty)
         c = r.0
         s.type_conv = r.1
         let elem_ty = r.2
         var indices: [i64; 2] = [0; 2]
         indices[0] = idx_val.ptr
-        let r2 = llvm_build_gep(b, elem_ty, base_val, &indices as *const i64, 1, "gep_elem\0" as *const i8)
+        let r2 = llvm_build_gep(b, elem_ty, base_val, &indices, 1 as i32, "gep_elem\0" as *const i8)
         return (c, m, r2.0, s, r2.1)
     }
 
     // ---- Cast ----
     if kind == HlirOpKind::HlirOpCast {
-        let src_val = ssa_map_get(s.values, instr.src)
-        let r = llvm_compile_cast(c, b, s, src_val, instr.cast_src_ty, instr.ty)
+        let src_val = ssa_map_get(s.values, instr.cast_value)
+        let r = llvm_compile_cast(c, b, s, src_val, instr.cast_source, instr.ty)
         return (r.0, m, r.1, r.2, r.3)
     }
 
@@ -539,15 +539,15 @@ fn llvm_compile_instruction(
         // Add incoming values
         var pi: i64 = 0
         while pi < instr.phi_count {
-            let incoming_val = ssa_map_get(s.values, instr.phi_values[pi as usize])
-            let incoming_bb = block_map_get(s.blocks, instr.phi_blocks[pi as usize])
+            let incoming_val = ssa_map_get(s.values, instr.phi_incoming[pi as usize].value_id)
+            let incoming_bb = block_map_get(s.blocks, instr.phi_incoming[pi as usize].block_id)
             if !llvm_value_is_null(incoming_val) {
                 if !llvm_block_is_null(incoming_bb) {
                     var vals: [i64; 1] = [0; 1]
                     var bbs: [i64; 1] = [0; 1]
                     vals[0] = incoming_val.ptr
                     bbs[0] = incoming_bb.ptr
-                    llvm_add_incoming(phi_val, &vals as *const i64, &bbs as *const i64, 1)
+                    llvm_add_incoming(phi_val, &vals, &bbs, 1 as i32)
                 }
             }
             pi = pi + 1
@@ -557,22 +557,22 @@ fn llvm_compile_instruction(
 
     // ---- ExtractValue ----
     if kind == HlirOpKind::HlirOpExtractValue {
-        let agg_val = ssa_map_get(s.values, instr.src)
+        let agg_val = ssa_map_get(s.values, instr.base)
         let r = llvm_build_extract_value(b, agg_val, instr.field_index as i32, "extract\0" as *const i8)
         return (c, m, r.0, s, r.1)
     }
 
     // ---- InsertValue ----
     if kind == HlirOpKind::HlirOpInsertValue {
-        let agg_val = ssa_map_get(s.values, instr.src)
-        let elem_val = ssa_map_get(s.values, instr.lhs)
+        let agg_val = ssa_map_get(s.values, instr.base)
+        let elem_val = ssa_map_get(s.values, instr.insert_value)
         let r = llvm_build_insert_value(b, agg_val, elem_val, instr.field_index as i32, "insert\0" as *const i8)
         return (c, m, r.0, s, r.1)
     }
 
     // ---- Call ----
     if kind == HlirOpKind::HlirOpCall {
-        let callee_hash = hlir_name_hash(instr.call_target)
+        let callee_hash = hlir_name_hash(instr.call_name)
         let callee = func_map_get(s.functions, callee_hash)
 
         // Build argument array
@@ -594,15 +594,15 @@ fn llvm_compile_instruction(
         // For simplicity, use the callee's existing type from LLVM
         let fn_ty = llvm_type_null()  // LLVM will infer from the function value
 
-        let r2 = llvm_build_call(b, fn_ty, callee, &arg_ptrs as *const i64, instr.call_arg_count as i32, "call\0" as *const i8)
+        let r2 = llvm_build_call(b, fn_ty, callee, &arg_ptrs, instr.call_arg_count as i32, "call\0" as *const i8)
         return (c, m, r2.0, s, r2.1)
     }
 
     // ---- Select ----
     if kind == HlirOpKind::HlirOpSelect {
-        let cond_val = ssa_map_get(s.values, instr.src)
-        let true_val = ssa_map_get(s.values, instr.lhs)
-        let false_val = ssa_map_get(s.values, instr.rhs)
+        let cond_val = ssa_map_get(s.values, instr.select_cond)
+        let true_val = ssa_map_get(s.values, instr.select_true)
+        let false_val = ssa_map_get(s.values, instr.select_false)
         let r = llvm_build_select(b, cond_val, true_val, false_val, "select\0" as *const i8)
         return (c, m, r.0, s, r.1)
     }
@@ -627,7 +627,7 @@ fn llvm_compile_constant(
     let ck = constant.kind
 
     // Integer constant
-    if ck == HlirConstKind::HlirConstInt {
+    if ck == HlirConstInt {
         let r = convert_hlir_type(c, s.type_conv, ty)
         c = r.0
         s.type_conv = r.1
@@ -638,7 +638,7 @@ fn llvm_compile_constant(
     }
 
     // Float constant
-    if ck == HlirConstKind::HlirConstFloat {
+    if ck == HlirConstFloat {
         let r = convert_hlir_type(c, s.type_conv, ty)
         c = r.0
         s.type_conv = r.1
@@ -648,7 +648,7 @@ fn llvm_compile_constant(
     }
 
     // Bool constant
-    if ck == HlirConstKind::HlirConstBool {
+    if ck == HlirConstBool {
         let r = llvm_int1_type(c)
         c = r.0
         let bool_ty = r.1
@@ -657,7 +657,7 @@ fn llvm_compile_constant(
     }
 
     // Null constant
-    if ck == HlirConstKind::HlirConstNull {
+    if ck == HlirConstNull {
         let r = convert_hlir_type(c, s.type_conv, ty)
         c = r.0
         s.type_conv = r.1
@@ -687,7 +687,7 @@ fn llvm_compile_binary(
     let is_signed = hlir_type_is_signed(ty)
 
     // ---- ADD ----
-    if op == HlirBinaryOp::HlirBinAdd {
+    if op == HlirOpAdd {
         if is_float {
             let r = llvm_build_fadd(b, lhs, rhs, "fadd\0" as *const i8)
             return (r.0, state, r.1)
@@ -697,7 +697,7 @@ fn llvm_compile_binary(
     }
 
     // ---- SUB ----
-    if op == HlirBinaryOp::HlirBinSub {
+    if op == HlirOpSub {
         if is_float {
             let r = llvm_build_fsub(b, lhs, rhs, "fsub\0" as *const i8)
             return (r.0, state, r.1)
@@ -707,7 +707,7 @@ fn llvm_compile_binary(
     }
 
     // ---- MUL ----
-    if op == HlirBinaryOp::HlirBinMul {
+    if op == HlirOpMul {
         if is_float {
             let r = llvm_build_fmul(b, lhs, rhs, "fmul\0" as *const i8)
             return (r.0, state, r.1)
@@ -717,15 +717,15 @@ fn llvm_compile_binary(
     }
 
     // ---- DIV (signed/unsigned/float) ----
-    if op == HlirBinaryOp::HlirBinSDiv {
+    if op == HlirOpSDiv {
         let r = llvm_build_sdiv(b, lhs, rhs, "sdiv\0" as *const i8)
         return (r.0, state, r.1)
     }
-    if op == HlirBinaryOp::HlirBinUDiv {
+    if op == HlirOpUDiv {
         let r = llvm_build_udiv(b, lhs, rhs, "udiv\0" as *const i8)
         return (r.0, state, r.1)
     }
-    if op == HlirBinaryOp::HlirBinDiv {
+    if op == HlirOpSDiv {
         if is_float {
             let r = llvm_build_fdiv(b, lhs, rhs, "fdiv\0" as *const i8)
             return (r.0, state, r.1)
@@ -739,15 +739,15 @@ fn llvm_compile_binary(
     }
 
     // ---- REM ----
-    if op == HlirBinaryOp::HlirBinSRem {
+    if op == HlirOpSRem {
         let r = llvm_build_srem(b, lhs, rhs, "srem\0" as *const i8)
         return (r.0, state, r.1)
     }
-    if op == HlirBinaryOp::HlirBinURem {
+    if op == HlirOpURem {
         let r = llvm_build_urem(b, lhs, rhs, "urem\0" as *const i8)
         return (r.0, state, r.1)
     }
-    if op == HlirBinaryOp::HlirBinRem {
+    if op == HlirOpSRem {
         if is_float {
             let r = llvm_build_frem(b, lhs, rhs, "frem\0" as *const i8)
             return (r.0, state, r.1)
@@ -761,33 +761,33 @@ fn llvm_compile_binary(
     }
 
     // ---- Bitwise ----
-    if op == HlirBinaryOp::HlirBinAnd {
+    if op == HlirOpAnd {
         let r = llvm_build_and(b, lhs, rhs, "and\0" as *const i8)
         return (r.0, state, r.1)
     }
-    if op == HlirBinaryOp::HlirBinOr {
+    if op == HlirOpOr {
         let r = llvm_build_or(b, lhs, rhs, "or\0" as *const i8)
         return (r.0, state, r.1)
     }
-    if op == HlirBinaryOp::HlirBinXor {
+    if op == HlirOpXor {
         let r = llvm_build_xor(b, lhs, rhs, "xor\0" as *const i8)
         return (r.0, state, r.1)
     }
-    if op == HlirBinaryOp::HlirBinShl {
+    if op == HlirOpShl {
         let r = llvm_build_shl(b, lhs, rhs, "shl\0" as *const i8)
         return (r.0, state, r.1)
     }
-    if op == HlirBinaryOp::HlirBinAShr {
+    if op == HlirOpAShr {
         let r = llvm_build_ashr(b, lhs, rhs, "ashr\0" as *const i8)
         return (r.0, state, r.1)
     }
-    if op == HlirBinaryOp::HlirBinLShr {
+    if op == HlirOpLShr {
         let r = llvm_build_lshr(b, lhs, rhs, "lshr\0" as *const i8)
         return (r.0, state, r.1)
     }
 
     // ---- Integer comparisons ----
-    if op == HlirBinaryOp::HlirBinEq {
+    if op == HlirOpEq {
         if is_float {
             let r = llvm_build_fcmp(b, LLVM_REAL_OEQ, lhs, rhs, "fcmp_eq\0" as *const i8)
             return (r.0, state, r.1)
@@ -795,7 +795,7 @@ fn llvm_compile_binary(
         let r = llvm_build_icmp(b, LLVM_INT_EQ, lhs, rhs, "icmp_eq\0" as *const i8)
         return (r.0, state, r.1)
     }
-    if op == HlirBinaryOp::HlirBinNe {
+    if op == HlirOpNe {
         if is_float {
             let r = llvm_build_fcmp(b, LLVM_REAL_UNE, lhs, rhs, "fcmp_ne\0" as *const i8)
             return (r.0, state, r.1)
@@ -803,67 +803,67 @@ fn llvm_compile_binary(
         let r = llvm_build_icmp(b, LLVM_INT_NE, lhs, rhs, "icmp_ne\0" as *const i8)
         return (r.0, state, r.1)
     }
-    if op == HlirBinaryOp::HlirBinSLt {
+    if op == HlirOpSLt {
         let r = llvm_build_icmp(b, LLVM_INT_SLT, lhs, rhs, "icmp_slt\0" as *const i8)
         return (r.0, state, r.1)
     }
-    if op == HlirBinaryOp::HlirBinSLe {
+    if op == HlirOpSLe {
         let r = llvm_build_icmp(b, LLVM_INT_SLE, lhs, rhs, "icmp_sle\0" as *const i8)
         return (r.0, state, r.1)
     }
-    if op == HlirBinaryOp::HlirBinSGt {
+    if op == HlirOpSGt {
         let r = llvm_build_icmp(b, LLVM_INT_SGT, lhs, rhs, "icmp_sgt\0" as *const i8)
         return (r.0, state, r.1)
     }
-    if op == HlirBinaryOp::HlirBinSGe {
+    if op == HlirOpSGe {
         let r = llvm_build_icmp(b, LLVM_INT_SGE, lhs, rhs, "icmp_sge\0" as *const i8)
         return (r.0, state, r.1)
     }
-    if op == HlirBinaryOp::HlirBinULt {
+    if op == HlirOpULt {
         let r = llvm_build_icmp(b, LLVM_INT_ULT, lhs, rhs, "icmp_ult\0" as *const i8)
         return (r.0, state, r.1)
     }
-    if op == HlirBinaryOp::HlirBinULe {
+    if op == HlirOpULe {
         let r = llvm_build_icmp(b, LLVM_INT_ULE, lhs, rhs, "icmp_ule\0" as *const i8)
         return (r.0, state, r.1)
     }
-    if op == HlirBinaryOp::HlirBinUGt {
+    if op == HlirOpUGt {
         let r = llvm_build_icmp(b, LLVM_INT_UGT, lhs, rhs, "icmp_ugt\0" as *const i8)
         return (r.0, state, r.1)
     }
-    if op == HlirBinaryOp::HlirBinUGe {
+    if op == HlirOpUGe {
         let r = llvm_build_icmp(b, LLVM_INT_UGE, lhs, rhs, "icmp_uge\0" as *const i8)
         return (r.0, state, r.1)
     }
 
     // ---- Float comparisons ----
-    if op == HlirBinaryOp::HlirBinFOLt {
+    if op == HlirOpFOLt {
         let r = llvm_build_fcmp(b, LLVM_REAL_OLT, lhs, rhs, "fcmp_olt\0" as *const i8)
         return (r.0, state, r.1)
     }
-    if op == HlirBinaryOp::HlirBinFOLe {
+    if op == HlirOpFOLe {
         let r = llvm_build_fcmp(b, LLVM_REAL_OLE, lhs, rhs, "fcmp_ole\0" as *const i8)
         return (r.0, state, r.1)
     }
-    if op == HlirBinaryOp::HlirBinFOGt {
+    if op == HlirOpFOGt {
         let r = llvm_build_fcmp(b, LLVM_REAL_OGT, lhs, rhs, "fcmp_ogt\0" as *const i8)
         return (r.0, state, r.1)
     }
-    if op == HlirBinaryOp::HlirBinFOGe {
+    if op == HlirOpFOGe {
         let r = llvm_build_fcmp(b, LLVM_REAL_OGE, lhs, rhs, "fcmp_oge\0" as *const i8)
         return (r.0, state, r.1)
     }
-    if op == HlirBinaryOp::HlirBinFOEq {
+    if op == HlirOpFOEq {
         let r = llvm_build_fcmp(b, LLVM_REAL_OEQ, lhs, rhs, "fcmp_oeq\0" as *const i8)
         return (r.0, state, r.1)
     }
-    if op == HlirBinaryOp::HlirBinFONe {
+    if op == HlirOpFONe {
         let r = llvm_build_fcmp(b, LLVM_REAL_ONE, lhs, rhs, "fcmp_one\0" as *const i8)
         return (r.0, state, r.1)
     }
 
     // ---- Lt/Le/Gt/Ge (generic, dispatch by signedness) ----
-    if op == HlirBinaryOp::HlirBinLt {
+    if op == HlirOpSLt {
         if is_float {
             let r = llvm_build_fcmp(b, LLVM_REAL_OLT, lhs, rhs, "fcmp_lt\0" as *const i8)
             return (r.0, state, r.1)
@@ -875,7 +875,7 @@ fn llvm_compile_binary(
         let r = llvm_build_icmp(b, LLVM_INT_ULT, lhs, rhs, "icmp_lt\0" as *const i8)
         return (r.0, state, r.1)
     }
-    if op == HlirBinaryOp::HlirBinLe {
+    if op == HlirOpSLe {
         if is_float {
             let r = llvm_build_fcmp(b, LLVM_REAL_OLE, lhs, rhs, "fcmp_le\0" as *const i8)
             return (r.0, state, r.1)
@@ -887,7 +887,7 @@ fn llvm_compile_binary(
         let r = llvm_build_icmp(b, LLVM_INT_ULE, lhs, rhs, "icmp_le\0" as *const i8)
         return (r.0, state, r.1)
     }
-    if op == HlirBinaryOp::HlirBinGt {
+    if op == HlirOpSGt {
         if is_float {
             let r = llvm_build_fcmp(b, LLVM_REAL_OGT, lhs, rhs, "fcmp_gt\0" as *const i8)
             return (r.0, state, r.1)
@@ -899,7 +899,7 @@ fn llvm_compile_binary(
         let r = llvm_build_icmp(b, LLVM_INT_UGT, lhs, rhs, "icmp_gt\0" as *const i8)
         return (r.0, state, r.1)
     }
-    if op == HlirBinaryOp::HlirBinGe {
+    if op == HlirOpSGe {
         if is_float {
             let r = llvm_build_fcmp(b, LLVM_REAL_OGE, lhs, rhs, "fcmp_ge\0" as *const i8)
             return (r.0, state, r.1)
@@ -929,7 +929,7 @@ fn llvm_compile_unary(
 ) -> (LlvmBuilder, LlvmCodegenState, LlvmValue) with IO {
     let is_float = hlir_type_is_float(ty)
 
-    if op == HlirUnaryOp::HlirUnNeg {
+    if op == HlirOpNeg {
         if is_float {
             let r = llvm_build_fneg(builder, operand, "fneg\0" as *const i8)
             return (r.0, state, r.1)
@@ -938,7 +938,7 @@ fn llvm_compile_unary(
         return (r.0, state, r.1)
     }
 
-    if op == HlirUnaryOp::HlirUnNot {
+    if op == HlirOpNot {
         let r = llvm_build_not(builder, operand, "not\0" as *const i8)
         return (r.0, state, r.1)
     }
@@ -1026,7 +1026,7 @@ fn llvm_compile_cast(
     }
 
     // Ptr → Int
-    if src_ty.kind == HlirTypeKind::HlirTypePtr {
+    if src_ty.kind == HlirTypePtr {
         if dst_is_int {
             let r = llvm_build_ptr_to_int(builder, src_val, dest_llvm_ty, "ptrtoint\0" as *const i8)
             return (c, r.0, s, r.1)
@@ -1035,7 +1035,7 @@ fn llvm_compile_cast(
 
     // Int → Ptr
     if src_is_int {
-        if dst_ty.kind == HlirTypeKind::HlirTypePtr {
+        if dst_ty.kind == HlirTypePtr {
             let r = llvm_build_int_to_ptr(builder, src_val, dest_llvm_ty, "inttoptr\0" as *const i8)
             return (c, r.0, s, r.1)
         }
@@ -1084,7 +1084,7 @@ fn llvm_compile_terminator(
 
     // ---- Unconditional branch ----
     if tk == HlirTermKind::HlirTermBranch {
-        let target_bb = block_map_get(s.blocks, term.target_block)
+        let target_bb = block_map_get(s.blocks, term.branch_target)
         if !llvm_block_is_null(target_bb) {
             let r = llvm_build_br(b, target_bb)
             b = r.0
@@ -1094,7 +1094,7 @@ fn llvm_compile_terminator(
 
     // ---- Conditional branch ----
     if tk == HlirTermKind::HlirTermCondBranch {
-        let cond_val = ssa_map_get(s.values, term.condition)
+        let cond_val = ssa_map_get(s.values, term.cond_value)
         let then_bb = block_map_get(s.blocks, term.then_block)
         let else_bb = block_map_get(s.blocks, term.else_block)
         if !llvm_value_is_null(cond_val) {
@@ -1110,8 +1110,8 @@ fn llvm_compile_terminator(
 
     // ---- Switch ----
     if tk == HlirTermKind::HlirTermSwitch {
-        let switch_val = ssa_map_get(s.values, term.condition)
-        let default_bb = block_map_get(s.blocks, term.target_block)
+        let switch_val = ssa_map_get(s.values, term.switch_value)
+        let default_bb = block_map_get(s.blocks, term.switch_default)
         if !llvm_value_is_null(switch_val) {
             if !llvm_block_is_null(default_bb) {
                 let r = llvm_build_switch(b, switch_val, default_bb, term.switch_case_count as i32)
@@ -1120,8 +1120,8 @@ fn llvm_compile_terminator(
 
                 var ci: i64 = 0
                 while ci < term.switch_case_count {
-                    let case_val_id = term.switch_case_values[ci as usize]
-                    let case_bb = block_map_get(s.blocks, term.switch_case_blocks[ci as usize])
+                    let case_val_id = term.switch_cases[ci as usize].value
+                    let case_bb = block_map_get(s.blocks, term.switch_cases[ci as usize].target)
                     if !llvm_block_is_null(case_bb) {
                         // Case value is an integer constant
                         let r2 = llvm_int64_type(c)

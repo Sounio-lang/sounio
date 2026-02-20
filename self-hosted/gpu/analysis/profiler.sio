@@ -76,7 +76,7 @@ let OCC_LIMIT_THREAD_COUNT: i64 = 3
 // Core IR structs (flat, fixed-capacity — mirrors optimizer.sio)
 // ============================================================================
 
-struct GpuOpEntry {
+struct ProfGpuOpEntry {
     opcode:   i64,
     type_tag: i64,
     dst_idx:  i64,
@@ -90,9 +90,9 @@ struct GpuOpEntry {
     dead:     bool,
 }
 
-struct GpuBlockEntry {
+struct ProfGpuBlockEntry {
     id:           i64,
-    ops:          [GpuOpEntry; 4096],
+    ops:          [ProfGpuOpEntry; 4096],
     op_count:     i64,
     term_tag:     i64,
     term_src:     i64,
@@ -100,11 +100,11 @@ struct GpuBlockEntry {
     term_target1: i64,
 }
 
-struct GpuKernelEntry {
+struct ProfGpuKernelEntry {
     name:                  [i8; 256],
     name_len:              i64,
     is_kernel:             bool,
-    blocks:                [GpuBlockEntry; 256],
+    blocks:                [ProfGpuBlockEntry; 256],
     block_count:           i64,
     param_count:           i64,
     shared_mem_bytes:      i64,
@@ -265,8 +265,8 @@ fn prof_peephole_hint_zero() -> PeepholeHint {
     }
 }
 
-fn prof_gpu_op_entry_zero() -> GpuOpEntry {
-    GpuOpEntry {
+fn prof_gpu_op_entry_zero() -> ProfGpuOpEntry {
+    ProfGpuOpEntry {
         opcode:   0,
         type_tag: 0,
         dst_idx:  -1,
@@ -274,7 +274,7 @@ fn prof_gpu_op_entry_zero() -> GpuOpEntry {
         src1:     -1,
         src2:     -1,
         imm_int:  0,
-        imm_f32:  0.0,
+        imm_f32:  0.0 as f32,
         pred:     -1,
         axis:     0,
         dead:     false,
@@ -518,8 +518,8 @@ fn prof_max_f32(a: f32, b: f32) -> f32 {
 // Instruction counting
 // ============================================================================
 
-// Classify one GpuOpEntry into InstructionCounts and return updated counts.
-fn prof_count_op(ic: InstructionCounts, op: GpuOpEntry) -> InstructionCounts {
+// Classify one ProfGpuOpEntry into InstructionCounts and return updated counts.
+fn prof_count_op(ic: InstructionCounts, op: ProfGpuOpEntry) -> InstructionCounts {
     if op.dead {
         return ic
     }
@@ -787,7 +787,7 @@ fn prof_ic_merge(a: InstructionCounts, b: InstructionCounts) -> InstructionCount
 }
 
 // Count all instructions in a single basic block.
-fn prof_count_block(blk: GpuBlockEntry) -> InstructionCounts {
+fn prof_count_block(blk: ProfGpuBlockEntry) -> InstructionCounts {
     var ic = prof_ic_new()
     var i: i64 = 0
     while i < blk.op_count {
@@ -798,7 +798,7 @@ fn prof_count_block(blk: GpuBlockEntry) -> InstructionCounts {
 }
 
 // Count all instructions across all blocks of a kernel.
-fn prof_count_kernel(k: GpuKernelEntry) -> InstructionCounts {
+fn prof_count_kernel(k: ProfGpuKernelEntry) -> InstructionCounts {
     var ic = prof_ic_new()
     var b: i64 = 0
     while b < k.block_count {
@@ -815,7 +815,7 @@ fn prof_count_kernel(k: GpuKernelEntry) -> InstructionCounts {
 
 // Count the number of distinct destination register indices defined across all
 // ops in a block.  Uses a simple bitmask covering indices 0..127.
-fn prof_count_distinct_dsts_block(blk: GpuBlockEntry) -> i64 {
+fn prof_count_distinct_dsts_block(blk: ProfGpuBlockEntry) -> i64 {
     var seen: [bool; 512] = [false; 512]
     var count: i64 = 0
     var i: i64 = 0
@@ -833,7 +833,7 @@ fn prof_count_distinct_dsts_block(blk: GpuBlockEntry) -> i64 {
 }
 
 // Rough register-per-thread estimate: peak distinct live values across blocks.
-fn prof_regs_per_thread_estimate(k: GpuKernelEntry) -> i64 {
+fn prof_regs_per_thread_estimate(k: ProfGpuKernelEntry) -> i64 {
     var peak: i64 = 0
     var b: i64 = 0
     while b < k.block_count {
@@ -1071,7 +1071,7 @@ fn prof_classify_bottleneck(ic: InstructionCounts, roofline: RooflinePoint, occu
 
 // Inspect a single op and optionally emit a peephole hint.
 // Returns (has_hint, PeepholeHint).
-fn prof_peephole_hint_for_op(op: GpuOpEntry, op_idx: i64) -> (bool, PeepholeHint) {
+fn prof_peephole_hint_for_op(op: ProfGpuOpEntry, op_idx: i64) -> (bool, PeepholeHint) {
     let oc = op.opcode
 
     // Division is expensive — suggest rcp.approx + mul
@@ -1115,7 +1115,7 @@ fn prof_peephole_hint_for_op(op: GpuOpEntry, op_idx: i64) -> (bool, PeepholeHint
 
 // Scan a block's ops and accumulate peephole hints.
 // Returns the updated hints array and new hint count.
-fn prof_analyze_block_hints(blk: GpuBlockEntry, hints: [PeepholeHint; 256], count: i64) -> ([PeepholeHint; 256], i64) {
+fn prof_analyze_block_hints(blk: ProfGpuBlockEntry, hints: [PeepholeHint; 256], count: i64) -> ([PeepholeHint; 256], i64) {
     var out_hints = hints
     var out_count = count
     var i: i64 = 0
@@ -1133,7 +1133,7 @@ fn prof_analyze_block_hints(blk: GpuBlockEntry, hints: [PeepholeHint; 256], coun
 }
 
 // Analyze all blocks in a kernel for peephole hints.
-fn prof_analyze_kernel_hints(k: GpuKernelEntry) -> ([PeepholeHint; 256], i64) {
+fn prof_analyze_kernel_hints(k: ProfGpuKernelEntry) -> ([PeepholeHint; 256], i64) {
     var hints: [PeepholeHint; 256] = [prof_peephole_hint_zero(); 256]
     var count: i64 = 0
     var b: i64 = 0
@@ -1150,7 +1150,7 @@ fn prof_analyze_kernel_hints(k: GpuKernelEntry) -> ([PeepholeHint; 256], i64) {
 // Full kernel analysis
 // ============================================================================
 
-fn prof_analyze_kernel(k: GpuKernelEntry, spec: SmHardwareSpec) -> KernelMetrics with Div {
+fn prof_analyze_kernel(k: ProfGpuKernelEntry, spec: SmHardwareSpec) -> KernelMetrics with Div {
     let ic            = prof_count_kernel(k)
     let regs          = prof_regs_per_thread_estimate(k)
     let smem          = k.shared_mem_bytes
@@ -1183,7 +1183,7 @@ fn prof_analyze_kernel(k: GpuKernelEntry, spec: SmHardwareSpec) -> KernelMetrics
 }
 
 // Analyze all kernel entries in a module-level array.
-fn prof_analyze_module_kernels(kernels: [GpuKernelEntry; 64], count: i64, spec: SmHardwareSpec) -> ModuleMetrics with Div {
+fn prof_analyze_module_kernels(kernels: [ProfGpuKernelEntry; 64], count: i64, spec: SmHardwareSpec) -> ModuleMetrics with Div {
     var metrics: [KernelMetrics; 64] = [KernelMetrics {
         name:                 [0; 256],
         name_len:             0,
