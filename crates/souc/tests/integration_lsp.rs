@@ -87,6 +87,7 @@ struct TextDocumentItem {
 struct LspClient {
     child: Child,
     next_id: AtomicI64,
+    stderr_reader: Option<thread::JoinHandle<Vec<String>>>,
 }
 
 impl LspClient {
@@ -117,7 +118,7 @@ impl LspClient {
             lsp_path.push("target/debug/sounio-lsp");
         }
 
-        let child = Command::new(lsp_path)
+        let mut child = Command::new(lsp_path)
             .arg("--stdio")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -125,12 +126,26 @@ impl LspClient {
             .spawn()
             .expect("Failed to start LSP server");
 
+        let stderr = child.stderr.take().expect("Failed to capture stderr");
+        let stderr_reader = thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            let mut lines = Vec::new();
+            for line in reader.lines() {
+                match line {
+                    Ok(line) => lines.push(line),
+                    Err(_) => break,
+                }
+            }
+            lines
+        });
+
         // Give server time to start
         thread::sleep(Duration::from_millis(300));
 
         Self {
             child,
             next_id: AtomicI64::new(1),
+            stderr_reader: Some(stderr_reader),
         }
     }
 
@@ -384,6 +399,9 @@ impl Drop for LspClient {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if let Some(handle) = self.stderr_reader.take() {
+            let _ = handle.join();
+        }
     }
 }
 

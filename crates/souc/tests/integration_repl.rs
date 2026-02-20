@@ -68,6 +68,7 @@ fn souc_bin() -> PathBuf {
 struct ReplSession {
     child: Child,
     output_reader: thread::JoinHandle<Vec<String>>,
+    stderr_reader: thread::JoinHandle<Vec<String>>,
 }
 
 impl ReplSession {
@@ -84,10 +85,26 @@ impl ReplSession {
             .expect("Failed to start REPL");
 
         let stdout = child.stdout.take().expect("Failed to get stdout");
+        let stderr = child.stderr.take().expect("Failed to get stderr");
 
-        // Spawn a thread to read output
+        // Drain stdout continuously so the child never blocks on a full pipe.
         let output_reader = thread::spawn(move || {
             let reader = BufReader::new(stdout);
+            let mut lines = Vec::new();
+            for line in reader.lines() {
+                match line {
+                    Ok(line) => {
+                        lines.push(line);
+                    }
+                    Err(_) => break,
+                }
+            }
+            lines
+        });
+
+        // Drain stderr continuously for the same reason.
+        let stderr_reader = thread::spawn(move || {
+            let reader = BufReader::new(stderr);
             let mut lines = Vec::new();
             for line in reader.lines() {
                 match line {
@@ -106,6 +123,7 @@ impl ReplSession {
         Self {
             child,
             output_reader,
+            stderr_reader,
         }
     }
 
@@ -133,7 +151,12 @@ impl ReplSession {
         let _ = self.child.wait();
 
         // Collect output
-        self.output_reader.join().unwrap_or_default()
+        let mut output = self.output_reader.join().unwrap_or_default();
+        let stderr = self.stderr_reader.join().unwrap_or_default();
+        if !stderr.is_empty() {
+            output.extend(stderr.into_iter().map(|line| format!("[stderr] {line}")));
+        }
+        output
     }
 
     /// Send input and collect all subsequent output

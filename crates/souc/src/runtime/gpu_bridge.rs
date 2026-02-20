@@ -29,9 +29,9 @@ use std::sync::{Mutex, OnceLock};
 use crate::codegen::gpu::runtime::{
     DeviceBuffer, GpuBackend, GpuError, GpuRuntime, Kernel, KernelArg, LaunchConfig,
 };
-use crate::codegen::gpu::epistemic_gemm::{
-    EpistemicGemmConfig, format_gemm_profile, generate_epistemic_gemm_ptx_sm, profile_gemm_launch,
-};
+use crate::codegen::gpu::epistemic_gemm::{EpistemicGemmConfig, generate_epistemic_gemm_ptx_sm};
+#[cfg(feature = "gpu")]
+use crate::codegen::gpu::epistemic_gemm::{format_gemm_profile, profile_gemm_launch};
 
 /// Global GPU runtime singleton
 static GPU_RUNTIME: OnceLock<Mutex<GpuRuntimeBridge>> = OnceLock::new();
