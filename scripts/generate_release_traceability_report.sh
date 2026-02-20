@@ -54,7 +54,13 @@ canonical_hello_line="$(line_of "All checks passed: examples/hello.sio" "$LOG_DI
 e2e_ok_line="$(line_of "\\[e2e\\] ok" "$LOG_DIR/fast_gate-rerun.log")"
 
 REPORT="$RUN_DIR/TRACEABILITY_MATRIX.md"
-GENERATED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+run_dir_base="$(basename "$RUN_DIR")"
+if [[ "$run_dir_base" =~ ^final-([0-9]{8}T[0-9]{6}Z)$ ]]; then
+  run_ts="${BASH_REMATCH[1]}"
+  GENERATED_AT="${run_ts:0:4}-${run_ts:4:2}-${run_ts:6:2}T${run_ts:9:2}:${run_ts:11:2}:${run_ts:13:2}Z"
+else
+  GENERATED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+fi
 
 cat > "$REPORT" <<EOF
 # Sounio Release-Readiness Traceability Matrix
