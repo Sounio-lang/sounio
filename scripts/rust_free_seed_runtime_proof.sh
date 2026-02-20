@@ -12,7 +12,8 @@ NO_RUST_MARKER_LOG="$LOG_DIR/no-rust-markers.log"
 SEED_PATH="${SOUNIO_BOOTSTRAP_SEED_PATH:-bootstrap/seeds/sounio-bootstrap-linux-x86_64.sio.bin}"
 SEED_SHA256_PATH="${SOUNIO_BOOTSTRAP_SEED_SHA256_PATH:-${SEED_PATH}.sha256}"
 SEED_SIG_PATH="${SOUNIO_BOOTSTRAP_SEED_SIG_PATH:-${SEED_PATH}.sig}"
-SELFHOST_TARGET="${SELFHOST_TARGET:-self-hosted/}"
+SELFHOST_TARGET="${SELFHOST_TARGET:-$ROOT_DIR/self-hosted/}"
+ASSERT_NO_RUST_MARKERS_SCRIPT="${ASSERT_NO_RUST_MARKERS_SCRIPT:-$ROOT_DIR/scripts/assert_no_rust_markers.sh}"
 
 mkdir -p "$LOG_DIR"
 rm -f "$RUN_LOG" "$NO_RUST_MARKER_LOG"
@@ -46,6 +47,16 @@ for required_file in "$SEED_PATH" "$SEED_SHA256_PATH" "$SEED_SIG_PATH"; do
   fi
 done
 
+if [ ! -e "$SELFHOST_TARGET" ]; then
+  echo "error: missing self-host target path: $SELFHOST_TARGET" >&2
+  exit 1
+fi
+
+if [ ! -f "$ASSERT_NO_RUST_MARKERS_SCRIPT" ]; then
+  echo "error: missing rust-marker assertion script: $ASSERT_NO_RUST_MARKERS_SCRIPT" >&2
+  exit 1
+fi
+
 if ! env \
   SOUNIO_BOOTSTRAP_SEED_ENFORCE=1 \
   SOUNIO_BOOTSTRAP_SEED_PATH="$SEED_PATH" \
@@ -77,7 +88,7 @@ if ! grep -q "Self-hosted compiler - Rust-free build" "$RUN_LOG"; then
   exit 1
 fi
 
-if ! bash scripts/assert_no_rust_markers.sh "$RUN_LOG" >"$NO_RUST_MARKER_LOG" 2>&1; then
+if ! bash "$ASSERT_NO_RUST_MARKERS_SCRIPT" "$RUN_LOG" >"$NO_RUST_MARKER_LOG" 2>&1; then
   echo "error: rust marker leakage detected during rust-free seed runtime proof" >&2
   cat "$NO_RUST_MARKER_LOG" >&2 || true
   exit 1
