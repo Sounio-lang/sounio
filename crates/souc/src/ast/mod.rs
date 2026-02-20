@@ -1465,6 +1465,8 @@ pub enum Expr {
         id: NodeId,
         callee: Box<Expr>,
         args: Vec<Expr>,
+        /// Turbofish type arguments: `func::<T, U>(args)`
+        type_args: Vec<TypeExpr>,
     },
     /// Method call
     MethodCall {
@@ -1472,6 +1474,8 @@ pub enum Expr {
         receiver: Box<Expr>,
         method: String,
         args: Vec<Expr>,
+        /// Turbofish type arguments: `.method::<T, U>(args)`
+        type_args: Vec<TypeExpr>,
     },
     /// Field access
     Field {

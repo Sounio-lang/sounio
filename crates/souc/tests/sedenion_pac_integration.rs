@@ -69,22 +69,37 @@ fn run_with_timeout(cmd: &str, args: &[&str], timeout_secs: u64) -> Result<Outpu
         .spawn()
         .map_err(|e| format!("Failed to spawn: {}", e))?;
 
+    // Drain pipes concurrently to avoid child-process deadlocks when diagnostics exceed pipe buffers.
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Failed to capture child stdout".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Failed to capture child stderr".to_string())?;
+
+    let stdout_thread = thread::spawn(move || {
+        let mut reader = stdout;
+        let mut buf = Vec::new();
+        let _ = reader.read_to_end(&mut buf);
+        buf
+    });
+    let stderr_thread = thread::spawn(move || {
+        let mut reader = stderr;
+        let mut buf = Vec::new();
+        let _ = reader.read_to_end(&mut buf);
+        buf
+    });
+
     let timeout = Duration::from_secs(timeout_secs);
     let start = Instant::now();
 
     while start.elapsed() < timeout {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let stdout = child.stdout.take().map_or(Vec::new(), |mut s| {
-                    let mut buf = Vec::new();
-                    let _ = s.read_to_end(&mut buf);
-                    buf
-                });
-                let stderr = child.stderr.take().map_or(Vec::new(), |mut s| {
-                    let mut buf = Vec::new();
-                    let _ = s.read_to_end(&mut buf);
-                    buf
-                });
+                let stdout = stdout_thread.join().unwrap_or_default();
+                let stderr = stderr_thread.join().unwrap_or_default();
                 return Ok(Output {
                     status,
                     stdout,
@@ -92,11 +107,20 @@ fn run_with_timeout(cmd: &str, args: &[&str], timeout_secs: u64) -> Result<Outpu
                 });
             }
             Ok(None) => thread::sleep(Duration::from_millis(100)),
-            Err(e) => return Err(format!("Wait error: {}", e)),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_thread.join();
+                let _ = stderr_thread.join();
+                return Err(format!("Wait error: {}", e));
+            }
         }
     }
 
     let _ = child.kill();
+    let _ = child.wait();
+    let _ = stdout_thread.join();
+    let _ = stderr_thread.join();
     Err(format!("Command timed out after {} seconds", timeout_secs))
 }
 

@@ -172,6 +172,9 @@ pub struct TypeChecker {
     alignments: HashMap<(String, String), f64>,
     /// Function-level compatibility thresholds from #[compat] annotations
     fn_thresholds: HashMap<String, f64>,
+    /// Generic type parameter names per function: fn_name -> ["T", "U", ...]
+    /// Used for turbofish type argument substitution: `func::<T>(args)`
+    fn_type_params: HashMap<String, Vec<String>>,
     /// Default compatibility threshold
     default_threshold: f64,
     /// Probabilistic threshold for Bayesian type compatibility (optional)
@@ -344,6 +347,7 @@ impl TypeChecker {
             errors: Vec::new(),
             alignments: HashMap::new(),
             fn_thresholds: HashMap::new(),
+            fn_type_params: HashMap::new(),
             default_threshold: 0.15, // Default threshold for semantic compatibility
             probabilistic_threshold: None, // Enable with enable_probabilistic_checking()
             ast: None,
@@ -1222,7 +1226,8 @@ impl TypeChecker {
                         KnowledgeValidityKind::ValidUntil => "ValidUntil",
                         KnowledgeValidityKind::ValidWhile => "ValidWhile",
                     };
-                    let rendered = match (validity.normalized_constant, validity.iso_hint.as_ref()) {
+                    let rendered = match (validity.normalized_constant, validity.iso_hint.as_ref())
+                    {
                         (Some(v), Some(iso)) => format!("{}({}, iso={})", kind, v, iso),
                         (Some(v), None) => format!("{}({})", kind, v),
                         (None, Some(iso)) => format!("{}(iso={})", kind, iso),
@@ -1412,6 +1417,23 @@ impl TypeChecker {
                 };
                 self.env.bind(f.name.clone(), fn_type, false);
 
+                // Store generic type parameter names for turbofish resolution
+                let type_params: Vec<String> = f
+                    .generics
+                    .params
+                    .iter()
+                    .filter_map(|p| {
+                        if let GenericParam::Type { name, .. } = p {
+                            Some(name.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if !type_params.is_empty() {
+                    self.fn_type_params.insert(f.name.clone(), type_params);
+                }
+
                 // Collect refinement info for parameters
                 let mut param_refinements = Vec::new();
                 for param in &f.params {
@@ -1564,13 +1586,17 @@ impl TypeChecker {
                     return false;
                 }
                 // Allow mutability relaxation (&! → &)
-                if m.contains("expected `Ref { mutable: true") && m.contains("found `Ref { mutable: false") {
+                if m.contains("expected `Ref { mutable: true")
+                    && m.contains("found `Ref { mutable: false")
+                {
                     return false;
                 }
                 // Allow enum↔i64 coercion (enum tag values)
                 if (m.contains("found `i64`") || m.contains("found `("))
-                    && (m.contains("HlirOpKind") || m.contains("HlirTypeKind")
-                        || m.contains("HlirTermKind") || m.contains("BioPtxState"))
+                    && (m.contains("HlirOpKind")
+                        || m.contains("HlirTypeKind")
+                        || m.contains("HlirTermKind")
+                        || m.contains("BioPtxState"))
                 {
                     return false;
                 }
@@ -2584,18 +2610,29 @@ impl TypeChecker {
         let expected_expanded =
             self.normalize_legacy_knowledge_type(self.expand_type_alias(expected));
         let found_expanded = self.normalize_legacy_knowledge_type(self.expand_type_alias(found));
+        let expected_hir = self.type_to_hir(&expected_expanded);
+        let found_hir = self.type_to_hir(&found_expanded);
+        let ontology_boundary = self
+            .extract_ontology_info(&expected_hir, &found_hir)
+            .is_some();
 
         let knowledge_violation =
             self.first_knowledge_boundary_violation(&expected_expanded, &found_expanded);
+        let expected_name = self.type_display_name(&expected_expanded);
+        let found_name = self.type_display_name(&found_expanded);
+        let looks_like_named_ontology =
+            |name: &str| name.contains(':') && !name.contains("::");
+        let named_ontology_boundary =
+            looks_like_named_ontology(&expected_name) && looks_like_named_ontology(&found_name);
         if let Some(message) = &knowledge_violation {
             self.error(message.clone(), span);
         }
 
         if !self.types_compatible(&expected_expanded, &found_expanded)
             && knowledge_violation.is_none()
+            && !ontology_boundary
+            && !named_ontology_boundary
         {
-            let expected_name = self.type_display_name(&expected_expanded);
-            let found_name = self.type_display_name(&found_expanded);
             self.error(
                 format!(
                     "Type mismatch: expected `{}`, found `{}`",
@@ -2605,8 +2642,6 @@ impl TypeChecker {
             );
         }
 
-        let expected_hir = self.type_to_hir(&expected_expanded);
-        let found_hir = self.type_to_hir(&found_expanded);
         self.check_type_compatibility_with_threshold(&expected_hir, &found_hir, threshold, span);
     }
 
@@ -2760,17 +2795,13 @@ impl TypeChecker {
                 }
 
                 if let Some(required_validity) = expected_validity
-                    && !self.validity_constraint_satisfied(
+                    && !self
+                        .validity_constraint_satisfied(required_validity, found_validity.as_ref())
+                {
+                    return Some(self.temporal_validity_window_diagnostic(
                         required_validity,
                         found_validity.as_ref(),
-                    )
-                {
-                    return Some(
-                        self.temporal_validity_window_diagnostic(
-                            required_validity,
-                            found_validity.as_ref(),
-                        ),
-                    );
+                    ));
                 }
 
                 if let Some(required_provenance) = expected_provenance
@@ -2860,12 +2891,11 @@ impl TypeChecker {
             (Type::Tuple(expected_items), Type::Tuple(found_items))
                 if expected_items.len() == found_items.len() =>
             {
-                expected_items
-                    .iter()
-                    .zip(found_items.iter())
-                    .find_map(|(expected_item, found_item)| {
+                expected_items.iter().zip(found_items.iter()).find_map(
+                    |(expected_item, found_item)| {
                         self.first_knowledge_boundary_violation(expected_item, found_item)
-                    })
+                    },
+                )
             }
             (
                 Type::Named {
@@ -2987,7 +3017,11 @@ impl TypeChecker {
                         iso
                     )
                 } else {
-                    format!("{}(epoch_days={})", kind, self.format_validity_epoch_days(window))
+                    format!(
+                        "{}(epoch_days={})",
+                        kind,
+                        self.format_validity_epoch_days(window)
+                    )
                 }
             }
             (None, Some(iso)) => format!("{}(iso={})", kind, iso),
@@ -3150,6 +3184,17 @@ impl TypeChecker {
         }
     }
 
+    fn parse_named_ontology_curie(name: &str) -> Option<(String, String)> {
+        if name.matches(':').count() != 1 || name.contains("::") {
+            return None;
+        }
+        let (namespace, term) = name.split_once(':')?;
+        if namespace.is_empty() || term.is_empty() {
+            return None;
+        }
+        Some((namespace.to_string(), term.to_string()))
+    }
+
     /// Extract ontology namespace/term info from HirTypes.
     /// Returns (exp_ns, exp_term, found_ns, found_term, exp_alias_name, found_alias_name)
     /// The alias names are Some if the type came from a named type alias.
@@ -3192,6 +3237,13 @@ impl TypeChecker {
                     name: found_name, ..
                 },
             ) => {
+                if let (Some((exp_ns, exp_term)), Some((found_ns, found_term))) = (
+                    Self::parse_named_ontology_curie(exp_name),
+                    Self::parse_named_ontology_curie(found_name),
+                ) {
+                    return Some((exp_ns, exp_term, found_ns, found_term, None, None));
+                }
+
                 let exp_ont = self.type_defs.get(exp_name).and_then(|def| {
                     if let TypeDef::Alias(
                         Type::Ontology {
@@ -3247,6 +3299,17 @@ impl TypeChecker {
                     term: found_term,
                 },
             ) => {
+                if let Some((exp_ns, exp_term)) = Self::parse_named_ontology_curie(name) {
+                    return Some((
+                        exp_ns,
+                        exp_term,
+                        found_ns.clone(),
+                        found_term.clone(),
+                        None,
+                        None,
+                    ));
+                }
+
                 let exp_ont = self.type_defs.get(name).and_then(|def| {
                     if let TypeDef::Alias(
                         Type::Ontology {
@@ -3283,6 +3346,17 @@ impl TypeChecker {
                 },
                 HirType::Named { name, .. },
             ) => {
+                if let Some((found_ns, found_term)) = Self::parse_named_ontology_curie(name) {
+                    return Some((
+                        exp_ns.clone(),
+                        exp_term.clone(),
+                        found_ns,
+                        found_term,
+                        None,
+                        None,
+                    ));
+                }
+
                 let found_ont = self.type_defs.get(name).and_then(|def| {
                     if let TypeDef::Alias(
                         Type::Ontology {
@@ -4456,7 +4530,7 @@ impl TypeChecker {
                 id,
                 callee,
                 args,
-                ..
+                type_args,
             } => {
                 // Check if this is a method call disguised as Call(Field(...))
                 if let Expr::Field { base, field, .. } = callee.as_ref() {
@@ -4600,9 +4674,60 @@ impl TypeChecker {
                 }
 
                 let callee_expr = self.check_expr(callee, None)?;
+
+                // Apply turbofish type arguments if present: `func::<T, U>(args)`
+                // Substitute generic params in the callee's function type before checking arguments.
+                let effective_callee_ty = if !type_args.is_empty() {
+                    if let Expr::Path { path, .. } = callee.as_ref() {
+                        let tf_fn_name = path.segments.last().map(String::as_str).unwrap_or("");
+                        if let Some(generic_params) = self.fn_type_params.get(tf_fn_name).cloned() {
+                            let concrete_args: Vec<Type> = type_args
+                                .iter()
+                                .map(|te| self.lower_type_expr(te))
+                                .collect();
+                            match &callee_expr.ty {
+                                HirType::Fn {
+                                    params,
+                                    return_type,
+                                } => {
+                                    let new_params = params
+                                        .iter()
+                                        .map(|p| {
+                                            let ty = self.hir_type_to_type(p);
+                                            let subst = self.substitute_type_params(
+                                                &ty,
+                                                &generic_params,
+                                                &concrete_args,
+                                            );
+                                            self.type_to_hir(&subst)
+                                        })
+                                        .collect();
+                                    let ret_ty = self.hir_type_to_type(return_type);
+                                    let subst_ret = self.substitute_type_params(
+                                        &ret_ty,
+                                        &generic_params,
+                                        &concrete_args,
+                                    );
+                                    HirType::Fn {
+                                        params: new_params,
+                                        return_type: Box::new(self.type_to_hir(&subst_ret)),
+                                    }
+                                }
+                                other => other.clone(),
+                            }
+                        } else {
+                            callee_expr.ty.clone()
+                        }
+                    } else {
+                        callee_expr.ty.clone()
+                    }
+                } else {
+                    callee_expr.ty.clone()
+                };
+
                 // If we know the callee's parameter types, use them as expected types for args.
                 // This enables context-driven literal typing (e.g., `1` -> `u8` when calling `fn(_, _, u8)`).
-                let expected_param_tys: Option<Vec<Type>> = match &callee_expr.ty {
+                let expected_param_tys: Option<Vec<Type>> = match &effective_callee_ty {
                     HirType::Fn { params, .. } => {
                         Some(params.iter().map(|p| self.hir_type_to_type(p)).collect())
                     }
@@ -4758,7 +4883,7 @@ impl TypeChecker {
                     // Use the specially inferred type for constructors
                     (special_ty, vec![])
                 } else {
-                    match &callee_expr.ty {
+                    match &effective_callee_ty {
                         HirType::Fn {
                             params,
                             return_type,
@@ -5689,8 +5814,8 @@ impl TypeChecker {
                 let value_expr = self.check_expr(value, None)?;
 
                 let expected_knowledge = expected.and_then(|expected_ty| {
-                    let expanded = self
-                        .normalize_legacy_knowledge_type(self.expand_type_alias(expected_ty));
+                    let expanded =
+                        self.normalize_legacy_knowledge_type(self.expand_type_alias(expected_ty));
                     match expanded {
                         Type::Knowledge {
                             epsilon_bound,
@@ -5734,7 +5859,9 @@ impl TypeChecker {
                     _ => None,
                 };
                 let mut knightian = false;
-                if let Some((expected_bound, expected_knightian, _, _)) = expected_knowledge.as_ref() {
+                if let Some((expected_bound, expected_knightian, _, _)) =
+                    expected_knowledge.as_ref()
+                {
                     knightian = *expected_knightian;
                     if knightian {
                         epsilon_bound = None;
@@ -5761,9 +5888,7 @@ impl TypeChecker {
                                     .and_then(|v| v.normalized_constant)
                             }),
                         iso_hint: self.hir_temporal_iso_hint(validity_value).or_else(|| {
-                            expected_validity
-                                .as_ref()
-                                .and_then(|v| v.iso_hint.clone())
+                            expected_validity.as_ref().and_then(|v| v.iso_hint.clone())
                         }),
                     })
                 } else {
@@ -5798,7 +5923,11 @@ impl TypeChecker {
                         self.extract_expr_string(p.as_ref())
                             .map(|source| HirProvenance::Measured { source })
                     })
-                    .or_else(|| provenance.as_ref().map(|_| HirProvenance::Derived { sources: vec![] }));
+                    .or_else(|| {
+                        provenance
+                            .as_ref()
+                            .map(|_| HirProvenance::Derived { sources: vec![] })
+                    });
 
                 (
                     HirExprKind::Knowledge {
@@ -6727,7 +6856,14 @@ impl TypeChecker {
 
     /// Check unit compatibility for binary operations and compute result type
     fn check_binary_units(&mut self, op: BinaryOp, left: &HirType, right: &HirType) -> HirType {
-        let (left_inner, left_conf, left_knightian, left_validity, left_provenance, left_is_knowledge) = match left {
+        let (
+            left_inner,
+            left_conf,
+            left_knightian,
+            left_validity,
+            left_provenance,
+            left_is_knowledge,
+        ) = match left {
             HirType::Knowledge {
                 inner,
                 epsilon_bound,
@@ -10337,7 +10473,7 @@ impl TypeChecker {
                     inner: i2,
                     ..
                 },
-            // Allow &T where &!T expected (FFI leniency — shared ref satisfies exclusive ref)
+                // Allow &T where &!T expected (FFI leniency — shared ref satisfies exclusive ref)
             ) if *m1 || m1 == m2 => self.types_compatible(i1, i2),
             (
                 Type::RawPointer {
@@ -10548,7 +10684,9 @@ impl TypeChecker {
                     mutable: false,
                     inner: ptr_inner,
                 },
-                Type::Ref { inner: ref_inner, .. },
+                Type::Ref {
+                    inner: ref_inner, ..
+                },
             ) => {
                 // Direct: *const T accepts &T (where inner types match)
                 if self.types_compatible(ptr_inner, ref_inner) {

@@ -1384,7 +1384,7 @@ impl<'a> Parser<'a> {
                     return Err(miette::miette!(
                         "Sum type alias `type {} = A | B | ...` requires bare variant names",
                         name
-                    ))
+                    ));
                 }
             };
             let mut variants = vec![first_variant];
@@ -3747,7 +3747,9 @@ impl<'a> Parser<'a> {
             EpsilonValue::KnightianUndefined
         } else if self.peek() == TokenKind::FloatLit {
             let s = self.advance().text.clone();
-            let f: f64 = s.parse().map_err(|_| miette::miette!("Invalid float in ε bound: {}", s))?;
+            let f: f64 = s
+                .parse()
+                .map_err(|_| miette::miette!("Invalid float in ε bound: {}", s))?;
             EpsilonValue::Float(f)
         } else {
             EpsilonValue::Expression(Box::new(self.parse_expr()?))
@@ -4458,6 +4460,33 @@ impl<'a> Parser<'a> {
                         id,
                         callee: Box::new(expr),
                         args,
+                        type_args: vec![],
+                    };
+                }
+                TokenKind::ColonColon if self.peek_n(1) == TokenKind::Lt => {
+                    // Turbofish syntax: expr::<T1, T2>(args)
+                    // e.g. vec_new::<f64>() or parse::<i32>()
+                    self.advance(); // consume '::'
+                    let type_args = self.parse_type_args()?;
+                    // Turbofish must be followed by '(' to form a function call
+                    let lparen_start = self.current().span.start;
+                    self.expect(TokenKind::LParen)?;
+                    let mut args = Vec::new();
+                    while !self.at(TokenKind::RParen) {
+                        args.push(self.parse_expr_with_span()?);
+                        if !self.at(TokenKind::RParen) {
+                            self.expect(TokenKind::Comma)?;
+                        }
+                    }
+                    let rparen_end = self.current().span.end;
+                    self.expect(TokenKind::RParen)?;
+                    let id = self.next_id();
+                    self.record_span(id, Span::new(lparen_start, rparen_end));
+                    expr = Expr::Call {
+                        id,
+                        callee: Box::new(expr),
+                        args,
+                        type_args,
                     };
                 }
                 TokenKind::LBracket => {
@@ -4527,9 +4556,21 @@ impl<'a> Parser<'a> {
                     } else {
                         let field = self.parse_ident()?;
 
-                        // Check if this is a method call: expr.method(args)
-                        // Like plain calls, don't treat '(' on a new line as a method call.
-                        if self.at(TokenKind::LParen) && !self.had_newline_before_current() {
+                        // Parse optional turbofish for method calls: .method::<T, U>(args)
+                        let type_args =
+                            if self.at(TokenKind::ColonColon) && self.peek_n(1) == TokenKind::Lt {
+                                self.advance(); // consume '::'
+                                self.parse_type_args()?
+                            } else {
+                                vec![]
+                            };
+
+                        // Check if this is a method call: expr.method(args) or expr.method::<T>(args)
+                        // Like plain calls, don't treat '(' on a new line as a method call,
+                        // unless turbofish was already parsed (the user explicitly called it).
+                        if self.at(TokenKind::LParen)
+                            && (!type_args.is_empty() || !self.had_newline_before_current())
+                        {
                             self.advance();
                             let mut args = Vec::new();
                             while !self.at(TokenKind::RParen) {
@@ -4544,6 +4585,7 @@ impl<'a> Parser<'a> {
                                 receiver: Box::new(expr),
                                 method: field,
                                 args,
+                                type_args,
                             };
                         } else {
                             expr = Expr::Field {
@@ -4802,6 +4844,7 @@ impl<'a> Parser<'a> {
                         path: Path::simple(&type_name),
                     }),
                     args,
+                    type_args: vec![],
                 })
             }
 
@@ -6163,7 +6206,11 @@ impl<'a> Parser<'a> {
             // Keywords with {...} syntax
             TokenKind::Counterfactual => next == TokenKind::LBrace,
             // Knowledge has special syntax: Knowledge { ... }, Knowledge::new(...), or Knowledge(...)
-            TokenKind::Knowledge => next == TokenKind::LBrace || next == TokenKind::ColonColon || next == TokenKind::LParen,
+            TokenKind::Knowledge => {
+                next == TokenKind::LBrace
+                    || next == TokenKind::ColonColon
+                    || next == TokenKind::LParen
+            }
             _ => false,
         }
     }
@@ -6183,7 +6230,11 @@ impl<'a> Parser<'a> {
             // Keywords with {...} syntax
             TokenKind::Counterfactual => next == TokenKind::LBrace,
             // Knowledge: { ... } or ::new(...) or named constructor (...)
-            TokenKind::Knowledge => next == TokenKind::LBrace || next == TokenKind::ColonColon || next == TokenKind::LParen,
+            TokenKind::Knowledge => {
+                next == TokenKind::LBrace
+                    || next == TokenKind::ColonColon
+                    || next == TokenKind::LParen
+            }
             // Async block/closure: async { ... } or async |...|
             TokenKind::Async => next == TokenKind::LBrace || next == TokenKind::Pipe,
             // Unsafe block: unsafe { ... }
@@ -6207,8 +6258,10 @@ impl<'a> Parser<'a> {
         // Expr::Field). Field access is now handled in parse_postfix via TokenKind::Dot.
         while self.at(TokenKind::ColonColon) {
             // Stop if next token after :: is { or * (for import syntax like `use foo::{a, b}` or `use foo::*`)
+            // Also stop when next is < — that's turbofish (`::<T>`) handled in parse_postfix,
+            // not a path separator.
             let next = self.peek_n(1);
-            if next == TokenKind::LBrace || next == TokenKind::Star {
+            if next == TokenKind::LBrace || next == TokenKind::Star || next == TokenKind::Lt {
                 break;
             }
             self.advance();

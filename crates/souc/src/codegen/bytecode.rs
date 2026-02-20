@@ -576,6 +576,18 @@ impl BytecodeCodegen {
                         variant: name.clone(),
                         field_count: 0,
                     });
+                } else if name.contains("::") {
+                    // Qualified enum variant: EnumName::VariantName
+                    let parts: Vec<&str> = name.splitn(2, "::").collect();
+                    if parts.len() == 2 {
+                        self.emit(Bytecode::MakeVariant {
+                            enum_name: parts[0].to_string(),
+                            variant: parts[1].to_string(),
+                            field_count: 0,
+                        });
+                    } else {
+                        return Err(BytecodeError::UnknownVariable(name.clone()));
+                    }
                 } else {
                     return Err(BytecodeError::UnknownVariable(name.clone()));
                 }
@@ -593,6 +605,21 @@ impl BytecodeCodegen {
                         variant: name.clone(),
                         field_count: 0,
                     });
+                } else if name.contains("::") {
+                    // Qualified enum variant: EnumName::VariantName
+                    // Emit as a unit variant struct. This handles cases where the type
+                    // checker emits Global(...) for paths that weren't in type_defs
+                    // (e.g. cross-file enum references in multi-module compilation).
+                    let parts: Vec<&str> = name.splitn(2, "::").collect();
+                    if parts.len() == 2 {
+                        self.emit(Bytecode::MakeVariant {
+                            enum_name: parts[0].to_string(),
+                            variant: parts[1].to_string(),
+                            field_count: 0,
+                        });
+                    } else {
+                        return Err(BytecodeError::UnknownVariable(name.clone()));
+                    }
                 } else {
                     return Err(BytecodeError::UnknownVariable(name.clone()));
                 }

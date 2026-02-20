@@ -245,6 +245,7 @@ impl<'a> OwnershipChecker<'a> {
                 method,
                 args,
                 id,
+                ..
             } => {
                 // Check receiver ownership based on method signature
                 // Methods with &self take a shared borrow, &!self takes exclusive
