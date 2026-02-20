@@ -1296,4 +1296,337 @@ fn bio_get_output(s: BioPtxState) -> ([i8; 65536], i64) {
     (s.buf, s.buf_len)
 }
 
+// ============================================================================
+// BOLD Balloon-Windkessel fMRI model
+// ============================================================================
+//
+// Implements the hemodynamic response model from Friston et al. 2000/2003:
+//   ds/dt = u(t) - κ·s - γ·(f - 1)   (vasodilatory signal)
+//   df/dt = s                          (CBF = blood flow)
+//   dv/dt = (1/τ)·(f - v^(1/α))       (CBV = blood volume)
+//   dq/dt = (1/τ)·(f·E(f,E₀)/E₀ - q·v^(1/α-1))  (deoxy-Hb)
+//   E(f,E₀) = 1 - (1-E₀)^(1/f)        (oxygen extraction)
+//   BOLD ≈ V₀·(k₁·(1-q) + k₂·(1-q/v) + k₃·(1-v))
+//
+// Default parameters (Friston 2003):
+//   κ=0.65, γ=0.41, τ=0.98, α=0.32, E₀=0.4, V₀=0.04
+//   k₁=7·E₀=2.8, k₂=2.0, k₃=2·E₀-0.2=0.6
+
+let BIO_KERNEL_BOLD_BALLOON: i64 = 10
+
+// Default Friston 2003 parameters as IEEE 754 hex constants
+let BOLD_DEFAULT_KAPPA_HEX: i64 = 0x3F266666   // 0.65 f32
+let BOLD_DEFAULT_GAMMA_HEX: i64 = 0x3ED1EB85   // 0.41 f32
+let BOLD_DEFAULT_TAU_HEX: i64 = 0x3F7AE148     // 0.98 f32
+let BOLD_DEFAULT_ALPHA_INV_HEX: i64 = 0x4047AE14 // 3.125 = 1/0.32 f32
+let BOLD_DEFAULT_E0_HEX: i64 = 0x3ECCCCCD      // 0.4 f32
+let BOLD_DEFAULT_V0_HEX: i64 = 0x3D23D70A      // 0.04 f32
+let BOLD_DT_100MS_HEX: i64 = 0x3DCCCCCD        // 0.1 f32
+
+struct BOLDParams {
+    kappa: f32,
+    gamma_val: f32,
+    tau: f32,
+    alpha: f32,
+    E0: f32,
+    V0: f32,
+    dt: f32,
+    kappa_eps: f32,
+    E0_eps: f32,
+}
+
+struct BOLDSimResult {
+    bold: [f32; 256],
+    bold_eps: [f32; 256],
+    n_points: i64,
+}
+
+// Compute BOLD signal from normalised CBV (v) and deoxy-Hb (q).
+fn bio_bold_signal(v: f32, q: f32, E0: f32, V0: f32) -> f32 with Div {
+    let k1 = 7.0 * E0
+    let k2: f32 = 2.0
+    let k3 = 2.0 * E0 - 0.2
+    V0 * (k1 * (1.0 - q) + k2 * (1.0 - q / v) + k3 * (1.0 - v))
+}
+
+// First-order uncertainty: eps_bold ≈ |∂BOLD/∂v|·eps_v + |∂BOLD/∂q|·eps_q
+fn bio_bold_signal_eps(v: f32, q: f32, E0: f32, V0: f32, eps_v: f32, eps_q: f32) -> f32 with Div {
+    let k1 = 7.0 * E0
+    let k2: f32 = 2.0
+    let k3 = 2.0 * E0 - 0.2
+    // ∂BOLD/∂v = V0·(k2·q/v² - k3)
+    let d_dv = V0 * (k2 * q / (v * v) - k3)
+    // ∂BOLD/∂q = V0·(-k1 - k2/v)  → |∂BOLD/∂q| = V0·(k1 + k2/v)
+    let d_dq_abs = V0 * (k1 + k2 / v)
+    let abs_d_dv = if d_dv < 0.0 { -d_dv } else { d_dv }
+    abs_d_dv * eps_v + d_dq_abs * eps_q
+}
+
+// One Euler step of the Balloon-Windkessel ODEs.
+// State (s, f, v, q) normalised to resting values (resting = 1.0 for f, v, q).
+fn bio_bold_euler_step(
+    s: f32, f_val: f32, v: f32, q: f32,
+    u: f32,
+    p: BOLDParams
+) -> (f32, f32, f32, f32) with Div {
+    let one_minus_E0 = 1.0 - p.E0
+    let E_f = 1.0 - bio_pow_f32_approx(one_minus_E0, 1.0 / f_val)
+    let alpha_inv = 1.0 / p.alpha
+    let v_pow_inv = bio_pow_f32_approx(v, alpha_inv)
+    let v_pow_inv_m1 = v_pow_inv / v
+    let ds_dt = u - p.kappa * s - p.gamma_val * (f_val - 1.0)
+    let df_dt = s
+    let dv_dt = (f_val - v_pow_inv) / p.tau
+    let dq_dt = (f_val * E_f / p.E0 - q * v_pow_inv_m1) / p.tau
+    let s_new = s + p.dt * ds_dt
+    let f_new = f_val + p.dt * df_dt
+    let v_new = v + p.dt * dv_dt
+    let q_new = q + p.dt * dq_dt
+    (s_new, f_new, v_new, q_new)
+}
+
+// CPU-side BOLD simulation for testing and calibration.
+// Input: u_input[0..256] neural activity, n_steps integration steps.
+// Returns BOLDSimResult with BOLD signal and uncertainty per step.
+fn bio_simulate_bold_cpu(
+    u_input: [f32; 256],
+    n_steps: i64,
+    params: BOLDParams
+) -> BOLDSimResult with Div {
+    var s: f32 = 0.0
+    var f_val: f32 = 1.0
+    var v: f32 = 1.0
+    var q: f32 = 1.0
+    var eps_v: f32 = params.kappa_eps * 0.1
+    var eps_q: f32 = params.E0_eps * 0.5
+    var result: BOLDSimResult = BOLDSimResult {
+        bold: [0.0; 256],
+        bold_eps: [0.0; 256],
+        n_points: 0
+    }
+    var t_step: i64 = 0
+    var out_idx: i64 = 0
+    while t_step < n_steps && out_idx < 256 {
+        let u_t = if t_step < 256 { u_input[t_step as usize] } else { 0.0 }
+        let step = bio_bold_euler_step(s, f_val, v, q, u_t, params)
+        s = step.0
+        f_val = step.1
+        v = step.2
+        q = step.3
+        if f_val < 0.1 { f_val = 0.1 }
+        if v < 0.1 { v = 0.1 }
+        if q < 0.01 { q = 0.01 }
+        eps_v = eps_v + params.dt * (params.kappa_eps * 0.1 + eps_q * 0.01)
+        eps_q = eps_q + params.dt * (params.E0_eps * 0.5 + eps_v * 0.01)
+        let bold_val = bio_bold_signal(v, q, params.E0, params.V0)
+        let bold_eps_val = bio_bold_signal_eps(v, q, params.E0, params.V0, eps_v, eps_q)
+        result.bold[out_idx as usize] = bold_val
+        result.bold_eps[out_idx as usize] = bold_eps_val
+        out_idx = out_idx + 1
+        t_step = t_step + 1
+    }
+    result.n_points = out_idx
+    result
+}
+
+// ============================================================================
+// PTX emitter: bio_emit_bold_balloon_ptx
+// ============================================================================
+//
+// Emits a complete PTX kernel for the BOLD Balloon-Windkessel model.
+// Each GPU thread integrates one voxel over T_steps Euler steps.
+//
+// Kernel signature:
+//   bold_balloon(neural_input_ptr, bold_out_ptr, bold_eps_ptr,
+//                kappa, gamma_val, tau, alpha_inv, E0, V0, dt,
+//                T_steps, voxel_count)
+//
+// Register map (fixed, no dynamic allocation):
+//   %f0-f3:  state s, f, v, q
+//   %f4-f5:  eps_v, eps_q
+//   %f6-f12: model params kappa,gamma,tau,alpha_inv,E0,V0,dt
+//   %f13-f15: precomputed k1,k2,k3
+//   %f16-f17: scratch constants (1-E0, 1.0)
+//   %f18-f31: working registers for Euler + BOLD computation
+
+fn bio_emit_bold_balloon_ptx(s: BioPtxState, kernel_name: string) -> BioPtxState with Div {
+    var out = s
+
+    // PTX header
+    out = bio_push_str(out, ".version 7.5\n")
+    out = bio_push_str(out, ".target sm_80\n")
+    out = bio_push_str(out, ".address_size 64\n\n")
+
+    // Kernel entry
+    out = bio_push_str(out, ".visible .entry ")
+    out = bio_push_str(out, kernel_name)
+    out = bio_push_str(out, "(\n")
+    out = bio_push_str(out, "    .param .u64 neural_input_ptr,\n")
+    out = bio_push_str(out, "    .param .u64 bold_out_ptr,\n")
+    out = bio_push_str(out, "    .param .u64 bold_eps_ptr,\n")
+    out = bio_push_str(out, "    .param .f32 kappa,\n")
+    out = bio_push_str(out, "    .param .f32 gamma_val,\n")
+    out = bio_push_str(out, "    .param .f32 tau,\n")
+    out = bio_push_str(out, "    .param .f32 alpha_inv,\n")
+    out = bio_push_str(out, "    .param .f32 E0,\n")
+    out = bio_push_str(out, "    .param .f32 V0,\n")
+    out = bio_push_str(out, "    .param .f32 dt,\n")
+    out = bio_push_str(out, "    .param .u32 T_steps,\n")
+    out = bio_push_str(out, "    .param .u32 voxel_count\n")
+    out = bio_push_str(out, ")\n{\n")
+
+    // Register declarations
+    out = bio_push_str(out, "    .reg .pred %p<8>;\n")
+    out = bio_push_str(out, "    .reg .f32 %f<32>;\n")
+    out = bio_push_str(out, "    .reg .b32 %r<16>;\n")
+    out = bio_push_str(out, "    .reg .b64 %rd<10>;\n\n")
+
+    // Load pointers and model params
+    out = bio_push_str(out, "    ld.param.u64 %rd0, [neural_input_ptr];\n")
+    out = bio_push_str(out, "    ld.param.u64 %rd1, [bold_out_ptr];\n")
+    out = bio_push_str(out, "    ld.param.u64 %rd2, [bold_eps_ptr];\n")
+    out = bio_push_str(out, "    ld.param.f32 %f6,  [kappa];\n")
+    out = bio_push_str(out, "    ld.param.f32 %f7,  [gamma_val];\n")
+    out = bio_push_str(out, "    ld.param.f32 %f8,  [tau];\n")
+    out = bio_push_str(out, "    ld.param.f32 %f9,  [alpha_inv];\n")
+    out = bio_push_str(out, "    ld.param.f32 %f10, [E0];\n")
+    out = bio_push_str(out, "    ld.param.f32 %f11, [V0];\n")
+    out = bio_push_str(out, "    ld.param.f32 %f12, [dt];\n")
+    out = bio_push_str(out, "    ld.param.u32 %r10, [T_steps];\n")
+    out = bio_push_str(out, "    ld.param.u32 %r11, [voxel_count];\n\n")
+
+    // Precompute BOLD constants: k1=7*E0, k2=2.0, k3=2*E0-0.2, 1-E0, 1.0
+    out = bio_push_str(out, "    // k1=7*E0, k2=2.0, k3=2*E0-0.2\n")
+    out = bio_push_str(out, "    mov.f32 %f17, 0f3F800000;  // 1.0\n")
+    out = bio_push_str(out, "    mov.f32 %f23, 0f40E00000;  // 7.0\n")
+    out = bio_push_str(out, "    mul.rn.f32 %f13, %f23, %f10;  // k1 = 7*E0\n")
+    out = bio_push_str(out, "    mov.f32 %f14, 0f40000000;  // k2 = 2.0\n")
+    out = bio_push_str(out, "    mul.rn.f32 %f15, %f14, %f10;  // 2*E0\n")
+    out = bio_push_str(out, "    mov.f32 %f23, 0f3E4CCCCD;  // 0.2\n")
+    out = bio_push_str(out, "    sub.rn.f32 %f15, %f15, %f23;  // k3 = 2*E0-0.2\n")
+    out = bio_push_str(out, "    sub.rn.f32 %f16, %f17, %f10;  // 1-E0\n\n")
+
+    // rcp(tau) cached in %f8 slot: reuse with rcp instruction
+    out = bio_push_str(out, "    rcp.approx.f32 %f8, %f8;  // 1/tau (replace tau with rcp)\n\n")
+
+    // Voxel thread index
+    out = bio_push_str(out, "    mov.u32 %r0, %tid.x;\n")
+    out = bio_push_str(out, "    mov.u32 %r1, %ctaid.x;\n")
+    out = bio_push_str(out, "    mad.lo.u32 %r2, %r1, 256, %r0;  // voxel_idx\n")
+    out = bio_push_str(out, "    setp.ge.u32 %p0, %r2, %r11;\n")
+    out = bio_push_str(out, "    @%p0 bra BOLD_EXIT;\n\n")
+
+    // Initialise state: s=0.0, f=1.0, v=1.0, q=1.0
+    out = bio_push_str(out, "    mov.f32 %f0, 0f00000000;  // s = 0.0\n")
+    out = bio_push_str(out, "    mov.f32 %f1, 0f3F800000;  // f = 1.0\n")
+    out = bio_push_str(out, "    mov.f32 %f2, 0f3F800000;  // v = 1.0\n")
+    out = bio_push_str(out, "    mov.f32 %f3, 0f3F800000;  // q = 1.0\n")
+    // eps_v = 0.01, eps_q = 0.02
+    out = bio_push_str(out, "    mov.f32 %f4, 0f3C23D70A;  // eps_v = 0.01\n")
+    out = bio_push_str(out, "    mov.f32 %f5, 0f3CA3D70A;  // eps_q = 0.02\n\n")
+
+    // t_step loop
+    out = bio_push_str(out, "    mov.u32 %r3, 0;  // t_step = 0\n")
+    out = bio_push_str(out, "BOLD_T:\n")
+    out = bio_push_str(out, "    setp.ge.u32 %p1, %r3, %r10;\n")
+    out = bio_push_str(out, "    @%p1 bra BOLD_T_DONE;\n\n")
+
+    // Load neural input u(t): neural_input[voxel_idx * T_steps + t_step]
+    out = bio_push_str(out, "    mad.lo.u32 %r4, %r2, %r10, %r3;\n")
+    out = bio_push_str(out, "    mul.wide.u32 %rd3, %r4, 4;\n")
+    out = bio_push_str(out, "    add.u64 %rd3, %rd0, %rd3;\n")
+    out = bio_push_str(out, "    ld.global.f32 %f18, [%rd3];  // u(t)\n\n")
+
+    // E(f,E0) = 1 - (1-E0)^(1/f) using ex2/lg2 chain
+    out = bio_push_str(out, "    lg2.approx.f32 %f19, %f16;  // lg2(1-E0)\n")
+    out = bio_push_str(out, "    rcp.approx.f32 %f20, %f1;   // 1/f\n")
+    out = bio_push_str(out, "    mul.rn.f32 %f19, %f19, %f20;  // lg2(1-E0)/f\n")
+    out = bio_push_str(out, "    ex2.approx.f32 %f19, %f19;    // (1-E0)^(1/f)\n")
+    out = bio_push_str(out, "    sub.rn.f32 %f19, %f17, %f19;  // E_f = 1 - ...\n\n")
+
+    // v^(1/alpha) = ex2(alpha_inv * lg2(v)) → %f20
+    out = bio_push_str(out, "    lg2.approx.f32 %f20, %f2;\n")
+    out = bio_push_str(out, "    mul.rn.f32 %f20, %f9, %f20;\n")
+    out = bio_push_str(out, "    ex2.approx.f32 %f20, %f20;  // v^(1/alpha)\n")
+    // v^(1/alpha-1) = v^(1/alpha)/v → %f21
+    out = bio_push_str(out, "    div.approx.f32 %f21, %f20, %f2;  // v^(1/alpha-1)\n\n")
+
+    // ds_dt = u - kappa*s - gamma*(f-1)
+    out = bio_push_str(out, "    sub.rn.f32 %f24, %f1, %f17;   // f - 1\n")
+    out = bio_push_str(out, "    mul.rn.f32 %f24, %f7, %f24;   // gamma*(f-1)\n")
+    out = bio_push_str(out, "    mul.rn.f32 %f25, %f6, %f0;    // kappa*s\n")
+    out = bio_push_str(out, "    sub.rn.f32 %f26, %f18, %f25;  // u - kappa*s\n")
+    out = bio_push_str(out, "    sub.rn.f32 %f26, %f26, %f24;  // ds_dt\n\n")
+
+    // dv_dt = (f - v^(1/alpha)) * (1/tau) → %f27
+    out = bio_push_str(out, "    sub.rn.f32 %f27, %f1, %f20;\n")
+    out = bio_push_str(out, "    mul.rn.f32 %f27, %f27, %f8;   // * (1/tau)\n\n")
+
+    // dq_dt = (f*E_f/E0 - q*v^(1/alpha-1)) * (1/tau) → %f28
+    out = bio_push_str(out, "    mul.rn.f32 %f28, %f1, %f19;   // f*E_f\n")
+    out = bio_push_str(out, "    div.approx.f32 %f28, %f28, %f10;  // /E0\n")
+    out = bio_push_str(out, "    mul.rn.f32 %f29, %f3, %f21;   // q*v^(1/alpha-1)\n")
+    out = bio_push_str(out, "    sub.rn.f32 %f28, %f28, %f29;\n")
+    out = bio_push_str(out, "    mul.rn.f32 %f28, %f28, %f8;   // * (1/tau)\n\n")
+
+    // Euler update: s += dt*ds, f += dt*s (df_dt=s, so use old s), v += dt*dv, q += dt*dq
+    out = bio_push_str(out, "    fma.rn.f32 %f0, %f12, %f26, %f0;  // s += dt*ds_dt\n")
+    out = bio_push_str(out, "    fma.rn.f32 %f1, %f12, %f0,  %f1;  // f += dt*s\n")
+    out = bio_push_str(out, "    fma.rn.f32 %f2, %f12, %f27, %f2;  // v += dt*dv_dt\n")
+    out = bio_push_str(out, "    fma.rn.f32 %f3, %f12, %f28, %f3;  // q += dt*dq_dt\n\n")
+
+    // Clamp to physical range
+    out = bio_push_str(out, "    mov.f32 %f30, 0f3DCCCCCD;  // 0.1\n")
+    out = bio_push_str(out, "    max.f32 %f1, %f1, %f30;\n")
+    out = bio_push_str(out, "    max.f32 %f2, %f2, %f30;\n")
+    out = bio_push_str(out, "    mov.f32 %f30, 0f3C23D70A;  // 0.01\n")
+    out = bio_push_str(out, "    max.f32 %f3, %f3, %f30;\n\n")
+
+    // Epistemic: eps_v += dt*0.01, eps_q += dt*0.01
+    out = bio_push_str(out, "    mov.f32 %f30, 0f3C23D70A;  // 0.01\n")
+    out = bio_push_str(out, "    fma.rn.f32 %f4, %f12, %f30, %f4;  // eps_v\n")
+    out = bio_push_str(out, "    fma.rn.f32 %f5, %f12, %f30, %f5;  // eps_q\n\n")
+
+    // BOLD signal: V0*(k1*(1-q) + k2*(1-q/v) + k3*(1-v))
+    out = bio_push_str(out, "    sub.rn.f32 %f18, %f17, %f3;    // 1-q\n")
+    out = bio_push_str(out, "    mul.rn.f32 %f18, %f13, %f18;   // k1*(1-q)\n")
+    out = bio_push_str(out, "    div.approx.f32 %f23, %f3, %f2; // q/v\n")
+    out = bio_push_str(out, "    sub.rn.f32 %f23, %f17, %f23;   // 1-q/v\n")
+    out = bio_push_str(out, "    fma.rn.f32 %f18, %f14, %f23, %f18;  // += k2*(1-q/v)\n")
+    out = bio_push_str(out, "    sub.rn.f32 %f23, %f17, %f2;    // 1-v\n")
+    out = bio_push_str(out, "    fma.rn.f32 %f18, %f15, %f23, %f18;  // += k3*(1-v)\n")
+    out = bio_push_str(out, "    mul.rn.f32 %f18, %f11, %f18;   // *= V0\n\n")
+
+    // BOLD epsilon: |dBOLD/dv|*eps_v + |dBOLD/dq|*eps_q
+    // |dBOLD/dv| = V0*|k2*q/v^2 - k3|
+    out = bio_push_str(out, "    mul.rn.f32 %f24, %f2,  %f2;    // v^2\n")
+    out = bio_push_str(out, "    div.approx.f32 %f24, %f3, %f24; // q/v^2\n")
+    out = bio_push_str(out, "    mul.rn.f32 %f24, %f14, %f24;   // k2*q/v^2\n")
+    out = bio_push_str(out, "    sub.rn.f32 %f24, %f24, %f15;   // k2*q/v^2 - k3\n")
+    out = bio_push_str(out, "    mul.rn.f32 %f24, %f11, %f24;   // V0*...\n")
+    out = bio_push_str(out, "    abs.f32 %f24, %f24;             // |dBOLD/dv|\n")
+    // |dBOLD/dq| = V0*(k1 + k2/v)
+    out = bio_push_str(out, "    rcp.approx.f32 %f25, %f2;      // 1/v\n")
+    out = bio_push_str(out, "    mul.rn.f32 %f25, %f14, %f25;   // k2/v\n")
+    out = bio_push_str(out, "    add.rn.f32 %f25, %f13, %f25;   // k1 + k2/v\n")
+    out = bio_push_str(out, "    mul.rn.f32 %f25, %f11, %f25;   // V0*(k1+k2/v)\n")
+    out = bio_push_str(out, "    mul.rn.f32 %f29, %f24, %f4;    // |dv|*eps_v\n")
+    out = bio_push_str(out, "    fma.rn.f32 %f29, %f25, %f5, %f29;  // += |dq|*eps_q\n\n")
+
+    // Store BOLD and eps: output[voxel_idx * T_steps + t_step]
+    out = bio_push_str(out, "    mad.lo.u32 %r4, %r2, %r10, %r3;\n")
+    out = bio_push_str(out, "    mul.wide.u32 %rd3, %r4, 4;\n")
+    out = bio_push_str(out, "    add.u64 %rd4, %rd1, %rd3;\n")
+    out = bio_push_str(out, "    st.global.f32 [%rd4], %f18;  // BOLD\n")
+    out = bio_push_str(out, "    add.u64 %rd5, %rd2, %rd3;\n")
+    out = bio_push_str(out, "    st.global.f32 [%rd5], %f29;  // BOLD eps\n\n")
+
+    out = bio_push_str(out, "    add.u32 %r3, %r3, 1;\n")
+    out = bio_push_str(out, "    bra BOLD_T;\n\n")
+    out = bio_push_str(out, "BOLD_T_DONE:\n")
+    out = bio_push_str(out, "BOLD_EXIT:\n")
+    out = bio_push_str(out, "    ret;\n}\n")
+    out
+}
+
 // End of gpu/kernels/bio.sio

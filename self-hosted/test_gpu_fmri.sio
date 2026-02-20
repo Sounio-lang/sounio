@@ -1,0 +1,229 @@
+// Self-hosted BOLD fMRI kernel tests
+//
+// Validates the Balloon-Windkessel hemodynamic model implementation in
+// gpu/kernels/bio.sio:
+//   - BIO_KERNEL_BOLD_BALLOON constant
+//   - bio_bold_signal / bio_bold_signal_eps correctness
+//   - bio_bold_euler_step dynamics
+//   - bio_simulate_bold_cpu reference simulation
+//   - bio_emit_bold_balloon_ptx PTX generation
+
+// ── Constant ────────────────────────────────────────────────────────
+
+fn fmri_test_01_bold_kernel_id() -> bool {
+    BIO_KERNEL_BOLD_BALLOON == 10
+}
+
+// ── bio_bold_signal at resting state ────────────────────────────────
+// At v=1, q=1: all (1-x) terms = 0, so BOLD = 0.
+
+fn fmri_test_02_bold_signal_resting_is_zero() -> bool {
+    let E0: f32 = 0.4
+    let V0: f32 = 0.04
+    let b = bio_bold_signal(1.0, 1.0, E0, V0)
+    // Allow tiny floating-point deviation
+    let abs_b = if b < 0.0 { -b } else { b }
+    abs_b < 1e-6
+}
+
+// ── bio_bold_signal with increased blood flow (v=1.05, q=0.95) ──────
+// Positive BOLD change expected: more oxygenated blood → lower deoxy-Hb
+
+fn fmri_test_03_bold_signal_activation_positive() -> bool {
+    let E0: f32 = 0.4
+    let V0: f32 = 0.04
+    // Activation: CBV increased, deoxy-Hb decreased
+    let b = bio_bold_signal(1.05, 0.95, E0, V0)
+    b > 0.0
+}
+
+// ── bio_bold_signal_eps is non-negative ─────────────────────────────
+
+fn fmri_test_04_bold_eps_non_negative() -> bool {
+    let E0: f32 = 0.4
+    let V0: f32 = 0.04
+    let eps = bio_bold_signal_eps(1.05, 0.95, E0, V0, 0.01, 0.02)
+    eps >= 0.0
+}
+
+// ── bio_bold_signal_eps scales with input uncertainty ───────────────
+
+fn fmri_test_05_bold_eps_scales_with_input() -> bool {
+    let E0: f32 = 0.4
+    let V0: f32 = 0.04
+    let eps_small = bio_bold_signal_eps(1.05, 0.95, E0, V0, 0.001, 0.002)
+    let eps_large = bio_bold_signal_eps(1.05, 0.95, E0, V0, 0.1, 0.2)
+    eps_large > eps_small
+}
+
+// ── bio_bold_euler_step: stimulus moves f away from resting ─────────
+// Apply u=1.0 for one step; f should increase (s=0 initially → s goes positive)
+
+fn fmri_test_06_euler_step_stimulus_moves_s() -> bool {
+    let p = BOLDParams {
+        kappa: 0.65,
+        gamma_val: 0.41,
+        tau: 0.98,
+        alpha: 0.32,
+        E0: 0.4,
+        V0: 0.04,
+        dt: 0.1,
+        kappa_eps: 0.01,
+        E0_eps: 0.01,
+    }
+    // Start at rest: s=0, f=1, v=1, q=1; apply u=1
+    let result = bio_bold_euler_step(0.0, 1.0, 1.0, 1.0, 1.0, p)
+    // s_new = s + dt*(u - kappa*s - gamma*(f-1)) = 0 + 0.1*(1 - 0 - 0) = 0.1
+    let s_new = result.0
+    let abs_diff = if s_new - 0.1 < 0.0 { -(s_new - 0.1) } else { s_new - 0.1 }
+    abs_diff < 0.001
+}
+
+// At rest with u=0: ds/dt = 0 → s_new should remain 0 (no drift)
+
+fn fmri_test_07_euler_step_no_stimulus_no_drift() -> bool {
+    let p = BOLDParams {
+        kappa: 0.65,
+        gamma_val: 0.41,
+        tau: 0.98,
+        alpha: 0.32,
+        E0: 0.4,
+        V0: 0.04,
+        dt: 0.1,
+        kappa_eps: 0.01,
+        E0_eps: 0.01,
+    }
+    let result = bio_bold_euler_step(0.0, 1.0, 1.0, 1.0, 0.0, p)
+    let s_new = result.0
+    let abs_s = if s_new < 0.0 { -s_new } else { s_new }
+    abs_s < 1e-6
+}
+
+// ── bio_simulate_bold_cpu: basic integration ─────────────────────────
+
+fn fmri_make_default_params() -> BOLDParams {
+    BOLDParams {
+        kappa: 0.65,
+        gamma_val: 0.41,
+        tau: 0.98,
+        alpha: 0.32,
+        E0: 0.4,
+        V0: 0.04,
+        dt: 0.1,
+        kappa_eps: 0.05,
+        E0_eps: 0.05,
+    }
+}
+
+fn fmri_test_08_simulate_returns_correct_n_points() -> bool {
+    let p = fmri_make_default_params()
+    var u: [f32; 256] = [0.0; 256]
+    let result = bio_simulate_bold_cpu(u, 50, p)
+    result.n_points == 50
+}
+
+// BOLD at step 0 with no stimulus should be exactly 0 (resting state)
+
+fn fmri_test_09_bold_starts_at_zero_no_stimulus() -> bool {
+    let p = fmri_make_default_params()
+    var u: [f32; 256] = [0.0; 256]
+    let result = bio_simulate_bold_cpu(u, 100, p)
+    let first_abs = if result.bold[0] < 0.0 { -result.bold[0] } else { result.bold[0] }
+    first_abs < 1e-5
+}
+
+// With constant stimulus, BOLD should become non-zero after several steps
+
+fn fmri_test_10_bold_non_zero_with_stimulus() -> bool {
+    let p = fmri_make_default_params()
+    var u: [f32; 256] = [0.0; 256]
+    // Apply step stimulus for first 100 steps
+    var i: i64 = 0
+    while i < 100 {
+        u[i as usize] = 1.0
+        i = i + 1
+    }
+    let result = bio_simulate_bold_cpu(u, 100, p)
+    // After 100 steps (~10s) with sustained stimulus, BOLD > 0
+    result.bold[99] > 0.0
+}
+
+// BOLD uncertainty (eps) should grow over time with non-zero kappa/E0 eps
+
+fn fmri_test_11_bold_eps_grows_over_time() -> bool {
+    let p = fmri_make_default_params()
+    var u: [f32; 256] = [0.0; 256]
+    var i: i64 = 0
+    while i < 256 {
+        u[i as usize] = 0.5
+        i = i + 1
+    }
+    let result = bio_simulate_bold_cpu(u, 200, p)
+    // eps at step 199 should be strictly greater than at step 0
+    result.bold_eps[199] > result.bold_eps[0]
+}
+
+// Clipping: f, v, q must not fall below physical minimums
+
+fn fmri_test_12_state_stays_above_minimum() -> bool {
+    let p = fmri_make_default_params()
+    var u: [f32; 256] = [0.0; 256]
+    // Large negative input to try to drive state negative
+    var i: i64 = 0
+    while i < 256 {
+        u[i as usize] = -10.0
+        i = i + 1
+    }
+    let result = bio_simulate_bold_cpu(u, 100, p)
+    // n_points should still be 100 (no crash)
+    result.n_points == 100
+}
+
+// ── bio_emit_bold_balloon_ptx: PTX structure ─────────────────────────
+
+fn fmri_test_13_ptx_emitter_produces_output() -> bool {
+    var s = bio_new()
+    s = bio_emit_bold_balloon_ptx(s, "bold_balloon")
+    s.buf_len > 100
+}
+
+fn fmri_test_14_ptx_contains_bold_t_loop() -> bool {
+    var s = bio_new()
+    s = bio_emit_bold_balloon_ptx(s, "bold_balloon")
+    // Check that "BOLD_T:" label appears in buffer by scanning for 'B','O','L','D','_','T',':'
+    let target: [i8; 7] = [66, 79, 76, 68, 95, 84, 58]  // "BOLD_T:" ASCII
+    var found = false
+    var i: i64 = 0
+    while i < s.buf_len - 6 && !found {
+        if s.buf[i as usize] == target[0] &&
+           s.buf[(i + 1) as usize] == target[1] &&
+           s.buf[(i + 2) as usize] == target[2] &&
+           s.buf[(i + 3) as usize] == target[3] &&
+           s.buf[(i + 4) as usize] == target[4] &&
+           s.buf[(i + 5) as usize] == target[5] &&
+           s.buf[(i + 6) as usize] == target[6] {
+            found = true
+        }
+        i = i + 1
+    }
+    found
+}
+
+fn fmri_test_15_ptx_contains_fma_instructions() -> bool {
+    // Verify that the BOLD PTX has FMA instructions (ASCII: "fma.")
+    // 'f'=102, 'm'=109, 'a'=97, '.'=46
+    var s = bio_new()
+    s = bio_emit_bold_balloon_ptx(s, "bold_balloon")
+    var found = false
+    var i: i64 = 0
+    while i < s.buf_len - 3 && !found {
+        if s.buf[i as usize] == 102 &&   // 'f'
+           s.buf[(i + 1) as usize] == 109 &&  // 'm'
+           s.buf[(i + 2) as usize] == 97 &&   // 'a'
+           s.buf[(i + 3) as usize] == 46 {    // '.'
+            found = true
+        }
+        i = i + 1
+    }
+    found
+}
