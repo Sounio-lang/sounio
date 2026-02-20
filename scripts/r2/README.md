@@ -16,3 +16,8 @@ python3 scripts/r2/parity_spec_exec.py --self-test
 
 The spec is intentionally minimal and can be expanded case-by-case as
 R2 parity hardening proceeds.
+
+Current baseline command contracts include:
+- `run`, `check`, top-level `--help`, `--version`
+- `build --help`, `test --help`, `fmt --help`, `lint --help`
+- `info`, `diagnostics --help`
