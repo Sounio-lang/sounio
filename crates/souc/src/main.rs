@@ -1698,9 +1698,10 @@ fn main() -> Result<()> {
                 #[cfg(not(feature = "glm"))]
                 eprintln!("Warning: --glm-enabled requires --features glm");
             }
-            // If native or cranelift backend, use new CLI integration
+            // If native, cranelift, or selfhosted-native backend, use new CLI integration
             if backend == sounio::cli::backend::Backend::Native
                 || backend == sounio::cli::backend::Backend::Cranelift
+                || backend == sounio::cli::backend::Backend::SelfhostedNative
             {
                 // Build args from command line
                 let build_args = sounio::cli::backend::BuildArgs {
