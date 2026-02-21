@@ -1,0 +1,476 @@
+//@ run-pass
+// test_interval.sio - Interval arithmetic test suite
+//
+// Self-contained test suite validating interval arithmetic operations:
+//   new, point, add, sub, mul, contains, width, midpoint, sqrt
+//
+// Tests cover basic operations, inclusion monotonicity, associativity,
+// subdistributivity, and edge cases (negative intervals, self-subtraction).
+//
+// All functions are inlined since tests cannot import.
+//
+// References:
+//   Moore, Kearfott, Cloud, "Introduction to Interval Analysis" (SIAM, 2009)
+//   IEEE 1788-2015, Standard for Interval Arithmetic
+
+// ============================================================================
+// PURE MATH HELPERS (must precede callers)
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var g = x / 2.0
+    if g < 1.0 { g = 1.0 }
+    var i = 0
+    while i < 60 {
+        g = (g + x / g) / 2.0
+        i = i + 1
+    }
+    return g
+}
+
+// ============================================================================
+// TOLERANCE HELPER
+// ============================================================================
+
+fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+    abs_f64(a - b) < tol
+}
+
+// ============================================================================
+// INTERVAL STRUCT AND OPERATIONS
+// ============================================================================
+
+struct Interval {
+    lo: f64,
+    hi: f64
+}
+
+fn iv_new(lo: f64, hi: f64) -> Interval {
+    Interval { lo: lo, hi: hi }
+}
+
+fn iv_point(x: f64) -> Interval {
+    Interval { lo: x, hi: x }
+}
+
+fn iv_add(a: Interval, b: Interval) -> Interval {
+    Interval { lo: a.lo + b.lo, hi: a.hi + b.hi }
+}
+
+fn iv_sub(a: Interval, b: Interval) -> Interval {
+    Interval { lo: a.lo - b.hi, hi: a.hi - b.lo }
+}
+
+fn iv_mul(a: Interval, b: Interval) -> Interval with Mut {
+    let p1 = a.lo * b.lo
+    let p2 = a.lo * b.hi
+    let p3 = a.hi * b.lo
+    let p4 = a.hi * b.hi
+    // min of p1..p4
+    var lo = p1
+    if p2 < lo { lo = p2 }
+    if p3 < lo { lo = p3 }
+    if p4 < lo { lo = p4 }
+    // max of p1..p4
+    var hi = p1
+    if p2 > hi { hi = p2 }
+    if p3 > hi { hi = p3 }
+    if p4 > hi { hi = p4 }
+    Interval { lo: lo, hi: hi }
+}
+
+fn iv_contains(a: Interval, x: f64) -> bool {
+    x >= a.lo && x <= a.hi
+}
+
+fn iv_width(a: Interval) -> f64 {
+    a.hi - a.lo
+}
+
+fn iv_midpoint(a: Interval) -> f64 {
+    0.5 * (a.lo + a.hi)
+}
+
+fn iv_sqrt(a: Interval) -> Interval with Mut, Div, Panic {
+    let lo = sqrt_f64(a.lo)
+    let hi = sqrt_f64(a.hi)
+    // Add small epsilon for outward rounding (conservative enclosure)
+    let eps = 2.2204460492503131e-16
+    Interval { lo: lo - eps * abs_f64(lo) - eps, hi: hi + eps * abs_f64(hi) + eps }
+}
+
+// iv_subset: checks a is subset of b (a.lo >= b.lo && a.hi <= b.hi)
+fn iv_subset(a: Interval, b: Interval) -> bool {
+    a.lo >= b.lo && a.hi <= b.hi
+}
+
+// ============================================================================
+// TEST FUNCTIONS
+// ============================================================================
+
+// Test 1: [1,2] + [3,4] = [4,6]
+fn test_add_basic() -> bool {
+    let a = iv_new(1.0, 2.0)
+    let b = iv_new(3.0, 4.0)
+    let c = iv_add(a, b)
+    let tol = 1.0e-12
+    return approx_eq(c.lo, 4.0, tol) && approx_eq(c.hi, 6.0, tol)
+}
+
+// Test 2: [1,2] - [3,4] = [-3,-1]
+fn test_sub_basic() -> bool {
+    let a = iv_new(1.0, 2.0)
+    let b = iv_new(3.0, 4.0)
+    let c = iv_sub(a, b)
+    let tol = 1.0e-12
+    return approx_eq(c.lo, 0.0 - 3.0, tol) && approx_eq(c.hi, 0.0 - 1.0, tol)
+}
+
+// Test 3: [1,2] * [3,4] = [3,8]
+fn test_mul_positive() -> bool with Mut {
+    let a = iv_new(1.0, 2.0)
+    let b = iv_new(3.0, 4.0)
+    let c = iv_mul(a, b)
+    let tol = 1.0e-12
+    return approx_eq(c.lo, 3.0, tol) && approx_eq(c.hi, 8.0, tol)
+}
+
+// Test 4: [1,2] * [-1,3] = [-2,6]
+fn test_mul_mixed_sign() -> bool with Mut {
+    let a = iv_new(1.0, 2.0)
+    let b = iv_new(0.0 - 1.0, 3.0)
+    let c = iv_mul(a, b)
+    let tol = 1.0e-12
+    return approx_eq(c.lo, 0.0 - 2.0, tol) && approx_eq(c.hi, 6.0, tol)
+}
+
+// Test 5: [-2,3] * [-1,4] = [-8,12]
+fn test_mul_both_mixed() -> bool with Mut {
+    let a = iv_new(0.0 - 2.0, 3.0)
+    let b = iv_new(0.0 - 1.0, 4.0)
+    let c = iv_mul(a, b)
+    let tol = 1.0e-12
+    return approx_eq(c.lo, 0.0 - 8.0, tol) && approx_eq(c.hi, 12.0, tol)
+}
+
+// Test 6: iv_contains([1,3], 2.0) = true
+fn test_contains_inside() -> bool {
+    let a = iv_new(1.0, 3.0)
+    return iv_contains(a, 2.0)
+}
+
+// Test 7: iv_contains([1,3], 0.5) = false
+fn test_contains_outside() -> bool {
+    let a = iv_new(1.0, 3.0)
+    return iv_contains(a, 0.5) == false
+}
+
+// Test 8: iv_width([1,3]) = 2.0
+fn test_width() -> bool {
+    let a = iv_new(1.0, 3.0)
+    let tol = 1.0e-12
+    return approx_eq(iv_width(a), 2.0, tol)
+}
+
+// Test 9: iv_midpoint([1,3]) = 2.0
+fn test_midpoint() -> bool {
+    let a = iv_new(1.0, 3.0)
+    let tol = 1.0e-12
+    return approx_eq(iv_midpoint(a), 2.0, tol)
+}
+
+// Test 10: iv_sqrt([4,9]) should contain [2,3]
+fn test_sqrt_range() -> bool with Mut, Div, Panic {
+    let a = iv_new(4.0, 9.0)
+    let s = iv_sqrt(a)
+    return s.lo <= 2.0 && s.hi >= 3.0
+}
+
+// Test 11: iv_sqrt([1,1]) should contain 1.0
+fn test_sqrt_point() -> bool with Mut, Div, Panic {
+    let a = iv_new(1.0, 1.0)
+    let s = iv_sqrt(a)
+    return iv_contains(s, 1.0)
+}
+
+// Test 12: Point interval arithmetic: iv_point(5) + iv_point(3) contains 8.0
+fn test_point_add() -> bool {
+    let a = iv_point(5.0)
+    let b = iv_point(3.0)
+    let c = iv_add(a, b)
+    return iv_contains(c, 8.0)
+}
+
+// Test 13: Inclusion monotonicity: if x in A and y in B, then x+y in A+B
+fn test_inclusion_monotone() -> bool {
+    let a = iv_new(1.0, 5.0)
+    let b = iv_new(2.0, 7.0)
+    let x = 3.0   // x in [1,5]
+    let y = 4.5   // y in [2,7]
+    let sum = iv_add(a, b)
+    return iv_contains(a, x) && iv_contains(b, y) && iv_contains(sum, x + y)
+}
+
+// Test 14: Associativity spot check: (A + B) + C contains same midpoint as A + (B + C)
+fn test_associativity() -> bool {
+    let a = iv_new(1.0, 2.0)
+    let b = iv_new(3.0, 4.0)
+    let c = iv_new(5.0, 6.0)
+    let lhs = iv_add(iv_add(a, b), c)
+    let rhs = iv_add(a, iv_add(b, c))
+    let tol = 1.0e-12
+    // Both should equal [9,12]
+    return approx_eq(lhs.lo, rhs.lo, tol) && approx_eq(lhs.hi, rhs.hi, tol)
+}
+
+// Test 15: Subdistributivity: A*(B+C) is a subset of A*B + A*C
+fn test_subdistributivity() -> bool with Mut {
+    let a = iv_new(0.0 - 1.0, 2.0)
+    let b = iv_new(1.0, 3.0)
+    let c = iv_new(0.0 - 2.0, 1.0)
+    // A*(B+C)
+    let bc = iv_add(b, c)
+    let lhs = iv_mul(a, bc)
+    // A*B + A*C
+    let ab = iv_mul(a, b)
+    let ac = iv_mul(a, c)
+    let rhs = iv_add(ab, ac)
+    // lhs should be a subset of rhs (or equal)
+    return iv_subset(lhs, rhs)
+}
+
+// Test 16: iv_add of zero-width intervals = zero-width
+fn test_add_zero_width() -> bool {
+    let a = iv_point(3.0)
+    let b = iv_point(7.0)
+    let c = iv_add(a, b)
+    let tol = 1.0e-12
+    return approx_eq(iv_width(c), 0.0, tol)
+}
+
+// Test 17: Negative interval multiplication: [-3,-1] * [2,4] = [-12,-2]
+fn test_mul_negative() -> bool with Mut {
+    let a = iv_new(0.0 - 3.0, 0.0 - 1.0)
+    let b = iv_new(2.0, 4.0)
+    let c = iv_mul(a, b)
+    let tol = 1.0e-12
+    return approx_eq(c.lo, 0.0 - 12.0, tol) && approx_eq(c.hi, 0.0 - 2.0, tol)
+}
+
+// Test 18: Self-subtraction: [a,b] - [a,b] should contain 0
+fn test_self_subtraction() -> bool {
+    let a = iv_new(2.0, 5.0)
+    let d = iv_sub(a, a)
+    return iv_contains(d, 0.0)
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== Interval Arithmetic Tests ===")
+    println("")
+
+    var passed = 0
+    var failed = 0
+
+    // Test 1
+    print("Test  1: add [1,2]+[3,4]=[4,6]...... ")
+    if test_add_basic() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 2
+    print("Test  2: sub [1,2]-[3,4]=[-3,-1].... ")
+    if test_sub_basic() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 3
+    print("Test  3: mul [1,2]*[3,4]=[3,8]...... ")
+    if test_mul_positive() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 4
+    print("Test  4: mul [1,2]*[-1,3]=[-2,6].... ")
+    if test_mul_mixed_sign() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 5
+    print("Test  5: mul [-2,3]*[-1,4]=[-8,12].. ")
+    if test_mul_both_mixed() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 6
+    print("Test  6: contains([1,3], 2.0)=true.. ")
+    if test_contains_inside() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 7
+    print("Test  7: contains([1,3], 0.5)=false. ")
+    if test_contains_outside() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 8
+    print("Test  8: width([1,3])=2.0........... ")
+    if test_width() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 9
+    print("Test  9: midpoint([1,3])=2.0........ ")
+    if test_midpoint() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 10
+    print("Test 10: sqrt([4,9]) contains [2,3]. ")
+    if test_sqrt_range() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 11
+    print("Test 11: sqrt([1,1]) contains 1.0... ")
+    if test_sqrt_point() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 12
+    print("Test 12: point(5)+point(3) has 8.0.. ")
+    if test_point_add() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 13
+    print("Test 13: inclusion monotonicity..... ")
+    if test_inclusion_monotone() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 14
+    print("Test 14: associativity of add....... ")
+    if test_associativity() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 15
+    print("Test 15: subdistributivity.......... ")
+    if test_subdistributivity() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 16
+    print("Test 16: add zero-width intervals... ")
+    if test_add_zero_width() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 17
+    print("Test 17: mul [-3,-1]*[2,4]=[-12,-2]. ")
+    if test_mul_negative() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 18
+    print("Test 18: self-subtraction has 0...... ")
+    if test_self_subtraction() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    println("")
+    print("Passed: ")
+    println(passed)
+    print("Failed: ")
+    println(failed)
+
+    if failed > 0 {
+        println("SOME TESTS FAILED")
+        return 1
+    }
+    println("ALL 18 TESTS PASSED")
+    return 0
+}

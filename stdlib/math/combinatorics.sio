@@ -1,0 +1,465 @@
+// stdlib/math/combinatorics.sio — Combinatorial functions
+//
+// Pure Sounio implementations of classical combinatorial quantities:
+//   Binomial coefficients, Stirling numbers (1st & 2nd kind), Catalan numbers,
+//   Bell numbers, integer partitions, derangements, multinomial coefficients,
+//   falling/rising factorials, harmonic numbers, Bernoulli numbers, Euler numbers.
+//
+// All functions are pure Sounio — zero FFI.
+//
+// References:
+//   Graham, Knuth, Patashnik (1994): "Concrete Mathematics" (2nd ed.)
+//   Stanley (2011): "Enumerative Combinatorics" Vol. 1 (2nd ed.)
+//   Comtet (1974): "Advanced Combinatorics"
+//   DLMF Ch. 24, 26
+
+// =============================================================================
+// Helpers (must precede callers)
+// =============================================================================
+
+fn comb_abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn comb_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    if x == 1.0 { return 0.0 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 {
+        term = term * t2
+        sum = sum + term / ((2 * k + 1) as f64)
+        k = k + 1
+    }
+    2.0 * sum + (e as f64) * 0.6931471805599453
+}
+
+fn comb_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 500.0 { return 1.0e200 }
+    if x < -500.0 { return 0.0 }
+    var k_f = x / 0.6931471805599453
+    var k: i32 = 0
+    if k_f >= 0.0 { k = k_f as i32 } else { k = (k_f as i32) - 1 }
+    let r = x - (k as f64) * 0.6931471805599453
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 25 {
+        term = term * r / (n as f64)
+        sum = sum + term
+        n = n + 1
+    }
+    var result = sum
+    if k >= 0 {
+        var i = 0
+        while i < k { result = result * 2.0; i = i + 1 }
+    } else {
+        var i = 0
+        while i < (0 - k) { result = result / 2.0; i = i + 1 }
+    }
+    result
+}
+
+fn comb_lgamma(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 1.0e30 }
+    var val = x
+    var shift = 0.0
+    while val < 8.0 {
+        shift = shift + comb_ln(val)
+        val = val + 1.0
+    }
+    var result = (val - 0.5) * comb_ln(val) - val + 0.5 * 1.8378770664093453
+    let inv_v = 1.0 / val
+    let iv2 = inv_v * inv_v
+    result = result + inv_v / 12.0
+    result = result - inv_v * iv2 / 360.0
+    result = result + inv_v * iv2 * iv2 / 1260.0
+    result - shift
+}
+
+// =============================================================================
+// Binomial coefficients
+// =============================================================================
+
+// Exact integer binomial coefficient C(n, k) = n! / (k! * (n-k)!).
+// Uses the multiplicative formula to avoid overflow as long as possible.
+// For n, k >= 0.
+fn binomial(n: i64, k: i64) -> i64 with Mut, Div {
+    if k < 0 || k > n { return 0 }
+    if k == 0 || k == n { return 1 }
+    // Use symmetry: C(n, k) = C(n, n-k)
+    var kk = k
+    if kk > n - kk { kk = n - kk }
+
+    var result: i64 = 1
+    var i: i64 = 0
+    while i < kk {
+        result = result * (n - i)
+        result = result / (i + 1)
+        i = i + 1
+    }
+    result
+}
+
+// Generalized binomial coefficient for real arguments via lgamma.
+// C(n, k) = Gamma(n+1) / (Gamma(k+1) * Gamma(n-k+1))
+fn binomial_f64(n: f64, k: f64) -> f64 with Mut, Div, Panic {
+    if k < 0.0 || k > n { return 0.0 }
+    comb_exp(comb_lgamma(n + 1.0) - comb_lgamma(k + 1.0) - comb_lgamma(n - k + 1.0))
+}
+
+// =============================================================================
+// Falling / Rising factorials
+// =============================================================================
+
+// Falling factorial: (n)_k = n * (n-1) * ... * (n-k+1)
+// Also known as Pochhammer symbol (in some conventions).
+fn falling_factorial(n: i64, k: i32) -> i64 with Mut, Div {
+    if k <= 0 { return 1 }
+    var result: i64 = 1
+    var i: i32 = 0
+    while i < k {
+        result = result * (n - (i as i64))
+        i = i + 1
+    }
+    result
+}
+
+// Rising factorial (Pochhammer symbol): n^{(k)} = n * (n+1) * ... * (n+k-1)
+fn rising_factorial(n: i64, k: i32) -> i64 with Mut, Div {
+    if k <= 0 { return 1 }
+    var result: i64 = 1
+    var i: i32 = 0
+    while i < k {
+        result = result * (n + (i as i64))
+        i = i + 1
+    }
+    result
+}
+
+// =============================================================================
+// Stirling numbers
+// =============================================================================
+
+// Unsigned Stirling numbers of the first kind |s(n, k)|.
+// Number of permutations of n elements with exactly k disjoint cycles.
+// Recurrence: |s(n, k)| = (n-1)*|s(n-1, k)| + |s(n-1, k-1)|
+// Uses a DP table. Max n, k = 20.
+fn stirling_first(n: i32, k: i32) -> i64 with Mut, Div {
+    if n < 0 || k < 0 || k > n { return 0 }
+    if n == 0 && k == 0 { return 1 }
+    if n == 0 || k == 0 { return 0 }
+    if k == n { return 1 }
+
+    // DP: use two rows
+    var prev: [i64; 21] = [0; 21]
+    var curr: [i64; 21] = [0; 21]
+    prev[0] = 1   // s(0, 0) = 1
+
+    var i = 1
+    while i <= n {
+        var j = 0
+        while j <= 20 { curr[j] = 0; j = j + 1 }
+
+        j = 1
+        while j <= i {
+            curr[j] = ((i - 1) as i64) * prev[j] + prev[j - 1]
+            j = j + 1
+        }
+        // Copy curr to prev
+        j = 0
+        while j <= 20 { prev[j] = curr[j]; j = j + 1 }
+        i = i + 1
+    }
+    prev[k]
+}
+
+// Stirling numbers of the second kind S(n, k).
+// Number of ways to partition n elements into k non-empty subsets.
+// Recurrence: S(n, k) = k*S(n-1, k) + S(n-1, k-1)
+// Max n, k = 20.
+fn stirling_second(n: i32, k: i32) -> i64 with Mut, Div {
+    if n < 0 || k < 0 || k > n { return 0 }
+    if n == 0 && k == 0 { return 1 }
+    if n == 0 || k == 0 { return 0 }
+    if k == 1 || k == n { return 1 }
+
+    var prev: [i64; 21] = [0; 21]
+    var curr: [i64; 21] = [0; 21]
+    prev[0] = 1
+
+    var i = 1
+    while i <= n {
+        var j = 0
+        while j <= 20 { curr[j] = 0; j = j + 1 }
+
+        j = 1
+        while j <= i {
+            curr[j] = (j as i64) * prev[j] + prev[j - 1]
+            j = j + 1
+        }
+        j = 0
+        while j <= 20 { prev[j] = curr[j]; j = j + 1 }
+        i = i + 1
+    }
+    prev[k]
+}
+
+// =============================================================================
+// Named sequences
+// =============================================================================
+
+// Catalan number C_n = C(2n, n) / (n+1).
+// Counts Dyck paths, valid parenthesizations, binary trees with n+1 leaves, etc.
+fn catalan_number(n: i32) -> i64 with Mut, Div {
+    if n < 0 { return 0 }
+    if n <= 1 { return 1 }
+    let b = binomial((2 * n) as i64, n as i64)
+    b / ((n + 1) as i64)
+}
+
+// Bell number B_n = total partitions of an n-element set.
+// Uses the Bell triangle. Max n = 25.
+fn bell(n: i32) -> i64 with Mut, Div {
+    if n < 0 { return 0 }
+    if n <= 1 { return 1 }
+
+    var row: [i64; 26] = [0; 26]
+    row[0] = 1  // B_0
+
+    var i = 1
+    while i <= n {
+        // Bell triangle: row starts with last element of previous row
+        var new_row: [i64; 26] = [0; 26]
+        new_row[0] = row[i - 1]
+        var j = 1
+        while j <= i {
+            new_row[j] = new_row[j - 1] + row[j - 1]
+            j = j + 1
+        }
+        // Copy
+        j = 0
+        while j <= i { row[j] = new_row[j]; j = j + 1 }
+        i = i + 1
+    }
+    row[0]
+}
+
+// Partition function p(n) = number of integer partitions of n.
+// Uses Euler's pentagonal number theorem recurrence:
+//   p(n) = sum_{k!=0} (-1)^{k+1} * p(n - k*(3k-1)/2)
+// Max n = 500.
+fn partition_count(n: i32) -> i64 with Mut, Div {
+    if n < 0 { return 0 }
+    if n <= 1 { return 1 }
+
+    var table: [i64; 501] = [0; 501]
+    table[0] = 1
+
+    var i = 1
+    while i <= n {
+        var sum: i64 = 0
+        var k = 1
+        var done = false
+        while !done {
+            // Generalized pentagonal numbers: k*(3k-1)/2 and k*(3k+1)/2
+            let pent1 = k * (3 * k - 1) / 2
+            let pent2 = k * (3 * k + 1) / 2
+
+            if pent1 > i { done = true }
+            else {
+                let sign: i64 = if k - (k / 2) * 2 == 1 { 1 } else { 0 - 1 }
+                sum = sum + sign * table[i - pent1]
+                if pent2 <= i {
+                    sum = sum + sign * table[i - pent2]
+                }
+                k = k + 1
+            }
+        }
+        table[i] = sum
+        i = i + 1
+    }
+    table[n]
+}
+
+// Derangement (subfactorial) !n = number of permutations with no fixed points.
+// D(n) = (n-1) * (D(n-1) + D(n-2)), D(0) = 1, D(1) = 0.
+fn derangements(n: i32) -> i64 with Mut, Div {
+    if n == 0 { return 1 }
+    if n == 1 { return 0 }
+    if n == 2 { return 1 }
+
+    var prev2: i64 = 1   // D(0)
+    var prev1: i64 = 0   // D(1)
+    var i = 2
+    while i <= n {
+        let current = ((i - 1) as i64) * (prev1 + prev2)
+        prev2 = prev1
+        prev1 = current
+        i = i + 1
+    }
+    prev1
+}
+
+// Multinomial coefficient: (n1 + n2 + ... + nc)! / (n1! * n2! * ... * nc!)
+// Input: array ks of length count.
+fn multinomial(ks: &[i32; 16], count: i32) -> i64 with Mut, Div {
+    if count <= 0 { return 1 }
+
+    var total: i64 = 0
+    var i: i32 = 0
+    while i < count { total = total + (ks[i] as i64); i = i + 1 }
+
+    var result: i64 = 1
+    var running: i64 = 0
+    i = 0
+    while i < count {
+        var j: i32 = 0
+        while j < ks[i] {
+            running = running + 1
+            result = result * running
+            result = result / ((j + 1) as i64)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    result
+}
+
+// =============================================================================
+// Harmonic numbers
+// =============================================================================
+
+// Harmonic number H_n = 1 + 1/2 + 1/3 + ... + 1/n.
+fn harmonic(n: i32) -> f64 with Mut, Div {
+    if n <= 0 { return 0.0 }
+    if n == 1 { return 1.0 }
+
+    // For large n, use asymptotic: H_n ~ ln(n) + gamma + 1/(2n) - 1/(12n^2) + ...
+    if n > 1000 {
+        let nf = n as f64
+        let gamma = 0.57721566490153286061
+        return comb_ln(nf) + gamma + 1.0 / (2.0 * nf) - 1.0 / (12.0 * nf * nf) + 1.0 / (120.0 * nf * nf * nf * nf)
+    }
+
+    var sum = 0.0
+    var i = 1
+    while i <= n {
+        sum = sum + 1.0 / (i as f64)
+        i = i + 1
+    }
+    sum
+}
+
+// Generalized harmonic number H_{n, s} = sum_{k=1}^{n} 1/k^s.
+fn generalized_harmonic(n: i32, s: f64) -> f64 with Mut, Div, Panic {
+    if n <= 0 { return 0.0 }
+    var sum = 0.0
+    var k = 1
+    while k <= n {
+        let kf = k as f64
+        // k^s = exp(s * ln(k))
+        let term = if s == 1.0 { 1.0 / kf }
+                   else if s == 2.0 { 1.0 / (kf * kf) }
+                   else { 1.0 / comb_exp(s * comb_ln(kf)) }
+        sum = sum + term
+        k = k + 1
+    }
+    sum
+}
+
+// =============================================================================
+// Bernoulli numbers
+// =============================================================================
+
+// Bernoulli number B_n via the Akiyama-Tanigawa algorithm.
+// B_0=1, B_1=-1/2, B_2=1/6, B_3=0, B_4=-1/30, B_5=0, ...
+// Odd B_n = 0 for n >= 3.
+// Max n = 30.
+fn bernoulli(n: i32) -> f64 with Mut, Div, Panic {
+    if n < 0 { return 0.0 }
+    if n == 0 { return 1.0 }
+    if n == 1 { return 0.0 - 0.5 }
+    // Odd Bernoulli numbers (n >= 3) are 0
+    if n >= 3 && n - (n / 2) * 2 == 1 { return 0.0 }
+
+    // Akiyama-Tanigawa algorithm
+    var a: [f64; 31] = [0.0; 31]
+    var i = 0
+    while i <= n {
+        a[i] = 1.0 / ((i + 1) as f64)
+        var j = i
+        while j >= 1 {
+            a[j - 1] = (j as f64) * (a[j - 1] - a[j])
+            j = j - 1
+        }
+        i = i + 1
+    }
+    a[0]
+}
+
+// =============================================================================
+// Euler (zigzag) numbers
+// =============================================================================
+
+// Euler number E_n (also called secant/tangent numbers).
+// E_0=1, E_1=0, E_2=-1, E_3=0, E_4=5, ...
+// Related to sec(x) = sum E_{2n} * x^{2n} / (2n)!
+// Uses the triangle method. Max n = 20.
+fn euler_number(n: i32) -> i64 with Mut, Div {
+    if n < 0 { return 0 }
+    if n == 0 { return 1 }
+    if n - (n / 2) * 2 == 1 { return 0 }
+
+    // Compute via tangent/secant number triangle
+    let m = n / 2
+
+    var t: [i64; 21] = [0; 21]
+    t[0] = 1  // E_0 = 1
+
+    var i = 1
+    while i <= m {
+        // Build up using recurrence for secant numbers
+        t[i] = 0
+        var j = i
+        while j >= 1 {
+            t[j] = t[j - 1] * ((2 * (i - j) + 1) as i64) + t[j]
+            j = j - 1
+        }
+        t[0] = 0
+        j = 0
+        while j < i {
+            t[j] = t[j + 1]
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Sign: (-1)^m
+    let val = t[0]
+    if m - (m / 2) * 2 == 0 { val } else { 0 - val }
+}
+
+// =============================================================================
+// Double factorial
+// =============================================================================
+
+// Double factorial n!! = n * (n-2) * (n-4) * ... * (1 or 2).
+fn double_factorial(n: i32) -> i64 with Mut, Div {
+    if n <= 0 { return 1 }
+    if n <= 2 { return n as i64 }
+    var result: i64 = 1
+    var k = n
+    while k > 1 {
+        result = result * (k as i64)
+        k = k - 2
+    }
+    result
+}

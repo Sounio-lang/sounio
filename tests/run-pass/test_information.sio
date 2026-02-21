@@ -1,0 +1,446 @@
+//@ run-pass
+
+// ---------------------------------------------------------------------------
+// Information theory test suite -- all helpers inlined, no imports
+//
+// Functions tested:
+//   it_ln          -- natural logarithm (range-reduced series)
+//   it_log2        -- log base 2 via ln(x)/ln(2)
+//   it_pow         -- power via exp(exp_val * ln(base))
+//   shannon_entropy -- H(X) = -sum p_i * log2(p_i) in bits
+//   kl_divergence  -- D_KL(P||Q) = sum p_i * ln(p_i/q_i) in nats
+//   js_divergence  -- JSD(P,Q) = 0.5*KL(P||M) + 0.5*KL(Q||M), M=(P+Q)/2
+//   cross_entropy  -- H(P,Q) = -sum p_i * ln(q_i) in nats
+//   mutual_information -- I(X;Y) from joint distribution
+//
+// References:
+//   Cover & Thomas, "Elements of Information Theory" (2nd ed., Wiley, 2006)
+//   Shannon, "A Mathematical Theory of Communication" (Bell Syst. Tech. J., 1948)
+//   Lin, "Divergence measures based on the Shannon entropy" (IEEE T-IT, 1991)
+// ---------------------------------------------------------------------------
+
+// ============================================================================
+// PURE MATH HELPERS (must precede callers)
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn check_f64(got: f64, expected: f64, tol: f64, pass: &!i32, fail: &!i32) with IO {
+    let diff = abs_f64(got - expected)
+    if diff < tol {
+        *pass = *pass + 1
+    } else {
+        *fail = *fail + 1
+    }
+}
+
+fn check_bool(got: bool, expected: bool, pass: &!i32, fail: &!i32) with IO {
+    if got == expected {
+        *pass = *pass + 1
+    } else {
+        *fail = *fail + 1
+    }
+}
+
+// exp via Taylor series with range splitting for large arguments
+fn exp_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x > 20.0 { return exp_f64(x / 2.0) * exp_f64(x / 2.0) }
+    if x < 0.0 - 20.0 { return 1.0 / exp_f64(0.0 - x) }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 30 {
+        term = term * x / (i as f64)
+        sum = sum + term
+        i = i + 1
+    }
+    return sum
+}
+
+// ============================================================================
+// INFORMATION THEORY FUNCTIONS (must precede callers)
+// ============================================================================
+
+// Natural logarithm via range reduction + Mercator-like series
+// ln(x) = ln(m * 2^e) = 2*atanh((m-1)/(m+1)) + e*ln(2)
+fn it_ln(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 {
+        term = term * t2
+        sum = sum + term / ((2 * k + 1) as f64)
+        k = k + 1
+    }
+    return 2.0 * sum + (e as f64) * 0.6931471805599453
+}
+
+// Log base 2: log2(x) = ln(x) / ln(2)
+fn it_log2(x: f64) -> f64 with Mut, Panic, Div {
+    return it_ln(x) / 0.6931471805599453
+}
+
+// Power: base^exp = exp(exp_val * ln(base))
+fn it_pow(base: f64, exp_val: f64) -> f64 with Mut, Panic, Div {
+    if base <= 0.0 { return 0.0 }
+    return exp_f64(exp_val * it_ln(base))
+}
+
+// ---------------------------------------------------------------------------
+// Shannon entropy: H(X) = -sum_{i=0}^{n-1} p_i * log2(p_i) in bits
+// Convention: 0 * log(0) = 0
+// ---------------------------------------------------------------------------
+fn shannon_entropy(p: &[f64; 32], n: i32) -> f64 with Mut, Panic, Div {
+    var h = 0.0
+    var i = 0
+    while i < n {
+        if p[i] > 0.0 {
+            h = h - p[i] * it_log2(p[i])
+        }
+        i = i + 1
+    }
+    return h
+}
+
+// ---------------------------------------------------------------------------
+// KL divergence: D_KL(P||Q) = sum_{i=0}^{n-1} p_i * ln(p_i / q_i) in nats
+// Requires: q_i > 0 whenever p_i > 0
+// ---------------------------------------------------------------------------
+fn kl_divergence(p: &[f64; 32], q: &[f64; 32], n: i32) -> f64 with Mut, Panic, Div {
+    var d = 0.0
+    var i = 0
+    while i < n {
+        if p[i] > 0.0 {
+            d = d + p[i] * it_ln(p[i] / q[i])
+        }
+        i = i + 1
+    }
+    return d
+}
+
+// ---------------------------------------------------------------------------
+// Jensen-Shannon divergence:
+//   JSD(P,Q) = 0.5 * KL(P||M) + 0.5 * KL(Q||M)  where M = (P+Q)/2
+// Returns value in nats; bounded [0, ln(2)].
+// ---------------------------------------------------------------------------
+fn js_divergence(p: &[f64; 32], q: &[f64; 32], n: i32) -> f64 with Mut, Panic, Div {
+    // Build M = (P + Q) / 2
+    var m: [f64; 32] = [0.0; 32]
+    var i = 0
+    while i < n {
+        m[i] = (p[i] + q[i]) / 2.0
+        i = i + 1
+    }
+    let kl_pm = kl_divergence(p, &m, n)
+    let kl_qm = kl_divergence(q, &m, n)
+    return 0.5 * kl_pm + 0.5 * kl_qm
+}
+
+// ---------------------------------------------------------------------------
+// Cross-entropy: H(P,Q) = -sum_{i=0}^{n-1} p_i * ln(q_i) in nats
+// ---------------------------------------------------------------------------
+fn cross_entropy(p: &[f64; 32], q: &[f64; 32], n: i32) -> f64 with Mut, Panic, Div {
+    var h = 0.0
+    var i = 0
+    while i < n {
+        if p[i] > 0.0 {
+            h = h - p[i] * it_ln(q[i])
+        }
+        i = i + 1
+    }
+    return h
+}
+
+// ---------------------------------------------------------------------------
+// Mutual information: I(X;Y) = sum_{x,y} p(x,y) * ln(p(x,y) / (p(x)*p(y)))
+//   joint is stored row-major in a flat array of size 256 (max 16x16).
+//   nx = number of X outcomes, ny = number of Y outcomes.
+//   Marginals are computed internally.
+// ---------------------------------------------------------------------------
+fn mutual_information(joint: &[f64; 256], nx: i32, ny: i32) -> f64 with Mut, Panic, Div {
+    // Marginals: p_x[i] = sum_j joint[i*ny + j], p_y[j] = sum_i joint[i*ny + j]
+    var px: [f64; 32] = [0.0; 32]
+    var py: [f64; 32] = [0.0; 32]
+
+    var i = 0
+    while i < nx {
+        var j = 0
+        while j < ny {
+            let idx = i * ny + j
+            px[i] = px[i] + joint[idx]
+            py[j] = py[j] + joint[idx]
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // I(X;Y) = sum p(x,y) * ln( p(x,y) / (p(x)*p(y)) )
+    var mi = 0.0
+    i = 0
+    while i < nx {
+        var j = 0
+        while j < ny {
+            let idx = i * ny + j
+            let pxy = joint[idx]
+            if pxy > 0.0 {
+                if px[i] > 0.0 {
+                    if py[j] > 0.0 {
+                        mi = mi + pxy * it_ln(pxy / (px[i] * py[j]))
+                    }
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return mi
+}
+
+// ============================================================================
+// MAIN TEST RUNNER
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== Information Theory Tests ===")
+    println("")
+
+    var pass = 0
+    var fail = 0
+
+    // -----------------------------------------------------------------------
+    // Test 1: H(uniform over 2) = 1.0 bit  (fair coin)
+    // -----------------------------------------------------------------------
+    let prev1 = pass
+    print("Test  1: H(uniform/2) = 1.0 bit .... ")
+    var u2: [f64; 32] = [0.0; 32]
+    u2[0] = 0.5
+    u2[1] = 0.5
+    let h_u2 = shannon_entropy(&u2, 2)
+    check_f64(h_u2, 1.0, 1.0e-8, &!pass, &!fail)
+    if pass > prev1 { println("PASS") } else { println("FAIL") }
+
+    // -----------------------------------------------------------------------
+    // Test 2: H(uniform over 4) = 2.0 bits
+    // -----------------------------------------------------------------------
+    let prev2 = pass
+    print("Test  2: H(uniform/4) = 2.0 bits ... ")
+    var u4: [f64; 32] = [0.0; 32]
+    u4[0] = 0.25; u4[1] = 0.25; u4[2] = 0.25; u4[3] = 0.25
+    let h_u4 = shannon_entropy(&u4, 4)
+    check_f64(h_u4, 2.0, 1.0e-8, &!pass, &!fail)
+    if pass > prev2 { println("PASS") } else { println("FAIL") }
+
+    // -----------------------------------------------------------------------
+    // Test 3: H(uniform over 8) = 3.0 bits
+    // -----------------------------------------------------------------------
+    let prev3 = pass
+    print("Test  3: H(uniform/8) = 3.0 bits ... ")
+    var u8: [f64; 32] = [0.0; 32]
+    var idx3 = 0
+    while idx3 < 8 {
+        u8[idx3] = 0.125
+        idx3 = idx3 + 1
+    }
+    let h_u8 = shannon_entropy(&u8, 8)
+    check_f64(h_u8, 3.0, 1.0e-8, &!pass, &!fail)
+    if pass > prev3 { println("PASS") } else { println("FAIL") }
+
+    // -----------------------------------------------------------------------
+    // Test 4: H(certain event [1,0,0,0]) = 0.0 bits
+    // -----------------------------------------------------------------------
+    let prev4 = pass
+    print("Test  4: H(certain) = 0.0 bits ..... ")
+    var cert: [f64; 32] = [0.0; 32]
+    cert[0] = 1.0
+    let h_cert = shannon_entropy(&cert, 4)
+    check_f64(h_cert, 0.0, 1.0e-8, &!pass, &!fail)
+    if pass > prev4 { println("PASS") } else { println("FAIL") }
+
+    // -----------------------------------------------------------------------
+    // Test 5: H(binary, p=0.5) = 1.0 bit
+    // -----------------------------------------------------------------------
+    let prev5 = pass
+    print("Test  5: H(binary,0.5) = 1.0 bit ... ")
+    var bin5: [f64; 32] = [0.0; 32]
+    bin5[0] = 0.5; bin5[1] = 0.5
+    let h_bin5 = shannon_entropy(&bin5, 2)
+    check_f64(h_bin5, 1.0, 1.0e-8, &!pass, &!fail)
+    if pass > prev5 { println("PASS") } else { println("FAIL") }
+
+    // -----------------------------------------------------------------------
+    // Test 6: H(binary, p=0.9) ~ 0.469 bits
+    //   H = -0.9*log2(0.9) - 0.1*log2(0.1)
+    // -----------------------------------------------------------------------
+    let prev6 = pass
+    print("Test  6: H(binary,0.9) ~ 0.469 .... ")
+    var bin6: [f64; 32] = [0.0; 32]
+    bin6[0] = 0.9; bin6[1] = 0.1
+    let h_bin6 = shannon_entropy(&bin6, 2)
+    check_f64(h_bin6, 0.469, 1.0e-3, &!pass, &!fail)
+    if pass > prev6 { println("PASS") } else { println("FAIL") }
+
+    // -----------------------------------------------------------------------
+    // Test 7: KL(P, P) = 0 for any distribution
+    // -----------------------------------------------------------------------
+    let prev7 = pass
+    print("Test  7: KL(P,P) = 0 .............. ")
+    var pk7: [f64; 32] = [0.0; 32]
+    pk7[0] = 0.2; pk7[1] = 0.3; pk7[2] = 0.5
+    let kl_pp = kl_divergence(&pk7, &pk7, 3)
+    check_f64(kl_pp, 0.0, 1.0e-8, &!pass, &!fail)
+    if pass > prev7 { println("PASS") } else { println("FAIL") }
+
+    // -----------------------------------------------------------------------
+    // Test 8: KL(P, Q) >= 0  (Gibbs' inequality)
+    //   P = [0.3, 0.7], Q = [0.6, 0.4]
+    // -----------------------------------------------------------------------
+    let prev8 = pass
+    print("Test  8: KL(P,Q) >= 0 (Gibbs) ..... ")
+    var p8: [f64; 32] = [0.0; 32]
+    p8[0] = 0.3; p8[1] = 0.7
+    var q8: [f64; 32] = [0.0; 32]
+    q8[0] = 0.6; q8[1] = 0.4
+    let kl_pq = kl_divergence(&p8, &q8, 2)
+    check_bool(kl_pq >= 0.0, true, &!pass, &!fail)
+    if pass > prev8 { println("PASS") } else { println("FAIL") }
+
+    // -----------------------------------------------------------------------
+    // Test 9: JSD is symmetric: JSD(P,Q) = JSD(Q,P)
+    // -----------------------------------------------------------------------
+    let prev9 = pass
+    print("Test  9: JSD symmetric ............. ")
+    var p9: [f64; 32] = [0.0; 32]
+    p9[0] = 0.1; p9[1] = 0.4; p9[2] = 0.5
+    var q9: [f64; 32] = [0.0; 32]
+    q9[0] = 0.3; q9[1] = 0.3; q9[2] = 0.4
+    let jsd_pq = js_divergence(&p9, &q9, 3)
+    let jsd_qp = js_divergence(&q9, &p9, 3)
+    check_f64(jsd_pq, jsd_qp, 1.0e-10, &!pass, &!fail)
+    if pass > prev9 { println("PASS") } else { println("FAIL") }
+
+    // -----------------------------------------------------------------------
+    // Test 10: JSD is bounded: 0 <= JSD(P,Q) <= ln(2)
+    // -----------------------------------------------------------------------
+    let prev10 = pass
+    print("Test 10: JSD bounded [0,ln2] ....... ")
+    let ln2 = 0.6931471805599453
+    let jsd_ok = jsd_pq >= 0.0 && jsd_pq <= ln2 + 1.0e-10
+    check_bool(jsd_ok, true, &!pass, &!fail)
+    if pass > prev10 { println("PASS") } else { println("FAIL") }
+
+    // -----------------------------------------------------------------------
+    // Test 11: Cross-entropy identity: H(P,Q) = H(P) + KL(P,Q)
+    //   where H(P) is Shannon entropy in nats, i.e. -sum p_i ln(p_i)
+    //   P = [0.2, 0.3, 0.5], Q = [0.4, 0.4, 0.2]
+    // -----------------------------------------------------------------------
+    let prev11 = pass
+    print("Test 11: H(P,Q) = H(P) + KL(P,Q) .. ")
+    var p11: [f64; 32] = [0.0; 32]
+    p11[0] = 0.2; p11[1] = 0.3; p11[2] = 0.5
+    var q11: [f64; 32] = [0.0; 32]
+    q11[0] = 0.4; q11[1] = 0.4; q11[2] = 0.2
+    let ce = cross_entropy(&p11, &q11, 3)
+    // H(P) in nats: -sum p_i * ln(p_i)
+    var hp_nats = 0.0
+    var idx11 = 0
+    while idx11 < 3 {
+        if p11[idx11] > 0.0 {
+            hp_nats = hp_nats - p11[idx11] * it_ln(p11[idx11])
+        }
+        idx11 = idx11 + 1
+    }
+    let kl_11 = kl_divergence(&p11, &q11, 3)
+    check_f64(ce, hp_nats + kl_11, 1.0e-8, &!pass, &!fail)
+    if pass > prev11 { println("PASS") } else { println("FAIL") }
+
+    // -----------------------------------------------------------------------
+    // Test 12: For independent X,Y: I(X;Y) = 0
+    //   P(X=0)=0.3, P(X=1)=0.7; P(Y=0)=0.4, P(Y=1)=0.6
+    //   joint[i*2+j] = px[i]*py[j]
+    // -----------------------------------------------------------------------
+    let prev12 = pass
+    print("Test 12: I(X;Y)=0 (independent) ... ")
+    var joint_ind: [f64; 256] = [0.0; 256]
+    joint_ind[0] = 0.3 * 0.4  // P(0,0) = 0.12
+    joint_ind[1] = 0.3 * 0.6  // P(0,1) = 0.18
+    joint_ind[2] = 0.7 * 0.4  // P(1,0) = 0.28
+    joint_ind[3] = 0.7 * 0.6  // P(1,1) = 0.42
+    let mi_ind = mutual_information(&joint_ind, 2, 2)
+    check_f64(mi_ind, 0.0, 1.0e-8, &!pass, &!fail)
+    if pass > prev12 { println("PASS") } else { println("FAIL") }
+
+    // -----------------------------------------------------------------------
+    // Test 13: For perfectly correlated X,Y: I(X;Y) = H(X) in nats
+    //   Use diagonal joint: P(X=i,Y=i) = p_i, all off-diag = 0
+    //   P = [0.25, 0.25, 0.25, 0.25]  (uniform over 4)
+    //   H(X) in nats = ln(4)
+    // -----------------------------------------------------------------------
+    let prev13 = pass
+    print("Test 13: I(X;Y)=H(X) (correlated) . ")
+    var joint_corr: [f64; 256] = [0.0; 256]
+    // Diagonal: joint[i*4 + i] = 0.25
+    joint_corr[0] = 0.25   // (0,0)
+    joint_corr[5] = 0.25   // (1,1)
+    joint_corr[10] = 0.25  // (2,2)
+    joint_corr[15] = 0.25  // (3,3)
+    let mi_corr = mutual_information(&joint_corr, 4, 4)
+    let hx_nats = it_ln(4.0)  // ln(4) ~ 1.3863
+    check_f64(mi_corr, hx_nats, 1.0e-6, &!pass, &!fail)
+    if pass > prev13 { println("PASS") } else { println("FAIL") }
+
+    // -----------------------------------------------------------------------
+    // Test 14: H(P) <= log2(n) with equality iff uniform
+    //   Verify H(uniform/8) = log2(8) = 3.0 (already tested in test 3)
+    //   and H(non-uniform/8) < log2(8)
+    // -----------------------------------------------------------------------
+    let prev14 = pass
+    print("Test 14: H(P) <= log2(n), eq unif .. ")
+    var nu8: [f64; 32] = [0.0; 32]
+    nu8[0] = 0.4; nu8[1] = 0.1; nu8[2] = 0.1; nu8[3] = 0.1
+    nu8[4] = 0.1; nu8[5] = 0.05; nu8[6] = 0.05; nu8[7] = 0.1
+    let h_nu8 = shannon_entropy(&nu8, 8)
+    let log2_8 = 3.0
+    // Uniform case: entropy equals log2(n)
+    let uniform_ok = abs_f64(h_u8 - log2_8) < 1.0e-8
+    // Non-uniform case: entropy strictly less than log2(n)
+    let nonunif_ok = h_nu8 < log2_8
+    check_bool(uniform_ok && nonunif_ok, true, &!pass, &!fail)
+    if pass > prev14 { println("PASS") } else { println("FAIL") }
+
+    // -----------------------------------------------------------------------
+    // Test 15: JSD(P, P) = 0
+    // -----------------------------------------------------------------------
+    let prev15 = pass
+    print("Test 15: JSD(P,P) = 0 ............. ")
+    var p15: [f64; 32] = [0.0; 32]
+    p15[0] = 0.1; p15[1] = 0.2; p15[2] = 0.3; p15[3] = 0.4
+    let jsd_pp = js_divergence(&p15, &p15, 4)
+    check_f64(jsd_pp, 0.0, 1.0e-10, &!pass, &!fail)
+    if pass > prev15 { println("PASS") } else { println("FAIL") }
+
+    // -----------------------------------------------------------------------
+    // Summary
+    // -----------------------------------------------------------------------
+    println("")
+    print("Passed: ")
+    println(pass)
+    print("Failed: ")
+    println(fail)
+
+    if fail == 0 {
+        println("ALL 15 TESTS PASSED")
+        return 0
+    }
+    println("SOME TESTS FAILED")
+    return 1
+}

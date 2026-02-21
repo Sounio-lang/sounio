@@ -1,0 +1,858 @@
+//@ run-pass
+// test_fft.sio - Comprehensive FFT test suite
+//
+// Self-contained radix-2 Cooley-Tukey DIT FFT with 15 tests covering:
+// correctness, roundtrip, spectral properties, and convolution theorem.
+//
+// All helpers inlined (no imports). Arrays fixed at size 256; tests use
+// only the first N elements where N is a power of 2.
+//
+// References:
+//   Cooley & Tukey, "An algorithm for the machine calculation of complex
+//       Fourier series", Math. Comp. 19 (1965), 297-301
+//   Oppenheim & Schafer, "Discrete-Time Signal Processing" (3rd ed.)
+
+// ============================================================================
+// PURE MATH HELPERS (must precede callers)
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var scaled = x
+    var scale_back = 1.0
+    while scaled < 1.0 {
+        scaled = scaled * 4.0
+        scale_back = scale_back * 2.0
+    }
+    while scaled > 4.0 {
+        scaled = scaled * 0.25
+        scale_back = scale_back * 0.5
+    }
+    var y = 1.5
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    return y / scale_back
+}
+
+fn floor_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x >= 0.0 {
+        let i = x as i32
+        return i as f64
+    }
+    let i = x as i32
+    let f = i as f64
+    if f > x { return f - 1.0 }
+    return f
+}
+
+fn sin_f64(x: f64) -> f64 with Mut, Panic, Div {
+    let pi = 3.141592653589793
+    let two_pi = 6.283185307179586
+    var t = x - floor_f64(x / two_pi) * two_pi
+    if t > pi { t = t - two_pi }
+    if t < 0.0 - pi { t = t + two_pi }
+    var sum = t
+    var term = t
+    var n = 1
+    while n <= 20 {
+        term = 0.0 - term * t * t / (((2 * n) as f64) * ((2 * n + 1) as f64))
+        sum = sum + term
+        n = n + 1
+    }
+    return sum
+}
+
+fn cos_f64(x: f64) -> f64 with Mut, Panic, Div {
+    return sin_f64(x + 1.5707963267948966)
+}
+
+fn approx_eq(a: f64, b: f64, tol: f64) -> bool with Mut, Panic, Div {
+    abs_f64(a - b) < tol
+}
+
+// ============================================================================
+// BIT-REVERSAL
+// ============================================================================
+
+fn bit_reverse(x: i32, log2n: i32) -> i32 {
+    var result = 0
+    var val = x
+    var i = 0
+    while i < log2n {
+        result = result * 2 + (val - (val / 2) * 2)
+        val = val / 2
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================================
+// FORWARD FFT (radix-2 decimation-in-time Cooley-Tukey, in-place)
+// ============================================================================
+
+fn fft(re: &![f64; 256], im: &![f64; 256], n: i32) with Mut, Div, Panic {
+    // compute log2n
+    var log2n = 0
+    var temp = n
+    while temp > 1 { temp = temp / 2; log2n = log2n + 1 }
+
+    // bit-reversal permutation
+    var i = 0
+    while i < n {
+        let j = bit_reverse(i, log2n)
+        if i < j {
+            let tr = re[i]; re[i] = re[j]; re[j] = tr
+            let ti = im[i]; im[i] = im[j]; im[j] = ti
+        }
+        i = i + 1
+    }
+
+    // FFT butterfly
+    var size = 2
+    while size <= n {
+        let half = size / 2
+        let angle = 0.0 - 6.28318530717958647692 / (size as f64)
+        var k = 0
+        while k < n {
+            var j = 0
+            while j < half {
+                let theta = angle * (j as f64)
+                let wr = cos_f64(theta)
+                let wi = sin_f64(theta)
+                let idx1 = k + j
+                let idx2 = k + j + half
+                let tr = wr * re[idx2] - wi * im[idx2]
+                let ti = wr * im[idx2] + wi * re[idx2]
+                re[idx2] = re[idx1] - tr
+                im[idx2] = im[idx1] - ti
+                re[idx1] = re[idx1] + tr
+                im[idx1] = im[idx1] + ti
+                j = j + 1
+            }
+            k = k + size
+        }
+        size = size * 2
+    }
+}
+
+// ============================================================================
+// INVERSE FFT (conjugation trick: negate im, forward FFT, negate im, / N)
+// ============================================================================
+
+fn ifft(re: &![f64; 256], im: &![f64; 256], n: i32) with Mut, Div, Panic {
+    // Step 1: negate imaginary part
+    var i = 0
+    while i < n {
+        im[i] = 0.0 - im[i]
+        i = i + 1
+    }
+
+    // Step 2: forward FFT
+    fft(re, im, n)
+
+    // Step 3: negate imaginary part and divide by N
+    let nf = n as f64
+    i = 0
+    while i < n {
+        re[i] = re[i] / nf
+        im[i] = 0.0 - im[i] / nf
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+// Test 1: FFT of all-zeros gives all-zeros (n=8, tol 1e-10)
+fn test_zeros() -> bool with IO, Mut, Panic, Div {
+    let n = 8
+    var re: [f64; 256] = [0.0; 256]
+    var im: [f64; 256] = [0.0; 256]
+
+    fft(&!re, &!im, n)
+
+    let tol = 1.0e-10
+    var i = 0
+    while i < n {
+        if abs_f64(re[i]) > tol { return false }
+        if abs_f64(im[i]) > tol { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// Test 2: FFT of constant [1,1,1,1]: DC = 4, others = 0 (n=4, tol 1e-10)
+fn test_constant_signal() -> bool with IO, Mut, Panic, Div {
+    let n = 4
+    var re: [f64; 256] = [0.0; 256]
+    var im: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < n {
+        re[i] = 1.0
+        i = i + 1
+    }
+
+    fft(&!re, &!im, n)
+
+    let tol = 1.0e-10
+    // DC component should be 4.0
+    if approx_eq(re[0], 4.0, tol) == false { return false }
+    if approx_eq(im[0], 0.0, tol) == false { return false }
+
+    // All other bins should be zero
+    i = 1
+    while i < n {
+        if abs_f64(re[i]) > tol { return false }
+        if abs_f64(im[i]) > tol { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// Test 3: FFT of delta [1,0,0,0]: flat spectrum, all outputs = 1+0i (n=4, tol 1e-10)
+fn test_delta() -> bool with IO, Mut, Panic, Div {
+    let n = 4
+    var re: [f64; 256] = [0.0; 256]
+    var im: [f64; 256] = [0.0; 256]
+    re[0] = 1.0
+
+    fft(&!re, &!im, n)
+
+    let tol = 1.0e-10
+    var i = 0
+    while i < n {
+        if approx_eq(re[i], 1.0, tol) == false { return false }
+        if approx_eq(im[i], 0.0, tol) == false { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// Test 4: IFFT(FFT(x)) = x for random-ish input (n=8, tol 1e-10)
+fn test_ifft_roundtrip() -> bool with IO, Mut, Panic, Div {
+    let n = 8
+    let pi = 3.141592653589793
+    var re: [f64; 256] = [0.0; 256]
+    var im: [f64; 256] = [0.0; 256]
+
+    // Construct a deterministic "random-ish" signal
+    re[0] = 1.7; re[1] = 0.0 - 0.3; re[2] = 2.1; re[3] = 0.0 - 1.5
+    re[4] = 0.8; re[5] = 3.2; re[6] = 0.0 - 0.9; re[7] = 1.1
+
+    // Save original values
+    var orig_re: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < n {
+        orig_re[i] = re[i]
+        i = i + 1
+    }
+
+    fft(&!re, &!im, n)
+    ifft(&!re, &!im, n)
+
+    let tol = 1.0e-10
+    i = 0
+    while i < n {
+        if approx_eq(re[i], orig_re[i], tol) == false { return false }
+        if approx_eq(im[i], 0.0, tol) == false { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// Test 5: Parseval's theorem: sum|x|^2 = (1/N)*sum|X|^2 (tol 1e-8)
+fn test_parseval() -> bool with IO, Mut, Panic, Div {
+    let n = 8
+    let pi = 3.141592653589793
+    var re: [f64; 256] = [0.0; 256]
+    var im: [f64; 256] = [0.0; 256]
+
+    // Build a signal: mix of cosines
+    var i = 0
+    while i < n {
+        re[i] = cos_f64(2.0 * pi * (i as f64) / (n as f64)) + 0.3 * sin_f64(2.0 * pi * 2.0 * (i as f64) / (n as f64))
+        i = i + 1
+    }
+
+    // Time-domain energy
+    var time_energy = 0.0
+    i = 0
+    while i < n {
+        time_energy = time_energy + re[i] * re[i]
+        i = i + 1
+    }
+
+    fft(&!re, &!im, n)
+
+    // Frequency-domain energy (divide by N)
+    var freq_energy = 0.0
+    i = 0
+    while i < n {
+        freq_energy = freq_energy + re[i] * re[i] + im[i] * im[i]
+        i = i + 1
+    }
+    freq_energy = freq_energy / (n as f64)
+
+    let tol = 1.0e-8
+    return approx_eq(time_energy, freq_energy, tol)
+}
+
+// Test 6: FFT of cos: x[k] = cos(2*pi*k*1/N) for f=1, N=8
+//   Peaks at bins 1 and N-1=7 with magnitude N/2=4, others ~0 (tol 1e-6)
+fn test_cosine_spectrum() -> bool with IO, Mut, Panic, Div {
+    let n = 8
+    let pi = 3.141592653589793
+    var re: [f64; 256] = [0.0; 256]
+    var im: [f64; 256] = [0.0; 256]
+
+    var i = 0
+    while i < n {
+        re[i] = cos_f64(2.0 * pi * (i as f64) / (n as f64))
+        i = i + 1
+    }
+
+    fft(&!re, &!im, n)
+
+    let tol = 1.0e-6
+    // Bin 1: magnitude should be N/2 = 4
+    let mag1 = sqrt_f64(re[1] * re[1] + im[1] * im[1])
+    if approx_eq(mag1, 4.0, tol) == false { return false }
+
+    // Bin 7: magnitude should be N/2 = 4
+    let mag7 = sqrt_f64(re[7] * re[7] + im[7] * im[7])
+    if approx_eq(mag7, 4.0, tol) == false { return false }
+
+    // DC bin should be ~0
+    let mag0 = sqrt_f64(re[0] * re[0] + im[0] * im[0])
+    if mag0 > tol { return false }
+
+    // Bins 2..6 should be ~0
+    i = 2
+    while i < 7 {
+        let mag = sqrt_f64(re[i] * re[i] + im[i] * im[i])
+        if mag > tol { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// Test 7: FFT of sin: x[k] = sin(2*pi*k/N) for N=8
+//   Peaks at bins 1 and 7 (imaginary), magnitude N/2=4 (tol 1e-6)
+fn test_sine_spectrum() -> bool with IO, Mut, Panic, Div {
+    let n = 8
+    let pi = 3.141592653589793
+    var re: [f64; 256] = [0.0; 256]
+    var im: [f64; 256] = [0.0; 256]
+
+    var i = 0
+    while i < n {
+        re[i] = sin_f64(2.0 * pi * (i as f64) / (n as f64))
+        i = i + 1
+    }
+
+    fft(&!re, &!im, n)
+
+    let tol = 1.0e-6
+    // Bin 1 magnitude should be N/2 = 4
+    let mag1 = sqrt_f64(re[1] * re[1] + im[1] * im[1])
+    if approx_eq(mag1, 4.0, tol) == false { return false }
+
+    // Bin 7 magnitude should be N/2 = 4
+    let mag7 = sqrt_f64(re[7] * re[7] + im[7] * im[7])
+    if approx_eq(mag7, 4.0, tol) == false { return false }
+
+    // Bins 2..6 should be ~0
+    i = 2
+    while i < 7 {
+        let mag = sqrt_f64(re[i] * re[i] + im[i] * im[i])
+        if mag > tol { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// Test 8: Linearity: FFT(a*x + b*y) = a*FFT(x) + b*FFT(y) (tol 1e-8)
+fn test_linearity() -> bool with IO, Mut, Panic, Div {
+    let n = 8
+    let pi = 3.141592653589793
+    let a = 2.5
+    let b = 1.3
+
+    // Build signals x and y
+    var x_re: [f64; 256] = [0.0; 256]
+    var x_im: [f64; 256] = [0.0; 256]
+    var y_re: [f64; 256] = [0.0; 256]
+    var y_im: [f64; 256] = [0.0; 256]
+    var z_re: [f64; 256] = [0.0; 256]
+    var z_im: [f64; 256] = [0.0; 256]
+
+    var i = 0
+    while i < n {
+        x_re[i] = cos_f64(2.0 * pi * (i as f64) / (n as f64))
+        y_re[i] = sin_f64(2.0 * pi * 2.0 * (i as f64) / (n as f64))
+        z_re[i] = a * x_re[i] + b * y_re[i]
+        i = i + 1
+    }
+
+    // Save copies of x and y before FFT mutates them
+    var x_re_copy: [f64; 256] = [0.0; 256]
+    var y_re_copy: [f64; 256] = [0.0; 256]
+    i = 0
+    while i < n {
+        x_re_copy[i] = x_re[i]
+        y_re_copy[i] = y_re[i]
+        i = i + 1
+    }
+
+    fft(&!x_re, &!x_im, n)
+    fft(&!y_re, &!y_im, n)
+    fft(&!z_re, &!z_im, n)
+
+    let tol = 1.0e-8
+    i = 0
+    while i < n {
+        let exp_re = a * x_re[i] + b * y_re[i]
+        let exp_im = a * x_im[i] + b * y_im[i]
+        if approx_eq(z_re[i], exp_re, tol) == false { return false }
+        if approx_eq(z_im[i], exp_im, tol) == false { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// Test 9: Conjugate symmetry of real input: X[k] = conj(X[N-k]) (tol 1e-8)
+fn test_conjugate_symmetry() -> bool with IO, Mut, Panic, Div {
+    let n = 8
+    let pi = 3.141592653589793
+    var re: [f64; 256] = [0.0; 256]
+    var im: [f64; 256] = [0.0; 256]
+
+    // Arbitrary real signal
+    var i = 0
+    while i < n {
+        re[i] = sin_f64(2.0 * pi * (i as f64) / (n as f64)) + 0.7 * cos_f64(2.0 * pi * 3.0 * (i as f64) / (n as f64)) + 1.2
+        i = i + 1
+    }
+
+    fft(&!re, &!im, n)
+
+    let tol = 1.0e-8
+    // Check X[k] = conj(X[N-k]) for k = 1..N/2-1
+    i = 1
+    while i < n / 2 {
+        let mirror = n - i
+        // Re[k] should equal Re[N-k]
+        if approx_eq(re[i], re[mirror], tol) == false { return false }
+        // Im[k] should equal -Im[N-k]
+        if approx_eq(im[i], 0.0 - im[mirror], tol) == false { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// Test 10: DC component = sum of input (tol 1e-10)
+fn test_dc_sum() -> bool with IO, Mut, Panic, Div {
+    let n = 8
+    var re: [f64; 256] = [0.0; 256]
+    var im: [f64; 256] = [0.0; 256]
+
+    re[0] = 1.7; re[1] = 0.0 - 0.3; re[2] = 2.1; re[3] = 0.0 - 1.5
+    re[4] = 0.8; re[5] = 3.2; re[6] = 0.0 - 0.9; re[7] = 1.1
+
+    // Compute expected sum
+    var expected_sum = 0.0
+    var i = 0
+    while i < n {
+        expected_sum = expected_sum + re[i]
+        i = i + 1
+    }
+
+    fft(&!re, &!im, n)
+
+    let tol = 1.0e-10
+    // DC bin (re[0]) should equal the sum of all input samples
+    if approx_eq(re[0], expected_sum, tol) == false { return false }
+    // Imaginary part of DC should be zero for real input
+    if approx_eq(im[0], 0.0, tol) == false { return false }
+    return true
+}
+
+// Test 11: FFT of [1, -1, 1, -1]: should be [0, 0, 4, 0] (Nyquist bin) (tol 1e-10)
+fn test_nyquist() -> bool with IO, Mut, Panic, Div {
+    let n = 4
+    var re: [f64; 256] = [0.0; 256]
+    var im: [f64; 256] = [0.0; 256]
+
+    re[0] = 1.0; re[1] = 0.0 - 1.0; re[2] = 1.0; re[3] = 0.0 - 1.0
+
+    fft(&!re, &!im, n)
+
+    let tol = 1.0e-10
+    // Expected: [0, 0, 4, 0]
+    if approx_eq(re[0], 0.0, tol) == false { return false }
+    if approx_eq(im[0], 0.0, tol) == false { return false }
+    if approx_eq(re[1], 0.0, tol) == false { return false }
+    if approx_eq(im[1], 0.0, tol) == false { return false }
+    if approx_eq(re[2], 4.0, tol) == false { return false }
+    if approx_eq(im[2], 0.0, tol) == false { return false }
+    if approx_eq(re[3], 0.0, tol) == false { return false }
+    if approx_eq(im[3], 0.0, tol) == false { return false }
+    return true
+}
+
+// Test 12: IFFT of known FFT result recovers original (tol 1e-10)
+fn test_ifft_known() -> bool with IO, Mut, Panic, Div {
+    let n = 8
+    var re: [f64; 256] = [0.0; 256]
+    var im: [f64; 256] = [0.0; 256]
+
+    // Original signal
+    re[0] = 0.5; re[1] = 1.0; re[2] = 0.0 - 0.5; re[3] = 2.0
+    re[4] = 0.0 - 1.0; re[5] = 0.3; re[6] = 1.7; re[7] = 0.0 - 0.8
+
+    // Save original
+    var orig: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < n {
+        orig[i] = re[i]
+        i = i + 1
+    }
+
+    // Forward then inverse
+    fft(&!re, &!im, n)
+    ifft(&!re, &!im, n)
+
+    let tol = 1.0e-10
+    i = 0
+    while i < n {
+        if approx_eq(re[i], orig[i], tol) == false { return false }
+        if approx_eq(im[i], 0.0, tol) == false { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// Test 13: Power spectrum of delta = all ones (tol 1e-10)
+fn test_delta_power_spectrum() -> bool with IO, Mut, Panic, Div {
+    let n = 8
+    var re: [f64; 256] = [0.0; 256]
+    var im: [f64; 256] = [0.0; 256]
+    re[0] = 1.0
+
+    fft(&!re, &!im, n)
+
+    let tol = 1.0e-10
+    // Power spectrum: |X[k]|^2 should be 1 for all k
+    var i = 0
+    while i < n {
+        let power = re[i] * re[i] + im[i] * im[i]
+        if approx_eq(power, 1.0, tol) == false { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// Test 14: Convolution theorem: FFT(x * y) = FFT(x) .* FFT(y) (tol 1e-6)
+//   Verify pointwise multiplication in frequency domain equals circular
+//   convolution in time domain. Use simple signals of length 8.
+fn test_convolution_theorem() -> bool with IO, Mut, Panic, Div {
+    let n = 8
+
+    // Signal x: [1, 2, 1, 0, 0, 0, 0, 0]
+    var x_re: [f64; 256] = [0.0; 256]
+    var x_im: [f64; 256] = [0.0; 256]
+    x_re[0] = 1.0; x_re[1] = 2.0; x_re[2] = 1.0
+
+    // Signal y: [1, 1, 0, 0, 0, 0, 0, 0]
+    var y_re: [f64; 256] = [0.0; 256]
+    var y_im: [f64; 256] = [0.0; 256]
+    y_re[0] = 1.0; y_re[1] = 1.0
+
+    // Compute circular convolution in time domain: z[n] = sum_m x[m]*y[(n-m) mod N]
+    var conv_re: [f64; 256] = [0.0; 256]
+    var conv_im: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < n {
+        var sum = 0.0
+        var m = 0
+        while m < n {
+            // (i - m + n) mod n
+            var idx = i - m + n
+            idx = idx - n * (idx / n)
+            sum = sum + x_re[m] * y_re[idx]
+            m = m + 1
+        }
+        conv_re[i] = sum
+        i = i + 1
+    }
+
+    // FFT of circular convolution
+    fft(&!conv_re, &!conv_im, n)
+
+    // FFT of x and y separately
+    fft(&!x_re, &!x_im, n)
+    fft(&!y_re, &!y_im, n)
+
+    // Pointwise multiply: Z[k] = X[k] * Y[k] (complex multiplication)
+    let tol = 1.0e-6
+    i = 0
+    while i < n {
+        let prod_re = x_re[i] * y_re[i] - x_im[i] * y_im[i]
+        let prod_im = x_re[i] * y_im[i] + x_im[i] * y_re[i]
+        if approx_eq(conv_re[i], prod_re, tol) == false { return false }
+        if approx_eq(conv_im[i], prod_im, tol) == false { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// Test 15: FFT size N=16: verify on known input (tol 1e-8)
+//   DC signal of length 16: DC bin = 16, others = 0.
+//   Also verify single cosine at bin 3: peaks at bins 3 and 13 with mag N/2=8.
+fn test_n16() -> bool with IO, Mut, Panic, Div {
+    let n = 16
+    let pi = 3.141592653589793
+
+    // Part A: DC signal
+    var re: [f64; 256] = [0.0; 256]
+    var im: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < n {
+        re[i] = 1.0
+        i = i + 1
+    }
+
+    fft(&!re, &!im, n)
+
+    let tol = 1.0e-8
+    if approx_eq(re[0], 16.0, tol) == false { return false }
+    if approx_eq(im[0], 0.0, tol) == false { return false }
+    i = 1
+    while i < n {
+        let mag = sqrt_f64(re[i] * re[i] + im[i] * im[i])
+        if mag > tol { return false }
+        i = i + 1
+    }
+
+    // Part B: cosine at bin 3
+    var re2: [f64; 256] = [0.0; 256]
+    var im2: [f64; 256] = [0.0; 256]
+    i = 0
+    while i < n {
+        re2[i] = cos_f64(2.0 * pi * 3.0 * (i as f64) / (n as f64))
+        i = i + 1
+    }
+
+    fft(&!re2, &!im2, n)
+
+    // Bin 3 and bin 13 should have magnitude N/2 = 8
+    let mag3 = sqrt_f64(re2[3] * re2[3] + im2[3] * im2[3])
+    if approx_eq(mag3, 8.0, tol) == false { return false }
+    let mag13 = sqrt_f64(re2[13] * re2[13] + im2[13] * im2[13])
+    if approx_eq(mag13, 8.0, tol) == false { return false }
+
+    // All other bins should be ~0
+    i = 0
+    while i < n {
+        if i != 3 && i != 13 {
+            let mag = sqrt_f64(re2[i] * re2[i] + im2[i] * im2[i])
+            if mag > tol { return false }
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== FFT Module Test Suite ===")
+    println("")
+
+    var passed = 0
+    var failed = 0
+
+    // Test 1
+    print("Test  1: all-zeros.................. ")
+    if test_zeros() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 2
+    print("Test  2: constant signal DC......... ")
+    if test_constant_signal() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 3
+    print("Test  3: delta flat spectrum........ ")
+    if test_delta() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 4
+    print("Test  4: IFFT(FFT(x)) roundtrip..... ")
+    if test_ifft_roundtrip() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 5
+    print("Test  5: Parseval theorem........... ")
+    if test_parseval() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 6
+    print("Test  6: cosine spectrum............ ")
+    if test_cosine_spectrum() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 7
+    print("Test  7: sine spectrum.............. ")
+    if test_sine_spectrum() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 8
+    print("Test  8: linearity.................. ")
+    if test_linearity() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 9
+    print("Test  9: conjugate symmetry......... ")
+    if test_conjugate_symmetry() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 10
+    print("Test 10: DC = sum of input.......... ")
+    if test_dc_sum() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 11
+    print("Test 11: Nyquist bin [1,-1,1,-1].... ")
+    if test_nyquist() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 12
+    print("Test 12: IFFT of known result....... ")
+    if test_ifft_known() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 13
+    print("Test 13: delta power spectrum....... ")
+    if test_delta_power_spectrum() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 14
+    print("Test 14: convolution theorem........ ")
+    if test_convolution_theorem() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 15
+    print("Test 15: N=16 verification.......... ")
+    if test_n16() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    println("")
+    print("Passed: ")
+    println(passed)
+    print("Failed: ")
+    println(failed)
+
+    if failed > 0 {
+        println("SOME TESTS FAILED")
+        return 1
+    }
+    println("ALL 15 TESTS PASSED")
+    return 0
+}

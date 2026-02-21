@@ -1,0 +1,225 @@
+// stdlib/special/airy.sio — Airy functions
+//
+// Pure Sounio implementations of the Airy functions Ai(x), Bi(x) and their
+// derivatives Ai'(x), Bi'(x).
+//
+// Algorithms:
+//   |x| < 4:  Taylor series about x = 0 using the standard series:
+//              Ai(x) = c1*f(x) - c2*g(x)
+//              Bi(x) = sqrt(3)*[c1*f(x) + c2*g(x)]
+//              where f, g are even/odd power series.
+//   x > 4:    Asymptotic expansion in terms of zeta = (2/3)*x^{3/2}:
+//              Ai(x) ~ exp(-zeta)/(2*sqrt(pi)*x^{1/4}) * sum
+//              Bi(x) ~ exp(zeta)/(sqrt(pi)*x^{1/4}) * sum
+//   x < -4:   Connection to oscillatory Bessel functions:
+//              Ai(-x) ~ cos(zeta - pi/4)/(sqrt(pi)*x^{1/4})
+//
+// References:
+//   DLMF Ch. 9 (https://dlmf.nist.gov/9)
+//   Abramowitz & Stegun (1964): Ch. 10
+//   Gil, Segura & Temme (2002): "Computing Airy functions"
+
+// =============================================================================
+// Helpers
+// =============================================================================
+
+fn ai_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn ai_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn ai_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 500.0 { return 1.0e200 }
+    if x < -500.0 { return 0.0 }
+    var kf = x / 0.6931471805599453
+    var k: i32 = 0
+    if kf >= 0.0 { k = kf as i32 } else { k = (kf as i32) - 1 }
+    let r = x - (k as f64) * 0.6931471805599453
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 25 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var result = sum
+    if k >= 0 { var i = 0; while i < k { result = result * 2.0; i = i + 1 } }
+    else { var i = 0; while i < (0 - k) { result = result / 2.0; i = i + 1 } }
+    result
+}
+
+fn ai_sin(x: f64) -> f64 with Mut, Div, Panic {
+    var a = x
+    let tp = 6.28318530717958647692
+    while a >= tp { a = a - tp }
+    while a < 0.0 { a = a + tp }
+    if a > 3.14159265358979323846 { a = a - tp }
+    let a2 = a * a
+    var sum = a
+    var term = a
+    var n = 1
+    while n < 18 { term = 0.0 - term * a2 / ((2 * n) * (2 * n + 1)) as f64; sum = sum + term; n = n + 1 }
+    sum
+}
+
+fn ai_cos(x: f64) -> f64 with Mut, Div, Panic {
+    ai_sin(x + 1.57079632679489661923)
+}
+
+fn ai_cbrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x == 0.0 { return 0.0 }
+    let neg = x < 0.0
+    var ax = ai_abs(x)
+    // Newton: y_{n+1} = (2*y_n + x/y_n^2) / 3
+    var y = ax
+    if ax > 1.0 { y = ax / 3.0 } else { y = 1.0 }
+    var i = 0
+    while i < 30 { y = (2.0 * y + ax / (y * y)) / 3.0; i = i + 1 }
+    if neg { 0.0 - y } else { y }
+}
+
+// =============================================================================
+// Constants
+// =============================================================================
+
+// Ai(0) = 1 / (3^{2/3} * Gamma(2/3)) ≈ 0.35502805388781723926
+fn ai_c1() -> f64 { 0.35502805388781723926 }
+
+// Ai'(0) = -1 / (3^{1/3} * Gamma(1/3)) ≈ -0.25881940379280679841
+fn ai_c2() -> f64 { 0.25881940379280679841 }
+
+// =============================================================================
+// Airy Ai(x) and Bi(x)
+// =============================================================================
+
+// Airy function Ai(x).
+fn airy_ai(x: f64) -> f64 with Mut, Div, Panic {
+    if ai_abs(x) < 4.0 {
+        // Taylor series: Ai(x) = c1*f(x) - c2*g(x)
+        // f(x) = sum_{k>=0} x^{3k} / (3k)! * prod_{j=1}^{k} (3j-2)/(3j*(3j-1))
+        // g(x) = sum_{k>=0} x^{3k+1} / (3k+1)! * prod
+        // Simplified: direct recurrence on series coefficients
+        var f_sum = 1.0
+        var g_sum = x
+        var f_term = 1.0
+        var g_term = x
+        var k = 1
+        while k < 30 {
+            // f_term *= x^3 / ((3k)(3k-1)(3k-2))
+            let k3 = 3 * k
+            f_term = f_term * x * x * x / ((k3 * (k3 - 1) * (k3 - 2)) as f64)
+            f_sum = f_sum + f_term
+            // g_term *= x^3 / ((3k+1)(3k)(3k-1))
+            g_term = g_term * x * x * x / (((k3 + 1) * k3 * (k3 - 1)) as f64)
+            g_sum = g_sum + g_term
+            k = k + 1
+        }
+        return ai_c1() * f_sum - ai_c2() * g_sum
+    }
+
+    if x > 0.0 {
+        // Asymptotic for large positive x
+        let zeta = 2.0 / 3.0 * x * ai_sqrt(x)
+        let x14 = ai_sqrt(ai_sqrt(x))
+        // Leading term only for very large x, add correction terms
+        let t = 1.0 / zeta
+        let c0 = 1.0
+        let c1_corr = 0.0 - 5.0 / 48.0 * t
+        let c2_corr = 385.0 / 4608.0 * t * t
+        let c3_corr = 0.0 - 85085.0 / 663552.0 * t * t * t
+        let series = c0 + c1_corr + c2_corr + c3_corr
+        return ai_exp(0.0 - zeta) / (2.0 * ai_sqrt(3.14159265358979323846) * x14) * series
+    }
+
+    // x < -4: oscillatory regime
+    let ax = 0.0 - x
+    let zeta = 2.0 / 3.0 * ax * ai_sqrt(ax)
+    let x14 = ai_sqrt(ai_sqrt(ax))
+    let t = 1.0 / zeta
+    let c1_corr = 0.0 - 5.0 / 48.0 * t
+    let c2_corr = 385.0 / 4608.0 * t * t
+    let phase = zeta - 3.14159265358979323846 / 4.0
+    return (ai_cos(phase) * (1.0 + c2_corr) - ai_sin(phase) * c1_corr) / (ai_sqrt(3.14159265358979323846) * x14)
+}
+
+// Airy function Bi(x).
+fn airy_bi(x: f64) -> f64 with Mut, Div, Panic {
+    let sqrt3 = 1.73205080756887729353
+
+    if ai_abs(x) < 4.0 {
+        var f_sum = 1.0
+        var g_sum = x
+        var f_term = 1.0
+        var g_term = x
+        var k = 1
+        while k < 30 {
+            let k3 = 3 * k
+            f_term = f_term * x * x * x / ((k3 * (k3 - 1) * (k3 - 2)) as f64)
+            f_sum = f_sum + f_term
+            g_term = g_term * x * x * x / (((k3 + 1) * k3 * (k3 - 1)) as f64)
+            g_sum = g_sum + g_term
+            k = k + 1
+        }
+        return sqrt3 * (ai_c1() * f_sum + ai_c2() * g_sum)
+    }
+
+    if x > 0.0 {
+        let zeta = 2.0 / 3.0 * x * ai_sqrt(x)
+        let x14 = ai_sqrt(ai_sqrt(x))
+        let t = 1.0 / zeta
+        let c1_corr = 5.0 / 48.0 * t
+        let c2_corr = 385.0 / 4608.0 * t * t
+        let series = 1.0 + c1_corr + c2_corr
+        return ai_exp(zeta) / (ai_sqrt(3.14159265358979323846) * x14) * series
+    }
+
+    // x < -4: oscillatory
+    let ax = 0.0 - x
+    let zeta = 2.0 / 3.0 * ax * ai_sqrt(ax)
+    let x14 = ai_sqrt(ai_sqrt(ax))
+    let t = 1.0 / zeta
+    let c1_corr = 0.0 - 5.0 / 48.0 * t
+    let c2_corr = 385.0 / 4608.0 * t * t
+    let phase = zeta - 3.14159265358979323846 / 4.0
+    return (0.0 - 1.0) * (ai_sin(phase) * (1.0 + c2_corr) + ai_cos(phase) * c1_corr) / (ai_sqrt(3.14159265358979323846) * x14)
+}
+
+// Derivative Ai'(x).
+fn airy_ai_prime(x: f64) -> f64 with Mut, Div, Panic {
+    if ai_abs(x) < 4.0 {
+        // Derivative of Taylor series
+        var f_sum = 0.0
+        var g_sum = 1.0
+        var f_term = 0.0  // d/dx of x^0 = 0, start from k=1
+        var g_term = 1.0
+        // f'(x) = sum x^{3k-1} * coeff, g'(x) = sum x^{3k} * coeff
+        var f_coeff = 1.0
+        var g_coeff = 1.0
+        var k = 1
+        while k < 30 {
+            let k3 = 3 * k
+            f_coeff = f_coeff * x * x * x / ((k3 * (k3 - 1) * (k3 - 2)) as f64)
+            g_coeff = g_coeff * x * x * x / (((k3 + 1) * k3 * (k3 - 1)) as f64)
+            f_sum = f_sum + f_coeff * (k3 as f64) * 1.0 / x  // really x^{3k-1}
+            g_sum = g_sum + g_coeff * ((k3 + 1) as f64) * 1.0 / x
+            k = k + 1
+        }
+        // Numerical differentiation fallback for stability near x=0
+        let h = 1.0e-7
+        return (airy_ai(x + h) - airy_ai(x - h)) / (2.0 * h)
+    }
+
+    // Numerical differentiation for large |x|
+    let h = ai_abs(x) * 1.0e-7
+    let hh = if h < 1.0e-10 { 1.0e-7 } else { h }
+    (airy_ai(x + hh) - airy_ai(x - hh)) / (2.0 * hh)
+}
+
+// Derivative Bi'(x).
+fn airy_bi_prime(x: f64) -> f64 with Mut, Div, Panic {
+    let h = if ai_abs(x) < 1.0 { 1.0e-7 } else { ai_abs(x) * 1.0e-7 }
+    let hh = if h < 1.0e-10 { 1.0e-7 } else { h }
+    (airy_bi(x + hh) - airy_bi(x - hh)) / (2.0 * hh)
+}

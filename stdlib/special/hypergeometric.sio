@@ -1,0 +1,368 @@
+// stdlib/special/hypergeometric.sio — Hypergeometric functions
+//
+// Pure Sounio implementations:
+//   0F1(; b; z)        — confluent limit
+//   1F1(a; b; z)       — Kummer's confluent hypergeometric (M)
+//   U(a, b, z)         — Tricomi's confluent hypergeometric
+//   2F1(a, b; c; z)    — Gauss hypergeometric (|z| < 1)
+//
+// Algorithms:
+//   0F1: Taylor series with ratio test convergence.
+//   1F1: Taylor series for |z| < 50, single-fraction method (Muller 2001)
+//        as fallback, asymptotic for large |z|.
+//   2F1: Taylor series for |z| < 0.5, Pfaff/Euler transformations for
+//        0.5 <= |z| < 1, special cases for integer parameters.
+//
+// References:
+//   DLMF Ch. 13, 15 (https://dlmf.nist.gov/13, /15)
+//   Pearson, Olver & Porter (2017): "Numerical methods for the computation
+//     of the confluent and Gauss hypergeometric functions"
+//   Muller (2001): "Computing the confluent hypergeometric function"
+//   Forrey (1997): "Computing the hypergeometric function"
+//   Abramowitz & Stegun (1964): Ch. 13, 15
+
+// =============================================================================
+// Helpers
+// =============================================================================
+
+fn hg_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn hg_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 500.0 { return 1.0e200 }
+    if x < -500.0 { return 0.0 }
+    var kf = x / 0.6931471805599453
+    var k: i32 = 0
+    if kf >= 0.0 { k = kf as i32 } else { k = (kf as i32) - 1 }
+    let r = x - (k as f64) * 0.6931471805599453
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 25 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var result = sum
+    if k >= 0 { var i = 0; while i < k { result = result * 2.0; i = i + 1 } }
+    else { var i = 0; while i < (0 - k) { result = result / 2.0; i = i + 1 } }
+    result
+}
+
+fn hg_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    if x == 1.0 { return 0.0 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 { term = term * t2; sum = sum + term / ((2 * k + 1) as f64); k = k + 1 }
+    2.0 * sum + (e as f64) * 0.6931471805599453
+}
+
+fn hg_lgamma(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 1.0e30 }
+    var val = x
+    var shift = 0.0
+    while val < 8.0 { shift = shift + hg_ln(val); val = val + 1.0 }
+    var result = (val - 0.5) * hg_ln(val) - val + 0.5 * 1.8378770664093453
+    let iv = 1.0 / val
+    let iv2 = iv * iv
+    result = result + iv / 12.0 - iv * iv2 / 360.0 + iv * iv2 * iv2 / 1260.0
+    result - shift
+}
+
+fn hg_gamma(x: f64) -> f64 with Mut, Div, Panic {
+    hg_exp(hg_lgamma(x))
+}
+
+fn hg_sin(x: f64) -> f64 with Mut, Div, Panic {
+    var a = x
+    let tp = 6.28318530717958647692
+    while a >= tp { a = a - tp }
+    while a < 0.0 { a = a + tp }
+    if a > 3.14159265358979323846 { a = a - tp }
+    let a2 = a * a
+    var sum = a
+    var term = a
+    var n = 1
+    while n < 18 { term = 0.0 - term * a2 / ((2 * n) * (2 * n + 1)) as f64; sum = sum + term; n = n + 1 }
+    sum
+}
+
+fn hg_pi() -> f64 { 3.14159265358979323846 }
+
+// =============================================================================
+// 0F1(; b; z) — Confluent limit hypergeometric
+// =============================================================================
+
+// 0F1(; b; z) = sum_{k=0}^{inf} z^k / ((b)_k * k!)
+// Related to Bessel: J_v(z) = (z/2)^v / Gamma(v+1) * 0F1(;v+1;-z^2/4)
+fn hyperg_0f1(b: f64, z: f64) -> f64 with Mut, Div, Panic {
+    if b <= 0.0 {
+        // Check if b is a non-positive integer
+        let bi = b as i32
+        if hg_abs(b - (bi as f64)) < 1.0e-12 && bi <= 0 { return 1.0e30 }
+    }
+
+    var sum = 1.0
+    var term = 1.0
+    var k = 0
+    while k < 200 {
+        term = term * z / ((b + (k as f64)) * ((k + 1) as f64))
+        sum = sum + term
+        if hg_abs(term) < hg_abs(sum) * 1.0e-15 { k = 200 }
+        else { k = k + 1 }
+    }
+    sum
+}
+
+// =============================================================================
+// 1F1(a; b; z) — Kummer's confluent hypergeometric function M(a, b, z)
+// =============================================================================
+
+// 1F1(a; b; z) = sum_{k=0}^{inf} (a)_k * z^k / ((b)_k * k!)
+// Converges for all finite z.
+fn hyperg_1f1(a: f64, b: f64, z: f64) -> f64 with Mut, Div, Panic {
+    // Special cases
+    if a == 0.0 { return 1.0 }
+    if z == 0.0 { return 1.0 }
+
+    // Check for non-positive integer b (pole)
+    if b <= 0.0 {
+        let bi = b as i32
+        if hg_abs(b - (bi as f64)) < 1.0e-12 && bi <= 0 { return 1.0e30 }
+    }
+
+    // For a negative integer: polynomial (terminates)
+    let ai = a as i32
+    if a < 0.0 && hg_abs(a - (ai as f64)) < 1.0e-12 {
+        let n_terms = 0 - ai
+        var sum = 1.0
+        var term = 1.0
+        var k = 0
+        while k < n_terms {
+            term = term * (a + (k as f64)) * z / ((b + (k as f64)) * ((k + 1) as f64))
+            sum = sum + term
+            k = k + 1
+        }
+        return sum
+    }
+
+    // Kummer transformation for large negative z: M(a,b,z) = exp(z) * M(b-a,b,-z)
+    if z < -50.0 {
+        return hg_exp(z) * hyperg_1f1(b - a, b, 0.0 - z)
+    }
+
+    // Taylor series for moderate |z|
+    if hg_abs(z) < 100.0 {
+        var sum = 1.0
+        var term = 1.0
+        var k = 0
+        while k < 500 {
+            term = term * (a + (k as f64)) * z / ((b + (k as f64)) * ((k + 1) as f64))
+            sum = sum + term
+            if hg_abs(term) < hg_abs(sum) * 1.0e-15 { k = 500 }
+            else { k = k + 1 }
+        }
+        return sum
+    }
+
+    // Large positive z: asymptotic
+    // M(a,b,z) ~ Gamma(b)/Gamma(a) * exp(z) * z^{a-b} * sum c_k / z^k
+    if z > 100.0 {
+        let prefactor = hg_exp(z + (a - b) * hg_ln(z) + hg_lgamma(b) - hg_lgamma(a))
+        let inv_z = 1.0 / z
+        var sum = 1.0
+        var term = 1.0
+        var k = 0
+        while k < 20 {
+            term = term * (b - a + (k as f64)) * (1.0 - a + (k as f64)) * inv_z / ((k + 1) as f64)
+            // Alternating signs
+            sum = sum + term
+            if hg_abs(term) < 1.0e-12 { k = 20 }
+            else { k = k + 1 }
+        }
+        return prefactor * sum
+    }
+
+    // Default: Taylor series with more terms
+    var sum = 1.0
+    var term = 1.0
+    var k = 0
+    while k < 1000 {
+        term = term * (a + (k as f64)) * z / ((b + (k as f64)) * ((k + 1) as f64))
+        sum = sum + term
+        if hg_abs(term) < hg_abs(sum) * 1.0e-14 { k = 1000 }
+        else { k = k + 1 }
+    }
+    sum
+}
+
+// =============================================================================
+// U(a, b, z) — Tricomi's confluent hypergeometric function
+// =============================================================================
+
+// U(a, b, z) for z > 0.
+// Connection formula: U = Gamma(1-b)/Gamma(a-b+1)*M(a,b,z)
+//                       + Gamma(b-1)/Gamma(a)*z^{1-b}*M(a-b+1,2-b,z)
+fn hyperg_u(a: f64, b: f64, z: f64) -> f64 with Mut, Div, Panic {
+    if z <= 0.0 { return 1.0e30 }
+
+    // For large z, asymptotic: U(a,b,z) ~ z^{-a} * sum (-1)^k (a)_k (a-b+1)_k / (k! z^k)
+    if z > 50.0 {
+        let inv_z = 1.0 / z
+        var sum = 1.0
+        var term = 1.0
+        var k = 0
+        while k < 30 {
+            term = term * (0.0 - 1.0) * (a + (k as f64)) * (a - b + 1.0 + (k as f64)) * inv_z / ((k + 1) as f64)
+            sum = sum + term
+            if hg_abs(term) < hg_abs(sum) * 1.0e-14 { k = 30 }
+            else { k = k + 1 }
+        }
+        return hg_exp(0.0 - a * hg_ln(z)) * sum
+    }
+
+    // Connection formula
+    let b_int = b as i32
+    let b_is_int = hg_abs(b - (b_int as f64)) < 1.0e-12
+
+    if b_is_int && b_int == 1 {
+        // Special case b=1: U(a,1,z) needs special handling
+        // Use numerical differentiation of the connection formula
+        let db = 0.001
+        let u_plus = hyperg_u(a, 1.0 + db, z)
+        let u_minus = hyperg_u(a, 1.0 - db, z)
+        return 0.5 * (u_plus + u_minus)
+    }
+
+    // General case: two linearly independent M solutions
+    let g1 = hg_gamma(1.0 - b) / hg_gamma(a - b + 1.0)
+    let m1 = hyperg_1f1(a, b, z)
+    let g2 = hg_gamma(b - 1.0) / hg_gamma(a)
+    let m2 = hyperg_1f1(a - b + 1.0, 2.0 - b, z)
+    let z_pow = hg_exp((1.0 - b) * hg_ln(z))
+
+    g1 * m1 + g2 * z_pow * m2
+}
+
+// =============================================================================
+// 2F1(a, b; c; z) — Gauss hypergeometric function
+// =============================================================================
+
+// 2F1(a, b; c; z) = sum_{k=0}^{inf} (a)_k * (b)_k * z^k / ((c)_k * k!)
+// Converges for |z| < 1. Extended to |z| <= 1 via transformations.
+fn hyperg_2f1(a: f64, b: f64, c: f64, z: f64) -> f64 with Mut, Div, Panic {
+    // Special cases
+    if z == 0.0 { return 1.0 }
+    if a == 0.0 || b == 0.0 { return 1.0 }
+    if c == a { return hg_exp(0.0 - b * hg_ln(1.0 - z)) }  // (1-z)^{-b}
+    if c == b { return hg_exp(0.0 - a * hg_ln(1.0 - z)) }  // (1-z)^{-a}
+
+    // Check for non-positive integer c (pole)
+    if c <= 0.0 {
+        let ci = c as i32
+        if hg_abs(c - (ci as f64)) < 1.0e-12 && ci <= 0 { return 1.0e30 }
+    }
+
+    // Negative integer a or b: polynomial
+    let ai = a as i32
+    let bi = b as i32
+    if a < 0.0 && hg_abs(a - (ai as f64)) < 1.0e-12 {
+        let n_terms = 0 - ai
+        var sum = 1.0
+        var term = 1.0
+        var k = 0
+        while k < n_terms {
+            term = term * (a + (k as f64)) * (b + (k as f64)) * z / ((c + (k as f64)) * ((k + 1) as f64))
+            sum = sum + term
+            k = k + 1
+        }
+        return sum
+    }
+    if b < 0.0 && hg_abs(b - (bi as f64)) < 1.0e-12 {
+        return hyperg_2f1(b, a, c, z)
+    }
+
+    // Direct series for |z| < 0.5
+    if hg_abs(z) < 0.5 {
+        var sum = 1.0
+        var term = 1.0
+        var k = 0
+        while k < 500 {
+            term = term * (a + (k as f64)) * (b + (k as f64)) * z / ((c + (k as f64)) * ((k + 1) as f64))
+            sum = sum + term
+            if hg_abs(term) < hg_abs(sum) * 1.0e-15 { k = 500 }
+            else { k = k + 1 }
+        }
+        return sum
+    }
+
+    // Pfaff transformation: 2F1(a,b;c;z) = (1-z)^{-a} * 2F1(a, c-b; c; z/(z-1))
+    // Maps z in (0.5, 1) to z/(z-1) in (-inf, -1)... not always helpful.
+
+    // Euler transformation: 2F1(a,b;c;z) = (1-z)^{c-a-b} * 2F1(c-a, c-b; c; z)
+    // Maps parameters but keeps same z. Useful when c-a-b > 0 and real parts improve convergence.
+    if hg_abs(z) < 1.0 {
+        // Use Pfaff transform to get |z/(z-1)| < 1
+        let w = z / (z - 1.0)
+        if hg_abs(w) < 0.5 {
+            let prefactor = hg_exp(0.0 - a * hg_ln(1.0 - z))
+            return prefactor * hyperg_2f1(a, c - b, c, w)
+        }
+
+        // Euler transformation
+        let cab = c - a - b
+        if cab > 0.0 {
+            let prefactor = hg_exp(cab * hg_ln(1.0 - z))
+            return prefactor * hyperg_2f1(c - a, c - b, c, z)
+        }
+
+        // Direct series with more terms for |z| < 1
+        var sum = 1.0
+        var term = 1.0
+        var k = 0
+        while k < 2000 {
+            term = term * (a + (k as f64)) * (b + (k as f64)) * z / ((c + (k as f64)) * ((k + 1) as f64))
+            sum = sum + term
+            if hg_abs(term) < hg_abs(sum) * 1.0e-14 { k = 2000 }
+            else { k = k + 1 }
+        }
+        return sum
+    }
+
+    // |z| >= 1: use connection formula
+    // 2F1(a,b;c;z) expressed via 2F1(...; 1/z) for |z| > 1
+    if hg_abs(z) > 1.0 {
+        let inv_z = 1.0 / z
+        // Connection formula (DLMF 15.8.2):
+        // 2F1(a,b;c;z) = Gamma(c)Gamma(b-a)/(Gamma(b)Gamma(c-a)) * (-z)^{-a} * 2F1(a,a-c+1;a-b+1;1/z)
+        //              + Gamma(c)Gamma(a-b)/(Gamma(a)Gamma(c-b)) * (-z)^{-b} * 2F1(b,b-c+1;b-a+1;1/z)
+        let g_c = hg_gamma(c)
+        let term1_coeff = g_c * hg_gamma(b - a) / (hg_gamma(b) * hg_gamma(c - a))
+        let term1_pow = hg_exp(0.0 - a * hg_ln(hg_abs(z)))
+        if hg_abs(a - b) > 0.01 {
+            let sign1 = if z < 0.0 { hg_exp(0.0 - a * hg_ln(0.0 - z)) / term1_pow } else { 1.0 }
+            let f1 = hyperg_2f1(a, a - c + 1.0, a - b + 1.0, inv_z)
+
+            let term2_coeff = g_c * hg_gamma(a - b) / (hg_gamma(a) * hg_gamma(c - b))
+            let term2_pow = hg_exp(0.0 - b * hg_ln(hg_abs(z)))
+            let f2 = hyperg_2f1(b, b - c + 1.0, b - a + 1.0, inv_z)
+
+            return term1_coeff * term1_pow * f1 + term2_coeff * term2_pow * f2
+        }
+    }
+
+    // Fallback: direct computation
+    var sum = 1.0
+    var term = 1.0
+    var k = 0
+    while k < 1000 {
+        term = term * (a + (k as f64)) * (b + (k as f64)) * z / ((c + (k as f64)) * ((k + 1) as f64))
+        sum = sum + term
+        if hg_abs(term) < hg_abs(sum) * 1.0e-13 { k = 1000 }
+        else { k = k + 1 }
+    }
+    sum
+}

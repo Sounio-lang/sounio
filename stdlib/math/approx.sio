@@ -1,0 +1,432 @@
+// stdlib/math/approx.sio — Approximation theory
+//
+// Pure Sounio implementations:
+//   Chebyshev approximation: coefficients, Clenshaw evaluation, derivative, integral
+//   Pade approximation: compute [p/q] approximant from Taylor coefficients
+//   Minimax polynomial: Remez exchange algorithm
+//
+// References:
+//   Mason & Handscomb (2003): "Chebyshev Polynomials"
+//   Trefethen (2019): "Approximation Theory and Approximation Practice"
+//   Press et al. (2007): "Numerical Recipes" Ch. 5.8, 5.12
+//   Powell (1981): "Approximation Theory and Methods"
+
+// =============================================================================
+// Helpers
+// =============================================================================
+
+fn ap_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn ap_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+
+fn ap_cos(x: f64) -> f64 with Mut, Div, Panic {
+    var a = x
+    let tp = 6.28318530717958647692
+    while a >= tp { a = a - tp }
+    while a < 0.0 { a = a + tp }
+    if a > 3.14159265358979323846 { a = a - tp }
+    let a2 = a * a
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 15 { term = 0.0 - term * a2 / ((2 * n - 1) * 2 * n) as f64; sum = sum + term; n = n + 1 }
+    sum
+}
+
+fn ap_pi() -> f64 { 3.14159265358979323846 }
+
+// =============================================================================
+// Chebyshev approximation
+// =============================================================================
+
+// Compute Chebyshev coefficients c[0..n-1] for f on [a, b].
+// Uses the DCT at Chebyshev nodes: x_k = cos(pi*(k+0.5)/n), k=0..n-1.
+// c_j = (2/n) * sum_{k=0}^{n-1} f(x_k) * cos(pi*j*(k+0.5)/n)
+fn cheb_coeffs(f: fn(f64) -> f64 with Mut, Div, Panic,
+               a: f64, b: f64, n: i32,
+               out: &![f64; 128]) with Mut, Div, Panic {
+    let bma = 0.5 * (b - a)
+    let bpa = 0.5 * (b + a)
+
+    // Evaluate f at Chebyshev nodes
+    var fvals: [f64; 128] = [0.0; 128]
+    var k = 0
+    while k < n {
+        let theta = ap_pi() * ((k as f64) + 0.5) / (n as f64)
+        let x = ap_cos(theta) * bma + bpa
+        fvals[k] = f(x)
+        k = k + 1
+    }
+
+    // Compute coefficients via DCT
+    var j = 0
+    while j < n {
+        var sum = 0.0
+        k = 0
+        while k < n {
+            let theta = ap_pi() * (j as f64) * ((k as f64) + 0.5) / (n as f64)
+            sum = sum + fvals[k] * ap_cos(theta)
+            k = k + 1
+        }
+        out[j] = 2.0 * sum / (n as f64)
+        j = j + 1
+    }
+}
+
+// Evaluate Chebyshev approximation at x in [a, b] using Clenshaw recurrence.
+// coeffs[0..n-1] are the Chebyshev coefficients.
+fn cheb_eval(coeffs: &[f64; 128], n: i32, a: f64, b: f64, x: f64) -> f64 with Mut, Div {
+    // Map x from [a, b] to [-1, 1]
+    let y = (2.0 * x - a - b) / (b - a)
+
+    // Clenshaw recurrence: evaluate sum c_k * T_k(y)
+    var d1 = 0.0
+    var d2 = 0.0
+    var j = n - 1
+    while j >= 1 {
+        let temp = d1
+        d1 = 2.0 * y * d1 - d2 + coeffs[j]
+        d2 = temp
+        j = j - 1
+    }
+    y * d1 - d2 + 0.5 * coeffs[0]
+}
+
+// Derivative of Chebyshev series.
+// If c[0..n-1] are coefficients of f, compute c'[0..n-2] of f'.
+// Scaled to [a, b]: multiply by 2/(b-a).
+fn cheb_derivative(coeffs: &[f64; 128], n: i32, a: f64, b: f64,
+                   out: &![f64; 128]) with Mut, Div {
+    let scale = 2.0 / (b - a)
+    out[n - 1] = 0.0
+    if n >= 2 { out[n - 2] = 2.0 * ((n - 1) as f64) * coeffs[n - 1] }
+
+    var j = n - 3
+    while j >= 0 {
+        out[j] = out[j + 2] + 2.0 * ((j + 1) as f64) * coeffs[j + 1]
+        j = j - 1
+    }
+    // Scale all coefficients
+    var i = 0
+    while i < n { out[i] = out[i] * scale; i = i + 1 }
+    // First coefficient halved (standard convention)
+    out[0] = out[0] * 0.5
+}
+
+// Integral of Chebyshev series.
+// Computes antiderivative coefficients c_int[0..n] from c[0..n-1].
+// c_int[0] is set to 0 (arbitrary constant).
+fn cheb_integral(coeffs: &[f64; 128], n: i32, a: f64, b: f64,
+                 out: &![f64; 128]) with Mut, Div {
+    let scale = 0.5 * (b - a)
+    out[0] = 0.0
+
+    var j = 1
+    while j < n {
+        if j == 1 {
+            out[1] = scale * (coeffs[0] - 0.5 * coeffs[2])
+        } else if j < n - 1 {
+            out[j] = scale * (coeffs[j - 1] - coeffs[j + 1]) / (2.0 * (j as f64))
+        } else {
+            out[j] = scale * coeffs[j - 1] / (2.0 * (j as f64))
+        }
+        j = j + 1
+    }
+}
+
+// Truncation: number of significant Chebyshev coefficients.
+// Returns the smallest m such that |c[m]|, |c[m+1]|, ... are all < tol.
+fn cheb_truncate(coeffs: &[f64; 128], n: i32, tol: f64) -> i32 with Mut, Div {
+    var m = n
+    while m > 1 {
+        if ap_abs(coeffs[m - 1]) > tol { return m }
+        m = m - 1
+    }
+    1
+}
+
+// =============================================================================
+// Pade approximation
+// =============================================================================
+
+// Compute [p/q] Pade approximant from Taylor coefficients.
+// Given f(x) = sum_{k=0}^{p+q} taylor[k] * x^k, find
+// num[0..p] and den[0..q] such that num(x)/den(x) agrees with f(x)
+// to order p+q.
+//
+// Method: solve the linear system for denominator coefficients,
+// then compute numerator coefficients.
+// Returns true if successful, false if singular.
+fn pade_coeffs(taylor: &[f64; 64], n_taylor: i32,
+               p: i32, q: i32,
+               num: &![f64; 32], den: &![f64; 32]) -> bool with Mut, Div, Panic {
+    if p + q >= n_taylor { return false }
+
+    // den[0] = 1 (normalization)
+    den[0] = 1.0
+
+    if q == 0 {
+        // Polynomial approximation (no denominator)
+        var i = 0
+        while i <= p { num[i] = taylor[i]; i = i + 1 }
+        return true
+    }
+
+    // Solve for den[1..q] from the equations:
+    // sum_{j=0}^{q} den[j] * taylor[p+1-j+i] = 0, i = 0..q-1
+    // (where taylor[k] = 0 for k < 0)
+    // This is a q x q system: A * d = -b
+
+    // Build the system (row-major in a flat array)
+    var mat: [f64; 1024] = [0.0; 1024]  // q x q matrix
+    var rhs: [f64; 32] = [0.0; 32]
+
+    var i = 0
+    while i < q {
+        var j = 0
+        while j < q {
+            let idx = p + 1 + i - j - 1
+            if idx >= 0 && idx < n_taylor {
+                mat[i * q + j] = taylor[idx]
+            }
+            j = j + 1
+        }
+        let rhs_idx = p + 1 + i
+        if rhs_idx >= 0 && rhs_idx < n_taylor {
+            rhs[i] = 0.0 - taylor[rhs_idx]
+        }
+        i = i + 1
+    }
+
+    // Gaussian elimination with partial pivoting
+    var col = 0
+    while col < q {
+        // Find pivot
+        var max_val = ap_abs(mat[col * q + col])
+        var max_row = col
+        var row = col + 1
+        while row < q {
+            if ap_abs(mat[row * q + col]) > max_val {
+                max_val = ap_abs(mat[row * q + col])
+                max_row = row
+            }
+            row = row + 1
+        }
+        if max_val < 1.0e-14 { return false }
+
+        // Swap rows
+        if max_row != col {
+            var j = 0
+            while j < q {
+                let temp = mat[col * q + j]
+                mat[col * q + j] = mat[max_row * q + j]
+                mat[max_row * q + j] = temp
+                j = j + 1
+            }
+            let temp_r = rhs[col]
+            rhs[col] = rhs[max_row]
+            rhs[max_row] = temp_r
+        }
+
+        // Eliminate
+        row = col + 1
+        while row < q {
+            let factor = mat[row * q + col] / mat[col * q + col]
+            var j = col
+            while j < q { mat[row * q + j] = mat[row * q + j] - factor * mat[col * q + j]; j = j + 1 }
+            rhs[row] = rhs[row] - factor * rhs[col]
+            row = row + 1
+        }
+        col = col + 1
+    }
+
+    // Back substitution
+    var k = q - 1
+    while k >= 0 {
+        var s = rhs[k]
+        var j = k + 1
+        while j < q { s = s - mat[k * q + j] * den[j + 1]; j = j + 1 }
+        den[k + 1] = s / mat[k * q + k]
+        k = k - 1
+    }
+
+    // Compute numerator: num[k] = sum_{j=0}^{min(k,q)} den[j] * taylor[k-j]
+    i = 0
+    while i <= p {
+        var s = 0.0
+        var j = 0
+        while j <= q && j <= i {
+            s = s + den[j] * taylor[i - j]
+            j = j + 1
+        }
+        num[i] = s
+        i = i + 1
+    }
+
+    true
+}
+
+// Evaluate Pade rational function num(x)/den(x).
+fn pade_eval(num: &[f64; 32], p: i32,
+             den: &[f64; 32], q: i32,
+             x: f64) -> f64 with Div {
+    // Horner evaluation for numerator
+    var numer = num[p]
+    var i = p - 1
+    while i >= 0 { numer = numer * x + num[i]; i = i - 1 }
+
+    // Horner evaluation for denominator
+    var denom = den[q]
+    i = q - 1
+    while i >= 0 { denom = denom * x + den[i]; i = i - 1 }
+
+    numer / denom
+}
+
+// =============================================================================
+// Minimax polynomial (Remez exchange algorithm)
+// =============================================================================
+
+// Remez exchange algorithm to find the minimax polynomial of degree d
+// approximating f on [a, b].
+// Stores polynomial coefficients (monomial basis) in coeffs[0..d].
+// Returns the maximum approximation error (equioscillation error).
+fn remez(f: fn(f64) -> f64 with Mut, Div, Panic,
+         a: f64, b: f64, degree: i32,
+         coeffs: &![f64; 32]) -> f64 with Mut, Div, Panic {
+    let n = degree + 2  // n = d+2 reference points
+
+    // Initialize reference points as Chebyshev nodes on [a, b]
+    var refs: [f64; 34] = [0.0; 34]
+    var i = 0
+    while i < n {
+        let theta = ap_pi() * (i as f64) / ((n - 1) as f64)
+        refs[i] = 0.5 * (a + b) - 0.5 * (b - a) * ap_cos(theta)
+        i = i + 1
+    }
+
+    var max_err = 0.0
+    var iter = 0
+
+    while iter < 50 {
+        // Solve the interpolation system:
+        // p(x_i) + (-1)^i * E = f(x_i), i = 0..n-1
+        // This is a (d+2) x (d+2) system for coeffs[0..d] and E.
+
+        // Build matrix (row-major)
+        var mat: [f64; 1024] = [0.0; 1024]
+        var rhs: [f64; 34] = [0.0; 34]
+
+        i = 0
+        while i < n {
+            // Monomial basis: x^0, x^1, ..., x^d
+            var x_pow = 1.0
+            var j = 0
+            while j <= degree {
+                mat[i * n + j] = x_pow
+                x_pow = x_pow * refs[i]
+                j = j + 1
+            }
+            // Error column
+            let sign = if i - (i / 2) * 2 == 0 { 1.0 } else { 0.0 - 1.0 }
+            mat[i * n + (degree + 1)] = sign
+            rhs[i] = f(refs[i])
+            i = i + 1
+        }
+
+        // Gaussian elimination
+        var col = 0
+        while col < n {
+            var max_val = ap_abs(mat[col * n + col])
+            var max_row = col
+            var row = col + 1
+            while row < n {
+                if ap_abs(mat[row * n + col]) > max_val { max_val = ap_abs(mat[row * n + col]); max_row = row }
+                row = row + 1
+            }
+            if max_row != col {
+                var j = 0
+                while j < n {
+                    let temp = mat[col * n + j]; mat[col * n + j] = mat[max_row * n + j]; mat[max_row * n + j] = temp
+                    j = j + 1
+                }
+                let tr = rhs[col]; rhs[col] = rhs[max_row]; rhs[max_row] = tr
+            }
+            row = col + 1
+            while row < n {
+                if ap_abs(mat[col * n + col]) > 1.0e-30 {
+                    let factor = mat[row * n + col] / mat[col * n + col]
+                    var j = col
+                    while j < n { mat[row * n + j] = mat[row * n + j] - factor * mat[col * n + j]; j = j + 1 }
+                    rhs[row] = rhs[row] - factor * rhs[col]
+                }
+                row = row + 1
+            }
+            col = col + 1
+        }
+
+        // Back substitution
+        var sol: [f64; 34] = [0.0; 34]
+        var k = n - 1
+        while k >= 0 {
+            var s = rhs[k]
+            var j = k + 1
+            while j < n { s = s - mat[k * n + j] * sol[j]; j = j + 1 }
+            if ap_abs(mat[k * n + k]) > 1.0e-30 { sol[k] = s / mat[k * n + k] }
+            k = k - 1
+        }
+
+        // Extract coefficients and error
+        i = 0
+        while i <= degree { coeffs[i] = sol[i]; i = i + 1 }
+        let levelled_err = ap_abs(sol[degree + 1])
+
+        // Check convergence
+        if ap_abs(levelled_err - max_err) < 1.0e-14 * ap_max(levelled_err, 1.0) {
+            return levelled_err
+        }
+        max_err = levelled_err
+
+        // Exchange step: find new reference points where error is maximal
+        // Sample error at many points
+        let n_sample = 200
+        var new_refs: [f64; 34] = [0.0; 34]
+        var ref_count = 0
+
+        // Find extrema of error function by sampling
+        var prev_err = 0.0
+        var prev_x = a
+        var si = 0
+        while si <= n_sample && ref_count < n {
+            let x = a + (b - a) * (si as f64) / (n_sample as f64)
+            // Evaluate polynomial
+            var px = 0.0
+            var x_pow = 1.0
+            var j = 0
+            while j <= degree { px = px + coeffs[j] * x_pow; x_pow = x_pow * x; j = j + 1 }
+            let err = f(x) - px
+
+            if si > 0 {
+                // Check for sign change (local extremum between prev and current)
+                if (err > 0.0 && prev_err < 0.0) || (err < 0.0 && prev_err > 0.0) {
+                    // Extremum near midpoint
+                    if ref_count < n {
+                        new_refs[ref_count] = 0.5 * (prev_x + x)
+                        ref_count = ref_count + 1
+                    }
+                }
+            }
+            prev_err = err
+            prev_x = x
+            si = si + 1
+        }
+
+        // If we found enough reference points, update
+        if ref_count >= n {
+            i = 0
+            while i < n { refs[i] = new_refs[i]; i = i + 1 }
+        }
+
+        iter = iter + 1
+    }
+    max_err
+}

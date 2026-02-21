@@ -1,0 +1,276 @@
+// stdlib/math/fft.sio — Fast Fourier Transform
+//
+// Pure Sounio implementation of the Cooley-Tukey radix-2 DIT FFT.
+// Operates on split real/imaginary arrays (not interleaved) for SIMD friendliness.
+//
+// Supported sizes: any power of 2, up to 4096.
+//
+// Functions:
+//   fft()           — Forward FFT (in-place)
+//   ifft()          — Inverse FFT (in-place)
+//   fft_convolve()  — Circular convolution via FFT
+//   power_spectrum() — |FFT(x)|^2
+//   fft_real()      — Real-input FFT (packs N/2+1 unique bins)
+//
+// Algorithm: Cooley-Tukey radix-2 decimation-in-time with bit-reversal
+// permutation. Twiddle factors computed on-the-fly. O(N log N).
+//
+// References:
+//   Cooley & Tukey (1965): "An Algorithm for Machine Calculation of Complex
+//     Fourier Series"
+//   Press et al. (2007): "Numerical Recipes" Ch. 12
+//   Van Loan (1992): "Computational Frameworks for the Fast Fourier Transform"
+
+// =============================================================================
+// Helpers
+// =============================================================================
+
+fn fft_sin(x: f64) -> f64 with Mut, Div, Panic {
+    var a = x
+    let tp = 6.28318530717958647692
+    while a >= tp { a = a - tp }
+    while a < 0.0 { a = a + tp }
+    if a > 3.14159265358979323846 { a = a - tp }
+    let a2 = a * a
+    var sum = a
+    var term = a
+    var n = 1
+    while n < 18 { term = 0.0 - term * a2 / ((2 * n) * (2 * n + 1)) as f64; sum = sum + term; n = n + 1 }
+    sum
+}
+
+fn fft_cos(x: f64) -> f64 with Mut, Div, Panic {
+    fft_sin(x + 1.57079632679489661923)
+}
+
+fn fft_pi() -> f64 { 3.14159265358979323846 }
+
+fn fft_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+// =============================================================================
+// Bit reversal
+// =============================================================================
+
+// Reverse the lowest `bits` bits of index i.
+fn bit_reverse(i: i32, bits: i32) -> i32 with Mut, Div {
+    var result: i32 = 0
+    var val = i
+    var b = 0
+    while b < bits {
+        result = result * 2
+        result = result + (val - (val / 2) * 2)
+        val = val / 2
+        b = b + 1
+    }
+    result
+}
+
+// Bit-reversal permutation: reorder data in-place.
+fn bit_reverse_permute(re: &![f64; 4096], im: &![f64; 4096], n: i32) with Mut, Div {
+    // Compute number of bits
+    var bits = 0
+    var temp = n
+    while temp > 1 { temp = temp / 2; bits = bits + 1 }
+
+    var i = 0
+    while i < n {
+        let j = bit_reverse(i, bits)
+        if i < j {
+            // Swap re[i], re[j]
+            let tr = re[i]
+            re[i] = re[j]
+            re[j] = tr
+            // Swap im[i], im[j]
+            let ti = im[i]
+            im[i] = im[j]
+            im[j] = ti
+        }
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Forward FFT
+// =============================================================================
+
+// In-place Cooley-Tukey radix-2 DIT FFT.
+// re[0..n-1] and im[0..n-1] contain the complex signal.
+// n must be a power of 2, max 4096.
+// After call: re + i*im contains the DFT.
+fn fft(re: &![f64; 4096], im: &![f64; 4096], n: i32) with Mut, Div, Panic {
+    bit_reverse_permute(re, im, n)
+
+    // Butterfly passes
+    var len = 2
+    while len <= n {
+        let half = len / 2
+        let angle = 0.0 - 2.0 * fft_pi() / (len as f64)
+
+        var k = 0
+        while k < n {
+            var j = 0
+            while j < half {
+                let theta = angle * (j as f64)
+                let wr = fft_cos(theta)
+                let wi = fft_sin(theta)
+
+                let idx_even = k + j
+                let idx_odd = k + j + half
+
+                let tr = wr * re[idx_odd] - wi * im[idx_odd]
+                let ti = wr * im[idx_odd] + wi * re[idx_odd]
+
+                re[idx_odd] = re[idx_even] - tr
+                im[idx_odd] = im[idx_even] - ti
+                re[idx_even] = re[idx_even] + tr
+                im[idx_even] = im[idx_even] + ti
+
+                j = j + 1
+            }
+            k = k + len
+        }
+        len = len * 2
+    }
+}
+
+// =============================================================================
+// Inverse FFT
+// =============================================================================
+
+// In-place inverse FFT via conjugation trick: IFFT(x) = conj(FFT(conj(x))) / N.
+fn ifft(re: &![f64; 4096], im: &![f64; 4096], n: i32) with Mut, Div, Panic {
+    // Conjugate input
+    var i = 0
+    while i < n { im[i] = 0.0 - im[i]; i = i + 1 }
+
+    // Forward FFT
+    fft(re, im, n)
+
+    // Conjugate and scale
+    let inv_n = 1.0 / (n as f64)
+    i = 0
+    while i < n {
+        re[i] = re[i] * inv_n
+        im[i] = 0.0 - im[i] * inv_n
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Circular convolution via FFT
+// =============================================================================
+
+// Circular convolution: out = IFFT(FFT(a) * FFT(b)).
+// All arrays must be size n (power of 2).
+fn fft_convolve(a_re: &[f64; 4096], a_im: &[f64; 4096],
+                b_re: &[f64; 4096], b_im: &[f64; 4096],
+                out_re: &![f64; 4096], out_im: &![f64; 4096],
+                n: i32) with Mut, Div, Panic {
+    // Copy a into output buffers (work arrays)
+    var i = 0
+    while i < n {
+        out_re[i] = a_re[i]
+        out_im[i] = a_im[i]
+        i = i + 1
+    }
+
+    // FFT of a (in-place in out)
+    fft(out_re, out_im, n)
+
+    // FFT of b into temp arrays
+    var br: [f64; 4096] = [0.0; 4096]
+    var bi: [f64; 4096] = [0.0; 4096]
+    i = 0
+    while i < n { br[i] = b_re[i]; bi[i] = b_im[i]; i = i + 1 }
+    fft(&!br, &!bi, n)
+
+    // Pointwise complex multiplication: out = out * B
+    i = 0
+    while i < n {
+        let tr = out_re[i] * br[i] - out_im[i] * bi[i]
+        let ti = out_re[i] * bi[i] + out_im[i] * br[i]
+        out_re[i] = tr
+        out_im[i] = ti
+        i = i + 1
+    }
+
+    // Inverse FFT
+    ifft(out_re, out_im, n)
+}
+
+// =============================================================================
+// Power spectrum
+// =============================================================================
+
+// Power spectrum |FFT(x)|^2.
+// Stores |X[k]|^2 in out[0..n-1].
+fn power_spectrum(re: &[f64; 4096], im: &[f64; 4096],
+                  out: &![f64; 4096], n: i32) with Mut, Div, Panic {
+    // Copy input to work arrays
+    var wr: [f64; 4096] = [0.0; 4096]
+    var wi: [f64; 4096] = [0.0; 4096]
+    var i = 0
+    while i < n { wr[i] = re[i]; wi[i] = im[i]; i = i + 1 }
+
+    fft(&!wr, &!wi, n)
+
+    i = 0
+    while i < n {
+        out[i] = wr[i] * wr[i] + wi[i] * wi[i]
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Real-input FFT
+// =============================================================================
+
+// FFT of a real-valued signal. Stores N/2+1 unique complex bins.
+// out_re[0..n/2] and out_im[0..n/2].
+fn fft_real(input: &[f64; 4096], out_re: &![f64; 2048],
+            out_im: &![f64; 2048], n: i32) with Mut, Div, Panic {
+    // Pack real input as complex: re = input, im = 0
+    var wr: [f64; 4096] = [0.0; 4096]
+    var wi: [f64; 4096] = [0.0; 4096]
+    var i = 0
+    while i < n { wr[i] = input[i]; i = i + 1 }
+
+    fft(&!wr, &!wi, n)
+
+    // Copy unique bins (0 to N/2)
+    let half = n / 2
+    i = 0
+    while i <= half {
+        out_re[i] = wr[i]
+        out_im[i] = wi[i]
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Utility: check if n is power of 2
+// =============================================================================
+
+fn is_power_of_2(n: i32) -> bool with Mut, Div {
+    if n <= 0 { return false }
+    var x = n
+    while x > 1 {
+        if x - (x / 2) * 2 != 0 { return false }
+        x = x / 2
+    }
+    true
+}
+
+// Find smallest power of 2 >= n.
+fn next_power_of_2(n: i32) -> i32 with Mut, Div {
+    if n <= 1 { return 1 }
+    var p = 1
+    while p < n { p = p * 2 }
+    p
+}

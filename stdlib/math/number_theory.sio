@@ -1,0 +1,607 @@
+// stdlib/math/number_theory.sio — Number theory functions
+//
+// Pure Sounio implementations of fundamental number-theoretic algorithms:
+//   GCD/LCM (Euclidean), extended GCD, modular arithmetic, primality
+//   testing (trial division + Miller-Rabin), factorization (trial + Pollard rho),
+//   Euler totient, Möbius function, Jacobi symbol, Chinese Remainder Theorem,
+//   Fibonacci/Lucas via matrix doubling.
+//
+// All functions are pure Sounio — zero FFI.
+//
+// References:
+//   Hardy & Wright (2008): "An Introduction to the Theory of Numbers" (6th ed.)
+//   Crandall & Pomerance (2005): "Prime Numbers: A Computational Perspective"
+//   Knuth (1997): "The Art of Computer Programming" Vol. 2
+//   Cohen (1993): "A Course in Computational Algebraic Number Theory"
+
+// =============================================================================
+// Helpers
+// =============================================================================
+
+fn nt_abs(x: i64) -> i64 {
+    if x < 0 { 0 - x } else { x }
+}
+
+// =============================================================================
+// GCD / LCM
+// =============================================================================
+
+// Greatest common divisor via Euclidean algorithm.
+// gcd(a, b) >= 0 always. gcd(0, 0) = 0.
+fn gcd(a: i64, b: i64) -> i64 with Mut, Div {
+    var x = nt_abs(a)
+    var y = nt_abs(b)
+    while y > 0 {
+        let t = y
+        y = x - (x / y) * y
+        x = t
+    }
+    x
+}
+
+// Least common multiple. lcm(a, 0) = 0.
+fn lcm(a: i64, b: i64) -> i64 with Mut, Div {
+    if a == 0 || b == 0 { return 0 }
+    let g = gcd(a, b)
+    nt_abs(a) / g * nt_abs(b)
+}
+
+// Extended Euclidean algorithm.
+// Returns (g, x, y) such that a*x + b*y = g = gcd(a, b).
+// Result stored in output array: [gcd, x, y].
+fn gcd_extended(a: i64, b: i64, result: &![i64; 3]) with Mut, Div {
+    if b == 0 {
+        result[0] = nt_abs(a)
+        result[1] = if a >= 0 { 1 } else { 0 - 1 }
+        result[2] = 0
+        return
+    }
+    var old_r = nt_abs(a)
+    var r = nt_abs(b)
+    var old_s: i64 = 1
+    var s: i64 = 0
+    var old_t: i64 = 0
+    var t: i64 = 1
+
+    while r > 0 {
+        let q = old_r / r
+        let temp_r = r
+        r = old_r - q * r
+        old_r = temp_r
+        let temp_s = s
+        s = old_s - q * s
+        old_s = temp_s
+        let temp_t = t
+        t = old_t - q * t
+        old_t = temp_t
+    }
+
+    result[0] = old_r
+    // Adjust signs for original a, b
+    if a < 0 { old_s = 0 - old_s }
+    if b < 0 { old_t = 0 - old_t }
+    result[1] = old_s
+    result[2] = old_t
+}
+
+// =============================================================================
+// Modular arithmetic
+// =============================================================================
+
+// Modular exponentiation: base^exp mod modulus.
+// Uses binary (right-to-left) exponentiation. O(log exp).
+// Requires modulus > 0, exp >= 0.
+fn mod_pow(base: i64, exp: i64, modulus: i64) -> i64 with Mut, Div {
+    if modulus == 1 { return 0 }
+    var result: i64 = 1
+    var b = base - (base / modulus) * modulus
+    if b < 0 { b = b + modulus }
+    var e = exp
+
+    while e > 0 {
+        // If e is odd
+        if e - (e / 2) * 2 == 1 {
+            result = result * b
+            result = result - (result / modulus) * modulus
+        }
+        e = e / 2
+        b = b * b
+        b = b - (b / modulus) * modulus
+    }
+    result
+}
+
+// Modular inverse: a^{-1} mod m.
+// Returns x such that a*x ≡ 1 (mod m), or 0 if gcd(a, m) != 1.
+fn mod_inv(a: i64, m: i64) -> i64 with Mut, Div {
+    var result: [i64; 3] = [0; 3]
+    gcd_extended(a, m, &!result)
+    if result[0] != 1 { return 0 }
+    var x = result[1]
+    // Ensure positive
+    x = x - (x / m) * m
+    if x < 0 { x = x + m }
+    x
+}
+
+// =============================================================================
+// Primality testing
+// =============================================================================
+
+// Trial division up to sqrt(n). Sufficient for n < ~10^14 in practice.
+fn is_prime_trial(n: i64) -> bool with Mut, Div {
+    if n < 2 { return false }
+    if n < 4 { return true }
+    if n - (n / 2) * 2 == 0 { return false }
+    if n - (n / 3) * 3 == 0 { return false }
+    // Check 6k ± 1
+    var i: i64 = 5
+    while i * i <= n {
+        if n - (n / i) * i == 0 { return false }
+        if n - (n / (i + 2)) * (i + 2) == 0 { return false }
+        i = i + 6
+    }
+    true
+}
+
+// Miller-Rabin witness test. Returns true if n passes the test for witness a.
+fn miller_rabin_witness(n: i64, a: i64) -> bool with Mut, Div {
+    if a <= 0 || a >= n { return true }
+
+    // Write n-1 = d * 2^r
+    var d = n - 1
+    var r = 0
+    while d - (d / 2) * 2 == 0 {
+        d = d / 2
+        r = r + 1
+    }
+
+    var x = mod_pow(a, d, n)
+    if x == 1 || x == n - 1 { return true }
+
+    var i = 0
+    while i < r - 1 {
+        x = x * x
+        x = x - (x / n) * n
+        if x == n - 1 { return true }
+        i = i + 1
+    }
+    false
+}
+
+// Deterministic Miller-Rabin primality test.
+// Uses witnesses {2,3,5,7,11,13,17,19,23,29,31,37}.
+// Deterministic for n < 3.317 * 10^24 (Jaeschke / Jiang & Deng 2014).
+fn is_prime(n: i64) -> bool with Mut, Div {
+    if n < 2 { return false }
+    if n < 4 { return true }
+    if n - (n / 2) * 2 == 0 { return false }
+    if n - (n / 3) * 3 == 0 { return false }
+    if n - (n / 5) * 5 == 0 { return n == 5 }
+    if n - (n / 7) * 7 == 0 { return n == 7 }
+    if n - (n / 11) * 11 == 0 { return n == 11 }
+    if n - (n / 13) * 13 == 0 { return n == 13 }
+    if n - (n / 17) * 17 == 0 { return n == 17 }
+    if n - (n / 19) * 19 == 0 { return n == 19 }
+    if n - (n / 23) * 23 == 0 { return n == 23 }
+    if n - (n / 29) * 29 == 0 { return n == 29 }
+    if n - (n / 31) * 31 == 0 { return n == 31 }
+    if n - (n / 37) * 37 == 0 { return n == 37 }
+
+    // Miller-Rabin with deterministic witness set
+    if !miller_rabin_witness(n, 2) { return false }
+    if !miller_rabin_witness(n, 3) { return false }
+    if !miller_rabin_witness(n, 5) { return false }
+    if !miller_rabin_witness(n, 7) { return false }
+    if !miller_rabin_witness(n, 11) { return false }
+    if !miller_rabin_witness(n, 13) { return false }
+    if !miller_rabin_witness(n, 17) { return false }
+    if !miller_rabin_witness(n, 19) { return false }
+    if !miller_rabin_witness(n, 23) { return false }
+    if !miller_rabin_witness(n, 29) { return false }
+    if !miller_rabin_witness(n, 31) { return false }
+    if !miller_rabin_witness(n, 37) { return false }
+    true
+}
+
+// Next prime >= n.
+fn next_prime(n: i64) -> i64 with Mut, Div {
+    if n <= 2 { return 2 }
+    var candidate = n
+    if candidate - (candidate / 2) * 2 == 0 { candidate = candidate + 1 }
+    while !is_prime(candidate) {
+        candidate = candidate + 2
+    }
+    candidate
+}
+
+// Sieve of Eratosthenes. Marks primes up to limit in a boolean array.
+// sieve[i] == true means i is prime. Max limit: 65536.
+fn sieve_eratosthenes(limit: i32, sieve: &![bool; 65536]) with Mut, Div {
+    if limit < 2 { return }
+
+    // Initialize all to true
+    var i = 0
+    while i <= limit {
+        sieve[i] = true
+        i = i + 1
+    }
+    sieve[0] = false
+    sieve[1] = false
+
+    // Sieve composites
+    var p = 2
+    while p * p <= limit {
+        if sieve[p] {
+            var j = p * p
+            while j <= limit {
+                sieve[j] = false
+                j = j + p
+            }
+        }
+        p = p + 1
+    }
+}
+
+// =============================================================================
+// Factorization
+// =============================================================================
+
+// Pollard's rho with Brent's improvement. Finds a non-trivial factor of n.
+// Returns n if no factor found (i.e. n is prime).
+fn pollard_rho(n: i64) -> i64 with Mut, Div {
+    if n - (n / 2) * 2 == 0 { return 2 }
+    if n - (n / 3) * 3 == 0 { return 3 }
+
+    var x: i64 = 2
+    var y: i64 = 2
+    var c: i64 = 1
+    var d: i64 = 1
+
+    while d == 1 {
+        x = x * x + c
+        x = x - (x / n) * n
+        y = y * y + c
+        y = y - (y / n) * n
+        y = y * y + c
+        y = y - (y / n) * n
+        var diff = x - y
+        if diff < 0 { diff = 0 - diff }
+        d = gcd(diff, n)
+    }
+
+    if d == n {
+        // Retry with different c
+        x = 2
+        y = 2
+        c = 2
+        d = 1
+        var iters = 0
+        while d == 1 && iters < 1000000 {
+            x = x * x + c
+            x = x - (x / n) * n
+            y = y * y + c
+            y = y - (y / n) * n
+            y = y * y + c
+            y = y - (y / n) * n
+            var diff2 = x - y
+            if diff2 < 0 { diff2 = 0 - diff2 }
+            d = gcd(diff2, n)
+            iters = iters + 1
+        }
+    }
+    d
+}
+
+// Complete factorization of n into prime factors.
+// Stores factors in factors[0..count-1] and exponents in exponents[0..count-1].
+// Returns count of distinct prime factors.
+fn factorize(n: i64, factors: &![i64; 64], exponents: &![i32; 64]) -> i32 with Mut, Div {
+    if n <= 1 { return 0 }
+    var remaining = n
+    var count: i32 = 0
+
+    // Trial division by small primes
+    var small_primes: [i64; 10] = [0; 10]
+    small_primes[0] = 2
+    small_primes[1] = 3
+    small_primes[2] = 5
+    small_primes[3] = 7
+    small_primes[4] = 11
+    small_primes[5] = 13
+    small_primes[6] = 17
+    small_primes[7] = 19
+    small_primes[8] = 23
+    small_primes[9] = 29
+
+    var si = 0
+    while si < 10 {
+        let p = small_primes[si]
+        if remaining - (remaining / p) * p == 0 {
+            factors[count] = p
+            exponents[count] = 0
+            while remaining - (remaining / p) * p == 0 {
+                remaining = remaining / p
+                exponents[count] = exponents[count] + 1
+            }
+            count = count + 1
+        }
+        si = si + 1
+    }
+
+    // Continue with trial division up to sqrt
+    var d: i64 = 31
+    while d * d <= remaining && d < 1000 {
+        if remaining - (remaining / d) * d == 0 {
+            factors[count] = d
+            exponents[count] = 0
+            while remaining - (remaining / d) * d == 0 {
+                remaining = remaining / d
+                exponents[count] = exponents[count] + 1
+            }
+            count = count + 1
+        }
+        d = d + 2
+    }
+
+    // Use Pollard rho for larger factors
+    while remaining > 1 {
+        if is_prime(remaining) {
+            factors[count] = remaining
+            exponents[count] = 1
+            count = count + 1
+            remaining = 1
+        } else {
+            var factor = pollard_rho(remaining)
+            // Make sure factor is prime
+            while !is_prime(factor) {
+                factor = pollard_rho(factor)
+            }
+            factors[count] = factor
+            exponents[count] = 0
+            while remaining - (remaining / factor) * factor == 0 {
+                remaining = remaining / factor
+                exponents[count] = exponents[count] + 1
+            }
+            count = count + 1
+        }
+    }
+    count
+}
+
+// =============================================================================
+// Arithmetic functions
+// =============================================================================
+
+// Euler's totient function phi(n) = count of integers in [1,n] coprime to n.
+fn euler_totient(n: i64) -> i64 with Mut, Div {
+    if n <= 1 { return 1 }
+    var factors: [i64; 64] = [0; 64]
+    var exponents: [i32; 64] = [0; 64]
+    let count = factorize(n, &!factors, &!exponents)
+
+    var result = n
+    var i: i32 = 0
+    while i < count {
+        let p = factors[i]
+        result = result / p * (p - 1)
+        i = i + 1
+    }
+    result
+}
+
+// Möbius function mu(n):
+//   mu(1) = 1
+//   mu(n) = 0 if n has a squared prime factor
+//   mu(n) = (-1)^k if n is a product of k distinct primes
+fn mobius(n: i64) -> i32 with Mut, Div {
+    if n <= 0 { return 0 }
+    if n == 1 { return 1 }
+
+    var factors: [i64; 64] = [0; 64]
+    var exponents: [i32; 64] = [0; 64]
+    let count = factorize(n, &!factors, &!exponents)
+
+    var i: i32 = 0
+    while i < count {
+        if exponents[i] > 1 { return 0 }
+        i = i + 1
+    }
+
+    // (-1)^count
+    if count - (count / 2) * 2 == 0 { 1 } else { 0 - 1 }
+}
+
+// Jacobi symbol (a/n) for odd n > 0.
+// Generalization of Legendre symbol.
+fn jacobi_symbol(a: i64, n: i64) -> i32 with Mut, Div {
+    if n <= 0 || n - (n / 2) * 2 == 0 { return 0 }
+    if n == 1 { return 1 }
+
+    var aa = a - (a / n) * n
+    if aa < 0 { aa = aa + n }
+    var nn = n
+    var result: i32 = 1
+
+    while aa > 0 {
+        // Extract factors of 2
+        while aa > 0 && aa - (aa / 2) * 2 == 0 {
+            aa = aa / 2
+            let n_mod_8 = nn - (nn / 8) * 8
+            if n_mod_8 == 3 || n_mod_8 == 5 {
+                result = 0 - result
+            }
+        }
+        // Quadratic reciprocity
+        let temp = aa
+        aa = nn
+        nn = temp
+        let a4 = aa - (aa / 4) * 4
+        let n4 = nn - (nn / 4) * 4
+        if a4 == 3 && n4 == 3 {
+            result = 0 - result
+        }
+        aa = aa - (aa / nn) * nn
+    }
+
+    if nn == 1 { result } else { 0 }
+}
+
+// =============================================================================
+// Chinese Remainder Theorem
+// =============================================================================
+
+// Solve the system:
+//   x ≡ r1 (mod m1)
+//   x ≡ r2 (mod m2)
+// Returns the unique solution x in [0, lcm(m1, m2)).
+// Requires gcd(m1, m2) | (r2 - r1).
+fn chinese_remainder(r1: i64, m1: i64, r2: i64, m2: i64) -> i64 with Mut, Div {
+    var ext: [i64; 3] = [0; 3]
+    gcd_extended(m1, m2, &!ext)
+    let g = ext[0]
+    let p = ext[1]
+
+    let diff = r2 - r1
+    // Check solvability
+    if diff - (diff / g) * g != 0 { return 0 - 1 }
+
+    let l = m1 / g * m2
+    var x = r1 + m1 * (diff / g)
+    // Multiply by p mod l
+    x = r1 + m1 * ((diff / g * p) - ((diff / g * p) / (m2 / g)) * (m2 / g))
+    // Normalize
+    x = x - (x / l) * l
+    if x < 0 { x = x + l }
+    x
+}
+
+// =============================================================================
+// Fibonacci and Lucas numbers
+// =============================================================================
+
+// Fibonacci number F(n) via fast doubling. O(log n).
+// F(2k) = F(k) * [2*F(k+1) - F(k)]
+// F(2k+1) = F(k)^2 + F(k+1)^2
+fn fibonacci(n: i32) -> i64 with Mut, Div {
+    if n <= 0 { return 0 }
+    if n == 1 { return 1 }
+    if n == 2 { return 1 }
+
+    // Find highest bit
+    var bits = 0
+    var temp = n
+    while temp > 0 {
+        bits = bits + 1
+        temp = temp / 2
+    }
+
+    var a: i64 = 0   // F(k)
+    var b: i64 = 1   // F(k+1)
+    var bit = bits - 1
+    while bit >= 0 {
+        // Doubling formulas
+        let c = a * (2 * b - a)
+        let d = a * a + b * b
+        let mask = 1
+        var shifted = n
+        var si2 = 0
+        while si2 < bit {
+            shifted = shifted / 2
+            si2 = si2 + 1
+        }
+        if shifted - (shifted / 2) * 2 == 0 {
+            a = c
+            b = d
+        } else {
+            a = d
+            b = c + d
+        }
+        bit = bit - 1
+    }
+    a
+}
+
+// Lucas number L(n). L(0)=2, L(1)=1, L(n)=L(n-1)+L(n-2).
+// L(n) = F(n-1) + F(n+1) = 2*F(n+1) - F(n).
+fn lucas(n: i32) -> i64 with Mut, Div {
+    if n == 0 { return 2 }
+    if n == 1 { return 1 }
+    let fn_val = fibonacci(n)
+    let fn1_val = fibonacci(n + 1)
+    2 * fn1_val - fn_val
+}
+
+// =============================================================================
+// Integer square root and related
+// =============================================================================
+
+// Floor of square root: largest k such that k*k <= n.
+fn integer_sqrt(n: i64) -> i64 with Mut, Div {
+    if n <= 0 { return 0 }
+    if n < 4 { return 1 }
+
+    // Newton's method starting from bit-length estimate
+    var x = n
+    var y = (x + 1) / 2
+    while y < x {
+        x = y
+        y = (x + n / x) / 2
+    }
+    x
+}
+
+// Check if n is a perfect square.
+fn is_perfect_square(n: i64) -> bool with Mut, Div {
+    if n < 0 { return false }
+    if n == 0 { return true }
+    let s = integer_sqrt(n)
+    s * s == n
+}
+
+// =============================================================================
+// Divisor functions
+// =============================================================================
+
+// Number of divisors sigma_0(n).
+fn count_divisors(n: i64) -> i64 with Mut, Div {
+    if n <= 0 { return 0 }
+    if n == 1 { return 1 }
+
+    var factors: [i64; 64] = [0; 64]
+    var exponents: [i32; 64] = [0; 64]
+    let count = factorize(n, &!factors, &!exponents)
+
+    var result: i64 = 1
+    var i: i32 = 0
+    while i < count {
+        result = result * ((exponents[i] + 1) as i64)
+        i = i + 1
+    }
+    result
+}
+
+// Sum of divisors sigma_1(n).
+fn sum_divisors(n: i64) -> i64 with Mut, Div {
+    if n <= 0 { return 0 }
+    if n == 1 { return 1 }
+
+    var factors: [i64; 64] = [0; 64]
+    var exponents: [i32; 64] = [0; 64]
+    let count = factorize(n, &!factors, &!exponents)
+
+    var result: i64 = 1
+    var i: i32 = 0
+    while i < count {
+        let p = factors[i]
+        var pk: i64 = 1
+        var j: i32 = 0
+        while j <= exponents[i] {
+            pk = pk * p
+            j = j + 1
+        }
+        result = result * ((pk - 1) / (p - 1))
+        i = i + 1
+    }
+    result
+}

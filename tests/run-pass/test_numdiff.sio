@@ -1,0 +1,558 @@
+//@ run-pass
+// test_numdiff.sio - Integration tests for numerical differentiation
+//
+// Tests central difference, forward difference, second derivative,
+// Richardson extrapolation, convergence ordering, and gradient computation.
+// All functions inlined since tests cannot import.
+//
+// References:
+//   Burden & Faires, "Numerical Analysis" (10th ed.)
+//   LeVeque, "Finite Difference Methods for ODEs and PDEs" (SIAM, 2007)
+
+// ============================================================================
+// MATH HELPERS (must precede callers)
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn floor_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x >= 0.0 {
+        if x < 1.0 { return 0.0 }
+        var result = 0.0
+        var remaining = x
+        var power = 1000000000000000.0
+        while power >= 1.0 {
+            while remaining >= power {
+                remaining = remaining - power
+                result = result + power
+            }
+            power = power / 10.0
+        }
+        return result
+    } else {
+        let pos = 0.0 - x
+        let pos_floor = floor_f64(pos)
+        if pos > pos_floor {
+            return 0.0 - pos_floor - 1.0
+        }
+        return 0.0 - pos_floor
+    }
+}
+
+fn pi_val() -> f64 {
+    3.141592653589793
+}
+
+fn two_pi_val() -> f64 {
+    6.283185307179586
+}
+
+fn sin_f64(x: f64) -> f64 with Mut, Panic, Div {
+    var a = x
+    let tp = two_pi_val()
+    if a > tp || a < 0.0 - tp {
+        let n = floor_f64(a / tp)
+        a = a - n * tp
+    }
+    while a > pi_val() { a = a - tp }
+    while a < 0.0 - pi_val() { a = a + tp }
+    let a2 = a * a
+    var sum = a
+    var term = a
+    var n = 1
+    while n < 20 {
+        term = 0.0 - term * a2 / ((2 * n) * (2 * n + 1)) as f64
+        sum = sum + term
+        n = n + 1
+    }
+    return sum
+}
+
+fn cos_f64(x: f64) -> f64 with Mut, Panic, Div {
+    return sin_f64(x + pi_val() / 2.0)
+}
+
+fn exp_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x > 20.0 { return exp_f64(x / 2.0) * exp_f64(x / 2.0) }
+    if x < 0.0 - 20.0 { return 1.0 / exp_f64(0.0 - x) }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 25 {
+        term = term * x / (i as f64)
+        sum = sum + term
+        i = i + 1
+    }
+    return sum
+}
+
+// ============================================================================
+// NUMERICAL DIFFERENTIATION KERNELS
+// ============================================================================
+
+// Central difference: (f(x+h) - f(x-h)) / (2h)
+// Error: O(h^2) — second-order accurate
+fn diff_central(f_minus: f64, f_plus: f64, h: f64) -> f64 with Div {
+    (f_plus - f_minus) / (2.0 * h)
+}
+
+// Forward difference: (f(x+h) - f(x)) / h
+// Error: O(h) — first-order accurate
+fn diff_forward(f0: f64, f_plus: f64, h: f64) -> f64 with Div {
+    (f_plus - f0) / h
+}
+
+// Second derivative via central difference: (f(x+h) - 2f(x) + f(x-h)) / h^2
+// Error: O(h^2)
+fn diff_second(f_minus: f64, f0: f64, f_plus: f64, h: f64) -> f64 with Div {
+    (f_plus - 2.0 * f0 + f_minus) / (h * h)
+}
+
+// Richardson extrapolation for central difference.
+// Uses two step sizes h1 and h2 = h1/2, then extrapolates:
+//   D = (4*D(h2) - D(h1)) / 3
+// This cancels the leading h^2 error term, yielding O(h^4) accuracy.
+fn diff_richardson_sin(x: f64) -> f64 with Mut, Panic, Div {
+    let h1 = 0.01
+    let h2 = 0.005
+    let d1 = diff_central(sin_f64(x - h1), sin_f64(x + h1), h1)
+    let d2 = diff_central(sin_f64(x - h2), sin_f64(x + h2), h2)
+    (4.0 * d2 - d1) / 3.0
+}
+
+fn diff_richardson_exp(x: f64) -> f64 with Mut, Panic, Div {
+    let h1 = 0.01
+    let h2 = 0.005
+    let d1 = diff_central(exp_f64(x - h1), exp_f64(x + h1), h1)
+    let d2 = diff_central(exp_f64(x - h2), exp_f64(x + h2), h2)
+    (4.0 * d2 - d1) / 3.0
+}
+
+// ============================================================================
+// TEST FUNCTIONS (polynomials and transcendentals)
+// ============================================================================
+
+// poly(x) = x^3 - 2*x^2 + x - 1
+fn poly(x: f64) -> f64 {
+    x * x * x - 2.0 * x * x + x - 1.0
+}
+
+// poly'(x) = 3*x^2 - 4*x + 1
+fn poly_deriv(x: f64) -> f64 {
+    3.0 * x * x - 4.0 * x + 1.0
+}
+
+// x^4
+fn x_fourth(x: f64) -> f64 {
+    x * x * x * x
+}
+
+// Constant function: f(x) = 7.0
+fn const_fn(x: f64) -> f64 {
+    7.0
+}
+
+// Linear function: f(x) = 3*x + 5
+fn linear_fn(x: f64) -> f64 {
+    3.0 * x + 5.0
+}
+
+// Two-variable function for gradient test: f(x,y) = x^2 + y^2
+// df/dx = 2x, df/dy = 2y
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+// Test 1: d/dx(sin(x)) = cos(x) at x=1.0, central diff h=0.001
+fn test_central_sin() -> bool with IO, Mut, Panic, Div {
+    let x = 1.0
+    let h = 0.001
+    let approx = diff_central(sin_f64(x - h), sin_f64(x + h), h)
+    let exact = cos_f64(x)
+    let err = abs_f64(approx - exact)
+    print("  err=")
+    println(err)
+    return err < 1.0e-6
+}
+
+// Test 2: d/dx(exp(x)) = exp(x) at x=1.0, central diff h=0.001
+fn test_central_exp() -> bool with IO, Mut, Panic, Div {
+    let x = 1.0
+    let h = 0.001
+    let approx = diff_central(exp_f64(x - h), exp_f64(x + h), h)
+    let exact = exp_f64(x)
+    let err = abs_f64(approx - exact)
+    print("  err=")
+    println(err)
+    return err < 1.0e-6
+}
+
+// Test 3: d/dx(x^3) = 3x^2 at x=2.0, central diff h=0.001
+fn test_central_x_cubed() -> bool with IO, Mut, Panic, Div {
+    let x = 2.0
+    let h = 0.001
+    let f_minus = (x - h) * (x - h) * (x - h)
+    let f_plus = (x + h) * (x + h) * (x + h)
+    let approx = diff_central(f_minus, f_plus, h)
+    let exact = 3.0 * x * x
+    let err = abs_f64(approx - exact)
+    print("  err=")
+    println(err)
+    return err < 1.0e-5
+}
+
+// Test 4: d/dx(poly) at x=1.5, expected 1.75
+fn test_central_poly() -> bool with IO, Mut, Panic, Div {
+    let x = 1.5
+    let h = 0.001
+    let approx = diff_central(poly(x - h), poly(x + h), h)
+    let exact = poly_deriv(x)
+    // 3*(1.5)^2 - 4*1.5 + 1 = 6.75 - 6.0 + 1.0 = 1.75
+    let err = abs_f64(approx - exact)
+    print("  expected=")
+    println(exact)
+    print("  err=")
+    println(err)
+    return err < 1.0e-5
+}
+
+// Test 5: Forward diff of sin at x=0, h=0.001, expect cos(0)=1.0
+fn test_forward_sin() -> bool with IO, Mut, Panic, Div {
+    let x = 0.0
+    let h = 0.001
+    let approx = diff_forward(sin_f64(x), sin_f64(x + h), h)
+    let exact = cos_f64(x)
+    let err = abs_f64(approx - exact)
+    print("  err=")
+    println(err)
+    return err < 1.0e-3
+}
+
+// Test 6: d^2/dx^2(sin(x)) = -sin(x) at x=1.0, h=0.001
+fn test_second_deriv_sin() -> bool with IO, Mut, Panic, Div {
+    let x = 1.0
+    let h = 0.001
+    let approx = diff_second(sin_f64(x - h), sin_f64(x), sin_f64(x + h), h)
+    let exact = 0.0 - sin_f64(x)
+    let err = abs_f64(approx - exact)
+    print("  err=")
+    println(err)
+    return err < 1.0e-4
+}
+
+// Test 7: d^2/dx^2(exp(x)) = exp(x) at x=0, h=0.001
+fn test_second_deriv_exp() -> bool with IO, Mut, Panic, Div {
+    let x = 0.0
+    let h = 0.001
+    let approx = diff_second(exp_f64(x - h), exp_f64(x), exp_f64(x + h), h)
+    let exact = exp_f64(x)
+    let err = abs_f64(approx - exact)
+    print("  err=")
+    println(err)
+    return err < 1.0e-4
+}
+
+// Test 8: d^2/dx^2(x^4) = 12x^2 at x=1.0, h=0.01
+fn test_second_deriv_x_fourth() -> bool with IO, Mut, Panic, Div {
+    let x = 1.0
+    let h = 0.01
+    let approx = diff_second(x_fourth(x - h), x_fourth(x), x_fourth(x + h), h)
+    let exact = 12.0 * x * x
+    let err = abs_f64(approx - exact)
+    print("  err=")
+    println(err)
+    return err < 1.0e-2
+}
+
+// Test 9: Richardson extrapolation of d/dx(sin) at x=1.0, tol 1e-10
+fn test_richardson_sin() -> bool with IO, Mut, Panic, Div {
+    let approx = diff_richardson_sin(1.0)
+    let exact = cos_f64(1.0)
+    let err = abs_f64(approx - exact)
+    print("  err=")
+    println(err)
+    return err < 1.0e-10
+}
+
+// Test 10: Richardson extrapolation of d/dx(exp) at x=0, tol 1e-10
+fn test_richardson_exp() -> bool with IO, Mut, Panic, Div {
+    let approx = diff_richardson_exp(0.0)
+    let exact = exp_f64(0.0)
+    let err = abs_f64(approx - exact)
+    print("  err=")
+    println(err)
+    return err < 1.0e-10
+}
+
+// Test 11: Smaller h gives better accuracy for central diff of sin at x=1
+// |err(h=0.001)| < |err(h=0.01)|
+fn test_convergence_order() -> bool with IO, Mut, Panic, Div {
+    let x = 1.0
+    let exact = cos_f64(x)
+
+    let h_coarse = 0.01
+    let d_coarse = diff_central(sin_f64(x - h_coarse), sin_f64(x + h_coarse), h_coarse)
+    let err_coarse = abs_f64(d_coarse - exact)
+
+    let h_fine = 0.001
+    let d_fine = diff_central(sin_f64(x - h_fine), sin_f64(x + h_fine), h_fine)
+    let err_fine = abs_f64(d_fine - exact)
+
+    print("  err_coarse=")
+    println(err_coarse)
+    print("  err_fine=")
+    println(err_fine)
+    return err_fine < err_coarse
+}
+
+// Test 12: Central diff is more accurate than forward diff for same h
+fn test_central_vs_forward() -> bool with IO, Mut, Panic, Div {
+    let x = 1.0
+    let h = 0.001
+    let exact = cos_f64(x)
+
+    let d_central = diff_central(sin_f64(x - h), sin_f64(x + h), h)
+    let err_central = abs_f64(d_central - exact)
+
+    let d_forward = diff_forward(sin_f64(x), sin_f64(x + h), h)
+    let err_forward = abs_f64(d_forward - exact)
+
+    print("  err_central=")
+    println(err_central)
+    print("  err_forward=")
+    println(err_forward)
+    return err_central < err_forward
+}
+
+// Test 13: d/dx(constant) = 0
+fn test_deriv_constant() -> bool with IO, Mut, Panic, Div {
+    let x = 3.0
+    let h = 0.001
+    let approx = diff_central(const_fn(x - h), const_fn(x + h), h)
+    let err = abs_f64(approx - 0.0)
+    print("  err=")
+    println(err)
+    return err < 1.0e-10
+}
+
+// Test 14: d/dx(3x+5) = 3 exactly (linear function)
+fn test_deriv_linear() -> bool with IO, Mut, Panic, Div {
+    let x = 2.5
+    let h = 0.001
+    let approx = diff_central(linear_fn(x - h), linear_fn(x + h), h)
+    let exact = 3.0
+    let err = abs_f64(approx - exact)
+    print("  err=")
+    println(err)
+    return err < 1.0e-10
+}
+
+// Test 15: Gradient of f(x,y) = x^2 + y^2 at (1,2) = [2, 4]
+// Partial derivatives via central diff on each component
+fn test_gradient_2d() -> bool with IO, Mut, Panic, Div {
+    let px = 1.0
+    let py = 2.0
+    let h = 0.001
+
+    // df/dx at (px, py): vary x, hold y fixed
+    let f_xminus = (px - h) * (px - h) + py * py
+    let f_xplus = (px + h) * (px + h) + py * py
+    let grad_x = diff_central(f_xminus, f_xplus, h)
+
+    // df/dy at (px, py): hold x fixed, vary y
+    let f_yminus = px * px + (py - h) * (py - h)
+    let f_yplus = px * px + (py + h) * (py + h)
+    let grad_y = diff_central(f_yminus, f_yplus, h)
+
+    let err_x = abs_f64(grad_x - 2.0)  // expected 2*px = 2
+    let err_y = abs_f64(grad_y - 4.0)  // expected 2*py = 4
+
+    print("  grad_x=")
+    println(grad_x)
+    print("  grad_y=")
+    println(grad_y)
+    print("  err_x=")
+    println(err_x)
+    print("  err_y=")
+    println(err_y)
+    return err_x < 1.0e-5 && err_y < 1.0e-5
+}
+
+// ============================================================================
+// MAIN TEST RUNNER
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== Numerical Differentiation Tests ===")
+    println("")
+
+    var passed: i32 = 0
+    var failed: i32 = 0
+
+    // Test 1
+    print("Test  1: Central d/dx(sin).......... ")
+    if test_central_sin() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 2
+    print("Test  2: Central d/dx(exp).......... ")
+    if test_central_exp() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 3
+    print("Test  3: Central d/dx(x^3).......... ")
+    if test_central_x_cubed() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 4
+    print("Test  4: Central d/dx(poly)......... ")
+    if test_central_poly() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 5
+    print("Test  5: Forward d/dx(sin) at 0..... ")
+    if test_forward_sin() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 6
+    print("Test  6: Second deriv sin........... ")
+    if test_second_deriv_sin() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 7
+    print("Test  7: Second deriv exp........... ")
+    if test_second_deriv_exp() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 8
+    print("Test  8: Second deriv x^4........... ")
+    if test_second_deriv_x_fourth() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 9
+    print("Test  9: Richardson sin............. ")
+    if test_richardson_sin() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 10
+    print("Test 10: Richardson exp............. ")
+    if test_richardson_exp() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 11
+    print("Test 11: Convergence order.......... ")
+    if test_convergence_order() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 12
+    print("Test 12: Central vs forward......... ")
+    if test_central_vs_forward() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 13
+    print("Test 13: Deriv of constant = 0...... ")
+    if test_deriv_constant() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 14
+    print("Test 14: Deriv of linear = slope.... ")
+    if test_deriv_linear() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    // Test 15
+    print("Test 15: Gradient of x^2+y^2........ ")
+    if test_gradient_2d() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    println("")
+    print("Passed: ")
+    println(passed)
+    print("Failed: ")
+    println(failed)
+
+    if failed == 0 {
+        println("ALL 15 TESTS PASSED")
+        return 0
+    }
+    println("SOME TESTS FAILED")
+    return 1
+}

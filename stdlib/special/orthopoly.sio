@@ -1,0 +1,412 @@
+// stdlib/special/orthopoly.sio — Classical orthogonal polynomials
+//
+// Pure Sounio implementations via three-term recurrence relations:
+//   Legendre P_n(x), P_n^m(x), Q_n(x)
+//   Chebyshev T_n(x), U_n(x)
+//   Hermite H_n(x) (physicists'), He_n(x) (probabilists')
+//   Laguerre L_n(x), L_n^alpha(x)
+//   Jacobi P_n^{alpha,beta}(x)
+//   Gegenbauer C_n^lambda(x)
+//
+// All evaluations use forward recurrence, which is numerically stable for
+// these classical families on their natural domains.
+//
+// References:
+//   DLMF Ch. 18 (https://dlmf.nist.gov/18)
+//   Gautschi (2004): "Orthogonal Polynomials: Computation and Approximation"
+//   Abramowitz & Stegun (1964): Ch. 22
+
+// =============================================================================
+// Helpers
+// =============================================================================
+
+fn op_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn op_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn op_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    if x == 1.0 { return 0.0 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 { term = term * t2; sum = sum + term / ((2 * k + 1) as f64); k = k + 1 }
+    2.0 * sum + (e as f64) * 0.6931471805599453
+}
+
+// =============================================================================
+// Legendre polynomials
+// =============================================================================
+
+// Legendre polynomial P_n(x), x in [-1, 1].
+// Recurrence: (n+1)*P_{n+1} = (2n+1)*x*P_n - n*P_{n-1}
+fn legendre_p(n: i32, x: f64) -> f64 with Mut, Div {
+    if n == 0 { return 1.0 }
+    if n == 1 { return x }
+
+    var p0 = 1.0
+    var p1 = x
+    var k = 1
+    while k < n {
+        let kf = k as f64
+        let p2 = ((2.0 * kf + 1.0) * x * p1 - kf * p0) / (kf + 1.0)
+        p0 = p1
+        p1 = p2
+        k = k + 1
+    }
+    p1
+}
+
+// Associated Legendre function P_n^m(x), x in [-1, 1].
+// Uses the forward recurrence on degree n for fixed m.
+// P_m^m(x) = (-1)^m * (2m-1)!! * (1-x^2)^{m/2}
+// P_{m+1}^m(x) = x * (2m+1) * P_m^m(x)
+// (n-m)*P_n^m = (2n-1)*x*P_{n-1}^m - (n+m-1)*P_{n-2}^m
+fn legendre_p_assoc(n: i32, m: i32, x: f64) -> f64 with Mut, Div, Panic {
+    let am = if m < 0 { 0 - m } else { m }
+    if am > n { return 0.0 }
+    if n == 0 { return 1.0 }
+
+    // Compute P_m^m
+    var pmm = 1.0
+    if am > 0 {
+        let somx2 = op_sqrt(1.0 - x * x)
+        var fact = 1.0
+        var i = 1
+        while i <= am {
+            pmm = pmm * (0.0 - fact) * somx2
+            fact = fact + 2.0
+            i = i + 1
+        }
+    }
+
+    if n == am { return pmm }
+
+    // Compute P_{m+1}^m
+    var pmmp1 = x * ((2 * am + 1) as f64) * pmm
+    if n == am + 1 { return pmmp1 }
+
+    // Forward recurrence
+    var p0 = pmm
+    var p1 = pmmp1
+    var k = am + 2
+    while k <= n {
+        let kf = k as f64
+        let mf = am as f64
+        let p2 = ((2.0 * kf - 1.0) * x * p1 - (kf + mf - 1.0) * p0) / (kf - mf)
+        p0 = p1
+        p1 = p2
+        k = k + 1
+    }
+    p1
+}
+
+// Legendre function of the second kind Q_n(x), |x| < 1.
+// Q_0(x) = 0.5 * ln((1+x)/(1-x))
+// Q_1(x) = x * Q_0(x) - 1
+// (n+1)*Q_{n+1} = (2n+1)*x*Q_n - n*Q_{n-1}
+fn legendre_q(n: i32, x: f64) -> f64 with Mut, Div, Panic {
+    if op_abs(x) >= 1.0 { return 0.0 - 1.0e30 }
+
+    let q0 = 0.5 * op_ln((1.0 + x) / (1.0 - x))
+    if n == 0 { return q0 }
+
+    let q1 = x * q0 - 1.0
+    if n == 1 { return q1 }
+
+    var qq0 = q0
+    var qq1 = q1
+    var k = 1
+    while k < n {
+        let kf = k as f64
+        let q2 = ((2.0 * kf + 1.0) * x * qq1 - kf * qq0) / (kf + 1.0)
+        qq0 = qq1
+        qq1 = q2
+        k = k + 1
+    }
+    qq1
+}
+
+// Spherical harmonic normalization factor for P_l^m.
+// N_l^m = sqrt((2l+1)/(4*pi) * (l-m)!/(l+m)!)
+fn spherical_harmonic_norm(l: i32, m: i32) -> f64 with Mut, Div, Panic {
+    let am = if m < 0 { 0 - m } else { m }
+    var log_norm = op_ln((2 * l + 1) as f64) - op_ln(4.0 * 3.14159265358979323846)
+    // Add ln((l-m)!) - ln((l+m)!)
+    var i = l - am + 1
+    while i <= l + am {
+        log_norm = log_norm - op_ln(i as f64)
+        i = i + 1
+    }
+    op_sqrt(0.5 * (2.71828182845904523536 - 2.71828182845904523536 + 1.0) * (2.71828182845904523536 - 2.71828182845904523536 + 1.0))
+    // Simplified: just exp(0.5 * log_norm)
+    var result_ln = 0.5 * log_norm
+    // exp approximation
+    if result_ln > 500.0 { return 1.0e200 }
+    if result_ln < -500.0 { return 0.0 }
+    var sum = 1.0
+    var term = 1.0
+    var j = 1
+    while j < 25 { term = term * result_ln / (j as f64); sum = sum + term; j = j + 1 }
+    sum
+}
+
+// =============================================================================
+// Chebyshev polynomials
+// =============================================================================
+
+// Chebyshev polynomial of the first kind T_n(x), x in [-1, 1].
+// Recurrence: T_{n+1}(x) = 2*x*T_n(x) - T_{n-1}(x)
+// T_0 = 1, T_1 = x.
+fn chebyshev_t(n: i32, x: f64) -> f64 with Mut, Div {
+    if n == 0 { return 1.0 }
+    if n == 1 { return x }
+
+    var t0 = 1.0
+    var t1 = x
+    var k = 2
+    while k <= n {
+        let t2 = 2.0 * x * t1 - t0
+        t0 = t1
+        t1 = t2
+        k = k + 1
+    }
+    t1
+}
+
+// Chebyshev polynomial of the second kind U_n(x).
+// Recurrence: U_{n+1}(x) = 2*x*U_n(x) - U_{n-1}(x)
+// U_0 = 1, U_1 = 2x.
+fn chebyshev_u(n: i32, x: f64) -> f64 with Mut, Div {
+    if n == 0 { return 1.0 }
+    if n == 1 { return 2.0 * x }
+
+    var u0 = 1.0
+    var u1 = 2.0 * x
+    var k = 2
+    while k <= n {
+        let u2 = 2.0 * x * u1 - u0
+        u0 = u1
+        u1 = u2
+        k = k + 1
+    }
+    u1
+}
+
+// =============================================================================
+// Hermite polynomials
+// =============================================================================
+
+// Physicists' Hermite polynomial H_n(x).
+// Recurrence: H_{n+1}(x) = 2*x*H_n(x) - 2*n*H_{n-1}(x)
+// H_0 = 1, H_1 = 2x.
+fn hermite_h(n: i32, x: f64) -> f64 with Mut, Div {
+    if n == 0 { return 1.0 }
+    if n == 1 { return 2.0 * x }
+
+    var h0 = 1.0
+    var h1 = 2.0 * x
+    var k = 2
+    while k <= n {
+        let h2 = 2.0 * x * h1 - 2.0 * ((k - 1) as f64) * h0
+        h0 = h1
+        h1 = h2
+        k = k + 1
+    }
+    h1
+}
+
+// Probabilists' Hermite polynomial He_n(x).
+// Recurrence: He_{n+1}(x) = x*He_n(x) - n*He_{n-1}(x)
+// He_0 = 1, He_1 = x.
+fn hermite_he(n: i32, x: f64) -> f64 with Mut, Div {
+    if n == 0 { return 1.0 }
+    if n == 1 { return x }
+
+    var h0 = 1.0
+    var h1 = x
+    var k = 2
+    while k <= n {
+        let h2 = x * h1 - ((k - 1) as f64) * h0
+        h0 = h1
+        h1 = h2
+        k = k + 1
+    }
+    h1
+}
+
+// =============================================================================
+// Laguerre polynomials
+// =============================================================================
+
+// Laguerre polynomial L_n(x).
+// Recurrence: (n+1)*L_{n+1} = (2n+1-x)*L_n - n*L_{n-1}
+// L_0 = 1, L_1 = 1 - x.
+fn laguerre_l(n: i32, x: f64) -> f64 with Mut, Div {
+    if n == 0 { return 1.0 }
+    if n == 1 { return 1.0 - x }
+
+    var l0 = 1.0
+    var l1 = 1.0 - x
+    var k = 1
+    while k < n {
+        let kf = k as f64
+        let l2 = ((2.0 * kf + 1.0 - x) * l1 - kf * l0) / (kf + 1.0)
+        l0 = l1
+        l1 = l2
+        k = k + 1
+    }
+    l1
+}
+
+// Generalized (associated) Laguerre polynomial L_n^alpha(x).
+// Recurrence: (n+1)*L_{n+1}^a = (2n+1+a-x)*L_n^a - (n+a)*L_{n-1}^a
+// L_0^a = 1, L_1^a = 1 + a - x.
+fn laguerre_l_assoc(n: i32, alpha: f64, x: f64) -> f64 with Mut, Div {
+    if n == 0 { return 1.0 }
+    if n == 1 { return 1.0 + alpha - x }
+
+    var l0 = 1.0
+    var l1 = 1.0 + alpha - x
+    var k = 1
+    while k < n {
+        let kf = k as f64
+        let l2 = ((2.0 * kf + 1.0 + alpha - x) * l1 - (kf + alpha) * l0) / (kf + 1.0)
+        l0 = l1
+        l1 = l2
+        k = k + 1
+    }
+    l1
+}
+
+// =============================================================================
+// Jacobi polynomials
+// =============================================================================
+
+// Jacobi polynomial P_n^{alpha, beta}(x), x in [-1, 1].
+// This is the most general family — Legendre, Chebyshev, Gegenbauer are special cases.
+// Recurrence (DLMF 18.9.2):
+//   2(n+1)(n+a+b+1)(2n+a+b) * P_{n+1}^{a,b}
+//   = (2n+a+b+1)*[(2n+a+b)(2n+a+b+2)*x + a^2-b^2] * P_n^{a,b}
+//     - 2(n+a)(n+b)(2n+a+b+2) * P_{n-1}^{a,b}
+fn jacobi_p(n: i32, alpha: f64, beta: f64, x: f64) -> f64 with Mut, Div {
+    if n == 0 { return 1.0 }
+
+    let ab = alpha + beta
+    let p1_val = 0.5 * (alpha - beta + (ab + 2.0) * x)
+    if n == 1 { return p1_val }
+
+    var p0 = 1.0
+    var p1 = p1_val
+    var k = 1
+    while k < n {
+        let kf = k as f64
+        let c1 = 2.0 * (kf + 1.0) * (kf + ab + 1.0) * (2.0 * kf + ab)
+        let c2 = (2.0 * kf + ab + 1.0) * (alpha * alpha - beta * beta)
+        let c3 = (2.0 * kf + ab) * (2.0 * kf + ab + 1.0) * (2.0 * kf + ab + 2.0)
+        let c4 = 2.0 * (kf + alpha) * (kf + beta) * (2.0 * kf + ab + 2.0)
+
+        let p2 = ((c2 + c3 * x) * p1 - c4 * p0) / c1
+        p0 = p1
+        p1 = p2
+        k = k + 1
+    }
+    p1
+}
+
+// =============================================================================
+// Gegenbauer (ultraspherical) polynomials
+// =============================================================================
+
+// Gegenbauer polynomial C_n^lambda(x).
+// Special case of Jacobi: C_n^lambda(x) = const * P_n^{lambda-1/2, lambda-1/2}(x).
+// Recurrence: (n+1)*C_{n+1}^lambda = 2(n+lambda)*x*C_n^lambda - (n+2*lambda-1)*C_{n-1}^lambda
+// C_0 = 1, C_1 = 2*lambda*x.
+fn gegenbauer_c(n: i32, lambda: f64, x: f64) -> f64 with Mut, Div {
+    if n == 0 { return 1.0 }
+    if n == 1 { return 2.0 * lambda * x }
+
+    var c0 = 1.0
+    var c1 = 2.0 * lambda * x
+    var k = 1
+    while k < n {
+        let kf = k as f64
+        let c2 = (2.0 * (kf + lambda) * x * c1 - (kf + 2.0 * lambda - 1.0) * c0) / (kf + 1.0)
+        c0 = c1
+        c1 = c2
+        k = k + 1
+    }
+    c1
+}
+
+// =============================================================================
+// Evaluation at roots (Gauss quadrature nodes)
+// =============================================================================
+
+// Compute n-th root of Legendre P_n by Newton iteration.
+// Initial guess from Tricomi asymptotic formula.
+// Returns the i-th root (0-indexed, i < n) in ascending order.
+fn legendre_root(n: i32, i: i32) -> f64 with Mut, Div, Panic {
+    let pi_val = 3.14159265358979323846
+    let nf = n as f64
+
+    // Tricomi initial guess: cos(pi * (4*(i+1) - 1) / (4*n + 2))
+    let theta = pi_val * ((4 * (i + 1) - 1) as f64) / ((4 * n + 2) as f64)
+    var x = 0.0 - 1.0   // cos(theta) approximation
+    // cos via Taylor
+    var a = theta
+    let tp = 2.0 * pi_val
+    while a >= tp { a = a - tp }
+    while a < 0.0 { a = a + tp }
+    if a > pi_val { a = a - tp }
+    let a2 = a * a
+    var sum = 1.0
+    var term = 1.0
+    var j = 1
+    while j < 15 { term = 0.0 - term * a2 / ((2 * j - 1) * 2 * j) as f64; sum = sum + term; j = j + 1 }
+    x = sum
+
+    // Newton refinement: x_{k+1} = x_k - P_n(x_k) / P_n'(x_k)
+    // P_n'(x) = n * (x * P_n - P_{n-1}) / (x^2 - 1)
+    var iter = 0
+    while iter < 20 {
+        let pn = legendre_p(n, x)
+        let pn1 = legendre_p(n - 1, x)
+        let dpn = nf * (x * pn - pn1) / (x * x - 1.0)
+        let dx = pn / dpn
+        x = x - dx
+        if op_abs(dx) < 1.0e-15 { iter = 20 }
+        else { iter = iter + 1 }
+    }
+    x
+}
+
+// Gauss-Legendre quadrature nodes and weights for n points.
+// Stores nodes in x[0..n-1], weights in w[0..n-1].
+fn gauss_legendre_nodes(n: i32, nodes: &![f64; 64], weights: &![f64; 64]) with Mut, Div, Panic {
+    var i = 0
+    while i < n {
+        let xi = legendre_root(n, i)
+        nodes[i] = xi
+        // Weight: w_i = 2 / ((1-x_i^2) * [P_n'(x_i)]^2)
+        let pn1 = legendre_p(n - 1, xi)
+        let nf = n as f64
+        let dpn = nf * (xi * legendre_p(n, xi) - pn1) / (xi * xi - 1.0)
+        weights[i] = 2.0 / ((1.0 - xi * xi) * dpn * dpn)
+        i = i + 1
+    }
+}

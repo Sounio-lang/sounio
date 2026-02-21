@@ -1,0 +1,906 @@
+// stdlib/math/tensor.sio — Tensor algebra
+//
+// Pure Sounio implementations:
+//   Kronecker product, Hadamard product, Khatri-Rao product
+//   Outer product, tensor contraction
+//   Mode-n product (tensor × matrix along a mode)
+//   CP decomposition via Alternating Least Squares (CP-ALS)
+//   Tucker decomposition via Higher-Order SVD (HOSVD)
+//   Tensor unfolding (matricization) along each mode
+//
+// Tensors are stored in row-major (C-order) flat arrays with shape metadata.
+// Max total elements: 4096. Max rank: 8.
+//
+// References:
+//   Kolda & Bader (2009): "Tensor Decompositions and Applications"
+//   De Lathauwer, De Moor, Vandewalle (2000): "A Multilinear SVD"
+//   Cichocki et al. (2015): "Tensor Decompositions for Signal Processing"
+
+// =============================================================================
+// Helpers
+// =============================================================================
+
+fn t_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn t_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+fn t_min_i32(a: i32, b: i32) -> i32 { if a < b { a } else { b } }
+
+fn t_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 30 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+// Compute total number of elements from shape.
+fn tensor_numel(dims: &[i32; 8], rank: i32) -> i32 with Mut {
+    var n = 1
+    var i = 0
+    while i < rank { n = n * dims[i]; i = i + 1 }
+    n
+}
+
+// Compute stride for a given mode in row-major layout.
+// stride[k] = product of dims[k+1..rank-1]
+fn tensor_stride(dims: &[i32; 8], rank: i32, mode: i32) -> i32 with Mut {
+    var s = 1
+    var i = mode + 1
+    while i < rank { s = s * dims[i]; i = i + 1 }
+    s
+}
+
+// =============================================================================
+// Kronecker product
+// =============================================================================
+
+// Kronecker product: A (m×n) ⊗ B (p×q) = C (mp × nq).
+// C[i*p+k, j*q+l] = A[i,j] * B[k,l]
+// Stored row-major.
+fn kron(a: &[f64; 4096], m: i32, n: i32,
+        b: &[f64; 4096], p: i32, q: i32,
+        out: &![f64; 4096]) with Mut {
+    let out_rows = m * p
+    let out_cols = n * q
+
+    var i = 0
+    while i < m {
+        var j = 0
+        while j < n {
+            let aij = a[i * n + j]
+            var k = 0
+            while k < p {
+                var l = 0
+                while l < q {
+                    out[(i * p + k) * out_cols + (j * q + l)] = aij * b[k * q + l]
+                    l = l + 1
+                }
+                k = k + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Hadamard (element-wise) product
+// =============================================================================
+
+// Hadamard product: C[i] = A[i] * B[i].
+fn hadamard(a: &[f64; 4096], b: &[f64; 4096], n: i32,
+            out: &![f64; 4096]) with Mut {
+    var i = 0
+    while i < n {
+        out[i] = a[i] * b[i]
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Outer product
+// =============================================================================
+
+// Outer product: C[i,j] = a[i] * b[j], producing an m×n matrix.
+fn outer(a: &[f64; 256], m: i32, b: &[f64; 256], n: i32,
+         out: &![f64; 4096]) with Mut {
+    var i = 0
+    while i < m {
+        var j = 0
+        while j < n {
+            out[i * n + j] = a[i] * b[j]
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Khatri-Rao product (column-wise Kronecker)
+// =============================================================================
+
+// Khatri-Rao product: A (m×r) ⊙ B (n×r) = C (mn × r)
+// C[:, k] = A[:, k] ⊗ B[:, k]  (Kronecker of each column pair)
+fn khatri_rao(a: &[f64; 4096], m: i32, r: i32,
+              b: &[f64; 4096], n: i32,
+              out: &![f64; 4096]) with Mut {
+    var k = 0
+    while k < r {
+        var i = 0
+        while i < m {
+            var j = 0
+            while j < n {
+                out[(i * n + j) * r + k] = a[i * r + k] * b[j * r + k]
+                j = j + 1
+            }
+            i = i + 1
+        }
+        k = k + 1
+    }
+}
+
+// =============================================================================
+// Matrix-matrix multiply (helper for decompositions)
+// =============================================================================
+
+// C = A (m×k) * B (k×n)
+fn mat_mul(a: &[f64; 4096], m: i32, k: i32,
+           b: &[f64; 4096], kk: i32, n: i32,
+           c: &![f64; 4096]) with Mut {
+    // Zero output
+    var idx = 0
+    while idx < m * n { c[idx] = 0.0; idx = idx + 1 }
+
+    var i = 0
+    while i < m {
+        var j = 0
+        while j < n {
+            var s = 0.0
+            var p = 0
+            while p < k {
+                s = s + a[i * k + p] * b[p * n + j]
+                p = p + 1
+            }
+            c[i * n + j] = s
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// C = A^T (k×m)^T * B (k×n) = (m×k) * (k×n)
+fn mat_mul_atb(a: &[f64; 4096], m: i32, k: i32,
+               b: &[f64; 4096], n: i32,
+               c: &![f64; 4096]) with Mut {
+    var idx = 0
+    while idx < m * n { c[idx] = 0.0; idx = idx + 1 }
+
+    var i = 0
+    while i < m {
+        var j = 0
+        while j < n {
+            var s = 0.0
+            var p = 0
+            while p < k {
+                // A^T[i,p] = A[p,i]
+                s = s + a[p * m + i] * b[p * n + j]
+                p = p + 1
+            }
+            c[i * n + j] = s
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Matrix transpose (helper)
+// =============================================================================
+
+// B = A^T where A is m×n, B is n×m
+fn mat_transpose(a: &[f64; 4096], m: i32, n: i32,
+                 b: &![f64; 4096]) with Mut {
+    var i = 0
+    while i < m {
+        var j = 0
+        while j < n {
+            b[j * m + i] = a[i * n + j]
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Vector/matrix norms (helpers)
+// =============================================================================
+
+fn vec_norm(v: &[f64; 4096], n: i32) -> f64 with Mut, Div, Panic {
+    var s = 0.0
+    var i = 0
+    while i < n { s = s + v[i] * v[i]; i = i + 1 }
+    t_sqrt(s)
+}
+
+fn mat_frobenius(a: &[f64; 4096], n: i32) -> f64 with Mut, Div, Panic {
+    var s = 0.0
+    var i = 0
+    while i < n { s = s + a[i] * a[i]; i = i + 1 }
+    t_sqrt(s)
+}
+
+// =============================================================================
+// Tensor unfolding (matricization)
+// =============================================================================
+
+// Unfold a tensor along mode k into a matrix.
+// The mode-k unfolding of a tensor X with dimensions [d0, d1, ..., d_{R-1}]
+// is a matrix of size d_k × (product of all other dimensions).
+//
+// Row i of the unfolding collects all elements where the k-th index is i.
+fn tensor_unfold(tensor: &[f64; 4096], dims: &[i32; 8], rank: i32,
+                 mode: i32,
+                 out: &![f64; 4096]) with Mut {
+    let total = tensor_numel(dims, rank)
+    let mode_dim = dims[mode]
+    let cols = total / mode_dim
+
+    // Compute strides for original tensor
+    var strides: [i32; 8] = [0; 8]
+    var i = rank - 1
+    strides[i] = 1
+    i = i - 1
+    while i >= 0 {
+        strides[i] = strides[i + 1] * dims[i + 1]
+        i = i - 1
+    }
+
+    // For each element in the tensor, compute its position in the unfolding
+    var flat = 0
+    while flat < total {
+        // Decompose flat index into multi-index
+        var rem = flat
+        var multi: [i32; 8] = [0; 8]
+        var d = 0
+        while d < rank {
+            multi[d] = rem / strides[d]
+            rem = rem - multi[d] * strides[d]
+            d = d + 1
+        }
+
+        let row = multi[mode]
+
+        // Compute column: linearize all indices except mode
+        var col = 0
+        var col_stride = 1
+        var d2 = rank - 1
+        while d2 >= 0 {
+            if d2 != mode {
+                col = col + multi[d2] * col_stride
+                col_stride = col_stride * dims[d2]
+            }
+            d2 = d2 - 1
+        }
+
+        out[row * cols + col] = tensor[flat]
+        flat = flat + 1
+    }
+}
+
+// Refold (inverse of unfold): fold a matrix back into a tensor along mode k.
+fn tensor_refold(mat: &[f64; 4096], dims: &[i32; 8], rank: i32,
+                 mode: i32,
+                 out: &![f64; 4096]) with Mut {
+    let total = tensor_numel(dims, rank)
+    let mode_dim = dims[mode]
+    let cols = total / mode_dim
+
+    var strides: [i32; 8] = [0; 8]
+    var i = rank - 1
+    strides[i] = 1
+    i = i - 1
+    while i >= 0 {
+        strides[i] = strides[i + 1] * dims[i + 1]
+        i = i - 1
+    }
+
+    var flat = 0
+    while flat < total {
+        var rem = flat
+        var multi: [i32; 8] = [0; 8]
+        var d = 0
+        while d < rank {
+            multi[d] = rem / strides[d]
+            rem = rem - multi[d] * strides[d]
+            d = d + 1
+        }
+
+        let row = multi[mode]
+
+        var col = 0
+        var col_stride = 1
+        var d2 = rank - 1
+        while d2 >= 0 {
+            if d2 != mode {
+                col = col + multi[d2] * col_stride
+                col_stride = col_stride * dims[d2]
+            }
+            d2 = d2 - 1
+        }
+
+        out[flat] = mat[row * cols + col]
+        flat = flat + 1
+    }
+}
+
+// =============================================================================
+// Mode-n product (tensor × matrix along mode n)
+// =============================================================================
+
+// Compute Y = X ×_n M where X is a tensor and M is a matrix.
+// X has shape dims, M is (new_dim × dims[mode]).
+// Result Y has same shape as X except dims[mode] is replaced by new_dim.
+fn mode_n_product(tensor: &[f64; 4096], dims: &[i32; 8], rank: i32,
+                  matrix: &[f64; 4096], new_dim: i32,
+                  mode: i32,
+                  out: &![f64; 4096], dims_out: &![i32; 8]) with Mut {
+    // Set output dimensions
+    var d = 0
+    while d < rank {
+        dims_out[d] = dims[d]
+        d = d + 1
+    }
+    dims_out[mode] = new_dim
+
+    // Unfold tensor along mode
+    let total = tensor_numel(dims, rank)
+    let mode_dim = dims[mode]
+    let cols = total / mode_dim
+
+    var unfolded: [f64; 4096] = [0.0; 4096]
+    tensor_unfold(tensor, dims, rank, mode, &!unfolded)
+
+    // Multiply: result_unfolded = matrix * unfolded
+    // matrix is new_dim × mode_dim, unfolded is mode_dim × cols
+    var result_unfolded: [f64; 4096] = [0.0; 4096]
+    mat_mul(matrix, new_dim, mode_dim, &unfolded, mode_dim, cols, &!result_unfolded)
+
+    // Refold
+    tensor_refold(&result_unfolded, dims_out, rank, mode, out)
+}
+
+// =============================================================================
+// Tensor contraction
+// =============================================================================
+
+// Contract two tensors along specified axes.
+// A general Einstein summation-style contraction for rank-2 tensors (matrices):
+//   C[i,j] = sum_k A[i,k] * B[k,j]  when axis_a=1, axis_b=0
+//
+// For simplicity, this handles the common case of contracting two 2D tensors
+// (i.e., matrix multiplication with axis selection).
+fn contract_2d(a: &[f64; 4096], rows_a: i32, cols_a: i32,
+               b: &[f64; 4096], rows_b: i32, cols_b: i32,
+               axis_a: i32, axis_b: i32,
+               out: &![f64; 4096]) -> i32 with Mut {
+    // axis_a=1, axis_b=0: standard matmul C = A * B
+    // axis_a=0, axis_b=0: C = A^T * B
+    // axis_a=1, axis_b=1: C = A * B^T
+    // axis_a=0, axis_b=1: C = A^T * B^T
+
+    if axis_a == 1 && axis_b == 0 {
+        // C[i,j] = sum_k A[i,k] * B[k,j], shape (rows_a × cols_b)
+        mat_mul(a, rows_a, cols_a, b, rows_b, cols_b, out)
+        return rows_a * cols_b
+    }
+
+    if axis_a == 0 && axis_b == 0 {
+        // C = A^T * B, shape (cols_a × cols_b)
+        mat_mul_atb(a, cols_a, rows_a, b, cols_b, out)
+        return cols_a * cols_b
+    }
+
+    if axis_a == 1 && axis_b == 1 {
+        // C = A * B^T, shape (rows_a × rows_b)
+        var bt: [f64; 4096] = [0.0; 4096]
+        mat_transpose(b, rows_b, cols_b, &!bt)
+        mat_mul(a, rows_a, cols_a, &bt, cols_b, rows_b, out)
+        return rows_a * rows_b
+    }
+
+    if axis_a == 0 && axis_b == 1 {
+        // C = A^T * B^T, shape (cols_a × rows_b)
+        var bt: [f64; 4096] = [0.0; 4096]
+        mat_transpose(b, rows_b, cols_b, &!bt)
+        mat_mul_atb(a, cols_a, rows_a, &bt, rows_b, out)
+        return cols_a * rows_b
+    }
+
+    0
+}
+
+// =============================================================================
+// Tensor dot product (full contraction)
+// =============================================================================
+
+// Full inner product of two tensors: sum of element-wise products.
+fn tensor_dot(a: &[f64; 4096], b: &[f64; 4096], n: i32) -> f64 with Mut {
+    var s = 0.0
+    var i = 0
+    while i < n { s = s + a[i] * b[i]; i = i + 1 }
+    s
+}
+
+// =============================================================================
+// Power iteration for dominant singular vector (helper for decompositions)
+// =============================================================================
+
+// Power iteration to find the dominant left singular vector of matrix A (m×n).
+// Returns the singular value. The left singular vector is stored in u (length m).
+fn power_iteration(a: &[f64; 4096], m: i32, n: i32,
+                   u: &![f64; 256], max_iter: i32) -> f64 with Mut, Div, Panic {
+    // Initialize u to [1, 0, 0, ...]
+    var i = 0
+    while i < m { u[i] = 0.0; i = i + 1 }
+    u[0] = 1.0
+
+    var sigma = 0.0
+    var iter = 0
+
+    while iter < max_iter {
+        // v = A^T * u  (length n)
+        var v: [f64; 256] = [0.0; 256]
+        var j = 0
+        while j < n {
+            var s = 0.0
+            i = 0
+            while i < m {
+                s = s + a[i * n + j] * u[i]
+                i = i + 1
+            }
+            v[j] = s
+            j = j + 1
+        }
+
+        // Normalize v
+        var vn = 0.0
+        j = 0
+        while j < n { vn = vn + v[j] * v[j]; j = j + 1 }
+        vn = t_sqrt(vn)
+        if vn < 1.0e-30 { break }
+        j = 0
+        while j < n { v[j] = v[j] / vn; j = j + 1 }
+
+        // u_new = A * v  (length m)
+        i = 0
+        while i < m {
+            var s = 0.0
+            j = 0
+            while j < n {
+                s = s + a[i * n + j] * v[j]
+                j = j + 1
+            }
+            u[i] = s
+            i = i + 1
+        }
+
+        // sigma = ||u_new||
+        var un = 0.0
+        i = 0
+        while i < m { un = un + u[i] * u[i]; i = i + 1 }
+        let new_sigma = t_sqrt(un)
+
+        // Normalize u
+        if new_sigma > 1.0e-30 {
+            i = 0
+            while i < m { u[i] = u[i] / new_sigma; i = i + 1 }
+        }
+
+        if t_abs(new_sigma - sigma) < 1.0e-12 * t_max(1.0, sigma) { sigma = new_sigma; break }
+        sigma = new_sigma
+        iter = iter + 1
+    }
+
+    sigma
+}
+
+// =============================================================================
+// Truncated SVD via deflation (helper for HOSVD)
+// =============================================================================
+
+// Compute truncated SVD of A (m×n): find the top r left singular vectors.
+// Stores the left singular vectors as columns of U (m×r).
+// Uses repeated power iteration with deflation.
+fn truncated_svd_left(a: &[f64; 4096], m: i32, n: i32, r: i32,
+                      u_out: &![f64; 4096]) with Mut, Div, Panic {
+    // Work on a copy for deflation
+    var work: [f64; 4096] = [0.0; 4096]
+    var i = 0
+    while i < m * n { work[i] = a[i]; i = i + 1 }
+
+    var k = 0
+    while k < r {
+        // Find dominant left singular vector
+        var uk: [f64; 256] = [0.0; 256]
+        let sigma = power_iteration(&work, m, n, &!uk, 200)
+
+        // Store in U column k
+        i = 0
+        while i < m { u_out[i * r + k] = uk[i]; i = i + 1 }
+
+        if sigma < 1.0e-30 { break }
+
+        // Compute corresponding right singular vector: v = A^T u / sigma
+        var vk: [f64; 256] = [0.0; 256]
+        var j = 0
+        while j < n {
+            var s = 0.0
+            i = 0
+            while i < m { s = s + work[i * n + j] * uk[i]; i = i + 1 }
+            vk[j] = s / sigma
+            j = j + 1
+        }
+
+        // Deflate: work = work - sigma * u * v^T
+        i = 0
+        while i < m {
+            j = 0
+            while j < n {
+                work[i * n + j] = work[i * n + j] - sigma * uk[i] * vk[j]
+                j = j + 1
+            }
+            i = i + 1
+        }
+
+        k = k + 1
+    }
+}
+
+// =============================================================================
+// CP decomposition via Alternating Least Squares (CP-ALS)
+// =============================================================================
+
+// CP decomposition: approximate a 3D tensor X (d0 × d1 × d2) as a sum of
+// R rank-1 tensors: X ≈ sum_{r=1}^{R} lambda_r * a_r ⊗ b_r ⊗ c_r
+//
+// factors layout: [A (d0×R) | B (d1×R) | C (d2×R)] in flat array
+//   A starts at offset 0, length d0*R
+//   B starts at offset d0*R, length d1*R
+//   C starts at offset (d0+d1)*R, length d2*R
+//
+// Returns the relative residual ||X - X_approx|| / ||X||.
+fn cp_als_3d(tensor: &[f64; 4096], d0: i32, d1: i32, d2: i32,
+             target_rank: i32, max_iter: i32, tol: f64,
+             factors: &![f64; 4096],
+             lambdas: &![f64; 64]) -> f64 with Mut, Div, Panic {
+    let rr = target_rank
+    let off_a = 0
+    let off_b = d0 * rr
+    let off_c = (d0 + d1) * rr
+
+    // Initialize factor matrices to 1.0
+    var i = 0
+    while i < d0 * rr { factors[off_a + i] = 1.0; i = i + 1 }
+    i = 0
+    while i < d1 * rr { factors[off_b + i] = 1.0; i = i + 1 }
+    i = 0
+    while i < d2 * rr { factors[off_c + i] = 1.0; i = i + 1 }
+    i = 0
+    while i < rr { lambdas[i] = 1.0; i = i + 1 }
+
+    let tensor_norm = mat_frobenius(tensor, d0 * d1 * d2)
+    if tensor_norm < 1.0e-30 { return 0.0 }
+
+    // Unfold tensor along each mode
+    var dims: [i32; 8] = [0; 8]
+    dims[0] = d0; dims[1] = d1; dims[2] = d2
+
+    var x0: [f64; 4096] = [0.0; 4096]  // mode-0 unfolding: d0 × (d1*d2)
+    var x1: [f64; 4096] = [0.0; 4096]  // mode-1 unfolding: d1 × (d0*d2)
+    var x2: [f64; 4096] = [0.0; 4096]  // mode-2 unfolding: d2 × (d0*d1)
+    tensor_unfold(tensor, &dims, 3, 0, &!x0)
+    tensor_unfold(tensor, &dims, 3, 1, &!x1)
+    tensor_unfold(tensor, &dims, 3, 2, &!x2)
+
+    var prev_fit = 0.0 - 1.0
+    var iter = 0
+
+    while iter < max_iter {
+        // Update A: A = X_(0) * (C ⊙ B) * inv(V)
+        // where V = (C^T C) * (B^T B) (element-wise, R×R Grammians)
+        // Simplified: for each column r, solve least squares
+
+        // Compute Khatri-Rao: C ⊙ B  (d2*d1 × R)
+        var kb: [f64; 4096] = [0.0; 4096]
+        khatri_rao(&factors[off_c], d2, rr, &factors[off_b], d1, &!kb)
+
+        // A_new = X_(0) * KB  (d0 × R)  via matmul with X_(0) (d0 × d1*d2) and KB (d1*d2 × R)
+        var a_new: [f64; 4096] = [0.0; 4096]
+        mat_mul(&x0, d0, d1 * d2, &kb, d1 * d2, rr, &!a_new)
+
+        // Normalize columns of A and store lambdas
+        var r = 0
+        while r < rr {
+            var col_norm = 0.0
+            i = 0
+            while i < d0 { col_norm = col_norm + a_new[i * rr + r] * a_new[i * rr + r]; i = i + 1 }
+            col_norm = t_sqrt(col_norm)
+            if col_norm > 1.0e-30 {
+                lambdas[r] = col_norm
+                i = 0
+                while i < d0 { factors[off_a + i * rr + r] = a_new[i * rr + r] / col_norm; i = i + 1 }
+            }
+            r = r + 1
+        }
+
+        // Update B: B = X_(1) * (C ⊙ A)
+        var ka: [f64; 4096] = [0.0; 4096]
+        khatri_rao(&factors[off_c], d2, rr, &factors[off_a], d0, &!ka)
+
+        var b_new: [f64; 4096] = [0.0; 4096]
+        mat_mul(&x1, d1, d0 * d2, &ka, d0 * d2, rr, &!b_new)
+
+        r = 0
+        while r < rr {
+            var col_norm = 0.0
+            i = 0
+            while i < d1 { col_norm = col_norm + b_new[i * rr + r] * b_new[i * rr + r]; i = i + 1 }
+            col_norm = t_sqrt(col_norm)
+            if col_norm > 1.0e-30 {
+                lambdas[r] = col_norm
+                i = 0
+                while i < d1 { factors[off_b + i * rr + r] = b_new[i * rr + r] / col_norm; i = i + 1 }
+            }
+            r = r + 1
+        }
+
+        // Update C: C = X_(2) * (B ⊙ A)
+        var kba: [f64; 4096] = [0.0; 4096]
+        khatri_rao(&factors[off_b], d1, rr, &factors[off_a], d0, &!kba)
+
+        var c_new: [f64; 4096] = [0.0; 4096]
+        mat_mul(&x2, d2, d0 * d1, &kba, d0 * d1, rr, &!c_new)
+
+        r = 0
+        while r < rr {
+            var col_norm = 0.0
+            i = 0
+            while i < d2 { col_norm = col_norm + c_new[i * rr + r] * c_new[i * rr + r]; i = i + 1 }
+            col_norm = t_sqrt(col_norm)
+            if col_norm > 1.0e-30 {
+                lambdas[r] = col_norm
+                i = 0
+                while i < d2 { factors[off_c + i * rr + r] = c_new[i * rr + r] / col_norm; i = i + 1 }
+            }
+            r = r + 1
+        }
+
+        // Compute fit: reconstruct and compare
+        // Approximate: fit = 1 - ||X - X_hat||/||X||
+        // Use: ||X - X_hat||^2 = ||X||^2 - 2*<X, X_hat> + ||X_hat||^2
+        // For efficiency, compute via Grammians
+
+        // Simple check: compute residual every 10 iterations
+        if (iter + 1) - ((iter + 1) / 5) * 5 == 0 || iter == max_iter - 1 {
+            // Reconstruct X_hat (expensive but straightforward for small tensors)
+            var x_hat: [f64; 4096] = [0.0; 4096]
+            var idx = 0
+            while idx < d0 * d1 * d2 { x_hat[idx] = 0.0; idx = idx + 1 }
+
+            r = 0
+            while r < rr {
+                var i0 = 0
+                while i0 < d0 {
+                    var i1 = 0
+                    while i1 < d1 {
+                        var i2 = 0
+                        while i2 < d2 {
+                            let flat_idx = i0 * d1 * d2 + i1 * d2 + i2
+                            x_hat[flat_idx] = x_hat[flat_idx] + lambdas[r] *
+                                factors[off_a + i0 * rr + r] *
+                                factors[off_b + i1 * rr + r] *
+                                factors[off_c + i2 * rr + r]
+                            i2 = i2 + 1
+                        }
+                        i1 = i1 + 1
+                    }
+                    i0 = i0 + 1
+                }
+                r = r + 1
+            }
+
+            // Residual
+            var res_sq = 0.0
+            idx = 0
+            while idx < d0 * d1 * d2 {
+                let diff = tensor[idx] - x_hat[idx]
+                res_sq = res_sq + diff * diff
+                idx = idx + 1
+            }
+            let fit = 1.0 - t_sqrt(res_sq) / tensor_norm
+
+            if t_abs(fit - prev_fit) < tol { return t_sqrt(res_sq) / tensor_norm }
+            prev_fit = fit
+        }
+
+        iter = iter + 1
+    }
+
+    // Final residual
+    var x_hat: [f64; 4096] = [0.0; 4096]
+    var idx = 0
+    while idx < d0 * d1 * d2 { x_hat[idx] = 0.0; idx = idx + 1 }
+
+    var r = 0
+    while r < rr {
+        var i0 = 0
+        while i0 < d0 {
+            var i1 = 0
+            while i1 < d1 {
+                var i2 = 0
+                while i2 < d2 {
+                    let flat_idx = i0 * d1 * d2 + i1 * d2 + i2
+                    x_hat[flat_idx] = x_hat[flat_idx] + lambdas[r] *
+                        factors[off_a + i0 * rr + r] *
+                        factors[off_b + i1 * rr + r] *
+                        factors[off_c + i2 * rr + r]
+                    i2 = i2 + 1
+                }
+                i1 = i1 + 1
+            }
+            i0 = i0 + 1
+        }
+        r = r + 1
+    }
+
+    var res_sq = 0.0
+    idx = 0
+    while idx < d0 * d1 * d2 {
+        let diff = tensor[idx] - x_hat[idx]
+        res_sq = res_sq + diff * diff
+        idx = idx + 1
+    }
+    t_sqrt(res_sq) / tensor_norm
+}
+
+// =============================================================================
+// Tucker decomposition via HOSVD
+// =============================================================================
+
+// Higher-Order SVD (HOSVD) for 3D tensors.
+// Decomposes X (d0 × d1 × d2) into core tensor G and factor matrices U0, U1, U2:
+//   X ≈ G ×_0 U0 ×_1 U1 ×_2 U2
+//
+// target_ranks: [r0, r1, r2] — truncation ranks for each mode.
+// core: output core tensor (r0 × r1 × r2)
+// u_factors: [U0 (d0×r0) | U1 (d1×r1) | U2 (d2×r2)] flattened
+//
+// This is a non-iterative, one-pass decomposition (truncated SVD of each unfolding).
+fn tucker_hosvd_3d(tensor: &[f64; 4096], d0: i32, d1: i32, d2: i32,
+                   r0: i32, r1: i32, r2: i32,
+                   core: &![f64; 4096],
+                   u_factors: &![f64; 4096]) with Mut, Div, Panic {
+    var dims: [i32; 8] = [0; 8]
+    dims[0] = d0; dims[1] = d1; dims[2] = d2
+
+    // Compute U0: truncated SVD of mode-0 unfolding (d0 × d1*d2), keep top r0 columns
+    let off_u0 = 0
+    let off_u1 = d0 * r0
+    let off_u2 = d0 * r0 + d1 * r1
+
+    var x0: [f64; 4096] = [0.0; 4096]
+    tensor_unfold(tensor, &dims, 3, 0, &!x0)
+    var u0_full: [f64; 4096] = [0.0; 4096]
+    truncated_svd_left(&x0, d0, d1 * d2, r0, &!u0_full)
+    var i = 0
+    while i < d0 * r0 { u_factors[off_u0 + i] = u0_full[i]; i = i + 1 }
+
+    // Compute U1: truncated SVD of mode-1 unfolding (d1 × d0*d2)
+    var x1: [f64; 4096] = [0.0; 4096]
+    tensor_unfold(tensor, &dims, 3, 1, &!x1)
+    var u1_full: [f64; 4096] = [0.0; 4096]
+    truncated_svd_left(&x1, d1, d0 * d2, r1, &!u1_full)
+    i = 0
+    while i < d1 * r1 { u_factors[off_u1 + i] = u1_full[i]; i = i + 1 }
+
+    // Compute U2: truncated SVD of mode-2 unfolding (d2 × d0*d1)
+    var x2: [f64; 4096] = [0.0; 4096]
+    tensor_unfold(tensor, &dims, 3, 2, &!x2)
+    var u2_full: [f64; 4096] = [0.0; 4096]
+    truncated_svd_left(&x2, d2, d0 * d1, r2, &!u2_full)
+    i = 0
+    while i < d2 * r2 { u_factors[off_u2 + i] = u2_full[i]; i = i + 1 }
+
+    // Compute core: G = X ×_0 U0^T ×_1 U1^T ×_2 U2^T
+    // Step 1: Y1 = X ×_0 U0^T  (result: r0 × d1 × d2)
+    var u0t: [f64; 4096] = [0.0; 4096]
+    mat_transpose(&u0_full, d0, r0, &!u0t)  // r0 × d0
+
+    var y1: [f64; 4096] = [0.0; 4096]
+    var dims_y1: [i32; 8] = [0; 8]
+    mode_n_product(tensor, &dims, 3, &u0t, r0, 0, &!y1, &!dims_y1)
+
+    // Step 2: Y2 = Y1 ×_1 U1^T  (result: r0 × r1 × d2)
+    var u1t: [f64; 4096] = [0.0; 4096]
+    mat_transpose(&u1_full, d1, r1, &!u1t)  // r1 × d1
+
+    var y2: [f64; 4096] = [0.0; 4096]
+    var dims_y2: [i32; 8] = [0; 8]
+    mode_n_product(&y1, &dims_y1, 3, &u1t, r1, 1, &!y2, &!dims_y2)
+
+    // Step 3: G = Y2 ×_2 U2^T  (result: r0 × r1 × r2)
+    var u2t: [f64; 4096] = [0.0; 4096]
+    mat_transpose(&u2_full, d2, r2, &!u2t)  // r2 × d2
+
+    var dims_core: [i32; 8] = [0; 8]
+    mode_n_product(&y2, &dims_y2, 3, &u2t, r2, 2, core, &!dims_core)
+}
+
+// =============================================================================
+// Tensor reconstruction from Tucker
+// =============================================================================
+
+// Reconstruct tensor from Tucker decomposition: X = G ×_0 U0 ×_1 U1 ×_2 U2
+fn tucker_reconstruct_3d(core: &[f64; 4096], r0: i32, r1: i32, r2: i32,
+                         u_factors: &[f64; 4096], d0: i32, d1: i32, d2: i32,
+                         out: &![f64; 4096]) with Mut {
+    let off_u0 = 0
+    let off_u1 = d0 * r0
+    let off_u2 = d0 * r0 + d1 * r1
+
+    // Reconstruct via explicit summation (simpler for small tensors)
+    var i0 = 0
+    while i0 < d0 {
+        var i1 = 0
+        while i1 < d1 {
+            var i2 = 0
+            while i2 < d2 {
+                var val = 0.0
+                var j0 = 0
+                while j0 < r0 {
+                    var j1 = 0
+                    while j1 < r1 {
+                        var j2 = 0
+                        while j2 < r2 {
+                            val = val + core[j0 * r1 * r2 + j1 * r2 + j2] *
+                                u_factors[off_u0 + i0 * r0 + j0] *
+                                u_factors[off_u1 + i1 * r1 + j1] *
+                                u_factors[off_u2 + i2 * r2 + j2]
+                            j2 = j2 + 1
+                        }
+                        j1 = j1 + 1
+                    }
+                    j0 = j0 + 1
+                }
+                out[i0 * d1 * d2 + i1 * d2 + i2] = val
+                i2 = i2 + 1
+            }
+            i1 = i1 + 1
+        }
+        i0 = i0 + 1
+    }
+}
+
+// =============================================================================
+// Tensor scaling and addition
+// =============================================================================
+
+// Scale: Y = alpha * X
+fn tensor_scale(x: &[f64; 4096], n: i32, alpha: f64,
+                out: &![f64; 4096]) with Mut {
+    var i = 0
+    while i < n { out[i] = alpha * x[i]; i = i + 1 }
+}
+
+// Add: Z = X + Y
+fn tensor_add(x: &[f64; 4096], y: &[f64; 4096], n: i32,
+              out: &![f64; 4096]) with Mut {
+    var i = 0
+    while i < n { out[i] = x[i] + y[i]; i = i + 1 }
+}
+
+// Subtract: Z = X - Y
+fn tensor_sub(x: &[f64; 4096], y: &[f64; 4096], n: i32,
+              out: &![f64; 4096]) with Mut {
+    var i = 0
+    while i < n { out[i] = x[i] - y[i]; i = i + 1 }
+}

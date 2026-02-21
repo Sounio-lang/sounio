@@ -1,0 +1,353 @@
+//@ run-pass
+
+// ---------------------------------------------------------------------------
+// Continued fraction test suite — all helpers inlined, no imports
+// ---------------------------------------------------------------------------
+
+// --- Structs ----------------------------------------------------------------
+
+struct ContinuedFraction { coeffs: [i64; 64], len: i32 }
+struct RationalPair { p: i64, q: i64 }
+
+// --- Checker helpers (must precede callers) ----------------------------------
+
+fn check_i64(got: i64, expected: i64, pass: &!i32, fail: &!i32) with IO {
+    if got == expected {
+        *pass = *pass + 1
+    } else {
+        *fail = *fail + 1
+    }
+}
+
+fn check_bool(got: bool, expected: bool, pass: &!i32, fail: &!i32) with IO {
+    if got == expected {
+        *pass = *pass + 1
+    } else {
+        *fail = *fail + 1
+    }
+}
+
+fn check_f64_tol(got: f64, expected: f64, tol: f64, pass: &!i32, fail: &!i32) with IO {
+    let diff = got - expected
+    let abs_diff = if diff < 0.0 { 0.0 - diff } else { diff }
+    if abs_diff < tol {
+        *pass = *pass + 1
+    } else {
+        *fail = *fail + 1
+    }
+}
+
+// --- Continued fraction functions -------------------------------------------
+
+fn cf_abs_i64(x: i64) -> i64 {
+    if x < 0 { 0 - x } else { x }
+}
+
+fn cf_abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn cf_gcd(a: i64, b: i64) -> i64 with Mut, Div {
+    var x = cf_abs_i64(a)
+    var y = cf_abs_i64(b)
+    while y != 0 {
+        let t = y
+        y = x - (x / y) * y
+        x = t
+    }
+    x
+}
+
+fn cf_floor(x: f64) -> i64 {
+    let i = x as i64
+    if (i as f64) > x { i - 1 } else { i }
+}
+
+fn cf_from_rational(p: i64, q: i64) -> ContinuedFraction with Mut, Div {
+    var cf: ContinuedFraction = ContinuedFraction { coeffs: [0; 64], len: 0 }
+    if q == 0 { return cf }
+    var a = p
+    var b = q
+    if b < 0 { a = 0 - a; b = 0 - b }
+    var i = 0
+    while b != 0 && i < 64 {
+        var quo = a / b
+        if a < 0 && (a - quo * b) != 0 {
+            quo = quo - 1
+        }
+        cf.coeffs[i] = quo
+        let rem = a - quo * b
+        a = b
+        b = rem
+        i = i + 1
+    }
+    cf.len = i
+    cf
+}
+
+fn cf_to_rational(cf: &ContinuedFraction) -> RationalPair with Mut, Div {
+    if cf.len <= 0 { return RationalPair { p: 0, q: 1 } }
+    var p = cf.coeffs[cf.len - 1]
+    var q: i64 = 1
+    var i = cf.len - 2
+    while i >= 0 {
+        let new_p = cf.coeffs[i] * p + q
+        let new_q = p
+        p = new_p
+        q = new_q
+        i = i - 1
+    }
+    if q < 0 { p = 0 - p; q = 0 - q }
+    let g = cf_gcd(cf_abs_i64(p), cf_abs_i64(q))
+    if g > 1 { p = p / g; q = q / g }
+    RationalPair { p: p, q: q }
+}
+
+fn cf_convergent(cf: &ContinuedFraction, k: i32) -> RationalPair with Mut, Div {
+    // Wallis recurrence
+    var p_prev: i64 = 1
+    var p_curr = cf.coeffs[0]
+    var q_prev: i64 = 0
+    var q_curr: i64 = 1
+    if k == 0 { return RationalPair { p: p_curr, q: q_curr } }
+    var i = 1
+    while i <= k {
+        let a = cf.coeffs[i]
+        let p_new = a * p_curr + p_prev
+        let q_new = a * q_curr + q_prev
+        p_prev = p_curr
+        q_prev = q_curr
+        p_curr = p_new
+        q_curr = q_new
+        i = i + 1
+    }
+    RationalPair { p: p_curr, q: q_curr }
+}
+
+fn cf_from_f64(x: f64, max_terms: i32) -> ContinuedFraction with Mut, Div, Panic {
+    var cf: ContinuedFraction = ContinuedFraction { coeffs: [0; 64], len: 0 }
+    var r = x
+    var i = 0
+    let limit = if max_terms < 64 { max_terms } else { 64 }
+    while i < limit {
+        let a = cf_floor(r)
+        cf.coeffs[i] = a
+        i = i + 1
+        let frac = r - (a as f64)
+        if cf_abs_f64(frac) < 1.0e-14 { break }
+        r = 1.0 / frac
+        if r > 1.0e15 { break }
+    }
+    cf.len = i
+    cf
+}
+
+fn cf_to_f64(cf: &ContinuedFraction) -> f64 with Mut, Div {
+    if cf.len <= 0 { return 0.0 }
+    var result = cf.coeffs[cf.len - 1] as f64
+    var i = cf.len - 2
+    while i >= 0 {
+        result = (cf.coeffs[i] as f64) + 1.0 / result
+        i = i - 1
+    }
+    result
+}
+
+fn cf_best_rational(x: f64, max_denom: i64) -> RationalPair with Mut, Div, Panic {
+    let cf = cf_from_f64(x, 50)
+    var best_p = cf.coeffs[0]
+    var best_q: i64 = 1
+    var best_err = cf_abs_f64(x - (best_p as f64))
+    var p_prev: i64 = 1
+    var p_curr = cf.coeffs[0]
+    var q_prev: i64 = 0
+    var q_curr: i64 = 1
+    var i = 1
+    while i < cf.len {
+        let a = cf.coeffs[i]
+        let p_new = a * p_curr + p_prev
+        let q_new = a * q_curr + q_prev
+        if q_new > max_denom { break }
+        let err = cf_abs_f64(x - (p_new as f64) / (q_new as f64))
+        if err < best_err {
+            best_p = p_new
+            best_q = q_new
+            best_err = err
+        }
+        p_prev = p_curr
+        q_prev = q_curr
+        p_curr = p_new
+        q_curr = q_new
+        i = i + 1
+    }
+    RationalPair { p: best_p, q: best_q }
+}
+
+// --- Main -------------------------------------------------------------------
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    var pass = 0
+    var fail = 0
+
+    // -- Constants -----------------------------------------------------------
+    let pi = 3.14159265358979323846
+    let sqrt2 = 1.41421356237309504880
+    let phi = 1.61803398874989484820
+
+    // ========================================================================
+    // Test 1: CF(355/113) = [3, 7, 16], len = 3
+    // ========================================================================
+    let cf1 = cf_from_rational(355, 113)
+    check_i64(cf1.len as i64, 3, &!pass, &!fail)
+    check_i64(cf1.coeffs[0], 3, &!pass, &!fail)
+    check_i64(cf1.coeffs[1], 7, &!pass, &!fail)
+    check_i64(cf1.coeffs[2], 16, &!pass, &!fail)
+
+    // ========================================================================
+    // Test 2: CF(1/1) = [1], CF(0/1) = [0]
+    // ========================================================================
+    let cf_one = cf_from_rational(1, 1)
+    check_i64(cf_one.len as i64, 1, &!pass, &!fail)
+    check_i64(cf_one.coeffs[0], 1, &!pass, &!fail)
+
+    let cf_zero = cf_from_rational(0, 1)
+    check_i64(cf_zero.len as i64, 1, &!pass, &!fail)
+    check_i64(cf_zero.coeffs[0], 0, &!pass, &!fail)
+
+    // ========================================================================
+    // Test 3: CF(22/7) = [3, 7] — classic pi approximation
+    // ========================================================================
+    let cf3 = cf_from_rational(22, 7)
+    check_i64(cf3.len as i64, 2, &!pass, &!fail)
+    check_i64(cf3.coeffs[0], 3, &!pass, &!fail)
+    check_i64(cf3.coeffs[1], 7, &!pass, &!fail)
+
+    // ========================================================================
+    // Test 4: cf_to_rational([3, 7]) gives 22/7
+    // ========================================================================
+    let rat4 = cf_to_rational(&cf3)
+    check_i64(rat4.p, 22, &!pass, &!fail)
+    check_i64(rat4.q, 7, &!pass, &!fail)
+
+    // ========================================================================
+    // Test 5: cf_to_rational([3, 7, 16]) gives 355/113
+    // ========================================================================
+    let rat5 = cf_to_rational(&cf1)
+    check_i64(rat5.p, 355, &!pass, &!fail)
+    check_i64(rat5.q, 113, &!pass, &!fail)
+
+    // ========================================================================
+    // Test 6: cf_from_f64(pi) starts with [3, 7, 15, 1, 292, ...]
+    // ========================================================================
+    let cf_pi = cf_from_f64(pi, 20)
+    check_i64(cf_pi.coeffs[0], 3, &!pass, &!fail)
+    check_i64(cf_pi.coeffs[1], 7, &!pass, &!fail)
+    check_i64(cf_pi.coeffs[2], 15, &!pass, &!fail)
+    check_i64(cf_pi.coeffs[3], 1, &!pass, &!fail)
+    check_i64(cf_pi.coeffs[4], 292, &!pass, &!fail)
+
+    // ========================================================================
+    // Test 7: Convergent 0 of pi CF = 3/1
+    // ========================================================================
+    let conv0 = cf_convergent(&cf_pi, 0)
+    check_i64(conv0.p, 3, &!pass, &!fail)
+    check_i64(conv0.q, 1, &!pass, &!fail)
+
+    // ========================================================================
+    // Test 8: Convergent 1 of pi CF = 22/7
+    // ========================================================================
+    let conv1 = cf_convergent(&cf_pi, 1)
+    check_i64(conv1.p, 22, &!pass, &!fail)
+    check_i64(conv1.q, 7, &!pass, &!fail)
+
+    // ========================================================================
+    // Test 9: Convergent 2 of pi CF = 333/106
+    // ========================================================================
+    let conv2 = cf_convergent(&cf_pi, 2)
+    check_i64(conv2.p, 333, &!pass, &!fail)
+    check_i64(conv2.q, 106, &!pass, &!fail)
+
+    // ========================================================================
+    // Test 10: Convergent 3 of pi CF = 355/113
+    // ========================================================================
+    let conv3 = cf_convergent(&cf_pi, 3)
+    check_i64(conv3.p, 355, &!pass, &!fail)
+    check_i64(conv3.q, 113, &!pass, &!fail)
+
+    // ========================================================================
+    // Test 11: cf_to_f64 round-trip for sqrt(2)
+    //   |cf_to_f64(cf_from_f64(sqrt2)) - sqrt2| < 1e-12
+    // ========================================================================
+    let cf_sqrt2 = cf_from_f64(sqrt2, 30)
+    let rt_sqrt2 = cf_to_f64(&cf_sqrt2)
+    check_f64_tol(rt_sqrt2, sqrt2, 1.0e-12, &!pass, &!fail)
+
+    // ========================================================================
+    // Test 12: best_rational(pi, 1000) = 355/113
+    // ========================================================================
+    let best_pi = cf_best_rational(pi, 1000)
+    check_i64(best_pi.p, 355, &!pass, &!fail)
+    check_i64(best_pi.q, 113, &!pass, &!fail)
+
+    // ========================================================================
+    // Test 13: best_rational(sqrt(2), 100) = 99/70 or 140/99
+    //   Both are valid best approximations; 99/70 has denom <= 100 and
+    //   |99/70 - sqrt(2)| ~ 7.2e-5. 140/99 has denom <= 100 and
+    //   |140/99 - sqrt(2)| ~ 7.2e-5 (same accuracy by conjugacy).
+    //   The algorithm returns whichever convergent is best; 99/70 is
+    //   convergent [1;2,2,2,2] and 140/99 is [1;2,2,2,2,2] with q=99<=100.
+    //   Convergents of sqrt(2): 1/1, 3/2, 7/5, 17/12, 41/29, 99/70, 239/169
+    //   99/70 is the last with q <= 100.
+    // ========================================================================
+    let best_s2 = cf_best_rational(sqrt2, 100)
+    check_i64(best_s2.p, 99, &!pass, &!fail)
+    check_i64(best_s2.q, 70, &!pass, &!fail)
+
+    // ========================================================================
+    // Test 14: Golden ratio CF [1;1,1,1,...] converges to phi
+    //   Build a 20-term CF with all coefficients = 1
+    //   cf_to_f64 should approximate phi within 1e-6
+    // ========================================================================
+    var cf_phi: ContinuedFraction = ContinuedFraction { coeffs: [0; 64], len: 20 }
+    var j = 0
+    while j < 20 {
+        cf_phi.coeffs[j] = 1
+        j = j + 1
+    }
+    let phi_approx = cf_to_f64(&cf_phi)
+    check_f64_tol(phi_approx, phi, 1.0e-6, &!pass, &!fail)
+
+    // ========================================================================
+    // Test 15: Rational round-trip — cf_to_rational(cf_from_rational(p,q)) == (p,q)
+    //   Test with several rationals: 17/5, 1/3, 7/1, 103/97
+    // ========================================================================
+
+    // 17/5
+    let cf_17_5 = cf_from_rational(17, 5)
+    let rt_17_5 = cf_to_rational(&cf_17_5)
+    check_i64(rt_17_5.p, 17, &!pass, &!fail)
+    check_i64(rt_17_5.q, 5, &!pass, &!fail)
+
+    // 1/3
+    let cf_1_3 = cf_from_rational(1, 3)
+    let rt_1_3 = cf_to_rational(&cf_1_3)
+    check_i64(rt_1_3.p, 1, &!pass, &!fail)
+    check_i64(rt_1_3.q, 3, &!pass, &!fail)
+
+    // 7/1
+    let cf_7_1 = cf_from_rational(7, 1)
+    let rt_7_1 = cf_to_rational(&cf_7_1)
+    check_i64(rt_7_1.p, 7, &!pass, &!fail)
+    check_i64(rt_7_1.q, 1, &!pass, &!fail)
+
+    // 103/97
+    let cf_103_97 = cf_from_rational(103, 97)
+    let rt_103_97 = cf_to_rational(&cf_103_97)
+    check_i64(rt_103_97.p, 103, &!pass, &!fail)
+    check_i64(rt_103_97.q, 97, &!pass, &!fail)
+
+    if fail > 0 {
+        return 1
+    }
+    0
+}

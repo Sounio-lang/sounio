@@ -1,0 +1,417 @@
+//@ run-pass
+
+// ---------------------------------------------------------------------------
+// Tensor algebra test suite — all helpers inlined, no imports
+//
+// Functions tested:
+//   kron (Kronecker product), hadamard (Hadamard/element-wise product),
+//   outer (outer product), mat_mul (matrix multiplication)
+//
+// Properties verified:
+//   kron(I,I)=I, block structure, associativity, trace preservation,
+//   zero annihilation, scalar kron; Hadamard identity diagonal;
+//   outer product correctness and unit vectors; mat_mul identity;
+//   tensor dot product / trace relation
+// ---------------------------------------------------------------------------
+
+// ============================================================================
+// CHECKER HELPERS (must precede callers)
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn check_f64(got: f64, expected: f64, tol: f64, pass: &!i32, fail: &!i32) with IO {
+    let diff = abs_f64(got - expected)
+    if diff < tol {
+        *pass = *pass + 1
+    } else {
+        *fail = *fail + 1
+    }
+}
+
+// ============================================================================
+// TENSOR OPERATIONS (must precede test callers)
+// ============================================================================
+
+// Kronecker product: A (m x n) ⊗ B (p x q) = C (mp x nq)
+fn kron(a: &[f64; 64], m: i32, n: i32, b: &[f64; 64], p: i32, q: i32, out: &![f64; 256]) with Mut {
+    var i = 0
+    while i < m {
+        var j = 0
+        while j < n {
+            let aij = a[i * n + j]
+            var k = 0
+            while k < p {
+                var l = 0
+                while l < q {
+                    out[(i * p + k) * (n * q) + (j * q + l)] = aij * b[k * q + l]
+                    l = l + 1
+                }
+                k = k + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// Hadamard product: C[i] = A[i] * B[i]
+fn hadamard(a: &[f64; 64], b: &[f64; 64], n: i32, out: &![f64; 64]) with Mut {
+    var i = 0
+    while i < n { out[i] = a[i] * b[i]; i = i + 1 }
+}
+
+// Outer product: C[i,j] = a[i] * b[j]
+fn outer(a: &[f64; 16], m: i32, b: &[f64; 16], n: i32, out: &![f64; 256]) with Mut {
+    var i = 0
+    while i < m {
+        var j = 0
+        while j < n { out[i * n + j] = a[i] * b[j]; j = j + 1 }
+        i = i + 1
+    }
+}
+
+// Matrix multiply: C = A(m,k) * B(k,n)
+fn mat_mul(a: &[f64; 64], m: i32, k: i32, b: &[f64; 64], n: i32, c: &![f64; 64]) with Mut {
+    var idx = 0
+    while idx < m * n { c[idx] = 0.0; idx = idx + 1 }
+    var i = 0
+    while i < m {
+        var j = 0
+        while j < n {
+            var s = 0.0
+            var p = 0
+            while p < k { s = s + a[i * k + p] * b[p * n + j]; p = p + 1 }
+            c[i * n + j] = s
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    var pass = 0
+    var fail = 0
+
+    // -----------------------------------------------------------------------
+    // Test 1: kron(I2, I2) = I4
+    // I2 = [[1,0],[0,1]], result should be 4x4 identity
+    // -----------------------------------------------------------------------
+    var i2: [f64; 64] = [0.0; 64]
+    i2[0] = 1.0; i2[3] = 1.0   // I2 = [1,0,0,1] (row-major 2x2)
+
+    var kron_out: [f64; 256] = [0.0; 256]
+    kron(&i2, 2, 2, &i2, 2, 2, &!kron_out)
+
+    // I4 diagonal entries should be 1.0, off-diagonal 0.0
+    let nq4 = 4
+    var r = 0
+    while r < 4 {
+        var c = 0
+        while c < 4 {
+            let expected = if r == c { 1.0 } else { 0.0 }
+            check_f64(kron_out[r * nq4 + c], expected, 1.0e-12, &!pass, &!fail)
+            c = c + 1
+        }
+        r = r + 1
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 2: kron(A, I2) block diagonal structure
+    // A = [[2,3],[5,7]], kron(A,I2) should be:
+    //   [[2,0,3,0],
+    //    [0,2,0,3],
+    //    [5,0,7,0],
+    //    [0,5,0,7]]
+    // -----------------------------------------------------------------------
+    var a22: [f64; 64] = [0.0; 64]
+    a22[0] = 2.0; a22[1] = 3.0; a22[2] = 5.0; a22[3] = 7.0
+
+    var kron2: [f64; 256] = [0.0; 256]
+    kron(&a22, 2, 2, &i2, 2, 2, &!kron2)
+
+    // Expected block diagonal: row0=[2,0,3,0], row1=[0,2,0,3],
+    //                          row2=[5,0,7,0], row3=[0,5,0,7]
+    var expected_blk: [f64; 16] = [0.0; 16]
+    expected_blk[0]  = 2.0; expected_blk[1]  = 0.0; expected_blk[2]  = 3.0; expected_blk[3]  = 0.0
+    expected_blk[4]  = 0.0; expected_blk[5]  = 2.0; expected_blk[6]  = 0.0; expected_blk[7]  = 3.0
+    expected_blk[8]  = 5.0; expected_blk[9]  = 0.0; expected_blk[10] = 7.0; expected_blk[11] = 0.0
+    expected_blk[12] = 0.0; expected_blk[13] = 5.0; expected_blk[14] = 0.0; expected_blk[15] = 7.0
+
+    var bi = 0
+    while bi < 16 {
+        check_f64(kron2[bi], expected_blk[bi], 1.0e-12, &!pass, &!fail)
+        bi = bi + 1
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 3: outer product of [1,2,3] and [4,5]
+    // Result (3x2): [[4,5],[8,10],[12,15]]
+    // -----------------------------------------------------------------------
+    var va: [f64; 16] = [0.0; 16]
+    va[0] = 1.0; va[1] = 2.0; va[2] = 3.0
+
+    var vb: [f64; 16] = [0.0; 16]
+    vb[0] = 4.0; vb[1] = 5.0
+
+    var outer_out: [f64; 256] = [0.0; 256]
+    outer(&va, 3, &vb, 2, &!outer_out)
+
+    check_f64(outer_out[0], 4.0,  1.0e-12, &!pass, &!fail)
+    check_f64(outer_out[1], 5.0,  1.0e-12, &!pass, &!fail)
+    check_f64(outer_out[2], 8.0,  1.0e-12, &!pass, &!fail)
+    check_f64(outer_out[3], 10.0, 1.0e-12, &!pass, &!fail)
+    check_f64(outer_out[4], 12.0, 1.0e-12, &!pass, &!fail)
+    check_f64(outer_out[5], 15.0, 1.0e-12, &!pass, &!fail)
+
+    // -----------------------------------------------------------------------
+    // Test 4: Hadamard of [1,2,3,4] and [5,6,7,8] = [5,12,21,32]
+    // -----------------------------------------------------------------------
+    var ha: [f64; 64] = [0.0; 64]
+    ha[0] = 1.0; ha[1] = 2.0; ha[2] = 3.0; ha[3] = 4.0
+
+    var hb: [f64; 64] = [0.0; 64]
+    hb[0] = 5.0; hb[1] = 6.0; hb[2] = 7.0; hb[3] = 8.0
+
+    var had_out: [f64; 64] = [0.0; 64]
+    hadamard(&ha, &hb, 4, &!had_out)
+
+    check_f64(had_out[0], 5.0,  1.0e-12, &!pass, &!fail)
+    check_f64(had_out[1], 12.0, 1.0e-12, &!pass, &!fail)
+    check_f64(had_out[2], 21.0, 1.0e-12, &!pass, &!fail)
+    check_f64(had_out[3], 32.0, 1.0e-12, &!pass, &!fail)
+
+    // -----------------------------------------------------------------------
+    // Test 5: kron(A, B) dimension check — (m*p) x (n*q)
+    // A is 2x2, B is 2x2 => result is 4x4
+    // Verify element at position (3,3) which is the (1,1) entry of B
+    // scaled by A[1,1] = 7.0, so kron(A,B)[3,3] = 7.0 * B[1,1]
+    // Use B = [[1,2],[3,4]], A = [[2,3],[5,7]]
+    // kron(A,B)[3,3] = A[1,1]*B[1,1] = 7*4 = 28
+    // -----------------------------------------------------------------------
+    var b22: [f64; 64] = [0.0; 64]
+    b22[0] = 1.0; b22[1] = 2.0; b22[2] = 3.0; b22[3] = 4.0
+
+    var kron3: [f64; 256] = [0.0; 256]
+    kron(&a22, 2, 2, &b22, 2, 2, &!kron3)
+
+    // (3,3) in 4-wide row-major = index 3*4+3 = 15
+    check_f64(kron3[15], 28.0, 1.0e-12, &!pass, &!fail)
+
+    // -----------------------------------------------------------------------
+    // Test 6: Outer product symmetry — outer(a,b)[i,j] = a[i]*b[j]
+    // a = [2,5,7], b = [3,11]
+    // outer[1,0] = 5*3 = 15, outer[2,1] = 7*11 = 77
+    // -----------------------------------------------------------------------
+    var ov_a: [f64; 16] = [0.0; 16]
+    ov_a[0] = 2.0; ov_a[1] = 5.0; ov_a[2] = 7.0
+
+    var ov_b: [f64; 16] = [0.0; 16]
+    ov_b[0] = 3.0; ov_b[1] = 11.0
+
+    var outer2: [f64; 256] = [0.0; 256]
+    outer(&ov_a, 3, &ov_b, 2, &!outer2)
+
+    // outer[1,0] = index 1*2+0 = 2 => 5*3 = 15
+    check_f64(outer2[2], 15.0, 1.0e-12, &!pass, &!fail)
+    // outer[2,1] = index 2*2+1 = 5 => 7*11 = 77
+    check_f64(outer2[5], 77.0, 1.0e-12, &!pass, &!fail)
+
+    // -----------------------------------------------------------------------
+    // Test 7: kron associativity — kron(A, kron(B, C)) vs kron(kron(A, B), C)
+    // A = [[1,2],[0,1]] (2x2), B = [[1,0],[0,1]] = I2, C = [[2,0],[0,3]] (2x2)
+    // kron is associative so both sides should match at every element.
+    // We check a specific element to keep the test compact.
+    // -----------------------------------------------------------------------
+    var assoc_a: [f64; 64] = [0.0; 64]
+    assoc_a[0] = 1.0; assoc_a[1] = 2.0; assoc_a[2] = 0.0; assoc_a[3] = 1.0
+
+    var assoc_c: [f64; 64] = [0.0; 64]
+    assoc_c[0] = 2.0; assoc_c[3] = 3.0
+
+    // Step 1: kron(B, C) where B = I2, C = assoc_c => result is 4x4
+    var bc: [f64; 256] = [0.0; 256]
+    kron(&i2, 2, 2, &assoc_c, 2, 2, &!bc)
+
+    // Step 2: kron(A, kron(B,C)) => A(2x2) x BC(4x4) => 8x8
+    // We need a larger buffer. Since max is 256 and 8x8=64, we fit.
+    // But bc is [f64;256] and kron expects &[f64;64]. We'll use a copy.
+    var bc_small: [f64; 64] = [0.0; 64]
+    var ci = 0
+    while ci < 16 { bc_small[ci] = bc[ci]; ci = ci + 1 }
+
+    var left_result: [f64; 256] = [0.0; 256]
+    kron(&assoc_a, 2, 2, &bc_small, 4, 4, &!left_result)
+
+    // Step 3: kron(A, B) => A(2x2) x I2(2x2) => 4x4
+    var ab: [f64; 256] = [0.0; 256]
+    kron(&assoc_a, 2, 2, &i2, 2, 2, &!ab)
+
+    var ab_small: [f64; 64] = [0.0; 64]
+    var ci2 = 0
+    while ci2 < 16 { ab_small[ci2] = ab[ci2]; ci2 = ci2 + 1 }
+
+    // Step 4: kron(kron(A,B), C) => AB(4x4) x C(2x2) => 8x8
+    var right_result: [f64; 256] = [0.0; 256]
+    kron(&ab_small, 4, 4, &assoc_c, 2, 2, &!right_result)
+
+    // Compare element [0]: both should match
+    check_f64(left_result[0], right_result[0], 1.0e-10, &!pass, &!fail)
+    // Compare element [9] (row 1, col 1 in 8-wide)
+    check_f64(left_result[9], right_result[9], 1.0e-10, &!pass, &!fail)
+    // Compare element [63] (row 7, col 7)
+    check_f64(left_result[63], right_result[63], 1.0e-10, &!pass, &!fail)
+
+    // -----------------------------------------------------------------------
+    // Test 8: kron with zero matrix gives zero
+    // kron(A, 0) should be all zeros
+    // -----------------------------------------------------------------------
+    var zero22: [f64; 64] = [0.0; 64]
+
+    var kron_zero: [f64; 256] = [0.0; 256]
+    kron(&a22, 2, 2, &zero22, 2, 2, &!kron_zero)
+
+    var zi = 0
+    while zi < 16 {
+        check_f64(kron_zero[zi], 0.0, 1.0e-12, &!pass, &!fail)
+        zi = zi + 1
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 9: kron(scalar, B) = scalar * B
+    // kron([2], B) where B = [[1,2],[3,4]] => [[2,4],[6,8]]
+    // Treat scalar as 1x1 matrix
+    // -----------------------------------------------------------------------
+    var scalar: [f64; 64] = [0.0; 64]
+    scalar[0] = 2.0
+
+    var kron_scalar: [f64; 256] = [0.0; 256]
+    kron(&scalar, 1, 1, &b22, 2, 2, &!kron_scalar)
+
+    check_f64(kron_scalar[0], 2.0,  1.0e-12, &!pass, &!fail)
+    check_f64(kron_scalar[1], 4.0,  1.0e-12, &!pass, &!fail)
+    check_f64(kron_scalar[2], 6.0,  1.0e-12, &!pass, &!fail)  // row-major: index 2 = (1,0)
+    check_f64(kron_scalar[3], 8.0,  1.0e-12, &!pass, &!fail)
+
+    // -----------------------------------------------------------------------
+    // Test 10: Hadamard of identity with matrix = diagonal of that matrix
+    // I2 = [[1,0],[0,1]], M = [[9,5],[3,7]]
+    // Hadamard = [[9,0],[0,7]] — diagonal extracted, off-diag zeroed
+    // -----------------------------------------------------------------------
+    var m22: [f64; 64] = [0.0; 64]
+    m22[0] = 9.0; m22[1] = 5.0; m22[2] = 3.0; m22[3] = 7.0
+
+    var had_id: [f64; 64] = [0.0; 64]
+    hadamard(&i2, &m22, 4, &!had_id)
+
+    check_f64(had_id[0], 9.0, 1.0e-12, &!pass, &!fail)  // 1*9
+    check_f64(had_id[1], 0.0, 1.0e-12, &!pass, &!fail)  // 0*5
+    check_f64(had_id[2], 0.0, 1.0e-12, &!pass, &!fail)  // 0*3
+    check_f64(had_id[3], 7.0, 1.0e-12, &!pass, &!fail)  // 1*7
+
+    // -----------------------------------------------------------------------
+    // Test 11: Outer product of unit vectors
+    // e_1 = [0,1,0], e_2 = [0,0,1]  (3-dim)
+    // outer(e1, e2) should have exactly one 1.0 at position (1,2) = index 5
+    // -----------------------------------------------------------------------
+    var e1: [f64; 16] = [0.0; 16]
+    e1[1] = 1.0
+
+    var e2: [f64; 16] = [0.0; 16]
+    e2[2] = 1.0
+
+    var outer_unit: [f64; 256] = [0.0; 256]
+    outer(&e1, 3, &e2, 3, &!outer_unit)
+
+    // Only (1,2) = index 1*3+2 = 5 should be 1.0
+    var ui = 0
+    while ui < 9 {
+        let exp_val = if ui == 5 { 1.0 } else { 0.0 }
+        check_f64(outer_unit[ui], exp_val, 1.0e-12, &!pass, &!fail)
+        ui = ui + 1
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 12: mat_mul A * I = A
+    // A = [[2,3],[5,7]], I2 = [[1,0],[0,1]]
+    // A * I = A
+    // -----------------------------------------------------------------------
+    var mul_out: [f64; 64] = [0.0; 64]
+    mat_mul(&a22, 2, 2, &i2, 2, &!mul_out)
+
+    check_f64(mul_out[0], 2.0, 1.0e-12, &!pass, &!fail)
+    check_f64(mul_out[1], 3.0, 1.0e-12, &!pass, &!fail)
+    check_f64(mul_out[2], 5.0, 1.0e-12, &!pass, &!fail)
+    check_f64(mul_out[3], 7.0, 1.0e-12, &!pass, &!fail)
+
+    // -----------------------------------------------------------------------
+    // Test 13: mat_mul I * B = B
+    // I2 * B where B = [[1,2],[3,4]]
+    // -----------------------------------------------------------------------
+    var mul_out2: [f64; 64] = [0.0; 64]
+    mat_mul(&i2, 2, 2, &b22, 2, &!mul_out2)
+
+    check_f64(mul_out2[0], 1.0, 1.0e-12, &!pass, &!fail)
+    check_f64(mul_out2[1], 2.0, 1.0e-12, &!pass, &!fail)
+    check_f64(mul_out2[2], 3.0, 1.0e-12, &!pass, &!fail)
+    check_f64(mul_out2[3], 4.0, 1.0e-12, &!pass, &!fail)
+
+    // -----------------------------------------------------------------------
+    // Test 14: Tensor dot product — sum of Hadamard = trace(A^T * B)
+    // A = [[2,3],[5,7]], B = [[1,2],[3,4]]
+    // Hadamard sum = 2*1 + 3*2 + 5*3 + 7*4 = 2 + 6 + 15 + 28 = 51
+    // A^T = [[2,5],[3,7]], A^T * B = [[2*1+5*3, 2*2+5*4],[3*1+7*3, 3*2+7*4]]
+    //                              = [[17, 24],[24, 34]]
+    // trace(A^T * B) = 17 + 34 = 51   ✓
+    // -----------------------------------------------------------------------
+    var had_ab: [f64; 64] = [0.0; 64]
+    hadamard(&a22, &b22, 4, &!had_ab)
+
+    let tensor_dot = had_ab[0] + had_ab[1] + had_ab[2] + had_ab[3]
+
+    // Compute A^T * B via mat_mul
+    var at: [f64; 64] = [0.0; 64]
+    at[0] = a22[0]; at[1] = a22[2]   // transpose: swap (0,1) and (1,0)
+    at[2] = a22[1]; at[3] = a22[3]
+
+    var atb: [f64; 64] = [0.0; 64]
+    mat_mul(&at, 2, 2, &b22, 2, &!atb)
+
+    let trace_atb = atb[0] + atb[3]  // trace = diagonal sum
+
+    check_f64(tensor_dot, trace_atb, 1.0e-12, &!pass, &!fail)
+    check_f64(tensor_dot, 51.0,      1.0e-12, &!pass, &!fail)
+
+    // -----------------------------------------------------------------------
+    // Test 15: kron preserves trace — tr(kron(A,B)) = tr(A) * tr(B)
+    // A = [[2,3],[5,7]], tr(A) = 2 + 7 = 9
+    // B = [[1,2],[3,4]], tr(B) = 1 + 4 = 5
+    // tr(A) * tr(B) = 45
+    // kron(A,B) is 4x4, trace = sum of diagonal = kron[0] + kron[5] + kron[10] + kron[15]
+    // kron(A,B)[0,0] = A[0,0]*B[0,0] = 2, [1,1] = A[0,0]*B[1,1] = 8,
+    //          [2,2] = A[1,1]*B[0,0] = 7, [3,3] = A[1,1]*B[1,1] = 28
+    // trace = 2 + 8 + 7 + 28 = 45  ✓
+    // -----------------------------------------------------------------------
+    // kron3 already has kron(A,B) from test 5
+    let tr_kron = kron3[0] + kron3[5] + kron3[10] + kron3[15]
+    let tr_a = a22[0] + a22[3]   // 2 + 7 = 9
+    let tr_b = b22[0] + b22[3]   // 1 + 4 = 5
+
+    check_f64(tr_kron, tr_a * tr_b, 1.0e-10, &!pass, &!fail)
+    check_f64(tr_kron, 45.0,        1.0e-10, &!pass, &!fail)
+
+    // -----------------------------------------------------------------------
+    // RESULT
+    // -----------------------------------------------------------------------
+    if fail > 0 {
+        return 1
+    }
+    0
+}

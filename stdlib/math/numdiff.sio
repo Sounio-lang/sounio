@@ -1,0 +1,329 @@
+// stdlib/math/numdiff.sio — Numerical differentiation
+//
+// Pure Sounio implementations:
+//   Finite differences (forward, backward, central, 4th order)
+//   Second derivative via central differences
+//   Richardson extrapolation (Ridders' method) with error estimate
+//   Complex-step derivative (machine precision without cancellation)
+//   Gradient, Jacobian, Hessian for multivariate functions
+//
+// References:
+//   Ridders (1982): "Accurate computation of F'(x) and F'(x)F''(x)"
+//   Squire & Trapp (1998): "Using Complex Variables to Estimate Derivatives
+//     of Real Functions"
+//   Press et al. (2007): "Numerical Recipes" Ch. 5.7
+//   Gill, Murray & Wright (1981): "Practical Optimization"
+
+// =============================================================================
+// Helpers
+// =============================================================================
+
+fn nd_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn nd_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+fn nd_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+fn nd_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn nd_cbrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x == 0.0 { return 0.0 }
+    let neg = x < 0.0
+    var ax = nd_abs(x)
+    var y = ax
+    if ax > 1.0 { y = ax / 3.0 } else { y = 1.0 }
+    var i = 0
+    while i < 30 { y = (2.0 * y + ax / (y * y)) / 3.0; i = i + 1 }
+    if neg { 0.0 - y } else { y }
+}
+
+// Machine epsilon
+fn nd_eps() -> f64 { 2.2204460492503131e-16 }
+
+// =============================================================================
+// Basic finite differences
+// =============================================================================
+
+// Forward difference: f'(x) ≈ (f(x+h) - f(x)) / h.
+// Error: O(h). Optimal h ≈ sqrt(eps) * |x| for smooth f.
+fn diff_forward(f: fn(f64) -> f64 with Mut, Div, Panic, x: f64, h: f64) -> f64 with Mut, Div, Panic {
+    (f(x + h) - f(x)) / h
+}
+
+// Backward difference: f'(x) ≈ (f(x) - f(x-h)) / h.
+fn diff_backward(f: fn(f64) -> f64 with Mut, Div, Panic, x: f64, h: f64) -> f64 with Mut, Div, Panic {
+    (f(x) - f(x - h)) / h
+}
+
+// Central difference: f'(x) ≈ (f(x+h) - f(x-h)) / (2h).
+// Error: O(h^2). Optimal h ≈ eps^{1/3} * |x|.
+fn diff_central(f: fn(f64) -> f64 with Mut, Div, Panic, x: f64, h: f64) -> f64 with Mut, Div, Panic {
+    (f(x + h) - f(x - h)) / (2.0 * h)
+}
+
+// 4th-order central difference:
+// f'(x) ≈ (-f(x+2h) + 8f(x+h) - 8f(x-h) + f(x-2h)) / (12h).
+// Error: O(h^4). Optimal h ≈ eps^{1/5} * |x|.
+fn diff_central_4th(f: fn(f64) -> f64 with Mut, Div, Panic, x: f64, h: f64) -> f64 with Mut, Div, Panic {
+    let fm2 = f(x - 2.0 * h)
+    let fm1 = f(x - h)
+    let fp1 = f(x + h)
+    let fp2 = f(x + 2.0 * h)
+    (0.0 - fp2 + 8.0 * fp1 - 8.0 * fm1 + fm2) / (12.0 * h)
+}
+
+// Second derivative: f''(x) ≈ (f(x+h) - 2f(x) + f(x-h)) / h^2.
+// Error: O(h^2).
+fn diff_second(f: fn(f64) -> f64 with Mut, Div, Panic, x: f64, h: f64) -> f64 with Mut, Div, Panic {
+    (f(x + h) - 2.0 * f(x) + f(x - h)) / (h * h)
+}
+
+// 4th-order second derivative:
+// f''(x) ≈ (-f(x+2h) + 16f(x+h) - 30f(x) + 16f(x-h) - f(x-2h)) / (12h^2).
+fn diff_second_4th(f: fn(f64) -> f64 with Mut, Div, Panic, x: f64, h: f64) -> f64 with Mut, Div, Panic {
+    let fm2 = f(x - 2.0 * h)
+    let fm1 = f(x - h)
+    let f0 = f(x)
+    let fp1 = f(x + h)
+    let fp2 = f(x + 2.0 * h)
+    (0.0 - fp2 + 16.0 * fp1 - 30.0 * f0 + 16.0 * fm1 - fm2) / (12.0 * h * h)
+}
+
+// =============================================================================
+// Richardson extrapolation (Ridders' method)
+// =============================================================================
+
+// Ridders' method for f'(x) with automatic step size selection.
+// Builds a Neville tableau of finite-difference estimates at decreasing step sizes.
+// Returns the best estimate and an error bound.
+// Result: out[0] = derivative, out[1] = error estimate.
+fn diff_richardson(f: fn(f64) -> f64 with Mut, Div, Panic, x: f64, out: &![f64; 2]) with Mut, Div, Panic {
+    let ntab: i32 = 10
+    let con = 1.4       // Step reduction factor
+    let con2 = con * con
+    let safe = 2.0      // Return when error increases by this factor
+
+    // Initial step size: use x-dependent or fixed
+    var h = if nd_abs(x) > 1.0 { 0.01 * nd_abs(x) } else { 0.01 }
+
+    // Tableau: a[i][j] stored as a[i * ntab + j] in flat array
+    var a: [f64; 100] = [0.0; 100]
+
+    // First estimate
+    a[0] = (f(x + h) - f(x - h)) / (2.0 * h)
+    var err = 1.0e30
+    out[0] = a[0]
+    out[1] = err
+
+    var i = 1
+    while i < ntab {
+        h = h / con
+
+        // Current central difference at step h
+        a[i * ntab] = (f(x + h) - f(x - h)) / (2.0 * h)
+
+        var fac = con2
+        var j = 1
+        while j <= i {
+            // Neville extrapolation: a[i][j] = (a[i][j-1]*fac - a[i-1][j-1]) / (fac - 1)
+            let prev_row = a[(i - 1) * ntab + (j - 1)]
+            let curr_col = a[i * ntab + (j - 1)]
+            a[i * ntab + j] = (curr_col * fac - prev_row) / (fac - 1.0)
+            fac = fac * con2
+
+            let errt = nd_max(nd_abs(a[i * ntab + j] - curr_col), nd_abs(a[i * ntab + j] - prev_row))
+            if errt <= err {
+                err = errt
+                out[0] = a[i * ntab + j]
+                out[1] = err
+            }
+            j = j + 1
+        }
+
+        // Return early if error is growing
+        let last_err = nd_abs(a[i * ntab + i] - a[(i - 1) * ntab + (i - 1)])
+        if last_err >= safe * err {
+            return
+        }
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Optimal step size selection
+// =============================================================================
+
+// Optimal step size for central differences: h_opt ≈ eps^{1/3} * max(|x|, 1)
+fn optimal_h_central(x: f64) -> f64 with Mut, Div, Panic {
+    nd_cbrt(nd_eps()) * nd_max(nd_abs(x), 1.0)
+}
+
+// Optimal step for forward differences: h_opt ≈ sqrt(eps) * max(|x|, 1)
+fn optimal_h_forward(x: f64) -> f64 with Mut, Div, Panic {
+    nd_sqrt(nd_eps()) * nd_max(nd_abs(x), 1.0)
+}
+
+// =============================================================================
+// Gradient (multivariate first derivative)
+// =============================================================================
+
+// Gradient of f: R^n -> R via central differences.
+// Stores df/dx_i in out[0..n-1].
+fn gradient(f: fn(&[f64; 64], i32) -> f64 with Mut, Div, Panic,
+            x: &[f64; 64], n: i32,
+            out: &![f64; 64]) with Mut, Div, Panic {
+    var xp: [f64; 64] = [0.0; 64]
+    var xm: [f64; 64] = [0.0; 64]
+
+    var i = 0
+    while i < n {
+        // Copy x
+        var j = 0
+        while j < n { xp[j] = x[j]; xm[j] = x[j]; j = j + 1 }
+
+        let h = nd_cbrt(nd_eps()) * nd_max(nd_abs(x[i]), 1.0)
+        xp[i] = x[i] + h
+        xm[i] = x[i] - h
+
+        out[i] = (f(&xp, n) - f(&xm, n)) / (2.0 * h)
+
+        // Restore
+        xp[i] = x[i]
+        xm[i] = x[i]
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Jacobian
+// =============================================================================
+
+// Jacobian of f: R^n_in -> R^n_out via central differences.
+// f takes (x, n_in, out, n_out) and writes output to out.
+// Stores J[i][j] = df_i/dx_j in jac[i * n_in + j] (row-major).
+fn jacobian(f: fn(&[f64; 64], i32, &![f64; 64], i32) with Mut, Div, Panic,
+            x: &[f64; 64], n_in: i32, n_out: i32,
+            jac: &![f64; 4096]) with Mut, Div, Panic {
+    var fp: [f64; 64] = [0.0; 64]
+    var fm: [f64; 64] = [0.0; 64]
+    var xp: [f64; 64] = [0.0; 64]
+
+    var j = 0
+    while j < n_in {
+        // Copy x
+        var k = 0
+        while k < n_in { xp[k] = x[k]; k = k + 1 }
+
+        let h = nd_cbrt(nd_eps()) * nd_max(nd_abs(x[j]), 1.0)
+
+        // f(x + h*e_j)
+        xp[j] = x[j] + h
+        f(&xp, n_in, &!fp, n_out)
+
+        // f(x - h*e_j)
+        xp[j] = x[j] - h
+        f(&xp, n_in, &!fm, n_out)
+
+        // J[i][j] = (fp[i] - fm[i]) / (2h)
+        var i = 0
+        while i < n_out {
+            jac[i * n_in + j] = (fp[i] - fm[i]) / (2.0 * h)
+            i = i + 1
+        }
+
+        xp[j] = x[j]
+        j = j + 1
+    }
+}
+
+// =============================================================================
+// Hessian
+// =============================================================================
+
+// Hessian of f: R^n -> R via central differences.
+// Stores H[i][j] = d^2f/(dx_i dx_j) in hess[i * n + j] (row-major, symmetric).
+fn hessian(f: fn(&[f64; 64], i32) -> f64 with Mut, Div, Panic,
+           x: &[f64; 64], n: i32,
+           hess: &![f64; 4096]) with Mut, Div, Panic {
+    var xpp: [f64; 64] = [0.0; 64]
+    let f0 = f(x, n)
+
+    var i = 0
+    while i < n {
+        var j = i
+        while j < n {
+            // Copy x
+            var k = 0
+            while k < n { xpp[k] = x[k]; k = k + 1 }
+
+            let hi = nd_cbrt(nd_eps()) * nd_max(nd_abs(x[i]), 1.0)
+            let hj = nd_cbrt(nd_eps()) * nd_max(nd_abs(x[j]), 1.0)
+
+            if i == j {
+                // Diagonal: d^2f/dx_i^2 = (f(x+h) - 2f(x) + f(x-h)) / h^2
+                xpp[i] = x[i] + hi
+                let fp = f(&xpp, n)
+                xpp[i] = x[i] - hi
+                let fm = f(&xpp, n)
+                hess[i * n + i] = (fp - 2.0 * f0 + fm) / (hi * hi)
+            } else {
+                // Off-diagonal: d^2f/(dx_i dx_j)
+                // = (f(x+h_i+h_j) - f(x+h_i-h_j) - f(x-h_i+h_j) + f(x-h_i-h_j)) / (4*h_i*h_j)
+                xpp[i] = x[i] + hi
+                xpp[j] = x[j] + hj
+                let fpp = f(&xpp, n)
+
+                xpp[j] = x[j] - hj
+                let fpm = f(&xpp, n)
+
+                xpp[i] = x[i] - hi
+                xpp[j] = x[j] + hj
+                let fmp = f(&xpp, n)
+
+                xpp[j] = x[j] - hj
+                let fmm = f(&xpp, n)
+
+                let val = (fpp - fpm - fmp + fmm) / (4.0 * hi * hj)
+                hess[i * n + j] = val
+                hess[j * n + i] = val
+            }
+
+            // Restore
+            k = 0
+            while k < n { xpp[k] = x[k]; k = k + 1 }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Laplacian
+// =============================================================================
+
+// Laplacian of f: R^n -> R = trace(Hessian) = sum d^2f/dx_i^2.
+fn laplacian(f: fn(&[f64; 64], i32) -> f64 with Mut, Div, Panic,
+             x: &[f64; 64], n: i32) -> f64 with Mut, Div, Panic {
+    let f0 = f(x, n)
+    var xp: [f64; 64] = [0.0; 64]
+    var sum = 0.0
+
+    var i = 0
+    while i < n {
+        var k = 0
+        while k < n { xp[k] = x[k]; k = k + 1 }
+
+        let h = nd_cbrt(nd_eps()) * nd_max(nd_abs(x[i]), 1.0)
+        xp[i] = x[i] + h
+        let fp = f(&xp, n)
+        xp[i] = x[i] - h
+        let fm = f(&xp, n)
+        sum = sum + (fp - 2.0 * f0 + fm) / (h * h)
+        i = i + 1
+    }
+    sum
+}

@@ -1,0 +1,397 @@
+// stdlib/math/information.sio — Information theory
+//
+// Pure Sounio implementations:
+//   Shannon entropy, Rényi entropy
+//   KL divergence, Jensen-Shannon divergence
+//   Mutual information, conditional entropy
+//   Cross-entropy
+//   Fisher information (numerical)
+//   Differential entropy (via binning)
+//
+// All functions operate on discrete probability distributions represented as
+// arrays p[0..n-1] where sum(p) = 1 and p[i] >= 0.
+//
+// References:
+//   Cover & Thomas (2006): "Elements of Information Theory" (2nd ed.)
+//   MacKay (2003): "Information Theory, Inference and Learning Algorithms"
+//   Kullback (1959): "Information Theory and Statistics"
+
+// =============================================================================
+// Helpers
+// =============================================================================
+
+fn it_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn it_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+
+fn it_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    if x == 1.0 { return 0.0 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 { term = term * t2; sum = sum + term / ((2 * k + 1) as f64); k = k + 1 }
+    2.0 * sum + (e as f64) * 0.6931471805599453
+}
+
+fn it_log2(x: f64) -> f64 with Mut, Div, Panic {
+    it_ln(x) / 0.6931471805599453
+}
+
+fn it_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 500.0 { return 1.0e200 }
+    if x < -500.0 { return 0.0 }
+    var kf = x / 0.6931471805599453
+    var k: i32 = 0
+    if kf >= 0.0 { k = kf as i32 } else { k = (kf as i32) - 1 }
+    let r = x - (k as f64) * 0.6931471805599453
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 25 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var result = sum
+    if k >= 0 { var i = 0; while i < k { result = result * 2.0; i = i + 1 } }
+    else { var i = 0; while i < (0 - k) { result = result / 2.0; i = i + 1 } }
+    result
+}
+
+fn it_pow(base: f64, exp: f64) -> f64 with Mut, Div, Panic {
+    if base <= 0.0 { return 0.0 }
+    it_exp(exp * it_ln(base))
+}
+
+fn it_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn it_floor(x: f64) -> f64 {
+    let i = x as i32
+    if (i as f64) > x { (i - 1) as f64 } else { i as f64 }
+}
+
+// =============================================================================
+// Shannon entropy
+// =============================================================================
+
+// Shannon entropy H(X) = -sum_i p_i * log2(p_i) in bits.
+// Convention: 0 * log(0) = 0.
+fn shannon_entropy(p: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {
+    var h = 0.0
+    var i = 0
+    while i < n {
+        if p[i] > 0.0 {
+            h = h - p[i] * it_log2(p[i])
+        }
+        i = i + 1
+    }
+    h
+}
+
+// Shannon entropy in nats (natural units): H(X) = -sum p_i * ln(p_i).
+fn shannon_entropy_nats(p: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {
+    var h = 0.0
+    var i = 0
+    while i < n {
+        if p[i] > 0.0 { h = h - p[i] * it_ln(p[i]) }
+        i = i + 1
+    }
+    h
+}
+
+// =============================================================================
+// Rényi entropy
+// =============================================================================
+
+// Rényi entropy H_alpha(X) = 1/(1-alpha) * log2(sum p_i^alpha).
+// alpha > 0, alpha != 1. Limit alpha -> 1 gives Shannon entropy.
+fn renyi_entropy(p: &[f64; 256], n: i32, alpha: f64) -> f64 with Mut, Div, Panic {
+    if it_abs(alpha - 1.0) < 1.0e-12 { return shannon_entropy(p, n) }
+    if alpha <= 0.0 { return 0.0 }
+
+    var sum = 0.0
+    var i = 0
+    while i < n {
+        if p[i] > 0.0 {
+            sum = sum + it_pow(p[i], alpha)
+        }
+        i = i + 1
+    }
+    it_log2(sum) / (1.0 - alpha)
+}
+
+// Min-entropy: H_inf(X) = -log2(max_i p_i). Limit of Rényi as alpha -> inf.
+fn min_entropy(p: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {
+    var max_p = 0.0
+    var i = 0
+    while i < n {
+        if p[i] > max_p { max_p = p[i] }
+        i = i + 1
+    }
+    if max_p <= 0.0 { return 0.0 }
+    0.0 - it_log2(max_p)
+}
+
+// =============================================================================
+// KL divergence
+// =============================================================================
+
+// Kullback-Leibler divergence D_KL(P || Q) = sum_i p_i * ln(p_i / q_i).
+// Requires: q_i > 0 wherever p_i > 0.
+// Result in nats.
+fn kl_divergence(p: &[f64; 256], q: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {
+    var d = 0.0
+    var i = 0
+    while i < n {
+        if p[i] > 0.0 {
+            if q[i] <= 0.0 { return 1.0e30 }
+            d = d + p[i] * it_ln(p[i] / q[i])
+        }
+        i = i + 1
+    }
+    d
+}
+
+// KL divergence in bits.
+fn kl_divergence_bits(p: &[f64; 256], q: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {
+    kl_divergence(p, q, n) / 0.6931471805599453
+}
+
+// =============================================================================
+// Jensen-Shannon divergence
+// =============================================================================
+
+// Jensen-Shannon divergence JSD(P, Q) = 0.5*D_KL(P||M) + 0.5*D_KL(Q||M)
+// where M = (P+Q)/2. Symmetric, bounded in [0, ln(2)].
+fn js_divergence(p: &[f64; 256], q: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {
+    var m: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < n {
+        m[i] = 0.5 * (p[i] + q[i])
+        i = i + 1
+    }
+    0.5 * kl_divergence(p, &m, n) + 0.5 * kl_divergence(q, &m, n)
+}
+
+// Jensen-Shannon distance = sqrt(JSD). A proper metric.
+fn js_distance(p: &[f64; 256], q: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {
+    it_sqrt(js_divergence(p, q, n))
+}
+
+// =============================================================================
+// Cross-entropy
+// =============================================================================
+
+// Cross-entropy H(P, Q) = -sum p_i * ln(q_i) = H(P) + D_KL(P||Q).
+fn cross_entropy(p: &[f64; 256], q: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {
+    var h = 0.0
+    var i = 0
+    while i < n {
+        if p[i] > 0.0 {
+            if q[i] <= 0.0 { return 1.0e30 }
+            h = h - p[i] * it_ln(q[i])
+        }
+        i = i + 1
+    }
+    h
+}
+
+// =============================================================================
+// Mutual information
+// =============================================================================
+
+// Mutual information I(X; Y) from joint distribution p(x, y).
+// joint[i * n_y + j] = P(X=i, Y=j).
+// I(X;Y) = sum_{i,j} p(x_i, y_j) * ln(p(x_i, y_j) / (p(x_i) * p(y_j)))
+fn mutual_information(joint: &[f64; 4096], n_x: i32, n_y: i32) -> f64 with Mut, Div, Panic {
+    // Compute marginals
+    var px: [f64; 64] = [0.0; 64]
+    var py: [f64; 64] = [0.0; 64]
+
+    var i = 0
+    while i < n_x {
+        var j = 0
+        while j < n_y {
+            px[i] = px[i] + joint[i * n_y + j]
+            py[j] = py[j] + joint[i * n_y + j]
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    var mi = 0.0
+    i = 0
+    while i < n_x {
+        var j = 0
+        while j < n_y {
+            let pxy = joint[i * n_y + j]
+            if pxy > 0.0 && px[i] > 0.0 && py[j] > 0.0 {
+                mi = mi + pxy * it_ln(pxy / (px[i] * py[j]))
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    mi
+}
+
+// =============================================================================
+// Conditional entropy
+// =============================================================================
+
+// Conditional entropy H(Y|X) = H(X,Y) - H(X) = -sum p(x,y)*ln(p(y|x)).
+fn conditional_entropy(joint: &[f64; 4096], n_x: i32, n_y: i32) -> f64 with Mut, Div, Panic {
+    // Compute marginal p(x)
+    var px: [f64; 64] = [0.0; 64]
+    var i = 0
+    while i < n_x {
+        var j = 0
+        while j < n_y {
+            px[i] = px[i] + joint[i * n_y + j]
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    var h = 0.0
+    i = 0
+    while i < n_x {
+        var j = 0
+        while j < n_y {
+            let pxy = joint[i * n_y + j]
+            if pxy > 0.0 && px[i] > 0.0 {
+                h = h - pxy * it_ln(pxy / px[i])
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    h
+}
+
+// =============================================================================
+// Joint entropy
+// =============================================================================
+
+// Joint entropy H(X, Y) = -sum p(x, y) * ln(p(x, y)).
+fn joint_entropy(joint: &[f64; 4096], n_x: i32, n_y: i32) -> f64 with Mut, Div, Panic {
+    var h = 0.0
+    var i = 0
+    while i < n_x {
+        var j = 0
+        while j < n_y {
+            let pxy = joint[i * n_y + j]
+            if pxy > 0.0 {
+                h = h - pxy * it_ln(pxy)
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    h
+}
+
+// =============================================================================
+// Differential entropy (continuous, via binning)
+// =============================================================================
+
+// Differential entropy of continuous samples via histogram binning.
+// h(X) ≈ -sum p_k * ln(p_k/delta) where delta = bin width.
+// This is an approximation; for exact differential entropy, use KDE.
+fn differential_entropy(samples: &[f64; 4096], n: i32, bins: i32) -> f64 with Mut, Div, Panic {
+    if n < 2 || bins < 1 { return 0.0 }
+
+    // Find min, max
+    var s_min = samples[0]
+    var s_max = samples[0]
+    var i = 1
+    while i < n {
+        if samples[i] < s_min { s_min = samples[i] }
+        if samples[i] > s_max { s_max = samples[i] }
+        i = i + 1
+    }
+
+    let range = s_max - s_min
+    if range <= 0.0 { return 0.0 - 1.0e30 }  // degenerate
+
+    let delta = range / (bins as f64)
+
+    // Count histogram
+    var counts: [i32; 256] = [0; 256]
+    i = 0
+    while i < n {
+        var bin = ((samples[i] - s_min) / delta) as i32
+        if bin >= bins { bin = bins - 1 }
+        if bin < 0 { bin = 0 }
+        counts[bin] = counts[bin] + 1
+        i = i + 1
+    }
+
+    // Compute entropy: h ≈ -sum (count/n) * ln(count/(n*delta))
+    var h = 0.0
+    var b = 0
+    while b < bins {
+        if counts[b] > 0 {
+            let p = (counts[b] as f64) / (n as f64)
+            let density = p / delta
+            h = h - p * it_ln(density)
+        }
+        b = b + 1
+    }
+    h
+}
+
+// =============================================================================
+// Total variation distance
+// =============================================================================
+
+// Total variation distance TV(P, Q) = 0.5 * sum |p_i - q_i|.
+fn total_variation(p: &[f64; 256], q: &[f64; 256], n: i32) -> f64 with Mut, Div {
+    var tv = 0.0
+    var i = 0
+    while i < n {
+        tv = tv + it_abs(p[i] - q[i])
+        i = i + 1
+    }
+    0.5 * tv
+}
+
+// =============================================================================
+// Hellinger distance
+// =============================================================================
+
+// Hellinger distance H(P, Q) = sqrt(1 - sum sqrt(p_i * q_i)).
+// Also known as Bhattacharyya coefficient BC = sum sqrt(p_i * q_i).
+fn hellinger_distance(p: &[f64; 256], q: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {
+    var bc = 0.0
+    var i = 0
+    while i < n {
+        bc = bc + it_sqrt(p[i] * q[i])
+        i = i + 1
+    }
+    it_sqrt(it_max(0.0, 1.0 - bc))
+}
+
+// Bhattacharyya coefficient BC(P, Q) = sum sqrt(p_i * q_i).
+fn bhattacharyya_coeff(p: &[f64; 256], q: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {
+    var bc = 0.0
+    var i = 0
+    while i < n {
+        bc = bc + it_sqrt(p[i] * q[i])
+        i = i + 1
+    }
+    bc
+}
+
+// Bhattacharyya distance DB(P, Q) = -ln(BC(P, Q)).
+fn bhattacharyya_distance(p: &[f64; 256], q: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {
+    0.0 - it_ln(bhattacharyya_coeff(p, q, n))
+}

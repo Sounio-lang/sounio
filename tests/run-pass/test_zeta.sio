@@ -1,0 +1,320 @@
+//@ run-pass
+
+// ---------------------------------------------------------------------------
+// Riemann zeta and Dirichlet eta function test suite
+// All helpers inlined, no imports
+//
+// Functions tested:
+//   dirichlet_eta  -- eta(s) = sum_{n=1}^{inf} (-1)^{n-1} / n^s
+//   zeta_via_eta   -- zeta(s) = eta(s) / (1 - 2^{1-s})
+//   zeta_direct    -- zeta(s) = sum_{n=1}^{N} 1/n^s  (direct series)
+//
+// The eta series converges for Re(s) > 0 due to alternation, making it
+// a practical route to zeta(s) for s > 1 via the identity:
+//   zeta(s) = eta(s) / (1 - 2^{1-s})
+//
+// References:
+//   Titchmarsh, E.C. "The Theory of the Riemann Zeta-Function" (1986)
+//   Borwein, P. "An Efficient Algorithm for the Riemann Zeta Function" (2000)
+//   DLMF (https://dlmf.nist.gov) chapter 25
+//   Apery, R. "Irrationalite de zeta(2) et zeta(3)" (1979)
+// ---------------------------------------------------------------------------
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+fn pi_val() -> f64 {
+    3.14159265358979323846
+}
+
+fn ln2_val() -> f64 {
+    0.6931471805599453
+}
+
+// ============================================================================
+// HELPERS (must precede callers)
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn floor_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x >= 0.0 {
+        if x < 1.0 { return 0.0 }
+        var result = 0.0
+        var remaining = x
+        var power = 1000000000000000.0
+        while power >= 1.0 {
+            while remaining >= power {
+                remaining = remaining - power
+                result = result + power
+            }
+            power = power / 10.0
+        }
+        return result
+    } else {
+        let pos = 0.0 - x
+        let pos_floor = floor_f64(pos)
+        if pos > pos_floor {
+            return 0.0 - pos_floor - 1.0
+        }
+        return 0.0 - pos_floor
+    }
+}
+
+fn exp_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x > 20.0 { return exp_f64(x / 2.0) * exp_f64(x / 2.0) }
+    if x < 0.0 - 20.0 { return 1.0 / exp_f64(0.0 - x) }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 30 {
+        term = term * x / (i as f64)
+        sum = sum + term
+        i = i + 1
+    }
+    return sum
+}
+
+fn ln_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    if x == 1.0 { return 0.0 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 {
+        term = term * t2
+        sum = sum + term / ((2 * k + 1) as f64)
+        k = k + 1
+    }
+    return 2.0 * sum + (e as f64) * ln2_val()
+}
+
+fn pow_f64(base: f64, exponent: f64) -> f64 with Mut, Panic, Div {
+    if exponent == 0.0 { return 1.0 }
+    if base == 0.0 {
+        if exponent > 0.0 { return 0.0 }
+        return 1.0e30
+    }
+    if base == 1.0 { return 1.0 }
+    if base > 0.0 {
+        return exp_f64(exponent * ln_f64(base))
+    }
+    let abs_base = abs_f64(base)
+    let iexp = floor_f64(exponent)
+    if abs_f64(exponent - iexp) < 1.0e-12 {
+        let result = exp_f64(exponent * ln_f64(abs_base))
+        let half = iexp / 2.0
+        let half_floor = floor_f64(half)
+        if abs_f64(half - half_floor) > 0.25 {
+            return 0.0 - result
+        }
+        return result
+    }
+    return 0.0 - 1.0e30
+}
+
+// ============================================================================
+// CHECK HELPER
+// ============================================================================
+
+fn check_f64(label: &str, got: f64, expected: f64, tol: f64,
+             pass: &!i32, fail: &!i32) with IO, Mut {
+    let err = abs_f64(got - expected)
+    if err < tol {
+        *pass = *pass + 1
+    } else {
+        print("  FAIL ")
+        print(label)
+        print(": got=")
+        print(got)
+        print(" expected=")
+        print(expected)
+        print(" err=")
+        println(err)
+        *fail = *fail + 1
+    }
+}
+
+fn check_bool(label: &str, cond: bool,
+              pass: &!i32, fail: &!i32) with IO, Mut {
+    if cond {
+        *pass = *pass + 1
+    } else {
+        print("  FAIL ")
+        println(label)
+        *fail = *fail + 1
+    }
+}
+
+// ============================================================================
+// ZETA AND ETA FUNCTIONS
+// ============================================================================
+
+// Dirichlet eta function via direct alternating series:
+//   eta(s) = sum_{n=1}^{N} (-1)^{n-1} / n^s
+// Converges for Re(s) > 0. Uses N=50000 terms for good accuracy.
+fn dirichlet_eta(s: f64) -> f64 with Mut, Panic, Div {
+    var sum = 0.0
+    var n = 1
+    var sign = 1.0
+    while n <= 50000 {
+        sum = sum + sign / pow_f64(n as f64, s)
+        sign = 0.0 - sign
+        n = n + 1
+    }
+    return sum
+}
+
+// Riemann zeta via the eta relation:
+//   zeta(s) = eta(s) / (1 - 2^{1-s})
+// Valid for s > 1 (where the denominator is nonzero and positive).
+fn zeta_via_eta(s: f64) -> f64 with Mut, Panic, Div {
+    let eta = dirichlet_eta(s)
+    let denom = 1.0 - pow_f64(2.0, 1.0 - s)
+    return eta / denom
+}
+
+// Direct Dirichlet series for zeta(s), s > 1:
+//   zeta(s) = sum_{n=1}^{N} 1/n^s
+// Converges slowly; error ~ 1/(s-1) * N^{1-s}.
+// For large s the series converges rapidly; for s near 1 it is very slow.
+// We use N=100000 terms.
+fn zeta_direct(s: f64) -> f64 with Mut, Panic, Div {
+    var sum = 0.0
+    var n = 1
+    while n <= 100000 {
+        sum = sum + pow_f64(n as f64, 0.0 - s)
+        n = n + 1
+    }
+    return sum
+}
+
+// ============================================================================
+// MAIN TEST RUNNER
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== Riemann Zeta & Dirichlet Eta Tests ===")
+    println("")
+
+    var pass = 0
+    var fail = 0
+
+    // --- Test 1: zeta(2) = pi^2/6 (Basel problem) ---
+    // Euler proved sum 1/n^2 = pi^2/6 in 1734.
+    // Using eta route for better convergence.
+    let zeta2 = zeta_via_eta(2.0)
+    let pi2_over_6 = pi_val() * pi_val() / 6.0
+    print("Test  1: zeta(2) = pi^2/6 .......... ")
+    check_f64("zeta(2)", zeta2, pi2_over_6, 1.0e-4, &!pass, &!fail)
+    println("ok")
+
+    // --- Test 2: zeta(4) = pi^4/90 ---
+    let zeta4 = zeta_via_eta(4.0)
+    let pi4_over_90 = pow_f64(pi_val(), 4.0) / 90.0
+    print("Test  2: zeta(4) = pi^4/90 ......... ")
+    check_f64("zeta(4)", zeta4, pi4_over_90, 1.0e-4, &!pass, &!fail)
+    println("ok")
+
+    // --- Test 3: zeta(6) = pi^6/945 ---
+    let zeta6 = zeta_via_eta(6.0)
+    let pi6_over_945 = pow_f64(pi_val(), 6.0) / 945.0
+    print("Test  3: zeta(6) = pi^6/945 ........ ")
+    check_f64("zeta(6)", zeta6, pi6_over_945, 1.0e-5, &!pass, &!fail)
+    println("ok")
+
+    // --- Test 4: zeta(3) = Apery's constant ---
+    // Apery (1979) proved zeta(3) is irrational.
+    // zeta(3) = 1.2020569031595942...
+    let zeta3 = zeta_via_eta(3.0)
+    let apery = 1.2020569031595942
+    print("Test  4: zeta(3) = Apery ........... ")
+    check_f64("zeta(3)", zeta3, apery, 1.0e-4, &!pass, &!fail)
+    println("ok")
+
+    // --- Test 5: eta(1) = ln(2) ---
+    // The alternating harmonic series: sum (-1)^{n-1}/n = ln(2).
+    // Converges slowly; 50000 terms gives ~1e-5 accuracy.
+    let eta1 = dirichlet_eta(1.0)
+    print("Test  5: eta(1) = ln(2) ............ ")
+    check_f64("eta(1)", eta1, ln2_val(), 1.0e-3, &!pass, &!fail)
+    println("ok")
+
+    // --- Test 6: zeta(10) ---
+    // zeta(10) = pi^10/93555 = 1.0009945751278180...
+    let zeta10 = zeta_via_eta(10.0)
+    let zeta10_exact = 1.0009945751278180
+    print("Test  6: zeta(10) .................. ")
+    check_f64("zeta(10)", zeta10, zeta10_exact, 1.0e-5, &!pass, &!fail)
+    println("ok")
+
+    // --- Test 7: zeta(20) ---
+    // zeta(20) = 1.0000009539620338...
+    // For large s the series converges very rapidly.
+    let zeta20 = zeta_via_eta(20.0)
+    let zeta20_exact = 1.0000009539620338
+    print("Test  7: zeta(20) .................. ")
+    check_f64("zeta(20)", zeta20, zeta20_exact, 1.0e-8, &!pass, &!fail)
+    println("ok")
+
+    // --- Test 8: eta(2) = pi^2/12 ---
+    // eta(2) = (1 - 2^{1-2}) * zeta(2) = (1/2) * pi^2/6 = pi^2/12
+    let eta2 = dirichlet_eta(2.0)
+    let pi2_over_12 = pi_val() * pi_val() / 12.0
+    print("Test  8: eta(2) = pi^2/12 ......... ")
+    check_f64("eta(2)", eta2, pi2_over_12, 1.0e-4, &!pass, &!fail)
+    println("ok")
+
+    // --- Test 9: zeta(s) -> 1 as s -> infinity ---
+    // For s=50, only n=1 contributes meaningfully: zeta(50) ~ 1.0
+    let zeta50 = zeta_via_eta(50.0)
+    print("Test  9: zeta(50) ~ 1.0 ........... ")
+    check_f64("zeta(50)", zeta50, 1.0, 1.0e-10, &!pass, &!fail)
+    println("ok")
+
+    // --- Test 10: eta-zeta relation at s=4 ---
+    // Verify: eta(s) = (1 - 2^{1-s}) * zeta(s)
+    let eta4 = dirichlet_eta(4.0)
+    let factor4 = 1.0 - pow_f64(2.0, 1.0 - 4.0)
+    let eta4_from_zeta = factor4 * zeta4
+    print("Test 10: eta/zeta relation (s=4) ... ")
+    check_f64("eta-zeta(4)", eta4, eta4_from_zeta, 1.0e-4, &!pass, &!fail)
+    println("ok")
+
+    // --- Test 11: consistency zeta(2)*6/pi^2 = 1 ---
+    let ratio = zeta2 * 6.0 / (pi_val() * pi_val())
+    print("Test 11: zeta(2)*6/pi^2 = 1 ....... ")
+    check_f64("consistency", ratio, 1.0, 1.0e-4, &!pass, &!fail)
+    println("ok")
+
+    // --- Test 12: zeta(s) > 1 for all s > 1 ---
+    // Check at s = 1.5 where zeta(1.5) = 2.612375...
+    let zeta1_5 = zeta_via_eta(1.5)
+    print("Test 12: zeta(1.5) > 1 ............ ")
+    check_bool("zeta(1.5)>1", zeta1_5 > 1.0, &!pass, &!fail)
+    println("ok")
+
+    // --- Summary ---
+    println("")
+    print("Passed: ")
+    println(pass)
+    print("Failed: ")
+    println(fail)
+
+    if fail > 0 {
+        println("SOME TESTS FAILED")
+        return 1
+    }
+    println("ALL 12 TESTS PASSED")
+    return 0
+}

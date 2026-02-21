@@ -1,0 +1,480 @@
+// stdlib/special/bessel.sio — Bessel functions
+//
+// Pure Sounio implementations of Bessel functions of integer order:
+//   J_n(x)  — Bessel function of the first kind
+//   Y_n(x)  — Bessel function of the second kind (Neumann)
+//   I_n(x)  — Modified Bessel function of the first kind
+//   K_n(x)  — Modified Bessel function of the second kind
+//   j_n(x)  — Spherical Bessel function of the first kind
+//   y_n(x)  — Spherical Bessel function of the second kind
+//
+// Algorithms:
+//   J0, J1: Rational polynomial approximation (Hart et al. 1968) for |x| <= 8,
+//           Hankel asymptotic expansion for |x| > 8.
+//   Jn:    Miller's backward recurrence for n > x (numerically stable),
+//           forward recurrence for n <= x.
+//   Y0, Y1: Polynomial approximation + J*ln(x/2) for small x,
+//            Hankel asymptotic for large x.
+//   I0, I1: Polynomial approximation for |x| <= 15,
+//            asymptotic exp(x)/sqrt(2*pi*x) for |x| > 15.
+//   K0, K1: Polynomial + I*ln(x/2) for small x,
+//            asymptotic exp(-x)*sqrt(pi/(2x)) for large x.
+//
+// References:
+//   DLMF Ch. 10 (https://dlmf.nist.gov/10)
+//   Abramowitz & Stegun (1964): Ch. 9
+//   Amos (1986): "Algorithm 644" ACM TOMS
+//   Press et al. (2007): "Numerical Recipes" Ch. 6.5-6.7
+
+// =============================================================================
+// Helpers
+// =============================================================================
+
+fn bs_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn bs_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn bs_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    if x == 1.0 { return 0.0 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 { term = term * t2; sum = sum + term / ((2 * k + 1) as f64); k = k + 1 }
+    2.0 * sum + (e as f64) * 0.6931471805599453
+}
+
+fn bs_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 500.0 { return 1.0e200 }
+    if x < -500.0 { return 0.0 }
+    var kf = x / 0.6931471805599453
+    var k: i32 = 0
+    if kf >= 0.0 { k = kf as i32 } else { k = (kf as i32) - 1 }
+    let r = x - (k as f64) * 0.6931471805599453
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 25 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var result = sum
+    if k >= 0 { var i = 0; while i < k { result = result * 2.0; i = i + 1 } }
+    else { var i = 0; while i < (0 - k) { result = result / 2.0; i = i + 1 } }
+    result
+}
+
+fn bs_sin(x: f64) -> f64 with Mut, Div, Panic {
+    var a = x
+    let tp = 6.28318530717958647692
+    while a >= tp { a = a - tp }
+    while a < 0.0 { a = a + tp }
+    if a > 3.14159265358979323846 { a = a - tp }
+    let a2 = a * a
+    var sum = a
+    var term = a
+    var n = 1
+    while n < 18 { term = 0.0 - term * a2 / ((2 * n) * (2 * n + 1)) as f64; sum = sum + term; n = n + 1 }
+    sum
+}
+
+fn bs_cos(x: f64) -> f64 with Mut, Div, Panic {
+    bs_sin(x + 1.57079632679489661923)
+}
+
+fn bs_pi() -> f64 { 3.14159265358979323846 }
+fn bs_euler_gamma() -> f64 { 0.57721566490153286061 }
+
+// =============================================================================
+// J0(x) and J1(x) — Bessel functions of the first kind
+// =============================================================================
+
+// J0(x) via rational polynomial approximation for |x| <= 8,
+// Hankel asymptotic for |x| > 8.
+fn bessel_j0(x: f64) -> f64 with Mut, Div, Panic {
+    let ax = bs_abs(x)
+
+    if ax <= 8.0 {
+        // Polynomial approximation (Abramowitz & Stegun 9.4.1)
+        let y = x * x
+        let p = 57568490574.0 + y * (0.0 - 13362590354.0 + y * (651619640.7
+                + y * (0.0 - 11214424.18 + y * (77392.33017 + y * (0.0 - 184.9052456)))))
+        let q = 57568490411.0 + y * (1029532985.0 + y * (9494680.718
+                + y * (59272.64853 + y * (267.8532712 + y * 1.0))))
+        return p / q
+    }
+
+    // Hankel asymptotic for large |x|
+    let z = 8.0 / ax
+    let z2 = z * z
+    let xx = ax - 0.785398163397448   // pi/4
+
+    let p0 = 1.0 + z2 * (0.0 - 0.1098628627e-2 + z2 * (0.2734510407e-4
+             + z2 * (0.0 - 0.2073370639e-5 + z2 * 0.2093887211e-6)))
+    let q0 = 0.0 - 0.1562499995e-1 + z2 * (0.1430488765e-3 + z2 * (0.0 - 0.6911147651e-5
+             + z2 * (0.7621095161e-6 + z2 * (0.0 - 0.934935152e-7))))
+
+    bs_sqrt(0.636619772 / ax) * (bs_cos(xx) * p0 - z * bs_sin(xx) * q0)
+}
+
+// J1(x) via rational polynomial approximation for |x| <= 8,
+// Hankel asymptotic for |x| > 8.
+fn bessel_j1(x: f64) -> f64 with Mut, Div, Panic {
+    let ax = bs_abs(x)
+
+    if ax <= 8.0 {
+        let y = x * x
+        let p = x * (72362614232.0 + y * (0.0 - 7895059235.0 + y * (242396853.1
+                + y * (0.0 - 2972611.439 + y * (15704.48260 + y * (0.0 - 30.16036606))))))
+        let q = 144725228442.0 + y * (2300535178.0 + y * (18583304.74
+                + y * (99447.43394 + y * (376.9991397 + y * 1.0))))
+        return p / q
+    }
+
+    let z = 8.0 / ax
+    let z2 = z * z
+    let xx = ax - 2.356194491    // 3*pi/4
+
+    let p1 = 1.0 + z2 * (0.183105e-2 + z2 * (0.0 - 0.3516396496e-4
+             + z2 * (0.2457520174e-5 + z2 * (0.0 - 0.240337019e-6))))
+    let q1 = 0.04687499995 + z2 * (0.0 - 0.2002690873e-3 + z2 * (0.8449199096e-5
+             + z2 * (0.0 - 0.88228987e-6 + z2 * 0.105787412e-6)))
+
+    let result = bs_sqrt(0.636619772 / ax) * (bs_cos(xx) * p1 - z * bs_sin(xx) * q1)
+    if x < 0.0 { 0.0 - result } else { result }
+}
+
+// J_n(x) for integer order n >= 0.
+// Uses Miller's backward recurrence for n > |x| (numerically stable),
+// forward recurrence for n <= |x|.
+fn bessel_jn(n: i32, x: f64) -> f64 with Mut, Div, Panic {
+    if n == 0 { return bessel_j0(x) }
+    if n == 1 { return bessel_j1(x) }
+    if n < 0 { return 0.0 }
+
+    let ax = bs_abs(x)
+    if ax == 0.0 { return 0.0 }
+
+    if ax > (n as f64) {
+        // Forward recurrence: J_{k+1} = (2k/x)*J_k - J_{k-1}
+        var jm = bessel_j0(ax)
+        var j = bessel_j1(ax)
+        var k = 1
+        while k < n {
+            let jt = (2.0 * (k as f64) / ax) * j - jm
+            jm = j
+            j = jt
+            k = k + 1
+        }
+        if x < 0.0 && n - (n / 2) * 2 == 1 { return 0.0 - j }
+        return j
+    }
+
+    // Miller's backward recurrence (downward)
+    let iacc = 40
+    let bigno = 1.0e10
+    let bigni = 1.0e-10
+
+    var m = 2 * ((n + (iacc as i32)) / 2)
+    var jsum = 0.0
+    var sum = 0.0
+    var jp = 0.0
+    var jj = 1.0
+    var answer = 0.0
+
+    var k2 = m
+    while k2 >= 1 {
+        let jt = (2.0 * (k2 as f64) / ax) * jj - jp
+        jp = jj
+        jj = jt
+
+        if bs_abs(jj) > bigno {
+            jj = jj * bigni
+            jp = jp * bigni
+            answer = answer * bigni
+            sum = sum * bigni
+        }
+
+        if jsum == 1.0 {
+            sum = sum + jj
+        }
+        jsum = 1.0 - jsum
+
+        if k2 == n { answer = jp }
+        k2 = k2 - 1
+    }
+
+    sum = 2.0 * sum - jj
+    answer = answer / sum
+
+    if x < 0.0 && n - (n / 2) * 2 == 1 { return 0.0 - answer }
+    answer
+}
+
+// =============================================================================
+// Y0(x) and Y1(x) — Bessel functions of the second kind
+// =============================================================================
+
+// Y0(x) for x > 0.
+fn bessel_y0(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+
+    if x <= 8.0 {
+        let y = x * x
+        let p = 0.0 - 2957821389.0 + y * (7062834065.0 + y * (0.0 - 512359803.6
+                + y * (10879881.29 + y * (0.0 - 86327.92757 + y * 228.4622733))))
+        let q = 40076544269.0 + y * (745249964.8 + y * (7189466.438
+                + y * (47447.26470 + y * (226.1030244 + y * 1.0))))
+        return p / q + 0.636619772 * bessel_j0(x) * bs_ln(x)
+    }
+
+    let z = 8.0 / x
+    let z2 = z * z
+    let xx = x - 0.785398163397448
+
+    let p0 = 1.0 + z2 * (0.0 - 0.1098628627e-2 + z2 * (0.2734510407e-4
+             + z2 * (0.0 - 0.2073370639e-5 + z2 * 0.2093887211e-6)))
+    let q0 = 0.0 - 0.1562499995e-1 + z2 * (0.1430488765e-3 + z2 * (0.0 - 0.6911147651e-5
+             + z2 * (0.7621095161e-6 + z2 * (0.0 - 0.934935152e-7))))
+
+    bs_sqrt(0.636619772 / x) * (bs_sin(xx) * p0 + z * bs_cos(xx) * q0)
+}
+
+// Y1(x) for x > 0.
+fn bessel_y1(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+
+    if x <= 8.0 {
+        let y = x * x
+        let p = x * (0.0 - 4900604943000.0 + y * (1275274390000.0 + y * (0.0 - 51534866838.0
+                + y * (622785432.7 + y * (0.0 - 3130827.436 + y * (7.420067088 + y * 0.0))))))
+        let q = 98447293420.0 + y * (2313163527.0 + y * (22027167.73
+                + y * (144725.2285 + y * (554.5141400 + y * 1.0))))
+        return p / q + 0.636619772 * (bessel_j1(x) * bs_ln(x) - 1.0 / x)
+    }
+
+    let z = 8.0 / x
+    let z2 = z * z
+    let xx = x - 2.356194491
+
+    let p1 = 1.0 + z2 * (0.183105e-2 + z2 * (0.0 - 0.3516396496e-4
+             + z2 * (0.2457520174e-5 + z2 * (0.0 - 0.240337019e-6))))
+    let q1 = 0.04687499995 + z2 * (0.0 - 0.2002690873e-3 + z2 * (0.8449199096e-5
+             + z2 * (0.0 - 0.88228987e-6 + z2 * 0.105787412e-6)))
+
+    bs_sqrt(0.636619772 / x) * (bs_sin(xx) * p1 + z * bs_cos(xx) * q1)
+}
+
+// Y_n(x) for integer order n >= 0, x > 0.
+// Forward recurrence: Y_{k+1} = (2k/x)*Y_k - Y_{k-1}
+fn bessel_yn(n: i32, x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    if n == 0 { return bessel_y0(x) }
+    if n == 1 { return bessel_y1(x) }
+
+    var ym = bessel_y0(x)
+    var y = bessel_y1(x)
+    var k = 1
+    while k < n {
+        let yt = (2.0 * (k as f64) / x) * y - ym
+        ym = y
+        y = yt
+        k = k + 1
+    }
+    y
+}
+
+// =============================================================================
+// I0(x) and I1(x) — Modified Bessel functions of the first kind
+// =============================================================================
+
+// I0(x) — exponentially growing modified Bessel function.
+fn bessel_i0(x: f64) -> f64 with Mut, Div, Panic {
+    let ax = bs_abs(x)
+
+    if ax < 3.75 {
+        let y = (x / 3.75) * (x / 3.75)
+        return 1.0 + y * (3.5156229 + y * (3.0899424 + y * (1.2067492
+               + y * (0.2659732 + y * (0.0360768 + y * 0.0045813)))))
+    }
+
+    let y = 3.75 / ax
+    let result = 0.39894228 + y * (0.01328592 + y * (0.00225319
+                 + y * (0.0 - 0.00157565 + y * (0.00916281 + y * (0.0 - 0.02057706
+                 + y * (0.02635537 + y * (0.0 - 0.01647633 + y * 0.00392377)))))))
+    result * bs_exp(ax) / bs_sqrt(ax)
+}
+
+// I1(x).
+fn bessel_i1(x: f64) -> f64 with Mut, Div, Panic {
+    let ax = bs_abs(x)
+
+    if ax < 3.75 {
+        let y = (x / 3.75) * (x / 3.75)
+        let result = ax * (0.5 + y * (0.87890594 + y * (0.51498869 + y * (0.15084934
+                     + y * (0.02658733 + y * (0.00301532 + y * 0.00032411))))))
+        if x < 0.0 { return 0.0 - result }
+        return result
+    }
+
+    let y = 3.75 / ax
+    let result = 0.39894228 + y * (0.0 - 0.03988024 + y * (0.0 - 0.00362018
+                 + y * (0.00163801 + y * (0.0 - 0.01031555 + y * (0.02282967
+                 + y * (0.0 - 0.02895312 + y * (0.01787654 + y * (0.0 - 0.00420059))))))))
+    let val = result * bs_exp(ax) / bs_sqrt(ax)
+    if x < 0.0 { 0.0 - val } else { val }
+}
+
+// I_n(x) for integer order n >= 0.
+fn bessel_in(n: i32, x: f64) -> f64 with Mut, Div, Panic {
+    if n == 0 { return bessel_i0(x) }
+    if n == 1 { return bessel_i1(x) }
+
+    let ax = bs_abs(x)
+    if ax == 0.0 { return 0.0 }
+
+    // Downward recurrence (Miller's algorithm) for stability
+    let iacc = 40
+    let bigno = 1.0e10
+    let bigni = 1.0e-10
+
+    var m = 2 * ((n + (iacc as i32)) / 2)
+    var bi = 0.0
+    var bip = 0.0
+    var answer = 0.0
+    var tox = 2.0 / ax
+
+    var k = m
+    while k >= 1 {
+        let bim = bip + (k as f64) * tox * bi
+        bip = bi
+        bi = bim
+        if bs_abs(bi) > bigno {
+            answer = answer * bigni
+            bi = bi * bigni
+            bip = bip * bigni
+        }
+        if k == n { answer = bip }
+        k = k - 1
+    }
+    // Normalize using I0
+    answer = answer * bessel_i0(ax) / bi
+    if x < 0.0 && n - (n / 2) * 2 == 1 { 0.0 - answer } else { answer }
+}
+
+// =============================================================================
+// K0(x) and K1(x) — Modified Bessel functions of the second kind
+// =============================================================================
+
+// K0(x) for x > 0.
+fn bessel_k0(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 1.0e30 }
+
+    if x <= 2.0 {
+        let y = x * x / 4.0
+        return (0.0 - bs_ln(x / 2.0)) * bessel_i0(x) + (0.0 - 0.57721566
+               + y * (0.42278420 + y * (0.23069756 + y * (0.03488590
+               + y * (0.00262698 + y * (0.00010750 + y * 0.00000740))))))
+    }
+
+    let y = 2.0 / x
+    let result = 1.25331414 + y * (0.0 - 0.07832358 + y * (0.02189568
+                 + y * (0.0 - 0.01062446 + y * (0.00587872 + y * (0.0 - 0.00251540
+                 + y * 0.00053208)))))
+    result * bs_exp(0.0 - x) / bs_sqrt(x)
+}
+
+// K1(x) for x > 0.
+fn bessel_k1(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 1.0e30 }
+
+    if x <= 2.0 {
+        let y = x * x / 4.0
+        return bs_ln(x / 2.0) * bessel_i1(x) + (1.0 / x) * (1.0 + y * (0.15443144
+               + y * (0.0 - 0.67278579 + y * (0.0 - 0.18156897 + y * (0.0 - 0.01919402
+               + y * (0.0 - 0.00110404 + y * (0.0 - 0.00004686)))))))
+    }
+
+    let y = 2.0 / x
+    let result = 1.25331414 + y * (0.23498619 + y * (0.0 - 0.03655620
+                 + y * (0.01504268 + y * (0.0 - 0.00780353 + y * (0.00325614
+                 + y * (0.0 - 0.00068245))))))
+    result * bs_exp(0.0 - x) / bs_sqrt(x)
+}
+
+// K_n(x) for integer order n >= 0, x > 0.
+// Forward recurrence: K_{k+1} = (2k/x)*K_k + K_{k-1}
+fn bessel_kn(n: i32, x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 1.0e30 }
+    if n == 0 { return bessel_k0(x) }
+    if n == 1 { return bessel_k1(x) }
+
+    var km = bessel_k0(x)
+    var k_val = bessel_k1(x)
+    var i = 1
+    while i < n {
+        let kt = (2.0 * (i as f64) / x) * k_val + km
+        km = k_val
+        k_val = kt
+        i = i + 1
+    }
+    k_val
+}
+
+// =============================================================================
+// Spherical Bessel functions
+// =============================================================================
+
+// Spherical Bessel function of the first kind:
+// j_n(x) = sqrt(pi/(2x)) * J_{n+1/2}(x)
+// j_0(x) = sin(x)/x, j_1(x) = sin(x)/x^2 - cos(x)/x
+fn sph_bessel_j(n: i32, x: f64) -> f64 with Mut, Div, Panic {
+    if bs_abs(x) < 1.0e-15 {
+        if n == 0 { return 1.0 } else { return 0.0 }
+    }
+
+    if n == 0 { return bs_sin(x) / x }
+    if n == 1 { return bs_sin(x) / (x * x) - bs_cos(x) / x }
+
+    // Forward recurrence: j_{k+1} = ((2k+1)/x)*j_k - j_{k-1}
+    var jm = bs_sin(x) / x
+    var j = bs_sin(x) / (x * x) - bs_cos(x) / x
+    var k = 1
+    while k < n {
+        let jt = ((2 * k + 1) as f64) / x * j - jm
+        jm = j
+        j = jt
+        k = k + 1
+    }
+    j
+}
+
+// Spherical Bessel function of the second kind:
+// y_n(x) = sqrt(pi/(2x)) * Y_{n+1/2}(x)
+// y_0(x) = -cos(x)/x, y_1(x) = -cos(x)/x^2 - sin(x)/x
+fn sph_bessel_y(n: i32, x: f64) -> f64 with Mut, Div, Panic {
+    if bs_abs(x) < 1.0e-15 { return 0.0 - 1.0e30 }
+
+    if n == 0 { return 0.0 - bs_cos(x) / x }
+    if n == 1 { return 0.0 - bs_cos(x) / (x * x) - bs_sin(x) / x }
+
+    var ym = 0.0 - bs_cos(x) / x
+    var y = 0.0 - bs_cos(x) / (x * x) - bs_sin(x) / x
+    var k = 1
+    while k < n {
+        let yt = ((2 * k + 1) as f64) / x * y - ym
+        ym = y
+        y = yt
+        k = k + 1
+    }
+    y
+}
