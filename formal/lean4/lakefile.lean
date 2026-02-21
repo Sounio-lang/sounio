@@ -10,4 +10,7 @@ lean_lib «SounioLinear» where
 lean_lib «SounioEffects» where
 
 @[default_target]
+lean_lib «SounioTyping» where
+
+@[default_target]
 lean_lib «SounioFormal» where
