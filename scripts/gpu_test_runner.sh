@@ -10,11 +10,15 @@
 #   [souc-gpu] epistemic_gemm NxNxN  ... X.X GFLOPS  bound=...  eff=...%  dbuf=yes
 #
 # Environment overrides:
-#   GPU_HOST        — hostname/IP of GPU node  (required)
-#   REMOTE_DIR      — path on GPU host         (default: ~/work/sounio)
-#   LOCAL_DIR       — local repo root          (default: auto-detected)
-#   GEMM_M/N/K      — matrix dimensions        (default: 4096)
-#   SM_MAJOR        — PTX SM version major      (default: auto from nvidia-smi)
+#   GPU_HOST        — logical name: gpu-appliance-l4, r740, or 5860  (required)
+#   GPU_HOST_IP     — override resolved IP (default: auto per GPU_HOST)
+#   GPU_USER        — SSH username           (default: demetrios)
+#   GPU_KEY         — SSH private key path   (default: ~/.ssh/id_ed25519)
+#   GPU_PASS        — keyboard-interactive password for 2FA nodes (optional)
+#   REMOTE_DIR      — path on GPU host       (default: ~/work/sounio)
+#   LOCAL_DIR       — local repo root        (default: auto-detected)
+#   GEMM_M/N/K      — matrix dimensions      (default: 4096)
+#   SM_MAJOR        — PTX SM version major   (default: auto from nvidia-smi)
 #   SKIP_BUILD      — set to 1 to skip cargo build (reuse previous binary)
 
 set -euo pipefail
@@ -26,6 +30,26 @@ GEMM_M="${GEMM_M:-4096}"
 GEMM_N="${GEMM_N:-4096}"
 GEMM_K="${GEMM_K:-4096}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
+GPU_PASS="${GPU_PASS:-}"   # keyboard-interactive password (2FA); set if needed
+
+# Resolve GPU_HOST to IP for direct 100G path
+case "$GPU_HOST" in
+  gpu-appliance-l4) GPU_HOST_IP="${GPU_HOST_IP:-10.100.100.215}" ;;
+  r740)             GPU_HOST_IP="${GPU_HOST_IP:-r740}" ;;
+  5860)             GPU_HOST_IP="${GPU_HOST_IP:-5860}" ;;
+  *)                GPU_HOST_IP="${GPU_HOST_IP:-$GPU_HOST}" ;;
+esac
+GPU_USER="${GPU_USER:-demetrios}"
+GPU_KEY="${GPU_KEY:-$HOME/.ssh/id_ed25519}"
+
+# SSH helper: uses sshpass if GPU_PASS is set, otherwise plain ssh
+SSH_CMD="ssh -i $GPU_KEY -o StrictHostKeyChecking=no -o PreferredAuthentications=publickey,keyboard-interactive"
+RSYNC_SSH="$SSH_CMD"
+if [ -n "$GPU_PASS" ]; then
+  export SSHPASS="$GPU_PASS"
+  SSH_CMD="sshpass -e ssh -i $GPU_KEY -o StrictHostKeyChecking=no -o PreferredAuthentications=publickey,keyboard-interactive"
+  RSYNC_SSH="sshpass -e ssh -i $GPU_KEY -o StrictHostKeyChecking=no -o PreferredAuthentications=publickey,keyboard-interactive"
+fi
 
 echo "======================================================================="
 echo "  Sounio GPU Test Runner"
@@ -37,19 +61,20 @@ echo "======================================================================="
 
 # ── 1. Sync repo (exclude build artefacts) ──────────────────────────────────
 echo ""
-echo "[1] Syncing repo to $GPU_HOST:$REMOTE_DIR ..."
+echo "[1] Syncing repo to ${GPU_USER}@${GPU_HOST_IP}:$REMOTE_DIR ..."
 rsync -az --delete \
-  --exclude 'target/' \
-  --exclude '.git/' \
-  --exclude 'artifacts/' \
-  --exclude '.continue/' \
-  "${LOCAL_DIR}/" "${GPU_HOST}:${REMOTE_DIR}/"
+  -e "$RSYNC_SSH" \
+  --exclude '/target/' \
+  --exclude '/.git/' \
+  --exclude '/artifacts/' \
+  --exclude '/.continue/' \
+  "${LOCAL_DIR}/" "${GPU_USER}@${GPU_HOST_IP}:${REMOTE_DIR}/"
 echo "    sync done."
 
 # ── 2. Remote build + profile ────────────────────────────────────────────────
 echo ""
-echo "[2] Running on $GPU_HOST ..."
-ssh -t "$GPU_HOST" bash -s <<REMOTE_SCRIPT
+echo "[2] Running on ${GPU_USER}@${GPU_HOST_IP} ..."
+$SSH_CMD -t "${GPU_USER}@${GPU_HOST_IP}" bash -s <<REMOTE_SCRIPT
 set -euo pipefail
 cd ${REMOTE_DIR}
 
