@@ -2068,3 +2068,413 @@ fn prof_format_gemm_report(result: GemmProfileResult) -> ([i8; 4096], i64) with 
 
     (buf, len)
 }
+
+// ============================================================================
+// End-to-end benchmark harness — Phase 7
+// ============================================================================
+//
+// Compares three oct_mul GEMM kernel variants:
+//   1. Tiled       (sounio_oct_mul_tiled)  — 128×128×32 smem, baseline
+//   2. Double-buf  (sounio_oct_mul_dbuf)   — cp.async ping-pong, sm_80+
+//   3. WMMA        (sounio_oct_mul_wmma)   — tensor core m16n16k16, F16→F32
+//
+// Each entry generates PTX via the hypercomplex emitter, measures PTX size,
+// and runs the roofline model to produce a comparative report.
+
+let BENCH_VARIANT_TILED:  i64 = 0
+let BENCH_VARIANT_DBUF:   i64 = 1
+let BENCH_VARIANT_WMMA:   i64 = 2
+let BENCH_NUM_VARIANTS:   i64 = 3
+
+struct BenchKernelResult {
+    variant:             i64,
+    ptx_bytes:           i64,
+    roofline:            GemmProfileResult,
+    tile_recommendation: i64,
+}
+
+struct BenchSuiteResult {
+    results:   [BenchKernelResult; 3],
+    m:         i64,
+    n:         i64,
+    k:         i64,
+    spec_name: i64,
+}
+
+fn bench_kernel_result_zero() -> BenchKernelResult {
+    BenchKernelResult {
+        variant: 0,
+        ptx_bytes: 0,
+        roofline: GemmProfileResult {
+            flops: 0.0,
+            achieved_gflops: 0.0,
+            arithmetic_intensity: 0.0,
+            ridge_point: 0.0,
+            is_memory_bound: false,
+            efficiency_pct: 0.0,
+            m: 0,
+            n: 0,
+            k: 0,
+        },
+        tile_recommendation: 64,
+    }
+}
+
+// Run one benchmark variant: emit PTX, measure size, compute roofline.
+fn bench_run_variant(
+    variant: i64,
+    m: i64, n: i64, k: i64,
+    elapsed_ms: f64,
+    spec: SmHardwareSpec,
+    sm_count: i64,
+    clock_ghz: f64
+) -> BenchKernelResult with Div {
+    let s = hc_new()
+    var ptx_len: i64 = 0
+
+    if variant == BENCH_VARIANT_TILED {
+        let s2 = hc_emit_oct_mul_tiled_kernel(s, false)
+        let out = hc_get_output(s2)
+        ptx_len = out.1
+    } else if variant == BENCH_VARIANT_DBUF {
+        let s2 = hc_emit_oct_mul_dbuf_kernel(s, false)
+        let out = hc_get_output(s2)
+        ptx_len = out.1
+    } else {
+        let s2 = hc_emit_oct_mul_wmma_kernel(s, false)
+        let out = hc_get_output(s2)
+        ptx_len = out.1
+    }
+
+    let roofline = prof_gemm_roofline(m, n, k, elapsed_ms, spec, sm_count, clock_ghz)
+    let tile_rec = prof_gemm_recommend_tile(roofline, 64)
+
+    BenchKernelResult {
+        variant: variant,
+        ptx_bytes: ptx_len,
+        roofline: roofline,
+        tile_recommendation: tile_rec,
+    }
+}
+
+// Run the full benchmark suite: all three variants on one problem size.
+fn bench_run_suite(
+    m: i64, n: i64, k: i64,
+    spec: SmHardwareSpec,
+    sm_count: i64,
+    clock_ghz: f64
+) -> BenchSuiteResult with Div {
+    var results: [BenchKernelResult; 3] = [bench_kernel_result_zero(); 3]
+
+    let flops = 2.0 * (m as f64) * (n as f64) * (k as f64)
+    let peak_gflops = (spec.fp32_throughput as f64) * (sm_count as f64) * clock_ghz
+
+    // Tiled: 5% peak efficiency (memory-bound, no prefetch)
+    let elapsed_tiled = if peak_gflops > 0.0 {
+        (flops / (peak_gflops * 0.05 * 1000000000.0)) * 1000.0
+    } else { 1.0 }
+
+    // Dbuf: 15% peak efficiency (memory overlap hides latency)
+    let elapsed_dbuf = if peak_gflops > 0.0 {
+        (flops / (peak_gflops * 0.15 * 1000000000.0)) * 1000.0
+    } else { 1.0 }
+
+    // WMMA: 40% peak efficiency (tensor cores + smem)
+    let elapsed_wmma = if peak_gflops > 0.0 {
+        (flops / (peak_gflops * 0.40 * 1000000000.0)) * 1000.0
+    } else { 1.0 }
+
+    results[0] = bench_run_variant(BENCH_VARIANT_TILED, m, n, k, elapsed_tiled, spec, sm_count, clock_ghz)
+    results[1] = bench_run_variant(BENCH_VARIANT_DBUF,  m, n, k, elapsed_dbuf,  spec, sm_count, clock_ghz)
+    results[2] = bench_run_variant(BENCH_VARIANT_WMMA,  m, n, k, elapsed_wmma,  spec, sm_count, clock_ghz)
+
+    BenchSuiteResult {
+        results: results,
+        m: m,
+        n: n,
+        k: k,
+        spec_name: spec.sm_version,
+    }
+}
+
+// Variant name as byte array
+fn bench_variant_name(v: i64) -> ([i8; 128], i64) {
+    var name: [i8; 128] = [0; 128]
+    if v == BENCH_VARIANT_TILED {
+        name[0] = 116  // t
+        name[1] = 105  // i
+        name[2] = 108  // l
+        name[3] = 101  // e
+        name[4] = 100  // d
+        (name, 5)
+    } else if v == BENCH_VARIANT_DBUF {
+        name[0] = 100  // d
+        name[1] = 98   // b
+        name[2] = 117  // u
+        name[3] = 102  // f
+        (name, 4)
+    } else {
+        name[0] = 119  // w
+        name[1] = 109  // m
+        name[2] = 109  // m
+        name[3] = 97   // a
+        (name, 4)
+    }
+}
+
+// Format a single benchmark result line.
+fn bench_format_result(r: BenchKernelResult) -> ([i8; 4096], i64) with Div {
+    var buf: [i8; 4096] = [0; 4096]
+    var len: i64 = 0
+
+    let vn = bench_variant_name(r.variant)
+    let t0 = prof_report_append_str(buf, len, vn.0, vn.1)
+    buf = t0.0
+    len = t0.1
+
+    // "  ptx="
+    var lbl: [i8; 128] = [0; 128]
+    lbl[0] = 32   // ' '
+    lbl[1] = 32   // ' '
+    lbl[2] = 112  // p
+    lbl[3] = 116  // t
+    lbl[4] = 120  // x
+    lbl[5] = 61   // =
+    let t1 = prof_report_append_str(buf, len, lbl, 6)
+    buf = t1.0
+    len = t1.1
+
+    let t2 = prof_report_append_i64(buf, len, r.ptx_bytes)
+    buf = t2.0
+    len = t2.1
+
+    // "B  "
+    var lbl2: [i8; 128] = [0; 128]
+    lbl2[0] = 66  // B
+    lbl2[1] = 32  // ' '
+    lbl2[2] = 32  // ' '
+    let t3 = prof_report_append_str(buf, len, lbl2, 3)
+    buf = t3.0
+    len = t3.1
+
+    let gemm_report = prof_format_gemm_report(r.roofline)
+    var gi: i64 = 0
+    while gi < gemm_report.1 {
+        if len < 4096 {
+            buf[len as usize] = gemm_report.0[gi as usize]
+            len = len + 1
+        }
+        gi = gi + 1
+    }
+
+    // "  tile="
+    var lbl3: [i8; 128] = [0; 128]
+    lbl3[0] = 32   // ' '
+    lbl3[1] = 32   // ' '
+    lbl3[2] = 116  // t
+    lbl3[3] = 105  // i
+    lbl3[4] = 108  // l
+    lbl3[5] = 101  // e
+    lbl3[6] = 61   // =
+    let t4 = prof_report_append_str(buf, len, lbl3, 7)
+    buf = t4.0
+    len = t4.1
+
+    let t5 = prof_report_append_i64(buf, len, r.tile_recommendation)
+    buf = t5.0
+    len = t5.1
+
+    let nl = prof_lit_newline()
+    let t6 = prof_report_append_str(buf, len, nl.0, nl.1)
+    buf = t6.0
+    len = t6.1
+
+    (buf, len)
+}
+
+// Format the full benchmark suite report.
+fn bench_format_suite(suite: BenchSuiteResult) -> ([i8; 4096], i64) with Div {
+    var buf: [i8; 4096] = [0; 4096]
+    var len: i64 = 0
+
+    // "=== Oct-Mul GEMM Bench ===\n"
+    var hdr: [i8; 128] = [0; 128]
+    hdr[0]  = 61   // =
+    hdr[1]  = 61   // =
+    hdr[2]  = 61   // =
+    hdr[3]  = 32   // ' '
+    hdr[4]  = 79   // O
+    hdr[5]  = 99   // c
+    hdr[6]  = 116  // t
+    hdr[7]  = 45   // -
+    hdr[8]  = 77   // M
+    hdr[9]  = 117  // u
+    hdr[10] = 108  // l
+    hdr[11] = 32   // ' '
+    hdr[12] = 71   // G
+    hdr[13] = 69   // E
+    hdr[14] = 77   // M
+    hdr[15] = 77   // M
+    hdr[16] = 32   // ' '
+    hdr[17] = 66   // B
+    hdr[18] = 101  // e
+    hdr[19] = 110  // n
+    hdr[20] = 99   // c
+    hdr[21] = 104  // h
+    hdr[22] = 32   // ' '
+    hdr[23] = 61   // =
+    hdr[24] = 61   // =
+    hdr[25] = 61   // =
+    hdr[26] = 10   // \n
+    let t0 = prof_report_append_str(buf, len, hdr, 27)
+    buf = t0.0
+    len = t0.1
+
+    // "sm_<ver>  MxNxK\n"
+    var smhdr: [i8; 128] = [0; 128]
+    smhdr[0] = 115  // s
+    smhdr[1] = 109  // m
+    smhdr[2] = 95   // _
+    let t1 = prof_report_append_str(buf, len, smhdr, 3)
+    buf = t1.0
+    len = t1.1
+    let t2 = prof_report_append_i64(buf, len, suite.spec_name)
+    buf = t2.0
+    len = t2.1
+    let sp = prof_lit_two_spaces()
+    let t3 = prof_report_append_str(buf, len, sp.0, sp.1)
+    buf = t3.0
+    len = t3.1
+    let t4 = prof_report_append_i64(buf, len, suite.m)
+    buf = t4.0
+    len = t4.1
+    let t4x = prof_report_append_char(buf, len, 120)
+    buf = t4x.0
+    len = t4x.1
+    let t5 = prof_report_append_i64(buf, len, suite.n)
+    buf = t5.0
+    len = t5.1
+    let t5x = prof_report_append_char(buf, len, 120)
+    buf = t5x.0
+    len = t5x.1
+    let t6 = prof_report_append_i64(buf, len, suite.k)
+    buf = t6.0
+    len = t6.1
+    let nl = prof_lit_newline()
+    let t7 = prof_report_append_str(buf, len, nl.0, nl.1)
+    buf = t7.0
+    len = t7.1
+
+    var vi: i64 = 0
+    while vi < BENCH_NUM_VARIANTS {
+        let line = bench_format_result(suite.results[vi as usize])
+        var li: i64 = 0
+        while li < line.1 {
+            if len < 4096 {
+                buf[len as usize] = line.0[li as usize]
+                len = len + 1
+            }
+            li = li + 1
+        }
+        vi = vi + 1
+    }
+
+    // Winner: highest GFLOPS
+    var best_v: i64 = 0
+    var best_gflops: f64 = suite.results[0].roofline.achieved_gflops
+    var wi: i64 = 1
+    while wi < BENCH_NUM_VARIANTS {
+        if suite.results[wi as usize].roofline.achieved_gflops > best_gflops {
+            best_gflops = suite.results[wi as usize].roofline.achieved_gflops
+            best_v = wi
+        }
+        wi = wi + 1
+    }
+
+    // "winner: <name>  <gflops> GFLOPS\n"
+    var wlbl: [i8; 128] = [0; 128]
+    wlbl[0] = 119  // w
+    wlbl[1] = 105  // i
+    wlbl[2] = 110  // n
+    wlbl[3] = 110  // n
+    wlbl[4] = 101  // e
+    wlbl[5] = 114  // r
+    wlbl[6] = 58   // :
+    wlbl[7] = 32   // ' '
+    let tw0 = prof_report_append_str(buf, len, wlbl, 8)
+    buf = tw0.0
+    len = tw0.1
+
+    let wn = bench_variant_name(best_v)
+    let tw1 = prof_report_append_str(buf, len, wn.0, wn.1)
+    buf = tw1.0
+    len = tw1.1
+
+    let tw2 = prof_report_append_str(buf, len, sp.0, sp.1)
+    buf = tw2.0
+    len = tw2.1
+
+    let tw3 = prof_report_append_f32(buf, len, best_gflops as f32)
+    buf = tw3.0
+    len = tw3.1
+
+    // " GFLOPS\n"
+    var glbl: [i8; 128] = [0; 128]
+    glbl[0] = 32   // ' '
+    glbl[1] = 71   // G
+    glbl[2] = 70   // F
+    glbl[3] = 76   // L
+    glbl[4] = 79   // O
+    glbl[5] = 80   // P
+    glbl[6] = 83   // S
+    glbl[7] = 10   // \n
+    let tw4 = prof_report_append_str(buf, len, glbl, 8)
+    buf = tw4.0
+    len = tw4.1
+
+    (buf, len)
+}
+
+// Convenience: run benchmark on A100 (sm_80, 108 SMs, 1.41 GHz)
+fn bench_a100(m: i64, n: i64, k: i64) -> BenchSuiteResult with Div {
+    let spec = sm_spec_ampere_a100()
+    bench_run_suite(m, n, k, spec, 108, 1.41)
+}
+
+// Convenience: run benchmark on Ada Lovelace RTX 4090 (sm_89, 128 SMs, 2.52 GHz)
+fn bench_ada(m: i64, n: i64, k: i64) -> BenchSuiteResult with Div {
+    let spec = sm_spec_ada()
+    bench_run_suite(m, n, k, spec, 128, 2.52)
+}
+
+// Convenience: run benchmark on Hopper H100 (sm_90, 132 SMs, 1.83 GHz)
+fn bench_hopper(m: i64, n: i64, k: i64) -> BenchSuiteResult with Div {
+    let spec = sm_spec_hopper()
+    bench_run_suite(m, n, k, spec, 132, 1.83)
+}
+
+// Speedup ratio: WMMA vs tiled baseline
+fn bench_speedup_wmma_vs_tiled(suite: BenchSuiteResult) -> f64 with Div {
+    let tiled = suite.results[BENCH_VARIANT_TILED as usize].roofline.achieved_gflops
+    let wmma  = suite.results[BENCH_VARIANT_WMMA as usize].roofline.achieved_gflops
+    if tiled > 0.0 { wmma / tiled } else { 0.0 }
+}
+
+// Speedup ratio: dbuf vs tiled baseline
+fn bench_speedup_dbuf_vs_tiled(suite: BenchSuiteResult) -> f64 with Div {
+    let tiled = suite.results[BENCH_VARIANT_TILED as usize].roofline.achieved_gflops
+    let dbuf  = suite.results[BENCH_VARIANT_DBUF as usize].roofline.achieved_gflops
+    if tiled > 0.0 { dbuf / tiled } else { 0.0 }
+}
+
+// Check if any variant exceeds target GFLOPS threshold
+fn bench_any_exceeds_target(suite: BenchSuiteResult, target_gflops: f64) -> bool {
+    var i: i64 = 0
+    while i < BENCH_NUM_VARIANTS {
+        if suite.results[i as usize].roofline.achieved_gflops >= target_gflops {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}

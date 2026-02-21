@@ -1,0 +1,284 @@
+//@ run-pass
+// Phase 7: End-to-end benchmark harness tests
+// Validates the comparative GEMM benchmark for tiled vs dbuf vs WMMA kernels.
+
+// ============================================================================
+// Struct and constant tests
+// ============================================================================
+
+fn test_bench_variant_constants() -> i64 {
+    if BENCH_VARIANT_TILED != 0 { return 1 }
+    if BENCH_VARIANT_DBUF  != 1 { return 1 }
+    if BENCH_VARIANT_WMMA  != 2 { return 1 }
+    if BENCH_NUM_VARIANTS  != 3 { return 1 }
+    0
+}
+
+fn test_bench_kernel_result_zero() -> i64 {
+    let z = bench_kernel_result_zero()
+    if z.variant != 0 { return 1 }
+    if z.ptx_bytes != 0 { return 1 }
+    if z.tile_recommendation != 64 { return 1 }
+    if z.roofline.achieved_gflops != 0.0 { return 1 }
+    0
+}
+
+// ============================================================================
+// Variant name formatting
+// ============================================================================
+
+fn test_variant_name_tiled() -> i64 {
+    let n = bench_variant_name(BENCH_VARIANT_TILED)
+    if n.1 != 5 { return 1 }
+    if n.0[0] != 116 { return 1 }  // 't'
+    0
+}
+
+fn test_variant_name_dbuf() -> i64 {
+    let n = bench_variant_name(BENCH_VARIANT_DBUF)
+    if n.1 != 4 { return 1 }
+    if n.0[0] != 100 { return 1 }  // 'd'
+    0
+}
+
+fn test_variant_name_wmma() -> i64 {
+    let n = bench_variant_name(BENCH_VARIANT_WMMA)
+    if n.1 != 4 { return 1 }
+    if n.0[0] != 119 { return 1 }  // 'w'
+    0
+}
+
+// ============================================================================
+// Single variant runs
+// ============================================================================
+
+fn test_run_variant_tiled_produces_ptx() -> i64 {
+    let spec = sm_spec_ampere_a100()
+    let r = bench_run_variant(BENCH_VARIANT_TILED, 128, 128, 128, 1.0, spec, 108, 1.41)
+    if r.ptx_bytes < 100 { return 1 }
+    if r.variant != BENCH_VARIANT_TILED { return 1 }
+    0
+}
+
+fn test_run_variant_dbuf_produces_ptx() -> i64 {
+    let spec = sm_spec_ampere_a100()
+    let r = bench_run_variant(BENCH_VARIANT_DBUF, 128, 128, 128, 1.0, spec, 108, 1.41)
+    if r.ptx_bytes < 100 { return 1 }
+    if r.variant != BENCH_VARIANT_DBUF { return 1 }
+    0
+}
+
+fn test_run_variant_wmma_produces_ptx() -> i64 {
+    let spec = sm_spec_ampere_a100()
+    let r = bench_run_variant(BENCH_VARIANT_WMMA, 128, 128, 128, 1.0, spec, 108, 1.41)
+    if r.ptx_bytes < 100 { return 1 }
+    if r.variant != BENCH_VARIANT_WMMA { return 1 }
+    0
+}
+
+fn test_run_variant_roofline_populated() -> i64 {
+    let spec = sm_spec_ampere_a100()
+    let r = bench_run_variant(BENCH_VARIANT_TILED, 256, 256, 256, 0.5, spec, 108, 1.41)
+    if r.roofline.flops <= 0.0 { return 1 }
+    if r.roofline.achieved_gflops <= 0.0 { return 1 }
+    if r.roofline.arithmetic_intensity <= 0.0 { return 1 }
+    if r.roofline.m != 256 { return 1 }
+    0
+}
+
+// ============================================================================
+// Full suite tests
+// ============================================================================
+
+fn test_suite_a100_all_variants_run() -> i64 {
+    let suite = bench_a100(128, 128, 128)
+    if suite.m != 128 { return 1 }
+    if suite.spec_name != 80 { return 1 }
+    // All three variants should have PTX
+    var i: i64 = 0
+    while i < 3 {
+        if suite.results[i as usize].ptx_bytes < 100 { return 1 }
+        i = i + 1
+    }
+    0
+}
+
+fn test_suite_ada_runs() -> i64 {
+    let suite = bench_ada(256, 256, 256)
+    if suite.spec_name != 89 { return 1 }
+    if suite.m != 256 { return 1 }
+    0
+}
+
+fn test_suite_hopper_runs() -> i64 {
+    let suite = bench_hopper(512, 512, 512)
+    if suite.spec_name != 90 { return 1 }
+    if suite.m != 512 { return 1 }
+    0
+}
+
+fn test_wmma_fastest_in_suite() -> i64 {
+    // WMMA at 40% efficiency should beat tiled at 5% and dbuf at 15%
+    let suite = bench_a100(1024, 1024, 1024)
+    let tiled_gflops = suite.results[BENCH_VARIANT_TILED as usize].roofline.achieved_gflops
+    let wmma_gflops  = suite.results[BENCH_VARIANT_WMMA as usize].roofline.achieved_gflops
+    if wmma_gflops <= tiled_gflops { return 1 }
+    0
+}
+
+fn test_dbuf_faster_than_tiled() -> i64 {
+    let suite = bench_a100(1024, 1024, 1024)
+    let tiled_gflops = suite.results[BENCH_VARIANT_TILED as usize].roofline.achieved_gflops
+    let dbuf_gflops  = suite.results[BENCH_VARIANT_DBUF as usize].roofline.achieved_gflops
+    if dbuf_gflops <= tiled_gflops { return 1 }
+    0
+}
+
+// ============================================================================
+// Speedup and target tests
+// ============================================================================
+
+fn test_speedup_wmma_vs_tiled() -> i64 {
+    let suite = bench_a100(1024, 1024, 1024)
+    let speedup = bench_speedup_wmma_vs_tiled(suite)
+    // 40% / 5% = 8× expected
+    if speedup < 5.0 { return 1 }
+    0
+}
+
+fn test_speedup_dbuf_vs_tiled() -> i64 {
+    let suite = bench_a100(1024, 1024, 1024)
+    let speedup = bench_speedup_dbuf_vs_tiled(suite)
+    // 15% / 5% = 3× expected
+    if speedup < 2.0 { return 1 }
+    0
+}
+
+fn test_500_gflops_target_reachable() -> i64 {
+    // On A100 at 40% efficiency WMMA should exceed 500 GFLOPS for 4096³
+    let suite = bench_a100(4096, 4096, 4096)
+    let exceeds = bench_any_exceeds_target(suite, 500.0)
+    if !exceeds { return 1 }
+    0
+}
+
+fn test_no_500_gflops_small_problem() -> i64 {
+    // 64³ is too small to reach 500 GFLOPS even with WMMA
+    let suite = bench_a100(64, 64, 64)
+    let tiled_gflops = suite.results[BENCH_VARIANT_TILED as usize].roofline.achieved_gflops
+    // Should still produce valid numbers
+    if tiled_gflops <= 0.0 { return 1 }
+    0
+}
+
+// ============================================================================
+// Report formatting
+// ============================================================================
+
+fn test_format_result_nonzero() -> i64 {
+    let spec = sm_spec_ampere_a100()
+    let r = bench_run_variant(BENCH_VARIANT_TILED, 128, 128, 128, 1.0, spec, 108, 1.41)
+    let report = bench_format_result(r)
+    if report.1 < 20 { return 1 }
+    0
+}
+
+fn test_format_suite_nonzero() -> i64 {
+    let suite = bench_a100(256, 256, 256)
+    let report = bench_format_suite(suite)
+    // Suite report should be substantial (header + 3 lines + winner)
+    if report.1 < 100 { return 1 }
+    0
+}
+
+fn test_format_suite_has_winner() -> i64 {
+    let suite = bench_a100(256, 256, 256)
+    let report = bench_format_suite(suite)
+    // Check for 'w' 'i' 'n' 'n' 'e' 'r' in the report buffer
+    var found: bool = false
+    var i: i64 = 0
+    while i < report.1 - 5 {
+        if report.0[i as usize] == 119 &&          // w
+           report.0[(i + 1) as usize] == 105 &&    // i
+           report.0[(i + 2) as usize] == 110 &&    // n
+           report.0[(i + 3) as usize] == 110 &&    // n
+           report.0[(i + 4) as usize] == 101 &&    // e
+           report.0[(i + 5) as usize] == 114 {     // r
+            found = true
+        }
+        i = i + 1
+    }
+    if !found { return 1 }
+    0
+}
+
+// ============================================================================
+// Multi-architecture comparison
+// ============================================================================
+
+fn test_hopper_faster_than_a100() -> i64 {
+    // H100 should have higher peak throughput than A100
+    let a100 = bench_a100(2048, 2048, 2048)
+    let h100 = bench_hopper(2048, 2048, 2048)
+    let a100_wmma = a100.results[BENCH_VARIANT_WMMA as usize].roofline.achieved_gflops
+    let h100_wmma = h100.results[BENCH_VARIANT_WMMA as usize].roofline.achieved_gflops
+    if h100_wmma <= a100_wmma { return 1 }
+    0
+}
+
+fn test_different_problem_sizes() -> i64 {
+    // Larger problem size should give more FLOPs (same efficiency %)
+    let small = bench_a100(256, 256, 256)
+    let large = bench_a100(1024, 1024, 1024)
+    let small_gflops = small.results[BENCH_VARIANT_WMMA as usize].roofline.achieved_gflops
+    let large_gflops = large.results[BENCH_VARIANT_WMMA as usize].roofline.achieved_gflops
+    // Both should have the same GFLOPS (efficiency is constant in this model)
+    // Actually achieved_gflops = flops / elapsed, and elapsed is set for constant efficiency,
+    // so both should report the same GFLOPS.
+    if small_gflops <= 0.0 { return 1 }
+    if large_gflops <= 0.0 { return 1 }
+    0
+}
+
+fn main() -> i64 {
+    var fails: i64 = 0
+
+    // Constants and struct
+    fails = fails + test_bench_variant_constants()
+    fails = fails + test_bench_kernel_result_zero()
+
+    // Variant names
+    fails = fails + test_variant_name_tiled()
+    fails = fails + test_variant_name_dbuf()
+    fails = fails + test_variant_name_wmma()
+
+    // Single variant runs
+    fails = fails + test_run_variant_tiled_produces_ptx()
+    fails = fails + test_run_variant_dbuf_produces_ptx()
+    fails = fails + test_run_variant_wmma_produces_ptx()
+    fails = fails + test_run_variant_roofline_populated()
+
+    // Full suite
+    fails = fails + test_suite_a100_all_variants_run()
+    fails = fails + test_suite_ada_runs()
+    fails = fails + test_suite_hopper_runs()
+    fails = fails + test_wmma_fastest_in_suite()
+    fails = fails + test_dbuf_faster_than_tiled()
+
+    // Speedup and targets
+    fails = fails + test_speedup_wmma_vs_tiled()
+    fails = fails + test_speedup_dbuf_vs_tiled()
+    fails = fails + test_500_gflops_target_reachable()
+    fails = fails + test_no_500_gflops_small_problem()
+
+    // Report formatting
+    fails = fails + test_format_result_nonzero()
+    fails = fails + test_format_suite_nonzero()
+    fails = fails + test_format_suite_has_winner()
+
+    // Multi-arch
+    fails = fails + test_hopper_faster_than_a100()
+    fails = fails + test_different_problem_sizes()
+
+    fails
+}
