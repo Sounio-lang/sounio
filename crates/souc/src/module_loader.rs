@@ -43,14 +43,32 @@ pub struct ImportMapping {
     pub file_path: PathBuf,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ProgramLoadOptions {
+    /// Optional explicit self-hosted bootstrap manifest path.
+    /// When set, directory loading for `self-hosted/` uses this manifest
+    /// instead of reading `SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST`.
+    pub selfhost_bootstrap_manifest: Option<PathBuf>,
+    /// Optional override for strict self-hosted module gating.
+    /// When `None`, falls back to `SOUNIO_SELFHOST_STRICT_MODULE_GATING`.
+    pub selfhost_strict_module_gating: Option<bool>,
+}
+
 pub fn load_program_ast(entry_path: &StdPath) -> Result<Ast> {
+    load_program_ast_with_options(entry_path, ProgramLoadOptions::default())
+}
+
+pub fn load_program_ast_with_options(
+    entry_path: &StdPath,
+    options: ProgramLoadOptions,
+) -> Result<Ast> {
     // Directory compilation mode: when given a directory or mod.sio,
     // concatenate all .sio files into a single flat compilation unit.
     //
     // This is intentionally different from the import-based ModuleLoader path:
     // self-hosted suites rely on "flat" visibility across the directory tree.
     if entry_path.is_dir() {
-        return load_directory_ast(entry_path);
+        return load_directory_ast_with_options(entry_path, &options);
     }
 
     let mut loader = ModuleLoader::new()?;
@@ -192,16 +210,26 @@ fn resolve_manifest_entry_path(
     entry_path
 }
 
-fn load_selfhost_manifest_files(selfhost_dir: &StdPath) -> Result<Option<Vec<PathBuf>>> {
-    let Some(raw_manifest_path) = std::env::var("SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-    else {
-        return Ok(None);
+fn load_selfhost_manifest_files(
+    selfhost_dir: &StdPath,
+    options: &ProgramLoadOptions,
+) -> Result<Option<Vec<PathBuf>>> {
+    let manifest_path = if let Some(explicit_manifest) = &options.selfhost_bootstrap_manifest {
+        if explicit_manifest.is_absolute() {
+            explicit_manifest.clone()
+        } else {
+            resolve_manifest_path(selfhost_dir, explicit_manifest.to_string_lossy().as_ref())
+        }
+    } else {
+        let Some(raw_manifest_path) = std::env::var("SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        else {
+            return Ok(None);
+        };
+        resolve_manifest_path(selfhost_dir, &raw_manifest_path)
     };
-
-    let manifest_path = resolve_manifest_path(selfhost_dir, &raw_manifest_path);
     let manifest_content = std::fs::read_to_string(&manifest_path).map_err(|e| {
         miette::miette!(
             "Failed to read SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST at {}: {}",
@@ -295,6 +323,12 @@ fn selfhost_strict_module_gating_enabled() -> bool {
     )
 }
 
+fn selfhost_strict_module_gating_enabled_with_options(options: &ProgramLoadOptions) -> bool {
+    options
+        .selfhost_strict_module_gating
+        .unwrap_or_else(selfhost_strict_module_gating_enabled)
+}
+
 fn strict_profile_list_contains(env_name: &str, needle: &str) -> bool {
     std::env::var(env_name).ok().is_some_and(|raw| {
         raw.split(',')
@@ -378,12 +412,16 @@ fn filter_selfhost_duplicate_items(items: &mut Vec<Item>) {
 /// This enables multi-file projects where definitions in earlier files are
 /// visible to later files without explicit import statements.
 fn load_directory_ast(dir: &StdPath) -> Result<Ast> {
+    load_directory_ast_with_options(dir, &ProgramLoadOptions::default())
+}
+
+fn load_directory_ast_with_options(dir: &StdPath, options: &ProgramLoadOptions) -> Result<Ast> {
     let is_selfhost_root = dir.file_name().and_then(|s| s.to_str()) == Some("self-hosted");
 
     let mut files: Vec<PathBuf> = Vec::new();
     let mut loaded_from_manifest = false;
     if is_selfhost_root {
-        if let Some(manifest_files) = load_selfhost_manifest_files(dir)? {
+        if let Some(manifest_files) = load_selfhost_manifest_files(dir, options)? {
             files = manifest_files;
             loaded_from_manifest = true;
         }
@@ -400,7 +438,7 @@ fn load_directory_ast(dir: &StdPath) -> Result<Ast> {
     }
 
     let strict_selfhost_module_gating =
-        is_selfhost_root && selfhost_strict_module_gating_enabled();
+        is_selfhost_root && selfhost_strict_module_gating_enabled_with_options(options);
     let selfhost_bootstrap_stubs_enabled = is_selfhost_root && loaded_from_manifest;
 
     if !loaded_from_manifest {
@@ -3092,7 +3130,7 @@ mod tests {
 
         let _env_guard =
             set_env_var("SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST", Some("bootstrap/manifest.txt"));
-        let files = load_selfhost_manifest_files(&selfhost_dir)
+        let files = load_selfhost_manifest_files(&selfhost_dir, &ProgramLoadOptions::default())
             .expect("load manifest")
             .expect("manifest enabled");
 
