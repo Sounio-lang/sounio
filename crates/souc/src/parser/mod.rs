@@ -3146,6 +3146,10 @@ impl<'a> Parser<'a> {
                 bounds.push(Path::simple(&format!("{:?}", fn_ty)));
             } else {
                 bounds.push(self.parse_path()?);
+                // Consume optional generic args on the trait bound: `PartialEq<U>`, `Into<i64>`, etc.
+                if self.at(TokenKind::Lt) {
+                    let _ = self.parse_type_args()?;
+                }
             }
             while self.at(TokenKind::Plus) {
                 self.advance();
@@ -3157,6 +3161,10 @@ impl<'a> Parser<'a> {
                     bounds.push(Path::simple(&format!("{:?}", fn_ty)));
                 } else {
                     bounds.push(self.parse_path()?);
+                    // Consume optional generic args on the trait bound
+                    if self.at(TokenKind::Lt) {
+                        let _ = self.parse_type_args()?;
+                    }
                 }
             }
             predicates.push(WherePredicate { ty, bounds });
@@ -4281,6 +4289,15 @@ impl<'a> Parser<'a> {
                     break;
                 }
 
+                // Don't treat `*` on a new line as binary multiplication.
+                // A `*` at the start of a new line is a dereference expression,
+                // not a continuation of the previous expression's arithmetic.
+                // Without this, `let val = *self\n*self = rhs` is parsed as
+                // `let val = (*self) * self` and then `=` causes P0002.
+                if op == BinaryOp::Mul && self.had_newline_before_current() {
+                    break;
+                }
+
                 self.advance();
                 let next_min = if assoc == Assoc::Left { prec + 1 } else { prec };
                 let right = self.parse_expr_with_precedence(next_min)?;
@@ -5090,6 +5107,32 @@ impl<'a> Parser<'a> {
 
             // Closure
             TokenKind::Pipe => self.parse_closure(),
+
+            // Zero-argument closure: `|| body` — `||` is lexed as a single PipePipe token
+            TokenKind::PipePipe => {
+                self.advance(); // consume `||`
+                let return_type = if self.at(TokenKind::Arrow) {
+                    self.advance();
+                    Some(self.parse_type()?)
+                } else {
+                    None
+                };
+                let body = if self.at(TokenKind::LBrace) {
+                    let block = self.parse_block()?;
+                    Box::new(Expr::Block {
+                        id: self.next_id(),
+                        block,
+                    })
+                } else {
+                    Box::new(self.parse_expr()?)
+                };
+                Ok(Expr::Closure {
+                    id: self.next_id(),
+                    params: Vec::new(),
+                    return_type,
+                    body,
+                })
+            }
 
             // Effect operations
             TokenKind::Perform => {
