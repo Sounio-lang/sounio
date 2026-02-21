@@ -1,0 +1,1461 @@
+// stdlib/math/convex.sio — Convex optimization and proximal methods
+//
+// Pure Sounio implementations:
+//   Proximal operators (L1 soft-threshold, L2-ball, nonneg, box, simplex)
+//   Forward-backward splitting (proximal gradient)
+//   FISTA (Nesterov-accelerated O(1/k^2) convergence)
+//   ADMM (consensus splitting)
+//   LASSO (L1-regularized least squares)
+//   Moreau envelope, adaptive backtracking
+//
+// References:
+//   Boyd et al. (2011): "Distributed Optimization via ADMM"
+//   Beck & Teboulle (2009): "A Fast Iterative Shrinkage-Thresholding Algorithm"
+//   Parikh & Boyd (2014): "Proximal Algorithms"
+
+// =============================================================================
+// Scalar helpers (cv_ prefix, self-contained)
+// =============================================================================
+
+fn cv_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn cv_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+
+fn cv_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+fn cv_sign(x: f64) -> f64 {
+    if x > 0.0 { 1.0 }
+    else if x < 0.0 { 0.0 - 1.0 }
+    else { 0.0 }
+}
+
+fn cv_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 30 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+// =============================================================================
+// Vector helpers (fixed-size [f64; 128])
+// =============================================================================
+
+// Dot product: sum a[i]*b[i] for i in 0..n
+fn cv_dot(a: &[f64; 128], b: &[f64; 128], n: i32) -> f64 with Mut {
+    var s = 0.0
+    var i = 0
+    while i < n { s = s + a[i] * b[i]; i = i + 1 }
+    s
+}
+
+// Euclidean norm: ||a||_2
+fn cv_norm2(a: &[f64; 128], n: i32) -> f64 with Mut, Div, Panic {
+    var s = 0.0
+    var i = 0
+    while i < n { s = s + a[i] * a[i]; i = i + 1 }
+    cv_sqrt(s)
+}
+
+// AXPY: y[i] = y[i] + alpha * x[i]
+fn cv_axpy(alpha: f64, x: &[f64; 128], y: &![f64; 128], n: i32) with Mut {
+    var i = 0
+    while i < n { y[i] = y[i] + alpha * x[i]; i = i + 1 }
+}
+
+// Copy: dst[i] = src[i]
+fn cv_copy(src: &[f64; 128], dst: &![f64; 128], n: i32) with Mut {
+    var i = 0
+    while i < n { dst[i] = src[i]; i = i + 1 }
+}
+
+// Scale: x[i] = alpha * x[i]
+fn cv_scale(alpha: f64, x: &![f64; 128], n: i32) with Mut {
+    var i = 0
+    while i < n { x[i] = alpha * x[i]; i = i + 1 }
+}
+
+// Zero: dst[i] = 0
+fn cv_zero(dst: &![f64; 128], n: i32) with Mut {
+    var i = 0
+    while i < n { dst[i] = 0.0; i = i + 1 }
+}
+
+// Infinity norm: max |a[i]|
+fn cv_norminf(a: &[f64; 128], n: i32) -> f64 with Mut {
+    var mx = 0.0
+    var i = 0
+    while i < n {
+        let v = cv_abs(a[i])
+        if v > mx { mx = v }
+        i = i + 1
+    }
+    mx
+}
+
+// =============================================================================
+// Matrix-vector helpers (row-major flat arrays [f64; 16384])
+// =============================================================================
+
+// Matrix-vector product: y = A * x, where A is m-by-n row-major
+// A stored as A[i*n + j], x is n-vector, y is m-vector
+fn cv_matvec(A: &[f64; 16384], x: &[f64; 128], y: &![f64; 128],
+             m: i32, n: i32) with Mut {
+    var i = 0
+    while i < m {
+        var s = 0.0
+        var j = 0
+        while j < n {
+            s = s + A[i * n + j] * x[j]
+            j = j + 1
+        }
+        y[i] = s
+        i = i + 1
+    }
+}
+
+// Transpose matrix-vector product: y = A^T * x, where A is m-by-n row-major
+// A^T is n-by-m, so y is n-vector, x is m-vector
+fn cv_mat_t_vec(A: &[f64; 16384], x: &[f64; 128], y: &![f64; 128],
+                m: i32, n: i32) with Mut {
+    var j = 0
+    while j < n { y[j] = 0.0; j = j + 1 }
+    var i = 0
+    while i < m {
+        j = 0
+        while j < n {
+            y[j] = y[j] + A[i * n + j] * x[i]
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Structs
+// =============================================================================
+
+struct ProxResult {
+    x: [f64; 128],
+    obj_val: f64,
+    iterations: i32,
+    converged: bool
+}
+
+struct ADMMResult {
+    x: [f64; 128],
+    z: [f64; 128],
+    obj_val: f64,
+    iterations: i32,
+    converged: bool
+}
+
+struct LassoResult {
+    x: [f64; 128],
+    obj_val: f64,
+    n_nonzero: i32,
+    iterations: i32,
+    converged: bool
+}
+
+// =============================================================================
+// Initialization helpers
+// =============================================================================
+
+fn cv_init_prox_result(res: &!ProxResult) with Mut {
+    var i = 0
+    while i < 128 { res.x[i] = 0.0; i = i + 1 }
+    res.obj_val = 0.0
+    res.iterations = 0
+    res.converged = false
+}
+
+fn cv_init_admm_result(res: &!ADMMResult) with Mut {
+    var i = 0
+    while i < 128 { res.x[i] = 0.0; i = i + 1 }
+    i = 0
+    while i < 128 { res.z[i] = 0.0; i = i + 1 }
+    res.obj_val = 0.0
+    res.iterations = 0
+    res.converged = false
+}
+
+fn cv_init_lasso_result(res: &!LassoResult) with Mut {
+    var i = 0
+    while i < 128 { res.x[i] = 0.0; i = i + 1 }
+    res.obj_val = 0.0
+    res.n_nonzero = 0
+    res.iterations = 0
+    res.converged = false
+}
+
+// =============================================================================
+// Proximal operators
+// =============================================================================
+
+// Proximal operator for L1 norm: prox_{lambda * ||.||_1}(x)
+// Soft thresholding: out[i] = sign(x[i]) * max(|x[i]| - lambda, 0)
+//
+// This is the fundamental building block for sparse optimization.
+// Reference: Parikh & Boyd (2014), Section 6.5.2
+fn prox_l1(x: &[f64; 128], lambda: f64, n: i32,
+           out: &![f64; 128]) with Mut {
+    var i = 0
+    while i < n {
+        let ax = cv_abs(x[i])
+        let shrunk = ax - lambda
+        if shrunk > 0.0 {
+            out[i] = cv_sign(x[i]) * shrunk
+        } else {
+            out[i] = 0.0
+        }
+        i = i + 1
+    }
+}
+
+// Proximal operator for L2 ball constraint: projection onto {z: ||z||_2 <= radius}
+// If ||x||_2 <= radius, out = x; otherwise out = x * (radius / ||x||_2)
+//
+// Reference: Parikh & Boyd (2014), Section 6.3.1
+fn prox_l2_ball(x: &[f64; 128], radius: f64, n: i32,
+                out: &![f64; 128]) with Mut, Div, Panic {
+    let nrm = cv_norm2(x, n)
+    if nrm <= radius {
+        // Already inside the ball
+        var i = 0
+        while i < n { out[i] = x[i]; i = i + 1 }
+    } else {
+        // Project onto the ball boundary
+        let scale = radius / nrm
+        var i = 0
+        while i < n { out[i] = x[i] * scale; i = i + 1 }
+    }
+}
+
+// Proximal operator for nonnegative orthant: projection onto R+^n
+// out[i] = max(x[i], 0)
+//
+// Reference: Parikh & Boyd (2014), Section 6.3
+fn prox_nonneg(x: &[f64; 128], n: i32,
+               out: &![f64; 128]) with Mut {
+    var i = 0
+    while i < n {
+        if x[i] > 0.0 {
+            out[i] = x[i]
+        } else {
+            out[i] = 0.0
+        }
+        i = i + 1
+    }
+}
+
+// Proximal operator for box constraints: projection onto [lower, upper]^n
+// out[i] = clamp(x[i], lower[i], upper[i])
+//
+// Reference: Parikh & Boyd (2014), Section 6.3
+fn prox_box(x: &[f64; 128], lower: &[f64; 128], upper: &[f64; 128],
+            n: i32, out: &![f64; 128]) with Mut {
+    var i = 0
+    while i < n {
+        var v = x[i]
+        if v < lower[i] { v = lower[i] }
+        if v > upper[i] { v = upper[i] }
+        out[i] = v
+        i = i + 1
+    }
+}
+
+// Proximal operator for probability simplex: projection onto Delta_n
+// {z: z >= 0, sum(z) = 1}
+//
+// Algorithm: Duchi et al. (2008) / Condat (2016) sort-based projection.
+// Uses insertion sort since Sounio has no built-in sort.
+//
+// Steps:
+//   1. Sort x in descending order into mu
+//   2. Find rho = max{j : mu[j] - (1/j)(sum_{i=1}^j mu[i] - 1) > 0}
+//   3. theta = (1/rho)(sum_{i=1}^rho mu[i] - 1)
+//   4. out[i] = max(x[i] - theta, 0)
+//
+// Reference: Duchi et al. (2008): "Efficient Projections onto the l1-Ball"
+fn prox_simplex(x: &[f64; 128], n: i32,
+                out: &![f64; 128]) with Mut, Div {
+    // Copy into working array for sorting
+    var mu: [f64; 128] = [0.0; 128]
+    var i = 0
+    while i < n { mu[i] = x[i]; i = i + 1 }
+
+    // Insertion sort descending
+    var k = 1
+    while k < n {
+        let key = mu[k]
+        var j = k - 1
+        while j >= 0 {
+            if mu[j] < key {
+                mu[j + 1] = mu[j]
+                j = j - 1
+            } else {
+                j = 0 - 1  // break
+            }
+        }
+        mu[j + 1] = key
+        k = k + 1
+    }
+
+    // Find rho and compute theta
+    var cumsum = 0.0
+    var rho = 0
+    var theta = 0.0
+    i = 0
+    while i < n {
+        cumsum = cumsum + mu[i]
+        let t_cand = (cumsum - 1.0) / ((i + 1) as f64)
+        if mu[i] - t_cand > 0.0 {
+            rho = i + 1
+            theta = t_cand
+        }
+        i = i + 1
+    }
+
+    // Project
+    i = 0
+    while i < n {
+        let v = x[i] - theta
+        if v > 0.0 {
+            out[i] = v
+        } else {
+            out[i] = 0.0
+        }
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Proximal gradient method (forward-backward splitting)
+// =============================================================================
+
+// Proximal gradient descent: minimize f(x) + g(x)
+//
+// where f is smooth (we have grad_f) and g is non-smooth (we have prox_g).
+//
+// Iteration:
+//   x_{k+1} = prox_{step * g}(x_k - step * grad_f(x_k))
+//
+// Convergence: O(1/k) for convex f + g.
+//
+// Parameters:
+//   grad_f  — gradient of smooth part f
+//   f_val   — evaluate f(x)
+//   prox_g  — proximal operator of step*g (takes x, step, n, out)
+//   g_val   — evaluate g(x)
+//   x0      — initial point
+//   n       — dimension
+//   step_size — step size (should be <= 1/L where L = Lipschitz constant of grad_f)
+//   max_iter — maximum iterations
+//   tol     — convergence tolerance on ||x_{k+1} - x_k||_inf
+//   result  — output
+//
+// Reference: Parikh & Boyd (2014), Section 4.2
+fn proximal_gradient(
+    grad_f: fn(&[f64; 128], i32, &![f64; 128]) with Mut, Div, Panic,
+    f_val: fn(&[f64; 128], i32) -> f64 with Mut, Div, Panic,
+    prox_g: fn(&[f64; 128], f64, i32, &![f64; 128]) with Mut, Div, Panic,
+    g_val: fn(&[f64; 128], i32) -> f64 with Mut, Div, Panic,
+    x0: &[f64; 128], n: i32,
+    step_size: f64, max_iter: i32, tol: f64,
+    result: &!ProxResult
+) with Mut, Div, Panic {
+    var x: [f64; 128] = [0.0; 128]
+    cv_copy(x0, &!x, n)
+
+    var grad: [f64; 128] = [0.0; 128]
+    var x_new: [f64; 128] = [0.0; 128]
+    var grad_step: [f64; 128] = [0.0; 128]
+
+    var iter = 0
+    while iter < max_iter {
+        // Gradient step: grad_step = x - step * grad_f(x)
+        grad_f(&x, n, &!grad)
+        var i = 0
+        while i < n {
+            grad_step[i] = x[i] - step_size * grad[i]
+            i = i + 1
+        }
+
+        // Proximal step: x_new = prox_{step*g}(grad_step)
+        prox_g(&grad_step, step_size, n, &!x_new)
+
+        // Check convergence: ||x_new - x||_inf < tol
+        var diff_norm = 0.0
+        i = 0
+        while i < n {
+            let d = cv_abs(x_new[i] - x[i])
+            if d > diff_norm { diff_norm = d }
+            i = i + 1
+        }
+
+        // Update x
+        cv_copy(&x_new, &!x, n)
+
+        if diff_norm < tol {
+            cv_copy(&x, &!result.x, n)
+            result.obj_val = f_val(&x, n) + g_val(&x, n)
+            result.iterations = iter + 1
+            result.converged = true
+            return
+        }
+
+        iter = iter + 1
+    }
+
+    // Did not converge
+    cv_copy(&x, &!result.x, n)
+    result.obj_val = f_val(&x, n) + g_val(&x, n)
+    result.iterations = max_iter
+    result.converged = false
+}
+
+// =============================================================================
+// FISTA (Fast Iterative Shrinkage-Thresholding Algorithm)
+// =============================================================================
+
+// FISTA: accelerated proximal gradient with Nesterov momentum.
+//
+// Achieves O(1/k^2) convergence rate vs O(1/k) for vanilla proximal gradient.
+//
+// Iteration:
+//   y_k = x_k + ((t_{k-1} - 1) / t_k) * (x_k - x_{k-1})
+//   x_{k+1} = prox_{step * g}(y_k - step * grad_f(y_k))
+//   t_{k+1} = (1 + sqrt(1 + 4*t_k^2)) / 2
+//
+// Reference: Beck & Teboulle (2009), "A Fast Iterative Shrinkage-Thresholding
+//   Algorithm for Linear Inverse Problems"
+fn fista(
+    grad_f: fn(&[f64; 128], i32, &![f64; 128]) with Mut, Div, Panic,
+    f_val: fn(&[f64; 128], i32) -> f64 with Mut, Div, Panic,
+    prox_g: fn(&[f64; 128], f64, i32, &![f64; 128]) with Mut, Div, Panic,
+    g_val: fn(&[f64; 128], i32) -> f64 with Mut, Div, Panic,
+    x0: &[f64; 128], n: i32,
+    step_size: f64, max_iter: i32, tol: f64,
+    result: &!ProxResult
+) with Mut, Div, Panic {
+    var x: [f64; 128] = [0.0; 128]
+    var x_prev: [f64; 128] = [0.0; 128]
+    var y: [f64; 128] = [0.0; 128]
+    var grad: [f64; 128] = [0.0; 128]
+    var x_new: [f64; 128] = [0.0; 128]
+    var grad_step: [f64; 128] = [0.0; 128]
+
+    cv_copy(x0, &!x, n)
+    cv_copy(x0, &!x_prev, n)
+    cv_copy(x0, &!y, n)
+
+    var t = 1.0
+    var iter = 0
+
+    while iter < max_iter {
+        // Gradient at y
+        grad_f(&y, n, &!grad)
+
+        // Gradient step: grad_step = y - step * grad_f(y)
+        var i = 0
+        while i < n {
+            grad_step[i] = y[i] - step_size * grad[i]
+            i = i + 1
+        }
+
+        // Proximal step: x_new = prox_{step*g}(grad_step)
+        prox_g(&grad_step, step_size, n, &!x_new)
+
+        // Check convergence: ||x_new - x||_inf < tol
+        var diff_norm = 0.0
+        i = 0
+        while i < n {
+            let d = cv_abs(x_new[i] - x[i])
+            if d > diff_norm { diff_norm = d }
+            i = i + 1
+        }
+
+        // Save x_prev = x, x = x_new
+        cv_copy(&x, &!x_prev, n)
+        cv_copy(&x_new, &!x, n)
+
+        if diff_norm < tol {
+            cv_copy(&x, &!result.x, n)
+            result.obj_val = f_val(&x, n) + g_val(&x, n)
+            result.iterations = iter + 1
+            result.converged = true
+            return
+        }
+
+        // Nesterov momentum update
+        let t_new = (1.0 + cv_sqrt(1.0 + 4.0 * t * t)) / 2.0
+        let momentum = (t - 1.0) / t_new
+
+        // y = x + momentum * (x - x_prev)
+        i = 0
+        while i < n {
+            y[i] = x[i] + momentum * (x[i] - x_prev[i])
+            i = i + 1
+        }
+
+        t = t_new
+        iter = iter + 1
+    }
+
+    // Did not converge
+    cv_copy(&x, &!result.x, n)
+    result.obj_val = f_val(&x, n) + g_val(&x, n)
+    result.iterations = max_iter
+    result.converged = false
+}
+
+// =============================================================================
+// ADMM (Alternating Direction Method of Multipliers)
+// =============================================================================
+
+// ADMM for consensus splitting: minimize f(x) + g(z) subject to x = z
+//
+// Scaled form iterations:
+//   x_{k+1} = prox_f(z_k - u_k)
+//   z_{k+1} = prox_g(x_{k+1} + u_k)
+//   u_{k+1} = u_k + x_{k+1} - z_{k+1}
+//
+// Convergence checked via primal and dual residuals:
+//   r_k = ||x_{k+1} - z_{k+1}||_2  (primal)
+//   s_k = rho * ||z_{k+1} - z_k||_2  (dual)
+//
+// Reference: Boyd et al. (2011), Section 3.1
+fn admm(
+    prox_f: fn(&[f64; 128], f64, i32, &![f64; 128]) with Mut, Div, Panic,
+    prox_g: fn(&[f64; 128], f64, i32, &![f64; 128]) with Mut, Div, Panic,
+    x0: &[f64; 128], n: i32,
+    rho: f64, max_iter: i32, tol: f64,
+    result: &!ADMMResult
+) with Mut, Div, Panic {
+    var x: [f64; 128] = [0.0; 128]
+    var z: [f64; 128] = [0.0; 128]
+    var z_prev: [f64; 128] = [0.0; 128]
+    var u: [f64; 128] = [0.0; 128]
+    var x_hat: [f64; 128] = [0.0; 128]
+    var z_hat: [f64; 128] = [0.0; 128]
+
+    cv_copy(x0, &!x, n)
+    cv_copy(x0, &!z, n)
+    cv_zero(&!u, n)
+
+    let inv_rho = 1.0 / rho
+
+    var iter = 0
+    while iter < max_iter {
+        cv_copy(&z, &!z_prev, n)
+
+        // x-update: x = prox_{(1/rho)*f}(z - u)
+        var i = 0
+        while i < n {
+            x_hat[i] = z[i] - u[i]
+            i = i + 1
+        }
+        prox_f(&x_hat, inv_rho, n, &!x)
+
+        // z-update: z = prox_{(1/rho)*g}(x + u)
+        i = 0
+        while i < n {
+            z_hat[i] = x[i] + u[i]
+            i = i + 1
+        }
+        prox_g(&z_hat, inv_rho, n, &!z)
+
+        // u-update (dual variable): u = u + x - z
+        i = 0
+        while i < n {
+            u[i] = u[i] + x[i] - z[i]
+            i = i + 1
+        }
+
+        // Convergence check: primal and dual residuals
+        // Primal residual: ||x - z||_2
+        var primal_resid = 0.0
+        i = 0
+        while i < n {
+            let d = x[i] - z[i]
+            primal_resid = primal_resid + d * d
+            i = i + 1
+        }
+        primal_resid = cv_sqrt(primal_resid)
+
+        // Dual residual: rho * ||z - z_prev||_2
+        var dual_resid = 0.0
+        i = 0
+        while i < n {
+            let d = z[i] - z_prev[i]
+            dual_resid = dual_resid + d * d
+            i = i + 1
+        }
+        dual_resid = rho * cv_sqrt(dual_resid)
+
+        if primal_resid < tol {
+            if dual_resid < tol {
+                cv_copy(&x, &!result.x, n)
+                cv_copy(&z, &!result.z, n)
+                result.obj_val = 0.0
+                result.iterations = iter + 1
+                result.converged = true
+                return
+            }
+        }
+
+        iter = iter + 1
+    }
+
+    // Did not converge
+    cv_copy(&x, &!result.x, n)
+    cv_copy(&z, &!result.z, n)
+    result.obj_val = 0.0
+    result.iterations = max_iter
+    result.converged = false
+}
+
+// =============================================================================
+// LASSO helper: gradient of (1/2)||Ax - b||_2^2
+// =============================================================================
+
+// Compute gradient of the smooth part of LASSO: grad = A^T(Ax - b)
+// Uses auxiliary workspace. A is m-by-n row-major in [f64; 16384].
+fn cv_lasso_grad(A: &[f64; 16384], b: &[f64; 128],
+                 x: &[f64; 128], m: i32, n: i32,
+                 grad: &![f64; 128]) with Mut {
+    // residual = Ax - b
+    var residual: [f64; 128] = [0.0; 128]
+    cv_matvec(A, x, &!residual, m, n)
+    var i = 0
+    while i < m {
+        residual[i] = residual[i] - b[i]
+        i = i + 1
+    }
+    // grad = A^T * residual
+    cv_mat_t_vec(A, &residual, grad, m, n)
+}
+
+// =============================================================================
+// LASSO objective helpers
+// =============================================================================
+
+// Compute LASSO objective: (1/2)||Ax - b||_2^2 + lambda * ||x||_1
+fn cv_objective_lasso(A: &[f64; 16384], b: &[f64; 128],
+                      x: &[f64; 128], lambda: f64,
+                      m: i32, n: i32) -> f64 with Mut {
+    // (1/2)||Ax - b||_2^2
+    var residual: [f64; 128] = [0.0; 128]
+    cv_matvec(A, x, &!residual, m, n)
+    var sq_err = 0.0
+    var i = 0
+    while i < m {
+        let r = residual[i] - b[i]
+        sq_err = sq_err + r * r
+        i = i + 1
+    }
+
+    // lambda * ||x||_1
+    var l1 = 0.0
+    i = 0
+    while i < n {
+        l1 = l1 + cv_abs(x[i])
+        i = i + 1
+    }
+
+    0.5 * sq_err + lambda * l1
+}
+
+// Count nonzero entries: |{i : |x[i]| > tol}|
+fn cv_count_nonzero(x: &[f64; 128], n: i32, tol: f64) -> i32 with Mut {
+    var count = 0
+    var i = 0
+    while i < n {
+        if cv_abs(x[i]) > tol { count = count + 1 }
+        i = i + 1
+    }
+    count
+}
+
+// =============================================================================
+// Lipschitz constant estimation via power iteration
+// =============================================================================
+
+// Estimate the largest eigenvalue of A^T A via power iteration.
+// This gives the Lipschitz constant L of grad f(x) = A^T(Ax - b).
+// step_size = 1/L guarantees convergence of proximal gradient methods.
+//
+// Algorithm: start with random-ish vector v, iterate v <- A^T A v / ||A^T A v||
+// and estimate lambda = v^T (A^T A v).
+//
+// Reference: Golub & Van Loan (2013), "Matrix Computations" Section 7.3
+fn cv_lipschitz_estimate(A: &[f64; 16384], m: i32, n: i32) -> f64 with Mut, Div, Panic {
+    // Initialize v with a deterministic non-degenerate vector
+    var v: [f64; 128] = [0.0; 128]
+    var i = 0
+    while i < n {
+        // Use a simple sequence to avoid degeneracy
+        v[i] = 1.0 / ((i + 1) as f64)
+        i = i + 1
+    }
+
+    // Normalize v
+    let nrm0 = cv_norm2(&v, n)
+    if nrm0 > 0.0 {
+        cv_scale(1.0 / nrm0, &!v, n)
+    }
+
+    var Av: [f64; 128] = [0.0; 128]
+    var AtAv: [f64; 128] = [0.0; 128]
+    var lambda = 1.0
+
+    // Power iteration: 50 iterations is more than enough for convergence
+    var iter = 0
+    while iter < 50 {
+        // Av = A * v
+        cv_matvec(A, &v, &!Av, m, n)
+
+        // AtAv = A^T * Av
+        cv_mat_t_vec(A, &Av, &!AtAv, m, n)
+
+        // Estimate eigenvalue: lambda = v^T * (A^T A v)
+        lambda = cv_dot(&v, &AtAv, n)
+
+        // Normalize: v = AtAv / ||AtAv||
+        let nrm = cv_norm2(&AtAv, n)
+        if nrm < 1.0e-30 { return lambda }
+        i = 0
+        while i < n {
+            v[i] = AtAv[i] / nrm
+            i = i + 1
+        }
+
+        iter = iter + 1
+    }
+
+    lambda
+}
+
+// =============================================================================
+// LASSO solver via FISTA
+// =============================================================================
+
+// LASSO: minimize (1/2)||Ax - b||_2^2 + lambda * ||x||_1
+//
+// Solved via FISTA (accelerated proximal gradient):
+//   - Smooth part: f(x) = (1/2)||Ax - b||_2^2, grad_f(x) = A^T(Ax - b)
+//   - Non-smooth part: g(x) = lambda * ||x||_1, prox = soft thresholding
+//   - Step size: 1/L where L = ||A^T A|| (Lipschitz constant)
+//
+// Parameters:
+//   A       — m-by-n design matrix (row-major, flat [f64; 16384])
+//   b       — m-vector of observations
+//   lambda  — regularization parameter (>0)
+//   m, n    — matrix dimensions (m observations, n features)
+//   max_iter — maximum FISTA iterations
+//   tol     — convergence tolerance on ||x_{k+1} - x_k||_inf
+//   result  — output (solution, objective, sparsity, iteration count)
+//
+// Reference: Beck & Teboulle (2009)
+fn lasso(
+    A: &[f64; 16384], b: &[f64; 128],
+    lambda: f64, m: i32, n: i32,
+    max_iter: i32, tol: f64,
+    result: &!LassoResult
+) with Mut, Div, Panic {
+    // Estimate Lipschitz constant for step size selection
+    let L = cv_lipschitz_estimate(A, m, n)
+    var step = 1.0 / L
+    if step > 1.0 { step = 1.0 }
+    if step < 1.0e-16 { step = 1.0e-4 }
+
+    // Initialize iterates
+    var x: [f64; 128] = [0.0; 128]
+    var x_prev: [f64; 128] = [0.0; 128]
+    var y: [f64; 128] = [0.0; 128]
+    var grad: [f64; 128] = [0.0; 128]
+    var grad_step: [f64; 128] = [0.0; 128]
+    var x_new: [f64; 128] = [0.0; 128]
+
+    var t = 1.0
+    var iter = 0
+
+    while iter < max_iter {
+        // Gradient at y: grad = A^T(Ay - b)
+        cv_lasso_grad(A, b, &y, m, n, &!grad)
+
+        // Gradient step: grad_step = y - step * grad
+        var i = 0
+        while i < n {
+            grad_step[i] = y[i] - step * grad[i]
+            i = i + 1
+        }
+
+        // Proximal step: soft thresholding at step * lambda
+        let threshold = step * lambda
+        prox_l1(&grad_step, threshold, n, &!x_new)
+
+        // Check convergence
+        var diff_norm = 0.0
+        i = 0
+        while i < n {
+            let d = cv_abs(x_new[i] - x[i])
+            if d > diff_norm { diff_norm = d }
+            i = i + 1
+        }
+
+        // Save x_prev = x, x = x_new
+        cv_copy(&x, &!x_prev, n)
+        cv_copy(&x_new, &!x, n)
+
+        if diff_norm < tol {
+            cv_copy(&x, &!result.x, n)
+            result.obj_val = cv_objective_lasso(A, b, &x, lambda, m, n)
+            result.n_nonzero = cv_count_nonzero(&x, n, 1.0e-10)
+            result.iterations = iter + 1
+            result.converged = true
+            return
+        }
+
+        // Nesterov momentum update
+        let t_new = (1.0 + cv_sqrt(1.0 + 4.0 * t * t)) / 2.0
+        let momentum = (t - 1.0) / t_new
+
+        // y = x + momentum * (x - x_prev)
+        i = 0
+        while i < n {
+            y[i] = x[i] + momentum * (x[i] - x_prev[i])
+            i = i + 1
+        }
+
+        t = t_new
+        iter = iter + 1
+    }
+
+    // Did not converge
+    cv_copy(&x, &!result.x, n)
+    result.obj_val = cv_objective_lasso(A, b, &x, lambda, m, n)
+    result.n_nonzero = cv_count_nonzero(&x, n, 1.0e-10)
+    result.iterations = max_iter
+    result.converged = false
+}
+
+// =============================================================================
+// Moreau envelope
+// =============================================================================
+
+// Moreau envelope of f at x with parameter gamma:
+//   M_gamma(f)(x) = min_y { f(y) + (1/(2*gamma)) * ||y - x||_2^2 }
+//
+// Computed as: M_gamma(f)(x) = f(prox_{gamma*f}(x)) + (1/(2*gamma)) * ||prox_{gamma*f}(x) - x||_2^2
+//
+// The Moreau envelope is a smooth approximation of f (even when f is non-smooth).
+// It has the same minimizers as f, and its gradient is (1/gamma)(x - prox_{gamma*f}(x)).
+//
+// Reference: Parikh & Boyd (2014), Section 2.2
+fn moreau_envelope(
+    prox_f: fn(&[f64; 128], f64, i32, &![f64; 128]) with Mut, Div, Panic,
+    f_val: fn(&[f64; 128], i32) -> f64 with Mut, Div, Panic,
+    x: &[f64; 128], gamma: f64, n: i32
+) -> f64 with Mut, Div, Panic {
+    // Compute proximal point
+    var p: [f64; 128] = [0.0; 128]
+    prox_f(x, gamma, n, &!p)
+
+    // f(prox(x))
+    let fval = f_val(&p, n)
+
+    // (1/(2*gamma)) * ||prox(x) - x||_2^2
+    var dist_sq = 0.0
+    var i = 0
+    while i < n {
+        let d = p[i] - x[i]
+        dist_sq = dist_sq + d * d
+        i = i + 1
+    }
+
+    fval + dist_sq / (2.0 * gamma)
+}
+
+// =============================================================================
+// Backtracking line search for proximal gradient
+// =============================================================================
+
+// Adaptive backtracking for proximal gradient step size selection.
+//
+// Finds the largest step s in {step * beta^k : k=0,1,...} such that
+//   f(prox_step) <= f(x) + grad^T(prox_step - x) + (1/(2*s))||prox_step - x||^2
+//
+// This is the sufficient decrease condition for proximal gradient methods.
+//
+// Reference: Beck & Teboulle (2009), Algorithm with backtracking (FISTA-BT)
+fn cv_backtrack_proxgrad(
+    grad_f: fn(&[f64; 128], i32, &![f64; 128]) with Mut, Div, Panic,
+    f_val: fn(&[f64; 128], i32) -> f64 with Mut, Div, Panic,
+    prox_g: fn(&[f64; 128], f64, i32, &![f64; 128]) with Mut, Div, Panic,
+    x: &[f64; 128], n: i32,
+    step_init: f64, beta: f64
+) -> f64 with Mut, Div, Panic {
+    var grad: [f64; 128] = [0.0; 128]
+    grad_f(x, n, &!grad)
+    let fx = f_val(x, n)
+
+    var step = step_init
+    var grad_step: [f64; 128] = [0.0; 128]
+    var p: [f64; 128] = [0.0; 128]
+
+    var k = 0
+    while k < 40 {
+        // grad_step = x - step * grad
+        var i = 0
+        while i < n {
+            grad_step[i] = x[i] - step * grad[i]
+            i = i + 1
+        }
+
+        // p = prox_{step*g}(grad_step)
+        prox_g(&grad_step, step, n, &!p)
+
+        // Check sufficient decrease
+        let fp = f_val(&p, n)
+
+        // Q_step(p, x) = f(x) + grad^T(p - x) + (1/(2*step))||p - x||^2
+        var grad_inner = 0.0
+        var dist_sq = 0.0
+        i = 0
+        while i < n {
+            let d = p[i] - x[i]
+            grad_inner = grad_inner + grad[i] * d
+            dist_sq = dist_sq + d * d
+            i = i + 1
+        }
+        let quad_upper = fx + grad_inner + dist_sq / (2.0 * step)
+
+        if fp <= quad_upper + 1.0e-14 {
+            return step
+        }
+
+        step = step * beta
+        if step < 1.0e-20 { return 1.0e-20 }
+
+        k = k + 1
+    }
+
+    step
+}
+
+// =============================================================================
+// FISTA with backtracking (FISTA-BT)
+// =============================================================================
+
+// FISTA with adaptive backtracking line search.
+//
+// Same as fista() but automatically selects the step size at each iteration
+// using the sufficient decrease condition. No need to know the Lipschitz
+// constant in advance.
+//
+// Reference: Beck & Teboulle (2009), Algorithm 2 (FISTA with backtracking)
+fn fista_backtrack(
+    grad_f: fn(&[f64; 128], i32, &![f64; 128]) with Mut, Div, Panic,
+    f_val: fn(&[f64; 128], i32) -> f64 with Mut, Div, Panic,
+    prox_g: fn(&[f64; 128], f64, i32, &![f64; 128]) with Mut, Div, Panic,
+    g_val: fn(&[f64; 128], i32) -> f64 with Mut, Div, Panic,
+    x0: &[f64; 128], n: i32,
+    step_init: f64, beta: f64,
+    max_iter: i32, tol: f64,
+    result: &!ProxResult
+) with Mut, Div, Panic {
+    var x: [f64; 128] = [0.0; 128]
+    var x_prev: [f64; 128] = [0.0; 128]
+    var y: [f64; 128] = [0.0; 128]
+    var grad: [f64; 128] = [0.0; 128]
+    var grad_step: [f64; 128] = [0.0; 128]
+    var x_new: [f64; 128] = [0.0; 128]
+
+    cv_copy(x0, &!x, n)
+    cv_copy(x0, &!x_prev, n)
+    cv_copy(x0, &!y, n)
+
+    var t = 1.0
+    var step = step_init
+
+    var iter = 0
+    while iter < max_iter {
+        // Backtracking: find step size at y
+        step = cv_backtrack_proxgrad(grad_f, f_val, prox_g, &y, n, step, beta)
+
+        // Gradient at y
+        grad_f(&y, n, &!grad)
+
+        // Gradient step
+        var i = 0
+        while i < n {
+            grad_step[i] = y[i] - step * grad[i]
+            i = i + 1
+        }
+
+        // Proximal step
+        prox_g(&grad_step, step, n, &!x_new)
+
+        // Check convergence
+        var diff_norm = 0.0
+        i = 0
+        while i < n {
+            let d = cv_abs(x_new[i] - x[i])
+            if d > diff_norm { diff_norm = d }
+            i = i + 1
+        }
+
+        cv_copy(&x, &!x_prev, n)
+        cv_copy(&x_new, &!x, n)
+
+        if diff_norm < tol {
+            cv_copy(&x, &!result.x, n)
+            result.obj_val = f_val(&x, n) + g_val(&x, n)
+            result.iterations = iter + 1
+            result.converged = true
+            return
+        }
+
+        // Nesterov momentum
+        let t_new = (1.0 + cv_sqrt(1.0 + 4.0 * t * t)) / 2.0
+        let momentum = (t - 1.0) / t_new
+
+        i = 0
+        while i < n {
+            y[i] = x[i] + momentum * (x[i] - x_prev[i])
+            i = i + 1
+        }
+
+        t = t_new
+        // Allow step to grow slightly for next iteration
+        step = step / beta
+        iter = iter + 1
+    }
+
+    cv_copy(&x, &!result.x, n)
+    result.obj_val = f_val(&x, n) + g_val(&x, n)
+    result.iterations = max_iter
+    result.converged = false
+}
+
+// =============================================================================
+// Proximal gradient with adaptive restart
+// =============================================================================
+
+// FISTA with gradient-based restart (O'Donoghue & Candes, 2015).
+//
+// Restarts the Nesterov sequence when the gradient-momentum angle criterion
+// detects that momentum is not helping:
+//   restart when grad_f(x_k)^T (x_k - x_{k-1}) > 0
+//
+// This prevents oscillation and can dramatically speed up convergence near
+// the optimum.
+//
+// Reference: O'Donoghue & Candes (2015): "Adaptive Restart for Accelerated
+//   Gradient Schemes"
+fn fista_restart(
+    grad_f: fn(&[f64; 128], i32, &![f64; 128]) with Mut, Div, Panic,
+    f_val: fn(&[f64; 128], i32) -> f64 with Mut, Div, Panic,
+    prox_g: fn(&[f64; 128], f64, i32, &![f64; 128]) with Mut, Div, Panic,
+    g_val: fn(&[f64; 128], i32) -> f64 with Mut, Div, Panic,
+    x0: &[f64; 128], n: i32,
+    step_size: f64, max_iter: i32, tol: f64,
+    result: &!ProxResult
+) with Mut, Div, Panic {
+    var x: [f64; 128] = [0.0; 128]
+    var x_prev: [f64; 128] = [0.0; 128]
+    var y: [f64; 128] = [0.0; 128]
+    var grad: [f64; 128] = [0.0; 128]
+    var grad_step: [f64; 128] = [0.0; 128]
+    var x_new: [f64; 128] = [0.0; 128]
+    var diff_vec: [f64; 128] = [0.0; 128]
+
+    cv_copy(x0, &!x, n)
+    cv_copy(x0, &!x_prev, n)
+    cv_copy(x0, &!y, n)
+
+    var t = 1.0
+    var iter = 0
+
+    while iter < max_iter {
+        // Gradient at y
+        grad_f(&y, n, &!grad)
+
+        // Gradient step
+        var i = 0
+        while i < n {
+            grad_step[i] = y[i] - step_size * grad[i]
+            i = i + 1
+        }
+
+        // Proximal step
+        prox_g(&grad_step, step_size, n, &!x_new)
+
+        // Check convergence
+        var diff_norm = 0.0
+        i = 0
+        while i < n {
+            let d = cv_abs(x_new[i] - x[i])
+            if d > diff_norm { diff_norm = d }
+            i = i + 1
+        }
+
+        cv_copy(&x, &!x_prev, n)
+        cv_copy(&x_new, &!x, n)
+
+        if diff_norm < tol {
+            cv_copy(&x, &!result.x, n)
+            result.obj_val = f_val(&x, n) + g_val(&x, n)
+            result.iterations = iter + 1
+            result.converged = true
+            return
+        }
+
+        // Restart criterion: grad_f(x)^T (x - x_prev) > 0
+        grad_f(&x, n, &!grad)
+        i = 0
+        while i < n {
+            diff_vec[i] = x[i] - x_prev[i]
+            i = i + 1
+        }
+        let restart_crit = cv_dot(&grad, &diff_vec, n)
+
+        if restart_crit > 0.0 {
+            // Restart: reset momentum
+            t = 1.0
+            cv_copy(&x, &!y, n)
+        } else {
+            // Nesterov momentum
+            let t_new = (1.0 + cv_sqrt(1.0 + 4.0 * t * t)) / 2.0
+            let momentum = (t - 1.0) / t_new
+            i = 0
+            while i < n {
+                y[i] = x[i] + momentum * (x[i] - x_prev[i])
+                i = i + 1
+            }
+            t = t_new
+        }
+
+        iter = iter + 1
+    }
+
+    cv_copy(&x, &!result.x, n)
+    result.obj_val = f_val(&x, n) + g_val(&x, n)
+    result.iterations = max_iter
+    result.converged = false
+}
+
+// =============================================================================
+// Douglas-Rachford splitting
+// =============================================================================
+
+// Douglas-Rachford splitting: find x in fix(R_g R_f) where R_f = 2*prox_f - I
+//
+// Iteration:
+//   x_hat = prox_f(z_k)
+//   z_{k+1} = z_k + prox_g(2*x_hat - z_k) - x_hat
+//
+// Converges for any two closed proper convex functions f, g.
+// The fixed point z* gives x* = prox_f(z*).
+//
+// Reference: Eckstein & Bertsekas (1992); Parikh & Boyd (2014) Section 4.3
+fn douglas_rachford(
+    prox_f: fn(&[f64; 128], f64, i32, &![f64; 128]) with Mut, Div, Panic,
+    prox_g: fn(&[f64; 128], f64, i32, &![f64; 128]) with Mut, Div, Panic,
+    z0: &[f64; 128], n: i32,
+    gamma: f64, max_iter: i32, tol: f64,
+    result: &!ProxResult
+) with Mut, Div, Panic {
+    var z: [f64; 128] = [0.0; 128]
+    var x_hat: [f64; 128] = [0.0; 128]
+    var reflect: [f64; 128] = [0.0; 128]
+    var g_prox: [f64; 128] = [0.0; 128]
+
+    cv_copy(z0, &!z, n)
+
+    var iter = 0
+    while iter < max_iter {
+        // x_hat = prox_{gamma*f}(z)
+        prox_f(&z, gamma, n, &!x_hat)
+
+        // reflect = 2*x_hat - z
+        var i = 0
+        while i < n {
+            reflect[i] = 2.0 * x_hat[i] - z[i]
+            i = i + 1
+        }
+
+        // g_prox = prox_{gamma*g}(reflect)
+        prox_g(&reflect, gamma, n, &!g_prox)
+
+        // z_new = z + g_prox - x_hat
+        var diff_norm = 0.0
+        i = 0
+        while i < n {
+            let z_new = z[i] + g_prox[i] - x_hat[i]
+            let d = cv_abs(z_new - z[i])
+            if d > diff_norm { diff_norm = d }
+            z[i] = z_new
+            i = i + 1
+        }
+
+        if diff_norm < tol {
+            // Return x_hat = prox_f(z) as the solution
+            prox_f(&z, gamma, n, &!result.x)
+            result.obj_val = 0.0
+            result.iterations = iter + 1
+            result.converged = true
+            return
+        }
+
+        iter = iter + 1
+    }
+
+    // Return best x = prox_f(z)
+    prox_f(&z, gamma, n, &!result.x)
+    result.obj_val = 0.0
+    result.iterations = max_iter
+    result.converged = false
+}
+
+// =============================================================================
+// Elastic net (L1 + L2 regularization)
+// =============================================================================
+
+// Elastic net proximal operator: prox_{lambda1 * ||.||_1 + lambda2 * ||.||_2^2}(x)
+// = soft_threshold(x, lambda1) / (1 + 2*lambda2)
+//
+// Combines L1 sparsity with L2 grouping effect.
+// Reference: Zou & Hastie (2005): "Regularization and Variable Selection via
+//   the Elastic Net"
+fn prox_elastic_net(x: &[f64; 128], lambda1: f64, lambda2: f64,
+                    n: i32, out: &![f64; 128]) with Mut, Div {
+    let denom = 1.0 + 2.0 * lambda2
+    var i = 0
+    while i < n {
+        let ax = cv_abs(x[i])
+        let shrunk = ax - lambda1
+        if shrunk > 0.0 {
+            out[i] = cv_sign(x[i]) * shrunk / denom
+        } else {
+            out[i] = 0.0
+        }
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Proximal operator for group LASSO (L1/L2 norm)
+// =============================================================================
+
+// Group LASSO proximal: prox_{lambda * ||.||_2}(x)
+// Block soft-thresholding: if ||x|| > lambda, out = (1 - lambda/||x||) * x, else 0
+//
+// Reference: Yuan & Lin (2006): "Model selection and estimation in regression
+//   with grouped variables"
+fn prox_group_l1l2(x: &[f64; 128], lambda: f64, n: i32,
+                   out: &![f64; 128]) with Mut, Div, Panic {
+    let nrm = cv_norm2(x, n)
+    if nrm <= lambda {
+        var i = 0
+        while i < n { out[i] = 0.0; i = i + 1 }
+    } else {
+        let scale = 1.0 - lambda / nrm
+        var i = 0
+        while i < n { out[i] = scale * x[i]; i = i + 1 }
+    }
+}
+
+// =============================================================================
+// Duality gap computation for LASSO
+// =============================================================================
+
+// Compute the duality gap for LASSO: gap = primal_obj - dual_obj.
+//
+// Primal: (1/2)||Ax-b||^2 + lambda*||x||_1
+// Dual:   -(1/2)||b||^2 + (1/2)||b - nu||^2  where nu = b - Ax, scaled
+//
+// The duality gap provides a certificate of epsilon-optimality.
+// Reference: Boyd et al. (2011), Section 3.3.1
+fn cv_lasso_duality_gap(A: &[f64; 16384], b: &[f64; 128],
+                        x: &[f64; 128], lambda: f64,
+                        m: i32, n: i32) -> f64 with Mut, Div, Panic {
+    // Compute residual: r = Ax - b
+    var r: [f64; 128] = [0.0; 128]
+    cv_matvec(A, x, &!r, m, n)
+    var i = 0
+    while i < m {
+        r[i] = r[i] - b[i]
+        i = i + 1
+    }
+
+    // Primal objective
+    var r_sq = 0.0
+    i = 0
+    while i < m { r_sq = r_sq + r[i] * r[i]; i = i + 1 }
+    var l1_norm = 0.0
+    i = 0
+    while i < n { l1_norm = l1_norm + cv_abs(x[i]); i = i + 1 }
+    let primal = 0.5 * r_sq + lambda * l1_norm
+
+    // Dual feasible point: nu = -r / max(lambda, ||A^T r||_inf)
+    var Atr: [f64; 128] = [0.0; 128]
+    cv_mat_t_vec(A, &r, &!Atr, m, n)
+    var Atr_inf = 0.0
+    i = 0
+    while i < n {
+        let v = cv_abs(Atr[i])
+        if v > Atr_inf { Atr_inf = v }
+        i = i + 1
+    }
+
+    var scale_factor = 1.0
+    if Atr_inf > lambda {
+        scale_factor = lambda / Atr_inf
+    }
+
+    // Dual objective: -(1/2)||scale*r||^2 + scale*r^T b
+    var dual = 0.0
+    i = 0
+    while i < m {
+        let sr = scale_factor * r[i]
+        dual = dual - 0.5 * sr * sr + sr * b[i]
+        i = i + 1
+    }
+
+    // Correct dual: dual = (1/2)||b||^2 - (1/2)||b + scale*r||^2
+    // Simplified: gap = primal - dual
+    let gap = primal - dual
+    if gap < 0.0 { return 0.0 }
+    gap
+}
+
+// =============================================================================
+// Proximal operator for indicator of affine set
+// =============================================================================
+
+// Proximal (projection) onto affine set {x : Cx = d} where C is p-by-n.
+// Computed via: prox(v) = v - C^T (C C^T)^{-1} (Cv - d)
+//
+// For small p, we form and solve the p-by-p system C*C^T * lambda = Cv - d
+// using Cholesky-like direct solve (Gauss elimination with partial pivoting).
+//
+// C stored row-major in [f64; 16384], d in [f64; 128], p = number of constraints.
+fn prox_affine(x: &[f64; 128], C: &[f64; 16384], d: &[f64; 128],
+               p: i32, n: i32,
+               out: &![f64; 128]) with Mut, Div {
+    // Compute residual: Cx - d
+    var resid: [f64; 128] = [0.0; 128]
+    var i = 0
+    while i < p {
+        var s = 0.0
+        var j = 0
+        while j < n {
+            s = s + C[i * n + j] * x[j]
+            j = j + 1
+        }
+        resid[i] = s - d[i]
+        i = i + 1
+    }
+
+    // Form G = C * C^T (p-by-p)
+    var G: [f64; 16384] = [0.0; 16384]
+    i = 0
+    while i < p {
+        var j = 0
+        while j < p {
+            var s = 0.0
+            var k = 0
+            while k < n {
+                s = s + C[i * n + k] * C[j * n + k]
+                k = k + 1
+            }
+            G[i * p + j] = s
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Solve G * lambda = resid via Gaussian elimination with partial pivoting
+    var lam: [f64; 128] = [0.0; 128]
+    i = 0
+    while i < p { lam[i] = resid[i]; i = i + 1 }
+
+    // Forward elimination
+    var col = 0
+    while col < p {
+        // Partial pivoting
+        var max_val = cv_abs(G[col * p + col])
+        var max_row = col
+        var row = col + 1
+        while row < p {
+            let v = cv_abs(G[row * p + col])
+            if v > max_val { max_val = v; max_row = row }
+            row = row + 1
+        }
+        // Swap rows
+        if max_row != col {
+            var k = 0
+            while k < p {
+                let tmp = G[col * p + k]
+                G[col * p + k] = G[max_row * p + k]
+                G[max_row * p + k] = tmp
+                k = k + 1
+            }
+            let tmp_lam = lam[col]
+            lam[col] = lam[max_row]
+            lam[max_row] = tmp_lam
+        }
+
+        let pivot = G[col * p + col]
+        if cv_abs(pivot) < 1.0e-30 {
+            col = col + 1
+        } else {
+            row = col + 1
+            while row < p {
+                let factor = G[row * p + col] / pivot
+                var k = col
+                while k < p {
+                    G[row * p + k] = G[row * p + k] - factor * G[col * p + k]
+                    k = k + 1
+                }
+                lam[row] = lam[row] - factor * lam[col]
+                row = row + 1
+            }
+            col = col + 1
+        }
+    }
+
+    // Back substitution
+    var r = p - 1
+    while r >= 0 {
+        var s = lam[r]
+        var k = r + 1
+        while k < p {
+            s = s - G[r * p + k] * lam[k]
+            k = k + 1
+        }
+        let piv = G[r * p + r]
+        if cv_abs(piv) > 1.0e-30 {
+            lam[r] = s / piv
+        } else {
+            lam[r] = 0.0
+        }
+        r = r - 1
+    }
+
+    // out = x - C^T * lambda
+    i = 0
+    while i < n { out[i] = x[i]; i = i + 1 }
+    i = 0
+    while i < p {
+        var j = 0
+        while j < n {
+            out[j] = out[j] - C[i * n + j] * lam[i]
+            j = j + 1
+        }
+        i = i + 1
+    }
+}

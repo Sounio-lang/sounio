@@ -815,15 +815,15 @@ impl EpistemicValue {
             _ => {
                 if conf < 1.0 {
                     format!(
-                        "{} {:?} {}[{:.1}%]{}",
+                        "{} {} {}[{:.1}%]{}",
                         badge,
-                        self.value,
+                        self.value.pretty_print(),
                         colors::DIM,
                         conf * 100.0,
                         colors::RESET
                     )
                 } else {
-                    format!("{} {:?}", badge, self.value)
+                    format!("{} {}", badge, self.value.pretty_print())
                 }
             }
         }
@@ -1952,7 +1952,7 @@ impl Repl {
                                 ev.format_display()
                             );
                         } else {
-                            println!("{} = {:?}", name, value);
+                            println!("{} = {}", name, value.pretty_print());
                         }
 
                         // Store binding statement for type checker
@@ -1979,9 +1979,9 @@ impl Repl {
                             ev.format_display()
                         );
                     } else if self.config.show_types {
-                        println!("=> {:?}", value);
+                        println!("=> {}", value.pretty_print());
                     } else {
-                        println!("{:?}", value);
+                        println!("{}", value.pretty_print());
                     }
                 }
             }

@@ -1,0 +1,1085 @@
+// stdlib/math/functional.sio — Computational functional analysis
+//
+// Pure Sounio implementations:
+//   Operator norms (1, infinity, Frobenius, spectral 2-norm)
+//   Spectral radius via power iteration
+//   Condition number estimation
+//   Numerical rank via SVD-like approach
+//   Function space inner products (L2, H1, weighted)
+//   RKHS kernel interpolation
+//   Compact operator spectrum
+//   Fredholm alternative detection
+//
+// References:
+//   Kreyszig (1978): "Introductory Functional Analysis with Applications"
+//   Conway (1990): "A Course in Functional Analysis"
+//   Fasshauer (2007): "Meshfree Approximation Methods with MATLAB"
+
+// =============================================================================
+// Helpers
+// =============================================================================
+
+fn fa_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn fa_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+fn fa_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+fn fa_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn fa_exp(x: f64) -> f64 with Mut, Div {
+    if x > 500.0 { return 1.0e200 }
+    if x < -500.0 { return 0.0 }
+    var kf = x / 0.6931471805599453
+    var k: i32 = 0
+    if kf >= 0.0 { k = kf as i32 } else { k = (kf as i32) - 1 }
+    let r = x - (k as f64) * 0.6931471805599453
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 25 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var result = sum
+    if k >= 0 { var i = 0; while i < k { result = result * 2.0; i = i + 1 } }
+    else { var i = 0; while i < (0 - k) { result = result / 2.0; i = i + 1 } }
+    result
+}
+
+fn fa_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    if x == 1.0 { return 0.0 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 { term = term * t2; sum = sum + term / ((2 * k + 1) as f64); k = k + 1 }
+    2.0 * sum + (e as f64) * 0.6931471805599453
+}
+
+fn fa_sin(x: f64) -> f64 with Mut, Div {
+    var a = x
+    let tp = 6.28318530717958647692
+    while a >= tp { a = a - tp }
+    while a < 0.0 { a = a + tp }
+    if a > 3.14159265358979323846 { a = a - tp }
+    let a2 = a * a
+    var sum = a
+    var term = a
+    var n = 1
+    while n < 18 { term = 0.0 - term * a2 / ((2 * n) * (2 * n + 1)) as f64; sum = sum + term; n = n + 1 }
+    sum
+}
+
+fn fa_cos(x: f64) -> f64 with Mut, Div {
+    fa_sin(x + 1.57079632679489661923)
+}
+
+fn fa_pi() -> f64 { 3.14159265358979323846 }
+
+// =============================================================================
+// Vector / matrix helpers (row-major flat arrays)
+// =============================================================================
+
+// Dot product of two vectors of length n.
+fn fa_dot(a: &[f64; 4096], b: &[f64; 4096], n: i32) -> f64 with Mut {
+    var sum = 0.0
+    var i = 0
+    while i < n { sum = sum + a[i] * b[i]; i = i + 1 }
+    sum
+}
+
+// Euclidean (L2) norm of a vector of length n.
+fn fa_norm2(v: &[f64; 4096], n: i32) -> f64 with Mut, Div {
+    var sum = 0.0
+    var i = 0
+    while i < n { sum = sum + v[i] * v[i]; i = i + 1 }
+    fa_sqrt(sum)
+}
+
+// Matrix-vector product: out = A * x where A is n x n stored row-major.
+fn fa_matvec(A: &[f64; 4096], x: &[f64; 4096], n: i32, out: &![f64; 4096]) with Mut {
+    var i = 0
+    while i < n {
+        var sum = 0.0
+        var j = 0
+        while j < n {
+            sum = sum + A[i * n + j] * x[j]
+            j = j + 1
+        }
+        out[i] = sum
+        i = i + 1
+    }
+}
+
+// Matrix-matrix multiply: C = A * B, all n x n row-major in [f64; 4096].
+fn fa_mat_mul(A: &[f64; 4096], B: &[f64; 4096], n: i32, C: &![f64; 4096]) with Mut {
+    var i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            var sum = 0.0
+            var k = 0
+            while k < n {
+                sum = sum + A[i * n + k] * B[k * n + j]
+                k = k + 1
+            }
+            C[i * n + j] = sum
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// Gaussian elimination with partial pivoting: solve A*x = b, n x n.
+// Overwrites augmented workspace. Stores solution in x[0..n-1].
+fn fa_gauss_solve(A: &[f64; 4096], b: &[f64; 4096], n: i32, x: &![f64; 4096]) with Mut, Div, Panic {
+    // Build augmented matrix [A|b] in work array (n rows, n+1 cols).
+    // Flatten: row i, col j -> work[i * (n+1) + j].
+    var work: [f64; 4096] = [0.0; 4096]
+    let nc = n + 1
+    var i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            work[i * nc + j] = A[i * n + j]
+            j = j + 1
+        }
+        work[i * nc + n] = b[i]
+        i = i + 1
+    }
+
+    // Forward elimination with partial pivoting
+    var col = 0
+    while col < n {
+        // Find pivot
+        var max_val = fa_abs(work[col * nc + col])
+        var max_row = col
+        var row = col + 1
+        while row < n {
+            let v = fa_abs(work[row * nc + col])
+            if v > max_val { max_val = v; max_row = row }
+            row = row + 1
+        }
+
+        // Swap rows if needed
+        if max_row != col {
+            var j = 0
+            while j < nc {
+                let tmp = work[col * nc + j]
+                work[col * nc + j] = work[max_row * nc + j]
+                work[max_row * nc + j] = tmp
+                j = j + 1
+            }
+        }
+
+        // Eliminate below
+        let pivot = work[col * nc + col]
+        if fa_abs(pivot) < 1.0e-30 {
+            // Singular or near-singular: set unknown to 0
+            x[col] = 0.0
+        } else {
+            row = col + 1
+            while row < n {
+                let factor = work[row * nc + col] / pivot
+                var j = col
+                while j < nc {
+                    work[row * nc + j] = work[row * nc + j] - factor * work[col * nc + j]
+                    j = j + 1
+                }
+                row = row + 1
+            }
+        }
+        col = col + 1
+    }
+
+    // Back substitution
+    i = n - 1
+    while i >= 0 {
+        var sum = work[i * nc + n]
+        var j = i + 1
+        while j < n {
+            sum = sum - work[i * nc + j] * x[j]
+            j = j + 1
+        }
+        let diag = work[i * nc + i]
+        if fa_abs(diag) < 1.0e-30 { x[i] = 0.0 }
+        else { x[i] = sum / diag }
+        i = i - 1
+    }
+}
+
+// =============================================================================
+// Structs
+// =============================================================================
+
+struct LinearOp {
+    matrix: [f64; 4096],
+    n: i32
+}
+
+struct OpNormResult {
+    norm_1: f64,
+    norm_inf: f64,
+    norm_fro: f64,
+    norm_2: f64,
+    spectral_radius: f64,
+    condition: f64
+}
+
+struct RKHSModel {
+    x_train: [f64; 128],
+    alpha: [f64; 128],
+    n_train: i32,
+    length_scale: f64,
+    kernel_type: i32
+}
+
+struct FunctionNorm {
+    l2: f64,
+    h1: f64,
+    linf: f64
+}
+
+// =============================================================================
+// Operator norms
+// =============================================================================
+
+// 1-norm (max absolute column sum): ||A||_1 = max_j sum_i |A_{ij}|
+fn op_norm_1(A: &[f64; 4096], n: i32) -> f64 with Mut {
+    var best = 0.0
+    var j = 0
+    while j < n {
+        var col_sum = 0.0
+        var i = 0
+        while i < n {
+            col_sum = col_sum + fa_abs(A[i * n + j])
+            i = i + 1
+        }
+        if col_sum > best { best = col_sum }
+        j = j + 1
+    }
+    best
+}
+
+// Infinity norm (max absolute row sum): ||A||_inf = max_i sum_j |A_{ij}|
+fn op_norm_inf(A: &[f64; 4096], n: i32) -> f64 with Mut {
+    var best = 0.0
+    var i = 0
+    while i < n {
+        var row_sum = 0.0
+        var j = 0
+        while j < n {
+            row_sum = row_sum + fa_abs(A[i * n + j])
+            j = j + 1
+        }
+        if row_sum > best { best = row_sum }
+        i = i + 1
+    }
+    best
+}
+
+// Frobenius norm: ||A||_F = sqrt(sum_{i,j} A_{ij}^2)
+fn op_norm_frobenius(A: &[f64; 4096], n: i32) -> f64 with Mut, Div {
+    var sum = 0.0
+    var i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            let v = A[i * n + j]
+            sum = sum + v * v
+            j = j + 1
+        }
+        i = i + 1
+    }
+    fa_sqrt(sum)
+}
+
+// Spectral norm (2-norm): ||A||_2 = sigma_max(A) = sqrt(lambda_max(A^T A)).
+// Computed via power iteration on B = A^T A.
+fn op_norm_2(A: &[f64; 4096], n: i32) -> f64 with Mut, Div, Panic {
+    // Form B = A^T A
+    var B: [f64; 4096] = [0.0; 4096]
+    var i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            var sum = 0.0
+            var k = 0
+            while k < n {
+                sum = sum + A[k * n + i] * A[k * n + j]
+                k = k + 1
+            }
+            B[i * n + j] = sum
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Power iteration on B to find largest eigenvalue
+    var v: [f64; 4096] = [0.0; 4096]
+    // Initialize with [1, 1, ..., 1] / sqrt(n)
+    let inv_sqrtn = 1.0 / fa_sqrt(n as f64)
+    i = 0
+    while i < n { v[i] = inv_sqrtn; i = i + 1 }
+
+    var w: [f64; 4096] = [0.0; 4096]
+    var eigenvalue = 0.0
+
+    var iter = 0
+    while iter < 500 {
+        // w = B * v
+        fa_matvec(&B, &v, n, &!w)
+
+        // Rayleigh quotient: eigenvalue = v^T w
+        eigenvalue = fa_dot(&v, &w, n)
+
+        // Normalize: v = w / ||w||
+        let nrm = fa_norm2(&w, n)
+        if nrm < 1.0e-30 { return 0.0 }
+
+        i = 0
+        while i < n { v[i] = w[i] / nrm; i = i + 1 }
+
+        iter = iter + 1
+    }
+
+    // sigma_max = sqrt(lambda_max(A^T A))
+    if eigenvalue < 0.0 { return 0.0 }
+    fa_sqrt(eigenvalue)
+}
+
+// Compute all operator norms and store in result struct.
+fn op_norms(A: &[f64; 4096], n: i32, result: &!OpNormResult) with Mut, Div, Panic {
+    result.norm_1 = op_norm_1(A, n)
+    result.norm_inf = op_norm_inf(A, n)
+    result.norm_fro = op_norm_frobenius(A, n)
+    result.norm_2 = op_norm_2(A, n)
+    result.spectral_radius = spectral_radius(A, n)
+    result.condition = condition_number(A, n)
+}
+
+// =============================================================================
+// Spectral properties
+// =============================================================================
+
+// Spectral radius: rho(A) = max|lambda_i|.
+// Approximated via power iteration: repeatedly multiply by A and measure growth.
+// For non-symmetric matrices, power iteration converges to the largest
+// eigenvalue in magnitude if it is dominant.
+fn spectral_radius(A: &[f64; 4096], n: i32) -> f64 with Mut, Div, Panic {
+    // Initialize vector v = [1, 0, 0, ..., 0] + small perturbation
+    var v: [f64; 4096] = [0.0; 4096]
+    var i = 0
+    while i < n {
+        // Seed with 1/(i+1) to break symmetry
+        v[i] = 1.0 / ((i + 1) as f64)
+        i = i + 1
+    }
+    // Normalize
+    let init_norm = fa_norm2(&v, n)
+    if init_norm > 0.0 {
+        i = 0
+        while i < n { v[i] = v[i] / init_norm; i = i + 1 }
+    }
+
+    var w: [f64; 4096] = [0.0; 4096]
+    var lambda = 0.0
+
+    var iter = 0
+    while iter < 500 {
+        // w = A * v
+        fa_matvec(A, &v, n, &!w)
+
+        // Rayleigh quotient for eigenvalue estimate
+        lambda = fa_dot(&v, &w, n)
+
+        // Normalize
+        let nrm = fa_norm2(&w, n)
+        if nrm < 1.0e-30 { return 0.0 }
+
+        i = 0
+        while i < n { v[i] = w[i] / nrm; i = i + 1 }
+
+        iter = iter + 1
+    }
+
+    fa_abs(lambda)
+}
+
+// Condition number: kappa(A) = sigma_max / sigma_min.
+// sigma_max from power iteration on A^T A.
+// sigma_min from inverse iteration on A^T A (power iteration on (A^T A)^{-1}).
+fn condition_number(A: &[f64; 4096], n: i32) -> f64 with Mut, Div, Panic {
+    // Form B = A^T A
+    var B: [f64; 4096] = [0.0; 4096]
+    var i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            var sum = 0.0
+            var k = 0
+            while k < n {
+                sum = sum + A[k * n + i] * A[k * n + j]
+                k = k + 1
+            }
+            B[i * n + j] = sum
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // --- Largest eigenvalue of B via power iteration ---
+    var v: [f64; 4096] = [0.0; 4096]
+    i = 0
+    while i < n { v[i] = 1.0 / ((i + 1) as f64); i = i + 1 }
+    let init_n = fa_norm2(&v, n)
+    if init_n > 0.0 {
+        i = 0
+        while i < n { v[i] = v[i] / init_n; i = i + 1 }
+    }
+
+    var w: [f64; 4096] = [0.0; 4096]
+    var lambda_max = 0.0
+    var iter = 0
+    while iter < 300 {
+        fa_matvec(&B, &v, n, &!w)
+        lambda_max = fa_dot(&v, &w, n)
+        let nrm = fa_norm2(&w, n)
+        if nrm < 1.0e-30 { return 1.0e30 }
+        i = 0
+        while i < n { v[i] = w[i] / nrm; i = i + 1 }
+        iter = iter + 1
+    }
+
+    // --- Smallest eigenvalue of B via inverse iteration ---
+    // Inverse iteration: v_{k+1} = B^{-1} v_k / ||B^{-1} v_k||
+    // At convergence, eigenvalue ~ 1 / ||B^{-1} v||
+    i = 0
+    while i < n { v[i] = 1.0 / ((i + 1) as f64); i = i + 1 }
+    let init_n2 = fa_norm2(&v, n)
+    if init_n2 > 0.0 {
+        i = 0
+        while i < n { v[i] = v[i] / init_n2; i = i + 1 }
+    }
+
+    var lambda_min = lambda_max  // fallback
+    iter = 0
+    while iter < 300 {
+        // Solve B * w = v for w
+        fa_gauss_solve(&B, &v, n, &!w)
+
+        let nrm = fa_norm2(&w, n)
+        if nrm < 1.0e-30 { return 1.0e30 }
+
+        // Eigenvalue estimate: 1/nrm approaches smallest eigenvalue
+        // More precisely: Rayleigh quotient of w on B
+        var bw: [f64; 4096] = [0.0; 4096]
+        fa_matvec(&B, &w, n, &!bw)
+        let rq = fa_dot(&w, &bw, n) / (nrm * nrm)
+        lambda_min = rq
+
+        // Normalize
+        i = 0
+        while i < n { v[i] = w[i] / nrm; i = i + 1 }
+
+        iter = iter + 1
+    }
+
+    // kappa = sqrt(lambda_max / lambda_min) since sigma = sqrt(eigenvalue of A^T A)
+    if lambda_min < 1.0e-30 { return 1.0e30 }
+    if lambda_max < 0.0 { return 1.0e30 }
+    if lambda_min < 0.0 { return 1.0e30 }
+    fa_sqrt(lambda_max / lambda_min)
+}
+
+// Numerical rank: count of singular values above tol.
+// Uses iterative deflation on A^T A to find successive eigenvalues.
+fn numerical_rank(A: &[f64; 4096], n: i32, tol: f64) -> i32 with Mut, Div, Panic {
+    // Work on a copy of B = A^T A, deflating after each eigenvalue found
+    var B: [f64; 4096] = [0.0; 4096]
+    var i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            var sum = 0.0
+            var k = 0
+            while k < n {
+                sum = sum + A[k * n + i] * A[k * n + j]
+                k = k + 1
+            }
+            B[i * n + j] = sum
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    let tol_sq = tol * tol  // Compare eigenvalue of A^T A against tol^2
+    var rank = 0
+
+    var eig_idx = 0
+    while eig_idx < n {
+        // Power iteration on current B to find largest eigenvalue
+        var v: [f64; 4096] = [0.0; 4096]
+        i = 0
+        while i < n { v[i] = 1.0 / ((i + 1) as f64); i = i + 1 }
+        let vnrm = fa_norm2(&v, n)
+        if vnrm > 0.0 {
+            i = 0
+            while i < n { v[i] = v[i] / vnrm; i = i + 1 }
+        }
+
+        var w: [f64; 4096] = [0.0; 4096]
+        var eigenvalue = 0.0
+        var iter = 0
+        while iter < 200 {
+            fa_matvec(&B, &v, n, &!w)
+            eigenvalue = fa_dot(&v, &w, n)
+            let nrm = fa_norm2(&w, n)
+            if nrm < 1.0e-30 {
+                // Remaining matrix is effectively zero
+                return rank
+            }
+            i = 0
+            while i < n { v[i] = w[i] / nrm; i = i + 1 }
+            iter = iter + 1
+        }
+
+        // Check if singular value = sqrt(eigenvalue) > tol
+        if eigenvalue < tol_sq { return rank }
+        rank = rank + 1
+
+        // Deflate: B <- B - eigenvalue * v * v^T
+        i = 0
+        while i < n {
+            var j = 0
+            while j < n {
+                B[i * n + j] = B[i * n + j] - eigenvalue * v[i] * v[j]
+                j = j + 1
+            }
+            i = i + 1
+        }
+
+        eig_idx = eig_idx + 1
+    }
+    rank
+}
+
+// =============================================================================
+// Function space inner products (via quadrature)
+// =============================================================================
+
+// Composite Simpson's rule for integral of h(x) on [a,b] with n_quad panels.
+// n_quad must be even. Internal helper — not exported.
+fn fa_simpson(vals: &[f64; 4096], a: f64, b: f64, n_quad: i32) -> f64 with Mut, Div {
+    let h = (b - a) / (n_quad as f64)
+    var sum = vals[0] + vals[n_quad]
+    var i = 1
+    while i < n_quad {
+        // Odd indices get weight 4, even get weight 2
+        let rem = i - (i / 2) * 2
+        if rem == 1 {
+            sum = sum + 4.0 * vals[i]
+        } else {
+            sum = sum + 2.0 * vals[i]
+        }
+        i = i + 1
+    }
+    sum * h / 3.0
+}
+
+// L2 inner product: <f,g> = integral_a^b f(x)*g(x) dx via composite Simpson's rule.
+fn l2_inner_product(f: fn(f64) -> f64 with Mut, Div, Panic,
+                    g: fn(f64) -> f64 with Mut, Div, Panic,
+                    a: f64, b: f64, n_quad: i32) -> f64 with Mut, Div, Panic {
+    // Ensure n_quad is even
+    var nq = n_quad
+    let rem = nq - (nq / 2) * 2
+    if rem != 0 { nq = nq + 1 }
+
+    let h = (b - a) / (nq as f64)
+    var vals: [f64; 4096] = [0.0; 4096]
+
+    var i = 0
+    while i <= nq {
+        let x = a + (i as f64) * h
+        vals[i] = f(x) * g(x)
+        i = i + 1
+    }
+
+    fa_simpson(&vals, a, b, nq)
+}
+
+// L2 norm: ||f||_2 = sqrt(<f,f>).
+fn l2_norm(f: fn(f64) -> f64 with Mut, Div, Panic,
+           a: f64, b: f64, n_quad: i32) -> f64 with Mut, Div, Panic {
+    let ip = l2_inner_product(f, f, a, b, n_quad)
+    if ip < 0.0 { return 0.0 }
+    fa_sqrt(ip)
+}
+
+// H1 inner product: <f,g>_{H1} = integral_a^b [f(x)*g(x) + f'(x)*g'(x)] dx.
+// Derivatives approximated via central differences.
+fn h1_inner_product(f: fn(f64) -> f64 with Mut, Div, Panic,
+                    g: fn(f64) -> f64 with Mut, Div, Panic,
+                    a: f64, b: f64, n_quad: i32) -> f64 with Mut, Div, Panic {
+    var nq = n_quad
+    let rem = nq - (nq / 2) * 2
+    if rem != 0 { nq = nq + 1 }
+
+    let h = (b - a) / (nq as f64)
+    // Step for central difference derivative approximation
+    let dh = h * 0.01
+    // Minimum dh to avoid catastrophic cancellation
+    let dh_eff = if dh > 1.0e-10 { dh } else { 1.0e-10 }
+
+    var vals: [f64; 4096] = [0.0; 4096]
+
+    var i = 0
+    while i <= nq {
+        let x = a + (i as f64) * h
+
+        // Function values
+        let fv = f(x)
+        let gv = g(x)
+
+        // Central difference derivatives
+        let df = (f(x + dh_eff) - f(x - dh_eff)) / (2.0 * dh_eff)
+        let dg = (g(x + dh_eff) - g(x - dh_eff)) / (2.0 * dh_eff)
+
+        vals[i] = fv * gv + df * dg
+        i = i + 1
+    }
+
+    fa_simpson(&vals, a, b, nq)
+}
+
+// H1 norm: ||f||_{H1} = sqrt(<f,f>_{H1}).
+fn h1_norm(f: fn(f64) -> f64 with Mut, Div, Panic,
+           a: f64, b: f64, n_quad: i32) -> f64 with Mut, Div, Panic {
+    let ip = h1_inner_product(f, f, a, b, n_quad)
+    if ip < 0.0 { return 0.0 }
+    fa_sqrt(ip)
+}
+
+// L-infinity norm: ||f||_inf = max_{x in [a,b]} |f(x)|.
+// Approximated by sampling n_sample equally spaced points.
+fn linf_norm(f: fn(f64) -> f64 with Mut, Div, Panic,
+             a: f64, b: f64, n_sample: i32) -> f64 with Mut, Div, Panic {
+    var best = 0.0
+    let h = (b - a) / ((n_sample - 1) as f64)
+    var i = 0
+    while i < n_sample {
+        let x = a + (i as f64) * h
+        let v = fa_abs(f(x))
+        if v > best { best = v }
+        i = i + 1
+    }
+    best
+}
+
+// Compute L2, H1, and L-infinity norms simultaneously and store in result.
+fn function_norms(f: fn(f64) -> f64 with Mut, Div, Panic,
+                  a: f64, b: f64, n_quad: i32,
+                  result: &!FunctionNorm) with Mut, Div, Panic {
+    result.l2 = l2_norm(f, a, b, n_quad)
+    result.h1 = h1_norm(f, a, b, n_quad)
+    result.linf = linf_norm(f, a, b, n_quad)
+}
+
+// =============================================================================
+// RKHS kernel functions
+// =============================================================================
+
+// Gaussian (RBF) kernel: k(x,y) = exp(-|x-y|^2 / (2 * l^2))
+fn fa_kernel_rbf(x: f64, y: f64, length_scale: f64) -> f64 with Mut, Div {
+    let d = x - y
+    let l2 = length_scale * length_scale
+    fa_exp(0.0 - (d * d) / (2.0 * l2))
+}
+
+// Matern 3/2 kernel: k(x,y) = (1 + sqrt(3)*r/l) * exp(-sqrt(3)*r/l)
+// where r = |x - y|
+fn fa_kernel_matern32(x: f64, y: f64, length_scale: f64) -> f64 with Mut, Div {
+    let r = fa_abs(x - y)
+    let sqrt3 = 1.7320508075688772
+    let z = sqrt3 * r / length_scale
+    (1.0 + z) * fa_exp(0.0 - z)
+}
+
+// Laplacian (exponential) kernel: k(x,y) = exp(-|x-y| / l)
+fn fa_kernel_laplacian(x: f64, y: f64, length_scale: f64) -> f64 with Mut, Div {
+    let r = fa_abs(x - y)
+    fa_exp(0.0 - r / length_scale)
+}
+
+// Dispatch kernel evaluation by type: 0=RBF, 1=Matern32, 2=Laplacian.
+fn fa_kernel_eval(x: f64, y: f64, length_scale: f64, kernel_type: i32) -> f64 with Mut, Div {
+    if kernel_type == 1 {
+        fa_kernel_matern32(x, y, length_scale)
+    } else if kernel_type == 2 {
+        fa_kernel_laplacian(x, y, length_scale)
+    } else {
+        fa_kernel_rbf(x, y, length_scale)
+    }
+}
+
+// =============================================================================
+// RKHS kernel interpolation
+// =============================================================================
+
+// Train RKHS model: solve (K + reg*I) * alpha = y via Gaussian elimination.
+// kernel_type: 0 = RBF, 1 = Matern32, 2 = Laplacian.
+fn rkhs_train(x_train: &[f64; 128], y_train: &[f64; 128], n: i32,
+              length_scale: f64, kernel_type: i32, reg: f64,
+              model: &!RKHSModel) with Mut, Div, Panic {
+    // Store training data in model
+    var i = 0
+    while i < n {
+        model.x_train[i] = x_train[i]
+        i = i + 1
+    }
+    model.n_train = n
+    model.length_scale = length_scale
+    model.kernel_type = kernel_type
+
+    // Build kernel matrix K + reg*I in flat 4096 array (max 64x64 sub-block)
+    // We use the first n*n entries of a [f64; 4096] for the kernel matrix.
+    var K: [f64; 4096] = [0.0; 4096]
+    i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            K[i * n + j] = fa_kernel_eval(x_train[i], x_train[j], length_scale, kernel_type)
+            j = j + 1
+        }
+        // Add regularization on diagonal
+        K[i * n + i] = K[i * n + i] + reg
+        i = i + 1
+    }
+
+    // RHS: copy y_train into a [f64; 4096] buffer
+    var rhs: [f64; 4096] = [0.0; 4096]
+    i = 0
+    while i < n { rhs[i] = y_train[i]; i = i + 1 }
+
+    // Solve K * alpha = y
+    var alpha_buf: [f64; 4096] = [0.0; 4096]
+    fa_gauss_solve(&K, &rhs, n, &!alpha_buf)
+
+    // Copy alpha into model
+    i = 0
+    while i < n {
+        model.alpha[i] = alpha_buf[i]
+        i = i + 1
+    }
+}
+
+// Evaluate trained RKHS model at a point x.
+// f(x) = sum_{i=0}^{n-1} alpha_i * k(x, x_train_i)
+fn rkhs_eval(model: &RKHSModel, x: f64) -> f64 with Mut, Div {
+    var sum = 0.0
+    var i = 0
+    while i < model.n_train {
+        let kval = fa_kernel_eval(x, model.x_train[i], model.length_scale, model.kernel_type)
+        sum = sum + model.alpha[i] * kval
+        i = i + 1
+    }
+    sum
+}
+
+// RKHS norm: ||f||_H = sqrt(sum_{i,j} alpha_i * K(x_i, x_j) * alpha_j).
+// This is the reproducing kernel Hilbert space norm of the interpolant.
+fn rkhs_norm(model: &RKHSModel) -> f64 with Mut, Div {
+    var sum = 0.0
+    var i = 0
+    while i < model.n_train {
+        var j = 0
+        while j < model.n_train {
+            let kval = fa_kernel_eval(model.x_train[i], model.x_train[j],
+                                      model.length_scale, model.kernel_type)
+            sum = sum + model.alpha[i] * kval * model.alpha[j]
+            j = j + 1
+        }
+        i = i + 1
+    }
+    if sum < 0.0 { return 0.0 }
+    fa_sqrt(sum)
+}
+
+// =============================================================================
+// Compact operator spectrum
+// =============================================================================
+
+// Compute leading eigenvalues of a compact integral operator
+//   (T f)(x) = integral_a^b K(x,t) f(t) dt
+// by discretizing via quadrature (Nystrom method) and applying power
+// iteration with deflation.
+//
+// K: kernel function K(x,t)
+// [a,b]: domain
+// n_quad: quadrature points
+// n_eig: number of eigenvalues to compute
+// eigenvalues: output array (sorted by decreasing |lambda|)
+fn compact_op_spectrum(K: fn(f64, f64) -> f64 with Mut, Div, Panic,
+                       a: f64, b: f64, n_quad: i32, n_eig: i32,
+                       eigenvalues: &![f64; 64]) with Mut, Div, Panic {
+    // Discretize: M_{ij} = w_j * K(x_i, x_j) where w_j are Simpson weights
+    // and x_i are quadrature nodes.
+    var nq = n_quad
+    let rem = nq - (nq / 2) * 2
+    if rem != 0 { nq = nq + 1 }
+
+    let h = (b - a) / (nq as f64)
+
+    // Quadrature nodes
+    var nodes: [f64; 4096] = [0.0; 4096]
+    var i = 0
+    while i <= nq {
+        nodes[i] = a + (i as f64) * h
+        i = i + 1
+    }
+    let nn = nq + 1  // number of nodes
+
+    // Simpson weights
+    var weights: [f64; 4096] = [0.0; 4096]
+    weights[0] = h / 3.0
+    weights[nq] = h / 3.0
+    i = 1
+    while i < nq {
+        let r2 = i - (i / 2) * 2
+        if r2 == 1 {
+            weights[i] = 4.0 * h / 3.0
+        } else {
+            weights[i] = 2.0 * h / 3.0
+        }
+        i = i + 1
+    }
+
+    // Build discretized matrix M_{ij} = w_j * K(x_i, x_j)
+    // Size nn x nn, stored row-major in flat array.
+    // Limit nn to at most 64 to fit within [f64; 4096] for square matrix.
+    var mat_n = nn
+    if mat_n > 64 { mat_n = 64 }
+
+    var M: [f64; 4096] = [0.0; 4096]
+    i = 0
+    while i < mat_n {
+        var j = 0
+        while j < mat_n {
+            M[i * mat_n + j] = weights[j] * K(nodes[i], nodes[j])
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Power iteration with deflation to find n_eig leading eigenvalues
+    var ne = n_eig
+    if ne > mat_n { ne = mat_n }
+    if ne > 64 { ne = 64 }
+
+    var eig_idx = 0
+    while eig_idx < ne {
+        // Power iteration
+        var v: [f64; 4096] = [0.0; 4096]
+        i = 0
+        while i < mat_n { v[i] = 1.0 / ((i + 1) as f64); i = i + 1 }
+        let v_norm_init = fa_norm2(&v, mat_n)
+        if v_norm_init > 0.0 {
+            i = 0
+            while i < mat_n { v[i] = v[i] / v_norm_init; i = i + 1 }
+        }
+
+        var w: [f64; 4096] = [0.0; 4096]
+        var eigenvalue = 0.0
+        var prev_eigenvalue = 0.0
+
+        var iter = 0
+        while iter < 500 {
+            // w = M * v
+            fa_matvec(&M, &v, mat_n, &!w)
+
+            // Rayleigh quotient
+            eigenvalue = fa_dot(&v, &w, mat_n)
+
+            // Normalize
+            let nrm = fa_norm2(&w, mat_n)
+            if nrm < 1.0e-30 {
+                eigenvalue = 0.0
+                i = 0
+                while i < mat_n { v[i] = 0.0; i = i + 1 }
+                iter = 500  // break
+            } else {
+                i = 0
+                while i < mat_n { v[i] = w[i] / nrm; i = i + 1 }
+
+                // Check convergence
+                if iter > 0 {
+                    if fa_abs(eigenvalue - prev_eigenvalue) < 1.0e-12 * fa_abs(eigenvalue) + 1.0e-30 {
+                        iter = 500  // converged, break
+                    }
+                }
+                prev_eigenvalue = eigenvalue
+            }
+
+            iter = iter + 1
+        }
+
+        eigenvalues[eig_idx] = eigenvalue
+
+        // Deflate: M <- M - eigenvalue * v * v^T
+        i = 0
+        while i < mat_n {
+            var j = 0
+            while j < mat_n {
+                M[i * mat_n + j] = M[i * mat_n + j] - eigenvalue * v[i] * v[j]
+                j = j + 1
+            }
+            i = i + 1
+        }
+
+        eig_idx = eig_idx + 1
+    }
+}
+
+// =============================================================================
+// Fredholm alternative
+// =============================================================================
+
+// Fredholm alternative detection.
+//
+// For the equation (I - lambda * T) f = g where T is the integral operator
+// with kernel K, the Fredholm alternative states that either:
+//   (a) lambda is NOT an eigenvalue of T => unique solution exists for any g
+//   (b) lambda IS an eigenvalue of T => solution exists iff g is orthogonal
+//       to the null space of (I - lambda * T*)
+//
+// This function returns true if lambda is NOT an eigenvalue (case a),
+// meaning the Fredholm alternative guarantees a unique solution.
+// Checks by discretizing T and computing det(I - lambda * M).
+fn fredholm_alternative(K: fn(f64, f64) -> f64 with Mut, Div, Panic,
+                        a: f64, b: f64, lambda: f64,
+                        n_quad: i32) -> bool with Mut, Div, Panic {
+    // Discretize the integral operator using composite trapezoid quadrature
+    var nq = n_quad
+    let rem = nq - (nq / 2) * 2
+    if rem != 0 { nq = nq + 1 }
+
+    let h = (b - a) / (nq as f64)
+
+    // Nodes
+    var nodes: [f64; 4096] = [0.0; 4096]
+    var i = 0
+    while i <= nq {
+        nodes[i] = a + (i as f64) * h
+        i = i + 1
+    }
+    let nn = nq + 1
+
+    // Simpson weights
+    var weights: [f64; 4096] = [0.0; 4096]
+    weights[0] = h / 3.0
+    weights[nq] = h / 3.0
+    i = 1
+    while i < nq {
+        let r2 = i - (i / 2) * 2
+        if r2 == 1 {
+            weights[i] = 4.0 * h / 3.0
+        } else {
+            weights[i] = 2.0 * h / 3.0
+        }
+        i = i + 1
+    }
+
+    // Build matrix A = I - lambda * M where M_{ij} = w_j * K(x_i, x_j)
+    var mat_n = nn
+    if mat_n > 64 { mat_n = 64 }
+
+    var A: [f64; 4096] = [0.0; 4096]
+    i = 0
+    while i < mat_n {
+        var j = 0
+        while j < mat_n {
+            let m_ij = weights[j] * K(nodes[i], nodes[j])
+            A[i * mat_n + j] = 0.0 - lambda * m_ij
+            j = j + 1
+        }
+        // Add identity on diagonal
+        A[i * mat_n + i] = A[i * mat_n + i] + 1.0
+        i = i + 1
+    }
+
+    // Compute determinant via LU decomposition (Gaussian elimination)
+    // We do partial-pivoting elimination and track the product of pivots.
+    var det_sign = 1.0
+    var log_det = 0.0
+
+    var col = 0
+    while col < mat_n {
+        // Partial pivot
+        var max_val = fa_abs(A[col * mat_n + col])
+        var max_row = col
+        var row = col + 1
+        while row < mat_n {
+            let v = fa_abs(A[row * mat_n + col])
+            if v > max_val { max_val = v; max_row = row }
+            row = row + 1
+        }
+
+        if max_row != col {
+            // Swap rows
+            var j = 0
+            while j < mat_n {
+                let tmp = A[col * mat_n + j]
+                A[col * mat_n + j] = A[max_row * mat_n + j]
+                A[max_row * mat_n + j] = tmp
+                j = j + 1
+            }
+            det_sign = 0.0 - det_sign  // Row swap flips sign
+        }
+
+        let pivot = A[col * mat_n + col]
+        if fa_abs(pivot) < 1.0e-30 {
+            // Determinant is zero => lambda IS an eigenvalue
+            return false
+        }
+
+        // Accumulate log|det|
+        if pivot < 0.0 { det_sign = 0.0 - det_sign }
+        log_det = log_det + fa_ln(fa_abs(pivot))
+
+        // Eliminate below pivot
+        row = col + 1
+        while row < mat_n {
+            let factor = A[row * mat_n + col] / pivot
+            var j = col + 1
+            while j < mat_n {
+                A[row * mat_n + j] = A[row * mat_n + j] - factor * A[col * mat_n + j]
+                j = j + 1
+            }
+            A[row * mat_n + col] = 0.0
+            row = row + 1
+        }
+
+        col = col + 1
+    }
+
+    // If |det| is very small, lambda is (approximately) an eigenvalue
+    // Use relative threshold based on matrix dimension
+    let det_threshold = (mat_n as f64) * fa_ln(10.0) * (0.0 - 10.0)  // ~ -10*n*log(10)
+    if log_det < det_threshold {
+        // det ≈ 0 => lambda is an eigenvalue => Fredholm alternative does NOT apply
+        return false
+    }
+
+    // det(I - lambda*M) is not near zero => lambda is not an eigenvalue
+    // Fredholm alternative guarantees unique solution exists
+    true
+}

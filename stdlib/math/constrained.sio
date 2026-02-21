@@ -1,0 +1,1203 @@
+// stdlib/math/constrained.sio — Constrained nonlinear optimization
+//
+// Pure Sounio implementations:
+//   L-BFGS (limited-memory quasi-Newton)
+//   Projected gradient descent (box constraints)
+//   Augmented Lagrangian method
+//   Quadratic penalty method
+//   Log-barrier interior point method
+//   KKT violation checking
+//
+// References:
+//   Nocedal & Wright (2006): "Numerical Optimization" Ch. 17-18
+//   Bertsekas (1999): "Nonlinear Programming"
+//   Boyd & Vandenberghe (2004): "Convex Optimization" Ch. 11
+
+// =============================================================================
+// Helpers (co_ prefix, self-contained)
+// =============================================================================
+
+fn co_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn co_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+fn co_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+fn co_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 30 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+// exp(x) via Taylor series with range reduction
+fn co_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 700.0 { return 1.0e308 }
+    if x < -700.0 { return 0.0 }
+    let ln2 = 0.6931471805599453
+    var k_f = x / ln2
+    var k: i32 = 0
+    if k_f >= 0.0 { k = k_f as i32 } else { k = (k_f - 1.0) as i32 }
+    let r = x - (k as f64) * ln2
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 30 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var result = sum
+    var j = 0
+    if k >= 0 {
+        while j < k { result = result * 2.0; j = j + 1 }
+    } else {
+        var neg_k = 0 - k
+        while j < neg_k { result = result * 0.5; j = j + 1 }
+    }
+    result
+}
+
+// ln(x) via series with range reduction
+fn co_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e308 }
+    if x == 1.0 { return 0.0 }
+    let ln2 = 0.6931471805599453
+    var m = x
+    var k: i32 = 0
+    while m > 2.0 { m = m * 0.5; k = k + 1 }
+    while m < 0.5 { m = m * 2.0; k = k - 1 }
+    let u = (m - 1.0) / (m + 1.0)
+    let u2 = u * u
+    var sum = u
+    var term = u
+    var n = 1
+    while n < 40 {
+        term = term * u2
+        sum = sum + term / (2.0 * (n as f64) + 1.0)
+        n = n + 1
+    }
+    2.0 * sum + (k as f64) * ln2
+}
+
+// =============================================================================
+// Vector helpers (fixed-size [f64; 64])
+// =============================================================================
+
+fn co_dot(a: &[f64; 64], b: &[f64; 64], n: i32) -> f64 with Mut {
+    var s = 0.0
+    var i = 0
+    while i < n { s = s + a[i] * b[i]; i = i + 1 }
+    s
+}
+
+fn co_norm2(a: &[f64; 64], n: i32) -> f64 with Mut, Div, Panic {
+    var s = 0.0
+    var i = 0
+    while i < n { s = s + a[i] * a[i]; i = i + 1 }
+    co_sqrt(s)
+}
+
+fn co_norminf(a: &[f64; 64], n: i32) -> f64 with Mut {
+    var mx = 0.0
+    var i = 0
+    while i < n {
+        let v = co_abs(a[i])
+        if v > mx { mx = v }
+        i = i + 1
+    }
+    mx
+}
+
+fn co_copy(src: &[f64; 64], dst: &![f64; 64], n: i32) with Mut {
+    var i = 0
+    while i < n { dst[i] = src[i]; i = i + 1 }
+}
+
+fn co_axpy(alpha: f64, x: &[f64; 64], dst: &![f64; 64], n: i32) with Mut {
+    var i = 0
+    while i < n { dst[i] = dst[i] + alpha * x[i]; i = i + 1 }
+}
+
+fn co_scale(dst: &![f64; 64], alpha: f64, n: i32) with Mut {
+    var i = 0
+    while i < n { dst[i] = dst[i] * alpha; i = i + 1 }
+}
+
+fn co_zero(dst: &![f64; 64], n: i32) with Mut {
+    var i = 0
+    while i < n { dst[i] = 0.0; i = i + 1 }
+}
+
+// =============================================================================
+// Structs
+// =============================================================================
+
+struct ConstrainedConfig {
+    max_iter: i32,
+    tol_opt: f64,
+    tol_feas: f64,
+    mu_init: f64,
+    mu_max: f64,
+    rho: f64
+}
+
+struct ConstrainedResult {
+    x: [f64; 64],
+    obj_val: f64,
+    constraint_viol: f64,
+    iterations: i32,
+    converged: bool,
+    n_dim: i32
+}
+
+struct LBFGSState {
+    s_store: [f64; 4096],
+    y_store: [f64; 4096],
+    rho_store: [f64; 64],
+    m: i32,
+    n: i32,
+    count: i32
+}
+
+// =============================================================================
+// Numerical gradient (central differences)
+// =============================================================================
+
+fn co_numerical_grad(f: fn(&[f64; 64], i32) -> f64 with Mut, Div, Panic,
+                     x: &[f64; 64], n: i32,
+                     grad: &![f64; 64]) with Mut, Div, Panic {
+    var xp: [f64; 64] = [0.0; 64]
+    var xm: [f64; 64] = [0.0; 64]
+    let cbrt_eps = 6.0554544523933429e-6
+    var i = 0
+    while i < n {
+        var j = 0
+        while j < n { xp[j] = x[j]; xm[j] = x[j]; j = j + 1 }
+        let h = cbrt_eps * co_max(co_abs(x[i]), 1.0)
+        xp[i] = x[i] + h
+        xm[i] = x[i] - h
+        grad[i] = (f(&xp, n) - f(&xm, n)) / (2.0 * h)
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Armijo backtracking line search
+// =============================================================================
+
+// f(x + alpha*dir) <= f(x) + c1*alpha*grad'*dir, c1=1e-4, shrink by 0.5
+fn co_armijo_search(f: fn(&[f64; 64], i32) -> f64 with Mut, Div, Panic,
+                    x: &[f64; 64], dir: &[f64; 64], grad: &[f64; 64],
+                    n: i32, alpha_init: f64) -> f64 with Mut, Div, Panic {
+    let c1 = 1.0e-4
+    let min_alpha = 1.0e-16
+    let f0 = f(x, n)
+    let dg = co_dot(grad, dir, n)
+    if dg >= 0.0 { return min_alpha }
+    var alpha = alpha_init
+    var trial: [f64; 64] = [0.0; 64]
+    var iter = 0
+    while iter < 40 {
+        var i = 0
+        while i < n { trial[i] = x[i] + alpha * dir[i]; i = i + 1 }
+        let f_trial = f(&trial, n)
+        if f_trial <= f0 + c1 * alpha * dg { return alpha }
+        alpha = alpha * 0.5
+        if alpha < min_alpha { return min_alpha }
+        iter = iter + 1
+    }
+    alpha
+}
+
+// =============================================================================
+// L-BFGS: Limited-memory BFGS (inner solver)
+// =============================================================================
+
+fn lbfgs_init(state: &!LBFGSState, n: i32, m: i32) with Mut {
+    state.n = n
+    state.m = m
+    state.count = 0
+    var i = 0
+    while i < 4096 { state.s_store[i] = 0.0; i = i + 1 }
+    i = 0
+    while i < 4096 { state.y_store[i] = 0.0; i = i + 1 }
+    i = 0
+    while i < 64 { state.rho_store[i] = 0.0; i = i + 1 }
+}
+
+// Store curvature pair s = x_{k+1} - x_k, y = g_{k+1} - g_k (circular buffer)
+fn lbfgs_update(state: &!LBFGSState, s: &[f64; 64], y: &[f64; 64]) with Mut, Div {
+    let n = state.n
+    let m = state.m
+    let slot = state.count - (state.count / m) * m
+    var i = 0
+    while i < n {
+        state.s_store[slot * n + i] = s[i]
+        state.y_store[slot * n + i] = y[i]
+        i = i + 1
+    }
+    var ys = 0.0
+    i = 0
+    while i < n { ys = ys + y[i] * s[i]; i = i + 1 }
+    if co_abs(ys) < 1.0e-30 { ys = 1.0e-30 }
+    state.rho_store[slot] = 1.0 / ys
+    state.count = state.count + 1
+}
+
+// Two-loop recursion (Nocedal Algorithm 7.4): dir = -H_k * grad
+fn lbfgs_direction(state: &LBFGSState, grad: &[f64; 64], dir: &![f64; 64]) with Mut, Div {
+    let n = state.n
+    let m = state.m
+    let k = state.count
+    var bound = k
+    if bound > m { bound = m }
+
+    var q: [f64; 64] = [0.0; 64]
+    var i = 0
+    while i < n { q[i] = grad[i]; i = i + 1 }
+
+    var alpha: [f64; 64] = [0.0; 64]
+
+    // First loop: most recent to oldest
+    var idx = 0
+    while idx < bound {
+        let raw = k - 1 - idx
+        var slot = raw - (raw / m) * m
+        if slot < 0 { slot = slot + m }
+        var stq = 0.0
+        i = 0
+        while i < n { stq = stq + state.s_store[slot * n + i] * q[i]; i = i + 1 }
+        alpha[idx] = state.rho_store[slot] * stq
+        i = 0
+        while i < n { q[i] = q[i] - alpha[idx] * state.y_store[slot * n + i]; i = i + 1 }
+        idx = idx + 1
+    }
+
+    // Initial Hessian scaling: gamma = s_{k-1}^T y_{k-1} / y_{k-1}^T y_{k-1}
+    var gamma = 1.0
+    if bound > 0 {
+        let nraw = k - 1
+        var nslot = nraw - (nraw / m) * m
+        if nslot < 0 { nslot = nslot + m }
+        var sy = 0.0
+        var yy = 0.0
+        i = 0
+        while i < n {
+            sy = sy + state.s_store[nslot * n + i] * state.y_store[nslot * n + i]
+            yy = yy + state.y_store[nslot * n + i] * state.y_store[nslot * n + i]
+            i = i + 1
+        }
+        if co_abs(yy) > 1.0e-30 { gamma = sy / yy }
+    }
+
+    var r: [f64; 64] = [0.0; 64]
+    i = 0
+    while i < n { r[i] = gamma * q[i]; i = i + 1 }
+
+    // Second loop: oldest to most recent
+    idx = bound - 1
+    while idx >= 0 {
+        let raw2 = k - 1 - idx
+        var slot2 = raw2 - (raw2 / m) * m
+        if slot2 < 0 { slot2 = slot2 + m }
+        var ytr = 0.0
+        i = 0
+        while i < n { ytr = ytr + state.y_store[slot2 * n + i] * r[i]; i = i + 1 }
+        let beta = state.rho_store[slot2] * ytr
+        i = 0
+        while i < n { r[i] = r[i] + (alpha[idx] - beta) * state.s_store[slot2 * n + i]; i = i + 1 }
+        idx = idx - 1
+    }
+
+    i = 0
+    while i < n { dir[i] = 0.0 - r[i]; i = i + 1 }
+}
+
+// Full L-BFGS minimization. Memory depth m=7, convergence on ||grad||_inf < tol.
+fn lbfgs_minimize(f: fn(&[f64; 64], i32) -> f64 with Mut, Div, Panic,
+                  grad_f: fn(&[f64; 64], i32, &![f64; 64]) with Mut, Div, Panic,
+                  x0: &[f64; 64], n: i32, max_iter: i32, tol: f64,
+                  result: &!ConstrainedResult) with Mut, Div, Panic {
+    var state: LBFGSState = LBFGSState {
+        s_store: [0.0; 4096], y_store: [0.0; 4096],
+        rho_store: [0.0; 64], m: 0, n: 0, count: 0
+    }
+    lbfgs_init(&!state, n, 7)
+
+    var x: [f64; 64] = [0.0; 64]
+    co_copy(x0, &!x, n)
+    var grad: [f64; 64] = [0.0; 64]
+    var grad_prev: [f64; 64] = [0.0; 64]
+    var dir: [f64; 64] = [0.0; 64]
+    var x_prev: [f64; 64] = [0.0; 64]
+    var s_vec: [f64; 64] = [0.0; 64]
+    var y_vec: [f64; 64] = [0.0; 64]
+
+    grad_f(&x, n, &!grad)
+    var iter = 0
+
+    while iter < max_iter {
+        let gnorm = co_norminf(&grad, n)
+        if gnorm < tol {
+            co_copy(&x, &!result.x, n)
+            result.obj_val = f(&x, n)
+            result.constraint_viol = 0.0
+            result.iterations = iter
+            result.converged = true
+            result.n_dim = n
+            return
+        }
+        co_copy(&x, &!x_prev, n)
+        co_copy(&grad, &!grad_prev, n)
+
+        if iter == 0 {
+            var i = 0
+            while i < n { dir[i] = 0.0 - grad[i]; i = i + 1 }
+        } else {
+            lbfgs_direction(&state, &grad, &!dir)
+        }
+
+        let alpha = co_armijo_search(f, &x, &dir, &grad, n, 1.0)
+        var i = 0
+        while i < n { x[i] = x[i] + alpha * dir[i]; i = i + 1 }
+        grad_f(&x, n, &!grad)
+
+        i = 0
+        while i < n {
+            s_vec[i] = x[i] - x_prev[i]
+            y_vec[i] = grad[i] - grad_prev[i]
+            i = i + 1
+        }
+        let sy = co_dot(&s_vec, &y_vec, n)
+        if sy > 1.0e-16 { lbfgs_update(&!state, &s_vec, &y_vec) }
+        iter = iter + 1
+    }
+
+    co_copy(&x, &!result.x, n)
+    result.obj_val = f(&x, n)
+    result.constraint_viol = 0.0
+    result.iterations = iter
+    result.converged = false
+    result.n_dim = n
+}
+
+// =============================================================================
+// Box-constrained optimization
+// =============================================================================
+
+// Project x[i] = clamp(x[i], lower[i], upper[i])
+fn box_project(x: &![f64; 64], lower: &[f64; 64], upper: &[f64; 64], n: i32) with Mut {
+    var i = 0
+    while i < n {
+        if x[i] < lower[i] { x[i] = lower[i] }
+        if x[i] > upper[i] { x[i] = upper[i] }
+        i = i + 1
+    }
+}
+
+// Projected gradient descent with Armijo line search on projected iterates.
+// Converges when ||project(x - grad) - x||_inf < tol.
+fn projected_gradient(f: fn(&[f64; 64], i32) -> f64 with Mut, Div, Panic,
+                      grad_f: fn(&[f64; 64], i32, &![f64; 64]) with Mut, Div, Panic,
+                      x0: &[f64; 64], lower: &[f64; 64], upper: &[f64; 64],
+                      n: i32, max_iter: i32, tol: f64,
+                      result: &!ConstrainedResult) with Mut, Div, Panic {
+    var x: [f64; 64] = [0.0; 64]
+    co_copy(x0, &!x, n)
+    box_project(&!x, lower, upper, n)
+
+    var grad: [f64; 64] = [0.0; 64]
+    var x_trial: [f64; 64] = [0.0; 64]
+    var proj_test: [f64; 64] = [0.0; 64]
+    var iter = 0
+
+    while iter < max_iter {
+        grad_f(&x, n, &!grad)
+
+        // Optimality: ||project(x - grad) - x||_inf
+        var i = 0
+        while i < n { proj_test[i] = x[i] - grad[i]; i = i + 1 }
+        box_project(&!proj_test, lower, upper, n)
+        var opt_viol = 0.0
+        i = 0
+        while i < n {
+            let diff = co_abs(proj_test[i] - x[i])
+            if diff > opt_viol { opt_viol = diff }
+            i = i + 1
+        }
+        if opt_viol < tol {
+            co_copy(&x, &!result.x, n)
+            result.obj_val = f(&x, n)
+            result.constraint_viol = 0.0
+            result.iterations = iter
+            result.converged = true
+            result.n_dim = n
+            return
+        }
+
+        // Projected Armijo backtracking
+        let f0 = f(&x, n)
+        var alpha = 1.0
+        let c1 = 1.0e-4
+        var ls_iter = 0
+        while ls_iter < 30 {
+            i = 0
+            while i < n { x_trial[i] = x[i] - alpha * grad[i]; i = i + 1 }
+            box_project(&!x_trial, lower, upper, n)
+            let f_trial = f(&x_trial, n)
+            var descent = 0.0
+            i = 0
+            while i < n { descent = descent + grad[i] * (x_trial[i] - x[i]); i = i + 1 }
+            if f_trial <= f0 + c1 * descent {
+                co_copy(&x_trial, &!x, n)
+                ls_iter = 30
+            } else {
+                alpha = alpha * 0.5
+                if alpha < 1.0e-16 {
+                    co_copy(&x_trial, &!x, n)
+                    ls_iter = 30
+                } else {
+                    ls_iter = ls_iter + 1
+                }
+            }
+        }
+        iter = iter + 1
+    }
+
+    co_copy(&x, &!result.x, n)
+    result.obj_val = f(&x, n)
+    result.constraint_viol = 0.0
+    result.iterations = iter
+    result.converged = false
+    result.n_dim = n
+}
+
+// =============================================================================
+// Augmented Lagrangian: helper functions (MUST precede auglag_minimize)
+// =============================================================================
+
+// Evaluate augmented Lagrangian objective:
+//   L_A = f(x) + sum_i (lambda_eq_i * ceq_i + (mu/2) * ceq_i^2)
+//       + sum_j (1/(2*mu)) * (max(0, lambda_ineq_j + mu*cineq_j)^2 - lambda_ineq_j^2)
+fn auglag_eval_obj(f: fn(&[f64; 64], i32) -> f64 with Mut, Div, Panic,
+                   c_eq: fn(&[f64; 64], i32, &![f64; 64], i32) with Mut, Div, Panic,
+                   n_eq: i32,
+                   c_ineq: fn(&[f64; 64], i32, &![f64; 64], i32) with Mut, Div, Panic,
+                   n_ineq: i32,
+                   x: &[f64; 64], n: i32,
+                   lambda_eq: &[f64; 64], lambda_ineq: &[f64; 64],
+                   mu: f64) -> f64 with Mut, Div, Panic {
+    var val = f(x, n)
+    if n_eq > 0 {
+        var ceq: [f64; 64] = [0.0; 64]
+        c_eq(x, n, &!ceq, n_eq)
+        var i = 0
+        while i < n_eq {
+            val = val + lambda_eq[i] * ceq[i] + 0.5 * mu * ceq[i] * ceq[i]
+            i = i + 1
+        }
+    }
+    // Inequality: Powell-Hestenes-Rockafellar formulation
+    if n_ineq > 0 {
+        var cineq: [f64; 64] = [0.0; 64]
+        c_ineq(x, n, &!cineq, n_ineq)
+        var j = 0
+        while j < n_ineq {
+            let shifted = lambda_ineq[j] + mu * cineq[j]
+            if shifted > 0.0 {
+                val = val + (shifted * shifted - lambda_ineq[j] * lambda_ineq[j]) / (2.0 * mu)
+            }
+            j = j + 1
+        }
+    }
+    val
+}
+
+// Backtracking line search on augmented Lagrangian objective.
+fn auglag_line_search(f: fn(&[f64; 64], i32) -> f64 with Mut, Div, Panic,
+                      c_eq: fn(&[f64; 64], i32, &![f64; 64], i32) with Mut, Div, Panic,
+                      n_eq: i32,
+                      c_ineq: fn(&[f64; 64], i32, &![f64; 64], i32) with Mut, Div, Panic,
+                      n_ineq: i32,
+                      x: &[f64; 64], dir: &[f64; 64], grad: &[f64; 64],
+                      n: i32,
+                      lambda_eq: &[f64; 64], lambda_ineq: &[f64; 64],
+                      mu: f64) -> f64 with Mut, Div, Panic {
+    let c1 = 1.0e-4
+    let min_alpha = 1.0e-16
+    let f0 = auglag_eval_obj(f, c_eq, n_eq, c_ineq, n_ineq, x, n,
+                             lambda_eq, lambda_ineq, mu)
+    let dg = co_dot(grad, dir, n)
+    if dg >= 0.0 { return min_alpha }
+    var alpha = 1.0
+    var trial: [f64; 64] = [0.0; 64]
+    var iter = 0
+    while iter < 30 {
+        var i = 0
+        while i < n { trial[i] = x[i] + alpha * dir[i]; i = i + 1 }
+        let f_trial = auglag_eval_obj(f, c_eq, n_eq, c_ineq, n_ineq, &trial, n,
+                                      lambda_eq, lambda_ineq, mu)
+        if f_trial <= f0 + c1 * alpha * dg { return alpha }
+        alpha = alpha * 0.5
+        if alpha < min_alpha { return min_alpha }
+        iter = iter + 1
+    }
+    alpha
+}
+
+// =============================================================================
+// Augmented Lagrangian method
+// =============================================================================
+
+// Solves: min f(x) s.t. c_eq(x)=0, c_ineq(x)<=0
+// Outer loop: update multipliers lambda, increase penalty mu.
+// Inner loop: L-BFGS on augmented Lagrangian with numerical gradients.
+fn auglag_minimize(f: fn(&[f64; 64], i32) -> f64 with Mut, Div, Panic,
+                   grad_f: fn(&[f64; 64], i32, &![f64; 64]) with Mut, Div, Panic,
+                   c_eq: fn(&[f64; 64], i32, &![f64; 64], i32) with Mut, Div, Panic,
+                   n_eq: i32,
+                   c_ineq: fn(&[f64; 64], i32, &![f64; 64], i32) with Mut, Div, Panic,
+                   n_ineq: i32,
+                   x0: &[f64; 64], n: i32,
+                   config: &ConstrainedConfig,
+                   result: &!ConstrainedResult) with Mut, Div, Panic {
+    var x: [f64; 64] = [0.0; 64]
+    co_copy(x0, &!x, n)
+    var lambda_eq: [f64; 64] = [0.0; 64]
+    var lambda_ineq: [f64; 64] = [0.0; 64]
+    var mu = config.mu_init
+    var ceq_val: [f64; 64] = [0.0; 64]
+    var cineq_val: [f64; 64] = [0.0; 64]
+
+    var outer = 0
+    while outer < config.max_iter {
+        // Evaluate constraints and check feasibility
+        if n_eq > 0 { c_eq(&x, n, &!ceq_val, n_eq) }
+        if n_ineq > 0 { c_ineq(&x, n, &!cineq_val, n_ineq) }
+        var feas_viol = 0.0
+        var i = 0
+        while i < n_eq {
+            let v = co_abs(ceq_val[i])
+            if v > feas_viol { feas_viol = v }
+            i = i + 1
+        }
+        i = 0
+        while i < n_ineq {
+            if cineq_val[i] > 0.0 {
+                if cineq_val[i] > feas_viol { feas_viol = cineq_val[i] }
+            }
+            i = i + 1
+        }
+        if feas_viol < config.tol_feas {
+            var grad_L: [f64; 64] = [0.0; 64]
+            grad_f(&x, n, &!grad_L)
+            let gnorm = co_norminf(&grad_L, n)
+            if gnorm < config.tol_opt {
+                co_copy(&x, &!result.x, n)
+                result.obj_val = f(&x, n)
+                result.constraint_viol = feas_viol
+                result.iterations = outer
+                result.converged = true
+                result.n_dim = n
+                return
+            }
+        }
+
+        // Inner L-BFGS solve on augmented Lagrangian
+        var istate: LBFGSState = LBFGSState {
+            s_store: [0.0; 4096], y_store: [0.0; 4096],
+            rho_store: [0.0; 64], m: 0, n: 0, count: 0
+        }
+        lbfgs_init(&!istate, n, 7)
+        var grad_aug: [f64; 64] = [0.0; 64]
+        var grad_aug_prev: [f64; 64] = [0.0; 64]
+        var dir_aug: [f64; 64] = [0.0; 64]
+        var x_prev: [f64; 64] = [0.0; 64]
+        var s_in: [f64; 64] = [0.0; 64]
+        var y_in: [f64; 64] = [0.0; 64]
+        var xp: [f64; 64] = [0.0; 64]
+        var xm: [f64; 64] = [0.0; 64]
+        let cbrt_eps = 6.0554544523933429e-6
+
+        var inner = 0
+        while inner < 50 {
+            // Numerical gradient of augmented Lagrangian
+            var gi = 0
+            while gi < n {
+                var j = 0
+                while j < n { xp[j] = x[j]; xm[j] = x[j]; j = j + 1 }
+                let h = cbrt_eps * co_max(co_abs(x[gi]), 1.0)
+                xp[gi] = x[gi] + h
+                xm[gi] = x[gi] - h
+                let fp = auglag_eval_obj(f, c_eq, n_eq, c_ineq, n_ineq,
+                                         &xp, n, &lambda_eq, &lambda_ineq, mu)
+                let fm = auglag_eval_obj(f, c_eq, n_eq, c_ineq, n_ineq,
+                                         &xm, n, &lambda_eq, &lambda_ineq, mu)
+                grad_aug[gi] = (fp - fm) / (2.0 * h)
+                gi = gi + 1
+            }
+            let gnorm_in = co_norminf(&grad_aug, n)
+            if gnorm_in < config.tol_opt * 10.0 {
+                inner = 50
+            } else {
+                co_copy(&x, &!x_prev, n)
+                co_copy(&grad_aug, &!grad_aug_prev, n)
+                if inner == 0 {
+                    var di = 0
+                    while di < n { dir_aug[di] = 0.0 - grad_aug[di]; di = di + 1 }
+                } else {
+                    lbfgs_direction(&istate, &grad_aug, &!dir_aug)
+                }
+                let a_aug = auglag_line_search(f, c_eq, n_eq, c_ineq, n_ineq,
+                                               &x, &dir_aug, &grad_aug,
+                                               n, &lambda_eq, &lambda_ineq, mu)
+                var ui = 0
+                while ui < n { x[ui] = x[ui] + a_aug * dir_aug[ui]; ui = ui + 1 }
+
+                // Recompute gradient for L-BFGS update
+                gi = 0
+                while gi < n {
+                    var j = 0
+                    while j < n { xp[j] = x[j]; xm[j] = x[j]; j = j + 1 }
+                    let h = cbrt_eps * co_max(co_abs(x[gi]), 1.0)
+                    xp[gi] = x[gi] + h
+                    xm[gi] = x[gi] - h
+                    let fp2 = auglag_eval_obj(f, c_eq, n_eq, c_ineq, n_ineq,
+                                              &xp, n, &lambda_eq, &lambda_ineq, mu)
+                    let fm2 = auglag_eval_obj(f, c_eq, n_eq, c_ineq, n_ineq,
+                                              &xm, n, &lambda_eq, &lambda_ineq, mu)
+                    grad_aug[gi] = (fp2 - fm2) / (2.0 * h)
+                    gi = gi + 1
+                }
+                var si = 0
+                while si < n {
+                    s_in[si] = x[si] - x_prev[si]
+                    y_in[si] = grad_aug[si] - grad_aug_prev[si]
+                    si = si + 1
+                }
+                let sy_in = co_dot(&s_in, &y_in, n)
+                if sy_in > 1.0e-16 { lbfgs_update(&!istate, &s_in, &y_in) }
+                inner = inner + 1
+            }
+        }
+
+        // Update multipliers
+        if n_eq > 0 { c_eq(&x, n, &!ceq_val, n_eq) }
+        if n_ineq > 0 { c_ineq(&x, n, &!cineq_val, n_ineq) }
+        i = 0
+        while i < n_eq { lambda_eq[i] = lambda_eq[i] + mu * ceq_val[i]; i = i + 1 }
+        i = 0
+        while i < n_ineq {
+            let cand = lambda_ineq[i] + mu * cineq_val[i]
+            if cand > 0.0 { lambda_ineq[i] = cand } else { lambda_ineq[i] = 0.0 }
+            i = i + 1
+        }
+        mu = mu * config.rho
+        if mu > config.mu_max { mu = config.mu_max }
+        outer = outer + 1
+    }
+
+    // Did not converge
+    if n_eq > 0 { c_eq(&x, n, &!ceq_val, n_eq) }
+    if n_ineq > 0 { c_ineq(&x, n, &!cineq_val, n_ineq) }
+    var fv = 0.0
+    var vi = 0
+    while vi < n_eq {
+        let v = co_abs(ceq_val[vi])
+        if v > fv { fv = v }
+        vi = vi + 1
+    }
+    vi = 0
+    while vi < n_ineq {
+        if cineq_val[vi] > 0.0 { if cineq_val[vi] > fv { fv = cineq_val[vi] } }
+        vi = vi + 1
+    }
+    co_copy(&x, &!result.x, n)
+    result.obj_val = f(&x, n)
+    result.constraint_viol = fv
+    result.iterations = outer
+    result.converged = false
+    result.n_dim = n
+}
+
+// =============================================================================
+// Penalty method: helper functions (MUST precede penalty_minimize)
+// =============================================================================
+
+// Evaluate penalized objective: f(x) + (mu/2) * ||c(x)||^2
+fn penalty_eval_obj(f: fn(&[f64; 64], i32) -> f64 with Mut, Div, Panic,
+                    c: fn(&[f64; 64], i32, &![f64; 64], i32) with Mut, Div, Panic,
+                    n_c: i32,
+                    x: &[f64; 64], n: i32,
+                    mu: f64) -> f64 with Mut, Div, Panic {
+    var val = f(x, n)
+    var c_val: [f64; 64] = [0.0; 64]
+    c(x, n, &!c_val, n_c)
+    var penalty = 0.0
+    var i = 0
+    while i < n_c { penalty = penalty + c_val[i] * c_val[i]; i = i + 1 }
+    val + 0.5 * mu * penalty
+}
+
+// Backtracking line search on penalized objective
+fn penalty_line_search(f: fn(&[f64; 64], i32) -> f64 with Mut, Div, Panic,
+                       c: fn(&[f64; 64], i32, &![f64; 64], i32) with Mut, Div, Panic,
+                       n_c: i32,
+                       x: &[f64; 64], dir: &[f64; 64], grad: &[f64; 64],
+                       n: i32, mu: f64) -> f64 with Mut, Div, Panic {
+    let c1 = 1.0e-4
+    let min_alpha = 1.0e-16
+    let f0 = penalty_eval_obj(f, c, n_c, x, n, mu)
+    let dg = co_dot(grad, dir, n)
+    if dg >= 0.0 { return min_alpha }
+    var alpha = 1.0
+    var trial: [f64; 64] = [0.0; 64]
+    var iter = 0
+    while iter < 30 {
+        var i = 0
+        while i < n { trial[i] = x[i] + alpha * dir[i]; i = i + 1 }
+        let f_trial = penalty_eval_obj(f, c, n_c, &trial, n, mu)
+        if f_trial <= f0 + c1 * alpha * dg { return alpha }
+        alpha = alpha * 0.5
+        if alpha < min_alpha { return min_alpha }
+        iter = iter + 1
+    }
+    alpha
+}
+
+// =============================================================================
+// Quadratic penalty method
+// =============================================================================
+
+// Quadratic penalty: min f(x) + (mu/2)*||c(x)||^2, increase mu by rho each outer iter.
+fn penalty_minimize(f: fn(&[f64; 64], i32) -> f64 with Mut, Div, Panic,
+                    grad_f: fn(&[f64; 64], i32, &![f64; 64]) with Mut, Div, Panic,
+                    c: fn(&[f64; 64], i32, &![f64; 64], i32) with Mut, Div, Panic,
+                    n_c: i32,
+                    x0: &[f64; 64], n: i32,
+                    config: &ConstrainedConfig,
+                    result: &!ConstrainedResult) with Mut, Div, Panic {
+    var x: [f64; 64] = [0.0; 64]
+    co_copy(x0, &!x, n)
+    var mu = config.mu_init
+    var c_val: [f64; 64] = [0.0; 64]
+
+    var outer = 0
+    while outer < config.max_iter {
+        // Inner L-BFGS on penalized objective
+        var istate: LBFGSState = LBFGSState {
+            s_store: [0.0; 4096], y_store: [0.0; 4096],
+            rho_store: [0.0; 64], m: 0, n: 0, count: 0
+        }
+        lbfgs_init(&!istate, n, 7)
+        var gp: [f64; 64] = [0.0; 64]
+        var gp_prev: [f64; 64] = [0.0; 64]
+        var dp: [f64; 64] = [0.0; 64]
+        var xprev: [f64; 64] = [0.0; 64]
+        var sp: [f64; 64] = [0.0; 64]
+        var yp: [f64; 64] = [0.0; 64]
+        var xpp: [f64; 64] = [0.0; 64]
+        var xmm: [f64; 64] = [0.0; 64]
+        let cbrt_eps = 6.0554544523933429e-6
+
+        var inner = 0
+        while inner < 50 {
+            var gi = 0
+            while gi < n {
+                var j = 0
+                while j < n { xpp[j] = x[j]; xmm[j] = x[j]; j = j + 1 }
+                let h = cbrt_eps * co_max(co_abs(x[gi]), 1.0)
+                xpp[gi] = x[gi] + h
+                xmm[gi] = x[gi] - h
+                let fp = penalty_eval_obj(f, c, n_c, &xpp, n, mu)
+                let fm = penalty_eval_obj(f, c, n_c, &xmm, n, mu)
+                gp[gi] = (fp - fm) / (2.0 * h)
+                gi = gi + 1
+            }
+            let gnorm = co_norminf(&gp, n)
+            if gnorm < config.tol_opt * 10.0 {
+                inner = 50
+            } else {
+                co_copy(&x, &!xprev, n)
+                co_copy(&gp, &!gp_prev, n)
+                if inner == 0 {
+                    var di = 0
+                    while di < n { dp[di] = 0.0 - gp[di]; di = di + 1 }
+                } else {
+                    lbfgs_direction(&istate, &gp, &!dp)
+                }
+                let ap = penalty_line_search(f, c, n_c, &x, &dp, &gp, n, mu)
+                var ui = 0
+                while ui < n { x[ui] = x[ui] + ap * dp[ui]; ui = ui + 1 }
+
+                // Recompute gradient for L-BFGS
+                gi = 0
+                while gi < n {
+                    var j = 0
+                    while j < n { xpp[j] = x[j]; xmm[j] = x[j]; j = j + 1 }
+                    let h = cbrt_eps * co_max(co_abs(x[gi]), 1.0)
+                    xpp[gi] = x[gi] + h
+                    xmm[gi] = x[gi] - h
+                    let fp2 = penalty_eval_obj(f, c, n_c, &xpp, n, mu)
+                    let fm2 = penalty_eval_obj(f, c, n_c, &xmm, n, mu)
+                    gp[gi] = (fp2 - fm2) / (2.0 * h)
+                    gi = gi + 1
+                }
+                var si = 0
+                while si < n {
+                    sp[si] = x[si] - xprev[si]
+                    yp[si] = gp[si] - gp_prev[si]
+                    si = si + 1
+                }
+                let syp = co_dot(&sp, &yp, n)
+                if syp > 1.0e-16 { lbfgs_update(&!istate, &sp, &yp) }
+                inner = inner + 1
+            }
+        }
+
+        // Check feasibility
+        c(&x, n, &!c_val, n_c)
+        var fv = 0.0
+        var vi = 0
+        while vi < n_c {
+            let v = co_abs(c_val[vi])
+            if v > fv { fv = v }
+            vi = vi + 1
+        }
+        if fv < config.tol_feas {
+            co_copy(&x, &!result.x, n)
+            result.obj_val = f(&x, n)
+            result.constraint_viol = fv
+            result.iterations = outer
+            result.converged = true
+            result.n_dim = n
+            return
+        }
+        mu = mu * config.rho
+        if mu > config.mu_max { mu = config.mu_max }
+        outer = outer + 1
+    }
+
+    c(&x, n, &!c_val, n_c)
+    var fv = 0.0
+    var vi = 0
+    while vi < n_c {
+        let v = co_abs(c_val[vi])
+        if v > fv { fv = v }
+        vi = vi + 1
+    }
+    co_copy(&x, &!result.x, n)
+    result.obj_val = f(&x, n)
+    result.constraint_viol = fv
+    result.iterations = outer
+    result.converged = false
+    result.n_dim = n
+}
+
+// =============================================================================
+// Barrier method: helper functions (MUST precede barrier_minimize)
+// =============================================================================
+
+// Evaluate barrier objective: f(x) - (1/t) * sum_j ln(-c_ineq_j(x))
+// Returns 1e308 if any constraint is non-negative (infeasible).
+fn barrier_eval_obj(f: fn(&[f64; 64], i32) -> f64 with Mut, Div, Panic,
+                    c_ineq: fn(&[f64; 64], i32, &![f64; 64], i32) with Mut, Div, Panic,
+                    n_ineq: i32,
+                    x: &[f64; 64], n: i32,
+                    t: f64) -> f64 with Mut, Div, Panic {
+    var val = f(x, n)
+    var cineq: [f64; 64] = [0.0; 64]
+    c_ineq(x, n, &!cineq, n_ineq)
+    var j = 0
+    while j < n_ineq {
+        if cineq[j] >= 0.0 { return 1.0e308 }
+        val = val - co_ln(0.0 - cineq[j]) / t
+        j = j + 1
+    }
+    val
+}
+
+// Backtracking line search for barrier method with feasibility enforcement.
+fn barrier_line_search(f: fn(&[f64; 64], i32) -> f64 with Mut, Div, Panic,
+                       c_ineq: fn(&[f64; 64], i32, &![f64; 64], i32) with Mut, Div, Panic,
+                       n_ineq: i32,
+                       x: &[f64; 64], dir: &[f64; 64], grad: &[f64; 64],
+                       n: i32, t: f64) -> f64 with Mut, Div, Panic {
+    let c1 = 1.0e-4
+    let min_alpha = 1.0e-16
+    let f0 = barrier_eval_obj(f, c_ineq, n_ineq, x, n, t)
+    let dg = co_dot(grad, dir, n)
+    if dg >= 0.0 { return min_alpha }
+    var alpha = 1.0
+    var trial: [f64; 64] = [0.0; 64]
+    var ct: [f64; 64] = [0.0; 64]
+    var iter = 0
+    while iter < 40 {
+        var i = 0
+        while i < n { trial[i] = x[i] + alpha * dir[i]; i = i + 1 }
+        // Check feasibility
+        c_ineq(&trial, n, &!ct, n_ineq)
+        var feasible = true
+        i = 0
+        while i < n_ineq {
+            if ct[i] >= 0.0 { feasible = false }
+            i = i + 1
+        }
+        if feasible {
+            let f_trial = barrier_eval_obj(f, c_ineq, n_ineq, &trial, n, t)
+            if f_trial <= f0 + c1 * alpha * dg { return alpha }
+        }
+        alpha = alpha * 0.5
+        if alpha < min_alpha { return min_alpha }
+        iter = iter + 1
+    }
+    alpha
+}
+
+// =============================================================================
+// Log-barrier interior point method
+// =============================================================================
+
+// Interior point: min f(x) - (1/t)*sum_j ln(-c_ineq_j(x))
+// Requires strictly feasible x0 (all c_ineq_j(x0) < 0).
+// Increases t by rho each outer iteration.
+fn barrier_minimize(f: fn(&[f64; 64], i32) -> f64 with Mut, Div, Panic,
+                    grad_f: fn(&[f64; 64], i32, &![f64; 64]) with Mut, Div, Panic,
+                    c_ineq: fn(&[f64; 64], i32, &![f64; 64], i32) with Mut, Div, Panic,
+                    n_ineq: i32,
+                    x0: &[f64; 64], n: i32,
+                    config: &ConstrainedConfig,
+                    result: &!ConstrainedResult) with Mut, Div, Panic {
+    var x: [f64; 64] = [0.0; 64]
+    co_copy(x0, &!x, n)
+    var t = 1.0
+    var cv: [f64; 64] = [0.0; 64]
+
+    // Verify initial strict feasibility
+    c_ineq(&x, n, &!cv, n_ineq)
+    var i = 0
+    while i < n_ineq {
+        if cv[i] >= 0.0 {
+            co_copy(x0, &!result.x, n)
+            result.obj_val = f(x0, n)
+            result.constraint_viol = 1.0e30
+            result.iterations = 0
+            result.converged = false
+            result.n_dim = n
+            return
+        }
+        i = i + 1
+    }
+
+    var outer = 0
+    while outer < config.max_iter {
+        // Inner L-BFGS on barrier objective
+        var istate: LBFGSState = LBFGSState {
+            s_store: [0.0; 4096], y_store: [0.0; 4096],
+            rho_store: [0.0; 64], m: 0, n: 0, count: 0
+        }
+        lbfgs_init(&!istate, n, 7)
+        var gb: [f64; 64] = [0.0; 64]
+        var gb_prev: [f64; 64] = [0.0; 64]
+        var db: [f64; 64] = [0.0; 64]
+        var xprev: [f64; 64] = [0.0; 64]
+        var sb: [f64; 64] = [0.0; 64]
+        var yb: [f64; 64] = [0.0; 64]
+        var xpp: [f64; 64] = [0.0; 64]
+        var xmm: [f64; 64] = [0.0; 64]
+        let cbrt_eps = 6.0554544523933429e-6
+
+        var inner = 0
+        while inner < 80 {
+            // Gradient via central differences
+            var gi = 0
+            while gi < n {
+                var j = 0
+                while j < n { xpp[j] = x[j]; xmm[j] = x[j]; j = j + 1 }
+                let h = cbrt_eps * co_max(co_abs(x[gi]), 1.0)
+                xpp[gi] = x[gi] + h
+                xmm[gi] = x[gi] - h
+                let fp = barrier_eval_obj(f, c_ineq, n_ineq, &xpp, n, t)
+                let fm = barrier_eval_obj(f, c_ineq, n_ineq, &xmm, n, t)
+                let diff = fp - fm
+                if co_abs(diff) < 1.0e300 {
+                    gb[gi] = diff / (2.0 * h)
+                } else {
+                    gb[gi] = 0.0
+                }
+                gi = gi + 1
+            }
+            let gnorm = co_norminf(&gb, n)
+            if gnorm < config.tol_opt {
+                inner = 80
+            } else {
+                co_copy(&x, &!xprev, n)
+                co_copy(&gb, &!gb_prev, n)
+                if inner == 0 {
+                    var di = 0
+                    while di < n { db[di] = 0.0 - gb[di]; di = di + 1 }
+                } else {
+                    lbfgs_direction(&istate, &gb, &!db)
+                }
+                let ab = barrier_line_search(f, c_ineq, n_ineq,
+                                             &x, &db, &gb, n, t)
+                var ui = 0
+                while ui < n { x[ui] = x[ui] + ab * db[ui]; ui = ui + 1 }
+
+                // Recompute gradient for L-BFGS
+                gi = 0
+                while gi < n {
+                    var j = 0
+                    while j < n { xpp[j] = x[j]; xmm[j] = x[j]; j = j + 1 }
+                    let h = cbrt_eps * co_max(co_abs(x[gi]), 1.0)
+                    xpp[gi] = x[gi] + h
+                    xmm[gi] = x[gi] - h
+                    let fp2 = barrier_eval_obj(f, c_ineq, n_ineq, &xpp, n, t)
+                    let fm2 = barrier_eval_obj(f, c_ineq, n_ineq, &xmm, n, t)
+                    let diff2 = fp2 - fm2
+                    if co_abs(diff2) < 1.0e300 {
+                        gb[gi] = diff2 / (2.0 * h)
+                    } else {
+                        gb[gi] = 0.0
+                    }
+                    gi = gi + 1
+                }
+                var si = 0
+                while si < n {
+                    sb[si] = x[si] - xprev[si]
+                    yb[si] = gb[si] - gb_prev[si]
+                    si = si + 1
+                }
+                let syb = co_dot(&sb, &yb, n)
+                if syb > 1.0e-16 { lbfgs_update(&!istate, &sb, &yb) }
+                inner = inner + 1
+            }
+        }
+
+        // Check duality gap: m/t
+        let gap = (n_ineq as f64) / t
+        if gap < config.tol_opt {
+            c_ineq(&x, n, &!cv, n_ineq)
+            var mv = 0.0
+            i = 0
+            while i < n_ineq {
+                if cv[i] > 0.0 { if cv[i] > mv { mv = cv[i] } }
+                i = i + 1
+            }
+            co_copy(&x, &!result.x, n)
+            result.obj_val = f(&x, n)
+            result.constraint_viol = mv
+            result.iterations = outer
+            result.converged = true
+            result.n_dim = n
+            return
+        }
+        t = t * config.rho
+        outer = outer + 1
+    }
+
+    c_ineq(&x, n, &!cv, n_ineq)
+    var mv = 0.0
+    i = 0
+    while i < n_ineq {
+        if cv[i] > 0.0 { if cv[i] > mv { mv = cv[i] } }
+        i = i + 1
+    }
+    co_copy(&x, &!result.x, n)
+    result.obj_val = f(&x, n)
+    result.constraint_viol = mv
+    result.iterations = outer
+    result.converged = false
+    result.n_dim = n
+}
+
+// =============================================================================
+// KKT violation analysis
+// =============================================================================
+
+// Compute max KKT violation for a constrained optimization solution.
+// Checks: stationarity, primal feasibility (eq+ineq), dual feasibility, complementarity.
+// jac_eq: n_eq x n row-major, jac_ineq: n_ineq x n row-major.
+fn kkt_violation(grad_f_x: &[f64; 64],
+                 jac_eq: &[f64; 4096], n_eq: i32,
+                 jac_ineq: &[f64; 4096], n_ineq: i32,
+                 lambda_eq: &[f64; 64], lambda_ineq: &[f64; 64],
+                 c_eq_x: &[f64; 64], c_ineq_x: &[f64; 64],
+                 n: i32) -> f64 with Mut, Div {
+    // Stationarity: ||grad_f + J_eq^T*lam_eq + J_ineq^T*lam_ineq||_inf
+    var stat: [f64; 64] = [0.0; 64]
+    var i = 0
+    while i < n { stat[i] = grad_f_x[i]; i = i + 1 }
+    i = 0
+    while i < n_eq {
+        var j = 0
+        while j < n { stat[j] = stat[j] + jac_eq[i * n + j] * lambda_eq[i]; j = j + 1 }
+        i = i + 1
+    }
+    i = 0
+    while i < n_ineq {
+        var j = 0
+        while j < n { stat[j] = stat[j] + jac_ineq[i * n + j] * lambda_ineq[i]; j = j + 1 }
+        i = i + 1
+    }
+    var sv = 0.0
+    i = 0
+    while i < n { let v = co_abs(stat[i]); if v > sv { sv = v }; i = i + 1 }
+
+    // Primal feasibility (equality): ||c_eq||_inf
+    var ev = 0.0
+    i = 0
+    while i < n_eq { let v = co_abs(c_eq_x[i]); if v > ev { ev = v }; i = i + 1 }
+
+    // Primal feasibility (inequality): max(0, c_ineq_j)
+    var iv = 0.0
+    i = 0
+    while i < n_ineq {
+        if c_ineq_x[i] > 0.0 { if c_ineq_x[i] > iv { iv = c_ineq_x[i] } }
+        i = i + 1
+    }
+
+    // Dual feasibility: lambda_ineq >= 0
+    var dv = 0.0
+    i = 0
+    while i < n_ineq {
+        if lambda_ineq[i] < 0.0 { let v = co_abs(lambda_ineq[i]); if v > dv { dv = v } }
+        i = i + 1
+    }
+
+    // Complementarity: |lambda_ineq_j * c_ineq_j|
+    var cv = 0.0
+    i = 0
+    while i < n_ineq {
+        let v = co_abs(lambda_ineq[i] * c_ineq_x[i])
+        if v > cv { cv = v }
+        i = i + 1
+    }
+
+    var mx = sv
+    if ev > mx { mx = ev }
+    if iv > mx { mx = iv }
+    if dv > mx { mx = dv }
+    if cv > mx { mx = cv }
+    mx
+}
+
+// =============================================================================
+// Default configuration and initialization
+// =============================================================================
+
+// Default: max_iter=100, tol_opt=1e-8, tol_feas=1e-8, mu_init=1.0, mu_max=1e8, rho=10.0
+fn constrained_default_config(cfg: &!ConstrainedConfig) with Mut {
+    cfg.max_iter = 100
+    cfg.tol_opt = 1.0e-8
+    cfg.tol_feas = 1.0e-8
+    cfg.mu_init = 1.0
+    cfg.mu_max = 1.0e8
+    cfg.rho = 10.0
+}
+
+fn constrained_init_result(res: &!ConstrainedResult) with Mut {
+    var i = 0
+    while i < 64 { res.x[i] = 0.0; i = i + 1 }
+    res.obj_val = 0.0
+    res.constraint_viol = 0.0
+    res.iterations = 0
+    res.converged = false
+    res.n_dim = 0
+}

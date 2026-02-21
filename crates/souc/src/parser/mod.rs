@@ -522,13 +522,17 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse item-level attributes: #[attr], #[attr(args)], etc.
+    /// Parse item-level attributes: #[attr], #[attr(args)], @attr, @attr(args)
     fn parse_item_attributes(&mut self) -> Result<Vec<Attribute>> {
         let mut attrs = Vec::new();
 
-        while self.at(TokenKind::Hash) {
-            self.advance(); // consume #
-            self.expect(TokenKind::LBracket)?;
+        while self.at(TokenKind::Hash) || self.at(TokenKind::At) {
+            let is_at_attr = self.at(TokenKind::At);
+            self.advance(); // consume # or @
+
+            if !is_at_attr {
+                self.expect(TokenKind::LBracket)?;
+            }
 
             let start = self.span();
             // Attribute name can be a keyword like 'compat'
@@ -550,7 +554,9 @@ impl<'a> Parser<'a> {
             };
 
             let end = self.span();
-            self.expect(TokenKind::RBracket)?;
+            if !is_at_attr {
+                self.expect(TokenKind::RBracket)?;
+            }
 
             attrs.push(Attribute {
                 id: self.next_id(),
@@ -831,6 +837,21 @@ impl<'a> Parser<'a> {
         // Handle special `self` parameter which doesn't require a type annotation
         if self.at(TokenKind::SelfLower) {
             self.advance();
+            // Support explicit typed self: `self: &Option<T>`, `self: Option<T>`, etc.
+            if self.at(TokenKind::Colon) {
+                self.advance();
+                let ty = self.parse_type()?;
+                return Ok(Param {
+                    id: self.next_id(),
+                    is_mut,
+                    pattern: Pattern::Binding {
+                        name: "self".to_string(),
+                        mutable: is_mut,
+                    },
+                    ty,
+                    attributes: Vec::new(),
+                });
+            }
             return Ok(Param {
                 id: self.next_id(),
                 is_mut,
@@ -1344,7 +1365,10 @@ impl<'a> Parser<'a> {
                 let name = self.parse_ident()?;
                 self.expect(TokenKind::Eq)?;
                 let ty = self.parse_type()?;
-                self.expect(TokenKind::Semi)?;
+                // Semicolon is optional after `type Name = T` in impl blocks
+                if self.at(TokenKind::Semi) {
+                    self.advance();
+                }
                 Ok(ImplItem::Type(ImplTypeDef {
                     id: self.next_id(),
                     name,
@@ -3059,6 +3083,29 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// Parse the left-hand side of a where predicate (`T`, `Option<T>`, `(A, B)`) without
+    /// triggering false-positive ontology detection. `parse_type()` can misparse `T: Default`
+    /// as the ontology reference `T:Default` because `Default` is an identifier — using a
+    /// path-first approach avoids that hazard.
+    fn parse_where_predicate_subject(&mut self) -> Result<TypeExpr> {
+        // Tuple type subjects: (A, B) for HRTB-style bounds
+        if self.at(TokenKind::LParen) {
+            return self.parse_type();
+        }
+        // Use parse_type_path() (pure path, no ontology detection) as the base
+        let path = self.parse_type_path()?;
+        let args = if self.at(TokenKind::Lt) {
+            self.parse_type_args()?
+        } else {
+            Vec::new()
+        };
+        Ok(TypeExpr::Named {
+            path,
+            args,
+            unit: None,
+        })
+    }
+
     fn parse_where_clause(&mut self) -> Result<Vec<WherePredicate>> {
         if !self.at(TokenKind::Where) {
             return Ok(Vec::new());
@@ -3088,11 +3135,15 @@ impl<'a> Parser<'a> {
                     break;
                 }
             }
-            let ty = self.parse_type()?;
+            let ty = self.parse_where_predicate_subject()?;
             self.expect(TokenKind::Colon)?;
             let mut bounds = Vec::new();
             if self.at(TokenKind::Lifetime) {
                 self.advance(); // Skip lifetime bounds
+            } else if self.at(TokenKind::Fn) {
+                // Function type bound: `F: fn(T) -> U` — parse as type, store as synthetic path
+                let fn_ty = self.parse_type()?;
+                bounds.push(Path::simple(&format!("{:?}", fn_ty)));
             } else {
                 bounds.push(self.parse_path()?);
             }
@@ -3100,6 +3151,10 @@ impl<'a> Parser<'a> {
                 self.advance();
                 if self.at(TokenKind::Lifetime) {
                     self.advance(); // Skip lifetime bounds like + 'static
+                } else if self.at(TokenKind::Fn) {
+                    // Function type bound after +
+                    let fn_ty = self.parse_type()?;
+                    bounds.push(Path::simple(&format!("{:?}", fn_ty)));
                 } else {
                     bounds.push(self.parse_path()?);
                 }
@@ -3311,7 +3366,14 @@ impl<'a> Parser<'a> {
                 // vs a path: module::Type (double colon)
                 // Term can be an identifier (chebi:drug), a number (chebi:15365),
                 // or a keyword used as ontology term name (uo:unit)
-                if self.peek_n(1) == TokenKind::Colon && self.peek_is_ontology_term_name(2) {
+                // EXCLUDE: `F: fn(...)` — `fn` followed by `(` is a function type bound, not ontology
+                let is_fn_type_bound = self.peek_n(1) == TokenKind::Colon
+                    && self.peek_n(2) == TokenKind::Fn
+                    && self.peek_n(3) == TokenKind::LParen;
+                if self.peek_n(1) == TokenKind::Colon
+                    && self.peek_is_ontology_term_name(2)
+                    && !is_fn_type_bound
+                {
                     // This is an ontology term reference like chebi:drug, chebi:15365, or uo:unit
                     let prefix = self.parse_ident()?;
                     self.expect(TokenKind::Colon)?;

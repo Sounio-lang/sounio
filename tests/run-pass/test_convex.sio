@@ -1,0 +1,912 @@
+//@ run-pass
+//@ expect-stdout: ALL 12 TESTS PASSED
+//@ expect-stdout: Failed: 0
+// test_convex.sio -- Tests for convex optimization module
+//
+// Self-contained test suite for proximal operators, LASSO, FISTA, and the
+// Moreau envelope. All structs, helpers, and algorithms are inlined since
+// tests cannot import.
+//
+// References:
+//   Parikh & Boyd (2014): "Proximal Algorithms" Foundations & Trends
+//   Beck & Teboulle (2009): "A Fast Iterative Shrinkage-Thresholding Algorithm"
+
+// ============================================================================
+// PURE MATH HELPERS (must precede callers)
+// ============================================================================
+
+fn cv_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn cv_max(a: f64, b: f64) -> f64 {
+    if a > b { return a }
+    return b
+}
+
+fn cv_min(a: f64, b: f64) -> f64 {
+    if a < b { return a }
+    return b
+}
+
+fn cv_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    if y < 1.0 { y = 1.0 }
+    var i = 0
+    while i < 60 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    return y
+}
+
+fn cv_sign(x: f64) -> f64 {
+    if x > 0.0 { return 1.0 }
+    if x < 0.0 { return 0.0 - 1.0 }
+    return 0.0
+}
+
+fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+    cv_abs(a - b) < tol
+}
+
+// ============================================================================
+// VECTOR HELPERS (fixed-size [f64; 64])
+// ============================================================================
+
+fn cv_dot(a: &[f64; 64], b: &[f64; 64], n: i32) -> f64 with Mut {
+    var s = 0.0
+    var i = 0
+    while i < n { s = s + a[i] * b[i]; i = i + 1 }
+    s
+}
+
+fn cv_norm2(a: &[f64; 64], n: i32) -> f64 with Mut, Div, Panic {
+    var s = 0.0
+    var i = 0
+    while i < n { s = s + a[i] * a[i]; i = i + 1 }
+    cv_sqrt(s)
+}
+
+fn cv_copy(src: &[f64; 64], dst: &![f64; 64], n: i32) with Mut {
+    var i = 0
+    while i < n { dst[i] = src[i]; i = i + 1 }
+}
+
+fn cv_axpy(alpha: f64, x: &[f64; 64], y: &![f64; 64], n: i32) with Mut {
+    var i = 0
+    while i < n { y[i] = y[i] + alpha * x[i]; i = i + 1 }
+}
+
+fn cv_scale(x: &![f64; 64], alpha: f64, n: i32) with Mut {
+    var i = 0
+    while i < n { x[i] = x[i] * alpha; i = i + 1 }
+}
+
+fn cv_sum(a: &[f64; 64], n: i32) -> f64 with Mut {
+    var s = 0.0
+    var i = 0
+    while i < n { s = s + a[i]; i = i + 1 }
+    s
+}
+
+fn cv_l1_norm(a: &[f64; 64], n: i32) -> f64 with Mut {
+    var s = 0.0
+    var i = 0
+    while i < n { s = s + cv_abs(a[i]); i = i + 1 }
+    s
+}
+
+// y = A * x,  A is m x n stored row-major in [f64; 4096]
+fn cv_matvec(A: &[f64; 4096], x: &[f64; 64], m: i32, n: i32,
+             y: &![f64; 64]) with Mut {
+    var i = 0
+    while i < m {
+        var s = 0.0
+        var j = 0
+        while j < n { s = s + A[i * n + j] * x[j]; j = j + 1 }
+        y[i] = s
+        i = i + 1
+    }
+}
+
+// y = A^T * x,  A is m x n stored row-major
+fn cv_mat_t_vec(A: &[f64; 4096], x: &[f64; 64], m: i32, n: i32,
+                y: &![f64; 64]) with Mut {
+    var j = 0
+    while j < n { y[j] = 0.0; j = j + 1 }
+    var i = 0
+    while i < m {
+        var j2 = 0
+        while j2 < n {
+            y[j2] = y[j2] + A[i * n + j2] * x[i]
+            j2 = j2 + 1
+        }
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// STRUCTS
+// ============================================================================
+
+struct ProxResult {
+    x: [f64; 64],
+    n_dim: i32
+}
+
+struct LassoResult {
+    x: [f64; 64],
+    obj_val: f64,
+    iterations: i32,
+    converged: bool,
+    n_dim: i32
+}
+
+// ============================================================================
+// PROXIMAL OPERATORS
+// ============================================================================
+
+// prox_{lambda * ||.||_1}(v) = soft-thresholding
+// S_lambda(v_i) = sign(v_i) * max(|v_i| - lambda, 0)
+fn prox_l1(v: &[f64; 64], n: i32, lambda: f64, out: &![f64; 64]) with Mut {
+    var i = 0
+    while i < n {
+        let mag = cv_abs(v[i]) - lambda
+        if mag > 0.0 {
+            out[i] = cv_sign(v[i]) * mag
+        } else {
+            out[i] = 0.0
+        }
+        i = i + 1
+    }
+}
+
+// prox of indicator of nonneg orthant: project onto R+
+fn prox_nonneg(v: &[f64; 64], n: i32, out: &![f64; 64]) with Mut {
+    var i = 0
+    while i < n {
+        if v[i] > 0.0 {
+            out[i] = v[i]
+        } else {
+            out[i] = 0.0
+        }
+        i = i + 1
+    }
+}
+
+// prox of indicator of box [lo, hi]: clamp
+fn prox_box(v: &[f64; 64], n: i32, lo: f64, hi: f64, out: &![f64; 64]) with Mut {
+    var i = 0
+    while i < n {
+        var val = v[i]
+        if val < lo { val = lo }
+        if val > hi { val = hi }
+        out[i] = val
+        i = i + 1
+    }
+}
+
+// prox of indicator of L2 ball: project onto ||x||_2 <= radius
+fn prox_l2_ball(v: &[f64; 64], n: i32, radius: f64, out: &![f64; 64]) with Mut, Div, Panic {
+    let norm = cv_norm2(v, n)
+    if norm <= radius {
+        var i = 0
+        while i < n { out[i] = v[i]; i = i + 1 }
+    } else {
+        let scale = radius / norm
+        var i = 0
+        while i < n { out[i] = v[i] * scale; i = i + 1 }
+    }
+}
+
+// Insertion sort for descending order (helper for prox_simplex)
+fn cv_insertion_sort_desc(arr: &![f64; 64], n: i32) with Mut {
+    var i = 1
+    while i < n {
+        let key = arr[i]
+        var j = i - 1
+        while j >= 0 {
+            if arr[j] < key {
+                arr[j + 1] = arr[j]
+                j = j - 1
+            } else {
+                j = 0 - 1
+            }
+        }
+        arr[j + 1] = key
+        i = i + 1
+    }
+}
+
+// prox of indicator of probability simplex: project onto {x >= 0, sum(x) = 1}
+// Michelot (1986) algorithm: sort descending, find threshold, project
+fn prox_simplex(v: &[f64; 64], n: i32, out: &![f64; 64]) with Mut, Div, Panic {
+    // Copy and sort descending using insertion sort
+    var sorted: [f64; 64] = [0.0; 64]
+    var i = 0
+    while i < n { sorted[i] = v[i]; i = i + 1 }
+    cv_insertion_sort_desc(&!sorted, n)
+
+    // Find rho: largest j s.t. sorted[j] - (cumsum - 1)/(j+1) > 0
+    var cumsum = 0.0
+    var rho = 0
+    i = 0
+    while i < n {
+        cumsum = cumsum + sorted[i]
+        let test = sorted[i] - (cumsum - 1.0) / ((i + 1) as f64)
+        if test > 0.0 {
+            rho = i + 1
+        }
+        i = i + 1
+    }
+
+    // Compute threshold
+    var cumsum2 = 0.0
+    i = 0
+    while i < rho { cumsum2 = cumsum2 + sorted[i]; i = i + 1 }
+    let theta = (cumsum2 - 1.0) / (rho as f64)
+
+    // Project
+    i = 0
+    while i < n {
+        let val = v[i] - theta
+        if val > 0.0 {
+            out[i] = val
+        } else {
+            out[i] = 0.0
+        }
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// LASSO SUPPORT FUNCTIONS
+// ============================================================================
+
+// Compute A^T * A * x  (A is m x n, x is n-vector)
+fn cv_ata_vec(A: &[f64; 4096], x: &[f64; 64], m: i32, n: i32,
+              out: &![f64; 64]) with Mut {
+    var tmp: [f64; 64] = [0.0; 64]
+    cv_matvec(A, x, m, n, &!tmp)
+    cv_mat_t_vec(A, &tmp, m, n, out)
+}
+
+// Estimate Lipschitz constant of grad f via power iteration on A^T A
+fn cv_lipschitz_estimate(A: &[f64; 4096], m: i32, n: i32) -> f64 with Mut, Div, Panic {
+    var v: [f64; 64] = [0.0; 64]
+    var i = 0
+    while i < n { v[i] = 1.0; i = i + 1 }
+    // Normalize initial vector
+    let norm0 = cv_norm2(&v, n)
+    i = 0
+    while i < n { v[i] = v[i] / norm0; i = i + 1 }
+    var eigenval = 1.0
+    var iter = 0
+    while iter < 50 {
+        var w: [f64; 64] = [0.0; 64]
+        cv_ata_vec(A, &v, m, n, &!w)
+        let norm_w = cv_norm2(&w, n)
+        if norm_w < 1.0e-30 { return 1.0 }
+        eigenval = norm_w
+        i = 0
+        while i < n { v[i] = w[i] / norm_w; i = i + 1 }
+        iter = iter + 1
+    }
+    return eigenval
+}
+
+// Compute LASSO objective: 0.5*||Ax - b||^2 + lambda*||x||_1
+fn cv_objective_lasso(A: &[f64; 4096], b: &[f64; 64], x: &[f64; 64],
+                      m: i32, n: i32, lambda: f64) -> f64 with Mut {
+    var r: [f64; 64] = [0.0; 64]
+    cv_matvec(A, x, m, n, &!r)
+    var i = 0
+    while i < m { r[i] = r[i] - b[i]; i = i + 1 }
+    var s = 0.0
+    i = 0
+    while i < m { s = s + r[i] * r[i]; i = i + 1 }
+    0.5 * s + lambda * cv_l1_norm(x, n)
+}
+
+// Count nonzero entries (|x[i]| > tol)
+fn cv_count_nonzero(x: &[f64; 64], n: i32, tol: f64) -> i32 with Mut {
+    var count = 0
+    var i = 0
+    while i < n {
+        if cv_abs(x[i]) > tol { count = count + 1 }
+        i = i + 1
+    }
+    return count
+}
+
+// Gradient of 0.5*||Ax - b||^2 = A^T(Ax - b)
+fn cv_lasso_grad(A: &[f64; 4096], b: &[f64; 64], x: &[f64; 64],
+                 m: i32, n: i32, grad: &![f64; 64]) with Mut {
+    var r: [f64; 64] = [0.0; 64]
+    cv_matvec(A, x, m, n, &!r)
+    var i = 0
+    while i < m { r[i] = r[i] - b[i]; i = i + 1 }
+    cv_mat_t_vec(A, &r, m, n, grad)
+}
+
+// ============================================================================
+// PROXIMAL GRADIENT DESCENT FOR LASSO
+// ============================================================================
+
+fn proxgrad_lasso(A: &[f64; 4096], b: &[f64; 64], m: i32, n: i32,
+                  lambda: f64, max_iter: i32, tol: f64,
+                  result: &!LassoResult) with Mut, Div, Panic {
+    let lip = cv_lipschitz_estimate(A, m, n)
+    let step = 1.0 / lip
+
+    var x: [f64; 64] = [0.0; 64]
+    var grad: [f64; 64] = [0.0; 64]
+    var x_new: [f64; 64] = [0.0; 64]
+    var prox_input: [f64; 64] = [0.0; 64]
+
+    var iter = 0
+    while iter < max_iter {
+        cv_lasso_grad(A, b, &x, m, n, &!grad)
+        // Gradient step
+        var i = 0
+        while i < n { prox_input[i] = x[i] - step * grad[i]; i = i + 1 }
+        // Proximal step (soft-thresholding)
+        prox_l1(&prox_input, n, lambda * step, &!x_new)
+        // Check convergence: ||x_new - x||_inf < tol
+        var max_diff = 0.0
+        i = 0
+        while i < n {
+            let d = cv_abs(x_new[i] - x[i])
+            if d > max_diff { max_diff = d }
+            i = i + 1
+        }
+        i = 0
+        while i < n { x[i] = x_new[i]; i = i + 1 }
+        if max_diff < tol {
+            cv_copy(&x, &!result.x, n)
+            result.obj_val = cv_objective_lasso(A, b, &x, m, n, lambda)
+            result.iterations = iter + 1
+            result.converged = true
+            result.n_dim = n
+            return
+        }
+        iter = iter + 1
+    }
+    cv_copy(&x, &!result.x, n)
+    result.obj_val = cv_objective_lasso(A, b, &x, m, n, lambda)
+    result.iterations = max_iter
+    result.converged = false
+    result.n_dim = n
+}
+
+// ============================================================================
+// FISTA (Fast Iterative Shrinkage-Thresholding Algorithm)
+// Beck & Teboulle (2009)
+// ============================================================================
+
+fn fista(A: &[f64; 4096], b: &[f64; 64], m: i32, n: i32,
+         lambda: f64, max_iter: i32, tol: f64,
+         result: &!LassoResult) with Mut, Div, Panic {
+    let lip = cv_lipschitz_estimate(A, m, n)
+    let step = 1.0 / lip
+
+    var x: [f64; 64] = [0.0; 64]
+    var y: [f64; 64] = [0.0; 64]
+    var x_prev: [f64; 64] = [0.0; 64]
+    var grad: [f64; 64] = [0.0; 64]
+    var prox_input: [f64; 64] = [0.0; 64]
+    var x_new: [f64; 64] = [0.0; 64]
+    var t_k = 1.0
+
+    var iter = 0
+    while iter < max_iter {
+        // Gradient at y
+        cv_lasso_grad(A, b, &y, m, n, &!grad)
+        // Gradient step
+        var i = 0
+        while i < n { prox_input[i] = y[i] - step * grad[i]; i = i + 1 }
+        // Proximal step
+        prox_l1(&prox_input, n, lambda * step, &!x_new)
+        // Check convergence
+        var max_diff = 0.0
+        i = 0
+        while i < n {
+            let d = cv_abs(x_new[i] - x[i])
+            if d > max_diff { max_diff = d }
+            i = i + 1
+        }
+        // Update momentum
+        i = 0
+        while i < n { x_prev[i] = x[i]; i = i + 1 }
+        i = 0
+        while i < n { x[i] = x_new[i]; i = i + 1 }
+        let t_next = (1.0 + cv_sqrt(1.0 + 4.0 * t_k * t_k)) / 2.0
+        let momentum = (t_k - 1.0) / t_next
+        t_k = t_next
+        // y = x + momentum * (x - x_prev)
+        i = 0
+        while i < n {
+            y[i] = x[i] + momentum * (x[i] - x_prev[i])
+            i = i + 1
+        }
+        if max_diff < tol {
+            cv_copy(&x, &!result.x, n)
+            result.obj_val = cv_objective_lasso(A, b, &x, m, n, lambda)
+            result.iterations = iter + 1
+            result.converged = true
+            result.n_dim = n
+            return
+        }
+        iter = iter + 1
+    }
+    cv_copy(&x, &!result.x, n)
+    result.obj_val = cv_objective_lasso(A, b, &x, m, n, lambda)
+    result.iterations = max_iter
+    result.converged = false
+    result.n_dim = n
+}
+
+// ============================================================================
+// MOREAU ENVELOPE
+// ============================================================================
+
+// Moreau envelope of f at x with parameter lambda:
+//   M_lambda(x) = min_u { f(u) + (1/(2*lambda)) * ||u - x||^2 }
+// For f(u) = ||u||_1, uses identity:
+//   M_lambda(x) = f(prox_lambda_f(x)) + (1/(2*lambda))*||prox - x||^2
+fn moreau_envelope(x: &[f64; 64], n: i32, lambda: f64) -> f64 with Mut, Div, Panic {
+    var p: [f64; 64] = [0.0; 64]
+    prox_l1(x, n, lambda, &!p)
+    // f(prox) = ||prox||_1
+    let f_prox = cv_l1_norm(&p, n)
+    // ||prox - x||^2
+    var dist_sq = 0.0
+    var i = 0
+    while i < n {
+        let d = p[i] - x[i]
+        dist_sq = dist_sq + d * d
+        i = i + 1
+    }
+    f_prox + dist_sq / (2.0 * lambda)
+}
+
+// ============================================================================
+// TEST 1: prox_l1 soft thresholding
+// prox_l1([3.0, -2.0, 0.5], lambda=1.0) -> [2.0, -1.0, 0.0]
+// ============================================================================
+
+fn test_prox_l1_basic() -> bool with Mut, Div, Panic {
+    var v: [f64; 64] = [0.0; 64]
+    v[0] = 3.0
+    v[1] = 0.0 - 2.0
+    v[2] = 0.5
+    var out: [f64; 64] = [0.0; 64]
+    prox_l1(&v, 3, 1.0, &!out)
+    // Expected: [2.0, -1.0, 0.0]
+    let ok0 = approx_eq(out[0], 2.0, 1.0e-10)
+    let ok1 = approx_eq(out[1], 0.0 - 1.0, 1.0e-10)
+    let ok2 = approx_eq(out[2], 0.0, 1.0e-10)
+    ok0 && ok1 && ok2
+}
+
+// ============================================================================
+// TEST 2: prox_l1 identity at zero lambda
+// prox_l1(x, 0) = x
+// ============================================================================
+
+fn test_prox_l1_zero_lambda() -> bool with Mut, Div, Panic {
+    var v: [f64; 64] = [0.0; 64]
+    v[0] = 3.7
+    v[1] = 0.0 - 1.2
+    v[2] = 0.0
+    v[3] = 5.5
+    var out: [f64; 64] = [0.0; 64]
+    prox_l1(&v, 4, 0.0, &!out)
+    let ok0 = approx_eq(out[0], 3.7, 1.0e-10)
+    let ok1 = approx_eq(out[1], 0.0 - 1.2, 1.0e-10)
+    let ok2 = approx_eq(out[2], 0.0, 1.0e-10)
+    let ok3 = approx_eq(out[3], 5.5, 1.0e-10)
+    ok0 && ok1 && ok2 && ok3
+}
+
+// ============================================================================
+// TEST 3: prox_nonneg
+// [2.0, -1.0, 0.0] -> [2.0, 0.0, 0.0]
+// ============================================================================
+
+fn test_prox_nonneg() -> bool with Mut, Div, Panic {
+    var v: [f64; 64] = [0.0; 64]
+    v[0] = 2.0
+    v[1] = 0.0 - 1.0
+    v[2] = 0.0
+    var out: [f64; 64] = [0.0; 64]
+    prox_nonneg(&v, 3, &!out)
+    let ok0 = approx_eq(out[0], 2.0, 1.0e-10)
+    let ok1 = approx_eq(out[1], 0.0, 1.0e-10)
+    let ok2 = approx_eq(out[2], 0.0, 1.0e-10)
+    ok0 && ok1 && ok2
+}
+
+// ============================================================================
+// TEST 4: prox_box clip to [0,1]
+// ============================================================================
+
+fn test_prox_box() -> bool with Mut, Div, Panic {
+    var v: [f64; 64] = [0.0; 64]
+    v[0] = 0.0 - 0.5    // below [0,1] -> clamp to 0
+    v[1] = 0.5           // inside -> unchanged
+    v[2] = 1.5           // above [0,1] -> clamp to 1
+    v[3] = 0.0           // boundary -> unchanged
+    v[4] = 1.0           // boundary -> unchanged
+    var out: [f64; 64] = [0.0; 64]
+    prox_box(&v, 5, 0.0, 1.0, &!out)
+    let ok0 = approx_eq(out[0], 0.0, 1.0e-10)
+    let ok1 = approx_eq(out[1], 0.5, 1.0e-10)
+    let ok2 = approx_eq(out[2], 1.0, 1.0e-10)
+    let ok3 = approx_eq(out[3], 0.0, 1.0e-10)
+    let ok4 = approx_eq(out[4], 1.0, 1.0e-10)
+    ok0 && ok1 && ok2 && ok3 && ok4
+}
+
+// ============================================================================
+// TEST 5: prox_l2_ball inside unchanged
+// Vector inside ball returned as-is
+// ============================================================================
+
+fn test_prox_l2_ball_inside() -> bool with Mut, Div, Panic {
+    var v: [f64; 64] = [0.0; 64]
+    v[0] = 0.3
+    v[1] = 0.4
+    // ||v|| = 0.5 < 1.0, so inside ball of radius 1.0
+    var out: [f64; 64] = [0.0; 64]
+    prox_l2_ball(&v, 2, 1.0, &!out)
+    let ok0 = approx_eq(out[0], 0.3, 1.0e-10)
+    let ok1 = approx_eq(out[1], 0.4, 1.0e-10)
+    ok0 && ok1
+}
+
+// ============================================================================
+// TEST 6: prox_l2_ball outside rescaled
+// Vector outside ball projected to boundary
+// ============================================================================
+
+fn test_prox_l2_ball_outside() -> bool with Mut, Div, Panic {
+    var v: [f64; 64] = [0.0; 64]
+    v[0] = 3.0
+    v[1] = 4.0
+    // ||v|| = 5.0, project onto ball of radius 1.0 -> [3/5, 4/5] = [0.6, 0.8]
+    var out: [f64; 64] = [0.0; 64]
+    prox_l2_ball(&v, 2, 1.0, &!out)
+    let ok0 = approx_eq(out[0], 0.6, 1.0e-6)
+    let ok1 = approx_eq(out[1], 0.8, 1.0e-6)
+    // Verify norm is 1.0
+    let norm_out = cv_norm2(&out, 2)
+    let ok2 = approx_eq(norm_out, 1.0, 1.0e-6)
+    ok0 && ok1 && ok2
+}
+
+// ============================================================================
+// TEST 7: prox_simplex sums to 1
+// Result sums to 1, all >= 0
+// ============================================================================
+
+fn test_prox_simplex() -> bool with Mut, Div, Panic {
+    var v: [f64; 64] = [0.0; 64]
+    v[0] = 2.0
+    v[1] = 0.0 - 1.0
+    v[2] = 0.5
+    v[3] = 1.5
+    var out: [f64; 64] = [0.0; 64]
+    prox_simplex(&v, 4, &!out)
+    // Check sum = 1
+    let s = cv_sum(&out, 4)
+    let sum_ok = approx_eq(s, 1.0, 1.0e-6)
+    // Check all non-negative
+    var all_nonneg = true
+    var i = 0
+    while i < 4 {
+        if out[i] < 0.0 - 1.0e-10 { all_nonneg = false }
+        i = i + 1
+    }
+    sum_ok && all_nonneg
+}
+
+// ============================================================================
+// TEST 8: LASSO sparsity with large lambda
+// Large lambda -> sparse solution
+// ============================================================================
+
+fn test_lasso_sparsity() -> bool with Mut, Div, Panic {
+    // A is 4x3 identity-like: A = [1 0 0; 0 1 0; 0 0 1; 0 0 0]
+    // b = [5.0, 3.0, 0.1, 0.0]
+    // With large lambda, solution should be sparse
+    var A: [f64; 4096] = [0.0; 4096]
+    A[0] = 1.0   // row 0, col 0
+    A[4] = 1.0   // row 1, col 1
+    A[8] = 1.0   // row 2, col 2
+    var b: [f64; 64] = [0.0; 64]
+    b[0] = 5.0
+    b[1] = 3.0
+    b[2] = 0.1
+    b[3] = 0.0
+
+    var result: LassoResult = LassoResult {
+        x: [0.0; 64], obj_val: 0.0, iterations: 0, converged: false, n_dim: 0
+    }
+    // Large lambda = 4.0 should zero out small entries
+    proxgrad_lasso(&A, &b, 4, 3, 4.0, 2000, 1.0e-8, &!result)
+
+    // x[2] should be zeroed (b[2]=0.1 is too small vs lambda=4.0)
+    let sparse_ok = approx_eq(result.x[2], 0.0, 1.0e-4)
+    // x[0] should be shrunken: x[0] = max(5.0 - 4.0, 0) = 1.0
+    let x0_ok = approx_eq(result.x[0], 1.0, 1.0e-4)
+    // Count nonzero entries; x[2] should be zero
+    let nnz = cv_count_nonzero(&result.x, 3, 1.0e-4)
+    let nnz_ok = nnz < 3
+    sparse_ok && x0_ok && nnz_ok
+}
+
+// ============================================================================
+// TEST 9: LASSO small lambda ~ OLS
+// Near-zero lambda on identity system -> x ~ b
+// ============================================================================
+
+fn test_lasso_zero_lambda() -> bool with Mut, Div, Panic {
+    // A is 3x3 identity, b = [2.0, 3.0, 4.0]
+    // With lambda ~ 0, LASSO solution ~ OLS = b
+    var A: [f64; 4096] = [0.0; 4096]
+    A[0] = 1.0
+    A[4] = 1.0
+    A[8] = 1.0
+    var b: [f64; 64] = [0.0; 64]
+    b[0] = 2.0
+    b[1] = 3.0
+    b[2] = 4.0
+
+    var result: LassoResult = LassoResult {
+        x: [0.0; 64], obj_val: 0.0, iterations: 0, converged: false, n_dim: 0
+    }
+    // lambda = 1e-12 (near zero)
+    proxgrad_lasso(&A, &b, 3, 3, 1.0e-12, 2000, 1.0e-8, &!result)
+
+    let ok0 = approx_eq(result.x[0], 2.0, 1.0e-4)
+    let ok1 = approx_eq(result.x[1], 3.0, 1.0e-4)
+    let ok2 = approx_eq(result.x[2], 4.0, 1.0e-4)
+    ok0 && ok1 && ok2
+}
+
+// ============================================================================
+// TEST 10: Proximal gradient on quadratic
+// min 0.5*||Ix - 0||^2 with lambda ~ 0 -> x* = 0
+// ============================================================================
+
+fn test_proxgrad_quadratic() -> bool with Mut, Div, Panic {
+    // A = identity, b = 0, lambda ~ 0 -> solution = 0
+    var A: [f64; 4096] = [0.0; 4096]
+    A[0] = 1.0
+    A[4] = 1.0
+    A[8] = 1.0
+    var b: [f64; 64] = [0.0; 64]
+
+    var result: LassoResult = LassoResult {
+        x: [0.0; 64], obj_val: 0.0, iterations: 0, converged: false, n_dim: 0
+    }
+    proxgrad_lasso(&A, &b, 3, 3, 1.0e-15, 2000, 1.0e-10, &!result)
+
+    let ok0 = approx_eq(result.x[0], 0.0, 1.0e-4)
+    let ok1 = approx_eq(result.x[1], 0.0, 1.0e-4)
+    let ok2 = approx_eq(result.x[2], 0.0, 1.0e-4)
+    ok0 && ok1 && ok2
+}
+
+// ============================================================================
+// TEST 11: FISTA converges on LASSO
+// FISTA should converge and produce similar objective to proxgrad
+// ============================================================================
+
+fn test_fista_converges() -> bool with Mut, Div, Panic {
+    // A is 4x3 matrix with correlated columns
+    var A: [f64; 4096] = [0.0; 4096]
+    A[0] = 1.0; A[1] = 0.5; A[2] = 0.0    // row 0
+    A[3] = 0.5; A[4] = 1.0; A[5] = 0.5    // row 1
+    A[6] = 0.0; A[7] = 0.5; A[8] = 1.0    // row 2
+    A[9] = 0.3; A[10] = 0.3; A[11] = 0.3  // row 3
+    var b: [f64; 64] = [0.0; 64]
+    b[0] = 2.0
+    b[1] = 3.0
+    b[2] = 1.0
+    b[3] = 1.0
+
+    let lambda = 0.1
+    let max_iter = 500
+    let tol = 1.0e-6
+
+    var pg_result: LassoResult = LassoResult {
+        x: [0.0; 64], obj_val: 0.0, iterations: 0, converged: false, n_dim: 0
+    }
+    proxgrad_lasso(&A, &b, 4, 3, lambda, max_iter, tol, &!pg_result)
+
+    var fista_result: LassoResult = LassoResult {
+        x: [0.0; 64], obj_val: 0.0, iterations: 0, converged: false, n_dim: 0
+    }
+    fista(&A, &b, 4, 3, lambda, max_iter, tol, &!fista_result)
+
+    // FISTA should converge in fewer or equal iterations
+    // Both should converge to similar objective values
+    let obj_close = approx_eq(pg_result.obj_val, fista_result.obj_val, 1.0e-3)
+    let fista_not_slower = fista_result.iterations <= pg_result.iterations
+    obj_close && fista_not_slower
+}
+
+// ============================================================================
+// TEST 12: Moreau envelope of ||.||_1 at zero = 0
+// ============================================================================
+
+fn test_moreau_envelope() -> bool with Mut, Div, Panic {
+    // Moreau envelope of ||.||_1 at 0 should be 0
+    var zero_vec: [f64; 64] = [0.0; 64]
+    let m0 = moreau_envelope(&zero_vec, 3, 1.0)
+    let at_zero_ok = approx_eq(m0, 0.0, 1.0e-10)
+
+    // At x = [2.0, 0, 0], lambda = 1.0:
+    // prox_l1([2.0,0,0], 1.0) = [1.0, 0, 0]
+    // Moreau = ||prox||_1 + ||prox - x||^2 / (2*lambda)
+    //        = 1.0 + (1.0)^2 / 2.0 = 1.5
+    var v: [f64; 64] = [0.0; 64]
+    v[0] = 2.0
+    let m1 = moreau_envelope(&v, 3, 1.0)
+    let at_two_ok = approx_eq(m1, 1.5, 1.0e-10)
+
+    // Moreau envelope should be <= f(x) = ||x||_1 (it is a smoothed lower bound)
+    // For x = [2.0, 0, 0]: f(x) = 2.0, M(x) = 1.5 <= 2.0
+    let smooth_ok = m1 <= 2.0 + 1.0e-10
+
+    at_zero_ok && at_two_ok && smooth_ok
+}
+
+// ============================================================================
+// MAIN TEST RUNNER
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== Convex Optimization Test Suite ===")
+    println("")
+
+    var pass = 0
+    var fail = 0
+
+    // Test 1
+    print("Test  1: prox_l1 soft thresholding ... ")
+    if test_prox_l1_basic() {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
+
+    // Test 2
+    print("Test  2: prox_l1 identity at zero lambda ... ")
+    if test_prox_l1_zero_lambda() {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
+
+    // Test 3
+    print("Test  3: prox_nonneg projection ... ")
+    if test_prox_nonneg() {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
+
+    // Test 4
+    print("Test  4: prox_box clip to [0,1] ... ")
+    if test_prox_box() {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
+
+    // Test 5
+    print("Test  5: prox_l2_ball inside unchanged ... ")
+    if test_prox_l2_ball_inside() {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
+
+    // Test 6
+    print("Test  6: prox_l2_ball outside rescaled ... ")
+    if test_prox_l2_ball_outside() {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
+
+    // Test 7
+    print("Test  7: prox_simplex sums to 1 ... ")
+    if test_prox_simplex() {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
+
+    // Test 8
+    print("Test  8: LASSO sparsity (large lambda) ... ")
+    if test_lasso_sparsity() {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
+
+    // Test 9
+    print("Test  9: LASSO small lambda ~ OLS ... ")
+    if test_lasso_zero_lambda() {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
+
+    // Test 10
+    print("Test 10: Proximal gradient on quadratic ... ")
+    if test_proxgrad_quadratic() {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
+
+    // Test 11
+    print("Test 11: FISTA converges on LASSO ... ")
+    if test_fista_converges() {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
+
+    // Test 12
+    print("Test 12: Moreau envelope smoothing ... ")
+    if test_moreau_envelope() {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
+
+    println("")
+    print("Passed: "); println(pass as string)
+    print("Failed: "); println(fail as string)
+    println("")
+    if fail == 0 {
+        println("ALL 12 TESTS PASSED")
+        return 0
+    } else {
+        println("SOME TESTS FAILED")
+        return 1
+    }
+}

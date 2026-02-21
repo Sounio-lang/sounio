@@ -1,0 +1,937 @@
+// stdlib/math/lie.sio — Lie algebras and Lie groups
+//
+// Pure Sounio implementations:
+//   Classical Lie algebras (su(2), su(3), so(3))
+//   Structure constants, Lie bracket, adjoint representation
+//   Killing form, Cartan subalgebra
+//   Exponential and logarithm maps
+//   SO(3) Rodrigues formula
+//   Baker-Campbell-Hausdorff formula (truncated)
+//   Wigner D-matrices for SU(2)
+//   Lie group integrators (Crouch-Grossman)
+//
+// References:
+//   Hall (2015): "Lie Groups, Lie Algebras, and Representations"
+//   Iserles et al. (2000): "Lie-group methods" Acta Numerica
+//   Hairer, Lubich & Wanner (2006): "Geometric Numerical Integration"
+
+// =============================================================================
+// Scalar helpers
+// =============================================================================
+
+fn lie_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn lie_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+
+fn lie_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 24 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn lie_sin(x: f64) -> f64 with Mut, Div {
+    var a = x
+    let tp = 6.28318530717958647692
+    while a >= tp { a = a - tp }
+    while a < 0.0 { a = a + tp }
+    if a > 3.14159265358979323846 { a = a - tp }
+    let a2 = a * a
+    var sum = a
+    var term = a
+    var n = 1
+    while n < 20 { term = 0.0 - term * a2 / ((2 * n) * (2 * n + 1)) as f64; sum = sum + term; n = n + 1 }
+    sum
+}
+
+fn lie_cos(x: f64) -> f64 with Mut, Div {
+    lie_sin(x + 1.57079632679489661923)
+}
+
+fn lie_exp(x: f64) -> f64 with Mut, Div {
+    if x > 500.0 { return 1.0e200 }
+    if x < -500.0 { return 0.0 }
+    var kf = x / 0.6931471805599453
+    var k: i32 = 0
+    if kf >= 0.0 { k = kf as i32 } else { k = (kf as i32) - 1 }
+    let r = x - (k as f64) * 0.6931471805599453
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 25 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var result = sum
+    if k >= 0 { var i = 0; while i < k { result = result * 2.0; i = i + 1 } }
+    else { var i = 0; while i < (0 - k) { result = result / 2.0; i = i + 1 } }
+    result
+}
+
+fn lie_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    if x == 1.0 { return 0.0 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 { term = term * t2; sum = sum + term / ((2 * k + 1) as f64); k = k + 1 }
+    2.0 * sum + (e as f64) * 0.6931471805599453
+}
+
+// Arctangent for non-negative argument via Taylor + range reduction
+fn lie_atan_core(z: f64) -> f64 with Mut, Div {
+    let pi2 = 1.57079632679489661923
+    if z > 1.0 { return pi2 - lie_atan_core(1.0 / z) }
+    let z2 = z * z
+    var sum = z
+    var term = z
+    var k = 1
+    while k < 40 { term = 0.0 - term * z2; sum = sum + term / ((2 * k + 1) as f64); k = k + 1 }
+    sum
+}
+
+fn lie_atan2(y: f64, x: f64) -> f64 with Mut, Div {
+    let pi = 3.14159265358979323846
+    let pi2 = 1.57079632679489661923
+    if lie_abs(x) < 1.0e-30 {
+        if y > 0.0 { return pi2 }
+        if y < 0.0 { return 0.0 - pi2 }
+        return 0.0
+    }
+    var at = lie_atan_core(lie_abs(y / x))
+    if x < 0.0 { at = pi - at }
+    if y < 0.0 { at = 0.0 - at }
+    at
+}
+
+fn lie_acos(x: f64) -> f64 with Mut, Div {
+    let pi2 = 1.57079632679489661923
+    var cx = x
+    if cx > 1.0 { cx = 1.0 }
+    if cx < -1.0 { cx = -1.0 }
+    if lie_abs(cx) < 1.0e-15 { return pi2 }
+    let s = lie_sqrt(1.0 - cx * cx)
+    pi2 - lie_atan2(cx, s)
+}
+
+fn lie_factorial(n: i32) -> f64 with Mut {
+    var result = 1.0
+    var i = 2
+    while i <= n { result = result * (i as f64); i = i + 1 }
+    result
+}
+
+// =============================================================================
+// Matrix helpers (flat row-major, max 8x8 = 64 elements)
+// =============================================================================
+
+fn lie_mat_zero(m: &![f64; 64], dim: i32) with Mut {
+    var i = 0
+    while i < dim * dim { m[i] = 0.0; i = i + 1 }
+}
+
+fn lie_mat_eye(m: &![f64; 64], dim: i32) with Mut {
+    var i = 0
+    while i < dim * dim { m[i] = 0.0; i = i + 1 }
+    i = 0
+    while i < dim { m[i * dim + i] = 1.0; i = i + 1 }
+}
+
+fn lie_mat_copy(dst: &![f64; 64], src: &[f64; 64], dim: i32) with Mut {
+    var i = 0
+    while i < dim * dim { dst[i] = src[i]; i = i + 1 }
+}
+
+fn lie_mat_add(a: &[f64; 64], b: &[f64; 64], c: &![f64; 64], dim: i32) with Mut {
+    var i = 0
+    while i < dim * dim { c[i] = a[i] + b[i]; i = i + 1 }
+}
+
+fn lie_mat_sub(a: &[f64; 64], b: &[f64; 64], c: &![f64; 64], dim: i32) with Mut {
+    var i = 0
+    while i < dim * dim { c[i] = a[i] - b[i]; i = i + 1 }
+}
+
+fn lie_mat_mul(a: &[f64; 64], b: &[f64; 64], c: &![f64; 64], dim: i32) with Mut {
+    var i = 0
+    while i < dim * dim { c[i] = 0.0; i = i + 1 }
+    i = 0
+    while i < dim {
+        var j = 0
+        while j < dim {
+            var s = 0.0
+            var k = 0
+            while k < dim { s = s + a[i * dim + k] * b[k * dim + j]; k = k + 1 }
+            c[i * dim + j] = s
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+fn lie_mat_scale(m: &![f64; 64], s: f64, dim: i32) with Mut {
+    var i = 0
+    while i < dim * dim { m[i] = m[i] * s; i = i + 1 }
+}
+
+fn lie_mat_trace(m: &[f64; 64], dim: i32) -> f64 with Mut {
+    var s = 0.0
+    var i = 0
+    while i < dim { s = s + m[i * dim + i]; i = i + 1 }
+    s
+}
+
+fn lie_mat_transpose(src: &[f64; 64], dst: &![f64; 64], dim: i32) with Mut {
+    var i = 0
+    while i < dim {
+        var j = 0
+        while j < dim { dst[j * dim + i] = src[i * dim + j]; j = j + 1 }
+        i = i + 1
+    }
+}
+
+fn lie_mat_norm(m: &[f64; 64], dim: i32) -> f64 with Mut, Div {
+    var s = 0.0
+    var i = 0
+    while i < dim * dim { s = s + m[i] * m[i]; i = i + 1 }
+    lie_sqrt(s)
+}
+
+fn lie_mat_norm_inf(m: &[f64; 64], dim: i32) -> f64 with Mut {
+    var mx = 0.0
+    var i = 0
+    while i < dim {
+        var rs = 0.0
+        var j = 0
+        while j < dim { rs = rs + lie_abs(m[i * dim + j]); j = j + 1 }
+        if rs > mx { mx = rs }
+        i = i + 1
+    }
+    mx
+}
+
+// Gauss-Jordan inversion: solve D * X = N via D^{-1} * N
+fn lie_mat_solve(D: [f64; 64], N: [f64; 64], X: &![f64; 64], dim: i32) with Mut, Div, Panic {
+    var A: [f64; 64] = [0.0; 64]
+    var inv: [f64; 64] = [0.0; 64]
+    var i = 0
+    while i < dim * dim { A[i] = D[i]; i = i + 1 }
+    lie_mat_eye(&!inv, dim)
+
+    var col = 0
+    while col < dim {
+        // Partial pivoting
+        var max_val = lie_abs(A[col * dim + col])
+        var max_row = col
+        var row = col + 1
+        while row < dim {
+            let v = lie_abs(A[row * dim + col])
+            if v > max_val { max_val = v; max_row = row }
+            row = row + 1
+        }
+        if max_row != col {
+            var j = 0
+            while j < dim {
+                let tmp = A[col * dim + j]
+                A[col * dim + j] = A[max_row * dim + j]
+                A[max_row * dim + j] = tmp
+                let tmp2 = inv[col * dim + j]
+                inv[col * dim + j] = inv[max_row * dim + j]
+                inv[max_row * dim + j] = tmp2
+                j = j + 1
+            }
+        }
+        let pivot = A[col * dim + col]
+        if lie_abs(pivot) < 1.0e-30 { lie_mat_eye(X, dim); return }
+        let inv_pivot = 1.0 / pivot
+        var j = 0
+        while j < dim {
+            A[col * dim + j] = A[col * dim + j] * inv_pivot
+            inv[col * dim + j] = inv[col * dim + j] * inv_pivot
+            j = j + 1
+        }
+        row = 0
+        while row < dim {
+            if row != col {
+                let factor = A[row * dim + col]
+                j = 0
+                while j < dim {
+                    A[row * dim + j] = A[row * dim + j] - factor * A[col * dim + j]
+                    inv[row * dim + j] = inv[row * dim + j] - factor * inv[col * dim + j]
+                    j = j + 1
+                }
+            }
+            row = row + 1
+        }
+        col = col + 1
+    }
+    lie_mat_mul(&inv, &N, X, dim)
+}
+
+// =============================================================================
+// Structs
+// =============================================================================
+
+struct LieElement {
+    coeffs: [f64; 16],
+    dim: i32
+}
+
+struct LieAlgebra {
+    structure_constants: [f64; 4096],
+    dim: i32,
+    matrix_dim: i32
+}
+
+struct LieGroupElement {
+    matrix: [f64; 64],
+    dim: i32
+}
+
+// =============================================================================
+// Element initialization
+// =============================================================================
+
+fn lie_elem_zero(e: &!LieElement, dim: i32) with Mut {
+    var i = 0
+    while i < 16 { e.coeffs[i] = 0.0; i = i + 1 }
+    e.dim = dim
+}
+
+fn lie_elem_basis(e: &!LieElement, dim: i32, idx: i32) with Mut {
+    var i = 0
+    while i < 16 { e.coeffs[i] = 0.0; i = i + 1 }
+    e.coeffs[idx] = 1.0
+    e.dim = dim
+}
+
+fn lie_elem_copy(dst: &!LieElement, src: &LieElement) with Mut {
+    var i = 0
+    while i < 16 { dst.coeffs[i] = src.coeffs[i]; i = i + 1 }
+    dst.dim = src.dim
+}
+
+fn lie_group_eye(g: &!LieGroupElement, dim: i32) with Mut {
+    var i = 0
+    while i < 64 { g.matrix[i] = 0.0; i = i + 1 }
+    i = 0
+    while i < dim { g.matrix[i * dim + i] = 1.0; i = i + 1 }
+    g.dim = dim
+}
+
+// =============================================================================
+// Predefined algebras: su(2)
+// =============================================================================
+
+// su(2): dim=3, matrix_dim=2. Structure constants = Levi-Civita epsilon_{ijk}.
+fn lie_su2(alg: &!LieAlgebra) with Mut {
+    alg.dim = 3
+    alg.matrix_dim = 2
+    var i = 0
+    while i < 4096 { alg.structure_constants[i] = 0.0; i = i + 1 }
+    // c^k_{ij} at index i*9 + j*3 + k
+    alg.structure_constants[0 * 9 + 1 * 3 + 2] = 1.0
+    alg.structure_constants[1 * 9 + 0 * 3 + 2] = -1.0
+    alg.structure_constants[1 * 9 + 2 * 3 + 0] = 1.0
+    alg.structure_constants[2 * 9 + 1 * 3 + 0] = -1.0
+    alg.structure_constants[2 * 9 + 0 * 3 + 1] = 1.0
+    alg.structure_constants[0 * 9 + 2 * 3 + 1] = -1.0
+}
+
+// =============================================================================
+// Predefined algebras: so(3)
+// =============================================================================
+
+// so(3): dim=3, matrix_dim=3. Isomorphic to su(2), same structure constants.
+fn lie_so3(alg: &!LieAlgebra) with Mut {
+    alg.dim = 3
+    alg.matrix_dim = 3
+    var i = 0
+    while i < 4096 { alg.structure_constants[i] = 0.0; i = i + 1 }
+    alg.structure_constants[0 * 9 + 1 * 3 + 2] = 1.0
+    alg.structure_constants[1 * 9 + 0 * 3 + 2] = -1.0
+    alg.structure_constants[1 * 9 + 2 * 3 + 0] = 1.0
+    alg.structure_constants[2 * 9 + 1 * 3 + 0] = -1.0
+    alg.structure_constants[2 * 9 + 0 * 3 + 1] = 1.0
+    alg.structure_constants[0 * 9 + 2 * 3 + 1] = -1.0
+}
+
+// =============================================================================
+// Predefined algebras: su(3)
+// =============================================================================
+
+// Set totally antisymmetric structure constant f_{abc} = val into c^k_{ij}.
+fn lie_su3_set_f(alg: &!LieAlgebra, a: i32, b: i32, c: i32, val: f64) with Mut {
+    let d = alg.dim
+    alg.structure_constants[a * d * d + b * d + c] = val
+    alg.structure_constants[b * d * d + a * d + c] = 0.0 - val
+    alg.structure_constants[b * d * d + c * d + a] = val
+    alg.structure_constants[c * d * d + b * d + a] = 0.0 - val
+    alg.structure_constants[c * d * d + a * d + b] = val
+    alg.structure_constants[a * d * d + c * d + b] = 0.0 - val
+}
+
+// su(3): dim=8, matrix_dim=3. Gell-Mann matrices / 2i.
+// Nonzero f_{ijk} (0-based): f_012=1, f_036=1/2, f_045=-1/2,
+//   f_135=1/2, f_146=1/2, f_234=1/2, f_256=-1/2,
+//   f_347=sqrt(3)/2, f_567=sqrt(3)/2
+fn lie_su3(alg: &!LieAlgebra) with Mut, Div {
+    alg.dim = 8
+    alg.matrix_dim = 3
+    var i = 0
+    while i < 4096 { alg.structure_constants[i] = 0.0; i = i + 1 }
+    let s32 = lie_sqrt(3.0) / 2.0
+    lie_su3_set_f(alg, 0, 1, 2, 1.0)
+    lie_su3_set_f(alg, 0, 3, 6, 0.5)
+    lie_su3_set_f(alg, 0, 4, 5, -0.5)
+    lie_su3_set_f(alg, 1, 3, 5, 0.5)
+    lie_su3_set_f(alg, 1, 4, 6, 0.5)
+    lie_su3_set_f(alg, 2, 3, 4, 0.5)
+    lie_su3_set_f(alg, 2, 5, 6, -0.5)
+    lie_su3_set_f(alg, 3, 4, 7, s32)
+    lie_su3_set_f(alg, 5, 6, 7, s32)
+}
+
+// =============================================================================
+// Lie bracket
+// =============================================================================
+
+// [X, Y]_k = sum_{i,j} c^k_{ij} * X_i * Y_j
+fn lie_bracket(alg: &LieAlgebra, X: &LieElement, Y: &LieElement, result: &!LieElement) with Mut, Div {
+    let d = alg.dim
+    result.dim = d
+    var k = 0
+    while k < d {
+        var s = 0.0
+        var i = 0
+        while i < d {
+            var j = 0
+            while j < d {
+                s = s + alg.structure_constants[i * d * d + j * d + k] * X.coeffs[i] * Y.coeffs[j]
+                j = j + 1
+            }
+            i = i + 1
+        }
+        result.coeffs[k] = s
+        k = k + 1
+    }
+    while k < 16 { result.coeffs[k] = 0.0; k = k + 1 }
+}
+
+// =============================================================================
+// Adjoint representation
+// =============================================================================
+
+// (ad_X)_{ki} = sum_j c^k_{ji} * X_j. Result: dim x dim matrix (row-major).
+fn lie_adjoint(alg: &LieAlgebra, X: &LieElement, ad_X: &![f64; 256]) with Mut, Div {
+    let d = alg.dim
+    var k = 0
+    while k < d {
+        var i = 0
+        while i < d {
+            var s = 0.0
+            var j = 0
+            while j < d {
+                s = s + alg.structure_constants[j * d * d + i * d + k] * X.coeffs[j]
+                j = j + 1
+            }
+            ad_X[k * d + i] = s
+            i = i + 1
+        }
+        k = k + 1
+    }
+}
+
+// =============================================================================
+// Killing form
+// =============================================================================
+
+// B(X,Y) = tr(ad_X * ad_Y)
+fn lie_killing(alg: &LieAlgebra, X: &LieElement, Y: &LieElement) -> f64 with Mut, Div {
+    let d = alg.dim
+    var adx: [f64; 256] = [0.0; 256]
+    var ady: [f64; 256] = [0.0; 256]
+    lie_adjoint(alg, X, &!adx)
+    lie_adjoint(alg, Y, &!ady)
+    var trace = 0.0
+    var i = 0
+    while i < d {
+        var j = 0
+        while j < d { trace = trace + adx[i * d + j] * ady[j * d + i]; j = j + 1 }
+        i = i + 1
+    }
+    trace
+}
+
+// Full Killing form matrix K_{ij} = B(e_i, e_j)
+fn lie_killing_matrix(alg: &LieAlgebra, K: &![f64; 256]) with Mut, Div {
+    let d = alg.dim
+    var ei: LieElement = LieElement { coeffs: [0.0; 16], dim: d }
+    var ej: LieElement = LieElement { coeffs: [0.0; 16], dim: d }
+    var i = 0
+    while i < d {
+        var ii = 0
+        while ii < 16 { ei.coeffs[ii] = 0.0; ii = ii + 1 }
+        ei.coeffs[i] = 1.0
+        var j = 0
+        while j < d {
+            ii = 0
+            while ii < 16 { ej.coeffs[ii] = 0.0; ii = ii + 1 }
+            ej.coeffs[j] = 1.0
+            K[i * d + j] = lie_killing(alg, &ei, &ej)
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Matrix representation
+// =============================================================================
+
+// Gell-Mann matrices lambda_k / 2, stored as real 3x3
+fn lie_su3_basis_matrix(idx: i32, mat: &![f64; 64]) with Mut {
+    if idx == 0 { mat[0 * 3 + 1] = 0.5; mat[1 * 3 + 0] = 0.5 }
+    if idx == 1 { mat[0 * 3 + 1] = -0.5; mat[1 * 3 + 0] = 0.5 }
+    if idx == 2 { mat[0 * 3 + 0] = 0.5; mat[1 * 3 + 1] = -0.5 }
+    if idx == 3 { mat[0 * 3 + 2] = 0.5; mat[2 * 3 + 0] = 0.5 }
+    if idx == 4 { mat[0 * 3 + 2] = -0.5; mat[2 * 3 + 0] = 0.5 }
+    if idx == 5 { mat[1 * 3 + 2] = 0.5; mat[2 * 3 + 1] = 0.5 }
+    if idx == 6 { mat[1 * 3 + 2] = -0.5; mat[2 * 3 + 1] = 0.5 }
+    if idx == 7 {
+        let s = 1.0 / (2.0 * 1.7320508075688772)
+        mat[0 * 3 + 0] = s
+        mat[1 * 3 + 1] = s
+        mat[2 * 3 + 2] = -2.0 * s
+    }
+}
+
+// Return the idx-th basis matrix of the algebra representation.
+fn lie_basis_matrix(alg: &LieAlgebra, idx: i32, mat: &![f64; 64]) with Mut {
+    let md = alg.matrix_dim
+    lie_mat_zero(mat, md)
+    if alg.dim == 3 && md == 3 {
+        // so(3): L_x, L_y, L_z
+        if idx == 0 { mat[1 * 3 + 2] = -1.0; mat[2 * 3 + 1] = 1.0 }
+        if idx == 1 { mat[0 * 3 + 2] = 1.0; mat[2 * 3 + 0] = -1.0 }
+        if idx == 2 { mat[0 * 3 + 1] = -1.0; mat[1 * 3 + 0] = 1.0 }
+    }
+    if alg.dim == 3 && md == 2 {
+        // su(2): sigma_k / 2
+        if idx == 0 { mat[0 * 2 + 1] = 0.5; mat[1 * 2 + 0] = 0.5 }
+        if idx == 1 { mat[0 * 2 + 1] = -0.5; mat[1 * 2 + 0] = 0.5 }
+        if idx == 2 { mat[0 * 2 + 0] = 0.5; mat[1 * 2 + 1] = -0.5 }
+    }
+    if alg.dim == 8 && md == 3 {
+        lie_su3_basis_matrix(idx, mat)
+    }
+}
+
+// mat = sum_i X.coeffs[i] * basis_matrix(i)
+fn lie_to_matrix(alg: &LieAlgebra, X: &LieElement, mat: &![f64; 64]) with Mut, Div {
+    let md = alg.matrix_dim
+    lie_mat_zero(mat, md)
+    var basis: [f64; 64] = [0.0; 64]
+    var i = 0
+    while i < alg.dim {
+        lie_mat_zero(&!basis, md)
+        lie_basis_matrix(alg, i, &!basis)
+        var r = 0
+        while r < md {
+            var c = 0
+            while c < md {
+                mat[r * md + c] = mat[r * md + c] + X.coeffs[i] * basis[r * md + c]
+                c = c + 1
+            }
+            r = r + 1
+        }
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Matrix exponential: Pade [6/6] with scaling and squaring
+// =============================================================================
+
+// exp(A) via [6/6] Pade approximation with scaling and squaring.
+// Pade coefficients b_k = (12-k)! 6! / (12! k! (6-k)!)
+fn lie_exp_pade(mat: &[f64; 64], dim: i32, result: &![f64; 64]) with Mut, Div, Panic {
+    var b: [f64; 7] = [0.0; 7]
+    b[0] = 1.0
+    b[1] = 0.5
+    b[2] = 0.11363636363636363636
+    b[3] = 0.01515151515151515152
+    b[4] = 0.00126262626262626263
+    b[5] = 0.00006313131313131313
+    b[6] = 0.00000150300150300150
+
+    // Scaling: find s such that ||A||_inf / 2^s < 0.5
+    let norm_a = lie_mat_norm_inf(mat, dim)
+    var s = 0
+    var scale = norm_a
+    while scale > 0.5 { scale = scale / 2.0; s = s + 1 }
+
+    var As: [f64; 64] = [0.0; 64]
+    var i = 0
+    while i < dim * dim { As[i] = mat[i]; i = i + 1 }
+    var si = 0
+    while si < s { i = 0; while i < dim * dim { As[i] = As[i] / 2.0; i = i + 1 }; si = si + 1 }
+
+    var A2: [f64; 64] = [0.0; 64]
+    var A4: [f64; 64] = [0.0; 64]
+    var A6: [f64; 64] = [0.0; 64]
+    lie_mat_mul(&As, &As, &!A2, dim)
+    lie_mat_mul(&A2, &A2, &!A4, dim)
+    lie_mat_mul(&A4, &A2, &!A6, dim)
+
+    // Even part: U = b_0*I + b_2*A^2 + b_4*A^4 + b_6*A^6
+    var U: [f64; 64] = [0.0; 64]
+    lie_mat_eye(&!U, dim)
+    i = 0
+    while i < dim * dim { U[i] = b[0] * U[i] + b[2] * A2[i] + b[4] * A4[i] + b[6] * A6[i]; i = i + 1 }
+
+    // Odd part inner: Vi = b_1*I + b_3*A^2 + b_5*A^4
+    var Vi: [f64; 64] = [0.0; 64]
+    lie_mat_eye(&!Vi, dim)
+    i = 0
+    while i < dim * dim { Vi[i] = b[1] * Vi[i] + b[3] * A2[i] + b[5] * A4[i]; i = i + 1 }
+    var V: [f64; 64] = [0.0; 64]
+    lie_mat_mul(&As, &Vi, &!V, dim)
+
+    // N = U + V, D = U - V
+    var N: [f64; 64] = [0.0; 64]
+    var D: [f64; 64] = [0.0; 64]
+    lie_mat_add(&U, &V, &!N, dim)
+    lie_mat_sub(&U, &V, &!D, dim)
+
+    // result = D^{-1} * N
+    lie_mat_solve(D, N, result, dim)
+
+    // Squaring s times
+    var temp: [f64; 64] = [0.0; 64]
+    si = 0
+    while si < s {
+        lie_mat_mul(result, result, &!temp, dim)
+        lie_mat_copy(result, &temp, dim)
+        si = si + 1
+    }
+}
+
+// =============================================================================
+// Matrix logarithm
+// =============================================================================
+
+// Matrix square root via Denman-Beavers iteration (in-place).
+// Y_{k+1} = (Y_k + Z_k^{-1})/2, Z_{k+1} = (Z_k + Y_k^{-1})/2
+fn lie_mat_sqrt_db(A: &![f64; 64], dim: i32) with Mut, Div, Panic {
+    var Y: [f64; 64] = [0.0; 64]
+    var Z: [f64; 64] = [0.0; 64]
+    var Yinv: [f64; 64] = [0.0; 64]
+    var Zinv: [f64; 64] = [0.0; 64]
+    var t1: [f64; 64] = [0.0; 64]
+    var t2: [f64; 64] = [0.0; 64]
+    var eye: [f64; 64] = [0.0; 64]
+    lie_mat_copy(&!Y, A, dim)
+    lie_mat_eye(&!Z, dim)
+    lie_mat_eye(&!eye, dim)
+    var iter = 0
+    while iter < 30 {
+        lie_mat_solve(Y, eye, &!Yinv, dim)
+        lie_mat_solve(Z, eye, &!Zinv, dim)
+        lie_mat_add(&Y, &Zinv, &!t1, dim)
+        lie_mat_scale(&!t1, 0.5, dim)
+        lie_mat_add(&Z, &Yinv, &!t2, dim)
+        lie_mat_scale(&!t2, 0.5, dim)
+        lie_mat_copy(&!Y, &t1, dim)
+        lie_mat_copy(&!Z, &t2, dim)
+        var diff: [f64; 64] = [0.0; 64]
+        lie_mat_sub(&Z, &eye, &!diff, dim)
+        if lie_mat_norm(&diff, dim) < 1.0e-14 { iter = 30 }
+        iter = iter + 1
+    }
+    lie_mat_copy(A, &Y, dim)
+}
+
+// log(A) via inverse scaling/squaring + Taylor series.
+// Repeatedly square-roots until ||A - I|| < 0.4, then uses
+// log(I+X) = X - X^2/2 + X^3/3 - ..., then scales back by 2^s.
+fn lie_log_series(mat: &[f64; 64], dim: i32, result: &![f64; 64]) with Mut, Div, Panic {
+    var A: [f64; 64] = [0.0; 64]
+    var i = 0
+    while i < dim * dim { A[i] = mat[i]; i = i + 1 }
+    var eye: [f64; 64] = [0.0; 64]
+    lie_mat_eye(&!eye, dim)
+
+    var s = 0
+    var diff: [f64; 64] = [0.0; 64]
+    lie_mat_sub(&A, &eye, &!diff, dim)
+    while lie_mat_norm(&diff, dim) > 0.4 && s < 20 {
+        lie_mat_sqrt_db(&!A, dim)
+        lie_mat_sub(&A, &eye, &!diff, dim)
+        s = s + 1
+    }
+
+    var X: [f64; 64] = [0.0; 64]
+    lie_mat_sub(&A, &eye, &!X, dim)
+    lie_mat_zero(result, dim)
+    var Xk: [f64; 64] = [0.0; 64]
+    lie_mat_copy(&!Xk, &X, dim)
+    var temp: [f64; 64] = [0.0; 64]
+    var k = 1
+    while k <= 20 {
+        let sign = if k - 2 * (k / 2) == 1 { 1.0 } else { -1.0 }
+        let coeff = sign / (k as f64)
+        i = 0
+        while i < dim * dim { result[i] = result[i] + coeff * Xk[i]; i = i + 1 }
+        lie_mat_mul(&Xk, &X, &!temp, dim)
+        lie_mat_copy(&!Xk, &temp, dim)
+        k = k + 1
+    }
+    var sf = 1.0
+    i = 0
+    while i < s { sf = sf * 2.0; i = i + 1 }
+    lie_mat_scale(result, sf, dim)
+}
+
+// =============================================================================
+// SO(3) specific: hat, vee, exponential, logarithm
+// =============================================================================
+
+// Hat: vector -> skew-symmetric 3x3
+fn so3_hat(omega: &[f64; 3], mat: &![f64; 9]) with Mut {
+    mat[0] = 0.0;              mat[1] = 0.0 - omega[2]; mat[2] = omega[1]
+    mat[3] = omega[2];         mat[4] = 0.0;             mat[5] = 0.0 - omega[0]
+    mat[6] = 0.0 - omega[1];  mat[7] = omega[0];        mat[8] = 0.0
+}
+
+// Vee: skew-symmetric 3x3 -> vector
+fn so3_vee(mat: &[f64; 9], omega: &![f64; 3]) with Mut {
+    omega[0] = mat[7]
+    omega[1] = mat[2]
+    omega[2] = mat[3]
+}
+
+// Rodrigues: R = I + sin(t)/t * [w]_x + (1-cos(t))/t^2 * [w]_x^2, t = ||w||
+fn so3_exp(omega: &[f64; 3], R: &![f64; 9]) with Mut, Div {
+    let wx = omega[0]
+    let wy = omega[1]
+    let wz = omega[2]
+    let t2 = wx * wx + wy * wy + wz * wz
+    let t = lie_sqrt(t2)
+    if t < 1.0e-10 {
+        R[0] = 1.0;  R[1] = 0.0 - wz; R[2] = wy
+        R[3] = wz;   R[4] = 1.0;       R[5] = 0.0 - wx
+        R[6] = 0.0 - wy; R[7] = wx;    R[8] = 1.0
+        return
+    }
+    let sc = lie_sin(t) / t
+    let cc = (1.0 - lie_cos(t)) / t2
+    var K: [f64; 9] = [0.0; 9]
+    so3_hat(omega, &!K)
+    // K^2 via direct 3x3 multiply
+    var K2: [f64; 9] = [0.0; 9]
+    var ri = 0
+    while ri < 3 {
+        var ci = 0
+        while ci < 3 {
+            var s = 0.0
+            var p = 0
+            while p < 3 { s = s + K[ri * 3 + p] * K[p * 3 + ci]; p = p + 1 }
+            K2[ri * 3 + ci] = s
+            ci = ci + 1
+        }
+        ri = ri + 1
+    }
+    // R = I + sc*K + cc*K^2
+    R[0] = 1.0 + sc * K[0] + cc * K2[0]
+    R[1] = sc * K[1] + cc * K2[1]
+    R[2] = sc * K[2] + cc * K2[2]
+    R[3] = sc * K[3] + cc * K2[3]
+    R[4] = 1.0 + sc * K[4] + cc * K2[4]
+    R[5] = sc * K[5] + cc * K2[5]
+    R[6] = sc * K[6] + cc * K2[6]
+    R[7] = sc * K[7] + cc * K2[7]
+    R[8] = 1.0 + sc * K[8] + cc * K2[8]
+}
+
+// Inverse Rodrigues: omega = theta/(2*sin(theta)) * vee(R - R^T)
+fn so3_log(R: &[f64; 9], omega: &![f64; 3]) with Mut, Div, Panic {
+    let tr = R[0] + R[4] + R[8]
+    var ct = (tr - 1.0) / 2.0
+    if ct > 1.0 { ct = 1.0 }
+    if ct < -1.0 { ct = -1.0 }
+    let theta = lie_acos(ct)
+    if theta < 1.0e-10 {
+        omega[0] = (R[7] - R[5]) / 2.0
+        omega[1] = (R[2] - R[6]) / 2.0
+        omega[2] = (R[3] - R[1]) / 2.0
+        return
+    }
+    let st = lie_sin(theta)
+    if lie_abs(st) < 1.0e-10 {
+        // theta ~ pi: extract axis from diagonal of R + I
+        omega[0] = lie_sqrt(lie_max((R[0] + 1.0) / 2.0, 0.0)) * theta
+        omega[1] = lie_sqrt(lie_max((R[4] + 1.0) / 2.0, 0.0)) * theta
+        omega[2] = lie_sqrt(lie_max((R[8] + 1.0) / 2.0, 0.0)) * theta
+        if R[1] + R[3] < 0.0 { omega[1] = 0.0 - omega[1] }
+        if R[2] + R[6] < 0.0 { omega[2] = 0.0 - omega[2] }
+        return
+    }
+    let f = theta / (2.0 * st)
+    omega[0] = f * (R[7] - R[5])
+    omega[1] = f * (R[2] - R[6])
+    omega[2] = f * (R[3] - R[1])
+}
+
+// =============================================================================
+// Baker-Campbell-Hausdorff formula
+// =============================================================================
+
+// BCH: Z = log(exp(X)*exp(Y)), truncated to given order (max 4).
+//   1: X+Y, 2: +1/2[X,Y], 3: +1/12([X,[X,Y]]-[Y,[X,Y]]), 4: -1/24[Y,[X,[X,Y]]]
+fn lie_bch(alg: &LieAlgebra, X: &LieElement, Y: &LieElement, order: i32, result: &!LieElement) with Mut, Div {
+    let d = alg.dim
+    result.dim = d
+    var i = 0
+    while i < d { result.coeffs[i] = X.coeffs[i] + Y.coeffs[i]; i = i + 1 }
+    while i < 16 { result.coeffs[i] = 0.0; i = i + 1 }
+    if order < 2 { return }
+
+    var xy: LieElement = LieElement { coeffs: [0.0; 16], dim: d }
+    lie_bracket(alg, X, Y, &!xy)
+    i = 0
+    while i < d { result.coeffs[i] = result.coeffs[i] + 0.5 * xy.coeffs[i]; i = i + 1 }
+    if order < 3 { return }
+
+    var xxy: LieElement = LieElement { coeffs: [0.0; 16], dim: d }
+    lie_bracket(alg, X, &xy, &!xxy)
+    var yxy: LieElement = LieElement { coeffs: [0.0; 16], dim: d }
+    lie_bracket(alg, Y, &xy, &!yxy)
+    i = 0
+    while i < d { result.coeffs[i] = result.coeffs[i] + (xxy.coeffs[i] - yxy.coeffs[i]) / 12.0; i = i + 1 }
+    if order < 4 { return }
+
+    var yxxy: LieElement = LieElement { coeffs: [0.0; 16], dim: d }
+    lie_bracket(alg, Y, &xxy, &!yxxy)
+    i = 0
+    while i < d { result.coeffs[i] = result.coeffs[i] - yxxy.coeffs[i] / 24.0; i = i + 1 }
+}
+
+// =============================================================================
+// Wigner D-matrices for SU(2)
+// =============================================================================
+
+// Small Wigner d-matrix d^j_{m',m}(beta).
+// All quantum numbers DOUBLED for half-integer support: j2=2j, m1_2=2m', m2_2=2m.
+// Uses the Wigner sum formula over s.
+fn su2_wigner_d(j2: i32, m1_2: i32, m2_2: i32, beta: f64) -> f64 with Mut, Div, Panic {
+    let cb = lie_cos(beta / 2.0)
+    let sb = lie_sin(beta / 2.0)
+    // Integer quantities (all guaranteed integer since j2, m1_2, m2_2 have same parity)
+    let jpm = (j2 + m2_2) / 2      // j + m
+    let jmm = (j2 - m2_2) / 2      // j - m
+    let jpmp = (j2 + m1_2) / 2     // j + m'
+    let jmmp = (j2 - m1_2) / 2     // j - m'
+    let mpm = (m1_2 - m2_2) / 2    // m' - m
+
+    var s_min = 0
+    if mpm < 0 { s_min = 0 - mpm }
+    var s_max = jpm
+    if jmmp < s_max { s_max = jmmp }
+
+    let pf = lie_sqrt(lie_factorial(jpmp) * lie_factorial(jmmp) *
+                      lie_factorial(jpm) * lie_factorial(jmm))
+    var result = 0.0
+    var s = s_min
+    while s <= s_max {
+        let denom = lie_factorial(jpm - s) * lie_factorial(s) *
+                    lie_factorial(mpm + s) * lie_factorial(jmmp - s)
+        // cos exponent = (j+m-s) + (j-m'-s), sin exponent = (m'-m) + 2s
+        let ce = jpm - s + jmmp - s
+        let se = mpm + 2 * s
+        var ct = 1.0
+        var ci = 0
+        while ci < ce { ct = ct * cb; ci = ci + 1 }
+        var st = 1.0
+        var si_c = 0
+        while si_c < se { st = st * sb; si_c = si_c + 1 }
+        // (-1)^{m'-m+s}
+        let sign_exp = mpm + s
+        var sign_abs = sign_exp
+        if sign_abs < 0 { sign_abs = 0 - sign_abs }
+        var sign = 1.0
+        if sign_abs - 2 * (sign_abs / 2) != 0 { sign = -1.0 }
+        result = result + sign * ct * st / denom
+        s = s + 1
+    }
+    pf * result
+}
+
+// Full D-matrix: D^j_{m'm}(a,b,g) = e^{-im'a} d^j_{m'm}(b) e^{-img}
+// Stored as Re/Im pairs: D[2*(row*ncols+col)] = Re, D[2*(...)+1] = Im.
+// Matrix size (2j+1) x (2j+1), j2 = 2j.
+fn su2_rotation_matrix(alpha: f64, beta: f64, gamma: f64, j2: i32,
+                       D: &![f64; 256]) with Mut, Div, Panic {
+    let nj = j2 + 1
+    var mp_idx = 0
+    while mp_idx < nj {
+        let mp2 = 0 - j2 + 2 * mp_idx
+        var m_idx = 0
+        while m_idx < nj {
+            let m2 = 0 - j2 + 2 * m_idx
+            let d_val = su2_wigner_d(j2, mp2, m2, beta)
+            let phase = (mp2 as f64) * alpha / 2.0 + (m2 as f64) * gamma / 2.0
+            let idx = 2 * (mp_idx * nj + m_idx)
+            D[idx] = lie_cos(phase) * d_val
+            D[idx + 1] = (0.0 - lie_sin(phase)) * d_val
+            m_idx = m_idx + 1
+        }
+        mp_idx = mp_idx + 1
+    }
+}
+
+// =============================================================================
+// Lie group integrator: Crouch-Grossman RK2
+// =============================================================================
+
+// Crouch-Grossman RK2 on Lie groups:
+//   k1 = dt * V(t, g);  g1 = exp(k1/2) * g
+//   k2 = dt * V(t+dt/2, g1);  g_{n+1} = exp(k2) * g_n
+fn lie_group_step(alg: &LieAlgebra, velocity: fn(f64, &[f64; 64], i32, &![f64; 16]) with Mut, Div, Panic,
+                  g: &![f64; 64], dim: i32, t: f64, dt: f64) with Mut, Div, Panic {
+    var k1: [f64; 16] = [0.0; 16]
+    velocity(t, g, dim, &!k1)
+    var i = 0
+    while i < alg.dim { k1[i] = dt * k1[i]; i = i + 1 }
+
+    var k1_elem: LieElement = LieElement { coeffs: [0.0; 16], dim: alg.dim }
+    i = 0
+    while i < alg.dim { k1_elem.coeffs[i] = k1[i] / 2.0; i = i + 1 }
+    var k1_mat: [f64; 64] = [0.0; 64]
+    lie_to_matrix(alg, &k1_elem, &!k1_mat)
+    var exp_k1: [f64; 64] = [0.0; 64]
+    lie_exp_pade(&k1_mat, dim, &!exp_k1)
+
+    var g1: [f64; 64] = [0.0; 64]
+    lie_mat_mul(&exp_k1, g, &!g1, dim)
+
+    var k2: [f64; 16] = [0.0; 16]
+    velocity(t + dt / 2.0, &g1, dim, &!k2)
+    i = 0
+    while i < alg.dim { k2[i] = dt * k2[i]; i = i + 1 }
+
+    var k2_elem: LieElement = LieElement { coeffs: [0.0; 16], dim: alg.dim }
+    i = 0
+    while i < alg.dim { k2_elem.coeffs[i] = k2[i]; i = i + 1 }
+    var k2_mat: [f64; 64] = [0.0; 64]
+    lie_to_matrix(alg, &k2_elem, &!k2_mat)
+    var exp_k2: [f64; 64] = [0.0; 64]
+    lie_exp_pade(&k2_mat, dim, &!exp_k2)
+
+    var g_new: [f64; 64] = [0.0; 64]
+    lie_mat_mul(&exp_k2, g, &!g_new, dim)
+    lie_mat_copy(g, &g_new, dim)
+}

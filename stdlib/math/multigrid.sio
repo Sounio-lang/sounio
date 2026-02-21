@@ -1,0 +1,954 @@
+// stdlib/math/multigrid.sio — Geometric multigrid solvers
+//
+// Pure Sounio implementations:
+//   Full-weighting restriction (1D and 2D)
+//   Linear interpolation prolongation (1D and 2D)
+//   Weighted Jacobi smoother
+//   Red-black Gauss-Seidel smoother (1D and 2D)
+//   V-cycle and W-cycle
+//   Full multigrid solver for Poisson's equation
+//   2D Poisson multigrid
+//
+// References:
+//   Briggs, Henson & McCormick (2000): "A Multigrid Tutorial"
+//   Trottenberg, Oosterlee & Schuller (2001): "Multigrid"
+//   Hackbusch (1985): "Multi-Grid Methods and Applications"
+
+// =============================================================================
+// Helpers (prefixed mg_ to avoid collisions)
+// =============================================================================
+
+fn mg_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn mg_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+
+fn mg_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+// =============================================================================
+// Structs
+// =============================================================================
+
+// Configuration for multigrid solver.
+//   n_levels:   number of grid levels (coarsest = level n_levels-1)
+//   nu1:        pre-smoothing steps
+//   nu2:        post-smoothing steps
+//   max_cycles: maximum outer iterations
+//   tol:        convergence tolerance (L2 residual norm)
+//   omega:      relaxation weight for Jacobi (typically 2/3)
+struct MGConfig { n_levels: i32, nu1: i32, nu2: i32, max_cycles: i32, tol: f64, omega: f64 }
+
+// Result of a multigrid solve.
+//   u:             solution values on the finest grid
+//   iterations:    number of cycles performed
+//   residual_norm: final L2 residual norm
+//   converged:     whether tol was reached
+struct MGResult { u: [f64; 4096], iterations: i32, residual_norm: f64, converged: bool }
+
+// A single multigrid grid level (used internally for scratch storage).
+struct MGGrid { u: [f64; 4096], f: [f64; 4096], r: [f64; 4096], n: i32 }
+
+// =============================================================================
+// Utility: default configuration
+// =============================================================================
+
+// Populate config with sensible defaults for a given number of levels.
+// nu1=2 pre-smooth, nu2=2 post-smooth, max_cycles=100, tol=1e-10, omega=2/3.
+fn mg_default_config(n_levels: i32, config: &!MGConfig) with Mut {
+    config.n_levels = n_levels
+    config.nu1 = 2
+    config.nu2 = 2
+    config.max_cycles = 100
+    config.tol = 1.0e-10
+    config.omega = 2.0 / 3.0
+}
+
+// =============================================================================
+// 1D Transfer Operators
+// =============================================================================
+
+// Full-weighting restriction from fine grid to coarse grid (1D).
+// n_fine is the number of intervals (grid has n_fine+1 points indexed 0..n_fine).
+// Coarse grid has n_coarse = n_fine/2 intervals (n_coarse+1 points).
+// Interior: coarse[i] = 0.25*fine[2i-1] + 0.5*fine[2i] + 0.25*fine[2i+1]
+// Boundary: coarse[0] = fine[0], coarse[n_c] = fine[n_f]
+fn mg_restrict_1d(fine: &[f64; 4096], n_fine: i32, coarse: &![f64; 4096]) with Mut {
+    let n_coarse = n_fine / 2
+
+    // Boundary points
+    coarse[0] = fine[0]
+    coarse[n_coarse] = fine[n_fine]
+
+    // Interior points: full-weighting stencil [1/4, 1/2, 1/4]
+    var i = 1
+    while i < n_coarse {
+        let fi = 2 * i
+        coarse[i] = 0.25 * fine[fi - 1] + 0.5 * fine[fi] + 0.25 * fine[fi + 1]
+        i = i + 1
+    }
+}
+
+// Linear interpolation prolongation from coarse to fine grid (1D).
+// n_coarse is the number of intervals on the coarse grid.
+// Fine grid has n_fine = 2*n_coarse intervals.
+// Coincident points: fine[2i] = coarse[i]
+// Midpoints:         fine[2i+1] = 0.5*(coarse[i] + coarse[i+1])
+fn mg_prolongate_1d(coarse: &[f64; 4096], n_coarse: i32, fine: &![f64; 4096]) with Mut {
+    // Coincident points
+    var i = 0
+    while i <= n_coarse {
+        fine[2 * i] = coarse[i]
+        i = i + 1
+    }
+
+    // Midpoints by linear interpolation
+    i = 0
+    while i < n_coarse {
+        fine[2 * i + 1] = 0.5 * (coarse[i] + coarse[i + 1])
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// 1D Smoothers
+// =============================================================================
+
+// Weighted Jacobi smoother for 1D Poisson: -u'' = f on [0,1].
+// Performs nu sweeps. h = 1/n is the mesh spacing. omega is the damping
+// parameter (2/3 for optimal high-frequency damping).
+// Update: u_new[i] = omega * (u[i-1] + u[i+1] + h^2*f[i]) / 2  +  (1-omega)*u[i]
+fn mg_smooth_jacobi_1d(u: &![f64; 4096], f: &[f64; 4096], n: i32,
+                       h: f64, omega: f64, nu: i32) with Mut, Div {
+    let h2 = h * h
+    var sweep = 0
+    while sweep < nu {
+        // We need the old values; copy u into a temporary array.
+        var u_old: [f64; 4096] = [0.0; 4096]
+        var k = 0
+        while k <= n {
+            u_old[k] = u[k]
+            k = k + 1
+        }
+
+        // Jacobi update for interior points (boundary stays fixed)
+        var i = 1
+        while i < n {
+            let avg = (u_old[i - 1] + u_old[i + 1] + h2 * f[i]) / 2.0
+            u[i] = omega * avg + (1.0 - omega) * u_old[i]
+            i = i + 1
+        }
+        sweep = sweep + 1
+    }
+}
+
+// Red-black Gauss-Seidel smoother for 1D Poisson.
+// Red = odd indices, black = even indices.
+// Update: u[i] = (u[i-1] + u[i+1] + h^2*f[i]) / 2
+// Performs nu full red-black sweeps.
+fn mg_smooth_gs_rb_1d(u: &![f64; 4096], f: &[f64; 4096], n: i32,
+                      h: f64, nu: i32) with Mut, Div {
+    let h2 = h * h
+    var sweep = 0
+    while sweep < nu {
+        // Red sweep: odd indices
+        var i = 1
+        while i < n {
+            // Check if i is odd: i - (i/2)*2 == 1
+            let rem = i - (i / 2) * 2
+            if rem == 1 {
+                u[i] = (u[i - 1] + u[i + 1] + h2 * f[i]) / 2.0
+            }
+            i = i + 1
+        }
+
+        // Black sweep: even indices (skip boundary 0 and n)
+        i = 2
+        while i < n {
+            let rem = i - (i / 2) * 2
+            if rem == 0 {
+                u[i] = (u[i - 1] + u[i + 1] + h2 * f[i]) / 2.0
+            }
+            i = i + 1
+        }
+        sweep = sweep + 1
+    }
+}
+
+// =============================================================================
+// 1D Residual
+// =============================================================================
+
+// Compute residual for 1D Poisson: r[i] = f[i] - (-u[i-1] + 2*u[i] - u[i+1])/h^2
+// for interior points. r[0] = r[n] = 0 (boundary residual is zero for
+// homogeneous Dirichlet BCs).
+fn mg_residual_1d(u: &[f64; 4096], f: &[f64; 4096], n: i32,
+                  h: f64, r: &![f64; 4096]) with Mut, Div {
+    let h2 = h * h
+    r[0] = 0.0
+    r[n] = 0.0
+
+    var i = 1
+    while i < n {
+        let lap = (0.0 - u[i - 1] + 2.0 * u[i] - u[i + 1]) / h2
+        r[i] = f[i] - lap
+        i = i + 1
+    }
+}
+
+// L2 norm of the residual on a 1D grid with n intervals:
+// ||r||_2 = sqrt(h * sum_{i=1}^{n-1} r[i]^2)
+fn mg_residual_norm_1d(r: &[f64; 4096], n: i32) -> f64 with Mut, Div {
+    let h = 1.0 / (n as f64)
+    var sum = 0.0
+    var i = 1
+    while i < n {
+        sum = sum + r[i] * r[i]
+        i = i + 1
+    }
+    mg_sqrt(h * sum)
+}
+
+// =============================================================================
+// 1D Coarse Solve (Thomas algorithm)
+// =============================================================================
+
+// Direct solve of the 1D Poisson equation on a small grid using the Thomas
+// algorithm (tridiagonal solver). The system is:
+//   -u[i-1] + 2*u[i] - u[i+1] = h^2 * f[i],  i = 1..n-1
+// with u[0] = u[n] = 0 (homogeneous Dirichlet).
+// Tridiagonal: a[i] = -1, b[i] = 2, c[i] = -1, d[i] = h^2*f[i].
+fn mg_coarse_solve_1d(u: &![f64; 4096], f: &[f64; 4096], n: i32,
+                      h: f64) with Mut, Div {
+    let h2 = h * h
+    let m = n - 1  // number of interior unknowns
+
+    if m <= 0 { return }
+
+    // Diagonal and RHS arrays for the tridiagonal system
+    // We solve in-place: b_mod[i] for modified diagonal, d_mod[i] for modified RHS.
+    var b_mod: [f64; 4096] = [0.0; 4096]
+    var d_mod: [f64; 4096] = [0.0; 4096]
+
+    // Sub-diagonal a = -1.0, main diagonal b = 2.0, super-diagonal c = -1.0
+    // Forward sweep: eliminate sub-diagonal
+    // b_mod[0] = 2.0, d_mod[0] = h^2 * f[1]
+    b_mod[0] = 2.0
+    d_mod[0] = h2 * f[1]
+
+    var i = 1
+    while i < m {
+        // w = a / b_mod[i-1] = -1 / b_mod[i-1]
+        let w = 0.0 - 1.0 / b_mod[i - 1]
+        b_mod[i] = 2.0 - (0.0 - 1.0) * w   // 2.0 - c * w where c = -1
+        d_mod[i] = h2 * f[i + 1] - d_mod[i - 1] * w
+        i = i + 1
+    }
+
+    // Back substitution
+    u[m] = d_mod[m - 1] / b_mod[m - 1]   // interior index m maps to u[n-1]
+
+    // Careful: the interior points are u[1]..u[n-1].
+    // We stored them as index 0..m-1 in b_mod/d_mod.
+    // u[interior_k+1] where interior_k = m-1 is u[n-1], already done.
+    // Now go backwards.
+    i = m - 2
+    while i >= 0 {
+        // u[interior index i+1] = (d_mod[i] - c * u[interior index i+2]) / b_mod[i]
+        // c = -1, interior index i+1 = i+1, i+2 = i+2
+        u[i + 1] = (d_mod[i] + u[i + 2]) / b_mod[i]
+        i = i - 1
+    }
+
+    // Boundary
+    u[0] = 0.0
+    u[n] = 0.0
+}
+
+// =============================================================================
+// 1D V-Cycle
+// =============================================================================
+
+// Recursive V-cycle for 1D Poisson.
+//   1. Pre-smooth nu1 sweeps of red-black GS
+//   2. Compute residual
+//   3. Restrict residual to coarse grid
+//   4. If at coarsest level, direct solve; otherwise recurse
+//   5. Prolongate coarse correction and add to u
+//   6. Post-smooth nu2 sweeps of red-black GS
+fn mg_vcycle_1d(u: &![f64; 4096], f: &[f64; 4096], n: i32,
+                h: f64, config: &MGConfig, level: i32) with Mut, Div {
+    // Base case: coarsest level or grid too small — direct solve
+    if level >= config.n_levels - 1 {
+        mg_coarse_solve_1d(u, f, n, h)
+        return
+    }
+    if n <= 2 {
+        mg_coarse_solve_1d(u, f, n, h)
+        return
+    }
+
+    // 1. Pre-smoothing
+    mg_smooth_gs_rb_1d(u, f, n, h, config.nu1)
+
+    // 2. Compute residual
+    var r_fine: [f64; 4096] = [0.0; 4096]
+    mg_residual_1d(u, f, n, h, &!r_fine)
+
+    // 3. Restrict residual to coarse grid
+    let n_coarse = n / 2
+    var r_coarse: [f64; 4096] = [0.0; 4096]
+    mg_restrict_1d(&r_fine, n, &!r_coarse)
+
+    // 4. Solve on coarse grid for the correction e: A_c * e = r_coarse
+    var e_coarse: [f64; 4096] = [0.0; 4096]
+    let h_coarse = 2.0 * h
+    mg_vcycle_1d(&!e_coarse, &r_coarse, n_coarse, h_coarse, config, level + 1)
+
+    // 5. Prolongate correction and add to u
+    var e_fine: [f64; 4096] = [0.0; 4096]
+    mg_prolongate_1d(&e_coarse, n_coarse, &!e_fine)
+
+    var i = 1
+    while i < n {
+        u[i] = u[i] + e_fine[i]
+        i = i + 1
+    }
+
+    // 6. Post-smoothing
+    mg_smooth_gs_rb_1d(u, f, n, h, config.nu2)
+}
+
+// =============================================================================
+// 1D W-Cycle
+// =============================================================================
+
+// Recursive W-cycle for 1D Poisson. Same as V-cycle but the coarse grid
+// correction is applied TWICE (two recursive calls instead of one).
+fn mg_wcycle_1d(u: &![f64; 4096], f: &[f64; 4096], n: i32,
+                h: f64, config: &MGConfig, level: i32) with Mut, Div {
+    // Base case: coarsest level or grid too small
+    if level >= config.n_levels - 1 {
+        mg_coarse_solve_1d(u, f, n, h)
+        return
+    }
+    if n <= 2 {
+        mg_coarse_solve_1d(u, f, n, h)
+        return
+    }
+
+    // 1. Pre-smoothing
+    mg_smooth_gs_rb_1d(u, f, n, h, config.nu1)
+
+    // 2. Compute residual
+    var r_fine: [f64; 4096] = [0.0; 4096]
+    mg_residual_1d(u, f, n, h, &!r_fine)
+
+    // 3. Restrict residual to coarse grid
+    let n_coarse = n / 2
+    var r_coarse: [f64; 4096] = [0.0; 4096]
+    mg_restrict_1d(&r_fine, n, &!r_coarse)
+
+    // 4. Recurse TWICE on coarse grid (W-cycle pattern)
+    var e_coarse: [f64; 4096] = [0.0; 4096]
+    let h_coarse = 2.0 * h
+
+    // First coarse-grid correction
+    mg_wcycle_1d(&!e_coarse, &r_coarse, n_coarse, h_coarse, config, level + 1)
+
+    // Second coarse-grid correction
+    mg_wcycle_1d(&!e_coarse, &r_coarse, n_coarse, h_coarse, config, level + 1)
+
+    // 5. Prolongate correction and add to u
+    var e_fine: [f64; 4096] = [0.0; 4096]
+    mg_prolongate_1d(&e_coarse, n_coarse, &!e_fine)
+
+    var i = 1
+    while i < n {
+        u[i] = u[i] + e_fine[i]
+        i = i + 1
+    }
+
+    // 6. Post-smoothing
+    mg_smooth_gs_rb_1d(u, f, n, h, config.nu2)
+}
+
+// =============================================================================
+// 1D Full Multigrid Solver
+// =============================================================================
+
+// Solve -u'' = f_rhs(x) on [0,1] with u(0) = u(1) = 0.
+// n is the number of intervals (must be a power of 2).
+// Iterates V-cycles until the residual norm drops below config.tol
+// or max_cycles is reached.
+fn mg_solve_poisson_1d(f_rhs: fn(f64) -> f64 with Mut, Div, Panic,
+                       n: i32, config: &MGConfig,
+                       result: &!MGResult) with Mut, Div, Panic {
+    let h = 1.0 / (n as f64)
+
+    // Initialize solution to zero
+    var i = 0
+    while i <= n {
+        result.u[i] = 0.0
+        i = i + 1
+    }
+
+    // Set up RHS: evaluate f_rhs at grid points
+    var f_vals: [f64; 4096] = [0.0; 4096]
+    i = 0
+    while i <= n {
+        let x = (i as f64) * h
+        f_vals[i] = f_rhs(x)
+        i = i + 1
+    }
+    // Enforce boundary in RHS
+    f_vals[0] = 0.0
+    f_vals[n] = 0.0
+
+    // Iterate V-cycles
+    result.converged = false
+    result.iterations = 0
+
+    var cycle = 0
+    while cycle < config.max_cycles {
+        mg_vcycle_1d(&!result.u, &f_vals, n, h, config, 0)
+
+        // Compute residual and its norm
+        var r: [f64; 4096] = [0.0; 4096]
+        mg_residual_1d(&result.u, &f_vals, n, h, &!r)
+        let rnorm = mg_residual_norm_1d(&r, n)
+
+        result.residual_norm = rnorm
+        result.iterations = cycle + 1
+
+        if rnorm < config.tol {
+            result.converged = true
+            return
+        }
+        cycle = cycle + 1
+    }
+}
+
+// =============================================================================
+// 2D Index Helpers
+// =============================================================================
+
+// Convert 2D grid index (i, j) to flat array index.
+// Grid has (nx+1) columns, so point (i, j) is at i*(nx+1) + j.
+fn mg_idx2d(i: i32, j: i32, nx: i32) -> i32 {
+    i * (nx + 1) + j
+}
+
+// =============================================================================
+// 2D Transfer Operators
+// =============================================================================
+
+// Full-weighting restriction from fine to coarse grid (2D).
+// Fine grid has (nx_f+1) x (ny_f+1) points.
+// Coarse grid has (nx_c+1) x (ny_c+1) where nx_c = nx_f/2, ny_c = ny_f/2.
+// Stencil weights:
+//   corners (1/16): fine[2i-1,2j-1], fine[2i-1,2j+1], fine[2i+1,2j-1], fine[2i+1,2j+1]
+//   edges   (1/8):  fine[2i,2j-1], fine[2i,2j+1], fine[2i-1,2j], fine[2i+1,2j]
+//   center  (1/4):  fine[2i,2j]
+fn mg_restrict_2d(fine: &[f64; 4096], nx_f: i32, ny_f: i32,
+                  coarse: &![f64; 4096]) with Mut {
+    let nx_c = nx_f / 2
+    let ny_c = ny_f / 2
+
+    // Boundary: copy directly from fine grid boundaries
+    // Top and bottom rows
+    var j = 0
+    while j <= nx_c {
+        coarse[mg_idx2d(0, j, nx_c)] = fine[mg_idx2d(0, 2 * j, nx_f)]
+        coarse[mg_idx2d(ny_c, j, nx_c)] = fine[mg_idx2d(ny_f, 2 * j, nx_f)]
+        j = j + 1
+    }
+    // Left and right columns
+    var i = 0
+    while i <= ny_c {
+        coarse[mg_idx2d(i, 0, nx_c)] = fine[mg_idx2d(2 * i, 0, nx_f)]
+        coarse[mg_idx2d(i, nx_c, nx_c)] = fine[mg_idx2d(2 * i, nx_f, nx_f)]
+        i = i + 1
+    }
+
+    // Interior points: full-weighting stencil
+    i = 1
+    while i < ny_c {
+        j = 1
+        while j < nx_c {
+            let fi = 2 * i
+            let fj = 2 * j
+
+            // Corners: weight 1/16 each
+            let corners = fine[mg_idx2d(fi - 1, fj - 1, nx_f)]
+                        + fine[mg_idx2d(fi - 1, fj + 1, nx_f)]
+                        + fine[mg_idx2d(fi + 1, fj - 1, nx_f)]
+                        + fine[mg_idx2d(fi + 1, fj + 1, nx_f)]
+
+            // Edges: weight 1/8 each
+            let edges = fine[mg_idx2d(fi, fj - 1, nx_f)]
+                      + fine[mg_idx2d(fi, fj + 1, nx_f)]
+                      + fine[mg_idx2d(fi - 1, fj, nx_f)]
+                      + fine[mg_idx2d(fi + 1, fj, nx_f)]
+
+            // Center: weight 1/4
+            let center = fine[mg_idx2d(fi, fj, nx_f)]
+
+            coarse[mg_idx2d(i, j, nx_c)] = corners / 16.0 + edges / 8.0 + center / 4.0
+
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// Bilinear interpolation prolongation from coarse to fine grid (2D).
+// Coarse grid: (nx_c+1) x (ny_c+1). Fine grid: (nx_f+1) x (ny_f+1)
+// where nx_f = 2*nx_c, ny_f = 2*ny_c.
+fn mg_prolongate_2d(coarse: &[f64; 4096], nx_c: i32, ny_c: i32,
+                    fine: &![f64; 4096]) with Mut {
+    let nx_f = 2 * nx_c
+    let ny_f = 2 * ny_c
+
+    // Step 1: Inject coarse points onto coincident fine points
+    var i = 0
+    while i <= ny_c {
+        var j = 0
+        while j <= nx_c {
+            fine[mg_idx2d(2 * i, 2 * j, nx_f)] = coarse[mg_idx2d(i, j, nx_c)]
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Step 2: Interpolate along rows (horizontal midpoints)
+    i = 0
+    while i <= ny_c {
+        var j = 0
+        while j < nx_c {
+            fine[mg_idx2d(2 * i, 2 * j + 1, nx_f)] = 0.5 * (
+                coarse[mg_idx2d(i, j, nx_c)] + coarse[mg_idx2d(i, j + 1, nx_c)]
+            )
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Step 3: Interpolate along columns (vertical midpoints) — these rows
+    // now have all horizontal values filled from steps 1 and 2.
+    i = 0
+    while i < ny_c {
+        var j = 0
+        while j <= nx_f {
+            fine[mg_idx2d(2 * i + 1, j, nx_f)] = 0.5 * (
+                fine[mg_idx2d(2 * i, j, nx_f)] + fine[mg_idx2d(2 * i + 2, j, nx_f)]
+            )
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// 2D Smoothers
+// =============================================================================
+
+// Weighted Jacobi smoother for 2D Poisson: -(u_xx + u_yy) = f on [0,1]^2.
+// Grid: (nx+1) x (ny+1) points, hx = 1/nx, hy = 1/ny.
+// Stencil:  (u[i-1,j] + u[i+1,j])/hx^2 + (u[i,j-1] + u[i,j+1])/hy^2
+//           = (2/hx^2 + 2/hy^2)*u[i,j] - f[i,j]
+// Jacobi update:
+//   u_new = omega * [(u_L+u_R)/hx^2 + (u_D+u_U)/hy^2 + f] / (2/hx^2 + 2/hy^2)
+//         + (1 - omega) * u_old
+fn mg_smooth_jacobi_2d(u: &![f64; 4096], f: &[f64; 4096],
+                       nx: i32, ny: i32, hx: f64, hy: f64,
+                       omega: f64, nu: i32) with Mut, Div {
+    let hx2 = hx * hx
+    let hy2 = hy * hy
+    let diag = 2.0 / hx2 + 2.0 / hy2
+
+    var sweep = 0
+    while sweep < nu {
+        // Copy current solution
+        var u_old: [f64; 4096] = [0.0; 4096]
+        var k = 0
+        let total = (nx + 1) * (ny + 1)
+        while k < total {
+            u_old[k] = u[k]
+            k = k + 1
+        }
+
+        // Update interior points
+        var i = 1
+        while i < ny {
+            var j = 1
+            while j < nx {
+                let idx = mg_idx2d(i, j, nx)
+                let u_left  = u_old[mg_idx2d(i, j - 1, nx)]
+                let u_right = u_old[mg_idx2d(i, j + 1, nx)]
+                let u_down  = u_old[mg_idx2d(i - 1, j, nx)]
+                let u_up    = u_old[mg_idx2d(i + 1, j, nx)]
+
+                let stencil = (u_left + u_right) / hx2 + (u_down + u_up) / hy2
+                let avg = (stencil + f[idx]) / diag
+                u[idx] = omega * avg + (1.0 - omega) * u_old[idx]
+
+                j = j + 1
+            }
+            i = i + 1
+        }
+        sweep = sweep + 1
+    }
+}
+
+// Red-black Gauss-Seidel smoother for 2D Poisson.
+// Red = (i+j) even, black = (i+j) odd.
+// In-place update: u[i,j] = [(u_L+u_R)/hx^2 + (u_D+u_U)/hy^2 + f] / (2/hx^2 + 2/hy^2)
+fn mg_smooth_gs_rb_2d(u: &![f64; 4096], f: &[f64; 4096],
+                      nx: i32, ny: i32, hx: f64, hy: f64,
+                      nu: i32) with Mut, Div {
+    let hx2 = hx * hx
+    let hy2 = hy * hy
+    let diag = 2.0 / hx2 + 2.0 / hy2
+
+    var sweep = 0
+    while sweep < nu {
+        // Red sweep: (i+j) even
+        var i = 1
+        while i < ny {
+            var j = 1
+            while j < nx {
+                let sum_ij = i + j
+                let rem = sum_ij - (sum_ij / 2) * 2
+                if rem == 0 {
+                    let idx = mg_idx2d(i, j, nx)
+                    let u_left  = u[mg_idx2d(i, j - 1, nx)]
+                    let u_right = u[mg_idx2d(i, j + 1, nx)]
+                    let u_down  = u[mg_idx2d(i - 1, j, nx)]
+                    let u_up    = u[mg_idx2d(i + 1, j, nx)]
+
+                    let stencil = (u_left + u_right) / hx2 + (u_down + u_up) / hy2
+                    u[idx] = (stencil + f[idx]) / diag
+                }
+                j = j + 1
+            }
+            i = i + 1
+        }
+
+        // Black sweep: (i+j) odd
+        i = 1
+        while i < ny {
+            var j = 1
+            while j < nx {
+                let sum_ij = i + j
+                let rem = sum_ij - (sum_ij / 2) * 2
+                if rem == 1 {
+                    let idx = mg_idx2d(i, j, nx)
+                    let u_left  = u[mg_idx2d(i, j - 1, nx)]
+                    let u_right = u[mg_idx2d(i, j + 1, nx)]
+                    let u_down  = u[mg_idx2d(i - 1, j, nx)]
+                    let u_up    = u[mg_idx2d(i + 1, j, nx)]
+
+                    let stencil = (u_left + u_right) / hx2 + (u_down + u_up) / hy2
+                    u[idx] = (stencil + f[idx]) / diag
+                }
+                j = j + 1
+            }
+            i = i + 1
+        }
+        sweep = sweep + 1
+    }
+}
+
+// =============================================================================
+// 2D Residual
+// =============================================================================
+
+// Compute residual for 2D Poisson: -(u_xx + u_yy) = f.
+// r[i,j] = f[i,j] + (u[i-1,j] - 2*u[i,j] + u[i+1,j])/hx^2
+//                   + (u[i,j-1] - 2*u[i,j] + u[i,j+1])/hy^2
+// Boundary residual is zero.
+fn mg_residual_2d(u: &[f64; 4096], f: &[f64; 4096],
+                  nx: i32, ny: i32, hx: f64, hy: f64,
+                  r: &![f64; 4096]) with Mut, Div {
+    let hx2 = hx * hx
+    let hy2 = hy * hy
+
+    // Zero out boundary residual
+    var j = 0
+    while j <= nx {
+        r[mg_idx2d(0, j, nx)] = 0.0
+        r[mg_idx2d(ny, j, nx)] = 0.0
+        j = j + 1
+    }
+    var i = 0
+    while i <= ny {
+        r[mg_idx2d(i, 0, nx)] = 0.0
+        r[mg_idx2d(i, nx, nx)] = 0.0
+        i = i + 1
+    }
+
+    // Interior residual
+    i = 1
+    while i < ny {
+        j = 1
+        while j < nx {
+            let idx = mg_idx2d(i, j, nx)
+            let u_ij = u[idx]
+            let lap_x = (u[mg_idx2d(i, j - 1, nx)] - 2.0 * u_ij + u[mg_idx2d(i, j + 1, nx)]) / hx2
+            let lap_y = (u[mg_idx2d(i - 1, j, nx)] - 2.0 * u_ij + u[mg_idx2d(i + 1, j, nx)]) / hy2
+
+            r[idx] = f[idx] + lap_x + lap_y
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// L2 norm of the 2D residual:
+// ||r||_2 = sqrt(hx*hy * sum_{interior} r[i,j]^2)
+fn mg_residual_norm_2d(r: &[f64; 4096], nx: i32, ny: i32,
+                       hx: f64, hy: f64) -> f64 with Mut, Div {
+    var sum = 0.0
+    var i = 1
+    while i < ny {
+        var j = 1
+        while j < nx {
+            let val = r[mg_idx2d(i, j, nx)]
+            sum = sum + val * val
+            j = j + 1
+        }
+        i = i + 1
+    }
+    mg_sqrt(hx * hy * sum)
+}
+
+// =============================================================================
+// 2D Coarse Solve
+// =============================================================================
+
+// Direct solve on the coarsest 2D grid via damped Jacobi iteration.
+// For small grids (e.g. 2x2 or 4x4), convergence is rapid.
+// Iterates until residual < 1e-12 or max 500 iterations.
+fn mg_coarse_solve_2d(u: &![f64; 4096], f: &[f64; 4096],
+                      nx: i32, ny: i32,
+                      hx: f64, hy: f64) with Mut, Div {
+    let hx2 = hx * hx
+    let hy2 = hy * hy
+    let diag = 2.0 / hx2 + 2.0 / hy2
+    let tol_coarse = 1.0e-12
+
+    var iter = 0
+    while iter < 500 {
+        // Jacobi sweep with omega = 1.0 (no damping on tiny grid)
+        var u_old: [f64; 4096] = [0.0; 4096]
+        let total = (nx + 1) * (ny + 1)
+        var k = 0
+        while k < total {
+            u_old[k] = u[k]
+            k = k + 1
+        }
+
+        var i = 1
+        while i < ny {
+            var j = 1
+            while j < nx {
+                let idx = mg_idx2d(i, j, nx)
+                let u_left  = u_old[mg_idx2d(i, j - 1, nx)]
+                let u_right = u_old[mg_idx2d(i, j + 1, nx)]
+                let u_down  = u_old[mg_idx2d(i - 1, j, nx)]
+                let u_up    = u_old[mg_idx2d(i + 1, j, nx)]
+
+                let stencil = (u_left + u_right) / hx2 + (u_down + u_up) / hy2
+                u[idx] = (stencil + f[idx]) / diag
+                j = j + 1
+            }
+            i = i + 1
+        }
+
+        // Check convergence
+        var r: [f64; 4096] = [0.0; 4096]
+        mg_residual_2d(u, f, nx, ny, hx, hy, &!r)
+        let rnorm = mg_residual_norm_2d(&r, nx, ny, hx, hy)
+        if rnorm < tol_coarse { return }
+
+        iter = iter + 1
+    }
+}
+
+// =============================================================================
+// 2D V-Cycle
+// =============================================================================
+
+// Recursive V-cycle for 2D Poisson on an (nx+1) x (ny+1) grid.
+// Uses red-black Gauss-Seidel for smoothing.
+//   1. Pre-smooth nu1 sweeps
+//   2. Compute residual
+//   3. Restrict residual to coarse grid
+//   4. If coarsest level, direct solve; else recurse
+//   5. Prolongate correction, add to u
+//   6. Post-smooth nu2 sweeps
+fn mg_vcycle_2d(u: &![f64; 4096], f: &[f64; 4096],
+                nx: i32, ny: i32, hx: f64, hy: f64,
+                config: &MGConfig, level: i32) with Mut, Div {
+    // Base case: coarsest level or grid too small
+    if level >= config.n_levels - 1 {
+        mg_coarse_solve_2d(u, f, nx, ny, hx, hy)
+        return
+    }
+    if nx <= 2 {
+        mg_coarse_solve_2d(u, f, nx, ny, hx, hy)
+        return
+    }
+    if ny <= 2 {
+        mg_coarse_solve_2d(u, f, nx, ny, hx, hy)
+        return
+    }
+
+    // 1. Pre-smoothing
+    mg_smooth_gs_rb_2d(u, f, nx, ny, hx, hy, config.nu1)
+
+    // 2. Compute residual on fine grid
+    var r_fine: [f64; 4096] = [0.0; 4096]
+    mg_residual_2d(u, f, nx, ny, hx, hy, &!r_fine)
+
+    // 3. Restrict residual to coarse grid
+    let nx_c = nx / 2
+    let ny_c = ny / 2
+    var r_coarse: [f64; 4096] = [0.0; 4096]
+    mg_restrict_2d(&r_fine, nx, ny, &!r_coarse)
+
+    // 4. Solve for correction on coarse grid: A_c * e = r_coarse
+    var e_coarse: [f64; 4096] = [0.0; 4096]
+    let hx_c = 2.0 * hx
+    let hy_c = 2.0 * hy
+    mg_vcycle_2d(&!e_coarse, &r_coarse, nx_c, ny_c, hx_c, hy_c, config, level + 1)
+
+    // 5. Prolongate correction to fine grid and add
+    var e_fine: [f64; 4096] = [0.0; 4096]
+    mg_prolongate_2d(&e_coarse, nx_c, ny_c, &!e_fine)
+
+    var i = 1
+    while i < ny {
+        var j = 1
+        while j < nx {
+            let idx = mg_idx2d(i, j, nx)
+            u[idx] = u[idx] + e_fine[idx]
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // 6. Post-smoothing
+    mg_smooth_gs_rb_2d(u, f, nx, ny, hx, hy, config.nu2)
+}
+
+// =============================================================================
+// 2D Full Multigrid Solver
+// =============================================================================
+
+// Solve -(u_xx + u_yy) = f_rhs(x, y) on [0,1]x[0,1] with u = 0 on boundary.
+// nx, ny are the number of intervals in each direction (must be powers of 2).
+// Iterates V-cycles until the residual norm drops below config.tol or
+// max_cycles is reached.
+fn mg_solve_poisson_2d(f_rhs: fn(f64, f64) -> f64 with Mut, Div, Panic,
+                       nx: i32, ny: i32, config: &MGConfig,
+                       result: &!MGResult) with Mut, Div, Panic {
+    let hx = 1.0 / (nx as f64)
+    let hy = 1.0 / (ny as f64)
+
+    // Initialize solution to zero
+    let total = (nx + 1) * (ny + 1)
+    var k = 0
+    while k < total {
+        result.u[k] = 0.0
+        k = k + 1
+    }
+
+    // Set up RHS on interior grid points
+    var f_vals: [f64; 4096] = [0.0; 4096]
+    var i = 0
+    while i <= ny {
+        var j = 0
+        while j <= nx {
+            let x = (j as f64) * hx
+            let y = (i as f64) * hy
+            let idx = mg_idx2d(i, j, nx)
+
+            // Interior only; boundary RHS is zero
+            if i > 0 {
+                if i < ny {
+                    if j > 0 {
+                        if j < nx {
+                            f_vals[idx] = f_rhs(x, y)
+                        }
+                    }
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Iterate V-cycles
+    result.converged = false
+    result.iterations = 0
+
+    var cycle = 0
+    while cycle < config.max_cycles {
+        mg_vcycle_2d(&!result.u, &f_vals, nx, ny, hx, hy, config, 0)
+
+        // Compute residual norm
+        var r: [f64; 4096] = [0.0; 4096]
+        mg_residual_2d(&result.u, &f_vals, nx, ny, hx, hy, &!r)
+        let rnorm = mg_residual_norm_2d(&r, nx, ny, hx, hy)
+
+        result.residual_norm = rnorm
+        result.iterations = cycle + 1
+
+        if rnorm < config.tol {
+            result.converged = true
+            return
+        }
+        cycle = cycle + 1
+    }
+}
+
+// =============================================================================
+// Convergence Analysis
+// =============================================================================
+
+// Compute the average convergence factor from a sequence of residual norms.
+// Given residuals[0..n-1], returns the geometric mean of
+//   residuals[k+1] / residuals[k] for k = 0..n-2.
+// A value near 0.1 indicates rapid convergence; near 1.0 indicates stalling.
+fn mg_convergence_factor(residuals: &[f64; 256], n: i32) -> f64 with Mut, Div {
+    if n < 2 { return 0.0 }
+
+    // Compute product of ratios, then take (n-1)-th root.
+    // To avoid overflow/underflow, compute via log of the ratio sum.
+    // log(geometric mean) = (1/(n-1)) * sum log(r[k+1]/r[k])
+    //                     = (1/(n-1)) * (log(r[n-1]) - log(r[0]))
+    // But we don't have log. Instead compute the product directly
+    // and iteratively take roots.
+
+    // Simple approach: average of individual ratios (arithmetic mean of ratios).
+    // This is a practical approximation for the convergence factor.
+    var sum_ratio = 0.0
+    var count = 0
+    var k = 0
+    while k < n - 1 {
+        if mg_abs(residuals[k]) > 1.0e-30 {
+            let ratio = residuals[k + 1] / residuals[k]
+            sum_ratio = sum_ratio + ratio
+            count = count + 1
+        }
+        k = k + 1
+    }
+
+    if count == 0 { return 0.0 }
+    sum_ratio / (count as f64)
+}

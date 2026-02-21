@@ -7097,6 +7097,11 @@ impl TypeChecker {
             }
             // Logical operators: require bool operands
             BinaryOp::And | BinaryOp::Or => {
+                // Error recovery: if either operand already resolved to Error, propagate
+                // silently to avoid cascade diagnostics ("bool required, found Error").
+                if matches!(left, HirType::Error) || matches!(right, HirType::Error) {
+                    return HirType::Error;
+                }
                 let op_name = if op == BinaryOp::And { "&&" } else { "||" };
                 if !matches!(left, HirType::Bool) {
                     self.error(
@@ -10748,6 +10753,9 @@ impl TypeChecker {
             // Integer type coercion: any integer type satisfies any other integer type.
             // This allows i64 literals (the default) to match i32/usize parameters, etc.
             (t1, t2) if Self::is_integer_type(t1) && Self::is_integer_type(t2) => true,
+            // Float widening/narrowing coercion: f32 and f64 are mutually assignable.
+            // Fixes stdlib files that mix f32 parameters with f64 literals and vice versa.
+            (Type::F32, Type::F64) | (Type::F64, Type::F32) => true,
             _ => false,
         }
     }

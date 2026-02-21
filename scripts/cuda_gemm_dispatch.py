@@ -111,13 +111,7 @@ def generate_ptx(M: int, N: int, K: int) -> str:
 
 def load_ptx_file(path: str) -> str:
     with open(path) as f:
-        raw = f.read()
-    # Strip gen_ptx fence markers if present
-    if "--- PTX BEGIN ---" in raw and "--- PTX END ---" in raw:
-        a = raw.index("--- PTX BEGIN ---") + len("--- PTX BEGIN ---")
-        b = raw.index("--- PTX END ---")
-        return raw[a:b].strip()
-    return raw.strip()
+        return f.read()
 
 
 # ── CUDA dispatch ─────────────────────────────────────────────────────────────
@@ -138,19 +132,10 @@ def run_gemm(ptx: str, M: int, N: int, K: int, n_iters: int = 5) -> dict:
     ctx = CUcontext(0)
     _cu(cuda.cuCtxCreate, ctypes.byref(ctx), 0, device)
 
-    # Load PTX (JIT) or pre-compiled CUBIN
-    cubin_file = os.environ.get("GEMM_CUBIN_FILE", "")
+    # Load PTX
+    ptx_bytes = ptx.encode() + b"\x00"
     mod = CUmodule(0)
-    if cubin_file:
-        _cu(cuda.cuModuleLoad, ctypes.byref(mod), cubin_file.encode())
-    else:
-        # Strip gen_ptx fence markers before JIT compile
-        if "--- PTX BEGIN ---" in ptx and "--- PTX END ---" in ptx:
-            a = ptx.index("--- PTX BEGIN ---") + len("--- PTX BEGIN ---")
-            b = ptx.index("--- PTX END ---")
-            ptx = ptx[a:b].strip()
-        ptx_bytes = ptx.encode() + b"\x00"
-        _cu(cuda.cuModuleLoadData, ctypes.byref(mod), ptx_bytes)
+    _cu(cuda.cuModuleLoadData, ctypes.byref(mod), ptx_bytes)
 
     fn = CUfunction(0)
     _cu(cuda.cuModuleGetFunction, ctypes.byref(fn), mod, b"epistemic_gemm")

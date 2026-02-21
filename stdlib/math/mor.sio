@@ -1,0 +1,1493 @@
+// stdlib/math/mor.sio — Model order reduction
+//
+// Pure Sounio implementations:
+//   Proper Orthogonal Decomposition (POD) via SVD
+//   POD energy-based rank selection
+//   Galerkin projection of matrices and vectors
+//   Reduced basis reconstruction
+//   Greedy basis construction with error estimation
+//   Discrete Empirical Interpolation Method (DEIM)
+//   A posteriori error bounds
+//   One-sided Jacobi SVD
+//
+// References:
+//   Quarteroni, Manzoni & Negri (2016): "Reduced Basis Methods for PDEs"
+//   Hesthaven, Rozza & Stamm (2016): "Certified Reduced Basis Methods"
+//   Chaturantabut & Sorensen (2010): "Nonlinear Model Reduction via DEIM"
+//   Golub & Van Loan (2013): "Matrix Computations" (SVD)
+
+// =============================================================================
+// Helpers (prefix mr_)
+// =============================================================================
+
+fn mr_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn mr_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+fn mr_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+fn mr_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 25 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+// Dot product of two vectors of length n.
+fn mr_dot(a: &[f64; 4096], a_off: i32, b: &[f64; 4096], b_off: i32, n: i32) -> f64 with Mut {
+    var sum = 0.0
+    var i = 0
+    while i < n {
+        sum = sum + a[a_off + i] * b[b_off + i]
+        i = i + 1
+    }
+    sum
+}
+
+// Dot product for 256-element vectors.
+fn mr_dot256(a: &[f64; 256], b: &[f64; 256], n: i32) -> f64 with Mut {
+    var sum = 0.0
+    var i = 0
+    while i < n {
+        sum = sum + a[i] * b[i]
+        i = i + 1
+    }
+    sum
+}
+
+// Dot product for 64-element vectors.
+fn mr_dot64(a: &[f64; 64], b: &[f64; 64], n: i32) -> f64 with Mut {
+    var sum = 0.0
+    var i = 0
+    while i < n {
+        sum = sum + a[i] * b[i]
+        i = i + 1
+    }
+    sum
+}
+
+// Euclidean norm of a contiguous slice within a 4096-array.
+fn mr_norm2(a: &[f64; 4096], off: i32, n: i32) -> f64 with Mut, Div, Panic {
+    var sum = 0.0
+    var i = 0
+    while i < n {
+        sum = sum + a[off + i] * a[off + i]
+        i = i + 1
+    }
+    mr_sqrt(sum)
+}
+
+// Euclidean norm for a 256-element vector.
+fn mr_norm2_256(a: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {
+    var sum = 0.0
+    var i = 0
+    while i < n {
+        sum = sum + a[i] * a[i]
+        i = i + 1
+    }
+    mr_sqrt(sum)
+}
+
+// Euclidean norm for a 64-element vector.
+fn mr_norm2_64(a: &[f64; 64], n: i32) -> f64 with Mut, Div, Panic {
+    var sum = 0.0
+    var i = 0
+    while i < n {
+        sum = sum + a[i] * a[i]
+        i = i + 1
+    }
+    mr_sqrt(sum)
+}
+
+// Copy n elements: dst[d_off..] = src[s_off..].
+fn mr_copy(src: &[f64; 4096], s_off: i32, dst: &![f64; 4096], d_off: i32, n: i32) with Mut {
+    var i = 0
+    while i < n {
+        dst[d_off + i] = src[s_off + i]
+        i = i + 1
+    }
+}
+
+// AXPY: y[off..] += alpha * x[off..], n elements.
+fn mr_axpy(alpha: f64, x: &[f64; 4096], x_off: i32, y: &![f64; 4096], y_off: i32, n: i32) with Mut {
+    var i = 0
+    while i < n {
+        y[y_off + i] = y[y_off + i] + alpha * x[x_off + i]
+        i = i + 1
+    }
+}
+
+// Scale: a[off..off+n] *= alpha.
+fn mr_scale(a: &![f64; 4096], off: i32, n: i32, alpha: f64) with Mut {
+    var i = 0
+    while i < n {
+        a[off + i] = a[off + i] * alpha
+        i = i + 1
+    }
+}
+
+// Zero out n elements starting at off.
+fn mr_zero(a: &![f64; 4096], off: i32, n: i32) with Mut {
+    var i = 0
+    while i < n {
+        a[off + i] = 0.0
+        i = i + 1
+    }
+}
+
+// Zero a 256-element array.
+fn mr_zero_256(a: &![f64; 256], n: i32) with Mut {
+    var i = 0
+    while i < n {
+        a[i] = 0.0
+        i = i + 1
+    }
+}
+
+// Zero a 64-element array.
+fn mr_zero_64(a: &![f64; 64], n: i32) with Mut {
+    var i = 0
+    while i < n {
+        a[i] = 0.0
+        i = i + 1
+    }
+}
+
+// Matrix-vector product: y = A*x, A is m x n row-major in flat array.
+// y has m elements, x has n elements. Both stored in 4096-arrays.
+fn mr_matvec(A: &[f64; 4096], x: &[f64; 4096], x_off: i32,
+             m: i32, n: i32,
+             y: &![f64; 4096], y_off: i32) with Mut {
+    var i = 0
+    while i < m {
+        var sum = 0.0
+        var j = 0
+        while j < n {
+            sum = sum + A[i * n + j] * x[x_off + j]
+            j = j + 1
+        }
+        y[y_off + i] = sum
+        i = i + 1
+    }
+}
+
+// Matrix-vector: y[256] = A[4096]*x[64], A is m x n.
+fn mr_matvec_mixed(A: &[f64; 4096], x: &[f64; 64],
+                   m: i32, n: i32,
+                   y: &![f64; 256]) with Mut {
+    var i = 0
+    while i < m {
+        var sum = 0.0
+        var j = 0
+        while j < n {
+            sum = sum + A[i * n + j] * x[j]
+            j = j + 1
+        }
+        y[i] = sum
+        i = i + 1
+    }
+}
+
+// Matrix multiply: C = A * B.
+// A is m x k, B is k x n, C is m x n. All row-major in 4096-arrays.
+fn mr_mat_mul(A: &[f64; 4096], B: &[f64; 4096],
+              m: i32, k: i32, n: i32,
+              C: &![f64; 4096]) with Mut {
+    var i = 0
+    while i < m {
+        var j = 0
+        while j < n {
+            var sum = 0.0
+            var p = 0
+            while p < k {
+                sum = sum + A[i * k + p] * B[p * n + j]
+                p = p + 1
+            }
+            C[i * n + j] = sum
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// Transpose of A (m x n) into At (n x m). Both in 4096-arrays.
+fn mr_transpose(A: &[f64; 4096], m: i32, n: i32, At: &![f64; 4096]) with Mut {
+    var i = 0
+    while i < m {
+        var j = 0
+        while j < n {
+            At[j * m + i] = A[i * n + j]
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// Index of element with maximum absolute value in a column of a 4096-array.
+// Column col of an m x n matrix, searching rows start_row..m-1.
+fn mr_argmax_abs_col(A: &[f64; 4096], m: i32, n: i32, col: i32, start_row: i32) -> i32 with Mut {
+    var best_idx = start_row
+    var best_val = mr_abs(A[start_row * n + col])
+    var i = start_row + 1
+    while i < m {
+        let v = mr_abs(A[i * n + col])
+        if v > best_val {
+            best_val = v
+            best_idx = i
+        }
+        i = i + 1
+    }
+    best_idx
+}
+
+// Index of maximum absolute value in a 256-element vector (first n elements).
+fn mr_argmax_abs_256(v: &[f64; 256], n: i32) -> i32 with Mut {
+    var best_idx = 0
+    var best_val = mr_abs(v[0])
+    var i = 1
+    while i < n {
+        let a = mr_abs(v[i])
+        if a > best_val {
+            best_val = a
+            best_idx = i
+        }
+        i = i + 1
+    }
+    best_idx
+}
+
+// =============================================================================
+// Structs
+// =============================================================================
+
+struct SnapshotMatrix {
+    data: [f64; 4096],
+    n_dof: i32,
+    n_snap: i32
+}
+
+struct ReducedBasis {
+    V: [f64; 4096],
+    n_dof: i32,
+    n_basis: i32,
+    singular_values: [f64; 64]
+}
+
+struct DEIMBasis {
+    U: [f64; 4096],
+    P: [i32; 64],
+    n_dof: i32,
+    n_deim: i32
+}
+
+struct MORResult {
+    u_reduced: [f64; 64],
+    u_full: [f64; 256],
+    n_basis: i32,
+    error_est: f64,
+    converged: bool
+}
+
+// =============================================================================
+// One-Sided Jacobi SVD
+// =============================================================================
+
+// One-sided Jacobi SVD: compute thin SVD of an m x n matrix A (m >= n).
+//
+// Algorithm (Golub & Van Loan, 2013, Section 8.6.3):
+//   1. Compute B = A^T A  (n x n symmetric positive semi-definite)
+//   2. Eigendecompose B via cyclic Jacobi rotations: B = V * diag(lambda) * V^T
+//   3. Singular values: sigma_i = sqrt(lambda_i)
+//   4. Left singular vectors: U = A * V * diag(1/sigma_i) for nonzero sigma_i
+//
+// Output:
+//   U  — m x n matrix (thin), row-major in 4096-array
+//   S  — n singular values in descending order
+//   Vt — n x n matrix (V^T), row-major in 4096-array
+fn mr_svd(A: &[f64; 4096], m: i32, n: i32,
+          U: &![f64; 4096], S: &![f64; 64], Vt: &![f64; 4096]) with Mut, Div, Panic {
+
+    // Step 1: Compute B = A^T A (n x n)
+    var B: [f64; 4096] = [0.0; 4096]
+    var i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            var sum = 0.0
+            var k = 0
+            while k < m {
+                sum = sum + A[k * n + i] * A[k * n + j]
+                k = k + 1
+            }
+            B[i * n + j] = sum
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Step 2: Eigendecompose B via cyclic Jacobi rotations.
+    // Initialize V = I_n.
+    var V: [f64; 4096] = [0.0; 4096]
+    i = 0
+    while i < n {
+        V[i * n + i] = 1.0
+        i = i + 1
+    }
+
+    // Jacobi iterations: sweep through all off-diagonal pairs (p, q) with p < q.
+    let max_sweeps = 100
+    let tol = 1.0e-12
+    var sweep = 0
+    while sweep < max_sweeps {
+        // Compute off-diagonal Frobenius norm to check convergence
+        var off_norm = 0.0
+        var p = 0
+        while p < n {
+            var q = p + 1
+            while q < n {
+                off_norm = off_norm + B[p * n + q] * B[p * n + q]
+                q = q + 1
+            }
+            p = p + 1
+        }
+        if off_norm < tol * tol {
+            sweep = max_sweeps  // converged, exit
+        } else {
+            // One full sweep of Jacobi rotations
+            p = 0
+            while p < n {
+                var q = p + 1
+                while q < n {
+                    let bpq = B[p * n + q]
+                    if mr_abs(bpq) > 1.0e-15 {
+                        let bpp = B[p * n + p]
+                        let bqq = B[q * n + q]
+
+                        // Compute rotation angle: tan(2*theta) = 2*bpq / (bpp - bqq)
+                        let tau = (bqq - bpp) / (2.0 * bpq)
+                        var t = 0.0
+                        if mr_abs(tau) > 1.0e30 {
+                            t = 1.0 / (2.0 * tau)
+                        } else {
+                            let sign_tau = if tau >= 0.0 { 1.0 } else { 0.0 - 1.0 }
+                            t = sign_tau / (mr_abs(tau) + mr_sqrt(1.0 + tau * tau))
+                        }
+                        let c = 1.0 / mr_sqrt(1.0 + t * t)
+                        let s = t * c
+
+                        // Update B: Apply rotation on both sides
+                        // B <- G^T B G where G is Givens rotation in (p, q) plane
+                        // Rows/cols p and q of B are affected
+
+                        // Update columns of B: B[:, p] and B[:, q]
+                        var k = 0
+                        while k < n {
+                            let bp = B[k * n + p]
+                            let bq = B[k * n + q]
+                            B[k * n + p] = c * bp - s * bq
+                            B[k * n + q] = s * bp + c * bq
+                            k = k + 1
+                        }
+                        // Update rows of B: B[p, :] and B[q, :]
+                        k = 0
+                        while k < n {
+                            let bp = B[p * n + k]
+                            let bq = B[q * n + k]
+                            B[p * n + k] = c * bp - s * bq
+                            B[q * n + k] = s * bp + c * bq
+                            k = k + 1
+                        }
+
+                        // Restore exact symmetry on diagonal block
+                        B[p * n + q] = 0.0
+                        B[q * n + p] = 0.0
+
+                        // Accumulate eigenvectors: V <- V * G
+                        k = 0
+                        while k < n {
+                            let vp = V[k * n + p]
+                            let vq = V[k * n + q]
+                            V[k * n + p] = c * vp - s * vq
+                            V[k * n + q] = s * vp + c * vq
+                            k = k + 1
+                        }
+                    }
+                    q = q + 1
+                }
+                p = p + 1
+            }
+            sweep = sweep + 1
+        }
+    }
+
+    // Step 3: Extract eigenvalues (diagonal of B) and compute singular values.
+    // Also sort in descending order by insertion sort.
+    var eig: [f64; 64] = [0.0; 64]
+    var order: [i32; 64] = [0; 64]
+    i = 0
+    while i < n {
+        eig[i] = B[i * n + i]
+        if eig[i] < 0.0 { eig[i] = 0.0 }  // clamp numerical negatives
+        order[i] = i
+        i = i + 1
+    }
+
+    // Insertion sort descending by eigenvalue
+    i = 1
+    while i < n {
+        let key_val = eig[i]
+        let key_idx = order[i]
+        var j = i - 1
+        var done = false
+        while j >= 0 && done == false {
+            if eig[j] < key_val {
+                eig[j + 1] = eig[j]
+                order[j + 1] = order[j]
+                j = j - 1
+            } else {
+                done = true
+            }
+        }
+        eig[j + 1] = key_val
+        order[j + 1] = key_idx
+        i = i + 1
+    }
+
+    // S[i] = sqrt(eig[i])
+    i = 0
+    while i < n {
+        S[i] = mr_sqrt(eig[i])
+        i = i + 1
+    }
+
+    // Step 4: Build Vt from reordered eigenvectors.
+    // V_sorted[:, i] = V[:, order[i]], then Vt = V_sorted^T
+    i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            // Vt[i, j] = V[j, order[i]]
+            Vt[i * n + j] = V[j * n + order[i]]
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Step 5: Compute U = A * V_sorted * diag(1/sigma).
+    // First build V_sorted in a temporary (it is Vt^T, so V_sorted[j, i] = Vt[i, j]).
+    var Vs: [f64; 4096] = [0.0; 4096]
+    i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            Vs[j * n + i] = Vt[i * n + j]
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // U[:, i] = A * Vs[:, i] / S[i]
+    i = 0
+    while i < n {
+        if S[i] > 1.0e-14 {
+            let inv_s = 1.0 / S[i]
+            var r = 0
+            while r < m {
+                var sum = 0.0
+                var c = 0
+                while c < n {
+                    sum = sum + A[r * n + c] * Vs[c * n + i]
+                    c = c + 1
+                }
+                U[r * n + i] = sum * inv_s
+                r = r + 1
+            }
+        } else {
+            // Zero singular value: set column to zero
+            var r = 0
+            while r < m {
+                U[r * n + i] = 0.0
+                r = r + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// POD: Proper Orthogonal Decomposition
+// =============================================================================
+
+// Determine smallest rank r such that cumulative energy >= energy_frac.
+// Energy fraction = sum_{i<=r} sigma_i^2 / sum_all sigma_i^2.
+fn pod_rank_for_energy(sv: &[f64; 64], n: i32, energy_frac: f64) -> i32 with Mut, Div {
+    var total = 0.0
+    var i = 0
+    while i < n {
+        total = total + sv[i] * sv[i]
+        i = i + 1
+    }
+
+    if total < 1.0e-30 { return 1 }
+
+    var cumul = 0.0
+    var r = 0
+    while r < n {
+        cumul = cumul + sv[r] * sv[r]
+        if cumul / total >= energy_frac { return r + 1 }
+        r = r + 1
+    }
+    n
+}
+
+// Compute POD basis from snapshot matrix.
+//
+// 1. Compute SVD of snapshot matrix (n_dof x n_snap)
+// 2. Select r basis vectors capturing >= energy_thresh fraction of total energy
+// 3. Store first r left singular vectors as reduced basis V (n_dof x r)
+fn pod_compute(snapshots: &SnapshotMatrix, energy_thresh: f64,
+               basis: &!ReducedBasis) with Mut, Div, Panic {
+    let nd = snapshots.n_dof
+    let ns = snapshots.n_snap
+
+    // SVD of the snapshot matrix (nd x ns)
+    var U_svd: [f64; 4096] = [0.0; 4096]
+    var S_svd: [f64; 64] = [0.0; 64]
+    var Vt_svd: [f64; 4096] = [0.0; 4096]
+
+    mr_svd(&snapshots.data, nd, ns, &!U_svd, &!S_svd, &!Vt_svd)
+
+    // Determine rank from energy threshold
+    let r = pod_rank_for_energy(&S_svd, ns, energy_thresh)
+
+    // Store first r left singular vectors as basis: V (nd x r)
+    // V[:, j] = U_svd[:, j] for j = 0..r-1
+    var i = 0
+    while i < nd {
+        var j = 0
+        while j < r {
+            basis.V[i * r + j] = U_svd[i * ns + j]
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    basis.n_dof = nd
+    basis.n_basis = r
+
+    // Copy singular values
+    i = 0
+    while i < ns {
+        basis.singular_values[i] = S_svd[i]
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Galerkin Projection
+// =============================================================================
+
+// Project matrix: A_r = V^T * A * V  (n_basis x n_basis reduced matrix).
+// V is n_dof x n_basis, A is n_dof x n_dof. All row-major.
+// Compute AV = A * V (n_dof x n_basis), then A_r = V^T * AV.
+fn mor_project_matrix(V: &[f64; 4096], A: &[f64; 4096],
+                      n_dof: i32, n_basis: i32,
+                      A_r: &![f64; 4096]) with Mut, Div {
+    // Step 1: AV = A * V (n_dof x n_basis)
+    var AV: [f64; 4096] = [0.0; 4096]
+    var i = 0
+    while i < n_dof {
+        var j = 0
+        while j < n_basis {
+            var sum = 0.0
+            var k = 0
+            while k < n_dof {
+                sum = sum + A[i * n_dof + k] * V[k * n_basis + j]
+                k = k + 1
+            }
+            AV[i * n_basis + j] = sum
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Step 2: A_r = V^T * AV (n_basis x n_basis)
+    i = 0
+    while i < n_basis {
+        var j = 0
+        while j < n_basis {
+            var sum = 0.0
+            var k = 0
+            while k < n_dof {
+                // V^T[i, k] = V[k, i] = V[k * n_basis + i]
+                sum = sum + V[k * n_basis + i] * AV[k * n_basis + j]
+                k = k + 1
+            }
+            A_r[i * n_basis + j] = sum
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// Project vector: b_r = V^T * b  (n_basis x 1 reduced vector).
+// V is n_dof x n_basis, b has n_dof elements.
+fn mor_project_vector(V: &[f64; 4096], b: &[f64; 256],
+                      n_dof: i32, n_basis: i32,
+                      b_r: &![f64; 64]) with Mut {
+    var i = 0
+    while i < n_basis {
+        var sum = 0.0
+        var k = 0
+        while k < n_dof {
+            // V^T[i, k] = V[k * n_basis + i]
+            sum = sum + V[k * n_basis + i] * b[k]
+            k = k + 1
+        }
+        b_r[i] = sum
+        i = i + 1
+    }
+}
+
+// Project right-hand side: f_r = V^T * f.
+// Alias for mor_project_vector for notational clarity in RB methods.
+fn mor_project_rhs(V: &[f64; 4096], f: &[f64; 256],
+                   n_dof: i32, n_basis: i32,
+                   f_r: &![f64; 64]) with Mut {
+    mor_project_vector(V, f, n_dof, n_basis, f_r)
+}
+
+// =============================================================================
+// Reconstruction
+// =============================================================================
+
+// Reconstruct full solution: u_full = V * u_red  (n_dof x 1).
+// V is n_dof x n_basis, u_red has n_basis elements.
+fn mor_reconstruct(V: &[f64; 4096], u_red: &[f64; 64],
+                   n_dof: i32, n_basis: i32,
+                   u_full: &![f64; 256]) with Mut {
+    var i = 0
+    while i < n_dof {
+        var sum = 0.0
+        var j = 0
+        while j < n_basis {
+            sum = sum + V[i * n_basis + j] * u_red[j]
+            j = j + 1
+        }
+        u_full[i] = sum
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Reduced System Solve (Gaussian Elimination)
+// =============================================================================
+
+// Solve A_r * u_r = b_r via Gaussian elimination with partial pivoting.
+// A_r is n_basis x n_basis, b_r and u_r have n_basis elements.
+// A_r is copied internally (not destroyed).
+fn mor_solve_reduced(A_r: &[f64; 4096], b_r: &[f64; 64], n_basis: i32,
+                     u_r: &![f64; 64]) with Mut, Div, Panic {
+    let nb = n_basis
+
+    // Copy A_r and b_r into working arrays
+    var M: [f64; 4096] = [0.0; 4096]
+    var rhs: [f64; 64] = [0.0; 64]
+    var i = 0
+    while i < nb {
+        var j = 0
+        while j < nb {
+            M[i * nb + j] = A_r[i * nb + j]
+            j = j + 1
+        }
+        rhs[i] = b_r[i]
+        i = i + 1
+    }
+
+    // Forward elimination with partial pivoting
+    var col = 0
+    while col < nb {
+        // Find pivot: row with max absolute value in column col, rows col..nb-1
+        var pivot_row = col
+        var pivot_val = mr_abs(M[col * nb + col])
+        var row = col + 1
+        while row < nb {
+            let v = mr_abs(M[row * nb + col])
+            if v > pivot_val {
+                pivot_val = v
+                pivot_row = row
+            }
+            row = row + 1
+        }
+
+        // Swap rows col and pivot_row
+        if pivot_row != col {
+            var k = 0
+            while k < nb {
+                let tmp = M[col * nb + k]
+                M[col * nb + k] = M[pivot_row * nb + k]
+                M[pivot_row * nb + k] = tmp
+                k = k + 1
+            }
+            let tmp_r = rhs[col]
+            rhs[col] = rhs[pivot_row]
+            rhs[pivot_row] = tmp_r
+        }
+
+        // Eliminate below
+        let diag = M[col * nb + col]
+        if mr_abs(diag) < 1.0e-30 {
+            // Singular or nearly singular — set solution to zero for this component
+            col = col + 1
+        } else {
+            row = col + 1
+            while row < nb {
+                let factor = M[row * nb + col] / diag
+                var k = col + 1
+                while k < nb {
+                    M[row * nb + k] = M[row * nb + k] - factor * M[col * nb + k]
+                    k = k + 1
+                }
+                M[row * nb + col] = 0.0
+                rhs[row] = rhs[row] - factor * rhs[col]
+                row = row + 1
+            }
+            col = col + 1
+        }
+    }
+
+    // Back substitution
+    i = nb - 1
+    var done_back = false
+    while i >= 0 && done_back == false {
+        var sum = rhs[i]
+        var j = i + 1
+        while j < nb {
+            sum = sum - M[i * nb + j] * u_r[j]
+            j = j + 1
+        }
+        let diag = M[i * nb + i]
+        if mr_abs(diag) < 1.0e-30 {
+            u_r[i] = 0.0
+        } else {
+            u_r[i] = sum / diag
+        }
+        if i == 0 { done_back = true } else { i = i - 1 }
+    }
+}
+
+// =============================================================================
+// Error Estimation
+// =============================================================================
+
+// Residual-based a posteriori error estimate:
+//   ||b - A * V * u_red|| / ||b||
+//
+// This is the relative residual norm, which provides a computable
+// upper bound when combined with the inf-sup constant (Hesthaven et al., 2016).
+fn mor_error_estimate(A: &[f64; 4096], b: &[f64; 256], V: &[f64; 4096],
+                      u_red: &[f64; 64],
+                      n_dof: i32, n_basis: i32) -> f64 with Mut, Div, Panic {
+    // Compute u_full = V * u_red
+    var u_full: [f64; 256] = [0.0; 256]
+    mor_reconstruct(V, u_red, n_dof, n_basis, &!u_full)
+
+    // Compute residual r = b - A * u_full
+    var res: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < n_dof {
+        var sum = 0.0
+        var j = 0
+        while j < n_dof {
+            sum = sum + A[i * n_dof + j] * u_full[j]
+            j = j + 1
+        }
+        res[i] = b[i] - sum
+        i = i + 1
+    }
+
+    let res_norm = mr_norm2_256(&res, n_dof)
+    let b_norm = mr_norm2_256(b, n_dof)
+
+    if b_norm < 1.0e-30 { return res_norm }
+    res_norm / b_norm
+}
+
+// True relative error: ||u_exact - u_approx|| / ||u_exact||.
+fn mor_true_error(u_full_exact: &[f64; 256], u_full_approx: &[f64; 256],
+                  n_dof: i32) -> f64 with Mut, Div {
+    var diff_sq = 0.0
+    var exact_sq = 0.0
+    var i = 0
+    while i < n_dof {
+        let d = u_full_exact[i] - u_full_approx[i]
+        diff_sq = diff_sq + d * d
+        exact_sq = exact_sq + u_full_exact[i] * u_full_exact[i]
+        i = i + 1
+    }
+
+    if exact_sq < 1.0e-30 { return mr_sqrt(diff_sq) }
+    mr_sqrt(diff_sq) / mr_sqrt(exact_sq)
+}
+
+// =============================================================================
+// Full MOR Pipeline
+// =============================================================================
+
+// Solve a reduced-order model: project, solve reduced system, reconstruct,
+// compute error estimate.
+//
+// Given full system A*u = b and a precomputed ReducedBasis:
+//   1. A_r = V^T A V
+//   2. b_r = V^T b
+//   3. Solve A_r u_r = b_r
+//   4. u_full = V u_r
+//   5. error_est = ||b - A u_full|| / ||b||
+fn mor_solve(A: &[f64; 4096], b: &[f64; 256], n_dof: i32,
+             basis: &ReducedBasis,
+             result: &!MORResult) with Mut, Div, Panic {
+    let nb = basis.n_basis
+
+    // Project matrix
+    var A_r: [f64; 4096] = [0.0; 4096]
+    mor_project_matrix(&basis.V, A, n_dof, nb, &!A_r)
+
+    // Project RHS
+    var b_r: [f64; 64] = [0.0; 64]
+    mor_project_rhs(&basis.V, b, n_dof, nb, &!b_r)
+
+    // Solve reduced system
+    var u_r: [f64; 64] = [0.0; 64]
+    mor_solve_reduced(&A_r, &b_r, nb, &!u_r)
+
+    // Store reduced solution
+    var i = 0
+    while i < nb {
+        result.u_reduced[i] = u_r[i]
+        i = i + 1
+    }
+
+    // Reconstruct full solution
+    mor_reconstruct(&basis.V, &u_r, n_dof, nb, &!result.u_full)
+
+    // Compute error estimate
+    let err = mor_error_estimate(A, b, &basis.V, &u_r, n_dof, nb)
+
+    result.n_basis = nb
+    result.error_est = err
+    result.converged = err < 1.0e-6
+}
+
+// =============================================================================
+// Modified Gram-Schmidt Orthogonalization
+// =============================================================================
+
+// Orthogonalize v_new against the existing columns of V and append it.
+// V is n_dof x n_basis (the existing basis). After this call, column n_basis
+// of V contains the orthonormalized new vector.
+//
+// Uses modified Gram-Schmidt (MGS) for numerical stability:
+//   for each existing column q_j:
+//     v_new = v_new - <v_new, q_j> * q_j
+//   v_new = v_new / ||v_new||
+fn mr_gram_schmidt(V: &![f64; 4096], n_dof: i32, n_basis: i32,
+                   v_new: &[f64; 256]) with Mut, Div, Panic {
+    // Copy v_new into a working array within V's column space
+    var w: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < n_dof {
+        w[i] = v_new[i]
+        i = i + 1
+    }
+
+    // Two passes of MGS for improved orthogonality (reorthogonalization).
+    // This is standard practice in reduced basis methods
+    // (Daniel, Gragg, Kaufman & Stewart, 1976).
+    var pass = 0
+    while pass < 2 {
+        var j = 0
+        while j < n_basis {
+            // Compute projection coefficient: <w, V[:, j]>
+            var proj = 0.0
+            i = 0
+            while i < n_dof {
+                proj = proj + w[i] * V[i * n_basis + j]
+                i = i + 1
+            }
+            // Subtract projection: w = w - proj * V[:, j]
+            i = 0
+            while i < n_dof {
+                w[i] = w[i] - proj * V[i * n_basis + j]
+                i = i + 1
+            }
+            j = j + 1
+        }
+        pass = pass + 1
+    }
+
+    // Normalize
+    let nrm = mr_norm2_256(&w, n_dof)
+    if nrm < 1.0e-14 {
+        // Linearly dependent: store zero vector (caller should check)
+        i = 0
+        while i < n_dof {
+            V[i * (n_basis + 1) + n_basis] = 0.0
+            i = i + 1
+        }
+        return
+    }
+
+    let inv_nrm = 1.0 / nrm
+
+    // We need to write into a reshaped V: the new column width is n_basis + 1.
+    // However, since V is a flat 4096-array and the caller will update n_basis,
+    // we write into column n_basis of the (n_dof x (n_basis+1)) layout.
+    // IMPORTANT: The caller must have allocated V with enough logical columns.
+    // We write at offset positions: V[i * new_width + n_basis] where
+    // new_width is what the caller will use after incrementing n_basis.
+    // Since the caller controls the stride, and the greedy algorithm rebuilds
+    // V from scratch, here we write using stride (n_basis + 1).
+    //
+    // Actually, to keep consistent with the greedy_basis function that
+    // rebuilds V with the new stride, we simply return the normalized vector
+    // in V's column n_basis using stride = n_basis + 1.
+    i = 0
+    while i < n_dof {
+        V[i * (n_basis + 1) + n_basis] = w[i] * inv_nrm
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Greedy Basis Construction
+// =============================================================================
+
+// Greedy reduced basis construction with error-driven parameter selection.
+//
+// Algorithm (Hesthaven, Rozza & Stamm, 2016, Ch. 3):
+//   1. Start with first parameter: solve full system, set as initial basis
+//   2. For each candidate parameter in the training set:
+//      a. Compute full solution u(mu)
+//      b. Project onto current basis: u_proj = V * V^T * u(mu)
+//      c. Measure error = ||u(mu) - u_proj||
+//   3. Add parameter with largest projection error to the basis
+//      (Gram-Schmidt orthogonalization)
+//   4. Repeat until error < tol or max_basis reached
+//
+// solve_full(param_vec, n_dof, u_out): solves the full-order model for the
+// parameter values encoded in param_vec (first entry used as scalar param).
+fn greedy_basis(solve_full: fn(&[f64; 64], i32, &![f64; 256]) with Mut, Div, Panic,
+                params: &[f64; 64], n_params: i32, n_dof: i32,
+                max_basis: i32, tol: f64,
+                basis: &!ReducedBasis) with Mut, Div, Panic {
+    // Clamp max_basis to avoid exceeding array bounds
+    var max_b = max_basis
+    if max_b > 64 { max_b = 64 }
+    if max_b > n_params { max_b = n_params }
+
+    // Storage for all full solutions (precompute for efficiency)
+    // We store them in a flat array: solutions[j * n_dof + i] = u_j[i]
+    // Limited by 4096: n_params * n_dof must fit.
+    var solutions: [f64; 4096] = [0.0; 4096]
+    var param_vec: [f64; 64] = [0.0; 64]
+    var u_tmp: [f64; 256] = [0.0; 256]
+
+    // Track which parameters have been selected
+    var selected: [i32; 64] = [0; 64]  // 1 if selected, 0 otherwise
+
+    // Solve for the first parameter and initialize basis
+    param_vec[0] = params[0]
+    solve_full(&param_vec, n_dof, &!u_tmp)
+
+    // Store solution
+    var i = 0
+    while i < n_dof {
+        solutions[0 * n_dof + i] = u_tmp[i]
+        i = i + 1
+    }
+
+    // Compute remaining solutions
+    var j = 1
+    while j < n_params {
+        param_vec[0] = params[j]
+        solve_full(&param_vec, n_dof, &!u_tmp)
+        i = 0
+        while i < n_dof {
+            solutions[j * n_dof + i] = u_tmp[i]
+            i = i + 1
+        }
+        j = j + 1
+    }
+
+    // Initialize basis with first solution (normalized)
+    let nrm0 = mr_norm2_256(&u_tmp, n_dof)
+
+    // Reload first solution into u_tmp
+    i = 0
+    while i < n_dof {
+        u_tmp[i] = solutions[0 * n_dof + i]
+        i = i + 1
+    }
+    let norm_first = mr_norm2_256(&u_tmp, n_dof)
+
+    // V starts as n_dof x 1
+    if norm_first > 1.0e-14 {
+        let inv_n = 1.0 / norm_first
+        i = 0
+        while i < n_dof {
+            basis.V[i * 1 + 0] = u_tmp[i] * inv_n
+            i = i + 1
+        }
+    } else {
+        i = 0
+        while i < n_dof {
+            basis.V[i * 1 + 0] = 0.0
+            i = i + 1
+        }
+    }
+    basis.n_dof = n_dof
+    basis.n_basis = 1
+    selected[0] = 1
+
+    // Greedy loop
+    var nb = 1
+    var max_err = 1.0e30
+    while nb < max_b && max_err > tol {
+        // Find parameter with largest projection error
+        var worst_idx = -1
+        var worst_err = 0.0
+
+        j = 0
+        while j < n_params {
+            if selected[j] == 0 {
+                // Compute projection of solution j onto current basis
+                // u_proj = V * V^T * u_j
+                // Error = ||u_j - u_proj||
+
+                // Load u_j
+                var u_j: [f64; 256] = [0.0; 256]
+                i = 0
+                while i < n_dof {
+                    u_j[i] = solutions[j * n_dof + i]
+                    i = i + 1
+                }
+
+                // Compute V^T * u_j (nb coefficients)
+                var coeffs: [f64; 64] = [0.0; 64]
+                var c = 0
+                while c < nb {
+                    var dot = 0.0
+                    i = 0
+                    while i < n_dof {
+                        dot = dot + basis.V[i * nb + c] * u_j[i]
+                        i = i + 1
+                    }
+                    coeffs[c] = dot
+                    c = c + 1
+                }
+
+                // Compute u_proj = V * coeffs and error = u_j - u_proj
+                var err_sq = 0.0
+                i = 0
+                while i < n_dof {
+                    var proj_i = 0.0
+                    c = 0
+                    while c < nb {
+                        proj_i = proj_i + basis.V[i * nb + c] * coeffs[c]
+                        c = c + 1
+                    }
+                    let diff = u_j[i] - proj_i
+                    err_sq = err_sq + diff * diff
+                    i = i + 1
+                }
+
+                let err = mr_sqrt(err_sq)
+                if err > worst_err {
+                    worst_err = err
+                    worst_idx = j
+                }
+            }
+            j = j + 1
+        }
+
+        max_err = worst_err
+
+        if worst_idx < 0 || max_err <= tol {
+            // No more candidates or tolerance met
+            max_err = 0.0  // exit loop
+        } else {
+            // Add the worst-error solution to the basis via Gram-Schmidt
+            selected[worst_idx] = 1
+
+            // Load the solution
+            i = 0
+            while i < n_dof {
+                u_tmp[i] = solutions[worst_idx * n_dof + i]
+                i = i + 1
+            }
+
+            // Rebuild V with new column width (nb + 1).
+            // Copy existing V (n_dof x nb) into new layout (n_dof x (nb+1))
+            var V_new: [f64; 4096] = [0.0; 4096]
+            i = 0
+            while i < n_dof {
+                var c = 0
+                while c < nb {
+                    V_new[i * (nb + 1) + c] = basis.V[i * nb + c]
+                    c = c + 1
+                }
+                i = i + 1
+            }
+
+            // Copy V_new back to basis.V
+            i = 0
+            while i < 4096 {
+                basis.V[i] = V_new[i]
+                i = i + 1
+            }
+
+            // Orthogonalize u_tmp against existing columns and append
+            mr_gram_schmidt(&!basis.V, n_dof, nb, &u_tmp)
+
+            nb = nb + 1
+            basis.n_basis = nb
+        }
+    }
+
+    // Store singular values as zeros (not computed in greedy — would need SVD
+    // of the snapshot matrix for true singular values; the greedy basis is
+    // not guaranteed to produce them in order)
+    i = 0
+    while i < 64 {
+        basis.singular_values[i] = 0.0
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// DEIM: Discrete Empirical Interpolation Method
+// =============================================================================
+
+// Compute DEIM interpolation indices from a basis.
+//
+// Algorithm (Chaturantabut & Sorensen, 2010):
+//   Input: U = [u_1, ..., u_m] orthonormal DEIM basis (n_dof x m)
+//   Output: P = interpolation indices (m integers)
+//
+//   1. p_1 = argmax |u_1|
+//      P = {p_1}
+//   2. For l = 2, ..., m:
+//      a. Solve (P^T U_{1:l-1}) c = P^T u_l  (small (l-1) x (l-1) system)
+//      b. r = u_l - U_{1:l-1} * c             (residual)
+//      c. p_l = argmax |r|
+//      P = P union {p_l}
+//
+// Uses the first n_deim columns of basis.V as the DEIM basis U.
+fn deim_compute(basis: &ReducedBasis, deim: &!DEIMBasis) with Mut, Div, Panic {
+    let nd = basis.n_dof
+    var m = basis.n_basis
+    if m > 64 { m = 64 }
+
+    // Copy first m columns of basis.V into deim.U (nd x m)
+    var i = 0
+    while i < nd {
+        var j = 0
+        while j < m {
+            deim.U[i * m + j] = basis.V[i * basis.n_basis + j]
+            j = j + 1
+        }
+        i = i + 1
+    }
+    deim.n_dof = nd
+    deim.n_deim = m
+
+    // Step 1: p_1 = argmax |u_1|
+    var u_col: [f64; 256] = [0.0; 256]
+    i = 0
+    while i < nd {
+        u_col[i] = deim.U[i * m + 0]
+        i = i + 1
+    }
+    deim.P[0] = mr_argmax_abs_256(&u_col, nd)
+
+    // Step 2: For l = 1, 2, ..., m-1 (0-indexed: adding column l)
+    var l = 1
+    while l < m {
+        // Extract u_l (column l of U)
+        i = 0
+        while i < nd {
+            u_col[i] = deim.U[i * m + l]
+            i = i + 1
+        }
+
+        // Build the small system (P^T U_{1:l}) c = P^T u_l
+        // (P^T U_{1:l}) is l x l: row i selects row P[i] from U_{1:l}
+        var PtU: [f64; 4096] = [0.0; 4096]
+        var Ptu: [f64; 64] = [0.0; 64]
+        i = 0
+        while i < l {
+            let pi = deim.P[i]
+            var j = 0
+            while j < l {
+                PtU[i * l + j] = deim.U[pi * m + j]
+                j = j + 1
+            }
+            Ptu[i] = u_col[pi]
+            i = i + 1
+        }
+
+        // Solve PtU * c = Ptu via Gaussian elimination (small l x l system)
+        var c_vec: [f64; 64] = [0.0; 64]
+
+        // Forward elimination with partial pivoting
+        var M: [f64; 4096] = [0.0; 4096]
+        var rhs: [f64; 64] = [0.0; 64]
+        i = 0
+        while i < l {
+            var j = 0
+            while j < l {
+                M[i * l + j] = PtU[i * l + j]
+                j = j + 1
+            }
+            rhs[i] = Ptu[i]
+            i = i + 1
+        }
+
+        var col = 0
+        while col < l {
+            // Partial pivoting
+            var pivot_row = col
+            var pivot_val = mr_abs(M[col * l + col])
+            var row = col + 1
+            while row < l {
+                let v = mr_abs(M[row * l + col])
+                if v > pivot_val { pivot_val = v; pivot_row = row }
+                row = row + 1
+            }
+            if pivot_row != col {
+                var k = 0
+                while k < l {
+                    let tmp = M[col * l + k]
+                    M[col * l + k] = M[pivot_row * l + k]
+                    M[pivot_row * l + k] = tmp
+                    k = k + 1
+                }
+                let tmp_r = rhs[col]
+                rhs[col] = rhs[pivot_row]
+                rhs[pivot_row] = tmp_r
+            }
+
+            let diag = M[col * l + col]
+            if mr_abs(diag) > 1.0e-30 {
+                row = col + 1
+                while row < l {
+                    let factor = M[row * l + col] / diag
+                    var k = col + 1
+                    while k < l {
+                        M[row * l + k] = M[row * l + k] - factor * M[col * l + k]
+                        k = k + 1
+                    }
+                    rhs[row] = rhs[row] - factor * rhs[col]
+                    row = row + 1
+                }
+            }
+            col = col + 1
+        }
+
+        // Back substitution
+        i = l - 1
+        var done_bs = false
+        while i >= 0 && done_bs == false {
+            var sum = rhs[i]
+            var j = i + 1
+            while j < l {
+                sum = sum - M[i * l + j] * c_vec[j]
+                j = j + 1
+            }
+            let diag = M[i * l + i]
+            if mr_abs(diag) > 1.0e-30 {
+                c_vec[i] = sum / diag
+            } else {
+                c_vec[i] = 0.0
+            }
+            if i == 0 { done_bs = true } else { i = i - 1 }
+        }
+
+        // Compute residual: r = u_l - U_{1:l} * c
+        var res: [f64; 256] = [0.0; 256]
+        i = 0
+        while i < nd {
+            var val = u_col[i]
+            var j = 0
+            while j < l {
+                val = val - deim.U[i * m + j] * c_vec[j]
+                j = j + 1
+            }
+            res[i] = val
+            i = i + 1
+        }
+
+        // p_l = argmax |r|
+        deim.P[l] = mr_argmax_abs_256(&res, nd)
+
+        l = l + 1
+    }
+}
+
+// Approximate a nonlinear function using DEIM.
+//
+// f_approx = U * (P^T U)^{-1} * P^T * f_full
+//
+// This requires evaluating f only at the m DEIM interpolation indices
+// (stored in deim.P), not at all n_dof DOFs. The complexity reduction
+// from O(n_dof) to O(m) per nonlinear evaluation is the key benefit.
+fn deim_approximate(deim: &DEIMBasis, f_full: &[f64; 256],
+                    f_approx: &![f64; 256]) with Mut, Div, Panic {
+    let nd = deim.n_dof
+    let m = deim.n_deim
+
+    // Step 1: Extract f at DEIM indices: f_P = P^T * f_full (m elements)
+    var f_P: [f64; 64] = [0.0; 64]
+    var i = 0
+    while i < m {
+        f_P[i] = f_full[deim.P[i]]
+        i = i + 1
+    }
+
+    // Step 2: Build (P^T U) — m x m matrix
+    var PtU: [f64; 4096] = [0.0; 4096]
+    i = 0
+    while i < m {
+        let pi = deim.P[i]
+        var j = 0
+        while j < m {
+            PtU[i * m + j] = deim.U[pi * m + j]
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Step 3: Solve (P^T U) * c = f_P via Gaussian elimination
+    var c_vec: [f64; 64] = [0.0; 64]
+
+    // Copy PtU and f_P into working arrays
+    var M: [f64; 4096] = [0.0; 4096]
+    var rhs: [f64; 64] = [0.0; 64]
+    i = 0
+    while i < m {
+        var j = 0
+        while j < m {
+            M[i * m + j] = PtU[i * m + j]
+            j = j + 1
+        }
+        rhs[i] = f_P[i]
+        i = i + 1
+    }
+
+    // Forward elimination with partial pivoting
+    var col = 0
+    while col < m {
+        var pivot_row = col
+        var pivot_val = mr_abs(M[col * m + col])
+        var row = col + 1
+        while row < m {
+            let v = mr_abs(M[row * m + col])
+            if v > pivot_val { pivot_val = v; pivot_row = row }
+            row = row + 1
+        }
+        if pivot_row != col {
+            var k = 0
+            while k < m {
+                let tmp = M[col * m + k]
+                M[col * m + k] = M[pivot_row * m + k]
+                M[pivot_row * m + k] = tmp
+                k = k + 1
+            }
+            let tmp_r = rhs[col]
+            rhs[col] = rhs[pivot_row]
+            rhs[pivot_row] = tmp_r
+        }
+
+        let diag = M[col * m + col]
+        if mr_abs(diag) > 1.0e-30 {
+            row = col + 1
+            while row < m {
+                let factor = M[row * m + col] / diag
+                var k = col + 1
+                while k < m {
+                    M[row * m + k] = M[row * m + k] - factor * M[col * m + k]
+                    k = k + 1
+                }
+                rhs[row] = rhs[row] - factor * rhs[col]
+                row = row + 1
+            }
+        }
+        col = col + 1
+    }
+
+    // Back substitution
+    i = m - 1
+    var done_bs = false
+    while i >= 0 && done_bs == false {
+        var sum = rhs[i]
+        var j = i + 1
+        while j < m {
+            sum = sum - M[i * m + j] * c_vec[j]
+            j = j + 1
+        }
+        let diag = M[i * m + i]
+        if mr_abs(diag) > 1.0e-30 {
+            c_vec[i] = sum / diag
+        } else {
+            c_vec[i] = 0.0
+        }
+        if i == 0 { done_bs = true } else { i = i - 1 }
+    }
+
+    // Step 4: f_approx = U * c_vec (nd x 1)
+    i = 0
+    while i < nd {
+        var sum = 0.0
+        var j = 0
+        while j < m {
+            sum = sum + deim.U[i * m + j] * c_vec[j]
+            j = j + 1
+        }
+        f_approx[i] = sum
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Snapshot Collection
+// =============================================================================
+
+// Collect snapshots by solving the full-order model for each parameter.
+//
+// For each parameter mu_j in params[0..n_params-1]:
+//   solve_full(param_vec, n_dof, u_out) computes u(mu_j)
+//   Store as column j of snapshot matrix: data[i * n_snap + j] = u_j[i]
+//
+// The snapshot matrix has dimensions n_dof x n_params (row-major).
+fn mor_collect_snapshots(solve: fn(&[f64; 64], i32, &![f64; 256]) with Mut, Div, Panic,
+                         params: &[f64; 64], n_params: i32, n_dof: i32,
+                         snapshots: &!SnapshotMatrix) with Mut, Div, Panic {
+    snapshots.n_dof = n_dof
+    snapshots.n_snap = n_params
+
+    var param_vec: [f64; 64] = [0.0; 64]
+    var u_out: [f64; 256] = [0.0; 256]
+
+    var j = 0
+    while j < n_params {
+        param_vec[0] = params[j]
+        solve(&param_vec, n_dof, &!u_out)
+
+        // Store as column j: data[i * n_params + j] = u_out[i]
+        var i = 0
+        while i < n_dof {
+            snapshots.data[i * n_params + j] = u_out[i]
+            i = i + 1
+        }
+        j = j + 1
+    }
+}

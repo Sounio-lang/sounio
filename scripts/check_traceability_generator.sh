@@ -6,11 +6,11 @@ cd "$ROOT_DIR"
 
 RUN_DIR="${1:-}"
 if [[ -z "$RUN_DIR" ]]; then
-  RUN_DIR="$(ls -1dt artifacts/diagnostic/final-* 2>/dev/null | head -n1 || true)"
+  RUN_DIR="$(bash scripts/latest_diagnostic_run_dir.sh 2>/dev/null || true)"
 fi
 
 if [[ -z "$RUN_DIR" || ! -d "$RUN_DIR" ]]; then
-  echo "No diagnostic run dir found under artifacts/diagnostic/final-*"
+  echo "No diagnostic run dir found under artifacts/diagnostic/*"
   echo "Run scripts/fast_gate.sh (or pass a run dir) before checking traceability generation."
   exit 1
 fi

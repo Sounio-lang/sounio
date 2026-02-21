@@ -1,0 +1,933 @@
+// stdlib/math/fem.sio — Finite element method
+//
+// Pure Sounio implementations:
+//   1D bar/beam elements (2-node)
+//   2D constant strain triangle (CST) elements
+//   Global assembly of stiffness, mass, and load
+//   Dirichlet BC application via penalty method
+//   Direct solver (Gaussian elimination)
+//   Conjugate gradient solver
+//   Plane stress/strain constitutive matrices
+//   Post-processing: strain, stress, von Mises
+//
+// References:
+//   Hughes (2000): "The Finite Element Method"
+//   Zienkiewicz, Taylor & Zhu (2005): "The Finite Element Method"
+//   Ern & Guermond (2004): "Theory and Practice of Finite Elements"
+
+// =============================================================================
+// Helpers (all prefixed fe_ to avoid collisions)
+// =============================================================================
+
+fn fe_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn fe_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+fn fe_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+fn fe_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+// =============================================================================
+// Data structures
+// =============================================================================
+
+struct FEMesh1D {
+    nodes: [f64; 256],
+    n_nodes: i32,
+    elements: [i32; 512],
+    n_elem: i32,
+    nodes_per_elem: i32
+}
+
+struct FEMesh2D {
+    nodes_x: [f64; 256],
+    nodes_y: [f64; 256],
+    n_nodes: i32,
+    elements: [i32; 1536],
+    n_elem: i32,
+    nodes_per_elem: i32
+}
+
+struct FESystem {
+    K: [f64; 4096],
+    M: [f64; 4096],
+    rhs: [f64; 256],
+    solution: [f64; 256],
+    n_dof: i32
+}
+
+struct FEResult {
+    u: [f64; 256],
+    residual: f64,
+    iterations: i32,
+    converged: bool
+}
+
+struct StressResult {
+    sxx: f64,
+    syy: f64,
+    sxy: f64,
+    von_mises: f64
+}
+
+// =============================================================================
+// 1D Element Routines
+// =============================================================================
+
+// 2x2 element stiffness for a 1D bar element.
+// ke = (EA / L) * [[1, -1], [-1, 1]]
+// where L = |x2 - x1|.
+// Stored row-major: ke[0]=K11, ke[1]=K12, ke[2]=K21, ke[3]=K22.
+fn fem_1d_stiffness(x1: f64, x2: f64, EA: f64, ke: &![f64; 4]) with Mut, Div {
+    let L = fe_abs(x2 - x1)
+    let k = EA / L
+    ke[0] = k
+    ke[1] = 0.0 - k
+    ke[2] = 0.0 - k
+    ke[3] = k
+}
+
+// 2x2 consistent mass matrix for a 1D bar element.
+// me = (rho_A * L / 6) * [[2, 1], [1, 2]]
+fn fem_1d_mass(x1: f64, x2: f64, rho_A: f64, me: &![f64; 4]) with Mut, Div {
+    let L = fe_abs(x2 - x1)
+    let c = rho_A * L / 6.0
+    me[0] = 2.0 * c
+    me[1] = c
+    me[2] = c
+    me[3] = 2.0 * c
+}
+
+// Element load vector for uniformly distributed load q on a 1D element.
+// fe = (q * L / 2) * [1, 1]
+fn fem_1d_load(x1: f64, x2: f64, q: f64, fe: &![f64; 2]) with Mut, Div {
+    let L = fe_abs(x2 - x1)
+    let c = q * L / 2.0
+    fe[0] = c
+    fe[1] = c
+}
+
+// =============================================================================
+// 2D Constant Strain Triangle (CST) Element Routines
+// =============================================================================
+
+// Triangle area via determinant formula.
+// A = 0.5 * |det([[1, x1, y1], [1, x2, y2], [1, x3, y3]])|
+// = 0.5 * |(x1(y2 - y3) + x2(y3 - y1) + x3(y1 - y2))|
+fn fem_tri_area(x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64) -> f64 with Mut, Div {
+    let det = x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2)
+    0.5 * fe_abs(det)
+}
+
+// Barycentric (area) coordinates N1, N2, N3 at point (x, y).
+// N_i = A_i / A where A_i is the sub-triangle area opposite node i.
+fn fem_tri_shape(x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64,
+                 x: f64, y: f64, N: &![f64; 3]) with Mut, Div {
+    let A2 = x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2)
+    // N1 = sub-area opposite node 1, formed by (x,y), (x2,y2), (x3,y3)
+    N[0] = (x * (y2 - y3) + x2 * (y3 - y) + x3 * (y - y2)) / A2
+    // N2 = sub-area opposite node 2, formed by (x1,y1), (x,y), (x3,y3)
+    N[1] = (x1 * (y - y3) + x * (y3 - y1) + x3 * (y1 - y)) / A2
+    // N3 = sub-area opposite node 3, formed by (x1,y1), (x2,y2), (x,y)
+    N[2] = (x1 * (y2 - y) + x2 * (y - y1) + x * (y1 - y2)) / A2
+}
+
+// Strain-displacement matrix B (3x6) for a CST triangle.
+// For plane stress/strain, the strain vector is {exx, eyy, 2*exy}.
+// B relates element displacements [u1, v1, u2, v2, u3, v3] to strains.
+//
+// B = (1 / (2A)) * [[b1, 0,  b2, 0,  b3, 0 ],
+//                    [0,  c1, 0,  c2, 0,  c3],
+//                    [c1, b1, c2, b2, c3, b3]]
+// where:
+//   b1 = y2 - y3,   b2 = y3 - y1,   b3 = y1 - y2
+//   c1 = x3 - x2,   c2 = x1 - x3,   c3 = x2 - x1
+//
+// Stored row-major in B[0..17] (3 rows x 6 cols).
+fn fem_tri_grad(x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64,
+                B: &![f64; 18]) with Mut, Div {
+    let A2 = x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2)
+    let inv2A = 1.0 / A2
+
+    let b1 = y2 - y3
+    let b2 = y3 - y1
+    let b3 = y1 - y2
+    let c1 = x3 - x2
+    let c2 = x1 - x3
+    let c3 = x2 - x1
+
+    // Row 0: [b1, 0, b2, 0, b3, 0]
+    B[0] = b1 * inv2A
+    B[1] = 0.0
+    B[2] = b2 * inv2A
+    B[3] = 0.0
+    B[4] = b3 * inv2A
+    B[5] = 0.0
+
+    // Row 1: [0, c1, 0, c2, 0, c3]
+    B[6] = 0.0
+    B[7] = c1 * inv2A
+    B[8] = 0.0
+    B[9] = c2 * inv2A
+    B[10] = 0.0
+    B[11] = c3 * inv2A
+
+    // Row 2: [c1, b1, c2, b2, c3, b3]
+    B[12] = c1 * inv2A
+    B[13] = b1 * inv2A
+    B[14] = c2 * inv2A
+    B[15] = b2 * inv2A
+    B[16] = c3 * inv2A
+    B[17] = b3 * inv2A
+}
+
+// 6x6 element stiffness matrix for a CST triangle.
+// ke = t * A * B^T * D * B
+// where t = thickness, A = triangle area, B = strain-displacement, D = constitutive.
+// D is 3x3 (row-major in D[0..8]), ke is 6x6 (row-major in ke[0..35]).
+fn fem_tri_stiffness(x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64,
+                     D: &[f64; 9], thickness: f64, ke: &![f64; 36]) with Mut, Div {
+    let A = fem_tri_area(x1, y1, x2, y2, x3, y3)
+
+    // Compute B matrix (3x6)
+    var B: [f64; 18] = [0.0; 18]
+    fem_tri_grad(x1, y1, x2, y2, x3, y3, &!B)
+
+    // Compute DB = D * B (3x6)
+    var DB: [f64; 18] = [0.0; 18]
+    var i = 0
+    while i < 3 {
+        var j = 0
+        while j < 6 {
+            var s = 0.0
+            var k = 0
+            while k < 3 {
+                s = s + D[i * 3 + k] * B[k * 6 + j]
+                k = k + 1
+            }
+            DB[i * 6 + j] = s
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Compute ke = t * A * B^T * DB (6x6)
+    let scale = thickness * A
+    i = 0
+    while i < 6 {
+        var j = 0
+        while j < 6 {
+            var s = 0.0
+            var k = 0
+            while k < 3 {
+                s = s + B[k * 6 + i] * DB[k * 6 + j]
+                k = k + 1
+            }
+            ke[i * 6 + j] = scale * s
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// 6x6 consistent mass matrix for a CST triangle.
+// me = rho * t * A / 12 * [[2,0,1,0,1,0],
+//                            [0,2,0,1,0,1],
+//                            [1,0,2,0,1,0],
+//                            [0,1,0,2,0,1],
+//                            [1,0,1,0,2,0],
+//                            [0,1,0,1,0,2]]
+//
+// This arises from the integral of N^T * N over the triangle, where N_i are
+// the linear shape functions: int(N_i * N_j) = A/12 * (1 + delta_ij).
+fn fem_tri_mass(x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64,
+                rho: f64, thickness: f64, me: &![f64; 36]) with Mut, Div {
+    let A = fem_tri_area(x1, y1, x2, y2, x3, y3)
+    let c = rho * thickness * A / 12.0
+
+    // Zero out the matrix first
+    var idx = 0
+    while idx < 36 { me[idx] = 0.0; idx = idx + 1 }
+
+    // Pattern: for node pair (a, b), the shape function integral gives
+    //   2 on diagonal blocks (a == b), 1 on off-diagonal blocks (a != b)
+    // Applied per DOF direction (x and y independently).
+    //
+    // Node i maps to DOFs (2i, 2i+1). For nodes a, b in {0, 1, 2}:
+    //   me[2a, 2b] = c * (2 if a==b, 1 otherwise)
+    //   me[2a+1, 2b+1] = same
+    //   me[2a, 2b+1] = 0
+    //   me[2a+1, 2b] = 0
+    var a = 0
+    while a < 3 {
+        var b = 0
+        while b < 3 {
+            let w = if a == b { 2.0 * c } else { c }
+            me[(2 * a) * 6 + (2 * b)] = w
+            me[(2 * a + 1) * 6 + (2 * b + 1)] = w
+            b = b + 1
+        }
+        a = a + 1
+    }
+}
+
+// =============================================================================
+// Constitutive Matrices
+// =============================================================================
+
+// Plane stress constitutive matrix.
+// D = E / (1 - nu^2) * [[1, nu, 0],
+//                        [nu, 1, 0],
+//                        [0, 0, (1-nu)/2]]
+fn fem_plane_stress(E: f64, nu: f64, D: &![f64; 9]) with Mut, Div {
+    let c = E / (1.0 - nu * nu)
+    D[0] = c
+    D[1] = c * nu
+    D[2] = 0.0
+    D[3] = c * nu
+    D[4] = c
+    D[5] = 0.0
+    D[6] = 0.0
+    D[7] = 0.0
+    D[8] = c * (1.0 - nu) / 2.0
+}
+
+// Plane strain constitutive matrix.
+// D = E / ((1 + nu)(1 - 2*nu)) * [[1-nu, nu,   0          ],
+//                                   [nu,   1-nu, 0          ],
+//                                   [0,    0,    (1-2*nu)/2 ]]
+fn fem_plane_strain(E: f64, nu: f64, D: &![f64; 9]) with Mut, Div {
+    let c = E / ((1.0 + nu) * (1.0 - 2.0 * nu))
+    D[0] = c * (1.0 - nu)
+    D[1] = c * nu
+    D[2] = 0.0
+    D[3] = c * nu
+    D[4] = c * (1.0 - nu)
+    D[5] = 0.0
+    D[6] = 0.0
+    D[7] = 0.0
+    D[8] = c * (1.0 - 2.0 * nu) / 2.0
+}
+
+// =============================================================================
+// 1D Assembly
+// =============================================================================
+
+// Assemble global stiffness matrix from all 1D bar elements.
+// mesh.elements stores [n1_0, n2_0, n1_1, n2_1, ...] (2 nodes per element).
+// Global DOF i corresponds to node i (1 DOF per node for 1D bar).
+fn fem_assemble_stiffness_1d(mesh: &FEMesh1D, EA: f64, K: &![f64; 4096]) with Mut, Div {
+    let n = mesh.n_nodes
+    // Zero out K
+    var idx = 0
+    while idx < n * n { K[idx] = 0.0; idx = idx + 1 }
+
+    var e = 0
+    while e < mesh.n_elem {
+        let n1 = mesh.elements[2 * e]
+        let n2 = mesh.elements[2 * e + 1]
+        let x1 = mesh.nodes[n1]
+        let x2 = mesh.nodes[n2]
+
+        var ke: [f64; 4] = [0.0; 4]
+        fem_1d_stiffness(x1, x2, EA, &!ke)
+
+        // Scatter element stiffness into global matrix
+        // Local DOF 0 -> global DOF n1
+        // Local DOF 1 -> global DOF n2
+        K[n1 * n + n1] = K[n1 * n + n1] + ke[0]
+        K[n1 * n + n2] = K[n1 * n + n2] + ke[1]
+        K[n2 * n + n1] = K[n2 * n + n1] + ke[2]
+        K[n2 * n + n2] = K[n2 * n + n2] + ke[3]
+
+        e = e + 1
+    }
+}
+
+// Assemble global mass matrix from all 1D elements.
+fn fem_assemble_mass_1d(mesh: &FEMesh1D, rho_A: f64, M: &![f64; 4096]) with Mut, Div {
+    let n = mesh.n_nodes
+    var idx = 0
+    while idx < n * n { M[idx] = 0.0; idx = idx + 1 }
+
+    var e = 0
+    while e < mesh.n_elem {
+        let n1 = mesh.elements[2 * e]
+        let n2 = mesh.elements[2 * e + 1]
+        let x1 = mesh.nodes[n1]
+        let x2 = mesh.nodes[n2]
+
+        var me: [f64; 4] = [0.0; 4]
+        fem_1d_mass(x1, x2, rho_A, &!me)
+
+        M[n1 * n + n1] = M[n1 * n + n1] + me[0]
+        M[n1 * n + n2] = M[n1 * n + n2] + me[1]
+        M[n2 * n + n1] = M[n2 * n + n1] + me[2]
+        M[n2 * n + n2] = M[n2 * n + n2] + me[3]
+
+        e = e + 1
+    }
+}
+
+// Assemble global load vector from all 1D elements under uniform load q.
+fn fem_assemble_load_1d(mesh: &FEMesh1D, q: f64, F: &![f64; 256]) with Mut, Div {
+    let n = mesh.n_nodes
+    var idx = 0
+    while idx < n { F[idx] = 0.0; idx = idx + 1 }
+
+    var e = 0
+    while e < mesh.n_elem {
+        let n1 = mesh.elements[2 * e]
+        let n2 = mesh.elements[2 * e + 1]
+        let x1 = mesh.nodes[n1]
+        let x2 = mesh.nodes[n2]
+
+        var fe: [f64; 2] = [0.0; 2]
+        fem_1d_load(x1, x2, q, &!fe)
+
+        F[n1] = F[n1] + fe[0]
+        F[n2] = F[n2] + fe[1]
+
+        e = e + 1
+    }
+}
+
+// =============================================================================
+// 2D Assembly
+// =============================================================================
+
+// Assemble global stiffness matrix from all 2D CST triangle elements.
+// Each node has 2 DOFs: node i -> DOF 2*i (u_x) and DOF 2*i+1 (u_y).
+// mesh.elements stores [n1_0, n2_0, n3_0, n1_1, n2_1, n3_1, ...].
+fn fem_assemble_stiffness_2d(mesh: &FEMesh2D, D: &[f64; 9], thickness: f64,
+                             K: &![f64; 4096]) with Mut, Div {
+    let n_dof = 2 * mesh.n_nodes
+    // Zero out K
+    var idx = 0
+    while idx < n_dof * n_dof { K[idx] = 0.0; idx = idx + 1 }
+
+    var e = 0
+    while e < mesh.n_elem {
+        let n1 = mesh.elements[3 * e]
+        let n2 = mesh.elements[3 * e + 1]
+        let n3 = mesh.elements[3 * e + 2]
+
+        let x1 = mesh.nodes_x[n1]
+        let y1 = mesh.nodes_y[n1]
+        let x2 = mesh.nodes_x[n2]
+        let y2 = mesh.nodes_y[n2]
+        let x3 = mesh.nodes_x[n3]
+        let y3 = mesh.nodes_y[n3]
+
+        var ke: [f64; 36] = [0.0; 36]
+        fem_tri_stiffness(x1, y1, x2, y2, x3, y3, D, thickness, &!ke)
+
+        // Element DOF map: local [0,1,2,3,4,5] -> global [2*n1, 2*n1+1, 2*n2, 2*n2+1, 2*n3, 2*n3+1]
+        var dof_map: [i32; 6] = [0; 6]
+        dof_map[0] = 2 * n1
+        dof_map[1] = 2 * n1 + 1
+        dof_map[2] = 2 * n2
+        dof_map[3] = 2 * n2 + 1
+        dof_map[4] = 2 * n3
+        dof_map[5] = 2 * n3 + 1
+
+        // Scatter into global matrix
+        var i = 0
+        while i < 6 {
+            var j = 0
+            while j < 6 {
+                let gi = dof_map[i]
+                let gj = dof_map[j]
+                K[gi * n_dof + gj] = K[gi * n_dof + gj] + ke[i * 6 + j]
+                j = j + 1
+            }
+            i = i + 1
+        }
+
+        e = e + 1
+    }
+}
+
+// Assemble global mass matrix from all 2D CST triangle elements.
+fn fem_assemble_mass_2d(mesh: &FEMesh2D, rho: f64, thickness: f64,
+                        M: &![f64; 4096]) with Mut, Div {
+    let n_dof = 2 * mesh.n_nodes
+    var idx = 0
+    while idx < n_dof * n_dof { M[idx] = 0.0; idx = idx + 1 }
+
+    var e = 0
+    while e < mesh.n_elem {
+        let n1 = mesh.elements[3 * e]
+        let n2 = mesh.elements[3 * e + 1]
+        let n3 = mesh.elements[3 * e + 2]
+
+        let x1 = mesh.nodes_x[n1]
+        let y1 = mesh.nodes_y[n1]
+        let x2 = mesh.nodes_x[n2]
+        let y2 = mesh.nodes_y[n2]
+        let x3 = mesh.nodes_x[n3]
+        let y3 = mesh.nodes_y[n3]
+
+        var me: [f64; 36] = [0.0; 36]
+        fem_tri_mass(x1, y1, x2, y2, x3, y3, rho, thickness, &!me)
+
+        var dof_map: [i32; 6] = [0; 6]
+        dof_map[0] = 2 * n1
+        dof_map[1] = 2 * n1 + 1
+        dof_map[2] = 2 * n2
+        dof_map[3] = 2 * n2 + 1
+        dof_map[4] = 2 * n3
+        dof_map[5] = 2 * n3 + 1
+
+        var i = 0
+        while i < 6 {
+            var j = 0
+            while j < 6 {
+                let gi = dof_map[i]
+                let gj = dof_map[j]
+                M[gi * n_dof + gj] = M[gi * n_dof + gj] + me[i * 6 + j]
+                j = j + 1
+            }
+            i = i + 1
+        }
+
+        e = e + 1
+    }
+}
+
+// =============================================================================
+// Boundary Conditions
+// =============================================================================
+
+// Apply a Dirichlet boundary condition via the penalty method.
+// Sets K[dof, dof] += PENALTY and F[dof] += PENALTY * value.
+// The penalty is chosen large enough (1e20) to enforce the constraint
+// without modifying the matrix structure (no row/column zeroing needed).
+fn fem_apply_dirichlet_penalty(K: &![f64; 4096], F: &![f64; 256],
+                               n_dof: i32, dof: i32, value: f64) with Mut {
+    let penalty = 1.0e20
+    K[dof * n_dof + dof] = K[dof * n_dof + dof] + penalty
+    F[dof] = F[dof] + penalty * value
+}
+
+// =============================================================================
+// Direct Solver: Gaussian Elimination with Partial Pivoting
+// =============================================================================
+
+// Solve K * u = F using Gaussian elimination with partial pivoting.
+// K is n_dof x n_dof (row-major), F is the RHS vector.
+// Solution is stored in u[0..n_dof-1].
+// Internally copies K and F to avoid modifying the originals.
+fn fem_solve_direct(K: &[f64; 4096], F: &[f64; 256], n_dof: i32,
+                    u: &![f64; 256]) with Mut, Div, Panic {
+    // Copy K into working matrix
+    var A: [f64; 4096] = [0.0; 4096]
+    var b: [f64; 256] = [0.0; 256]
+
+    var idx = 0
+    while idx < n_dof * n_dof { A[idx] = K[idx]; idx = idx + 1 }
+    idx = 0
+    while idx < n_dof { b[idx] = F[idx]; idx = idx + 1 }
+
+    // Forward elimination with partial pivoting
+    var col = 0
+    while col < n_dof {
+        // Find pivot row
+        var max_val = fe_abs(A[col * n_dof + col])
+        var max_row = col
+        var row = col + 1
+        while row < n_dof {
+            let v = fe_abs(A[row * n_dof + col])
+            if v > max_val {
+                max_val = v
+                max_row = row
+            }
+            row = row + 1
+        }
+
+        // Swap rows if necessary
+        if max_row != col {
+            var j = 0
+            while j < n_dof {
+                let temp = A[col * n_dof + j]
+                A[col * n_dof + j] = A[max_row * n_dof + j]
+                A[max_row * n_dof + j] = temp
+                j = j + 1
+            }
+            let temp_b = b[col]
+            b[col] = b[max_row]
+            b[max_row] = temp_b
+        }
+
+        // Check for singularity
+        let pivot = A[col * n_dof + col]
+        if fe_abs(pivot) < 1.0e-30 {
+            // Nearly singular: set unknown to 0
+            u[col] = 0.0
+            col = col + 1
+            // Skip this column in elimination but continue
+            var skip = col
+            while skip < n_dof {
+                A[skip * n_dof + (col - 1)] = 0.0
+                skip = skip + 1
+            }
+            // Continue to next column (already incremented)
+            // Actually, just continue normally; the zero pivot
+            // means this DOF is unconstrained.
+        }
+
+        // Eliminate below
+        row = col + 1
+        while row < n_dof {
+            let pivot_val = A[col * n_dof + col]
+            if fe_abs(pivot_val) > 1.0e-30 {
+                let factor = A[row * n_dof + col] / pivot_val
+                var j = col
+                while j < n_dof {
+                    A[row * n_dof + j] = A[row * n_dof + j] - factor * A[col * n_dof + j]
+                    j = j + 1
+                }
+                b[row] = b[row] - factor * b[col]
+            }
+            row = row + 1
+        }
+
+        col = col + 1
+    }
+
+    // Back substitution
+    var i = n_dof - 1
+    while i >= 0 {
+        var s = b[i]
+        var j = i + 1
+        while j < n_dof {
+            s = s - A[i * n_dof + j] * u[j]
+            j = j + 1
+        }
+        let diag = A[i * n_dof + i]
+        if fe_abs(diag) > 1.0e-30 {
+            u[i] = s / diag
+        } else {
+            u[i] = 0.0
+        }
+        i = i - 1
+    }
+}
+
+// =============================================================================
+// Conjugate Gradient Solver
+// =============================================================================
+
+// Matrix-vector product: y = K * x, where K is n x n row-major.
+// Helper for CG solver; must precede the caller.
+fn fe_matvec(K: &[f64; 4096], x: &[f64; 256], n: i32, y: &![f64; 256]) with Mut {
+    var i = 0
+    while i < n {
+        var s = 0.0
+        var j = 0
+        while j < n {
+            s = s + K[i * n + j] * x[j]
+            j = j + 1
+        }
+        y[i] = s
+        i = i + 1
+    }
+}
+
+// Dot product of two vectors of length n.
+fn fe_dot(a: &[f64; 256], b: &[f64; 256], n: i32) -> f64 with Mut {
+    var s = 0.0
+    var i = 0
+    while i < n {
+        s = s + a[i] * b[i]
+        i = i + 1
+    }
+    s
+}
+
+// Solve K * u = F using the Conjugate Gradient method.
+// K must be symmetric positive definite. Starting guess u = 0.
+// Iterates until ||r|| / ||F|| < tol or max_iter is reached.
+// Result struct receives the solution, residual, iteration count, and convergence flag.
+fn fem_solve_cg(K: &[f64; 4096], F: &[f64; 256], n_dof: i32,
+                u: &![f64; 256], max_iter: i32, tol: f64,
+                result: &!FEResult) with Mut, Div, Panic {
+    // Initialize u = 0
+    var i = 0
+    while i < n_dof { u[i] = 0.0; i = i + 1 }
+
+    // r0 = F - K * u0 = F (since u0 = 0)
+    var r: [f64; 256] = [0.0; 256]
+    i = 0
+    while i < n_dof { r[i] = F[i]; i = i + 1 }
+
+    // p0 = r0
+    var p: [f64; 256] = [0.0; 256]
+    i = 0
+    while i < n_dof { p[i] = r[i]; i = i + 1 }
+
+    // rr_old = r^T * r
+    var rr_old = fe_dot(&r, &r, n_dof)
+
+    // ||F|| for relative convergence check
+    let F_norm = fe_sqrt(fe_dot(F, F, n_dof))
+    let abs_tol = if F_norm > 1.0e-30 { tol * F_norm } else { tol }
+
+    var Kp: [f64; 256] = [0.0; 256]
+
+    var iter = 0
+    while iter < max_iter {
+        // Check convergence: ||r|| < abs_tol
+        let r_norm = fe_sqrt(rr_old)
+        if r_norm < abs_tol {
+            // Converged
+            i = 0
+            while i < n_dof { result.u[i] = u[i]; i = i + 1 }
+            result.residual = r_norm
+            result.iterations = iter
+            result.converged = true
+            return
+        }
+
+        // Kp = K * p
+        fe_matvec(K, &p, n_dof, &!Kp)
+
+        // alpha = rr_old / (p^T * K * p)
+        let pKp = fe_dot(&p, &Kp, n_dof)
+        if fe_abs(pKp) < 1.0e-30 {
+            // Breakdown: p^T K p ~ 0
+            i = 0
+            while i < n_dof { result.u[i] = u[i]; i = i + 1 }
+            result.residual = fe_sqrt(rr_old)
+            result.iterations = iter
+            result.converged = false
+            return
+        }
+        let alpha = rr_old / pKp
+
+        // u = u + alpha * p
+        // r = r - alpha * K * p
+        i = 0
+        while i < n_dof {
+            u[i] = u[i] + alpha * p[i]
+            r[i] = r[i] - alpha * Kp[i]
+            i = i + 1
+        }
+
+        // rr_new = r^T * r
+        let rr_new = fe_dot(&r, &r, n_dof)
+
+        // beta = rr_new / rr_old
+        let beta = rr_new / rr_old
+
+        // p = r + beta * p
+        i = 0
+        while i < n_dof {
+            p[i] = r[i] + beta * p[i]
+            i = i + 1
+        }
+
+        rr_old = rr_new
+        iter = iter + 1
+    }
+
+    // Did not converge within max_iter
+    i = 0
+    while i < n_dof { result.u[i] = u[i]; i = i + 1 }
+    result.residual = fe_sqrt(rr_old)
+    result.iterations = max_iter
+    result.converged = false
+}
+
+// =============================================================================
+// Post-Processing
+// =============================================================================
+
+// Compute strain at the centroid of a 2D CST triangle element.
+// For CST, strain is constant over the element: epsilon = B * u_e.
+// strain = [exx, eyy, 2*exy] stored in strain[0..2].
+fn fem_strain_at_centroid(mesh: &FEMesh2D, u: &[f64; 256], elem_idx: i32,
+                          strain: &![f64; 3]) with Mut, Div {
+    let n1 = mesh.elements[3 * elem_idx]
+    let n2 = mesh.elements[3 * elem_idx + 1]
+    let n3 = mesh.elements[3 * elem_idx + 2]
+
+    let x1 = mesh.nodes_x[n1]
+    let y1 = mesh.nodes_y[n1]
+    let x2 = mesh.nodes_x[n2]
+    let y2 = mesh.nodes_y[n2]
+    let x3 = mesh.nodes_x[n3]
+    let y3 = mesh.nodes_y[n3]
+
+    // Compute B matrix (3x6)
+    var B: [f64; 18] = [0.0; 18]
+    fem_tri_grad(x1, y1, x2, y2, x3, y3, &!B)
+
+    // Extract element displacement vector u_e = [u_x1, u_y1, u_x2, u_y2, u_x3, u_y3]
+    var ue: [f64; 6] = [0.0; 6]
+    ue[0] = u[2 * n1]
+    ue[1] = u[2 * n1 + 1]
+    ue[2] = u[2 * n2]
+    ue[3] = u[2 * n2 + 1]
+    ue[4] = u[2 * n3]
+    ue[5] = u[2 * n3 + 1]
+
+    // strain = B * u_e (3x6 * 6x1 = 3x1)
+    var i = 0
+    while i < 3 {
+        var s = 0.0
+        var j = 0
+        while j < 6 {
+            s = s + B[i * 6 + j] * ue[j]
+            j = j + 1
+        }
+        strain[i] = s
+        i = i + 1
+    }
+}
+
+// Compute stress at the centroid of a 2D CST triangle element.
+// sigma = D * epsilon.
+// Also computes the von Mises equivalent stress:
+//   sigma_vm = sqrt(sxx^2 - sxx*syy + syy^2 + 3*sxy^2)
+fn fem_stress_at_centroid(mesh: &FEMesh2D, u: &[f64; 256], D: &[f64; 9],
+                          elem_idx: i32, result: &!StressResult) with Mut, Div {
+    // Compute strain first
+    var strain: [f64; 3] = [0.0; 3]
+    fem_strain_at_centroid(mesh, u, elem_idx, &!strain)
+
+    // sigma = D * strain (3x3 * 3x1 = 3x1)
+    let sxx = D[0] * strain[0] + D[1] * strain[1] + D[2] * strain[2]
+    let syy = D[3] * strain[0] + D[4] * strain[1] + D[5] * strain[2]
+    let sxy = D[6] * strain[0] + D[7] * strain[1] + D[8] * strain[2]
+
+    result.sxx = sxx
+    result.syy = syy
+    result.sxy = sxy
+
+    // von Mises stress for plane stress:
+    // sigma_vm = sqrt(sxx^2 - sxx*syy + syy^2 + 3*sxy^2)
+    let vm_sq = sxx * sxx - sxx * syy + syy * syy + 3.0 * sxy * sxy
+    result.von_mises = fe_sqrt(fe_abs(vm_sq))
+}
+
+// =============================================================================
+// Mesh Utilities
+// =============================================================================
+
+// Generate a uniform 1D mesh on [x_start, x_end] with n_elem elements.
+// Creates n_elem + 1 equally spaced nodes and n_elem 2-node elements.
+fn fem_mesh_1d_uniform(x_start: f64, x_end: f64, n_elem: i32,
+                       mesh: &!FEMesh1D) with Mut, Div {
+    let n_nodes = n_elem + 1
+    mesh.n_nodes = n_nodes
+    mesh.n_elem = n_elem
+    mesh.nodes_per_elem = 2
+
+    // Generate nodes
+    let h = (x_end - x_start) / (n_elem as f64)
+    var i = 0
+    while i < n_nodes {
+        mesh.nodes[i] = x_start + (i as f64) * h
+        i = i + 1
+    }
+
+    // Generate connectivity: element e connects node e to node e+1
+    var e = 0
+    while e < n_elem {
+        mesh.elements[2 * e] = e
+        mesh.elements[2 * e + 1] = e + 1
+        e = e + 1
+    }
+}
+
+// Generate a structured rectangular mesh of CST triangles.
+// Domain: [x0, y0] x [x1, y1], divided into nx x ny rectangular cells.
+// Each cell is split into 2 triangles (lower-left and upper-right).
+// Nodes are numbered row by row: node(ix, iy) = iy * (nx + 1) + ix.
+//
+// Cell (ix, iy) has corners:
+//   BL = iy*(nx+1) + ix
+//   BR = iy*(nx+1) + ix + 1
+//   TL = (iy+1)*(nx+1) + ix
+//   TR = (iy+1)*(nx+1) + ix + 1
+//
+// Triangle 1 (lower-left):  BL, BR, TL
+// Triangle 2 (upper-right): BR, TR, TL
+fn fem_mesh_2d_rect(x0: f64, y0: f64, x1: f64, y1: f64, nx: i32, ny: i32,
+                    mesh: &!FEMesh2D) with Mut, Div {
+    let n_nodes = (nx + 1) * (ny + 1)
+    let n_elem = 2 * nx * ny
+    mesh.n_nodes = n_nodes
+    mesh.n_elem = n_elem
+    mesh.nodes_per_elem = 3
+
+    let dx = (x1 - x0) / (nx as f64)
+    let dy = (y1 - y0) / (ny as f64)
+
+    // Generate nodes
+    var iy = 0
+    while iy <= ny {
+        var ix = 0
+        while ix <= nx {
+            let node_id = iy * (nx + 1) + ix
+            mesh.nodes_x[node_id] = x0 + (ix as f64) * dx
+            mesh.nodes_y[node_id] = y0 + (iy as f64) * dy
+            ix = ix + 1
+        }
+        iy = iy + 1
+    }
+
+    // Generate connectivity
+    var elem_id = 0
+    iy = 0
+    while iy < ny {
+        var ix = 0
+        while ix < nx {
+            let bl = iy * (nx + 1) + ix
+            let br = iy * (nx + 1) + ix + 1
+            let tl = (iy + 1) * (nx + 1) + ix
+            let tr = (iy + 1) * (nx + 1) + ix + 1
+
+            // Triangle 1 (lower-left): BL -> BR -> TL
+            mesh.elements[3 * elem_id] = bl
+            mesh.elements[3 * elem_id + 1] = br
+            mesh.elements[3 * elem_id + 2] = tl
+            elem_id = elem_id + 1
+
+            // Triangle 2 (upper-right): BR -> TR -> TL
+            mesh.elements[3 * elem_id] = br
+            mesh.elements[3 * elem_id + 1] = tr
+            mesh.elements[3 * elem_id + 2] = tl
+            elem_id = elem_id + 1
+
+            ix = ix + 1
+        }
+        iy = iy + 1
+    }
+}
+
+// =============================================================================
+// System Setup
+// =============================================================================
+
+// Initialize an FESystem, zeroing out all arrays.
+fn fem_system_init(n_dof: i32, sys: &!FESystem) with Mut {
+    sys.n_dof = n_dof
+
+    var i = 0
+    while i < n_dof * n_dof { sys.K[i] = 0.0; i = i + 1 }
+
+    i = 0
+    while i < n_dof * n_dof { sys.M[i] = 0.0; i = i + 1 }
+
+    i = 0
+    while i < n_dof { sys.rhs[i] = 0.0; i = i + 1 }
+
+    i = 0
+    while i < n_dof { sys.solution[i] = 0.0; i = i + 1 }
+}

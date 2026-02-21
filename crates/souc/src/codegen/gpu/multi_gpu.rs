@@ -920,6 +920,35 @@ impl MultiGpuRuntime {
     pub fn build_tree(&self, root: DeviceId) -> BroadcastTree {
         self.topology.build_tree(root)
     }
+
+    /// Generates a human-readable Distribution Plan detailing hardware utilization
+    pub fn format_distribution_plan(&self) -> String {
+        let mut plan = String::new();
+        plan.push_str("┌─ Distribution Plan: Multi-GPU Execution ──────────────────┐\n");
+        plan.push_str(&format!("│ Backend: {:<46} │\n", format!("{:?}", self.config.backend)));
+        plan.push_str(&format!("│ Total Devices: {:<40} │\n", self.device_count()));
+        plan.push_str("├───────────────────────────────────────────────────────────┤\n");
+        
+        let mut devices: Vec<_> = self.device_ids().collect();
+        devices.sort();
+        for id in devices {
+            if let Ok(info) = self.device_info(id) {
+                plan.push_str(&format!("│ {}: {:<42} │\n", id, info.name));
+                let mem_gb = info.total_memory as f64 / (1024.0 * 1024.0 * 1024.0);
+                plan.push_str(&format!("│   Memory: {:.1} GB, CUs: {:<27} │\n", mem_gb, info.compute_units));
+            }
+        }
+        
+        plan.push_str("├─ Topology / Interconnects ────────────────────────────────┤\n");
+        for group in self.groups() {
+            let devs: Vec<String> = group.devices.iter().map(|d| d.to_string()).collect();
+            plan.push_str(&format!("│ Group '{}': [{}] │\n", group.name, devs.join(", ")));
+            plan.push_str(&format!("│   Link: {:<47} │\n", group.internal_interconnect.to_string()));
+        }
+        
+        plan.push_str("└───────────────────────────────────────────────────────────┘\n");
+        plan
+    }
 }
 
 impl Default for MultiGpuRuntime {

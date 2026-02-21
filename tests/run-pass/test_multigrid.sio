@@ -1,0 +1,1080 @@
+//@ run-pass
+// test_multigrid.sio -- Tests for geometric multigrid solvers module
+//
+// Self-contained test suite for restriction, prolongation, smoothers,
+// coarse solve, V-cycle, full Poisson solver, 2D operators, and
+// convergence analysis. All helpers copied from stdlib/math/multigrid.sio.
+//
+// Tests:
+//  1.  Restriction preserves constant (1D)
+//  2.  Prolongation preserves constant (1D)
+//  3.  Restriction/prolongation adjoint relation
+//  4.  Jacobi smoother reduces residual (1D)
+//  5.  Red-black GS reduces residual (1D)
+//  6.  Thomas algorithm (coarse solve) exact
+//  7.  V-cycle convergence: residual decreases by factor < 0.5
+//  8.  Full 1D Poisson solver: -u'' = pi^2 sin(pi x)
+//  9.  2D restriction preserves constant
+// 10.  2D Jacobi smoother reduces residual
+// 11.  Convergence factor in (0, 1)
+// 12.  Default config values
+
+// ============================================================================
+// HELPERS (copied from multigrid.sio -- tests must be self-contained)
+// ============================================================================
+
+fn mg_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn mg_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+
+fn mg_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn sp_sin(x: f64) -> f64 with Mut, Div, Panic {
+    var a = x
+    let tp = 6.28318530717958647692
+    while a >= tp { a = a - tp }
+    while a < 0.0 { a = a + tp }
+    if a > 3.14159265358979323846 { a = a - tp }
+    let a2 = a * a
+    var sum = a
+    var term = a
+    var n = 1
+    while n < 18 { term = 0.0 - term * a2 / ((2 * n) * (2 * n + 1)) as f64; sum = sum + term; n = n + 1 }
+    sum
+}
+
+// ============================================================================
+// STRUCTS (copied from multigrid.sio)
+// ============================================================================
+
+struct MGConfig { n_levels: i32, nu1: i32, nu2: i32, max_cycles: i32, tol: f64, omega: f64 }
+struct MGResult { u: [f64; 4096], iterations: i32, residual_norm: f64, converged: bool }
+
+// ============================================================================
+// UTILITY (copied from multigrid.sio)
+// ============================================================================
+
+fn mg_default_config(n_levels: i32, config: &!MGConfig) with Mut {
+    config.n_levels = n_levels
+    config.nu1 = 2
+    config.nu2 = 2
+    config.max_cycles = 100
+    config.tol = 1.0e-10
+    config.omega = 2.0 / 3.0
+}
+
+// ============================================================================
+// 1D TRANSFER OPERATORS (copied from multigrid.sio)
+// ============================================================================
+
+fn mg_restrict_1d(fine: &[f64; 4096], n_fine: i32, coarse: &![f64; 4096]) with Mut {
+    let n_coarse = n_fine / 2
+    coarse[0] = fine[0]
+    coarse[n_coarse] = fine[n_fine]
+    var i = 1
+    while i < n_coarse {
+        let fi = 2 * i
+        coarse[i] = 0.25 * fine[fi - 1] + 0.5 * fine[fi] + 0.25 * fine[fi + 1]
+        i = i + 1
+    }
+}
+
+fn mg_prolongate_1d(coarse: &[f64; 4096], n_coarse: i32, fine: &![f64; 4096]) with Mut {
+    var i = 0
+    while i <= n_coarse {
+        fine[2 * i] = coarse[i]
+        i = i + 1
+    }
+    i = 0
+    while i < n_coarse {
+        fine[2 * i + 1] = 0.5 * (coarse[i] + coarse[i + 1])
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// 1D SMOOTHERS (copied from multigrid.sio)
+// ============================================================================
+
+fn mg_smooth_jacobi_1d(u: &![f64; 4096], f: &[f64; 4096], n: i32,
+                       h: f64, omega: f64, nu: i32) with Mut, Div {
+    let h2 = h * h
+    var sweep = 0
+    while sweep < nu {
+        var u_old: [f64; 4096] = [0.0; 4096]
+        var k = 0
+        while k <= n {
+            u_old[k] = u[k]
+            k = k + 1
+        }
+        var i = 1
+        while i < n {
+            let avg = (u_old[i - 1] + u_old[i + 1] + h2 * f[i]) / 2.0
+            u[i] = omega * avg + (1.0 - omega) * u_old[i]
+            i = i + 1
+        }
+        sweep = sweep + 1
+    }
+}
+
+fn mg_smooth_gs_rb_1d(u: &![f64; 4096], f: &[f64; 4096], n: i32,
+                      h: f64, nu: i32) with Mut, Div {
+    let h2 = h * h
+    var sweep = 0
+    while sweep < nu {
+        var i = 1
+        while i < n {
+            let rem = i - (i / 2) * 2
+            if rem == 1 {
+                u[i] = (u[i - 1] + u[i + 1] + h2 * f[i]) / 2.0
+            }
+            i = i + 1
+        }
+        i = 2
+        while i < n {
+            let rem = i - (i / 2) * 2
+            if rem == 0 {
+                u[i] = (u[i - 1] + u[i + 1] + h2 * f[i]) / 2.0
+            }
+            i = i + 1
+        }
+        sweep = sweep + 1
+    }
+}
+
+// ============================================================================
+// 1D RESIDUAL (copied from multigrid.sio)
+// ============================================================================
+
+fn mg_residual_1d(u: &[f64; 4096], f: &[f64; 4096], n: i32,
+                  h: f64, r: &![f64; 4096]) with Mut, Div {
+    let h2 = h * h
+    r[0] = 0.0
+    r[n] = 0.0
+    var i = 1
+    while i < n {
+        let lap = (0.0 - u[i - 1] + 2.0 * u[i] - u[i + 1]) / h2
+        r[i] = f[i] - lap
+        i = i + 1
+    }
+}
+
+fn mg_residual_norm_1d(r: &[f64; 4096], n: i32) -> f64 with Mut, Div {
+    let h = 1.0 / (n as f64)
+    var sum = 0.0
+    var i = 1
+    while i < n {
+        sum = sum + r[i] * r[i]
+        i = i + 1
+    }
+    mg_sqrt(h * sum)
+}
+
+// ============================================================================
+// 1D COARSE SOLVE (copied from multigrid.sio)
+// ============================================================================
+
+fn mg_coarse_solve_1d(u: &![f64; 4096], f: &[f64; 4096], n: i32,
+                      h: f64) with Mut, Div {
+    let h2 = h * h
+    let m = n - 1
+    if m <= 0 { return }
+
+    var b_mod: [f64; 4096] = [0.0; 4096]
+    var d_mod: [f64; 4096] = [0.0; 4096]
+
+    b_mod[0] = 2.0
+    d_mod[0] = h2 * f[1]
+
+    var i = 1
+    while i < m {
+        let w = 0.0 - 1.0 / b_mod[i - 1]
+        b_mod[i] = 2.0 - (0.0 - 1.0) * w
+        d_mod[i] = h2 * f[i + 1] - d_mod[i - 1] * w
+        i = i + 1
+    }
+
+    u[m] = d_mod[m - 1] / b_mod[m - 1]
+
+    i = m - 2
+    while i >= 0 {
+        u[i + 1] = (d_mod[i] + u[i + 2]) / b_mod[i]
+        i = i - 1
+    }
+
+    u[0] = 0.0
+    u[n] = 0.0
+}
+
+// ============================================================================
+// 1D V-CYCLE (copied from multigrid.sio)
+// ============================================================================
+
+fn mg_vcycle_1d(u: &![f64; 4096], f: &[f64; 4096], n: i32,
+                h: f64, config: &MGConfig, level: i32) with Mut, Div {
+    if level >= config.n_levels - 1 {
+        mg_coarse_solve_1d(u, f, n, h)
+        return
+    }
+    if n <= 2 {
+        mg_coarse_solve_1d(u, f, n, h)
+        return
+    }
+
+    mg_smooth_gs_rb_1d(u, f, n, h, config.nu1)
+
+    var r_fine: [f64; 4096] = [0.0; 4096]
+    mg_residual_1d(u, f, n, h, &!r_fine)
+
+    let n_coarse = n / 2
+    var r_coarse: [f64; 4096] = [0.0; 4096]
+    mg_restrict_1d(&r_fine, n, &!r_coarse)
+
+    var e_coarse: [f64; 4096] = [0.0; 4096]
+    let h_coarse = 2.0 * h
+    mg_vcycle_1d(&!e_coarse, &r_coarse, n_coarse, h_coarse, config, level + 1)
+
+    var e_fine: [f64; 4096] = [0.0; 4096]
+    mg_prolongate_1d(&e_coarse, n_coarse, &!e_fine)
+
+    var i = 1
+    while i < n {
+        u[i] = u[i] + e_fine[i]
+        i = i + 1
+    }
+
+    mg_smooth_gs_rb_1d(u, f, n, h, config.nu2)
+}
+
+// ============================================================================
+// 1D FULL SOLVER (copied from multigrid.sio)
+// ============================================================================
+
+fn mg_solve_poisson_1d(f_rhs: fn(f64) -> f64 with Mut, Div, Panic,
+                       n: i32, config: &MGConfig,
+                       result: &!MGResult) with Mut, Div, Panic {
+    let h = 1.0 / (n as f64)
+
+    var i = 0
+    while i <= n {
+        result.u[i] = 0.0
+        i = i + 1
+    }
+
+    var f_vals: [f64; 4096] = [0.0; 4096]
+    i = 0
+    while i <= n {
+        let x = (i as f64) * h
+        f_vals[i] = f_rhs(x)
+        i = i + 1
+    }
+    f_vals[0] = 0.0
+    f_vals[n] = 0.0
+
+    result.converged = false
+    result.iterations = 0
+
+    var cycle = 0
+    while cycle < config.max_cycles {
+        mg_vcycle_1d(&!result.u, &f_vals, n, h, config, 0)
+
+        var r: [f64; 4096] = [0.0; 4096]
+        mg_residual_1d(&result.u, &f_vals, n, h, &!r)
+        let rnorm = mg_residual_norm_1d(&r, n)
+
+        result.residual_norm = rnorm
+        result.iterations = cycle + 1
+
+        if rnorm < config.tol {
+            result.converged = true
+            return
+        }
+        cycle = cycle + 1
+    }
+}
+
+// ============================================================================
+// 2D INDEX HELPER (copied from multigrid.sio)
+// ============================================================================
+
+fn mg_idx2d(i: i32, j: i32, nx: i32) -> i32 {
+    i * (nx + 1) + j
+}
+
+// ============================================================================
+// 2D TRANSFER OPERATORS (copied from multigrid.sio)
+// ============================================================================
+
+fn mg_restrict_2d(fine: &[f64; 4096], nx_f: i32, ny_f: i32,
+                  coarse: &![f64; 4096]) with Mut {
+    let nx_c = nx_f / 2
+    let ny_c = ny_f / 2
+
+    var j = 0
+    while j <= nx_c {
+        coarse[mg_idx2d(0, j, nx_c)] = fine[mg_idx2d(0, 2 * j, nx_f)]
+        coarse[mg_idx2d(ny_c, j, nx_c)] = fine[mg_idx2d(ny_f, 2 * j, nx_f)]
+        j = j + 1
+    }
+    var i = 0
+    while i <= ny_c {
+        coarse[mg_idx2d(i, 0, nx_c)] = fine[mg_idx2d(2 * i, 0, nx_f)]
+        coarse[mg_idx2d(i, nx_c, nx_c)] = fine[mg_idx2d(2 * i, nx_f, nx_f)]
+        i = i + 1
+    }
+
+    i = 1
+    while i < ny_c {
+        j = 1
+        while j < nx_c {
+            let fi = 2 * i
+            let fj = 2 * j
+
+            let corners = fine[mg_idx2d(fi - 1, fj - 1, nx_f)]
+                        + fine[mg_idx2d(fi - 1, fj + 1, nx_f)]
+                        + fine[mg_idx2d(fi + 1, fj - 1, nx_f)]
+                        + fine[mg_idx2d(fi + 1, fj + 1, nx_f)]
+
+            let edges = fine[mg_idx2d(fi, fj - 1, nx_f)]
+                      + fine[mg_idx2d(fi, fj + 1, nx_f)]
+                      + fine[mg_idx2d(fi - 1, fj, nx_f)]
+                      + fine[mg_idx2d(fi + 1, fj, nx_f)]
+
+            let center = fine[mg_idx2d(fi, fj, nx_f)]
+
+            coarse[mg_idx2d(i, j, nx_c)] = corners / 16.0 + edges / 8.0 + center / 4.0
+
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+fn mg_prolongate_2d(coarse: &[f64; 4096], nx_c: i32, ny_c: i32,
+                    fine: &![f64; 4096]) with Mut {
+    let nx_f = 2 * nx_c
+    let ny_f = 2 * ny_c
+
+    var i = 0
+    while i <= ny_c {
+        var j = 0
+        while j <= nx_c {
+            fine[mg_idx2d(2 * i, 2 * j, nx_f)] = coarse[mg_idx2d(i, j, nx_c)]
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    i = 0
+    while i <= ny_c {
+        var j = 0
+        while j < nx_c {
+            fine[mg_idx2d(2 * i, 2 * j + 1, nx_f)] = 0.5 * (
+                coarse[mg_idx2d(i, j, nx_c)] + coarse[mg_idx2d(i, j + 1, nx_c)]
+            )
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    i = 0
+    while i < ny_c {
+        var j = 0
+        while j <= nx_f {
+            fine[mg_idx2d(2 * i + 1, j, nx_f)] = 0.5 * (
+                fine[mg_idx2d(2 * i, j, nx_f)] + fine[mg_idx2d(2 * i + 2, j, nx_f)]
+            )
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// 2D SMOOTHERS (copied from multigrid.sio)
+// ============================================================================
+
+fn mg_smooth_jacobi_2d(u: &![f64; 4096], f: &[f64; 4096],
+                       nx: i32, ny: i32, hx: f64, hy: f64,
+                       omega: f64, nu: i32) with Mut, Div {
+    let hx2 = hx * hx
+    let hy2 = hy * hy
+    let diag = 2.0 / hx2 + 2.0 / hy2
+
+    var sweep = 0
+    while sweep < nu {
+        var u_old: [f64; 4096] = [0.0; 4096]
+        var k = 0
+        let total = (nx + 1) * (ny + 1)
+        while k < total {
+            u_old[k] = u[k]
+            k = k + 1
+        }
+
+        var i = 1
+        while i < ny {
+            var j = 1
+            while j < nx {
+                let idx = mg_idx2d(i, j, nx)
+                let u_left  = u_old[mg_idx2d(i, j - 1, nx)]
+                let u_right = u_old[mg_idx2d(i, j + 1, nx)]
+                let u_down  = u_old[mg_idx2d(i - 1, j, nx)]
+                let u_up    = u_old[mg_idx2d(i + 1, j, nx)]
+
+                let stencil = (u_left + u_right) / hx2 + (u_down + u_up) / hy2
+                let avg = (stencil + f[idx]) / diag
+                u[idx] = omega * avg + (1.0 - omega) * u_old[idx]
+
+                j = j + 1
+            }
+            i = i + 1
+        }
+        sweep = sweep + 1
+    }
+}
+
+// ============================================================================
+// 2D RESIDUAL (copied from multigrid.sio)
+// ============================================================================
+
+fn mg_residual_2d(u: &[f64; 4096], f: &[f64; 4096],
+                  nx: i32, ny: i32, hx: f64, hy: f64,
+                  r: &![f64; 4096]) with Mut, Div {
+    let hx2 = hx * hx
+    let hy2 = hy * hy
+
+    var j = 0
+    while j <= nx {
+        r[mg_idx2d(0, j, nx)] = 0.0
+        r[mg_idx2d(ny, j, nx)] = 0.0
+        j = j + 1
+    }
+    var i = 0
+    while i <= ny {
+        r[mg_idx2d(i, 0, nx)] = 0.0
+        r[mg_idx2d(i, nx, nx)] = 0.0
+        i = i + 1
+    }
+
+    i = 1
+    while i < ny {
+        j = 1
+        while j < nx {
+            let idx = mg_idx2d(i, j, nx)
+            let u_ij = u[idx]
+            let lap_x = (u[mg_idx2d(i, j - 1, nx)] - 2.0 * u_ij + u[mg_idx2d(i, j + 1, nx)]) / hx2
+            let lap_y = (u[mg_idx2d(i - 1, j, nx)] - 2.0 * u_ij + u[mg_idx2d(i + 1, j, nx)]) / hy2
+
+            r[idx] = f[idx] + lap_x + lap_y
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+fn mg_residual_norm_2d(r: &[f64; 4096], nx: i32, ny: i32,
+                       hx: f64, hy: f64) -> f64 with Mut, Div {
+    var sum = 0.0
+    var i = 1
+    while i < ny {
+        var j = 1
+        while j < nx {
+            let val = r[mg_idx2d(i, j, nx)]
+            sum = sum + val * val
+            j = j + 1
+        }
+        i = i + 1
+    }
+    mg_sqrt(hx * hy * sum)
+}
+
+// ============================================================================
+// CONVERGENCE ANALYSIS (copied from multigrid.sio)
+// ============================================================================
+
+fn mg_convergence_factor(residuals: &[f64; 256], n: i32) -> f64 with Mut, Div {
+    if n < 2 { return 0.0 }
+
+    var sum_ratio = 0.0
+    var count = 0
+    var k = 0
+    while k < n - 1 {
+        if mg_abs(residuals[k]) > 1.0e-30 {
+            let ratio = residuals[k + 1] / residuals[k]
+            sum_ratio = sum_ratio + ratio
+            count = count + 1
+        }
+        k = k + 1
+    }
+
+    if count == 0 { return 0.0 }
+    sum_ratio / (count as f64)
+}
+
+// ============================================================================
+// RHS function for Poisson test (must be defined before callers)
+// ============================================================================
+
+fn rhs_sin_pi(x: f64) -> f64 with Mut, Div, Panic {
+    let pi = 3.141592653589793
+    pi * pi * sp_sin(pi * x)
+}
+
+// ============================================================================
+// TEST 1: Restriction preserves constant (1D)
+// A constant vector on a fine grid should restrict to the same constant
+// on the coarse grid, since full-weighting stencil sums to 1.
+// ============================================================================
+
+fn test_restrict_preserves_constant() -> bool with Mut, Div {
+    let n_fine = 32
+    let n_coarse = n_fine / 2
+    let c = 7.5
+
+    var fine: [f64; 4096] = [0.0; 4096]
+    var i = 0
+    while i <= n_fine {
+        fine[i] = c
+        i = i + 1
+    }
+
+    var coarse: [f64; 4096] = [0.0; 4096]
+    mg_restrict_1d(&fine, n_fine, &!coarse)
+
+    let tol = 1.0e-12
+    var ok = true
+    i = 0
+    while i <= n_coarse {
+        if mg_abs(coarse[i] - c) > tol { ok = false }
+        i = i + 1
+    }
+    ok
+}
+
+// ============================================================================
+// TEST 2: Prolongation preserves constant (1D)
+// A constant on the coarse grid should prolongate to the same constant
+// on the fine grid.
+// ============================================================================
+
+fn test_prolongate_preserves_constant() -> bool with Mut, Div {
+    let n_coarse = 16
+    let n_fine = 2 * n_coarse
+    let c = 3.25
+
+    var coarse: [f64; 4096] = [0.0; 4096]
+    var i = 0
+    while i <= n_coarse {
+        coarse[i] = c
+        i = i + 1
+    }
+
+    var fine: [f64; 4096] = [0.0; 4096]
+    mg_prolongate_1d(&coarse, n_coarse, &!fine)
+
+    let tol = 1.0e-12
+    var ok = true
+    i = 0
+    while i <= n_fine {
+        if mg_abs(fine[i] - c) > tol { ok = false }
+        i = i + 1
+    }
+    ok
+}
+
+// ============================================================================
+// TEST 3: Restriction/prolongation adjoint relation
+// <Ru, v>_c ≈ <u, Pv>_f  (up to a factor of 2 from the scaling convention)
+// We check that the inner products are proportional.
+// ============================================================================
+
+fn test_adjoint_relation() -> bool with Mut, Div {
+    let n_fine = 32
+    let n_coarse = n_fine / 2
+
+    // Create fine-grid vector u: u[i] = sin-like pattern
+    var u_fine: [f64; 4096] = [0.0; 4096]
+    var i = 0
+    while i <= n_fine {
+        // Simple quadratic: i*(n_fine - i) / n_fine^2
+        u_fine[i] = (i as f64) * ((n_fine - i) as f64) / ((n_fine * n_fine) as f64)
+        i = i + 1
+    }
+
+    // Create coarse-grid vector v: v[j] = j*(n_coarse - j) / n_coarse^2
+    var v_coarse: [f64; 4096] = [0.0; 4096]
+    var j = 0
+    while j <= n_coarse {
+        v_coarse[j] = (j as f64) * ((n_coarse - j) as f64) / ((n_coarse * n_coarse) as f64)
+        j = j + 1
+    }
+
+    // Compute R*u (restrict u from fine to coarse)
+    var Ru: [f64; 4096] = [0.0; 4096]
+    mg_restrict_1d(&u_fine, n_fine, &!Ru)
+
+    // Compute P*v (prolongate v from coarse to fine)
+    var Pv: [f64; 4096] = [0.0; 4096]
+    mg_prolongate_1d(&v_coarse, n_coarse, &!Pv)
+
+    // <Ru, v>_coarse = sum Ru[j] * v[j]
+    var ip_coarse = 0.0
+    j = 0
+    while j <= n_coarse {
+        ip_coarse = ip_coarse + Ru[j] * v_coarse[j]
+        j = j + 1
+    }
+
+    // <u, Pv>_fine = sum u[i] * Pv[i]
+    var ip_fine = 0.0
+    i = 0
+    while i <= n_fine {
+        ip_fine = ip_fine + u_fine[i] * Pv[i]
+        i = i + 1
+    }
+
+    // For full-weighting restriction and linear prolongation:
+    // R = (1/2) * P^T, so <Ru, v> = (1/2)<u, Pv>
+    // Check that 2 * <Ru, v> ≈ <u, Pv>
+    let ratio = ip_fine / ip_coarse
+    // The ratio should be close to 2.0
+    let tol = 0.1
+    mg_abs(ratio - 2.0) < tol
+}
+
+// ============================================================================
+// TEST 4: Jacobi smoother reduces residual (1D)
+// After several Jacobi smoothing sweeps on an initial guess of zero
+// with a nonzero RHS, the residual norm should decrease.
+// ============================================================================
+
+fn test_jacobi_reduces_residual() -> bool with Mut, Div {
+    let n = 32
+    let h = 1.0 / (n as f64)
+    let omega = 2.0 / 3.0
+
+    // Set up RHS: f[i] = 1.0 for interior points
+    var f_vals: [f64; 4096] = [0.0; 4096]
+    var i = 1
+    while i < n {
+        f_vals[i] = 1.0
+        i = i + 1
+    }
+
+    // Initial solution: zero
+    var u: [f64; 4096] = [0.0; 4096]
+
+    // Compute initial residual norm
+    var r0: [f64; 4096] = [0.0; 4096]
+    mg_residual_1d(&u, &f_vals, n, h, &!r0)
+    let norm0 = mg_residual_norm_1d(&r0, n)
+
+    // Apply 10 Jacobi sweeps
+    mg_smooth_jacobi_1d(&!u, &f_vals, n, h, omega, 10)
+
+    // Compute new residual norm
+    var r1: [f64; 4096] = [0.0; 4096]
+    mg_residual_1d(&u, &f_vals, n, h, &!r1)
+    let norm1 = mg_residual_norm_1d(&r1, n)
+
+    // Residual must have decreased
+    norm1 < norm0
+}
+
+// ============================================================================
+// TEST 5: Red-black GS reduces residual (1D)
+// Same setup as Jacobi but should converge faster.
+// ============================================================================
+
+fn test_gs_rb_reduces_residual() -> bool with Mut, Div {
+    let n = 32
+    let h = 1.0 / (n as f64)
+
+    var f_vals: [f64; 4096] = [0.0; 4096]
+    var i = 1
+    while i < n {
+        f_vals[i] = 1.0
+        i = i + 1
+    }
+
+    var u: [f64; 4096] = [0.0; 4096]
+
+    var r0: [f64; 4096] = [0.0; 4096]
+    mg_residual_1d(&u, &f_vals, n, h, &!r0)
+    let norm0 = mg_residual_norm_1d(&r0, n)
+
+    // Apply 10 GS-RB sweeps
+    mg_smooth_gs_rb_1d(&!u, &f_vals, n, h, 10)
+
+    var r1: [f64; 4096] = [0.0; 4096]
+    mg_residual_1d(&u, &f_vals, n, h, &!r1)
+    let norm1 = mg_residual_norm_1d(&r1, n)
+
+    // Residual must have decreased
+    norm1 < norm0
+}
+
+// ============================================================================
+// TEST 6: Thomas algorithm (coarse solve) exact
+// Solve -u'' = 6x on [0,1] with u(0)=u(1)=0.
+// Exact solution: u(x) = x - x^3 (since u''=-6x, u(0)=0, u(1)=0).
+// ============================================================================
+
+fn test_thomas_exact() -> bool with Mut, Div {
+    let n = 16
+    let h = 1.0 / (n as f64)
+
+    // Set up RHS: f[i] = 6 * x_i
+    var f_vals: [f64; 4096] = [0.0; 4096]
+    var i = 0
+    while i <= n {
+        let x = (i as f64) * h
+        f_vals[i] = 6.0 * x
+        i = i + 1
+    }
+
+    var u: [f64; 4096] = [0.0; 4096]
+    mg_coarse_solve_1d(&!u, &f_vals, n, h)
+
+    // Check against exact solution u(x) = x - x^3
+    let tol = 1.0e-10
+    var max_err = 0.0
+    i = 0
+    while i <= n {
+        let x = (i as f64) * h
+        let exact = x - x * x * x
+        let err = mg_abs(u[i] - exact)
+        if err > max_err { max_err = err }
+        i = i + 1
+    }
+    max_err < tol
+}
+
+// ============================================================================
+// TEST 7: V-cycle convergence
+// A single V-cycle should reduce the residual by a factor < 0.5.
+// ============================================================================
+
+fn test_vcycle_convergence() -> bool with Mut, Div {
+    let n = 32
+    let h = 1.0 / (n as f64)
+
+    // RHS: f = 1 on interior
+    var f_vals: [f64; 4096] = [0.0; 4096]
+    var i = 1
+    while i < n {
+        f_vals[i] = 1.0
+        i = i + 1
+    }
+
+    // Initial guess: random-ish — use i*(n-i)/n^2 as initial "error"
+    var u: [f64; 4096] = [0.0; 4096]
+    i = 1
+    while i < n {
+        u[i] = (i as f64) * ((n - i) as f64) / ((n * n) as f64)
+        i = i + 1
+    }
+
+    // Compute initial residual
+    var r0: [f64; 4096] = [0.0; 4096]
+    mg_residual_1d(&u, &f_vals, n, h, &!r0)
+    let norm0 = mg_residual_norm_1d(&r0, n)
+
+    // Config: 4 levels for n=32 (32 -> 16 -> 8 -> 4)
+    var config: MGConfig = MGConfig {
+        n_levels: 4, nu1: 2, nu2: 2, max_cycles: 100,
+        tol: 1.0e-10, omega: 2.0 / 3.0
+    }
+
+    // One V-cycle
+    mg_vcycle_1d(&!u, &f_vals, n, h, &config, 0)
+
+    // Compute new residual
+    var r1: [f64; 4096] = [0.0; 4096]
+    mg_residual_1d(&u, &f_vals, n, h, &!r1)
+    let norm1 = mg_residual_norm_1d(&r1, n)
+
+    // Convergence factor should be < 0.5
+    if norm0 < 1.0e-30 { return true }
+    let factor = norm1 / norm0
+    factor < 0.5
+}
+
+// ============================================================================
+// TEST 8: Full 1D Poisson solver
+// -u'' = pi^2 * sin(pi * x) on [0,1], u(0)=u(1)=0
+// Exact solution: u(x) = sin(pi * x)
+// With n=32, discretization error is O(h^2) ≈ 1e-3.
+// ============================================================================
+
+fn test_full_poisson_1d() -> bool with Mut, Div, Panic {
+    let n = 32
+    let pi = 3.141592653589793
+
+    // 5 levels for n=32: 32 -> 16 -> 8 -> 4 -> 2
+    var config: MGConfig = MGConfig {
+        n_levels: 5, nu1: 2, nu2: 2, max_cycles: 100,
+        tol: 1.0e-10, omega: 2.0 / 3.0
+    }
+
+    var result: MGResult = MGResult {
+        u: [0.0; 4096], iterations: 0, residual_norm: 0.0, converged: false
+    }
+
+    mg_solve_poisson_1d(rhs_sin_pi, n, &config, &!result)
+
+    // Check pointwise error against sin(pi*x)
+    let h = 1.0 / (n as f64)
+    var max_err = 0.0
+    var i = 0
+    while i <= n {
+        let x = (i as f64) * h
+        let exact = sp_sin(pi * x)
+        let err = mg_abs(result.u[i] - exact)
+        if err > max_err { max_err = err }
+        i = i + 1
+    }
+
+    // Discretization error is O(h^2) ≈ (1/32)^2 ≈ 1e-3
+    let tol = 1.0e-3
+    max_err < tol
+}
+
+// ============================================================================
+// TEST 9: 2D restriction preserves constant
+// A constant on a fine 2D grid should restrict to the same constant
+// on the coarse grid.
+// ============================================================================
+
+fn test_restrict_2d_preserves_constant() -> bool with Mut, Div {
+    let nx_f = 8
+    let ny_f = 8
+    let nx_c = nx_f / 2
+    let ny_c = ny_f / 2
+    let c = 4.0
+
+    var fine: [f64; 4096] = [0.0; 4096]
+    var i = 0
+    while i <= ny_f {
+        var j = 0
+        while j <= nx_f {
+            fine[mg_idx2d(i, j, nx_f)] = c
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    var coarse: [f64; 4096] = [0.0; 4096]
+    mg_restrict_2d(&fine, nx_f, ny_f, &!coarse)
+
+    let tol = 1.0e-12
+    var ok = true
+    i = 0
+    while i <= ny_c {
+        var j = 0
+        while j <= nx_c {
+            if mg_abs(coarse[mg_idx2d(i, j, nx_c)] - c) > tol { ok = false }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    ok
+}
+
+// ============================================================================
+// TEST 10: 2D Jacobi smoother reduces residual
+// After several 2D Jacobi sweeps, the residual should decrease.
+// ============================================================================
+
+fn test_jacobi_2d_reduces_residual() -> bool with Mut, Div {
+    let nx = 8
+    let ny = 8
+    let hx = 1.0 / (nx as f64)
+    let hy = 1.0 / (ny as f64)
+    let omega = 2.0 / 3.0
+
+    // Set up RHS: f = 1.0 on interior
+    var f_vals: [f64; 4096] = [0.0; 4096]
+    var i = 1
+    while i < ny {
+        var j = 1
+        while j < nx {
+            f_vals[mg_idx2d(i, j, nx)] = 1.0
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Initial solution: zero
+    var u: [f64; 4096] = [0.0; 4096]
+
+    // Compute initial residual norm
+    var r0: [f64; 4096] = [0.0; 4096]
+    mg_residual_2d(&u, &f_vals, nx, ny, hx, hy, &!r0)
+    let norm0 = mg_residual_norm_2d(&r0, nx, ny, hx, hy)
+
+    // Apply 10 Jacobi sweeps
+    mg_smooth_jacobi_2d(&!u, &f_vals, nx, ny, hx, hy, omega, 10)
+
+    // Compute new residual norm
+    var r1: [f64; 4096] = [0.0; 4096]
+    mg_residual_2d(&u, &f_vals, nx, ny, hx, hy, &!r1)
+    let norm1 = mg_residual_norm_2d(&r1, nx, ny, hx, hy)
+
+    norm1 < norm0
+}
+
+// ============================================================================
+// TEST 11: Convergence factor in (0, 1)
+// Given a decreasing sequence of residuals, mg_convergence_factor should
+// return a value strictly between 0 and 1.
+// ============================================================================
+
+fn test_convergence_factor() -> bool with Mut, Div {
+    // Simulate a geometric decrease: r[k] = 10.0 * 0.3^k
+    var residuals: [f64; 256] = [0.0; 256]
+    residuals[0] = 10.0
+    residuals[1] = 3.0
+    residuals[2] = 0.9
+    residuals[3] = 0.27
+    residuals[4] = 0.081
+
+    let factor = mg_convergence_factor(&residuals, 5)
+
+    // Factor should be approximately 0.3
+    // It must be in (0, 1)
+    let ok_pos = factor > 0.0
+    let ok_lt1 = factor < 1.0
+    // Check it's close to 0.3
+    let ok_val = mg_abs(factor - 0.3) < 0.05
+
+    if ok_pos {
+        if ok_lt1 {
+            if ok_val { return true }
+        }
+    }
+    false
+}
+
+// ============================================================================
+// TEST 12: Default config values
+// mg_default_config should set nu1=2, nu2=2, max_cycles=100, tol=1e-10.
+// ============================================================================
+
+fn test_default_config() -> bool with Mut, Div {
+    var config: MGConfig = MGConfig {
+        n_levels: 0, nu1: 0, nu2: 0, max_cycles: 0,
+        tol: 0.0, omega: 0.0
+    }
+
+    mg_default_config(4, &!config)
+
+    let ok_levels = config.n_levels == 4
+    let ok_nu1 = config.nu1 == 2
+    let ok_nu2 = config.nu2 == 2
+    let ok_max = config.max_cycles == 100
+    let ok_tol = mg_abs(config.tol - 1.0e-10) < 1.0e-15
+    let ok_omega = mg_abs(config.omega - 2.0 / 3.0) < 1.0e-12
+
+    if ok_levels {
+        if ok_nu1 {
+            if ok_nu2 {
+                if ok_max {
+                    if ok_tol {
+                        if ok_omega { return true }
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    var pass = 0
+    var fail = 0
+
+    println("=== Multigrid Solvers Tests ===")
+    println("")
+
+    // Test 1
+    print("Test  1: Restriction preserves constant (1D) .. ")
+    if test_restrict_preserves_constant() { println("PASS"); pass = pass + 1 }
+    else { println("FAIL"); fail = fail + 1 }
+
+    // Test 2
+    print("Test  2: Prolongation preserves constant (1D) . ")
+    if test_prolongate_preserves_constant() { println("PASS"); pass = pass + 1 }
+    else { println("FAIL"); fail = fail + 1 }
+
+    // Test 3
+    print("Test  3: Restriction/prolongation adjoint ..... ")
+    if test_adjoint_relation() { println("PASS"); pass = pass + 1 }
+    else { println("FAIL"); fail = fail + 1 }
+
+    // Test 4
+    print("Test  4: Jacobi smoother reduces residual ..... ")
+    if test_jacobi_reduces_residual() { println("PASS"); pass = pass + 1 }
+    else { println("FAIL"); fail = fail + 1 }
+
+    // Test 5
+    print("Test  5: Red-black GS reduces residual ....... ")
+    if test_gs_rb_reduces_residual() { println("PASS"); pass = pass + 1 }
+    else { println("FAIL"); fail = fail + 1 }
+
+    // Test 6
+    print("Test  6: Thomas algorithm exact solve ......... ")
+    if test_thomas_exact() { println("PASS"); pass = pass + 1 }
+    else { println("FAIL"); fail = fail + 1 }
+
+    // Test 7
+    print("Test  7: V-cycle convergence factor < 0.5 ..... ")
+    if test_vcycle_convergence() { println("PASS"); pass = pass + 1 }
+    else { println("FAIL"); fail = fail + 1 }
+
+    // Test 8
+    print("Test  8: Full 1D Poisson -u''=pi^2*sin(pi*x) . ")
+    if test_full_poisson_1d() { println("PASS"); pass = pass + 1 }
+    else { println("FAIL"); fail = fail + 1 }
+
+    // Test 9
+    print("Test  9: 2D restriction preserves constant .... ")
+    if test_restrict_2d_preserves_constant() { println("PASS"); pass = pass + 1 }
+    else { println("FAIL"); fail = fail + 1 }
+
+    // Test 10
+    print("Test 10: 2D Jacobi reduces residual ........... ")
+    if test_jacobi_2d_reduces_residual() { println("PASS"); pass = pass + 1 }
+    else { println("FAIL"); fail = fail + 1 }
+
+    // Test 11
+    print("Test 11: Convergence factor in (0, 1) ......... ")
+    if test_convergence_factor() { println("PASS"); pass = pass + 1 }
+    else { println("FAIL"); fail = fail + 1 }
+
+    // Test 12
+    print("Test 12: Default config values ................ ")
+    if test_default_config() { println("PASS"); pass = pass + 1 }
+    else { println("FAIL"); fail = fail + 1 }
+
+    println("")
+    print("Passed: "); println(pass as string)
+    print("Failed: "); println(fail as string)
+    println("")
+    if fail == 0 {
+        println("ALL 12 TESTS PASSED")
+        return 0
+    } else {
+        println("SOME TESTS FAILED")
+        return 1
+    }
+}

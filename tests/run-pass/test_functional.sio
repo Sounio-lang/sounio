@@ -1,0 +1,1132 @@
+//@ run-pass
+//@ expect-stdout: ALL 12 TESTS PASSED
+//@ expect-stdout: Failed: 0
+// test_functional.sio — Tests for computational functional analysis module
+//
+// Self-contained test suite for operator norms, spectral radius, condition
+// number, L2 inner products, RKHS interpolation, compact operator spectrum,
+// and Fredholm alternative detection. All structs, helpers, and algorithms
+// are inlined since tests cannot import.
+//
+// References:
+//   Kreyszig (1978): "Introductory Functional Analysis with Applications"
+//   Conway (1990): "A Course in Functional Analysis"
+//   Fasshauer (2007): "Meshfree Approximation Methods with MATLAB"
+
+// ============================================================================
+// PURE MATH HELPERS (must precede callers)
+// ============================================================================
+
+fn fa_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn fa_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+fn fa_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+fn fa_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn fa_exp(x: f64) -> f64 with Mut, Div {
+    if x > 500.0 { return 1.0e200 }
+    if x < -500.0 { return 0.0 }
+    var kf = x / 0.6931471805599453
+    var k: i32 = 0
+    if kf >= 0.0 { k = kf as i32 } else { k = (kf as i32) - 1 }
+    let r = x - (k as f64) * 0.6931471805599453
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 25 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var result = sum
+    if k >= 0 { var i = 0; while i < k { result = result * 2.0; i = i + 1 } }
+    else { var i = 0; while i < (0 - k) { result = result / 2.0; i = i + 1 } }
+    result
+}
+
+fn fa_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    if x == 1.0 { return 0.0 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 { term = term * t2; sum = sum + term / ((2 * k + 1) as f64); k = k + 1 }
+    2.0 * sum + (e as f64) * 0.6931471805599453
+}
+
+fn fa_sin(x: f64) -> f64 with Mut, Div {
+    var a = x
+    let tp = 6.28318530717958647692
+    while a >= tp { a = a - tp }
+    while a < 0.0 { a = a + tp }
+    if a > 3.14159265358979323846 { a = a - tp }
+    let a2 = a * a
+    var sum = a
+    var term = a
+    var n = 1
+    while n < 18 { term = 0.0 - term * a2 / ((2 * n) * (2 * n + 1)) as f64; sum = sum + term; n = n + 1 }
+    sum
+}
+
+fn fa_cos(x: f64) -> f64 with Mut, Div {
+    fa_sin(x + 1.57079632679489661923)
+}
+
+fn fa_pi() -> f64 { 3.14159265358979323846 }
+
+fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
+    fa_abs(a - b) < tol
+}
+
+fn approx_rel(a: f64, b: f64, tol: f64) -> bool {
+    let denom = fa_max(fa_abs(a), fa_abs(b))
+    if denom < 1.0e-30 { return fa_abs(a - b) < tol }
+    fa_abs(a - b) / denom < tol
+}
+
+// ============================================================================
+// VECTOR / MATRIX HELPERS (row-major flat arrays)
+// ============================================================================
+
+fn fa_dot(a: &[f64; 4096], b: &[f64; 4096], n: i32) -> f64 with Mut {
+    var sum = 0.0
+    var i = 0
+    while i < n { sum = sum + a[i] * b[i]; i = i + 1 }
+    sum
+}
+
+fn fa_norm2(v: &[f64; 4096], n: i32) -> f64 with Mut, Div {
+    var sum = 0.0
+    var i = 0
+    while i < n { sum = sum + v[i] * v[i]; i = i + 1 }
+    fa_sqrt(sum)
+}
+
+fn fa_matvec(A: &[f64; 4096], x: &[f64; 4096], n: i32, out: &![f64; 4096]) with Mut {
+    var i = 0
+    while i < n {
+        var sum = 0.0
+        var j = 0
+        while j < n {
+            sum = sum + A[i * n + j] * x[j]
+            j = j + 1
+        }
+        out[i] = sum
+        i = i + 1
+    }
+}
+
+fn fa_gauss_solve(A: &[f64; 4096], b: &[f64; 4096], n: i32, x: &![f64; 4096]) with Mut, Div, Panic {
+    var work: [f64; 4096] = [0.0; 4096]
+    let nc = n + 1
+    var i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            work[i * nc + j] = A[i * n + j]
+            j = j + 1
+        }
+        work[i * nc + n] = b[i]
+        i = i + 1
+    }
+
+    var col = 0
+    while col < n {
+        var max_val = fa_abs(work[col * nc + col])
+        var max_row = col
+        var row = col + 1
+        while row < n {
+            let v = fa_abs(work[row * nc + col])
+            if v > max_val { max_val = v; max_row = row }
+            row = row + 1
+        }
+        if max_row != col {
+            var j = 0
+            while j < nc {
+                let tmp = work[col * nc + j]
+                work[col * nc + j] = work[max_row * nc + j]
+                work[max_row * nc + j] = tmp
+                j = j + 1
+            }
+        }
+        let pivot = work[col * nc + col]
+        if fa_abs(pivot) < 1.0e-30 {
+            x[col] = 0.0
+        } else {
+            row = col + 1
+            while row < n {
+                let factor = work[row * nc + col] / pivot
+                var j = col
+                while j < nc {
+                    work[row * nc + j] = work[row * nc + j] - factor * work[col * nc + j]
+                    j = j + 1
+                }
+                row = row + 1
+            }
+        }
+        col = col + 1
+    }
+
+    i = n - 1
+    while i >= 0 {
+        var sum = work[i * nc + n]
+        var j = i + 1
+        while j < n {
+            sum = sum - work[i * nc + j] * x[j]
+            j = j + 1
+        }
+        let diag = work[i * nc + i]
+        if fa_abs(diag) < 1.0e-30 { x[i] = 0.0 }
+        else { x[i] = sum / diag }
+        i = i - 1
+    }
+}
+
+// ============================================================================
+// STRUCTS
+// ============================================================================
+
+struct OpNormResult {
+    norm_1: f64,
+    norm_inf: f64,
+    norm_fro: f64,
+    norm_2: f64,
+    spectral_radius: f64,
+    condition: f64
+}
+
+struct RKHSModel {
+    x_train: [f64; 128],
+    alpha: [f64; 128],
+    n_train: i32,
+    length_scale: f64,
+    kernel_type: i32
+}
+
+// ============================================================================
+// OPERATOR NORMS
+// ============================================================================
+
+fn op_norm_1(A: &[f64; 4096], n: i32) -> f64 with Mut {
+    var best = 0.0
+    var j = 0
+    while j < n {
+        var col_sum = 0.0
+        var i = 0
+        while i < n {
+            col_sum = col_sum + fa_abs(A[i * n + j])
+            i = i + 1
+        }
+        if col_sum > best { best = col_sum }
+        j = j + 1
+    }
+    best
+}
+
+fn op_norm_inf(A: &[f64; 4096], n: i32) -> f64 with Mut {
+    var best = 0.0
+    var i = 0
+    while i < n {
+        var row_sum = 0.0
+        var j = 0
+        while j < n {
+            row_sum = row_sum + fa_abs(A[i * n + j])
+            j = j + 1
+        }
+        if row_sum > best { best = row_sum }
+        i = i + 1
+    }
+    best
+}
+
+fn op_norm_frobenius(A: &[f64; 4096], n: i32) -> f64 with Mut, Div {
+    var sum = 0.0
+    var i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            let v = A[i * n + j]
+            sum = sum + v * v
+            j = j + 1
+        }
+        i = i + 1
+    }
+    fa_sqrt(sum)
+}
+
+fn op_norm_2(A: &[f64; 4096], n: i32) -> f64 with Mut, Div, Panic {
+    var B: [f64; 4096] = [0.0; 4096]
+    var i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            var sum = 0.0
+            var k = 0
+            while k < n {
+                sum = sum + A[k * n + i] * A[k * n + j]
+                k = k + 1
+            }
+            B[i * n + j] = sum
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    var v: [f64; 4096] = [0.0; 4096]
+    let inv_sqrtn = 1.0 / fa_sqrt(n as f64)
+    i = 0
+    while i < n { v[i] = inv_sqrtn; i = i + 1 }
+
+    var w: [f64; 4096] = [0.0; 4096]
+    var eigenvalue = 0.0
+
+    var iter = 0
+    while iter < 500 {
+        fa_matvec(&B, &v, n, &!w)
+        eigenvalue = fa_dot(&v, &w, n)
+        let nrm = fa_norm2(&w, n)
+        if nrm < 1.0e-30 { return 0.0 }
+        i = 0
+        while i < n { v[i] = w[i] / nrm; i = i + 1 }
+        iter = iter + 1
+    }
+
+    if eigenvalue < 0.0 { return 0.0 }
+    fa_sqrt(eigenvalue)
+}
+
+// ============================================================================
+// SPECTRAL PROPERTIES
+// ============================================================================
+
+fn spectral_radius(A: &[f64; 4096], n: i32) -> f64 with Mut, Div, Panic {
+    var v: [f64; 4096] = [0.0; 4096]
+    var i = 0
+    while i < n {
+        v[i] = 1.0 / ((i + 1) as f64)
+        i = i + 1
+    }
+    let init_norm = fa_norm2(&v, n)
+    if init_norm > 0.0 {
+        i = 0
+        while i < n { v[i] = v[i] / init_norm; i = i + 1 }
+    }
+
+    var w: [f64; 4096] = [0.0; 4096]
+    var lambda = 0.0
+
+    var iter = 0
+    while iter < 500 {
+        fa_matvec(A, &v, n, &!w)
+        lambda = fa_dot(&v, &w, n)
+        let nrm = fa_norm2(&w, n)
+        if nrm < 1.0e-30 { return 0.0 }
+        i = 0
+        while i < n { v[i] = w[i] / nrm; i = i + 1 }
+        iter = iter + 1
+    }
+
+    fa_abs(lambda)
+}
+
+fn condition_number(A: &[f64; 4096], n: i32) -> f64 with Mut, Div, Panic {
+    var B: [f64; 4096] = [0.0; 4096]
+    var i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            var sum = 0.0
+            var k = 0
+            while k < n {
+                sum = sum + A[k * n + i] * A[k * n + j]
+                k = k + 1
+            }
+            B[i * n + j] = sum
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Largest eigenvalue via power iteration
+    var v: [f64; 4096] = [0.0; 4096]
+    i = 0
+    while i < n { v[i] = 1.0 / ((i + 1) as f64); i = i + 1 }
+    let init_n = fa_norm2(&v, n)
+    if init_n > 0.0 {
+        i = 0
+        while i < n { v[i] = v[i] / init_n; i = i + 1 }
+    }
+
+    var w: [f64; 4096] = [0.0; 4096]
+    var lambda_max = 0.0
+    var iter = 0
+    while iter < 300 {
+        fa_matvec(&B, &v, n, &!w)
+        lambda_max = fa_dot(&v, &w, n)
+        let nrm = fa_norm2(&w, n)
+        if nrm < 1.0e-30 { return 1.0e30 }
+        i = 0
+        while i < n { v[i] = w[i] / nrm; i = i + 1 }
+        iter = iter + 1
+    }
+
+    // Smallest eigenvalue via inverse iteration
+    i = 0
+    while i < n { v[i] = 1.0 / ((i + 1) as f64); i = i + 1 }
+    let init_n2 = fa_norm2(&v, n)
+    if init_n2 > 0.0 {
+        i = 0
+        while i < n { v[i] = v[i] / init_n2; i = i + 1 }
+    }
+
+    var lambda_min = lambda_max
+    iter = 0
+    while iter < 300 {
+        fa_gauss_solve(&B, &v, n, &!w)
+        let nrm = fa_norm2(&w, n)
+        if nrm < 1.0e-30 { return 1.0e30 }
+        var bw: [f64; 4096] = [0.0; 4096]
+        fa_matvec(&B, &w, n, &!bw)
+        let rq = fa_dot(&w, &bw, n) / (nrm * nrm)
+        lambda_min = rq
+        i = 0
+        while i < n { v[i] = w[i] / nrm; i = i + 1 }
+        iter = iter + 1
+    }
+
+    if lambda_min < 1.0e-30 { return 1.0e30 }
+    if lambda_max < 0.0 { return 1.0e30 }
+    if lambda_min < 0.0 { return 1.0e30 }
+    fa_sqrt(lambda_max / lambda_min)
+}
+
+// ============================================================================
+// FUNCTION SPACE INNER PRODUCTS (via quadrature)
+// ============================================================================
+
+fn fa_simpson(vals: &[f64; 4096], a: f64, b: f64, n_quad: i32) -> f64 with Mut, Div {
+    let h = (b - a) / (n_quad as f64)
+    var sum = vals[0] + vals[n_quad]
+    var i = 1
+    while i < n_quad {
+        let rem = i - (i / 2) * 2
+        if rem == 1 {
+            sum = sum + 4.0 * vals[i]
+        } else {
+            sum = sum + 2.0 * vals[i]
+        }
+        i = i + 1
+    }
+    sum * h / 3.0
+}
+
+fn l2_inner_product(f: fn(f64) -> f64 with Mut, Div, Panic,
+                    g: fn(f64) -> f64 with Mut, Div, Panic,
+                    a: f64, b: f64, n_quad: i32) -> f64 with Mut, Div, Panic {
+    var nq = n_quad
+    let rem = nq - (nq / 2) * 2
+    if rem != 0 { nq = nq + 1 }
+
+    let h = (b - a) / (nq as f64)
+    var vals: [f64; 4096] = [0.0; 4096]
+
+    var i = 0
+    while i <= nq {
+        let x = a + (i as f64) * h
+        vals[i] = f(x) * g(x)
+        i = i + 1
+    }
+
+    fa_simpson(&vals, a, b, nq)
+}
+
+fn l2_norm(f: fn(f64) -> f64 with Mut, Div, Panic,
+           a: f64, b: f64, n_quad: i32) -> f64 with Mut, Div, Panic {
+    let ip = l2_inner_product(f, f, a, b, n_quad)
+    if ip < 0.0 { return 0.0 }
+    fa_sqrt(ip)
+}
+
+// ============================================================================
+// RKHS KERNEL FUNCTIONS
+// ============================================================================
+
+fn fa_kernel_rbf(x: f64, y: f64, length_scale: f64) -> f64 with Mut, Div {
+    let d = x - y
+    let l2 = length_scale * length_scale
+    fa_exp(0.0 - (d * d) / (2.0 * l2))
+}
+
+fn fa_kernel_eval(x: f64, y: f64, length_scale: f64, kernel_type: i32) -> f64 with Mut, Div {
+    // Only RBF (type 0) used in tests
+    fa_kernel_rbf(x, y, length_scale)
+}
+
+// ============================================================================
+// RKHS KERNEL INTERPOLATION
+// ============================================================================
+
+fn rkhs_train(x_train: &[f64; 128], y_train: &[f64; 128], n: i32,
+              length_scale: f64, kernel_type: i32, reg: f64,
+              model: &!RKHSModel) with Mut, Div, Panic {
+    var i = 0
+    while i < n {
+        model.x_train[i] = x_train[i]
+        i = i + 1
+    }
+    model.n_train = n
+    model.length_scale = length_scale
+    model.kernel_type = kernel_type
+
+    var K: [f64; 4096] = [0.0; 4096]
+    i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            K[i * n + j] = fa_kernel_eval(x_train[i], x_train[j], length_scale, kernel_type)
+            j = j + 1
+        }
+        K[i * n + i] = K[i * n + i] + reg
+        i = i + 1
+    }
+
+    var rhs: [f64; 4096] = [0.0; 4096]
+    i = 0
+    while i < n { rhs[i] = y_train[i]; i = i + 1 }
+
+    var alpha_buf: [f64; 4096] = [0.0; 4096]
+    fa_gauss_solve(&K, &rhs, n, &!alpha_buf)
+
+    i = 0
+    while i < n {
+        model.alpha[i] = alpha_buf[i]
+        i = i + 1
+    }
+}
+
+fn rkhs_eval(model: &RKHSModel, x: f64) -> f64 with Mut, Div {
+    var sum = 0.0
+    var i = 0
+    while i < model.n_train {
+        let kval = fa_kernel_eval(x, model.x_train[i], model.length_scale, model.kernel_type)
+        sum = sum + model.alpha[i] * kval
+        i = i + 1
+    }
+    sum
+}
+
+fn rkhs_norm(model: &RKHSModel) -> f64 with Mut, Div {
+    var sum = 0.0
+    var i = 0
+    while i < model.n_train {
+        var j = 0
+        while j < model.n_train {
+            let kval = fa_kernel_eval(model.x_train[i], model.x_train[j],
+                                      model.length_scale, model.kernel_type)
+            sum = sum + model.alpha[i] * kval * model.alpha[j]
+            j = j + 1
+        }
+        i = i + 1
+    }
+    if sum < 0.0 { return 0.0 }
+    fa_sqrt(sum)
+}
+
+// ============================================================================
+// COMPACT OPERATOR SPECTRUM
+// ============================================================================
+
+fn compact_op_spectrum(K: fn(f64, f64) -> f64 with Mut, Div, Panic,
+                       a: f64, b: f64, n_quad: i32, n_eig: i32,
+                       eigenvalues: &![f64; 64]) with Mut, Div, Panic {
+    var nq = n_quad
+    let rem = nq - (nq / 2) * 2
+    if rem != 0 { nq = nq + 1 }
+
+    let h = (b - a) / (nq as f64)
+
+    var nodes: [f64; 4096] = [0.0; 4096]
+    var i = 0
+    while i <= nq {
+        nodes[i] = a + (i as f64) * h
+        i = i + 1
+    }
+    let nn = nq + 1
+
+    var weights: [f64; 4096] = [0.0; 4096]
+    weights[0] = h / 3.0
+    weights[nq] = h / 3.0
+    i = 1
+    while i < nq {
+        let r2 = i - (i / 2) * 2
+        if r2 == 1 {
+            weights[i] = 4.0 * h / 3.0
+        } else {
+            weights[i] = 2.0 * h / 3.0
+        }
+        i = i + 1
+    }
+
+    var mat_n = nn
+    if mat_n > 64 { mat_n = 64 }
+
+    var M: [f64; 4096] = [0.0; 4096]
+    i = 0
+    while i < mat_n {
+        var j = 0
+        while j < mat_n {
+            M[i * mat_n + j] = weights[j] * K(nodes[i], nodes[j])
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    var ne = n_eig
+    if ne > mat_n { ne = mat_n }
+    if ne > 64 { ne = 64 }
+
+    var eig_idx = 0
+    while eig_idx < ne {
+        var v: [f64; 4096] = [0.0; 4096]
+        i = 0
+        while i < mat_n { v[i] = 1.0 / ((i + 1) as f64); i = i + 1 }
+        let v_norm_init = fa_norm2(&v, mat_n)
+        if v_norm_init > 0.0 {
+            i = 0
+            while i < mat_n { v[i] = v[i] / v_norm_init; i = i + 1 }
+        }
+
+        var w: [f64; 4096] = [0.0; 4096]
+        var eigenvalue = 0.0
+        var prev_eigenvalue = 0.0
+
+        var iter = 0
+        while iter < 500 {
+            fa_matvec(&M, &v, mat_n, &!w)
+            eigenvalue = fa_dot(&v, &w, mat_n)
+            let nrm = fa_norm2(&w, mat_n)
+            if nrm < 1.0e-30 {
+                eigenvalue = 0.0
+                i = 0
+                while i < mat_n { v[i] = 0.0; i = i + 1 }
+                iter = 500
+            } else {
+                i = 0
+                while i < mat_n { v[i] = w[i] / nrm; i = i + 1 }
+                if iter > 0 {
+                    if fa_abs(eigenvalue - prev_eigenvalue) < 1.0e-12 * fa_abs(eigenvalue) + 1.0e-30 {
+                        iter = 500
+                    }
+                }
+                prev_eigenvalue = eigenvalue
+            }
+            iter = iter + 1
+        }
+
+        eigenvalues[eig_idx] = eigenvalue
+
+        i = 0
+        while i < mat_n {
+            var j = 0
+            while j < mat_n {
+                M[i * mat_n + j] = M[i * mat_n + j] - eigenvalue * v[i] * v[j]
+                j = j + 1
+            }
+            i = i + 1
+        }
+
+        eig_idx = eig_idx + 1
+    }
+}
+
+// ============================================================================
+// FREDHOLM ALTERNATIVE
+// ============================================================================
+
+fn fredholm_alternative(K: fn(f64, f64) -> f64 with Mut, Div, Panic,
+                        a: f64, b: f64, lambda: f64,
+                        n_quad: i32) -> bool with Mut, Div, Panic {
+    var nq = n_quad
+    let rem = nq - (nq / 2) * 2
+    if rem != 0 { nq = nq + 1 }
+
+    let h = (b - a) / (nq as f64)
+
+    var nodes: [f64; 4096] = [0.0; 4096]
+    var i = 0
+    while i <= nq {
+        nodes[i] = a + (i as f64) * h
+        i = i + 1
+    }
+    let nn = nq + 1
+
+    var weights: [f64; 4096] = [0.0; 4096]
+    weights[0] = h / 3.0
+    weights[nq] = h / 3.0
+    i = 1
+    while i < nq {
+        let r2 = i - (i / 2) * 2
+        if r2 == 1 {
+            weights[i] = 4.0 * h / 3.0
+        } else {
+            weights[i] = 2.0 * h / 3.0
+        }
+        i = i + 1
+    }
+
+    var mat_n = nn
+    if mat_n > 64 { mat_n = 64 }
+
+    var A: [f64; 4096] = [0.0; 4096]
+    i = 0
+    while i < mat_n {
+        var j = 0
+        while j < mat_n {
+            let m_ij = weights[j] * K(nodes[i], nodes[j])
+            A[i * mat_n + j] = 0.0 - lambda * m_ij
+            j = j + 1
+        }
+        A[i * mat_n + i] = A[i * mat_n + i] + 1.0
+        i = i + 1
+    }
+
+    var det_sign = 1.0
+    var log_det = 0.0
+
+    var col = 0
+    while col < mat_n {
+        var max_val = fa_abs(A[col * mat_n + col])
+        var max_row = col
+        var row = col + 1
+        while row < mat_n {
+            let v = fa_abs(A[row * mat_n + col])
+            if v > max_val { max_val = v; max_row = row }
+            row = row + 1
+        }
+        if max_row != col {
+            var j = 0
+            while j < mat_n {
+                let tmp = A[col * mat_n + j]
+                A[col * mat_n + j] = A[max_row * mat_n + j]
+                A[max_row * mat_n + j] = tmp
+                j = j + 1
+            }
+            det_sign = 0.0 - det_sign
+        }
+        let pivot = A[col * mat_n + col]
+        if fa_abs(pivot) < 1.0e-30 {
+            return false
+        }
+        if pivot < 0.0 { det_sign = 0.0 - det_sign }
+        log_det = log_det + fa_ln(fa_abs(pivot))
+        row = col + 1
+        while row < mat_n {
+            let factor = A[row * mat_n + col] / pivot
+            var j = col + 1
+            while j < mat_n {
+                A[row * mat_n + j] = A[row * mat_n + j] - factor * A[col * mat_n + j]
+                j = j + 1
+            }
+            A[row * mat_n + col] = 0.0
+            row = row + 1
+        }
+        col = col + 1
+    }
+
+    let det_threshold = (mat_n as f64) * fa_ln(10.0) * (0.0 - 10.0)
+    if log_det < det_threshold {
+        return false
+    }
+    true
+}
+
+// ============================================================================
+// TEST HELPER FUNCTIONS (used as function pointers)
+// ============================================================================
+
+fn fn_sin(x: f64) -> f64 with Mut, Div, Panic {
+    fa_sin(x)
+}
+
+fn fn_const_one(x: f64) -> f64 with Mut, Div, Panic {
+    1.0
+}
+
+fn kernel_xt(x: f64, t: f64) -> f64 with Mut, Div, Panic {
+    x * t
+}
+
+// ============================================================================
+// TEST 1: Identity matrix norms
+// ||I||_1 = 1, ||I||_inf = 1, ||I||_F = sqrt(n), ||I||_2 = 1
+// ============================================================================
+
+fn test_identity_norms() -> bool with Mut, Div, Panic {
+    let n = 3
+    var I: [f64; 4096] = [0.0; 4096]
+    I[0] = 1.0    // (0,0)
+    I[4] = 1.0    // (1,1)
+    I[8] = 1.0    // (2,2)
+
+    let n1 = op_norm_1(&I, n)
+    let ni = op_norm_inf(&I, n)
+    let nf = op_norm_frobenius(&I, n)
+    let n2 = op_norm_2(&I, n)
+
+    let expected_fro = fa_sqrt(3.0)
+
+    let ok_1 = approx_eq(n1, 1.0, 1.0e-6)
+    let ok_inf = approx_eq(ni, 1.0, 1.0e-6)
+    let ok_fro = approx_eq(nf, expected_fro, 1.0e-6)
+    let ok_2 = approx_eq(n2, 1.0, 1.0e-6)
+    ok_1 && ok_inf && ok_fro && ok_2
+}
+
+// ============================================================================
+// TEST 2: Norm inequality ||A||_F >= ||A||_2
+// ============================================================================
+
+fn test_norm_inequality() -> bool with Mut, Div, Panic {
+    let n = 3
+    // A = [[2, 1, 0], [1, 3, 1], [0, 1, 2]]
+    var A: [f64; 4096] = [0.0; 4096]
+    A[0] = 2.0; A[1] = 1.0; A[2] = 0.0
+    A[3] = 1.0; A[4] = 3.0; A[5] = 1.0
+    A[6] = 0.0; A[7] = 1.0; A[8] = 2.0
+
+    let nf = op_norm_frobenius(&A, n)
+    let n2 = op_norm_2(&A, n)
+
+    // Frobenius norm must be >= spectral norm
+    nf >= n2 - 1.0e-10
+}
+
+// ============================================================================
+// TEST 3: Frobenius norm of known matrix
+// A = [[1,2],[3,4]] -> ||A||_F = sqrt(1+4+9+16) = sqrt(30)
+// ============================================================================
+
+fn test_frobenius_known() -> bool with Mut, Div, Panic {
+    let n = 2
+    var A: [f64; 4096] = [0.0; 4096]
+    A[0] = 1.0; A[1] = 2.0
+    A[2] = 3.0; A[3] = 4.0
+
+    let nf = op_norm_frobenius(&A, n)
+    let expected = fa_sqrt(30.0)
+    approx_eq(nf, expected, 1.0e-6)
+}
+
+// ============================================================================
+// TEST 4: Spectral radius of diagonal matrix
+// diag(1, 3, 2) -> spectral_radius = 3
+// ============================================================================
+
+fn test_spectral_radius_diag() -> bool with Mut, Div, Panic {
+    let n = 3
+    var D: [f64; 4096] = [0.0; 4096]
+    D[0] = 1.0    // (0,0)
+    D[4] = 3.0    // (1,1)
+    D[8] = 2.0    // (2,2)
+
+    let rho = spectral_radius(&D, n)
+    approx_eq(rho, 3.0, 1.0e-4)
+}
+
+// ============================================================================
+// TEST 5: Condition number of identity = 1
+// ============================================================================
+
+fn test_condition_identity() -> bool with Mut, Div, Panic {
+    let n = 3
+    var I: [f64; 4096] = [0.0; 4096]
+    I[0] = 1.0
+    I[4] = 1.0
+    I[8] = 1.0
+
+    let kappa = condition_number(&I, n)
+    approx_eq(kappa, 1.0, 1.0e-4)
+}
+
+// ============================================================================
+// TEST 6: Condition number of ill-conditioned matrix >> 1
+// diag(1, 1000) -> kappa = 1000
+// ============================================================================
+
+fn test_condition_ill() -> bool with Mut, Div, Panic {
+    let n = 2
+    var A: [f64; 4096] = [0.0; 4096]
+    A[0] = 1.0      // (0,0)
+    A[3] = 1000.0    // (1,1)
+
+    let kappa = condition_number(&A, n)
+    // Should be close to 1000
+    approx_rel(kappa, 1000.0, 1.0e-2)
+}
+
+// ============================================================================
+// TEST 7: L2 inner product <sin, sin> on [0, pi] = pi/2
+// ============================================================================
+
+fn test_l2_inner_product_sin() -> bool with Mut, Div, Panic {
+    let pi = fa_pi()
+    let ip = l2_inner_product(fn_sin, fn_sin, 0.0, pi, 200)
+    let expected = pi / 2.0
+    approx_eq(ip, expected, 1.0e-4)
+}
+
+// ============================================================================
+// TEST 8: L2 norm of constant function ||1||_2 on [0,1] = 1
+// integral_0^1 1^2 dx = 1, so ||1||_2 = sqrt(1) = 1
+// ============================================================================
+
+fn test_l2_norm_constant() -> bool with Mut, Div, Panic {
+    let nm = l2_norm(fn_const_one, 0.0, 1.0, 200)
+    approx_eq(nm, 1.0, 1.0e-4)
+}
+
+// ============================================================================
+// TEST 9: RKHS interpolation exact at training points
+// f(x_i) should equal y_i for each training point
+// ============================================================================
+
+fn test_rkhs_interp_exact() -> bool with Mut, Div, Panic {
+    var x_train: [f64; 128] = [0.0; 128]
+    var y_train: [f64; 128] = [0.0; 128]
+    x_train[0] = 0.0; y_train[0] = 1.0
+    x_train[1] = 0.5; y_train[1] = 2.0
+    x_train[2] = 1.0; y_train[2] = 0.5
+    x_train[3] = 1.5; y_train[3] = 3.0
+    let n_pts = 4
+
+    var model: RKHSModel = RKHSModel {
+        x_train: [0.0; 128],
+        alpha: [0.0; 128],
+        n_train: 0,
+        length_scale: 0.0,
+        kernel_type: 0
+    }
+    rkhs_train(&x_train, &y_train, n_pts, 1.0, 0, 1.0e-10, &!model)
+
+    // Evaluate at each training point
+    let e0 = fa_abs(rkhs_eval(&model, 0.0) - 1.0)
+    let e1 = fa_abs(rkhs_eval(&model, 0.5) - 2.0)
+    let e2 = fa_abs(rkhs_eval(&model, 1.0) - 0.5)
+    let e3 = fa_abs(rkhs_eval(&model, 1.5) - 3.0)
+
+    let ok0 = e0 < 1.0e-4
+    let ok1 = e1 < 1.0e-4
+    let ok2 = e2 < 1.0e-4
+    let ok3 = e3 < 1.0e-4
+    ok0 && ok1 && ok2 && ok3
+}
+
+// ============================================================================
+// TEST 10: RKHS norm non-negative
+// ||f||_H >= 0 for any interpolant
+// ============================================================================
+
+fn test_rkhs_norm_nonneg() -> bool with Mut, Div, Panic {
+    var x_train: [f64; 128] = [0.0; 128]
+    var y_train: [f64; 128] = [0.0; 128]
+    x_train[0] = 0.0; y_train[0] = 1.0
+    x_train[1] = 1.0; y_train[1] = 0.0 - 1.0
+    x_train[2] = 2.0; y_train[2] = 0.5
+    let n_pts = 3
+
+    var model: RKHSModel = RKHSModel {
+        x_train: [0.0; 128],
+        alpha: [0.0; 128],
+        n_train: 0,
+        length_scale: 0.0,
+        kernel_type: 0
+    }
+    rkhs_train(&x_train, &y_train, n_pts, 1.0, 0, 1.0e-10, &!model)
+
+    let nm = rkhs_norm(&model)
+    nm >= 0.0 - 1.0e-10
+}
+
+// ============================================================================
+// TEST 11: Compact operator dominant eigenvalue
+// K(x,t) = x*t on [0,1] -> lambda_1 = 1/3
+// (since integral_0^1 x*t*f(t)dt with f(t)=t gives x*1/3, eigenvalue = 1/3)
+// ============================================================================
+
+fn test_compact_dominant_eigenvalue() -> bool with Mut, Div, Panic {
+    var eigenvalues: [f64; 64] = [0.0; 64]
+    compact_op_spectrum(kernel_xt, 0.0, 1.0, 60, 2, &!eigenvalues)
+
+    let lambda1 = eigenvalues[0]
+    let expected = 1.0 / 3.0
+    approx_eq(lambda1, expected, 1.0e-4)
+}
+
+// ============================================================================
+// TEST 12: Fredholm alternative
+// For K(x,t) = x*t on [0,1], eigenvalue is 1/3 so lambda=3 is the
+// reciprocal eigenvalue. lambda=2 is NOT an eigenvalue, so the
+// Fredholm alternative guarantees a unique solution.
+// ============================================================================
+
+fn test_fredholm_alternative() -> bool with Mut, Div, Panic {
+    // lambda=2 is not an eigenvalue of K(x,t)=x*t -> should return true
+    let not_eig = fredholm_alternative(kernel_xt, 0.0, 1.0, 2.0, 60)
+
+    // lambda=3 IS the reciprocal of eigenvalue 1/3 -> should return false
+    let is_eig = fredholm_alternative(kernel_xt, 0.0, 1.0, 3.0, 60)
+
+    not_eig && !is_eig
+}
+
+// ============================================================================
+// MAIN TEST RUNNER
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== Functional Analysis Test Suite ===")
+    println("")
+
+    var pass = 0
+    var fail = 0
+
+    // Test 1
+    print("Test  1: Identity matrix norms ... ")
+    if test_identity_norms() {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
+
+    // Test 2
+    print("Test  2: Norm inequality ||A||_F >= ||A||_2 ... ")
+    if test_norm_inequality() {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
+
+    // Test 3
+    print("Test  3: Frobenius norm of [[1,2],[3,4]] ... ")
+    if test_frobenius_known() {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
+
+    // Test 4
+    print("Test  4: Spectral radius of diag(1,3,2) ... ")
+    if test_spectral_radius_diag() {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
+
+    // Test 5
+    print("Test  5: Condition number of identity ... ")
+    if test_condition_identity() {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
+
+    // Test 6
+    print("Test  6: Condition number ill-conditioned ... ")
+    if test_condition_ill() {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
+
+    // Test 7
+    print("Test  7: L2 inner product <sin,sin> = pi/2 ... ")
+    if test_l2_inner_product_sin() {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
+
+    // Test 8
+    print("Test  8: L2 norm of constant ||1|| = 1 ... ")
+    if test_l2_norm_constant() {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
+
+    // Test 9
+    print("Test  9: RKHS interpolation exact at points ... ")
+    if test_rkhs_interp_exact() {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
+
+    // Test 10
+    print("Test 10: RKHS norm non-negative ... ")
+    if test_rkhs_norm_nonneg() {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
+
+    // Test 11
+    print("Test 11: Compact op eigenvalue K=x*t, l1=1/3 ... ")
+    if test_compact_dominant_eigenvalue() {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
+
+    // Test 12
+    print("Test 12: Fredholm alternative detection ... ")
+    if test_fredholm_alternative() {
+        println("PASS")
+        pass = pass + 1
+    } else {
+        println("FAIL")
+        fail = fail + 1
+    }
+
+    println("")
+    print("Passed: "); println(pass as string)
+    print("Failed: "); println(fail as string)
+    println("")
+    if fail == 0 {
+        println("ALL 12 TESTS PASSED")
+        return 0
+    } else {
+        println("SOME TESTS FAILED")
+        return 1
+    }
+}

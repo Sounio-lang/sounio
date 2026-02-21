@@ -1,0 +1,970 @@
+// stdlib/math/integral_eq.sio — Integral equations
+//
+// Pure Sounio implementations:
+//   Fredholm equations of the 1st and 2nd kind
+//   Volterra equations of the 2nd kind
+//   Nystrom method with Gauss-Legendre quadrature
+//   Tikhonov regularization for ill-posed problems
+//   Green's function methods for BVPs
+//   Eigenvalue problems for integral operators
+//
+// References:
+//   Atkinson (1997): "The Numerical Solution of Integral Equations of the Second Kind"
+//   Kress (2014): "Linear Integral Equations"
+//   Press et al. (2007): "Numerical Recipes" Ch. 19
+
+// =============================================================================
+// Helpers
+// =============================================================================
+
+fn ie_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn ie_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+fn ie_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+fn ie_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn ie_exp(x: f64) -> f64 with Mut, Div {
+    if x > 500.0 { return 1.0e200 }
+    if x < -500.0 { return 0.0 }
+    var kf = x / 0.6931471805599453
+    var k: i32 = 0
+    if kf >= 0.0 { k = kf as i32 } else { k = (kf as i32) - 1 }
+    let r = x - (k as f64) * 0.6931471805599453
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 25 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var result = sum
+    if k >= 0 { var i = 0; while i < k { result = result * 2.0; i = i + 1 } }
+    else { var i = 0; while i < (0 - k) { result = result / 2.0; i = i + 1 } }
+    result
+}
+
+fn ie_sin(x: f64) -> f64 with Mut, Div {
+    var a = x
+    let tp = 6.28318530717958647692
+    while a >= tp { a = a - tp }
+    while a < 0.0 { a = a + tp }
+    if a > 3.14159265358979323846 { a = a - tp }
+    let a2 = a * a
+    var sum = a
+    var term = a
+    var n = 1
+    while n < 18 { term = 0.0 - term * a2 / ((2 * n) * (2 * n + 1)) as f64; sum = sum + term; n = n + 1 }
+    sum
+}
+
+fn ie_cos(x: f64) -> f64 with Mut, Div {
+    ie_sin(x + 1.57079632679489661923)
+}
+
+fn ie_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    if x == 1.0 { return 0.0 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 { term = term * t2; sum = sum + term / ((2 * k + 1) as f64); k = k + 1 }
+    2.0 * sum + (e as f64) * 0.6931471805599453
+}
+
+fn ie_pi() -> f64 { 3.14159265358979323846 }
+
+fn ie_pow(base: f64, exp_val: f64) -> f64 with Mut, Div, Panic {
+    // base^exp_val = exp(exp_val * ln(base))
+    if base <= 0.0 { return 0.0 }
+    ie_exp(exp_val * ie_ln(base))
+}
+
+// =============================================================================
+// Linear algebra helpers
+// =============================================================================
+
+// Dot product of a[0..n-1] and b[0..n-1].
+fn ie_dot(a: &[f64; 128], b: &[f64; 128], n: i32) -> f64 with Mut {
+    var sum = 0.0
+    var i = 0
+    while i < n { sum = sum + a[i] * b[i]; i = i + 1 }
+    sum
+}
+
+// Matrix-vector product y = A*x, A is m x n stored row-major in flat array.
+fn ie_mat_vec(A: &[f64; 16384], x: &[f64; 128], y: &![f64; 128], m: i32, n: i32) with Mut {
+    var i = 0
+    while i < m {
+        var sum = 0.0
+        var j = 0
+        while j < n { sum = sum + A[i * n + j] * x[j]; j = j + 1 }
+        y[i] = sum
+        i = i + 1
+    }
+}
+
+// Gaussian elimination with partial pivoting.
+// Solves Ax = b where A is n x n stored row-major in flat array.
+// A and b are modified in-place; solution stored in x.
+fn ie_gauss_solve(A: &![f64; 16384], b: &![f64; 128], x: &![f64; 128], n: i32) with Mut, Div, Panic {
+    // Forward elimination with partial pivoting
+    var col = 0
+    while col < n {
+        // Find pivot
+        var max_val = ie_abs(A[col * n + col])
+        var max_row = col
+        var row = col + 1
+        while row < n {
+            let v = ie_abs(A[row * n + col])
+            if v > max_val { max_val = v; max_row = row }
+            row = row + 1
+        }
+
+        // Swap rows in A and b
+        if max_row != col {
+            var j = 0
+            while j < n {
+                let tmp = A[col * n + j]
+                A[col * n + j] = A[max_row * n + j]
+                A[max_row * n + j] = tmp
+                j = j + 1
+            }
+            let tmp_b = b[col]
+            b[col] = b[max_row]
+            b[max_row] = tmp_b
+        }
+
+        // Eliminate below pivot
+        let pivot = A[col * n + col]
+        if ie_abs(pivot) < 1.0e-30 {
+            // Singular or near-singular — skip
+            col = col + 1
+            // continue equivalent: just proceed
+        } else {
+            row = col + 1
+            while row < n {
+                let factor = A[row * n + col] / pivot
+                var j = col + 1
+                while j < n {
+                    A[row * n + j] = A[row * n + j] - factor * A[col * n + j]
+                    j = j + 1
+                }
+                A[row * n + col] = 0.0
+                b[row] = b[row] - factor * b[col]
+                row = row + 1
+            }
+            col = col + 1
+        }
+    }
+
+    // Back substitution
+    var k = n - 1
+    while k >= 0 {
+        var s = b[k]
+        var j = k + 1
+        while j < n { s = s - A[k * n + j] * x[j]; j = j + 1 }
+        if ie_abs(A[k * n + k]) > 1.0e-30 {
+            x[k] = s / A[k * n + k]
+        } else {
+            x[k] = 0.0
+        }
+        k = k - 1
+    }
+}
+
+// =============================================================================
+// Result structs
+// =============================================================================
+
+struct IEResult {
+    u: [f64; 128],
+    nodes: [f64; 128],
+    weights: [f64; 128],
+    n: i32,
+    residual: f64,
+    converged: bool
+}
+
+struct IEEigenResult {
+    eigenvalues: [f64; 64],
+    eigenvectors: [f64; 8192],
+    n_found: i32,
+    n_quad: i32
+}
+
+// =============================================================================
+// Gauss-Legendre quadrature
+// =============================================================================
+
+// Compute n-point Gauss-Legendre nodes and weights on [-1, 1].
+// Uses Newton's method on the Legendre polynomial P_n(x).
+// Recurrence: (k+1) P_{k+1}(x) = (2k+1) x P_k(x) - k P_{k-1}(x)
+// Derivative: P'_n(x) = n (x P_n(x) - P_{n-1}(x)) / (x^2 - 1)
+// Initial guess: x_i = cos(pi * (i - 0.25) / (n + 0.5))
+// Weights: w_i = 2 / ((1 - x_i^2) * [P'_n(x_i)]^2)
+fn ie_gauss_legendre(n: i32, nodes: &![f64; 128], weights: &![f64; 128]) with Mut, Div, Panic {
+    let n_half = (n + 1) / 2
+    var i = 0
+    while i < n_half {
+        // Initial guess: cos(pi * (i + 0.75) / (n + 0.5))
+        var x = ie_cos(ie_pi() * ((i as f64) + 0.75) / ((n as f64) + 0.5))
+
+        // Newton iterations to refine root of P_n(x)
+        var iter = 0
+        while iter < 50 {
+            // Evaluate P_n(x) and P_{n-1}(x) via recurrence
+            var p0 = 1.0   // P_0(x)
+            var p1 = x     // P_1(x)
+            var k = 1
+            while k < n {
+                let p2 = ((2 * k + 1) as f64 * x * p1 - (k as f64) * p0) / ((k + 1) as f64)
+                p0 = p1
+                p1 = p2
+                k = k + 1
+            }
+            // p1 = P_n(x), p0 = P_{n-1}(x)
+
+            // Derivative: P'_n(x) = n * (x * P_n - P_{n-1}) / (x^2 - 1)
+            let dp = (n as f64) * (x * p1 - p0) / (x * x - 1.0)
+
+            let dx = p1 / dp
+            x = x - dx
+            if ie_abs(dx) < 1.0e-15 { iter = 50 }
+            iter = iter + 1
+        }
+
+        // Store symmetric pair
+        nodes[i] = 0.0 - x
+        nodes[n - 1 - i] = x
+
+        // Re-evaluate derivative at converged x for weight computation
+        var p0w = 1.0
+        var p1w = x
+        var k = 1
+        while k < n {
+            let p2 = ((2 * k + 1) as f64 * x * p1w - (k as f64) * p0w) / ((k + 1) as f64)
+            p0w = p1w
+            p1w = p2
+            k = k + 1
+        }
+        let dpw = (n as f64) * (x * p1w - p0w) / (x * x - 1.0)
+        let w = 2.0 / ((1.0 - x * x) * dpw * dpw)
+
+        weights[i] = w
+        weights[n - 1 - i] = w
+
+        i = i + 1
+    }
+}
+
+// Map GL nodes/weights from [-1, 1] to [a, b].
+// x_mapped = (b - a) / 2 * t + (a + b) / 2
+// w_mapped = w * (b - a) / 2
+fn ie_gauss_legendre_ab(a: f64, b: f64, n: i32,
+                        nodes: &![f64; 128], weights: &![f64; 128]) with Mut, Div, Panic {
+    ie_gauss_legendre(n, nodes, weights)
+    let half_len = 0.5 * (b - a)
+    let midpoint = 0.5 * (a + b)
+    var i = 0
+    while i < n {
+        nodes[i] = half_len * nodes[i] + midpoint
+        weights[i] = weights[i] * half_len
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Residual computation
+// =============================================================================
+
+// Internal helper for Fredholm 2nd kind residual.
+// Compute ||u - f - lambda K u||_inf at quadrature nodes.
+fn ie_residual_fredholm2_internal(K: fn(f64, f64) -> f64 with Mut, Div, Panic,
+                                  f: fn(f64) -> f64 with Mut, Div, Panic,
+                                  lambda: f64, result: &IEResult) -> f64 with Mut, Div, Panic {
+    var max_res = 0.0
+    var i = 0
+    while i < result.n {
+        var ku_i = 0.0
+        var j = 0
+        while j < result.n {
+            ku_i = ku_i + result.weights[j] * K(result.nodes[i], result.nodes[j]) * result.u[j]
+            j = j + 1
+        }
+        let expected = f(result.nodes[i]) + lambda * ku_i
+        let res_i = ie_abs(result.u[i] - expected)
+        if res_i > max_res { max_res = res_i }
+        i = i + 1
+    }
+    max_res
+}
+
+// Public residual computation for Fredholm 2nd kind.
+// Compute ||u - f - lambda K u||_inf at quadrature nodes.
+fn ie_residual_fredholm2(K: fn(f64, f64) -> f64 with Mut, Div, Panic,
+                         f: fn(f64) -> f64 with Mut, Div, Panic,
+                         lambda: f64, result: &IEResult) -> f64 with Mut, Div, Panic {
+    ie_residual_fredholm2_internal(K, f, lambda, result)
+}
+
+// =============================================================================
+// Fredholm equations of the 2nd kind — Nystrom method
+// =============================================================================
+
+// Solve u(x) = f(x) + lambda * integral_a^b K(x,t) u(t) dt
+// via the Nystrom method with Gauss-Legendre quadrature.
+//
+// Discretization: at quadrature nodes {t_j}, the equation becomes
+//   u(t_i) = f(t_i) + lambda * sum_j w_j K(t_i, t_j) u(t_j)
+// which is the linear system (I - lambda W K) u = f where
+//   W K is the matrix with entries w_j K(t_i, t_j).
+fn fredholm2_nystrom(K: fn(f64, f64) -> f64 with Mut, Div, Panic,
+                     f: fn(f64) -> f64 with Mut, Div, Panic,
+                     a: f64, b: f64, lambda: f64, n: i32,
+                     result: &!IEResult) with Mut, Div, Panic {
+    // Compute GL quadrature on [a, b]
+    ie_gauss_legendre_ab(a, b, n, &!result.nodes, &!result.weights)
+    result.n = n
+
+    // Build system matrix A = I - lambda * W * K
+    // A[i * n + j] = delta_{ij} - lambda * w_j * K(t_i, t_j)
+    var mat: [f64; 16384] = [0.0; 16384]
+    var rhs: [f64; 128] = [0.0; 128]
+
+    var i = 0
+    while i < n {
+        rhs[i] = f(result.nodes[i])
+        var j = 0
+        while j < n {
+            let kval = K(result.nodes[i], result.nodes[j])
+            mat[i * n + j] = 0.0 - lambda * result.weights[j] * kval
+            if i == j {
+                mat[i * n + j] = mat[i * n + j] + 1.0
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Solve the system
+    var sol: [f64; 128] = [0.0; 128]
+    ie_gauss_solve(&!mat, &!rhs, &!sol, n)
+
+    // Store solution
+    i = 0
+    while i < n { result.u[i] = sol[i]; i = i + 1 }
+
+    // Compute residual
+    result.residual = ie_residual_fredholm2_internal(K, f, lambda, result)
+    result.converged = result.residual < 1.0e-10
+}
+
+// Nystrom interpolation formula: evaluate solution at arbitrary x.
+// u(x) = f(x) + lambda * sum_j w_j K(x, t_j) u(t_j)
+fn fredholm2_eval(K: fn(f64, f64) -> f64 with Mut, Div, Panic,
+                  f: fn(f64) -> f64 with Mut, Div, Panic,
+                  lambda: f64, result: &IEResult, x: f64) -> f64 with Mut, Div, Panic {
+    var sum = 0.0
+    var j = 0
+    while j < result.n {
+        sum = sum + result.weights[j] * K(x, result.nodes[j]) * result.u[j]
+        j = j + 1
+    }
+    f(x) + lambda * sum
+}
+
+// =============================================================================
+// Fredholm equations of the 1st kind — Tikhonov regularization
+// =============================================================================
+
+// Solve the ill-posed equation integral_a^b K(x,t) u(t) dt = f(x)
+// with Tikhonov regularization: minimize ||Ku - f||^2 + alpha ||u||^2.
+//
+// Discretization via GL quadrature:
+//   K_ij = sqrt(w_i) * K(t_i, t_j) * sqrt(w_j)   (symmetrized)
+//   f_i  = sqrt(w_i) * f(t_i)
+// Normal equations: (K^T K + alpha I) u = K^T f
+// where alpha is the regularization parameter.
+fn fredholm1_tikhonov(K: fn(f64, f64) -> f64 with Mut, Div, Panic,
+                      f: fn(f64) -> f64 with Mut, Div, Panic,
+                      a: f64, b: f64, alpha: f64, n: i32,
+                      result: &!IEResult) with Mut, Div, Panic {
+    // Compute GL quadrature on [a, b]
+    ie_gauss_legendre_ab(a, b, n, &!result.nodes, &!result.weights)
+    result.n = n
+
+    // Build the discrete kernel matrix K_ij = w_j * K(t_i, t_j)
+    // and the RHS vector f_i = f(t_i)
+    var kmat: [f64; 16384] = [0.0; 16384]
+    var fvec: [f64; 128] = [0.0; 128]
+
+    var i = 0
+    while i < n {
+        fvec[i] = f(result.nodes[i])
+        var j = 0
+        while j < n {
+            kmat[i * n + j] = result.weights[j] * K(result.nodes[i], result.nodes[j])
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Build normal equations: (K^T W_diag K + alpha I) u = K^T W_diag f
+    // where W_diag accounts for quadrature in the outer integral.
+    // Here we use: A = K^T diag(w) K + alpha I, rhs = K^T diag(w) f
+    // Note: kmat already contains w_j factors, so K^T * diag(w_i) * K
+    // has entry (j, k) = sum_i w_i * kmat[i,j] * kmat[i,k] / w_j / w_k * w_j * w_k
+    // Simpler: just form A[j,k] = sum_i w_i * K(t_i,t_j)*w_j * K(t_i,t_k)*w_k
+    // But let's directly compute K^T W K where K has entries w_j K(t_i,t_j).
+
+    var ata: [f64; 16384] = [0.0; 16384]
+    var atf: [f64; 128] = [0.0; 128]
+
+    // A^T A: ata[j, k] = sum_i kmat[i,j] * kmat[i,k] * w_i
+    // A^T f: atf[j] = sum_i kmat[i,j] * fvec[i] * w_i
+    var j = 0
+    while j < n {
+        var k = 0
+        while k < n {
+            var sum = 0.0
+            i = 0
+            while i < n {
+                sum = sum + kmat[i * n + j] * kmat[i * n + k] * result.weights[i]
+                i = i + 1
+            }
+            ata[j * n + k] = sum
+            k = k + 1
+        }
+        var sumf = 0.0
+        i = 0
+        while i < n {
+            sumf = sumf + kmat[i * n + j] * fvec[i] * result.weights[i]
+            i = i + 1
+        }
+        atf[j] = sumf
+        j = j + 1
+    }
+
+    // Add regularization: ata += alpha * I
+    i = 0
+    while i < n {
+        ata[i * n + i] = ata[i * n + i] + alpha
+        i = i + 1
+    }
+
+    // Solve the regularized system
+    var sol: [f64; 128] = [0.0; 128]
+    ie_gauss_solve(&!ata, &!atf, &!sol, n)
+
+    // Store solution
+    i = 0
+    while i < n { result.u[i] = sol[i]; i = i + 1 }
+
+    // Compute residual: ||Ku - f||_inf at quadrature nodes
+    var max_res = 0.0
+    i = 0
+    while i < n {
+        var ku_i = 0.0
+        j = 0
+        while j < n {
+            ku_i = ku_i + kmat[i * n + j] * sol[j]
+            j = j + 1
+        }
+        let res_i = ie_abs(ku_i - fvec[i])
+        if res_i > max_res { max_res = res_i }
+        i = i + 1
+    }
+    result.residual = max_res
+    result.converged = max_res < 1.0e-6
+}
+
+// =============================================================================
+// Volterra equations of the 2nd kind
+// =============================================================================
+
+// Solve u(x) = f(x) + integral_a^x K(x,t) u(t) dt (Volterra 2nd kind)
+// using the product trapezoidal method with forward marching.
+//
+// At uniform nodes x_i = a + i*h, the discretization gives:
+//   u_0 = f(a)
+//   u_i = f(x_i) + h * [K(x_i,x_0)*u_0/2 + sum_{j=1}^{i-1} K(x_i,x_j)*u_j
+//                        + K(x_i,x_i)*u_i/2]
+// Rearranging for u_i:
+//   u_i * (1 - h/2 * K(x_i,x_i)) = f(x_i) + h * [K(x_i,x_0)*u_0/2
+//                                    + sum_{j=1}^{i-1} K(x_i,x_j)*u_j]
+fn volterra2_solve(K: fn(f64, f64) -> f64 with Mut, Div, Panic,
+                   f: fn(f64) -> f64 with Mut, Div, Panic,
+                   a: f64, b: f64, n: i32,
+                   result: &!IEResult) with Mut, Div, Panic {
+    result.n = n
+    let h = (b - a) / ((n - 1) as f64)
+
+    // Set up uniform nodes
+    var i = 0
+    while i < n {
+        result.nodes[i] = a + (i as f64) * h
+        result.weights[i] = h  // trapezoidal weights (uniform)
+        i = i + 1
+    }
+
+    // Initial value
+    result.u[0] = f(a)
+
+    // Forward march
+    i = 1
+    while i < n {
+        let xi = result.nodes[i]
+
+        // Sum of interior quadrature contributions
+        var sum = 0.5 * K(xi, result.nodes[0]) * result.u[0]
+        var j = 1
+        while j < i {
+            sum = sum + K(xi, result.nodes[j]) * result.u[j]
+            j = j + 1
+        }
+
+        // Solve for u_i: u_i * (1 - h/2 * K(xi,xi)) = f(xi) + h * sum
+        let kii = K(xi, xi)
+        let denom = 1.0 - 0.5 * h * kii
+        let numer = f(xi) + h * sum
+
+        if ie_abs(denom) < 1.0e-30 {
+            // Degenerate case: approximate without implicit term
+            result.u[i] = numer
+        } else {
+            result.u[i] = numer / denom
+        }
+        i = i + 1
+    }
+
+    // Compute residual at quadrature nodes
+    var max_res = 0.0
+    i = 1
+    while i < n {
+        let xi = result.nodes[i]
+        // Compute integral_a^{x_i} K(x_i, t) u(t) dt via trapezoidal rule
+        var integral = 0.5 * K(xi, result.nodes[0]) * result.u[0]
+        var j = 1
+        while j < i {
+            integral = integral + K(xi, result.nodes[j]) * result.u[j]
+            j = j + 1
+        }
+        integral = integral + 0.5 * K(xi, result.nodes[i]) * result.u[i]
+        integral = integral * h
+
+        let res_i = ie_abs(result.u[i] - f(xi) - integral)
+        if res_i > max_res { max_res = res_i }
+        i = i + 1
+    }
+    result.residual = max_res
+    result.converged = max_res < 1.0e-8
+}
+
+// =============================================================================
+// Abel integral equation (weakly singular Volterra)
+// =============================================================================
+
+// Solve the Abel integral equation:
+//   integral_a^x u(t) / (x - t)^alpha dt = f(x),  0 < alpha < 1
+//
+// Uses product integration to handle the weakly singular kernel (x-t)^{-alpha}.
+// At uniform nodes x_i = a + i*h, the weights for the singular kernel are
+// computed analytically:
+//   w_{i,j} = integral_{x_j}^{x_{j+1}} (x_i - t)^{-alpha} dt
+//           = [(x_i - x_j)^{1-alpha} - (x_i - x_{j+1})^{1-alpha}] / (1 - alpha)
+//
+// This gives the system: sum_j w_{ij} * u_j = f(x_i), solved forward.
+fn volterra2_abel(f: fn(f64) -> f64 with Mut, Div, Panic,
+                  alpha: f64, a: f64, b: f64, n: i32,
+                  result: &!IEResult) with Mut, Div, Panic {
+    result.n = n
+    let h = (b - a) / ((n - 1) as f64)
+    let one_m_a = 1.0 - alpha
+
+    // Set up uniform nodes
+    var i = 0
+    while i < n {
+        result.nodes[i] = a + (i as f64) * h
+        result.weights[i] = h
+        i = i + 1
+    }
+
+    // First node: u(a) = f(a) / integral_a^{a+epsilon} (a+epsilon - t)^{-alpha} dt
+    // For the first point, use the analytical value if available.
+    // The integral from a to a is zero, so we need special treatment.
+    // Use: integral_a^{x_1} (x_1 - t)^{-alpha} u(t) dt = f(x_1)
+    // With piecewise constant assumption: u_0 * h^{1-alpha} / (1-alpha) = f(x_1)
+    // So u_0 = f(x_1) * (1-alpha) / h^{1-alpha}
+
+    // Forward marching with product integration
+    // For each x_i, the Abel equation discretizes as:
+    //   sum_{j=0}^{i-1} integral_{x_j}^{x_{j+1}} (x_i - t)^{-alpha} u(t) dt = f(x_i)
+    //
+    // With piecewise linear u(t) on each subinterval, approximate u(t) = u_j
+    // (piecewise constant) and pull out of integral:
+    //   sum_{j=0}^{i-1} u_j * mu_{i,j} = f(x_i)
+    // where mu_{i,j} = integral_{x_j}^{x_{j+1}} (x_i - t)^{-alpha} dt
+    //                 = [(x_i - x_j)^{1-alpha} - (x_i - x_{j+1})^{1-alpha}] / (1-alpha)
+
+    // For i=1 (first nontrivial equation): u_0 * mu_{1,0} = f(x_1)
+    let mu_10 = ie_pow(h, one_m_a) / one_m_a
+    if ie_abs(mu_10) > 1.0e-30 {
+        result.u[0] = f(result.nodes[1]) / mu_10
+    } else {
+        result.u[0] = 0.0
+    }
+
+    // Forward march for i = 2, 3, ..., n-1
+    i = 2
+    while i < n {
+        let xi = result.nodes[i]
+        var sum = 0.0
+        var j = 0
+        while j < i - 1 {
+            // mu_{i,j} = [(x_i - x_j)^{1-alpha} - (x_i - x_{j+1})^{1-alpha}] / (1-alpha)
+            let dist_j = xi - result.nodes[j]
+            let dist_jp1 = xi - result.nodes[j + 1]
+            let mu_ij = (ie_pow(dist_j, one_m_a) - ie_pow(dist_jp1, one_m_a)) / one_m_a
+            sum = sum + result.u[j] * mu_ij
+            j = j + 1
+        }
+
+        // Last interval: j = i-1, integration from x_{i-1} to x_i
+        // mu_{i,i-1} = [(x_i - x_{i-1})^{1-alpha} - 0^{1-alpha}] / (1-alpha)
+        //            = h^{1-alpha} / (1-alpha)
+        let mu_last = ie_pow(h, one_m_a) / one_m_a
+
+        // sum + u_{i-1} * mu_last = f(x_i)
+        // But we want u_{i-1} — however we already computed it in previous step.
+        // The unknown here is u_{i-1} that was already solved.
+        // Actually, we need to solve for u[i-1]:
+        // sum_{j=0}^{i-2} u_j * mu_{i,j} + u_{i-1} * mu_{i,i-1} = f(x_i)
+        // u_{i-1} is already known. So this determines consistency.
+        // For the Abel equation, we solve a sequential system.
+        // Let's use the equation for step i to determine u[i-1]:
+        // Actually, the standard approach is:
+        //   equation at x_i gives us u[i-1] from the last sub-interval contribution.
+        // Re-derive: with n subintervals and n+1 nodes,
+        // the equation at x_i uses subintervals [x_0,x_1], ..., [x_{i-1},x_i].
+        // u_j is constant on [x_j, x_{j+1}], so u_j corresponds to the j-th subinterval.
+        // Then: sum_{j=0}^{i-1} u_j * mu_{i,j} = f(x_i)
+        // and u_{i-1} is the unknown.
+
+        if ie_abs(mu_last) > 1.0e-30 {
+            result.u[i - 1] = (f(xi) - sum) / mu_last
+        } else {
+            result.u[i - 1] = 0.0
+        }
+
+        i = i + 1
+    }
+
+    // The last unknown u[n-2] is already set by the loop.
+    // Set u[n-1] by extrapolation or by using a supplementary equation.
+    // Use simple extrapolation from last two values.
+    if n >= 3 {
+        result.u[n - 1] = 2.0 * result.u[n - 2] - result.u[n - 3]
+    } else {
+        result.u[n - 1] = result.u[n - 2]
+    }
+
+    // Compute residual
+    var max_res = 0.0
+    i = 1
+    while i < n {
+        let xi = result.nodes[i]
+        // Compute integral_a^{x_i} u(t) / (x_i - t)^alpha dt
+        var integral_val = 0.0
+        var j = 0
+        while j < i {
+            let dist_j = xi - result.nodes[j]
+            let dist_jp1 = if j + 1 < i { xi - result.nodes[j + 1] } else { 0.0 }
+            let mu_ij = if j + 1 < i {
+                (ie_pow(dist_j, one_m_a) - ie_pow(dist_jp1, one_m_a)) / one_m_a
+            } else {
+                ie_pow(dist_j, one_m_a) / one_m_a
+            }
+            integral_val = integral_val + result.u[j] * mu_ij
+            j = j + 1
+        }
+        let res_i = ie_abs(integral_val - f(xi))
+        if res_i > max_res { max_res = res_i }
+        i = i + 1
+    }
+    result.residual = max_res
+    result.converged = max_res < 1.0e-4
+}
+
+// =============================================================================
+// Green's function methods
+// =============================================================================
+
+// Green's function for -u'' = f on [a, b] with u(a) = u(b) = 0.
+// G(x, t) = (b - t)(x - a) / (b - a)   for a <= x <= t
+//          = (b - x)(t - a) / (b - a)   for t <= x <= b
+fn greens_poisson_1d(x: f64, t: f64, a: f64, b: f64) -> f64 with Mut, Div {
+    let l = b - a
+    if x <= t {
+        (b - t) * (x - a) / l
+    } else {
+        (b - x) * (t - a) / l
+    }
+}
+
+// Solve a BVP via Green's function:
+//   u(x_i) = integral_a^b G(x_i, t) f(t) dt
+// where G is the Green's function and f is the source term.
+// Uses Gauss-Legendre quadrature for the integral.
+fn bvp_via_greens(G: fn(f64, f64) -> f64 with Mut, Div, Panic,
+                  f: fn(f64) -> f64 with Mut, Div, Panic,
+                  a: f64, b: f64, n: i32,
+                  result: &!IEResult) with Mut, Div, Panic {
+    // Compute GL quadrature on [a, b]
+    ie_gauss_legendre_ab(a, b, n, &!result.nodes, &!result.weights)
+    result.n = n
+
+    // Evaluate u at each quadrature node
+    var i = 0
+    while i < n {
+        let xi = result.nodes[i]
+        var sum = 0.0
+        var j = 0
+        while j < n {
+            sum = sum + result.weights[j] * G(xi, result.nodes[j]) * f(result.nodes[j])
+            j = j + 1
+        }
+        result.u[i] = sum
+        i = i + 1
+    }
+
+    result.residual = 0.0
+    result.converged = true
+}
+
+// =============================================================================
+// Eigenvalue problems for integral operators
+// =============================================================================
+
+// Find eigenvalues of the integral operator T with kernel K:
+//   integral_a^b K(x, t) phi(t) dt = lambda * phi(x)
+//
+// Discretize via Nystrom: w_j^{1/2} K(t_i, t_j) w_j^{1/2} is symmetric.
+// Let B_{ij} = sqrt(w_i) * K(t_i, t_j) * sqrt(w_j).
+// Then eigenvalues of B approximate eigenvalues of T.
+//
+// Uses power iteration with deflation to find the top n_eig eigenvalues.
+fn ie_eigenvalues(K: fn(f64, f64) -> f64 with Mut, Div, Panic,
+                  a: f64, b: f64, n_quad: i32, n_eig: i32,
+                  result: &!IEEigenResult) with Mut, Div, Panic {
+    result.n_quad = n_quad
+    result.n_found = 0
+
+    // Compute GL quadrature on [a, b]
+    var nodes: [f64; 128] = [0.0; 128]
+    var weights: [f64; 128] = [0.0; 128]
+    ie_gauss_legendre_ab(a, b, n_quad, &!nodes, &!weights)
+
+    // Build symmetrized kernel matrix B_{ij} = sqrt(w_i) * K(t_i, t_j) * sqrt(w_j)
+    var bmat: [f64; 16384] = [0.0; 16384]
+    var sqrt_w: [f64; 128] = [0.0; 128]
+
+    var i = 0
+    while i < n_quad {
+        sqrt_w[i] = ie_sqrt(weights[i])
+        i = i + 1
+    }
+
+    i = 0
+    while i < n_quad {
+        var j = 0
+        while j < n_quad {
+            bmat[i * n_quad + j] = sqrt_w[i] * K(nodes[i], nodes[j]) * sqrt_w[j]
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Power iteration with deflation for each eigenvalue
+    var eig_idx = 0
+    while eig_idx < n_eig && eig_idx < n_quad {
+        // Initialize random-ish vector
+        var v: [f64; 128] = [0.0; 128]
+        i = 0
+        while i < n_quad {
+            // Deterministic pseudo-random initialization
+            let seed_val = (i as f64) * 0.618033988749895 + (eig_idx as f64) * 1.324717957244746
+            v[i] = ie_sin(seed_val * 17.0 + 3.7)
+            i = i + 1
+        }
+
+        // Normalize
+        var norm = 0.0
+        i = 0
+        while i < n_quad { norm = norm + v[i] * v[i]; i = i + 1 }
+        norm = ie_sqrt(norm)
+        if norm > 1.0e-30 {
+            i = 0
+            while i < n_quad { v[i] = v[i] / norm; i = i + 1 }
+        }
+
+        // Power iteration
+        var lambda_est = 0.0
+        var iter = 0
+        while iter < 500 {
+            // w = B * v
+            var w: [f64; 128] = [0.0; 128]
+            i = 0
+            while i < n_quad {
+                var s = 0.0
+                var j = 0
+                while j < n_quad { s = s + bmat[i * n_quad + j] * v[j]; j = j + 1 }
+                w[i] = s
+                i = i + 1
+            }
+
+            // Deflate: remove components along previously found eigenvectors
+            var d = 0
+            while d < eig_idx {
+                var proj = 0.0
+                i = 0
+                while i < n_quad {
+                    proj = proj + w[i] * result.eigenvectors[d * n_quad + i]
+                    i = i + 1
+                }
+                i = 0
+                while i < n_quad {
+                    w[i] = w[i] - proj * result.eigenvectors[d * n_quad + i]
+                    i = i + 1
+                }
+                d = d + 1
+            }
+
+            // Compute eigenvalue estimate: Rayleigh quotient v^T w
+            var lambda_new = 0.0
+            i = 0
+            while i < n_quad { lambda_new = lambda_new + v[i] * w[i]; i = i + 1 }
+
+            // Normalize w
+            norm = 0.0
+            i = 0
+            while i < n_quad { norm = norm + w[i] * w[i]; i = i + 1 }
+            norm = ie_sqrt(norm)
+            if norm < 1.0e-30 {
+                // Zero vector — no more eigenvalues
+                iter = 500
+            } else {
+                i = 0
+                while i < n_quad { v[i] = w[i] / norm; i = i + 1 }
+            }
+
+            // Check convergence
+            if ie_abs(lambda_new - lambda_est) < 1.0e-12 * ie_max(ie_abs(lambda_new), 1.0) {
+                lambda_est = lambda_new
+                iter = 500
+            }
+            lambda_est = lambda_new
+            iter = iter + 1
+        }
+
+        // Store eigenvalue and eigenvector
+        result.eigenvalues[eig_idx] = lambda_est
+
+        // Convert back to eigenfunction: phi_i = v_i / sqrt(w_i)
+        i = 0
+        while i < n_quad {
+            if ie_abs(sqrt_w[i]) > 1.0e-30 {
+                result.eigenvectors[eig_idx * n_quad + i] = v[i] / sqrt_w[i]
+            } else {
+                result.eigenvectors[eig_idx * n_quad + i] = 0.0
+            }
+            i = i + 1
+        }
+
+        // For deflation: store the normalized eigenvector v (in B-space)
+        // We already have v normalized from the iteration.
+        // Overwrite eigenvectors with the B-space vector for deflation.
+        // Actually, keep the eigenfunction but re-use v for deflation.
+        // Store v in eigenvectors for deflation purposes.
+        i = 0
+        while i < n_quad {
+            result.eigenvectors[eig_idx * n_quad + i] = v[i]
+            i = i + 1
+        }
+
+        result.n_found = eig_idx + 1
+        eig_idx = eig_idx + 1
+    }
+}
+
+// =============================================================================
+// Iterative solvers — Neumann series
+// =============================================================================
+
+// Solve Fredholm 2nd kind by Neumann series:
+//   u = f + lambda K f + lambda^2 K^2 f + ...
+// Converges when |lambda| * ||K|| < 1 (spectral radius condition).
+//
+// Each iterate: u_{k+1} = f + lambda K u_k
+// The integral K u is evaluated via GL quadrature at the quadrature nodes.
+fn fredholm2_neumann(K: fn(f64, f64) -> f64 with Mut, Div, Panic,
+                     f: fn(f64) -> f64 with Mut, Div, Panic,
+                     a: f64, b: f64, lambda: f64, n: i32,
+                     max_iter: i32, tol: f64,
+                     result: &!IEResult) with Mut, Div, Panic {
+    // Compute GL quadrature on [a, b]
+    ie_gauss_legendre_ab(a, b, n, &!result.nodes, &!result.weights)
+    result.n = n
+
+    // Initialize: u_0 = f
+    var i = 0
+    while i < n { result.u[i] = f(result.nodes[i]); i = i + 1 }
+
+    var prev: [f64; 128] = [0.0; 128]
+    i = 0
+    while i < n { prev[i] = result.u[i]; i = i + 1 }
+
+    // Iterate: u_{k+1}(t_i) = f(t_i) + lambda * sum_j w_j K(t_i, t_j) u_k(t_j)
+    var iter = 0
+    result.converged = false
+    while iter < max_iter {
+        // Compute new iterate
+        var max_diff = 0.0
+        i = 0
+        while i < n {
+            var sum = 0.0
+            var j = 0
+            while j < n {
+                sum = sum + result.weights[j] * K(result.nodes[i], result.nodes[j]) * prev[j]
+                j = j + 1
+            }
+            result.u[i] = f(result.nodes[i]) + lambda * sum
+
+            let diff = ie_abs(result.u[i] - prev[i])
+            if diff > max_diff { max_diff = diff }
+            i = i + 1
+        }
+
+        // Copy current to prev
+        i = 0
+        while i < n { prev[i] = result.u[i]; i = i + 1 }
+
+        if max_diff < tol {
+            result.converged = true
+            result.residual = max_diff
+            return
+        }
+        iter = iter + 1
+    }
+
+    // Did not converge — compute residual
+    result.residual = ie_residual_fredholm2_internal(K, f, lambda, result)
+}

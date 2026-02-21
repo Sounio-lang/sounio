@@ -9,6 +9,7 @@
 
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 /// Minimal working ELF that returns exit code 42
 /// Code path: main() { return 42; }
 /// Assembly:
@@ -122,16 +123,24 @@ fn phase6a_minimal_elf_executes() {
     // Verify ELF data (little-endian)
     assert_eq!(elf_bytes[5], 1, "ELF data should be little-endian");
 
-    // Write to disk
-    let out_path = "/tmp/sounio_phase6a_test.elf";
-    std::fs::write(out_path, &elf_bytes).expect("Failed to write ELF to disk");
+    // Write to a unique temp path to avoid cross-test races with cleanup tests.
+    let unique_suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after unix epoch")
+        .as_nanos();
+    let out_path = std::env::temp_dir().join(format!(
+        "sounio_phase6a_test_{}_{}.elf",
+        std::process::id(),
+        unique_suffix
+    ));
+    std::fs::write(&out_path, &elf_bytes).expect("Failed to write ELF to disk");
 
     // Make executable
-    std::fs::set_permissions(out_path, std::fs::Permissions::from_mode(0o755))
+    std::fs::set_permissions(&out_path, std::fs::Permissions::from_mode(0o755))
         .expect("Failed to set executable permissions");
 
     // Execute and verify exit code
-    let output = Command::new(out_path)
+    let output = Command::new(&out_path)
         .output()
         .expect("Failed to execute ELF binary");
 
@@ -142,6 +151,7 @@ fn phase6a_minimal_elf_executes() {
         "Expected exit code 42, got {:?}",
         exit_code
     );
+    let _ = std::fs::remove_file(&out_path);
 
     println!("✓ Phase 6A: Minimal ELF executed successfully with exit code 42");
 }

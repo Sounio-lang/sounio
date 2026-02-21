@@ -1,8 +1,7 @@
-# Sounio Formal Semantics — Phase 8–11 Reference
+# Sounio Formal Semantics — Phase 8 Reference
 
 Lean 4 formalization of the Sounio type system.
 Source: `formal/lean4/` — no Mathlib, no `sorry`, `lake build` < 1 min.
-7 libraries, ~2530 lines, ~211 theorems.
 
 ---
 
@@ -288,103 +287,6 @@ The Handle rule is formalised by `handler_reduces_effects`:
 | `handler_chain_reduces` | `mask (mask r e₁) e₂ ⊆ r` |
 | `mask_union_single_superset` | `r ⊆ (mask r e) ∪ {e}` |
 
-### SounioTyping — compound expressions and structural lemmas (Phase 10)
-
-| Theorem | Informal statement |
-|---------|-------------------|
-| `typing_weaken_two` | Weaken by two weakenable variables at once |
-| `typing_weaken_unrestricted_list` | Weaken by N Unrestricted variables |
-| `typing_mask_absent` | Masking an absent effect is a no-op on typing |
-| `typing_handler_weakens` | Handler application preserves typeability |
-| `typing_pure_mask` | Pure expressions can be given any masked row |
-| `typing_double_app` | Double application of a curried function |
-| `typing_nested_letB` | Nested let-box for two successive bang eliminations |
-| `typing_pair_bang` | A pair of pure expressions is bangable |
-| `typing_letP_same_row` | Let-pair where scrutinee and body share the same effect row |
-| `typing_box_letB_id` | Box-then-letB identity pipeline is pure |
-| `typing_app_sub_both` | Effect subsumption composes with application (via LUB) |
-| `typing_affine_identity` | Affine identity lambda is typable |
-| `typing_relevant_identity` | Relevant identity lambda is typable |
-
-### SounioUnits — dimensional analysis (Phase 10)
-
-| Theorem | Informal statement |
-|---------|-------------------|
-| `dim_mul_comm` | `d₁ × d₂ = d₂ × d₁` (exponent addition commutes) |
-| `dim_mul_assoc` | `(d₁ × d₂) × d₃ = d₁ × (d₂ × d₃)` |
-| `dimless_mul_left` / `dimless_mul_right` | Dimensionless is the identity for `mul` |
-| `dim_mul_recip` / `dim_recip_mul` | `d × d⁻¹ = 1`, `d⁻¹ × d = 1` |
-| `dim_div_self` | `d / d = 1` |
-| `dim_mul_div_cancel` | `(d₁ × d₂) / d₂ = d₁` |
-| `dim_div_mul_cancel` | `(d₁ / d₂) × d₂ = d₁` |
-| `dim_div_eq_mul_recip` | `d₁ / d₂ = d₁ × d₂⁻¹` |
-| `dim_recip_involution` | `(d⁻¹)⁻¹ = d` |
-| `dim_recip_dimless` | `1⁻¹ = 1` |
-| `dim_recip_mul_distrib` | `(d₁ × d₂)⁻¹ = d₁⁻¹ × d₂⁻¹` |
-| `dim_pow_zero` / `dim_pow_one` | `dⁿ` with `n=0` gives dimensionless, `n=1` identity |
-| `dim_pow_add` | `d^(m+n) = d^m × d^n` |
-| `dim_pow_neg` | `d^(-n) = (d^n)⁻¹` |
-| `dim_pow_mul` | `(d^m)^n = d^(m×n)` |
-| `velocity_def` | `L / T = [L T⁻¹]` |
-| `acceleration_def` | `V / T = [L T⁻²]` |
-| `force_def` | `M × A = [M L T⁻²]` (Newton) |
-| `energy_def` | `F × L = [M L² T⁻²]` (Joule) |
-| `power_def` | `E / T = [M L² T⁻³]` (Watt) |
-| `pressure_def` | `F / A = [M L⁻¹ T⁻²]` (Pascal) |
-| `frequency_def` | `T⁻¹ = [T⁻¹]` (Hertz) |
-| `concentration_def` | `M / V = [M L⁻³]` |
-| `clearance_def` | `V / T = [L³ T⁻¹]` |
-| `area_def` / `volume_def` | `L² = Area`, `L³ = Volume` |
-| `compatible_refl/symm/trans` | Compatibility is an equivalence relation |
-| `mul_div_roundtrip` / `div_mul_roundtrip` | Round-trip cancellation |
-| `mul_recip_dimless` | `d × d⁻¹` is dimensionless |
-| `sq_recip_sq_dimless` | `d² × d⁻² = 1` |
-
-### SounioRowPoly — row-polymorphic effect typing (Phase 10)
-
-| Theorem | Informal statement |
-|---------|-------------------|
-| `apply_concrete/var/union/masked` | Substitution distributes over scheme constructors |
-| `apply_id_concrete` / `apply_id_var` | Identity substitution behavior |
-| `schemeSubrow_refl` | Scheme subrow is reflexive |
-| `schemeSubrow_trans` | Scheme subrow is transitive |
-| `schemeSubrow_pure` | Concrete pure scheme ⊆ anything |
-| `schemeSubrow_union_left/right` | Union is an upper bound on both sides |
-| `handler_reduces_scheme` | Handler masking reduces effects (∀ substitutions) |
-| `handler_comm_scheme` | Two handlers commute at the scheme level |
-| `handler_idempotent_scheme` | Same handler twice = once (scheme level) |
-| `effectPoly_of_forall` | Universal row property lifts to schemes |
-| `effectPoly_pure` | Concrete pure scheme preserves purity |
-| `singleSubst_hit/miss` | Single substitution returns `r` at `v`, `pureRow` elsewhere |
-| `instantiate_var` | Instantiating a variable scheme via `singleSubst` |
-| `scheme_union_comm/assoc` | Scheme union commutes and associates (∀ substitutions) |
-| `scheme_union_pure_left` | Pure union is identity at scheme level |
-| `mask_apply_comm` | Masking commutes with substitution |
-| `mask_concrete_single` | Masking a singleton's effect yields pure |
-| `handler_strips_added_effect` | Handler strips added effect from `ρ ∪ {e}` (key handler rule) |
-
-### SounioSemantics — operational semantics (Phase 11)
-
-| Theorem | Informal statement |
-|---------|-------------------|
-| `subst_var_hit` | `x[x := v] = v` |
-| `subst_var_miss` | `y[x := v] = y` when `y ≠ x` |
-| `subst_lam_shadow` | `(λx.e)[x := v] = λx.e` (shadowing) |
-| `subst_app/pair/box` | Substitution distributes over app, pair, box |
-| `value_irreducible` | Values do not step (stability) |
-| `value_is_normal` | Values are normal forms |
-| `lam_normal` | Lambda abstractions are normal forms |
-| `step_deterministic` | CBV small-step is deterministic (at most one reduct) |
-| `multistep_one` | Single step lifts to multi-step |
-| `multistep_trans` | Multi-step is transitive |
-| `multistep_app_left/right` | Multi-step congruence for application |
-| `multistep_pair_left/right` | Multi-step congruence for pairs |
-| `multistep_box` | Multi-step congruence for box |
-| `multistep_letP/letB` | Multi-step congruence for let-pair and let-box |
-| `eval_app_full` | Full β-reduction: evaluate function, argument, then beta |
-| `eval_letP_full` | Full tensor elimination evaluation sequence |
-| `eval_letB_full` | Full bang elimination evaluation sequence |
-
 ---
 
 ## §5 References
@@ -393,9 +295,5 @@ The Handle rule is formalised by `handler_reduces_effects`:
 - Wadler, P. (1990). "Linear Types Can Change the World!" *IFIP TC 2 Working Conference.*
 - Bierman, G. (1994). "On Intuitionistic Linear Logic." PhD thesis, University of Cambridge.
 - Plotkin, G. and Pretnar, M. (2009). "Handlers of Algebraic Effects." *ESOP.*
-- Kennedy, A. (1997). "Relational Parametricity and Units of Measure." *POPL.*
 - Leijen, D. (2014). "Koka: Programming with Row Polymorphic Effect Types." *HOPE.*
 - Lindley, S. and Cheney, J. (2012). "Row-based Effect Types for Database Integration." *TLDI.*
-- Hillerström, D. and Lindley, S. (2016). "Liberating Effects with Rows and Handlers." *TyDe.*
-- Wright, A. and Felleisen, M. (1994). "A Syntactic Approach to Type Soundness." *I&C.*
-- Pierce, B. (2002). *Types and Programming Languages.* MIT Press.

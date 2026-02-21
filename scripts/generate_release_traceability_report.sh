@@ -7,7 +7,7 @@ cd "$ROOT_DIR"
 if [[ $# -ge 1 ]]; then
   RUN_DIR="$1"
 else
-  RUN_DIR="$(ls -1dt artifacts/diagnostic/final-* 2>/dev/null | head -n1 || true)"
+  RUN_DIR="$(bash scripts/latest_diagnostic_run_dir.sh 2>/dev/null || true)"
 fi
 
 if [[ -z "${RUN_DIR:-}" || ! -d "$RUN_DIR" ]]; then

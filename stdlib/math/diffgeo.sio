@@ -1,0 +1,1090 @@
+// stdlib/math/diffgeo.sio — Differential geometry
+//
+// Pure Sounio implementations:
+//   Metric tensor operations (inverse, determinant)
+//   Christoffel symbols via numerical differentiation
+//   Riemann curvature tensor
+//   Ricci tensor and scalar curvature
+//   Geodesic integration via RK4
+//   Parallel transport along geodesics
+//   Lie derivative of vector fields
+//   Standard metrics (Euclidean, sphere, Schwarzschild)
+//   Gaussian curvature for 2D surfaces
+//
+// References:
+//   do Carmo (1992): "Riemannian Geometry"
+//   Misner, Thorne & Wheeler (1973): "Gravitation"
+//   Lee (2018): "Introduction to Riemannian Manifolds"
+
+// =============================================================================
+// Helpers (prefixed dg_ to avoid collisions)
+// =============================================================================
+
+fn dg_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn dg_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+
+fn dg_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 24 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn dg_sin(x: f64) -> f64 with Mut, Div {
+    var a = x
+    let tp = 6.28318530717958647692
+    while a >= tp { a = a - tp }
+    while a < 0.0 { a = a + tp }
+    if a > 3.14159265358979323846 { a = a - tp }
+    let a2 = a * a
+    var sum = a
+    var term = a
+    var n = 1
+    while n < 20 { term = 0.0 - term * a2 / ((2 * n) * (2 * n + 1)) as f64; sum = sum + term; n = n + 1 }
+    sum
+}
+
+fn dg_cos(x: f64) -> f64 with Mut, Div {
+    dg_sin(x + 1.57079632679489661923)
+}
+
+fn dg_exp(x: f64) -> f64 with Mut, Div {
+    if x > 500.0 { return 1.0e200 }
+    if x < -500.0 { return 0.0 }
+    let ln2 = 0.6931471805599453
+    var kf = x / ln2
+    var k: i32 = 0
+    if kf >= 0.0 { k = kf as i32 } else { k = (kf as i32) - 1 }
+    let r = x - (k as f64) * ln2
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 25 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var result = sum
+    if k >= 0 { var i = 0; while i < k { result = result * 2.0; i = i + 1 } }
+    else { var i = 0; while i < (0 - k) { result = result / 2.0; i = i + 1 } }
+    result
+}
+
+fn dg_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    if x == 1.0 { return 0.0 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 { term = term * t2; sum = sum + term / ((2 * k + 1) as f64); k = k + 1 }
+    2.0 * sum + (e as f64) * 0.6931471805599453
+}
+
+fn dg_pi() -> f64 { 3.14159265358979323846 }
+
+// =============================================================================
+// Structs
+// =============================================================================
+
+struct Metric4 { g: [f64; 16], dim: i32 }
+
+struct Christoffel4 { gamma: [f64; 64], dim: i32 }
+
+struct RiemannTensor { R: [f64; 256], dim: i32 }
+
+struct RicciTensor { Ric: [f64; 16], scalar: f64, dim: i32 }
+
+struct GeodesicState { x: [f64; 4], v: [f64; 4], dim: i32, tau: f64 }
+
+struct GeodesicPath { x: [f64; 4096], v: [f64; 4096], tau: [f64; 1024], n_steps: i32, dim: i32 }
+
+// =============================================================================
+// Metric operations
+// =============================================================================
+
+// Inverse of a dim x dim metric (up to 4D) via Gauss-Jordan elimination.
+// g is stored row-major in [f64; 16], g_inv receives the result.
+fn metric_inverse(g: &[f64; 16], dim: i32, g_inv: &![f64; 16]) with Mut, Div, Panic {
+    // Augmented matrix [g | I] stored in work[row * 2*dim + col]
+    var work: [f64; 32] = [0.0; 32]  // max 4x8 = 32
+
+    // Fill augmented matrix
+    var i = 0
+    while i < dim {
+        var j = 0
+        while j < dim {
+            work[i * 2 * dim + j] = g[i * dim + j]
+            j = j + 1
+        }
+        // Identity on the right half
+        work[i * 2 * dim + dim + i] = 1.0
+        i = i + 1
+    }
+
+    // Forward elimination with partial pivoting
+    var col = 0
+    while col < dim {
+        // Find pivot
+        var max_val = dg_abs(work[col * 2 * dim + col])
+        var max_row = col
+        var row = col + 1
+        while row < dim {
+            let v = dg_abs(work[row * 2 * dim + col])
+            if v > max_val { max_val = v; max_row = row }
+            row = row + 1
+        }
+
+        // Swap rows if needed
+        if max_row != col {
+            var j = 0
+            while j < 2 * dim {
+                let tmp = work[col * 2 * dim + j]
+                work[col * 2 * dim + j] = work[max_row * 2 * dim + j]
+                work[max_row * 2 * dim + j] = tmp
+                j = j + 1
+            }
+        }
+
+        let pivot = work[col * 2 * dim + col]
+        if dg_abs(pivot) < 1.0e-30 {
+            // Singular: set identity as fallback
+            i = 0
+            while i < 16 { g_inv[i] = 0.0; i = i + 1 }
+            i = 0
+            while i < dim { g_inv[i * dim + i] = 1.0; i = i + 1 }
+            return
+        }
+
+        // Scale pivot row
+        let inv_pivot = 1.0 / pivot
+        var j = 0
+        while j < 2 * dim {
+            work[col * 2 * dim + j] = work[col * 2 * dim + j] * inv_pivot
+            j = j + 1
+        }
+
+        // Eliminate column in all other rows
+        row = 0
+        while row < dim {
+            if row != col {
+                let factor = work[row * 2 * dim + col]
+                j = 0
+                while j < 2 * dim {
+                    work[row * 2 * dim + j] = work[row * 2 * dim + j] - factor * work[col * 2 * dim + j]
+                    j = j + 1
+                }
+            }
+            row = row + 1
+        }
+        col = col + 1
+    }
+
+    // Extract inverse from right half
+    i = 0
+    while i < 16 { g_inv[i] = 0.0; i = i + 1 }
+    i = 0
+    while i < dim {
+        var j = 0
+        while j < dim {
+            g_inv[i * dim + j] = work[i * 2 * dim + dim + j]
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// Determinant of a dim x dim metric (row-major in [f64; 16]).
+// dim=2: ad-bc. dim=3: cofactor expansion. dim=4: LU decomposition.
+fn metric_det(g: &[f64; 16], dim: i32) -> f64 with Mut, Div {
+    if dim == 1 { return g[0] }
+
+    if dim == 2 {
+        return g[0] * g[3] - g[1] * g[2]
+    }
+
+    if dim == 3 {
+        // Cofactor expansion along first row
+        let a = g[0]; let b = g[1]; let c = g[2]
+        let d = g[3]; let e = g[4]; let f = g[5]
+        let h = g[6]; let i = g[7]; let j = g[8]
+        return a * (e * j - f * i) - b * (d * j - f * h) + c * (d * i - e * h)
+    }
+
+    // dim == 4: LU decomposition for determinant
+    var A: [f64; 16] = [0.0; 16]
+    var k = 0
+    while k < 16 { A[k] = g[k]; k = k + 1 }
+
+    var det = 1.0
+    var col = 0
+    while col < dim {
+        // Partial pivoting
+        var max_val = dg_abs(A[col * dim + col])
+        var max_row = col
+        var row = col + 1
+        while row < dim {
+            let v = dg_abs(A[row * dim + col])
+            if v > max_val { max_val = v; max_row = row }
+            row = row + 1
+        }
+        if max_row != col {
+            var j = 0
+            while j < dim {
+                let tmp = A[col * dim + j]
+                A[col * dim + j] = A[max_row * dim + j]
+                A[max_row * dim + j] = tmp
+                j = j + 1
+            }
+            det = 0.0 - det
+        }
+
+        let pivot = A[col * dim + col]
+        if dg_abs(pivot) < 1.0e-30 { return 0.0 }
+        det = det * pivot
+
+        // Eliminate below
+        row = col + 1
+        while row < dim {
+            let factor = A[row * dim + col] / pivot
+            var j = col + 1
+            while j < dim {
+                A[row * dim + j] = A[row * dim + j] - factor * A[col * dim + j]
+                j = j + 1
+            }
+            row = row + 1
+        }
+        col = col + 1
+    }
+    det
+}
+
+// Raise an index: v^i = g^{ij} v_j
+fn metric_raise_index(g_inv: &[f64; 16], v_lower: &[f64; 4], dim: i32, v_upper: &![f64; 4]) with Mut {
+    var i = 0
+    while i < dim {
+        var s = 0.0
+        var j = 0
+        while j < dim {
+            s = s + g_inv[i * dim + j] * v_lower[j]
+            j = j + 1
+        }
+        v_upper[i] = s
+        i = i + 1
+    }
+    // Zero out unused components
+    while i < 4 { v_upper[i] = 0.0; i = i + 1 }
+}
+
+// Lower an index: v_i = g_{ij} v^j
+fn metric_lower_index(g: &[f64; 16], v_upper: &[f64; 4], dim: i32, v_lower: &![f64; 4]) with Mut {
+    var i = 0
+    while i < dim {
+        var s = 0.0
+        var j = 0
+        while j < dim {
+            s = s + g[i * dim + j] * v_upper[j]
+            j = j + 1
+        }
+        v_lower[i] = s
+        i = i + 1
+    }
+    while i < 4 { v_lower[i] = 0.0; i = i + 1 }
+}
+
+// =============================================================================
+// Christoffel symbols
+// =============================================================================
+
+// Compute Christoffel symbols Gamma^k_{ij} from a metric callback.
+// metric_fn(x, dim, g_out) fills g_out with the metric at point x.
+// Uses central differences with step h = 1e-6 to approximate partial derivatives.
+//
+// Gamma^k_{ij} = 0.5 * g^{kl} * (dg_{li}/dx^j + dg_{lj}/dx^i - dg_{ij}/dx^l)
+//
+// Indexing: gamma.gamma[k * dim*dim + i * dim + j]
+fn christoffel_from_metric(metric_fn: fn(&[f64; 4], i32, &![f64; 16]) with Mut, Div, Panic,
+                           x: &[f64; 4], dim: i32,
+                           gamma: &!Christoffel4) with Mut, Div, Panic {
+    let h = 1.0e-6
+    gamma.dim = dim
+
+    // Zero out gamma
+    var idx = 0
+    while idx < 64 { gamma.gamma[idx] = 0.0; idx = idx + 1 }
+
+    // Compute metric at x
+    var g0: [f64; 16] = [0.0; 16]
+    metric_fn(x, dim, &!g0)
+
+    // Compute metric inverse
+    var g_inv: [f64; 16] = [0.0; 16]
+    metric_inverse(&g0, dim, &!g_inv)
+
+    // Compute partial derivatives of the metric: dg[m][i][j] = dg_{ij}/dx^m
+    // Stored as dg[m * dim*dim + i * dim + j]
+    var dg: [f64; 256] = [0.0; 256]  // max 4 * 16 = 64, but 256 for safety
+
+    var m = 0
+    while m < dim {
+        var xp: [f64; 4] = [0.0; 4]
+        var xm: [f64; 4] = [0.0; 4]
+        var c = 0
+        while c < 4 { xp[c] = x[c]; xm[c] = x[c]; c = c + 1 }
+        xp[m] = x[m] + h
+        xm[m] = x[m] - h
+
+        var gp: [f64; 16] = [0.0; 16]
+        var gm: [f64; 16] = [0.0; 16]
+        metric_fn(&xp, dim, &!gp)
+        metric_fn(&xm, dim, &!gm)
+
+        var i = 0
+        while i < dim {
+            var j = 0
+            while j < dim {
+                dg[m * dim * dim + i * dim + j] = (gp[i * dim + j] - gm[i * dim + j]) / (2.0 * h)
+                j = j + 1
+            }
+            i = i + 1
+        }
+        m = m + 1
+    }
+
+    // Assemble Christoffel symbols
+    // Gamma^k_{ij} = 0.5 * g^{kl} * (dg_{li}/dx^j + dg_{lj}/dx^i - dg_{ij}/dx^l)
+    var k = 0
+    while k < dim {
+        var i = 0
+        while i < dim {
+            var j = 0
+            while j < dim {
+                var s = 0.0
+                var l = 0
+                while l < dim {
+                    let term1 = dg[j * dim * dim + l * dim + i]   // dg_{li}/dx^j
+                    let term2 = dg[i * dim * dim + l * dim + j]   // dg_{lj}/dx^i
+                    let term3 = dg[l * dim * dim + i * dim + j]   // dg_{ij}/dx^l
+                    s = s + g_inv[k * dim + l] * (term1 + term2 - term3)
+                    l = l + 1
+                }
+                gamma.gamma[k * dim * dim + i * dim + j] = 0.5 * s
+                j = j + 1
+            }
+            i = i + 1
+        }
+        k = k + 1
+    }
+}
+
+// =============================================================================
+// Riemann curvature tensor
+// =============================================================================
+
+// Compute Riemann tensor R^k_{lij} from a metric callback.
+// Uses central differences on Christoffel symbols plus quadratic Christoffel terms.
+//
+// R^k_{lij} = d_i Gamma^k_{jl} - d_j Gamma^k_{il}
+//           + Gamma^k_{im} Gamma^m_{jl} - Gamma^k_{jm} Gamma^m_{il}
+//
+// Indexing: R.R[k * dim^3 + l * dim^2 + i * dim + j]
+fn riemann_tensor(metric_fn: fn(&[f64; 4], i32, &![f64; 16]) with Mut, Div, Panic,
+                  x: &[f64; 4], dim: i32,
+                  R: &!RiemannTensor) with Mut, Div, Panic {
+    let h = 1.0e-5  // slightly larger step for second-level numerical differentiation
+    R.dim = dim
+
+    // Zero out
+    var idx = 0
+    while idx < 256 { R.R[idx] = 0.0; idx = idx + 1 }
+
+    // Compute Christoffel symbols at x
+    var gamma0: Christoffel4 = Christoffel4 { gamma: [0.0; 64], dim: dim }
+    christoffel_from_metric(metric_fn, x, dim, &!gamma0)
+
+    // Compute partial derivatives of Christoffel symbols via central differences
+    // d_gamma[m][k][a][b] = d(Gamma^k_{ab})/dx^m
+    // Stored flat: d_gamma[m * dim^3 + k * dim^2 + a * dim + b]
+    var d_gamma: [f64; 256] = [0.0; 256]  // 4 * 64 = 256
+
+    var m = 0
+    while m < dim {
+        var xp: [f64; 4] = [0.0; 4]
+        var xm: [f64; 4] = [0.0; 4]
+        var c = 0
+        while c < 4 { xp[c] = x[c]; xm[c] = x[c]; c = c + 1 }
+        xp[m] = x[m] + h
+        xm[m] = x[m] - h
+
+        var gp: Christoffel4 = Christoffel4 { gamma: [0.0; 64], dim: dim }
+        var gm: Christoffel4 = Christoffel4 { gamma: [0.0; 64], dim: dim }
+        christoffel_from_metric(metric_fn, &xp, dim, &!gp)
+        christoffel_from_metric(metric_fn, &xm, dim, &!gm)
+
+        var k = 0
+        while k < dim {
+            var a = 0
+            while a < dim {
+                var b = 0
+                while b < dim {
+                    let gp_val = gp.gamma[k * dim * dim + a * dim + b]
+                    let gm_val = gm.gamma[k * dim * dim + a * dim + b]
+                    d_gamma[m * dim * dim * dim + k * dim * dim + a * dim + b] = (gp_val - gm_val) / (2.0 * h)
+                    b = b + 1
+                }
+                a = a + 1
+            }
+            k = k + 1
+        }
+        m = m + 1
+    }
+
+    // Assemble Riemann tensor
+    // R^k_{lij} = d_i Gamma^k_{jl} - d_j Gamma^k_{il}
+    //           + Gamma^k_{im} Gamma^m_{jl} - Gamma^k_{jm} Gamma^m_{il}
+    var k = 0
+    while k < dim {
+        var l = 0
+        while l < dim {
+            var i = 0
+            while i < dim {
+                var j = 0
+                while j < dim {
+                    // Derivative terms
+                    let di_Gkjl = d_gamma[i * dim * dim * dim + k * dim * dim + j * dim + l]
+                    let dj_Gkil = d_gamma[j * dim * dim * dim + k * dim * dim + i * dim + l]
+
+                    // Quadratic Christoffel terms
+                    var quad1 = 0.0
+                    var quad2 = 0.0
+                    var mm = 0
+                    while mm < dim {
+                        quad1 = quad1 + gamma0.gamma[k * dim * dim + i * dim + mm] * gamma0.gamma[mm * dim * dim + j * dim + l]
+                        quad2 = quad2 + gamma0.gamma[k * dim * dim + j * dim + mm] * gamma0.gamma[mm * dim * dim + i * dim + l]
+                        mm = mm + 1
+                    }
+
+                    R.R[k * dim * dim * dim + l * dim * dim + i * dim + j] = di_Gkjl - dj_Gkil + quad1 - quad2
+                    j = j + 1
+                }
+                i = i + 1
+            }
+            l = l + 1
+        }
+        k = k + 1
+    }
+}
+
+// =============================================================================
+// Ricci tensor and scalar curvature
+// =============================================================================
+
+// Contract the Riemann tensor to get the Ricci tensor: R_{ij} = R^k_{ikj}
+// Note: this only fills Ric and dim; scalar is set to 0.0 (needs metric inverse).
+fn ricci_tensor(R_in: &RiemannTensor, result: &!RicciTensor) with Mut {
+    let dim = R_in.dim
+    result.dim = dim
+    result.scalar = 0.0
+
+    var i = 0
+    while i < 16 { result.Ric[i] = 0.0; i = i + 1 }
+
+    i = 0
+    while i < dim {
+        var j = 0
+        while j < dim {
+            var s = 0.0
+            var k = 0
+            while k < dim {
+                // R^k_{ikj}
+                s = s + R_in.R[k * dim * dim * dim + i * dim * dim + k * dim + j]
+                k = k + 1
+            }
+            result.Ric[i * dim + j] = s
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// Compute full Ricci tensor and scalar curvature in one call.
+// R = g^{ij} R_{ij}
+fn ricci_with_scalar(metric_fn: fn(&[f64; 4], i32, &![f64; 16]) with Mut, Div, Panic,
+                     x: &[f64; 4], dim: i32,
+                     result: &!RicciTensor) with Mut, Div, Panic {
+    // Compute Riemann tensor
+    var Riem: RiemannTensor = RiemannTensor { R: [0.0; 256], dim: dim }
+    riemann_tensor(metric_fn, x, dim, &!Riem)
+
+    // Contract to Ricci
+    ricci_tensor(&Riem, result)
+
+    // Compute metric and its inverse for scalar curvature
+    var g0: [f64; 16] = [0.0; 16]
+    metric_fn(x, dim, &!g0)
+    var g_inv: [f64; 16] = [0.0; 16]
+    metric_inverse(&g0, dim, &!g_inv)
+
+    // Scalar curvature: R = g^{ij} R_{ij}
+    var scalar = 0.0
+    var i = 0
+    while i < dim {
+        var j = 0
+        while j < dim {
+            scalar = scalar + g_inv[i * dim + j] * result.Ric[i * dim + j]
+            j = j + 1
+        }
+        i = i + 1
+    }
+    result.scalar = scalar
+}
+
+// Compute only the scalar curvature R = g^{ij} R_{ij}
+fn scalar_curvature(metric_fn: fn(&[f64; 4], i32, &![f64; 16]) with Mut, Div, Panic,
+                    x: &[f64; 4], dim: i32) -> f64 with Mut, Div, Panic {
+    var ric: RicciTensor = RicciTensor { Ric: [0.0; 16], scalar: 0.0, dim: dim }
+    ricci_with_scalar(metric_fn, x, dim, &!ric)
+    ric.scalar
+}
+
+// =============================================================================
+// Geodesic equations
+// =============================================================================
+
+// Compute the geodesic RHS:
+//   dx^i/dtau = v^i
+//   dv^k/dtau = -Gamma^k_{ij} v^i v^j
+fn geodesic_rhs(metric_fn: fn(&[f64; 4], i32, &![f64; 16]) with Mut, Div, Panic,
+                state: &GeodesicState,
+                dx: &![f64; 4], dv: &![f64; 4]) with Mut, Div, Panic {
+    let dim = state.dim
+
+    // dx/dtau = v
+    var i = 0
+    while i < 4 { dx[i] = 0.0; dv[i] = 0.0; i = i + 1 }
+    i = 0
+    while i < dim { dx[i] = state.v[i]; i = i + 1 }
+
+    // Compute Christoffel symbols at current position
+    var gamma: Christoffel4 = Christoffel4 { gamma: [0.0; 64], dim: dim }
+    christoffel_from_metric(metric_fn, &state.x, dim, &!gamma)
+
+    // dv^k/dtau = -Gamma^k_{ij} v^i v^j
+    var k = 0
+    while k < dim {
+        var s = 0.0
+        i = 0
+        while i < dim {
+            var j = 0
+            while j < dim {
+                s = s + gamma.gamma[k * dim * dim + i * dim + j] * state.v[i] * state.v[j]
+                j = j + 1
+            }
+            i = i + 1
+        }
+        dv[k] = 0.0 - s
+        k = k + 1
+    }
+}
+
+// Single RK4 step on the geodesic equation.
+fn geodesic_step(metric_fn: fn(&[f64; 4], i32, &![f64; 16]) with Mut, Div, Panic,
+                 state: &!GeodesicState, dtau: f64) with Mut, Div, Panic {
+    let dim = state.dim
+
+    // k1
+    var dx1: [f64; 4] = [0.0; 4]
+    var dv1: [f64; 4] = [0.0; 4]
+    geodesic_rhs(metric_fn, state, &!dx1, &!dv1)
+
+    // Stage 2: state at tau + dtau/2 using k1
+    var s2: GeodesicState = GeodesicState { x: [0.0; 4], v: [0.0; 4], dim: dim, tau: state.tau + dtau / 2.0 }
+    var c = 0
+    while c < dim {
+        s2.x[c] = state.x[c] + 0.5 * dtau * dx1[c]
+        s2.v[c] = state.v[c] + 0.5 * dtau * dv1[c]
+        c = c + 1
+    }
+
+    var dx2: [f64; 4] = [0.0; 4]
+    var dv2: [f64; 4] = [0.0; 4]
+    geodesic_rhs(metric_fn, &s2, &!dx2, &!dv2)
+
+    // Stage 3: state at tau + dtau/2 using k2
+    var s3: GeodesicState = GeodesicState { x: [0.0; 4], v: [0.0; 4], dim: dim, tau: state.tau + dtau / 2.0 }
+    c = 0
+    while c < dim {
+        s3.x[c] = state.x[c] + 0.5 * dtau * dx2[c]
+        s3.v[c] = state.v[c] + 0.5 * dtau * dv2[c]
+        c = c + 1
+    }
+
+    var dx3: [f64; 4] = [0.0; 4]
+    var dv3: [f64; 4] = [0.0; 4]
+    geodesic_rhs(metric_fn, &s3, &!dx3, &!dv3)
+
+    // Stage 4: state at tau + dtau using k3
+    var s4: GeodesicState = GeodesicState { x: [0.0; 4], v: [0.0; 4], dim: dim, tau: state.tau + dtau }
+    c = 0
+    while c < dim {
+        s4.x[c] = state.x[c] + dtau * dx3[c]
+        s4.v[c] = state.v[c] + dtau * dv3[c]
+        c = c + 1
+    }
+
+    var dx4: [f64; 4] = [0.0; 4]
+    var dv4: [f64; 4] = [0.0; 4]
+    geodesic_rhs(metric_fn, &s4, &!dx4, &!dv4)
+
+    // Combine: state += dtau/6 * (k1 + 2*k2 + 2*k3 + k4)
+    c = 0
+    while c < dim {
+        state.x[c] = state.x[c] + dtau / 6.0 * (dx1[c] + 2.0 * dx2[c] + 2.0 * dx3[c] + dx4[c])
+        state.v[c] = state.v[c] + dtau / 6.0 * (dv1[c] + 2.0 * dv2[c] + 2.0 * dv3[c] + dv4[c])
+        c = c + 1
+    }
+    state.tau = state.tau + dtau
+}
+
+// Integrate geodesic from initial conditions over n_steps of equal size.
+// Stores positions, velocities, and proper time at each step in path.
+fn geodesic_integrate(metric_fn: fn(&[f64; 4], i32, &![f64; 16]) with Mut, Div, Panic,
+                      x0: &[f64; 4], v0: &[f64; 4], dim: i32,
+                      tau_end: f64, n_steps: i32,
+                      path: &!GeodesicPath) with Mut, Div, Panic {
+    path.dim = dim
+    path.n_steps = n_steps
+
+    // Zero out path arrays
+    var z = 0
+    while z < 4096 { path.x[z] = 0.0; path.v[z] = 0.0; z = z + 1 }
+    z = 0
+    while z < 1024 { path.tau[z] = 0.0; z = z + 1 }
+
+    let dtau = tau_end / (n_steps as f64)
+
+    // Initialize state
+    var state: GeodesicState = GeodesicState { x: [0.0; 4], v: [0.0; 4], dim: dim, tau: 0.0 }
+    var c = 0
+    while c < dim { state.x[c] = x0[c]; state.v[c] = v0[c]; c = c + 1 }
+
+    // Store initial conditions (step 0)
+    c = 0
+    while c < dim {
+        path.x[0 * dim + c] = state.x[c]
+        path.v[0 * dim + c] = state.v[c]
+        c = c + 1
+    }
+    path.tau[0] = 0.0
+
+    // Integrate
+    var step = 1
+    while step <= n_steps {
+        geodesic_step(metric_fn, &!state, dtau)
+
+        // Clamp step index for storage (max 1024 steps in tau, 4096/dim in x,v)
+        if step < 1024 {
+            path.tau[step] = state.tau
+            c = 0
+            while c < dim {
+                path.x[step * dim + c] = state.x[c]
+                path.v[step * dim + c] = state.v[c]
+                c = c + 1
+            }
+        }
+        step = step + 1
+    }
+}
+
+// =============================================================================
+// Parallel transport
+// =============================================================================
+
+// Single RK4 step for parallel transport of vector w along a geodesic with
+// tangent vector v at point x.
+// Transport equation: dw^k/dtau = -Gamma^k_{ij} v^i w^j
+fn parallel_transport_step(metric_fn: fn(&[f64; 4], i32, &![f64; 16]) with Mut, Div, Panic,
+                           x: &[f64; 4], v: &[f64; 4],
+                           w: &![f64; 4], dim: i32, dtau: f64) with Mut, Div, Panic {
+    // Compute Christoffel symbols at x
+    var gamma: Christoffel4 = Christoffel4 { gamma: [0.0; 64], dim: dim }
+    christoffel_from_metric(metric_fn, x, dim, &!gamma)
+
+    // k1: dw^k = -Gamma^k_{ij} v^i w^j
+    var k1: [f64; 4] = [0.0; 4]
+    var k = 0
+    while k < dim {
+        var s = 0.0
+        var i = 0
+        while i < dim {
+            var j = 0
+            while j < dim {
+                s = s + gamma.gamma[k * dim * dim + i * dim + j] * v[i] * w[j]
+                j = j + 1
+            }
+            i = i + 1
+        }
+        k1[k] = 0.0 - s
+        k = k + 1
+    }
+
+    // k2: at w + dtau/2 * k1
+    var w2: [f64; 4] = [0.0; 4]
+    var c = 0
+    while c < dim { w2[c] = w[c] + 0.5 * dtau * k1[c]; c = c + 1 }
+    var k2: [f64; 4] = [0.0; 4]
+    k = 0
+    while k < dim {
+        var s = 0.0
+        var i = 0
+        while i < dim {
+            var j = 0
+            while j < dim {
+                s = s + gamma.gamma[k * dim * dim + i * dim + j] * v[i] * w2[j]
+                j = j + 1
+            }
+            i = i + 1
+        }
+        k2[k] = 0.0 - s
+        k = k + 1
+    }
+
+    // k3: at w + dtau/2 * k2
+    var w3: [f64; 4] = [0.0; 4]
+    c = 0
+    while c < dim { w3[c] = w[c] + 0.5 * dtau * k2[c]; c = c + 1 }
+    var k3: [f64; 4] = [0.0; 4]
+    k = 0
+    while k < dim {
+        var s = 0.0
+        var i = 0
+        while i < dim {
+            var j = 0
+            while j < dim {
+                s = s + gamma.gamma[k * dim * dim + i * dim + j] * v[i] * w3[j]
+                j = j + 1
+            }
+            i = i + 1
+        }
+        k3[k] = 0.0 - s
+        k = k + 1
+    }
+
+    // k4: at w + dtau * k3
+    var w4: [f64; 4] = [0.0; 4]
+    c = 0
+    while c < dim { w4[c] = w[c] + dtau * k3[c]; c = c + 1 }
+    var k4: [f64; 4] = [0.0; 4]
+    k = 0
+    while k < dim {
+        var s = 0.0
+        var i = 0
+        while i < dim {
+            var j = 0
+            while j < dim {
+                s = s + gamma.gamma[k * dim * dim + i * dim + j] * v[i] * w4[j]
+                j = j + 1
+            }
+            i = i + 1
+        }
+        k4[k] = 0.0 - s
+        k = k + 1
+    }
+
+    // Combine: w += dtau/6 * (k1 + 2*k2 + 2*k3 + k4)
+    c = 0
+    while c < dim {
+        w[c] = w[c] + dtau / 6.0 * (k1[c] + 2.0 * k2[c] + 2.0 * k3[c] + k4[c])
+        c = c + 1
+    }
+}
+
+// Transport a vector w0 along a precomputed geodesic path.
+// The result is stored in w_final.
+fn parallel_transport_along(metric_fn: fn(&[f64; 4], i32, &![f64; 16]) with Mut, Div, Panic,
+                            path: &GeodesicPath,
+                            w0: &[f64; 4],
+                            w_final: &![f64; 4]) with Mut, Div, Panic {
+    let dim = path.dim
+    let n = path.n_steps
+
+    // Initialize w_final with w0
+    var c = 0
+    while c < 4 { w_final[c] = 0.0; c = c + 1 }
+    c = 0
+    while c < dim { w_final[c] = w0[c]; c = c + 1 }
+
+    // Step through the path
+    var step = 0
+    while step < n {
+        // Extract position and velocity at this step
+        var x_cur: [f64; 4] = [0.0; 4]
+        var v_cur: [f64; 4] = [0.0; 4]
+        c = 0
+        while c < dim {
+            x_cur[c] = path.x[step * dim + c]
+            v_cur[c] = path.v[step * dim + c]
+            c = c + 1
+        }
+
+        // Compute dtau for this segment
+        var dtau = 0.0
+        if step + 1 < 1024 {
+            dtau = path.tau[step + 1] - path.tau[step]
+        }
+
+        if dg_abs(dtau) > 1.0e-30 {
+            parallel_transport_step(metric_fn, &x_cur, &v_cur, w_final, dim, dtau)
+        }
+        step = step + 1
+    }
+}
+
+// =============================================================================
+// Lie derivative of vector fields
+// =============================================================================
+
+// Lie derivative of W along V: (L_V W)^i = V^j dW^i/dx^j - W^j dV^i/dx^j
+// V and W are vector field callbacks: V(x, dim, out), W(x, dim, out).
+// Derivatives computed via central differences with h = 1e-6.
+fn lie_derivative_vec(V: fn(&[f64; 4], i32, &![f64; 4]) with Mut, Div, Panic,
+                      W: fn(&[f64; 4], i32, &![f64; 4]) with Mut, Div, Panic,
+                      x: &[f64; 4], dim: i32,
+                      result: &![f64; 4]) with Mut, Div, Panic {
+    let h = 1.0e-6
+
+    // Evaluate V and W at x
+    var V0: [f64; 4] = [0.0; 4]
+    var W0: [f64; 4] = [0.0; 4]
+    V(x, dim, &!V0)
+    W(x, dim, &!W0)
+
+    // Compute Jacobians dV^i/dx^j and dW^i/dx^j via central differences
+    // dV[i * dim + j] = dV^i/dx^j
+    var dV: [f64; 16] = [0.0; 16]
+    var dW: [f64; 16] = [0.0; 16]
+
+    var j = 0
+    while j < dim {
+        var xp: [f64; 4] = [0.0; 4]
+        var xm: [f64; 4] = [0.0; 4]
+        var c = 0
+        while c < 4 { xp[c] = x[c]; xm[c] = x[c]; c = c + 1 }
+        xp[j] = x[j] + h
+        xm[j] = x[j] - h
+
+        var Vp: [f64; 4] = [0.0; 4]
+        var Vm: [f64; 4] = [0.0; 4]
+        V(&xp, dim, &!Vp)
+        V(&xm, dim, &!Vm)
+
+        var Wp: [f64; 4] = [0.0; 4]
+        var Wm: [f64; 4] = [0.0; 4]
+        W(&xp, dim, &!Wp)
+        W(&xm, dim, &!Wm)
+
+        var i = 0
+        while i < dim {
+            dV[i * dim + j] = (Vp[i] - Vm[i]) / (2.0 * h)
+            dW[i * dim + j] = (Wp[i] - Wm[i]) / (2.0 * h)
+            i = i + 1
+        }
+        j = j + 1
+    }
+
+    // Assemble Lie derivative: (L_V W)^i = V^j dW^i/dx^j - W^j dV^i/dx^j
+    var i = 0
+    while i < 4 { result[i] = 0.0; i = i + 1 }
+    i = 0
+    while i < dim {
+        var s = 0.0
+        j = 0
+        while j < dim {
+            s = s + V0[j] * dW[i * dim + j] - W0[j] * dV[i * dim + j]
+            j = j + 1
+        }
+        result[i] = s
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Standard metrics (callback-compatible)
+// =============================================================================
+
+// Euclidean metric in 3D: g = diag(1, 1, 1)
+fn metric_euclidean_3d(x: &[f64; 4], dim: i32, g: &![f64; 16]) with Mut, Div, Panic {
+    var i = 0
+    while i < 16 { g[i] = 0.0; i = i + 1 }
+    g[0] = 1.0
+    g[4] = 1.0
+    g[8] = 1.0
+}
+
+// Unit sphere in 2D: coordinates (theta, phi).
+// g = diag(1, sin^2(theta))
+// x[0] = theta, x[1] = phi
+fn metric_sphere_2d(x: &[f64; 4], dim: i32, g: &![f64; 16]) with Mut, Div, Panic {
+    var i = 0
+    while i < 16 { g[i] = 0.0; i = i + 1 }
+    let theta = x[0]
+    let sth = dg_sin(theta)
+    g[0] = 1.0            // g_{theta theta}
+    g[3] = sth * sth       // g_{phi phi}
+}
+
+// Sphere of radius R in 2D: g = R^2 * diag(1, sin^2(theta))
+// x[0] = theta, x[1] = phi
+// Note: R passed as separate argument since Sounio lacks partial application.
+fn metric_sphere_2d_r(x: &[f64; 4], dim: i32, g: &![f64; 16], R: f64) with Mut, Div, Panic {
+    var i = 0
+    while i < 16 { g[i] = 0.0; i = i + 1 }
+    let theta = x[0]
+    let sth = dg_sin(theta)
+    g[0] = R * R                    // g_{theta theta}
+    g[3] = R * R * sth * sth        // g_{phi phi}
+}
+
+// Schwarzschild metric in Boyer-Lindquist coordinates (t, r, theta, phi).
+// M = 1 (geometric units, r_s = 2M = 2).
+// x[0] = t, x[1] = r, x[2] = theta, x[3] = phi
+// g_tt = -(1 - 2/r), g_rr = 1/(1 - 2/r), g_{theta theta} = r^2, g_{phi phi} = r^2 sin^2(theta)
+fn metric_schwarzschild(x: &[f64; 4], dim: i32, g: &![f64; 16]) with Mut, Div, Panic {
+    var i = 0
+    while i < 16 { g[i] = 0.0; i = i + 1 }
+
+    let r = x[1]
+    let theta = x[2]
+    let sth = dg_sin(theta)
+
+    // Guard against r = 0 or r = 2 (singularities)
+    var r_safe = r
+    if dg_abs(r_safe) < 1.0e-10 { r_safe = 1.0e-10 }
+    let f = 1.0 - 2.0 / r_safe
+
+    if dg_abs(f) < 1.0e-30 {
+        // Near horizon: regularize
+        g[0] = -1.0e-30                            // g_tt
+        g[5] = 1.0e30                              // g_rr
+    } else {
+        g[0] = 0.0 - f                             // g_tt  = -(1 - 2/r)
+        g[5] = 1.0 / f                             // g_rr  = 1/(1 - 2/r)
+    }
+    g[10] = r_safe * r_safe                         // g_{theta theta} = r^2
+    g[15] = r_safe * r_safe * sth * sth             // g_{phi phi} = r^2 sin^2(theta)
+}
+
+// Poincare half-plane metric (2D hyperbolic geometry).
+// Coordinates (x, y), y > 0.
+// g = (1/y^2) * diag(1, 1)
+// x[0] = x-coordinate, x[1] = y-coordinate
+fn metric_hyperbolic_2d(x: &[f64; 4], dim: i32, g: &![f64; 16]) with Mut, Div, Panic {
+    var i = 0
+    while i < 16 { g[i] = 0.0; i = i + 1 }
+
+    var y = x[1]
+    if y < 1.0e-10 { y = 1.0e-10 }  // Guard against y = 0
+    let inv_y2 = 1.0 / (y * y)
+
+    g[0] = inv_y2    // g_{xx}
+    g[3] = inv_y2    // g_{yy}
+}
+
+// =============================================================================
+// Gaussian curvature for 2D surfaces
+// =============================================================================
+
+// Gaussian curvature K for a 2D Riemannian manifold.
+// For any 2D surface, K = R_scalar / 2 where R_scalar is the scalar curvature.
+// Equivalently, K = R_{0101} / det(g) in the fully lowered Riemann tensor.
+fn gauss_curvature_2d(metric_fn: fn(&[f64; 4], i32, &![f64; 16]) with Mut, Div, Panic,
+                      x: &[f64; 4]) -> f64 with Mut, Div, Panic {
+    let dim = 2
+
+    // Use the scalar curvature relation: K = R_scalar / 2 for 2D manifolds
+    var ric: RicciTensor = RicciTensor { Ric: [0.0; 16], scalar: 0.0, dim: dim }
+    ricci_with_scalar(metric_fn, x, dim, &!ric)
+    ric.scalar / 2.0
+}
+
+// =============================================================================
+// Geodesic arc length
+// =============================================================================
+
+// Compute arc length along a geodesic path: integral of sqrt(g_{ij} v^i v^j) dtau.
+// Uses the trapezoidal rule over the stored path segments.
+fn geodesic_arc_length(path: &GeodesicPath,
+                       metric_fn: fn(&[f64; 4], i32, &![f64; 16]) with Mut, Div, Panic) -> f64 with Mut, Div, Panic {
+    let dim = path.dim
+    let n = path.n_steps
+    var total = 0.0
+
+    var step = 0
+    while step <= n {
+        if step >= 1024 { step = n + 1 }
+        else {
+            // Extract position and velocity
+            var x_cur: [f64; 4] = [0.0; 4]
+            var v_cur: [f64; 4] = [0.0; 4]
+            var c = 0
+            while c < dim {
+                x_cur[c] = path.x[step * dim + c]
+                v_cur[c] = path.v[step * dim + c]
+                c = c + 1
+            }
+
+            // Compute g_{ij} v^i v^j at this point
+            var g0: [f64; 16] = [0.0; 16]
+            metric_fn(&x_cur, dim, &!g0)
+
+            var norm_sq = 0.0
+            var i = 0
+            while i < dim {
+                var j = 0
+                while j < dim {
+                    norm_sq = norm_sq + g0[i * dim + j] * v_cur[i] * v_cur[j]
+                    j = j + 1
+                }
+                i = i + 1
+            }
+
+            // For spacelike geodesics norm_sq > 0; for timelike, norm_sq < 0
+            // Take absolute value before sqrt for generality
+            let speed = dg_sqrt(dg_abs(norm_sq))
+
+            // Trapezoidal rule contribution
+            if step > 0 {
+                let dtau = path.tau[step] - path.tau[step - 1]
+
+                // Also compute speed at previous step for trapezoidal rule
+                var x_prev: [f64; 4] = [0.0; 4]
+                var v_prev: [f64; 4] = [0.0; 4]
+                c = 0
+                while c < dim {
+                    x_prev[c] = path.x[(step - 1) * dim + c]
+                    v_prev[c] = path.v[(step - 1) * dim + c]
+                    c = c + 1
+                }
+                var g_prev: [f64; 16] = [0.0; 16]
+                metric_fn(&x_prev, dim, &!g_prev)
+                var ns_prev = 0.0
+                i = 0
+                while i < dim {
+                    var j = 0
+                    while j < dim {
+                        ns_prev = ns_prev + g_prev[i * dim + j] * v_prev[i] * v_prev[j]
+                        j = j + 1
+                    }
+                    i = i + 1
+                }
+                let speed_prev = dg_sqrt(dg_abs(ns_prev))
+
+                total = total + 0.5 * (speed_prev + speed) * dg_abs(dtau)
+            }
+            step = step + 1
+        }
+    }
+    total
+}

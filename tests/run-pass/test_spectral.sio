@@ -1,0 +1,1067 @@
+//@ run-pass
+// test_spectral.sio -- Tests for spectral methods module
+//
+// Self-contained test suite for Chebyshev collocation, differentiation matrices,
+// spectral BVP/eigenvalue solvers, Clenshaw-Curtis quadrature, interpolation,
+// and Clenshaw recurrence. All helpers copied from stdlib/math/spectral.sio.
+//
+// Tests:
+//  1.  Chebyshev nodes on [-1,1]: x_0 = 1, x_n = -1
+//  2.  Chebyshev nodes mapped to [0,1]: first = 1, last = 0
+//  3.  Diff matrix on x: D*[x_0,...,x_n] = all 1s
+//  4.  Diff matrix on x^2: D*[x^2] = 2*x at nodes
+//  5.  D2 on x^2: second derivative = 2 everywhere
+//  6.  Spectral BVP: -u'' = 1 on [0,1], u = x(1-x)/2
+//  7.  Spectral BVP: -u'' + u = 0, u = sinh(x)/sinh(1)
+//  8.  Spectral eigenvalue: -u'' on [0,pi], eigenvalues = n^2
+//  9.  Clenshaw-Curtis integrates 1: integral = 2
+// 10.  Clenshaw-Curtis integrates x^2: integral = 2/3
+// 11.  Chebyshev interpolation accuracy on sin(x)
+// 12.  Clenshaw recurrence: evaluate expansion at a point
+
+// ============================================================================
+// HELPERS (copied from spectral.sio -- tests must be self-contained)
+// ============================================================================
+
+fn sp_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn sp_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+fn sp_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+fn sp_pi() -> f64 { 3.14159265358979323846 }
+
+fn sp_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn sp_sin(x: f64) -> f64 with Mut, Div, Panic {
+    var a = x
+    let tp = 6.28318530717958647692
+    while a >= tp { a = a - tp }
+    while a < 0.0 { a = a + tp }
+    if a > 3.14159265358979323846 { a = a - tp }
+    let a2 = a * a
+    var sum = a
+    var term = a
+    var n = 1
+    while n < 18 { term = 0.0 - term * a2 / ((2 * n) * (2 * n + 1)) as f64; sum = sum + term; n = n + 1 }
+    sum
+}
+
+fn sp_cos(x: f64) -> f64 with Mut, Div, Panic {
+    sp_sin(x + 1.57079632679489661923)
+}
+
+fn sp_exp(x: f64) -> f64 with Mut, Div, Panic {
+    let ln2 = 0.6931471805599453
+    var k_f = x / ln2
+    var k: i32 = 0
+    if k_f >= 0.0 { k = k_f as i32 } else { k = (k_f as i32) - 1 }
+    let r = x - (k as f64) * ln2
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n < 25 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var result = sum
+    if k >= 0 {
+        var i = 0
+        while i < k { result = result * 2.0; i = i + 1 }
+    } else {
+        var i = 0
+        while i < (0 - k) { result = result * 0.5; i = i + 1 }
+    }
+    result
+}
+
+fn sp_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    let ln2 = 0.6931471805599453
+    var m = x
+    var e: i32 = 0
+    while m >= 2.0 { m = m * 0.5; e = e + 1 }
+    while m < 1.0 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var power = t
+    var k = 1
+    while k < 30 { power = power * t2; sum = sum + power / (2 * k + 1) as f64; k = k + 1 }
+    2.0 * sum + (e as f64) * ln2
+}
+
+fn sp_sinh(x: f64) -> f64 with Mut, Div, Panic {
+    let ep = sp_exp(x)
+    let em = sp_exp(0.0 - x)
+    (ep - em) / 2.0
+}
+
+// ============================================================================
+// GAUSSIAN ELIMINATION (copied from spectral.sio)
+// ============================================================================
+
+fn sp_gauss_solve(A: &![f64; 4096], b: &![f64; 256], x: &![f64; 256], n: i32) with Mut, Div, Panic {
+    var col = 0
+    while col < n {
+        var max_val = sp_abs(A[col * n + col])
+        var max_row = col
+        var row = col + 1
+        while row < n {
+            let val = sp_abs(A[row * n + col])
+            if val > max_val { max_val = val; max_row = row }
+            row = row + 1
+        }
+
+        if max_row != col {
+            var j = 0
+            while j < n {
+                let tmp = A[col * n + j]
+                A[col * n + j] = A[max_row * n + j]
+                A[max_row * n + j] = tmp
+                j = j + 1
+            }
+            let tmp_b = b[col]
+            b[col] = b[max_row]
+            b[max_row] = tmp_b
+        }
+
+        let pivot = A[col * n + col]
+        if sp_abs(pivot) < 1.0e-30 {
+            col = col + 1
+        } else {
+            row = col + 1
+            while row < n {
+                let factor = A[row * n + col] / pivot
+                var j = col + 1
+                while j < n {
+                    A[row * n + j] = A[row * n + j] - factor * A[col * n + j]
+                    j = j + 1
+                }
+                A[row * n + col] = 0.0
+                b[row] = b[row] - factor * b[col]
+                row = row + 1
+            }
+            col = col + 1
+        }
+    }
+
+    var i = n - 1
+    while i >= 0 {
+        var sum = b[i]
+        var j = i + 1
+        while j < n { sum = sum - A[i * n + j] * x[j]; j = j + 1 }
+        if sp_abs(A[i * n + i]) < 1.0e-30 {
+            x[i] = 0.0
+        } else {
+            x[i] = sum / A[i * n + i]
+        }
+        i = i - 1
+    }
+}
+
+// ============================================================================
+// CHEBYSHEV NODES (copied from spectral.sio)
+// ============================================================================
+
+fn cheb_nodes(n: i32, x: &![f64; 256]) with Mut, Div {
+    var j = 0
+    while j <= n {
+        x[j] = sp_cos((j as f64) * sp_pi() / (n as f64))
+        j = j + 1
+    }
+}
+
+fn cheb_nodes_ab(n: i32, a: f64, b: f64, x: &![f64; 256]) with Mut, Div {
+    let mid = 0.5 * (a + b)
+    let half = 0.5 * (b - a)
+    var j = 0
+    while j <= n {
+        x[j] = mid + half * sp_cos((j as f64) * sp_pi() / (n as f64))
+        j = j + 1
+    }
+}
+
+// ============================================================================
+// CHEBYSHEV DIFFERENTIATION MATRICES (copied from spectral.sio)
+// ============================================================================
+
+fn cheb_diffmat(n: i32, D: &![f64; 4096]) with Mut, Div {
+    let np = n + 1
+
+    var x: [f64; 256] = [0.0; 256]
+    var j = 0
+    while j <= n { x[j] = sp_cos((j as f64) * sp_pi() / (n as f64)); j = j + 1 }
+
+    var c: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i <= n { c[i] = 1.0; i = i + 1 }
+    c[0] = 2.0
+    c[n] = 2.0
+
+    i = 0
+    while i <= n {
+        j = 0
+        while j <= n {
+            if i != j {
+                var sign = 1.0
+                if (i + j) - ((i + j) / 2) * 2 != 0 { sign = 0.0 - 1.0 }
+                D[i * np + j] = c[i] * sign / (c[j] * (x[i] - x[j]))
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    i = 1
+    while i < n {
+        D[i * np + i] = 0.0 - x[i] / (2.0 * (1.0 - x[i] * x[i]))
+        i = i + 1
+    }
+
+    let n2 = (n as f64) * (n as f64)
+    D[0] = (2.0 * n2 + 1.0) / 6.0
+    D[n * np + n] = 0.0 - (2.0 * n2 + 1.0) / 6.0
+}
+
+fn cheb_diffmat2(n: i32, D2: &![f64; 4096]) with Mut, Div {
+    let np = n + 1
+
+    var D1: [f64; 4096] = [0.0; 4096]
+    cheb_diffmat(n, &!D1)
+
+    var i = 0
+    while i < np {
+        var j = 0
+        while j < np {
+            var sum = 0.0
+            var k = 0
+            while k < np {
+                sum = sum + D1[i * np + k] * D1[k * np + j]
+                k = k + 1
+            }
+            D2[i * np + j] = sum
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+fn cheb_diffmat_ab(n: i32, a: f64, b: f64, D: &![f64; 4096]) with Mut, Div {
+    let np = n + 1
+    cheb_diffmat(n, D)
+    let scale = 2.0 / (b - a)
+    var i = 0
+    while i < np {
+        var j = 0
+        while j < np {
+            D[i * np + j] = D[i * np + j] * scale
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+fn cheb_diffmat2_ab(n: i32, a: f64, b: f64, D2: &![f64; 4096]) with Mut, Div {
+    let np = n + 1
+    cheb_diffmat2(n, D2)
+    let scale = 2.0 / (b - a)
+    let scale2 = scale * scale
+    var i = 0
+    while i < np {
+        var j = 0
+        while j < np {
+            D2[i * np + j] = D2[i * np + j] * scale2
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// SPECTRAL BVP SOLVER (copied from spectral.sio)
+// ============================================================================
+
+fn spectral_bvp_2nd(n: i32, a: f64, b: f64,
+                    p_fn: fn(f64) -> f64 with Mut, Div, Panic,
+                    q_fn: fn(f64) -> f64 with Mut, Div, Panic,
+                    f_fn: fn(f64) -> f64 with Mut, Div, Panic,
+                    alpha: f64, beta: f64,
+                    u: &![f64; 256]) with Mut, Div, Panic {
+    let np = n + 1
+
+    var x: [f64; 256] = [0.0; 256]
+    cheb_nodes_ab(n, a, b, &!x)
+
+    var D1: [f64; 4096] = [0.0; 4096]
+    var D2: [f64; 4096] = [0.0; 4096]
+    cheb_diffmat_ab(n, a, b, &!D1)
+    cheb_diffmat2_ab(n, a, b, &!D2)
+
+    var L: [f64; 4096] = [0.0; 4096]
+    var i = 0
+    while i < np {
+        let p_val = p_fn(x[i])
+        let q_val = q_fn(x[i])
+        var j = 0
+        while j < np {
+            L[i * np + j] = 0.0 - D2[i * np + j] + p_val * D1[i * np + j]
+            j = j + 1
+        }
+        L[i * np + i] = L[i * np + i] + q_val
+        i = i + 1
+    }
+
+    var rhs: [f64; 256] = [0.0; 256]
+    i = 0
+    while i < np { rhs[i] = f_fn(x[i]); i = i + 1 }
+
+    // BC: CGL nodes ordered x_0 = b (right), x_n = a (left)
+    var j = 0
+    while j < np { L[0 * np + j] = 0.0; j = j + 1 }
+    L[0 * np + 0] = 1.0
+    rhs[0] = beta
+
+    j = 0
+    while j < np { L[n * np + j] = 0.0; j = j + 1 }
+    L[n * np + n] = 1.0
+    rhs[n] = alpha
+
+    sp_gauss_solve(&!L, &!rhs, u, np)
+}
+
+// ============================================================================
+// ARCTANGENT HELPERS (copied from spectral.sio)
+// ============================================================================
+
+fn sp_atan_core(t: f64) -> f64 with Mut, Div {
+    let t2 = t * t
+    var sum = t
+    var power = t
+    var k = 1
+    while k < 30 {
+        power = 0.0 - power * t2
+        sum = sum + power / (2 * k + 1) as f64
+        k = k + 1
+    }
+    sum
+}
+
+fn sp_atan_series(t: f64) -> f64 with Mut, Div, Panic {
+    if sp_abs(t) > 1.0 {
+        let inv = 1.0 / t
+        let a = sp_atan_core(inv)
+        if t > 0.0 { return sp_pi() / 2.0 - a }
+        return 0.0 - sp_pi() / 2.0 - a
+    }
+    sp_atan_core(t)
+}
+
+fn sp_atan2(y: f64, x: f64) -> f64 with Mut, Div, Panic {
+    if sp_abs(x) < 1.0e-30 {
+        if y > 0.0 { return sp_pi() / 2.0 }
+        if y < 0.0 { return 0.0 - sp_pi() / 2.0 }
+        return 0.0
+    }
+    let ratio = y / x
+    var a = sp_atan_series(ratio)
+    if x < 0.0 {
+        if y >= 0.0 { a = a + sp_pi() } else { a = a - sp_pi() }
+    }
+    a
+}
+
+// ============================================================================
+// SPECTRAL EIGENVALUE SOLVER (copied from spectral.sio)
+// ============================================================================
+
+fn spectral_eigval(n: i32, a: f64, b: f64,
+                   V_fn: fn(f64) -> f64 with Mut, Div, Panic,
+                   eigenvalues: &![f64; 256],
+                   n_found: &!i32) with Mut, Div, Panic {
+    let np = n + 1
+
+    var x: [f64; 256] = [0.0; 256]
+    cheb_nodes_ab(n, a, b, &!x)
+
+    var D2: [f64; 4096] = [0.0; 4096]
+    cheb_diffmat2_ab(n, a, b, &!D2)
+
+    let m = n - 1
+    if m <= 0 { n_found[0] = 0; return }
+
+    var L: [f64; 4096] = [0.0; 4096]
+    var i = 0
+    while i < m {
+        var j = 0
+        while j < m {
+            L[i * m + j] = 0.0 - D2[(i + 1) * np + (j + 1)]
+            j = j + 1
+        }
+        L[i * m + i] = L[i * m + i] + V_fn(x[i + 1])
+        i = i + 1
+    }
+
+    var max_iter = 100 * m * m
+    if max_iter > 100000 { max_iter = 100000 }
+    var iter = 0
+    while iter < max_iter {
+        var max_off = 0.0
+        var p = 0
+        var q = 1
+        i = 0
+        while i < m {
+            var j = i + 1
+            while j < m {
+                let val = sp_abs(L[i * m + j])
+                if val > max_off { max_off = val; p = i; q = j }
+                j = j + 1
+            }
+            i = i + 1
+        }
+
+        if max_off < 1.0e-12 { iter = max_iter }
+        else {
+            let app = L[p * m + p]
+            let aqq = L[q * m + q]
+            let apq = L[p * m + q]
+
+            var theta = 0.0
+            let diff = aqq - app
+            if sp_abs(diff) < 1.0e-30 {
+                theta = sp_pi() / 4.0
+            } else {
+                theta = 0.5 * sp_atan2(2.0 * apq, diff)
+            }
+
+            let cos_t = sp_cos(theta)
+            let sin_t = sp_sin(theta)
+
+            var k = 0
+            while k < m {
+                if k != p && k != q {
+                    let lkp = L[k * m + p]
+                    let lkq = L[k * m + q]
+                    L[k * m + p] = cos_t * lkp + sin_t * lkq
+                    L[k * m + q] = 0.0 - sin_t * lkp + cos_t * lkq
+                    L[p * m + k] = L[k * m + p]
+                    L[q * m + k] = L[k * m + q]
+                }
+                k = k + 1
+            }
+
+            let new_pp = cos_t * cos_t * app + 2.0 * cos_t * sin_t * apq + sin_t * sin_t * aqq
+            let new_qq = sin_t * sin_t * app - 2.0 * cos_t * sin_t * apq + cos_t * cos_t * aqq
+            L[p * m + p] = new_pp
+            L[q * m + q] = new_qq
+            L[p * m + q] = 0.0
+            L[q * m + p] = 0.0
+
+            iter = iter + 1
+        }
+    }
+
+    i = 0
+    while i < m { eigenvalues[i] = L[i * m + i]; i = i + 1 }
+
+    i = 1
+    while i < m {
+        let key = eigenvalues[i]
+        var j = i - 1
+        while j >= 0 && eigenvalues[j] > key {
+            eigenvalues[j + 1] = eigenvalues[j]
+            j = j - 1
+        }
+        eigenvalues[j + 1] = key
+        i = i + 1
+    }
+
+    n_found[0] = m
+}
+
+// ============================================================================
+// CLENSHAW-CURTIS QUADRATURE (copied from spectral.sio)
+// ============================================================================
+
+fn cc_weights(n: i32, w: &![f64; 256]) with Mut, Div {
+    if n == 0 { w[0] = 2.0; return }
+    if n == 1 { w[0] = 1.0; w[1] = 1.0; return }
+
+    let half_n = n / 2
+
+    var j = 0
+    while j <= n {
+        var sum = 0.0
+        var k = 0
+        while k <= half_n {
+            let denom = 1.0 - 4.0 * (k as f64) * (k as f64)
+            let theta = 2.0 * (k as f64) * (j as f64) * sp_pi() / (n as f64)
+            var term = sp_cos(theta) / denom
+
+            if k == 0 { term = term * 0.5 }
+            if k == half_n { term = term * 0.5 }
+
+            sum = sum + term
+            k = k + 1
+        }
+
+        w[j] = 2.0 * sum / (n as f64)
+        j = j + 1
+    }
+}
+
+fn cc_integrate(f_vals: &[f64; 256], n: i32) -> f64 with Mut, Div {
+    var w: [f64; 256] = [0.0; 256]
+    cc_weights(n, &!w)
+
+    var sum = 0.0
+    var j = 0
+    while j <= n {
+        sum = sum + w[j] * f_vals[j]
+        j = j + 1
+    }
+    sum
+}
+
+// ============================================================================
+// SPECTRAL INTERPOLATION (copied from spectral.sio)
+// ============================================================================
+
+fn cheb_interpolate(f_vals: &[f64; 256], n: i32, x: f64) -> f64 with Mut, Div {
+    var nodes: [f64; 256] = [0.0; 256]
+    var j = 0
+    while j <= n { nodes[j] = sp_cos((j as f64) * sp_pi() / (n as f64)); j = j + 1 }
+
+    j = 0
+    while j <= n {
+        if sp_abs(x - nodes[j]) < 1.0e-15 { return f_vals[j] }
+        j = j + 1
+    }
+
+    var numer = 0.0
+    var denom = 0.0
+    j = 0
+    while j <= n {
+        var w = 1.0
+        if j - (j / 2) * 2 != 0 { w = 0.0 - 1.0 }
+        if j == 0 || j == n { w = w * 0.5 }
+
+        let term = w / (x - nodes[j])
+        numer = numer + term * f_vals[j]
+        denom = denom + term
+        j = j + 1
+    }
+    numer / denom
+}
+
+// ============================================================================
+// CHEBYSHEV COEFFICIENTS AND CLENSHAW RECURRENCE (copied from spectral.sio)
+// ============================================================================
+
+fn cheb_coeffs_from_values(f_vals: &[f64; 256], n: i32, coeffs: &![f64; 256]) with Mut, Div {
+    var k = 0
+    while k <= n {
+        var sum = 0.0
+        var j = 0
+        while j <= n {
+            let theta = (k as f64) * (j as f64) * sp_pi() / (n as f64)
+            var term = f_vals[j] * sp_cos(theta)
+
+            if j == 0 { term = term * 0.5 }
+            if j == n { term = term * 0.5 }
+
+            sum = sum + term
+            j = j + 1
+        }
+
+        coeffs[k] = 2.0 * sum / (n as f64)
+        k = k + 1
+    }
+
+    coeffs[0] = coeffs[0] * 0.5
+    if n > 0 { coeffs[n] = coeffs[n] * 0.5 }
+}
+
+fn cheb_eval_from_coeffs(coeffs: &[f64; 256], n: i32, x: f64) -> f64 with Mut, Div {
+    if n == 0 { return coeffs[0] }
+    if n == 1 { return coeffs[0] + coeffs[1] * x }
+
+    var b_next = 0.0
+    var b_curr = 0.0
+
+    var k = n
+    while k >= 1 {
+        let b_new = 2.0 * x * b_curr - b_next + coeffs[k]
+        b_next = b_curr
+        b_curr = b_new
+        k = k - 1
+    }
+
+    coeffs[0] + x * b_curr - b_next
+}
+
+// ============================================================================
+// BVP CALLBACK FUNCTIONS (must precede test functions that reference them)
+// ============================================================================
+
+// For -u'' = 1: p=0, q=0, f=1
+fn bvp1_p(x: f64) -> f64 with Mut, Div, Panic { 0.0 }
+fn bvp1_q(x: f64) -> f64 with Mut, Div, Panic { 0.0 }
+fn bvp1_f(x: f64) -> f64 with Mut, Div, Panic { 1.0 }
+
+// For -u'' + u = 0: p=0, q=1, f=0
+fn bvp2_p(x: f64) -> f64 with Mut, Div, Panic { 0.0 }
+fn bvp2_q(x: f64) -> f64 with Mut, Div, Panic { 1.0 }
+fn bvp2_f(x: f64) -> f64 with Mut, Div, Panic { 0.0 }
+
+// For eigenvalue problem: V(x) = 0
+fn eigval_V(x: f64) -> f64 with Mut, Div, Panic { 0.0 }
+
+// ============================================================================
+// TEST 1: Chebyshev nodes on [-1,1]
+// x_0 = cos(0) = 1.0, x_n = cos(pi) = -1.0
+// ============================================================================
+
+fn test_cheb_nodes_standard() -> bool with Mut, Div, Panic {
+    let n = 16
+    var x: [f64; 256] = [0.0; 256]
+    cheb_nodes(n, &!x)
+
+    let tol = 1.0e-12
+    if sp_abs(x[0] - 1.0) > tol { return false }
+    if sp_abs(x[n] - (0.0 - 1.0)) > tol { return false }
+
+    // Nodes should be strictly decreasing
+    var i = 0
+    while i < n {
+        if x[i] <= x[i + 1] { return false }
+        i = i + 1
+    }
+
+    // Middle node for even n: x_{n/2} = cos(pi/2) = 0
+    if sp_abs(x[n / 2]) > tol { return false }
+
+    true
+}
+
+// ============================================================================
+// TEST 2: Chebyshev nodes mapped to [0,1]
+// CGL: x_0 = (0+1)/2 + (1-0)/2 * cos(0) = 0.5 + 0.5 = 1.0
+//      x_n = (0+1)/2 + (1-0)/2 * cos(pi) = 0.5 - 0.5 = 0.0
+// ============================================================================
+
+fn test_cheb_nodes_mapped() -> bool with Mut, Div, Panic {
+    let n = 12
+    var x: [f64; 256] = [0.0; 256]
+    cheb_nodes_ab(n, 0.0, 1.0, &!x)
+
+    let tol = 1.0e-12
+    if sp_abs(x[0] - 1.0) > tol { return false }
+    if sp_abs(x[n]) > tol { return false }
+
+    // All nodes should be in [0, 1]
+    var i = 0
+    while i <= n {
+        if x[i] < 0.0 - tol { return false }
+        if x[i] > 1.0 + tol { return false }
+        i = i + 1
+    }
+
+    true
+}
+
+// ============================================================================
+// TEST 3: D applied to [x_0, ..., x_n] should give all 1's
+// The derivative of f(x) = x is f'(x) = 1.
+// ============================================================================
+
+fn test_diffmat_on_x() -> bool with Mut, Div, Panic {
+    let n = 10
+    let np = n + 1
+
+    var x: [f64; 256] = [0.0; 256]
+    cheb_nodes(n, &!x)
+
+    var D: [f64; 4096] = [0.0; 4096]
+    cheb_diffmat(n, &!D)
+
+    // Compute D * x = derivative of f(x) = x at each node
+    let tol = 1.0e-8
+    var i = 0
+    while i <= n {
+        var sum = 0.0
+        var j = 0
+        while j <= n {
+            sum = sum + D[i * np + j] * x[j]
+            j = j + 1
+        }
+        // Should be 1.0 at every node
+        if sp_abs(sum - 1.0) > tol { return false }
+        i = i + 1
+    }
+
+    true
+}
+
+// ============================================================================
+// TEST 4: D applied to x^2 should give 2*x at each node
+// ============================================================================
+
+fn test_diffmat_on_x2() -> bool with Mut, Div, Panic {
+    let n = 12
+    let np = n + 1
+
+    var x: [f64; 256] = [0.0; 256]
+    cheb_nodes(n, &!x)
+
+    var D: [f64; 4096] = [0.0; 4096]
+    cheb_diffmat(n, &!D)
+
+    // Build f_vals = x^2
+    var f_vals: [f64; 256] = [0.0; 256]
+    var j = 0
+    while j <= n { f_vals[j] = x[j] * x[j]; j = j + 1 }
+
+    // Compute D * f_vals and compare to 2*x
+    let tol = 1.0e-7
+    var i = 0
+    while i <= n {
+        var sum = 0.0
+        j = 0
+        while j <= n {
+            sum = sum + D[i * np + j] * f_vals[j]
+            j = j + 1
+        }
+        let expected = 2.0 * x[i]
+        if sp_abs(sum - expected) > tol { return false }
+        i = i + 1
+    }
+
+    true
+}
+
+// ============================================================================
+// TEST 5: D2 on x^2 should give 2 everywhere
+// Second derivative of x^2 is 2.
+// ============================================================================
+
+fn test_d2_on_x2() -> bool with Mut, Div, Panic {
+    let n = 12
+    let np = n + 1
+
+    var x: [f64; 256] = [0.0; 256]
+    cheb_nodes(n, &!x)
+
+    var D2: [f64; 4096] = [0.0; 4096]
+    cheb_diffmat2(n, &!D2)
+
+    // Build f_vals = x^2
+    var f_vals: [f64; 256] = [0.0; 256]
+    var j = 0
+    while j <= n { f_vals[j] = x[j] * x[j]; j = j + 1 }
+
+    // Compute D2 * f_vals and compare to 2.0
+    let tol = 1.0e-6
+    var i = 0
+    while i <= n {
+        var sum = 0.0
+        j = 0
+        while j <= n {
+            sum = sum + D2[i * np + j] * f_vals[j]
+            j = j + 1
+        }
+        if sp_abs(sum - 2.0) > tol { return false }
+        i = i + 1
+    }
+
+    true
+}
+
+// ============================================================================
+// TEST 6: Spectral BVP -u'' = 1, u(0)=0, u(1)=0
+// Exact: u(x) = x(1-x)/2
+// ============================================================================
+
+fn test_bvp_poisson() -> bool with Mut, Div, Panic {
+    let n = 16
+    var u: [f64; 256] = [0.0; 256]
+    spectral_bvp_2nd(n, 0.0, 1.0, bvp1_p, bvp1_q, bvp1_f, 0.0, 0.0, &!u)
+
+    // Get the CGL nodes on [0,1]
+    var x: [f64; 256] = [0.0; 256]
+    cheb_nodes_ab(n, 0.0, 1.0, &!x)
+
+    let tol = 1.0e-6
+    var i = 0
+    while i <= n {
+        let exact = x[i] * (1.0 - x[i]) / 2.0
+        if sp_abs(u[i] - exact) > tol { return false }
+        i = i + 1
+    }
+
+    true
+}
+
+// ============================================================================
+// TEST 7: Spectral BVP -u'' + u = 0, u(0)=0, u(1)=sinh(1)/sinh(1)=1
+// Exact: u(x) = sinh(x)/sinh(1)
+// ============================================================================
+
+fn test_bvp_helmholtz() -> bool with Mut, Div, Panic {
+    let n = 16
+    var u: [f64; 256] = [0.0; 256]
+    // -u'' + u = 0, u(0)=0 (alpha), u(1)=1 (beta)
+    spectral_bvp_2nd(n, 0.0, 1.0, bvp2_p, bvp2_q, bvp2_f, 0.0, 1.0, &!u)
+
+    var x: [f64; 256] = [0.0; 256]
+    cheb_nodes_ab(n, 0.0, 1.0, &!x)
+
+    let sinh1 = sp_sinh(1.0)
+    let tol = 1.0e-6
+    var i = 0
+    while i <= n {
+        let exact = sp_sinh(x[i]) / sinh1
+        if sp_abs(u[i] - exact) > tol { return false }
+        i = i + 1
+    }
+
+    true
+}
+
+// ============================================================================
+// TEST 8: Spectral eigenvalue -u'' on [0, pi], u(0)=u(pi)=0
+// Eigenvalues = n^2: 1, 4, 9, ...
+// ============================================================================
+
+fn test_eigenvalues_laplacian() -> bool with Mut, Div, Panic {
+    let n = 24
+    var eigenvalues: [f64; 256] = [0.0; 256]
+    var n_found: i32 = 0
+
+    spectral_eigval(n, 0.0, sp_pi(), eigval_V, &!eigenvalues, &!n_found)
+
+    if n_found < 3 { return false }
+
+    // Check first 3 eigenvalues: 1, 4, 9
+    let tol = 0.05
+    if sp_abs(eigenvalues[0] - 1.0) > tol { return false }
+    if sp_abs(eigenvalues[1] - 4.0) > tol { return false }
+    if sp_abs(eigenvalues[2] - 9.0) > tol { return false }
+
+    true
+}
+
+// ============================================================================
+// TEST 9: Clenshaw-Curtis integrates f=1 on [-1,1]
+// integral of 1 from -1 to 1 = 2
+// ============================================================================
+
+fn test_cc_integrates_one() -> bool with Mut, Div, Panic {
+    let n = 8
+    var f_vals: [f64; 256] = [0.0; 256]
+    var j = 0
+    while j <= n {
+        f_vals[j] = 1.0
+        j = j + 1
+    }
+
+    let result = cc_integrate(&f_vals, n)
+    let tol = 1.0e-12
+    sp_abs(result - 2.0) < tol
+}
+
+// ============================================================================
+// TEST 10: Clenshaw-Curtis integrates x^2 on [-1,1]
+// integral of x^2 from -1 to 1 = 2/3
+// ============================================================================
+
+fn test_cc_integrates_x2() -> bool with Mut, Div, Panic {
+    let n = 16
+    var x: [f64; 256] = [0.0; 256]
+    cheb_nodes(n, &!x)
+
+    var f_vals: [f64; 256] = [0.0; 256]
+    var j = 0
+    while j <= n {
+        f_vals[j] = x[j] * x[j]
+        j = j + 1
+    }
+
+    let result = cc_integrate(&f_vals, n)
+    let expected = 2.0 / 3.0
+    let tol = 1.0e-10
+    sp_abs(result - expected) < tol
+}
+
+// ============================================================================
+// TEST 11: Chebyshev interpolation of sin(x) on [-1,1]
+// Spectral convergence: with n=16 nodes, error should be tiny.
+// ============================================================================
+
+fn test_cheb_interpolation_sin() -> bool with Mut, Div, Panic {
+    let n = 16
+    var x: [f64; 256] = [0.0; 256]
+    cheb_nodes(n, &!x)
+
+    // Sample sin at CGL nodes
+    var f_vals: [f64; 256] = [0.0; 256]
+    var j = 0
+    while j <= n {
+        f_vals[j] = sp_sin(x[j])
+        j = j + 1
+    }
+
+    // Evaluate interpolant at several test points and compare to sin
+    let tol = 1.0e-6
+    var max_err = 0.0
+
+    // Test points: 0.1, 0.3, -0.5, 0.7, -0.9
+    var test_pt = 0.1
+    var interp = cheb_interpolate(&f_vals, n, test_pt)
+    var exact = sp_sin(test_pt)
+    var err = sp_abs(interp - exact)
+    if err > max_err { max_err = err }
+
+    test_pt = 0.3
+    interp = cheb_interpolate(&f_vals, n, test_pt)
+    exact = sp_sin(test_pt)
+    err = sp_abs(interp - exact)
+    if err > max_err { max_err = err }
+
+    test_pt = 0.0 - 0.5
+    interp = cheb_interpolate(&f_vals, n, test_pt)
+    exact = sp_sin(test_pt)
+    err = sp_abs(interp - exact)
+    if err > max_err { max_err = err }
+
+    test_pt = 0.7
+    interp = cheb_interpolate(&f_vals, n, test_pt)
+    exact = sp_sin(test_pt)
+    err = sp_abs(interp - exact)
+    if err > max_err { max_err = err }
+
+    test_pt = 0.0 - 0.9
+    interp = cheb_interpolate(&f_vals, n, test_pt)
+    exact = sp_sin(test_pt)
+    err = sp_abs(interp - exact)
+    if err > max_err { max_err = err }
+
+    max_err < tol
+}
+
+// ============================================================================
+// TEST 12: Clenshaw recurrence evaluation
+// Compute Chebyshev coefficients of cos(x) on [-1,1], then evaluate at
+// x = 0.5 using Clenshaw and compare to direct cos(0.5).
+// ============================================================================
+
+fn test_clenshaw_recurrence() -> bool with Mut, Div, Panic {
+    let n = 16
+    var x: [f64; 256] = [0.0; 256]
+    cheb_nodes(n, &!x)
+
+    // Sample cos at CGL nodes
+    var f_vals: [f64; 256] = [0.0; 256]
+    var j = 0
+    while j <= n {
+        f_vals[j] = sp_cos(x[j])
+        j = j + 1
+    }
+
+    // Compute Chebyshev coefficients
+    var coeffs: [f64; 256] = [0.0; 256]
+    cheb_coeffs_from_values(&f_vals, n, &!coeffs)
+
+    // Evaluate at x = 0.5 using Clenshaw recurrence
+    let eval_pt = 0.5
+    let clenshaw_val = cheb_eval_from_coeffs(&coeffs, n, eval_pt)
+    let exact = sp_cos(eval_pt)
+
+    let tol = 1.0e-10
+    sp_abs(clenshaw_val - exact) < tol
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    var pass = 0
+    var fail = 0
+
+    println("=== Spectral Methods Tests ===")
+    println("")
+
+    // Test 1
+    print("Test  1: Chebyshev nodes [-1,1] .............. ")
+    if test_cheb_nodes_standard() { println("PASS"); pass = pass + 1 }
+    else { println("FAIL"); fail = fail + 1 }
+
+    // Test 2
+    print("Test  2: Chebyshev nodes mapped [0,1] ........ ")
+    if test_cheb_nodes_mapped() { println("PASS"); pass = pass + 1 }
+    else { println("FAIL"); fail = fail + 1 }
+
+    // Test 3
+    print("Test  3: Diff matrix on x (deriv = 1) ....... ")
+    if test_diffmat_on_x() { println("PASS"); pass = pass + 1 }
+    else { println("FAIL"); fail = fail + 1 }
+
+    // Test 4
+    print("Test  4: Diff matrix on x^2 (deriv = 2x) .... ")
+    if test_diffmat_on_x2() { println("PASS"); pass = pass + 1 }
+    else { println("FAIL"); fail = fail + 1 }
+
+    // Test 5
+    print("Test  5: D2 on x^2 (2nd deriv = 2) .......... ")
+    if test_d2_on_x2() { println("PASS"); pass = pass + 1 }
+    else { println("FAIL"); fail = fail + 1 }
+
+    // Test 6
+    print("Test  6: BVP -u'' = 1, u = x(1-x)/2 ........ ")
+    if test_bvp_poisson() { println("PASS"); pass = pass + 1 }
+    else { println("FAIL"); fail = fail + 1 }
+
+    // Test 7
+    print("Test  7: BVP -u'' + u = 0, sinh solution .... ")
+    if test_bvp_helmholtz() { println("PASS"); pass = pass + 1 }
+    else { println("FAIL"); fail = fail + 1 }
+
+    // Test 8
+    print("Test  8: Eigenvalues -u'' on [0,pi] ......... ")
+    if test_eigenvalues_laplacian() { println("PASS"); pass = pass + 1 }
+    else { println("FAIL"); fail = fail + 1 }
+
+    // Test 9
+    print("Test  9: CC integrates 1 = 2 ................ ")
+    if test_cc_integrates_one() { println("PASS"); pass = pass + 1 }
+    else { println("FAIL"); fail = fail + 1 }
+
+    // Test 10
+    print("Test 10: CC integrates x^2 = 2/3 ............ ")
+    if test_cc_integrates_x2() { println("PASS"); pass = pass + 1 }
+    else { println("FAIL"); fail = fail + 1 }
+
+    // Test 11
+    print("Test 11: Chebyshev interp sin(x) accuracy ... ")
+    if test_cheb_interpolation_sin() { println("PASS"); pass = pass + 1 }
+    else { println("FAIL"); fail = fail + 1 }
+
+    // Test 12
+    print("Test 12: Clenshaw recurrence cos(0.5) ....... ")
+    if test_clenshaw_recurrence() { println("PASS"); pass = pass + 1 }
+    else { println("FAIL"); fail = fail + 1 }
+
+    println("")
+    print("Passed: "); println(pass as string)
+    print("Failed: "); println(fail as string)
+    println("")
+    if fail == 0 {
+        println("ALL 12 TESTS PASSED")
+        return 0
+    } else {
+        println("SOME TESTS FAILED")
+        return 1
+    }
+}

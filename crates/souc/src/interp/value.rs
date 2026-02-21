@@ -331,6 +331,99 @@ impl Value {
             _ => None,
         }
     }
+
+    /// Pretty print complex mathematical structures (tensors, distributions, etc.)
+    pub fn pretty_print(&self) -> String {
+        match self {
+            Value::Tensor { data, shape } => {
+                if shape.is_empty() {
+                    return format!("Scalar({})", data.first().unwrap_or(&0.0));
+                }
+                if shape.len() == 1 {
+                    let max_disp = 10;
+                    let display_len = data.len().min(max_disp);
+                    let mut items: Vec<String> = data[..display_len].iter().map(|v| format!("{:.4}", v)).collect();
+                    if data.len() > max_disp {
+                        items.push("...".to_string());
+                    }
+                    return format!("Tensor[{}]: [{}]", shape[0], items.join(", "));
+                }
+                if shape.len() == 2 {
+                    let rows = shape[0];
+                    let cols = shape[1];
+                    let max_rows = 5;
+                    let max_cols = 5;
+                    let disp_rows = rows.min(max_rows);
+                    let disp_cols = cols.min(max_cols);
+                    
+                    let mut out = format!("Tensor[{}×{}]:\n", rows, cols);
+                    out.push_str("┌ ");
+                    out.push_str(&" ".repeat(disp_cols * 9));
+                    out.push_str(" ┐\n");
+                    
+                    for r in 0..disp_rows {
+                        out.push_str("│ ");
+                        let mut row_items = Vec::new();
+                        for c in 0..disp_cols {
+                            row_items.push(format!("{:>8.4}", data[r * cols + c]));
+                        }
+                        out.push_str(&row_items.join(" "));
+                        if cols > max_cols {
+                            out.push_str(" ... ");
+                        }
+                        out.push_str(" │\n");
+                    }
+                    if rows > max_rows {
+                        out.push_str("│ ");
+                        out.push_str(&"   ...   ".repeat(disp_cols));
+                        out.push_str(" │\n");
+                    }
+                    out.push_str("└ ");
+                    out.push_str(&" ".repeat(disp_cols * 9));
+                    out.push_str(" ┘");
+                    return out;
+                }
+                format!("Tensor{:?} ({} elements)", shape, data.len())
+            }
+            Value::ODESolution { t, y, stats } => {
+                let mut out = format!("ODESolution (steps: {})\n", stats.steps);
+                let display_len = t.len().min(3);
+                out.push_str("Time        Trajectories\n");
+                for i in 0..display_len {
+                    let t_val = t[i];
+                    let vals: Vec<String> = y[i].iter().take(3).map(|v| format!("{:.4}", v)).collect();
+                    let ellipsis = if y[i].len() > 3 { ", ..." } else { "" };
+                    out.push_str(&format!("{:<10.4} [{}{}]\n", t_val, vals.join(", "), ellipsis));
+                }
+                if t.len() > 3 {
+                    out.push_str("...\n");
+                    let last = t.len() - 1;
+                    let t_val = t[last];
+                    let vals: Vec<String> = y[last].iter().take(3).map(|v| format!("{:.4}", v)).collect();
+                    let ellipsis = if y[last].len() > 3 { ", ..." } else { "" };
+                    out.push_str(&format!("{:<10.4} [{}{}]", t_val, vals.join(", "), ellipsis));
+                }
+                out
+            }
+            Value::Distribution(d) => match d {
+                Distribution::Normal { mean, std } => format!("𝒩(μ={:.4}, σ={:.4})", mean, std),
+                Distribution::Uniform { a, b } => format!("𝒰(a={:.4}, b={:.4})", a, b),
+                Distribution::Beta { alpha, beta } => format!("Beta(α={:.4}, β={:.4})", alpha, beta),
+                Distribution::Exponential { lambda } => format!("Exp(λ={:.4})", lambda),
+                Distribution::Categorical { probs } => {
+                    let max_disp = 5;
+                    let display_len = probs.len().min(max_disp);
+                    let mut items: Vec<String> = probs[..display_len].iter().map(|p| format!("{:.4}", p)).collect();
+                    if probs.len() > max_disp {
+                        items.push("...".to_string());
+                    }
+                    format!("Cat([{}])", items.join(", "))
+                }
+            },
+            Value::CausalModel(m) => format!("CausalModel {{ {} }}", m),
+            _ => format!("{}", self)
+        }
+    }
 }
 
 impl fmt::Debug for Value {

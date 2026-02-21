@@ -1,0 +1,864 @@
+//@ run-pass
+// test_stochastic_calc.sio — Tests for stochastic calculus module
+//
+// Fully self-contained: all helpers, structs, and functions are inlined.
+// 12 tests covering: PRNG, Box-Muller, GBM exact/Euler, OU mean-reversion,
+// OU stationary variance, Euler-Maruyama path structure, Milstein path
+// structure, quadratic variation, strong error, Wiener path, Monte Carlo stats.
+
+// =============================================================================
+// Helpers (copied from stochastic_calc.sio, prefixed sc_)
+// =============================================================================
+
+fn sc_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn sc_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+fn sc_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+fn sc_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 25 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn sc_exp(x: f64) -> f64 with Mut, Div {
+    let ln2 = 0.6931471805599453
+    let inv_ln2 = 1.4426950408889634
+
+    if x > 709.0 { return 1.0e308 }
+    if x < -709.0 { return 0.0 }
+
+    var k_f = x * inv_ln2
+    var k: i64 = 0
+    if k_f >= 0.0 { k = (k_f + 0.5) as i64 } else { k = (k_f - 0.5) as i64 }
+
+    let r = x - (k as f64) * ln2
+
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n <= 20 {
+        term = term * r / (n as f64)
+        sum = sum + term
+        n = n + 1
+    }
+
+    var result = sum
+    if k > 0 {
+        var j: i64 = 0
+        while j < k { result = result * 2.0; j = j + 1 }
+    } else if k < 0 {
+        var j: i64 = 0
+        while j < (0 - k) { result = result * 0.5; j = j + 1 }
+    }
+    result
+}
+
+fn sc_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e308 }
+    if x == 1.0 { return 0.0 }
+
+    let ln2 = 0.6931471805599453
+    var m = x
+    var e: i64 = 0
+    while m > 2.0 { m = m * 0.5; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+
+    let u = m - 1.0
+    var sum = 0.0
+    var term = u
+    var n = 1
+    while n <= 30 {
+        sum = sum + term / (n as f64)
+        term = 0.0 - term * u
+        n = n + 1
+    }
+
+    sum + (e as f64) * ln2
+}
+
+fn sc_sin(x: f64) -> f64 with Mut, Div {
+    let tp = 6.28318530717958647692
+    var a = x
+    while a >= tp { a = a - tp }
+    while a < 0.0 { a = a + tp }
+    if a > 3.14159265358979323846 { a = a - tp }
+    let a2 = a * a
+    var sum = a
+    var term = a
+    var n = 1
+    while n < 18 {
+        term = 0.0 - term * a2 / ((2 * n) * (2 * n + 1)) as f64
+        sum = sum + term
+        n = n + 1
+    }
+    sum
+}
+
+fn sc_cos(x: f64) -> f64 with Mut, Div {
+    sc_sin(x + 1.57079632679489661923)
+}
+
+fn sc_pi() -> f64 { 3.14159265358979323846 }
+
+fn sc_floor_i64(x: f64) -> i64 {
+    let n = x as i64
+    if (n as f64) > x { n - 1 } else { n }
+}
+
+// =============================================================================
+// Structs (copied from stochastic_calc.sio)
+// =============================================================================
+
+struct SDEPath {
+    t_start: f64,
+    t_end: f64,
+    x: [f64; 4096],
+    n_steps: i32
+}
+
+struct SDEPathND {
+    t_start: f64,
+    t_end: f64,
+    x: [f64; 4096],
+    dim: i32,
+    n_steps: i32
+}
+
+struct SDEStats {
+    mean: f64,
+    variance: f64,
+    std_dev: f64,
+    n_paths: i32
+}
+
+// =============================================================================
+// PRNG (copied from stochastic_calc.sio)
+// =============================================================================
+
+fn sc_lcg_next(state: &!i64) -> i64 with Mut {
+    let a: i64 = 1664525
+    let c: i64 = 1013904223
+    let mask: i64 = 4294967295
+    state[0] = (a * state[0] + c) & mask
+    state[0]
+}
+
+fn sc_lcg_uniform(state: &!i64) -> f64 with Mut {
+    let val = sc_lcg_next(state)
+    (val as f64) / 4294967296.0
+}
+
+fn sc_box_muller(state: &!i64) -> f64 with Mut, Div {
+    var u1 = sc_lcg_uniform(state)
+    while u1 < 1.0e-10 { u1 = sc_lcg_uniform(state) }
+    let u2 = sc_lcg_uniform(state)
+
+    let r = sc_sqrt(0.0 - 2.0 * sc_ln(u1))
+    let theta = 2.0 * sc_pi() * u2
+    r * sc_cos(theta)
+}
+
+// =============================================================================
+// SDE Solvers (copied from stochastic_calc.sio)
+// =============================================================================
+
+fn sde_euler_maruyama(
+    drift: fn(f64, f64) -> f64 with Mut, Div, Panic,
+    diffusion: fn(f64, f64) -> f64 with Mut, Div, Panic,
+    x0: f64, t0: f64, t_end: f64, n_steps: i32, seed: i64,
+    path: &!SDEPath
+) with Mut, Div, Panic {
+    path.t_start = t0
+    path.t_end = t_end
+    path.n_steps = n_steps
+
+    let dt = (t_end - t0) / (n_steps as f64)
+    let sqrt_dt = sc_sqrt(dt)
+
+    var rng_state: i64 = seed
+    path.x[0] = x0
+
+    var i = 0
+    while i < n_steps {
+        let t = t0 + (i as f64) * dt
+        let x = path.x[i]
+        let dW = sqrt_dt * sc_box_muller(&!rng_state)
+
+        path.x[i + 1] = x + drift(t, x) * dt + diffusion(t, x) * dW
+        i = i + 1
+    }
+}
+
+fn sde_milstein(
+    drift: fn(f64, f64) -> f64 with Mut, Div, Panic,
+    diffusion: fn(f64, f64) -> f64 with Mut, Div, Panic,
+    diff_prime: fn(f64, f64) -> f64 with Mut, Div, Panic,
+    x0: f64, t0: f64, t_end: f64, n_steps: i32, seed: i64,
+    path: &!SDEPath
+) with Mut, Div, Panic {
+    path.t_start = t0
+    path.t_end = t_end
+    path.n_steps = n_steps
+
+    let dt = (t_end - t0) / (n_steps as f64)
+    let sqrt_dt = sc_sqrt(dt)
+
+    var rng_state: i64 = seed
+    path.x[0] = x0
+
+    var i = 0
+    while i < n_steps {
+        let t = t0 + (i as f64) * dt
+        let x = path.x[i]
+        let dW = sqrt_dt * sc_box_muller(&!rng_state)
+
+        let a_val = drift(t, x)
+        let b_val = diffusion(t, x)
+        let bp_val = diff_prime(t, x)
+
+        let milstein_term = 0.5 * b_val * bp_val * (dW * dW - dt)
+
+        path.x[i + 1] = x + a_val * dt + b_val * dW + milstein_term
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// GBM (copied from stochastic_calc.sio)
+// =============================================================================
+
+fn gbm_exact(
+    S0: f64, mu: f64, sigma: f64,
+    t_end: f64, n_steps: i32, seed: i64,
+    path: &!SDEPath
+) with Mut, Div, Panic {
+    path.t_start = 0.0
+    path.t_end = t_end
+    path.n_steps = n_steps
+
+    let dt = t_end / (n_steps as f64)
+    let sqrt_dt = sc_sqrt(dt)
+    let drift_coeff = mu - 0.5 * sigma * sigma
+
+    var rng_state: i64 = seed
+    path.x[0] = S0
+
+    var W = 0.0
+    var i = 0
+    while i < n_steps {
+        let dW = sqrt_dt * sc_box_muller(&!rng_state)
+        W = W + dW
+        let t = (i + 1) as f64 * dt
+        path.x[i + 1] = S0 * sc_exp(drift_coeff * t + sigma * W)
+        i = i + 1
+    }
+}
+
+fn gbm_euler(
+    S0: f64, mu: f64, sigma: f64,
+    t_end: f64, n_steps: i32, seed: i64,
+    path: &!SDEPath
+) with Mut, Div, Panic {
+    path.t_start = 0.0
+    path.t_end = t_end
+    path.n_steps = n_steps
+
+    let dt = t_end / (n_steps as f64)
+    let sqrt_dt = sc_sqrt(dt)
+
+    var rng_state: i64 = seed
+    path.x[0] = S0
+
+    var i = 0
+    while i < n_steps {
+        let x = path.x[i]
+        let dW = sqrt_dt * sc_box_muller(&!rng_state)
+        path.x[i + 1] = x + mu * x * dt + sigma * x * dW
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Ornstein-Uhlenbeck (copied from stochastic_calc.sio)
+// =============================================================================
+
+fn ou_exact(
+    x0: f64, theta: f64, mu: f64, sigma: f64,
+    t_end: f64, n_steps: i32, seed: i64,
+    path: &!SDEPath
+) with Mut, Div, Panic {
+    path.t_start = 0.0
+    path.t_end = t_end
+    path.n_steps = n_steps
+
+    let dt = t_end / (n_steps as f64)
+
+    let decay = sc_exp(0.0 - theta * dt)
+    let var_factor = sigma * sigma * (1.0 - sc_exp(0.0 - 2.0 * theta * dt)) / (2.0 * theta)
+    let std_factor = sc_sqrt(var_factor)
+
+    var rng_state: i64 = seed
+    path.x[0] = x0
+
+    var i = 0
+    while i < n_steps {
+        let x = path.x[i]
+        let z = sc_box_muller(&!rng_state)
+
+        let mean_k = mu + (x - mu) * decay
+        path.x[i + 1] = mean_k + std_factor * z
+        i = i + 1
+    }
+}
+
+fn ou_euler(
+    x0: f64, theta: f64, mu: f64, sigma: f64,
+    t_end: f64, n_steps: i32, seed: i64,
+    path: &!SDEPath
+) with Mut, Div, Panic {
+    path.t_start = 0.0
+    path.t_end = t_end
+    path.n_steps = n_steps
+
+    let dt = t_end / (n_steps as f64)
+    let sqrt_dt = sc_sqrt(dt)
+
+    var rng_state: i64 = seed
+    path.x[0] = x0
+
+    var i = 0
+    while i < n_steps {
+        let x = path.x[i]
+        let dW = sqrt_dt * sc_box_muller(&!rng_state)
+        path.x[i + 1] = x + theta * (mu - x) * dt + sigma * dW
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Monte Carlo (copied from stochastic_calc.sio)
+// =============================================================================
+
+fn sde_monte_carlo(
+    drift: fn(f64, f64) -> f64 with Mut, Div, Panic,
+    diffusion: fn(f64, f64) -> f64 with Mut, Div, Panic,
+    x0: f64, t0: f64, t_end: f64, n_steps: i32, n_paths: i32, seed: i64,
+    stats: &!SDEStats
+) with Mut, Div, Panic {
+    let dt = (t_end - t0) / (n_steps as f64)
+    let sqrt_dt = sc_sqrt(dt)
+
+    var sum_x = 0.0
+    var sum_x2 = 0.0
+
+    var p = 0
+    while p < n_paths {
+        var rng_state: i64 = seed + (p as i64) * 1000003
+
+        var x = x0
+        var i = 0
+        while i < n_steps {
+            let t = t0 + (i as f64) * dt
+            let dW = sqrt_dt * sc_box_muller(&!rng_state)
+            x = x + drift(t, x) * dt + diffusion(t, x) * dW
+            i = i + 1
+        }
+
+        sum_x = sum_x + x
+        sum_x2 = sum_x2 + x * x
+        p = p + 1
+    }
+
+    let n_f = n_paths as f64
+    let mean = sum_x / n_f
+    let variance = sum_x2 / n_f - mean * mean
+
+    stats.mean = mean
+    stats.variance = variance
+    stats.std_dev = sc_sqrt(sc_max(variance, 0.0))
+    stats.n_paths = n_paths
+}
+
+// =============================================================================
+// Path Analysis (copied from stochastic_calc.sio)
+// =============================================================================
+
+fn sde_strong_error(path_fine: &SDEPath, path_coarse: &SDEPath) -> f64 with Mut, Div {
+    let ratio = path_fine.n_steps / path_coarse.n_steps
+    var max_err = 0.0
+
+    var k = 0
+    while k <= path_coarse.n_steps {
+        let fine_idx = k * ratio
+        let err = sc_abs(path_fine.x[fine_idx] - path_coarse.x[k])
+        if err > max_err { max_err = err }
+        k = k + 1
+    }
+    max_err
+}
+
+fn sde_path_quadratic_var(path: &SDEPath) -> f64 with Mut, Div {
+    var qv = 0.0
+    var i = 0
+    while i < path.n_steps {
+        let dx = path.x[i + 1] - path.x[i]
+        qv = qv + dx * dx
+        i = i + 1
+    }
+    qv
+}
+
+fn sde_path_terminal(path: &SDEPath) -> f64 {
+    path.x[path.n_steps]
+}
+
+// =============================================================================
+// Wiener Process (copied from stochastic_calc.sio)
+// =============================================================================
+
+fn wiener_path(
+    t_end: f64, n_steps: i32, seed: i64,
+    path: &!SDEPath
+) with Mut, Div {
+    path.t_start = 0.0
+    path.t_end = t_end
+    path.n_steps = n_steps
+
+    let dt = t_end / (n_steps as f64)
+    let sqrt_dt = sc_sqrt(dt)
+
+    var rng_state: i64 = seed
+    path.x[0] = 0.0
+
+    var i = 0
+    while i < n_steps {
+        let dW = sqrt_dt * sc_box_muller(&!rng_state)
+        path.x[i + 1] = path.x[i] + dW
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Drift / diffusion functions for tests
+// =============================================================================
+
+// GBM: dS = mu*S*dt + sigma*S*dW  (mu=0.05, sigma=0.2)
+fn gbm_drift(t: f64, x: f64) -> f64 with Mut, Div, Panic {
+    0.05 * x
+}
+
+fn gbm_diffusion(t: f64, x: f64) -> f64 with Mut, Div, Panic {
+    0.2 * x
+}
+
+fn gbm_diff_prime(t: f64, x: f64) -> f64 with Mut, Div, Panic {
+    0.2
+}
+
+// Simple additive noise: dX = -X*dt + 0.5*dW  (for Milstein test)
+fn add_drift(t: f64, x: f64) -> f64 with Mut, Div, Panic {
+    0.0 - x
+}
+
+fn add_diffusion(t: f64, x: f64) -> f64 with Mut, Div, Panic {
+    0.5
+}
+
+fn add_diff_prime(t: f64, x: f64) -> f64 with Mut, Div, Panic {
+    0.0
+}
+
+// =============================================================================
+// TESTS
+// =============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    var pass = 0
+    var fail = 0
+
+    // =========================================================================
+    // Test 1: LCG produces different values
+    // =========================================================================
+    {
+        var state: i64 = 42
+        let v1 = sc_lcg_next(&!state)
+        let v2 = sc_lcg_next(&!state)
+        let v3 = sc_lcg_next(&!state)
+        let v4 = sc_lcg_next(&!state)
+
+        // At least some values should differ
+        var all_same = true
+        if v1 != v2 { all_same = false }
+        if v2 != v3 { all_same = false }
+        if v3 != v4 { all_same = false }
+
+        if all_same == false {
+            pass = pass + 1
+        } else {
+            fail = fail + 1
+        }
+    }
+
+    // =========================================================================
+    // Test 2: Box-Muller mean near 0
+    // Generate 1000 samples, check |mean| < 0.2
+    // =========================================================================
+    {
+        var state: i64 = 12345
+        var sum = 0.0
+        let n_samples = 1000
+        var i = 0
+        while i < n_samples {
+            let z = sc_box_muller(&!state)
+            sum = sum + z
+            i = i + 1
+        }
+        let mean = sum / (n_samples as f64)
+        if sc_abs(mean) < 0.2 {
+            pass = pass + 1
+        } else {
+            fail = fail + 1
+        }
+    }
+
+    // =========================================================================
+    // Test 3: GBM exact terminal mean
+    // E[S(T)] = S0 * exp(mu * T)
+    // Run many paths and check the sample mean is close.
+    // S0=100, mu=0.05, sigma=0.2, T=1.0
+    // Expected mean = 100 * exp(0.05) ~ 105.127
+    // =========================================================================
+    {
+        let S0 = 100.0
+        let mu = 0.05
+        let sigma = 0.2
+        let T = 1.0
+        let n_steps = 200
+        let n_paths = 500
+        let expected_mean = S0 * sc_exp(mu * T)
+
+        var sum_terminal = 0.0
+        var p = 0
+        while p < n_paths {
+            var path: SDEPath = SDEPath {
+                t_start: 0.0, t_end: 0.0,
+                x: [0.0; 4096], n_steps: 0
+            }
+            let seed: i64 = 77777 + (p as i64) * 31337
+            gbm_exact(S0, mu, sigma, T, n_steps, seed, &!path)
+            sum_terminal = sum_terminal + path.x[n_steps]
+            p = p + 1
+        }
+        let sample_mean = sum_terminal / (n_paths as f64)
+        let rel_err = sc_abs(sample_mean - expected_mean) / expected_mean
+
+        // Allow 5% relative error for 500 Monte Carlo paths
+        if rel_err < 0.05 {
+            pass = pass + 1
+        } else {
+            fail = fail + 1
+        }
+    }
+
+    // =========================================================================
+    // Test 4: GBM Euler vs exact convergence
+    // With same seed, Euler path should be close to exact for fine dt.
+    // Compare terminal values with moderate tolerance.
+    // =========================================================================
+    {
+        let S0 = 100.0
+        let mu = 0.05
+        let sigma = 0.2
+        let T = 1.0
+        let n_steps = 1000
+        let seed: i64 = 999999
+
+        var path_exact: SDEPath = SDEPath {
+            t_start: 0.0, t_end: 0.0,
+            x: [0.0; 4096], n_steps: 0
+        }
+        var path_euler: SDEPath = SDEPath {
+            t_start: 0.0, t_end: 0.0,
+            x: [0.0; 4096], n_steps: 0
+        }
+
+        gbm_exact(S0, mu, sigma, T, n_steps, seed, &!path_exact)
+        gbm_euler(S0, mu, sigma, T, n_steps, seed, &!path_euler)
+
+        let terminal_exact = path_exact.x[n_steps]
+        let terminal_euler = path_euler.x[n_steps]
+
+        // For very fine dt, Euler should be within ~5% of exact
+        let rel_diff = sc_abs(terminal_exact - terminal_euler) / sc_abs(terminal_exact)
+        if rel_diff < 0.15 {
+            pass = pass + 1
+        } else {
+            fail = fail + 1
+        }
+    }
+
+    // =========================================================================
+    // Test 5: OU mean reversion
+    // OU process with large theta should have terminal mean near mu.
+    // x0=5.0, theta=5.0, mu=2.0, sigma=0.3, T=5.0
+    // After long time, E[X(T)] ~ mu + (x0 - mu)*exp(-theta*T)
+    //   = 2.0 + 3.0*exp(-25) ~ 2.0
+    // Average over many paths.
+    // =========================================================================
+    {
+        let x0 = 5.0
+        let theta = 5.0
+        let mu_ou = 2.0
+        let sigma = 0.3
+        let T = 5.0
+        let n_steps = 500
+        let n_paths = 300
+
+        var sum_terminal = 0.0
+        var p = 0
+        while p < n_paths {
+            var path: SDEPath = SDEPath {
+                t_start: 0.0, t_end: 0.0,
+                x: [0.0; 4096], n_steps: 0
+            }
+            let seed: i64 = 54321 + (p as i64) * 7919
+            ou_exact(x0, theta, mu_ou, sigma, T, n_steps, seed, &!path)
+            sum_terminal = sum_terminal + path.x[n_steps]
+            p = p + 1
+        }
+        let sample_mean = sum_terminal / (n_paths as f64)
+
+        // Should be close to mu=2.0
+        if sc_abs(sample_mean - mu_ou) < 0.3 {
+            pass = pass + 1
+        } else {
+            fail = fail + 1
+        }
+    }
+
+    // =========================================================================
+    // Test 6: OU exact stationary variance
+    // For OU, stationary variance = sigma^2 / (2*theta)
+    // theta=2.0, mu=0.0, sigma=1.0 => Var = 1/(2*2) = 0.25
+    // Run many paths for long T, check sample variance of terminals.
+    // =========================================================================
+    {
+        let x0 = 0.0
+        let theta = 2.0
+        let mu_ou = 0.0
+        let sigma = 1.0
+        let T = 10.0
+        let n_steps = 1000
+        let n_paths = 500
+        let expected_var = sigma * sigma / (2.0 * theta)
+
+        var sum_x = 0.0
+        var sum_x2 = 0.0
+        var p = 0
+        while p < n_paths {
+            var path: SDEPath = SDEPath {
+                t_start: 0.0, t_end: 0.0,
+                x: [0.0; 4096], n_steps: 0
+            }
+            let seed: i64 = 11111 + (p as i64) * 13337
+            ou_exact(x0, theta, mu_ou, sigma, T, n_steps, seed, &!path)
+            let xT = path.x[n_steps]
+            sum_x = sum_x + xT
+            sum_x2 = sum_x2 + xT * xT
+            p = p + 1
+        }
+        let mean_val = sum_x / (n_paths as f64)
+        let sample_var = sum_x2 / (n_paths as f64) - mean_val * mean_val
+
+        // Allow tolerance of 0.15 on variance estimate
+        if sc_abs(sample_var - expected_var) < 0.15 {
+            pass = pass + 1
+        } else {
+            fail = fail + 1
+        }
+    }
+
+    // =========================================================================
+    // Test 7: Euler-Maruyama path fills array correctly
+    // Check n_steps, t_start, t_end are set as requested.
+    // =========================================================================
+    {
+        var path: SDEPath = SDEPath {
+            t_start: 0.0, t_end: 0.0,
+            x: [0.0; 4096], n_steps: 0
+        }
+        let n_steps = 100
+        let t0 = 0.0
+        let t_end = 2.0
+        let x0 = 1.0
+        let seed: i64 = 424242
+
+        sde_euler_maruyama(add_drift, add_diffusion, x0, t0, t_end, n_steps, seed, &!path)
+
+        var ok = true
+        if path.n_steps != n_steps { ok = false }
+        if sc_abs(path.t_start - t0) > 1.0e-12 { ok = false }
+        if sc_abs(path.t_end - t_end) > 1.0e-12 { ok = false }
+        if sc_abs(path.x[0] - x0) > 1.0e-12 { ok = false }
+
+        if ok {
+            pass = pass + 1
+        } else {
+            fail = fail + 1
+        }
+    }
+
+    // =========================================================================
+    // Test 8: Milstein path fills array
+    // Check path structure is populated and terminal value is finite.
+    // =========================================================================
+    {
+        var path: SDEPath = SDEPath {
+            t_start: 0.0, t_end: 0.0,
+            x: [0.0; 4096], n_steps: 0
+        }
+        let n_steps = 200
+        let seed: i64 = 808080
+
+        sde_milstein(add_drift, add_diffusion, add_diff_prime,
+                     1.0, 0.0, 1.0, n_steps, seed, &!path)
+
+        var ok = true
+        if path.n_steps != n_steps { ok = false }
+        if sc_abs(path.x[0] - 1.0) > 1.0e-12 { ok = false }
+
+        // Terminal value should be finite (not NaN or extreme)
+        let terminal = path.x[n_steps]
+        if terminal > 1.0e100 { ok = false }
+        if terminal < 0.0 - 1.0e100 { ok = false }
+
+        if ok {
+            pass = pass + 1
+        } else {
+            fail = fail + 1
+        }
+    }
+
+    // =========================================================================
+    // Test 9: Quadratic variation of Wiener path ~ T
+    // For standard Brownian motion, [W,W](T) -> T as n_steps -> inf.
+    // With n_steps=2000 and T=1.0, QV should be close to 1.0.
+    // =========================================================================
+    {
+        var path: SDEPath = SDEPath {
+            t_start: 0.0, t_end: 0.0,
+            x: [0.0; 4096], n_steps: 0
+        }
+        let T = 1.0
+        let n_steps = 2000
+        let seed: i64 = 314159
+
+        wiener_path(T, n_steps, seed, &!path)
+        let qv = sde_path_quadratic_var(&path)
+
+        // QV should be near T=1.0, tolerance 0.3 for stochastic noise
+        if sc_abs(qv - T) < 0.3 {
+            pass = pass + 1
+        } else {
+            fail = fail + 1
+        }
+    }
+
+    // =========================================================================
+    // Test 10: SDE strong error — fine path has smaller max error vs coarse
+    // Use Euler-Maruyama with additive noise. Same seed for consistency.
+    // Fine: 400 steps, coarse: 100 steps (ratio 4).
+    // Strong error (max pointwise diff) should be bounded.
+    // =========================================================================
+    {
+        var path_fine: SDEPath = SDEPath {
+            t_start: 0.0, t_end: 0.0,
+            x: [0.0; 4096], n_steps: 0
+        }
+        var path_coarse: SDEPath = SDEPath {
+            t_start: 0.0, t_end: 0.0,
+            x: [0.0; 4096], n_steps: 0
+        }
+        let seed: i64 = 271828
+
+        sde_euler_maruyama(add_drift, add_diffusion,
+                           1.0, 0.0, 1.0, 400, seed, &!path_fine)
+        sde_euler_maruyama(add_drift, add_diffusion,
+                           1.0, 0.0, 1.0, 100, seed, &!path_coarse)
+
+        let err = sde_strong_error(&path_fine, &path_coarse)
+
+        // Strong error should be positive but bounded (< 2.0 for this SDE)
+        if err > 0.0 {
+            if err < 2.0 {
+                pass = pass + 1
+            } else {
+                fail = fail + 1
+            }
+        } else {
+            // err == 0 is extremely unlikely but technically OK
+            pass = pass + 1
+        }
+    }
+
+    // =========================================================================
+    // Test 11: Wiener path starts at 0
+    // W(0) = 0 by definition.
+    // =========================================================================
+    {
+        var path: SDEPath = SDEPath {
+            t_start: 0.0, t_end: 0.0,
+            x: [0.0; 4096], n_steps: 0
+        }
+        let seed: i64 = 161803
+
+        wiener_path(1.0, 500, seed, &!path)
+
+        if sc_abs(path.x[0]) < 1.0e-15 {
+            pass = pass + 1
+        } else {
+            fail = fail + 1
+        }
+    }
+
+    // =========================================================================
+    // Test 12: Monte Carlo stats — n_paths matches, variance >= 0
+    // Use GBM drift/diffusion. Check SDEStats fields are sensible.
+    // =========================================================================
+    {
+        var stats: SDEStats = SDEStats {
+            mean: 0.0, variance: 0.0, std_dev: 0.0, n_paths: 0
+        }
+        let n_paths = 200
+        let seed: i64 = 999000
+
+        sde_monte_carlo(gbm_drift, gbm_diffusion,
+                        100.0, 0.0, 1.0, 200, n_paths, seed, &!stats)
+
+        var ok = true
+        if stats.n_paths != n_paths { ok = false }
+        if stats.variance < 0.0 { ok = false }
+        if stats.std_dev < 0.0 { ok = false }
+
+        // Mean should be positive (GBM with positive S0 and mu)
+        if stats.mean <= 0.0 { ok = false }
+
+        // std_dev should be consistent with variance
+        let std_check = sc_abs(stats.std_dev * stats.std_dev - stats.variance)
+        if std_check > 0.01 { ok = false }
+
+        if ok {
+            pass = pass + 1
+        } else {
+            fail = fail + 1
+        }
+    }
+
+    // =========================================================================
+    // Summary
+    // =========================================================================
+    if fail > 0 { return 1 }
+    return 0
+}

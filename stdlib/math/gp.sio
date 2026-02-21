@@ -1,0 +1,1089 @@
+// stdlib/math/gp.sio — Gaussian process regression
+//
+// Pure Sounio implementations:
+//   Kernel functions (RBF, Matern-3/2, Matern-5/2, periodic, rational quadratic)
+//   Kernel matrix assembly with noise
+//   Cholesky factorization and triangular solves
+//   GP training (compute L, alpha = K^{-1}y)
+//   GP prediction with posterior mean and variance
+//   Log marginal likelihood
+//   Hyperparameter optimization via Nelder-Mead
+//   GP sampling from prior and posterior
+//
+// References:
+//   Rasmussen & Williams (2006): "Gaussian Processes for Machine Learning"
+//   Quinonero-Candela & Rasmussen (2005): "A Unifying View of Sparse GP Approximations"
+//   Bishop (2006): "Pattern Recognition and Machine Learning" Ch. 6
+
+// =============================================================================
+// Helpers (all prefixed gp_h_ to avoid name collisions)
+// =============================================================================
+
+fn gp_h_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn gp_h_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+fn gp_h_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+fn gp_h_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 25 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn gp_h_exp(x: f64) -> f64 with Mut, Div {
+    // Range reduction: exp(x) = 2^k * exp(r) where x = k*ln2 + r
+    let ln2 = 0.6931471805599453
+    let inv_ln2 = 1.4426950408889634
+
+    if x > 709.0 { return 1.0e308 }
+    if x < -709.0 { return 0.0 }
+
+    var k_f = x * inv_ln2
+    var k: i64 = 0
+    if k_f >= 0.0 { k = (k_f + 0.5) as i64 } else { k = (k_f - 0.5) as i64 }
+
+    let r = x - (k as f64) * ln2
+
+    // Taylor series for exp(r), |r| <= ln2/2
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n <= 20 {
+        term = term * r / (n as f64)
+        sum = sum + term
+        n = n + 1
+    }
+
+    // Multiply by 2^k via repeated squaring
+    var result = sum
+    var kabs = k
+    if kabs < 0 { kabs = 0 - kabs }
+    var pow2 = 2.0
+    var ka = kabs
+    var acc = 1.0
+    while ka > 0 {
+        if ka - (ka / 2) * 2 != 0 { acc = acc * pow2 }
+        pow2 = pow2 * pow2
+        ka = ka / 2
+    }
+    if k >= 0 { result = result * acc } else { result = result / acc }
+    result
+}
+
+fn gp_h_ln(x: f64) -> f64 with Mut, Div {
+    // Natural logarithm via Halley iteration: converges cubically
+    if x <= 0.0 { return -1.0e30 }
+    if x == 1.0 { return 0.0 }
+
+    // Initial guess via range reduction
+    var y = 0.0
+    var a = x
+    let ln2 = 0.6931471805599453
+    while a > 2.0 { a = a * 0.5; y = y + ln2 }
+    while a < 0.5 { a = a * 2.0; y = y - ln2 }
+
+    // Now a is in [0.5, 2.0], compute ln(a) via series around 1
+    let t = (a - 1.0) / (a + 1.0)
+    let t2 = t * t
+    var sum = t
+    var power = t
+    var n = 1
+    while n <= 30 {
+        power = power * t2
+        sum = sum + power / (2.0 * (n as f64) + 1.0)
+        n = n + 1
+    }
+    y + 2.0 * sum
+}
+
+fn gp_h_sin(x: f64) -> f64 with Mut, Div {
+    var a = x
+    let tp = 6.28318530717958647692
+    while a >= tp { a = a - tp }
+    while a < 0.0 { a = a + tp }
+    if a > 3.14159265358979323846 { a = a - tp }
+    let a2 = a * a
+    var sum = a
+    var term = a
+    var n = 1
+    while n < 18 {
+        term = 0.0 - term * a2 / ((2 * n) * (2 * n + 1)) as f64
+        sum = sum + term
+        n = n + 1
+    }
+    sum
+}
+
+fn gp_h_cos(x: f64) -> f64 with Mut, Div {
+    gp_h_sin(x + 1.57079632679489661923)
+}
+
+fn gp_h_pi() -> f64 { 3.14159265358979323846 }
+
+// =============================================================================
+// Inlined PRNG (for sampling)
+// =============================================================================
+
+// Linear congruential generator: x_{n+1} = (a*x_n + c) mod m
+// Using Knuth's MMIX constants
+fn gp_lcg_next(state: &!i64) -> i64 with Mut {
+    let a: i64 = 6364136223846793005
+    let c: i64 = 1442695040888963407
+    state[0] = state[0] * a + c
+    state[0]
+}
+
+// Uniform on [0, 1)
+fn gp_lcg_uniform(state: &!i64) -> f64 with Mut {
+    let raw = gp_lcg_next(state)
+    var bits = raw
+    if bits < 0 { bits = 0 - bits }
+    // Map to [0, 1)
+    let denom = 9223372036854775807.0  // 2^63 - 1
+    (bits as f64) / denom
+}
+
+// Box-Muller transform: generate one standard normal variate
+fn gp_box_muller(state: &!i64) -> f64 with Mut, Div {
+    var u1 = gp_lcg_uniform(state)
+    if u1 < 1.0e-30 { u1 = 1.0e-30 }
+    let u2 = gp_lcg_uniform(state)
+    let r = gp_h_sqrt(0.0 - 2.0 * gp_h_ln(u1))
+    r * gp_h_cos(2.0 * gp_h_pi() * u2)
+}
+
+// =============================================================================
+// Structs
+// =============================================================================
+
+struct GPData {
+    x_train: [f64; 128],
+    y_train: [f64; 128],
+    n_train: i32,
+    noise_var: f64
+}
+
+struct GPHyper {
+    signal_var: f64,
+    length_scale: f64,
+    noise_var: f64,
+    kernel_type: i32,
+    extra_param: f64
+}
+
+struct GPModel {
+    L: [f64; 4096],
+    alpha: [f64; 128],
+    x_train: [f64; 128],
+    y_train: [f64; 128],
+    n_train: i32,
+    hyper: GPHyper,
+    log_ml: f64
+}
+
+struct GPPrediction {
+    mean: f64,
+    variance: f64,
+    std_dev: f64
+}
+
+struct GPBatchPred {
+    means: [f64; 256],
+    variances: [f64; 256],
+    n_pred: i32
+}
+
+// =============================================================================
+// Kernel functions
+// =============================================================================
+
+// RBF (squared exponential) kernel:
+//   k(x,y) = signal_var * exp(-0.5 * (x-y)^2 / length_scale^2)
+fn kernel_rbf(x: f64, y: f64, hyper: &GPHyper) -> f64 with Mut, Div {
+    let d = x - y
+    let l = hyper.length_scale
+    hyper.signal_var * gp_h_exp(0.0 - 0.5 * d * d / (l * l))
+}
+
+// Matern 3/2 kernel:
+//   k(x,y) = signal_var * (1 + sqrt(3)*r/l) * exp(-sqrt(3)*r/l)
+//   where r = |x - y|
+fn kernel_matern32(x: f64, y: f64, hyper: &GPHyper) -> f64 with Mut, Div {
+    let r = gp_h_abs(x - y)
+    let l = hyper.length_scale
+    let sqrt3 = 1.7320508075688772
+    let z = sqrt3 * r / l
+    hyper.signal_var * (1.0 + z) * gp_h_exp(0.0 - z)
+}
+
+// Matern 5/2 kernel:
+//   k(x,y) = signal_var * (1 + sqrt(5)*r/l + 5*r^2/(3*l^2)) * exp(-sqrt(5)*r/l)
+fn kernel_matern52(x: f64, y: f64, hyper: &GPHyper) -> f64 with Mut, Div {
+    let r = gp_h_abs(x - y)
+    let l = hyper.length_scale
+    let sqrt5 = 2.2360679774997896
+    let z = sqrt5 * r / l
+    let z2 = 5.0 * r * r / (3.0 * l * l)
+    hyper.signal_var * (1.0 + z + z2) * gp_h_exp(0.0 - z)
+}
+
+// Periodic kernel:
+//   k(x,y) = signal_var * exp(-2 * sin^2(pi*|x-y|/p) / l^2)
+//   where p = extra_param (period)
+fn kernel_periodic(x: f64, y: f64, hyper: &GPHyper) -> f64 with Mut, Div {
+    let r = gp_h_abs(x - y)
+    let l = hyper.length_scale
+    let p = hyper.extra_param
+    let s = gp_h_sin(gp_h_pi() * r / p)
+    hyper.signal_var * gp_h_exp(0.0 - 2.0 * s * s / (l * l))
+}
+
+// Rational quadratic kernel:
+//   k(x,y) = signal_var * (1 + r^2 / (2*alpha*l^2))^{-alpha}
+//   where alpha = extra_param, r = |x - y|
+fn kernel_rq(x: f64, y: f64, hyper: &GPHyper) -> f64 with Mut, Div {
+    let d = x - y
+    let l = hyper.length_scale
+    let alpha = hyper.extra_param
+    let base = 1.0 + d * d / (2.0 * alpha * l * l)
+    // base^{-alpha} = exp(-alpha * ln(base))
+    hyper.signal_var * gp_h_exp(0.0 - alpha * gp_h_ln(base))
+}
+
+// Kernel dispatch: evaluate kernel based on kernel_type field
+//   0 = RBF, 1 = Matern 3/2, 2 = Matern 5/2, 3 = periodic, 4 = rational quadratic
+fn kernel_eval(x: f64, y: f64, hyper: &GPHyper) -> f64 with Mut, Div {
+    if hyper.kernel_type == 0 { return kernel_rbf(x, y, hyper) }
+    if hyper.kernel_type == 1 { return kernel_matern32(x, y, hyper) }
+    if hyper.kernel_type == 2 { return kernel_matern52(x, y, hyper) }
+    if hyper.kernel_type == 3 { return kernel_periodic(x, y, hyper) }
+    if hyper.kernel_type == 4 { return kernel_rq(x, y, hyper) }
+    // Default to RBF
+    kernel_rbf(x, y, hyper)
+}
+
+// =============================================================================
+// Kernel matrix assembly
+// =============================================================================
+
+// Build the n x n kernel matrix K where K_ij = k(x_i, x_j) + delta_ij * noise_var.
+// K is stored row-major in a flat [f64; 4096] (supports up to n=64).
+fn gp_kernel_matrix(data: &GPData, hyper: &GPHyper, K: &![f64; 4096]) with Mut, Div {
+    let n = data.n_train
+    var i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            let kval = kernel_eval(data.x_train[i], data.x_train[j], hyper)
+            if i == j {
+                K[i * n + j] = kval + hyper.noise_var
+            } else {
+                K[i * n + j] = kval
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Cholesky factorization
+// =============================================================================
+
+// Cholesky factorization: L * L^T = K.
+// K is n x n symmetric positive definite, stored row-major in flat array.
+// L is output lower triangular, also stored row-major.
+// Returns true if successful, false if K is not positive definite.
+// Standard column-by-column algorithm (Golub & Van Loan).
+fn gp_cholesky(K: &[f64; 4096], n: i32, L: &![f64; 4096]) -> bool with Mut, Div {
+    // Zero out L
+    var idx = 0
+    while idx < n * n { L[idx] = 0.0; idx = idx + 1 }
+
+    var j = 0
+    while j < n {
+        // Compute L[j][j] = sqrt(K[j][j] - sum_{k=0}^{j-1} L[j][k]^2)
+        var sum_diag = 0.0
+        var k = 0
+        while k < j {
+            let ljk = L[j * n + k]
+            sum_diag = sum_diag + ljk * ljk
+            k = k + 1
+        }
+        let diag_val = K[j * n + j] - sum_diag
+        if diag_val <= 0.0 { return false }  // Not positive definite
+        L[j * n + j] = gp_h_sqrt(diag_val)
+
+        // Compute L[i][j] for i > j:
+        //   L[i][j] = (K[i][j] - sum_{k=0}^{j-1} L[i][k]*L[j][k]) / L[j][j]
+        var i = j + 1
+        while i < n {
+            var sum_off = 0.0
+            k = 0
+            while k < j {
+                sum_off = sum_off + L[i * n + k] * L[j * n + k]
+                k = k + 1
+            }
+            L[i * n + j] = (K[i * n + j] - sum_off) / L[j * n + j]
+            i = i + 1
+        }
+        j = j + 1
+    }
+    true
+}
+
+// Solve L * L^T * x = b given the Cholesky factor L.
+// Two-step: forward substitution (L * z = b), then back substitution (L^T * x = z).
+fn gp_cholesky_solve(L: &[f64; 4096], b: &[f64; 128], n: i32, x: &![f64; 128]) with Mut, Div {
+    // Forward substitution: L * z = b
+    var z: [f64; 128] = [0.0; 128]
+    var i = 0
+    while i < n {
+        var sum = 0.0
+        var j = 0
+        while j < i {
+            sum = sum + L[i * n + j] * z[j]
+            j = j + 1
+        }
+        z[i] = (b[i] - sum) / L[i * n + i]
+        i = i + 1
+    }
+
+    // Back substitution: L^T * x = z
+    i = n - 1
+    while i >= 0 {
+        var sum = 0.0
+        var j = i + 1
+        while j < n {
+            sum = sum + L[j * n + i] * x[j]  // L^T[i][j] = L[j][i]
+            j = j + 1
+        }
+        x[i] = (z[i] - sum) / L[i * n + i]
+        i = i - 1
+    }
+}
+
+// Forward substitution only: solve L * v = b.
+// Used for computing predictive variance.
+fn gp_forward_solve(L: &[f64; 4096], b: &[f64; 128], n: i32, v: &![f64; 128]) with Mut, Div {
+    var i = 0
+    while i < n {
+        var sum = 0.0
+        var j = 0
+        while j < i {
+            sum = sum + L[i * n + j] * v[j]
+            j = j + 1
+        }
+        v[i] = (b[i] - sum) / L[i * n + i]
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// GP training
+// =============================================================================
+
+// Train a Gaussian process model: build kernel matrix, factorize, compute alpha.
+//
+// Given training data (x, y) and hyperparameters, computes:
+//   - L: Cholesky factor of K + sigma_n^2 * I
+//   - alpha = K^{-1} * y (via Cholesky solve)
+//   - log marginal likelihood: -0.5*y^T*alpha - sum(log(L_ii)) - n/2*log(2*pi)
+//
+// Returns true on success (K was positive definite), false on failure.
+fn gp_train(data: &GPData, hyper: &GPHyper, model: &!GPModel) -> bool with Mut, Div, Panic {
+    let n = data.n_train
+
+    // Copy training data into model
+    var i = 0
+    while i < n {
+        model.x_train[i] = data.x_train[i]
+        model.y_train[i] = data.y_train[i]
+        i = i + 1
+    }
+    model.n_train = n
+    model.hyper.signal_var = hyper.signal_var
+    model.hyper.length_scale = hyper.length_scale
+    model.hyper.noise_var = hyper.noise_var
+    model.hyper.kernel_type = hyper.kernel_type
+    model.hyper.extra_param = hyper.extra_param
+
+    // Build kernel matrix
+    var K: [f64; 4096] = [0.0; 4096]
+    i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            let kval = kernel_eval(data.x_train[i], data.x_train[j], hyper)
+            if i == j {
+                K[i * n + j] = kval + hyper.noise_var
+            } else {
+                K[i * n + j] = kval
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Cholesky factorization: L * L^T = K
+    let ok = gp_cholesky(&K, n, &!model.L)
+    if !ok { return false }
+
+    // Compute alpha = K^{-1} * y via Cholesky solve
+    gp_cholesky_solve(&model.L, &data.y_train, n, &!model.alpha)
+
+    // Compute log marginal likelihood
+    //   log p(y|X,theta) = -0.5 * y^T * alpha - sum(log(L_ii)) - n/2 * log(2*pi)
+    var data_fit = 0.0
+    i = 0
+    while i < n {
+        data_fit = data_fit + data.y_train[i] * model.alpha[i]
+        i = i + 1
+    }
+    data_fit = 0.0 - 0.5 * data_fit
+
+    var complexity = 0.0
+    i = 0
+    while i < n {
+        complexity = complexity + gp_h_ln(model.L[i * n + i])
+        i = i + 1
+    }
+    complexity = 0.0 - complexity
+
+    let norm_const = 0.0 - 0.5 * (n as f64) * gp_h_ln(2.0 * gp_h_pi())
+
+    model.log_ml = data_fit + complexity + norm_const
+    true
+}
+
+// =============================================================================
+// GP prediction
+// =============================================================================
+
+// Predict at a single test point x_star.
+//
+// Computes posterior mean and variance:
+//   k_star = [k(x_star, x_1), ..., k(x_star, x_n)]
+//   mean = k_star^T * alpha
+//   v = L \ k_star  (forward substitution)
+//   variance = k(x_star, x_star) - v^T * v
+//   std_dev = sqrt(variance)
+fn gp_predict(model: &GPModel, x_star: f64, pred: &!GPPrediction) with Mut, Div, Panic {
+    let n = model.n_train
+
+    // Compute k_star vector
+    var k_star: [f64; 128] = [0.0; 128]
+    var i = 0
+    while i < n {
+        k_star[i] = kernel_eval(x_star, model.x_train[i], &model.hyper)
+        i = i + 1
+    }
+
+    // Posterior mean: mean = k_star^T * alpha
+    var mean = 0.0
+    i = 0
+    while i < n {
+        mean = mean + k_star[i] * model.alpha[i]
+        i = i + 1
+    }
+    pred.mean = mean
+
+    // Solve L * v = k_star (forward substitution)
+    var v: [f64; 128] = [0.0; 128]
+    gp_forward_solve(&model.L, &k_star, n, &!v)
+
+    // Posterior variance: k(x_star, x_star) - v^T * v
+    let k_ss = kernel_eval(x_star, x_star, &model.hyper)
+    var v_dot_v = 0.0
+    i = 0
+    while i < n {
+        v_dot_v = v_dot_v + v[i] * v[i]
+        i = i + 1
+    }
+    var variance = k_ss - v_dot_v
+    // Clamp to non-negative (numerical safety)
+    if variance < 0.0 { variance = 0.0 }
+    pred.variance = variance
+    pred.std_dev = gp_h_sqrt(variance)
+}
+
+// Predict at multiple test points.
+fn gp_predict_batch(model: &GPModel, x_stars: &[f64; 256], n_pred: i32,
+                    batch: &!GPBatchPred) with Mut, Div, Panic {
+    batch.n_pred = n_pred
+    var pred: GPPrediction = GPPrediction { mean: 0.0, variance: 0.0, std_dev: 0.0 }
+    var i = 0
+    while i < n_pred {
+        gp_predict(model, x_stars[i], &!pred)
+        batch.means[i] = pred.mean
+        batch.variances[i] = pred.variance
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Log marginal likelihood
+// =============================================================================
+
+// Return the stored log marginal likelihood from a trained model.
+fn gp_log_marginal(model: &GPModel) -> f64 {
+    model.log_ml
+}
+
+// Compute log marginal likelihood for given hyperparameters without storing model.
+// Useful as objective function for hyperparameter optimization.
+fn gp_log_ml_at_hyper(data: &GPData, hyper: &GPHyper) -> f64 with Mut, Div, Panic {
+    let n = data.n_train
+
+    // Build kernel matrix
+    var K: [f64; 4096] = [0.0; 4096]
+    var i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            let kval = kernel_eval(data.x_train[i], data.x_train[j], hyper)
+            if i == j {
+                K[i * n + j] = kval + hyper.noise_var
+            } else {
+                K[i * n + j] = kval
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Cholesky factorization
+    var L: [f64; 4096] = [0.0; 4096]
+    let ok = gp_cholesky(&K, n, &!L)
+    if !ok {
+        // Not positive definite: return very negative log ML
+        return -1.0e30
+    }
+
+    // Solve for alpha = K^{-1} * y
+    var alpha: [f64; 128] = [0.0; 128]
+    gp_cholesky_solve(&L, &data.y_train, n, &!alpha)
+
+    // Data fit term: -0.5 * y^T * alpha
+    var data_fit = 0.0
+    i = 0
+    while i < n {
+        data_fit = data_fit + data.y_train[i] * alpha[i]
+        i = i + 1
+    }
+    data_fit = 0.0 - 0.5 * data_fit
+
+    // Complexity term: -sum(log(L_ii))
+    var complexity = 0.0
+    i = 0
+    while i < n {
+        complexity = complexity + gp_h_ln(L[i * n + i])
+        i = i + 1
+    }
+    complexity = 0.0 - complexity
+
+    // Normalization: -n/2 * log(2*pi)
+    let norm_const = 0.0 - 0.5 * (n as f64) * gp_h_ln(2.0 * gp_h_pi())
+
+    data_fit + complexity + norm_const
+}
+
+// =============================================================================
+// Hyperparameter optimization via Nelder-Mead
+// =============================================================================
+
+// Negative log marginal likelihood as a function of log-space hyperparameters.
+// theta = [log(signal_var), log(length_scale), log(noise_var)]
+// Working in log-space ensures all hyperparameters remain positive.
+fn gp_neg_lml_objective(data: &GPData, theta: &[f64; 3], kernel_type: i32,
+                        extra_param: f64) -> f64 with Mut, Div, Panic {
+    var hyper: GPHyper = GPHyper {
+        signal_var: gp_h_exp(theta[0]),
+        length_scale: gp_h_exp(theta[1]),
+        noise_var: gp_h_exp(theta[2]),
+        kernel_type: kernel_type,
+        extra_param: extra_param
+    }
+    0.0 - gp_log_ml_at_hyper(data, &hyper)
+}
+
+// Nelder-Mead simplex optimization for GP hyperparameters.
+//
+// Optimizes signal_var, length_scale, and noise_var in log-space.
+// The simplex has 4 vertices (dim+1) in 3D space.
+//
+// Algorithm: reflection, expansion, contraction, shrink
+// (Nelder & Mead, 1965; as described in Nocedal & Wright, Ch. 9)
+fn gp_optimize_hyper(data: &GPData, hyper_init: &GPHyper, max_iter: i32,
+                     hyper_opt: &!GPHyper) with Mut, Div, Panic {
+    let dim = 3
+    let n_verts = 4  // dim + 1
+
+    // Nelder-Mead parameters
+    let alpha_nm = 1.0   // reflection
+    let gamma_nm = 2.0   // expansion
+    let rho_nm = 0.5     // contraction
+    let sigma_nm = 0.5   // shrink
+
+    // Initialize simplex vertices in log-space
+    // Vertices stored row-major: simplex[v * dim + d]
+    var simplex: [f64; 12] = [0.0; 12]  // 4 vertices x 3 dimensions
+    var f_vals: [f64; 4] = [0.0; 4]
+
+    // First vertex: initial hyperparameters
+    simplex[0] = gp_h_ln(hyper_init.signal_var)
+    simplex[1] = gp_h_ln(hyper_init.length_scale)
+    simplex[2] = gp_h_ln(hyper_init.noise_var)
+
+    // Other vertices: perturb each dimension by a step
+    let step = 0.5
+    var v = 1
+    while v < n_verts {
+        var d = 0
+        while d < dim {
+            simplex[v * dim + d] = simplex[d]  // copy from vertex 0
+            d = d + 1
+        }
+        // Perturb dimension (v-1)
+        simplex[v * dim + (v - 1)] = simplex[v - 1] + step
+        v = v + 1
+    }
+
+    // Evaluate objective at all vertices
+    v = 0
+    while v < n_verts {
+        var theta: [f64; 3] = [0.0; 3]
+        theta[0] = simplex[v * dim + 0]
+        theta[1] = simplex[v * dim + 1]
+        theta[2] = simplex[v * dim + 2]
+        f_vals[v] = gp_neg_lml_objective(data, &theta, hyper_init.kernel_type,
+                                         hyper_init.extra_param)
+        v = v + 1
+    }
+
+    // Main optimization loop
+    var iter = 0
+    while iter < max_iter {
+        // Find best, worst, second worst
+        var i_best = 0
+        var i_worst = 0
+        var i_second = 0
+        var v2 = 1
+        while v2 < n_verts {
+            if f_vals[v2] < f_vals[i_best] { i_best = v2 }
+            if f_vals[v2] > f_vals[i_worst] { i_worst = v2 }
+            v2 = v2 + 1
+        }
+        // Find second worst
+        i_second = i_best
+        v2 = 0
+        while v2 < n_verts {
+            if v2 != i_worst {
+                if f_vals[v2] > f_vals[i_second] { i_second = v2 }
+            }
+            v2 = v2 + 1
+        }
+
+        // Convergence check: range of function values
+        let f_range = gp_h_abs(f_vals[i_worst] - f_vals[i_best])
+        if f_range < 1.0e-8 { iter = max_iter }  // break
+
+        // Compute centroid of all vertices except worst
+        var centroid: [f64; 3] = [0.0; 3]
+        v2 = 0
+        while v2 < n_verts {
+            if v2 != i_worst {
+                var d = 0
+                while d < dim {
+                    centroid[d] = centroid[d] + simplex[v2 * dim + d]
+                    d = d + 1
+                }
+            }
+            v2 = v2 + 1
+        }
+        var d = 0
+        while d < dim {
+            centroid[d] = centroid[d] / ((n_verts - 1) as f64)
+            d = d + 1
+        }
+
+        // Reflection: x_r = centroid + alpha*(centroid - x_worst)
+        var x_r: [f64; 3] = [0.0; 3]
+        d = 0
+        while d < dim {
+            x_r[d] = centroid[d] + alpha_nm * (centroid[d] - simplex[i_worst * dim + d])
+            d = d + 1
+        }
+        let f_r = gp_neg_lml_objective(data, &x_r, hyper_init.kernel_type,
+                                       hyper_init.extra_param)
+
+        if f_r < f_vals[i_best] {
+            // Expansion: x_e = centroid + gamma*(x_r - centroid)
+            var x_e: [f64; 3] = [0.0; 3]
+            d = 0
+            while d < dim {
+                x_e[d] = centroid[d] + gamma_nm * (x_r[d] - centroid[d])
+                d = d + 1
+            }
+            let f_e = gp_neg_lml_objective(data, &x_e, hyper_init.kernel_type,
+                                           hyper_init.extra_param)
+
+            if f_e < f_r {
+                // Accept expansion
+                d = 0
+                while d < dim { simplex[i_worst * dim + d] = x_e[d]; d = d + 1 }
+                f_vals[i_worst] = f_e
+            } else {
+                // Accept reflection
+                d = 0
+                while d < dim { simplex[i_worst * dim + d] = x_r[d]; d = d + 1 }
+                f_vals[i_worst] = f_r
+            }
+        } else if f_r < f_vals[i_second] {
+            // Accept reflection
+            d = 0
+            while d < dim { simplex[i_worst * dim + d] = x_r[d]; d = d + 1 }
+            f_vals[i_worst] = f_r
+        } else {
+            // Contraction
+            if f_r < f_vals[i_worst] {
+                // Outside contraction: x_c = centroid + rho*(x_r - centroid)
+                var x_c: [f64; 3] = [0.0; 3]
+                d = 0
+                while d < dim {
+                    x_c[d] = centroid[d] + rho_nm * (x_r[d] - centroid[d])
+                    d = d + 1
+                }
+                let f_c = gp_neg_lml_objective(data, &x_c, hyper_init.kernel_type,
+                                               hyper_init.extra_param)
+                if f_c <= f_r {
+                    d = 0
+                    while d < dim { simplex[i_worst * dim + d] = x_c[d]; d = d + 1 }
+                    f_vals[i_worst] = f_c
+                } else {
+                    // Shrink: move all vertices except best toward best
+                    v2 = 0
+                    while v2 < n_verts {
+                        if v2 != i_best {
+                            d = 0
+                            while d < dim {
+                                simplex[v2 * dim + d] = simplex[i_best * dim + d]
+                                    + sigma_nm * (simplex[v2 * dim + d] - simplex[i_best * dim + d])
+                                d = d + 1
+                            }
+                            var theta2: [f64; 3] = [0.0; 3]
+                            theta2[0] = simplex[v2 * dim + 0]
+                            theta2[1] = simplex[v2 * dim + 1]
+                            theta2[2] = simplex[v2 * dim + 2]
+                            f_vals[v2] = gp_neg_lml_objective(data, &theta2,
+                                             hyper_init.kernel_type, hyper_init.extra_param)
+                        }
+                        v2 = v2 + 1
+                    }
+                }
+            } else {
+                // Inside contraction: x_c = centroid - rho*(centroid - x_worst)
+                // Equivalently: x_c = centroid + rho*(x_worst - centroid)
+                var x_c: [f64; 3] = [0.0; 3]
+                d = 0
+                while d < dim {
+                    x_c[d] = centroid[d] + rho_nm * (simplex[i_worst * dim + d] - centroid[d])
+                    d = d + 1
+                }
+                let f_c = gp_neg_lml_objective(data, &x_c, hyper_init.kernel_type,
+                                               hyper_init.extra_param)
+                if f_c < f_vals[i_worst] {
+                    d = 0
+                    while d < dim { simplex[i_worst * dim + d] = x_c[d]; d = d + 1 }
+                    f_vals[i_worst] = f_c
+                } else {
+                    // Shrink
+                    v2 = 0
+                    while v2 < n_verts {
+                        if v2 != i_best {
+                            d = 0
+                            while d < dim {
+                                simplex[v2 * dim + d] = simplex[i_best * dim + d]
+                                    + sigma_nm * (simplex[v2 * dim + d] - simplex[i_best * dim + d])
+                                d = d + 1
+                            }
+                            var theta2: [f64; 3] = [0.0; 3]
+                            theta2[0] = simplex[v2 * dim + 0]
+                            theta2[1] = simplex[v2 * dim + 1]
+                            theta2[2] = simplex[v2 * dim + 2]
+                            f_vals[v2] = gp_neg_lml_objective(data, &theta2,
+                                             hyper_init.kernel_type, hyper_init.extra_param)
+                        }
+                        v2 = v2 + 1
+                    }
+                }
+            }
+        }
+
+        iter = iter + 1
+    }
+
+    // Extract best vertex
+    var i_best_final = 0
+    var v3 = 1
+    while v3 < n_verts {
+        if f_vals[v3] < f_vals[i_best_final] { i_best_final = v3 }
+        v3 = v3 + 1
+    }
+
+    // Convert from log-space back to original space
+    hyper_opt.signal_var = gp_h_exp(simplex[i_best_final * dim + 0])
+    hyper_opt.length_scale = gp_h_exp(simplex[i_best_final * dim + 1])
+    hyper_opt.noise_var = gp_h_exp(simplex[i_best_final * dim + 2])
+    hyper_opt.kernel_type = hyper_init.kernel_type
+    hyper_opt.extra_param = hyper_init.extra_param
+}
+
+// =============================================================================
+// GP sampling from prior
+// =============================================================================
+
+// Sample from GP prior at given test points.
+//
+// Builds K at x_points, computes Cholesky L, then y = L * z where z ~ N(0, I).
+// This produces a sample from the multivariate normal N(0, K).
+fn gp_sample_prior(hyper: &GPHyper, x_points: &[f64; 256], n_points: i32,
+                   seed: i64, y_out: &![f64; 256]) with Mut, Div, Panic {
+    // Build kernel matrix at test points (up to 64x64 for Cholesky in 4096)
+    let n = if n_points > 64 { 64 } else { n_points }
+    var K: [f64; 4096] = [0.0; 4096]
+    var i = 0
+    while i < n {
+        var j = 0
+        while j < n {
+            let kval = kernel_eval(x_points[i], x_points[j], hyper)
+            if i == j {
+                // Add small jitter for numerical stability
+                K[i * n + j] = kval + 1.0e-8
+            } else {
+                K[i * n + j] = kval
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Cholesky factorization
+    var L: [f64; 4096] = [0.0; 4096]
+    let ok = gp_cholesky(&K, n, &!L)
+    if !ok {
+        // Fallback: zero output
+        i = 0
+        while i < n { y_out[i] = 0.0; i = i + 1 }
+        return
+    }
+
+    // Generate standard normal random vector z
+    var z: [f64; 256] = [0.0; 256]
+    var state: i64 = seed
+    i = 0
+    while i < n {
+        z[i] = gp_box_muller(&!state)
+        i = i + 1
+    }
+
+    // Compute y = L * z
+    i = 0
+    while i < n {
+        var sum = 0.0
+        var j = 0
+        while j < n {
+            sum = sum + L[i * n + j] * z[j]
+            j = j + 1
+        }
+        y_out[i] = sum
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// GP sampling from posterior
+// =============================================================================
+
+// Sample from GP posterior at given test points.
+//
+// Computes posterior mean and covariance at x_points:
+//   mu_star = K_star * alpha
+//   Sigma_star = K_** - K_star * K^{-1} * K_star^T
+//                = K_** - V^T * V  where V = L^{-1} * K_star^T
+// Then sample y = mu_star + L_post * z where z ~ N(0, I).
+fn gp_sample_posterior(model: &GPModel, x_points: &[f64; 256], n_points: i32,
+                       seed: i64, y_out: &![f64; 256]) with Mut, Div, Panic {
+    let n_train = model.n_train
+    let n_test = if n_points > 64 { 64 } else { n_points }
+
+    // Compute posterior means
+    var mu: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < n_test {
+        // k_star_i = [k(x_points[i], x_train[0]), ..., k(x_points[i], x_train[n-1])]
+        var k_star: [f64; 128] = [0.0; 128]
+        var j = 0
+        while j < n_train {
+            k_star[j] = kernel_eval(x_points[i], model.x_train[j], &model.hyper)
+            j = j + 1
+        }
+
+        // mu[i] = k_star^T * alpha
+        var mean_i = 0.0
+        j = 0
+        while j < n_train {
+            mean_i = mean_i + k_star[j] * model.alpha[j]
+            j = j + 1
+        }
+        mu[i] = mean_i
+        i = i + 1
+    }
+
+    // Build posterior covariance matrix
+    // Sigma_post[i][j] = k(x_i*, x_j*) - v_i^T * v_j
+    // where v_i = L^{-1} * k_star_i
+    var Sigma: [f64; 4096] = [0.0; 4096]
+
+    // Pre-compute V matrix: V[t][i] = v_i[t] for each test point i
+    // V stored as V[i * n_train + t] for test point i, training index t
+    var V: [f64; 4096] = [0.0; 4096]  // max 64 test x 64 train
+    i = 0
+    while i < n_test {
+        var k_star: [f64; 128] = [0.0; 128]
+        var j = 0
+        while j < n_train {
+            k_star[j] = kernel_eval(x_points[i], model.x_train[j], &model.hyper)
+            j = j + 1
+        }
+        // Forward solve: L * v = k_star
+        var v: [f64; 128] = [0.0; 128]
+        gp_forward_solve(&model.L, &k_star, n_train, &!v)
+        // Store in V
+        j = 0
+        while j < n_train {
+            V[i * n_train + j] = v[j]
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Build Sigma_post[i][j] = k(x_i*, x_j*) - sum_t V[i][t]*V[j][t]
+    i = 0
+    while i < n_test {
+        var j = 0
+        while j < n_test {
+            let k_ij = kernel_eval(x_points[i], x_points[j], &model.hyper)
+            var vv = 0.0
+            var t = 0
+            while t < n_train {
+                vv = vv + V[i * n_train + t] * V[j * n_train + t]
+                t = t + 1
+            }
+            var cov_val = k_ij - vv
+            if i == j {
+                // Add jitter for numerical stability
+                if cov_val < 1.0e-8 { cov_val = 1.0e-8 }
+            }
+            Sigma[i * n_test + j] = cov_val
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Cholesky factorize posterior covariance
+    var L_post: [f64; 4096] = [0.0; 4096]
+    let ok = gp_cholesky(&Sigma, n_test, &!L_post)
+    if !ok {
+        // Fallback: return posterior mean only
+        i = 0
+        while i < n_test { y_out[i] = mu[i]; i = i + 1 }
+        return
+    }
+
+    // Generate standard normal random vector
+    var z: [f64; 256] = [0.0; 256]
+    var state: i64 = seed
+    i = 0
+    while i < n_test {
+        z[i] = gp_box_muller(&!state)
+        i = i + 1
+    }
+
+    // y = mu + L_post * z
+    i = 0
+    while i < n_test {
+        var sum = 0.0
+        var j = 0
+        while j < n_test {
+            sum = sum + L_post[i * n_test + j] * z[j]
+            j = j + 1
+        }
+        y_out[i] = mu[i] + sum
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Leave-one-out cross-validation
+// =============================================================================
+
+// Leave-one-out cross-validation score via the LOO formula.
+//
+// For a trained GP with alpha = K^{-1} * y and K_inv = K^{-1}:
+//   LOO_i = alpha_i / [K^{-1}]_{ii}
+//   LOO score = (1/n) * sum_i LOO_i^2
+//
+// We compute [K^{-1}]_{ii} by solving K * e_i for each i (via Cholesky).
+// This avoids explicitly inverting K.
+fn gp_loo_cv(model: &GPModel) -> f64 with Mut, Div, Panic {
+    let n = model.n_train
+
+    // Compute diagonal of K^{-1} by solving L*L^T * x = e_i for each i
+    // and reading off x[i] = [K^{-1}]_{ii}
+    var loo_score = 0.0
+    var i = 0
+    while i < n {
+        // Build e_i
+        var e_i: [f64; 128] = [0.0; 128]
+        e_i[i] = 1.0
+
+        // Solve K^{-1} * e_i
+        var kinv_ei: [f64; 128] = [0.0; 128]
+        gp_cholesky_solve(&model.L, &e_i, n, &!kinv_ei)
+
+        // [K^{-1}]_{ii} = kinv_ei[i]
+        let kinv_ii = kinv_ei[i]
+
+        // LOO residual: alpha_i / K^{-1}_{ii}
+        if gp_h_abs(kinv_ii) > 1.0e-30 {
+            let loo_i = model.alpha[i] / kinv_ii
+            loo_score = loo_score + loo_i * loo_i
+        }
+        i = i + 1
+    }
+
+    // Mean squared LOO error
+    loo_score / (n as f64)
+}
+
+// =============================================================================
+// Predictive entropy
+// =============================================================================
+
+// Predictive (differential) entropy at a test point.
+//
+// For a Gaussian predictive distribution N(mu, sigma^2):
+//   H = 0.5 * log(2 * pi * e * sigma^2)
+fn gp_predictive_entropy(model: &GPModel, x_star: f64) -> f64 with Mut, Div, Panic {
+    var pred: GPPrediction = GPPrediction { mean: 0.0, variance: 0.0, std_dev: 0.0 }
+    gp_predict(model, x_star, &!pred)
+
+    let variance = pred.variance
+    if variance <= 0.0 { return -1.0e30 }  // degenerate: zero entropy
+
+    // H = 0.5 * ln(2 * pi * e * variance)
+    let e_const = 2.718281828459045
+    0.5 * gp_h_ln(2.0 * gp_h_pi() * e_const * variance)
+}

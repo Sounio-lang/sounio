@@ -1,0 +1,1165 @@
+//@ run-pass
+// test_fem.sio -- Tests for the finite element method module
+//
+// Self-contained test suite for 1D bar elements, 2D CST triangles,
+// constitutive matrices, assembly, solvers (direct + CG), boundary
+// conditions, and mesh generation. All helpers copied from stdlib/math/fem.sio.
+//
+// Tests:
+//  1.  1D stiffness matrix symmetry: ke[0][1] = ke[1][0]
+//  2.  1D stiffness trace: ke[0][0] + ke[1][1] = 2*EA/L
+//  3.  1D mass matrix positive entries
+//  4.  Triangle area: known triangle with area = 0.5
+//  5.  Triangle shape functions sum to 1 at any point
+//  6.  Triangle shape functions at vertices: N_i(vertex_j) = delta_ij
+//  7.  Plane stress matrix symmetry: D[0][1] = D[1][0]
+//  8.  1D bar exact solution: fixed-free bar, distributed load
+//  9.  2D patch test: uniform stress state recovered by CST elements
+// 10.  CG solver matches direct solver for same system
+// 11.  Dirichlet penalty BC: K[dof][dof] >> other entries
+// 12.  Mesh generation: 1D uniform mesh has correct node/element count
+
+// ============================================================================
+// HELPERS (copied from fem.sio -- tests must be self-contained)
+// ============================================================================
+
+fn fe_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn fe_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+fn fe_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+fn fe_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+// ============================================================================
+// DATA STRUCTURES (copied from fem.sio)
+// ============================================================================
+
+struct FEMesh1D {
+    nodes: [f64; 256],
+    n_nodes: i32,
+    elements: [i32; 512],
+    n_elem: i32,
+    nodes_per_elem: i32
+}
+
+struct FEMesh2D {
+    nodes_x: [f64; 256],
+    nodes_y: [f64; 256],
+    n_nodes: i32,
+    elements: [i32; 1536],
+    n_elem: i32,
+    nodes_per_elem: i32
+}
+
+struct FESystem {
+    K: [f64; 4096],
+    M: [f64; 4096],
+    rhs: [f64; 256],
+    solution: [f64; 256],
+    n_dof: i32
+}
+
+struct FEResult {
+    u: [f64; 256],
+    residual: f64,
+    iterations: i32,
+    converged: bool
+}
+
+struct StressResult {
+    sxx: f64,
+    syy: f64,
+    sxy: f64,
+    von_mises: f64
+}
+
+// ============================================================================
+// 1D ELEMENT ROUTINES (copied from fem.sio)
+// ============================================================================
+
+fn fem_1d_stiffness(x1: f64, x2: f64, EA: f64, ke: &![f64; 4]) with Mut, Div {
+    let L = fe_abs(x2 - x1)
+    let k = EA / L
+    ke[0] = k
+    ke[1] = 0.0 - k
+    ke[2] = 0.0 - k
+    ke[3] = k
+}
+
+fn fem_1d_mass(x1: f64, x2: f64, rho_A: f64, me: &![f64; 4]) with Mut, Div {
+    let L = fe_abs(x2 - x1)
+    let c = rho_A * L / 6.0
+    me[0] = 2.0 * c
+    me[1] = c
+    me[2] = c
+    me[3] = 2.0 * c
+}
+
+fn fem_1d_load(x1: f64, x2: f64, q: f64, fe: &![f64; 2]) with Mut, Div {
+    let L = fe_abs(x2 - x1)
+    let c = q * L / 2.0
+    fe[0] = c
+    fe[1] = c
+}
+
+// ============================================================================
+// 2D CST ELEMENT ROUTINES (copied from fem.sio)
+// ============================================================================
+
+fn fem_tri_area(x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64) -> f64 with Mut, Div {
+    let det = x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2)
+    0.5 * fe_abs(det)
+}
+
+fn fem_tri_shape(x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64,
+                 x: f64, y: f64, N: &![f64; 3]) with Mut, Div {
+    let A2 = x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2)
+    N[0] = (x * (y2 - y3) + x2 * (y3 - y) + x3 * (y - y2)) / A2
+    N[1] = (x1 * (y - y3) + x * (y3 - y1) + x3 * (y1 - y)) / A2
+    N[2] = (x1 * (y2 - y) + x2 * (y - y1) + x * (y1 - y2)) / A2
+}
+
+fn fem_tri_grad(x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64,
+                B: &![f64; 18]) with Mut, Div {
+    let A2 = x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2)
+    let inv2A = 1.0 / A2
+
+    let b1 = y2 - y3
+    let b2 = y3 - y1
+    let b3 = y1 - y2
+    let c1 = x3 - x2
+    let c2 = x1 - x3
+    let c3 = x2 - x1
+
+    B[0] = b1 * inv2A
+    B[1] = 0.0
+    B[2] = b2 * inv2A
+    B[3] = 0.0
+    B[4] = b3 * inv2A
+    B[5] = 0.0
+
+    B[6] = 0.0
+    B[7] = c1 * inv2A
+    B[8] = 0.0
+    B[9] = c2 * inv2A
+    B[10] = 0.0
+    B[11] = c3 * inv2A
+
+    B[12] = c1 * inv2A
+    B[13] = b1 * inv2A
+    B[14] = c2 * inv2A
+    B[15] = b2 * inv2A
+    B[16] = c3 * inv2A
+    B[17] = b3 * inv2A
+}
+
+fn fem_tri_stiffness(x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64,
+                     D: &[f64; 9], thickness: f64, ke: &![f64; 36]) with Mut, Div {
+    let A = fem_tri_area(x1, y1, x2, y2, x3, y3)
+
+    var B: [f64; 18] = [0.0; 18]
+    fem_tri_grad(x1, y1, x2, y2, x3, y3, &!B)
+
+    var DB: [f64; 18] = [0.0; 18]
+    var i = 0
+    while i < 3 {
+        var j = 0
+        while j < 6 {
+            var s = 0.0
+            var k = 0
+            while k < 3 {
+                s = s + D[i * 3 + k] * B[k * 6 + j]
+                k = k + 1
+            }
+            DB[i * 6 + j] = s
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    let scale = thickness * A
+    i = 0
+    while i < 6 {
+        var j = 0
+        while j < 6 {
+            var s = 0.0
+            var k = 0
+            while k < 3 {
+                s = s + B[k * 6 + i] * DB[k * 6 + j]
+                k = k + 1
+            }
+            ke[i * 6 + j] = scale * s
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// CONSTITUTIVE MATRICES (copied from fem.sio)
+// ============================================================================
+
+fn fem_plane_stress(E: f64, nu: f64, D: &![f64; 9]) with Mut, Div {
+    let c = E / (1.0 - nu * nu)
+    D[0] = c
+    D[1] = c * nu
+    D[2] = 0.0
+    D[3] = c * nu
+    D[4] = c
+    D[5] = 0.0
+    D[6] = 0.0
+    D[7] = 0.0
+    D[8] = c * (1.0 - nu) / 2.0
+}
+
+// ============================================================================
+// 1D ASSEMBLY (copied from fem.sio)
+// ============================================================================
+
+fn fem_assemble_stiffness_1d(mesh: &FEMesh1D, EA: f64, K: &![f64; 4096]) with Mut, Div {
+    let n = mesh.n_nodes
+    var idx = 0
+    while idx < n * n { K[idx] = 0.0; idx = idx + 1 }
+
+    var e = 0
+    while e < mesh.n_elem {
+        let n1 = mesh.elements[2 * e]
+        let n2 = mesh.elements[2 * e + 1]
+        let x1 = mesh.nodes[n1]
+        let x2 = mesh.nodes[n2]
+
+        var ke: [f64; 4] = [0.0; 4]
+        fem_1d_stiffness(x1, x2, EA, &!ke)
+
+        K[n1 * n + n1] = K[n1 * n + n1] + ke[0]
+        K[n1 * n + n2] = K[n1 * n + n2] + ke[1]
+        K[n2 * n + n1] = K[n2 * n + n1] + ke[2]
+        K[n2 * n + n2] = K[n2 * n + n2] + ke[3]
+
+        e = e + 1
+    }
+}
+
+fn fem_assemble_load_1d(mesh: &FEMesh1D, q: f64, F: &![f64; 256]) with Mut, Div {
+    let n = mesh.n_nodes
+    var idx = 0
+    while idx < n { F[idx] = 0.0; idx = idx + 1 }
+
+    var e = 0
+    while e < mesh.n_elem {
+        let n1 = mesh.elements[2 * e]
+        let n2 = mesh.elements[2 * e + 1]
+        let x1 = mesh.nodes[n1]
+        let x2 = mesh.nodes[n2]
+
+        var fe: [f64; 2] = [0.0; 2]
+        fem_1d_load(x1, x2, q, &!fe)
+
+        F[n1] = F[n1] + fe[0]
+        F[n2] = F[n2] + fe[1]
+
+        e = e + 1
+    }
+}
+
+// ============================================================================
+// 2D ASSEMBLY (copied from fem.sio)
+// ============================================================================
+
+fn fem_assemble_stiffness_2d(mesh: &FEMesh2D, D: &[f64; 9], thickness: f64,
+                             K: &![f64; 4096]) with Mut, Div {
+    let n_dof = 2 * mesh.n_nodes
+    var idx = 0
+    while idx < n_dof * n_dof { K[idx] = 0.0; idx = idx + 1 }
+
+    var e = 0
+    while e < mesh.n_elem {
+        let n1 = mesh.elements[3 * e]
+        let n2 = mesh.elements[3 * e + 1]
+        let n3 = mesh.elements[3 * e + 2]
+
+        let x1 = mesh.nodes_x[n1]
+        let y1 = mesh.nodes_y[n1]
+        let x2 = mesh.nodes_x[n2]
+        let y2 = mesh.nodes_y[n2]
+        let x3 = mesh.nodes_x[n3]
+        let y3 = mesh.nodes_y[n3]
+
+        var ke: [f64; 36] = [0.0; 36]
+        fem_tri_stiffness(x1, y1, x2, y2, x3, y3, D, thickness, &!ke)
+
+        var dof_map: [i32; 6] = [0; 6]
+        dof_map[0] = 2 * n1
+        dof_map[1] = 2 * n1 + 1
+        dof_map[2] = 2 * n2
+        dof_map[3] = 2 * n2 + 1
+        dof_map[4] = 2 * n3
+        dof_map[5] = 2 * n3 + 1
+
+        var i = 0
+        while i < 6 {
+            var j = 0
+            while j < 6 {
+                let gi = dof_map[i]
+                let gj = dof_map[j]
+                K[gi * n_dof + gj] = K[gi * n_dof + gj] + ke[i * 6 + j]
+                j = j + 1
+            }
+            i = i + 1
+        }
+
+        e = e + 1
+    }
+}
+
+// ============================================================================
+// BOUNDARY CONDITIONS (copied from fem.sio)
+// ============================================================================
+
+fn fem_apply_dirichlet_penalty(K: &![f64; 4096], F: &![f64; 256],
+                               n_dof: i32, dof: i32, value: f64) with Mut {
+    let penalty = 1.0e20
+    K[dof * n_dof + dof] = K[dof * n_dof + dof] + penalty
+    F[dof] = F[dof] + penalty * value
+}
+
+// ============================================================================
+// DIRECT SOLVER (copied from fem.sio)
+// ============================================================================
+
+fn fem_solve_direct(K: &[f64; 4096], F: &[f64; 256], n_dof: i32,
+                    u: &![f64; 256]) with Mut, Div, Panic {
+    var A: [f64; 4096] = [0.0; 4096]
+    var b: [f64; 256] = [0.0; 256]
+
+    var idx = 0
+    while idx < n_dof * n_dof { A[idx] = K[idx]; idx = idx + 1 }
+    idx = 0
+    while idx < n_dof { b[idx] = F[idx]; idx = idx + 1 }
+
+    var col = 0
+    while col < n_dof {
+        var max_val = fe_abs(A[col * n_dof + col])
+        var max_row = col
+        var row = col + 1
+        while row < n_dof {
+            let v = fe_abs(A[row * n_dof + col])
+            if v > max_val {
+                max_val = v
+                max_row = row
+            }
+            row = row + 1
+        }
+
+        if max_row != col {
+            var j = 0
+            while j < n_dof {
+                let temp = A[col * n_dof + j]
+                A[col * n_dof + j] = A[max_row * n_dof + j]
+                A[max_row * n_dof + j] = temp
+                j = j + 1
+            }
+            let temp_b = b[col]
+            b[col] = b[max_row]
+            b[max_row] = temp_b
+        }
+
+        let pivot = A[col * n_dof + col]
+        if fe_abs(pivot) < 1.0e-30 {
+            u[col] = 0.0
+            col = col + 1
+            var skip = col
+            while skip < n_dof {
+                A[skip * n_dof + (col - 1)] = 0.0
+                skip = skip + 1
+            }
+        }
+
+        row = col + 1
+        while row < n_dof {
+            let pivot_val = A[col * n_dof + col]
+            if fe_abs(pivot_val) > 1.0e-30 {
+                let factor = A[row * n_dof + col] / pivot_val
+                var j = col
+                while j < n_dof {
+                    A[row * n_dof + j] = A[row * n_dof + j] - factor * A[col * n_dof + j]
+                    j = j + 1
+                }
+                b[row] = b[row] - factor * b[col]
+            }
+            row = row + 1
+        }
+
+        col = col + 1
+    }
+
+    var i = n_dof - 1
+    while i >= 0 {
+        var s = b[i]
+        var j = i + 1
+        while j < n_dof {
+            s = s - A[i * n_dof + j] * u[j]
+            j = j + 1
+        }
+        let diag = A[i * n_dof + i]
+        if fe_abs(diag) > 1.0e-30 {
+            u[i] = s / diag
+        } else {
+            u[i] = 0.0
+        }
+        i = i - 1
+    }
+}
+
+// ============================================================================
+// CONJUGATE GRADIENT SOLVER (copied from fem.sio)
+// ============================================================================
+
+fn fe_matvec(K: &[f64; 4096], x: &[f64; 256], n: i32, y: &![f64; 256]) with Mut {
+    var i = 0
+    while i < n {
+        var s = 0.0
+        var j = 0
+        while j < n {
+            s = s + K[i * n + j] * x[j]
+            j = j + 1
+        }
+        y[i] = s
+        i = i + 1
+    }
+}
+
+fn fe_dot(a: &[f64; 256], b: &[f64; 256], n: i32) -> f64 with Mut {
+    var s = 0.0
+    var i = 0
+    while i < n {
+        s = s + a[i] * b[i]
+        i = i + 1
+    }
+    s
+}
+
+fn fem_solve_cg(K: &[f64; 4096], F: &[f64; 256], n_dof: i32,
+                u: &![f64; 256], max_iter: i32, tol: f64,
+                result: &!FEResult) with Mut, Div, Panic {
+    var i = 0
+    while i < n_dof { u[i] = 0.0; i = i + 1 }
+
+    var r: [f64; 256] = [0.0; 256]
+    i = 0
+    while i < n_dof { r[i] = F[i]; i = i + 1 }
+
+    var p: [f64; 256] = [0.0; 256]
+    i = 0
+    while i < n_dof { p[i] = r[i]; i = i + 1 }
+
+    var rr_old = fe_dot(&r, &r, n_dof)
+
+    let F_norm = fe_sqrt(fe_dot(F, F, n_dof))
+    let abs_tol = if F_norm > 1.0e-30 { tol * F_norm } else { tol }
+
+    var Kp: [f64; 256] = [0.0; 256]
+
+    var iter = 0
+    while iter < max_iter {
+        let r_norm = fe_sqrt(rr_old)
+        if r_norm < abs_tol {
+            i = 0
+            while i < n_dof { result.u[i] = u[i]; i = i + 1 }
+            result.residual = r_norm
+            result.iterations = iter
+            result.converged = true
+            return
+        }
+
+        fe_matvec(K, &p, n_dof, &!Kp)
+
+        let pKp = fe_dot(&p, &Kp, n_dof)
+        if fe_abs(pKp) < 1.0e-30 {
+            i = 0
+            while i < n_dof { result.u[i] = u[i]; i = i + 1 }
+            result.residual = fe_sqrt(rr_old)
+            result.iterations = iter
+            result.converged = false
+            return
+        }
+        let alpha = rr_old / pKp
+
+        i = 0
+        while i < n_dof {
+            u[i] = u[i] + alpha * p[i]
+            r[i] = r[i] - alpha * Kp[i]
+            i = i + 1
+        }
+
+        let rr_new = fe_dot(&r, &r, n_dof)
+        let beta = rr_new / rr_old
+
+        i = 0
+        while i < n_dof {
+            p[i] = r[i] + beta * p[i]
+            i = i + 1
+        }
+
+        rr_old = rr_new
+        iter = iter + 1
+    }
+
+    i = 0
+    while i < n_dof { result.u[i] = u[i]; i = i + 1 }
+    result.residual = fe_sqrt(rr_old)
+    result.iterations = max_iter
+    result.converged = false
+}
+
+// ============================================================================
+// POST-PROCESSING (copied from fem.sio)
+// ============================================================================
+
+fn fem_strain_at_centroid(mesh: &FEMesh2D, u: &[f64; 256], elem_idx: i32,
+                          strain: &![f64; 3]) with Mut, Div {
+    let n1 = mesh.elements[3 * elem_idx]
+    let n2 = mesh.elements[3 * elem_idx + 1]
+    let n3 = mesh.elements[3 * elem_idx + 2]
+
+    let x1 = mesh.nodes_x[n1]
+    let y1 = mesh.nodes_y[n1]
+    let x2 = mesh.nodes_x[n2]
+    let y2 = mesh.nodes_y[n2]
+    let x3 = mesh.nodes_x[n3]
+    let y3 = mesh.nodes_y[n3]
+
+    var B: [f64; 18] = [0.0; 18]
+    fem_tri_grad(x1, y1, x2, y2, x3, y3, &!B)
+
+    var ue: [f64; 6] = [0.0; 6]
+    ue[0] = u[2 * n1]
+    ue[1] = u[2 * n1 + 1]
+    ue[2] = u[2 * n2]
+    ue[3] = u[2 * n2 + 1]
+    ue[4] = u[2 * n3]
+    ue[5] = u[2 * n3 + 1]
+
+    var i = 0
+    while i < 3 {
+        var s = 0.0
+        var j = 0
+        while j < 6 {
+            s = s + B[i * 6 + j] * ue[j]
+            j = j + 1
+        }
+        strain[i] = s
+        i = i + 1
+    }
+}
+
+fn fem_stress_at_centroid(mesh: &FEMesh2D, u: &[f64; 256], D: &[f64; 9],
+                          elem_idx: i32, result: &!StressResult) with Mut, Div {
+    var strain: [f64; 3] = [0.0; 3]
+    fem_strain_at_centroid(mesh, u, elem_idx, &!strain)
+
+    let sxx = D[0] * strain[0] + D[1] * strain[1] + D[2] * strain[2]
+    let syy = D[3] * strain[0] + D[4] * strain[1] + D[5] * strain[2]
+    let sxy = D[6] * strain[0] + D[7] * strain[1] + D[8] * strain[2]
+
+    result.sxx = sxx
+    result.syy = syy
+    result.sxy = sxy
+
+    let vm_sq = sxx * sxx - sxx * syy + syy * syy + 3.0 * sxy * sxy
+    result.von_mises = fe_sqrt(fe_abs(vm_sq))
+}
+
+// ============================================================================
+// MESH UTILITIES (copied from fem.sio)
+// ============================================================================
+
+fn fem_mesh_1d_uniform(x_start: f64, x_end: f64, n_elem: i32,
+                       mesh: &!FEMesh1D) with Mut, Div {
+    let n_nodes = n_elem + 1
+    mesh.n_nodes = n_nodes
+    mesh.n_elem = n_elem
+    mesh.nodes_per_elem = 2
+
+    let h = (x_end - x_start) / (n_elem as f64)
+    var i = 0
+    while i < n_nodes {
+        mesh.nodes[i] = x_start + (i as f64) * h
+        i = i + 1
+    }
+
+    var e = 0
+    while e < n_elem {
+        mesh.elements[2 * e] = e
+        mesh.elements[2 * e + 1] = e + 1
+        e = e + 1
+    }
+}
+
+fn fem_mesh_2d_rect(x0: f64, y0: f64, x1: f64, y1: f64, nx: i32, ny: i32,
+                    mesh: &!FEMesh2D) with Mut, Div {
+    let n_nodes = (nx + 1) * (ny + 1)
+    let n_elem = 2 * nx * ny
+    mesh.n_nodes = n_nodes
+    mesh.n_elem = n_elem
+    mesh.nodes_per_elem = 3
+
+    let dx = (x1 - x0) / (nx as f64)
+    let dy = (y1 - y0) / (ny as f64)
+
+    var iy = 0
+    while iy <= ny {
+        var ix = 0
+        while ix <= nx {
+            let node_id = iy * (nx + 1) + ix
+            mesh.nodes_x[node_id] = x0 + (ix as f64) * dx
+            mesh.nodes_y[node_id] = y0 + (iy as f64) * dy
+            ix = ix + 1
+        }
+        iy = iy + 1
+    }
+
+    var elem_id = 0
+    iy = 0
+    while iy < ny {
+        var ix = 0
+        while ix < nx {
+            let bl = iy * (nx + 1) + ix
+            let br = iy * (nx + 1) + ix + 1
+            let tl = (iy + 1) * (nx + 1) + ix
+            let tr = (iy + 1) * (nx + 1) + ix + 1
+
+            mesh.elements[3 * elem_id] = bl
+            mesh.elements[3 * elem_id + 1] = br
+            mesh.elements[3 * elem_id + 2] = tl
+            elem_id = elem_id + 1
+
+            mesh.elements[3 * elem_id] = br
+            mesh.elements[3 * elem_id + 1] = tr
+            mesh.elements[3 * elem_id + 2] = tl
+            elem_id = elem_id + 1
+
+            ix = ix + 1
+        }
+        iy = iy + 1
+    }
+}
+
+fn fem_system_init(n_dof: i32, sys: &!FESystem) with Mut {
+    sys.n_dof = n_dof
+
+    var i = 0
+    while i < n_dof * n_dof { sys.K[i] = 0.0; i = i + 1 }
+
+    i = 0
+    while i < n_dof * n_dof { sys.M[i] = 0.0; i = i + 1 }
+
+    i = 0
+    while i < n_dof { sys.rhs[i] = 0.0; i = i + 1 }
+
+    i = 0
+    while i < n_dof { sys.solution[i] = 0.0; i = i + 1 }
+}
+
+// ============================================================================
+// TEST 1: 1D stiffness matrix symmetry -- ke[0][1] = ke[1][0]
+// ============================================================================
+
+fn test_1d_stiffness_symmetry() -> bool with Mut, Div {
+    let tol = 1.0e-6
+    let EA = 200.0e3
+    let x1 = 0.0
+    let x2 = 2.5
+
+    var ke: [f64; 4] = [0.0; 4]
+    fem_1d_stiffness(x1, x2, EA, &!ke)
+
+    // ke is 2x2 row-major: ke[1] = K(0,1), ke[2] = K(1,0)
+    let diff = fe_abs(ke[1] - ke[2])
+    if diff > tol { return false }
+    true
+}
+
+// ============================================================================
+// TEST 2: 1D stiffness trace -- ke[0][0] + ke[1][1] = 2*EA/L
+// ============================================================================
+
+fn test_1d_stiffness_trace() -> bool with Mut, Div {
+    let tol = 1.0e-6
+    let EA = 150.0e3
+    let x1 = 1.0
+    let x2 = 4.0
+    let L = fe_abs(x2 - x1)
+
+    var ke: [f64; 4] = [0.0; 4]
+    fem_1d_stiffness(x1, x2, EA, &!ke)
+
+    let trace = ke[0] + ke[3]
+    let expected = 2.0 * EA / L
+    let diff = fe_abs(trace - expected)
+    if diff > tol { return false }
+    true
+}
+
+// ============================================================================
+// TEST 3: 1D mass matrix positive entries
+// ============================================================================
+
+fn test_1d_mass_positive() -> bool with Mut, Div {
+    let rho_A = 7800.0
+    let x1 = 0.0
+    let x2 = 1.5
+
+    var me: [f64; 4] = [0.0; 4]
+    fem_1d_mass(x1, x2, rho_A, &!me)
+
+    // All entries of consistent mass matrix should be positive
+    var i = 0
+    while i < 4 {
+        if me[i] <= 0.0 { return false }
+        i = i + 1
+    }
+    true
+}
+
+// ============================================================================
+// TEST 4: Triangle area -- right triangle with vertices (0,0), (1,0), (0,1)
+//         Expected area = 0.5
+// ============================================================================
+
+fn test_tri_area() -> bool with Mut, Div {
+    let tol = 1.0e-6
+    let A = fem_tri_area(0.0, 0.0, 1.0, 0.0, 0.0, 1.0)
+    let diff = fe_abs(A - 0.5)
+    if diff > tol { return false }
+    true
+}
+
+// ============================================================================
+// TEST 5: Triangle shape functions sum to 1 at an arbitrary interior point
+// ============================================================================
+
+fn test_tri_shape_partition_of_unity() -> bool with Mut, Div {
+    let tol = 1.0e-6
+    // Triangle: (0,0), (4,0), (1,3)
+    // Interior point: (1.5, 1.0)
+    var N: [f64; 3] = [0.0; 3]
+    fem_tri_shape(0.0, 0.0, 4.0, 0.0, 1.0, 3.0, 1.5, 1.0, &!N)
+
+    let sum = N[0] + N[1] + N[2]
+    let diff = fe_abs(sum - 1.0)
+    if diff > tol { return false }
+    true
+}
+
+// ============================================================================
+// TEST 6: Triangle shape functions at vertices -- N_i(vertex_j) = delta_ij
+// ============================================================================
+
+fn test_tri_shape_at_vertices() -> bool with Mut, Div {
+    let tol = 1.0e-6
+    // Triangle: (0,0), (1,0), (0,1)
+    let x1 = 0.0
+    let y1 = 0.0
+    let x2 = 1.0
+    let y2 = 0.0
+    let x3 = 0.0
+    let y3 = 1.0
+
+    // Evaluate at vertex 1: (0,0) -> N = (1, 0, 0)
+    var N: [f64; 3] = [0.0; 3]
+    fem_tri_shape(x1, y1, x2, y2, x3, y3, x1, y1, &!N)
+    if fe_abs(N[0] - 1.0) > tol { return false }
+    if fe_abs(N[1]) > tol { return false }
+    if fe_abs(N[2]) > tol { return false }
+
+    // Evaluate at vertex 2: (1,0) -> N = (0, 1, 0)
+    fem_tri_shape(x1, y1, x2, y2, x3, y3, x2, y2, &!N)
+    if fe_abs(N[0]) > tol { return false }
+    if fe_abs(N[1] - 1.0) > tol { return false }
+    if fe_abs(N[2]) > tol { return false }
+
+    // Evaluate at vertex 3: (0,1) -> N = (0, 0, 1)
+    fem_tri_shape(x1, y1, x2, y2, x3, y3, x3, y3, &!N)
+    if fe_abs(N[0]) > tol { return false }
+    if fe_abs(N[1]) > tol { return false }
+    if fe_abs(N[2] - 1.0) > tol { return false }
+
+    true
+}
+
+// ============================================================================
+// TEST 7: Plane stress matrix symmetry -- D[0][1] = D[1][0]
+// ============================================================================
+
+fn test_plane_stress_symmetry() -> bool with Mut, Div {
+    let tol = 1.0e-6
+    let E = 200.0e9
+    let nu = 0.3
+
+    var D: [f64; 9] = [0.0; 9]
+    fem_plane_stress(E, nu, &!D)
+
+    // D is 3x3 row-major: D[1] = D(0,1), D[3] = D(1,0)
+    let diff01 = fe_abs(D[1] - D[3])
+    if diff01 > tol { return false }
+
+    // Also check D(0,2) = D(2,0) and D(1,2) = D(2,1)
+    let diff02 = fe_abs(D[2] - D[6])
+    if diff02 > tol { return false }
+
+    let diff12 = fe_abs(D[5] - D[7])
+    if diff12 > tol { return false }
+
+    true
+}
+
+// ============================================================================
+// TEST 8: 1D bar exact solution
+//
+// Fixed-free bar under uniform distributed load q.
+//   - Domain [0, L], fixed at x=0, free at x=L
+//   - EA = const, load q per unit length
+//   - Analytical: u(x) = q*x*(2L - x) / (2*EA)
+//   - With penalty BC at node 0 (u=0), compare FE solution to analytical
+//     at the free end: u(L) = q*L^2 / (2*EA)
+// ============================================================================
+
+fn test_1d_bar_exact() -> bool with Mut, Div, Panic {
+    let tol = 1.0e-6
+    let L = 10.0
+    let EA = 1.0e5
+    let q = 100.0
+    let n_elem = 4
+
+    // Create mesh
+    var mesh: FEMesh1D = FEMesh1D {
+        nodes: [0.0; 256], n_nodes: 0,
+        elements: [0; 512], n_elem: 0, nodes_per_elem: 2
+    }
+    fem_mesh_1d_uniform(0.0, L, n_elem, &!mesh)
+
+    let n = mesh.n_nodes
+
+    // Assemble K and F
+    var K: [f64; 4096] = [0.0; 4096]
+    var F: [f64; 256] = [0.0; 256]
+    fem_assemble_stiffness_1d(&mesh, EA, &!K)
+    fem_assemble_load_1d(&mesh, q, &!F)
+
+    // Apply Dirichlet BC: u(0) = 0 via penalty
+    fem_apply_dirichlet_penalty(&!K, &!F, n, 0, 0.0)
+
+    // Solve
+    var u: [f64; 256] = [0.0; 256]
+    fem_solve_direct(&K, &F, n, &!u)
+
+    // Compare each node to analytical solution: u(x) = q*x*(2L - x) / (2*EA)
+    var ok = true
+    var i = 0
+    while i < n {
+        let x = mesh.nodes[i]
+        let u_exact = q * x * (2.0 * L - x) / (2.0 * EA)
+        let diff = fe_abs(u[i] - u_exact)
+        // Use relative tolerance for non-zero values
+        if fe_abs(u_exact) > 1.0e-12 {
+            if diff / fe_abs(u_exact) > tol { ok = false }
+        } else {
+            if diff > tol { ok = false }
+        }
+        i = i + 1
+    }
+
+    ok
+}
+
+// ============================================================================
+// TEST 9: 2D patch test
+//
+// A single-element (or 2-element) patch under uniform strain should
+// reproduce the exact stress. We set up a 1x1 square meshed into 2 CST
+// triangles with prescribed displacements corresponding to a uniform
+// strain exx = 0.001 (pure x-extension): u_x = 0.001 * x, u_y = 0.
+// The stress should be sigma_xx = E/(1-nu^2) * exx + E*nu/(1-nu^2) * 0
+// and sigma_yy = E*nu/(1-nu^2) * exx.
+// ============================================================================
+
+fn test_2d_patch_test() -> bool with Mut, Div, Panic {
+    let tol = 1.0e-4
+    let E = 1.0e6
+    let nu = 0.25
+    let thickness = 1.0
+    let exx = 0.001
+
+    // Create 1x1 mesh (2 elements, 4 nodes)
+    var mesh: FEMesh2D = FEMesh2D {
+        nodes_x: [0.0; 256], nodes_y: [0.0; 256], n_nodes: 0,
+        elements: [0; 1536], n_elem: 0, nodes_per_elem: 3
+    }
+    fem_mesh_2d_rect(0.0, 0.0, 1.0, 1.0, 1, 1, &!mesh)
+
+    // Constitutive matrix
+    var D: [f64; 9] = [0.0; 9]
+    fem_plane_stress(E, nu, &!D)
+
+    // Prescribed displacement: u_x = exx * x, u_y = 0
+    // Nodes from fem_mesh_2d_rect(0,0,1,1,1,1):
+    //   node 0 = (0,0), node 1 = (1,0), node 2 = (0,1), node 3 = (1,1)
+    // DOF: [u_x0, u_y0, u_x1, u_y1, u_x2, u_y2, u_x3, u_y3]
+    var u_disp: [f64; 256] = [0.0; 256]
+    var nd = 0
+    while nd < mesh.n_nodes {
+        u_disp[2 * nd] = exx * mesh.nodes_x[nd]
+        u_disp[2 * nd + 1] = 0.0
+        nd = nd + 1
+    }
+
+    // Expected stress
+    let c = E / (1.0 - nu * nu)
+    let sxx_expected = c * exx
+    let syy_expected = c * nu * exx
+    let sxy_expected = 0.0
+
+    // Check stress in each element
+    var ok = true
+    var e = 0
+    while e < mesh.n_elem {
+        var sr: StressResult = StressResult {
+            sxx: 0.0, syy: 0.0, sxy: 0.0, von_mises: 0.0
+        }
+        fem_stress_at_centroid(&mesh, &u_disp, &D, e, &!sr)
+
+        if fe_abs(sr.sxx - sxx_expected) > tol * fe_abs(sxx_expected) { ok = false }
+        if fe_abs(sr.syy - syy_expected) > tol * fe_abs(syy_expected) { ok = false }
+        if fe_abs(sr.sxy - sxy_expected) > tol { ok = false }
+
+        e = e + 1
+    }
+
+    ok
+}
+
+// ============================================================================
+// TEST 10: CG solver matches direct solver
+//
+// Build a small 1D problem (3 elements, 4 nodes), apply Dirichlet at node 0,
+// solve with both direct and CG, compare solutions.
+// ============================================================================
+
+fn test_cg_matches_direct() -> bool with Mut, Div, Panic {
+    let tol = 1.0e-6
+    let L = 6.0
+    let EA = 5.0e4
+    let q = 200.0
+    let n_elem = 3
+
+    var mesh: FEMesh1D = FEMesh1D {
+        nodes: [0.0; 256], n_nodes: 0,
+        elements: [0; 512], n_elem: 0, nodes_per_elem: 2
+    }
+    fem_mesh_1d_uniform(0.0, L, n_elem, &!mesh)
+    let n = mesh.n_nodes
+
+    var K: [f64; 4096] = [0.0; 4096]
+    var F: [f64; 256] = [0.0; 256]
+    fem_assemble_stiffness_1d(&mesh, EA, &!K)
+    fem_assemble_load_1d(&mesh, q, &!F)
+    fem_apply_dirichlet_penalty(&!K, &!F, n, 0, 0.0)
+
+    // Direct solve
+    var u_direct: [f64; 256] = [0.0; 256]
+    fem_solve_direct(&K, &F, n, &!u_direct)
+
+    // CG solve
+    var u_cg: [f64; 256] = [0.0; 256]
+    var cg_result: FEResult = FEResult {
+        u: [0.0; 256], residual: 0.0, iterations: 0, converged: false
+    }
+    fem_solve_cg(&K, &F, n, &!u_cg, 1000, 1.0e-12, &!cg_result)
+
+    if cg_result.converged == false { return false }
+
+    // Compare solutions
+    var ok = true
+    var i = 0
+    while i < n {
+        let diff = fe_abs(u_direct[i] - u_cg[i])
+        if fe_abs(u_direct[i]) > 1.0e-12 {
+            if diff / fe_abs(u_direct[i]) > tol { ok = false }
+        } else {
+            if diff > tol { ok = false }
+        }
+        i = i + 1
+    }
+    ok
+}
+
+// ============================================================================
+// TEST 11: Dirichlet penalty BC makes K[dof][dof] >> other entries
+// ============================================================================
+
+fn test_dirichlet_penalty() -> bool with Mut, Div, Panic {
+    let n = 4
+    // Build a small stiffness matrix (identity-like for simplicity)
+    var K: [f64; 4096] = [0.0; 4096]
+    var F: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < n {
+        K[i * n + i] = 1.0e3
+        F[i] = 100.0
+        i = i + 1
+    }
+
+    // Apply Dirichlet at DOF 1 with value 0.0
+    fem_apply_dirichlet_penalty(&!K, &!F, n, 1, 0.0)
+
+    // K[1][1] should now be 1e3 + 1e20 ~ 1e20
+    let diag = K[1 * n + 1]
+
+    // Check that the diagonal is orders of magnitude larger than off-diags
+    var ok = true
+    var j = 0
+    while j < n {
+        if j != 1 {
+            let off = fe_abs(K[1 * n + j])
+            // The penalty-augmented diagonal should dominate
+            if off > 0.0 {
+                if diag / off < 1.0e10 { ok = false }
+            }
+        }
+        j = j + 1
+    }
+
+    // Also check the diagonal is at least 1e15 (penalty = 1e20)
+    if diag < 1.0e15 { ok = false }
+
+    ok
+}
+
+// ============================================================================
+// TEST 12: 1D uniform mesh has correct number of nodes and elements
+// ============================================================================
+
+fn test_mesh_1d_counts() -> bool with Mut, Div {
+    let n_elem = 8
+
+    var mesh: FEMesh1D = FEMesh1D {
+        nodes: [0.0; 256], n_nodes: 0,
+        elements: [0; 512], n_elem: 0, nodes_per_elem: 2
+    }
+    fem_mesh_1d_uniform(0.0, 10.0, n_elem, &!mesh)
+
+    // n_nodes should be n_elem + 1 = 9
+    if mesh.n_nodes != n_elem + 1 { return false }
+
+    // n_elem should be 8
+    if mesh.n_elem != n_elem { return false }
+
+    // nodes_per_elem should be 2
+    if mesh.nodes_per_elem != 2 { return false }
+
+    // Check first and last node positions
+    let tol = 1.0e-6
+    if fe_abs(mesh.nodes[0] - 0.0) > tol { return false }
+    if fe_abs(mesh.nodes[n_elem] - 10.0) > tol { return false }
+
+    // Check uniform spacing: h = 10/8 = 1.25
+    let h = 10.0 / (n_elem as f64)
+    var i = 0
+    while i < mesh.n_nodes {
+        let expected = (i as f64) * h
+        if fe_abs(mesh.nodes[i] - expected) > tol { return false }
+        i = i + 1
+    }
+
+    true
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    var pass = 0
+    var fail = 0
+
+    println("=== FEM Module Tests ===")
+    println("")
+
+    // Test 1
+    print("Test  1: 1D stiffness symmetry ............... ")
+    if test_1d_stiffness_symmetry() { println("PASS"); pass = pass + 1 }
+    else { println("FAIL"); fail = fail + 1 }
+
+    // Test 2
+    print("Test  2: 1D stiffness trace = 2*EA/L ......... ")
+    if test_1d_stiffness_trace() { println("PASS"); pass = pass + 1 }
+    else { println("FAIL"); fail = fail + 1 }
+
+    // Test 3
+    print("Test  3: 1D mass matrix positive entries ...... ")
+    if test_1d_mass_positive() { println("PASS"); pass = pass + 1 }
+    else { println("FAIL"); fail = fail + 1 }
+
+    // Test 4
+    print("Test  4: Triangle area = 0.5 ................. ")
+    if test_tri_area() { println("PASS"); pass = pass + 1 }
+    else { println("FAIL"); fail = fail + 1 }
+
+    // Test 5
+    print("Test  5: Shape functions sum to 1 ............ ")
+    if test_tri_shape_partition_of_unity() { println("PASS"); pass = pass + 1 }
+    else { println("FAIL"); fail = fail + 1 }
+
+    // Test 6
+    print("Test  6: Shape functions at vertices ......... ")
+    if test_tri_shape_at_vertices() { println("PASS"); pass = pass + 1 }
+    else { println("FAIL"); fail = fail + 1 }
+
+    // Test 7
+    print("Test  7: Plane stress matrix symmetry ........ ")
+    if test_plane_stress_symmetry() { println("PASS"); pass = pass + 1 }
+    else { println("FAIL"); fail = fail + 1 }
+
+    // Test 8
+    print("Test  8: 1D bar exact solution ............... ")
+    if test_1d_bar_exact() { println("PASS"); pass = pass + 1 }
+    else { println("FAIL"); fail = fail + 1 }
+
+    // Test 9
+    print("Test  9: 2D patch test ....................... ")
+    if test_2d_patch_test() { println("PASS"); pass = pass + 1 }
+    else { println("FAIL"); fail = fail + 1 }
+
+    // Test 10
+    print("Test 10: CG solver matches direct solver ..... ")
+    if test_cg_matches_direct() { println("PASS"); pass = pass + 1 }
+    else { println("FAIL"); fail = fail + 1 }
+
+    // Test 11
+    print("Test 11: Dirichlet penalty BC dominance ...... ")
+    if test_dirichlet_penalty() { println("PASS"); pass = pass + 1 }
+    else { println("FAIL"); fail = fail + 1 }
+
+    // Test 12
+    print("Test 12: 1D mesh node/element counts ......... ")
+    if test_mesh_1d_counts() { println("PASS"); pass = pass + 1 }
+    else { println("FAIL"); fail = fail + 1 }
+
+    println("")
+    print("Passed: "); println(pass as string)
+    print("Failed: "); println(fail as string)
+    println("")
+    if fail == 0 {
+        println("ALL 12 TESTS PASSED")
+        return 0
+    } else {
+        println("SOME TESTS FAILED")
+        return 1
+    }
+}

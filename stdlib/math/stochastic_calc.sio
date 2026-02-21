@@ -1,0 +1,1104 @@
+// stdlib/math/stochastic_calc.sio — Stochastic calculus and SDEs
+//
+// Pure Sounio implementations:
+//   Linear congruential PRNG with Box-Muller normal generation
+//   Euler-Maruyama scheme (weak order 1.0)
+//   Milstein scheme (strong order 1.0)
+//   Stratonovich-Heun predictor-corrector
+//   Geometric Brownian Motion (exact + Euler)
+//   Ornstein-Uhlenbeck process (exact + Euler)
+//   Monte Carlo simulation with terminal statistics
+//   Strong error estimation between fine/coarse paths
+//   Path analysis: time-average, running max, quadratic variation
+//   Ito <-> Stratonovich drift corrections
+//   Multi-dimensional Euler-Maruyama (flat storage, dim components per step)
+//
+// References:
+//   Kloeden & Platen (1999): "Numerical Solution of Stochastic DEs"
+//   Higham (2001): "An Algorithmic Introduction to Numerical Simulation of SDEs"
+//   Oksendal (2003): "Stochastic Differential Equations"
+//   Glasserman (2003): "Monte Carlo Methods in Financial Engineering"
+
+// =============================================================================
+// Helpers (all prefixed sc_ to avoid name collisions)
+// =============================================================================
+
+fn sc_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn sc_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+fn sc_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+
+fn sc_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 25 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn sc_exp(x: f64) -> f64 with Mut, Div {
+    // Range reduction: exp(x) = 2^k * exp(r) where x = k*ln2 + r, |r| <= ln2/2
+    let ln2 = 0.6931471805599453
+    let inv_ln2 = 1.4426950408889634
+
+    // Clamp to avoid overflow/underflow
+    if x > 709.0 { return 1.0e308 }
+    if x < -709.0 { return 0.0 }
+
+    // Compute k = round(x / ln2)
+    var k_f = x * inv_ln2
+    var k: i64 = 0
+    if k_f >= 0.0 { k = (k_f + 0.5) as i64 } else { k = (k_f - 0.5) as i64 }
+
+    let r = x - (k as f64) * ln2
+
+    // Taylor series for exp(r), |r| <= ln2/2 ~ 0.347
+    var sum = 1.0
+    var term = 1.0
+    var n = 1
+    while n <= 20 {
+        term = term * r / (n as f64)
+        sum = sum + term
+        n = n + 1
+    }
+
+    // Multiply by 2^k using repeated squaring
+    var result = sum
+    if k > 0 {
+        var j: i64 = 0
+        while j < k { result = result * 2.0; j = j + 1 }
+    } else if k < 0 {
+        var j: i64 = 0
+        while j < (0 - k) { result = result * 0.5; j = j + 1 }
+    }
+    result
+}
+
+fn sc_ln(x: f64) -> f64 with Mut, Div, Panic {
+    // ln(x) via Newton iteration on exp(y) = x
+    if x <= 0.0 { return 0.0 - 1.0e308 }
+    if x == 1.0 { return 0.0 }
+
+    // Initial guess using range reduction: x = m * 2^e, ln(x) = ln(m) + e*ln(2)
+    let ln2 = 0.6931471805599453
+    var m = x
+    var e: i64 = 0
+    while m > 2.0 { m = m * 0.5; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+
+    // ln(m) for m in [0.5, 2] using series around 1: ln(1+u) = u - u^2/2 + u^3/3 - ...
+    let u = m - 1.0
+    var sum = 0.0
+    var term = u
+    var n = 1
+    while n <= 30 {
+        sum = sum + term / (n as f64)
+        term = 0.0 - term * u
+        n = n + 1
+    }
+
+    sum + (e as f64) * ln2
+}
+
+fn sc_sin(x: f64) -> f64 with Mut, Div {
+    // Reduce to [-pi, pi]
+    let tp = 6.28318530717958647692
+    var a = x
+    while a >= tp { a = a - tp }
+    while a < 0.0 { a = a + tp }
+    if a > 3.14159265358979323846 { a = a - tp }
+    let a2 = a * a
+    var sum = a
+    var term = a
+    var n = 1
+    while n < 18 {
+        term = 0.0 - term * a2 / ((2 * n) * (2 * n + 1)) as f64
+        sum = sum + term
+        n = n + 1
+    }
+    sum
+}
+
+fn sc_cos(x: f64) -> f64 with Mut, Div {
+    sc_sin(x + 1.57079632679489661923)
+}
+
+fn sc_pi() -> f64 { 3.14159265358979323846 }
+
+fn sc_floor_i64(x: f64) -> i64 {
+    let n = x as i64
+    if (n as f64) > x { n - 1 } else { n }
+}
+
+// =============================================================================
+// Structs
+// =============================================================================
+
+// Single-dimensional SDE path with up to 4096 time steps.
+// x[i] stores the solution at time t_start + i * (t_end - t_start) / n_steps.
+struct SDEPath {
+    t_start: f64,
+    t_end: f64,
+    x: [f64; 4096],
+    n_steps: i32
+}
+
+// Multi-dimensional SDE path with flat storage.
+// x[i * dim + d] stores the d-th component at time step i.
+// Requires dim * n_steps <= 4096.
+struct SDEPathND {
+    t_start: f64,
+    t_end: f64,
+    x: [f64; 4096],
+    dim: i32,
+    n_steps: i32
+}
+
+// Terminal statistics from Monte Carlo simulation.
+struct SDEStats {
+    mean: f64,
+    variance: f64,
+    std_dev: f64,
+    n_paths: i32
+}
+
+// =============================================================================
+// Inlined LCG PRNG + Box-Muller
+// =============================================================================
+
+// Linear congruential generator: state = (a * state + c) mod m.
+// Uses the Numerical Recipes LCG parameters:
+//   a = 1664525, c = 1013904223, m = 2^32 (implicit via i64 masking).
+fn sc_lcg_next(state: &!i64) -> i64 with Mut {
+    // Constants from Knuth / Numerical Recipes
+    let a: i64 = 1664525
+    let c: i64 = 1013904223
+    let mask: i64 = 4294967295   // 2^32 - 1
+    state[0] = (a * state[0] + c) & mask
+    state[0]
+}
+
+// Uniform random in [0, 1) from LCG.
+fn sc_lcg_uniform(state: &!i64) -> f64 with Mut {
+    let val = sc_lcg_next(state)
+    // Divide by 2^32 to get [0, 1)
+    (val as f64) / 4294967296.0
+}
+
+// Standard normal N(0,1) via Box-Muller transform.
+// Generates two normals per call but discards one for simplicity.
+// Z = sqrt(-2 * ln(U1)) * cos(2 * pi * U2)
+fn sc_box_muller(state: &!i64) -> f64 with Mut, Div {
+    // Ensure U1 is bounded away from 0 to avoid ln(0)
+    var u1 = sc_lcg_uniform(state)
+    while u1 < 1.0e-10 { u1 = sc_lcg_uniform(state) }
+    let u2 = sc_lcg_uniform(state)
+
+    let r = sc_sqrt(0.0 - 2.0 * sc_ln(u1))
+    let theta = 2.0 * sc_pi() * u2
+    r * sc_cos(theta)
+}
+
+// =============================================================================
+// Core SDE Solvers
+// =============================================================================
+
+// Euler-Maruyama scheme for scalar SDE:
+//   dX = a(t, X) dt + b(t, X) dW
+// Weak order 1.0, strong order 0.5.
+//   X_{n+1} = X_n + a(t_n, X_n) * dt + b(t_n, X_n) * dW_n
+// where dW_n ~ N(0, dt).
+fn sde_euler_maruyama(
+    drift: fn(f64, f64) -> f64 with Mut, Div, Panic,
+    diffusion: fn(f64, f64) -> f64 with Mut, Div, Panic,
+    x0: f64, t0: f64, t_end: f64, n_steps: i32, seed: i64,
+    path: &!SDEPath
+) with Mut, Div, Panic {
+    path.t_start = t0
+    path.t_end = t_end
+    path.n_steps = n_steps
+
+    let dt = (t_end - t0) / (n_steps as f64)
+    let sqrt_dt = sc_sqrt(dt)
+
+    var rng_state: i64 = seed
+    path.x[0] = x0
+
+    var i = 0
+    while i < n_steps {
+        let t = t0 + (i as f64) * dt
+        let x = path.x[i]
+        let dW = sqrt_dt * sc_box_muller(&!rng_state)
+
+        // Euler-Maruyama update
+        path.x[i + 1] = x + drift(t, x) * dt + diffusion(t, x) * dW
+        i = i + 1
+    }
+}
+
+// Milstein scheme for scalar SDE:
+//   dX = a(t, X) dt + b(t, X) dW
+// Strong order 1.0. Requires the derivative b'(t, x) = db/dx.
+//   X_{n+1} = X_n + a*dt + b*dW + 0.5*b*b'*(dW^2 - dt)
+fn sde_milstein(
+    drift: fn(f64, f64) -> f64 with Mut, Div, Panic,
+    diffusion: fn(f64, f64) -> f64 with Mut, Div, Panic,
+    diff_prime: fn(f64, f64) -> f64 with Mut, Div, Panic,
+    x0: f64, t0: f64, t_end: f64, n_steps: i32, seed: i64,
+    path: &!SDEPath
+) with Mut, Div, Panic {
+    path.t_start = t0
+    path.t_end = t_end
+    path.n_steps = n_steps
+
+    let dt = (t_end - t0) / (n_steps as f64)
+    let sqrt_dt = sc_sqrt(dt)
+
+    var rng_state: i64 = seed
+    path.x[0] = x0
+
+    var i = 0
+    while i < n_steps {
+        let t = t0 + (i as f64) * dt
+        let x = path.x[i]
+        let dW = sqrt_dt * sc_box_muller(&!rng_state)
+
+        let a_val = drift(t, x)
+        let b_val = diffusion(t, x)
+        let bp_val = diff_prime(t, x)
+
+        // Milstein correction: 0.5 * b * b' * (dW^2 - dt)
+        let milstein_term = 0.5 * b_val * bp_val * (dW * dW - dt)
+
+        path.x[i + 1] = x + a_val * dt + b_val * dW + milstein_term
+        i = i + 1
+    }
+}
+
+// Stratonovich-Heun predictor-corrector scheme:
+//   Predictor: X_bar = X_n + a(t, X_n)*dt + b(t, X_n)*dW
+//   Corrector: X_{n+1} = X_n + a(t, X_n)*dt
+//              + 0.5*(b(t, X_n) + b(t+dt, X_bar))*dW
+// This scheme is consistent with the Stratonovich interpretation.
+fn sde_heun(
+    drift: fn(f64, f64) -> f64 with Mut, Div, Panic,
+    diffusion: fn(f64, f64) -> f64 with Mut, Div, Panic,
+    x0: f64, t0: f64, t_end: f64, n_steps: i32, seed: i64,
+    path: &!SDEPath
+) with Mut, Div, Panic {
+    path.t_start = t0
+    path.t_end = t_end
+    path.n_steps = n_steps
+
+    let dt = (t_end - t0) / (n_steps as f64)
+    let sqrt_dt = sc_sqrt(dt)
+
+    var rng_state: i64 = seed
+    path.x[0] = x0
+
+    var i = 0
+    while i < n_steps {
+        let t = t0 + (i as f64) * dt
+        let x = path.x[i]
+        let dW = sqrt_dt * sc_box_muller(&!rng_state)
+
+        let a_val = drift(t, x)
+        let b_val = diffusion(t, x)
+
+        // Predictor (Euler step)
+        let x_bar = x + a_val * dt + b_val * dW
+
+        // Corrector: average diffusion at both endpoints
+        let b_bar = diffusion(t + dt, x_bar)
+        path.x[i + 1] = x + a_val * dt + 0.5 * (b_val + b_bar) * dW
+
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Specific Processes: Geometric Brownian Motion
+// =============================================================================
+
+// Geometric Brownian Motion — exact (analytic) solution.
+//   dS = mu * S * dt + sigma * S * dW
+//   S(t) = S0 * exp((mu - sigma^2/2)*t + sigma*W(t))
+// Accumulates Wiener increments to build W(t_k).
+fn gbm_exact(
+    S0: f64, mu: f64, sigma: f64,
+    t_end: f64, n_steps: i32, seed: i64,
+    path: &!SDEPath
+) with Mut, Div, Panic {
+    path.t_start = 0.0
+    path.t_end = t_end
+    path.n_steps = n_steps
+
+    let dt = t_end / (n_steps as f64)
+    let sqrt_dt = sc_sqrt(dt)
+    let drift_coeff = mu - 0.5 * sigma * sigma
+
+    var rng_state: i64 = seed
+    path.x[0] = S0
+
+    // Accumulate Wiener path W(t_k) = sum of dW_j for j < k
+    var W = 0.0
+    var i = 0
+    while i < n_steps {
+        let dW = sqrt_dt * sc_box_muller(&!rng_state)
+        W = W + dW
+        let t = (i + 1) as f64 * dt
+        path.x[i + 1] = S0 * sc_exp(drift_coeff * t + sigma * W)
+        i = i + 1
+    }
+}
+
+// Geometric Brownian Motion via Euler-Maruyama (for comparison/convergence tests).
+//   X_{n+1} = X_n + mu*X_n*dt + sigma*X_n*dW
+fn gbm_euler(
+    S0: f64, mu: f64, sigma: f64,
+    t_end: f64, n_steps: i32, seed: i64,
+    path: &!SDEPath
+) with Mut, Div, Panic {
+    path.t_start = 0.0
+    path.t_end = t_end
+    path.n_steps = n_steps
+
+    let dt = t_end / (n_steps as f64)
+    let sqrt_dt = sc_sqrt(dt)
+
+    var rng_state: i64 = seed
+    path.x[0] = S0
+
+    var i = 0
+    while i < n_steps {
+        let x = path.x[i]
+        let dW = sqrt_dt * sc_box_muller(&!rng_state)
+        path.x[i + 1] = x + mu * x * dt + sigma * x * dW
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Specific Processes: Ornstein-Uhlenbeck
+// =============================================================================
+
+// Ornstein-Uhlenbeck exact solution using the conditional Gaussian distribution.
+//   dX = theta * (mu - X) * dt + sigma * dW
+//   X(t_{k+1}) | X(t_k) ~ N(mean_k, var_k) where:
+//     mean_k = mu + (X(t_k) - mu) * exp(-theta * dt)
+//     var_k  = sigma^2 * (1 - exp(-2*theta*dt)) / (2*theta)
+fn ou_exact(
+    x0: f64, theta: f64, mu: f64, sigma: f64,
+    t_end: f64, n_steps: i32, seed: i64,
+    path: &!SDEPath
+) with Mut, Div, Panic {
+    path.t_start = 0.0
+    path.t_end = t_end
+    path.n_steps = n_steps
+
+    let dt = t_end / (n_steps as f64)
+
+    // Precompute transition parameters
+    let decay = sc_exp(0.0 - theta * dt)
+    let var_factor = sigma * sigma * (1.0 - sc_exp(0.0 - 2.0 * theta * dt)) / (2.0 * theta)
+    let std_factor = sc_sqrt(var_factor)
+
+    var rng_state: i64 = seed
+    path.x[0] = x0
+
+    var i = 0
+    while i < n_steps {
+        let x = path.x[i]
+        let z = sc_box_muller(&!rng_state)
+
+        // Conditional Gaussian: X_{k+1} = mean + std * Z
+        let mean_k = mu + (x - mu) * decay
+        path.x[i + 1] = mean_k + std_factor * z
+        i = i + 1
+    }
+}
+
+// Ornstein-Uhlenbeck via Euler-Maruyama (for convergence comparison).
+//   X_{n+1} = X_n + theta*(mu - X_n)*dt + sigma*dW
+fn ou_euler(
+    x0: f64, theta: f64, mu: f64, sigma: f64,
+    t_end: f64, n_steps: i32, seed: i64,
+    path: &!SDEPath
+) with Mut, Div, Panic {
+    path.t_start = 0.0
+    path.t_end = t_end
+    path.n_steps = n_steps
+
+    let dt = t_end / (n_steps as f64)
+    let sqrt_dt = sc_sqrt(dt)
+
+    var rng_state: i64 = seed
+    path.x[0] = x0
+
+    var i = 0
+    while i < n_steps {
+        let x = path.x[i]
+        let dW = sqrt_dt * sc_box_muller(&!rng_state)
+        path.x[i + 1] = x + theta * (mu - x) * dt + sigma * dW
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Monte Carlo Simulation
+// =============================================================================
+
+// Run n_paths independent Euler-Maruyama simulations and compute terminal
+// value statistics (mean, variance, std_dev).
+// Each path uses seed + path_index as its RNG seed for reproducibility.
+fn sde_monte_carlo(
+    drift: fn(f64, f64) -> f64 with Mut, Div, Panic,
+    diffusion: fn(f64, f64) -> f64 with Mut, Div, Panic,
+    x0: f64, t0: f64, t_end: f64, n_steps: i32, n_paths: i32, seed: i64,
+    stats: &!SDEStats
+) with Mut, Div, Panic {
+    let dt = (t_end - t0) / (n_steps as f64)
+    let sqrt_dt = sc_sqrt(dt)
+
+    var sum_x = 0.0
+    var sum_x2 = 0.0
+
+    var p = 0
+    while p < n_paths {
+        // Each path gets a distinct seed
+        var rng_state: i64 = seed + (p as i64) * 1000003
+
+        var x = x0
+        var i = 0
+        while i < n_steps {
+            let t = t0 + (i as f64) * dt
+            let dW = sqrt_dt * sc_box_muller(&!rng_state)
+            x = x + drift(t, x) * dt + diffusion(t, x) * dW
+            i = i + 1
+        }
+
+        // Accumulate terminal value
+        sum_x = sum_x + x
+        sum_x2 = sum_x2 + x * x
+        p = p + 1
+    }
+
+    let n_f = n_paths as f64
+    let mean = sum_x / n_f
+    let variance = sum_x2 / n_f - mean * mean
+
+    stats.mean = mean
+    stats.variance = variance
+    stats.std_dev = sc_sqrt(sc_max(variance, 0.0))
+    stats.n_paths = n_paths
+}
+
+// =============================================================================
+// Path Analysis
+// =============================================================================
+
+// Strong error between a fine and coarse path.
+// Compares paths at the coarse grid points.
+// Returns max |X_fine(t_k) - X_coarse(t_k)| where t_k are coarse time points.
+// Assumes fine.n_steps is a multiple of coarse.n_steps.
+fn sde_strong_error(path_fine: &SDEPath, path_coarse: &SDEPath) -> f64 with Mut, Div {
+    let ratio = path_fine.n_steps / path_coarse.n_steps
+    var max_err = 0.0
+
+    var k = 0
+    while k <= path_coarse.n_steps {
+        let fine_idx = k * ratio
+        let err = sc_abs(path_fine.x[fine_idx] - path_coarse.x[k])
+        if err > max_err { max_err = err }
+        k = k + 1
+    }
+    max_err
+}
+
+// Time-average of a path: (1/T) * integral X(t) dt
+// approximated by trapezoidal rule.
+fn sde_path_mean(path: &SDEPath) -> f64 with Mut, Div {
+    let n = path.n_steps
+    if n <= 0 { return path.x[0] }
+
+    let dt = (path.t_end - path.t_start) / (n as f64)
+    var sum = 0.5 * path.x[0] + 0.5 * path.x[n]
+
+    var i = 1
+    while i < n {
+        sum = sum + path.x[i]
+        i = i + 1
+    }
+
+    sum * dt / (path.t_end - path.t_start)
+}
+
+// Running maximum of the path: max_{k=0..n} X(t_k).
+fn sde_path_max(path: &SDEPath) -> f64 with Mut {
+    var mx = path.x[0]
+    var i = 1
+    while i <= path.n_steps {
+        if path.x[i] > mx { mx = path.x[i] }
+        i = i + 1
+    }
+    mx
+}
+
+// Running minimum of the path: min_{k=0..n} X(t_k).
+fn sde_path_min(path: &SDEPath) -> f64 with Mut {
+    var mn = path.x[0]
+    var i = 1
+    while i <= path.n_steps {
+        if path.x[i] < mn { mn = path.x[i] }
+        i = i + 1
+    }
+    mn
+}
+
+// Quadratic variation of the path: sum_{i=0}^{n-1} (X_{i+1} - X_i)^2.
+// For Brownian motion, this should converge to diffusion^2 * T as n -> inf.
+fn sde_path_quadratic_var(path: &SDEPath) -> f64 with Mut, Div {
+    var qv = 0.0
+    var i = 0
+    while i < path.n_steps {
+        let dx = path.x[i + 1] - path.x[i]
+        qv = qv + dx * dx
+        i = i + 1
+    }
+    qv
+}
+
+// Terminal value of the path: X(t_end).
+fn sde_path_terminal(path: &SDEPath) -> f64 {
+    path.x[path.n_steps]
+}
+
+// =============================================================================
+// Ito <-> Stratonovich Corrections
+// =============================================================================
+
+// Ito-to-Stratonovich drift correction.
+// If the Ito SDE is dX = a_ito * dt + b * dW,
+// the equivalent Stratonovich SDE is dX = a_strat * dt + b o dW where:
+//   a_strat = a_ito + 0.5 * b(t,x) * b'(t,x)
+// This function returns the correction term: 0.5 * b * b'.
+fn ito_to_strat_correction(
+    diffusion: fn(f64, f64) -> f64 with Mut, Div, Panic,
+    diff_prime: fn(f64, f64) -> f64 with Mut, Div, Panic,
+    t: f64, x: f64
+) -> f64 with Mut, Div, Panic {
+    let b_val = diffusion(t, x)
+    let bp_val = diff_prime(t, x)
+    0.5 * b_val * bp_val
+}
+
+// Stratonovich-to-Ito drift correction.
+// If the Stratonovich SDE is dX = a_strat * dt + b o dW,
+// the equivalent Ito SDE is dX = a_ito * dt + b * dW where:
+//   a_ito = a_strat - 0.5 * b(t,x) * b'(t,x)
+// This function returns the correction term: -0.5 * b * b'.
+fn strat_to_ito_correction(
+    diffusion: fn(f64, f64) -> f64 with Mut, Div, Panic,
+    diff_prime: fn(f64, f64) -> f64 with Mut, Div, Panic,
+    t: f64, x: f64
+) -> f64 with Mut, Div, Panic {
+    let b_val = diffusion(t, x)
+    let bp_val = diff_prime(t, x)
+    0.0 - 0.5 * b_val * bp_val
+}
+
+// =============================================================================
+// Multi-dimensional Euler-Maruyama
+// =============================================================================
+
+// Euler-Maruyama for a dim-dimensional SDE system:
+//   dX_d = drift_d(X, t) * dt + diffusion_d(X, t) * dW_d
+// Each component has its own independent Wiener increment.
+//
+// drift(dim, x_state, t, out): writes drift vector into out[0..dim-1]
+// diffusion(dim, x_state, t, out): writes diffusion vector into out[0..dim-1]
+// x0[0..dim-1]: initial condition
+//
+// Path stored as flat array: path.x[step * dim + d] = X_d(t_step).
+fn sde_euler_nd(
+    drift: fn(i32, &[f64; 64], f64, &![f64; 64]) with Mut, Div, Panic,
+    diffusion: fn(i32, &[f64; 64], f64, &![f64; 64]) with Mut, Div, Panic,
+    x0: &[f64; 64], dim: i32, t0: f64, t_end: f64, n_steps: i32, seed: i64,
+    path: &!SDEPathND
+) with Mut, Div, Panic {
+    path.t_start = t0
+    path.t_end = t_end
+    path.dim = dim
+    path.n_steps = n_steps
+
+    let dt = (t_end - t0) / (n_steps as f64)
+    let sqrt_dt = sc_sqrt(dt)
+
+    var rng_state: i64 = seed
+
+    // Store initial condition at step 0
+    var d = 0
+    while d < dim {
+        path.x[d] = x0[d]
+        d = d + 1
+    }
+
+    // Temporary arrays for current state, drift, and diffusion vectors
+    var x_cur: [f64; 64] = [0.0; 64]
+    var a_vec: [f64; 64] = [0.0; 64]
+    var b_vec: [f64; 64] = [0.0; 64]
+
+    var i = 0
+    while i < n_steps {
+        let t = t0 + (i as f64) * dt
+
+        // Copy current state from path storage
+        d = 0
+        while d < dim {
+            x_cur[d] = path.x[i * dim + d]
+            d = d + 1
+        }
+
+        // Evaluate drift and diffusion vectors
+        drift(dim, &x_cur, t, &!a_vec)
+        diffusion(dim, &x_cur, t, &!b_vec)
+
+        // Update each component with independent Wiener increments
+        d = 0
+        while d < dim {
+            let dW = sqrt_dt * sc_box_muller(&!rng_state)
+            path.x[(i + 1) * dim + d] = x_cur[d] + a_vec[d] * dt + b_vec[d] * dW
+            d = d + 1
+        }
+
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Multi-dimensional Path Analysis
+// =============================================================================
+
+// Extract the d-th component from a multi-dimensional path into a 1D path.
+fn sde_nd_extract(nd_path: &SDEPathND, d: i32, out: &!SDEPath) with Mut {
+    out.t_start = nd_path.t_start
+    out.t_end = nd_path.t_end
+    out.n_steps = nd_path.n_steps
+
+    var i = 0
+    while i <= nd_path.n_steps {
+        out.x[i] = nd_path.x[i * nd_path.dim + d]
+        i = i + 1
+    }
+}
+
+// Compute the Euclidean norm of the state vector at time step k.
+fn sde_nd_norm_at(nd_path: &SDEPathND, k: i32) -> f64 with Mut, Div {
+    var sum_sq = 0.0
+    var d = 0
+    while d < nd_path.dim {
+        let val = nd_path.x[k * nd_path.dim + d]
+        sum_sq = sum_sq + val * val
+        d = d + 1
+    }
+    sc_sqrt(sum_sq)
+}
+
+// =============================================================================
+// Advanced Solvers
+// =============================================================================
+
+// Stochastic Runge-Kutta (SRK) method of order 1.0 (strong).
+// A two-stage explicit method by Rossler (2010) for additive noise
+// (constant diffusion). Falls back to improved behavior for multiplicative noise.
+//   Stage 1: K1 = a(t, X_n)
+//   Predictor: X_hat = X_n + K1 * dt + b(t, X_n) * sqrt(dt)
+//   Stage 2: K2 = a(t + dt, X_hat)
+//   X_{n+1} = X_n + 0.5*(K1+K2)*dt + b(t, X_n)*dW
+fn sde_srk(
+    drift: fn(f64, f64) -> f64 with Mut, Div, Panic,
+    diffusion: fn(f64, f64) -> f64 with Mut, Div, Panic,
+    x0: f64, t0: f64, t_end: f64, n_steps: i32, seed: i64,
+    path: &!SDEPath
+) with Mut, Div, Panic {
+    path.t_start = t0
+    path.t_end = t_end
+    path.n_steps = n_steps
+
+    let dt = (t_end - t0) / (n_steps as f64)
+    let sqrt_dt = sc_sqrt(dt)
+
+    var rng_state: i64 = seed
+    path.x[0] = x0
+
+    var i = 0
+    while i < n_steps {
+        let t = t0 + (i as f64) * dt
+        let x = path.x[i]
+        let dW = sqrt_dt * sc_box_muller(&!rng_state)
+
+        let b_val = diffusion(t, x)
+        let k1 = drift(t, x)
+
+        // Predictor using sqrt(dt) supporting term
+        let x_hat = x + k1 * dt + b_val * sqrt_dt
+        let k2 = drift(t + dt, x_hat)
+
+        // Two-stage update
+        path.x[i + 1] = x + 0.5 * (k1 + k2) * dt + b_val * dW
+        i = i + 1
+    }
+}
+
+// Implicit Euler-Maruyama (drift-implicit) for stiff SDEs.
+// Solves X_{n+1} = X_n + a(t_{n+1}, X_{n+1})*dt + b(t_n, X_n)*dW
+// via fixed-point iteration on the implicit drift term.
+// max_iter controls the number of fixed-point iterations per step.
+fn sde_implicit_euler(
+    drift: fn(f64, f64) -> f64 with Mut, Div, Panic,
+    diffusion: fn(f64, f64) -> f64 with Mut, Div, Panic,
+    x0: f64, t0: f64, t_end: f64, n_steps: i32, seed: i64,
+    max_iter: i32,
+    path: &!SDEPath
+) with Mut, Div, Panic {
+    path.t_start = t0
+    path.t_end = t_end
+    path.n_steps = n_steps
+
+    let dt = (t_end - t0) / (n_steps as f64)
+    let sqrt_dt = sc_sqrt(dt)
+
+    var rng_state: i64 = seed
+    path.x[0] = x0
+
+    var i = 0
+    while i < n_steps {
+        let t = t0 + (i as f64) * dt
+        let t_next = t + dt
+        let x = path.x[i]
+        let dW = sqrt_dt * sc_box_muller(&!rng_state)
+
+        // Explicit diffusion term (evaluated at current point)
+        let stoch_part = diffusion(t, x) * dW
+
+        // Initial guess for X_{n+1} via explicit Euler
+        var x_next = x + drift(t, x) * dt + stoch_part
+
+        // Fixed-point iteration: x_next = x + a(t_next, x_next)*dt + stoch_part
+        var iter = 0
+        while iter < max_iter {
+            x_next = x + drift(t_next, x_next) * dt + stoch_part
+            iter = iter + 1
+        }
+
+        path.x[i + 1] = x_next
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Wiener Process Utilities
+// =============================================================================
+
+// Generate a standard Wiener process (Brownian motion) path.
+// W(0) = 0, W(t_{k+1}) = W(t_k) + sqrt(dt) * Z_k where Z_k ~ N(0,1).
+fn wiener_path(
+    t_end: f64, n_steps: i32, seed: i64,
+    path: &!SDEPath
+) with Mut, Div {
+    path.t_start = 0.0
+    path.t_end = t_end
+    path.n_steps = n_steps
+
+    let dt = t_end / (n_steps as f64)
+    let sqrt_dt = sc_sqrt(dt)
+
+    var rng_state: i64 = seed
+    path.x[0] = 0.0
+
+    var i = 0
+    while i < n_steps {
+        let dW = sqrt_dt * sc_box_muller(&!rng_state)
+        path.x[i + 1] = path.x[i] + dW
+        i = i + 1
+    }
+}
+
+// Brownian bridge: W(0) = a, W(T) = b, with correct conditional distribution.
+// At intermediate points, W(t_k) is drawn from the bridge distribution:
+//   W(t_k) | W(t_{k-1}), W(T) ~ N(mean, var) where
+//   mean = W(t_{k-1}) + (b - W(t_{k-1})) * dt / (T - t_{k-1})
+//   var  = dt * (T - t_k) / (T - t_{k-1})
+fn brownian_bridge(
+    a: f64, b: f64, t_end: f64, n_steps: i32, seed: i64,
+    path: &!SDEPath
+) with Mut, Div, Panic {
+    path.t_start = 0.0
+    path.t_end = t_end
+    path.n_steps = n_steps
+
+    let dt = t_end / (n_steps as f64)
+
+    var rng_state: i64 = seed
+    path.x[0] = a
+    path.x[n_steps] = b
+
+    // Fill intermediate points using conditional Gaussian
+    var i = 0
+    while i < n_steps - 1 {
+        let t_cur = (i as f64) * dt
+        let t_next = ((i + 1) as f64) * dt
+        let remaining = t_end - t_cur
+
+        // Conditional mean and variance
+        let cond_mean = path.x[i] + (b - path.x[i]) * dt / remaining
+        let cond_var = dt * (t_end - t_next) / remaining
+        let cond_std = sc_sqrt(sc_max(cond_var, 0.0))
+
+        let z = sc_box_muller(&!rng_state)
+        path.x[i + 1] = cond_mean + cond_std * z
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// Convergence Analysis Utilities
+// =============================================================================
+
+// Compute the weak error estimate: |E[g(X_T)] - reference|
+// by running multiple paths and comparing the sample mean of g(X_T).
+// Here g is the identity function g(x) = x, so it computes |E[X_T] - ref|.
+fn sde_weak_error(
+    drift: fn(f64, f64) -> f64 with Mut, Div, Panic,
+    diffusion: fn(f64, f64) -> f64 with Mut, Div, Panic,
+    x0: f64, t0: f64, t_end: f64, n_steps: i32,
+    n_paths: i32, seed: i64, reference: f64
+) -> f64 with Mut, Div, Panic {
+    let dt = (t_end - t0) / (n_steps as f64)
+    let sqrt_dt = sc_sqrt(dt)
+
+    var sum_terminal = 0.0
+    var p = 0
+    while p < n_paths {
+        var rng_state: i64 = seed + (p as i64) * 999983
+
+        var x = x0
+        var i = 0
+        while i < n_steps {
+            let t = t0 + (i as f64) * dt
+            let dW = sqrt_dt * sc_box_muller(&!rng_state)
+            x = x + drift(t, x) * dt + diffusion(t, x) * dW
+            i = i + 1
+        }
+        sum_terminal = sum_terminal + x
+        p = p + 1
+    }
+
+    let mean_terminal = sum_terminal / (n_paths as f64)
+    sc_abs(mean_terminal - reference)
+}
+
+// Compute the path increment covariance estimate between two consecutive
+// time steps. For Brownian motion increments, this should be near zero
+// (independent increments property).
+fn sde_increment_covariance(path: &SDEPath) -> f64 with Mut, Div {
+    let n = path.n_steps
+    if n < 2 { return 0.0 }
+
+    // Compute mean of increments
+    var sum_inc = 0.0
+    var i = 0
+    while i < n {
+        sum_inc = sum_inc + (path.x[i + 1] - path.x[i])
+        i = i + 1
+    }
+    let mean_inc = sum_inc / (n as f64)
+
+    // Compute covariance of consecutive increments
+    var sum_cov = 0.0
+    i = 0
+    while i < n - 1 {
+        let inc1 = path.x[i + 1] - path.x[i] - mean_inc
+        let inc2 = path.x[i + 2] - path.x[i + 1] - mean_inc
+        sum_cov = sum_cov + inc1 * inc2
+        i = i + 1
+    }
+    sum_cov / ((n - 1) as f64)
+}
+
+// =============================================================================
+// Moment Estimation
+// =============================================================================
+
+// Compute the k-th moment of the terminal value from Monte Carlo paths.
+// E[X_T^k] estimated by (1/n) * sum X_T(i)^k.
+fn sde_terminal_moment(
+    drift: fn(f64, f64) -> f64 with Mut, Div, Panic,
+    diffusion: fn(f64, f64) -> f64 with Mut, Div, Panic,
+    x0: f64, t0: f64, t_end: f64, n_steps: i32,
+    n_paths: i32, seed: i64, k: i32
+) -> f64 with Mut, Div, Panic {
+    let dt = (t_end - t0) / (n_steps as f64)
+    let sqrt_dt = sc_sqrt(dt)
+
+    var sum_moment = 0.0
+    var p = 0
+    while p < n_paths {
+        var rng_state: i64 = seed + (p as i64) * 1000033
+
+        var x = x0
+        var i = 0
+        while i < n_steps {
+            let t = t0 + (i as f64) * dt
+            let dW = sqrt_dt * sc_box_muller(&!rng_state)
+            x = x + drift(t, x) * dt + diffusion(t, x) * dW
+            i = i + 1
+        }
+
+        // Compute x^k via repeated multiplication
+        var x_pow = 1.0
+        var j = 0
+        while j < k { x_pow = x_pow * x; j = j + 1 }
+        sum_moment = sum_moment + x_pow
+        p = p + 1
+    }
+
+    sum_moment / (n_paths as f64)
+}
+
+// =============================================================================
+// Absorbed / Reflected Boundary Conditions
+// =============================================================================
+
+// Euler-Maruyama with absorbing boundary at x = barrier.
+// Once X hits the barrier (from above if barrier < x0, or below if barrier > x0),
+// X stays there for all subsequent steps.
+fn sde_euler_absorbed(
+    drift: fn(f64, f64) -> f64 with Mut, Div, Panic,
+    diffusion: fn(f64, f64) -> f64 with Mut, Div, Panic,
+    x0: f64, t0: f64, t_end: f64, n_steps: i32, seed: i64,
+    barrier: f64,
+    path: &!SDEPath
+) with Mut, Div, Panic {
+    path.t_start = t0
+    path.t_end = t_end
+    path.n_steps = n_steps
+
+    let dt = (t_end - t0) / (n_steps as f64)
+    let sqrt_dt = sc_sqrt(dt)
+    let above = x0 > barrier
+
+    var rng_state: i64 = seed
+    path.x[0] = x0
+    var absorbed = false
+
+    var i = 0
+    while i < n_steps {
+        if absorbed {
+            path.x[i + 1] = barrier
+        } else {
+            let t = t0 + (i as f64) * dt
+            let x = path.x[i]
+            let dW = sqrt_dt * sc_box_muller(&!rng_state)
+            let x_new = x + drift(t, x) * dt + diffusion(t, x) * dW
+
+            // Check if path crossed barrier
+            if above {
+                if x_new <= barrier { absorbed = true; path.x[i + 1] = barrier }
+                else { path.x[i + 1] = x_new }
+            } else {
+                if x_new >= barrier { absorbed = true; path.x[i + 1] = barrier }
+                else { path.x[i + 1] = x_new }
+            }
+        }
+        i = i + 1
+    }
+}
+
+// Euler-Maruyama with reflecting boundary at x = barrier.
+// If X crosses barrier, it is reflected back: X = 2*barrier - X.
+fn sde_euler_reflected(
+    drift: fn(f64, f64) -> f64 with Mut, Div, Panic,
+    diffusion: fn(f64, f64) -> f64 with Mut, Div, Panic,
+    x0: f64, t0: f64, t_end: f64, n_steps: i32, seed: i64,
+    barrier: f64, reflect_above: bool,
+    path: &!SDEPath
+) with Mut, Div, Panic {
+    path.t_start = t0
+    path.t_end = t_end
+    path.n_steps = n_steps
+
+    let dt = (t_end - t0) / (n_steps as f64)
+    let sqrt_dt = sc_sqrt(dt)
+
+    var rng_state: i64 = seed
+    path.x[0] = x0
+
+    var i = 0
+    while i < n_steps {
+        let t = t0 + (i as f64) * dt
+        let x = path.x[i]
+        let dW = sqrt_dt * sc_box_muller(&!rng_state)
+        var x_new = x + drift(t, x) * dt + diffusion(t, x) * dW
+
+        // Reflect if crossing barrier
+        if reflect_above {
+            // Reflect from above: if x_new > barrier, fold back
+            if x_new > barrier { x_new = 2.0 * barrier - x_new }
+        } else {
+            // Reflect from below: if x_new < barrier, fold back
+            if x_new < barrier { x_new = 2.0 * barrier - x_new }
+        }
+
+        path.x[i + 1] = x_new
+        i = i + 1
+    }
+}
+
+// =============================================================================
+// First Passage Time Estimation
+// =============================================================================
+
+// Estimate the first passage time (FPT) to a level 'barrier' via Monte Carlo.
+// Returns the mean first passage time across n_paths simulations.
+// If a path never hits the barrier within [t0, t_end], it contributes t_end.
+fn sde_first_passage_time(
+    drift: fn(f64, f64) -> f64 with Mut, Div, Panic,
+    diffusion: fn(f64, f64) -> f64 with Mut, Div, Panic,
+    x0: f64, t0: f64, t_end: f64, n_steps: i32,
+    barrier: f64, n_paths: i32, seed: i64
+) -> f64 with Mut, Div, Panic {
+    let dt = (t_end - t0) / (n_steps as f64)
+    let sqrt_dt = sc_sqrt(dt)
+    let above = x0 > barrier
+
+    var sum_fpt = 0.0
+    var p = 0
+    while p < n_paths {
+        var rng_state: i64 = seed + (p as i64) * 1000037
+        var x = x0
+        var fpt = t_end    // Default: never hit
+
+        var i = 0
+        var hit = false
+        while i < n_steps {
+            if hit == false {
+                let t = t0 + (i as f64) * dt
+                let dW = sqrt_dt * sc_box_muller(&!rng_state)
+                x = x + drift(t, x) * dt + diffusion(t, x) * dW
+
+                // Check crossing
+                if above {
+                    if x <= barrier { fpt = t + dt; hit = true }
+                } else {
+                    if x >= barrier { fpt = t + dt; hit = true }
+                }
+            }
+            i = i + 1
+        }
+
+        sum_fpt = sum_fpt + fpt
+        p = p + 1
+    }
+
+    sum_fpt / (n_paths as f64)
+}
