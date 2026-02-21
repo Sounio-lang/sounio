@@ -18,12 +18,18 @@ const requiredFiles = [
 
 const sourceChecks = [
   {
+    file: 'src/components/home/Hero.astro',
+    mustContain: [
+      'assets/original-artworks/pappou_hero',
+      'assets/original-artworks/yiayia_hero',
+      '/assets/stamps/emblem_badge_monochrome_on_navy.png',
+    ],
+  },
+  {
     file: 'src/pages/index.astro',
     mustContain: [
-      '/assets/original-artworks/pappou_hero',
-      '/assets/original-artworks/yiayia_hero',
       '/assets/emblem/emblem_badge_textperfect_optionC.svg',
-      '/assets/stamps/',
+      '/assets/stamps/stamp_monochrome_transparent.png',
     ],
   },
   {
