@@ -4,9 +4,10 @@ import SounioEffects
 import SounioTyping
 import SounioUnits
 import SounioRowPoly
+import SounioSemantics
 
 /-!
-# Sounio Formal Verification — Phase 8–10
+# Sounio Formal Verification — Phase 8–11
 
 Lean 4 formalization of key Sounio type-system components.
 No sorry. No Mathlib dependency. `lake build` completes in < 1 minute.
@@ -107,9 +108,28 @@ No sorry. No Mathlib dependency. `lake build` completes in < 1 minute.
 - Masking interaction: `mask_apply_comm`, `mask_concrete_single`,
   `handler_strips_added_effect`
 
+### `SounioSemantics` — Operational Semantics (Phase 11)
+
+**Defines:**
+- `IsValue`: CBV value predicate (λ-abstractions, pairs, boxes)
+- `subst`: capture-avoiding substitution on named terms
+- `Step`: small-step CBV reduction (11 rules: β, letP-β, letB-β, + congruences)
+- `MultiStep`: reflexive-transitive closure of Step
+- `NormalForm`: irreducible expression predicate
+
+**Proven (20 theorems):**
+- Substitution: `subst_var_hit/miss`, `subst_lam_shadow`, `subst_app/pair/box`
+- Stability: `value_irreducible` — values do not step
+- Normal forms: `value_is_normal`, `lam_normal`
+- **Determinism**: `step_deterministic` — CBV has at most one reduct
+- Multi-step: `multistep_one`, `multistep_trans`
+- Congruence: `multistep_app_left/right`, `multistep_pair_left/right`,
+  `multistep_box`, `multistep_letP`, `multistep_letB`
+- Evaluation: `eval_app_full`, `eval_letP_full`, `eval_letB_full`
+
 ## Out of scope
 
-- Operational semantics and progress/preservation
+- Progress and preservation (requires substitution lemma for linear types)
 - Epistemic type `Knowledge[T,ε]` (requires real-number analysis)
 - Causal type system formalization
 - Type uniqueness / inversion (requires determinism of Sub+Weak)

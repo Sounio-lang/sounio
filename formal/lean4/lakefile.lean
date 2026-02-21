@@ -19,4 +19,7 @@ lean_lib «SounioUnits» where
 lean_lib «SounioRowPoly» where
 
 @[default_target]
+lean_lib «SounioSemantics» where
+
+@[default_target]
 lean_lib «SounioFormal» where

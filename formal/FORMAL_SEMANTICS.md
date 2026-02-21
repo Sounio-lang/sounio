@@ -1,8 +1,8 @@
-# Sounio Formal Semantics — Phase 8–10 Reference
+# Sounio Formal Semantics — Phase 8–11 Reference
 
 Lean 4 formalization of the Sounio type system.
 Source: `formal/lean4/` — no Mathlib, no `sorry`, `lake build` < 1 min.
-6 libraries, ~2120 lines, ~191 theorems.
+7 libraries, ~2530 lines, ~211 theorems.
 
 ---
 
@@ -363,6 +363,28 @@ The Handle rule is formalised by `handler_reduces_effects`:
 | `mask_concrete_single` | Masking a singleton's effect yields pure |
 | `handler_strips_added_effect` | Handler strips added effect from `ρ ∪ {e}` (key handler rule) |
 
+### SounioSemantics — operational semantics (Phase 11)
+
+| Theorem | Informal statement |
+|---------|-------------------|
+| `subst_var_hit` | `x[x := v] = v` |
+| `subst_var_miss` | `y[x := v] = y` when `y ≠ x` |
+| `subst_lam_shadow` | `(λx.e)[x := v] = λx.e` (shadowing) |
+| `subst_app/pair/box` | Substitution distributes over app, pair, box |
+| `value_irreducible` | Values do not step (stability) |
+| `value_is_normal` | Values are normal forms |
+| `lam_normal` | Lambda abstractions are normal forms |
+| `step_deterministic` | CBV small-step is deterministic (at most one reduct) |
+| `multistep_one` | Single step lifts to multi-step |
+| `multistep_trans` | Multi-step is transitive |
+| `multistep_app_left/right` | Multi-step congruence for application |
+| `multistep_pair_left/right` | Multi-step congruence for pairs |
+| `multistep_box` | Multi-step congruence for box |
+| `multistep_letP/letB` | Multi-step congruence for let-pair and let-box |
+| `eval_app_full` | Full β-reduction: evaluate function, argument, then beta |
+| `eval_letP_full` | Full tensor elimination evaluation sequence |
+| `eval_letB_full` | Full bang elimination evaluation sequence |
+
 ---
 
 ## §5 References
@@ -375,3 +397,5 @@ The Handle rule is formalised by `handler_reduces_effects`:
 - Leijen, D. (2014). "Koka: Programming with Row Polymorphic Effect Types." *HOPE.*
 - Lindley, S. and Cheney, J. (2012). "Row-based Effect Types for Database Integration." *TLDI.*
 - Hillerström, D. and Lindley, S. (2016). "Liberating Effects with Rows and Handlers." *TyDe.*
+- Wright, A. and Felleisen, M. (1994). "A Syntactic Approach to Type Soundness." *I&C.*
+- Pierce, B. (2002). *Types and Programming Languages.* MIT Press.
