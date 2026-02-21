@@ -161,7 +161,14 @@ impl<'a> OwnershipChecker<'a> {
             }
 
             Stmt::Expr { expr, .. } => {
+                // NLL: snapshot borrow count before evaluating the expression so that
+                // any temporaries created (e.g. `&!x` as an argument) are released
+                // once the statement ends, rather than persisting until block close.
+                let snapshot = self.scopes.last().map(|s| s.borrow_count()).unwrap_or(0);
                 self.check_expr(expr, UseKind::Move);
+                if let Some(scope) = self.scopes.last_mut() {
+                    scope.end_borrows_from(snapshot);
+                }
             }
 
             Stmt::Assign { target, value, .. } => {

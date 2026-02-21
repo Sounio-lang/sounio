@@ -253,6 +253,18 @@ impl ScopeState {
         }
     }
 
+    /// Number of borrows currently tracked (used for statement-boundary NLL snapshots)
+    pub fn borrow_count(&self) -> usize {
+        self.borrows.len()
+    }
+
+    /// Release all borrows added since `from_idx` (statement-boundary NLL)
+    pub fn end_borrows_from(&mut self, from_idx: usize) {
+        for borrow in &mut self.borrows[from_idx..] {
+            borrow.active = false;
+        }
+    }
+
     pub fn active_borrows(&self, place: &Place) -> Vec<&BorrowState> {
         self.borrows
             .iter()

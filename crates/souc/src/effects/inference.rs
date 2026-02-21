@@ -383,6 +383,12 @@ impl<'a> EffectChecker<'a> {
         // Infer effects from body
         self.infer_block(&f.body);
 
+        // Auto-inference: if the function declares no `with` clause, effects are
+        // inferred implicitly and there is nothing to validate against.
+        if f.effects.is_empty() {
+            return;
+        }
+
         // Check that all inferred effects are declared
         for effect_name in &self.inferred.effects.clone() {
             if !self.declared.contains(effect_name) {
