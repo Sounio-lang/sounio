@@ -192,7 +192,26 @@ The Handle rule is formalised by `handler_reduces_effects`:
 | `no_weakening_lemma` | Linear/Relevant entries force non-zero usage |
 | `promotion_exhausted_any` | All-Unrestricted context is always exhausted (Bang-I) |
 
-### SounioEffects — effect row algebra
+### SounioLinear — distributive lattice and structural monotonicity
+
+| Theorem | Informal statement |
+|---------|-------------------|
+| `modality_meet_distrib` | `m ⊓ (n ⊔ k) = (m ⊓ n) ⊔ (m ⊓ k)` |
+| `modality_join_distrib` | `m ⊔ (n ⊓ k) = (m ⊔ n) ⊓ (m ⊔ k)` |
+| `contraction_monotone` | If `m₁ ≤ m₂` and `m₁` allows contraction, so does `m₂` |
+| `allowsWeakening_join` | Weakening is preserved under join |
+| `allowsContraction_join` | Contraction is preserved under join |
+| `mustUse_meet` | MustUse is preserved under meet |
+| `wellUsed_one_always` | Every modality accepts exactly-one usage |
+| `wellUsed_join_left` | If `m` accepts `u`, so does `m ⊔ n` |
+| `not_wellUsed_meet` | If `m` rejects `u`, so does `m ⊓ n` |
+| `usage_many_absorb_left` | `Many + u = Many` |
+| `usage_many_absorb_right` | `u + Many = Many` |
+| `usage_one_plus_one` | `One + One = Many` |
+| `usage_add_zero_iff` | `u + v = Zero ↔ u = Zero ∧ v = Zero` |
+| `usage_add_many_iff` | `u + v = Many ↔ u = Many ∨ v = Many ∨ (u = One ∧ v = One)` |
+
+### SounioEffects — effect row algebra (core)
 
 | Theorem | Informal statement |
 |---------|-------------------|
@@ -215,6 +234,58 @@ The Handle rule is formalised by `handler_reduces_effects`:
 | `effectSubrow_union_left/right` | `r₁ ⊆ r₁ ∪ r₂`, `r₂ ⊆ r₁ ∪ r₂` |
 | `effectSubrow_union_lub` | union is the least upper bound |
 | `mask_union_right` | `r₁ e = false → mask (r₁ ∪ r₂) e = r₁ ∪ mask r₂ e` |
+
+### SounioEffects — singleton membership and intersection
+
+| Theorem | Informal statement |
+|---------|-------------------|
+| `singleRow_member` | `e ∈ singleRow e` |
+| `singleRow_not_member` | `f ≠ e → f ∉ singleRow e` |
+| `memberOf_single_iff` | `(e ∈ singleRow f) ↔ e = f` |
+| `mask_single_other` | masking a different effect from a singleton is a no-op |
+| `memberOf_pure_false` | no effect belongs to the pure row |
+| `memberOf_union_iff` | `(e ∈ r₁ ∪ r₂) ↔ e ∈ r₁ ∨ e ∈ r₂` |
+| `memberOf_inter_iff` | `(e ∈ r₁ ∩ r₂) ↔ e ∈ r₁ ∧ e ∈ r₂` |
+| `pureRow_unique` | `(∀ e, e ∉ r) → r = ∅` |
+| `rowInter_comm` | `r₁ ∩ r₂ = r₂ ∩ r₁` |
+| `rowInter_assoc` | `(r₁ ∩ r₂) ∩ r₃ = r₁ ∩ (r₂ ∩ r₃)` |
+| `rowInter_idempotent` | `r ∩ r = r` |
+| `rowInter_pure_left/right` | `∅ ∩ r = ∅`, `r ∩ ∅ = ∅` |
+| `effectSubrow_inter_left/right` | `r₁ ∩ r₂ ⊆ r₁`, `r₁ ∩ r₂ ⊆ r₂` |
+| `effectSubrow_inter_glb` | intersection is the greatest lower bound |
+| `rowInter_union_distrib` | `r₁ ∩ (r₂ ∪ r₃) = (r₁ ∩ r₂) ∪ (r₁ ∩ r₃)` |
+| `rowUnion_inter_distrib` | `r₁ ∪ (r₂ ∩ r₃) = (r₁ ∪ r₂) ∩ (r₁ ∪ r₃)` |
+| `rowInter_union_absorb` | `r₁ ∩ (r₁ ∪ r₂) = r₁` |
+| `rowUnion_inter_absorb` | `r₁ ∪ (r₁ ∩ r₂) = r₁` |
+
+### SounioEffects — monotonicity, complement, all-effects, disjointness
+
+| Theorem | Informal statement |
+|---------|-------------------|
+| `effectSubrow_union_mono_left/right` | union is monotone in each argument |
+| `effectSubrow_mask_mono` | masking is monotone in the subrow order |
+| `effectSubrow_inter_mono_left` | intersection is monotone on the left |
+| `rowComplement_involution` | `¬¬r = r` (double complement) |
+| `rowComplement_union` | `¬(r₁ ∪ r₂) = ¬r₁ ∩ ¬r₂` (De Morgan) |
+| `rowComplement_inter` | `¬(r₁ ∩ r₂) = ¬r₁ ∪ ¬r₂` (De Morgan) |
+| `rowUnion_complement_full` | `r ∪ ¬r = ⊤` |
+| `rowInter_complement_pure` | `r ∩ ¬r = ∅` |
+| `effectSubrow_complement_antimono` | complement reverses the subrow order |
+| `effectSubrow_allEffects` | every row is a subrow of `⊤` |
+| `rowUnion_allEffects_left/right` | `⊤ ∪ r = ⊤`, `r ∪ ⊤ = ⊤` |
+| `rowInter_allEffects_left/right` | `⊤ ∩ r = r`, `r ∩ ⊤ = r` |
+| `rowComplement_pure_is_all` | `¬∅ = ⊤` |
+| `rowComplement_all_is_pure` | `¬⊤ = ∅` |
+| `rowDisjoint_comm` | disjointness is symmetric |
+| `rowDisjoint_pure_left/right` | `∅ ⊥ r`, `r ⊥ ∅` |
+| `rowDisjoint_single_absent` | `e ∉ r → {e} ⊥ r` |
+| `rowDisjoint_single_mask` | `{e} ⊥ mask r e` |
+| `rowDisjoint_union_inter` | `(r₁ ⊥ r₃) ∧ (r₂ ⊥ r₃) → (r₁ ∪ r₂) ⊥ r₃` |
+| `maskAll_pure` | applying handlers for all 10 effects yields the pure row |
+| `mask_union_left` | `r₁ e = false → mask (r₁ ∪ r₂) e = r₁ ∪ mask r₂ e` |
+| `mask_inter` | `mask (r₁ ∩ r₂) e = (mask r₁ e) ∩ (mask r₂ e)` |
+| `handler_chain_reduces` | `mask (mask r e₁) e₂ ⊆ r` |
+| `mask_union_single_superset` | `r ⊆ (mask r e) ∪ {e}` |
 
 ---
 

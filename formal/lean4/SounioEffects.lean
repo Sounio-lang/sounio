@@ -286,9 +286,13 @@ theorem singleRow_not_member (e f : Effect) (hne : f ≠ e) :
 
 /-- Membership in a singleton row iff equal to the target. -/
 theorem memberOf_single_iff (e f : Effect) :
-    e ∈ᵣ singleRow f ↔ e = f := by
-  show (if e = f then true else false) = true ↔ e = f
-  by_cases h : e = f <;> simp [h]
+    (e ∈ᵣ singleRow f) ↔ e = f := by
+  constructor
+  · intro h
+    have h' : singleRow f e = true := h
+    simp only [singleRow] at h'
+    by_cases heq : e = f <;> simp_all
+  · intro h; rw [h]; exact singleRow_member f
 
 /-- Masking a different effect from a singleton row is a no-op. -/
 theorem mask_single_other (e1 e2 : Effect) (hne : e1 ≠ e2) :
@@ -305,9 +309,16 @@ theorem memberOf_pure_false (e : Effect) : ¬(e ∈ᵣ pureRow) := by
 
 /-- Membership in a union iff membership in either component. -/
 theorem memberOf_union_iff (e : Effect) (r1 r2 : EffectRow) :
-    e ∈ᵣ rowUnion r1 r2 ↔ (e ∈ᵣ r1 ∨ e ∈ᵣ r2) := by
-  show r1 e || r2 e = true ↔ r1 e = true ∨ r2 e = true
-  cases r1 e <;> cases r2 e <;> simp
+    (e ∈ᵣ rowUnion r1 r2) ↔ ((e ∈ᵣ r1) ∨ (e ∈ᵣ r2)) := by
+  constructor
+  · intro h
+    have h' : (r1 e || r2 e) = true := h
+    cases hr1 : r1 e <;> cases hr2 : r2 e <;> simp_all [memberOf]
+  · intro h
+    show (r1 e || r2 e) = true
+    rcases h with h1 | h2
+    · simp [(show r1 e = true from h1)]
+    · simp [(show r2 e = true from h2)]
 
 /-- A row with no members is the pure row. -/
 theorem pureRow_unique (r : EffectRow) (h : ∀ e, ¬(e ∈ᵣ r)) : r = pureRow := by
@@ -345,9 +356,15 @@ theorem rowInter_pure_right (r : EffectRow) :
 
 /-- Membership in an intersection iff membership in both components. -/
 theorem memberOf_inter_iff (e : Effect) (r1 r2 : EffectRow) :
-    e ∈ᵣ rowInter r1 r2 ↔ (e ∈ᵣ r1 ∧ e ∈ᵣ r2) := by
-  show r1 e && r2 e = true ↔ r1 e = true ∧ r2 e = true
-  cases r1 e <;> cases r2 e <;> simp
+    (e ∈ᵣ rowInter r1 r2) ↔ ((e ∈ᵣ r1) ∧ (e ∈ᵣ r2)) := by
+  constructor
+  · intro h
+    have h' : (r1 e && r2 e) = true := h
+    cases hr1 : r1 e <;> cases hr2 : r2 e <;> simp_all [memberOf]
+  · intro h
+    show (r1 e && r2 e) = true
+    obtain ⟨h1, h2⟩ := h
+    simp [(show r1 e = true from h1), (show r2 e = true from h2)]
 
 /-- Intersection is a lower bound: r1 ∩ r2 ⊆ r1. -/
 theorem effectSubrow_inter_left (r1 r2 : EffectRow) :
@@ -562,12 +579,10 @@ theorem rowDisjoint_union_inter (r1 r2 r3 : EffectRow)
     rowDisjoint (rowUnion r1 r2) r3 := by
   unfold rowDisjoint at *
   funext e
-  have he1 : r1 e && r3 e = false := by
-    have := congrFun h1 e; simp [rowInter, pureRow] at this; exact this
-  have he2 : r2 e && r3 e = false := by
-    have := congrFun h2 e; simp [rowInter, pureRow] at this; exact this
-  simp only [rowInter, rowUnion, pureRow]
-  cases r1 e <;> cases r2 e <;> cases r3 e <;> simp_all
+  have he1 := congrFun h1 e
+  have he2 := congrFun h2 e
+  simp only [rowInter, pureRow, rowUnion] at he1 he2 ⊢
+  cases hr1 : r1 e <;> cases hr2 : r2 e <;> cases hr3 : r3 e <;> simp_all
 
 -- ================================================================
 -- §17. maskAll — Handle All Effects
