@@ -84,3 +84,34 @@ pub use gpu_quantum::{
     BatchedVQE, GpuBackend, GpuCircuit, GpuMemoryPool, GpuQuantumConfig, GpuStateVector,
     SingleQubitKernel, TwoQubitGateType, TwoQubitKernel,
 };
+
+// ============================================================================
+// High-level QML primitives (callable from interpreter builtins)
+// ============================================================================
+
+/// Compute the tensor product of two quantum states.
+///
+/// For pure states |ψ₁⟩ and |ψ₂⟩ this produces |ψ₁⟩ ⊗ |ψ₂⟩, whose amplitude
+/// vector has dimension dim(ψ₁) × dim(ψ₂).
+pub fn tensor_product(a: &StateVector, b: &StateVector) -> StateVector {
+    let dim_a = a.amplitudes.len();
+    let dim_b = b.amplitudes.len();
+    let mut amplitudes = Vec::with_capacity(dim_a * dim_b);
+    for ai in &a.amplitudes {
+        for bi in &b.amplitudes {
+            amplitudes.push(*ai * *bi);
+        }
+    }
+    StateVector {
+        amplitudes,
+        num_qubits: a.num_qubits + b.num_qubits,
+    }
+}
+
+/// Create a strongly-entangling QNN layer descriptor.
+///
+/// Returns a `VariationalLayer` configured with `num_qubits` qubits at
+/// `layer_index`, ready for insertion into a `VariationalCircuit`.
+pub fn qnn_layer(num_qubits: usize, layer_index: usize) -> VariationalLayer {
+    VariationalLayer::strongly_entangling(num_qubits, layer_index)
+}
