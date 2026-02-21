@@ -2620,8 +2620,7 @@ impl TypeChecker {
             self.first_knowledge_boundary_violation(&expected_expanded, &found_expanded);
         let expected_name = self.type_display_name(&expected_expanded);
         let found_name = self.type_display_name(&found_expanded);
-        let looks_like_named_ontology =
-            |name: &str| name.contains(':') && !name.contains("::");
+        let looks_like_named_ontology = |name: &str| name.contains(':') && !name.contains("::");
         let named_ontology_boundary =
             looks_like_named_ontology(&expected_name) && looks_like_named_ontology(&found_name);
         if let Some(message) = &knowledge_violation {
@@ -6190,7 +6189,7 @@ impl TypeChecker {
                 receiver,
                 method,
                 args,
-                ..
+                type_args,
             } => {
                 // First, check the receiver to get its type
                 let receiver_expr = self.check_expr(receiver, None)?;
@@ -6318,13 +6317,34 @@ impl TypeChecker {
                 // Determine return type based on method name and receiver type
                 let result_ty = self.get_method_return_type(&receiver_ty, method, &arg_exprs);
 
+                // Apply turbofish type args to method return type if present: `.method::<T>(args)`
+                let effective_result_ty = if !type_args.is_empty() {
+                    if let Some(generic_params) = self.fn_type_params.get(method).cloned() {
+                        let concrete_args: Vec<Type> = type_args
+                            .iter()
+                            .map(|te| self.lower_type_expr(te))
+                            .collect();
+                        let result_as_ty = self.hir_type_to_type(&result_ty);
+                        let subst = self.substitute_type_params(
+                            &result_as_ty,
+                            &generic_params,
+                            &concrete_args,
+                        );
+                        self.type_to_hir(&subst)
+                    } else {
+                        result_ty
+                    }
+                } else {
+                    result_ty
+                };
+
                 (
                     HirExprKind::MethodCall {
                         receiver: Box::new(receiver_expr),
                         method: method.clone(),
                         args: arg_exprs,
                     },
-                    result_ty,
+                    effective_result_ty,
                 )
             }
 
@@ -10474,7 +10494,9 @@ impl TypeChecker {
                     ..
                 },
                 // Allow &T where &!T expected (FFI leniency — shared ref satisfies exclusive ref)
-            ) if *m1 || m1 == m2 => self.types_compatible(i1, i2),
+                // Allow &!T where &T expected (standard subtyping: exclusive satisfies shared)
+                // and keep existing &T where &!T leniency for FFI compatibility
+            ) if *m1 || *m2 || m1 == m2 => self.types_compatible(i1, i2),
             (
                 Type::RawPointer {
                     mutable: m1,
@@ -10723,8 +10745,30 @@ impl TypeChecker {
                     ..
                 },
             ) => self.types_compatible(i1, i2),
+            // Integer type coercion: any integer type satisfies any other integer type.
+            // This allows i64 literals (the default) to match i32/usize parameters, etc.
+            (t1, t2) if Self::is_integer_type(t1) && Self::is_integer_type(t2) => true,
             _ => false,
         }
+    }
+
+    /// Returns `true` if `t` is any integer scalar type (signed or unsigned, any width).
+    fn is_integer_type(t: &Type) -> bool {
+        matches!(
+            t,
+            Type::I8
+                | Type::I16
+                | Type::I32
+                | Type::I64
+                | Type::I128
+                | Type::Isize
+                | Type::U8
+                | Type::U16
+                | Type::U32
+                | Type::U64
+                | Type::U128
+                | Type::Usize
+        )
     }
 }
 
