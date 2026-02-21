@@ -13,4 +13,10 @@ lean_lib «SounioEffects» where
 lean_lib «SounioTyping» where
 
 @[default_target]
+lean_lib «SounioUnits» where
+
+@[default_target]
+lean_lib «SounioRowPoly» where
+
+@[default_target]
 lean_lib «SounioFormal» where

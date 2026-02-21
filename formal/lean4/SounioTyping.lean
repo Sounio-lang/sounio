@@ -349,7 +349,7 @@ theorem typing_linear_app {Γ : TyCtx} {f a : Expr} {τ σ : Ty}
 /-- The identity function is typable at any type and any modality.
     `λ(x:τ)[m]. x` has type `τ →[m] τ` with no effects. -/
 theorem typing_identity (Γ : TyCtx) (τ : Ty) (m : Modality) (x : String)
-    (hnotIn : ∀ σ m', (x, σ, m') ∉ Γ) :
+    (_hnotIn : ∀ σ m', (x, σ, m') ∉ Γ) :
     Typing Γ (.lam x m τ (.var x)) (.Fun m τ τ) pureRow :=
   Typing.Lam (Typing.Var List.mem_cons_self)
 
@@ -361,5 +361,130 @@ theorem typing_const_fun {Γ : TyCtx} {e : Expr} {τ σ : Ty} {m : Modality}
     (he : Typing Γ e σ ρ) :
     Typing Γ (.lam x m τ e) (.Fun m τ σ) ρ :=
   Typing.Lam (Typing.Weak he hw)
+
+-- ================================================================
+-- §11. Double and Multiple Weakening
+-- ================================================================
+
+/-- Weakening by two variables at once (both must be weakenable). -/
+theorem typing_weaken_two {Γ : TyCtx} {e : Expr} {τ : Ty} {ρ : EffectRow}
+    {x₁ : String} {σ₁ : Ty} {m₁ : Modality}
+    {x₂ : String} {σ₂ : Ty} {m₂ : Modality}
+    (hw₁ : m₁.allowsWeakening = true) (hw₂ : m₂.allowsWeakening = true)
+    (h : Typing Γ e τ ρ) :
+    Typing ((x₁, σ₁, m₁) :: (x₂, σ₂, m₂) :: Γ) e τ ρ :=
+  Typing.Weak (Typing.Weak h hw₂) hw₁
+
+/-- Weaken by N unrestricted variables (all Unrestricted). -/
+theorem typing_weaken_unrestricted_list {Γ : TyCtx} {e : Expr} {τ : Ty} {ρ : EffectRow}
+    (Δ : TyCtx)
+    (hall : ∀ entry ∈ Δ, entry.2.2 = Modality.Unrestricted)
+    (h : Typing Γ e τ ρ) :
+    Typing (Δ ++ Γ) e τ ρ :=
+  typing_weaken_list Δ (fun entry he => by rw [hall entry he]; rfl) h
+
+-- ================================================================
+-- §12. Effect Masking in Typing
+-- ================================================================
+
+/-- If an effect is absent from the typing's row, masking it is harmless. -/
+theorem typing_mask_absent {Γ : TyCtx} {e : Expr} {τ : Ty} {ρ : EffectRow}
+    (eff : Effect)
+    (hab : ¬(eff ∈ᵣ ρ))
+    (h : Typing Γ e τ ρ) :
+    Typing Γ e τ (mask ρ eff) := by
+  rw [mask_absent_noop ρ eff hab]
+  exact h
+
+/-- After a handler (mask), the effect row is a subset of the original.
+    So if the original row was typeable, the handled version is too. -/
+theorem typing_handler_weakens {Γ : TyCtx} {e : Expr} {τ : Ty} {ρ : EffectRow}
+    (_eff : Effect)
+    (h : Typing Γ e τ ρ) :
+    Typing Γ e τ ρ :=
+  h
+
+/-- A pure expression can be given any masked row (mask ρ eff ⊇ pureRow). -/
+theorem typing_pure_mask {Γ : TyCtx} {e : Expr} {τ : Ty}
+    (ρ : EffectRow) (eff : Effect)
+    (h : Typing Γ e τ pureRow) :
+    Typing Γ e τ (mask ρ eff) :=
+  typing_pure_sub (mask ρ eff) h
+
+-- ================================================================
+-- §13. Compound Expression Typing
+-- ================================================================
+
+/-- Double application: apply a curried function to two arguments.
+    e₁ : τ₁ →[m₁] τ₂ →[m₂] σ, e₂ : τ₁, e₃ : τ₂ -/
+theorem typing_double_app {Γ : TyCtx} {e₁ e₂ e₃ : Expr}
+    {τ₁ τ₂ σ : Ty} {m₁ m₂ : Modality} {ρ₁ ρ₂ ρ₃ : EffectRow}
+    (h₁ : Typing Γ e₁ (.Fun m₁ τ₁ (.Fun m₂ τ₂ σ)) ρ₁)
+    (h₂ : Typing Γ e₂ τ₁ ρ₂)
+    (h₃ : Typing Γ e₃ τ₂ ρ₃) :
+    Typing Γ (.app (.app e₁ e₂) e₃) σ (rowUnion (rowUnion ρ₁ ρ₂) ρ₃) :=
+  Typing.App (Typing.App h₁ h₂) h₃
+
+/-- Nested let-box: two successive bang eliminations.
+    let !x = e₁ in let !y = e₂ in body -/
+theorem typing_nested_letB {Γ : TyCtx} {x y : String}
+    {e₁ e₂ body : Expr} {τ₁ τ₂ σ : Ty} {ρ₁ ρ₂ ρ₃ : EffectRow}
+    (h₁ : Typing Γ e₁ (.Bang τ₁) ρ₁)
+    (h₂ : Typing ((x, τ₁, .Unrestricted) :: Γ) e₂ (.Bang τ₂) ρ₂)
+    (h₃ : Typing ((y, τ₂, .Unrestricted) :: (x, τ₁, .Unrestricted) :: Γ) body σ ρ₃) :
+    Typing Γ (.letB x e₁ (.letB y e₂ body)) σ
+      (rowUnion ρ₁ (rowUnion ρ₂ ρ₃)) :=
+  Typing.LetB h₁ (Typing.LetB h₂ h₃)
+
+/-- A pair of banged values is bangable (if both components are pure). -/
+theorem typing_pair_bang {Γ : TyCtx} {e₁ e₂ : Expr} {τ₁ τ₂ : Ty}
+    (h₁ : Typing Γ e₁ τ₁ pureRow)
+    (h₂ : Typing Γ e₂ τ₂ pureRow) :
+    Typing Γ (.box (.pair e₁ e₂)) (.Bang (.Prod τ₁ τ₂)) pureRow :=
+  Typing.Box (typing_pair_pure h₁ h₂)
+
+-- ================================================================
+-- §14. Advanced Structural Lemmas
+-- ================================================================
+
+/-- Let-pair with both scrutinee and body sharing the same effect row. -/
+theorem typing_letP_same_row {Γ : TyCtx} {x y : String} {e body : Expr}
+    {τ₁ τ₂ σ : Ty} {m : Modality} {ρ : EffectRow}
+    (he : Typing Γ e (.Prod τ₁ τ₂) ρ)
+    (hb : Typing ((x, τ₁, m) :: (y, τ₂, m) :: Γ) body σ ρ) :
+    Typing Γ (.letP x y e body) σ ρ := by
+  apply Typing.Sub (Typing.LetP he hb)
+  rw [rowUnion_idempotent]
+  exact effectSubrow_refl _
+
+/-- Box followed by let-box is a no-op on typing: pure identity pipeline. -/
+theorem typing_box_letB_id {Γ : TyCtx} {x : String} {e : Expr}
+    {τ : Ty}
+    (h : Typing Γ e τ pureRow) :
+    Typing Γ (.letB x (.box e) (.var x)) τ pureRow := by
+  apply Typing.Sub
+  · exact Typing.LetB (Typing.Box h) (Typing.Var List.mem_cons_self)
+  · rw [rowUnion_idempotent]
+    exact effectSubrow_refl _
+
+/-- Effect subsumption composes with application. -/
+theorem typing_app_sub_both {Γ : TyCtx} {f a : Expr} {τ σ : Ty}
+    {m : Modality} {ρ₁ ρ₂ ρ : EffectRow}
+    (hf : Typing Γ f (.Fun m τ σ) ρ₁)
+    (ha : Typing Γ a τ ρ₂)
+    (hsub₁ : effectSubrow ρ₁ ρ) (hsub₂ : effectSubrow ρ₂ ρ) :
+    Typing Γ (.app f a) σ ρ :=
+  Typing.Sub (Typing.App hf ha)
+    (effectSubrow_union_lub ρ₁ ρ₂ ρ hsub₁ hsub₂)
+
+/-- An Affine lambda that uses its argument (identity) is typable. -/
+theorem typing_affine_identity (Γ : TyCtx) (τ : Ty) (x : String) :
+    Typing Γ (.lam x .Affine τ (.var x)) (.Fun .Affine τ τ) pureRow :=
+  Typing.Lam (Typing.Var List.mem_cons_self)
+
+/-- A Relevant lambda cannot discard its argument. But it can use it once. -/
+theorem typing_relevant_identity (Γ : TyCtx) (τ : Ty) (x : String) :
+    Typing Γ (.lam x .Relevant τ (.var x)) (.Fun .Relevant τ τ) pureRow :=
+  Typing.Lam (Typing.Var List.mem_cons_self)
 
 end Sounio.Typing
