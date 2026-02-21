@@ -1844,4 +1844,31 @@ mod tests {
         assert_eq!(result_eps.len(), 1);
         assert!(result_eps[0] > 0.0);
     }
+
+    /// Print epistemic GEMM PTX to stdout so cuda_gemm_dispatch.py can extract it.
+    ///
+    /// Run with: cargo test --lib print_epistemic_gemm_ptx -- --nocapture
+    #[test]
+    fn print_epistemic_gemm_ptx() {
+        let m: usize = std::env::var("GEMM_M").ok()
+            .and_then(|v| v.parse().ok()).unwrap_or(1024);
+        let n: usize = std::env::var("GEMM_N").ok()
+            .and_then(|v| v.parse().ok()).unwrap_or(m);
+        let k: usize = std::env::var("GEMM_K").ok()
+            .and_then(|v| v.parse().ok()).unwrap_or(m);
+        let sm: u32 = std::env::var("SM_MAJOR").ok()
+            .and_then(|v| v.parse().ok()).unwrap_or(8);
+
+        let config = EpistemicGemmConfig {
+            m, k, n,
+            alpha: 1.0, beta: 0.0,
+            precision: MatrixPrecision::F32,
+            use_tensor_cores: false,
+            confidence_threshold: None,
+        };
+        let ptx = generate_epistemic_gemm_ptx_sm(&config, "epistemic_gemm", sm, 0);
+        println!("--- PTX BEGIN ---");
+        println!("{}", ptx);
+        println!("--- PTX END ---");
+    }
 }

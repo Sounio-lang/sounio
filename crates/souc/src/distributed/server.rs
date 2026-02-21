@@ -58,7 +58,7 @@ impl Default for ServerConfig {
             heartbeat_interval: Duration::from_secs(30),
             cache_enabled: true,
             cache_url: None,
-            auth_required: false,
+            auth_required: true,
             server_name: "d-build-server".to_string(),
             max_message_size: 10 * 1024 * 1024, // 10MB
         }

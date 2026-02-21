@@ -7,7 +7,7 @@
 //! - Builtin `print("...")` and `exit(code)` through `RuntimeCodegen` stubs
 
 use crate::hir::{
-    Hir, HirBinaryOp, HirBlock, HirExpr, HirExprKind, HirFn, HirItem, HirLiteral, HirStmt,
+    Hir, HirBinaryOp, HirBlock, HirExpr, HirExprKind, HirFn, HirItem, HirLiteral, HirStmt, HirType,
     HirUnaryOp,
 };
 use crate::runtime::elf::NativeEmitter;
@@ -401,6 +401,13 @@ impl NativeCodegen {
                 self.emit_mov_rax_imm64(*n);
                 Ok(())
             }
+            HirLiteral::Float(f) => {
+                // Load f64 bit-pattern into rax as an opaque i64.
+                // Float values travel through rax as bit-patterns throughout this backend.
+                let bits = f.to_bits() as i64;
+                self.emit_mov_rax_imm64(bits);
+                Ok(())
+            }
             HirLiteral::String(_) => Err(
                 "String literals are currently supported only in print(\"...\") calls".to_string(),
             ),
@@ -446,6 +453,72 @@ impl NativeCodegen {
         self.compile_expr(right)?;
         self.emit_add_rsp8(0x08); // add rsp, 8
         self.emit_pop_r10();
+
+        // Float path: rax = right operand, r10 = left operand (both as f64 bit-patterns).
+        // Load into XMM registers: xmm0 = left (from r10), xmm1 = right (from rax).
+        if Self::is_float_ty(&left.ty) {
+            self.emitter.emit_code(&[0x66, 0x49, 0x0f, 0x6e, 0xc2]); // movq xmm0, r10 (left)
+            self.emitter.emit_code(&[0x66, 0x48, 0x0f, 0x6e, 0xc8]); // movq xmm1, rax (right)
+            return match op {
+                HirBinaryOp::Add => {
+                    self.emitter.emit_code(&[0xf2, 0x0f, 0x58, 0xc1]); // addsd xmm0, xmm1
+                    self.emitter.emit_code(&[0x66, 0x48, 0x0f, 0x7e, 0xc0]); // movq rax, xmm0
+                    Ok(())
+                }
+                HirBinaryOp::Sub => {
+                    self.emitter.emit_code(&[0xf2, 0x0f, 0x5c, 0xc1]); // subsd xmm0, xmm1
+                    self.emitter.emit_code(&[0x66, 0x48, 0x0f, 0x7e, 0xc0]); // movq rax, xmm0
+                    Ok(())
+                }
+                HirBinaryOp::Mul => {
+                    self.emitter.emit_code(&[0xf2, 0x0f, 0x59, 0xc1]); // mulsd xmm0, xmm1
+                    self.emitter.emit_code(&[0x66, 0x48, 0x0f, 0x7e, 0xc0]); // movq rax, xmm0
+                    Ok(())
+                }
+                HirBinaryOp::Div => {
+                    self.emitter.emit_code(&[0xf2, 0x0f, 0x5e, 0xc1]); // divsd xmm0, xmm1
+                    self.emitter.emit_code(&[0x66, 0x48, 0x0f, 0x7e, 0xc0]); // movq rax, xmm0
+                    Ok(())
+                }
+                HirBinaryOp::Eq => {
+                    self.emitter.emit_code(&[0x66, 0x0f, 0x2e, 0xc1]); // ucomisd xmm0, xmm1
+                    self.emitter.emit_code(&[0x0f, 0x94, 0xc0]); // sete al
+                    self.emitter.emit_code(&[0x48, 0x0f, 0xb6, 0xc0]); // movzx rax, al
+                    Ok(())
+                }
+                HirBinaryOp::Ne => {
+                    self.emitter.emit_code(&[0x66, 0x0f, 0x2e, 0xc1]); // ucomisd xmm0, xmm1
+                    self.emitter.emit_code(&[0x0f, 0x95, 0xc0]); // setne al
+                    self.emitter.emit_code(&[0x48, 0x0f, 0xb6, 0xc0]); // movzx rax, al
+                    Ok(())
+                }
+                HirBinaryOp::Lt => {
+                    self.emitter.emit_code(&[0x66, 0x0f, 0x2e, 0xc1]); // ucomisd xmm0, xmm1
+                    self.emitter.emit_code(&[0x0f, 0x92, 0xc0]); // setb al  (CF=1 → left<right)
+                    self.emitter.emit_code(&[0x48, 0x0f, 0xb6, 0xc0]); // movzx rax, al
+                    Ok(())
+                }
+                HirBinaryOp::Le => {
+                    self.emitter.emit_code(&[0x66, 0x0f, 0x2e, 0xc1]); // ucomisd xmm0, xmm1
+                    self.emitter.emit_code(&[0x0f, 0x96, 0xc0]); // setbe al
+                    self.emitter.emit_code(&[0x48, 0x0f, 0xb6, 0xc0]); // movzx rax, al
+                    Ok(())
+                }
+                HirBinaryOp::Gt => {
+                    self.emitter.emit_code(&[0x66, 0x0f, 0x2e, 0xc1]); // ucomisd xmm0, xmm1
+                    self.emitter.emit_code(&[0x0f, 0x97, 0xc0]); // seta al  (CF=0,ZF=0)
+                    self.emitter.emit_code(&[0x48, 0x0f, 0xb6, 0xc0]); // movzx rax, al
+                    Ok(())
+                }
+                HirBinaryOp::Ge => {
+                    self.emitter.emit_code(&[0x66, 0x0f, 0x2e, 0xc1]); // ucomisd xmm0, xmm1
+                    self.emitter.emit_code(&[0x0f, 0x93, 0xc0]); // setae al (CF=0)
+                    self.emitter.emit_code(&[0x48, 0x0f, 0xb6, 0xc0]); // movzx rax, al
+                    Ok(())
+                }
+                _ => Err(format!("Unsupported float binary op: {:?}", op)),
+            };
+        }
 
         match op {
             HirBinaryOp::Add => {
