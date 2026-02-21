@@ -60,8 +60,8 @@ class AbsField (α : Type) extends Add α, Mul α, Neg α, LE α where
 
 variable {α : Type} [F : AbsField α]
 
-local notation "ퟰ" => @AbsField.zero α F
-local notation "ퟱ" => @AbsField.one α F
+local notation "𝟎" => @AbsField.zero α F
+local notation "𝟏" => @AbsField.one α F
 local notation "|" a "|" => @AbsField.abs α F a
 
 -- ---------------------------------------------------------------------------
@@ -81,15 +81,15 @@ private lemma neg_mul_neg (a b : α) : -a * -b = a * b := by
   rw [F.neg_mul, F.mul_neg, F.neg_neg]
 
 private lemma neg_add_dist (a b : α) : -(a + b) = -a + -b := by
-  have h1 : (a + b) + (-a + -b) = ퟰ := by
+  have h1 : (a + b) + (-a + -b) = 𝟎 := by
     rw [F.add_assoc, ← F.add_assoc b, F.add_neg_cancel, F.zero_add, F.add_neg_cancel]
-  have h2 : (a + b) + -(a + b) = ퟰ := F.add_neg_cancel (a + b)
-  have h3 : ퟰ + -(a + b) = ퟰ + (-a + -b) := by rw [← h2, ← h1]
+  have h2 : (a + b) + -(a + b) = 𝟎 := F.add_neg_cancel (a + b)
+  have h3 : 𝟎 + -(a + b) = 𝟎 + (-a + -b) := by rw [← h2, ← h1]
   rw [F.zero_add, F.zero_add] at h3
   exact h3.symm
 
 private lemma foldl_acc_eq (xs : List α) (acc : α) :
-    xs.foldl (· + ·) acc = acc + xs.foldl (· + ·) ퟰ := by
+    xs.foldl (· + ·) acc = acc + xs.foldl (· + ·) 𝟎 := by
   induction xs generalizing acc with
   | nil => simp only [List.foldl_nil]; rw [F.add_zero]
   | cons x xs ih =>
@@ -99,7 +99,7 @@ private lemma foldl_acc_eq (xs : List α) (acc : α) :
     rw [← F.add_assoc]
 
 private lemma foldl_zero_cons (x : α) (xs : List α) :
-    (x :: xs).foldl (· + ·) ퟰ = x + xs.foldl (· + ·) ퟰ := by
+    (x :: xs).foldl (· + ·) 𝟎 = x + xs.foldl (· + ·) 𝟎 := by
   simp only [List.foldl_cons]
   rw [F.zero_add]
   exact foldl_acc_eq xs x
@@ -143,7 +143,7 @@ private theorem ring_identity (a b a0 b0 : α) :
 theorem mul_error_bound (a b a0 b0 ea eb : α)
     (ha  : | a + -a0 | ≤ ea)
     (hb  : | b + -b0 | ≤ eb)
-    (hea : ퟰ ≤ ea) (heb : ퟰ ≤ eb) :
+    (hea : 𝟎 ≤ ea) (heb : 𝟎 ≤ eb) :
     | a * b + -(a0 * b0) | ≤ |a0| * eb + |b0| * ea + ea * eb := by
   rw [ring_identity a b a0 b0]
   have step1 : | a0 * (b + -b0) + b0 * (a + -a0) + (a + -a0) * (b + -b0) | ≤
@@ -181,7 +181,7 @@ theorem gemm_scalar_soundness
     (a_val a_eps b_val b_eps true_a true_b : α)
     (ha  : | true_a + -a_val | ≤ a_eps)
     (hb  : | true_b + -b_val | ≤ b_eps)
-    (hea : ퟰ ≤ a_eps) (heb : ퟰ ≤ b_eps) :
+    (hea : 𝟎 ≤ a_eps) (heb : 𝟎 ≤ b_eps) :
     | true_a * true_b + -(a_val * b_val) | ≤
       |a_val| * b_eps + |b_val| * a_eps + a_eps * b_eps :=
   mul_error_bound true_a true_b a_val b_val a_eps b_eps ha hb hea heb
@@ -191,7 +191,7 @@ theorem gemm_scalar_soundness
 -- ---------------------------------------------------------------------------
 
 theorem zero_eps_exact (a b : α) :
-    |a| * ퟰ + |b| * ퟰ + ퟰ * ퟰ = ퟰ := by
+    |a| * 𝟎 + |b| * 𝟎 + 𝟎 * 𝟎 = 𝟎 := by
   rw [F.mul_zero, F.mul_zero, F.mul_zero, F.add_zero, F.add_zero]
 
 -- ---------------------------------------------------------------------------
@@ -203,7 +203,7 @@ theorem sum_error_bound
     (h_len   : terms.length = bounds.length)
     (h_bound : ∀ i : Fin terms.length,
                  | terms.get i | ≤ bounds.get ⟨i.val, h_len ▸ i.isLt⟩) :
-    | terms.foldl (· + ·) ퟰ | ≤ bounds.foldl (· + ·) ퟰ := by
+    | terms.foldl (· + ·) 𝟎 | ≤ bounds.foldl (· + ·) 𝟎 := by
   induction terms generalizing bounds with
   | nil =>
     simp only [List.foldl_nil]
@@ -221,16 +221,16 @@ theorem sum_error_bound
         have := h_bound ⟨0, Nat.zero_lt_succ _⟩
         simp only [List.get] at this
         exact this
-      have ih_applied : | ts.foldl (· + ·) ퟰ | ≤ bnds.foldl (· + ·) ퟰ := by
+      have ih_applied : | ts.foldl (· + ·) 𝟎 | ≤ bnds.foldl (· + ·) 𝟎 := by
         apply ih bnds h_len
         intro ⟨i, hi⟩
         have := h_bound ⟨i + 1, Nat.succ_lt_succ hi⟩
         simp only [List.get] at this ⊢
         convert this using 2
         simp [h_len]
-      calc | t + ts.foldl (· + ·) ퟰ |
-              ≤ | t | + | ts.foldl (· + ·) ퟰ | := F.abs_triangle _ _
-           _ ≤ bnd + bnds.foldl (· + ·) ퟰ :=
+      calc | t + ts.foldl (· + ·) 𝟎 |
+              ≤ | t | + | ts.foldl (· + ·) 𝟎 | := F.abs_triangle _ _
+           _ ≤ bnd + bnds.foldl (· + ·) 𝟎 :=
                F.add_le_add _ _ _ _ ht ih_applied
 
 -- ---------------------------------------------------------------------------
@@ -244,8 +244,8 @@ theorem gemm_dot_product_soundness
     (h_len_ab : avs.length = bvs.length)
     (h_ta     : tas.length = avs.length)
     (h_tb     : tbs.length = bvs.length)
-    (h_nonneg_ae : ∀ i : Fin aes.length, ퟰ ≤ aes.get i)
-    (h_nonneg_be : ∀ i : Fin bes.length, ퟰ ≤ bes.get i)
+    (h_nonneg_ae : ∀ i : Fin aes.length, 𝟎 ≤ aes.get i)
+    (h_nonneg_be : ∀ i : Fin bes.length, 𝟎 ≤ bes.get i)
     (h_err_a  : ∀ i : Fin tas.length,
                   | tas.get i + -(avs.get ⟨i.val, h_ta ▸ i.isLt⟩) | ≤
                     aes.get ⟨i.val, h_len_a ▸ (h_ta ▸ i.isLt)⟩)
@@ -257,8 +257,8 @@ theorem gemm_dot_product_soundness
     let eps_terms  := List.zipWith3 (fun av_abs ae be =>
                         av_abs * be + be * ae + ae * be)
                         (List.map (fun x => @AbsField.abs α F x) avs) aes bes
-    | true_terms.foldl (· + ·) ퟰ + -(val_terms.foldl (· + ·) ퟰ) | ≤
-      eps_terms.foldl (· + ·) ퟰ := by
+    | true_terms.foldl (· + ·) 𝟎 + -(val_terms.foldl (· + ·) 𝟎) | ≤
+      eps_terms.foldl (· + ·) 𝟎 := by
   induction avs generalizing aes bvs bes tas tbs with
   | nil =>
     simp only [List.zipWith, List.map, List.foldl_nil, F.abs_zero,
@@ -288,14 +288,14 @@ theorem gemm_dot_product_soundness
     rw [neg_add_dist (av * bv)]
     rw [F.add_assoc (ta * tb)]
     rw [← F.add_assoc (ta * tb + -(av * bv))]
-    rw [F.add_comm (-((List.zipWith (· * ·) avs bvs).foldl (· + ·) ퟰ))
-                   ((List.zipWith (· * ·) tas tbs).foldl (· + ·) ퟰ)]
+    rw [F.add_comm (-((List.zipWith (· * ·) avs bvs).foldl (· + ·) 𝟎))
+                   ((List.zipWith (· * ·) tas tbs).foldl (· + ·) 𝟎)]
     rw [← F.add_assoc]
     have tri := F.abs_triangle (ta * tb + -(av * bv))
-      ((List.zipWith (· * ·) tas tbs).foldl (· + ·) ퟰ +
-       -((List.zipWith (· * ·) avs bvs).foldl (· + ·) ퟰ))
-    have head_ae : ퟰ ≤ ae := h_nonneg_ae ⟨0, Nat.zero_lt_succ _⟩
-    have head_be : ퟰ ≤ be := h_nonneg_be ⟨0, Nat.zero_lt_succ _⟩
+      ((List.zipWith (· * ·) tas tbs).foldl (· + ·) 𝟎 +
+       -((List.zipWith (· * ·) avs bvs).foldl (· + ·) 𝟎))
+    have head_ae : 𝟎 ≤ ae := h_nonneg_ae ⟨0, Nat.zero_lt_succ _⟩
+    have head_be : 𝟎 ≤ be := h_nonneg_be ⟨0, Nat.zero_lt_succ _⟩
     have head_ha : | ta + -av | ≤ ae := by
       have := h_err_a ⟨0, Nat.zero_lt_succ _⟩
       simp only [List.get] at this; exact this
