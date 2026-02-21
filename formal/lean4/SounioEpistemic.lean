@@ -153,7 +153,7 @@ theorem measure_zero_provenance (c : Confidence) : (measure c).provenance = 0 :=
 
 theorem derive_decreases_confidence (k : Knowledge) (d : Nat) :
     (derive k d).confidence ≤ k.confidence := by
-  unfold derive Confidence; omega
+  simp only [derive, Confidence]; omega
 
 theorem derive_increases_provenance (k : Knowledge) (d : Nat) :
     (derive k d).provenance = k.provenance + 1 := rfl
@@ -216,13 +216,13 @@ def uncertainty (k : Knowledge) (bound : Nat) : Nat := bound - k.confidence
 
 theorem uncertainty_zero_is_certain (bound : Nat) :
     uncertainty (measure bound) bound = 0 := by
-  unfold uncertainty measure Confidence; omega
+  simp only [uncertainty, measure, Confidence]; omega
 
 theorem uncertainty_monotone (k₁ k₂ : Knowledge) (bound : Nat)
     (hv₁ : k₁.confidence ≤ bound) (hv₂ : k₂.confidence ≤ bound)
     (h : k₁.confidence ≤ k₂.confidence) :
     uncertainty k₂ bound ≤ uncertainty k₁ bound := by
-  unfold uncertainty Confidence; omega
+  simp only [uncertainty, Confidence] at *; omega
 
 theorem combine_uncertainty_ge (k₁ k₂ : Knowledge) (bound : Nat)
     (hv₁ : k₁.confidence ≤ bound) (hv₂ : k₂.confidence ≤ bound) :
@@ -239,7 +239,7 @@ theorem strengthen_uncertainty_le (k₁ k₂ : Knowledge) (bound : Nat)
 theorem derive_uncertainty_ge (k : Knowledge) (d : Nat) (bound : Nat)
     (hv : k.confidence ≤ bound) :
     uncertainty (derive k d) bound ≥ uncertainty k bound := by
-  unfold uncertainty derive Confidence; omega
+  simp only [uncertainty, derive, Confidence]; omega
 
 -- ================================================================
 -- S6. Bayesian Composition (Abstract Model)
@@ -260,7 +260,7 @@ theorem bayesianUpdate_increases_confidence
 theorem bayesianUpdate_increases_provenance
     (prior evidence : Knowledge) (bound : Nat) :
     (bayesianUpdate prior evidence bound).provenance > prior.provenance := by
-  simp only [bayesianUpdate, Confidence]; split <;> omega
+  simp only [bayesianUpdate, Confidence]; omega
 
 theorem bayesianUpdate_bounded (prior evidence : Knowledge) (bound : Nat) :
     (bayesianUpdate prior evidence bound).confidence ≤ bound := by
@@ -269,7 +269,7 @@ theorem bayesianUpdate_bounded (prior evidence : Knowledge) (bound : Nat) :
 theorem bayesianUpdate_zero_evidence (prior : Knowledge) (bound : Nat)
     (hv : prior.confidence ≤ bound) :
     (bayesianUpdate prior (measure 0) bound).confidence = prior.confidence := by
-  simp only [bayesianUpdate, measure, Confidence]; split <;> omega
+  simp only [bayesianUpdate, measure, Confidence] at *; split <;> omega
 
 theorem bayesianUpdate_provenance_sum (k e₁ e₂ : Knowledge) (bound : Nat) :
     (bayesianUpdate (bayesianUpdate k e₁ bound) e₂ bound).provenance =
@@ -489,18 +489,18 @@ theorem combine_strengthen_distrib_confidence (k₁ k₂ k₃ : Knowledge) :
 
 theorem combine_provenance_ge_left (k₁ k₂ : Knowledge) :
     (combine k₁ k₂).provenance ≥ k₁.provenance := by
-  simp only [combine, Confidence]; split <;> omega
+  simp only [combine]; split <;> omega
 
 theorem combine_provenance_ge_right (k₁ k₂ : Knowledge) :
     (combine k₁ k₂).provenance ≥ k₂.provenance := by
-  simp only [combine, Confidence]; split <;> omega
+  simp only [combine]; split <;> omega
 
 theorem strengthen_provenance_le_left (k₁ k₂ : Knowledge) :
     (strengthen k₁ k₂).provenance ≤ k₁.provenance := by
-  simp only [strengthen, Confidence]; split <;> omega
+  simp only [strengthen]; split <;> omega
 
 theorem strengthen_provenance_le_right (k₁ k₂ : Knowledge) :
     (strengthen k₁ k₂).provenance ≤ k₂.provenance := by
-  simp only [strengthen, Confidence]; split <;> omega
+  simp only [strengthen]; split <;> omega
 
 end Sounio.Epistemic
