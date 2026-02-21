@@ -308,8 +308,8 @@ theorem epistemic_subrow_of_member (r : EffectRow)
   rw [he]; exact h
 
 theorem epistemic_union_io :
-    Effect.Epistemic ∈ᵣ rowUnion epistemicRow (singleRow .IO) ∧
-    Effect.IO ∈ᵣ rowUnion epistemicRow (singleRow .IO) := by
+    (Effect.Epistemic ∈ᵣ rowUnion epistemicRow (singleRow .IO)) ∧
+    (Effect.IO ∈ᵣ rowUnion epistemicRow (singleRow .IO)) := by
   constructor
   · exact effectSubrow_union_left epistemicRow (singleRow .IO) .Epistemic
       (singleRow_member .Epistemic)
@@ -327,8 +327,7 @@ theorem handle_epistemic_preserves_io :
   funext f; simp only [mask, rowUnion, epistemicRow, singleRow]
   by_cases h : f = .Epistemic
   · subst h; simp
-  · simp [h]
-    by_cases hio : f = .IO <;> simp [hio]
+  · by_cases hio : f = .IO <;> simp [h, hio]
 
 -- ================================================================
 -- S8. Knowledge Degradation Chain

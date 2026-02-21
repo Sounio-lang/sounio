@@ -2,67 +2,83 @@
 import SounioLinear
 import SounioEffects
 import SounioTyping
+import SounioSemantics
+import SounioRowPoly
+import SounioUnits
+import SounioProgress
+import SounioSubstitution
+import SounioPreservation
+import SounioEpistemic
+import SounioCausality
 
 /-!
-# Sounio Formal Verification — Phase 8 + 9
+# Sounio Formal Verification — Phases 8–12
 
-Lean 4 formalization of key Sounio type-system components.
-No sorry. No Mathlib dependency. `lake build` completes in < 1 minute.
+Lean 4 formalization of the Sounio linear-effect calculus.
+No sorry. No Mathlib dependency. `lake build` completes in < 1 minute (25 jobs).
 
-## Scope
+## Library inventory (12 modules)
 
-### `SounioLinear` — Four-modality linear type system (Girard 1987)
+| Library             | Lines | Theorems | Phase | Topic                                  |
+|---------------------|-------|----------|-------|----------------------------------------|
+| `SounioLinear`      |  459  |   ~40    |   8   | Four-modality lattice, structural rules|
+| `SounioEffects`     |  637  |   ~50    |   8   | Algebraic effect rows, mask algebra    |
+| `SounioTyping`      |  490  |   ~38    |  9–10 | Bidirectional typing judgment          |
+| `SounioSemantics`   |  293  |    20    |  11   | CBV operational semantics              |
+| `SounioRowPoly`     |  256  |    25    |  10   | Row-polymorphic effect variables       |
+| `SounioUnits`       |  278  |    38    |  10   | Units of measure (dimensional analysis)|
+| `SounioProgress`    |  557  |    51    |  12   | Canonical forms + progress theorem     |
+| `SounioSubstitution`|  740  |    81    |  12   | Free variables, context ops, subst     |
+| `SounioPreservation`|  676  |    72    |  12   | Type safety (Wright-Felleisen)         |
+| `SounioEpistemic`   |  505  |    76    |  12   | Epistemic types (confidence lattice)   |
+| `SounioCausality`   |  562  |    77    |  12   | Causal types (SCMs, do-calculus)       |
+| **Total**           |**5453**|**~568** |       |                                        |
 
-**Proven:**
-- Modality lattice laws: commutativity, associativity, absorption, idempotence,
-  distributivity
-- Linear is bottom; Unrestricted is top; Affine ∥ Relevant (incomparable)
-- Structural rule properties: weakening/no-weakening/contraction per modality
-- Monotonicity: weakening/contraction/mustUse preserved under join/meet
-- `usage_add_*`: usage count arithmetic (absorb, iff characterizations)
-- `wellUsed` predicate: all four modalities × all three usage counts
-- `weakening_lemma` / `no_weakening_lemma`: structural rule admissibility
-- `promotion_exhausted_any`: all-Unrestricted contexts always exhausted (Bang-I)
+## Phase 12 highlights
 
-### `SounioEffects` — Algebraic effect rows (characteristic function model)
+### SounioProgress — Canonical Forms + Progress
+- `canonical_fun_form` / `canonical_prod_form` / `canonical_bang_form`: value + type → shape
+- `progress`: every closed well-typed term is a value or can step
+- `progress_xor`: the dichotomy is exclusive (value ⊕ step, never both)
+- `closed_normal_is_value`: normal forms of closed well-typed terms are values
 
-**Proven:**
-- `mask_*`: idempotent, commutative, membership-preserving, distributive
-- `rowUnion_*`: complete Boolean union algebra (comm, assoc, distrib, absorb, lub)
-- `rowInter_*`: complete Boolean intersection algebra (+ GLB proof)
-- `rowComplement_*`: De Morgan laws, involution, anti-monotonicity
-- `allEffectsRow`: top element; identity laws for ∪ and ∩
-- `rowDisjoint_*`: symmetry, pure cases, union monotonicity
-- `maskAll_pure`: handling all 10 named effects yields pureRow
-- `effectSubrow_*`: partial order (refl, trans, antisymm) + monotonicity
+### SounioSubstitution — Free Variables, Context Ops, Substitution
+- `freeVars` / `freeVarsDec`: free variable computation + decidable membership
+- `subst_not_free`: substituting a non-free variable is identity
+- `typing_append_right`: context can be extended on the right
+- `typing_closed_weakening`: closed terms can be typed in any context
+- `substitution_closed_value`: substitution lemma for closed values (CBV)
 
-### `SounioTyping` — Linear Effect Typing Judgment (Phase 9)
+### SounioPreservation — Type Safety (Wright-Felleisen Framework)
+- `Stuck` / `Safe` predicates and their algebra
+- `EvaluatesTo`: deterministic evaluation + uniqueness (`evaluatesTo_unique`)
+- `MultiStepN`: counted reduction with determinism
+- `Preserves` combinator: property preservation under reduction
+- `type_safety`: parametric safety from progress + preservation
+- Canonical forms re-derived independently from SounioProgress
 
-**Defines:**
-- `Ty`: types (`Base`, `→[m]`, `⊗`, `!`)
-- `Expr`: expressions (λ, app, pair, let-pair, box, let-box)
-- `Typing Γ e τ ρ`: inductive judgment `Γ ⊢ e : τ ! ρ`
-  with nine constructors (Var, Lam, App, Pair, LetP, Box, LetB, Weak, Sub)
+### SounioEpistemic — Epistemic Type Theory (NOVEL)
+- `Knowledge` type with confidence lattice and provenance tracking
+- `confMeet` / `confJoin`: bounded lattice with full algebraic laws
+- `combine` / `strengthen` / `derive` / `bayesianUpdate`: knowledge operations
+- `knowledgeLeq`: partial order (refl, trans, antisymm)
+- Uncertainty propagation, information content, degradation chains
+- Connection to algebraic effect system (`epistemicRow`, `mask`, disjointness)
 
-**Proven:**
-- `typing_var_pure` / `typing_box_pure` / `typing_lam_effects` / `typing_app_union`
-- `typing_sub` / `typing_pure_sub` / `typing_sub_trans`: effect subsumption
-- `typing_app_effects_comm`: application effects commute up to Sub
-- `typing_dereliction` / `typing_app_sub`: bang and composition
-- `typing_weaken_one/affine/unrestricted`: single-entry weakening
-- `typing_weaken_list`: list weakening (induction on Δ)
-- `typing_box_letB` / `typing_box_letB_pure`: promotion + dereliction
-- `typing_bang_weaken`: bang values are weakenable
-- `typing_app_pure` / `typing_pair_pure` / `typing_pair_same_row`
-- `typing_letP_pure_scrut`: tensor elimination with pure scrutinee
-- `typing_unrestricted_app` / `typing_linear_app`
-- `typing_identity`: `λ(x:τ)[m]. x` is typable at every type and modality
-- `typing_const_fun`: discarding an argument requires weakenable modality
+### SounioCausality — Causal Type Theory (NOVEL)
+- `SCM`: structural causal models with `isTopological` (DAG) witness
+- `Reachable`: ancestral relation with acyclicity + antisymmetry
+- `intervene`: do-operator with 10+ properties (idempotent, commutative, topo-preserving)
+- `dSepSimple`: d-separation criterion + monotonicity
+- `counterfactualWorld`: multi-intervention worlds
+- Pearl's do-calculus rules 1–3 (simplified)
+- `backDoorCriterion` / `frontDoorCriterion` / `instrumentalVariable`
+- Connection to effect system (`causalEffectRow`, `probCausalRow`)
 
-## Out of scope
+## Out of scope (future work)
 
-- Operational semantics and progress/preservation
-- Epistemic type `Knowledge[T,ε]` (requires real-number analysis)
-- Causal type system formalization
+- Full subject reduction (requires linear context splitting in substitution)
 - Type uniqueness / inversion (requires determinism of Sub+Weak)
+- Normalization / strong normalization
+- Denotational semantics
 -/
