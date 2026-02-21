@@ -3337,6 +3337,38 @@ fn main() -> CompileArtifact with IO, Mut, Div, Panic, Alloc {
     }
 
     #[test]
+    fn test_driver_compile_source_text_rejects_oversize_input_with_explicit_diag() {
+        let compiler = SounioCompiler::new_embedded().expect("embedded compiler");
+        let oversize = "a".repeat(65_537);
+        let vm_result = compiler
+            .run_driver_orchestration(DriverEntrypoint::CompileSource, Some(&oversize))
+            .expect("driver orchestration should return compile artifact");
+
+        let crate::vm::Value::Struct(fields) = &vm_result else {
+            panic!("expected compile artifact struct, got {:?}", vm_result);
+        };
+        assert_eq!(fields.get("ok"), Some(&crate::vm::Value::Bool(false)));
+        assert_eq!(fields.get("exit_code"), Some(&crate::vm::Value::Int(2)));
+        assert_eq!(compile_artifact_diag_string(&vm_result), "source_text_too_large");
+    }
+
+    #[test]
+    fn test_driver_compile_source_text_rejects_non_ascii_input_with_explicit_diag() {
+        let compiler = SounioCompiler::new_embedded().expect("embedded compiler");
+        let non_ascii_source = format!("fn main() -> i32 {{ 3{} }}", '\u{00E9}');
+        let vm_result = compiler
+            .run_driver_orchestration(DriverEntrypoint::CompileSource, Some(&non_ascii_source))
+            .expect("driver orchestration should return compile artifact");
+
+        let crate::vm::Value::Struct(fields) = &vm_result else {
+            panic!("expected compile artifact struct, got {:?}", vm_result);
+        };
+        assert_eq!(fields.get("ok"), Some(&crate::vm::Value::Bool(false)));
+        assert_eq!(fields.get("exit_code"), Some(&crate::vm::Value::Int(2)));
+        assert_eq!(compile_artifact_diag_string(&vm_result), "source_text_non_ascii");
+    }
+
+    #[test]
     fn test_driver_run_pipeline_native_stage_returns_explicit_failure_code() {
         let _env_guard = env_lock().lock().expect("env lock poisoned");
         let cache_dir = tempfile::tempdir().expect("temp dir for harness cache");
