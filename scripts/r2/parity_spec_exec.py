@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import os
 import re
 import shlex
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -97,18 +99,212 @@ def build_invocation(souc_bin: Path, command: str, args: list[str]) -> list[str]
     return [str(souc_bin), command, *args]
 
 
+@dataclass(frozen=True)
+class StreamExpectation:
+    expected_text: str | None
+    source_label: str | None
+
+
+@dataclass(frozen=True)
+class InvocationResult:
+    code: int
+    stdout: str
+    stderr: str
+    timed_out: bool
+
+
+def normalize_oracle_compare_tokens(suite: dict[str, Any]) -> list[str]:
+    raw = suite.get("oracle_compare")
+    if not isinstance(raw, list):
+        return []
+    normalized: list[str] = []
+    for token in raw:
+        if not isinstance(token, str):
+            continue
+        mapped = "exit_code" if token == "exit" else token
+        if mapped in {"exit_code", "stdout", "stderr"} and mapped not in normalized:
+            normalized.append(mapped)
+    return normalized
+
+
+def resolve_contract_path(root: Path, spec_path: Path, raw_path: str) -> Path:
+    contract_path = Path(raw_path)
+    if contract_path.is_absolute():
+        return contract_path.resolve()
+    from_root = (root / contract_path).resolve()
+    from_spec_dir = (spec_path.parent / contract_path).resolve()
+    if from_root.exists() or not from_spec_dir.exists():
+        return from_root
+    return from_spec_dir
+
+
+def load_stream_expectation(
+    *,
+    case: dict[str, Any],
+    case_id: str,
+    stream: str,
+    root: Path,
+    spec_path: Path,
+    parse_errors: list[str],
+) -> StreamExpectation:
+    inline_key = f"expected_{stream}"
+    file_key = f"expected_{stream}_file"
+    inline_value = case.get(inline_key)
+    file_value = case.get(file_key)
+
+    if inline_value is not None and not isinstance(inline_value, str):
+        parse_errors.append(f"case[{case_id}] {inline_key} must be a string when present")
+    if file_value is not None and not isinstance(file_value, str):
+        parse_errors.append(f"case[{case_id}] {file_key} must be a string path when present")
+    if inline_value is not None and file_value is not None:
+        parse_errors.append(f"case[{case_id}] cannot set both {inline_key} and {file_key}")
+
+    if parse_errors:
+        return StreamExpectation(expected_text=None, source_label=None)
+    if isinstance(inline_value, str):
+        return StreamExpectation(
+            expected_text=inline_value,
+            source_label=f"case[{case_id}].{inline_key}",
+        )
+    if not isinstance(file_value, str):
+        return StreamExpectation(expected_text=None, source_label=None)
+
+    contract_path = resolve_contract_path(root, spec_path, file_value)
+    if not contract_path.exists():
+        parse_errors.append(
+            f"case[{case_id}] missing {file_key} file: {contract_path}"
+        )
+        return StreamExpectation(expected_text=None, source_label=None)
+    if contract_path.is_dir():
+        parse_errors.append(
+            f"case[{case_id}] {file_key} points to a directory: {contract_path}"
+        )
+        return StreamExpectation(expected_text=None, source_label=None)
+    try:
+        expected_text = contract_path.read_text(encoding="utf-8")
+    except Exception as exc:  # pragma: no cover
+        parse_errors.append(
+            f"case[{case_id}] failed to read {file_key} {contract_path}: {exc}"
+        )
+        return StreamExpectation(expected_text=None, source_label=None)
+    return StreamExpectation(
+        expected_text=expected_text,
+        source_label=f"{file_key}:{contract_path}",
+    )
+
+
+def run_invocation(
+    *,
+    invocation: list[str],
+    root: Path,
+    backend: str | None,
+    timeout_seconds: int,
+) -> InvocationResult:
+    env = os.environ.copy()
+    if isinstance(backend, str) and backend:
+        env["SOUNIO_SELFHOST_PIPELINE"] = backend
+    timed_out = False
+    try:
+        completed = subprocess.run(
+            invocation,
+            cwd=str(root),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+        return InvocationResult(
+            code=int(completed.returncode),
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            timed_out=timed_out,
+        )
+    except subprocess.TimeoutExpired as exc:
+        timed_out = True
+        return InvocationResult(
+            code=124,
+            stdout=coerce_text(exc.stdout),
+            stderr=coerce_text(exc.stderr),
+            timed_out=timed_out,
+        )
+
+
+def write_result_artifacts(
+    *,
+    artifact_root: Path,
+    case_file_stem: str,
+    suffix: str,
+    result: InvocationResult,
+) -> dict[str, Path]:
+    file_stem = f"{case_file_stem}{suffix}"
+    stdout_path = artifact_root / f"{file_stem}.stdout"
+    stderr_path = artifact_root / f"{file_stem}.stderr"
+    exit_path = artifact_root / f"{file_stem}.exit"
+    timeout_path = artifact_root / f"{file_stem}.timeout"
+
+    stdout_path.write_text(result.stdout, encoding="utf-8")
+    stderr_path.write_text(result.stderr, encoding="utf-8")
+    exit_path.write_text(f"{result.code}\n", encoding="utf-8")
+    timeout_path.write_text(f"{int(result.timed_out)}\n", encoding="utf-8")
+
+    return {
+        "stdout": stdout_path,
+        "stderr": stderr_path,
+        "exit": exit_path,
+        "timeout": timeout_path,
+    }
+
+
+def write_unified_diff(
+    *,
+    expected_text: str,
+    actual_text: str,
+    expected_label: str,
+    actual_label: str,
+    diff_path: Path,
+) -> None:
+    diff_text = "".join(
+        difflib.unified_diff(
+            expected_text.splitlines(keepends=True),
+            actual_text.splitlines(keepends=True),
+            fromfile=expected_label,
+            tofile=actual_label,
+            n=3,
+        )
+    )
+    if not diff_text:
+        diff_text = "(no diff generated)\n"
+    elif not diff_text.endswith("\n"):
+        diff_text += "\n"
+    diff_path.write_text(diff_text, encoding="utf-8")
+
+
 def evaluate_stream_contracts(
     *,
+    case_id: str,
+    case_file_stem: str,
+    artifact_root: Path,
     label: str,
     actual: str,
-    expected_exact: str | None,
+    actual_artifact_path: Path,
+    expected_exact: StreamExpectation,
     must_contain: list[str],
     must_exclude: list[str],
     failures: list[str],
 ) -> None:
-    if expected_exact is not None and actual != expected_exact:
+    if expected_exact.expected_text is not None and actual != expected_exact.expected_text:
+        diff_path = artifact_root / f"{case_file_stem}.{label}.expected.diff"
+        expected_label = expected_exact.source_label or f"case[{case_id}].expected_{label}"
+        write_unified_diff(
+            expected_text=expected_exact.expected_text,
+            actual_text=actual,
+            expected_label=expected_label,
+            actual_label=str(actual_artifact_path),
+            diff_path=diff_path,
+        )
         failures.append(
-            f"{label} exact mismatch (expected={expected_exact!r} actual={actual!r})"
+            f"{label} exact mismatch ({expected_label}) diff={diff_path} actual={actual_artifact_path}"
         )
     for token in must_contain:
         if token not in actual:
@@ -118,11 +314,53 @@ def evaluate_stream_contracts(
             failures.append(f"{label} contains forbidden substring: {token!r}")
 
 
+def evaluate_oracle_contracts(
+    *,
+    case_file_stem: str,
+    artifact_root: Path,
+    oracle_backend: str,
+    oracle_compare: list[str],
+    primary: InvocationResult,
+    primary_artifacts: dict[str, Path],
+    oracle: InvocationResult,
+    oracle_artifacts: dict[str, Path],
+    failures: list[str],
+) -> None:
+    for token in oracle_compare:
+        if token == "exit_code":
+            if primary.code != oracle.code:
+                failures.append(
+                    "oracle exit_code mismatch "
+                    f"(backend={oracle_backend} primary={primary.code} oracle={oracle.code} "
+                    f"artifacts={primary_artifacts['exit']} vs {oracle_artifacts['exit']})"
+                )
+            continue
+
+        primary_text = primary.stdout if token == "stdout" else primary.stderr
+        oracle_text = oracle.stdout if token == "stdout" else oracle.stderr
+        if primary_text == oracle_text:
+            continue
+
+        diff_path = artifact_root / f"{case_file_stem}.oracle.{token}.diff"
+        write_unified_diff(
+            expected_text=primary_text,
+            actual_text=oracle_text,
+            expected_label=str(primary_artifacts[token]),
+            actual_label=str(oracle_artifacts[token]),
+            diff_path=diff_path,
+        )
+        failures.append(
+            f"oracle {token} mismatch (backend={oracle_backend}) diff={diff_path} "
+            f"primary={primary_artifacts[token]} oracle={oracle_artifacts[token]}"
+        )
+
+
 def run_case(
     *,
     case: dict[str, Any],
     case_index: int,
     suite: dict[str, Any],
+    spec_path: Path,
     root: Path,
     souc_bin: Path,
     artifact_root: Path,
@@ -147,79 +385,120 @@ def run_case(
     stdout_excludes = parse_string_list(case, "expected_stdout_excludes", parse_errors, case_id)
     stderr_contains = parse_string_list(case, "expected_stderr_contains", parse_errors, case_id)
     stderr_excludes = parse_string_list(case, "expected_stderr_excludes", parse_errors, case_id)
+    expected_stdout = load_stream_expectation(
+        case=case,
+        case_id=case_id,
+        stream="stdout",
+        root=root,
+        spec_path=spec_path,
+        parse_errors=parse_errors,
+    )
+    expected_stderr = load_stream_expectation(
+        case=case,
+        case_id=case_id,
+        stream="stderr",
+        root=root,
+        spec_path=spec_path,
+        parse_errors=parse_errors,
+    )
     if parse_errors:
         return False, parse_errors
 
-    expected_stdout = case.get("expected_stdout")
-    expected_stderr = case.get("expected_stderr")
-    if expected_stdout is not None and not isinstance(expected_stdout, str):
-        return False, [f"case[{case_id}] expected_stdout must be a string when present"]
-    if expected_stderr is not None and not isinstance(expected_stderr, str):
-        return False, [f"case[{case_id}] expected_stderr must be a string when present"]
-
     timeout_seconds = int(suite.get("timeout_seconds", 120))
-    backend = suite.get("default_backend")
-
-    env = os.environ.copy()
-    if isinstance(backend, str) and backend:
-        env["SOUNIO_SELFHOST_PIPELINE"] = backend
+    default_backend = suite.get("default_backend")
+    oracle_backend = suite.get("oracle_backend")
+    oracle_compare = normalize_oracle_compare_tokens(suite)
 
     invocation = build_invocation(souc_bin, command, args)
     print(f"PARITY_CASE RUN id={case_id} argv={shlex.join(invocation)}")
-
-    timed_out = False
-    try:
-        completed = subprocess.run(
-            invocation,
-            cwd=str(root),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            check=False,
-        )
-        code = int(completed.returncode)
-        stdout = completed.stdout
-        stderr = completed.stderr
-    except subprocess.TimeoutExpired as exc:
-        timed_out = True
-        code = 124
-        stdout = coerce_text(exc.stdout)
-        stderr = coerce_text(exc.stderr)
+    primary = run_invocation(
+        invocation=invocation,
+        root=root,
+        backend=default_backend if isinstance(default_backend, str) else None,
+        timeout_seconds=timeout_seconds,
+    )
+    if primary.timed_out:
         failures.append(f"timed out after {timeout_seconds}s")
 
     case_file_stem = sanitize_case_id(case_id)
-    (artifact_root / f"{case_file_stem}.stdout").write_text(stdout, encoding="utf-8")
-    (artifact_root / f"{case_file_stem}.stderr").write_text(stderr, encoding="utf-8")
-    (artifact_root / f"{case_file_stem}.exit").write_text(f"{code}\n", encoding="utf-8")
+    primary_artifacts = write_result_artifacts(
+        artifact_root=artifact_root,
+        case_file_stem=case_file_stem,
+        suffix="",
+        result=primary,
+    )
 
-    if code != expected_exit:
-        failures.append(f"exit mismatch (expected={expected_exit} actual={code})")
+    if primary.code != expected_exit:
+        failures.append(f"exit mismatch (expected={expected_exit} actual={primary.code})")
 
     evaluate_stream_contracts(
+        case_id=case_id,
+        case_file_stem=case_file_stem,
+        artifact_root=artifact_root,
         label="stdout",
-        actual=stdout,
+        actual=primary.stdout,
+        actual_artifact_path=primary_artifacts["stdout"],
         expected_exact=expected_stdout,
         must_contain=stdout_contains,
         must_exclude=stdout_excludes,
         failures=failures,
     )
     evaluate_stream_contracts(
+        case_id=case_id,
+        case_file_stem=case_file_stem,
+        artifact_root=artifact_root,
         label="stderr",
-        actual=stderr,
+        actual=primary.stderr,
+        actual_artifact_path=primary_artifacts["stderr"],
         expected_exact=expected_stderr,
         must_contain=stderr_contains,
         must_exclude=stderr_excludes,
         failures=failures,
     )
 
+    if oracle_compare:
+        if not isinstance(oracle_backend, str) or not oracle_backend:
+            failures.append("oracle parity configured but suite.oracle_backend is missing/invalid")
+        else:
+            print(
+                "PARITY_CASE ORACLE "
+                f"id={case_id} backend={oracle_backend} compare={','.join(oracle_compare)}"
+            )
+            oracle = run_invocation(
+                invocation=invocation,
+                root=root,
+                backend=oracle_backend,
+                timeout_seconds=timeout_seconds,
+            )
+            oracle_artifacts = write_result_artifacts(
+                artifact_root=artifact_root,
+                case_file_stem=case_file_stem,
+                suffix=".oracle",
+                result=oracle,
+            )
+            if oracle.timed_out:
+                failures.append(
+                    f"oracle run timed out after {timeout_seconds}s (backend={oracle_backend})"
+                )
+            evaluate_oracle_contracts(
+                case_file_stem=case_file_stem,
+                artifact_root=artifact_root,
+                oracle_backend=oracle_backend,
+                oracle_compare=oracle_compare,
+                primary=primary,
+                primary_artifacts=primary_artifacts,
+                oracle=oracle,
+                oracle_artifacts=oracle_artifacts,
+                failures=failures,
+            )
+
     if failures:
-        print(f"PARITY_CASE FAIL id={case_id} rc={code} timeout={int(timed_out)}")
+        print(f"PARITY_CASE FAIL id={case_id} rc={primary.code} timeout={int(primary.timed_out)}")
         for failure in failures:
             print(f" - {failure}")
         return False, failures
 
-    print(f"PARITY_CASE PASS id={case_id} rc={code}")
+    print(f"PARITY_CASE PASS id={case_id} rc={primary.code}")
     return True, []
 
 
@@ -231,12 +510,18 @@ def execute_spec(spec: dict[str, Any], *, spec_path: Path, root: Path, souc_bin:
     artifact_dir = (root / artifact_root).resolve()
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
-    backend = suite.get("default_backend", "inherit")
-    timeout_seconds = suite.get("timeout_seconds", 120)
+    suite_dict = suite if isinstance(suite, dict) else {}
+    backend = suite_dict.get("default_backend", "inherit")
+    oracle_backend = suite_dict.get("oracle_backend", "inherit")
+    oracle_compare = normalize_oracle_compare_tokens(suite_dict)
+    timeout_seconds = suite_dict.get("timeout_seconds", 120)
+    oracle_compare_label = ",".join(oracle_compare) if oracle_compare else "disabled"
     print(
         "PARITY_SPEC_EXEC START "
         f"spec={spec_path} cases={len(cases)} souc={souc_bin} "
-        f"backend={backend} timeout_seconds={timeout_seconds} artifacts={artifact_dir}"
+        f"backend={backend} oracle_backend={oracle_backend} "
+        f"oracle_compare={oracle_compare_label} timeout_seconds={timeout_seconds} "
+        f"artifacts={artifact_dir}"
     )
 
     pass_count = 0
@@ -250,7 +535,8 @@ def execute_spec(spec: dict[str, Any], *, spec_path: Path, root: Path, souc_bin:
         ok, _ = run_case(
             case=case,
             case_index=index,
-            suite=suite if isinstance(suite, dict) else {},
+            suite=suite_dict,
+            spec_path=spec_path,
             root=root,
             souc_bin=souc_bin,
             artifact_root=artifact_dir,
@@ -279,10 +565,12 @@ def run_self_test() -> int:
             "\n".join(
                 [
                     "#!/usr/bin/env python3",
+                    "import os",
                     "import sys",
                     "",
                     "def main() -> int:",
                     "    args = sys.argv[1:]",
+                    "    backend = os.environ.get('SOUNIO_SELFHOST_PIPELINE', 'inherit')",
                     "    if args == ['--help']:",
                     "        sys.stdout.write('Sounio compiler\\nUSAGE\\nCOMMANDS\\n')",
                     "        return 0",
@@ -290,8 +578,15 @@ def run_self_test() -> int:
                     "        sys.stdout.write('souc 0.0.0-selftest\\n')",
                     "        return 0",
                     "    if len(args) >= 2 and args[0] == 'run':",
-                    "        sys.stdout.write('42\\n')",
-                    "        sys.stderr.write('SELFHOST=driver_output\\n')",
+                    "        program = args[1]",
+                    "        if program.endswith('oracle_mismatch.sio') and backend == 'rust':",
+                    "            sys.stdout.write('99\\n')",
+                    "        else:",
+                    "            sys.stdout.write('42\\n')",
+                    "        if backend == 'rust':",
+                    "            sys.stderr.write('SELFHOST=oracle backend=rust\\n')",
+                    "        else:",
+                    "            sys.stderr.write('SELFHOST=driver_output\\n')",
                     "        return 0",
                     "    if len(args) >= 2 and args[0] == 'check':",
                     "        return 0",
@@ -308,6 +603,11 @@ def run_self_test() -> int:
         fake_souc.chmod(0o755)
 
         (temp_root / "dummy.sio").write_text("fn main() -> i64 { 42 }\n", encoding="utf-8")
+        (temp_root / "oracle_mismatch.sio").write_text("fn main() -> i64 { 42 }\n", encoding="utf-8")
+        golden_dir = temp_root / "golden"
+        golden_dir.mkdir(parents=True, exist_ok=True)
+        (golden_dir / "run_smoke.stdout").write_text("42\n", encoding="utf-8")
+        (golden_dir / "run_smoke.stderr").write_text("SELFHOST=driver_output\n", encoding="utf-8")
 
         pass_spec = temp_root / "pass-spec.toml"
         pass_spec.write_text(
@@ -320,6 +620,7 @@ def run_self_test() -> int:
                     "[suite]",
                     'default_backend = "driver"',
                     'oracle_backend = "rust"',
+                    'oracle_compare = ["exit_code", "stdout"]',
                     "timeout_seconds = 5",
                     "",
                     "[cultural_fidelity]",
@@ -334,8 +635,8 @@ def run_self_test() -> int:
                     'command = "run"',
                     'args = ["dummy.sio"]',
                     "expected_exit_code = 0",
-                    'expected_stdout = "42\\n"',
-                    'expected_stderr_contains = ["SELFHOST=driver_output"]',
+                    'expected_stdout_file = "golden/run_smoke.stdout"',
+                    'expected_stderr_file = "golden/run_smoke.stderr"',
                     "",
                     "[[case]]",
                     'id = "help_smoke"',
@@ -360,6 +661,7 @@ def run_self_test() -> int:
                     "[suite]",
                     'default_backend = "driver"',
                     'oracle_backend = "rust"',
+                    'oracle_compare = ["exit_code", "stdout"]',
                     "timeout_seconds = 5",
                     "",
                     "[cultural_fidelity]",
@@ -370,11 +672,11 @@ def run_self_test() -> int:
                     "scan_errors = true",
                     "",
                     "[[case]]",
-                    'id = "mismatch_smoke"',
+                    'id = "oracle_mismatch_smoke"',
                     'command = "run"',
-                    'args = ["dummy.sio"]',
+                    'args = ["oracle_mismatch.sio"]',
                     "expected_exit_code = 0",
-                    'expected_stdout = "41\\n"',
+                    'expected_stdout = "42\\n"',
                     "",
                 ]
             ),
@@ -407,6 +709,26 @@ def run_self_test() -> int:
             print("SELF_TEST FAIL expected fail spec to return 1", file=sys.stderr)
             print(fail_run.stdout, file=sys.stderr)
             print(fail_run.stderr, file=sys.stderr)
+            return 1
+        if "oracle stdout mismatch" not in fail_run.stdout:
+            print("SELF_TEST FAIL expected oracle mismatch failure text", file=sys.stderr)
+            print(fail_run.stdout, file=sys.stderr)
+            print(fail_run.stderr, file=sys.stderr)
+            return 1
+
+        pass_oracle_stdout = temp_root / "artifacts" / "pass" / "run_smoke.oracle.stdout"
+        pass_oracle_exit = temp_root / "artifacts" / "pass" / "run_smoke.oracle.exit"
+        fail_oracle_diff = (
+            temp_root
+            / "artifacts"
+            / "fail"
+            / "oracle_mismatch_smoke.oracle.stdout.diff"
+        )
+        if not pass_oracle_stdout.exists() or not pass_oracle_exit.exists():
+            print("SELF_TEST FAIL expected oracle artifacts for pass case", file=sys.stderr)
+            return 1
+        if not fail_oracle_diff.exists():
+            print("SELF_TEST FAIL expected oracle stdout diff artifact for fail case", file=sys.stderr)
             return 1
 
         print("SELF_TEST PASS parity_spec_exec")

@@ -102,7 +102,9 @@ run_step "14-warning-baseline" bash "$ROOT_DIR/scripts/check_new_warnings.sh"
 run_step "15-build-bootstrap-seed" bash "$ROOT_DIR/scripts/build_bootstrap_seed.sh"
 run_step "16-selfhost-cycle-release-byte-equality" env WORK_DIR="$RUN_DIR/selfhost-cycle-release-gate" SOUNIO_SELFHOST_RELEASE_CYCLE_SKIP_BUILD=1 SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST=bootstrap/selfhost-kernel.manifest bash "$ROOT_DIR/scripts/selfhost_cycle_release_gate.sh"
 run_step "17-selfhost-cycle-gate-seed-root" env WORK_DIR="$RUN_DIR/selfhost-cycle-gate-seed-root" SOUNIO_SELFHOST_CYCLE_FORCE_DYNAMIC=0 SOUNIO_SELFHOST_CYCLE_SEED_ENFORCE=1 SOUNIO_SELFHOST_CYCLE_SEED_PATH=bootstrap/seeds/sounio-bootstrap-linux-x86_64.sio.bin SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST=bootstrap/selfhost-kernel.manifest bash "$ROOT_DIR/scripts/selfhost_cycle_gate.sh"
-run_step "18-full-gate" bash "$ROOT_DIR/scripts/full_gate.sh"
+run_step "18-selfhost-driver-output-gate" env WORK_DIR="$RUN_DIR/selfhost-driver-output-gate" SOUNIO_SELFHOST_STRICT=1 SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT=1 bash "$ROOT_DIR/scripts/selfhost_driver_output_gate.sh"
+run_step "19-selfhost-driver-output-parity-oracle-diff-gate" env WORK_DIR="$RUN_DIR/selfhost-driver-output-parity-gate" SOUNIO_SELFHOST_STRICT=1 SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT=1 bash "$ROOT_DIR/scripts/selfhost_driver_output_parity_gate.sh"
+run_step "20-full-gate" bash "$ROOT_DIR/scripts/full_gate.sh"
 
 write_summary
 echo "[release-pack] summary=$SUMMARY_MD"

@@ -30,6 +30,8 @@ ALLOWED_COMMANDS = {
     "version",
 }
 
+ALLOWED_ORACLE_COMPARE_TOKENS = {"exit", "exit_code", "stdout", "stderr"}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Validate R2 parity spec TOML shape.")
@@ -45,6 +47,10 @@ def parse_args() -> argparse.Namespace:
 def ensure(condition: bool, errors: list[str], message: str) -> None:
     if not condition:
         errors.append(message)
+
+
+def is_string_list(value: object) -> bool:
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
 
 
 def validate(spec: dict, spec_path: Path) -> list[str]:
@@ -64,6 +70,28 @@ def validate(spec: dict, spec_path: Path) -> list[str]:
             errors,
             "missing/invalid suite.timeout_seconds (int)",
         )
+        oracle_compare = suite.get("oracle_compare")
+        if oracle_compare is not None:
+            ensure(
+                is_string_list(oracle_compare),
+                errors,
+                "suite.oracle_compare must be a list of strings when present",
+            )
+            if is_string_list(oracle_compare):
+                unknown_tokens = sorted(
+                    token for token in oracle_compare if token not in ALLOWED_ORACLE_COMPARE_TOKENS
+                )
+                if unknown_tokens:
+                    errors.append(
+                        "suite.oracle_compare contains unsupported tokens: "
+                        f"{unknown_tokens} (allowed={sorted(ALLOWED_ORACLE_COMPARE_TOKENS)})"
+                    )
+                if oracle_compare:
+                    has_exit = "exit_code" in oracle_compare or "exit" in oracle_compare
+                    if not has_exit or "stdout" not in oracle_compare:
+                        errors.append(
+                            "suite.oracle_compare must include both exit_code (or exit) and stdout when configured"
+                        )
 
     fidelity = spec.get("cultural_fidelity")
     ensure(isinstance(fidelity, dict), errors, "missing `[cultural_fidelity]` table")
@@ -90,8 +118,25 @@ def validate(spec: dict, spec_path: Path) -> list[str]:
             ensure(command in ALLOWED_COMMANDS, errors, f"{prefix}.command must be one of {sorted(ALLOWED_COMMANDS)}")
             args = case.get("args")
             ensure(isinstance(args, list), errors, f"{prefix}.args must be a list")
+            if isinstance(args, list) and any(not isinstance(arg, str) for arg in args):
+                errors.append(f"{prefix}.args must contain only strings")
             exit_code = case.get("expected_exit_code")
             ensure(isinstance(exit_code, int), errors, f"{prefix}.expected_exit_code must be an int")
+
+            for stream in ("stdout", "stderr"):
+                inline_key = f"expected_{stream}"
+                file_key = f"expected_{stream}_file"
+                inline_value = case.get(inline_key)
+                file_value = case.get(file_key)
+
+                if inline_value is not None and not isinstance(inline_value, str):
+                    errors.append(f"{prefix}.{inline_key} must be a string when present")
+                if file_value is not None and not isinstance(file_value, str):
+                    errors.append(f"{prefix}.{file_key} must be a string path when present")
+                if inline_value is not None and file_value is not None:
+                    errors.append(
+                        f"{prefix} cannot set both {inline_key} and {file_key}; choose one contract source"
+                    )
 
     if errors:
         errors.insert(0, f"invalid parity spec: {spec_path}")
