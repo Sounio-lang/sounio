@@ -202,6 +202,32 @@ pub fn format_gemm_profile(name: &str, config: &EpistemicGemmConfig, p: &GemmLau
     )
 }
 
+/// Return a tile-size upgrade recommendation when the roofline indicates memory-bound.
+///
+/// Returns `Some(hint_string)` if the kernel is memory-bound and the 64×64 tiled
+/// F32 path was used (i.e., not yet double-buffered).  Returns `None` if already
+/// compute-bound or the double-buffered cp.async path is active.
+///
+/// The returned string is suitable for appending to a `format_gemm_profile` log line.
+pub fn suggest_tile_config(p: &GemmLaunchProfile) -> Option<String> {
+    if !p.memory_bound {
+        return None;
+    }
+    if p.double_buffered {
+        // Already using double-buffer; biggest remaining win is tensor cores.
+        return Some(format!(
+            "  [roofline-hint] memory-bound (intensity={:.1} FLOPs/B < ridge={:.1}): \
+             consider F16 tensor-core path (--use-tensor-cores)",
+            p.arithmetic_intensity, p.ridge_point_flops_per_byte
+        ));
+    }
+    Some(format!(
+        "  [roofline-hint] memory-bound (intensity={:.1} FLOPs/B < ridge={:.1}): \
+         try double-buffered cp.async path (sm_major>=8) or increase TILE to 128×128",
+        p.arithmetic_intensity, p.ridge_point_flops_per_byte
+    ))
+}
+
 /// Compute recommended launch configuration for the tiled F32 GEMM kernel.
 ///
 /// Returns `(grid_x, grid_y, block_x, block_y)` for use with GPU launch APIs.
