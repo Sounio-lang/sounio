@@ -220,11 +220,8 @@ fn test_sedenion_benchmark_module_import_compiles() {
 }
 
 #[test]
-fn test_hsi_classification_reports_known_array_drift() {
-    assert_check_fails_with(
-        "examples/hsi_tissue_classification.sio",
-        "expected `[i32; 0]`, found `[i64; 3]`",
-    );
+fn test_hsi_classification_compiles() {
+    assert_check_passes("examples/hsi_tissue_classification.sio");
 }
 
 #[test]
