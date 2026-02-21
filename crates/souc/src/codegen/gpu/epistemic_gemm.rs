@@ -212,6 +212,17 @@ pub fn tiled_gemm_launch_config(config: &EpistemicGemmConfig) -> (u32, u32, u32,
     (grid_x, grid_y, 16, 16)
 }
 
+/// Compute recommended launch configuration for the WMMA tensor-core kernel.
+///
+/// Returns `(grid_x, grid_y, block_x, block_y)`.
+/// Tile size: 16×16 per warp, thread block: 32 threads (1 warp).
+/// Each block computes one 16×16 output tile.
+pub fn wmma_gemm_launch_config(config: &EpistemicGemmConfig) -> (u32, u32, u32, u32) {
+    let grid_x = ((config.n + 15) / 16) as u32; // ceil(N/16) blocks in X
+    let grid_y = ((config.m + 15) / 16) as u32; // ceil(M/16) blocks in Y
+    (grid_x, grid_y, 32, 1)                     // one warp per block
+}
+
 /// Compute recommended launch configuration for the epsilon-only kernel.
 ///
 /// Returns `(grid_x, block_x)` for 1-D launch over M×N elements.
@@ -1188,14 +1199,14 @@ pub fn generate_wmma_k_loop_ptx(config: &EpistemicGemmConfig, kernel_name: &str)
     s.push_str("    add.u64 %rd4, %rd0, %rd4;\n");
     s.push_str("    wmma.load.a.sync.aligned.row.m16n16k16.global.f16 {%wmma_a0,%wmma_a1,%wmma_a2,%wmma_a3,%wmma_a4,%wmma_a5,%wmma_a6,%wmma_a7}, [%rd4], %r22;\n\n");
 
-    // B fragment: B[k..k+16][tile_col..tile_col+16] = col-major, f16
+    // B fragment: B[k..k+16][tile_col..tile_col+16] — row-major f16 (stride = N)
     s.push_str("    mad.lo.u32 %r7, %r5, %r21, %r3;\n"); // k*N + tile_col
     s.push_str("    mul.wide.u32 %rd5, %r7, 2;\n");
     s.push_str("    add.u64 %rd5, %rd1, %rd5;\n");
-    s.push_str("    wmma.load.b.sync.aligned.col.m16n16k16.global.f16 {%wmma_b0,%wmma_b1,%wmma_b2,%wmma_b3,%wmma_b4,%wmma_b5,%wmma_b6,%wmma_b7}, [%rd5], %r21;\n\n");
+    s.push_str("    wmma.load.b.sync.aligned.row.m16n16k16.global.f16 {%wmma_b0,%wmma_b1,%wmma_b2,%wmma_b3,%wmma_b4,%wmma_b5,%wmma_b6,%wmma_b7}, [%rd5], %r21;\n\n");
 
-    // MMA: accumulate into f32
-    s.push_str("    wmma.mma.sync.aligned.row.col.m16n16k16.f32.f16.f16 {%wmma_d0,%wmma_d1,%wmma_d2,%wmma_d3,%wmma_d4,%wmma_d5,%wmma_d6,%wmma_d7}, {%wmma_a0,%wmma_a1,%wmma_a2,%wmma_a3,%wmma_a4,%wmma_a5,%wmma_a6,%wmma_a7}, {%wmma_b0,%wmma_b1,%wmma_b2,%wmma_b3,%wmma_b4,%wmma_b5,%wmma_b6,%wmma_b7}, {%wmma_c0,%wmma_c1,%wmma_c2,%wmma_c3,%wmma_c4,%wmma_c5,%wmma_c6,%wmma_c7};\n");
+    // MMA: row-major A × row-major B → f32 accumulator
+    s.push_str("    wmma.mma.sync.aligned.row.row.m16n16k16.f32.f16.f16 {%wmma_d0,%wmma_d1,%wmma_d2,%wmma_d3,%wmma_d4,%wmma_d5,%wmma_d6,%wmma_d7}, {%wmma_a0,%wmma_a1,%wmma_a2,%wmma_a3,%wmma_a4,%wmma_a5,%wmma_a6,%wmma_a7}, {%wmma_b0,%wmma_b1,%wmma_b2,%wmma_b3,%wmma_b4,%wmma_b5,%wmma_b6,%wmma_b7}, {%wmma_c0,%wmma_c1,%wmma_c2,%wmma_c3,%wmma_c4,%wmma_c5,%wmma_c6,%wmma_c7};\n");
 
     // Copy d → c for next iteration
     for i in 0..8u32 {
@@ -1207,11 +1218,12 @@ pub fn generate_wmma_k_loop_ptx(config: &EpistemicGemmConfig, kernel_name: &str)
     s.push_str("WMMA_K_DONE:\n\n");
 
     // alpha * d + beta * C: load C tile, scale, store to result
+    // rd6 = byte offset only (not c_ptr + offset)
     s.push_str("    mad.lo.u32 %r8, %r2, %r21, %r3;\n"); // tile_row*N + tile_col
-    s.push_str("    mul.wide.u32 %rd6, %r8, 4;\n");
-    s.push_str("    add.u64 %rd6, %rd2, %rd6;\n");
+    s.push_str("    mul.wide.u32 %rd6, %r8, 4;\n");      // rd6 = byte_offset
+    s.push_str("    add.u64 %rd8, %rd2, %rd6;\n");        // rd8 = c_ptr + byte_offset
     s.push_str(&format!(
-        "    wmma.load.c.sync.aligned.row.m16n16k16.global.f32 {{%wmma_c0,%wmma_c1,%wmma_c2,%wmma_c3,%wmma_c4,%wmma_c5,%wmma_c6,%wmma_c7}}, [%rd6], %r21;\n\n"
+        "    wmma.load.c.sync.aligned.row.m16n16k16.global.f32 {{%wmma_c0,%wmma_c1,%wmma_c2,%wmma_c3,%wmma_c4,%wmma_c5,%wmma_c6,%wmma_c7}}, [%rd8], %r21;\n\n"
     ));
 
     // scale: result_d = alpha*d + beta*C
@@ -1220,9 +1232,9 @@ pub fn generate_wmma_k_loop_ptx(config: &EpistemicGemmConfig, kernel_name: &str)
         s.push_str(&format!("    fma.rn.f32 %wmma_d{i}, %wmma_c{i}, %f1, %f2;\n")); // beta*C + alpha*d
     }
 
-    // store result
-    s.push_str("    add.u64 %rd7, %rd3, %rd6;\n");
-    s.push_str("    wmma.store.d.sync.aligned.row.m16n16k16.global.f32 [%rd7], {%wmma_d0,%wmma_d1,%wmma_d2,%wmma_d3,%wmma_d4,%wmma_d5,%wmma_d6,%wmma_d7}, %r21;\n");
+    // store result to result_ptr + byte_offset (not c_ptr + byte_offset)
+    s.push_str("    add.u64 %rd9, %rd3, %rd6;\n");
+    s.push_str("    wmma.store.d.sync.aligned.row.m16n16k16.global.f32 [%rd9], {%wmma_d0,%wmma_d1,%wmma_d2,%wmma_d3,%wmma_d4,%wmma_d5,%wmma_d6,%wmma_d7}, %r21;\n");
 
     let _ = k; // used via config.k doc
     s.push_str("\n    ret;\n}\n");
