@@ -419,4 +419,149 @@ theorem preservation (Γ : List (String × Ty)) (e e' : Expr) (t : Ty)
     ∃ t' : Ty, Sub t' t := by
   exact ⟨t, Sub.refl t⟩
 
+
+-- ===========================================================================
+-- REAL SMALL-STEP SEMANTICS AND TYPE PRESERVATION  (Phase 8.2)
+-- ===========================================================================
+-- We work within the existing HasType and Expr inductives.
+-- Expr constructors: val, var, app, letIn, annot.
+-- HasType rules: t_unit, t_bool, t_int, t_float, t_var, t_sub, t_annot.
+-- HasType has NO rules for app or letIn.
+-- ---------------------------------------------------------------------------
+
+-- ---------------------------------------------------------------------------
+-- Substitution
+-- ---------------------------------------------------------------------------
+
+def subst (x : String) (v : Expr) : Expr → Expr
+  | Expr.var y         => if y == x then v else Expr.var y
+  | Expr.letIn y S e b => if y == x
+                           then Expr.letIn y S (subst x v e) b
+                           else Expr.letIn y S (subst x v e) (subst x v b)
+  | Expr.app f arg     => Expr.app (subst x v f) (subst x v arg)
+  | Expr.annot e t     => Expr.annot (subst x v e) t
+  | e                  => e
+
+@[simp] theorem subst_val_eq (x : String) (v : Expr) (w : Val) :
+    subst x v (Expr.val w) = Expr.val w := rfl
+
+-- ---------------------------------------------------------------------------
+-- Small-step reduction relation
+-- ---------------------------------------------------------------------------
+
+inductive Step : Expr → Expr → Prop where
+  | step_annot_val  (v : Val) (t : Ty) :
+      Step (Expr.annot (Expr.val v) t) (Expr.val v)
+  | step_annot_cong (e e' : Expr) (t : Ty) :
+      Step e e' → Step (Expr.annot e t) (Expr.annot e' t)
+
+-- ---------------------------------------------------------------------------
+-- Inversion lemmas (structural recursion in term mode)
+-- ---------------------------------------------------------------------------
+
+/-- A closed variable cannot be well-typed. -/
+private def no_closed_var (x : String) (t : Ty)
+    (h : HasType [] (Expr.var x) t) : False :=
+  match h with
+  | HasType.t_var _ _ hmem => absurd hmem (List.not_mem_nil _)
+  | HasType.t_sub he _     => no_closed_var x _ he
+
+/-- Inversion: HasType Γ (annot e t) T implies HasType Γ e t and Sub t T. -/
+private def annot_inv
+    (Γ : List (String × Ty)) (e : Expr) (t T : Ty)
+    (h : HasType Γ (Expr.annot e t) T) :
+    HasType Γ e t ∧ Sub t T :=
+  match h with
+  | HasType.t_annot he    => ⟨he, Sub.refl t⟩
+  | HasType.t_sub he hsub =>
+      let ⟨h_e, h_s⟩ := annot_inv Γ e t _ he
+      ⟨h_e, Sub.trans t _ T h_s hsub⟩
+
+-- ---------------------------------------------------------------------------
+-- Substitution preserves typing
+-- ---------------------------------------------------------------------------
+
+theorem subst_preserves_type
+    (Γ : List (String × Ty)) (x : String) (S T : Ty)
+    (e v : Expr)
+    (hfresh : ∀ y ty, (y, ty) ∈ Γ → y ≠ x)
+    (hv    : HasType Γ v S)
+    (he    : HasType ((x, S) :: Γ) e T) :
+    HasType Γ (subst x v e) T := by
+  induction he with
+  | t_unit  => exact HasType.t_unit
+  | t_bool b  => exact HasType.t_bool b
+  | t_int  n  => exact HasType.t_int  n
+  | t_float f => exact HasType.t_float f
+  | t_var y ty hmem =>
+      simp only [subst]
+      rw [List.mem_cons] at hmem
+      cases hmem with
+      | inl h =>
+          have hyx  : y  = x := congr_arg Prod.fst h
+          have htyS : ty = S := congr_arg Prod.snd h
+          subst hyx; subst htyS; simp [beq_iff_eq]; exact hv
+      | inr h =>
+          have hne : y ≠ x := hfresh y ty h
+          simp [beq_iff_eq, hne]; exact HasType.t_var y ty h
+  | t_sub _ hsub ih1 => exact HasType.t_sub ih1 hsub
+  | t_annot _ ih1    => exact HasType.t_annot ih1
+
+
+-- ---------------------------------------------------------------------------
+-- Helper: isValue and value form
+-- ---------------------------------------------------------------------------
+
+private theorem isValue_iff_val (e : Expr) :
+    isValue e = true ↔ ∃ v : Val, e = Expr.val v := by
+  constructor
+  · intro h; cases e with
+    | val v       => exact ⟨v, rfl⟩
+    | var _       => simp [isValue] at h
+    | annot _ _   => simp [isValue] at h
+    | letIn _ _ _ _ => simp [isValue] at h
+    | app _ _     => simp [isValue] at h
+  · rintro ⟨v, rfl⟩; rfl
+
+-- ---------------------------------------------------------------------------
+-- Real preservation theorem
+-- ---------------------------------------------------------------------------
+
+theorem preservation_real
+    (Γ : List (String × Ty)) (e e' : Expr) (t : Ty)
+    (htype : HasType Γ e t)
+    (hstep : Step e e') :
+    ∃ t' : Ty, Sub t' t ∧ HasType Γ e' t' := by
+  induction hstep generalizing t with
+  | step_annot_val v t_ann =>
+      obtain ⟨he_inner, hsub⟩ := annot_inv Γ (Expr.val v) t_ann t htype
+      exact ⟨t_ann, hsub, he_inner⟩
+  | step_annot_cong e_inner e'_inner t_ann _hs ih =>
+      obtain ⟨he_inner, hsub⟩ := annot_inv Γ e_inner t_ann t htype
+      obtain ⟨T', hT'_sub, hT'_type⟩ := ih t_ann he_inner
+      exact ⟨t_ann, hsub, HasType.t_annot (HasType.t_sub hT'_type hT'_sub)⟩
+
+-- ---------------------------------------------------------------------------
+-- Real progress theorem
+-- ---------------------------------------------------------------------------
+
+/-- **progress_real**
+    A closed, well-typed expression is either a value or can take a step. -/
+theorem progress_real (e : Expr) (t : Ty) (h : HasType [] e t) :
+    isValue e = true ∨ ∃ e', Step e e' := by
+  induction h with
+  | t_unit         => left; rfl
+  | t_bool _       => left; rfl
+  | t_int  _       => left; rfl
+  | t_float _      => left; rfl
+  | t_var x ty hmem => exact absurd hmem (List.not_mem_nil _)
+  | t_sub _ _ ih   => exact ih
+  | t_annot he ih =>
+      right
+      obtain (hv | ⟨e', hstep⟩) := ih
+      · rw [isValue_iff_val] at hv
+        obtain ⟨v, rfl⟩ := hv
+        exact ⟨Expr.val v, Step.step_annot_val v _⟩
+      · exact ⟨Expr.annot e' _, Step.step_annot_cong _ e' _ hstep⟩
+
 end Sounio.TypeChecker
