@@ -31,7 +31,9 @@ use crate::codegen::gpu::runtime::{
 };
 use crate::codegen::gpu::epistemic_gemm::{EpistemicGemmConfig, generate_epistemic_gemm_ptx_sm};
 #[cfg(feature = "gpu")]
-use crate::codegen::gpu::epistemic_gemm::{format_gemm_profile, profile_gemm_launch};
+use crate::codegen::gpu::epistemic_gemm::{
+    format_gemm_profile, profile_gemm_launch, suggest_tile_config,
+};
 
 /// Global GPU runtime singleton
 static GPU_RUNTIME: OnceLock<Mutex<GpuRuntimeBridge>> = OnceLock::new();
@@ -366,6 +368,9 @@ impl GpuRuntimeBridge {
         {
             let profile = profile_gemm_launch(config, elapsed_ms, mem_bw, peak_fp32, uses_double_buffer);
             eprintln!("{}", format_gemm_profile(kernel_name, config, &profile));
+            if let Some(hint) = suggest_tile_config(&profile) {
+                eprintln!("{hint}");
+            }
         }
         // Suppress unused-variable warnings outside the `gpu` feature gate.
         let _ = (mem_bw, peak_fp32, uses_double_buffer);
@@ -470,6 +475,70 @@ mod tests {
         assert_eq!(stats.kernels_loaded, 0);
         assert_eq!(stats.buffers_allocated, 0);
         assert_eq!(stats.kernel_launches, 0);
+    }
+
+    #[test]
+    fn test_launch_epistemic_gemm_roofline() {
+        use crate::codegen::gpu::epistemic_gemm::MatrixPrecision;
+        let mut bridge = GpuRuntimeBridge::new_simulated();
+
+        let config = EpistemicGemmConfig {
+            m: 64,
+            k: 64,
+            n: 64,
+            alpha: 1.0,
+            beta: 0.0,
+            precision: MatrixPrecision::F32,
+            use_tensor_cores: false,
+            confidence_threshold: None,
+        };
+
+        let result = bridge.launch_epistemic_gemm(
+            &config,
+            "roofline_test_gemm",
+            (1, 1, 1),
+            (16, 16, 1),
+            &[],
+        );
+        assert!(result.is_ok(), "launch_epistemic_gemm must succeed on simulated backend");
+        let (kernel_id, elapsed_ms) = result.unwrap();
+        assert!(kernel_id > 0, "kernel id must be nonzero");
+        assert!(elapsed_ms >= 0.0, "elapsed must be non-negative");
+        assert_eq!(bridge.stats.kernel_launches, 1);
+    }
+
+    #[test]
+    fn test_suggest_tile_config_memory_bound() {
+        use crate::codegen::gpu::epistemic_gemm::{suggest_tile_config, GemmLaunchProfile};
+        let p = GemmLaunchProfile {
+            flops: 2.0 * 64.0 * 64.0 * 64.0,
+            achieved_gflops: 14.0,
+            arithmetic_intensity: 0.3,
+            ridge_point_flops_per_byte: 20.0,
+            memory_bound: true,
+            efficiency: 0.0005,
+            double_buffered: false,
+        };
+        let hint = suggest_tile_config(&p);
+        assert!(hint.is_some(), "memory-bound single-buffer must produce a hint");
+        let s = hint.unwrap();
+        assert!(s.contains("memory-bound"), "hint must mention memory-bound");
+        assert!(s.contains("128"), "hint must suggest 128×128 tile");
+    }
+
+    #[test]
+    fn test_suggest_tile_config_compute_bound() {
+        use crate::codegen::gpu::epistemic_gemm::{suggest_tile_config, GemmLaunchProfile};
+        let p = GemmLaunchProfile {
+            flops: 2.0 * 4096.0 * 4096.0 * 4096.0,
+            achieved_gflops: 10000.0,
+            arithmetic_intensity: 256.0,
+            ridge_point_flops_per_byte: 20.0,
+            memory_bound: false,
+            efficiency: 0.5,
+            double_buffered: true,
+        };
+        assert!(suggest_tile_config(&p).is_none(), "compute-bound path must return None");
     }
 
     // C-callable dispatch tests moved to runtime::ffi::ffi_gpu
