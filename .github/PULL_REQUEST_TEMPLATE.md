@@ -46,6 +46,7 @@
 - [ ] I have added tests that prove my fix/feature works
 - [ ] All new and existing tests pass (`cargo test`)
 - [ ] I have updated documentation as needed
+- [ ] I completed `Traceability` and `Release Scope` sections (required by PR intake enforcement)
 - [ ] My commits follow the project's commit message format
 
 ## Testing

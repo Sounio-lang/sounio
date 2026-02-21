@@ -2,22 +2,128 @@ name: Release Readiness Dashboard
 
 on:
   schedule:
-    - cron: "5 5 * * *"
+    - cron: "5 5 * * 1"
   workflow_dispatch:
 
 permissions:
-  issues: read
+  issues: write
 
 jobs:
   build-dashboard:
     runs-on: ubuntu-latest
     steps:
-      - name: Generate release-readiness dashboard artifact
+      - name: Build release-readiness dashboard + weekly issue comment
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require("fs");
             const path = require("path");
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const now = new Date();
+            const dayMs = 24 * 60 * 60 * 1000;
+
+            const hasLabel = (item, name) =>
+              item.labels.some((label) => (typeof label === "string" ? label : label.name) === name);
+            const labelNames = (item) => item.labels.map((label) => (typeof label === "string" ? label : label.name));
+
+            const allOpen = (await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: "open",
+              per_page: 100
+            })).filter((item) => !item.pull_request);
+
+            const allClosed = (await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: "closed",
+              per_page: 100
+            })).filter((item) => !item.pull_request);
+
+            const releaseOpen = allOpen.filter((item) => hasLabel(item, "release-readiness"));
+            const releaseClosed = allClosed.filter((item) => hasLabel(item, "release-readiness"));
+
+            const countByPrefix = (issues, prefix) => {
+              const counts = {};
+              for (const issue of issues) {
+                for (const label of labelNames(issue)) {
+                  if (label.startsWith(prefix)) {
+                    counts[label] = (counts[label] || 0) + 1;
+                  }
+                }
+              }
+              return counts;
+            };
+
+            const ageDays = (iso) => Math.floor((now - new Date(iso)) / dayMs);
+            const ageBuckets = {
+              "0-3": 0,
+              "4-7": 0,
+              "8-14": 0,
+              "15-30": 0,
+              "31+": 0
+            };
+            for (const issue of releaseOpen) {
+              const age = ageDays(issue.created_at);
+              if (age <= 3) ageBuckets["0-3"] += 1;
+              else if (age <= 7) ageBuckets["4-7"] += 1;
+              else if (age <= 14) ageBuckets["8-14"] += 1;
+              else if (age <= 30) ageBuckets["15-30"] += 1;
+              else ageBuckets["31+"] += 1;
+            }
+
+            const blockers = releaseOpen
+              .filter((issue) => hasLabel(issue, "release-blocker"))
+              .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+
+            const staleBlockers = blockers.slice(0, 10).map((issue) => ({
+              number: issue.number,
+              title: issue.title,
+              url: issue.html_url,
+              age_days: ageDays(issue.created_at),
+              updated_at: issue.updated_at,
+              scope: labelNames(issue).filter((n) => n.startsWith("scope:")).join(", ") || "scope:unspecified",
+              severity: labelNames(issue).find((n) => n.startsWith("severity:")) || "severity:unspecified"
+            }));
+
+            const intakeMissing = releaseOpen.filter((issue) =>
+              hasLabel(issue, "needs:evidence") || hasLabel(issue, "traceability:missing")
+            );
+
+            const mttrStats = (issues) => {
+              const values = issues
+                .filter((issue) => issue.closed_at)
+                .map((issue) => (new Date(issue.closed_at) - new Date(issue.created_at)) / dayMs)
+                .filter((v) => Number.isFinite(v))
+                .sort((a, b) => a - b);
+
+              if (values.length === 0) {
+                return {
+                  count: 0,
+                  average_days: null,
+                  median_days: null,
+                  p90_days: null
+                };
+              }
+
+              const avg = values.reduce((acc, v) => acc + v, 0) / values.length;
+              const median = values[Math.floor(values.length / 2)];
+              const p90 = values[Math.floor((values.length - 1) * 0.9)];
+              return {
+                count: values.length,
+                average_days: Number(avg.toFixed(2)),
+                median_days: Number(median.toFixed(2)),
+                p90_days: Number(p90.toFixed(2))
+              };
+            };
+
+            const closed30d = releaseClosed.filter(
+              (issue) => issue.closed_at && (now - new Date(issue.closed_at)) <= (30 * dayMs)
+            );
+            const mttrAll = mttrStats(releaseClosed);
+            const mttr30d = mttrStats(closed30d);
 
             const severityRank = {
               "severity:critical": 0,
@@ -25,75 +131,30 @@ jobs:
               "severity:medium": 2,
               "severity:low": 3
             };
-
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-            const open = await github.paginate(github.rest.issues.listForRepo, {
-              owner,
-              repo,
-              state: "open",
-              per_page: 100
-            });
-
-            const issues = open.filter((item) => !item.pull_request);
-            const releaseIssues = issues.filter((item) =>
-              item.labels.some((label) => label.name === "release-readiness")
-            );
-
-            const countByPrefix = (prefix) => {
-              const counts = {};
-              for (const issue of releaseIssues) {
-                for (const label of issue.labels) {
-                  if (label.name.startsWith(prefix)) {
-                    counts[label.name] = (counts[label.name] || 0) + 1;
-                  }
-                }
-              }
-              return counts;
-            };
-
-            const scopeCounts = countByPrefix("scope:");
-            const severityCounts = countByPrefix("severity:");
-            const confidenceCounts = countByPrefix("confidence:");
-            const effortCounts = countByPrefix("effort:");
-            const traceabilityCounts = countByPrefix("traceability:");
-
-            const blockers = releaseIssues.filter((issue) =>
-              issue.labels.some((label) => label.name === "release-blocker")
-            );
-            const intakeMissing = releaseIssues.filter((issue) =>
-              issue.labels.some((label) => label.name === "needs:evidence" || label.name === "traceability:missing")
-            );
-
-            const sorted = [...releaseIssues].sort((a, b) => {
-              const aLabelNames = a.labels.map((l) => l.name);
-              const bLabelNames = b.labels.map((l) => l.name);
-
-              const aSeverity = aLabelNames.find((x) => severityRank[x] !== undefined) || "severity:low";
-              const bSeverity = bLabelNames.find((x) => severityRank[x] !== undefined) || "severity:low";
+            const sortedTop = [...releaseOpen].sort((a, b) => {
+              const aNames = labelNames(a);
+              const bNames = labelNames(b);
+              const aSeverity = aNames.find((n) => severityRank[n] !== undefined) || "severity:low";
+              const bSeverity = bNames.find((n) => severityRank[n] !== undefined) || "severity:low";
               if (severityRank[aSeverity] !== severityRank[bSeverity]) {
                 return severityRank[aSeverity] - severityRank[bSeverity];
               }
-              return new Date(b.updated_at) - new Date(a.updated_at);
-            });
+              return new Date(a.updated_at) - new Date(b.updated_at);
+            }).slice(0, 100);
 
-            const topRows = sorted.slice(0, 100).map((issue) => {
-              const labels = issue.labels.map((l) => l.name);
-              const severity = labels.find((x) => x.startsWith("severity:")) || "severity:unspecified";
-              const scope = labels.filter((x) => x.startsWith("scope:")).join(", ") || "scope:unspecified";
-              const confidence = labels.find((x) => x.startsWith("confidence:")) || "confidence:unspecified";
-              const effort = labels.find((x) => x.startsWith("effort:")) || "effort:unspecified";
-              const traceability = labels.find((x) => x.startsWith("traceability:")) || "traceability:unspecified";
+            const topIssues = sortedTop.map((issue) => {
+              const names = labelNames(issue);
               return {
                 number: issue.number,
                 title: issue.title,
                 url: issue.html_url,
                 updated_at: issue.updated_at,
-                severity,
-                scope,
-                confidence,
-                effort,
-                traceability
+                age_days: ageDays(issue.created_at),
+                severity: names.find((n) => n.startsWith("severity:")) || "severity:unspecified",
+                scope: names.filter((n) => n.startsWith("scope:")).join(", ") || "scope:unspecified",
+                confidence: names.find((n) => n.startsWith("confidence:")) || "confidence:unspecified",
+                effort: names.find((n) => n.startsWith("effort:")) || "effort:unspecified",
+                traceability: names.find((n) => n.startsWith("traceability:")) || "traceability:unspecified"
               };
             });
 
@@ -101,26 +162,29 @@ jobs:
             fs.mkdirSync(outDir, { recursive: true });
 
             const summary = {
-              generated_at: new Date().toISOString(),
+              generated_at: now.toISOString(),
               repo: `${owner}/${repo}`,
               totals: {
-                open_issues: issues.length,
-                release_readiness_open: releaseIssues.length,
+                open_issues: allOpen.length,
+                release_readiness_open: releaseOpen.length,
                 release_blockers_open: blockers.length,
-                intake_missing_open: intakeMissing.length
+                intake_missing_open: intakeMissing.length,
+                closed_release_readiness_total: releaseClosed.length,
+                closed_release_readiness_30d: closed30d.length
               },
-              by_scope: scopeCounts,
-              by_severity: severityCounts,
-              by_confidence: confidenceCounts,
-              by_effort: effortCounts,
-              by_traceability: traceabilityCounts,
-              top_issues: topRows
+              age_buckets_open_release_readiness: ageBuckets,
+              mttr_all_days: mttrAll,
+              mttr_30d_days: mttr30d,
+              by_scope: countByPrefix(releaseOpen, "scope:"),
+              by_severity: countByPrefix(releaseOpen, "severity:"),
+              by_confidence: countByPrefix(releaseOpen, "confidence:"),
+              by_effort: countByPrefix(releaseOpen, "effort:"),
+              by_traceability: countByPrefix(releaseOpen, "traceability:"),
+              top_stale_blockers: staleBlockers,
+              top_issues: topIssues
             };
 
-            fs.writeFileSync(
-              path.join(outDir, "summary.json"),
-              JSON.stringify(summary, null, 2)
-            );
+            fs.writeFileSync(path.join(outDir, "summary.json"), JSON.stringify(summary, null, 2));
 
             const asList = (obj) =>
               Object.entries(obj)
@@ -128,12 +192,21 @@ jobs:
                 .map(([k, v]) => `- ${k}: ${v}`)
                 .join("\n") || "- (none)";
 
-            const tableHeader =
-              "| Issue | Severity | Scope | Confidence | Effort | Traceability | Updated |\n" +
-              "|---|---|---|---|---|---|---|";
-            const tableRows = topRows
+            const issueTableHeader =
+              "| Issue | Severity | Scope | Confidence | Effort | Traceability | Age (d) | Updated |\n" +
+              "|---|---|---|---|---|---|---:|---|";
+            const issueTableRows = topIssues
               .map((row) =>
-                `| [#${row.number}](${row.url}) ${row.title.replace(/\|/g, "\\|")} | ${row.severity} | ${row.scope} | ${row.confidence} | ${row.effort} | ${row.traceability} | ${row.updated_at} |`
+                `| [#${row.number}](${row.url}) ${row.title.replace(/\|/g, "\\|")} | ${row.severity} | ${row.scope} | ${row.confidence} | ${row.effort} | ${row.traceability} | ${row.age_days} | ${row.updated_at} |`
+              )
+              .join("\n");
+
+            const blockerHeader =
+              "| Blocker | Severity | Scope | Age (d) | Updated |\n" +
+              "|---|---|---|---:|---|";
+            const blockerRows = staleBlockers
+              .map((row) =>
+                `| [#${row.number}](${row.url}) ${row.title.replace(/\|/g, "\\|")} | ${row.severity} | ${row.scope} | ${row.age_days} | ${row.updated_at} |`
               )
               .join("\n");
 
@@ -147,6 +220,21 @@ jobs:
             - Release-readiness open: ${summary.totals.release_readiness_open}
             - Release blockers open: ${summary.totals.release_blockers_open}
             - Intake-missing open: ${summary.totals.intake_missing_open}
+
+            ## Age Buckets (Open Release-Readiness Issues)
+            ${asList(summary.age_buckets_open_release_readiness)}
+
+            ## MTTR (days)
+            - All closed release-readiness issues:
+              - count: ${summary.mttr_all_days.count}
+              - average: ${summary.mttr_all_days.average_days}
+              - median: ${summary.mttr_all_days.median_days}
+              - p90: ${summary.mttr_all_days.p90_days}
+            - Closed in last 30 days:
+              - count: ${summary.mttr_30d_days.count}
+              - average: ${summary.mttr_30d_days.average_days}
+              - median: ${summary.mttr_30d_days.median_days}
+              - p90: ${summary.mttr_30d_days.p90_days}
 
             ## By Scope
             ${asList(summary.by_scope)}
@@ -163,12 +251,93 @@ jobs:
             ## By Traceability
             ${asList(summary.by_traceability)}
 
+            ## Top Stale Blockers
+            ${blockerHeader}
+            ${blockerRows || "| (none) | - | - | - | - |"}
+
             ## Top Open Release-Readiness Issues
-            ${tableHeader}
-            ${tableRows || "| (none) | - | - | - | - | - | - |"}
+            ${issueTableHeader}
+            ${issueTableRows || "| (none) | - | - | - | - | - | - | - |"}
             `.replace(/^[ \t]+/gm, "");
 
             fs.writeFileSync(path.join(outDir, "summary.md"), markdown);
+
+            const dashboardLabel = "release-readiness-dashboard";
+            try {
+              await github.rest.issues.getLabel({ owner, repo, name: dashboardLabel });
+            } catch (error) {
+              if (error.status === 404) {
+                await github.rest.issues.createLabel({
+                  owner,
+                  repo,
+                  name: dashboardLabel,
+                  color: "5319e7",
+                  description: "Automated release-readiness dashboard thread"
+                });
+              } else {
+                throw error;
+              }
+            }
+
+            const dashboardTitle = "Release Readiness Dashboard (Automated)";
+            const openDashboardIssues = (await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: "open",
+              labels: dashboardLabel,
+              per_page: 100
+            })).filter((item) => !item.pull_request);
+
+            let dashboardIssue = openDashboardIssues.find((item) => item.title === dashboardTitle);
+            if (!dashboardIssue) {
+              const created = await github.rest.issues.create({
+                owner,
+                repo,
+                title: dashboardTitle,
+                labels: [dashboardLabel],
+                body:
+                  "This issue is maintained by workflow automation.\n" +
+                  "Weekly release-readiness snapshots are posted as comments."
+              });
+              dashboardIssue = created.data;
+            }
+
+            const marker = "<!-- release-readiness-dashboard-weekly -->";
+            const weeklyComment =
+              `${marker}\n` +
+              `## Weekly Snapshot (${summary.generated_at})\n` +
+              `- Release-readiness open: ${summary.totals.release_readiness_open}\n` +
+              `- Release blockers open: ${summary.totals.release_blockers_open}\n` +
+              `- Intake-missing open: ${summary.totals.intake_missing_open}\n` +
+              `- MTTR (30d avg): ${summary.mttr_30d_days.average_days}\n\n` +
+              `### Age Buckets\n${asList(summary.age_buckets_open_release_readiness)}\n\n` +
+              `### Top Stale Blockers\n` +
+              `${staleBlockers.map((b) => `- [#${b.number}](${b.url}) (${b.age_days}d) ${b.title}`).join("\n") || "- (none)"}`;
+
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner,
+              repo,
+              issue_number: dashboardIssue.number
+            });
+            const existing = comments.find(
+              (comment) => comment.user?.type === "Bot" && comment.body?.includes(marker)
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+                body: weeklyComment
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: dashboardIssue.number,
+                body: weeklyComment
+              });
+            }
 
       - name: Upload release-readiness dashboard artifact
         uses: actions/upload-artifact@v4

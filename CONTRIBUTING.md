@@ -212,8 +212,10 @@ Automation notes:
 
 - Issues are auto-labeled from form fields (scope, severity, confidence, effort, traceability).
 - PRs are auto-triaged from PR template intake sections.
+- PR intake is also enforced by a required CI check (`PR Intake Enforcement`).
 - Intake-incomplete issues (`needs:evidence` / `traceability:missing`) can be marked stale and auto-closed if not updated.
-- A scheduled release-readiness dashboard artifact is generated from issue labels.
+- `release-blocker` issues trigger automatic scope-owner mention comments.
+- A weekly release-readiness dashboard artifact + issue comment is generated from issue labels.
 
 ## License
 

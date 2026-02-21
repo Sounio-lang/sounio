@@ -1,0 +1,71 @@
+name: PR Intake Enforcement
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  enforce-intake:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate PR intake contract
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const bodyRaw = pr.body || "";
+
+            const sectionValue = (heading) => {
+              const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+              const re = new RegExp(`##\\s+${escaped}\\s*\\n+([\\s\\S]*?)(?=\\n##\\s+|$)`, "i");
+              const match = bodyRaw.match(re);
+              return match ? match[1].trim() : "";
+            };
+
+            const problems = [];
+
+            const scopeSection = sectionValue("Release Scope");
+            const hasScopeSelection =
+              /- \[[xX]\]\s+Compiler/i.test(scopeSection) ||
+              /- \[[xX]\]\s+Docs/i.test(scopeSection) ||
+              /- \[[xX]\]\s+Website/i.test(scopeSection) ||
+              /- \[[xX]\]\s+CI\s*\/\s*Workflow contracts/i.test(scopeSection) ||
+              /- \[[xX]\]\s+Non-release-blocking change/i.test(scopeSection);
+            if (!hasScopeSelection) {
+              problems.push("Release Scope: select at least one checkbox.");
+            }
+
+            const traceabilitySection = sectionValue("Traceability");
+            const traceabilityLine = (traceabilitySection.match(/Traceability Matrix ID\(s\):[^\n]*/i) || [""])[0];
+            const evidenceLine = (traceabilitySection.match(/Evidence Log\(s\):[^\n]*/i) || [""])[0];
+
+            const hasTraceability =
+              /[A-Z]{3,}-\d{3}/.test(traceabilityLine) ||
+              /Traceability Matrix ID\(s\):\s*N\/A\b/i.test(traceabilityLine);
+            if (!hasTraceability) {
+              problems.push("Traceability Matrix ID(s): include at least one ID (e.g. `COMP-001`) or `N/A` with reason.");
+            }
+
+            const hasEvidence =
+              evidenceLine &&
+              !/Evidence Log\(s\):\s*$/i.test(evidenceLine) &&
+              !/Evidence Log\(s\):\s*<!--/i.test(evidenceLine);
+            if (!hasEvidence) {
+              problems.push("Evidence Log(s): include at least one concrete path.");
+            }
+
+            if (problems.length > 0) {
+              const title = "PR intake contract is incomplete";
+              const details = problems.map((line) => `- ${line}`).join("\n");
+              const message =
+                `${title}\n${details}\n\n` +
+                `Update the PR body sections \`Traceability\` and \`Release Scope\` to pass this required check.`;
+              core.summary
+                .addHeading(title)
+                .addRaw(details, true)
+                .write();
+              core.setFailed(message);
+            }
