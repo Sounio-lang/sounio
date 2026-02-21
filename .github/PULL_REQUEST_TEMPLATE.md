@@ -35,6 +35,8 @@
 - [ ] CI / Workflow contracts
 - [ ] Non-release-blocking change
 
+<!-- Intake automation reads this section. Keep scope + traceability populated. -->
+
 ## Checklist
 
 <!-- Mark with an `x` all that apply -->

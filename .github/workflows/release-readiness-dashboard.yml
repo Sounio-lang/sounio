@@ -1,0 +1,178 @@
+name: Release Readiness Dashboard
+
+on:
+  schedule:
+    - cron: "5 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  issues: read
+
+jobs:
+  build-dashboard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate release-readiness dashboard artifact
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            const path = require("path");
+
+            const severityRank = {
+              "severity:critical": 0,
+              "severity:high": 1,
+              "severity:medium": 2,
+              "severity:low": 3
+            };
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const open = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: "open",
+              per_page: 100
+            });
+
+            const issues = open.filter((item) => !item.pull_request);
+            const releaseIssues = issues.filter((item) =>
+              item.labels.some((label) => label.name === "release-readiness")
+            );
+
+            const countByPrefix = (prefix) => {
+              const counts = {};
+              for (const issue of releaseIssues) {
+                for (const label of issue.labels) {
+                  if (label.name.startsWith(prefix)) {
+                    counts[label.name] = (counts[label.name] || 0) + 1;
+                  }
+                }
+              }
+              return counts;
+            };
+
+            const scopeCounts = countByPrefix("scope:");
+            const severityCounts = countByPrefix("severity:");
+            const confidenceCounts = countByPrefix("confidence:");
+            const effortCounts = countByPrefix("effort:");
+            const traceabilityCounts = countByPrefix("traceability:");
+
+            const blockers = releaseIssues.filter((issue) =>
+              issue.labels.some((label) => label.name === "release-blocker")
+            );
+            const intakeMissing = releaseIssues.filter((issue) =>
+              issue.labels.some((label) => label.name === "needs:evidence" || label.name === "traceability:missing")
+            );
+
+            const sorted = [...releaseIssues].sort((a, b) => {
+              const aLabelNames = a.labels.map((l) => l.name);
+              const bLabelNames = b.labels.map((l) => l.name);
+
+              const aSeverity = aLabelNames.find((x) => severityRank[x] !== undefined) || "severity:low";
+              const bSeverity = bLabelNames.find((x) => severityRank[x] !== undefined) || "severity:low";
+              if (severityRank[aSeverity] !== severityRank[bSeverity]) {
+                return severityRank[aSeverity] - severityRank[bSeverity];
+              }
+              return new Date(b.updated_at) - new Date(a.updated_at);
+            });
+
+            const topRows = sorted.slice(0, 100).map((issue) => {
+              const labels = issue.labels.map((l) => l.name);
+              const severity = labels.find((x) => x.startsWith("severity:")) || "severity:unspecified";
+              const scope = labels.filter((x) => x.startsWith("scope:")).join(", ") || "scope:unspecified";
+              const confidence = labels.find((x) => x.startsWith("confidence:")) || "confidence:unspecified";
+              const effort = labels.find((x) => x.startsWith("effort:")) || "effort:unspecified";
+              const traceability = labels.find((x) => x.startsWith("traceability:")) || "traceability:unspecified";
+              return {
+                number: issue.number,
+                title: issue.title,
+                url: issue.html_url,
+                updated_at: issue.updated_at,
+                severity,
+                scope,
+                confidence,
+                effort,
+                traceability
+              };
+            });
+
+            const outDir = path.join("artifacts", "release-readiness-dashboard");
+            fs.mkdirSync(outDir, { recursive: true });
+
+            const summary = {
+              generated_at: new Date().toISOString(),
+              repo: `${owner}/${repo}`,
+              totals: {
+                open_issues: issues.length,
+                release_readiness_open: releaseIssues.length,
+                release_blockers_open: blockers.length,
+                intake_missing_open: intakeMissing.length
+              },
+              by_scope: scopeCounts,
+              by_severity: severityCounts,
+              by_confidence: confidenceCounts,
+              by_effort: effortCounts,
+              by_traceability: traceabilityCounts,
+              top_issues: topRows
+            };
+
+            fs.writeFileSync(
+              path.join(outDir, "summary.json"),
+              JSON.stringify(summary, null, 2)
+            );
+
+            const asList = (obj) =>
+              Object.entries(obj)
+                .sort((a, b) => a[0].localeCompare(b[0]))
+                .map(([k, v]) => `- ${k}: ${v}`)
+                .join("\n") || "- (none)";
+
+            const tableHeader =
+              "| Issue | Severity | Scope | Confidence | Effort | Traceability | Updated |\n" +
+              "|---|---|---|---|---|---|---|";
+            const tableRows = topRows
+              .map((row) =>
+                `| [#${row.number}](${row.url}) ${row.title.replace(/\|/g, "\\|")} | ${row.severity} | ${row.scope} | ${row.confidence} | ${row.effort} | ${row.traceability} | ${row.updated_at} |`
+              )
+              .join("\n");
+
+            const markdown = `# Release Readiness Dashboard
+
+            Generated: ${summary.generated_at}
+            Repository: ${summary.repo}
+
+            ## Totals
+            - Open issues: ${summary.totals.open_issues}
+            - Release-readiness open: ${summary.totals.release_readiness_open}
+            - Release blockers open: ${summary.totals.release_blockers_open}
+            - Intake-missing open: ${summary.totals.intake_missing_open}
+
+            ## By Scope
+            ${asList(summary.by_scope)}
+
+            ## By Severity
+            ${asList(summary.by_severity)}
+
+            ## By Confidence
+            ${asList(summary.by_confidence)}
+
+            ## By Effort
+            ${asList(summary.by_effort)}
+
+            ## By Traceability
+            ${asList(summary.by_traceability)}
+
+            ## Top Open Release-Readiness Issues
+            ${tableHeader}
+            ${tableRows || "| (none) | - | - | - | - | - | - |"}
+            `.replace(/^[ \t]+/gm, "");
+
+            fs.writeFileSync(path.join(outDir, "summary.md"), markdown);
+
+      - name: Upload release-readiness dashboard artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-readiness-dashboard
+          path: artifacts/release-readiness-dashboard/
+          retention-days: 14

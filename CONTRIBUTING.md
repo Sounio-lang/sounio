@@ -208,6 +208,13 @@ To help maintainers diagnose quickly and prioritize consistently, issue forms re
 
 Release-critical regressions should use the **Release Readiness Regression** template.
 
+Automation notes:
+
+- Issues are auto-labeled from form fields (scope, severity, confidence, effort, traceability).
+- PRs are auto-triaged from PR template intake sections.
+- Intake-incomplete issues (`needs:evidence` / `traceability:missing`) can be marked stale and auto-closed if not updated.
+- A scheduled release-readiness dashboard artifact is generated from issue labels.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the MIT License.

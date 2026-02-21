@@ -1,0 +1,188 @@
+name: PR Intake Triage
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure PR triage labels exist
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const labels = [
+              { name: "pr:release-readiness", color: "5319e7", description: "PR impacts release-readiness scope" },
+              { name: "pr:needs-release-scope", color: "d93f0b", description: "PR missing release scope selection" },
+              { name: "pr:needs-traceability", color: "d93f0b", description: "PR missing traceability IDs" },
+              { name: "pr:needs-evidence", color: "d93f0b", description: "PR missing evidence log references" },
+              { name: "pr:needs-intake", color: "d93f0b", description: "PR body missing required intake fields" },
+              { name: "scope:compiler", color: "1d76db", description: "Compiler scope impact" },
+              { name: "scope:docs", color: "0e8a16", description: "Documentation scope impact" },
+              { name: "scope:website", color: "0052cc", description: "Website scope impact" },
+              { name: "scope:ci", color: "d876e3", description: "CI/workflow scope impact" },
+              { name: "scope:other", color: "cfd3d7", description: "Other scope impact" },
+              { name: "traceability:linked", color: "0e8a16", description: "Traceability IDs linked" },
+              { name: "traceability:missing", color: "d93f0b", description: "Traceability IDs missing" }
+            ];
+
+            for (const label of labels) {
+              try {
+                await github.rest.issues.getLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: label.name
+                });
+              } catch (error) {
+                if (error.status === 404) {
+                  await github.rest.issues.createLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    name: label.name,
+                    color: label.color,
+                    description: label.description
+                  });
+                } else {
+                  throw error;
+                }
+              }
+            }
+
+      - name: Apply PR intake labels
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const bodyRaw = pr.body || "";
+
+            const sectionValue = (heading) => {
+              const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+              const re = new RegExp(`##\\s+${escaped}\\s*\\n+([\\s\\S]*?)(?=\\n##\\s+|$)`, "i");
+              const match = bodyRaw.match(re);
+              return match ? match[1].trim() : "";
+            };
+
+            const additions = new Set(["triage"]);
+            const scopeSection = sectionValue("Release Scope");
+
+            if (/- \[x\]\s+Compiler/i.test(scopeSection)) additions.add("scope:compiler");
+            if (/- \[x\]\s+Docs/i.test(scopeSection)) additions.add("scope:docs");
+            if (/- \[x\]\s+Website/i.test(scopeSection)) additions.add("scope:website");
+            if (/- \[x\]\s+CI\s*\/\s*Workflow contracts/i.test(scopeSection)) additions.add("scope:ci");
+            if (/- \[x\]\s+Non-release-blocking change/i.test(scopeSection)) additions.add("scope:other");
+
+            const hasReleaseScope = [...additions].some((label) =>
+              /^scope:(compiler|docs|website|ci|other)$/.test(label)
+            );
+            if (!hasReleaseScope) {
+              additions.add("pr:needs-release-scope");
+              additions.add("scope:other");
+            }
+
+            const traceabilitySection = sectionValue("Traceability");
+            const traceabilityMatch = traceabilitySection.match(/Traceability Matrix ID\(s\):[^\n]*/i);
+            const evidenceMatch = traceabilitySection.match(/Evidence Log\(s\):[^\n]*/i);
+
+            const traceabilityText = traceabilityMatch ? traceabilityMatch[0] : "";
+            const evidenceText = evidenceMatch ? evidenceMatch[0] : "";
+
+            if (/[A-Z]{3,}-\d{3}/.test(traceabilityText)) additions.add("traceability:linked");
+            else {
+              additions.add("traceability:missing");
+              additions.add("pr:needs-traceability");
+            }
+
+            const hasEvidence =
+              evidenceText &&
+              !/Evidence Log\(s\):\s*$/i.test(evidenceText) &&
+              !/Evidence Log\(s\):\s*<!--/i.test(evidenceText);
+            if (!hasEvidence) additions.add("pr:needs-evidence");
+
+            if (
+              additions.has("pr:needs-release-scope") ||
+              additions.has("pr:needs-traceability") ||
+              additions.has("pr:needs-evidence")
+            ) {
+              additions.add("pr:needs-intake");
+            }
+
+            if (
+              additions.has("scope:compiler") ||
+              additions.has("scope:docs") ||
+              additions.has("scope:website") ||
+              additions.has("scope:ci")
+            ) {
+              additions.add("pr:release-readiness");
+            }
+
+            const currentLabelNames = pr.labels.map((label) => label.name);
+            const managed = (name) =>
+              name === "pr:release-readiness" ||
+              name === "pr:needs-release-scope" ||
+              name === "pr:needs-traceability" ||
+              name === "pr:needs-evidence" ||
+              name === "pr:needs-intake" ||
+              name.startsWith("scope:") ||
+              name.startsWith("traceability:");
+
+            const preserved = currentLabelNames.filter((name) => !managed(name));
+            const nextLabels = [...new Set([...preserved, ...additions])];
+
+            await github.rest.issues.setLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number,
+              labels: nextLabels
+            });
+
+      - name: Comment on missing PR intake evidence
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const labels = pr.labels.map((label) => label.name);
+            const marker = "<!-- pr-intake-triage -->";
+
+            const needs = [];
+            if (labels.includes("pr:needs-release-scope")) needs.push("release scope checkbox selection");
+            if (labels.includes("pr:needs-traceability")) needs.push("Traceability Matrix ID(s)");
+            if (labels.includes("pr:needs-evidence")) needs.push("Evidence Log(s) paths");
+
+            if (needs.length === 0) return;
+
+            const body =
+              `${marker}\n` +
+              `Thanks for the PR. Please update the PR body so intake is complete:\n` +
+              needs.map((item) => `- ${item}`).join("\n") +
+              `\n\nThis keeps release-readiness triage deterministic and reviewable.`;
+
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number
+            });
+
+            const existing = comments.find(
+              (comment) => comment.user?.type === "Bot" && comment.body?.includes(marker)
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                body
+              });
+            }
