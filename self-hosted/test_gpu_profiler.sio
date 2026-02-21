@@ -1,0 +1,266 @@
+// Self-hosted GPU profiler roofline tests
+//
+// Validates the GEMM roofline hook added to gpu/analysis/profiler.sio:
+//   - prof_gemm_roofline: GFLOPS + intensity + bottleneck classification
+//   - prof_gemm_recommend_tile: tile size recommendation
+//   - prof_format_gemm_report: formatted output
+//   - SM hardware spec database
+//   - Occupancy and roofline point computation
+
+// ── SM hardware spec database ─────────────────────────────────────────
+
+fn prof_test_01_sm_spec_ampere_a100_bandwidth() -> bool {
+    let spec = sm_spec_ampere_a100()
+    spec.mem_bandwidth_gb_s == 1935
+}
+
+fn prof_test_02_sm_spec_for_version_80_is_a100() -> bool {
+    let spec = sm_spec_for_version(80)
+    spec.sm_version == 80 && spec.fp32_throughput == 128
+}
+
+fn prof_test_03_sm_spec_for_version_86_is_consumer() -> bool {
+    let spec = sm_spec_for_version(86)
+    spec.max_threads_per_sm == 1536
+}
+
+fn prof_test_04_sm_spec_default_is_a100() -> bool {
+    let spec = sm_spec_default()
+    spec.sm_version == 80
+}
+
+fn prof_test_05_sm_spec_hopper_fp16_throughput() -> bool {
+    let spec = sm_spec_hopper()
+    spec.fp16_throughput == 512
+}
+
+fn prof_test_06_sm_spec_blackwell_bw() -> bool {
+    let spec = sm_spec_blackwell()
+    spec.mem_bandwidth_gb_s == 8000
+}
+
+// ── Instruction counting ──────────────────────────────────────────────
+
+fn prof_test_07_ic_new_all_zeros() -> bool {
+    let ic = prof_ic_new()
+    ic.fp32_ops == 0 && ic.mem_loads == 0 && ic.total_ops == 0
+}
+
+fn prof_test_08_count_fma_as_two_flops() -> bool {
+    let ic = prof_ic_new()
+    var op = prof_gpu_op_entry_zero()
+    op.opcode = PROF_OP_FMA
+    let ic2 = prof_count_op(ic, op)
+    ic2.fp32_ops == 2 && ic2.total_ops == 1
+}
+
+fn prof_test_09_count_mul_as_one_flop() -> bool {
+    let ic = prof_ic_new()
+    var op = prof_gpu_op_entry_zero()
+    op.opcode = PROF_OP_MUL
+    let ic2 = prof_count_op(ic, op)
+    ic2.fp32_ops == 1
+}
+
+fn prof_test_10_dead_op_not_counted() -> bool {
+    let ic = prof_ic_new()
+    var op = prof_gpu_op_entry_zero()
+    op.opcode = PROF_OP_ADD
+    op.dead = true
+    let ic2 = prof_count_op(ic, op)
+    ic2.fp32_ops == 0 && ic2.total_ops == 0
+}
+
+// ── Arithmetic intensity ──────────────────────────────────────────────
+
+fn prof_test_11_intensity_compute_only() -> bool {
+    var ic = prof_ic_new()
+    ic.fp32_ops = 1000
+    ic.mem_loads = 0
+    ic.mem_stores = 0
+    let intensity = prof_compute_intensity(ic, 256)
+    // No memory → infinite intensity (capped at 1000.0)
+    intensity > 999.0
+}
+
+fn prof_test_12_intensity_balanced() -> bool {
+    var ic = prof_ic_new()
+    ic.fp32_ops = 100
+    ic.mem_loads = 25
+    ic.mem_stores = 0
+    // 100 FLOPs / (25 * 4 bytes) = 1.0
+    let intensity = prof_compute_intensity(ic, 256)
+    let diff = intensity - 1.0
+    let abs_diff = if diff < 0.0 { -diff } else { diff }
+    abs_diff < 0.01
+}
+
+// ── Roofline point ────────────────────────────────────────────────────
+
+fn prof_test_13_roofline_memory_bound() -> bool {
+    let spec = sm_spec_ampere_a100()
+    var ic = prof_ic_new()
+    ic.fp32_ops = 10
+    ic.mem_loads = 100
+    ic.mem_stores = 0
+    // intensity = 10 / 400 = 0.025 FLOPs/byte → very low → memory-bound
+    let occ = prof_occupancy_zero()
+    let rp = prof_roofline_point(spec, ic, 256, 1, occ)
+    rp.is_memory_bound
+}
+
+fn prof_test_14_roofline_compute_bound() -> bool {
+    let spec = sm_spec_ampere_a100()
+    var ic = prof_ic_new()
+    ic.fp32_ops = 10000
+    ic.mem_loads = 1
+    ic.mem_stores = 0
+    // intensity = 10000 / 4 = 2500 → very high → compute-bound
+    let occ = prof_occupancy_zero()
+    let rp = prof_roofline_point(spec, ic, 256, 1, occ)
+    rp.is_compute_bound
+}
+
+// ── GEMM roofline hook ────────────────────────────────────────────────
+
+fn prof_test_15_gemm_roofline_flops_correct() -> bool {
+    // 4096^3 GEMM: flops = 2 * 4096 * 4096 * 4096 = 137438953472
+    let spec = sm_spec_ampere_a100()
+    let result = prof_gemm_roofline(4096, 4096, 4096, 1.0, spec, 108, 1.41)
+    let expected = 2.0 * 4096.0 * 4096.0 * 4096.0
+    let diff = result.flops - expected
+    let abs_diff = if diff < 0.0 { -diff } else { diff }
+    abs_diff < 1.0
+}
+
+fn prof_test_16_gemm_roofline_gflops_positive() -> bool {
+    let spec = sm_spec_ampere_a100()
+    let result = prof_gemm_roofline(1024, 1024, 1024, 0.1, spec, 108, 1.41)
+    result.achieved_gflops > 0.0
+}
+
+fn prof_test_17_gemm_roofline_500_gflops_on_a100() -> bool {
+    // A100: 108 SMs, 1.41 GHz, fp32=128 FLOPs/SM/clk → peak ~19.5 TFLOPS
+    // 4096^3 GEMM: 137.4 GFLOPS. At ~50% efficiency with 0.01ms elapsed
+    // that's 137.4e9 / 0.00001 / 1e9 = 13.74 TFLOPS
+    let spec = sm_spec_ampere_a100()
+    let result = prof_gemm_roofline(4096, 4096, 4096, 0.01, spec, 108, 1.41)
+    result.achieved_gflops > 500.0
+}
+
+fn prof_test_18_gemm_roofline_compute_bound_large_k() -> bool {
+    // Large K → high arithmetic intensity → compute-bound
+    let spec = sm_spec_ampere_a100()
+    let result = prof_gemm_roofline(256, 256, 8192, 1.0, spec, 108, 1.41)
+    // intensity = 2*256*256*8192 / ((256*8192 + 8192*256 + 2*256*256)*4)
+    //           = 1073741824 / (2*8192*256*4 + 2*65536*4)
+    //           ≈ high → compute-bound
+    result.arithmetic_intensity > 10.0
+}
+
+fn prof_test_19_gemm_roofline_memory_bound_small_k() -> bool {
+    // Small K → low arithmetic intensity → memory-bound
+    let spec = sm_spec_ampere_a100()
+    let result = prof_gemm_roofline(4096, 4096, 1, 1.0, spec, 108, 1.41)
+    // intensity = 2*4096*4096*1 / ((4096*1 + 1*4096 + 2*4096*4096)*4)
+    //           ≈ 2*16M / (4*33558528) ≈ 0.25 → memory-bound
+    result.is_memory_bound
+}
+
+// ── Tile recommendation ───────────────────────────────────────────────
+
+fn prof_test_20_recommend_tile_doubles_when_mem_bound() -> bool {
+    let spec = sm_spec_ampere_a100()
+    let result = prof_gemm_roofline(4096, 4096, 1, 1.0, spec, 108, 1.41)
+    // Should be memory-bound → recommend doubling from 64 to 128
+    let recommended = prof_gemm_recommend_tile(result, 64)
+    recommended == 128
+}
+
+fn prof_test_21_recommend_tile_no_change_compute_bound() -> bool {
+    let spec = sm_spec_ampere_a100()
+    let result = prof_gemm_roofline(256, 256, 8192, 1.0, spec, 108, 1.41)
+    // Compute-bound → keep current tile
+    let recommended = prof_gemm_recommend_tile(result, 64)
+    recommended == 64
+}
+
+fn prof_test_22_recommend_tile_cap_at_128() -> bool {
+    let spec = sm_spec_ampere_a100()
+    var result = prof_gemm_roofline(4096, 4096, 1, 1.0, spec, 108, 1.41)
+    // Already at 128 → no change even if memory-bound
+    let recommended = prof_gemm_recommend_tile(result, 128)
+    recommended == 128
+}
+
+// ── Report formatting ─────────────────────────────────────────────────
+
+fn prof_test_23_format_report_non_empty() -> bool {
+    let spec = sm_spec_ampere_a100()
+    let result = prof_gemm_roofline(1024, 1024, 1024, 1.0, spec, 108, 1.41)
+    let report = prof_format_gemm_report(result)
+    report.1 > 20  // report length > 20 bytes
+}
+
+fn prof_test_24_format_report_contains_gemm() -> bool {
+    let spec = sm_spec_ampere_a100()
+    let result = prof_gemm_roofline(512, 512, 512, 0.5, spec, 108, 1.41)
+    let report = prof_format_gemm_report(result)
+    // Check "GEMM" at start: G=71, E=69, M=77, M=77
+    report.0[0] == 71 && report.0[1] == 69 && report.0[2] == 77 && report.0[3] == 77
+}
+
+fn prof_test_25_format_report_contains_gflops() -> bool {
+    let spec = sm_spec_ampere_a100()
+    let result = prof_gemm_roofline(512, 512, 512, 0.5, spec, 108, 1.41)
+    let report = prof_format_gemm_report(result)
+    // Search for "GFLOPS" (G=71, F=70, L=76, O=79, P=80, S=83) in buffer
+    var found = false
+    var i: i64 = 0
+    while i < report.1 - 5 && !found {
+        if report.0[i as usize] == 71 &&
+           report.0[(i + 1) as usize] == 70 &&
+           report.0[(i + 2) as usize] == 76 &&
+           report.0[(i + 3) as usize] == 79 &&
+           report.0[(i + 4) as usize] == 80 &&
+           report.0[(i + 5) as usize] == 83 {
+            found = true
+        }
+        i = i + 1
+    }
+    found
+}
+
+// ── Bottleneck label ──────────────────────────────────────────────────
+
+fn prof_test_26_bottleneck_label_compute() -> bool {
+    let lbl = prof_bottleneck_label(BOTTLENECK_COMPUTE)
+    lbl.1 == 7 && lbl.0[0] == 99  // "compute", 'c'=99
+}
+
+fn prof_test_27_bottleneck_label_memory() -> bool {
+    let lbl = prof_bottleneck_label(BOTTLENECK_MEMORY)
+    lbl.1 == 6 && lbl.0[0] == 109  // "memory", 'm'=109
+}
+
+// ── Efficiency sanity ─────────────────────────────────────────────────
+
+fn prof_test_28_efficiency_below_100_pct() -> bool {
+    let spec = sm_spec_ampere_a100()
+    // 1ms for 4096^3 GEMM → ~137 TFLOPS → should exceed peak → eff > 100
+    // But 10ms → ~13.7 TFLOPS → below A100 peak → eff < 100
+    let result = prof_gemm_roofline(4096, 4096, 4096, 10.0, spec, 108, 1.41)
+    result.efficiency_pct < 100.0 && result.efficiency_pct > 0.0
+}
+
+fn prof_test_29_zero_elapsed_gives_zero_gflops() -> bool {
+    let spec = sm_spec_ampere_a100()
+    let result = prof_gemm_roofline(1024, 1024, 1024, 0.0, spec, 108, 1.41)
+    result.achieved_gflops == 0.0
+}
+
+fn prof_test_30_sm_fp32_tflops_positive() -> bool {
+    let spec = sm_spec_ampere_a100()
+    let tflops = sm_spec_fp32_tflops(spec, 108, 1.41)
+    tflops > 10.0
+}

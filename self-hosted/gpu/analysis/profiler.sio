@@ -1852,3 +1852,219 @@ fn prof_format_module_report(m: ModuleMetrics) -> ([i8; 4096], i64) with Div {
 
     (buf, len)
 }
+
+// ============================================================================
+// GEMM roofline hook — per-launch GFLOPS estimate
+// ============================================================================
+//
+// Mirrors the Rust-side GemmLaunchProfile from epistemic_gemm.rs.
+// Takes M, N, K, elapsed_ms, hardware spec, and computes GFLOPS, arithmetic
+// intensity, and bottleneck classification.
+
+struct GemmProfileResult {
+    flops: f64,
+    achieved_gflops: f64,
+    arithmetic_intensity: f64,
+    ridge_point: f64,
+    is_memory_bound: bool,
+    efficiency_pct: f64,
+    m: i64,
+    n: i64,
+    k: i64,
+}
+
+// Compute roofline analysis for a GEMM kernel launch.
+//
+// FLOPs = 2*M*N*K (one multiply + one add per inner-loop iteration).
+// Memory traffic (tiled): A[M×K] + B[K×N] + C_read[M×N] + C_write[M×N], each f32.
+// Arithmetic intensity = FLOPs / bytes.
+// Ridge point = peak_compute_gflops / peak_mem_bw_gbs.
+// Achieved GFLOPS = FLOPs / elapsed_s / 1e9.
+fn prof_gemm_roofline(
+    m: i64, n: i64, k: i64,
+    elapsed_ms: f64,
+    spec: SmHardwareSpec,
+    sm_count: i64,
+    clock_ghz: f64
+) -> GemmProfileResult with Div {
+    let m_f = m as f64
+    let n_f = n as f64
+    let k_f = k as f64
+
+    // Total FLOPs: 2 * M * K * N
+    let flops = 2.0 * m_f * k_f * n_f
+
+    // Memory traffic (bytes): (M*K + K*N + 2*M*N) * 4
+    let bytes = (m_f * k_f + k_f * n_f + 2.0 * m_f * n_f) * 4.0
+
+    let intensity = if bytes > 0.0 { flops / bytes } else { 1000.0 }
+
+    // Peak compute: fp32_throughput * sm_count * clock_ghz (GFLOPs)
+    let peak_compute = (spec.fp32_throughput as f64) * (sm_count as f64) * clock_ghz
+
+    // Peak memory bandwidth: given in spec as GB/s
+    let peak_bw = spec.mem_bandwidth_gb_s as f64
+
+    // Ridge point: intensity where compute and memory lines cross
+    let ridge = if peak_bw > 0.0 { peak_compute / peak_bw } else { 0.0 }
+
+    let is_mem_bound = intensity < ridge
+
+    // Achieved GFLOPS
+    let elapsed_s = elapsed_ms / 1000.0
+    let achieved = if elapsed_s > 0.0 { (flops / elapsed_s) / 1000000000.0 } else { 0.0 }
+
+    // Efficiency: fraction of peak
+    let eff = if peak_compute > 0.0 { (achieved / peak_compute) * 100.0 } else { 0.0 }
+
+    GemmProfileResult {
+        flops: flops,
+        achieved_gflops: achieved,
+        arithmetic_intensity: intensity,
+        ridge_point: ridge,
+        is_memory_bound: is_mem_bound,
+        efficiency_pct: eff,
+        m: m,
+        n: n,
+        k: k,
+    }
+}
+
+// Recommend tile size adjustment for memory-bound GEMM kernels.
+// Returns recommended TILE_M (larger tile = higher reuse = higher intensity).
+fn prof_gemm_recommend_tile(result: GemmProfileResult, current_tile: i64) -> i64 {
+    if result.is_memory_bound && current_tile < 128 {
+        // Double tile size to increase reuse
+        current_tile * 2
+    } else {
+        current_tile
+    }
+}
+
+// Format a GEMM roofline report line into the report buffer.
+// Output: "GEMM MxNxK  <gflops> GFLOPS  intensity=<f>  bound=<tag>  eff=<f>%\n"
+fn prof_format_gemm_report(result: GemmProfileResult) -> ([i8; 4096], i64) with Div {
+    var buf: [i8; 4096] = [0; 4096]
+    var len: i64 = 0
+
+    // "GEMM "
+    var lbl: [i8; 128] = [0; 128]
+    lbl[0] = 71   // G
+    lbl[1] = 69   // E
+    lbl[2] = 77   // M
+    lbl[3] = 77   // M
+    lbl[4] = 32   // ' '
+    let tup0 = prof_report_append_str(buf, len, lbl, 5)
+    buf = tup0.0
+    len = tup0.1
+
+    // MxNxK
+    let tup1 = prof_report_append_i64(buf, len, result.m)
+    buf = tup1.0
+    len = tup1.1
+    let tup1x = prof_report_append_char(buf, len, 120)  // 'x'
+    buf = tup1x.0
+    len = tup1x.1
+    let tup2 = prof_report_append_i64(buf, len, result.n)
+    buf = tup2.0
+    len = tup2.1
+    let tup2x = prof_report_append_char(buf, len, 120)  // 'x'
+    buf = tup2x.0
+    len = tup2x.1
+    let tup3 = prof_report_append_i64(buf, len, result.k)
+    buf = tup3.0
+    len = tup3.1
+
+    // "  "
+    let sp = prof_lit_two_spaces()
+    let tup4 = prof_report_append_str(buf, len, sp.0, sp.1)
+    buf = tup4.0
+    len = tup4.1
+
+    // achieved GFLOPS
+    let tup5 = prof_report_append_f32(buf, len, result.achieved_gflops as f32)
+    buf = tup5.0
+    len = tup5.1
+
+    // " GFLOPS  intensity="
+    var lbl2: [i8; 128] = [0; 128]
+    lbl2[0]  = 32   // ' '
+    lbl2[1]  = 71   // G
+    lbl2[2]  = 70   // F
+    lbl2[3]  = 76   // L
+    lbl2[4]  = 79   // O
+    lbl2[5]  = 80   // P
+    lbl2[6]  = 83   // S
+    lbl2[7]  = 32   // ' '
+    lbl2[8]  = 32   // ' '
+    lbl2[9]  = 105  // i
+    lbl2[10] = 110  // n
+    lbl2[11] = 116  // t
+    lbl2[12] = 101  // e
+    lbl2[13] = 110  // n
+    lbl2[14] = 115  // s
+    lbl2[15] = 105  // i
+    lbl2[16] = 116  // t
+    lbl2[17] = 121  // y
+    lbl2[18] = 61   // =
+    let tup6 = prof_report_append_str(buf, len, lbl2, 19)
+    buf = tup6.0
+    len = tup6.1
+
+    // intensity value
+    let tup7 = prof_report_append_f32(buf, len, result.arithmetic_intensity as f32)
+    buf = tup7.0
+    len = tup7.1
+
+    // "  bound="
+    var lbl3: [i8; 128] = [0; 128]
+    lbl3[0] = 32   // ' '
+    lbl3[1] = 32   // ' '
+    lbl3[2] = 98   // b
+    lbl3[3] = 111  // o
+    lbl3[4] = 117  // u
+    lbl3[5] = 110  // n
+    lbl3[6] = 100  // d
+    lbl3[7] = 61   // =
+    let tup8 = prof_report_append_str(buf, len, lbl3, 8)
+    buf = tup8.0
+    len = tup8.1
+
+    // "memory" or "compute"
+    let bn_label = if result.is_memory_bound {
+        prof_bottleneck_label(BOTTLENECK_MEMORY)
+    } else {
+        prof_bottleneck_label(BOTTLENECK_COMPUTE)
+    }
+    let tup9 = prof_report_append_str(buf, len, bn_label.0, bn_label.1)
+    buf = tup9.0
+    len = tup9.1
+
+    // "  eff="
+    var lbl4: [i8; 128] = [0; 128]
+    lbl4[0] = 32   // ' '
+    lbl4[1] = 32   // ' '
+    lbl4[2] = 101  // e
+    lbl4[3] = 102  // f
+    lbl4[4] = 102  // f
+    lbl4[5] = 61   // =
+    let tup10 = prof_report_append_str(buf, len, lbl4, 6)
+    buf = tup10.0
+    len = tup10.1
+
+    let tup11 = prof_report_append_f32(buf, len, result.efficiency_pct as f32)
+    buf = tup11.0
+    len = tup11.1
+
+    // "%\n"
+    let pct = prof_lit_pct()
+    let tup12 = prof_report_append_str(buf, len, pct.0, pct.1)
+    buf = tup12.0
+    len = tup12.1
+    let nl = prof_lit_newline()
+    let tup13 = prof_report_append_str(buf, len, nl.0, nl.1)
+    buf = tup13.0
+    len = tup13.1
+
+    (buf, len)
+}
