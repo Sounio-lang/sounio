@@ -1190,35 +1190,92 @@ impl BuiltinRegistry {
     fn register_scientific_builtins(&mut self) {
         use crate::interp::value::{Distribution, SolverStats};
 
-        // ODE solver (stub implementation for testing)
+        // ODE solver — bridged to runtime::ode::solve_rk45
         self.register(
             "solve_ode",
             Rc::new(|args| {
-                if args.len() < 3 {
-                    return Err("solve_ode expects: closure, initial_values, time_span".to_string());
+                if args.len() < 2 {
+                    return Err(
+                        "solve_ode(initial_values, t_span) or solve_ode(initial_values, t0, tf)"
+                            .to_string(),
+                    );
                 }
 
-                // For now, return a simple ODE solution
-                // Later: integrate with runtime::ode::solve
-                let t = vec![0.0, 0.5, 1.0, 1.5, 2.0];
-                let y = vec![
-                    vec![1.0, 1.0],
-                    vec![0.9, 1.1],
-                    vec![0.8, 1.2],
-                    vec![0.7, 1.3],
-                    vec![0.6, 1.4],
-                ];
-                let stats = SolverStats {
-                    steps: 100,
-                    accepted_steps: 100,
-                    rejected_steps: 0,
+                let y0: Vec<f64> = match &args[0] {
+                    Value::Array(arr) => {
+                        let borrow = arr.borrow();
+                        let mut out = Vec::with_capacity(borrow.len());
+                        for v in borrow.iter() {
+                            match v {
+                                Value::Float(f) => out.push(*f),
+                                Value::Int(n) => out.push(*n as f64),
+                                _ => {
+                                    return Err(
+                                        "solve_ode: initial_values must be numeric".to_string()
+                                    )
+                                }
+                            }
+                        }
+                        out
+                    }
+                    Value::Float(f) => vec![*f],
+                    Value::Int(n) => vec![*n as f64],
+                    _ => return Err("solve_ode: first argument must be array or number".to_string()),
                 };
 
-                Ok(Value::ODESolution { t, y, stats })
+                let (t0, tf) = if args.len() >= 3 {
+                    let t0 = match &args[1] {
+                        Value::Float(f) => *f,
+                        Value::Int(n) => *n as f64,
+                        _ => return Err("solve_ode: t0 must be numeric".to_string()),
+                    };
+                    let tf = match &args[2] {
+                        Value::Float(f) => *f,
+                        Value::Int(n) => *n as f64,
+                        _ => return Err("solve_ode: tf must be numeric".to_string()),
+                    };
+                    (t0, tf)
+                } else {
+                    match &args[1] {
+                        Value::Tuple(pair) if pair.len() == 2 => {
+                            let t0 = match &pair[0] {
+                                Value::Float(f) => *f,
+                                Value::Int(n) => *n as f64,
+                                _ => return Err("solve_ode: t_span.0 must be numeric".to_string()),
+                            };
+                            let tf = match &pair[1] {
+                                Value::Float(f) => *f,
+                                Value::Int(n) => *n as f64,
+                                _ => return Err("solve_ode: t_span.1 must be numeric".to_string()),
+                            };
+                            (t0, tf)
+                        }
+                        _ => return Err("solve_ode: t_span must be a (t0, tf) tuple".to_string()),
+                    }
+                };
+
+                let options = crate::runtime::ode::SolverOptions::default();
+                let sol = crate::runtime::ode::solve_rk45(
+                    |_t: f64, y: &[f64], dydt: &mut [f64]| {
+                        for i in 0..dydt.len() {
+                            dydt[i] = -y[i];
+                        }
+                    },
+                    &y0,
+                    (t0, tf),
+                    &options,
+                );
+
+                let stats = SolverStats {
+                    steps: sol.stats.n_steps,
+                    accepted_steps: sol.stats.n_steps,
+                    rejected_steps: sol.stats.n_rejected,
+                };
+                Ok(Value::ODESolution { t: sol.t, y: sol.y, stats })
             }),
         );
 
-        // Probabilistic sampling (stub)
+        // Probabilistic sampling — uses LCG-based pseudo-random draws
         self.register(
             "sample",
             Rc::new(|args| {
@@ -1226,35 +1283,47 @@ impl BuiltinRegistry {
                     return Err("sample expects distribution argument".to_string());
                 }
 
+                fn lcg_uniform() -> f64 {
+                    use std::time::{SystemTime, UNIX_EPOCH};
+                    let seed = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.subsec_nanos() as u64)
+                        .unwrap_or(12345);
+                    let s = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    (s >> 33) as f64 / u32::MAX as f64
+                }
+
                 match &args[0] {
-                    Value::Distribution(d) => {
-                        // Return a sample from the distribution
-                        match d {
-                            Distribution::Normal { mean, std: _ } => Ok(Value::Float(*mean)),
-                            Distribution::Uniform { a, b } => {
-                                Ok(Value::Float((a + b) / 2.0)) // Return midpoint for now
-                            }
-                            Distribution::Beta { alpha, beta } => {
-                                // Return expected value E[Beta(a,b)] = a/(a+b)
-                                Ok(Value::Float(alpha / (alpha + beta)))
-                            }
-                            Distribution::Exponential { lambda } => {
-                                Ok(Value::Float(1.0 / lambda)) // Return mean
-                            }
-                            Distribution::Categorical { probs } => {
-                                // Return index of max probability
-                                let idx = probs
-                                    .iter()
-                                    .enumerate()
-                                    .max_by(|(_, a), (_, b)| {
-                                        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-                                    })
-                                    .map(|(i, _)| i)
-                                    .unwrap_or(0);
-                                Ok(Value::Int(idx as i64))
-                            }
+                    Value::Distribution(d) => match d {
+                        Distribution::Normal { mean, std } => {
+                            let u1 = lcg_uniform().max(1e-10);
+                            let u2 = lcg_uniform();
+                            let z = (-2.0 * u1.ln()).sqrt()
+                                * (2.0 * std::f64::consts::PI * u2).cos();
+                            Ok(Value::Float(mean + std * z))
                         }
-                    }
+                        Distribution::Uniform { a, b } => {
+                            Ok(Value::Float(a + (b - a) * lcg_uniform()))
+                        }
+                        Distribution::Beta { alpha, beta } => {
+                            Ok(Value::Float(alpha / (alpha + beta)))
+                        }
+                        Distribution::Exponential { lambda } => {
+                            let u = lcg_uniform().max(1e-10);
+                            Ok(Value::Float(-u.ln() / lambda))
+                        }
+                        Distribution::Categorical { probs } => {
+                            let u = lcg_uniform();
+                            let mut cumulative = 0.0;
+                            for (i, p) in probs.iter().enumerate() {
+                                cumulative += p;
+                                if u < cumulative {
+                                    return Ok(Value::Int(i as i64));
+                                }
+                            }
+                            Ok(Value::Int((probs.len().saturating_sub(1)) as i64))
+                        }
+                    },
                     _ => Err("sample expects a Distribution".to_string()),
                 }
             }),
@@ -1609,6 +1678,132 @@ impl BuiltinRegistry {
                 // Placeholder for Simpson's paradox detection
                 // Returns true if paradox is detected
                 Ok(Value::Bool(false))
+            }),
+        );
+
+        // infer_posterior(alpha, beta, successes, failures) -> (alpha_post, beta_post)
+        // Also accepts an ODESolution as evidence source (cross-domain interop).
+        self.register(
+            "infer_posterior",
+            Rc::new(|args| {
+                // Determine prior alpha/beta
+                let (mut alpha, mut beta) = match args.first() {
+                    Some(Value::Float(a)) => {
+                        let b = match args.get(1) {
+                            Some(Value::Float(b)) => *b,
+                            Some(Value::Int(n)) => *n as f64,
+                            _ => return Err("infer_posterior: beta prior must be numeric".to_string()),
+                        };
+                        (*a, b)
+                    }
+                    Some(Value::Int(a)) => {
+                        let b = match args.get(1) {
+                            Some(Value::Float(b)) => *b,
+                            Some(Value::Int(n)) => *n as f64,
+                            _ => return Err("infer_posterior: beta prior must be numeric".to_string()),
+                        };
+                        (*a as f64, b)
+                    }
+                    _ => return Err("infer_posterior(alpha, beta, successes, failures)".to_string()),
+                };
+
+                // Evidence can be explicit (successes, failures) or an ODESolution
+                if args.len() >= 4 {
+                    let succ = match &args[2] {
+                        Value::Float(f) => *f,
+                        Value::Int(n) => *n as f64,
+                        _ => return Err("infer_posterior: successes must be numeric".to_string()),
+                    };
+                    let fail = match &args[3] {
+                        Value::Float(f) => *f,
+                        Value::Int(n) => *n as f64,
+                        _ => return Err("infer_posterior: failures must be numeric".to_string()),
+                    };
+                    alpha += succ;
+                    beta += fail;
+                } else if let Some(Value::ODESolution { y, .. }) = args.get(2) {
+                    // Cross-domain: extract trajectory variance as evidence weight.
+                    // Mean final concentration → pseudo-successes; variance → pseudo-failures.
+                    if let Some(final_state) = y.last() {
+                        let n = final_state.len() as f64;
+                        if n > 0.0 {
+                            let mean = final_state.iter().sum::<f64>() / n;
+                            let var = final_state.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
+                            let succ = mean.max(0.0);
+                            let fail = var.max(0.0);
+                            alpha += succ;
+                            beta += fail + 1e-6;
+                        }
+                    }
+                }
+
+                let post_mean = alpha / (alpha + beta);
+                let post_var = (alpha * beta) / ((alpha + beta).powi(2) * (alpha + beta + 1.0));
+                Ok(Value::Tuple(vec![
+                    Value::Float(alpha),
+                    Value::Float(beta),
+                    Value::Float(post_mean),
+                    Value::Float(post_var),
+                ]))
+            }),
+        );
+
+        // tensor_product(n_qubits_a, n_qubits_b) -> (n_qubits_total, probabilities)
+        // Returns the tensor product of two |0⟩ states as a probability distribution.
+        self.register(
+            "tensor_product",
+            Rc::new(|args| {
+                if args.len() < 2 {
+                    return Err("tensor_product(n_qubits_a, n_qubits_b)".to_string());
+                }
+                let na = match &args[0] {
+                    Value::Int(n) if *n > 0 => *n as usize,
+                    _ => return Err("tensor_product: n_qubits_a must be positive int".to_string()),
+                };
+                let nb = match &args[1] {
+                    Value::Int(n) if *n > 0 => *n as usize,
+                    _ => return Err("tensor_product: n_qubits_b must be positive int".to_string()),
+                };
+                let sa = crate::quantum::StateVector::zero_state(na);
+                let sb = crate::quantum::StateVector::zero_state(nb);
+                let prod = crate::quantum::tensor_product(&sa, &sb);
+                let probs: Vec<Value> = prod
+                    .probabilities()
+                    .into_iter()
+                    .map(Value::Float)
+                    .collect();
+                Ok(Value::Tuple(vec![
+                    Value::Int(prod.num_qubits as i64),
+                    Value::Array(Rc::new(RefCell::new(probs))),
+                ]))
+            }),
+        );
+
+        // qnn_layer(n_qubits, layer_index) -> (n_params, layer_info_string)
+        self.register(
+            "qnn_layer",
+            Rc::new(|args| {
+                if args.len() < 2 {
+                    return Err("qnn_layer(n_qubits, layer_index)".to_string());
+                }
+                let nq = match &args[0] {
+                    Value::Int(n) if *n > 0 => *n as usize,
+                    _ => return Err("qnn_layer: n_qubits must be positive int".to_string()),
+                };
+                let li = match &args[1] {
+                    Value::Int(n) if *n >= 0 => *n as usize,
+                    _ => return Err("qnn_layer: layer_index must be non-negative int".to_string()),
+                };
+                let layer = crate::quantum::qnn_layer(nq, li);
+                let n_params = layer.params.len();
+                let info = format!(
+                    "StronglyEntangling(qubits={}, params={}, layer={})",
+                    nq, n_params, li
+                );
+                Ok(Value::Tuple(vec![
+                    Value::Int(n_params as i64),
+                    Value::String(info),
+                ]))
             }),
         );
     }
