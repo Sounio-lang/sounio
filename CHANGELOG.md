@@ -2,6 +2,14 @@
 
 All notable changes to the Sounio programming language and compiler are documented in this file. Sounio follows semantic versioning and this changelog is maintained for each release.
 
+## [1.0.0-beta.3] - 2026-02-21
+
+### Release — Gates and Release Integrity
+
+- Restored issue intake template contract fields required by release governance checks.
+- Updated integration expectations for `examples/hsi_tissue_classification.sio` now that it compiles successfully.
+- Validated release gates (`full_gate`) and published `v1.0.0-beta.3`.
+
 ## [1.0.0-beta] - 2026-02-15
 
 ### Release — First Public Beta
