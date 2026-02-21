@@ -589,6 +589,12 @@ impl NativeCodegen {
         }
     }
 
+    /// Returns `true` if the HIR type is a floating-point type.
+    /// Used to select between integer (rax/r10) and SSE2 (xmm0/xmm1) code paths.
+    fn is_float_ty(ty: &HirType) -> bool {
+        matches!(ty, HirType::F32 | HirType::F64)
+    }
+
     fn compile_logical_and(&mut self, left: &HirExpr, right: &HirExpr) -> Result<(), String> {
         self.compile_expr(left)?;
         self.emitter.emit_code(&[0x48, 0x85, 0xc0]); // test rax, rax
