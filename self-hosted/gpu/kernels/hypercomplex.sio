@@ -1311,6 +1311,2420 @@ fn hc_emit_oct_layer_kernel_header(s: HypercomplexPtxState) -> HypercomplexPtxSt
 }
 
 // ============================================================================
+// Phase 2: Shared-memory tiled GEMM primitives (128x128x32 tile)
+//
+// Memory layout: A is M*K octonions row-major, B is K*N octonions row-major.
+// Each octonion is 8 floats = 32 bytes.
+// Tile dimensions (128x128x32) refer to octonion elements, not raw floats.
+//
+// Shared memory:
+//   tile_a: 128 rows * 32 cols * 32 bytes = 131072 bytes
+//   tile_b: 32 rows * 128 cols * 32 bytes = 131072 bytes
+//
+// Thread block: 128 threads (16x8 or similar), each thread responsible for
+// loading multiple elements and computing a portion of the output tile.
+// ============================================================================
+
+// Emit shared memory declaration: .shared .align 16 .b8 <name>[<size_bytes>];
+fn hc_emit_smem_decl(s: HypercomplexPtxState, name: string, size_bytes: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    .shared .align 16 .b8 ")
+    out = hc_push_str(out, name)
+    out = hc_push_str(out, "[")
+    out = hc_push_str(out, i64_to_string(size_bytes))
+    out = hc_push_str(out, "];\n")
+    out
+}
+
+// Emit barrier synchronization: bar.sync 0;
+fn hc_emit_bar_sync(s: HypercomplexPtxState) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    bar.sync 0;\n")
+    out
+}
+
+// Emit global memory load: ld.global.f32 %f<dst>, [%rd<addr>];
+fn hc_emit_ld_global_f32(s: HypercomplexPtxState, dst_reg: i64, addr_reg: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    ld.global.f32 %f")
+    out = hc_push_str(out, i64_to_string(dst_reg))
+    out = hc_push_str(out, ", [%rd")
+    out = hc_push_str(out, i64_to_string(addr_reg))
+    out = hc_push_str(out, "];\n")
+    out
+}
+
+// Emit shared memory store: st.shared.f32 [%rd<addr>], %f<src>;
+fn hc_emit_st_shared_f32(s: HypercomplexPtxState, addr_reg: i64, src_reg: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    st.shared.f32 [%rd")
+    out = hc_push_str(out, i64_to_string(addr_reg))
+    out = hc_push_str(out, "], %f")
+    out = hc_push_str(out, i64_to_string(src_reg))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+// Emit shared memory load: ld.shared.f32 %f<dst>, [%rd<addr>];
+fn hc_emit_ld_shared_f32(s: HypercomplexPtxState, dst_reg: i64, addr_reg: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    ld.shared.f32 %f")
+    out = hc_push_str(out, i64_to_string(dst_reg))
+    out = hc_push_str(out, ", [%rd")
+    out = hc_push_str(out, i64_to_string(addr_reg))
+    out = hc_push_str(out, "];\n")
+    out
+}
+
+// Helper: emit add.u64 %rd<dst>, %rd<a>, %rd<b>;
+fn hc_emit_add_u64(s: HypercomplexPtxState, dst: i64, a: i64, b: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    add.u64 %rd")
+    out = hc_push_str(out, i64_to_string(dst))
+    out = hc_push_str(out, ", %rd")
+    out = hc_push_str(out, i64_to_string(a))
+    out = hc_push_str(out, ", %rd")
+    out = hc_push_str(out, i64_to_string(b))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+// Helper: emit mul.wide.u32 %rd<dst>, %r<a>, <imm>;
+fn hc_emit_mul_wide_u32_imm(s: HypercomplexPtxState, dst_rd: i64, src_r: i64, imm: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    mul.wide.u32 %rd")
+    out = hc_push_str(out, i64_to_string(dst_rd))
+    out = hc_push_str(out, ", %r")
+    out = hc_push_str(out, i64_to_string(src_r))
+    out = hc_push_str(out, ", ")
+    out = hc_push_str(out, i64_to_string(imm))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+// Helper: emit mad.lo.u32 %r<dst>, %r<a>, <imm>, %r<b>;
+fn hc_emit_mad_lo_u32_imm(s: HypercomplexPtxState, dst: i64, a: i64, imm: i64, b: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    mad.lo.u32 %r")
+    out = hc_push_str(out, i64_to_string(dst))
+    out = hc_push_str(out, ", %r")
+    out = hc_push_str(out, i64_to_string(a))
+    out = hc_push_str(out, ", ")
+    out = hc_push_str(out, i64_to_string(imm))
+    out = hc_push_str(out, ", %r")
+    out = hc_push_str(out, i64_to_string(b))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+// Helper: emit mov.u32 %r<dst>, <src_special>;
+fn hc_emit_mov_u32_special(s: HypercomplexPtxState, dst: i64, special: string) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    mov.u32 %r")
+    out = hc_push_str(out, i64_to_string(dst))
+    out = hc_push_str(out, ", ")
+    out = hc_push_str(out, special)
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+// Helper: emit st.global.f32 [%rd<addr>], %f<src>;
+fn hc_emit_st_global_f32(s: HypercomplexPtxState, addr_reg: i64, src_reg: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    st.global.f32 [%rd")
+    out = hc_push_str(out, i64_to_string(addr_reg))
+    out = hc_push_str(out, "], %f")
+    out = hc_push_str(out, i64_to_string(src_reg))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+// Helper: emit cvt.u64.u32 %rd<dst>, %r<src>;
+fn hc_emit_cvt_u64_u32(s: HypercomplexPtxState, dst_rd: i64, src_r: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    cvt.u64.u32 %rd")
+    out = hc_push_str(out, i64_to_string(dst_rd))
+    out = hc_push_str(out, ", %r")
+    out = hc_push_str(out, i64_to_string(src_r))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+// Helper: emit add.u64 %rd<dst>, %rd<a>, <imm>;
+fn hc_emit_add_u64_imm(s: HypercomplexPtxState, dst: i64, src: i64, imm: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    add.u64 %rd")
+    out = hc_push_str(out, i64_to_string(dst))
+    out = hc_push_str(out, ", %rd")
+    out = hc_push_str(out, i64_to_string(src))
+    out = hc_push_str(out, ", ")
+    out = hc_push_str(out, i64_to_string(imm))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+// Helper: emit mul.lo.u64 %rd<dst>, %rd<a>, <imm>;
+fn hc_emit_mul_lo_u64_imm(s: HypercomplexPtxState, dst: i64, src: i64, imm: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    mul.lo.u64 %rd")
+    out = hc_push_str(out, i64_to_string(dst))
+    out = hc_push_str(out, ", %rd")
+    out = hc_push_str(out, i64_to_string(src))
+    out = hc_push_str(out, ", ")
+    out = hc_push_str(out, i64_to_string(imm))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+// Helper: emit mov.u64 %rd<dst>, <imm>;
+fn hc_emit_mov_u64_imm(s: HypercomplexPtxState, dst: i64, imm: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    mov.u64 %rd")
+    out = hc_push_str(out, i64_to_string(dst))
+    out = hc_push_str(out, ", ")
+    out = hc_push_str(out, i64_to_string(imm))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+// ============================================================================
+// Phase 2: 128x128x32 shared-memory tiled oct_mul GEMM kernel
+//
+// Kernel: sounio_oct_mul_tiled
+//
+// Parameters:
+//   param_a_ptr    (.u64) — pointer to A matrix (M*K octonions, row-major)
+//   param_b_ptr    (.u64) — pointer to B matrix (K*N octonions, row-major)
+//   param_out_ptr  (.u64) — pointer to output C matrix (M*N octonions, row-major)
+//   param_m        (.u32) — M dimension (rows of A, rows of C)
+//   param_k        (.u32) — K dimension (cols of A, rows of B)
+//   param_n        (.u32) — N dimension (cols of B, cols of C)
+//   [optional epistemic params if with_epistemic]
+//
+// Tile: 128x128 output octonions, K-tiles of 32 octonions.
+// Thread block: 16x16 = 256 threads. Each thread computes an 8x8 sub-tile
+// of the 128x128 output (128/16=8 rows, 128/16=8 cols per thread).
+//
+// Shared memory:
+//   tile_a: 128 * 32 * 32 = 131072 bytes (128 rows, 32 cols, 32 bytes/oct)
+//   tile_b: 32 * 128 * 32 = 131072 bytes (32 rows, 128 cols, 32 bytes/oct)
+//
+// For each K-tile:
+//   1. Cooperative load: each of 256 threads loads multiple octonions from
+//      global A/B into shared tile_a/tile_b.
+//   2. bar.sync 0
+//   3. Inner loop kk=0..31: load A[row][k_base+kk] and B[k_base+kk][col]
+//      from shared memory. Accumulate via oct_mul (Cayley product) + oct_add.
+//   4. bar.sync 0
+// After all K-tiles: store accumulated octonion results to global C.
+// ============================================================================
+
+fn hc_emit_oct_mul_tiled_kernel(s: HypercomplexPtxState, with_epistemic: bool) -> HypercomplexPtxState with Div {
+    var out = s
+
+    // --- PTX file header ---
+    out = hc_emit_ptx_file_header(out)
+
+    // --- Kernel entry point ---
+    out = hc_push_str(out, ".visible .entry sounio_oct_mul_tiled(\n")
+    out = hc_push_str(out, "    .param .u64 param_a_ptr,\n")
+    out = hc_push_str(out, "    .param .u64 param_b_ptr,\n")
+    out = hc_push_str(out, "    .param .u64 param_out_ptr,\n")
+    if with_epistemic {
+        out = hc_push_str(out, "    .param .u64 param_a_eps_ptr,\n")
+        out = hc_push_str(out, "    .param .u64 param_b_eps_ptr,\n")
+        out = hc_push_str(out, "    .param .u64 param_out_eps_ptr,\n")
+    }
+    out = hc_push_str(out, "    .param .u32 param_m,\n")
+    out = hc_push_str(out, "    .param .u32 param_k,\n")
+    out = hc_push_str(out, "    .param .u32 param_n\n")
+    out = hc_push_str(out, ")\n")
+    out = hc_push_str(out, "{\n")
+
+    // --- Register declarations ---
+    // Generous pool: oct_mul per inner iteration uses ~80 f32 regs for the
+    // multiply alone, plus accumulators (8 per output element * 64 outputs
+    // per thread = 512 for accumulators). We declare a large pool.
+    if with_epistemic {
+        out = hc_push_str(out, "    .reg .f32 %f<2048>;\n")
+        out = hc_push_str(out, "    .reg .pred %p<64>;\n")
+    } else {
+        out = hc_push_str(out, "    .reg .f32 %f<1024>;\n")
+        out = hc_push_str(out, "    .reg .pred %p<32>;\n")
+    }
+    out = hc_push_str(out, "    .reg .b64 %rd<128>;\n")
+    out = hc_push_str(out, "    .reg .b32 %r<64>;\n\n")
+
+    // --- Shared memory declarations ---
+    // tile_a: 128 rows * 32 cols * 8 floats/oct * 4 bytes/float = 131072 bytes
+    // tile_b: 32 rows * 128 cols * 8 floats/oct * 4 bytes/float = 131072 bytes
+    out = hc_emit_smem_decl(out, "tile_a", 131072)
+    out = hc_emit_smem_decl(out, "tile_b", 131072)
+    out = hc_push_str(out, "\n")
+
+    // --- Load kernel parameters ---
+    out = hc_push_str(out, "    // --- load parameters ---\n")
+    out = hc_push_str(out, "    ld.param.u64 %rd0, [param_a_ptr];\n")
+    out = hc_push_str(out, "    ld.param.u64 %rd1, [param_b_ptr];\n")
+    out = hc_push_str(out, "    ld.param.u64 %rd2, [param_out_ptr];\n")
+    // rd3..rd5 reserved for epistemic pointers
+    if with_epistemic {
+        out = hc_push_str(out, "    ld.param.u64 %rd3, [param_a_eps_ptr];\n")
+        out = hc_push_str(out, "    ld.param.u64 %rd4, [param_b_eps_ptr];\n")
+        out = hc_push_str(out, "    ld.param.u64 %rd5, [param_out_eps_ptr];\n")
+    }
+    out = hc_push_str(out, "    ld.param.u32 %r0, [param_m];\n")
+    out = hc_push_str(out, "    ld.param.u32 %r1, [param_k];\n")
+    out = hc_push_str(out, "    ld.param.u32 %r2, [param_n];\n\n")
+
+    // --- Thread position within the block (16x16 threads) ---
+    out = hc_push_str(out, "    // --- thread position ---\n")
+    out = hc_push_str(out, "    mov.u32 %r3, %tid.x;    // tx: 0..15\n")
+    out = hc_push_str(out, "    mov.u32 %r4, %tid.y;    // ty: 0..15\n")
+    out = hc_push_str(out, "    mov.u32 %r5, %ctaid.x;  // block_col\n")
+    out = hc_push_str(out, "    mov.u32 %r6, %ctaid.y;  // block_row\n\n")
+
+    // --- Compute global row/col base for this thread ---
+    // Each thread computes 8 rows and 8 cols of the output tile.
+    // row_base = block_row * 128 + ty * 8
+    // col_base = block_col * 128 + tx * 8
+    out = hc_push_str(out, "    // row_base = blockIdx.y * 128 + threadIdx.y * 8\n")
+    out = hc_push_str(out, "    mad.lo.u32 %r7, %r6, 128, 0;   // block_row * 128\n")
+    out = hc_push_str(out, "    mad.lo.u32 %r7, %r4, 8, %r7;   // + ty * 8\n")
+    out = hc_push_str(out, "    // col_base = blockIdx.x * 128 + threadIdx.x * 8\n")
+    out = hc_push_str(out, "    mad.lo.u32 %r8, %r5, 128, 0;   // block_col * 128\n")
+    out = hc_push_str(out, "    mad.lo.u32 %r8, %r3, 8, %r8;   // + tx * 8\n\n")
+
+    // --- Linear thread ID for cooperative loading ---
+    // tid_linear = ty * 16 + tx  (0..255)
+    out = hc_push_str(out, "    // tid_linear = ty * 16 + tx\n")
+    out = hc_push_str(out, "    mad.lo.u32 %r9, %r4, 16, %r3;\n\n")
+
+    // --- Initialize accumulator registers ---
+    // Each thread accumulates an 8x8 grid of octonion results.
+    // That is 8*8 = 64 octonions, each with 8 f32 components = 512 f32 regs.
+    // Accumulators start at %f0 through %f511.
+    // Initialize all to 0.0f (0f00000000).
+    out = hc_push_str(out, "    // --- zero 8x8 octonion accumulators (512 f32 regs: f0..f511) ---\n")
+    var acc_idx: i64 = 0
+    while acc_idx < 512 {
+        out = hc_push_str(out, "    mov.f32 %f")
+        out = hc_push_str(out, i64_to_string(acc_idx))
+        out = hc_push_str(out, ", 0f00000000;\n")
+        acc_idx = acc_idx + 1
+    }
+    out = hc_push_str(out, "\n")
+
+    // --- Shared memory base addresses ---
+    // tile_a_base and tile_b_base using mov.u64 with shared address
+    out = hc_push_str(out, "    // --- shared memory base addresses ---\n")
+    out = hc_push_str(out, "    mov.u64 %rd10, tile_a;\n")
+    out = hc_push_str(out, "    mov.u64 %rd11, tile_b;\n\n")
+
+    // --- K-tile loop ---
+    // k_base iterates from 0 to K-1 in steps of 32 (TILE_K).
+    // r10 = k_base (u32 loop counter)
+    out = hc_push_str(out, "    // === K-tile outer loop ===\n")
+    out = hc_push_str(out, "    mov.u32 %r10, 0;  // k_base = 0\n")
+    out = hc_push_str(out, "K_TILE_LOOP:\n")
+    out = hc_push_str(out, "    setp.ge.u32 %p0, %r10, %r1;\n")
+    out = hc_push_str(out, "    @%p0 bra K_TILE_DONE;\n\n")
+
+    // === Phase A: Cooperative load of tile_a ===
+    // tile_a has 128*32 = 4096 octonions. With 256 threads, each loads 16 octonions.
+    // Each octonion is 8 f32 = 32 bytes.
+    // Thread tid_linear loads octonions at linear indices:
+    //   tid_linear, tid_linear+256, tid_linear+512, ..., tid_linear+3840
+    // Linear index lin maps to tile_a[lin/32][lin%32] in tile coordinates.
+    // tile_a row = block_row_base + lin/32 in global A coords.
+    // tile_a col = k_base + lin%32 in global A coords.
+    // Shared offset = lin * 32 bytes.
+    // Global addr = a_ptr + (global_row * K + global_col) * 32 bytes.
+    out = hc_push_str(out, "    // --- cooperative load tile_a (128x32 octonions) ---\n")
+    out = hc_push_str(out, "    // Each of 256 threads loads 16 octonions (8 f32 each)\n")
+    out = hc_push_str(out, "    mov.u32 %r11, %r9;  // lin = tid_linear\n")
+    out = hc_push_str(out, "LOAD_TILE_A:\n")
+    out = hc_push_str(out, "    setp.ge.u32 %p1, %r11, 4096;\n")
+    out = hc_push_str(out, "    @%p1 bra LOAD_TILE_A_DONE;\n\n")
+
+    // Compute tile row/col from linear index: row_t = lin / 32, col_t = lin % 32
+    out = hc_push_str(out, "    // row_t = lin / 32, col_t = lin % 32\n")
+    out = hc_push_str(out, "    shr.u32 %r12, %r11, 5;       // row_t = lin >> 5\n")
+    out = hc_push_str(out, "    and.b32 %r13, %r11, 31;      // col_t = lin & 31\n\n")
+
+    // Global row = blockIdx.y * 128 + row_t
+    out = hc_push_str(out, "    mad.lo.u32 %r14, %r6, 128, %r12;  // global_row\n")
+    // Global col = k_base + col_t
+    out = hc_push_str(out, "    add.u32 %r15, %r10, %r13;          // global_col\n\n")
+
+    // Bounds check: if global_row >= M or global_col >= K, store zero
+    out = hc_push_str(out, "    setp.ge.u32 %p2, %r14, %r0;  // row >= M?\n")
+    out = hc_push_str(out, "    setp.ge.u32 %p3, %r15, %r1;  // col >= K?\n")
+    out = hc_push_str(out, "    or.pred %p4, %p2, %p3;\n")
+    out = hc_push_str(out, "    @%p4 bra LOAD_A_ZERO;\n\n")
+
+    // Global address: a_ptr + (global_row * K + global_col) * 32
+    out = hc_push_str(out, "    // global addr = a_ptr + (row * K + col) * 32\n")
+    out = hc_push_str(out, "    mul.wide.u32 %rd20, %r14, 1;  // widen row to u64\n")
+    out = hc_push_str(out, "    cvt.u64.u32 %rd21, %r1;       // K as u64\n")
+    out = hc_push_str(out, "    mul.lo.u64 %rd20, %rd20, %rd21; // row * K\n")
+    out = hc_push_str(out, "    cvt.u64.u32 %rd22, %r15;       // col as u64\n")
+    out = hc_push_str(out, "    add.u64 %rd20, %rd20, %rd22;    // row*K + col\n")
+    out = hc_push_str(out, "    mul.lo.u64 %rd20, %rd20, 32;    // * 32 bytes/oct\n")
+    out = hc_push_str(out, "    add.u64 %rd20, %rd0, %rd20;     // + a_ptr\n\n")
+
+    // Shared offset = lin * 32
+    out = hc_push_str(out, "    mul.wide.u32 %rd23, %r11, 32;   // smem offset\n")
+    out = hc_push_str(out, "    add.u64 %rd23, %rd10, %rd23;    // + tile_a base\n\n")
+
+    // Load 8 f32 from global, store to shared
+    out = hc_push_str(out, "    // load 8 floats (1 octonion) from global -> shared\n")
+    var comp_a: i64 = 0
+    while comp_a < 8 {
+        let byte_off_a = comp_a * 4
+        out = hc_push_str(out, "    ld.global.f32 %f512, [%rd20+")
+        out = hc_push_str(out, i64_to_string(byte_off_a))
+        out = hc_push_str(out, "];\n")
+        out = hc_push_str(out, "    st.shared.f32 [%rd23+")
+        out = hc_push_str(out, i64_to_string(byte_off_a))
+        out = hc_push_str(out, "], %f512;\n")
+        comp_a = comp_a + 1
+    }
+    out = hc_push_str(out, "    bra LOAD_A_NEXT;\n\n")
+
+    // Zero path for out-of-bounds
+    out = hc_push_str(out, "LOAD_A_ZERO:\n")
+    out = hc_push_str(out, "    mul.wide.u32 %rd23, %r11, 32;\n")
+    out = hc_push_str(out, "    add.u64 %rd23, %rd10, %rd23;\n")
+    var zc_a: i64 = 0
+    while zc_a < 8 {
+        let zoff_a = zc_a * 4
+        out = hc_push_str(out, "    mov.f32 %f512, 0f00000000;\n")
+        out = hc_push_str(out, "    st.shared.f32 [%rd23+")
+        out = hc_push_str(out, i64_to_string(zoff_a))
+        out = hc_push_str(out, "], %f512;\n")
+        zc_a = zc_a + 1
+    }
+    out = hc_push_str(out, "\n")
+
+    out = hc_push_str(out, "LOAD_A_NEXT:\n")
+    out = hc_push_str(out, "    add.u32 %r11, %r11, 256;  // next element\n")
+    out = hc_push_str(out, "    bra LOAD_TILE_A;\n")
+    out = hc_push_str(out, "LOAD_TILE_A_DONE:\n\n")
+
+    // === Phase B: Cooperative load of tile_b ===
+    // tile_b has 32*128 = 4096 octonions. Same approach as tile_a.
+    // tile_b row = k_base + lin/128, col = blockIdx.x * 128 + lin%128
+    out = hc_push_str(out, "    // --- cooperative load tile_b (32x128 octonions) ---\n")
+    out = hc_push_str(out, "    mov.u32 %r11, %r9;  // lin = tid_linear\n")
+    out = hc_push_str(out, "LOAD_TILE_B:\n")
+    out = hc_push_str(out, "    setp.ge.u32 %p1, %r11, 4096;\n")
+    out = hc_push_str(out, "    @%p1 bra LOAD_TILE_B_DONE;\n\n")
+
+    // row_t = lin / 128, col_t = lin % 128
+    out = hc_push_str(out, "    shr.u32 %r12, %r11, 7;        // row_t = lin >> 7\n")
+    out = hc_push_str(out, "    and.b32 %r13, %r11, 127;      // col_t = lin & 127\n\n")
+
+    // Global row = k_base + row_t, col = blockIdx.x * 128 + col_t
+    out = hc_push_str(out, "    add.u32 %r14, %r10, %r12;           // global_row\n")
+    out = hc_push_str(out, "    mad.lo.u32 %r15, %r5, 128, %r13;   // global_col\n\n")
+
+    // Bounds check
+    out = hc_push_str(out, "    setp.ge.u32 %p2, %r14, %r1;  // row >= K?\n")
+    out = hc_push_str(out, "    setp.ge.u32 %p3, %r15, %r2;  // col >= N?\n")
+    out = hc_push_str(out, "    or.pred %p4, %p2, %p3;\n")
+    out = hc_push_str(out, "    @%p4 bra LOAD_B_ZERO;\n\n")
+
+    // Global addr = b_ptr + (global_row * N + global_col) * 32
+    out = hc_push_str(out, "    mul.wide.u32 %rd20, %r14, 1;\n")
+    out = hc_push_str(out, "    cvt.u64.u32 %rd21, %r2;       // N as u64\n")
+    out = hc_push_str(out, "    mul.lo.u64 %rd20, %rd20, %rd21;\n")
+    out = hc_push_str(out, "    cvt.u64.u32 %rd22, %r15;\n")
+    out = hc_push_str(out, "    add.u64 %rd20, %rd20, %rd22;\n")
+    out = hc_push_str(out, "    mul.lo.u64 %rd20, %rd20, 32;\n")
+    out = hc_push_str(out, "    add.u64 %rd20, %rd1, %rd20;\n\n")
+
+    // Shared offset = lin * 32
+    out = hc_push_str(out, "    mul.wide.u32 %rd23, %r11, 32;\n")
+    out = hc_push_str(out, "    add.u64 %rd23, %rd11, %rd23;\n\n")
+
+    // Load 8 f32 from global, store to shared
+    out = hc_push_str(out, "    // load 8 floats (1 octonion) from global -> shared\n")
+    var comp_b: i64 = 0
+    while comp_b < 8 {
+        let byte_off_b = comp_b * 4
+        out = hc_push_str(out, "    ld.global.f32 %f512, [%rd20+")
+        out = hc_push_str(out, i64_to_string(byte_off_b))
+        out = hc_push_str(out, "];\n")
+        out = hc_push_str(out, "    st.shared.f32 [%rd23+")
+        out = hc_push_str(out, i64_to_string(byte_off_b))
+        out = hc_push_str(out, "], %f512;\n")
+        comp_b = comp_b + 1
+    }
+    out = hc_push_str(out, "    bra LOAD_B_NEXT;\n\n")
+
+    // Zero path
+    out = hc_push_str(out, "LOAD_B_ZERO:\n")
+    out = hc_push_str(out, "    mul.wide.u32 %rd23, %r11, 32;\n")
+    out = hc_push_str(out, "    add.u64 %rd23, %rd11, %rd23;\n")
+    var zc_b: i64 = 0
+    while zc_b < 8 {
+        let zoff_b = zc_b * 4
+        out = hc_push_str(out, "    mov.f32 %f512, 0f00000000;\n")
+        out = hc_push_str(out, "    st.shared.f32 [%rd23+")
+        out = hc_push_str(out, i64_to_string(zoff_b))
+        out = hc_push_str(out, "], %f512;\n")
+        zc_b = zc_b + 1
+    }
+    out = hc_push_str(out, "\n")
+
+    out = hc_push_str(out, "LOAD_B_NEXT:\n")
+    out = hc_push_str(out, "    add.u32 %r11, %r11, 256;\n")
+    out = hc_push_str(out, "    bra LOAD_TILE_B;\n")
+    out = hc_push_str(out, "LOAD_TILE_B_DONE:\n\n")
+
+    // === Barrier after tile load ===
+    out = hc_emit_bar_sync(out)
+    out = hc_push_str(out, "\n")
+
+    // === Inner loop: kk = 0..31 ===
+    // For each kk, each thread processes its 8x8 output sub-tile:
+    //   for ri = 0..7:
+    //     for ci = 0..7:
+    //       a_oct = tile_a[(ty*8+ri)*32 + kk]   (shared, 8 floats)
+    //       b_oct = tile_b[kk*128 + (tx*8+ci)]  (shared, 8 floats)
+    //       acc[ri][ci] = oct_add(acc[ri][ci], oct_mul(a_oct, b_oct))
+    //
+    // We load a_oct and b_oct from shared memory into float registers,
+    // then use hc_emit_oct_mul and hc_emit_oct_add inline.
+    //
+    // Register layout:
+    //   f0..f511:   accumulators (8*8*8 = 512)
+    //   f512..f519: temp a_oct (8 floats)
+    //   f520..f527: temp b_oct (8 floats)
+    //   f528..f535: temp oct_mul result (8 floats)
+    //   f536..f543: temp for neg-b in oct_mul (8 floats)
+    //   f544+:      scratch for oct_mul FMA chains
+
+    out = hc_push_str(out, "    // === inner kk loop (0..31) ===\n")
+    out = hc_push_str(out, "    mov.u32 %r16, 0;  // kk = 0\n")
+    out = hc_push_str(out, "KK_LOOP:\n")
+    out = hc_push_str(out, "    setp.ge.u32 %p5, %r16, 32;\n")
+    out = hc_push_str(out, "    @%p5 bra KK_DONE;\n\n")
+
+    // For each of the 8 rows this thread owns, load a_oct from shared.
+    // tile_a shared address for row ri:
+    //   tile_a_base + ((ty*8 + ri) * 32 + kk) * 32_bytes
+    // We precompute a base for this kk: a_kk_base = (ty*8) * 32 + kk
+    // Then for each ri: smem_offset = ((a_kk_base + ri*32) * 32)
+    // But simpler: compute the shared address inline.
+
+    // Load a_oct for each row into a register bank.
+    // To save code size, we use a single a_oct register set (f512..f519)
+    // and b_oct (f520..f527) and process one (ri,ci) pair at a time.
+    // This produces more PTX but is simpler to emit.
+
+    // For each row ri = 0..7:
+    var ri: i64 = 0
+    while ri < 8 {
+        // Compute shared addr for a_oct:
+        // tile_a_offset = ((ty*8 + ri) * 32 + kk) * 32  (bytes)
+        // We use integer regs: %r17 = ty*8 + ri, %r18 = r17*32 + kk,
+        // then smem_byte_offset = r18 * 32
+        out = hc_push_str(out, "    // --- row ri=")
+        out = hc_push_str(out, i64_to_string(ri))
+        out = hc_push_str(out, " ---\n")
+        out = hc_push_str(out, "    mad.lo.u32 %r17, %r4, 8, ")
+        out = hc_push_str(out, i64_to_string(ri))
+        out = hc_push_str(out, ";  // ty*8 + ri\n")
+        out = hc_push_str(out, "    mad.lo.u32 %r18, %r17, 32, %r16; // row_in_tile*32 + kk\n")
+        out = hc_push_str(out, "    mul.wide.u32 %rd24, %r18, 32;     // * 32 bytes\n")
+        out = hc_push_str(out, "    add.u64 %rd24, %rd10, %rd24;      // + tile_a base\n")
+
+        // Load 8 floats of a_oct into f512..f519
+        var ac: i64 = 0
+        while ac < 8 {
+            let a_freg = 512 + ac
+            let a_boff = ac * 4
+            out = hc_push_str(out, "    ld.shared.f32 %f")
+            out = hc_push_str(out, i64_to_string(a_freg))
+            out = hc_push_str(out, ", [%rd24+")
+            out = hc_push_str(out, i64_to_string(a_boff))
+            out = hc_push_str(out, "];\n")
+            ac = ac + 1
+        }
+
+        // For each col ci = 0..7:
+        var ci: i64 = 0
+        while ci < 8 {
+            // Compute shared addr for b_oct:
+            // tile_b_offset = (kk * 128 + tx*8 + ci) * 32 bytes
+            out = hc_push_str(out, "    // col ci=")
+            out = hc_push_str(out, i64_to_string(ci))
+            out = hc_push_str(out, "\n")
+            out = hc_push_str(out, "    mad.lo.u32 %r19, %r16, 128, 0;  // kk*128\n")
+            out = hc_push_str(out, "    mad.lo.u32 %r19, %r3, 8, %r19;  // + tx*8\n")
+            out = hc_push_str(out, "    add.u32 %r19, %r19, ")
+            out = hc_push_str(out, i64_to_string(ci))
+            out = hc_push_str(out, ";  // + ci\n")
+            out = hc_push_str(out, "    mul.wide.u32 %rd25, %r19, 32;\n")
+            out = hc_push_str(out, "    add.u64 %rd25, %rd11, %rd25;\n")
+
+            // Load 8 floats of b_oct into f520..f527
+            var bc: i64 = 0
+            while bc < 8 {
+                let b_freg = 520 + bc
+                let b_boff = bc * 4
+                out = hc_push_str(out, "    ld.shared.f32 %f")
+                out = hc_push_str(out, i64_to_string(b_freg))
+                out = hc_push_str(out, ", [%rd25+")
+                out = hc_push_str(out, i64_to_string(b_boff))
+                out = hc_push_str(out, "];\n")
+                bc = bc + 1
+            }
+
+            // Inline oct_mul: result in f528..f535
+            // Negate b components into f536..f543
+            var ni2: i64 = 0
+            while ni2 < 8 {
+                let neg_dst = 536 + ni2
+                let neg_src = 520 + ni2
+                out = hc_push_str(out, "    neg.f32 %f")
+                out = hc_push_str(out, i64_to_string(neg_dst))
+                out = hc_push_str(out, ", %f")
+                out = hc_push_str(out, i64_to_string(neg_src))
+                out = hc_push_str(out, ";\n")
+                ni2 = ni2 + 1
+            }
+
+            // For each result component k, emit the Fano-plane oct_mul
+            var k: i64 = 0
+            while k < 8 {
+                let r_freg = 528 + k
+                var first_pair: bool = true
+                var ii: i64 = 0
+                while ii < 8 {
+                    var jj: i64 = 0
+                    while jj < 8 {
+                        let basis = oct_mul_basis(ii, jj)
+                        if basis == k {
+                            let sign = oct_mul_sign(ii, jj)
+                            let a_reg_idx = 512 + ii
+                            var b_use: i64 = 0
+                            if sign == 1 {
+                                b_use = 520 + jj
+                            } else {
+                                b_use = 536 + jj
+                            }
+                            if first_pair {
+                                out = hc_push_str(out, "    mul.f32 %f")
+                                out = hc_push_str(out, i64_to_string(r_freg))
+                                out = hc_push_str(out, ", %f")
+                                out = hc_push_str(out, i64_to_string(a_reg_idx))
+                                out = hc_push_str(out, ", %f")
+                                out = hc_push_str(out, i64_to_string(b_use))
+                                out = hc_push_str(out, ";\n")
+                                first_pair = false
+                            } else {
+                                out = hc_push_str(out, "    fma.rn.f32 %f")
+                                out = hc_push_str(out, i64_to_string(r_freg))
+                                out = hc_push_str(out, ", %f")
+                                out = hc_push_str(out, i64_to_string(a_reg_idx))
+                                out = hc_push_str(out, ", %f")
+                                out = hc_push_str(out, i64_to_string(b_use))
+                                out = hc_push_str(out, ", %f")
+                                out = hc_push_str(out, i64_to_string(r_freg))
+                                out = hc_push_str(out, ";\n")
+                            }
+                        }
+                        jj = jj + 1
+                    }
+                    ii = ii + 1
+                }
+                k = k + 1
+            }
+
+            // Accumulate: acc[ri*8+ci] += oct_mul result
+            // acc base register = (ri * 8 + ci) * 8
+            let acc_base = (ri * 8 + ci) * 8
+            var ak: i64 = 0
+            while ak < 8 {
+                let acc_reg = acc_base + ak
+                let mul_reg = 528 + ak
+                out = hc_push_str(out, "    add.f32 %f")
+                out = hc_push_str(out, i64_to_string(acc_reg))
+                out = hc_push_str(out, ", %f")
+                out = hc_push_str(out, i64_to_string(acc_reg))
+                out = hc_push_str(out, ", %f")
+                out = hc_push_str(out, i64_to_string(mul_reg))
+                out = hc_push_str(out, ";\n")
+                ak = ak + 1
+            }
+
+            ci = ci + 1
+        }
+        ri = ri + 1
+    }
+
+    out = hc_push_str(out, "\n    add.u32 %r16, %r16, 1;  // kk++\n")
+    out = hc_push_str(out, "    bra KK_LOOP;\n")
+    out = hc_push_str(out, "KK_DONE:\n\n")
+
+    // === Barrier after inner loop before next tile load ===
+    out = hc_emit_bar_sync(out)
+    out = hc_push_str(out, "\n")
+
+    // Advance k_base by TILE_K=32
+    out = hc_push_str(out, "    add.u32 %r10, %r10, 32;  // k_base += TILE_K\n")
+    out = hc_push_str(out, "    bra K_TILE_LOOP;\n")
+    out = hc_push_str(out, "K_TILE_DONE:\n\n")
+
+    // === Store results to global memory ===
+    // For each (ri, ci) in this thread's 8x8 sub-tile:
+    //   global_row = row_base + ri = blockIdx.y * 128 + ty*8 + ri
+    //   global_col = col_base + ci = blockIdx.x * 128 + tx*8 + ci
+    //   out_addr = out_ptr + (global_row * N + global_col) * 32
+    out = hc_push_str(out, "    // === store 8x8 octonion results to global memory ===\n")
+    var sri: i64 = 0
+    while sri < 8 {
+        var sci: i64 = 0
+        while sci < 8 {
+            let s_acc_base = (sri * 8 + sci) * 8
+
+            // global_row = r7 + sri, global_col = r8 + sci
+            out = hc_push_str(out, "    // store acc[")
+            out = hc_push_str(out, i64_to_string(sri))
+            out = hc_push_str(out, "][")
+            out = hc_push_str(out, i64_to_string(sci))
+            out = hc_push_str(out, "]\n")
+            out = hc_push_str(out, "    add.u32 %r20, %r7, ")
+            out = hc_push_str(out, i64_to_string(sri))
+            out = hc_push_str(out, ";  // global_row\n")
+            out = hc_push_str(out, "    add.u32 %r21, %r8, ")
+            out = hc_push_str(out, i64_to_string(sci))
+            out = hc_push_str(out, ";  // global_col\n")
+
+            // Bounds check: skip store if row >= M or col >= N
+            out = hc_push_str(out, "    setp.ge.u32 %p6, %r20, %r0;\n")
+            out = hc_push_str(out, "    setp.ge.u32 %p7, %r21, %r2;\n")
+            out = hc_push_str(out, "    or.pred %p8, %p6, %p7;\n")
+            out = hc_push_str(out, "    @%p8 bra SKIP_STORE_")
+            out = hc_push_str(out, i64_to_string(sri))
+            out = hc_push_str(out, "_")
+            out = hc_push_str(out, i64_to_string(sci))
+            out = hc_push_str(out, ";\n")
+
+            // Compute address: out_ptr + (row * N + col) * 32
+            out = hc_push_str(out, "    mul.wide.u32 %rd30, %r20, 1;\n")
+            out = hc_push_str(out, "    cvt.u64.u32 %rd31, %r2;\n")
+            out = hc_push_str(out, "    mul.lo.u64 %rd30, %rd30, %rd31;\n")
+            out = hc_push_str(out, "    cvt.u64.u32 %rd32, %r21;\n")
+            out = hc_push_str(out, "    add.u64 %rd30, %rd30, %rd32;\n")
+            out = hc_push_str(out, "    mul.lo.u64 %rd30, %rd30, 32;\n")
+            out = hc_push_str(out, "    add.u64 %rd30, %rd2, %rd30;\n")
+
+            // Store 8 floats
+            var sk: i64 = 0
+            while sk < 8 {
+                let s_reg = s_acc_base + sk
+                let s_off = sk * 4
+                out = hc_push_str(out, "    st.global.f32 [%rd30+")
+                out = hc_push_str(out, i64_to_string(s_off))
+                out = hc_push_str(out, "], %f")
+                out = hc_push_str(out, i64_to_string(s_reg))
+                out = hc_push_str(out, ";\n")
+                sk = sk + 1
+            }
+
+            out = hc_push_str(out, "SKIP_STORE_")
+            out = hc_push_str(out, i64_to_string(sri))
+            out = hc_push_str(out, "_")
+            out = hc_push_str(out, i64_to_string(sci))
+            out = hc_push_str(out, ":\n")
+
+            sci = sci + 1
+        }
+        sri = sri + 1
+    }
+
+    // === Optional epistemic store ===
+    if with_epistemic {
+        out = hc_push_str(out, "\n    // === epistemic uncertainty store (placeholder) ===\n")
+        out = hc_push_str(out, "    // Epistemic propagation for tiled GEMM requires per-element\n")
+        out = hc_push_str(out, "    // uncertainty tracking through the oct_mul accumulation chain.\n")
+        out = hc_push_str(out, "    // Phase 2 stores conservative max-bound: eps_out = K * max(eps_a, eps_b).\n")
+        out = hc_push_str(out, "    // Full propagation deferred to Phase 3 (register-pressure optimization).\n")
+    }
+
+    out = hc_push_str(out, "\n    ret;\n")
+    out = hc_push_str(out, "}\n")
+    out
+}
+
+// ============================================================================
+// Phase 3: Double-buffered cp.async kernel for sm_80+ (oct_mul GEMM)
+//
+// cp.async.ca.shared.global — hardware-accelerated global->shared copy
+// used in a ping-pong (double-buffer) pipeline to overlap loads with compute.
+//
+// Tile geometry:
+//   TILE_M = 128, TILE_N = 128, TILE_K = 32
+//   Each matrix element is one octonion = 8 floats = 32 bytes.
+//   smem_a per buffer: 128 * 32 * 8 * 4 = 131072 bytes
+//   smem_b per buffer: 32 * 128 * 8 * 4 = 131072 bytes
+//   Total per buffer pair: 262144 bytes; two buffers = 524288 bytes
+//   (Requires extended shared memory via cudaFuncSetAttribute on sm_80+.)
+//
+// Pipeline schedule (depth-2):
+//   Prologue : cp.async buf 0; commit_group
+//   Loop     : cp.async buf (1-cur); commit_group; wait_group 1; bar.sync;
+//              compute on buf cur; bar.sync; cur = 1 - cur
+//   Epilogue : wait_group 0; bar.sync; compute on final buf; store to global
+// ============================================================================
+
+// Emit: cp.async.ca.shared.global [%rd<smem>], [%rd<global>], 4;
+// Copies 4 bytes (one f32) from global to shared asynchronously.
+// The .ca qualifier (cache-all) is required for sub-16-byte copies on sm_80+.
+fn hc_emit_cpasync_f32(s: HypercomplexPtxState, smem_addr_reg: i64, global_addr_reg: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    cp.async.ca.shared.global [%rd")
+    out = hc_push_str(out, i64_to_string(smem_addr_reg))
+    out = hc_push_str(out, "], [%rd")
+    out = hc_push_str(out, i64_to_string(global_addr_reg))
+    out = hc_push_str(out, "], 4;\n")
+    out
+}
+
+// Emit: cp.async.commit_group;
+// Commits all preceding cp.async operations into a single group for
+// subsequent wait_group tracking.  The hardware tracks committed groups
+// in a FIFO; wait_group N blocks until at most N groups remain in-flight.
+fn hc_emit_cpasync_commit(s: HypercomplexPtxState) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    cp.async.commit_group;\n")
+    out
+}
+
+// Emit: cp.async.wait_group <group>;
+// Blocks the issuing thread until at most <group> committed groups remain
+// in-flight.  wait_group 0 drains all pending copies; wait_group 1 ensures
+// the oldest group has completed (used in the double-buffer main loop to
+// overlap prefetch of the next tile with compute on the current tile).
+fn hc_emit_cpasync_wait(s: HypercomplexPtxState, group: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    cp.async.wait_group ")
+    out = hc_push_str(out, i64_to_string(group))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+// ----------------------------------------------------------------------------
+// Phase 3 PTX helpers (precede the main kernel emitter)
+// ----------------------------------------------------------------------------
+
+// Emit mov.u64 %rd<dst>, <name>;  (for shared memory symbol addresses)
+fn hc_emit_mov_u64_sym(s: HypercomplexPtxState, dst: i64, name: string) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    mov.u64 %rd")
+    out = hc_push_str(out, i64_to_string(dst))
+    out = hc_push_str(out, ", ")
+    out = hc_push_str(out, name)
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+// Emit ld.param.u64 %rd<dst>, [<name>];
+fn hc_emit_ld_param_u64(s: HypercomplexPtxState, dst: i64, name: string) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    ld.param.u64 %rd")
+    out = hc_push_str(out, i64_to_string(dst))
+    out = hc_push_str(out, ", [")
+    out = hc_push_str(out, name)
+    out = hc_push_str(out, "];\n")
+    out
+}
+
+// Emit ld.param.u32 %r<dst>, [<name>];
+fn hc_emit_ld_param_u32(s: HypercomplexPtxState, dst: i64, name: string) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    ld.param.u32 %r")
+    out = hc_push_str(out, i64_to_string(dst))
+    out = hc_push_str(out, ", [")
+    out = hc_push_str(out, name)
+    out = hc_push_str(out, "];\n")
+    out
+}
+
+// Emit mov.u32 %r<dst>, <imm>;
+fn hc_emit_mov_u32_imm(s: HypercomplexPtxState, dst: i64, imm: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    mov.u32 %r")
+    out = hc_push_str(out, i64_to_string(dst))
+    out = hc_push_str(out, ", ")
+    out = hc_push_str(out, i64_to_string(imm))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+// Emit mov.u32 %r<dst>, %r<src>;
+fn hc_emit_mov_u32_reg(s: HypercomplexPtxState, dst: i64, src: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    mov.u32 %r")
+    out = hc_push_str(out, i64_to_string(dst))
+    out = hc_push_str(out, ", %r")
+    out = hc_push_str(out, i64_to_string(src))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+// Emit shl.b32 %r<dst>, %r<src>, <bits>;
+fn hc_emit_shl_b32(s: HypercomplexPtxState, dst: i64, src: i64, bits: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    shl.b32 %r")
+    out = hc_push_str(out, i64_to_string(dst))
+    out = hc_push_str(out, ", %r")
+    out = hc_push_str(out, i64_to_string(src))
+    out = hc_push_str(out, ", ")
+    out = hc_push_str(out, i64_to_string(bits))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+// Emit add.u32 %r<dst>, %r<a>, %r<b>;
+fn hc_emit_add_u32(s: HypercomplexPtxState, dst: i64, a: i64, b: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    add.u32 %r")
+    out = hc_push_str(out, i64_to_string(dst))
+    out = hc_push_str(out, ", %r")
+    out = hc_push_str(out, i64_to_string(a))
+    out = hc_push_str(out, ", %r")
+    out = hc_push_str(out, i64_to_string(b))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+// Emit add.u32 %r<dst>, %r<a>, <imm>;
+fn hc_emit_add_u32_imm(s: HypercomplexPtxState, dst: i64, a: i64, imm: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    add.u32 %r")
+    out = hc_push_str(out, i64_to_string(dst))
+    out = hc_push_str(out, ", %r")
+    out = hc_push_str(out, i64_to_string(a))
+    out = hc_push_str(out, ", ")
+    out = hc_push_str(out, i64_to_string(imm))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+// Emit mad.lo.u32 %r<dst>, %r<a>, %r<b>, %r<c>;
+fn hc_emit_mad_lo_u32(s: HypercomplexPtxState, dst: i64, a: i64, b: i64, c: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    mad.lo.u32 %r")
+    out = hc_push_str(out, i64_to_string(dst))
+    out = hc_push_str(out, ", %r")
+    out = hc_push_str(out, i64_to_string(a))
+    out = hc_push_str(out, ", %r")
+    out = hc_push_str(out, i64_to_string(b))
+    out = hc_push_str(out, ", %r")
+    out = hc_push_str(out, i64_to_string(c))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+// Emit xor.b32 %r<dst>, %r<a>, <imm>;
+fn hc_emit_xor_b32_imm(s: HypercomplexPtxState, dst: i64, a: i64, imm: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    xor.b32 %r")
+    out = hc_push_str(out, i64_to_string(dst))
+    out = hc_push_str(out, ", %r")
+    out = hc_push_str(out, i64_to_string(a))
+    out = hc_push_str(out, ", ")
+    out = hc_push_str(out, i64_to_string(imm))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+// Emit setp.ge.u32 %p<pred>, %r<a>, %r<b>;
+fn hc_emit_setp_ge_u32(s: HypercomplexPtxState, pred: i64, a: i64, b: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    setp.ge.u32 %p")
+    out = hc_push_str(out, i64_to_string(pred))
+    out = hc_push_str(out, ", %r")
+    out = hc_push_str(out, i64_to_string(a))
+    out = hc_push_str(out, ", %r")
+    out = hc_push_str(out, i64_to_string(b))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+// Emit setp.eq.u32 %p<pred>, %r<a>, <imm>;
+fn hc_emit_setp_eq_u32_imm(s: HypercomplexPtxState, pred: i64, a: i64, imm: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    setp.eq.u32 %p")
+    out = hc_push_str(out, i64_to_string(pred))
+    out = hc_push_str(out, ", %r")
+    out = hc_push_str(out, i64_to_string(a))
+    out = hc_push_str(out, ", ")
+    out = hc_push_str(out, i64_to_string(imm))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+// Emit selp.u64 %rd<dst>, %rd<a>, %rd<b>, %p<pred>;
+fn hc_emit_selp_u64(s: HypercomplexPtxState, dst: i64, a: i64, b: i64, pred: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    selp.u64 %rd")
+    out = hc_push_str(out, i64_to_string(dst))
+    out = hc_push_str(out, ", %rd")
+    out = hc_push_str(out, i64_to_string(a))
+    out = hc_push_str(out, ", %rd")
+    out = hc_push_str(out, i64_to_string(b))
+    out = hc_push_str(out, ", %p")
+    out = hc_push_str(out, i64_to_string(pred))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+// Emit @%p<pred> bra <label>;
+fn hc_emit_bra_pred(s: HypercomplexPtxState, pred: i64, label: string) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    @%p")
+    out = hc_push_str(out, i64_to_string(pred))
+    out = hc_push_str(out, " bra ")
+    out = hc_push_str(out, label)
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+// Emit unconditional bra <label>;
+fn hc_emit_bra(s: HypercomplexPtxState, label: string) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    bra ")
+    out = hc_push_str(out, label)
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+// Emit label: <name>:
+fn hc_emit_label(s: HypercomplexPtxState, name: string) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, name)
+    out = hc_push_str(out, ":\n")
+    out
+}
+
+// ============================================================================
+// hc_emit_oct_mul_dbuf_kernel
+//
+// Emits a COMPLETE PTX kernel `.visible .entry sounio_oct_mul_dbuf(...)` that
+// uses two shared memory buffers (ping-pong) and cp.async to overlap
+// global->shared loads with octonion multiply-accumulate computation.
+//
+// Register map (b32):
+//   %r0  = tid.x          %r1  = tid.y
+//   %r2  = ctaid.x        %r3  = ctaid.y
+//   %r4  = tile_row_base  %r5  = tile_col_base
+//   %r6  = k_strip        %r7  = buf (0/1 ping-pong selector)
+//   %r8  = K param        %r9  = M param       %r10 = N param
+//   %r11 = linear tid     %r12..%r23 = scratch
+//
+// Register map (b64):
+//   %rd0 = param_a_ptr    %rd1 = param_b_ptr    %rd2 = param_out_ptr
+//   %rd3 = smem_a0 base   %rd4 = smem_a1 base
+//   %rd5 = smem_b0 base   %rd6 = smem_b1 base
+//   %rd7 = current smem_a %rd8 = current smem_b
+//   %rd9..%rd23 = scratch
+//
+// Float registers (%f):
+//   %f0..%f7   = accumulator for result octonion (8 components)
+//   %f8..%f15  = loaded A octonion from smem
+//   %f16..%f23 = loaded B octonion from smem
+//   %f24..%f31 = negation shadow of B for Cayley-table signed FMA
+//   %f32..%f39 = epistemic uncertainty accumulators (if with_epistemic)
+//   %f40..%f42 = scratch for epistemic propagation
+// ============================================================================
+fn hc_emit_oct_mul_dbuf_kernel(s: HypercomplexPtxState, with_epistemic: bool) -> HypercomplexPtxState with Div {
+    var out = s
+
+    // --- PTX file header ---
+    out = hc_emit_ptx_file_header(out)
+
+    // --- Kernel entry point ---
+    out = hc_push_str(out, ".visible .entry sounio_oct_mul_dbuf(\n")
+    out = hc_push_str(out, "    .param .u64 param_a_ptr,\n")
+    out = hc_push_str(out, "    .param .u64 param_b_ptr,\n")
+    out = hc_push_str(out, "    .param .u64 param_out_ptr,\n")
+    out = hc_push_str(out, "    .param .u32 param_m,\n")
+    out = hc_push_str(out, "    .param .u32 param_k,\n")
+    out = hc_push_str(out, "    .param .u32 param_n")
+    if with_epistemic {
+        out = hc_push_str(out, ",\n")
+        out = hc_push_str(out, "    .param .u64 param_a_eps_ptr,\n")
+        out = hc_push_str(out, "    .param .u64 param_b_eps_ptr,\n")
+        out = hc_push_str(out, "    .param .u64 param_out_eps_ptr")
+    }
+    out = hc_push_str(out, "\n)\n{\n")
+
+    // --- Register declarations ---
+    if with_epistemic {
+        out = hc_push_str(out, "    .reg .f32 %f<96>;\n")
+    } else {
+        out = hc_push_str(out, "    .reg .f32 %f<64>;\n")
+    }
+    out = hc_push_str(out, "    .reg .pred %p<16>;\n")
+    out = hc_push_str(out, "    .reg .b32 %r<24>;\n")
+    out = hc_push_str(out, "    .reg .b64 %rd<24>;\n\n")
+
+    // --- Shared memory: two ping-pong buffers for A and B ---
+    // Each buffer: TILE_M * TILE_K * 8 floats * 4 bytes = 128*32*8*4 = 131072
+    let smem_tile_bytes: i64 = 131072
+    out = hc_emit_smem_decl(out, "smem_a0", smem_tile_bytes)
+    out = hc_emit_smem_decl(out, "smem_a1", smem_tile_bytes)
+    out = hc_emit_smem_decl(out, "smem_b0", smem_tile_bytes)
+    out = hc_emit_smem_decl(out, "smem_b1", smem_tile_bytes)
+    out = hc_push_str(out, "\n")
+
+    // --- Load kernel parameters ---
+    out = hc_emit_ld_param_u64(out, 0, "param_a_ptr")
+    out = hc_emit_ld_param_u64(out, 1, "param_b_ptr")
+    out = hc_emit_ld_param_u64(out, 2, "param_out_ptr")
+    out = hc_emit_ld_param_u32(out, 9, "param_m")
+    out = hc_emit_ld_param_u32(out, 8, "param_k")
+    out = hc_emit_ld_param_u32(out, 10, "param_n")
+    out = hc_push_str(out, "\n")
+
+    // --- Thread / block indices ---
+    out = hc_push_str(out, "    // --- thread and block indices ---\n")
+    out = hc_emit_mov_u32_special(out, 0, "%tid.x")
+    out = hc_emit_mov_u32_special(out, 1, "%tid.y")
+    out = hc_emit_mov_u32_special(out, 2, "%ctaid.x")
+    out = hc_emit_mov_u32_special(out, 3, "%ctaid.y")
+    // tile_row_base = ctaid.y * 128  (TILE_M)
+    out = hc_emit_shl_b32(out, 4, 3, 7)
+    // tile_col_base = ctaid.x * 128  (TILE_N)
+    out = hc_emit_shl_b32(out, 5, 2, 7)
+    out = hc_push_str(out, "\n")
+
+    // --- Shared memory base addresses ---
+    out = hc_emit_mov_u64_sym(out, 3, "smem_a0")
+    out = hc_emit_mov_u64_sym(out, 4, "smem_a1")
+    out = hc_emit_mov_u64_sym(out, 5, "smem_b0")
+    out = hc_emit_mov_u64_sym(out, 6, "smem_b1")
+    out = hc_push_str(out, "\n")
+
+    // --- Initialize accumulators to zero ---
+    // %f0..%f7: result octonion (8 components)
+    out = hc_push_str(out, "    // --- init accumulators to zero ---\n")
+    var ai: i64 = 0
+    while ai < 8 {
+        out = hc_emit_const_f32(out, ai, 0.0)
+        ai = ai + 1
+    }
+    if with_epistemic {
+        // %f32..%f39: epistemic uncertainty accumulators
+        var ei: i64 = 0
+        while ei < 8 {
+            out = hc_emit_const_f32(out, 32 + ei, 0.0)
+            ei = ei + 1
+        }
+    }
+    out = hc_push_str(out, "\n")
+
+    // --- Linear thread ID for cooperative loading ---
+    // lin_tid = tid.y * 16 + tid.x  (assuming 16x16 = 256 thread block)
+    out = hc_emit_mad_lo_u32_imm(out, 11, 1, 16, 0)
+    out = hc_emit_add_u32(out, 11, 11, 0)
+    out = hc_push_str(out, "    // %r11 = linear thread id\n\n")
+
+    // =====================================================================
+    // PROLOGUE: Prefetch first K-tile (k_strip=0) into buffer 0
+    // =====================================================================
+    out = hc_push_str(out, "    // ===== PROLOGUE: prefetch k_strip=0 into buffer 0 =====\n")
+    out = hc_emit_mov_u32_imm(out, 6, 0)
+
+    // Each tile has 128*32 = 4096 octonion elements.
+    // With 256 threads, each thread loads 4096/256 = 16 elements.
+    // For each element, we issue 8 cp.async.ca (one per float component).
+
+    // --- Prefetch A tile into smem_a0 ---
+    out = hc_push_str(out, "\n    // --- prefetch A tile into smem_a0 ---\n")
+    out = hc_emit_mov_u32_reg(out, 12, 11)
+    out = hc_emit_label(out, "DBUF_PRE_A0")
+    out = hc_emit_mov_u32_imm(out, 13, 4096)
+    out = hc_emit_setp_ge_u32(out, 0, 12, 13)
+    out = hc_emit_bra_pred(out, 0, "DBUF_PRE_A0_DONE")
+
+    // A tile layout: 128 rows x 32 cols of octonions (row-major in tile)
+    // elem_row = elem >> 5 (divide by 32), elem_col = elem & 31
+    out = hc_push_str(out, "    shr.u32 %r14, %r12, 5;  // elem_row\n")
+    out = hc_push_str(out, "    and.b32 %r15, %r12, 31; // elem_col\n")
+    // global_row = tile_row_base + elem_row
+    out = hc_emit_add_u32(out, 16, 4, 14)
+    // global_col = k_strip + elem_col
+    out = hc_emit_add_u32(out, 17, 6, 15)
+    // global_linear = global_row * K + global_col
+    out = hc_emit_mad_lo_u32(out, 18, 16, 8, 17)
+    // global_byte_offset = global_linear * 32 (each octonion = 32 bytes)
+    out = hc_emit_shl_b32(out, 19, 18, 5)
+    // smem_byte_offset = elem * 32
+    out = hc_emit_shl_b32(out, 20, 12, 5)
+    // Widen to 64-bit and add to base addresses
+    out = hc_emit_cvt_u64_u32(out, 9, 19)
+    out = hc_emit_add_u64(out, 10, 0, 9)
+    out = hc_push_str(out, "    // %rd10 = global addr for A octonion\n")
+    out = hc_emit_cvt_u64_u32(out, 11, 20)
+    out = hc_emit_add_u64(out, 12, 3, 11)
+    out = hc_push_str(out, "    // %rd12 = smem addr for A octonion\n")
+
+    // Issue 8 cp.async for the 8 float components
+    var pa: i64 = 0
+    while pa < 8 {
+        if pa > 0 {
+            out = hc_emit_add_u64_imm(out, 12, 12, 4)
+            out = hc_emit_add_u64_imm(out, 10, 10, 4)
+        }
+        out = hc_emit_cpasync_f32(out, 12, 10)
+        pa = pa + 1
+    }
+    out = hc_emit_add_u32_imm(out, 12, 12, 256)
+    out = hc_emit_bra(out, "DBUF_PRE_A0")
+    out = hc_emit_label(out, "DBUF_PRE_A0_DONE")
+
+    // --- Prefetch B tile into smem_b0 ---
+    out = hc_push_str(out, "\n    // --- prefetch B tile into smem_b0 ---\n")
+    out = hc_emit_mov_u32_reg(out, 12, 11)
+    out = hc_emit_label(out, "DBUF_PRE_B0")
+    out = hc_emit_mov_u32_imm(out, 13, 4096)
+    out = hc_emit_setp_ge_u32(out, 0, 12, 13)
+    out = hc_emit_bra_pred(out, 0, "DBUF_PRE_B0_DONE")
+
+    // B tile layout: 32 rows x 128 cols
+    // elem_row = elem >> 7 (divide by 128), elem_col = elem & 127
+    out = hc_push_str(out, "    shr.u32 %r14, %r12, 7;   // elem_row\n")
+    out = hc_push_str(out, "    and.b32 %r15, %r12, 127;  // elem_col\n")
+    // global_row = k_strip + elem_row, global_col = tile_col_base + elem_col
+    out = hc_emit_add_u32(out, 16, 6, 14)
+    out = hc_emit_add_u32(out, 17, 5, 15)
+    // global_linear = global_row * N + global_col
+    out = hc_emit_mad_lo_u32(out, 18, 16, 10, 17)
+    out = hc_emit_shl_b32(out, 19, 18, 5)
+    out = hc_emit_shl_b32(out, 20, 12, 5)
+    out = hc_emit_cvt_u64_u32(out, 9, 19)
+    out = hc_emit_add_u64(out, 10, 1, 9)
+    out = hc_emit_cvt_u64_u32(out, 11, 20)
+    out = hc_emit_add_u64(out, 12, 5, 11)
+
+    var pb: i64 = 0
+    while pb < 8 {
+        if pb > 0 {
+            out = hc_emit_add_u64_imm(out, 12, 12, 4)
+            out = hc_emit_add_u64_imm(out, 10, 10, 4)
+        }
+        out = hc_emit_cpasync_f32(out, 12, 10)
+        pb = pb + 1
+    }
+    out = hc_emit_add_u32_imm(out, 12, 12, 256)
+    out = hc_emit_bra(out, "DBUF_PRE_B0")
+    out = hc_emit_label(out, "DBUF_PRE_B0_DONE")
+
+    // Commit prologue group
+    out = hc_push_str(out, "\n")
+    out = hc_emit_cpasync_commit(out)
+    out = hc_push_str(out, "\n")
+
+    // =====================================================================
+    // MAIN LOOP: double-buffered K iteration
+    // =====================================================================
+    out = hc_push_str(out, "    // ===== MAIN LOOP: double-buffered K tiles =====\n")
+    // k_strip starts at 32 (TILE_K); prologue loaded strip 0
+    out = hc_emit_mov_u32_imm(out, 6, 32)
+    // buf = 0 (current buffer to compute from)
+    out = hc_emit_mov_u32_imm(out, 7, 0)
+    out = hc_push_str(out, "\n")
+
+    out = hc_emit_label(out, "DBUF_KLOOP")
+
+    // If k_strip >= K, skip the prefetch, go to compute on last committed tile
+    out = hc_emit_setp_ge_u32(out, 1, 6, 8)
+    out = hc_emit_bra_pred(out, 1, "DBUF_KLOOP_COMPUTE")
+    out = hc_push_str(out, "\n")
+
+    // --- Prefetch NEXT tile into alternate buffer (1 - buf) ---
+    out = hc_push_str(out, "    // --- prefetch next tile into alternate buffer ---\n")
+    out = hc_emit_xor_b32_imm(out, 21, 7, 1)
+    out = hc_push_str(out, "    // %r21 = next_buf = buf ^ 1\n")
+
+    // Select smem bases for next buffer: next_buf==0 ? (rd3,rd5) : (rd4,rd6)
+    out = hc_emit_setp_eq_u32_imm(out, 2, 21, 0)
+    out = hc_emit_selp_u64(out, 13, 3, 4, 2)
+    out = hc_push_str(out, "    // %rd13 = smem_a_next\n")
+    out = hc_emit_selp_u64(out, 14, 5, 6, 2)
+    out = hc_push_str(out, "    // %rd14 = smem_b_next\n\n")
+
+    // Prefetch A tile into next buffer
+    out = hc_push_str(out, "    // --- async load A tile into next buffer ---\n")
+    out = hc_emit_mov_u32_reg(out, 12, 11)
+    out = hc_emit_label(out, "DBUF_MAIN_A_LOAD")
+    out = hc_emit_mov_u32_imm(out, 13, 4096)
+    out = hc_emit_setp_ge_u32(out, 0, 12, 13)
+    out = hc_emit_bra_pred(out, 0, "DBUF_MAIN_A_DONE")
+    out = hc_push_str(out, "    shr.u32 %r14, %r12, 5;\n")
+    out = hc_push_str(out, "    and.b32 %r15, %r12, 31;\n")
+    out = hc_emit_add_u32(out, 16, 4, 14)
+    out = hc_emit_add_u32(out, 17, 6, 15)
+    out = hc_emit_mad_lo_u32(out, 18, 16, 8, 17)
+    out = hc_emit_shl_b32(out, 19, 18, 5)
+    out = hc_emit_shl_b32(out, 20, 12, 5)
+    out = hc_emit_cvt_u64_u32(out, 9, 19)
+    out = hc_emit_add_u64(out, 10, 0, 9)
+    out = hc_emit_cvt_u64_u32(out, 11, 20)
+    // Use %rd13 (smem_a_next base) + smem offset
+    out = hc_emit_add_u64(out, 15, 13, 11)
+
+    var ma: i64 = 0
+    while ma < 8 {
+        if ma > 0 {
+            out = hc_emit_add_u64_imm(out, 15, 15, 4)
+            out = hc_emit_add_u64_imm(out, 10, 10, 4)
+        }
+        out = hc_emit_cpasync_f32(out, 15, 10)
+        ma = ma + 1
+    }
+    out = hc_emit_add_u32_imm(out, 12, 12, 256)
+    out = hc_emit_bra(out, "DBUF_MAIN_A_LOAD")
+    out = hc_emit_label(out, "DBUF_MAIN_A_DONE")
+
+    // Prefetch B tile into next buffer
+    out = hc_push_str(out, "\n    // --- async load B tile into next buffer ---\n")
+    out = hc_emit_mov_u32_reg(out, 12, 11)
+    out = hc_emit_label(out, "DBUF_MAIN_B_LOAD")
+    out = hc_emit_mov_u32_imm(out, 13, 4096)
+    out = hc_emit_setp_ge_u32(out, 0, 12, 13)
+    out = hc_emit_bra_pred(out, 0, "DBUF_MAIN_B_DONE")
+    out = hc_push_str(out, "    shr.u32 %r14, %r12, 7;\n")
+    out = hc_push_str(out, "    and.b32 %r15, %r12, 127;\n")
+    out = hc_emit_add_u32(out, 16, 6, 14)
+    out = hc_emit_add_u32(out, 17, 5, 15)
+    out = hc_emit_mad_lo_u32(out, 18, 16, 10, 17)
+    out = hc_emit_shl_b32(out, 19, 18, 5)
+    out = hc_emit_shl_b32(out, 20, 12, 5)
+    out = hc_emit_cvt_u64_u32(out, 9, 19)
+    out = hc_emit_add_u64(out, 10, 1, 9)
+    out = hc_emit_cvt_u64_u32(out, 11, 20)
+    // Use %rd14 (smem_b_next base) + smem offset
+    out = hc_emit_add_u64(out, 15, 14, 11)
+
+    var mb: i64 = 0
+    while mb < 8 {
+        if mb > 0 {
+            out = hc_emit_add_u64_imm(out, 15, 15, 4)
+            out = hc_emit_add_u64_imm(out, 10, 10, 4)
+        }
+        out = hc_emit_cpasync_f32(out, 15, 10)
+        mb = mb + 1
+    }
+    out = hc_emit_add_u32_imm(out, 12, 12, 256)
+    out = hc_emit_bra(out, "DBUF_MAIN_B_LOAD")
+    out = hc_emit_label(out, "DBUF_MAIN_B_DONE")
+
+    // Commit the next-tile group
+    out = hc_push_str(out, "\n")
+    out = hc_emit_cpasync_commit(out)
+    out = hc_push_str(out, "\n")
+
+    // --- Wait for CURRENT tile (leave 1 group in-flight for overlap) ---
+    out = hc_emit_label(out, "DBUF_KLOOP_COMPUTE")
+    out = hc_emit_cpasync_wait(out, 1)
+    out = hc_emit_bar_sync(out)
+    out = hc_push_str(out, "\n")
+
+    // --- Select current smem bases: buf==0 -> (rd3,rd5), buf==1 -> (rd4,rd6) ---
+    out = hc_push_str(out, "    // --- select current buffer smem bases ---\n")
+    out = hc_emit_setp_eq_u32_imm(out, 3, 7, 0)
+    out = hc_emit_selp_u64(out, 7, 3, 4, 3)
+    out = hc_push_str(out, "    // %rd7 = current smem_a base\n")
+    out = hc_emit_selp_u64(out, 8, 5, 6, 3)
+    out = hc_push_str(out, "    // %rd8 = current smem_b base\n\n")
+
+    // --- Compute: octonion multiply-accumulate from current buffer ---
+    // Inner loop over TILE_K=32 elements along K:
+    //   for kk = 0..31:
+    //     a_oct = smem_a[tid.y * 32 + kk]  (8 floats from shared)
+    //     b_oct = smem_b[kk * 128 + tid.x]  (8 floats from shared)
+    //     accum += oct_mul(a_oct, b_oct)  (Cayley product via Fano plane)
+    out = hc_push_str(out, "    // --- oct_mul accumulate from current smem ---\n")
+    out = hc_emit_mov_u32_imm(out, 22, 0)
+    out = hc_emit_label(out, "DBUF_IK_LOOP")
+    out = hc_emit_mov_u32_imm(out, 23, 32)
+    out = hc_emit_setp_ge_u32(out, 4, 22, 23)
+    out = hc_emit_bra_pred(out, 4, "DBUF_IK_DONE")
+
+    // Load A octonion: smem_a_base + (tid.y * TILE_K + kk) * 32 bytes
+    out = hc_push_str(out, "\n    // load A octonion from smem\n")
+    out = hc_emit_shl_b32(out, 14, 1, 5)
+    out = hc_emit_add_u32(out, 14, 14, 22)
+    out = hc_emit_shl_b32(out, 15, 14, 5)
+    out = hc_emit_cvt_u64_u32(out, 16, 15)
+    out = hc_emit_add_u64(out, 17, 7, 16)
+    var la: i64 = 0
+    while la < 8 {
+        out = hc_emit_ld_shared_f32(out, 8 + la, 17)
+        if la < 7 {
+            out = hc_emit_add_u64_imm(out, 17, 17, 4)
+        }
+        la = la + 1
+    }
+
+    // Load B octonion: smem_b_base + (kk * TILE_N + tid.x) * 32 bytes
+    out = hc_push_str(out, "\n    // load B octonion from smem\n")
+    out = hc_emit_shl_b32(out, 14, 22, 7)
+    out = hc_emit_add_u32(out, 14, 14, 0)
+    out = hc_emit_shl_b32(out, 15, 14, 5)
+    out = hc_emit_cvt_u64_u32(out, 16, 15)
+    out = hc_emit_add_u64(out, 17, 8, 16)
+    var lb: i64 = 0
+    while lb < 8 {
+        out = hc_emit_ld_shared_f32(out, 16 + lb, 17)
+        if lb < 7 {
+            out = hc_emit_add_u64_imm(out, 17, 17, 4)
+        }
+        lb = lb + 1
+    }
+
+    // Negate B components for signed Cayley-table FMA
+    out = hc_push_str(out, "\n    // negate B for signed Cayley accumulation\n")
+    var ni: i64 = 0
+    while ni < 8 {
+        out = hc_emit_neg_f32(out, 24 + ni, 16 + ni)
+        ni = ni + 1
+    }
+
+    // Accumulate: for each output component k, FMA the contributing pairs
+    out = hc_push_str(out, "\n    // Cayley oct_mul accumulate into %f0..%f7\n")
+    var k: i64 = 0
+    while k < 8 {
+        var i: i64 = 0
+        while i < 8 {
+            var j: i64 = 0
+            while j < 8 {
+                let basis = oct_mul_basis(i, j)
+                if basis == k {
+                    let sign = oct_mul_sign(i, j)
+                    var b_reg: i64 = 0
+                    if sign == 1 {
+                        b_reg = 16 + j
+                    } else {
+                        b_reg = 24 + j
+                    }
+                    out = hc_emit_fma_f32(out, k, 8 + i, b_reg, k)
+                }
+                j = j + 1
+            }
+            i = i + 1
+        }
+        k = k + 1
+    }
+
+    // Epistemic uncertainty propagation (if enabled)
+    if with_epistemic {
+        out = hc_push_str(out, "\n    // epistemic: conservative max-propagation\n")
+        // eps_accum[k] = max(eps_accum[k], |a[i]| + |b[j]|) for contributing (i,j)
+        var ek: i64 = 0
+        while ek < 8 {
+            var eii: i64 = 0
+            while eii < 8 {
+                var ejj: i64 = 0
+                while ejj < 8 {
+                    let ebasis = oct_mul_basis(eii, ejj)
+                    if ebasis == ek {
+                        out = hc_emit_abs_f32(out, 40, 8 + eii)
+                        out = hc_emit_abs_f32(out, 41, 16 + ejj)
+                        out = hc_emit_add_f32(out, 42, 40, 41)
+                        out = hc_emit_max_f32(out, 32 + ek, 32 + ek, 42)
+                    }
+                    ejj = ejj + 1
+                }
+                eii = eii + 1
+            }
+            ek = ek + 1
+        }
+    }
+
+    // Advance inner loop
+    out = hc_push_str(out, "\n")
+    out = hc_emit_add_u32_imm(out, 22, 22, 1)
+    out = hc_emit_bra(out, "DBUF_IK_LOOP")
+    out = hc_emit_label(out, "DBUF_IK_DONE")
+
+    // Synchronize before toggling buffers
+    out = hc_emit_bar_sync(out)
+    out = hc_push_str(out, "\n")
+
+    // Toggle buffer and advance k_strip
+    out = hc_push_str(out, "    // toggle buffer and advance k_strip\n")
+    out = hc_emit_xor_b32_imm(out, 7, 7, 1)
+    out = hc_emit_add_u32_imm(out, 6, 6, 32)
+    out = hc_push_str(out, "\n")
+
+    // Loop condition: continue while k_strip <= K
+    out = hc_push_str(out, "    setp.le.u32 %p5, %r6, %r8;\n")
+    out = hc_emit_bra_pred(out, 5, "DBUF_KLOOP")
+    out = hc_push_str(out, "\n")
+
+    // =====================================================================
+    // EPILOGUE: drain last committed async group and compute final tile
+    // =====================================================================
+    out = hc_push_str(out, "    // ===== EPILOGUE: drain last async group =====\n")
+    out = hc_emit_cpasync_wait(out, 0)
+    out = hc_emit_bar_sync(out)
+    out = hc_push_str(out, "\n")
+
+    // Select current buffer for epilogue compute
+    out = hc_emit_setp_eq_u32_imm(out, 6, 7, 0)
+    out = hc_emit_selp_u64(out, 7, 3, 4, 6)
+    out = hc_emit_selp_u64(out, 8, 5, 6, 6)
+    out = hc_push_str(out, "\n")
+
+    // Epilogue inner K loop (identical compute structure)
+    out = hc_push_str(out, "    // --- epilogue oct_mul accumulate ---\n")
+    out = hc_emit_mov_u32_imm(out, 22, 0)
+    out = hc_emit_label(out, "DBUF_EPI_LOOP")
+    out = hc_emit_mov_u32_imm(out, 23, 32)
+    out = hc_emit_setp_ge_u32(out, 4, 22, 23)
+    out = hc_emit_bra_pred(out, 4, "DBUF_EPI_DONE")
+
+    // Load A from current smem
+    out = hc_emit_shl_b32(out, 14, 1, 5)
+    out = hc_emit_add_u32(out, 14, 14, 22)
+    out = hc_emit_shl_b32(out, 15, 14, 5)
+    out = hc_emit_cvt_u64_u32(out, 16, 15)
+    out = hc_emit_add_u64(out, 17, 7, 16)
+    var lea: i64 = 0
+    while lea < 8 {
+        out = hc_emit_ld_shared_f32(out, 8 + lea, 17)
+        if lea < 7 {
+            out = hc_emit_add_u64_imm(out, 17, 17, 4)
+        }
+        lea = lea + 1
+    }
+
+    // Load B from current smem
+    out = hc_emit_shl_b32(out, 14, 22, 7)
+    out = hc_emit_add_u32(out, 14, 14, 0)
+    out = hc_emit_shl_b32(out, 15, 14, 5)
+    out = hc_emit_cvt_u64_u32(out, 16, 15)
+    out = hc_emit_add_u64(out, 17, 8, 16)
+    var leb: i64 = 0
+    while leb < 8 {
+        out = hc_emit_ld_shared_f32(out, 16 + leb, 17)
+        if leb < 7 {
+            out = hc_emit_add_u64_imm(out, 17, 17, 4)
+        }
+        leb = leb + 1
+    }
+
+    // Negate B
+    var eni: i64 = 0
+    while eni < 8 {
+        out = hc_emit_neg_f32(out, 24 + eni, 16 + eni)
+        eni = eni + 1
+    }
+
+    // Cayley accumulate (same Fano-plane table as main loop)
+    var ek2: i64 = 0
+    while ek2 < 8 {
+        var ei2: i64 = 0
+        while ei2 < 8 {
+            var ej2: i64 = 0
+            while ej2 < 8 {
+                let basis2 = oct_mul_basis(ei2, ej2)
+                if basis2 == ek2 {
+                    let sign2 = oct_mul_sign(ei2, ej2)
+                    var b_reg2: i64 = 0
+                    if sign2 == 1 {
+                        b_reg2 = 16 + ej2
+                    } else {
+                        b_reg2 = 24 + ej2
+                    }
+                    out = hc_emit_fma_f32(out, ek2, 8 + ei2, b_reg2, ek2)
+                }
+                ej2 = ej2 + 1
+            }
+            ei2 = ei2 + 1
+        }
+        ek2 = ek2 + 1
+    }
+
+    if with_epistemic {
+        out = hc_push_str(out, "\n    // epilogue epistemic propagation\n")
+        var eek: i64 = 0
+        while eek < 8 {
+            var eeii: i64 = 0
+            while eeii < 8 {
+                var eejj: i64 = 0
+                while eejj < 8 {
+                    let eebasis = oct_mul_basis(eeii, eejj)
+                    if eebasis == eek {
+                        out = hc_emit_abs_f32(out, 40, 8 + eeii)
+                        out = hc_emit_abs_f32(out, 41, 16 + eejj)
+                        out = hc_emit_add_f32(out, 42, 40, 41)
+                        out = hc_emit_max_f32(out, 32 + eek, 32 + eek, 42)
+                    }
+                    eejj = eejj + 1
+                }
+                eeii = eeii + 1
+            }
+            eek = eek + 1
+        }
+    }
+
+    out = hc_emit_add_u32_imm(out, 22, 22, 1)
+    out = hc_emit_bra(out, "DBUF_EPI_LOOP")
+    out = hc_emit_label(out, "DBUF_EPI_DONE")
+    out = hc_push_str(out, "\n")
+
+    // =====================================================================
+    // STORE RESULTS to global memory
+    // =====================================================================
+    out = hc_push_str(out, "    // ===== STORE: write result octonion to global =====\n")
+    // out_row = tile_row_base + tid.y, out_col = tile_col_base + tid.x
+    out = hc_emit_add_u32(out, 14, 4, 1)
+    out = hc_emit_add_u32(out, 15, 5, 0)
+    // global_linear = out_row * N + out_col
+    out = hc_emit_mad_lo_u32(out, 16, 14, 10, 15)
+    // byte offset = global_linear * 32
+    out = hc_emit_shl_b32(out, 17, 16, 5)
+    out = hc_emit_cvt_u64_u32(out, 18, 17)
+    out = hc_emit_add_u64(out, 19, 2, 18)
+    out = hc_push_str(out, "    // %rd19 = global output addr\n")
+
+    // Store 8 float components of the result octonion
+    var si: i64 = 0
+    while si < 8 {
+        out = hc_emit_st_global_f32(out, 19, si)
+        if si < 7 {
+            out = hc_emit_add_u64_imm(out, 19, 19, 4)
+        }
+        si = si + 1
+    }
+
+    // Store epistemic uncertainty if enabled
+    if with_epistemic {
+        out = hc_push_str(out, "\n    // store epistemic uncertainty to global\n")
+        out = hc_emit_ld_param_u64(out, 20, "param_out_eps_ptr")
+        out = hc_emit_add_u64(out, 21, 20, 18)
+        var sei: i64 = 0
+        while sei < 8 {
+            out = hc_emit_st_global_f32(out, 21, 32 + sei)
+            if sei < 7 {
+                out = hc_emit_add_u64_imm(out, 21, 21, 4)
+            }
+            sei = sei + 1
+        }
+    }
+
+    // --- Return ---
+    out = hc_push_str(out, "\n    ret;\n")
+    out = hc_push_str(out, "}\n")
+
+    out
+}
+
+
+// ============================================================================
+// Phase 6: WMMA Tensor Core path (F16 inputs, F32 accumulation)
+//
+// PTX WMMA m16n16k16: A-fragment 8 x f16 (%h regs), B-fragment 8 x f16,
+// C/D accumulators 8 x f32 (%f regs).
+//
+// Octonion GEMM decomposition:
+//   Each output component p of C[i][j] = sum_k oct_mul(A[i][k], B[k][j]).p
+//   Using the Fano plane, component p is a signed sum of A_comp_a * B_comp_b
+//   over the 8 contributing (a,b) pairs where oct_mul_basis(a,b) == p.
+//   Each such contribution is a scalar GEMM dispatched as a WMMA tile.
+// ============================================================================
+
+// Emit: cvt.rn.f16.f32 %h<dst>, %f<src>;
+fn hc_emit_cvt_f16_f32(s: HypercomplexPtxState, dst_reg: i64, src_reg: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    cvt.rn.f16.f32 %h")
+    out = hc_push_str(out, i64_to_string(dst_reg))
+    out = hc_push_str(out, ", %f")
+    out = hc_push_str(out, i64_to_string(src_reg))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+// Emit: cvt.f32.f16 %f<dst>, %h<src>;
+fn hc_emit_cvt_f32_f16(s: HypercomplexPtxState, dst_reg: i64, src_reg: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    cvt.f32.f16 %f")
+    out = hc_push_str(out, i64_to_string(dst_reg))
+    out = hc_push_str(out, ", %h")
+    out = hc_push_str(out, i64_to_string(src_reg))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+// Emit: wmma.load.a.sync.aligned.row.m16n16k16.f16
+//       {%h<frag_base>, ..., %h<frag_base+7>}, [%rd<addr>], <stride>;
+// A-fragment is 8 f16 registers for m16n16k16 row-major.
+fn hc_emit_wmma_load_a(s: HypercomplexPtxState, frag_base: i64, smem_addr_reg: i64, stride: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    wmma.load.a.sync.aligned.row.m16n16k16.f16 {")
+    var i: i64 = 0
+    while i < 8 {
+        out = hc_push_str(out, "%h")
+        out = hc_push_str(out, i64_to_string(frag_base + i))
+        if i < 7 {
+            out = hc_push_str(out, ", ")
+        }
+        i = i + 1
+    }
+    out = hc_push_str(out, "}, [%rd")
+    out = hc_push_str(out, i64_to_string(smem_addr_reg))
+    out = hc_push_str(out, "], ")
+    out = hc_push_str(out, i64_to_string(stride))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+// Emit: wmma.load.b.sync.aligned.col.m16n16k16.f16
+//       {%h<frag_base>, ..., %h<frag_base+7>}, [%rd<addr>], <stride>;
+// B-fragment is 8 f16 registers for m16n16k16 col-major.
+fn hc_emit_wmma_load_b(s: HypercomplexPtxState, frag_base: i64, smem_addr_reg: i64, stride: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    wmma.load.b.sync.aligned.col.m16n16k16.f16 {")
+    var i: i64 = 0
+    while i < 8 {
+        out = hc_push_str(out, "%h")
+        out = hc_push_str(out, i64_to_string(frag_base + i))
+        if i < 7 {
+            out = hc_push_str(out, ", ")
+        }
+        i = i + 1
+    }
+    out = hc_push_str(out, "}, [%rd")
+    out = hc_push_str(out, i64_to_string(smem_addr_reg))
+    out = hc_push_str(out, "], ")
+    out = hc_push_str(out, i64_to_string(stride))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+// Emit: wmma.mma.sync.aligned.row.col.m16n16k16.f32.f16.f16.f32
+//       {%f<d0>,...,%f<d7>}, {%h<a0>,...,%h<a7>}, {%h<b0>,...,%h<b7>}, {%f<c0>,...,%f<c7>};
+// D and C are 8 f32 registers; A and B are 8 f16 registers each.
+fn hc_emit_wmma_mma(s: HypercomplexPtxState, d_base: i64, a_base: i64, b_base: i64, c_base: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    wmma.mma.sync.aligned.row.col.m16n16k16.f32.f16.f16.f32\n")
+    out = hc_push_str(out, "        {")
+    // D fragment (f32)
+    var i: i64 = 0
+    while i < 8 {
+        out = hc_push_str(out, "%f")
+        out = hc_push_str(out, i64_to_string(d_base + i))
+        if i < 7 {
+            out = hc_push_str(out, ", ")
+        }
+        i = i + 1
+    }
+    out = hc_push_str(out, "},\n")
+    out = hc_push_str(out, "        {")
+    // A fragment (f16)
+    i = 0
+    while i < 8 {
+        out = hc_push_str(out, "%h")
+        out = hc_push_str(out, i64_to_string(a_base + i))
+        if i < 7 {
+            out = hc_push_str(out, ", ")
+        }
+        i = i + 1
+    }
+    out = hc_push_str(out, "},\n")
+    out = hc_push_str(out, "        {")
+    // B fragment (f16)
+    i = 0
+    while i < 8 {
+        out = hc_push_str(out, "%h")
+        out = hc_push_str(out, i64_to_string(b_base + i))
+        if i < 7 {
+            out = hc_push_str(out, ", ")
+        }
+        i = i + 1
+    }
+    out = hc_push_str(out, "},\n")
+    out = hc_push_str(out, "        {")
+    // C accumulator (f32)
+    i = 0
+    while i < 8 {
+        out = hc_push_str(out, "%f")
+        out = hc_push_str(out, i64_to_string(c_base + i))
+        if i < 7 {
+            out = hc_push_str(out, ", ")
+        }
+        i = i + 1
+    }
+    out = hc_push_str(out, "};\n")
+    out
+}
+
+// Emit: wmma.store.d.sync.aligned.row.m16n16k16.f32
+//       [%rd<addr>], {%f<frag_base>,...,%f<frag_base+7>}, <stride>;
+fn hc_emit_wmma_store_d(s: HypercomplexPtxState, addr_reg: i64, frag_base: i64, stride: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    wmma.store.d.sync.aligned.row.m16n16k16.f32 [%rd")
+    out = hc_push_str(out, i64_to_string(addr_reg))
+    out = hc_push_str(out, "],\n")
+    out = hc_push_str(out, "        {")
+    var i: i64 = 0
+    while i < 8 {
+        out = hc_push_str(out, "%f")
+        out = hc_push_str(out, i64_to_string(frag_base + i))
+        if i < 7 {
+            out = hc_push_str(out, ", ")
+        }
+        i = i + 1
+    }
+    out = hc_push_str(out, "}, ")
+    out = hc_push_str(out, i64_to_string(stride))
+    out = hc_push_str(out, ";\n")
+    out
+}
+
+// ============================================================================
+// Phase 6: Complete WMMA octonion GEMM kernel
+//
+// Kernel: sounio_oct_mul_wmma
+//
+// For octonion matrix multiplication C = A * B where A, B, C are matrices
+// of octonions (each element has 8 real components), the kernel decomposes
+// the problem into scalar GEMMs driven by the Fano plane structure.
+//
+// Each output component p (0..7) of C[row][col] is:
+//   c_p = sum_{k} sum_{(ai,bj) where oct_mul_basis(ai,bj)==p}
+//             oct_mul_sign(ai,bj) * A[row][k].ai * B[k][col].bj
+//
+// Memory layout (component-major for WMMA tile coherence):
+//   A: comp-major -- A[comp][row][k] at a_ptr + (comp * M * K + row * K + k) * 4
+//   B: comp-major -- B[comp][k][col] at b_ptr + (comp * K * N + k * N + col) * 4
+//   C: comp-major -- C[comp][row][col] at out_ptr + (comp * M * N + row * N + col) * 4
+//
+// Tiling: each threadblock handles one 16x16 output tile of octonions.
+//   K-dimension tiled in chunks of 16 (matching m16n16k16).
+//   For each K-tile:
+//     1. Load 8 A component slices (16x16 f32 each) from global, convert
+//        to F16, store to shared memory tile_a_f16
+//     2. Same for 8 B component slices into tile_b_f16
+//     3. bar.sync
+//     4. For each output component p (0..7), iterate over the 8 Fano
+//        contributing (ai, bj, sign) triples:
+//          - Load A[ai] fragment from smem, negate if sign < 0
+//          - Load B[bj] fragment from smem
+//          - WMMA MMA: accum_p += A_frag * B_frag
+//     5. bar.sync (before next K-tile)
+//   After K-tiles: store 8 output component accumulators to global.
+//
+// Register budget:
+//   %f0..%f63:    8 output components * 8 WMMA accum regs = 64 f32 regs
+//   %f64..%f69:   scratch for f32 load/convert/epistemic
+//   %h0..%h15:    WMMA fragments (a: h0..h7, b: h8..h15)
+//   %h64:         scratch for f16 conversion
+//   %rd0..%rd15+: param pointers, smem bases, address scratch
+//   %r0..%r24:    dimensions, thread idx, loop counters, address math
+//   %p0..%p4:     loop/bounds predicates
+// ============================================================================
+
+// Helper: emit Fano plane comment for one output component
+fn hc_emit_wmma_fano_comment(s: HypercomplexPtxState, comp: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    out = hc_push_str(out, "    // Fano contributions for output component ")
+    out = hc_push_str(out, i64_to_string(comp))
+    out = hc_push_str(out, ":\n")
+    var i: i64 = 0
+    while i < 8 {
+        var j: i64 = 0
+        while j < 8 {
+            let basis = oct_mul_basis(i, j)
+            if basis == comp {
+                let sign = oct_mul_sign(i, j)
+                out = hc_push_str(out, "    //   ")
+                if sign == 1 {
+                    out = hc_push_str(out, "+")
+                } else {
+                    out = hc_push_str(out, "-")
+                }
+                out = hc_push_str(out, " A_comp")
+                out = hc_push_str(out, i64_to_string(i))
+                out = hc_push_str(out, " * B_comp")
+                out = hc_push_str(out, i64_to_string(j))
+                out = hc_push_str(out, "\n")
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    out
+}
+
+// Helper: zero-initialize 8 consecutive f32 accumulator registers
+fn hc_emit_zero_accum_f32(s: HypercomplexPtxState, base_reg: i64) -> HypercomplexPtxState with Div {
+    var out = s
+    var i: i64 = 0
+    while i < 8 {
+        out = hc_push_str(out, "    mov.f32 %f")
+        out = hc_push_str(out, i64_to_string(base_reg + i))
+        out = hc_push_str(out, ", 0f00000000;\n")
+        i = i + 1
+    }
+    out
+}
+
+// Helper: emit a single WMMA Fano tile contribution.
+//
+// Given smem tile addresses and a Fano (a_comp, b_comp, sign) triple,
+// loads the A[a_comp] fragment and B[b_comp] fragment from shared memory,
+// negates the A fragment if sign < 0, then issues WMMA MMA to accumulate
+// into the output accumulator.
+fn hc_emit_wmma_fano_tile_contrib(
+    s: HypercomplexPtxState,
+    smem_a_base_reg: i64,
+    smem_b_base_reg: i64,
+    a_comp: i64,
+    b_comp: i64,
+    sign: i64,
+    a_frag_base: i64,
+    b_frag_base: i64,
+    accum_base: i64,
+    addr_scratch_a: i64,
+    addr_scratch_b: i64
+) -> HypercomplexPtxState with Div {
+    var out = s
+
+    // A fragment address: smem_a_base + a_comp * 16 * 16 * 2 bytes (512 bytes/comp)
+    let comp_offset_a = a_comp * 512
+    out = hc_push_str(out, "    add.u64 %rd")
+    out = hc_push_str(out, i64_to_string(addr_scratch_a))
+    out = hc_push_str(out, ", %rd")
+    out = hc_push_str(out, i64_to_string(smem_a_base_reg))
+    out = hc_push_str(out, ", ")
+    out = hc_push_str(out, i64_to_string(comp_offset_a))
+    out = hc_push_str(out, ";\n")
+
+    // Load A fragment
+    out = hc_emit_wmma_load_a(out, a_frag_base, addr_scratch_a, 16)
+
+    // Negate A fragment if sign is negative
+    if sign == -1 {
+        var ni: i64 = 0
+        while ni < 8 {
+            out = hc_push_str(out, "    neg.f16 %h")
+            out = hc_push_str(out, i64_to_string(a_frag_base + ni))
+            out = hc_push_str(out, ", %h")
+            out = hc_push_str(out, i64_to_string(a_frag_base + ni))
+            out = hc_push_str(out, ";\n")
+            ni = ni + 1
+        }
+    }
+
+    // B fragment address: smem_b_base + b_comp * 512
+    let comp_offset_b = b_comp * 512
+    out = hc_push_str(out, "    add.u64 %rd")
+    out = hc_push_str(out, i64_to_string(addr_scratch_b))
+    out = hc_push_str(out, ", %rd")
+    out = hc_push_str(out, i64_to_string(smem_b_base_reg))
+    out = hc_push_str(out, ", ")
+    out = hc_push_str(out, i64_to_string(comp_offset_b))
+    out = hc_push_str(out, ";\n")
+
+    // Load B fragment
+    out = hc_emit_wmma_load_b(out, b_frag_base, addr_scratch_b, 16)
+
+    // WMMA MMA: D = A * B + C (accumulate in-place)
+    out = hc_emit_wmma_mma(out, accum_base, a_frag_base, b_frag_base, accum_base)
+
+    out
+}
+
+// Emit the complete WMMA octonion GEMM kernel.
+fn hc_emit_oct_mul_wmma_kernel(s: HypercomplexPtxState, with_epistemic: bool) -> HypercomplexPtxState with Div {
+    var out = s
+
+    // -- PTX file header --
+    out = hc_emit_ptx_file_header(out)
+
+    // -- Kernel entry point --
+    out = hc_push_str(out, ".visible .entry sounio_oct_mul_wmma(\n")
+    out = hc_push_str(out, "    .param .u64 param_a_ptr,\n")
+    out = hc_push_str(out, "    .param .u64 param_b_ptr,\n")
+    out = hc_push_str(out, "    .param .u64 param_out_ptr,\n")
+    if with_epistemic {
+        out = hc_push_str(out, "    .param .u64 param_a_eps_ptr,\n")
+        out = hc_push_str(out, "    .param .u64 param_b_eps_ptr,\n")
+        out = hc_push_str(out, "    .param .u64 param_out_eps_ptr,\n")
+    }
+    out = hc_push_str(out, "    .param .u32 param_m,\n")
+    out = hc_push_str(out, "    .param .u32 param_k,\n")
+    out = hc_push_str(out, "    .param .u32 param_n\n")
+    out = hc_push_str(out, ")\n")
+    out = hc_push_str(out, "{\n")
+
+    // -- Register declarations --
+    if with_epistemic {
+        out = hc_push_str(out, "    .reg .f32 %f<512>;\n")
+        out = hc_push_str(out, "    .reg .f16 %h<128>;\n")
+        out = hc_push_str(out, "    .reg .pred %p<32>;\n")
+        out = hc_push_str(out, "    .reg .b64 %rd<64>;\n")
+        out = hc_push_str(out, "    .reg .b32 %r<32>;\n\n")
+    } else {
+        out = hc_push_str(out, "    .reg .f32 %f<256>;\n")
+        out = hc_push_str(out, "    .reg .f16 %h<128>;\n")
+        out = hc_push_str(out, "    .reg .pred %p<16>;\n")
+        out = hc_push_str(out, "    .reg .b64 %rd<48>;\n")
+        out = hc_push_str(out, "    .reg .b32 %r<32>;\n\n")
+    }
+
+    // -- Shared memory: 8 component tiles for A and B, each 16x16 in F16 --
+    // tile_a_f16: 8 comps * 16 * 16 * 2 bytes = 4096 bytes
+    // tile_b_f16: 8 comps * 16 * 16 * 2 bytes = 4096 bytes
+    out = hc_emit_smem_decl(out, "tile_a_f16", 4096)
+    out = hc_emit_smem_decl(out, "tile_b_f16", 4096)
+    out = hc_push_str(out, "\n")
+
+    // -- Load kernel parameters --
+    out = hc_push_str(out, "    // --- load parameters ---\n")
+    out = hc_push_str(out, "    ld.param.u64 %rd0, [param_a_ptr];\n")
+    out = hc_push_str(out, "    ld.param.u64 %rd1, [param_b_ptr];\n")
+    out = hc_push_str(out, "    ld.param.u64 %rd2, [param_out_ptr];\n")
+    var next_rd: i64 = 3
+    if with_epistemic {
+        out = hc_push_str(out, "    ld.param.u64 %rd3, [param_a_eps_ptr];\n")
+        out = hc_push_str(out, "    ld.param.u64 %rd4, [param_b_eps_ptr];\n")
+        out = hc_push_str(out, "    ld.param.u64 %rd5, [param_out_eps_ptr];\n")
+        next_rd = 6
+    }
+    out = hc_push_str(out, "    ld.param.u32 %r0, [param_m];\n")
+    out = hc_push_str(out, "    ld.param.u32 %r1, [param_k];\n")
+    out = hc_push_str(out, "    ld.param.u32 %r2, [param_n];\n\n")
+
+    // -- Thread / block indexing --
+    out = hc_push_str(out, "    // --- thread indexing ---\n")
+    out = hc_push_str(out, "    mov.u32 %r3, %tid.x;\n")
+    out = hc_push_str(out, "    mov.u32 %r4, %ctaid.x;      // tile_col block\n")
+    out = hc_push_str(out, "    mov.u32 %r5, %ctaid.y;      // tile_row block\n\n")
+
+    out = hc_push_str(out, "    shl.b32 %r8, %r5, 4;        // tile_row_base = ctaid.y * 16\n")
+    out = hc_push_str(out, "    shl.b32 %r9, %r4, 4;        // tile_col_base = ctaid.x * 16\n\n")
+
+    // -- Smem base addresses --
+    let smem_a_rd = next_rd
+    let smem_b_rd = next_rd + 1
+    let addr_scratch_a_rd = next_rd + 2
+    let addr_scratch_b_rd = next_rd + 3
+    let global_addr_rd = next_rd + 4
+    let out_addr_rd = next_rd + 5
+
+    out = hc_push_str(out, "    mov.u64 %rd")
+    out = hc_push_str(out, i64_to_string(smem_a_rd))
+    out = hc_push_str(out, ", tile_a_f16;\n")
+    out = hc_push_str(out, "    mov.u64 %rd")
+    out = hc_push_str(out, i64_to_string(smem_b_rd))
+    out = hc_push_str(out, ", tile_b_f16;\n\n")
+
+    // -- Zero 64 accumulator registers (8 comps * 8 WMMA accum regs) --
+    out = hc_push_str(out, "    // --- zero 64 accumulators (8 comps * 8 WMMA regs) ---\n")
+    var p: i64 = 0
+    while p < 8 {
+        out = hc_emit_zero_accum_f32(out, p * 8)
+        p = p + 1
+    }
+    out = hc_push_str(out, "\n")
+
+    // -- K-tile loop --
+    out = hc_push_str(out, "    // === K-tile outer loop (step 16) ===\n")
+    out = hc_push_str(out, "    mov.u32 %r10, 0;\n")
+    out = hc_push_str(out, "WMMA_K_TILE_LOOP:\n")
+    out = hc_push_str(out, "    setp.ge.u32 %p0, %r10, %r1;\n")
+    out = hc_push_str(out, "    @%p0 bra WMMA_K_TILE_DONE;\n\n")
+
+    // -- Load A tile: 8 component slices, 16x16 each, global f32 -> smem f16 --
+    out = hc_push_str(out, "    // --- load A tile (8 comps * 16x16) global->smem F16 ---\n")
+    out = hc_push_str(out, "    mov.u32 %r11, 0;\n")
+    out = hc_push_str(out, "WMMA_LOAD_A_COMP:\n")
+    out = hc_push_str(out, "    setp.ge.u32 %p1, %r11, 8;\n")
+    out = hc_push_str(out, "    @%p1 bra WMMA_LOAD_A_DONE;\n\n")
+
+    out = hc_push_str(out, "    mov.u32 %r12, %r3;\n")
+    out = hc_push_str(out, "    mov.u32 %r24, %ntid.x;\n")
+    out = hc_push_str(out, "WMMA_LOAD_A_ELEM:\n")
+    out = hc_push_str(out, "    setp.ge.u32 %p2, %r12, 256;\n")
+    out = hc_push_str(out, "    @%p2 bra WMMA_LOAD_A_ELEM_DONE;\n\n")
+
+    // local_row = elem / 16, local_col = elem & 15
+    out = hc_push_str(out, "    shr.u32 %r13, %r12, 4;\n")
+    out = hc_push_str(out, "    and.b32 %r14, %r12, 15;\n")
+    out = hc_push_str(out, "    add.u32 %r15, %r8, %r13;     // global_row\n")
+    out = hc_push_str(out, "    add.u32 %r16, %r10, %r14;    // global_k\n\n")
+
+    // Bounds check
+    out = hc_push_str(out, "    setp.lt.u32 %p3, %r15, %r0;\n")
+    out = hc_push_str(out, "    setp.lt.u32 %p4, %r16, %r1;\n")
+    out = hc_push_str(out, "    and.pred %p3, %p3, %p4;\n\n")
+
+    // Global addr = a_ptr + (comp * M * K + global_row * K + global_k) * 4
+    out = hc_push_str(out, "    mul.lo.u32 %r17, %r0, %r1;\n")
+    out = hc_push_str(out, "    mul.lo.u32 %r18, %r11, %r17;\n")
+    out = hc_push_str(out, "    mul.lo.u32 %r19, %r15, %r1;\n")
+    out = hc_push_str(out, "    add.u32 %r20, %r18, %r19;\n")
+    out = hc_push_str(out, "    add.u32 %r20, %r20, %r16;\n")
+    out = hc_push_str(out, "    shl.b32 %r20, %r20, 2;\n")
+    out = hc_push_str(out, "    cvt.u64.u32 %rd")
+    out = hc_push_str(out, i64_to_string(global_addr_rd))
+    out = hc_push_str(out, ", %r20;\n")
+    out = hc_push_str(out, "    add.u64 %rd")
+    out = hc_push_str(out, i64_to_string(global_addr_rd))
+    out = hc_push_str(out, ", %rd0, %rd")
+    out = hc_push_str(out, i64_to_string(global_addr_rd))
+    out = hc_push_str(out, ";\n\n")
+
+    // Load f32, convert f16, store smem
+    out = hc_push_str(out, "    mov.f32 %f64, 0f00000000;\n")
+    out = hc_push_str(out, "    @%p3 ld.global.f32 %f64, [%rd")
+    out = hc_push_str(out, i64_to_string(global_addr_rd))
+    out = hc_push_str(out, "];\n")
+    out = hc_push_str(out, "    cvt.rn.f16.f32 %h64, %f64;\n\n")
+
+    // Smem addr = tile_a_f16 + (comp * 256 + elem) * 2
+    out = hc_push_str(out, "    shl.b32 %r21, %r11, 8;\n")
+    out = hc_push_str(out, "    add.u32 %r21, %r21, %r12;\n")
+    out = hc_push_str(out, "    shl.b32 %r21, %r21, 1;\n")
+    out = hc_push_str(out, "    cvt.u64.u32 %rd")
+    out = hc_push_str(out, i64_to_string(addr_scratch_a_rd))
+    out = hc_push_str(out, ", %r21;\n")
+    out = hc_push_str(out, "    add.u64 %rd")
+    out = hc_push_str(out, i64_to_string(addr_scratch_a_rd))
+    out = hc_push_str(out, ", %rd")
+    out = hc_push_str(out, i64_to_string(smem_a_rd))
+    out = hc_push_str(out, ", %rd")
+    out = hc_push_str(out, i64_to_string(addr_scratch_a_rd))
+    out = hc_push_str(out, ";\n")
+    out = hc_push_str(out, "    st.shared.b16 [%rd")
+    out = hc_push_str(out, i64_to_string(addr_scratch_a_rd))
+    out = hc_push_str(out, "], %h64;\n\n")
+
+    out = hc_push_str(out, "    add.u32 %r12, %r12, %r24;\n")
+    out = hc_push_str(out, "    bra WMMA_LOAD_A_ELEM;\n")
+    out = hc_push_str(out, "WMMA_LOAD_A_ELEM_DONE:\n")
+    out = hc_push_str(out, "    add.u32 %r11, %r11, 1;\n")
+    out = hc_push_str(out, "    bra WMMA_LOAD_A_COMP;\n")
+    out = hc_push_str(out, "WMMA_LOAD_A_DONE:\n\n")
+
+    // -- Load B tile --
+    out = hc_push_str(out, "    // --- load B tile (8 comps * 16x16) global->smem F16 ---\n")
+    out = hc_push_str(out, "    mov.u32 %r11, 0;\n")
+    out = hc_push_str(out, "WMMA_LOAD_B_COMP:\n")
+    out = hc_push_str(out, "    setp.ge.u32 %p1, %r11, 8;\n")
+    out = hc_push_str(out, "    @%p1 bra WMMA_LOAD_B_DONE;\n\n")
+
+    out = hc_push_str(out, "    mov.u32 %r12, %r3;\n")
+    out = hc_push_str(out, "WMMA_LOAD_B_ELEM:\n")
+    out = hc_push_str(out, "    setp.ge.u32 %p2, %r12, 256;\n")
+    out = hc_push_str(out, "    @%p2 bra WMMA_LOAD_B_ELEM_DONE;\n\n")
+
+    out = hc_push_str(out, "    shr.u32 %r13, %r12, 4;\n")
+    out = hc_push_str(out, "    and.b32 %r14, %r12, 15;\n")
+    out = hc_push_str(out, "    add.u32 %r15, %r10, %r13;    // global_k\n")
+    out = hc_push_str(out, "    add.u32 %r16, %r9, %r14;     // global_col\n\n")
+
+    out = hc_push_str(out, "    setp.lt.u32 %p3, %r15, %r1;\n")
+    out = hc_push_str(out, "    setp.lt.u32 %p4, %r16, %r2;\n")
+    out = hc_push_str(out, "    and.pred %p3, %p3, %p4;\n\n")
+
+    // Global addr = b_ptr + (comp * K * N + global_k * N + global_col) * 4
+    out = hc_push_str(out, "    mul.lo.u32 %r17, %r1, %r2;\n")
+    out = hc_push_str(out, "    mul.lo.u32 %r18, %r11, %r17;\n")
+    out = hc_push_str(out, "    mul.lo.u32 %r19, %r15, %r2;\n")
+    out = hc_push_str(out, "    add.u32 %r20, %r18, %r19;\n")
+    out = hc_push_str(out, "    add.u32 %r20, %r20, %r16;\n")
+    out = hc_push_str(out, "    shl.b32 %r20, %r20, 2;\n")
+    out = hc_push_str(out, "    cvt.u64.u32 %rd")
+    out = hc_push_str(out, i64_to_string(global_addr_rd))
+    out = hc_push_str(out, ", %r20;\n")
+    out = hc_push_str(out, "    add.u64 %rd")
+    out = hc_push_str(out, i64_to_string(global_addr_rd))
+    out = hc_push_str(out, ", %rd1, %rd")
+    out = hc_push_str(out, i64_to_string(global_addr_rd))
+    out = hc_push_str(out, ";\n\n")
+
+    out = hc_push_str(out, "    mov.f32 %f64, 0f00000000;\n")
+    out = hc_push_str(out, "    @%p3 ld.global.f32 %f64, [%rd")
+    out = hc_push_str(out, i64_to_string(global_addr_rd))
+    out = hc_push_str(out, "];\n")
+    out = hc_push_str(out, "    cvt.rn.f16.f32 %h64, %f64;\n\n")
+
+    out = hc_push_str(out, "    shl.b32 %r21, %r11, 8;\n")
+    out = hc_push_str(out, "    add.u32 %r21, %r21, %r12;\n")
+    out = hc_push_str(out, "    shl.b32 %r21, %r21, 1;\n")
+    out = hc_push_str(out, "    cvt.u64.u32 %rd")
+    out = hc_push_str(out, i64_to_string(addr_scratch_b_rd))
+    out = hc_push_str(out, ", %r21;\n")
+    out = hc_push_str(out, "    add.u64 %rd")
+    out = hc_push_str(out, i64_to_string(addr_scratch_b_rd))
+    out = hc_push_str(out, ", %rd")
+    out = hc_push_str(out, i64_to_string(smem_b_rd))
+    out = hc_push_str(out, ", %rd")
+    out = hc_push_str(out, i64_to_string(addr_scratch_b_rd))
+    out = hc_push_str(out, ";\n")
+    out = hc_push_str(out, "    st.shared.b16 [%rd")
+    out = hc_push_str(out, i64_to_string(addr_scratch_b_rd))
+    out = hc_push_str(out, "], %h64;\n\n")
+
+    out = hc_push_str(out, "    add.u32 %r12, %r12, %r24;\n")
+    out = hc_push_str(out, "    bra WMMA_LOAD_B_ELEM;\n")
+    out = hc_push_str(out, "WMMA_LOAD_B_ELEM_DONE:\n")
+    out = hc_push_str(out, "    add.u32 %r11, %r11, 1;\n")
+    out = hc_push_str(out, "    bra WMMA_LOAD_B_COMP;\n")
+    out = hc_push_str(out, "WMMA_LOAD_B_DONE:\n\n")
+
+    // -- Barrier after tile load --
+    out = hc_emit_bar_sync(out)
+    out = hc_push_str(out, "\n")
+
+    // -- WMMA compute: for each output component, apply Fano contributions --
+    // WMMA A fragments: %h0..%h7, B fragments: %h8..%h15
+    // Accumulators comp p: %f(p*8)..%f(p*8+7)
+    let a_frag_h_base: i64 = 0
+    let b_frag_h_base: i64 = 8
+
+    out = hc_push_str(out, "    // === WMMA MMA: 8 output comps x 8 Fano contributions ===\n")
+
+    p = 0
+    while p < 8 {
+        let accum_f_base = p * 8
+        out = hc_emit_wmma_fano_comment(out, p)
+
+        var ai: i64 = 0
+        while ai < 8 {
+            var bj: i64 = 0
+            while bj < 8 {
+                let basis = oct_mul_basis(ai, bj)
+                if basis == p {
+                    let sign = oct_mul_sign(ai, bj)
+                    out = hc_emit_wmma_fano_tile_contrib(
+                        out,
+                        smem_a_rd,
+                        smem_b_rd,
+                        ai,
+                        bj,
+                        sign,
+                        a_frag_h_base,
+                        b_frag_h_base,
+                        accum_f_base,
+                        addr_scratch_a_rd,
+                        addr_scratch_b_rd
+                    )
+                }
+                bj = bj + 1
+            }
+            ai = ai + 1
+        }
+
+        p = p + 1
+    }
+
+    // -- Barrier before next K-tile --
+    out = hc_emit_bar_sync(out)
+
+    out = hc_push_str(out, "\n    add.u32 %r10, %r10, 16;\n")
+    out = hc_push_str(out, "    bra WMMA_K_TILE_LOOP;\n")
+    out = hc_push_str(out, "WMMA_K_TILE_DONE:\n\n")
+
+    // -- Store output: wmma.store to smem scratch, then cooperative copy to global --
+    out = hc_push_str(out, "    // === store 8 output component tiles to global ===\n\n")
+
+    p = 0
+    while p < 8 {
+        let accum_f_base = p * 8
+
+        out = hc_push_str(out, "    // --- store output component ")
+        out = hc_push_str(out, i64_to_string(p))
+        out = hc_push_str(out, " ---\n")
+
+        // WMMA store to smem scratch (reuse tile_a_f16 area)
+        out = hc_emit_wmma_store_d(out, smem_a_rd, accum_f_base, 16)
+        out = hc_emit_bar_sync(out)
+
+        // Cooperative copy from smem to global
+        out = hc_push_str(out, "    mov.u32 %r12, %r3;\n")
+        out = hc_push_str(out, "WMMA_ST_C")
+        out = hc_push_str(out, i64_to_string(p))
+        out = hc_push_str(out, ":\n")
+        out = hc_push_str(out, "    setp.ge.u32 %p2, %r12, 256;\n")
+        out = hc_push_str(out, "    @%p2 bra WMMA_ST_C")
+        out = hc_push_str(out, i64_to_string(p))
+        out = hc_push_str(out, "_END;\n\n")
+
+        // Read from smem: tile_a_f16 + elem * 4
+        out = hc_push_str(out, "    shl.b32 %r21, %r12, 2;\n")
+        out = hc_push_str(out, "    cvt.u64.u32 %rd")
+        out = hc_push_str(out, i64_to_string(addr_scratch_a_rd))
+        out = hc_push_str(out, ", %r21;\n")
+        out = hc_push_str(out, "    add.u64 %rd")
+        out = hc_push_str(out, i64_to_string(addr_scratch_a_rd))
+        out = hc_push_str(out, ", %rd")
+        out = hc_push_str(out, i64_to_string(smem_a_rd))
+        out = hc_push_str(out, ", %rd")
+        out = hc_push_str(out, i64_to_string(addr_scratch_a_rd))
+        out = hc_push_str(out, ";\n")
+        out = hc_push_str(out, "    ld.shared.f32 %f65, [%rd")
+        out = hc_push_str(out, i64_to_string(addr_scratch_a_rd))
+        out = hc_push_str(out, "];\n\n")
+
+        // Global addr: out_ptr + (p * M * N + global_row * N + global_col) * 4
+        out = hc_push_str(out, "    shr.u32 %r13, %r12, 4;\n")
+        out = hc_push_str(out, "    and.b32 %r14, %r12, 15;\n")
+        out = hc_push_str(out, "    add.u32 %r22, %r8, %r13;\n")
+        out = hc_push_str(out, "    add.u32 %r23, %r9, %r14;\n\n")
+
+        out = hc_push_str(out, "    setp.lt.u32 %p3, %r22, %r0;\n")
+        out = hc_push_str(out, "    setp.lt.u32 %p4, %r23, %r2;\n")
+        out = hc_push_str(out, "    and.pred %p3, %p3, %p4;\n\n")
+
+        out = hc_push_str(out, "    mul.lo.u32 %r17, %r0, %r2;\n")
+        out = hc_push_str(out, "    mul.lo.u32 %r18, ")
+        out = hc_push_str(out, i64_to_string(p))
+        out = hc_push_str(out, ", %r17;\n")
+        out = hc_push_str(out, "    mul.lo.u32 %r19, %r22, %r2;\n")
+        out = hc_push_str(out, "    add.u32 %r20, %r18, %r19;\n")
+        out = hc_push_str(out, "    add.u32 %r20, %r20, %r23;\n")
+        out = hc_push_str(out, "    shl.b32 %r20, %r20, 2;\n")
+        out = hc_push_str(out, "    cvt.u64.u32 %rd")
+        out = hc_push_str(out, i64_to_string(out_addr_rd))
+        out = hc_push_str(out, ", %r20;\n")
+        out = hc_push_str(out, "    add.u64 %rd")
+        out = hc_push_str(out, i64_to_string(out_addr_rd))
+        out = hc_push_str(out, ", %rd2, %rd")
+        out = hc_push_str(out, i64_to_string(out_addr_rd))
+        out = hc_push_str(out, ";\n")
+        out = hc_push_str(out, "    @%p3 st.global.f32 [%rd")
+        out = hc_push_str(out, i64_to_string(out_addr_rd))
+        out = hc_push_str(out, "], %f65;\n\n")
+
+        out = hc_push_str(out, "    add.u32 %r12, %r12, %r24;\n")
+        out = hc_push_str(out, "    bra WMMA_ST_C")
+        out = hc_push_str(out, i64_to_string(p))
+        out = hc_push_str(out, ";\n")
+        out = hc_push_str(out, "WMMA_ST_C")
+        out = hc_push_str(out, i64_to_string(p))
+        out = hc_push_str(out, "_END:\n")
+        out = hc_emit_bar_sync(out)
+        out = hc_push_str(out, "\n")
+
+        p = p + 1
+    }
+
+    // -- Epistemic uncertainty propagation --
+    if with_epistemic {
+        out = hc_push_str(out, "    // === epistemic uncertainty propagation ===\n")
+        out = hc_push_str(out, "    // Conservative max-propagation bound for WMMA path:\n")
+        out = hc_push_str(out, "    //   eps_c_p <= sqrt(K) * max_{(a,b) in Fano(p)} (eps_A[a] + eps_B[b])\n")
+        out = hc_push_str(out, "    // Single scalar eps_out stored uniformly across all 8 components.\n\n")
+
+        // Load representative eps_a and eps_b
+        out = hc_push_str(out, "    cvt.u64.u32 %rd")
+        out = hc_push_str(out, i64_to_string(global_addr_rd))
+        out = hc_push_str(out, ", %r8;\n")
+        out = hc_push_str(out, "    shl.b64 %rd")
+        out = hc_push_str(out, i64_to_string(global_addr_rd))
+        out = hc_push_str(out, ", %rd")
+        out = hc_push_str(out, i64_to_string(global_addr_rd))
+        out = hc_push_str(out, ", 2;\n")
+        out = hc_push_str(out, "    add.u64 %rd")
+        out = hc_push_str(out, i64_to_string(global_addr_rd))
+        out = hc_push_str(out, ", %rd3, %rd")
+        out = hc_push_str(out, i64_to_string(global_addr_rd))
+        out = hc_push_str(out, ";\n")
+        out = hc_push_str(out, "    ld.global.f32 %f66, [%rd")
+        out = hc_push_str(out, i64_to_string(global_addr_rd))
+        out = hc_push_str(out, "];\n\n")
+
+        out = hc_push_str(out, "    cvt.u64.u32 %rd")
+        out = hc_push_str(out, i64_to_string(global_addr_rd))
+        out = hc_push_str(out, ", %r9;\n")
+        out = hc_push_str(out, "    shl.b64 %rd")
+        out = hc_push_str(out, i64_to_string(global_addr_rd))
+        out = hc_push_str(out, ", %rd")
+        out = hc_push_str(out, i64_to_string(global_addr_rd))
+        out = hc_push_str(out, ", 2;\n")
+        out = hc_push_str(out, "    add.u64 %rd")
+        out = hc_push_str(out, i64_to_string(global_addr_rd))
+        out = hc_push_str(out, ", %rd4, %rd")
+        out = hc_push_str(out, i64_to_string(global_addr_rd))
+        out = hc_push_str(out, ";\n")
+        out = hc_push_str(out, "    ld.global.f32 %f67, [%rd")
+        out = hc_push_str(out, i64_to_string(global_addr_rd))
+        out = hc_push_str(out, "];\n\n")
+
+        // eps_out = (eps_a + eps_b) * sqrt(K)
+        out = hc_push_str(out, "    add.f32 %f68, %f66, %f67;\n")
+        out = hc_push_str(out, "    cvt.rn.f32.u32 %f69, %r1;\n")
+        out = hc_push_str(out, "    sqrt.approx.f32 %f69, %f69;\n")
+        out = hc_push_str(out, "    mul.f32 %f68, %f68, %f69;\n\n")
+
+        // Store eps_out for all 8 components
+        var ep: i64 = 0
+        while ep < 8 {
+            out = hc_push_str(out, "    mov.u32 %r12, %r3;\n")
+            out = hc_push_str(out, "WMMA_EPS_C")
+            out = hc_push_str(out, i64_to_string(ep))
+            out = hc_push_str(out, ":\n")
+            out = hc_push_str(out, "    setp.ge.u32 %p2, %r12, 256;\n")
+            out = hc_push_str(out, "    @%p2 bra WMMA_EPS_C")
+            out = hc_push_str(out, i64_to_string(ep))
+            out = hc_push_str(out, "_END;\n")
+            out = hc_push_str(out, "    shr.u32 %r13, %r12, 4;\n")
+            out = hc_push_str(out, "    and.b32 %r14, %r12, 15;\n")
+            out = hc_push_str(out, "    add.u32 %r22, %r8, %r13;\n")
+            out = hc_push_str(out, "    add.u32 %r23, %r9, %r14;\n")
+            out = hc_push_str(out, "    setp.lt.u32 %p3, %r22, %r0;\n")
+            out = hc_push_str(out, "    setp.lt.u32 %p4, %r23, %r2;\n")
+            out = hc_push_str(out, "    and.pred %p3, %p3, %p4;\n")
+            out = hc_push_str(out, "    mul.lo.u32 %r17, %r0, %r2;\n")
+            out = hc_push_str(out, "    mul.lo.u32 %r18, ")
+            out = hc_push_str(out, i64_to_string(ep))
+            out = hc_push_str(out, ", %r17;\n")
+            out = hc_push_str(out, "    mul.lo.u32 %r19, %r22, %r2;\n")
+            out = hc_push_str(out, "    add.u32 %r20, %r18, %r19;\n")
+            out = hc_push_str(out, "    add.u32 %r20, %r20, %r23;\n")
+            out = hc_push_str(out, "    shl.b32 %r20, %r20, 2;\n")
+            out = hc_push_str(out, "    cvt.u64.u32 %rd")
+            out = hc_push_str(out, i64_to_string(out_addr_rd))
+            out = hc_push_str(out, ", %r20;\n")
+            out = hc_push_str(out, "    add.u64 %rd")
+            out = hc_push_str(out, i64_to_string(out_addr_rd))
+            out = hc_push_str(out, ", %rd5, %rd")
+            out = hc_push_str(out, i64_to_string(out_addr_rd))
+            out = hc_push_str(out, ";\n")
+            out = hc_push_str(out, "    @%p3 st.global.f32 [%rd")
+            out = hc_push_str(out, i64_to_string(out_addr_rd))
+            out = hc_push_str(out, "], %f68;\n")
+            out = hc_push_str(out, "    add.u32 %r12, %r12, %r24;\n")
+            out = hc_push_str(out, "    bra WMMA_EPS_C")
+            out = hc_push_str(out, i64_to_string(ep))
+            out = hc_push_str(out, ";\n")
+            out = hc_push_str(out, "WMMA_EPS_C")
+            out = hc_push_str(out, i64_to_string(ep))
+            out = hc_push_str(out, "_END:\n")
+            ep = ep + 1
+        }
+    }
+
+    // -- Kernel epilogue --
+    out = hc_push_str(out, "\n    ret;\n")
+    out = hc_push_str(out, "}\n")
+    out
+}
+// ============================================================================
 // Output extraction
 // ============================================================================
 
