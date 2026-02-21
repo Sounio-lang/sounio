@@ -14,6 +14,22 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+fn load_phase6_selfhost_ast() -> miette::Result<sounio::ast::Ast> {
+    let selfhost_dir = workspace_root().join("self-hosted");
+    let manifest_path = workspace_root().join("bootstrap/selfhost-kernel.manifest");
+    assert!(
+        manifest_path.exists(),
+        "Phase 6 bootstrap manifest missing: {}",
+        manifest_path.display()
+    );
+
+    let options = sounio::module_loader::ProgramLoadOptions {
+        selfhost_bootstrap_manifest: Some(manifest_path),
+        selfhost_strict_module_gating: Some(true),
+    };
+    sounio::module_loader::load_program_ast_with_options(&selfhost_dir, options)
+}
+
 fn fn_names_in_ast(ast: &sounio::ast::Ast) -> Vec<&str> {
     ast.items
         .iter()
@@ -28,11 +44,10 @@ fn fn_names_in_ast(ast: &sounio::ast::Ast) -> Vec<&str> {
 /// This was previously blocked by native/ being in the EXCLUDED list.
 #[test]
 fn selfhosted_loads_native_module() {
-    let selfhost_dir = workspace_root().join("self-hosted");
-    let ast = sounio::module_loader::load_program_ast(&selfhost_dir);
+    let ast = load_phase6_selfhost_ast();
     assert!(
         ast.is_ok(),
-        "Self-hosted suite should load (including native/): {:?}",
+        "Self-hosted Phase 6 profile should load (including native/): {:?}",
         ast.err()
     );
 
@@ -47,8 +62,7 @@ fn selfhosted_loads_native_module() {
 /// Verify write_elf_to_file is accessible in the self-hosted suite.
 #[test]
 fn selfhosted_loads_write_elf_to_file() {
-    let selfhost_dir = workspace_root().join("self-hosted");
-    let ast = sounio::module_loader::load_program_ast(&selfhost_dir).unwrap();
+    let ast = load_phase6_selfhost_ast().unwrap();
     let names = fn_names_in_ast(&ast);
     assert!(
         names.contains(&"write_elf_to_file"),
@@ -59,8 +73,7 @@ fn selfhosted_loads_write_elf_to_file() {
 /// Verify no duplicate symbol conflicts after enabling native/ directory.
 #[test]
 fn selfhosted_no_duplicate_symbols() {
-    let selfhost_dir = workspace_root().join("self-hosted");
-    let ast = sounio::module_loader::load_program_ast(&selfhost_dir).unwrap();
+    let ast = load_phase6_selfhost_ast().unwrap();
 
     let mut names: Vec<&str> = fn_names_in_ast(&ast);
     names.sort();
