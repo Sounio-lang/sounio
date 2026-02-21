@@ -864,6 +864,44 @@ impl<'a> Parser<'a> {
             });
         }
 
+        // Handle &!self (Sounio exclusive reference — lexed as single AmpBang token)
+        if self.at(TokenKind::AmpBang) {
+            self.advance();
+            if self.at(TokenKind::SelfLower) {
+                self.advance();
+                return Ok(Param {
+                    id: self.next_id(),
+                    is_mut: true,
+                    pattern: Pattern::Binding {
+                        name: "self".to_string(),
+                        mutable: true,
+                    },
+                    ty: TypeExpr::Reference {
+                        mutable: true,
+                        inner: Box::new(TypeExpr::SelfType),
+                    },
+                    attributes: Vec::new(),
+                });
+            }
+            // &! ident: type — exclusive ref non-self parameter
+            let name = self.parse_ident()?;
+            self.expect(TokenKind::Colon)?;
+            let inner_ty = self.parse_type()?;
+            return Ok(Param {
+                id: self.next_id(),
+                is_mut: true,
+                pattern: Pattern::Binding {
+                    name,
+                    mutable: true,
+                },
+                ty: TypeExpr::Reference {
+                    mutable: true,
+                    inner: Box::new(inner_ty),
+                },
+                attributes: Vec::new(),
+            });
+        }
+
         // Handle &self, &mut self, and &!self (Sounio mutable reference)
         if self.at(TokenKind::Amp) {
             self.advance();
@@ -924,6 +962,13 @@ impl<'a> Parser<'a> {
             self.advance();
             let mut effects = vec![self.parse_effect_ref()?];
             while self.at(TokenKind::Comma) {
+                // Lookahead: if comma is followed by `ident :`, this is a function
+                // parameter separator (not an effect separator) — stop parsing effects.
+                // e.g. `fn(f64) -> f64 with Mut, Div, Panic, x: f64` — the `x:` signals
+                // the next parameter, not another effect name.
+                if self.peek_n(1) == TokenKind::Ident && self.peek_n(2) == TokenKind::Colon {
+                    break;
+                }
                 self.advance();
                 effects.push(self.parse_effect_ref()?);
             }
@@ -3626,6 +3671,13 @@ impl<'a> Parser<'a> {
                 })
             }
 
+            // `unit` keyword used as the void/unit type (synonym for `()`)
+            // e.g. `Result<unit, FmtError>`, `unit: unit,`
+            TokenKind::Unit => {
+                self.advance();
+                Ok(TypeExpr::Unit)
+            }
+
             _ => {
                 // Generate context-aware error message
                 let lookahead = [self.peek_n(0), self.peek_n(1), self.peek_n(2)];
@@ -4257,7 +4309,8 @@ impl<'a> Parser<'a> {
                 self.advance();
 
                 // Parse end expression if present (not at end of expression context)
-                let end = if self.at_expr_start() {
+                // Also check for `self` explicitly so `0..self.n` works in range ends
+                let end = if self.at_expr_start() || self.at(TokenKind::SelfLower) {
                     Some(Box::new(self.parse_expr_with_precedence(1)?))
                 } else {
                     None
@@ -5722,7 +5775,18 @@ impl<'a> Parser<'a> {
 
         let mut arms = Vec::new();
         while !self.at(TokenKind::RBrace) {
-            let pattern = self.parse_pattern()?;
+            // Parse first pattern, then collect alternatives: `Pat1 | Pat2 | Pat3 =>`
+            let first = self.parse_pattern()?;
+            let pattern = if self.at(TokenKind::Pipe) {
+                let mut alts = vec![first];
+                while self.at(TokenKind::Pipe) {
+                    self.advance();
+                    alts.push(self.parse_pattern()?);
+                }
+                Pattern::Or(alts)
+            } else {
+                first
+            };
             let guard = if self.at(TokenKind::If) {
                 self.advance();
                 Some(Box::new(self.parse_expr()?))

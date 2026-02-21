@@ -348,8 +348,17 @@ fn is_selfhost_dir_excluded(name: &str, strict: bool) -> bool {
 
     // Seed build profile: keep the self-hosted root stable by excluding
     // currently non-essential experimental backends.
+    // Note: `compiler/` can be re-included by omitting it from
+    // SOUNIO_SELFHOST_STRICT_EXCLUDE_DIRS or by setting
+    // SOUNIO_SELFHOST_STRICT_INCLUDE_COMPILER=1.
+    let include_compiler = matches!(
+        std::env::var("SOUNIO_SELFHOST_STRICT_INCLUDE_COMPILER")
+            .ok()
+            .as_deref(),
+        Some("1" | "true" | "TRUE" | "yes" | "YES")
+    );
     strict
-        && (matches!(name, "gpu" | "llvm" | "compiler")
+        && ((matches!(name, "gpu" | "llvm") || (!include_compiler && name == "compiler"))
             || strict_profile_list_contains("SOUNIO_SELFHOST_STRICT_EXCLUDE_DIRS", name))
 }
 
