@@ -29,10 +29,10 @@ No sorry. No Mathlib dependency. `lake build` completes in < 1 minute (25 jobs).
 | `SounioUnits`       |  278  |    38    |  10   | Units of measure (dimensional analysis)|
 | `SounioProgress`    |  557  |    51    |  12   | Canonical forms + progress theorem     |
 | `SounioSubstitution`|  740  |    81    |  12   | Free variables, context ops, subst     |
-| `SounioPreservation`|  676  |    72    |  12   | Type safety (Wright-Felleisen)         |
+| `SounioPreservation`|  678  |    72    |  12   | Type safety (Wright-Felleisen)         |
 | `SounioEpistemic`   |  505  |    76    |  12   | Epistemic types (confidence lattice)   |
 | `SounioCausality`   |  562  |    77    |  12   | Causal types (SCMs, do-calculus)       |
-| **Total**           |**5453**|**~568** |       |                                        |
+| **Total**           |**5539**|**~601** |       |                                        |
 
 ## Phase 12 highlights
 

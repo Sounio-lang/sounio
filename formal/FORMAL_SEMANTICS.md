@@ -3,7 +3,7 @@
 Lean 4 formalization of the Sounio type system.
 Source: `formal/lean4/` — no Mathlib, no `sorry`, `lake build` < 1 min (25 jobs).
 
-**12 libraries, ~5450 lines, ~568 theorems.**
+**12 libraries, ~5539 lines, ~601 theorems.**
 
 ---
 

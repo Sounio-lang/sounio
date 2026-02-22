@@ -136,9 +136,11 @@ theorem multiStepN_trans {n m : Nat} {e₁ e₂ e₃ : Expr}
     (h₁ : MultiStepN n e₁ e₂) (h₂ : MultiStepN m e₂ e₃) :
     MultiStepN (n + m) e₁ e₃ := by
   induction h₁ with
-  | zero => simp; exact h₂
+  | zero =>
+    simp only [Nat.zero_add]
+    exact h₂
   | succ hs _ ih =>
-    rw [Nat.add_right_comm]
+    simp only [Nat.add_succ, Nat.succ_add]
     exact .succ hs (ih h₂)
 
 /-- A value cannot take any positive number of steps. -/
@@ -353,7 +355,7 @@ theorem step_letB_cong {e e' : Expr} {x : String} {body : Expr} (hs : Step e e')
 -- ================================================================
 
 /-- Full beta: evaluate function to lambda, argument to value, then beta. -/
-theorem eval_app_sequence {f v_f a v_a : Expr} {x : String} {m : Modality}
+theorem eval_app_sequence {f a v_a : Expr} {x : String} {m : Modality}
     {τ : Ty} {body : Expr}
     (hf : MultiStep f (.lam x m τ body))
     (ha : MultiStep a v_a) (hva : IsValue v_a) :
@@ -428,7 +430,7 @@ theorem value_evaluation_unique {v v' : Expr} (hv : IsValue v)
   value_multistep_id hv hev.1
 
 /-- Multi-step from a value is reflexive. -/
-theorem value_multistep_refl {v : Expr} (hv : IsValue v) : MultiStep v v :=
+theorem value_multistep_refl {v : Expr} (_hv : IsValue v) : MultiStep v v :=
   .refl
 
 /-- If e evaluates to v, and e also multi-steps to v' which is a value,
