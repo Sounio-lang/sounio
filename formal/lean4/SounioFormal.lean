@@ -19,20 +19,20 @@ No sorry. No Mathlib dependency. `lake build` completes in < 1 minute (25 jobs).
 
 ## Library inventory (12 modules)
 
-| Library             | Lines | Theorems | Phase | Topic                                  |
-|---------------------|-------|----------|-------|----------------------------------------|
-| `SounioLinear`      |  459  |   ~40    |   8   | Four-modality lattice, structural rules|
-| `SounioEffects`     |  637  |   ~50    |   8   | Algebraic effect rows, mask algebra    |
-| `SounioTyping`      |  490  |   ~38    |  9–10 | Bidirectional typing judgment          |
-| `SounioSemantics`   |  293  |    20    |  11   | CBV operational semantics              |
-| `SounioRowPoly`     |  256  |    25    |  10   | Row-polymorphic effect variables       |
-| `SounioUnits`       |  278  |    38    |  10   | Units of measure (dimensional analysis)|
-| `SounioProgress`    |  557  |    51    |  12   | Canonical forms + progress theorem     |
-| `SounioSubstitution`|  740  |    81    |  12   | Free variables, context ops, subst     |
-| `SounioPreservation`|  678  |    72    |  12   | Type safety (Wright-Felleisen)         |
-| `SounioEpistemic`   |  505  |    76    |  12   | Epistemic types (confidence lattice)   |
-| `SounioCausality`   |  562  |    77    |  12   | Causal types (SCMs, do-calculus)       |
-| **Total**           |**5539**|**~601** |       |                                        |
+| Library             | Lines | Defs/Thms | Phase | Topic                                  |
+|---------------------|-------|-----------|-------|----------------------------------------|
+| `SounioLinear`      |  459  |    63     |   8   | Four-modality lattice, structural rules|
+| `SounioEffects`     |  637  |    86     |   8   | Algebraic effect rows, mask algebra    |
+| `SounioTyping`      |  490  |    42     |  9–10 | Bidirectional typing judgment          |
+| `SounioSemantics`   |  293  |    27     |  11   | CBV operational semantics              |
+| `SounioRowPoly`     |  256  |    34     |  10   | Row-polymorphic effect variables       |
+| `SounioUnits`       |  278  |    63     |  10   | Units of measure (dimensional analysis)|
+| `SounioProgress`    |  557  |    52     |  12   | Canonical forms + progress theorem     |
+| `SounioSubstitution`|  740  |    83     |  12   | Free variables, context ops, subst     |
+| `SounioPreservation`|  678  |    80     |  12   | Type safety (Wright-Felleisen)         |
+| `SounioEpistemic`   |  505  |    92     |  12   | Epistemic types (confidence lattice)   |
+| `SounioCausality`   |  562  |   106     |  12   | Causal types (SCMs, do-calculus)       |
+| **Total**           |**5539**| **728**  |       |                                        |
 
 ## Phase 12 highlights
 
