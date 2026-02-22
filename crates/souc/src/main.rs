@@ -192,7 +192,7 @@ enum Commands {
         #[arg(value_name = "FILE")]
         input: PathBuf,
 
-        /// Deprecated compatibility flag: self-hosted compiler is now the default for `run`
+        /// Use the native self-hosted compiler backend instead of the tree-walking interpreter
         #[arg(long)]
         use_sounio_compiler: bool,
 
@@ -1832,16 +1832,11 @@ fn main() -> Result<()> {
 
         Commands::Run {
             input,
-            use_sounio_compiler,
+            use_sounio_compiler: _,
             trace_interp,
             check_only,
             args,
         } => {
-            if use_sounio_compiler {
-                eprintln!(
-                    "Note: --use-sounio-compiler is deprecated; self-hosted compiler is already the default for `souc run`."
-                );
-            }
             run(&input, &args, true, trace_interp, check_only)
         }
 
@@ -3144,66 +3139,92 @@ fn run(
 
     let run_payload = move || -> std::result::Result<Option<i64>, String> {
         if use_sounio_compiler {
-            // Use the self-hosted Sounio compiler (week 2 bootstrap feature)
-            tracing::info!("Using self-hosted Sounio compiler from stdin");
+            tracing::info!("Using native self-host execution backend");
 
-            // Get the stdlib path from environment or use default
-            let stdlib_path = std::env::var("SOUNIO_STDLIB_PATH")
-                .unwrap_or_else(|_| "stdlib/compiler".to_string());
+            if let Ok(mode_raw) = std::env::var("SOUNIO_SELFHOST_MODE") {
+                let mode = mode_raw.trim().to_lowercase();
+                eprintln!(
+                    "error: unsupported SOUNIO_SELFHOST_MODE='{}'. Bytecode VM mode has been removed. Only SOUNIO_SELFHOST_EXECUTOR=native-driver is supported.",
+                    mode
+                );
+                std::process::exit(2);
+            }
 
-            // Create the self-hosted compiler
-            let mut compiler = sounio::compiler_loader::SounioCompiler::new(&stdlib_path)
-                .map_err(|e| format!("Failed to initialize self-hosted compiler: {}", e))?;
+            let executor = std::env::var("SOUNIO_SELFHOST_EXECUTOR")
+                .unwrap_or_else(|_| "native-driver".to_string())
+                .trim()
+                .to_lowercase();
+            if executor != "native-driver" {
+                eprintln!(
+                    "error: unsupported SOUNIO_SELFHOST_EXECUTOR='{}'. Only 'native-driver' is supported.",
+                    executor
+                );
+                std::process::exit(2);
+            }
 
-            // Compile through the self-hosted bridge.
-            let input_str = input_path.to_string_lossy();
-            let bytecode = compiler.compile_file(input_str.as_ref()).map_err(|e| {
+            if let Ok(rebuild_raw) = std::env::var("SOUNIO_SELFHOST_DRIVER_ALLOW_LOCAL_REBUILD") {
+                let rebuild = rebuild_raw.trim().to_ascii_lowercase();
+                if matches!(rebuild.as_str(), "1" | "true" | "yes" | "on") {
+                    eprintln!(
+                        "error: unsupported SOUNIO_SELFHOST_DRIVER_ALLOW_LOCAL_REBUILD='{}'. \
+No-Rust policy is active. Provide a signed prebuilt driver via \
+SOUNIO_SELFHOST_DRIVER_MANIFEST_URL or SOUNIO_SELFHOST_DRIVER_CACHE_DIR.",
+                        rebuild
+                    );
+                    std::process::exit(2);
+                }
+            }
+
+            if is_self_hosted_root {
+                sounio::compiler_loader::verify_selfhost_bootstrap_seed_policy().map_err(|e| {
+                    format!(
+                        "Self-hosted compile failed for {}: {}",
+                        input_path.display(),
+                        e
+                    )
+                })?;
+            }
+
+            let backend = sounio::selfhost::native_driver::NativeAotDriverBackend::new()
+                .map_err(|e| format!("Failed to initialize native self-host backend: {}", e))?;
+            let flags = sounio::selfhost::native_driver::DriverCompileFlags::default();
+            let artifact = sounio::selfhost::native_driver::SelfhostExecutionBackend::compile_for_run(
+                &backend,
+                &input_path,
+                flags,
+            )
+            .map_err(|e| {
                 format!(
-                    "Self-hosted compile failed for {}: {}",
+                    "Native self-host compile failed for {}: {}",
                     input_path.display(),
                     e
                 )
             })?;
 
-            // check-only with the self-hosted bridge means "compile/type-check only".
             if check_only {
                 return Ok(None);
             }
 
-            // Select self-host execution mode.
-            // - vm (default): compile via self-host bridge, execute via bytecode VM.
-            let mode = std::env::var("SOUNIO_SELFHOST_MODE")
-                .unwrap_or_else(|_| "vm".to_string())
-                .to_lowercase();
+            let exit_code = sounio::selfhost::native_driver::SelfhostExecutionBackend::run_program(
+                &backend,
+                &artifact,
+                &user_args,
+            )
+            .map_err(|e| {
+                format!(
+                    "Native self-host execution failed for {}: {}",
+                    input_path.display(),
+                    e
+                )
+            })?;
 
-            if mode == "vm" {
-                match compiler.execute_bytecode_with_args(&bytecode, &user_args) {
-                    Ok(vm_result) => {
-                        if is_self_hosted_root {
-                            if let sounio::vm::Value::Int(code) = vm_result {
-                                return Ok(Some(code));
-                            }
-                        }
-                        if !matches!(vm_result, sounio::vm::Value::Unit) {
-                            println!("{}", vm_result);
-                        }
-                        return Ok(None);
-                    }
-                    Err(vm_error) => {
-                        return Err(format!(
-                            "Self-hosted VM execution failed for {}: {}. Legacy fallback execution has been removed.",
-                            input_path.display(),
-                            vm_error
-                        ));
-                    }
-                }
+            if is_self_hosted_root {
+                return Ok(Some(i64::from(exit_code)));
             }
 
-            eprintln!(
-                "error: unsupported SOUNIO_SELFHOST_MODE='{}'. Only 'vm' is supported for self-hosted `souc run`.",
-                mode
-            );
-            std::process::exit(2);
+            // Preserve historical `souc run` behavior: print program result for non-root runs.
+            println!("{}", exit_code);
+            return Ok(None);
         }
 
         if check_only {

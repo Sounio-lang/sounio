@@ -1042,6 +1042,10 @@ impl Interpreter {
                             Ok(Value::Int(0))
                         }
                     }
+                    (Value::Int(n), "to_string") => Ok(Value::String(n.to_string())),
+                    (Value::Float(f), "to_string") => Ok(Value::String(format!("{}", f))),
+                    (Value::Bool(b), "to_string") => Ok(Value::String(b.to_string())),
+                    (Value::String(s), "to_string") => Ok(Value::String(s.clone())),
                     (Value::Array(arr), "push") => {
                         if let Some(val) = arg_values.get(1) {
                             arr.borrow_mut().push(val.clone());

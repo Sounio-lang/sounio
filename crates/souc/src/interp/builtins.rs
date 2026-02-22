@@ -15,7 +15,6 @@ use std::sync::{Mutex, OnceLock};
 use std::{fs, io};
 
 use crate::interp::value::Value;
-
 // Thread-local memory storage for ptr_read/ptr_write operations
 // Maps memory addresses to Values for simulating pointer operations in the interpreter
 thread_local! {

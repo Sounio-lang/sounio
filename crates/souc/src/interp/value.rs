@@ -54,6 +54,7 @@ pub enum HybridFusion {
 /// Runtime value
 #[derive(Clone)]
 pub enum Value {
+    Dummy,
     /// Unit value `()`
     Unit,
     /// Boolean
@@ -118,6 +119,8 @@ pub enum Value {
     SymbolicExpr(Rc<SymbolicExprType>),
     /// Multi-dimensional tensor/array
     Tensor { data: Vec<f64>, shape: Vec<usize> },
+    /// Sparse tensor in various formats
+    SparseTensor(Rc<crate::tensor::sparse::SparseTensor>),
     /// Value with uncertainty bounds (mean ± std)
     Uncertain { mean: f64, std: f64 },
     /// Causal model representation
@@ -161,6 +164,7 @@ impl Value {
     /// Get the type name of this value
     pub fn type_name(&self) -> &'static str {
         match self {
+            Value::Dummy => "dummy",
             Value::Unit => "unit",
             Value::Bool(_) => "bool",
             Value::Int(_) => "int",
@@ -183,6 +187,7 @@ impl Value {
             Value::Distribution(_) => "Distribution",
             Value::SymbolicExpr(_) => "SymbolicExpr",
             Value::Tensor { .. } => "Tensor",
+            Value::SparseTensor(_) => "SparseTensor",
             Value::Uncertain { .. } => "Uncertain",
             Value::CausalModel(_) => "CausalModel",
             Value::HybridModel { .. } => "HybridModel",
@@ -277,6 +282,14 @@ impl Value {
     pub fn as_tensor(&self) -> Option<(&[f64], &[usize])> {
         match self {
             Value::Tensor { data, shape } => Some((data, shape)),
+            _ => None,
+        }
+    }
+
+    /// Try to get as sparse tensor
+    pub fn as_sparse_tensor(&self) -> Option<Rc<crate::tensor::sparse::SparseTensor>> {
+        match self {
+            Value::SparseTensor(s) => Some(s.clone()),
             _ => None,
         }
     }
@@ -429,6 +442,7 @@ impl Value {
 impl fmt::Debug for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Value::Dummy => write!(f, "<dummy>"),
             Value::Unit => write!(f, "()"),
             Value::Bool(b) => write!(f, "{}", b),
             Value::Int(n) => write!(f, "{}", n),
@@ -512,6 +526,11 @@ impl fmt::Debug for Value {
             Value::Tensor { data, shape } => {
                 write!(f, "Tensor {{ shape: {:?}, data: [{}] }}", shape, data.len())
             }
+            Value::SparseTensor(s) => {
+                let (r, c) = s.dims();
+                let nnz = s.nnz();
+                write!(f, "SparseTensor({}x{}, nnz={})", r, c, nnz)
+            }
             Value::Uncertain { mean, std } => write!(f, "{} ± {}", mean, std),
             Value::CausalModel(m) => write!(f, "CausalModel({})", m),
             Value::HybridModel {
@@ -571,6 +590,7 @@ impl fmt::Debug for Value {
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Value::Dummy => write!(f, "<dummy>"),
             Value::Unit => write!(f, "()"),
             Value::Bool(b) => write!(f, "{}", b),
             Value::Int(n) => write!(f, "{}", n),
@@ -660,6 +680,11 @@ impl fmt::Display for Value {
             Value::Tensor { data, shape } => {
                 write!(f, "Tensor({:?}, {} elements)", shape, data.len())
             }
+            Value::SparseTensor(s) => {
+                let (r, c) = s.dims();
+                let nnz = s.nnz();
+                write!(f, "SparseTensor({}x{}, nnz={})", r, c, nnz)
+            }
             Value::Uncertain { mean, std } => write!(f, "{} ± {}", mean, std),
             Value::CausalModel(m) => write!(f, "CausalModel({})", m),
             Value::HybridModel {
@@ -712,6 +737,7 @@ impl fmt::Display for Value {
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
+            (Value::Dummy, Value::Dummy) => true,
             (Value::Unit, Value::Unit) => true,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Int(a), Value::Int(b)) => a == b,

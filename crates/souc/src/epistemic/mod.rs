@@ -184,3 +184,23 @@ pub use gaussian_process::{GPConfig, GPPrediction, GaussianProcess, Kernel};
 pub use simd_knowledge::{
     KnowledgeVec4, KnowledgeVec8, batch_add_uncertainties, batch_weighted_mean,
 };
+
+pub mod physical_law;
+pub mod physical_law_synthesis;
+pub mod grand_challenges;
+
+pub use physical_law::{
+    BoundaryType, ComplexityMeasure, ConservationQuantity, ConstitutiveRelation, CouplingStrategy,
+    DomainOfValidity, EquilibriumType, FieldTheory, HybridComposition, HybridOperator,
+    LawParameter, LawType, LearnedOperator, LearningMethod, LossFunction, NeuralArchitecture,
+    OperatorTarget, PacBounds, ParameterConstraint, ParameterEpistemic, PhysicalLaw, PhysicalLawType,
+    PhysicalProvenance, RegimeConstraint, ScaleConstraint, SpatialConstraint, TrainingConfig,
+    TrainingProvenance, UqMethod, ValidationMetrics,
+};
+
+pub use physical_law_synthesis::{
+    AutoPinNConfig, AutoPinNResult, EquationParser, LawSynthesisError, PdePattern, PdeTemplate,
+    PhysicsInformedSynthesizer, SynthesisStrategy, auto_build_pinn, synthesize_from_equations,
+};
+
+pub use grand_challenges::{StabilityProof, SOUNIO_PROOF_DSL};
