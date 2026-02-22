@@ -495,9 +495,9 @@ If you use Sounio in academic work, please cite:
   author = {Agourakis, Demetrios Chiuratto},
   year = {2025--2026},
   version = {1.0.0-beta.4},
-  doi = {10.5281/zenodo.18190065},
-  url = {https://doi.org/10.5281/zenodo.18190065},
-  note = {Latest published release DOI: 10.5281/zenodo.18404188 (v0.99.0)}
+  doi = {10.5281/zenodo.18726647},
+  url = {https://doi.org/10.5281/zenodo.18726647},
+  note = {Latest published release DOI: 10.5281/zenodo.18726647 (v1.0.0)}
 }
 ```
 
