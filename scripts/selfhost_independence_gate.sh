@@ -42,7 +42,13 @@ run_step() {
   local name="$1"
   shift
   echo "==> $name"
+  set +e
+  set -o pipefail
   "$@" 2>&1 | tee "$LOG_DIR/${name}.log"
+  local rc=${PIPESTATUS[0]}
+  set +o pipefail
+  set -e
+  return "$rc"
 }
 
 echo "SELFHOST_INDEPENDENCE_GATE_START"

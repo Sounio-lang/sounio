@@ -69,6 +69,7 @@ export OMEGA_CANONICAL_BOOTSTRAP_TIMESTAMP="$ts"
 export OMEGA_CANONICAL_BOOTSTRAP_TIMESTAMP_PATH="$TIMESTAMP_PATH"
 export OMEGA_CANONICAL_KEY_COMMENT_PATH="$COMMENT_PATH"
 EOF
+  chmod 600 "$ENV_OUT" 2>/dev/null || true
 }
 
 compute_pubkey_fingerprint() {
@@ -95,6 +96,7 @@ generate_with_openssl() {
 import re
 import sys
 from pathlib import Path
+import os
 
 src = Path(sys.argv[1]).read_text().splitlines()
 priv_out = Path(sys.argv[2])
@@ -128,9 +130,18 @@ if len(priv) != 64 or len(pub) != 64:
 priv_out.parent.mkdir(parents=True, exist_ok=True)
 priv_out.write_text(priv + "\n")
 pub_out.write_text(pub + "\n")
+os.chmod(priv_out, 0o600)
+os.chmod(pub_out, 0o644)
 PY
 
   rm -rf "$tmpdir"
+}
+
+enforce_permissions() {
+  chmod 600 "$PRIVATE_PATH" 2>/dev/null || true
+  chmod 644 "$PUBLIC_PATH" 2>/dev/null || true
+  chmod 644 "$COMMENT_PATH" 2>/dev/null || true
+  chmod 644 "$TIMESTAMP_PATH" 2>/dev/null || true
 }
 
 validate_or_generate() {
@@ -164,6 +175,8 @@ fi
 if [ ! -f "$TIMESTAMP_PATH" ]; then
   date -u +"%Y-%m-%dT%H:%M:%SZ" >"$TIMESTAMP_PATH"
 fi
+
+enforce_permissions
 
 PRIV_HEX="$(read_key_hex "$PRIVATE_PATH")"
 PUB_HEX="$(read_key_hex "$PUBLIC_PATH")"

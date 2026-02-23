@@ -98,6 +98,25 @@ if [ -z "${SOUNIO_POLICY_VERIFY_KEY_PATH:-}" ]; then
   echo "error: SOUNIO_POLICY_VERIFY_KEY_PATH is required for canonical verification" >&2
   exit 2
 fi
+if [ ! -f "$SOUNIO_POLICY_VERIFY_KEY_PATH" ]; then
+  echo "error: verification key path not found: $SOUNIO_POLICY_VERIFY_KEY_PATH" >&2
+  exit 2
+fi
+
+ACTUAL_FINGERPRINT="$(python3 - "$SOUNIO_POLICY_VERIFY_KEY_PATH" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+
+pub_hex = Path(sys.argv[1]).read_text().strip()
+print(hashlib.sha256(bytes.fromhex(pub_hex)).hexdigest())
+PY
+)"
+EXPECTED_FINGERPRINT="${OMEGA_CANONICAL_PUBKEY_FINGERPRINT:-}"
+if [ -n "$EXPECTED_FINGERPRINT" ] && [ "$ACTUAL_FINGERPRINT" != "$EXPECTED_FINGERPRINT" ]; then
+  echo "error: canonical verification key fingerprint mismatch expected=$EXPECTED_FINGERPRINT actual=$ACTUAL_FINGERPRINT" >&2
+  exit 2
+fi
 
 set +e
 STATUS_OUTPUT="$(
@@ -117,4 +136,4 @@ if ! grep -q "signature=verified" <<<"$STATUS_OUTPUT"; then
   exit 2
 fi
 
-echo "signature=verified (canonical bootstrap key) fingerprint=${OMEGA_CANONICAL_PUBKEY_FINGERPRINT:-unknown}"
+echo "signature=verified (canonical bootstrap key) fingerprint=$ACTUAL_FINGERPRINT"
