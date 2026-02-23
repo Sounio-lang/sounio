@@ -1434,12 +1434,7 @@ impl HlirToGpuLowering {
 
 /// Compile HLIR directly to PTX string
 pub fn compile_to_ptx(hlir: &HlirModule, sm_version: (u32, u32)) -> String {
-    let target = GpuTarget::Cuda {
-        compute_capability: sm_version,
-    };
-    let gpu_module = lower(hlir, target);
-    let mut codegen = super::ptx::PtxCodegen::new(sm_version);
-    codegen.generate(&gpu_module)
+    super::hlir_to_ptx::compile_to_ptx(hlir, sm_version)
 }
 
 /// Compile HLIR directly to PTX with epistemic tracking
@@ -1448,16 +1443,7 @@ pub fn compile_to_ptx_epistemic(
     sm_version: (u32, u32),
     epistemic: bool,
 ) -> String {
-    let config = LoweringConfig {
-        target: GpuTarget::Cuda {
-            compute_capability: sm_version,
-        },
-        epistemic_enabled: epistemic,
-        ..Default::default()
-    };
-    let gpu_module = lower_with_config(hlir, &config);
-    let mut codegen = super::ptx::PtxCodegen::new(sm_version);
-    codegen.generate(&gpu_module)
+    super::hlir_to_ptx::compile_to_ptx_epistemic(hlir, sm_version, epistemic)
 }
 
 #[cfg(test)]

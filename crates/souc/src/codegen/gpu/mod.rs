@@ -47,6 +47,7 @@ pub mod example_profiles;
 pub mod fusion;
 pub mod graph;
 pub mod hlir_to_gpu;
+pub mod hlir_to_ptx;
 pub mod intrinsics;
 pub mod ir;
 pub mod metal;
@@ -112,8 +113,11 @@ pub use epistemic_gemm_intrinsics::{
 
 // HLIR to GPU lowering - the critical bridge
 pub use hlir_to_gpu::{
-    LoweringConfig, OptimizedGpuModule, compile_to_ptx, compile_to_ptx_epistemic, lower,
-    lower_and_optimize, lower_with_config,
+    LoweringConfig, OptimizedGpuModule, lower, lower_and_optimize, lower_with_config,
+};
+pub use hlir_to_ptx::{
+    EpistemicPtxOutput, compile_to_ptx, compile_to_ptx_epistemic,
+    compile_to_ptx_epistemic_with_stats,
 };
 
 // Epistemic PTX emission - shadow registers for uncertainty tracking
