@@ -306,9 +306,27 @@ if [ "${OMEGA_REQUIRE_RL_READINESS_BRIDGE:-1}" = "1" ]; then
 
   if [ "${OMEGA_REQUIRE_RL_READINESS_STATUS_SMOKE:-1}" = "1" ]; then
     RL_STATUS_LOG="${OMEGA_RL_READINESS_STATUS_LOG:-artifacts/omega_rl_readiness_status.log}"
+    RL_POLICY_SMOKE_OUTPUT="${OMEGA_POLICY_SMOKE_OUTPUT:-artifacts/omega/policy_status_smoke.v2.json}"
+    RL_POLICY_SMOKE_ENV_PATH="${OMEGA_POLICY_SMOKE_ENV_PATH:-artifacts/omega/policy_smoke.env}"
+    OMEGA_POLICY_PREP_SCRIPT="${OMEGA_POLICY_PREP_SCRIPT:-scripts/omega/omega_prepare_policy_smoke.sh}"
+    OMEGA_POLICY_SOUC_BIN="${OMEGA_POLICY_SOUC_BIN:-$ROOT_DIR/souc}"
+    if [ -x "$OMEGA_POLICY_PREP_SCRIPT" ]; then
+      "$OMEGA_POLICY_PREP_SCRIPT" \
+        --policy "$RL_POLICY_PATH" \
+        --souc "$OMEGA_POLICY_SOUC_BIN" \
+        --corpus "${OMEGA_POLICY_TRAIN_CORPUS:-benchmarks/independence}" \
+        --out "$RL_POLICY_SMOKE_OUTPUT" \
+        --env-out "$RL_POLICY_SMOKE_ENV_PATH"
+      if [ -f "$RL_POLICY_SMOKE_ENV_PATH" ]; then
+        # shellcheck disable=SC1090
+        source "$RL_POLICY_SMOKE_ENV_PATH"
+      fi
+    fi
+    RL_POLICY_STATUS_PATH="${SOUNIO_POLICY_STATUS_PATH:-$RL_POLICY_PATH}"
     PATH="$ROOT_DIR:$PATH" \
     SOUNIO_RL_READINESS_EVIDENCE_PATH="${OMEGA_RL_READINESS_EVIDENCE_OUT:-bootstrap/policies/rl_readiness.evidence.json}" \
-      souc opt policy status --policy "$RL_POLICY_PATH" | tee "$RL_STATUS_LOG"
+    SOUNIO_POLICY_VERIFY_KEY_PATH="${SOUNIO_POLICY_VERIFY_KEY_PATH:-}" \
+      souc opt policy status --policy "$RL_POLICY_STATUS_PATH" | tee "$RL_STATUS_LOG"
     if ! rg -q "opt policy readiness: pass" "$RL_STATUS_LOG"; then
       echo "error: RL readiness status did not report pass" >&2
       exit 2
@@ -385,6 +403,22 @@ if [ "${OMEGA_REQUIRE_PERFORMANCE_SUMMARY:-1}" = "1" ]; then
   fi
   python3 scripts/omega/omega_performance_summary.py "${PERF_ARGS[@]}"
   echo "PERFORMANCE_SUMMARY_PASS" | tee -a "$GATE_LOG"
+fi
+
+if [ "${OMEGA_REQUIRE_BASELINE_FREEZE:-1}" = "1" ]; then
+  echo "==> omega sprint1 gate: baseline freeze"
+  BASELINE_FREEZE_ARGS=(
+    --contract benchmarks/independence/contract.v2.json
+    --baseline-manifest benchmarks/independence/omega_sprint1_baselines.v1.json
+    --external-collection "${OMEGA_EXTERNAL_BASELINE_COLLECTION_OUT:-artifacts/omega/external_baseline_collection.v1.json}"
+    --performance-summary "${OMEGA_PERFORMANCE_REPORT_PATH:-artifacts/omega/performance_summary.v1.json}"
+    --out "${OMEGA_BASELINE_FREEZE_OUT:-artifacts/omega/baseline_freeze.v1.json}"
+  )
+  if [ "${OMEGA_REQUIRE_BASELINE_FREEZE_STRICT:-1}" = "1" ]; then
+    BASELINE_FREEZE_ARGS+=(--strict)
+  fi
+  python3 scripts/omega/omega_baseline_freeze.py "${BASELINE_FREEZE_ARGS[@]}"
+  echo "BASELINE_FREEZE_PASS" | tee -a "$GATE_LOG"
 fi
 
 if [ "${OMEGA_REQUIRE_POLICY_MODE_GUARD:-1}" = "1" ]; then
@@ -513,6 +547,7 @@ if [ "${OMEGA_REQUIRE_HW_TELEMETRY_REGRESSION:-1}" = "1" ]; then
   OMEGA_REQUIRE_RL_READINESS_TREND="${OMEGA_REQUIRE_RL_READINESS_TREND:-1}"
   OMEGA_REQUIRE_EXTERNAL_BASELINE_COLLECTION="${OMEGA_REQUIRE_EXTERNAL_BASELINE_COLLECTION:-1}"
   OMEGA_REQUIRE_PERFORMANCE_SUMMARY="${OMEGA_REQUIRE_PERFORMANCE_SUMMARY:-1}"
+  OMEGA_REQUIRE_BASELINE_FREEZE="${OMEGA_REQUIRE_BASELINE_FREEZE:-1}"
   OMEGA_REQUIRE_POLICY_MODE_GUARD="${OMEGA_REQUIRE_POLICY_MODE_GUARD:-1}"
   OMEGA_REQUIRE_RL_READINESS_REPLAY="${OMEGA_REQUIRE_RL_READINESS_REPLAY:-1}"
   OMEGA_REQUIRE_GOVERNANCE_ATTESTATION="${OMEGA_REQUIRE_GOVERNANCE_ATTESTATION:-1}"
@@ -529,6 +564,7 @@ if [ "${OMEGA_REQUIRE_HW_TELEMETRY_REGRESSION:-1}" = "1" ]; then
   OMEGA_REQUIRE_RL_READINESS_TREND="$OMEGA_REQUIRE_RL_READINESS_TREND" \
   OMEGA_REQUIRE_EXTERNAL_BASELINE_COLLECTION="$OMEGA_REQUIRE_EXTERNAL_BASELINE_COLLECTION" \
   OMEGA_REQUIRE_PERFORMANCE_SUMMARY="$OMEGA_REQUIRE_PERFORMANCE_SUMMARY" \
+  OMEGA_REQUIRE_BASELINE_FREEZE="$OMEGA_REQUIRE_BASELINE_FREEZE" \
   OMEGA_REQUIRE_POLICY_MODE_GUARD="$OMEGA_REQUIRE_POLICY_MODE_GUARD" \
   OMEGA_REQUIRE_RL_READINESS_REPLAY="$OMEGA_REQUIRE_RL_READINESS_REPLAY" \
   OMEGA_REQUIRE_GOVERNANCE_ATTESTATION="$OMEGA_REQUIRE_GOVERNANCE_ATTESTATION" \

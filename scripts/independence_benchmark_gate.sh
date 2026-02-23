@@ -14,6 +14,9 @@ fi
 
 SOUC_BIN="${SOUC_BIN:-$ROOT_DIR/target/debug/souc}"
 RUN_EXTERNAL_BASELINES="${RUN_EXTERNAL_BASELINES:-0}"
+POLICY_TRAIN_CORPUS="${OMEGA_POLICY_TRAIN_CORPUS:-benchmarks/independence}"
+POLICY_SMOKE_OUTPUT="${OMEGA_POLICY_SMOKE_OUTPUT:-artifacts/omega/policy_status_smoke.v2.json}"
+POLICY_SMOKE_ENV_PATH="${OMEGA_POLICY_SMOKE_ENV_PATH:-artifacts/omega/policy_smoke.env}"
 
 if [ ! -f "$CONTRACT_PATH" ]; then
   echo "error: missing independence contract: $CONTRACT_PATH" >&2
@@ -112,12 +115,39 @@ if [ -f "bootstrap/policies/policy.v2.json" ]; then
 else
   POLICY_PATH="bootstrap/policies/policy.v1.json"
 fi
+POLICY_STATUS_PATH="$POLICY_PATH"
+
+prepare_policy_smoke() {
+  local souc_cmd="$1"
+  local prep_script="scripts/omega/omega_prepare_policy_smoke.sh"
+  if [ ! -x "$prep_script" ]; then
+    return 0
+  fi
+  if ! "$prep_script" \
+    --policy "$POLICY_PATH" \
+    --souc "$souc_cmd" \
+    --corpus "$POLICY_TRAIN_CORPUS" \
+    --out "$POLICY_SMOKE_OUTPUT" \
+    --env-out "$POLICY_SMOKE_ENV_PATH"; then
+    echo "policy smoke warning: signed-policy preparation failed, continuing with source policy"
+    return 0
+  fi
+  if [ -f "$POLICY_SMOKE_ENV_PATH" ]; then
+    # shellcheck disable=SC1090
+    source "$POLICY_SMOKE_ENV_PATH"
+  fi
+  POLICY_STATUS_PATH="${SOUNIO_POLICY_STATUS_PATH:-$POLICY_PATH}"
+}
 
 run_policy_smoke() {
   local cmd_prefix=("$@")
+  prepare_policy_smoke "${cmd_prefix[0]}"
   set +e
   local output
-  output="$("${cmd_prefix[@]}" opt policy status --policy "$POLICY_PATH" 2>&1)"
+  output="$(
+    SOUNIO_POLICY_VERIFY_KEY_PATH="${SOUNIO_POLICY_VERIFY_KEY_PATH:-}" \
+      "${cmd_prefix[@]}" opt policy status --policy "$POLICY_STATUS_PATH" 2>&1
+  )"
   local code=$?
   set -e
   echo "$output"
@@ -126,7 +156,8 @@ run_policy_smoke() {
   fi
   if [[ "$output" == *"unsupported optimization policy schema 'sounio.optimization.policy.v2': expected 'sounio.optimization.policy.v1'"* ]]; then
     echo "policy smoke warning: binary appears stale for v2 schema; retrying via cargo run"
-    cargo run -p souc --bin souc -- opt policy status --policy "$POLICY_PATH" || true
+    SOUNIO_POLICY_VERIFY_KEY_PATH="${SOUNIO_POLICY_VERIFY_KEY_PATH:-}" \
+      cargo run -p souc --bin souc -- opt policy status --policy "$POLICY_STATUS_PATH" || true
   fi
 }
 

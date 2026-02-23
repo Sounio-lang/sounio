@@ -46,6 +46,9 @@ No existing TODOs were removed; this is an additive backlog.
 - [x] Add custom external baseline command hook templates (`scripts/omega/external_baseline_cmds.env.example`) and report emitter utility (`scripts/omega/omega_emit_baseline_report.py`).
 - [x] Bridge legacy `RUN_EXTERNAL_BASELINES` to `OMEGA_RUN_EXTERNAL_BASELINES` inside Sprint 1 gate contract stage so external adapters run by default without manual env sync.
 - [x] Default `OMEGA_REQUIRE_PURE_SOUNIO_KAXI=1` in Sprint 1 gate, while preserving override to `0` for explicit compatibility runs.
+- [x] Add policy-smoke signature hardening (`scripts/omega/omega_prepare_policy_smoke.sh`) and wire signed policy smoke path into independence + Omega RL status checks.
+- [x] Add baseline freeze artifact (`artifacts/omega/baseline_freeze.v1.json`) and enforce it in Sprint 1 gate + hardware telemetry regression strict path.
+- [x] Extend weekly governance drift report to include baseline freeze summary and digest tracking.
 
 ## Nice-to-have (post Sprint 1)
 
