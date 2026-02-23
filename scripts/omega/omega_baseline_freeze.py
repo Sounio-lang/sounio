@@ -6,9 +6,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+from cryptography.hazmat.primitives.asymmetric import ed25519
 
 SCHEMA = "sounio.omega.baseline-freeze.v1"
 CONTRACT_SCHEMA = "sounio.independence.contract.v2"
@@ -51,6 +54,24 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Fail when freeze preconditions are not satisfied",
     )
+    parser.add_argument(
+        "--canonical-privkey",
+        default=os.environ.get("OMEGA_CANONICAL_PRIVKEY", "keys/bootstrap_ed25519"),
+        help="Canonical private key path (32-byte Ed25519 hex)",
+    )
+    parser.add_argument(
+        "--canonical-pubkey",
+        default=os.environ.get("OMEGA_CANONICAL_PUBKEY", "keys/bootstrap_ed25519.pub"),
+        help="Canonical public key path (32-byte Ed25519 hex)",
+    )
+    parser.add_argument(
+        "--canonical-timestamp",
+        default=os.environ.get(
+            "OMEGA_CANONICAL_BOOTSTRAP_TIMESTAMP_PATH",
+            "keys/bootstrap_ed25519.created_at",
+        ),
+        help="Canonical key bootstrap timestamp file path",
+    )
     return parser.parse_args()
 
 
@@ -89,6 +110,40 @@ def parse_float(value: object, default: float = 0.0) -> float:
 def write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2))
+
+
+def read_hex_key(path: Path, expected_len: int, key_label: str) -> str:
+    try:
+        raw = path.read_text().strip()
+    except OSError as exc:
+        raise SystemExit(f"unable to read {key_label} {path}: {exc}") from exc
+    if len(raw) != expected_len:
+        raise SystemExit(
+            f"invalid {key_label} length in {path}: expected {expected_len} hex chars, got {len(raw)}"
+        )
+    try:
+        bytes.fromhex(raw)
+    except ValueError as exc:
+        raise SystemExit(f"invalid {key_label} hex in {path}: {exc}") from exc
+    return raw
+
+
+def canonical_pubkey_fingerprint(pub_hex: str) -> str:
+    return hashlib.sha256(bytes.fromhex(pub_hex)).hexdigest()
+
+
+def sign_digest_with_private_key(priv_hex: str, digest_hex: str) -> str:
+    private_key = ed25519.Ed25519PrivateKey.from_private_bytes(bytes.fromhex(priv_hex))
+    signature = private_key.sign(digest_hex.encode("utf-8"))
+    return signature.hex()
+
+
+def read_bootstrap_timestamp(path: Path) -> str:
+    try:
+        text = path.read_text().strip()
+    except OSError:
+        return ""
+    return text
 
 
 def main() -> int:
@@ -242,6 +297,24 @@ def main() -> int:
         )
     freeze_digest = hashlib.sha256("\n".join(digest_lines).encode("utf-8")).hexdigest()
 
+    canonical_priv_path = Path(args.canonical_privkey)
+    canonical_pub_path = Path(args.canonical_pubkey)
+    canonical_ts_path = Path(args.canonical_timestamp)
+
+    canonical_priv_hex = read_hex_key(canonical_priv_path, 64, "canonical private key")
+    canonical_pub_hex = read_hex_key(canonical_pub_path, 64, "canonical public key")
+    key_fingerprint = canonical_pubkey_fingerprint(canonical_pub_hex)
+    freeze_signature = sign_digest_with_private_key(canonical_priv_hex, freeze_digest)
+    bootstrap_timestamp = read_bootstrap_timestamp(canonical_ts_path)
+
+    if args.strict:
+        if len(key_fingerprint) != 64:
+            errors.append("canonical key fingerprint must be 64-char hex in --strict mode")
+        if len(freeze_signature) != 128:
+            errors.append("baseline freeze signature must be 128-char hex in --strict mode")
+        if not bootstrap_timestamp:
+            errors.append("canonical bootstrap timestamp missing in --strict mode")
+
     payload = {
         "schema": SCHEMA,
         "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -262,6 +335,13 @@ def main() -> int:
         "substitution_count": len(substitutions),
         "frozen_rows": frozen_rows,
         "freeze_digest_sha256": freeze_digest,
+        "canonical_pubkey_path": str(canonical_pub_path),
+        "canonical_pubkey_fingerprint": key_fingerprint,
+        "canonical_bootstrap_timestamp": bootstrap_timestamp,
+        "signature_algo": "ed25519",
+        "signature_scope": "freeze_digest_sha256",
+        "signature_hex": freeze_signature,
+        "signed": True,
         "status": "frozen" if not errors else "invalid",
     }
 
@@ -273,6 +353,7 @@ def main() -> int:
         f"mode={measurement_mode} "
         f"baseline_count={baseline_count} "
         f"available_count={available_count} "
+        f"signed=true "
         f"errors={len(errors)} "
         f"out={out_path}"
     )

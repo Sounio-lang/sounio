@@ -8,7 +8,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA = "sounio.omega.weekly-drift-report.v1"
+SCHEMA = "sounio.omega.weekly-drift-report.v2"
 
 
 def parse_args() -> argparse.Namespace:
@@ -52,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--out-json",
-        default="artifacts/omega/weekly_drift_report.v1.json",
+        default="artifacts/omega/weekly_drift_report.v2.json",
         help="Weekly report JSON output path",
     )
     parser.add_argument(
@@ -213,6 +213,17 @@ def summarize_baseline_freeze(summary: dict) -> dict:
     }
 
 
+def summarize_canonical_bootstrap(attestation: dict, freeze: dict) -> dict:
+    fpr = str(attestation.get("canonical_pubkey_fingerprint", ""))
+    ts = str(attestation.get("canonical_bootstrap_timestamp", ""))
+    if not ts:
+        ts = str(freeze.get("canonical_bootstrap_timestamp", ""))
+    return {
+        "canonical_pubkey_fingerprint": fpr,
+        "canonical_bootstrap_timestamp": ts,
+    }
+
+
 def make_markdown(payload: dict) -> str:
     hw = payload["hardware_live_read"]
     rl = payload["rl_readiness"]
@@ -221,6 +232,7 @@ def make_markdown(payload: dict) -> str:
     perf = payload["performance_summary"]
     ext = payload["external_baselines"]
     freeze = payload["baseline_freeze"]
+    canonical = payload["canonical_bootstrap"]
     lines = [
         "# Omega Weekly Governance Drift Report",
         "",
@@ -277,6 +289,10 @@ def make_markdown(payload: dict) -> str:
         f"- Frozen rows: `{freeze['frozen_rows']}`",
         f"- Freeze digest: `{freeze['freeze_digest_sha256']}`",
         "",
+        "## Canonical Bootstrap Key",
+        f"- Fingerprint: `{canonical['canonical_pubkey_fingerprint']}`",
+        f"- Last bootstrap timestamp: `{canonical['canonical_bootstrap_timestamp']}`",
+        "",
     ]
     return "\n".join(lines)
 
@@ -323,6 +339,7 @@ def main() -> int:
         "performance_summary": summarize_performance_summary(performance_summary),
         "external_baselines": summarize_external_baselines(external_baseline_collection),
         "baseline_freeze": summarize_baseline_freeze(baseline_freeze),
+        "canonical_bootstrap": summarize_canonical_bootstrap(attestation, baseline_freeze),
     }
 
     out_json = Path(args.out_json)

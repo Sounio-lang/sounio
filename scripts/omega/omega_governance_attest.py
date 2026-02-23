@@ -12,6 +12,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from cryptography.hazmat.primitives.asymmetric import ed25519
+
 SCHEMA = "sounio.omega.governance-attestation.v1"
 DEFAULT_ARTIFACTS = (
     "artifacts/omega/shadow_audit.v1.json",
@@ -66,6 +68,24 @@ def parse_args() -> argparse.Namespace:
         "--require-signature",
         action="store_true",
         help="Require signature generation",
+    )
+    parser.add_argument(
+        "--canonical-privkey",
+        default=os.environ.get("OMEGA_CANONICAL_PRIVKEY", ""),
+        help="Canonical bootstrap private key path (32-byte Ed25519 hex)",
+    )
+    parser.add_argument(
+        "--canonical-pubkey",
+        default=os.environ.get("OMEGA_CANONICAL_PUBKEY", "keys/bootstrap_ed25519.pub"),
+        help="Canonical bootstrap public key path (32-byte Ed25519 hex)",
+    )
+    parser.add_argument(
+        "--canonical-timestamp",
+        default=os.environ.get(
+            "OMEGA_CANONICAL_BOOTSTRAP_TIMESTAMP_PATH",
+            "keys/bootstrap_ed25519.created_at",
+        ),
+        help="Canonical bootstrap timestamp path",
     )
     return parser.parse_args()
 
@@ -125,9 +145,54 @@ def sign_digest(private_key: Path, aggregate_digest: str) -> str:
             pass
 
 
+def read_hex_key(path: Path, expected_len: int, key_label: str) -> str:
+    try:
+        raw = path.read_text().strip()
+    except OSError as exc:
+        raise SystemExit(f"unable to read {key_label} {path}: {exc}") from exc
+    if len(raw) != expected_len:
+        raise SystemExit(
+            f"invalid {key_label} length in {path}: expected {expected_len} hex chars, got {len(raw)}"
+        )
+    try:
+        bytes.fromhex(raw)
+    except ValueError as exc:
+        raise SystemExit(f"invalid {key_label} hex in {path}: {exc}") from exc
+    return raw
+
+
+def sign_digest_canonical(priv_hex: str, aggregate_digest: str) -> str:
+    private_key = ed25519.Ed25519PrivateKey.from_private_bytes(
+        bytes.fromhex(priv_hex)
+    )
+    signature = private_key.sign(aggregate_digest.encode("utf-8"))
+    return signature.hex()
+
+
 def write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2))
+
+
+def canonical_pubkey_fingerprint(path: Path) -> str:
+    try:
+        raw = path.read_text().strip()
+    except OSError as exc:
+        raise SystemExit(f"unable to read canonical pubkey {path}: {exc}") from exc
+    if len(raw) != 64:
+        raise SystemExit(f"invalid canonical pubkey length in {path}: expected 64 hex chars")
+    try:
+        pub_bytes = bytes.fromhex(raw)
+    except ValueError as exc:
+        raise SystemExit(f"invalid canonical pubkey hex in {path}: {exc}") from exc
+    return sha256_bytes(pub_bytes)
+
+
+def read_bootstrap_timestamp(path: Path) -> str:
+    try:
+        return path.read_text().strip()
+    except OSError:
+        return ""
 
 
 def main() -> int:
@@ -154,11 +219,24 @@ def main() -> int:
     signature = ""
     key_id = args.key_id.strip()
     signed = False
-    if args.private_key.strip():
+    canonical_privkey_path = args.canonical_privkey.strip()
+    if canonical_privkey_path and Path(canonical_privkey_path).exists():
+        priv_hex = read_hex_key(
+            Path(canonical_privkey_path), 64, "canonical private key"
+        )
+        signature = sign_digest_canonical(priv_hex, aggregate_digest)
+        signed = True
+        if not key_id:
+            key_id = "canonical-bootstrap-ed25519"
+    elif args.private_key.strip():
         signature = sign_digest(Path(args.private_key.strip()), aggregate_digest)
         signed = True
         if not key_id:
             key_id = "manual-override"
+
+    canonical_pubkey_path = Path(args.canonical_pubkey)
+    canonical_pubkey_fpr = canonical_pubkey_fingerprint(canonical_pubkey_path)
+    canonical_bootstrap_ts = read_bootstrap_timestamp(Path(args.canonical_timestamp))
 
     payload = {
         "schema": SCHEMA,
@@ -166,6 +244,9 @@ def main() -> int:
         "artifacts": sorted(records, key=lambda x: x["path"]),
         "missing_artifacts": sorted(missing),
         "aggregate_sha256": aggregate_digest,
+        "canonical_pubkey_path": str(canonical_pubkey_path),
+        "canonical_pubkey_fingerprint": canonical_pubkey_fpr,
+        "canonical_bootstrap_timestamp": canonical_bootstrap_ts,
         "signed": signed,
         "key_id": key_id,
         "signature_hex": signature,
@@ -177,6 +258,7 @@ def main() -> int:
         "omega_governance_attest: "
         f"artifacts={len(records)} "
         f"missing={len(missing)} "
+        f"canonical_fpr={canonical_pubkey_fpr} "
         f"signed={str(signed).lower()} "
         f"report={out_path}"
     )
@@ -187,6 +269,12 @@ def main() -> int:
         return 2
     if args.require_signature and not signed:
         print("omega_governance_attest: signature required but not produced", file=sys.stderr)
+        return 2
+    if args.strict and not canonical_bootstrap_ts:
+        print(
+            "omega_governance_attest: canonical bootstrap timestamp missing in strict mode",
+            file=sys.stderr,
+        )
         return 2
     return 0
 

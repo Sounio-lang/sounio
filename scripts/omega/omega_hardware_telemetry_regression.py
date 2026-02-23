@@ -776,6 +776,16 @@ def validate_governance_attestation(path: Path, errors: List[str], strict: bool)
     if not isinstance(signed, bool):
         errors.append(f"{path}: signed must be bool")
 
+    canonical_fpr = payload.get("canonical_pubkey_fingerprint")
+    if not isinstance(canonical_fpr, str) or len(canonical_fpr) != 64:
+        errors.append(f"{path}: canonical_pubkey_fingerprint must be 64-char hex string")
+    canonical_pub_path = payload.get("canonical_pubkey_path")
+    if not isinstance(canonical_pub_path, str) or not canonical_pub_path:
+        errors.append(f"{path}: canonical_pubkey_path must be non-empty string")
+    canonical_ts = payload.get("canonical_bootstrap_timestamp")
+    if canonical_ts is not None and not isinstance(canonical_ts, str):
+        errors.append(f"{path}: canonical_bootstrap_timestamp must be string when present")
+
     if strict:
         missing = payload.get("missing_artifacts")
         if isinstance(missing, list) and missing:
@@ -785,6 +795,8 @@ def validate_governance_attestation(path: Path, errors: List[str], strict: bool)
                 errors.append(f"{path}: artifact_count must match len(artifacts) in --strict mode")
         if payload.get("signed") is not True:
             errors.append(f"{path}: signed must be true in --strict mode")
+        if not isinstance(canonical_ts, str) or not canonical_ts:
+            errors.append(f"{path}: canonical_bootstrap_timestamp must be present in --strict mode")
 
 
 def validate_sprint1_release_readiness(
@@ -1051,6 +1063,10 @@ def validate_baseline_freeze(path: Path, errors: List[str], strict: bool) -> Non
         "geomean_speedup",
         "frozen_rows",
         "freeze_digest_sha256",
+        "canonical_pubkey_fingerprint",
+        "canonical_bootstrap_timestamp",
+        "signature_hex",
+        "signed",
         "status",
     )
     for field in required_fields:
@@ -1066,6 +1082,10 @@ def validate_baseline_freeze(path: Path, errors: List[str], strict: bool) -> Non
     measurement_mode = payload.get("measurement_mode")
     status = payload.get("status")
     freeze_digest = payload.get("freeze_digest_sha256")
+    signature_hex = payload.get("signature_hex")
+    signed = payload.get("signed")
+    canonical_fpr = payload.get("canonical_pubkey_fingerprint")
+    canonical_ts = payload.get("canonical_bootstrap_timestamp")
     frozen_rows = payload.get("frozen_rows")
 
     if not isinstance(baseline_count, int):
@@ -1098,6 +1118,14 @@ def validate_baseline_freeze(path: Path, errors: List[str], strict: bool) -> Non
         status = "invalid"
     if not isinstance(freeze_digest, str) or len(freeze_digest) != 64:
         errors.append(f"{path}: freeze_digest_sha256 must be 64-char hex")
+    if not isinstance(signature_hex, str) or len(signature_hex) != 128:
+        errors.append(f"{path}: signature_hex must be 128-char hex")
+    if not isinstance(signed, bool):
+        errors.append(f"{path}: signed must be bool")
+    if not isinstance(canonical_fpr, str) or len(canonical_fpr) != 64:
+        errors.append(f"{path}: canonical_pubkey_fingerprint must be 64-char hex")
+    if canonical_ts is not None and not isinstance(canonical_ts, str):
+        errors.append(f"{path}: canonical_bootstrap_timestamp must be string when present")
     if not isinstance(frozen_rows, list):
         errors.append(f"{path}: frozen_rows must be list")
         frozen_rows = []
@@ -1136,6 +1164,10 @@ def validate_baseline_freeze(path: Path, errors: List[str], strict: bool) -> Non
             errors.append(
                 f"{path}: external_baseline_ingest requires available_count==baseline_count in --strict mode ({available_count}!={baseline_count})"
             )
+        if signed is not True:
+            errors.append(f"{path}: signed must be true in --strict mode")
+        if not isinstance(canonical_ts, str) or not canonical_ts:
+            errors.append(f"{path}: canonical_bootstrap_timestamp must be present in --strict mode")
 
 
 def maybe_validate(
