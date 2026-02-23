@@ -18,6 +18,8 @@ DECISION_TRAIL_REQUIRED="${SOUNIO_OPT_DECISION_TRAIL_REQUIRED:-1}"
 DECISION_TRAIL_PATH="${SOUNIO_OPT_DECISION_TRAIL_PATH:-$LOG_DIR/decision_trail.jsonl}"
 POLICY_SMOKE_OUTPUT="${SOUNIO_POLICY_SMOKE_OUTPUT:-$WORK_DIR/policy_status_smoke.v2.json}"
 POLICY_SMOKE_ENV_PATH="${SOUNIO_POLICY_SMOKE_ENV_PATH:-$LOG_DIR/policy_smoke.env}"
+POLICY_CANONICAL_ENV_PATH="${OMEGA_CANONICAL_ENV_OUT:-$WORK_DIR/canonical_key.env}"
+POLICY_STATUS_SCRIPT="${OMEGA_POLICY_STATUS_SCRIPT:-scripts/omega/omega_policy_status.sh}"
 
 mkdir -p "$LOG_DIR"
 
@@ -68,23 +70,23 @@ run_step "06a-independence-benchmark-contract" env \
   CONTRACT_PATH="$INDEPENDENCE_CONTRACT_PATH" \
   bash scripts/independence_benchmark_gate.sh
 
-if [ -x "scripts/omega/omega_prepare_policy_smoke.sh" ]; then
-  scripts/omega/omega_prepare_policy_smoke.sh \
-    --policy "$POLICY_PATH" \
-    --souc "$SOUC_BIN" \
-    --corpus benchmarks/independence \
-    --out "$POLICY_SMOKE_OUTPUT" \
-    --env-out "$POLICY_SMOKE_ENV_PATH" || true
+if [ ! -x "$POLICY_STATUS_SCRIPT" ]; then
+  echo "error: policy status script not executable: $POLICY_STATUS_SCRIPT" >&2
+  exit 2
+fi
+run_step "06b-opt-policy-status" "$POLICY_STATUS_SCRIPT" \
+  --policy "$POLICY_PATH" \
+  --souc "$SOUC_BIN" \
+  --corpus benchmarks/independence \
+  --canonical-env "$POLICY_CANONICAL_ENV_PATH" \
+  --smoke-env "$POLICY_SMOKE_ENV_PATH" \
+  --smoke-out "$POLICY_SMOKE_OUTPUT"
+if [[ "$REQUIRE_SIGNED_POLICY" == "1" ]]; then
   if [ -f "$POLICY_SMOKE_ENV_PATH" ]; then
     # shellcheck disable=SC1090
     source "$POLICY_SMOKE_ENV_PATH"
   fi
-fi
-POLICY_STATUS_PATH="${SOUNIO_POLICY_STATUS_PATH:-$POLICY_PATH}"
-run_step "06b-opt-policy-status" env \
-  SOUNIO_POLICY_VERIFY_KEY_PATH="${SOUNIO_POLICY_VERIFY_KEY_PATH:-}" \
-  "$SOUC_BIN" opt policy status --policy "$POLICY_STATUS_PATH"
-if [[ "$REQUIRE_SIGNED_POLICY" == "1" ]]; then
+  POLICY_STATUS_PATH="${SOUNIO_POLICY_STATUS_PATH:-$POLICY_PATH}"
   run_step "06c-opt-policy-eval" env \
     SOUNIO_POLICY_VERIFY_KEY_PATH="${SOUNIO_POLICY_VERIFY_KEY_PATH:-}" \
     "$SOUC_BIN" opt policy eval --policy "$POLICY_STATUS_PATH"

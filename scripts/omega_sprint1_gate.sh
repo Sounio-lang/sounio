@@ -16,6 +16,28 @@ RUN_EXTERNAL_BASELINES="${RUN_EXTERNAL_BASELINES:-${OMEGA_RUN_EXTERNAL_BASELINES
 CONTRACT_PATH="benchmarks/independence/contract.v2.json" \
   bash scripts/independence_benchmark_gate.sh
 
+if [ "${OMEGA_REQUIRE_CANONICAL_KEY_BOOTSTRAP:-1}" = "1" ]; then
+  echo "==> omega sprint1 gate: canonical key bootstrap"
+  CANONICAL_BOOTSTRAP_SCRIPT="${OMEGA_CANONICAL_BOOTSTRAP_SCRIPT:-scripts/omega_canonical_key_bootstrap.sh}"
+  CANONICAL_ENV_PATH="${OMEGA_CANONICAL_ENV_OUT:-artifacts/omega/canonical_key.env}"
+  if [ ! -x "$CANONICAL_BOOTSTRAP_SCRIPT" ]; then
+    echo "error: canonical key bootstrap script missing or not executable: $CANONICAL_BOOTSTRAP_SCRIPT" >&2
+    exit 2
+  fi
+  "$CANONICAL_BOOTSTRAP_SCRIPT" --env-out "$CANONICAL_ENV_PATH"
+  if [ ! -f "$CANONICAL_ENV_PATH" ]; then
+    echo "error: canonical key env file missing: $CANONICAL_ENV_PATH" >&2
+    exit 2
+  fi
+  # shellcheck disable=SC1090
+  source "$CANONICAL_ENV_PATH"
+  if [ ! -f "${OMEGA_CANONICAL_PRIVKEY:-}" ] || [ ! -f "${OMEGA_CANONICAL_PUBKEY:-}" ]; then
+    echo "error: canonical key bootstrap did not export valid key paths" >&2
+    exit 2
+  fi
+  echo "CANONICAL_KEY_BOOTSTRAP_PASS" | tee -a "$GATE_LOG"
+fi
+
 python3 - <<'PY'
 import json
 from pathlib import Path
@@ -308,27 +330,24 @@ if [ "${OMEGA_REQUIRE_RL_READINESS_BRIDGE:-1}" = "1" ]; then
     RL_STATUS_LOG="${OMEGA_RL_READINESS_STATUS_LOG:-artifacts/omega_rl_readiness_status.log}"
     RL_POLICY_SMOKE_OUTPUT="${OMEGA_POLICY_SMOKE_OUTPUT:-artifacts/omega/policy_status_smoke.v2.json}"
     RL_POLICY_SMOKE_ENV_PATH="${OMEGA_POLICY_SMOKE_ENV_PATH:-artifacts/omega/policy_smoke.env}"
-    OMEGA_POLICY_PREP_SCRIPT="${OMEGA_POLICY_PREP_SCRIPT:-scripts/omega/omega_prepare_policy_smoke.sh}"
-    OMEGA_POLICY_SOUC_BIN="${OMEGA_POLICY_SOUC_BIN:-$ROOT_DIR/souc}"
-    if [ -x "$OMEGA_POLICY_PREP_SCRIPT" ]; then
-      "$OMEGA_POLICY_PREP_SCRIPT" \
-        --policy "$RL_POLICY_PATH" \
-        --souc "$OMEGA_POLICY_SOUC_BIN" \
-        --corpus "${OMEGA_POLICY_TRAIN_CORPUS:-benchmarks/independence}" \
-        --out "$RL_POLICY_SMOKE_OUTPUT" \
-        --env-out "$RL_POLICY_SMOKE_ENV_PATH"
-      if [ -f "$RL_POLICY_SMOKE_ENV_PATH" ]; then
-        # shellcheck disable=SC1090
-        source "$RL_POLICY_SMOKE_ENV_PATH"
-      fi
-    fi
-    RL_POLICY_STATUS_PATH="${SOUNIO_POLICY_STATUS_PATH:-$RL_POLICY_PATH}"
+    RL_POLICY_STATUS_SCRIPT="${OMEGA_POLICY_STATUS_SCRIPT:-scripts/omega/omega_policy_status.sh}"
+    RL_CANONICAL_ENV_PATH="${OMEGA_CANONICAL_ENV_OUT:-artifacts/omega/canonical_key.env}"
+    RL_SOUC_BIN="${OMEGA_POLICY_SOUC_BIN:-$ROOT_DIR/souc}"
     PATH="$ROOT_DIR:$PATH" \
     SOUNIO_RL_READINESS_EVIDENCE_PATH="${OMEGA_RL_READINESS_EVIDENCE_OUT:-bootstrap/policies/rl_readiness.evidence.json}" \
-    SOUNIO_POLICY_VERIFY_KEY_PATH="${SOUNIO_POLICY_VERIFY_KEY_PATH:-}" \
-      souc opt policy status --policy "$RL_POLICY_STATUS_PATH" | tee "$RL_STATUS_LOG"
+      "$RL_POLICY_STATUS_SCRIPT" \
+        --policy "$RL_POLICY_PATH" \
+        --souc "$RL_SOUC_BIN" \
+        --corpus "${OMEGA_POLICY_TRAIN_CORPUS:-benchmarks/independence}" \
+        --canonical-env "$RL_CANONICAL_ENV_PATH" \
+        --smoke-env "$RL_POLICY_SMOKE_ENV_PATH" \
+        --smoke-out "$RL_POLICY_SMOKE_OUTPUT" | tee "$RL_STATUS_LOG"
     if ! rg -q "opt policy readiness: pass" "$RL_STATUS_LOG"; then
       echo "error: RL readiness status did not report pass" >&2
+      exit 2
+    fi
+    if ! rg -q "signature=verified \(canonical bootstrap key\)" "$RL_STATUS_LOG"; then
+      echo "error: RL readiness status did not verify canonical bootstrap key" >&2
       exit 2
     fi
   fi
@@ -472,33 +491,12 @@ if [ "${OMEGA_REQUIRE_GOVERNANCE_ATTESTATION:-1}" = "1" ]; then
   echo "==> omega sprint1 gate: governance attestation"
   GOV_ATTEST_ARGS=(
     --out "${OMEGA_GOVERNANCE_ATTESTATION_OUT:-artifacts/omega/governance_attestation.v1.json}"
+    --canonical-privkey "${OMEGA_CANONICAL_PRIVKEY:-}"
+    --canonical-pubkey "${OMEGA_CANONICAL_PUBKEY:-keys/bootstrap_ed25519.pub}"
+    --canonical-timestamp "${OMEGA_CANONICAL_BOOTSTRAP_TIMESTAMP_PATH:-keys/bootstrap_ed25519.created_at}"
+    --key-id "${OMEGA_GOVERNANCE_ATTEST_KEY_ID:-canonical-bootstrap-ed25519}"
+    --require-signature
   )
-  REQUIRE_GOV_ATTEST_SIG="${OMEGA_REQUIRE_GOVERNANCE_ATTEST_SIGNATURE:-1}"
-  if [ "$REQUIRE_GOV_ATTEST_SIG" = "1" ] && [ -z "${OMEGA_GOVERNANCE_ATTEST_PRIVATE_KEY:-}" ]; then
-    AUTO_KEY_PATH="${OMEGA_GOVERNANCE_ATTEST_AUTO_PRIVATE_KEY:-artifacts/omega/governance_attest_ed25519.pem}"
-    if [ ! -f "$AUTO_KEY_PATH" ]; then
-      if ! command -v openssl >/dev/null 2>&1; then
-        echo "error: openssl is required for governance attestation signing" >&2
-        exit 2
-      fi
-      mkdir -p "$(dirname "$AUTO_KEY_PATH")"
-      openssl genpkey -algorithm ED25519 -out "$AUTO_KEY_PATH"
-      chmod 600 "$AUTO_KEY_PATH"
-    fi
-    OMEGA_GOVERNANCE_ATTEST_PRIVATE_KEY="$AUTO_KEY_PATH"
-    if [ -z "${OMEGA_GOVERNANCE_ATTEST_KEY_ID:-}" ]; then
-      OMEGA_GOVERNANCE_ATTEST_KEY_ID="auto-local-ed25519"
-    fi
-  fi
-  if [ -n "${OMEGA_GOVERNANCE_ATTEST_PRIVATE_KEY:-}" ]; then
-    GOV_ATTEST_ARGS+=(--private-key "${OMEGA_GOVERNANCE_ATTEST_PRIVATE_KEY}")
-  fi
-  if [ -n "${OMEGA_GOVERNANCE_ATTEST_KEY_ID:-}" ]; then
-    GOV_ATTEST_ARGS+=(--key-id "${OMEGA_GOVERNANCE_ATTEST_KEY_ID}")
-  fi
-  if [ "$REQUIRE_GOV_ATTEST_SIG" = "1" ]; then
-    GOV_ATTEST_ARGS+=(--require-signature)
-  fi
   if [ "${OMEGA_REQUIRE_GOVERNANCE_ATTESTATION_STRICT:-1}" = "1" ]; then
     GOV_ATTEST_ARGS+=(--strict)
   fi

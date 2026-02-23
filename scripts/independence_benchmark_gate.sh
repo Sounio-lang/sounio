@@ -17,6 +17,8 @@ RUN_EXTERNAL_BASELINES="${RUN_EXTERNAL_BASELINES:-0}"
 POLICY_TRAIN_CORPUS="${OMEGA_POLICY_TRAIN_CORPUS:-benchmarks/independence}"
 POLICY_SMOKE_OUTPUT="${OMEGA_POLICY_SMOKE_OUTPUT:-artifacts/omega/policy_status_smoke.v2.json}"
 POLICY_SMOKE_ENV_PATH="${OMEGA_POLICY_SMOKE_ENV_PATH:-artifacts/omega/policy_smoke.env}"
+POLICY_CANONICAL_ENV_PATH="${OMEGA_CANONICAL_ENV_OUT:-artifacts/omega/canonical_key.env}"
+POLICY_STATUS_SCRIPT="${OMEGA_POLICY_STATUS_SCRIPT:-scripts/omega/omega_policy_status.sh}"
 
 if [ ! -f "$CONTRACT_PATH" ]; then
   echo "error: missing independence contract: $CONTRACT_PATH" >&2
@@ -115,50 +117,20 @@ if [ -f "bootstrap/policies/policy.v2.json" ]; then
 else
   POLICY_PATH="bootstrap/policies/policy.v1.json"
 fi
-POLICY_STATUS_PATH="$POLICY_PATH"
-
-prepare_policy_smoke() {
-  local souc_cmd="$1"
-  local prep_script="scripts/omega/omega_prepare_policy_smoke.sh"
-  if [ ! -x "$prep_script" ]; then
-    return 0
-  fi
-  if ! "$prep_script" \
-    --policy "$POLICY_PATH" \
-    --souc "$souc_cmd" \
-    --corpus "$POLICY_TRAIN_CORPUS" \
-    --out "$POLICY_SMOKE_OUTPUT" \
-    --env-out "$POLICY_SMOKE_ENV_PATH"; then
-    echo "policy smoke warning: signed-policy preparation failed, continuing with source policy"
-    return 0
-  fi
-  if [ -f "$POLICY_SMOKE_ENV_PATH" ]; then
-    # shellcheck disable=SC1090
-    source "$POLICY_SMOKE_ENV_PATH"
-  fi
-  POLICY_STATUS_PATH="${SOUNIO_POLICY_STATUS_PATH:-$POLICY_PATH}"
-}
 
 run_policy_smoke() {
   local cmd_prefix=("$@")
-  prepare_policy_smoke "${cmd_prefix[0]}"
-  set +e
-  local output
-  output="$(
-    SOUNIO_POLICY_VERIFY_KEY_PATH="${SOUNIO_POLICY_VERIFY_KEY_PATH:-}" \
-      "${cmd_prefix[@]}" opt policy status --policy "$POLICY_STATUS_PATH" 2>&1
-  )"
-  local code=$?
-  set -e
-  echo "$output"
-  if [ $code -ne 0 ]; then
-    return 0
+  if [ ! -x "$POLICY_STATUS_SCRIPT" ]; then
+    echo "error: policy status script not executable: $POLICY_STATUS_SCRIPT" >&2
+    exit 2
   fi
-  if [[ "$output" == *"unsupported optimization policy schema 'sounio.optimization.policy.v2': expected 'sounio.optimization.policy.v1'"* ]]; then
-    echo "policy smoke warning: binary appears stale for v2 schema; retrying via cargo run"
-    SOUNIO_POLICY_VERIFY_KEY_PATH="${SOUNIO_POLICY_VERIFY_KEY_PATH:-}" \
-      cargo run -p souc --bin souc -- opt policy status --policy "$POLICY_STATUS_PATH" || true
-  fi
+  "$POLICY_STATUS_SCRIPT" \
+    --policy "$POLICY_PATH" \
+    --souc "${cmd_prefix[0]}" \
+    --corpus "$POLICY_TRAIN_CORPUS" \
+    --canonical-env "$POLICY_CANONICAL_ENV_PATH" \
+    --smoke-env "$POLICY_SMOKE_ENV_PATH" \
+    --smoke-out "$POLICY_SMOKE_OUTPUT"
 }
 
 if [ -x "$SOUC_BIN" ] && "$SOUC_BIN" opt --help >/dev/null 2>&1; then

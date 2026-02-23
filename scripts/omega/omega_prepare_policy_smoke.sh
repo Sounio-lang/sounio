@@ -6,12 +6,12 @@ usage() {
 Usage: omega_prepare_policy_smoke.sh --policy <path> [options]
 
 Options:
-  --policy <path>      Source optimization policy path (required)
-  --souc <path>        souc binary/command (default: souc)
-  --corpus <path>      Corpus path for policy train signing (default: benchmarks/independence)
-  --out <path>         Signed policy output path (default: artifacts/omega/policy_status_smoke.v2.json)
-  --env-out <path>     Env export file path (default: artifacts/omega/policy_smoke.env)
-  --key-dir <path>     Local key directory for policy smoke signing (default: artifacts/omega/policy_keys)
+  --policy <path>          Source optimization policy path (required)
+  --souc <path>            souc binary/command (default: souc)
+  --corpus <path>          Corpus path for policy train signing (default: benchmarks/independence)
+  --out <path>             Signed policy output path (default: artifacts/omega/policy_status_smoke.v2.json)
+  --env-out <path>         Env export file path (default: artifacts/omega/policy_smoke.env)
+  --canonical-env <path>   Canonical key env path (default: artifacts/omega/canonical_key.env)
 EOF
 }
 
@@ -20,7 +20,7 @@ SOUC_BIN="souc"
 CORPUS_PATH="benchmarks/independence"
 OUT_PATH="artifacts/omega/policy_status_smoke.v2.json"
 ENV_OUT_PATH="artifacts/omega/policy_smoke.env"
-KEY_DIR="artifacts/omega/policy_keys"
+CANONICAL_ENV_PATH="artifacts/omega/canonical_key.env"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -44,8 +44,8 @@ while [ "$#" -gt 0 ]; do
       ENV_OUT_PATH="${2:-}"
       shift 2
       ;;
-    --key-dir)
-      KEY_DIR="${2:-}"
+    --canonical-env)
+      CANONICAL_ENV_PATH="${2:-}"
       shift 2
       ;;
     -h|--help)
@@ -77,8 +77,20 @@ if ! command -v "$SOUC_BIN" >/dev/null 2>&1 && [ ! -x "$SOUC_BIN" ]; then
   echo "error: souc command not found: $SOUC_BIN" >&2
   exit 2
 fi
-if ! command -v openssl >/dev/null 2>&1; then
-  echo "error: openssl is required for local policy smoke key generation" >&2
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CANONICAL_BOOTSTRAP_SCRIPT="${OMEGA_CANONICAL_BOOTSTRAP_SCRIPT:-$SCRIPT_DIR/omega_canonical_key_bootstrap.sh}"
+if [ ! -x "$CANONICAL_BOOTSTRAP_SCRIPT" ]; then
+  echo "error: canonical bootstrap script not executable: $CANONICAL_BOOTSTRAP_SCRIPT" >&2
+  exit 2
+fi
+
+"$CANONICAL_BOOTSTRAP_SCRIPT" --env-out "$CANONICAL_ENV_PATH" >/dev/null
+# shellcheck disable=SC1090
+source "$CANONICAL_ENV_PATH"
+
+if [ ! -f "$OMEGA_CANONICAL_PRIVKEY" ] || [ ! -f "$OMEGA_CANONICAL_PUBKEY" ]; then
+  echo "error: canonical key bootstrap did not produce required key files" >&2
   exit 2
 fi
 
@@ -108,6 +120,10 @@ mkdir -p "$(dirname "$OUT_PATH")"
 if [ "$POLICY_SCHEMA" != "sounio.optimization.policy.v2" ]; then
   cat >"$ENV_OUT_PATH" <<EOF
 export SOUNIO_POLICY_STATUS_PATH="$POLICY_PATH"
+export SOUNIO_POLICY_SIGNING_KEY_PATH="$OMEGA_CANONICAL_PRIVKEY"
+export SOUNIO_POLICY_VERIFY_KEY_PATH="$OMEGA_CANONICAL_PUBKEY"
+export OMEGA_CANONICAL_PUBKEY_FINGERPRINT="$OMEGA_CANONICAL_PUBKEY_FINGERPRINT"
+export OMEGA_CANONICAL_BOOTSTRAP_TIMESTAMP="$OMEGA_CANONICAL_BOOTSTRAP_TIMESTAMP"
 EOF
   echo "omega_prepare_policy_smoke: schema=$POLICY_SCHEMA -> passthrough policy=$POLICY_PATH"
   exit 0
@@ -118,64 +134,8 @@ if [ -z "$POLICY_ID" ] || [ -z "$POLICY_VERSION" ] || [ -z "$POLICY_MODE" ]; the
   exit 2
 fi
 
-PRIVATE_HEX_PATH="$KEY_DIR/local_ed25519_private.hex"
-PUBLIC_HEX_PATH="$KEY_DIR/local_ed25519_public.hex"
-
-ensure_policy_keypair() {
-  mkdir -p "$KEY_DIR"
-  if [ -s "$PRIVATE_HEX_PATH" ] && [ -s "$PUBLIC_HEX_PATH" ]; then
-    return 0
-  fi
-
-  local pem_path="$KEY_DIR/local_ed25519_private.pem"
-  local key_text_path="$KEY_DIR/local_ed25519_key.txt"
-  openssl genpkey -algorithm ED25519 -out "$pem_path" >/dev/null 2>&1
-  openssl pkey -in "$pem_path" -text -noout >"$key_text_path"
-
-  python3 - "$key_text_path" "$PRIVATE_HEX_PATH" "$PUBLIC_HEX_PATH" <<'PY'
-import re
-import sys
-from pathlib import Path
-
-src = Path(sys.argv[1]).read_text().splitlines()
-priv_out = Path(sys.argv[2])
-pub_out = Path(sys.argv[3])
-
-mode = None
-data = {"priv": [], "pub": []}
-for line in src:
-    chunk = line.strip().lower().rstrip(":")
-    if chunk == "priv":
-        mode = "priv"
-        continue
-    if chunk == "pub":
-        mode = "pub"
-        continue
-    if mode is None or not chunk:
-        continue
-    if not re.fullmatch(r"[0-9a-f:]+", chunk):
-        continue
-    token = chunk.replace(":", "")
-    if token:
-        data[mode].append(token)
-
-priv = "".join(data["priv"])
-pub = "".join(data["pub"])
-if len(priv) != 64 or len(pub) != 64:
-    raise SystemExit(
-        f"invalid generated Ed25519 key lengths: priv={len(priv)} pub={len(pub)}"
-    )
-priv_out.write_text(priv + "\n")
-pub_out.write_text(pub + "\n")
-PY
-
-  chmod 600 "$PRIVATE_HEX_PATH"
-}
-
-ensure_policy_keypair
-
-SOUNIO_POLICY_SIGNING_KEY_PATH="$PRIVATE_HEX_PATH" \
-SOUNIO_POLICY_VERIFY_KEY_PATH="$PUBLIC_HEX_PATH" \
+SOUNIO_POLICY_SIGNING_KEY_PATH="$OMEGA_CANONICAL_PRIVKEY" \
+SOUNIO_POLICY_VERIFY_KEY_PATH="$OMEGA_CANONICAL_PUBKEY" \
   "$SOUC_BIN" opt policy train \
   --corpus "$CORPUS_PATH" \
   --output "$OUT_PATH" \
@@ -183,13 +143,15 @@ SOUNIO_POLICY_VERIFY_KEY_PATH="$PUBLIC_HEX_PATH" \
   --policy-version "$POLICY_VERSION" \
   --mode "$POLICY_MODE" >/dev/null
 
-SOUNIO_POLICY_VERIFY_KEY_PATH="$PUBLIC_HEX_PATH" \
+SOUNIO_POLICY_VERIFY_KEY_PATH="$OMEGA_CANONICAL_PUBKEY" \
   "$SOUC_BIN" opt policy eval --policy "$OUT_PATH" >/dev/null
 
 cat >"$ENV_OUT_PATH" <<EOF
 export SOUNIO_POLICY_STATUS_PATH="$OUT_PATH"
-export SOUNIO_POLICY_SIGNING_KEY_PATH="$PRIVATE_HEX_PATH"
-export SOUNIO_POLICY_VERIFY_KEY_PATH="$PUBLIC_HEX_PATH"
+export SOUNIO_POLICY_SIGNING_KEY_PATH="$OMEGA_CANONICAL_PRIVKEY"
+export SOUNIO_POLICY_VERIFY_KEY_PATH="$OMEGA_CANONICAL_PUBKEY"
+export OMEGA_CANONICAL_PUBKEY_FINGERPRINT="$OMEGA_CANONICAL_PUBKEY_FINGERPRINT"
+export OMEGA_CANONICAL_BOOTSTRAP_TIMESTAMP="$OMEGA_CANONICAL_BOOTSTRAP_TIMESTAMP"
 EOF
 
-echo "omega_prepare_policy_smoke: source=$POLICY_PATH signed_policy=$OUT_PATH verify_key=$PUBLIC_HEX_PATH"
+echo "omega_prepare_policy_smoke: source=$POLICY_PATH signed_policy=$OUT_PATH verify_key=$OMEGA_CANONICAL_PUBKEY"
