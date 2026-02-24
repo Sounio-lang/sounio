@@ -277,8 +277,10 @@ OMEGA_REQUIRE_FPGA_PASS="${OMEGA_REQUIRE_FPGA_PASS:-0}" \
 OMEGA_REQUIRE_QUANTUM_CONTROLLER="${OMEGA_REQUIRE_QUANTUM_CONTROLLER:-0}" \
 OMEGA_REQUIRE_QUANTUM_ACCUM_LINK="${OMEGA_REQUIRE_QUANTUM_ACCUM_LINK:-1}" \
 OMEGA_REQUIRE_K_AXI="${OMEGA_REQUIRE_K_AXI:-0}" \
-OMEGA_REQUIRE_K_AXI_RETURN="${OMEGA_REQUIRE_K_AXI_RETURN:-0}" \
+OMEGA_REQUIRE_K_AXI_RETURN="${OMEGA_REQUIRE_K_AXI_RETURN:-1}" \
 OMEGA_REQUIRE_EPI_POWER_ACCUM="${OMEGA_REQUIRE_EPI_POWER_ACCUM:-1}" \
+OMEGA_REQUIRE_MERKLE_LANE="${OMEGA_REQUIRE_MERKLE_LANE:-1}" \
+OMEGA_REQUIRE_MERKLE_ROOT="${OMEGA_REQUIRE_MERKLE_ROOT:-1}" \
 OMEGA_REQUIRE_COUNTER_REPRO="${OMEGA_REQUIRE_COUNTER_REPRO:-1}" \
 OMEGA_REQUIRE_RESOURCE_TREND="${OMEGA_REQUIRE_RESOURCE_TREND:-1}" \
   bash scripts/run_fpga_epistemic_seed.sh
@@ -334,6 +336,341 @@ if [ "${OMEGA_REQUIRE_HW_EPI_POWER_TREND:-1}" = "1" ]; then
   fi
   python3 scripts/omega/omega_hw_epi_power_trend.py "${HW_EPI_TREND_ARGS[@]}"
   echo "HW_EPI_POWER_TREND_PASS" | tee -a "$GATE_LOG"
+fi
+
+if [ "${OMEGA_REQUIRE_QIR_EMITTER:-1}" = "1" ]; then
+  echo "==> omega sprint4 gate: full QIR emitter"
+  QIR_EMITTER_PATH="${OMEGA_QIR_FULL_EMITTER_PATH:-}"
+  if [ -z "$QIR_EMITTER_PATH" ]; then
+    if [ -f "hardware/rtl/qir/omega_genesis_emitter.sio" ]; then
+      QIR_EMITTER_PATH="hardware/rtl/qir/omega_genesis_emitter.sio"
+    else
+      QIR_EMITTER_PATH="hardware/rtl/qir/omega_full_qir_emitter.sio"
+    fi
+  fi
+  if [ ! -f "$QIR_EMITTER_PATH" ]; then
+    echo "error: full QIR emitter missing: $QIR_EMITTER_PATH" >&2
+    exit 2
+  fi
+  if [ "${OMEGA_REQUIRE_QIR_GENESIS_EMITTER:-1}" = "1" ] \
+    && [ "$QIR_EMITTER_PATH" != "hardware/rtl/qir/omega_genesis_emitter.sio" ]; then
+    echo "error: genesis QIR emitter required but active emitter is $QIR_EMITTER_PATH" >&2
+    exit 2
+  fi
+  python3 - "$QIR_EMITTER_PATH" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+text = path.read_text()
+required_symbols = (
+    "omega_qir_emit_shim",
+    "omega_qir_emit_quantum_controller",
+    "omega_qir_emit_bundle",
+    "omega_qir_full_emitter_self_check",
+    "selfhost-emitter",
+)
+for symbol in required_symbols:
+    if symbol not in text:
+        raise SystemExit(f"missing required symbol in {path}: {symbol}")
+if "template-direct" in text:
+    raise SystemExit(f"{path}: template-direct fallback is not allowed")
+print(f"qir_emitter_check: pass path={path}")
+PY
+
+  if [ -f "bootstrap/policies/policy.v2.json" ]; then
+    QIR_POLICY_PATH="bootstrap/policies/policy.v2.json"
+  else
+    QIR_POLICY_PATH="bootstrap/policies/policy.v1.json"
+  fi
+  QIR_SOUC_BIN="${OMEGA_POLICY_SOUC_BIN:-$ROOT_DIR/souc}"
+  set +e
+  QIR_EVAL_OUTPUT="$(
+    SOUNIO_POLICY_VERIFY_KEY_PATH="${OMEGA_CANONICAL_PUBKEY:-keys/bootstrap_ed25519.pub}" \
+      "$QIR_SOUC_BIN" opt policy eval --policy "$QIR_POLICY_PATH" 2>&1
+  )"
+  QIR_EVAL_RC=$?
+  set -e
+  echo "$QIR_EVAL_OUTPUT"
+  if [ "$QIR_EVAL_RC" -ne 0 ]; then
+    echo "error: souc opt policy eval failed for QIR emitter check" >&2
+    exit "$QIR_EVAL_RC"
+  fi
+  if ! grep -q "opt policy qir-emitter: status=pass" <<<"$QIR_EVAL_OUTPUT"; then
+    echo "error: opt policy eval did not report qir-emitter pass status" >&2
+    exit 2
+  fi
+  echo "QIR_EMITTER_PASS" | tee -a "$GATE_LOG"
+  echo "QIR_GENESIS_EMITTER_PASS" | tee -a "$GATE_LOG"
+fi
+
+if [ "${OMEGA_REQUIRE_EPI_POWER_LIVE:-1}" = "1" ]; then
+  echo "==> omega sprint3 gate: QIR epistemic power .sio live module"
+  QIR_SIO="hardware/rtl/qir/omega_epistemic_power.sio"
+  HW_EPI_LIVE_ART="artifacts/fpga/hardware_epistemic_power_live.v1.json"
+  if [ ! -f "$QIR_SIO" ]; then
+    echo "error: QIR epistemic power .sio module missing: $QIR_SIO" >&2
+    exit 2
+  fi
+  if [ ! -f "$HW_EPI_LIVE_ART" ]; then
+    echo "error: hardware epistemic power live artifact missing: $HW_EPI_LIVE_ART" >&2
+    exit 2
+  fi
+  python3 - "$QIR_SIO" "$HW_EPI_LIVE_ART" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+sio_path = Path(sys.argv[1])
+art_path = Path(sys.argv[2])
+content = sio_path.read_text()
+for fn in (
+    "qir_epi_power_hw_q32_32",
+    "qir_epi_power_variance_q32_32",
+    "qir_epi_power_poll_overhead_us",
+    "qir_epi_power_live_conformant_v2",
+):
+    if fn not in content:
+        print(f"error: QIR module missing required fn {fn}", file=sys.stderr)
+        sys.exit(2)
+payload = json.loads(art_path.read_text())
+conformant = payload.get("live_read_conformant", False)
+variance_q32_32 = payload.get("hardware_epistemic_power_variance_q32_32", None)
+poll_overhead_us = payload.get("poll_overhead_us", None)
+if not conformant:
+    print(f"error: live_read_conformant=false in {art_path}", file=sys.stderr)
+    sys.exit(2)
+if not isinstance(variance_q32_32, int) or variance_q32_32 < 0:
+    print(
+        f"error: hardware_epistemic_power_variance_q32_32 invalid in {art_path}: {variance_q32_32!r}",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+if not isinstance(poll_overhead_us, int) or poll_overhead_us < 0 or poll_overhead_us >= 1000:
+    print(
+        f"error: poll_overhead_us must be <1000 in {art_path}: {poll_overhead_us!r}",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+print(
+    "QIR epi power .sio module OK "
+    f"conformant={str(conformant).lower()} "
+    f"variance_q32_32={variance_q32_32} "
+    f"poll_overhead_us={poll_overhead_us}"
+)
+PY
+  echo "EPI_POWER_LIVE_PASS" | tee -a "$GATE_LOG"
+fi
+
+if [ "${OMEGA_REQUIRE_MERKLE_LANE:-1}" = "1" ]; then
+  echo "==> omega sprint4 gate: K-AXI Merkle lane"
+  MERKLE_SIO="hardware/rtl/kaxi/merkle_lane.sio"
+  MERKLE_RTL="hardware/fpga/k_axi_merkle_lane.v"
+  MERKLE_ROOT_SIO="${OMEGA_MERKLE_ROOT_SIO_PATH:-hardware/rtl/kaxi/merkle_root_lane.sio}"
+  MERKLE_ROOT_RTL="${OMEGA_MERKLE_ROOT_RTL_PATH:-hardware/fpga/k_axi_merkle_root_lane.v}"
+  FPGA_REPORT="artifacts/fpga/fpga_seed_report.json"
+  if [ ! -f "$MERKLE_SIO" ]; then
+    echo "error: missing Merkle lane .sio adapter: $MERKLE_SIO" >&2
+    exit 2
+  fi
+  if [ ! -f "$MERKLE_RTL" ]; then
+    echo "error: missing Merkle lane RTL: $MERKLE_RTL" >&2
+    exit 2
+  fi
+  if [ ! -f "$FPGA_REPORT" ]; then
+    echo "error: missing FPGA report for Merkle lane check: $FPGA_REPORT" >&2
+    exit 2
+  fi
+  if ! rg -q "merkle_lane_root_l64" "$MERKLE_SIO"; then
+    echo "error: Merkle lane .sio missing merkle_lane_root_l64" >&2
+    exit 2
+  fi
+  if ! rg -q "merkle_lane_verify_root" "$MERKLE_SIO"; then
+    echo "error: Merkle lane .sio missing merkle_lane_verify_root" >&2
+    exit 2
+  fi
+  if ! rg -q "module k_axi_merkle_lane_core" "$MERKLE_RTL"; then
+    echo "error: Merkle lane RTL missing module k_axi_merkle_lane_core" >&2
+    exit 2
+  fi
+  if [ ! -f "$MERKLE_ROOT_SIO" ]; then
+    echo "error: missing Merkle root .sio adapter: $MERKLE_ROOT_SIO" >&2
+    exit 2
+  fi
+  if [ ! -f "$MERKLE_ROOT_RTL" ]; then
+    echo "error: missing Merkle root RTL: $MERKLE_ROOT_RTL" >&2
+    exit 2
+  fi
+  if ! rg -q "merkle_root_lane_l64" "$MERKLE_ROOT_SIO"; then
+    echo "error: Merkle root .sio missing merkle_root_lane_l64" >&2
+    exit 2
+  fi
+  if ! rg -q "merkle_root_verify_l64" "$MERKLE_ROOT_SIO"; then
+    echo "error: Merkle root .sio missing merkle_root_verify_l64" >&2
+    exit 2
+  fi
+  if ! rg -q "module k_axi_merkle_root_lane_core" "$MERKLE_ROOT_RTL"; then
+    echo "error: Merkle root RTL missing module k_axi_merkle_root_lane_core" >&2
+    exit 2
+  fi
+  python3 - "$FPGA_REPORT" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text())
+if payload.get("merkle_lane_present") is not True:
+    raise SystemExit("merkle_lane_present must be true")
+if payload.get("merkle_lane_core_rtl_present") is not True:
+    raise SystemExit("merkle_lane_core_rtl_present must be true")
+status = payload.get("merkle_lane_synth_status")
+if status != "pass":
+    raise SystemExit(f"merkle_lane_synth_status={status!r} (expected pass)")
+root_status = payload.get("merkle_root_synth_status")
+if root_status != "pass":
+    raise SystemExit(f"merkle_root_synth_status={root_status!r} (expected pass)")
+if payload.get("merkle_root_core_rtl_present") is not True:
+    raise SystemExit("merkle_root_core_rtl_present must be true")
+print(
+    "merkle_lane_check: "
+    f"present={payload.get('merkle_lane_present')} "
+    f"core_rtl={payload.get('merkle_lane_core_rtl_present')} "
+    f"synth={status} "
+    f"root_core_rtl={payload.get('merkle_root_core_rtl_present')} "
+    f"root_synth={root_status}"
+)
+PY
+  echo "MERKLE_LANE_PASS" | tee -a "$GATE_LOG"
+  echo "MERKLE_ROOT_PASS" | tee -a "$GATE_LOG"
+fi
+
+if [ "${OMEGA_REQUIRE_BIDIR_KAXI:-1}" = "1" ]; then
+  echo "==> omega sprint3 gate: bidirectional K-AXI return channel"
+  FPGA_REPORT="artifacts/fpga/fpga_seed_report.json"
+  BIDIR_ADAPTER_SIO="hardware/rtl/kaxi/bidirectional_return_adapter.sio"
+  BIDIR_WAVE="artifacts/fpga/waveforms/tb_k_axi_bidirectional.vcd"
+  if [ ! -f "$FPGA_REPORT" ]; then
+    echo "error: FPGA seed report missing: $FPGA_REPORT" >&2
+    exit 2
+  fi
+  if [ ! -f "$BIDIR_ADAPTER_SIO" ]; then
+    echo "error: bidirectional K-AXI adapter missing: $BIDIR_ADAPTER_SIO" >&2
+    exit 2
+  fi
+  if [ ! -f "$BIDIR_WAVE" ]; then
+    echo "error: bidirectional K-AXI waveform missing: $BIDIR_WAVE" >&2
+    exit 2
+  fi
+  if ! rg -q "kaxi_bidir_pack_header" "$BIDIR_ADAPTER_SIO"; then
+    echo "error: bidirectional K-AXI adapter missing kaxi_bidir_pack_header" >&2
+    exit 2
+  fi
+  if ! rg -q "kaxi_bidir_replay_inspect" "$BIDIR_ADAPTER_SIO"; then
+    echo "error: bidirectional K-AXI adapter missing kaxi_bidir_replay_inspect" >&2
+    exit 2
+  fi
+  python3 - "$FPGA_REPORT" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text())
+sim = payload.get("k_axi_return_sim_status", "")
+synth = payload.get("k_axi_return_synth_status", "")
+if sim != "pass":
+    print(f"error: k_axi_return_sim_status={sim!r} (expected pass)", file=sys.stderr)
+    sys.exit(2)
+if synth != "pass":
+    print(f"error: k_axi_return_synth_status={synth!r} (expected pass)", file=sys.stderr)
+    sys.exit(2)
+print(f"K-AXI bidirectional return: sim={sim} synth={synth}")
+PY
+  echo "BIDIR_KAXI_PASS" | tee -a "$GATE_LOG"
+fi
+
+if [ "${OMEGA_REQUIRE_ACCUMULATOR_BOUNDS:-1}" = "1" ]; then
+  echo "==> omega sprint3 gate: accumulator formal bounds"
+  BOUNDS_SIO="tests/hardware/accumulator_bounds_test.sio"
+  if [ ! -f "$BOUNDS_SIO" ]; then
+    echo "error: accumulator bounds test missing: $BOUNDS_SIO" >&2
+    exit 2
+  fi
+  SOUC_BIN="${OMEGA_POLICY_SOUC_BIN:-$ROOT_DIR/souc}"
+  BOUNDS_OUT="$(PATH="$ROOT_DIR:$PATH" "$SOUC_BIN" run "$BOUNDS_SIO" 2>&1)"
+  echo "$BOUNDS_OUT"
+  if ! grep -q "ACCUMULATOR_BOUNDS_PASS" <<<"$BOUNDS_OUT"; then
+    echo "error: accumulator_bounds_test.sio did not emit ACCUMULATOR_BOUNDS_PASS" >&2
+    exit 2
+  fi
+  ACCUM_WAVE="artifacts/fpga/waveforms/tb_epistemic_power_accumulator.vcd"
+  if [ ! -f "$ACCUM_WAVE" ]; then
+    echo "error: accumulator waveform missing: $ACCUM_WAVE" >&2
+    exit 2
+  fi
+  echo "ACCUMULATOR_BOUNDS_PASS" | tee -a "$GATE_LOG"
+fi
+
+if [ "${OMEGA_REQUIRE_RESOURCE_TREND:-1}" = "1" ]; then
+  echo "==> omega sprint4 gate: hardware resource trend"
+  RESOURCE_TREND_PATH="${OMEGA_HW_RESOURCE_TREND_PATH:-artifacts/fpga/hardware_resource_trend.v2.json}"
+  if [ ! -f "$RESOURCE_TREND_PATH" ]; then
+    echo "error: hardware resource trend artifact missing: $RESOURCE_TREND_PATH" >&2
+    exit 2
+  fi
+  python3 - "$RESOURCE_TREND_PATH" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+payload = json.loads(path.read_text())
+runs = payload.get("runs")
+if not isinstance(runs, list) or not runs:
+    raise SystemExit(f"{path}: runs missing or empty")
+last = runs[-1]
+if not isinstance(last, dict):
+    raise SystemExit(f"{path}: latest run must be object")
+modules = last.get("modules")
+if not isinstance(modules, dict) or len(modules) < 3:
+    raise SystemExit(f"{path}: latest run modules missing or too small")
+status = payload.get("last_status")
+if status not in ("pass", "bootstrap"):
+    raise SystemExit(f"{path}: last_status must be pass/bootstrap, got {status!r}")
+max_drift = payload.get("last_max_relative_drift")
+threshold = payload.get("drift_threshold", 0.05)
+if not isinstance(max_drift, (int, float)):
+    raise SystemExit(f"{path}: last_max_relative_drift missing")
+if not isinstance(threshold, (int, float)):
+    raise SystemExit(f"{path}: drift_threshold missing")
+if float(max_drift) > float(threshold):
+    raise SystemExit(
+        f"{path}: max drift {float(max_drift):.6f} exceeds threshold {float(threshold):.6f}"
+    )
+print(
+    f"resource_trend_check: status={status} "
+    f"max_relative_drift={float(max_drift):.6f} "
+    f"threshold={float(threshold):.6f} "
+    f"modules={len(modules)}"
+)
+PY
+  echo "RESOURCE_TREND_GATE_PASS" | tee -a "$GATE_LOG"
+  echo "RESOURCE_ZERO_DRIFT_PASS" | tee -a "$GATE_LOG"
+fi
+
+if [ "${OMEGA_REQUIRE_GENESIS_MANIFEST:-1}" = "1" ]; then
+  echo "==> omega sprint4 gate: genesis manifest release"
+  GENESIS_ARGS=(
+    --gate-log "$GATE_LOG"
+    --canonical-privkey "${OMEGA_CANONICAL_PRIVKEY:-keys/bootstrap_ed25519}"
+    --canonical-pubkey "${OMEGA_CANONICAL_PUBKEY:-keys/bootstrap_ed25519.pub}"
+    --canonical-timestamp "${OMEGA_CANONICAL_BOOTSTRAP_TIMESTAMP_PATH:-keys/bootstrap_ed25519.created_at}"
+    --out "${OMEGA_GENESIS_MANIFEST_OUT:-artifacts/omega/omega_genesis.v1.0.json}"
+  )
+  if [ "${OMEGA_REQUIRE_GENESIS_MANIFEST_STRICT:-1}" = "1" ]; then
+    GENESIS_ARGS+=(--strict)
+  fi
+  python3 scripts/omega/omega_genesis_manifest.py "${GENESIS_ARGS[@]}"
+  echo "OMEGA_GENESIS_V1_RELEASE_PASS" | tee -a "$GATE_LOG"
 fi
 
 if [ "${OMEGA_REQUIRE_SHADOW_AUDIT:-1}" = "1" ]; then
@@ -662,6 +999,11 @@ if [ "${OMEGA_REQUIRE_GOVERNANCE_ATTESTATION:-1}" = "1" ]; then
     --canonical-timestamp "${OMEGA_CANONICAL_BOOTSTRAP_TIMESTAMP_PATH:-keys/bootstrap_ed25519.created_at}"
     --policy "${RL_POLICY_PATH:-bootstrap/policies/policy.v2.json}"
     --baseline-freeze "${OMEGA_BASELINE_FREEZE_OUT:-artifacts/omega/baseline_freeze.v1.json}"
+    --resource-trend "${OMEGA_HW_RESOURCE_TREND_PATH:-artifacts/fpga/hardware_resource_trend.v2.json}"
+    --qir-emitter "${OMEGA_QIR_FULL_EMITTER_PATH:-hardware/rtl/qir/omega_genesis_emitter.sio}"
+    --merkle-sio "${OMEGA_MERKLE_ROOT_SIO_PATH:-hardware/rtl/kaxi/merkle_root_lane.sio}"
+    --merkle-rtl "${OMEGA_MERKLE_ROOT_RTL_PATH:-hardware/fpga/k_axi_merkle_root_lane.v}"
+    --genesis-manifest "${OMEGA_GENESIS_MANIFEST_OUT:-artifacts/omega/omega_genesis.v1.0.json}"
     --key-id "${OMEGA_GOVERNANCE_ATTEST_KEY_ID:-canonical-bootstrap-ed25519}"
     --require-signature
   )
@@ -719,6 +1061,14 @@ if [ "${OMEGA_REQUIRE_HW_TELEMETRY_REGRESSION:-1}" = "1" ]; then
   OMEGA_REQUIRE_GOVERNANCE_ATTESTATION="${OMEGA_REQUIRE_GOVERNANCE_ATTESTATION:-1}"
   OMEGA_REQUIRE_SPRINT1_RELEASE_READINESS="${OMEGA_REQUIRE_SPRINT1_RELEASE_READINESS:-1}"
   OMEGA_REQUIRE_SPRINT1_SUCCESS_CRITERIA_NOW="${OMEGA_REQUIRE_SPRINT1_SUCCESS_CRITERIA_NOW:-1}"
+  OMEGA_REQUIRE_BIDIR_KAXI="${OMEGA_REQUIRE_BIDIR_KAXI:-1}"
+  OMEGA_REQUIRE_ACCUMULATOR_BOUNDS="${OMEGA_REQUIRE_ACCUMULATOR_BOUNDS:-1}"
+  OMEGA_REQUIRE_EPI_POWER_LIVE="${OMEGA_REQUIRE_EPI_POWER_LIVE:-1}"
+  OMEGA_REQUIRE_QIR_EMITTER="${OMEGA_REQUIRE_QIR_EMITTER:-1}"
+  OMEGA_REQUIRE_MERKLE_LANE="${OMEGA_REQUIRE_MERKLE_LANE:-1}"
+  OMEGA_REQUIRE_MERKLE_ROOT="${OMEGA_REQUIRE_MERKLE_ROOT:-1}"
+  OMEGA_REQUIRE_GENESIS_MANIFEST="${OMEGA_REQUIRE_GENESIS_MANIFEST:-1}"
+  OMEGA_REQUIRE_RESOURCE_TREND="${OMEGA_REQUIRE_RESOURCE_TREND:-1}"
   HW_TELEMETRY_ARGS=()
   if [ "${OMEGA_HW_TELEMETRY_REGRESSION_STRICT:-0}" = "1" ]; then
     HW_TELEMETRY_ARGS+=(--strict)
@@ -736,6 +1086,14 @@ if [ "${OMEGA_REQUIRE_HW_TELEMETRY_REGRESSION:-1}" = "1" ]; then
   OMEGA_REQUIRE_GOVERNANCE_ATTESTATION="$OMEGA_REQUIRE_GOVERNANCE_ATTESTATION" \
   OMEGA_REQUIRE_SPRINT1_RELEASE_READINESS="$OMEGA_REQUIRE_SPRINT1_RELEASE_READINESS" \
   OMEGA_REQUIRE_SPRINT1_SUCCESS_CRITERIA_NOW="$OMEGA_REQUIRE_SPRINT1_SUCCESS_CRITERIA_NOW" \
+  OMEGA_REQUIRE_BIDIR_KAXI="$OMEGA_REQUIRE_BIDIR_KAXI" \
+  OMEGA_REQUIRE_ACCUMULATOR_BOUNDS="$OMEGA_REQUIRE_ACCUMULATOR_BOUNDS" \
+  OMEGA_REQUIRE_EPI_POWER_LIVE="$OMEGA_REQUIRE_EPI_POWER_LIVE" \
+  OMEGA_REQUIRE_QIR_EMITTER="$OMEGA_REQUIRE_QIR_EMITTER" \
+  OMEGA_REQUIRE_MERKLE_LANE="$OMEGA_REQUIRE_MERKLE_LANE" \
+  OMEGA_REQUIRE_MERKLE_ROOT="$OMEGA_REQUIRE_MERKLE_ROOT" \
+  OMEGA_REQUIRE_GENESIS_MANIFEST="$OMEGA_REQUIRE_GENESIS_MANIFEST" \
+  OMEGA_REQUIRE_RESOURCE_TREND="$OMEGA_REQUIRE_RESOURCE_TREND" \
     python3 scripts/omega/omega_hardware_telemetry_regression.py "${HW_TELEMETRY_ARGS[@]}"
   echo "HW_TELEMETRY_REGRESSION_PASS" | tee -a "$GATE_LOG"
 else

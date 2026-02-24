@@ -15,7 +15,7 @@ FPGA_REPORT_PATH = Path("artifacts/fpga/fpga_seed_report.json")
 QUANTUM_CONFORMANCE_PATH = Path("artifacts/quantum/omega/quantum_conformance.json")
 PURE_KAXI_MARKER_PATH = Path("artifacts/.pure_sounio_kaxi_generated")
 HARDWARE_COUNTER_REPRO_PATH = Path("artifacts/fpga/hardware_counter_repro.v1.json")
-HARDWARE_RESOURCE_TREND_PATH = Path("artifacts/fpga/hardware_resource_trend.v1.json")
+HARDWARE_RESOURCE_TREND_PATH = Path("artifacts/fpga/hardware_resource_trend.v2.json")
 PTX_LAUNCH_REPORT_PATH = Path("artifacts/ptx/omega/ptx_launch_report.json")
 HW_EPI_POWER_LIVE_PATH = Path("artifacts/fpga/hardware_epistemic_power_live.v1.json")
 HW_EPI_POWER_TREND_PATH = Path("artifacts/fpga/hardware_epistemic_power_live_trend.v1.json")
@@ -26,15 +26,28 @@ RL_READINESS_TREND_PATH = Path("artifacts/omega/rl_readiness_trend.v1.json")
 POLICY_MODE_GUARD_PATH = Path("artifacts/omega/policy_mode_guard.v1.json")
 RL_READINESS_REPLAY_PATH = Path("artifacts/omega/rl_readiness_replay.v1.json")
 GOVERNANCE_ATTESTATION_PATH = Path("artifacts/omega/governance_attestation.v1.json")
+GENESIS_MANIFEST_PATH = Path("artifacts/omega/omega_genesis.v1.0.json")
 SPRINT1_RELEASE_READINESS_PATH = Path("artifacts/omega/sprint1_release_readiness.v1.json")
 PERFORMANCE_SUMMARY_PATH = Path("artifacts/omega/performance_summary.v1.json")
 EXTERNAL_BASELINE_COLLECTION_PATH = Path("artifacts/omega/external_baseline_collection.v1.json")
 BASELINE_FREEZE_PATH = Path("artifacts/omega/baseline_freeze.v1.json")
+QIR_EPI_POWER_SIO_PATH = Path("hardware/rtl/qir/omega_epistemic_power.sio")
+QIR_FULL_EMITTER_SIO_PATH = Path("hardware/rtl/qir/omega_full_qir_emitter.sio")
+BIDIR_KAXI_ADAPTER_SIO_PATH = Path("hardware/rtl/kaxi/bidirectional_return_adapter.sio")
+MERKLE_LANE_SIO_PATH = Path("hardware/rtl/kaxi/merkle_lane.sio")
+MERKLE_LANE_RTL_PATH = Path("hardware/fpga/k_axi_merkle_lane.v")
+MERKLE_ROOT_SIO_PATH = Path("hardware/rtl/kaxi/merkle_root_lane.sio")
+MERKLE_ROOT_RTL_PATH = Path("hardware/fpga/k_axi_merkle_root_lane.v")
+BIDIR_KAXI_WAVEFORM_PATH = Path("artifacts/fpga/waveforms/tb_k_axi_bidirectional.vcd")
+ACCUMULATOR_WAVEFORM_PATH = Path(
+    "artifacts/fpga/waveforms/tb_epistemic_power_accumulator.vcd"
+)
+ACCUMULATOR_BOUNDS_TEST_PATH = Path("tests/hardware/accumulator_bounds_test.sio")
 
 FPGA_REPORT_SCHEMA = "sounio.omega.fpga-seed-report.v1"
 QUANTUM_CONFORMANCE_SCHEMA = "sounio.quantum.conformance.v1"
 HARDWARE_COUNTER_REPRO_SCHEMA = "sounio.omega.hardware-counter-repro.v1"
-HARDWARE_RESOURCE_TREND_SCHEMA = "sounio.omega.hardware-resource-trend.v1"
+HARDWARE_RESOURCE_TREND_SCHEMA = "sounio.omega.hardware-resource-trend.v2"
 PTX_LAUNCH_REPORT_SCHEMA = "sounio.omega.ptx-launch-report.v1"
 HW_EPI_POWER_LIVE_SCHEMA = "sounio.omega.hardware-epistemic-power-live.v1"
 HW_EPI_POWER_TREND_SCHEMA = "sounio.omega.hardware-epistemic-power-live-trend.v1"
@@ -44,6 +57,7 @@ RL_READINESS_TREND_SCHEMA = "sounio.omega.rl-readiness-trend.v1"
 POLICY_MODE_GUARD_SCHEMA = "sounio.omega.policy-mode-guard.v1"
 RL_READINESS_REPLAY_SCHEMA = "sounio.omega.rl-readiness-replay.v1"
 GOVERNANCE_ATTESTATION_SCHEMA = "sounio.omega.governance-attestation.v1"
+GENESIS_MANIFEST_SCHEMA = "sounio.omega.genesis.v1.0"
 SPRINT1_RELEASE_READINESS_SCHEMA = "sounio.omega.sprint1-release-readiness.v1"
 PERFORMANCE_SUMMARY_SCHEMA = "sounio.omega.performance-summary.v1"
 EXTERNAL_BASELINE_COLLECTION_SCHEMA = "sounio.omega.external-baseline-collection.v1"
@@ -109,6 +123,8 @@ def validate_fpga_report(path: Path, errors: List[str], strict: bool = False) ->
         "k_axi_return_synth_status",
         "epistemic_power_accumulator_sim_status",
         "epistemic_power_accumulator_synth_status",
+        "merkle_lane_synth_status",
+        "merkle_root_synth_status",
         "hardware_counter_repro_status",
         "hardware_resource_trend_status",
     )
@@ -121,6 +137,8 @@ def validate_fpga_report(path: Path, errors: List[str], strict: bool = False) ->
 
     required_bool_fields = (
         "merkle_lane_present",
+        "merkle_lane_core_rtl_present",
+        "merkle_root_core_rtl_present",
         "quantum_controller_lane_present",
     )
     for field in required_bool_fields:
@@ -129,6 +147,13 @@ def validate_fpga_report(path: Path, errors: List[str], strict: bool = False) ->
             continue
         if not isinstance(payload[field], bool):
             errors.append(f"{path}: field {field} must be a bool")
+
+    waveform_paths = payload.get("waveform_paths")
+    if waveform_paths is not None and not isinstance(waveform_paths, list):
+        errors.append(f"{path}: waveform_paths must be a list when present")
+    waveforms_present = payload.get("waveforms_present")
+    if waveforms_present is not None and not isinstance(waveforms_present, bool):
+        errors.append(f"{path}: waveforms_present must be bool when present")
 
     if strict:
         for field in required_bool_fields:
@@ -150,11 +175,27 @@ def validate_fpga_report(path: Path, errors: List[str], strict: bool = False) ->
             )
         if (
             "hardware_resource_trend_status" in payload
-            and payload["hardware_resource_trend_status"] != "pass"
+            and payload["hardware_resource_trend_status"] not in ("pass", "bootstrap")
         ):
             errors.append(
-                f"{path}: hardware_resource_trend_status must be pass in --strict mode (got {payload['hardware_resource_trend_status']})"
+                f"{path}: hardware_resource_trend_status must be pass/bootstrap in --strict mode (got {payload['hardware_resource_trend_status']})"
             )
+        if (
+            "merkle_lane_synth_status" in payload
+            and payload["merkle_lane_synth_status"] != "pass"
+        ):
+            errors.append(
+                f"{path}: merkle_lane_synth_status must be pass in --strict mode (got {payload['merkle_lane_synth_status']})"
+            )
+        if (
+            "merkle_root_synth_status" in payload
+            and payload["merkle_root_synth_status"] != "pass"
+        ):
+            errors.append(
+                f"{path}: merkle_root_synth_status must be pass in --strict mode (got {payload['merkle_root_synth_status']})"
+            )
+        if "waveforms_present" in payload and payload["waveforms_present"] is not True:
+            errors.append(f"{path}: waveforms_present must be true in --strict mode")
 
 
 def validate_quantum_conformance(path: Path, errors: List[str], strict: bool) -> None:
@@ -266,16 +307,38 @@ def validate_resource_trend(path: Path, errors: List[str], strict: bool) -> None
     if not runs:
         return
 
+    drift_threshold = payload.get("drift_threshold")
+    if not is_number(drift_threshold):
+        errors.append(f"{path}: drift_threshold must be numeric")
+        drift_threshold = 0.05
+    else:
+        drift_threshold = float(drift_threshold)
+
+    last_status = payload.get("last_status")
+    if not isinstance(last_status, str) or not last_status:
+        errors.append(f"{path}: last_status must be non-empty string")
+    elif last_status not in ("bootstrap", "pass", "drift", "incomplete"):
+        errors.append(f"{path}: invalid last_status {last_status!r}")
+
+    last_max_relative_drift = payload.get("last_max_relative_drift")
+    if not is_number(last_max_relative_drift):
+        errors.append(f"{path}: last_max_relative_drift must be numeric")
+    else:
+        last_max_relative_drift = float(last_max_relative_drift)
+
     latest = runs[-1]
     if not isinstance(latest, dict):
         errors.append(f"{path}: latest run entry must be an object")
         return
+
     modules = latest.get("modules")
     if not isinstance(modules, dict):
         errors.append(f"{path}: latest run modules must be an object")
         return
+
     if strict and len(modules) < 3:
         errors.append(f"{path}: latest run modules must have >=3 modules in --strict mode")
+
     for module_name, stats in modules.items():
         if not isinstance(module_name, str) or not module_name:
             errors.append(f"{path}: invalid module key: {module_name!r}")
@@ -289,6 +352,38 @@ def validate_resource_trend(path: Path, errors: List[str], strict: bool) -> None
                 continue
             if not isinstance(stats[field], int):
                 errors.append(f"{path}: module {module_name} field {field} must be int")
+
+    run_status = latest.get("status")
+    if not isinstance(run_status, str):
+        errors.append(f"{path}: latest run status must be string")
+    elif run_status not in ("bootstrap", "pass", "drift", "incomplete"):
+        errors.append(f"{path}: latest run status has invalid value {run_status!r}")
+
+    run_max_drift = latest.get("max_relative_drift")
+    if not is_number(run_max_drift):
+        errors.append(f"{path}: latest run max_relative_drift must be numeric")
+    else:
+        run_max_drift = float(run_max_drift)
+        if run_max_drift < 0.0:
+            errors.append(f"{path}: latest run max_relative_drift must be >= 0")
+
+    compared_points = latest.get("compared_points")
+    if compared_points is not None and not isinstance(compared_points, int):
+        errors.append(f"{path}: latest run compared_points must be int when present")
+    for list_field in ("new_modules", "removed_modules"):
+        value = latest.get(list_field)
+        if value is not None and not isinstance(value, list):
+            errors.append(f"{path}: latest run {list_field} must be list when present")
+
+    if strict:
+        if isinstance(last_status, str) and last_status not in ("pass", "bootstrap"):
+            errors.append(
+                f"{path}: last_status must be pass/bootstrap in --strict mode (got {last_status!r})"
+            )
+        if is_number(last_max_relative_drift) and float(last_max_relative_drift) > drift_threshold:
+            errors.append(
+                f"{path}: last_max_relative_drift {float(last_max_relative_drift):.6f} exceeds drift_threshold {drift_threshold:.6f} in --strict mode"
+            )
 
 
 def validate_ptx_launch_report(path: Path, errors: List[str], strict: bool) -> None:
@@ -377,6 +472,8 @@ def validate_hw_epi_power_live(path: Path, errors: List[str], strict: bool) -> N
         "hardware_epistemic_power_log_q32_32",
         "software_epistemic_power_log_q32_32",
         "hybrid_epistemic_power_log_q32_32",
+        "hardware_epistemic_power_variance_q32_32",
+        "poll_overhead_us",
     )
 
     for field in required_status_fields:
@@ -422,6 +519,16 @@ def validate_hw_epi_power_live(path: Path, errors: List[str], strict: bool) -> N
             errors.append(f"{path}: used_fallback must be false in --strict mode")
         if payload.get("live_read_conformant") is not True:
             errors.append(f"{path}: live_read_conformant must be true in --strict mode")
+        variance = payload.get("hardware_epistemic_power_variance_q32_32")
+        if isinstance(variance, int) and variance < 0:
+            errors.append(
+                f"{path}: hardware_epistemic_power_variance_q32_32 must be >=0 in --strict mode"
+            )
+        overhead = payload.get("poll_overhead_us")
+        if not isinstance(overhead, int):
+            errors.append(f"{path}: poll_overhead_us must be int in --strict mode")
+        elif overhead < 0 or overhead >= 1000:
+            errors.append(f"{path}: poll_overhead_us must be in [0,1000) in --strict mode")
         if isinstance(symbols, dict):
             for symbol in ("g_epistemic_power_log_hw_q32_32", "g_kaxi_ring"):
                 if symbols.get(symbol) is not True:
@@ -816,6 +923,46 @@ def validate_governance_attestation(path: Path, errors: List[str], strict: bool)
     pinned_digest_match = payload.get("pinned_digest_match")
     if pinned_digest_match is not None and not isinstance(pinned_digest_match, bool):
         errors.append(f"{path}: pinned_digest_match must be bool when present")
+    hw_variance = payload.get("hardware_epistemic_power_variance_q32_32")
+    if hw_variance is not None:
+        if not isinstance(hw_variance, str):
+            errors.append(
+                f"{path}: hardware_epistemic_power_variance_q32_32 must be string when present"
+            )
+    hw_poll_overhead = payload.get("hardware_poll_overhead_us")
+    if hw_poll_overhead is not None and not isinstance(hw_poll_overhead, int):
+        errors.append(f"{path}: hardware_poll_overhead_us must be int when present")
+    bidir_pass = payload.get("bidir_kaxi_pass")
+    if bidir_pass is not None and not isinstance(bidir_pass, bool):
+        errors.append(f"{path}: bidir_kaxi_pass must be bool when present")
+    merkle_lane_pass = payload.get("merkle_lane_pass")
+    if merkle_lane_pass is not None and not isinstance(merkle_lane_pass, bool):
+        errors.append(f"{path}: merkle_lane_pass must be bool when present")
+    qir_emitter_pass = payload.get("qir_emitter_pass")
+    if qir_emitter_pass is not None and not isinstance(qir_emitter_pass, bool):
+        errors.append(f"{path}: qir_emitter_pass must be bool when present")
+    resource_trend_pass = payload.get("resource_trend_pass")
+    if resource_trend_pass is not None and not isinstance(resource_trend_pass, bool):
+        errors.append(f"{path}: resource_trend_pass must be bool when present")
+    genesis_manifest_path = payload.get("genesis_manifest_path")
+    if genesis_manifest_path is not None and (
+        not isinstance(genesis_manifest_path, str) or not genesis_manifest_path
+    ):
+        errors.append(f"{path}: genesis_manifest_path must be non-empty string when present")
+    genesis_manifest_signed = payload.get("genesis_manifest_signed")
+    if genesis_manifest_signed is not None and not isinstance(genesis_manifest_signed, bool):
+        errors.append(f"{path}: genesis_manifest_signed must be bool when present")
+    genesis_cold_boot_ready = payload.get("genesis_cold_boot_ready")
+    if genesis_cold_boot_ready is not None and not isinstance(genesis_cold_boot_ready, bool):
+        errors.append(f"{path}: genesis_cold_boot_ready must be bool when present")
+    genesis_manifest_aggregate_sha256 = payload.get("genesis_manifest_aggregate_sha256")
+    if genesis_manifest_aggregate_sha256 is not None and (
+        not isinstance(genesis_manifest_aggregate_sha256, str)
+        or len(genesis_manifest_aggregate_sha256) != 64
+    ):
+        errors.append(
+            f"{path}: genesis_manifest_aggregate_sha256 must be 64-char hex when present"
+        )
 
     if strict:
         missing = payload.get("missing_artifacts")
@@ -845,6 +992,24 @@ def validate_governance_attestation(path: Path, errors: List[str], strict: bool)
             )
         if pinned_digest_match is not True:
             errors.append(f"{path}: pinned_digest_match must be true in --strict mode")
+        if not isinstance(hw_poll_overhead, int):
+            errors.append(f"{path}: hardware_poll_overhead_us must be present in --strict mode")
+        elif hw_poll_overhead < 0 or hw_poll_overhead >= 1000:
+            errors.append(
+                f"{path}: hardware_poll_overhead_us must be in [0,1000) in --strict mode"
+            )
+        if bidir_pass is not True:
+            errors.append(f"{path}: bidir_kaxi_pass must be true in --strict mode")
+        if merkle_lane_pass is not True:
+            errors.append(f"{path}: merkle_lane_pass must be true in --strict mode")
+        if qir_emitter_pass is not True:
+            errors.append(f"{path}: qir_emitter_pass must be true in --strict mode")
+        if resource_trend_pass is not True:
+            errors.append(f"{path}: resource_trend_pass must be true in --strict mode")
+        if genesis_manifest_signed is not True:
+            errors.append(f"{path}: genesis_manifest_signed must be true in --strict mode")
+        if genesis_cold_boot_ready is not True:
+            errors.append(f"{path}: genesis_cold_boot_ready must be true in --strict mode")
 
 
 def validate_sprint1_release_readiness(
@@ -1218,6 +1383,262 @@ def validate_baseline_freeze(path: Path, errors: List[str], strict: bool) -> Non
             errors.append(f"{path}: canonical_bootstrap_timestamp must be present in --strict mode")
 
 
+def validate_bidir_kaxi(path: Path, errors: List[str], strict: bool) -> None:
+    """Validate bidirectional K-AXI return channel status in fpga_seed_report."""
+    payload = load_json_object(path, errors)
+    if payload is None:
+        return
+    sim = payload.get("k_axi_return_sim_status", "")
+    synth = payload.get("k_axi_return_synth_status", "")
+    if not isinstance(sim, str):
+        errors.append(f"{path}: k_axi_return_sim_status must be a string")
+        return
+    if sim not in ("pass", "skipped", "missing_tool", "fail", ""):
+        errors.append(f"{path}: k_axi_return_sim_status has unexpected value {sim!r}")
+    if strict and sim != "pass":
+        errors.append(
+            f"{path}: k_axi_return_sim_status={sim!r} must be pass in --strict mode"
+        )
+    if strict:
+        if not isinstance(synth, str):
+            errors.append(f"{path}: k_axi_return_synth_status must be a string")
+        elif synth != "pass":
+            errors.append(
+                f"{path}: k_axi_return_synth_status={synth!r} must be pass in --strict mode"
+            )
+        if not BIDIR_KAXI_ADAPTER_SIO_PATH.exists():
+            errors.append(
+                f"{BIDIR_KAXI_ADAPTER_SIO_PATH}: required bidirectional adapter missing (--strict)"
+            )
+        else:
+            try:
+                adapter = BIDIR_KAXI_ADAPTER_SIO_PATH.read_text()
+            except OSError as exc:
+                errors.append(f"{BIDIR_KAXI_ADAPTER_SIO_PATH}: read failed: {exc}")
+            else:
+                for fn in ("kaxi_bidir_pack_header", "kaxi_bidir_replay_inspect"):
+                    if fn not in adapter:
+                        errors.append(
+                            f"{BIDIR_KAXI_ADAPTER_SIO_PATH}: missing required function {fn!r}"
+                        )
+        if not BIDIR_KAXI_WAVEFORM_PATH.exists():
+            errors.append(
+                f"{BIDIR_KAXI_WAVEFORM_PATH}: required waveform missing in --strict mode"
+            )
+
+
+def validate_accumulator_bounds(path: Path, errors: List[str], strict: bool) -> None:
+    """Validate epistemic power accumulator bounds in fpga_seed_report.
+
+    Checks that the accumulator simulation ran and counter fields are present.
+    The formal bound 0 <= L_ref - L_hw < 3 is verified algebraically in
+    tests/hardware/accumulator_bounds_test.sio; here we confirm the hardware
+    report is consistent with a running accumulator.
+    """
+    payload = load_json_object(path, errors)
+    if payload is None:
+        return
+    accum_sim = payload.get("epistemic_power_accumulator_sim_status", "")
+    if not isinstance(accum_sim, str):
+        errors.append(f"{path}: epistemic_power_accumulator_sim_status must be a string")
+        return
+    if strict and accum_sim not in ("pass", "skipped"):
+        errors.append(
+            f"{path}: epistemic_power_accumulator_sim_status={accum_sim!r} "
+            "must be pass or skipped in --strict mode"
+        )
+    if strict:
+        accum_synth = payload.get("epistemic_power_accumulator_synth_status", "")
+        if not isinstance(accum_synth, str):
+            errors.append(f"{path}: epistemic_power_accumulator_synth_status must be a string")
+        elif accum_synth not in ("pass", "skipped"):
+            errors.append(
+                f"{path}: epistemic_power_accumulator_synth_status={accum_synth!r} "
+                "must be pass or skipped in --strict mode"
+            )
+        if not ACCUMULATOR_WAVEFORM_PATH.exists():
+            errors.append(
+                f"{ACCUMULATOR_WAVEFORM_PATH}: required accumulator waveform missing in --strict mode"
+            )
+        if not ACCUMULATOR_BOUNDS_TEST_PATH.exists():
+            errors.append(
+                f"{ACCUMULATOR_BOUNDS_TEST_PATH}: accumulator bounds test missing in --strict mode"
+            )
+        else:
+            try:
+                bounds_text = ACCUMULATOR_BOUNDS_TEST_PATH.read_text()
+            except OSError as exc:
+                errors.append(f"{ACCUMULATOR_BOUNDS_TEST_PATH}: read failed: {exc}")
+            else:
+                if "ACCUMULATOR_BOUNDS_PASS" not in bounds_text:
+                    errors.append(
+                        f"{ACCUMULATOR_BOUNDS_TEST_PATH}: missing ACCUMULATOR_BOUNDS_PASS marker"
+                    )
+    fingerprint = payload.get("hardware_counter_fingerprint", {})
+    if not isinstance(fingerprint, dict):
+        errors.append(f"{path}: hardware_counter_fingerprint must be an object")
+        return
+    for key in ("accum_log", "accum_tx"):
+        if key not in fingerprint:
+            if strict:
+                errors.append(
+                    f"{path}: hardware_counter_fingerprint missing {key!r} in --strict mode"
+                )
+
+
+def validate_qir_epi_power_sio(path: Path, errors: List[str], strict: bool) -> None:
+    """Validate the QIR epistemic power .sio module declares required functions."""
+    try:
+        content = path.read_text()
+    except OSError as exc:
+        errors.append(f"{path}: read failed: {exc}")
+        return
+    required_fns = (
+        "qir_epi_power_hw_q32_32",
+        "qir_epi_power_variance_q32_32",
+        "qir_epi_power_poll_overhead_us",
+        "qir_epi_power_live_conformant_v2",
+    )
+    for fn in required_fns:
+        if fn not in content:
+            errors.append(f"{path}: missing required function {fn!r}")
+
+
+def validate_qir_full_emitter_sio(path: Path, errors: List[str], strict: bool) -> None:
+    """Validate the full QIR emitter self-hosted module."""
+    try:
+        content = path.read_text()
+    except OSError as exc:
+        errors.append(f"{path}: read failed: {exc}")
+        return
+    required_symbols = (
+        "omega_qir_emit_shim",
+        "omega_qir_emit_quantum_controller",
+        "omega_qir_emit_bundle",
+        "omega_qir_full_emitter_self_check",
+        "selfhost-emitter",
+    )
+    for symbol in required_symbols:
+        if symbol not in content:
+            errors.append(f"{path}: missing required symbol {symbol!r}")
+    if strict and "template-direct" in content:
+        errors.append(f"{path}: template-direct fallback is forbidden in --strict mode")
+
+
+def validate_merkle_lane_sio(path: Path, errors: List[str], strict: bool) -> None:
+    """Validate Merkle lane helper SIO module."""
+    try:
+        content = path.read_text()
+    except OSError as exc:
+        errors.append(f"{path}: read failed: {exc}")
+        return
+    required_symbols = (
+        "merkle_lane_root_l64",
+        "merkle_lane_verify_root",
+        "merkle_lane_replay_summary",
+        "merkle_lane_self_check",
+    )
+    for symbol in required_symbols:
+        if symbol not in content:
+            errors.append(f"{path}: missing required symbol {symbol!r}")
+
+
+def validate_merkle_lane_rtl(path: Path, errors: List[str], strict: bool) -> None:
+    """Validate Merkle lane RTL core."""
+    try:
+        content = path.read_text()
+    except OSError as exc:
+        errors.append(f"{path}: read failed: {exc}")
+        return
+    required_symbols = (
+        "module k_axi_merkle_lane_core",
+        "merkle_lane_digest",
+        "merkle_lane_valid",
+        "MERKLE_SALT",
+    )
+    for symbol in required_symbols:
+        if symbol not in content:
+            errors.append(f"{path}: missing required RTL symbol {symbol!r}")
+
+
+def validate_merkle_root_sio(path: Path, errors: List[str], strict: bool) -> None:
+    """Validate Merkle root helper SIO module."""
+    try:
+        content = path.read_text()
+    except OSError as exc:
+        errors.append(f"{path}: read failed: {exc}")
+        return
+    required_symbols = (
+        "merkle_root_lane_l64",
+        "merkle_root_verify_l64",
+        "merkle_root_lane_self_check",
+    )
+    for symbol in required_symbols:
+        if symbol not in content:
+            errors.append(f"{path}: missing required symbol {symbol!r}")
+
+
+def validate_merkle_root_rtl(path: Path, errors: List[str], strict: bool) -> None:
+    """Validate Merkle root RTL core."""
+    try:
+        content = path.read_text()
+    except OSError as exc:
+        errors.append(f"{path}: read failed: {exc}")
+        return
+    required_symbols = (
+        "module k_axi_merkle_root_lane_core",
+        "merkle_root_l64",
+        "merkle_root_valid",
+    )
+    for symbol in required_symbols:
+        if symbol not in content:
+            errors.append(f"{path}: missing required RTL symbol {symbol!r}")
+
+
+def validate_genesis_manifest(path: Path, errors: List[str], strict: bool) -> None:
+    payload = load_json_object(path, errors)
+    if payload is None:
+        return
+
+    if payload.get("schema") != GENESIS_MANIFEST_SCHEMA:
+        errors.append(
+            f"{path}: schema mismatch (expected {GENESIS_MANIFEST_SCHEMA}, got {payload.get('schema')})"
+        )
+    for field in (
+        "artifact_count",
+        "artifacts",
+        "aggregate_sha256",
+        "merkle_root_sha256",
+        "canonical_pubkey_fingerprint",
+        "signature_hex",
+        "signed",
+        "cold_boot_ready",
+    ):
+        if field not in payload:
+            errors.append(f"{path}: missing required field: {field}")
+    if "artifact_count" in payload and not isinstance(payload["artifact_count"], int):
+        errors.append(f"{path}: artifact_count must be int")
+    if "artifacts" in payload and not isinstance(payload["artifacts"], list):
+        errors.append(f"{path}: artifacts must be list")
+    for field in ("aggregate_sha256", "merkle_root_sha256", "canonical_pubkey_fingerprint"):
+        value = payload.get(field)
+        if value is not None and (not isinstance(value, str) or len(value) != 64):
+            errors.append(f"{path}: {field} must be 64-char hex string")
+    signature = payload.get("signature_hex")
+    if signature is not None and (not isinstance(signature, str) or len(signature) != 128):
+        errors.append(f"{path}: signature_hex must be 128-char hex string")
+    if "signed" in payload and not isinstance(payload["signed"], bool):
+        errors.append(f"{path}: signed must be bool")
+    if "cold_boot_ready" in payload and not isinstance(payload["cold_boot_ready"], bool):
+        errors.append(f"{path}: cold_boot_ready must be bool")
+
+    if strict:
+        if payload.get("signed") is not True:
+            errors.append(f"{path}: signed must be true in --strict mode")
+        if payload.get("cold_boot_ready") is not True:
+            errors.append(f"{path}: cold_boot_ready must be true in --strict mode")
+
+
 def maybe_validate(
     path: Path,
     strict: bool,
@@ -1276,6 +1697,28 @@ def main() -> int:
     require_sprint1_success_criteria = (
         os.environ.get("OMEGA_REQUIRE_SPRINT1_SUCCESS_CRITERIA_NOW", "0") == "1"
     )
+    require_bidir_kaxi = os.environ.get("OMEGA_REQUIRE_BIDIR_KAXI", "0") == "1"
+    require_accumulator_bounds = (
+        os.environ.get("OMEGA_REQUIRE_ACCUMULATOR_BOUNDS", "0") == "1"
+    )
+    require_epi_power_live = (
+        os.environ.get("OMEGA_REQUIRE_EPI_POWER_LIVE", "0") == "1"
+    )
+    require_qir_emitter = (
+        os.environ.get("OMEGA_REQUIRE_QIR_EMITTER", "0") == "1"
+    )
+    require_merkle_lane = (
+        os.environ.get("OMEGA_REQUIRE_MERKLE_LANE", "0") == "1"
+    )
+    require_resource_trend = (
+        os.environ.get("OMEGA_REQUIRE_RESOURCE_TREND", "0") == "1"
+    )
+    require_merkle_root = (
+        os.environ.get("OMEGA_REQUIRE_MERKLE_ROOT", "0") == "1"
+    )
+    require_genesis_manifest = (
+        os.environ.get("OMEGA_REQUIRE_GENESIS_MANIFEST", "0") == "1"
+    )
 
     maybe_validate(
         FPGA_REPORT_PATH,
@@ -1303,7 +1746,7 @@ def main() -> int:
     )
     maybe_validate(
         HARDWARE_RESOURCE_TREND_PATH,
-        args.strict,
+        args.strict and require_resource_trend,
         errors,
         validate_resource_trend,
     )
@@ -1392,6 +1835,60 @@ def main() -> int:
         lambda p, e, strict: validate_sprint1_release_readiness(
             p, e, strict, require_success_criteria=require_sprint1_success_criteria
         ),
+    )
+    maybe_validate(
+        FPGA_REPORT_PATH,
+        args.strict and require_bidir_kaxi,
+        errors,
+        validate_bidir_kaxi,
+    )
+    maybe_validate(
+        FPGA_REPORT_PATH,
+        args.strict and require_accumulator_bounds,
+        errors,
+        validate_accumulator_bounds,
+    )
+    maybe_validate(
+        QIR_EPI_POWER_SIO_PATH,
+        args.strict and require_epi_power_live,
+        errors,
+        validate_qir_epi_power_sio,
+    )
+    maybe_validate(
+        QIR_FULL_EMITTER_SIO_PATH,
+        args.strict and require_qir_emitter,
+        errors,
+        validate_qir_full_emitter_sio,
+    )
+    maybe_validate(
+        MERKLE_LANE_SIO_PATH,
+        args.strict and require_merkle_lane,
+        errors,
+        validate_merkle_lane_sio,
+    )
+    maybe_validate(
+        MERKLE_LANE_RTL_PATH,
+        args.strict and require_merkle_lane,
+        errors,
+        validate_merkle_lane_rtl,
+    )
+    maybe_validate(
+        MERKLE_ROOT_SIO_PATH,
+        args.strict and require_merkle_root,
+        errors,
+        validate_merkle_root_sio,
+    )
+    maybe_validate(
+        MERKLE_ROOT_RTL_PATH,
+        args.strict and require_merkle_root,
+        errors,
+        validate_merkle_root_rtl,
+    )
+    maybe_validate(
+        GENESIS_MANIFEST_PATH,
+        args.strict and require_genesis_manifest,
+        errors,
+        validate_genesis_manifest,
     )
 
     if errors:
