@@ -216,11 +216,27 @@ def summarize_baseline_freeze(summary: dict) -> dict:
 def summarize_canonical_bootstrap(attestation: dict, freeze: dict) -> dict:
     fpr = str(attestation.get("canonical_pubkey_fingerprint", ""))
     ts = str(attestation.get("canonical_bootstrap_timestamp", ""))
+    policy_sign_fingerprint = str(attestation.get("policy_sign_fingerprint", ""))
+    policy_sign_timestamp = str(attestation.get("policy_sign_timestamp", ""))
+    policy_pinned_digest = str(attestation.get("policy_pinned_digest_sha256", ""))
+    baseline_freeze_digest = str(attestation.get("baseline_freeze_digest_sha256", ""))
+    baseline_freeze_policy_pinned = str(
+        attestation.get("baseline_freeze_policy_pinned_digest_sha256", "")
+    )
+    pinned_digest_match = bool(attestation.get("pinned_digest_match", False))
     if not ts:
         ts = str(freeze.get("canonical_bootstrap_timestamp", ""))
+    if not baseline_freeze_digest:
+        baseline_freeze_digest = str(freeze.get("freeze_digest_sha256", ""))
     return {
         "canonical_pubkey_fingerprint": fpr,
         "canonical_bootstrap_timestamp": ts,
+        "policy_sign_fingerprint": policy_sign_fingerprint,
+        "policy_sign_timestamp": policy_sign_timestamp,
+        "policy_pinned_digest_sha256": policy_pinned_digest,
+        "baseline_freeze_digest_sha256": baseline_freeze_digest,
+        "baseline_freeze_policy_pinned_digest_sha256": baseline_freeze_policy_pinned,
+        "pinned_digest_match": pinned_digest_match,
     }
 
 
@@ -292,6 +308,12 @@ def make_markdown(payload: dict) -> str:
         "## Canonical Bootstrap Key",
         f"- Fingerprint: `{canonical['canonical_pubkey_fingerprint']}`",
         f"- Last bootstrap timestamp: `{canonical['canonical_bootstrap_timestamp']}`",
+        f"- Policy sign fingerprint: `{canonical['policy_sign_fingerprint']}`",
+        f"- Policy sign timestamp: `{canonical['policy_sign_timestamp']}`",
+        f"- Policy pinned digest: `{canonical['policy_pinned_digest_sha256']}`",
+        f"- Baseline freeze digest: `{canonical['baseline_freeze_digest_sha256']}`",
+        f"- Baseline freeze policy-pinned digest: `{canonical['baseline_freeze_policy_pinned_digest_sha256']}`",
+        f"- Pinned digest match: `{str(canonical['pinned_digest_match']).lower()}`",
         "",
     ]
     return "\n".join(lines)

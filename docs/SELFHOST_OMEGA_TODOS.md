@@ -52,7 +52,13 @@ No existing TODOs were removed; this is an additive backlog.
 - [x] Enforce canonical bootstrap key workflow (`scripts/omega_canonical_key_bootstrap.sh`) across policy status smoke, baseline freeze signing, and strict gate marker `CANONICAL_KEY_BOOTSTRAP_PASS`.
 - [x] Replace policy status smoke path with canonical verifier wrapper (`scripts/omega/omega_policy_status.sh`) that hard-fails unless `signature=verified (canonical bootstrap key)`.
 - [x] Wire governance attestation signing to canonical bootstrap key, removing ephemeral auto-generated PEM key fallback from Sprint 1 gate.
-- [ ] Add first-class `souc opt policy sign --policy <path>` command to support in-place signing of existing policy documents without regeneration (currently unavailable in non-Rust scope).
+- [x] Add first-class `souc opt policy sign --policy <path>` command to support in-place signing of existing policy documents without regeneration.
+- [x] Sprint 2.0: canonical in-place policy signing wired into smoke/status/gate governance lineage.
+- [x] Sprint 2.1: digest pinning enforced across signed policy runs (`--pin-digest`, gate marker `PINNED_DIGEST_PASS`, governance + weekly lineage).
+
+## Deferred to Sprint 2+
+
+- [ ] (none)
 
 ## Nice-to-have (post Sprint 1)
 

@@ -87,6 +87,16 @@ def parse_args() -> argparse.Namespace:
         ),
         help="Canonical bootstrap timestamp path",
     )
+    parser.add_argument(
+        "--policy",
+        default="bootstrap/policies/policy.v2.json",
+        help="Optimization policy path used for canonical signing metadata",
+    )
+    parser.add_argument(
+        "--baseline-freeze",
+        default="artifacts/omega/baseline_freeze.v1.json",
+        help="Baseline freeze artifact used for digest pin lineage",
+    )
     return parser.parse_args()
 
 
@@ -195,6 +205,39 @@ def read_bootstrap_timestamp(path: Path) -> str:
         return ""
 
 
+def read_policy_sign_metadata(path: Path) -> tuple[str, str, str]:
+    if not path.exists():
+        return "", "", ""
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return "", "", ""
+    if not isinstance(payload, dict):
+        return "", "", ""
+    fingerprint = str(payload.get("canonical_fingerprint", "")).strip()
+    signed_at = str(payload.get("canonical_signed_at_utc", "")).strip()
+    pinned_digest = str(payload.get("pinned_digest_sha256", "")).strip()
+    return fingerprint, signed_at, pinned_digest
+
+
+def read_baseline_freeze_lineage(path: Path) -> tuple[str, str]:
+    if not path.exists():
+        return "", ""
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return "", ""
+    if not isinstance(payload, dict):
+        return "", ""
+    digest = payload.get("freeze_digest_sha256", "")
+    freeze_policy_pinned = payload.get("policy_pinned_digest_sha256", "")
+    digest_text = str(digest).strip() if isinstance(digest, str) else ""
+    freeze_policy_pinned_text = (
+        str(freeze_policy_pinned).strip() if isinstance(freeze_policy_pinned, str) else ""
+    )
+    return digest_text, freeze_policy_pinned_text
+
+
 def main() -> int:
     args = parse_args()
     artifacts = list(DEFAULT_ARTIFACTS)
@@ -237,6 +280,17 @@ def main() -> int:
     canonical_pubkey_path = Path(args.canonical_pubkey)
     canonical_pubkey_fpr = canonical_pubkey_fingerprint(canonical_pubkey_path)
     canonical_bootstrap_ts = read_bootstrap_timestamp(Path(args.canonical_timestamp))
+    policy_fingerprint, policy_signed_at, policy_pinned_digest = read_policy_sign_metadata(
+        Path(args.policy)
+    )
+    baseline_freeze_digest, baseline_freeze_policy_pinned_digest = read_baseline_freeze_lineage(
+        Path(args.baseline_freeze)
+    )
+    pinned_digest_match = (
+        bool(policy_pinned_digest)
+        and bool(baseline_freeze_policy_pinned_digest)
+        and policy_pinned_digest == baseline_freeze_policy_pinned_digest
+    )
 
     payload = {
         "schema": SCHEMA,
@@ -247,6 +301,12 @@ def main() -> int:
         "canonical_pubkey_path": str(canonical_pubkey_path),
         "canonical_pubkey_fingerprint": canonical_pubkey_fpr,
         "canonical_bootstrap_timestamp": canonical_bootstrap_ts,
+        "policy_sign_fingerprint": policy_fingerprint,
+        "policy_sign_timestamp": policy_signed_at,
+        "policy_pinned_digest_sha256": policy_pinned_digest,
+        "baseline_freeze_digest_sha256": baseline_freeze_digest,
+        "baseline_freeze_policy_pinned_digest_sha256": baseline_freeze_policy_pinned_digest,
+        "pinned_digest_match": pinned_digest_match,
         "signed": signed,
         "key_id": key_id,
         "signature_hex": signature,
@@ -259,6 +319,8 @@ def main() -> int:
         f"artifacts={len(records)} "
         f"missing={len(missing)} "
         f"canonical_fpr={canonical_pubkey_fpr} "
+        f"policy_sign_fpr={policy_fingerprint or 'missing'} "
+        f"pinned_match={str(pinned_digest_match).lower()} "
         f"signed={str(signed).lower()} "
         f"report={out_path}"
     )
@@ -273,6 +335,27 @@ def main() -> int:
     if args.strict and not canonical_bootstrap_ts:
         print(
             "omega_governance_attest: canonical bootstrap timestamp missing in strict mode",
+            file=sys.stderr,
+        )
+        return 2
+    if args.strict and (not policy_fingerprint or not policy_signed_at):
+        print(
+            "omega_governance_attest: policy sign metadata missing in strict mode "
+            f"(policy={args.policy})",
+            file=sys.stderr,
+        )
+        return 2
+    if args.strict and (not policy_pinned_digest or not baseline_freeze_policy_pinned_digest):
+        print(
+            "omega_governance_attest: pinned digest lineage missing in strict mode "
+            f"(policy={args.policy}, baseline_freeze={args.baseline_freeze})",
+            file=sys.stderr,
+        )
+        return 2
+    if args.strict and not pinned_digest_match:
+        print(
+            "omega_governance_attest: pinned digest mismatch in strict mode "
+            f"(policy_pinned={policy_pinned_digest}, baseline_freeze_policy_pinned={baseline_freeze_policy_pinned_digest})",
             file=sys.stderr,
         )
         return 2

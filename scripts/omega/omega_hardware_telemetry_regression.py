@@ -785,6 +785,37 @@ def validate_governance_attestation(path: Path, errors: List[str], strict: bool)
     canonical_ts = payload.get("canonical_bootstrap_timestamp")
     if canonical_ts is not None and not isinstance(canonical_ts, str):
         errors.append(f"{path}: canonical_bootstrap_timestamp must be string when present")
+    policy_sign_fpr = payload.get("policy_sign_fingerprint")
+    if policy_sign_fpr is not None:
+        if not isinstance(policy_sign_fpr, str) or len(policy_sign_fpr) != 64:
+            errors.append(f"{path}: policy_sign_fingerprint must be 64-char hex string when present")
+    policy_sign_ts = payload.get("policy_sign_timestamp")
+    if policy_sign_ts is not None and not isinstance(policy_sign_ts, str):
+        errors.append(f"{path}: policy_sign_timestamp must be string when present")
+    policy_pinned_digest = payload.get("policy_pinned_digest_sha256")
+    if policy_pinned_digest is not None:
+        if not isinstance(policy_pinned_digest, str) or len(policy_pinned_digest) != 64:
+            errors.append(
+                f"{path}: policy_pinned_digest_sha256 must be 64-char hex string when present"
+            )
+    baseline_freeze_digest = payload.get("baseline_freeze_digest_sha256")
+    if baseline_freeze_digest is not None:
+        if not isinstance(baseline_freeze_digest, str) or len(baseline_freeze_digest) != 64:
+            errors.append(
+                f"{path}: baseline_freeze_digest_sha256 must be 64-char hex string when present"
+            )
+    baseline_freeze_policy_pinned = payload.get("baseline_freeze_policy_pinned_digest_sha256")
+    if baseline_freeze_policy_pinned is not None:
+        if (
+            not isinstance(baseline_freeze_policy_pinned, str)
+            or len(baseline_freeze_policy_pinned) != 64
+        ):
+            errors.append(
+                f"{path}: baseline_freeze_policy_pinned_digest_sha256 must be 64-char hex string when present"
+            )
+    pinned_digest_match = payload.get("pinned_digest_match")
+    if pinned_digest_match is not None and not isinstance(pinned_digest_match, bool):
+        errors.append(f"{path}: pinned_digest_match must be bool when present")
 
     if strict:
         missing = payload.get("missing_artifacts")
@@ -797,6 +828,23 @@ def validate_governance_attestation(path: Path, errors: List[str], strict: bool)
             errors.append(f"{path}: signed must be true in --strict mode")
         if not isinstance(canonical_ts, str) or not canonical_ts:
             errors.append(f"{path}: canonical_bootstrap_timestamp must be present in --strict mode")
+        if not isinstance(policy_sign_fpr, str) or len(policy_sign_fpr) != 64:
+            errors.append(f"{path}: policy_sign_fingerprint must be present in --strict mode")
+        if not isinstance(policy_sign_ts, str) or not policy_sign_ts:
+            errors.append(f"{path}: policy_sign_timestamp must be present in --strict mode")
+        if not isinstance(policy_pinned_digest, str) or len(policy_pinned_digest) != 64:
+            errors.append(f"{path}: policy_pinned_digest_sha256 must be present in --strict mode")
+        if not isinstance(baseline_freeze_digest, str) or len(baseline_freeze_digest) != 64:
+            errors.append(f"{path}: baseline_freeze_digest_sha256 must be present in --strict mode")
+        if (
+            not isinstance(baseline_freeze_policy_pinned, str)
+            or len(baseline_freeze_policy_pinned) != 64
+        ):
+            errors.append(
+                f"{path}: baseline_freeze_policy_pinned_digest_sha256 must be present in --strict mode"
+            )
+        if pinned_digest_match is not True:
+            errors.append(f"{path}: pinned_digest_match must be true in --strict mode")
 
 
 def validate_sprint1_release_readiness(

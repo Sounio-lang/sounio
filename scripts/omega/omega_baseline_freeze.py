@@ -72,6 +72,11 @@ def parse_args() -> argparse.Namespace:
         ),
         help="Canonical key bootstrap timestamp file path",
     )
+    parser.add_argument(
+        "--policy",
+        default="bootstrap/policies/policy.v2.json",
+        help="Policy path used for pinned digest lineage metadata",
+    )
     return parser.parse_args()
 
 
@@ -144,6 +149,19 @@ def read_bootstrap_timestamp(path: Path) -> str:
     except OSError:
         return ""
     return text
+
+
+def read_policy_pinned_digest(path: Path) -> str:
+    if not path.exists():
+        return ""
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    value = payload.get("pinned_digest_sha256", "")
+    return str(value).strip() if isinstance(value, str) else ""
 
 
 def main() -> int:
@@ -306,6 +324,7 @@ def main() -> int:
     key_fingerprint = canonical_pubkey_fingerprint(canonical_pub_hex)
     freeze_signature = sign_digest_with_private_key(canonical_priv_hex, freeze_digest)
     bootstrap_timestamp = read_bootstrap_timestamp(canonical_ts_path)
+    policy_pinned_digest = read_policy_pinned_digest(Path(args.policy))
 
     if args.strict:
         if len(key_fingerprint) != 64:
@@ -338,6 +357,7 @@ def main() -> int:
         "canonical_pubkey_path": str(canonical_pub_path),
         "canonical_pubkey_fingerprint": key_fingerprint,
         "canonical_bootstrap_timestamp": bootstrap_timestamp,
+        "policy_pinned_digest_sha256": policy_pinned_digest,
         "signature_algo": "ed25519",
         "signature_scope": "freeze_digest_sha256",
         "signature_hex": freeze_signature,
