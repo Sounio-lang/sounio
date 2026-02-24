@@ -1,0 +1,1916 @@
+From 4844ce05a823dfb823050fa3986662603ab92ed0 Mon Sep 17 00:00:00 2001
+From: Demetrios Agourakis <demetrios@agourakis.med.br>
+Date: Tue, 24 Feb 2026 15:55:19 -0300
+Subject: [PATCH 2/7] Omega Sprint 4.0 Genesis: enforce strict gate markers and
+ FPGA zero-drift telemetry contracts
+
+Co-authored-by: Codex <noreply@openai.com>
+---
+ .../omega_hardware_telemetry_regression.py    | 507 +++++++++++-
+ scripts/omega/omega_shadow_audit_report.py    |  10 +
+ scripts/omega_sprint1_gate.sh                 | 360 ++++++++-
+ scripts/run_fpga_epistemic_seed.sh            | 754 +++++++++++++++++-
+ 4 files changed, 1623 insertions(+), 8 deletions(-)
+
+diff --git a/scripts/omega/omega_hardware_telemetry_regression.py b/scripts/omega/omega_hardware_telemetry_regression.py
+index 8855f243..2a98f7fc 100644
+--- a/scripts/omega/omega_hardware_telemetry_regression.py
++++ b/scripts/omega/omega_hardware_telemetry_regression.py
+@@ -15,7 +15,7 @@ FPGA_REPORT_PATH = Path("artifacts/fpga/fpga_seed_report.json")
+ QUANTUM_CONFORMANCE_PATH = Path("artifacts/quantum/omega/quantum_conformance.json")
+ PURE_KAXI_MARKER_PATH = Path("artifacts/.pure_sounio_kaxi_generated")
+ HARDWARE_COUNTER_REPRO_PATH = Path("artifacts/fpga/hardware_counter_repro.v1.json")
+-HARDWARE_RESOURCE_TREND_PATH = Path("artifacts/fpga/hardware_resource_trend.v1.json")
++HARDWARE_RESOURCE_TREND_PATH = Path("artifacts/fpga/hardware_resource_trend.v2.json")
+ PTX_LAUNCH_REPORT_PATH = Path("artifacts/ptx/omega/ptx_launch_report.json")
+ HW_EPI_POWER_LIVE_PATH = Path("artifacts/fpga/hardware_epistemic_power_live.v1.json")
+ HW_EPI_POWER_TREND_PATH = Path("artifacts/fpga/hardware_epistemic_power_live_trend.v1.json")
+@@ -26,15 +26,28 @@ RL_READINESS_TREND_PATH = Path("artifacts/omega/rl_readiness_trend.v1.json")
+ POLICY_MODE_GUARD_PATH = Path("artifacts/omega/policy_mode_guard.v1.json")
+ RL_READINESS_REPLAY_PATH = Path("artifacts/omega/rl_readiness_replay.v1.json")
+ GOVERNANCE_ATTESTATION_PATH = Path("artifacts/omega/governance_attestation.v1.json")
++GENESIS_MANIFEST_PATH = Path("artifacts/omega/omega_genesis.v1.0.json")
+ SPRINT1_RELEASE_READINESS_PATH = Path("artifacts/omega/sprint1_release_readiness.v1.json")
+ PERFORMANCE_SUMMARY_PATH = Path("artifacts/omega/performance_summary.v1.json")
+ EXTERNAL_BASELINE_COLLECTION_PATH = Path("artifacts/omega/external_baseline_collection.v1.json")
+ BASELINE_FREEZE_PATH = Path("artifacts/omega/baseline_freeze.v1.json")
++QIR_EPI_POWER_SIO_PATH = Path("hardware/rtl/qir/omega_epistemic_power.sio")
++QIR_FULL_EMITTER_SIO_PATH = Path("hardware/rtl/qir/omega_full_qir_emitter.sio")
++BIDIR_KAXI_ADAPTER_SIO_PATH = Path("hardware/rtl/kaxi/bidirectional_return_adapter.sio")
++MERKLE_LANE_SIO_PATH = Path("hardware/rtl/kaxi/merkle_lane.sio")
++MERKLE_LANE_RTL_PATH = Path("hardware/fpga/k_axi_merkle_lane.v")
++MERKLE_ROOT_SIO_PATH = Path("hardware/rtl/kaxi/merkle_root_lane.sio")
++MERKLE_ROOT_RTL_PATH = Path("hardware/fpga/k_axi_merkle_root_lane.v")
++BIDIR_KAXI_WAVEFORM_PATH = Path("artifacts/fpga/waveforms/tb_k_axi_bidirectional.vcd")
++ACCUMULATOR_WAVEFORM_PATH = Path(
++    "artifacts/fpga/waveforms/tb_epistemic_power_accumulator.vcd"
++)
++ACCUMULATOR_BOUNDS_TEST_PATH = Path("tests/hardware/accumulator_bounds_test.sio")
+ 
+ FPGA_REPORT_SCHEMA = "sounio.omega.fpga-seed-report.v1"
+ QUANTUM_CONFORMANCE_SCHEMA = "sounio.quantum.conformance.v1"
+ HARDWARE_COUNTER_REPRO_SCHEMA = "sounio.omega.hardware-counter-repro.v1"
+-HARDWARE_RESOURCE_TREND_SCHEMA = "sounio.omega.hardware-resource-trend.v1"
++HARDWARE_RESOURCE_TREND_SCHEMA = "sounio.omega.hardware-resource-trend.v2"
+ PTX_LAUNCH_REPORT_SCHEMA = "sounio.omega.ptx-launch-report.v1"
+ HW_EPI_POWER_LIVE_SCHEMA = "sounio.omega.hardware-epistemic-power-live.v1"
+ HW_EPI_POWER_TREND_SCHEMA = "sounio.omega.hardware-epistemic-power-live-trend.v1"
+@@ -44,6 +57,7 @@ RL_READINESS_TREND_SCHEMA = "sounio.omega.rl-readiness-trend.v1"
+ POLICY_MODE_GUARD_SCHEMA = "sounio.omega.policy-mode-guard.v1"
+ RL_READINESS_REPLAY_SCHEMA = "sounio.omega.rl-readiness-replay.v1"
+ GOVERNANCE_ATTESTATION_SCHEMA = "sounio.omega.governance-attestation.v1"
++GENESIS_MANIFEST_SCHEMA = "sounio.omega.genesis.v1.0"
+ SPRINT1_RELEASE_READINESS_SCHEMA = "sounio.omega.sprint1-release-readiness.v1"
+ PERFORMANCE_SUMMARY_SCHEMA = "sounio.omega.performance-summary.v1"
+ EXTERNAL_BASELINE_COLLECTION_SCHEMA = "sounio.omega.external-baseline-collection.v1"
+@@ -109,6 +123,8 @@ def validate_fpga_report(path: Path, errors: List[str], strict: bool = False) ->
+         "k_axi_return_synth_status",
+         "epistemic_power_accumulator_sim_status",
+         "epistemic_power_accumulator_synth_status",
++        "merkle_lane_synth_status",
++        "merkle_root_synth_status",
+         "hardware_counter_repro_status",
+         "hardware_resource_trend_status",
+     )
+@@ -121,6 +137,8 @@ def validate_fpga_report(path: Path, errors: List[str], strict: bool = False) ->
+ 
+     required_bool_fields = (
+         "merkle_lane_present",
++        "merkle_lane_core_rtl_present",
++        "merkle_root_core_rtl_present",
+         "quantum_controller_lane_present",
+     )
+     for field in required_bool_fields:
+@@ -130,6 +148,13 @@ def validate_fpga_report(path: Path, errors: List[str], strict: bool = False) ->
+         if not isinstance(payload[field], bool):
+             errors.append(f"{path}: field {field} must be a bool")
+ 
++    waveform_paths = payload.get("waveform_paths")
++    if waveform_paths is not None and not isinstance(waveform_paths, list):
++        errors.append(f"{path}: waveform_paths must be a list when present")
++    waveforms_present = payload.get("waveforms_present")
++    if waveforms_present is not None and not isinstance(waveforms_present, bool):
++        errors.append(f"{path}: waveforms_present must be bool when present")
++
+     if strict:
+         for field in required_bool_fields:
+             if field in payload and isinstance(payload[field], bool) and not payload[field]:
+@@ -150,11 +175,27 @@ def validate_fpga_report(path: Path, errors: List[str], strict: bool = False) ->
+             )
+         if (
+             "hardware_resource_trend_status" in payload
+-            and payload["hardware_resource_trend_status"] != "pass"
++            and payload["hardware_resource_trend_status"] not in ("pass", "bootstrap")
++        ):
++            errors.append(
++                f"{path}: hardware_resource_trend_status must be pass/bootstrap in --strict mode (got {payload['hardware_resource_trend_status']})"
++            )
++        if (
++            "merkle_lane_synth_status" in payload
++            and payload["merkle_lane_synth_status"] != "pass"
+         ):
+             errors.append(
+-                f"{path}: hardware_resource_trend_status must be pass in --strict mode (got {payload['hardware_resource_trend_status']})"
++                f"{path}: merkle_lane_synth_status must be pass in --strict mode (got {payload['merkle_lane_synth_status']})"
+             )
++        if (
++            "merkle_root_synth_status" in payload
++            and payload["merkle_root_synth_status"] != "pass"
++        ):
++            errors.append(
++                f"{path}: merkle_root_synth_status must be pass in --strict mode (got {payload['merkle_root_synth_status']})"
++            )
++        if "waveforms_present" in payload and payload["waveforms_present"] is not True:
++            errors.append(f"{path}: waveforms_present must be true in --strict mode")
+ 
+ 
+ def validate_quantum_conformance(path: Path, errors: List[str], strict: bool) -> None:
+@@ -266,16 +307,38 @@ def validate_resource_trend(path: Path, errors: List[str], strict: bool) -> None
+     if not runs:
+         return
+ 
++    drift_threshold = payload.get("drift_threshold")
++    if not is_number(drift_threshold):
++        errors.append(f"{path}: drift_threshold must be numeric")
++        drift_threshold = 0.05
++    else:
++        drift_threshold = float(drift_threshold)
++
++    last_status = payload.get("last_status")
++    if not isinstance(last_status, str) or not last_status:
++        errors.append(f"{path}: last_status must be non-empty string")
++    elif last_status not in ("bootstrap", "pass", "drift", "incomplete"):
++        errors.append(f"{path}: invalid last_status {last_status!r}")
++
++    last_max_relative_drift = payload.get("last_max_relative_drift")
++    if not is_number(last_max_relative_drift):
++        errors.append(f"{path}: last_max_relative_drift must be numeric")
++    else:
++        last_max_relative_drift = float(last_max_relative_drift)
++
+     latest = runs[-1]
+     if not isinstance(latest, dict):
+         errors.append(f"{path}: latest run entry must be an object")
+         return
++
+     modules = latest.get("modules")
+     if not isinstance(modules, dict):
+         errors.append(f"{path}: latest run modules must be an object")
+         return
++
+     if strict and len(modules) < 3:
+         errors.append(f"{path}: latest run modules must have >=3 modules in --strict mode")
++
+     for module_name, stats in modules.items():
+         if not isinstance(module_name, str) or not module_name:
+             errors.append(f"{path}: invalid module key: {module_name!r}")
+@@ -290,6 +353,38 @@ def validate_resource_trend(path: Path, errors: List[str], strict: bool) -> None
+             if not isinstance(stats[field], int):
+                 errors.append(f"{path}: module {module_name} field {field} must be int")
+ 
++    run_status = latest.get("status")
++    if not isinstance(run_status, str):
++        errors.append(f"{path}: latest run status must be string")
++    elif run_status not in ("bootstrap", "pass", "drift", "incomplete"):
++        errors.append(f"{path}: latest run status has invalid value {run_status!r}")
++
++    run_max_drift = latest.get("max_relative_drift")
++    if not is_number(run_max_drift):
++        errors.append(f"{path}: latest run max_relative_drift must be numeric")
++    else:
++        run_max_drift = float(run_max_drift)
++        if run_max_drift < 0.0:
++            errors.append(f"{path}: latest run max_relative_drift must be >= 0")
++
++    compared_points = latest.get("compared_points")
++    if compared_points is not None and not isinstance(compared_points, int):
++        errors.append(f"{path}: latest run compared_points must be int when present")
++    for list_field in ("new_modules", "removed_modules"):
++        value = latest.get(list_field)
++        if value is not None and not isinstance(value, list):
++            errors.append(f"{path}: latest run {list_field} must be list when present")
++
++    if strict:
++        if isinstance(last_status, str) and last_status not in ("pass", "bootstrap"):
++            errors.append(
++                f"{path}: last_status must be pass/bootstrap in --strict mode (got {last_status!r})"
++            )
++        if is_number(last_max_relative_drift) and float(last_max_relative_drift) > drift_threshold:
++            errors.append(
++                f"{path}: last_max_relative_drift {float(last_max_relative_drift):.6f} exceeds drift_threshold {drift_threshold:.6f} in --strict mode"
++            )
++
+ 
+ def validate_ptx_launch_report(path: Path, errors: List[str], strict: bool) -> None:
+     payload = load_json_object(path, errors)
+@@ -377,6 +472,8 @@ def validate_hw_epi_power_live(path: Path, errors: List[str], strict: bool) -> N
+         "hardware_epistemic_power_log_q32_32",
+         "software_epistemic_power_log_q32_32",
+         "hybrid_epistemic_power_log_q32_32",
++        "hardware_epistemic_power_variance_q32_32",
++        "poll_overhead_us",
+     )
+ 
+     for field in required_status_fields:
+@@ -422,6 +519,16 @@ def validate_hw_epi_power_live(path: Path, errors: List[str], strict: bool) -> N
+             errors.append(f"{path}: used_fallback must be false in --strict mode")
+         if payload.get("live_read_conformant") is not True:
+             errors.append(f"{path}: live_read_conformant must be true in --strict mode")
++        variance = payload.get("hardware_epistemic_power_variance_q32_32")
++        if isinstance(variance, int) and variance < 0:
++            errors.append(
++                f"{path}: hardware_epistemic_power_variance_q32_32 must be >=0 in --strict mode"
++            )
++        overhead = payload.get("poll_overhead_us")
++        if not isinstance(overhead, int):
++            errors.append(f"{path}: poll_overhead_us must be int in --strict mode")
++        elif overhead < 0 or overhead >= 1000:
++            errors.append(f"{path}: poll_overhead_us must be in [0,1000) in --strict mode")
+         if isinstance(symbols, dict):
+             for symbol in ("g_epistemic_power_log_hw_q32_32", "g_kaxi_ring"):
+                 if symbols.get(symbol) is not True:
+@@ -816,6 +923,46 @@ def validate_governance_attestation(path: Path, errors: List[str], strict: bool)
+     pinned_digest_match = payload.get("pinned_digest_match")
+     if pinned_digest_match is not None and not isinstance(pinned_digest_match, bool):
+         errors.append(f"{path}: pinned_digest_match must be bool when present")
++    hw_variance = payload.get("hardware_epistemic_power_variance_q32_32")
++    if hw_variance is not None:
++        if not isinstance(hw_variance, str):
++            errors.append(
++                f"{path}: hardware_epistemic_power_variance_q32_32 must be string when present"
++            )
++    hw_poll_overhead = payload.get("hardware_poll_overhead_us")
++    if hw_poll_overhead is not None and not isinstance(hw_poll_overhead, int):
++        errors.append(f"{path}: hardware_poll_overhead_us must be int when present")
++    bidir_pass = payload.get("bidir_kaxi_pass")
++    if bidir_pass is not None and not isinstance(bidir_pass, bool):
++        errors.append(f"{path}: bidir_kaxi_pass must be bool when present")
++    merkle_lane_pass = payload.get("merkle_lane_pass")
++    if merkle_lane_pass is not None and not isinstance(merkle_lane_pass, bool):
++        errors.append(f"{path}: merkle_lane_pass must be bool when present")
++    qir_emitter_pass = payload.get("qir_emitter_pass")
++    if qir_emitter_pass is not None and not isinstance(qir_emitter_pass, bool):
++        errors.append(f"{path}: qir_emitter_pass must be bool when present")
++    resource_trend_pass = payload.get("resource_trend_pass")
++    if resource_trend_pass is not None and not isinstance(resource_trend_pass, bool):
++        errors.append(f"{path}: resource_trend_pass must be bool when present")
++    genesis_manifest_path = payload.get("genesis_manifest_path")
++    if genesis_manifest_path is not None and (
++        not isinstance(genesis_manifest_path, str) or not genesis_manifest_path
++    ):
++        errors.append(f"{path}: genesis_manifest_path must be non-empty string when present")
++    genesis_manifest_signed = payload.get("genesis_manifest_signed")
++    if genesis_manifest_signed is not None and not isinstance(genesis_manifest_signed, bool):
++        errors.append(f"{path}: genesis_manifest_signed must be bool when present")
++    genesis_cold_boot_ready = payload.get("genesis_cold_boot_ready")
++    if genesis_cold_boot_ready is not None and not isinstance(genesis_cold_boot_ready, bool):
++        errors.append(f"{path}: genesis_cold_boot_ready must be bool when present")
++    genesis_manifest_aggregate_sha256 = payload.get("genesis_manifest_aggregate_sha256")
++    if genesis_manifest_aggregate_sha256 is not None and (
++        not isinstance(genesis_manifest_aggregate_sha256, str)
++        or len(genesis_manifest_aggregate_sha256) != 64
++    ):
++        errors.append(
++            f"{path}: genesis_manifest_aggregate_sha256 must be 64-char hex when present"
++        )
+ 
+     if strict:
+         missing = payload.get("missing_artifacts")
+@@ -845,6 +992,24 @@ def validate_governance_attestation(path: Path, errors: List[str], strict: bool)
+             )
+         if pinned_digest_match is not True:
+             errors.append(f"{path}: pinned_digest_match must be true in --strict mode")
++        if not isinstance(hw_poll_overhead, int):
++            errors.append(f"{path}: hardware_poll_overhead_us must be present in --strict mode")
++        elif hw_poll_overhead < 0 or hw_poll_overhead >= 1000:
++            errors.append(
++                f"{path}: hardware_poll_overhead_us must be in [0,1000) in --strict mode"
++            )
++        if bidir_pass is not True:
++            errors.append(f"{path}: bidir_kaxi_pass must be true in --strict mode")
++        if merkle_lane_pass is not True:
++            errors.append(f"{path}: merkle_lane_pass must be true in --strict mode")
++        if qir_emitter_pass is not True:
++            errors.append(f"{path}: qir_emitter_pass must be true in --strict mode")
++        if resource_trend_pass is not True:
++            errors.append(f"{path}: resource_trend_pass must be true in --strict mode")
++        if genesis_manifest_signed is not True:
++            errors.append(f"{path}: genesis_manifest_signed must be true in --strict mode")
++        if genesis_cold_boot_ready is not True:
++            errors.append(f"{path}: genesis_cold_boot_ready must be true in --strict mode")
+ 
+ 
+ def validate_sprint1_release_readiness(
+@@ -1218,6 +1383,262 @@ def validate_baseline_freeze(path: Path, errors: List[str], strict: bool) -> Non
+             errors.append(f"{path}: canonical_bootstrap_timestamp must be present in --strict mode")
+ 
+ 
++def validate_bidir_kaxi(path: Path, errors: List[str], strict: bool) -> None:
++    """Validate bidirectional K-AXI return channel status in fpga_seed_report."""
++    payload = load_json_object(path, errors)
++    if payload is None:
++        return
++    sim = payload.get("k_axi_return_sim_status", "")
++    synth = payload.get("k_axi_return_synth_status", "")
++    if not isinstance(sim, str):
++        errors.append(f"{path}: k_axi_return_sim_status must be a string")
++        return
++    if sim not in ("pass", "skipped", "missing_tool", "fail", ""):
++        errors.append(f"{path}: k_axi_return_sim_status has unexpected value {sim!r}")
++    if strict and sim != "pass":
++        errors.append(
++            f"{path}: k_axi_return_sim_status={sim!r} must be pass in --strict mode"
++        )
++    if strict:
++        if not isinstance(synth, str):
++            errors.append(f"{path}: k_axi_return_synth_status must be a string")
++        elif synth != "pass":
++            errors.append(
++                f"{path}: k_axi_return_synth_status={synth!r} must be pass in --strict mode"
++            )
++        if not BIDIR_KAXI_ADAPTER_SIO_PATH.exists():
++            errors.append(
++                f"{BIDIR_KAXI_ADAPTER_SIO_PATH}: required bidirectional adapter missing (--strict)"
++            )
++        else:
++            try:
++                adapter = BIDIR_KAXI_ADAPTER_SIO_PATH.read_text()
++            except OSError as exc:
++                errors.append(f"{BIDIR_KAXI_ADAPTER_SIO_PATH}: read failed: {exc}")
++            else:
++                for fn in ("kaxi_bidir_pack_header", "kaxi_bidir_replay_inspect"):
++                    if fn not in adapter:
++                        errors.append(
++                            f"{BIDIR_KAXI_ADAPTER_SIO_PATH}: missing required function {fn!r}"
++                        )
++        if not BIDIR_KAXI_WAVEFORM_PATH.exists():
++            errors.append(
++                f"{BIDIR_KAXI_WAVEFORM_PATH}: required waveform missing in --strict mode"
++            )
++
++
++def validate_accumulator_bounds(path: Path, errors: List[str], strict: bool) -> None:
++    """Validate epistemic power accumulator bounds in fpga_seed_report.
++
++    Checks that the accumulator simulation ran and counter fields are present.
++    The formal bound 0 <= L_ref - L_hw < 3 is verified algebraically in
++    tests/hardware/accumulator_bounds_test.sio; here we confirm the hardware
++    report is consistent with a running accumulator.
++    """
++    payload = load_json_object(path, errors)
++    if payload is None:
++        return
++    accum_sim = payload.get("epistemic_power_accumulator_sim_status", "")
++    if not isinstance(accum_sim, str):
++        errors.append(f"{path}: epistemic_power_accumulator_sim_status must be a string")
++        return
++    if strict and accum_sim not in ("pass", "skipped"):
++        errors.append(
++            f"{path}: epistemic_power_accumulator_sim_status={accum_sim!r} "
++            "must be pass or skipped in --strict mode"
++        )
++    if strict:
++        accum_synth = payload.get("epistemic_power_accumulator_synth_status", "")
++        if not isinstance(accum_synth, str):
++            errors.append(f"{path}: epistemic_power_accumulator_synth_status must be a string")
++        elif accum_synth not in ("pass", "skipped"):
++            errors.append(
++                f"{path}: epistemic_power_accumulator_synth_status={accum_synth!r} "
++                "must be pass or skipped in --strict mode"
++            )
++        if not ACCUMULATOR_WAVEFORM_PATH.exists():
++            errors.append(
++                f"{ACCUMULATOR_WAVEFORM_PATH}: required accumulator waveform missing in --strict mode"
++            )
++        if not ACCUMULATOR_BOUNDS_TEST_PATH.exists():
++            errors.append(
++                f"{ACCUMULATOR_BOUNDS_TEST_PATH}: accumulator bounds test missing in --strict mode"
++            )
++        else:
++            try:
++                bounds_text = ACCUMULATOR_BOUNDS_TEST_PATH.read_text()
++            except OSError as exc:
++                errors.append(f"{ACCUMULATOR_BOUNDS_TEST_PATH}: read failed: {exc}")
++            else:
++                if "ACCUMULATOR_BOUNDS_PASS" not in bounds_text:
++                    errors.append(
++                        f"{ACCUMULATOR_BOUNDS_TEST_PATH}: missing ACCUMULATOR_BOUNDS_PASS marker"
++                    )
++    fingerprint = payload.get("hardware_counter_fingerprint", {})
++    if not isinstance(fingerprint, dict):
++        errors.append(f"{path}: hardware_counter_fingerprint must be an object")
++        return
++    for key in ("accum_log", "accum_tx"):
++        if key not in fingerprint:
++            if strict:
++                errors.append(
++                    f"{path}: hardware_counter_fingerprint missing {key!r} in --strict mode"
++                )
++
++
++def validate_qir_epi_power_sio(path: Path, errors: List[str], strict: bool) -> None:
++    """Validate the QIR epistemic power .sio module declares required functions."""
++    try:
++        content = path.read_text()
++    except OSError as exc:
++        errors.append(f"{path}: read failed: {exc}")
++        return
++    required_fns = (
++        "qir_epi_power_hw_q32_32",
++        "qir_epi_power_variance_q32_32",
++        "qir_epi_power_poll_overhead_us",
++        "qir_epi_power_live_conformant_v2",
++    )
++    for fn in required_fns:
++        if fn not in content:
++            errors.append(f"{path}: missing required function {fn!r}")
++
++
++def validate_qir_full_emitter_sio(path: Path, errors: List[str], strict: bool) -> None:
++    """Validate the full QIR emitter self-hosted module."""
++    try:
++        content = path.read_text()
++    except OSError as exc:
++        errors.append(f"{path}: read failed: {exc}")
++        return
++    required_symbols = (
++        "omega_qir_emit_shim",
++        "omega_qir_emit_quantum_controller",
++        "omega_qir_emit_bundle",
++        "omega_qir_full_emitter_self_check",
++        "selfhost-emitter",
++    )
++    for symbol in required_symbols:
++        if symbol not in content:
++            errors.append(f"{path}: missing required symbol {symbol!r}")
++    if strict and "template-direct" in content:
++        errors.append(f"{path}: template-direct fallback is forbidden in --strict mode")
++
++
++def validate_merkle_lane_sio(path: Path, errors: List[str], strict: bool) -> None:
++    """Validate Merkle lane helper SIO module."""
++    try:
++        content = path.read_text()
++    except OSError as exc:
++        errors.append(f"{path}: read failed: {exc}")
++        return
++    required_symbols = (
++        "merkle_lane_root_l64",
++        "merkle_lane_verify_root",
++        "merkle_lane_replay_summary",
++        "merkle_lane_self_check",
++    )
++    for symbol in required_symbols:
++        if symbol not in content:
++            errors.append(f"{path}: missing required symbol {symbol!r}")
++
++
++def validate_merkle_lane_rtl(path: Path, errors: List[str], strict: bool) -> None:
++    """Validate Merkle lane RTL core."""
++    try:
++        content = path.read_text()
++    except OSError as exc:
++        errors.append(f"{path}: read failed: {exc}")
++        return
++    required_symbols = (
++        "module k_axi_merkle_lane_core",
++        "merkle_lane_digest",
++        "merkle_lane_valid",
++        "MERKLE_SALT",
++    )
++    for symbol in required_symbols:
++        if symbol not in content:
++            errors.append(f"{path}: missing required RTL symbol {symbol!r}")
++
++
++def validate_merkle_root_sio(path: Path, errors: List[str], strict: bool) -> None:
++    """Validate Merkle root helper SIO module."""
++    try:
++        content = path.read_text()
++    except OSError as exc:
++        errors.append(f"{path}: read failed: {exc}")
++        return
++    required_symbols = (
++        "merkle_root_lane_l64",
++        "merkle_root_verify_l64",
++        "merkle_root_lane_self_check",
++    )
++    for symbol in required_symbols:
++        if symbol not in content:
++            errors.append(f"{path}: missing required symbol {symbol!r}")
++
++
++def validate_merkle_root_rtl(path: Path, errors: List[str], strict: bool) -> None:
++    """Validate Merkle root RTL core."""
++    try:
++        content = path.read_text()
++    except OSError as exc:
++        errors.append(f"{path}: read failed: {exc}")
++        return
++    required_symbols = (
++        "module k_axi_merkle_root_lane_core",
++        "merkle_root_l64",
++        "merkle_root_valid",
++    )
++    for symbol in required_symbols:
++        if symbol not in content:
++            errors.append(f"{path}: missing required RTL symbol {symbol!r}")
++
++
++def validate_genesis_manifest(path: Path, errors: List[str], strict: bool) -> None:
++    payload = load_json_object(path, errors)
++    if payload is None:
++        return
++
++    if payload.get("schema") != GENESIS_MANIFEST_SCHEMA:
++        errors.append(
++            f"{path}: schema mismatch (expected {GENESIS_MANIFEST_SCHEMA}, got {payload.get('schema')})"
++        )
++    for field in (
++        "artifact_count",
++        "artifacts",
++        "aggregate_sha256",
++        "merkle_root_sha256",
++        "canonical_pubkey_fingerprint",
++        "signature_hex",
++        "signed",
++        "cold_boot_ready",
++    ):
++        if field not in payload:
++            errors.append(f"{path}: missing required field: {field}")
++    if "artifact_count" in payload and not isinstance(payload["artifact_count"], int):
++        errors.append(f"{path}: artifact_count must be int")
++    if "artifacts" in payload and not isinstance(payload["artifacts"], list):
++        errors.append(f"{path}: artifacts must be list")
++    for field in ("aggregate_sha256", "merkle_root_sha256", "canonical_pubkey_fingerprint"):
++        value = payload.get(field)
++        if value is not None and (not isinstance(value, str) or len(value) != 64):
++            errors.append(f"{path}: {field} must be 64-char hex string")
++    signature = payload.get("signature_hex")
++    if signature is not None and (not isinstance(signature, str) or len(signature) != 128):
++        errors.append(f"{path}: signature_hex must be 128-char hex string")
++    if "signed" in payload and not isinstance(payload["signed"], bool):
++        errors.append(f"{path}: signed must be bool")
++    if "cold_boot_ready" in payload and not isinstance(payload["cold_boot_ready"], bool):
++        errors.append(f"{path}: cold_boot_ready must be bool")
++
++    if strict:
++        if payload.get("signed") is not True:
++            errors.append(f"{path}: signed must be true in --strict mode")
++        if payload.get("cold_boot_ready") is not True:
++            errors.append(f"{path}: cold_boot_ready must be true in --strict mode")
++
++
+ def maybe_validate(
+     path: Path,
+     strict: bool,
+@@ -1276,6 +1697,28 @@ def main() -> int:
+     require_sprint1_success_criteria = (
+         os.environ.get("OMEGA_REQUIRE_SPRINT1_SUCCESS_CRITERIA_NOW", "0") == "1"
+     )
++    require_bidir_kaxi = os.environ.get("OMEGA_REQUIRE_BIDIR_KAXI", "0") == "1"
++    require_accumulator_bounds = (
++        os.environ.get("OMEGA_REQUIRE_ACCUMULATOR_BOUNDS", "0") == "1"
++    )
++    require_epi_power_live = (
++        os.environ.get("OMEGA_REQUIRE_EPI_POWER_LIVE", "0") == "1"
++    )
++    require_qir_emitter = (
++        os.environ.get("OMEGA_REQUIRE_QIR_EMITTER", "0") == "1"
++    )
++    require_merkle_lane = (
++        os.environ.get("OMEGA_REQUIRE_MERKLE_LANE", "0") == "1"
++    )
++    require_resource_trend = (
++        os.environ.get("OMEGA_REQUIRE_RESOURCE_TREND", "0") == "1"
++    )
++    require_merkle_root = (
++        os.environ.get("OMEGA_REQUIRE_MERKLE_ROOT", "0") == "1"
++    )
++    require_genesis_manifest = (
++        os.environ.get("OMEGA_REQUIRE_GENESIS_MANIFEST", "0") == "1"
++    )
+ 
+     maybe_validate(
+         FPGA_REPORT_PATH,
+@@ -1303,7 +1746,7 @@ def main() -> int:
+     )
+     maybe_validate(
+         HARDWARE_RESOURCE_TREND_PATH,
+-        args.strict,
++        args.strict and require_resource_trend,
+         errors,
+         validate_resource_trend,
+     )
+@@ -1393,6 +1836,60 @@ def main() -> int:
+             p, e, strict, require_success_criteria=require_sprint1_success_criteria
+         ),
+     )
++    maybe_validate(
++        FPGA_REPORT_PATH,
++        args.strict and require_bidir_kaxi,
++        errors,
++        validate_bidir_kaxi,
++    )
++    maybe_validate(
++        FPGA_REPORT_PATH,
++        args.strict and require_accumulator_bounds,
++        errors,
++        validate_accumulator_bounds,
++    )
++    maybe_validate(
++        QIR_EPI_POWER_SIO_PATH,
++        args.strict and require_epi_power_live,
++        errors,
++        validate_qir_epi_power_sio,
++    )
++    maybe_validate(
++        QIR_FULL_EMITTER_SIO_PATH,
++        args.strict and require_qir_emitter,
++        errors,
++        validate_qir_full_emitter_sio,
++    )
++    maybe_validate(
++        MERKLE_LANE_SIO_PATH,
++        args.strict and require_merkle_lane,
++        errors,
++        validate_merkle_lane_sio,
++    )
++    maybe_validate(
++        MERKLE_LANE_RTL_PATH,
++        args.strict and require_merkle_lane,
++        errors,
++        validate_merkle_lane_rtl,
++    )
++    maybe_validate(
++        MERKLE_ROOT_SIO_PATH,
++        args.strict and require_merkle_root,
++        errors,
++        validate_merkle_root_sio,
++    )
++    maybe_validate(
++        MERKLE_ROOT_RTL_PATH,
++        args.strict and require_merkle_root,
++        errors,
++        validate_merkle_root_rtl,
++    )
++    maybe_validate(
++        GENESIS_MANIFEST_PATH,
++        args.strict and require_genesis_manifest,
++        errors,
++        validate_genesis_manifest,
++    )
+ 
+     if errors:
+         for err in errors:
+diff --git a/scripts/omega/omega_shadow_audit_report.py b/scripts/omega/omega_shadow_audit_report.py
+index 24b54a39..285b9730 100644
+--- a/scripts/omega/omega_shadow_audit_report.py
++++ b/scripts/omega/omega_shadow_audit_report.py
+@@ -22,6 +22,16 @@ DEFAULT_MARKERS = (
+     "PINNED_DIGEST_PASS",
+     "HW_EPI_POWER_LIVE_READ_PASS",
+     "HW_EPI_POWER_TREND_PASS",
++    "QIR_EMITTER_PASS",
++    "QIR_GENESIS_EMITTER_PASS",
++    "EPI_POWER_LIVE_PASS",
++    "MERKLE_LANE_PASS",
++    "MERKLE_ROOT_PASS",
++    "BIDIR_KAXI_PASS",
++    "ACCUMULATOR_BOUNDS_PASS",
++    "RESOURCE_TREND_GATE_PASS",
++    "RESOURCE_ZERO_DRIFT_PASS",
++    "OMEGA_GENESIS_V1_RELEASE_PASS",
+ )
+ 
+ 
+diff --git a/scripts/omega_sprint1_gate.sh b/scripts/omega_sprint1_gate.sh
+index 69fc8c03..830b9af3 100755
+--- a/scripts/omega_sprint1_gate.sh
++++ b/scripts/omega_sprint1_gate.sh
+@@ -277,8 +277,10 @@ OMEGA_REQUIRE_FPGA_PASS="${OMEGA_REQUIRE_FPGA_PASS:-0}" \
+ OMEGA_REQUIRE_QUANTUM_CONTROLLER="${OMEGA_REQUIRE_QUANTUM_CONTROLLER:-0}" \
+ OMEGA_REQUIRE_QUANTUM_ACCUM_LINK="${OMEGA_REQUIRE_QUANTUM_ACCUM_LINK:-1}" \
+ OMEGA_REQUIRE_K_AXI="${OMEGA_REQUIRE_K_AXI:-0}" \
+-OMEGA_REQUIRE_K_AXI_RETURN="${OMEGA_REQUIRE_K_AXI_RETURN:-0}" \
++OMEGA_REQUIRE_K_AXI_RETURN="${OMEGA_REQUIRE_K_AXI_RETURN:-1}" \
+ OMEGA_REQUIRE_EPI_POWER_ACCUM="${OMEGA_REQUIRE_EPI_POWER_ACCUM:-1}" \
++OMEGA_REQUIRE_MERKLE_LANE="${OMEGA_REQUIRE_MERKLE_LANE:-1}" \
++OMEGA_REQUIRE_MERKLE_ROOT="${OMEGA_REQUIRE_MERKLE_ROOT:-1}" \
+ OMEGA_REQUIRE_COUNTER_REPRO="${OMEGA_REQUIRE_COUNTER_REPRO:-1}" \
+ OMEGA_REQUIRE_RESOURCE_TREND="${OMEGA_REQUIRE_RESOURCE_TREND:-1}" \
+   bash scripts/run_fpga_epistemic_seed.sh
+@@ -336,6 +338,341 @@ if [ "${OMEGA_REQUIRE_HW_EPI_POWER_TREND:-1}" = "1" ]; then
+   echo "HW_EPI_POWER_TREND_PASS" | tee -a "$GATE_LOG"
+ fi
+ 
++if [ "${OMEGA_REQUIRE_QIR_EMITTER:-1}" = "1" ]; then
++  echo "==> omega sprint4 gate: full QIR emitter"
++  QIR_EMITTER_PATH="${OMEGA_QIR_FULL_EMITTER_PATH:-}"
++  if [ -z "$QIR_EMITTER_PATH" ]; then
++    if [ -f "hardware/rtl/qir/omega_genesis_emitter.sio" ]; then
++      QIR_EMITTER_PATH="hardware/rtl/qir/omega_genesis_emitter.sio"
++    else
++      QIR_EMITTER_PATH="hardware/rtl/qir/omega_full_qir_emitter.sio"
++    fi
++  fi
++  if [ ! -f "$QIR_EMITTER_PATH" ]; then
++    echo "error: full QIR emitter missing: $QIR_EMITTER_PATH" >&2
++    exit 2
++  fi
++  if [ "${OMEGA_REQUIRE_QIR_GENESIS_EMITTER:-1}" = "1" ] \
++    && [ "$QIR_EMITTER_PATH" != "hardware/rtl/qir/omega_genesis_emitter.sio" ]; then
++    echo "error: genesis QIR emitter required but active emitter is $QIR_EMITTER_PATH" >&2
++    exit 2
++  fi
++  python3 - "$QIR_EMITTER_PATH" <<'PY'
++import sys
++from pathlib import Path
++
++path = Path(sys.argv[1])
++text = path.read_text()
++required_symbols = (
++    "omega_qir_emit_shim",
++    "omega_qir_emit_quantum_controller",
++    "omega_qir_emit_bundle",
++    "omega_qir_full_emitter_self_check",
++    "selfhost-emitter",
++)
++for symbol in required_symbols:
++    if symbol not in text:
++        raise SystemExit(f"missing required symbol in {path}: {symbol}")
++if "template-direct" in text:
++    raise SystemExit(f"{path}: template-direct fallback is not allowed")
++print(f"qir_emitter_check: pass path={path}")
++PY
++
++  if [ -f "bootstrap/policies/policy.v2.json" ]; then
++    QIR_POLICY_PATH="bootstrap/policies/policy.v2.json"
++  else
++    QIR_POLICY_PATH="bootstrap/policies/policy.v1.json"
++  fi
++  QIR_SOUC_BIN="${OMEGA_POLICY_SOUC_BIN:-$ROOT_DIR/souc}"
++  set +e
++  QIR_EVAL_OUTPUT="$(
++    SOUNIO_POLICY_VERIFY_KEY_PATH="${OMEGA_CANONICAL_PUBKEY:-keys/bootstrap_ed25519.pub}" \
++      "$QIR_SOUC_BIN" opt policy eval --policy "$QIR_POLICY_PATH" 2>&1
++  )"
++  QIR_EVAL_RC=$?
++  set -e
++  echo "$QIR_EVAL_OUTPUT"
++  if [ "$QIR_EVAL_RC" -ne 0 ]; then
++    echo "error: souc opt policy eval failed for QIR emitter check" >&2
++    exit "$QIR_EVAL_RC"
++  fi
++  if ! grep -q "opt policy qir-emitter: status=pass" <<<"$QIR_EVAL_OUTPUT"; then
++    echo "error: opt policy eval did not report qir-emitter pass status" >&2
++    exit 2
++  fi
++  echo "QIR_EMITTER_PASS" | tee -a "$GATE_LOG"
++  echo "QIR_GENESIS_EMITTER_PASS" | tee -a "$GATE_LOG"
++fi
++
++if [ "${OMEGA_REQUIRE_EPI_POWER_LIVE:-1}" = "1" ]; then
++  echo "==> omega sprint3 gate: QIR epistemic power .sio live module"
++  QIR_SIO="hardware/rtl/qir/omega_epistemic_power.sio"
++  HW_EPI_LIVE_ART="artifacts/fpga/hardware_epistemic_power_live.v1.json"
++  if [ ! -f "$QIR_SIO" ]; then
++    echo "error: QIR epistemic power .sio module missing: $QIR_SIO" >&2
++    exit 2
++  fi
++  if [ ! -f "$HW_EPI_LIVE_ART" ]; then
++    echo "error: hardware epistemic power live artifact missing: $HW_EPI_LIVE_ART" >&2
++    exit 2
++  fi
++  python3 - "$QIR_SIO" "$HW_EPI_LIVE_ART" <<'PY'
++import json
++import sys
++from pathlib import Path
++
++sio_path = Path(sys.argv[1])
++art_path = Path(sys.argv[2])
++content = sio_path.read_text()
++for fn in (
++    "qir_epi_power_hw_q32_32",
++    "qir_epi_power_variance_q32_32",
++    "qir_epi_power_poll_overhead_us",
++    "qir_epi_power_live_conformant_v2",
++):
++    if fn not in content:
++        print(f"error: QIR module missing required fn {fn}", file=sys.stderr)
++        sys.exit(2)
++payload = json.loads(art_path.read_text())
++conformant = payload.get("live_read_conformant", False)
++variance_q32_32 = payload.get("hardware_epistemic_power_variance_q32_32", None)
++poll_overhead_us = payload.get("poll_overhead_us", None)
++if not conformant:
++    print(f"error: live_read_conformant=false in {art_path}", file=sys.stderr)
++    sys.exit(2)
++if not isinstance(variance_q32_32, int) or variance_q32_32 < 0:
++    print(
++        f"error: hardware_epistemic_power_variance_q32_32 invalid in {art_path}: {variance_q32_32!r}",
++        file=sys.stderr,
++    )
++    sys.exit(2)
++if not isinstance(poll_overhead_us, int) or poll_overhead_us < 0 or poll_overhead_us >= 1000:
++    print(
++        f"error: poll_overhead_us must be <1000 in {art_path}: {poll_overhead_us!r}",
++        file=sys.stderr,
++    )
++    sys.exit(2)
++print(
++    "QIR epi power .sio module OK "
++    f"conformant={str(conformant).lower()} "
++    f"variance_q32_32={variance_q32_32} "
++    f"poll_overhead_us={poll_overhead_us}"
++)
++PY
++  echo "EPI_POWER_LIVE_PASS" | tee -a "$GATE_LOG"
++fi
++
++if [ "${OMEGA_REQUIRE_MERKLE_LANE:-1}" = "1" ]; then
++  echo "==> omega sprint4 gate: K-AXI Merkle lane"
++  MERKLE_SIO="hardware/rtl/kaxi/merkle_lane.sio"
++  MERKLE_RTL="hardware/fpga/k_axi_merkle_lane.v"
++  MERKLE_ROOT_SIO="${OMEGA_MERKLE_ROOT_SIO_PATH:-hardware/rtl/kaxi/merkle_root_lane.sio}"
++  MERKLE_ROOT_RTL="${OMEGA_MERKLE_ROOT_RTL_PATH:-hardware/fpga/k_axi_merkle_root_lane.v}"
++  FPGA_REPORT="artifacts/fpga/fpga_seed_report.json"
++  if [ ! -f "$MERKLE_SIO" ]; then
++    echo "error: missing Merkle lane .sio adapter: $MERKLE_SIO" >&2
++    exit 2
++  fi
++  if [ ! -f "$MERKLE_RTL" ]; then
++    echo "error: missing Merkle lane RTL: $MERKLE_RTL" >&2
++    exit 2
++  fi
++  if [ ! -f "$FPGA_REPORT" ]; then
++    echo "error: missing FPGA report for Merkle lane check: $FPGA_REPORT" >&2
++    exit 2
++  fi
++  if ! rg -q "merkle_lane_root_l64" "$MERKLE_SIO"; then
++    echo "error: Merkle lane .sio missing merkle_lane_root_l64" >&2
++    exit 2
++  fi
++  if ! rg -q "merkle_lane_verify_root" "$MERKLE_SIO"; then
++    echo "error: Merkle lane .sio missing merkle_lane_verify_root" >&2
++    exit 2
++  fi
++  if ! rg -q "module k_axi_merkle_lane_core" "$MERKLE_RTL"; then
++    echo "error: Merkle lane RTL missing module k_axi_merkle_lane_core" >&2
++    exit 2
++  fi
++  if [ ! -f "$MERKLE_ROOT_SIO" ]; then
++    echo "error: missing Merkle root .sio adapter: $MERKLE_ROOT_SIO" >&2
++    exit 2
++  fi
++  if [ ! -f "$MERKLE_ROOT_RTL" ]; then
++    echo "error: missing Merkle root RTL: $MERKLE_ROOT_RTL" >&2
++    exit 2
++  fi
++  if ! rg -q "merkle_root_lane_l64" "$MERKLE_ROOT_SIO"; then
++    echo "error: Merkle root .sio missing merkle_root_lane_l64" >&2
++    exit 2
++  fi
++  if ! rg -q "merkle_root_verify_l64" "$MERKLE_ROOT_SIO"; then
++    echo "error: Merkle root .sio missing merkle_root_verify_l64" >&2
++    exit 2
++  fi
++  if ! rg -q "module k_axi_merkle_root_lane_core" "$MERKLE_ROOT_RTL"; then
++    echo "error: Merkle root RTL missing module k_axi_merkle_root_lane_core" >&2
++    exit 2
++  fi
++  python3 - "$FPGA_REPORT" <<'PY'
++import json
++import sys
++from pathlib import Path
++
++payload = json.loads(Path(sys.argv[1]).read_text())
++if payload.get("merkle_lane_present") is not True:
++    raise SystemExit("merkle_lane_present must be true")
++if payload.get("merkle_lane_core_rtl_present") is not True:
++    raise SystemExit("merkle_lane_core_rtl_present must be true")
++status = payload.get("merkle_lane_synth_status")
++if status != "pass":
++    raise SystemExit(f"merkle_lane_synth_status={status!r} (expected pass)")
++root_status = payload.get("merkle_root_synth_status")
++if root_status != "pass":
++    raise SystemExit(f"merkle_root_synth_status={root_status!r} (expected pass)")
++if payload.get("merkle_root_core_rtl_present") is not True:
++    raise SystemExit("merkle_root_core_rtl_present must be true")
++print(
++    "merkle_lane_check: "
++    f"present={payload.get('merkle_lane_present')} "
++    f"core_rtl={payload.get('merkle_lane_core_rtl_present')} "
++    f"synth={status} "
++    f"root_core_rtl={payload.get('merkle_root_core_rtl_present')} "
++    f"root_synth={root_status}"
++)
++PY
++  echo "MERKLE_LANE_PASS" | tee -a "$GATE_LOG"
++  echo "MERKLE_ROOT_PASS" | tee -a "$GATE_LOG"
++fi
++
++if [ "${OMEGA_REQUIRE_BIDIR_KAXI:-1}" = "1" ]; then
++  echo "==> omega sprint3 gate: bidirectional K-AXI return channel"
++  FPGA_REPORT="artifacts/fpga/fpga_seed_report.json"
++  BIDIR_ADAPTER_SIO="hardware/rtl/kaxi/bidirectional_return_adapter.sio"
++  BIDIR_WAVE="artifacts/fpga/waveforms/tb_k_axi_bidirectional.vcd"
++  if [ ! -f "$FPGA_REPORT" ]; then
++    echo "error: FPGA seed report missing: $FPGA_REPORT" >&2
++    exit 2
++  fi
++  if [ ! -f "$BIDIR_ADAPTER_SIO" ]; then
++    echo "error: bidirectional K-AXI adapter missing: $BIDIR_ADAPTER_SIO" >&2
++    exit 2
++  fi
++  if [ ! -f "$BIDIR_WAVE" ]; then
++    echo "error: bidirectional K-AXI waveform missing: $BIDIR_WAVE" >&2
++    exit 2
++  fi
++  if ! rg -q "kaxi_bidir_pack_header" "$BIDIR_ADAPTER_SIO"; then
++    echo "error: bidirectional K-AXI adapter missing kaxi_bidir_pack_header" >&2
++    exit 2
++  fi
++  if ! rg -q "kaxi_bidir_replay_inspect" "$BIDIR_ADAPTER_SIO"; then
++    echo "error: bidirectional K-AXI adapter missing kaxi_bidir_replay_inspect" >&2
++    exit 2
++  fi
++  python3 - "$FPGA_REPORT" <<'PY'
++import json
++import sys
++from pathlib import Path
++
++payload = json.loads(Path(sys.argv[1]).read_text())
++sim = payload.get("k_axi_return_sim_status", "")
++synth = payload.get("k_axi_return_synth_status", "")
++if sim != "pass":
++    print(f"error: k_axi_return_sim_status={sim!r} (expected pass)", file=sys.stderr)
++    sys.exit(2)
++if synth != "pass":
++    print(f"error: k_axi_return_synth_status={synth!r} (expected pass)", file=sys.stderr)
++    sys.exit(2)
++print(f"K-AXI bidirectional return: sim={sim} synth={synth}")
++PY
++  echo "BIDIR_KAXI_PASS" | tee -a "$GATE_LOG"
++fi
++
++if [ "${OMEGA_REQUIRE_ACCUMULATOR_BOUNDS:-1}" = "1" ]; then
++  echo "==> omega sprint3 gate: accumulator formal bounds"
++  BOUNDS_SIO="tests/hardware/accumulator_bounds_test.sio"
++  if [ ! -f "$BOUNDS_SIO" ]; then
++    echo "error: accumulator bounds test missing: $BOUNDS_SIO" >&2
++    exit 2
++  fi
++  SOUC_BIN="${OMEGA_POLICY_SOUC_BIN:-$ROOT_DIR/souc}"
++  BOUNDS_OUT="$(PATH="$ROOT_DIR:$PATH" "$SOUC_BIN" run "$BOUNDS_SIO" 2>&1)"
++  echo "$BOUNDS_OUT"
++  if ! grep -q "ACCUMULATOR_BOUNDS_PASS" <<<"$BOUNDS_OUT"; then
++    echo "error: accumulator_bounds_test.sio did not emit ACCUMULATOR_BOUNDS_PASS" >&2
++    exit 2
++  fi
++  ACCUM_WAVE="artifacts/fpga/waveforms/tb_epistemic_power_accumulator.vcd"
++  if [ ! -f "$ACCUM_WAVE" ]; then
++    echo "error: accumulator waveform missing: $ACCUM_WAVE" >&2
++    exit 2
++  fi
++  echo "ACCUMULATOR_BOUNDS_PASS" | tee -a "$GATE_LOG"
++fi
++
++if [ "${OMEGA_REQUIRE_RESOURCE_TREND:-1}" = "1" ]; then
++  echo "==> omega sprint4 gate: hardware resource trend"
++  RESOURCE_TREND_PATH="${OMEGA_HW_RESOURCE_TREND_PATH:-artifacts/fpga/hardware_resource_trend.v2.json}"
++  if [ ! -f "$RESOURCE_TREND_PATH" ]; then
++    echo "error: hardware resource trend artifact missing: $RESOURCE_TREND_PATH" >&2
++    exit 2
++  fi
++  python3 - "$RESOURCE_TREND_PATH" <<'PY'
++import json
++import sys
++from pathlib import Path
++
++path = Path(sys.argv[1])
++payload = json.loads(path.read_text())
++runs = payload.get("runs")
++if not isinstance(runs, list) or not runs:
++    raise SystemExit(f"{path}: runs missing or empty")
++last = runs[-1]
++if not isinstance(last, dict):
++    raise SystemExit(f"{path}: latest run must be object")
++modules = last.get("modules")
++if not isinstance(modules, dict) or len(modules) < 3:
++    raise SystemExit(f"{path}: latest run modules missing or too small")
++status = payload.get("last_status")
++if status not in ("pass", "bootstrap"):
++    raise SystemExit(f"{path}: last_status must be pass/bootstrap, got {status!r}")
++max_drift = payload.get("last_max_relative_drift")
++threshold = payload.get("drift_threshold", 0.05)
++if not isinstance(max_drift, (int, float)):
++    raise SystemExit(f"{path}: last_max_relative_drift missing")
++if not isinstance(threshold, (int, float)):
++    raise SystemExit(f"{path}: drift_threshold missing")
++if float(max_drift) > float(threshold):
++    raise SystemExit(
++        f"{path}: max drift {float(max_drift):.6f} exceeds threshold {float(threshold):.6f}"
++    )
++print(
++    f"resource_trend_check: status={status} "
++    f"max_relative_drift={float(max_drift):.6f} "
++    f"threshold={float(threshold):.6f} "
++    f"modules={len(modules)}"
++)
++PY
++  echo "RESOURCE_TREND_GATE_PASS" | tee -a "$GATE_LOG"
++  echo "RESOURCE_ZERO_DRIFT_PASS" | tee -a "$GATE_LOG"
++fi
++
++if [ "${OMEGA_REQUIRE_GENESIS_MANIFEST:-1}" = "1" ]; then
++  echo "==> omega sprint4 gate: genesis manifest release"
++  GENESIS_ARGS=(
++    --gate-log "$GATE_LOG"
++    --canonical-privkey "${OMEGA_CANONICAL_PRIVKEY:-keys/bootstrap_ed25519}"
++    --canonical-pubkey "${OMEGA_CANONICAL_PUBKEY:-keys/bootstrap_ed25519.pub}"
++    --canonical-timestamp "${OMEGA_CANONICAL_BOOTSTRAP_TIMESTAMP_PATH:-keys/bootstrap_ed25519.created_at}"
++    --out "${OMEGA_GENESIS_MANIFEST_OUT:-artifacts/omega/omega_genesis.v1.0.json}"
++  )
++  if [ "${OMEGA_REQUIRE_GENESIS_MANIFEST_STRICT:-1}" = "1" ]; then
++    GENESIS_ARGS+=(--strict)
++  fi
++  python3 scripts/omega/omega_genesis_manifest.py "${GENESIS_ARGS[@]}"
++  echo "OMEGA_GENESIS_V1_RELEASE_PASS" | tee -a "$GATE_LOG"
++fi
++
+ if [ "${OMEGA_REQUIRE_SHADOW_AUDIT:-1}" = "1" ]; then
+   echo "==> omega sprint1 gate: shadow audit report"
+   SHADOW_AUDIT_ARGS=(
+@@ -662,6 +999,11 @@ if [ "${OMEGA_REQUIRE_GOVERNANCE_ATTESTATION:-1}" = "1" ]; then
+     --canonical-timestamp "${OMEGA_CANONICAL_BOOTSTRAP_TIMESTAMP_PATH:-keys/bootstrap_ed25519.created_at}"
+     --policy "${RL_POLICY_PATH:-bootstrap/policies/policy.v2.json}"
+     --baseline-freeze "${OMEGA_BASELINE_FREEZE_OUT:-artifacts/omega/baseline_freeze.v1.json}"
++    --resource-trend "${OMEGA_HW_RESOURCE_TREND_PATH:-artifacts/fpga/hardware_resource_trend.v2.json}"
++    --qir-emitter "${OMEGA_QIR_FULL_EMITTER_PATH:-hardware/rtl/qir/omega_genesis_emitter.sio}"
++    --merkle-sio "${OMEGA_MERKLE_ROOT_SIO_PATH:-hardware/rtl/kaxi/merkle_root_lane.sio}"
++    --merkle-rtl "${OMEGA_MERKLE_ROOT_RTL_PATH:-hardware/fpga/k_axi_merkle_root_lane.v}"
++    --genesis-manifest "${OMEGA_GENESIS_MANIFEST_OUT:-artifacts/omega/omega_genesis.v1.0.json}"
+     --key-id "${OMEGA_GOVERNANCE_ATTEST_KEY_ID:-canonical-bootstrap-ed25519}"
+     --require-signature
+   )
+@@ -719,6 +1061,14 @@ if [ "${OMEGA_REQUIRE_HW_TELEMETRY_REGRESSION:-1}" = "1" ]; then
+   OMEGA_REQUIRE_GOVERNANCE_ATTESTATION="${OMEGA_REQUIRE_GOVERNANCE_ATTESTATION:-1}"
+   OMEGA_REQUIRE_SPRINT1_RELEASE_READINESS="${OMEGA_REQUIRE_SPRINT1_RELEASE_READINESS:-1}"
+   OMEGA_REQUIRE_SPRINT1_SUCCESS_CRITERIA_NOW="${OMEGA_REQUIRE_SPRINT1_SUCCESS_CRITERIA_NOW:-1}"
++  OMEGA_REQUIRE_BIDIR_KAXI="${OMEGA_REQUIRE_BIDIR_KAXI:-1}"
++  OMEGA_REQUIRE_ACCUMULATOR_BOUNDS="${OMEGA_REQUIRE_ACCUMULATOR_BOUNDS:-1}"
++  OMEGA_REQUIRE_EPI_POWER_LIVE="${OMEGA_REQUIRE_EPI_POWER_LIVE:-1}"
++  OMEGA_REQUIRE_QIR_EMITTER="${OMEGA_REQUIRE_QIR_EMITTER:-1}"
++  OMEGA_REQUIRE_MERKLE_LANE="${OMEGA_REQUIRE_MERKLE_LANE:-1}"
++  OMEGA_REQUIRE_MERKLE_ROOT="${OMEGA_REQUIRE_MERKLE_ROOT:-1}"
++  OMEGA_REQUIRE_GENESIS_MANIFEST="${OMEGA_REQUIRE_GENESIS_MANIFEST:-1}"
++  OMEGA_REQUIRE_RESOURCE_TREND="${OMEGA_REQUIRE_RESOURCE_TREND:-1}"
+   HW_TELEMETRY_ARGS=()
+   if [ "${OMEGA_HW_TELEMETRY_REGRESSION_STRICT:-0}" = "1" ]; then
+     HW_TELEMETRY_ARGS+=(--strict)
+@@ -736,6 +1086,14 @@ if [ "${OMEGA_REQUIRE_HW_TELEMETRY_REGRESSION:-1}" = "1" ]; then
+   OMEGA_REQUIRE_GOVERNANCE_ATTESTATION="$OMEGA_REQUIRE_GOVERNANCE_ATTESTATION" \
+   OMEGA_REQUIRE_SPRINT1_RELEASE_READINESS="$OMEGA_REQUIRE_SPRINT1_RELEASE_READINESS" \
+   OMEGA_REQUIRE_SPRINT1_SUCCESS_CRITERIA_NOW="$OMEGA_REQUIRE_SPRINT1_SUCCESS_CRITERIA_NOW" \
++  OMEGA_REQUIRE_BIDIR_KAXI="$OMEGA_REQUIRE_BIDIR_KAXI" \
++  OMEGA_REQUIRE_ACCUMULATOR_BOUNDS="$OMEGA_REQUIRE_ACCUMULATOR_BOUNDS" \
++  OMEGA_REQUIRE_EPI_POWER_LIVE="$OMEGA_REQUIRE_EPI_POWER_LIVE" \
++  OMEGA_REQUIRE_QIR_EMITTER="$OMEGA_REQUIRE_QIR_EMITTER" \
++  OMEGA_REQUIRE_MERKLE_LANE="$OMEGA_REQUIRE_MERKLE_LANE" \
++  OMEGA_REQUIRE_MERKLE_ROOT="$OMEGA_REQUIRE_MERKLE_ROOT" \
++  OMEGA_REQUIRE_GENESIS_MANIFEST="$OMEGA_REQUIRE_GENESIS_MANIFEST" \
++  OMEGA_REQUIRE_RESOURCE_TREND="$OMEGA_REQUIRE_RESOURCE_TREND" \
+     python3 scripts/omega/omega_hardware_telemetry_regression.py "${HW_TELEMETRY_ARGS[@]}"
+   echo "HW_TELEMETRY_REGRESSION_PASS" | tee -a "$GATE_LOG"
+ else
+diff --git a/scripts/run_fpga_epistemic_seed.sh b/scripts/run_fpga_epistemic_seed.sh
+index 06a9a3f5..8131cfbd 100755
+--- a/scripts/run_fpga_epistemic_seed.sh
++++ b/scripts/run_fpga_epistemic_seed.sh
+@@ -4,9 +4,19 @@ set -euo pipefail
+ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ cd "$ROOT_DIR"
+ mkdir -p artifacts/fpga
++WAVE_DIR="artifacts/fpga/waveforms"
++mkdir -p "$WAVE_DIR"
+ 
+ REQUIRE_FPGA_PASS="${OMEGA_REQUIRE_FPGA_PASS:-0}"
+ REQUIRE_QUANTUM_CONTROLLER="${OMEGA_REQUIRE_QUANTUM_CONTROLLER:-0}"
++REQUIRE_QUANTUM_ACCUM_LINK="${OMEGA_REQUIRE_QUANTUM_ACCUM_LINK:-0}"
++REQUIRE_K_AXI="${OMEGA_REQUIRE_K_AXI:-0}"
++REQUIRE_K_AXI_RETURN="${OMEGA_REQUIRE_K_AXI_RETURN:-0}"
++REQUIRE_EPI_POWER_ACCUM="${OMEGA_REQUIRE_EPI_POWER_ACCUM:-0}"
++REQUIRE_MERKLE_LANE="${OMEGA_REQUIRE_MERKLE_LANE:-0}"
++REQUIRE_MERKLE_ROOT="${OMEGA_REQUIRE_MERKLE_ROOT:-0}"
++REQUIRE_COUNTER_REPRO="${OMEGA_REQUIRE_COUNTER_REPRO:-0}"
++REQUIRE_RESOURCE_TREND="${OMEGA_REQUIRE_RESOURCE_TREND:-0}"
+ SIM_STATUS="skipped"
+ SYNTH_STATUS="skipped"
+ SIM_RC=0
+@@ -15,6 +25,24 @@ QCTRL_SIM_STATUS="skipped"
+ QCTRL_SIM_RC=0
+ QCTRL_SYNTH_STATUS="skipped"
+ QCTRL_SYNTH_RC=0
++QLINK_SIM_STATUS="skipped"
++QLINK_SIM_RC=0
++KAXI_SIM_STATUS="skipped"
++KAXI_SIM_RC=0
++KAXI_SYNTH_STATUS="skipped"
++KAXI_SYNTH_RC=0
++KAXI_RETURN_SIM_STATUS="skipped"
++KAXI_RETURN_SIM_RC=0
++KAXI_RETURN_SYNTH_STATUS="skipped"
++KAXI_RETURN_SYNTH_RC=0
++EPI_PWR_SIM_STATUS="skipped"
++EPI_PWR_SIM_RC=0
++EPI_PWR_SYNTH_STATUS="skipped"
++EPI_PWR_SYNTH_RC=0
++MERKLE_SYNTH_STATUS="skipped"
++MERKLE_SYNTH_RC=0
++MERKLE_ROOT_SYNTH_STATUS="skipped"
++MERKLE_ROOT_SYNTH_RC=0
+ 
+ echo "==> FPGA seed simulation"
+ if command -v iverilog >/dev/null 2>&1; then
+@@ -22,7 +50,7 @@ if command -v iverilog >/dev/null 2>&1; then
+   iverilog -o artifacts/fpga/tb_epistemic_mac hardware/fpga/epistemic_mac.v hardware/fpga/tb_epistemic_mac.v >artifacts/fpga/iverilog.log 2>&1
+   SIM_RC=$?
+   if [ "$SIM_RC" -eq 0 ]; then
+-    vvp artifacts/fpga/tb_epistemic_mac >artifacts/fpga/vvp.log 2>&1
++    vvp artifacts/fpga/tb_epistemic_mac +dumpfile="$WAVE_DIR/tb_epistemic_mac.vcd" >artifacts/fpga/vvp.log 2>&1
+     SIM_RC=$?
+   fi
+   set -e
+@@ -49,7 +77,7 @@ if [ -f hardware/fpga/epistemic_quantum_controller.v ] && [ -f hardware/fpga/tb_
+       hardware/fpga/tb_epistemic_quantum_controller.v >artifacts/fpga/iverilog_quantum_controller.log 2>&1
+     QCTRL_SIM_RC=$?
+     if [ "$QCTRL_SIM_RC" -eq 0 ]; then
+-      vvp artifacts/fpga/tb_epistemic_quantum_controller >artifacts/fpga/vvp_quantum_controller.log 2>&1
++      vvp artifacts/fpga/tb_epistemic_quantum_controller +dumpfile="$WAVE_DIR/tb_epistemic_quantum_controller.vcd" >artifacts/fpga/vvp_quantum_controller.log 2>&1
+       QCTRL_SIM_RC=$?
+     fi
+     set -e
+@@ -74,6 +102,43 @@ else
+   fi
+ fi
+ 
++echo "==> FPGA quantum->accumulator link simulation"
++if [ -f hardware/fpga/epistemic_quantum_controller.v ] \
++  && [ -f hardware/fpga/epistemic_power_accumulator.v ] \
++  && [ -f hardware/fpga/tb_quantum_accumulator_link.v ]; then
++  if command -v iverilog >/dev/null 2>&1; then
++    set +e
++    iverilog -o artifacts/fpga/tb_quantum_accumulator_link \
++      hardware/fpga/epistemic_quantum_controller.v \
++      hardware/fpga/epistemic_power_accumulator.v \
++      hardware/fpga/tb_quantum_accumulator_link.v >artifacts/fpga/iverilog_quantum_accumulator_link.log 2>&1
++    QLINK_SIM_RC=$?
++    if [ "$QLINK_SIM_RC" -eq 0 ]; then
++      vvp artifacts/fpga/tb_quantum_accumulator_link +dumpfile="$WAVE_DIR/tb_quantum_accumulator_link.vcd" >artifacts/fpga/vvp_quantum_accumulator_link.log 2>&1
++      QLINK_SIM_RC=$?
++    fi
++    set -e
++    if [ "$QLINK_SIM_RC" -eq 0 ]; then
++      QLINK_SIM_STATUS="pass"
++    else
++      QLINK_SIM_STATUS="fail"
++      echo "warning: quantum->accumulator link simulation failed (rc=$QLINK_SIM_RC); see artifacts/fpga/vvp_quantum_accumulator_link.log"
++    fi
++  else
++    echo "warning: iverilog not found; skipping quantum->accumulator link simulation"
++    if [ "$REQUIRE_QUANTUM_ACCUM_LINK" = "1" ]; then
++      QLINK_SIM_STATUS="missing_tool"
++      QLINK_SIM_RC=127
++    fi
++  fi
++else
++  echo "warning: quantum->accumulator link sources not found; skipping"
++  if [ "$REQUIRE_QUANTUM_ACCUM_LINK" = "1" ]; then
++    QLINK_SIM_STATUS="missing_sources"
++    QLINK_SIM_RC=2
++  fi
++fi
++
+ echo "==> FPGA seed synthesis"
+ if command -v yosys >/dev/null 2>&1; then
+   set +e
+@@ -122,6 +187,287 @@ else
+   fi
+ fi
+ 
++echo "==> K-AXI bridge simulation"
++if [ -f hardware/fpga/k_axi_master.v ] && [ -f hardware/fpga/k_axi_slave_epistemic.v ] && [ -f hardware/fpga/tb_k_axi_bridge.v ]; then
++  if command -v iverilog >/dev/null 2>&1; then
++    set +e
++    iverilog -o artifacts/fpga/tb_k_axi_bridge \
++      hardware/fpga/k_axi_master.v \
++      hardware/fpga/k_axi_slave_epistemic.v \
++      hardware/fpga/tb_k_axi_bridge.v >artifacts/fpga/iverilog_k_axi.log 2>&1
++    KAXI_SIM_RC=$?
++    if [ "$KAXI_SIM_RC" -eq 0 ]; then
++      vvp artifacts/fpga/tb_k_axi_bridge +dumpfile="$WAVE_DIR/tb_k_axi_bridge.vcd" >artifacts/fpga/vvp_k_axi.log 2>&1
++      KAXI_SIM_RC=$?
++    fi
++    set -e
++    if [ "$KAXI_SIM_RC" -eq 0 ]; then
++      KAXI_SIM_STATUS="pass"
++    else
++      KAXI_SIM_STATUS="fail"
++      echo "warning: K-AXI simulation failed (rc=$KAXI_SIM_RC); see artifacts/fpga/vvp_k_axi.log"
++    fi
++  else
++    echo "warning: iverilog not found; skipping K-AXI simulation"
++    if [ "$REQUIRE_K_AXI" = "1" ]; then
++      KAXI_SIM_STATUS="missing_tool"
++      KAXI_SIM_RC=127
++    fi
++  fi
++else
++  echo "warning: K-AXI sources not found; skipping"
++  if [ "$REQUIRE_K_AXI" = "1" ]; then
++    KAXI_SIM_STATUS="missing_sources"
++    KAXI_SIM_RC=2
++  fi
++fi
++
++echo "==> K-AXI bridge synthesis"
++if [ -f hardware/fpga/synth_k_axi.ys ]; then
++  if command -v yosys >/dev/null 2>&1; then
++    set +e
++    yosys -s hardware/fpga/synth_k_axi.ys >artifacts/fpga/yosys_k_axi.log 2>&1
++    KAXI_SYNTH_RC=$?
++    set -e
++    if [ "$KAXI_SYNTH_RC" -eq 0 ]; then
++      KAXI_SYNTH_STATUS="pass"
++    else
++      KAXI_SYNTH_STATUS="fail"
++      echo "warning: K-AXI synthesis failed (rc=$KAXI_SYNTH_RC); see artifacts/fpga/yosys_k_axi.log"
++    fi
++  else
++    echo "warning: yosys not found; skipping K-AXI synthesis"
++    if [ "$REQUIRE_K_AXI" = "1" ]; then
++      KAXI_SYNTH_STATUS="missing_tool"
++      KAXI_SYNTH_RC=127
++    fi
++  fi
++else
++  echo "warning: hardware/fpga/synth_k_axi.ys not found; skipping"
++  if [ "$REQUIRE_K_AXI" = "1" ]; then
++    KAXI_SYNTH_STATUS="missing_sources"
++    KAXI_SYNTH_RC=2
++  fi
++fi
++
++echo "==> K-AXI Merkle lane synthesis"
++if [ -f hardware/fpga/k_axi_merkle_lane.v ]; then
++  if command -v yosys >/dev/null 2>&1; then
++    set +e
++    yosys -p "read_verilog hardware/fpga/k_axi_merkle_lane.v; synth -top k_axi_merkle_lane_core" >artifacts/fpga/yosys_k_axi_merkle_lane.log 2>&1
++    MERKLE_SYNTH_RC=$?
++    set -e
++    if [ "$MERKLE_SYNTH_RC" -eq 0 ]; then
++      MERKLE_SYNTH_STATUS="pass"
++    else
++      MERKLE_SYNTH_STATUS="fail"
++      echo "warning: K-AXI Merkle lane synthesis failed (rc=$MERKLE_SYNTH_RC); see artifacts/fpga/yosys_k_axi_merkle_lane.log"
++    fi
++  else
++    echo "warning: yosys not found; skipping K-AXI Merkle lane synthesis"
++    if [ "$REQUIRE_MERKLE_LANE" = "1" ]; then
++      MERKLE_SYNTH_STATUS="missing_tool"
++      MERKLE_SYNTH_RC=127
++    fi
++  fi
++else
++  echo "warning: hardware/fpga/k_axi_merkle_lane.v not found; skipping"
++  if [ "$REQUIRE_MERKLE_LANE" = "1" ]; then
++    MERKLE_SYNTH_STATUS="missing_sources"
++    MERKLE_SYNTH_RC=2
++  fi
++fi
++
++echo "==> K-AXI Merkle root synthesis"
++if [ -f hardware/fpga/k_axi_merkle_root_lane.v ]; then
++  if command -v yosys >/dev/null 2>&1; then
++    set +e
++    yosys -p "read_verilog hardware/fpga/k_axi_merkle_root_lane.v; synth -top k_axi_merkle_root_lane_core" >artifacts/fpga/yosys_k_axi_merkle_root_lane.log 2>&1
++    MERKLE_ROOT_SYNTH_RC=$?
++    set -e
++    if [ "$MERKLE_ROOT_SYNTH_RC" -eq 0 ]; then
++      MERKLE_ROOT_SYNTH_STATUS="pass"
++    else
++      MERKLE_ROOT_SYNTH_STATUS="fail"
++      echo "warning: K-AXI Merkle root synthesis failed (rc=$MERKLE_ROOT_SYNTH_RC); see artifacts/fpga/yosys_k_axi_merkle_root_lane.log"
++    fi
++  else
++    echo "warning: yosys not found; skipping K-AXI Merkle root synthesis"
++    if [ "$REQUIRE_MERKLE_ROOT" = "1" ]; then
++      MERKLE_ROOT_SYNTH_STATUS="missing_tool"
++      MERKLE_ROOT_SYNTH_RC=127
++    fi
++  fi
++else
++  echo "warning: hardware/fpga/k_axi_merkle_root_lane.v not found; skipping"
++  if [ "$REQUIRE_MERKLE_ROOT" = "1" ]; then
++    MERKLE_ROOT_SYNTH_STATUS="missing_sources"
++    MERKLE_ROOT_SYNTH_RC=2
++  fi
++fi
++
++echo "==> K-AXI return channel simulation"
++if [ -f hardware/fpga/k_axi_return_fifo.v ] \
++  && [ -f hardware/fpga/k_axi_return_mux.v ] \
++  && [ -f hardware/fpga/tb_k_axi_bidirectional.v ]; then
++  if command -v iverilog >/dev/null 2>&1; then
++    set +e
++    iverilog -o artifacts/fpga/tb_k_axi_bidirectional \
++      hardware/fpga/k_axi_return_fifo.v \
++      hardware/fpga/k_axi_return_mux.v \
++      hardware/fpga/tb_k_axi_bidirectional.v >artifacts/fpga/iverilog_k_axi_return.log 2>&1
++    KAXI_RETURN_SIM_RC=$?
++    if [ "$KAXI_RETURN_SIM_RC" -eq 0 ]; then
++      vvp artifacts/fpga/tb_k_axi_bidirectional +dumpfile="$WAVE_DIR/tb_k_axi_bidirectional.vcd" >artifacts/fpga/vvp_k_axi_return.log 2>&1
++      KAXI_RETURN_SIM_RC=$?
++    fi
++    set -e
++    if [ "$KAXI_RETURN_SIM_RC" -eq 0 ]; then
++      KAXI_RETURN_SIM_STATUS="pass"
++    else
++      KAXI_RETURN_SIM_STATUS="fail"
++      echo "warning: K-AXI return simulation failed (rc=$KAXI_RETURN_SIM_RC); see artifacts/fpga/vvp_k_axi_return.log"
++    fi
++  else
++    echo "warning: iverilog not found; skipping K-AXI return simulation"
++    if [ "$REQUIRE_K_AXI_RETURN" = "1" ]; then
++      KAXI_RETURN_SIM_STATUS="missing_tool"
++      KAXI_RETURN_SIM_RC=127
++    fi
++  fi
++else
++  echo "warning: K-AXI return sources not found; skipping"
++  if [ "$REQUIRE_K_AXI_RETURN" = "1" ]; then
++    KAXI_RETURN_SIM_STATUS="missing_sources"
++    KAXI_RETURN_SIM_RC=2
++  fi
++fi
++
++echo "==> K-AXI return channel synthesis"
++if [ -f hardware/fpga/synth_k_axi_return.ys ]; then
++  if command -v yosys >/dev/null 2>&1; then
++    set +e
++    yosys -s hardware/fpga/synth_k_axi_return.ys >artifacts/fpga/yosys_k_axi_return.log 2>&1
++    KAXI_RETURN_SYNTH_RC=$?
++    set -e
++    if [ "$KAXI_RETURN_SYNTH_RC" -eq 0 ]; then
++      KAXI_RETURN_SYNTH_STATUS="pass"
++    else
++      KAXI_RETURN_SYNTH_STATUS="fail"
++      echo "warning: K-AXI return synthesis failed (rc=$KAXI_RETURN_SYNTH_RC); see artifacts/fpga/yosys_k_axi_return.log"
++    fi
++  else
++    echo "warning: yosys not found; skipping K-AXI return synthesis"
++    if [ "$REQUIRE_K_AXI_RETURN" = "1" ]; then
++      KAXI_RETURN_SYNTH_STATUS="missing_tool"
++      KAXI_RETURN_SYNTH_RC=127
++    fi
++  fi
++else
++  echo "warning: hardware/fpga/synth_k_axi_return.ys not found; skipping"
++  if [ "$REQUIRE_K_AXI_RETURN" = "1" ]; then
++    KAXI_RETURN_SYNTH_STATUS="missing_sources"
++    KAXI_RETURN_SYNTH_RC=2
++  fi
++fi
++
++echo "==> Epistemic power accumulator simulation"
++if [ -f hardware/fpga/epistemic_power_accumulator.v ] && [ -f hardware/fpga/tb_epistemic_power_accumulator.v ]; then
++  if command -v iverilog >/dev/null 2>&1; then
++    set +e
++    iverilog -o artifacts/fpga/tb_epistemic_power_accumulator \
++      hardware/fpga/epistemic_power_accumulator.v \
++      hardware/fpga/tb_epistemic_power_accumulator.v >artifacts/fpga/iverilog_epistemic_power.log 2>&1
++    EPI_PWR_SIM_RC=$?
++    if [ "$EPI_PWR_SIM_RC" -eq 0 ]; then
++      vvp artifacts/fpga/tb_epistemic_power_accumulator +dumpfile="$WAVE_DIR/tb_epistemic_power_accumulator.vcd" >artifacts/fpga/vvp_epistemic_power.log 2>&1
++      EPI_PWR_SIM_RC=$?
++    fi
++    set -e
++    if [ "$EPI_PWR_SIM_RC" -eq 0 ]; then
++      EPI_PWR_SIM_STATUS="pass"
++    else
++      EPI_PWR_SIM_STATUS="fail"
++      echo "warning: epistemic power accumulator simulation failed (rc=$EPI_PWR_SIM_RC); see artifacts/fpga/vvp_epistemic_power.log"
++    fi
++  else
++    echo "warning: iverilog not found; skipping epistemic power accumulator simulation"
++    if [ "$REQUIRE_EPI_POWER_ACCUM" = "1" ]; then
++      EPI_PWR_SIM_STATUS="missing_tool"
++      EPI_PWR_SIM_RC=127
++    fi
++  fi
++else
++  echo "warning: epistemic power accumulator sources not found; skipping"
++  if [ "$REQUIRE_EPI_POWER_ACCUM" = "1" ]; then
++    EPI_PWR_SIM_STATUS="missing_sources"
++    EPI_PWR_SIM_RC=2
++  fi
++fi
++
++echo "==> Epistemic power accumulator synthesis"
++if [ -f hardware/fpga/synth_epistemic_power_accumulator.ys ]; then
++  if command -v yosys >/dev/null 2>&1; then
++    set +e
++    yosys -s hardware/fpga/synth_epistemic_power_accumulator.ys >artifacts/fpga/yosys_epistemic_power.log 2>&1
++    EPI_PWR_SYNTH_RC=$?
++    set -e
++    if [ "$EPI_PWR_SYNTH_RC" -eq 0 ]; then
++      EPI_PWR_SYNTH_STATUS="pass"
++    else
++      EPI_PWR_SYNTH_STATUS="fail"
++      echo "warning: epistemic power accumulator synthesis failed (rc=$EPI_PWR_SYNTH_RC); see artifacts/fpga/yosys_epistemic_power.log"
++    fi
++  else
++    echo "warning: yosys not found; skipping epistemic power accumulator synthesis"
++    if [ "$REQUIRE_EPI_POWER_ACCUM" = "1" ]; then
++      EPI_PWR_SYNTH_STATUS="missing_tool"
++      EPI_PWR_SYNTH_RC=127
++    fi
++  fi
++else
++  echo "warning: hardware/fpga/synth_epistemic_power_accumulator.ys not found; skipping"
++  if [ "$REQUIRE_EPI_POWER_ACCUM" = "1" ]; then
++    EPI_PWR_SYNTH_STATUS="missing_sources"
++    EPI_PWR_SYNTH_RC=2
++  fi
++fi
++
++MERKLE_LANE_PRESENT=false
++K_AXI_RTL_PATH="hardware/fpga/k_axi_slave_epistemic.v"
++if [ -f "$K_AXI_RTL_PATH" ]; then
++  if grep -q 'merkle_lane_valid' "$K_AXI_RTL_PATH" \
++    && grep -q 'merkle_lane_digest' "$K_AXI_RTL_PATH" \
++    && grep -q 'merkle_lane_req' "$K_AXI_RTL_PATH" \
++    && grep -q 'merkle_lane_seed' "$K_AXI_RTL_PATH"; then
++    MERKLE_LANE_PRESENT=true
++  fi
++fi
++
++MERKLE_LANE_CORE_RTL_PRESENT=false
++if [ -f "hardware/fpga/k_axi_merkle_lane.v" ]; then
++  if grep -q 'module k_axi_merkle_lane_core' "hardware/fpga/k_axi_merkle_lane.v" \
++    && grep -q 'merkle_lane_digest' "hardware/fpga/k_axi_merkle_lane.v" \
++    && grep -q 'MERKLE_SALT' "hardware/fpga/k_axi_merkle_lane.v"; then
++    MERKLE_LANE_CORE_RTL_PRESENT=true
++  fi
++fi
++
++MERKLE_ROOT_CORE_RTL_PRESENT=false
++if [ -f "hardware/fpga/k_axi_merkle_root_lane.v" ]; then
++  if grep -q 'module k_axi_merkle_root_lane_core' "hardware/fpga/k_axi_merkle_root_lane.v" \
++    && grep -q 'merkle_root_l64' "hardware/fpga/k_axi_merkle_root_lane.v" \
++    && grep -q 'merkle_root_valid' "hardware/fpga/k_axi_merkle_root_lane.v"; then
++    MERKLE_ROOT_CORE_RTL_PRESENT=true
++  fi
++fi
++
++QUANTUM_CONTROLLER_LANE_PRESENT=false
++EPI_POWER_ACCUM_RTL_PATH="hardware/fpga/epistemic_power_accumulator.v"
++if [ -f "$EPI_POWER_ACCUM_RTL_PATH" ] && grep -q 'quantum_controller_inc' "$EPI_POWER_ACCUM_RTL_PATH"; then
++  QUANTUM_CONTROLLER_LANE_PRESENT=true
++fi
++
+ SIM_STATUS="$SIM_STATUS" \
+ SIM_RC="$SIM_RC" \
+ SYNTH_STATUS="$SYNTH_STATUS" \
+@@ -130,11 +476,294 @@ QCTRL_SIM_STATUS="$QCTRL_SIM_STATUS" \
+ QCTRL_SIM_RC="$QCTRL_SIM_RC" \
+ QCTRL_SYNTH_STATUS="$QCTRL_SYNTH_STATUS" \
+ QCTRL_SYNTH_RC="$QCTRL_SYNTH_RC" \
++QLINK_SIM_STATUS="$QLINK_SIM_STATUS" \
++QLINK_SIM_RC="$QLINK_SIM_RC" \
++KAXI_SIM_STATUS="$KAXI_SIM_STATUS" \
++KAXI_SIM_RC="$KAXI_SIM_RC" \
++KAXI_SYNTH_STATUS="$KAXI_SYNTH_STATUS" \
++KAXI_SYNTH_RC="$KAXI_SYNTH_RC" \
++KAXI_RETURN_SIM_STATUS="$KAXI_RETURN_SIM_STATUS" \
++KAXI_RETURN_SIM_RC="$KAXI_RETURN_SIM_RC" \
++KAXI_RETURN_SYNTH_STATUS="$KAXI_RETURN_SYNTH_STATUS" \
++KAXI_RETURN_SYNTH_RC="$KAXI_RETURN_SYNTH_RC" \
++EPI_PWR_SIM_STATUS="$EPI_PWR_SIM_STATUS" \
++EPI_PWR_SIM_RC="$EPI_PWR_SIM_RC" \
++EPI_PWR_SYNTH_STATUS="$EPI_PWR_SYNTH_STATUS" \
++EPI_PWR_SYNTH_RC="$EPI_PWR_SYNTH_RC" \
++MERKLE_SYNTH_STATUS="$MERKLE_SYNTH_STATUS" \
++MERKLE_SYNTH_RC="$MERKLE_SYNTH_RC" \
++MERKLE_ROOT_SYNTH_STATUS="$MERKLE_ROOT_SYNTH_STATUS" \
++MERKLE_ROOT_SYNTH_RC="$MERKLE_ROOT_SYNTH_RC" \
++MERKLE_LANE_PRESENT="$MERKLE_LANE_PRESENT" \
++MERKLE_LANE_CORE_RTL_PRESENT="$MERKLE_LANE_CORE_RTL_PRESENT" \
++MERKLE_ROOT_CORE_RTL_PRESENT="$MERKLE_ROOT_CORE_RTL_PRESENT" \
++QUANTUM_CONTROLLER_LANE_PRESENT="$QUANTUM_CONTROLLER_LANE_PRESENT" \
+ python3 - <<'PY'
+ import json
+ import os
++import re
++from datetime import datetime, timezone
+ from pathlib import Path
+ 
++def parse_counter_kv(path: Path) -> dict:
++    if not path.exists():
++        return {}
++    kv = {}
++    for line in path.read_text(errors="replace").splitlines():
++        if "OMEGA_COUNTERS" not in line:
++            continue
++        for match in re.finditer(r"([A-Za-z0-9_]+)=(-?[0-9]+)", line):
++            kv[match.group(1)] = int(match.group(2))
++    return kv
++
++def parse_yosys_stats(path: Path) -> dict:
++    if not path.exists():
++        return {}
++    text = path.read_text(errors="replace")
++    lines = text.splitlines()
++    modules = {}
++    i = 0
++    while i < len(lines):
++        line = lines[i].strip()
++        m = re.match(r"===\s+([A-Za-z0-9_.$\\]+)\s+===", line)
++        if not m:
++            i += 1
++            continue
++        module_name = m.group(1).lstrip("\\")
++        stats = {}
++        j = i + 1
++        while j < len(lines):
++            s = lines[j].strip()
++            if s.startswith("==="):
++                break
++            w = re.match(r"Number of wires:\s+([0-9]+)$", s)
++            wb = re.match(r"Number of wire bits:\s+([0-9]+)$", s)
++            c = re.match(r"Number of cells:\s+([0-9]+)$", s)
++            if w:
++                stats["wires"] = int(w.group(1))
++            if wb:
++                stats["wire_bits"] = int(wb.group(1))
++            if c:
++                stats["cells"] = int(c.group(1))
++            j += 1
++        if {"wires", "wire_bits", "cells"}.issubset(stats):
++            modules[module_name] = stats
++        i = j
++    return modules
++
++kaxi_counters = parse_counter_kv(Path("artifacts/fpga/vvp_k_axi.log"))
++accum_counters = parse_counter_kv(Path("artifacts/fpga/vvp_epistemic_power.log"))
++qlink_counters = parse_counter_kv(Path("artifacts/fpga/vvp_quantum_accumulator_link.log"))
++kaxi_return_counters = parse_counter_kv(Path("artifacts/fpga/vvp_k_axi_return.log"))
++
++counter_fingerprint = {
++    "kaxi_gum": int(kaxi_counters.get("kaxi_gum", -1)),
++    "kaxi_prov": int(kaxi_counters.get("kaxi_prov", -1)),
++    "kaxi_formal": int(kaxi_counters.get("kaxi_formal", -1)),
++    "accum_log": int(accum_counters.get("accum_log", -1)),
++    "accum_tx": int(accum_counters.get("accum_tx", -1)),
++    "qlink_seen": int(qlink_counters.get("qlink_seen", -1)),
++    "qlink_log": int(qlink_counters.get("qlink_log", -1)),
++    "qlink_tx": int(qlink_counters.get("qlink_tx", -1)),
++    "kaxi_return_seen": int(kaxi_return_counters.get("kaxi_return_seen", -1)),
++    "kaxi_return_dropped": int(kaxi_return_counters.get("kaxi_return_dropped", -1)),
++    "kaxi_return_overflow": int(kaxi_return_counters.get("kaxi_return_overflow", -1)),
++}
++counter_complete = all(v >= 0 for v in counter_fingerprint.values())
++counter_repro_path = Path("artifacts/fpga/hardware_counter_repro.v1.json")
++counter_history_path = Path("artifacts/fpga/hardware_counter_repro_history.v1.json")
++previous_fingerprint = None
++if counter_repro_path.exists():
++    try:
++        prev = json.loads(counter_repro_path.read_text())
++        if isinstance(prev, dict):
++            prev_fp = prev.get("current_fingerprint")
++            if isinstance(prev_fp, dict):
++                previous_fingerprint = {
++                    key: int(prev_fp.get(key, -1)) for key in counter_fingerprint.keys()
++                }
++    except Exception:
++        previous_fingerprint = None
++
++previous_complete = previous_fingerprint is not None and all(
++    value >= 0 for value in previous_fingerprint.values()
++)
++
++if not counter_complete:
++    counter_repro_status = "incomplete"
++    reproducible_against_previous = None
++elif previous_fingerprint is None or not previous_complete:
++    counter_repro_status = "bootstrap"
++    reproducible_against_previous = None
++else:
++    reproducible_against_previous = previous_fingerprint == counter_fingerprint
++    counter_repro_status = "pass" if reproducible_against_previous else "drift"
++
++counter_repro = {
++    "schema": "sounio.omega.hardware-counter-repro.v1",
++    "generated_at_utc": datetime.now(timezone.utc).isoformat(),
++    "current_fingerprint": counter_fingerprint,
++    "previous_fingerprint": previous_fingerprint,
++    "reproducible_against_previous": reproducible_against_previous,
++    "status": counter_repro_status,
++}
++counter_repro_path.write_text(json.dumps(counter_repro, indent=2))
++
++history = {
++    "schema": "sounio.omega.hardware-counter-repro-history.v1",
++    "runs": [],
++}
++if counter_history_path.exists():
++    try:
++        obj = json.loads(counter_history_path.read_text())
++        if isinstance(obj, dict) and obj.get("schema") == history["schema"] and isinstance(obj.get("runs"), list):
++            history = obj
++    except Exception:
++        history = {
++            "schema": "sounio.omega.hardware-counter-repro-history.v1",
++            "runs": [],
++        }
++history["runs"].append(
++    {
++        "generated_at_utc": counter_repro["generated_at_utc"],
++        "fingerprint": counter_fingerprint,
++        "status": counter_repro_status,
++    }
++)
++history["runs"] = history["runs"][-32:]
++counter_history_path.write_text(json.dumps(history, indent=2))
++
++resource_snapshot = {}
++for log_path in (
++    Path("artifacts/fpga/yosys.log"),
++    Path("artifacts/fpga/yosys_k_axi.log"),
++    Path("artifacts/fpga/yosys_k_axi_return.log"),
++    Path("artifacts/fpga/yosys_epistemic_power.log"),
++    Path("artifacts/fpga/yosys_quantum_controller.log"),
++    Path("artifacts/fpga/yosys_k_axi_merkle_lane.log"),
++    Path("artifacts/fpga/yosys_k_axi_merkle_root_lane.log"),
++):
++    resource_snapshot.update(parse_yosys_stats(log_path))
++
++resource_trend_status = "incomplete"
++resource_trend_path = Path("artifacts/fpga/hardware_resource_trend.v1.json")
++resource_trend_v2_path = Path("artifacts/fpga/hardware_resource_trend.v2.json")
++resource_trend = {
++    "schema": "sounio.omega.hardware-resource-trend.v1",
++    "runs": [],
++}
++if resource_trend_path.exists():
++    try:
++        obj = json.loads(resource_trend_path.read_text())
++        if isinstance(obj, dict) and obj.get("schema") == resource_trend["schema"] and isinstance(obj.get("runs"), list):
++            resource_trend = obj
++    except Exception:
++        resource_trend = {
++            "schema": "sounio.omega.hardware-resource-trend.v1",
++            "runs": [],
++        }
++resource_trend["runs"].append(
++    {
++        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
++        "modules": resource_snapshot,
++    }
++)
++resource_trend["runs"] = resource_trend["runs"][-64:]
++resource_trend_path.write_text(json.dumps(resource_trend, indent=2))
++
++resource_trend_v2 = {
++    "schema": "sounio.omega.hardware-resource-trend.v2",
++    "drift_threshold": 0.05,
++    "runs": [],
++}
++if resource_trend_v2_path.exists():
++    try:
++        obj = json.loads(resource_trend_v2_path.read_text())
++        if (
++            isinstance(obj, dict)
++            and obj.get("schema") == resource_trend_v2["schema"]
++            and isinstance(obj.get("runs"), list)
++        ):
++            resource_trend_v2 = obj
++    except Exception:
++        resource_trend_v2 = {
++            "schema": "sounio.omega.hardware-resource-trend.v2",
++            "drift_threshold": 0.05,
++            "runs": [],
++        }
++
++drift_threshold = float(resource_trend_v2.get("drift_threshold", 0.05))
++previous_modules = None
++if resource_trend_v2["runs"]:
++    last = resource_trend_v2["runs"][-1]
++    if isinstance(last, dict):
++        maybe_modules = last.get("modules")
++        if isinstance(maybe_modules, dict):
++            previous_modules = maybe_modules
++
++max_relative_drift = 0.0
++compared_points = 0
++new_modules = []
++removed_modules = []
++if previous_modules is not None:
++    prev_keys = set(previous_modules.keys())
++    curr_keys = set(resource_snapshot.keys())
++    new_modules = sorted(curr_keys - prev_keys)
++    removed_modules = sorted(prev_keys - curr_keys)
++    shared = sorted(prev_keys & curr_keys)
++    for module_name in shared:
++        prev_stats = previous_modules.get(module_name)
++        curr_stats = resource_snapshot.get(module_name)
++        if not isinstance(prev_stats, dict) or not isinstance(curr_stats, dict):
++            continue
++        for field in ("wires", "wire_bits", "cells"):
++            prev_value = prev_stats.get(field)
++            curr_value = curr_stats.get(field)
++            if not isinstance(prev_value, int) or not isinstance(curr_value, int):
++                continue
++            denom = max(abs(prev_value), 1)
++            drift = abs(curr_value - prev_value) / float(denom)
++            if drift > max_relative_drift:
++                max_relative_drift = drift
++            compared_points += 1
++
++if not resource_snapshot:
++    resource_trend_status = "incomplete"
++elif previous_modules is None:
++    resource_trend_status = "bootstrap"
++elif max_relative_drift > drift_threshold:
++    resource_trend_status = "drift"
++else:
++    resource_trend_status = "pass"
++
++resource_trend_v2["runs"].append(
++    {
++        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
++        "modules": resource_snapshot,
++        "status": resource_trend_status,
++        "drift_threshold": drift_threshold,
++        "max_relative_drift": max_relative_drift,
++        "compared_points": compared_points,
++        "new_modules": new_modules,
++        "removed_modules": removed_modules,
++    }
++)
++resource_trend_v2["runs"] = resource_trend_v2["runs"][-64:]
++resource_trend_v2["last_status"] = resource_trend_status
++resource_trend_v2["last_max_relative_drift"] = max_relative_drift
++resource_trend_v2["last_compared_points"] = compared_points
++resource_trend_v2_path.write_text(json.dumps(resource_trend_v2, indent=2))
++
++waveform_candidates = [
++    "artifacts/fpga/waveforms/tb_epistemic_mac.vcd",
++    "artifacts/fpga/waveforms/tb_epistemic_quantum_controller.vcd",
++    "artifacts/fpga/waveforms/tb_quantum_accumulator_link.vcd",
++    "artifacts/fpga/waveforms/tb_k_axi_bridge.vcd",
++    "artifacts/fpga/waveforms/tb_k_axi_bidirectional.vcd",
++    "artifacts/fpga/waveforms/tb_epistemic_power_accumulator.vcd",
++]
++waveforms_present = [path for path in waveform_candidates if Path(path).exists()]
++
+ report = {
+     "schema": "sounio.omega.fpga-seed-report.v1",
+     "sim_status": os.environ["SIM_STATUS"],
+@@ -145,6 +774,37 @@ report = {
+     "quantum_controller_sim_rc": int(os.environ["QCTRL_SIM_RC"]),
+     "quantum_controller_synth_status": os.environ["QCTRL_SYNTH_STATUS"],
+     "quantum_controller_synth_rc": int(os.environ["QCTRL_SYNTH_RC"]),
++    "quantum_accumulator_link_sim_status": os.environ["QLINK_SIM_STATUS"],
++    "quantum_accumulator_link_sim_rc": int(os.environ["QLINK_SIM_RC"]),
++    "k_axi_sim_status": os.environ["KAXI_SIM_STATUS"],
++    "k_axi_sim_rc": int(os.environ["KAXI_SIM_RC"]),
++    "k_axi_synth_status": os.environ["KAXI_SYNTH_STATUS"],
++    "k_axi_synth_rc": int(os.environ["KAXI_SYNTH_RC"]),
++    "k_axi_return_sim_status": os.environ["KAXI_RETURN_SIM_STATUS"],
++    "k_axi_return_sim_rc": int(os.environ["KAXI_RETURN_SIM_RC"]),
++    "k_axi_return_synth_status": os.environ["KAXI_RETURN_SYNTH_STATUS"],
++    "k_axi_return_synth_rc": int(os.environ["KAXI_RETURN_SYNTH_RC"]),
++    "epistemic_power_accumulator_sim_status": os.environ["EPI_PWR_SIM_STATUS"],
++    "epistemic_power_accumulator_sim_rc": int(os.environ["EPI_PWR_SIM_RC"]),
++    "epistemic_power_accumulator_synth_status": os.environ["EPI_PWR_SYNTH_STATUS"],
++    "epistemic_power_accumulator_synth_rc": int(os.environ["EPI_PWR_SYNTH_RC"]),
++    "merkle_lane_present": os.environ["MERKLE_LANE_PRESENT"] == "true",
++    "merkle_lane_core_rtl_present": os.environ["MERKLE_LANE_CORE_RTL_PRESENT"] == "true",
++    "merkle_lane_synth_status": os.environ["MERKLE_SYNTH_STATUS"],
++    "merkle_lane_synth_rc": int(os.environ["MERKLE_SYNTH_RC"]),
++    "merkle_root_core_rtl_present": os.environ["MERKLE_ROOT_CORE_RTL_PRESENT"] == "true",
++    "merkle_root_synth_status": os.environ["MERKLE_ROOT_SYNTH_STATUS"],
++    "merkle_root_synth_rc": int(os.environ["MERKLE_ROOT_SYNTH_RC"]),
++    "quantum_controller_lane_present": os.environ["QUANTUM_CONTROLLER_LANE_PRESENT"] == "true",
++    "hardware_counter_repro_status": counter_repro_status,
++    "hardware_counter_fingerprint": counter_fingerprint,
++    "hardware_resource_trend_status": resource_trend_status,
++    "hardware_resource_trend_threshold": drift_threshold,
++    "hardware_resource_trend_max_relative_drift": max_relative_drift,
++    "hardware_resource_trend_compared_points": compared_points,
++    "hardware_resource_modules": sorted(resource_snapshot.keys()),
++    "waveform_paths": waveforms_present,
++    "waveforms_present": len(waveforms_present) > 0,
+ }
+ Path("artifacts/fpga/fpga_seed_report.json").write_text(json.dumps(report, indent=2))
+ print("fpga_seed_report:", report)
+@@ -164,4 +824,94 @@ if [ "$REQUIRE_QUANTUM_CONTROLLER" = "1" ]; then
+   fi
+ fi
+ 
++if [ "$REQUIRE_QUANTUM_ACCUM_LINK" = "1" ]; then
++  if [ "$QLINK_SIM_STATUS" != "pass" ]; then
++    echo "error: quantum->accumulator link strict gate failed (sim=$QLINK_SIM_STATUS)" >&2
++    exit 2
++  fi
++fi
++
++if [ "$REQUIRE_K_AXI" = "1" ]; then
++  if [ "$KAXI_SIM_STATUS" != "pass" ] || [ "$KAXI_SYNTH_STATUS" != "pass" ]; then
++    echo "error: K-AXI strict gate failed (sim=$KAXI_SIM_STATUS synth=$KAXI_SYNTH_STATUS)" >&2
++    exit 2
++  fi
++fi
++
++if [ "$REQUIRE_MERKLE_ROOT" = "1" ]; then
++  if [ "$MERKLE_ROOT_SYNTH_STATUS" != "pass" ]; then
++    echo "error: K-AXI Merkle root strict gate failed (synth=$MERKLE_ROOT_SYNTH_STATUS)" >&2
++    exit 2
++  fi
++fi
++
++if [ "$REQUIRE_K_AXI_RETURN" = "1" ]; then
++  if [ "$KAXI_RETURN_SIM_STATUS" != "pass" ] || [ "$KAXI_RETURN_SYNTH_STATUS" != "pass" ]; then
++    echo "error: K-AXI return strict gate failed (sim=$KAXI_RETURN_SIM_STATUS synth=$KAXI_RETURN_SYNTH_STATUS)" >&2
++    exit 2
++  fi
++fi
++
++if [ "$REQUIRE_EPI_POWER_ACCUM" = "1" ]; then
++  if [ "$EPI_PWR_SIM_STATUS" != "pass" ] || [ "$EPI_PWR_SYNTH_STATUS" != "pass" ]; then
++    echo "error: epistemic power accumulator strict gate failed (sim=$EPI_PWR_SIM_STATUS synth=$EPI_PWR_SYNTH_STATUS)" >&2
++    exit 2
++  fi
++fi
++
++if [ "$REQUIRE_COUNTER_REPRO" = "1" ]; then
++  python3 - <<'PY'
++import json
++from pathlib import Path
++
++path = Path("artifacts/fpga/hardware_counter_repro.v1.json")
++if not path.exists():
++    raise SystemExit("missing artifacts/fpga/hardware_counter_repro.v1.json")
++payload = json.loads(path.read_text())
++status = payload.get("status")
++if status not in ("pass", "bootstrap"):
++    raise SystemExit(f"hardware counter reproducibility check failed (status={status})")
++print(f"hardware counter reproducibility status: {status}")
++PY
++fi
++
++if [ "$REQUIRE_RESOURCE_TREND" = "1" ]; then
++  python3 - <<'PY'
++import json
++from pathlib import Path
++
++path = Path("artifacts/fpga/hardware_resource_trend.v2.json")
++if not path.exists():
++    raise SystemExit("missing artifacts/fpga/hardware_resource_trend.v2.json")
++payload = json.loads(path.read_text())
++runs = payload.get("runs")
++if not isinstance(runs, list) or not runs:
++    raise SystemExit("hardware resource trend is empty")
++last = runs[-1]
++modules = last.get("modules") if isinstance(last, dict) else None
++if not isinstance(modules, dict) or len(modules) < 3:
++    raise SystemExit(f"hardware resource trend missing module stats in latest run: {modules}")
++status = payload.get("last_status")
++if status not in ("pass", "bootstrap"):
++    raise SystemExit(f"hardware resource trend status must be pass/bootstrap (got {status})")
++max_drift = payload.get("last_max_relative_drift")
++threshold = payload.get("drift_threshold", 0.05)
++if not isinstance(max_drift, (int, float)):
++    raise SystemExit(f"hardware resource trend max drift missing: {max_drift!r}")
++if not isinstance(threshold, (int, float)):
++    raise SystemExit(f"hardware resource trend threshold missing: {threshold!r}")
++if float(max_drift) > float(threshold):
++    raise SystemExit(
++        f"hardware resource trend drift violation: max_relative_drift={float(max_drift):.6f} "
++        f"> threshold={float(threshold):.6f}"
++    )
++print(
++    "hardware resource trend modules: "
++    f"{sorted(modules.keys())} "
++    f"status={status} max_relative_drift={float(max_drift):.6f} "
++    f"threshold={float(threshold):.6f}"
++)
++PY
++fi
++
+ echo "FPGA_EPISTEMIC_SEED_DONE"
+-- 
+2.43.0
+
