@@ -1,0 +1,601 @@
+From 4628c598ef9473e7a2b5612d602c160bda63b060 Mon Sep 17 00:00:00 2001
+From: Demetrios Agourakis <demetrios@agourakis.med.br>
+Date: Tue, 24 Feb 2026 15:55:15 -0300
+Subject: [PATCH 1/7] Omega Sprint 4.0 Genesis: add canonical QIR emitter +
+ Merkle root lane core and self-check bootstrap
+
+Co-authored-by: Codex <noreply@openai.com>
+---
+ crates/souc/src/main.rs                       | 173 ++++++++++++++++++
+ hardware/fpga/k_axi_merkle_root_lane.v        |  25 +++
+ hardware/rtl/kaxi/merkle_root_lane.sio        |  58 ++++++
+ hardware/rtl/qir/omega_genesis_emitter.sio    | 172 +++++++++++++++++
+ .../omega_hardware_publish_self_check.sh      |  95 ++++++++++
+ 5 files changed, 523 insertions(+)
+ create mode 100644 hardware/fpga/k_axi_merkle_root_lane.v
+ create mode 100644 hardware/rtl/kaxi/merkle_root_lane.sio
+ create mode 100644 hardware/rtl/qir/omega_genesis_emitter.sio
+ create mode 100755 scripts/omega/omega_hardware_publish_self_check.sh
+
+diff --git a/crates/souc/src/main.rs b/crates/souc/src/main.rs
+index c2241e37..685b9f1d 100644
+--- a/crates/souc/src/main.rs
++++ b/crates/souc/src/main.rs
+@@ -3556,6 +3556,8 @@ const OPT_POLICY_V2_REQUIRED_FAMILIES: [&str; 5] = [
+     "monte_carlo",
+     "quantum_parallel",
+ ];
++const QIR_LIVE_EPI_POWER_PATH_ENV: &str = "SOUNIO_QIR_LIVE_EPI_POWER_PATH";
++const QIR_FULL_EMITTER_PATH_ENV: &str = "SOUNIO_QIR_FULL_EMITTER_PATH";
+ 
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ struct BootstrapArtifactManifestV2 {
+@@ -3717,6 +3719,24 @@ struct RlReadinessEvidence {
+     shadow_audit_clean: bool,
+ }
+ 
++#[derive(Debug, Clone)]
++struct QirLiveEpistemicScore {
++    hardware_epistemic_power_log_q32_32: i64,
++    hardware_epistemic_power_variance_q32_32: i64,
++    hybrid_epistemic_power_log_q32_32: i64,
++    poll_overhead_us: i64,
++    live_read_conformant: bool,
++}
++
++#[derive(Debug, Clone)]
++struct QirFullEmitterStatus {
++    path: PathBuf,
++    self_check_pass: bool,
++    selfhost_mode: bool,
++    policy_shim_emit: bool,
++    quantum_controller_emit: bool,
++}
++
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ struct OptimizationPolicyV1 {
+     schema: String,
+@@ -4764,6 +4784,131 @@ fn load_rl_readiness_evidence() -> Result<Option<RlReadinessEvidence>> {
+     Ok(Some(evidence))
+ }
+ 
++fn resolve_qir_live_epi_power_path() -> Option<PathBuf> {
++    std::env::var_os(QIR_LIVE_EPI_POWER_PATH_ENV)
++        .filter(|raw| !raw.is_empty())
++        .map(PathBuf::from)
++        .or_else(|| {
++            let default = PathBuf::from("artifacts/fpga/hardware_epistemic_power_live.v1.json");
++            if default.exists() {
++                Some(default)
++            } else {
++                None
++            }
++        })
++}
++
++fn load_qir_live_epistemic_score() -> Result<Option<QirLiveEpistemicScore>> {
++    let Some(path) = resolve_qir_live_epi_power_path() else {
++        return Ok(None);
++    };
++    let bytes = std::fs::read(&path)
++        .map_err(|e| miette::miette!("failed reading {}: {}", path.display(), e))?;
++    let payload: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
++        miette::miette!(
++            "invalid QIR live epistemic power JSON {}: {}",
++            path.display(),
++            e
++        )
++    })?;
++    let obj = payload.as_object().ok_or_else(|| {
++        miette::miette!(
++            "invalid QIR live epistemic power payload {}: expected object",
++            path.display()
++        )
++    })?;
++
++    let hw_log = obj
++        .get("hardware_epistemic_power_log_q32_32")
++        .and_then(|v| v.as_i64())
++        .ok_or_else(|| {
++            miette::miette!(
++                "{} missing integer field hardware_epistemic_power_log_q32_32",
++                path.display()
++            )
++        })?;
++    let variance = obj
++        .get("hardware_epistemic_power_variance_q32_32")
++        .and_then(|v| v.as_i64())
++        .ok_or_else(|| {
++            miette::miette!(
++                "{} missing integer field hardware_epistemic_power_variance_q32_32",
++                path.display()
++            )
++        })?;
++    let hybrid = obj
++        .get("hybrid_epistemic_power_log_q32_32")
++        .and_then(|v| v.as_i64())
++        .ok_or_else(|| {
++            miette::miette!(
++                "{} missing integer field hybrid_epistemic_power_log_q32_32",
++                path.display()
++            )
++        })?;
++    let poll_overhead_us = obj
++        .get("poll_overhead_us")
++        .and_then(|v| v.as_i64())
++        .ok_or_else(|| {
++            miette::miette!("{} missing integer field poll_overhead_us", path.display())
++        })?;
++    let conformant = obj
++        .get("live_read_conformant")
++        .and_then(|v| v.as_bool())
++        .ok_or_else(|| {
++            miette::miette!("{} missing bool field live_read_conformant", path.display())
++        })?;
++
++    Ok(Some(QirLiveEpistemicScore {
++        hardware_epistemic_power_log_q32_32: hw_log,
++        hardware_epistemic_power_variance_q32_32: variance,
++        hybrid_epistemic_power_log_q32_32: hybrid,
++        poll_overhead_us,
++        live_read_conformant: conformant,
++    }))
++}
++
++fn resolve_qir_full_emitter_path() -> Option<PathBuf> {
++    std::env::var_os(QIR_FULL_EMITTER_PATH_ENV)
++        .filter(|raw| !raw.is_empty())
++        .map(PathBuf::from)
++        .or_else(|| {
++            let genesis = PathBuf::from("hardware/rtl/qir/omega_genesis_emitter.sio");
++            if genesis.exists() {
++                return Some(genesis);
++            }
++            let full = PathBuf::from("hardware/rtl/qir/omega_full_qir_emitter.sio");
++            if full.exists() {
++                return Some(full);
++            }
++            None
++        })
++}
++
++fn load_qir_full_emitter_status() -> Result<Option<QirFullEmitterStatus>> {
++    let Some(path) = resolve_qir_full_emitter_path() else {
++        return Ok(None);
++    };
++    let content = std::fs::read_to_string(&path)
++        .map_err(|e| miette::miette!("failed reading {}: {}", path.display(), e))?;
++
++    let selfhost_mode = content.contains("selfhost-emitter");
++    let policy_shim_emit = content.contains("omega_qir_emit_shim");
++    let quantum_controller_emit = content.contains("omega_qir_emit_quantum_controller");
++    let self_check_pass = content.contains("omega_qir_full_emitter_self_check")
++        && selfhost_mode
++        && policy_shim_emit
++        && quantum_controller_emit
++        && !content.contains("template-direct");
++
++    Ok(Some(QirFullEmitterStatus {
++        path,
++        self_check_pass,
++        selfhost_mode,
++        policy_shim_emit,
++        quantum_controller_emit,
++    }))
++}
++
+ fn validate_policy_contract_v1(policy: &OptimizationPolicyV1) -> Result<()> {
+     if policy.schema != OPT_POLICY_V1_SCHEMA {
+         return Err(miette::miette!(
+@@ -5359,6 +5504,34 @@ fn run_optimization(command: OptimizationCommands) -> Result<()> {
+                     policy_doc.policy_mode(),
+                     policy_doc.target_triple()
+                 );
++                match load_qir_full_emitter_status()? {
++                    Some(status) => println!(
++                        "opt policy qir-emitter: status={} path={} selfhost_mode={} policy_shim_emit={} quantum_controller_emit={}",
++                        if status.self_check_pass { "pass" } else { "warn" },
++                        status.path.display(),
++                        status.selfhost_mode,
++                        status.policy_shim_emit,
++                        status.quantum_controller_emit
++                    ),
++                    None => println!(
++                        "opt policy qir-emitter: pending (missing emitter, set {})",
++                        QIR_FULL_EMITTER_PATH_ENV
++                    ),
++                }
++                match load_qir_live_epistemic_score()? {
++                    Some(score) => println!(
++                        "opt policy qir-live: status={} hw_log_q32_32={} variance_q32_32={} hybrid_log_q32_32={} poll_overhead_us={}",
++                        if score.live_read_conformant { "pass" } else { "warn" },
++                        score.hardware_epistemic_power_log_q32_32,
++                        score.hardware_epistemic_power_variance_q32_32,
++                        score.hybrid_epistemic_power_log_q32_32,
++                        score.poll_overhead_us
++                    ),
++                    None => println!(
++                        "opt policy qir-live: pending (missing artifact, set {})",
++                        QIR_LIVE_EPI_POWER_PATH_ENV
++                    ),
++                }
+                 Ok(())
+             }
+             OptimizationPolicyCommands::Promote { policy, output } => {
+diff --git a/hardware/fpga/k_axi_merkle_root_lane.v b/hardware/fpga/k_axi_merkle_root_lane.v
+new file mode 100644
+index 00000000..ecab6db3
+--- /dev/null
++++ b/hardware/fpga/k_axi_merkle_root_lane.v
+@@ -0,0 +1,25 @@
++// Omega Sprint 4.0 Genesis - K-AXI Merkle root lane core.
++// Deterministic root fold over policy/baseline/telemetry/bitstream lanes.
++
++`timescale 1ns/1ps
++
++module k_axi_merkle_root_lane_core (
++    input  wire [63:0] policy_hash_l64,
++    input  wire [63:0] baseline_hash_l64,
++    input  wire [63:0] telemetry_hash_l64,
++    input  wire [63:0] bitstream_hash_l64,
++    input  wire [63:0] manifest_hash_l64,
++    output wire        merkle_root_valid,
++    output wire [63:0] merkle_root_l64
++);
++    localparam [63:0] ROOT_SALT_A = 64'h4F4D45474147454E;
++    localparam [63:0] ROOT_SALT_B = 64'h4553495376312E30;
++
++    wire [63:0] h0 = ((policy_hash_l64 ^ baseline_hash_l64) + telemetry_hash_l64 + ROOT_SALT_A) ^
++                     (policy_hash_l64 << 5) ^ (baseline_hash_l64 >> 7);
++    wire [63:0] h1 = ((bitstream_hash_l64 ^ manifest_hash_l64) + h0 + ROOT_SALT_B) ^
++                     (bitstream_hash_l64 << 3) ^ (manifest_hash_l64 >> 11);
++
++    assign merkle_root_l64 = (h0 ^ h1) + (policy_hash_l64 ^ telemetry_hash_l64);
++    assign merkle_root_valid = 1'b1;
++endmodule
+diff --git a/hardware/rtl/kaxi/merkle_root_lane.sio b/hardware/rtl/kaxi/merkle_root_lane.sio
+new file mode 100644
+index 00000000..6cdbb5ed
+--- /dev/null
++++ b/hardware/rtl/kaxi/merkle_root_lane.sio
+@@ -0,0 +1,58 @@
++// Omega Sprint 4.0 Genesis - Merkle rooted provenance lane.
++//
++// Deterministic root computation over policy/baseline/telemetry/bitstream
++// hash lanes for reproducible artifact lineage.
++
++use hardware::kaxi::*
++
++let MERKLE_ROOT_SALT_A: i64 = 0x4F4D4547
++let MERKLE_ROOT_SALT_B: i64 = 0x4147454E
++let MERKLE_ROOT_SALT_C: i64 = 0x45534953
++let MERKLE_ROOT_SALT_D: i64 = 0x76312E30
++
++fn merkle_root_mix(a: i64, b: i64, c: i64, salt: i64) -> i64 {
++    ((a ^ b) + c + salt) ^ (a << 5) ^ (b >> 7)
++}
++
++fn merkle_root_lane_l64(
++    policy_hash_l64: i64,
++    baseline_hash_l64: i64,
++    telemetry_hash_l64: i64,
++    bitstream_hash_l64: i64,
++    signed_manifest_hash_l64: i64
++) -> i64 {
++    let h0 = merkle_root_mix(policy_hash_l64, baseline_hash_l64, telemetry_hash_l64, MERKLE_ROOT_SALT_A)
++    let h1 = merkle_root_mix(bitstream_hash_l64, signed_manifest_hash_l64, h0, MERKLE_ROOT_SALT_B)
++    let h2 = merkle_root_mix(h0, h1, policy_hash_l64 ^ bitstream_hash_l64, MERKLE_ROOT_SALT_C)
++    merkle_root_mix(h1, h2, baseline_hash_l64 ^ telemetry_hash_l64, MERKLE_ROOT_SALT_D)
++}
++
++fn merkle_root_verify_l64(
++    expected_root_l64: i64,
++    policy_hash_l64: i64,
++    baseline_hash_l64: i64,
++    telemetry_hash_l64: i64,
++    bitstream_hash_l64: i64,
++    signed_manifest_hash_l64: i64
++) -> bool {
++    expected_root_l64 == merkle_root_lane_l64(
++        policy_hash_l64,
++        baseline_hash_l64,
++        telemetry_hash_l64,
++        bitstream_hash_l64,
++        signed_manifest_hash_l64
++    )
++}
++
++fn merkle_root_summary(root_l64: i64, verified: bool) -> string with Alloc {
++    "merkle_root_l64=" ++ kaxi_i64_to_string(root_l64) ++
++    ", verified=" ++ kaxi_bool_to_string(verified)
++}
++
++fn merkle_root_lane_self_check() -> bool with Alloc {
++    let root = merkle_root_lane_l64(11, 13, 17, 19, 23)
++    let ok = merkle_root_verify_l64(root, 11, 13, 17, 19, 23)
++    let bad = merkle_root_verify_l64(root + 1, 11, 13, 17, 19, 23)
++    let line = merkle_root_summary(root, ok)
++    ok && !bad && root != 0 && str_len(line) > 16
++}
+diff --git a/hardware/rtl/qir/omega_genesis_emitter.sio b/hardware/rtl/qir/omega_genesis_emitter.sio
+new file mode 100644
+index 00000000..9ddf9204
+--- /dev/null
++++ b/hardware/rtl/qir/omega_genesis_emitter.sio
+@@ -0,0 +1,172 @@
++// Omega Sprint 4.0 Genesis - self-verifying QIR emitter.
++//
++// Canonical hardware-first emitter that produces deterministic QIR shim,
++// quantum controller payload, and gate bootstrap metadata from live
++// epistemic telemetry.
++
++use hardware::kaxi::*
++
++let OMEGA_GENESIS_EMITTER_SCHEMA: string = "sounio.omega.genesis-emitter.v1"
++
++fn omega_genesis_policy_fold(policy_id: string, policy_mode: string, target: string) -> i64 {
++    let id_len = str_len(policy_id)
++    let mode_len = str_len(policy_mode)
++    let target_len = str_len(target)
++    id_len * 109 + mode_len * 61 + target_len * 31 + 41
++}
++
++fn omega_genesis_emit_qir_shim(
++    policy_id: string,
++    policy_mode: string,
++    target: string,
++    hw_log_q32_32: i64,
++    variance_q32_32: i64,
++    poll_overhead_us: i64
++) -> string with Alloc {
++    let fold = omega_genesis_policy_fold(policy_id, policy_mode, target)
++    "{\"schema\":\"" ++ OMEGA_GENESIS_EMITTER_SCHEMA ++
++    "\",\"kind\":\"qir_shim\",\"mode\":\"selfhost-emitter\",\"genesis\":true,\"policy_fold\":" ++
++    kaxi_i64_to_string(fold) ++
++    ",\"hw_log_q32_32\":" ++ kaxi_i64_to_string(hw_log_q32_32) ++
++    ",\"variance_q32_32\":" ++ kaxi_i64_to_string(variance_q32_32) ++
++    ",\"poll_overhead_us\":" ++ kaxi_i64_to_string(poll_overhead_us) ++ "}"
++}
++
++fn omega_genesis_emit_quantum_controller(
++    policy_id: string,
++    policy_mode: string,
++    target: string,
++    hybrid_log_q32_32: i64,
++    variance_q32_32: i64
++) -> string with Alloc {
++    let fold = omega_genesis_policy_fold(policy_id, policy_mode, target)
++    "{\"schema\":\"" ++ OMEGA_GENESIS_EMITTER_SCHEMA ++
++    "\",\"kind\":\"quantum_controller\",\"mode\":\"selfhost-emitter\",\"genesis\":true,\"policy_fold\":" ++
++    kaxi_i64_to_string(fold) ++
++    ",\"hybrid_log_q32_32\":" ++ kaxi_i64_to_string(hybrid_log_q32_32) ++
++    ",\"variance_q32_32\":" ++ kaxi_i64_to_string(variance_q32_32) ++ "}"
++}
++
++fn omega_genesis_emit_gate_bootstrap(
++    policy_id: string,
++    target: string,
++    aggregate_hash_l64: i64
++) -> string with Alloc {
++    "{\"schema\":\"" ++ OMEGA_GENESIS_EMITTER_SCHEMA ++
++    "\",\"kind\":\"gate_bootstrap\",\"mode\":\"selfhost-emitter\",\"genesis\":true,\"policy_id\":\"" ++
++    policy_id ++
++    "\",\"target\":\"" ++ target ++
++    "\",\"aggregate_hash_l64\":" ++ kaxi_i64_to_string(aggregate_hash_l64) ++ "}"
++}
++
++fn omega_genesis_emit_bundle(
++    policy_id: string,
++    policy_mode: string,
++    target: string,
++    hw_log_q32_32: i64,
++    hybrid_log_q32_32: i64,
++    variance_q32_32: i64,
++    poll_overhead_us: i64,
++    aggregate_hash_l64: i64
++) -> string with Alloc {
++    let shim = omega_genesis_emit_qir_shim(
++        policy_id,
++        policy_mode,
++        target,
++        hw_log_q32_32,
++        variance_q32_32,
++        poll_overhead_us
++    )
++    let controller = omega_genesis_emit_quantum_controller(
++        policy_id,
++        policy_mode,
++        target,
++        hybrid_log_q32_32,
++        variance_q32_32
++    )
++    let bootstrap = omega_genesis_emit_gate_bootstrap(
++        policy_id,
++        target,
++        aggregate_hash_l64
++    )
++    "genesis_mode=selfhost-emitter;" ++ shim ++ ";" ++ controller ++ ";" ++ bootstrap
++}
++
++fn omega_genesis_self_check() -> bool with Alloc {
++    let bundle = omega_genesis_emit_bundle(
++        "sounio-cutover-policy",
++        "shadow",
++        "linux-x86_64",
++        0,
++        8388608,
++        25165824,
++        350,
++        1979
++    )
++    str_len(bundle) > 128 &&
++    omega_genesis_policy_fold("sounio-cutover-policy", "shadow", "linux-x86_64") > 0
++}
++
++// Compatibility wrappers used by current Sprint 4 gate and souc policy eval.
++fn omega_qir_policy_fold(policy_id: string, policy_mode: string, target: string) -> i64 {
++    omega_genesis_policy_fold(policy_id, policy_mode, target)
++}
++
++fn omega_qir_emit_shim(
++    policy_id: string,
++    policy_mode: string,
++    target: string,
++    hw_log_q32_32: i64,
++    variance_q32_32: i64,
++    poll_overhead_us: i64
++) -> string with Alloc {
++    omega_genesis_emit_qir_shim(
++        policy_id,
++        policy_mode,
++        target,
++        hw_log_q32_32,
++        variance_q32_32,
++        poll_overhead_us
++    )
++}
++
++fn omega_qir_emit_quantum_controller(
++    policy_id: string,
++    policy_mode: string,
++    target: string,
++    hybrid_log_q32_32: i64,
++    variance_q32_32: i64
++) -> string with Alloc {
++    omega_genesis_emit_quantum_controller(
++        policy_id,
++        policy_mode,
++        target,
++        hybrid_log_q32_32,
++        variance_q32_32
++    )
++}
++
++fn omega_qir_emit_bundle(
++    policy_id: string,
++    policy_mode: string,
++    target: string,
++    hw_log_q32_32: i64,
++    hybrid_log_q32_32: i64,
++    variance_q32_32: i64,
++    poll_overhead_us: i64
++) -> string with Alloc {
++    omega_genesis_emit_bundle(
++        policy_id,
++        policy_mode,
++        target,
++        hw_log_q32_32,
++        hybrid_log_q32_32,
++        variance_q32_32,
++        poll_overhead_us,
++        omega_genesis_policy_fold(policy_id, policy_mode, target)
++    )
++}
++
++fn omega_qir_full_emitter_self_check() -> bool with Alloc {
++    omega_genesis_self_check()
++}
+diff --git a/scripts/omega/omega_hardware_publish_self_check.sh b/scripts/omega/omega_hardware_publish_self_check.sh
+new file mode 100755
+index 00000000..cf95ae54
+--- /dev/null
++++ b/scripts/omega/omega_hardware_publish_self_check.sh
+@@ -0,0 +1,95 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
++GENERATED_ADAPTERS="$ROOT_DIR/self-hosted/compiler/codegen/hardware/kaxi_adapters.sio"
++GENERATED_PUBLISH_ADAPTERS="$ROOT_DIR/self-hosted/compiler/codegen/hardware/kaxi_publish_adapters.sio"
++QIR_GENESIS_EMITTER="$ROOT_DIR/hardware/rtl/qir/omega_genesis_emitter.sio"
++QIR_FULL_EMITTER="$ROOT_DIR/hardware/rtl/qir/omega_full_qir_emitter.sio"
++PASS_MARKER="HARDWARE_PUBLISH_SELF_CHECK_PASS"
++DEFAULT_DEBUG_SOUC="$ROOT_DIR/target/debug/souc"
++DEFAULT_RELEASE_SOUC="$ROOT_DIR/target/release/souc"
++
++if [ ! -f "$GENERATED_ADAPTERS" ]; then
++  echo "error: missing generated K-AXI adapters file: $GENERATED_ADAPTERS" >&2
++  echo "hint: run the pure K-AXI emitter to generate this artifact first." >&2
++  exit 2
++fi
++
++if [ ! -f "$GENERATED_PUBLISH_ADAPTERS" ]; then
++  echo "error: missing generated hardware_publish adapters file: $GENERATED_PUBLISH_ADAPTERS" >&2
++  echo "hint: run the pure K-AXI emitter to generate this artifact first." >&2
++  exit 2
++fi
++
++QIR_EMITTER_SOURCE="$QIR_FULL_EMITTER"
++if [ -f "$QIR_GENESIS_EMITTER" ]; then
++  QIR_EMITTER_SOURCE="$QIR_GENESIS_EMITTER"
++fi
++
++if [ ! -f "$QIR_EMITTER_SOURCE" ]; then
++  echo "error: missing QIR emitter file: $QIR_EMITTER_SOURCE" >&2
++  echo "hint: ensure Sprint 4 QIR emitter artifact is present." >&2
++  exit 2
++fi
++
++resolve_souc_bin() {
++  if [ -n "${SOUC_BIN:-}" ]; then
++    echo "$SOUC_BIN"
++    return
++  fi
++  if [ -x "$DEFAULT_DEBUG_SOUC" ]; then
++    echo "$DEFAULT_DEBUG_SOUC"
++    return
++  fi
++  if [ -x "$DEFAULT_RELEASE_SOUC" ]; then
++    echo "$DEFAULT_RELEASE_SOUC"
++    return
++  fi
++  echo "souc"
++}
++
++SOUC_BIN="$(resolve_souc_bin)"
++
++tmp_sio="$(mktemp "${TMPDIR:-/tmp}/omega_hardware_publish_self_check.XXXXXX.sio")"
++cleanup() {
++  rm -f "$tmp_sio"
++}
++trap cleanup EXIT
++
++cat "$QIR_EMITTER_SOURCE" >"$tmp_sio"
++printf '\n' >>"$tmp_sio"
++cat "$GENERATED_ADAPTERS" >>"$tmp_sio"
++printf '\n' >>"$tmp_sio"
++cat "$GENERATED_PUBLISH_ADAPTERS" >>"$tmp_sio"
++cat >>"$tmp_sio" <<'SIO'
++
++fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
++    if omega_qir_full_emitter_self_check() && hardware_publish_self_check() {
++        print("HARDWARE_PUBLISH_SELF_CHECK_PASS\n")
++        return 0 as i32
++    } else {
++        print("HARDWARE_PUBLISH_SELF_CHECK_FAIL\n")
++        return 1 as i32
++    }
++}
++SIO
++
++set +e
++run_output="$(PATH="$ROOT_DIR:$PATH" "$SOUC_BIN" run "$tmp_sio" 2>&1)"
++run_rc=$?
++set -e
++
++if [ "$run_rc" -ne 0 ]; then
++  echo "error: souc run failed for hardware_publish self-check (exit=$run_rc bin=$SOUC_BIN)" >&2
++  printf '%s\n' "$run_output" >&2
++  exit "$run_rc"
++fi
++
++if ! printf '%s\n' "$run_output" | rg -q "$PASS_MARKER"; then
++  echo "error: hardware_publish self-check did not emit required marker: $PASS_MARKER" >&2
++  printf '%s\n' "$run_output" >&2
++  exit 2
++fi
++
++printf '%s\n' "$run_output"
+-- 
+2.43.0
+

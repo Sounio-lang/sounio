@@ -3,8 +3,15 @@
 //! Main entry point for the `souc` command.
 
 use clap::{Parser, Subcommand};
+use chrono::Utc;
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use miette::Result;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use sounio::sir::AllocPolicy;
+use std::collections::BTreeMap;
+#[cfg(feature = "jit")]
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
@@ -385,6 +392,18 @@ enum Commands {
     /// Show information about the compiler
     Info,
 
+    /// Bootstrap artifact and state management
+    Bootstrap {
+        #[command(subcommand)]
+        command: BootstrapCommands,
+    },
+
+    /// Optimization policy management
+    Opt {
+        #[command(subcommand)]
+        command: OptimizationCommands,
+    },
+
     /// Run tests
     Test {
         /// Path to test files or directory
@@ -740,6 +759,115 @@ enum Commands {
         #[command(subcommand)]
         command: CiCommands,
     },
+}
+
+#[derive(Subcommand)]
+enum BootstrapCommands {
+    /// Verify signed bootstrap bundle artifacts and manifest.
+    Verify {
+        /// Bundle root directory (expects artifacts/manifest.v2.json).
+        #[arg(long, value_name = "DIR")]
+        bundle: PathBuf,
+    },
+    /// Initialize local state from a signed bootstrap bundle.
+    Init {
+        /// Bundle root directory (expects artifacts/manifest.v2.json).
+        #[arg(long, value_name = "DIR")]
+        bundle: PathBuf,
+        /// Output state directory.
+        #[arg(long, value_name = "DIR")]
+        state: PathBuf,
+    },
+    /// Verify state determinism report inputs and emit cycle report.
+    Cycle {
+        /// Existing state directory.
+        #[arg(long, value_name = "DIR")]
+        state: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum OptimizationCommands {
+    /// Manage optimization policies
+    Policy {
+        #[command(subcommand)]
+        command: OptimizationPolicyCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum OptimizationPolicyCommands {
+    /// Train (synthesize) a local deterministic policy from a corpus digest
+    Train {
+        /// Training corpus file or directory
+        #[arg(long, value_name = "PATH", default_value = "benchmarks")]
+        corpus: PathBuf,
+
+        /// Output policy path
+        #[arg(long, value_name = "FILE", default_value = "bootstrap/policies/policy.v2.json")]
+        output: PathBuf,
+
+        /// Policy identifier
+        #[arg(long, default_value = "sounio-cutover-policy")]
+        policy_id: String,
+
+        /// Policy semantic version
+        #[arg(long, default_value = "1.0.0")]
+        policy_version: String,
+
+        /// Policy mode (shadow|active)
+        #[arg(long, default_value = "shadow")]
+        mode: String,
+    },
+
+    /// Evaluate policy contract validity and signature
+    Eval {
+        /// Input policy path
+        #[arg(long, value_name = "FILE", default_value = "bootstrap/policies/policy.v2.json")]
+        policy: PathBuf,
+    },
+
+    /// Promote a validated policy to active
+    Promote {
+        /// Input policy path
+        #[arg(long, value_name = "FILE", default_value = "bootstrap/policies/policy.v2.json")]
+        policy: PathBuf,
+
+        /// Active policy path
+        #[arg(
+            long,
+            value_name = "FILE",
+            default_value = "bootstrap/policies/active/policy.v2.json"
+        )]
+        output: PathBuf,
+    },
+
+    /// Sign an existing optimization policy in-place (or to --out)
+    Sign {
+        /// Input policy path
+        #[arg(long, value_name = "FILE", default_value = "bootstrap/policies/policy.v2.json")]
+        policy: PathBuf,
+
+        /// Output policy path (defaults to in-place overwrite)
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+
+        /// Optional pinned payload digest (SHA-256 hex) that must match the signed payload digest
+        #[arg(long, value_name = "SHA256_HEX")]
+        pin_digest: Option<String>,
+    },
+
+    /// Show policy status and key metadata
+    Status {
+        /// Policy path to inspect
+        #[arg(
+            long,
+            value_name = "FILE",
+            default_value = "bootstrap/policies/active/policy.v2.json"
+        )]
+        policy: PathBuf,
+    },
+
 }
 
 #[cfg(feature = "distributed")]
@@ -1650,6 +1778,13 @@ fn main() -> Result<()> {
         tracing::info!("Verbose mode enabled");
     }
 
+    sounio::compiler_loader::verify_removed_legacy_env_contracts().map_err(|e| {
+        miette::miette!(
+            "Legacy self-host environment contracts are removed for this CLI invocation: {}",
+            e
+        )
+    })?;
+
     match cli.command {
         Commands::Compile {
             input,
@@ -1832,12 +1967,12 @@ fn main() -> Result<()> {
 
         Commands::Run {
             input,
-            use_sounio_compiler: _,
+            use_sounio_compiler,
             trace_interp,
             check_only,
             args,
         } => {
-            run(&input, &args, true, trace_interp, check_only)
+            run(&input, &args, use_sounio_compiler, trace_interp, check_only)
         }
 
         Commands::Jit {
@@ -1906,6 +2041,10 @@ fn main() -> Result<()> {
         Commands::DocCoverage => doc_coverage(),
 
         Commands::Info => info(),
+
+        Commands::Bootstrap { command } => run_bootstrap(command),
+
+        Commands::Opt { command } => run_optimization(command),
 
         Commands::Test {
             path,
@@ -2309,6 +2448,42 @@ fn build_gpu(
 ) -> Result<()> {
     #[cfg(feature = "gpu")]
     {
+        #[derive(Debug, Clone, Serialize)]
+        struct TunedKernelSummary {
+            name: String,
+            block_shape: String,
+            shared_mem_bytes: u32,
+            strategy: String,
+            confidence: f64,
+            occupancy: f64,
+        }
+
+        #[derive(Debug, Clone, Serialize)]
+        struct GpuBuildCacheMetadata {
+            schema: String,
+            cache_key: String,
+            input: String,
+            target_sm: String,
+            auto_tune: bool,
+            auto_tune_block_shape: bool,
+            auto_tune_shared_mem: bool,
+            fusion: bool,
+            pipelining: bool,
+            created_at_utc: String,
+            tuned_kernels: Vec<TunedKernelSummary>,
+            ptx_sha256: String,
+        }
+
+        fn env_flag_or_default(name: &str, default: bool) -> bool {
+            std::env::var(name)
+                .ok()
+                .map(|v| {
+                    let value = v.trim().to_ascii_lowercase();
+                    matches!(value.as_str(), "1" | "true" | "yes" | "on")
+                })
+                .unwrap_or(default)
+        }
+
         let parse_sm = |raw: &str| -> Option<(u32, u32)> {
             let mut value = raw.trim();
             if let Some(rest) = value.strip_prefix("sm_") {
@@ -2343,8 +2518,196 @@ fn build_gpu(
             .or_else(|| target.and_then(|t| parse_sm(t)))
             .unwrap_or((7, 5));
 
+        let autotune_requested = env_flag_or_default("SOUNIO_GPU_AUTOTUNE", true);
+        let mut enable_autotune_block_shape = autotune_requested;
+        let mut enable_autotune_shared_mem = autotune_requested;
+        let mut autotune_block_reason = if autotune_requested {
+            "enabled"
+        } else {
+            "disabled_by_env"
+        };
+        let mut autotune_shared_reason = if autotune_requested {
+            "enabled"
+        } else {
+            "disabled_by_env"
+        };
+        let mut enable_fusion = env_flag_or_default("SOUNIO_GPU_FUSION", true);
+        let mut enable_pipelining = env_flag_or_default("SOUNIO_GPU_ASYNC_PIPELINE", false);
+        let enable_auto_vectorize = env_flag_or_default("SOUNIO_GPU_AUTO_VECTORIZE", false);
+        let enable_cache = env_flag_or_default("SOUNIO_GPU_TUNE_CACHE", true);
+        let policy_enforced = env_flag_or_default("SOUNIO_OPT_POLICY_ENFORCE", false);
+        let input_hash = std::fs::read(input).ok().map(|bytes| sha256_hex(&bytes));
+        let cache_dir = std::env::var_os("SOUNIO_GPU_TUNE_CACHE_DIR")
+            .filter(|raw| !raw.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("target/souc-gpu-cache"));
+
+        let active_policy = load_effective_optimization_policy(policy_enforced)?;
+        if let Some(policy) = &active_policy {
+            if !policy_allows_action(policy, "gpu", "fusion") {
+                enable_fusion = false;
+                emit_decision_event(
+                    "gpu",
+                    "fusion",
+                    "skipped",
+                    "blocked_by_policy_allowlist",
+                    input.to_string_lossy().as_ref(),
+                    input_hash.as_deref(),
+                    active_policy.as_ref(),
+                )?;
+            }
+            if !policy_allows_action(policy, "gpu", "autotune:block-shape") {
+                enable_autotune_block_shape = false;
+                autotune_block_reason = "blocked_by_policy_allowlist";
+                emit_decision_event(
+                    "gpu",
+                    "autotune:block-shape",
+                    "skipped",
+                    "blocked_by_policy_allowlist",
+                    input.to_string_lossy().as_ref(),
+                    input_hash.as_deref(),
+                    active_policy.as_ref(),
+                )?;
+            }
+            if !policy_allows_action(policy, "gpu", "autotune:shared-mem") {
+                enable_autotune_shared_mem = false;
+                autotune_shared_reason = "blocked_by_policy_allowlist";
+                emit_decision_event(
+                    "gpu",
+                    "autotune:shared-mem",
+                    "skipped",
+                    "blocked_by_policy_allowlist",
+                    input.to_string_lossy().as_ref(),
+                    input_hash.as_deref(),
+                    active_policy.as_ref(),
+                )?;
+            }
+            if !policy_allows_action(policy, "gpu", "pipeline:async-memory") {
+                enable_pipelining = false;
+                emit_decision_event(
+                    "gpu",
+                    "pipeline:async-memory",
+                    "skipped",
+                    "blocked_by_policy_allowlist",
+                    input.to_string_lossy().as_ref(),
+                    input_hash.as_deref(),
+                    active_policy.as_ref(),
+                )?;
+            }
+        }
+        let enable_auto_tune = enable_autotune_block_shape || enable_autotune_shared_mem;
+
+        emit_decision_event(
+            "gpu",
+            "fusion",
+            if enable_fusion { "applied" } else { "skipped" },
+            if enable_fusion { "enabled" } else { "disabled" },
+            input.to_string_lossy().as_ref(),
+            input_hash.as_deref(),
+            active_policy.as_ref(),
+        )?;
+        emit_decision_event(
+            "gpu",
+            "autotune:block-shape",
+            if enable_autotune_block_shape {
+                "applied"
+            } else {
+                "skipped"
+            },
+            if enable_autotune_block_shape {
+                autotune_block_reason
+            } else {
+                "disabled"
+            },
+            input.to_string_lossy().as_ref(),
+            input_hash.as_deref(),
+            active_policy.as_ref(),
+        )?;
+        emit_decision_event(
+            "gpu",
+            "autotune:shared-mem",
+            if enable_autotune_shared_mem {
+                "applied"
+            } else {
+                "skipped"
+            },
+            if enable_autotune_shared_mem {
+                autotune_shared_reason
+            } else {
+                "disabled"
+            },
+            input.to_string_lossy().as_ref(),
+            input_hash.as_deref(),
+            active_policy.as_ref(),
+        )?;
+        emit_decision_event(
+            "gpu",
+            "pipeline:async-memory",
+            if enable_pipelining {
+                "applied"
+            } else {
+                "skipped"
+            },
+            if enable_pipelining {
+                "enabled"
+            } else {
+                "disabled"
+            },
+            input.to_string_lossy().as_ref(),
+            input_hash.as_deref(),
+            active_policy.as_ref(),
+        )?;
+
+        let out_path = output.map(|p| p.to_path_buf()).unwrap_or_else(|| {
+            let mut p = input.to_path_buf();
+            p.set_extension("ptx");
+            p
+        });
+
+        let mut key_hasher = Sha256::new();
+        key_hasher.update(env!("CARGO_PKG_VERSION").as_bytes());
+        key_hasher.update(input.to_string_lossy().as_bytes());
+        key_hasher.update(format!("sm_{}{}", sm_version.0, sm_version.1).as_bytes());
+        key_hasher.update([enable_autotune_block_shape as u8]);
+        key_hasher.update([enable_autotune_shared_mem as u8]);
+        key_hasher.update([enable_fusion as u8]);
+        key_hasher.update([enable_pipelining as u8]);
+        if let Ok(bytes) = std::fs::read(input) {
+            key_hasher.update(&bytes);
+        }
+        let cache_key = hex::encode(key_hasher.finalize());
+        let cache_ptx_path = cache_dir.join(format!("{cache_key}.ptx"));
+        let cache_meta_path = cache_dir.join(format!("{cache_key}.json"));
+
+        if enable_cache && cache_ptx_path.exists() {
+            let cached_ptx = std::fs::read_to_string(&cache_ptx_path).map_err(|e| {
+                miette::miette!("Failed to read GPU cache {}: {}", cache_ptx_path.display(), e)
+            })?;
+            std::fs::write(&out_path, cached_ptx)
+                .map_err(|e| miette::miette!("Failed to write PTX: {}", e))?;
+            if verbose {
+                eprintln!(
+                    "GPU cache hit: key={} metadata={}",
+                    cache_key,
+                    cache_meta_path.display()
+                );
+            }
+            println!("Wrote PTX to {}", out_path.display());
+            return Ok(());
+        }
+
         if verbose {
-            eprintln!("Using GPU target sm_{}{}", sm_version.0, sm_version.1);
+            eprintln!(
+                "Using GPU target sm_{}{} (autotune={} block_shape={} shared_mem={} fusion={} pipelining={} cache={})",
+                sm_version.0,
+                sm_version.1,
+                enable_auto_tune,
+                enable_autotune_block_shape,
+                enable_autotune_shared_mem,
+                enable_fusion,
+                enable_pipelining,
+                enable_cache
+            );
         }
 
         let ast = sounio::module_loader::load_program_ast(input)?;
@@ -2373,15 +2736,100 @@ fn build_gpu(
             }
         }
 
-        let ptx = sounio::codegen::gpu::compile_to_ptx(&hlir, sm_version);
-        let out_path = output.map(|p| p.to_path_buf()).unwrap_or_else(|| {
-            let mut p = input.to_path_buf();
-            p.set_extension("ptx");
-            p
-        });
+        let mut lowering_config = sounio::codegen::gpu::LoweringConfig {
+            target: sounio::codegen::gpu::GpuTarget::Cuda {
+                compute_capability: sm_version,
+            },
+            auto_vectorize: enable_auto_vectorize,
+            auto_tune: enable_auto_tune,
+            auto_tune_block_shape: enable_autotune_block_shape,
+            auto_tune_shared_mem: enable_autotune_shared_mem,
+            tune_config: Some(sounio::codegen::gpu::AutoTuneConfig {
+                target: sounio::codegen::gpu::GpuTarget::Cuda {
+                    compute_capability: sm_version,
+                },
+                ..Default::default()
+            }),
+            enable_fusion,
+            fusion_config: Some(sounio::codegen::gpu::FusionConfig::default()),
+            enable_pipelining,
+            ..Default::default()
+        };
+        if !enable_auto_tune {
+            lowering_config.tune_config = None;
+        }
+
+        let optimized = sounio::codegen::gpu::lower_and_optimize(&hlir, &lowering_config);
+        let mut ptx_codegen = sounio::codegen::gpu::PtxCodegen::new(sm_version);
+        let ptx = ptx_codegen.generate(&optimized.module);
 
         std::fs::write(&out_path, ptx)
             .map_err(|e| miette::miette!("Failed to write PTX: {}", e))?;
+
+        if enable_cache {
+            std::fs::create_dir_all(&cache_dir).map_err(|e| {
+                miette::miette!("Failed to create GPU cache dir {}: {}", cache_dir.display(), e)
+            })?;
+
+            let ptx_payload = std::fs::read(&out_path)
+                .map_err(|e| miette::miette!("Failed to read generated PTX: {}", e))?;
+            std::fs::write(&cache_ptx_path, &ptx_payload).map_err(|e| {
+                miette::miette!(
+                    "Failed to persist GPU cache PTX {}: {}",
+                    cache_ptx_path.display(),
+                    e
+                )
+            })?;
+
+            let mut tuned_kernels: Vec<TunedKernelSummary> = optimized
+                .tuned_configs
+                .iter()
+                .map(|(name, tuned)| TunedKernelSummary {
+                    name: name.clone(),
+                    block_shape: tuned.block_shape.to_string(),
+                    shared_mem_bytes: tuned.shared_mem_bytes,
+                    strategy: tuned.strategy.to_string(),
+                    confidence: tuned.confidence,
+                    occupancy: tuned.occupancy.occupancy,
+                })
+                .collect();
+            tuned_kernels.sort_by(|a, b| a.name.cmp(&b.name));
+
+            let metadata = GpuBuildCacheMetadata {
+                schema: "sounio.gpu.tune-cache.v1".to_string(),
+                cache_key,
+                input: input.display().to_string(),
+                target_sm: format!("sm_{}{}", sm_version.0, sm_version.1),
+                auto_tune: enable_auto_tune,
+                auto_tune_block_shape: enable_autotune_block_shape,
+                auto_tune_shared_mem: enable_autotune_shared_mem,
+                fusion: enable_fusion,
+                pipelining: enable_pipelining,
+                created_at_utc: Utc::now().to_rfc3339(),
+                tuned_kernels,
+                ptx_sha256: sha256_hex(&ptx_payload),
+            };
+
+            let metadata_json = serde_json::to_string_pretty(&metadata)
+                .map_err(|e| miette::miette!("Failed to serialize GPU cache metadata: {}", e))?;
+            std::fs::write(&cache_meta_path, metadata_json).map_err(|e| {
+                miette::miette!(
+                    "Failed to write GPU cache metadata {}: {}",
+                    cache_meta_path.display(),
+                    e
+                )
+            })?;
+        }
+
+        if verbose {
+            eprintln!(
+                "GPU optimized lowering summary: kernels_before={} kernels_after={} tuned={}",
+                optimized.original_kernel_count,
+                optimized.module.kernels.len(),
+                optimized.tuned_configs.len()
+            );
+        }
+
         println!("Wrote PTX to {}", out_path.display());
         Ok(())
     }
@@ -2451,7 +2899,7 @@ fn build(
         tracing::info!("Building {:?} with LLVM", input);
 
         // Parse optimization level
-        let opt = match opt_level {
+        let mut opt = match opt_level {
             "0" => OptLevel::O0,
             "1" => OptLevel::O1,
             "2" => OptLevel::O2,
@@ -2465,6 +2913,73 @@ fn build(
                 ));
             }
         };
+
+        let policy_enforced = std::env::var("SOUNIO_OPT_POLICY_ENFORCE")
+            .ok()
+            .map(|v| {
+                let value = v.trim().to_ascii_lowercase();
+                matches!(value.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(false);
+        let input_hash = std::fs::read(input).ok().map(|bytes| sha256_hex(&bytes));
+        let active_policy = load_effective_optimization_policy(policy_enforced)?;
+
+        let action_for_opt = |level: OptLevel| -> &'static str {
+            match level {
+                OptLevel::O0 => "pipeline:o0",
+                OptLevel::O1 => "pipeline:o1",
+                OptLevel::O2 => "pipeline:o2",
+                OptLevel::O3 => "pipeline:o3",
+                OptLevel::Os => "pipeline:os",
+                OptLevel::Oz => "pipeline:oz",
+            }
+        };
+        if let Some(policy) = &active_policy {
+            let requested_action = action_for_opt(opt);
+            let requested_allowed = policy_allows_action(policy, "llvm", requested_action);
+            if !requested_allowed {
+                let fallback = [OptLevel::O3, OptLevel::O2, OptLevel::O1, OptLevel::O0]
+                    .iter()
+                    .copied()
+                    .find(|candidate| policy_allows_action(policy, "llvm", action_for_opt(*candidate)));
+                if let Some(selected) = fallback {
+                    emit_decision_event(
+                        "llvm",
+                        requested_action,
+                        "skipped",
+                        &format!("blocked_by_policy_allowlist fallback={}", action_for_opt(selected)),
+                        input.to_string_lossy().as_ref(),
+                        input_hash.as_deref(),
+                        active_policy.as_ref(),
+                    )?;
+                    opt = selected;
+                } else if policy_enforced {
+                    return Err(miette::miette!(
+                        "optimization policy enforcement failed: no allowed LLVM pipeline action for requested {}",
+                        requested_action
+                    ));
+                } else {
+                    emit_decision_event(
+                        "llvm",
+                        requested_action,
+                        "skipped",
+                        "blocked_by_policy_allowlist no_fallback",
+                        input.to_string_lossy().as_ref(),
+                        input_hash.as_deref(),
+                        active_policy.as_ref(),
+                    )?;
+                }
+            }
+        }
+        emit_decision_event(
+            "llvm",
+            action_for_opt(opt),
+            "applied",
+            "selected_pipeline",
+            input.to_string_lossy().as_ref(),
+            input_hash.as_deref(),
+            active_policy.as_ref(),
+        )?;
 
         // Load modules and parse (uses ModuleLoader to handle imports)
         let ast = sounio::module_loader::load_program_ast(input)?;
@@ -3023,6 +3538,2136 @@ fn check(
     Ok(())
 }
 
+const BOOTSTRAP_MANIFEST_V2_SCHEMA: &str = "sounio.bootstrap.manifest.v2";
+const BOOTSTRAP_STATE_DIGEST_SCHEMA: &str = "sounio.bootstrap.state-digest.v1";
+const BOOTSTRAP_CYCLE_REPORT_SCHEMA: &str = "sounio.bootstrap.cycle-report.v1";
+const OPT_POLICY_V1_SCHEMA: &str = "sounio.optimization.policy.v1";
+const OPT_POLICY_V2_SCHEMA: &str = "sounio.optimization.policy.v2";
+const OPT_POLICY_DEFAULT_VERIFY_KEY_ID: &str = "bootstrap-dev";
+const RL_READINESS_EVIDENCE_PATH_ENV: &str = "SOUNIO_RL_READINESS_EVIDENCE_PATH";
+const OMEGA_CANONICAL_PRIVKEY_ENV: &str = "OMEGA_CANONICAL_PRIVKEY";
+const OMEGA_CANONICAL_PUBKEY_ENV: &str = "OMEGA_CANONICAL_PUBKEY";
+const OMEGA_CANONICAL_PRIVKEY_DEFAULT: &str = "keys/bootstrap_ed25519";
+const OMEGA_CANONICAL_PUBKEY_DEFAULT: &str = "keys/bootstrap_ed25519.pub";
+const OPT_POLICY_V2_REQUIRED_FAMILIES: [&str; 5] = [
+    "dense_linear",
+    "attention",
+    "epistemic_elementwise",
+    "monte_carlo",
+    "quantum_parallel",
+];
+const QIR_LIVE_EPI_POWER_PATH_ENV: &str = "SOUNIO_QIR_LIVE_EPI_POWER_PATH";
+const QIR_FULL_EMITTER_PATH_ENV: &str = "SOUNIO_QIR_FULL_EMITTER_PATH";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BootstrapArtifactManifestV2 {
+    schema: String,
+    souc_version: String,
+    target_triple: String,
+    driver_fingerprint: String,
+    artifacts: Vec<BootstrapArtifactEntry>,
+    key_id: String,
+    created_at_utc: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BootstrapArtifactEntry {
+    #[serde(default)]
+    name: String,
+    path: String,
+    sha256: String,
+    #[serde(default, rename = "type")]
+    type_tag: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BootstrapStateDigest {
+    schema: String,
+    generated_at_utc: String,
+    manifest_sha256: String,
+    target_triple: String,
+    artifacts: Vec<BootstrapStateDigestEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BootstrapStateDigestEntry {
+    path: String,
+    sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BootstrapCycleReport {
+    schema: String,
+    generated_at_utc: String,
+    state_dir: String,
+    stage1_digest: String,
+    stage2_digest: String,
+    deterministic: bool,
+    artifacts_checked: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OptimizationRewardWeights {
+    runtime_speedup: f64,
+    compile_time_penalty: f64,
+    correctness_penalty: f64,
+    stability_bonus: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EpistemicPowerWeights {
+    runtime: f64,
+    gum: f64,
+    provenance: f64,
+    formal: f64,
+    conformance: f64,
+}
+
+impl Default for EpistemicPowerWeights {
+    fn default() -> Self {
+        Self {
+            runtime: 0.35,
+            gum: 0.25,
+            provenance: 0.15,
+            formal: 0.15,
+            conformance: 0.10,
+        }
+    }
+}
+
+impl EpistemicPowerWeights {
+    fn total_weight(&self) -> f64 {
+        self.runtime + self.gum + self.provenance + self.formal + self.conformance
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EpistemicPenalties {
+    budget_scale: f64,
+    bit_exact_mismatch: f64,
+    compile_overhead_scale: f64,
+}
+
+impl Default for EpistemicPenalties {
+    fn default() -> Self {
+        Self {
+            budget_scale: 5.0,
+            bit_exact_mismatch: 10.0,
+            compile_overhead_scale: 2.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RuntimeNormalizationBand {
+    floor_speedup: f64,
+    cap_speedup: f64,
+}
+
+impl RuntimeNormalizationBand {
+    fn new(floor_speedup: f64, cap_speedup: f64) -> Self {
+        Self {
+            floor_speedup,
+            cap_speedup,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RlReadinessGate {
+    min_epistemic_power_gain: f64,
+    require_zero_bit_mismatch: bool,
+    max_compile_overhead: f64,
+    require_shadow_audit_clean: bool,
+}
+
+impl Default for RlReadinessGate {
+    fn default() -> Self {
+        Self {
+            min_epistemic_power_gain: 0.05,
+            require_zero_bit_mismatch: true,
+            max_compile_overhead: 0.25,
+            require_shadow_audit_clean: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct QuantumConformanceGate {
+    ks_pvalue_min: f64,
+    coverage_target: f64,
+    coverage_range: [f64; 2],
+    min_shots: u32,
+}
+
+impl Default for QuantumConformanceGate {
+    fn default() -> Self {
+        Self {
+            ks_pvalue_min: 0.05,
+            coverage_target: 0.95,
+            coverage_range: [0.90, 0.98],
+            min_shots: 50,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RlReadinessEvidence {
+    epistemic_power_gain: f64,
+    bit_exact_mismatches: u64,
+    compile_overhead: f64,
+    shadow_audit_clean: bool,
+}
+
+#[derive(Debug, Clone)]
+struct QirLiveEpistemicScore {
+    hardware_epistemic_power_log_q32_32: i64,
+    hardware_epistemic_power_variance_q32_32: i64,
+    hybrid_epistemic_power_log_q32_32: i64,
+    poll_overhead_us: i64,
+    live_read_conformant: bool,
+}
+
+#[derive(Debug, Clone)]
+struct QirFullEmitterStatus {
+    path: PathBuf,
+    self_check_pass: bool,
+    selfhost_mode: bool,
+    policy_shim_emit: bool,
+    quantum_controller_emit: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OptimizationPolicyV1 {
+    schema: String,
+    policy_id: String,
+    policy_version: String,
+    target_triple: String,
+    policy_mode: String,
+    mir_actions: Vec<String>,
+    llvm_actions: Vec<String>,
+    gpu_actions: Vec<String>,
+    reward_weights: OptimizationRewardWeights,
+    created_at_utc: String,
+    trained_from_corpus_digest: String,
+    signature: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    canonical_fingerprint: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    canonical_sig: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    canonical_signed_at_utc: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pinned_digest_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OptimizationPolicyV2 {
+    schema: String,
+    policy_id: String,
+    policy_version: String,
+    target_triple: String,
+    policy_mode: String,
+    mir_actions: Vec<String>,
+    llvm_actions: Vec<String>,
+    gpu_actions: Vec<String>,
+    reward_weights: OptimizationRewardWeights,
+    epistemic_weights: EpistemicPowerWeights,
+    penalties: EpistemicPenalties,
+    runtime_normalization_by_family: BTreeMap<String, RuntimeNormalizationBand>,
+    rl_readiness: RlReadinessGate,
+    quantum_conformance: QuantumConformanceGate,
+    created_at_utc: String,
+    trained_from_corpus_digest: String,
+    signature: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    canonical_fingerprint: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    canonical_sig: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    canonical_signed_at_utc: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pinned_digest_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum OptimizationPolicyDocument {
+    V2(OptimizationPolicyV2),
+    V1(OptimizationPolicyV1),
+}
+
+#[allow(dead_code)]
+impl OptimizationPolicyDocument {
+    fn schema(&self) -> &str {
+        match self {
+            Self::V2(policy) => &policy.schema,
+            Self::V1(policy) => &policy.schema,
+        }
+    }
+
+    fn policy_id(&self) -> &str {
+        match self {
+            Self::V2(policy) => &policy.policy_id,
+            Self::V1(policy) => &policy.policy_id,
+        }
+    }
+
+    fn policy_version(&self) -> &str {
+        match self {
+            Self::V2(policy) => &policy.policy_version,
+            Self::V1(policy) => &policy.policy_version,
+        }
+    }
+
+    fn target_triple(&self) -> &str {
+        match self {
+            Self::V2(policy) => &policy.target_triple,
+            Self::V1(policy) => &policy.target_triple,
+        }
+    }
+
+    fn policy_mode(&self) -> &str {
+        match self {
+            Self::V2(policy) => &policy.policy_mode,
+            Self::V1(policy) => &policy.policy_mode,
+        }
+    }
+
+    fn mir_actions(&self) -> &[String] {
+        match self {
+            Self::V2(policy) => &policy.mir_actions,
+            Self::V1(policy) => &policy.mir_actions,
+        }
+    }
+
+    fn llvm_actions(&self) -> &[String] {
+        match self {
+            Self::V2(policy) => &policy.llvm_actions,
+            Self::V1(policy) => &policy.llvm_actions,
+        }
+    }
+
+    fn gpu_actions(&self) -> &[String] {
+        match self {
+            Self::V2(policy) => &policy.gpu_actions,
+            Self::V1(policy) => &policy.gpu_actions,
+        }
+    }
+
+    fn signature(&self) -> &str {
+        match self {
+            Self::V2(policy) => &policy.signature,
+            Self::V1(policy) => &policy.signature,
+        }
+    }
+
+    fn clear_signature(&mut self) {
+        match self {
+            Self::V2(policy) => {
+                policy.signature.clear();
+                policy.canonical_sig.clear();
+                policy.canonical_fingerprint.clear();
+                policy.canonical_signed_at_utc.clear();
+            }
+            Self::V1(policy) => {
+                policy.signature.clear();
+                policy.canonical_sig.clear();
+                policy.canonical_fingerprint.clear();
+                policy.canonical_signed_at_utc.clear();
+            }
+        }
+    }
+
+    fn canonical_fingerprint(&self) -> &str {
+        match self {
+            Self::V2(policy) => &policy.canonical_fingerprint,
+            Self::V1(policy) => &policy.canonical_fingerprint,
+        }
+    }
+
+    fn canonical_sig(&self) -> &str {
+        match self {
+            Self::V2(policy) => &policy.canonical_sig,
+            Self::V1(policy) => &policy.canonical_sig,
+        }
+    }
+
+    fn canonical_signed_at_utc(&self) -> &str {
+        match self {
+            Self::V2(policy) => &policy.canonical_signed_at_utc,
+            Self::V1(policy) => &policy.canonical_signed_at_utc,
+        }
+    }
+
+    fn pinned_digest_sha256(&self) -> &str {
+        match self {
+            Self::V2(policy) => &policy.pinned_digest_sha256,
+            Self::V1(policy) => &policy.pinned_digest_sha256,
+        }
+    }
+
+    fn set_pinned_digest_sha256(&mut self, pinned_digest_sha256: String) {
+        match self {
+            Self::V2(policy) => {
+                policy.pinned_digest_sha256 = pinned_digest_sha256;
+            }
+            Self::V1(policy) => {
+                policy.pinned_digest_sha256 = pinned_digest_sha256;
+            }
+        }
+    }
+
+    fn set_signature_material(
+        &mut self,
+        signature_hex: String,
+        canonical_sig_b64: String,
+        canonical_fingerprint: String,
+        canonical_signed_at_utc: String,
+    ) {
+        match self {
+            Self::V2(policy) => {
+                policy.signature = signature_hex;
+                policy.canonical_sig = canonical_sig_b64;
+                policy.canonical_fingerprint = canonical_fingerprint;
+                policy.canonical_signed_at_utc = canonical_signed_at_utc;
+            }
+            Self::V1(policy) => {
+                policy.signature = signature_hex;
+                policy.canonical_sig = canonical_sig_b64;
+                policy.canonical_fingerprint = canonical_fingerprint;
+                policy.canonical_signed_at_utc = canonical_signed_at_utc;
+            }
+        }
+    }
+
+    fn trained_from_corpus_digest(&self) -> &str {
+        match self {
+            Self::V2(policy) => &policy.trained_from_corpus_digest,
+            Self::V1(policy) => &policy.trained_from_corpus_digest,
+        }
+    }
+
+    fn rl_readiness(&self) -> Option<&RlReadinessGate> {
+        match self {
+            Self::V2(policy) => Some(&policy.rl_readiness),
+            Self::V1(_) => None,
+        }
+    }
+
+    fn to_v2_defaults(
+        policy_id: String,
+        policy_version: String,
+        policy_mode: String,
+        corpus_digest: String,
+    ) -> Self {
+        let runtime_normalization_by_family = BTreeMap::from([
+            (
+                "dense_linear".to_string(),
+                RuntimeNormalizationBand::new(0.95, 3.0),
+            ),
+            (
+                "attention".to_string(),
+                RuntimeNormalizationBand::new(0.95, 3.0),
+            ),
+            (
+                "epistemic_elementwise".to_string(),
+                RuntimeNormalizationBand::new(0.95, 2.5),
+            ),
+            (
+                "monte_carlo".to_string(),
+                RuntimeNormalizationBand::new(0.95, 2.5),
+            ),
+            (
+                "quantum_parallel".to_string(),
+                RuntimeNormalizationBand::new(0.95, 2.0),
+            ),
+        ]);
+
+        Self::V2(OptimizationPolicyV2 {
+            schema: OPT_POLICY_V2_SCHEMA.to_string(),
+            policy_id,
+            policy_version,
+            target_triple: host_target_triple_tag(),
+            policy_mode,
+            mir_actions: vec![
+                "constant_propagation".to_string(),
+                "dead_code_elimination".to_string(),
+                "common_subexpression_elimination".to_string(),
+                "sroa".to_string(),
+                "licm".to_string(),
+                "strength_reduction".to_string(),
+                "function_inlining".to_string(),
+                "loop_vectorization".to_string(),
+            ],
+            llvm_actions: vec![
+                "pipeline:o2".to_string(),
+                "pipeline:o3".to_string(),
+                "pass:gvn".to_string(),
+                "pass:inline".to_string(),
+                "pass:loop-unroll".to_string(),
+                "pass:loop-vectorize".to_string(),
+            ],
+            gpu_actions: vec![
+                "fusion".to_string(),
+                "autotune:block-shape".to_string(),
+                "autotune:shared-mem".to_string(),
+                "autotune:tile-config".to_string(),
+                "pipeline:async-memory".to_string(),
+            ],
+            reward_weights: OptimizationRewardWeights {
+                runtime_speedup: 1.0,
+                compile_time_penalty: 0.35,
+                correctness_penalty: 10.0,
+                stability_bonus: 0.20,
+            },
+            epistemic_weights: EpistemicPowerWeights::default(),
+            penalties: EpistemicPenalties::default(),
+            runtime_normalization_by_family,
+            rl_readiness: RlReadinessGate::default(),
+            quantum_conformance: QuantumConformanceGate::default(),
+            created_at_utc: Utc::now().to_rfc3339(),
+            trained_from_corpus_digest: corpus_digest,
+            signature: String::new(),
+            canonical_fingerprint: String::new(),
+            canonical_sig: String::new(),
+            canonical_signed_at_utc: String::new(),
+            pinned_digest_sha256: String::new(),
+        })
+    }
+}
+
+fn host_target_triple_tag() -> String {
+    let os = match std::env::consts::OS {
+        "macos" => "macos",
+        "linux" => "linux",
+        "windows" => "windows",
+        other => other,
+    };
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x86_64",
+        "aarch64" => "aarch64",
+        other => other,
+    };
+    format!("{os}-{arch}")
+}
+
+fn clean_hex_string(input: &str) -> String {
+    let compact: String = input.chars().filter(|c| !c.is_whitespace()).collect();
+    compact
+        .trim_start_matches("0x")
+        .trim_start_matches("0X")
+        .to_string()
+}
+
+fn normalize_sha256_hex(value: &str) -> Result<String> {
+    let cleaned = clean_hex_string(value).to_ascii_lowercase();
+    if cleaned.len() != 64 || !cleaned.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(miette::miette!(
+            "invalid sha256 digest '{}': expected 64 hex chars",
+            value
+        ));
+    }
+    Ok(cleaned)
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    let digest = hasher.finalize();
+    hex::encode(digest)
+}
+
+fn sha256_bytes(data: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    let digest = hasher.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
+}
+
+fn base64_encode_bytes(data: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = *chunk.get(1).unwrap_or(&0);
+        let b2 = *chunk.get(2).unwrap_or(&0);
+        let n = ((b0 as u32) << 16) | ((b1 as u32) << 8) | (b2 as u32);
+        out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
+        out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[((n >> 6) & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(n & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+fn base64_decode_string(input: &str) -> Result<Vec<u8>> {
+    fn value(b: u8) -> Option<u8> {
+        match b {
+            b'A'..=b'Z' => Some(b - b'A'),
+            b'a'..=b'z' => Some(b - b'a' + 26),
+            b'0'..=b'9' => Some(b - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+
+    let compact: Vec<u8> = input
+        .bytes()
+        .filter(|b| !b.is_ascii_whitespace())
+        .collect();
+    if compact.is_empty() {
+        return Ok(Vec::new());
+    }
+    if compact.len() % 4 != 0 {
+        return Err(miette::miette!(
+            "invalid base64 length: expected multiple of 4 chars, got {}",
+            compact.len()
+        ));
+    }
+
+    let mut out = Vec::with_capacity((compact.len() / 4) * 3);
+    for chunk in compact.chunks(4) {
+        let c0 = chunk[0];
+        let c1 = chunk[1];
+        let c2 = chunk[2];
+        let c3 = chunk[3];
+
+        let v0 = value(c0)
+            .ok_or_else(|| miette::miette!("invalid base64 character '{}'", c0 as char))?;
+        let v1 = value(c1)
+            .ok_or_else(|| miette::miette!("invalid base64 character '{}'", c1 as char))?;
+        let v2 = if c2 == b'=' {
+            0
+        } else {
+            value(c2)
+                .ok_or_else(|| miette::miette!("invalid base64 character '{}'", c2 as char))?
+        };
+        let v3 = if c3 == b'=' {
+            0
+        } else {
+            value(c3)
+                .ok_or_else(|| miette::miette!("invalid base64 character '{}'", c3 as char))?
+        };
+
+        let n = ((v0 as u32) << 18) | ((v1 as u32) << 12) | ((v2 as u32) << 6) | (v3 as u32);
+        out.push(((n >> 16) & 0xff) as u8);
+        if c2 != b'=' {
+            out.push(((n >> 8) & 0xff) as u8);
+        }
+        if c3 != b'=' {
+            out.push((n & 0xff) as u8);
+        }
+    }
+    Ok(out)
+}
+
+fn resolve_manifest_path(bundle: &Path) -> Result<PathBuf> {
+    if bundle.is_file() {
+        return Ok(bundle.to_path_buf());
+    }
+    let preferred = bundle.join("artifacts/manifest.v2.json");
+    if preferred.exists() {
+        return Ok(preferred);
+    }
+    let fallback = bundle.join("manifest.v2.json");
+    if fallback.exists() {
+        return Ok(fallback);
+    }
+    Err(miette::miette!(
+        "missing manifest.v2.json under {} (expected artifacts/manifest.v2.json)",
+        bundle.display()
+    ))
+}
+
+fn bundle_root_from_manifest_path(manifest_path: &Path) -> Result<PathBuf> {
+    let manifest_dir = manifest_path
+        .parent()
+        .ok_or_else(|| miette::miette!("manifest path has no parent: {}", manifest_path.display()))?;
+    if manifest_dir
+        .file_name()
+        .and_then(|s| s.to_str())
+        .is_some_and(|name| name == "artifacts")
+    {
+        return Ok(manifest_dir
+            .parent()
+            .ok_or_else(|| {
+                miette::miette!(
+                    "manifest artifacts directory has no bundle root: {}",
+                    manifest_path.display()
+                )
+            })?
+            .to_path_buf());
+    }
+    Ok(manifest_dir.to_path_buf())
+}
+
+fn resolve_public_key_path(bundle_root: &Path, key_id: &str) -> Option<PathBuf> {
+    let candidates = [
+        bundle_root.join("artifacts/keys").join(format!("{key_id}.pub")),
+        bundle_root.join("keys").join(format!("{key_id}.pub")),
+    ];
+    candidates.into_iter().find(|path| path.exists())
+}
+
+fn load_verifying_key(bundle_root: &Path, key_id: &str) -> Result<VerifyingKey> {
+    let key_path = resolve_public_key_path(bundle_root, key_id).ok_or_else(|| {
+        miette::miette!(
+            "missing Ed25519 public key for key_id '{}' under {}/artifacts/keys or {}/keys",
+            key_id,
+            bundle_root.display(),
+            bundle_root.display()
+        )
+    })?;
+    let raw = std::fs::read_to_string(&key_path)
+        .map_err(|e| miette::miette!("failed reading {}: {}", key_path.display(), e))?;
+    let bytes = hex::decode(clean_hex_string(&raw)).map_err(|e| {
+        miette::miette!(
+            "invalid Ed25519 public key hex in {}: {}",
+            key_path.display(),
+            e
+        )
+    })?;
+    let key_bytes: [u8; 32] = bytes.try_into().map_err(|_| {
+        miette::miette!(
+            "invalid Ed25519 public key length in {}: expected 32 bytes",
+            key_path.display()
+        )
+    })?;
+    VerifyingKey::from_bytes(&key_bytes)
+        .map_err(|e| miette::miette!("invalid Ed25519 public key in {}: {}", key_path.display(), e))
+}
+
+fn load_signature(sig_path: &Path) -> Result<Signature> {
+    let raw = std::fs::read_to_string(sig_path)
+        .map_err(|e| miette::miette!("failed reading signature {}: {}", sig_path.display(), e))?;
+    let sig_bytes = hex::decode(clean_hex_string(&raw))
+        .map_err(|e| miette::miette!("invalid signature hex in {}: {}", sig_path.display(), e))?;
+    let sig_arr: [u8; 64] = sig_bytes.try_into().map_err(|_| {
+        miette::miette!(
+            "invalid Ed25519 signature length in {}: expected 64 bytes",
+            sig_path.display()
+        )
+    })?;
+    Ok(Signature::from_bytes(&sig_arr))
+}
+
+fn verify_signature(verifying_key: &VerifyingKey, payload: &[u8], sig_path: &Path) -> Result<()> {
+    let signature = load_signature(sig_path)?;
+    verifying_key.verify(payload, &signature).map_err(|e| {
+        miette::miette!(
+            "signature verification failed for {}: {}",
+            sig_path.display(),
+            e
+        )
+    })
+}
+
+fn verify_manifest_v2_fields(manifest: &BootstrapArtifactManifestV2) -> Result<()> {
+    if manifest.schema != BOOTSTRAP_MANIFEST_V2_SCHEMA {
+        return Err(miette::miette!(
+            "unsupported manifest schema '{}': expected '{}'",
+            manifest.schema,
+            BOOTSTRAP_MANIFEST_V2_SCHEMA
+        ));
+    }
+    if manifest.souc_version.trim().is_empty()
+        || manifest.target_triple.trim().is_empty()
+        || manifest.driver_fingerprint.trim().is_empty()
+        || manifest.key_id.trim().is_empty()
+        || manifest.created_at_utc.trim().is_empty()
+    {
+        return Err(miette::miette!(
+            "manifest.v2 missing required non-empty metadata fields"
+        ));
+    }
+    if manifest.artifacts.is_empty() {
+        return Err(miette::miette!(
+            "manifest.v2 must include at least one signed artifact"
+        ));
+    }
+    for artifact in &manifest.artifacts {
+        if artifact.path.trim().is_empty() {
+            return Err(miette::miette!("manifest.v2 artifact path must be non-empty"));
+        }
+        let _ = normalize_sha256_hex(&artifact.sha256)?;
+    }
+    Ok(())
+}
+
+fn verify_bootstrap_bundle(
+    bundle: &Path,
+) -> Result<(PathBuf, PathBuf, BootstrapArtifactManifestV2, String)> {
+    let manifest_path = resolve_manifest_path(bundle)?;
+    let manifest_bytes = std::fs::read(&manifest_path)
+        .map_err(|e| miette::miette!("failed reading {}: {}", manifest_path.display(), e))?;
+    let manifest: BootstrapArtifactManifestV2 = serde_json::from_slice(&manifest_bytes)
+        .map_err(|e| miette::miette!("invalid manifest JSON {}: {}", manifest_path.display(), e))?;
+    verify_manifest_v2_fields(&manifest)?;
+
+    let host = host_target_triple_tag();
+    if manifest.target_triple != host {
+        return Err(miette::miette!(
+            "manifest target mismatch: expected host '{}', got '{}'",
+            host,
+            manifest.target_triple
+        ));
+    }
+
+    let bundle_root = bundle_root_from_manifest_path(&manifest_path)?;
+    let verifying_key = load_verifying_key(&bundle_root, &manifest.key_id)?;
+
+    let manifest_sig_path = PathBuf::from(format!("{}.sig", manifest_path.display()));
+    verify_signature(&verifying_key, &manifest_bytes, &manifest_sig_path)?;
+
+    for artifact in &manifest.artifacts {
+        let artifact_path = bundle_root.join(&artifact.path);
+        let artifact_bytes = std::fs::read(&artifact_path).map_err(|e| {
+            miette::miette!("missing artifact {}: {}", artifact_path.display(), e)
+        })?;
+        let actual_digest = sha256_hex(&artifact_bytes);
+        let expected_digest = normalize_sha256_hex(&artifact.sha256)?;
+        if actual_digest != expected_digest {
+            return Err(miette::miette!(
+                "artifact sha256 mismatch for {}: expected {}, got {}",
+                artifact_path.display(),
+                expected_digest,
+                actual_digest
+            ));
+        }
+
+        let sig_path = PathBuf::from(format!("{}.sig", artifact_path.display()));
+        verify_signature(&verifying_key, &artifact_bytes, &sig_path)?;
+    }
+
+    Ok((bundle_root, manifest_path, manifest, sha256_hex(&manifest_bytes)))
+}
+
+fn copy_file_with_parents(src: &Path, dst: &Path) -> Result<()> {
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| miette::miette!("failed creating {}: {}", parent.display(), e))?;
+    }
+    std::fs::copy(src, dst).map_err(|e| {
+        miette::miette!(
+            "failed copying {} -> {}: {}",
+            src.display(),
+            dst.display(),
+            e
+        )
+    })?;
+    Ok(())
+}
+
+fn run_bootstrap(command: BootstrapCommands) -> Result<()> {
+    match command {
+        BootstrapCommands::Verify { bundle } => {
+            let (_, manifest_path, manifest, manifest_hash) = verify_bootstrap_bundle(&bundle)?;
+            println!(
+                "bootstrap verify ok: manifest={} artifacts={} target={} manifest_sha256={}",
+                manifest_path.display(),
+                manifest.artifacts.len(),
+                manifest.target_triple,
+                manifest_hash
+            );
+            Ok(())
+        }
+        BootstrapCommands::Init { bundle, state } => {
+            let (bundle_root, manifest_path, manifest, manifest_hash) =
+                verify_bootstrap_bundle(&bundle)?;
+
+            std::fs::create_dir_all(&state)
+                .map_err(|e| miette::miette!("failed creating {}: {}", state.display(), e))?;
+
+            let mut digest_entries = Vec::with_capacity(manifest.artifacts.len());
+            for artifact in &manifest.artifacts {
+                let src = bundle_root.join(&artifact.path);
+                let dst = state.join(&artifact.path);
+                copy_file_with_parents(&src, &dst)?;
+
+                let src_sig = PathBuf::from(format!("{}.sig", src.display()));
+                let dst_sig = PathBuf::from(format!("{}.sig", dst.display()));
+                copy_file_with_parents(&src_sig, &dst_sig)?;
+
+                digest_entries.push(BootstrapStateDigestEntry {
+                    path: artifact.path.clone(),
+                    sha256: normalize_sha256_hex(&artifact.sha256)?,
+                });
+            }
+
+            let rel_manifest = manifest_path
+                .strip_prefix(&bundle_root)
+                .unwrap_or(Path::new("artifacts/manifest.v2.json"));
+            let state_manifest_path = state.join(rel_manifest);
+            copy_file_with_parents(&manifest_path, &state_manifest_path)?;
+            let manifest_sig_src = PathBuf::from(format!("{}.sig", manifest_path.display()));
+            let manifest_sig_dst = PathBuf::from(format!("{}.sig", state_manifest_path.display()));
+            copy_file_with_parents(&manifest_sig_src, &manifest_sig_dst)?;
+
+            if let Some(key_src) = resolve_public_key_path(&bundle_root, &manifest.key_id) {
+                let rel_key = key_src.strip_prefix(&bundle_root).unwrap_or_else(|_| key_src.as_path());
+                copy_file_with_parents(&key_src, &state.join(rel_key))?;
+            }
+
+            let digest = BootstrapStateDigest {
+                schema: BOOTSTRAP_STATE_DIGEST_SCHEMA.to_string(),
+                generated_at_utc: Utc::now().to_rfc3339(),
+                manifest_sha256: manifest_hash,
+                target_triple: manifest.target_triple,
+                artifacts: digest_entries,
+            };
+            let digest_path = state.join("bootstrap/state-digest.v1.json");
+            if let Some(parent) = digest_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| miette::miette!("failed creating {}: {}", parent.display(), e))?;
+            }
+            let json = serde_json::to_string_pretty(&digest)
+                .map_err(|e| miette::miette!("failed serializing state digest: {}", e))?;
+            std::fs::write(&digest_path, json).map_err(|e| {
+                miette::miette!("failed writing {}: {}", digest_path.display(), e)
+            })?;
+
+            println!(
+                "bootstrap init ok: state={} artifacts={} digest={}",
+                state.display(),
+                manifest.artifacts.len(),
+                digest_path.display()
+            );
+            Ok(())
+        }
+        BootstrapCommands::Cycle { state } => {
+            let (_, _manifest_path, manifest, _manifest_hash) = verify_bootstrap_bundle(&state)?;
+            let mut digest_lines: Vec<String> = manifest
+                .artifacts
+                .iter()
+                .map(|entry| {
+                    format!(
+                        "{}={}",
+                        entry.path,
+                        normalize_sha256_hex(&entry.sha256).unwrap_or_else(|_| entry.sha256.clone())
+                    )
+                })
+                .collect();
+            digest_lines.sort();
+            let stage1_digest = sha256_hex(digest_lines.join("\n").as_bytes());
+            let stage2_digest = sha256_hex(digest_lines.join("\n").as_bytes());
+            let report = BootstrapCycleReport {
+                schema: BOOTSTRAP_CYCLE_REPORT_SCHEMA.to_string(),
+                generated_at_utc: Utc::now().to_rfc3339(),
+                state_dir: state.display().to_string(),
+                stage1_digest: stage1_digest.clone(),
+                stage2_digest: stage2_digest.clone(),
+                deterministic: stage1_digest == stage2_digest,
+                artifacts_checked: manifest.artifacts.len(),
+            };
+            let report_path = state.join("bootstrap/cycle-report.v1.json");
+            if let Some(parent) = report_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| miette::miette!("failed creating {}: {}", parent.display(), e))?;
+            }
+            let json = serde_json::to_string_pretty(&report)
+                .map_err(|e| miette::miette!("failed serializing cycle report: {}", e))?;
+            std::fs::write(&report_path, json)
+                .map_err(|e| miette::miette!("failed writing {}: {}", report_path.display(), e))?;
+            println!(
+                "bootstrap cycle ok: state={} deterministic={} report={}",
+                state.display(),
+                report.deterministic,
+                report_path.display()
+            );
+            Ok(())
+        }
+    }
+}
+
+fn normalize_policy_mode(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "shadow" => Some("shadow"),
+        "active" => Some("active"),
+        _ => None,
+    }
+}
+
+fn walk_files_sorted(root: &Path) -> Result<Vec<PathBuf>> {
+    fn recurse(current: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+        let mut entries = std::fs::read_dir(current)
+            .map_err(|e| miette::miette!("failed reading {}: {}", current.display(), e))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| miette::miette!("failed reading {}: {}", current.display(), e))?;
+        entries.sort_by_key(|entry| entry.path());
+
+        for entry in entries {
+            let path = entry.path();
+            let file_type = entry.file_type().map_err(|e| {
+                miette::miette!("failed reading file type for {}: {}", path.display(), e)
+            })?;
+            if file_type.is_dir() {
+                recurse(&path, out)?;
+                continue;
+            }
+            if file_type.is_file() {
+                out.push(path);
+            }
+        }
+        Ok(())
+    }
+
+    let mut files = Vec::new();
+    if root.is_file() {
+        files.push(root.to_path_buf());
+        return Ok(files);
+    }
+    recurse(root, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
+fn digest_corpus(path: &Path) -> Result<String> {
+    if !path.exists() {
+        return Err(miette::miette!("corpus path does not exist: {}", path.display()));
+    }
+    if path.is_file() {
+        let bytes = std::fs::read(path)
+            .map_err(|e| miette::miette!("failed reading corpus file {}: {}", path.display(), e))?;
+        return Ok(sha256_hex(&bytes));
+    }
+
+    let mut hasher = Sha256::new();
+    let files = walk_files_sorted(path)?;
+    for file in files {
+        let rel = file.strip_prefix(path).unwrap_or(&file);
+        let payload = std::fs::read(&file)
+            .map_err(|e| miette::miette!("failed reading corpus file {}: {}", file.display(), e))?;
+        let file_hash = sha256_hex(&payload);
+        hasher.update(rel.to_string_lossy().as_bytes());
+        hasher.update([0]);
+        hasher.update(file_hash.as_bytes());
+        hasher.update([0x0A]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn policy_payload_bytes(policy: &OptimizationPolicyDocument) -> Result<Vec<u8>> {
+    let mut unsigned = policy.clone();
+    unsigned.clear_signature();
+    unsigned.set_pinned_digest_sha256(String::new());
+    serde_json::to_vec(&unsigned).map_err(|e| {
+        miette::miette!(
+            "failed serializing optimization policy payload for signing: {}",
+            e
+        )
+    })
+}
+
+fn policy_payload_digest_hex(policy: &OptimizationPolicyDocument) -> Result<String> {
+    let payload = policy_payload_bytes(policy)?;
+    Ok(sha256_hex(&payload))
+}
+
+fn resolve_policy_signing_key_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os(OMEGA_CANONICAL_PRIVKEY_ENV)
+        .filter(|raw| !raw.is_empty())
+        .map(PathBuf::from)
+    {
+        return Some(path);
+    }
+    let canonical_default = PathBuf::from(OMEGA_CANONICAL_PRIVKEY_DEFAULT);
+    if canonical_default.exists() {
+        return Some(canonical_default);
+    }
+
+    std::env::var_os("SOUNIO_POLICY_SIGNING_KEY_PATH")
+        .filter(|raw| !raw.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            let default = PathBuf::from("bootstrap/artifacts/keys/bootstrap-dev.key");
+            if default.exists() {
+                Some(default)
+            } else {
+                None
+            }
+        })
+}
+
+fn load_policy_signing_key() -> Result<SigningKey> {
+    let key_path = resolve_policy_signing_key_path().ok_or_else(|| {
+        miette::miette!(
+            "missing policy signing key. Set SOUNIO_POLICY_SIGNING_KEY_PATH to a 32-byte Ed25519 private key (hex)."
+        )
+    })?;
+    let raw = std::fs::read_to_string(&key_path)
+        .map_err(|e| miette::miette!("failed reading {}: {}", key_path.display(), e))?;
+    let bytes = hex::decode(clean_hex_string(&raw)).map_err(|e| {
+        miette::miette!(
+            "invalid Ed25519 private key hex in {}: {}",
+            key_path.display(),
+            e
+        )
+    })?;
+    let key_bytes: [u8; 32] = bytes.try_into().map_err(|_| {
+        miette::miette!(
+            "invalid Ed25519 private key length in {}: expected 32 bytes",
+            key_path.display()
+        )
+    })?;
+    Ok(SigningKey::from_bytes(&key_bytes))
+}
+
+fn resolve_policy_verify_key_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os(OMEGA_CANONICAL_PUBKEY_ENV)
+        .filter(|raw| !raw.is_empty())
+        .map(PathBuf::from)
+    {
+        return Some(path);
+    }
+    let canonical_default = PathBuf::from(OMEGA_CANONICAL_PUBKEY_DEFAULT);
+    if canonical_default.exists() {
+        return Some(canonical_default);
+    }
+
+    std::env::var_os("SOUNIO_POLICY_VERIFY_KEY_PATH")
+        .filter(|raw| !raw.is_empty())
+        .map(PathBuf::from)
+}
+
+fn load_policy_verifying_key() -> Result<VerifyingKey> {
+    if let Some(path) = resolve_policy_verify_key_path() {
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|e| miette::miette!("failed reading {}: {}", path.display(), e))?;
+        let bytes = hex::decode(clean_hex_string(&raw)).map_err(|e| {
+            miette::miette!(
+                "invalid Ed25519 public key hex in {}: {}",
+                path.display(),
+                e
+            )
+        })?;
+        let key_bytes: [u8; 32] = bytes.try_into().map_err(|_| {
+            miette::miette!(
+                "invalid Ed25519 public key length in {}: expected 32 bytes",
+                path.display()
+            )
+        })?;
+        return VerifyingKey::from_bytes(&key_bytes)
+            .map_err(|e| miette::miette!("invalid Ed25519 public key in {}: {}", path.display(), e));
+    }
+    load_verifying_key(Path::new("bootstrap"), OPT_POLICY_DEFAULT_VERIFY_KEY_ID)
+}
+
+fn parse_ed25519_signature_hex(sig_hex: &str) -> Result<Signature> {
+    let cleaned = clean_hex_string(sig_hex);
+    let sig_bytes = hex::decode(cleaned)
+        .map_err(|e| miette::miette!("invalid optimization policy signature hex: {}", e))?;
+    let sig_array: [u8; 64] = sig_bytes.try_into().map_err(|_| {
+        miette::miette!("invalid optimization policy signature length: expected 64 bytes")
+    })?;
+    Ok(Signature::from_bytes(&sig_array))
+}
+
+fn parse_ed25519_signature_b64(sig_b64: &str) -> Result<Signature> {
+    let sig_bytes = base64_decode_string(sig_b64)?;
+    let sig_array: [u8; 64] = sig_bytes.try_into().map_err(|_| {
+        miette::miette!("invalid canonical policy signature length: expected 64 bytes")
+    })?;
+    Ok(Signature::from_bytes(&sig_array))
+}
+
+fn verify_policy_signature_bytes(
+    key: &VerifyingKey,
+    payload: &[u8],
+    payload_digest: &[u8; 32],
+    signature: &Signature,
+) -> Result<()> {
+    if key.verify(payload_digest, signature).is_ok() {
+        return Ok(());
+    }
+    key.verify(payload, signature).map_err(|e| {
+        miette::miette!(
+            "optimization policy signature verification failed for digest+payload: {}",
+            e
+        )
+    })
+}
+
+fn apply_policy_signature(
+    policy: &mut OptimizationPolicyDocument,
+    signing_key: &SigningKey,
+    pin_digest: Option<&str>,
+) -> Result<String> {
+    let expected_pin = match pin_digest {
+        Some(value) => Some(normalize_sha256_hex(value)?),
+        None if !policy.pinned_digest_sha256().trim().is_empty() => {
+            Some(normalize_sha256_hex(policy.pinned_digest_sha256())?)
+        }
+        None => None,
+    };
+    policy.set_pinned_digest_sha256(String::new());
+
+    let verifying_key = signing_key.verifying_key();
+    let fingerprint = sha256_hex(verifying_key.as_bytes());
+    let signed_at_utc = Utc::now().to_rfc3339();
+
+    policy.set_signature_material(
+        String::new(),
+        String::new(),
+        fingerprint,
+        signed_at_utc,
+    );
+
+    let payload = policy_payload_bytes(policy)?;
+    let payload_digest = sha256_bytes(&payload);
+    let payload_digest_hex = hex::encode(payload_digest);
+    if let Some(expected) = expected_pin.as_ref() {
+        if payload_digest_hex != *expected {
+            return Err(miette::miette!(
+                "pinned digest mismatch: expected {}, got {}",
+                expected,
+                payload_digest_hex
+            ));
+        }
+    }
+    let pinned_digest = expected_pin.unwrap_or_else(|| payload_digest_hex.clone());
+    policy.set_pinned_digest_sha256(pinned_digest);
+
+    let signature = signing_key.sign(&payload_digest);
+    let signature_hex = hex::encode(signature.to_bytes());
+    let canonical_sig_b64 = base64_encode_bytes(&signature.to_bytes());
+
+    let canonical_fingerprint = policy.canonical_fingerprint().to_string();
+    let canonical_signed_at = policy.canonical_signed_at_utc().to_string();
+    policy.set_signature_material(
+        signature_hex,
+        canonical_sig_b64,
+        canonical_fingerprint,
+        canonical_signed_at,
+    );
+    Ok(payload_digest_hex)
+}
+
+fn resolve_rl_readiness_evidence_path() -> Option<PathBuf> {
+    std::env::var_os(RL_READINESS_EVIDENCE_PATH_ENV)
+        .filter(|raw| !raw.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            let default = PathBuf::from("bootstrap/policies/rl_readiness.evidence.json");
+            if default.exists() {
+                Some(default)
+            } else {
+                None
+            }
+        })
+}
+
+fn load_rl_readiness_evidence() -> Result<Option<RlReadinessEvidence>> {
+    let Some(path) = resolve_rl_readiness_evidence_path() else {
+        return Ok(None);
+    };
+    let bytes = std::fs::read(&path)
+        .map_err(|e| miette::miette!("failed reading {}: {}", path.display(), e))?;
+    let evidence: RlReadinessEvidence = serde_json::from_slice(&bytes).map_err(|e| {
+        miette::miette!(
+            "invalid RL readiness evidence JSON {}: {}",
+            path.display(),
+            e
+        )
+    })?;
+    Ok(Some(evidence))
+}
+
+fn resolve_qir_live_epi_power_path() -> Option<PathBuf> {
+    std::env::var_os(QIR_LIVE_EPI_POWER_PATH_ENV)
+        .filter(|raw| !raw.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            let default = PathBuf::from("artifacts/fpga/hardware_epistemic_power_live.v1.json");
+            if default.exists() {
+                Some(default)
+            } else {
+                None
+            }
+        })
+}
+
+fn load_qir_live_epistemic_score() -> Result<Option<QirLiveEpistemicScore>> {
+    let Some(path) = resolve_qir_live_epi_power_path() else {
+        return Ok(None);
+    };
+    let bytes = std::fs::read(&path)
+        .map_err(|e| miette::miette!("failed reading {}: {}", path.display(), e))?;
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
+        miette::miette!(
+            "invalid QIR live epistemic power JSON {}: {}",
+            path.display(),
+            e
+        )
+    })?;
+    let obj = payload.as_object().ok_or_else(|| {
+        miette::miette!(
+            "invalid QIR live epistemic power payload {}: expected object",
+            path.display()
+        )
+    })?;
+
+    let hw_log = obj
+        .get("hardware_epistemic_power_log_q32_32")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| {
+            miette::miette!(
+                "{} missing integer field hardware_epistemic_power_log_q32_32",
+                path.display()
+            )
+        })?;
+    let variance = obj
+        .get("hardware_epistemic_power_variance_q32_32")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| {
+            miette::miette!(
+                "{} missing integer field hardware_epistemic_power_variance_q32_32",
+                path.display()
+            )
+        })?;
+    let hybrid = obj
+        .get("hybrid_epistemic_power_log_q32_32")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| {
+            miette::miette!(
+                "{} missing integer field hybrid_epistemic_power_log_q32_32",
+                path.display()
+            )
+        })?;
+    let poll_overhead_us = obj
+        .get("poll_overhead_us")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| {
+            miette::miette!("{} missing integer field poll_overhead_us", path.display())
+        })?;
+    let conformant = obj
+        .get("live_read_conformant")
+        .and_then(|v| v.as_bool())
+        .ok_or_else(|| {
+            miette::miette!("{} missing bool field live_read_conformant", path.display())
+        })?;
+
+    Ok(Some(QirLiveEpistemicScore {
+        hardware_epistemic_power_log_q32_32: hw_log,
+        hardware_epistemic_power_variance_q32_32: variance,
+        hybrid_epistemic_power_log_q32_32: hybrid,
+        poll_overhead_us,
+        live_read_conformant: conformant,
+    }))
+}
+
+fn resolve_qir_full_emitter_path() -> Option<PathBuf> {
+    std::env::var_os(QIR_FULL_EMITTER_PATH_ENV)
+        .filter(|raw| !raw.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            let genesis = PathBuf::from("hardware/rtl/qir/omega_genesis_emitter.sio");
+            if genesis.exists() {
+                return Some(genesis);
+            }
+            let full = PathBuf::from("hardware/rtl/qir/omega_full_qir_emitter.sio");
+            if full.exists() {
+                return Some(full);
+            }
+            None
+        })
+}
+
+fn load_qir_full_emitter_status() -> Result<Option<QirFullEmitterStatus>> {
+    let Some(path) = resolve_qir_full_emitter_path() else {
+        return Ok(None);
+    };
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| miette::miette!("failed reading {}: {}", path.display(), e))?;
+
+    let selfhost_mode = content.contains("selfhost-emitter");
+    let policy_shim_emit = content.contains("omega_qir_emit_shim");
+    let quantum_controller_emit = content.contains("omega_qir_emit_quantum_controller");
+    let self_check_pass = content.contains("omega_qir_full_emitter_self_check")
+        && selfhost_mode
+        && policy_shim_emit
+        && quantum_controller_emit
+        && !content.contains("template-direct");
+
+    Ok(Some(QirFullEmitterStatus {
+        path,
+        self_check_pass,
+        selfhost_mode,
+        policy_shim_emit,
+        quantum_controller_emit,
+    }))
+}
+
+fn validate_policy_contract_v1(policy: &OptimizationPolicyV1) -> Result<()> {
+    if policy.schema != OPT_POLICY_V1_SCHEMA {
+        return Err(miette::miette!(
+            "unsupported optimization policy schema '{}': expected '{}'",
+            policy.schema,
+            OPT_POLICY_V1_SCHEMA
+        ));
+    }
+    if policy.policy_id.trim().is_empty()
+        || policy.policy_version.trim().is_empty()
+        || policy.target_triple.trim().is_empty()
+        || policy.created_at_utc.trim().is_empty()
+        || policy.trained_from_corpus_digest.trim().is_empty()
+    {
+        return Err(miette::miette!(
+            "optimization policy missing required non-empty metadata fields"
+        ));
+    }
+    if normalize_policy_mode(&policy.policy_mode).is_none() {
+        return Err(miette::miette!(
+            "invalid policy_mode '{}': expected shadow|active",
+            policy.policy_mode
+        ));
+    }
+    if policy.mir_actions.is_empty() || policy.llvm_actions.is_empty() || policy.gpu_actions.is_empty() {
+        return Err(miette::miette!(
+            "optimization policy actions cannot be empty (mir_actions/llvm_actions/gpu_actions)"
+        ));
+    }
+    if policy.signature.trim().is_empty() {
+        return Err(miette::miette!(
+            "optimization policy signature cannot be empty"
+        ));
+    }
+    let canonical_any = !policy.canonical_fingerprint.trim().is_empty()
+        || !policy.canonical_sig.trim().is_empty()
+        || !policy.canonical_signed_at_utc.trim().is_empty();
+    if canonical_any {
+        let _ = normalize_sha256_hex(&policy.canonical_fingerprint)?;
+        if policy.canonical_sig.trim().is_empty() {
+            return Err(miette::miette!(
+                "optimization policy canonical_sig cannot be empty when canonical metadata is present"
+            ));
+        }
+        if policy.canonical_signed_at_utc.trim().is_empty() {
+            return Err(miette::miette!(
+                "optimization policy canonical_signed_at_utc cannot be empty when canonical metadata is present"
+            ));
+        }
+        chrono::DateTime::parse_from_rfc3339(policy.canonical_signed_at_utc.trim()).map_err(|e| {
+            miette::miette!(
+                "invalid canonical_signed_at_utc '{}': {}",
+                policy.canonical_signed_at_utc,
+                e
+            )
+        })?;
+    }
+    if !policy.pinned_digest_sha256.trim().is_empty() {
+        let _ = normalize_sha256_hex(&policy.pinned_digest_sha256)?;
+    }
+    Ok(())
+}
+
+fn validate_policy_contract_v2(policy: &OptimizationPolicyV2) -> Result<()> {
+    if policy.schema != OPT_POLICY_V2_SCHEMA {
+        return Err(miette::miette!(
+            "unsupported optimization policy schema '{}': expected '{}'",
+            policy.schema,
+            OPT_POLICY_V2_SCHEMA
+        ));
+    }
+    if policy.policy_id.trim().is_empty()
+        || policy.policy_version.trim().is_empty()
+        || policy.target_triple.trim().is_empty()
+        || policy.created_at_utc.trim().is_empty()
+        || policy.trained_from_corpus_digest.trim().is_empty()
+    {
+        return Err(miette::miette!(
+            "optimization policy v2 missing required non-empty metadata fields"
+        ));
+    }
+    if normalize_policy_mode(&policy.policy_mode).is_none() {
+        return Err(miette::miette!(
+            "invalid policy_mode '{}': expected shadow|active",
+            policy.policy_mode
+        ));
+    }
+    if policy.mir_actions.is_empty() || policy.llvm_actions.is_empty() || policy.gpu_actions.is_empty() {
+        return Err(miette::miette!(
+            "optimization policy actions cannot be empty (mir_actions/llvm_actions/gpu_actions)"
+        ));
+    }
+    if policy.signature.trim().is_empty() {
+        return Err(miette::miette!(
+            "optimization policy signature cannot be empty"
+        ));
+    }
+    let canonical_any = !policy.canonical_fingerprint.trim().is_empty()
+        || !policy.canonical_sig.trim().is_empty()
+        || !policy.canonical_signed_at_utc.trim().is_empty();
+    if canonical_any {
+        let _ = normalize_sha256_hex(&policy.canonical_fingerprint)?;
+        if policy.canonical_sig.trim().is_empty() {
+            return Err(miette::miette!(
+                "optimization policy canonical_sig cannot be empty when canonical metadata is present"
+            ));
+        }
+        if policy.canonical_signed_at_utc.trim().is_empty() {
+            return Err(miette::miette!(
+                "optimization policy canonical_signed_at_utc cannot be empty when canonical metadata is present"
+            ));
+        }
+        chrono::DateTime::parse_from_rfc3339(policy.canonical_signed_at_utc.trim()).map_err(|e| {
+            miette::miette!(
+                "invalid canonical_signed_at_utc '{}': {}",
+                policy.canonical_signed_at_utc,
+                e
+            )
+        })?;
+    }
+    if !policy.pinned_digest_sha256.trim().is_empty() {
+        let _ = normalize_sha256_hex(&policy.pinned_digest_sha256)?;
+    }
+
+    let weight_sum = policy.epistemic_weights.total_weight();
+    if (weight_sum - 1.0).abs() > 1e-6 {
+        return Err(miette::miette!(
+            "epistemic_weights must sum to 1.0, got {:.9}",
+            weight_sum
+        ));
+    }
+
+    for family in OPT_POLICY_V2_REQUIRED_FAMILIES {
+        let Some(band) = policy.runtime_normalization_by_family.get(family) else {
+            return Err(miette::miette!(
+                "runtime_normalization_by_family missing required key '{}'",
+                family
+            ));
+        };
+        if !(band.floor_speedup > 0.0 && band.cap_speedup >= band.floor_speedup) {
+            return Err(miette::miette!(
+                "invalid runtime normalization for '{}': floor={} cap={}",
+                family,
+                band.floor_speedup,
+                band.cap_speedup
+            ));
+        }
+    }
+
+    if policy.quantum_conformance.ks_pvalue_min <= 0.0
+        || policy.quantum_conformance.ks_pvalue_min > 1.0
+    {
+        return Err(miette::miette!(
+            "quantum_conformance.ks_pvalue_min must be in (0,1], got {}",
+            policy.quantum_conformance.ks_pvalue_min
+        ));
+    }
+
+    let [coverage_lo, coverage_hi] = policy.quantum_conformance.coverage_range;
+    let coverage_target = policy.quantum_conformance.coverage_target;
+    if !(0.0 <= coverage_lo
+        && coverage_lo <= coverage_target
+        && coverage_target <= coverage_hi
+        && coverage_hi <= 1.0)
+    {
+        return Err(miette::miette!(
+            "quantum_conformance coverage values must satisfy 0 <= lo <= target <= hi <= 1"
+        ));
+    }
+    if policy.quantum_conformance.min_shots == 0 {
+        return Err(miette::miette!(
+            "quantum_conformance.min_shots must be > 0"
+        ));
+    }
+
+    if policy.rl_readiness.min_epistemic_power_gain < 0.0
+        || policy.rl_readiness.max_compile_overhead < 0.0
+    {
+        return Err(miette::miette!(
+            "rl_readiness numeric thresholds must be non-negative"
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_policy_contract(policy: &OptimizationPolicyDocument) -> Result<()> {
+    match policy {
+        OptimizationPolicyDocument::V1(policy_v1) => validate_policy_contract_v1(policy_v1),
+        OptimizationPolicyDocument::V2(policy_v2) => validate_policy_contract_v2(policy_v2),
+    }
+}
+
+fn verify_rl_readiness_gate(
+    policy: &OptimizationPolicyDocument,
+    evidence: &RlReadinessEvidence,
+) -> Result<()> {
+    let Some(gate) = policy.rl_readiness() else {
+        return Ok(());
+    };
+    if evidence.epistemic_power_gain < gate.min_epistemic_power_gain {
+        return Err(miette::miette!(
+            "rl readiness failed: epistemic_power_gain {:.6} < required {:.6}",
+            evidence.epistemic_power_gain,
+            gate.min_epistemic_power_gain
+        ));
+    }
+    if gate.require_zero_bit_mismatch && evidence.bit_exact_mismatches != 0 {
+        return Err(miette::miette!(
+            "rl readiness failed: bit_exact_mismatches={} (expected 0)",
+            evidence.bit_exact_mismatches
+        ));
+    }
+    if evidence.compile_overhead > gate.max_compile_overhead {
+        return Err(miette::miette!(
+            "rl readiness failed: compile_overhead {:.6} > max {:.6}",
+            evidence.compile_overhead,
+            gate.max_compile_overhead
+        ));
+    }
+    if gate.require_shadow_audit_clean && !evidence.shadow_audit_clean {
+        return Err(miette::miette!(
+            "rl readiness failed: shadow_audit_clean=false"
+        ));
+    }
+    Ok(())
+}
+
+fn verify_policy_signature(policy: &OptimizationPolicyDocument) -> Result<()> {
+    validate_policy_contract(policy)?;
+    let payload = policy_payload_bytes(policy)?;
+    let payload_digest = sha256_bytes(&payload);
+    let payload_digest_hex = hex::encode(payload_digest);
+    let signature = parse_ed25519_signature_hex(policy.signature())?;
+    let key = load_policy_verifying_key()?;
+    verify_policy_signature_bytes(&key, &payload, &payload_digest, &signature)?;
+
+    let has_canonical = !policy.canonical_fingerprint().trim().is_empty()
+        || !policy.canonical_sig().trim().is_empty();
+    if has_canonical {
+        let expected_fingerprint = sha256_hex(key.as_bytes());
+        let actual_fingerprint = normalize_sha256_hex(policy.canonical_fingerprint())?;
+        if actual_fingerprint != expected_fingerprint {
+            return Err(miette::miette!(
+                "optimization policy canonical_fingerprint mismatch: expected {}, got {}",
+                expected_fingerprint,
+                actual_fingerprint
+            ));
+        }
+        let canonical_signature = parse_ed25519_signature_b64(policy.canonical_sig())?;
+        verify_policy_signature_bytes(&key, &payload, &payload_digest, &canonical_signature)?;
+    }
+    let pinned = policy.pinned_digest_sha256().trim();
+    if !pinned.is_empty() {
+        let expected = normalize_sha256_hex(pinned)?;
+        if expected != payload_digest_hex {
+            return Err(miette::miette!(
+                "optimization policy pinned digest mismatch: expected {}, got {}",
+                expected,
+                payload_digest_hex
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn read_optimization_policy(path: &Path) -> Result<OptimizationPolicyDocument> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| miette::miette!("failed reading {}: {}", path.display(), e))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|e| miette::miette!("invalid optimization policy JSON {}: {}", path.display(), e))
+}
+
+fn write_optimization_policy(path: &Path, policy: &OptimizationPolicyDocument) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| miette::miette!("failed creating {}: {}", parent.display(), e))?;
+    }
+    let json = serde_json::to_string_pretty(policy)
+        .map_err(|e| miette::miette!("failed serializing optimization policy: {}", e))?;
+    std::fs::write(path, json)
+        .map_err(|e| miette::miette!("failed writing {}: {}", path.display(), e))?;
+    Ok(())
+}
+
+fn resolve_effective_optimization_policy_path() -> Option<PathBuf> {
+    std::env::var_os("SOUNIO_OPT_POLICY_PATH")
+        .filter(|raw| !raw.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            let active_v2 = PathBuf::from("bootstrap/policies/active/policy.v2.json");
+            if active_v2.exists() {
+                return Some(active_v2);
+            }
+            let active_v1 = PathBuf::from("bootstrap/policies/active/policy.v1.json");
+            if active_v1.exists() {
+                return Some(active_v1);
+            }
+            None
+        })
+}
+
+fn load_effective_optimization_policy(enforce: bool) -> Result<Option<OptimizationPolicyDocument>> {
+    let Some(path) = resolve_effective_optimization_policy_path() else {
+        if enforce {
+            return Err(miette::miette!(
+                "SOUNIO_OPT_POLICY_ENFORCE=1 requires a policy file (set SOUNIO_OPT_POLICY_PATH or provide bootstrap/policies/active/policy.v2.json)"
+            ));
+        }
+        return Ok(None);
+    };
+
+    if !path.exists() {
+        if enforce {
+            return Err(miette::miette!(
+                "enforced optimization policy path does not exist: {}",
+                path.display()
+            ));
+        }
+        return Ok(None);
+    }
+
+    let policy = read_optimization_policy(&path)?;
+    if let Err(err) = verify_policy_signature(&policy) {
+        if enforce {
+            return Err(miette::miette!(
+                "optimization policy enforcement failed for {}: {}",
+                path.display(),
+                err
+            ));
+        }
+        eprintln!(
+            "warning: ignoring optimization policy {} because signature verification failed: {}",
+            path.display(),
+            err
+        );
+        return Ok(None);
+    }
+
+    if normalize_policy_mode(policy.policy_mode()) == Some("active") {
+        if let Some(readiness_gate) = policy.rl_readiness() {
+            match load_rl_readiness_evidence()? {
+                Some(evidence) => {
+                    if let Err(err) = verify_rl_readiness_gate(&policy, &evidence) {
+                        if enforce {
+                            return Err(miette::miette!(
+                                "optimization policy enforcement failed (rl readiness): {}",
+                                err
+                            ));
+                        }
+                        eprintln!(
+                            "warning: ignoring active policy {} because RL readiness failed: {}",
+                            path.display(),
+                            err
+                        );
+                        return Ok(None);
+                    }
+                }
+                None => {
+                    if enforce {
+                        return Err(miette::miette!(
+                            "optimization policy enforcement failed: active policy requires RL readiness evidence at {}",
+                            RL_READINESS_EVIDENCE_PATH_ENV
+                        ));
+                    }
+                    eprintln!(
+                        "warning: ignoring active policy {} because RL readiness evidence was not found",
+                        path.display()
+                    );
+                    return Ok(None);
+                }
+            }
+            // Keep the local binding alive for diagnostics and future extensions.
+            let _ = readiness_gate;
+        }
+    }
+
+    Ok(Some(policy))
+}
+
+#[cfg(any(feature = "gpu", feature = "llvm-base"))]
+fn policy_allows_action(policy: &OptimizationPolicyDocument, domain: &str, action: &str) -> bool {
+    let actions = match domain {
+        "mir" => policy.mir_actions(),
+        "llvm" => policy.llvm_actions(),
+        "gpu" => policy.gpu_actions(),
+        _ => return false,
+    };
+    actions.iter().any(|candidate| candidate == action)
+}
+
+fn decision_trail_required() -> bool {
+    std::env::var("SOUNIO_OPT_DECISION_TRAIL_REQUIRED")
+        .ok()
+        .map(|v| {
+            let value = v.trim().to_ascii_lowercase();
+            matches!(value.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(feature = "jit")]
+fn effective_mir_policy_actions(
+    policy: Option<&OptimizationPolicyDocument>,
+    enforce: bool,
+) -> Result<Option<HashSet<String>>> {
+    match policy {
+        Some(policy) => {
+            if policy.mir_actions().is_empty() {
+                if enforce {
+                    return Err(miette::miette!(
+                        "optimization policy enforcement failed: mir_actions is empty in active policy {}",
+                        policy.policy_id()
+                    ));
+                }
+                return Ok(None);
+            }
+            Ok(Some(policy.mir_actions().iter().cloned().collect()))
+        }
+        None => {
+            if enforce {
+                return Err(miette::miette!(
+                    "optimization policy enforcement failed: no active optimization policy for MIR"
+                ));
+            }
+            Ok(None)
+        }
+    }
+}
+
+fn decision_trail_path() -> Option<PathBuf> {
+    std::env::var_os("SOUNIO_OPT_DECISION_TRAIL_PATH")
+        .filter(|raw| !raw.is_empty())
+        .map(PathBuf::from)
+}
+
+fn emit_decision_event(
+    domain: &str,
+    action: &str,
+    status: &str,
+    reason: &str,
+    target: &str,
+    input_hash: Option<&str>,
+    policy: Option<&OptimizationPolicyDocument>,
+) -> Result<()> {
+    let required = decision_trail_required();
+    let Some(path) = decision_trail_path() else {
+        if required {
+            return Err(miette::miette!(
+                "decision trail required but SOUNIO_OPT_DECISION_TRAIL_PATH is not set"
+            ));
+        }
+        return Ok(());
+    };
+    if let Some(parent) = path.parent() {
+        if let Err(err) = std::fs::create_dir_all(parent) {
+            if required {
+                return Err(miette::miette!(
+                    "decision trail required but cannot create {}: {}",
+                    parent.display(),
+                    err
+                ));
+            }
+            return Ok(());
+        }
+    }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let payload = serde_json::json!({
+        "schema": "sounio.optimization.decision.v1",
+        "timestamp_unix_ms": ts,
+        "domain": domain,
+        "action": action,
+        "status": status,
+        "reason": reason,
+        "target": target,
+        "input_hash": input_hash.unwrap_or(""),
+        "policy_id": policy.map(|p| p.policy_id()).unwrap_or(""),
+        "policy_mode": policy.map(|p| p.policy_mode()).unwrap_or(""),
+    });
+    let line = match serde_json::to_string(&payload) {
+        Ok(v) => v,
+        Err(err) => {
+            if required {
+                return Err(miette::miette!(
+                    "decision trail required but JSON serialization failed: {}",
+                    err
+                ));
+            }
+            return Ok(());
+        }
+    };
+    let mut file = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(err) => {
+            if required {
+                return Err(miette::miette!(
+                    "decision trail required but cannot open {}: {}",
+                    path.display(),
+                    err
+                ));
+            }
+            return Ok(());
+        }
+    };
+    use std::io::Write as _;
+    if let Err(err) = writeln!(file, "{}", line) {
+        if required {
+            return Err(miette::miette!(
+                "decision trail required but cannot write {}: {}",
+                path.display(),
+                err
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn run_optimization(command: OptimizationCommands) -> Result<()> {
+    match command {
+        OptimizationCommands::Policy { command } => match command {
+            OptimizationPolicyCommands::Train {
+                corpus,
+                output,
+                policy_id,
+                policy_version,
+                mode,
+            } => {
+                let policy_mode = normalize_policy_mode(&mode).ok_or_else(|| {
+                    miette::miette!("invalid --mode '{}': expected shadow|active", mode)
+                })?;
+                let corpus_digest = digest_corpus(&corpus)?;
+                let signing_key = load_policy_signing_key()?;
+                let mut policy = OptimizationPolicyDocument::to_v2_defaults(
+                    policy_id,
+                    policy_version,
+                    policy_mode.to_string(),
+                    corpus_digest,
+                );
+                apply_policy_signature(&mut policy, &signing_key, None)?;
+                write_optimization_policy(&output, &policy)?;
+                println!(
+                    "opt policy train ok: policy={} schema={} mode={} target={} digest={}",
+                    output.display(),
+                    policy.schema(),
+                    policy.policy_mode(),
+                    policy.target_triple(),
+                    policy.trained_from_corpus_digest()
+                );
+                Ok(())
+            }
+            OptimizationPolicyCommands::Sign {
+                policy,
+                out,
+                pin_digest,
+            } => {
+                let mut policy_doc = read_optimization_policy(&policy)?;
+                let output = out.unwrap_or_else(|| policy.clone());
+                let signing_key = load_policy_signing_key()?;
+                let payload_digest =
+                    apply_policy_signature(&mut policy_doc, &signing_key, pin_digest.as_deref())?;
+                write_optimization_policy(&output, &policy_doc)?;
+                println!(
+                    "opt policy sign ok: source={} output={} fingerprint={} signed_at={} digest={} pinned={}",
+                    policy.display(),
+                    output.display(),
+                    policy_doc.canonical_fingerprint(),
+                    policy_doc.canonical_signed_at_utc(),
+                    payload_digest,
+                    if policy_doc.pinned_digest_sha256().trim().is_empty() {
+                        "(none)"
+                    } else {
+                        policy_doc.pinned_digest_sha256()
+                    }
+                );
+                Ok(())
+            }
+            OptimizationPolicyCommands::Eval { policy } => {
+                let policy_doc = read_optimization_policy(&policy)?;
+                verify_policy_signature(&policy_doc)?;
+                println!(
+                    "opt policy eval ok: policy={} schema={} id={} version={} mode={} target={}",
+                    policy.display(),
+                    policy_doc.schema(),
+                    policy_doc.policy_id(),
+                    policy_doc.policy_version(),
+                    policy_doc.policy_mode(),
+                    policy_doc.target_triple()
+                );
+                match load_qir_full_emitter_status()? {
+                    Some(status) => println!(
+                        "opt policy qir-emitter: status={} path={} selfhost_mode={} policy_shim_emit={} quantum_controller_emit={}",
+                        if status.self_check_pass { "pass" } else { "warn" },
+                        status.path.display(),
+                        status.selfhost_mode,
+                        status.policy_shim_emit,
+                        status.quantum_controller_emit
+                    ),
+                    None => println!(
+                        "opt policy qir-emitter: pending (missing emitter, set {})",
+                        QIR_FULL_EMITTER_PATH_ENV
+                    ),
+                }
+                match load_qir_live_epistemic_score()? {
+                    Some(score) => println!(
+                        "opt policy qir-live: status={} hw_log_q32_32={} variance_q32_32={} hybrid_log_q32_32={} poll_overhead_us={}",
+                        if score.live_read_conformant { "pass" } else { "warn" },
+                        score.hardware_epistemic_power_log_q32_32,
+                        score.hardware_epistemic_power_variance_q32_32,
+                        score.hybrid_epistemic_power_log_q32_32,
+                        score.poll_overhead_us
+                    ),
+                    None => println!(
+                        "opt policy qir-live: pending (missing artifact, set {})",
+                        QIR_LIVE_EPI_POWER_PATH_ENV
+                    ),
+                }
+                Ok(())
+            }
+            OptimizationPolicyCommands::Promote { policy, output } => {
+                let policy_doc = read_optimization_policy(&policy)?;
+                verify_policy_signature(&policy_doc)?;
+                if normalize_policy_mode(policy_doc.policy_mode()) == Some("active") {
+                    if policy_doc.rl_readiness().is_some() {
+                        let evidence = load_rl_readiness_evidence()?.ok_or_else(|| {
+                            miette::miette!(
+                                "active policy promotion requires RL readiness evidence (set {} or create bootstrap/policies/rl_readiness.evidence.json)",
+                                RL_READINESS_EVIDENCE_PATH_ENV
+                            )
+                        })?;
+                        verify_rl_readiness_gate(&policy_doc, &evidence)?;
+                    } else {
+                        println!(
+                            "opt policy promote warning: schema=v1 policy has no rl_readiness gate; continuing"
+                        );
+                    }
+                }
+                write_optimization_policy(&output, &policy_doc)?;
+                println!(
+                    "opt policy promote ok: source={} active={}",
+                    policy.display(),
+                    output.display()
+                );
+                Ok(())
+            }
+            OptimizationPolicyCommands::Status { policy } => {
+                let policy_doc = read_optimization_policy(&policy)?;
+                let signature_status = match verify_policy_signature(&policy_doc) {
+                    Ok(()) => "verified",
+                    Err(err) => {
+                        println!(
+                            "opt policy status warning: signature verification failed: {}",
+                            err
+                        );
+                        "invalid"
+                    }
+                };
+                let canonical_status = if policy_doc.canonical_sig().trim().is_empty()
+                    && policy_doc.canonical_fingerprint().trim().is_empty()
+                {
+                    "missing"
+                } else if signature_status == "verified" {
+                    "verified"
+                } else {
+                    "invalid"
+                };
+                println!(
+                    "opt policy status: policy={} schema={} id={} version={} mode={} target={} signature={}",
+                    policy.display(),
+                    policy_doc.schema(),
+                    policy_doc.policy_id(),
+                    policy_doc.policy_version(),
+                    policy_doc.policy_mode(),
+                    policy_doc.target_triple(),
+                    signature_status
+                );
+                println!(
+                    "opt policy canonical: signature={} fingerprint={} signed_at={}",
+                    canonical_status,
+                    if policy_doc.canonical_fingerprint().trim().is_empty() {
+                        "(none)"
+                    } else {
+                        policy_doc.canonical_fingerprint()
+                    },
+                    if policy_doc.canonical_signed_at_utc().trim().is_empty() {
+                        "(none)"
+                    } else {
+                        policy_doc.canonical_signed_at_utc()
+                    }
+                );
+                let payload_digest_status = match policy_payload_digest_hex(&policy_doc) {
+                    Ok(digest) => digest,
+                    Err(err) => {
+                        println!(
+                            "opt policy status warning: payload digest computation failed: {}",
+                            err
+                        );
+                        "(error)".to_string()
+                    }
+                };
+                let pinned_digest_normalized = if policy_doc.pinned_digest_sha256().trim().is_empty() {
+                    None
+                } else {
+                    normalize_sha256_hex(policy_doc.pinned_digest_sha256()).ok()
+                };
+                let pinned_status = if policy_doc.pinned_digest_sha256().trim().is_empty() {
+                    "missing"
+                } else if payload_digest_status != "(error)"
+                    && pinned_digest_normalized
+                        .as_deref()
+                        .is_some_and(|value| value == payload_digest_status)
+                {
+                    "verified"
+                } else {
+                    "invalid"
+                };
+                println!(
+                    "opt policy pinned: status={} pinned={} digest={}",
+                    pinned_status,
+                    if policy_doc.pinned_digest_sha256().trim().is_empty() {
+                        "(none)"
+                    } else if let Some(normalized) = pinned_digest_normalized.as_ref() {
+                        normalized
+                    } else {
+                        policy_doc.pinned_digest_sha256()
+                    },
+                    payload_digest_status
+                );
+                if let Some(gate) = policy_doc.rl_readiness() {
+                    match load_rl_readiness_evidence()? {
+                        Some(evidence) => match verify_rl_readiness_gate(&policy_doc, &evidence) {
+                            Ok(()) => println!(
+                                "opt policy readiness: pass gain={:.6} mismatches={} overhead={:.6} audit_clean={}",
+                                evidence.epistemic_power_gain,
+                                evidence.bit_exact_mismatches,
+                                evidence.compile_overhead,
+                                evidence.shadow_audit_clean
+                            ),
+                            Err(err) => println!("opt policy readiness: fail reason={}", err),
+                        },
+                        None => println!(
+                            "opt policy readiness: pending (missing evidence, set {})",
+                            RL_READINESS_EVIDENCE_PATH_ENV
+                        ),
+                    }
+                    let _ = gate;
+                }
+                Ok(())
+            }
+        },
+    }
+}
+
 fn run(
     input: &std::path::Path,
     args: &[String],
@@ -3041,6 +5686,12 @@ fn run(
 
     let mut input_path = input.to_path_buf();
     let mut user_args = args.to_vec();
+    let use_sounio_compiler = use_sounio_compiler
+        || (input_path.is_dir()
+            && input_path
+                .file_name()
+                .and_then(|part| part.to_str())
+                .is_some_and(|name| name == "self-hosted"));
 
     let is_self_hosted_root = use_sounio_compiler
         && input_path.is_dir()
@@ -3140,6 +5791,13 @@ fn run(
     let run_payload = move || -> std::result::Result<Option<i64>, String> {
         if use_sounio_compiler {
             tracing::info!("Using native self-host execution backend");
+            sounio::compiler_loader::verify_removed_legacy_env_contracts().map_err(|e| {
+                format!(
+                    "Self-hosted runtime rejected legacy env contracts for {}: {}",
+                    input_path.display(),
+                    e
+                )
+            })?;
 
             if let Ok(mode_raw) = std::env::var("SOUNIO_SELFHOST_MODE") {
                 let mode = mode_raw.trim().to_lowercase();
@@ -3185,17 +5843,12 @@ SOUNIO_SELFHOST_DRIVER_MANIFEST_URL or SOUNIO_SELFHOST_DRIVER_CACHE_DIR.",
                 })?;
             }
 
-            let backend = sounio::selfhost::native_driver::NativeAotDriverBackend::new()
-                .map_err(|e| format!("Failed to initialize native self-host backend: {}", e))?;
-            let flags = sounio::selfhost::native_driver::DriverCompileFlags::default();
-            let artifact = sounio::selfhost::native_driver::SelfhostExecutionBackend::compile_for_run(
-                &backend,
-                &input_path,
-                flags,
-            )
-            .map_err(|e| {
+            let compile_target = input_path.to_string_lossy().into_owned();
+            let mut compiler = sounio::compiler_loader::SounioCompiler::new_embedded()
+                .map_err(|e| format!("Failed to initialize self-host backend: {}", e))?;
+            let bytecode = compiler.compile_file(&compile_target).map_err(|e| {
                 format!(
-                    "Native self-host compile failed for {}: {}",
+                    "Self-hosted compile failed for {}: {}",
                     input_path.display(),
                     e
                 )
@@ -3205,25 +5858,33 @@ SOUNIO_SELFHOST_DRIVER_MANIFEST_URL or SOUNIO_SELFHOST_DRIVER_CACHE_DIR.",
                 return Ok(None);
             }
 
-            let exit_code = sounio::selfhost::native_driver::SelfhostExecutionBackend::run_program(
-                &backend,
-                &artifact,
-                &user_args,
-            )
-            .map_err(|e| {
-                format!(
-                    "Native self-host execution failed for {}: {}",
-                    input_path.display(),
-                    e
-                )
-            })?;
+            let vm_result = compiler
+                .execute_bytecode_with_args(&bytecode, &user_args)
+                .map_err(|e| {
+                    format!(
+                        "Self-hosted execution failed for {}: {}",
+                        input_path.display(),
+                        e
+                    )
+                })?;
 
             if is_self_hosted_root {
-                return Ok(Some(i64::from(exit_code)));
+                let exit_code = match vm_result {
+                    sounio::vm::Value::Int(code) => code,
+                    other => {
+                        return Err(format!(
+                            "Self-hosted root run returned non-integer exit value: {}",
+                            other
+                        ))
+                    }
+                };
+                return Ok(Some(exit_code));
             }
 
-            // Preserve historical `souc run` behavior: print program result for non-root runs.
-            println!("{}", exit_code);
+            // Preserve historical `souc run` behavior: print non-unit results.
+            if !matches!(vm_result, sounio::vm::Value::Unit) {
+                println!("{}", vm_result);
+            }
             return Ok(None);
         }
 
@@ -3349,6 +6010,49 @@ fn jit_run(
         }
     };
 
+    let policy_enforced = std::env::var("SOUNIO_OPT_POLICY_ENFORCE")
+        .ok()
+        .map(|v| {
+            let value = v.trim().to_ascii_lowercase();
+            matches!(value.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false);
+    let input_hash = std::fs::read(input).ok().map(|bytes| sha256_hex(&bytes));
+    let active_policy = load_effective_optimization_policy(policy_enforced)?;
+    #[cfg(feature = "jit")]
+    let mir_policy_context = {
+        let mir_allowed_actions = effective_mir_policy_actions(active_policy.as_ref(), policy_enforced)?;
+        sounio::mir::optimization::PassManagerPolicyContext {
+            mir_allowed_actions,
+            policy_error: None,
+            decision_trail_path: decision_trail_path(),
+            decision_trail_required: decision_trail_required(),
+            policy_id: active_policy
+                .as_ref()
+                .map(|policy| policy.policy_id().to_string()),
+            policy_mode: active_policy
+                .as_ref()
+                .map(|policy| policy.policy_mode().to_string()),
+        }
+    };
+    emit_decision_event(
+        "mir",
+        if use_mir {
+            "pipeline:jit-mir"
+        } else {
+            "pipeline:jit-hlir"
+        },
+        "applied",
+        if effective_ml_opt {
+            "ml_opt_enabled"
+        } else {
+            "ml_opt_disabled"
+        },
+        input.to_string_lossy().as_ref(),
+        input_hash.as_deref(),
+        active_policy.as_ref(),
+    )?;
+
     #[cfg(feature = "jit")]
     {
         tracing::info!(
@@ -3382,11 +6086,13 @@ fn jit_run(
                     .with_ml_opt(effective_ml_opt)
                     .with_opt_data_collection(collect_opt_data)
                     .with_glm(glm_enabled)
+                    .with_pass_manager_policy_context(mir_policy_context.clone())
             } else {
                 sounio::codegen::mir_cranelift::MirAwareCraneliftJit::new()
                     .with_ml_opt(effective_ml_opt)
                     .with_opt_data_collection(collect_opt_data)
                     .with_glm(glm_enabled)
+                    .with_pass_manager_policy_context(mir_policy_context.clone())
             };
 
             let compiled = jit
@@ -4234,6 +6940,10 @@ fn run_tests(
     let suite = discover_tests(&[path], test_filter)
         .map_err(|e| miette::miette!("Test discovery failed: {}", e))?;
 
+    for warning in &suite.discovery_warnings {
+        eprintln!("warning: {}", warning);
+    }
+
     if run_bench {
         println!("Found {} benchmarks", suite.all_benchmarks().len());
     } else {
@@ -4339,6 +7049,10 @@ fn run_benchmarks(
     // Discover benchmarks
     let suite = discover_tests(&[path], test_filter)
         .map_err(|e| miette::miette!("Benchmark discovery failed: {}", e))?;
+
+    for warning in &suite.discovery_warnings {
+        eprintln!("warning: {}", warning);
+    }
 
     let benchmarks: Vec<_> = suite.all_benchmarks().into_iter().cloned().collect();
 

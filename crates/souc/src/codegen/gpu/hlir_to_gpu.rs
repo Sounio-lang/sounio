@@ -77,6 +77,10 @@ pub struct LoweringConfig {
     pub auto_vectorize: bool,
     /// Enable auto-tuning for kernel launch configuration
     pub auto_tune: bool,
+    /// Apply block-shape decisions from autotune.
+    pub auto_tune_block_shape: bool,
+    /// Apply shared-memory sizing decisions from autotune.
+    pub auto_tune_shared_mem: bool,
     /// Auto-tuning configuration (uses default if None)
     pub tune_config: Option<AutoTuneConfig>,
     /// Enable kernel fusion optimization
@@ -102,6 +106,8 @@ impl Default for LoweringConfig {
             // Optimization passes disabled by default for backward compatibility
             auto_vectorize: true, // Enabled for scientific performance
             auto_tune: false,
+            auto_tune_block_shape: true,
+            auto_tune_shared_mem: true,
             tune_config: None,
             enable_fusion: false,
             fusion_config: None,
@@ -214,11 +220,13 @@ fn apply_auto_tuning(
     for (name, kernel) in &mut module.kernels {
         let tuned = tuner.tune_kernel(kernel);
 
-        // Apply tuned config to kernel
-        kernel.max_threads = Some(tuned.block_shape.total_threads());
+        // Apply tuned config to kernel (policy can independently gate sub-actions).
+        if config.auto_tune_block_shape {
+            kernel.max_threads = Some(tuned.block_shape.total_threads());
+        }
 
-        // Update shared memory if tuner recommends more
-        if tuned.shared_mem_bytes > kernel.shared_mem_size {
+        // Update shared memory if tuner recommends more and shared-memory tuning is enabled.
+        if config.auto_tune_shared_mem && tuned.shared_mem_bytes > kernel.shared_mem_size {
             kernel.shared_mem_size = tuned.shared_mem_bytes;
         }
 
@@ -1426,12 +1434,7 @@ impl HlirToGpuLowering {
 
 /// Compile HLIR directly to PTX string
 pub fn compile_to_ptx(hlir: &HlirModule, sm_version: (u32, u32)) -> String {
-    let target = GpuTarget::Cuda {
-        compute_capability: sm_version,
-    };
-    let gpu_module = lower(hlir, target);
-    let mut codegen = super::ptx::PtxCodegen::new(sm_version);
-    codegen.generate(&gpu_module)
+    super::hlir_to_ptx::compile_to_ptx(hlir, sm_version)
 }
 
 /// Compile HLIR directly to PTX with epistemic tracking
@@ -1440,21 +1443,13 @@ pub fn compile_to_ptx_epistemic(
     sm_version: (u32, u32),
     epistemic: bool,
 ) -> String {
-    let config = LoweringConfig {
-        target: GpuTarget::Cuda {
-            compute_capability: sm_version,
-        },
-        epistemic_enabled: epistemic,
-        ..Default::default()
-    };
-    let gpu_module = lower_with_config(hlir, &config);
-    let mut codegen = super::ptx::PtxCodegen::new(sm_version);
-    codegen.generate(&gpu_module)
+    super::hlir_to_ptx::compile_to_ptx_epistemic(hlir, sm_version, epistemic)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codegen::gpu::ir::{BlockId, GpuBlock, GpuKernel, GpuModule, GpuTerminator};
     use crate::hlir::{FunctionId, HlirBlock, HlirFunction, HlirInstr, HlirParam, HlirTerminator};
     use std::collections::HashMap;
 
@@ -1495,6 +1490,23 @@ mod tests {
         };
 
         module.functions.push(func);
+        module
+    }
+
+    fn create_tunable_gpu_module(initial_threads: Option<u32>, initial_shared_mem: u32) -> GpuModule {
+        let mut module = GpuModule::new(
+            "autotune-test",
+            GpuTarget::Cuda {
+                compute_capability: (8, 0),
+            },
+        );
+        let mut kernel = GpuKernel::new("autotune_kernel");
+        kernel.max_threads = initial_threads;
+        kernel.shared_mem_size = initial_shared_mem;
+        let mut block = GpuBlock::new(BlockId(0), "entry");
+        block.set_terminator(GpuTerminator::ReturnVoid);
+        kernel.add_block(block);
+        module.add_kernel(kernel);
         module
     }
 
@@ -1546,5 +1558,113 @@ mod tests {
 
         // I128 downgrades to I64 on GPU
         assert_eq!(lowering.lower_type(&HlirType::I128), GpuType::I64);
+    }
+
+    #[test]
+    fn test_autotune_respects_disabled_block_shape() {
+        let mut module = create_tunable_gpu_module(Some(13), 0);
+        let config = LoweringConfig {
+            target: GpuTarget::Cuda {
+                compute_capability: (8, 0),
+            },
+            auto_tune: true,
+            auto_tune_block_shape: false,
+            auto_tune_shared_mem: true,
+            tune_config: Some(AutoTuneConfig {
+                target: GpuTarget::Cuda {
+                    compute_capability: (8, 0),
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let tuned = apply_auto_tuning(&mut module, &config);
+        let tuned_kernel = tuned
+            .get("autotune_kernel")
+            .expect("expected tuned kernel config");
+        let kernel = module
+            .kernels
+            .get("autotune_kernel")
+            .expect("expected kernel in module");
+
+        assert_eq!(
+            kernel.max_threads,
+            Some(13),
+            "block-shape disabled must preserve existing launch threads"
+        );
+        assert_eq!(
+            kernel.shared_mem_size,
+            tuned_kernel.shared_mem_bytes.max(0),
+            "shared-mem tuning should still apply when enabled"
+        );
+    }
+
+    #[test]
+    fn test_autotune_respects_disabled_shared_mem() {
+        let mut module = create_tunable_gpu_module(Some(13), 7);
+        let config = LoweringConfig {
+            target: GpuTarget::Cuda {
+                compute_capability: (8, 0),
+            },
+            auto_tune: true,
+            auto_tune_block_shape: true,
+            auto_tune_shared_mem: false,
+            tune_config: Some(AutoTuneConfig {
+                target: GpuTarget::Cuda {
+                    compute_capability: (8, 0),
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let tuned = apply_auto_tuning(&mut module, &config);
+        let tuned_kernel = tuned
+            .get("autotune_kernel")
+            .expect("expected tuned kernel config");
+        let kernel = module
+            .kernels
+            .get("autotune_kernel")
+            .expect("expected kernel in module");
+
+        assert_eq!(
+            kernel.max_threads,
+            Some(tuned_kernel.block_shape.total_threads()),
+            "block-shape tuning should apply when enabled"
+        );
+        assert_eq!(
+            kernel.shared_mem_size,
+            7,
+            "shared-mem disabled must preserve existing shared memory size"
+        );
+    }
+
+    #[test]
+    fn test_autotune_respects_all_disabled() {
+        let mut module = create_tunable_gpu_module(Some(13), 7);
+        let config = LoweringConfig {
+            target: GpuTarget::Cuda {
+                compute_capability: (8, 0),
+            },
+            auto_tune: true,
+            auto_tune_block_shape: false,
+            auto_tune_shared_mem: false,
+            tune_config: Some(AutoTuneConfig {
+                target: GpuTarget::Cuda {
+                    compute_capability: (8, 0),
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let _ = apply_auto_tuning(&mut module, &config);
+        let kernel = module
+            .kernels
+            .get("autotune_kernel")
+            .expect("expected kernel in module");
+        assert_eq!(kernel.max_threads, Some(13));
+        assert_eq!(kernel.shared_mem_size, 7);
     }
 }

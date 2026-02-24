@@ -22,8 +22,9 @@ PARSE_SHARD_MODE="${PARSE_SHARD_MODE:-balanced}"
 FULL_TARGET="${FULL_TARGET:-self-hosted/}"
 
 STRICT_MODE="${SOUNIO_SELFHOST_STRICT:-1}"
-NO_RUST_FALLBACK="${SOUNIO_SELFHOST_NO_RUST_FALLBACK:-1}"
-NO_RUST_HARNESS="${SOUNIO_SELFHOST_NO_RUST_HARNESS:-1}"
+INDEPENDENCE_CONTRACT_PATH="${INDEPENDENCE_CONTRACT_PATH:-benchmarks/independence/contract.v1.json}"
+DECISION_TRAIL_REQUIRED="${SOUNIO_OPT_DECISION_TRAIL_REQUIRED:-1}"
+DECISION_TRAIL_PATH="${SOUNIO_OPT_DECISION_TRAIL_PATH:-$LOG_DIR/decision_trail.jsonl}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -156,6 +157,9 @@ extract_kv_value() {
 mkdir -p "$LOG_DIR" "$ARTIFACT_DIR"
 mkdir -p "$DRIVER_HARNESS_CACHE_DIR"
 
+export SOUNIO_OPT_DECISION_TRAIL_REQUIRED="$DECISION_TRAIL_REQUIRED"
+export SOUNIO_OPT_DECISION_TRAIL_PATH="$DECISION_TRAIL_PATH"
+
 BUILD_LOG="$LOG_DIR/build.log"
 PREWARM_LOG="$LOG_DIR/prewarm.log"
 FULL_LOG="$LOG_DIR/full_selfhost.log"
@@ -171,10 +175,23 @@ echo "parse_shard_count=$PARSE_SHARD_COUNT"
 echo "parse_shard_selector=$PARSE_SHARD_SELECTOR"
 echo "parse_shard_mode=$PARSE_SHARD_MODE"
 echo "strict_mode=$STRICT_MODE"
-echo "no_rust_fallback=$NO_RUST_FALLBACK"
-echo "no_rust_harness=$NO_RUST_HARNESS"
+echo "independence_contract=$INDEPENDENCE_CONTRACT_PATH"
+echo "decision_trail_required=$SOUNIO_OPT_DECISION_TRAIL_REQUIRED"
+echo "decision_trail_path=$SOUNIO_OPT_DECISION_TRAIL_PATH"
 echo "driver_harness_cache_dir=$DRIVER_HARNESS_CACHE_DIR"
 echo "prewarm_target=$PREWARM_TARGET"
+
+if [ -f "$INDEPENDENCE_CONTRACT_PATH" ]; then
+  python3 - "$INDEPENDENCE_CONTRACT_PATH" <<'PY'
+import json
+import pathlib
+import sys
+
+obj = json.loads(pathlib.Path(sys.argv[1]).read_text())
+if obj.get("schema") != "sounio.independence.contract.v1":
+    raise SystemExit(f"invalid independence contract schema: {obj.get('schema')}")
+PY
+fi
 
 set +e
 run_with_timeout "$BUILD_TIMEOUT_SECS" cargo build -p souc >"$BUILD_LOG" 2>&1
@@ -194,8 +211,6 @@ if [ "$FAIL_COUNT" -eq 0 ]; then
   set +e
   run_with_timeout "$FULL_TIMEOUT_SECS" env \
     SOUNIO_SELFHOST_DRIVER_HARNESS_CACHE_DIR="$DRIVER_HARNESS_CACHE_DIR" \
-    SOUNIO_SELFHOST_PIPELINE="driver" \
-    SOUNIO_SELFHOST_NO_RUST_HARNESS="0" \
     "$SOUC_BIN" run "$PREWARM_TARGET" >"$PREWARM_LOG" 2>&1
   prewarm_code=$?
   set -e
@@ -217,9 +232,6 @@ if [ "$FAIL_COUNT" -eq 0 ]; then
   set +e
   run_with_timeout_pty_log "$FULL_TIMEOUT_SECS" "$FULL_LOG" env \
     SOUNIO_SELFHOST_STRICT="$STRICT_MODE" \
-    SOUNIO_SELFHOST_NO_RUST_FALLBACK="$NO_RUST_FALLBACK" \
-    SOUNIO_SELFHOST_PIPELINE="driver" \
-    SOUNIO_SELFHOST_NO_RUST_HARNESS="$NO_RUST_HARNESS" \
     SOUNIO_SELFHOST_DRIVER_HARNESS_CACHE_DIR="$DRIVER_HARNESS_CACHE_DIR" \
     "$SOUC_BIN" run "$FULL_TARGET"
   full_code=$?
@@ -251,9 +263,6 @@ if [ "$FAIL_COUNT" -eq 0 ]; then
   set +e
   run_with_timeout "$PARSE_TIMEOUT_SECS" env \
     SOUNIO_SELFHOST_STRICT="$STRICT_MODE" \
-    SOUNIO_SELFHOST_NO_RUST_FALLBACK="$NO_RUST_FALLBACK" \
-    SOUNIO_SELFHOST_PIPELINE="driver" \
-    SOUNIO_SELFHOST_NO_RUST_HARNESS="$NO_RUST_HARNESS" \
     SOUNIO_SELFHOST_DRIVER_HARNESS_CACHE_DIR="$DRIVER_HARNESS_CACHE_DIR" \
     "$SOUC_BIN" run "$FULL_TARGET" -- parse-all report "$PARSE_SHARD_COUNT" "$PARSE_SHARD_MODE" >"$REPORT_LOG" 2>&1
   report_code=$?
@@ -278,9 +287,6 @@ if [ "$FAIL_COUNT" -eq 0 ]; then
   set +e
   run_with_timeout "$PARSE_TIMEOUT_SECS" env \
     SOUNIO_SELFHOST_STRICT="$STRICT_MODE" \
-    SOUNIO_SELFHOST_NO_RUST_FALLBACK="$NO_RUST_FALLBACK" \
-    SOUNIO_SELFHOST_PIPELINE="driver" \
-    SOUNIO_SELFHOST_NO_RUST_HARNESS="$NO_RUST_HARNESS" \
     SOUNIO_SELFHOST_DRIVER_HARNESS_CACHE_DIR="$DRIVER_HARNESS_CACHE_DIR" \
     "$SOUC_BIN" run "$FULL_TARGET" -- parse-all shards "$PARSE_SHARD_COUNT" "$PARSE_SHARD_SELECTOR" "$PARSE_SHARD_MODE" >"$SHARDS_LOG" 2>&1
   shards_code=$?

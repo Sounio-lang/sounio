@@ -26,7 +26,7 @@ use crate::mir::MirModule;
 use crate::mir::optimization::OptimizationLevel;
 
 #[cfg(feature = "jit")]
-use crate::mir::optimization::PassManager;
+use crate::mir::optimization::{PassManager, PassManagerPolicyContext};
 #[cfg(feature = "jit")]
 use crate::mir::{
     BlockId, MirBinaryOp, MirBlock, MirCompareOp, MirConstant, MirFunction, MirInstruction,
@@ -173,6 +173,8 @@ pub struct MirAwareCraneliftJit {
     collect_opt_data: bool,
     /// Stack size for the JIT execution thread (bytes)
     stack_size: usize,
+    /// Optional explicit policy context for MIR pass manager.
+    pass_manager_policy_context: Option<PassManagerPolicyContext>,
 }
 
 #[cfg(feature = "jit")]
@@ -185,6 +187,7 @@ impl MirAwareCraneliftJit {
             ml_opt_enabled: false,
             collect_opt_data: false,
             stack_size: 64 * 1024 * 1024, // 64 MB
+            pass_manager_policy_context: None,
         }
     }
 
@@ -217,6 +220,12 @@ impl MirAwareCraneliftJit {
         self
     }
 
+    /// Inject explicit MIR policy context (preferred over environment transport).
+    pub fn with_pass_manager_policy_context(mut self, context: PassManagerPolicyContext) -> Self {
+        self.pass_manager_policy_context = Some(context);
+        self
+    }
+
     /// Compile MIR module and return a handle to the compiled code
     pub fn compile_mir(&self, mir_module: &MirModule) -> Result<CompiledModule, String> {
         // Run MIR optimization passes if enabled
@@ -225,8 +234,16 @@ impl MirAwareCraneliftJit {
 
             // Choose optimization strategy: local ML-opt, GLM, or standard
             if self.ml_opt_enabled {
-                let mut pass_manager =
-                    PassManager::new_with_ml_opt(opt_level, true, self.collect_opt_data);
+                let mut pass_manager = if let Some(context) = &self.pass_manager_policy_context {
+                    PassManager::new_with_ml_opt_and_context(
+                        opt_level,
+                        true,
+                        self.collect_opt_data,
+                        context.clone(),
+                    )
+                } else {
+                    PassManager::new_with_ml_opt(opt_level, true, self.collect_opt_data)
+                };
                 for func in &mut module_clone.functions {
                     let _ = pass_manager.run_function_passes_with_ml_opt(func, mir_module)?;
                 }
@@ -247,7 +264,15 @@ impl MirAwareCraneliftJit {
                     }
                 }
             } else {
-                let mut pass_manager = PassManager::new_with_glm(opt_level, self.glm_enabled);
+                let mut pass_manager = if let Some(context) = &self.pass_manager_policy_context {
+                    PassManager::new_with_glm_and_context(
+                        opt_level,
+                        self.glm_enabled,
+                        context.clone(),
+                    )
+                } else {
+                    PassManager::new_with_glm(opt_level, self.glm_enabled)
+                };
                 for func in &mut module_clone.functions {
                     #[cfg(feature = "glm")]
                     if self.glm_enabled {

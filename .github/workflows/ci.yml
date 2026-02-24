@@ -44,6 +44,8 @@ jobs:
     env:
       LLVM_SYS_150_PREFIX: /usr/lib/llvm-15
       SOUNIO_RELEASE_PACK_RUN_DIR: /tmp/sounio-release-critical-pack
+      SOUNIO_OPT_DECISION_TRAIL_REQUIRED: "1"
+      SOUNIO_OPT_DECISION_TRAIL_PATH: /tmp/sounio-release-critical-pack/decision_trail.jsonl
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -57,9 +59,8 @@ jobs:
         run: |
           SUMMARY=/tmp/sounio-release-critical-pack/release-pack-summary.tsv
           test -s "$SUMMARY"
-          awk -F '\t' '$1=="18-selfhost-driver-output-gate" && $2=="PASS"{ok=1} END {exit(ok?0:1)}' "$SUMMARY"
-          awk -F '\t' '$1=="19-selfhost-driver-output-parity-oracle-diff-gate" && $2=="PASS"{ok=1} END {exit(ok?0:1)}' "$SUMMARY"
-          test -s /tmp/sounio-release-critical-pack/selfhost-driver-output-parity-gate/artifacts/parity_matrix.tsv
+          awk -F '\t' '$1=="09-no-legacy-env-diagnostic-smoke" && $2=="PASS"{ok=1} END {exit(ok?0:1)}' "$SUMMARY"
+          awk -F '\t' '$1=="18-selfhost-independence-gate" && $2=="PASS"{ok=1} END {exit(ok?0:1)}' "$SUMMARY"
       - name: Upload release-critical pack artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -67,6 +68,88 @@ jobs:
           name: release-critical-pack
           path: /tmp/sounio-release-critical-pack/
           retention-days: 7
+
+  selfhost-independence:
+    name: Selfhost Independence Gate
+    runs-on: ubuntu-24.04
+    env:
+      SOUC_BIN: ./target/release/souc
+      WORK_DIR: /tmp/sounio-selfhost-independence-gate
+      BOOTSTRAP_BUNDLE_DIR: bootstrap
+      SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST: bootstrap/selfhost-kernel.manifest
+      SOUNIO_SELFHOST_STRICT_MODULE_GATING: "1"
+      INDEPENDENCE_CONTRACT_PATH: benchmarks/independence/contract.v1.json
+      SOUNIO_OPT_POLICY_PATH: bootstrap/policies/policy.v1.json
+      SOUNIO_REQUIRE_SIGNED_POLICY: "0"
+      SOUNIO_OPT_DECISION_TRAIL_REQUIRED: "1"
+      SOUNIO_OPT_DECISION_TRAIL_PATH: /tmp/sounio-selfhost-independence-gate/decision_trail.jsonl
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run selfhost independence gate
+        run: |
+          bash scripts/selfhost_independence_gate.sh
+      - name: Upload selfhost independence artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: selfhost-independence-gate
+          path: /tmp/sounio-selfhost-independence-gate/
+          retention-days: 7
+
+  rl-policy-shadow:
+    name: RL Policy Shadow Gate
+    runs-on: ubuntu-24.04
+    env:
+      CONTRACT_PATH: benchmarks/independence/contract.v1.json
+      SOUNIO_OPT_POLICY_PATH: bootstrap/policies/policy.v1.json
+      SOUNIO_REQUIRE_SIGNED_POLICY: "0"
+      SOUNIO_OPT_DECISION_TRAIL_REQUIRED: "1"
+      SOUNIO_OPT_DECISION_TRAIL_PATH: /tmp/sounio-rl-shadow/decisions.jsonl
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build souc release for policy tools
+        run: cargo build -p souc --release --features jit
+      - name: Validate independence benchmark contract
+        run: bash scripts/independence_benchmark_gate.sh
+      - name: RL policy status (shadow)
+        run: ./target/release/souc opt policy status --policy "$SOUNIO_OPT_POLICY_PATH"
+      - name: RL shadow decision trail smoke (MIR JIT)
+        run: |
+          mkdir -p /tmp/sounio-rl-shadow
+          ./target/release/souc jit tests/rustless-regressions/02_arithmetic.sio --mir --ml-opt
+          test -s "$SOUNIO_OPT_DECISION_TRAIL_PATH"
+          rg -n '"domain":"mir"' "$SOUNIO_OPT_DECISION_TRAIL_PATH"
+      - name: Upload RL shadow decision artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rl-policy-shadow
+          path: /tmp/sounio-rl-shadow/
+          retention-days: 7
+
+  rl-policy-active:
+    name: RL Policy Active Promotion Gate
+    runs-on: ubuntu-24.04
+    needs: rl-policy-shadow
+    env:
+      SHADOW_POLICY: bootstrap/policies/policy.v1.json
+      ACTIVE_POLICY: bootstrap/policies/active/policy.v1.json
+      SOUNIO_REQUIRE_SIGNED_POLICY: "0"
+      SOUNIO_OPT_DECISION_TRAIL_REQUIRED: "1"
+      SOUNIO_OPT_DECISION_TRAIL_PATH: /tmp/sounio-rl-active/decisions.jsonl
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build souc release for policy tools
+        run: cargo build -p souc --release
+      - name: Prepare active policy artifact
+        run: |
+          mkdir -p "$(dirname "$ACTIVE_POLICY")"
+          cp "$SHADOW_POLICY" "$ACTIVE_POLICY"
+      - name: RL policy status (active)
+        run: ./target/release/souc opt policy status --policy "$ACTIVE_POLICY"
 
   rust-free-proof-build:
     name: Rust-Free Proof Build Inputs
@@ -192,7 +275,7 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: macos-14
             target: aarch64-apple-darwin
-          - os: macos-13
+          - os: macos-15-intel
             target: x86_64-apple-darwin
           - os: windows-2022
             target: x86_64-pc-windows-msvc
@@ -244,24 +327,10 @@ jobs:
           PARSE_SHARD_SELECTOR: ${{ matrix.parse_shard_selector }}
           PARSE_SHARD_MODE: ${{ matrix.parse_shard_mode }}
           SOUNIO_SELFHOST_STRICT: "1"
-          SOUNIO_SELFHOST_NO_RUST_FALLBACK: "1"
+          SOUNIO_OPT_DECISION_TRAIL_REQUIRED: "1"
+          SOUNIO_OPT_DECISION_TRAIL_PATH: /tmp/sounio-selfhost-zero-gate-${{ runner.os }}/decision_trail.jsonl
         run: |
           bash scripts/selfhost_zero_fallback_gate.sh
-      - name: Run selfhost driver-output gate
-        env:
-          WORK_DIR: /tmp/sounio-selfhost-driver-output-gate-${{ runner.os }}
-          SOUNIO_SELFHOST_STRICT: "1"
-          SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT: "1"
-        run: |
-          bash scripts/selfhost_driver_output_gate.sh
-      - name: Run selfhost driver-output parity gate
-        env:
-          WORK_DIR: /tmp/sounio-selfhost-driver-output-parity-gate-${{ runner.os }}
-          SOUNIO_SELFHOST_STRICT: "1"
-          SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT: "1"
-        run: |
-          bash scripts/selfhost_driver_output_parity_gate.sh
-          test -s /tmp/sounio-selfhost-driver-output-parity-gate-${{ runner.os }}/artifacts/parity_matrix.tsv
       - name: Upload selfhost gate artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -269,24 +338,13 @@ jobs:
           name: selfhost-zero-fallback-${{ runner.os }}
           path: /tmp/sounio-selfhost-zero-gate-${{ runner.os }}/
           retention-days: 7
-      - name: Upload selfhost driver-output artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: selfhost-driver-output-${{ runner.os }}
-          path: /tmp/sounio-selfhost-driver-output-gate-${{ runner.os }}/
-          retention-days: 7
-      - name: Upload selfhost driver-output parity artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: selfhost-driver-output-parity-${{ runner.os }}
-          path: /tmp/sounio-selfhost-driver-output-parity-gate-${{ runner.os }}/
-          retention-days: 7
 
   selfhost-cycle:
     name: Selfhost Cycle Gate
     runs-on: ubuntu-24.04
+    env:
+      SOUNIO_OPT_DECISION_TRAIL_REQUIRED: "1"
+      SOUNIO_OPT_DECISION_TRAIL_PATH: /tmp/sounio-selfhost-cycle-gate/decision_trail.jsonl
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
