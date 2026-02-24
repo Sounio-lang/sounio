@@ -8,7 +8,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA = "sounio.omega.weekly-drift-report.v2"
+SCHEMA = "sounio.omega.weekly-drift-report.v4"
 
 
 def parse_args() -> argparse.Namespace:
@@ -19,6 +19,11 @@ def parse_args() -> argparse.Namespace:
         "--hw-trend",
         default="artifacts/fpga/hardware_epistemic_power_live_trend.v1.json",
         help="Hardware live-read trend path",
+    )
+    parser.add_argument(
+        "--resource-trend",
+        default="artifacts/fpga/hardware_resource_trend.v2.json",
+        help="Hardware resource trend path",
     )
     parser.add_argument(
         "--rl-trend",
@@ -51,8 +56,18 @@ def parse_args() -> argparse.Namespace:
         help="Baseline freeze artifact path",
     )
     parser.add_argument(
+        "--hw-live",
+        default="artifacts/fpga/hardware_epistemic_power_live.v1.json",
+        help="Hardware live-read artifact path",
+    )
+    parser.add_argument(
+        "--fpga-report",
+        default="artifacts/fpga/fpga_seed_report.json",
+        help="FPGA seed report path",
+    )
+    parser.add_argument(
         "--out-json",
-        default="artifacts/omega/weekly_drift_report.v2.json",
+        default="artifacts/omega/weekly_drift_report.v4.json",
         help="Weekly report JSON output path",
     )
     parser.add_argument(
@@ -146,6 +161,14 @@ def summarize_attestation(attestation: dict) -> dict:
         "missing_count": len(missing),
         "signed": bool(attestation.get("signed", False)),
         "aggregate_sha256": str(attestation.get("aggregate_sha256", "")),
+        "qir_emitter_pass": bool(attestation.get("qir_emitter_pass", False)),
+        "merkle_lane_pass": bool(attestation.get("merkle_lane_pass", False)),
+        "resource_trend_pass": bool(attestation.get("resource_trend_pass", False)),
+        "genesis_manifest_signed": bool(attestation.get("genesis_manifest_signed", False)),
+        "genesis_cold_boot_ready": bool(attestation.get("genesis_cold_boot_ready", False)),
+        "genesis_manifest_aggregate_sha256": str(
+            attestation.get("genesis_manifest_aggregate_sha256", "")
+        ),
     }
 
 
@@ -240,6 +263,49 @@ def summarize_canonical_bootstrap(attestation: dict, freeze: dict) -> dict:
     }
 
 
+def summarize_sprint3_hardware(hw_live: dict, fpga_report: dict) -> dict:
+    variance = hw_live.get("hardware_epistemic_power_variance_q32_32", 0)
+    overhead_us = hw_live.get("poll_overhead_us", 0)
+    bidir_sim = fpga_report.get("k_axi_return_sim_status", "unknown")
+    bidir_synth = fpga_report.get("k_axi_return_synth_status", "unknown")
+    return {
+        "live_read_conformant": bool(hw_live.get("live_read_conformant", False)),
+        "hardware_epistemic_power_log_q32_32": int(
+            hw_live.get("hardware_epistemic_power_log_q32_32", 0)
+        )
+        if isinstance(hw_live.get("hardware_epistemic_power_log_q32_32", 0), int)
+        else 0,
+        "hybrid_epistemic_power_log_q32_32": int(
+            hw_live.get("hybrid_epistemic_power_log_q32_32", 0)
+        )
+        if isinstance(hw_live.get("hybrid_epistemic_power_log_q32_32", 0), int)
+        else 0,
+        "variance_q32_32": int(variance) if isinstance(variance, int) else 0,
+        "poll_overhead_us": int(overhead_us) if isinstance(overhead_us, int) else 0,
+        "sub_1ms_overhead": isinstance(overhead_us, int) and overhead_us >= 0 and overhead_us < 1000,
+        "bidir_kaxi_sim_status": str(bidir_sim),
+        "bidir_kaxi_synth_status": str(bidir_synth),
+        "bidir_kaxi_pass": bidir_sim == "pass" and bidir_synth == "pass",
+    }
+
+
+def summarize_resource_trend(trend: dict) -> dict:
+    runs = trend.get("runs", [])
+    if not isinstance(runs, list):
+        runs = []
+    last = runs[-1] if runs else {}
+    if not isinstance(last, dict):
+        last = {}
+    max_drift = last.get("max_relative_drift", trend.get("last_max_relative_drift", 0.0))
+    threshold = trend.get("drift_threshold", 0.05)
+    return {
+        "last_status": str(trend.get("last_status", "")),
+        "run_count": len(runs),
+        "max_relative_drift": float(max_drift) if isinstance(max_drift, (int, float)) else 0.0,
+        "drift_threshold": float(threshold) if isinstance(threshold, (int, float)) else 0.05,
+    }
+
+
 def make_markdown(payload: dict) -> str:
     hw = payload["hardware_live_read"]
     rl = payload["rl_readiness"]
@@ -249,6 +315,8 @@ def make_markdown(payload: dict) -> str:
     ext = payload["external_baselines"]
     freeze = payload["baseline_freeze"]
     canonical = payload["canonical_bootstrap"]
+    sprint3 = payload["sprint3_hardware"]
+    resource_trend = payload["resource_trend_gate"]
     lines = [
         "# Omega Weekly Governance Drift Report",
         "",
@@ -276,6 +344,12 @@ def make_markdown(payload: dict) -> str:
         f"- Missing artifacts: `{att['missing_count']}`",
         f"- Signed: `{str(att['signed']).lower()}`",
         f"- Aggregate SHA256: `{att['aggregate_sha256']}`",
+        f"- QIR emitter pass: `{str(att['qir_emitter_pass']).lower()}`",
+        f"- Merkle lane pass: `{str(att['merkle_lane_pass']).lower()}`",
+        f"- Resource trend pass: `{str(att['resource_trend_pass']).lower()}`",
+        f"- Genesis manifest signed: `{str(att['genesis_manifest_signed']).lower()}`",
+        f"- Genesis cold boot ready: `{str(att['genesis_cold_boot_ready']).lower()}`",
+        f"- Genesis aggregate SHA256: `{att['genesis_manifest_aggregate_sha256']}`",
         "",
         "## Sprint 1 Release Readiness",
         f"- Verdict: `{release['verdict']}`",
@@ -315,6 +389,23 @@ def make_markdown(payload: dict) -> str:
         f"- Baseline freeze policy-pinned digest: `{canonical['baseline_freeze_policy_pinned_digest_sha256']}`",
         f"- Pinned digest match: `{str(canonical['pinned_digest_match']).lower()}`",
         "",
+        "## Sprint 3 Hardware",
+        f"- Live read conformant: `{str(sprint3['live_read_conformant']).lower()}`",
+        f"- Hardware log Q32.32: `{sprint3['hardware_epistemic_power_log_q32_32']}`",
+        f"- Hybrid log Q32.32: `{sprint3['hybrid_epistemic_power_log_q32_32']}`",
+        f"- Variance Q32.32: `{sprint3['variance_q32_32']}`",
+        f"- Poll overhead (us): `{sprint3['poll_overhead_us']}`",
+        f"- Sub-1ms overhead: `{str(sprint3['sub_1ms_overhead']).lower()}`",
+        f"- Bidir K-AXI sim: `{sprint3['bidir_kaxi_sim_status']}`",
+        f"- Bidir K-AXI synth: `{sprint3['bidir_kaxi_synth_status']}`",
+        f"- Bidir K-AXI pass: `{str(sprint3['bidir_kaxi_pass']).lower()}`",
+        "",
+        "## Sprint 4 Resource Trend",
+        f"- Last status: `{resource_trend['last_status']}`",
+        f"- Run count: `{resource_trend['run_count']}`",
+        f"- Max relative drift: `{resource_trend['max_relative_drift']:.6f}`",
+        f"- Drift threshold: `{resource_trend['drift_threshold']:.6f}`",
+        "",
     ]
     return "\n".join(lines)
 
@@ -325,6 +416,7 @@ def main() -> int:
         raise SystemExit("--window must be > 0")
 
     hw_trend, hw_present = load_json_optional(Path(args.hw_trend))
+    resource_trend, resource_trend_present = load_json_optional(Path(args.resource_trend))
     rl_trend, rl_present = load_json_optional(Path(args.rl_trend))
     attestation, att_present = load_json_optional(Path(args.attestation))
     release_readiness, release_present = load_json_optional(Path(args.release_readiness))
@@ -333,6 +425,8 @@ def main() -> int:
         Path(args.external_baseline_collection)
     )
     baseline_freeze, baseline_freeze_present = load_json_optional(Path(args.baseline_freeze))
+    hw_live, hw_live_present = load_json_optional(Path(args.hw_live))
+    fpga_report, fpga_report_present = load_json_optional(Path(args.fpga_report))
 
     payload = {
         "schema": SCHEMA,
@@ -340,19 +434,25 @@ def main() -> int:
         "window": args.window,
         "sources": {
             "hardware_live_read_trend_present": hw_present,
+            "hardware_resource_trend_present": resource_trend_present,
             "rl_readiness_trend_present": rl_present,
             "governance_attestation_present": att_present,
             "release_readiness_present": release_present,
             "performance_summary_present": performance_present,
             "external_baseline_collection_present": external_baseline_collection_present,
             "baseline_freeze_present": baseline_freeze_present,
+            "hw_live_present": hw_live_present,
+            "fpga_report_present": fpga_report_present,
             "hardware_live_read_trend_path": args.hw_trend,
+            "hardware_resource_trend_path": args.resource_trend,
             "rl_readiness_trend_path": args.rl_trend,
             "governance_attestation_path": args.attestation,
             "release_readiness_path": args.release_readiness,
             "performance_summary_path": args.performance_summary,
             "external_baseline_collection_path": args.external_baseline_collection,
             "baseline_freeze_path": args.baseline_freeze,
+            "hw_live_path": args.hw_live,
+            "fpga_report_path": args.fpga_report,
         },
         "hardware_live_read": summarize_hw_trend(hw_trend, args.window),
         "rl_readiness": summarize_rl_trend(rl_trend, args.window),
@@ -362,6 +462,8 @@ def main() -> int:
         "external_baselines": summarize_external_baselines(external_baseline_collection),
         "baseline_freeze": summarize_baseline_freeze(baseline_freeze),
         "canonical_bootstrap": summarize_canonical_bootstrap(attestation, baseline_freeze),
+        "sprint3_hardware": summarize_sprint3_hardware(hw_live, fpga_report),
+        "resource_trend_gate": summarize_resource_trend(resource_trend),
     }
 
     out_json = Path(args.out_json)
