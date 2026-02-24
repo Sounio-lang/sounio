@@ -131,7 +131,7 @@ priv_out.parent.mkdir(parents=True, exist_ok=True)
 priv_out.write_text(priv + "\n")
 pub_out.write_text(pub + "\n")
 os.chmod(priv_out, 0o600)
-os.chmod(pub_out, 0o644)
+os.chmod(pub_out, 0o600)
 PY
 
   rm -rf "$tmpdir"
@@ -139,9 +139,9 @@ PY
 
 enforce_permissions() {
   chmod 600 "$PRIVATE_PATH" 2>/dev/null || true
-  chmod 644 "$PUBLIC_PATH" 2>/dev/null || true
-  chmod 644 "$COMMENT_PATH" 2>/dev/null || true
-  chmod 644 "$TIMESTAMP_PATH" 2>/dev/null || true
+  chmod 600 "$PUBLIC_PATH" 2>/dev/null || true
+  chmod 600 "$COMMENT_PATH" 2>/dev/null || true
+  chmod 600 "$TIMESTAMP_PATH" 2>/dev/null || true
 }
 
 validate_or_generate() {
