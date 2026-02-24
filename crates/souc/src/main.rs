@@ -3556,6 +3556,8 @@ const OPT_POLICY_V2_REQUIRED_FAMILIES: [&str; 5] = [
     "monte_carlo",
     "quantum_parallel",
 ];
+const QIR_LIVE_EPI_POWER_PATH_ENV: &str = "SOUNIO_QIR_LIVE_EPI_POWER_PATH";
+const QIR_FULL_EMITTER_PATH_ENV: &str = "SOUNIO_QIR_FULL_EMITTER_PATH";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct BootstrapArtifactManifestV2 {
@@ -3715,6 +3717,24 @@ struct RlReadinessEvidence {
     bit_exact_mismatches: u64,
     compile_overhead: f64,
     shadow_audit_clean: bool,
+}
+
+#[derive(Debug, Clone)]
+struct QirLiveEpistemicScore {
+    hardware_epistemic_power_log_q32_32: i64,
+    hardware_epistemic_power_variance_q32_32: i64,
+    hybrid_epistemic_power_log_q32_32: i64,
+    poll_overhead_us: i64,
+    live_read_conformant: bool,
+}
+
+#[derive(Debug, Clone)]
+struct QirFullEmitterStatus {
+    path: PathBuf,
+    self_check_pass: bool,
+    selfhost_mode: bool,
+    policy_shim_emit: bool,
+    quantum_controller_emit: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4764,6 +4784,131 @@ fn load_rl_readiness_evidence() -> Result<Option<RlReadinessEvidence>> {
     Ok(Some(evidence))
 }
 
+fn resolve_qir_live_epi_power_path() -> Option<PathBuf> {
+    std::env::var_os(QIR_LIVE_EPI_POWER_PATH_ENV)
+        .filter(|raw| !raw.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            let default = PathBuf::from("artifacts/fpga/hardware_epistemic_power_live.v1.json");
+            if default.exists() {
+                Some(default)
+            } else {
+                None
+            }
+        })
+}
+
+fn load_qir_live_epistemic_score() -> Result<Option<QirLiveEpistemicScore>> {
+    let Some(path) = resolve_qir_live_epi_power_path() else {
+        return Ok(None);
+    };
+    let bytes = std::fs::read(&path)
+        .map_err(|e| miette::miette!("failed reading {}: {}", path.display(), e))?;
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
+        miette::miette!(
+            "invalid QIR live epistemic power JSON {}: {}",
+            path.display(),
+            e
+        )
+    })?;
+    let obj = payload.as_object().ok_or_else(|| {
+        miette::miette!(
+            "invalid QIR live epistemic power payload {}: expected object",
+            path.display()
+        )
+    })?;
+
+    let hw_log = obj
+        .get("hardware_epistemic_power_log_q32_32")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| {
+            miette::miette!(
+                "{} missing integer field hardware_epistemic_power_log_q32_32",
+                path.display()
+            )
+        })?;
+    let variance = obj
+        .get("hardware_epistemic_power_variance_q32_32")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| {
+            miette::miette!(
+                "{} missing integer field hardware_epistemic_power_variance_q32_32",
+                path.display()
+            )
+        })?;
+    let hybrid = obj
+        .get("hybrid_epistemic_power_log_q32_32")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| {
+            miette::miette!(
+                "{} missing integer field hybrid_epistemic_power_log_q32_32",
+                path.display()
+            )
+        })?;
+    let poll_overhead_us = obj
+        .get("poll_overhead_us")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| {
+            miette::miette!("{} missing integer field poll_overhead_us", path.display())
+        })?;
+    let conformant = obj
+        .get("live_read_conformant")
+        .and_then(|v| v.as_bool())
+        .ok_or_else(|| {
+            miette::miette!("{} missing bool field live_read_conformant", path.display())
+        })?;
+
+    Ok(Some(QirLiveEpistemicScore {
+        hardware_epistemic_power_log_q32_32: hw_log,
+        hardware_epistemic_power_variance_q32_32: variance,
+        hybrid_epistemic_power_log_q32_32: hybrid,
+        poll_overhead_us,
+        live_read_conformant: conformant,
+    }))
+}
+
+fn resolve_qir_full_emitter_path() -> Option<PathBuf> {
+    std::env::var_os(QIR_FULL_EMITTER_PATH_ENV)
+        .filter(|raw| !raw.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            let genesis = PathBuf::from("hardware/rtl/qir/omega_genesis_emitter.sio");
+            if genesis.exists() {
+                return Some(genesis);
+            }
+            let full = PathBuf::from("hardware/rtl/qir/omega_full_qir_emitter.sio");
+            if full.exists() {
+                return Some(full);
+            }
+            None
+        })
+}
+
+fn load_qir_full_emitter_status() -> Result<Option<QirFullEmitterStatus>> {
+    let Some(path) = resolve_qir_full_emitter_path() else {
+        return Ok(None);
+    };
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| miette::miette!("failed reading {}: {}", path.display(), e))?;
+
+    let selfhost_mode = content.contains("selfhost-emitter");
+    let policy_shim_emit = content.contains("omega_qir_emit_shim");
+    let quantum_controller_emit = content.contains("omega_qir_emit_quantum_controller");
+    let self_check_pass = content.contains("omega_qir_full_emitter_self_check")
+        && selfhost_mode
+        && policy_shim_emit
+        && quantum_controller_emit
+        && !content.contains("template-direct");
+
+    Ok(Some(QirFullEmitterStatus {
+        path,
+        self_check_pass,
+        selfhost_mode,
+        policy_shim_emit,
+        quantum_controller_emit,
+    }))
+}
+
 fn validate_policy_contract_v1(policy: &OptimizationPolicyV1) -> Result<()> {
     if policy.schema != OPT_POLICY_V1_SCHEMA {
         return Err(miette::miette!(
@@ -5359,6 +5504,34 @@ fn run_optimization(command: OptimizationCommands) -> Result<()> {
                     policy_doc.policy_mode(),
                     policy_doc.target_triple()
                 );
+                match load_qir_full_emitter_status()? {
+                    Some(status) => println!(
+                        "opt policy qir-emitter: status={} path={} selfhost_mode={} policy_shim_emit={} quantum_controller_emit={}",
+                        if status.self_check_pass { "pass" } else { "warn" },
+                        status.path.display(),
+                        status.selfhost_mode,
+                        status.policy_shim_emit,
+                        status.quantum_controller_emit
+                    ),
+                    None => println!(
+                        "opt policy qir-emitter: pending (missing emitter, set {})",
+                        QIR_FULL_EMITTER_PATH_ENV
+                    ),
+                }
+                match load_qir_live_epistemic_score()? {
+                    Some(score) => println!(
+                        "opt policy qir-live: status={} hw_log_q32_32={} variance_q32_32={} hybrid_log_q32_32={} poll_overhead_us={}",
+                        if score.live_read_conformant { "pass" } else { "warn" },
+                        score.hardware_epistemic_power_log_q32_32,
+                        score.hardware_epistemic_power_variance_q32_32,
+                        score.hybrid_epistemic_power_log_q32_32,
+                        score.poll_overhead_us
+                    ),
+                    None => println!(
+                        "opt policy qir-live: pending (missing artifact, set {})",
+                        QIR_LIVE_EPI_POWER_PATH_ENV
+                    ),
+                }
                 Ok(())
             }
             OptimizationPolicyCommands::Promote { policy, output } => {
