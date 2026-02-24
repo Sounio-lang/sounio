@@ -48,6 +48,28 @@ fn metal_push_str(buf: MetalBuf, s: string) -> MetalBuf with Mut, Panic, Div {
     out
 }
 
+fn metal_buf_contains(buf: MetalBuf, needle: string) -> bool with Mut, Panic, Div {
+    let nlen = str_len(needle)
+    if nlen == 0 { return true }
+    if buf.len < nlen { return false }
+
+    var i: i64 = 0
+    while i <= (buf.len - nlen) {
+        var j: i64 = 0
+        var ok: bool = true
+        while j < nlen {
+            if buf.data[(i + j) as usize] != (str_char_at(needle, j) as i8) {
+                ok = false
+                break
+            }
+            j = j + 1
+        }
+        if ok { return true }
+        i = i + 1
+    }
+    false
+}
+
 fn metal_push_i64(buf: MetalBuf, n: i64) -> MetalBuf with Mut, Panic, Div {
     metal_push_str(buf, i64_to_string(n))
 }
@@ -250,6 +272,20 @@ fn metal_emit_var_decls(buf: MetalBuf, kernel: GpuKernelIr) -> MetalBuf with Mut
         out = metal_push_str(out, "];\n")
     }
 
+    if metal_kernel_uses_lane_exchange(kernel) {
+        out = metal_push_str(out, "    // Lane-exchange scratch (portable fallback for shuffle family)\n")
+        out = metal_push_str(out, "    threadgroup uint __omega_shfl_u32[1024];\n")
+        out = metal_push_str(out, "    threadgroup ulong __omega_shfl_u64[1024];\n")
+        out = metal_push_str(out, "    threadgroup float __omega_shfl_f32[1024];\n")
+        out = metal_push_str(out, "    threadgroup double __omega_shfl_f64[1024];\n")
+        out = metal_push_str(out, "    threadgroup int __omega_shfl_i32[1024];\n")
+        out = metal_push_str(out, "    threadgroup long __omega_shfl_i64[1024];\n")
+        out = metal_push_str(out, "    uint __omega_local_tid = tid - (bid * ntid);\n")
+        out = metal_push_str(out, "    uint __omega_lane = __omega_local_tid & 31u;\n")
+        out = metal_push_str(out, "    uint __omega_warp_base = __omega_local_tid - __omega_lane;\n")
+        out = metal_push_newline(out)
+    }
+
     out = metal_push_newline(out)
     out
 }
@@ -267,6 +303,33 @@ fn metal_reg_name(ty: GpuType, idx: i64) -> string with Mut, Panic, Div, Alloc {
         GpuType::GpuI32 => str_concat("sr", i64_to_string(idx)),
         GpuType::GpuI64 => str_concat("srd", i64_to_string(idx)),
         GpuType::GpuPtr => str_concat("rd", i64_to_string(idx)),
+    }
+}
+
+fn metal_kernel_uses_lane_exchange(kernel: GpuKernelIr) -> bool {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        let opc = kernel.ops[i as usize].opcode
+        if opc == GpuOpcode::GpuShflDown
+        || opc == GpuOpcode::GpuShflUp
+        || opc == GpuOpcode::GpuShflBfly
+        || opc == GpuOpcode::GpuShflIdx {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn metal_shuffle_lane_array(ty: GpuType) -> string {
+    match ty {
+        GpuType::GpuU32 => "__omega_shfl_u32",
+        GpuType::GpuU64 => "__omega_shfl_u64",
+        GpuType::GpuF32 => "__omega_shfl_f32",
+        GpuType::GpuF64 => "__omega_shfl_f64",
+        GpuType::GpuI32 => "__omega_shfl_i32",
+        GpuType::GpuI64 => "__omega_shfl_i64",
+        GpuType::GpuPtr => "__omega_shfl_u64",
     }
 }
 
@@ -438,8 +501,73 @@ fn metal_lower_single_op(buf: MetalBuf, op: GpuOp, kernel: GpuKernelIr) -> Metal
         return out
     }
 
+    // ---- LdGlobalCached ----
+    // MSL does not expose explicit cache control for generic global loads.
+    // Lower to regular device load and keep opcode intent in comment.
+    if opc == GpuOpcode::GpuLdGlobalCached {
+        out = metal_push_str(out, "    // cached load (lowered as standard device load)\n")
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = ((device ")
+        out = metal_push_str(out, gpu_type_to_msl(op.ty))
+        out = metal_push_str(out, "*)")
+        out = metal_push_str(out, metal_reg_name(GpuType::GpuPtr, op.addr_reg))
+        out = metal_push_str(out, ")[0];\n")
+        return out
+    }
+
     // ---- StoreGlobal ----
     if opc == GpuOpcode::GpuStoreGlobal {
+        out = metal_push_str(out, "    ((device ")
+        out = metal_push_str(out, gpu_type_to_msl(op.ty))
+        out = metal_push_str(out, "*)")
+        out = metal_push_str(out, metal_reg_name(GpuType::GpuPtr, op.addr_reg))
+        out = metal_push_str(out, ")[0] = ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.src_reg))
+        out = metal_push_str(out, ";\n")
+        return out
+    }
+
+    // ---- LoadGlobalPred ----
+    if opc == GpuOpcode::GpuLoadGlobalPred {
+        out = metal_push_str(out, "    if (p")
+        out = metal_push_i64(out, op.pred_reg)
+        out = metal_push_str(out, ") {\n")
+        out = metal_push_str(out, "        ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = ((device ")
+        out = metal_push_str(out, gpu_type_to_msl(op.ty))
+        out = metal_push_str(out, "*)")
+        out = metal_push_str(out, metal_reg_name(GpuType::GpuPtr, op.addr_reg))
+        out = metal_push_str(out, ")[0];\n")
+        out = metal_push_str(out, "    } else {\n")
+        out = metal_push_str(out, "        ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = 0;\n")
+        out = metal_push_str(out, "    }\n")
+        return out
+    }
+
+    // ---- StoreGlobalPred ----
+    if opc == GpuOpcode::GpuStoreGlobalPred {
+        out = metal_push_str(out, "    if (p")
+        out = metal_push_i64(out, op.pred_reg)
+        out = metal_push_str(out, ") {\n")
+        out = metal_push_str(out, "        ((device ")
+        out = metal_push_str(out, gpu_type_to_msl(op.ty))
+        out = metal_push_str(out, "*)")
+        out = metal_push_str(out, metal_reg_name(GpuType::GpuPtr, op.addr_reg))
+        out = metal_push_str(out, ")[0] = ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.src_reg))
+        out = metal_push_str(out, ";\n")
+        out = metal_push_str(out, "    }\n")
+        return out
+    }
+
+    // ---- StGlobalWriteback ----
+    // MSL has no direct writeback qualifier here; lower to normal global store.
+    if opc == GpuOpcode::GpuStGlobalWriteback {
+        out = metal_push_str(out, "    // writeback store (lowered as standard device store)\n")
         out = metal_push_str(out, "    ((device ")
         out = metal_push_str(out, gpu_type_to_msl(op.ty))
         out = metal_push_str(out, "*)")
@@ -467,6 +595,38 @@ fn metal_lower_single_op(buf: MetalBuf, op: GpuOp, kernel: GpuKernelIr) -> Metal
         out = metal_push_str(out, "] = ")
         out = metal_push_str(out, metal_reg_name(op.ty, op.src_reg))
         out = metal_push_str(out, ";\n")
+        return out
+    }
+
+    // ---- LoadSharedPred ----
+    if opc == GpuOpcode::GpuLoadSharedPred {
+        out = metal_push_str(out, "    if (p")
+        out = metal_push_i64(out, op.pred_reg)
+        out = metal_push_str(out, ") {\n")
+        out = metal_push_str(out, "        ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = shared_mem[")
+        out = metal_push_i64(out, op.shared_addr / 4)
+        out = metal_push_str(out, "];\n")
+        out = metal_push_str(out, "    } else {\n")
+        out = metal_push_str(out, "        ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = 0;\n")
+        out = metal_push_str(out, "    }\n")
+        return out
+    }
+
+    // ---- StoreSharedPred ----
+    if opc == GpuOpcode::GpuStoreSharedPred {
+        out = metal_push_str(out, "    if (p")
+        out = metal_push_i64(out, op.pred_reg)
+        out = metal_push_str(out, ") {\n")
+        out = metal_push_str(out, "        shared_mem[")
+        out = metal_push_i64(out, op.shared_addr / 4)
+        out = metal_push_str(out, "] = ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.src_reg))
+        out = metal_push_str(out, ";\n")
+        out = metal_push_str(out, "    }\n")
         return out
     }
 
@@ -507,6 +667,159 @@ fn metal_lower_single_op(buf: MetalBuf, op: GpuOp, kernel: GpuKernelIr) -> Metal
         out = metal_push_str(out, ", ")
         out = metal_push_str(out, metal_reg_name(op.ty, op.src_reg))
         out = metal_push_str(out, ", memory_order_relaxed);\n")
+        return out
+    }
+
+    // ---- Prefetch ----
+    // Portable MSL fallback: no-op with explicit marker.
+    if opc == GpuOpcode::GpuPrefetch {
+        out = metal_push_str(out, "    // prefetch: no-op on portable MSL path\n")
+        return out
+    }
+
+    // ---- Warp shuffle family ----
+    // Lane-exchange fallback using threadgroup scratch and lane math.
+    if opc == GpuOpcode::GpuShflDown
+    || opc == GpuOpcode::GpuShflUp
+    || opc == GpuOpcode::GpuShflBfly
+    || opc == GpuOpcode::GpuShflIdx {
+        let dst_name = metal_reg_name(op.ty, op.dst_reg)
+        let src_name = metal_reg_name(op.ty, op.src_reg)
+        let lane_array = metal_shuffle_lane_array(op.ty)
+
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, lane_array)
+        out = metal_push_str(out, "[__omega_local_tid & 1023u] = ")
+        out = metal_push_str(out, src_name)
+        out = metal_push_str(out, ";\n")
+        out = metal_push_str(out, "    threadgroup_barrier(mem_flags::mem_threadgroup);\n")
+
+        if opc == GpuOpcode::GpuShflDown {
+            if op.rhs_imm >= 0 {
+                out = metal_push_str(out, "    uint __omega_lane_peer = __omega_lane + ")
+                out = metal_push_i64(out, op.rhs_imm)
+                out = metal_push_str(out, "u;\n")
+            } else {
+                out = metal_push_str(out, "    uint __omega_lane_peer = __omega_lane >= ")
+                out = metal_push_i64(out, 0 - op.rhs_imm)
+                out = metal_push_str(out, "u ? (__omega_lane - ")
+                out = metal_push_i64(out, 0 - op.rhs_imm)
+                out = metal_push_str(out, "u) : 32u;\n")
+            }
+        } else if opc == GpuOpcode::GpuShflUp {
+            if op.rhs_imm >= 0 {
+                out = metal_push_str(out, "    uint __omega_lane_peer = __omega_lane >= ")
+                out = metal_push_i64(out, op.rhs_imm)
+                out = metal_push_str(out, "u ? (__omega_lane - ")
+                out = metal_push_i64(out, op.rhs_imm)
+                out = metal_push_str(out, "u) : 32u;\n")
+            } else {
+                out = metal_push_str(out, "    uint __omega_lane_peer = __omega_lane + ")
+                out = metal_push_i64(out, 0 - op.rhs_imm)
+                out = metal_push_str(out, "u;\n")
+            }
+        } else if opc == GpuOpcode::GpuShflBfly {
+            out = metal_push_str(out, "    uint __omega_lane_peer = __omega_lane ^ ")
+            if op.rhs_imm >= 0 {
+                out = metal_push_i64(out, op.rhs_imm)
+            } else {
+                out = metal_push_i64(out, 0 - op.rhs_imm)
+            }
+            out = metal_push_str(out, "u;\n")
+        } else {
+            if op.rhs_reg >= 0 {
+                out = metal_push_str(out, "    uint __omega_lane_peer = (uint)")
+                out = metal_push_str(out, metal_reg_name(GpuType::GpuU32, op.rhs_reg))
+                out = metal_push_str(out, ";\n")
+            } else {
+                if op.rhs_imm >= 0 {
+                    out = metal_push_str(out, "    uint __omega_lane_peer = ")
+                    out = metal_push_i64(out, op.rhs_imm)
+                    out = metal_push_str(out, "u;\n")
+                } else {
+                    out = metal_push_str(out, "    uint __omega_lane_peer = 32u;\n")
+                }
+            }
+        }
+
+        out = metal_push_str(out, "    if (__omega_lane_peer < 32u && (__omega_warp_base + __omega_lane_peer) < ntid) {\n")
+        out = metal_push_str(out, "        ")
+        out = metal_push_str(out, dst_name)
+        out = metal_push_str(out, " = ")
+        out = metal_push_str(out, lane_array)
+        out = metal_push_str(out, "[(__omega_warp_base + __omega_lane_peer) & 1023u];\n")
+        out = metal_push_str(out, "    } else {\n")
+        out = metal_push_str(out, "        ")
+        out = metal_push_str(out, dst_name)
+        out = metal_push_str(out, " = ")
+        out = metal_push_str(out, src_name)
+        out = metal_push_str(out, ";\n")
+        out = metal_push_str(out, "    }\n")
+        out = metal_push_str(out, "    threadgroup_barrier(mem_flags::mem_threadgroup);\n")
+        return out
+    }
+
+    // ---- Vote / Ballot ----
+    if opc == GpuOpcode::GpuVote || opc == GpuOpcode::GpuBallot {
+        var pred_expr = "false"
+        if op.pred_reg >= 0 {
+            pred_expr = str_concat("p", i64_to_string(op.pred_reg))
+        } else if op.src_reg >= 0 {
+            pred_expr = str_concat(metal_reg_name(op.ty, op.src_reg), " != 0")
+        }
+
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = ")
+        if opc == GpuOpcode::GpuBallot {
+            out = metal_push_str(out, "(")
+            out = metal_push_str(out, pred_expr)
+            out = metal_push_str(out, ") ? (1u << (__omega_lane & 31u)) : 0u;\n")
+        } else {
+            out = metal_push_str(out, "(")
+            out = metal_push_str(out, pred_expr)
+            out = metal_push_str(out, ") ? 1 : 0;\n")
+        }
+        return out
+    }
+
+    // ---- Tensor ops (WMMA/MMA/TMA) ----
+    // These are represented as conservative no-op placeholders in MSL path.
+    if opc == GpuOpcode::GpuWmma || opc == GpuOpcode::GpuMma {
+        out = metal_push_str(out, "    // tensor op lowered as fallback on MSL path\n")
+        if op.dst_reg >= 0 && op.src_reg >= 0 {
+            out = metal_push_str(out, "    ")
+            out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+            out = metal_push_str(out, " = ")
+            out = metal_push_str(out, metal_reg_name(op.ty, op.src_reg))
+            out = metal_push_str(out, ";\n")
+        }
+        return out
+    }
+    if opc == GpuOpcode::GpuTmaLoad {
+        out = metal_push_str(out, "    // tma.load lowered to regular load fallback\n")
+        if op.dst_reg >= 0 && op.addr_reg >= 0 {
+            out = metal_push_str(out, "    ")
+            out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+            out = metal_push_str(out, " = ((device ")
+            out = metal_push_str(out, gpu_type_to_msl(op.ty))
+            out = metal_push_str(out, "*)")
+            out = metal_push_str(out, metal_reg_name(GpuType::GpuPtr, op.addr_reg))
+            out = metal_push_str(out, ")[0];\n")
+        }
+        return out
+    }
+    if opc == GpuOpcode::GpuTmaStore {
+        out = metal_push_str(out, "    // tma.store lowered to regular store fallback\n")
+        if op.addr_reg >= 0 && op.src_reg >= 0 {
+            out = metal_push_str(out, "    ((device ")
+            out = metal_push_str(out, gpu_type_to_msl(op.ty))
+            out = metal_push_str(out, "*)")
+            out = metal_push_str(out, metal_reg_name(GpuType::GpuPtr, op.addr_reg))
+            out = metal_push_str(out, ")[0] = ")
+            out = metal_push_str(out, metal_reg_name(op.ty, op.src_reg))
+            out = metal_push_str(out, ";\n")
+        }
         return out
     }
 
@@ -649,6 +962,50 @@ fn metal_lower_single_op(buf: MetalBuf, op: GpuOp, kernel: GpuKernelIr) -> Metal
         out = metal_push_str(out, " = 1.0 / ")
         out = metal_push_str(out, metal_reg_name(op.ty, op.src_reg))
         out = metal_push_str(out, ";\n")
+        return out
+    }
+
+    // ---- Special registers ----
+    if opc == GpuOpcode::GpuGetLaneId {
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = tid & 31;\n")
+        return out
+    }
+    if opc == GpuOpcode::GpuGetWarpId {
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = tid / 32;\n")
+        return out
+    }
+    if opc == GpuOpcode::GpuGetSmId {
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = 0; // SM id unavailable in portable MSL\n")
+        return out
+    }
+    if opc == GpuOpcode::GpuGetGridDim {
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = ntid; // fallback: threads_per_threadgroup\n")
+        return out
+    }
+
+    // ---- Branch ----
+    // MSL linear emitter cannot materialize arbitrary PTX label targets.
+    // Deterministic fallback: branch is approximated as early return.
+    if opc == GpuOpcode::GpuBra {
+        if op.pred_reg >= 0 {
+            out = metal_push_str(out, "    if (p")
+            out = metal_push_i64(out, op.pred_reg)
+            out = metal_push_str(out, ") { return; } // bra fallback target L")
+            out = metal_push_i64(out, op.rhs_imm)
+            out = metal_push_str(out, "\n")
+        } else {
+            out = metal_push_str(out, "    return; // bra fallback target L")
+            out = metal_push_i64(out, op.rhs_imm)
+            out = metal_push_str(out, "\n")
+        }
         return out
     }
 
