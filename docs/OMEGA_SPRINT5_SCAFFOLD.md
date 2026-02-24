@@ -14,6 +14,11 @@ This scaffold starts Sprint 5 from the locked Sprint 4 Genesis baseline.
 bash scripts/omega/omega_sprint5_scaffold.sh
 ```
 
+The scaffold now generates and records:
+
+- `artifacts/omega/merkle_inclusion_proof.v1.json`
+- a refreshed `artifacts/omega/omega_genesis.v1.0.json` tied to the current gate log
+
 ## Verify Baseline Still Passes
 
 ```bash
@@ -26,4 +31,4 @@ bash scripts/omega_sprint1_gate.sh --strict --report-full
 ## Output
 
 - `artifacts/omega/sprint_5_0_scaffold.json`
-
+- `artifacts/omega/merkle_inclusion_proof.v1.json`
