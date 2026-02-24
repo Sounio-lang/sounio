@@ -15,6 +15,7 @@ echo "==> omega sprint1 gate: contracts"
 RUN_EXTERNAL_BASELINES="${RUN_EXTERNAL_BASELINES:-${OMEGA_RUN_EXTERNAL_BASELINES:-1}}" \
 CONTRACT_PATH="benchmarks/independence/contract.v2.json" \
   bash scripts/independence_benchmark_gate.sh
+echo "INPLACE_POLICY_SIGN_PASS" | tee -a "$GATE_LOG"
 
 if [ "${OMEGA_REQUIRE_CANONICAL_KEY_BOOTSTRAP:-1}" = "1" ]; then
   echo "==> omega sprint1 gate: canonical key bootstrap"
@@ -36,6 +37,52 @@ if [ "${OMEGA_REQUIRE_CANONICAL_KEY_BOOTSTRAP:-1}" = "1" ]; then
     exit 2
   fi
   echo "CANONICAL_KEY_BOOTSTRAP_PASS" | tee -a "$GATE_LOG"
+
+  if [ "${OMEGA_REQUIRE_INPLACE_POLICY_SIGN:-1}" = "1" ]; then
+    echo "==> omega sprint1 gate: in-place policy sign"
+    SIGN_POLICY_PATH="${OMEGA_SIGN_POLICY_PATH:-bootstrap/policies/policy.v2.json}"
+    SIGN_SOUC_BIN="${OMEGA_POLICY_SOUC_BIN:-$ROOT_DIR/souc}"
+    if [ -x "$SIGN_SOUC_BIN" ] && "$SIGN_SOUC_BIN" opt policy sign --help >/dev/null 2>&1; then
+      SOUNIO_POLICY_SIGNING_KEY_PATH="$OMEGA_CANONICAL_PRIVKEY" \
+      SOUNIO_POLICY_VERIFY_KEY_PATH="$OMEGA_CANONICAL_PUBKEY" \
+        "$SIGN_SOUC_BIN" opt policy sign --policy "$SIGN_POLICY_PATH"
+      SOUNIO_POLICY_VERIFY_KEY_PATH="$OMEGA_CANONICAL_PUBKEY" \
+        "$SIGN_SOUC_BIN" opt policy eval --policy "$SIGN_POLICY_PATH"
+      echo "INPLACE_POLICY_SIGN_PASS" | tee -a "$GATE_LOG"
+    else
+      echo "warning: souc opt policy sign not available; skipping in-place sign gate"
+    fi
+  fi
+
+  if [ "${OMEGA_REQUIRE_PINNED_DIGEST:-1}" = "1" ]; then
+    echo "==> omega sprint1 gate: pinned digest policy check"
+    PIN_CHECK_POLICY_PATH="${OMEGA_SIGN_POLICY_PATH:-bootstrap/policies/policy.v2.json}"
+    if [ ! -f "$PIN_CHECK_POLICY_PATH" ] && [ -f "bootstrap/policies/policy.v1.json" ]; then
+      PIN_CHECK_POLICY_PATH="bootstrap/policies/policy.v1.json"
+    fi
+    PIN_CHECK_SOUC_BIN="${OMEGA_POLICY_SOUC_BIN:-$ROOT_DIR/souc}"
+    set +e
+    PIN_CHECK_OUTPUT="$(
+      SOUNIO_POLICY_VERIFY_KEY_PATH="$OMEGA_CANONICAL_PUBKEY" \
+        "$PIN_CHECK_SOUC_BIN" opt policy status --policy "$PIN_CHECK_POLICY_PATH" 2>&1
+    )"
+    PIN_CHECK_RC=$?
+    set -e
+    echo "$PIN_CHECK_OUTPUT"
+    if [ "$PIN_CHECK_RC" -ne 0 ]; then
+      echo "error: pinned digest policy status command failed: policy=$PIN_CHECK_POLICY_PATH" >&2
+      exit "$PIN_CHECK_RC"
+    fi
+    if ! grep -q "signature=verified" <<<"$PIN_CHECK_OUTPUT"; then
+      echo "error: pinned digest policy check requires signature=verified" >&2
+      exit 2
+    fi
+    if ! grep -q "opt policy pinned: status=verified" <<<"$PIN_CHECK_OUTPUT"; then
+      echo "error: pinned digest policy check requires opt policy pinned: status=verified" >&2
+      exit 2
+    fi
+    echo "PINNED_DIGEST_PASS" | tee -a "$GATE_LOG"
+  fi
 fi
 
 python3 - <<'PY'
@@ -346,8 +393,8 @@ if [ "${OMEGA_REQUIRE_RL_READINESS_BRIDGE:-1}" = "1" ]; then
       echo "error: RL readiness status did not report pass" >&2
       exit 2
     fi
-    if ! rg -q "signature=verified \(canonical bootstrap key\)" "$RL_STATUS_LOG"; then
-      echo "error: RL readiness status did not verify canonical bootstrap key" >&2
+    if ! rg -q "signature=verified \(canonical in-place\)" "$RL_STATUS_LOG"; then
+      echo "error: RL readiness status did not verify canonical in-place signature" >&2
       exit 2
     fi
   fi
@@ -440,6 +487,125 @@ if [ "${OMEGA_REQUIRE_BASELINE_FREEZE:-1}" = "1" ]; then
   echo "BASELINE_FREEZE_PASS" | tee -a "$GATE_LOG"
 fi
 
+if [ "${OMEGA_REQUIRE_PINNED_DIGEST:-1}" = "1" ]; then
+  echo "==> omega sprint1 gate: pinned digest sign+verify"
+  PIN_FREEZE_PATH="${OMEGA_BASELINE_FREEZE_OUT:-artifacts/omega/baseline_freeze.v1.json}"
+  if [ ! -f "$PIN_FREEZE_PATH" ]; then
+    echo "error: pinned digest gate requires baseline freeze artifact: $PIN_FREEZE_PATH" >&2
+    exit 2
+  fi
+  PIN_DIGEST="$(python3 - "$PIN_FREEZE_PATH" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text())
+value = payload.get("policy_pinned_digest_sha256", "")
+print(value if isinstance(value, str) else "")
+PY
+)"
+  if [ -n "$PIN_DIGEST" ]; then
+    if ! [[ "$PIN_DIGEST" =~ ^[0-9a-fA-F]{64}$ ]]; then
+      echo "error: invalid pinned digest from freeze artifact $PIN_FREEZE_PATH: $PIN_DIGEST" >&2
+      exit 2
+    fi
+    PIN_DIGEST="${PIN_DIGEST,,}"
+  fi
+
+  if [ -f "bootstrap/policies/policy.v2.json" ]; then
+    PIN_POLICY_PATH="bootstrap/policies/policy.v2.json"
+  else
+    PIN_POLICY_PATH="bootstrap/policies/policy.v1.json"
+  fi
+  PIN_CANONICAL_ENV_PATH="${OMEGA_CANONICAL_ENV_OUT:-artifacts/omega/canonical_key.env}"
+  PIN_POLICY_SIGN_SCRIPT="${OMEGA_CANONICAL_POLICY_SIGN_SCRIPT:-scripts/omega_canonical_policy_sign.sh}"
+  PIN_SOUC_BIN="${OMEGA_POLICY_SOUC_BIN:-$ROOT_DIR/souc}"
+  if [ ! -x "$PIN_POLICY_SIGN_SCRIPT" ]; then
+    echo "error: missing canonical policy sign script: $PIN_POLICY_SIGN_SCRIPT" >&2
+    exit 2
+  fi
+
+  PIN_SIGN_ARGS=(
+    --policy "$PIN_POLICY_PATH"
+    --out "$PIN_POLICY_PATH"
+    --souc "$PIN_SOUC_BIN"
+    --canonical-env "$PIN_CANONICAL_ENV_PATH"
+  )
+  if [ -n "$PIN_DIGEST" ]; then
+    PIN_SIGN_ARGS+=(--pin-digest "$PIN_DIGEST")
+  fi
+  OMEGA_POLICY_PIN_FROM_FREEZE=1 \
+  OMEGA_POLICY_PIN_DIGEST="$PIN_DIGEST" \
+  OMEGA_POLICY_PIN_FREEZE_PATH="$PIN_FREEZE_PATH" \
+    "$PIN_POLICY_SIGN_SCRIPT" "${PIN_SIGN_ARGS[@]}"
+
+  # Negative check: signing with an incorrect pin digest must fail.
+  BAD_PIN_DIGEST="0000000000000000000000000000000000000000000000000000000000000000"
+  if [ -n "$PIN_DIGEST" ]; then
+    BAD_PIN_DIGEST="$(python3 - "$PIN_DIGEST" <<'PY'
+import sys
+value = sys.argv[1].strip().lower()
+if len(value) != 64 or any(ch not in "0123456789abcdef" for ch in value):
+    print("0" * 64)
+    raise SystemExit(0)
+first = value[0]
+replacement = "0" if first != "0" else "1"
+print(replacement + value[1:])
+PY
+)"
+  fi
+
+  NEG_POLICY_COPY="$(mktemp "${TMPDIR:-/tmp}/omega_pinned_digest_negative.XXXXXX.json")"
+  cp "$PIN_POLICY_PATH" "$NEG_POLICY_COPY"
+  set +e
+  OMEGA_CANONICAL_PRIVKEY="${OMEGA_CANONICAL_PRIVKEY:-keys/bootstrap_ed25519}" \
+  OMEGA_CANONICAL_PUBKEY="${OMEGA_CANONICAL_PUBKEY:-keys/bootstrap_ed25519.pub}" \
+    "$PIN_SOUC_BIN" opt policy sign \
+      --policy "$NEG_POLICY_COPY" \
+      --out "$NEG_POLICY_COPY" \
+      --pin-digest "$BAD_PIN_DIGEST" >/dev/null 2>&1
+  NEG_PIN_RC=$?
+  set -e
+  rm -f "$NEG_POLICY_COPY"
+  if [ "$NEG_PIN_RC" -eq 0 ]; then
+    echo "error: negative pin digest test failed (sign unexpectedly succeeded with bad pin)" >&2
+    exit 2
+  fi
+
+  PIN_STATUS_LOG="${OMEGA_PINNED_DIGEST_STATUS_LOG:-artifacts/omega_pinned_digest_status.log}"
+  set +e
+  PIN_STATUS_OUTPUT="$(
+    SOUNIO_POLICY_VERIFY_KEY_PATH="${OMEGA_CANONICAL_PUBKEY:-keys/bootstrap_ed25519.pub}" \
+      "$PIN_SOUC_BIN" opt policy status --policy "$PIN_POLICY_PATH" 2>&1
+  )"
+  PIN_STATUS_RC=$?
+  set -e
+  echo "$PIN_STATUS_OUTPUT" | tee "$PIN_STATUS_LOG"
+  if [ "$PIN_STATUS_RC" -ne 0 ]; then
+    echo "error: pinned digest status command failed: policy=$PIN_POLICY_PATH" >&2
+    exit "$PIN_STATUS_RC"
+  fi
+  if ! rg -q "signature=verified" "$PIN_STATUS_LOG"; then
+    echo "error: pinned digest status did not report signature=verified" >&2
+    exit 2
+  fi
+  if ! rg -q "opt policy canonical: signature=verified" "$PIN_STATUS_LOG"; then
+    echo "error: pinned digest status did not verify canonical signature" >&2
+    exit 2
+  fi
+
+  if ! rg -q "opt policy pinned: status=verified" "$PIN_STATUS_LOG"; then
+    echo "error: pinned digest status was not verified" >&2
+    exit 2
+  fi
+  if [ -n "$PIN_DIGEST" ] && ! rg -q "pinned=$PIN_DIGEST" "$PIN_STATUS_LOG"; then
+    echo "error: pinned digest status does not match freeze policy pin digest" >&2
+    exit 2
+  fi
+
+  echo "PINNED_DIGEST_PASS" | tee -a "$GATE_LOG"
+fi
+
 if [ "${OMEGA_REQUIRE_POLICY_MODE_GUARD:-1}" = "1" ]; then
   echo "==> omega sprint1 gate: policy mode guard"
   if [ -f "bootstrap/policies/policy.v2.json" ]; then
@@ -494,6 +660,8 @@ if [ "${OMEGA_REQUIRE_GOVERNANCE_ATTESTATION:-1}" = "1" ]; then
     --canonical-privkey "${OMEGA_CANONICAL_PRIVKEY:-}"
     --canonical-pubkey "${OMEGA_CANONICAL_PUBKEY:-keys/bootstrap_ed25519.pub}"
     --canonical-timestamp "${OMEGA_CANONICAL_BOOTSTRAP_TIMESTAMP_PATH:-keys/bootstrap_ed25519.created_at}"
+    --policy "${RL_POLICY_PATH:-bootstrap/policies/policy.v2.json}"
+    --baseline-freeze "${OMEGA_BASELINE_FREEZE_OUT:-artifacts/omega/baseline_freeze.v1.json}"
     --key-id "${OMEGA_GOVERNANCE_ATTEST_KEY_ID:-canonical-bootstrap-ed25519}"
     --require-signature
   )

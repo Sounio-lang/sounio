@@ -12,6 +12,8 @@ Options:
   --canonical-env <path>   Canonical key env file path (default: artifacts/omega/canonical_key.env)
   --smoke-env <path>       Policy smoke env file path (default: artifacts/omega/policy_smoke.env)
   --smoke-out <path>       Signed smoke policy output path (default: artifacts/omega/policy_status_smoke.v2.json)
+  --pin-digest <sha256>    Expected pinned payload digest (default: env/freeze artifact)
+  --freeze <path>          Baseline freeze artifact path (default: artifacts/omega/baseline_freeze.v1.json)
 EOF
 }
 
@@ -21,6 +23,8 @@ CORPUS_PATH="benchmarks/independence"
 CANONICAL_ENV_PATH="artifacts/omega/canonical_key.env"
 SMOKE_ENV_PATH="artifacts/omega/policy_smoke.env"
 SMOKE_OUT_PATH="artifacts/omega/policy_status_smoke.v2.json"
+PIN_DIGEST="${OMEGA_POLICY_PIN_DIGEST:-}"
+FREEZE_PATH="${OMEGA_POLICY_PIN_FREEZE_PATH:-${OMEGA_BASELINE_FREEZE_OUT:-artifacts/omega/baseline_freeze.v1.json}}"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -46,6 +50,14 @@ while [ "$#" -gt 0 ]; do
       ;;
     --smoke-out)
       SMOKE_OUT_PATH="${2:-}"
+      shift 2
+      ;;
+    --pin-digest)
+      PIN_DIGEST="${2:-}"
+      shift 2
+      ;;
+    --freeze)
+      FREEZE_PATH="${2:-}"
       shift 2
       ;;
     -h|--help)
@@ -135,5 +147,48 @@ if ! grep -q "signature=verified" <<<"$STATUS_OUTPUT"; then
   echo "error: canonical policy verification failed for $STATUS_POLICY_PATH" >&2
   exit 2
 fi
+if ! grep -q "opt policy canonical: signature=verified" <<<"$STATUS_OUTPUT"; then
+  echo "error: canonical in-place signature attachment is not verified for $STATUS_POLICY_PATH" >&2
+  exit 2
+fi
+if ! grep -q "fingerprint=$ACTUAL_FINGERPRINT" <<<"$STATUS_OUTPUT"; then
+  echo "error: canonical fingerprint mismatch in status output for $STATUS_POLICY_PATH" >&2
+  exit 2
+fi
 
-echo "signature=verified (canonical bootstrap key) fingerprint=$ACTUAL_FINGERPRINT"
+REQUIRE_PIN="${OMEGA_REQUIRE_PINNED_DIGEST:-0}"
+if [ "$REQUIRE_PIN" = "1" ] && [ -z "$PIN_DIGEST" ] && [ -f "$FREEZE_PATH" ]; then
+  PIN_DIGEST="$(python3 - "$FREEZE_PATH" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text())
+value = payload.get("policy_pinned_digest_sha256", "")
+print(value if isinstance(value, str) else "")
+PY
+)"
+fi
+if [ -n "$PIN_DIGEST" ]; then
+  if ! [[ "$PIN_DIGEST" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    echo "error: invalid pinned digest (expected 64 hex chars): $PIN_DIGEST" >&2
+    exit 2
+  fi
+  PIN_DIGEST="${PIN_DIGEST,,}"
+fi
+
+if [ -n "$PIN_DIGEST" ]; then
+  REQUIRE_PIN=1
+fi
+if [ "$REQUIRE_PIN" = "1" ]; then
+  if ! grep -q "opt policy pinned: status=verified" <<<"$STATUS_OUTPUT"; then
+    echo "error: pinned digest verification failed for $STATUS_POLICY_PATH" >&2
+    exit 2
+  fi
+  if [ -n "$PIN_DIGEST" ] && ! grep -q "pinned=$PIN_DIGEST" <<<"$STATUS_OUTPUT"; then
+    echo "error: status output pinned digest does not match expected freeze digest for $STATUS_POLICY_PATH" >&2
+    exit 2
+  fi
+fi
+
+echo "signature=verified (canonical in-place) fingerprint=$ACTUAL_FINGERPRINT"
