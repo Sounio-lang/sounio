@@ -80,14 +80,25 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CANONICAL_BOOTSTRAP_SCRIPT="${OMEGA_CANONICAL_BOOTSTRAP_SCRIPT:-$SCRIPT_DIR/omega_canonical_key_bootstrap.sh}"
+CANONICAL_POLICY_SIGN_SCRIPT="${OMEGA_CANONICAL_POLICY_SIGN_SCRIPT:-$SCRIPT_DIR/omega_canonical_policy_sign.sh}"
 if [ ! -x "$CANONICAL_BOOTSTRAP_SCRIPT" ]; then
   echo "error: canonical bootstrap script not executable: $CANONICAL_BOOTSTRAP_SCRIPT" >&2
   exit 2
 fi
+if [ ! -x "$CANONICAL_POLICY_SIGN_SCRIPT" ]; then
+  echo "error: canonical policy sign script not executable: $CANONICAL_POLICY_SIGN_SCRIPT" >&2
+  exit 2
+fi
 
-"$CANONICAL_BOOTSTRAP_SCRIPT" --env-out "$CANONICAL_ENV_PATH" >/dev/null
-# shellcheck disable=SC1090
-source "$CANONICAL_ENV_PATH"
+if [ -f "$CANONICAL_ENV_PATH" ]; then
+  # shellcheck disable=SC1090
+  source "$CANONICAL_ENV_PATH"
+fi
+if [ ! -f "${OMEGA_CANONICAL_PRIVKEY:-}" ] || [ ! -f "${OMEGA_CANONICAL_PUBKEY:-}" ]; then
+  "$CANONICAL_BOOTSTRAP_SCRIPT" --env-out "$CANONICAL_ENV_PATH" >/dev/null
+  # shellcheck disable=SC1090
+  source "$CANONICAL_ENV_PATH"
+fi
 
 if [ ! -f "$OMEGA_CANONICAL_PRIVKEY" ] || [ ! -f "$OMEGA_CANONICAL_PUBKEY" ]; then
   echo "error: canonical key bootstrap did not produce required key files" >&2
@@ -134,17 +145,67 @@ if [ -z "$POLICY_ID" ] || [ -z "$POLICY_VERSION" ] || [ -z "$POLICY_MODE" ]; the
   exit 2
 fi
 
-SOUNIO_POLICY_SIGNING_KEY_PATH="$OMEGA_CANONICAL_PRIVKEY" \
-SOUNIO_POLICY_VERIFY_KEY_PATH="$OMEGA_CANONICAL_PUBKEY" \
-  "$SOUC_BIN" opt policy train \
-  --corpus "$CORPUS_PATH" \
-  --output "$OUT_PATH" \
-  --policy-id "$POLICY_ID" \
-  --policy-version "$POLICY_VERSION" \
-  --mode "$POLICY_MODE" >/dev/null
+META_PATH="${OUT_PATH}.meta.json"
+SOURCE_SHA="$(sha256sum "$POLICY_PATH" | awk '{print $1}')"
+SKIP_RETRAIN=0
+if [ -f "$OUT_PATH" ] && [ -f "$META_PATH" ]; then
+  if python3 - "$META_PATH" "$SOURCE_SHA" "$OMEGA_CANONICAL_PUBKEY_FINGERPRINT" "$POLICY_ID" "$POLICY_VERSION" "$POLICY_MODE" <<'PY'
+import json
+import sys
+from pathlib import Path
 
-SOUNIO_POLICY_VERIFY_KEY_PATH="$OMEGA_CANONICAL_PUBKEY" \
-  "$SOUC_BIN" opt policy eval --policy "$OUT_PATH" >/dev/null
+meta = json.loads(Path(sys.argv[1]).read_text())
+expected = {
+    "source_sha256": sys.argv[2],
+    "canonical_pubkey_fingerprint": sys.argv[3],
+    "policy_id": sys.argv[4],
+    "policy_version": sys.argv[5],
+    "policy_mode": sys.argv[6],
+}
+for key, value in expected.items():
+    if str(meta.get(key, "")) != value:
+        raise SystemExit(1)
+PY
+  then
+    SKIP_RETRAIN=1
+  fi
+fi
+
+if [ "$SKIP_RETRAIN" = "0" ]; then
+  SOUNIO_POLICY_SIGNING_KEY_PATH="$OMEGA_CANONICAL_PRIVKEY" \
+  SOUNIO_POLICY_VERIFY_KEY_PATH="$OMEGA_CANONICAL_PUBKEY" \
+    "$SOUC_BIN" opt policy train \
+    --corpus "$CORPUS_PATH" \
+    --output "$OUT_PATH" \
+    --policy-id "$POLICY_ID" \
+    --policy-version "$POLICY_VERSION" \
+    --mode "$POLICY_MODE" >/dev/null
+
+  python3 - "$META_PATH" "$SOURCE_SHA" "$OMEGA_CANONICAL_PUBKEY_FINGERPRINT" "$POLICY_ID" "$POLICY_VERSION" "$POLICY_MODE" "$OUT_PATH" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+payload = {
+    "schema": "sounio.omega.policy-smoke-meta.v1",
+    "generated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    "source_sha256": sys.argv[2],
+    "canonical_pubkey_fingerprint": sys.argv[3],
+    "policy_id": sys.argv[4],
+    "policy_version": sys.argv[5],
+    "policy_mode": sys.argv[6],
+    "status_policy_path": sys.argv[7],
+}
+Path(sys.argv[1]).write_text(json.dumps(payload, indent=2))
+PY
+fi
+
+"$CANONICAL_POLICY_SIGN_SCRIPT" \
+  --policy "$OUT_PATH" \
+  --out "$OUT_PATH" \
+  --souc "$SOUC_BIN" \
+  --canonical-env "$CANONICAL_ENV_PATH" >/dev/null
 
 cat >"$ENV_OUT_PATH" <<EOF
 export SOUNIO_POLICY_STATUS_PATH="$OUT_PATH"

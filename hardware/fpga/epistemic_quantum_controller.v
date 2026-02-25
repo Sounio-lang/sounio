@@ -30,6 +30,7 @@ module epistemic_quantum_controller #(
     output reg  [WIDTH_VAR-1:0]    updated_var,
     output reg  [WIDTH_PROV-1:0]   updated_prov,
     output reg  [WIDTH_CONF-1:0]   updated_conf,
+    output reg  [31:0]             quantum_controller_inc,
 
     input  wire                    enable_fusion,
     output reg                     fusion_done
@@ -59,6 +60,7 @@ module epistemic_quantum_controller #(
             updated_var <= {WIDTH_VAR{1'b0}};
             updated_prov <= {WIDTH_PROV{1'b0}};
             updated_conf <= {WIDTH_CONF{1'b0}};
+            quantum_controller_inc <= 32'd0;
             fusion_done <= 1'b0;
 
             value_sq <= 128'd0;
@@ -143,8 +145,12 @@ module epistemic_quantum_controller #(
             beta_next <= beta + failure_shots;
             updated_conf <= {alpha_next, beta_next};
 
+            // Export a real hardware lane for downstream EpistemicPower accumulation.
+            // 32 aligns with accumulator's >>5 lane weighting to produce a visible unit step.
+            quantum_controller_inc <= 32'd32;
             fusion_done <= 1'b1;
         end else begin
+            quantum_controller_inc <= 32'd0;
             fusion_done <= 1'b0;
         end
     end

@@ -16,10 +16,12 @@
 #   GPU_KEY         — SSH private key path   (default: ~/.ssh/id_ed25519)
 #   GPU_PASS        — keyboard-interactive password for 2FA nodes (optional)
 #   REMOTE_DIR      — path on GPU host       (default: ~/work/sounio)
+#   REMOTE_CARGO_BIN— prepend remote cargo bin dir (default: ~/.cargo/bin)
 #   LOCAL_DIR       — local repo root        (default: auto-detected)
 #   GEMM_M/N/K      — matrix dimensions      (default: 4096)
 #   SM_MAJOR        — PTX SM version major   (default: auto from nvidia-smi)
 #   SKIP_BUILD      — set to 1 to skip cargo build (reuse previous binary)
+#   CONTRACT_PATH   — independence benchmark contract path
 
 set -euo pipefail
 
@@ -31,6 +33,8 @@ GEMM_N="${GEMM_N:-4096}"
 GEMM_K="${GEMM_K:-4096}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 GPU_PASS="${GPU_PASS:-}"   # keyboard-interactive password (2FA); set if needed
+CONTRACT_PATH="${CONTRACT_PATH:-benchmarks/independence/contract.v1.json}"
+REMOTE_CARGO_BIN="${REMOTE_CARGO_BIN:-\$HOME/.cargo/bin}"
 
 # Resolve GPU_HOST to IP for direct 100G path
 case "$GPU_HOST" in
@@ -59,6 +63,20 @@ echo "  Remote: $REMOTE_DIR"
 echo "  GEMM  : ${GEMM_M}×${GEMM_N}×${GEMM_K}"
 echo "======================================================================="
 
+if [ -f "$LOCAL_DIR/$CONTRACT_PATH" ]; then
+  echo "[contract] validating $CONTRACT_PATH ..."
+  python3 - "$LOCAL_DIR/$CONTRACT_PATH" <<'PY'
+import json
+import pathlib
+import sys
+
+obj = json.loads(pathlib.Path(sys.argv[1]).read_text())
+if obj.get("schema") != "sounio.independence.contract.v1":
+    raise SystemExit(f"invalid contract schema: {obj.get('schema')}")
+print(f"[contract] ok threshold={obj['performance_gate']['threshold']}")
+PY
+fi
+
 # ── 1. Sync repo (exclude build artefacts) ──────────────────────────────────
 echo ""
 echo "[1] Syncing repo to ${GPU_USER}@${GPU_HOST_IP}:$REMOTE_DIR ..."
@@ -74,8 +92,20 @@ echo "    sync done."
 # ── 2. Remote build + profile ────────────────────────────────────────────────
 echo ""
 echo "[2] Running on ${GPU_USER}@${GPU_HOST_IP} ..."
-$SSH_CMD -t "${GPU_USER}@${GPU_HOST_IP}" bash -s <<REMOTE_SCRIPT
+$SSH_CMD "${GPU_USER}@${GPU_HOST_IP}" bash -s <<REMOTE_SCRIPT
 set -euo pipefail
+
+if [ -d "${REMOTE_CARGO_BIN}" ]; then
+  export PATH="${REMOTE_CARGO_BIN}:\$PATH"
+fi
+
+echo ""
+echo "=== Rust toolchain ==="
+echo "cargo: \$(command -v cargo || echo 'not found')"
+echo "rustc: \$(command -v rustc || echo 'not found')"
+cargo --version || true
+rustc --version || true
+
 cd ${REMOTE_DIR}
 
 echo ""
@@ -97,7 +127,6 @@ echo "=== Epistemic GEMM profile (${GEMM_M}×${GEMM_N}×${GEMM_K}) ==="
 
 # Run the GPU unit tests — the roofline hook fires on every GEMM launch
 # and prints: [souc-gpu] epistemic_gemm M×K×N  ... GFLOPS  bound=...  eff=...%
-SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT=0 \
 SOUNIO_GPU_GEMM_M=${GEMM_M} \
 SOUNIO_GPU_GEMM_N=${GEMM_N} \
 SOUNIO_GPU_GEMM_K=${GEMM_K} \
@@ -107,13 +136,11 @@ SOUNIO_GPU_GEMM_K=${GEMM_K} \
 
 echo ""
 echo "=== Epistemic GEMM benchmark via souc run ==="
-SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT=0 \
   ./target/release/souc run benchmarks/cl44_vs_octonion.sio 2>/dev/null | \
   grep -E "Octonion|GFLOPS|BENCHMARK"
 
 echo ""
 echo "=== fMRI Equivariant demo (CPU validation) ==="
-SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT=0 \
   ./target/release/souc run experiments/02_fmri_equivariant/fmri_equivariant.sio 2>/dev/null | \
   grep -E "PASS|FAIL|Experiment 02 complete|r="
 

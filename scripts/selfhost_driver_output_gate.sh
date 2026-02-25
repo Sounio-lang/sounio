@@ -15,7 +15,6 @@ TIMEOUT_SECS="${TIMEOUT_SECS:-60}"
 BUILD_TIMEOUT_SECS="${BUILD_TIMEOUT_SECS:-600}"
 
 STRICT_MODE="${SOUNIO_SELFHOST_STRICT:-1}"
-REQUIRE_DRIVER_OUTPUT="${SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT:-1}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -87,8 +86,6 @@ run_case() {
   set +e
   run_with_timeout "$TIMEOUT_SECS" env \
     SOUNIO_SELFHOST_STRICT="$STRICT_MODE" \
-    SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT="$REQUIRE_DRIVER_OUTPUT" \
-    SOUNIO_SELFHOST_PIPELINE="driver" \
     "$SOUC_BIN" run "$program_path" >"$stdout_file" 2>"$stderr_file"
   local code=$?
   set -e
@@ -130,7 +127,6 @@ echo "SELFHOST_DRIVER_OUTPUT_GATE_START"
 echo "work_dir=$WORK_DIR"
 echo "timeout_secs=$TIMEOUT_SECS"
 echo "strict_mode=$STRICT_MODE"
-echo "require_driver_output=$REQUIRE_DRIVER_OUTPUT"
 echo "program_dir=$PROGRAM_DIR"
 
 set +e

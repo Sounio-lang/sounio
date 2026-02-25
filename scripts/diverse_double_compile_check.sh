@@ -34,6 +34,8 @@ CLANG_TARGET_DIR="${CLANG_TARGET_DIR:-$ROOT_DIR/target/ddc-clang}"
 GCC_BIN="$GCC_TARGET_DIR/debug/souc"
 CLANG_BIN="$CLANG_TARGET_DIR/debug/souc"
 SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
+BOOTSTRAP_BUNDLE_DIR="${BOOTSTRAP_BUNDLE_DIR:-$ROOT_DIR/bootstrap}"
+INDEPENDENCE_CONTRACT_PATH="${INDEPENDENCE_CONTRACT_PATH:-$ROOT_DIR/benchmarks/independence/contract.v1.json}"
 WORK_DIR="${WORK_DIR:-/tmp/sounio-ddc}"
 LOG_DIR="$WORK_DIR/logs"
 REF_PROGRAM=""
@@ -60,6 +62,20 @@ echo "DDC_CHECK_START"
 echo "gcc_target=$GCC_TARGET_DIR"
 echo "clang_target=$CLANG_TARGET_DIR"
 echo "stdlib=$SOUNIO_STDLIB_PATH"
+echo "bootstrap_bundle=$BOOTSTRAP_BUNDLE_DIR"
+echo "independence_contract=$INDEPENDENCE_CONTRACT_PATH"
+
+if [ -f "$INDEPENDENCE_CONTRACT_PATH" ]; then
+  python3 - "$INDEPENDENCE_CONTRACT_PATH" <<'PY'
+import json
+import pathlib
+import sys
+
+obj = json.loads(pathlib.Path(sys.argv[1]).read_text())
+if obj.get("schema") != "sounio.independence.contract.v1":
+    raise SystemExit(f"invalid independence contract schema: {obj.get('schema')}")
+PY
+fi
 
 # ── dependency check ─────────────────────────────────────────────────────────
 require_tool() {
@@ -130,6 +146,14 @@ fi
 # ── run both binaries ────────────────────────────────────────────────────────
 GCC_OUT="$WORK_DIR/out-gcc.txt"
 CLANG_OUT="$WORK_DIR/out-clang.txt"
+
+echo ""
+echo "── verifying signed bootstrap bundle (GCC-built souc) ──────────────────"
+"$GCC_BIN" bootstrap verify --bundle "$BOOTSTRAP_BUNDLE_DIR" > "$LOG_DIR/bootstrap-verify-gcc.log" 2>&1
+
+echo ""
+echo "── verifying signed bootstrap bundle (Clang-built souc) ────────────────"
+"$CLANG_BIN" bootstrap verify --bundle "$BOOTSTRAP_BUNDLE_DIR" > "$LOG_DIR/bootstrap-verify-clang.log" 2>&1
 
 echo ""
 echo "── running GCC-built souc ──────────────────────────────────────────────"

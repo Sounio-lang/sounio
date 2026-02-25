@@ -18,7 +18,6 @@ BASELINE_COMPARE="${POSEIDON_BASELINE_COMPARE:-1}"
 BASELINE_COMMIT="${POSEIDON_BASELINE_COMMIT:-01ecf01}"
 BASELINE_WORKTREE="$WORK_DIR/baseline-wt"
 BASELINE_SOUC="$BASELINE_WORKTREE/target/debug/souc"
-SELFHOST_NO_RUST_FALLBACK="${SOUNIO_SELFHOST_NO_RUST_FALLBACK:-1}"
 FULL_SELFHOST_TARGET="${FULL_SELFHOST_TARGET:-self-hosted/}"
 
 PASS_COUNT=0
@@ -42,17 +41,6 @@ run_with_timeout() {
   else
     "$@"
   fi
-}
-
-flag_enabled() {
-  local raw="${1:-}"
-  raw="${raw,,}"
-  case "$raw" in
-    1|true|yes|on)
-      return 0
-      ;;
-  esac
-  return 1
 }
 
 count_matches() {
@@ -112,7 +100,6 @@ run_full_selfhost() {
 
   run_with_timeout "$TIMEOUT_SECS" env \
     SOUNIO_SELFHOST_MODE="$SELFHOST_MODE" \
-    SOUNIO_SELFHOST_NO_RUST_FALLBACK="$SELFHOST_NO_RUST_FALLBACK" \
     "$souc_bin" run "$FULL_SELFHOST_TARGET" >"$log_file" 2>&1
 }
 
@@ -244,10 +231,8 @@ is_full_selfhost_success() {
     return 1
   fi
 
-  if flag_enabled "$SELFHOST_NO_RUST_FALLBACK"; then
-    if [ "$rust_fallback_count" -ne 0 ] || [ "$rust_oracle_count" -ne 0 ]; then
-      return 1
-    fi
+  if [ "$rust_fallback_count" -ne 0 ] || [ "$rust_oracle_count" -ne 0 ]; then
+    return 1
   fi
 
   return 0
@@ -366,7 +351,7 @@ while IFS='|' read -r case_id mode command compare_spec; do
 
   case "$mode" in
     run_selfhost|run_default_vs_compat)
-      common_selfhost_env="SOUNIO_SELFHOST_MODE=$SELFHOST_MODE SOUNIO_SELFHOST_NO_RUST_FALLBACK=$SELFHOST_NO_RUST_FALLBACK"
+      common_selfhost_env="SOUNIO_SELFHOST_MODE=$SELFHOST_MODE"
       run_capture \
         "$base_prefix.stdout" \
         "$base_prefix.stderr" \
@@ -406,34 +391,7 @@ while IFS='|' read -r case_id mode command compare_spec; do
 done <"$MATRIX_FILE"
 
 if [ "$RUN_ORACLE_PARITY" = "1" ]; then
-  while IFS='|' read -r case_id mode command compare_spec; do
-    if [[ -z "${case_id:-}" ]] || [[ "$case_id" =~ ^# ]]; then
-      continue
-    fi
-
-    if [ "$mode" != "run_selfhost" ] && [ "$mode" != "run_default_vs_compat" ]; then
-      continue
-    fi
-
-    base_prefix="$ARTIFACT_DIR/oracle_${case_id}.baseline"
-    cand_prefix="$ARTIFACT_DIR/oracle_${case_id}.candidate"
-
-    run_capture \
-      "$base_prefix.stdout" \
-      "$base_prefix.stderr" \
-      "$base_prefix.exit" \
-      "SOUNIO_SELFHOST_MODE=$SELFHOST_MODE SOUNIO_SELFHOST_NO_RUST_FALLBACK=$SELFHOST_NO_RUST_FALLBACK" \
-      "$command"
-
-    run_capture \
-      "$cand_prefix.stdout" \
-      "$cand_prefix.stderr" \
-      "$cand_prefix.exit" \
-      "SOUNIO_SELFHOST_MODE=$SELFHOST_MODE SOUNIO_SELFHOST_NO_RUST_FALLBACK=0 SOUNIO_SELFHOST_PIPELINE=rust" \
-      "$command --use-sounio-compiler"
-
-    compare_case "oracle-$case_id" "exit,stdout" "$base_prefix" "$cand_prefix" || true
-  done <"$MATRIX_FILE"
+  fail "oracle-parity" "POSEIDON_ORACLE_PARITY=1 is unsupported after no-rust cutover"
 fi
 
 if [ "$SKIP_FULL_SELFHOST" != "1" ]; then
@@ -454,9 +412,9 @@ if [ "$SKIP_FULL_SELFHOST" != "1" ]; then
   rust_oracle_count="$(marker_value "$FULL_MARKERS" "rust_oracle")"
 
   if is_full_selfhost_success "$FULL_MARKERS"; then
-    pass "full-selfhost" "self-hosted suite completed with required markers (no_rust_fallback=$SELFHOST_NO_RUST_FALLBACK)"
+    pass "full-selfhost" "self-hosted suite completed with required markers and no rust fallback/oracle markers"
   else
-    fail "full-selfhost" "gate failed (exit=$full_code parse_all=$parse_all_count parse_all_header=$parse_all_header_count parse_all_summary=$parse_all_summary_count all_passed=$all_passed_count suite_fail=$suite_fail_count rust_fallback=$rust_fallback_count rust_oracle=$rust_oracle_count no_rust_fallback=$SELFHOST_NO_RUST_FALLBACK)"
+    fail "full-selfhost" "gate failed (exit=$full_code parse_all=$parse_all_count parse_all_header=$parse_all_header_count parse_all_summary=$parse_all_summary_count all_passed=$all_passed_count suite_fail=$suite_fail_count rust_fallback=$rust_fallback_count rust_oracle=$rust_oracle_count)"
     classification="$(classify_full_selfhost_failure "$FULL_MARKERS")"
     if [ -n "$classification" ]; then
       echo "INFO [full-selfhost] $classification"

@@ -202,7 +202,13 @@ def run_invocation(
 ) -> InvocationResult:
     env = os.environ.copy()
     if isinstance(backend, str) and backend:
-        env["SOUNIO_SELFHOST_PIPELINE"] = backend
+        normalized = backend.strip().lower()
+        # Legacy pipeline env knobs were removed in no-rust cutover builds.
+        # Keep backend intent in a neutral marker for test doubles and map
+        # real runtime selection to the supported executor contract.
+        env["SOUNIO_PARITY_BACKEND"] = normalized
+        if normalized in {"driver", "native-driver"}:
+            env["SOUNIO_SELFHOST_EXECUTOR"] = "native-driver"
     timed_out = False
     try:
         completed = subprocess.run(
@@ -570,7 +576,7 @@ def run_self_test() -> int:
                     "",
                     "def main() -> int:",
                     "    args = sys.argv[1:]",
-                    "    backend = os.environ.get('SOUNIO_SELFHOST_PIPELINE', 'inherit')",
+                    "    backend = os.environ.get('SOUNIO_PARITY_BACKEND', 'inherit')",
                     "    if args == ['--help']:",
                     "        sys.stdout.write('Sounio compiler\\nUSAGE\\nCOMMANDS\\n')",
                     "        return 0",

@@ -18,9 +18,11 @@ module tb_epistemic_quantum_controller;
     wire [63:0] updated_var;
     wire [255:0] updated_prov;
     wire [127:0] updated_conf;
+    wire [31:0] quantum_controller_inc;
     wire fusion_done;
 
     integer failures;
+    reg [1023:0] dumpfile_path;
 
     epistemic_quantum_controller dut (
         .clk(clk),
@@ -38,6 +40,7 @@ module tb_epistemic_quantum_controller;
         .updated_var(updated_var),
         .updated_prov(updated_prov),
         .updated_conf(updated_conf),
+        .quantum_controller_inc(quantum_controller_inc),
         .enable_fusion(enable_fusion),
         .fusion_done(fusion_done)
     );
@@ -56,6 +59,12 @@ module tb_epistemic_quantum_controller;
     endtask
 
     initial begin
+        if (!$value$plusargs("dumpfile=%s", dumpfile_path)) begin
+            dumpfile_path = "artifacts/fpga/waveforms/tb_epistemic_quantum_controller.vcd";
+        end
+        $dumpfile(dumpfile_path);
+        $dumpvars(0, tb_epistemic_quantum_controller);
+
         clk = 0;
         rst_n = 0;
         classical_value = 64'd0;
@@ -92,11 +101,13 @@ module tb_epistemic_quantum_controller;
         expect_true(updated_prov != classical_prov, "provenance updated");
         expect_true(updated_conf[127:64] >= 64'd10, "alpha updated");
         expect_true(updated_conf[63:0] >= 64'd20, "beta updated");
+        expect_true(quantum_controller_inc == 32'd32, "quantum controller lane pulse");
 
         // Case 2: disable fusion returns fusion_done low.
         enable_fusion = 1'b0;
         #10;
         expect_true(fusion_done == 1'b0, "fusion_done deasserted when disabled");
+        expect_true(quantum_controller_inc == 32'd0, "quantum controller lane clears");
 
         if (failures != 0) begin
             $display("FAIL tb_epistemic_quantum_controller cases=%0d", failures);

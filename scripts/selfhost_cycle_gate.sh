@@ -23,8 +23,8 @@ SEED_SIG_PATH="${SOUNIO_SELFHOST_CYCLE_SEED_SIG_PATH:-${SEED_PATH}.sig}"
 CYCLE_FORCE_DYNAMIC="${SOUNIO_SELFHOST_CYCLE_FORCE_DYNAMIC:-1}"
 NO_RUST_MARKER_ENFORCE="${SOUNIO_SELFHOST_CYCLE_NO_RUST_MARKER_ENFORCE:-1}"
 NO_RUST_MARKER_TIMEOUT_SECS="${SOUNIO_SELFHOST_CYCLE_NO_RUST_MARKER_TIMEOUT_SECS:-30}"
-NO_RUST_HARNESS="${SOUNIO_SELFHOST_CYCLE_NO_RUST_HARNESS:-1}"
 BOOTSTRAP_MANIFEST_PATH="${BOOTSTRAP_MANIFEST_PATH:-${SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST:-bootstrap/selfhost-kernel.manifest}}"
+INDEPENDENCE_CONTRACT_PATH="${INDEPENDENCE_CONTRACT_PATH:-benchmarks/independence/contract.v1.json}"
 
 if [ "$CYCLE_FORCE_DYNAMIC" = "1" ]; then
   # Cycle reproducibility should remain testable even when a seed is present.
@@ -80,8 +80,20 @@ echo "seed_enforce=$SEED_ENFORCE"
 echo "seed_path=$SEED_PATH"
 echo "cycle_force_dynamic=$CYCLE_FORCE_DYNAMIC"
 echo "no_rust_marker_enforce=$NO_RUST_MARKER_ENFORCE"
-echo "no_rust_harness=$NO_RUST_HARNESS"
 echo "bootstrap_manifest=$BOOTSTRAP_MANIFEST_PATH"
+echo "independence_contract=$INDEPENDENCE_CONTRACT_PATH"
+
+if [ -f "$INDEPENDENCE_CONTRACT_PATH" ]; then
+  python3 - "$INDEPENDENCE_CONTRACT_PATH" <<'PY'
+import json
+import pathlib
+import sys
+
+obj = json.loads(pathlib.Path(sys.argv[1]).read_text())
+if obj.get("schema") != "sounio.independence.contract.v1":
+    raise SystemExit(f"invalid independence contract schema: {obj.get('schema')}")
+PY
+fi
 
 if [ "$SKIP_BUILD" = "1" ]; then
   : >"$BUILD_LOG"
@@ -147,9 +159,6 @@ run_with_timeout "$COMPILE_TIMEOUT_SECS" env \
   SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST="$BOOTSTRAP_MANIFEST_PATH" \
   SOUNIO_SELFHOST_STRICT_MODULE_GATING="1" \
   SOUNIO_SELFHOST_WRITE_DIR_CACHE="1" \
-  SOUNIO_SELFHOST_NO_RUST_HARNESS="$NO_RUST_HARNESS" \
-  SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT="0" \
-  SOUNIO_SELFHOST_PIPELINE="driver" \
   "$SOUC_BIN" run self-hosted/ -- parse-all shard 0 1 balanced >"$STAGE1_LOG" 2>&1
 
 capture_stage_artifact "stage1" "$STAGE1_LOG" "$STAGE1_PATH"
@@ -164,9 +173,6 @@ run_with_timeout "$COMPILE_TIMEOUT_SECS" env \
   SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST="$BOOTSTRAP_MANIFEST_PATH" \
   SOUNIO_SELFHOST_STRICT_MODULE_GATING="1" \
   SOUNIO_SELFHOST_WRITE_DIR_CACHE="1" \
-  SOUNIO_SELFHOST_NO_RUST_HARNESS="$NO_RUST_HARNESS" \
-  SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT="0" \
-  SOUNIO_SELFHOST_PIPELINE="driver" \
   "$SOUC_BIN" run self-hosted/ -- parse-all shard 0 1 balanced >"$STAGE2_LOG" 2>&1
 
 capture_stage_artifact "stage2" "$STAGE2_LOG" "$STAGE2_PATH"

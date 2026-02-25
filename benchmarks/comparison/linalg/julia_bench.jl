@@ -1,5 +1,6 @@
 # Benchmark: QR Decomposition — Julia equivalent
 # Hand-rolled Householder QR on 4x4 matrices (no LinearAlgebra.qr) for fair comparison.
+using LinearAlgebra
 
 function mat_get(data, rows, cols, r, c)
     return data[r * cols + c + 1]  # Julia is 1-indexed
@@ -37,8 +38,6 @@ function qr_householder!(A::Matrix{Float64})
 end
 
 function main()
-    using LinearAlgebra
-
     A = [4.0 1.0 2.0 1.0;
          1.0 3.0 1.0 2.0;
          2.0 1.0 5.0 1.0;

@@ -15,7 +15,6 @@ TIMEOUT_SECS="${TIMEOUT_SECS:-60}"
 BUILD_TIMEOUT_SECS="${BUILD_TIMEOUT_SECS:-600}"
 
 STRICT_MODE="${SOUNIO_SELFHOST_STRICT:-1}"
-REQUIRE_DRIVER_OUTPUT="${SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT:-1}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -33,21 +32,21 @@ fail() {
 
 init_parity_matrix() {
   cat >"$PARITY_MATRIX_FILE" <<'EOF'
-case_id	program	driver_exit	rust_exit	driver_output_marker	stdout_parity	parity
+case_id	program	primary_exit	replay_exit	driver_output_marker	stdout_parity	parity
 EOF
 }
 
 append_parity_row() {
   local case_id="$1"
   local program_path="$2"
-  local driver_exit="$3"
-  local rust_exit="$4"
+  local primary_exit="$3"
+  local replay_exit="$4"
   local marker_status="$5"
   local stdout_status="$6"
   local parity_status="$7"
 
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$case_id" "$program_path" "$driver_exit" "$rust_exit" "$marker_status" "$stdout_status" "$parity_status" \
+    "$case_id" "$program_path" "$primary_exit" "$replay_exit" "$marker_status" "$stdout_status" "$parity_status" \
     >>"$PARITY_MATRIX_FILE"
 
   if [ "$parity_status" != "ok" ]; then
@@ -101,9 +100,9 @@ run_case() {
   local driver_stderr_file="$LOG_DIR/${case_id}.driver.stderr"
   local driver_exit_file="$ARTIFACT_DIR/${case_id}.driver.exit"
 
-  local rust_stdout_file="$LOG_DIR/${case_id}.rust.stdout"
-  local rust_stderr_file="$LOG_DIR/${case_id}.rust.stderr"
-  local rust_exit_file="$ARTIFACT_DIR/${case_id}.rust.exit"
+  local replay_stdout_file="$LOG_DIR/${case_id}.replay.stdout"
+  local replay_stderr_file="$LOG_DIR/${case_id}.replay.stderr"
+  local replay_exit_file="$ARTIFACT_DIR/${case_id}.replay.exit"
   local driver_marker_status="missing"
   local stdout_status="mismatch"
   local parity_status="fail"
@@ -115,8 +114,6 @@ run_case() {
   set +e
   run_with_timeout "$TIMEOUT_SECS" env \
     SOUNIO_SELFHOST_STRICT="$STRICT_MODE" \
-    SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT="$REQUIRE_DRIVER_OUTPUT" \
-    SOUNIO_SELFHOST_PIPELINE="driver" \
     "$SOUC_BIN" run "$program_path" >"$driver_stdout_file" 2>"$driver_stderr_file"
   local driver_code=$?
   set -e
@@ -125,13 +122,10 @@ run_case() {
   set +e
   run_with_timeout "$TIMEOUT_SECS" env \
     SOUNIO_SELFHOST_STRICT="$STRICT_MODE" \
-    SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT="0" \
-    SOUNIO_SELFHOST_PIPELINE="rust" \
-    SOUNIO_RUST_GHOST="1" \
-    "$SOUC_BIN" run "$program_path" >"$rust_stdout_file" 2>"$rust_stderr_file"
-  local rust_code=$?
+    "$SOUC_BIN" run "$program_path" >"$replay_stdout_file" 2>"$replay_stderr_file"
+  local replay_code=$?
   set -e
-  echo "$rust_code" >"$rust_exit_file"
+  echo "$replay_code" >"$replay_exit_file"
 
   if command -v rg >/dev/null 2>&1; then
     if rg -n "SELFHOST=driver-first schema=v1 event=driver_output entrypoint=bootstrap::driver::compile_file status=ok" "$driver_stderr_file" >/dev/null; then
@@ -143,11 +137,11 @@ run_case() {
     fi
   fi
 
-  if cmp -s "$driver_stdout_file" "$rust_stdout_file"; then
+  if cmp -s "$driver_stdout_file" "$replay_stdout_file"; then
     stdout_status="ok"
   fi
 
-  if [ "$driver_code" -eq 0 ] && [ "$rust_code" -eq 0 ] \
+  if [ "$driver_code" -eq 0 ] && [ "$replay_code" -eq 0 ] \
     && [ "$driver_marker_status" = "ok" ] && [ "$stdout_status" = "ok" ]; then
     parity_status="ok"
   fi
@@ -156,24 +150,24 @@ run_case() {
     "$case_id" \
     "$program_path" \
     "$driver_code" \
-    "$rust_code" \
+    "$replay_code" \
     "$driver_marker_status" \
     "$stdout_status" \
     "$parity_status"
 
   if [ "$parity_status" = "ok" ]; then
-    pass "$case_id" "driver_output stdout matches rust pipeline"
+    pass "$case_id" "driver_output stdout stable across replay run"
     return 0
   fi
 
   if [ "$driver_code" -ne 0 ]; then
-    fail "$case_id" "driver pipeline non-zero exit (exit=$driver_code)"
-  elif [ "$rust_code" -ne 0 ]; then
-    fail "$case_id" "rust pipeline non-zero exit (exit=$rust_code)"
+    fail "$case_id" "primary run non-zero exit (exit=$driver_code)"
+  elif [ "$replay_code" -ne 0 ]; then
+    fail "$case_id" "replay run non-zero exit (exit=$replay_code)"
   elif [ "$driver_marker_status" != "ok" ]; then
     fail "$case_id" "missing driver_output marker (driver_stderr=$driver_stderr_file)"
   else
-    fail "$case_id" "stdout mismatch (driver=$driver_stdout_file rust=$rust_stdout_file)"
+    fail "$case_id" "stdout mismatch (primary=$driver_stdout_file replay=$replay_stdout_file)"
   fi
 
   return 1
@@ -192,7 +186,6 @@ echo "SELFHOST_DRIVER_OUTPUT_PARITY_GATE_START"
 echo "work_dir=$WORK_DIR"
 echo "timeout_secs=$TIMEOUT_SECS"
 echo "strict_mode=$STRICT_MODE"
-echo "require_driver_output=$REQUIRE_DRIVER_OUTPUT"
 echo "program_dir=$PROGRAM_DIR"
 
 set +e

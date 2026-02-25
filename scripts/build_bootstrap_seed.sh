@@ -65,9 +65,7 @@ run_with_timeout "$SEED_TIMEOUT_SECS" env \
   SOUNIO_BOOTSTRAP_SEED_PATH="/tmp/sounio-seed-build-missing-${PPID}-${BASHPID}.sio.bin" \
   SOUNIO_SELFHOST_STRICT_MODULE_GATING="1" \
   SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST="$BOOTSTRAP_KERNEL_MANIFEST_PATH" \
-  SOUNIO_SELFHOST_PIPELINE="driver" \
   SOUNIO_SELFHOST_WRITE_DIR_CACHE="1" \
-  SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT="0" \
   "$SOUC_BIN" run self-hosted/ -- parse-all shard 0 1 balanced >/tmp/sounio-seed-build.log 2>&1 || {
     cat /tmp/sounio-seed-build.log >&2 || true
     if [[ "$SEED_FALLBACK_ENABLED" != "1" ]]; then

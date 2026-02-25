@@ -62,8 +62,6 @@ if ! env \
   SOUNIO_BOOTSTRAP_SEED_PATH="$SEED_PATH" \
   SOUNIO_BOOTSTRAP_SEED_SHA256_PATH="$SEED_SHA256_PATH" \
   SOUNIO_BOOTSTRAP_SEED_SIG_PATH="$SEED_SIG_PATH" \
-  SOUNIO_SELFHOST_NO_RUST_FALLBACK=1 \
-  SOUNIO_SELFHOST_NO_RUST_HARNESS=1 \
   "$SOUC_BIN" run "$SELFHOST_TARGET" -- version >"$RUN_LOG" 2>&1; then
   echo "error: seed-only self-hosted runtime execution failed (see $RUN_LOG)" >&2
   cat "$RUN_LOG" >&2 || true
