@@ -388,6 +388,66 @@ pub fn msgpack_encode(value: &MsgPackValue) -> Vec<u8> with Alloc, Mut, Div, Pan
     buf
 }
 
+// Encodes a MessagePack ext type: fixext (len 1/2/4/8/16) or ext8/ext16/ext32.
+// MessagePack spec §2.4: https://github.com/msgpack/msgpack/blob/master/spec.md
+fn encode_ext(buf: &!Vec<u8>, type_id: i8, data: &Vec<u8>) with Alloc, Mut, Div, Panic {
+    let len = data.len();
+    let tid = type_id as u8;
+
+    // Prefer fixext formats for power-of-two lengths
+    if len == 1 {
+        buf.push(212); // 0xd4 = fixext 1
+        buf.push(tid);
+        buf.push(data[0]);
+        return
+    } else if len == 2 {
+        buf.push(213); // 0xd5 = fixext 2
+        buf.push(tid);
+        buf.push(data[0]); buf.push(data[1]);
+        return
+    } else if len == 4 {
+        buf.push(214); // 0xd6 = fixext 4
+        buf.push(tid);
+        var i: usize = 0; while i < 4 { buf.push(data[i]); i = i + 1 }
+        return
+    } else if len == 8 {
+        buf.push(215); // 0xd7 = fixext 8
+        buf.push(tid);
+        var i: usize = 0; while i < 8 { buf.push(data[i]); i = i + 1 }
+        return
+    } else if len == 16 {
+        buf.push(216); // 0xd8 = fixext 16
+        buf.push(tid);
+        var i: usize = 0; while i < 16 { buf.push(data[i]); i = i + 1 }
+        return
+    }
+
+    // Variable-length ext formats
+    if len <= 255 {
+        buf.push(199); // 0xc7 = ext8
+        buf.push(len as u8);
+        buf.push(tid);
+    } else if len <= 65535 {
+        buf.push(200); // 0xc8 = ext16
+        buf.push((len >> 8) as u8);
+        buf.push(len as u8);
+        buf.push(tid);
+    } else {
+        buf.push(201); // 0xc9 = ext32
+        buf.push((len >> 24) as u8);
+        buf.push((len >> 16) as u8);
+        buf.push((len >> 8) as u8);
+        buf.push(len as u8);
+        buf.push(tid);
+    }
+
+    var i: usize = 0;
+    while i < len {
+        buf.push(data[i]);
+        i = i + 1
+    }
+}
+
 fn encode_value(buf: &!Vec<u8>, value: &MsgPackValue) with Alloc, Mut, Div, Panic {
     if value.tag == TAG_NIL {
         buf.push(192); // 0xc0
@@ -412,7 +472,9 @@ fn encode_value(buf: &!Vec<u8>, value: &MsgPackValue) with Alloc, Mut, Div, Pani
     } else if value.tag == TAG_MAP {
         encode_map(buf, &value.map_val);
     }
-    // TAG_EXT not handled in stub
+    } else if value.tag == TAG_EXT {
+        encode_ext(buf, value.ext_type_id, &value.ext_data);
+    }
 }
 
 fn encode_pos_int(buf: &!Vec<u8>, n: u64) with Alloc {

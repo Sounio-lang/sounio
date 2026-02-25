@@ -451,13 +451,88 @@ fn simulate_multiple_dose(
     t_end: f64@h,
     route: i32
 ) -> SimulationResult {
-    let config = SimulationConfig::multiple_dose(dose, interval, n_doses, t_end, route);
-    
-    // For multiple dosing, we need to add doses at intervals
-    // This is simplified - full implementation would add doses at t = 0, interval, 2*interval, etc.
-    // For now, simulate single dose (TODO: implement multiple dosing loop)
-    
-    return run_pbpk_simulation(drug, patient, config);
+    // Set up patient-scaled params (mirrors run_pbpk_simulation setup)
+    let base_params = create_default_pbpk_params()
+    var params = scale_params_for_patient(base_params, patient)
+    let kps = calculate_drug_params(drug)
+    params.kp_adipose = kps.kp_adipose
+    params.kp_bone = kps.kp_bone
+    params.kp_brain = kps.kp_brain
+    params.kp_gut = kps.kp_gut
+    params.kp_heart = kps.kp_heart
+    params.kp_kidney = kps.kp_kidney
+    params.kp_liver = kps.kp_liver
+    params.kp_lung = kps.kp_lung
+    params.kp_muscle = kps.kp_muscle
+    params.kp_skin = kps.kp_skin
+    params.kp_spleen = kps.kp_spleen
+    params.kp_pancreas = kps.kp_pancreas
+    params.kp_rest = 1.0
+    params.clearance_hepatic = drug.cl_hepatic
+    params.clearance_renal = drug.cl_renal
+
+    let dt = 0.01@h
+
+    // Initialize state with first dose
+    var state = if route == 0 {
+        create_iv_bolus_state(dose, params)
+    } else {
+        create_oral_dose_state(dose, drug.f_oral)
+    }
+
+    var t = 0.0@h
+    var cmax = 0.0@mg_per_L
+    var tmax = 0.0@h
+    var auc = 0.0@mg_h_per_L
+    var c_prev = state.c_blood
+    var dose_count: i32 = 1
+    var next_dose_t = interval
+
+    let t_early = t_end * 0.25
+    let t_late = t_end * 0.75
+    var c_early = 0.0@mg_per_L
+    var c_late = 0.0@mg_per_L
+
+    while t < t_end {
+        // Inject subsequent doses at each dosing interval
+        if t >= next_dose_t && dose_count < n_doses {
+            if route == 0 {
+                // IV: add dose directly to blood compartment (dose/volume → concentration)
+                state.c_blood = state.c_blood + dose / params.v_blood
+            } else {
+                // Oral: add bioavailable dose fraction to gut lumen for absorption
+                state.a_gut_lumen = state.a_gut_lumen + dose * drug.f_oral
+            }
+            dose_count = dose_count + 1
+            next_dose_t = next_dose_t + interval
+        }
+
+        state = rk4_step_pbpk(state, params, drug, t, dt)
+        t = t + dt
+
+        if state.c_blood > cmax { cmax = state.c_blood; tmax = t }
+        auc = auc + ((c_prev + state.c_blood) / 2.0) * dt
+        c_prev = state.c_blood
+
+        if t >= t_early && c_early == 0.0@mg_per_L { c_early = state.c_blood }
+        if t >= t_late && c_late == 0.0@mg_per_L { c_late = state.c_blood }
+    }
+
+    let half_life = calculate_half_life_from_curve(c_early, c_late, t_early, t_late)
+    let f_bioavail = if route == 0 { 1.0 } else { drug.f_oral }
+    let clearance = calculate_clearance_from_auc(dose, auc, f_bioavail)
+    let vdss = calculate_vdss_from_cl_thalf(clearance, half_life)
+
+    SimulationResult {
+        cmax_plasma: cmax,
+        tmax: tmax,
+        auc_0_inf: auc,
+        half_life: half_life,
+        clearance: clearance,
+        vdss: vdss,
+        final_state: state,
+        success: true
+    }
 }
 
 // ============================================================================
