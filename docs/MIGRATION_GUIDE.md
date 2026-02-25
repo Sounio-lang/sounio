@@ -575,19 +575,26 @@ diff -u s1.txt s2.txt
 
 ### Q7: Can I still use the Rust compiler?
 
-**A**: The Rust compiler still exists but is deprecated for self-hosted code. It's used only for Stage 0 bootstrap.
+**A**: Rust-bridge self-host transition toggles are removed in cutover builds.
+The following env vars now hard-error with migration guidance:
 
-For production use, the self-hosted compiler is now the canonical implementation.
+- `SOUNIO_SELFHOST_PIPELINE`
+- `SOUNIO_RUST_GHOST`
+- `SOUNIO_SELFHOST_NO_RUST_FALLBACK`
+- `SOUNIO_SELFHOST_NO_RUST_HARNESS`
+- `SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT`
 
-If you must temporarily force the legacy Rust pipeline for transition debugging, opt in explicitly:
+Use signed bundle/state commands instead:
 
 ```bash
-SOUNIO_SELFHOST_PIPELINE=rust SOUNIO_RUST_GHOST=1 cargo run -- run your_program.sio
+souc bootstrap verify --bundle bootstrap
+souc bootstrap init --bundle bootstrap --state .sounio-state
+souc bootstrap cycle --state .sounio-state
+souc opt policy train --corpus benchmarks --output bootstrap/policies/policy.v1.json
+souc opt policy eval --policy bootstrap/policies/policy.v1.json
+souc opt policy promote --policy bootstrap/policies/policy.v1.json --output bootstrap/policies/active/policy.v1.json
+souc opt policy status --policy bootstrap/policies/active/policy.v1.json
 ```
-
-Without `SOUNIO_RUST_GHOST=1`, `SOUNIO_SELFHOST_PIPELINE=rust` is routed back to the driver path.
-When ghost mode is enabled, stderr emits a deterministic marker:
-`SELFHOST=legacy-ghost schema=v1 event=transition_warning ...`
 
 ### Q8: How do I debug self-hosted code?
 

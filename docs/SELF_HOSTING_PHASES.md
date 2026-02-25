@@ -1,5 +1,22 @@
 # Sounio Self-Hosting Bootstrap Phases
 
+## Cutover Status (No-Rust Build+Run)
+
+Current cutover contract is bundle/state driven:
+
+- `souc bootstrap verify --bundle <dir>`
+- `souc bootstrap init --bundle <dir> --state <dir>`
+- `souc bootstrap cycle --state <dir>`
+- `souc opt policy train --corpus <path> --output <file>`
+- `souc opt policy eval --policy <file>`
+- `souc opt policy promote --policy <file> --output <file>`
+- `souc opt policy status --policy <file>`
+
+Artifacts are validated from `manifest.v2.json` with Ed25519 signatures.
+Legacy Rust-bridge transition env knobs are removed and treated as hard errors.
+Optimization policy decisions are tracked by `bootstrap/policies/policy.v1.json`
+(`schema = "sounio.optimization.policy.v1"`).
+
 ## Overview
 
 Sounio's self-hosting bootstrap is being implemented in 3 phases:

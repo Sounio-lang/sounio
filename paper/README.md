@@ -14,6 +14,7 @@ automatically propagate measurement uncertainty through computations.
 make        # Build PDF
 make arxiv  # Create arXiv submission tarball
 make clean  # Remove build artifacts
+./reproduce.sh  # Build + benchmark logs + reference checks
 ```
 
 ## Files
@@ -21,8 +22,10 @@ make clean  # Remove build artifacts
 - `paper.md` — JOSS paper source
 - `paper.bib` — JOSS bibliography
 - `sounio-epistemic-types.tex` — TeX preprint source
+- `sounio-ieee-cise.tex` — IEEE CiSE manuscript source
 - `references.bib` — TeX preprint bibliography
 - `Makefile` — TeX build script
+- `reproduce.sh` — end-to-end reproducibility script
 
 ## Target Venues
 

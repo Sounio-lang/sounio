@@ -3,6 +3,42 @@
 This document defines the transition seed artifact used to bootstrap the
 self-hosted compiler without runtime Rust compilation of the root suite.
 
+## R2 Cutover Update (No-Rust Contracts)
+
+Sounio now supports signed bundle/state bootstrap commands:
+
+- `souc bootstrap verify --bundle <dir>`
+- `souc bootstrap init --bundle <dir> --state <dir>`
+- `souc bootstrap cycle --state <dir>`
+
+The signed bundle contract is defined by `bootstrap/artifacts/manifest.v2.json`
+(`schema = "sounio.bootstrap.manifest.v2"`), with Ed25519 signatures on:
+
+- each artifact (`<artifact>.sig`)
+- the manifest (`manifest.v2.json.sig`)
+
+Optimization policy contract is defined by
+`bootstrap/policies/policy.v1.json`
+(`schema = "sounio.optimization.policy.v1"`). Policy promotion/evaluation uses:
+
+- `souc opt policy train --corpus <path> --output <file>`
+- `souc opt policy eval --policy <file>`
+- `souc opt policy promote --policy <file> --output <file>`
+- `souc opt policy status --policy <file>`
+
+Performance release gating contract is defined by
+`benchmarks/independence/contract.v1.json`
+(`schema = "sounio.independence.contract.v1"`).
+
+Legacy transition env contracts are removed and now hard-error with migration
+guidance:
+
+- `SOUNIO_SELFHOST_PIPELINE`
+- `SOUNIO_RUST_GHOST`
+- `SOUNIO_SELFHOST_NO_RUST_FALLBACK`
+- `SOUNIO_SELFHOST_NO_RUST_HARNESS`
+- `SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT`
+
 ## Artifact
 
 - Default path: `bootstrap/seeds/sounio-bootstrap-linux-x86_64.sio.bin`
@@ -66,9 +102,7 @@ self-host compilation paths.
 
 For `souc run self-hosted/`, seed-enforced wrapper mode activates when either:
 
-- `SOUNIO_BOOTSTRAP_SEED_ENFORCE=1`, or
-- transition legacy path is explicitly requested:
-  `SOUNIO_SELFHOST_PIPELINE=rust` + `SOUNIO_RUST_GHOST=1`.
+- `SOUNIO_BOOTSTRAP_SEED_ENFORCE=1`.
 
 In seed-enforced wrapper mode:
 

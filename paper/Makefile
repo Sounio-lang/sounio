@@ -1,22 +1,36 @@
-# Sounio ArXiv Paper Build
+# Sounio Paper Build
+# Targets: arxiv (preprint), ieee (CiSE submission)
 
-PAPER = sounio-epistemic-types
+PREPRINT = sounio-epistemic-types
+IEEE     = sounio-ieee-cise
 
-.PHONY: all clean arxiv
+.PHONY: all ieee arxiv clean
 
-all: $(PAPER).pdf
+all: ieee
 
-$(PAPER).pdf: $(PAPER).tex references.bib
-	pdflatex $(PAPER)
-	bibtex $(PAPER)
-	pdflatex $(PAPER)
-	pdflatex $(PAPER)
+# IEEE CiSE submission
+ieee: $(IEEE).pdf
 
-arxiv: $(PAPER).pdf
+$(IEEE).pdf: $(IEEE).tex references.bib
+	pdflatex $(IEEE)
+	bibtex $(IEEE)
+	pdflatex $(IEEE)
+	pdflatex $(IEEE)
+
+# ArXiv preprint
+arxiv: $(PREPRINT).pdf
+
+$(PREPRINT).pdf: $(PREPRINT).tex references.bib
+	pdflatex $(PREPRINT)
+	bibtex $(PREPRINT)
+	pdflatex $(PREPRINT)
+	pdflatex $(PREPRINT)
+
+arxiv-tar: $(PREPRINT).pdf
 	mkdir -p arxiv-submission
-	cp $(PAPER).tex arxiv-submission/
+	cp $(PREPRINT).tex arxiv-submission/
 	cp references.bib arxiv-submission/
-	cp $(PAPER).bbl arxiv-submission/
+	cp $(PREPRINT).bbl arxiv-submission/
 	tar -czvf arxiv-submission.tar.gz arxiv-submission/
 	@echo "Created arxiv-submission.tar.gz for arXiv upload"
 

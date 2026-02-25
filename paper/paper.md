@@ -9,7 +9,7 @@ tags:
 authors:
   - name: Demetrios Chiuratto Agourakis
     affiliation: "1, 2"
-    orcid: 0009-0008-2276-5847
+    orcid: 0009-0001-8671-8878
     email: demetrios@agourakis.med.br
     corresponding: true
   - name: Marli Gerenutti

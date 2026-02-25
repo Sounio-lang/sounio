@@ -24,6 +24,9 @@ Sounio's GPU runtime provides:
 - **Buffer registry**: Map buffer IDs to device memory allocations
 - **C-callable dispatch functions**: Integration with effect handler system
 - **Multiple backends**: CUDA, Vulkan/SPIR-V, and simulated (testing)
+- **Release contract integration**: `benchmarks/independence/contract.v2.json`
+  (fallback `contract.v1.json`) is validated by
+  `scripts/independence_benchmark_gate.sh` before promotion
 
 The runtime bridges the effect handler system to actual GPU execution, enabling the `GPU` effect in Sounio programs.
 
