@@ -126,6 +126,9 @@ pub struct TestSuite {
     pub files: Vec<PathBuf>,
     /// Child suites (nested modules)
     pub children: HashMap<String, TestSuite>,
+    /// Non-fatal discovery warnings (directory mode only).
+    #[serde(default)]
+    pub discovery_warnings: Vec<String>,
 }
 
 impl TestSuite {
@@ -190,6 +193,7 @@ impl TestSuite {
         filtered.files = self.files.clone();
         filtered.setup_fns = self.setup_fns.clone();
         filtered.teardown_fns = self.teardown_fns.clone();
+        filtered.discovery_warnings = self.discovery_warnings.clone();
 
         for test in &self.tests {
             if filter.matches(test) {
@@ -316,8 +320,8 @@ pub fn discover_tests(
         let path = path.as_ref();
         if path.is_dir() {
             discover_in_directory(path, &mut suite)?;
-        } else if path.extension().is_some_and(|e| e == "d") {
-            discover_in_file(path, &mut suite)?;
+        } else if path.extension().is_some_and(|e| e == "sio" || e == "d") {
+            discover_in_file(path, &mut suite, DiscoveryMode::Explicit)?;
         }
     }
 
@@ -338,15 +342,36 @@ fn discover_in_directory(dir: &Path, suite: &mut TestSuite) -> Result<(), Discov
                 continue;
             }
             discover_in_directory(&path, suite)?;
-        } else if path.extension().is_some_and(|e| e == "d") {
-            discover_in_file(&path, suite)?;
+        } else if path.extension().is_some_and(|e| e == "sio") {
+            if let Err(err) = discover_in_file(&path, suite, DiscoveryMode::Directory) {
+                match err {
+                    DiscoveryError::Parse { file, message } => suite.discovery_warnings.push(
+                        format!(
+                            "skipping parse-failing test file {}: {}",
+                            file.display(),
+                            message
+                        ),
+                    ),
+                    other => return Err(other),
+                }
+            }
         }
     }
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiscoveryMode {
+    Directory,
+    Explicit,
+}
+
 /// Discover tests in a single file
-fn discover_in_file(file: &Path, suite: &mut TestSuite) -> Result<(), DiscoveryError> {
+fn discover_in_file(
+    file: &Path,
+    suite: &mut TestSuite,
+    _mode: DiscoveryMode,
+) -> Result<(), DiscoveryError> {
     let source = std::fs::read_to_string(file)?;
 
     // Parse the file
@@ -483,6 +508,7 @@ pub fn parse_attrs_from_raw(raw_attrs: &[RawAttribute]) -> TestAttributes {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn test_filter_matches_pattern() {
@@ -632,5 +658,87 @@ mod tests {
         );
 
         assert_eq!(test.full_name, "test_func");
+    }
+
+    #[test]
+    fn directory_discovers_sio_tests() {
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("sample.sio");
+        std::fs::write(
+            &file,
+            r#"
+            #[test]
+            fn sample_test() {}
+            "#,
+        )
+        .expect("write");
+
+        let suite = discover_tests(&[dir.path()], TestFilter::default()).expect("discover");
+        assert_eq!(suite.test_count(), 1);
+        assert!(suite.discovery_warnings.is_empty());
+    }
+
+    #[test]
+    fn directory_does_not_auto_discover_d_files() {
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("legacy.d");
+        std::fs::write(
+            &file,
+            r#"
+            #[test]
+            fn legacy_test() {}
+            "#,
+        )
+        .expect("write");
+
+        let suite = discover_tests(&[dir.path()], TestFilter::default()).expect("discover");
+        assert_eq!(suite.test_count(), 0);
+        assert!(suite.discovery_warnings.is_empty());
+    }
+
+    #[test]
+    fn explicit_d_file_is_still_supported() {
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("legacy.d");
+        std::fs::write(
+            &file,
+            r#"
+            #[test]
+            fn legacy_test() {}
+            "#,
+        )
+        .expect("write");
+
+        let suite = discover_tests(&[&file], TestFilter::default()).expect("discover");
+        assert_eq!(suite.test_count(), 1);
+    }
+
+    #[test]
+    fn directory_parse_failure_becomes_warning() {
+        let dir = tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("ok.sio"),
+            r#"
+            #[test]
+            fn ok_test() {}
+            "#,
+        )
+        .expect("write ok");
+        std::fs::write(dir.path().join("bad.sio"), "fn broken( {\n").expect("write bad");
+
+        let suite = discover_tests(&[dir.path()], TestFilter::default()).expect("discover");
+        assert_eq!(suite.test_count(), 1);
+        assert_eq!(suite.discovery_warnings.len(), 1);
+        assert!(suite.discovery_warnings[0].contains("bad.sio"));
+    }
+
+    #[test]
+    fn explicit_parse_failure_is_error() {
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("bad.sio");
+        std::fs::write(&file, "fn broken( {\n").expect("write");
+
+        let err = discover_tests(&[&file], TestFilter::default()).expect_err("must fail");
+        assert!(matches!(err, DiscoveryError::Parse { .. }));
     }
 }
