@@ -70,6 +70,21 @@ struct RefinementInfo {
     predicate: Box<Expr>,
 }
 
+/// Richer generic metadata stored per function/struct/method.
+///
+/// Captures the parameter names, their trait bounds, and optional default types
+/// so turbofish instantiation can validate concrete type arguments and fill
+/// missing arguments from defaults.
+#[derive(Debug, Clone, Default)]
+struct GenericInfo {
+    /// Ordered list of type-parameter names (e.g., ["T", "U"])
+    params: Vec<String>,
+    /// Trait-bound names per parameter (e.g., {"T" => ["Default", "Clone"]})
+    bounds: HashMap<String, Vec<String>>,
+    /// Default type per parameter (e.g., {"T" => Type::Named { name: "i32", .. }})
+    defaults: HashMap<String, crate::types::core::Type>,
+}
+
 /// Probabilistic threshold for semantic type compatibility.
 ///
 /// Instead of a scalar threshold (distance <= 0.15), this uses Bayesian reasoning:
@@ -175,6 +190,13 @@ pub struct TypeChecker {
     /// Generic type parameter names per function: fn_name -> ["T", "U", ...]
     /// Used for turbofish type argument substitution: `func::<T>(args)`
     fn_type_params: HashMap<String, Vec<String>>,
+    /// Richer generic metadata per top-level function: fn_name -> GenericInfo
+    /// Supersedes fn_type_params; stored in parallel for backwards compatibility.
+    fn_generic_info: HashMap<String, GenericInfo>,
+    /// Richer generic metadata per struct definition: struct_name -> GenericInfo
+    struct_generic_info: HashMap<String, GenericInfo>,
+    /// Richer generic metadata per method: (receiver_type_name, method_name) -> GenericInfo
+    method_generic_info: HashMap<(String, String), GenericInfo>,
     /// Default compatibility threshold
     default_threshold: f64,
     /// Probabilistic threshold for Bayesian type compatibility (optional)
@@ -348,6 +370,9 @@ impl TypeChecker {
             alignments: HashMap::new(),
             fn_thresholds: HashMap::new(),
             fn_type_params: HashMap::new(),
+            fn_generic_info: HashMap::new(),
+            struct_generic_info: HashMap::new(),
+            method_generic_info: HashMap::new(),
             default_threshold: 0.15, // Default threshold for semantic compatibility
             probabilistic_threshold: None, // Enable with enable_probabilistic_checking()
             ast: None,
@@ -1432,6 +1457,29 @@ impl TypeChecker {
                     .collect();
                 if !type_params.is_empty() {
                     self.fn_type_params.insert(f.name.clone(), type_params);
+                }
+
+                // Also store richer GenericInfo (bounds + defaults) for validated turbofish
+                {
+                    let mut ginfo = GenericInfo::default();
+                    for p in &f.generics.params {
+                        if let GenericParam::Type { name, bounds, default } = p {
+                            ginfo.params.push(name.clone());
+                            if !bounds.is_empty() {
+                                ginfo.bounds.insert(
+                                    name.clone(),
+                                    bounds.iter().map(|b| b.to_string()).collect(),
+                                );
+                            }
+                            if let Some(default_expr) = default {
+                                let default_ty = self.lower_type_expr(default_expr);
+                                ginfo.defaults.insert(name.clone(), default_ty);
+                            }
+                        }
+                    }
+                    if !ginfo.params.is_empty() {
+                        self.fn_generic_info.insert(f.name.clone(), ginfo);
+                    }
                 }
 
                 // Collect refinement info for parameters
@@ -3850,6 +3898,30 @@ impl TypeChecker {
         let mut methods = Vec::new();
         for item in &i.items {
             if let ImplItem::Fn(f) = item {
+                // Store richer GenericInfo for method turbofish resolution
+                {
+                    let mut ginfo = GenericInfo::default();
+                    for p in &f.generics.params {
+                        if let GenericParam::Type { name, bounds, default } = p {
+                            ginfo.params.push(name.clone());
+                            if !bounds.is_empty() {
+                                ginfo.bounds.insert(
+                                    name.clone(),
+                                    bounds.iter().map(|b| b.to_string()).collect(),
+                                );
+                            }
+                            if let Some(default_expr) = default {
+                                let default_ty = self.lower_type_expr(default_expr);
+                                ginfo.defaults.insert(name.clone(), default_ty);
+                            }
+                        }
+                    }
+                    if !ginfo.params.is_empty() {
+                        self.method_generic_info
+                            .insert((type_name.clone(), f.name.clone()), ginfo);
+                    }
+                }
+
                 let hir_fn = self.check_function(f)?;
                 methods.push(hir_fn);
             }
@@ -4275,6 +4347,9 @@ impl TypeChecker {
 
                     if is_last && !has_semi {
                         result_ty = self.hir_type_to_type(&expr_result.ty);
+                    } else if is_last && *has_semi && matches!(expr_result.ty, HirType::Never) {
+                        // Preserve control-flow typing for explicit `return ...;` blocks.
+                        result_ty = Type::Never;
                     }
 
                     stmts.push(HirStmt::Expr(expr_result));
@@ -4676,14 +4751,61 @@ impl TypeChecker {
 
                 // Apply turbofish type arguments if present: `func::<T, U>(args)`
                 // Substitute generic params in the callee's function type before checking arguments.
+                // Uses fn_generic_info (richer) when available, falling back to fn_type_params.
                 let effective_callee_ty = if !type_args.is_empty() {
                     if let Expr::Path { path, .. } = callee.as_ref() {
                         let tf_fn_name = path.segments.last().map(String::as_str).unwrap_or("");
-                        if let Some(generic_params) = self.fn_type_params.get(tf_fn_name).cloned() {
-                            let concrete_args: Vec<Type> = type_args
+
+                        // Prefer the richer GenericInfo path
+                        let maybe_ginfo = self.fn_generic_info.get(tf_fn_name).cloned();
+                        let maybe_params = maybe_ginfo
+                            .as_ref()
+                            .map(|g| g.params.clone())
+                            .or_else(|| self.fn_type_params.get(tf_fn_name).cloned());
+
+                        if let Some(generic_params) = maybe_params {
+                            let mut concrete_args: Vec<Type> = type_args
                                 .iter()
                                 .map(|te| self.lower_type_expr(te))
                                 .collect();
+
+                            // Fill missing args from defaults (GenericInfo path only)
+                            if let Some(ref ginfo) = maybe_ginfo {
+                                for param_name in
+                                    generic_params.iter().skip(concrete_args.len())
+                                {
+                                    if let Some(default_ty) =
+                                        ginfo.defaults.get(param_name).cloned()
+                                    {
+                                        concrete_args.push(default_ty);
+                                    }
+                                }
+
+                                // Validate bounds: if a param has the "Default" bound,
+                                // reject unit type as a concrete argument (simple sanity check).
+                                let call_span = self
+                                    .ast
+                                    .as_ref()
+                                    .map(|ast| self.expr_span(expr, ast.as_ref()))
+                                    .unwrap_or_else(Span::dummy);
+                                for (idx, param_name) in generic_params.iter().enumerate() {
+                                    if let Some(bounds) = ginfo.bounds.get(param_name) {
+                                        if bounds.iter().any(|b| b == "Default") {
+                                            if let Some(Type::Unit) = concrete_args.get(idx) {
+                                                self.error(
+                                                    format!(
+                                                        "type argument `()` does not satisfy \
+                                                         bound `Default` on `{}`",
+                                                        param_name
+                                                    ),
+                                                    call_span,
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
                             match &callee_expr.ty {
                                 HirType::Fn {
                                     params,
@@ -6318,12 +6440,46 @@ impl TypeChecker {
                 let result_ty = self.get_method_return_type(&receiver_ty, method, &arg_exprs);
 
                 // Apply turbofish type args to method return type if present: `.method::<T>(args)`
+                // First try method_generic_info keyed by (receiver_type_name, method_name),
+                // then fall back to fn_type_params keyed by method_name only.
                 let effective_result_ty = if !type_args.is_empty() {
-                    if let Some(generic_params) = self.fn_type_params.get(method).cloned() {
-                        let concrete_args: Vec<Type> = type_args
+                    // Extract the receiver's base type name for method_generic_info lookup
+                    let receiver_type_name: Option<String> = match &receiver_ty {
+                        HirType::Named { name, .. } => Some(name.clone()),
+                        _ => None,
+                    };
+
+                    // Look up GenericInfo: prefer method_generic_info over fn_type_params
+                    let maybe_ginfo: Option<GenericInfo> = receiver_type_name
+                        .as_ref()
+                        .and_then(|tn| {
+                            self.method_generic_info
+                                .get(&(tn.clone(), method.clone()))
+                                .cloned()
+                        });
+
+                    let maybe_generic_params: Option<Vec<String>> = maybe_ginfo
+                        .as_ref()
+                        .map(|g| g.params.clone())
+                        .or_else(|| self.fn_type_params.get(method.as_str()).cloned());
+
+                    if let Some(generic_params) = maybe_generic_params {
+                        let mut concrete_args: Vec<Type> = type_args
                             .iter()
                             .map(|te| self.lower_type_expr(te))
                             .collect();
+
+                        // Fill missing args from defaults when richer info is available
+                        if let Some(ref ginfo) = maybe_ginfo {
+                            for param_name in generic_params.iter().skip(concrete_args.len()) {
+                                if let Some(default_ty) =
+                                    ginfo.defaults.get(param_name).cloned()
+                                {
+                                    concrete_args.push(default_ty);
+                                }
+                            }
+                        }
+
                         let result_as_ty = self.hir_type_to_type(&result_ty);
                         let subst = self.substitute_type_params(
                             &result_as_ty,
@@ -6945,6 +7101,17 @@ impl TypeChecker {
         let (left_numeric, left_unit) = self.extract_quantity(&left_inner);
         let (right_numeric, right_unit) = self.extract_quantity(&right_inner);
 
+        let left_is_vec = matches!(&left_inner, HirType::Named { name, .. } if name == "Vec");
+        let right_is_vec = matches!(&right_inner, HirType::Named { name, .. } if name == "Vec");
+        let right_is_array = matches!(&right_inner, HirType::Array { .. });
+        if op == BinaryOp::Add && left_is_vec && (right_is_array || right_is_vec) {
+            self.error(
+                "Vec append with '+' is not supported; use '++ [value]' instead".to_string(),
+                Span::dummy(),
+            );
+            return HirType::Error;
+        }
+
         let result_inner = match op {
             BinaryOp::Add | BinaryOp::Sub | BinaryOp::PlusMinus => {
                 // Addition/subtraction requires compatible units
@@ -7461,6 +7628,8 @@ impl TypeChecker {
                 | "quat_lstm_cell"
                 | "quat_gru_cell"
                 | "quat_attention"
+                // ODE solver bridge
+                | "solve_ode"
         );
         if name.starts_with("quat_init")
             || name.starts_with("quat_relu")
@@ -8315,6 +8484,16 @@ impl TypeChecker {
                         size: None,
                     },
                 ])),
+            },
+
+            // ==================== ODE SOLVER BRIDGE ====================
+            // solve_ode(rhs, y0, t0, tf[, dt]) -> ODESolution
+            "solve_ode" => HirType::Fn {
+                params: vec![],  // Variadic: (fn, [f64], f64, f64[, f64])
+                return_type: Box::new(HirType::Named {
+                    name: "ODESolution".to_string(),
+                    args: vec![],
+                }),
             },
 
             // ==================== AUTOMATIC DIFFERENTIATION ====================
