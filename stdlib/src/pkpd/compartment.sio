@@ -290,6 +290,20 @@ pub fn simulate_pk(
     var sorted_doses = doses.to_vec();
     sorted_doses.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
 
+    // Build infusion end events — for each dose with duration > 0,
+    // we track when the infusion starts and stops.
+    var active_infusion_rate: f64 = 0.0;
+    var infusion_end_times: Vec<(f64, f64)> = Vec::new(); // (end_time, rate)
+    for dose in &sorted_doses {
+        if dose.duration > 0.0 {
+            let bioav = dose.bioav.unwrap_or(params.f);
+            let rate = dose.amount * bioav / dose.duration;
+            infusion_end_times.push((dose.time + dose.duration, rate));
+        }
+    }
+    infusion_end_times.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    var infusion_end_idx = 0;
+
     // Process events
     while time_idx < n_times {
         let next_obs = times[time_idx];
@@ -299,17 +313,27 @@ pub fn simulate_pk(
             None
         };
 
-        // Determine next event
-        let next_event = match next_dose {
-            Some(td) if td <= next_obs => td,
-            _ => next_obs,
+        // Also check for infusion end events
+        let next_inf_end = if infusion_end_idx < infusion_end_times.len() {
+            Some(infusion_end_times[infusion_end_idx].0)
+        } else {
+            None
         };
 
-        // Integrate to next event
+        // Determine next event (min of observation, dose, infusion end)
+        var next_event = next_obs;
+        if let Some(td) = next_dose {
+            if td <= next_event { next_event = td; }
+        }
+        if let Some(te) = next_inf_end {
+            if te <= next_event { next_event = te; }
+        }
+
+        // Integrate to next event with current infusion rate
         if next_event > t {
             let ode = CompartmentODE {
                 params: params.clone(),
-                infusion_rate: 0.0,  // TODO: handle infusions
+                infusion_rate: active_infusion_rate,
             };
 
             let sol = odeint(ode, &y, (t, next_event), "RK45");
@@ -323,17 +347,34 @@ pub fn simulate_pk(
 
         t = next_event;
 
+        // Handle infusion end event — subtract its rate contribution
+        if let Some(te) = next_inf_end {
+            if te == t {
+                let rate = infusion_end_times[infusion_end_idx].1;
+                active_infusion_rate -= rate;
+                if active_infusion_rate < 0.0 { active_infusion_rate = 0.0; }
+                infusion_end_idx += 1;
+            }
+        }
+
         // Apply dose if this is a dose event
         if let Some(td) = next_dose {
             if td == t {
                 let dose = &sorted_doses[dose_idx];
                 let bioav = dose.bioav.unwrap_or(params.f);
-                let amt = dose.amount * bioav;
 
-                if dose.cmt == 0 && depot_idx != usize::MAX {
-                    y[depot_idx] += amt;
+                if dose.duration > 0.0 {
+                    // Infusion: add rate (will run until infusion_end event)
+                    let rate = dose.amount * bioav / dose.duration;
+                    active_infusion_rate += rate;
                 } else {
-                    y[central_idx] += amt;
+                    // Bolus: instantaneous addition
+                    let amt = dose.amount * bioav;
+                    if dose.cmt == 0 && depot_idx != usize::MAX {
+                        y[depot_idx] += amt;
+                    } else {
+                        y[central_idx] += amt;
+                    }
                 }
 
                 dose_idx += 1;

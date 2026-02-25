@@ -272,6 +272,41 @@ struct MultiChainDiagnostics {
     converged: bool,        // r_hat < 1.1
 }
 
+// Per-chain Effective Sample Size via initial monotone sequence estimator.
+// Uses lag-k autocorrelation until the sum of consecutive pairs is negative.
+fn chain_ess(chain: &MCMCChain) -> f64 with Mut, Div, Panic {
+    let n = chain.n_stored
+    if n < 4 { return n as f64 }
+
+    let mean = chain_mean(chain)
+    let var0 = chain_variance(chain)
+    if var0 < 1.0e-30 { return n as f64 }   // constant chain → fully independent
+
+    // Compute autocorrelation sum using initial positive sequence rule
+    var autocorr_sum: f64 = 0.0
+    let max_lag = n / 2
+    var lag = 1
+    while lag < max_lag {
+        var ac: f64 = 0.0
+        var k = 0
+        while k < n - lag {
+            ac = ac + (chain.samples[k] - mean) * (chain.samples[k + lag] - mean)
+            k = k + 1
+        }
+        let rho = ac / ((n - lag) as f64 * var0)
+
+        // Initial positive sequence: stop at first negative pair
+        if rho < 0.05 { lag = max_lag }   // break
+        else {
+            autocorr_sum = autocorr_sum + rho
+            lag = lag + 1
+        }
+    }
+
+    let ess = (n as f64) / (1.0 + 2.0 * autocorr_sum)
+    if ess < 1.0 { 1.0 } else { ess }
+}
+
 // Multi-chain R-hat: uses BETWEEN-chain variance (stronger than split-chain)
 fn multi_chain_rhat(bundle: &TraceBundle) -> f64 with Mut, Div, Panic {
     if bundle.n_chains < 2 { return 2.0 }
@@ -359,12 +394,24 @@ fn multi_chain_diagnostics(bundle: &TraceBundle) -> MultiChainDiagnostics with M
         (total_accepted as f64) / (total_total as f64)
     } else { 0.0 }
 
+    // Compute per-chain ESS and find min/max
+    var min_ess: f64 = 1.0e30
+    var max_ess: f64 = 0.0
+    var ci = 0
+    while ci < bundle.n_chains {
+        let ess = chain_ess(&bundle.chains[ci])
+        if ess < min_ess { min_ess = ess }
+        if ess > max_ess { max_ess = ess }
+        ci = ci + 1
+    }
+    if bundle.n_chains == 0 { min_ess = 0.0 }
+
     MultiChainDiagnostics {
         grand_mean: grand_mean,
         grand_std: grand_std,
         r_hat: r_hat,
-        min_ess: 0.0,  // TODO: per-chain ESS
-        max_ess: 0.0,
+        min_ess: min_ess,
+        max_ess: max_ess,
         mean_accept_rate: mean_accept,
         n_chains: bundle.n_chains,
         converged: r_hat < 1.1,
