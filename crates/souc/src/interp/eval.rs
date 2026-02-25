@@ -17,7 +17,7 @@ use super::effect_dispatch::{
     CapabilityAdapter, DispatchResult, EffectContext, EffectError, EffectHandler, EffectKind,
 };
 use super::env::Environment;
-use super::value::{ControlFlow, SuspensionId, Value};
+use super::value::{ControlFlow, SolverStats, SuspensionId, Value};
 use crate::effects::continuation::ContinuationId;
 use crate::effects::handlers::HandlerRegistry;
 
@@ -429,10 +429,11 @@ impl Interpreter {
                     };
                     // Wrap mutable structs in Ref to allow field mutation.
                     // Unwrap any existing Ref to prevent double-wrapping.
+                    // Use deep_clone to prevent array aliasing across struct copies.
                     let val = if *is_mut {
                         let inner = match val {
-                            Value::Ref(r) => r.borrow().clone(),
-                            other => other,
+                            Value::Ref(r) => r.borrow().deep_clone(),
+                            other => other.deep_clone(),
                         };
                         if matches!(inner, Value::Struct { .. }) {
                             Value::Ref(Rc::new(RefCell::new(inner)))
@@ -740,6 +741,24 @@ impl Interpreter {
                                 .ok_or(ControlFlow::Return(Value::Unit))
                         } else {
                             Err(ControlFlow::Return(Value::Unit))
+                        }
+                    }
+                    Value::ODESolution { ref t, ref y, ref stats } => {
+                        match field.as_str() {
+                            "t" => Ok(Value::Array(Rc::new(RefCell::new(
+                                t.iter().map(|v| Value::Float(*v)).collect(),
+                            )))),
+                            "y" => Ok(Value::Array(Rc::new(RefCell::new(
+                                y.iter()
+                                    .map(|row| {
+                                        Value::Array(Rc::new(RefCell::new(
+                                            row.iter().map(|v| Value::Float(*v)).collect(),
+                                        )))
+                                    })
+                                    .collect(),
+                            )))),
+                            "steps" => Ok(Value::Int(stats.steps as i64)),
+                            _ => Err(ControlFlow::Return(Value::Unit)),
                         }
                     }
                     _ => Err(ControlFlow::Return(Value::Unit)),
@@ -2558,8 +2577,8 @@ impl Interpreter {
     pub fn call_builtin(&mut self, name: &str, args: Vec<Value>) -> Result<Value, ControlFlow> {
         self.trace_call(name, &args);
 
-        // First, try the builtin registry
-        if self.builtins.is_builtin(name) {
+        // First, try the builtin registry (skip solve_ode — it needs interpreter access for RHS callbacks)
+        if self.builtins.is_builtin(name) && name != "solve_ode" {
             match self.builtins.call(name, &args) {
                 Ok(v) => {
                     self.trace_return(&v);
@@ -2816,6 +2835,123 @@ impl Interpreter {
                         Ok(Value::Array(arr))
                     }
                 }
+            }
+            // ==================== ODE SOLVER BRIDGE ====================
+            // solve_ode(rhs_fn, y0, t0, tf[, dt]) -> ODESolution
+            // Classic RK4 with interpreter callbacks for the RHS function
+            "solve_ode" => {
+                use std::cell::RefCell;
+                use std::rc::Rc;
+
+                if args.len() < 4 {
+                    return Err(ControlFlow::Return(Value::String(
+                        "solve_ode requires (rhs_fn, y0, t0, tf[, dt])".to_string(),
+                    )));
+                }
+
+                // Extract the RHS closure/function
+                let rhs_val = args[0].clone();
+
+                // Extract y0 as Vec<f64>
+                let y0: Vec<f64> = match &args[1] {
+                    Value::Array(arr) => {
+                        let borrowed = arr.borrow();
+                        borrowed
+                            .iter()
+                            .map(|v| match v {
+                                Value::Float(f) => *f,
+                                Value::Int(n) => *n as f64,
+                                _ => 0.0,
+                            })
+                            .collect()
+                    }
+                    _ => {
+                        return Err(ControlFlow::Return(Value::String(
+                            "solve_ode: y0 must be an array".to_string(),
+                        )));
+                    }
+                };
+
+                let t0 = match &args[2] {
+                    Value::Float(f) => *f,
+                    Value::Int(n) => *n as f64,
+                    _ => 0.0,
+                };
+                let tf = match &args[3] {
+                    Value::Float(f) => *f,
+                    Value::Int(n) => *n as f64,
+                    _ => 1.0,
+                };
+                let dt = if args.len() > 4 {
+                    match &args[4] {
+                        Value::Float(f) => *f,
+                        Value::Int(n) => *n as f64,
+                        _ => 0.01,
+                    }
+                } else {
+                    0.01
+                };
+
+                let n = y0.len();
+                let mut t = t0;
+                let mut y = y0.clone();
+                let mut t_out = vec![t0];
+                let mut y_out = vec![y0.clone()];
+                let mut steps = 0u64;
+
+                // Inline helper to call RHS and extract Vec<f64>
+                macro_rules! call_rhs {
+                    ($t_val:expr, $y_val:expr) => {{
+                        let t_arg = Value::Float($t_val);
+                        let y_arg = Value::Array(Rc::new(RefCell::new(
+                            $y_val.iter().map(|v| Value::Float(*v)).collect(),
+                        )));
+                        let result = self.eval_call(rhs_val.clone(), vec![t_arg, y_arg])?;
+                        match result {
+                            Value::Array(arr) => {
+                                let borrowed = arr.borrow();
+                                borrowed
+                                    .iter()
+                                    .map(|v| match v {
+                                        Value::Float(f) => *f,
+                                        Value::Int(n) => *n as f64,
+                                        _ => 0.0,
+                                    })
+                                    .collect::<Vec<f64>>()
+                            }
+                            _ => vec![0.0; $y_val.len()],
+                        }
+                    }};
+                }
+
+                // RK4 integration
+                while t < tf - dt * 0.5 {
+                    let k1 = call_rhs!(t, &y);
+                    let y_tmp: Vec<f64> = (0..n).map(|i| y[i] + 0.5 * dt * k1[i]).collect();
+                    let k2 = call_rhs!(t + 0.5 * dt, &y_tmp);
+                    let y_tmp: Vec<f64> = (0..n).map(|i| y[i] + 0.5 * dt * k2[i]).collect();
+                    let k3 = call_rhs!(t + 0.5 * dt, &y_tmp);
+                    let y_tmp: Vec<f64> = (0..n).map(|i| y[i] + dt * k3[i]).collect();
+                    let k4 = call_rhs!(t + dt, &y_tmp);
+
+                    for i in 0..n {
+                        y[i] += dt / 6.0 * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]);
+                    }
+                    t += dt;
+                    steps += 1;
+                    t_out.push(t);
+                    y_out.push(y.clone());
+                }
+
+                Ok(Value::ODESolution {
+                    t: t_out,
+                    y: y_out,
+                    stats: SolverStats {
+                        steps: steps as usize,
+                        accepted_steps: steps as usize,
+                        rejected_steps: 0,
+                    },
+                })
             }
             _ => {
                 // Try to find function by name

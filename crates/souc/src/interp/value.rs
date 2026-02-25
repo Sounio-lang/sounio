@@ -120,7 +120,7 @@ pub enum Value {
     /// Multi-dimensional tensor/array
     Tensor { data: Vec<f64>, shape: Vec<usize> },
     /// Sparse tensor in various formats
-    SparseTensor(Rc<crate::tensor::sparse::SparseTensor>),
+    SparseTensor(Rc<crate::codegen::gpu::sparse::SparseTensor>),
     /// Value with uncertainty bounds (mean ± std)
     Uncertain { mean: f64, std: f64 },
     /// Causal model representation
@@ -194,6 +194,41 @@ impl Value {
             Value::Future { .. } => "Future",
             Value::Task { .. } => "Task",
             Value::Knowledge { .. } => "Knowledge",
+        }
+    }
+
+    /// Deep clone: recursively copies arrays so struct copies don't alias.
+    /// Regular `clone()` on `Value::Array` just bumps the Rc refcount,
+    /// which means `var copy = original_struct` shares array storage.
+    pub fn deep_clone(&self) -> Value {
+        match self {
+            Value::Array(arr) => {
+                let borrowed = arr.borrow();
+                Value::Array(Rc::new(RefCell::new(
+                    borrowed.iter().map(|v| v.deep_clone()).collect(),
+                )))
+            }
+            Value::Struct { name, fields } => Value::Struct {
+                name: name.clone(),
+                fields: fields.iter().map(|(k, v)| (k.clone(), v.deep_clone())).collect(),
+            },
+            Value::Ref(r) => {
+                let inner = r.borrow();
+                Value::Ref(Rc::new(RefCell::new(inner.deep_clone())))
+            }
+            Value::Tuple(elems) => {
+                Value::Tuple(elems.iter().map(|v| v.deep_clone()).collect())
+            }
+            Value::Variant { enum_name, variant_name, fields } => Value::Variant {
+                enum_name: enum_name.clone(),
+                variant_name: variant_name.clone(),
+                fields: fields.iter().map(|v| v.deep_clone()).collect(),
+            },
+            Value::Some(v) => Value::Some(Box::new(v.deep_clone())),
+            Value::Ok(v) => Value::Ok(Box::new(v.deep_clone())),
+            Value::Err(v) => Value::Err(Box::new(v.deep_clone())),
+            // Scalars and other types — shallow clone is fine
+            other => other.clone(),
         }
     }
 
@@ -287,7 +322,7 @@ impl Value {
     }
 
     /// Try to get as sparse tensor
-    pub fn as_sparse_tensor(&self) -> Option<Rc<crate::tensor::sparse::SparseTensor>> {
+    pub fn as_sparse_tensor(&self) -> Option<Rc<crate::codegen::gpu::sparse::SparseTensor>> {
         match self {
             Value::SparseTensor(s) => Some(s.clone()),
             _ => None,
