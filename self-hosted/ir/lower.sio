@@ -608,6 +608,122 @@ impl Lowerer {
         Some(Box::new(IrRegList { head: reg, tail: args }))
     }
 
+    fn expr_list_len(self, args: Option<Box<ExprList>>) -> i64 with Alloc {
+        match args {
+            Some(list) => 1 + self.expr_list_len((*list).tail),
+            _ => 0,
+        }
+    }
+
+    fn ir_name_is_knowledge_kaxi_publish(self, n: Name) -> bool {
+        n.len == 24 &&
+        n.buf[0] == 95 as i8 &&
+        n.buf[1] == 95 as i8 &&
+        n.buf[2] == 107 as i8 &&
+        n.buf[3] == 110 as i8 &&
+        n.buf[4] == 111 as i8 &&
+        n.buf[5] == 119 as i8 &&
+        n.buf[6] == 108 as i8 &&
+        n.buf[7] == 101 as i8 &&
+        n.buf[8] == 100 as i8 &&
+        n.buf[9] == 103 as i8 &&
+        n.buf[10] == 101 as i8 &&
+        n.buf[11] == 95 as i8 &&
+        n.buf[12] == 107 as i8 &&
+        n.buf[13] == 97 as i8 &&
+        n.buf[14] == 120 as i8 &&
+        n.buf[15] == 105 as i8 &&
+        n.buf[16] == 95 as i8 &&
+        n.buf[17] == 112 as i8 &&
+        n.buf[18] == 117 as i8 &&
+        n.buf[19] == 98 as i8 &&
+        n.buf[20] == 108 as i8 &&
+        n.buf[21] == 105 as i8 &&
+        n.buf[22] == 115 as i8 &&
+        n.buf[23] == 104 as i8
+    }
+
+    fn kaxi_sanitize_op_kind(self, raw_op: i64) -> i64 {
+        if raw_op < 0 || raw_op > 15 {
+            0
+        } else {
+            raw_op
+        }
+    }
+
+    fn kaxi_extract_publish_args(self, args: Option<Box<ExprList>>) -> (Option<Box<Expr>>, i64) with Alloc {
+        match args {
+            Some(list) => {
+                let value_expr = (*list).head
+                let op_kind = match (*list).tail {
+                    Some(tail1) => {
+                        let op_expr = (*tail1).head
+                        if op_expr.kind == ExprKind::ExprIntLit {
+                            self.kaxi_sanitize_op_kind(op_expr.int_val)
+                        } else {
+                            0
+                        }
+                    }
+                    _ => 0,
+                }
+                (Some(Box::new(value_expr)), op_kind)
+            }
+            _ => (None, 0),
+        }
+    }
+
+    fn kaxi_pack_default_flags(self, op_kind_raw: i64) -> i64 {
+        let op_kind = self.kaxi_sanitize_op_kind(op_kind_raw)
+        // Native keyword contract: alpha_q8=16, success_inc=1 (except pass), failure_inc=0.
+        let success_inc = if op_kind == 0 { 0 } else { 1 }
+        ((16 as i64) << 24) | (success_inc << 16) | op_kind
+    }
+
+    fn lower_kaxi_publish_call(self, fn_id: i64, callee_name: Name, args: Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let extracted = self.kaxi_extract_publish_args(args)
+        let op_kind = extracted.1
+        let pair_value = match extracted.0 {
+            Some(value_expr) => self.lower_expr(*value_expr),
+            _ => self.emit_unit(),
+        }
+        var lo = pair_value.0
+        let value_reg = pair_value.1
+
+        // Synthesize default epistemic payload fields for hardware_publish(value, op_kind):
+        // variance=0, provenance=0 sentinel, confidence=1.0, flags=packed(op_kind).
+        let pair_var = lo.fresh_reg()
+        lo = pair_var.0
+        let var_reg = pair_var.1
+        lo = lo.emit(ir_load_imm(var_reg, 0))
+
+        let pair_prov = lo.fresh_reg()
+        lo = pair_prov.0
+        let prov_reg = pair_prov.1
+        lo = lo.emit(ir_load_imm(prov_reg, 0))
+
+        let pair_conf = lo.fresh_reg()
+        lo = pair_conf.0
+        let conf_reg = pair_conf.1
+        lo = lo.emit(ir_load_float(conf_reg, 1.0))
+
+        let pair_flags = lo.fresh_reg()
+        lo = pair_flags.0
+        let flags_reg = pair_flags.1
+        lo = lo.emit(ir_load_imm(flags_reg, lo.kaxi_pack_default_flags(op_kind)))
+
+        var call_args = lo.prepend_arg(flags_reg, None)
+        call_args = lo.prepend_arg(conf_reg, call_args)
+        call_args = lo.prepend_arg(prov_reg, call_args)
+        call_args = lo.prepend_arg(var_reg, call_args)
+        call_args = lo.prepend_arg(value_reg, call_args)
+
+        let pair_dst = lo.fresh_reg()
+        lo = pair_dst.0
+        let dst = pair_dst.1
+        lo = lo.emit(ir_call(dst, fn_id, callee_name, call_args, 5))
+        (lo, dst)
+    }
+
     fn expr_to_callee_name(self, e: Expr) -> Name with Mut, Panic, Div {
         if e.kind == ExprKind::ExprIdent {
             e.name
@@ -958,6 +1074,14 @@ impl Lowerer {
             let pair_fn = self.find_or_add_fn_id(callee_name)
             let lo1 = pair_fn.0
             let fn_id = pair_fn.1
+            if lo1.ir_name_is_knowledge_kaxi_publish(callee_name) {
+                // Parser canonicalizes hardware_publish(value, KAXI::op) into this intrinsic with
+                // 2 arguments. Lowering expands only this canonical form to the runtime
+                // contract of 5 arguments; explicit 5-arg intrinsic calls pass through unchanged.
+                if lo1.expr_list_len(e.args) == 2 {
+                    return lo1.lower_kaxi_publish_call(fn_id, callee_name, e.args)
+                }
+            }
             let pair_args: (Lowerer, IrRegList, i64) = lo1.lower_expr_args(e.args)
             let lo2 = pair_args.0
             let args: Option<Box<IrRegList>> = if pair_args.2 <= 0 { None } else { Some(Box::new(pair_args.1)) }

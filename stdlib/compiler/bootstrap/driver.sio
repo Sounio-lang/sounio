@@ -27,6 +27,20 @@ let STAGE_CODEGEN_NATIVE: i32 = 5  // Phase 6: Native ELF backend
 let BACKEND_BYTECODE: i32 = 1  // SOIR bytecode (default)
 let BACKEND_NATIVE: i32 = 2    // Native ELF/Mach-O/PE
 
+// Driver exit codes (fail-closed and deterministic at boundary)
+let DRIVER_EXIT_OK: i32 = 0
+let DRIVER_EXIT_INTERNAL: i32 = 1
+let DRIVER_EXIT_COMPILE_ERROR: i32 = 2
+let DRIVER_EXIT_UNSUPPORTED_STAGE: i32 = 4
+let DRIVER_EXIT_UNSUPPORTED_NATIVE: i32 = 5
+let DRIVER_EXIT_UNSUPPORTED_MULTIMODULE: i32 = 6
+
+// CompileArtifact transport metadata (v2-compatible additive fields)
+let COMPILE_ARTIFACT_SCHEMA_V2: i32 = 2
+let COMPILE_ARTIFACT_TRANSPORT_INLINE: i32 = 1
+let COMPILE_ARTIFACT_TRANSPORT_PATH: i32 = 2
+let COMPILE_ARTIFACT_FORMAT_SOBC: i32 = 1
+
 // ============================================================================
 // DRIVER TYPES
 // ============================================================================
@@ -47,6 +61,12 @@ struct CompileArtifact {
     exit_code: i32,
     diagnostics: [i8; 4096],
     diagnostics_len: i64,
+    // V2 transport metadata (additive; legacy host decoders can ignore these).
+    artifact_schema: i32,      // v2 when set to COMPILE_ARTIFACT_SCHEMA_V2
+    transport_kind: i32,       // inline bytes vs external artifact path
+    artifact_format: i32,      // currently COMPILE_ARTIFACT_FORMAT_SOBC
+    artifact_path: [i8; 1024], // UTF-8-ish bytes for external artifact location
+    artifact_path_len: i64,
 }
 
 struct StageInput {
@@ -81,9 +101,14 @@ fn compile_artifact_empty() -> CompileArtifact {
         code: [0; 131072],
         code_len: 0,
         ok: false,
-        exit_code: 1,
+        exit_code: DRIVER_EXIT_INTERNAL,
         diagnostics: [0; 4096],
         diagnostics_len: 0,
+        artifact_schema: COMPILE_ARTIFACT_SCHEMA_V2,
+        transport_kind: COMPILE_ARTIFACT_TRANSPORT_INLINE,
+        artifact_format: COMPILE_ARTIFACT_FORMAT_SOBC,
+        artifact_path: [0; 1024],
+        artifact_path_len: 0,
     }
 }
 
@@ -93,7 +118,7 @@ fn stage_output_empty(stage: i32) -> StageOutput {
         ok: false,
         payload: [0; 131072],
         payload_len: 0,
-        diag_code: 1,
+        diag_code: DRIVER_EXIT_INTERNAL,
     }
 }
 
@@ -272,6 +297,80 @@ fn str_concat_buf(a: string, b: string, out: [i8; 1024]) -> ([i8; 1024], i64) wi
     (buf, pos)
 }
 
+fn str_lt(a: string, b: string) -> bool with Mut, Panic, Div {
+    let len_a = str_len(a)
+    let len_b = str_len(b)
+    var i: i64 = 0
+    var min_len = len_a
+    if len_b < min_len { min_len = len_b }
+
+    while i < min_len {
+        let ca = a[i as usize]
+        let cb = b[i as usize]
+        if ca < cb { return true }
+        if ca > cb { return false }
+        i = i + 1
+    }
+
+    len_a < len_b
+}
+
+fn sort_string_list(values: [string], count: i64) -> [string] with Mut, Panic, Div {
+    // Small deterministic bubble sort for bootstrap directory entry ordering.
+    var out = values
+    var n = count
+    if n < 0 { n = 0 }
+
+    var i: i64 = 0
+    while i < n {
+        var j: i64 = 0
+        while j + 1 < n - i {
+            let left = out[j as usize]
+            let right = out[(j + 1) as usize]
+            if str_lt(right, left) {
+                out[j as usize] = right
+                out[(j + 1) as usize] = left
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    out
+}
+
+fn compile_artifact_set_inline_transport(out: CompileArtifact) -> CompileArtifact with Mut, Panic, Div {
+    var o = out
+    o.artifact_schema = COMPILE_ARTIFACT_SCHEMA_V2
+    o.transport_kind = COMPILE_ARTIFACT_TRANSPORT_INLINE
+    o.artifact_format = COMPILE_ARTIFACT_FORMAT_SOBC
+    o.artifact_path_len = 0
+    o
+}
+
+fn compile_artifact_set_path_transport(out: CompileArtifact, artifact_path: string) -> CompileArtifact with Mut, Panic, Div {
+    var o = out
+    o.artifact_schema = COMPILE_ARTIFACT_SCHEMA_V2
+    o.transport_kind = COMPILE_ARTIFACT_TRANSPORT_PATH
+    o.artifact_format = COMPILE_ARTIFACT_FORMAT_SOBC
+
+    var n = str_len(artifact_path)
+    if n < 0 { n = 0 }
+    if n > 1024 { n = 1024 }
+    o.artifact_path_len = n
+
+    var i: i64 = 0
+    while i < n {
+        o.artifact_path[i as usize] = artifact_path[i as usize] as i8
+        i = i + 1
+    }
+    while i < 1024 {
+        o.artifact_path[i as usize] = 0
+        i = i + 1
+    }
+    o
+}
+
 // ============================================================================
 // MULTI-MODULE COMPILATION TYPES
 // ============================================================================
@@ -409,7 +508,7 @@ fn file_exists(path: string) -> bool with IO, Panic {
 // PUBLIC DRIVER API
 // ============================================================================
 
-fn run_pipeline(input: StageInput) -> StageOutput with Mut, Panic {
+fn run_pipeline(input: StageInput) -> StageOutput with Mut, Panic, Div {
     // Stage handler boundary.
     //
     // Phase 1 wiring begins here: we start by supporting the CODEGEN stage,
@@ -438,12 +537,12 @@ fn run_pipeline(input: StageInput) -> StageOutput with Mut, Panic {
     } else if input.stage == STAGE_CODEGEN_NATIVE {
         // Native backend stage is defined but not implemented in this bootstrap driver.
         var out = stage_output_empty(input.stage)
-        out.diag_code = 5
+        out.diag_code = DRIVER_EXIT_UNSUPPORTED_NATIVE
         out
     } else {
         // Future stages (lexer/parser/checker) are intentionally fail-closed for now.
         var out = stage_output_empty(input.stage)
-        out.diag_code = 4
+        out.diag_code = DRIVER_EXIT_UNSUPPORTED_STAGE
         out
     }
 }
@@ -483,7 +582,81 @@ fn is_ident_continue(c: i8) -> bool {
     is_ident_start(c) || is_digit(c)
 }
 
-fn skip_ws(src: [i8; 65536], len: i64, pos: i64) -> i64 with Panic, Div {
+fn source_has_multimodule_syntax(src: [i8; 65536], len: i64) -> bool with Mut, Panic, Div {
+    // Conservative scan to fail closed on module-graph syntax unsupported by the
+    // bootstrap single-module compiler path.
+    var i: i64 = 0
+    var in_string: bool = false
+    var in_line_comment: bool = false
+
+    while i < len {
+        let c = src[i as usize]
+
+        if in_line_comment {
+            if c == 10 || c == 13 {
+                in_line_comment = false
+            }
+            i = i + 1
+        } else if in_string {
+            if c == 92 && i + 1 < len { // '\\'
+                i = i + 2
+            } else {
+                if c == 34 { in_string = false } // '"'
+                i = i + 1
+            }
+        } else if c == 47 && i + 1 < len && src[(i + 1) as usize] == 47 { // "//"
+            in_line_comment = true
+            i = i + 2
+        } else if c == 34 { // '"'
+            in_string = true
+            i = i + 1
+        } else if c == 58 && i + 1 < len && src[(i + 1) as usize] == 58 { // "::"
+            return true
+        } else {
+            var prev_ident: bool = false
+            if i > 0 {
+                prev_ident = is_ident_continue(src[(i - 1) as usize])
+            }
+            if !prev_ident {
+                // use
+                if i + 2 < len &&
+                   src[i as usize] == 117 && src[(i + 1) as usize] == 115 && src[(i + 2) as usize] == 101 {
+                    if i + 3 >= len || !is_ident_continue(src[(i + 3) as usize]) {
+                        return true
+                    }
+                }
+                // mod
+                if i + 2 < len &&
+                   src[i as usize] == 109 && src[(i + 1) as usize] == 111 && src[(i + 2) as usize] == 100 {
+                    if i + 3 >= len || !is_ident_continue(src[(i + 3) as usize]) {
+                        return true
+                    }
+                }
+                // import
+                if i + 5 < len &&
+                   src[i as usize] == 105 && src[(i + 1) as usize] == 109 && src[(i + 2) as usize] == 112 &&
+                   src[(i + 3) as usize] == 111 && src[(i + 4) as usize] == 114 && src[(i + 5) as usize] == 116 {
+                    if i + 6 >= len || !is_ident_continue(src[(i + 6) as usize]) {
+                        return true
+                    }
+                }
+                // module
+                if i + 5 < len &&
+                   src[i as usize] == 109 && src[(i + 1) as usize] == 111 && src[(i + 2) as usize] == 100 &&
+                   src[(i + 3) as usize] == 117 && src[(i + 4) as usize] == 108 && src[(i + 5) as usize] == 101 {
+                    if i + 6 >= len || !is_ident_continue(src[(i + 6) as usize]) {
+                        return true
+                    }
+                }
+            }
+            i = i + 1
+        }
+    }
+
+    false
+}
+
+fn skip_ws(src: [i8; 65536], len: i64, pos: i64) -> i64 with Mut, Panic, Div {
     var p = pos
     while p < len && is_ws(src[p as usize]) {
         p = p + 1
@@ -491,7 +664,7 @@ fn skip_ws(src: [i8; 65536], len: i64, pos: i64) -> i64 with Panic, Div {
     p
 }
 
-fn find_fn_main_lbrace(src: [i8; 65536], len: i64) -> i64 with Panic, Div {
+fn find_fn_main_lbrace(src: [i8; 65536], len: i64) -> i64 with Mut, Panic, Div {
     // Best-effort scan for `fn main ... {`.
     var i: i64 = 0
     while i + 2 < len {
@@ -512,7 +685,7 @@ fn find_fn_main_lbrace(src: [i8; 65536], len: i64) -> i64 with Panic, Div {
     -1
 }
 
-fn find_matching_rbrace(src: [i8; 65536], len: i64, lbrace: i64) -> i64 with Panic, Div {
+fn find_matching_rbrace(src: [i8; 65536], len: i64, lbrace: i64) -> i64 with Mut, Panic, Div {
     // Returns index of matching '}' for the '{' at lbrace (or -1).
     if lbrace < 0 || lbrace >= len { return -1 }
     var depth: i64 = 0
@@ -547,7 +720,7 @@ fn find_matching_rbrace(src: [i8; 65536], len: i64, lbrace: i64) -> i64 with Pan
     -1
 }
 
-fn find_return(src: [i8; 65536], len: i64) -> i64 with Panic, Div {
+fn find_return(src: [i8; 65536], len: i64) -> i64 with Mut, Panic, Div {
     // "return"
     var i: i64 = 0
     while i + 6 < len {
@@ -564,7 +737,7 @@ fn find_return(src: [i8; 65536], len: i64) -> i64 with Panic, Div {
     -1
 }
 
-fn find_let(src: [i8; 65536], len: i64) -> i64 with Panic, Div {
+fn find_let(src: [i8; 65536], len: i64) -> i64 with Mut, Panic, Div {
     // "let"
     var i: i64 = 0
     while i + 3 < len {
@@ -578,7 +751,7 @@ fn find_let(src: [i8; 65536], len: i64) -> i64 with Panic, Div {
     -1
 }
 
-fn find_print(src: [i8; 65536], len: i64) -> i64 with Panic, Div {
+fn find_print(src: [i8; 65536], len: i64) -> i64 with Mut, Panic, Div {
     // "print"
     var i: i64 = 0
     while i + 5 < len {
@@ -594,7 +767,7 @@ fn find_print(src: [i8; 65536], len: i64) -> i64 with Panic, Div {
     -1
 }
 
-fn find_first_char(src: [i8; 65536], len: i64, ch: i8, start: i64) -> i64 with Panic, Div {
+fn find_first_char(src: [i8; 65536], len: i64, ch: i8, start: i64) -> i64 with Mut, Panic, Div {
     var i: i64 = start
     if i < 0 { i = 0 }
     while i < len {
@@ -675,7 +848,7 @@ fn parse_ident_at(src: [i8; 65536], len: i64, pos: i64) -> (bool, [i8; 64], i64,
     (true, name, n, p)
 }
 
-fn ident_eq(a: [i8; 64], a_len: i64, b: [i8; 64], b_len: i64) -> bool with Panic, Div {
+fn ident_eq(a: [i8; 64], a_len: i64, b: [i8; 64], b_len: i64) -> bool with Mut, Panic, Div {
     if a_len != b_len { return false }
     var i: i64 = 0
     while i < a_len {
@@ -692,7 +865,7 @@ fn lookup_binding(
     name_lens: [i64; 32],
     values: [i64; 32],
     n: i64
-) -> (bool, i64) with Panic, Div {
+) -> (bool, i64) with Mut, Panic, Div {
     var i: i64 = 0
     while i < n {
         if ident_eq(name, name_len, names[i as usize], name_lens[i as usize]) {
@@ -908,6 +1081,27 @@ fn emit_diag(out: CompileArtifact, msg: [i8; 64], msg_len: i64) -> CompileArtifa
     o
 }
 
+fn emit_diag_string(out: CompileArtifact, msg: string) -> CompileArtifact with Mut, Panic, Div {
+    var buf: [i8; 64] = [0; 64]
+    var n = str_len(msg)
+    if n < 0 { n = 0 }
+    if n > 64 { n = 64 }
+
+    var i: i64 = 0
+    while i < n {
+        buf[i as usize] = msg[i as usize] as i8
+        i = i + 1
+    }
+    emit_diag(out, buf, n)
+}
+
+fn compile_artifact_fail_closed(exit_code: i32, msg: string) -> CompileArtifact with Mut, Panic, Div {
+    var out = compile_artifact_empty()
+    out = compile_artifact_set_inline_transport(out)
+    out.exit_code = exit_code
+    emit_diag_string(out, msg)
+}
+
 // ============================================================================
 // BYTECODE BINARY ARTIFACT EMISSION (SOBC v1)
 // ============================================================================
@@ -1070,9 +1264,16 @@ fn compile_source(
     source: [i8; 65536],
     source_len: i64,
     options: CompileOptions
-) -> CompileArtifact with Mut, Panic {
-    let _opts = options
+) -> CompileArtifact with Mut, Panic, Div {
+    if options.backend == BACKEND_NATIVE {
+        return compile_artifact_fail_closed(
+            DRIVER_EXIT_UNSUPPORTED_NATIVE,
+            "native_backend_unsupported"
+        )
+    }
+
     var out = compile_artifact_empty()
+    out = compile_artifact_set_inline_transport(out)
 
     if source_len <= 0 {
         var msg: [i8; 64] = [0; 64]
@@ -1085,6 +1286,13 @@ fn compile_source(
 
     var len = source_len
     if len > 65536 { len = 65536 }
+
+    if source_has_multimodule_syntax(source, len) {
+        return compile_artifact_fail_closed(
+            DRIVER_EXIT_UNSUPPORTED_MULTIMODULE,
+            "multimodule_unsupported"
+        )
+    }
 
     let lbrace = find_fn_main_lbrace(source, len)
     let rbrace = find_matching_rbrace(source, len, lbrace)
@@ -1895,6 +2103,7 @@ fn compile_source(
         }
     }
 
+    out = compile_artifact_set_inline_transport(out)
     out.code_len = pos
     out
 }
@@ -2107,15 +2316,10 @@ fn compile_multimodule_program(main_path: string) -> CompileArtifact with IO, Mu
     // Step 1: Parse main file
     let main_state = read_source_file(main_path)
     if main_state.token_count <= 0 {
-        var msg: [i8; 64] = [0; 64]
-        // "bootstrap_lexer_unavailable"
-        msg[0] = 98; msg[1] = 111; msg[2] = 111; msg[3] = 116; msg[4] = 115; msg[5] = 116; msg[6] = 114; msg[7] = 97; msg[8] = 112
-        msg[9] = 95
-        msg[10] = 108; msg[11] = 101; msg[12] = 120; msg[13] = 101; msg[14] = 114
-        msg[15] = 95
-        msg[16] = 117; msg[17] = 110; msg[18] = 97; msg[19] = 118; msg[20] = 97; msg[21] = 105; msg[22] = 108; msg[23] = 97; msg[24] = 98; msg[25] = 108; msg[26] = 101
-        out.exit_code = 2
-        return emit_diag(out, msg, 27)
+        return compile_artifact_fail_closed(
+            DRIVER_EXIT_UNSUPPORTED_MULTIMODULE,
+            "multimodule_pipeline_unavailable"
+        )
     }
     let main_prog = parse_program_preloaded(main_state.token_count)
 
@@ -2237,9 +2441,10 @@ fn compile_multimodule_program(main_path: string) -> CompileArtifact with IO, Mu
         out.code[copy_idx as usize] = bytecode_buf[copy_idx as usize]
         copy_idx = copy_idx + 1
     }
+    out = compile_artifact_set_inline_transport(out)
     out.code_len = bytecode_len
     out.ok = true
-    out.exit_code = 0
+    out.exit_code = DRIVER_EXIT_OK
     out
 }
 
@@ -2287,6 +2492,31 @@ fn test_import_cycle_detection() -> i32 with IO, Mut, Div, Panic, Alloc {
     0
 }
 
+fn test_compile_artifact_v2_inline_transport() -> i32 with Mut, Panic, Div {
+    let opts = compile_options_default()
+    let artifact = compile_source_text("fn main() -> i32 { 0 }", opts)
+    if !artifact.ok { return 1 }
+    if artifact.transport_kind != COMPILE_ARTIFACT_TRANSPORT_INLINE { return 1 }
+    if artifact.artifact_schema != COMPILE_ARTIFACT_SCHEMA_V2 { return 1 }
+    if artifact.artifact_path_len != 0 { return 1 }
+    if artifact.code_len <= 0 { return 1 }
+    0
+}
+
+fn test_compile_artifact_v2_path_transport_metadata() -> i32 with Mut, Panic, Div {
+    var artifact = compile_artifact_empty()
+    artifact.ok = true
+    artifact.exit_code = DRIVER_EXIT_OK
+    artifact.code_len = 0
+    artifact = compile_artifact_set_path_transport(artifact, ".sounio_bytecode.sobc")
+
+    if artifact.transport_kind != COMPILE_ARTIFACT_TRANSPORT_PATH { return 1 }
+    if artifact.artifact_schema != COMPILE_ARTIFACT_SCHEMA_V2 { return 1 }
+    if artifact.artifact_path_len <= 0 { return 1 }
+    if artifact.artifact_path[0] != 46 { return 1 } // '.'
+    0
+}
+
 fn multimodule_demonstrator() -> i32 with IO, Mut, Div, Panic, Alloc {
     // Main demonstrator showing the multi-module compilation pipeline.
     //
@@ -2302,11 +2532,13 @@ fn multimodule_demonstrator() -> i32 with IO, Mut, Div, Panic, Alloc {
     // - Circular dependencies don't cause infinite recursion
 
     var passed: i32 = 0
-    var total: i32 = 3
+    var total: i32 = 5
 
     if test_multimodule_basic() == 0 { passed = passed + 1 }
     if test_import_deduplication() == 0 { passed = passed + 1 }
     if test_import_cycle_detection() == 0 { passed = passed + 1 }
+    if test_compile_artifact_v2_inline_transport() == 0 { passed = passed + 1 }
+    if test_compile_artifact_v2_path_transport_metadata() == 0 { passed = passed + 1 }
 
     if passed == total { 0 } else { 1 }
 }
@@ -2321,6 +2553,12 @@ fn compile_file(path: string, options: CompileOptions) -> CompileArtifact with I
     //
     // Moonshot step: if `path` is a directory, compile a flat concatenation of
     // all `.sio` files within it (non-recursive), sorted deterministically.
+    if options.backend == BACKEND_NATIVE {
+        return compile_artifact_fail_closed(
+            DRIVER_EXIT_UNSUPPORTED_NATIVE,
+            "native_backend_unsupported"
+        )
+    }
 
     var buf: [i8; 65536] = [0; 65536]
     var n: i64 = file_size(path)
@@ -2359,14 +2597,15 @@ fn compile_file(path: string, options: CompileOptions) -> CompileArtifact with I
     if cache_size > 0 {
         var out = compile_artifact_empty()
         out.ok = true
-        out.exit_code = 0
+        out.exit_code = DRIVER_EXIT_OK
         // Signal the host VM boundary to load cache directly, avoiding byte-by-byte
         // materialization in self-hosted bytecode.
         out.code_len = 0
+        out = compile_artifact_set_path_transport(out, cache_path)
         return out
     }
 
-    let entries = list_dir(path)
+    var entries = list_dir(path)
 
     // Heuristic guard: listing a directory is cheap, but reading N files into
     // `[i8]` lists is extremely expensive for large trees (e.g. `self-hosted/`).
@@ -2376,6 +2615,7 @@ fn compile_file(path: string, options: CompileOptions) -> CompileArtifact with I
     var total_bytes: i64 = 0
     var scan_idx: i64 = 0
     let total = len(entries)
+    entries = sort_string_list(entries, total)
     while scan_idx < total {
         let p = entries[scan_idx as usize]
         if ends_with(p, ".sio") {

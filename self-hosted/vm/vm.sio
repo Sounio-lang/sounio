@@ -378,6 +378,136 @@ fn val_list_push(list: Option<Box<ValList>>, value: Val) -> Option<Box<ValList>>
     }
 }
 
+fn vm_should_deep_clone_ptr_obj(tag: ObjTag) -> bool {
+    tag == ObjTag::Struct || tag == ObjTag::Array || tag == ObjTag::Tuple
+}
+
+fn vm_deep_clone_val(heap: Heap, value: Val) -> (Heap, Val) with Mut, Panic, Div, Alloc {
+    if value.tag != ValTag::Ptr {
+        return (heap, value)
+    }
+
+    let src_id = ptr_to_id(value)
+    if src_id < 0 {
+        return (heap, value)
+    }
+
+    let src_obj = heap_get(heap, src_id)
+    if !vm_should_deep_clone_ptr_obj(src_obj.tag) {
+        return (heap, value)
+    }
+
+    let clone_pair = vm_deep_clone_obj(heap, src_obj)
+    let h2 = clone_pair.0
+    let cloned_obj = clone_pair.1
+    let alloc_pair = heap_alloc(h2, cloned_obj)
+    let h3 = alloc_pair.0
+    let new_id = alloc_pair.1
+    if new_id < 0 {
+        return (heap, value)
+    }
+    (h3, ptr_from_id(new_id))
+}
+
+fn vm_deep_clone_fields(
+    heap: Heap,
+    fields: Option<Box<FieldList>>
+) -> (Heap, Option<Box<FieldList>>) with Mut, Panic, Div, Alloc {
+    match fields {
+        Some(list) => {
+            let head_binding = (*list).head
+            let head_pair = vm_deep_clone_val(heap, head_binding.value)
+            let h1 = head_pair.0
+            let cloned_head_val = head_pair.1
+
+            let tail_pair = vm_deep_clone_fields(h1, (*list).tail)
+            let h2 = tail_pair.0
+            let cloned_tail = tail_pair.1
+
+            let cloned_head = FieldBinding {
+                name: head_binding.name,
+                value: cloned_head_val,
+            }
+            (
+                h2,
+                Some(Box::new(FieldList {
+                    head: cloned_head,
+                    tail: cloned_tail,
+                })),
+            )
+        }
+        _ => (heap, None),
+    }
+}
+
+fn vm_deep_clone_elems(
+    heap: Heap,
+    elems: Option<Box<ValList>>
+) -> (Heap, Option<Box<ValList>>) with Mut, Panic, Div, Alloc {
+    match elems {
+        Some(list) => {
+            let head_pair = vm_deep_clone_val(heap, (*list).head)
+            let h1 = head_pair.0
+            let cloned_head = head_pair.1
+
+            let tail_pair = vm_deep_clone_elems(h1, (*list).tail)
+            let h2 = tail_pair.0
+            let cloned_tail = tail_pair.1
+            (
+                h2,
+                Some(Box::new(ValList {
+                    head: cloned_head,
+                    tail: cloned_tail,
+                })),
+            )
+        }
+        _ => (heap, None),
+    }
+}
+
+fn vm_deep_clone_obj(heap: Heap, src_obj: HeapObj) -> (Heap, HeapObj) with Mut, Panic, Div, Alloc {
+    var cloned = heap_empty_obj(src_obj.tag)
+    cloned.len = src_obj.len
+    cloned.quat_data = src_obj.quat_data
+    cloned.oct_data = src_obj.oct_data
+    cloned.sed_data = src_obj.sed_data
+
+    if src_obj.tag == ObjTag::Struct {
+        let fields_pair = vm_deep_clone_fields(heap, src_obj.fields)
+        cloned.fields = fields_pair.1
+        cloned.elems = None
+        return (fields_pair.0, cloned)
+    }
+
+    if src_obj.tag == ObjTag::Array || src_obj.tag == ObjTag::Tuple {
+        let elems_pair = vm_deep_clone_elems(heap, src_obj.elems)
+        cloned.elems = elems_pair.1
+        cloned.fields = None
+        return (elems_pair.0, cloned)
+    }
+
+    // Non-aggregate objects keep pointer semantics in this VM.
+    cloned.fields = src_obj.fields
+    cloned.elems = src_obj.elems
+    (heap, cloned)
+}
+
+fn vm_copy_value_for_ir_copy(heap: Heap, value: Val) -> (Heap, Val) with Mut, Panic, Div, Alloc {
+    if value.tag != ValTag::Ptr {
+        return (heap, value)
+    }
+    let src_id = ptr_to_id(value)
+    if src_id < 0 {
+        return (heap, value)
+    }
+    let src_obj = heap_get(heap, src_id)
+    if src_obj.tag == ObjTag::Struct {
+        vm_deep_clone_val(heap, value)
+    } else {
+        (heap, value)
+    }
+}
+
 fn vm_write_call_args(state: VmState, ins: IrInstr, callee: IrFunction) -> VmState with Mut, Panic, Div {
     var st = state
     // Preferred: use the full call argument list, if present.
@@ -517,7 +647,7 @@ fn cab_empty() -> CallArgsBuf {
     CallArgsBuf { regs: [IR_INVALID_REG; 64], count: 0 }
 }
 
-fn cab_push(buf: CallArgsBuf, reg: i64) -> CallArgsBuf with Mut {
+fn cab_push(buf: CallArgsBuf, reg: i64) -> CallArgsBuf with Mut, Panic {
     var out = buf
     if out.count >= 0 && out.count < 64 {
         out.regs[out.count] = reg
@@ -1602,7 +1732,9 @@ fn vm_step(state: VmState, m: IrModule) -> VmState with Mut, Panic, Div, Alloc, 
         st
     } else if ins.op == IrOpcode::IrCopy {
         if ins.dst >= 0 && ins.dst < 1024 && ins.src1 >= 0 && ins.src1 < 1024 {
-            st.regs[ins.dst] = st.regs[ins.src1]
+            let pair = vm_copy_value_for_ir_copy(st.heap, st.regs[ins.src1])
+            st.heap = pair.0
+            st.regs[ins.dst] = pair.1
         }
         st.pc = st.pc + 1
         st

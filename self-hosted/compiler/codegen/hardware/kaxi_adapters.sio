@@ -1,0 +1,146 @@
+// GENERATED_FROM_STDLIB: stdlib/hardware/kaxi.sio
+// GENERATED_BY: self-hosted/compiler/codegen/hardware/kaxi_emitter.sio
+// Pure Sounio helpers for K-AXI flag packing and replay inspection.
+
+fn kaxi_i64_to_string(n: i64) -> string with Mut, Panic, Div, Alloc {
+    if n == 0 { return "0" }
+    if n < 0 { return "0" }
+
+    var rev: [i8; 32] = [0; 32]
+    var rev_len: i64 = 0
+    var v = n
+    while v > 0 {
+        rev[rev_len as usize] = 48 + (v % 10) as i8
+        rev_len = rev_len + 1
+        v = v / 10
+    }
+
+    var out: [i8; 32] = [0; 32]
+    var i: i64 = 0
+    while i < rev_len {
+        out[i as usize] = rev[(rev_len - i - 1) as usize]
+        i = i + 1
+    }
+    str_from_bytes(out, rev_len)
+}
+
+fn kaxi_flags_pack(op_kind: i64, success_inc: i64, failure_inc: i64, alpha_q8: i64) -> i64 {
+    let op = op_kind & 0xF
+    let failure = (failure_inc & 0xFF) << 8
+    let success = (success_inc & 0xFF) << 16
+    let alpha = (alpha_q8 & 0xFF) << 24
+    op | failure | success | alpha
+}
+
+fn kaxi_flags_unpack_op_kind(flags: i64) -> i64 {
+    flags & 0xF
+}
+
+fn kaxi_flags_unpack_success_inc(flags: i64) -> i64 {
+    (flags >> 16) & 0xFF
+}
+
+fn kaxi_flags_unpack_failure_inc(flags: i64) -> i64 {
+    (flags >> 8) & 0xFF
+}
+
+fn kaxi_flags_unpack_alpha_q8(flags: i64) -> i64 {
+    (flags >> 24) & 0xFF
+}
+
+fn kaxi_flags_is_valid(flags: i64) -> bool {
+    let op = kaxi_flags_unpack_op_kind(flags)
+    let success = kaxi_flags_unpack_success_inc(flags)
+    let failure = kaxi_flags_unpack_failure_inc(flags)
+    let alpha = kaxi_flags_unpack_alpha_q8(flags)
+    op >= 0 && op <= 5 &&
+    success >= 0 && success <= 255 &&
+    failure >= 0 && failure <= 255 &&
+    alpha >= 0 && alpha <= 255
+}
+
+fn kaxi_replay_is_epistemic(flags: i64) -> bool {
+    let op = kaxi_flags_unpack_op_kind(flags)
+    op >= 1 && op <= 5
+}
+
+fn kaxi_replay_entry_summary(value_bits: i64, variance_bits: i64, flags: i64) -> string with Alloc {
+    let op = kaxi_flags_unpack_op_kind(flags)
+    let success = kaxi_flags_unpack_success_inc(flags)
+    let failure = kaxi_flags_unpack_failure_inc(flags)
+    let alpha = kaxi_flags_unpack_alpha_q8(flags)
+    let valid = if kaxi_flags_is_valid(flags) { "true" } else { "false" }
+    let epistemic = if kaxi_replay_is_epistemic(flags) { "true" } else { "false" }
+    "value_bits=" ++ kaxi_i64_to_string(value_bits) ++
+    ", variance_bits=" ++ kaxi_i64_to_string(variance_bits) ++
+    ", op_kind=" ++ kaxi_i64_to_string(op) ++
+    ", failure_inc=" ++ kaxi_i64_to_string(failure) ++
+    ", success_inc=" ++ kaxi_i64_to_string(success) ++
+    ", alpha_q8=" ++ kaxi_i64_to_string(alpha) ++
+    ", valid=" ++ valid ++
+    ", epistemic=" ++ epistemic
+}
+
+fn kaxi_hw_counter_step(
+    fidelity_total: i64,
+    prov_total: i64,
+    formal_total: i64,
+    flags: i64
+) -> (i64, i64, i64) {
+    let is_epi = if kaxi_replay_is_epistemic(flags) { 1 as i64 } else { 0 as i64 }
+    (
+        fidelity_total + is_epi,
+        prov_total + is_epi,
+        formal_total + is_epi
+    )
+}
+
+fn kaxi_hw_epistemic_power_log_q32_32(
+    fidelity_total: i64,
+    prov_total: i64,
+    quantum_total: i64
+) -> i64 {
+    (fidelity_total >> 3) + (prov_total >> 4) + (quantum_total >> 5)
+}
+
+fn kaxi_hw_poll_replay_flags(
+    flags_batch: [i64; 64],
+    count: i64,
+    quantum_total: i64
+) -> (i64, i64, i64, i64) with Mut, Panic, Div, Alloc {
+    var fidelity_total: i64 = 0
+    var prov_total: i64 = 0
+    var formal_total: i64 = 0
+    var i: i64 = 0
+    while i < count && i < 64 {
+        let flags = flags_batch[i as usize]
+        let (next_fidelity, next_prov, next_formal) =
+            kaxi_hw_counter_step(fidelity_total, prov_total, formal_total, flags)
+        fidelity_total = next_fidelity
+        prov_total = next_prov
+        formal_total = next_formal
+        i = i + 1
+    }
+    let score = kaxi_hw_epistemic_power_log_q32_32(fidelity_total, prov_total, quantum_total)
+    (fidelity_total, prov_total, formal_total, score)
+}
+
+fn kaxi_adapters_self_check() -> bool {
+    let f = kaxi_flags_pack(4, 2, 1, 16)
+    var replay: [i64; 64] = [0; 64]
+    replay[0] = kaxi_flags_pack(1, 1, 0, 8)   // epistemic add
+    replay[1] = kaxi_flags_pack(0, 0, 0, 0)   // non-epistemic pass
+    replay[2] = kaxi_flags_pack(4, 1, 1, 16)  // epistemic fma
+    let (fidelity_total, prov_total, formal_total, score_q32) =
+        kaxi_hw_poll_replay_flags(replay, 3, 32)
+    kaxi_flags_unpack_op_kind(f) == 4 &&
+    kaxi_flags_unpack_success_inc(f) == 2 &&
+    kaxi_flags_unpack_failure_inc(f) == 1 &&
+    kaxi_flags_unpack_alpha_q8(f) == 16 &&
+    kaxi_flags_is_valid(f) &&
+    kaxi_replay_is_epistemic(f) &&
+    fidelity_total == 2 &&
+    prov_total == 2 &&
+    formal_total == 2 &&
+    score_q32 == 1
+}

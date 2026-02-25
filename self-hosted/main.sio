@@ -823,6 +823,281 @@ fn run_parse_all_full_shards_selector(shard_count: i64, selector: string, shard_
     if stats.executed <= 0 || stats.failed > 0 || stats.invalid > 0 { 1 } else { 0 }
 }
 
+fn kaxi_str_contains(haystack: string, needle: string) -> bool with Mut, Panic, Div {
+    let hlen = str_len(haystack)
+    let nlen = str_len(needle)
+    if nlen == 0 { return true }
+    if hlen < nlen { return false }
+
+    var i: i64 = 0
+    while i <= (hlen - nlen) {
+        var j: i64 = 0
+        var ok: bool = true
+        while j < nlen {
+            if str_char_at(haystack, i + j) != str_char_at(needle, j) {
+                ok = false
+                break
+            }
+            j = j + 1
+        }
+        if ok { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn kaxi_emit_selector_has(emit_selector: string, key: string) -> bool with Mut, Panic, Div {
+    kaxi_str_contains(emit_selector, key)
+}
+
+fn kaxi_load_spec_text(path: string) -> string with IO, Mut, Panic, Div, Alloc {
+    let bytes = read_file(path)
+    let size = file_size(path)
+    str_from_bytes(bytes, size)
+}
+
+fn kaxi_write_text_file(path: string, text: string) -> bool with IO, Mut, Panic, Div {
+    var data: [i8; 4194304] = [0; 4194304]
+    let n = str_len(text)
+    var i: i64 = 0
+    while i < n && i < 4194304 {
+        data[i as usize] = str_char_at(text, i) as i8
+        i = i + 1
+    }
+    write_bytes_to_file(path, data, i)
+}
+
+fn kaxi_template_slave_verilog() -> string {
+    var out = "// GENERATED_FROM_STDLIB: stdlib/hardware/kaxi.sio\n"
+    out = out ++ "// GENERATED_BY: self-hosted build --target hardware-kaxi\n"
+    out = out ++ "// Sounio Omega - K-AXI epistemic slave/propagation engine\n\n"
+    out = out ++ "`timescale 1ns/1ps\n\n"
+    out = out ++ "module k_axi_slave_epistemic #(\n"
+    out = out ++ "    parameter DATA_WIDTH = 64,\n"
+    out = out ++ "    parameter VAR_WIDTH = 64,\n"
+    out = out ++ "    parameter PROV_WIDTH = 256,\n"
+    out = out ++ "    parameter CONF_WIDTH = 128,\n"
+    out = out ++ "    parameter FLAGS_WIDTH = 32,\n"
+    out = out ++ "    parameter SCALE_SHIFT = 30\n"
+    out = out ++ ") (\n"
+    out = out ++ "    input  wire                         aclk,\n"
+    out = out ++ "    input  wire                         aresetn,\n"
+    out = out ++ "    input  wire [DATA_WIDTH-1:0]        s_tdata,\n"
+    out = out ++ "    input  wire [VAR_WIDTH+PROV_WIDTH+CONF_WIDTH+FLAGS_WIDTH-1:0] s_tuser,\n"
+    out = out ++ "    input  wire                         s_tvalid,\n"
+    out = out ++ "    output wire                         s_tready,\n"
+    out = out ++ "    output reg  [DATA_WIDTH-1:0]        out_value,\n"
+    out = out ++ "    output reg  [VAR_WIDTH-1:0]         out_variance,\n"
+    out = out ++ "    output reg  [PROV_WIDTH-1:0]        out_prov,\n"
+    out = out ++ "    output reg  [CONF_WIDTH-1:0]        out_conf,\n"
+    out = out ++ "    output reg  [FLAGS_WIDTH-1:0]       out_flags,\n"
+    out = out ++ "    output reg                          out_valid,\n"
+    out = out ++ "    input  wire                         downstream_ready,\n"
+    out = out ++ "    output reg  [31:0]                  gum_fidelity_inc,\n"
+    out = out ++ "    output reg  [31:0]                  provenance_depth_inc,\n"
+    out = out ++ "    output reg  [31:0]                  formal_coverage_inc\n"
+    out = out ++ ");\n\n"
+    out = out ++ "    localparam [255:0] PROV_SALT = 256'h4B5F4158495F4D45524B4C455F4550495354454D49435F4255535F7631A5A5A5;\n"
+    out = out ++ "    localparam OP_ADD = 4'h1;\n"
+    out = out ++ "    localparam OP_MUL = 4'h2;\n"
+    out = out ++ "    localparam OP_DIV = 4'h3;\n"
+    out = out ++ "    localparam OP_FMA = 4'h4;\n\n"
+    out = out ++ "    wire accept = s_tvalid && s_tready;\n"
+    out = out ++ "    assign s_tready = !out_valid || downstream_ready;\n\n"
+    out = out ++ "    wire [63:0] in_variance = s_tuser[63:0];\n"
+    out = out ++ "    wire [255:0] in_prov = s_tuser[319:64];\n"
+    out = out ++ "    wire [127:0] in_conf = s_tuser[447:320];\n"
+    out = out ++ "    wire [31:0] in_flags = s_tuser[479:448];\n\n"
+    out = out ++ "    wire [3:0] op_kind = in_flags[3:0];\n"
+    out = out ++ "    wire [7:0] failure_inc = in_flags[15:8];\n"
+    out = out ++ "    wire [7:0] success_inc = in_flags[23:16];\n"
+    out = out ++ "    wire [7:0] alpha_q8 = in_flags[31:24];\n"
+    out = out ++ "    wire [63:0] in_alpha = in_conf[127:64];\n"
+    out = out ++ "    wire [63:0] in_beta = in_conf[63:0];\n"
+    out = out ++ "    wire [63:0] shifted_abs = s_tdata[63] ? ((~s_tdata + 64'd1) >> SCALE_SHIFT) : (s_tdata >> SCALE_SHIFT);\n\n"
+    out = out ++ "    reg [63:0] op_var;\n"
+    out = out ++ "    reg [127:0] degradation_full;\n"
+    out = out ++ "    reg [63:0] degradation_var;\n\n"
+    out = out ++ "    always @(*) begin\n"
+    out = out ++ "        case (op_kind)\n"
+    out = out ++ "            OP_ADD: op_var = in_variance + (in_variance >> 1);\n"
+    out = out ++ "            OP_MUL: op_var = (in_variance >> 1) + (in_variance >> 2);\n"
+    out = out ++ "            OP_DIV: op_var = (in_variance >> 1) + (in_variance >> 3);\n"
+    out = out ++ "            OP_FMA: op_var = in_variance + shifted_abs;\n"
+    out = out ++ "            default: op_var = in_variance;\n"
+    out = out ++ "        endcase\n"
+    out = out ++ "        degradation_full = in_variance * alpha_q8;\n"
+    out = out ++ "        degradation_var = degradation_full[71:8];\n"
+    out = out ++ "    end\n\n"
+    out = out ++ "    always @(posedge aclk or negedge aresetn) begin\n"
+    out = out ++ "        if (!aresetn) begin\n"
+    out = out ++ "            out_value <= {DATA_WIDTH{1'b0}};\n"
+    out = out ++ "            out_variance <= {VAR_WIDTH{1'b0}};\n"
+    out = out ++ "            out_prov <= {PROV_WIDTH{1'b0}};\n"
+    out = out ++ "            out_conf <= {CONF_WIDTH{1'b0}};\n"
+    out = out ++ "            out_flags <= {FLAGS_WIDTH{1'b0}};\n"
+    out = out ++ "            out_valid <= 1'b0;\n"
+    out = out ++ "            gum_fidelity_inc <= 32'd0;\n"
+    out = out ++ "            provenance_depth_inc <= 32'd0;\n"
+    out = out ++ "            formal_coverage_inc <= 32'd0;\n"
+    out = out ++ "        end else begin\n"
+    out = out ++ "            if (out_valid && downstream_ready) begin\n"
+    out = out ++ "                out_valid <= 1'b0;\n"
+    out = out ++ "            end\n"
+    out = out ++ "            if (accept) begin\n"
+    out = out ++ "                out_value <= s_tdata;\n"
+    out = out ++ "                out_variance <= op_var + degradation_var;\n"
+    out = out ++ "                out_prov <= ({in_prov[247:0], in_prov[255:248]} ^ {192'd0, s_tdata} ^ {224'd0, in_flags} ^ PROV_SALT);\n"
+    out = out ++ "                out_conf <= {in_alpha + {56'd0, success_inc}, in_beta + {56'd0, failure_inc}};\n"
+    out = out ++ "                out_flags <= in_flags;\n"
+    out = out ++ "                gum_fidelity_inc <= gum_fidelity_inc + 32'd1;\n"
+    out = out ++ "                provenance_depth_inc <= provenance_depth_inc + 32'd1;\n"
+    out = out ++ "                formal_coverage_inc <= formal_coverage_inc + 32'd1;\n"
+    out = out ++ "                out_valid <= 1'b1;\n"
+    out = out ++ "            end\n"
+    out = out ++ "        end\n"
+    out = out ++ "    end\n"
+    out = out ++ "endmodule\n"
+    out
+}
+
+fn kaxi_template_epistemic_power_accumulator_verilog() -> string {
+    var out = "// GENERATED_FROM_STDLIB: stdlib/hardware/kaxi.sio\n"
+    out = out ++ "// GENERATED_BY: self-hosted build --target hardware-kaxi\n"
+    out = out ++ "// Sounio Omega - Hardware Epistemic Power accumulator\n\n"
+    out = out ++ "`timescale 1ns/1ps\n\n"
+    out = out ++ "module epistemic_power_accumulator #(\n"
+    out = out ++ "    parameter SCALE_SHIFT = 30\n"
+    out = out ++ ") (\n"
+    out = out ++ "    input  wire         aclk,\n"
+    out = out ++ "    input  wire         aresetn,\n"
+    out = out ++ "    input  wire [31:0]  fidelity_inc,\n"
+    out = out ++ "    input  wire [31:0]  prov_depth_inc,\n"
+    out = out ++ "    input  wire [31:0]  quantum_fidelity_inc,\n"
+    out = out ++ "    input  wire         clear_counters,\n"
+    out = out ++ "    output reg  [63:0]  epistemic_power_log,\n"
+    out = out ++ "    output reg  [31:0]  total_transactions\n"
+    out = out ++ ");\n\n"
+    out = out ++ "    reg [63:0] fidelity_accum;\n"
+    out = out ++ "    reg [63:0] prov_accum;\n"
+    out = out ++ "    reg [63:0] quantum_accum;\n\n"
+    out = out ++ "    wire [63:0] fidelity_next = fidelity_accum + {32'd0, fidelity_inc};\n"
+    out = out ++ "    wire [63:0] prov_next = prov_accum + {32'd0, prov_depth_inc};\n"
+    out = out ++ "    wire [63:0] quantum_next = quantum_accum + {32'd0, quantum_fidelity_inc};\n"
+    out = out ++ "    wire [63:0] weighted_log_next = (fidelity_next >> 3) + (prov_next >> 4) + (quantum_next >> 5);\n"
+    out = out ++ "    wire tx_seen = |fidelity_inc;\n\n"
+    out = out ++ "    always @(posedge aclk or negedge aresetn) begin\n"
+    out = out ++ "        if (!aresetn) begin\n"
+    out = out ++ "            fidelity_accum <= 64'd0;\n"
+    out = out ++ "            prov_accum <= 64'd0;\n"
+    out = out ++ "            quantum_accum <= 64'd0;\n"
+    out = out ++ "            total_transactions <= 32'd0;\n"
+    out = out ++ "            epistemic_power_log <= 64'd0;\n"
+    out = out ++ "        end else if (clear_counters) begin\n"
+    out = out ++ "            fidelity_accum <= 64'd0;\n"
+    out = out ++ "            prov_accum <= 64'd0;\n"
+    out = out ++ "            quantum_accum <= 64'd0;\n"
+    out = out ++ "            total_transactions <= 32'd0;\n"
+    out = out ++ "            epistemic_power_log <= 64'd0;\n"
+    out = out ++ "        end else begin\n"
+    out = out ++ "            fidelity_accum <= fidelity_next;\n"
+    out = out ++ "            prov_accum <= prov_next;\n"
+    out = out ++ "            quantum_accum <= quantum_next;\n"
+    out = out ++ "            total_transactions <= total_transactions + {31'd0, tx_seen};\n"
+    out = out ++ "            epistemic_power_log <= weighted_log_next;\n"
+    out = out ++ "        end\n"
+    out = out ++ "    end\n"
+    out = out ++ "endmodule\n"
+    out
+}
+
+fn kaxi_template_cuda_stub() -> string {
+    var out = "// GENERATED_FROM_STDLIB: stdlib/hardware/kaxi.sio\n"
+    out = out ++ "// GENERATED_BY: self-hosted build --target hardware-kaxi\n"
+    out = out ++ "// CUDA sidecar for K-AXI publish path.\n\n"
+    out = out ++ "#include <cuda_runtime.h>\n"
+    out = out ++ "#include <stdint.h>\n"
+    out = out ++ "#include <math.h>\n\n"
+    out = out ++ "struct alignas(32) uint256_t {\n"
+    out = out ++ "    uint64_t lane0;\n"
+    out = out ++ "    uint64_t lane1;\n"
+    out = out ++ "    uint64_t lane2;\n"
+    out = out ++ "    uint64_t lane3;\n"
+    out = out ++ "};\n\n"
+    out = out ++ "struct KaxiPayload {\n"
+    out = out ++ "    double value;\n"
+    out = out ++ "    double variance;\n"
+    out = out ++ "    uint256_t provenance;\n"
+    out = out ++ "    uint64_t confidence_bits;\n"
+    out = out ++ "    uint32_t flags;\n"
+    out = out ++ "    uint32_t reserved;\n"
+    out = out ++ "};\n\n"
+    out = out ++ "static constexpr unsigned KAXI_RING_SIZE = 64;\n"
+    out = out ++ "__device__ KaxiPayload g_kaxi_ring[KAXI_RING_SIZE];\n"
+    out = out ++ "__device__ unsigned int g_kaxi_write_idx = 0;\n"
+    out = out ++ "__device__ unsigned long long g_epistemic_power_log_hw_q32_32 = 0ull;\n\n"
+    out = out ++ "__device__ __forceinline__ void __knowledge_kaxi_publish(\n"
+    out = out ++ "    double value,\n"
+    out = out ++ "    double variance,\n"
+    out = out ++ "    const uint256_t& prov,\n"
+    out = out ++ "    double confidence,\n"
+    out = out ++ "    uint32_t flags\n"
+    out = out ++ ") {\n"
+    out = out ++ "    const unsigned idx = atomicAdd(&g_kaxi_write_idx, 1u) & (KAXI_RING_SIZE - 1);\n"
+    out = out ++ "    g_kaxi_ring[idx].value = value;\n"
+    out = out ++ "    g_kaxi_ring[idx].variance = fmax(0.0, variance);\n"
+    out = out ++ "    g_kaxi_ring[idx].provenance = prov;\n"
+    out = out ++ "    g_kaxi_ring[idx].confidence_bits = static_cast<uint64_t>(__double_as_longlong(confidence));\n"
+    out = out ++ "    g_kaxi_ring[idx].flags = flags;\n"
+    out = out ++ "    g_kaxi_ring[idx].reserved = 0u;\n"
+    out = out ++ "    atomicAdd(&g_epistemic_power_log_hw_q32_32, 1ull << 16);\n"
+    out = out ++ "}\n"
+    out
+}
+
+fn run_build_hardware_kaxi(emit_selector: string) -> i32 with IO, Mut, Panic, Div, Alloc {
+    let _ignored_emit_selector = emit_selector
+    print("Error: template-direct hardware build path has been removed.\n")
+    print("Use the wrapper path:\n")
+    print("  ./souc build --target hardware-kaxi --emit verilog,cuda-stub\n")
+    print("This enforces canonical extraction from stdlib/hardware/kaxi.sio via selfhost-emitter.\n")
+    2
+}
+
+fn run_build_command(argc: i64) -> i32 with IO, Mut, Panic, Div, Alloc {
+    var target: string = ""
+    var emit_selector: string = "verilog,cuda-stub"
+    var i: i64 = 1
+
+    while i < argc {
+        let arg = get_arg(i)
+        if str_eq(arg, "--target") {
+            if i + 1 >= argc {
+                print("Error: --target requires a value\n")
+                return 1
+            }
+            target = get_arg(i + 1)
+            i = i + 2
+        } else if str_eq(arg, "--emit") {
+            if i + 1 >= argc {
+                print("Error: --emit requires a value\n")
+                return 1
+            }
+            emit_selector = get_arg(i + 1)
+            i = i + 2
+        } else {
+            i = i + 1
+        }
+    }
+
+    if str_eq(target, "hardware-kaxi") {
+        return run_build_hardware_kaxi(emit_selector)
+    }
+
+    print("Error: self-hosted build currently supports only --target hardware-kaxi\n")
+    1
+}
+
 // ============================================================================
 // CLI MODE — User-facing commands (bootstrap sovereignty)
 // ============================================================================
@@ -844,6 +1119,8 @@ fn print_cli_help() with IO {
     print("    help                   Show this help message\n\n")
     print("DEVELOPER COMMANDS:\n")
     print("    test                   Run test suite\n")
+    print("    build --target hardware-kaxi --emit verilog,cuda-stub\n")
+    print("                           Emit K-AXI + Epistemic Power hardware artifacts\n")
     print("    lex <file>             Tokenize source file\n")
     print("    parse <file>           Parse source file to AST\n")
     print("    resolve <file>         Resolve names and scopes\n")
@@ -887,6 +1164,10 @@ fn main() -> i32 with IO, Mut, Div, Panic, Alloc {
 
     if str_eq(cmd, "test") {
         return run_all_tests()
+    }
+
+    if str_eq(cmd, "build") {
+        return run_build_command(argc)
     }
 
     if str_eq(cmd, "lex") {
