@@ -152,6 +152,52 @@ def _repo_root() -> str:
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def _extract_ptx_text(blob: str, source: str) -> str:
+    """Extract clean PTX from mixed fenced/logged output."""
+    if "--- PTX BEGIN ---" in blob and "--- PTX END ---" in blob:
+        start = blob.index("--- PTX BEGIN ---") + len("--- PTX BEGIN ---")
+        end = blob.index("--- PTX END ---")
+        ptx = blob[start:end].strip()
+        if ptx:
+            return ptx
+
+    lines = blob.splitlines()
+    start_idx = None
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith(".version"):
+            start_idx = i
+            break
+
+    if start_idx is None:
+        raise RuntimeError(f"Could not locate PTX .version directive in {source}")
+
+    ptx_lines = []
+    depth = 0
+    saw_entry = False
+    for line in lines[start_idx:]:
+        ptx_lines.append(line)
+        if ".entry" in line:
+            saw_entry = True
+        depth += line.count("{") - line.count("}")
+        if saw_entry and depth <= 0 and line.strip() == "}":
+            break
+
+    ptx = "\n".join(ptx_lines).strip()
+    if ".target" not in ptx:
+        raise RuntimeError(f"Extracted PTX from {source} is missing .target directive")
+    return ptx
+
+
+def _normalize_sm89_cp_async(ptx: str, source: str) -> str:
+    if ".target sm_89" in ptx and "cp.async.cg.shared.global" in ptx:
+        print(
+            f"[sounio-modal] {source}: rewriting cp.async.cg.shared.global -> "
+            "cp.async.ca.shared.global (sm_89 compatibility)"
+        )
+        ptx = ptx.replace("cp.async.cg.shared.global", "cp.async.ca.shared.global")
+    return ptx
+
+
 def generate_ptx_via_cargo(M: int, N: int, K: int) -> str:
     """Run the souc GPU unit tests with --nocapture and extract the PTX block.
 
@@ -172,35 +218,17 @@ def generate_ptx_via_cargo(M: int, N: int, K: int) -> str:
     )
     combined = result.stdout + result.stderr
 
-    # Fenced extraction
-    if "--- PTX BEGIN ---" in combined and "--- PTX END ---" in combined:
-        a = combined.index("--- PTX BEGIN ---") + len("--- PTX BEGIN ---")
-        b = combined.index("--- PTX END ---")
-        return combined[a:b].strip()
+    try:
+        ptx = _extract_ptx_text(combined, "cargo test output")
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "Could not extract PTX from souc cargo test output.\n"
+            f"{exc}\n"
+            f"stdout ({len(result.stdout)} chars):\n{result.stdout[:800]}\n"
+            f"stderr ({len(result.stderr)} chars):\n{result.stderr[:800]}"
+        ) from exc
 
-    # Fallback: first .version block
-    lines     = combined.splitlines()
-    ptx_lines = []
-    in_ptx    = False
-    brace_depth = 0
-    for line in lines:
-        if not in_ptx and ".version" in line:
-            in_ptx = True
-        if in_ptx:
-            ptx_lines.append(line)
-            brace_depth += line.count("{") - line.count("}")
-            # Stop after the closing brace of the last kernel entry
-            if brace_depth <= 0 and len(ptx_lines) > 5:
-                break
-
-    if ptx_lines:
-        return "\n".join(ptx_lines)
-
-    raise RuntimeError(
-        "Could not extract PTX from souc cargo test output.\n"
-        f"stdout ({len(result.stdout)} chars):\n{result.stdout[:800]}\n"
-        f"stderr ({len(result.stderr)} chars):\n{result.stderr[:800]}"
-    )
+    return _normalize_sm89_cp_async(ptx, "cargo test output")
 
 
 def generate_ptx_via_binary(souc_bin: str, M: int, N: int, K: int) -> str:
@@ -246,7 +274,9 @@ def main():
     if args.ptx_file:
         print(f"[sounio-modal] Loading PTX from {args.ptx_file} ...")
         with open(args.ptx_file) as f:
-            ptx = f.read()
+            blob = f.read()
+        ptx = _extract_ptx_text(blob, args.ptx_file)
+        ptx = _normalize_sm89_cp_async(ptx, args.ptx_file)
         print(f"[sounio-modal] PTX loaded ({len(ptx):,} chars)")
     else:
         print(f"[sounio-modal] Generating epistemic GEMM PTX ({M}×{N}×{K}) via cargo ...")
