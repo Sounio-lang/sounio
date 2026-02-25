@@ -58,6 +58,53 @@ def _ptr(ctype, val=None):
     return ctypes.byref(ctype(0 if val is None else val))
 
 
+def extract_ptx_text(blob: str, source: str) -> str:
+    """Extract a clean PTX body from mixed logs/fences/raw file content."""
+    if "--- PTX BEGIN ---" in blob and "--- PTX END ---" in blob:
+        start = blob.index("--- PTX BEGIN ---") + len("--- PTX BEGIN ---")
+        end = blob.index("--- PTX END ---")
+        ptx = blob[start:end].strip()
+        if ptx:
+            return ptx
+
+    lines = blob.splitlines()
+    start_idx = None
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith(".version"):
+            start_idx = i
+            break
+
+    if start_idx is None:
+        raise RuntimeError(f"Could not locate PTX .version directive in {source}")
+
+    ptx_lines = []
+    depth = 0
+    saw_entry = False
+    for line in lines[start_idx:]:
+        ptx_lines.append(line)
+        if ".entry" in line:
+            saw_entry = True
+        depth += line.count("{") - line.count("}")
+        if saw_entry and depth <= 0 and line.strip() == "}":
+            break
+
+    ptx = "\n".join(ptx_lines).strip()
+    if ".target" not in ptx:
+        raise RuntimeError(f"Extracted PTX from {source} is missing .target directive")
+    return ptx
+
+
+def normalize_sm89_cp_async(ptx: str, source: str) -> str:
+    """Rewrite known-invalid sm_89 scalar cp.async.cg payloads to cp.async.ca."""
+    if ".target sm_89" in ptx and "cp.async.cg.shared.global" in ptx:
+        print(
+            f"  [ptx] {source}: rewriting cp.async.cg.shared.global -> "
+            "cp.async.ca.shared.global (sm_89 compatibility)"
+        )
+        ptx = ptx.replace("cp.async.cg.shared.global", "cp.async.ca.shared.global")
+    return ptx
+
+
 # ── PTX generation ────────────────────────────────────────────────────────────
 
 def generate_ptx(M: int, N: int, K: int) -> str:
@@ -79,39 +126,23 @@ def generate_ptx(M: int, N: int, K: int) -> str:
     r = subprocess.run(cmd, capture_output=True, text=True, cwd=repo, env=env)
     combined = r.stdout + r.stderr
 
-    # Fenced marker
-    if "--- PTX BEGIN ---" in combined and "--- PTX END ---" in combined:
-        a = combined.index("--- PTX BEGIN ---") + len("--- PTX BEGIN ---")
-        b = combined.index("--- PTX END ---")
-        return combined[a:b].strip()
-
-    # Heuristic: first .version block → closing }
-    lines = combined.splitlines()
-    ptx_lines, in_ptx, depth = [], False, 0
-    for line in lines:
-        if not in_ptx and ".version" in line:
-            in_ptx = True
-        if in_ptx:
-            ptx_lines.append(line)
-            depth += line.count("{") - line.count("}")
-            if depth <= 0 and len(ptx_lines) > 10:
-                break
-
-    if ptx_lines:
-        return "\n".join(ptx_lines)
-
-    # Last resort: look for the tiled GEMM PTX in test output
-    # The Rust test print_epistemic_gemm_ptx might not exist; embed fallback.
-    raise RuntimeError(
-        "Could not extract PTX from souc test output.\n"
-        f"stdout ({len(r.stdout)} chars):\n{r.stdout[:600]}\n"
-        f"stderr ({len(r.stderr)} chars):\n{r.stderr[:600]}"
-    )
+    try:
+        ptx = extract_ptx_text(combined, "cargo test output")
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "Could not extract PTX from souc test output.\n"
+            f"{exc}\n"
+            f"stdout ({len(r.stdout)} chars):\n{r.stdout[:600]}\n"
+            f"stderr ({len(r.stderr)} chars):\n{r.stderr[:600]}"
+        ) from exc
+    return normalize_sm89_cp_async(ptx, "cargo test output")
 
 
 def load_ptx_file(path: str) -> str:
     with open(path) as f:
-        return f.read()
+        blob = f.read()
+    ptx = extract_ptx_text(blob, path)
+    return normalize_sm89_cp_async(ptx, path)
 
 
 # ── CUDA dispatch ─────────────────────────────────────────────────────────────

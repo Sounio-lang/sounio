@@ -1234,7 +1234,8 @@ impl PipelineCodegen {
 
     /// Emit cp.async PTX (Ampere+)
     pub fn emit_cp_async(&self, dst_smem: &str, src_global: &str, size: u32) -> String {
-        format!("cp.async.cg.shared.global [{dst_smem}], [{src_global}], {size};")
+        // Use `.ca` for broader driver JIT compatibility on Ada/L4 scalar copies.
+        format!("cp.async.ca.shared.global [{dst_smem}], [{src_global}], {size};")
     }
 
     /// Emit cp.async commit PTX
@@ -1394,7 +1395,7 @@ impl PipelineCodegen {
                 } else {
                     // Fallback to cp.async for pre-Hopper
                     lines.push(format!(
-                        "cp.async.cg.shared.global [smem_{}], [gmem_{}], {};",
+                        "cp.async.ca.shared.global [smem_{}], [gmem_{}], {};",
                         dst.0, src.0, size
                     ));
                     lines.push("cp.async.commit_group;".to_string());
@@ -1403,7 +1404,7 @@ impl PipelineCodegen {
             AsyncOpKind::CpAsync { src, dst, size } => {
                 // cp.async for Ampere+ (sm_80+)
                 lines.push(format!(
-                    "cp.async.cg.shared.global [smem_{}], [gmem_{}], {};",
+                    "cp.async.ca.shared.global [smem_{}], [gmem_{}], {};",
                     dst.0, src.0, size
                 ));
             }
@@ -1625,6 +1626,41 @@ mod tests {
         let wait = codegen.emit_barrier_wait(&barrier);
         assert!(!wait.is_empty());
         assert!(wait.iter().any(|l| l.contains("mbarrier.try_wait")));
+    }
+
+    #[test]
+    fn test_cp_async_emission_uses_ca_cache_operator() {
+        let codegen = PipelineCodegen::new(CudaArch::Ampere);
+        let line = codegen.emit_cp_async("smem_0", "gmem_0", 16);
+        assert!(line.contains("cp.async.ca.shared.global"));
+        assert!(!line.contains("cp.async.cg.shared.global"));
+    }
+
+    #[test]
+    fn test_cp_async_fallback_uses_ca_cache_operator() {
+        let codegen = PipelineCodegen::new(CudaArch::Ampere);
+        let pipeline = PipelineBuilder::double_buffer(CudaArch::Ampere, 1024, GpuType::F16);
+        let op = AsyncOp::new(
+            AsyncOpId(7),
+            AsyncOpKind::TmaLoad {
+                src: ValueId(1),
+                dst: ValueId(2),
+                size: 16,
+            },
+            StageId(0),
+        );
+        let lines = codegen.emit_async_load_op(&op, &pipeline);
+        assert!(
+            lines.iter()
+                .any(|line| line.contains("cp.async.ca.shared.global")),
+            "Ampere fallback path must emit cp.async.ca"
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains("cp.async.cg.shared.global")),
+            "Ampere fallback path must not emit cp.async.cg"
+        );
     }
 
     #[test]
