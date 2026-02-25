@@ -1,0 +1,94 @@
+//@ run-pass
+// Formal bounds test for the epistemic power accumulator approximation.
+//
+// Proves: 0 <= L_ref - L_hw < 3 per transaction across all edge cases.
+//
+// Accumulator hardware formula (hardware/fpga/epistemic_power_accumulator.v):
+//   L_hw = floor(F/8) + floor(P/16) + floor(Q/32)
+//
+// Software reference (exact rational):
+//   L_ref = F/8.0 + P/16.0 + Q/32.0
+//
+// Worst-case gap analysis:
+//   max(L_ref - L_hw) = max(frac(F/8) + frac(P/16) + frac(Q/32))
+//                     < 7/8 + 15/16 + 31/32
+//                     = (28 + 30 + 31) / 32
+//                     = 89/32
+//                     < 3
+//
+// Verified in 1/32-unit integer arithmetic to avoid floating point:
+//   delta_32 = 4*(F%8) + 2*(P%16) + (Q%32)   in [0, 89) < 96
+
+// Compute hardware log (floor-based, integer division).
+fn hw_log(f: i64, p: i64, q: i64) -> i64 {
+    f / 8 + p / 16 + q / 32
+}
+
+// Compute residuals (without modulo operator) using floor-multiply trick.
+fn residual_f(f: i64) -> i64 { f - (f / 8) * 8 }
+fn residual_p(p: i64) -> i64 { p - (p / 16) * 16 }
+fn residual_q(q: i64) -> i64 { q - (q / 32) * 32 }
+
+// Compute delta_32 = 32 * (L_ref - L_hw).
+// Bound: 0 <= delta_32 < 96  (equivalently 0 <= L_ref - L_hw < 3).
+fn delta_32(f: i64, p: i64, q: i64) -> i64 {
+    residual_f(f) * 4 + residual_p(p) * 2 + residual_q(q)
+}
+
+// Pure-integer bound check.
+fn bound_ok(f: i64, p: i64, q: i64) -> bool {
+    let d = residual_f(f) * 4 + residual_p(p) * 2 + residual_q(q)
+    d >= 0 && d < 96
+}
+
+fn main() with IO, Panic {
+    // ── zero counters ─────────────────────────────────────────────────────────
+    assert(bound_ok(0, 0, 0))
+    assert(hw_log(0, 0, 0) == 0)
+
+    // ── maximum fractional loss (all denominators - 1) ────────────────────────
+    // frac(7/8)=7/8  frac(15/16)=15/16  frac(31/32)=31/32
+    // delta_32 = 4*7 + 2*15 + 31 = 28+30+31 = 89 < 96  ✓
+    assert(bound_ok(7, 15, 31))
+    assert(hw_log(7, 15, 31) == 0)
+    assert(delta_32(7, 15, 31) == 89)
+
+    // ── exact multiples (zero residual) ──────────────────────────────────────
+    assert(bound_ok(8, 16, 32))
+    assert(hw_log(8, 16, 32) == 3)
+
+    assert(bound_ok(16, 32, 64))
+    assert(hw_log(16, 32, 64) == 6)
+
+    // ── single-lane residual extremes ─────────────────────────────────────────
+    assert(bound_ok(7, 0, 0))     // delta_32 = 28
+    assert(bound_ok(0, 15, 0))    // delta_32 = 30
+    assert(bound_ok(0, 0, 31))    // delta_32 = 31
+    assert(delta_32(7, 0, 0) == 28)
+    assert(delta_32(0, 15, 0) == 30)
+    assert(delta_32(0, 0, 31) == 31)
+
+    // ── typical transaction (F=1 P=1 Q=1) ────────────────────────────────────
+    assert(bound_ok(1, 1, 1))
+    assert(hw_log(1, 1, 1) == 0)
+
+    // ── large counters (many accumulated transactions) ────────────────────────
+    assert(bound_ok(1000, 1000, 1000))
+    assert(hw_log(1000, 1000, 1000) == 125 + 62 + 31)  // 218
+
+    assert(bound_ok(65535, 65535, 65535))
+
+    // ── verify design constant: max delta_32 < 96 for boundary inputs ─────────
+    let max_delta = residual_f(7) * 4 + residual_p(15) * 2 + residual_q(31)
+    assert(max_delta == 89)
+    assert(max_delta < 96)
+
+    // ── K-AXI return packet typical payload ───────────────────────────────────
+    // From k_axi_return_mux.v: fidelity_inc=1 prov_inc=1 formal_inc=1 per TX
+    assert(bound_ok(4, 4, 4))
+    assert(hw_log(4, 4, 4) == 0)   // below threshold for each lane
+
+    println("ACCUMULATOR_BOUNDS_PASS")
+    println("accumulator_bounds_test: 0 <= L_ref - L_hw < 3 verified for all cases")
+    println("accumulator_bounds_test: max delta_32=89 < 96 confirmed")
+}
