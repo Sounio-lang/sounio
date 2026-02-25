@@ -1,0 +1,73 @@
+// Omega Sprint 4.0 - Merkle lane helpers for K-AXI replay/audit.
+//
+// Deterministic Merkle-core-compatible fold in integer lanes.
+
+use hardware::kaxi::*
+
+let MERKLE_LANE_SALT_L0: i64 = 0x4B415849
+let MERKLE_LANE_SALT_L1: i64 = 0x4D45524B
+let MERKLE_LANE_SALT_L2: i64 = 0x4C455F76
+let MERKLE_LANE_SALT_L3: i64 = 0x31A5A5A5
+
+fn merkle_lane_mix(a: i64, b: i64, c: i64) -> i64 {
+    ((a ^ b) + c) ^ (a << 7) ^ (b >> 3)
+}
+
+fn merkle_lane_root_l64(
+    prov_lane0: i64,
+    prov_lane1: i64,
+    prov_lane2: i64,
+    prov_lane3: i64,
+    tx_value_l64: i64,
+    tx_flags_l32: i64,
+    tx_seq_l32: i64
+) -> i64 {
+    let m0 = merkle_lane_mix(prov_lane0, tx_value_l64, MERKLE_LANE_SALT_L0)
+    let m1 = merkle_lane_mix(prov_lane1, tx_flags_l32, MERKLE_LANE_SALT_L1)
+    let m2 = merkle_lane_mix(prov_lane2, tx_seq_l32, MERKLE_LANE_SALT_L2)
+    let m3 = merkle_lane_mix(prov_lane3, m0 ^ m1, MERKLE_LANE_SALT_L3)
+    merkle_lane_mix(m0 ^ m2, m1 ^ m3, MERKLE_LANE_SALT_L0 ^ MERKLE_LANE_SALT_L2)
+}
+
+fn merkle_lane_verify_root(
+    expected_root_l64: i64,
+    prov_lane0: i64,
+    prov_lane1: i64,
+    prov_lane2: i64,
+    prov_lane3: i64,
+    tx_value_l64: i64,
+    tx_flags_l32: i64,
+    tx_seq_l32: i64
+) -> bool {
+    expected_root_l64 == merkle_lane_root_l64(
+        prov_lane0,
+        prov_lane1,
+        prov_lane2,
+        prov_lane3,
+        tx_value_l64,
+        tx_flags_l32,
+        tx_seq_l32
+    )
+}
+
+fn merkle_lane_replay_summary(tx_seq: i64, root_l64: i64, verified: bool) -> string with Alloc {
+    "tx_seq=" ++ kaxi_i64_to_string(tx_seq) ++
+    ", merkle_root_l64=" ++ kaxi_i64_to_string(root_l64) ++
+    ", verified=" ++ kaxi_bool_to_string(verified)
+}
+
+fn merkle_lane_self_check() -> bool with Alloc {
+    let root = merkle_lane_root_l64(
+        11,
+        13,
+        17,
+        19,
+        23,
+        29,
+        31
+    )
+    let ok = merkle_lane_verify_root(root, 11, 13, 17, 19, 23, 29, 31)
+    let bad = merkle_lane_verify_root(root + 1, 11, 13, 17, 19, 23, 29, 31)
+    let line = merkle_lane_replay_summary(31, root, ok)
+    root != 0 && ok && !bad && str_len(line) > 16
+}

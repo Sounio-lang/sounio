@@ -1,0 +1,132 @@
+// K-AXI bidirectional return channel adapter (Sprint 3.0 foundation).
+//
+// Canonical self-hosted helpers for return flag packing/unpacking and replay
+// inspection at the compiler<->hardware boundary.
+
+let KAXI_RX_KIND_EPISTEMIC: i64 = 0xA1
+let KAXI_RX_STATUS_OK: i64 = 0x01
+let KAXI_RX_STATUS_DEGRADED: i64 = 0x02
+let KAXI_RX_STATUS_FALLBACK: i64 = 0x03
+let KAXI_RX_STATUS_ERROR: i64 = 0x04
+
+// Pack RX header bytes in a single i64 lane for deterministic replay.
+// Layout: [flags:8 | op_kind:8 | status:8 | kind:8] in low 32 bits.
+fn kaxi_bidir_pack_header(kind: i64, status: i64, op_kind: i64, flags: i64) -> i64 {
+    (kind & 0xFF) |
+    ((status & 0xFF) << 8) |
+    ((op_kind & 0xFF) << 16) |
+    ((flags & 0xFF) << 24)
+}
+
+fn kaxi_bidir_unpack_kind(header: i64) -> i64 {
+    header & 0xFF
+}
+
+fn kaxi_bidir_unpack_status(header: i64) -> i64 {
+    (header >> 8) & 0xFF
+}
+
+fn kaxi_bidir_unpack_op_kind(header: i64) -> i64 {
+    (header >> 16) & 0xFF
+}
+
+fn kaxi_bidir_unpack_flags(header: i64) -> i64 {
+    (header >> 24) & 0xFF
+}
+
+fn kaxi_bidir_status_is_terminal(status: i64) -> bool {
+    status == KAXI_RX_STATUS_ERROR || status == KAXI_RX_STATUS_FALLBACK
+}
+
+fn kaxi_bidir_status_name(status: i64) -> string {
+    if status == KAXI_RX_STATUS_OK { return "ok" }
+    if status == KAXI_RX_STATUS_DEGRADED { return "degraded" }
+    if status == KAXI_RX_STATUS_FALLBACK { return "fallback" }
+    if status == KAXI_RX_STATUS_ERROR { return "error" }
+    "unknown"
+}
+
+fn kaxi_bidir_merkle_root_l64(
+    tx_seq: i64,
+    header: i64,
+    fidelity_inc: i64,
+    prov_depth_inc: i64,
+    formal_cov_inc: i64,
+    epi_log_q32_32: i64
+) -> i64 {
+    let s0 = (tx_seq << 7) ^ (header >> 3)
+    let s1 = (fidelity_inc << 11) ^ (prov_depth_inc >> 5)
+    let s2 = (formal_cov_inc << 13) ^ (epi_log_q32_32 >> 9)
+    (s0 ^ s1 ^ s2) + 0x4B415849
+}
+
+fn kaxi_bidir_merkle_verify_l64(
+    expected_root_l64: i64,
+    tx_seq: i64,
+    header: i64,
+    fidelity_inc: i64,
+    prov_depth_inc: i64,
+    formal_cov_inc: i64,
+    epi_log_q32_32: i64
+) -> bool {
+    expected_root_l64 == kaxi_bidir_merkle_root_l64(
+        tx_seq,
+        header,
+        fidelity_inc,
+        prov_depth_inc,
+        formal_cov_inc,
+        epi_log_q32_32
+    )
+}
+
+fn kaxi_bidir_replay_inspect(
+    tx_seq: i64,
+    header: i64,
+    fidelity_inc: i64,
+    prov_depth_inc: i64,
+    formal_cov_inc: i64,
+    epi_log_q32_32: i64
+) -> string with Alloc {
+    let kind = kaxi_bidir_unpack_kind(header)
+    let status = kaxi_bidir_unpack_status(header)
+    let op_kind = kaxi_bidir_unpack_op_kind(header)
+    let flags = kaxi_bidir_unpack_flags(header)
+    "tx_seq=" ++ kaxi_i64_to_string(tx_seq) ++
+    ", kind=" ++ kaxi_i64_to_string(kind) ++
+    ", status=" ++ kaxi_bidir_status_name(status) ++
+    ", op_kind=" ++ kaxi_i64_to_string(op_kind) ++
+    ", flags=" ++ kaxi_i64_to_string(flags) ++
+    ", fidelity_inc=" ++ kaxi_i64_to_string(fidelity_inc) ++
+    ", prov_depth_inc=" ++ kaxi_i64_to_string(prov_depth_inc) ++
+    ", formal_cov_inc=" ++ kaxi_i64_to_string(formal_cov_inc) ++
+    ", epi_log_q32_32=" ++ kaxi_i64_to_string(epi_log_q32_32)
+}
+
+fn kaxi_bidir_replay_is_epistemic(header: i64) -> bool {
+    let kind = kaxi_bidir_unpack_kind(header)
+    let op_kind = kaxi_bidir_unpack_op_kind(header)
+    kind == KAXI_RX_KIND_EPISTEMIC && op_kind >= 1 && op_kind <= 5
+}
+
+fn kaxi_bidir_adapter_self_check() -> bool with Alloc {
+    let header = kaxi_bidir_pack_header(
+        KAXI_RX_KIND_EPISTEMIC,
+        KAXI_RX_STATUS_OK,
+        4,
+        0x5A
+    )
+    let summary = kaxi_bidir_replay_inspect(7, header, 1, 1, 1, 0)
+    let merkle = kaxi_bidir_merkle_root_l64(7, header, 1, 1, 1, 0)
+    let merkle_ok = kaxi_bidir_merkle_verify_l64(merkle, 7, header, 1, 1, 1, 0)
+    let merkle_fail = kaxi_bidir_merkle_verify_l64(merkle + 1, 7, header, 1, 1, 1, 0)
+    kaxi_bidir_unpack_kind(header) == KAXI_RX_KIND_EPISTEMIC &&
+    kaxi_bidir_unpack_status(header) == KAXI_RX_STATUS_OK &&
+    kaxi_bidir_unpack_op_kind(header) == 4 &&
+    kaxi_bidir_unpack_flags(header) == 0x5A &&
+    !kaxi_bidir_status_is_terminal(KAXI_RX_STATUS_OK) &&
+    kaxi_bidir_status_is_terminal(KAXI_RX_STATUS_ERROR) &&
+    kaxi_bidir_replay_is_epistemic(header) &&
+    merkle_ok &&
+    !merkle_fail &&
+    str_len(summary) > 0
+}
