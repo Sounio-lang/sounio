@@ -332,7 +332,7 @@ impl GpuRuntime {
     }
 
     /// Copy data to device
-    pub fn copy_to_device<T>(&self, dst: &DeviceBuffer, src: &[T]) -> Result<(), GpuError> {
+    pub fn copy_to_device<T>(&self, dst: &mut DeviceBuffer, src: &[T]) -> Result<(), GpuError> {
         let size = std::mem::size_of_val(src);
         if size > dst.size {
             return Err(GpuError::BufferTooSmall);
@@ -517,7 +517,7 @@ impl GpuRuntime {
     #[cfg(feature = "cuda")]
     fn cuda_copy_htod(
         &self,
-        dst: &DeviceBuffer,
+        dst: &mut DeviceBuffer,
         src: *const c_void,
         size: usize,
     ) -> Result<(), GpuError> {
@@ -528,15 +528,9 @@ impl GpuRuntime {
 
         let src_slice = unsafe { std::slice::from_raw_parts(src as *const u8, size) };
 
-        // Use the CudaSlice stored in the DeviceBuffer for a direct copy
-        if let Some(ref cuda_slice) = dst.cuda_slice {
-            // SAFETY: We have shared access to cuda_slice but htod_sync_copy_into
-            // needs &mut. The DeviceBuffer owns this slice exclusively, and we only
-            // write to device memory (no aliasing on GPU side).
-            let slice_ptr = cuda_slice as *const CudaSlice<u8> as *mut CudaSlice<u8>;
-            let mutable_slice = unsafe { &mut *slice_ptr };
+        if let Some(ref mut cuda_slice) = dst.cuda_slice {
             device
-                .htod_sync_copy_into(src_slice, mutable_slice)
+                .htod_sync_copy_into(src_slice, cuda_slice)
                 .map_err(|_| GpuError::CopyFailed)?;
         } else {
             return Err(GpuError::DriverError(
@@ -551,7 +545,7 @@ impl GpuRuntime {
     #[cfg(not(feature = "cuda"))]
     fn cuda_copy_htod(
         &self,
-        _dst: &DeviceBuffer,
+        _dst: &mut DeviceBuffer,
         _src: *const c_void,
         _size: usize,
     ) -> Result<(), GpuError> {
@@ -1303,10 +1297,10 @@ mod tests {
     fn test_simulated_copy() {
         let runtime = GpuRuntime::new(GpuBackend::Simulated, 0).unwrap();
 
-        let buffer = runtime.alloc_typed::<f32>(10).unwrap();
+        let mut buffer = runtime.alloc_typed::<f32>(10).unwrap();
 
         let host_data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
-        runtime.copy_to_device(&buffer, &host_data).unwrap();
+        runtime.copy_to_device(&mut buffer, &host_data).unwrap();
 
         let mut result = vec![0.0f32; 10];
         runtime.copy_to_host(&mut result, &buffer).unwrap();

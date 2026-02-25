@@ -50,6 +50,7 @@ pub mod gpu_quantum;
 pub mod hamiltonian;
 pub mod noise;
 pub mod pennylane;
+pub mod qir_shim;
 pub mod states;
 pub mod uccsd;
 pub mod vqe;
@@ -65,6 +66,10 @@ pub use pennylane::{
     EpistemicExpectation, EpistemicGradients, EpistemicHamiltonian, EpistemicParam, LayerType,
     PauliObservable, PauliType, TrainingConfig, VQEOptimizationResult, VariationalCircuit,
     VariationalLayer,
+};
+pub use qir_shim::{
+    QuantumConformanceTelemetry, QuantumConformanceThresholds, QirShimArtifact,
+    emit_qir_shim, evaluate_quantum_conformance, interval_coverage_95, ks_two_sample_pvalue,
 };
 pub use states::{DensityMatrix, EpistemicQubit, QubitState, StateVector};
 pub use uccsd::{

@@ -673,45 +673,72 @@ impl GpuExecutor {
             shared_mem_bytes: shared_mem,
         };
 
-        // Build argument list
+        // Build argument list.  cuLaunchKernel expects `kernelParams` — an
+        // array of *host* pointers, each pointing to a region of memory from
+        // which the actual kernel parameter will be copied.  We heap-allocate
+        // every parameter so it outlives the launch call.
+        let mut arg_storage: Vec<Box<dyn std::any::Any>> = Vec::with_capacity(params.len());
         let mut args: Vec<*mut c_void> = Vec::with_capacity(params.len());
 
         for param in params {
             match param {
                 KernelParam::Buffer(buf) => {
-                    args.push(buf.raw_ptr);
+                    let boxed = Box::new(buf.device_ptr());
+                    let ptr = &*boxed as *const u64 as *mut c_void;
+                    args.push(ptr);
+                    arg_storage.push(boxed);
                 }
                 KernelParam::EpistemicBuffer(ebuf) => {
-                    // Push both value and epsilon pointers
-                    args.push(ebuf.values.raw_ptr);
-                    args.push(ebuf.epsilons.raw_ptr);
+                    let boxed_v = Box::new(ebuf.values.device_ptr());
+                    let ptr_v = &*boxed_v as *const u64 as *mut c_void;
+                    args.push(ptr_v);
+                    arg_storage.push(boxed_v);
+                    let boxed_e = Box::new(ebuf.epsilons.device_ptr());
+                    let ptr_e = &*boxed_e as *const u64 as *mut c_void;
+                    args.push(ptr_e);
+                    arg_storage.push(boxed_e);
                 }
                 KernelParam::I32(v) => {
                     let boxed = Box::new(*v);
-                    args.push(Box::into_raw(boxed) as *mut c_void);
+                    let ptr = &*boxed as *const i32 as *mut c_void;
+                    args.push(ptr);
+                    arg_storage.push(boxed);
                 }
                 KernelParam::I64(v) => {
                     let boxed = Box::new(*v);
-                    args.push(Box::into_raw(boxed) as *mut c_void);
+                    let ptr = &*boxed as *const i64 as *mut c_void;
+                    args.push(ptr);
+                    arg_storage.push(boxed);
                 }
                 KernelParam::U32(v) => {
                     let boxed = Box::new(*v);
-                    args.push(Box::into_raw(boxed) as *mut c_void);
+                    let ptr = &*boxed as *const u32 as *mut c_void;
+                    args.push(ptr);
+                    arg_storage.push(boxed);
                 }
                 KernelParam::U64(v) => {
                     let boxed = Box::new(*v);
-                    args.push(Box::into_raw(boxed) as *mut c_void);
+                    let ptr = &*boxed as *const u64 as *mut c_void;
+                    args.push(ptr);
+                    arg_storage.push(boxed);
                 }
                 KernelParam::F32(v) => {
                     let boxed = Box::new(*v);
-                    args.push(Box::into_raw(boxed) as *mut c_void);
+                    let ptr = &*boxed as *const f32 as *mut c_void;
+                    args.push(ptr);
+                    arg_storage.push(boxed);
                 }
                 KernelParam::F64(v) => {
                     let boxed = Box::new(*v);
-                    args.push(Box::into_raw(boxed) as *mut c_void);
+                    let ptr = &*boxed as *const f64 as *mut c_void;
+                    args.push(ptr);
+                    arg_storage.push(boxed);
                 }
                 KernelParam::Ptr(p) => {
-                    args.push(*p as *mut c_void);
+                    let boxed = Box::new(*p);
+                    let ptr = &*boxed as *const u64 as *mut c_void;
+                    args.push(ptr);
+                    arg_storage.push(boxed);
                 }
             }
         }
@@ -965,6 +992,8 @@ mod tests {
             device: unsafe { std::mem::zeroed() },
             #[cfg(feature = "cuda")]
             kernel_cache: HashMap::new(),
+            #[cfg(feature = "cuda")]
+            string_cache: HashMap::new(),
             next_buffer_id: 1,
             device_info: info,
         };
@@ -987,6 +1016,8 @@ mod tests {
             device: unsafe { std::mem::zeroed() },
             #[cfg(feature = "cuda")]
             kernel_cache: HashMap::new(),
+            #[cfg(feature = "cuda")]
+            string_cache: HashMap::new(),
             next_buffer_id: 1,
             device_info: info,
         };
@@ -1006,5 +1037,197 @@ mod tests {
 
         let err = GpuExecutorError::CudaNotEnabled;
         assert!(err.to_string().contains("CUDA feature not enabled"));
+    }
+
+    /// End-to-end real CUDA kernel launch: PTX load → alloc → HtoD → launch → DtoH → verify.
+    /// Only compiled + run when `--features cuda` is active and a GPU is present.
+    #[test]
+    #[cfg(feature = "cuda")]
+    fn test_real_cuda_vector_add() {
+        // 1. Initialize CUDA device 0
+        let mut executor = GpuExecutor::new(0).expect("CUDA device init failed");
+        eprintln!(
+            "[sounio-gpu] device {} ready (sm_{}.{})",
+            executor.device_id(),
+            executor.device_info().compute_capability.0,
+            executor.device_info().compute_capability.1,
+        );
+
+        // 2. Hand-written PTX: c[i] = a[i] + b[i], with n elements
+        let ptx = r#"
+.version 7.0
+.target sm_75
+.address_size 64
+
+.visible .entry vector_add(
+    .param .u64 param_a,
+    .param .u64 param_b,
+    .param .u64 param_c,
+    .param .u32 param_n
+)
+{
+    .reg .pred  %p<2>;
+    .reg .f32   %f<4>;
+    .reg .b32   %r<5>;
+    .reg .b64   %rd<8>;
+
+    // tid = blockIdx.x * blockDim.x + threadIdx.x
+    mov.u32         %r0, %ctaid.x;
+    mov.u32         %r1, %ntid.x;
+    mov.u32         %r2, %tid.x;
+    mad.lo.s32      %r3, %r0, %r1, %r2;
+
+    // if (tid >= n) return
+    ld.param.u32    %r4, [param_n];
+    setp.ge.u32     %p1, %r3, %r4;
+    @%p1 bra        DONE;
+
+    // Load pointers
+    ld.param.u64    %rd0, [param_a];
+    ld.param.u64    %rd1, [param_b];
+    ld.param.u64    %rd2, [param_c];
+
+    // Byte offset = tid * 4
+    mul.wide.u32    %rd3, %r3, 4;
+
+    // a[tid]
+    add.u64         %rd4, %rd0, %rd3;
+    ld.global.f32   %f0, [%rd4];
+
+    // b[tid]
+    add.u64         %rd5, %rd1, %rd3;
+    ld.global.f32   %f1, [%rd5];
+
+    // c[tid] = a[tid] + b[tid]
+    add.f32         %f2, %f0, %f1;
+
+    // Store
+    add.u64         %rd6, %rd2, %rd3;
+    st.global.f32   [%rd6], %f2;
+
+DONE:
+    ret;
+}
+"#;
+
+        // 3. Load PTX
+        executor
+            .cache_kernel("vector_add", ptx)
+            .expect("PTX compilation failed");
+        assert!(executor.has_kernel("vector_add"));
+        eprintln!("[sounio-gpu] vector_add PTX loaded and JIT-compiled");
+
+        // 4. Allocate device buffers (1024 f32 elements)
+        let n: u32 = 1024;
+        let mut buf_a = executor.alloc::<f32>(n as usize).expect("alloc A");
+        let mut buf_b = executor.alloc::<f32>(n as usize).expect("alloc B");
+        let mut buf_c = executor.alloc::<f32>(n as usize).expect("alloc C");
+
+        // 5. Prepare host data: a[i] = i, b[i] = 1000 - i
+        let host_a: Vec<f32> = (0..n).map(|i| i as f32).collect();
+        let host_b: Vec<f32> = (0..n).map(|i| 1000.0 - i as f32).collect();
+
+        // 6. Copy to device
+        executor
+            .copy_to_device(&mut buf_a, &host_a)
+            .expect("HtoD copy A");
+        executor
+            .copy_to_device(&mut buf_b, &host_b)
+            .expect("HtoD copy B");
+        eprintln!("[sounio-gpu] HtoD copies complete ({} elements)", n);
+
+        // 7. Launch kernel: grid = (n/256, 1, 1), block = (256, 1, 1)
+        let grid = ((n + 255) / 256, 1, 1);
+        let block = (256u32, 1, 1);
+
+        executor
+            .execute_kernel(
+                "vector_add",
+                grid,
+                block,
+                0,
+                &[
+                    KernelParam::Buffer(&buf_a),
+                    KernelParam::Buffer(&buf_b),
+                    KernelParam::Buffer(&buf_c),
+                    KernelParam::U32(n),
+                ],
+            )
+            .expect("Kernel launch failed");
+        eprintln!(
+            "[sounio-gpu] vector_add launched: grid=({},{},{}), block=({},{},{})",
+            grid.0, grid.1, grid.2, block.0, block.1, block.2
+        );
+
+        // 8. Copy results back
+        let mut host_c = vec![0.0f32; n as usize];
+        executor
+            .copy_to_host(&mut host_c, &buf_c)
+            .expect("DtoH copy C");
+
+        // 9. Verify: c[i] should be exactly 1000.0 for all i
+        let mut max_err: f32 = 0.0;
+        for i in 0..n as usize {
+            let expected = 1000.0f32;
+            let err = (host_c[i] - expected).abs();
+            if err > max_err {
+                max_err = err;
+            }
+        }
+
+        eprintln!(
+            "[sounio-gpu] vector_add verified: max_err={:.6e}, result[0]={}, result[512]={}, result[1023]={}",
+            max_err, host_c[0], host_c[512], host_c[1023]
+        );
+        assert!(
+            max_err < 1e-6,
+            "vector_add correctness failed: max_err={max_err}"
+        );
+        eprintln!("[sounio-gpu] REAL CUDA KERNEL LAUNCH: PASS");
+    }
+
+    /// End-to-end epistemic GEMM on real CUDA: generates PTX from Sounio codegen,
+    /// JIT-compiles it on the L4, and verifies the kernel loads successfully.
+    #[test]
+    #[cfg(feature = "cuda")]
+    fn test_real_cuda_epistemic_gemm_ptx_load() {
+        use crate::codegen::gpu::epistemic_gemm::{
+            generate_epistemic_gemm_ptx_sm, EpistemicGemmConfig, MatrixPrecision,
+        };
+
+        // 1. Initialize device
+        let mut executor = GpuExecutor::new(0).expect("CUDA device init failed");
+
+        // 2. Generate epistemic GEMM PTX using Sounio's codegen pipeline
+        //    L4 = sm_89 (Ada Lovelace), sm_major=8 → double-buffered tiled kernel
+        let config = EpistemicGemmConfig {
+            m: 64,
+            k: 64,
+            n: 64,
+            alpha: 1.0,
+            beta: 0.0,
+            precision: MatrixPrecision::F32,
+            use_tensor_cores: false,
+            confidence_threshold: None,
+        };
+
+        let kernel_name = "epistemic_gemm_f32";
+        // sm_major=8 → double-buffered kernel with cp.async.ca
+        let ptx = generate_epistemic_gemm_ptx_sm(&config, kernel_name, 8, 9);
+
+        eprintln!(
+            "[sounio-gpu] Epistemic GEMM PTX generated: {} bytes, kernel='{}'",
+            ptx.len(),
+            kernel_name
+        );
+
+        // 3. Load and JIT-compile PTX on the real GPU
+        executor
+            .cache_kernel(kernel_name, &ptx)
+            .expect("Epistemic GEMM PTX compilation failed");
+        assert!(executor.has_kernel(kernel_name));
+
+        eprintln!("[sounio-gpu] Epistemic GEMM PTX JIT-compiled successfully on L4");
+        eprintln!("[sounio-gpu] REAL CUDA EPISTEMIC GEMM PTX LOAD: PASS");
     }
 }

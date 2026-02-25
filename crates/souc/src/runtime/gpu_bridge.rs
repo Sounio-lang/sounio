@@ -298,7 +298,7 @@ impl GpuRuntimeBridge {
     pub fn copy_htod<T>(&mut self, buffer_id: u64, data: &[T]) -> Result<(), GpuBridgeError> {
         let buffer = self
             .buffers
-            .get(&buffer_id)
+            .get_mut(&buffer_id)
             .ok_or(GpuBridgeError::BufferNotFound(buffer_id))?;
         self.runtime.copy_to_device(buffer, data)?;
         self.stats.htod_copies += 1;

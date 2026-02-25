@@ -202,6 +202,18 @@ impl SparseTensor {
     pub fn is_very_sparse(&self) -> bool {
         self.density < 0.1
     }
+
+    /// Return matrix-style dimensions for diagnostics/display.
+    pub fn dims(&self) -> (usize, usize) {
+        let rows = self.shape.first().copied().unwrap_or(0);
+        let cols = self.shape.get(1).copied().unwrap_or(1);
+        (rows, cols)
+    }
+
+    /// Return number of non-zero elements.
+    pub fn nnz(&self) -> usize {
+        self.nnz
+    }
 }
 
 /// Sparsity pattern metadata

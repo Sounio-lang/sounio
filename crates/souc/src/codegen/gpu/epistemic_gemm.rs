@@ -696,7 +696,7 @@ pub fn generate_tiled_f32_gemm_ptx(config: &EpistemicGemmConfig, kernel_name: &s
 ///
 /// Identical tile geometry to `generate_tiled_f32_gemm_ptx` (TILE_M=64, TILE_N=64, TILE_K=16,
 /// 16×16 thread block, 4×4 register tile) but uses **two** smem ping-pong buffers and
-/// `cp.async.cg` to overlap global loads with FMA computation:
+/// `cp.async.ca` to overlap global loads with FMA computation:
 ///
 ///   - smem_a[2][TILE_K×TILE_M] = 2 × 4096 f32 = 32 KB for A
 ///   - smem_b[2][TILE_K×TILE_N] = 2 × 4096 f32 = 32 KB for B  (total 64 KB ≤ sm_80 limit)
@@ -789,8 +789,8 @@ pub fn generate_double_buffered_f32_gemm_ptx(
     s.push_str("    // prologue: async-prefetch k_strip=0 into buf 0\n");
     s.push_str("    mov.u32 %r8, 0;  // k_strip = 0 for prologue load\n");
 
-    // emit cp.async for smem_a0: 4 elements per thread (ty-dim), using 16-byte (float4) copy
-    // cp.async.cg.shared.global [dst+offset], [src+offset], 4 (4 bytes = 1 f32)
+    // emit cp.async for smem_a0: 4 elements per thread (ty-dim), using 4-byte scalar copy
+    // cp.async.ca.shared.global [dst+offset], [src+offset], 4 (4 bytes = 1 f32)
     // We do scalar cp.async (4 bytes each) to keep bounds-check generality
     for i in 0..4u32 {
         // A_row = tile_row + tx*4 + i; A_col = k_strip + ty
@@ -814,7 +814,7 @@ pub fn generate_double_buffered_f32_gemm_ptx(
         s.push_str("    mul.wide.u32 %rd4, %r25, 4;\n");
         s.push_str("    add.u64 %rd4, %rd0, %rd4;\n");
         // cp.async with predicate guard: if in-bounds do async, else zero smem
-        s.push_str("    @%p3 cp.async.cg.shared.global [%r24], [%rd4], 4;\n");
+        s.push_str("    @%p3 cp.async.ca.shared.global [%r24], [%rd4], 4;\n");
         s.push_str("    @!%p3 st.shared.f32 [%r24], 0f00000000;\n");
     }
     // smem_b0: 4 elements
@@ -838,7 +838,7 @@ pub fn generate_double_buffered_f32_gemm_ptx(
         s.push_str("    mad.lo.u32 %r25, %r21, %r30, %r22;\n"); // B_row*N + B_col
         s.push_str("    mul.wide.u32 %rd4, %r25, 4;\n");
         s.push_str("    add.u64 %rd4, %rd1, %rd4;\n");
-        s.push_str("    @%p3 cp.async.cg.shared.global [%r24], [%rd4], 4;\n");
+        s.push_str("    @%p3 cp.async.ca.shared.global [%r24], [%rd4], 4;\n");
         s.push_str("    @!%p3 st.shared.f32 [%r24], 0f00000000;\n");
     }
     s.push_str("    cp.async.commit_group;\n\n");
@@ -882,7 +882,7 @@ pub fn generate_double_buffered_f32_gemm_ptx(
         s.push_str("    mad.lo.u32 %r25, %r21, %r31, %r22;\n");
         s.push_str("    mul.wide.u32 %rd4, %r25, 4;\n");
         s.push_str("    add.u64 %rd4, %rd0, %rd4;\n");
-        s.push_str("    @%p3 cp.async.cg.shared.global [%r24], [%rd4], 4;\n");
+        s.push_str("    @%p3 cp.async.ca.shared.global [%r24], [%rd4], 4;\n");
         s.push_str("    @!%p3 st.shared.f32 [%r24], 0f00000000;\n");
     }
     for i in 0..4u32 {
@@ -904,7 +904,7 @@ pub fn generate_double_buffered_f32_gemm_ptx(
         s.push_str("    mad.lo.u32 %r25, %r21, %r30, %r22;\n");
         s.push_str("    mul.wide.u32 %rd4, %r25, 4;\n");
         s.push_str("    add.u64 %rd4, %rd1, %rd4;\n");
-        s.push_str("    @%p3 cp.async.cg.shared.global [%r24], [%rd4], 4;\n");
+        s.push_str("    @%p3 cp.async.ca.shared.global [%r24], [%rd4], 4;\n");
         s.push_str("    @!%p3 st.shared.f32 [%r24], 0f00000000;\n");
     }
     s.push_str("    cp.async.commit_group;\n\n");
@@ -1721,7 +1721,7 @@ mod tests {
         assert!(ptx.contains("smem_b0"), "must have smem_b0");
         assert!(ptx.contains("smem_b1"), "must have smem_b1");
         // cp.async machinery
-        assert!(ptx.contains("cp.async.cg.shared.global"), "must use cp.async.cg");
+        assert!(ptx.contains("cp.async.ca.shared.global"), "must use cp.async.ca for 4-byte scalar copies");
         assert!(ptx.contains("cp.async.commit_group"), "must commit async group");
         assert!(ptx.contains("cp.async.wait_group 1"), "must wait leaving 1 in-flight (overlap)");
         assert!(ptx.contains("cp.async.wait_group 0"), "epilogue must drain all");
