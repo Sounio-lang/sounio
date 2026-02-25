@@ -554,29 +554,248 @@ fn sedenion_from_array(arr: [f32; 16]) -> Sedenion {
     )
 }
 
-// Module exports
-mod sedenion_eeg {
-    pub type EEGParams
-    pub type EEGSample
-    pub type EEGEpoch
-    pub type PowerSpectrum
-    pub type Connectivity
-    pub type ERP
-    pub type BCIFeatures
+// ============================================================================
+// SCALAR EEG ANALYSIS (single-channel, Vec<f64> interface)
+// ============================================================================
 
-    pub fn default_eeg_params
-    pub fn create_epoch
-    pub fn rereference_average
-    pub fn apply_bandpass
-    pub fn compute_power_spectrum
-    pub fn band_power
-    pub fn delta_power
-    pub fn theta_power
-    pub fn alpha_power
-    pub fn beta_power
-    pub fn gamma_power
-    pub fn compute_connectivity
-    pub fn compute_erp
-    pub fn extract_bci_features
-    pub fn electrode_name
+// Standard EEG frequency bands from a single-channel scalar analysis
+struct EegBands {
+    delta: f64,   // 0.5–4 Hz
+    theta: f64,   // 4–8 Hz
+    alpha: f64,   // 8–13 Hz
+    beta: f64,    // 13–30 Hz
+    gamma: f64,   // 30–100 Hz
 }
+
+// Scalar math helpers (f64 versions for single-channel analysis)
+fn abs_f64_eeg(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn sqrt_f64_eeg(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var g = x / 2.0
+    if g < 1.0 { g = 1.0 }
+    var i = 0
+    while i < 25 {
+        g = (g + x / g) / 2.0
+        i = i + 1
+    }
+    g
+}
+
+// cos via Taylor series (f64, for DFT angle computation)
+fn cos_f64_eeg(x: f64) -> f64 {
+    // Reduce x to [-pi, pi] range using repeated subtraction
+    let two_pi = 6.283185307179586
+    var xr = x
+    while xr > 3.14159265358979 { xr = xr - two_pi }
+    while xr < -3.14159265358979 { xr = xr + two_pi }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i < 15 {
+        term = term * (0.0 - xr * xr) / ((2 * i - 1) * (2 * i)) as f64
+        sum = sum + term
+        i = i + 1
+    }
+    sum
+}
+
+// sin via Taylor series (f64)
+fn sin_f64_eeg(x: f64) -> f64 {
+    let two_pi = 6.283185307179586
+    var xr = x
+    while xr > 3.14159265358979 { xr = xr - two_pi }
+    while xr < -3.14159265358979 { xr = xr + two_pi }
+    var sum = xr
+    var term = xr
+    var i = 1
+    while i < 15 {
+        term = term * (0.0 - xr * xr) / ((2 * i) * (2 * i + 1)) as f64
+        sum = sum + term
+        i = i + 1
+    }
+    sum
+}
+
+// atan2 approximation (for Hilbert phase estimation)
+fn atan2_f64_eeg(y: f64, x: f64) -> f64 {
+    let pi = 3.14159265358979
+    if x > 0.0 {
+        atan_f64_eeg(y / x)
+    } else if x < 0.0 && y >= 0.0 {
+        atan_f64_eeg(y / x) + pi
+    } else if x < 0.0 && y < 0.0 {
+        atan_f64_eeg(y / x) - pi
+    } else if x == 0.0 && y > 0.0 {
+        pi / 2.0
+    } else if x == 0.0 && y < 0.0 {
+        0.0 - pi / 2.0
+    } else {
+        0.0
+    }
+}
+
+// atan via Maclaurin series (convergent for |z| <= 1; uses identity for |z| > 1)
+fn atan_f64_eeg(z: f64) -> f64 {
+    let pi = 3.14159265358979
+    if abs_f64_eeg(z) > 1.0 {
+        // atan(z) = pi/2 - atan(1/z) for z > 0
+        if z > 0.0 {
+            pi / 2.0 - atan_small_f64_eeg(1.0 / z)
+        } else {
+            0.0 - pi / 2.0 - atan_small_f64_eeg(1.0 / z)
+        }
+    } else {
+        atan_small_f64_eeg(z)
+    }
+}
+
+// atan series for |z| <= 1
+fn atan_small_f64_eeg(z: f64) -> f64 {
+    var sum = z
+    var term = z
+    var i = 1
+    while i < 20 {
+        term = term * (0.0 - z * z)
+        sum = sum + term / (2 * i + 1) as f64
+        i = i + 1
+    }
+    sum
+}
+
+// Compute power spectrum via direct DFT for a scalar signal
+// Returns power[k] = (Re[k]^2 + Im[k]^2) / N for k = 0..N/2
+// signal: time-domain samples; sample_rate: Hz (used only for frequency labeling)
+fn compute_power_spectrum_scalar(signal: Vec<f64>, sample_rate: f64) -> Vec<f64> {
+    let n = signal.len()
+    if n == 0 { return Vec::new() }
+
+    let n_freqs = n / 2 + 1
+    var power: Vec<f64> = Vec::new()
+
+    let pi = 3.14159265358979
+    let two_pi_over_n = 2.0 * pi / n as f64
+
+    var k = 0
+    while k < n_freqs {
+        var re = 0.0
+        var im = 0.0
+        var t = 0
+        while t < n {
+            let angle = two_pi_over_n * k as f64 * t as f64
+            re = re + signal[t] * cos_f64_eeg(angle)
+            im = im - signal[t] * sin_f64_eeg(angle)
+            t = t + 1
+        }
+        power.push((re * re + im * im) / n as f64)
+        k = k + 1
+    }
+
+    power
+}
+
+// Extract total power in a frequency band [low_hz, high_hz] from power spectrum
+// power: output of compute_power_spectrum_scalar; sample_rate and n_samples needed for bin->Hz mapping
+fn extract_band_power(power: Vec<f64>, sample_rate: f64, low_hz: f64, high_hz: f64) -> f64 {
+    let n = power.len()
+    if n == 0 { return 0.0 }
+    // N (original signal length) ≈ 2*(n-1) since n_freqs = N/2 + 1
+    let n_signal = 2 * (n - 1)
+    var total = 0.0
+    var k = 0
+    while k < n {
+        let bin_freq = k as f64 * sample_rate / n_signal as f64
+        if bin_freq >= low_hz && bin_freq <= high_hz {
+            total = total + power[k]
+        }
+        k = k + 1
+    }
+    total
+}
+
+// Compute all standard EEG band powers from a single-channel signal
+fn compute_eeg_bands(signal: Vec<f64>, sample_rate: f64) -> EegBands {
+    let power = compute_power_spectrum_scalar(signal, sample_rate)
+    EegBands {
+        delta: extract_band_power(power, sample_rate, 0.5, 4.0),
+        theta: extract_band_power(power, sample_rate, 4.0, 8.0),
+        alpha: extract_band_power(power, sample_rate, 8.0, 13.0),
+        beta: extract_band_power(power, sample_rate, 13.0, 30.0),
+        gamma: extract_band_power(power, sample_rate, 30.0, 100.0),
+    }
+}
+
+// ============================================================================
+// PHASE LOCKING VALUE (PLV) between two single-channel signals
+// ============================================================================
+
+// Approximate instantaneous phase of a signal via Hilbert transform approximation.
+// Uses a causal FIR odd-harmonic approximation: each sample's imaginary part is
+// approximated by a 5-tap weighted sum of neighboring samples (Bedrosian approach).
+// Phase = atan2(hilbert_imag[n], signal[n])
+fn estimate_instantaneous_phase(signal: Vec<f64>) -> Vec<f64> {
+    let n = signal.len()
+    var phases: Vec<f64> = Vec::new()
+
+    // 5-tap FIR Hilbert coefficients h[k] for k = -2..2 (odd-symmetric, causal approx)
+    // h[-2] = 2/(-2*pi), h[-1] = 2/(-1*pi), h[0] = 0, h[1] = 2/(1*pi), h[2] = 2/(2*pi)
+    // Equivalent: h[+1] = 2/pi ≈ 0.6366, h[+2] = 1/pi ≈ 0.3183 (and negatives)
+    let pi = 3.14159265358979
+    let h1 = 2.0 / pi          // tap at offset ±1
+    let h2 = 2.0 / (2.0 * pi)  // tap at offset ±2
+
+    var i = 0
+    while i < n {
+        // Hilbert imaginary part approximation using symmetric taps
+        var hilb = 0.0
+        if i >= 1 { hilb = hilb + h1 * signal[i - 1] }
+        if i >= 2 { hilb = hilb + h2 * signal[i - 2] }
+        if i + 1 < n { hilb = hilb - h1 * signal[i + 1] }
+        if i + 2 < n { hilb = hilb - h2 * signal[i + 2] }
+
+        let phase = atan2_f64_eeg(hilb, signal[i])
+        phases.push(phase)
+        i = i + 1
+    }
+
+    phases
+}
+
+// Phase Locking Value between two signals
+// PLV = |mean(exp(i*(phase_a - phase_b)))| = sqrt(mean_cos^2 + mean_sin^2)
+fn compute_plv(signal_a: Vec<f64>, signal_b: Vec<f64>) -> f64 {
+    let n = signal_a.len()
+    if n == 0 { return 0.0 }
+
+    let phase_a = estimate_instantaneous_phase(signal_a)
+    let phase_b = estimate_instantaneous_phase(signal_b)
+
+    let n_b = signal_b.len()
+    let n_use = if n < n_b { n } else { n_b }
+
+    var sum_cos = 0.0
+    var sum_sin = 0.0
+    var i = 0
+    while i < n_use {
+        let phase_diff = phase_a[i] - phase_b[i]
+        sum_cos = sum_cos + cos_f64_eeg(phase_diff)
+        sum_sin = sum_sin + sin_f64_eeg(phase_diff)
+        i = i + 1
+    }
+
+    let mean_cos = sum_cos / n_use as f64
+    let mean_sin = sum_sin / n_use as f64
+
+    sqrt_f64_eeg(mean_cos * mean_cos + mean_sin * mean_sin)
+}
+
+// Module: sedenion_eeg
+// Exported types: EEGParams, EEGSample, EEGEpoch, PowerSpectrum, Connectivity,
+//   ERP, BCIFeatures, EegBands
+// Exported functions: default_eeg_params, create_epoch, rereference_average,
+//   apply_bandpass, compute_power_spectrum, compute_power_spectrum_scalar,
+//   band_power, delta_power, theta_power, alpha_power, beta_power, gamma_power,
+//   compute_connectivity, compute_erp, extract_bci_features, electrode_name,
+//   extract_band_power, compute_eeg_bands, compute_plv
