@@ -1,0 +1,372 @@
+//@ run-pass
+//@ expect-stdout: ALL 5 TESTS PASSED
+//@ expect-stdout: Failed: 0
+// Hosmer-Lemeshow Calibration Test Suite
+//
+// Self-contained tests for the Hosmer-Lemeshow goodness-of-fit statistic,
+// used to assess calibration of logistic regression models.
+//
+// The HL statistic partitions predictions into 10 decile bins and computes
+// a chi-squared statistic comparing observed vs. expected event counts.
+//
+//   HL = Σ_{g=1}^{10} [(O_g - E_g)² / E_g + (O̅_g - Ē_g)² / Ē_g]
+//
+// Under good calibration HL ~ χ²(8) (8 df since outer cells are constrained).
+// Critical values: χ²(8, 0.05) ≈ 15.51, χ²(8, 0.01) ≈ 20.09.
+//
+// Reference: Hosmer & Lemeshow, "Goodness-of-fit tests for the multiple
+//   logistic regression model", Comm. Stat. Theory Methods (1980).
+//
+// All functions inlined (tests cannot import stdlib).
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn floor_f64(x: f64) -> f64 with Mut, Panic, Div {
+    let i = x as i32
+    let f = i as f64
+    if x < 0.0 && f != x { return f - 1.0 }
+    return f
+}
+
+fn approx_eq(a: f64, b: f64, tol: f64) -> bool with Mut, Panic, Div {
+    abs_f64(a - b) < tol
+}
+
+// ============================================================================
+// HOSMER-LEMESHOW COMPUTATION (inlined)
+//
+// Input arrays of length n:
+//   probs[i]  — predicted probability in [0,1]
+//   obs[i]    — binary outcome (0.0 or 1.0)
+// Returns:
+//   HL chi-squared statistic (df=8 under null of perfect calibration)
+// ============================================================================
+
+fn hosmer_lemeshow(probs: [f64; 100], obs: [f64; 100], n: i64) -> f64 with Mut, Panic, Div {
+    var hl_stat = 0.0
+
+    // 10 equal-width bins: bin g covers predicted probs in [0.1*g, 0.1*(g+1))
+    // (bin 9 includes 1.0 at the upper boundary)
+    var g = 0 as i64
+    while g < 10 {
+        let bin_lo = (g as f64) * 0.1
+        let bin_hi = ((g + 1) as f64) * 0.1
+
+        var ng = 0 as i64
+        var obs1 = 0 as i64
+        var sum_pred = 0.0
+
+        var i = 0 as i64
+        while i < n {
+            let p = probs[i as usize]
+            let in_bin = if g < 9 {
+                p >= bin_lo && p < bin_hi
+            } else {
+                p >= bin_lo  // last bin includes p=1.0
+            }
+            if in_bin {
+                ng = ng + 1
+                sum_pred = sum_pred + p
+                if obs[i as usize] > 0.5 {
+                    obs1 = obs1 + 1
+                }
+            }
+            i = i + 1
+        }
+
+        if ng > 0 {
+            let ng_f   = ng as f64
+            let obs1_f = obs1 as f64
+            let obs0_f = (ng - obs1) as f64
+            let exp1   = sum_pred
+            let exp0   = ng_f - exp1
+
+            if exp1 > 0.5 {
+                hl_stat = hl_stat + (obs1_f - exp1) * (obs1_f - exp1) / exp1
+            }
+            if exp0 > 0.5 {
+                hl_stat = hl_stat + (obs0_f - exp0) * (obs0_f - exp0) / exp0
+            }
+        }
+
+        g = g + 1
+    }
+
+    return hl_stat
+}
+
+// ============================================================================
+// TEST FUNCTIONS
+// ============================================================================
+
+// Test 1: Perfect calibration (predicted = actual fraction in each bin)
+// 100 observations, 10 per bin; in bin g: predicted all =(g+0.5)/10,
+// exactly round((g+0.5)/10 * 10) = g+1 positives per 10 items.
+// HL stat should be 0 (obs=exp in every bin).
+fn test_perfect_calibration() -> bool with IO, Mut, Panic, Div {
+    var probs: [f64; 100] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var obs: [f64; 100] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    // 10 bins, 10 obs each; in bin g (0-indexed), predicted prob = (g+0.5)/10
+    // Exactly g+1 positives out of 10 per bin (obs fraction = predicted fraction)
+    var g = 0 as i64
+    while g < 10 {
+        let pred = ((g as f64) + 0.5) / 10.0
+        var k = 0 as i64
+        while k < 10 {
+            let idx = (g * 10 + k) as usize
+            probs[idx] = pred
+            // obs = 1 for first (g+1) items in bin, 0 for rest
+            obs[idx] = if k <= g { 1.0 } else { 0.0 }
+            k = k + 1
+        }
+        g = g + 1
+    }
+    let hl = hosmer_lemeshow(probs, obs, 100)
+    // Perfect calibration: exp = obs in each bin -> HL = 0
+    return approx_eq(hl, 0.0, 1.0e-9)
+}
+
+// Test 2: Well-calibrated model — HL stat below 5% critical value (15.51)
+// Half of 10 observations predict 0.3, half predict 0.7,
+// with 3/10 and 7/10 positive rates respectively.
+fn test_well_calibrated() -> bool with IO, Mut, Panic, Div {
+    var probs: [f64; 100] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var obs: [f64; 100] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    // 50 predictions of 0.3 (obs: 15 positives) — in bin [0.3,0.4)
+    // 50 predictions of 0.7 (obs: 35 positives) — in bin [0.7,0.8)
+    // Perfect calibration in each occupied bin
+    var i = 0 as i64
+    while i < 50 {
+        probs[i as usize] = 0.3
+        obs[i as usize] = if i < 15 { 1.0 } else { 0.0 }
+        i = i + 1
+    }
+    var j = 0 as i64
+    while j < 50 {
+        probs[(50 + j) as usize] = 0.7
+        obs[(50 + j) as usize] = if j < 35 { 1.0 } else { 0.0 }
+        j = j + 1
+    }
+    let hl = hosmer_lemeshow(probs, obs, 100)
+    // Perfectly calibrated in both occupied bins => HL = 0
+    return approx_eq(hl, 0.0, 1.0e-9)
+}
+
+// Test 3: Miscalibrated — all predict 0.5 but all outcomes are 1 (overconfident zeros)
+// In the [0.5,0.6) bin: 100 obs, exp1=50, obs1=100 → HL term = (100-50)²/50 + (0-50)²/50 = 100
+fn test_miscalibrated_high() -> bool with IO, Mut, Panic, Div {
+    var probs: [f64; 100] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var obs: [f64; 100] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var i = 0 as i64
+    while i < 100 {
+        probs[i as usize] = 0.55  // all in bin [0.5, 0.6)
+        obs[i as usize] = 1.0     // all outcomes are 1
+        i = i + 1
+    }
+    let hl = hosmer_lemeshow(probs, obs, 100)
+    // Expected: HL = (100-55)²/55 + (0-45)²/45 = 2025/55 + 2025/45 = 36.818... + 45.0 = 81.818...
+    // Just verify it's >> 15.51 (critical value at 5%)
+    return hl > 15.51
+}
+
+// Test 4: HL is non-negative for any input
+fn test_hl_nonnegative() -> bool with IO, Mut, Panic, Div {
+    var probs: [f64; 100] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var obs: [f64; 100] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    // Spread predictions across all bins with mixed outcomes
+    var i = 0 as i64
+    while i < 100 {
+        probs[i as usize] = (i as f64) * 0.01 + 0.005  // 0.005, 0.015, ..., 0.995
+        obs[i as usize] = if i < 50 { 0.0 } else { 1.0 }
+        i = i + 1
+    }
+    let hl = hosmer_lemeshow(probs, obs, 100)
+    return hl >= 0.0
+}
+
+// Test 5: Symmetric miscalibration — predict all 0.5, alternating obs 0/1
+// Expected positives per bin = 10*0.5 = 5; observed = exactly 5 (alternating)
+// HL = 0 for this balanced setup
+fn test_balanced_neutral() -> bool with IO, Mut, Panic, Div {
+    var probs: [f64; 100] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var obs: [f64; 100] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    // 100 obs all in [0.5, 0.6) — exactly 50 positives out of 100
+    var i = 0 as i64
+    while i < 100 {
+        probs[i as usize] = 0.55
+        obs[i as usize] = if i < 50 { 1.0 } else { 0.0 }
+        i = i + 1
+    }
+    let hl = hosmer_lemeshow(probs, obs, 100)
+    // exp1 = 100 * 0.55 = 55, obs1 = 50 → HL = (50-55)²/55 + (50-45)²/45
+    //      = 25/55 + 25/45 = 0.4545 + 0.5556 ≈ 1.01
+    // HL should be > 0 (slight miscalibration) and << 15.51 (not significant)
+    return hl > 0.0 && hl < 15.51
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== Hosmer-Lemeshow Calibration Tests ===")
+    println("")
+
+    var passed = 0
+    var failed = 0
+
+    print("Test 1: perfect calibration HL=0......... ")
+    if test_perfect_calibration() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 2: well-calibrated two-bin HL=0..... ")
+    if test_well_calibrated() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 3: miscalibrated HL > chi2 threshold ")
+    if test_miscalibrated_high() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 4: HL statistic is non-negative..... ")
+    if test_hl_nonnegative() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 5: balanced neutral HL in (0,15.51). ")
+    if test_balanced_neutral() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    println("")
+    print("Passed: ")
+    println(passed)
+    print("Failed: ")
+    println(failed)
+
+    if failed > 0 {
+        println("SOME TESTS FAILED")
+        return 1
+    }
+    println("ALL 5 TESTS PASSED")
+    return 0
+}

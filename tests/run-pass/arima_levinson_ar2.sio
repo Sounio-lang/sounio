@@ -1,0 +1,295 @@
+//@ run-pass
+//@ expect-stdout: ALL 6 TESTS PASSED
+//@ expect-stdout: Failed: 0
+// ARIMA Levinson-Durbin AR(p) Coefficient Recovery Test Suite
+//
+// Self-contained tests validating the Levinson-Durbin Yule-Walker recursion
+// for estimating AR model coefficients from known autocorrelation functions.
+//
+// Mathematical basis: For AR(p): y[t] = φ1*y[t-1] + ... + φp*y[t-p] + ε
+// The Yule-Walker equations R*φ = r yield the population AR coefficients
+// given exact ACF. The Levinson-Durbin recursion solves this in O(p²) time.
+//
+// Reference: Brockwell & Davis, "Time Series: Theory and Methods" (2002)
+//
+// All functions inlined (tests cannot import stdlib).
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn approx_eq(a: f64, b: f64, tol: f64) -> bool with Mut, Panic, Div {
+    abs_f64(a - b) < tol
+}
+
+// ============================================================================
+// LEVINSON-DURBIN RECURSION (inlined from stdlib/stats/timeseries/arima.sio)
+//
+// Input:  acf[0..19] — autocorrelation at lags 0,1,...,19 (acf[0]=1.0)
+//         order       — AR model order p (1 <= p <= 5)
+// Output: ar[0..4]   — AR coefficients φ1,..,φp; remaining slots are 0.0
+//
+// Algorithm (Levinson 1947 / Durbin 1960):
+//   σ_0 = acf[0]
+//   For m = 1..order:
+//     k_m = (acf[m] - Σ_{j=1}^{m-1} φ_{m-1,j} * acf[m-j]) / σ_{m-1}
+//     For j = 1..m-1:  φ_{m,j} = φ_{m-1,j} - k_m * φ_{m-1,m-j}
+//     φ_{m,m} = k_m
+//     σ_m = σ_{m-1} * (1 - k_m²)
+// ============================================================================
+
+fn levinson_durbin(acf: [f64; 20], order: i64) -> [f64; 5] with Mut, Panic, Div {
+    var ar: [f64; 5] = [0.0, 0.0, 0.0, 0.0, 0.0]
+    var sigma_sq = acf[0]
+
+    var m = 1 as i64
+    while m <= order {
+        // Compute reflection coefficient k_m
+        var numer = acf[m as usize]
+        var j = 1 as i64
+        while j < m {
+            numer = numer - ar[(j-1) as usize] * acf[(m-j) as usize]
+            j = j + 1
+        }
+        let k_m = if sigma_sq > 1.0e-15 { numer / sigma_sq } else { 0.0 }
+
+        // Update AR coefficients: φ_{m,j} = φ_{m-1,j} - k_m * φ_{m-1,m-j}
+        // Must update in a temporary copy to avoid overwriting in-place
+        var new_ar: [f64; 5] = [0.0, 0.0, 0.0, 0.0, 0.0]
+        new_ar[0] = ar[0]
+        new_ar[1] = ar[1]
+        new_ar[2] = ar[2]
+        new_ar[3] = ar[3]
+        new_ar[4] = ar[4]
+
+        var k = 1 as i64
+        while k < m {
+            new_ar[(k-1) as usize] = ar[(k-1) as usize] - k_m * ar[(m-k-1) as usize]
+            k = k + 1
+        }
+        new_ar[(m-1) as usize] = k_m
+
+        ar[0] = new_ar[0]
+        ar[1] = new_ar[1]
+        ar[2] = new_ar[2]
+        ar[3] = new_ar[3]
+        ar[4] = new_ar[4]
+
+        sigma_sq = sigma_sq * (1.0 - k_m * k_m)
+        m = m + 1
+    }
+    return ar
+}
+
+// ============================================================================
+// ACF HELPERS: compute theoretical ACF for known AR models
+// ============================================================================
+
+// Theoretical ACF for AR(1): y[t] = phi*y[t-1] + eps
+// ρ(k) = phi^k  (geometric decay)
+fn acf_ar1(phi: f64, lag: i64) -> f64 with Mut, Panic, Div {
+    var r = 1.0
+    var i = 0 as i64
+    while i < lag {
+        r = r * phi
+        i = i + 1
+    }
+    return r
+}
+
+// Theoretical ACF for AR(2): y[t] = phi1*y[t-1] + phi2*y[t-2] + eps
+// Yule-Walker: ρ(1) = phi1/(1-phi2), ρ(k) = phi1*ρ(k-1) + phi2*ρ(k-2)
+fn build_ar2_acf(phi1: f64, phi2: f64) -> [f64; 20] with Mut, Panic, Div {
+    var acf: [f64; 20] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                           0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    acf[0] = 1.0
+    acf[1] = phi1 / (1.0 - phi2)
+    var k = 2 as i64
+    while k < 20 {
+        acf[k as usize] = phi1 * acf[(k-1) as usize] + phi2 * acf[(k-2) as usize]
+        k = k + 1
+    }
+    return acf
+}
+
+// ============================================================================
+// TEST FUNCTIONS
+// ============================================================================
+
+// Test 1: AR(1) with phi=0.8 — Levinson recovers φ1=0.8 exactly
+fn test_ar1_positive() -> bool with IO, Mut, Panic, Div {
+    // Build exact ACF for AR(1) with phi=0.8
+    var acf: [f64; 20] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                           0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var i = 0 as i64
+    while i < 20 {
+        acf[i as usize] = acf_ar1(0.8, i)
+        i = i + 1
+    }
+    let ar = levinson_durbin(acf, 1)
+    return approx_eq(ar[0], 0.8, 1.0e-9)
+}
+
+// Test 2: AR(1) with phi=-0.6 — negative autocorrelation
+fn test_ar1_negative() -> bool with IO, Mut, Panic, Div {
+    var acf: [f64; 20] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                           0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var i = 0 as i64
+    while i < 20 {
+        acf[i as usize] = acf_ar1(0.0-0.6, i)
+        i = i + 1
+    }
+    let ar = levinson_durbin(acf, 1)
+    return approx_eq(ar[0], 0.0-0.6, 1.0e-9)
+}
+
+// Test 3: AR(2) with phi1=0.5, phi2=-0.3 — classic stationarity check
+// Stationarity: |phi2| < 1, phi1+phi2 < 1, phi2-phi1 < 1 — all satisfied
+fn test_ar2_stable() -> bool with IO, Mut, Panic, Div {
+    let phi1 = 0.5
+    let phi2 = 0.0-0.3
+    let acf = build_ar2_acf(phi1, phi2)
+    let ar = levinson_durbin(acf, 2)
+    return approx_eq(ar[0], phi1, 1.0e-8) && approx_eq(ar[1], phi2, 1.0e-8)
+}
+
+// Test 4: AR(2) with phi1=0.3, phi2=0.6 — persistent, near-unit-root
+fn test_ar2_persistent() -> bool with IO, Mut, Panic, Div {
+    let phi1 = 0.3
+    let phi2 = 0.6
+    let acf = build_ar2_acf(phi1, phi2)
+    let ar = levinson_durbin(acf, 2)
+    return approx_eq(ar[0], phi1, 1.0e-8) && approx_eq(ar[1], phi2, 1.0e-8)
+}
+
+// Test 5: AR(2) zeroth-order check — acf[0]=1 means sigma_sq starts at 1.0
+fn test_ar2_zero_coeffs() -> bool with IO, Mut, Panic, Div {
+    // AR(2) with phi1=phi2=0 — white noise, AR = zero coefficients
+    let acf = build_ar2_acf(0.0, 0.0)
+    let ar = levinson_durbin(acf, 2)
+    // For white noise, AR coefficients should be exactly 0
+    return approx_eq(ar[0], 0.0, 1.0e-12) && approx_eq(ar[1], 0.0, 1.0e-12)
+}
+
+// Test 6: Partial ACF monotone decay — AR(3) coefficient sign pattern
+// AR(3): phi1=0.4, phi2=-0.2, phi3=0.1 — alternating signs
+fn test_ar3_sign_pattern() -> bool with IO, Mut, Panic, Div {
+    // Build ACF for AR(3) via Yule-Walker recursion from lag 0..19
+    var acf: [f64; 20] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                           0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let phi1 = 0.4
+    let phi2 = 0.0-0.2
+    let phi3 = 0.1
+    // Solve Yule-Walker for the initial values (lags 1,2,3):
+    // ρ(1) = phi1 + phi2*ρ(1) + phi3*ρ(2) — simplified by iteration
+    // For small phi3, ρ(1) ≈ phi1/(1-phi2)*(1+correction)
+    // Use direct Yule-Walker system for lags 1..3:
+    // [1      rho1   rho2] [phi1]   [rho1]
+    // [rho1   1      rho1] [phi2] = [rho2]
+    // [rho2   rho1   1   ] [phi3]   [rho3]
+    // Iteratively solve: start with rho(k) from AR(2) fit, iterate once
+    let rho1_init = phi1 / (1.0 - phi2)
+    let rho2_init = phi1 * rho1_init + phi2
+    let rho3_init = phi1 * rho2_init + phi2 * rho1_init + phi3
+    // Refine once using the AR(3) Yule-Walker recursion
+    let rho1 = (phi1 + phi2*rho1_init + phi3*rho2_init)
+    let rho2 = (phi1*rho1_init + phi2 + phi3*rho1_init)
+    let rho3 = (phi1*rho2_init + phi2*rho1_init + phi3)
+    acf[0] = 1.0
+    acf[1] = rho1
+    acf[2] = rho2
+    acf[3] = rho3
+    // Higher lags: ρ(k) = phi1*ρ(k-1) + phi2*ρ(k-2) + phi3*ρ(k-3)
+    var k = 4 as i64
+    while k < 20 {
+        acf[k as usize] = phi1*acf[(k-1) as usize] + phi2*acf[(k-2) as usize] + phi3*acf[(k-3) as usize]
+        k = k + 1
+    }
+    let ar = levinson_durbin(acf, 3)
+    // Verify sign pattern: ar[0] > 0, ar[1] < 0, ar[2] > 0
+    return ar[0] > 0.0 && ar[1] < 0.0 && ar[2] > 0.0
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== ARIMA Levinson-Durbin AR(p) Tests ===")
+    println("")
+
+    var passed = 0
+    var failed = 0
+
+    print("Test 1: AR(1) phi=+0.8 recovery.......... ")
+    if test_ar1_positive() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 2: AR(1) phi=-0.6 recovery.......... ")
+    if test_ar1_negative() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 3: AR(2) phi1=0.5,phi2=-0.3........ ")
+    if test_ar2_stable() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 4: AR(2) phi1=0.3,phi2=0.6......... ")
+    if test_ar2_persistent() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 5: AR(2) white noise zero coeffs.... ")
+    if test_ar2_zero_coeffs() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 6: AR(3) sign pattern............... ")
+    if test_ar3_sign_pattern() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    println("")
+    print("Passed: ")
+    println(passed)
+    print("Failed: ")
+    println(failed)
+
+    if failed > 0 {
+        println("SOME TESTS FAILED")
+        return 1
+    }
+    println("ALL 6 TESTS PASSED")
+    return 0
+}
