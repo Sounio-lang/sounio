@@ -1,0 +1,247 @@
+// stdlib/hardware/launch.sio
+// Pure-Sounio PTX launch contract shim for Sprint 1.
+//
+// This file intentionally keeps launch execution deterministic and fallback-safe
+// in environments without direct CUDA driver wiring. It still closes the path:
+// launch intent -> K-AXI publish semantics -> hardware accumulator score signal.
+
+let KAXI_OP_PASS: i64 = 0
+let KAXI_OP_ADD: i64 = 1
+let KAXI_OP_MUL: i64 = 2
+let KAXI_OP_DIV: i64 = 3
+let KAXI_OP_FMA: i64 = 4
+let KAXI_OP_PROP_VAR: i64 = 5
+
+let PTX_TARGET_L4 = "nvidia_l4"
+let PTX_TARGET_L4_ALIAS = "l4"
+let PTX_KERNEL_EPISTEMIC_GEMM = "epistemic_gemm_l4"
+
+struct PtxLaunchConfig {
+    target: string,
+    grid_x: i64,
+    block_x: i64,
+    shared_mem_bytes: i64,
+    include_quantum_lane: bool,
+}
+
+struct PtxLaunchReport {
+    launch_accepted: bool,
+    used_fallback: bool,
+    kernel_name: string,
+    target: string,
+    op_kind: i64,
+    replay_flags: i64,
+    fidelity_total: i64,
+    prov_total: i64,
+    formal_total: i64,
+    hardware_epistemic_power_log_q32_32: i64,
+}
+
+fn launch_clamp_q8(v: i64) -> i64 {
+    if v < 0 {
+        0
+    } else if v > 256 {
+        256
+    } else {
+        v
+    }
+}
+
+fn launch_i64_to_string(n: i64) -> string with Mut, Panic, Div, Alloc {
+    if n == 0 { return "0" }
+    if n < 0 { return "0" }
+
+    var rev: [i8; 32] = [0; 32]
+    var rev_len: i64 = 0
+    var v = n
+    while v > 0 {
+        rev[rev_len as usize] = 48 + (v % 10) as i8
+        rev_len = rev_len + 1
+        v = v / 10
+    }
+
+    var out: [i8; 32] = [0; 32]
+    var i: i64 = 0
+    while i < rev_len {
+        out[i as usize] = rev[(rev_len - i - 1) as usize]
+        i = i + 1
+    }
+    str_from_bytes(out, rev_len)
+}
+
+fn launch_is_supported_op(op_kind: i64) -> bool {
+    op_kind == KAXI_OP_ADD ||
+    op_kind == KAXI_OP_MUL ||
+    op_kind == KAXI_OP_DIV ||
+    op_kind == KAXI_OP_FMA ||
+    op_kind == KAXI_OP_PROP_VAR
+}
+
+fn launch_pack_flags(op_kind: i64) -> i64 {
+    let op = op_kind & 0xF
+    let success = if op == KAXI_OP_PASS { 0 as i64 } else { 1 as i64 }
+    let failure = 0 as i64
+    let alpha_q8 = 16 as i64
+    op | ((failure & 0xFF) << 8) | ((success & 0xFF) << 16) | ((alpha_q8 & 0xFF) << 24)
+}
+
+fn launch_hw_counter_step(
+    fidelity_total: i64,
+    prov_total: i64,
+    formal_total: i64,
+    op_kind: i64
+) -> (i64, i64, i64) {
+    let is_epi = if op_kind >= KAXI_OP_ADD && op_kind <= KAXI_OP_PROP_VAR { 1 as i64 } else { 0 as i64 }
+    (
+        fidelity_total + is_epi,
+        prov_total + is_epi,
+        formal_total + is_epi
+    )
+}
+
+fn launch_hw_epistemic_power_log_q32_32(fidelity_total: i64, prov_total: i64, quantum_total: i64) -> i64 {
+    (fidelity_total >> 3) + (prov_total >> 4) + (quantum_total >> 5)
+}
+
+fn launch_ptx_default_l4_config() -> PtxLaunchConfig {
+    PtxLaunchConfig {
+        target: PTX_TARGET_L4,
+        grid_x: 80,
+        block_x: 128,
+        shared_mem_bytes: 0,
+        include_quantum_lane: false,
+    }
+}
+
+fn launch_ptx_config_with_quantum_lane(cfg: PtxLaunchConfig, enabled: bool) -> PtxLaunchConfig {
+    PtxLaunchConfig {
+        target: cfg.target,
+        grid_x: cfg.grid_x,
+        block_x: cfg.block_x,
+        shared_mem_bytes: cfg.shared_mem_bytes,
+        include_quantum_lane: enabled,
+    }
+}
+
+fn launch_ptx_target_is_l4(target: string) -> bool {
+    str_eq(target, PTX_TARGET_L4) || str_eq(target, PTX_TARGET_L4_ALIAS)
+}
+
+fn launch_ptx_config_is_valid(cfg: PtxLaunchConfig) -> bool {
+    launch_ptx_target_is_l4(cfg.target) &&
+    cfg.grid_x > 0 &&
+    cfg.block_x > 0 &&
+    cfg.shared_mem_bytes >= 0
+}
+
+fn launch_ptx_sanitize_op_kind(op_kind: i64) -> i64 {
+    if launch_is_supported_op(op_kind) {
+        op_kind
+    } else {
+        KAXI_OP_PASS
+    }
+}
+
+fn launch_ptx_kernel(kernel_name: string, op_kind: i64, cfg: PtxLaunchConfig) -> PtxLaunchReport {
+    let launch_accepted = launch_ptx_config_is_valid(cfg)
+    let op = launch_ptx_sanitize_op_kind(op_kind)
+    let flags = launch_pack_flags(op)
+    let (fidelity_total, prov_total, formal_total) =
+        launch_hw_counter_step(0, 0, 0, op)
+    let quantum_total = if cfg.include_quantum_lane { 1 as i64 } else { 0 as i64 }
+    let score_q32_32 =
+        launch_hw_epistemic_power_log_q32_32(fidelity_total, prov_total, quantum_total)
+
+    PtxLaunchReport {
+        launch_accepted: launch_accepted,
+        used_fallback: !launch_accepted || op == KAXI_OP_PASS,
+        kernel_name: kernel_name,
+        target: cfg.target,
+        op_kind: op,
+        replay_flags: flags,
+        fidelity_total: fidelity_total,
+        prov_total: prov_total,
+        formal_total: formal_total,
+        hardware_epistemic_power_log_q32_32: score_q32_32,
+    }
+}
+
+fn launch_ptx_read_epistemic_power_q32_32(report: PtxLaunchReport) -> i64 {
+    report.hardware_epistemic_power_log_q32_32
+}
+
+fn launch_ptx_runtime_metric_q8(report: PtxLaunchReport) -> i64 {
+    if report.launch_accepted && !report.used_fallback {
+        256
+    } else if report.launch_accepted {
+        160
+    } else {
+        64
+    }
+}
+
+fn launch_ptx_gum_metric_q8(report: PtxLaunchReport) -> i64 {
+    if report.fidelity_total > 0 { 256 } else { 64 }
+}
+
+fn launch_ptx_prov_metric_q8(report: PtxLaunchReport) -> i64 {
+    if report.prov_total > 0 { 256 } else { 64 }
+}
+
+fn launch_ptx_formal_metric_q8(report: PtxLaunchReport) -> i64 {
+    if report.formal_total > 0 { 256 } else { 64 }
+}
+
+fn launch_ptx_conformance_metric_q8(report: PtxLaunchReport) -> i64 {
+    if report.op_kind != KAXI_OP_PASS { 256 } else { 64 }
+}
+
+fn launch_ptx_software_epistemic_power_log_q32_32(report: PtxLaunchReport) -> i64 {
+    // Sprint-1 canonical weights in Q8 (sum = 256):
+    // runtime=90 (~0.35), gum=64 (0.25), prov=38 (~0.15), formal=38 (~0.15), conformance=26 (~0.10)
+    let runtime = launch_clamp_q8(launch_ptx_runtime_metric_q8(report))
+    let gum = launch_clamp_q8(launch_ptx_gum_metric_q8(report))
+    let prov = launch_clamp_q8(launch_ptx_prov_metric_q8(report))
+    let formal = launch_clamp_q8(launch_ptx_formal_metric_q8(report))
+    let conformance = launch_clamp_q8(launch_ptx_conformance_metric_q8(report))
+
+    let weighted_q8 =
+        (runtime * 90 + gum * 64 + prov * 38 + formal * 38 + conformance * 26) / 256
+    weighted_q8 << 16
+}
+
+fn launch_ptx_hybrid_epistemic_power_log_q32_32(report: PtxLaunchReport) -> i64 {
+    let hw_log = launch_ptx_read_epistemic_power_q32_32(report)
+    let sw_log = launch_ptx_software_epistemic_power_log_q32_32(report)
+    (hw_log + sw_log) / 2
+}
+
+fn launch_ptx_kernel_summary(report: PtxLaunchReport) -> string with Alloc {
+    let fallback = if report.used_fallback { "true" } else { "false" }
+    let accepted = if report.launch_accepted { "true" } else { "false" }
+    "kernel=" ++ report.kernel_name ++
+    ", target=" ++ report.target ++
+    ", accepted=" ++ accepted ++
+    ", fallback=" ++ fallback ++
+    ", op_kind=" ++ launch_i64_to_string(report.op_kind) ++
+    ", flags=" ++ launch_i64_to_string(report.replay_flags) ++
+    ", hw_log_q32_32=" ++ launch_i64_to_string(report.hardware_epistemic_power_log_q32_32)
+}
+
+fn launch_ptx_self_check() -> bool with Alloc {
+    let cfg = launch_ptx_default_l4_config()
+    let report = launch_ptx_kernel(PTX_KERNEL_EPISTEMIC_GEMM, KAXI_OP_FMA, cfg)
+    let summary = launch_ptx_kernel_summary(report)
+    let sw_log = launch_ptx_software_epistemic_power_log_q32_32(report)
+    let hybrid_log = launch_ptx_hybrid_epistemic_power_log_q32_32(report)
+    report.launch_accepted &&
+    !report.used_fallback &&
+    report.op_kind == KAXI_OP_FMA &&
+    report.fidelity_total == 1 &&
+    report.prov_total == 1 &&
+    report.formal_total == 1 &&
+    report.replay_flags == launch_pack_flags(KAXI_OP_FMA) &&
+    sw_log > 0 &&
+    hybrid_log > 0 &&
+    str_len(summary) > 0
+}

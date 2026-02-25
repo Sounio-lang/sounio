@@ -1,0 +1,994 @@
+// stdlib/hardware/kaxi.sio
+// Canonical source of truth for K-AXI + EpistemicPowerAccumulator.
+// The self-hosted emitter extracts @@TEMPLATE blocks from this file.
+
+/*
+hardware KAXI {
+    name: "Knowledge AXI"
+    bus: AXI4Stream + EpistemicSideband
+    payload: Knowledge<f64>
+
+    operations {
+        fma {
+            propagation: GUM_DeltaExact
+            provenance: MerkleMerge
+            confidence: BayesianIncrement
+            counter: fidelity +1, prov_depth +1
+        }
+        add {
+            propagation: GUM_Add
+            provenance: MerkleMerge
+            counter: fidelity +1, prov_depth +1
+        }
+        mul {
+            propagation: GUM_Mul
+            provenance: MerkleMerge
+            counter: fidelity +1, prov_depth +1
+        }
+        div {
+            propagation: GUM_Div
+            provenance: MerkleMerge
+            counter: fidelity +1, prov_depth +1
+        }
+        prop_var {
+            propagation: EpistemicDegradation
+            counter: fidelity +1, prov_depth +1
+        }
+    }
+
+    ring_buffer {
+        size: 64
+        mode: atomic_circular
+    }
+
+    native_keyword: hardware_publish
+    publish: __knowledge_kaxi_publish
+}
+
+hardware EpistemicPowerAccumulator {
+    source: KAXI
+    output: live_score : Q32.32
+}
+
+@@TEMPLATE:hardware/fpga/k_axi_slave_epistemic.v
+// GENERATED_FROM_STDLIB: stdlib/hardware/kaxi.sio
+// GENERATED_BY: self-hosted/compiler/codegen/hardware/kaxi_emitter.sio
+// Sounio Omega - K-AXI epistemic slave/propagation engine
+// Consumes AXI-Stream value + epistemic sideband and applies hardware-side updates.
+
+`timescale 1ns/1ps
+
+module k_axi_merkle_core #(
+    parameter PROV_WIDTH = 256
+) (
+    input  wire [PROV_WIDTH-1:0] in_prov,
+    input  wire [63:0]           in_value,
+    input  wire [31:0]           in_flags,
+    output wire [PROV_WIDTH-1:0] digest
+);
+    localparam [255:0] PROV_SALT = 256'h4B5F4158495F4D45524B4C455F4550495354454D49435F4255535F7631A5A5A5;
+
+    // Dedicated deterministic Merkle-seed fold (replace with hash core in v2).
+    assign digest = {in_prov[247:0], in_prov[255:248]}
+        ^ {192'd0, in_value}
+        ^ {224'd0, in_flags}
+        ^ PROV_SALT;
+endmodule
+
+module k_axi_slave_epistemic #(
+    parameter DATA_WIDTH = 64,
+    parameter VAR_WIDTH = 64,
+    parameter PROV_WIDTH = 256,
+    parameter CONF_WIDTH = 128,
+    parameter FLAGS_WIDTH = 32,
+    parameter SCALE_SHIFT = 30
+) (
+    input  wire                         aclk,
+    input  wire                         aresetn,
+
+    // AXI-Stream input.
+    input  wire [DATA_WIDTH-1:0]        s_tdata,
+    input  wire [VAR_WIDTH+PROV_WIDTH+CONF_WIDTH+FLAGS_WIDTH-1:0] s_tuser,
+    input  wire                         s_tvalid,
+    output wire                         s_tready,
+
+    // Downstream interface.
+    output reg  [DATA_WIDTH-1:0]        out_value,
+    output reg  [VAR_WIDTH-1:0]         out_variance,
+    output reg  [PROV_WIDTH-1:0]        out_prov,
+    output reg  [CONF_WIDTH-1:0]        out_conf,
+    output reg  [FLAGS_WIDTH-1:0]       out_flags,
+    output reg                          out_valid,
+    input  wire                         downstream_ready,
+
+    // Merkle lane interface (optional external provenance core).
+    input  wire                         merkle_lane_valid,
+    input  wire [PROV_WIDTH-1:0]        merkle_lane_digest,
+    output reg                          merkle_lane_req,
+    output reg  [PROV_WIDTH-1:0]        merkle_lane_seed,
+
+    // Epistemic Power accounting lanes.
+    output reg  [31:0]                  gum_fidelity_inc,
+    output reg  [31:0]                  provenance_depth_inc,
+    output reg  [31:0]                  formal_coverage_inc
+);
+
+    localparam KUSER_WIDTH = VAR_WIDTH + PROV_WIDTH + CONF_WIDTH + FLAGS_WIDTH;
+
+    localparam OP_PASS = 4'h0;
+    localparam OP_ADD = 4'h1;
+    localparam OP_MUL = 4'h2;
+    localparam OP_DIV = 4'h3;
+    localparam OP_FMA = 4'h4;
+
+    wire accept;
+    assign s_tready = !out_valid || downstream_ready;
+    assign accept = s_tvalid && s_tready;
+
+    wire [63:0] in_variance = s_tuser[63:0];
+    wire [255:0] in_prov = s_tuser[319:64];
+    wire [127:0] in_conf = s_tuser[447:320];
+    wire [31:0] in_flags = s_tuser[479:448];
+
+    wire [3:0] op_kind = in_flags[3:0];
+    wire [7:0] failure_inc = in_flags[15:8];
+    wire [7:0] success_inc = in_flags[23:16];
+    wire [7:0] alpha_q8 = in_flags[31:24];
+
+    wire [63:0] in_alpha = in_conf[127:64];
+    wire [63:0] in_beta = in_conf[63:0];
+    wire [63:0] alpha_next_wire = in_alpha + {56'd0, success_inc};
+    wire [63:0] beta_next_wire = in_beta + {56'd0, failure_inc};
+    wire [255:0] merkle_core_digest;
+
+    k_axi_merkle_core #(
+        .PROV_WIDTH(PROV_WIDTH)
+    ) u_merkle_core (
+        .in_prov(in_prov),
+        .in_value(s_tdata),
+        .in_flags(in_flags),
+        .digest(merkle_core_digest)
+    );
+
+    reg [63:0] op_var;
+    reg [127:0] degradation_full;
+    reg [63:0] degradation_var;
+
+    always @(*) begin
+        // Richer op-sensitive variance profile (Q32.32-oriented approximation).
+        // This keeps deterministic hardware semantics while differentiating
+        // additive vs multiplicative/divisive uncertainty growth.
+        case (op_kind)
+            OP_ADD: op_var = in_variance + (in_variance >> 3);                         // +12.5%
+            OP_MUL: op_var = in_variance + (in_variance >> 1) + (in_variance >> 3);   // +62.5%
+            OP_DIV: op_var = in_variance + (in_variance >> 1) + (in_variance >> 2);   // +75.0%
+            OP_FMA: op_var = in_variance + (in_variance >> 1) + (in_variance >> 2) + (in_variance >> 4); // +81.25%
+            default: op_var = in_variance;
+        endcase
+
+        // Epistemic degradation term from alpha_q8 (Q0.8), now applied after
+        // op-profile shaping so downstream sees profile+degradation.
+        degradation_full = op_var * alpha_q8;
+        degradation_var = degradation_full[71:8];
+    end
+
+    always @(posedge aclk or negedge aresetn) begin
+        if (!aresetn) begin
+            out_value <= {DATA_WIDTH{1'b0}};
+            out_variance <= {VAR_WIDTH{1'b0}};
+            out_prov <= {PROV_WIDTH{1'b0}};
+            out_conf <= {CONF_WIDTH{1'b0}};
+            out_flags <= {FLAGS_WIDTH{1'b0}};
+            out_valid <= 1'b0;
+            merkle_lane_req <= 1'b0;
+            merkle_lane_seed <= {PROV_WIDTH{1'b0}};
+            gum_fidelity_inc <= 32'd0;
+            provenance_depth_inc <= 32'd0;
+            formal_coverage_inc <= 32'd0;
+        end else begin
+            // One-cycle request pulse unless a transaction is accepted.
+            merkle_lane_req <= 1'b0;
+
+            if (out_valid && downstream_ready) begin
+                out_valid <= 1'b0;
+            end
+
+            if (accept) begin
+                out_value <= s_tdata;
+                out_variance <= op_var + degradation_var;
+                out_flags <= in_flags;
+
+                // Main path consumes dedicated Merkle-core digest.
+                merkle_lane_seed <= merkle_core_digest;
+                merkle_lane_req <= 1'b1;
+                if (merkle_lane_valid) begin
+                    out_prov <= merkle_lane_digest;
+                end else begin
+                    out_prov <= merkle_core_digest;
+                end
+                out_conf <= {alpha_next_wire, beta_next_wire};
+
+                gum_fidelity_inc <= gum_fidelity_inc + 32'd1;
+                provenance_depth_inc <= provenance_depth_inc + 32'd1;
+                formal_coverage_inc <= formal_coverage_inc + 32'd1;
+
+                out_valid <= 1'b1;
+            end
+        end
+    end
+
+endmodule
+@@ENDTEMPLATE
+
+@@TEMPLATE:hardware/fpga/epistemic_power_accumulator.v
+// GENERATED_FROM_STDLIB: stdlib/hardware/kaxi.sio
+// GENERATED_BY: self-hosted/compiler/codegen/hardware/kaxi_emitter.sio
+// Sounio Omega - Hardware Epistemic Power accumulator
+// Aggregates hardware counter increments and exposes live log-space score (Q32.32).
+
+`timescale 1ns/1ps
+
+module epistemic_power_accumulator #(
+    parameter SCALE_SHIFT = 30
+) (
+    input  wire         aclk,
+    input  wire         aresetn,
+
+    // Counter deltas from epistemic fabric.
+    input  wire [31:0]  fidelity_inc,
+    input  wire [31:0]  prov_depth_inc,
+    input  wire [31:0]  quantum_fidelity_inc,
+    input  wire [31:0]  quantum_controller_inc,
+
+    input  wire         clear_counters,
+
+    // Q32.32 log-space approximation.
+    output reg  [63:0]  epistemic_power_log,
+    output reg  [31:0]  total_transactions
+);
+
+    reg [63:0] fidelity_accum;
+    reg [63:0] prov_accum;
+    reg [63:0] quantum_accum;
+
+    wire [63:0] fidelity_inc64 = {32'd0, fidelity_inc};
+    wire [63:0] prov_inc64 = {32'd0, prov_depth_inc};
+    wire [63:0] quantum_inc64 = {32'd0, quantum_fidelity_inc};
+    wire [63:0] quantum_controller_inc64 = {32'd0, quantum_controller_inc};
+
+    wire [63:0] fidelity_next = fidelity_accum + fidelity_inc64;
+    wire [63:0] prov_next = prov_accum + prov_inc64;
+    wire [63:0] quantum_next = quantum_accum + quantum_inc64 + quantum_controller_inc64;
+
+    wire [63:0] weighted_log_next =
+        (fidelity_next >> 3) + // runtime+gum dominant lane
+        (prov_next >> 4) +     // provenance lane
+        (quantum_next >> 5);   // quantum lane
+
+    wire tx_seen = |fidelity_inc;
+
+    always @(posedge aclk or negedge aresetn) begin
+        if (!aresetn) begin
+            fidelity_accum <= 64'd0;
+            prov_accum <= 64'd0;
+            quantum_accum <= 64'd0;
+            total_transactions <= 32'd0;
+            epistemic_power_log <= 64'd0;
+        end else if (clear_counters) begin
+            fidelity_accum <= 64'd0;
+            prov_accum <= 64'd0;
+            quantum_accum <= 64'd0;
+            total_transactions <= 32'd0;
+            epistemic_power_log <= 64'd0;
+        end else begin
+            fidelity_accum <= fidelity_next;
+            prov_accum <= prov_next;
+            quantum_accum <= quantum_next;
+            total_transactions <= total_transactions + {31'd0, tx_seen};
+            epistemic_power_log <= weighted_log_next;
+        end
+    end
+
+endmodule
+@@ENDTEMPLATE
+
+@@TEMPLATE:hardware/fpga/epistemic_rt_kaxi_generated.cu
+// GENERATED_FROM_STDLIB: stdlib/hardware/kaxi.sio
+// GENERATED_BY: self-hosted/compiler/codegen/hardware/kaxi_emitter.sio
+// CUDA sidecar for K-AXI publish path.
+
+#include <cuda_runtime.h>
+#include <stdint.h>
+#include <math.h>
+
+struct alignas(32) uint256_t {
+    uint64_t lane0;
+    uint64_t lane1;
+    uint64_t lane2;
+    uint64_t lane3;
+};
+
+struct KaxiPayload {
+    double value;
+    double variance;
+    uint256_t provenance;
+    uint64_t confidence_bits;
+    uint32_t flags;
+    uint32_t reserved;
+};
+
+static constexpr unsigned KAXI_RING_SIZE = 64;
+static constexpr uint8_t OP_PASS = 0x0;
+static constexpr uint8_t OP_ADD = 0x1;
+static constexpr uint8_t OP_MUL = 0x2;
+static constexpr uint8_t OP_DIV = 0x3;
+static constexpr uint8_t OP_FMA = 0x4;
+static constexpr uint8_t OP_PROP_VAR = 0x5;
+__device__ KaxiPayload g_kaxi_ring[KAXI_RING_SIZE];
+__device__ unsigned int g_kaxi_write_idx = 0;
+__device__ unsigned long long g_epistemic_power_log_hw_q32_32 = 0ull;
+
+__device__ __forceinline__ uint32_t __knowledge_kaxi_pack_flags(
+    uint8_t op_kind,
+    uint8_t alpha_q8,
+    uint8_t success_inc,
+    uint8_t failure_inc
+) {
+    return (static_cast<uint32_t>(alpha_q8) << 24) |
+           (static_cast<uint32_t>(success_inc) << 16) |
+           (static_cast<uint32_t>(failure_inc) << 8) |
+           (static_cast<uint32_t>(op_kind) & 0x0Fu);
+}
+
+__device__ __forceinline__ void __knowledge_kaxi_unpack_flags(
+    uint32_t flags,
+    uint8_t* op_kind,
+    uint8_t* alpha_q8,
+    uint8_t* success_inc,
+    uint8_t* failure_inc
+) {
+    if (op_kind != nullptr) {
+        *op_kind = static_cast<uint8_t>(flags & 0x0Fu);
+    }
+    if (alpha_q8 != nullptr) {
+        *alpha_q8 = static_cast<uint8_t>((flags >> 24) & 0xFFu);
+    }
+    if (success_inc != nullptr) {
+        *success_inc = static_cast<uint8_t>((flags >> 16) & 0xFFu);
+    }
+    if (failure_inc != nullptr) {
+        *failure_inc = static_cast<uint8_t>((flags >> 8) & 0xFFu);
+    }
+}
+
+__device__ __forceinline__ int __knowledge_kaxi_is_epistemic(uint32_t flags) {
+    const uint8_t op_kind = static_cast<uint8_t>(flags & 0x0Fu);
+    return (op_kind >= OP_ADD && op_kind <= OP_PROP_VAR) ? 1 : 0;
+}
+
+__device__ __forceinline__ void __knowledge_kaxi_publish(
+    double value,
+    double variance,
+    const uint256_t& prov,
+    double confidence,
+    uint32_t flags
+) {
+    const unsigned idx = atomicAdd(&g_kaxi_write_idx, 1u) & (KAXI_RING_SIZE - 1);
+    g_kaxi_ring[idx].value = value;
+    g_kaxi_ring[idx].variance = fmax(0.0, variance);
+    g_kaxi_ring[idx].provenance = prov;
+    g_kaxi_ring[idx].confidence_bits = static_cast<uint64_t>(__double_as_longlong(confidence));
+    g_kaxi_ring[idx].flags = flags;
+    g_kaxi_ring[idx].reserved = 0u;
+    atomicAdd(&g_epistemic_power_log_hw_q32_32, 1ull << 16);
+}
+
+extern "C" __device__ const KaxiPayload* __knowledge_kaxi_ring_base() {
+    return g_kaxi_ring;
+}
+
+extern "C" __device__ const KaxiPayload* __knowledge_kaxi_ring_at(uint32_t idx) {
+    return &g_kaxi_ring[idx & (KAXI_RING_SIZE - 1)];
+}
+
+extern "C" __device__ uint32_t __knowledge_kaxi_ring_size() {
+    return static_cast<uint32_t>(KAXI_RING_SIZE);
+}
+
+extern "C" __device__ unsigned int __knowledge_kaxi_ring_head() {
+    return g_kaxi_write_idx;
+}
+
+extern "C" __device__ uint64_t __knowledge_get_epistemic_power_log_q32_32() {
+    return static_cast<uint64_t>(g_epistemic_power_log_hw_q32_32);
+}
+@@ENDTEMPLATE
+
+@@TEMPLATE:self-hosted/compiler/codegen/hardware/kaxi_adapters.sio
+// GENERATED_FROM_STDLIB: stdlib/hardware/kaxi.sio
+// GENERATED_BY: self-hosted/compiler/codegen/hardware/kaxi_emitter.sio
+// Pure Sounio helpers for K-AXI flag packing and replay inspection.
+
+fn kaxi_i64_to_string(n: i64) -> string with Mut, Panic, Div, Alloc {
+    if n == 0 { return "0" }
+    if n < 0 { return "0" }
+
+    var rev: [i8; 32] = [0; 32]
+    var rev_len: i64 = 0
+    var v = n
+    while v > 0 {
+        rev[rev_len as usize] = 48 + (v % 10) as i8
+        rev_len = rev_len + 1
+        v = v / 10
+    }
+
+    var out: [i8; 32] = [0; 32]
+    var i: i64 = 0
+    while i < rev_len {
+        out[i as usize] = rev[(rev_len - i - 1) as usize]
+        i = i + 1
+    }
+    str_from_bytes(out, rev_len)
+}
+
+fn kaxi_flags_pack(op_kind: i64, success_inc: i64, failure_inc: i64, alpha_q8: i64) -> i64 {
+    let op = op_kind & 0xF
+    let failure = (failure_inc & 0xFF) << 8
+    let success = (success_inc & 0xFF) << 16
+    let alpha = (alpha_q8 & 0xFF) << 24
+    op | failure | success | alpha
+}
+
+fn kaxi_flags_unpack_op_kind(flags: i64) -> i64 {
+    flags & 0xF
+}
+
+fn kaxi_flags_unpack_success_inc(flags: i64) -> i64 {
+    (flags >> 16) & 0xFF
+}
+
+fn kaxi_flags_unpack_failure_inc(flags: i64) -> i64 {
+    (flags >> 8) & 0xFF
+}
+
+fn kaxi_flags_unpack_alpha_q8(flags: i64) -> i64 {
+    (flags >> 24) & 0xFF
+}
+
+fn kaxi_flags_is_valid(flags: i64) -> bool {
+    let op = kaxi_flags_unpack_op_kind(flags)
+    let success = kaxi_flags_unpack_success_inc(flags)
+    let failure = kaxi_flags_unpack_failure_inc(flags)
+    let alpha = kaxi_flags_unpack_alpha_q8(flags)
+    op >= 0 && op <= 5 &&
+    success >= 0 && success <= 255 &&
+    failure >= 0 && failure <= 255 &&
+    alpha >= 0 && alpha <= 255
+}
+
+fn kaxi_replay_is_epistemic(flags: i64) -> bool {
+    let op = kaxi_flags_unpack_op_kind(flags)
+    op >= 1 && op <= 5
+}
+
+fn kaxi_replay_entry_summary(value_bits: i64, variance_bits: i64, flags: i64) -> string with Alloc {
+    let op = kaxi_flags_unpack_op_kind(flags)
+    let success = kaxi_flags_unpack_success_inc(flags)
+    let failure = kaxi_flags_unpack_failure_inc(flags)
+    let alpha = kaxi_flags_unpack_alpha_q8(flags)
+    let valid = if kaxi_flags_is_valid(flags) { "true" } else { "false" }
+    let epistemic = if kaxi_replay_is_epistemic(flags) { "true" } else { "false" }
+    "value_bits=" ++ kaxi_i64_to_string(value_bits) ++
+    ", variance_bits=" ++ kaxi_i64_to_string(variance_bits) ++
+    ", op_kind=" ++ kaxi_i64_to_string(op) ++
+    ", failure_inc=" ++ kaxi_i64_to_string(failure) ++
+    ", success_inc=" ++ kaxi_i64_to_string(success) ++
+    ", alpha_q8=" ++ kaxi_i64_to_string(alpha) ++
+    ", valid=" ++ valid ++
+    ", epistemic=" ++ epistemic
+}
+
+fn kaxi_hw_counter_step(
+    fidelity_total: i64,
+    prov_total: i64,
+    formal_total: i64,
+    flags: i64
+) -> (i64, i64, i64) {
+    let is_epi = if kaxi_replay_is_epistemic(flags) { 1 as i64 } else { 0 as i64 }
+    (
+        fidelity_total + is_epi,
+        prov_total + is_epi,
+        formal_total + is_epi
+    )
+}
+
+fn kaxi_hw_epistemic_power_log_q32_32(
+    fidelity_total: i64,
+    prov_total: i64,
+    quantum_total: i64
+) -> i64 {
+    (fidelity_total >> 3) + (prov_total >> 4) + (quantum_total >> 5)
+}
+
+fn kaxi_hw_poll_replay_flags(
+    flags_batch: [i64; 64],
+    count: i64,
+    quantum_total: i64
+) -> (i64, i64, i64, i64) with Mut, Panic, Div, Alloc {
+    var fidelity_total: i64 = 0
+    var prov_total: i64 = 0
+    var formal_total: i64 = 0
+    var i: i64 = 0
+    while i < count && i < 64 {
+        let flags = flags_batch[i as usize]
+        let (next_fidelity, next_prov, next_formal) =
+            kaxi_hw_counter_step(fidelity_total, prov_total, formal_total, flags)
+        fidelity_total = next_fidelity
+        prov_total = next_prov
+        formal_total = next_formal
+        i = i + 1
+    }
+    let score = kaxi_hw_epistemic_power_log_q32_32(fidelity_total, prov_total, quantum_total)
+    (fidelity_total, prov_total, formal_total, score)
+}
+
+fn kaxi_adapters_self_check() -> bool {
+    let f = kaxi_flags_pack(4, 2, 1, 16)
+    var replay: [i64; 64] = [0; 64]
+    replay[0] = kaxi_flags_pack(1, 1, 0, 8)   // epistemic add
+    replay[1] = kaxi_flags_pack(0, 0, 0, 0)   // non-epistemic pass
+    replay[2] = kaxi_flags_pack(4, 1, 1, 16)  // epistemic fma
+    let (fidelity_total, prov_total, formal_total, score_q32) =
+        kaxi_hw_poll_replay_flags(replay, 3, 32)
+    kaxi_flags_unpack_op_kind(f) == 4 &&
+    kaxi_flags_unpack_success_inc(f) == 2 &&
+    kaxi_flags_unpack_failure_inc(f) == 1 &&
+    kaxi_flags_unpack_alpha_q8(f) == 16 &&
+    kaxi_flags_is_valid(f) &&
+    kaxi_replay_is_epistemic(f) &&
+    fidelity_total == 2 &&
+    prov_total == 2 &&
+    formal_total == 2 &&
+    score_q32 == 1
+}
+@@ENDTEMPLATE
+
+@@TEMPLATE:hardware/fpga/k_axi_return_fifo.v
+// GENERATED_FROM_STDLIB: stdlib/hardware/kaxi.sio
+// GENERATED_BY: self-hosted/compiler/codegen/hardware/kaxi_emitter.sio
+// K-AXI bidirectional return FIFO (deterministic fixed-width queue).
+
+`timescale 1ns/1ps
+
+module k_axi_return_fifo #(
+    parameter WIDTH = 544,
+    parameter DEPTH = 8,
+    parameter ADDR_BITS = 3
+) (
+    input  wire                  clk,
+    input  wire                  rst_n,
+    input  wire                  wr_en,
+    input  wire [WIDTH-1:0]      wr_data,
+    output wire                  full,
+    output reg                   overflow,
+    input  wire                  rd_en,
+    output wire [WIDTH-1:0]      rd_data,
+    output wire                  empty,
+    output reg                   underflow,
+    output reg  [ADDR_BITS:0]    count
+);
+    localparam integer DEPTH_INT = DEPTH;
+
+    reg [WIDTH-1:0] mem [0:DEPTH-1];
+    reg [ADDR_BITS-1:0] wptr;
+    reg [ADDR_BITS-1:0] rptr;
+
+    assign full = (count == DEPTH_INT);
+    assign empty = (count == 0);
+    assign rd_data = mem[rptr];
+
+    wire do_write = wr_en && !full;
+    wire do_read = rd_en && !empty;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            wptr <= {ADDR_BITS{1'b0}};
+            rptr <= {ADDR_BITS{1'b0}};
+            count <= {(ADDR_BITS + 1){1'b0}};
+            overflow <= 1'b0;
+            underflow <= 1'b0;
+        end else begin
+            overflow <= 1'b0;
+            underflow <= 1'b0;
+
+            if (wr_en && full) begin
+                overflow <= 1'b1;
+            end
+            if (rd_en && empty) begin
+                underflow <= 1'b1;
+            end
+
+            if (do_write) begin
+                mem[wptr] <= wr_data;
+                wptr <= wptr + 1'b1;
+            end
+
+            if (do_read) begin
+                rptr <= rptr + 1'b1;
+            end
+
+            case ({do_write, do_read})
+                2'b10: count <= count + 1'b1;
+                2'b01: count <= count - 1'b1;
+                default: count <= count;
+            endcase
+        end
+    end
+endmodule
+@@ENDTEMPLATE
+
+@@TEMPLATE:hardware/fpga/k_axi_return_mux.v
+// GENERATED_FROM_STDLIB: stdlib/hardware/kaxi.sio
+// GENERATED_BY: self-hosted/compiler/codegen/hardware/kaxi_emitter.sio
+// K-AXI bidirectional return mux: fabric -> return FIFO -> host runtime.
+
+`timescale 1ns/1ps
+
+module k_axi_return_mux #(
+    parameter PACKET_WIDTH = 544,
+    parameter FIFO_DEPTH = 8,
+    parameter FIFO_ADDR_BITS = 3
+) (
+    input  wire                  aclk,
+    input  wire                  aresetn,
+
+    // Inbound return lane from epistemic fabric.
+    input  wire                  fabric_valid,
+    output wire                  fabric_ready,
+    input  wire [7:0]            kind,
+    input  wire [7:0]            status,
+    input  wire [7:0]            op_kind,
+    input  wire [7:0]            flags,
+    input  wire [31:0]           tx_seq,
+    input  wire [31:0]           fidelity_inc,
+    input  wire [31:0]           prov_depth_inc,
+    input  wire [31:0]           formal_cov_inc,
+    input  wire [63:0]           epi_log_q32_32,
+    input  wire [255:0]          digest,
+    input  wire [63:0]           timestamp_cycles,
+
+    // Outbound lane to host/runtime consumer.
+    output wire                  ret_valid,
+    input  wire                  ret_ready,
+    output wire [PACKET_WIDTH-1:0] ret_data,
+
+    // Telemetry counters.
+    output reg  [31:0]           accepted_packets,
+    output reg  [31:0]           dropped_packets,
+    output reg  [31:0]           overflow_events
+);
+    wire [PACKET_WIDTH-1:0] packet_in;
+    assign packet_in = {
+        timestamp_cycles,
+        digest,
+        epi_log_q32_32,
+        formal_cov_inc,
+        prov_depth_inc,
+        fidelity_inc,
+        tx_seq,
+        flags,
+        op_kind,
+        status,
+        kind
+    };
+
+    wire fifo_full;
+    wire fifo_empty;
+    wire fifo_overflow;
+    wire fifo_underflow;
+    wire [FIFO_ADDR_BITS:0] fifo_count;
+    wire [PACKET_WIDTH-1:0] fifo_rd_data;
+
+    assign fabric_ready = !fifo_full;
+
+    wire wr_en = fabric_valid && fabric_ready;
+    wire rd_en = ret_ready && !fifo_empty;
+
+    assign ret_valid = !fifo_empty;
+    assign ret_data = fifo_rd_data;
+
+    k_axi_return_fifo #(
+        .WIDTH(PACKET_WIDTH),
+        .DEPTH(FIFO_DEPTH),
+        .ADDR_BITS(FIFO_ADDR_BITS)
+    ) u_return_fifo (
+        .clk(aclk),
+        .rst_n(aresetn),
+        .wr_en(wr_en),
+        .wr_data(packet_in),
+        .full(fifo_full),
+        .overflow(fifo_overflow),
+        .rd_en(rd_en),
+        .rd_data(fifo_rd_data),
+        .empty(fifo_empty),
+        .underflow(fifo_underflow),
+        .count(fifo_count)
+    );
+
+    always @(posedge aclk or negedge aresetn) begin
+        if (!aresetn) begin
+            accepted_packets <= 32'd0;
+            dropped_packets <= 32'd0;
+            overflow_events <= 32'd0;
+        end else begin
+            if (wr_en) begin
+                accepted_packets <= accepted_packets + 32'd1;
+            end
+            if (fabric_valid && !fabric_ready) begin
+                dropped_packets <= dropped_packets + 32'd1;
+            end
+            if (fifo_overflow) begin
+                overflow_events <= overflow_events + 32'd1;
+            end
+            if (fifo_underflow) begin
+                overflow_events <= overflow_events + 32'd1;
+            end
+        end
+    end
+endmodule
+@@ENDTEMPLATE
+
+@@TEMPLATE:hardware/fpga/tb_k_axi_bidirectional.v
+`timescale 1ns/1ps
+
+module tb_k_axi_bidirectional;
+    reg aclk = 1'b0;
+    reg aresetn = 1'b0;
+    always #5 aclk = ~aclk;
+
+    reg fabric_valid;
+    wire fabric_ready;
+    reg [7:0] kind;
+    reg [7:0] status;
+    reg [7:0] op_kind;
+    reg [7:0] flags;
+    reg [31:0] tx_seq;
+    reg [31:0] fidelity_inc;
+    reg [31:0] prov_depth_inc;
+    reg [31:0] formal_cov_inc;
+    reg [63:0] epi_log_q32_32;
+    reg [255:0] digest;
+    reg [63:0] timestamp_cycles;
+
+    wire ret_valid;
+    reg ret_ready;
+    wire [543:0] ret_data;
+
+    wire [31:0] accepted_packets;
+    wire [31:0] dropped_packets;
+    wire [31:0] overflow_events;
+
+    integer failures;
+    integer drained;
+    reg [31:0] first_seq;
+
+    k_axi_return_mux #(
+        .PACKET_WIDTH(544),
+        .FIFO_DEPTH(4),
+        .FIFO_ADDR_BITS(2)
+    ) dut (
+        .aclk(aclk),
+        .aresetn(aresetn),
+        .fabric_valid(fabric_valid),
+        .fabric_ready(fabric_ready),
+        .kind(kind),
+        .status(status),
+        .op_kind(op_kind),
+        .flags(flags),
+        .tx_seq(tx_seq),
+        .fidelity_inc(fidelity_inc),
+        .prov_depth_inc(prov_depth_inc),
+        .formal_cov_inc(formal_cov_inc),
+        .epi_log_q32_32(epi_log_q32_32),
+        .digest(digest),
+        .timestamp_cycles(timestamp_cycles),
+        .ret_valid(ret_valid),
+        .ret_ready(ret_ready),
+        .ret_data(ret_data),
+        .accepted_packets(accepted_packets),
+        .dropped_packets(dropped_packets),
+        .overflow_events(overflow_events)
+    );
+
+    task send_packet(input [31:0] seq, input [7:0] op);
+    begin
+        @(posedge aclk);
+        fabric_valid <= 1'b1;
+        kind <= 8'hA1;
+        status <= 8'h01;
+        op_kind <= op;
+        flags <= 8'h5A;
+        tx_seq <= seq;
+        fidelity_inc <= 32'd1;
+        prov_depth_inc <= 32'd1;
+        formal_cov_inc <= 32'd1;
+        epi_log_q32_32 <= {32'd0, seq};
+        digest <= {224'd0, seq};
+        timestamp_cycles <= 64'h1000 + seq;
+
+        @(posedge aclk);
+        fabric_valid <= 1'b0;
+    end
+    endtask
+
+    initial begin
+        failures = 0;
+        drained = 0;
+        first_seq = 32'd0;
+        fabric_valid = 1'b0;
+        kind = 8'd0;
+        status = 8'd0;
+        op_kind = 8'd0;
+        flags = 8'd0;
+        tx_seq = 32'd0;
+        fidelity_inc = 32'd0;
+        prov_depth_inc = 32'd0;
+        formal_cov_inc = 32'd0;
+        epi_log_q32_32 = 64'd0;
+        digest = 256'd0;
+        timestamp_cycles = 64'd0;
+        ret_ready = 1'b0;
+
+        $dumpfile("artifacts/fpga/waveforms/tb_k_axi_bidirectional.vcd");
+        $dumpvars(0, tb_k_axi_bidirectional);
+
+        repeat (4) @(posedge aclk);
+        aresetn = 1'b1;
+        repeat (2) @(posedge aclk);
+
+        // Fill FIFO and force one overflow/drop packet.
+        send_packet(32'd1, 8'h11);
+        send_packet(32'd2, 8'h12);
+        send_packet(32'd3, 8'h13);
+        send_packet(32'd4, 8'h14);
+        send_packet(32'd5, 8'h15);
+
+        repeat (2) @(posedge aclk);
+        if (accepted_packets !== 32'd4) begin
+            $display("ASSERT FAIL: accepted_packets expected 4 got %0d", accepted_packets);
+            failures = failures + 1;
+        end
+        if (dropped_packets !== 32'd1) begin
+            $display("ASSERT FAIL: dropped_packets expected 1 got %0d", dropped_packets);
+            failures = failures + 1;
+        end
+
+        // Drain queue.
+        ret_ready = 1'b1;
+        while (drained < 4) begin
+            @(posedge aclk);
+            if (ret_valid && ret_ready) begin
+                if (drained == 0) begin
+                    first_seq = ret_data[63:32];
+                end
+                drained = drained + 1;
+            end
+        end
+
+        if (first_seq !== 32'd1) begin
+            $display("ASSERT FAIL: first packet tx_seq expected 1 got %0d", first_seq);
+            failures = failures + 1;
+        end
+        if (overflow_events == 0) begin
+            $display("ASSERT FAIL: overflow_events should be > 0");
+            failures = failures + 1;
+        end
+
+        $display(
+            "OMEGA_COUNTERS kaxi_return_seen=%0d kaxi_return_dropped=%0d kaxi_return_overflow=%0d",
+            accepted_packets,
+            dropped_packets,
+            overflow_events
+        );
+
+        if (failures > 0) begin
+            $display("FAIL tb_k_axi_bidirectional cases=%0d", failures);
+            $finish(1);
+        end
+
+        $display("PASS tb_k_axi_bidirectional");
+        $finish(0);
+    end
+endmodule
+@@ENDTEMPLATE
+
+@@TEMPLATE:hardware/fpga/synth_k_axi_return.ys
+read_verilog hardware/fpga/k_axi_return_fifo.v
+read_verilog hardware/fpga/k_axi_return_mux.v
+hierarchy -check -top k_axi_return_mux
+proc; opt; fsm; opt; memory; opt
+stat
+write_json artifacts/fpga/k_axi_return.netlist.json
+@@ENDTEMPLATE
+
+@@TEMPLATE:self-hosted/compiler/codegen/hardware/kaxi_publish_adapters.sio
+// GENERATED_FROM_STDLIB: stdlib/hardware/kaxi.sio
+// GENERATED_BY: self-hosted/compiler/codegen/hardware/kaxi_emitter.sio
+// Pure Sounio hardware_publish adapters (native keyword contract shim).
+
+let HARDWARE_PUBLISH_NATIVE_KEYWORD = "hardware_publish"
+let KAXI_OP_PASS: i64 = 0
+let KAXI_OP_ADD: i64 = 1
+let KAXI_OP_MUL: i64 = 2
+let KAXI_OP_DIV: i64 = 3
+let KAXI_OP_FMA: i64 = 4
+let KAXI_OP_PROP_VAR: i64 = 5
+
+fn hardware_publish_is_supported_op(op_kind: i64) -> bool {
+    op_kind == KAXI_OP_ADD ||
+    op_kind == KAXI_OP_MUL ||
+    op_kind == KAXI_OP_DIV ||
+    op_kind == KAXI_OP_FMA ||
+    op_kind == KAXI_OP_PROP_VAR
+}
+
+fn hardware_publish_pack_flags(op_kind: i64) -> i64 {
+    // Native keyword contract: every publish contributes one success delta,
+    // no failure delta, and default degradation alpha_q8 = 16.
+    let success = if op_kind == KAXI_OP_PASS { 0 as i64 } else { 1 as i64 }
+    let failure = 0 as i64
+    let alpha_q8 = 16 as i64
+    kaxi_flags_pack(op_kind, success, failure, alpha_q8)
+}
+
+fn hardware_publish_preview(value_bits: i64, variance_bits: i64, op_kind: i64) -> string with Alloc {
+    let flags = hardware_publish_pack_flags(op_kind)
+    kaxi_replay_entry_summary(value_bits, variance_bits, flags)
+}
+
+fn hardware_publish_counter_step(
+    fidelity_total: i64,
+    prov_total: i64,
+    formal_total: i64,
+    op_kind: i64
+) -> (i64, i64, i64) {
+    let flags = hardware_publish_pack_flags(op_kind)
+    kaxi_hw_counter_step(fidelity_total, prov_total, formal_total, flags)
+}
+
+fn hardware_publish_self_check() -> bool with Alloc {
+    let flags = hardware_publish_pack_flags(KAXI_OP_FMA)
+    let summary = hardware_publish_preview(42, 7, KAXI_OP_FMA)
+    let (fidelity_total, prov_total, formal_total) =
+        hardware_publish_counter_step(0, 0, 0, KAXI_OP_FMA)
+    let prop_flags = hardware_publish_pack_flags(KAXI_OP_PROP_VAR)
+    hardware_publish_is_supported_op(KAXI_OP_FMA) &&
+    hardware_publish_is_supported_op(KAXI_OP_PROP_VAR) &&
+    !hardware_publish_is_supported_op(9) &&
+    kaxi_flags_unpack_op_kind(flags) == KAXI_OP_FMA &&
+    kaxi_flags_unpack_success_inc(flags) == 1 &&
+    kaxi_flags_unpack_failure_inc(flags) == 0 &&
+    kaxi_flags_unpack_alpha_q8(flags) == 16 &&
+    kaxi_flags_is_valid(prop_flags) &&
+    kaxi_replay_is_epistemic(prop_flags) &&
+    fidelity_total == 1 &&
+    prov_total == 1 &&
+    formal_total == 1 &&
+    str_len(summary) > 0
+}
+@@ENDTEMPLATE
+*/
+
+let KAXI_SPEC_SCHEMA = "sounio.hardware.kaxi.v1"
+let KAXI_NAME = "Knowledge AXI"
+let KAXI_BUS = "AXI4Stream + EpistemicSideband"
+let KAXI_PAYLOAD = "Knowledge<f64>"
+let KAXI_RING_BUFFER_SIZE: i64 = 64
+let KAXI_PUBLISH_INTRINSIC = "__knowledge_kaxi_publish"
+let KAXI_NATIVE_PUBLISH_KEYWORD = "hardware_publish"
+let KAXI_REQUIRED_OPERATIONS = "fma,add,mul,div,prop_var"
+let EPISTEMIC_POWER_OUTPUT = "live_score:Q32.32"
+
+fn kaxi_spec_ping() -> i32 {
+    return 0 as i32
+}
