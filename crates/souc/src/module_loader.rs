@@ -345,21 +345,7 @@ fn is_selfhost_dir_excluded(name: &str, strict: bool) -> bool {
     if matches!(name, "hypercomplex" | "linker" | "bench") {
         return true;
     }
-
-    // Seed build profile: keep the self-hosted root stable by excluding
-    // currently non-essential experimental backends.
-    // Note: `compiler/` can be re-included by omitting it from
-    // SOUNIO_SELFHOST_STRICT_EXCLUDE_DIRS or by setting
-    // SOUNIO_SELFHOST_STRICT_INCLUDE_COMPILER=1.
-    let include_compiler = matches!(
-        std::env::var("SOUNIO_SELFHOST_STRICT_INCLUDE_COMPILER")
-            .ok()
-            .as_deref(),
-        Some("1" | "true" | "TRUE" | "yes" | "YES")
-    );
-    strict
-        && ((matches!(name, "gpu" | "llvm") || (!include_compiler && name == "compiler"))
-            || strict_profile_list_contains("SOUNIO_SELFHOST_STRICT_EXCLUDE_DIRS", name))
+    strict && strict_profile_list_contains("SOUNIO_SELFHOST_STRICT_EXCLUDE_DIRS", name)
 }
 
 fn is_selfhost_root_file_excluded(name: &str, strict: bool) -> bool {
@@ -448,7 +434,6 @@ fn load_directory_ast_with_options(dir: &StdPath, options: &ProgramLoadOptions) 
 
     let strict_selfhost_module_gating =
         is_selfhost_root && selfhost_strict_module_gating_enabled_with_options(options);
-    let selfhost_bootstrap_stubs_enabled = is_selfhost_root && loaded_from_manifest;
 
     if !loaded_from_manifest {
         // Sort: subdirectories before parent (deeper first), alphabetical within
@@ -495,165 +480,8 @@ fn load_directory_ast_with_options(dir: &StdPath, options: &ProgramLoadOptions) 
         filter_selfhost_duplicate_items(&mut all_items);
     }
 
-    // Self-hosted suite currently references `run_native_tests()` from the aggregated
-    // runner, but we intentionally skip the experimental native subtree when compiling
-    // `self-hosted/` in flat-directory mode. Provide a tiny stub so the suite can
-    // stay green while native self-hosting is still in progress.
-    if is_selfhost_root
-        && !all_items.iter().any(|item| match item {
-            Item::Function(def) => def.name == "run_native_tests",
-            _ => false,
-        })
-    {
-        let stub = "fn run_native_tests() -> i32 { 0 }\n";
-        let tokens =
-            lexer::lex(stub).map_err(|e| miette::miette!("Lexer error in native stub: {}", e))?;
-        let (mut ast, next_id) = parser::parse_with_id_start(&tokens, stub, next_node_id)
-            .map_err(|e| miette::miette!("Parse error in native stub: {}", e))?;
-        next_node_id = next_id;
-        all_items.append(&mut ast.items);
-        all_node_spans.extend(ast.node_spans);
-    }
-
-    if (strict_selfhost_module_gating || selfhost_bootstrap_stubs_enabled)
-        && !all_items.iter().any(|item| match item {
-            Item::Function(def) => def.name == "run_all_tests",
-            _ => false,
-        })
-    {
-        let stub = "fn run_all_tests() -> i32 { 0 }\n";
-        let tokens =
-            lexer::lex(stub).map_err(|e| miette::miette!("Lexer error in run_all_tests stub: {}", e))?;
-        let (mut ast, next_id) = parser::parse_with_id_start(&tokens, stub, next_node_id)
-            .map_err(|e| miette::miette!("Parse error in run_all_tests stub: {}", e))?;
-        next_node_id = next_id;
-        all_items.append(&mut ast.items);
-        all_node_spans.extend(ast.node_spans);
-    }
-
-    if (strict_selfhost_module_gating || selfhost_bootstrap_stubs_enabled)
-        && !all_items.iter().any(|item| match item {
-            Item::Function(def) => def.name == "run_gpu_ptx_tests",
-            _ => false,
-        })
-    {
-        let stub = "fn run_gpu_ptx_tests() -> i32 { 0 }\n";
-        let tokens =
-            lexer::lex(stub).map_err(|e| miette::miette!("Lexer error in gpu_ptx stub: {}", e))?;
-        let (mut ast, next_id) = parser::parse_with_id_start(&tokens, stub, next_node_id)
-            .map_err(|e| miette::miette!("Parse error in gpu_ptx stub: {}", e))?;
-        next_node_id = next_id;
-        all_items.append(&mut ast.items);
-        all_node_spans.extend(ast.node_spans);
-    }
-
-    if (strict_selfhost_module_gating || selfhost_bootstrap_stubs_enabled)
-        && !all_items.iter().any(|item| match item {
-            Item::Function(def) => def.name == "run_gpu_cuda_runtime_tests",
-            _ => false,
-        })
-    {
-        let stub = "fn run_gpu_cuda_runtime_tests() -> i32 { 0 }\n";
-        let tokens = lexer::lex(stub)
-            .map_err(|e| miette::miette!("Lexer error in gpu_cuda_runtime stub: {}", e))?;
-        let (mut ast, next_id) = parser::parse_with_id_start(&tokens, stub, next_node_id)
-            .map_err(|e| miette::miette!("Parse error in gpu_cuda_runtime stub: {}", e))?;
-        next_node_id = next_id;
-        all_items.append(&mut ast.items);
-        all_node_spans.extend(ast.node_spans);
-    }
-
-    if (strict_selfhost_module_gating || selfhost_bootstrap_stubs_enabled)
-        && !all_items.iter().any(|item| match item {
-            Item::Function(def) => def.name == "run_parse_all_full_tests",
-            _ => false,
-        })
-    {
-        let stub = "fn run_parse_all_full_tests() -> i32 { 0 }\n";
-        let tokens = lexer::lex(stub)
-            .map_err(|e| miette::miette!("Lexer error in run_parse_all_full_tests stub: {}", e))?;
-        let (mut ast, next_id) = parser::parse_with_id_start(&tokens, stub, next_node_id)
-            .map_err(|e| miette::miette!("Parse error in run_parse_all_full_tests stub: {}", e))?;
-        next_node_id = next_id;
-        all_items.append(&mut ast.items);
-        all_node_spans.extend(ast.node_spans);
-    }
-
-    if (strict_selfhost_module_gating || selfhost_bootstrap_stubs_enabled)
-        && !all_items.iter().any(|item| match item {
-            Item::Function(def) => def.name == "run_parse_all_full_shard_tests",
-            _ => false,
-        })
-    {
-        let stub = "fn run_parse_all_full_shard_tests(shard_index: i64, shard_count: i64, shard_mode: i64) -> i32 { 0 }\n";
-        let tokens = lexer::lex(stub).map_err(|e| {
-            miette::miette!("Lexer error in run_parse_all_full_shard_tests stub: {}", e)
-        })?;
-        let (mut ast, next_id) = parser::parse_with_id_start(&tokens, stub, next_node_id)
-            .map_err(|e| {
-                miette::miette!("Parse error in run_parse_all_full_shard_tests stub: {}", e)
-            })?;
-        next_node_id = next_id;
-        all_items.append(&mut ast.items);
-        all_node_spans.extend(ast.node_spans);
-    }
-
-    if (strict_selfhost_module_gating || selfhost_bootstrap_stubs_enabled)
-        && !all_items.iter().any(|item| match item {
-            Item::Function(def) => def.name == "run_parse_all_full_report",
-            _ => false,
-        })
-    {
-        let stub = "fn run_parse_all_full_report(shard_count: i64, shard_mode: i64) -> i32 { 0 }\n";
-        let tokens = lexer::lex(stub)
-            .map_err(|e| miette::miette!("Lexer error in run_parse_all_full_report stub: {}", e))?;
-        let (mut ast, next_id) = parser::parse_with_id_start(&tokens, stub, next_node_id)
-            .map_err(|e| miette::miette!("Parse error in run_parse_all_full_report stub: {}", e))?;
-        next_node_id = next_id;
-        all_items.append(&mut ast.items);
-        all_node_spans.extend(ast.node_spans);
-    }
-
-    if (strict_selfhost_module_gating || selfhost_bootstrap_stubs_enabled)
-        && !all_items.iter().any(|item| match item {
-            Item::Function(def) => def.name == "compile_multimodule_program",
-            _ => false,
-        })
-    {
-        let stub = r#"
-struct CompileResult {
-    ok: bool,
-    bytecode: [i8; 131072],
-    bytecode_len: i64,
-    error_msg: string,
-}
-
-fn compile_result_error(msg: string) -> CompileResult {
-    CompileResult {
-        ok: false,
-        bytecode: [0; 131072],
-        bytecode_len: 0,
-        error_msg: msg,
-    }
-}
-
-fn compile_multimodule_program(main_path: string) -> CompileResult {
-    compile_result_error("multimodule disabled in strict bootstrap profile")
-}
-
-fn compile_multimodule_native(main_path: string, output_path: string) -> i32 {
-    1
-}
-"#;
-        let tokens = lexer::lex(stub)
-            .map_err(|e| miette::miette!("Lexer error in multimodule strict stubs: {}", e))?;
-        let (mut ast, next_id) = parser::parse_with_id_start(&tokens, stub, next_node_id)
-            .map_err(|e| {
-                miette::miette!("Parse error in multimodule strict stubs: {}", e)
-            })?;
-        next_node_id = next_id;
-        all_items.append(&mut ast.items);
-        all_node_spans.extend(ast.node_spans);
+    if strict_selfhost_module_gating {
+        module_loader_debug!("[load_directory_ast] strict self-host gating enabled (no stub injection)");
     }
 
     // Resolve external imports: find `use` items that reference modules outside

@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, Once, OnceLock};
+use std::sync::{Mutex, OnceLock};
 
 const BOOTSTRAP_DRIVER_MODULE: &str = "bootstrap::driver";
 const REQUIRED_DRIVER_ENTRYPOINTS: [&str; 3] = ["compile_file", "compile_source", "run_pipeline"];
@@ -23,8 +23,6 @@ const BOOTSTRAP_SEED_VERSION: u16 = 1;
 const BOOTSTRAP_SEED_HEADER_LEN: usize = 20;
 const BOOTSTRAP_SEED_SIGNATURE_MARKER: &str = "SOUNIO-SEED-SIG-V1";
 const DEFAULT_BOOTSTRAP_SEED_TRUSTED_KEY: &str = "sounio-dev";
-const DRIVER_HARNESS_STACK_BYTES_DEFAULT: usize = 64 * 1024 * 1024;
-const DRIVER_HARNESS_STACK_BYTES_MIN: usize = 8 * 1024 * 1024;
 
 fn env_flag_enabled(name: &str) -> bool {
     std::env::var(name)
@@ -45,44 +43,46 @@ fn env_flag_or_default(name: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
-fn rust_ghost_mode_enabled() -> bool {
-    env_flag_enabled("SOUNIO_RUST_GHOST")
-}
-
-fn emit_rust_ghost_warning(path_kind: &str) {
-    if !rust_ghost_mode_enabled() {
-        return;
-    }
-    static RUST_GHOST_WARNING_ONCE: Once = Once::new();
-    RUST_GHOST_WARNING_ONCE.call_once(|| {
-        eprintln!(
-            "SELFHOST=legacy-ghost schema=v1 event=transition_warning status=enabled gate=SOUNIO_RUST_GHOST path={}",
-            path_kind
-        );
-        eprintln!(
-            "\x1b[1;31mGHOST MODE — Legacy bridge path is end-of-life and will vanish in 0.x.y+1 ({})\x1b[0m",
-            path_kind
-        );
-    });
-}
-
 fn bootstrap_seed_enforced() -> bool {
     env_flag_or_default("SOUNIO_BOOTSTRAP_SEED_ENFORCE", !cfg!(debug_assertions))
 }
 
-fn selfhost_transition_mode_enabled() -> bool {
-    rust_ghost_mode_enabled()
-        && std::env::var("SOUNIO_SELFHOST_PIPELINE")
-            .map(|value| value.trim().eq_ignore_ascii_case("rust"))
-            .unwrap_or(false)
-}
-
 fn bootstrap_seed_enforced_for_selfhost_root() -> bool {
-    bootstrap_seed_enforced() || selfhost_transition_mode_enabled()
+    bootstrap_seed_enforced()
 }
 
 pub fn selfhost_root_seed_enforced() -> bool {
     bootstrap_seed_enforced_for_selfhost_root()
+}
+
+pub fn verify_selfhost_bootstrap_seed_policy() -> LoadResult<()> {
+    if bootstrap_seed_enforced_for_selfhost_root() {
+        SounioCompiler::load_bootstrap_seed_bytecode().map(|_| ())
+    } else {
+        Err(CompilerLoaderError::CompileError(
+            "SELFHOST_BOOTSTRAP_ARTIFACTS_MISSING guidance='Run souc bootstrap init --bundle <dir> --state <dir>'".to_string(),
+        ))
+    }
+}
+
+const REMOVED_SELFHOST_ENV_KNOBS: &[&str] = &[
+    "SOUNIO_SELFHOST_PIPELINE",
+    "SOUNIO_RUST_GHOST",
+    "SOUNIO_SELFHOST_NO_RUST_FALLBACK",
+    "SOUNIO_SELFHOST_NO_RUST_HARNESS",
+    "SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT",
+];
+
+pub fn verify_removed_legacy_env_contracts() -> LoadResult<()> {
+    for knob in REMOVED_SELFHOST_ENV_KNOBS {
+        if let Ok(value) = std::env::var(knob) {
+            return Err(CompilerLoaderError::CompileError(format!(
+                "LEGACY_SELFHOST_ENV_REMOVED var={} value={} guidance='Use souc bootstrap init --bundle <dir> --state <dir>, souc bootstrap verify --bundle <dir>, and souc bootstrap cycle --state <dir>'",
+                knob, value
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn bootstrap_seed_signature_required() -> bool {
@@ -214,43 +214,6 @@ fn parse_seed_signature_fields(
     Ok(SeedSignatureFields { key, sha256 })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SelfhostCompilePipeline {
-    /// Prefer the Sounio-side driver boundary and execute orchestration via VM.
-    DriverPreferred,
-    /// Explicitly use the Rust bridge compile path (dev/oracle fallback only).
-    RustBridge,
-}
-
-impl SelfhostCompilePipeline {
-    fn from_env() -> Self {
-        let raw = std::env::var("SOUNIO_SELFHOST_PIPELINE")
-            .unwrap_or_else(|_| "driver".to_string())
-            .to_lowercase();
-        match raw.as_str() {
-            "driver" => Self::DriverPreferred,
-            "rust" => {
-                if rust_ghost_mode_enabled() {
-                    emit_rust_ghost_warning("SOUNIO_SELFHOST_PIPELINE=rust");
-                    Self::RustBridge
-                } else {
-                    tracing::warn!(
-                        "SOUNIO_SELFHOST_PIPELINE=rust is deprecated; using driver pipeline instead (set SOUNIO_RUST_GHOST=1 for temporary legacy-bridge access)"
-                    );
-                    Self::DriverPreferred
-                }
-            }
-            other => {
-                tracing::warn!(
-                    "Unknown SOUNIO_SELFHOST_PIPELINE='{}', defaulting to driver",
-                    other
-                );
-                Self::DriverPreferred
-            }
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct DriverHarnessCacheKey {
     entrypoint: DriverEntrypoint,
@@ -311,27 +274,6 @@ fn driver_harness_cache_write(
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SelfhostRustOracleMode {
-    Disabled,
-    Parity,
-}
-
-impl SelfhostRustOracleMode {
-    fn from_env() -> Self {
-        if env_flag_enabled("SOUNIO_SELFHOST_PARITY") || env_flag_enabled("SOUNIO_SELFHOST_ORACLE")
-        {
-            Self::Parity
-        } else {
-            Self::Disabled
-        }
-    }
-
-    fn is_parity(self) -> bool {
-        matches!(self, Self::Parity)
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum DriverEntrypoint {
     CompileSource,
@@ -345,28 +287,6 @@ impl DriverEntrypoint {
             Self::CompileFile => "bootstrap::driver::compile_file",
         }
     }
-}
-
-#[derive(Debug)]
-struct LexerBoundary {
-    source_len: usize,
-    tokens: Vec<crate::lexer::Token>,
-}
-
-#[derive(Debug)]
-struct ParserBoundary {
-    token_count: usize,
-    ast: crate::ast::Ast,
-}
-
-#[derive(Debug)]
-struct CheckerBoundary {
-    hir: crate::hir::Hir,
-}
-
-#[derive(Debug)]
-struct CodegenBoundary {
-    bytecode: Vec<Bytecode>,
 }
 
 /// Result type for compiler loader operations
@@ -691,10 +611,7 @@ impl SounioCompiler {
     /// 1. Resolve and validate the Sounio-side driver interface
     ///    (`bootstrap::driver`) entrypoints.
     /// 2. Execute a VM harness that dispatches into the driver boundary.
-    /// 3. Lower user source to bytecode while preserving current semantics.
-    ///
-    /// To explicitly force the legacy bridge path, set
-    /// `SOUNIO_SELFHOST_PIPELINE=rust`.
+    /// 3. Require a valid driver compile artifact and fail closed otherwise.
     ///
     /// # Arguments
     /// * `source` - The Sounio source code to compile
@@ -703,31 +620,12 @@ impl SounioCompiler {
     /// Returns `CompilerLoaderError::CompileError` if compilation fails
     pub fn compile(&self, source: &str) -> LoadResult<Vec<Bytecode>> {
         tracing::info!("Compiling {} bytes of Sounio source", source.len());
-        match SelfhostCompilePipeline::from_env() {
-            SelfhostCompilePipeline::DriverPreferred => self.compile_via_driver_source(source),
-            SelfhostCompilePipeline::RustBridge => self.compile_via_rust_bridge(source),
-        }
+        verify_removed_legacy_env_contracts()?;
+        self.compile_via_driver_source(source)
     }
 
     fn driver_orchestration_strict() -> bool {
-        env_flag_enabled("SOUNIO_SELFHOST_DRIVER_STRICT")
-            || env_flag_enabled("SOUNIO_SELFHOST_STRICT")
-    }
-
-    fn stage_boundary_fallback_disallowed(strict: bool) -> bool {
-        strict || env_flag_enabled("SOUNIO_SELFHOST_NO_RUST_FALLBACK")
-    }
-
-    fn rust_oracle_mode() -> SelfhostRustOracleMode {
-        SelfhostRustOracleMode::from_env()
-    }
-
-    fn driver_output_required(fallback_disallow: bool) -> bool {
-        fallback_disallow
-            || env_flag_or_default(
-                "SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT",
-                !cfg!(debug_assertions),
-            )
+        true
     }
 
     fn bool_bit(value: bool) -> u8 {
@@ -741,13 +639,12 @@ impl SounioCompiler {
     fn emit_driver_compile_start_marker(
         entrypoint: DriverEntrypoint,
         strict: bool,
-        oracle_mode: SelfhostRustOracleMode,
     ) {
         eprintln!(
             "SELFHOST=driver-first schema=v1 event=compile_start entrypoint={} strict={} parity={}",
             entrypoint.qualified_name(),
             Self::bool_bit(strict),
-            Self::bool_bit(oracle_mode.is_parity())
+            0
         );
     }
 
@@ -805,94 +702,45 @@ impl SounioCompiler {
     fn compile_via_driver_source(&self, source: &str) -> LoadResult<Vec<Bytecode>> {
         let entrypoint = DriverEntrypoint::CompileSource;
         let strict = Self::driver_orchestration_strict();
-        let fallback_disallow = Self::stage_boundary_fallback_disallowed(strict);
-        let oracle_mode = Self::rust_oracle_mode();
-        // When fallback is disallowed, the driver must produce a valid artifact.
-        let require_driver_output = Self::driver_output_required(fallback_disallow);
-        Self::emit_driver_compile_start_marker(entrypoint, strict, oracle_mode);
+        Self::emit_driver_compile_start_marker(entrypoint, strict);
 
-        let mut driver_output: Option<Vec<Bytecode>> = None;
-        match self.run_driver_orchestration(entrypoint, Some(source)) {
+        let vm_result = match self.run_driver_orchestration(entrypoint, Some(source)) {
             Ok(vm_result) => {
                 Self::emit_driver_orchestration_marker(entrypoint, strict, "ok", None);
-                tracing::debug!(
-                    "Driver VM orchestration completed via {} (result={}); lowering through explicit stage boundaries",
-                    entrypoint.qualified_name(),
-                    vm_result
-                );
-                if !oracle_mode.is_parity() {
-                    match Self::maybe_decode_driver_artifact(&vm_result) {
-                        Ok(Some(bytecode)) => {
-                            eprintln!(
-                                "SELFHOST=driver-first schema=v1 event=driver_output entrypoint={} status=ok bytecode_len={}",
-                                entrypoint.qualified_name(),
-                                bytecode.len()
-                            );
-                            driver_output = Some(bytecode);
-                        }
-                        Ok(None) => {}
-                        Err(err) => {
-                            tracing::debug!(
-                                "Driver artifact decode failed for source (len={}): {} (falling back to stage boundaries)",
-                                source.len(),
-                                err
-                            );
-                        }
-                    }
-                }
+                vm_result
             }
             Err(err) => {
                 let err_kind = err.kind_code();
-                if fallback_disallow {
-                    Self::emit_driver_orchestration_marker(
-                        entrypoint,
-                        strict,
-                        "strict_error",
-                        Some(err_kind),
-                    );
-                    return Err(Self::strict_driver_failure(entrypoint, err));
-                }
-
                 Self::emit_driver_orchestration_marker(
                     entrypoint,
                     strict,
-                    "fallback",
+                    "strict_error",
                     Some(err_kind),
                 );
-                tracing::debug!(
-                    "Driver VM orchestration via {} failed ({}); continuing via stage-boundary handoff",
-                    entrypoint.qualified_name(),
-                    err
-                );
+                return Err(Self::strict_driver_failure(entrypoint, err));
             }
-        }
+        };
 
-        if let Some(driver_bytecode) = driver_output {
-            Self::emit_stage_boundary_marker(entrypoint, driver_bytecode.len());
-            return Ok(driver_bytecode);
-        }
-
-        if require_driver_output {
-            return Err(CompilerLoaderError::CompileError(format!(
-                "SELFHOST_STRICT_DRIVER_OUTPUT_REQUIRED entrypoint={} source_len={}",
-                entrypoint.qualified_name(),
-                source.len()
-            )));
-        }
-
-        let boundary_bytecode = self.compile_via_stage_boundaries_source(source)?;
-        Self::emit_stage_boundary_marker(entrypoint, boundary_bytecode.len());
-        self.maybe_run_rust_oracle_for_source(oracle_mode, strict, source, &boundary_bytecode)?;
-        Ok(boundary_bytecode)
+        let driver_bytecode = Self::maybe_decode_driver_artifact(&vm_result)?
+            .ok_or_else(|| {
+                CompilerLoaderError::CompileError(format!(
+                    "SELFHOST_STRICT_DRIVER_OUTPUT_REQUIRED entrypoint={} source_len={}",
+                    entrypoint.qualified_name(),
+                    source.len()
+                ))
+            })?;
+        eprintln!(
+            "SELFHOST=driver-first schema=v1 event=driver_output entrypoint={} status=ok bytecode_len={}",
+            entrypoint.qualified_name(),
+            driver_bytecode.len()
+        );
+        Self::emit_stage_boundary_marker(entrypoint, driver_bytecode.len());
+        Ok(driver_bytecode)
     }
 
     fn compile_via_driver_file(&self, path: &str) -> LoadResult<Vec<Bytecode>> {
         let entrypoint = DriverEntrypoint::CompileFile;
         let strict = Self::driver_orchestration_strict();
-        let fallback_disallow = Self::stage_boundary_fallback_disallowed(strict);
-        let oracle_mode = Self::rust_oracle_mode();
-        // When fallback is disallowed, the driver must produce a valid artifact.
-        let require_driver_output = Self::driver_output_required(fallback_disallow);
         let path = std::path::Path::new(path);
         if !path.exists() {
             return Err(CompilerLoaderError::IoError(format!(
@@ -902,160 +750,65 @@ impl SounioCompiler {
         }
         let path_str = path.to_string_lossy();
 
-        Self::emit_driver_compile_start_marker(entrypoint, strict, oracle_mode);
-
-        // The bootstrap driver is intentionally tiny and can take an unbounded amount of time
-        // if we hand it a directory-sized compilation unit (e.g. `self-hosted/`).
-        // For non-strict runs, prefer the Rust stage-boundary loader for directories and
-        // the self-hosted suite entrypoint (`self-hosted/main.sio`), but keep the
-        // compile target anchored to the entrypoint file to avoid loading every file in
-        // `self-hosted/` and introducing duplicate definitions.
-        let path_is_self_hosted_suite = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name == "main.sio")
-            && path
-                .parent()
-                .and_then(|parent| parent.file_name())
-                .and_then(|parent| parent.to_str())
-                .is_some_and(|name| name == "self-hosted");
-        let compile_target = path;
+        Self::emit_driver_compile_start_marker(entrypoint, strict);
         if env_flag_enabled("SOUNIO_SELFHOST_DEBUG_DRIVER_ORCH") {
             eprintln!(
                 "SELFHOST_DEBUG event=driver_orch step=compile_file_path path={} is_dir={} is_self_hosted_suite={} target={}",
                 path.display(),
                 path.is_dir(),
-                path_is_self_hosted_suite,
-                compile_target.display()
+                false,
+                path.display()
             );
         }
 
-        if !require_driver_output
-            && (path_is_self_hosted_suite || path.is_dir())
-            && !env_flag_enabled("SOUNIO_SELFHOST_DRIVER_ALLOW_DIR")
-        {
-            Self::emit_driver_orchestration_marker(entrypoint, strict, "skip_dir", None);
-            let compile_target_str = compile_target.to_string_lossy();
-            let boundary_bytecode = self.compile_path_via_stage_boundaries(&compile_target_str)?;
-            Self::emit_stage_boundary_marker(entrypoint, boundary_bytecode.len());
-            self.maybe_run_rust_oracle_for_path(
-                oracle_mode,
-                strict,
-                &compile_target_str,
-                &boundary_bytecode,
-            )?;
-            return Ok(boundary_bytecode);
-        }
-
-        let mut driver_output: Option<Vec<Bytecode>> = None;
-        match self.run_driver_orchestration(entrypoint, Some(path_str.as_ref())) {
+        let vm_result = match self.run_driver_orchestration(entrypoint, Some(path_str.as_ref())) {
             Ok(vm_result) => {
                 Self::emit_driver_orchestration_marker(entrypoint, strict, "ok", None);
-                tracing::debug!(
-                    "Driver VM orchestration completed via {} for '{}' (result={}); lowering through explicit stage boundaries",
-                    entrypoint.qualified_name(),
-                    path_str,
-                    vm_result
-                );
-                // If the driver returned a headered compile artifact, prefer it for tiny bootstrap programs.
-                // Skip this when Rust oracle parity is enabled: oracle compares Rust stage-boundary output.
-                if !oracle_mode.is_parity() {
-                    match Self::maybe_decode_driver_artifact(&vm_result) {
-                        Ok(Some(bytecode)) => {
-                            eprintln!(
-                                "SELFHOST=driver-first schema=v1 event=driver_output entrypoint={} status=ok bytecode_len={}",
-                                entrypoint.qualified_name(),
-                                bytecode.len()
-                            );
-                            driver_output = Some(bytecode);
-                        }
-                        Ok(None) => {}
-                        Err(err) => {
-                            tracing::debug!(
-                                "Driver artifact decode failed for '{}': {} (falling back to stage boundaries)",
-                                path_str,
-                                err
-                            );
-                        }
-                    }
-
-                    // If the driver signaled a directory bytecode cache, load it directly in the host.
-                    // This avoids copying large `.sobc` blobs through the VM value model.
-                    if driver_output.is_none() {
-                        match Self::maybe_decode_driver_dir_cache(&vm_result, path_str.as_ref()) {
-                            Ok(Some(bytecode)) => {
-                                eprintln!(
-                                    "SELFHOST=driver-first schema=v1 event=driver_output entrypoint={} status=dir_cache bytecode_len={}",
-                                    entrypoint.qualified_name(),
-                                    bytecode.len()
-                                );
-                                driver_output = Some(bytecode);
-                            }
-                            Ok(None) => {}
-                            Err(err) => {
-                                if fallback_disallow {
-                                    return Err(err);
-                                }
-                                tracing::debug!(
-                                    "Driver dir cache decode failed for '{}': {} (falling back to stage boundaries)",
-                                    path_str,
-                                    err
-                                );
-                            }
-                        }
-                    }
-                }
+                vm_result
             }
             Err(err) => {
                 let err_kind = err.kind_code();
-                if fallback_disallow {
-                    Self::emit_driver_orchestration_marker(
-                        entrypoint,
-                        strict,
-                        "strict_error",
-                        Some(err_kind),
-                    );
-                    return Err(Self::strict_driver_failure(entrypoint, err));
-                }
-
                 Self::emit_driver_orchestration_marker(
                     entrypoint,
                     strict,
-                    "fallback",
+                    "strict_error",
                     Some(err_kind),
                 );
-                tracing::debug!(
-                    "Driver VM orchestration via {} for '{}' failed ({}); continuing via stage-boundary handoff",
-                    entrypoint.qualified_name(),
-                    path_str,
-                    err
-                );
+                return Err(Self::strict_driver_failure(entrypoint, err));
             }
-        }
+        };
 
-        if let Some(driver_bytecode) = driver_output {
-            // Preserve existing telemetry contract: stage_boundary is the "bytecode produced" marker.
-            Self::emit_stage_boundary_marker(entrypoint, driver_bytecode.len());
-            return Ok(driver_bytecode);
-        }
+        let driver_output = match Self::maybe_decode_driver_artifact(&vm_result)? {
+            Some(bytecode) => {
+                eprintln!(
+                    "SELFHOST=driver-first schema=v1 event=driver_output entrypoint={} status=ok bytecode_len={}",
+                    entrypoint.qualified_name(),
+                    bytecode.len()
+                );
+                Some(bytecode)
+            }
+            None => match Self::maybe_decode_driver_dir_cache(&vm_result, path_str.as_ref())? {
+                Some(bytecode) => {
+                    eprintln!(
+                        "SELFHOST=driver-first schema=v1 event=driver_output entrypoint={} status=dir_cache bytecode_len={}",
+                        entrypoint.qualified_name(),
+                        bytecode.len()
+                    );
+                    Some(bytecode)
+                }
+                None => None,
+            },
+        };
 
-        if require_driver_output {
-            return Err(CompilerLoaderError::CompileError(format!(
+        let driver_bytecode = driver_output.ok_or_else(|| {
+            CompilerLoaderError::CompileError(format!(
                 "SELFHOST_STRICT_DRIVER_OUTPUT_REQUIRED entrypoint={} path={}",
                 entrypoint.qualified_name(),
                 path_str
-            )));
-        }
-
-        let boundary_bytecode = self.compile_path_via_stage_boundaries(path_str.as_ref())?;
-        Self::emit_stage_boundary_marker(entrypoint, boundary_bytecode.len());
-        self.maybe_run_rust_oracle_for_path(
-            oracle_mode,
-            strict,
-            path_str.as_ref(),
-            &boundary_bytecode,
-        )?;
-        Ok(boundary_bytecode)
+            ))
+        })?;
+        Self::emit_stage_boundary_marker(entrypoint, driver_bytecode.len());
+        Ok(driver_bytecode)
     }
 
     fn run_driver_orchestration(
@@ -1064,7 +817,6 @@ impl SounioCompiler {
         arg0: Option<&str>,
     ) -> LoadResult<crate::vm::Value> {
         let debug = env_flag_enabled("SOUNIO_SELFHOST_DEBUG_DRIVER_ORCH");
-        let disallow_rust_harness = env_flag_enabled("SOUNIO_SELFHOST_NO_RUST_HARNESS");
         if debug {
             eprintln!(
                 "SELFHOST_DEBUG event=driver_orch step=start entrypoint={} arg0_len={}",
@@ -1133,119 +885,18 @@ impl SounioCompiler {
                             .expect("driver harness cache lock poisoned")
                             .insert(cache_key, cached.clone());
                         cached
-                    } else if disallow_rust_harness {
+                    } else {
                         return Err(CompilerLoaderError::CompileError(format!(
-                            "SELFHOST_NO_RUST_HARNESS entrypoint={} cache_dir={}",
+                            "SELFHOST_DRIVER_HARNESS_UNAVAILABLE entrypoint={} cache_dir={}",
                             entrypoint.qualified_name(),
                             cache_dir.display()
                         )));
-                    } else {
-                        if debug {
-                            eprintln!(
-                                "SELFHOST_DEBUG event=driver_orch step=harness_disk_cache_miss entrypoint={} cache_dir={}",
-                                entrypoint.qualified_name(),
-                                cache_dir.display()
-                            );
-                        }
-                        let harness_source =
-                            Self::build_driver_harness_module(entrypoint, &driver_source);
-                        if debug {
-                            eprintln!(
-                                "SELFHOST_DEBUG event=driver_orch step=harness_source_built entrypoint={} harness_len={}",
-                                entrypoint.qualified_name(),
-                                harness_source.len()
-                            );
-                        }
-                        let compiled = self
-                            .compile_driver_harness_via_rust_bridge(
-                                entrypoint,
-                                driver_fingerprint,
-                                &harness_source,
-                            )
-                            .map_err(|e| {
-                                CompilerLoaderError::CompileError(format!(
-                                    "{} harness lowering failed: {}",
-                                    entrypoint.qualified_name(),
-                                    e
-                                ))
-                            })?;
-                        if debug {
-                            eprintln!(
-                                "SELFHOST_DEBUG event=driver_orch step=harness_compiled entrypoint={} bytecode_len={}",
-                                entrypoint.qualified_name(),
-                                compiled.len()
-                            );
-                        }
-                        driver_harness_cache()
-                            .lock()
-                            .expect("driver harness cache lock poisoned")
-                            .insert(cache_key, compiled.clone());
-
-                        if let Err(err) =
-                            driver_harness_cache_write(&cache_dir, cache_key, &compiled)
-                        {
-                            if debug {
-                                eprintln!(
-                                    "SELFHOST_DEBUG event=driver_orch step=harness_disk_cache_write_failed entrypoint={} error={}",
-                                    entrypoint.qualified_name(),
-                                    err
-                                );
-                            }
-                        } else if debug {
-                            eprintln!(
-                                "SELFHOST_DEBUG event=driver_orch step=harness_disk_cache_write_ok entrypoint={} cache_dir={}",
-                                entrypoint.qualified_name(),
-                                cache_dir.display()
-                            );
-                        }
-                        compiled
                     }
-                } else if disallow_rust_harness {
+                } else {
                     return Err(CompilerLoaderError::CompileError(format!(
-                        "SELFHOST_NO_RUST_HARNESS entrypoint={}",
+                        "SELFHOST_DRIVER_HARNESS_UNAVAILABLE entrypoint={} cache=disabled",
                         entrypoint.qualified_name(),
                     )));
-                } else {
-                    if debug {
-                        eprintln!(
-                            "SELFHOST_DEBUG event=driver_orch step=harness_cache_miss entrypoint={}",
-                            entrypoint.qualified_name()
-                        );
-                    }
-                    let harness_source =
-                        Self::build_driver_harness_module(entrypoint, &driver_source);
-                    if debug {
-                        eprintln!(
-                            "SELFHOST_DEBUG event=driver_orch step=harness_source_built entrypoint={} harness_len={}",
-                            entrypoint.qualified_name(),
-                            harness_source.len()
-                        );
-                    }
-                    let compiled = self
-                        .compile_driver_harness_via_rust_bridge(
-                            entrypoint,
-                            driver_fingerprint,
-                            &harness_source,
-                        )
-                        .map_err(|e| {
-                            CompilerLoaderError::CompileError(format!(
-                                "{} harness lowering failed: {}",
-                                entrypoint.qualified_name(),
-                                e
-                            ))
-                        })?;
-                    if debug {
-                        eprintln!(
-                            "SELFHOST_DEBUG event=driver_orch step=harness_compiled entrypoint={} bytecode_len={}",
-                            entrypoint.qualified_name(),
-                            compiled.len()
-                        );
-                    }
-                    driver_harness_cache()
-                        .lock()
-                        .expect("driver harness cache lock poisoned")
-                        .insert(cache_key, compiled.clone());
-                    compiled
                 }
             }
         };
@@ -1677,441 +1328,6 @@ fn main() -> CompileArtifact with IO, Mut, Div, Panic {
         Ok(())
     }
 
-    fn maybe_run_rust_oracle_for_source(
-        &self,
-        oracle_mode: SelfhostRustOracleMode,
-        strict: bool,
-        source: &str,
-        boundary_bytecode: &[Bytecode],
-    ) -> LoadResult<()> {
-        if !matches!(oracle_mode, SelfhostRustOracleMode::Parity) {
-            return Ok(());
-        }
-
-        match self.compile_via_rust_bridge(source) {
-            Ok(oracle_bytecode) => Self::report_rust_oracle_parity(
-                strict,
-                "source",
-                boundary_bytecode,
-                &oracle_bytecode,
-            ),
-            Err(err) => Self::handle_rust_oracle_error(strict, "source", err),
-        }
-    }
-
-    fn maybe_run_rust_oracle_for_path(
-        &self,
-        oracle_mode: SelfhostRustOracleMode,
-        strict: bool,
-        path: &str,
-        boundary_bytecode: &[Bytecode],
-    ) -> LoadResult<()> {
-        if !matches!(oracle_mode, SelfhostRustOracleMode::Parity) {
-            return Ok(());
-        }
-
-        match self.compile_path_via_rust_bridge(path) {
-            Ok(oracle_bytecode) => {
-                Self::report_rust_oracle_parity(strict, "file", boundary_bytecode, &oracle_bytecode)
-            }
-            Err(err) => Self::handle_rust_oracle_error(strict, "file", err),
-        }
-    }
-
-    fn report_rust_oracle_parity(
-        strict: bool,
-        label: &str,
-        boundary_bytecode: &[Bytecode],
-        oracle_bytecode: &[Bytecode],
-    ) -> LoadResult<()> {
-        if boundary_bytecode == oracle_bytecode {
-            eprintln!(
-                "SELFHOST=oracle backend=rust status=match label={} strict={} stage_len={} oracle_len={}",
-                label,
-                Self::bool_bit(strict),
-                boundary_bytecode.len(),
-                oracle_bytecode.len()
-            );
-            return Ok(());
-        }
-
-        eprintln!(
-            "SELFHOST=oracle backend=rust status=mismatch label={} strict={} stage_len={} oracle_len={}",
-            label,
-            Self::bool_bit(strict),
-            boundary_bytecode.len(),
-            oracle_bytecode.len()
-        );
-        let message = format!(
-            "Legacy oracle parity mismatch for {}: stage-boundary produced {} instruction(s), oracle produced {} instruction(s)",
-            label,
-            boundary_bytecode.len(),
-            oracle_bytecode.len()
-        );
-        if strict {
-            Err(CompilerLoaderError::CompileError(message))
-        } else {
-            tracing::warn!("{}", message);
-            Ok(())
-        }
-    }
-
-    fn handle_rust_oracle_error(
-        strict: bool,
-        label: &str,
-        err: CompilerLoaderError,
-    ) -> LoadResult<()> {
-        eprintln!(
-            "SELFHOST=oracle backend=rust status=error label={} strict={} error_kind={}",
-            label,
-            Self::bool_bit(strict),
-            err.kind_code()
-        );
-        let message = format!("Legacy oracle parity check failed for {}: {}", label, err);
-        if strict {
-            Err(CompilerLoaderError::CompileError(message))
-        } else {
-            tracing::warn!("{}", message);
-            Ok(())
-        }
-    }
-
-    fn compile_via_stage_boundaries_source(&self, source: &str) -> LoadResult<Vec<Bytecode>> {
-        tracing::debug!("Compiling source through stage-boundary loader");
-        let lexed = self.run_lexer_boundary(source)?;
-        let parsed = self.run_parser_boundary_from_lexer(source, lexed)?;
-        let checked = self.run_checker_boundary(parsed)?;
-        let generated = self.run_codegen_boundary(checked)?;
-
-        tracing::info!(
-            "Stage-boundary source compilation complete, generated {} bytecode instructions",
-            generated.bytecode.len()
-        );
-        Ok(generated.bytecode)
-    }
-
-    fn compile_path_via_stage_boundaries(&self, path: &str) -> LoadResult<Vec<Bytecode>> {
-        tracing::debug!("Compiling path through stage-boundary loader: {}", path);
-        let parsed = self.run_parser_boundary_for_path(path)?;
-        let checked = self.run_checker_boundary(parsed)?;
-        let generated = self.run_codegen_boundary(checked)?;
-
-        tracing::info!(
-            "Stage-boundary path compilation complete, generated {} bytecode instructions",
-            generated.bytecode.len()
-        );
-        self.maybe_write_dir_bytecode_cache(path, &generated.bytecode);
-        Ok(generated.bytecode)
-    }
-
-    fn maybe_write_dir_bytecode_cache(&self, path: &str, bytecode: &[Bytecode]) {
-        if !env_flag_enabled("SOUNIO_SELFHOST_WRITE_DIR_CACHE") {
-            return;
-        }
-        let path = Path::new(path);
-        if !path.is_dir() {
-            return;
-        }
-
-        let cache_path = path.join(DIR_BYTECODE_CACHE_FILENAME);
-        let bytes = match crate::vm::serialize::serialize(bytecode) {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                tracing::debug!(
-                    "Selfhost dir cache: serialize failed for {}: {}",
-                    cache_path.display(),
-                    err
-                );
-                return;
-            }
-        };
-
-        if bytes.len() > DIR_BYTECODE_CACHE_MAX_BYTES {
-            tracing::debug!(
-                "Selfhost dir cache: skip write for {} ({} bytes > max {})",
-                cache_path.display(),
-                bytes.len(),
-                DIR_BYTECODE_CACHE_MAX_BYTES
-            );
-            return;
-        }
-
-        if let Err(err) = std::fs::write(&cache_path, &bytes) {
-            tracing::debug!(
-                "Selfhost dir cache: write failed for {}: {}",
-                cache_path.display(),
-                err
-            );
-        } else {
-            tracing::debug!(
-                "Selfhost dir cache: wrote {} bytes to {}",
-                bytes.len(),
-                cache_path.display()
-            );
-        }
-    }
-
-    fn run_lexer_boundary(&self, source: &str) -> LoadResult<LexerBoundary> {
-        let tokens = lexer::lex(source)
-            .map_err(|e| CompilerLoaderError::ParseError(format!("Lexer error: {}", e)))?;
-        tracing::debug!(
-            "Lexer boundary: {} bytes -> {} tokens",
-            source.len(),
-            tokens.len()
-        );
-        Ok(LexerBoundary {
-            source_len: source.len(),
-            tokens,
-        })
-    }
-
-    fn run_parser_boundary_from_lexer(
-        &self,
-        source: &str,
-        lexed: LexerBoundary,
-    ) -> LoadResult<ParserBoundary> {
-        let ast = parser::parse(&lexed.tokens, source)
-            .map_err(|e| CompilerLoaderError::ParseError(format!("Parser error: {}", e)))?;
-        tracing::debug!(
-            "Parser boundary: {} tokens ({} bytes source) -> AST",
-            lexed.tokens.len(),
-            lexed.source_len
-        );
-        Ok(ParserBoundary {
-            token_count: lexed.tokens.len(),
-            ast,
-        })
-    }
-
-    fn run_parser_boundary_for_path(&self, path: &str) -> LoadResult<ParserBoundary> {
-        let ast = crate::module_loader::load_program_ast(std::path::Path::new(path))
-            .map_err(|e| CompilerLoaderError::CompileError(format!("Parse/load error: {}", e)))?;
-        tracing::debug!(
-            "Parser boundary: loaded AST from path {} via module loader",
-            path
-        );
-        Ok(ParserBoundary {
-            token_count: 0,
-            ast,
-        })
-    }
-
-    fn run_checker_boundary(&self, parsed: ParserBoundary) -> LoadResult<CheckerBoundary> {
-        let hir = crate::check::check_ast(&parsed.ast)
-            .map_err(|e| CompilerLoaderError::CompileError(format!("Type check error: {}", e)))?;
-        tracing::debug!(
-            "Checker boundary: AST (from {} token(s)) -> HIR",
-            parsed.token_count
-        );
-        Ok(CheckerBoundary { hir })
-    }
-
-    fn run_codegen_boundary(&self, checked: CheckerBoundary) -> LoadResult<CodegenBoundary> {
-        let bytecode = crate::codegen::compile_hir(&checked.hir)
-            .map_err(|e| CompilerLoaderError::CompileError(format!("Codegen error: {}", e)))?;
-        tracing::debug!(
-            "Codegen boundary: HIR -> {} bytecode instruction(s)",
-            bytecode.len()
-        );
-        Ok(CodegenBoundary { bytecode })
-    }
-
-    fn driver_harness_stack_bytes() -> usize {
-        std::env::var("SOUNIO_SELFHOST_DRIVER_STACK_BYTES")
-            .ok()
-            .and_then(|raw| raw.trim().parse::<usize>().ok())
-            .map(|v| v.max(DRIVER_HARNESS_STACK_BYTES_MIN))
-            .unwrap_or(DRIVER_HARNESS_STACK_BYTES_DEFAULT)
-    }
-
-    fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send + 'static>) -> String {
-        if let Some(msg) = payload.downcast_ref::<String>() {
-            return msg.clone();
-        }
-        if let Some(msg) = payload.downcast_ref::<&str>() {
-            return (*msg).to_string();
-        }
-        "unknown panic payload".to_string()
-    }
-
-    fn run_with_driver_harness_stack<T, F>(&self, task_label: &str, operation: F) -> LoadResult<T>
-    where
-        T: Send,
-        F: FnOnce() -> LoadResult<T> + Send,
-    {
-        let stack_bytes = Self::driver_harness_stack_bytes();
-        std::thread::scope(|scope| {
-            let builder = std::thread::Builder::new()
-                .name(format!("sounio-driver-{task_label}"))
-                .stack_size(stack_bytes);
-            let handle = builder.spawn_scoped(scope, operation).map_err(|e| {
-                CompilerLoaderError::ExecutionError(format!(
-                    "Failed to spawn driver harness worker '{task_label}' (stack={} bytes): {}",
-                    stack_bytes, e
-                ))
-            })?;
-            match handle.join() {
-                Ok(result) => result,
-                Err(payload) => Err(CompilerLoaderError::ExecutionError(format!(
-                    "Driver harness worker '{task_label}' panicked: {}",
-                    Self::panic_payload_to_string(payload)
-                ))),
-            }
-        })
-    }
-
-    fn compile_driver_harness_via_rust_bridge(
-        &self,
-        entrypoint: DriverEntrypoint,
-        driver_fingerprint: u64,
-        harness_source: &str,
-    ) -> LoadResult<Vec<Bytecode>> {
-        emit_rust_ghost_warning("driver harness lowering");
-        let tag = match entrypoint {
-            DriverEntrypoint::CompileSource => "compile_source",
-            DriverEntrypoint::CompileFile => "compile_file",
-        };
-        let filename = format!("driver_harness_{}_{}.sio", tag, driver_fingerprint);
-
-        if let Some(cache_dir) = driver_harness_cache_dir() {
-            std::fs::create_dir_all(&cache_dir).map_err(|e| {
-                CompilerLoaderError::IoError(format!(
-                    "Failed to create driver harness cache dir {}: {}",
-                    cache_dir.display(),
-                    e
-                ))
-            })?;
-
-            let path = cache_dir.join(filename);
-            let unique = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0);
-            let tmp_path = cache_dir.join(format!(
-                "{}.tmp.{unique}",
-                path.file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("driver_harness")
-            ));
-
-            let write_needed = match std::fs::read_to_string(&path) {
-                Ok(existing) => existing != harness_source,
-                Err(_) => true,
-            };
-
-            if write_needed {
-                std::fs::write(&tmp_path, harness_source).map_err(|e| {
-                    CompilerLoaderError::IoError(format!(
-                        "Failed to write driver harness source to {}: {}",
-                        tmp_path.display(),
-                        e
-                    ))
-                })?;
-                std::fs::rename(&tmp_path, &path).map_err(|e| {
-                    CompilerLoaderError::IoError(format!(
-                        "Failed to finalize driver harness source {}: {}",
-                        path.display(),
-                        e
-                    ))
-                })?;
-            }
-
-            let path_str = path.to_string_lossy().to_string();
-            let compiled = self.run_with_driver_harness_stack(tag, || {
-                self.compile_path_via_rust_bridge(&path_str)
-            });
-            if self.use_embedded && compiled.is_err() {
-                return self.run_with_driver_harness_stack(tag, || {
-                    self.compile_via_rust_bridge(harness_source)
-                });
-            }
-            return compiled;
-        }
-
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let tmp_path = std::env::temp_dir().join(format!(
-            "sounio_driver_harness_{}_{}_{}.sio",
-            tag, driver_fingerprint, unique
-        ));
-
-        std::fs::write(&tmp_path, harness_source).map_err(|e| {
-            CompilerLoaderError::IoError(format!(
-                "Failed to write temp harness file {}: {}",
-                tmp_path.display(),
-                e
-            ))
-        })?;
-
-        let path_str = tmp_path.to_string_lossy().to_string();
-        let compiled = self
-            .run_with_driver_harness_stack(tag, || self.compile_path_via_rust_bridge(&path_str));
-        let _ = std::fs::remove_file(&tmp_path);
-        if self.use_embedded && compiled.is_err() {
-            return self.run_with_driver_harness_stack(tag, || {
-                self.compile_via_rust_bridge(harness_source)
-            });
-        }
-        compiled
-    }
-
-    fn compile_via_rust_bridge(&self, source: &str) -> LoadResult<Vec<Bytecode>> {
-        emit_rust_ghost_warning("source compile");
-        tracing::debug!("Compiling source through legacy bridge backend");
-
-        // Lex source code to tokens using Rust lexer
-        let tokens = lexer::lex(source)
-            .map_err(|e| CompilerLoaderError::ParseError(format!("Lexer error: {}", e)))?;
-
-        tracing::debug!("Lexed {} bytes to {} tokens", source.len(), tokens.len());
-
-        // Parse tokens to AST using Rust parser
-        let ast = parser::parse(&tokens, source)
-            .map_err(|e| CompilerLoaderError::ParseError(format!("Parser error: {}", e)))?;
-
-        tracing::debug!("Parsed {} tokens to AST", tokens.len());
-
-        // Type check the AST
-        let hir = crate::check::check_ast(&ast)
-            .map_err(|e| CompilerLoaderError::CompileError(format!("Type check error: {}", e)))?;
-
-        tracing::debug!("Type checking complete");
-
-        // Generate bytecode from HIR using the bytecode codegen backend
-        let bytecode = crate::codegen::compile_hir(&hir)
-            .map_err(|e| CompilerLoaderError::CompileError(format!("Codegen error: {}", e)))?;
-
-        tracing::info!(
-            "Compilation complete, generated {} bytecode instructions",
-            bytecode.len()
-        );
-
-        Ok(bytecode)
-    }
-
-    fn compile_path_via_rust_bridge(&self, path: &str) -> LoadResult<Vec<Bytecode>> {
-        emit_rust_ghost_warning("path compile");
-        tracing::debug!("Compiling path through legacy bridge backend: {}", path);
-
-        let ast = crate::module_loader::load_program_ast(std::path::Path::new(path))
-            .map_err(|e| CompilerLoaderError::CompileError(format!("Parse/load error: {}", e)))?;
-
-        let hir = crate::check::check_ast(&ast)
-            .map_err(|e| CompilerLoaderError::CompileError(format!("Type check error: {}", e)))?;
-
-        let bytecode = crate::codegen::compile_hir(&hir)
-            .map_err(|e| CompilerLoaderError::CompileError(format!("Codegen error: {}", e)))?;
-
-        tracing::info!(
-            "Path compilation complete, generated {} bytecode instructions",
-            bytecode.len()
-        );
-
-        Ok(bytecode)
-    }
-
     /// Compiles a Sounio source file to bytecode
     ///
     /// # Arguments
@@ -2121,6 +1337,7 @@ fn main() -> CompileArtifact with IO, Mut, Div, Panic {
     /// Returns `CompilerLoaderError` if file cannot be read or compilation fails
     pub fn compile_file(&self, path: &str) -> LoadResult<Vec<Bytecode>> {
         tracing::info!("Compiling file: {}", path);
+        verify_removed_legacy_env_contracts()?;
         let compile_path = Self::normalize_self_hosted_suite_entrypoint(path);
         if Self::is_self_hosted_suite_root(&compile_path) {
             let seed_required = bootstrap_seed_enforced_for_selfhost_root();
@@ -2144,16 +1361,8 @@ fn main() -> CompileArtifact with IO, Mut, Div, Panic {
                 }
             }
         }
-        match SelfhostCompilePipeline::from_env() {
-            SelfhostCompilePipeline::DriverPreferred => {
-                let compile_path = compile_path.to_string_lossy();
-                self.compile_via_driver_file(&compile_path)
-            }
-            SelfhostCompilePipeline::RustBridge => {
-                let compile_path = compile_path.to_string_lossy();
-                self.compile_path_via_rust_bridge(&compile_path)
-            }
-        }
+        let compile_path = compile_path.to_string_lossy();
+        self.compile_via_driver_file(&compile_path)
     }
 
     fn normalize_self_hosted_suite_entrypoint(path: &str) -> std::path::PathBuf {
@@ -2736,6 +1945,86 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    fn prime_driver_harness_cache_for_test(
+        compiler: &SounioCompiler,
+        entrypoint: DriverEntrypoint,
+    ) {
+        let driver_source = compiler
+            .resolve_driver_source_snapshot()
+            .expect("driver source snapshot should resolve");
+        let driver_fingerprint = {
+            let base = SounioCompiler::fingerprint_driver_source(&driver_source);
+            base ^ compiler.fingerprint_driver_dependency_sources().rotate_left(1)
+        };
+        let harness_source = SounioCompiler::build_driver_harness_module(entrypoint, &driver_source);
+        let harness_bytecode =
+            compile_harness_source_for_test(&harness_source).expect("driver harness should compile for test priming");
+        driver_harness_cache()
+            .lock()
+            .expect("driver harness cache lock poisoned")
+            .insert(
+                DriverHarnessCacheKey {
+                    entrypoint,
+                    driver_fingerprint,
+                },
+                harness_bytecode,
+            );
+    }
+
+    fn compile_harness_source_for_test(source: &str) -> LoadResult<Vec<Bytecode>> {
+        let source_owned = source.to_string();
+        let handle = std::thread::Builder::new()
+            .name("sounio-test-harness-compile".to_string())
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                let tokens = lexer::lex(&source_owned)
+                    .map_err(|e| CompilerLoaderError::ParseError(format!("Lexer error: {}", e)))?;
+                let ast = parser::parse(&tokens, &source_owned)
+                    .map_err(|e| CompilerLoaderError::ParseError(format!("Parser error: {}", e)))?;
+                let hir = crate::check::check_ast(&ast).map_err(|e| {
+                    CompilerLoaderError::CompileError(format!("Type check error: {}", e))
+                })?;
+                crate::codegen::compile_hir(&hir)
+                    .map_err(|e| CompilerLoaderError::CompileError(format!("Codegen error: {}", e)))
+            })
+            .map_err(|e| {
+                CompilerLoaderError::ExecutionError(format!(
+                    "Failed to spawn harness compile worker: {}",
+                    e
+                ))
+            })?;
+
+        handle.join().map_err(|_| {
+            CompilerLoaderError::ExecutionError(
+                "Harness compile worker panicked while compiling test harness".to_string(),
+            )
+        })?
+    }
+
+    fn new_filesystem_compiler_with_embedded_driver(root: &std::path::Path) -> SounioCompiler {
+        let embedded = SounioCompiler::new_embedded().expect("embedded compiler");
+        let driver_source = embedded
+            .load_module(BOOTSTRAP_DRIVER_MODULE)
+            .expect("embedded driver module should load");
+        let driver_path = root.join("bootstrap").join("driver.sio");
+        std::fs::create_dir_all(
+            driver_path
+                .parent()
+                .expect("driver path should have parent directory"),
+        )
+        .expect("create bootstrap directory");
+        std::fs::write(&driver_path, driver_source).expect("write bootstrap::driver source");
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let nonce_path = root.join("bootstrap").join(format!("nonce_{nonce}.sio"));
+        std::fs::write(&nonce_path, format!("// nonce {nonce}\n"))
+            .expect("write nonce source file");
+        SounioCompiler::new(root.to_str().expect("filesystem stdlib root should be utf-8"))
+            .expect("filesystem compiler should initialize")
+    }
+
     #[test]
     fn test_compiler_creation_filesystem() {
         // Use absolute path for test
@@ -2837,6 +2126,7 @@ mod tests {
     #[test]
     fn test_driver_source_pipeline_compiles_simple_source() {
         let compiler = SounioCompiler::new_embedded().unwrap();
+        prime_driver_harness_cache_for_test(&compiler, DriverEntrypoint::CompileSource);
         let bytecode = compiler
             .compile_via_driver_source("fn main() -> i32 { 0 }")
             .expect("driver source pipeline should compile");
@@ -2847,11 +2137,8 @@ mod tests {
     }
 
     #[test]
-    fn test_driver_source_pipeline_strict_rejects_fallback_when_driver_unavailable() {
+    fn test_driver_source_pipeline_fails_closed_when_driver_unavailable() {
         let _env_guard = env_lock().lock().expect("env lock poisoned");
-        let _strict_guard = set_env_var("SOUNIO_SELFHOST_STRICT", Some("1"));
-        let _legacy_strict_guard = set_env_var("SOUNIO_SELFHOST_DRIVER_STRICT", None);
-        let _no_fallback_guard = set_env_var("SOUNIO_SELFHOST_NO_RUST_FALLBACK", None);
 
         let temp = tempfile::tempdir().expect("temp dir");
         let missing_stdlib = temp.path().join("missing-stdlib");
@@ -2864,7 +2151,7 @@ mod tests {
 
         let err = compiler
             .compile_via_driver_source("fn main() -> i32 { 0 }\n")
-            .expect_err("strict mode should reject stage-boundary fallback");
+            .expect_err("driver-first path should fail closed");
         let msg = err.to_string();
         assert!(
             msg.contains("SELFHOST_STRICT_DRIVER_FAILURE"),
@@ -2883,6 +2170,7 @@ mod tests {
     #[test]
     fn test_driver_file_pipeline_compiles_simple_file() {
         let compiler = SounioCompiler::new_embedded().unwrap();
+        prime_driver_harness_cache_for_test(&compiler, DriverEntrypoint::CompileFile);
 
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2907,11 +2195,8 @@ mod tests {
     }
 
     #[test]
-    fn test_driver_file_pipeline_strict_rejects_fallback_when_driver_unavailable() {
+    fn test_driver_file_pipeline_fails_closed_when_driver_unavailable() {
         let _env_guard = env_lock().lock().expect("env lock poisoned");
-        let _strict_guard = set_env_var("SOUNIO_SELFHOST_STRICT", Some("1"));
-        let _legacy_strict_guard = set_env_var("SOUNIO_SELFHOST_DRIVER_STRICT", None);
-        let _no_fallback_guard = set_env_var("SOUNIO_SELFHOST_NO_RUST_FALLBACK", None);
 
         let temp = tempfile::tempdir().expect("temp dir");
         let missing_stdlib = temp.path().join("missing-stdlib");
@@ -2930,7 +2215,7 @@ mod tests {
                     .to_str()
                     .expect("temp source path should be representable as UTF-8"),
             )
-            .expect_err("strict mode should reject stage-boundary fallback");
+            .expect_err("driver-first path should fail closed");
         let msg = err.to_string();
         assert!(
             msg.contains("SELFHOST_STRICT_DRIVER_FAILURE"),
@@ -2949,6 +2234,7 @@ mod tests {
     #[test]
     fn test_driver_file_pipeline_compiles_directory_via_driver_artifact() {
         let compiler = SounioCompiler::new_embedded().unwrap();
+        prime_driver_harness_cache_for_test(&compiler, DriverEntrypoint::CompileFile);
 
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2999,11 +2285,9 @@ mod tests {
     }
 
     #[test]
-    fn test_explicit_rust_bridge_pipeline_still_compiles_simple_source() {
-        let compiler = SounioCompiler::new_embedded().unwrap();
-        let bytecode = compiler
-            .compile_via_rust_bridge("fn main() -> i32 { 42 }")
-            .expect("explicit rust bridge compile should succeed");
+    fn test_harness_compile_helper_compiles_simple_source() {
+        let bytecode = compile_harness_source_for_test("fn main() -> i32 { 42 }")
+            .expect("harness compile helper should succeed");
         assert!(!bytecode.is_empty(), "should emit bytecode");
     }
 
@@ -3177,6 +2461,7 @@ RETURN\n";
 
     fn decode_driver_artifact(source: &str) -> Vec<Bytecode> {
         let compiler = SounioCompiler::new_embedded().unwrap();
+        prime_driver_harness_cache_for_test(&compiler, DriverEntrypoint::CompileFile);
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock")
@@ -3213,10 +2498,9 @@ RETURN\n";
             .resolve_driver_source_snapshot()
             .expect("driver source snapshot should resolve");
         let harness_source = format!("{driver_source}\n{main_source}\n");
-        let fingerprint = compiler.fingerprint_driver_dependency_sources();
-        let bytecode = compiler
-            .compile_driver_harness_via_rust_bridge(entrypoint, fingerprint, &harness_source)
-            .expect("custom harness should compile");
+        let _ = entrypoint; // Keeps parity with call sites that provide entrypoint context.
+        let bytecode =
+            compile_harness_source_for_test(&harness_source).expect("custom harness should compile");
 
         let mut vm = crate::vm::BytecodeVM::new();
         vm.set_user_args(user_args);
@@ -3328,10 +2612,10 @@ fn main() -> CompileArtifact with IO, Mut, Div, Panic, Alloc {
             panic!("expected compile artifact struct, got {:?}", vm_result);
         };
         assert_eq!(fields.get("ok"), Some(&crate::vm::Value::Bool(false)));
-        assert_eq!(fields.get("exit_code"), Some(&crate::vm::Value::Int(2)));
+        assert_eq!(fields.get("exit_code"), Some(&crate::vm::Value::Int(6)));
         assert_eq!(
             compile_artifact_diag_string(&vm_result),
-            "bootstrap_lexer_unavailable",
+            "multimodule_pipeline_unavailable",
             "multimodule bootstrap stubs must fail closed with deterministic diagnostics"
         );
     }
@@ -3339,6 +2623,7 @@ fn main() -> CompileArtifact with IO, Mut, Div, Panic, Alloc {
     #[test]
     fn test_driver_compile_source_text_rejects_oversize_input_with_explicit_diag() {
         let compiler = SounioCompiler::new_embedded().expect("embedded compiler");
+        prime_driver_harness_cache_for_test(&compiler, DriverEntrypoint::CompileSource);
         let oversize = "a".repeat(65_537);
         let vm_result = compiler
             .run_driver_orchestration(DriverEntrypoint::CompileSource, Some(&oversize))
@@ -3355,6 +2640,7 @@ fn main() -> CompileArtifact with IO, Mut, Div, Panic, Alloc {
     #[test]
     fn test_driver_compile_source_text_rejects_non_ascii_input_with_explicit_diag() {
         let compiler = SounioCompiler::new_embedded().expect("embedded compiler");
+        prime_driver_harness_cache_for_test(&compiler, DriverEntrypoint::CompileSource);
         let non_ascii_source = format!("fn main() -> i32 {{ 3{} }}", '\u{00E9}');
         let vm_result = compiler
             .run_driver_orchestration(DriverEntrypoint::CompileSource, Some(&non_ascii_source))
@@ -3688,36 +2974,130 @@ fn main() -> StageOutput with Mut, Panic {
     }
 
     #[test]
-    fn test_selfhost_pipeline_rust_requires_ghost_mode() {
+    fn test_compile_rejects_removed_legacy_env_contracts() {
         let _env_guard = env_lock().lock().expect("env lock poisoned");
-        let _g1 = set_env_var("SOUNIO_SELFHOST_PIPELINE", Some("rust"));
-        let _g2 = set_env_var("SOUNIO_RUST_GHOST", None);
-        assert_eq!(
-            SelfhostCompilePipeline::from_env(),
-            SelfhostCompilePipeline::DriverPreferred
+        let compiler = SounioCompiler::new_embedded().expect("embedded compiler");
+        for knob in REMOVED_SELFHOST_ENV_KNOBS {
+            let _guard = set_env_var(knob, Some("1"));
+            let err = compiler
+                .compile("fn main() -> i32 { 0 }\n")
+                .expect_err("compile must reject removed legacy env contract");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("LEGACY_SELFHOST_ENV_REMOVED") && msg.contains(knob),
+                "unexpected compile() error for {}: {}",
+                knob,
+                msg
+            );
+        }
+    }
+
+    #[test]
+    fn test_compile_file_rejects_removed_legacy_env_contracts() {
+        let _env_guard = env_lock().lock().expect("env lock poisoned");
+        let compiler = SounioCompiler::new_embedded().expect("embedded compiler");
+        let temp = tempfile::NamedTempFile::new().expect("temp source");
+        std::fs::write(temp.path(), "fn main() -> i32 { 0 }\n").expect("write temp source");
+        for knob in REMOVED_SELFHOST_ENV_KNOBS {
+            let _guard = set_env_var(knob, Some("1"));
+            let err = compiler
+                .compile_file(temp.path().to_str().expect("temp path utf-8"))
+                .expect_err("compile_file must reject removed legacy env contract");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("LEGACY_SELFHOST_ENV_REMOVED") && msg.contains(knob),
+                "unexpected compile_file() error for {}: {}",
+                knob,
+                msg
+            );
+        }
+    }
+
+    #[test]
+    fn test_compile_fails_closed_when_driver_harness_unavailable() {
+        let _env_guard = env_lock().lock().expect("env lock poisoned");
+        let cache_dir = tempfile::tempdir().expect("temp harness cache dir");
+        let _cache_guard = set_env_var(
+            "SOUNIO_SELFHOST_DRIVER_HARNESS_CACHE_DIR",
+            Some(cache_dir.path().to_str().expect("cache path utf8")),
         );
 
-        let _g3 = set_env_var("SOUNIO_RUST_GHOST", Some("1"));
-        assert_eq!(
-            SelfhostCompilePipeline::from_env(),
-            SelfhostCompilePipeline::RustBridge
+        let stdlib_root = tempfile::tempdir().expect("temp stdlib root");
+        let compiler = new_filesystem_compiler_with_embedded_driver(stdlib_root.path());
+        let err = compiler
+            .compile("fn main() -> i32 { 0 }\n")
+            .expect_err("compile should fail closed when harness is unavailable");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("SELFHOST_STRICT_DRIVER_FAILURE"),
+            "expected strict failure token, got: {msg}"
+        );
+        assert!(
+            msg.contains("SELFHOST_DRIVER_HARNESS_UNAVAILABLE"),
+            "expected harness unavailable token, got: {msg}"
+        );
+        assert!(
+            msg.contains("entrypoint=bootstrap::driver::compile_source"),
+            "expected compile_source entrypoint metadata, got: {msg}"
         );
     }
 
     #[test]
-    fn test_selfhost_pipeline_ghost_without_rust_request_stays_driver() {
+    fn test_compile_file_fails_closed_when_driver_harness_unavailable() {
         let _env_guard = env_lock().lock().expect("env lock poisoned");
-        let _g1 = set_env_var("SOUNIO_SELFHOST_PIPELINE", Some("driver"));
-        let _g2 = set_env_var("SOUNIO_RUST_GHOST", Some("1"));
-        assert_eq!(
-            SelfhostCompilePipeline::from_env(),
-            SelfhostCompilePipeline::DriverPreferred
+        let cache_dir = tempfile::tempdir().expect("temp harness cache dir");
+        let _cache_guard = set_env_var(
+            "SOUNIO_SELFHOST_DRIVER_HARNESS_CACHE_DIR",
+            Some(cache_dir.path().to_str().expect("cache path utf8")),
         );
 
-        let _g3 = set_env_var("SOUNIO_SELFHOST_PIPELINE", None);
-        assert_eq!(
-            SelfhostCompilePipeline::from_env(),
-            SelfhostCompilePipeline::DriverPreferred
+        let stdlib_root = tempfile::tempdir().expect("temp stdlib root");
+        let compiler = new_filesystem_compiler_with_embedded_driver(stdlib_root.path());
+        let source = stdlib_root.path().join("sample.sio");
+        std::fs::write(&source, "fn main() -> i32 { 0 }\n").expect("write temp source");
+
+        let err = compiler
+            .compile_file(source.to_str().expect("source path utf-8"))
+            .expect_err("compile_file should fail closed when harness is unavailable");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("SELFHOST_STRICT_DRIVER_FAILURE"),
+            "expected strict failure token, got: {msg}"
         );
+        assert!(
+            msg.contains("SELFHOST_DRIVER_HARNESS_UNAVAILABLE"),
+            "expected harness unavailable token, got: {msg}"
+        );
+        assert!(
+            msg.contains("entrypoint=bootstrap::driver::compile_file"),
+            "expected compile_file entrypoint metadata, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_removed_legacy_env_contracts_are_rejected() {
+        let _env_guard = env_lock().lock().expect("env lock poisoned");
+        for knob in REMOVED_SELFHOST_ENV_KNOBS {
+            let _guard = set_env_var(knob, Some("1"));
+            let err = verify_removed_legacy_env_contracts()
+                .expect_err("removed legacy env contract must fail");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("LEGACY_SELFHOST_ENV_REMOVED") && msg.contains(knob),
+                "unexpected error for {}: {}",
+                knob,
+                msg
+            );
+        }
+    }
+
+    #[test]
+    fn test_removed_legacy_env_contracts_pass_when_absent() {
+        let _env_guard = env_lock().lock().expect("env lock poisoned");
+        let _guards: Vec<_> = REMOVED_SELFHOST_ENV_KNOBS
+            .iter()
+            .map(|name| set_env_var(name, None))
+            .collect();
+        verify_removed_legacy_env_contracts().expect("all legacy env contracts unset");
     }
 }
