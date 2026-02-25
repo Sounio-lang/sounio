@@ -1,0 +1,108 @@
+//@ run-pass
+// Tests for stdlib/theorem/epistemic.sio:
+// confidence monotonicity, GUM propagation, decay bounds, sensor fusion
+
+use theorem::kernel::*;
+use theorem::epistemic::*;
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn run_tests(ctx: &! ProofContext) -> i32 {
+    // Test 1: confidence_monotone_add — conf(a+b) <= min(conf(a), conf(b))
+    let ep_add = confidence_monotone_add(ctx, 0.9, 0.8)
+    // combined confidence should be min(0.9, 0.8) = 0.8
+    let diff1 = abs_f(ep_add.confidence - 0.8)
+    if diff1 > 0.01 {
+        return 1
+    }
+
+    // Test 2: confidence_monotone_mul — conf(a*b) <= min(conf(a), conf(b))
+    let ep_mul = confidence_monotone_mul(ctx, 0.95, 0.85)
+    let diff2 = abs_f(ep_mul.confidence - 0.85)
+    if diff2 > 0.01 {
+        return 2
+    }
+
+    // Test 3: confidence_monotone_compose — conf(f∘g) <= conf(f)*conf(g)
+    let ep_comp = confidence_monotone_compose(ctx, 0.9, 0.9)
+    // 0.9 * 0.9 = 0.81
+    let diff3 = abs_f(ep_comp.confidence - 0.81)
+    if diff3 > 0.01 {
+        return 3
+    }
+
+    // Test 4: GUM add — u(a+b) = sqrt(u_a^2 + u_b^2)
+    let gum_add = gum_add_proof(ctx, 0.3, 0.4)
+    // Expected: sqrt(0.09 + 0.16) = sqrt(0.25) = 0.5
+    let diff4 = abs_f(gum_add.output_uncertainty - 0.5)
+    if diff4 > 0.001 {
+        return 4
+    }
+
+    // Test 5: GUM mul — u_rel(a*b) = sqrt(u_rel(a)^2 + u_rel(b)^2)
+    // a=10, u_a=1 => u_rel_a=0.1; b=5, u_b=0.5 => u_rel_b=0.1
+    let gum_mul = gum_mul_proof(ctx, 10.0, 1.0, 5.0, 0.5)
+    if gum_mul.output_uncertainty < 0.1 {
+        return 5
+    }
+
+    // Test 6: decay_bound_proof — epsilon_0 * exp(-lambda*t) >= min
+    // epsilon_0=1.0, lambda=0.1, t=1.0 => 1.0 * exp(-0.1) = 0.9048 >= 0.8 ✓
+    let decay_prf = decay_bound_proof(ctx, 1.0, 0.1, 1.0, 0.8)
+    let vr_decay = verify(ctx, decay_prf.prf_id)
+    if vr_decay.is_valid == false {
+        return 6
+    }
+    if decay_prf.confidence < 0.99 {
+        return 7
+    }
+
+    // Test 7: decay_bound fails when threshold not met
+    // epsilon_0=0.5, lambda=1.0, t=5.0 => 0.5 * exp(-5) = 0.00337 < 0.5 => fail
+    let decay_fail = decay_bound_proof(ctx, 0.5, 1.0, 5.0, 0.5)
+    if decay_fail.confidence > 0.01 {
+        return 8  // should have near-zero confidence
+    }
+
+    // Test 8: ds_combine_proof — Dempster-Shafer combination
+    let ds = ds_combine_proof(ctx, 0.7, 0.8)
+    // Both sources believe H => combined should be > max(0.7, 0.8) = 0.8
+    if ds.combined_belief < 0.8 {
+        return 9
+    }
+
+    // Test 9: ds_vacuous_identity — combining with vacuous preserves belief
+    let vac = ds_vacuous_identity(ctx, 0.7)
+    if vac.confidence < 0.99 {
+        return 10
+    }
+
+    // Test 10: fusion_narrows_uncertainty — u_fused < min(u1, u2)
+    let fuse = fusion_narrows_uncertainty(ctx, 0.3, 0.4)
+    if fuse.confidence < 0.99 {
+        return 11
+    }
+
+    // Test 11: epistemic_subtype — K<T, 0.9> <: K<T, 0.8>
+    let subtype_prf = epistemic_subtype(ctx, 0.9, 0.8)
+    let st_conf = proof_confidence(ctx, subtype_prf)
+    if st_conf < 0.99 {
+        return 12
+    }
+
+    // Test 12: pipeline_confidence
+    let stages: [f64; 16] = [0.99, 0.98, 0.97, 0.96, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let pipe = pipeline_confidence(ctx, stages, 4)
+    if pipe.confidence < 0.99 {
+        return 13
+    }
+
+    return 0
+}
+
+fn main() -> i32 {
+    var ctx = proof_context_new()
+    return run_tests(&! ctx)
+}

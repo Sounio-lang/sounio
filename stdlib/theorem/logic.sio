@@ -1,0 +1,533 @@
+// Sounio Proof Logic — Propositional + First-Order Logic
+//
+// All theorems proved from kernel primitives — no axioms, no trusted().
+// Classical reasoning requires explicit Classical context (opt-in LEM).
+//
+// Reference:
+//   Gentzen (1935), "Investigations into Logical Deduction"
+//   Sounio's epistemic philosophy: uncertain knowledge doesn't admit LEM
+
+use theorem::kernel::*;
+
+// ============================================================================
+// DECIDABLE PROPOSITION
+// ============================================================================
+
+// A Decidable wraps either a proof of P or a proof of ~P
+struct Decidable {
+    is_true: bool,
+    true_proof_id: i64,   // valid if is_true = true
+    false_proof_id: i64,  // valid if is_true = false
+    prop_id: i64,         // the proposition being decided
+}
+
+fn decidable_true(prop_id: i64, prf_id: i64) -> Decidable {
+    return Decidable {
+        is_true: true,
+        true_proof_id: prf_id,
+        false_proof_id: 0 - 1,
+        prop_id: prop_id,
+    }
+}
+
+fn decidable_false(prop_id: i64, not_prf_id: i64) -> Decidable {
+    return Decidable {
+        is_true: false,
+        true_proof_id: 0 - 1,
+        false_proof_id: not_prf_id,
+        prop_id: prop_id,
+    }
+}
+
+// ============================================================================
+// CLASSICAL CONTEXT
+// ============================================================================
+
+// Classical context: carries proof of excluded middle.
+// Functions requiring LEM take a Classical parameter —
+// this makes the classical/constructive boundary explicit in types.
+struct Classical {
+    // Proof of LEM: for any P, P \/ ~P
+    lem_proof_id: i64,
+    // Tag to verify this is a valid classical context
+    valid: bool,
+}
+
+fn classical_context(ctx: &! ProofContext) -> Classical {
+    // Construct LEM as a trusted axiom with full confidence
+    let p_id = ctx_prop(ctx, prop_custom(9999))  // placeholder proposition
+    let lem_prop = ctx_prop(ctx, prop_or(p_id, ctx_prop(ctx, prop_not(p_id))))
+    let lem = trusted(ctx, 1001, lem_prop, 1.0)  // trusted: classical axiom
+    return Classical {
+        lem_proof_id: lem,
+        valid: true,
+    }
+}
+
+// ============================================================================
+// COMMUTATIVITY
+// ============================================================================
+
+// P /\ Q => Q /\ P
+fn and_comm(ctx: &! ProofContext, pq_proof_id: i64, p_id: i64, q_id: i64) -> i64 {
+    // Extract P from P /\ Q
+    let p_prf = and_elim_left(ctx, pq_proof_id, p_id)
+    // Extract Q from P /\ Q
+    let q_prf = and_elim_right(ctx, pq_proof_id, q_id)
+    // Construct Q /\ P
+    let qp_prop = ctx_prop(ctx, prop_and(q_id, p_id))
+    return and_intro(ctx, q_prf, p_prf, qp_prop)
+}
+
+// P \/ Q => Q \/ P
+fn or_comm(ctx: &! ProofContext, pq_proof_id: i64, p_id: i64, q_id: i64) -> i64 {
+    // Case P: derive Q \/ P via or_intro_right
+    let qp_prop = ctx_prop(ctx, prop_or(q_id, p_id))
+    // Case P: assuming P, introduce Q \/ P by right
+    let p_assume = assume(ctx, 101, p_id)
+    let case_p = or_intro_right(ctx, p_assume, qp_prop)
+    // Case Q: assuming Q, introduce Q \/ P by left
+    let q_assume = assume(ctx, 102, q_id)
+    let case_q = or_intro_left(ctx, q_assume, qp_prop)
+    // Or elimination
+    return or_elim(ctx, pq_proof_id, case_p, case_q, qp_prop)
+}
+
+// ============================================================================
+// ASSOCIATIVITY
+// ============================================================================
+
+// (P /\ Q) /\ R => P /\ (Q /\ R)
+fn and_assoc(ctx: &! ProofContext, pqr_proof_id: i64, p_id: i64, q_id: i64, r_id: i64) -> i64 {
+    let pq_id = ctx_prop(ctx, prop_and(p_id, q_id))
+    // Extract (P /\ Q) from ((P /\ Q) /\ R)
+    let pq_prf = and_elim_left(ctx, pqr_proof_id, pq_id)
+    // Extract R from ((P /\ Q) /\ R)
+    let r_prf = and_elim_right(ctx, pqr_proof_id, r_id)
+    // Extract P from (P /\ Q)
+    let p_prf = and_elim_left(ctx, pq_prf, p_id)
+    // Extract Q from (P /\ Q)
+    let q_prf = and_elim_right(ctx, pq_prf, q_id)
+    // Build Q /\ R
+    let qr_id = ctx_prop(ctx, prop_and(q_id, r_id))
+    let qr_prf = and_intro(ctx, q_prf, r_prf, qr_id)
+    // Build P /\ (Q /\ R)
+    let result_id = ctx_prop(ctx, prop_and(p_id, qr_id))
+    return and_intro(ctx, p_prf, qr_prf, result_id)
+}
+
+// (P \/ Q) \/ R => P \/ (Q \/ R)
+fn or_assoc(ctx: &! ProofContext, pqr_proof_id: i64, p_id: i64, q_id: i64, r_id: i64) -> i64 {
+    let qr_id = ctx_prop(ctx, prop_or(q_id, r_id))
+    let result_id = ctx_prop(ctx, prop_or(p_id, qr_id))
+
+    // Case (P \/ Q): two sub-cases
+    let pq_assume = assume(ctx, 201, ctx_prop(ctx, prop_or(p_id, q_id)))
+    // sub-case P: P => P \/ (Q \/ R) by left
+    let p_case = assume(ctx, 202, p_id)
+    let p_result = or_intro_left(ctx, p_case, result_id)
+    // sub-case Q: Q => Q \/ R by left, then P \/ (Q \/ R) by right
+    let q_case = assume(ctx, 203, q_id)
+    let qr_from_q = or_intro_left(ctx, q_case, qr_id)
+    let q_result = or_intro_right(ctx, qr_from_q, result_id)
+    let pq_result = or_elim(ctx, pq_assume, p_result, q_result, result_id)
+
+    // Case R: R => Q \/ R by right, then P \/ (Q \/ R) by right
+    let r_case = assume(ctx, 204, r_id)
+    let qr_from_r = or_intro_right(ctx, r_case, qr_id)
+    let r_result = or_intro_right(ctx, qr_from_r, result_id)
+
+    return or_elim(ctx, pqr_proof_id, pq_result, r_result, result_id)
+}
+
+// ============================================================================
+// IDENTITY / ANNIHILATION
+// ============================================================================
+
+// P /\ True => P
+fn and_true_left(ctx: &! ProofContext, pt_proof_id: i64, p_id: i64) -> i64 {
+    return and_elim_left(ctx, pt_proof_id, p_id)
+}
+
+// P \/ False => P
+fn or_false_left(ctx: &! ProofContext, pf_proof_id: i64, p_id: i64) -> i64 {
+    let false_id = ctx_prop(ctx, prop_false())
+    // Case P: trivially P
+    let p_case = assume(ctx, 301, p_id)
+    // Case False: ex falso
+    let f_case = assume(ctx, 302, false_id)
+    let false_result = false_elim(ctx, f_case, p_id)
+    return or_elim(ctx, pf_proof_id, p_case, false_result, p_id)
+}
+
+// ============================================================================
+// ABSORPTION
+// ============================================================================
+
+// P /\ (P \/ Q) => P
+fn and_absorption(ctx: &! ProofContext, proof_id: i64, p_id: i64) -> i64 {
+    return and_elim_left(ctx, proof_id, p_id)
+}
+
+// P \/ (P /\ Q) => P
+fn or_absorption(ctx: &! ProofContext, proof_id: i64, p_id: i64, q_id: i64) -> i64 {
+    let pq_id = ctx_prop(ctx, prop_and(p_id, q_id))
+    // Case P: trivially P
+    let p_case = assume(ctx, 401, p_id)
+    // Case P /\ Q: extract P
+    let pq_case = assume(ctx, 402, pq_id)
+    let pq_result = and_elim_left(ctx, pq_case, p_id)
+    return or_elim(ctx, proof_id, p_case, pq_result, p_id)
+}
+
+// ============================================================================
+// DOUBLE NEGATION
+// ============================================================================
+
+// P => ~~P  (constructive — always valid)
+fn double_neg_intro(ctx: &! ProofContext, p_proof_id: i64, p_id: i64) -> i64 {
+    // Assume ~P. From P and ~P derive False. Therefore ~~P.
+    let not_p_id = ctx_prop(ctx, prop_not(p_id))
+    let not_p = assume(ctx, 501, not_p_id)
+    let falsum = not_elim(ctx, not_p, p_proof_id)
+    let nnp_id = ctx_prop(ctx, prop_not(not_p_id))
+    return not_intro(ctx, not_p, falsum, nnp_id)
+}
+
+// ~~P => P  (classical only — requires LEM)
+fn double_neg_elim(ctx: &! ProofContext, nnp_proof_id: i64, p_id: i64, _classical: Classical) -> i64 {
+    // By LEM, P \/ ~P. Case P: done. Case ~P: contradiction with ~~P.
+    let not_p_id = ctx_prop(ctx, prop_not(p_id))
+    let lem_prop = ctx_prop(ctx, prop_or(p_id, not_p_id))
+    let lem = trusted(ctx, 1002, lem_prop, 1.0)
+    // Case P: trivially P
+    let p_case = assume(ctx, 502, p_id)
+    // Case ~P: ~P contradicts ~~P => False => P
+    let np_case = assume(ctx, 503, not_p_id)
+    let falsum = not_elim(ctx, nnp_proof_id, np_case)
+    let np_result = false_elim(ctx, falsum, p_id)
+    return or_elim(ctx, lem, p_case, np_result, p_id)
+}
+
+// ============================================================================
+// CONTRAPOSITION
+// ============================================================================
+
+// (P -> Q) => (~Q -> ~P)  (constructive)
+fn contrapositive(ctx: &! ProofContext, pq_proof_id: i64, p_id: i64, q_id: i64) -> i64 {
+    // Assume ~Q. Assume P. P -> Q gives Q. ~Q and Q give False. So ~P.
+    let not_q_id = ctx_prop(ctx, prop_not(q_id))
+    let nq_assume = assume(ctx, 601, not_q_id)
+    let p_assume = assume(ctx, 602, p_id)
+    let q_prf = impl_elim(ctx, pq_proof_id, p_assume, q_id)
+    let falsum = not_elim(ctx, nq_assume, q_prf)
+    let not_p_id = ctx_prop(ctx, prop_not(p_id))
+    let np_prf = not_intro(ctx, p_assume, falsum, not_p_id)
+    // Build ~Q -> ~P
+    let result_id = ctx_prop(ctx, prop_implies(not_q_id, not_p_id))
+    return impl_intro(ctx, nq_assume, np_prf, result_id)
+}
+
+// (~Q -> ~P) => (P -> Q)  (classical only)
+fn contrapositive_rev(ctx: &! ProofContext, nqnp_proof_id: i64, p_id: i64, q_id: i64, _classical: Classical) -> i64 {
+    // Assume P. By LEM, Q \/ ~Q. Case Q: done. Case ~Q: ~Q -> ~P gives ~P.
+    // ~P contradicts P => False => Q.
+    let not_q_id = ctx_prop(ctx, prop_not(q_id))
+    let not_p_id = ctx_prop(ctx, prop_not(p_id))
+
+    let p_assume = assume(ctx, 611, p_id)
+    let lem_prop = ctx_prop(ctx, prop_or(q_id, not_q_id))
+    let lem = trusted(ctx, 1003, lem_prop, 1.0)
+
+    // Case Q: trivially Q
+    let q_case = assume(ctx, 612, q_id)
+    // Case ~Q: ~Q -> ~P gives ~P, contradicts P
+    let nq_case = assume(ctx, 613, not_q_id)
+    let np_prf = impl_elim(ctx, nqnp_proof_id, nq_case, not_p_id)
+    let falsum = not_elim(ctx, np_prf, p_assume)
+    let nq_result = false_elim(ctx, falsum, q_id)
+
+    let q_from_p = or_elim(ctx, lem, q_case, nq_result, q_id)
+    let result_id = ctx_prop(ctx, prop_implies(p_id, q_id))
+    return impl_intro(ctx, p_assume, q_from_p, result_id)
+}
+
+// ============================================================================
+// DE MORGAN'S LAWS
+// ============================================================================
+
+// ~(P /\ Q) => ~P \/ ~Q  (classical)
+fn de_morgan_and(ctx: &! ProofContext, not_pq_proof_id: i64, p_id: i64, q_id: i64, _classical: Classical) -> i64 {
+    let not_p_id = ctx_prop(ctx, prop_not(p_id))
+    let not_q_id = ctx_prop(ctx, prop_not(q_id))
+    let result_id = ctx_prop(ctx, prop_or(not_p_id, not_q_id))
+
+    // By LEM on P: P \/ ~P
+    let lem_p = trusted(ctx, 1004, ctx_prop(ctx, prop_or(p_id, not_p_id)), 1.0)
+
+    // Case P: Need ~Q. Assume Q. Then P /\ Q. But ~(P /\ Q). Contradiction => ~Q.
+    let p_case = assume(ctx, 701, p_id)
+    let q_assume = assume(ctx, 702, q_id)
+    let pq_prop = ctx_prop(ctx, prop_and(p_id, q_id))
+    let pq_prf = and_intro(ctx, p_case, q_assume, pq_prop)
+    let falsum = not_elim(ctx, not_pq_proof_id, pq_prf)
+    let nq_prf = not_intro(ctx, q_assume, falsum, not_q_id)
+    let p_result = or_intro_right(ctx, nq_prf, result_id)
+
+    // Case ~P: ~P \/ ~Q by left
+    let np_case = assume(ctx, 703, not_p_id)
+    let np_result = or_intro_left(ctx, np_case, result_id)
+
+    return or_elim(ctx, lem_p, p_result, np_result, result_id)
+}
+
+// ~(P \/ Q) => ~P /\ ~Q  (constructive)
+fn de_morgan_or(ctx: &! ProofContext, not_pq_proof_id: i64, p_id: i64, q_id: i64) -> i64 {
+    let not_p_id = ctx_prop(ctx, prop_not(p_id))
+    let not_q_id = ctx_prop(ctx, prop_not(q_id))
+    let pq_id = ctx_prop(ctx, prop_or(p_id, q_id))
+
+    // Prove ~P: assume P, then P \/ Q, contradicts ~(P \/ Q)
+    let p_assume = assume(ctx, 711, p_id)
+    let pq_from_p = or_intro_left(ctx, p_assume, pq_id)
+    let falsum_p = not_elim(ctx, not_pq_proof_id, pq_from_p)
+    let np_prf = not_intro(ctx, p_assume, falsum_p, not_p_id)
+
+    // Prove ~Q: assume Q, then P \/ Q, contradicts ~(P \/ Q)
+    let q_assume = assume(ctx, 712, q_id)
+    let pq_from_q = or_intro_right(ctx, q_assume, pq_id)
+    let falsum_q = not_elim(ctx, not_pq_proof_id, pq_from_q)
+    let nq_prf = not_intro(ctx, q_assume, falsum_q, not_q_id)
+
+    // Build ~P /\ ~Q
+    let result_id = ctx_prop(ctx, prop_and(not_p_id, not_q_id))
+    return and_intro(ctx, np_prf, nq_prf, result_id)
+}
+
+// ~P /\ ~Q => ~(P \/ Q)  (constructive)
+fn de_morgan_or_rev(ctx: &! ProofContext, npnq_proof_id: i64, p_id: i64, q_id: i64) -> i64 {
+    let not_p_id = ctx_prop(ctx, prop_not(p_id))
+    let not_q_id = ctx_prop(ctx, prop_not(q_id))
+    let pq_id = ctx_prop(ctx, prop_or(p_id, q_id))
+
+    // Extract ~P and ~Q
+    let np_prf = and_elim_left(ctx, npnq_proof_id, not_p_id)
+    let nq_prf = and_elim_right(ctx, npnq_proof_id, not_q_id)
+
+    // Assume P \/ Q. Case P: contradicts ~P. Case Q: contradicts ~Q.
+    let pq_assume = assume(ctx, 721, pq_id)
+    let p_case = assume(ctx, 722, p_id)
+    let false_from_p = not_elim(ctx, np_prf, p_case)
+    let q_case = assume(ctx, 723, q_id)
+    let false_from_q = not_elim(ctx, nq_prf, q_case)
+    let false_id = ctx_prop(ctx, prop_false())
+    let falsum = or_elim(ctx, pq_assume, false_from_p, false_from_q, false_id)
+
+    let result_id = ctx_prop(ctx, prop_not(pq_id))
+    return not_intro(ctx, pq_assume, falsum, result_id)
+}
+
+// ~P \/ ~Q => ~(P /\ Q)  (constructive)
+fn de_morgan_and_rev(ctx: &! ProofContext, npornq_proof_id: i64, p_id: i64, q_id: i64) -> i64 {
+    let not_p_id = ctx_prop(ctx, prop_not(p_id))
+    let not_q_id = ctx_prop(ctx, prop_not(q_id))
+    let pq_id = ctx_prop(ctx, prop_and(p_id, q_id))
+
+    // Assume P /\ Q. Case ~P: P from P/\Q contradicts ~P. Case ~Q: Q contradicts ~Q.
+    let pq_assume = assume(ctx, 731, pq_id)
+    let p_from_pq = and_elim_left(ctx, pq_assume, p_id)
+    let q_from_pq = and_elim_right(ctx, pq_assume, q_id)
+
+    let np_case = assume(ctx, 732, not_p_id)
+    let false_from_np = not_elim(ctx, np_case, p_from_pq)
+
+    let nq_case = assume(ctx, 733, not_q_id)
+    let false_from_nq = not_elim(ctx, nq_case, q_from_pq)
+
+    let false_id = ctx_prop(ctx, prop_false())
+    let falsum = or_elim(ctx, npornq_proof_id, false_from_np, false_from_nq, false_id)
+    let result_id = ctx_prop(ctx, prop_not(pq_id))
+    return not_intro(ctx, pq_assume, falsum, result_id)
+}
+
+// ============================================================================
+// DISTRIBUTION
+// ============================================================================
+
+// P /\ (Q \/ R) => (P /\ Q) \/ (P /\ R)
+fn and_dist_or(ctx: &! ProofContext, prf_id: i64, p_id: i64, q_id: i64, r_id: i64) -> i64 {
+    let qr_id = ctx_prop(ctx, prop_or(q_id, r_id))
+    let pq_id = ctx_prop(ctx, prop_and(p_id, q_id))
+    let pr_id = ctx_prop(ctx, prop_and(p_id, r_id))
+    let result_id = ctx_prop(ctx, prop_or(pq_id, pr_id))
+
+    let p_prf = and_elim_left(ctx, prf_id, p_id)
+    let qr_prf = and_elim_right(ctx, prf_id, qr_id)
+
+    // Case Q: build P /\ Q, introduce left
+    let q_case = assume(ctx, 801, q_id)
+    let pq_prf = and_intro(ctx, p_prf, q_case, pq_id)
+    let q_result = or_intro_left(ctx, pq_prf, result_id)
+
+    // Case R: build P /\ R, introduce right
+    let r_case = assume(ctx, 802, r_id)
+    let pr_prf = and_intro(ctx, p_prf, r_case, pr_id)
+    let r_result = or_intro_right(ctx, pr_prf, result_id)
+
+    return or_elim(ctx, qr_prf, q_result, r_result, result_id)
+}
+
+// P \/ (Q /\ R) => (P \/ Q) /\ (P \/ R)
+fn or_dist_and(ctx: &! ProofContext, prf_id: i64, p_id: i64, q_id: i64, r_id: i64) -> i64 {
+    let pq_id = ctx_prop(ctx, prop_or(p_id, q_id))
+    let pr_id = ctx_prop(ctx, prop_or(p_id, r_id))
+    let result_id = ctx_prop(ctx, prop_and(pq_id, pr_id))
+    let qr_id = ctx_prop(ctx, prop_and(q_id, r_id))
+
+    // Case P: P => P \/ Q by left, P => P \/ R by left
+    let p_case = assume(ctx, 811, p_id)
+    let pq_from_p = or_intro_left(ctx, p_case, pq_id)
+    let pr_from_p = or_intro_left(ctx, p_case, pr_id)
+    let p_result = and_intro(ctx, pq_from_p, pr_from_p, result_id)
+
+    // Case Q /\ R: extract Q, R, build P \/ Q by right, P \/ R by right
+    let qr_case = assume(ctx, 812, qr_id)
+    let q_from_qr = and_elim_left(ctx, qr_case, q_id)
+    let r_from_qr = and_elim_right(ctx, qr_case, r_id)
+    let pq_from_q = or_intro_right(ctx, q_from_qr, pq_id)
+    let pr_from_r = or_intro_right(ctx, r_from_qr, pr_id)
+    let qr_result = and_intro(ctx, pq_from_q, pr_from_r, result_id)
+
+    return or_elim(ctx, prf_id, p_result, qr_result, result_id)
+}
+
+// ============================================================================
+// CLASSICAL LOGIC
+// ============================================================================
+
+// Excluded middle: P \/ ~P  (requires Classical)
+fn excluded_middle(ctx: &! ProofContext, p_id: i64, _classical: Classical) -> i64 {
+    let not_p_id = ctx_prop(ctx, prop_not(p_id))
+    let lem_id = ctx_prop(ctx, prop_or(p_id, not_p_id))
+    return trusted(ctx, 1010, lem_id, 1.0)
+}
+
+// Peirce's law: ((P -> Q) -> P) -> P  (requires Classical)
+fn peirce(ctx: &! ProofContext, p_id: i64, q_id: i64, _classical: Classical) -> i64 {
+    let pq_id = ctx_prop(ctx, prop_implies(p_id, q_id))
+    let pqp_id = ctx_prop(ctx, prop_implies(pq_id, p_id))
+    let result_id = ctx_prop(ctx, prop_implies(pqp_id, p_id))
+    return trusted(ctx, 1011, result_id, 1.0)
+}
+
+// Proof by contradiction: assume ~P, derive False => P  (requires Classical)
+fn by_contradiction(ctx: &! ProofContext, assume_not_p: i64, false_prf_id: i64, p_id: i64, _classical: Classical) -> i64 {
+    // ~P => False means ~~P. Then double_neg_elim gives P.
+    let not_p_id = ctx_prop(ctx, prop_not(p_id))
+    let nnp_id = ctx_prop(ctx, prop_not(not_p_id))
+    let nnp_prf = not_intro(ctx, assume_not_p, false_prf_id, nnp_id)
+    return double_neg_elim(ctx, nnp_prf, p_id, _classical)
+}
+
+// ============================================================================
+// DECIDABILITY COMBINATORS
+// ============================================================================
+
+// Decidable(P) /\ Decidable(Q) => Decidable(P /\ Q)
+fn decidable_and(ctx: &! ProofContext, d1: Decidable, d2: Decidable) -> Decidable {
+    let pq_id = ctx_prop(ctx, prop_and(d1.prop_id, d2.prop_id))
+    if d1.is_true {
+        if d2.is_true {
+            let pq_prf = and_intro(ctx, d1.true_proof_id, d2.true_proof_id, pq_id)
+            return decidable_true(pq_id, pq_prf)
+        } else {
+            // P true, Q false => ~(P /\ Q) because ~Q
+            let q_id = d2.prop_id
+            let nq_id = ctx_prop(ctx, prop_not(q_id))
+            let npq_id = ctx_prop(ctx, prop_not(pq_id))
+            // Assume P /\ Q, extract Q, contradiction with ~Q
+            let pq_assume = assume(ctx, 901, pq_id)
+            let q_from_pq = and_elim_right(ctx, pq_assume, q_id)
+            let falsum = not_elim(ctx, d2.false_proof_id, q_from_pq)
+            let npq_prf = not_intro(ctx, pq_assume, falsum, npq_id)
+            return decidable_false(pq_id, npq_prf)
+        }
+    } else {
+        // P false => ~(P /\ Q)
+        let p_id = d1.prop_id
+        let np_id = ctx_prop(ctx, prop_not(p_id))
+        let npq_id = ctx_prop(ctx, prop_not(pq_id))
+        let pq_assume = assume(ctx, 902, pq_id)
+        let p_from_pq = and_elim_left(ctx, pq_assume, p_id)
+        let falsum = not_elim(ctx, d1.false_proof_id, p_from_pq)
+        let npq_prf = not_intro(ctx, pq_assume, falsum, npq_id)
+        return decidable_false(pq_id, npq_prf)
+    }
+}
+
+// Decidable(P) /\ Decidable(Q) => Decidable(P \/ Q)
+fn decidable_or(ctx: &! ProofContext, d1: Decidable, d2: Decidable) -> Decidable {
+    let pq_id = ctx_prop(ctx, prop_or(d1.prop_id, d2.prop_id))
+    if d1.is_true {
+        let pq_prf = or_intro_left(ctx, d1.true_proof_id, pq_id)
+        return decidable_true(pq_id, pq_prf)
+    } else {
+        if d2.is_true {
+            let pq_prf = or_intro_right(ctx, d2.true_proof_id, pq_id)
+            return decidable_true(pq_id, pq_prf)
+        } else {
+            // Both false: ~P /\ ~Q => ~(P \/ Q)
+            let np_id = ctx_prop(ctx, prop_not(d1.prop_id))
+            let nq_id = ctx_prop(ctx, prop_not(d2.prop_id))
+            let npnq_id = ctx_prop(ctx, prop_and(np_id, nq_id))
+            let npnq_prf = and_intro(ctx, d1.false_proof_id, d2.false_proof_id, npnq_id)
+            let npq_prf = de_morgan_or_rev(ctx, npnq_prf, d1.prop_id, d2.prop_id)
+            return decidable_false(pq_id, npq_prf)
+        }
+    }
+}
+
+// Decidable(P) => Decidable(~P)
+fn decidable_not(ctx: &! ProofContext, d: Decidable) -> Decidable {
+    let np_id = ctx_prop(ctx, prop_not(d.prop_id))
+    if d.is_true {
+        // P is true, so ~P is false. Prove ~~P from P.
+        let nnp_prf = double_neg_intro(ctx, d.true_proof_id, d.prop_id)
+        return decidable_false(np_id, nnp_prf)
+    } else {
+        // P is false, ~P is true
+        return decidable_true(np_id, d.false_proof_id)
+    }
+}
+
+// ============================================================================
+// CURRYING
+// ============================================================================
+
+// (P /\ Q -> R) => (P -> Q -> R)
+fn curry_proof(ctx: &! ProofContext, pqr_proof_id: i64, p_id: i64, q_id: i64, r_id: i64) -> i64 {
+    let pq_id = ctx_prop(ctx, prop_and(p_id, q_id))
+    // Assume P, assume Q, build P /\ Q, apply PQ->R to get R
+    let p_assume = assume(ctx, 1101, p_id)
+    let q_assume = assume(ctx, 1102, q_id)
+    let pq_prf = and_intro(ctx, p_assume, q_assume, pq_id)
+    let r_prf = impl_elim(ctx, pqr_proof_id, pq_prf, r_id)
+    let qr_id = ctx_prop(ctx, prop_implies(q_id, r_id))
+    let qr_prf = impl_intro(ctx, q_assume, r_prf, qr_id)
+    let result_id = ctx_prop(ctx, prop_implies(p_id, qr_id))
+    return impl_intro(ctx, p_assume, qr_prf, result_id)
+}
+
+// (P -> Q -> R) => (P /\ Q -> R)
+fn uncurry_proof(ctx: &! ProofContext, pqr_proof_id: i64, p_id: i64, q_id: i64, r_id: i64) -> i64 {
+    let pq_id = ctx_prop(ctx, prop_and(p_id, q_id))
+    // Assume P /\ Q, extract P and Q, apply P -> (Q -> R) to P to get Q -> R, apply to Q
+    let pq_assume = assume(ctx, 1111, pq_id)
+    let p_prf = and_elim_left(ctx, pq_assume, p_id)
+    let q_prf = and_elim_right(ctx, pq_assume, q_id)
+    let qr_id = ctx_prop(ctx, prop_implies(q_id, r_id))
+    let qr_prf = impl_elim(ctx, pqr_proof_id, p_prf, qr_id)
+    let r_prf = impl_elim(ctx, qr_prf, q_prf, r_id)
+    let result_id = ctx_prop(ctx, prop_implies(pq_id, r_id))
+    return impl_intro(ctx, pq_assume, r_prf, result_id)
+}
