@@ -503,9 +503,46 @@ fn fit_logistic_epistemic(
         (1.0 - sep_conf) * (n as f64) * 0.3
     )
 
+    // Hosmer-Lemeshow goodness-of-fit test
+    // Bins observations into 10 equal-width probability groups [0,0.1), [0.1,0.2), ..., [0.9,1.0]
+    // HL = Σ_g [(O1g - E1g)² / E1g + (O0g - E0g)² / E0g]
+    // Under H₀ (good fit): HL ~ χ²(8)
+    // Reference: Hosmer & Lemeshow (2000), "Applied Logistic Regression", Ch. 5
+    var hl_stat = 0.0
+    var g: i64 = 0
+    while g < 10 {
+        let lo = (g as f64) * 0.1
+        let hi = if g == 9 { 1.0001 } else { lo + 0.1 }
+        var obs1 = 0.0   // observed events in bin
+        var exp1 = 0.0   // expected events in bin
+        var ng = 0.0     // total observations in bin
+        var j: i64 = 0
+        while j < n {
+            let p_j = 1.0 / (1.0 + logit_exp(0.0 - model.beta[0] - model.beta[1] * x[j as usize]))
+            if p_j >= lo && p_j < hi {
+                obs1 = obs1 + y[j as usize]
+                exp1 = exp1 + p_j
+                ng = ng + 1.0
+            }
+            j = j + 1
+        }
+        if ng > 0.0 && exp1 > 1.0e-8 && (ng - exp1) > 1.0e-8 {
+            let obs0 = ng - obs1
+            let exp0 = ng - exp1
+            hl_stat = hl_stat + (obs1 - exp1) * (obs1 - exp1) / exp1
+                    + (obs0 - exp0) * (obs0 - exp0) / exp0
+        }
+        g = g + 1
+    }
+    // p-value approximation for χ²(8): critical values 15.51 (p=0.05), 20.09 (p=0.01)
+    let hl_p = if hl_stat > 20.09 { 0.01 }
+               else if hl_stat > 15.51 { 0.05 }
+               else if hl_stat > 13.36 { 0.10 }
+               else { 0.50 }
+
     let diag = LogisticDiagnostics {
-        hosmer_lemeshow_stat: 0.0,  // TODO: full HL implementation
-        hosmer_lemeshow_p: 1.0,
+        hosmer_lemeshow_stat: hl_stat,
+        hosmer_lemeshow_p: hl_p,
         auc: auc,
         concordance: auc,  // C-statistic = AUC for binary
         separation_adequate: sep_beta,

@@ -113,7 +113,7 @@ fn difference(
     series: [f64; 500],
     n: i64,
     d: i64
-) -> ([f64; 500], i64) with Mut {
+) -> ([f64; 500], i64) with Mut, Div, Panic {
     var result: [f64; 500] = series
     var current_n = n
 
@@ -137,7 +137,7 @@ fn difference(
 // Autocorrelation Function
 // =============================================================================
 
-fn acf(series: [f64; 500], n: i64, max_lag: i64) -> [f64; 20] with Mut, Div {
+fn acf(series: [f64; 500], n: i64, max_lag: i64) -> [f64; 20] with Mut, Div, Panic {
     var result: [f64; 20] = [0.0; 20]
 
     // Mean
@@ -175,6 +175,158 @@ fn acf(series: [f64; 500], n: i64, max_lag: i64) -> [f64; 20] with Mut, Div {
 }
 
 // =============================================================================
+// Levinson-Durbin Recursion
+// =============================================================================
+//
+// Solves the Yule-Walker system for AR(p) coefficients given the normalised
+// autocorrelation sequence r[0..p] (r[0] == 1.0 after normalisation).
+//
+// Reference: Durbin (1960), Levinson (1947).
+//
+// Arguments:
+//   acf_vals  — autocorrelation array of length >= p+1 (index 0 == lag-0 ACF,
+//               which must be 1.0 for the normalised form expected here)
+//   order     — AR order p (1 <= p <= 5)
+//
+// Returns: AR coefficient array of length 5 (coefficients at indices 0..p-1).
+
+fn levinson_durbin(acf_vals: [f64; 20], order: i64) -> [f64; 5] with Mut, Div, Panic {
+    var phi: [f64; 5] = [0.0; 5]
+
+    if order <= 0 { return phi }
+
+    // phi_prev holds the coefficients from the previous order.
+    // We use two explicit arrays and swap conceptually.
+    var phi_prev: [f64; 5] = [0.0; 5]
+
+    // Initialise for k = 1
+    // Reflection coefficient: phi_11 = r(1) / r(0) = r(1)  (r(0) == 1.0)
+    phi_prev[0] = acf_vals[1]
+    // Prediction-error variance (unnormalised): P_1 = 1 - phi_11^2
+    var P = 1.0 - phi_prev[0] * phi_prev[0]
+
+    // Copy into phi (will be returned if order == 1)
+    var idx: i64 = 0
+    while idx < 5 { phi[idx as usize] = phi_prev[idx as usize]; idx = idx + 1 }
+
+    var k: i64 = 2
+    while k <= order {
+        // --- Compute reflection coefficient for order k ---
+        // lambda = r(k) - sum_{j=1}^{k-1} phi_{k-1,j} * r(k-j)
+        var lambda = acf_vals[k as usize]
+        var j: i64 = 1
+        while j <= k - 1 {
+            lambda = lambda - phi_prev[(j - 1) as usize] * acf_vals[(k - j) as usize]
+            j = j + 1
+        }
+
+        // Guard against near-zero prediction-error variance
+        var phi_kk = 0.0
+        if ar_abs(P) > 1.0e-12 { phi_kk = lambda / P }
+
+        // --- Update AR coefficients ---
+        // phi_{k,j} = phi_{k-1,j} - phi_kk * phi_{k-1,k-j}   for j = 1..k-1
+        // phi_{k,k} = phi_kk
+        var phi_new: [f64; 5] = [0.0; 5]
+        j = 1
+        while j <= k - 1 {
+            phi_new[(j - 1) as usize] =
+                phi_prev[(j - 1) as usize]
+                - phi_kk * phi_prev[(k - j - 1) as usize]
+            j = j + 1
+        }
+        phi_new[(k - 1) as usize] = phi_kk
+
+        // --- Update prediction-error variance ---
+        P = P * (1.0 - phi_kk * phi_kk)
+
+        // Copy phi_new → phi_prev for next iteration and into phi for return
+        idx = 0
+        while idx < 5 {
+            phi_prev[idx as usize] = phi_new[idx as usize]
+            phi[idx as usize]      = phi_new[idx as usize]
+            idx = idx + 1
+        }
+
+        k = k + 1
+    }
+
+    phi
+}
+
+// =============================================================================
+// MA(q) Estimation via OLS on Innovations
+// =============================================================================
+//
+// After fitting the AR part the residuals approximate the innovation process.
+// For MA(q) we regress each residual e[t] on the q most-recent lagged residuals
+// e[t-1], ..., e[t-q] by solving the normal equations directly.
+//
+// For q = 1 this is just the sample correlation between e[t] and e[t-1].
+// For q = 2 we solve a 2x2 system.  For q > 2 we iteratively refine using a
+// single Gauss-Seidel sweep (sufficient for initial estimates).
+//
+// Arguments:
+//   residuals — residual array (length n, stored in a [f64; 500] buffer)
+//   n         — number of valid residuals
+//   q         — MA order (1 <= q <= 5)
+//
+// Returns: MA coefficient array of length 5 (indices 0..q-1).
+
+fn estimate_ma_coefficients(residuals: [f64; 500], n: i64, q: i64) -> [f64; 5] with Mut, Div, Panic {
+    var theta: [f64; 5] = [0.0; 5]
+
+    if q <= 0 || n <= q { return theta }
+
+    // Build the sample autocovariance of the residuals up to lag q.
+    // c[k] = (1/n) * sum_{t=k}^{n-1} e[t] * e[t-k]
+    var c: [f64; 6] = [0.0; 6]  // index 0..q, q <= 5
+    var k: i64 = 0
+    while k <= q && k < 6 {
+        var sum = 0.0
+        var t: i64 = k
+        while t < n {
+            sum = sum + residuals[t as usize] * residuals[(t - k) as usize]
+            t = t + 1
+        }
+        c[k as usize] = sum / (n as f64)
+        k = k + 1
+    }
+
+    // Guard: if residual variance is negligible MA coefficients stay zero
+    if ar_abs(c[0]) < 1.0e-12 { return theta }
+
+    if q == 1 {
+        // theta_1 = c(1) / c(0)   (OLS slope, also moment estimator)
+        theta[0] = c[1] / c[0]
+    } else if q == 2 {
+        // Solve 2x2 Yule-Walker–like system for the MA side:
+        //   [c(0)  c(1)] [theta_1]   [c(1)]
+        //   [c(1)  c(0)] [theta_2] = [c(2)]
+        let det = c[0] * c[0] - c[1] * c[1]
+        if ar_abs(det) > 1.0e-12 {
+            theta[0] = (c[0] * c[1] - c[1] * c[2]) / det
+            theta[1] = (c[0] * c[2] - c[1] * c[1]) / det
+        }
+    } else {
+        // For q >= 3: use Levinson-Durbin on the residual ACF.
+        // First build the normalised ACF array (length 20) for the residuals.
+        var resid_acf: [f64; 20] = [0.0; 20]
+        resid_acf[0] = 1.0
+        var lag: i64 = 1
+        while lag <= q && lag < 20 {
+            resid_acf[lag as usize] = c[lag as usize] / c[0]
+            lag = lag + 1
+        }
+        // Levinson-Durbin gives AR coefficients for the ACF structure;
+        // the resulting coefficients serve as moment-based MA estimates.
+        theta = levinson_durbin(resid_acf, q)
+    }
+
+    theta
+}
+
+// =============================================================================
 // AR(p) Estimation via Yule-Walker
 // =============================================================================
 
@@ -195,22 +347,9 @@ fn fit_ar(
     while i < n { mean = mean + series[i as usize]; i = i + 1 }
     mean = mean / (n as f64)
 
-    var ar_coeffs: [f64; 5] = [0.0; 5]
-
-    if p == 1 {
-        // AR(1): φ₁ = ρ(1)
-        ar_coeffs[0] = autocorr[1]
-    } else if p == 2 {
-        // AR(2): solve [[1, ρ₁], [ρ₁, 1]] · [φ₁, φ₂] = [ρ₁, ρ₂]
-        let r1 = autocorr[1]
-        let r2 = autocorr[2]
-        let det = 1.0 - r1 * r1
-        if ar_abs(det) > 1.0e-10 {
-            ar_coeffs[0] = (r1 - r1 * r2) / det
-            ar_coeffs[1] = (r2 - r1 * r1) / det
-        }
-    }
-    // Higher orders: Levinson-Durbin recursion (TODO)
+    // Levinson-Durbin recursion solves the full Yule-Walker system for any p.
+    // For p == 0 it returns a zero array (pure MA / white-noise case).
+    var ar_coeffs: [f64; 5] = levinson_durbin(autocorr, p)
 
     // Compute residuals
     var residuals: [f64; 500] = [0.0; 500]
@@ -270,11 +409,48 @@ fn fit_arima(
     // Step 1: Difference d times
     let (diff_series, diff_n) = difference(series, n, d)
 
-    // Step 2: Fit AR(p) on differenced series
-    // (Full ARIMA would use MLE with MA terms; this is AR approximation)
+    // Step 2: Fit AR(p) on differenced series via Levinson-Durbin / Yule-Walker
     var result = fit_ar(diff_series, diff_n, p)
     result.d = d
     result.q = q
+
+    // Step 3: If q > 0, estimate MA(q) coefficients from the AR residuals.
+    // The AR residuals stored in result.residuals approximate the innovations;
+    // estimate_ma_coefficients regresses e[t] on e[t-1]..e[t-q] via OLS /
+    // moment matching to produce initial MA parameter estimates.
+    if q > 0 {
+        let ma_est = estimate_ma_coefficients(result.residuals, result.n_obs, q)
+        result.ma_coeffs = ma_est
+
+        // Refine residuals with MA correction:
+        //   e_arma[t] = e_ar[t] - sum_{j=1}^{q} theta_j * e_ar[t-j]
+        var refined: [f64; 500] = [0.0; 500]
+        var rss2 = 0.0
+        var i: i64 = q
+        while i < result.n_obs {
+            var corr = result.residuals[i as usize]
+            var j: i64 = 0
+            while j < q {
+                corr = corr - ma_est[j as usize] * result.residuals[(i - j - 1) as usize]
+                j = j + 1
+            }
+            refined[i as usize] = corr
+            rss2 = rss2 + corr * corr
+            i = i + 1
+        }
+
+        let eff_n2 = (result.n_obs - p - q) as f64
+        let sigma2_arma = if eff_n2 > 0.0 { rss2 / eff_n2 } else { result.sigma_squared }
+        result.residuals    = refined
+        result.sigma_squared = sigma2_arma
+
+        // Update log-likelihood, AIC, BIC with new sigma and parameter count
+        let ll2 = -0.5 * eff_n2 * (1.0 + ar_ln(2.0 * 3.14159265) + ar_ln(sigma2_arma))
+        let k2  = (p + q + 1) as f64
+        result.log_likelihood = ll2
+        result.aic            = -2.0 * ll2 + 2.0 * k2
+        result.bic            = -2.0 * ll2 + k2 * ar_ln(eff_n2)
+    }
 
     result
 }
@@ -374,7 +550,7 @@ fn forecast_arima(
 // Ljung-Box Test
 // =============================================================================
 
-fn ljung_box(residuals: [f64; 500], n: i64, max_lag: i64) -> (f64, f64) with Mut, Div {
+fn ljung_box(residuals: [f64; 500], n: i64, max_lag: i64) -> (f64, f64) with Mut, Div, Panic {
     let autocorr = acf(residuals, n, max_lag)
 
     // Q = n(n+2) Σ ρ²(k) / (n-k)
