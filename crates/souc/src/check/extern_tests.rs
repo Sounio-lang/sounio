@@ -45,3 +45,69 @@ fn extern_fn_is_resolved_and_lowered() {
         .any(|i| matches!(&i.op, hlir::Op::CallDirect { name, .. } if name == "d_puts"));
     assert!(has_call, "expected a direct call to extern fn `puts`");
 }
+
+fn check_source(source: &str) -> miette::Result<crate::hir::Hir> {
+    let tokens = lexer::lex(source).expect("lex");
+    let ast = parser::parse(&tokens, source).expect("parse");
+    check::check_ast(&ast)
+}
+
+#[test]
+fn return_with_trailing_semicolon_typechecks() {
+    let source = r#"
+        fn main() -> i64 {
+            return 1;
+        }
+    "#;
+
+    let checked = check_source(source);
+    assert!(checked.is_ok(), "expected explicit return to typecheck");
+}
+
+#[test]
+fn trailing_semicolon_non_return_still_fails() {
+    let source = r#"
+        fn main() -> i64 {
+            1;
+        }
+    "#;
+
+    let checked = check_source(source);
+    assert!(
+        checked.is_err(),
+        "non-return trailing semicolon must not typecheck"
+    );
+}
+
+#[test]
+fn vec_plus_array_is_rejected_with_hint() {
+    let source = r#"
+        fn main() -> i32 with Mut, Alloc {
+            var xs: Vec<i64> = []
+            xs = xs + [1]
+            return 0
+        }
+    "#;
+
+    let err = check_source(source).expect_err("Vec + [x] must be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Vec append with '+' is not supported")
+            && msg.contains("use '++ [value]' instead"),
+        "expected actionable Vec append hint, got: {msg}"
+    );
+}
+
+#[test]
+fn vec_concat_array_typechecks() {
+    let source = r#"
+        fn main() -> i32 with Mut, Alloc {
+            var xs: Vec<i64> = []
+            xs = xs ++ [1]
+            return 0
+        }
+    "#;
+
+    let checked = check_source(source);
+    assert!(checked.is_ok(), "Vec ++ [x] should typecheck");
+}

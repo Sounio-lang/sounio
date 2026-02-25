@@ -284,6 +284,8 @@ impl Resolver {
             "quat_lstm_cell",
             "quat_gru_cell",
             "quat_attention",
+            // ODE solver bridge
+            "solve_ode",
         ];
 
         for name in builtins {

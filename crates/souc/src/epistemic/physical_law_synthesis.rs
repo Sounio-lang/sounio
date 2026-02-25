@@ -866,7 +866,8 @@ mod tests {
         let equations = ["∂u/∂t = D∇²u"];
 
         let config = AutoPinNConfig {
-            confidence_target: 0.999, // Very high target
+            // Keep this impossible regardless of confidence model changes.
+            confidence_target: 1.001,
             ..Default::default()
         };
 
