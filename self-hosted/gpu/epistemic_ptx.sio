@@ -898,7 +898,7 @@ fn epistemic_ptx_new(config: EpistemicPtxConfig) -> EpistemicPtxState {
 fn epistemic_alloc_shadow(
     st: EpistemicPtxState,
     base: string
-) -> (EpistemicPtxState, EpistemicShadow) with Alloc {
+) -> (EpistemicPtxState, EpistemicShadow) with Mut, Panic, Div, Alloc {
     var out = st
     let idx = out.shadow_counter
     out.shadow_counter = idx + 1
@@ -907,14 +907,14 @@ fn epistemic_alloc_shadow(
     (out, shadow)
 }
 
-fn epistemic_alloc_temp_f32(st: EpistemicPtxState) -> (EpistemicPtxState, string) with Alloc {
+fn epistemic_alloc_temp_f32(st: EpistemicPtxState) -> (EpistemicPtxState, string) with Mut, Panic, Div, Alloc {
     var out = st
     let idx = out.temp_f32_count
     out.temp_f32_count = idx + 1
     (out, "%r_eps_t" ++ i64_to_string(idx))
 }
 
-fn epistemic_alloc_temp_pred(st: EpistemicPtxState) -> (EpistemicPtxState, string) with Alloc {
+fn epistemic_alloc_temp_pred(st: EpistemicPtxState) -> (EpistemicPtxState, string) with Mut, Panic, Div, Alloc {
     var out = st
     let idx = out.temp_pred_count
     out.temp_pred_count = idx + 1
@@ -1708,6 +1708,969 @@ fn epistemic_emit_weighted_mean(
     out
 }
 
+// ══════════════════════════════════════════════════════════════════════
+// Phase 2: f64 Epistemic Shadow Registers — Knowledge<f64> on GPU
+// ══════════════════════════════════════════════════════════════════════
+//
+// Promotes all shadow registers to f64 for double-precision epistemic
+// computing. Uses %fd_ prefix for f64 values, f64 epsilon (matching
+// precision), pred for validity, u64 for provenance.
+
+struct EpistemicShadowF64 {
+    val_name: string,    // e.g. "%fd_a"       (f64)
+    eps_name: string,    // e.g. "%fd_a_eps"   (f64)
+    valid_name: string,  // e.g. "%p_a_valid"  (pred)
+    prov_name: string,   // e.g. "%rd_a_prov"  (u64)
+}
+
+fn epistemic_shadow_f64_new(base: string) -> EpistemicShadowF64 with Alloc {
+    EpistemicShadowF64 {
+        val_name: "%fd_" ++ base,
+        eps_name: "%fd_" ++ base ++ "_eps",
+        valid_name: "%p_" ++ base ++ "_valid",
+        prov_name: "%rd_" ++ base ++ "_prov",
+    }
+}
+
+// Extended state for f64 epistemic compilation
+struct EpistemicF64State {
+    buf: PtxBuf,
+    config: EpistemicPtxConfig,
+    shadow_counter: i64,
+    temp_f64_count: i64,
+    temp_pred_count: i64,
+    temp_u64_count: i64,
+}
+
+fn epistemic_f64_new(config: EpistemicPtxConfig) -> EpistemicF64State {
+    EpistemicF64State {
+        buf: ptx_buf_new(),
+        config: config,
+        shadow_counter: 0,
+        temp_f64_count: 0,
+        temp_pred_count: 0,
+        temp_u64_count: 0,
+    }
+}
+
+fn epistemic_f64_alloc_shadow(
+    st: EpistemicF64State,
+    base: string
+) -> (EpistemicF64State, EpistemicShadowF64) with Mut, Panic, Div, Alloc {
+    var out = st
+    let idx = out.shadow_counter
+    out.shadow_counter = idx + 1
+    let name = base ++ "_" ++ i64_to_string(idx)
+    let shadow = epistemic_shadow_f64_new(name)
+    (out, shadow)
+}
+
+// f64 shadow register pool declaration
+fn epistemic_f64_emit_shadow_reg_pool(
+    st: EpistemicF64State,
+    num_shadows: i64
+) -> EpistemicF64State with Mut, Panic, Div, Alloc {
+    var out = st
+    out.buf = ptx_push_str(out.buf, "    // Epistemic f64 shadow registers (Knowledge<f64>)\n")
+    // Value registers (f64)
+    out.buf = ptx_push_str(out.buf, "    .reg .f64 %fd_<")
+    out.buf = ptx_push_str(out.buf, i64_to_string(num_shadows * 2))
+    out.buf = ptx_push_str(out.buf, ">;  // f64 values + epsilons\n")
+    // Validity predicates
+    out.buf = ptx_push_str(out.buf, "    .reg .pred %p_<")
+    out.buf = ptx_push_str(out.buf, i64_to_string(num_shadows + 16))
+    out.buf = ptx_push_str(out.buf, ">;  // validity + temporaries\n")
+    // Provenance registers (u64)
+    if out.config.provenance_tracking {
+        out.buf = ptx_push_str(out.buf, "    .reg .b64 %rd_prov_<")
+        out.buf = ptx_push_str(out.buf, i64_to_string(num_shadows))
+        out.buf = ptx_push_str(out.buf, ">;  // provenance\n")
+    }
+    // Temporary registers for f64 epsilon calculations
+    out.buf = ptx_push_str(out.buf, "    .reg .f64 %fd_eps_t<16>;  // f64 epsilon temporaries\n")
+    out.buf = ptx_push_str(out.buf, "    .reg .pred %p_eps_t<8>;   // predicate temporaries\n")
+    out.buf = ptx_push_str(out.buf, "    .reg .b64 %rd_prov_t<4>;  // provenance temporaries\n")
+    out.buf = ptx_push_str(out.buf, "\n")
+    out
+}
+
+// f64 shadow initialisation
+fn epistemic_f64_emit_init_shadow(
+    st: EpistemicF64State,
+    shadow: EpistemicShadowF64,
+    initial_value_hex: string,
+    initial_epsilon_hex: string
+) -> EpistemicF64State with Mut, Panic, Div, Alloc {
+    var out = st
+    // Value
+    out.buf = ptx_push_str(out.buf, "    mov.f64 ")
+    out.buf = ptx_push_str(out.buf, shadow.val_name)
+    out.buf = ptx_push_str(out.buf, ", 0d")
+    out.buf = ptx_push_str(out.buf, initial_value_hex)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    // Epsilon
+    out.buf = ptx_push_str(out.buf, "    mov.f64 ")
+    out.buf = ptx_push_str(out.buf, shadow.eps_name)
+    out.buf = ptx_push_str(out.buf, ", 0d")
+    out.buf = ptx_push_str(out.buf, initial_epsilon_hex)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    // Validity = true
+    out.buf = ptx_push_str(out.buf, "    setp.eq.s32 ")
+    out.buf = ptx_push_str(out.buf, shadow.valid_name)
+    out.buf = ptx_push_str(out.buf, ", 1, 1;\n")
+    // Provenance
+    if out.config.provenance_tracking {
+        out.buf = ptx_push_str(out.buf, "    mov.u64 ")
+        out.buf = ptx_push_str(out.buf, shadow.prov_name)
+        out.buf = ptx_push_str(out.buf, ", 0;\n")
+    }
+    out
+}
+
+// ── f64 Add/Sub: ε_c = √(ε_a² + ε_b²)  [quadrature] ───────────────
+
+fn epistemic_f64_emit_add(
+    st: EpistemicF64State,
+    result: EpistemicShadowF64,
+    left: EpistemicShadowF64,
+    right: EpistemicShadowF64,
+    is_sub: bool
+) -> EpistemicF64State with Mut, Panic, Div, Alloc {
+    var out = st
+    // Value computation
+    if is_sub {
+        out.buf = ptx_push_str(out.buf, "    sub.f64 ")
+    } else {
+        out.buf = ptx_push_str(out.buf, "    add.f64 ")
+    }
+    out.buf = ptx_push_str(out.buf, result.val_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, left.val_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, right.val_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+
+    // Epsilon: quadrature propagation
+    if out.config.quadrature_propagation {
+        // ε_a²
+        out.buf = ptx_push_str(out.buf, "    mul.rn.f64 %fd_eps_t0, ")
+        out.buf = ptx_push_str(out.buf, left.eps_name)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, left.eps_name)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        // ε_b²
+        out.buf = ptx_push_str(out.buf, "    mul.rn.f64 %fd_eps_t1, ")
+        out.buf = ptx_push_str(out.buf, right.eps_name)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, right.eps_name)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        // ε_a² + ε_b²
+        out.buf = ptx_push_str(out.buf, "    add.f64 %fd_eps_t2, %fd_eps_t0, %fd_eps_t1;\n")
+        // √(ε_a² + ε_b²) — .rn for round-to-nearest (no approx for f64)
+        out.buf = ptx_push_str(out.buf, "    sqrt.rn.f64 ")
+        out.buf = ptx_push_str(out.buf, result.eps_name)
+        out.buf = ptx_push_str(out.buf, ", %fd_eps_t2;\n")
+    } else {
+        out.buf = ptx_push_str(out.buf, "    max.f64 ")
+        out.buf = ptx_push_str(out.buf, result.eps_name)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, left.eps_name)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, right.eps_name)
+        out.buf = ptx_push_str(out.buf, ";\n")
+    }
+
+    // Validity: conjunction
+    out.buf = ptx_push_str(out.buf, "    and.pred ")
+    out.buf = ptx_push_str(out.buf, result.valid_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, left.valid_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, right.valid_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+
+    // Provenance: XOR merge
+    if out.config.provenance_tracking {
+        out.buf = ptx_push_str(out.buf, "    xor.b64 ")
+        out.buf = ptx_push_str(out.buf, result.prov_name)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, left.prov_name)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, right.prov_name)
+        out.buf = ptx_push_str(out.buf, ";\n")
+    }
+    out
+}
+
+// ── f64 Mul: ε_c = |a|·ε_b + |b|·ε_a ───────────────────────────────
+
+fn epistemic_f64_emit_mul(
+    st: EpistemicF64State,
+    result: EpistemicShadowF64,
+    left: EpistemicShadowF64,
+    right: EpistemicShadowF64
+) -> EpistemicF64State with Mut, Panic, Div, Alloc {
+    var out = st
+    // Value
+    out.buf = ptx_push_str(out.buf, "    mul.rn.f64 ")
+    out.buf = ptx_push_str(out.buf, result.val_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, left.val_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, right.val_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    // |a|
+    out.buf = ptx_push_str(out.buf, "    abs.f64 %fd_eps_t0, ")
+    out.buf = ptx_push_str(out.buf, left.val_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    // |b|
+    out.buf = ptx_push_str(out.buf, "    abs.f64 %fd_eps_t1, ")
+    out.buf = ptx_push_str(out.buf, right.val_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    // |a| * ε_b
+    out.buf = ptx_push_str(out.buf, "    mul.rn.f64 %fd_eps_t2, %fd_eps_t0, ")
+    out.buf = ptx_push_str(out.buf, right.eps_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    // |b| * ε_a
+    out.buf = ptx_push_str(out.buf, "    mul.rn.f64 %fd_eps_t3, %fd_eps_t1, ")
+    out.buf = ptx_push_str(out.buf, left.eps_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    // Sum
+    out.buf = ptx_push_str(out.buf, "    add.f64 ")
+    out.buf = ptx_push_str(out.buf, result.eps_name)
+    out.buf = ptx_push_str(out.buf, ", %fd_eps_t2, %fd_eps_t3;\n")
+
+    // Validity + provenance (same as f32 pattern)
+    out.buf = ptx_push_str(out.buf, "    and.pred ")
+    out.buf = ptx_push_str(out.buf, result.valid_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, left.valid_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, right.valid_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    if out.config.provenance_tracking {
+        out.buf = ptx_push_str(out.buf, "    xor.b64 ")
+        out.buf = ptx_push_str(out.buf, result.prov_name)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, left.prov_name)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, right.prov_name)
+        out.buf = ptx_push_str(out.buf, ";\n")
+    }
+    out
+}
+
+// ── f64 Div: ε_c = (|a|·ε_b + |b|·ε_a) / b²  [+ near-zero guard] ──
+
+fn epistemic_f64_emit_div(
+    st: EpistemicF64State,
+    result: EpistemicShadowF64,
+    left: EpistemicShadowF64,
+    right: EpistemicShadowF64
+) -> EpistemicF64State with Mut, Panic, Div, Alloc {
+    var out = st
+    // Value
+    out.buf = ptx_push_str(out.buf, "    div.rn.f64 ")
+    out.buf = ptx_push_str(out.buf, result.val_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, left.val_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, right.val_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    // Numerator: |a|·ε_b + |b|·ε_a
+    out.buf = ptx_push_str(out.buf, "    abs.f64 %fd_eps_t0, ")
+    out.buf = ptx_push_str(out.buf, left.val_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out.buf = ptx_push_str(out.buf, "    abs.f64 %fd_eps_t1, ")
+    out.buf = ptx_push_str(out.buf, right.val_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out.buf = ptx_push_str(out.buf, "    mul.rn.f64 %fd_eps_t2, %fd_eps_t0, ")
+    out.buf = ptx_push_str(out.buf, right.eps_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out.buf = ptx_push_str(out.buf, "    mul.rn.f64 %fd_eps_t3, %fd_eps_t1, ")
+    out.buf = ptx_push_str(out.buf, left.eps_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out.buf = ptx_push_str(out.buf, "    add.f64 %fd_eps_t0, %fd_eps_t2, %fd_eps_t3;\n")
+    // Denominator: b²
+    out.buf = ptx_push_str(out.buf, "    mul.rn.f64 %fd_eps_t1, ")
+    out.buf = ptx_push_str(out.buf, right.val_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, right.val_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    // ε_c = numerator / b²
+    out.buf = ptx_push_str(out.buf, "    div.rn.f64 ")
+    out.buf = ptx_push_str(out.buf, result.eps_name)
+    out.buf = ptx_push_str(out.buf, ", %fd_eps_t0, %fd_eps_t1;\n")
+    // Near-zero guard: if |b| < 1e-12, max out uncertainty
+    out.buf = ptx_push_str(out.buf, "    abs.f64 %fd_eps_t2, ")
+    out.buf = ptx_push_str(out.buf, right.val_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    // 1e-12 in f64 hex = 0d3D719799812DEA11
+    out.buf = ptx_push_str(out.buf, "    setp.lt.f64 %p_eps_t0, %fd_eps_t2, 0d3D719799812DEA11;\n")
+    // Max uncertainty = 1.0 in f64 = 0d3FF0000000000000
+    out.buf = ptx_push_str(out.buf, "    @%p_eps_t0 mov.f64 ")
+    out.buf = ptx_push_str(out.buf, result.eps_name)
+    out.buf = ptx_push_str(out.buf, ", 0d3FF0000000000000;\n")
+    // Validity + provenance
+    out.buf = ptx_push_str(out.buf, "    and.pred ")
+    out.buf = ptx_push_str(out.buf, result.valid_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, left.valid_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, right.valid_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    if out.config.provenance_tracking {
+        out.buf = ptx_push_str(out.buf, "    xor.b64 ")
+        out.buf = ptx_push_str(out.buf, result.prov_name)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, left.prov_name)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, right.prov_name)
+        out.buf = ptx_push_str(out.buf, ";\n")
+    }
+    out
+}
+
+// ── f64 FMA: ε = √((|a|·ε_b + |b|·ε_a)² + ε_c²) ──────────────────
+
+fn epistemic_f64_emit_fma(
+    st: EpistemicF64State,
+    result: EpistemicShadowF64,
+    a: EpistemicShadowF64,
+    b: EpistemicShadowF64,
+    c: EpistemicShadowF64
+) -> EpistemicF64State with Mut, Panic, Div, Alloc {
+    var out = st
+    // Value: fma(a, b, c)
+    out.buf = ptx_push_str(out.buf, "    fma.rn.f64 ")
+    out.buf = ptx_push_str(out.buf, result.val_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, a.val_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, b.val_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, c.val_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    // Mul part: |a|·ε_b + |b|·ε_a
+    out.buf = ptx_push_str(out.buf, "    abs.f64 %fd_eps_t0, ")
+    out.buf = ptx_push_str(out.buf, a.val_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out.buf = ptx_push_str(out.buf, "    abs.f64 %fd_eps_t1, ")
+    out.buf = ptx_push_str(out.buf, b.val_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out.buf = ptx_push_str(out.buf, "    mul.rn.f64 %fd_eps_t2, %fd_eps_t0, ")
+    out.buf = ptx_push_str(out.buf, b.eps_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out.buf = ptx_push_str(out.buf, "    mul.rn.f64 %fd_eps_t3, %fd_eps_t1, ")
+    out.buf = ptx_push_str(out.buf, a.eps_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out.buf = ptx_push_str(out.buf, "    add.f64 %fd_eps_t0, %fd_eps_t2, %fd_eps_t3;\n")
+    // Square the mul part
+    out.buf = ptx_push_str(out.buf, "    mul.rn.f64 %fd_eps_t0, %fd_eps_t0, %fd_eps_t0;\n")
+    // ε_c²
+    out.buf = ptx_push_str(out.buf, "    mul.rn.f64 %fd_eps_t1, ")
+    out.buf = ptx_push_str(out.buf, c.eps_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, c.eps_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    // Sum + sqrt
+    out.buf = ptx_push_str(out.buf, "    add.f64 %fd_eps_t2, %fd_eps_t0, %fd_eps_t1;\n")
+    out.buf = ptx_push_str(out.buf, "    sqrt.rn.f64 ")
+    out.buf = ptx_push_str(out.buf, result.eps_name)
+    out.buf = ptx_push_str(out.buf, ", %fd_eps_t2;\n")
+    // Validity: 3-way
+    out.buf = ptx_push_str(out.buf, "    and.pred %p_eps_t0, ")
+    out.buf = ptx_push_str(out.buf, a.valid_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, b.valid_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out.buf = ptx_push_str(out.buf, "    and.pred ")
+    out.buf = ptx_push_str(out.buf, result.valid_name)
+    out.buf = ptx_push_str(out.buf, ", %p_eps_t0, ")
+    out.buf = ptx_push_str(out.buf, c.valid_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    // Provenance: 3-way XOR
+    if out.config.provenance_tracking {
+        out.buf = ptx_push_str(out.buf, "    xor.b64 %rd_prov_t0, ")
+        out.buf = ptx_push_str(out.buf, a.prov_name)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, b.prov_name)
+        out.buf = ptx_push_str(out.buf, ";\n")
+        out.buf = ptx_push_str(out.buf, "    xor.b64 ")
+        out.buf = ptx_push_str(out.buf, result.prov_name)
+        out.buf = ptx_push_str(out.buf, ", %rd_prov_t0, ")
+        out.buf = ptx_push_str(out.buf, c.prov_name)
+        out.buf = ptx_push_str(out.buf, ";\n")
+    }
+    out
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Phase 2: .knowledge.* PTX Intrinsic Functions
+// ══════════════════════════════════════════════════════════════════════
+//
+// World-first: callable PTX .func definitions that treat Knowledge<f64>
+// as a first-class 4-register tuple. Each intrinsic encapsulates the
+// full uncertainty propagation sequence as a self-contained PTX function
+// that kernel code can call.
+//
+// Calling convention:
+//   .func knowledge_add_f64(
+//       .param .f64 out_val, .param .f64 out_eps,
+//       .param .b32 out_valid, .param .b64 out_prov,
+//       .param .f64 a_val, .param .f64 a_eps,
+//       .param .b32 a_valid, .param .b64 a_prov,
+//       .param .f64 b_val, .param .f64 b_eps,
+//       .param .b32 b_valid, .param .b64 b_prov
+//   )
+
+fn knowledge_emit_func_header(
+    buf: PtxBuf,
+    func_name: string
+) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "\n// .knowledge.* intrinsic: ")
+    out = ptx_push_str(out, func_name)
+    out = ptx_push_str(out, "\n.func ")
+    out = ptx_push_str(out, func_name)
+    out = ptx_push_str(out, "(\n")
+    // Output params
+    out = ptx_push_str(out, "    .param .f64 _out_val,\n")
+    out = ptx_push_str(out, "    .param .f64 _out_eps,\n")
+    out = ptx_push_str(out, "    .param .b32 _out_valid,\n")
+    out = ptx_push_str(out, "    .param .b64 _out_prov,\n")
+    // Input A params
+    out = ptx_push_str(out, "    .param .f64 _a_val,\n")
+    out = ptx_push_str(out, "    .param .f64 _a_eps,\n")
+    out = ptx_push_str(out, "    .param .b32 _a_valid,\n")
+    out = ptx_push_str(out, "    .param .b64 _a_prov,\n")
+    // Input B params
+    out = ptx_push_str(out, "    .param .f64 _b_val,\n")
+    out = ptx_push_str(out, "    .param .f64 _b_eps,\n")
+    out = ptx_push_str(out, "    .param .b32 _b_valid,\n")
+    out = ptx_push_str(out, "    .param .b64 _b_prov\n")
+    out = ptx_push_str(out, ")\n{\n")
+    // Local register declarations
+    out = ptx_push_str(out, "    .reg .f64 %lv, %le, %av, %ae, %bv, %be;\n")
+    out = ptx_push_str(out, "    .reg .pred %lp, %ap, %bp;\n")
+    out = ptx_push_str(out, "    .reg .b64 %lr, %ar, %br;\n")
+    out = ptx_push_str(out, "    .reg .f64 %t0, %t1, %t2, %t3;\n")
+    out = ptx_push_str(out, "    .reg .pred %tp;\n")
+    out = ptx_push_str(out, "    .reg .b64 %tr;\n")
+    out = ptx_push_str(out, "    .reg .b32 %vi;\n")
+    out = ptx_push_str(out, "\n")
+    // Load params into locals
+    out = ptx_push_str(out, "    ld.param.f64 %av, [_a_val];\n")
+    out = ptx_push_str(out, "    ld.param.f64 %ae, [_a_eps];\n")
+    out = ptx_push_str(out, "    ld.param.b32 %vi, [_a_valid];\n")
+    out = ptx_push_str(out, "    setp.ne.s32 %ap, %vi, 0;\n")
+    out = ptx_push_str(out, "    ld.param.b64 %ar, [_a_prov];\n")
+    out = ptx_push_str(out, "    ld.param.f64 %bv, [_b_val];\n")
+    out = ptx_push_str(out, "    ld.param.f64 %be, [_b_eps];\n")
+    out = ptx_push_str(out, "    ld.param.b32 %vi, [_b_valid];\n")
+    out = ptx_push_str(out, "    setp.ne.s32 %bp, %vi, 0;\n")
+    out = ptx_push_str(out, "    ld.param.b64 %br, [_b_prov];\n")
+    out = ptx_push_str(out, "\n")
+    out
+}
+
+fn knowledge_emit_func_footer(buf: PtxBuf) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    // Store results back to output params
+    out = ptx_push_str(out, "\n    st.param.f64 [_out_val], %lv;\n")
+    out = ptx_push_str(out, "    st.param.f64 [_out_eps], %le;\n")
+    out = ptx_push_str(out, "    selp.b32 %vi, 1, 0, %lp;\n")
+    out = ptx_push_str(out, "    st.param.b32 [_out_valid], %vi;\n")
+    out = ptx_push_str(out, "    st.param.b64 [_out_prov], %lr;\n")
+    out = ptx_push_str(out, "    ret;\n")
+    out = ptx_push_str(out, "}\n")
+    out
+}
+
+// knowledge_add_f64: additive propagation with quadrature epsilon
+fn knowledge_emit_intrinsic_add(buf: PtxBuf) -> PtxBuf with Mut, Panic, Div {
+    var out = knowledge_emit_func_header(buf, "knowledge_add_f64")
+    // Value: a + b
+    out = ptx_push_str(out, "    add.f64 %lv, %av, %bv;\n")
+    // Epsilon: √(ε_a² + ε_b²)
+    out = ptx_push_str(out, "    mul.rn.f64 %t0, %ae, %ae;\n")
+    out = ptx_push_str(out, "    mul.rn.f64 %t1, %be, %be;\n")
+    out = ptx_push_str(out, "    add.f64 %t2, %t0, %t1;\n")
+    out = ptx_push_str(out, "    sqrt.rn.f64 %le, %t2;\n")
+    // Validity: and
+    out = ptx_push_str(out, "    and.pred %lp, %ap, %bp;\n")
+    // Provenance: xor
+    out = ptx_push_str(out, "    xor.b64 %lr, %ar, %br;\n")
+    out = knowledge_emit_func_footer(out)
+    out
+}
+
+// knowledge_sub_f64: subtractive propagation (same epsilon as add)
+fn knowledge_emit_intrinsic_sub(buf: PtxBuf) -> PtxBuf with Mut, Panic, Div {
+    var out = knowledge_emit_func_header(buf, "knowledge_sub_f64")
+    out = ptx_push_str(out, "    sub.f64 %lv, %av, %bv;\n")
+    out = ptx_push_str(out, "    mul.rn.f64 %t0, %ae, %ae;\n")
+    out = ptx_push_str(out, "    mul.rn.f64 %t1, %be, %be;\n")
+    out = ptx_push_str(out, "    add.f64 %t2, %t0, %t1;\n")
+    out = ptx_push_str(out, "    sqrt.rn.f64 %le, %t2;\n")
+    out = ptx_push_str(out, "    and.pred %lp, %ap, %bp;\n")
+    out = ptx_push_str(out, "    xor.b64 %lr, %ar, %br;\n")
+    out = knowledge_emit_func_footer(out)
+    out
+}
+
+// knowledge_mul_f64: first-order multiplicative propagation
+fn knowledge_emit_intrinsic_mul(buf: PtxBuf) -> PtxBuf with Mut, Panic, Div {
+    var out = knowledge_emit_func_header(buf, "knowledge_mul_f64")
+    out = ptx_push_str(out, "    mul.rn.f64 %lv, %av, %bv;\n")
+    // |a|·ε_b + |b|·ε_a
+    out = ptx_push_str(out, "    abs.f64 %t0, %av;\n")
+    out = ptx_push_str(out, "    abs.f64 %t1, %bv;\n")
+    out = ptx_push_str(out, "    mul.rn.f64 %t2, %t0, %be;\n")
+    out = ptx_push_str(out, "    mul.rn.f64 %t3, %t1, %ae;\n")
+    out = ptx_push_str(out, "    add.f64 %le, %t2, %t3;\n")
+    out = ptx_push_str(out, "    and.pred %lp, %ap, %bp;\n")
+    out = ptx_push_str(out, "    xor.b64 %lr, %ar, %br;\n")
+    out = knowledge_emit_func_footer(out)
+    out
+}
+
+// knowledge_div_f64: division with near-zero guard
+fn knowledge_emit_intrinsic_div(buf: PtxBuf) -> PtxBuf with Mut, Panic, Div {
+    var out = knowledge_emit_func_header(buf, "knowledge_div_f64")
+    out = ptx_push_str(out, "    div.rn.f64 %lv, %av, %bv;\n")
+    // Numerator: |a|·ε_b + |b|·ε_a
+    out = ptx_push_str(out, "    abs.f64 %t0, %av;\n")
+    out = ptx_push_str(out, "    abs.f64 %t1, %bv;\n")
+    out = ptx_push_str(out, "    mul.rn.f64 %t2, %t0, %be;\n")
+    out = ptx_push_str(out, "    mul.rn.f64 %t3, %t1, %ae;\n")
+    out = ptx_push_str(out, "    add.f64 %t0, %t2, %t3;\n")
+    // Denominator: b²
+    out = ptx_push_str(out, "    mul.rn.f64 %t1, %bv, %bv;\n")
+    out = ptx_push_str(out, "    div.rn.f64 %le, %t0, %t1;\n")
+    // Near-zero guard
+    out = ptx_push_str(out, "    abs.f64 %t2, %bv;\n")
+    out = ptx_push_str(out, "    setp.lt.f64 %tp, %t2, 0d3D719799812DEA11;\n")
+    out = ptx_push_str(out, "    @%tp mov.f64 %le, 0d3FF0000000000000;\n")
+    out = ptx_push_str(out, "    and.pred %lp, %ap, %bp;\n")
+    out = ptx_push_str(out, "    xor.b64 %lr, %ar, %br;\n")
+    out = knowledge_emit_func_footer(out)
+    out
+}
+
+// knowledge_fma_f64: fused multiply-add (3-input variant)
+fn knowledge_emit_intrinsic_fma_header(buf: PtxBuf) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "\n// .knowledge.* intrinsic: knowledge_fma_f64\n")
+    out = ptx_push_str(out, ".func knowledge_fma_f64(\n")
+    out = ptx_push_str(out, "    .param .f64 _out_val,\n")
+    out = ptx_push_str(out, "    .param .f64 _out_eps,\n")
+    out = ptx_push_str(out, "    .param .b32 _out_valid,\n")
+    out = ptx_push_str(out, "    .param .b64 _out_prov,\n")
+    out = ptx_push_str(out, "    .param .f64 _a_val, .param .f64 _a_eps,\n")
+    out = ptx_push_str(out, "    .param .b32 _a_valid, .param .b64 _a_prov,\n")
+    out = ptx_push_str(out, "    .param .f64 _b_val, .param .f64 _b_eps,\n")
+    out = ptx_push_str(out, "    .param .b32 _b_valid, .param .b64 _b_prov,\n")
+    out = ptx_push_str(out, "    .param .f64 _c_val, .param .f64 _c_eps,\n")
+    out = ptx_push_str(out, "    .param .b32 _c_valid, .param .b64 _c_prov\n")
+    out = ptx_push_str(out, ")\n{\n")
+    out = ptx_push_str(out, "    .reg .f64 %lv, %le, %av, %ae, %bv, %be, %cv, %ce;\n")
+    out = ptx_push_str(out, "    .reg .pred %lp, %ap, %bp, %cp, %tp;\n")
+    out = ptx_push_str(out, "    .reg .b64 %lr, %ar, %br, %cr, %tr;\n")
+    out = ptx_push_str(out, "    .reg .f64 %t0, %t1, %t2, %t3;\n")
+    out = ptx_push_str(out, "    .reg .b32 %vi;\n\n")
+    // Load all params
+    out = ptx_push_str(out, "    ld.param.f64 %av, [_a_val]; ld.param.f64 %ae, [_a_eps];\n")
+    out = ptx_push_str(out, "    ld.param.b32 %vi, [_a_valid]; setp.ne.s32 %ap, %vi, 0;\n")
+    out = ptx_push_str(out, "    ld.param.b64 %ar, [_a_prov];\n")
+    out = ptx_push_str(out, "    ld.param.f64 %bv, [_b_val]; ld.param.f64 %be, [_b_eps];\n")
+    out = ptx_push_str(out, "    ld.param.b32 %vi, [_b_valid]; setp.ne.s32 %bp, %vi, 0;\n")
+    out = ptx_push_str(out, "    ld.param.b64 %br, [_b_prov];\n")
+    out = ptx_push_str(out, "    ld.param.f64 %cv, [_c_val]; ld.param.f64 %ce, [_c_eps];\n")
+    out = ptx_push_str(out, "    ld.param.b32 %vi, [_c_valid]; setp.ne.s32 %cp, %vi, 0;\n")
+    out = ptx_push_str(out, "    ld.param.b64 %cr, [_c_prov];\n\n")
+    out
+}
+
+fn knowledge_emit_intrinsic_fma(buf: PtxBuf) -> PtxBuf with Mut, Panic, Div {
+    var out = knowledge_emit_intrinsic_fma_header(buf)
+    // Value: fma(a, b, c)
+    out = ptx_push_str(out, "    fma.rn.f64 %lv, %av, %bv, %cv;\n")
+    // Epsilon: √((|a|·ε_b + |b|·ε_a)² + ε_c²)
+    out = ptx_push_str(out, "    abs.f64 %t0, %av;\n")
+    out = ptx_push_str(out, "    abs.f64 %t1, %bv;\n")
+    out = ptx_push_str(out, "    mul.rn.f64 %t2, %t0, %be;\n")
+    out = ptx_push_str(out, "    mul.rn.f64 %t3, %t1, %ae;\n")
+    out = ptx_push_str(out, "    add.f64 %t0, %t2, %t3;\n")
+    out = ptx_push_str(out, "    mul.rn.f64 %t0, %t0, %t0;\n")
+    out = ptx_push_str(out, "    mul.rn.f64 %t1, %ce, %ce;\n")
+    out = ptx_push_str(out, "    add.f64 %t2, %t0, %t1;\n")
+    out = ptx_push_str(out, "    sqrt.rn.f64 %le, %t2;\n")
+    // Validity: 3-way and
+    out = ptx_push_str(out, "    and.pred %tp, %ap, %bp;\n")
+    out = ptx_push_str(out, "    and.pred %lp, %tp, %cp;\n")
+    // Provenance: 3-way xor
+    out = ptx_push_str(out, "    xor.b64 %tr, %ar, %br;\n")
+    out = ptx_push_str(out, "    xor.b64 %lr, %tr, %cr;\n")
+    // Store results
+    out = ptx_push_str(out, "\n    st.param.f64 [_out_val], %lv;\n")
+    out = ptx_push_str(out, "    st.param.f64 [_out_eps], %le;\n")
+    out = ptx_push_str(out, "    selp.b32 %vi, 1, 0, %lp;\n")
+    out = ptx_push_str(out, "    st.param.b32 [_out_valid], %vi;\n")
+    out = ptx_push_str(out, "    st.param.b64 [_out_prov], %lr;\n")
+    out = ptx_push_str(out, "    ret;\n}\n")
+    out
+}
+
+// Emit ALL .knowledge.* intrinsic function preamble
+fn knowledge_emit_all_intrinsics(buf: PtxBuf) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "\n// ═══ .knowledge.* intrinsic functions (Knowledge<f64>) ═══\n")
+    out = knowledge_emit_intrinsic_add(out)
+    out = knowledge_emit_intrinsic_sub(out)
+    out = knowledge_emit_intrinsic_mul(out)
+    out = knowledge_emit_intrinsic_div(out)
+    out = knowledge_emit_intrinsic_fma(out)
+    out
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Phase 3: knowledge.load.global.f64 / knowledge.store.global.f64
+// ══════════════════════════════════════════════════════════════════════
+//
+// Cohesive 4-register load/store from a single base address.
+// Memory layout per Knowledge<f64> element (32 bytes):
+//   offset +0:  f64 value   (8 bytes)
+//   offset +8:  f64 epsilon (8 bytes)
+//   offset +16: u32 valid   (4 bytes, boolean)
+//   offset +20: padding     (4 bytes)
+//   offset +24: u64 prov    (8 bytes)
+
+fn knowledge_emit_load_global_f64(
+    st: EpistemicF64State,
+    shadow: EpistemicShadowF64,
+    base_addr_reg: string,
+    byte_offset: i64
+) -> EpistemicF64State with Mut, Panic, Div, Alloc {
+    var out = st
+    out.buf = ptx_push_str(out.buf, "    // knowledge.load.global.f64 [")
+    out.buf = ptx_push_str(out.buf, base_addr_reg)
+    out.buf = ptx_push_str(out.buf, "+")
+    out.buf = ptx_push_str(out.buf, i64_to_string(byte_offset))
+    out.buf = ptx_push_str(out.buf, "]\n")
+    // Value (offset +0)
+    out.buf = ptx_push_str(out.buf, "    ld.global.f64 ")
+    out.buf = ptx_push_str(out.buf, shadow.val_name)
+    out.buf = ptx_push_str(out.buf, ", [")
+    out.buf = ptx_push_str(out.buf, base_addr_reg)
+    out.buf = ptx_push_str(out.buf, "+")
+    out.buf = ptx_push_str(out.buf, i64_to_string(byte_offset))
+    out.buf = ptx_push_str(out.buf, "];\n")
+    // Epsilon (offset +8)
+    out.buf = ptx_push_str(out.buf, "    ld.global.f64 ")
+    out.buf = ptx_push_str(out.buf, shadow.eps_name)
+    out.buf = ptx_push_str(out.buf, ", [")
+    out.buf = ptx_push_str(out.buf, base_addr_reg)
+    out.buf = ptx_push_str(out.buf, "+")
+    out.buf = ptx_push_str(out.buf, i64_to_string(byte_offset + 8))
+    out.buf = ptx_push_str(out.buf, "];\n")
+    // Valid (offset +16, u32 → pred)
+    out.buf = ptx_push_str(out.buf, "    ld.global.u32 %fd_eps_t_vi, [")
+    out.buf = ptx_push_str(out.buf, base_addr_reg)
+    out.buf = ptx_push_str(out.buf, "+")
+    out.buf = ptx_push_str(out.buf, i64_to_string(byte_offset + 16))
+    out.buf = ptx_push_str(out.buf, "];\n")
+    out.buf = ptx_push_str(out.buf, "    setp.ne.s32 ")
+    out.buf = ptx_push_str(out.buf, shadow.valid_name)
+    out.buf = ptx_push_str(out.buf, ", %fd_eps_t_vi, 0;\n")
+    // Provenance (offset +24)
+    out.buf = ptx_push_str(out.buf, "    ld.global.u64 ")
+    out.buf = ptx_push_str(out.buf, shadow.prov_name)
+    out.buf = ptx_push_str(out.buf, ", [")
+    out.buf = ptx_push_str(out.buf, base_addr_reg)
+    out.buf = ptx_push_str(out.buf, "+")
+    out.buf = ptx_push_str(out.buf, i64_to_string(byte_offset + 24))
+    out.buf = ptx_push_str(out.buf, "];\n")
+    out
+}
+
+fn knowledge_emit_store_global_f64(
+    st: EpistemicF64State,
+    shadow: EpistemicShadowF64,
+    base_addr_reg: string,
+    byte_offset: i64
+) -> EpistemicF64State with Mut, Panic, Div, Alloc {
+    var out = st
+    out.buf = ptx_push_str(out.buf, "    // knowledge.store.global.f64 [")
+    out.buf = ptx_push_str(out.buf, base_addr_reg)
+    out.buf = ptx_push_str(out.buf, "+")
+    out.buf = ptx_push_str(out.buf, i64_to_string(byte_offset))
+    out.buf = ptx_push_str(out.buf, "]\n")
+    // Value
+    out.buf = ptx_push_str(out.buf, "    st.global.f64 [")
+    out.buf = ptx_push_str(out.buf, base_addr_reg)
+    out.buf = ptx_push_str(out.buf, "+")
+    out.buf = ptx_push_str(out.buf, i64_to_string(byte_offset))
+    out.buf = ptx_push_str(out.buf, "], ")
+    out.buf = ptx_push_str(out.buf, shadow.val_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    // Epsilon
+    out.buf = ptx_push_str(out.buf, "    st.global.f64 [")
+    out.buf = ptx_push_str(out.buf, base_addr_reg)
+    out.buf = ptx_push_str(out.buf, "+")
+    out.buf = ptx_push_str(out.buf, i64_to_string(byte_offset + 8))
+    out.buf = ptx_push_str(out.buf, "], ")
+    out.buf = ptx_push_str(out.buf, shadow.eps_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    // Valid (pred → u32)
+    out.buf = ptx_push_str(out.buf, "    selp.b32 %fd_eps_t_vi, 1, 0, ")
+    out.buf = ptx_push_str(out.buf, shadow.valid_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out.buf = ptx_push_str(out.buf, "    st.global.u32 [")
+    out.buf = ptx_push_str(out.buf, base_addr_reg)
+    out.buf = ptx_push_str(out.buf, "+")
+    out.buf = ptx_push_str(out.buf, i64_to_string(byte_offset + 16))
+    out.buf = ptx_push_str(out.buf, "], %fd_eps_t_vi;\n")
+    // Provenance
+    out.buf = ptx_push_str(out.buf, "    st.global.u64 [")
+    out.buf = ptx_push_str(out.buf, base_addr_reg)
+    out.buf = ptx_push_str(out.buf, "+")
+    out.buf = ptx_push_str(out.buf, i64_to_string(byte_offset + 24))
+    out.buf = ptx_push_str(out.buf, "], ")
+    out.buf = ptx_push_str(out.buf, shadow.prov_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+    out
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Phase 4: knowledge.reduce.warp.f64
+// ══════════════════════════════════════════════════════════════════════
+//
+// Combined warp-wide Knowledge reduction:
+//   - Value: sum via shfl.sync.down.b64 tree
+//   - Epsilon: quadrature (√Σε²) via shfl.sync.down.b64
+//   - Validity: all-reduce via vote.sync.all
+//   - Provenance: OR-reduce via shfl.sync.down.b64 + or.b64
+
+fn knowledge_emit_warp_reduce_f64(
+    st: EpistemicF64State,
+    shadow: EpistemicShadowF64,
+    result: EpistemicShadowF64
+) -> EpistemicF64State with Mut, Panic, Div, Alloc {
+    var out = st
+    out.buf = ptx_push_str(out.buf, "    // knowledge.reduce.warp.f64\n")
+
+    // Init result from lane value
+    out.buf = ptx_push_str(out.buf, "    mov.f64 ")
+    out.buf = ptx_push_str(out.buf, result.val_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, shadow.val_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+
+    // Init epsilon² accumulator
+    out.buf = ptx_push_str(out.buf, "    mul.rn.f64 %fd_eps_t4, ")
+    out.buf = ptx_push_str(out.buf, shadow.eps_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, shadow.eps_name)
+    out.buf = ptx_push_str(out.buf, ";\n")
+
+    // Init provenance accumulator
+    if out.config.provenance_tracking {
+        out.buf = ptx_push_str(out.buf, "    mov.b64 %rd_prov_t0, ")
+        out.buf = ptx_push_str(out.buf, shadow.prov_name)
+        out.buf = ptx_push_str(out.buf, ";\n")
+    }
+
+    // Tree reduction: 16, 8, 4, 2, 1
+    var offset: i64 = 16
+    while offset >= 1 {
+        // Value sum
+        out.buf = ptx_push_str(out.buf, "    shfl.sync.down.b64 %fd_eps_t0, ")
+        out.buf = ptx_push_str(out.buf, result.val_name)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, i64_to_string(offset))
+        out.buf = ptx_push_str(out.buf, ", 31, 0xffffffff;\n")
+        out.buf = ptx_push_str(out.buf, "    add.f64 ")
+        out.buf = ptx_push_str(out.buf, result.val_name)
+        out.buf = ptx_push_str(out.buf, ", ")
+        out.buf = ptx_push_str(out.buf, result.val_name)
+        out.buf = ptx_push_str(out.buf, ", %fd_eps_t0;\n")
+
+        // Epsilon² sum
+        out.buf = ptx_push_str(out.buf, "    shfl.sync.down.b64 %fd_eps_t1, %fd_eps_t4, ")
+        out.buf = ptx_push_str(out.buf, i64_to_string(offset))
+        out.buf = ptx_push_str(out.buf, ", 31, 0xffffffff;\n")
+        out.buf = ptx_push_str(out.buf, "    add.f64 %fd_eps_t4, %fd_eps_t4, %fd_eps_t1;\n")
+
+        // Provenance OR
+        if out.config.provenance_tracking {
+            out.buf = ptx_push_str(out.buf, "    shfl.sync.down.b64 %rd_prov_t1, %rd_prov_t0, ")
+            out.buf = ptx_push_str(out.buf, i64_to_string(offset))
+            out.buf = ptx_push_str(out.buf, ", 31, 0xffffffff;\n")
+            out.buf = ptx_push_str(out.buf, "    or.b64 %rd_prov_t0, %rd_prov_t0, %rd_prov_t1;\n")
+        }
+
+        offset = offset / 2
+    }
+
+    // Final epsilon = √(sum of squares)
+    out.buf = ptx_push_str(out.buf, "    sqrt.rn.f64 ")
+    out.buf = ptx_push_str(out.buf, result.eps_name)
+    out.buf = ptx_push_str(out.buf, ", %fd_eps_t4;\n")
+
+    // Validity: all-reduce
+    out.buf = ptx_push_str(out.buf, "    vote.sync.all.pred ")
+    out.buf = ptx_push_str(out.buf, result.valid_name)
+    out.buf = ptx_push_str(out.buf, ", ")
+    out.buf = ptx_push_str(out.buf, shadow.valid_name)
+    out.buf = ptx_push_str(out.buf, ", 0xffffffff;\n")
+
+    // Provenance result
+    if out.config.provenance_tracking {
+        out.buf = ptx_push_str(out.buf, "    mov.b64 ")
+        out.buf = ptx_push_str(out.buf, result.prov_name)
+        out.buf = ptx_push_str(out.buf, ", %rd_prov_t0;\n")
+    }
+    out
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Phase 5: epistemic_ptx_compile_kernel — Full Pipeline Entry Point
+// ══════════════════════════════════════════════════════════════════════
+//
+// Generates a complete epistemic PTX kernel with:
+//   1. PTX header (.version, .target, .address_size)
+//   2. .knowledge.* intrinsic function preamble
+//   3. Kernel entry point with Knowledge<f64> parameters
+//   4. Shadow register allocation
+//   5. Epistemic load, compute, store sequence
+//
+// This is the world-first: an entire PTX kernel that natively computes
+// with uncertainty-tracked values from load to store.
+
+struct EpistemicKernelSpec {
+    name: string,
+    num_params: i64,        // number of Knowledge<f64> pointer params
+    num_elements: i64,      // elements per param (for launch bounds)
+    sm_major: i64,
+    sm_minor: i64,
+    emit_intrinsics: bool,  // whether to emit .knowledge.* func defs
+    block_size: i64,        // threads per block
+}
+
+fn epistemic_kernel_spec_default() -> EpistemicKernelSpec with Alloc {
+    EpistemicKernelSpec {
+        name: "epistemic_kernel",
+        num_params: 3,
+        num_elements: 1024,
+        sm_major: 8,
+        sm_minor: 0,
+        emit_intrinsics: true,
+        block_size: 256,
+    }
+}
+
+fn epistemic_ptx_compile_kernel_header(
+    buf: PtxBuf,
+    spec: EpistemicKernelSpec
+) -> PtxBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    // PTX header
+    out = ptx_push_str(out, ".version 7.8\n")
+    out = ptx_push_str(out, ".target sm_")
+    out = ptx_push_str(out, i64_to_string(spec.sm_major))
+    out = ptx_push_str(out, i64_to_string(spec.sm_minor))
+    out = ptx_push_str(out, "\n")
+    out = ptx_push_str(out, ".address_size 64\n\n")
+
+    // Emit .knowledge.* intrinsic function preamble
+    if spec.emit_intrinsics {
+        out = knowledge_emit_all_intrinsics(out)
+    }
+
+    // Kernel entry
+    out = ptx_push_str(out, "\n.visible .entry ")
+    out = ptx_push_str(out, spec.name)
+    out = ptx_push_str(out, "(\n")
+    // 3 Knowledge<f64> array pointers + 1 count param
+    out = ptx_push_str(out, "    .param .u64 param_a,  // Knowledge<f64>* input A\n")
+    out = ptx_push_str(out, "    .param .u64 param_b,  // Knowledge<f64>* input B\n")
+    out = ptx_push_str(out, "    .param .u64 param_out, // Knowledge<f64>* output\n")
+    out = ptx_push_str(out, "    .param .u32 param_n   // element count\n")
+    out = ptx_push_str(out, ")\n")
+    out
+}
+
+fn epistemic_ptx_compile_kernel(
+    spec: EpistemicKernelSpec,
+    config: EpistemicPtxConfig
+) -> PtxBuf with Mut, Panic, Div, Alloc {
+    var buf = ptx_buf_new()
+
+    // Header + intrinsics + kernel signature
+    buf = epistemic_ptx_compile_kernel_header(buf, spec)
+
+    // Kernel body
+    buf = ptx_push_str(buf, "{\n")
+    // Register declarations
+    buf = ptx_push_str(buf, "    .reg .b32 %r<8>;\n")
+    buf = ptx_push_str(buf, "    .reg .b64 %rd<16>;\n")
+    buf = ptx_push_str(buf, "    .reg .pred %p<4>;\n")
+    buf = ptx_push_str(buf, "    .reg .b32 %fd_eps_t_vi;  // valid-int temp\n")
+
+    // f64 epistemic shadow registers: 3 Knowledge values (a, b, out)
+    var f64st = epistemic_f64_new(config)
+    f64st.buf = buf
+    f64st = epistemic_f64_emit_shadow_reg_pool(f64st, 8)
+    buf = f64st.buf
+
+    // Thread index calculation
+    buf = ptx_push_str(buf, "\n    // Thread index = blockIdx.x * blockDim.x + threadIdx.x\n")
+    buf = ptx_push_str(buf, "    mov.u32 %r0, %tid.x;\n")
+    buf = ptx_push_str(buf, "    mov.u32 %r1, %ctaid.x;\n")
+    buf = ptx_push_str(buf, "    mov.u32 %r2, %ntid.x;\n")
+    buf = ptx_push_str(buf, "    mad.lo.s32 %r3, %r1, %r2, %r0;\n")
+
+    // Bounds check
+    buf = ptx_push_str(buf, "    ld.param.u32 %r4, [param_n];\n")
+    buf = ptx_push_str(buf, "    setp.ge.u32 %p0, %r3, %r4;\n")
+    buf = ptx_push_str(buf, "    @%p0 bra $L_exit;\n\n")
+
+    // Compute byte offset (element_stride = 32 bytes per Knowledge<f64>)
+    buf = ptx_push_str(buf, "    cvt.u64.u32 %rd0, %r3;\n")
+    buf = ptx_push_str(buf, "    mul.lo.u64 %rd1, %rd0, 32;  // 32 bytes per Knowledge<f64>\n\n")
+
+    // Load base addresses
+    buf = ptx_push_str(buf, "    ld.param.u64 %rd2, [param_a];\n")
+    buf = ptx_push_str(buf, "    ld.param.u64 %rd3, [param_b];\n")
+    buf = ptx_push_str(buf, "    ld.param.u64 %rd4, [param_out];\n")
+    buf = ptx_push_str(buf, "    add.u64 %rd5, %rd2, %rd1;  // addr_a\n")
+    buf = ptx_push_str(buf, "    add.u64 %rd6, %rd3, %rd1;  // addr_b\n")
+    buf = ptx_push_str(buf, "    add.u64 %rd7, %rd4, %rd1;  // addr_out\n\n")
+
+    // Load Knowledge<f64> A and B
+    let a_sh = epistemic_shadow_f64_new("ka")
+    let b_sh = epistemic_shadow_f64_new("kb")
+    let out_sh = epistemic_shadow_f64_new("ko")
+
+    f64st.buf = buf
+    f64st = knowledge_emit_load_global_f64(f64st, a_sh, "%rd5", 0)
+    f64st = knowledge_emit_load_global_f64(f64st, b_sh, "%rd6", 0)
+
+    // Compute: out = a + b (with epistemic propagation)
+    f64st = epistemic_f64_emit_add(f64st, out_sh, a_sh, b_sh, false)
+
+    // Store result
+    f64st = knowledge_emit_store_global_f64(f64st, out_sh, "%rd7", 0)
+    buf = f64st.buf
+
+    // Exit label
+    buf = ptx_push_str(buf, "\n$L_exit:\n")
+    buf = ptx_push_str(buf, "    ret;\n")
+    buf = ptx_push_str(buf, "}\n")
+    buf
+}
+
 // ── Smoke-test entry point ───────────────────────────────────────────
 //
 // Validates that the epistemic PTX codegen emits the expected opcodes for
@@ -1768,47 +2731,255 @@ fn epistemic_smoke_test_warp_reduce() -> bool with Mut, Panic, Div, Alloc {
     ptx_str_contains(ptx, "shfl.sync.down.b32") && ptx_str_contains(ptx, "vote.sync.all.pred")
 }
 
+// ── Phase 2 smoke tests: f64 epistemic operations ───────────────────
+
+fn epistemic_smoke_test_f64_add() -> bool with Mut, Panic, Div, Alloc {
+    let cfg = epistemic_config_default()
+    var st = epistemic_f64_new(cfg)
+    let a_sh = epistemic_shadow_f64_new("a")
+    let b_sh = epistemic_shadow_f64_new("b")
+    let c_sh = epistemic_shadow_f64_new("c")
+    st = epistemic_f64_emit_shadow_reg_pool(st, 8)
+    st = epistemic_f64_emit_init_shadow(st, a_sh, "3FF0000000000000", "3F50624DD2F1A9FC")
+    st = epistemic_f64_emit_init_shadow(st, b_sh, "4000000000000000", "3F50624DD2F1A9FC")
+    st = epistemic_f64_emit_add(st, c_sh, a_sh, b_sh, false)
+    let ptx = ptx_to_string(st.buf)
+    ptx_str_contains(ptx, "add.f64") && ptx_str_contains(ptx, "sqrt.rn.f64")
+}
+
+fn epistemic_smoke_test_f64_mul() -> bool with Mut, Panic, Div, Alloc {
+    let cfg = epistemic_config_default()
+    var st = epistemic_f64_new(cfg)
+    let a_sh = epistemic_shadow_f64_new("a")
+    let b_sh = epistemic_shadow_f64_new("b")
+    let c_sh = epistemic_shadow_f64_new("c")
+    st = epistemic_f64_emit_shadow_reg_pool(st, 8)
+    st = epistemic_f64_emit_init_shadow(st, a_sh, "3FF0000000000000", "3F50624DD2F1A9FC")
+    st = epistemic_f64_emit_init_shadow(st, b_sh, "4000000000000000", "3F50624DD2F1A9FC")
+    st = epistemic_f64_emit_mul(st, c_sh, a_sh, b_sh)
+    let ptx = ptx_to_string(st.buf)
+    ptx_str_contains(ptx, "mul.rn.f64") && ptx_str_contains(ptx, "abs.f64")
+}
+
+fn epistemic_smoke_test_f64_div() -> bool with Mut, Panic, Div, Alloc {
+    let cfg = epistemic_config_default()
+    var st = epistemic_f64_new(cfg)
+    let a_sh = epistemic_shadow_f64_new("a")
+    let b_sh = epistemic_shadow_f64_new("b")
+    let c_sh = epistemic_shadow_f64_new("c")
+    st = epistemic_f64_emit_shadow_reg_pool(st, 8)
+    st = epistemic_f64_emit_init_shadow(st, a_sh, "3FF0000000000000", "3F50624DD2F1A9FC")
+    st = epistemic_f64_emit_init_shadow(st, b_sh, "4000000000000000", "3F50624DD2F1A9FC")
+    st = epistemic_f64_emit_div(st, c_sh, a_sh, b_sh)
+    let ptx = ptx_to_string(st.buf)
+    ptx_str_contains(ptx, "div.rn.f64") && ptx_str_contains(ptx, "setp.lt.f64")
+}
+
+fn epistemic_smoke_test_f64_fma() -> bool with Mut, Panic, Div, Alloc {
+    let cfg = epistemic_config_default()
+    var st = epistemic_f64_new(cfg)
+    let a_sh = epistemic_shadow_f64_new("a")
+    let b_sh = epistemic_shadow_f64_new("b")
+    let c_sh = epistemic_shadow_f64_new("c")
+    let r_sh = epistemic_shadow_f64_new("r")
+    st = epistemic_f64_emit_shadow_reg_pool(st, 8)
+    st = epistemic_f64_emit_init_shadow(st, a_sh, "3FF0000000000000", "3F50624DD2F1A9FC")
+    st = epistemic_f64_emit_init_shadow(st, b_sh, "4000000000000000", "3F50624DD2F1A9FC")
+    st = epistemic_f64_emit_init_shadow(st, c_sh, "3FE0000000000000", "3F1A36E2EB1C432D")
+    st = epistemic_f64_emit_fma(st, r_sh, a_sh, b_sh, c_sh)
+    let ptx = ptx_to_string(st.buf)
+    ptx_str_contains(ptx, "fma.rn.f64") && ptx_str_contains(ptx, "sqrt.rn.f64")
+}
+
+// ── Phase 3 smoke test: .knowledge.* intrinsic functions ─────────────
+
+fn epistemic_smoke_test_knowledge_intrinsics() -> bool with Mut, Panic, Div, Alloc {
+    var buf = ptx_buf_new()
+    buf = knowledge_emit_all_intrinsics(buf)
+    let ptx = ptx_to_string(buf)
+    // Verify all 5 intrinsic functions were emitted
+    ptx_str_contains(ptx, "knowledge_add_f64") &&
+    ptx_str_contains(ptx, "knowledge_sub_f64") &&
+    ptx_str_contains(ptx, "knowledge_mul_f64") &&
+    ptx_str_contains(ptx, "knowledge_div_f64") &&
+    ptx_str_contains(ptx, "knowledge_fma_f64") &&
+    // Verify key PTX opcodes in the function bodies
+    ptx_str_contains(ptx, "sqrt.rn.f64") &&
+    ptx_str_contains(ptx, "abs.f64") &&
+    ptx_str_contains(ptx, "and.pred") &&
+    ptx_str_contains(ptx, "xor.b64") &&
+    ptx_str_contains(ptx, ".func")
+}
+
+// ── Phase 4 smoke test: knowledge.load/store ─────────────────────────
+
+fn epistemic_smoke_test_knowledge_load_store() -> bool with Mut, Panic, Div, Alloc {
+    let cfg = epistemic_config_default()
+    var st = epistemic_f64_new(cfg)
+    let a_sh = epistemic_shadow_f64_new("a")
+    st = epistemic_f64_emit_shadow_reg_pool(st, 4)
+    st = knowledge_emit_load_global_f64(st, a_sh, "%rd0", 0)
+    st = knowledge_emit_store_global_f64(st, a_sh, "%rd1", 0)
+    let ptx = ptx_to_string(st.buf)
+    ptx_str_contains(ptx, "ld.global.f64") &&
+    ptx_str_contains(ptx, "ld.global.u64") &&
+    ptx_str_contains(ptx, "st.global.f64") &&
+    ptx_str_contains(ptx, "st.global.u64") &&
+    ptx_str_contains(ptx, "knowledge.load.global.f64") &&
+    ptx_str_contains(ptx, "knowledge.store.global.f64")
+}
+
+// ── Phase 5 smoke test: full kernel compile ──────────────────────────
+
+fn epistemic_smoke_test_full_kernel() -> bool with Mut, Panic, Div, Alloc {
+    let spec = epistemic_kernel_spec_default()
+    let cfg = epistemic_config_default()
+    let buf = epistemic_ptx_compile_kernel(spec, cfg)
+    let ptx = ptx_to_string(buf)
+    // Verify kernel structure
+    ptx_str_contains(ptx, ".version 7.8") &&
+    ptx_str_contains(ptx, ".target sm_80") &&
+    ptx_str_contains(ptx, ".visible .entry epistemic_kernel") &&
+    // Verify .knowledge.* intrinsics were emitted
+    ptx_str_contains(ptx, "knowledge_add_f64") &&
+    ptx_str_contains(ptx, "knowledge_mul_f64") &&
+    // Verify Knowledge<f64> operations in kernel body
+    ptx_str_contains(ptx, "knowledge.load.global.f64") &&
+    ptx_str_contains(ptx, "knowledge.store.global.f64") &&
+    ptx_str_contains(ptx, "add.f64") &&
+    ptx_str_contains(ptx, "sqrt.rn.f64") &&
+    // Verify structure
+    ptx_str_contains(ptx, "param_a") &&
+    ptx_str_contains(ptx, "param_out") &&
+    ptx_str_contains(ptx, "$L_exit")
+}
+
+// ── Phase 5 smoke test: warp reduce f64 ──────────────────────────────
+
+fn epistemic_smoke_test_warp_reduce_f64() -> bool with Mut, Panic, Div, Alloc {
+    let cfg = epistemic_config_default()
+    var st = epistemic_f64_new(cfg)
+    let s_sh = epistemic_shadow_f64_new("s")
+    let r_sh = epistemic_shadow_f64_new("r")
+    st = epistemic_f64_emit_shadow_reg_pool(st, 4)
+    st = knowledge_emit_warp_reduce_f64(st, s_sh, r_sh)
+    let ptx = ptx_to_string(st.buf)
+    ptx_str_contains(ptx, "shfl.sync.down.b64") &&
+    ptx_str_contains(ptx, "vote.sync.all.pred") &&
+    ptx_str_contains(ptx, "sqrt.rn.f64") &&
+    ptx_str_contains(ptx, "or.b64")
+}
+
 fn main() -> i64 with Mut, Panic, Div, Alloc, IO {
     var passed: i64 = 0
     var total: i64 = 0
 
+    // Original f32 tests
     if epistemic_smoke_test_add() {
         passed = passed + 1
-        print("  T1 OK (add: quadrature epsilon + sqrt)\n")
+        print("  T1  OK (f32 add: quadrature epsilon + sqrt)\n")
     } else {
-        print("  FAIL T1 (add)\n")
+        print("  FAIL T1 (f32 add)\n")
     }
     total = total + 1
 
     if epistemic_smoke_test_mul() {
         passed = passed + 1
-        print("  T2 OK (mul: first-order epsilon + abs)\n")
+        print("  T2  OK (f32 mul: first-order epsilon + abs)\n")
     } else {
-        print("  FAIL T2 (mul)\n")
+        print("  FAIL T2 (f32 mul)\n")
     }
     total = total + 1
 
     if epistemic_smoke_test_fma() {
         passed = passed + 1
-        print("  T3 OK (fma: combined epsilon + sqrt)\n")
+        print("  T3  OK (f32 fma: combined epsilon + sqrt)\n")
     } else {
-        print("  FAIL T3 (fma)\n")
+        print("  FAIL T3 (f32 fma)\n")
     }
     total = total + 1
 
     if epistemic_smoke_test_warp_reduce() {
         passed = passed + 1
-        print("  T4 OK (warp reduce: shfl + vote.sync)\n")
+        print("  T4  OK (f32 warp reduce: shfl + vote.sync)\n")
     } else {
-        print("  FAIL T4 (warp reduce)\n")
+        print("  FAIL T4 (f32 warp reduce)\n")
+    }
+    total = total + 1
+
+    // f64 Knowledge<f64> tests
+    if epistemic_smoke_test_f64_add() {
+        passed = passed + 1
+        print("  T5  OK (f64 add: quadrature + sqrt.rn.f64)\n")
+    } else {
+        print("  FAIL T5 (f64 add)\n")
+    }
+    total = total + 1
+
+    if epistemic_smoke_test_f64_mul() {
+        passed = passed + 1
+        print("  T6  OK (f64 mul: first-order + abs.f64)\n")
+    } else {
+        print("  FAIL T6 (f64 mul)\n")
+    }
+    total = total + 1
+
+    if epistemic_smoke_test_f64_div() {
+        passed = passed + 1
+        print("  T7  OK (f64 div: near-zero guard + setp.lt.f64)\n")
+    } else {
+        print("  FAIL T7 (f64 div)\n")
+    }
+    total = total + 1
+
+    if epistemic_smoke_test_f64_fma() {
+        passed = passed + 1
+        print("  T8  OK (f64 fma: 3-input + sqrt.rn.f64)\n")
+    } else {
+        print("  FAIL T8 (f64 fma)\n")
+    }
+    total = total + 1
+
+    // .knowledge.* intrinsic function tests
+    if epistemic_smoke_test_knowledge_intrinsics() {
+        passed = passed + 1
+        print("  T9  OK (.knowledge.* intrinsic functions emitted)\n")
+    } else {
+        print("  FAIL T9 (.knowledge.* intrinsics)\n")
+    }
+    total = total + 1
+
+    if epistemic_smoke_test_knowledge_load_store() {
+        passed = passed + 1
+        print("  T10 OK (knowledge.load/store.global.f64)\n")
+    } else {
+        print("  FAIL T10 (knowledge load/store)\n")
+    }
+    total = total + 1
+
+    // Full kernel compile test
+    if epistemic_smoke_test_full_kernel() {
+        passed = passed + 1
+        print("  T11 OK (full epistemic kernel compile)\n")
+    } else {
+        print("  FAIL T11 (full kernel)\n")
+    }
+    total = total + 1
+
+    // Warp reduce f64 test
+    if epistemic_smoke_test_warp_reduce_f64() {
+        passed = passed + 1
+        print("  T12 OK (knowledge.reduce.warp.f64)\n")
+    } else {
+        print("  FAIL T12 (warp reduce f64)\n")
     }
     total = total + 1
 
     if passed == total {
-        print("epistemic_ptx smoke tests: all passed\n")
+        print("epistemic_ptx: all " ++ i64_to_string(total) ++ " tests passed\n")
         0
     } else {
-        print("epistemic_ptx smoke tests: suite fail\n")
+        print("epistemic_ptx: " ++ i64_to_string(passed) ++ "/" ++ i64_to_string(total) ++ " passed\n")
         1
     }
 }

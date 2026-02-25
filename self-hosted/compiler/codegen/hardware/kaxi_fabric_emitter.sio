@@ -1,0 +1,383 @@
+// K-AXI Active Epistemic Fabric — Transaction Emitter
+//
+// Transforms Knowledge<f64> operations into AXI-Stream transactions
+// for the FPGA epistemic fabric. Handles:
+//   1. Transaction construction (TUSER sideband packing)
+//   2. Backpressure management (pending queue)
+//   3. Batch emission for kernel-scale operation streams
+//   4. Integration with hardware_publish contract
+//
+// Helpers inlined from kaxi_adapters.sio (no import support).
+
+// ---------------------------------------------------------------------------
+// Inlined helpers
+// ---------------------------------------------------------------------------
+
+fn kaxi_i64_to_string(n: i64) -> string with Mut, Panic, Div, Alloc {
+    if n == 0 { return "0" }
+    if n < 0 { return "0" }
+
+    var rev: [i8; 32] = [0; 32]
+    var rev_len: i64 = 0
+    var v = n
+    while v > 0 {
+        rev[rev_len as usize] = 48 + (v % 10) as i8
+        rev_len = rev_len + 1
+        v = v / 10
+    }
+
+    var out: [i8; 32] = [0; 32]
+    var i: i64 = 0
+    while i < rev_len {
+        out[i as usize] = rev[(rev_len - i - 1) as usize]
+        i = i + 1
+    }
+    str_from_bytes(out, rev_len)
+}
+
+// ---------------------------------------------------------------------------
+// Op-kind constants (matching kaxi_publish_adapters.sio)
+// ---------------------------------------------------------------------------
+
+let KAXI_OP_PASS: i64 = 0
+let KAXI_OP_ADD: i64 = 1
+let KAXI_OP_MUL: i64 = 2
+let KAXI_OP_DIV: i64 = 3
+let KAXI_OP_FMA: i64 = 4
+let KAXI_OP_PROP_VAR: i64 = 5
+
+// ---------------------------------------------------------------------------
+// Flag packing (duplicated from kaxi_adapters.sio)
+// ---------------------------------------------------------------------------
+
+fn kaxi_fabric_flags_pack(op_kind: i64, success_inc: i64, failure_inc: i64, alpha_q8: i64) -> i64 {
+    let op = op_kind & 0xF
+    let failure = (failure_inc & 0xFF) << 8
+    let success = (success_inc & 0xFF) << 16
+    let alpha = (alpha_q8 & 0xFF) << 24
+    op | failure | success | alpha
+}
+
+fn kaxi_fabric_flags_unpack_op_kind(flags: i64) -> i64 {
+    flags & 0xF
+}
+
+// ---------------------------------------------------------------------------
+// Structs
+// ---------------------------------------------------------------------------
+
+struct KaxiTransaction {
+    value_bits: i64,
+    variance_bits: i64,
+    provenance: i64,
+    confidence_q8: i64,
+    flags: i64,
+    tx_seq: i64,
+}
+
+struct KaxiPendingQueue {
+    entries: [KaxiTransaction; 64],
+    head: i64,
+    tail: i64,
+    count: i64,
+}
+
+struct KaxiEmitState {
+    queue: KaxiPendingQueue,
+    tx_seq_counter: i64,
+    total_emitted: i64,
+    total_stalled: i64,
+    fidelity_total: i64,
+    prov_total: i64,
+    formal_total: i64,
+    epi_score: i64,
+}
+
+// ---------------------------------------------------------------------------
+// 1. kaxi_transaction_new
+// ---------------------------------------------------------------------------
+
+fn kaxi_transaction_new(
+    value_bits: i64,
+    variance_bits: i64,
+    provenance: i64,
+    confidence_q8: i64,
+    op_kind: i64,
+    tx_seq: i64
+) -> KaxiTransaction {
+    let success = if op_kind >= 1 && op_kind <= 5 { 1 as i64 } else { 0 as i64 }
+    let flags = kaxi_fabric_flags_pack(op_kind, success, 0, 16)
+    KaxiTransaction {
+        value_bits: value_bits,
+        variance_bits: variance_bits,
+        provenance: provenance,
+        confidence_q8: confidence_q8,
+        flags: flags,
+        tx_seq: tx_seq,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Default transaction (for queue initialisation)
+// ---------------------------------------------------------------------------
+
+fn kaxi_default_transaction() -> KaxiTransaction {
+    KaxiTransaction {
+        value_bits: 0,
+        variance_bits: 0,
+        provenance: 0,
+        confidence_q8: 0,
+        flags: 0,
+        tx_seq: 0,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 2. kaxi_pending_queue_new
+// ---------------------------------------------------------------------------
+
+fn kaxi_pending_queue_new() -> KaxiPendingQueue {
+    let d = kaxi_default_transaction()
+    KaxiPendingQueue {
+        entries: [
+            d, d, d, d, d, d, d, d,
+            d, d, d, d, d, d, d, d,
+            d, d, d, d, d, d, d, d,
+            d, d, d, d, d, d, d, d,
+            d, d, d, d, d, d, d, d,
+            d, d, d, d, d, d, d, d,
+            d, d, d, d, d, d, d, d,
+            d, d, d, d, d, d, d, d
+        ],
+        head: 0,
+        tail: 0,
+        count: 0,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 3. kaxi_pending_queue_is_full
+// ---------------------------------------------------------------------------
+
+fn kaxi_pending_queue_is_full(q: KaxiPendingQueue) -> bool {
+    q.count >= 64
+}
+
+// ---------------------------------------------------------------------------
+// 4. kaxi_pending_queue_is_empty
+// ---------------------------------------------------------------------------
+
+fn kaxi_pending_queue_is_empty(q: KaxiPendingQueue) -> bool {
+    q.count == 0
+}
+
+// ---------------------------------------------------------------------------
+// 5. kaxi_pending_queue_push
+// ---------------------------------------------------------------------------
+
+fn kaxi_pending_queue_push(q: KaxiPendingQueue, tx: KaxiTransaction) -> KaxiPendingQueue {
+    if q.count >= 64 {
+        return q
+    }
+    var entries = q.entries
+    entries[q.tail as usize] = tx
+    let next_tail = (q.tail + 1) % 64
+    KaxiPendingQueue {
+        entries: entries,
+        head: q.head,
+        tail: next_tail,
+        count: q.count + 1,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 6. kaxi_pending_queue_pop
+// ---------------------------------------------------------------------------
+
+fn kaxi_pending_queue_pop(q: KaxiPendingQueue) -> (KaxiPendingQueue, KaxiTransaction) {
+    if q.count == 0 {
+        let d = kaxi_default_transaction()
+        return (q, d)
+    }
+    let tx = q.entries[q.head as usize]
+    let next_head = (q.head + 1) % 64
+    let new_q = KaxiPendingQueue {
+        entries: q.entries,
+        head: next_head,
+        tail: q.tail,
+        count: q.count - 1,
+    }
+    (new_q, tx)
+}
+
+// ---------------------------------------------------------------------------
+// 7. kaxi_emit_state_new
+// ---------------------------------------------------------------------------
+
+fn kaxi_emit_state_new() -> KaxiEmitState {
+    KaxiEmitState {
+        queue: kaxi_pending_queue_new(),
+        tx_seq_counter: 0,
+        total_emitted: 0,
+        total_stalled: 0,
+        fidelity_total: 0,
+        prov_total: 0,
+        formal_total: 0,
+        epi_score: 0,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 8. kaxi_emit_begin
+// ---------------------------------------------------------------------------
+
+fn kaxi_emit_begin(
+    st: KaxiEmitState,
+    value_bits: i64,
+    variance_bits: i64,
+    provenance: i64,
+    confidence_q8: i64,
+    op_kind: i64
+) -> KaxiEmitState {
+    let seq = st.tx_seq_counter
+    let tx = kaxi_transaction_new(value_bits, variance_bits, provenance, confidence_q8, op_kind, seq)
+    let new_queue = kaxi_pending_queue_push(st.queue, tx)
+    KaxiEmitState {
+        queue: new_queue,
+        tx_seq_counter: seq + 1,
+        total_emitted: st.total_emitted,
+        total_stalled: st.total_stalled,
+        fidelity_total: st.fidelity_total,
+        prov_total: st.prov_total,
+        formal_total: st.formal_total,
+        epi_score: st.epi_score,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 9. kaxi_emit_flush_one
+// ---------------------------------------------------------------------------
+
+fn kaxi_emit_flush_one(st: KaxiEmitState, ready: bool) -> (KaxiEmitState, bool) {
+    if !ready {
+        let stalled_st = KaxiEmitState {
+            queue: st.queue,
+            tx_seq_counter: st.tx_seq_counter,
+            total_emitted: st.total_emitted,
+            total_stalled: st.total_stalled + 1,
+            fidelity_total: st.fidelity_total,
+            prov_total: st.prov_total,
+            formal_total: st.formal_total,
+            epi_score: st.epi_score,
+        }
+        return (stalled_st, false)
+    }
+    if kaxi_pending_queue_is_empty(st.queue) {
+        return (st, false)
+    }
+    let (new_queue, tx) = kaxi_pending_queue_pop(st.queue)
+    let op_kind = kaxi_fabric_flags_unpack_op_kind(tx.flags)
+    let is_epi = if op_kind >= 1 && op_kind <= 5 { 1 as i64 } else { 0 as i64 }
+    let new_fidelity = st.fidelity_total + is_epi
+    let new_prov = st.prov_total + is_epi
+    let new_formal = st.formal_total + is_epi
+    let new_epi_score = (new_fidelity >> 3) + (new_prov >> 4) + (new_formal >> 5)
+    let new_st = KaxiEmitState {
+        queue: new_queue,
+        tx_seq_counter: st.tx_seq_counter,
+        total_emitted: st.total_emitted + 1,
+        total_stalled: st.total_stalled,
+        fidelity_total: new_fidelity,
+        prov_total: new_prov,
+        formal_total: new_formal,
+        epi_score: new_epi_score,
+    }
+    (new_st, true)
+}
+
+// ---------------------------------------------------------------------------
+// 10. kaxi_emit_flush_all
+// ---------------------------------------------------------------------------
+
+fn kaxi_emit_flush_all(st: KaxiEmitState) -> KaxiEmitState with Mut, Div {
+    var current = st
+    var flushing = true
+    while flushing {
+        if kaxi_pending_queue_is_empty(current.queue) {
+            flushing = false
+        } else {
+            let (next_st, did_emit) = kaxi_emit_flush_one(current, true)
+            current = next_st
+            if !did_emit {
+                flushing = false
+            }
+        }
+    }
+    current
+}
+
+// ---------------------------------------------------------------------------
+// 11-15. Convenience emitters for specific op kinds
+// ---------------------------------------------------------------------------
+
+fn kaxi_emit_epistemic_add(st: KaxiEmitState, value: i64, variance: i64, prov: i64) -> KaxiEmitState {
+    kaxi_emit_begin(st, value, variance, prov, 255, KAXI_OP_ADD)
+}
+
+fn kaxi_emit_epistemic_mul(st: KaxiEmitState, value: i64, variance: i64, prov: i64) -> KaxiEmitState {
+    kaxi_emit_begin(st, value, variance, prov, 255, KAXI_OP_MUL)
+}
+
+fn kaxi_emit_epistemic_div(st: KaxiEmitState, value: i64, variance: i64, prov: i64) -> KaxiEmitState {
+    kaxi_emit_begin(st, value, variance, prov, 255, KAXI_OP_DIV)
+}
+
+fn kaxi_emit_epistemic_fma(st: KaxiEmitState, value: i64, variance: i64, prov: i64) -> KaxiEmitState {
+    kaxi_emit_begin(st, value, variance, prov, 255, KAXI_OP_FMA)
+}
+
+fn kaxi_emit_epistemic_propagate(st: KaxiEmitState, value: i64, variance: i64, prov: i64) -> KaxiEmitState {
+    kaxi_emit_begin(st, value, variance, prov, 255, KAXI_OP_PROP_VAR)
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostics
+// ---------------------------------------------------------------------------
+
+fn kaxi_emit_stats_summary(st: KaxiEmitState) -> string with Mut, Panic, Div, Alloc {
+    "emitted=" ++ kaxi_i64_to_string(st.total_emitted) ++
+    " stalled=" ++ kaxi_i64_to_string(st.total_stalled) ++
+    " pending=" ++ kaxi_i64_to_string(st.queue.count) ++
+    " fidelity=" ++ kaxi_i64_to_string(st.fidelity_total) ++
+    " prov=" ++ kaxi_i64_to_string(st.prov_total) ++
+    " formal=" ++ kaxi_i64_to_string(st.formal_total) ++
+    " epi_score=" ++ kaxi_i64_to_string(st.epi_score)
+}
+
+// ---------------------------------------------------------------------------
+// Self-check and main
+// ---------------------------------------------------------------------------
+
+fn kaxi_fabric_emitter_self_check() -> bool with Mut, Panic, Div, Alloc {
+    // Create emitter, push 3 epistemic ops, flush all, verify counters.
+    var st = kaxi_emit_state_new()
+    st = kaxi_emit_epistemic_add(st, 42, 7, 100)
+    st = kaxi_emit_epistemic_mul(st, 84, 14, 200)
+    st = kaxi_emit_epistemic_fma(st, 168, 28, 300)
+    st = kaxi_emit_flush_all(st)
+    st.total_emitted == 3 &&
+    st.fidelity_total == 3 &&
+    st.prov_total == 3 &&
+    st.formal_total == 3 &&
+    st.epi_score > 0
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
+    if kaxi_fabric_emitter_self_check() {
+        print("kaxi_fabric_emitter: self-check OK\n")
+        0
+    } else {
+        print("kaxi_fabric_emitter: self-check FAIL\n")
+        1
+    }
+}

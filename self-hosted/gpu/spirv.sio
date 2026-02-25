@@ -534,3 +534,672 @@ fn spv_to_bytes(buf: SpvBuf) -> SpvBytes with Mut, Panic {
     }
     out
 }
+
+// ============================================================================
+// Phase 3: Full Kernel Pipeline — SPIR-V Code Generator
+// ============================================================================
+
+// Additional SPIR-V opcodes needed for the kernel pipeline
+let OP_COMPOSITE_EXTRACT: i64 = 81
+let OP_SLESS_THAN_OR_EQUAL: i64 = 179
+let OP_SGREATER_THAN_OR_EQUAL: i64 = 183
+let OP_FORD_LESS_THAN_OR_EQUAL: i64 = 185
+let OP_FORD_GREATER_THAN_OR_EQUAL: i64 = 187
+
+// Scope constants for OpControlBarrier
+let SCOPE_WORKGROUP: i64 = 2
+let SCOPE_DEVICE: i64 = 1
+let MEMORY_SEMANTICS_WORKGROUP: i64 = 256   // WorkgroupMemory
+let MEMORY_SEMANTICS_ACQUIRE_RELEASE: i64 = 8  // AcquireRelease
+
+// Type tag encoding: 0=f32, 1=f64, 2=i32, 3=i64, 4=u32, 5=u64
+let SPV_TAG_F32: i64 = 0
+let SPV_TAG_F64: i64 = 1
+let SPV_TAG_I32: i64 = 2
+let SPV_TAG_I64: i64 = 3
+let SPV_TAG_U32: i64 = 4
+let SPV_TAG_U64: i64 = 5
+
+// ============================================================================
+// 1. SpvCompileState — register map and compilation state
+// ============================================================================
+
+struct SpvRegMapEntry {
+    gpu_reg: i64,
+    spv_id: i64,
+}
+
+struct SpvRegMap {
+    entries: [SpvRegMapEntry; 512],
+    count: i64,
+}
+
+struct SpvCompileState {
+    buf: SpvBuf,
+    ids: SpvIdAlloc,
+    types: SpvTypeIds,
+    reg_map: SpvRegMap,
+    // IDs allocated during kernel setup
+    entry_func_id: i64,
+    label_id: i64,
+    gid_var_id: i64,           // GlobalInvocationId variable
+    param_var_ids: [i64; 8],   // StorageBuffer param variable IDs
+    // Constant IDs needed for barriers and composite extract
+    const_scope_wg_id: i64,
+    const_semantics_id: i64,
+    const_zero_id: i64,
+}
+
+fn spv_reg_map_entry_new() -> SpvRegMapEntry {
+    SpvRegMapEntry { gpu_reg: 0, spv_id: 0 }
+}
+
+fn spv_reg_map_new() -> SpvRegMap {
+    SpvRegMap {
+        entries: [spv_reg_map_entry_new(); 512],
+        count: 0,
+    }
+}
+
+fn spv_reg_map_insert(map: SpvRegMap, gpu_reg: i64, spv_id: i64) -> SpvRegMap with Mut, Panic {
+    var out = map
+    if out.count < 512 {
+        out.entries[out.count as usize] = SpvRegMapEntry { gpu_reg: gpu_reg, spv_id: spv_id }
+        out.count = out.count + 1
+    }
+    out
+}
+
+fn spv_reg_map_lookup(map: SpvRegMap, gpu_reg: i64) -> i64 with Mut, Panic {
+    var i: i64 = 0
+    while i < map.count {
+        if map.entries[i as usize].gpu_reg == gpu_reg {
+            return map.entries[i as usize].spv_id
+        }
+        i = i + 1
+    }
+    // Not found — return 0 (invalid SPIR-V ID)
+    0
+}
+
+fn spv_compile_state_new() -> SpvCompileState {
+    SpvCompileState {
+        buf: spv_buf_new(),
+        ids: spv_id_alloc_new(),
+        types: spv_type_ids_new(),
+        reg_map: spv_reg_map_new(),
+        entry_func_id: 0,
+        label_id: 0,
+        gid_var_id: 0,
+        param_var_ids: [0; 8],
+        const_scope_wg_id: 0,
+        const_semantics_id: 0,
+        const_zero_id: 0,
+    }
+}
+
+// ============================================================================
+// 2. spv_allocate_all_types — emit type declarations
+// ============================================================================
+
+fn spv_allocate_all_types(state: SpvCompileState) -> SpvCompileState with Mut, Panic {
+    var s = state
+
+    // OpTypeVoid
+    let (ids1, void_id) = spv_alloc_id(s.ids)
+    s.ids = ids1
+    s.buf = spv_emit_type_void(s.buf, void_id)
+    s.types.void_id = void_id
+
+    // OpTypeInt(32, unsigned) — uint
+    let (ids2, uint_id) = spv_alloc_id(s.ids)
+    s.ids = ids2
+    s.buf = spv_emit_type_int(s.buf, uint_id, 32, 0)
+    s.types.uint_id = uint_id
+
+    // OpTypeInt(32, signed) — int
+    let (ids3, int_id) = spv_alloc_id(s.ids)
+    s.ids = ids3
+    s.buf = spv_emit_type_int(s.buf, int_id, 32, 1)
+    s.types.int_id = int_id
+
+    // OpTypeInt(64, unsigned) — ulong
+    let (ids4, ulong_id) = spv_alloc_id(s.ids)
+    s.ids = ids4
+    s.buf = spv_emit_type_int(s.buf, ulong_id, 64, 0)
+    s.types.ulong_id = ulong_id
+
+    // OpTypeInt(64, signed) — long
+    let (ids5, long_id) = spv_alloc_id(s.ids)
+    s.ids = ids5
+    s.buf = spv_emit_type_int(s.buf, long_id, 64, 1)
+    s.types.long_id = long_id
+
+    // OpTypeFloat(32) — float
+    let (ids6, float_id) = spv_alloc_id(s.ids)
+    s.ids = ids6
+    s.buf = spv_emit_type_float(s.buf, float_id, 32)
+    s.types.float_id = float_id
+
+    // OpTypeFloat(64) — double
+    let (ids7, double_id) = spv_alloc_id(s.ids)
+    s.ids = ids7
+    s.buf = spv_emit_type_float(s.buf, double_id, 64)
+    s.types.double_id = double_id
+
+    // OpTypeVector(uint, 3) — uvec3 for GlobalInvocationId
+    let (ids8, uint3_id) = spv_alloc_id(s.ids)
+    s.ids = ids8
+    s.buf = spv_emit_type_vector(s.buf, uint3_id, uint_id, 3)
+    s.types.uint3_id = uint3_id
+
+    // OpTypePointer(Function, float) — for function-local float pointers
+    let (ids9, ptr_func_float_id) = spv_alloc_id(s.ids)
+    s.ids = ids9
+    s.buf = spv_emit_type_pointer(s.buf, ptr_func_float_id, STORAGE_FUNCTION, float_id)
+
+    // OpTypePointer(StorageBuffer, uint) — for buffer params (uint element)
+    let (ids10, ptr_sb_uint_id) = spv_alloc_id(s.ids)
+    s.ids = ids10
+    s.buf = spv_emit_type_pointer(s.buf, ptr_sb_uint_id, STORAGE_STORAGE_BUFFER, uint_id)
+    s.types.ptr_storage_uint_id = ptr_sb_uint_id
+
+    // OpTypePointer(StorageBuffer, float) — for buffer params (float element)
+    let (ids11, ptr_sb_float_id) = spv_alloc_id(s.ids)
+    s.ids = ids11
+    s.buf = spv_emit_type_pointer(s.buf, ptr_sb_float_id, STORAGE_STORAGE_BUFFER, float_id)
+    s.types.ptr_storage_float_id = ptr_sb_float_id
+
+    // OpTypePointer(Input, uvec3) — for GlobalInvocationId
+    let (ids12, ptr_input_uint3_id) = spv_alloc_id(s.ids)
+    s.ids = ids12
+    s.buf = spv_emit_type_pointer(s.buf, ptr_input_uint3_id, STORAGE_INPUT, uint3_id)
+    s.types.ptr_input_uint3_id = ptr_input_uint3_id
+
+    // OpTypeFunction(void) — void() function type
+    let (ids13, func_void_id) = spv_alloc_id(s.ids)
+    s.ids = ids13
+    s.buf = spv_emit_type_function(s.buf, func_void_id, void_id)
+    s.types.func_void_id = func_void_id
+
+    s
+}
+
+// ============================================================================
+// 3. spv_emit_kernel_variables — declare params and builtins
+// ============================================================================
+
+fn spv_emit_kernel_variables(state: SpvCompileState, param_count: i64) -> SpvCompileState with Mut, Panic {
+    var s = state
+
+    // Declare StorageBuffer pointer variables for each kernel parameter.
+    // Each gets Binding = i, DescriptorSet = 0.
+    var i: i64 = 0
+    while i < param_count {
+        if i < 8 {
+            let (ids_p, var_id) = spv_alloc_id(s.ids)
+            s.ids = ids_p
+            // OpVariable StorageBuffer pointer (using float pointer type as default)
+            s.buf = spv_emit_variable(s.buf, s.types.ptr_storage_float_id, var_id, STORAGE_STORAGE_BUFFER)
+            // OpDecorate Binding i
+            s.buf = spv_emit_decorate_binding(s.buf, var_id, i)
+            // OpDecorate DescriptorSet 0
+            s.buf = spv_emit_decorate_descriptor_set(s.buf, var_id, 0)
+            s.param_var_ids[i as usize] = var_id
+        }
+        i = i + 1
+    }
+
+    // Declare GlobalInvocationId input variable
+    let (ids_gid, gid_var_id) = spv_alloc_id(s.ids)
+    s.ids = ids_gid
+    s.buf = spv_emit_variable(s.buf, s.types.ptr_input_uint3_id, gid_var_id, STORAGE_INPUT)
+    // OpDecorate BuiltIn GlobalInvocationId
+    s.buf = spv_emit_decorate_builtin(s.buf, gid_var_id, BUILTIN_GLOBAL_INVOCATION_ID)
+    s.gid_var_id = gid_var_id
+
+    // Emit constants needed for barriers and composite extract
+    // Constant: workgroup scope (uint = 2)
+    let (ids_c1, scope_wg_id) = spv_alloc_id(s.ids)
+    s.ids = ids_c1
+    s.buf = spv_emit_constant_u32(s.buf, s.types.uint_id, scope_wg_id, SCOPE_WORKGROUP)
+    s.const_scope_wg_id = scope_wg_id
+
+    // Constant: memory semantics for barrier (WorkgroupMemory | AcquireRelease = 264)
+    let (ids_c2, semantics_id) = spv_alloc_id(s.ids)
+    s.ids = ids_c2
+    s.buf = spv_emit_constant_u32(s.buf, s.types.uint_id, semantics_id, MEMORY_SEMANTICS_WORKGROUP + MEMORY_SEMANTICS_ACQUIRE_RELEASE)
+    s.const_semantics_id = semantics_id
+
+    // Constant: zero (uint = 0) for composite extract index
+    let (ids_c3, zero_id) = spv_alloc_id(s.ids)
+    s.ids = ids_c3
+    s.buf = spv_emit_constant_u32(s.buf, s.types.uint_id, zero_id, 0)
+    s.const_zero_id = zero_id
+
+    s
+}
+
+// ============================================================================
+// Helper: resolve SPIR-V type ID from type_tag
+// ============================================================================
+
+fn spv_type_id_for_tag(types: SpvTypeIds, type_tag: i64) -> i64 {
+    if type_tag == SPV_TAG_F32 { return types.float_id }
+    if type_tag == SPV_TAG_F64 { return types.double_id }
+    if type_tag == SPV_TAG_I32 { return types.int_id }
+    if type_tag == SPV_TAG_I64 { return types.long_id }
+    if type_tag == SPV_TAG_U32 { return types.uint_id }
+    if type_tag == SPV_TAG_U64 { return types.ulong_id }
+    // Default to uint
+    types.uint_id
+}
+
+fn spv_is_float_tag(type_tag: i64) -> bool {
+    type_tag == SPV_TAG_F32 || type_tag == SPV_TAG_F64
+}
+
+fn spv_is_signed_int_tag(type_tag: i64) -> bool {
+    type_tag == SPV_TAG_I32 || type_tag == SPV_TAG_I64
+}
+
+// ============================================================================
+// Helper: emit OpCompositeExtract instruction
+// ============================================================================
+
+fn spv_emit_composite_extract(buf: SpvBuf, type_id: i64, result_id: i64, composite_id: i64, index: i64) -> SpvBuf with Mut, Panic {
+    var out = buf
+    out = spv_push_word(out, spv_encode_op(5, OP_COMPOSITE_EXTRACT))
+    out = spv_push_word(out, type_id)
+    out = spv_push_word(out, result_id)
+    out = spv_push_word(out, composite_id)
+    out = spv_push_word(out, index)
+    out
+}
+
+// ============================================================================
+// 4. spv_lower_single_op — lower one GPU IR opcode to SPIR-V
+// ============================================================================
+
+fn spv_lower_single_op(state: SpvCompileState, opcode: i64, dst_reg: i64, src_a_reg: i64, src_b_reg: i64, type_tag: i64) -> SpvCompileState with Mut, Panic {
+    var s = state
+    let tid = spv_type_id_for_tag(s.types, type_tag)
+    let is_float = spv_is_float_tag(type_tag)
+    let is_signed = spv_is_signed_int_tag(type_tag)
+
+    // GpuOpcode enum indices (matching kernel_ir.sio order)
+    let GPU_OP_GET_TID: i64 = 0
+    let GPU_OP_ADD: i64 = 3
+    let GPU_OP_SUB: i64 = 4
+    let GPU_OP_MUL: i64 = 5
+    let GPU_OP_DIV: i64 = 6
+    let GPU_OP_BARRIER_SYNC: i64 = 8
+    let GPU_OP_SHFL_DOWN: i64 = 9
+    let GPU_OP_LOAD_GLOBAL: i64 = 13
+    let GPU_OP_STORE_GLOBAL: i64 = 14
+    let GPU_OP_SETP_LT: i64 = 21
+    let GPU_OP_SETP_LE: i64 = 22
+    let GPU_OP_SETP_EQ: i64 = 23
+    let GPU_OP_SETP_GE: i64 = 24
+
+    // ---- GpuAdd ----
+    if opcode == GPU_OP_ADD {
+        let (ids_a, result_id) = spv_alloc_id(s.ids)
+        s.ids = ids_a
+        let src_a_id = spv_reg_map_lookup(s.reg_map, src_a_reg)
+        let src_b_id = spv_reg_map_lookup(s.reg_map, src_b_reg)
+        if is_float {
+            s.buf = spv_emit_binary_op(s.buf, OP_FADD, tid, result_id, src_a_id, src_b_id)
+        } else {
+            s.buf = spv_emit_binary_op(s.buf, OP_IADD, tid, result_id, src_a_id, src_b_id)
+        }
+        s.reg_map = spv_reg_map_insert(s.reg_map, dst_reg, result_id)
+        return s
+    }
+
+    // ---- GpuSub ----
+    if opcode == GPU_OP_SUB {
+        let (ids_b, result_id) = spv_alloc_id(s.ids)
+        s.ids = ids_b
+        let src_a_id = spv_reg_map_lookup(s.reg_map, src_a_reg)
+        let src_b_id = spv_reg_map_lookup(s.reg_map, src_b_reg)
+        if is_float {
+            s.buf = spv_emit_binary_op(s.buf, OP_FSUB, tid, result_id, src_a_id, src_b_id)
+        } else {
+            s.buf = spv_emit_binary_op(s.buf, OP_ISUB, tid, result_id, src_a_id, src_b_id)
+        }
+        s.reg_map = spv_reg_map_insert(s.reg_map, dst_reg, result_id)
+        return s
+    }
+
+    // ---- GpuMul ----
+    if opcode == GPU_OP_MUL {
+        let (ids_c, result_id) = spv_alloc_id(s.ids)
+        s.ids = ids_c
+        let src_a_id = spv_reg_map_lookup(s.reg_map, src_a_reg)
+        let src_b_id = spv_reg_map_lookup(s.reg_map, src_b_reg)
+        if is_float {
+            s.buf = spv_emit_binary_op(s.buf, OP_FMUL, tid, result_id, src_a_id, src_b_id)
+        } else {
+            s.buf = spv_emit_binary_op(s.buf, OP_IMUL, tid, result_id, src_a_id, src_b_id)
+        }
+        s.reg_map = spv_reg_map_insert(s.reg_map, dst_reg, result_id)
+        return s
+    }
+
+    // ---- GpuDiv ----
+    if opcode == GPU_OP_DIV {
+        let (ids_d, result_id) = spv_alloc_id(s.ids)
+        s.ids = ids_d
+        let src_a_id = spv_reg_map_lookup(s.reg_map, src_a_reg)
+        let src_b_id = spv_reg_map_lookup(s.reg_map, src_b_reg)
+        if is_float {
+            s.buf = spv_emit_binary_op(s.buf, OP_FDIV, tid, result_id, src_a_id, src_b_id)
+        } else if is_signed {
+            s.buf = spv_emit_binary_op(s.buf, OP_SDIV, tid, result_id, src_a_id, src_b_id)
+        } else {
+            s.buf = spv_emit_binary_op(s.buf, OP_UDIV, tid, result_id, src_a_id, src_b_id)
+        }
+        s.reg_map = spv_reg_map_insert(s.reg_map, dst_reg, result_id)
+        return s
+    }
+
+    // ---- GpuLoadGlobal ----
+    if opcode == GPU_OP_LOAD_GLOBAL {
+        let (ids_l, result_id) = spv_alloc_id(s.ids)
+        s.ids = ids_l
+        let ptr_id = spv_reg_map_lookup(s.reg_map, src_a_reg)
+        s.buf = spv_emit_load(s.buf, tid, result_id, ptr_id)
+        s.reg_map = spv_reg_map_insert(s.reg_map, dst_reg, result_id)
+        return s
+    }
+
+    // ---- GpuStoreGlobal ----
+    if opcode == GPU_OP_STORE_GLOBAL {
+        let ptr_id = spv_reg_map_lookup(s.reg_map, dst_reg)
+        let val_id = spv_reg_map_lookup(s.reg_map, src_a_reg)
+        s.buf = spv_emit_store(s.buf, ptr_id, val_id)
+        return s
+    }
+
+    // ---- GpuGetTid ----
+    if opcode == GPU_OP_GET_TID {
+        // Load the GlobalInvocationId vec3, then extract component 0 (x)
+        let (ids_t1, loaded_id) = spv_alloc_id(s.ids)
+        s.ids = ids_t1
+        s.buf = spv_emit_load(s.buf, s.types.uint3_id, loaded_id, s.gid_var_id)
+        let (ids_t2, extracted_id) = spv_alloc_id(s.ids)
+        s.ids = ids_t2
+        s.buf = spv_emit_composite_extract(s.buf, s.types.uint_id, extracted_id, loaded_id, 0)
+        s.reg_map = spv_reg_map_insert(s.reg_map, dst_reg, extracted_id)
+        return s
+    }
+
+    // ---- GpuBarrierSync ----
+    if opcode == GPU_OP_BARRIER_SYNC {
+        // OpControlBarrier(Workgroup, Workgroup, WorkgroupMemory | AcquireRelease)
+        s.buf = spv_emit_control_barrier(s.buf, s.const_scope_wg_id, s.const_scope_wg_id, s.const_semantics_id)
+        return s
+    }
+
+    // ---- GpuSetpLt — float: OpFOrdLessThan, int: OpSLessThan ----
+    if opcode == GPU_OP_SETP_LT {
+        let (ids_lt, result_id) = spv_alloc_id(s.ids)
+        s.ids = ids_lt
+        let src_a_id = spv_reg_map_lookup(s.reg_map, src_a_reg)
+        let src_b_id = spv_reg_map_lookup(s.reg_map, src_b_reg)
+        if is_float {
+            s.buf = spv_emit_binary_op(s.buf, OP_FORD_LESS_THAN, s.types.bool_id, result_id, src_a_id, src_b_id)
+        } else {
+            s.buf = spv_emit_binary_op(s.buf, OP_SLESS_THAN, s.types.bool_id, result_id, src_a_id, src_b_id)
+        }
+        s.reg_map = spv_reg_map_insert(s.reg_map, dst_reg, result_id)
+        return s
+    }
+
+    // ---- GpuSetpLe — float: OpFOrdLessThanEqual, int: OpSLessThanEqual ----
+    if opcode == GPU_OP_SETP_LE {
+        let (ids_le, result_id) = spv_alloc_id(s.ids)
+        s.ids = ids_le
+        let src_a_id = spv_reg_map_lookup(s.reg_map, src_a_reg)
+        let src_b_id = spv_reg_map_lookup(s.reg_map, src_b_reg)
+        if is_float {
+            s.buf = spv_emit_binary_op(s.buf, OP_FORD_LESS_THAN_OR_EQUAL, s.types.bool_id, result_id, src_a_id, src_b_id)
+        } else {
+            s.buf = spv_emit_binary_op(s.buf, OP_SLESS_THAN_OR_EQUAL, s.types.bool_id, result_id, src_a_id, src_b_id)
+        }
+        s.reg_map = spv_reg_map_insert(s.reg_map, dst_reg, result_id)
+        return s
+    }
+
+    // ---- GpuSetpEq — float: OpFOrdEqual, int: OpIEqual ----
+    if opcode == GPU_OP_SETP_EQ {
+        let (ids_eq, result_id) = spv_alloc_id(s.ids)
+        s.ids = ids_eq
+        let src_a_id = spv_reg_map_lookup(s.reg_map, src_a_reg)
+        let src_b_id = spv_reg_map_lookup(s.reg_map, src_b_reg)
+        if is_float {
+            s.buf = spv_emit_binary_op(s.buf, OP_FORD_EQUAL, s.types.bool_id, result_id, src_a_id, src_b_id)
+        } else {
+            s.buf = spv_emit_binary_op(s.buf, OP_SEQUAL, s.types.bool_id, result_id, src_a_id, src_b_id)
+        }
+        s.reg_map = spv_reg_map_insert(s.reg_map, dst_reg, result_id)
+        return s
+    }
+
+    // ---- GpuSetpGe — float: OpFOrdGreaterThanEqual, int: OpSGreaterThanEqual ----
+    if opcode == GPU_OP_SETP_GE {
+        let (ids_ge, result_id) = spv_alloc_id(s.ids)
+        s.ids = ids_ge
+        let src_a_id = spv_reg_map_lookup(s.reg_map, src_a_reg)
+        let src_b_id = spv_reg_map_lookup(s.reg_map, src_b_reg)
+        if is_float {
+            s.buf = spv_emit_binary_op(s.buf, OP_FORD_GREATER_THAN_OR_EQUAL, s.types.bool_id, result_id, src_a_id, src_b_id)
+        } else {
+            s.buf = spv_emit_binary_op(s.buf, OP_SGREATER_THAN_OR_EQUAL, s.types.bool_id, result_id, src_a_id, src_b_id)
+        }
+        s.reg_map = spv_reg_map_insert(s.reg_map, dst_reg, result_id)
+        return s
+    }
+
+    // ---- GpuShflDown — no direct SPIR-V equivalent ----
+    // Note: SPIR-V has no warp shuffle. Would need SPV_KHR_subgroup_shuffle
+    // or OpGroupNonUniformShuffleDown (requires Vulkan 1.1 + SubgroupBallotKHR).
+    // For now, skip with a no-op.
+    if opcode == GPU_OP_SHFL_DOWN {
+        return s
+    }
+
+    // Default: skip unknown opcodes (no emission, no crash)
+    s
+}
+
+// ============================================================================
+// 5. gpu_lower_to_spirv — full pipeline entry point
+// ============================================================================
+
+fn gpu_lower_to_spirv(kernel_name: string, param_count: i64, ops_opcodes: [i64; 256], ops_dst: [i64; 256], ops_src_a: [i64; 256], ops_src_b: [i64; 256], ops_type_tags: [i64; 256], ops_count: i64) -> SpvBuf with Mut, Panic, Div {
+    var s = spv_compile_state_new()
+
+    // We build the module body first, then prepend the header with the final ID bound.
+
+    // 1. Emit OpCapability Shader
+    s.buf = spv_emit_capability(s.buf, CAPABILITY_SHADER)
+
+    // 2. Emit OpMemoryModel Logical GLSL450
+    s.buf = spv_emit_memory_model(s.buf, ADDRESSING_LOGICAL, MEMORY_GLSL450)
+
+    // 3. Allocate types
+    s = spv_allocate_all_types(s)
+
+    // Emit OpTypeBool (needed for predicate comparisons)
+    let (ids_bool, bool_id) = spv_alloc_id(s.ids)
+    s.ids = ids_bool
+    s.buf = spv_push_word(s.buf, spv_encode_op(2, OP_TYPE_BOOL))
+    s.buf = spv_push_word(s.buf, bool_id)
+    s.types.bool_id = bool_id
+
+    // 4. Emit kernel variables + decorations
+    s = spv_emit_kernel_variables(s, param_count)
+
+    // 5. Allocate function and label IDs
+    let (ids_fn, func_id) = spv_alloc_id(s.ids)
+    s.ids = ids_fn
+    s.entry_func_id = func_id
+
+    let (ids_lbl, lbl_id) = spv_alloc_id(s.ids)
+    s.ids = ids_lbl
+    s.label_id = lbl_id
+
+    // 6. Emit OpEntryPoint GLCompute
+    // Interface variables: gid var + all param vars
+    var iface_ids: [i64; 8] = [0; 8]
+    var iface_count: i64 = 0
+    // Add GlobalInvocationId variable to interface
+    iface_ids[0] = s.gid_var_id
+    iface_count = 1
+    // Add StorageBuffer param variables to interface
+    var pi: i64 = 0
+    while pi < param_count {
+        if pi < 8 {
+            if iface_count < 8 {
+                iface_ids[iface_count as usize] = s.param_var_ids[pi as usize]
+                iface_count = iface_count + 1
+            }
+        }
+        pi = pi + 1
+    }
+    s.buf = spv_emit_entry_point(s.buf, EXECUTION_GLCOMPUTE, func_id, kernel_name, iface_ids, iface_count)
+
+    // 7. Emit OpExecutionMode LocalSize (256, 1, 1)
+    s.buf = spv_emit_local_size(s.buf, func_id, 256, 1, 1)
+
+    // 8. Begin function
+    s.buf = spv_emit_function(s.buf, s.types.void_id, func_id, 0, s.types.func_void_id)
+    s.buf = spv_emit_label(s.buf, lbl_id)
+
+    // 9. Walk ops array, calling spv_lower_single_op for each
+    var oi: i64 = 0
+    while oi < ops_count {
+        if oi < 256 {
+            s = spv_lower_single_op(
+                s,
+                ops_opcodes[oi as usize],
+                ops_dst[oi as usize],
+                ops_src_a[oi as usize],
+                ops_src_b[oi as usize],
+                ops_type_tags[oi as usize]
+            )
+        }
+        oi = oi + 1
+    }
+
+    // 10. End function
+    s.buf = spv_emit_return(s.buf)
+    s.buf = spv_emit_function_end(s.buf)
+
+    // Build final buffer: 5-word header + module body
+    let bound = s.ids.next_id
+    var final_buf = spv_buf_new()
+    final_buf = spv_push_word(final_buf, SPIRV_MAGIC)
+    final_buf = spv_push_word(final_buf, SPIRV_VERSION_1_5)
+    final_buf = spv_push_word(final_buf, SPIRV_GENERATOR_SOUNIO)
+    final_buf = spv_push_word(final_buf, bound)
+    final_buf = spv_push_word(final_buf, 0)  // schema (reserved)
+
+    // Copy all words from module body
+    var ci: i64 = 0
+    while ci < s.buf.word_count {
+        final_buf = spv_push_word(final_buf, s.buf.words[ci as usize])
+        ci = ci + 1
+    }
+
+    final_buf
+}
+
+// ============================================================================
+// 6. Smoke tests + self_check
+// ============================================================================
+
+fn spirv_self_check_magic() -> bool with Mut, Panic, Div {
+    // Build a minimal kernel with 0 ops and 2 params
+    var opcodes: [i64; 256] = [0; 256]
+    var dsts: [i64; 256] = [0; 256]
+    var src_a: [i64; 256] = [0; 256]
+    var src_b: [i64; 256] = [0; 256]
+    var tags: [i64; 256] = [0; 256]
+
+    let buf = gpu_lower_to_spirv("test_kernel", 2, opcodes, dsts, src_a, src_b, tags, 0)
+
+    // Check magic number is first word
+    let magic_ok = buf.words[0] == SPIRV_MAGIC
+    // Check word count is > 5 (at minimum: 5 header + capabilities + types)
+    let size_ok = buf.word_count > 5
+    // Check version
+    let version_ok = buf.words[1] == SPIRV_VERSION_1_5
+    // Check generator ID
+    let generator_ok = buf.words[2] == SPIRV_GENERATOR_SOUNIO
+
+    magic_ok && size_ok && version_ok && generator_ok
+}
+
+fn spirv_self_check_add_kernel() -> bool with Mut, Panic, Div {
+    // Build a kernel with one add op: dst=2, src_a=0, src_b=1, f32
+    var opcodes: [i64; 256] = [0; 256]
+    var dsts: [i64; 256] = [0; 256]
+    var src_a: [i64; 256] = [0; 256]
+    var src_b: [i64; 256] = [0; 256]
+    var tags: [i64; 256] = [0; 256]
+
+    opcodes[0] = 3   // GpuAdd
+    dsts[0] = 2
+    src_a[0] = 0
+    src_b[0] = 1
+    tags[0] = SPV_TAG_F32
+
+    let buf = gpu_lower_to_spirv("vec_add", 3, opcodes, dsts, src_a, src_b, tags, 1)
+
+    // Must have SPIR-V magic
+    let magic_ok = buf.words[0] == SPIRV_MAGIC
+    // Must have more words than the empty kernel (types + variable decls + add op)
+    let size_ok = buf.word_count > 20
+    magic_ok && size_ok
+}
+
+fn spirv_self_check_tid_kernel() -> bool with Mut, Panic, Div {
+    // Build a kernel that gets thread ID (opcode 0)
+    var opcodes: [i64; 256] = [0; 256]
+    var dsts: [i64; 256] = [0; 256]
+    var src_a: [i64; 256] = [0; 256]
+    var src_b: [i64; 256] = [0; 256]
+    var tags: [i64; 256] = [0; 256]
+
+    opcodes[0] = 0   // GpuGetTid
+    dsts[0] = 0
+    tags[0] = SPV_TAG_U32
+
+    let buf = gpu_lower_to_spirv("tid_test", 1, opcodes, dsts, src_a, src_b, tags, 1)
+
+    // Must have SPIR-V magic and reasonable size
+    let magic_ok = buf.words[0] == SPIRV_MAGIC
+    let size_ok = buf.word_count > 20
+    magic_ok && size_ok
+}
+
+fn spirv_self_check() -> bool with Mut, Panic, Div {
+    let t1 = spirv_self_check_magic()
+    let t2 = spirv_self_check_add_kernel()
+    let t3 = spirv_self_check_tid_kernel()
+    t1 && t2 && t3
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    let ok = spirv_self_check()
+    if ok {
+        print("PASS spirv_self_check\n")
+        return 0 as i32
+    } else {
+        print("FAIL spirv_self_check\n")
+        return 1 as i32
+    }
+}

@@ -1183,3 +1183,120 @@ fn gpu_kernel_portability_score(kernel: GpuKernelIr) -> i64 {
     if final_score < 0 { final_score = 0 }
     final_score
 }
+
+// ============================================================================
+// Self-check: smoke tests for portable GPU compiler
+// ============================================================================
+
+fn portable_self_check_target_names() -> bool {
+    let ptx_name = gpu_target_name(GpuTarget::GpuTargetPtx)
+    let metal_name = gpu_target_name(GpuTarget::GpuTargetMetal)
+    let spirv_name = gpu_target_name(GpuTarget::GpuTargetSpirv)
+    let ptx_short = gpu_target_short_name(GpuTarget::GpuTargetPtx)
+    let metal_short = gpu_target_short_name(GpuTarget::GpuTargetMetal)
+    let spirv_short = gpu_target_short_name(GpuTarget::GpuTargetSpirv)
+    str_len(ptx_name) > 0 &&
+    str_len(metal_name) > 0 &&
+    str_len(spirv_name) > 0 &&
+    ptx_short == "ptx" &&
+    metal_short == "metal" &&
+    spirv_short == "spirv"
+}
+
+fn portable_self_check_ptx_caps() -> bool {
+    // sm_50 (Maxwell): f64=true, tensor=false, shared=48KB, warp=32
+    let caps50 = gpu_ptx_capabilities(5, 0)
+    let ok50 = caps50.has_f64 && !caps50.has_tensor_cores &&
+               caps50.max_shared_bytes == 49152 && caps50.warp_size == 32
+
+    // sm_90 (Hopper): f64=true, tensor=true, shared=228KB
+    let caps90 = gpu_ptx_capabilities(9, 0)
+    let ok90 = caps90.has_f64 && caps90.has_tensor_cores &&
+               caps90.max_shared_bytes == 233472
+
+    ok50 && ok90
+}
+
+fn portable_self_check_metal_caps() -> bool {
+    // Family 1: no f64, no tensor, 16KB shared, 512 max threads
+    let caps1 = gpu_metal_capabilities(1)
+    let ok1 = !caps1.has_f64 && !caps1.has_tensor_cores &&
+              caps1.max_shared_bytes == 16384 &&
+              caps1.max_threads_per_block == 512
+
+    // Family 7 (M1): still no f64, 32KB shared, 1024 max threads
+    let caps7 = gpu_metal_capabilities(7)
+    let ok7 = !caps7.has_f64 && caps7.max_shared_bytes == 32768 &&
+              caps7.max_threads_per_block == 1024
+
+    ok1 && ok7
+}
+
+fn portable_self_check_spirv_caps() -> bool {
+    let caps = gpu_spirv_capabilities()
+    !caps.has_f64 && !caps.has_tensor_cores &&
+    caps.has_shared_memory && caps.warp_size == 32
+}
+
+fn portable_self_check_result_helpers() -> bool {
+    let empty = gpu_compile_result_new()
+    let none_valid = !gpu_compile_result_any_valid(empty)
+    let count_zero = gpu_compile_result_valid_count(empty) == 0
+
+    var r = gpu_compile_result_new()
+    r.ptx_valid = true
+    r.metal_valid = true
+    let some_valid = gpu_compile_result_any_valid(r)
+    let not_all = !gpu_compile_result_all_valid(r)
+    let count_two = gpu_compile_result_valid_count(r) == 2
+
+    r.spirv_valid = true
+    let all_valid = gpu_compile_result_all_valid(r)
+    let count_three = gpu_compile_result_valid_count(r) == 3
+
+    none_valid && count_zero && some_valid && not_all && count_two &&
+    all_valid && count_three
+}
+
+fn portable_self_check_target_support() -> bool {
+    let support = gpu_target_support_new()
+    let count0 = gpu_target_support_count(support) == 0
+
+    var s = gpu_target_support_new()
+    s.ptx_ok = true
+    s.spirv_ok = true
+    let count2 = gpu_target_support_count(s) == 2
+
+    count0 && count2
+}
+
+fn portable_self_check_arch_inference() -> bool {
+    // gpu_caps_to_ptx_arch should map shared memory tiers back to SM
+    let caps_hopper = gpu_ptx_capabilities(9, 0)
+    let arch = gpu_caps_to_ptx_arch(caps_hopper)
+    // Hopper has 228KB shared → should map to sm_90
+    let sm = ptx_sm_version(arch)
+    sm == 90
+}
+
+fn portable_self_check() -> bool {
+    let t1 = portable_self_check_target_names()
+    let t2 = portable_self_check_ptx_caps()
+    let t3 = portable_self_check_metal_caps()
+    let t4 = portable_self_check_spirv_caps()
+    let t5 = portable_self_check_result_helpers()
+    let t6 = portable_self_check_target_support()
+    let t7 = portable_self_check_arch_inference()
+    t1 && t2 && t3 && t4 && t5 && t6 && t7
+}
+
+fn main() -> i32 with IO {
+    let ok = portable_self_check()
+    if ok {
+        print("PASS portable_self_check (7 tests)\n")
+        return 0 as i32
+    } else {
+        print("FAIL portable_self_check\n")
+        return 1 as i32
+    }
+}

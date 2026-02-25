@@ -155,7 +155,11 @@ fn ptx_value_map_get_name(vm: PtxValueMap, op_idx: i64) -> string with Mut, Pani
         if vm.op_ids[i as usize] == op_idx {
             let start = vm.reg_names[i as usize]
             let len = vm.reg_lens[i as usize]
-            return str_from_bytes(vm.name_buf, len)
+            var end = start + len
+            if end > vm.name_buf_len { end = vm.name_buf_len }
+            if start < 0 || end <= start { return "UNKNOWN" }
+            let prefix = str_from_bytes(vm.name_buf, end)
+            return str_slice(prefix, start, end)
         }
         i = i + 1
     }
@@ -2190,4 +2194,1120 @@ fn ptx_codegen_module(
     }
 
     buf
+}
+
+// ── Phase 4B: Advanced Opcode Emission ──────────────────────────────
+//
+// These functions extend the opcode emission suite with:
+//   - ptx_adv_emit_* math intrinsics (proper f64 rounding modes)
+//   - ptx_adv_emit_cvt with string type suffixes
+//   - Bitwise logic (and, or, xor, not)
+//   - Shift operations (shl, shr)
+//   - Register move (mov)
+//   - Negate (neg)
+//   - Additional atomic ops (cas, exch)
+//   - Async copy (cp.async)
+//
+// Convention: ptx_adv_emit_* variants select .approx for f32 and .rn for f64,
+// matching NVIDIA's recommended fast-math path for single precision and
+// IEEE-compliant rounding for double precision.
+
+// ── Math Intrinsics (f32 = .approx, f64 = .rn) ─────────────────────
+
+fn ptx_adv_emit_sqrt(buf: PtxBuf, dst: string, src: string, ty: GpuType) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    if ty == GpuType::GpuF64 {
+        out = ptx_push_str(out, "    sqrt.rn.f64 ")
+    } else {
+        out = ptx_push_str(out, "    sqrt.approx.f32 ")
+    }
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, src)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+fn ptx_adv_emit_rsqrt(buf: PtxBuf, dst: string, src: string, ty: GpuType) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    if ty == GpuType::GpuF64 {
+        out = ptx_push_str(out, "    rsqrt.approx.ftz.f64 ")
+    } else {
+        out = ptx_push_str(out, "    rsqrt.approx.f32 ")
+    }
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, src)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+fn ptx_adv_emit_exp2(buf: PtxBuf, dst: string, src: string, ty: GpuType) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    if ty == GpuType::GpuF64 {
+        // f64 ex2 not available as hardware intrinsic; emit sequence: cvt + ex2.approx.f32 + cvt
+        // For now emit comment + ex2.approx.f64 (requires PTX 7.8+/sm_90 for double-precision)
+        out = ptx_push_str(out, "    ex2.approx.f64 ")
+    } else {
+        out = ptx_push_str(out, "    ex2.approx.f32 ")
+    }
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, src)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+fn ptx_adv_emit_lg2(buf: PtxBuf, dst: string, src: string, ty: GpuType) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    if ty == GpuType::GpuF64 {
+        out = ptx_push_str(out, "    lg2.approx.f64 ")
+    } else {
+        out = ptx_push_str(out, "    lg2.approx.f32 ")
+    }
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, src)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+fn ptx_adv_emit_sin(buf: PtxBuf, dst: string, src: string, ty: GpuType) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    if ty == GpuType::GpuF64 {
+        out = ptx_push_str(out, "    sin.approx.f64 ")
+    } else {
+        out = ptx_push_str(out, "    sin.approx.f32 ")
+    }
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, src)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+fn ptx_adv_emit_cos(buf: PtxBuf, dst: string, src: string, ty: GpuType) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    if ty == GpuType::GpuF64 {
+        out = ptx_push_str(out, "    cos.approx.f64 ")
+    } else {
+        out = ptx_push_str(out, "    cos.approx.f32 ")
+    }
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, src)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+fn ptx_adv_emit_rcp(buf: PtxBuf, dst: string, src: string, ty: GpuType) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    if ty == GpuType::GpuF64 {
+        out = ptx_push_str(out, "    rcp.rn.f64 ")
+    } else {
+        out = ptx_push_str(out, "    rcp.approx.f32 ")
+    }
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, src)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+fn ptx_adv_emit_abs(buf: PtxBuf, dst: string, src: string, ty: GpuType) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    abs.")
+    out = ptx_push_str(out, ptx_type_suffix(ty))
+    out = ptx_push_str(out, " ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, src)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+// ── Conversion with Explicit Type Suffixes ──────────────────────────
+
+fn ptx_adv_emit_cvt(buf: PtxBuf, dst: string, src: string, dst_ty_suffix: string, src_ty_suffix: string) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    cvt.rn.")
+    out = ptx_push_str(out, dst_ty_suffix)
+    out = ptx_push_str(out, ".")
+    out = ptx_push_str(out, src_ty_suffix)
+    out = ptx_push_str(out, " ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, src)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+// Truncation conversion (cvt.rzi for float-to-int)
+fn ptx_adv_emit_cvt_rzi(buf: PtxBuf, dst: string, src: string, dst_ty_suffix: string, src_ty_suffix: string) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    cvt.rzi.")
+    out = ptx_push_str(out, dst_ty_suffix)
+    out = ptx_push_str(out, ".")
+    out = ptx_push_str(out, src_ty_suffix)
+    out = ptx_push_str(out, " ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, src)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+// ── Bitwise Logic Operations ────────────────────────────────────────
+
+fn ptx_emit_and(buf: PtxBuf, dst: string, lhs: string, rhs: string, ty: GpuType) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    and.b")
+    out = ptx_push_str(out, ptx_bit_width(ty))
+    out = ptx_push_str(out, " ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, lhs)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, rhs)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+fn ptx_emit_or(buf: PtxBuf, dst: string, lhs: string, rhs: string, ty: GpuType) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    or.b")
+    out = ptx_push_str(out, ptx_bit_width(ty))
+    out = ptx_push_str(out, " ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, lhs)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, rhs)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+fn ptx_emit_xor(buf: PtxBuf, dst: string, lhs: string, rhs: string, ty: GpuType) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    xor.b")
+    out = ptx_push_str(out, ptx_bit_width(ty))
+    out = ptx_push_str(out, " ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, lhs)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, rhs)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+fn ptx_emit_not(buf: PtxBuf, dst: string, src: string, ty: GpuType) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    not.b")
+    out = ptx_push_str(out, ptx_bit_width(ty))
+    out = ptx_push_str(out, " ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, src)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+// ── Shift Operations ────────────────────────────────────────────────
+
+fn ptx_emit_shl(buf: PtxBuf, dst: string, src: string, amount: string, ty: GpuType) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    shl.b")
+    out = ptx_push_str(out, ptx_bit_width(ty))
+    out = ptx_push_str(out, " ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, src)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, amount)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+fn ptx_emit_shr(buf: PtxBuf, dst: string, src: string, amount: string, ty: GpuType) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    if ptx_is_signed(ty) {
+        out = ptx_push_str(out, "    shr.")
+        out = ptx_push_str(out, ptx_type_suffix(ty))
+    } else {
+        out = ptx_push_str(out, "    shr.b")
+        out = ptx_push_str(out, ptx_bit_width(ty))
+    }
+    out = ptx_push_str(out, " ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, src)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, amount)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+// ── Register Move ───────────────────────────────────────────────────
+
+fn ptx_emit_mov(buf: PtxBuf, dst: string, src: string, ty: GpuType) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    mov.")
+    out = ptx_push_str(out, ptx_type_suffix(ty))
+    out = ptx_push_str(out, " ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, src)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+// Move immediate value into register
+fn ptx_emit_mov_imm(buf: PtxBuf, dst: string, imm_val: string, ty: GpuType) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    mov.")
+    out = ptx_push_str(out, ptx_type_suffix(ty))
+    out = ptx_push_str(out, " ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, imm_val)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+// ── Negate ──────────────────────────────────────────────────────────
+
+fn ptx_emit_neg(buf: PtxBuf, dst: string, src: string, ty: GpuType) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    neg.")
+    out = ptx_push_str(out, ptx_type_suffix(ty))
+    out = ptx_push_str(out, " ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, src)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+// ── Additional Atomic Operations ────────────────────────────────────
+
+// Atomic compare-and-swap: atomically replaces [addr] with new_val if [addr] == expected
+fn ptx_emit_atom_cas(buf: PtxBuf, dst: string, addr: string, expected: string, new_val: string, ty: GpuType) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    atom.global.cas.b")
+    out = ptx_push_str(out, ptx_bit_width(ty))
+    out = ptx_push_str(out, " ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", [")
+    out = ptx_push_str(out, addr)
+    out = ptx_push_str(out, "], ")
+    out = ptx_push_str(out, expected)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, new_val)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+// Atomic exchange: atomically replaces [addr] with val, returns old value
+fn ptx_emit_atom_exch(buf: PtxBuf, dst: string, addr: string, val: string, ty: GpuType) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    atom.global.exch.b")
+    out = ptx_push_str(out, ptx_bit_width(ty))
+    out = ptx_push_str(out, " ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", [")
+    out = ptx_push_str(out, addr)
+    out = ptx_push_str(out, "], ")
+    out = ptx_push_str(out, val)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+// Atomic min (signed integer)
+fn ptx_emit_atom_min(buf: PtxBuf, dst: string, addr: string, val: string, ty: GpuType) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    atom.global.min.")
+    out = ptx_push_str(out, ptx_type_suffix(ty))
+    out = ptx_push_str(out, " ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", [")
+    out = ptx_push_str(out, addr)
+    out = ptx_push_str(out, "], ")
+    out = ptx_push_str(out, val)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+// Atomic max (signed integer)
+fn ptx_emit_atom_max(buf: PtxBuf, dst: string, addr: string, val: string, ty: GpuType) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    atom.global.max.")
+    out = ptx_push_str(out, ptx_type_suffix(ty))
+    out = ptx_push_str(out, " ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", [")
+    out = ptx_push_str(out, addr)
+    out = ptx_push_str(out, "], ")
+    out = ptx_push_str(out, val)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+// ── Async Copy (cp.async for tensor core pipelines) ─────────────────
+
+// cp.async.ca.shared.global [dst_shared], [src_global], cp_size;
+fn ptx_emit_cp_async(buf: PtxBuf, dst_shared: string, src_global: string, cp_size: i64) -> PtxBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = ptx_push_str(out, "    cp.async.ca.shared.global [")
+    out = ptx_push_str(out, dst_shared)
+    out = ptx_push_str(out, "], [")
+    out = ptx_push_str(out, src_global)
+    out = ptx_push_str(out, "], ")
+    out = ptx_push_str(out, i64_to_string(cp_size))
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+// cp.async.commit_group — commits all pending cp.async in this group
+fn ptx_emit_cp_async_commit(buf: PtxBuf) -> PtxBuf with Mut, Panic, Div {
+    ptx_push_str(buf, "    cp.async.commit_group;\n")
+}
+
+// cp.async.wait_group N — waits until at most N groups remain pending
+fn ptx_emit_cp_async_wait(buf: PtxBuf, groups: i64) -> PtxBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = ptx_push_str(out, "    cp.async.wait_group ")
+    out = ptx_push_str(out, i64_to_string(groups))
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+// ── Predicated Instruction Wrappers ─────────────────────────────────
+
+// Predicated add: @pred add.ty dst, lhs, rhs;
+fn ptx_emit_add_pred(buf: PtxBuf, pred: string, dst: string, lhs: string, rhs: string, ty: GpuType) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    @")
+    out = ptx_push_str(out, pred)
+    out = ptx_push_str(out, " add.")
+    out = ptx_push_str(out, ptx_type_suffix(ty))
+    out = ptx_push_str(out, " ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, lhs)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, rhs)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+// Predicated mov: @pred mov.ty dst, src;
+fn ptx_emit_mov_pred(buf: PtxBuf, pred: string, dst: string, src: string, ty: GpuType) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    @")
+    out = ptx_push_str(out, pred)
+    out = ptx_push_str(out, " mov.")
+    out = ptx_push_str(out, ptx_type_suffix(ty))
+    out = ptx_push_str(out, " ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, src)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+// Negated predicate branch: @!pred bra label;
+fn ptx_emit_bra_not_pred(buf: PtxBuf, pred: string, label: string) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    @!")
+    out = ptx_push_str(out, pred)
+    out = ptx_push_str(out, " bra ")
+    out = ptx_push_str(out, label)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+// ── Wide Multiply (mul.wide for 32->64 extension) ───────────────────
+
+fn ptx_emit_mul_wide(buf: PtxBuf, dst: string, lhs: string, rhs: string, src_ty: GpuType) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    mul.wide.")
+    out = ptx_push_str(out, ptx_type_suffix(src_ty))
+    out = ptx_push_str(out, " ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, lhs)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, rhs)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+// ── MAD (multiply-add without fused rounding) ───────────────────────
+
+fn ptx_emit_mad(buf: PtxBuf, dst: string, a: string, b: string, c: string, ty: GpuType) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    if ptx_is_float(ty) {
+        out = ptx_push_str(out, "    mad.rn.")
+        out = ptx_push_str(out, ptx_type_suffix(ty))
+    } else {
+        out = ptx_push_str(out, "    mad.lo.")
+        out = ptx_push_str(out, ptx_type_suffix(ty))
+    }
+    out = ptx_push_str(out, " ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, a)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, b)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, c)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+// ── Conditional Warp Reduce (shfl.down chain) ───────────────────────
+// Emit a standard warp-reduce pattern: 5 rounds of shfl.down + add
+// for a 32-lane warp. dst is the final accumulated register.
+
+fn ptx_emit_warp_reduce_add_f32(
+    buf: PtxBuf,
+    dst: string,
+    src: string,
+    tmp: string
+) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    // Round 1: offset 16
+    out = ptx_push_str(out, "    shfl.sync.down.b32 ")
+    out = ptx_push_str(out, tmp)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, src)
+    out = ptx_push_str(out, ", 16, 0x1f;\n")
+    out = ptx_push_str(out, "    add.f32 ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, src)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, tmp)
+    out = ptx_push_str(out, ";\n")
+    // Round 2: offset 8
+    out = ptx_push_str(out, "    shfl.sync.down.b32 ")
+    out = ptx_push_str(out, tmp)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", 8, 0x1f;\n")
+    out = ptx_push_str(out, "    add.f32 ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, tmp)
+    out = ptx_push_str(out, ";\n")
+    // Round 3: offset 4
+    out = ptx_push_str(out, "    shfl.sync.down.b32 ")
+    out = ptx_push_str(out, tmp)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", 4, 0x1f;\n")
+    out = ptx_push_str(out, "    add.f32 ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, tmp)
+    out = ptx_push_str(out, ";\n")
+    // Round 4: offset 2
+    out = ptx_push_str(out, "    shfl.sync.down.b32 ")
+    out = ptx_push_str(out, tmp)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", 2, 0x1f;\n")
+    out = ptx_push_str(out, "    add.f32 ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, tmp)
+    out = ptx_push_str(out, ";\n")
+    // Round 5: offset 1
+    out = ptx_push_str(out, "    shfl.sync.down.b32 ")
+    out = ptx_push_str(out, tmp)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", 1, 0x1f;\n")
+    out = ptx_push_str(out, "    add.f32 ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, tmp)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+// ── Texture / Surface Load (basic form) ─────────────────────────────
+
+fn ptx_emit_tex_1d(buf: PtxBuf, dst: string, tex_ref: string, coord: string) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    tex.1d.v4.f32.f32 {")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, "}, [")
+    out = ptx_push_str(out, tex_ref)
+    out = ptx_push_str(out, ", {")
+    out = ptx_push_str(out, coord)
+    out = ptx_push_str(out, "}];\n")
+    out
+}
+
+// ── Memory Fence ────────────────────────────────────────────────────
+
+fn ptx_emit_membar_cta(buf: PtxBuf) -> PtxBuf with Mut, Panic, Div {
+    ptx_push_str(buf, "    membar.cta;\n")
+}
+
+fn ptx_emit_membar_gl(buf: PtxBuf) -> PtxBuf with Mut, Panic, Div {
+    ptx_push_str(buf, "    membar.gl;\n")
+}
+
+fn ptx_emit_membar_sys(buf: PtxBuf) -> PtxBuf with Mut, Panic, Div {
+    ptx_push_str(buf, "    membar.sys;\n")
+}
+
+// ── Population Count / Bit Reverse / Find Leading Zero ──────────────
+
+fn ptx_emit_popc(buf: PtxBuf, dst: string, src: string, ty: GpuType) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    popc.b")
+    out = ptx_push_str(out, ptx_bit_width(ty))
+    out = ptx_push_str(out, " ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, src)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+fn ptx_emit_brev(buf: PtxBuf, dst: string, src: string, ty: GpuType) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    brev.b")
+    out = ptx_push_str(out, ptx_bit_width(ty))
+    out = ptx_push_str(out, " ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, src)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+fn ptx_emit_clz(buf: PtxBuf, dst: string, src: string, ty: GpuType) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    clz.b")
+    out = ptx_push_str(out, ptx_bit_width(ty))
+    out = ptx_push_str(out, " ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, src)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+// ── Predicate Logic ─────────────────────────────────────────────────
+
+fn ptx_emit_and_pred(buf: PtxBuf, dst: string, lhs: string, rhs: string) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    and.pred ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, lhs)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, rhs)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+fn ptx_emit_or_pred(buf: PtxBuf, dst: string, lhs: string, rhs: string) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    or.pred ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, lhs)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, rhs)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+fn ptx_emit_not_pred(buf: PtxBuf, dst: string, src: string) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    not.pred ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, src)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+// ── Shared-Memory Atomic Add ────────────────────────────────────────
+
+fn ptx_emit_atom_shared_add(buf: PtxBuf, dst: string, addr: string, val: string, ty: GpuType) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    atom.shared.add.")
+    out = ptx_push_str(out, ptx_type_suffix(ty))
+    out = ptx_push_str(out, " ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", [")
+    out = ptx_push_str(out, addr)
+    out = ptx_push_str(out, "], ")
+    out = ptx_push_str(out, val)
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+// ── Redux (Warp-Level Reduction, sm_80+) ────────────────────────────
+
+fn ptx_emit_redux_add(buf: PtxBuf, dst: string, src: string) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    redux.sync.add.s32 ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, src)
+    out = ptx_push_str(out, ", 0xffffffff;\n")
+    out
+}
+
+fn ptx_emit_redux_min(buf: PtxBuf, dst: string, src: string) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    redux.sync.min.s32 ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, src)
+    out = ptx_push_str(out, ", 0xffffffff;\n")
+    out
+}
+
+fn ptx_emit_redux_max(buf: PtxBuf, dst: string, src: string) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    redux.sync.max.s32 ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, src)
+    out = ptx_push_str(out, ", 0xffffffff;\n")
+    out
+}
+
+// ── Match (Warp-Level Match, sm_70+) ────────────────────────────────
+
+fn ptx_emit_match_any(buf: PtxBuf, dst: string, src: string) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    match.any.sync.b32 ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, src)
+    out = ptx_push_str(out, ", 0xffffffff;\n")
+    out
+}
+
+fn ptx_emit_match_all(buf: PtxBuf, dst: string, pred_out: string, src: string) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    match.all.sync.b32 ")
+    out = ptx_push_str(out, dst)
+    out = ptx_push_str(out, "|")
+    out = ptx_push_str(out, pred_out)
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, src)
+    out = ptx_push_str(out, ", 0xffffffff;\n")
+    out
+}
+
+// ── Named Barrier (bar.arrive + bar.sync with ID) ───────────────────
+
+fn ptx_emit_bar_sync_id(buf: PtxBuf, bar_id: i64, thread_count: i64) -> PtxBuf with Mut, Panic, Div, Alloc {
+    var out = buf
+    out = ptx_push_str(out, "    bar.sync ")
+    out = ptx_push_str(out, i64_to_string(bar_id))
+    out = ptx_push_str(out, ", ")
+    out = ptx_push_str(out, i64_to_string(thread_count))
+    out = ptx_push_str(out, ";\n")
+    out
+}
+
+// ── Comment / Debug Annotation ──────────────────────────────────────
+
+fn ptx_emit_comment(buf: PtxBuf, text: string) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    out = ptx_push_str(out, "    // ")
+    out = ptx_push_str(out, text)
+    out = ptx_push_str(out, "\n")
+    out
+}
+
+// ── Smoke Tests ─────────────────────────────────────────────────────
+//
+// These tests exercise the new Phase 4B opcode emission functions.
+// Each test builds a PtxBuf, emits one or more instructions, and
+// checks that the output contains expected PTX text fragments.
+
+fn ptx_adv_test_01_sqrt_f32() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_adv_emit_sqrt(b, "%f1", "%f0", GpuType::GpuF32)
+    ptx_buf_contains(b, "sqrt.approx.f32 %f1, %f0;")
+}
+
+fn ptx_adv_test_02_sqrt_f64() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_adv_emit_sqrt(b, "%fd1", "%fd0", GpuType::GpuF64)
+    ptx_buf_contains(b, "sqrt.rn.f64 %fd1, %fd0;")
+}
+
+fn ptx_adv_test_03_rcp_f32() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_adv_emit_rcp(b, "%f1", "%f0", GpuType::GpuF32)
+    ptx_buf_contains(b, "rcp.approx.f32 %f1, %f0;")
+}
+
+fn ptx_adv_test_04_rcp_f64() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_adv_emit_rcp(b, "%fd1", "%fd0", GpuType::GpuF64)
+    ptx_buf_contains(b, "rcp.rn.f64 %fd1, %fd0;")
+}
+
+fn ptx_adv_test_05_cvt_string_suffixes() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_adv_emit_cvt(b, "%f0", "%r0", "f32", "s32")
+    ptx_buf_contains(b, "cvt.rn.f32.s32 %f0, %r0;")
+}
+
+fn ptx_adv_test_06_cvt_rzi() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_adv_emit_cvt_rzi(b, "%r0", "%f0", "s32", "f32")
+    ptx_buf_contains(b, "cvt.rzi.s32.f32 %r0, %f0;")
+}
+
+fn ptx_adv_test_07_and_b32() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_and(b, "%r2", "%r0", "%r1", GpuType::GpuU32)
+    ptx_buf_contains(b, "and.b32 %r2, %r0, %r1;")
+}
+
+fn ptx_adv_test_08_or_b64() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_or(b, "%rd2", "%rd0", "%rd1", GpuType::GpuU64)
+    ptx_buf_contains(b, "or.b64 %rd2, %rd0, %rd1;")
+}
+
+fn ptx_adv_test_09_xor_b32() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_xor(b, "%r2", "%r0", "%r1", GpuType::GpuI32)
+    ptx_buf_contains(b, "xor.b32 %r2, %r0, %r1;")
+}
+
+fn ptx_adv_test_10_not_b32() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_not(b, "%r1", "%r0", GpuType::GpuU32)
+    ptx_buf_contains(b, "not.b32 %r1, %r0;")
+}
+
+fn ptx_adv_test_11_shl_b32() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_shl(b, "%r1", "%r0", "2", GpuType::GpuU32)
+    ptx_buf_contains(b, "shl.b32 %r1, %r0, 2;")
+}
+
+fn ptx_adv_test_12_shr_signed() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_shr(b, "%r1", "%r0", "4", GpuType::GpuI32)
+    ptx_buf_contains(b, "shr.s32 %r1, %r0, 4;")
+}
+
+fn ptx_adv_test_13_shr_unsigned() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_shr(b, "%r1", "%r0", "4", GpuType::GpuU32)
+    ptx_buf_contains(b, "shr.b32 %r1, %r0, 4;")
+}
+
+fn ptx_adv_test_14_mov_f32() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_mov(b, "%f1", "%f0", GpuType::GpuF32)
+    ptx_buf_contains(b, "mov.f32 %f1, %f0;")
+}
+
+fn ptx_adv_test_15_mov_imm() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_mov_imm(b, "%r0", "42", GpuType::GpuU32)
+    ptx_buf_contains(b, "mov.u32 %r0, 42;")
+}
+
+fn ptx_adv_test_16_neg_f32() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_neg(b, "%f1", "%f0", GpuType::GpuF32)
+    ptx_buf_contains(b, "neg.f32 %f1, %f0;")
+}
+
+fn ptx_adv_test_17_atom_cas() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_atom_cas(b, "%r2", "%rd0", "%r0", "%r1", GpuType::GpuU32)
+    ptx_buf_contains(b, "atom.global.cas.b32 %r2, [%rd0], %r0, %r1;")
+}
+
+fn ptx_adv_test_18_atom_exch() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_atom_exch(b, "%r1", "%rd0", "%r0", GpuType::GpuU32)
+    ptx_buf_contains(b, "atom.global.exch.b32 %r1, [%rd0], %r0;")
+}
+
+fn ptx_adv_test_19_cp_async() -> bool with Mut, Panic, Div, Alloc {
+    var b = ptx_buf_new()
+    b = ptx_emit_cp_async(b, "%rd0", "%rd1", 16)
+    ptx_buf_contains(b, "cp.async.ca.shared.global [%rd0], [%rd1], 16;")
+}
+
+fn ptx_adv_test_20_cp_async_commit_wait() -> bool with Mut, Panic, Div, Alloc {
+    var b = ptx_buf_new()
+    b = ptx_emit_cp_async_commit(b)
+    b = ptx_emit_cp_async_wait(b, 0)
+    ptx_buf_contains(b, "cp.async.commit_group;") &&
+    ptx_buf_contains(b, "cp.async.wait_group 0;")
+}
+
+fn ptx_adv_test_21_pred_add() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_add_pred(b, "%p0", "%f2", "%f0", "%f1", GpuType::GpuF32)
+    ptx_buf_contains(b, "@%p0 add.f32 %f2, %f0, %f1;")
+}
+
+fn ptx_adv_test_22_bra_not_pred() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_bra_not_pred(b, "%p0", "L_exit")
+    ptx_buf_contains(b, "@!%p0 bra L_exit;")
+}
+
+fn ptx_adv_test_23_mul_wide() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_mul_wide(b, "%rd0", "%r0", "%r1", GpuType::GpuI32)
+    ptx_buf_contains(b, "mul.wide.s32 %rd0, %r0, %r1;")
+}
+
+fn ptx_adv_test_24_mad_float() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_mad(b, "%f3", "%f0", "%f1", "%f2", GpuType::GpuF32)
+    ptx_buf_contains(b, "mad.rn.f32 %f3, %f0, %f1, %f2;")
+}
+
+fn ptx_adv_test_25_mad_int() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_mad(b, "%r3", "%r0", "%r1", "%r2", GpuType::GpuI32)
+    ptx_buf_contains(b, "mad.lo.s32 %r3, %r0, %r1, %r2;")
+}
+
+fn ptx_adv_test_26_warp_reduce() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_warp_reduce_add_f32(b, "%f1", "%f0", "%f2")
+    ptx_buf_contains(b, "shfl.sync.down.b32 %f2, %f0, 16") &&
+    ptx_buf_contains(b, "add.f32 %f1, %f0, %f2;") &&
+    ptx_buf_contains(b, "shfl.sync.down.b32 %f2, %f1, 1")
+}
+
+fn ptx_adv_test_27_membar() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_membar_cta(b)
+    b = ptx_emit_membar_gl(b)
+    b = ptx_emit_membar_sys(b)
+    ptx_buf_contains(b, "membar.cta;") &&
+    ptx_buf_contains(b, "membar.gl;") &&
+    ptx_buf_contains(b, "membar.sys;")
+}
+
+fn ptx_adv_test_28_popc() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_popc(b, "%r1", "%r0", GpuType::GpuU32)
+    ptx_buf_contains(b, "popc.b32 %r1, %r0;")
+}
+
+fn ptx_adv_test_29_brev() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_brev(b, "%r1", "%r0", GpuType::GpuU32)
+    ptx_buf_contains(b, "brev.b32 %r1, %r0;")
+}
+
+fn ptx_adv_test_30_clz() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_clz(b, "%r1", "%r0", GpuType::GpuU32)
+    ptx_buf_contains(b, "clz.b32 %r1, %r0;")
+}
+
+fn ptx_adv_test_31_pred_logic() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_and_pred(b, "%p2", "%p0", "%p1")
+    b = ptx_emit_or_pred(b, "%p3", "%p0", "%p1")
+    b = ptx_emit_not_pred(b, "%p4", "%p0")
+    ptx_buf_contains(b, "and.pred %p2, %p0, %p1;") &&
+    ptx_buf_contains(b, "or.pred %p3, %p0, %p1;") &&
+    ptx_buf_contains(b, "not.pred %p4, %p0;")
+}
+
+fn ptx_adv_test_32_redux_add() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_redux_add(b, "%r1", "%r0")
+    ptx_buf_contains(b, "redux.sync.add.s32 %r1, %r0, 0xffffffff;")
+}
+
+fn ptx_adv_test_33_atom_shared_add() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_atom_shared_add(b, "%r1", "%rd0", "%f0", GpuType::GpuF32)
+    ptx_buf_contains(b, "atom.shared.add.f32 %r1, [%rd0], %f0;")
+}
+
+fn ptx_adv_test_34_bar_sync_id() -> bool with Mut, Panic, Div, Alloc {
+    var b = ptx_buf_new()
+    b = ptx_emit_bar_sync_id(b, 1, 128)
+    ptx_buf_contains(b, "bar.sync 1, 128;")
+}
+
+fn ptx_adv_test_35_comment() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_comment(b, "Phase 4B: advanced opcodes")
+    ptx_buf_contains(b, "// Phase 4B: advanced opcodes")
+}
+
+fn ptx_adv_test_36_sin_f32() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_adv_emit_sin(b, "%f1", "%f0", GpuType::GpuF32)
+    ptx_buf_contains(b, "sin.approx.f32 %f1, %f0;")
+}
+
+fn ptx_adv_test_37_cos_f64() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_adv_emit_cos(b, "%fd1", "%fd0", GpuType::GpuF64)
+    ptx_buf_contains(b, "cos.approx.f64 %fd1, %fd0;")
+}
+
+fn ptx_adv_test_38_exp2_f32() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_adv_emit_exp2(b, "%f1", "%f0", GpuType::GpuF32)
+    ptx_buf_contains(b, "ex2.approx.f32 %f1, %f0;")
+}
+
+fn ptx_adv_test_39_lg2_f64() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_adv_emit_lg2(b, "%fd1", "%fd0", GpuType::GpuF64)
+    ptx_buf_contains(b, "lg2.approx.f64 %fd1, %fd0;")
+}
+
+fn ptx_adv_test_40_abs_f64() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_adv_emit_abs(b, "%fd1", "%fd0", GpuType::GpuF64)
+    ptx_buf_contains(b, "abs.f64 %fd1, %fd0;")
+}
+
+fn ptx_adv_test_41_rsqrt_f64() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_adv_emit_rsqrt(b, "%fd1", "%fd0", GpuType::GpuF64)
+    ptx_buf_contains(b, "rsqrt.approx.ftz.f64 %fd1, %fd0;")
+}
+
+fn ptx_adv_test_42_match_any() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_match_any(b, "%r1", "%r0")
+    ptx_buf_contains(b, "match.any.sync.b32 %r1, %r0, 0xffffffff;")
+}
+
+fn ptx_adv_test_43_tex_1d() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_tex_1d(b, "%f0", "tex_ref", "%f1")
+    ptx_buf_contains(b, "tex.1d.v4.f32.f32 {%f0}, [tex_ref, {%f1}];")
+}
+
+fn ptx_adv_test_44_atom_min_max() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_atom_min(b, "%r2", "%rd0", "%r0", GpuType::GpuI32)
+    b = ptx_emit_atom_max(b, "%r3", "%rd1", "%r1", GpuType::GpuI32)
+    ptx_buf_contains(b, "atom.global.min.s32 %r2, [%rd0], %r0;") &&
+    ptx_buf_contains(b, "atom.global.max.s32 %r3, [%rd1], %r1;")
+}
+
+fn ptx_adv_test_45_mov_pred() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_mov_pred(b, "%p0", "%f1", "%f0", GpuType::GpuF32)
+    ptx_buf_contains(b, "@%p0 mov.f32 %f1, %f0;")
+}
+
+fn ptx_adv_test_46_redux_min_max() -> bool with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_redux_min(b, "%r1", "%r0")
+    b = ptx_emit_redux_max(b, "%r3", "%r2")
+    ptx_buf_contains(b, "redux.sync.min.s32 %r1, %r0, 0xffffffff;") &&
+    ptx_buf_contains(b, "redux.sync.max.s32 %r3, %r2, 0xffffffff;")
+}
+
+// ── Self-check: run all Phase 4B tests ──────────────────────────────
+
+fn ptx_advanced_self_check() -> bool with Mut, Panic, Div, Alloc {
+    let t01 = ptx_adv_test_01_sqrt_f32()
+    let t02 = ptx_adv_test_02_sqrt_f64()
+    let t03 = ptx_adv_test_03_rcp_f32()
+    let t04 = ptx_adv_test_04_rcp_f64()
+    let t05 = ptx_adv_test_05_cvt_string_suffixes()
+    let t06 = ptx_adv_test_06_cvt_rzi()
+    let t07 = ptx_adv_test_07_and_b32()
+    let t08 = ptx_adv_test_08_or_b64()
+    let t09 = ptx_adv_test_09_xor_b32()
+    let t10 = ptx_adv_test_10_not_b32()
+    let t11 = ptx_adv_test_11_shl_b32()
+    let t12 = ptx_adv_test_12_shr_signed()
+    let t13 = ptx_adv_test_13_shr_unsigned()
+    let t14 = ptx_adv_test_14_mov_f32()
+    let t15 = ptx_adv_test_15_mov_imm()
+    let t16 = ptx_adv_test_16_neg_f32()
+    let t17 = ptx_adv_test_17_atom_cas()
+    let t18 = ptx_adv_test_18_atom_exch()
+    let t19 = ptx_adv_test_19_cp_async()
+    let t20 = ptx_adv_test_20_cp_async_commit_wait()
+    let t21 = ptx_adv_test_21_pred_add()
+    let t22 = ptx_adv_test_22_bra_not_pred()
+    let t23 = ptx_adv_test_23_mul_wide()
+
+    let block1 = t01 && t02 && t03 && t04 && t05 && t06 && t07 && t08
+    let block2 = t09 && t10 && t11 && t12 && t13 && t14 && t15 && t16
+    let block3 = t17 && t18 && t19 && t20 && t21 && t22 && t23
+
+    let t24 = ptx_adv_test_24_mad_float()
+    let t25 = ptx_adv_test_25_mad_int()
+    let t26 = ptx_adv_test_26_warp_reduce()
+    let t27 = ptx_adv_test_27_membar()
+    let t28 = ptx_adv_test_28_popc()
+    let t29 = ptx_adv_test_29_brev()
+    let t30 = ptx_adv_test_30_clz()
+    let t31 = ptx_adv_test_31_pred_logic()
+    let t32 = ptx_adv_test_32_redux_add()
+    let t33 = ptx_adv_test_33_atom_shared_add()
+    let t34 = ptx_adv_test_34_bar_sync_id()
+    let t35 = ptx_adv_test_35_comment()
+    let t36 = ptx_adv_test_36_sin_f32()
+    let t37 = ptx_adv_test_37_cos_f64()
+    let t38 = ptx_adv_test_38_exp2_f32()
+    let t39 = ptx_adv_test_39_lg2_f64()
+    let t40 = ptx_adv_test_40_abs_f64()
+    let t41 = ptx_adv_test_41_rsqrt_f64()
+    let t42 = ptx_adv_test_42_match_any()
+    let t43 = ptx_adv_test_43_tex_1d()
+    let t44 = ptx_adv_test_44_atom_min_max()
+    let t45 = ptx_adv_test_45_mov_pred()
+    let t46 = ptx_adv_test_46_redux_min_max()
+
+    let block4 = t24 && t25 && t26 && t27 && t28 && t29 && t30 && t31
+    let block5 = t32 && t33 && t34 && t35 && t36 && t37 && t38 && t39
+    let block6 = t40 && t41 && t42 && t43 && t44 && t45 && t46
+
+    block1 && block2 && block3 && block4 && block5 && block6
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    let ok = ptx_advanced_self_check()
+    if ok {
+        print("PASS ptx_advanced_self_check (46 tests)\n")
+        return 0 as i32
+    } else {
+        print("FAIL ptx_advanced_self_check\n")
+        return 1 as i32
+    }
 }
