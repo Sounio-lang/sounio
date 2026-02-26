@@ -1,0 +1,260 @@
+// Units and dimensional analysis for the type checker
+//
+// Represents physical quantities as vectors of base dimension exponents:
+//   [mass, length, time, temperature, amount, current, luminosity]
+//
+// Examples:
+//   mg, kg, g   → [1, 0, 0, 0, 0, 0, 0]  (mass)
+//   m, km       → [0, 1, 0, 0, 0, 0, 0]  (length)
+//   s, ms       → [0, 0, 1, 0, 0, 0, 0]  (time)
+//   K           → [0, 0, 0, 1, 0, 0, 0]  (temperature)
+//   mol         → [0, 0, 0, 0, 1, 0, 0]  (amount)
+//   m/s         → [0, 1, -1, 0, 0, 0, 0] (velocity)
+//   kg*m/s^2    → [1, 1, -2, 0, 0, 0, 0] (force = Newton)
+//
+// Unit arithmetic:
+//   a * b → add dimension vectors
+//   a / b → subtract dimension vectors
+//   a + b → dimensions must match exactly
+//   a - b → dimensions must match exactly
+
+// ============================================================
+// Unit dimension vector (7 base SI dimensions)
+// ============================================================
+
+struct UnitDim {
+    exponents: [i64; 7],   // [mass, length, time, temp, amount, current, luminosity]
+    scale_num: i64,        // Scale factor numerator (for unit conversions)
+    scale_den: i64,        // Scale factor denominator
+}
+
+fn unit_dim_dimensionless() -> UnitDim {
+    UnitDim {
+        exponents: [0, 0, 0, 0, 0, 0, 0],
+        scale_num: 1,
+        scale_den: 1,
+    }
+}
+
+fn unit_dim_mass() -> UnitDim {
+    UnitDim {
+        exponents: [1, 0, 0, 0, 0, 0, 0],
+        scale_num: 1,
+        scale_den: 1,
+    }
+}
+
+fn unit_dim_length() -> UnitDim {
+    UnitDim {
+        exponents: [0, 1, 0, 0, 0, 0, 0],
+        scale_num: 1,
+        scale_den: 1,
+    }
+}
+
+fn unit_dim_time() -> UnitDim {
+    UnitDim {
+        exponents: [0, 0, 1, 0, 0, 0, 0],
+        scale_num: 1,
+        scale_den: 1,
+    }
+}
+
+fn unit_dim_temperature() -> UnitDim {
+    UnitDim {
+        exponents: [0, 0, 0, 1, 0, 0, 0],
+        scale_num: 1,
+        scale_den: 1,
+    }
+}
+
+fn unit_dim_amount() -> UnitDim {
+    UnitDim {
+        exponents: [0, 0, 0, 0, 1, 0, 0],
+        scale_num: 1,
+        scale_den: 1,
+    }
+}
+
+// ============================================================
+// Dimension arithmetic
+// ============================================================
+
+// Multiply: add exponents
+fn unit_dim_mul(a: UnitDim, b: UnitDim) -> UnitDim with Mut, Panic, Div {
+    var result = a
+    var i: i64 = 0
+    while i < 7 {
+        result.exponents[i as usize] = a.exponents[i as usize] + b.exponents[i as usize]
+        i = i + 1
+    }
+    result.scale_num = a.scale_num * b.scale_num
+    result.scale_den = a.scale_den * b.scale_den
+    result
+}
+
+// Divide: subtract exponents
+fn unit_dim_div(a: UnitDim, b: UnitDim) -> UnitDim with Mut, Panic, Div {
+    var result = a
+    var i: i64 = 0
+    while i < 7 {
+        result.exponents[i as usize] = a.exponents[i as usize] - b.exponents[i as usize]
+        i = i + 1
+    }
+    // Scale: a/b
+    result.scale_num = a.scale_num * b.scale_den
+    result.scale_den = a.scale_den * b.scale_num
+    result
+}
+
+// Check if two dimensions are compatible (same exponents, scale may differ)
+fn unit_dim_compatible(a: UnitDim, b: UnitDim) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < 7 {
+        if a.exponents[i as usize] != b.exponents[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Check if dimension is dimensionless
+fn unit_dim_is_dimensionless(d: UnitDim) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < 7 {
+        if d.exponents[i as usize] != 0 {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// ============================================================
+// Named unit registry
+// ============================================================
+
+struct UnitEntry {
+    name: Name,
+    dim: UnitDim,
+}
+
+fn empty_unit_entry() -> UnitEntry {
+    UnitEntry {
+        name: Name { buf: [0; 128], len: 0 },
+        dim: unit_dim_dimensionless(),
+    }
+}
+
+struct UnitRegistry {
+    entries: [UnitEntry; 256],
+    count: i64,
+}
+
+fn unit_registry_new() -> UnitRegistry {
+    UnitRegistry {
+        entries: [empty_unit_entry(); 256],
+        count: 0,
+    }
+}
+
+impl UnitRegistry {
+    fn register(self, name: Name, dim: UnitDim) -> UnitRegistry with Mut, Panic, Div {
+        var reg = self
+        if reg.count < 256 {
+            reg.entries[reg.count] = UnitEntry { name: name, dim: dim }
+            reg.count = reg.count + 1
+        }
+        reg
+    }
+
+    fn find(self, name: Name) -> i64 with Mut, Panic, Div {
+        var i: i64 = 0
+        while i < self.count {
+            if name_eq(self.entries[i].name, name) {
+                return i
+            }
+            i = i + 1
+        }
+        -1
+    }
+
+    fn get_dim(self, idx: i64) -> UnitDim with Panic, Div {
+        self.entries[idx].dim
+    }
+}
+
+// ============================================================
+// Builtin unit definitions
+// ============================================================
+
+fn register_builtin_units(reg: UnitRegistry) -> UnitRegistry with Mut, Panic, Div {
+    var r = reg
+
+    // Mass units
+    r = r.register(name_from_str2(109, 103), unit_dim_mass())          // "mg"
+    r = r.register(name_from_str1(103), unit_dim_mass())               // "g"
+    r = r.register(name_from_str2(107, 103), unit_dim_mass())          // "kg"
+
+    // Length units
+    r = r.register(name_from_str1(109), unit_dim_length())             // "m"
+    r = r.register(name_from_str2(107, 109), unit_dim_length())        // "km"
+    r = r.register(name_from_str2(99, 109), unit_dim_length())         // "cm"
+    r = r.register(name_from_str2(109, 109), unit_dim_length())        // "mm"
+
+    // Time units
+    r = r.register(name_from_str1(115), unit_dim_time())               // "s"
+    r = r.register(name_from_str2(109, 115), unit_dim_time())          // "ms"
+    r = r.register(name_from_str3(109, 105, 110), unit_dim_time())     // "min"
+    r = r.register(name_from_str1(104), unit_dim_time())               // "h"
+
+    // Temperature
+    r = r.register(name_from_str1(75), unit_dim_temperature())         // "K"
+
+    // Amount (moles)
+    r = r.register(name_from_str3(109, 111, 108), unit_dim_amount())   // "mol"
+
+    r
+}
+
+// ============================================================
+// Name construction helpers (for builtin registration)
+// ============================================================
+
+fn name_from_str1(a: i64) -> Name with Mut, Panic, Div {
+    var n = Name { buf: [0; 128], len: 1 }
+    n.buf[0] = a as i8
+    n
+}
+
+fn name_from_str2(a: i64, b: i64) -> Name with Mut, Panic, Div {
+    var n = Name { buf: [0; 128], len: 2 }
+    n.buf[0] = a as i8
+    n.buf[1] = b as i8
+    n
+}
+
+fn name_from_str3(a: i64, b: i64, c: i64) -> Name with Mut, Panic, Div {
+    var n = Name { buf: [0; 128], len: 3 }
+    n.buf[0] = a as i8
+    n.buf[1] = b as i8
+    n.buf[2] = c as i8
+    n
+}
+
+// ============================================================
+// Unit error printing
+// ============================================================
+
+fn print_unit_dim(d: UnitDim) with IO, Mut, Panic, Div {
+    var first = true
+    if d.exponents[0] != 0 { print("mass^"); print_int(d.exponents[0]); first = false }
+    if d.exponents[1] != 0 { if !first { print("*") }; print("length^"); print_int(d.exponents[1]); first = false }
+    if d.exponents[2] != 0 { if !first { print("*") }; print("time^"); print_int(d.exponents[2]); first = false }
+    if d.exponents[3] != 0 { if !first { print("*") }; print("temp^"); print_int(d.exponents[3]); first = false }
+    if d.exponents[4] != 0 { if !first { print("*") }; print("amount^"); print_int(d.exponents[4]); first = false }
+    if d.exponents[5] != 0 { if !first { print("*") }; print("current^"); print_int(d.exponents[5]); first = false }
+    if d.exponents[6] != 0 { if !first { print("*") }; print("luminosity^"); print_int(d.exponents[6]); first = false }
+    if first { print("dimensionless") }
+}
