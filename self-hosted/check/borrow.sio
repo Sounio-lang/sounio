@@ -1,0 +1,189 @@
+// Borrow checker — single-pass ownership and borrowing verification
+//
+// Tracks per-variable borrow state: Owned, SharedBorrow(n), ExclusiveBorrow
+// Enforces:
+//   - &x: fails if exclusive borrow is active
+//   - &!x: fails if any borrow is active
+//   - linear struct: must be consumed exactly once
+//   - Scope exit: releases borrows created in that scope
+
+// ============================================================
+// Borrow state per variable
+// ============================================================
+
+// State values: 0 = Owned (unborrowed), 1 = SharedBorrow, 2 = ExclusiveBorrow
+// shared_count tracks number of active shared borrows
+
+struct BorrowEntry {
+    name: Name,
+    state: i64,          // 0=Owned, 1=SharedBorrow, 2=ExclusiveBorrow
+    shared_count: i64,   // Number of active shared borrows
+    is_linear: bool,     // Whether this is a linear type variable
+    consumed: bool,      // Whether a linear variable has been consumed
+    scope_depth: i64,    // Scope where this entry was created
+}
+
+fn empty_borrow_entry() -> BorrowEntry {
+    BorrowEntry {
+        name: Name { buf: [0; 128], len: 0 },
+        state: 0,
+        shared_count: 0,
+        is_linear: false,
+        consumed: false,
+        scope_depth: 0,
+    }
+}
+
+// ============================================================
+// Borrow environment
+// ============================================================
+
+struct BorrowEnv {
+    entries: [BorrowEntry; 2048],
+    count: i64,
+    scope_starts: [i64; 256],
+    scope_depth: i64,
+}
+
+fn borrow_env_new() -> BorrowEnv {
+    BorrowEnv {
+        entries: [empty_borrow_entry(); 2048],
+        count: 0,
+        scope_starts: [0; 256],
+        scope_depth: 0,
+    }
+}
+
+impl BorrowEnv {
+    fn push_scope(self) -> BorrowEnv with Mut, Panic, Div {
+        var env = self
+        if env.scope_depth < 256 {
+            env.scope_starts[env.scope_depth] = env.count
+            env.scope_depth = env.scope_depth + 1
+        }
+        env
+    }
+
+    fn pop_scope(self) -> BorrowEnv with Mut, Panic, Div {
+        var env = self
+        if env.scope_depth > 0 {
+            env.scope_depth = env.scope_depth - 1
+            // Release borrows created in this scope by resetting state
+            let scope_start = env.scope_starts[env.scope_depth]
+            var i = scope_start
+            while i < env.count {
+                env.entries[i].state = 0
+                env.entries[i].shared_count = 0
+                i = i + 1
+            }
+            env.count = scope_start
+        }
+        env
+    }
+
+    // Register a variable for borrow tracking
+    fn track(self, name: Name, is_linear: bool) -> BorrowEnv with Mut, Panic, Div {
+        var env = self
+        if env.count < 2048 {
+            env.entries[env.count] = BorrowEntry {
+                name: name,
+                state: 0,
+                shared_count: 0,
+                is_linear: is_linear,
+                consumed: false,
+                scope_depth: env.scope_depth,
+            }
+            env.count = env.count + 1
+        }
+        env
+    }
+
+    // Find entry index for a variable (most recent binding)
+    fn find(self, name: Name) -> i64 with Mut, Panic, Div {
+        var i = self.count - 1
+        while i >= 0 {
+            if name_eq(self.entries[i].name, name) {
+                return i
+            }
+            i = i - 1
+        }
+        -1
+    }
+
+    // Try to take a shared borrow (&x)
+    // Returns (updated env, error_code) where error_code 0 = ok, 37 = conflict
+    fn try_shared_borrow(self, name: Name) -> (BorrowEnv, i64) with Mut, Panic, Div {
+        var env = self
+        let idx = env.find(name)
+        if idx < 0 {
+            // Variable not tracked — allow (may be a global or external)
+            return (env, 0)
+        }
+        let entry = env.entries[idx]
+        if entry.state == 2 {
+            // Cannot take shared borrow while exclusive borrow is active
+            return (env, 37)
+        }
+        // Increment shared borrow count
+        env.entries[idx].state = 1
+        env.entries[idx].shared_count = entry.shared_count + 1
+        (env, 0)
+    }
+
+    // Try to take an exclusive borrow (&!x)
+    // Returns (updated env, error_code) where error_code 0 = ok, 38 = conflict
+    fn try_exclusive_borrow(self, name: Name) -> (BorrowEnv, i64) with Mut, Panic, Div {
+        var env = self
+        let idx = env.find(name)
+        if idx < 0 {
+            return (env, 0)
+        }
+        let entry = env.entries[idx]
+        if entry.state != 0 {
+            // Cannot take exclusive borrow while any borrow is active
+            return (env, 38)
+        }
+        env.entries[idx].state = 2
+        (env, 0)
+    }
+
+    // Mark a linear variable as consumed (moved)
+    // Returns (updated env, error_code) where 0 = ok, 39 = already consumed
+    fn consume_linear(self, name: Name) -> (BorrowEnv, i64) with Mut, Panic, Div {
+        var env = self
+        let idx = env.find(name)
+        if idx < 0 {
+            return (env, 0)
+        }
+        let entry = env.entries[idx]
+        if !entry.is_linear {
+            return (env, 0)
+        }
+        if entry.consumed {
+            // Double consumption of linear value
+            return (env, 39)
+        }
+        env.entries[idx].consumed = true
+        (env, 0)
+    }
+
+    // Check that all linear variables in the current scope have been consumed
+    // Returns (env, unconsumed_count)
+    fn check_linear_consumed(self) -> (BorrowEnv, i64) with Mut, Panic, Div {
+        let env = self
+        var unconsumed: i64 = 0
+        let scope_start = if env.scope_depth > 0 {
+            env.scope_starts[env.scope_depth - 1]
+        } else {
+            0
+        }
+        var i = scope_start
+        while i < env.count {
+            if env.entries[i].is_linear && !env.entries[i].consumed {
+                unconsumed = unconsumed + 1
+            }
+            i = i + 1
+        }
+        (env, unconsumed)
+    }
+}

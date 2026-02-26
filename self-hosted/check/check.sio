@@ -11,6 +11,7 @@
 
 struct Checker {
     env: TypeEnv,
+    borrows: BorrowEnv,
     structs: StructTable,
     enums: EnumTable,
     fn_sigs: FnSigTable,
@@ -25,6 +26,7 @@ struct Checker {
 fn checker_new() -> Checker {
     Checker {
         env: type_env_new(),
+        borrows: borrow_env_new(),
         structs: struct_table_new(),
         enums: enum_table_new(),
         fn_sigs: fn_sig_table_new(),
@@ -283,7 +285,29 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 34 { print("Cayley-Dickson coercion direction error (no narrowing)") }
     else if code == 35 { print("missing required effect") }
     else if code == 36 { print("epistemic epsilon bound too loose") }
+    else if code == 37 { print("cannot take shared borrow: exclusive borrow active") }
+    else if code == 38 { print("cannot take exclusive borrow: existing borrow active") }
+    else if code == 39 { print("linear value used after move") }
+    else if code == 40 { print("linear value not consumed") }
     else { print("unknown error") }
+}
+
+// ============================================================
+// Borrow checking helpers
+// ============================================================
+
+// Extract variable name from unary operand (if it's a simple ident)
+fn unary_operand_name(opt: Option<Box<Expr>>) -> Name {
+    match opt {
+        Some(inner) => {
+            if (*inner).kind == ExprKind::ExprIdent {
+                (*inner).name
+            } else {
+                Name { buf: [0; 128], len: 0 }
+            }
+        }
+        None => Name { buf: [0; 128], len: 0 }
+    }
 }
 
 // ============================================================
@@ -864,9 +888,11 @@ impl Checker {
     fn check_block(self, blk: Block) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         var c = self
         c.env = c.env.push_scope()
+        c.borrows = c.borrows.push_scope()
         let pair = c.check_stmts(blk.stmts)
         c = pair.0
         let result_ty = pair.1
+        c.borrows = c.borrows.pop_scope()
         c.env = c.env.pop_scope()
         (c, result_ty)
     }
@@ -913,6 +939,8 @@ impl Checker {
         }
         let cur_env = c.env
         c.env = cur_env.bind(s.name, bind_ty, false)
+        // Track variable for borrow checking
+        c.borrows = c.borrows.track(s.name, false)
         (c, ty_unit())
     }
 
@@ -932,6 +960,8 @@ impl Checker {
             bind_ty = ann_ty
         }
         c.env = c.env.bind(s.name, bind_ty, true)
+        // Track variable for borrow checking
+        c.borrows = c.borrows.track(s.name, false)
         (c, ty_unit())
     }
 
@@ -1083,6 +1113,25 @@ impl Checker {
         let result = unary_result_type(e.un_op, operand_ty)
         if result.kind == TypeKind::TyError && !is_error_or_unknown(operand_ty) {
             c = c.report_error_at(e.span, 5, 0, 0, 0)
+        }
+        // Borrow checking: if this is &x or &!x on a named variable
+        if e.un_op == UnaryOp::OpRef || e.un_op == UnaryOp::OpRefMut {
+            let borrow_name = unary_operand_name(e.left)
+            if borrow_name.len > 0 {
+                if e.un_op == UnaryOp::OpRef {
+                    let borrow_result = c.borrows.try_shared_borrow(borrow_name)
+                    c.borrows = borrow_result.0
+                    if borrow_result.1 != 0 {
+                        c = c.report_error_at(e.span, borrow_result.1, 0, 0, 0)
+                    }
+                } else {
+                    let borrow_result = c.borrows.try_exclusive_borrow(borrow_name)
+                    c.borrows = borrow_result.0
+                    if borrow_result.1 != 0 {
+                        c = c.report_error_at(e.span, borrow_result.1, 0, 0, 0)
+                    }
+                }
+            }
         }
         (c, result)
     }
