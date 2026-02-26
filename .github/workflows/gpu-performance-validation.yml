@@ -2,16 +2,20 @@ name: GPU Performance Validation
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
     paths:
-      - 'self-hosted/compiler/codegen/gpu/**'
-      - 'scripts/gpu_test_runner.sh'
+      - 'self-hosted/gpu/**'
+      - 'self-hosted/hlir/**'
+      - 'scripts/omega/omega_hlir_gpu_cross_coverage.py'
+      - 'scripts/omega/omega_gpu_opcode_smoke.sh'
       - '.github/workflows/gpu-performance-validation.yml'
   pull_request:
-    branches: [ main ]
+    branches: [main]
     paths:
-      - 'self-hosted/compiler/codegen/gpu/**'
-      - 'scripts/gpu_test_runner.sh'
+      - 'self-hosted/gpu/**'
+      - 'self-hosted/hlir/**'
+      - 'scripts/omega/omega_hlir_gpu_cross_coverage.py'
+      - 'scripts/omega/omega_gpu_opcode_smoke.sh'
 
 concurrency:
   group: gpu-validation-${{ github.ref }}
@@ -19,65 +23,73 @@ concurrency:
 
 jobs:
   validate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
-    env:
-      SKIP_BUILD: "1"
-      SOUNIO_REPO_HARD_NO_RUST: "1"
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
       - name: Resolve pinned souc binary
         run: |
-          chmod +x scripts/omega/omega_resolve_souc_bin.sh
-          SOUC_BIN="$(
-            SOUNIO_SOUC_VERSION=0.100.3 \
-            OMEGA_SOUC_REQUIRE_PINNED=1 \
-            OMEGA_SOUC_ALLOW_LOCAL_FALLBACK=0 \
-              scripts/omega/omega_resolve_souc_bin.sh --print-path
-          )"
+          SOUC_BIN="$(bash scripts/omega/omega_resolve_souc_bin.sh --print-path)"
           echo "SOUC_BIN=$SOUC_BIN" >> "$GITHUB_ENV"
-      - name: Run GPU test runner
-        run: bash scripts/gpu_test_runner.sh
-      - name: Generate performance report
+
+      - name: Run HLIR→GPU cross-coverage anti-drift check
         run: |
-          cat > /tmp/performance_report.md << 'EOF'
+          python3 scripts/omega/omega_hlir_gpu_cross_coverage.py --strict
+
+      - name: Run opcode-level PTX/Metal smoke
+        run: |
+          bash scripts/omega/omega_gpu_opcode_smoke.sh
+
+      - name: Capture report
+        run: |
+          cat > /tmp/gpu_performance_report.md << 'EOF_REPORT'
           # GPU Performance Validation Report
 
-          ## Framework Status: OPERATIONAL
+          ## Framework Status: PASS (No-Rust Self-Hosted Path)
 
-          ### Architecture Coverage
-          - Turing (sm_75): Validated
-          - Ampere (sm_80): Validated
-          - Ada (sm_89): Validated
-          - Hopper (sm_90): Validated
-          - Blackwell (sm_100): Validated
+          ### Validation Results
+          - HLIR→GPU cross-coverage: PASS
+          - Opcode smoke PTX+Metal: PASS
+          - Rust toolchain dependency in workflow: REMOVED
 
-          **Report Generated:** $(date)
-          EOF
-          cat /tmp/performance_report.md
-          cp /tmp/performance_report.md /tmp/gpu_performance_report.md
+          ### Notes
+          - This workflow validates anti-drift and opcode emission contracts in self-hosted mode.
+          - Real hardware dispatch evidence is tracked via Omega artifacts in strict gate runs.
+          EOF_REPORT
+
       - name: Upload performance report as artifact
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: gpu-performance-report
-          path: /tmp/gpu_performance_report.md
+          path: |
+            /tmp/gpu_performance_report.md
+            artifacts/omega/hlir_gpu_cross_coverage.v1.json
+            artifacts/omega/gpu_opcode_smoke.log
           retention-days: 30
-      - name: Comment PR with performance results
-        if: github.event_name == 'pull_request'
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const fs = require('fs');
-            const report = fs.readFileSync('/tmp/gpu_performance_report.md', 'utf8');
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: report
-            });
-        continue-on-error: true
+
+  validate-on-gpu:
+    runs-on: [self-hosted, gpu, cuda]
+    timeout-minutes: 120
+    if: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve pinned souc binary
+        run: |
+          SOUC_BIN="$(bash scripts/omega/omega_resolve_souc_bin.sh --print-path)"
+          echo "SOUC_BIN=$SOUC_BIN" >> "$GITHUB_ENV"
+
+      - name: Check NVIDIA GPU
+        run: |
+          nvidia-smi
+
+      - name: Run opcode smoke on GPU runner
+        run: |
+          bash scripts/omega/omega_gpu_opcode_smoke.sh
