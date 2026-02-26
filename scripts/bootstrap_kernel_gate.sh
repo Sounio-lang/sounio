@@ -3,8 +3,9 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
 
-SOUC_BIN="${SOUC_BIN:-./target/debug/souc}"
+SOUC_BIN="${SOUC_BIN:-./souc}"
 WORK_DIR="${WORK_DIR:-/tmp/sounio-bootstrap-kernel-gate}"
 LOG_DIR="$WORK_DIR/logs"
 ARTIFACT_DIR="$WORK_DIR/artifacts"
@@ -195,7 +196,7 @@ else
     "$BUILD_TIMEOUT_SECS" \
     "$LOG_DIR/build.stdout.log" \
     "$LOG_DIR/build.stderr.log" \
-    cargo build -p souc
+    test -x "$SOUC_BIN"
 fi
 
 if [ "$LAST_STEP_RC" -ne 0 ]; then

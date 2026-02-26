@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
 
 SOUC_BIN="${SOUC_BIN:-./target/debug/souc}"
 SEED_PATH="${SEED_PATH:-bootstrap/seeds/sounio-bootstrap-linux-x86_64.sio.bin}"
@@ -52,7 +53,12 @@ echo "bootstrap_seed_trusted_key=$BOOTSTRAP_SEED_TRUSTED_KEY"
 mkdir -p "$(dirname "$SEED_PATH")"
 rm -f "$CACHE_PATH"
 
-run_with_timeout "$BUILD_TIMEOUT_SECS" cargo build -p souc
+if [[ "$SKIP_BUILD" = "1" ]]; then
+  echo "[build-seed] skipping cargo build (SKIP_BUILD=1)"
+  sounio_require_souc
+else
+  run_with_timeout "$BUILD_TIMEOUT_SECS" cargo build -p souc
+fi
 
 if [ ! -x "$SOUC_BIN" ]; then
   echo "error: missing compiler binary at $SOUC_BIN" >&2

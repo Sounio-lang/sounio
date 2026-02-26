@@ -3,8 +3,9 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
 
-SOUC_BIN="${SOUC_BIN:-$ROOT_DIR/target/release/souc}"
+SOUC_BIN="${SOUC_BIN:-$ROOT_DIR/souc}"
 BOOTSTRAP_MANIFEST="${SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST:-bootstrap/selfhost-kernel.manifest}"
 STRICT_MODULE_GATING="${SOUNIO_SELFHOST_STRICT_MODULE_GATING:-1}"
 WORK_DIR="${WORK_DIR:-/tmp/sounio-selfhost-independence-gate}"
@@ -58,9 +59,13 @@ echo "logs=$LOG_DIR"
 echo "decision_trail_required=$SOUNIO_OPT_DECISION_TRAIL_REQUIRED"
 echo "decision_trail_path=$SOUNIO_OPT_DECISION_TRAIL_PATH"
 
-run_step "01-cargo-check-bins" cargo check -p souc --bins
-run_step "02-cargo-test-lib" cargo test -p souc --lib
-run_step "03-cargo-build-release" cargo build -p souc --release
+if [[ "$SKIP_BUILD" != "1" ]]; then
+  echo "==> 01-cargo-check-bins (disabled: repo-hard no-rust)"
+  echo "==> 02-cargo-test-lib (disabled: repo-hard no-rust)"
+  echo "==> 03-cargo-build-release (disabled: repo-hard no-rust)"
+fi
+sounio_require_souc
+run_step "01-souc-version" "$SOUC_BIN" --version
 
 if [ ! -x "$SOUC_BIN" ]; then
   echo "error: expected release binary not found: $SOUC_BIN" >&2

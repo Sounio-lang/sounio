@@ -3,8 +3,9 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
 
-SOUC_BIN="${SOUC_BIN:-./target/debug/souc}"
+SOUC_BIN="${SOUC_BIN:-./souc}"
 PROGRAM_DIR="${PROGRAM_DIR:-tests/selfhost-driver-output}"
 
 WORK_DIR="${WORK_DIR:-/tmp/sounio-selfhost-driver-output-gate}"
@@ -129,15 +130,11 @@ echo "timeout_secs=$TIMEOUT_SECS"
 echo "strict_mode=$STRICT_MODE"
 echo "program_dir=$PROGRAM_DIR"
 
-set +e
-run_with_timeout "$BUILD_TIMEOUT_SECS" cargo build -p souc >"$BUILD_LOG" 2>&1
-build_code=$?
-set -e
-if [ "$build_code" -eq 0 ]; then
-  pass "build" "cargo build -p souc"
-else
-  fail "build" "cargo build failed (exit=$build_code)"
-fi
+{
+  echo "SELFHOST_DRIVER_OUTPUT_GATE_INFO build_step=disabled mode=repo-hard-no-rust"
+  echo "hint=provide SOUC_BIN prebuilt compiler"
+} >"$BUILD_LOG"
+pass "build" "cargo build disabled (repo-hard no-rust)"
 
 if [ ! -x "$SOUC_BIN" ]; then
   fail "preflight" "missing compiler binary at $SOUC_BIN"

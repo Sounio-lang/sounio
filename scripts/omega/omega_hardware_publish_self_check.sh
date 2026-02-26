@@ -7,8 +7,7 @@ GENERATED_PUBLISH_ADAPTERS="$ROOT_DIR/self-hosted/compiler/codegen/hardware/kaxi
 QIR_GENESIS_EMITTER="$ROOT_DIR/hardware/rtl/qir/omega_genesis_emitter.sio"
 QIR_FULL_EMITTER="$ROOT_DIR/hardware/rtl/qir/omega_full_qir_emitter.sio"
 PASS_MARKER="HARDWARE_PUBLISH_SELF_CHECK_PASS"
-DEFAULT_DEBUG_SOUC="$ROOT_DIR/target/debug/souc"
-DEFAULT_RELEASE_SOUC="$ROOT_DIR/target/release/souc"
+source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
 
 if [ ! -f "$GENERATED_ADAPTERS" ]; then
   echo "error: missing generated K-AXI adapters file: $GENERATED_ADAPTERS" >&2
@@ -33,23 +32,7 @@ if [ ! -f "$QIR_EMITTER_SOURCE" ]; then
   exit 2
 fi
 
-resolve_souc_bin() {
-  if [ -n "${SOUC_BIN:-}" ]; then
-    echo "$SOUC_BIN"
-    return
-  fi
-  if [ -x "$DEFAULT_DEBUG_SOUC" ]; then
-    echo "$DEFAULT_DEBUG_SOUC"
-    return
-  fi
-  if [ -x "$DEFAULT_RELEASE_SOUC" ]; then
-    echo "$DEFAULT_RELEASE_SOUC"
-    return
-  fi
-  echo "souc"
-}
-
-SOUC_BIN="$(resolve_souc_bin)"
+sounio_require_souc
 
 tmp_sio="$(mktemp "${TMPDIR:-/tmp}/omega_hardware_publish_self_check.XXXXXX.sio")"
 cleanup() {

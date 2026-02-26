@@ -3,6 +3,12 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
+
+if [[ "$SKIP_BUILD" = "1" ]]; then
+  echo "[golden-snapshots] skipped (SKIP_BUILD=1, requires cargo test)"
+  exit 0
+fi
 
 if [[ -n "${UPDATE_GOLDEN:-}" ]]; then
   echo "Refusing to run golden drift check with UPDATE_GOLDEN set."

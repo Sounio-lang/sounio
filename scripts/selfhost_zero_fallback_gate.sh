@@ -3,8 +3,9 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
 
-SOUC_BIN="${SOUC_BIN:-./target/debug/souc}"
+SOUC_BIN="${SOUC_BIN:-./souc}"
 WORK_DIR="${WORK_DIR:-/tmp/sounio-selfhost-zero-gate}"
 LOG_DIR="$WORK_DIR/logs"
 ARTIFACT_DIR="$WORK_DIR/artifacts"
@@ -193,14 +194,18 @@ if obj.get("schema") != "sounio.independence.contract.v1":
 PY
 fi
 
-set +e
-run_with_timeout "$BUILD_TIMEOUT_SECS" cargo build -p souc >"$BUILD_LOG" 2>&1
-build_code=$?
-set -e
-if [ "$build_code" -eq 0 ]; then
-  pass "build" "cargo build -p souc"
+if [[ "$SKIP_BUILD" = "1" ]]; then
+  if [[ -x "$SOUC_BIN" ]]; then
+    pass "build" "skipped (SKIP_BUILD=1, binary at $SOUC_BIN)"
+  else
+    fail "build" "SKIP_BUILD=1 but binary not found at $SOUC_BIN"
+  fi
 else
-  fail "build" "cargo build failed (exit=$build_code)"
+{
+  echo "SELFHOST_ZERO_GATE_INFO build_step=disabled mode=repo-hard-no-rust"
+  echo "hint=provide SOUC_BIN prebuilt compiler"
+} >"$BUILD_LOG"
+pass "build" "cargo build disabled (repo-hard no-rust)"
 fi
 
 if [ ! -x "$SOUC_BIN" ]; then

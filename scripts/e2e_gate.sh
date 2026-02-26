@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
+
 if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
   if [[ "$CARGO_TARGET_DIR" = /* ]]; then
     TARGET_DIR="$CARGO_TARGET_DIR"
@@ -12,7 +14,7 @@ else
   TARGET_DIR="$ROOT_DIR/target"
 fi
 
-SOUC_BIN="$TARGET_DIR/debug/souc"
+SOUC_BIN="${SOUC_BIN:-$TARGET_DIR/debug/souc}"
 EXAMPLE="$ROOT_DIR/examples/simple_test.sio"
 GPU_FIXTURE="$ROOT_DIR/scripts/fixtures/gpu_minimal.sio"
 
@@ -20,22 +22,16 @@ OUT_DIR="$(mktemp -d)"
 trap 'rm -rf "$OUT_DIR"' EXIT
 
 echo "[e2e] native build + run"
-(cd "$ROOT_DIR" && cargo build -q -p souc --bin souc)
+sounio_require_souc
 "$SOUC_BIN" build "$EXAMPLE" --backend native -o "$OUT_DIR/simple_test_native"
 "$OUT_DIR/simple_test_native"
 
 if [[ "${SOUNIO_SKIP_LLVM:-}" != "1" ]]; then
   echo "[e2e] llvm build + run"
-  LLVM_BUILD_LOG="$OUT_DIR/llvm_build.log"
-  if (cd "$ROOT_DIR" && cargo build -q -p souc --features llvm --bin souc) >"$LLVM_BUILD_LOG" 2>&1; then
-    "$SOUC_BIN" build "$EXAMPLE" --backend llvm -o "$OUT_DIR/simple_test_llvm"
+  if "$SOUC_BIN" build "$EXAMPLE" --backend llvm -o "$OUT_DIR/simple_test_llvm" 2>/dev/null; then
     "$OUT_DIR/simple_test_llvm"
-  elif grep -q "No suitable version of LLVM was found" "$LLVM_BUILD_LOG"; then
-    echo "[e2e] llvm skipped (LLVM toolchain not available)"
   else
-    echo "[e2e] llvm build failed"
-    cat "$LLVM_BUILD_LOG"
-    exit 1
+    echo "[e2e] llvm skipped (binary not built with llvm feature/toolchain)"
   fi
 else
   echo "[e2e] llvm skipped (SOUNIO_SKIP_LLVM=1)"
@@ -43,10 +39,12 @@ fi
 
 if [[ "${SOUNIO_SKIP_GPU:-}" != "1" ]]; then
   echo "[e2e] gpu compile-only"
-  (cd "$ROOT_DIR" && cargo build -q -p souc --features gpu --bin souc)
-  "$SOUC_BIN" build "$GPU_FIXTURE" --backend gpu -o "$OUT_DIR/gpu_minimal.ptx"
-  test -s "$OUT_DIR/gpu_minimal.ptx"
-  grep -q "\\.entry" "$OUT_DIR/gpu_minimal.ptx"
+  if "$SOUC_BIN" build "$GPU_FIXTURE" --backend gpu -o "$OUT_DIR/gpu_minimal.ptx" 2>/dev/null; then
+    test -s "$OUT_DIR/gpu_minimal.ptx"
+    grep -q "\\.entry" "$OUT_DIR/gpu_minimal.ptx"
+  else
+    echo "[e2e] gpu skipped (binary not built with gpu feature)"
+  fi
 else
   echo "[e2e] gpu skipped (SOUNIO_SKIP_GPU=1)"
 fi

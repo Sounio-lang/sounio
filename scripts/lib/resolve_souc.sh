@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# scripts/lib/resolve_souc.sh — shared souc binary resolution and cargo-skip logic.
+# Source this file; do not execute directly.
+#
+# After sourcing:
+#   SOUC_BIN            — path to the souc binary
+#   SKIP_BUILD          — "1" if cargo should be skipped, "0" otherwise
+#   sounio_cargo()      — wrapper: runs cargo if SKIP_BUILD=0, no-ops if 1
+#   sounio_require_souc — asserts SOUC_BIN exists and is executable
+
+# Guard against double-sourcing.
+if [[ -n "${_SOUNIO_RESOLVE_SOUC_LOADED:-}" ]]; then
+  return 0
+fi
+_SOUNIO_RESOLVE_SOUC_LOADED=1
+
+_SOUNIO_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_SOUNIO_ROOT_DIR="${_SOUNIO_ROOT_DIR:-$(cd "$_SOUNIO_LIB_DIR/../.." && pwd)}"
+
+# Normalize boolean env vars: 1/true/yes/on → 1, 0/false/no/off → 0.
+_sounio_normalize_bool() {
+  local raw="$1"
+  local name="$2"
+  case "$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on)  echo "1" ;;
+    0|false|no|off) echo "0" ;;
+    *)
+      echo "error: invalid $name=$raw (expected 0/1/true/false/yes/no/on/off)" >&2
+      return 1
+      ;;
+  esac
+}
+
+SOUNIO_REPO_HARD_NO_RUST="$(_sounio_normalize_bool "${SOUNIO_REPO_HARD_NO_RUST:-1}" "SOUNIO_REPO_HARD_NO_RUST")"
+SKIP_BUILD="$(_sounio_normalize_bool "${SKIP_BUILD:-$SOUNIO_REPO_HARD_NO_RUST}" "SKIP_BUILD")"
+
+# Resolve SOUC_BIN: explicit env → debug build → release build → PATH.
+_sounio_resolve_bin() {
+  local resolver="$_SOUNIO_ROOT_DIR/scripts/omega/omega_resolve_souc_bin.sh"
+  if [[ -x "$resolver" ]]; then
+    if _resolved_via_omega="$(
+      OMEGA_SOUC_REQUIRE_PINNED="${OMEGA_SOUC_REQUIRE_PINNED:-$SOUNIO_REPO_HARD_NO_RUST}" \
+      OMEGA_SOUC_ALLOW_LOCAL_FALLBACK="${OMEGA_SOUC_ALLOW_LOCAL_FALLBACK:-0}" \
+        "$resolver" --print-path 2>/dev/null
+    )"; then
+      if [[ -n "$_resolved_via_omega" && -x "$_resolved_via_omega" ]]; then
+        echo "$_resolved_via_omega"
+        return 0
+      fi
+    fi
+  fi
+  if [[ -n "${SOUC_BIN:-}" && -x "$SOUC_BIN" ]]; then
+    echo "$SOUC_BIN"
+    return 0
+  fi
+  local root_bin="$_SOUNIO_ROOT_DIR/souc"
+  if [[ -x "$root_bin" ]]; then
+    echo "$root_bin"
+    return 0
+  fi
+  local debug_bin="$_SOUNIO_ROOT_DIR/target/debug/souc"
+  local release_bin="$_SOUNIO_ROOT_DIR/target/release/souc"
+  if [[ -x "$debug_bin" ]]; then
+    echo "$debug_bin"
+    return 0
+  fi
+  if [[ -x "$release_bin" ]]; then
+    echo "$release_bin"
+    return 0
+  fi
+  if command -v souc >/dev/null 2>&1; then
+    command -v souc
+    return 0
+  fi
+  echo ""
+  return 1
+}
+
+# Assert souc binary exists.
+sounio_require_souc() {
+  if [[ ! -x "$SOUC_BIN" ]]; then
+    echo "error: souc binary not found at $SOUC_BIN" >&2
+    echo "hint: build with 'cargo build -p souc' or set SOUC_BIN=/path/to/souc" >&2
+    exit 1
+  fi
+}
+
+# Wrapper: runs cargo normally if SKIP_BUILD=0, skips with message if SKIP_BUILD=1.
+sounio_cargo() {
+  if [[ "$SKIP_BUILD" = "1" ]]; then
+    if [[ "$SOUNIO_REPO_HARD_NO_RUST" = "1" ]]; then
+      echo "error: cargo invocation blocked in repo-hard no-rust mode: cargo $*" >&2
+      return 2
+    fi
+    echo "[skip-build] skipping: cargo $*"
+    return 0
+  fi
+  cargo "$@"
+}
+
+# If SOUC_BIN is not set or not executable, try to resolve it.
+if [[ -z "${SOUC_BIN:-}" ]] || [[ ! -x "${SOUC_BIN:-}" ]]; then
+  _resolved="$(_sounio_resolve_bin 2>/dev/null || true)"
+  if [[ -n "$_resolved" ]]; then
+    SOUC_BIN="$_resolved"
+  fi
+  unset _resolved
+fi

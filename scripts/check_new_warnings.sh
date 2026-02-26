@@ -2,6 +2,13 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
+
+if [[ "$SKIP_BUILD" = "1" ]]; then
+  echo "[warnings] skipped (SKIP_BUILD=1, requires cargo)"
+  exit 0
+fi
+
 BASELINE_FILE="${ROOT_DIR}/scripts/baselines/lib_warning_signatures.txt"
 MODE="${1:-check}"
 

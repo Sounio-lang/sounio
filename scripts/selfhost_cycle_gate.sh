@@ -4,7 +4,14 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-SOUC_BIN="${SOUC_BIN:-./target/debug/souc}"
+SOUC_BIN="${SOUC_BIN:-./souc}"
+if [ -x "$ROOT_DIR/scripts/omega/omega_resolve_souc_bin.sh" ]; then
+  SOUC_BIN="$(
+    OMEGA_SOUC_REQUIRE_PINNED="${OMEGA_SOUC_REQUIRE_PINNED:-1}" \
+    OMEGA_SOUC_ALLOW_LOCAL_FALLBACK="${OMEGA_SOUC_ALLOW_LOCAL_FALLBACK:-0}" \
+      "$ROOT_DIR/scripts/omega/omega_resolve_souc_bin.sh" --print-path
+  )"
+fi
 WORK_DIR="${WORK_DIR:-/tmp/sounio-selfhost-cycle-gate}"
 LOG_DIR="$WORK_DIR/logs"
 ARTIFACT_DIR="$WORK_DIR/artifacts"
@@ -98,7 +105,10 @@ fi
 if [ "$SKIP_BUILD" = "1" ]; then
   : >"$BUILD_LOG"
 else
-  run_with_timeout "$BUILD_TIMEOUT_SECS" cargo build -p souc >"$BUILD_LOG" 2>&1
+  {
+    echo "SELFHOST_CYCLE_GATE_INFO build_step=disabled mode=repo-hard-no-rust"
+    echo "hint=provide SOUC_BIN prebuilt compiler"
+  } >"$BUILD_LOG"
 fi
 
 if [ ! -x "$SOUC_BIN" ]; then

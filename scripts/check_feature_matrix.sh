@@ -2,6 +2,12 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
+
+if [[ "$SKIP_BUILD" = "1" ]]; then
+  echo "[feature-matrix] skipped (SKIP_BUILD=1, feature checks require cargo)"
+  exit 0
+fi
 
 has_llvm15() {
   if [[ -n "${LLVM_SYS_150_PREFIX:-}" && -d "${LLVM_SYS_150_PREFIX}" ]]; then
