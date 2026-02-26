@@ -4,10 +4,36 @@
 //   Knowledge[T, epsilon < bound, Valid(...), Provenance]
 //
 // Functions:
-//   check_knowledge_type   — validate and lower a KnowledgeTypeInfo AST node
-//   check_knowledge_unwrap — extract inner type from Knowledge wrapper
-//   is_knowledge_type      — predicate
-//   knowledge_inner        — extract wrapped type entry
+//   check_knowledge_type      — validate and lower a KnowledgeTypeInfo AST node
+//   check_knowledge_unwrap    — extract inner type from Knowledge wrapper
+//   is_knowledge_type         — predicate
+//   knowledge_inner           — extract wrapped type entry
+//   check_knowledge_epsilon   — field access for epsilon
+//   check_knowledge_epsilon_of — epsilonOf intrinsic
+//
+// Provenance tracking:
+//   ProvenanceKind enum       — source classification
+//   Provenance struct         — source metadata
+//   provenance_new            — constructor
+//
+// Validity conditions:
+//   ValidityKind enum         — validity classification
+//   Validity struct           — validity metadata
+//   validity_always           — always valid constructor
+//   validity_duration         — duration-based validity
+//
+// Knowledge metadata:
+//   KnowledgeMeta struct      — combined epsilon, validity, provenance
+//   knowledge_meta_from_ty    — extract from type
+//
+// Confidence subsumption:
+//   epsilon_subsumes          — lattice ordering (lower = more confident)
+//   knowledge_compatible      — type compatibility with epsilon ordering
+//
+// Epsilon propagation:
+//   epsilon_combine_independent — add for independent errors
+//   epsilon_combine_correlated  — max for correlated errors
+//   knowledge_binary_result     — binary op epsilon propagation
 
 // ============================================================
 // Knowledge type construction and validation
@@ -80,5 +106,432 @@ fn check_knowledge_epsilon_of(ty: TypeEntry) -> TypeEntry {
         ty_f64()
     } else {
         ty_error()
+    }
+}
+
+// ============================================================
+// Provenance tracking (lines 85-150)
+// ============================================================
+
+// Classification of knowledge sources for audit trails
+// and trust boundary tracking
+enum ProvenanceKind {
+    ProvDerived,    // Derived from other Knowledge via computation
+    ProvSource,     // Original authoritative source
+    ProvComputed,   // Algorithmic computation result
+    ProvLiterature, // Published literature reference
+    ProvMeasured,   // Physical measurement or sensor data
+    ProvInput       // External user/system input
+}
+
+// Provenance metadata tracking source and lineage
+struct Provenance {
+    kind: ProvenanceKind,
+    source_id: i64
+}
+
+// Construct provenance with a specific kind
+// source_id is initialized to 0 (unknown)
+fn provenance_new(kind: ProvenanceKind) -> Provenance {
+    Provenance {
+        kind: kind,
+        source_id: 0
+    }
+}
+
+// Construct provenance with explicit source identifier
+fn provenance_with_source(kind: ProvenanceKind, source_id: i64) -> Provenance {
+    Provenance {
+        kind: kind,
+        source_id: source_id
+    }
+}
+
+// Check if provenance is from a trusted source
+fn provenance_is_trusted(prov: Provenance) -> bool {
+    match prov.kind {
+        ProvenanceKind::ProvSource => true,
+        ProvenanceKind::ProvLiterature => true,
+        ProvenanceKind::ProvMeasured => true,
+        ProvenanceKind::ProvDerived => false,
+        ProvenanceKind::ProvComputed => false,
+        ProvenanceKind::ProvInput => false
+    }
+}
+
+// Get string representation of provenance kind
+fn provenance_kind_name(kind: ProvenanceKind) -> String with Alloc {
+    match kind {
+        ProvenanceKind::ProvDerived => "derived",
+        ProvenanceKind::ProvSource => "source",
+        ProvenanceKind::ProvComputed => "computed",
+        ProvenanceKind::ProvLiterature => "literature",
+        ProvenanceKind::ProvMeasured => "measured",
+        ProvenanceKind::ProvInput => "input"
+    }
+}
+
+// ============================================================
+// Validity conditions (lines 151-220)
+// ============================================================
+
+// Classification of validity conditions for knowledge
+// Determines when knowledge remains valid/usable
+enum ValidityKind {
+    ValidAlways,        // No expiration, always valid
+    ValidDuration,      // Valid for a fixed duration from creation
+    ValidUntilTime,     // Valid until a specific timestamp
+    ValidWhileCond      // Valid while some condition holds
+}
+
+// Validity metadata for knowledge temporal bounds
+struct Validity {
+    kind: ValidityKind,
+    duration_sec: f64,
+    until_timestamp: f64
+}
+
+// Create always-valid validity (no expiration)
+fn validity_always() -> Validity {
+    Validity {
+        kind: ValidityKind::ValidAlways,
+        duration_sec: 0.0,
+        until_timestamp: 0.0
+    }
+}
+
+// Create duration-based validity
+fn validity_duration(seconds: f64) -> Validity {
+    Validity {
+        kind: ValidityKind::ValidDuration,
+        duration_sec: seconds,
+        until_timestamp: 0.0
+    }
+}
+
+// Create timestamp-based validity (valid until specific time)
+fn validity_until(timestamp: f64) -> Validity {
+    Validity {
+        kind: ValidityKind::ValidUntilTime,
+        duration_sec: 0.0,
+        until_timestamp: timestamp
+    }
+}
+
+// Create condition-based validity
+fn validity_while() -> Validity {
+    Validity {
+        kind: ValidityKind::ValidWhileCond,
+        duration_sec: 0.0,
+        until_timestamp: 0.0
+    }
+}
+
+// Check if validity has expired based on current time
+fn validity_is_expired(validity: Validity, current_time: f64) -> bool {
+    match validity.kind {
+        ValidityKind::ValidAlways => false,
+        ValidityKind::ValidDuration => false,  // Need creation time to check
+        ValidityKind::ValidUntilTime => current_time > validity.until_timestamp,
+        ValidityKind::ValidWhileCond => false  // Condition checked at runtime
+    }
+}
+
+// ============================================================
+// Extended Knowledge metadata (lines 221-300)
+// ============================================================
+
+// Combined metadata for Knowledge types including
+// epsilon bound, validity conditions, and provenance
+struct KnowledgeMeta {
+    epsilon: f64,
+    validity: Validity,
+    provenance: Provenance
+}
+
+// Create default metadata with always-valid and unknown provenance
+fn knowledge_meta_default(epsilon: f64) -> KnowledgeMeta {
+    KnowledgeMeta {
+        epsilon: epsilon,
+        validity: validity_always(),
+        provenance: provenance_new(ProvenanceKind::ProvDerived)
+    }
+}
+
+// Create metadata with specified validity
+fn knowledge_meta_with_validity(epsilon: f64, validity: Validity) -> KnowledgeMeta {
+    KnowledgeMeta {
+        epsilon: epsilon,
+        validity: validity,
+        provenance: provenance_new(ProvenanceKind::ProvDerived)
+    }
+}
+
+// Create metadata with specified provenance
+fn knowledge_meta_with_provenance(epsilon: f64, provenance: Provenance) -> KnowledgeMeta {
+    KnowledgeMeta {
+        epsilon: epsilon,
+        validity: validity_always(),
+        provenance: provenance
+    }
+}
+
+// Extract KnowledgeMeta from a type entry
+// Returns default metadata for non-Knowledge types
+fn knowledge_meta_from_ty(ty: TypeEntry) -> KnowledgeMeta with Mut, Panic, Div, Alloc {
+    match ty.kind {
+        TypeKind::TyKnowledge => {
+            let eps = ty.epsilon_bound
+            let prov = match ty.provenance {
+                Some(p) => *p,
+                None => provenance_new(ProvenanceKind::ProvDerived)
+            }
+            let valid = match ty.validity {
+                Some(v) => *v,
+                None => validity_always()
+            }
+            KnowledgeMeta {
+                epsilon: eps,
+                validity: valid,
+                provenance: prov
+            }
+        }
+        _ => knowledge_meta_default(-1.0)
+    }
+}
+
+// Get epsilon from knowledge metadata
+fn knowledge_meta_epsilon(meta: KnowledgeMeta) -> f64 {
+    meta.epsilon
+}
+
+// Get validity from knowledge metadata
+fn knowledge_meta_validity(meta: KnowledgeMeta) -> Validity {
+    meta.validity
+}
+
+// Get provenance from knowledge metadata
+fn knowledge_meta_provenance(meta: KnowledgeMeta) -> Provenance {
+    meta.provenance
+}
+
+// ============================================================
+// Confidence subsumption lattice (lines 301-380)
+// ============================================================
+
+// Confidence subsumption: lower epsilon = higher confidence
+// epsilon_subsumes(eps_a, eps_b) returns true if a is at least as
+// confident as b (eps_a <= eps_b)
+//
+// This defines a partial order where:
+//   0.0 (certain) > 0.1 > 0.5 > 1.0 (unknown)
+//
+// Returns true if eps_a <= eps_b
+fn epsilon_subsumes(eps_a: f64, eps_b: f64) -> bool {
+    eps_a <= eps_b
+}
+
+// Get the more confident (lower) epsilon
+fn epsilon_meet(eps_a: f64, eps_b: f64) -> f64 {
+    if eps_a < eps_b {
+        eps_a
+    } else {
+        eps_b
+    }
+}
+
+// Get the less confident (higher) epsilon
+fn epsilon_join(eps_a: f64, eps_b: f64) -> f64 {
+    if eps_a > eps_b {
+        eps_a
+    } else {
+        eps_b
+    }
+}
+
+// Check if two knowledge types are compatible
+// Compatible if:
+//   1. Inner types match (structural equality)
+//   2. Epsilon subsumption holds (a is at least as confident as b)
+//
+// Returns true if ty_a can be used where ty_b is expected
+fn knowledge_compatible(ty_a: TypeEntry, ty_b: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
+    let inner_a = knowledge_inner(ty_a)
+    let inner_b = knowledge_inner(ty_b)
+
+    // Check inner types match
+    let types_match = types_equal(inner_a, inner_b)
+    if !types_match {
+        false
+    } else {
+        // Check epsilon subsumption
+        epsilon_subsumes(ty_a.epsilon_bound, ty_b.epsilon_bound)
+    }
+}
+
+// Check type equality (structural)
+fn types_equal(a: TypeEntry, b: TypeEntry) -> bool {
+    if a.kind != b.kind {
+        false
+    } else {
+        match (a.inner, b.inner) {
+            (Some(inner_a), Some(inner_b)) => types_equal(*inner_a, *inner_b),
+            (None, None) => true,
+            _ => false
+        }
+    }
+}
+
+// Check if knowledge type meets epsilon requirement
+fn knowledge_meets_epsilon(ty: TypeEntry, required_epsilon: f64) -> bool {
+    if is_knowledge_type(ty) {
+        epsilon_subsumes(ty.epsilon_bound, required_epsilon)
+    } else {
+        false
+    }
+}
+
+// ============================================================
+// Epsilon propagation in binary operations (lines 381-480)
+// ============================================================
+
+// Clamp epsilon to valid range [0.0, 1.0]
+fn epsilon_clamp(eps: f64) -> f64 {
+    if eps < 0.0 {
+        0.0
+    } else if eps > 1.0 {
+        1.0
+    } else {
+        eps
+    }
+}
+
+// Combine independent errors: eps_a + eps_b
+// Used for addition/subtraction where errors accumulate
+// Clamped to maximum of 1.0
+fn epsilon_combine_independent(eps_a: f64, eps_b: f64) -> f64 {
+    let sum = eps_a + eps_b
+    epsilon_clamp(sum)
+}
+
+// Combine correlated errors: max(eps_a, eps_b)
+// Used when errors are perfectly correlated (same source)
+fn epsilon_combine_correlated(eps_a: f64, eps_b: f64) -> f64 {
+    if eps_a > eps_b {
+        eps_a
+    } else {
+        eps_b
+    }
+}
+
+// Combine relative errors for multiplication/division
+// Relative errors add: (da/a) + (db/b)
+fn epsilon_combine_relative(eps_a: f64, eps_b: f64) -> f64 {
+    let sum = eps_a + eps_b
+    epsilon_clamp(sum)
+}
+
+// Weighted combination for weighted averages
+fn epsilon_combine_weighted(eps_a: f64, eps_b: f64, weight_a: f64, weight_b: f64) -> f64 with Div {
+    let weighted_sum = weight_a * eps_a + weight_b * eps_b
+    let total_weight = weight_a + weight_b
+    if total_weight == 0.0 {
+        1.0
+    } else {
+        epsilon_clamp(weighted_sum / total_weight)
+    }
+}
+
+// Binary operation kinds for epsilon propagation
+enum BinaryOp {
+    OpAdd,
+    OpSub,
+    OpMul,
+    OpDiv,
+    OpEq,
+    OpNe,
+    OpLt,
+    OpLe,
+    OpGt,
+    OpGe
+}
+
+// Compute result type for binary operations on Knowledge types
+// Handles epsilon propagation according to operation semantics
+fn knowledge_binary_result(op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc {
+    // If neither operand is Knowledge, return error
+    let left_is_knowledge = is_knowledge_type(left_ty)
+    let right_is_knowledge = is_knowledge_type(right_ty)
+
+    if !left_is_knowledge && !right_is_knowledge {
+        ty_error()
+    } else {
+        // Extract inner types and epsilons
+        let left_inner = if left_is_knowledge {
+            knowledge_inner(left_ty)
+        } else {
+            left_ty
+        }
+        let right_inner = if right_is_knowledge {
+            knowledge_inner(right_ty)
+        } else {
+            right_ty
+        }
+
+        let left_eps = if left_is_knowledge {
+            left_ty.epsilon_bound
+        } else {
+            0.0
+        }
+        let right_eps = if right_is_knowledge {
+            right_ty.epsilon_bound
+        } else {
+            0.0
+        }
+
+        // Determine result epsilon based on operation
+        let result_epsilon = match op {
+            BinaryOp::OpAdd => epsilon_combine_independent(left_eps, right_eps),
+            BinaryOp::OpSub => epsilon_combine_independent(left_eps, right_eps),
+            BinaryOp::OpMul => epsilon_combine_relative(left_eps, right_eps),
+            BinaryOp::OpDiv => epsilon_combine_relative(left_eps, right_eps),
+            BinaryOp::OpEq => 0.0,  // Comparisons return bool, not Knowledge
+            BinaryOp::OpNe => 0.0,
+            BinaryOp::OpLt => 0.0,
+            BinaryOp::OpLe => 0.0,
+            BinaryOp::OpGt => 0.0,
+            BinaryOp::OpGe => 0.0
+        }
+
+        // Determine result type based on operation
+        match op {
+            BinaryOp::OpEq => ty_bool(),
+            BinaryOp::OpNe => ty_bool(),
+            BinaryOp::OpLt => ty_bool(),
+            BinaryOp::OpLe => ty_bool(),
+            BinaryOp::OpGt => ty_bool(),
+            BinaryOp::OpGe => ty_bool(),
+            _ => {
+                // For arithmetic operations, result is Knowledge with combined epsilon
+                // Inner type is the same as input inner types (assuming they match)
+                ty_knowledge(left_inner, result_epsilon)
+            }
+        }
+    }
+}
+
+// Check if binary operation is supported for Knowledge types
+fn knowledge_op_supported(op: BinaryOp) -> bool {
+    match op {
+        BinaryOp::OpAdd => true,
+        BinaryOp::OpSub => true,
+        BinaryOp::OpMul => true,
+        BinaryOp::OpDiv => true,
+        BinaryOp::OpEq => true,
+        BinaryOp::OpNe => true,
+        BinaryOp::OpLt => true,
+        BinaryOp::OpLe => true,
+        BinaryOp::OpGt => true,
+        BinaryOp::OpGe => true
     }
 }
