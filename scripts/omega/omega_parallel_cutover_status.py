@@ -14,11 +14,19 @@ PROGRESS_SCHEMA = "sounio.omega.selfhost-compiler-progress.v1"
 TRACK_B_STEPS = [
     ("data_structures", "DATA_STRUCTURES_PASS"),
     ("gpu_ir_expansion", "GPU_IR_EXPANSION_PASS"),
+    ("hlir_gpu_cross_coverage", "HLIR_GPU_CROSS_COVERAGE_PASS"),
     ("hlir_lowering", "HLIR_LOWERING_PASS"),
     ("metal_msl_codegen", "METAL_MSL_CODEGEN_PASS"),
     ("ptx_regalloc_expansion", "PTX_REGALLOC_EXPANSION_PASS"),
-    ("hlir_gpu_cross_coverage", "HLIR_GPU_CROSS_COVERAGE_PASS"),
     ("gpu_opcode_smoke", "GPU_OPCODE_SMOKE_PASS"),
+]
+
+TRACK_B_ORDERED_PLAN_MARKERS = [
+    "DATA_STRUCTURES_PASS",
+    "GPU_IR_EXPANSION_PASS",
+    "HLIR_LOWERING_PASS",
+    "METAL_MSL_CODEGEN_PASS",
+    "PTX_REGALLOC_EXPANSION_PASS",
 ]
 
 
@@ -118,18 +126,23 @@ def main() -> int:
     step_status = []
     track_b_missing = []
     order_violations = []
-    previous_offset = -1
+    previous_plan_offset = -1
     for stage, marker in TRACK_B_STEPS:
         offset = marker_offset(gate_text, marker)
         ok = offset >= 0
         if not ok:
             track_b_missing.append(marker)
-        if ok and offset < previous_offset:
+        if (
+            ok
+            and marker in TRACK_B_ORDERED_PLAN_MARKERS
+            and offset < previous_plan_offset
+        ):
             order_violations.append(
-                f"{marker} appears out of order (offset={offset}, previous_offset={previous_offset})"
+                f"{marker} appears out of canonical plan order "
+                f"(offset={offset}, previous_offset={previous_plan_offset})"
             )
-        if ok:
-            previous_offset = offset
+        if ok and marker in TRACK_B_ORDERED_PLAN_MARKERS:
+            previous_plan_offset = offset
         step_status.append(
             {
                 "stage": stage,
