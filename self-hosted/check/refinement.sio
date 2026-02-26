@@ -1,0 +1,484 @@
+// Refinement types — predicate representation + SMT-lite checks
+//
+// Predicate op tags:
+// 0=None, 1=Gt, 2=GtEq, 3=Lt, 4=LtEq, 5=Eq, 6=NotEq, 7=And, 8=Or
+
+fn refinement_op_none() -> i64 { 0 }
+fn refinement_op_gt() -> i64 { 1 }
+fn refinement_op_gt_eq() -> i64 { 2 }
+fn refinement_op_lt() -> i64 { 3 }
+fn refinement_op_lt_eq() -> i64 { 4 }
+fn refinement_op_eq() -> i64 { 5 }
+fn refinement_op_neq() -> i64 { 6 }
+fn refinement_op_and() -> i64 { 7 }
+fn refinement_op_or() -> i64 { 8 }
+
+struct RefinementPred {
+    op: i64,
+    var_name: Name,
+    rhs_int: i64,
+    rhs_float: f64,
+    is_float: bool,
+    left: Option<Box<RefinementPred>>,
+    right: Option<Box<RefinementPred>>,
+}
+
+struct RefinementType {
+    base_type: TypeEntry,
+    var_name: Name,
+    predicate: RefinementPred,
+}
+
+struct RefinementTable {
+    entries: [RefinementType; 128],
+    names: [Name; 128],
+    count: i64,
+}
+
+fn empty_refinement_pred() -> RefinementPred {
+    RefinementPred {
+        op: refinement_op_none(),
+        var_name: Name { buf: [0; 128], len: 0 },
+        rhs_int: 0,
+        rhs_float: 0.0,
+        is_float: false,
+        left: None,
+        right: None,
+    }
+}
+
+fn empty_refinement_type() -> RefinementType {
+    RefinementType {
+        base_type: ty_error(),
+        var_name: Name { buf: [0; 128], len: 0 },
+        predicate: empty_refinement_pred(),
+    }
+}
+
+fn refinement_table_new() -> RefinementTable {
+    RefinementTable {
+        entries: [empty_refinement_type(); 128],
+        names: [Name { buf: [0; 128], len: 0 }; 128],
+        count: 0,
+    }
+}
+
+fn refinement_table_find(t: RefinementTable, name: Name) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < t.count {
+        if name_eq(t.names[i as usize], name) {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+fn refinement_table_add(t: RefinementTable, name: Name, rt: RefinementType) -> RefinementTable with Mut, Panic, Div {
+    var out = t
+    let idx = refinement_table_find(out, name)
+    if idx >= 0 {
+        out.entries[idx as usize] = rt
+        out.names[idx as usize] = name
+        return out
+    }
+    if out.count < 128 {
+        out.entries[out.count as usize] = rt
+        out.names[out.count as usize] = name
+        out.count = out.count + 1
+    }
+    out
+}
+
+fn pred_make_int(op: i64, var_name: Name, val: i64) -> RefinementPred {
+    RefinementPred {
+        op: op,
+        var_name: var_name,
+        rhs_int: val,
+        rhs_float: val as f64,
+        is_float: false,
+        left: None,
+        right: None,
+    }
+}
+
+fn pred_make_float(op: i64, var_name: Name, val: f64) -> RefinementPred {
+    RefinementPred {
+        op: op,
+        var_name: var_name,
+        rhs_int: val as i64,
+        rhs_float: val,
+        is_float: true,
+        left: None,
+        right: None,
+    }
+}
+
+fn pred_make_compound(op: i64, left: RefinementPred, right: RefinementPred) -> RefinementPred with Alloc {
+    RefinementPred {
+        op: op,
+        var_name: left.var_name,
+        rhs_int: 0,
+        rhs_float: 0.0,
+        is_float: false,
+        left: Some(Box::new(left)),
+        right: Some(Box::new(right)),
+    }
+}
+
+fn pred_gt(var_name: Name, val: i64) -> RefinementPred {
+    pred_make_int(refinement_op_gt(), var_name, val)
+}
+
+fn pred_gt_eq(var_name: Name, val: i64) -> RefinementPred {
+    pred_make_int(refinement_op_gt_eq(), var_name, val)
+}
+
+fn pred_lt(var_name: Name, val: i64) -> RefinementPred {
+    pred_make_int(refinement_op_lt(), var_name, val)
+}
+
+fn pred_lt_eq(var_name: Name, val: i64) -> RefinementPred {
+    pred_make_int(refinement_op_lt_eq(), var_name, val)
+}
+
+fn pred_eq(var_name: Name, val: i64) -> RefinementPred {
+    pred_make_int(refinement_op_eq(), var_name, val)
+}
+
+fn pred_neq(var_name: Name, val: i64) -> RefinementPred {
+    pred_make_int(refinement_op_neq(), var_name, val)
+}
+
+fn pred_gt_f(var_name: Name, val: f64) -> RefinementPred {
+    pred_make_float(refinement_op_gt(), var_name, val)
+}
+
+fn pred_and(left: RefinementPred, right: RefinementPred) -> RefinementPred with Alloc {
+    pred_make_compound(refinement_op_and(), left, right)
+}
+
+fn pred_or(left: RefinementPred, right: RefinementPred) -> RefinementPred with Alloc {
+    pred_make_compound(refinement_op_or(), left, right)
+}
+
+fn pred_check_cmp_int(op: i64, lhs: i64, rhs: i64) -> bool {
+    if op == refinement_op_gt() {
+        lhs > rhs
+    } else if op == refinement_op_gt_eq() {
+        lhs >= rhs
+    } else if op == refinement_op_lt() {
+        lhs < rhs
+    } else if op == refinement_op_lt_eq() {
+        lhs <= rhs
+    } else if op == refinement_op_eq() {
+        lhs == rhs
+    } else if op == refinement_op_neq() {
+        lhs != rhs
+    } else {
+        false
+    }
+}
+
+fn pred_check_cmp_float(op: i64, lhs: f64, rhs: f64) -> bool {
+    if op == refinement_op_gt() {
+        lhs > rhs
+    } else if op == refinement_op_gt_eq() {
+        lhs >= rhs
+    } else if op == refinement_op_lt() {
+        lhs < rhs
+    } else if op == refinement_op_lt_eq() {
+        lhs <= rhs
+    } else if op == refinement_op_eq() {
+        lhs == rhs
+    } else if op == refinement_op_neq() {
+        lhs != rhs
+    } else {
+        false
+    }
+}
+
+fn pred_check_int(pred: RefinementPred, val: i64) -> bool with Mut, Panic, Div {
+    if pred.op == refinement_op_and() {
+        let left_ok = match pred.left {
+            Some(l) => pred_check_int(*l, val)
+            None => false
+        }
+        if !left_ok { return false }
+        let right_ok = match pred.right {
+            Some(r) => pred_check_int(*r, val)
+            None => false
+        }
+        left_ok && right_ok
+    } else if pred.op == refinement_op_or() {
+        let left_ok = match pred.left {
+            Some(l) => pred_check_int(*l, val)
+            None => false
+        }
+        if left_ok { return true }
+        match pred.right {
+            Some(r) => pred_check_int(*r, val)
+            None => false
+        }
+    } else if pred.is_float {
+        pred_check_cmp_float(pred.op, val as f64, pred.rhs_float)
+    } else {
+        pred_check_cmp_int(pred.op, val, pred.rhs_int)
+    }
+}
+
+fn pred_check_float(pred: RefinementPred, val: f64) -> bool with Mut, Panic, Div {
+    if pred.op == refinement_op_and() {
+        let left_ok = match pred.left {
+            Some(l) => pred_check_float(*l, val)
+            None => false
+        }
+        if !left_ok { return false }
+        let right_ok = match pred.right {
+            Some(r) => pred_check_float(*r, val)
+            None => false
+        }
+        left_ok && right_ok
+    } else if pred.op == refinement_op_or() {
+        let left_ok = match pred.left {
+            Some(l) => pred_check_float(*l, val)
+            None => false
+        }
+        if left_ok { return true }
+        match pred.right {
+            Some(r) => pred_check_float(*r, val)
+            None => false
+        }
+    } else if pred.is_float {
+        pred_check_cmp_float(pred.op, val, pred.rhs_float)
+    } else {
+        pred_check_cmp_float(pred.op, val, pred.rhs_int as f64)
+    }
+}
+
+fn pred_is_atomic(pred: RefinementPred) -> bool {
+    pred.op >= refinement_op_gt() && pred.op <= refinement_op_neq()
+}
+
+fn pred_equals(a: RefinementPred, b: RefinementPred) -> bool with Mut, Panic, Div {
+    if a.op != b.op { return false }
+    if !name_eq(a.var_name, b.var_name) { return false }
+    if a.is_float != b.is_float { return false }
+    if a.is_float {
+        if a.rhs_float != b.rhs_float { return false }
+    } else {
+        if a.rhs_int != b.rhs_int { return false }
+    }
+    if a.op == refinement_op_and() || a.op == refinement_op_or() {
+        let left_eq = match a.left {
+            Some(la) => {
+                match b.left {
+                    Some(lb) => pred_equals(*la, *lb)
+                    None => false
+                }
+            }
+            None => false
+        }
+        if !left_eq { return false }
+        match a.right {
+            Some(ra) => {
+                match b.right {
+                    Some(rb) => pred_equals(*ra, *rb)
+                    None => false
+                }
+            }
+            None => false
+        }
+    } else {
+        true
+    }
+}
+
+fn pred_implies_atomic_int(a: RefinementPred, b: RefinementPred) -> bool {
+    let av = a.rhs_int
+    let bv = b.rhs_int
+
+    if a.op == refinement_op_gt() {
+        if b.op == refinement_op_gt() { return av >= bv }
+        if b.op == refinement_op_gt_eq() { return av >= bv }
+        if b.op == refinement_op_neq() { return av >= bv }
+        return false
+    }
+    if a.op == refinement_op_gt_eq() {
+        if b.op == refinement_op_gt() { return av > bv }
+        if b.op == refinement_op_gt_eq() { return av >= bv }
+        if b.op == refinement_op_neq() { return av > bv || av < bv }
+        return false
+    }
+    if a.op == refinement_op_lt() {
+        if b.op == refinement_op_lt() { return av <= bv }
+        if b.op == refinement_op_lt_eq() { return av <= bv }
+        if b.op == refinement_op_neq() { return av <= bv }
+        return false
+    }
+    if a.op == refinement_op_lt_eq() {
+        if b.op == refinement_op_lt() { return av < bv }
+        if b.op == refinement_op_lt_eq() { return av <= bv }
+        if b.op == refinement_op_neq() { return av < bv || av > bv }
+        return false
+    }
+    if a.op == refinement_op_eq() {
+        if b.op == refinement_op_eq() { return av == bv }
+        if b.op == refinement_op_neq() { return av != bv }
+        return pred_check_cmp_int(b.op, av, bv)
+    }
+    if a.op == refinement_op_neq() {
+        if b.op == refinement_op_neq() { return av == bv }
+        return false
+    }
+    false
+}
+
+fn pred_implies_atomic_float(a: RefinementPred, b: RefinementPred) -> bool {
+    let av = if a.is_float { a.rhs_float } else { a.rhs_int as f64 }
+    let bv = if b.is_float { b.rhs_float } else { b.rhs_int as f64 }
+
+    if a.op == refinement_op_gt() {
+        if b.op == refinement_op_gt() { return av >= bv }
+        if b.op == refinement_op_gt_eq() { return av >= bv }
+        return false
+    }
+    if a.op == refinement_op_gt_eq() {
+        if b.op == refinement_op_gt() { return av > bv }
+        if b.op == refinement_op_gt_eq() { return av >= bv }
+        return false
+    }
+    if a.op == refinement_op_lt() {
+        if b.op == refinement_op_lt() { return av <= bv }
+        if b.op == refinement_op_lt_eq() { return av <= bv }
+        return false
+    }
+    if a.op == refinement_op_lt_eq() {
+        if b.op == refinement_op_lt() { return av < bv }
+        if b.op == refinement_op_lt_eq() { return av <= bv }
+        return false
+    }
+    if a.op == refinement_op_eq() {
+        if b.op == refinement_op_eq() { return av == bv }
+        return pred_check_cmp_float(b.op, av, bv)
+    }
+    if a.op == refinement_op_neq() {
+        if b.op == refinement_op_neq() { return av == bv }
+        return false
+    }
+    false
+}
+
+fn pred_implies(a: RefinementPred, b: RefinementPred) -> bool with Mut, Panic, Div {
+    if pred_equals(a, b) { return true }
+
+    // A implies (B1 or B2) iff A implies B1 or A implies B2
+    if b.op == refinement_op_or() {
+        let left_ok = match b.left {
+            Some(bl) => pred_implies(a, *bl)
+            None => false
+        }
+        if left_ok { return true }
+        return match b.right {
+            Some(br) => pred_implies(a, *br)
+            None => false
+        }
+    }
+
+    // A implies (B1 and B2) iff A implies both B1 and B2
+    if b.op == refinement_op_and() {
+        let left_ok = match b.left {
+            Some(bl) => pred_implies(a, *bl)
+            None => false
+        }
+        if !left_ok { return false }
+        return match b.right {
+            Some(br) => pred_implies(a, *br)
+            None => false
+        }
+    }
+
+    // (A1 and A2) implies B if either conjunct alone implies B (safe under-approx)
+    if a.op == refinement_op_and() {
+        let left_ok = match a.left {
+            Some(al) => pred_implies(*al, b)
+            None => false
+        }
+        if left_ok { return true }
+        return match a.right {
+            Some(ar) => pred_implies(*ar, b)
+            None => false
+        }
+    }
+
+    // (A1 or A2) implies B only if both imply B
+    if a.op == refinement_op_or() {
+        let left_ok = match a.left {
+            Some(al) => pred_implies(*al, b)
+            None => false
+        }
+        if !left_ok { return false }
+        return match a.right {
+            Some(ar) => pred_implies(*ar, b)
+            None => false
+        }
+    }
+
+    if !pred_is_atomic(a) || !pred_is_atomic(b) { return false }
+    if !name_eq(a.var_name, b.var_name) { return false }
+
+    if a.is_float || b.is_float {
+        pred_implies_atomic_float(a, b)
+    } else {
+        pred_implies_atomic_int(a, b)
+    }
+}
+
+fn print_pred_op(op: i64) with IO {
+    if op == refinement_op_gt() { print(">") }
+    else if op == refinement_op_gt_eq() { print(">=") }
+    else if op == refinement_op_lt() { print("<") }
+    else if op == refinement_op_lt_eq() { print("<=") }
+    else if op == refinement_op_eq() { print("==") }
+    else if op == refinement_op_neq() { print("!=") }
+    else if op == refinement_op_and() { print("&&") }
+    else if op == refinement_op_or() { print("||") }
+    else { print("?") }
+}
+
+fn print_pred_name(n: Name) with IO, Mut, Panic, Div {
+    var i: i64 = 0
+    while i < n.len {
+        print_char(n.buf[i as usize] as i64)
+        i = i + 1
+    }
+}
+
+fn print_pred(pred: RefinementPred) with IO, Mut, Panic, Div {
+    if pred.op == refinement_op_and() || pred.op == refinement_op_or() {
+        print("(")
+        match pred.left {
+            Some(l) => print_pred(*l)
+            None => print("?")
+        }
+        print(" ")
+        print_pred_op(pred.op)
+        print(" ")
+        match pred.right {
+            Some(r) => print_pred(*r)
+            None => print("?")
+        }
+        print(")")
+        return
+    }
+
+    print_pred_name(pred.var_name)
+    print(" ")
+    print_pred_op(pred.op)
+    print(" ")
+    if pred.is_float {
+        print_int(pred.rhs_float as i64)
+    } else {
+        print_int(pred.rhs_int)
+    }
+}
