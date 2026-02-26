@@ -18,6 +18,8 @@ struct Checker {
     had_error: bool,
     current_return_type: TypeEntry,
     current_impl_type: TypeEntry,
+    current_effects: [i64; 8],
+    current_effect_count: i64,
 }
 
 fn checker_new() -> Checker {
@@ -30,6 +32,8 @@ fn checker_new() -> Checker {
         had_error: false,
         current_return_type: ty_unit(),
         current_impl_type: ty_error(),
+        current_effects: [0; 8],
+        current_effect_count: 0,
     }
 }
 
@@ -206,6 +210,39 @@ impl Checker {
         print(")\n")
         c
     }
+
+    fn report_effect_error(self, span: Span, missing: [i64; 8], missing_count: i64) -> Checker with Mut, IO, Panic, Div {
+        var c = self
+        c.error_count = c.error_count + 1
+        c.had_error = true
+        print("error[E035]")
+        if span.start > 0 || span.end > 0 {
+            print(" at ")
+            print_int(span.start)
+            print("..")
+            print_int(span.end)
+        }
+        print(": effect not declared in function signature (missing: ")
+        var i: i64 = 0
+        while i < missing_count {
+            if i > 0 { print(", ") }
+            print_effect_name(missing[i as usize])
+            i = i + 1
+        }
+        print(")\n")
+        c
+    }
+
+    fn check_callee_effects(self, span: Span, callee_effects: [i64; 8], callee_effect_count: i64) -> Checker with Mut, IO, Panic, Div {
+        if callee_effect_count == 0 {
+            return self
+        }
+        if effects_subset(callee_effects, callee_effect_count, self.current_effects, self.current_effect_count) {
+            return self
+        }
+        let missing_pair = find_missing_effects(callee_effects, callee_effect_count, self.current_effects, self.current_effect_count)
+        self.report_effect_error(span, missing_pair.0, missing_pair.1)
+    }
 }
 
 fn print_error_message(code: i64) with IO, Mut, Panic, Div {
@@ -236,6 +273,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 32 { print("division on non-division algebra") }
     else if code == 33 { print("Clifford embedding mismatch (different signatures)") }
     else if code == 34 { print("Cayley-Dickson coercion direction error (no narrowing)") }
+    else if code == 35 { print("missing required effect") }
     else { print("unknown error") }
 }
 
@@ -686,10 +724,15 @@ impl Checker {
         match opt {
             Some(fd) => {
                 var c = self
+                // Save outer effects context
+                let saved_effects = c.current_effects
+                let saved_effect_count = c.current_effect_count
                 let sig_id = c.fn_sigs.find((*fd).name)
                 if sig_id >= 0 {
                     let sig = c.fn_sigs.get(sig_id)
                     c.current_return_type = sig.return_type
+                    c.current_effects = sig.effects
+                    c.current_effect_count = sig.effect_count
                 }
                 c.env = c.env.push_scope()
                 c = c.bind_fn_params((*fd).params)
@@ -705,6 +748,9 @@ impl Checker {
                 }
                 c.env = c.env.pop_scope()
                 c.current_return_type = ty_unit()
+                // Restore outer effects context
+                c.current_effects = saved_effects
+                c.current_effect_count = saved_effect_count
                 c
             }
             None => self
@@ -768,10 +814,15 @@ impl Checker {
         match item.fn_def {
             Some(fd) => {
                 var c = self
+                // Save outer effects context
+                let saved_effects = c.current_effects
+                let saved_effect_count = c.current_effect_count
                 let sig_id = c.fn_sigs.find_method(c.current_impl_type.name, (*fd).name)
                 if sig_id >= 0 {
                     let sig = c.fn_sigs.get(sig_id)
                     c.current_return_type = sig.return_type
+                    c.current_effects = sig.effects
+                    c.current_effect_count = sig.effect_count
                 }
                 c.env = c.env.push_scope()
                 c = c.bind_fn_params((*fd).params)
@@ -786,6 +837,9 @@ impl Checker {
                 }
                 c.env = c.env.pop_scope()
                 c.current_return_type = ty_unit()
+                // Restore outer effects context
+                c.current_effects = saved_effects
+                c.current_effect_count = saved_effect_count
                 c
             }
             None => self
@@ -1188,6 +1242,8 @@ impl Checker {
             if sig_id >= 0 {
                 let sig = c.fn_sigs.get(sig_id)
                 c = c.check_call_args(e.args, sig.params, sig.param_count, e.span)
+                // Verify callee method's effects are subset of caller's effects
+                c = c.check_callee_effects(e.span, sig.effects, sig.effect_count)
                 (c, sig.return_type)
             } else {
                 // Method not found
@@ -1217,6 +1273,8 @@ impl Checker {
         if callee_ty.kind == TypeKind::TyFn && callee_ty.fn_sig_id >= 0 {
             let sig = c.fn_sigs.get(callee_ty.fn_sig_id)
             c = c.check_call_args(e.args, sig.params, sig.param_count, e.span)
+            // Verify callee's effects are subset of caller's effects
+            c = c.check_callee_effects(e.span, sig.effects, sig.effect_count)
             (c, sig.return_type)
         } else if is_error_or_unknown(callee_ty) {
             c = c.check_expr_list_no_type(e.args)
