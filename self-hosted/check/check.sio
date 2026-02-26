@@ -1223,6 +1223,7 @@ impl Checker {
             ExprTupleLit => self.check_tuple_lit(e)
             ExprRange => self.check_range_expr(e)
             ExprCast => self.check_cast_expr(e)
+            ExprHandle => self.check_handle_expr(e)
             ExprError => (self, ty_error())
         }
     }
@@ -1995,5 +1996,50 @@ impl Checker {
             }
             None => (c, ty_error())
         }
+    }
+
+    fn check_handle_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        // handle<Effect> { body } with { handlers }
+        // The handler discharges the named effect within the body.
+        var c = self
+
+        // Resolve the effect name to an ID
+        var eff_name_buf: [i8; 64] = [0; 64]
+        var i: i64 = 0
+        while i < e.name.len && i < 64 {
+            eff_name_buf[i as usize] = e.name.buf[i as usize]
+            i = i + 1
+        }
+        let eff_id = effect_name_to_id(eff_name_buf, e.name.len)
+
+        // Add the handled effect to the current effects (body may use it)
+        var saved_effects = c.current_effects
+        var saved_count = c.current_effect_count
+        if eff_id >= 0 && c.current_effect_count < 8 {
+            if !has_effect_id(c.current_effects, c.current_effect_count, eff_id) {
+                c.current_effects[c.current_effect_count as usize] = eff_id
+                c.current_effect_count = c.current_effect_count + 1
+            }
+        }
+
+        // Check the body block
+        let body_pair = c.check_opt_block(e.block)
+        c = body_pair.0
+        let body_ty = body_pair.1
+
+        // Restore original effects (handler discharges the effect)
+        c.current_effects = saved_effects
+        c.current_effect_count = saved_count
+
+        // Check the handler block (with { ... }) if present
+        match e.handler_block {
+            Some(hb) => {
+                let hpair = c.check_block(*hb)
+                c = hpair.0
+            }
+            None => {}
+        }
+
+        (c, body_ty)
     }
 }
