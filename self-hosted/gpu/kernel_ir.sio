@@ -19,7 +19,13 @@ enum GpuType {
     GpuF64,
     GpuI32,
     GpuI64,
-    GpuPtr,  // .u64 pointer type
+    GpuPtr,   // .u64 pointer type
+    // Phase 6 types
+    GpuBool,  // Predicate register (.pred)
+    GpuTf32,  // TF32 (19-bit, sm_80+)
+    GpuF16,   // Half precision (.f16)
+    GpuB32,   // Untyped 32-bit (.b32, for bitwise ops)
+    GpuB64,   // Untyped 64-bit (.b64)
 }
 
 // GPU operation opcodes (simple enum, no fields)
@@ -97,6 +103,47 @@ enum GpuOpcode {
     GpuGetWarpId,       // Warp ID within block
     GpuGetSmId,         // Streaming multiprocessor ID
     GpuGetGridDim,      // Grid dimension
+
+    // Phase 6: Async copy (cp.async, sm_80+)
+    GpuCpAsync,              // Async copy global->shared
+    GpuCpAsyncWait,          // Wait for N async copies
+    GpuCpAsyncWaitAll,       // Wait for all async copies
+
+    // Phase 6: Extended atomics
+    GpuAtomicCas,            // Compare-and-swap
+    GpuAtomicExch,           // Exchange
+    GpuAtomicMin,            // Atomic minimum
+    GpuAtomicMax,            // Atomic maximum
+    GpuAtomicAnd,            // Atomic bitwise AND
+    GpuAtomicOr,             // Atomic bitwise OR
+    GpuAtomicXor,            // Atomic bitwise XOR
+
+    // Phase 6: Memory fences
+    GpuFenceAcquire,         // fence.acquire.cta/gl/sys
+    GpuFenceRelease,         // fence.release.cta/gl/sys
+    GpuFenceAcqRel,          // fence.acq_rel
+    GpuMembar,               // membar.cta / membar.gl / membar.sys
+
+    // Phase 6: Mixed precision
+    GpuMmaTf32,              // TF32 tensor core (sm_80+)
+    GpuCvtF32Tf32,           // f32 -> tf32 truncation
+    GpuMmaF16,               // FP16 warp-level mma
+
+    // Phase 6: Bitwise / integer
+    GpuAnd,                  // Bitwise AND
+    GpuOr,                   // Bitwise OR
+    GpuXor,                  // Bitwise XOR
+    GpuNot,                  // Bitwise NOT
+    GpuShl,                  // Shift left
+    GpuShr,                  // Shift right (logical)
+    GpuShra,                 // Shift right (arithmetic)
+    GpuClz,                  // Count leading zeros
+    GpuPopc,                 // Population count (popc.b32)
+
+    // Phase 6: Cooperative groups (sm_90+)
+    GpuCgTiledPartition,     // Cooperative group tiled_partition
+    GpuCgSync,               // Cooperative group sync
+    GpuCgReduce,             // Cooperative group reduce
 }
 
 // GPU memory space (for load/store address space qualification)
@@ -105,6 +152,28 @@ enum GpuMemorySpace {
     GpuMemShared,
     GpuMemLocal,
     GpuMemConstant,
+}
+
+// Phase 6: Atomic operation selector (used by GpuAtomicCas, GpuAtomicExch, etc.)
+enum GpuAtomicOp {
+    GpuAtomAdd,
+    GpuAtomCas,
+    GpuAtomExch,
+    GpuAtomMin,
+    GpuAtomMax,
+    GpuAtomAnd,
+    GpuAtomOr,
+    GpuAtomXor,
+}
+
+// Phase 6: Cache hint for loads/stores (maps to PTX cache operators)
+enum GpuCacheHint {
+    GpuCacheDefault,  // .ca — cache at all levels (default)
+    GpuCacheCA,       // .ca — cache at all levels
+    GpuCacheCG,       // .cg — cache at L2 only
+    GpuCacheCS,       // .cs — cache streaming (evict-first)
+    GpuCacheWT,       // .wt — write-through
+    GpuCacheCV,       // .cv — volatile (don't cache)
 }
 
 enum GpuError {
@@ -137,6 +206,14 @@ struct GpuOp {
     memory_space: GpuMemorySpace,   // Address space for load/store ops
     pred_reg: i64,                  // Predicate register for conditional ops (-1 = none)
     mask: i64,                      // Warp mask for shuffle/vote ops (0xFFFFFFFF = all lanes)
+    // Phase 6 extensions
+    atomic_op: GpuAtomicOp,         // Operation selector for atomic ops
+    cache_hint: GpuCacheHint,       // Cache policy for loads/stores
+    compare_reg: i64,               // CAS compare value register (-1 = none)
+    num_regs: i64,                  // Tile register count (tensor core fragments)
+    byte_offset: i64,               // Byte offset for cp.async
+    scope: i64,                     // Fence scope: 0=cta, 1=gl, 2=sys
+    cg_size: i64,                   // Cooperative group size (tiled_partition width)
 }
 
 // GPU kernel parameter (e.g., .param .u64 param_a)
@@ -170,6 +247,13 @@ struct GpuKernelIr {
     // Phase 5 extensions
     shared_mem_bytes: i64,  // Total shared memory allocated (bytes)
     max_threads: i64,       // Maximum threads per block hint (0 = default)
+    // Phase 6 extensions
+    num_barriers: i64,      // Named barrier count (bar.sync n)
+    cta_size_x: i64,        // Compile-time blockDim.x (0 = dynamic)
+    cta_size_y: i64,        // Compile-time blockDim.y (0 = dynamic)
+    cta_size_z: i64,        // Compile-time blockDim.z (0 = dynamic)
+    cluster_x: i64,         // Thread block cluster dim x (sm_90+, 0 = none)
+    cluster_y: i64,         // Thread block cluster dim y (sm_90+, 0 = none)
 }
 
 // Lowered module: collection of kernels post-HLIR-to-GPU lowering, pre-optimization.
@@ -204,6 +288,12 @@ fn gpu_kernel_new() -> GpuKernelIr {
         max_reg_pred: 0,
         shared_mem_bytes: 0,
         max_threads: 0,
+        num_barriers: 0,
+        cta_size_x: 0,
+        cta_size_y: 0,
+        cta_size_z: 0,
+        cluster_x: 0,
+        cluster_y: 0,
     }
 }
 
@@ -261,30 +351,47 @@ fn gpu_op_new() -> GpuOp {
         memory_space: GpuMemorySpace::GpuMemGlobal,
         pred_reg: -1,
         mask: 4294967295,  // 0xFFFFFFFF — all lanes
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
 }
 
 fn gpu_type_to_string(ty: GpuType) -> string {
     match ty {
-        GpuType::GpuU32 => "u32",
-        GpuType::GpuU64 => "u64",
-        GpuType::GpuF32 => "f32",
-        GpuType::GpuF64 => "f64",
-        GpuType::GpuI32 => "s32",
-        GpuType::GpuI64 => "s64",
-        GpuType::GpuPtr => "u64",
+        GpuType::GpuU32  => "u32",
+        GpuType::GpuU64  => "u64",
+        GpuType::GpuF32  => "f32",
+        GpuType::GpuF64  => "f64",
+        GpuType::GpuI32  => "s32",
+        GpuType::GpuI64  => "s64",
+        GpuType::GpuPtr  => "u64",
+        GpuType::GpuBool => "pred",
+        GpuType::GpuTf32 => "tf32",
+        GpuType::GpuF16  => "f16",
+        GpuType::GpuB32  => "b32",
+        GpuType::GpuB64  => "b64",
     }
 }
 
 fn gpu_type_sizeof(ty: GpuType) -> i64 {
     match ty {
-        GpuType::GpuU32 => 4,
-        GpuType::GpuU64 => 8,
-        GpuType::GpuF32 => 4,
-        GpuType::GpuF64 => 8,
-        GpuType::GpuI32 => 4,
-        GpuType::GpuI64 => 8,
-        GpuType::GpuPtr => 8,
+        GpuType::GpuU32  => 4,
+        GpuType::GpuU64  => 8,
+        GpuType::GpuF32  => 4,
+        GpuType::GpuF64  => 8,
+        GpuType::GpuI32  => 4,
+        GpuType::GpuI64  => 8,
+        GpuType::GpuPtr  => 8,
+        GpuType::GpuBool => 1,
+        GpuType::GpuTf32 => 4,
+        GpuType::GpuF16  => 2,
+        GpuType::GpuB32  => 4,
+        GpuType::GpuB64  => 8,
     }
 }
 

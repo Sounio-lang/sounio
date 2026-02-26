@@ -98,26 +98,36 @@ fn metal_to_string(buf: MetalBuf) -> string with Mut, Panic, Div, Alloc {
 
 fn gpu_type_to_msl(ty: GpuType) -> string {
     match ty {
-        GpuType::GpuU32 => "uint",
-        GpuType::GpuU64 => "ulong",
-        GpuType::GpuF32 => "float",
-        GpuType::GpuF64 => "double",
-        GpuType::GpuI32 => "int",
-        GpuType::GpuI64 => "long",
-        GpuType::GpuPtr => "device void*",
+        GpuType::GpuU32  => "uint",
+        GpuType::GpuU64  => "ulong",
+        GpuType::GpuF32  => "float",
+        GpuType::GpuF64  => "double",
+        GpuType::GpuI32  => "int",
+        GpuType::GpuI64  => "long",
+        GpuType::GpuPtr  => "device void*",
+        GpuType::GpuBool => "bool",
+        GpuType::GpuTf32 => "float",    // TF32 stored as float in MSL
+        GpuType::GpuF16  => "half",
+        GpuType::GpuB32  => "uint",     // untyped 32-bit -> uint in MSL
+        GpuType::GpuB64  => "ulong",
     }
 }
 
 // MSL pointer type for kernel parameters
 fn gpu_type_to_msl_param(ty: GpuType) -> string {
     match ty {
-        GpuType::GpuU32 => "device uint*",
-        GpuType::GpuU64 => "device ulong*",
-        GpuType::GpuF32 => "device float*",
-        GpuType::GpuF64 => "device double*",
-        GpuType::GpuI32 => "device int*",
-        GpuType::GpuI64 => "device long*",
-        GpuType::GpuPtr => "device void*",
+        GpuType::GpuU32  => "device uint*",
+        GpuType::GpuU64  => "device ulong*",
+        GpuType::GpuF32  => "device float*",
+        GpuType::GpuF64  => "device double*",
+        GpuType::GpuI32  => "device int*",
+        GpuType::GpuI64  => "device long*",
+        GpuType::GpuPtr  => "device void*",
+        GpuType::GpuBool => "device bool*",
+        GpuType::GpuTf32 => "device float*",
+        GpuType::GpuF16  => "device half*",
+        GpuType::GpuB32  => "device uint*",
+        GpuType::GpuB64  => "device ulong*",
     }
 }
 
@@ -323,14 +333,51 @@ fn metal_kernel_uses_lane_exchange(kernel: GpuKernelIr) -> bool {
 
 fn metal_shuffle_lane_array(ty: GpuType) -> string {
     match ty {
-        GpuType::GpuU32 => "__omega_shfl_u32",
-        GpuType::GpuU64 => "__omega_shfl_u64",
-        GpuType::GpuF32 => "__omega_shfl_f32",
-        GpuType::GpuF64 => "__omega_shfl_f64",
-        GpuType::GpuI32 => "__omega_shfl_i32",
-        GpuType::GpuI64 => "__omega_shfl_i64",
-        GpuType::GpuPtr => "__omega_shfl_u64",
+        GpuType::GpuU32  => "__omega_shfl_u32",
+        GpuType::GpuU64  => "__omega_shfl_u64",
+        GpuType::GpuF32  => "__omega_shfl_f32",
+        GpuType::GpuF64  => "__omega_shfl_f64",
+        GpuType::GpuI32  => "__omega_shfl_i32",
+        GpuType::GpuI64  => "__omega_shfl_i64",
+        GpuType::GpuPtr  => "__omega_shfl_u64",
+        GpuType::GpuBool => "__omega_shfl_u32",
+        GpuType::GpuTf32 => "__omega_shfl_f32",
+        GpuType::GpuF16  => "__omega_shfl_f32",
+        GpuType::GpuB32  => "__omega_shfl_u32",
+        GpuType::GpuB64  => "__omega_shfl_u64",
     }
+}
+
+// ============================================================================
+// Phase 6 helpers: generic binary op and atomic binary op emitters
+// ============================================================================
+
+fn metal_emit_binop(buf: MetalBuf, op: GpuOp, sym: string) -> MetalBuf with Mut, Panic, Div {
+    var out = buf
+    out = metal_push_str(out, "    ")
+    out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+    out = metal_push_str(out, " = ")
+    out = metal_push_str(out, metal_reg_name(op.ty, op.lhs_reg))
+    out = metal_push_str(out, " ")
+    out = metal_push_str(out, sym)
+    out = metal_push_str(out, " ")
+    out = metal_push_str(out, metal_reg_name(op.ty, op.rhs_reg))
+    out = metal_push_str(out, ";\n")
+    out
+}
+
+fn metal_emit_atomic_binop(buf: MetalBuf, op: GpuOp, fn_name: string) -> MetalBuf with Mut, Panic, Div {
+    var out = buf
+    out = metal_push_str(out, "    ")
+    out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+    out = metal_push_str(out, " = ")
+    out = metal_push_str(out, fn_name)
+    out = metal_push_str(out, "((device atomic_uint*)&")
+    out = metal_push_str(out, metal_reg_name(op.ty, op.addr_reg))
+    out = metal_push_str(out, ", ")
+    out = metal_push_str(out, metal_reg_name(op.ty, op.src_reg))
+    out = metal_push_str(out, ", memory_order_relaxed);\n")
+    out
 }
 
 // ============================================================================
@@ -1018,6 +1065,164 @@ fn metal_lower_single_op(buf: MetalBuf, op: GpuOp, kernel: GpuKernelIr) -> Metal
     // ---- Exit ----
     if opc == GpuOpcode::GpuExit {
         out = metal_push_str(out, "    return;\n")
+        return out
+    }
+
+    // Phase 6: Async copy (cp.async -> threadgroup_barrier in MSL)
+    if opc == GpuOpcode::GpuCpAsync {
+        out = metal_push_str(out, "    // cp.async: threadgroup_barrier(mem_flags::mem_threadgroup);\n")
+        return out
+    }
+    if opc == GpuOpcode::GpuCpAsyncWait {
+        out = metal_push_str(out, "    threadgroup_barrier(mem_flags::mem_threadgroup);\n")
+        return out
+    }
+    if opc == GpuOpcode::GpuCpAsyncWaitAll {
+        out = metal_push_str(out, "    threadgroup_barrier(mem_flags::mem_threadgroup);\n")
+        return out
+    }
+
+    // Phase 6: Extended atomics
+    if opc == GpuOpcode::GpuAtomicCas {
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = atomic_compare_exchange_weak_explicit((device atomic_uint*)&")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.addr_reg))
+        out = metal_push_str(out, ", &")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.compare_reg))
+        out = metal_push_str(out, ", ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.src_reg))
+        out = metal_push_str(out, ", memory_order_relaxed, memory_order_relaxed);\n")
+        return out
+    }
+    if opc == GpuOpcode::GpuAtomicExch {
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = atomic_exchange_explicit((device atomic_uint*)&")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.addr_reg))
+        out = metal_push_str(out, ", ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.src_reg))
+        out = metal_push_str(out, ", memory_order_relaxed);\n")
+        return out
+    }
+    if opc == GpuOpcode::GpuAtomicMin {
+        out = metal_emit_atomic_binop(out, op, "atomic_fetch_min_explicit")
+        return out
+    }
+    if opc == GpuOpcode::GpuAtomicMax {
+        out = metal_emit_atomic_binop(out, op, "atomic_fetch_max_explicit")
+        return out
+    }
+    if opc == GpuOpcode::GpuAtomicAnd {
+        out = metal_emit_atomic_binop(out, op, "atomic_fetch_and_explicit")
+        return out
+    }
+    if opc == GpuOpcode::GpuAtomicOr {
+        out = metal_emit_atomic_binop(out, op, "atomic_fetch_or_explicit")
+        return out
+    }
+    if opc == GpuOpcode::GpuAtomicXor {
+        out = metal_emit_atomic_binop(out, op, "atomic_fetch_xor_explicit")
+        return out
+    }
+
+    // Phase 6: Memory fences
+    if opc == GpuOpcode::GpuFenceAcquire {
+        out = metal_push_str(out, "    threadgroup_barrier(mem_flags::mem_device);\n")
+        return out
+    }
+    if opc == GpuOpcode::GpuFenceRelease {
+        out = metal_push_str(out, "    threadgroup_barrier(mem_flags::mem_device);\n")
+        return out
+    }
+    if opc == GpuOpcode::GpuFenceAcqRel {
+        out = metal_push_str(out, "    threadgroup_barrier(mem_flags::mem_device);\n")
+        return out
+    }
+    if opc == GpuOpcode::GpuMembar {
+        out = metal_push_str(out, "    threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);\n")
+        return out
+    }
+
+    // Phase 6: Mixed precision
+    if opc == GpuOpcode::GpuCvtF32Tf32 {
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = (float)(")
+        out = metal_push_str(out, metal_reg_name(op.src_ty, op.src_reg))
+        out = metal_push_str(out, "); // tf32 approx via f32\n")
+        return out
+    }
+    if opc == GpuOpcode::GpuMmaTf32 {
+        out = metal_push_str(out, "    // mma.tf32: not directly expressible in MSL 3.1\n")
+        return out
+    }
+    if opc == GpuOpcode::GpuMmaF16 {
+        out = metal_push_str(out, "    // mma.f16: not directly expressible in MSL 3.1\n")
+        return out
+    }
+
+    // Phase 6: Bitwise / integer
+    if opc == GpuOpcode::GpuAnd {
+        out = metal_emit_binop(out, op, "&")
+        return out
+    }
+    if opc == GpuOpcode::GpuOr {
+        out = metal_emit_binop(out, op, "|")
+        return out
+    }
+    if opc == GpuOpcode::GpuXor {
+        out = metal_emit_binop(out, op, "^")
+        return out
+    }
+    if opc == GpuOpcode::GpuNot {
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = ~")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.src_reg))
+        out = metal_push_str(out, ";\n")
+        return out
+    }
+    if opc == GpuOpcode::GpuShl {
+        out = metal_emit_binop(out, op, "<<")
+        return out
+    }
+    if opc == GpuOpcode::GpuShr {
+        out = metal_emit_binop(out, op, ">>")
+        return out
+    }
+    if opc == GpuOpcode::GpuShra {
+        out = metal_emit_binop(out, op, ">>")
+        return out
+    }
+    if opc == GpuOpcode::GpuClz {
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = clz(")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.src_reg))
+        out = metal_push_str(out, ");\n")
+        return out
+    }
+    if opc == GpuOpcode::GpuPopc {
+        out = metal_push_str(out, "    ")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.dst_reg))
+        out = metal_push_str(out, " = popcount(")
+        out = metal_push_str(out, metal_reg_name(op.ty, op.src_reg))
+        out = metal_push_str(out, ");\n")
+        return out
+    }
+
+    // Phase 6: Cooperative groups
+    if opc == GpuOpcode::GpuCgTiledPartition {
+        out = metal_push_str(out, "    // cg::tiled_partition: use simd_group in MSL\n")
+        return out
+    }
+    if opc == GpuOpcode::GpuCgSync {
+        out = metal_push_str(out, "    simdgroup_barrier(mem_flags::mem_none);\n")
+        return out
+    }
+    if opc == GpuOpcode::GpuCgReduce {
+        out = metal_push_str(out, "    // cg::reduce: use simd_sum/simd_min/simd_max\n")
         return out
     }
 
