@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
-SOUC_VERSION="${SOUNIO_SOUC_VERSION:-latest}"
+SOUC_VERSION="${SOUNIO_SOUC_VERSION:-0.100.3}"
 SOUC_PLATFORM="${SOUNIO_SOUC_PLATFORM:-linux-x86_64}"
 SOUC_RELEASE_BASE_URL="${SOUNIO_SOUC_RELEASE_BASE_URL:-https://github.com/sounio-lang/sounio/releases/download}"
 SOUC_ASSET_NAME="${SOUNIO_SOUC_ASSET_NAME:-souc-${SOUC_PLATFORM}}"
@@ -112,7 +112,7 @@ if [ "$SOUC_REQUIRE_PINNED" = "1" ] && [ -n "$ASSET_URL" ]; then
       VERIFY_ARGS+=(--signature-file "$SIG_PATH")
     fi
 
-    python3 "$ROOT_DIR/scripts/omega/omega_verify_release_souc.py" "${VERIFY_ARGS[@]}"
+    python3 "$ROOT_DIR/scripts/omega/omega_verify_release_souc.py" "${VERIFY_ARGS[@]}" 1>&2
     resolved="$BIN_PATH"
   else
     echo "error: curl required for pinned souc resolution" >&2

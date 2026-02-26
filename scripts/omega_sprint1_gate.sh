@@ -10,6 +10,19 @@ GATE_LOG="${OMEGA_GATE_LOG:-artifacts/omega_sprint1_gate.log}"
 NO_RUST_MARKER="${OMEGA_NO_RUST_MARKER:-artifacts/.omega_no_rust_start}"
 touch "$NO_RUST_MARKER"
 
+if [ -x "scripts/omega/omega_resolve_souc_bin.sh" ]; then
+  RESOLVED_SOUC_BIN="$(
+    OMEGA_SOUC_REQUIRE_PINNED="${OMEGA_SOUC_REQUIRE_PINNED:-1}" \
+    OMEGA_SOUC_ALLOW_LOCAL_FALLBACK="${OMEGA_SOUC_ALLOW_LOCAL_FALLBACK:-0}" \
+      scripts/omega/omega_resolve_souc_bin.sh --print-path
+  )"
+else
+  RESOLVED_SOUC_BIN="${OMEGA_POLICY_SOUC_BIN:-$ROOT_DIR/souc}"
+fi
+export OMEGA_POLICY_SOUC_BIN="$RESOLVED_SOUC_BIN"
+export SOUC_BIN="$RESOLVED_SOUC_BIN"
+export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
+
 echo "==> omega sprint1 gate: contracts"
 # Keep independence gate adapter execution aligned with Omega defaults.
 RUN_EXTERNAL_BASELINES="${RUN_EXTERNAL_BASELINES:-${OMEGA_RUN_EXTERNAL_BASELINES:-1}}" \
@@ -104,7 +117,7 @@ PY
 if [ "${OMEGA_REQUIRE_QR_ALIAS_REGRESSION:-1}" = "1" ]; then
   echo "==> omega sprint1 gate: QR alias regression"
   QR_ALIAS_LOG="artifacts/omega_qr_alias_regression.log"
-  PATH="$ROOT_DIR:$PATH" souc run tests/regression/linalg_qr_alias_test.sio | tee "$QR_ALIAS_LOG"
+  PATH="$ROOT_DIR:$PATH" "$OMEGA_POLICY_SOUC_BIN" run tests/regression/linalg_qr_alias_test.sio | tee "$QR_ALIAS_LOG"
   if ! rg -q "QR 4x4 \(1000 iters\): PASS" "$QR_ALIAS_LOG"; then
     echo "error: QR alias regression output missing PASS marker" >&2
     exit 2
@@ -164,9 +177,10 @@ if missing:
 print("canonical K-AXI template-schema validation ok")
 PY
 
+  PURE_KAXI_SOURCE="${OMEGA_PURE_KAXI_SOURCE:-stdlib/hardware/kaxi.sio}"
   SOUNIO_PURE_KAXI_STRICT_SELFHOST=1 \
   SOUNIO_PURE_EMITTER_TIMEOUT_SECS="${SOUNIO_PURE_EMITTER_TIMEOUT_SECS:-30}" \
-  PATH="$ROOT_DIR:$PATH" souc build --target hardware-kaxi --emit verilog,cuda-stub
+  PATH="$ROOT_DIR:$PATH" "$OMEGA_POLICY_SOUC_BIN" build --target hardware-kaxi --emit verilog,cuda-stub "$PURE_KAXI_SOURCE"
 
   for required in \
     stdlib/hardware/kaxi.sio \
@@ -301,8 +315,19 @@ if [ "${OMEGA_REQUIRE_HW_EPI_POWER:-1}" = "1" ]; then
   if [ ! -f "$HW_EPI_CUBIN" ]; then
     if command -v nvcc >/dev/null 2>&1; then
       mkdir -p "$(dirname "$HW_EPI_CUBIN")"
+      HW_EPI_RUNTIME_SRC="${OMEGA_HW_EPI_RUNTIME_SRC:-hardware/fpga/epistemic_rt_kaxi_generated.cu}"
+      if [ ! -f "$HW_EPI_RUNTIME_SRC" ]; then
+        if [ -f "artifacts/sass/omega/epistemic_rt_generated.cu" ]; then
+          HW_EPI_RUNTIME_SRC="artifacts/sass/omega/epistemic_rt_generated.cu"
+        elif [ -f "crates/souc/src/codegen/gpu/runtime/epistemic_rt.cu" ]; then
+          HW_EPI_RUNTIME_SRC="crates/souc/src/codegen/gpu/runtime/epistemic_rt.cu"
+        else
+          echo "error: missing hardware runtime source for cubin build (checked hardware/fpga, artifacts/sass, crates)" >&2
+          exit 2
+        fi
+      fi
       nvcc -cubin -arch="${OMEGA_CUDA_ARCH:-sm_80}" \
-        crates/souc/src/codegen/gpu/runtime/epistemic_rt.cu \
+        "$HW_EPI_RUNTIME_SRC" \
         -o "$HW_EPI_CUBIN"
     else
       echo "error: nvcc not found and missing $HW_EPI_CUBIN" >&2
@@ -336,6 +361,486 @@ if [ "${OMEGA_REQUIRE_HW_EPI_POWER_TREND:-1}" = "1" ]; then
   fi
   python3 scripts/omega/omega_hw_epi_power_trend.py "${HW_EPI_TREND_ARGS[@]}"
   echo "HW_EPI_POWER_TREND_PASS" | tee -a "$GATE_LOG"
+fi
+
+if [ "${OMEGA_REQUIRE_DATA_STRUCTURES:-1}" = "1" ]; then
+  echo "==> omega sprint2 gate: data structures surface"
+  ORDERED_MAP_PATH="${OMEGA_ORDERED_MAP_PATH:-self-hosted/collections/ordered_map.sio}"
+  ARENA_PATH="${OMEGA_ARENA_PATH:-self-hosted/collections/arena.sio}"
+  INTERNER_PATH="${OMEGA_INTERNER_PATH:-self-hosted/intern.sio}"
+  GRAPH_PATH="${OMEGA_GRAPH_PATH:-self-hosted/collections/graph.sio}"
+  for required_path in "$ORDERED_MAP_PATH" "$ARENA_PATH" "$INTERNER_PATH" "$GRAPH_PATH"; do
+    if [ ! -f "$required_path" ]; then
+      echo "error: data structures module missing: $required_path" >&2
+      exit 2
+    fi
+  done
+  python3 - "$ORDERED_MAP_PATH" "$ARENA_PATH" "$INTERNER_PATH" "$GRAPH_PATH" <<'PY'
+import sys
+from pathlib import Path
+
+ordered_map_path, arena_path, interner_path, graph_path = [Path(p) for p in sys.argv[1:5]]
+
+checks = {
+    ordered_map_path: (
+        "struct OrderedMap",
+        "fn ordered_map_new(",
+        "fn ordered_map_insert(",
+        "fn ordered_map_get(",
+        "fn ordered_map_contains(",
+        "fn ordered_map_remove(",
+        "fn ordered_map_len(",
+        "fn ordered_map_key_at(",
+        "fn ordered_map_value_at(",
+        "keys: [i64; 1024]",
+        "values: [i64; 1024]",
+    ),
+    arena_path: (
+        "struct Arena",
+        "fn arena_new(",
+        "fn arena_alloc(",
+        "fn arena_get(",
+        "fn arena_set(",
+        "fn arena_len(",
+        "data: [i64; 8192]",
+    ),
+    interner_path: (
+        "struct StringInterner",
+        "fn interner_new(",
+        "fn interner_intern(",
+        "fn interner_resolve(",
+        "fn interner_contains(",
+        "buf: [i8; 65536]",
+        "offsets: [i64; 4096]",
+        "lengths: [i64; 4096]",
+        "hashes: [i64; 4096]",
+    ),
+    graph_path: (
+        "struct DiGraph",
+        "fn graph_new(",
+        "fn graph_add_node(",
+        "fn graph_add_edge(",
+        "fn graph_has_edge(",
+        "fn graph_successors(",
+        "fn graph_predecessors(",
+        "fn graph_node_count(",
+        "fn graph_edge_count(",
+        "fn graph_dfs_order(",
+        "fn graph_topo_sort(",
+        "nodes: [i64; 1024]",
+        "edges_src: [i64; 4096]",
+        "edges_dst: [i64; 4096]",
+    ),
+}
+
+total_symbols = 0
+for path, symbols in checks.items():
+    text = path.read_text()
+    for symbol in symbols:
+        if symbol not in text:
+            raise SystemExit(f"{path}: missing data-structure symbol {symbol!r}")
+    total_symbols += len(symbols)
+
+print(
+    f"data_structures_check: pass files={len(checks)} "
+    f"symbols={total_symbols}"
+)
+PY
+  echo "DATA_STRUCTURES_PASS" | tee -a "$GATE_LOG"
+fi
+
+if [ "${OMEGA_REQUIRE_GPU_IR_EXPANSION:-1}" = "1" ]; then
+  echo "==> omega sprint2 gate: GPU IR expansion surface"
+  GPU_KERNEL_IR_PATH="${OMEGA_GPU_KERNEL_IR_PATH:-self-hosted/gpu/kernel_ir.sio}"
+  METAL_CODEGEN_PATH="${OMEGA_METAL_CODEGEN_PATH:-self-hosted/gpu/metal.sio}"
+  PTX_ADVANCED_PATH="${OMEGA_PTX_ADVANCED_PATH:-self-hosted/gpu/ptx_advanced.sio}"
+  if [ ! -f "$GPU_KERNEL_IR_PATH" ]; then
+    echo "error: GPU kernel IR module missing: $GPU_KERNEL_IR_PATH" >&2
+    exit 2
+  fi
+  python3 - "$GPU_KERNEL_IR_PATH" "$METAL_CODEGEN_PATH" "$PTX_ADVANCED_PATH" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+metal_path = Path(sys.argv[2])
+ptx_path = Path(sys.argv[3])
+text = path.read_text()
+metal_text = metal_path.read_text()
+ptx_text = ptx_path.read_text()
+required_symbols = (
+    "enum GpuMemorySpace",
+    "GpuMemGlobal",
+    "GpuMemShared",
+    "GpuMemLocal",
+    "GpuMemConstant",
+    "memory_space: GpuMemorySpace",
+    "pred_reg: i64",
+    "mask: i64",
+    "max_reg_f64: i64",
+    "shared_mem_bytes: i64",
+    "max_threads: i64",
+)
+for symbol in required_symbols:
+    if symbol not in text:
+        raise SystemExit(f"{path}: missing required symbol {symbol!r}")
+
+required_opcodes = (
+    "GpuShflUp",
+    "GpuShflBfly",
+    "GpuShflIdx",
+    "GpuVote",
+    "GpuBallot",
+    "GpuWmma",
+    "GpuMma",
+    "GpuTmaLoad",
+    "GpuTmaStore",
+    "GpuLdGlobalCached",
+    "GpuStGlobalWriteback",
+    "GpuPrefetch",
+    "GpuSqrt",
+    "GpuRsqrt",
+    "GpuExp2",
+    "GpuLg2",
+    "GpuSin",
+    "GpuCos",
+    "GpuAbs",
+    "GpuRcp",
+    "GpuSetpGt",
+    "GpuSetpNe",
+    "GpuBra",
+    "GpuExit",
+    "GpuGetLaneId",
+    "GpuGetWarpId",
+    "GpuGetSmId",
+    "GpuGetGridDim",
+)
+for opcode in required_opcodes:
+    if f"{opcode}," not in text:
+        raise SystemExit(f"{path}: missing expanded opcode {opcode!r}")
+    backend_marker = f"GpuOpcode::{opcode}"
+    if backend_marker not in metal_text:
+        raise SystemExit(
+            f"{metal_path}: missing GPU IR expanded opcode coverage for {opcode!r}"
+        )
+    if backend_marker not in ptx_text:
+        raise SystemExit(
+            f"{ptx_path}: missing GPU IR expanded opcode coverage for {opcode!r}"
+        )
+
+print(
+    "gpu_ir_expansion_check: pass "
+    f"path={path} opcodes={len(required_opcodes)} "
+    f"metal_coverage={len(required_opcodes)} ptx_coverage={len(required_opcodes)}"
+)
+PY
+  echo "GPU_IR_EXPANSION_PASS" | tee -a "$GATE_LOG"
+fi
+
+if [ "${OMEGA_REQUIRE_HLIR_GPU_CROSS_COVERAGE:-1}" = "1" ]; then
+  echo "==> omega sprint2 gate: HLIR to GPU cross-coverage"
+  HLIR_TO_GPU_PATH="${OMEGA_HLIR_TO_GPU_PATH:-self-hosted/gpu/hlir_to_gpu.sio}"
+  METAL_CODEGEN_PATH="${OMEGA_METAL_CODEGEN_PATH:-self-hosted/gpu/metal.sio}"
+  PTX_ADVANCED_PATH="${OMEGA_PTX_ADVANCED_PATH:-self-hosted/gpu/ptx_advanced.sio}"
+  if [ ! -f "$HLIR_TO_GPU_PATH" ]; then
+    echo "error: HLIR->GPU lowering module missing: $HLIR_TO_GPU_PATH" >&2
+    exit 2
+  fi
+  python3 - "$HLIR_TO_GPU_PATH" "$METAL_CODEGEN_PATH" "$PTX_ADVANCED_PATH" <<'PY'
+import sys
+from pathlib import Path
+
+hlir_path = Path(sys.argv[1])
+metal_path = Path(sys.argv[2])
+ptx_path = Path(sys.argv[3])
+hlir_text = hlir_path.read_text()
+metal_text = metal_path.read_text()
+ptx_text = ptx_path.read_text()
+
+shared_core_pairs = (
+    ("HlirOpAdd", "GpuOpcodeAdd", "GpuOpcode::GpuAdd"),
+    ("HlirOpSub", "GpuOpcodeSub", "GpuOpcode::GpuSub"),
+    ("HlirOpMul", "GpuOpcodeMul", "GpuOpcode::GpuMul"),
+    ("HlirOpDiv", "GpuOpcodeDiv", "GpuOpcode::GpuDiv"),
+    ("HlirOpEq", "GpuOpcodeSetpEq", "GpuOpcode::GpuSetpEq"),
+    ("HlirOpNe", "GpuOpcodeSetpNe", "GpuOpcode::GpuSetpNe"),
+    ("HlirOpLt", "GpuOpcodeSetpLt", "GpuOpcode::GpuSetpLt"),
+    ("HlirOpLe", "GpuOpcodeSetpLe", "GpuOpcode::GpuSetpLe"),
+    ("HlirOpGt", "GpuOpcodeSetpGt", "GpuOpcode::GpuSetpGt"),
+    ("HlirOpGe", "GpuOpcodeSetpGe", "GpuOpcode::GpuSetpGe"),
+    ("HlirOpLoad", "GpuOpcodeLoadGlobal", "GpuOpcode::GpuLoadGlobal"),
+    ("HlirOpStore", "GpuOpcodeStoreGlobal", "GpuOpcode::GpuStoreGlobal"),
+    ("HlirOpSExt", "GpuOpcodeCvt", "GpuOpcode::GpuCvt"),
+    ("HlirOpSelect", "GpuOpcodeSelp", "GpuOpcode::GpuSelp"),
+    ("HlirOpFMA", "GpuOpcodeFma", "GpuOpcode::GpuFma"),
+    ("HlirOpGetThreadId", "GpuOpcodeGetTid", "GpuOpcode::GpuGetTid"),
+    ("HlirOpGetBlockId", "GpuOpcodeGetBid", "GpuOpcode::GpuGetBid"),
+    ("HlirOpGetBlockDim", "GpuOpcodeGetNtid", "GpuOpcode::GpuGetNtid"),
+    ("HlirOpAtomicAdd", "GpuOpcodeAtomicAdd", "GpuOpcode::GpuAtomicAdd"),
+    ("HlirOpSyncThreads", "GpuOpcodeBarrierSync", "GpuOpcode::GpuBarrierSync"),
+)
+
+for hlir_op, gpu_const, backend_marker in shared_core_pairs:
+    if f"op_tag == {hlir_op}" not in hlir_text:
+        raise SystemExit(f"{hlir_path}: missing HLIR lowering branch for {hlir_op}")
+    if gpu_const not in hlir_text:
+        raise SystemExit(
+            f"{hlir_path}: missing GPU opcode constant marker {gpu_const!r} for {hlir_op}"
+        )
+    if backend_marker not in metal_text:
+        raise SystemExit(
+            f"{metal_path}: missing shared-core backend marker {backend_marker!r}"
+        )
+    if backend_marker not in ptx_text:
+        raise SystemExit(
+            f"{ptx_path}: missing shared-core backend marker {backend_marker!r}"
+        )
+
+if "fn hlir_lower_instr(" not in hlir_text:
+    raise SystemExit(f"{hlir_path}: missing fn hlir_lower_instr")
+
+print(
+    "hlir_gpu_cross_coverage_check: pass "
+    f"path={hlir_path} shared_core_pairs={len(shared_core_pairs)} "
+    f"metal_coverage={len(shared_core_pairs)} ptx_coverage={len(shared_core_pairs)}"
+)
+PY
+  if [ -x "scripts/omega/omega_hlir_gpu_cross_coverage.py" ]; then
+    python3 scripts/omega/omega_hlir_gpu_cross_coverage.py --strict
+  fi
+  echo "HLIR_GPU_CROSS_COVERAGE_PASS" | tee -a "$GATE_LOG"
+fi
+
+if [ "${OMEGA_REQUIRE_HLIR_LOWERING:-1}" = "1" ]; then
+  echo "==> omega sprint2 gate: HLIR lowering bridge"
+  HLIR_LOWERING_PATH="${OMEGA_HLIR_LOWERING_PATH:-self-hosted/hlir/lower.sio}"
+  if [ ! -f "$HLIR_LOWERING_PATH" ]; then
+    echo "error: HLIR lowering module missing: $HLIR_LOWERING_PATH" >&2
+    exit 2
+  fi
+  python3 - "$HLIR_LOWERING_PATH" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+text = path.read_text()
+
+if "struct HlirLowerState" not in text:
+    raise SystemExit(f"{path}: missing HlirLowerState declaration")
+if "loop_continue_block" not in text or "loop_break_block" not in text:
+    raise SystemExit(f"{path}: missing loop control fields in HlirLowerState")
+
+state_builder_variants = (
+    ("module: HlirModuleBuilder", "current_func: HlirFunctionBuilder"),
+    ("module_builder: HlirModuleBuilder", "builder: HlirFunctionBuilder"),
+)
+if not any(a in text and b in text for a, b in state_builder_variants):
+    raise SystemExit(
+        f"{path}: missing expected builder/module builder fields for HlirLowerState"
+    )
+
+scope_variants = (
+    ("var_scope_keys", "var_scope_vals", "var_scope_count"),
+    ("scope_stack", "scope_stack_top"),
+)
+if not any(all(token in text for token in variant) for variant in scope_variants):
+    raise SystemExit(
+        f"{path}: missing expected scope tracking fields for HlirLowerState"
+    )
+
+required_entrypoints = (
+    "fn hlir_lower_module(",
+    "fn hlir_lower_function(",
+    "fn hlir_lower_expr(",
+    "fn hlir_lower_literal(",
+    "fn hlir_lower_binary(",
+    "fn hlir_lower_unary(",
+    "fn hlir_lower_call(",
+    "fn hlir_lower_field_access(",
+    "fn hlir_lower_index(",
+    "fn hlir_lower_cast(",
+    "fn hlir_lower_let(",
+    "fn hlir_lower_var(",
+    "fn hlir_lower_assign(",
+    "fn hlir_lower_return(",
+    "fn hlir_lower_if(",
+    "fn hlir_lower_while(",
+    "fn hlir_lower_match(",
+    "fn hlir_lower_break(",
+    "fn hlir_lower_continue(",
+    "fn hlir_lower_new_block(",
+    "fn hlir_lower_seal_block(",
+    "fn hlir_lower_branch(",
+    "fn hlir_lower_cond_branch(",
+    "fn hlir_scope_push(",
+    "fn hlir_scope_pop(",
+    "fn hlir_scope_insert(",
+    "fn hlir_scope_lookup(",
+)
+for marker in required_entrypoints:
+    if marker not in text:
+        raise SystemExit(f"{path}: missing HLIR lowering function {marker!r}")
+
+lowered = text.lower()
+if "phi" not in lowered and "ssa" not in lowered:
+    raise SystemExit(f"{path}: expected SSA/phi lowering markers")
+
+print(
+    f"hlir_lowering_check: pass path={path} "
+    f"entrypoints={len(required_entrypoints)}"
+)
+PY
+  echo "HLIR_LOWERING_PASS" | tee -a "$GATE_LOG"
+fi
+
+if [ "${OMEGA_REQUIRE_METAL_MSL_CODEGEN:-1}" = "1" ]; then
+  echo "==> omega sprint2 gate: Metal MSL codegen surface"
+  METAL_CODEGEN_PATH="${OMEGA_METAL_CODEGEN_PATH:-self-hosted/gpu/metal.sio}"
+  if [ ! -f "$METAL_CODEGEN_PATH" ]; then
+    echo "error: Metal codegen module missing: $METAL_CODEGEN_PATH" >&2
+    exit 2
+  fi
+  python3 - "$METAL_CODEGEN_PATH" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+text = path.read_text()
+
+required_symbols = (
+    "struct MetalBuf",
+    "fn metal_buf_new(",
+    "fn metal_push_str(",
+    "fn metal_push_i64(",
+    "fn gpu_type_to_msl(",
+    "fn metal_emit_header(",
+    "fn metal_emit_kernel_signature(",
+    "fn metal_emit_var_decls(",
+    "fn metal_lower_ops(",
+    "fn gpu_lower_to_metal(",
+)
+for symbol in required_symbols:
+    if symbol not in text:
+        raise SystemExit(f"{path}: missing Metal codegen symbol {symbol!r}")
+
+if "#include <metal_stdlib>" not in text:
+    raise SystemExit(f"{path}: missing #include <metal_stdlib> marker")
+if "using namespace metal;" not in text:
+    raise SystemExit(f"{path}: missing using namespace metal; marker")
+
+print(
+    f"metal_msl_codegen_check: pass path={path} "
+    f"symbols={len(required_symbols)}"
+)
+PY
+  echo "METAL_MSL_CODEGEN_PASS" | tee -a "$GATE_LOG"
+fi
+
+if [ "${OMEGA_REQUIRE_PTX_REGALLOC_EXPANSION:-1}" = "1" ]; then
+  echo "==> omega sprint2 gate: PTX regalloc expansion surface"
+  PTX_ADVANCED_PATH="${OMEGA_PTX_ADVANCED_PATH:-self-hosted/gpu/ptx_advanced.sio}"
+  if [ ! -f "$PTX_ADVANCED_PATH" ]; then
+    echo "error: PTX advanced module missing: $PTX_ADVANCED_PATH" >&2
+    exit 2
+  fi
+  python3 - "$PTX_ADVANCED_PATH" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+text = path.read_text()
+
+required_symbols = (
+    "struct PtxRegCounters",
+    "fn ptx_reg_counters_new(",
+    "fn ptx_alloc_pred(",
+    "fn ptx_alloc_b32(",
+    "fn ptx_alloc_b64(",
+    "fn ptx_alloc_f32(",
+    "fn ptx_alloc_f64(",
+    "fn ptx_alloc_for_type(",
+    "fn ptx_emit_reg_name(",
+    "fn ptx_emit_typed_reg_decls(",
+    "fn ptx_emit_add(",
+    "fn ptx_emit_sub(",
+    "fn ptx_emit_mul(",
+    "fn ptx_emit_div(",
+    "fn ptx_emit_rem(",
+    "fn ptx_emit_fma(",
+    "fn ptx_emit_ld_global(",
+    "fn ptx_emit_st_global(",
+    "fn ptx_emit_ld_shared(",
+    "fn ptx_emit_st_shared(",
+    "fn ptx_emit_ld_param(",
+    "fn ptx_emit_setp_lt(",
+    "fn ptx_emit_setp_le(",
+    "fn ptx_emit_setp_eq(",
+    "fn ptx_emit_setp_ge(",
+    "fn ptx_emit_setp_gt(",
+    "fn ptx_emit_setp_ne(",
+    "fn ptx_emit_selp(",
+    "fn ptx_emit_bra(",
+    "fn ptx_emit_bra_pred(",
+    "fn ptx_emit_label(",
+    "fn ptx_emit_bar_sync(",
+    "fn ptx_emit_exit(",
+    "fn ptx_emit_ret(",
+    "fn ptx_emit_cvt(",
+    "fn ptx_emit_shfl_down(",
+    "fn ptx_emit_shfl_up(",
+    "fn ptx_emit_shfl_bfly(",
+    "fn ptx_emit_vote_ballot(",
+    "fn ptx_emit_bar_arrive(",
+    "fn ptx_emit_sqrt(",
+    "fn ptx_emit_rsqrt(",
+    "fn ptx_emit_exp2(",
+    "fn ptx_emit_lg2(",
+    "fn ptx_emit_sin(",
+    "fn ptx_emit_cos(",
+    "fn ptx_emit_rcp(",
+    "fn ptx_emit_abs(",
+    "fn ptx_sm_version_string(",
+    "fn ptx_version_for_sm(",
+    "fn ptx_supports_bf16(",
+    "fn ptx_supports_fp8(",
+    "fn ptx_supports_tma(",
+    "fn ptx_supports_cp_async_arch(",
+    "fn ptx_supports_cp_async(",
+    "fn ptx_supports_redux(",
+    "fn ptx_supports_match(",
+    "fn ptx_cp_async_size_is_valid(",
+    "fn ptx_cp_async_normalize_size(",
+    "fn ptx_emit_cp_async_arch(",
+)
+for symbol in required_symbols:
+    if symbol not in text:
+        raise SystemExit(f"{path}: missing PTX regalloc symbol {symbol!r}")
+
+strict_markers = (
+    ".reg .pred %p<",
+    ".reg .b32 %r<",
+    ".reg .b64 %rd<",
+    ".reg .f32 %f<",
+    ".reg .f64 %fd<",
+    "ptx_supports_fp8_arch",
+    "ptx_supports_tma_arch",
+)
+for marker in strict_markers:
+    if marker not in text:
+        raise SystemExit(f"{path}: missing PTX strict marker {marker!r}")
+
+print(
+    f"ptx_regalloc_expansion_check: pass path={path} "
+    f"symbols={len(required_symbols)}"
+)
+PY
+  echo "PTX_REGALLOC_EXPANSION_PASS" | tee -a "$GATE_LOG"
+fi
+
+if [ "${OMEGA_REQUIRE_GPU_OPCODE_SMOKE:-1}" = "1" ]; then
+  echo "==> omega sprint2 gate: GPU opcode runtime smoke"
+  bash scripts/omega/omega_gpu_opcode_smoke.sh
+  echo "GPU_OPCODE_SMOKE_PASS" | tee -a "$GATE_LOG"
 fi
 
 if [ "${OMEGA_REQUIRE_QIR_EMITTER:-1}" = "1" ]; then
@@ -607,7 +1112,117 @@ if [ "${OMEGA_REQUIRE_ACCUMULATOR_BOUNDS:-1}" = "1" ]; then
     echo "error: accumulator waveform missing: $ACCUM_WAVE" >&2
     exit 2
   fi
+  python3 - <<'PY'
+import json
+from pathlib import Path
+
+contract_path = Path("benchmarks/independence/contract.v2.json")
+if not contract_path.exists():
+    contract_path = Path("benchmarks/independence/contract.v1.json")
+if not contract_path.exists():
+    raise SystemExit("error: missing independence contract for accumulator bounds check")
+
+obj = json.loads(contract_path.read_text())
+acc = obj.get("epistemic_power_accumulator_bound")
+if not isinstance(acc, dict):
+    raise SystemExit(
+        f"error: {contract_path}: missing epistemic_power_accumulator_bound"
+    )
+formula = str(acc.get("delta_32_formula", "")).replace(" ", "")
+if formula != "4*(F%8)+2*(P%16)+(Q%32)":
+    raise SystemExit(
+        f"error: {contract_path}: invalid delta_32_formula={formula!r}"
+    )
+delta = int(acc.get("delta_32_max_exclusive", 0))
+if delta != 96:
+    raise SystemExit(
+        f"error: {contract_path}: delta_32_max_exclusive must be 96 (got {delta})"
+    )
+gap_lt = float(acc.get("max_gap_lt", 0.0))
+if gap_lt != 3.0:
+    raise SystemExit(
+        f"error: {contract_path}: max_gap_lt must be 3.0 (got {gap_lt})"
+    )
+print(
+    f"accumulator_contract_bound_check: pass contract={contract_path} "
+    f"delta_32_max_exclusive={delta} max_gap_lt={gap_lt}"
+)
+PY
   echo "ACCUMULATOR_BOUNDS_PASS" | tee -a "$GATE_LOG"
+fi
+
+if [ "${OMEGA_REQUIRE_INTERNED_CHEMICAL_PROVENANCE:-1}" = "1" ]; then
+  echo "==> omega sprint4 gate: interned chemical provenance"
+  INTERNER_SIO="self-hosted/intern.sio"
+  if [ ! -f "$INTERNER_SIO" ]; then
+    echo "error: interner module missing: $INTERNER_SIO" >&2
+    exit 2
+  fi
+  python3 - "$INTERNER_SIO" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+text = path.read_text()
+required_symbols = (
+    "variance_q32_32",
+    "provenance_root_l64",
+    "confidence_beta",
+    "intern_merkle_root_lane_l64",
+    "interner_epi_power_delta_32",
+    "interner_chemical_provenance_self_check",
+)
+for symbol in required_symbols:
+    if symbol not in text:
+        raise SystemExit(f"{path}: missing required symbol {symbol!r}")
+
+compact = text.replace(" ", "")
+formula = "frac_f*4+frac_p*2+frac_q"
+if formula not in compact:
+    raise SystemExit(f"{path}: missing accumulator delta_32 formula fragment {formula!r}")
+
+print(f"interned_chemical_provenance_check: pass path={path}")
+PY
+  echo "INTERNED_CHEMICAL_PROVENANCE_PASS" | tee -a "$GATE_LOG"
+fi
+
+if [ "${OMEGA_REQUIRE_INTERNED_CHEMICAL_PROOF:-1}" = "1" ]; then
+  echo "==> omega sprint4 gate: interned chemical Lean proof linkage"
+  python3 - <<'PY'
+from pathlib import Path
+
+proof_path = Path("formal/omega_mathlib/OmegaMathlib/InternedChemicalGraph.lean")
+root_path = Path("formal/omega_mathlib/OmegaMathlib.lean")
+lakefile_path = Path("formal/omega_mathlib/lakefile.lean")
+
+for path in (proof_path, root_path, lakefile_path):
+    if not path.exists():
+        raise SystemExit(f"{path}: required file missing")
+
+proof_text = proof_path.read_text()
+for symbol in (
+    "import OmegaMathlib.AccumulatorBounds",
+    "theorem intern_delta32_lt_96",
+    "theorem intern_preserves_accumulator_bound",
+):
+    if symbol not in proof_text:
+        raise SystemExit(f"{proof_path}: missing required symbol {symbol!r}")
+
+root_text = root_path.read_text()
+if "import OmegaMathlib.InternedChemicalGraph" not in root_text:
+    raise SystemExit(
+        f"{root_path}: missing import OmegaMathlib.InternedChemicalGraph"
+    )
+
+lakefile_text = lakefile_path.read_text()
+if "`OmegaMathlib.InternedChemicalGraph" not in lakefile_text:
+    raise SystemExit(
+        f"{lakefile_path}: missing root `OmegaMathlib.InternedChemicalGraph"
+    )
+
+print("interned_chemical_proof_check: pass")
+PY
+  echo "INTERNED_CHEMICAL_PROOF_PASS" | tee -a "$GATE_LOG"
 fi
 
 if [ "${OMEGA_REQUIRE_RESOURCE_TREND:-1}" = "1" ]; then
@@ -1069,6 +1684,17 @@ if [ "${OMEGA_REQUIRE_HW_TELEMETRY_REGRESSION:-1}" = "1" ]; then
   OMEGA_REQUIRE_MERKLE_ROOT="${OMEGA_REQUIRE_MERKLE_ROOT:-1}"
   OMEGA_REQUIRE_GENESIS_MANIFEST="${OMEGA_REQUIRE_GENESIS_MANIFEST:-1}"
   OMEGA_REQUIRE_RESOURCE_TREND="${OMEGA_REQUIRE_RESOURCE_TREND:-1}"
+  OMEGA_REQUIRE_INTERNED_CHEMICAL_PROVENANCE="${OMEGA_REQUIRE_INTERNED_CHEMICAL_PROVENANCE:-1}"
+  OMEGA_REQUIRE_INTERNED_CHEMICAL_PROOF="${OMEGA_REQUIRE_INTERNED_CHEMICAL_PROOF:-1}"
+  OMEGA_REQUIRE_DATA_STRUCTURES="${OMEGA_REQUIRE_DATA_STRUCTURES:-1}"
+  OMEGA_REQUIRE_GPU_IR_EXPANSION="${OMEGA_REQUIRE_GPU_IR_EXPANSION:-1}"
+  OMEGA_REQUIRE_HLIR_GPU_CROSS_COVERAGE="${OMEGA_REQUIRE_HLIR_GPU_CROSS_COVERAGE:-1}"
+  OMEGA_REQUIRE_HLIR_LOWERING="${OMEGA_REQUIRE_HLIR_LOWERING:-1}"
+  OMEGA_REQUIRE_METAL_MSL_CODEGEN="${OMEGA_REQUIRE_METAL_MSL_CODEGEN:-1}"
+  OMEGA_REQUIRE_PTX_REGALLOC_EXPANSION="${OMEGA_REQUIRE_PTX_REGALLOC_EXPANSION:-1}"
+  OMEGA_REQUIRE_SOUC_RELEASE_PROVENANCE="${OMEGA_REQUIRE_SOUC_RELEASE_PROVENANCE:-0}"
+  OMEGA_REQUIRE_REPO_HARD_NO_RUST="${OMEGA_REQUIRE_REPO_HARD_NO_RUST:-0}"
+  OMEGA_REQUIRE_PARALLEL_SELFHOST_CUTOVER="${OMEGA_REQUIRE_PARALLEL_SELFHOST_CUTOVER:-0}"
   HW_TELEMETRY_ARGS=()
   if [ "${OMEGA_HW_TELEMETRY_REGRESSION_STRICT:-0}" = "1" ]; then
     HW_TELEMETRY_ARGS+=(--strict)
@@ -1094,21 +1720,79 @@ if [ "${OMEGA_REQUIRE_HW_TELEMETRY_REGRESSION:-1}" = "1" ]; then
   OMEGA_REQUIRE_MERKLE_ROOT="$OMEGA_REQUIRE_MERKLE_ROOT" \
   OMEGA_REQUIRE_GENESIS_MANIFEST="$OMEGA_REQUIRE_GENESIS_MANIFEST" \
   OMEGA_REQUIRE_RESOURCE_TREND="$OMEGA_REQUIRE_RESOURCE_TREND" \
+  OMEGA_REQUIRE_INTERNED_CHEMICAL_PROVENANCE="$OMEGA_REQUIRE_INTERNED_CHEMICAL_PROVENANCE" \
+  OMEGA_REQUIRE_INTERNED_CHEMICAL_PROOF="$OMEGA_REQUIRE_INTERNED_CHEMICAL_PROOF" \
+  OMEGA_REQUIRE_DATA_STRUCTURES="$OMEGA_REQUIRE_DATA_STRUCTURES" \
+  OMEGA_REQUIRE_GPU_IR_EXPANSION="$OMEGA_REQUIRE_GPU_IR_EXPANSION" \
+  OMEGA_REQUIRE_HLIR_GPU_CROSS_COVERAGE="$OMEGA_REQUIRE_HLIR_GPU_CROSS_COVERAGE" \
+  OMEGA_REQUIRE_HLIR_LOWERING="$OMEGA_REQUIRE_HLIR_LOWERING" \
+  OMEGA_REQUIRE_METAL_MSL_CODEGEN="$OMEGA_REQUIRE_METAL_MSL_CODEGEN" \
+  OMEGA_REQUIRE_PTX_REGALLOC_EXPANSION="$OMEGA_REQUIRE_PTX_REGALLOC_EXPANSION" \
+  OMEGA_REQUIRE_SOUC_RELEASE_PROVENANCE="$OMEGA_REQUIRE_SOUC_RELEASE_PROVENANCE" \
+  OMEGA_REQUIRE_REPO_HARD_NO_RUST="$OMEGA_REQUIRE_REPO_HARD_NO_RUST" \
+  OMEGA_REQUIRE_PARALLEL_SELFHOST_CUTOVER="$OMEGA_REQUIRE_PARALLEL_SELFHOST_CUTOVER" \
     python3 scripts/omega/omega_hardware_telemetry_regression.py "${HW_TELEMETRY_ARGS[@]}"
   echo "HW_TELEMETRY_REGRESSION_PASS" | tee -a "$GATE_LOG"
 else
   echo "omega sprint1 gate: hardware telemetry regression disabled (OMEGA_REQUIRE_HW_TELEMETRY_REGRESSION=0)"
 fi
 
-if [ "${OMEGA_REQUIRE_NO_RUST:-1}" = "1" ]; then
+if [ "${OMEGA_REQUIRE_SOUC_RELEASE_PROVENANCE:-1}" = "1" ]; then
+  echo "==> omega sprint1 gate: souc release provenance"
+  PROVENANCE_PATH="${OMEGA_SOUC_PROVENANCE_OUT:-artifacts/omega/souc_release_provenance.v1.json}"
+  if [ ! -f "$PROVENANCE_PATH" ]; then
+    echo "error: missing souc release provenance artifact: $PROVENANCE_PATH" >&2
+    exit 2
+  fi
+  python3 - "$PROVENANCE_PATH" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+obj = json.loads(path.read_text())
+if obj.get("schema") != "sounio.omega.souc-release-provenance.v1":
+    raise SystemExit(f"{path}: invalid schema {obj.get('schema')!r}")
+if obj.get("status") != "pass":
+    raise SystemExit(f"{path}: status must be pass (got {obj.get('status')!r})")
+sha = obj.get("sha256", {})
+if sha.get("match") is not True:
+    raise SystemExit(f"{path}: sha256.match must be true")
+sig = obj.get("signature", {})
+if sig.get("verified") is not True:
+    raise SystemExit(f"{path}: signature.verified must be true")
+print(f"souc_release_provenance_check: pass path={path}")
+PY
+  echo "SOUC_RELEASE_PROVENANCE_PASS" | tee -a "$GATE_LOG"
+fi
+
+OMEGA_REQUIRE_REPO_HARD_NO_RUST="${OMEGA_REQUIRE_REPO_HARD_NO_RUST:-${OMEGA_REQUIRE_NO_RUST:-1}}"
+if [ "${OMEGA_REQUIRE_REPO_HARD_NO_RUST}" = "1" ]; then
+  echo "==> omega sprint1 gate: no-rust execution surface"
+  if [ ! -x "scripts/omega/omega_no_rust_execution_surface.sh" ]; then
+    echo "error: missing no-rust execution surface script" >&2
+    exit 2
+  fi
+  scripts/omega/omega_no_rust_execution_surface.sh
+  echo "REPO_HARD_NO_RUST_PASS" | tee -a "$GATE_LOG"
+
   echo "==> omega sprint1 gate: no-rust mode guard"
-  mapfile -t changed_rust < <(find crates -type f -name '*.rs' -newer "$NO_RUST_MARKER" | sort)
+  changed_rust=()
+  if [ -d "crates" ]; then
+    mapfile -t changed_rust < <(find crates -type f -name '*.rs' -newer "$NO_RUST_MARKER" | sort)
+  fi
   if [ "${#changed_rust[@]}" -ne 0 ]; then
     echo "error: no-rust mode violated; Rust files modified during gate run:" >&2
     printf '  %s\n' "${changed_rust[@]}" >&2
     exit 2
   fi
   echo "No-Rust mode PASS" | tee -a "$GATE_LOG"
+fi
+
+if [ "${OMEGA_REQUIRE_PARALLEL_SELFHOST_CUTOVER:-1}" = "1" ]; then
+  echo "==> omega sprint1 gate: parallel selfhost cutover status"
+  python3 scripts/omega/omega_parallel_cutover_status.py --gate-log "$GATE_LOG"
+  echo "PARALLEL_SELFHOST_CUTOVER_PASS" | tee -a "$GATE_LOG"
 fi
 
 echo "OMEGA_SPRINT1_GATE_PASS"

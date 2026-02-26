@@ -59,6 +59,28 @@ budget = float(obj["compile_time_budget"].get("max_overhead", 0.0))
 if budget > 0.25:
     raise SystemExit(f"compile-time budget too high: {budget} (expected <= 0.25)")
 
+acc_bound = obj.get("epistemic_power_accumulator_bound")
+if not isinstance(acc_bound, dict):
+    raise SystemExit("missing required contract field: epistemic_power_accumulator_bound")
+
+formula = str(acc_bound.get("delta_32_formula", "")).replace(" ", "")
+expected_formula = "4*(F%8)+2*(P%16)+(Q%32)"
+if formula != expected_formula:
+    raise SystemExit(
+        "invalid accumulator delta formula: "
+        f"{formula!r} (expected {expected_formula!r})"
+    )
+
+delta_max = int(acc_bound.get("delta_32_max_exclusive", 0))
+if delta_max != 96:
+    raise SystemExit(
+        f"delta_32_max_exclusive must be 96 (got {delta_max})"
+    )
+
+gap_lt = float(acc_bound.get("max_gap_lt", 0.0))
+if gap_lt != 3.0:
+    raise SystemExit(f"max_gap_lt must be 3.0 (got {gap_lt})")
+
 if schema.endswith("v2"):
     required_v2 = [
         "runtime_normalization_by_family",

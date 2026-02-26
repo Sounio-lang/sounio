@@ -8,4 +8,4 @@ require mathlib from git
 
 @[default_target]
 lean_lib «OmegaMathlib» where
-  roots := #[`OmegaMathlib.EpistemicPower]
+  roots := #[`OmegaMathlib.EpistemicPower, `OmegaMathlib.AccumulatorBounds, `OmegaMathlib.InternedChemicalGraph]

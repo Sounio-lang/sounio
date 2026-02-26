@@ -27,6 +27,10 @@ POLICY_MODE_GUARD_PATH = Path("artifacts/omega/policy_mode_guard.v1.json")
 RL_READINESS_REPLAY_PATH = Path("artifacts/omega/rl_readiness_replay.v1.json")
 GOVERNANCE_ATTESTATION_PATH = Path("artifacts/omega/governance_attestation.v1.json")
 GENESIS_MANIFEST_PATH = Path("artifacts/omega/omega_genesis.v1.0.json")
+SOUC_RELEASE_PROVENANCE_PATH = Path("artifacts/omega/souc_release_provenance.v1.json")
+NO_RUST_EXECUTION_SURFACE_PATH = Path("artifacts/omega/no_rust_execution_surface.v1.json")
+SELFHOST_COMPILER_PROGRESS_PATH = Path("artifacts/omega/selfhost_compiler_progress.v1.json")
+PARALLEL_CUTOVER_STATUS_PATH = Path("artifacts/omega/parallel_cutover_status.v1.json")
 SPRINT1_RELEASE_READINESS_PATH = Path("artifacts/omega/sprint1_release_readiness.v1.json")
 PERFORMANCE_SUMMARY_PATH = Path("artifacts/omega/performance_summary.v1.json")
 EXTERNAL_BASELINE_COLLECTION_PATH = Path("artifacts/omega/external_baseline_collection.v1.json")
@@ -43,6 +47,22 @@ ACCUMULATOR_WAVEFORM_PATH = Path(
     "artifacts/fpga/waveforms/tb_epistemic_power_accumulator.vcd"
 )
 ACCUMULATOR_BOUNDS_TEST_PATH = Path("tests/hardware/accumulator_bounds_test.sio")
+INTERNER_SIO_PATH = Path("self-hosted/intern.sio")
+INTERNED_CHEMICAL_PROOF_PATH = Path(
+    "formal/omega_mathlib/OmegaMathlib/InternedChemicalGraph.lean"
+)
+OMEGA_MATHLIB_ROOT_PATH = Path("formal/omega_mathlib/OmegaMathlib.lean")
+OMEGA_MATHLIB_LAKEFILE_PATH = Path("formal/omega_mathlib/lakefile.lean")
+INDEPENDENCE_CONTRACT_V2_PATH = Path("benchmarks/independence/contract.v2.json")
+INDEPENDENCE_CONTRACT_V1_PATH = Path("benchmarks/independence/contract.v1.json")
+GPU_KERNEL_IR_PATH = Path("self-hosted/gpu/kernel_ir.sio")
+HLIR_LOWERING_PATH = Path("self-hosted/hlir/lower.sio")
+HLIR_TO_GPU_LOWER_PATH = Path("self-hosted/gpu/hlir_to_gpu.sio")
+METAL_MSL_CODEGEN_PATH = Path("self-hosted/gpu/metal.sio")
+PTX_ADVANCED_CODEGEN_PATH = Path("self-hosted/gpu/ptx_advanced.sio")
+ORDERED_MAP_SIO_PATH = Path("self-hosted/collections/ordered_map.sio")
+ARENA_SIO_PATH = Path("self-hosted/collections/arena.sio")
+GRAPH_SIO_PATH = Path("self-hosted/collections/graph.sio")
 
 FPGA_REPORT_SCHEMA = "sounio.omega.fpga-seed-report.v1"
 QUANTUM_CONFORMANCE_SCHEMA = "sounio.quantum.conformance.v1"
@@ -58,6 +78,10 @@ POLICY_MODE_GUARD_SCHEMA = "sounio.omega.policy-mode-guard.v1"
 RL_READINESS_REPLAY_SCHEMA = "sounio.omega.rl-readiness-replay.v1"
 GOVERNANCE_ATTESTATION_SCHEMA = "sounio.omega.governance-attestation.v1"
 GENESIS_MANIFEST_SCHEMA = "sounio.omega.genesis.v1.0"
+SOUC_RELEASE_PROVENANCE_SCHEMA = "sounio.omega.souc-release-provenance.v1"
+NO_RUST_EXECUTION_SURFACE_SCHEMA = "sounio.omega.no-rust-execution-surface.v1"
+SELFHOST_COMPILER_PROGRESS_SCHEMA = "sounio.omega.selfhost-compiler-progress.v1"
+PARALLEL_CUTOVER_STATUS_SCHEMA = "sounio.omega.parallel-cutover-status.v1"
 SPRINT1_RELEASE_READINESS_SCHEMA = "sounio.omega.sprint1-release-readiness.v1"
 PERFORMANCE_SUMMARY_SCHEMA = "sounio.omega.performance-summary.v1"
 EXTERNAL_BASELINE_COLLECTION_SCHEMA = "sounio.omega.external-baseline-collection.v1"
@@ -1474,6 +1498,41 @@ def validate_accumulator_bounds(path: Path, errors: List[str], strict: bool) -> 
                     errors.append(
                         f"{ACCUMULATOR_BOUNDS_TEST_PATH}: missing ACCUMULATOR_BOUNDS_PASS marker"
                     )
+        contract_path = INDEPENDENCE_CONTRACT_V2_PATH
+        if not contract_path.exists():
+            contract_path = INDEPENDENCE_CONTRACT_V1_PATH
+        if not contract_path.exists():
+            errors.append(
+                "benchmarks/independence/contract.v2.json: missing independence contract "
+                "(no v2 or v1 contract found)"
+            )
+        else:
+            contract = load_json_object(contract_path, errors)
+            if isinstance(contract, dict):
+                bound = contract.get("epistemic_power_accumulator_bound")
+                if not isinstance(bound, dict):
+                    errors.append(
+                        f"{contract_path}: missing epistemic_power_accumulator_bound object"
+                    )
+                else:
+                    formula = str(bound.get("delta_32_formula", "")).replace(" ", "")
+                    if formula != "4*(F%8)+2*(P%16)+(Q%32)":
+                        errors.append(
+                            f"{contract_path}: delta_32_formula mismatch "
+                            f"(got {formula!r})"
+                        )
+                    delta_max = bound.get("delta_32_max_exclusive")
+                    if not isinstance(delta_max, int) or delta_max != 96:
+                        errors.append(
+                            f"{contract_path}: delta_32_max_exclusive must be int 96 "
+                            f"(got {delta_max!r})"
+                        )
+                    max_gap_lt = bound.get("max_gap_lt")
+                    if not is_number(max_gap_lt) or float(max_gap_lt) != 3.0:
+                        errors.append(
+                            f"{contract_path}: max_gap_lt must be numeric 3.0 "
+                            f"(got {max_gap_lt!r})"
+                        )
     fingerprint = payload.get("hardware_counter_fingerprint", {})
     if not isinstance(fingerprint, dict):
         errors.append(f"{path}: hardware_counter_fingerprint must be an object")
@@ -1484,6 +1543,549 @@ def validate_accumulator_bounds(path: Path, errors: List[str], strict: bool) -> 
                 errors.append(
                     f"{path}: hardware_counter_fingerprint missing {key!r} in --strict mode"
                 )
+
+
+def validate_ordered_map_surface(path: Path, errors: List[str], strict: bool) -> None:
+    """Validate ordered_map replacement surface (indexmap parity layer)."""
+    try:
+        content = path.read_text()
+    except OSError as exc:
+        errors.append(f"{path}: read failed: {exc}")
+        return
+
+    required_symbols = (
+        "struct OrderedMap",
+        "fn ordered_map_new(",
+        "fn ordered_map_insert(",
+        "fn ordered_map_get(",
+        "fn ordered_map_contains(",
+        "fn ordered_map_remove(",
+        "fn ordered_map_len(",
+        "fn ordered_map_key_at(",
+        "fn ordered_map_value_at(",
+    )
+    for symbol in required_symbols:
+        if symbol not in content:
+            errors.append(f"{path}: missing ordered_map symbol {symbol!r}")
+
+    if strict:
+        for marker in ("keys: [i64; 1024]", "values: [i64; 1024]"):
+            if marker not in content:
+                errors.append(f"{path}: missing strict ordered_map marker {marker!r}")
+
+
+def validate_arena_surface(path: Path, errors: List[str], strict: bool) -> None:
+    """Validate arena replacement surface (id-arena parity layer)."""
+    try:
+        content = path.read_text()
+    except OSError as exc:
+        errors.append(f"{path}: read failed: {exc}")
+        return
+
+    required_symbols = (
+        "struct Arena",
+        "fn arena_new(",
+        "fn arena_alloc(",
+        "fn arena_get(",
+        "fn arena_set(",
+        "fn arena_len(",
+    )
+    for symbol in required_symbols:
+        if symbol not in content:
+            errors.append(f"{path}: missing arena symbol {symbol!r}")
+
+    if strict and "data: [i64; 8192]" not in content:
+        errors.append(f"{path}: missing strict arena storage marker 'data: [i64; 8192]'")
+
+
+def validate_interner_core_surface(path: Path, errors: List[str], strict: bool) -> None:
+    """Validate string interner replacement surface (string-interner parity layer)."""
+    try:
+        content = path.read_text()
+    except OSError as exc:
+        errors.append(f"{path}: read failed: {exc}")
+        return
+
+    required_symbols = (
+        "struct StringInterner",
+        "fn interner_new(",
+        "fn interner_intern(",
+        "fn interner_resolve(",
+        "fn interner_contains(",
+    )
+    for symbol in required_symbols:
+        if symbol not in content:
+            errors.append(f"{path}: missing interner symbol {symbol!r}")
+
+    if strict:
+        strict_markers = (
+            "buf: [i8; 65536]",
+            "offsets: [i64; 4096]",
+            "lengths: [i64; 4096]",
+            "hashes: [i64; 4096]",
+        )
+        for marker in strict_markers:
+            if marker not in content:
+                errors.append(f"{path}: missing strict interner marker {marker!r}")
+
+
+def validate_graph_surface(path: Path, errors: List[str], strict: bool) -> None:
+    """Validate graph replacement surface (petgraph parity layer)."""
+    try:
+        content = path.read_text()
+    except OSError as exc:
+        errors.append(f"{path}: read failed: {exc}")
+        return
+
+    required_symbols = (
+        "struct DiGraph",
+        "fn graph_new(",
+        "fn graph_add_node(",
+        "fn graph_add_edge(",
+        "fn graph_has_edge(",
+        "fn graph_successors(",
+        "fn graph_predecessors(",
+        "fn graph_node_count(",
+        "fn graph_edge_count(",
+        "fn graph_dfs_order(",
+        "fn graph_topo_sort(",
+    )
+    for symbol in required_symbols:
+        if symbol not in content:
+            errors.append(f"{path}: missing graph symbol {symbol!r}")
+
+    if strict:
+        strict_markers = (
+            "nodes: [i64; 1024]",
+            "edges_src: [i64; 4096]",
+            "edges_dst: [i64; 4096]",
+        )
+        for marker in strict_markers:
+            if marker not in content:
+                errors.append(f"{path}: missing strict graph marker {marker!r}")
+
+
+def validate_interner_provenance_sio(path: Path, errors: List[str], strict: bool) -> None:
+    """Validate interner epistemic provenance integration."""
+    try:
+        content = path.read_text()
+    except OSError as exc:
+        errors.append(f"{path}: read failed: {exc}")
+        return
+
+    required_symbols = (
+        "variance_q32_32",
+        "provenance_root_l64",
+        "confidence_beta",
+        "intern_merkle_root_lane_l64",
+        "interner_epi_power_delta_32",
+        "interner_chemical_provenance_self_check",
+    )
+    for symbol in required_symbols:
+        if symbol not in content:
+            errors.append(f"{path}: missing required symbol {symbol!r}")
+
+    compact = content.replace(" ", "")
+    formula = "frac_f*4+frac_p*2+frac_q"
+    if strict and formula not in compact:
+        errors.append(
+            f"{path}: missing accumulator delta_32 formula fragment {formula!r}"
+        )
+
+
+def validate_interned_chemical_proof(path: Path, errors: List[str], strict: bool) -> None:
+    """Validate Lean corollary linkage for interner chemistry bounds."""
+    try:
+        content = path.read_text()
+    except OSError as exc:
+        errors.append(f"{path}: read failed: {exc}")
+        return
+
+    for symbol in (
+        "import OmegaMathlib.AccumulatorBounds",
+        "theorem intern_delta32_lt_96",
+        "theorem intern_preserves_accumulator_bound",
+    ):
+        if symbol not in content:
+            errors.append(f"{path}: missing required symbol {symbol!r}")
+
+    try:
+        root_text = OMEGA_MATHLIB_ROOT_PATH.read_text()
+    except OSError as exc:
+        errors.append(f"{OMEGA_MATHLIB_ROOT_PATH}: read failed: {exc}")
+    else:
+        if "import OmegaMathlib.InternedChemicalGraph" not in root_text:
+            errors.append(
+                f"{OMEGA_MATHLIB_ROOT_PATH}: missing import OmegaMathlib.InternedChemicalGraph"
+            )
+
+    try:
+        lakefile_text = OMEGA_MATHLIB_LAKEFILE_PATH.read_text()
+    except OSError as exc:
+        errors.append(f"{OMEGA_MATHLIB_LAKEFILE_PATH}: read failed: {exc}")
+    else:
+        if "`OmegaMathlib.InternedChemicalGraph" not in lakefile_text:
+            errors.append(
+                f"{OMEGA_MATHLIB_LAKEFILE_PATH}: missing root `OmegaMathlib.InternedChemicalGraph"
+            )
+
+
+def validate_gpu_ir_kernel_surface(path: Path, errors: List[str], strict: bool) -> None:
+    """Validate that kernel_ir.sio carries the expanded GPU IR surface."""
+    try:
+        content = path.read_text()
+    except OSError as exc:
+        errors.append(f"{path}: read failed: {exc}")
+        return
+
+    required_symbols = (
+        "enum GpuMemorySpace",
+        "GpuMemGlobal",
+        "GpuMemShared",
+        "GpuMemLocal",
+        "GpuMemConstant",
+        "memory_space: GpuMemorySpace",
+        "pred_reg: i64",
+        "mask: i64",
+        "max_reg_f64: i64",
+        "shared_mem_bytes: i64",
+        "max_threads: i64",
+    )
+    for symbol in required_symbols:
+        if symbol not in content:
+            errors.append(f"{path}: missing required symbol {symbol!r}")
+
+    required_opcodes = (
+        "GpuShflUp",
+        "GpuShflBfly",
+        "GpuShflIdx",
+        "GpuVote",
+        "GpuBallot",
+        "GpuWmma",
+        "GpuMma",
+        "GpuTmaLoad",
+        "GpuTmaStore",
+        "GpuLdGlobalCached",
+        "GpuStGlobalWriteback",
+        "GpuPrefetch",
+        "GpuSqrt",
+        "GpuRsqrt",
+        "GpuExp2",
+        "GpuLg2",
+        "GpuSin",
+        "GpuCos",
+        "GpuAbs",
+        "GpuRcp",
+        "GpuSetpGt",
+        "GpuSetpNe",
+        "GpuBra",
+        "GpuExit",
+        "GpuGetLaneId",
+        "GpuGetWarpId",
+        "GpuGetSmId",
+        "GpuGetGridDim",
+    )
+    for opcode in required_opcodes:
+        if f"{opcode}," not in content:
+            errors.append(f"{path}: missing expanded opcode {opcode!r}")
+
+    try:
+        metal_content = METAL_MSL_CODEGEN_PATH.read_text()
+    except OSError as exc:
+        errors.append(f"{METAL_MSL_CODEGEN_PATH}: read failed: {exc}")
+        metal_content = ""
+
+    try:
+        ptx_content = PTX_ADVANCED_CODEGEN_PATH.read_text()
+    except OSError as exc:
+        errors.append(f"{PTX_ADVANCED_CODEGEN_PATH}: read failed: {exc}")
+        ptx_content = ""
+
+    if metal_content:
+        missing_metal = [
+            opcode
+            for opcode in required_opcodes
+            if f"GpuOpcode::{opcode}" not in metal_content
+        ]
+        if missing_metal:
+            joined = ", ".join(missing_metal)
+            errors.append(
+                f"{METAL_MSL_CODEGEN_PATH}: missing expanded opcode coverage [{joined}]"
+            )
+
+    if ptx_content:
+        missing_ptx = [
+            opcode
+            for opcode in required_opcodes
+            if f"GpuOpcode::{opcode}" not in ptx_content
+        ]
+        if missing_ptx:
+            joined = ", ".join(missing_ptx)
+            errors.append(
+                f"{PTX_ADVANCED_CODEGEN_PATH}: missing expanded opcode coverage [{joined}]"
+            )
+
+    if strict and "GpuStoreSharedPred" not in content:
+        errors.append(
+            f"{path}: expected base anchor opcode GpuStoreSharedPred for expansion check"
+        )
+
+
+def validate_hlir_to_gpu_cross_coverage(path: Path, errors: List[str], strict: bool) -> None:
+    """Validate anti-drift coverage from HLIR op lowering to backend GPU emitters."""
+    try:
+        content = path.read_text()
+    except OSError as exc:
+        errors.append(f"{path}: read failed: {exc}")
+        return
+
+    try:
+        metal_content = METAL_MSL_CODEGEN_PATH.read_text()
+    except OSError as exc:
+        errors.append(f"{METAL_MSL_CODEGEN_PATH}: read failed: {exc}")
+        metal_content = ""
+
+    try:
+        ptx_content = PTX_ADVANCED_CODEGEN_PATH.read_text()
+    except OSError as exc:
+        errors.append(f"{PTX_ADVANCED_CODEGEN_PATH}: read failed: {exc}")
+        ptx_content = ""
+
+    shared_core_pairs = (
+        ("HlirOpAdd", "GpuOpcodeAdd", "GpuOpcode::GpuAdd"),
+        ("HlirOpSub", "GpuOpcodeSub", "GpuOpcode::GpuSub"),
+        ("HlirOpMul", "GpuOpcodeMul", "GpuOpcode::GpuMul"),
+        ("HlirOpDiv", "GpuOpcodeDiv", "GpuOpcode::GpuDiv"),
+        ("HlirOpEq", "GpuOpcodeSetpEq", "GpuOpcode::GpuSetpEq"),
+        ("HlirOpNe", "GpuOpcodeSetpNe", "GpuOpcode::GpuSetpNe"),
+        ("HlirOpLt", "GpuOpcodeSetpLt", "GpuOpcode::GpuSetpLt"),
+        ("HlirOpLe", "GpuOpcodeSetpLe", "GpuOpcode::GpuSetpLe"),
+        ("HlirOpGt", "GpuOpcodeSetpGt", "GpuOpcode::GpuSetpGt"),
+        ("HlirOpGe", "GpuOpcodeSetpGe", "GpuOpcode::GpuSetpGe"),
+        ("HlirOpLoad", "GpuOpcodeLoadGlobal", "GpuOpcode::GpuLoadGlobal"),
+        ("HlirOpStore", "GpuOpcodeStoreGlobal", "GpuOpcode::GpuStoreGlobal"),
+        ("HlirOpSExt", "GpuOpcodeCvt", "GpuOpcode::GpuCvt"),
+        ("HlirOpSelect", "GpuOpcodeSelp", "GpuOpcode::GpuSelp"),
+        ("HlirOpFMA", "GpuOpcodeFma", "GpuOpcode::GpuFma"),
+        ("HlirOpGetThreadId", "GpuOpcodeGetTid", "GpuOpcode::GpuGetTid"),
+        ("HlirOpGetBlockId", "GpuOpcodeGetBid", "GpuOpcode::GpuGetBid"),
+        ("HlirOpGetBlockDim", "GpuOpcodeGetNtid", "GpuOpcode::GpuGetNtid"),
+        ("HlirOpAtomicAdd", "GpuOpcodeAtomicAdd", "GpuOpcode::GpuAtomicAdd"),
+        ("HlirOpSyncThreads", "GpuOpcodeBarrierSync", "GpuOpcode::GpuBarrierSync"),
+    )
+
+    for hlir_op, gpu_const, backend_marker in shared_core_pairs:
+        if f"op_tag == {hlir_op}" not in content:
+            errors.append(f"{path}: missing HLIR lowering branch for {hlir_op}")
+        if gpu_const not in content:
+            errors.append(
+                f"{path}: missing GPU opcode constant marker {gpu_const!r} for {hlir_op}"
+            )
+
+        if metal_content and backend_marker not in metal_content:
+            errors.append(
+                f"{METAL_MSL_CODEGEN_PATH}: missing shared-core marker {backend_marker!r}"
+            )
+        if ptx_content and backend_marker not in ptx_content:
+            errors.append(
+                f"{PTX_ADVANCED_CODEGEN_PATH}: missing shared-core marker {backend_marker!r}"
+            )
+
+    if strict and "fn hlir_lower_instr(" not in content:
+        errors.append(f"{path}: missing fn hlir_lower_instr for strict coverage check")
+
+
+def validate_hlir_lowering_surface(path: Path, errors: List[str], strict: bool) -> None:
+    """Validate HLIR lowering bridge surface required by the offload plan."""
+    try:
+        content = path.read_text()
+    except OSError as exc:
+        errors.append(f"{path}: read failed: {exc}")
+        return
+
+    if "struct HlirLowerState" not in content:
+        errors.append(f"{path}: missing HlirLowerState declaration")
+    if "loop_continue_block" not in content or "loop_break_block" not in content:
+        errors.append(f"{path}: missing loop control fields in HlirLowerState")
+
+    state_builder_variants = (
+        ("module: HlirModuleBuilder", "current_func: HlirFunctionBuilder"),
+        ("module_builder: HlirModuleBuilder", "builder: HlirFunctionBuilder"),
+    )
+    if not any(a in content and b in content for a, b in state_builder_variants):
+        errors.append(
+            f"{path}: missing expected builder/module builder fields for HlirLowerState"
+        )
+
+    scope_variants = (
+        ("var_scope_keys", "var_scope_vals", "var_scope_count"),
+        ("scope_stack", "scope_stack_top"),
+    )
+    if not any(all(token in content for token in variant) for variant in scope_variants):
+        errors.append(
+            f"{path}: missing expected scope tracking fields for HlirLowerState"
+        )
+
+    required_entrypoints = (
+        "fn hlir_lower_module(",
+        "fn hlir_lower_function(",
+        "fn hlir_lower_expr(",
+        "fn hlir_lower_literal(",
+        "fn hlir_lower_binary(",
+        "fn hlir_lower_unary(",
+        "fn hlir_lower_call(",
+        "fn hlir_lower_field_access(",
+        "fn hlir_lower_index(",
+        "fn hlir_lower_cast(",
+        "fn hlir_lower_let(",
+        "fn hlir_lower_var(",
+        "fn hlir_lower_assign(",
+        "fn hlir_lower_return(",
+        "fn hlir_lower_if(",
+        "fn hlir_lower_while(",
+        "fn hlir_lower_match(",
+        "fn hlir_lower_break(",
+        "fn hlir_lower_continue(",
+        "fn hlir_lower_new_block(",
+        "fn hlir_lower_seal_block(",
+        "fn hlir_lower_branch(",
+        "fn hlir_lower_cond_branch(",
+        "fn hlir_scope_push(",
+        "fn hlir_scope_pop(",
+        "fn hlir_scope_insert(",
+        "fn hlir_scope_lookup(",
+    )
+    for marker in required_entrypoints:
+        if marker not in content:
+            errors.append(f"{path}: missing HLIR lowering function {marker!r}")
+
+    lowered = content.lower()
+    if strict and "ssa" not in lowered and "phi" not in lowered:
+        errors.append(
+            f"{path}: expected SSA/phi lowering commentary markers for strict HLIR check"
+        )
+
+
+def validate_metal_msl_codegen_surface(path: Path, errors: List[str], strict: bool) -> None:
+    """Validate Metal MSL codegen surface required by the offload plan."""
+    try:
+        content = path.read_text()
+    except OSError as exc:
+        errors.append(f"{path}: read failed: {exc}")
+        return
+
+    required_symbols = (
+        "struct MetalBuf",
+        "fn metal_buf_new(",
+        "fn metal_push_str(",
+        "fn metal_push_i64(",
+        "fn gpu_type_to_msl(",
+        "fn metal_emit_header(",
+        "fn metal_emit_kernel_signature(",
+        "fn metal_emit_var_decls(",
+        "fn metal_lower_ops(",
+        "fn gpu_lower_to_metal(",
+    )
+    for symbol in required_symbols:
+        if symbol not in content:
+            errors.append(f"{path}: missing Metal codegen symbol {symbol!r}")
+
+    if strict:
+        if "#include <metal_stdlib>" not in content:
+            errors.append(f"{path}: missing Metal header include marker")
+        if "using namespace metal;" not in content:
+            errors.append(f"{path}: missing Metal namespace marker")
+
+
+def validate_ptx_regalloc_expansion_surface(
+    path: Path, errors: List[str], strict: bool
+) -> None:
+    """Validate PTX advanced regalloc/codegen surface required by the plan."""
+    try:
+        content = path.read_text()
+    except OSError as exc:
+        errors.append(f"{path}: read failed: {exc}")
+        return
+
+    required_symbols = (
+        "struct PtxRegCounters",
+        "fn ptx_reg_counters_new(",
+        "fn ptx_alloc_pred(",
+        "fn ptx_alloc_b32(",
+        "fn ptx_alloc_b64(",
+        "fn ptx_alloc_f32(",
+        "fn ptx_alloc_f64(",
+        "fn ptx_alloc_for_type(",
+        "fn ptx_emit_reg_name(",
+        "fn ptx_emit_typed_reg_decls(",
+        "fn ptx_emit_add(",
+        "fn ptx_emit_sub(",
+        "fn ptx_emit_mul(",
+        "fn ptx_emit_div(",
+        "fn ptx_emit_rem(",
+        "fn ptx_emit_fma(",
+        "fn ptx_emit_ld_global(",
+        "fn ptx_emit_st_global(",
+        "fn ptx_emit_ld_shared(",
+        "fn ptx_emit_st_shared(",
+        "fn ptx_emit_ld_param(",
+        "fn ptx_emit_setp_lt(",
+        "fn ptx_emit_setp_le(",
+        "fn ptx_emit_setp_eq(",
+        "fn ptx_emit_setp_ge(",
+        "fn ptx_emit_setp_gt(",
+        "fn ptx_emit_setp_ne(",
+        "fn ptx_emit_selp(",
+        "fn ptx_emit_bra(",
+        "fn ptx_emit_bra_pred(",
+        "fn ptx_emit_label(",
+        "fn ptx_emit_bar_sync(",
+        "fn ptx_emit_exit(",
+        "fn ptx_emit_ret(",
+        "fn ptx_emit_cvt(",
+        "fn ptx_emit_shfl_down(",
+        "fn ptx_emit_shfl_up(",
+        "fn ptx_emit_shfl_bfly(",
+        "fn ptx_emit_vote_ballot(",
+        "fn ptx_emit_bar_arrive(",
+        "fn ptx_emit_sqrt(",
+        "fn ptx_emit_rsqrt(",
+        "fn ptx_emit_exp2(",
+        "fn ptx_emit_lg2(",
+        "fn ptx_emit_sin(",
+        "fn ptx_emit_cos(",
+        "fn ptx_emit_rcp(",
+        "fn ptx_emit_abs(",
+        "fn ptx_sm_version_string(",
+        "fn ptx_version_for_sm(",
+        "fn ptx_supports_bf16(",
+        "fn ptx_supports_fp8(",
+        "fn ptx_supports_tma(",
+        "fn ptx_supports_cp_async_arch(",
+        "fn ptx_supports_cp_async(",
+        "fn ptx_supports_redux(",
+        "fn ptx_supports_match(",
+        "fn ptx_cp_async_size_is_valid(",
+        "fn ptx_cp_async_normalize_size(",
+        "fn ptx_emit_cp_async_arch(",
+    )
+    for symbol in required_symbols:
+        if symbol not in content:
+            errors.append(f"{path}: missing PTX regalloc symbol {symbol!r}")
+
+    if strict:
+        strict_markers = (
+            ".reg .pred %p<",
+            ".reg .b32 %r<",
+            ".reg .b64 %rd<",
+            ".reg .f32 %f<",
+            ".reg .f64 %fd<",
+            "ptx_supports_fp8_arch",
+            "ptx_supports_tma_arch",
+        )
+        for marker in strict_markers:
+            if marker not in content:
+                errors.append(f"{path}: missing PTX strict marker {marker!r}")
 
 
 def validate_qir_epi_power_sio(path: Path, errors: List[str], strict: bool) -> None:
@@ -1639,6 +2241,136 @@ def validate_genesis_manifest(path: Path, errors: List[str], strict: bool) -> No
             errors.append(f"{path}: cold_boot_ready must be true in --strict mode")
 
 
+def validate_souc_release_provenance(path: Path, errors: List[str], strict: bool) -> None:
+    payload = load_json_object(path, errors)
+    if payload is None:
+        return
+
+    if payload.get("schema") != SOUC_RELEASE_PROVENANCE_SCHEMA:
+        errors.append(
+            f"{path}: schema mismatch (expected {SOUC_RELEASE_PROVENANCE_SCHEMA}, got {payload.get('schema')})"
+        )
+    if payload.get("status") != "pass":
+        errors.append(f"{path}: status must be pass")
+
+    sha = payload.get("sha256")
+    if not isinstance(sha, dict):
+        errors.append(f"{path}: sha256 must be object")
+    else:
+        actual = sha.get("actual")
+        if actual is not None and (not isinstance(actual, str) or len(actual) != 64):
+            errors.append(f"{path}: sha256.actual must be 64-char hex when present")
+
+    sig = payload.get("signature")
+    if not isinstance(sig, dict):
+        errors.append(f"{path}: signature must be object")
+    else:
+        fpr = sig.get("canonical_pubkey_fingerprint")
+        if fpr is not None and (not isinstance(fpr, str) or len(fpr) != 64):
+            errors.append(
+                f"{path}: signature.canonical_pubkey_fingerprint must be 64-char hex"
+            )
+        if strict and sig.get("verified") is not True:
+            errors.append(f"{path}: signature.verified must be true in --strict mode")
+
+
+def validate_no_rust_execution_surface(
+    path: Path, errors: List[str], strict: bool
+) -> None:
+    payload = load_json_object(path, errors)
+    if payload is None:
+        return
+
+    if payload.get("schema") != NO_RUST_EXECUTION_SURFACE_SCHEMA:
+        errors.append(
+            f"{path}: schema mismatch (expected {NO_RUST_EXECUTION_SURFACE_SCHEMA}, got {payload.get('schema')})"
+        )
+    if strict:
+        if payload.get("status") != "pass":
+            errors.append(f"{path}: status must be pass in --strict mode")
+        if payload.get("violation_count") not in (0, 0.0):
+            errors.append(f"{path}: violation_count must be 0 in --strict mode")
+        if payload.get("require_runtime_absence") is not True:
+            errors.append(f"{path}: require_runtime_absence must be true in --strict mode")
+        if payload.get("runtime_violation_count") not in (0, 0.0):
+            errors.append(f"{path}: runtime_violation_count must be 0 in --strict mode")
+    runtime_tools = payload.get("runtime_tools")
+    if runtime_tools is not None and not isinstance(runtime_tools, list):
+        errors.append(f"{path}: runtime_tools must be list when present")
+
+
+def validate_selfhost_compiler_progress(
+    path: Path, errors: List[str], strict: bool
+) -> None:
+    payload = load_json_object(path, errors)
+    if payload is None:
+        return
+
+    if payload.get("schema") != SELFHOST_COMPILER_PROGRESS_SCHEMA:
+        errors.append(
+            f"{path}: schema mismatch (expected {SELFHOST_COMPILER_PROGRESS_SCHEMA}, got {payload.get('schema')})"
+        )
+    if strict and payload.get("order_status") != "pass":
+        errors.append(f"{path}: order_status must be pass in --strict mode")
+    steps = payload.get("steps")
+    if not isinstance(steps, list):
+        errors.append(f"{path}: steps must be list")
+        return
+
+    required_markers = {
+        "DATA_STRUCTURES_PASS",
+        "GPU_IR_EXPANSION_PASS",
+        "HLIR_LOWERING_PASS",
+        "METAL_MSL_CODEGEN_PASS",
+        "PTX_REGALLOC_EXPANSION_PASS",
+        "HLIR_GPU_CROSS_COVERAGE_PASS",
+        "GPU_OPCODE_SMOKE_PASS",
+    }
+    seen = set()
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        marker = step.get("marker")
+        status = step.get("status")
+        if isinstance(marker, str):
+            seen.add(marker)
+        if strict and status != "pass":
+            errors.append(f"{path}: step {marker!r} must be pass in --strict mode")
+
+    missing = sorted(required_markers - seen)
+    if missing:
+        errors.append(f"{path}: missing required step markers: {missing}")
+
+
+def validate_parallel_cutover_status(path: Path, errors: List[str], strict: bool) -> None:
+    payload = load_json_object(path, errors)
+    if payload is None:
+        return
+
+    if payload.get("schema") != PARALLEL_CUTOVER_STATUS_SCHEMA:
+        errors.append(
+            f"{path}: schema mismatch (expected {PARALLEL_CUTOVER_STATUS_SCHEMA}, got {payload.get('schema')})"
+        )
+    for field in (
+        "track_a_status",
+        "track_b_status",
+        "track_b_order_status",
+        "crates_mainline_removed_status",
+        "status",
+    ):
+        if payload.get(field) not in ("pass", "fail"):
+            errors.append(f"{path}: {field} must be 'pass' or 'fail'")
+    failures = payload.get("blocking_failures")
+    if failures is not None and not isinstance(failures, list):
+        errors.append(f"{path}: blocking_failures must be list")
+    if strict and payload.get("status") != "pass":
+        errors.append(f"{path}: status must be pass in --strict mode")
+    if strict and payload.get("crates_mainline_removed_status") != "pass":
+        errors.append(
+            f"{path}: crates_mainline_removed_status must be pass in --strict mode"
+        )
+
+
 def maybe_validate(
     path: Path,
     strict: bool,
@@ -1718,6 +2450,39 @@ def main() -> int:
     )
     require_genesis_manifest = (
         os.environ.get("OMEGA_REQUIRE_GENESIS_MANIFEST", "0") == "1"
+    )
+    require_data_structures = (
+        os.environ.get("OMEGA_REQUIRE_DATA_STRUCTURES", "0") == "1"
+    )
+    require_interned_chemical_provenance = (
+        os.environ.get("OMEGA_REQUIRE_INTERNED_CHEMICAL_PROVENANCE", "0") == "1"
+    )
+    require_interned_chemical_proof = (
+        os.environ.get("OMEGA_REQUIRE_INTERNED_CHEMICAL_PROOF", "0") == "1"
+    )
+    require_gpu_ir_expansion = (
+        os.environ.get("OMEGA_REQUIRE_GPU_IR_EXPANSION", "0") == "1"
+    )
+    require_hlir_lowering = (
+        os.environ.get("OMEGA_REQUIRE_HLIR_LOWERING", "0") == "1"
+    )
+    require_hlir_gpu_cross_coverage = (
+        os.environ.get("OMEGA_REQUIRE_HLIR_GPU_CROSS_COVERAGE", "0") == "1"
+    )
+    require_metal_msl_codegen = (
+        os.environ.get("OMEGA_REQUIRE_METAL_MSL_CODEGEN", "0") == "1"
+    )
+    require_ptx_regalloc_expansion = (
+        os.environ.get("OMEGA_REQUIRE_PTX_REGALLOC_EXPANSION", "0") == "1"
+    )
+    require_souc_release_provenance = (
+        os.environ.get("OMEGA_REQUIRE_SOUC_RELEASE_PROVENANCE", "1") == "1"
+    )
+    require_repo_hard_no_rust = (
+        os.environ.get("OMEGA_REQUIRE_REPO_HARD_NO_RUST", "1") == "1"
+    )
+    require_parallel_selfhost_cutover = (
+        os.environ.get("OMEGA_REQUIRE_PARALLEL_SELFHOST_CUTOVER", "1") == "1"
     )
 
     maybe_validate(
@@ -1889,6 +2654,96 @@ def main() -> int:
         args.strict and require_genesis_manifest,
         errors,
         validate_genesis_manifest,
+    )
+    maybe_validate(
+        ORDERED_MAP_SIO_PATH,
+        args.strict and require_data_structures,
+        errors,
+        validate_ordered_map_surface,
+    )
+    maybe_validate(
+        ARENA_SIO_PATH,
+        args.strict and require_data_structures,
+        errors,
+        validate_arena_surface,
+    )
+    maybe_validate(
+        INTERNER_SIO_PATH,
+        args.strict and require_data_structures,
+        errors,
+        validate_interner_core_surface,
+    )
+    maybe_validate(
+        GRAPH_SIO_PATH,
+        args.strict and require_data_structures,
+        errors,
+        validate_graph_surface,
+    )
+    maybe_validate(
+        INTERNER_SIO_PATH,
+        args.strict and require_interned_chemical_provenance,
+        errors,
+        validate_interner_provenance_sio,
+    )
+    maybe_validate(
+        INTERNED_CHEMICAL_PROOF_PATH,
+        args.strict and require_interned_chemical_proof,
+        errors,
+        validate_interned_chemical_proof,
+    )
+    maybe_validate(
+        GPU_KERNEL_IR_PATH,
+        args.strict and require_gpu_ir_expansion,
+        errors,
+        validate_gpu_ir_kernel_surface,
+    )
+    maybe_validate(
+        HLIR_TO_GPU_LOWER_PATH,
+        args.strict and require_hlir_gpu_cross_coverage,
+        errors,
+        validate_hlir_to_gpu_cross_coverage,
+    )
+    maybe_validate(
+        HLIR_LOWERING_PATH,
+        args.strict and require_hlir_lowering,
+        errors,
+        validate_hlir_lowering_surface,
+    )
+    maybe_validate(
+        METAL_MSL_CODEGEN_PATH,
+        args.strict and require_metal_msl_codegen,
+        errors,
+        validate_metal_msl_codegen_surface,
+    )
+    maybe_validate(
+        PTX_ADVANCED_CODEGEN_PATH,
+        args.strict and require_ptx_regalloc_expansion,
+        errors,
+        validate_ptx_regalloc_expansion_surface,
+    )
+    maybe_validate(
+        SOUC_RELEASE_PROVENANCE_PATH,
+        args.strict and require_souc_release_provenance,
+        errors,
+        validate_souc_release_provenance,
+    )
+    maybe_validate(
+        NO_RUST_EXECUTION_SURFACE_PATH,
+        args.strict and require_repo_hard_no_rust,
+        errors,
+        validate_no_rust_execution_surface,
+    )
+    maybe_validate(
+        SELFHOST_COMPILER_PROGRESS_PATH,
+        args.strict and require_parallel_selfhost_cutover,
+        errors,
+        validate_selfhost_compiler_progress,
+    )
+    maybe_validate(
+        PARALLEL_CUTOVER_STATUS_PATH,
+        args.strict and require_parallel_selfhost_cutover,
+        errors,
+        validate_parallel_cutover_status,
     )
 
     if errors:

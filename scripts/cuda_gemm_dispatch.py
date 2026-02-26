@@ -45,6 +45,12 @@ CUfunction = ctypes.c_void_p
 CUdeviceptr= ctypes.c_uint64
 CUevent    = ctypes.c_void_p
 
+CUDA_ERROR_NAMES = {
+    0x00000064: "CUDA_ERROR_NO_DEVICE",
+    0x000000c8: "CUDA_ERROR_INVALID_IMAGE",
+    0x000000d1: "CUDA_ERROR_NO_BINARY_FOR_GPU",
+}
+
 
 def _cu(fn, *args):
     """Call a CUDA driver function; raise on non-zero return."""
@@ -103,6 +109,43 @@ def normalize_sm89_cp_async(ptx: str, source: str) -> str:
         )
         ptx = ptx.replace("cp.async.cg.shared.global", "cp.async.ca.shared.global")
     return ptx
+
+
+def sm89_compat_fallback(ptx: str) -> tuple[str, bool]:
+    """Build a conservative PTX fallback for drivers that reject sm_89 modules."""
+    out = ptx
+    changed = False
+
+    if ".target sm_89" in out:
+        out = out.replace(".target sm_89", ".target sm_80")
+        changed = True
+
+    lines = out.splitlines()
+    for i, line in enumerate(lines):
+        if not line.startswith(".version "):
+            continue
+        ver = line.split(" ", 1)[1].strip()
+        if "." not in ver:
+            break
+        major_s, minor_s = ver.split(".", 1)
+        try:
+            major = int(major_s)
+            minor = int(minor_s)
+        except ValueError:
+            break
+        if major > 7 or (major == 7 and minor > 5):
+            lines[i] = ".version 7.5"
+            changed = True
+        break
+
+    if not changed:
+        return ptx, False
+
+    had_trailing_newline = out.endswith("\n")
+    out = "\n".join(lines)
+    if had_trailing_newline:
+        out += "\n"
+    return out, True
 
 
 # ── PTX generation ────────────────────────────────────────────────────────────
@@ -164,9 +207,27 @@ def run_gemm(ptx: str, M: int, N: int, K: int, n_iters: int = 5) -> dict:
     _cu(cuda.cuCtxCreate, ctypes.byref(ctx), 0, device)
 
     # Load PTX
-    ptx_bytes = ptx.encode() + b"\x00"
-    mod = CUmodule(0)
-    _cu(cuda.cuModuleLoadData, ctypes.byref(mod), ptx_bytes)
+    def try_load_module(ptx_text: str) -> tuple[int, CUmodule]:
+        mod_try = CUmodule(0)
+        ptx_bytes = ptx_text.encode() + b"\x00"
+        rc = cuda.cuModuleLoadData(ctypes.byref(mod_try), ptx_bytes)
+        return rc, mod_try
+
+    rc, mod = try_load_module(ptx)
+    if rc != 0 and ".target sm_89" in ptx:
+        fallback_ptx, changed = sm89_compat_fallback(ptx)
+        if changed:
+            print(
+                "  [ptx] cuModuleLoadData rejected sm_89 payload; retrying with "
+                "compat fallback (.target sm_80, .version 7.5)"
+            )
+            rc2, mod2 = try_load_module(fallback_ptx)
+            if rc2 == 0:
+                rc, mod = rc2, mod2
+
+    if rc != 0:
+        err_name = CUDA_ERROR_NAMES.get(rc, "CUDA_ERROR_UNKNOWN")
+        raise RuntimeError(f"cuModuleLoadData returned {rc:#010x} ({err_name})")
 
     fn = CUfunction(0)
     _cu(cuda.cuModuleGetFunction, ctypes.byref(fn), mod, b"epistemic_gemm")

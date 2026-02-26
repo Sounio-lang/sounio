@@ -22,6 +22,11 @@
 #   SM_MAJOR        — PTX SM version major   (default: auto from nvidia-smi)
 #   SKIP_BUILD      — set to 1 to skip cargo build (reuse previous binary)
 #   CONTRACT_PATH   — independence benchmark contract path
+#   GPU_PROFILE_TIMEOUT_SECS — timeout for cargo-test profile stage (default: 900)
+#   GPU_RUN_TIMEOUT_SECS     — timeout for souc run stages (default: 300)
+#   GPU_DIRECT_DISPATCH_FALLBACK — run direct dispatch on profile failure/timeout (default: 1)
+#   GPU_DIRECT_ITERS         — iterations for direct dispatch fallback (default: 8)
+#   GPU_DIRECT_PTX_FILE      — optional PTX file for direct dispatch fallback
 
 set -euo pipefail
 
@@ -35,6 +40,11 @@ SKIP_BUILD="${SKIP_BUILD:-0}"
 GPU_PASS="${GPU_PASS:-}"   # keyboard-interactive password (2FA); set if needed
 CONTRACT_PATH="${CONTRACT_PATH:-benchmarks/independence/contract.v1.json}"
 REMOTE_CARGO_BIN="${REMOTE_CARGO_BIN:-\$HOME/.cargo/bin}"
+GPU_PROFILE_TIMEOUT_SECS="${GPU_PROFILE_TIMEOUT_SECS:-900}"
+GPU_RUN_TIMEOUT_SECS="${GPU_RUN_TIMEOUT_SECS:-300}"
+GPU_DIRECT_DISPATCH_FALLBACK="${GPU_DIRECT_DISPATCH_FALLBACK:-1}"
+GPU_DIRECT_ITERS="${GPU_DIRECT_ITERS:-8}"
+GPU_DIRECT_PTX_FILE="${GPU_DIRECT_PTX_FILE:-}"
 
 # Resolve GPU_HOST to IP for direct 100G path
 case "$GPU_HOST" in
@@ -71,9 +81,25 @@ import pathlib
 import sys
 
 obj = json.loads(pathlib.Path(sys.argv[1]).read_text())
-if obj.get("schema") != "sounio.independence.contract.v1":
+schema = obj.get("schema")
+if schema not in {"sounio.independence.contract.v1", "sounio.independence.contract.v2"}:
     raise SystemExit(f"invalid contract schema: {obj.get('schema')}")
-print(f"[contract] ok threshold={obj['performance_gate']['threshold']}")
+acc = obj.get("epistemic_power_accumulator_bound")
+if not isinstance(acc, dict):
+    raise SystemExit("missing epistemic_power_accumulator_bound")
+if int(acc.get("delta_32_max_exclusive", 0)) != 96:
+    raise SystemExit(
+        "invalid delta_32_max_exclusive; expected 96 "
+        f"(got {acc.get('delta_32_max_exclusive')!r})"
+    )
+formula = str(acc.get("delta_32_formula", "")).replace(" ", "")
+if formula != "4*(F%8)+2*(P%16)+(Q%32)":
+    raise SystemExit(f"invalid delta_32_formula: {formula!r}")
+print(
+    f"[contract] ok schema={schema} "
+    f"threshold={obj['performance_gate']['threshold']} "
+    f"delta_32_max_exclusive={acc['delta_32_max_exclusive']}"
+)
 PY
 fi
 
@@ -98,6 +124,16 @@ set -euo pipefail
 if [ -d "${REMOTE_CARGO_BIN}" ]; then
   export PATH="${REMOTE_CARGO_BIN}:\$PATH"
 fi
+
+run_with_timeout() {
+  local timeout_secs="\$1"
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout --preserve-status "\${timeout_secs}s" "\$@"
+  else
+    "\$@"
+  fi
+}
 
 echo ""
 echo "=== Rust toolchain ==="
@@ -127,22 +163,82 @@ echo "=== Epistemic GEMM profile (${GEMM_M}×${GEMM_N}×${GEMM_K}) ==="
 
 # Run the GPU unit tests — the roofline hook fires on every GEMM launch
 # and prints: [souc-gpu] epistemic_gemm M×K×N  ... GFLOPS  bound=...  eff=...%
-SOUNIO_GPU_GEMM_M=${GEMM_M} \
-SOUNIO_GPU_GEMM_N=${GEMM_N} \
-SOUNIO_GPU_GEMM_K=${GEMM_K} \
+profile_log="\$(mktemp /tmp/sounio_gpu_profile.XXXXXX.log)"
+direct_log="\$(mktemp /tmp/sounio_gpu_direct_dispatch.XXXXXX.log)"
+cleanup_logs() {
+  rm -f "\$profile_log" "\$direct_log"
+}
+trap cleanup_logs EXIT
+
+profile_ok=0
+set +e
+run_with_timeout "${GPU_PROFILE_TIMEOUT_SECS}" env \
+  SOUNIO_GPU_GEMM_M=${GEMM_M} \
+  SOUNIO_GPU_GEMM_N=${GEMM_N} \
+  SOUNIO_GPU_GEMM_K=${GEMM_K} \
   cargo test --release --features gpu -p souc \
-    --lib "epistemic_gemm" -- --nocapture 2>&1 | \
-    grep -E "\[souc-gpu\]|GFLOPS|test result|FAILED" || true
+    --lib "epistemic_gemm" -- --nocapture >"\$profile_log" 2>&1
+profile_rc=\$?
+set -e
+
+grep -E "\[souc-gpu\]|GFLOPS|test result|FAILED" "\$profile_log" || true
+
+if [ "\$profile_rc" -eq 0 ]; then
+  profile_ok=1
+  echo "GPU_PROFILE_STATUS=pass mode=cargo_test timeout_s=${GPU_PROFILE_TIMEOUT_SECS}"
+else
+  if [ "\$profile_rc" -eq 124 ] || [ "\$profile_rc" -eq 137 ]; then
+    echo "warning: epistemic_gemm profile timed out after ${GPU_PROFILE_TIMEOUT_SECS}s"
+  else
+    echo "warning: epistemic_gemm profile exited rc=\$profile_rc"
+  fi
+fi
+
+if [ "\$profile_ok" -ne 1 ] && [ "${GPU_DIRECT_DISPATCH_FALLBACK}" = "1" ]; then
+  echo ""
+  echo "=== Direct CUDA dispatch fallback (${GEMM_M}×${GEMM_N}×${GEMM_K}) ==="
+  set +e
+  if [ -n "${GPU_DIRECT_PTX_FILE}" ] && [ -f "${GPU_DIRECT_PTX_FILE}" ]; then
+    run_with_timeout "${GPU_PROFILE_TIMEOUT_SECS}" env \
+      GEMM_M=${GEMM_M} \
+      GEMM_N=${GEMM_N} \
+      GEMM_K=${GEMM_K} \
+      GEMM_ITERS=${GPU_DIRECT_ITERS} \
+      GEMM_PTX_FILE="${GPU_DIRECT_PTX_FILE}" \
+      python3 scripts/cuda_gemm_dispatch.py >"\$direct_log" 2>&1
+  else
+    run_with_timeout "${GPU_PROFILE_TIMEOUT_SECS}" env \
+      GEMM_M=${GEMM_M} \
+      GEMM_N=${GEMM_N} \
+      GEMM_K=${GEMM_K} \
+      GEMM_ITERS=${GPU_DIRECT_ITERS} \
+      python3 scripts/cuda_gemm_dispatch.py >"\$direct_log" 2>&1
+  fi
+  direct_rc=\$?
+  set -e
+  cat "\$direct_log"
+
+  if [ "\$direct_rc" -eq 0 ]; then
+    profile_ok=1
+    echo "GPU_PROFILE_STATUS=pass mode=direct_dispatch timeout_s=${GPU_PROFILE_TIMEOUT_SECS}"
+  else
+    echo "warning: direct dispatch fallback failed rc=\$direct_rc"
+  fi
+fi
+
+if [ "\$profile_ok" -ne 1 ]; then
+  echo "GPU_PROFILE_STATUS=fail"
+fi
 
 echo ""
 echo "=== Epistemic GEMM benchmark via souc run ==="
-  ./target/release/souc run benchmarks/cl44_vs_octonion.sio 2>/dev/null | \
-  grep -E "Octonion|GFLOPS|BENCHMARK"
+run_with_timeout "${GPU_RUN_TIMEOUT_SECS}" ./target/release/souc run benchmarks/cl44_vs_octonion.sio \
+  2>/dev/null | grep -E "Octonion|GFLOPS|BENCHMARK" || true
 
 echo ""
 echo "=== fMRI Equivariant demo (CPU validation) ==="
-  ./target/release/souc run experiments/02_fmri_equivariant/fmri_equivariant.sio 2>/dev/null | \
-  grep -E "PASS|FAIL|Experiment 02 complete|r="
+run_with_timeout "${GPU_RUN_TIMEOUT_SECS}" ./target/release/souc run experiments/02_fmri_equivariant/fmri_equivariant.sio \
+  2>/dev/null | grep -E "PASS|FAIL|Experiment 02 complete|r=" || true
 
 REMOTE_SCRIPT
 

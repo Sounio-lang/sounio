@@ -8,11 +8,13 @@ namespace OmegaMathlib
 def clamp (eps : Real) (x : Real) : Real := max eps (min 1 x)
 
 /-- Log-domain utility to avoid underflow/overflow in products. -/
-def logEpistemicPower (weights metrics : List Real) (penalty : Real) (eps : Real := 1e-9) : Real :=
+noncomputable def logEpistemicPower (weights metrics : List Real) (penalty : Real)
+    (eps : Real := 1e-9) : Real :=
   (List.zipWith (fun w m => w * Real.log (clamp eps m)) weights metrics).sum - penalty
 
 /-- Canonical Epistemic Power utility in real space. -/
-def epistemicPower (weights metrics : List Real) (penalty : Real) (eps : Real := 1e-9) : Real :=
+noncomputable def epistemicPower (weights metrics : List Real) (penalty : Real)
+    (eps : Real := 1e-9) : Real :=
   Real.exp (logEpistemicPower weights metrics penalty eps)
 
 lemma clamp_lower_bound (eps x : Real) : eps <= clamp eps x := by
@@ -21,7 +23,7 @@ lemma clamp_lower_bound (eps x : Real) : eps <= clamp eps x := by
 
 lemma clamp_upper_bound (eps x : Real) : clamp eps x <= max eps 1 := by
   unfold clamp
-  exact max_le_max le_rfl (min_le_right x 1)
+  exact max_le_max le_rfl (min_le_left 1 x)
 
 /-- Increasing penalty decreases log-EpistemicPower (antitone in penalty). -/
 theorem logEpistemicPower_penalty_antitone
