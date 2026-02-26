@@ -12,6 +12,7 @@
 struct Checker {
     env: TypeEnv,
     borrows: BorrowEnv,
+    units: UnitRegistry,
     structs: StructTable,
     enums: EnumTable,
     fn_sigs: FnSigTable,
@@ -23,10 +24,11 @@ struct Checker {
     current_effect_count: i64,
 }
 
-fn checker_new() -> Checker {
+fn checker_new() -> Checker with Mut, Panic, Div {
     Checker {
         env: type_env_new(),
         borrows: borrow_env_new(),
+        units: register_builtin_units(unit_registry_new()),
         structs: struct_table_new(),
         enums: enum_table_new(),
         fn_sigs: fn_sig_table_new(),
@@ -356,7 +358,14 @@ impl Checker {
         } else if name_is_char(name) {
             (self, ty_char())
         } else {
-            (self, ty_named(name))
+            // Check if it's a registered unit name (mg, kg, m, s, etc.)
+            let unit_idx = self.units.find(name)
+            if unit_idx >= 0 {
+                // Units resolve to f64 with a unit_id annotation
+                (self, ty_with_unit(ty_f64(), unit_idx))
+            } else {
+                (self, ty_named(name))
+            }
         }
     }
 
@@ -468,7 +477,16 @@ impl Checker {
             ItemImpl => self.collect_impl_def(item.impl_def)
             ItemTypeAlias => self
             ItemUse => self
+            ItemUnit => self.collect_unit_decl(item.name)
         }
+    }
+
+    fn collect_unit_decl(self, name: Name) -> Checker with Mut, Panic, Div, Alloc, IO {
+        var c = self
+        // Register user-defined unit as a mass-like dimension (f64 base)
+        // For now, user-defined units get a generic dimension
+        c.units = c.units.register(name, unit_dim_dimensionless())
+        c
     }
 
     // --------------------------------------------------------
@@ -746,6 +764,7 @@ impl Checker {
             ItemImpl => self.check_impl_item(item.impl_def)
             ItemTypeAlias => self
             ItemUse => self
+            ItemUnit => self  // Already handled in collect pass
         }
     }
 
@@ -1099,7 +1118,107 @@ impl Checker {
         if result.kind == TypeKind::TyError && !is_error_or_unknown(left_ty) && !is_error_or_unknown(right_ty) {
             c = c.report_mismatch(e.span, 4, left_ty, right_ty)
         }
-        (c, result)
+        // Unit checking for arithmetic on unit-typed values
+        let result_with_units = c.check_binary_units(e.span, e.bin_op, left_ty, right_ty, result)
+        c = result_with_units.0
+        let final_result = result_with_units.1
+        (c, final_result)
+    }
+
+    fn check_binary_units(self, span: Span, op: BinaryOp, left: TypeEntry, right: TypeEntry, result: TypeEntry) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        var c = self
+        let lu = left.unit_id
+        let ru = right.unit_id
+        // If neither side has units, nothing to check
+        if lu < 0 && ru < 0 {
+            return (c, result)
+        }
+        match op {
+            // Addition/subtraction: units must match exactly
+            OpAdd => {
+                if lu != ru {
+                    c = c.report_unit_mismatch(span, lu, ru)
+                    (c, result)
+                } else {
+                    (c, ty_with_unit(result, lu))
+                }
+            }
+            OpSub => {
+                if lu != ru {
+                    c = c.report_unit_mismatch(span, lu, ru)
+                    (c, result)
+                } else {
+                    (c, ty_with_unit(result, lu))
+                }
+            }
+            // Multiplication: combine unit dimensions
+            OpMul => {
+                if lu >= 0 && ru >= 0 {
+                    // Both have units — product gets combined dimensions
+                    let ld = c.units.get_dim(lu)
+                    let rd = c.units.get_dim(ru)
+                    let prod = unit_dim_mul(ld, rd)
+                    // For now, result is f64 with no named unit (product unit)
+                    // A future pass could register the product unit
+                    (c, result)
+                } else {
+                    // One side has units, other is scalar — keep the unit
+                    let uid = if lu >= 0 { lu } else { ru }
+                    (c, ty_with_unit(result, uid))
+                }
+            }
+            // Division: combine unit dimensions
+            OpDiv => {
+                if lu >= 0 && ru >= 0 {
+                    let ld = c.units.get_dim(lu)
+                    let rd = c.units.get_dim(ru)
+                    let quot = unit_dim_div(ld, rd)
+                    if unit_dim_is_dimensionless(quot) {
+                        // Units cancel out — result is dimensionless
+                        (c, result)
+                    } else {
+                        // Quotient has dimensions — result is f64 (unnamed unit)
+                        (c, result)
+                    }
+                } else if lu >= 0 {
+                    // numerator has units, denominator is scalar — keep unit
+                    (c, ty_with_unit(result, lu))
+                } else {
+                    // numerator is scalar, denominator has units — inverse unit
+                    (c, result)
+                }
+            }
+            // Comparison operators: units must match
+            OpEq => { if lu != ru { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
+            OpNe => { if lu != ru { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
+            OpLt => { if lu != ru { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
+            OpLe => { if lu != ru { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
+            OpGt => { if lu != ru { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
+            OpGe => { if lu != ru { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
+            // Other operators: pass through
+            _ => (c, result)
+        }
+    }
+
+    fn report_unit_mismatch(self, span: Span, left_uid: i64, right_uid: i64) -> Checker with Mut, Panic, Div, Alloc, IO {
+        var c = self
+        c.had_error = true
+        c.error_count = c.error_count + 1
+        print("error[E041]: unit mismatch in arithmetic operation\n")
+        print("  left unit: ")
+        if left_uid >= 0 {
+            print_unit_dim(c.units.get_dim(left_uid))
+        } else {
+            print("(dimensionless)")
+        }
+        print("\n  right unit: ")
+        if right_uid >= 0 {
+            print_unit_dim(c.units.get_dim(right_uid))
+        } else {
+            print("(dimensionless)")
+        }
+        print("\n")
+        c
     }
 
     // --------------------------------------------------------
