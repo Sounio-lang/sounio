@@ -579,6 +579,7 @@ impl Checker {
                     name: name,
                     fields: fields,
                     field_count: field_count,
+                    is_linear: (*sd).is_linear,
                 }
                 c.structs = c.structs.add(info)
                 c
@@ -911,6 +912,16 @@ impl Checker {
         let pair = c.check_stmts(blk.stmts)
         c = pair.0
         let result_ty = pair.1
+        // Check that all linear variables in this scope have been consumed
+        let linear_check = c.borrows.check_linear_consumed()
+        c.borrows = linear_check.0
+        if linear_check.1 > 0 {
+            c.had_error = true
+            c.error_count = c.error_count + 1
+            print("error[E040]: linear value not consumed (")
+            print_int(linear_check.1)
+            print(" unconsumed)\n")
+        }
         c.borrows = c.borrows.pop_scope()
         c.env = c.env.pop_scope()
         (c, result_ty)
@@ -958,8 +969,9 @@ impl Checker {
         }
         let cur_env = c.env
         c.env = cur_env.bind(s.name, bind_ty, false)
-        // Track variable for borrow checking
-        c.borrows = c.borrows.track(s.name, false)
+        // Track variable for borrow checking (linear if struct is declared linear)
+        let lin = c.is_linear_type(bind_ty)
+        c.borrows = c.borrows.track(s.name, lin)
         (c, ty_unit())
     }
 
@@ -979,9 +991,20 @@ impl Checker {
             bind_ty = ann_ty
         }
         c.env = c.env.bind(s.name, bind_ty, true)
-        // Track variable for borrow checking
-        c.borrows = c.borrows.track(s.name, false)
+        // Track variable for borrow checking (linear if struct is declared linear)
+        let lin = c.is_linear_type(bind_ty)
+        c.borrows = c.borrows.track(s.name, lin)
         (c, ty_unit())
+    }
+
+    fn is_linear_type(self, ty: TypeEntry) -> bool with Mut, Panic, Div {
+        if ty.kind == TypeKind::TyNamed {
+            let idx = self.structs.find(ty.name)
+            if idx >= 0 {
+                return self.structs.entries[idx].is_linear
+            }
+        }
+        false
     }
 
     fn check_expr_stmt(self, s: Stmt) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
@@ -1054,7 +1077,19 @@ impl Checker {
             ExprBoolFalse => (self, ty_bool())
             ExprStringLit => (self, ty_string())
             ExprCharLit => (self, ty_char())
-            ExprIdent => (self, self.env.lookup(e.name))
+            ExprIdent => {
+                let ident_ty = self.env.lookup(e.name)
+                // If this is a linear type variable, mark it as consumed
+                var c2 = self
+                if c2.is_linear_type(ident_ty) {
+                    let consume_result = c2.borrows.consume_linear(e.name)
+                    c2.borrows = consume_result.0
+                    if consume_result.1 != 0 {
+                        c2 = c2.report_error_at(e.span, consume_result.1, 0, 0, 0)
+                    }
+                }
+                (c2, ident_ty)
+            }
             ExprPath => self.check_path_expr(e)
             ExprBinary => self.check_binary_expr(e)
             ExprUnary => self.check_unary_expr(e)
