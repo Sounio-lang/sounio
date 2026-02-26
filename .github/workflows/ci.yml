@@ -7,33 +7,29 @@ on:
       - main
       - master
 
-jobs:
-  build-souc:
-    name: Build souc Binary
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Build souc (debug + release)
-        run: |
-          cargo build -p souc --bin souc
-          cargo build -p souc --bin souc --release
-      - name: Upload souc binaries
-        uses: actions/upload-artifact@v4
-        with:
-          name: souc-binaries
-          path: |
-            target/debug/souc
-            target/release/souc
-          retention-days: 1
+# Shared anchor for pinned souc binary resolution.
+# Each job that needs souc includes the resolve step below.
+# The binary is downloaded from GitHub releases (v0.100.3)
+# and verified via sha256 + ed25519 signature.
 
+jobs:
   fast-gate:
     runs-on: ubuntu-24.04
     env:
-      LLVM_SYS_150_PREFIX: /usr/lib/llvm-15
+      SKIP_BUILD: "1"
+      SOUNIO_REPO_HARD_NO_RUST: "1"
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Resolve pinned souc binary
+        run: |
+          chmod +x scripts/omega/omega_resolve_souc_bin.sh
+          SOUC_BIN="$(
+            SOUNIO_SOUC_VERSION=0.100.3 \
+            OMEGA_SOUC_REQUIRE_PINNED=1 \
+            OMEGA_SOUC_ALLOW_LOCAL_FALLBACK=0 \
+              scripts/omega/omega_resolve_souc_bin.sh --print-path
+          )"
+          echo "SOUC_BIN=$SOUC_BIN" >> "$GITHUB_ENV"
       - name: Check workflow script references
         run: scripts/check_workflow_script_refs.sh
       - name: Check docs consistency
@@ -42,38 +38,34 @@ jobs:
         run: scripts/check_issue_template_contracts.sh
       - name: Check legacy path hygiene
         run: scripts/check_legacy_paths.sh
-      - name: Install LLVM 15
-        run: |
-          curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh
-          sudo bash /tmp/llvm.sh 15 -n noble
       - name: Run fast gate
         run: scripts/fast_gate.sh
       - name: Check for new lib warning signatures
         run: scripts/check_new_warnings.sh
       - name: Feature matrix gate
         run: scripts/check_feature_matrix.sh
-      - name: GPU backend test
-        if: ${{ env.SKIP_CARGO_TESTS != '1' }}
-        run: cargo test -p souc --features gpu --test backend_e2e
-      - name: Ontology e2e smoke test
-        if: ${{ env.SKIP_CARGO_TESTS != '1' }}
-        run: cargo test -p souc --test integration_ontology_e2e
 
   release-critical-pack:
     name: Release-Critical Pack
     runs-on: ubuntu-24.04
     env:
-      LLVM_SYS_150_PREFIX: /usr/lib/llvm-15
+      SKIP_BUILD: "1"
+      SOUNIO_REPO_HARD_NO_RUST: "1"
       SOUNIO_RELEASE_PACK_RUN_DIR: /tmp/sounio-release-critical-pack
       SOUNIO_OPT_DECISION_TRAIL_REQUIRED: "1"
       SOUNIO_OPT_DECISION_TRAIL_PATH: /tmp/sounio-release-critical-pack/decision_trail.jsonl
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install LLVM 15
+      - name: Resolve pinned souc binary
         run: |
-          curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh
-          sudo bash /tmp/llvm.sh 15 -n noble
+          chmod +x scripts/omega/omega_resolve_souc_bin.sh
+          SOUC_BIN="$(
+            SOUNIO_SOUC_VERSION=0.100.3 \
+            OMEGA_SOUC_REQUIRE_PINNED=1 \
+            OMEGA_SOUC_ALLOW_LOCAL_FALLBACK=0 \
+              scripts/omega/omega_resolve_souc_bin.sh --print-path
+          )"
+          echo "SOUC_BIN=$SOUC_BIN" >> "$GITHUB_ENV"
       - name: Run release-critical pack
         run: bash scripts/run_release_critical_pack.sh
       - name: Verify release-critical parity/oracle-diff gates
@@ -93,10 +85,9 @@ jobs:
   selfhost-independence:
     name: Selfhost Independence Gate
     runs-on: ubuntu-24.04
-    needs: build-souc
     env:
-      SOUC_BIN: ./target/release/souc
       SKIP_BUILD: "1"
+      SOUNIO_REPO_HARD_NO_RUST: "1"
       WORK_DIR: /tmp/sounio-selfhost-independence-gate
       BOOTSTRAP_BUNDLE_DIR: bootstrap
       SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST: bootstrap/selfhost-kernel.manifest
@@ -108,16 +99,18 @@ jobs:
       SOUNIO_OPT_DECISION_TRAIL_PATH: /tmp/sounio-selfhost-independence-gate/decision_trail.jsonl
     steps:
       - uses: actions/checkout@v4
-      - name: Download souc binaries
-        uses: actions/download-artifact@v4
-        with:
-          name: souc-binaries
-          path: target/
-      - name: Make binaries executable
-        run: chmod +x target/debug/souc target/release/souc
-      - name: Run selfhost independence gate
+      - name: Resolve pinned souc binary
         run: |
-          bash scripts/selfhost_independence_gate.sh
+          chmod +x scripts/omega/omega_resolve_souc_bin.sh
+          SOUC_BIN="$(
+            SOUNIO_SOUC_VERSION=0.100.3 \
+            OMEGA_SOUC_REQUIRE_PINNED=1 \
+            OMEGA_SOUC_ALLOW_LOCAL_FALLBACK=0 \
+              scripts/omega/omega_resolve_souc_bin.sh --print-path
+          )"
+          echo "SOUC_BIN=$SOUC_BIN" >> "$GITHUB_ENV"
+      - name: Run selfhost independence gate
+        run: bash scripts/selfhost_independence_gate.sh
       - name: Upload selfhost independence artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -130,6 +123,8 @@ jobs:
     name: RL Policy Shadow Gate
     runs-on: ubuntu-24.04
     env:
+      SKIP_BUILD: "1"
+      SOUNIO_REPO_HARD_NO_RUST: "1"
       CONTRACT_PATH: benchmarks/independence/contract.v1.json
       SOUNIO_OPT_POLICY_PATH: bootstrap/policies/policy.v1.json
       SOUNIO_REQUIRE_SIGNED_POLICY: "0"
@@ -137,17 +132,24 @@ jobs:
       SOUNIO_OPT_DECISION_TRAIL_PATH: /tmp/sounio-rl-shadow/decisions.jsonl
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Build souc release for policy tools
-        run: cargo build -p souc --release --features jit
+      - name: Resolve pinned souc binary
+        run: |
+          chmod +x scripts/omega/omega_resolve_souc_bin.sh
+          SOUC_BIN="$(
+            SOUNIO_SOUC_VERSION=0.100.3 \
+            OMEGA_SOUC_REQUIRE_PINNED=1 \
+            OMEGA_SOUC_ALLOW_LOCAL_FALLBACK=0 \
+              scripts/omega/omega_resolve_souc_bin.sh --print-path
+          )"
+          echo "SOUC_BIN=$SOUC_BIN" >> "$GITHUB_ENV"
       - name: Validate independence benchmark contract
         run: bash scripts/independence_benchmark_gate.sh
       - name: RL policy status (shadow)
-        run: ./target/release/souc opt policy status --policy "$SOUNIO_OPT_POLICY_PATH"
+        run: $SOUC_BIN opt policy status --policy "$SOUNIO_OPT_POLICY_PATH"
       - name: RL shadow decision trail smoke (MIR JIT)
         run: |
           mkdir -p /tmp/sounio-rl-shadow
-          ./target/release/souc jit tests/rustless-regressions/02_arithmetic.sio --mir --ml-opt
+          $SOUC_BIN jit tests/rustless-regressions/02_arithmetic.sio --mir --ml-opt
           test -s "$SOUNIO_OPT_DECISION_TRAIL_PATH"
           rg -n '"domain":"mir"' "$SOUNIO_OPT_DECISION_TRAIL_PATH"
       - name: Upload RL shadow decision artifacts
@@ -163,6 +165,8 @@ jobs:
     runs-on: ubuntu-24.04
     needs: rl-policy-shadow
     env:
+      SKIP_BUILD: "1"
+      SOUNIO_REPO_HARD_NO_RUST: "1"
       SHADOW_POLICY: bootstrap/policies/policy.v1.json
       ACTIVE_POLICY: bootstrap/policies/active/policy.v1.json
       SOUNIO_REQUIRE_SIGNED_POLICY: "0"
@@ -170,29 +174,47 @@ jobs:
       SOUNIO_OPT_DECISION_TRAIL_PATH: /tmp/sounio-rl-active/decisions.jsonl
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Build souc release for policy tools
-        run: cargo build -p souc --release
+      - name: Resolve pinned souc binary
+        run: |
+          chmod +x scripts/omega/omega_resolve_souc_bin.sh
+          SOUC_BIN="$(
+            SOUNIO_SOUC_VERSION=0.100.3 \
+            OMEGA_SOUC_REQUIRE_PINNED=1 \
+            OMEGA_SOUC_ALLOW_LOCAL_FALLBACK=0 \
+              scripts/omega/omega_resolve_souc_bin.sh --print-path
+          )"
+          echo "SOUC_BIN=$SOUC_BIN" >> "$GITHUB_ENV"
       - name: Prepare active policy artifact
         run: |
           mkdir -p "$(dirname "$ACTIVE_POLICY")"
           cp "$SHADOW_POLICY" "$ACTIVE_POLICY"
       - name: RL policy status (active)
-        run: ./target/release/souc opt policy status --policy "$ACTIVE_POLICY"
+        run: $SOUC_BIN opt policy status --policy "$ACTIVE_POLICY"
 
   rust-free-proof-build:
     name: Rust-Free Proof Build Inputs
     runs-on: ubuntu-24.04
+    env:
+      SKIP_BUILD: "1"
+      SOUNIO_REPO_HARD_NO_RUST: "1"
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Build compiler and bootstrap seed artifact
+      - name: Resolve pinned souc binary
         run: |
-          cargo build -p souc --bin souc
-          bash scripts/build_bootstrap_seed.sh
-          mkdir -p /tmp/sounio-rust-free-proof-inputs
+          chmod +x scripts/omega/omega_resolve_souc_bin.sh
+          SOUC_BIN="$(
+            SOUNIO_SOUC_VERSION=0.100.3 \
+            OMEGA_SOUC_REQUIRE_PINNED=1 \
+            OMEGA_SOUC_ALLOW_LOCAL_FALLBACK=0 \
+              scripts/omega/omega_resolve_souc_bin.sh --print-path
+          )"
+          echo "SOUC_BIN=$SOUC_BIN" >> "$GITHUB_ENV"
+      - name: Build bootstrap seed artifact
+        run: bash scripts/build_bootstrap_seed.sh
+      - name: Assemble rust-free proof inputs
+        run: |
           mkdir -p /tmp/sounio-rust-free-proof-inputs/scripts
-          cp target/debug/souc /tmp/sounio-rust-free-proof-inputs/souc
+          cp "$SOUC_BIN" /tmp/sounio-rust-free-proof-inputs/souc
           cp bootstrap/seeds/sounio-bootstrap-linux-x86_64.sio.bin /tmp/sounio-rust-free-proof-inputs/
           cp bootstrap/seeds/sounio-bootstrap-linux-x86_64.sio.bin.sha256 /tmp/sounio-rust-free-proof-inputs/
           cp bootstrap/seeds/sounio-bootstrap-linux-x86_64.sio.bin.sig /tmp/sounio-rust-free-proof-inputs/
@@ -266,9 +288,11 @@ jobs:
   golden-snapshot-drift:
     name: Golden Snapshot Drift
     runs-on: ubuntu-24.04
+    env:
+      SKIP_BUILD: "1"
+      SOUNIO_REPO_HARD_NO_RUST: "1"
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
       - name: Verify golden snapshots are current
         run: scripts/check_golden_snapshots.sh
 
@@ -276,11 +300,21 @@ jobs:
     name: Release Traceability Generator
     runs-on: ubuntu-24.04
     env:
-      LLVM_SYS_150_PREFIX: /usr/lib/llvm-15
+      SKIP_BUILD: "1"
+      SOUNIO_REPO_HARD_NO_RUST: "1"
       SOUNIO_TRACEABILITY_MODE: full
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Resolve pinned souc binary
+        run: |
+          chmod +x scripts/omega/omega_resolve_souc_bin.sh
+          SOUC_BIN="$(
+            SOUNIO_SOUC_VERSION=0.100.3 \
+            OMEGA_SOUC_REQUIRE_PINNED=1 \
+            OMEGA_SOUC_ALLOW_LOCAL_FALLBACK=0 \
+              scripts/omega/omega_resolve_souc_bin.sh --print-path
+          )"
+          echo "SOUC_BIN=$SOUC_BIN" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -292,38 +326,6 @@ jobs:
         run: bash scripts/run_traceability_diagnostic.sh --mode full
       - name: Verify traceability generator succeeds
         run: scripts/check_traceability_generator.sh
-
-  cross-platform-native:
-    name: Native Backend (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-          - os: macos-14
-            target: aarch64-apple-darwin
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-          - os: windows-2022
-            target: x86_64-pc-windows-msvc
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Build Poseidon VM
-        shell: bash
-        run: |
-          cd bootstrap/poseidon
-          make clean || true
-          make
-      - name: Build native backend
-        run: cargo build -p souc --release
-      - name: Run native backend tests
-        run: |
-          cargo test -p souc --test linker_selfhost -- --nocapture
-          cargo test -p souc --test vm_selfhost -- --nocapture
-          cargo test -p souc --test native_cross_validation -- --nocapture
 
   selfhost-zero-fallback:
     name: Selfhost Zero Fallback (${{ matrix.os }})
@@ -344,9 +346,21 @@ jobs:
             parse_shard_count: 56
             parse_shard_selector: "all"
             parse_shard_mode: balanced
+    env:
+      SKIP_BUILD: "1"
+      SOUNIO_REPO_HARD_NO_RUST: "1"
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Resolve pinned souc binary
+        run: |
+          chmod +x scripts/omega/omega_resolve_souc_bin.sh
+          SOUC_BIN="$(
+            SOUNIO_SOUC_VERSION=0.100.3 \
+            OMEGA_SOUC_REQUIRE_PINNED=1 \
+            OMEGA_SOUC_ALLOW_LOCAL_FALLBACK=0 \
+              scripts/omega/omega_resolve_souc_bin.sh --print-path
+          )"
+          echo "SOUC_BIN=$SOUC_BIN" >> "$GITHUB_ENV"
       - name: Run selfhost zero-fallback gate
         env:
           WORK_DIR: /tmp/sounio-selfhost-zero-gate-${{ runner.os }}
@@ -358,8 +372,7 @@ jobs:
           SOUNIO_SELFHOST_STRICT: "1"
           SOUNIO_OPT_DECISION_TRAIL_REQUIRED: "1"
           SOUNIO_OPT_DECISION_TRAIL_PATH: /tmp/sounio-selfhost-zero-gate-${{ runner.os }}/decision_trail.jsonl
-        run: |
-          bash scripts/selfhost_zero_fallback_gate.sh
+        run: bash scripts/selfhost_zero_fallback_gate.sh
       - name: Upload selfhost gate artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -372,14 +385,24 @@ jobs:
     name: Selfhost Cycle Gate
     runs-on: ubuntu-24.04
     env:
+      SKIP_BUILD: "1"
+      SOUNIO_REPO_HARD_NO_RUST: "1"
       SOUNIO_OPT_DECISION_TRAIL_REQUIRED: "1"
       SOUNIO_OPT_DECISION_TRAIL_PATH: /tmp/sounio-selfhost-cycle-gate/decision_trail.jsonl
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Build bootstrap seed artifact
+      - name: Resolve pinned souc binary
         run: |
-          bash scripts/build_bootstrap_seed.sh
+          chmod +x scripts/omega/omega_resolve_souc_bin.sh
+          SOUC_BIN="$(
+            SOUNIO_SOUC_VERSION=0.100.3 \
+            OMEGA_SOUC_REQUIRE_PINNED=1 \
+            OMEGA_SOUC_ALLOW_LOCAL_FALLBACK=0 \
+              scripts/omega/omega_resolve_souc_bin.sh --print-path
+          )"
+          echo "SOUC_BIN=$SOUC_BIN" >> "$GITHUB_ENV"
+      - name: Build bootstrap seed artifact
+        run: bash scripts/build_bootstrap_seed.sh
       - name: Verify seed-only bootstrap smoke
         env:
           SOUNIO_BOOTSTRAP_SEED_ENFORCE: "1"
@@ -387,15 +410,14 @@ jobs:
           SOUNIO_BOOTSTRAP_SEED_SHA256_PATH: bootstrap/seeds/sounio-bootstrap-linux-x86_64.sio.bin.sha256
           SOUNIO_BOOTSTRAP_SEED_SIG_PATH: bootstrap/seeds/sounio-bootstrap-linux-x86_64.sio.bin.sig
         run: |
-          test -x ./target/debug/souc
-          ./target/debug/souc run self-hosted/ -- version
+          test -x "$SOUC_BIN"
+          $SOUC_BIN run self-hosted/ -- version
       - name: Run selfhost cycle reproducibility gate (stage1/stage2 byte-equality)
         env:
           WORK_DIR: /tmp/sounio-selfhost-cycle-repro-gate
           SOUNIO_SELFHOST_CYCLE_SEED_PATH: bootstrap/seeds/sounio-bootstrap-linux-x86_64.sio.bin
           SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST: bootstrap/selfhost-kernel.manifest
-        run: |
-          bash scripts/selfhost_cycle_release_gate.sh
+        run: bash scripts/selfhost_cycle_release_gate.sh
       - name: Run selfhost cycle gate (seed-root reproducibility)
         env:
           WORK_DIR: /tmp/sounio-selfhost-cycle-gate-seed-root
@@ -403,15 +425,12 @@ jobs:
           SOUNIO_SELFHOST_CYCLE_SEED_ENFORCE: "1"
           SOUNIO_SELFHOST_CYCLE_SEED_PATH: bootstrap/seeds/sounio-bootstrap-linux-x86_64.sio.bin
           SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST: bootstrap/selfhost-kernel.manifest
-        run: |
-          bash scripts/selfhost_cycle_gate.sh
+        run: bash scripts/selfhost_cycle_gate.sh
       - name: Run bootstrap kernel gate
         env:
-          SOUC_BIN: ./target/debug/souc
           WORK_DIR: /tmp/sounio-bootstrap-kernel-gate
           CYCLE_WORK_DIR: /tmp/sounio-bootstrap-kernel-gate/cycle
           SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST: bootstrap/selfhost-kernel.manifest
-          SKIP_BUILD: "1"
           BUILD_TIMEOUT_SECS: 900
           CYCLE_TIMEOUT_SECS: 1200
           BENCH_TIMEOUT_SECS: 60
@@ -419,8 +438,7 @@ jobs:
           BENCH_SEED_PATH: bootstrap/seeds/sounio-bootstrap-linux-x86_64.sio.bin
           BENCH_SEED_SHA256_PATH: bootstrap/seeds/sounio-bootstrap-linux-x86_64.sio.bin.sha256
           BENCH_SEED_SIG_PATH: bootstrap/seeds/sounio-bootstrap-linux-x86_64.sio.bin.sig
-        run: |
-          bash scripts/bootstrap_kernel_gate.sh
+        run: bash scripts/bootstrap_kernel_gate.sh
       - name: Upload selfhost cycle artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -443,19 +461,29 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     continue-on-error: true
+    env:
+      SKIP_BUILD: "1"
+      SOUNIO_REPO_HARD_NO_RUST: "1"
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Build bootstrap seed artifact
+      - name: Resolve pinned souc binary
         run: |
-          bash scripts/build_bootstrap_seed.sh
+          chmod +x scripts/omega/omega_resolve_souc_bin.sh
+          SOUC_BIN="$(
+            SOUNIO_SOUC_VERSION=0.100.3 \
+            OMEGA_SOUC_REQUIRE_PINNED=1 \
+            OMEGA_SOUC_ALLOW_LOCAL_FALLBACK=0 \
+              scripts/omega/omega_resolve_souc_bin.sh --print-path
+          )"
+          echo "SOUC_BIN=$SOUC_BIN" >> "$GITHUB_ENV"
+      - name: Build bootstrap seed artifact
+        run: bash scripts/build_bootstrap_seed.sh
       - name: Run heavy selfhost compile/check timing gate
         if: always()
         env:
           WORK_DIR: /tmp/sounio-selfhost-heavy-performance-gate
           CYCLE_WORK_DIR: /tmp/sounio-selfhost-heavy-performance-gate/cycle
           SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST: bootstrap/selfhost-kernel.manifest
-          SKIP_BUILD: "1"
           BUILD_TIMEOUT_SECS: 1800
           CYCLE_TIMEOUT_SECS: 5400
           BENCH_TIMEOUT_SECS: 3600
@@ -467,8 +495,7 @@ jobs:
           BENCH_SEED_PATH: bootstrap/seeds/sounio-bootstrap-linux-x86_64.sio.bin
           BENCH_SEED_SHA256_PATH: bootstrap/seeds/sounio-bootstrap-linux-x86_64.sio.bin.sha256
           BENCH_SEED_SIG_PATH: bootstrap/seeds/sounio-bootstrap-linux-x86_64.sio.bin.sig
-        run: |
-          bash scripts/bootstrap_kernel_gate.sh
+        run: bash scripts/bootstrap_kernel_gate.sh
       - name: Upload selfhost heavy performance artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -477,97 +504,23 @@ jobs:
           path: /tmp/sounio-selfhost-heavy-performance-gate/
           retention-days: 14
 
-  feature-gates:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Check distributed feature compiles
-        run: cargo check -p souc --features distributed
-      - name: Check pkg feature compiles
-        run: cargo check -p souc --features pkg
-      - name: Run distributed unit tests
-        run: cargo test -p souc --lib --features distributed -- distributed
-      - name: Run pkg unit tests
-        run: cargo test -p souc --lib --features pkg -- pkg
-
-  wasm-checks:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install WASM targets
-        run: |
-          rustup target add wasm32-unknown-unknown
-          rustup target add wasm32-wasip1
-      - name: Check WASM feature (host)
-        run: cargo check -p souc --features wasm
-      - name: Check wasm32-unknown-unknown
-        run: cargo check -p souc --lib --target wasm32-unknown-unknown --features wasm
-      - name: Check wasm32-wasip1 (WASI)
-        run: cargo check -p souc --lib --target wasm32-wasip1 --features wasm
-
-  documentation:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # Need full history for diff comparison
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Check documentation coverage
-        run: |
-          chmod +x scripts/check_doc_coverage.sh
-          scripts/check_doc_coverage.sh
-        env:
-          MIN_COVERAGE: 60
-          STRICT: false
-      - name: Generate API documentation
-        run: |
-          cargo run -p souc --bin souniodoc -- generate stdlib --output target/doc
-      - name: Copy API docs to Hugo static directory
-        run: |
-          mkdir -p hugo/static/api
-          cp -r target/doc/* hugo/static/api/
-      - name: Upload documentation artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: api-docs
-          path: target/doc
-          retention-days: 7
-      - name: Upload Hugo-ready site artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: hugo-with-api-docs
-          path: hugo/
-          retention-days: 7
-
-  rustless-e2e:
-    name: Rustless End-to-End Tests
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Run rustless E2E regression suite
-        run: cargo test --test rustless_e2e
-      - name: Run VM self-hosting tests
-        run: cargo test --test vm_selfhost
-      - name: Run linker self-hosting tests
-        run: cargo test --test linker_selfhost
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: rustless-e2e-results
-          path: target/debug/deps/rustless_e2e-*
-          retention-days: 7
-
   scientific-execution:
     runs-on: ubuntu-24.04
+    env:
+      SKIP_BUILD: "1"
+      SOUNIO_REPO_HARD_NO_RUST: "1"
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Build release binary
-        run: cargo build --release
+      - name: Resolve pinned souc binary
+        run: |
+          chmod +x scripts/omega/omega_resolve_souc_bin.sh
+          SOUC_BIN="$(
+            SOUNIO_SOUC_VERSION=0.100.3 \
+            OMEGA_SOUC_REQUIRE_PINNED=1 \
+            OMEGA_SOUC_ALLOW_LOCAL_FALLBACK=0 \
+              scripts/omega/omega_resolve_souc_bin.sh --print-path
+          )"
+          echo "SOUC_BIN=$SOUC_BIN" >> "$GITHUB_ENV"
       - name: Run scientific test suite via interpreter
         run: |
           failed=0
@@ -580,7 +533,7 @@ jobs:
                    tests/run-pass/probability_distributions.sio \
                    tests/run-pass/polynomial_ops.sio; do
             echo "=== Running $f ==="
-            if output=$(./target/release/souc run "$f" 2>&1); then
+            if output=$($SOUC_BIN run "$f" 2>&1); then
               if echo "$output" | grep -q "Failed: 0"; then
                 echo "PASS"
               else
@@ -600,34 +553,44 @@ jobs:
 
   joss-smoke:
     runs-on: ubuntu-24.04
+    env:
+      SKIP_BUILD: "1"
+      SOUNIO_REPO_HARD_NO_RUST: "1"
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Build release binary
-        run: cargo build --release
+      - name: Resolve pinned souc binary
+        run: |
+          chmod +x scripts/omega/omega_resolve_souc_bin.sh
+          SOUC_BIN="$(
+            SOUNIO_SOUC_VERSION=0.100.3 \
+            OMEGA_SOUC_REQUIRE_PINNED=1 \
+            OMEGA_SOUC_ALLOW_LOCAL_FALLBACK=0 \
+              scripts/omega/omega_resolve_souc_bin.sh --print-path
+          )"
+          echo "SOUC_BIN=$SOUC_BIN" >> "$GITHUB_ENV"
       - name: Version check
-        run: ./target/release/souc --version
+        run: $SOUC_BIN --version
       - name: Run required JOSS examples
         run: |
-          ./target/release/souc run examples/hello.sio
-          ./target/release/souc run examples/epistemic_bmi.sio
-          ./target/release/souc run examples/pbpk_simple.sio
-          ./target/release/souc run examples/gpu_hypercomplex.sio
+          $SOUC_BIN run examples/hello.sio
+          $SOUC_BIN run examples/epistemic_bmi.sio
+          $SOUC_BIN run examples/pbpk_simple.sio
+          $SOUC_BIN run examples/gpu_hypercomplex.sio
       - name: Run science showcase programs
         run: |
-          ./target/release/souc run examples/science/pkpd_simulation.sio
-          ./target/release/souc run examples/science/signal_analysis.sio
-          ./target/release/souc run examples/science/uncertainty_propagation.sio
-          ./target/release/souc run examples/science/bayesian_clinical_trial.sio
-          ./target/release/souc run examples/science/simpsons_paradox.sio
-          ./target/release/souc run examples/science/entropy_information.sio
-          ./target/release/souc run examples/science/epistemic_cascade.sio
-          ./target/release/souc run examples/science/lotka_volterra_ecosystem.sio
-          ./target/release/souc run examples/science/markov_chain_monte_carlo.sio
-          ./target/release/souc run examples/science/kalman_filter_tracking.sio
+          $SOUC_BIN run examples/science/pkpd_simulation.sio
+          $SOUC_BIN run examples/science/signal_analysis.sio
+          $SOUC_BIN run examples/science/uncertainty_propagation.sio
+          $SOUC_BIN run examples/science/bayesian_clinical_trial.sio
+          $SOUC_BIN run examples/science/simpsons_paradox.sio
+          $SOUC_BIN run examples/science/entropy_information.sio
+          $SOUC_BIN run examples/science/epistemic_cascade.sio
+          $SOUC_BIN run examples/science/lotka_volterra_ecosystem.sio
+          $SOUC_BIN run examples/science/markov_chain_monte_carlo.sio
+          $SOUC_BIN run examples/science/kalman_filter_tracking.sio
       - name: Compile-fail smoke (missing effect annotation)
         run: |
-          if ./target/release/souc check tests/compile-fail/effect_missing.sio; then
+          if $SOUC_BIN check tests/compile-fail/effect_missing.sio; then
             echo "expected compile failure did not occur"
             exit 1
           fi

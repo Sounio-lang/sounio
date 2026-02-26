@@ -17,14 +17,16 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       glm_enabled: ${{ steps.glm-key.outputs.glm_enabled }}
+    env:
+      SKIP_BUILD: "1"
+      SOUNIO_REPO_HARD_NO_RUST: "1"
 
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
 
     - name: Validate workflow script references
-      run: |
-        bash scripts/check_workflow_script_refs.sh
+      run: bash scripts/check_workflow_script_refs.sh
 
     - name: Check GLM API key
       id: glm-key
@@ -44,52 +46,17 @@ jobs:
       run: |
         echo "::notice::Skipping GLM benchmark execution because GLM_API_KEY is unavailable."
 
-    - name: Setup Rust
-      if: steps.glm-key.outputs.glm_enabled == 'true'
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        components: llvm-tools-preview
-
-    - name: Cache cargo registry
-      if: steps.glm-key.outputs.glm_enabled == 'true'
-      uses: actions/cache@v3
-      with:
-        path: ~/.cargo/registry
-        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-
-    - name: Cache cargo index
-      if: steps.glm-key.outputs.glm_enabled == 'true'
-      uses: actions/cache@v3
-      with:
-        path: ~/.cargo/git
-        key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-
-    - name: Cache cargo build
-      if: steps.glm-key.outputs.glm_enabled == 'true'
-      uses: actions/cache@v3
-      with:
-        path: target
-        key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
-
-    - name: Install system dependencies
+    - name: Resolve pinned souc binary
       if: steps.glm-key.outputs.glm_enabled == 'true'
       run: |
-        sudo apt-get update
-        WEBKIT_DEV_PACKAGE="libwebkit2gtk-4.1-dev"
-        if ! apt-cache show "$WEBKIT_DEV_PACKAGE" >/dev/null 2>&1; then
-          WEBKIT_DEV_PACKAGE="libwebkit2gtk-4.0-dev"
-        fi
-        echo "Installing WebKit development package: $WEBKIT_DEV_PACKAGE"
-        sudo apt-get install -y \
-          libgtk-3-dev \
-          "$WEBKIT_DEV_PACKAGE" \
-          build-essential \
-          curl \
-          wget \
-          file \
-          libssl-dev \
-          libayatana-appindicator3-dev \
-          librsvg2-dev
+        chmod +x scripts/omega/omega_resolve_souc_bin.sh
+        SOUC_BIN="$(
+          SOUNIO_SOUC_VERSION=0.100.3 \
+          OMEGA_SOUC_REQUIRE_PINNED=1 \
+          OMEGA_SOUC_ALLOW_LOCAL_FALLBACK=0 \
+            scripts/omega/omega_resolve_souc_bin.sh --print-path
+        )"
+        echo "SOUC_BIN=$SOUC_BIN" >> "$GITHUB_ENV"
 
     - name: Install Python dependencies
       if: steps.glm-key.outputs.glm_enabled == 'true'
@@ -97,25 +64,13 @@ jobs:
         python3 -m pip install --upgrade pip
         pip3 install matplotlib pandas numpy
 
-    - name: Build compiler (Traditional)
-      if: steps.glm-key.outputs.glm_enabled == 'true'
-      run: |
-        cargo build -p souc --release
-
-    - name: Build compiler (GLM)
-      if: steps.glm-key.outputs.glm_enabled == 'true'
-      run: |
-        cargo build -p souc --release --features glm
-
     - name: Run GLM Benchmarks
       if: steps.glm-key.outputs.glm_enabled == 'true'
-      run: |
-        bash scripts/run_glm_benchmarks.sh comprehensive
+      run: bash scripts/run_glm_benchmarks.sh comprehensive
 
     - name: Generate Dashboard
       if: steps.glm-key.outputs.glm_enabled == 'true'
-      run: |
-        python3 scripts/glm_dashboard.py --charts
+      run: python3 scripts/glm_dashboard.py --charts
 
     - name: Validate benchmark outputs
       if: steps.glm-key.outputs.glm_enabled == 'true'
