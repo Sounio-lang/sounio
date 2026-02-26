@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-GLM-4.7 Pattern Miner for Sounio
+LLM Pattern Miner for Sounio
 
-Analyzes Sounio source files using GLM-4.7 to discover optimization patterns.
-Results are stored as JSONL for human review and eventual encoding into
-deterministic compiler heuristics.
+Analyzes Sounio source files using one or more LLM providers to discover
+optimization patterns. Results are stored as JSONL for human review and
+eventual encoding into deterministic compiler heuristics.
 
 Usage:
-    python scripts/glm_pattern_miner.py [--input-dir DIR] [--output-dir DIR]
+    python scripts/glm_pattern_miner.py [--providers glm,openai,deepseek] [--input-dir DIR] [--output-dir DIR]
 """
 
 import argparse
@@ -22,18 +22,68 @@ from typing import List, Dict, Any, Optional
 import requests
 
 # Configuration
-GLM_API_URL = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
-GLM_MODEL = "glm-4.7"
+PROVIDER_CONFIG: Dict[str, Dict[str, str]] = {
+    "glm": {
+        "api_url": "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions",
+        "default_model": "glm-4.7",
+        "api_key_env": "GLM_API_KEY",
+        "model_env": "GLM_PATTERN_MODEL",
+        "reasoning_field": "reasoning_content",
+    },
+    "openai": {
+        "api_url": "https://api.openai.com/v1/chat/completions",
+        "default_model": "gpt-4o-mini",
+        "api_key_env": "OPENAI_API_KEY",
+        "model_env": "OPENAI_PATTERN_MODEL",
+        "reasoning_field": "",
+    },
+    "deepseek": {
+        "api_url": "https://api.deepseek.com/chat/completions",
+        "default_model": "deepseek-chat",
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "model_env": "DEEPSEEK_PATTERN_MODEL",
+        "reasoning_field": "reasoning_content",
+    },
+}
 MAX_TOKENS = 1500
 TEMPERATURE = 0.1
 
 
-def get_api_key() -> str:
-    """Get GLM API key from environment."""
-    key = os.environ.get("GLM_API_KEY")
+def parse_providers(raw_value: str) -> List[str]:
+    """Parse provider selection from CLI input."""
+    if raw_value.strip().lower() == "auto":
+        return [
+            provider
+            for provider, cfg in PROVIDER_CONFIG.items()
+            if os.environ.get(cfg["api_key_env"])
+        ]
+
+    providers = [provider.strip().lower() for provider in raw_value.split(",") if provider.strip()]
+    unknown = [provider for provider in providers if provider not in PROVIDER_CONFIG]
+    if unknown:
+        supported = ", ".join(sorted(PROVIDER_CONFIG.keys()))
+        raise ValueError(f"Unknown providers: {unknown}. Supported providers: {supported}")
+    ordered_unique: List[str] = []
+    for provider in providers:
+        if provider not in ordered_unique:
+            ordered_unique.append(provider)
+    return ordered_unique
+
+
+def get_api_key(provider: str) -> str:
+    """Get provider API key from environment."""
+    config = PROVIDER_CONFIG[provider]
+    key_env = config["api_key_env"]
+    key = os.environ.get(key_env)
     if not key:
-        raise ValueError("GLM_API_KEY environment variable not set")
+        raise ValueError(f"{key_env} environment variable not set for provider '{provider}'")
     return key
+
+
+def get_model(provider: str) -> str:
+    """Get provider model from environment override or default."""
+    config = PROVIDER_CONFIG[provider]
+    return os.environ.get(config["model_env"], config["default_model"])
 
 
 def parse_sounio_file(filepath: Path) -> Dict[str, Any]:
@@ -61,8 +111,14 @@ def parse_sounio_file(filepath: Path) -> Dict[str, Any]:
     return features
 
 
-def query_glm(code_content: str, features: Dict[str, Any], api_key: str) -> Optional[Dict[str, Any]]:
-    """Query GLM-4.7 for optimization suggestions."""
+def query_provider(
+    provider: str,
+    model: str,
+    code_content: str,
+    features: Dict[str, Any],
+    api_key: str,
+) -> Optional[Dict[str, Any]]:
+    """Query selected provider for optimization suggestions."""
 
     prompt = f"""Analyze this Sounio code and suggest compiler optimizations.
 
@@ -93,8 +149,9 @@ Respond ONLY with JSON:
         "Content-Type": "application/json"
     }
 
+    config = PROVIDER_CONFIG[provider]
     payload = {
-        "model": GLM_MODEL,
+        "model": model,
         "messages": [
             {
                 "role": "system",
@@ -107,12 +164,15 @@ Respond ONLY with JSON:
     }
 
     try:
-        response = requests.post(GLM_API_URL, headers=headers, json=payload, timeout=60)
+        response = requests.post(config["api_url"], headers=headers, json=payload, timeout=60)
         response.raise_for_status()
 
         result = response.json()
         content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
-        reasoning = result.get("choices", [{}])[0].get("message", {}).get("reasoning_content", "")
+        reasoning = ""
+        reasoning_field = config.get("reasoning_field", "")
+        if reasoning_field:
+            reasoning = result.get("choices", [{}])[0].get("message", {}).get(reasoning_field, "")
 
         # Extract JSON from content
         if "{" in content:
@@ -130,18 +190,21 @@ Respond ONLY with JSON:
         return None
 
     except Exception as e:
-        print(f"Error querying GLM: {e}", file=sys.stderr)
+        print(f"Error querying provider '{provider}' (model={model}): {e}", file=sys.stderr)
         return None
 
 
-def mine_patterns(input_dir: Path, output_dir: Path, api_key: str) -> List[Dict[str, Any]]:
+def mine_patterns(input_dir: Path, output_dir: Path, providers: List[str]) -> List[Dict[str, Any]]:
     """Mine optimization patterns from all Sounio files in directory."""
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    provider_keys = {provider: get_api_key(provider) for provider in providers}
+    provider_models = {provider: get_model(provider) for provider in providers}
 
     # Find all .sio files
     sio_files = list(input_dir.rglob("*.sio"))
-    print(f"Found {len(sio_files)} Sounio files to analyze")
+    provider_list = ", ".join(f"{provider}:{provider_models[provider]}" for provider in providers)
+    print(f"Found {len(sio_files)} Sounio files to analyze with providers [{provider_list}]")
 
     results = []
 
@@ -156,28 +219,40 @@ def mine_patterns(input_dir: Path, output_dir: Path, api_key: str) -> List[Dict[
                 print(f"  Skipping (too small)")
                 continue
 
-            # Query GLM
-            glm_result = query_glm(features["content"], features, api_key)
+            for provider in providers:
+                provider_model = provider_models[provider]
+                print(f"  [{provider}] Querying model={provider_model}...")
+                provider_result = query_provider(
+                    provider,
+                    provider_model,
+                    features["content"],
+                    features,
+                    provider_keys[provider],
+                )
 
-            if glm_result and glm_result.get("suggestions"):
-                result = {
-                    "timestamp": datetime.utcnow().isoformat(),
-                    "filepath": str(filepath.relative_to(input_dir)),
-                    "features": {k: v for k, v in features.items() if k != "content"},
-                    "suggestions": glm_result["suggestions"],
-                    "reasoning_trace": glm_result.get("reasoning_trace", ""),
-                    "tokens_used": glm_result.get("usage", {}).get("total_tokens", 0)
-                }
-                results.append(result)
+                if provider_result and provider_result.get("suggestions"):
+                    result = {
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "provider": provider,
+                        "model": provider_model,
+                        "filepath": str(filepath.relative_to(input_dir)),
+                        "features": {k: v for k, v in features.items() if k != "content"},
+                        "suggestions": provider_result["suggestions"],
+                        "reasoning_trace": provider_result.get("reasoning_trace", ""),
+                        "tokens_used": provider_result.get("usage", {}).get("total_tokens", 0),
+                    }
+                    results.append(result)
 
-                # Print summary
-                for suggestion in glm_result["suggestions"]:
-                    print(f"  → {suggestion.get('type', 'Unknown')}: {suggestion.get('confidence', 0):.2f}")
-            else:
-                print(f"  No suggestions")
+                    # Print summary
+                    for suggestion in provider_result["suggestions"]:
+                        print(
+                            f"  [{provider}] → {suggestion.get('type', 'Unknown')}: {suggestion.get('confidence', 0):.2f}"
+                        )
+                else:
+                    print(f"  [{provider}] No suggestions")
 
-            # Rate limit
-            time.sleep(1)
+                # Rate limit between provider queries
+                time.sleep(1)
 
         except Exception as e:
             print(f"  Error: {e}", file=sys.stderr)
@@ -200,9 +275,12 @@ def save_results(results: List[Dict[str, Any]], output_dir: Path):
     # Also save summary
     summary = {
         "timestamp": datetime.utcnow().isoformat(),
-        "files_analyzed": len(results),
+        "files_analyzed": len({r["filepath"] for r in results}),
+        "result_entries": len(results),
+        "providers": sorted({r.get("provider", "glm") for r in results}),
         "total_suggestions": sum(len(r["suggestions"]) for r in results),
         "suggestion_types": {},
+        "suggestion_types_by_provider": {},
         "avg_confidence": 0,
     }
 
@@ -211,6 +289,13 @@ def save_results(results: List[Dict[str, Any]], output_dir: Path):
         for s in all_suggestions:
             t = s.get("type", "Unknown")
             summary["suggestion_types"][t] = summary["suggestion_types"].get(t, 0) + 1
+
+        for result in results:
+            provider = result.get("provider", "glm")
+            provider_map = summary["suggestion_types_by_provider"].setdefault(provider, {})
+            for suggestion in result["suggestions"]:
+                suggestion_type = suggestion.get("type", "Unknown")
+                provider_map[suggestion_type] = provider_map.get(suggestion_type, 0) + 1
 
         confidences = [s.get("confidence", 0) for s in all_suggestions]
         summary["avg_confidence"] = sum(confidences) / len(confidences)
@@ -225,13 +310,19 @@ def save_results(results: List[Dict[str, Any]], output_dir: Path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="GLM-4.7 Pattern Miner for Sounio")
+    parser = argparse.ArgumentParser(description="LLM Pattern Miner for Sounio")
+    parser.add_argument(
+        "--providers",
+        type=str,
+        default="auto",
+        help="Comma-separated provider list (glm,openai,deepseek) or 'auto' to use all configured keys",
+    )
     parser.add_argument("--input-dir", type=Path, default=Path("examples"),
                         help="Directory containing Sounio files")
     parser.add_argument("--output-dir", type=Path, default=Path("data/optimization_patterns"),
                         help="Directory to store mined patterns")
     parser.add_argument("--dry-run", action="store_true",
-                        help="List files without querying GLM")
+                        help="List files without querying providers")
 
     args = parser.parse_args()
 
@@ -249,16 +340,26 @@ def main():
             print(f"  ... and {len(sio_files) - 20} more")
         return
 
-    # Get API key
+    # Resolve providers and required API keys
     try:
-        api_key = get_api_key()
+        providers = parse_providers(args.providers)
+        if not providers:
+            supported = ", ".join(sorted(PROVIDER_CONFIG.keys()))
+            print(
+                f"Error: no providers enabled. Set API keys and pass --providers (<{supported}>), or use --providers auto",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        for provider in providers:
+            # Validate required API key is set
+            get_api_key(provider)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
     # Mine patterns
     print(f"Mining patterns from {args.input_dir}")
-    results = mine_patterns(args.input_dir, args.output_dir, api_key)
+    results = mine_patterns(args.input_dir, args.output_dir, providers)
 
     # Save results
     if results:
