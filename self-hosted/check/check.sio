@@ -13,6 +13,7 @@ struct Checker {
     env: TypeEnv,
     borrows: BorrowEnv,
     units: UnitRegistry,
+    refinements: RefinementTable,
     structs: StructTable,
     enums: EnumTable,
     fn_sigs: FnSigTable,
@@ -22,6 +23,9 @@ struct Checker {
     current_impl_type: TypeEntry,
     current_effects: [i64; 8],
     current_effect_count: i64,
+    last_literal_int: i64,
+    last_literal_float: f64,
+    last_literal_kind: i64,   // 0=none, 1=int, 2=float
 }
 
 fn checker_new() -> Checker with Mut, Panic, Div {
@@ -29,6 +33,7 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         env: type_env_new(),
         borrows: borrow_env_new(),
         units: register_builtin_units(unit_registry_new()),
+        refinements: refinement_table_new(),
         structs: struct_table_new(),
         enums: enum_table_new(),
         fn_sigs: fn_sig_table_new(),
@@ -38,6 +43,9 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         current_impl_type: ty_error(),
         current_effects: [0; 8],
         current_effect_count: 0,
+        last_literal_int: 0,
+        last_literal_float: 0.0,
+        last_literal_kind: 0,
     }
 }
 
@@ -291,6 +299,8 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 38 { print("cannot take exclusive borrow: existing borrow active") }
     else if code == 39 { print("linear value used after move") }
     else if code == 40 { print("linear value not consumed") }
+    else if code == 41 { print("unit dimension mismatch") }
+    else if code == 42 { print("refinement predicate violated") }
     else { print("unknown error") }
 }
 
@@ -330,6 +340,7 @@ impl Checker {
             TypeTuple => self.lower_tuple_type(te.type_args)
             TypeFn => (self, ty_unknown())
             TypeKnowledge => self.lower_knowledge_type(te.knowledge_info)
+            TypeRefinement => self.lower_refinement_type(te.refinement_info)
         }
     }
 
@@ -364,7 +375,15 @@ impl Checker {
                 // Units resolve to f64 with a unit_id annotation
                 (self, ty_with_unit(ty_f64(), unit_idx))
             } else {
-                (self, ty_named(name))
+                // Check if it's a refinement type alias
+                let ref_idx = refinement_table_find(self.refinements, name)
+                if ref_idx >= 0 {
+                    // Resolve to base type with refinement_id annotation
+                    let rt = self.refinements.entries[ref_idx as usize]
+                    (self, ty_with_refinement(rt.base_type, ref_idx))
+                } else {
+                    (self, ty_named(name))
+                }
             }
         }
     }
@@ -445,6 +464,23 @@ impl Checker {
             None => (self, ty_error())
         }
     }
+
+    fn lower_refinement_type(self, opt: Option<Box<RefinementInfo>>) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(info) => {
+                let ri = *info
+                // Lower the base type
+                match ri.base_type {
+                    Some(bte) => {
+                        let pair = self.lower_type_expr(*bte)
+                        (pair.0, pair.1)
+                    }
+                    None => (self, ty_error())
+                }
+            }
+            None => (self, ty_error())
+        }
+    }
 }
 
 fn lower_array_size(opt: Option<Box<Expr>>) -> i64 {
@@ -475,9 +511,50 @@ impl Checker {
             ItemStruct => self.collect_struct_def(item.name, item.struct_def)
             ItemEnum => self.collect_enum_def(item.name, item.enum_def)
             ItemImpl => self.collect_impl_def(item.impl_def)
-            ItemTypeAlias => self
+            ItemTypeAlias => self.collect_type_alias(item.name, item.type_alias_ty)
             ItemUse => self
             ItemUnit => self.collect_unit_decl(item.name)
+        }
+    }
+
+    fn collect_type_alias(self, name: Name, ty_opt: Option<Box<TypeExpr>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        match ty_opt {
+            Some(te_box) => {
+                let te = *te_box
+                if te.kind == TypeExprKind::TypeRefinement {
+                    // Register refinement type: type Pos = { x: i64 | x > 0 }
+                    match te.refinement_info {
+                        Some(ri_box) => {
+                            let ri = *ri_box
+                            // Lower base type
+                            let pair = match ri.base_type {
+                                Some(bte) => self.lower_type_expr(*bte)
+                                None => (self, ty_error())
+                            }
+                            var c = pair.0
+                            let base_ty = pair.1
+                            // Build predicate from parsed op + value
+                            let pred = if ri.pred_is_float {
+                                pred_make_float(ri.pred_op, ri.var_name, ri.pred_float_val)
+                            } else {
+                                pred_make_int(ri.pred_op, ri.var_name, ri.pred_int_val)
+                            }
+                            let rt = RefinementType {
+                                base_type: base_ty,
+                                var_name: ri.var_name,
+                                predicate: pred,
+                            }
+                            c.refinements = refinement_table_add(c.refinements, name, rt)
+                            c
+                        }
+                        None => self
+                    }
+                } else {
+                    // Plain type alias — no refinement, pass through
+                    self
+                }
+            }
+            None => self
         }
     }
 
@@ -953,6 +1030,7 @@ impl Checker {
 
     fn check_let_stmt(self, s: Stmt) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         var c = self
+        c.last_literal_kind = 0  // reset before checking init expr
         let ann_pair = c.lower_opt_type(s.ty)
         c = ann_pair.0
         let ann_ty = ann_pair.1
@@ -967,6 +1045,8 @@ impl Checker {
             }
             bind_ty = ann_ty
         }
+        // Validate refinement predicate on literal initializers
+        c = c.check_refinement_literal(s.span, bind_ty)
         let cur_env = c.env
         c.env = cur_env.bind(s.name, bind_ty, false)
         // Track variable for borrow checking (linear if struct is declared linear)
@@ -977,6 +1057,7 @@ impl Checker {
 
     fn check_var_stmt(self, s: Stmt) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         var c = self
+        c.last_literal_kind = 0  // reset before checking init expr
         let ann_pair = c.lower_opt_type(s.ty)
         c = ann_pair.0
         let ann_ty = ann_pair.1
@@ -990,11 +1071,33 @@ impl Checker {
             }
             bind_ty = ann_ty
         }
+        // Validate refinement predicate on literal initializers
+        c = c.check_refinement_literal(s.span, bind_ty)
         c.env = c.env.bind(s.name, bind_ty, true)
         // Track variable for borrow checking (linear if struct is declared linear)
         let lin = c.is_linear_type(bind_ty)
         c.borrows = c.borrows.track(s.name, lin)
         (c, ty_unit())
+    }
+
+    fn check_refinement_literal(self, span: Span, ty: TypeEntry) -> Checker with Mut, Panic, Div {
+        if ty.refinement_id < 0 { return self }
+        let rt = self.refinements.entries[ty.refinement_id as usize]
+        var c = self
+        if c.last_literal_kind == 1 {
+            // Integer literal — check predicate
+            if !pred_check_int(rt.predicate, c.last_literal_int) {
+                c = c.report_error_at(span, 42, 0, 0, 0)
+            }
+        } else if c.last_literal_kind == 2 {
+            // Float literal — check predicate
+            if !pred_check_float(rt.predicate, c.last_literal_float) {
+                c = c.report_error_at(span, 42, 0, 0, 0)
+            }
+        }
+        // Reset literal tracking
+        c.last_literal_kind = 0
+        c
     }
 
     fn is_linear_type(self, ty: TypeEntry) -> bool with Mut, Panic, Div {
@@ -1071,8 +1174,18 @@ impl Checker {
 impl Checker {
     fn check_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match e.kind {
-            ExprIntLit => (self, ty_i64())
-            ExprFloatLit => (self, ty_f64())
+            ExprIntLit => {
+                var c = self
+                c.last_literal_int = e.int_val
+                c.last_literal_kind = 1
+                (c, ty_i64())
+            }
+            ExprFloatLit => {
+                var c = self
+                c.last_literal_float = e.float_val
+                c.last_literal_kind = 2
+                (c, ty_f64())
+            }
             ExprBoolTrue => (self, ty_bool())
             ExprBoolFalse => (self, ty_bool())
             ExprStringLit => (self, ty_string())
