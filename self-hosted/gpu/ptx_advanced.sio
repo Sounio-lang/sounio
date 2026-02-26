@@ -213,6 +213,9 @@ fn ptx_recommended_version_minor(arch: PtxArch) -> i64 {
 fn ptx_supports_bf16_arch(arch: PtxArch) -> bool { ptx_sm_version(arch) >= 80 }
 fn ptx_supports_fp8_arch(arch: PtxArch) -> bool { ptx_sm_version(arch) >= 89 }
 fn ptx_supports_tma_arch(arch: PtxArch) -> bool { ptx_sm_version(arch) >= 90 }
+fn ptx_supports_cp_async_arch(arch: PtxArch) -> bool { ptx_sm_version(arch) >= 80 }
+fn ptx_supports_redux_arch(arch: PtxArch) -> bool { ptx_sm_version(arch) >= 80 }
+fn ptx_supports_match_arch(arch: PtxArch) -> bool { ptx_sm_version(arch) >= 70 }
 fn ptx_supports_clusters(arch: PtxArch) -> bool { ptx_sm_version(arch) >= 90 }
 fn ptx_supports_wgmma(arch: PtxArch) -> bool { ptx_sm_version(arch) >= 90 }
 fn ptx_supports_fp4(arch: PtxArch) -> bool { ptx_sm_version(arch) >= 100 }
@@ -239,6 +242,18 @@ fn ptx_supports_fp8(major: i64, minor: i64) -> bool {
 
 fn ptx_supports_tma(major: i64, minor: i64) -> bool {
     ptx_sm_version(ptx_arch_new(major, minor)) >= 90
+}
+
+fn ptx_supports_cp_async(major: i64, minor: i64) -> bool {
+    ptx_sm_version(ptx_arch_new(major, minor)) >= 80
+}
+
+fn ptx_supports_redux(major: i64, minor: i64) -> bool {
+    ptx_sm_version(ptx_arch_new(major, minor)) >= 80
+}
+
+fn ptx_supports_match(major: i64, minor: i64) -> bool {
+    ptx_sm_version(ptx_arch_new(major, minor)) >= 70
 }
 
 // ── PTX Type Strings ────────────────────────────────────────────────
@@ -2555,17 +2570,45 @@ fn ptx_emit_atom_max(buf: PtxBuf, dst: string, addr: string, val: string, ty: Gp
 
 // ── Async Copy (cp.async for tensor core pipelines) ─────────────────
 
+fn ptx_cp_async_size_is_valid(cp_size: i64) -> bool {
+    cp_size == 4 || cp_size == 8 || cp_size == 16
+}
+
+fn ptx_cp_async_normalize_size(cp_size: i64) -> i64 {
+    if ptx_cp_async_size_is_valid(cp_size) { return cp_size }
+    // PTX only allows 4/8/16-byte payloads; keep invalid callers deterministic.
+    16
+}
+
 // cp.async.ca.shared.global [dst_shared], [src_global], cp_size;
 fn ptx_emit_cp_async(buf: PtxBuf, dst_shared: string, src_global: string, cp_size: i64) -> PtxBuf with Mut, Panic, Div, Alloc {
     var out = buf
+    let size = ptx_cp_async_normalize_size(cp_size)
     out = ptx_push_str(out, "    cp.async.ca.shared.global [")
     out = ptx_push_str(out, dst_shared)
     out = ptx_push_str(out, "], [")
     out = ptx_push_str(out, src_global)
     out = ptx_push_str(out, "], ")
-    out = ptx_push_str(out, i64_to_string(cp_size))
+    out = ptx_push_str(out, i64_to_string(size))
     out = ptx_push_str(out, ";\n")
     out
+}
+
+fn ptx_emit_cp_async_arch(
+    buf: PtxBuf,
+    arch: PtxArch,
+    dst_shared: string,
+    src_global: string,
+    cp_size: i64
+) -> PtxBuf with Mut, Panic, Div, Alloc {
+    if !ptx_supports_cp_async_arch(arch) {
+        var out = buf
+        out = ptx_push_str(out, "    // cp.async unavailable for ")
+        out = ptx_push_str(out, ptx_sm_version_string(arch.sm_major, arch.sm_minor))
+        out = ptx_push_str(out, " (caller should use ld/st fallback)\n")
+        return out
+    }
+    ptx_emit_cp_async(buf, dst_shared, src_global, cp_size)
 }
 
 // cp.async.commit_group — commits all pending cp.async in this group
@@ -3239,6 +3282,45 @@ fn ptx_adv_test_46_redux_min_max() -> bool with Mut, Panic, Div {
     ptx_buf_contains(b, "redux.sync.max.s32 %r3, %r2, 0xffffffff;")
 }
 
+fn ptx_adv_test_47_cp_async_size_normalization() -> bool with Mut, Panic, Div, Alloc {
+    var b = ptx_buf_new()
+    b = ptx_emit_cp_async(b, "%rd0", "%rd1", 12)
+    ptx_buf_contains(b, "cp.async.ca.shared.global [%rd0], [%rd1], 16;") &&
+    !ptx_buf_contains(b, ", 12;")
+}
+
+fn ptx_adv_test_48_arch_capability_gates() -> bool {
+    let sm75 = ptx_arch_new(7, 5)
+    let sm89 = ptx_arch_new(8, 9)
+    let sm90 = ptx_arch_new(9, 0)
+    !ptx_supports_cp_async_arch(sm75) &&
+    !ptx_supports_redux_arch(sm75) &&
+    ptx_supports_match_arch(sm75) &&
+    ptx_supports_cp_async_arch(sm89) &&
+    ptx_supports_redux_arch(sm89) &&
+    ptx_supports_fp8_arch(sm89) &&
+    !ptx_supports_tma_arch(sm89) &&
+    ptx_supports_tma_arch(sm90)
+}
+
+fn ptx_adv_test_49_cp_async_arch_fallback() -> bool with Mut, Panic, Div, Alloc {
+    var fallback = ptx_buf_new()
+    fallback = ptx_emit_cp_async_arch(fallback, ptx_arch_new(7, 5), "%rd0", "%rd1", 16)
+    var enabled = ptx_buf_new()
+    enabled = ptx_emit_cp_async_arch(enabled, ptx_arch_new(8, 9), "%rd0", "%rd1", 16)
+    ptx_buf_contains(fallback, "cp.async unavailable for sm_75") &&
+    ptx_buf_contains(enabled, "cp.async.ca.shared.global [%rd0], [%rd1], 16;")
+}
+
+fn ptx_adv_test_50_major_minor_capability_helpers() -> bool {
+    !ptx_supports_cp_async(7, 5) &&
+    ptx_supports_cp_async(8, 9) &&
+    !ptx_supports_redux(7, 5) &&
+    ptx_supports_redux(8, 0) &&
+    !ptx_supports_match(6, 1) &&
+    ptx_supports_match(7, 0)
+}
+
 // ── Self-check: run all Phase 4B tests ──────────────────────────────
 
 fn ptx_advanced_self_check() -> bool with Mut, Panic, Div, Alloc {
@@ -3293,18 +3375,23 @@ fn ptx_advanced_self_check() -> bool with Mut, Panic, Div, Alloc {
     let t44 = ptx_adv_test_44_atom_min_max()
     let t45 = ptx_adv_test_45_mov_pred()
     let t46 = ptx_adv_test_46_redux_min_max()
+    let t47 = ptx_adv_test_47_cp_async_size_normalization()
+    let t48 = ptx_adv_test_48_arch_capability_gates()
+    let t49 = ptx_adv_test_49_cp_async_arch_fallback()
+    let t50 = ptx_adv_test_50_major_minor_capability_helpers()
 
     let block4 = t24 && t25 && t26 && t27 && t28 && t29 && t30 && t31
     let block5 = t32 && t33 && t34 && t35 && t36 && t37 && t38 && t39
     let block6 = t40 && t41 && t42 && t43 && t44 && t45 && t46
+    let block7 = t47 && t48 && t49 && t50
 
-    block1 && block2 && block3 && block4 && block5 && block6
+    block1 && block2 && block3 && block4 && block5 && block6 && block7
 }
 
 fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
     let ok = ptx_advanced_self_check()
     if ok {
-        print("PASS ptx_advanced_self_check (46 tests)\n")
+        print("PASS ptx_advanced_self_check (50 tests)\n")
         return 0 as i32
     } else {
         print("FAIL ptx_advanced_self_check\n")

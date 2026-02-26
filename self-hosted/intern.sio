@@ -29,6 +29,13 @@ let INTERN_HASH_TABLE_SIZE: i64 = 8192
 // Sentinel value for empty hash table slots.
 let INTERN_HASH_EMPTY: i64 = -1
 
+// Deterministic salts for provenance root folding.  Kept aligned with the
+// Merkle lane constants used in hardware/rtl/kaxi/merkle_root_lane.sio.
+let INTERN_MERKLE_SALT_A: i64 = 0x4F4D4547
+let INTERN_MERKLE_SALT_B: i64 = 0x4147454E
+let INTERN_MERKLE_SALT_C: i64 = 0x45534953
+let INTERN_MERKLE_SALT_D: i64 = 0x76312E30
+
 // ============================================================================
 // INTERNER STRUCT
 // ============================================================================
@@ -40,6 +47,9 @@ struct StringInterner {
     lengths: [i64; 4096],      // intern_id -> length of string
     count: i64,                // number of interned strings
     hashes: [i64; 4096],       // intern_id -> precomputed DJB2 hash
+    variance_q32_32: [i64; 4096],       // intern_id -> epistemic variance proxy
+    provenance_root_l64: [i64; 4096],   // intern_id -> Merkle-compatible lineage root
+    confidence_beta: [i64; 4096],       // intern_id -> confidence score
     hash_table: [i64; 8192],   // hash -> intern_id (open addressing)
 }
 
@@ -55,6 +65,9 @@ fn interner_new() -> StringInterner {
         lengths: [0; 4096],
         count: 0,
         hashes: [0; 4096],
+        variance_q32_32: [0; 4096],
+        provenance_root_l64: [0; 4096],
+        confidence_beta: [0; 4096],
         hash_table: [-1; 8192],
     }
 }
@@ -91,6 +104,63 @@ fn intern_hash_buf_range(buf: [i8; 65536], offset: i64, length: i64) -> i64 with
         i = i + 1
     }
     hash
+}
+
+// Deterministic Merkle-compatible fold reused for interner provenance roots.
+fn intern_merkle_mix(a: i64, b: i64, c: i64, salt: i64) -> i64 {
+    ((a ^ b) + c + salt) ^ (a << 5) ^ (b >> 7)
+}
+
+fn intern_merkle_root_lane_l64(
+    policy_hash_l64: i64,
+    baseline_hash_l64: i64,
+    telemetry_hash_l64: i64,
+    bitstream_hash_l64: i64,
+    signed_manifest_hash_l64: i64
+) -> i64 {
+    let h0 = intern_merkle_mix(
+        policy_hash_l64,
+        baseline_hash_l64,
+        telemetry_hash_l64,
+        INTERN_MERKLE_SALT_A
+    )
+    let h1 = intern_merkle_mix(
+        bitstream_hash_l64,
+        signed_manifest_hash_l64,
+        h0,
+        INTERN_MERKLE_SALT_B
+    )
+    let h2 = intern_merkle_mix(
+        h0,
+        h1,
+        policy_hash_l64 ^ bitstream_hash_l64,
+        INTERN_MERKLE_SALT_C
+    )
+    intern_merkle_mix(
+        h1,
+        h2,
+        baseline_hash_l64 ^ telemetry_hash_l64,
+        INTERN_MERKLE_SALT_D
+    )
+}
+
+fn intern_provenance_seed(hash: i64) -> i64 {
+    intern_merkle_root_lane_l64(0, hash, 0, 0, 1)
+}
+
+fn intern_provenance_merge(
+    existing_root_l64: i64,
+    hash: i64,
+    variance_q32_32: i64,
+    confidence_beta: i64
+) -> i64 {
+    intern_merkle_root_lane_l64(
+        existing_root_l64,
+        hash,
+        variance_q32_32,
+        confidence_beta,
+        existing_root_l64 ^ hash
+    )
 }
 
 // ============================================================================
@@ -187,7 +257,21 @@ fn interner_intern(si: StringInterner, s: string) -> (StringInterner, i64) with 
     // Check if already interned.
     let existing = intern_find(si, s, hash)
     if existing != INTERN_HASH_EMPTY {
-        return (si, existing)
+        var result = si
+        let curr_var = result.variance_q32_32[existing as usize]
+        let curr_conf = result.confidence_beta[existing as usize]
+        let next_var = curr_var + 1
+        let next_conf = curr_conf + 1
+        let merged_root = intern_provenance_merge(
+            result.provenance_root_l64[existing as usize],
+            hash,
+            next_var,
+            next_conf
+        )
+        result.variance_q32_32[existing as usize] = next_var
+        result.confidence_beta[existing as usize] = next_conf
+        result.provenance_root_l64[existing as usize] = merged_root
+        return (result, existing)
     }
 
     // Check capacity.
@@ -211,6 +295,9 @@ fn interner_intern(si: StringInterner, s: string) -> (StringInterner, i64) with 
     result.offsets[id as usize] = result.buf_len
     result.lengths[id as usize] = slen
     result.hashes[id as usize] = hash
+    result.variance_q32_32[id as usize] = 0
+    result.confidence_beta[id as usize] = 1
+    result.provenance_root_l64[id as usize] = intern_provenance_seed(hash)
     result.buf_len = result.buf_len + slen
     result.count = id + 1
 
@@ -293,6 +380,76 @@ fn interner_resolve_hash(si: StringInterner, id: i64) -> i64 with Panic, Div {
         return 0
     }
     si.hashes[id as usize]
+}
+
+// Return the variance proxy for the interned string with the given ID.
+fn interner_resolve_variance_q32_32(si: StringInterner, id: i64) -> i64 with Panic, Div {
+    if id < 0 || id >= si.count {
+        return 0
+    }
+    si.variance_q32_32[id as usize]
+}
+
+// Return the provenance root for the interned string with the given ID.
+fn interner_resolve_provenance_root_l64(si: StringInterner, id: i64) -> i64 with Panic, Div {
+    if id < 0 || id >= si.count {
+        return 0
+    }
+    si.provenance_root_l64[id as usize]
+}
+
+// Return the confidence score for the interned string with the given ID.
+fn interner_resolve_confidence_beta(si: StringInterner, id: i64) -> i64 with Panic, Div {
+    if id < 0 || id >= si.count {
+        return 0
+    }
+    si.confidence_beta[id as usize]
+}
+
+// 1/32-scaled accumulator residual used by the hardware epistemic bound:
+//   delta_32 = 4*(F%8) + 2*(P%16) + (Q%32)
+fn interner_epi_power_delta_32(fidelity: i64, provenance: i64, quantum: i64) -> i64 {
+    let frac_f = fidelity - (fidelity / 8) * 8
+    let frac_p = provenance - (provenance / 16) * 16
+    let frac_q = quantum - (quantum / 32) * 32
+    frac_f * 4 + frac_p * 2 + frac_q
+}
+
+// Self-check for interned provenance + accumulator bound linkage.
+fn interner_chemical_provenance_self_check() -> bool with Mut, Panic, Div {
+    var interner = interner_new()
+
+    let o_pair = interner_intern(interner, "O")
+    interner = o_pair.0
+    let o_id = o_pair.1
+    if o_id < 0 {
+        return false
+    }
+
+    let h_pair = interner_intern(interner, "H")
+    interner = h_pair.0
+    let h_id = h_pair.1
+    if h_id < 0 {
+        return false
+    }
+
+    let before_root = interner_resolve_provenance_root_l64(interner, h_id)
+    let h_dup_pair = interner_intern(interner, "H")
+    interner = h_dup_pair.0
+    let h_dup_id = h_dup_pair.1
+    let after_root = interner_resolve_provenance_root_l64(interner, h_id)
+
+    let o_text_ok = interner_resolve(interner, o_id) == "O"
+    let h_text_ok = interner_resolve(interner, h_id) == "H"
+    let dedup_ok = h_id == h_dup_id
+    let root_ok = before_root != 0 && after_root != 0 && after_root != before_root
+    let variance_o = interner_resolve_variance_q32_32(interner, o_id)
+    let variance_h = interner_resolve_variance_q32_32(interner, h_id)
+    let confidence_h = interner_resolve_confidence_beta(interner, h_id)
+    let delta_32 = interner_epi_power_delta_32(variance_o, variance_h, confidence_h)
+    let bound_ok = delta_32 >= 0 && delta_32 < 96
+
+    o_text_ok && h_text_ok && dedup_ok && root_ok && bound_ok
 }
 
 // ============================================================================
