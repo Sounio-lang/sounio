@@ -6,6 +6,18 @@
 // Methods return (Checker, ...) to thread state through value semantics.
 
 // ============================================================
+// Security limits
+// ============================================================
+
+const MAX_TYPE_DEPTH: i64 = 64
+const MAX_EXPR_DEPTH: i64 = 256
+const MAX_LOOP_DEPTH: i64 = 1024
+const MAX_TYPE_COMPLEXITY: i64 = 1000
+const MAX_BORROW_ENTRIES: i64 = 2048
+const MAX_SCOPE_DEPTH: i64 = 256
+const MAX_REFINEMENT_ENTRIES: i64 = 128
+
+// ============================================================
 // Checker state
 // ============================================================
 
@@ -28,6 +40,9 @@ struct Checker {
     last_literal_kind: i64,   // 0=none, 1=int, 2=float
     loop_depth: i64,
     suppress_linear_consume_depth: i64,
+    type_depth: i64,
+    expr_depth: i64,
+    complexity_budget: i64,
 }
 
 fn checker_new() -> Checker with Mut, Panic, Div {
@@ -50,6 +65,9 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         last_literal_kind: 0,
         loop_depth: 0,
         suppress_linear_consume_depth: 0,
+        type_depth: 0,
+        expr_depth: 0,
+        complexity_budget: 0,
     }
 }
 
@@ -277,6 +295,65 @@ impl Checker {
         let missing_pair = find_missing_effects(callee_effects, callee_effect_count, self.current_effects, self.current_effect_count)
         self.report_effect_error(span, missing_pair.0, missing_pair.1)
     }
+
+    // --------------------------------------------------------
+    // Security hardening: depth and complexity tracking
+    // --------------------------------------------------------
+
+    fn check_type_depth(self, span: Span) -> (Checker, bool) with Mut, Panic, Div {
+        var c = self
+        if c.type_depth >= MAX_TYPE_DEPTH {
+            c = c.report_error_at(span, 60, c.type_depth, MAX_TYPE_DEPTH, 0)
+            return (c, false)
+        }
+        c.type_depth = c.type_depth + 1
+        (c, true)
+    }
+
+    fn exit_type_depth(self) -> Checker with Mut {
+        var c = self
+        if c.type_depth > 0 {
+            c.type_depth = c.type_depth - 1
+        }
+        c
+    }
+
+    fn check_expr_depth(self, span: Span) -> (Checker, bool) with Mut, Panic, Div {
+        var c = self
+        if c.expr_depth >= MAX_EXPR_DEPTH {
+            c = c.report_error_at(span, 61, c.expr_depth, MAX_EXPR_DEPTH, 0)
+            return (c, false)
+        }
+        c.expr_depth = c.expr_depth + 1
+        (c, true)
+    }
+
+    fn exit_expr_depth(self) -> Checker with Mut {
+        var c = self
+        if c.expr_depth > 0 {
+            c.expr_depth = c.expr_depth - 1
+        }
+        c
+    }
+
+    fn check_loop_depth(self, span: Span) -> (Checker, bool) with Mut, Panic, Div {
+        var c = self
+        if c.loop_depth >= MAX_LOOP_DEPTH {
+            c = c.report_error_at(span, 62, c.loop_depth, MAX_LOOP_DEPTH, 0)
+            return (c, false)
+        }
+        (c, true)
+    }
+
+    fn check_complexity(self, cost: i64, span: Span) -> (Checker, bool) with Mut, Panic, Div {
+        var c = self
+        if c.complexity_budget + cost > MAX_TYPE_COMPLEXITY {
+            c = c.report_error_at(span, 64, c.complexity_budget, MAX_TYPE_COMPLEXITY, 0)
+            return (c, false)
+        }
+        c.complexity_budget = c.complexity_budget + cost
+        (c, true)
+    }
 }
 
 fn print_error_message(code: i64) with IO, Mut, Panic, Div {
@@ -338,6 +415,10 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 52 { print("cannot prove refinement requirement at this call site") }
     else if code == 53 { print("closure may use undeclared effects") }
     else if code == 54 { print("invalid Knowledge metadata constraint") }
+    else if code == 60 { print("type nesting exceeds maximum depth") }
+    else if code == 61 { print("expression nesting exceeds maximum depth") }
+    else if code == 62 { print("loop nesting exceeds maximum depth") }
+    else if code == 64 { print("type complexity budget exceeded") }
     else { print("unknown error") }
 }
 
