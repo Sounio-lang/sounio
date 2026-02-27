@@ -73,6 +73,7 @@ PY
 - `jq` is required.
 - LSP line/character are 0-based; compiler diagnostics are 1-based.
 - The server kills stale check processes before a new diagnostic run.
+- `SOUNIO_LSP_CHECK_TIMEOUT_SEC` controls `souc check` timeout (default: `60`).
 
 ## No-Rust Strict Mode
 

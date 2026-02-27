@@ -26,6 +26,16 @@ normalize_bool() {
     esac
 }
 
+normalize_positive_int() {
+    local raw="$1"
+    local name="$2"
+    if ! [[ "$raw" =~ ^[0-9]+$ ]] || [[ "$raw" == "0" ]]; then
+        echo "error: $name must be a positive integer (got '$raw')" >&2
+        return 1
+    fi
+    printf '%s\n' "$raw"
+}
+
 verify_pinned_souc() {
     local bin="$1"
     local sha_path="${bin}.sha256"
@@ -91,6 +101,9 @@ resolve_souc_for_lsp() {
 SOUNIO_LSP_STRICT_NO_RUST="$(
     normalize_bool "${SOUNIO_LSP_STRICT_NO_RUST:-${SOUNIO_REPO_HARD_NO_RUST:-1}}"
 )"
+SOUNIO_LSP_CHECK_TIMEOUT_SEC="$(
+    normalize_positive_int "${SOUNIO_LSP_CHECK_TIMEOUT_SEC:-60}" "SOUNIO_LSP_CHECK_TIMEOUT_SEC"
+)"
 SOUC_BIN="$(resolve_souc_for_lsp "$SOUNIO_LSP_STRICT_NO_RUST")"
 
 log() {
@@ -155,6 +168,14 @@ send_error() {
     payload="$(jq -cn --argjson id "$id_json" --argjson code "$code" --arg message "$message" \
         '{jsonrpc:"2.0", id:$id, error:{code:$code, message:$message}}')"
     send_wire_message "$payload"
+}
+
+run_souc_check() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "${SOUNIO_LSP_CHECK_TIMEOUT_SEC}s" "$SOUC_BIN" check "$@"
+    else
+        "$SOUC_BIN" check "$@"
+    fi
 }
 
 uri_to_path() {
@@ -449,11 +470,7 @@ run_check_and_publish() {
     rc=0
 
     (
-        if command -v timeout >/dev/null 2>&1; then
-            timeout 60s "$SOUC_BIN" check "$source_path" >"$out_file" 2>"$err_file"
-        else
-            "$SOUC_BIN" check "$source_path" >"$out_file" 2>"$err_file"
-        fi
+        run_souc_check "$source_path" >"$out_file" 2>"$err_file"
     ) &
     CHECK_PID="$!"
     CHECK_PID_URI="$uri"
@@ -556,7 +573,7 @@ handle_hover() {
     fi
     cleanup_path="$LAST_SOURCE_CLEANUP"
 
-    output="$($SOUC_BIN check "$source_path" --show-types 2>&1 || true)"
+    output="$(run_souc_check "$source_path" --show-types 2>&1 || true)"
     cleanup_temp_source "$cleanup_path"
     if ! ty="$(extract_hover_type "$output" "$line1" "$col1")"; then
         send_response "$id_json" "null"
@@ -590,9 +607,9 @@ handle_definition() {
     fi
     cleanup_path="$LAST_SOURCE_CLEANUP"
 
-    output="$($SOUC_BIN check "$source_path" --show-defs 2>&1 || true)"
+    output="$(run_souc_check "$source_path" --show-defs 2>&1 || true)"
     if [[ "$output" == *"unrecognized option"* ]] || [[ "$output" == *"unknown option"* ]]; then
-        output="$($SOUC_BIN check "$source_path" --show-ast 2>&1 || true)"
+        output="$(run_souc_check "$source_path" --show-ast 2>&1 || true)"
     fi
     cleanup_temp_source "$cleanup_path"
 
