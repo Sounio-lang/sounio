@@ -2,7 +2,75 @@
 
 Production-quality benchmarks demonstrating epistemic types and causal programming for academic publications.
 
-## Benchmark Suite
+## Status Matrix
+
+| Benchmark | Status | Entry Point | Key Result |
+|-----------|--------|-------------|------------|
+| GPU Epistemic GEMM (L4) | **Verified** | `scripts/gpu_test_runner.sh` | Median 5.3 TFLOPS at 4096^3 (17.3% peak) |
+| External Baselines | **Frozen** | `independence/adapters/` | Geomean 1.2077x vs CUTLASS/Triton/Inductor |
+| Cross-Language Comparison | Runnable | `comparison/run_all.sh` | ODE/LA/Uncertainty vs Python/Julia |
+| Cl(4,4) vs Octonion | Runnable | `cl44_vs_octonion.sio` | Algebraic product microbenchmark |
+| QNN-MNIST (epistemic) | Stub | `qnn/validate.sh` | Planned Month 4-5 |
+| PBPK (causal) | Stub | `pbpk/validate.sh` | Planned Month 8-9 |
+| fMRI (connectivity) | Stub | `fmri/validate.sh` | Planned Month 10-11 |
+
+## GPU Performance Results (Verified)
+
+**Full report:** [`results/NVIDIA_L4_BENCHMARKS.md`](results/NVIDIA_L4_BENCHMARKS.md)
+**Machine-readable:** [`results/l4_raw_data.json`](results/l4_raw_data.json)
+
+Epistemic GEMM with 4 shadow registers per `Knowledge<f32>` value, compiled to PTX by Sounio, dispatched on NVIDIA L4 (Ada Lovelace, 30.3 TFLOPS peak FP32):
+
+| Dimension | n | Median GFLOPS | Peak % |
+|-----------|---|---------------|--------|
+| 1024^3 | 1 | 6,061 | 20.0 |
+| 2048^3 | 3 | 7,201 | 25.0 |
+| 4096^3 | 6 | 5,253 | 17.3 |
+| 8192^3 | 3 | 4,876 | 16.1 |
+
+**Limitation:** No plain SGEMM baseline on this hardware. Cannot yet quantify shadow register overhead.
+
+## External Baseline Comparison (Frozen)
+
+**Full report:** [`results/external_baselines_summary.md`](results/external_baselines_summary.md)
+
+Geomean speedup 1.2077x across 5 kernel families (50 samples each) vs CUDA CUTLASS, Triton, and PyTorch Inductor. Contract: `independence/contract.v2.json`. Freeze: `artifacts/omega/baseline_freeze.v1.json` (Ed25519 signed).
+
+## Cross-Language Comparison (Runnable)
+
+```bash
+bash benchmarks/comparison/run_all.sh
+```
+
+ODE solver, linear algebra, and uncertainty propagation compared against Python and Julia.
+
+## Directory Map
+
+```
+benchmarks/
++-- README.md                     # This file
++-- results/                      # Formatted benchmark evidence
+|   +-- NVIDIA_L4_BENCHMARKS.md   # GPU results with defensible claims
+|   +-- l4_raw_data.json          # Machine-readable L4 data (19 runs)
+|   +-- l4_gemm_summary.md        # Tabular L4 summary
+|   +-- external_baselines_summary.md  # CUTLASS/Triton/Inductor comparison
++-- independence/                 # Performance contract system
+|   +-- contract.v1.json          # Legacy contract
+|   +-- contract.v2.json          # Current contract (omega-sprint-1)
+|   +-- omega_sprint1_baselines.v1.json
+|   +-- adapters/                 # Baseline probe scripts
++-- comparison/                   # Cross-language benchmarks
+|   +-- run_all.sh                # Sounio vs Python vs Julia
+|   +-- linalg/, ode/, uncertainty/
++-- cl44_vs_octonion.sio          # Cl(4,4) geometric product benchmark
++-- qnn/                          # [STUB] Epistemic QNN on MNIST
++-- pbpk/                         # [STUB] Causal pharmacokinetics
++-- fmri/                         # [STUB] Causal connectivity
+```
+
+---
+
+## Planned Benchmarks
 
 ### 1. QNN-MNIST: Epistemic Quaternionic Neural Networks
 **Directory:** `qnn/`

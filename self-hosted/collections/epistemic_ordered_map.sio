@@ -1,0 +1,472 @@
+// self-hosted::collections::epistemic_ordered_map — Epistemic provenance-tracking map
+//
+// Extends the ordered map with per-entry epistemic metadata:
+//   - variance_q32_32: Q32.32 fixed-point variance proxy
+//   - provenance_root_l64: Merkle-compatible lineage root
+//   - confidence_beta: Beta-distribution confidence score
+//
+// Every insert seeds a Merkle provenance root. Every update to an existing
+// key merges provenance and bumps variance + confidence. This is the first
+// general-purpose self-hosted collection with built-in epistemic tracking.
+//
+// Capacity: 1024 entries. All mutating operations consume and return the
+// struct (state threading). Merkle salts are aligned with
+// hardware/rtl/kaxi/merkle_root_lane.sio.
+
+// ============================================================================
+// MERKLE CONSTANTS (aligned with hardware RTL)
+// ============================================================================
+
+let EPI_MAP_MERKLE_SALT_A: i64 = 0x4F4D4547
+let EPI_MAP_MERKLE_SALT_B: i64 = 0x4147454E
+let EPI_MAP_MERKLE_SALT_C: i64 = 0x45534953
+let EPI_MAP_MERKLE_SALT_D: i64 = 0x76312E30
+
+let EPI_MAP_CAP: i64 = 1024
+
+// ============================================================================
+// MERKLE INFRASTRUCTURE
+// ============================================================================
+
+fn epi_map_merkle_mix(a: i64, b: i64, c: i64, salt: i64) -> i64 {
+    ((a ^ b) + c + salt) ^ (a << 5) ^ (b >> 7)
+}
+
+fn epi_map_merkle_root_lane_l64(
+    p0: i64, p1: i64, p2: i64, p3: i64, p4: i64
+) -> i64 {
+    let h0 = epi_map_merkle_mix(p0, p1, p2, EPI_MAP_MERKLE_SALT_A)
+    let h1 = epi_map_merkle_mix(p3, p4, h0, EPI_MAP_MERKLE_SALT_B)
+    let h2 = epi_map_merkle_mix(h0, h1, p0 ^ p3, EPI_MAP_MERKLE_SALT_C)
+    epi_map_merkle_mix(h1, h2, p1 ^ p2, EPI_MAP_MERKLE_SALT_D)
+}
+
+// Hash a key-value pair using DJB2-like mixing.
+fn epi_map_hash_pair(key: i64, value: i64) -> i64 {
+    var hash: i64 = 5381
+    hash = hash * 33 + key
+    hash = hash * 33 + value
+    hash & 9223372036854775807
+}
+
+// Seed provenance for a freshly inserted entry.
+fn epi_map_provenance_seed(key_hash: i64) -> i64 {
+    epi_map_merkle_root_lane_l64(0, key_hash, 0, 0, 1)
+}
+
+// Merge provenance when an existing entry is updated.
+fn epi_map_provenance_merge(
+    existing_root_l64: i64,
+    key_hash: i64,
+    variance_q32_32: i64,
+    confidence_beta: i64
+) -> i64 {
+    epi_map_merkle_root_lane_l64(
+        existing_root_l64,
+        key_hash,
+        variance_q32_32,
+        confidence_beta,
+        existing_root_l64 ^ key_hash
+    )
+}
+
+// 1/32-scaled accumulator residual (same formula as interner / hardware gate).
+fn epi_map_delta_32(fidelity: i64, provenance: i64, quantum: i64) -> i64 {
+    let frac_f = fidelity - (fidelity / 8) * 8
+    let frac_p = provenance - (provenance / 16) * 16
+    let frac_q = quantum - (quantum / 32) * 32
+    frac_f * 4 + frac_p * 2 + frac_q
+}
+
+// ============================================================================
+// STRUCT
+// ============================================================================
+
+struct EpistemicOrderedMap {
+    keys: [i64; 1024],
+    values: [i64; 1024],
+    variance_q32_32: [i64; 1024],
+    provenance_root_l64: [i64; 1024],
+    confidence_beta: [i64; 1024],
+    count: i64,
+}
+
+// ============================================================================
+// CONSTRUCTOR
+// ============================================================================
+
+fn epi_map_new() -> EpistemicOrderedMap {
+    EpistemicOrderedMap {
+        keys: [0; 1024],
+        values: [0; 1024],
+        variance_q32_32: [0; 1024],
+        provenance_root_l64: [0; 1024],
+        confidence_beta: [0; 1024],
+        count: 0,
+    }
+}
+
+// ============================================================================
+// INTERNAL HELPERS (must precede callers)
+// ============================================================================
+
+// Linear scan for key. Returns index in [0, count) or -1 if absent.
+fn epi_map_find(m: EpistemicOrderedMap, key: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < m.count {
+        if m.keys[i] == key {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// ============================================================================
+// CONTAINS
+// ============================================================================
+
+fn epi_map_contains(m: EpistemicOrderedMap, key: i64) -> bool with Mut, Panic, Div {
+    let idx = epi_map_find(m, key)
+    idx >= 0
+}
+
+// ============================================================================
+// GET — value only, returns -1 if not found
+// ============================================================================
+
+fn epi_map_get(m: EpistemicOrderedMap, key: i64) -> i64 with Mut, Panic, Div {
+    let idx = epi_map_find(m, key)
+    if idx < 0 {
+        return 0 - 1
+    }
+    m.values[idx]
+}
+
+// ============================================================================
+// EPISTEMIC ACCESSORS
+// ============================================================================
+
+fn epi_map_get_provenance(m: EpistemicOrderedMap, key: i64) -> i64 with Mut, Panic, Div {
+    let idx = epi_map_find(m, key)
+    if idx < 0 {
+        return 0
+    }
+    m.provenance_root_l64[idx]
+}
+
+fn epi_map_get_variance(m: EpistemicOrderedMap, key: i64) -> i64 with Mut, Panic, Div {
+    let idx = epi_map_find(m, key)
+    if idx < 0 {
+        return 0
+    }
+    m.variance_q32_32[idx]
+}
+
+fn epi_map_get_confidence(m: EpistemicOrderedMap, key: i64) -> i64 with Mut, Panic, Div {
+    let idx = epi_map_find(m, key)
+    if idx < 0 {
+        return 0
+    }
+    m.confidence_beta[idx]
+}
+
+// ============================================================================
+// INSERT — append if new, merge provenance if existing
+// ============================================================================
+
+fn epi_map_insert(m: EpistemicOrderedMap, key: i64, value: i64) -> EpistemicOrderedMap with Mut, Panic, Div {
+    var map = m
+
+    let idx = epi_map_find(map, key)
+    if idx >= 0 {
+        // Update existing entry — merge provenance
+        map.values[idx] = value
+        let curr_var = map.variance_q32_32[idx]
+        let curr_conf = map.confidence_beta[idx]
+        let next_var = curr_var + 1
+        let next_conf = curr_conf + 1
+        let key_hash = epi_map_hash_pair(key, value)
+        let merged_root = epi_map_provenance_merge(
+            map.provenance_root_l64[idx],
+            key_hash,
+            next_var,
+            next_conf
+        )
+        map.variance_q32_32[idx] = next_var
+        map.confidence_beta[idx] = next_conf
+        map.provenance_root_l64[idx] = merged_root
+        return map
+    }
+
+    // Append new entry if capacity allows
+    if map.count < EPI_MAP_CAP {
+        let id = map.count
+        map.keys[id] = key
+        map.values[id] = value
+        let key_hash = epi_map_hash_pair(key, value)
+        map.variance_q32_32[id] = 0
+        map.confidence_beta[id] = 1
+        map.provenance_root_l64[id] = epi_map_provenance_seed(key_hash)
+        map.count = map.count + 1
+    }
+    map
+}
+
+// ============================================================================
+// REMOVE — shift all 5 parallel arrays left to preserve order
+// ============================================================================
+
+fn epi_map_remove(m: EpistemicOrderedMap, key: i64) -> EpistemicOrderedMap with Mut, Panic, Div {
+    var map = m
+    let idx = epi_map_find(map, key)
+    if idx < 0 {
+        return map
+    }
+
+    var i: i64 = idx
+    while i < map.count - 1 {
+        map.keys[i] = map.keys[i + 1]
+        map.values[i] = map.values[i + 1]
+        map.variance_q32_32[i] = map.variance_q32_32[i + 1]
+        map.provenance_root_l64[i] = map.provenance_root_l64[i + 1]
+        map.confidence_beta[i] = map.confidence_beta[i + 1]
+        i = i + 1
+    }
+
+    let last = map.count - 1
+    map.keys[last] = 0
+    map.values[last] = 0
+    map.variance_q32_32[last] = 0
+    map.provenance_root_l64[last] = 0
+    map.confidence_beta[last] = 0
+    map.count = map.count - 1
+    map
+}
+
+// ============================================================================
+// LEN
+// ============================================================================
+
+fn epi_map_len(m: EpistemicOrderedMap) -> i64 {
+    m.count
+}
+
+// ============================================================================
+// KEY_AT / VALUE_AT — positional access by insertion order
+// ============================================================================
+
+fn epi_map_key_at(m: EpistemicOrderedMap, index: i64) -> i64 with Panic, Div {
+    if index < 0 || index >= m.count {
+        return 0 - 1
+    }
+    m.keys[index]
+}
+
+fn epi_map_value_at(m: EpistemicOrderedMap, index: i64) -> i64 with Panic, Div {
+    if index < 0 || index >= m.count {
+        return 0 - 1
+    }
+    m.values[index]
+}
+
+// ============================================================================
+// INDEX_OF
+// ============================================================================
+
+fn epi_map_index_of(m: EpistemicOrderedMap, key: i64) -> i64 with Mut, Panic, Div {
+    epi_map_find(m, key)
+}
+
+// ============================================================================
+// CLEAR
+// ============================================================================
+
+fn epi_map_clear(m: EpistemicOrderedMap) -> EpistemicOrderedMap with Mut, Panic, Div {
+    var map = m
+    var i: i64 = 0
+    while i < map.count {
+        map.keys[i] = 0
+        map.values[i] = 0
+        map.variance_q32_32[i] = 0
+        map.provenance_root_l64[i] = 0
+        map.confidence_beta[i] = 0
+        i = i + 1
+    }
+    map.count = 0
+    map
+}
+
+// ============================================================================
+// CHEMICAL SELF-CHECK (H2O pattern — same as intern.sio)
+// ============================================================================
+
+// Uses atomic numbers as keys (O=8, H=1) and scaled masses as values (O=16, H=1).
+// Inserting H twice triggers provenance merge. Validates:
+//   - dedup (count stays at 2)
+//   - provenance merge (root changes on re-insert)
+//   - delta_32 bound [0, 96)
+fn epi_map_chemical_self_check() -> bool with Mut, Panic, Div {
+    var m = epi_map_new()
+
+    // Oxygen: Z=8, mass=16
+    m = epi_map_insert(m, 8, 16)
+
+    // Hydrogen: Z=1, mass=1
+    m = epi_map_insert(m, 1, 1)
+
+    let before_root = epi_map_get_provenance(m, 1)
+
+    // Second hydrogen — same key, triggers provenance merge
+    m = epi_map_insert(m, 1, 1)
+
+    let after_root = epi_map_get_provenance(m, 1)
+
+    let count_ok = epi_map_len(m) == 2
+    let dedup_ok = epi_map_get(m, 1) == 1
+    let root_ok = before_root != 0 && after_root != 0 && after_root != before_root
+    let var_h = epi_map_get_variance(m, 1)
+    let conf_h = epi_map_get_confidence(m, 1)
+    let var_o = epi_map_get_variance(m, 8)
+    let delta = epi_map_delta_32(var_o, var_h, conf_h)
+    let bound_ok = delta >= 0 && delta < 96
+
+    count_ok && dedup_ok && root_ok && bound_ok
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn test_epi_map_new() -> bool {
+    let m = epi_map_new()
+    epi_map_len(m) == 0
+}
+
+fn test_epi_map_insert_and_get() -> bool with Mut, Panic, Div {
+    var m = epi_map_new()
+    m = epi_map_insert(m, 10, 100)
+    m = epi_map_insert(m, 20, 200)
+    m = epi_map_insert(m, 30, 300)
+
+    let ok1 = epi_map_get(m, 10) == 100
+    let ok2 = epi_map_get(m, 20) == 200
+    let ok3 = epi_map_get(m, 30) == 300
+    let ok4 = epi_map_len(m) == 3
+    ok1 && ok2 && ok3 && ok4
+}
+
+fn test_epi_map_provenance_seeded() -> bool with Mut, Panic, Div {
+    var m = epi_map_new()
+    m = epi_map_insert(m, 42, 100)
+
+    let prov = epi_map_get_provenance(m, 42)
+    let var_v = epi_map_get_variance(m, 42)
+    let conf = epi_map_get_confidence(m, 42)
+
+    prov != 0 && var_v == 0 && conf == 1
+}
+
+fn test_epi_map_provenance_merges_on_update() -> bool with Mut, Panic, Div {
+    var m = epi_map_new()
+    m = epi_map_insert(m, 42, 100)
+    let before = epi_map_get_provenance(m, 42)
+
+    m = epi_map_insert(m, 42, 200)
+    let after = epi_map_get_provenance(m, 42)
+
+    let ok1 = before != 0 && after != 0
+    let ok2 = before != after
+    let ok3 = epi_map_get_variance(m, 42) == 1
+    let ok4 = epi_map_get_confidence(m, 42) == 2
+    ok1 && ok2 && ok3 && ok4
+}
+
+fn test_epi_map_different_keys_different_provenance() -> bool with Mut, Panic, Div {
+    var m = epi_map_new()
+    m = epi_map_insert(m, 10, 100)
+    m = epi_map_insert(m, 20, 200)
+
+    let prov_10 = epi_map_get_provenance(m, 10)
+    let prov_20 = epi_map_get_provenance(m, 20)
+
+    prov_10 != 0 && prov_20 != 0 && prov_10 != prov_20
+}
+
+fn test_epi_map_delta_32_bound() -> bool with Mut, Panic, Div {
+    var m = epi_map_new()
+    m = epi_map_insert(m, 1, 10)
+    m = epi_map_insert(m, 1, 10)
+    m = epi_map_insert(m, 1, 10)
+    m = epi_map_insert(m, 1, 10)
+
+    let var_v = epi_map_get_variance(m, 1)
+    let conf = epi_map_get_confidence(m, 1)
+    let delta = epi_map_delta_32(0, var_v, conf)
+
+    delta >= 0 && delta < 96
+}
+
+fn test_epi_map_remove_shifts_epistemic() -> bool with Mut, Panic, Div {
+    var m = epi_map_new()
+    m = epi_map_insert(m, 1, 10)
+    m = epi_map_insert(m, 2, 20)
+    m = epi_map_insert(m, 3, 30)
+
+    let prov_3_before = epi_map_get_provenance(m, 3)
+
+    m = epi_map_remove(m, 2)
+
+    let ok1 = epi_map_len(m) == 2
+    let ok2 = epi_map_get(m, 2) < 0
+    let ok3 = epi_map_key_at(m, 0) == 1
+    let ok4 = epi_map_key_at(m, 1) == 3
+    let prov_3_after = epi_map_get_provenance(m, 3)
+    let ok5 = prov_3_before == prov_3_after
+    ok1 && ok2 && ok3 && ok4 && ok5
+}
+
+fn test_epi_map_reinsert_fresh_provenance() -> bool with Mut, Panic, Div {
+    var m = epi_map_new()
+    m = epi_map_insert(m, 5, 50)
+    let prov_first = epi_map_get_provenance(m, 5)
+    m = epi_map_remove(m, 5)
+    m = epi_map_insert(m, 5, 50)
+    let prov_second = epi_map_get_provenance(m, 5)
+
+    // Re-inserted entry gets same seed provenance (deterministic)
+    let ok1 = prov_first == prov_second
+    let ok2 = epi_map_get_variance(m, 5) == 0
+    let ok3 = epi_map_get_confidence(m, 5) == 1
+    ok1 && ok2 && ok3
+}
+
+fn test_epi_map_variance_monotonic() -> bool with Mut, Panic, Div {
+    var m = epi_map_new()
+    m = epi_map_insert(m, 7, 70)
+    let v0 = epi_map_get_variance(m, 7)
+    m = epi_map_insert(m, 7, 71)
+    let v1 = epi_map_get_variance(m, 7)
+    m = epi_map_insert(m, 7, 72)
+    let v2 = epi_map_get_variance(m, 7)
+    m = epi_map_insert(m, 7, 73)
+    let v3 = epi_map_get_variance(m, 7)
+
+    v0 == 0 && v1 == 1 && v2 == 2 && v3 == 3
+}
+
+fn test_epi_map_clear_resets_epistemic() -> bool with Mut, Panic, Div {
+    var m = epi_map_new()
+    m = epi_map_insert(m, 1, 10)
+    m = epi_map_insert(m, 2, 20)
+    m = epi_map_clear(m)
+
+    let ok1 = epi_map_len(m) == 0
+    let ok2 = epi_map_get_provenance(m, 1) == 0
+    let ok3 = epi_map_get_variance(m, 1) == 0
+    ok1 && ok2 && ok3
+}
+
+fn test_epi_map_chemical_h2o() -> bool with Mut, Panic, Div {
+    epi_map_chemical_self_check()
+}

@@ -1,0 +1,429 @@
+// self-hosted::collections::epistemic_molecule — Chemical molecule graph
+//
+// Self-contained epistemic molecule representation. Atoms are stored with
+// atomic number, scaled mass, and provenance root. Bonds carry epistemic
+// metadata: provenance root, variance, and confidence. The molecule itself
+// has an aggregate provenance root folded from all bond roots.
+//
+// This is the first chemical graph data structure where every bond carries
+// Merkle-compatible provenance tracking and hardware-verifiable accumulator
+// bounds (delta_32 < 96).
+//
+// Capacity: 256 atoms, 512 bonds.
+// All mutating operations consume and return the struct (state threading).
+// Merkle salts are aligned with hardware/rtl/kaxi/merkle_root_lane.sio.
+
+// ============================================================================
+// MERKLE CONSTANTS (aligned with hardware RTL)
+// ============================================================================
+
+let MOL_MERKLE_SALT_A: i64 = 0x4F4D4547
+let MOL_MERKLE_SALT_B: i64 = 0x4147454E
+let MOL_MERKLE_SALT_C: i64 = 0x45534953
+let MOL_MERKLE_SALT_D: i64 = 0x76312E30
+
+let MOL_MAX_ATOMS: i64 = 256
+let MOL_MAX_BONDS: i64 = 512
+
+// Bond type constants
+let MOL_BOND_SINGLE: i64 = 1
+let MOL_BOND_DOUBLE: i64 = 2
+let MOL_BOND_TRIPLE: i64 = 3
+let MOL_BOND_AROMATIC: i64 = 4
+
+// ============================================================================
+// MERKLE INFRASTRUCTURE
+// ============================================================================
+
+fn mol_merkle_mix(a: i64, b: i64, c: i64, salt: i64) -> i64 {
+    ((a ^ b) + c + salt) ^ (a << 5) ^ (b >> 7)
+}
+
+fn mol_merkle_root_lane_l64(
+    p0: i64, p1: i64, p2: i64, p3: i64, p4: i64
+) -> i64 {
+    let h0 = mol_merkle_mix(p0, p1, p2, MOL_MERKLE_SALT_A)
+    let h1 = mol_merkle_mix(p3, p4, h0, MOL_MERKLE_SALT_B)
+    let h2 = mol_merkle_mix(h0, h1, p0 ^ p3, MOL_MERKLE_SALT_C)
+    mol_merkle_mix(h1, h2, p1 ^ p2, MOL_MERKLE_SALT_D)
+}
+
+// Hash an atom from its atomic number and mass.
+fn mol_atom_hash(atomic_number: i64, mass_q16_16: i64) -> i64 {
+    var hash: i64 = 5381
+    hash = hash * 33 + atomic_number
+    hash = hash * 33 + mass_q16_16
+    hash & 9223372036854775807
+}
+
+// Hash a bond from its endpoints and type.
+fn mol_bond_hash(src: i64, dst: i64, bond_type: i64) -> i64 {
+    var hash: i64 = 5381
+    hash = hash * 33 + src
+    hash = hash * 33 + dst
+    hash = hash * 33 + bond_type
+    hash & 9223372036854775807
+}
+
+// Seed provenance for a freshly created atom or bond.
+fn mol_provenance_seed(item_hash: i64) -> i64 {
+    mol_merkle_root_lane_l64(0, item_hash, 0, 0, 1)
+}
+
+// Merge provenance when a bond is updated.
+fn mol_provenance_merge(
+    existing_root_l64: i64,
+    item_hash: i64,
+    variance_q32_32: i64,
+    confidence_beta: i64
+) -> i64 {
+    mol_merkle_root_lane_l64(
+        existing_root_l64,
+        item_hash,
+        variance_q32_32,
+        confidence_beta,
+        existing_root_l64 ^ item_hash
+    )
+}
+
+// 1/32-scaled accumulator residual.
+fn mol_delta_32(fidelity: i64, provenance: i64, quantum: i64) -> i64 {
+    let frac_f = fidelity - (fidelity / 8) * 8
+    let frac_p = provenance - (provenance / 16) * 16
+    let frac_q = quantum - (quantum / 32) * 32
+    frac_f * 4 + frac_p * 2 + frac_q
+}
+
+// ============================================================================
+// STRUCT
+// ============================================================================
+
+struct EpistemicMolecule {
+    // Atom storage
+    atom_atomic_number: [i64; 256],
+    atom_mass_q16_16: [i64; 256],
+    atom_provenance_l64: [i64; 256],
+    atom_count: i64,
+
+    // Bond storage
+    bond_src: [i64; 512],
+    bond_dst: [i64; 512],
+    bond_type: [i64; 512],
+    bond_provenance_l64: [i64; 512],
+    bond_variance_q32_32: [i64; 512],
+    bond_confidence_beta: [i64; 512],
+    bond_count: i64,
+
+    // Molecule-level aggregate provenance
+    mol_provenance_l64: i64,
+}
+
+// ============================================================================
+// CONSTRUCTOR
+// ============================================================================
+
+fn mol_new() -> EpistemicMolecule {
+    EpistemicMolecule {
+        atom_atomic_number: [0; 256],
+        atom_mass_q16_16: [0; 256],
+        atom_provenance_l64: [0; 256],
+        atom_count: 0,
+
+        bond_src: [0; 512],
+        bond_dst: [0; 512],
+        bond_type: [0; 512],
+        bond_provenance_l64: [0; 512],
+        bond_variance_q32_32: [0; 512],
+        bond_confidence_beta: [0; 512],
+        bond_count: 0,
+
+        mol_provenance_l64: 0,
+    }
+}
+
+// ============================================================================
+// ATOM OPERATIONS
+// ============================================================================
+
+// Add an atom. Returns (molecule, atom_id). atom_id is -1 if at capacity.
+fn mol_add_atom(
+    m: EpistemicMolecule,
+    atomic_number: i64,
+    mass_q16_16: i64
+) -> (EpistemicMolecule, i64) with Mut, Panic {
+    var mol = m
+    if mol.atom_count >= MOL_MAX_ATOMS {
+        return (mol, 0 - 1)
+    }
+    let id = mol.atom_count
+    mol.atom_atomic_number[id] = atomic_number
+    mol.atom_mass_q16_16[id] = mass_q16_16
+    let ah = mol_atom_hash(atomic_number, mass_q16_16)
+    mol.atom_provenance_l64[id] = mol_provenance_seed(ah)
+    mol.atom_count = mol.atom_count + 1
+    (mol, id)
+}
+
+fn mol_atom_count(m: EpistemicMolecule) -> i64 {
+    m.atom_count
+}
+
+fn mol_atom_number_at(m: EpistemicMolecule, atom_id: i64) -> i64 with Panic, Div {
+    if atom_id < 0 || atom_id >= m.atom_count {
+        return 0 - 1
+    }
+    m.atom_atomic_number[atom_id]
+}
+
+fn mol_atom_mass_at(m: EpistemicMolecule, atom_id: i64) -> i64 with Panic, Div {
+    if atom_id < 0 || atom_id >= m.atom_count {
+        return 0
+    }
+    m.atom_mass_q16_16[atom_id]
+}
+
+fn mol_atom_provenance_at(m: EpistemicMolecule, atom_id: i64) -> i64 with Panic, Div {
+    if atom_id < 0 || atom_id >= m.atom_count {
+        return 0
+    }
+    m.atom_provenance_l64[atom_id]
+}
+
+// ============================================================================
+// BOND OPERATIONS
+// ============================================================================
+
+// Check if both atom IDs are valid for this molecule.
+fn mol_valid_atom(m: EpistemicMolecule, atom_id: i64) -> bool {
+    atom_id >= 0 && atom_id < m.atom_count
+}
+
+// Add a bond between two atoms. Returns the updated molecule.
+// No-op if either atom is invalid or bond capacity is reached.
+fn mol_add_bond(
+    m: EpistemicMolecule,
+    src: i64,
+    dst: i64,
+    btype: i64
+) -> EpistemicMolecule with Mut, Panic {
+    var mol = m
+    if !mol_valid_atom(mol, src) {
+        return mol
+    }
+    if !mol_valid_atom(mol, dst) {
+        return mol
+    }
+    if mol.bond_count >= MOL_MAX_BONDS {
+        return mol
+    }
+    let id = mol.bond_count
+    mol.bond_src[id] = src
+    mol.bond_dst[id] = dst
+    mol.bond_type[id] = btype
+    let bh = mol_bond_hash(src, dst, btype)
+    mol.bond_provenance_l64[id] = mol_provenance_seed(bh)
+    mol.bond_variance_q32_32[id] = 0
+    mol.bond_confidence_beta[id] = 1
+    mol.bond_count = mol.bond_count + 1
+    mol
+}
+
+fn mol_bond_count(m: EpistemicMolecule) -> i64 {
+    m.bond_count
+}
+
+// Check if a bond exists between src and dst (any type).
+fn mol_has_bond(m: EpistemicMolecule, src: i64, dst: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < m.bond_count {
+        if m.bond_src[i] == src && m.bond_dst[i] == dst {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Count the number of bonds connected to an atom (as src or dst).
+fn mol_degree(m: EpistemicMolecule, atom_id: i64) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < m.bond_count {
+        if m.bond_src[i] == atom_id || m.bond_dst[i] == atom_id {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// BOND EPISTEMIC ACCESSORS
+// ============================================================================
+
+fn mol_bond_provenance(m: EpistemicMolecule, bond_id: i64) -> i64 with Panic, Div {
+    if bond_id < 0 || bond_id >= m.bond_count {
+        return 0
+    }
+    m.bond_provenance_l64[bond_id]
+}
+
+fn mol_bond_variance(m: EpistemicMolecule, bond_id: i64) -> i64 with Panic, Div {
+    if bond_id < 0 || bond_id >= m.bond_count {
+        return 0
+    }
+    m.bond_variance_q32_32[bond_id]
+}
+
+fn mol_bond_confidence(m: EpistemicMolecule, bond_id: i64) -> i64 with Panic, Div {
+    if bond_id < 0 || bond_id >= m.bond_count {
+        return 0
+    }
+    m.bond_confidence_beta[bond_id]
+}
+
+// ============================================================================
+// MOLECULE-LEVEL PROVENANCE
+// ============================================================================
+
+// Fold all bond provenance roots into a single molecule provenance root.
+fn mol_update_provenance(m: EpistemicMolecule) -> EpistemicMolecule with Mut, Panic, Div {
+    var mol = m
+    var root: i64 = 0
+    var i: i64 = 0
+    while i < mol.bond_count {
+        root = mol_merkle_mix(
+            root,
+            mol.bond_provenance_l64[i],
+            mol.bond_variance_q32_32[i],
+            MOL_MERKLE_SALT_A
+        )
+        i = i + 1
+    }
+    mol.mol_provenance_l64 = root
+    mol
+}
+
+fn mol_molecule_provenance(m: EpistemicMolecule) -> i64 {
+    m.mol_provenance_l64
+}
+
+// ============================================================================
+// H2O SELF-CHECK
+// ============================================================================
+
+// Build water molecule (H-O-H) and verify epistemic properties:
+//   - 3 atoms, 2 single bonds
+//   - O has degree 2, each H has degree 1
+//   - every bond has non-zero provenance
+//   - molecule provenance is non-zero
+//   - delta_32 bound holds for bond metadata
+fn mol_h2o_self_check() -> bool with Mut, Panic, Div {
+    var mol = mol_new()
+
+    // Add atoms: H(Z=1, mass=1*65536), O(Z=8, mass=16*65536), H(Z=1, mass=1*65536)
+    // Mass is Q16.16: value * 65536
+    let pair_h1 = mol_add_atom(mol, 1, 65536)
+    mol = pair_h1.0
+    let h1_id = pair_h1.1
+
+    let pair_o = mol_add_atom(mol, 8, 1048576)
+    mol = pair_o.0
+    let o_id = pair_o.1
+
+    let pair_h2 = mol_add_atom(mol, 1, 65536)
+    mol = pair_h2.0
+    let h2_id = pair_h2.1
+
+    let atoms_ok = mol_atom_count(mol) == 3
+
+    // Add bonds: H1-O and O-H2 (single bonds)
+    mol = mol_add_bond(mol, h1_id, o_id, MOL_BOND_SINGLE)
+    mol = mol_add_bond(mol, o_id, h2_id, MOL_BOND_SINGLE)
+
+    let bonds_ok = mol_bond_count(mol) == 2
+
+    // Degree checks
+    let deg_o = mol_degree(mol, o_id)
+    let deg_h1 = mol_degree(mol, h1_id)
+    let deg_h2 = mol_degree(mol, h2_id)
+    let degree_ok = deg_o == 2 && deg_h1 == 1 && deg_h2 == 1
+
+    // Bond provenance checks
+    let prov_b0 = mol_bond_provenance(mol, 0)
+    let prov_b1 = mol_bond_provenance(mol, 1)
+    let bond_prov_ok = prov_b0 != 0 && prov_b1 != 0
+
+    // Update molecule provenance
+    mol = mol_update_provenance(mol)
+    let mol_prov_ok = mol_molecule_provenance(mol) != 0
+
+    // Accumulator bound check on bond metadata
+    let var_b0 = mol_bond_variance(mol, 0)
+    let conf_b0 = mol_bond_confidence(mol, 0)
+    let delta = mol_delta_32(0, var_b0, conf_b0)
+    let bound_ok = delta >= 0 && delta < 96
+
+    // Atom provenance checks
+    let atom_prov_ok = mol_atom_provenance_at(mol, h1_id) != 0
+        && mol_atom_provenance_at(mol, o_id) != 0
+
+    atoms_ok && bonds_ok && degree_ok && bond_prov_ok
+        && mol_prov_ok && bound_ok && atom_prov_ok
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn test_mol_empty() -> bool {
+    let mol = mol_new()
+    mol_atom_count(mol) == 0 && mol_bond_count(mol) == 0
+        && mol_molecule_provenance(mol) == 0
+}
+
+fn test_mol_add_atoms() -> bool with Mut, Panic {
+    var mol = mol_new()
+    let p1 = mol_add_atom(mol, 6, 786432)
+    mol = p1.0
+    let p2 = mol_add_atom(mol, 1, 65536)
+    mol = p2.0
+    mol_atom_count(mol) == 2 && p1.1 == 0 && p2.1 == 1
+}
+
+fn test_mol_add_bond_validates() -> bool with Mut, Panic {
+    var mol = mol_new()
+    // Adding bond to non-existent atoms should be no-op
+    mol = mol_add_bond(mol, 0, 1, MOL_BOND_SINGLE)
+    mol_bond_count(mol) == 0
+}
+
+fn test_mol_degree() -> bool with Mut, Panic, Div {
+    var mol = mol_new()
+    let p0 = mol_add_atom(mol, 6, 786432)
+    mol = p0.0
+    let p1 = mol_add_atom(mol, 1, 65536)
+    mol = p1.0
+    let p2 = mol_add_atom(mol, 1, 65536)
+    mol = p2.0
+    // C-H and C-H bonds (methylene fragment)
+    mol = mol_add_bond(mol, 0, 1, MOL_BOND_SINGLE)
+    mol = mol_add_bond(mol, 0, 2, MOL_BOND_SINGLE)
+    let deg_c = mol_degree(mol, 0)
+    let deg_h1 = mol_degree(mol, 1)
+    deg_c == 2 && deg_h1 == 1
+}
+
+fn test_mol_bond_provenance_nonzero() -> bool with Mut, Panic, Div {
+    var mol = mol_new()
+    let p0 = mol_add_atom(mol, 8, 1048576)
+    mol = p0.0
+    let p1 = mol_add_atom(mol, 1, 65536)
+    mol = p1.0
+    mol = mol_add_bond(mol, 0, 1, MOL_BOND_SINGLE)
+    mol_bond_provenance(mol, 0) != 0
+}
+
+fn test_mol_h2o() -> bool with Mut, Panic, Div {
+    mol_h2o_self_check()
+}
