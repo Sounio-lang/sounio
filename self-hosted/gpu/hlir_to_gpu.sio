@@ -959,6 +959,131 @@ fn hlir_gpu_emit_shadow_div(s: HlirToGpuState, blk: GpuBlockEntry, result: i64, 
     (st, b)
 }
 
+// Emit FMA epistemic shadow: dst = a*b + c
+// Epsilon: first multiplicative (|a|*eps_b + |b|*eps_a), then additive quadrature with eps_c
+fn hlir_gpu_emit_shadow_fma(s: HlirToGpuState, blk: GpuBlockEntry, result: i64, a_val: i64, b_val: i64, c_val: i64) -> (HlirToGpuState, GpuBlockEntry) with Mut, Panic {
+    var st = s
+    var b = blk
+
+    let a_idx = hlir_gpu_find_shadow(st, a_val)
+    let b_idx = hlir_gpu_find_shadow(st, b_val)
+    let c_idx = hlir_gpu_find_shadow(st, c_val)
+
+    var eps_a: i64 = -1
+    var valid_a: i64 = -1
+    var prov_a: i64 = -1
+    var eps_b: i64 = -1
+    var valid_b: i64 = -1
+    var prov_b: i64 = -1
+    var eps_c: i64 = -1
+    var valid_c: i64 = -1
+    var prov_c: i64 = -1
+
+    if a_idx >= 0 {
+        eps_a = st.epistemic_shadows[a_idx as usize].eps_value
+        valid_a = st.epistemic_shadows[a_idx as usize].valid_value
+        prov_a = st.epistemic_shadows[a_idx as usize].prov_value
+    }
+    if b_idx >= 0 {
+        eps_b = st.epistemic_shadows[b_idx as usize].eps_value
+        valid_b = st.epistemic_shadows[b_idx as usize].valid_value
+        prov_b = st.epistemic_shadows[b_idx as usize].prov_value
+    }
+    if c_idx >= 0 {
+        eps_c = st.epistemic_shadows[c_idx as usize].eps_value
+        valid_c = st.epistemic_shadows[c_idx as usize].valid_value
+        prov_c = st.epistemic_shadows[c_idx as usize].prov_value
+    }
+
+    // Step 1: multiplicative part — eps_mul = |a|*eps_b + |b|*eps_a
+    let abs_a_r = hlir_gpu_alloc_value(st)
+    st = abs_a_r.0
+    let abs_a = abs_a_r.1
+
+    let abs_b_r = hlir_gpu_alloc_value(st)
+    st = abs_b_r.0
+    let abs_b = abs_b_r.1
+
+    let mul_t1_r = hlir_gpu_alloc_value(st)
+    st = mul_t1_r.0
+    let mul_t1 = mul_t1_r.1
+
+    let mul_t2_r = hlir_gpu_alloc_value(st)
+    st = mul_t2_r.0
+    let mul_t2 = mul_t2_r.1
+
+    let eps_mul_r = hlir_gpu_alloc_value(st)
+    st = eps_mul_r.0
+    let eps_mul = eps_mul_r.1
+
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAbs, GpuTypeF32, abs_a, a_val, -1, -1))
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAbs, GpuTypeF32, abs_b, b_val, -1, -1))
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeMul, GpuTypeF32, mul_t1, abs_a, eps_b, -1))
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeMul, GpuTypeF32, mul_t2, abs_b, eps_a, -1))
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAdd, GpuTypeF32, eps_mul, mul_t1, mul_t2, -1))
+
+    // Step 2: additive quadrature — eps_out = sqrt(eps_mul^2 + eps_c^2)
+    let sq_mul_r = hlir_gpu_alloc_value(st)
+    st = sq_mul_r.0
+    let sq_mul = sq_mul_r.1
+
+    let sq_c_r = hlir_gpu_alloc_value(st)
+    st = sq_c_r.0
+    let sq_c = sq_c_r.1
+
+    let sum_sq_r = hlir_gpu_alloc_value(st)
+    st = sum_sq_r.0
+    let sum_sq = sum_sq_r.1
+
+    let eps_res_r = hlir_gpu_alloc_value(st)
+    st = eps_res_r.0
+    let eps_res = eps_res_r.1
+
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeMul, GpuTypeF32, sq_mul, eps_mul, eps_mul, -1))
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeMul, GpuTypeF32, sq_c, eps_c, eps_c, -1))
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAdd, GpuTypeF32, sum_sq, sq_mul, sq_c, -1))
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeSqrt, GpuTypeF32, eps_res, sum_sq, -1, -1))
+
+    // Step 3: validity = valid_a AND valid_b AND valid_c
+    let valid_ab_r = hlir_gpu_alloc_value(st)
+    st = valid_ab_r.0
+    let valid_ab = valid_ab_r.1
+
+    let valid_res_r = hlir_gpu_alloc_value(st)
+    st = valid_res_r.0
+    let valid_res = valid_res_r.1
+
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAnd, GpuTypeBool, valid_ab, valid_a, valid_b, -1))
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeAnd, GpuTypeBool, valid_res, valid_ab, valid_c, -1))
+
+    // Step 4: provenance = prov_a XOR prov_b XOR prov_c
+    let prov_ab_r = hlir_gpu_alloc_value(st)
+    st = prov_ab_r.0
+    let prov_ab = prov_ab_r.1
+
+    let prov_res_r = hlir_gpu_alloc_value(st)
+    st = prov_res_r.0
+    let prov_res = prov_res_r.1
+
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeXor, GpuTypeI64, prov_ab, prov_a, prov_b, -1))
+    b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeXor, GpuTypeI64, prov_res, prov_ab, prov_c, -1))
+
+    // Record shadow
+    if st.shadow_count < 8192 {
+        let idx = st.shadow_count as usize
+        st.epistemic_shadows[idx] = EpistemicShadowEntry {
+            hlir_value: -1,
+            gpu_value: result,
+            eps_value: eps_res,
+            valid_value: valid_res,
+            prov_value: prov_res,
+        }
+        st.shadow_count = st.shadow_count + 1
+    }
+
+    (st, b)
+}
+
 // ============================================================================
 // Section 20 — Instruction lowering
 // ============================================================================
@@ -1124,6 +1249,11 @@ fn hlir_lower_instr(s: HlirToGpuState, blk: GpuBlockEntry, op_tag: i64, type_tag
         b = gpu_block_add_op(b, gpu_op_pred(op, g_src2))
     } else if op_tag == HlirOpFMA {
         b = gpu_block_add_op(b, gpu_op_make(GpuOpcodeFma, gpu_type, g_dst, g_src0, g_src1, g_src2))
+        if st.epistemic_enabled {
+            let ep = hlir_gpu_emit_shadow_fma(st, b, g_dst, g_src0, g_src1, g_src2)
+            st = ep.0
+            b = ep.1
+        }
     } else if op_tag == HlirOpGetThreadId {
         let op = gpu_op_make(GpuOpcodeGetTid, gpu_type, g_dst, -1, -1, -1)
         b = gpu_block_add_op(b, gpu_op_axis(op, axis))
