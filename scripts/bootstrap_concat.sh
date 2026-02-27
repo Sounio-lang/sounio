@@ -18,7 +18,11 @@ cd "$REPO_ROOT"
 PINNED_BIN="artifacts/omega/souc-bin/souc-linux-x86_64"
 OUTPUT_DIR="build"
 OUTPUT_FILE="$OUTPUT_DIR/bootstrap_stage1.sio"
+ARTIFACT_DIR="artifacts/omega"
 BOOTSTRAP_PROFILE="${BOOTSTRAP_PROFILE:-core}"
+BOOTSTRAP_INCLUDE_TESTS="${BOOTSTRAP_INCLUDE_TESTS:-0}"
+BOOTSTRAP_FULL_INCLUDE_EXPERIMENTAL="${BOOTSTRAP_FULL_INCLUDE_EXPERIMENTAL:-0}"
+BOOTSTRAP_FULL_INCLUDE_HYPERCOMPLEX="${BOOTSTRAP_FULL_INCLUDE_HYPERCOMPLEX:-0}"
 
 # ── Dependency-ordered file list (leaf-first) ──────────────────────
 # Full bootstrap: ALL 168 self-hosted .sio files.
@@ -340,37 +344,91 @@ else
   echo "=== Bootstrap profile: full (production-complete concat) ==="
 fi
 
-if [ "$BOOTSTRAP_PROFILE" = "full" ] && [ "${BOOTSTRAP_INCLUDE_TESTS:-0}" != "1" ]; then
-  echo "=== Full profile note: skipping standalone test/demo entrypoints (set BOOTSTRAP_INCLUDE_TESTS=1 to include) ==="
-  echo "=== Full profile note: keeping bootstrap test stubs for main() dispatch compatibility ==="
-  echo "=== Full profile note: skipping hypercomplex modules (Quat/acos unresolved in strict pinned check) ==="
+if [ "$BOOTSTRAP_PROFILE" = "full" ]; then
+  if [ "$BOOTSTRAP_INCLUDE_TESTS" = "1" ]; then
+    echo "=== Full profile: including tests/demos (stubs removed to avoid collisions) ==="
+  else
+    echo "=== Full profile note: skipping standalone test/demo entrypoints (set BOOTSTRAP_INCLUDE_TESTS=1 to include) ==="
+    echo "=== Full profile note: keeping bootstrap test stubs for main() dispatch compatibility ==="
+  fi
+  if [ "$BOOTSTRAP_FULL_INCLUDE_EXPERIMENTAL" != "1" ]; then
+    echo "=== Full profile note: skipping experimental GPU bundles (set BOOTSTRAP_FULL_INCLUDE_EXPERIMENTAL=1) ==="
+  fi
+  if [ "$BOOTSTRAP_FULL_INCLUDE_HYPERCOMPLEX" != "1" ]; then
+    echo "=== Full profile note: skipping hypercomplex bundles (set BOOTSTRAP_FULL_INCLUDE_HYPERCOMPLEX=1) ==="
+  fi
+
   FILTERED_FILES=()
   for f in "${FILES[@]}"; do
-    case "$f" in
-      self-hosted/test_stubs_bootstrap.sio)
-        FILTERED_FILES+=("$f")
-        continue
-        ;;
-      self-hosted/hypercomplex/*.sio)
-        continue
-        ;;
-      self-hosted/native/suite.sio)
-        continue
-        ;;
-      self-hosted/test_*.sio|\
-      self-hosted/native/test_*.sio|\
-      self-hosted/tensor/test_*.sio|\
-      self-hosted/vm/test_*.sio|\
-      self-hosted/linker/test_*.sio|\
-      self-hosted/linker/demo_e2e.sio|\
-      self-hosted/bench/kernel_smoke.sio)
-        continue
-        ;;
-    esac
+    # If real tests are included, drop bootstrap stubs to avoid duplicate defs.
+    if [ "$BOOTSTRAP_INCLUDE_TESTS" = "1" ]; then
+      case "$f" in
+        self-hosted/test_stubs_bootstrap.sio)
+          continue
+          ;;
+      esac
+    else
+      # For production-focused full profile, keep stubs and skip standalone tests/demos.
+      case "$f" in
+        self-hosted/test_stubs_bootstrap.sio)
+          FILTERED_FILES+=("$f")
+          continue
+          ;;
+        self-hosted/native/suite.sio|\
+        self-hosted/test_*.sio|\
+        self-hosted/native/test_*.sio|\
+        self-hosted/tensor/test_*.sio|\
+        self-hosted/vm/test_*.sio|\
+        self-hosted/linker/test_*.sio|\
+        self-hosted/linker/demo_e2e.sio|\
+        self-hosted/bench/kernel_smoke.sio)
+          continue
+          ;;
+      esac
+    fi
+
+    if [ "$BOOTSTRAP_FULL_INCLUDE_EXPERIMENTAL" != "1" ]; then
+      case "$f" in
+        self-hosted/gpu/opt/*.sio|\
+        self-hosted/gpu/kernels/*.sio|\
+        self-hosted/gpu/autodiff/*.sio|\
+        self-hosted/gpu/multi/*.sio|\
+        self-hosted/gpu/quant/*.sio|\
+        self-hosted/gpu/analysis/*.sio)
+          continue
+          ;;
+      esac
+    fi
+
+    if [ "$BOOTSTRAP_FULL_INCLUDE_HYPERCOMPLEX" != "1" ]; then
+      case "$f" in
+        self-hosted/hypercomplex/*.sio)
+          continue
+          ;;
+      esac
+    fi
+
     FILTERED_FILES+=("$f")
   done
   FILES=("${FILTERED_FILES[@]}")
 fi
+
+# ── De-duplicate file list while preserving order ──────────────────
+declare -A _SEEN_FILES=()
+UNIQUE_FILES=()
+DUP_FILE_COUNT=0
+for f in "${FILES[@]}"; do
+  if [ -n "${_SEEN_FILES[$f]+x}" ]; then
+    DUP_FILE_COUNT=$((DUP_FILE_COUNT + 1))
+    continue
+  fi
+  _SEEN_FILES[$f]=1
+  UNIQUE_FILES+=("$f")
+done
+if [ "$DUP_FILE_COUNT" -gt 0 ]; then
+  echo "=== Bootstrap note: dropped $DUP_FILE_COUNT duplicate file list entries ==="
+fi
+FILES=("${UNIQUE_FILES[@]}")
 
 # ── Verify all source files exist ──────────────────────────────────
 echo "=== Bootstrap Concat: verifying source files ==="
@@ -399,8 +457,9 @@ if [ ! -x "$PINNED_BIN" ]; then
   chmod +x "$PINNED_BIN"
 fi
 
-# ── Create output directory ────────────────────────────────────────
+# ── Create output/artifact directories ─────────────────────────────
 mkdir -p "$OUTPUT_DIR"
+mkdir -p "$ARTIFACT_DIR"
 
 # ── Concatenate in dependency order ────────────────────────────────
 echo ""
@@ -438,14 +497,56 @@ echo "=== Running pinned checker: $PINNED_BIN check $OUTPUT_FILE ==="
 echo ""
 
 CHECKER_EXIT=0
+FULL_CHECK_LOG="$ARTIFACT_DIR/bootstrap_full_check.log"
+set +e
 if [ "$BOOTSTRAP_PROFILE" = "full" ]; then
   CHECKER_STACK_KB="${CHECKER_STACK_KB:-65536}"
   (
     ulimit -s "$CHECKER_STACK_KB" 2>/dev/null || true
     "$PINNED_BIN" check "$OUTPUT_FILE" 2>&1
-  ) || CHECKER_EXIT=$?
+  ) | tee "$FULL_CHECK_LOG"
+  CHECKER_EXIT="${PIPESTATUS[0]}"
 else
-  "$PINNED_BIN" check "$OUTPUT_FILE" 2>&1 || CHECKER_EXIT=$?
+  "$PINNED_BIN" check "$OUTPUT_FILE" 2>&1
+  CHECKER_EXIT="$?"
+fi
+set -e
+
+if [ "$BOOTSTRAP_PROFILE" = "full" ] && [ "$CHECKER_EXIT" -ne 0 ]; then
+  DUP_COUNT="$(grep -c "Duplicate definition" "$FULL_CHECK_LOG" || true)"
+  UNDEF_COUNT="$(grep -c "Undefined variable" "$FULL_CHECK_LOG" || true)"
+  TYPE_MISMATCH_COUNT="$(grep -c "Type mismatch" "$FULL_CHECK_LOG" || true)"
+  RESOLUTION_COUNT="$(grep -c "Resolution errors" "$FULL_CHECK_LOG" || true)"
+  STACK_OVERFLOW_COUNT="$(grep -c "stack overflow" "$FULL_CHECK_LOG" || true)"
+
+  echo ""
+  echo "=== BOOTSTRAP_FULL_ERROR_SUMMARY ==="
+  echo "  duplicate_definitions: $DUP_COUNT"
+  echo "  undefined_variables:   $UNDEF_COUNT"
+  echo "  type_mismatches:       $TYPE_MISMATCH_COUNT"
+  echo "  resolution_blocks:     $RESOLUTION_COUNT"
+  echo "  stack_overflows:       $STACK_OVERFLOW_COUNT"
+  echo "  full_check_log:        $FULL_CHECK_LOG"
+  echo "===================================="
+
+  SUMMARY_FILE="$ARTIFACT_DIR/bootstrap_full_error_summary.v1.json"
+  cat > "$SUMMARY_FILE" <<EOF
+{
+  "schema": "sounio.bootstrap.full-error-summary.v1",
+  "generated_at_utc": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+  "profile": "full",
+  "exit_code": $CHECKER_EXIT,
+  "counts": {
+    "duplicate_definitions": $DUP_COUNT,
+    "undefined_variables": $UNDEF_COUNT,
+    "type_mismatches": $TYPE_MISMATCH_COUNT,
+    "resolution_blocks": $RESOLUTION_COUNT,
+    "stack_overflows": $STACK_OVERFLOW_COUNT
+  },
+  "log_path": "$FULL_CHECK_LOG",
+  "output_file": "$OUTPUT_FILE"
+}
+EOF
 fi
 
 echo ""
