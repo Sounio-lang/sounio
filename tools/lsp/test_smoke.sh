@@ -556,6 +556,20 @@ test_strict_no_rust_failfast() {
     fi
 }
 
+test_invalid_timeout_config_failfast() {
+    log "invalid timeout config fails fast"
+    local out_file err_file
+    out_file="$TMP_DIR/invalid-timeout.out"
+    err_file="$TMP_DIR/invalid-timeout.err"
+    if SOUNIO_LSP_CHECK_TIMEOUT_SEC=not_a_number \
+        bash "$LSP_SCRIPT" </dev/null >"$out_file" 2>"$err_file"; then
+        fail "invalid SOUNIO_LSP_CHECK_TIMEOUT_SEC should fail fast"
+    fi
+    if ! grep -q "SOUNIO_LSP_CHECK_TIMEOUT_SEC must be a positive integer" "$err_file"; then
+        fail "invalid timeout failure message not found"
+    fi
+}
+
 main() {
     test_diag_parser
     test_lifecycle_framed
@@ -564,6 +578,7 @@ main() {
     test_hover_definition_roundtrip
     test_multi_uri_diagnostics_isolation
     test_strict_no_rust_failfast
+    test_invalid_timeout_config_failfast
     log "PASS"
 }
 

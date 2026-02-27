@@ -1,273 +1,329 @@
 #!/usr/bin/env bash
-# Semantic Versioning Library for Sounio Package Manager
-# Supports parsing, comparison, and constraint satisfaction
+#
+# Semantic versioning utilities for Sounio package manager
+# Supports semver 2.0.0 with constraint operators: ^, ~, =, >=, <=, >, <
+#
 
 set -euo pipefail
 
 # Parse a semantic version string
-# Usage: semver_parse "1.2.3" -> outputs: major=1 minor=2 patch=3 prerelease="" build=""
+# Usage: semver_parse "1.2.3"
+# Returns: major=1 minor=2 patch=3 prerelease="" build=""
 semver_parse() {
     local version="$1"
-    
+    local major=0 minor=0 patch=0
+    local prerelease="" build=""
+
     # Remove leading 'v' if present
     version="${version#v}"
-    
+
     # Extract build metadata (after +)
-    local build=""
     if [[ "$version" =~ ^([^+]+)\+(.+)$ ]]; then
         version="${BASH_REMATCH[1]}"
         build="${BASH_REMATCH[2]}"
     fi
-    
+
     # Extract prerelease (after -)
-    local prerelease=""
     if [[ "$version" =~ ^([^-]+)-(.+)$ ]]; then
         version="${BASH_REMATCH[1]}"
         prerelease="${BASH_REMATCH[2]}"
     fi
-    
+
     # Parse major.minor.patch
-    local major=0 minor=0 patch=0
     IFS='.' read -r major minor patch <<< "$version"
-    
-    # Ensure numeric values
-    [[ "$major" =~ ^[0-9]+$ ]] || major=0
-    [[ "$minor" =~ ^[0-9]+$ ]] || minor=0
-    [[ "$patch" =~ ^[0-9]+$ ]] || patch=0
-    
-    echo "major=${major}"
-    echo "minor=${minor}"
-    echo "patch=${patch}"
-    echo "prerelease=${prerelease}"
-    echo "build=${build}"
+
+    # Handle short versions
+    [[ -z "$minor" ]] && minor=0
+    [[ -z "$patch" ]] && patch=0
+
+    printf 'major=%s\nminor=%s\npatch=%s\nprerelease=%s\nbuild=%s\n' \
+        "$major" "$minor" "$patch" "$prerelease" "$build"
 }
 
-# Get individual component from parsed version
-semver_get_major() { semver_parse "$1" | grep "^major=" | cut -d'=' -f2; }
-semver_get_minor() { semver_parse "$1" | grep "^minor=" | cut -d'=' -f2; }
-semver_get_patch() { semver_parse "$1" | grep "^patch=" | cut -d'=' -f2; }
+# Get a component from parsed version
+semver_get() {
+    local parsed="$1"
+    local component="$2"
 
-# Compare two prerelease identifiers
-# Returns: -1 if a < b, 0 if equal, 1 if a > b
-_prerelease_compare() {
-    local a="$1"
-    local b="$2"
-    
-    # Empty prerelease has higher precedence than any prerelease
-    [[ -z "$a" && -z "$b" ]] && echo 0 && return
-    [[ -z "$a" && -n "$b" ]] && echo 1 && return
-    [[ -n "$a" && -z "$b" ]] && echo -1 && return
-    
-    # Split by dots and compare each identifier
-    local IFS='.'
-    local a_parts=($a)
-    local b_parts=($b)
-    local max_len=${#a_parts[@]}
-    [[ ${#b_parts[@]} -gt $max_len ]] && max_len=${#b_parts[@]}
-    
-    for ((i=0; i<max_len; i++)); do
-        local a_id="${a_parts[$i]:-}"
-        local b_id="${b_parts[$i]:-}"
-        
-        # If one has more parts, it has higher precedence
-        [[ -z "$a_id" && -n "$b_id" ]] && echo -1 && return
-        [[ -n "$a_id" && -z "$b_id" ]] && echo 1 && return
-        
-        # Compare numeric vs alphanumeric
-        local a_isnum=0 b_isnum=0
-        [[ "$a_id" =~ ^[0-9]+$ ]] && a_isnum=1
-        [[ "$b_id" =~ ^[0-9]+$ ]] && b_isnum=1
-        
-        if [[ $a_isnum -eq 1 && $b_isnum -eq 1 ]]; then
-            # Numeric comparison
-            [[ $a_id -lt $b_id ]] && echo -1 && return
-            [[ $a_id -gt $b_id ]] && echo 1 && return
-        elif [[ $a_isnum -eq 1 ]]; then
-            # Numeric identifiers have lower precedence
-            echo -1 && return
-        elif [[ $b_isnum -eq 1 ]]; then
-            echo 1 && return
-        else
-            # ASCII comparison
-            [[ "$a_id" < "$b_id" ]] && echo -1 && return
-            [[ "$a_id" > "$b_id" ]] && echo 1 && return
-        fi
-    done
-    
-    echo 0
+    grep "^${component}=" <<< "$parsed" | cut -d'=' -f2-
 }
 
 # Compare two semantic versions
-# Returns: -1 if v1 < v2, 0 if equal, 1 if v1 > v2
+# Usage: semver_compare "1.2.3" "1.2.4"
+# Returns: -1 (v1 < v2), 0 (v1 = v2), 1 (v1 > v2)
 semver_compare() {
-    local v1="$1"
-    local v2="$2"
-    
-    local v1_info v2_info
-    v1_info=$(semver_parse "$v1")
-    v2_info=$(semver_parse "$v2")
-    
-    local major1=$(echo "$v1_info" | grep "^major=" | cut -d'=' -f2)
-    local minor1=$(echo "$v1_info" | grep "^minor=" | cut -d'=' -f2)
-    local patch1=$(echo "$v1_info" | grep "^patch=" | cut -d'=' -f2)
-    local pre1=$(echo "$v1_info" | grep "^prerelease=" | cut -d'=' -f2)
-    
-    local major2=$(echo "$v2_info" | grep "^major=" | cut -d'=' -f2)
-    local minor2=$(echo "$v2_info" | grep "^minor=" | cut -d'=' -f2)
-    local patch2=$(echo "$v2_info" | grep "^patch=" | cut -d'=' -f2)
-    local pre2=$(echo "$v2_info" | grep "^prerelease=" | cut -d'=' -f2)
-    
+    local v1="$1" v2="$2"
+    local p1 p2 major1 major2 minor1 minor2 patch1 patch2 pre1 pre2
+
+    p1=$(semver_parse "$v1")
+    p2=$(semver_parse "$v2")
+
+    major1=$(semver_get "$p1" "major")
+    major2=$(semver_get "$p2" "major")
+    minor1=$(semver_get "$p1" "minor")
+    minor2=$(semver_get "$p2" "minor")
+    patch1=$(semver_get "$p1" "patch")
+    patch2=$(semver_get "$p2" "patch")
+    pre1=$(semver_get "$p1" "prerelease")
+    pre2=$(semver_get "$p2" "prerelease")
+
     # Compare major
-    [[ $major1 -lt $major2 ]] && echo -1 && return
-    [[ $major1 -gt $major2 ]] && echo 1 && return
-    
+    if (( major1 < major2 )); then echo -1; return; fi
+    if (( major1 > major2 )); then echo 1; return; fi
+
     # Compare minor
-    [[ $minor1 -lt $minor2 ]] && echo -1 && return
-    [[ $minor1 -gt $minor2 ]] && echo 1 && return
-    
+    if (( minor1 < minor2 )); then echo -1; return; fi
+    if (( minor1 > minor2 )); then echo 1; return; fi
+
     # Compare patch
-    [[ $patch1 -lt $patch2 ]] && echo -1 && return
-    [[ $patch1 -gt $patch2 ]] && echo 1 && return
-    
+    if (( patch1 < patch2 )); then echo -1; return; fi
+    if (( patch1 > patch2 )); then echo 1; return; fi
+
     # Compare prerelease
-    _prerelease_compare "$pre1" "$pre2"
+    # A version without prerelease is greater than one with prerelease
+    if [[ -z "$pre1" && -n "$pre2" ]]; then echo 1; return; fi
+    if [[ -n "$pre1" && -z "$pre2" ]]; then echo -1; return; fi
+    if [[ -n "$pre1" && -n "$pre2" ]]; then
+        local cmp
+        cmp=$(semver_compare_prerelease "$pre1" "$pre2")
+        [[ "$cmp" != "0" ]] && { echo "$cmp"; return; }
+    fi
+
+    echo 0
 }
 
-# Check if version satisfies a constraint
-# Supports: ^ (caret), ~ (tilde), = (exact), >=, <=, >, <
+# Compare prerelease identifiers
+semver_compare_prerelease() {
+    local pre1="$1" pre2="$2"
+    local id1 id2
+
+    local IFS='.'
+    read -ra ids1 <<< "$pre1"
+    read -ra ids2 <<< "$pre2"
+
+    local len1=${#ids1[@]} len2=${#ids2[@]}
+    local max=$(( len1 > len2 ? len1 : len2 ))
+
+    for (( i=0; i<max; i++ )); do
+        id1="${ids1[$i]:-}"
+        id2="${ids2[$i]:-}"
+
+        # Missing identifier is less than any identifier
+        [[ -z "$id1" ]] && { echo -1; return; }
+        [[ -z "$id2" ]] && { echo 1; return; }
+
+        # Numeric identifiers are compared as integers
+        if [[ "$id1" =~ ^[0-9]+$ && "$id2" =~ ^[0-9]+$ ]]; then
+            if (( id1 < id2 )); then echo -1; return; fi
+            if (( id1 > id2 )); then echo 1; return; fi
+        else
+            # Alphanumeric identifiers are compared lexically
+            if [[ "$id1" < "$id2" ]]; then echo -1; return; fi
+            if [[ "$id1" > "$id2" ]]; then echo 1; return; fi
+        fi
+    done
+
+    echo 0
+}
+
+# Check if a version satisfies a constraint
+# Usage: semver_satisfies "1.2.3" "^1.0.0"
+# Supported constraints:
+#   ^1.2.3 - caret, compatible with major version
+#   ~1.2.3 - tilde, compatible with minor version  
+#   =1.2.3 - exact
+#   >=1.2.3, <=1.2.3, >1.2.3, <1.2.3 - ranges
+#   1.2.3 || 2.0.0 - OR constraints
 semver_satisfies() {
     local version="$1"
     local constraint="$2"
-    
-    # Remove leading 'v'
-    version="${version#v}"
-    constraint="${constraint#v}"
-    
-    # Handle wildcard
-    [[ "$constraint" == "*" ]] && return 0
-    
-    # Handle caret (^) - compatible with version
-    if [[ "$constraint" =~ ^\^(.+)$ ]]; then
-        local caret_ver="${BASH_REMATCH[1]}"
-        local caret_info=$(semver_parse "$caret_ver")
-        local ver_info=$(semver_parse "$version")
-        
-        local c_major=$(echo "$caret_info" | grep "^major=" | cut -d'=' -f2)
-        local c_minor=$(echo "$caret_info" | grep "^minor=" | cut -d'=' -f2)
-        local v_major=$(echo "$ver_info" | grep "^major=" | cut -d'=' -f2)
-        local v_minor=$(echo "$ver_info" | grep "^minor=" | cut -d'=' -f2)
-        
-        # ^0.0.x matches exact version only
-        if [[ $c_major -eq 0 && $c_minor -eq 0 ]]; then
-            [[ $(semver_compare "$version" "$caret_ver") -eq 0 ]]
-            return
+
+    # Handle OR constraints
+    if [[ "$constraint" =~ \|\| ]]; then
+        local IFS='||'
+        read -ra parts <<< "$constraint"
+        for part in "${parts[@]}"; do
+            part="${part#"${part%%[![:space:]]*}"}"
+            part="${part%"${part##*[![:space:]]}"}"
+            if semver_satisfies "$version" "$part"; then
+                return 0
+            fi
+        done
+        return 1
+    fi
+
+    # Handle hyphen ranges: 1.2.3 - 2.3.4
+    if [[ "$constraint" =~ ^([0-9.]+)[[:space:]]*-[[:space:]]*([0-9.]+)$ ]]; then
+        local low="${BASH_REMATCH[1]}"
+        local high="${BASH_REMATCH[2]}"
+        if (( $(semver_compare "$version" "$low") >= 0 )) && \
+           (( $(semver_compare "$version" "$high") <= 0 )); then
+            return 0
         fi
-        
-        # ^0.x matches compatible with 0.x (minor must match)
-        if [[ $c_major -eq 0 ]]; then
-            [[ $v_major -eq 0 && $v_minor -eq $c_minor && $(semver_compare "$version" "$caret_ver") -ge 0 ]]
-            return
-        fi
-        
-        # ^x matches compatible with major version x
-        [[ $v_major -eq $c_major && $(semver_compare "$version" "$caret_ver") -ge 0 ]]
-        return
+        return 1
     fi
-    
-    # Handle tilde (~) - approximately equivalent
-    if [[ "$constraint" =~ ^~(.+)$ ]]; then
-        local tilde_ver="${BASH_REMATCH[1]}"
-        local tilde_info=$(semver_parse "$tilde_ver")
-        local ver_info=$(semver_parse "$version")
-        
-        local t_major=$(echo "$tilde_info" | grep "^major=" | cut -d'=' -f2)
-        local t_minor=$(echo "$tilde_info" | grep "^minor=" | cut -d'=' -f2)
-        local v_major=$(echo "$ver_info" | grep "^major=" | cut -d'=' -f2)
-        local v_minor=$(echo "$ver_info" | grep "^minor=" | cut -d'=' -f2)
-        
-        # ~1.2.3 allows >= 1.2.3, < 1.3.0
-        # ~1.2 allows >= 1.2.0, < 1.3.0
-        # ~1 allows >= 1.0.0, < 2.0.0
-        [[ $v_major -eq $t_major && $v_minor -eq $t_minor && $(semver_compare "$version" "$tilde_ver") -ge 0 ]]
-        return
+
+    # Parse operator and version
+    local op=""
+    local ver=""
+
+    # Handle multi-char operators first (>=, <=, >, <)
+    if [[ "$constraint" =~ ^(>=|<=|>|<)([0-9].*)$ ]]; then
+        op="${BASH_REMATCH[1]}"
+        ver="${BASH_REMATCH[2]}"
+    # Then single-char operators (start with ^ or ~)
+    elif [[ "$constraint" =~ ^(\^)([0-9].*)$ ]]; then
+        op="^"
+        ver="${BASH_REMATCH[2]}"
+    elif [[ "$constraint" =~ ^(~)([0-9].*)$ ]]; then
+        op="~"
+        ver="${BASH_REMATCH[2]}"
+    elif [[ "$constraint" =~ ^([0-9]+\.[0-9]+\.[0-9]+.*)$ ]]; then
+        # Bare version = exact match
+        op="="
+        ver="$constraint"
+    else
+        return 1
     fi
-    
-    # Handle comparison operators (using string prefix checks)
-    if [[ "$constraint" == ">="* ]]; then
-        local cmp_ver="${constraint#>=}"
-        [[ $(semver_compare "$version" "$cmp_ver") -ge 0 ]]
-        return
+
+    # Remove trailing whitespace from version
+    ver="${ver%"${ver##*[![:space:]]}"}"
+
+    case "$op" in
+        "=")
+            [[ $(semver_compare "$version" "$ver") == "0" ]]
+            ;;
+        "^")
+            semver_satisfies_caret "$version" "$ver"
+            ;;
+        "~")
+            semver_satisfies_tilde "$version" "$ver"
+            ;;
+        ">=")
+            (( $(semver_compare "$version" "$ver") >= 0 ))
+            ;;
+        "<=")
+            (( $(semver_compare "$version" "$ver") <= 0 ))
+            ;;
+        ">")
+            (( $(semver_compare "$version" "$ver") > 0 ))
+            ;;
+        "<")
+            (( $(semver_compare "$version" "$ver") < 0 ))
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# Check if version satisfies caret constraint (^x.y.z)
+# Allows changes that do not modify the left-most non-zero digit
+semver_satisfies_caret() {
+    local version="$1" target="$2"
+    local pv tv major minor patch
+
+    pv=$(semver_parse "$version")
+    tv=$(semver_parse "$target")
+
+    local major_t minor_t patch_t
+    major_t=$(semver_get "$tv" "major")
+    minor_t=$(semver_get "$tv" "minor")
+    patch_t=$(semver_get "$tv" "patch")
+
+    local major_v minor_v patch_v
+    major_v=$(semver_get "$pv" "major")
+    minor_v=$(semver_get "$pv" "minor")
+    patch_v=$(semver_get "$pv" "patch")
+
+    # If major > 0, compatible with same major
+    if (( major_t > 0 )); then
+        (( major_v == major_t )) || return 1
+        (( minor_v > minor_t )) || { (( minor_v == minor_t )) && (( patch_v >= patch_t )); } || return 1
+        return 0
     fi
-    
-    if [[ "$constraint" == ">"* ]]; then
-        local cmp_ver="${constraint#>}"
-        [[ $(semver_compare "$version" "$cmp_ver") -gt 0 ]]
-        return
+
+    # If major = 0, minor > 0: compatible with same minor
+    if (( minor_t > 0 )); then
+        (( minor_v == minor_t )) || return 1
+        (( patch_v >= patch_t )) || return 1
+        return 0
     fi
-    
-    if [[ "$constraint" == "<="* ]]; then
-        local cmp_ver="${constraint#<=}"
-        [[ $(semver_compare "$version" "$cmp_ver") -le 0 ]]
-        return
-    fi
-    
-    if [[ "$constraint" == "<"* ]]; then
-        local cmp_ver="${constraint#<}"
-        [[ $(semver_compare "$version" "$cmp_ver") -lt 0 ]]
-        return
-    fi
-    
-    # Handle exact version (= is optional)
-    local exact_ver="${constraint#=}"
-    [[ $(semver_compare "$version" "$exact_ver") -eq 0 ]]
+
+    # If major = 0, minor = 0: only same patch
+    (( patch_v == patch_t ))
+}
+
+# Check if version satisfies tilde constraint (~x.y.z)
+# Allows patch-level changes if minor version is specified
+semver_satisfies_tilde() {
+    local version="$1" target="$2"
+    local pv tv
+
+    pv=$(semver_parse "$version")
+    tv=$(semver_parse "$target")
+
+    local major_t minor_t patch_t
+    major_t=$(semver_get "$tv" "major")
+    minor_t=$(semver_get "$tv" "minor")
+    patch_t=$(semver_get "$tv" "patch")
+
+    local major_v minor_v patch_v
+    major_v=$(semver_get "$pv" "major")
+    minor_v=$(semver_get "$pv" "minor")
+    patch_v=$(semver_get "$pv" "patch")
+
+    (( major_v == major_t )) || return 1
+    (( minor_v == minor_t )) || return 1
+    (( patch_v >= patch_t )) || return 1
 }
 
 # Find the highest version that satisfies a constraint
 # Usage: semver_resolve "^1.0.0" "1.0.0" "1.0.1" "1.1.0" "2.0.0"
+# Returns: the highest matching version or empty if none
 semver_resolve() {
     local constraint="$1"
     shift
-    
-    local best_version=""
-    
+
+    local best=""
+    local version
+
     for version in "$@"; do
         if semver_satisfies "$version" "$constraint"; then
-            if [[ -z "$best_version" ]] || [[ $(semver_compare "$version" "$best_version") -gt 0 ]]; then
-                best_version="$version"
+            if [[ -z "$best" ]] || (( $(semver_compare "$version" "$best") > 0 )); then
+                best="$version"
             fi
         fi
     done
-    
-    echo "$best_version"
+
+    printf '%s\n' "$best"
 }
 
-# Validate if a string is a valid semantic version
-semver_is_valid() {
+# Get the minimum version from a constraint
+# Usage: semver_min_version "^1.2.3"
+semver_min_version() {
+    local constraint="$1"
+
+    if [[ "$constraint" =~ ^[=\^~]+([0-9]+\.[0-9]+\.[0-9]+.*)$ ]]; then
+        printf '%s\n' "${BASH_REMATCH[1]}"
+        return 0
+    fi
+
+    return 1
+}
+
+# Validate that a string is a valid semantic version
+semver_validate() {
     local version="$1"
+
+    # Remove leading 'v'
     version="${version#v}"
-    
-    # Basic semver pattern: major.minor.patch[-prerelease][+build]
-    [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[a-zA-Z0-9.]+)?(\+[a-zA-Z0-9.]+)?$ ]]
+
+    # Basic semver regex
+    [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?(\+([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?$ ]]
 }
 
-# Bump version components
-semver_bump_major() {
-    local info=$(semver_parse "$1")
-    local major=$(echo "$info" | grep "^major=" | cut -d'=' -f2)
-    echo "$((major + 1)).0.0"
-}
-
-semver_bump_minor() {
-    local info=$(semver_parse "$1")
-    local major=$(echo "$info" | grep "^major=" | cut -d'=' -f2)
-    local minor=$(echo "$info" | grep "^minor=" | cut -d'=' -f2)
-    echo "${major}.$((minor + 1)).0"
-}
-
-semver_bump_patch() {
-    local info=$(semver_parse "$1")
-    local major=$(echo "$info" | grep "^major=" | cut -d'=' -f2)
-    local minor=$(echo "$info" | grep "^minor=" | cut -d'=' -f2)
-    local patch=$(echo "$info" | grep "^patch=" | cut -d'=' -f2)
-    echo "${major}.${minor}.$((patch + 1))"
-}
+# Example usage:
+#   semver_compare "1.2.3" "1.2.4"  # Outputs: -1
+#   semver_satisfies "1.2.5" "^1.0.0" && echo "satisfies"
+#   best=$(semver_resolve "~1.2.0" "1.2.0" "1.2.5" "1.3.0")  # Returns: 1.2.5

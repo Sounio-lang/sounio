@@ -1,18 +1,14 @@
 # Sounio Package Manager
 
-The Sounio package manager (`sounio-pkg`) is a dependency management tool for Sounio projects, inspired by Cargo and npm.
+A lightweight package manager for the Sounio programming language.
 
 ## Overview
 
-The package manager handles:
-- **Dependency resolution** from registries, git repositories, or local paths
-- **Lockfile generation** for reproducible builds
-- **Semantic versioning** with constraint satisfaction (^, ~, >=, etc.)
-- **Package caching** for faster subsequent installs
+The Sounio Package Manager (`sounio-pkg`) handles dependency resolution, fetching, and verification for Sounio projects. It uses TOML-based manifests (`Sounio.toml`) and lockfiles (`Sounio.lock`) for reproducible builds.
 
 ## Installation
 
-The package manager is included with the Sounio toolchain. Make sure `tools/pkg/` is in your PATH:
+The package manager is included with the Sounio toolchain. Ensure the `tools/pkg/` directory is in your PATH:
 
 ```bash
 export PATH="$PATH:/path/to/sounio/tools/pkg"
@@ -26,170 +22,195 @@ ln -s /path/to/sounio/tools/pkg/sounio-pkg.sh /usr/local/bin/sounio-pkg
 
 ## Quick Start
 
-### 1. Create a Sounio.toml manifest
+1. **Create a manifest** (`Sounio.toml`):
 
 ```toml
 [package]
 name = "my-project"
-version = "1.0.0"
-edition = "2024"
+version = "0.1.0"
 
 [dependencies]
-stdlib = { version = "^1.2.0" }
-parser = { git = "https://github.com/sounio/parser.git", branch = "main" }
-utils = { path = "../utils" }
+stdlib = "^1.0.0"
+json = { git = "https://github.com/sounio/json.git", version = "~2.1.0" }
+local-lib = { path = "../local-lib", version = "=1.0.0" }
 ```
 
-### 2. Install dependencies
+2. **Install dependencies**:
 
 ```bash
 sounio-pkg install
 ```
 
-This creates:
-- `Sounio.lock` - Lockfile with resolved versions
-- `vendor/` - Downloaded packages
+This creates a `vendor/` directory with all dependencies.
 
-### 3. Update dependencies
+3. **Update dependencies**:
 
 ```bash
 sounio-pkg update
 ```
 
-Regenerates the lockfile from the manifest.
+This updates `Sounio.lock` with resolved versions.
 
 ## Commands
 
-| Command | Description |
-|---------|-------------|
-| `install` | Install from lockfile (or update if stale) |
-| `update` | Generate new lockfile from manifest |
-| `add <pkg>` | Add dependency (stub - edit manually) |
-| `remove <pkg>` | Remove dependency (stub - edit manually) |
-| `verify` | Verify package hashes |
-| `clean` | Remove vendor and cache |
-| `help` | Show usage information |
+### `install`
 
-## Manifest Format (Sounio.toml)
+Installs dependencies from `Sounio.lock`. If the lockfile doesn't exist, runs `update` first.
 
-### Package Section
+```bash
+sounio-pkg install
+```
+
+### `update`
+
+Resolves dependencies from `Sounio.toml` and generates/updates `Sounio.lock`.
+
+```bash
+sounio-pkg update
+```
+
+### `add <package>[@version]`
+
+Adds a new dependency (stub - not fully implemented).
+
+```bash
+sounio-pkg add stdlib@^1.0.0
+sounio-pkg add json
+```
+
+### `remove <package>`
+
+Removes a dependency (stub - not fully implemented).
+
+```bash
+sounio-pkg remove json
+```
+
+### `verify`
+
+Verifies package integrity by checking hashes.
+
+```bash
+sounio-pkg verify
+```
+
+### `clean`
+
+Removes the `vendor/` directory. Use `--all` to also clear cache and remove lockfile.
+
+```bash
+sounio-pkg clean
+sounio-pkg clean --all
+```
+
+## Manifest Format (`Sounio.toml`)
 
 ```toml
 [package]
-name = "my-project"      # Required: Package name
-version = "1.0.0"        # Required: Semantic version
-edition = "2024"         # Optional: Sounio edition
-```
+name = "project-name"
+version = "1.0.0"
+description = "A description"
 
-### Dependencies Section
-
-Registry dependency with version constraint:
-
-```toml
 [dependencies]
-stdlib = { version = "^1.2.0" }
-```
+# Simple registry dependency with version constraint
+stdlib = "^1.0.0"
 
-Git dependency:
+# Exact version
+exact-lib = "=1.2.3"
 
-```toml
-parser = { git = "https://github.com/sounio/parser.git", branch = "main" }
-```
+# Git dependency
+git-lib = { git = "https://github.com/user/repo.git", version = "^1.0.0" }
 
-Local path dependency:
-
-```toml
-utils = { path = "../utils" }
+# Path dependency
+local-lib = { path = "../local", version = "=1.0.0" }
 ```
 
 ### Version Constraints
 
-| Constraint | Meaning |
-|------------|---------|
-| `^1.2.0` | Compatible with 1.2.0 (>= 1.2.0, < 2.0.0) |
-| `~1.2.0` | Approximately 1.2.0 (>= 1.2.0, < 1.3.0) |
-| `=1.2.0` | Exactly 1.2.0 |
-| `>=1.2.0` | At least 1.2.0 |
-| `>1.2.0` | Greater than 1.2.0 |
-| `<=1.2.0` | At most 1.2.0 |
-| `<1.2.0` | Less than 1.2.0 |
+- `^1.2.3` - Caret: compatible with major version (>=1.2.3, <2.0.0)
+- `~1.2.3` - Tilde: compatible with minor version (>=1.2.3, <1.3.0)
+- `=1.2.3` - Exact version
+- `>=1.2.3` - Greater than or equal
+- `<=1.2.3` - Less than or equal
+- `>1.2.3` - Greater than
+- `<1.2.3` - Less than
 
-## Lockfile Format (Sounio.lock)
+## Lockfile Format (`Sounio.lock`)
 
 ```toml
 # This file is automatically generated by sounio-pkg.
-# Do not edit manually.
-# Generated: 2024-01-15T10:30:00Z
+# It is not intended for manual editing.
+version = "1"
 
 [[package]]
 name = "stdlib"
-version = "1.2.0"
-source = "registry"
-hash = "abc123..."
+version = "1.2.5"
+source = "registry://stdlib"
+hash = "sha256:abc123..."
 
 [[package]]
-name = "parser"
-version = "git-main"
-source = "git:https://github.com/sounio/parser.git#main"
-
-[[package]]
-name = "utils"
-version = "local"
-source = "path:../utils"
+name = "json"
+version = "2.1.0"
+source = "git+https://github.com/sounio/json.git"
+hash = "sha256:def456..."
 ```
-
-## Library Structure
-
-The package manager is organized into reusable bash libraries:
-
-| Library | Purpose |
-|---------|---------|
-| `lib/parse_toml.sh` | TOML parsing utilities |
-| `lib/semver.sh` | Semantic versioning and constraints |
-| `lib/lockfile.sh` | Lockfile read/write operations |
-| `lib/fetch.sh` | Package fetching from various sources |
-
-## Cache Directory
-
-Downloaded packages are cached in:
-
-```
-~/.cache/sounio/pkg/
-```
-
-Use `sounio-pkg clean` to clear the cache.
 
 ## Architecture
 
-```
-┌─────────────────────────────────────┐
-│         sounio-pkg.sh (CLI)         │
-├─────────────────────────────────────┤
-│  ┌─────────┐ ┌─────────┐ ┌────────┐ │
-│  │ install │ │ update  │ │ verify │ │
-│  └────┬────┘ └────┬────┘ └───┬────┘ │
-│       └─────────────┴─────────┘      │
-├─────────────────────────────────────┤
-│         Library Layer               │
-│  ┌──────────┐ ┌──────────┐          │
-│  │ parse_   │ │ semver   │          │
-│  │ toml.sh  │ │ .sh      │          │
-│  ├──────────┤ ├──────────┤          │
-│  │ lockfile │ │ fetch    │          │
-│  │ .sh      │ │ .sh      │          │
-│  └──────────┘ └──────────┘          │
-└─────────────────────────────────────┘
+The package manager consists of modular libraries:
+
+- `lib/parse_toml.sh` - TOML parsing utilities
+- `lib/semver.sh` - Semantic versioning and constraint resolution
+- `lib/lockfile.sh` - Lockfile read/write operations
+- `lib/fetch.sh` - Package fetching from registry/git/path sources
+- `sounio-pkg.sh` - Main CLI entry point
+
+## Environment Variables
+
+- `PKG_CACHE_DIR` - Cache directory (default: `~/.cache/sounio/pkg`)
+- `PKG_REGISTRY_URL` - Package registry URL (default: `https://packages.souniolang.org`)
+- `PKG_TIMEOUT` - Download timeout in seconds (default: `60`)
+
+## Examples
+
+### Basic workflow
+
+```bash
+# Create a new project
+cd my-project
+
+# Create Sounio.toml
+cat > Sounio.toml << 'EOF'
+[package]
+name = "my-project"
+version = "0.1.0"
+
+[dependencies]
+stdlib = "^1.0.0"
+EOF
+
+# Install dependencies
+sounio-pkg update
+sounio-pkg install
+
+# Verify packages
+sounio-pkg verify
 ```
 
-## Future Enhancements
+### Using git dependencies
 
-- [ ] Real registry API integration
-- [ ] Dependency tree resolution
-- [ ] `add` and `remove` command implementation
-- [ ] Package publishing
-- [ ] Workspace support
-- [ ] Selective dependency updates
+```toml
+[dependencies]
+my-lib = { git = "https://github.com/user/my-lib.git", version = "^1.0.0" }
+```
+
+### Using path dependencies
+
+```toml
+[dependencies]
+local-utils = { path = "../utils", version = "=1.0.0" }
+```
 
 ## License
 
-Part of the Sounio project. See LICENSE for details.
+See the main Sounio project LICENSE file.
