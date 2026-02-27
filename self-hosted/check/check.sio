@@ -692,6 +692,10 @@ fn call_arg_types_compatible(arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEn
     if types_compatible(arg_ty, param_ty) {
         return true
     }
+    // Directional borrow boundary: &!T can flow to &T.
+    if param_ty.kind == TypeKind::TyRef && arg_ty.kind == TypeKind::TyRefMut {
+        return types_compatible_inner(arg_ty.inner, param_ty.inner)
+    }
     // Allow implicit borrow syntax at call boundaries: f(&T) <- x
     if arg_expr.kind == ExprKind::ExprIdent &&
        (param_ty.kind == TypeKind::TyRef || param_ty.kind == TypeKind::TyRefMut) {
@@ -1469,7 +1473,7 @@ impl Checker {
     }
 
     fn check_refinement_literal(self, span: Span, ty: TypeEntry) -> Checker with Mut, Panic, Div {
-        if ty.refinement_id < 0 { return self }
+        if ty.refinement_id < 0 || ty.refinement_id >= 128 { return self }
         let rt = self.refinements.entries[ty.refinement_id as usize]
         var c = self
         if c.last_literal_kind == 1 {
@@ -1583,10 +1587,15 @@ impl Checker {
                 // If this is a linear type variable, mark it as consumed
                 var c2 = self
                 if c2.is_linear_type(ident_ty) && c2.suppress_linear_consume_depth == 0 {
-                    let consume_result = c2.borrows.consume_linear(e.name)
-                    c2.borrows = consume_result.0
-                    if consume_result.1 != 0 {
-                        c2 = c2.report_error_at(e.span, consume_result.1, 0, 0, 0)
+                    // CRITICAL FIX: Check if borrowed before consuming
+                    if c2.borrows.is_borrowed(e.name) {
+                        c2 = c2.report_error_at(e.span, 38, 0, 0, 0)  // Cannot consume borrowed value
+                    } else {
+                        let consume_result = c2.borrows.consume_linear(e.name)
+                        c2.borrows = consume_result.0
+                        if consume_result.1 != 0 {
+                            c2 = c2.report_error_at(e.span, consume_result.1, 0, 0, 0)
+                        }
                     }
                 }
                 (c2, ident_ty)
@@ -1709,10 +1718,16 @@ impl Checker {
                 if !is_integer_type(left_ty) {
                     return self.report_error_at(span, 49, 0, 0, 0)
                 }
+                if !is_integer_type(right_ty) {
+                    return self.report_error_at(span, 49, 0, 0, 0)
+                }
                 self
             }
             OpShr => {
                 if !is_integer_type(left_ty) {
+                    return self.report_error_at(span, 49, 0, 0, 0)
+                }
+                if !is_integer_type(right_ty) {
                     return self.report_error_at(span, 49, 0, 0, 0)
                 }
                 self
@@ -2112,7 +2127,7 @@ impl Checker {
 
     fn check_call_arg_refinement_boundary(self, arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {
         let expected_ty = call_ref_inner_or_self(param_ty)
-        if expected_ty.refinement_id < 0 || is_error_or_unknown(expected_ty) {
+        if expected_ty.refinement_id < 0 || expected_ty.refinement_id >= 128 || is_error_or_unknown(expected_ty) {
             return self
         }
         let provided_ty = call_ref_inner_or_self(arg_ty)
@@ -2136,7 +2151,7 @@ impl Checker {
             return c
         }
 
-        if provided_ty.refinement_id >= 0 {
+        if provided_ty.refinement_id >= 0 && provided_ty.refinement_id < 128 {
             let provided_ref = c.refinements.entries[provided_ty.refinement_id as usize]
             if !pred_implies(provided_ref.predicate, expected_ref.predicate) {
                 c = c.report_error_at(call_span, 42, 0, 0, 0)
@@ -2195,10 +2210,14 @@ impl Checker {
                 }
                 // Linear type consumption: if arg is linear and not implicitly borrowed, consume it
                 if arg_expr.kind == ExprKind::ExprIdent && c.is_linear_type(arg_ty) && !implicit_borrow && c.suppress_linear_consume_depth == 0 {
-                    let consume_result = c.borrows.consume_linear(arg_expr.name)
-                    c.borrows = consume_result.0
-                    if consume_result.1 != 0 {
-                        c = c.report_error_at(call_span, 39, 0, 0, 0)
+                    if c.borrows.is_borrowed(arg_expr.name) {
+                        c = c.report_error_at(call_span, 38, 0, 0, 0)
+                    } else {
+                        let consume_result = c.borrows.consume_linear(arg_expr.name)
+                        c.borrows = consume_result.0
+                        if consume_result.1 != 0 {
+                            c = c.report_error_at(call_span, 39, 0, 0, 0)
+                        }
                     }
                 }
                 c.check_call_args_inner((*arg_list).tail, params, idx + 1, expected_count, call_span)
