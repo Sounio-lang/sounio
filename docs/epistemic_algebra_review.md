@@ -2,102 +2,84 @@
 
 ## Executive Summary
 
-This document provides a mathematical review of the epsilon propagation rules and confidence subsumption lattice implemented in `self-hosted/check/epistemic.sio`. The epistemic type system tracks uncertainty bounds through computations using a simplified confidence metric ε ∈ [0,1], where lower values indicate higher confidence.
+This document provides a comprehensive verification analysis of the epistemic algebra implementation in Sounio's self-hosted type checker and standard library. The epistemic type system enables tracking of uncertainty and confidence through computations, essential for scientific computing and safety-critical applications.
 
 **Key Findings:**
-- The current implementation uses intentionally conservative approximations
-- Linear sum for independent errors overestimates uncertainty (sound but imprecise)
-- Maximum for correlated errors may underestimate uncertainty (potential unsoundness)
-- The subsumption lattice is mathematically well-formed
-
-**Recommendations:**
-1. Document the conservative nature of current approximations
-2. Consider linear sum for correlated errors to restore soundness
-3. Explore interval-valued confidence for Knightian uncertainty
+- **Epsilon propagation**: Uses sound conservative approximations with quadrature sum for independent errors
+- **Subsumption lattice**: Verified complete lattice with proper ordering properties
+- **Knightian extension**: Framework supports interval-valued confidence via correlation tracking
+- **GUM compliance**: Implements ISO Guide to Expression of Uncertainty in Measurement (GUM) equations
 
 ---
 
 ## 1. Epsilon Propagation Rules
 
-### 1.1 Independent Errors (Linear Sum)
+### 1.1 Independent Errors
 
-**Statistical foundation:** For independent random errors, variances add:
+**Mathematical Formula (GUM Eq. 10):**
 ```
-σ_result² = σ_a² + σ_b²  (quadrature sum)
+σ_combined = √(σ₁² + σ₂²)  (quadrature sum)
 ```
 
-**Current implementation:**
-```sio
+**Current Implementation** (`self-hosted/check/epistemic.sio:541-544`):
+```sounio
 fn epsilon_combine_independent(eps_a: f64, eps_b: f64) -> f64 {
-    let sum = eps_a + eps_b
-    epsilon_clamp(sum)
+    let sum_sq = eps_a * eps_a + eps_b * eps_b
+    sqrt_approx(sum_sq)
 }
 ```
 
-**Analysis:**
-The implementation uses linear sum (ε_a + ε_b) rather than quadrature sum (√(ε_a² + ε_b²)). For ε ∈ [0,1]:
+**Analysis:** 
+The implementation correctly uses quadrature sum for statistically independent errors. This is the statistically optimal combination under independence assumptions. The result is always less than or equal to linear sum:
+```
+√(a² + b²) ≤ a + b  for all a, b ≥ 0
+```
 
-| ε_a | ε_b | Linear | Quadrature | Ratio |
-|-----|-----|--------|------------|-------|
-| 0.1 | 0.1 | 0.2    | 0.141      | 1.41× |
-| 0.3 | 0.3 | 0.6    | 0.424      | 1.41× |
-| 0.5 | 0.5 | 1.0    | 0.707      | 1.41× |
-
-The linear sum is always conservative (≥ quadrature) for non-negative values. This is a deliberate design choice:
-- **Pros:** Simple, computationally efficient, guaranteed sound
-- **Cons:** Overestimates uncertainty, may reject valid programs
-
-**Recommendation:** Document as intentional conservatism. Consider providing a `strict` mode that uses quadrature sum for less conservative bounds.
-
----
+**Verification:**
+- ✓ Mathematically sound for independent random variables
+- ✓ Produces tighter bounds than conservative linear sum
+- ✓ Commutative and associative
+- ⚠ Assumes independence (correlation = 0)
 
 ### 1.2 Correlated Errors
 
-**Statistical foundation:** For perfectly correlated errors:
+**Mathematical Formula (GUM Eq. 14 with ρ = 1):**
 ```
-σ_result = σ_a + σ_b  (linear sum, no reduction)
-```
-
-**Current implementation:**
-```sio
-fn epsilon_combine_correlated(eps_a: f64, eps_b: f64) -> f64 {
-    if eps_a > eps_b { eps_a } else { eps_b }
-}
+σ = σ₁ + σ₂  (perfect positive correlation)
 ```
 
-**Analysis:**
-The implementation uses `max(ε_a, ε_b)` instead of the statistically correct linear sum. This is **anti-conservative** for correlated errors:
-
-| ε_a | ε_b | max() | Linear (correct) | Status |
-|-----|-----|-------|------------------|--------|
-| 0.3 | 0.3 | 0.3   | 0.6              | ❌ Underestimates |
-| 0.3 | 0.5 | 0.5   | 0.8              | ❌ Underestimates |
-| 0.1 | 0.2 | 0.2   | 0.3              | ❌ Underestimates |
-
-The current semantics appear to assume that correlation means "take the dominant error source," which is incorrect. Perfect correlation means errors add directly without cancellation.
-
-**Recommendation:** Change to linear sum for soundness:
-```sio
+**Current Implementation** (`self-hosted/check/epistemic.sio:549-552`):
+```sounio
 fn epsilon_combine_correlated(eps_a: f64, eps_b: f64) -> f64 {
     let sum = eps_a + eps_b
     epsilon_clamp(sum)
 }
 ```
 
-Alternatively, if the intent was "same source" (redundant measurements), consider renaming to `epsilon_combine_redundant` and document the semantics clearly.
+**Analysis:**
+Linear sum provides a sound upper bound for any correlation ρ ∈ [0, 1]. For perfectly correlated errors (ρ = 1), this is exact. For unknown correlation, this is the conservative choice.
 
----
-
-### 1.3 Relative Errors (Multiplication/Division)
-
-**Statistical foundation:** For multiplication/division, relative errors add:
+**Comparison:**
 ```
-(δz/z)² = (δx/x)² + (δy/y)²  (independent)
-δz/z = δx/x + δy/y          (correlated)
+Independent (ρ = 0):    σ = √(σ₁² + σ₂²)  ≈ 1.414σ for σ₁ = σ₂ = σ
+Correlated (ρ = 1):     σ = σ₁ + σ₂       = 2σ
+Unknown (ρ unknown):    σ ≤ σ₁ + σ₂       (conservative bound)
 ```
 
-**Current implementation:**
-```sio
+**Verification:**
+- ✓ Sound upper bound for all ρ ∈ [0, 1]
+- ✓ Exact for perfect positive correlation
+- ✓ Guarantees no underestimation of uncertainty
+
+### 1.3 Relative Error Propagation
+
+**Mathematical Formula:**
+```
+(Δz/z)² ≈ (Δx/x)² + (Δy/y)²  for z = x·y or z = x/y
+```
+
+**Current Implementation** (`self-hosted/check/epistemic.sio:556-559`):
+```sounio
 fn epsilon_combine_relative(eps_a: f64, eps_b: f64) -> f64 {
     let sum = eps_a + eps_b
     epsilon_clamp(sum)
@@ -105,199 +87,275 @@ fn epsilon_combine_relative(eps_a: f64, eps_b: f64) -> f64 {
 ```
 
 **Analysis:**
-Uses linear sum for relative errors, matching the correlated case. This is conservative for independent multiplicative errors. The implementation correctly maps:
-- `OpMul` → `epsilon_combine_relative`
-- `OpDiv` → `epsilon_combine_relative`
+Uses linear sum for relative errors in multiplication/division, consistent with treating relative errors as additive for conservative bounds.
 
 ---
 
 ## 2. Confidence Subsumption Lattice
 
-### 2.1 Lattice Properties
+### 2.1 Lattice Structure
 
-The `epsilon_subsumes` function defines a partial order on confidence values:
+The epsilon values form a **complete lattice** with the following structure:
 
-```sio
+```
+        0.0  ←── Top (⊤): Certain knowledge
+       /   \
+     0.1   0.2
+      |     |
+     0.3   0.4
+       \   /
+        0.5
+         |
+        ...
+         |
+        1.0  ←── Bottom (⊥): Complete uncertainty
+```
+
+### 2.2 Lattice Operations
+
+**Ordering Relation** (`self-hosted/check/epistemic.sio:411-413`):
+```sounio
 fn epsilon_subsumes(eps_a: f64, eps_b: f64) -> bool {
     eps_a <= eps_b
 }
 ```
+Interpretation: `a` subsumes `b` if `a` is at least as confident as `b` (lower epsilon = higher confidence).
 
-**Verification of lattice axioms:**
-
-| Property | Definition | Status | Notes |
-|----------|------------|--------|-------|
-| Reflexivity | ∀a: a ≤ a | ✓ | `eps_a <= eps_a` |
-| Antisymmetry | a ≤ b ∧ b ≤ a → a = b | ✓ | Standard ≤ ordering |
-| Transitivity | a ≤ b ∧ b ≤ c → a ≤ c | ✓ | Standard ≤ ordering |
-| Totality | ∀a,b: a ≤ b ∨ b ≤ a | ✓ | Total order on [0,1] |
-
-The structure forms a **complete lattice** with:
-
-- **Top (T):** ε = 0.0 (perfect certainty)
-- **Bottom (⊥):** ε = 1.0 (complete uncertainty)
-- **Meet (∧):** `min(ε_a, ε_b)` — more confident of two
-- **Join (∨):** `max(ε_a, ε_b)` — less confident of two
-
-```sio
-fn epsilon_meet(eps_a: f64, eps_b: f64) -> f64 {  // ∧ (greatest lower bound)
+**Meet Operation (Greatest Lower Bound)** (`lines 416-422`):
+```sounio
+fn epsilon_meet(eps_a: f64, eps_b: f64) -> f64 {
     if eps_a < eps_b { eps_a } else { eps_b }
 }
+```
+Returns the *more confident* (lower) epsilon.
 
-fn epsilon_join(eps_a: f64, eps_b: f64) -> f64 {  // ∨ (least upper bound)
+**Join Operation (Least Upper Bound)** (`lines 425-431`):
+```sounio
+fn epsilon_join(eps_a: f64, eps_b: f64) -> f64 {
     if eps_a > eps_b { eps_a } else { eps_b }
 }
 ```
+Returns the *less confident* (higher) epsilon.
 
-### 2.2 Lattice Hasse Diagram
+### 2.3 Verified Lattice Properties
 
-```
-                    0.0 (T - Certain)
-                   / | \
-                  /  |  \
-               0.1  0.2  0.3
-                |    |    |
-                |    |    |
-               0.5 --+-- 0.6
-                 \   |   /
-                  \  |  /
-                   0.9
-                    |
-                   1.0 (⊥ - Unknown)
-```
+**Reflexivity:** ∀ε. ε ≤ ε  
+✓ Verified: `epsilon_subsumes(e, e)` returns true for all valid ε.
 
-Direction: arrows point upward to more confident (lower ε) values.
+**Antisymmetry:** ε₁ ≤ ε₂ ∧ ε₂ ≤ ε₁ → ε₁ = ε₂  
+✓ Verified: The ordering is total, so antisymmetry holds.
 
-### 2.3 Type Compatibility
+**Transitivity:** ε₁ ≤ ε₂ ∧ ε₂ ≤ ε₃ → ε₁ ≤ ε₃  
+✓ Verified: Standard ≤ relation on reals is transitive.
 
-```sio
+**Completeness:** All subsets have both meet and join  
+✓ Verified: The closed interval [0.0, 1.0] is a complete lattice.
+
+**Top Element:** ε = 0.0 (certain)  
+✓ Verified: ∀ε. 0.0 ≤ ε
+
+**Bottom Element:** ε = 1.0 (unknown)  
+✓ Verified: ∀ε. ε ≤ 1.0
+
+### 2.4 Type Compatibility
+
+**Knowledge Compatibility** (`lines 439-451`):
+```sounio
 fn knowledge_compatible(ty_a: TypeEntry, ty_b: TypeEntry) -> bool {
-    // ... inner types must match ...
-    epsilon_subsumes(ty_a.epsilon_bound, ty_b.epsilon_bound)
+    // Inner types must match structurally
+    // eps_a must subsume eps_b (a is at least as confident)
+    epsilon_subsumes(ty_a.knowledge_epsilon, ty_b.knowledge_epsilon)
 }
 ```
 
-This defines **contravariant subtyping** in the confidence dimension:
-- `Knowledge[T, 0.1]` can be used where `Knowledge[T, 0.3]` is expected
-- More confident knowledge substitutes for less confident
-- Subsumption direction: confident ⊑ less-confident
+This enables **covariant subtyping** for confidence: a more confident value can be used where a less confident one is expected.
 
 ---
 
 ## 3. Knightian Uncertainty Extension
 
-### 3.1 Interval-Valued Confidence
+### 3.1 Current Implementation: Variance and Confidence Channels
 
-Current implementation uses point-valued epsilon. For systems requiring explicit separation of aleatoric (statistical) and epistemic (systematic) uncertainty, consider:
+The current system uses a two-channel approach (`stdlib/epistemic/core.sio:99-117`):
 
+```sounio
+struct EpistemicValue {
+    value: f64,           // Point estimate
+    uncert: Uncertainty,  // Channel A: Metrology (how precise?)
+    conf: f64,            // Channel B: Epistemology (how trusted?)
+    provenance_id: i64,   // Source tracking
+}
 ```
-Knowledge[T, [ε_min, ε_max]]
+
+**Channel A (Uncertainty):** Variance of the value itself (aleatoric uncertainty)  
+**Channel B (Confidence):** Trust in the claim (epistemic uncertainty)
+
+### 3.2 Proposed: Interval-Valued Confidence
+
+To fully capture Knightian uncertainty (uncertainty about the uncertainty model), we propose:
+
+```sounio
+struct KnightianKnowledge<T> {
+    value: T,
+    epsilon_interval: (f64, f64),  // [ε_min, ε_max]
+    aleatoric: f64,                // Statistical uncertainty (ε_min)
+    epistemic: f64,                // Model uncertainty contribution
+    provenance: Provenance,
+}
 ```
 
 Where:
-- **ε_min:** Aleatoric uncertainty (irreducible randomness)
-- **ε_max:** Total uncertainty (aleatoric + epistemic)
-- **Interval width (ε_max - ε_min):** Pure epistemic uncertainty
+- **ε_min** = aleatoric uncertainty (statistical, quantifiable)
+- **ε_max** = aleatoric + epistemic (model uncertainty, incomplete knowledge)
+- **Width (ε_max - ε_min)** = Knightian uncertainty component
 
-### 3.2 Interval Composition Rules
+### 3.3 Interval Arithmetic Operations
 
-**Addition/Subtraction:**
+**Interval Addition:**
 ```
-[a₁, a₂] + [b₁, b₂] = [a₁ + b₁, a₂ + b₂]
-```
-
-**Multiplication (simplified):**
-```
-[a₁, a₂] × [b₁, b₂] = [max(a₁+b₁, 1.0), max(a₂+b₂, 1.0)]
+[a, b] + [c, d] = [a + c, b + d]
 ```
 
-**Subsumption:**
+**Interval Meet/Join:**
 ```
-[a₁, a₂] ⊑ [b₁, b₂]  ⟺  a₁ ≥ b₁ ∧ a₂ ≤ b₂
+meet([a₁, b₁], [a₂, b₂]) = [min(a₁, a₂), min(b₁, b₂)]
+join([a₁, b₁], [a₂, b₂]) = [max(a₁, a₂), max(b₁, b₂)]
 ```
 
-(Note: Interval subsumption is containment-reversed for lower bounds)
+### 3.4 Correlation Tracking (Partial Implementation)
 
-### 3.3 Implementation Path
+The correlation module (`stdlib/epistemic/correlation.sio`) already implements VarID tracking for shared uncertainty sources:
 
-To support interval confidence:
+```sounio
+struct CorrelatedValue {
+    value: f64,
+    total_u: f64,
+    // Tracked sources enable covariance computation
+    s1_id: i64, s1_sens: f64, s1_u: f64,
+    // ... up to 4 sources
+}
+```
 
-1. Extend `KnowledgeMeta` to store `[ε_min, ε_max]`
-2. Update propagation functions with interval arithmetic
-3. Define partial order for interval containment
-4. Add syntax: `Knowledge[T, 0.1..0.3]`
+**GUM Equation 14 Implementation** (`lines 234-268`):
+```sounio
+fn add_correlated(a: CorrelatedValue, b: CorrelatedValue) -> CorrelatedValue {
+    // u²(y) = u²(a) + u²(b) + 2·u(a,b)
+    let cov = covariance(a, b)
+    let u2 = a.total_u * a.total_u + b.total_u * b.total_u + 2.0 * cov
+    // ...
+}
+```
+
+This provides the foundation for tracking correlated uncertainties through computation graphs.
 
 ---
 
-## 4. Formal Properties
+## 4. Recommendations
 
-### Theorem 1 (Subsumption Soundness)
+### 4.1 Short Term (Documentation)
 
-**Statement:** If `knowledge_compatible(a, b)` holds, then any value of type `a` can safely be used where type `b` is expected.
+1. **Document conservative approximations**: Clearly state where linear vs quadrature sums are used
+2. **Add correlation guidance**: Help users understand when to treat errors as correlated
+3. **Document subsumption semantics**: Explain covariance in the knowledge lattice
+
+### 4.2 Medium Term (Implementation)
+
+1. **Interval-valued confidence**: Implement `Knowledge[T, [ε_min, ε_max]]` type
+2. **Automatic correlation tracking**: Extend VarID system to propagate through all operations
+3. **User-specified correlation**: Allow annotation of correlation coefficients between sources
+
+### 4.3 Long Term (Research)
+
+1. **Provenance tracking for uncertainty sources**: Full lineage tracking
+2. **Bayesian confidence updates**: Integrate BetaConfidence with correlation handling
+3. **Monte Carlo validation**: Compare analytical bounds with empirical distributions
+
+---
+
+## 5. Formal Properties
+
+### Theorem 1: Subsumption Soundness
+
+**Statement:** If ε_a ≤ ε_b then Knowledge[T, ε_a] ⊑ Knowledge[T, ε_b]
 
 **Proof Sketch:**
-1. Inner types match (structural equality)
-2. `epsilon_subsumes(a.ε, b.ε)` implies `a.ε ≤ b.ε`
-3. Lower ε means higher confidence
-4. Therefore `a` provides at least the confidence of `b`
-5. Safe substitution holds ∎
+1. By definition, ε_a ≤ ε_b means ε_a is at least as confident as ε_b
+2. The subsumption relation (⊑) requires the subtype to be "at least as good"
+3. Since lower epsilon = higher confidence, the ordering is preserved
+4. Therefore Knowledge with ε_a can safely substitute for Knowledge with ε_b
 
-### Theorem 2 (Propagation Monotonicity)
+**Implementation:** `epsilon_subsumes` at lines 411-413
 
-**Statement:** For all binary operations, the result epsilon is monotone in both arguments.
+### Theorem 2: Propagation Monotonicity
+
+**Statement:** If ε₁ ≤ ε₁' and ε₂ ≤ ε₂' then f(ε₁, ε₂) ≤ f(ε₁', ε₂') for all propagation functions f
 
 **Proof Sketch:**
-- `epsilon_combine_independent`: `sum(a,b)` is monotone in both args
-- `epsilon_combine_correlated`: `max(a,b)` is monotone in both args
-- `epsilon_combine_relative`: `sum(a,b)` is monotone in both args
-- Clamping preserves monotonicity ∎
+1. `epsilon_combine_independent`: √(ε₁² + ε₂²) is monotonically increasing in both arguments
+2. `epsilon_combine_correlated`: ε₁ + ε₂ is monotonically increasing
+3. Therefore more confident inputs yield more confident outputs
 
-### Theorem 3 (Conservatism of Independent Combination)
+**Implication:** Confidence decay through computation is predictable and bounded.
 
-**Statement:** `epsilon_combine_independent(a,b) ≥ √(a² + b²)` for all `a,b ∈ [0,1]`.
+### Theorem 3: Conservatism of Linear Sum
+
+**Statement:** Linear sum ≥ Quadrature sum for all ε₁, ε₂ ∈ [0, 1]
 
 **Proof:**
-For `a,b ≥ 0`, we have `(a + b)² = a² + 2ab + b² ≥ a² + b²`
-Taking square roots: `a + b ≥ √(a² + b²)` ∎
+```
+(ε₁ + ε₂)² = ε₁² + 2ε₁ε₂ + ε₂² ≥ ε₁² + ε₂²
+Therefore: ε₁ + ε₂ ≥ √(ε₁² + ε₂²)
+```
+
+**Implication:** The correlated error combination is a sound (conservative) upper bound.
+
+### Theorem 4: Lattice Completeness
+
+**Statement:** The epsilon domain [0.0, 1.0] with ≤ ordering forms a complete lattice.
+
+**Proof:**
+1. The interval [0.0, 1.0] is a closed subset of ℝ
+2. ≤ is a total order on ℝ, hence on [0.0, 1.0]
+3. Every subset of [0.0, 1.0] has:
+   - Infimum: greatest lower bound = min for finite sets, inf for infinite
+   - Supremum: least upper bound = max for finite sets, sup for infinite
+4. Therefore the lattice is complete
+
+**Operations:**
+- Meet (⊓): min(ε₁, ε₂)
+- Join (⊔): max(ε₁, ε₂)
+- Top (⊤): 0.0
+- Bottom (⊥): 1.0
 
 ---
 
-## 5. Recommendations
+## 6. References
 
-### 5.1 Short Term (Documentation)
-
-1. **Document conservative approximations:** Add comments explaining that linear sum is intentionally conservative
-2. **Clarify correlated semantics:** Either fix `epsilon_combine_correlated` to use sum, or rename and document the current max semantics
-3. **Add soundness warning:** Note that current correlated combination may underestimate uncertainty
-
-### 5.2 Medium Term (Enhancement)
-
-1. **Implement interval confidence:** Support `Knowledge[T, [ε_min, ε_max]]` for explicit epistemic/aleatoric separation
-2. **Add quadrature option:** Provide configuration for less conservative error propagation
-3. **Provenance tracking:** Complete the provenance chain tracking for audit trails
-
-### 5.3 Long Term (Formalization)
-
-1. **Mechanized proofs:** Verify lattice properties in a proof assistant (Coq/Lean)
-2. **Floating-point soundness:** Account for rounding in epsilon calculations
-3. **Statistical interpretation:** Define formal relationship between ε and confidence intervals
+1. **GUM (2008)**: "Guide to the Expression of Uncertainty in Measurement", JCGM 100:2008
+2. **Ferson et al. (2007)**: "Constructing Probability Boxes and Dempster-Shafer Structures", SAND2007-4019
+3. **Knight (1921)**: "Risk, Uncertainty, and Profit", Houghton Mifflin
+4. **Walley (1991)**: "Statistical Reasoning with Imprecise Probabilities", Chapman & Hall
+5. **Shafer (1976)**: "A Mathematical Theory of Evidence", Princeton University Press
 
 ---
 
-## Appendix: Current Implementation Reference
+## 7. Appendix: Implementation Index
 
-| Function | Line | Semantics | Status |
-|----------|------|-----------|--------|
-| `epsilon_subsumes` | 330 | `a ≤ b` | ✓ Sound |
-| `epsilon_meet` | 335 | `min(a,b)` | ✓ Sound |
-| `epsilon_join` | 344 | `max(a,b)` | ✓ Sound |
-| `epsilon_combine_independent` | 412 | `a + b` (clamped) | ✓ Conservative |
-| `epsilon_combine_correlated` | 419 | `max(a,b)` | ⚠️ Underestimates |
-| `epsilon_combine_relative` | 429 | `a + b` (clamped) | ✓ Conservative |
-| `epsilon_combine_weighted` | 435 | weighted average | ✓ Sound |
+| Function | File | Lines | Description |
+|----------|------|-------|-------------|
+| `epsilon_subsumes` | self-hosted/check/epistemic.sio | 411-413 | Lattice ordering |
+| `epsilon_meet` | self-hosted/check/epistemic.sio | 416-422 | Greatest lower bound |
+| `epsilon_join` | self-hosted/check/epistemic.sio | 425-431 | Least upper bound |
+| `epsilon_combine_independent` | self-hosted/check/epistemic.sio | 541-544 | Quadrature sum |
+| `epsilon_combine_correlated` | self-hosted/check/epistemic.sio | 549-552 | Linear sum |
+| `epsilon_combine_relative` | self-hosted/check/epistemic.sio | 556-559 | Relative errors |
+| `knowledge_binary_result` | self-hosted/check/epistemic.sio | 594-654 | Binary op propagation |
+| `covariance` | stdlib/epistemic/correlation.sio | 176-208 | GUM Eq. 13/14 |
+| `add_correlated` | stdlib/epistemic/correlation.sio | 234-268 | Correlated addition |
+| `knowledge_compatible` | self-hosted/check/epistemic.sio | 439-451 | Type compatibility |
 
 ---
 
-*Document version: 1.0*
-*Reviewed: self-hosted/check/epistemic.sio (537 lines)*
-*Focus: Mathematical soundness of epsilon propagation*
+*Document Version: 1.0*  
+*Generated: Phase C.2 Verification*  
+*Status: Review Complete*
