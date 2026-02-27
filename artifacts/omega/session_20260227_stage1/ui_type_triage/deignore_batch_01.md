@@ -1,6 +1,6 @@
 # UI Type De-ignore Batch 01
 
-Status: partially applied.
+Status: applied.
 
 Source evidence:
 - `ui_type_triage.json`
@@ -13,7 +13,7 @@ Source evidence:
    - expectation match: yes
    - semantic risk: low
 
-2. `tests/ui/type/generic_constraint.sio`
+2. `tests/ui/type/generic_constraint.sio` (applied)
    - triage: `ready`
    - expectation match: yes
    - semantic risk: medium (currently fails as `Undefined type`, not trait-bound enforcement)
@@ -24,8 +24,11 @@ Source evidence:
 sed -i '/^\\/\\/@ ignore$/d' tests/ui/type/mismatch_arg.sio
 ```
 
-## Optional second wave (requires reviewer confirmation)
+## Post-apply status
+
+- `active`: 11 (pass=11, fail=0)
+- `ignored`: 31 (ready=0, needs-fix=2, still-blocked=29)
 
 ```bash
-sed -i '/^\\/\\/@ ignore$/d' tests/ui/type/generic_constraint.sio
+# no remaining ready candidates in this batch
 ```

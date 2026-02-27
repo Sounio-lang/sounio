@@ -65,8 +65,38 @@ FILES=(
   self-hosted/check/check.sio
   self-hosted/check/mod.sio
 
-  # 6. Entry point (bootstrap-trimmed: lex/parse/resolve/check only)
-  self-hosted/main_bootstrap.sio
+  # 6. IR layer
+  self-hosted/ir/ir.sio
+  self-hosted/ir/algebra.sio
+  self-hosted/ir/lower.sio
+  self-hosted/ir/normalize.sio
+  self-hosted/ir/serialize.sio
+  self-hosted/ir/disasm.sio
+  self-hosted/ir/verify.sio
+  self-hosted/ir/mod.sio
+
+  # 7. Native codegen layer
+  self-hosted/native/mod.sio
+  self-hosted/native/regs.sio
+  self-hosted/native/encode.sio
+  self-hosted/native/frame.sio
+  self-hosted/native/reloc.sio
+  self-hosted/native/abi.sio
+  self-hosted/native/lower_hir.sio
+  self-hosted/native/elf.sio
+  self-hosted/native/codegen.sio
+  self-hosted/native/lower_ir.sio
+  self-hosted/native/hyper_lower.sio
+
+  # 8. I/O helpers + module loader
+  self-hosted/io/file_write.sio
+  self-hosted/compiler/module_loader.sio
+
+  # 9. Test stubs (replace full test suites for bootstrap)
+  self-hosted/test_stubs_bootstrap.sio
+
+  # 10. Full entry point
+  self-hosted/main.sio
 )
 
 # ── Verify all source files exist ──────────────────────────────────
