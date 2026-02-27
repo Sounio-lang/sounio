@@ -7,23 +7,91 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOUNIO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DIAG_PARSER="$SCRIPT_DIR/parse_diagnostics.sh"
 
-if [[ -x "$SOUNIO_ROOT/.pinned-souc/souc-linux-x86_64" ]]; then
-    SOUC_BIN="$SOUNIO_ROOT/.pinned-souc/souc-linux-x86_64"
-elif [[ -x "$SOUNIO_ROOT/artifacts/omega/souc-bin/souc-linux-x86_64" ]]; then
-    SOUC_BIN="$SOUNIO_ROOT/artifacts/omega/souc-bin/souc-linux-x86_64"
-fi
-
 source "$SOUNIO_ROOT/scripts/lib/resolve_souc.sh"
-
-if [[ -z "${SOUC_BIN:-}" ]] || [[ ! -x "${SOUC_BIN:-}" ]]; then
-    echo "error: souc binary not found/executable" >&2
-    exit 1
-fi
 
 if ! command -v jq >/dev/null 2>&1; then
     echo "error: jq is required for sounio-lsp" >&2
     exit 1
 fi
+
+normalize_bool() {
+    local raw="$1"
+    case "$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')" in
+        1|true|yes|on) echo "1" ;;
+        0|false|no|off) echo "0" ;;
+        *)
+            echo "error: invalid boolean value '$raw'" >&2
+            return 1
+            ;;
+    esac
+}
+
+verify_pinned_souc() {
+    local bin="$1"
+    local sha_path="${bin}.sha256"
+    local sig_path="${bin}.sig"
+    if [[ ! -f "$sha_path" ]]; then
+        echo "error: strict no-rust mode requires checksum file: $sha_path" >&2
+        return 1
+    fi
+    if [[ ! -f "$sig_path" ]]; then
+        echo "error: strict no-rust mode requires signature file: $sig_path" >&2
+        return 1
+    fi
+    local expected
+    expected="$(awk '{print $1}' "$sha_path" | tr -d '[:space:]')"
+    if [[ -z "$expected" ]]; then
+        echo "error: invalid checksum file: $sha_path" >&2
+        return 1
+    fi
+    local actual
+    actual="$(sha256sum "$bin" | awk '{print $1}')"
+    if [[ "$actual" != "$expected" ]]; then
+        echo "error: strict no-rust mode checksum mismatch for $bin" >&2
+        return 1
+    fi
+}
+
+resolve_souc_for_lsp() {
+    local strict="$1"
+    local explicit="${SOUNIO_LSP_SOUC_BIN:-}"
+    local candidate=""
+
+    if [[ -n "$explicit" ]]; then
+        candidate="$explicit"
+    else
+        if [[ -x "$SOUNIO_ROOT/.pinned-souc/souc-linux-x86_64" ]]; then
+            candidate="$SOUNIO_ROOT/.pinned-souc/souc-linux-x86_64"
+        elif [[ -x "$SOUNIO_ROOT/artifacts/omega/souc-bin/souc-linux-x86_64" ]]; then
+            candidate="$SOUNIO_ROOT/artifacts/omega/souc-bin/souc-linux-x86_64"
+        elif [[ -n "${SOUC_BIN:-}" && -x "${SOUC_BIN:-}" ]]; then
+            candidate="$SOUC_BIN"
+        fi
+    fi
+
+    if [[ -z "$candidate" || ! -x "$candidate" ]]; then
+        echo "error: souc binary not found/executable" >&2
+        return 1
+    fi
+
+    if [[ "$strict" == "1" ]]; then
+        case "$candidate" in
+            "$SOUNIO_ROOT"/.pinned-souc/*|"$SOUNIO_ROOT"/artifacts/omega/souc-bin/*) ;;
+            *)
+                echo "error: strict no-rust mode requires pinned souc under .pinned-souc/ or artifacts/omega/souc-bin/" >&2
+                return 1
+                ;;
+        esac
+        verify_pinned_souc "$candidate" || return 1
+    fi
+
+    printf '%s\n' "$candidate"
+}
+
+SOUNIO_LSP_STRICT_NO_RUST="$(
+    normalize_bool "${SOUNIO_LSP_STRICT_NO_RUST:-${SOUNIO_REPO_HARD_NO_RUST:-1}}"
+)"
+SOUC_BIN="$(resolve_souc_for_lsp "$SOUNIO_LSP_STRICT_NO_RUST")"
 
 log() {
     printf '[sounio-lsp] %s\n' "$*" >&2
@@ -99,6 +167,17 @@ else:
 PY
 }
 
+path_to_uri() {
+    python3 - "$1" <<'PY'
+import os
+import sys
+from urllib.parse import quote
+
+path = os.path.abspath(sys.argv[1])
+print("file://" + quote(path))
+PY
+}
+
 kill_stale_check() {
     if [[ -n "$CHECK_PID" ]] && kill -0 "$CHECK_PID" 2>/dev/null; then
         log "killing stale check pid=$CHECK_PID"
@@ -151,62 +230,154 @@ extract_hover_type() {
     local output="$1"
     local line="$2"
     local col="$3"
+    local parsed
+    if ! parsed="$(
+        LSP_HOVER_OUTPUT="$output" python3 - "$line" "$col" <<'PY'
+import math
+import os
+import re
+import sys
 
-    local best=""
-    best="$(printf '%s\n' "$output" \
-        | awk -v ln="$line" -v col="$col" '
-            {
-                if ($0 ~ ":" ln ":" col) {
-                    print $0
-                    exit
-                }
-            }')"
-    if [[ -z "$best" ]]; then
-        best="$(printf '%s\n' "$output" \
-            | awk -v ln="$line" '
-                {
-                    if ($0 ~ ":" ln ":") {
-                        print $0
-                        exit
-                    }
-                }')"
-    fi
-    if [[ -z "$best" ]]; then
+req_line = int(sys.argv[1])
+req_col = int(sys.argv[2])
+text = os.environ.get("LSP_HOVER_OUTPUT", "")
+
+coord_re = re.compile(r"(?P<l1>\d+):(?P<c1>\d+)(?:-(?P<l2>\d+):(?P<c2>\d+))?")
+
+def extract_type(line: str) -> str:
+    lowered = line.lower()
+    if "type:" in lowered:
+        idx = lowered.rfind("type:")
+        return line[idx + len("type:"):].strip()
+    if "=>" in line:
+        return line.rsplit("=>", 1)[1].strip()
+    if "->" in line:
+        return line.rsplit("->", 1)[1].strip()
+    return ""
+
+best = None
+best_score = math.inf
+
+for raw_line in text.splitlines():
+    candidate_type = extract_type(raw_line)
+    if not candidate_type:
+        continue
+
+    match = coord_re.search(raw_line)
+    if match:
+        l1 = int(match.group("l1"))
+        c1 = int(match.group("c1"))
+        l2 = int(match.group("l2")) if match.group("l2") else l1
+        c2 = int(match.group("c2")) if match.group("c2") else c1
+        in_range = (l1 <= req_line <= l2)
+        if in_range and req_line == l1 == l2:
+            in_range = c1 <= req_col <= c2
+        if in_range:
+            score = 0
+        else:
+            score = abs(l1 - req_line) * 1000 + abs(c1 - req_col)
+    else:
+        score = 9_000_000
+
+    if score < best_score:
+        best_score = score
+        best = candidate_type
+
+if best is None:
+    raise SystemExit(1)
+
+print(best)
+PY
+    )"; then
         return 1
     fi
-
-    if [[ "$best" == *"type:"* ]]; then
-        printf '%s' "${best##*type: }"
-        return 0
-    fi
-    if [[ "$best" == *"=>"* ]]; then
-        printf '%s' "${best##*=> }"
-        return 0
-    fi
-    printf '%s' "$best"
+    printf '%s' "$parsed"
 }
 
 extract_definition_location_json() {
     local output="$1"
     local req_line="$2"
     local req_col="$3"
-    local out
-    out="$(printf '%s\n' "$output" \
-        | awk -v ln="$req_line" -v col="$req_col" '
-            $0 ~ ":" ln ":" col {
-                if (match($0, /([0-9]+):([0-9]+)[^0-9]*$/ , m)) {
-                    print m[1] ":" m[2]
-                    exit
-                }
-            }')"
-    if [[ -z "$out" ]]; then
+    local current_file_path="$4"
+    local match_json
+    if ! match_json="$(
+        LSP_DEF_OUTPUT="$output" python3 - "$req_line" "$req_col" "$current_file_path" <<'PY'
+import json
+import math
+import os
+import re
+import sys
+
+req_line = int(sys.argv[1])
+req_col = int(sys.argv[2])
+current_file = os.path.abspath(sys.argv[3])
+text = os.environ.get("LSP_DEF_OUTPUT", "")
+
+coord_re = re.compile(r"(?:(?P<path>[^\s:]+\.sio):)?(?P<line>\d+):(?P<col>\d+)")
+
+def parse_coord(match):
+    path = match.group("path")
+    line = int(match.group("line"))
+    col = int(match.group("col"))
+    if path:
+        if not os.path.isabs(path):
+            path = os.path.abspath(os.path.join(os.path.dirname(current_file), path))
+    return {"path": path or "", "line": line, "col": col}
+
+def score(src):
+    return abs(src["line"] - req_line) * 1000 + abs(src["col"] - req_col)
+
+best = None
+best_score = math.inf
+
+for raw_line in text.splitlines():
+    matches = list(coord_re.finditer(raw_line))
+    if not matches:
+        continue
+
+    coords = [parse_coord(m) for m in matches]
+    lowered = raw_line.lower()
+
+    if len(coords) >= 2:
+        src = coords[0]
+        dst = coords[-1]
+        dst_path = dst["path"] or src["path"]
+        candidate = {"path": dst_path, "line": dst["line"], "col": dst["col"]}
+        candidate_score = score(src)
+    else:
+        if not any(token in lowered for token in ("definition", "defined at", "declared at", "declaration", "def", "->")):
+            continue
+        dst = coords[0]
+        candidate = {"path": dst["path"], "line": dst["line"], "col": dst["col"]}
+        candidate_score = 2_000_000 + score(dst)
+
+    if candidate_score < best_score:
+        best_score = candidate_score
+        best = candidate
+
+if best is None:
+    raise SystemExit(1)
+
+print(json.dumps(best))
+PY
+    )"; then
         return 1
     fi
 
-    local dst_line="${out%%:*}"
-    local dst_col="${out##*:}"
-    jq -cn --argjson ln "$((dst_line - 1))" --argjson col "$((dst_col - 1))" \
-        '{uri:null, range:{start:{line:$ln, character:$col}, end:{line:$ln, character:$col}}}'
+    local dst_line dst_col dst_path dst_uri
+    dst_line="$(jq -r '.line' <<<"$match_json")"
+    dst_col="$(jq -r '.col' <<<"$match_json")"
+    dst_path="$(jq -r '.path // ""' <<<"$match_json")"
+    dst_uri="null"
+    if [[ -n "$dst_path" ]]; then
+        dst_uri="$(path_to_uri "$dst_path" | jq -R '.')"
+    fi
+
+    jq -cn \
+        --argjson uri "$dst_uri" \
+        --argjson ln "$((dst_line - 1))" \
+        --argjson col "$((dst_col - 1))" \
+        '{uri:$uri, range:{start:{line:$ln, character:$col}, end:{line:$ln, character:$col}}}'
 }
 
 run_check_and_publish() {
@@ -368,8 +539,13 @@ handle_definition() {
         output="$($SOUC_BIN check "$file_path" --show-ast 2>&1 || true)"
     fi
 
-    if location="$(extract_definition_location_json "$output" "$line1" "$col1")"; then
-        result="$(jq -cn --arg uri "$uri" --argjson loc "$location" '$loc | .uri = $uri')"
+    if location="$(extract_definition_location_json "$output" "$line1" "$col1" "$file_path")"; then
+        local location_uri
+        location_uri="$(jq -r '.uri // empty' <<<"$location")"
+        if [[ -z "$location_uri" ]]; then
+            location_uri="$uri"
+        fi
+        result="$(jq -cn --arg uri "$location_uri" --argjson loc "$location" '$loc | .uri = $uri')"
         send_response "$id_json" "$result"
         return
     fi

@@ -73,3 +73,32 @@ PY
 - `jq` is required.
 - LSP line/character are 0-based; compiler diagnostics are 1-based.
 - The server kills stale check processes before a new diagnostic run.
+
+## No-Rust Strict Mode
+
+`tools/lsp/sounio-lsp.sh` supports strict no-rust resolution and verification:
+
+- `SOUNIO_LSP_STRICT_NO_RUST`:
+  - defaults to `SOUNIO_REPO_HARD_NO_RUST` (or `1` when unset)
+  - accepts: `1/true/yes/on` and `0/false/no/off`
+- `SOUNIO_LSP_SOUC_BIN`:
+  - optional explicit override for `souc` binary path
+  - when strict mode is enabled, override must point inside:
+    - `.pinned-souc/`
+    - `artifacts/omega/souc-bin/`
+  - strict mode requires `<binary>.sha256` and `<binary>.sig`; sha256 is validated at startup
+
+## Smoke Test
+
+Run the local smoke suite:
+
+```bash
+bash tools/lsp/test_smoke.sh
+```
+
+This validates:
+
+- parser conversion (`parse_diagnostics.sh`)
+- framed lifecycle (`initialize`/`shutdown`/`exit`)
+- `didOpen -> publishDiagnostics` flow
+- strict no-rust fail-fast behavior
