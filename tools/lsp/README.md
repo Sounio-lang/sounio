@@ -103,6 +103,7 @@ This validates:
 - `didOpen -> publishDiagnostics` flow
 - `didChange` unsaved buffer used by `didSave` diagnostics
 - `hover/definition` request roundtrip
+- multi-document `didSave` sequencing keeps diagnostics isolated per URI
 - strict no-rust fail-fast behavior
 
 CI/automation entrypoint:

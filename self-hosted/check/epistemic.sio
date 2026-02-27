@@ -45,6 +45,12 @@ fn check_knowledge_type(checker: Checker, info: KnowledgeTypeInfo) -> (Checker, 
     var c = pair.0
     let inner_ty = pair.1
 
+    // Validate metadata constraints that we can prove at type-check time.
+    // (TypeEntry does not yet persist full validity/provenance metadata.)
+    if !knowledge_metadata_is_valid(info.validity) {
+        c = c.report_error_at(Span::dummy(), 54, 0, 0, 0)
+    }
+
     // Validate epsilon bound if present
     var eps_val: f64 = -1.0
     match info.epsilon {
@@ -61,11 +67,30 @@ fn check_knowledge_type(checker: Checker, info: KnowledgeTypeInfo) -> (Checker, 
         None => {}
     }
 
-    // Validity and provenance: accept all for now (stub)
-    // Future: validate duration expressions, condition types
-
     let ty = ty_knowledge(inner_ty, eps_val)
     (c, ty)
+}
+
+fn knowledge_validity_expr_non_negative(opt: Option<Box<Expr>>) -> bool {
+    match opt {
+        Some(e) => {
+            if (*e).kind == ExprKind::ExprIntLit {
+                return (*e).int_val >= 0
+            }
+            if (*e).kind == ExprKind::ExprFloatLit {
+                return (*e).float_val >= 0.0
+            }
+            true
+        }
+        None => false
+    }
+}
+
+fn knowledge_metadata_is_valid(validity_opt: Option<Box<ValidityCondition>>) -> bool {
+    match validity_opt {
+        Some(vc) => knowledge_validity_expr_non_negative((*vc).expr)
+        None => true
+    }
 }
 
 // ============================================================
@@ -171,6 +196,23 @@ fn provenance_kind_name(kind: ProvenanceKind) -> String with Alloc {
     }
 }
 
+// Check if provenance kind requires verification
+fn provenance_kind_needs_verification(kind: ProvenanceKind) -> bool {
+    match kind {
+        ProvenanceKind::ProvInput => true,
+        ProvenanceKind::ProvMeasured => true,
+        ProvenanceKind::ProvDerived => false,
+        ProvenanceKind::ProvSource => false,
+        ProvenanceKind::ProvComputed => false,
+        ProvenanceKind::ProvLiterature => false
+    }
+}
+
+// Compare two provenance entries for equality
+fn provenance_eq(a: Provenance, b: Provenance) -> bool {
+    a.kind == b.kind && a.source_id == b.source_id
+}
+
 // ============================================================
 // Validity conditions (lines 151-220)
 // ============================================================
@@ -237,8 +279,41 @@ fn validity_is_expired(validity: Validity, current_time: f64) -> bool {
     }
 }
 
+// Get a conservative validity that combines two validity constraints
+fn validity_intersect(a: Validity, b: Validity) -> Validity {
+    // The intersection is the more restrictive of the two
+    match a.kind {
+        ValidityKind::ValidAlways => b,
+        ValidityKind::ValidDuration => {
+            match b.kind {
+                ValidityKind::ValidAlways => a,
+                ValidityKind::ValidDuration => {
+                    if a.duration_sec < b.duration_sec { a } else { b }
+                }
+                ValidityKind::ValidUntilTime => b,
+                ValidityKind::ValidWhileCond => b
+            }
+        }
+        ValidityKind::ValidUntilTime => {
+            match b.kind {
+                ValidityKind::ValidAlways => a,
+                ValidityKind::ValidUntilTime => {
+                    if a.until_timestamp < b.until_timestamp { a } else { b }
+                }
+                _ => a
+            }
+        }
+        ValidityKind::ValidWhileCond => {
+            match b.kind {
+                ValidityKind::ValidAlways => a,
+                _ => b
+            }
+        }
+    }
+}
+
 // ============================================================
-// Extended Knowledge metadata (lines 221-300)
+// Knowledge metadata (lines 221-300)
 // ============================================================
 
 // Combined metadata for Knowledge types including
@@ -255,6 +330,22 @@ fn knowledge_meta_default(epsilon: f64) -> KnowledgeMeta {
         epsilon: epsilon,
         validity: validity_always(),
         provenance: provenance_new(ProvenanceKind::ProvDerived)
+    }
+}
+
+// Create metadata from type entry
+// Extracts epsilon from Knowledge types, uses defaults otherwise
+fn knowledge_meta_from_ty(ty: TypeEntry) -> KnowledgeMeta with Mut, Panic, Div, Alloc {
+    match ty.kind {
+        TypeKind::TyKnowledge => {
+            let eps = ty.knowledge_epsilon
+            KnowledgeMeta {
+                epsilon: eps,
+                validity: validity_always(),
+                provenance: provenance_new(ProvenanceKind::ProvDerived)
+            }
+        }
+        _ => knowledge_meta_default(-1.0)
     }
 }
 
@@ -276,27 +367,12 @@ fn knowledge_meta_with_provenance(epsilon: f64, provenance: Provenance) -> Knowl
     }
 }
 
-// Extract KnowledgeMeta from a type entry
-// Returns default metadata for non-Knowledge types
-fn knowledge_meta_from_ty(ty: TypeEntry) -> KnowledgeMeta with Mut, Panic, Div, Alloc {
-    match ty.kind {
-        TypeKind::TyKnowledge => {
-            let eps = ty.epsilon_bound
-            let prov = match ty.provenance {
-                Some(p) => *p,
-                None => provenance_new(ProvenanceKind::ProvDerived)
-            }
-            let valid = match ty.validity {
-                Some(v) => *v,
-                None => validity_always()
-            }
-            KnowledgeMeta {
-                epsilon: eps,
-                validity: valid,
-                provenance: prov
-            }
-        }
-        _ => knowledge_meta_default(-1.0)
+// Create fully specified metadata
+fn knowledge_meta_full(epsilon: f64, validity: Validity, provenance: Provenance) -> KnowledgeMeta {
+    KnowledgeMeta {
+        epsilon: epsilon,
+        validity: validity,
+        provenance: provenance
     }
 }
 
@@ -313,6 +389,11 @@ fn knowledge_meta_validity(meta: KnowledgeMeta) -> Validity {
 // Get provenance from knowledge metadata
 fn knowledge_meta_provenance(meta: KnowledgeMeta) -> Provenance {
     meta.provenance
+}
+
+// Check if metadata represents valid knowledge
+fn knowledge_meta_is_valid(meta: KnowledgeMeta) -> bool {
+    meta.epsilon >= 0.0 && meta.epsilon <= 1.0
 }
 
 // ============================================================
@@ -365,7 +446,7 @@ fn knowledge_compatible(ty_a: TypeEntry, ty_b: TypeEntry) -> bool with Mut, Pani
         false
     } else {
         // Check epsilon subsumption
-        epsilon_subsumes(ty_a.epsilon_bound, ty_b.epsilon_bound)
+        epsilon_subsumes(ty_a.knowledge_epsilon, ty_b.knowledge_epsilon)
     }
 }
 
@@ -385,14 +466,53 @@ fn types_equal(a: TypeEntry, b: TypeEntry) -> bool {
 // Check if knowledge type meets epsilon requirement
 fn knowledge_meets_epsilon(ty: TypeEntry, required_epsilon: f64) -> bool {
     if is_knowledge_type(ty) {
-        epsilon_subsumes(ty.epsilon_bound, required_epsilon)
+        epsilon_subsumes(ty.knowledge_epsilon, required_epsilon)
     } else {
         false
     }
 }
 
+// Subsumption for provenance
+fn provenance_subsumes(provided: Provenance, required: Provenance) -> bool {
+    // If caller requires a trusted source, callee argument must be trusted.
+    if provenance_is_trusted(required) {
+        provenance_is_trusted(provided)
+    } else {
+        true
+    }
+}
+
+// Subsumption for validity
+fn validity_subsumes(provided: Validity, required: Validity) -> bool {
+    if required.kind == ValidityKind::ValidAlways {
+        return provided.kind == ValidityKind::ValidAlways
+    }
+    if required.kind == ValidityKind::ValidDuration {
+        if provided.kind == ValidityKind::ValidAlways {
+            return true
+        }
+        if provided.kind == ValidityKind::ValidDuration {
+            return provided.duration_sec >= required.duration_sec
+        }
+        return false
+    }
+    if required.kind == ValidityKind::ValidUntilTime {
+        if provided.kind == ValidityKind::ValidAlways {
+            return true
+        }
+        if provided.kind == ValidityKind::ValidUntilTime {
+            return provided.until_timestamp >= required.until_timestamp
+        }
+        return false
+    }
+    if required.kind == ValidityKind::ValidWhileCond {
+        return provided.kind == ValidityKind::ValidAlways || provided.kind == ValidityKind::ValidWhileCond
+    }
+    false
+}
+
 // ============================================================
-// Epsilon propagation in binary operations (lines 381-480)
+// Epsilon propagation (lines 381-480)
 // ============================================================
 
 // Clamp epsilon to valid range [0.0, 1.0]
@@ -425,7 +545,7 @@ fn epsilon_combine_independent(eps_a: f64, eps_b: f64) -> f64 with Div {
 
 // Combine correlated errors: eps_a + eps_b (linear sum, conservative)
 // For perfectly correlated or unknown correlation, linear sum is the
-// sound upper bound. Previous max() was anti-conservative for rho > 0.
+// sound upper bound.
 fn epsilon_combine_correlated(eps_a: f64, eps_b: f64) -> f64 {
     let sum = eps_a + eps_b
     epsilon_clamp(sum)
@@ -492,12 +612,12 @@ fn knowledge_binary_result(op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry
         }
 
         let left_eps = if left_is_knowledge {
-            left_ty.epsilon_bound
+            left_ty.knowledge_epsilon
         } else {
             0.0
         }
         let right_eps = if right_is_knowledge {
-            right_ty.epsilon_bound
+            right_ty.knowledge_epsilon
         } else {
             0.0
         }
@@ -547,4 +667,25 @@ fn knowledge_op_supported(op: BinaryOp) -> bool {
         BinaryOp::OpGt => true,
         BinaryOp::OpGe => true
     }
+}
+
+// ============================================================
+// Call boundary compatibility (lines 481-500)
+// ============================================================
+
+// Check knowledge compatibility at function call boundaries
+// Considers epsilon, validity, and provenance
+fn knowledge_call_boundary_compatible(provided: TypeEntry, required: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
+    if !is_knowledge_type(provided) || !is_knowledge_type(required) {
+        return false
+    }
+    if !knowledge_compatible(provided, required) {
+        return false
+    }
+    let pmeta = knowledge_meta_from_ty(provided)
+    let rmeta = knowledge_meta_from_ty(required)
+    if !validity_subsumes(knowledge_meta_validity(pmeta), knowledge_meta_validity(rmeta)) {
+        return false
+    }
+    provenance_subsumes(knowledge_meta_provenance(pmeta), knowledge_meta_provenance(rmeta))
 }

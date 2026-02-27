@@ -405,6 +405,143 @@ if "error" in definition:
 PY
 }
 
+test_multi_uri_diagnostics_isolation() {
+    log "multi-document didSave sequence keeps diagnostics isolated per URI"
+    local file_a file_b out_file err_file
+    file_a="$TMP_DIR/lsp_multi_a.sio"
+    file_b="$TMP_DIR/lsp_multi_b.sio"
+    out_file="$TMP_DIR/multi_uri.out"
+    err_file="$TMP_DIR/multi_uri.err"
+
+    cat >"$file_a" <<'EOF'
+fn main() -> i32 {
+    let a: i64 = "bad-a"
+    return 0
+}
+EOF
+    cat >"$file_b" <<'EOF'
+fn main() -> i32 {
+    let b: i64 = 1
+    return 0
+}
+EOF
+
+    python3 - "$LSP_SCRIPT" "$file_a" "$file_b" "$out_file" "$err_file" <<'PY'
+import json
+import pathlib
+import re
+import subprocess
+import sys
+from urllib.parse import quote
+
+lsp_script, file_a, file_b, out_path, err_path = sys.argv[1:6]
+file_a = pathlib.Path(file_a).resolve()
+file_b = pathlib.Path(file_b).resolve()
+uri_a = "file://" + quote(str(file_a))
+uri_b = "file://" + quote(str(file_b))
+text_a = file_a.read_text(encoding="utf-8")
+text_b = file_b.read_text(encoding="utf-8")
+
+messages = [
+    {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"capabilities": {}}},
+    {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {"textDocument": {"uri": uri_a, "languageId": "sounio", "version": 1, "text": text_a}},
+    },
+    {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {"textDocument": {"uri": uri_b, "languageId": "sounio", "version": 1, "text": text_b}},
+    },
+    {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didChange",
+        "params": {
+            "textDocument": {"uri": uri_b, "version": 2},
+            "contentChanges": [{"text": 'fn main() -> i32 {\n    let b: i64 = "bad-b"\n    return 0\n}\n'}],
+        },
+    },
+    {"jsonrpc": "2.0", "method": "textDocument/didSave", "params": {"textDocument": {"uri": uri_b}}},
+    {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didChange",
+        "params": {
+            "textDocument": {"uri": uri_b, "version": 3},
+            "contentChanges": [{"text": "fn main() -> i32 {\n    let b: i64 = 2\n    return 0\n}\n"}],
+        },
+    },
+    {"jsonrpc": "2.0", "method": "textDocument/didSave", "params": {"textDocument": {"uri": uri_b}}},
+    {"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": {}},
+    {"jsonrpc": "2.0", "method": "exit", "params": {}},
+]
+
+wire = bytearray()
+for msg in messages:
+    body = json.dumps(msg, separators=(",", ":")).encode("utf-8")
+    wire.extend(f"Content-Length: {len(body)}\r\n\r\n".encode("utf-8"))
+    wire.extend(body)
+
+p = subprocess.Popen(
+    ["bash", lsp_script],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+)
+out, err = p.communicate(bytes(wire), timeout=120)
+open(out_path, "wb").write(out)
+open(err_path, "wb").write(err)
+if p.returncode != 0:
+    raise SystemExit(f"lsp multi-uri run failed with code {p.returncode}")
+
+payloads = []
+idx = 0
+while idx < len(out):
+    sep = out.find(b"\r\n\r\n", idx)
+    if sep < 0:
+        break
+    headers = out[idx:sep].decode("utf-8", "replace")
+    match = re.search(r"Content-Length:\s*([0-9]+)", headers, flags=re.IGNORECASE)
+    if not match:
+        raise SystemExit("missing Content-Length in multi-uri response headers")
+    length = int(match.group(1))
+    body_start = sep + 4
+    body_end = body_start + length
+    payload = json.loads(out[body_start:body_end].decode("utf-8", "replace"))
+    payloads.append(payload)
+    idx = body_end
+
+publishes = [
+    p for p in payloads
+    if p.get("method") == "textDocument/publishDiagnostics"
+]
+if not publishes:
+    raise SystemExit("missing publishDiagnostics notifications in multi-uri scenario")
+
+by_uri = {}
+for p in publishes:
+    uri = p.get("params", {}).get("uri")
+    if uri:
+        by_uri.setdefault(uri, []).append(p.get("params", {}).get("diagnostics", []))
+
+if uri_a not in by_uri:
+    raise SystemExit("missing diagnostics stream for uri_a")
+if uri_b not in by_uri:
+    raise SystemExit("missing diagnostics stream for uri_b")
+
+if not any(d for d in by_uri[uri_a] if len(d) > 0):
+    raise SystemExit("uri_a should keep non-empty diagnostics")
+
+# For uri_b we expect one failing save and then a clean save.
+if len(by_uri[uri_b]) < 2:
+    raise SystemExit("uri_b should have multiple diagnostic publications")
+if len(by_uri[uri_b][-2]) == 0:
+    raise SystemExit("uri_b penultimate diagnostics should report the introduced error")
+if len(by_uri[uri_b][-1]) != 0:
+    raise SystemExit("uri_b final diagnostics should be clean after fix")
+PY
+}
+
 test_strict_no_rust_failfast() {
     log "strict no-rust rejects unpinned SOUC_BIN override"
     local out_file err_file
@@ -425,6 +562,7 @@ main() {
     test_didopen_publish_diagnostics
     test_didchange_unsaved_snapshot_on_save
     test_hover_definition_roundtrip
+    test_multi_uri_diagnostics_isolation
     test_strict_no_rust_failfast
     log "PASS"
 }

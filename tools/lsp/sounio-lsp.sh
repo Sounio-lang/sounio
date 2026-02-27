@@ -101,6 +101,7 @@ declare -A OPEN_DOCS
 declare -A OPEN_DOC_VERSION
 
 CHECK_PID=""
+CHECK_PID_URI=""
 RUNNING=1
 SHUTDOWN_SEEN=0
 EXIT_CODE=0
@@ -111,6 +112,8 @@ cleanup() {
         kill "$CHECK_PID" 2>/dev/null || true
         wait "$CHECK_PID" 2>/dev/null || true
     fi
+    CHECK_PID=""
+    CHECK_PID_URI=""
 }
 
 trap cleanup EXIT SIGTERM SIGINT SIGPIPE
@@ -222,11 +225,17 @@ resolve_source_path_for_uri() {
 }
 
 kill_stale_check() {
+    local uri="$1"
     if [[ -n "$CHECK_PID" ]] && kill -0 "$CHECK_PID" 2>/dev/null; then
-        log "killing stale check pid=$CHECK_PID"
-        kill "$CHECK_PID" 2>/dev/null || true
-        wait "$CHECK_PID" 2>/dev/null || true
-        CHECK_PID=""
+        if [[ "$CHECK_PID_URI" == "$uri" ]]; then
+            log "killing stale check pid=$CHECK_PID uri=$uri"
+            kill "$CHECK_PID" 2>/dev/null || true
+            wait "$CHECK_PID" 2>/dev/null || true
+            CHECK_PID=""
+            CHECK_PID_URI=""
+        else
+            log "active check belongs to another uri; keeping pid=$CHECK_PID uri=$CHECK_PID_URI"
+        fi
     fi
 }
 
@@ -432,7 +441,7 @@ run_check_and_publish() {
     fi
     cleanup_path="$LAST_SOURCE_CLEANUP"
 
-    kill_stale_check
+    kill_stale_check "$uri"
 
     local out_file err_file diagnostics rc
     out_file="$(mktemp)"
@@ -447,10 +456,12 @@ run_check_and_publish() {
         fi
     ) &
     CHECK_PID="$!"
+    CHECK_PID_URI="$uri"
     if ! wait "$CHECK_PID"; then
         rc=$?
     fi
     CHECK_PID=""
+    CHECK_PID_URI=""
 
     if diagnostics="$($DIAG_PARSER <"$err_file" 2>/dev/null)"; then
         :

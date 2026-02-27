@@ -27,6 +27,7 @@ struct Checker {
     last_literal_float: f64,
     last_literal_kind: i64,   // 0=none, 1=int, 2=float
     loop_depth: i64,
+    suppress_linear_consume_depth: i64,
 }
 
 fn checker_new() -> Checker with Mut, Panic, Div {
@@ -48,6 +49,7 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         last_literal_float: 0.0,
         last_literal_kind: 0,
         loop_depth: 0,
+        suppress_linear_consume_depth: 0,
     }
 }
 
@@ -322,8 +324,10 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 49 { print("shift operations require integer types") }
     else if code == 50 { print("modulo requires integer types") }
     else if code == 51 { print("logical operations require boolean types") }
-    // Phase B.3 additions (53)
+    // Phase B.3 additions (52-54)
+    else if code == 52 { print("cannot prove refinement requirement at this call site") }
     else if code == 53 { print("closure may use undeclared effects") }
+    else if code == 54 { print("invalid Knowledge metadata constraint") }
     else { print("unknown error") }
 }
 
@@ -343,6 +347,29 @@ fn unary_operand_name(opt: Option<Box<Expr>>) -> Name {
         }
         None => Name { buf: [0; 128], len: 0 }
     }
+}
+
+fn call_ref_inner_or_self(ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc {
+    if ty.kind == TypeKind::TyRef || ty.kind == TypeKind::TyRefMut {
+        match ty.inner {
+            Some(inner) => *inner
+            None => ty_error()
+        }
+    } else {
+        ty
+    }
+}
+
+fn call_arg_types_compatible(arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
+    if types_compatible(arg_ty, param_ty) {
+        return true
+    }
+    // Allow implicit borrow syntax at call boundaries: f(&T) <- x
+    if arg_expr.kind == ExprKind::ExprIdent &&
+       (param_ty.kind == TypeKind::TyRef || param_ty.kind == TypeKind::TyRefMut) {
+        return types_compatible(arg_ty, call_ref_inner_or_self(param_ty))
+    }
+    false
 }
 
 // ============================================================
@@ -1227,7 +1254,7 @@ impl Checker {
                 let ident_ty = self.env.lookup(e.name)
                 // If this is a linear type variable, mark it as consumed
                 var c2 = self
-                if c2.is_linear_type(ident_ty) {
+                if c2.is_linear_type(ident_ty) && c2.suppress_linear_consume_depth == 0 {
                     let consume_result = c2.borrows.consume_linear(e.name)
                     c2.borrows = consume_result.0
                     if consume_result.1 != 0 {
@@ -1719,30 +1746,116 @@ impl Checker {
         c
     }
 
+    fn check_call_arg_borrow_boundary(self, arg_expr: Expr, param_ty: TypeEntry, call_span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {
+        if arg_expr.kind != ExprKind::ExprIdent {
+            return self
+        }
+        var c = self
+        if param_ty.kind == TypeKind::TyRef {
+            let borrow_result = c.borrows.try_shared_borrow(arg_expr.name)
+            c.borrows = borrow_result.0
+            if borrow_result.1 != 0 {
+                c = c.report_error_at(call_span, borrow_result.1, 0, 0, 0)
+            }
+        } else if param_ty.kind == TypeKind::TyRefMut {
+            let borrow_result = c.borrows.try_exclusive_borrow(arg_expr.name)
+            c.borrows = borrow_result.0
+            if borrow_result.1 != 0 {
+                c = c.report_error_at(call_span, borrow_result.1, 0, 0, 0)
+            }
+        }
+        c
+    }
+
+    fn check_call_arg_refinement_boundary(self, arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {
+        let expected_ty = call_ref_inner_or_self(param_ty)
+        if expected_ty.refinement_id < 0 || is_error_or_unknown(expected_ty) {
+            return self
+        }
+        let provided_ty = call_ref_inner_or_self(arg_ty)
+        if is_error_or_unknown(provided_ty) {
+            return self
+        }
+
+        let expected_ref = self.refinements.entries[expected_ty.refinement_id as usize]
+        var c = self
+
+        if arg_expr.kind == ExprKind::ExprIntLit {
+            if !pred_check_int(expected_ref.predicate, arg_expr.int_val) {
+                c = c.report_error_at(call_span, 42, 0, 0, 0)
+            }
+            return c
+        }
+        if arg_expr.kind == ExprKind::ExprFloatLit {
+            if !pred_check_float(expected_ref.predicate, arg_expr.float_val) {
+                c = c.report_error_at(call_span, 42, 0, 0, 0)
+            }
+            return c
+        }
+
+        if provided_ty.refinement_id >= 0 {
+            let provided_ref = c.refinements.entries[provided_ty.refinement_id as usize]
+            if !pred_implies(provided_ref.predicate, expected_ref.predicate) {
+                c = c.report_error_at(call_span, 42, 0, 0, 0)
+            }
+            return c
+        }
+
+        c.report_error_at(call_span, 52, 0, 0, 0)
+    }
+
+    fn check_call_arg_knowledge_boundary(self, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {
+        let expected_ty = call_ref_inner_or_self(param_ty)
+        if expected_ty.kind != TypeKind::TyKnowledge {
+            return self
+        }
+        let provided_ty = call_ref_inner_or_self(arg_ty)
+        if provided_ty.kind != TypeKind::TyKnowledge || is_error_or_unknown(provided_ty) {
+            return self
+        }
+        if knowledge_call_boundary_compatible(provided_ty, expected_ty) {
+            self
+        } else {
+            self.report_error_at(call_span, 36, 0, 0, 0)
+        }
+    }
+
     fn check_call_args_inner(self, args: Option<Box<ExprList>>, params: Option<Box<FnParamList>>, idx: i64, expected_count: i64, call_span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {
         match args {
             Some(arg_list) => {
-                let pair = self.check_expr((*arg_list).head)
-                var c = pair.0
-                let arg_ty = pair.1
-                // Check against param type if available
+                let arg_expr = (*arg_list).head
                 let param_info = fn_param_list_get(params, idx)
+                let implicit_borrow =
+                    arg_expr.kind == ExprKind::ExprIdent &&
+                    (param_info.ty.kind == TypeKind::TyRef || param_info.ty.kind == TypeKind::TyRefMut)
+
+                var checker_for_arg = self
+                if implicit_borrow {
+                    checker_for_arg.suppress_linear_consume_depth = checker_for_arg.suppress_linear_consume_depth + 1
+                }
+
+                let pair = checker_for_arg.check_expr(arg_expr)
+                var c = pair.0
+                if implicit_borrow && c.suppress_linear_consume_depth > 0 {
+                    c.suppress_linear_consume_depth = c.suppress_linear_consume_depth - 1
+                }
+                let arg_ty = pair.1
+
+                // Check against parameter type and boundary contracts
                 if !name_is_empty(param_info.name) || param_info.ty.kind != TypeKind::TyError {
-                    if !types_compatible(arg_ty, param_info.ty) {
+                    if !call_arg_types_compatible(arg_expr, arg_ty, param_info.ty) {
                         c = c.report_mismatch(call_span, 9, param_info.ty, arg_ty)
                     }
+                    c = c.check_call_arg_borrow_boundary(arg_expr, param_info.ty, call_span)
+                    c = c.check_call_arg_refinement_boundary(arg_expr, arg_ty, param_info.ty, call_span)
+                    c = c.check_call_arg_knowledge_boundary(arg_ty, param_info.ty, call_span)
                 }
-                // Consume linear type arguments passed to functions
-                // Note: check_expr already consumed if it was an ExprIdent,
-                // but we double-check here for any other cases
-                if c.is_linear_type(arg_ty) {
-                    let arg_expr = (*arg_list).head
-                    if arg_expr.kind == ExprKind::ExprIdent {
-                        let consume_result = c.borrows.consume_linear(arg_expr.name)
-                        c.borrows = consume_result.0
-                        if consume_result.1 != 0 {
-                            c = c.report_error_at(call_span, consume_result.1, 0, 0, 0)
-                        }
+                // Linear type consumption: if arg is linear and not implicitly borrowed, consume it
+                if arg_expr.kind == ExprKind::ExprIdent && c.is_linear_type(arg_ty) && !implicit_borrow && c.suppress_linear_consume_depth == 0 {
+                    let consume_result = c.borrows.consume_linear(arg_expr.name)
+                    c.borrows = consume_result.0
+                    if consume_result.1 != 0 {
+                        c = c.report_error_at(call_span, 39, 0, 0, 0)
                     }
                 }
                 c.check_call_args_inner((*arg_list).tail, params, idx + 1, expected_count, call_span)
