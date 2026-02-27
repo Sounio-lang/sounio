@@ -682,6 +682,116 @@ if "timed out" not in first.get("message", ""):
 PY
 }
 
+test_check_failure_emits_diagnostic() {
+    log "check failure emits explicit diagnostic"
+    local fake_souc source_file out_file err_file
+    fake_souc="$TMP_DIR/fake_souc_failure.sh"
+    source_file="$TMP_DIR/lsp_failure_input.sio"
+    out_file="$TMP_DIR/failure_diag.out"
+    err_file="$TMP_DIR/failure_diag.err"
+
+    cat >"$fake_souc" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "check" ]]; then
+    echo "fatal: synthetic check failure" >&2
+    exit 7
+fi
+exit 0
+EOF
+    chmod +x "$fake_souc"
+
+    cat >"$source_file" <<'EOF'
+fn main() -> i32 {
+    return 0
+}
+EOF
+
+    python3 - "$LSP_SCRIPT" "$source_file" "$fake_souc" "$out_file" "$err_file" <<'PY'
+import json
+import os
+import pathlib
+import re
+import subprocess
+import sys
+from urllib.parse import quote
+
+lsp_script, source_file, fake_souc, out_path, err_path = sys.argv[1:6]
+source_file = pathlib.Path(source_file).resolve()
+uri = "file://" + quote(str(source_file))
+text = source_file.read_text(encoding="utf-8")
+
+messages = [
+    {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"capabilities": {}}},
+    {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {"textDocument": {"uri": uri, "languageId": "sounio", "version": 1, "text": text}},
+    },
+    {"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": {}},
+    {"jsonrpc": "2.0", "method": "exit", "params": {}},
+]
+
+wire = bytearray()
+for msg in messages:
+    body = json.dumps(msg, separators=(",", ":")).encode("utf-8")
+    wire.extend(f"Content-Length: {len(body)}\r\n\r\n".encode("utf-8"))
+    wire.extend(body)
+
+env = os.environ.copy()
+env["SOUNIO_LSP_STRICT_NO_RUST"] = "0"
+env["SOUNIO_LSP_SOUC_BIN"] = fake_souc
+env["SOUNIO_LSP_CHECK_TIMEOUT_SEC"] = "5"
+
+p = subprocess.Popen(
+    ["bash", lsp_script],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    env=env,
+)
+out, err = p.communicate(bytes(wire), timeout=60)
+open(out_path, "wb").write(out)
+open(err_path, "wb").write(err)
+if p.returncode != 0:
+    raise SystemExit(f"lsp failure diagnostic run failed with code {p.returncode}")
+
+payloads = []
+idx = 0
+while idx < len(out):
+    sep = out.find(b"\r\n\r\n", idx)
+    if sep < 0:
+        break
+    headers = out[idx:sep].decode("utf-8", "replace")
+    match = re.search(r"Content-Length:\s*([0-9]+)", headers, flags=re.IGNORECASE)
+    if not match:
+        raise SystemExit("missing Content-Length in failure diagnostic response headers")
+    length = int(match.group(1))
+    body_start = sep + 4
+    body_end = body_start + length
+    payload = json.loads(out[body_start:body_end].decode("utf-8", "replace"))
+    payloads.append(payload)
+    idx = body_end
+
+publish = [p for p in payloads if p.get("method") == "textDocument/publishDiagnostics"]
+if not publish:
+    raise SystemExit("missing publishDiagnostics for failure scenario")
+
+diagnostics = publish[-1].get("params", {}).get("diagnostics", [])
+if not diagnostics:
+    raise SystemExit("expected synthetic failure diagnostic, got empty diagnostics")
+first = diagnostics[0]
+if first.get("code") != "SOUNIO_LSP_CHECK_FAILED":
+    raise SystemExit(f"unexpected failure diagnostic code: {first.get('code')}")
+msg = first.get("message", "")
+if "exit code 7" not in msg:
+    raise SystemExit(f"failure diagnostic missing exit-code context: {msg}")
+if "synthetic check failure" not in msg:
+    raise SystemExit(f"failure diagnostic missing stderr context: {msg}")
+PY
+}
+
 main() {
     test_diag_parser
     test_lifecycle_framed
@@ -692,6 +802,7 @@ main() {
     test_strict_no_rust_failfast
     test_invalid_timeout_config_failfast
     test_timeout_emits_diagnostic
+    test_check_failure_emits_diagnostic
     log "PASS"
 }
 
