@@ -103,10 +103,12 @@ This validates:
 - parser conversion (`parse_diagnostics.sh`)
 - framed lifecycle (`initialize`/`shutdown`/`exit`)
 - `didOpen -> publishDiagnostics` flow
+- `didClose -> publishDiagnostics([])` cleanup flow
 - `didChange` unsaved buffer used by `didSave` diagnostics
 - `hover/definition` request roundtrip
 - multi-document `didSave` sequencing keeps diagnostics isolated per URI
 - strict no-rust fail-fast behavior
+- explicit synthetic diagnostics for timeout and non-timeout check failures
 
 CI/automation entrypoint:
 
