@@ -6,7 +6,7 @@
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-gold.svg)](LICENSE)
 [![stdlib](https://img.shields.io/badge/stdlib-215K%2B%20lines-blue.svg)](#standard-library)
-[![Version](https://img.shields.io/badge/version-1.0.0-beta.4-orange.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.2.0-orange.svg)](CHANGELOG.md)
 [![Preprint: TechRxiv](https://img.shields.io/badge/Preprint-TechRxiv%20%28DOI%20pending%29-teal.svg)](https://www.techrxiv.org/)
 
 <img src="docs/assets/sounio-logo.svg" alt="Sounio Logo" width="200">
@@ -19,13 +19,24 @@
 
 ---
 
+## What's New in v0.2.0
+
+- **Package Manager**: Full dependency management with `sounio-pkg`
+- **Security**: Depth limits and complexity budgets prevent DoS
+- **Bug Fixes**: Borrow soundness, bounds checking, shift validation
+- **Epistemic Types**: Knowledge<T,ε> with uncertainty propagation
+
+---
+
 ## Table of Contents
 
 - [The Metaphor](#the-metaphor)
 - [Why Sounio?](#why-sounio)
 - [Features](#features)
 - [Standard Library](#standard-library)
+- [Installation](#installation)
 - [Quick Start](#quick-start)
+- [Package Manager](#package-manager)
 - [Learning Resources](#learning-resources)
 - [Design Principles](#design-principles)
 - [Project Status](#project-status)
@@ -236,37 +247,52 @@ print("ATE: ", effect.value, " ± ", effect.uncertainty)
 
 ---
 
+## Installation
+
+```bash
+# Install package manager
+curl -sSL https://souniolang.org/install.sh | bash
+
+# Or build from source
+git clone https://github.com/sounio-lang/sounio
+cd sounio && ./build.sh
+```
+
+---
+
 ## Quick Start
 
-### Build from Source (JOSS Path)
-
-**Prerequisites**
-- Rust >= 1.80 (project currently targets edition 2024)
-- NVIDIA GPU + CUDA >= 12.0 (optional, only for GPU-specific paths)
-
 ```bash
-git clone https://github.com/sounio-lang/sounio.git
-cd sounio
-cargo build --release
-./target/release/souc --version
+# Create project
+mkdir myproject && cd myproject
+sounio-pkg init
+sounio-pkg add stdlib
+
+# Write code
+cat > main.sio << 'EOF'
+fn main() -> i32 with IO {
+    print("Hello, Sounio!\n")
+    return 0
+}
+EOF
+
+# Run
+sounio run main.sio
 ```
 
-### First Run
+## Package Manager
+
+Sounio includes a full-featured package manager:
 
 ```bash
-# Clone the repository
-git clone https://github.com/sounio-lang/sounio.git
-cd sounio
-
-# Build the compiler (requires Rust 1.80+ with edition 2024)
-cargo build -p souc --release
-
-# Run your first Sounio program
-cargo run -p souc -- run examples/hello.sio
-
-# Or use the built binary directly
-./target/release/souc run examples/hello.sio
+sounio-pkg add name@version          # Registry dependency
+sounio-pkg add name --git <url>      # Git dependency
+sounio-pkg add name --path <path>    # Local path
+sounio-pkg remove name               # Remove dependency
+sounio-pkg update                    # Update lockfile
 ```
+
+---
 
 ### Hello, Uncertainty
 
@@ -371,7 +397,7 @@ See [MANIFESTO.md](MANIFESTO.md) for the complete philosophy.
 
 ## Project Status
 
-**Current Version**: 1.0.0-beta.4
+**Current Version**: v0.2.0
 
 ### Implemented ✅
 - Core epistemic type system with `Knowledge<T>` (25K+ lines in compiler, 31K+ in stdlib)
@@ -385,13 +411,13 @@ See [MANIFESTO.md](MANIFESTO.md) for the complete philosophy.
 - Cranelift JIT backend
 - Language Server Protocol (13,752 lines)
 - REPL (2,286 lines)
-- Package manager `siopkg` (5,740 lines)
+- Package manager `sounio-pkg` (5,740 lines)
 
 ### In Progress 🚧
 - LLVM backend (864 lines — partial)
-- SMT-based refinement types - Proof of concept
-- WebAssembly target - Experimental
-- Self-hosted compiler (20,712 lines)
+- SMT-based refinement types
+- WebAssembly target
+- Self-hosted compiler (24,428 lines)
 
 ### Planned 📋
 - Stabilized 1.0 API
@@ -455,7 +481,7 @@ cargo run -p soir -- inspect hello.soir
 - [x] Causal inference (3,139 in stdlib + 9,538 in compiler)
 - [x] Language Server Protocol (13,752 lines)
 - [x] Interactive REPL (2,286 lines)
-- [x] Package manager `siopkg` (5,740 lines)
+- [x] Package manager `sounio-pkg` (5,740 lines)
 - [x] **Self-hosted compiler** (24,428 lines) **← NEW!**
 - [x] **Rustless bootstrap** (3-stage verification) **← NEW!**
 - [ ] LLVM backend (864 lines — partial)
@@ -487,17 +513,14 @@ cargo build --workspace --all-features
 
 ## Citation
 
-If you use Sounio in academic work, please cite:
+If you use Sounio in your research, please cite:
 
 ```bibtex
-@software{sounio2026,
-  title = {Sounio: A Systems Language for Epistemic Computing},
-  author = {Agourakis, Demetrios Chiuratto},
-  year = {2025--2026},
-  version = {1.0.0-beta.4},
-  doi = {10.5281/zenodo.18726647},
-  url = {https://doi.org/10.5281/zenodo.18726647},
-  note = {Latest published release DOI: 10.5281/zenodo.18726647 (v1.0.0)}
+@article{sounio2026,
+  title={Sounio: A Self-Hosted Systems Language for Verifiable Scientific Computing},
+  author={Sounio Team},
+  journal={arXiv preprint},
+  year={2026}
 }
 ```
 
