@@ -791,20 +791,33 @@ fn call_arg_types_compatible(arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEn
 
 impl Checker {
     fn lower_type_expr(self, te: TypeExpr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
-        match te.kind {
-            TypeNamed => self.lower_named_type(te.path)
-            TypeUnit => (self, ty_unit())
-            TypeNever => (self, ty_never())
-            TypeInfer => (self, ty_unknown())
-            TypeSelfUpper => (self, self.current_impl_type)
-            TypeReference => self.lower_ref_type(te.inner)
-            TypeRefMut => self.lower_ref_mut_type(te.inner)
-            TypeArray => self.lower_array_type(te.inner, te.array_size)
-            TypeTuple => self.lower_tuple_type(te.type_args)
-            TypeFn => (self, ty_unknown())
-            TypeKnowledge => self.lower_knowledge_type(te.knowledge_info)
-            TypeRefinement => self.lower_refinement_type(te.refinement_info)
+        // Check type depth limit
+        let depth_pair = self.check_type_depth(te.span)
+        var c = depth_pair.0
+        if !depth_pair.1 {
+            return (c, ty_error())
         }
+        // Check complexity budget (cost = 1 for each type node)
+        let complexity_pair = c.check_complexity(1, te.span)
+        c = complexity_pair.0
+        if !complexity_pair.1 {
+            return (c.exit_type_depth(), ty_error())
+        }
+        let result = match te.kind {
+            TypeNamed => c.lower_named_type(te.path)
+            TypeUnit => (c, ty_unit())
+            TypeNever => (c, ty_never())
+            TypeInfer => (c, ty_unknown())
+            TypeSelfUpper => (c, c.current_impl_type)
+            TypeReference => c.lower_ref_type(te.inner)
+            TypeRefMut => c.lower_ref_mut_type(te.inner)
+            TypeArray => c.lower_array_type(te.inner, te.array_size)
+            TypeTuple => c.lower_tuple_type(te.type_args)
+            TypeFn => (c, ty_unknown())
+            TypeKnowledge => c.lower_knowledge_type(te.knowledge_info)
+            TypeRefinement => c.lower_refinement_type(te.refinement_info)
+        }
+        (result.0.exit_type_depth(), result.1)
     }
 
     fn lower_named_type(self, path: AstPath) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
@@ -1646,27 +1659,31 @@ impl Checker {
 
 impl Checker {
     fn check_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
-        match e.kind {
+        // Check expression depth limit
+        let depth_pair = self.check_expr_depth(e.span)
+        var c = depth_pair.0
+        if !depth_pair.1 {
+            return (c, ty_error())
+        }
+        let result = match e.kind {
             ExprIntLit => {
-                var c = self
                 c.last_literal_int = e.int_val
                 c.last_literal_kind = 1
                 (c, ty_i64())
             }
             ExprFloatLit => {
-                var c = self
                 c.last_literal_float = e.float_val
                 c.last_literal_kind = 2
                 (c, ty_f64())
             }
-            ExprBoolTrue => (self, ty_bool())
-            ExprBoolFalse => (self, ty_bool())
-            ExprStringLit => (self, ty_string())
-            ExprCharLit => (self, ty_char())
+            ExprBoolTrue => (c, ty_bool())
+            ExprBoolFalse => (c, ty_bool())
+            ExprStringLit => (c, ty_string())
+            ExprCharLit => (c, ty_char())
             ExprIdent => {
-                let ident_ty = self.env.lookup(e.name)
+                let ident_ty = c.env.lookup(e.name)
                 // If this is a linear type variable, mark it as consumed
-                var c2 = self
+                var c2 = c
                 if c2.is_linear_type(ident_ty) && c2.suppress_linear_consume_depth == 0 {
                     // CRITICAL FIX: Check if borrowed before consuming
                     if c2.borrows.is_borrowed(e.name) {
@@ -1681,30 +1698,31 @@ impl Checker {
                 }
                 (c2, ident_ty)
             }
-            ExprPath => self.check_path_expr(e)
-            ExprBinary => self.check_binary_expr(e)
-            ExprUnary => self.check_unary_expr(e)
-            ExprFieldAccess => self.check_field_access(e)
-            ExprIndex => self.check_index_expr(e)
-            ExprMethodCall => self.check_method_call(e)
-            ExprCall => self.check_call_expr(e)
-            ExprIf => self.check_if_expr(e)
-            ExprMatch => self.check_match_expr(e)
-            ExprWhile => self.check_while_expr(e)
-            ExprLoop => self.check_loop_expr(e)
-            ExprBlock => self.check_block_expr(e)
-            ExprReturn => self.check_return_expr(e)
-            ExprBreak => self.check_break_expr(e)
-            ExprContinue => self.check_continue_expr(e)
-            ExprStructLit => self.check_struct_lit(e)
-            ExprArrayLit => self.check_array_lit(e)
-            ExprTupleLit => self.check_tuple_lit(e)
-            ExprRange => self.check_range_expr(e)
-            ExprCast => self.check_cast_expr(e)
-            ExprHandle => self.check_handle_expr(e)
-            ExprClosure => self.check_closure_expr(e)
-            ExprError => (self, ty_error())
+            ExprPath => c.check_path_expr(e)
+            ExprBinary => c.check_binary_expr(e)
+            ExprUnary => c.check_unary_expr(e)
+            ExprFieldAccess => c.check_field_access(e)
+            ExprIndex => c.check_index_expr(e)
+            ExprMethodCall => c.check_method_call(e)
+            ExprCall => c.check_call_expr(e)
+            ExprIf => c.check_if_expr(e)
+            ExprMatch => c.check_match_expr(e)
+            ExprWhile => c.check_while_expr(e)
+            ExprLoop => c.check_loop_expr(e)
+            ExprBlock => c.check_block_expr(e)
+            ExprReturn => c.check_return_expr(e)
+            ExprBreak => c.check_break_expr(e)
+            ExprContinue => c.check_continue_expr(e)
+            ExprStructLit => c.check_struct_lit(e)
+            ExprArrayLit => c.check_array_lit(e)
+            ExprTupleLit => c.check_tuple_lit(e)
+            ExprRange => c.check_range_expr(e)
+            ExprCast => c.check_cast_expr(e)
+            ExprHandle => c.check_handle_expr(e)
+            ExprClosure => c.check_closure_expr(e)
+            ExprError => (c, ty_error())
         }
+        (result.0.exit_expr_depth(), result.1)
     }
 
     // --------------------------------------------------------
@@ -2137,6 +2155,8 @@ impl Checker {
                 c = c.check_call_args(e.args, sig.params, sig.param_count, e.span)
                 // Verify callee method's effects are subset of caller's effects
                 c = c.check_callee_effects(e.span, sig.effects, sig.effect_count)
+                // Release borrows taken for method call arguments
+                c = c.release_call_arg_borrows(e.args, sig.params)
                 (c, sig.return_type)
             } else {
                 // Method not found
@@ -2168,6 +2188,9 @@ impl Checker {
             c = c.check_call_args(e.args, sig.params, sig.param_count, e.span)
             // Verify callee's effects are subset of caller's effects
             c = c.check_callee_effects(e.span, sig.effects, sig.effect_count)
+            // Release borrows taken for call arguments — the call has returned,
+            // so exclusive/shared borrows on arguments are no longer active.
+            c = c.release_call_arg_borrows(e.args, sig.params)
             (c, sig.return_type)
         } else if is_error_or_unknown(callee_ty) {
             c = c.check_expr_list_no_type(e.args)
@@ -2176,6 +2199,30 @@ impl Checker {
             c = c.report_error_at(e.span, 17, 0, 0, 0)
             c = c.check_expr_list_no_type(e.args)
             (c, ty_error())
+        }
+    }
+
+    // Release borrows taken for function call arguments after the call returns.
+    // For each arg that is a named variable passed as &x or &!x, reset borrow state.
+    fn release_call_arg_borrows(self, args: Option<Box<ExprList>>, params: Option<Box<FnParamList>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        var c = self
+        match args {
+            None => c
+            Some(arg_list) => {
+                match params {
+                    None => c
+                    Some(param_list) => {
+                        let arg_expr = (*arg_list).head
+                        let param = (*param_list).head
+                        if arg_expr.kind == ExprKind::ExprIdent {
+                            if param.ty_entry.kind == TypeKind::TyRef || param.ty_entry.kind == TypeKind::TyRefMut {
+                                c.borrows = c.borrows.release_borrow(arg_expr.name)
+                            }
+                        }
+                        c.release_call_arg_borrows((*arg_list).tail, (*param_list).tail)
+                    }
+                }
+            }
         }
     }
 
@@ -2520,6 +2567,12 @@ impl Checker {
         if !is_error_or_unknown(cond_ty) && !is_bool_type(cond_ty) {
             c = c.report_mismatch(e.span, 6, ty_bool(), cond_ty)
         }
+        // Check loop depth limit before incrementing
+        let depth_pair = c.check_loop_depth(e.span)
+        c = depth_pair.0
+        if !depth_pair.1 {
+            return (c, ty_error())
+        }
         c.loop_depth = c.loop_depth + 1
         let body_pair = c.check_opt_block(e.block)
         c = body_pair.0
@@ -2529,6 +2582,12 @@ impl Checker {
 
     fn check_loop_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         var c = self
+        // Check loop depth limit before incrementing
+        let depth_pair = c.check_loop_depth(e.span)
+        c = depth_pair.0
+        if !depth_pair.1 {
+            return (c, ty_error())
+        }
         c.loop_depth = c.loop_depth + 1
         let pair = c.check_opt_block(e.block)
         c = pair.0
