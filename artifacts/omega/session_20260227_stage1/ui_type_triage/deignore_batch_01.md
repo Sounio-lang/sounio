@@ -1,6 +1,6 @@
-# UI Type De-ignore Batch 01 (Prepared)
+# UI Type De-ignore Batch 01
 
-Status: prepared, not applied.
+Status: partially applied.
 
 Source evidence:
 - `ui_type_triage.json`
@@ -8,7 +8,7 @@ Source evidence:
 
 ## Candidates
 
-1. `tests/ui/type/mismatch_arg.sio`
+1. `tests/ui/type/mismatch_arg.sio` (applied)
    - triage: `ready`
    - expectation match: yes
    - semantic risk: low
@@ -18,7 +18,7 @@ Source evidence:
    - expectation match: yes
    - semantic risk: medium (currently fails as `Undefined type`, not trait-bound enforcement)
 
-## Safe apply command (only low-risk first)
+## Applied command
 
 ```bash
 sed -i '/^\\/\\/@ ignore$/d' tests/ui/type/mismatch_arg.sio

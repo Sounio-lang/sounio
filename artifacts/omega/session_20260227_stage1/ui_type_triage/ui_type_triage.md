@@ -2,12 +2,11 @@
 
 - souc_bin: `/home/demetrios/work/sounio/artifacts/omega/souc-bin/souc-linux-x86_64`
 - total_files: 42
-- active: 9 (pass=9, fail=0)
-- ignored: 33 (ready=2, needs-fix=2, still-blocked=29)
+- active: 10 (pass=10, fail=0)
+- ignored: 32 (ready=1, needs-fix=2, still-blocked=29)
 
 ## Ready De-ignore Candidates
 - `tests/ui/type/generic_constraint.sio`
-- `tests/ui/type/mismatch_arg.sio`
 
 ## Needs Expectation Fix
 - `tests/ui/type/refinement_violation.sio`
@@ -43,3 +42,4 @@
 - `tests/ui/type/tuple_index_oob.sio`
 - `tests/ui/type/while_cond_not_bool.sio`
 - `tests/ui/type/wrong_arg_count.sio`
+
