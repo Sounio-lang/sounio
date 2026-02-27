@@ -1789,6 +1789,46 @@ if [ "${OMEGA_REQUIRE_REPO_HARD_NO_RUST}" = "1" ]; then
   echo "No-Rust mode PASS" | tee -a "$GATE_LOG"
 fi
 
+if [ "${OMEGA_REQUIRE_DRIVER_HARNESS_STATUS:-1}" = "1" ]; then
+  echo "==> omega sprint1 gate: driver harness readiness"
+  DRIVER_HARNESS_CACHE_DIR="${OMEGA_DRIVER_HARNESS_CACHE_DIR:-artifacts/omega/driver_harness_cache}"
+  DRIVER_HARNESS_STATUS_LOG="${OMEGA_DRIVER_HARNESS_STATUS_LOG:-artifacts/omega/driver_harness_status.log}"
+  DRIVER_HARNESS_TIMEOUT_SECS="${OMEGA_DRIVER_HARNESS_TIMEOUT_SECS:-120}"
+  mkdir -p "$DRIVER_HARNESS_CACHE_DIR" "$(dirname "$DRIVER_HARNESS_STATUS_LOG")"
+
+  set +e
+  if command -v timeout >/dev/null 2>&1; then
+    timeout --preserve-status "${DRIVER_HARNESS_TIMEOUT_SECS}s" env \
+      SOUNIO_SELFHOST_DRIVER_HARNESS_CACHE_DIR="$DRIVER_HARNESS_CACHE_DIR" \
+      "$OMEGA_POLICY_SOUC_BIN" run examples/minimal.sio --use-sounio-compiler --check-only \
+      >"$DRIVER_HARNESS_STATUS_LOG" 2>&1
+  else
+    env \
+      SOUNIO_SELFHOST_DRIVER_HARNESS_CACHE_DIR="$DRIVER_HARNESS_CACHE_DIR" \
+      "$OMEGA_POLICY_SOUC_BIN" run examples/minimal.sio --use-sounio-compiler --check-only \
+      >"$DRIVER_HARNESS_STATUS_LOG" 2>&1
+  fi
+  DRIVER_HARNESS_RC=$?
+  set -e
+
+  if [ "$DRIVER_HARNESS_RC" -eq 0 ] && ls "$DRIVER_HARNESS_CACHE_DIR"/driver_harness_*.sobc >/dev/null 2>&1; then
+    echo "SELFHOST_DRIVER_HARNESS_STATUS status=ready rc=$DRIVER_HARNESS_RC cache_dir=$DRIVER_HARNESS_CACHE_DIR log=$DRIVER_HARNESS_STATUS_LOG" | tee -a "$GATE_LOG"
+    echo "DRIVER_HARNESS_READY_PASS" | tee -a "$GATE_LOG"
+  elif rg -n "SELFHOST_DRIVER_HARNESS_UNAVAILABLE" "$DRIVER_HARNESS_STATUS_LOG" >/dev/null 2>&1; then
+    echo "SELFHOST_DRIVER_HARNESS_STATUS status=unavailable rc=$DRIVER_HARNESS_RC reason=SELFHOST_DRIVER_HARNESS_UNAVAILABLE cache_dir=$DRIVER_HARNESS_CACHE_DIR log=$DRIVER_HARNESS_STATUS_LOG" | tee -a "$GATE_LOG"
+    if [ "${OMEGA_REQUIRE_DRIVER_HARNESS_AVAILABLE:-0}" = "1" ]; then
+      echo "error: driver harness unavailable under strict requirement" >&2
+      exit 2
+    fi
+  else
+    echo "SELFHOST_DRIVER_HARNESS_STATUS status=unknown rc=$DRIVER_HARNESS_RC cache_dir=$DRIVER_HARNESS_CACHE_DIR log=$DRIVER_HARNESS_STATUS_LOG" | tee -a "$GATE_LOG"
+    if [ "${OMEGA_REQUIRE_DRIVER_HARNESS_AVAILABLE:-0}" = "1" ]; then
+      echo "error: driver harness status unknown under strict requirement" >&2
+      exit 2
+    fi
+  fi
+fi
+
 if [ "${OMEGA_REQUIRE_PARALLEL_SELFHOST_CUTOVER:-1}" = "1" ]; then
   echo "==> omega sprint1 gate: parallel selfhost cutover status"
   python3 scripts/omega/omega_parallel_cutover_status.py --gate-log "$GATE_LOG"

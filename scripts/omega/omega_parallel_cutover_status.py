@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -58,6 +59,23 @@ def parse_args() -> argparse.Namespace:
 
 def marker_offset(log_text: str, marker: str) -> int:
     return log_text.find(marker)
+
+
+def find_line_containing(log_text: str, token: str) -> str:
+    for line in log_text.splitlines():
+        if token in line:
+            return line.strip()
+    return ""
+
+
+def parse_kv_line(line: str) -> dict[str, str]:
+    if not line:
+        return {}
+    pairs = re.findall(r"([A-Za-z0-9_]+)=([^ \t]+)", line)
+    parsed: dict[str, str] = {}
+    for key, value in pairs:
+        parsed[key] = value
+    return parsed
 
 
 def read_json_status(
@@ -154,6 +172,16 @@ def main() -> int:
 
     track_b_status = "pass" if (not track_b_missing and not order_violations) else "fail"
     track_b_order_status = "pass" if not order_violations else "fail"
+    harness_line = find_line_containing(gate_text, "SELFHOST_DRIVER_HARNESS_STATUS")
+    harness_info = parse_kv_line(harness_line)
+    harness_status = harness_info.get("status", "unknown")
+    harness_reason = harness_info.get("reason", "")
+    harness_cache_dir = harness_info.get("cache_dir", "")
+    harness_log_path = harness_info.get("log", "")
+    if harness_status == "unavailable":
+        errors.append("track_b:SELFHOST_DRIVER_HARNESS_UNAVAILABLE")
+    elif harness_status == "unknown" and marker_offset(gate_text, "DRIVER_HARNESS_READY_PASS") >= 0:
+        harness_status = "ready"
 
     blocking_failures = sorted(
         set(
@@ -180,6 +208,10 @@ def main() -> int:
         "track_a_status": track_a_status,
         "track_b_status": track_b_status,
         "track_b_order_status": track_b_order_status,
+        "selfhost_driver_harness_status": harness_status,
+        "selfhost_driver_harness_reason": harness_reason,
+        "selfhost_driver_harness_cache_dir": harness_cache_dir,
+        "selfhost_driver_harness_log": harness_log_path,
         "provenance_status": provenance_status,
         "no_rust_surface_status": no_rust_status,
         "no_rust_runtime_absence_status": "pass" if no_rust_runtime_ok else "fail",
