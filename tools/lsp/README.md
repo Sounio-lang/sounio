@@ -101,4 +101,18 @@ This validates:
 - parser conversion (`parse_diagnostics.sh`)
 - framed lifecycle (`initialize`/`shutdown`/`exit`)
 - `didOpen -> publishDiagnostics` flow
+- `didChange` unsaved buffer used by `didSave` diagnostics
+- `hover/definition` request roundtrip
 - strict no-rust fail-fast behavior
+
+CI/automation entrypoint:
+
+```bash
+bash scripts/lsp_smoke_gate.sh
+```
+
+Gate marker emitted on success: `LSP_SMOKE_PASS`.
+
+When a document is open in the LSP session, diagnostics/hover/definition use the
+in-memory buffer snapshot (not only on-disk file contents). This keeps editor
+feedback aligned with unsaved changes.

@@ -104,6 +104,7 @@ CHECK_PID=""
 RUNNING=1
 SHUTDOWN_SEEN=0
 EXIT_CODE=0
+LAST_SOURCE_CLEANUP=""
 
 cleanup() {
     if [[ -n "$CHECK_PID" ]] && kill -0 "$CHECK_PID" 2>/dev/null; then
@@ -176,6 +177,48 @@ from urllib.parse import quote
 path = os.path.abspath(sys.argv[1])
 print("file://" + quote(path))
 PY
+}
+
+cleanup_temp_source() {
+    local path="$1"
+    if [[ -n "$path" ]] && [[ -f "$path" ]]; then
+        rm -f "$path"
+    fi
+}
+
+write_open_doc_snapshot() {
+    local uri="$1"
+    local canonical_path="$2"
+    local dir snapshot
+    dir="$(dirname "$canonical_path")"
+    if [[ -d "$dir" ]] && [[ -w "$dir" ]]; then
+        snapshot="$(mktemp "$dir/.sounio-lsp-snapshot.XXXXXX.sio")"
+    else
+        snapshot="$(mktemp /tmp/.sounio-lsp-snapshot.XXXXXX.sio)"
+    fi
+    printf '%s' "${OPEN_DOCS[$uri]}" >"$snapshot"
+    printf '%s\n' "$snapshot"
+}
+
+resolve_source_path_for_uri() {
+    local uri="$1"
+    local canonical_path
+    LAST_SOURCE_CLEANUP=""
+    canonical_path="$(uri_to_path "$uri")"
+    if [[ -n "${OPEN_DOCS[$uri]+x}" ]]; then
+        local snapshot
+        snapshot="$(write_open_doc_snapshot "$uri" "$canonical_path")" || return 1
+        LAST_SOURCE_CLEANUP="$snapshot"
+        printf '%s\n' "$snapshot"
+        return 0
+    fi
+
+    if [[ -f "$canonical_path" ]]; then
+        printf '%s\n' "$canonical_path"
+        return 0
+    fi
+
+    return 1
 }
 
 kill_stale_check() {
@@ -382,13 +425,12 @@ PY
 
 run_check_and_publish() {
     local uri="$1"
-    local file_path
-    file_path="$(uri_to_path "$uri")"
-
-    if [[ ! -f "$file_path" ]]; then
-        log "skip diagnostics (file missing): $file_path"
+    local source_path cleanup_path
+    if ! source_path="$(resolve_source_path_for_uri "$uri")"; then
+        log "skip diagnostics (source missing): $(uri_to_path "$uri")"
         return 0
     fi
+    cleanup_path="$LAST_SOURCE_CLEANUP"
 
     kill_stale_check
 
@@ -399,9 +441,9 @@ run_check_and_publish() {
 
     (
         if command -v timeout >/dev/null 2>&1; then
-            timeout 60s "$SOUC_BIN" check "$file_path" >"$out_file" 2>"$err_file"
+            timeout 60s "$SOUC_BIN" check "$source_path" >"$out_file" 2>"$err_file"
         else
-            "$SOUC_BIN" check "$file_path" >"$out_file" 2>"$err_file"
+            "$SOUC_BIN" check "$source_path" >"$out_file" 2>"$err_file"
         fi
     ) &
     CHECK_PID="$!"
@@ -421,6 +463,7 @@ run_check_and_publish() {
         '{uri:$uri, diagnostics:$diagnostics}')"
     send_notification "textDocument/publishDiagnostics" "$params"
 
+    cleanup_temp_source "$cleanup_path"
     rm -f "$out_file" "$err_file"
     return "$rc"
 }
@@ -488,21 +531,22 @@ handle_did_close() {
 handle_hover() {
     local id_json="$1"
     local params="$2"
-    local uri file_path line col line1 col1 output ty result
+    local uri source_path cleanup_path line col line1 col1 output ty result
 
     uri="$(jq -r '.textDocument.uri' <<<"$params")"
-    file_path="$(uri_to_path "$uri")"
     line="$(jq -r '.position.line' <<<"$params")"
     col="$(jq -r '.position.character' <<<"$params")"
     line1="$((line + 1))"
     col1="$((col + 1))"
 
-    if [[ ! -f "$file_path" ]]; then
+    if ! source_path="$(resolve_source_path_for_uri "$uri")"; then
         send_response "$id_json" "null"
         return
     fi
+    cleanup_path="$LAST_SOURCE_CLEANUP"
 
-    output="$($SOUC_BIN check "$file_path" --show-types 2>&1 || true)"
+    output="$($SOUC_BIN check "$source_path" --show-types 2>&1 || true)"
+    cleanup_temp_source "$cleanup_path"
     if ! ty="$(extract_hover_type "$output" "$line1" "$col1")"; then
         send_response "$id_json" "null"
         return
@@ -520,7 +564,7 @@ handle_hover() {
 handle_definition() {
     local id_json="$1"
     local params="$2"
-    local uri file_path line col line1 col1 output result location
+    local uri file_path source_path cleanup_path line col line1 col1 output result location
 
     uri="$(jq -r '.textDocument.uri' <<<"$params")"
     file_path="$(uri_to_path "$uri")"
@@ -529,19 +573,28 @@ handle_definition() {
     line1="$((line + 1))"
     col1="$((col + 1))"
 
-    if [[ ! -f "$file_path" ]]; then
+    if ! source_path="$(resolve_source_path_for_uri "$uri")"; then
         send_response "$id_json" "null"
         return
     fi
+    cleanup_path="$LAST_SOURCE_CLEANUP"
 
-    output="$($SOUC_BIN check "$file_path" --show-defs 2>&1 || true)"
+    output="$($SOUC_BIN check "$source_path" --show-defs 2>&1 || true)"
     if [[ "$output" == *"unrecognized option"* ]] || [[ "$output" == *"unknown option"* ]]; then
-        output="$($SOUC_BIN check "$file_path" --show-ast 2>&1 || true)"
+        output="$($SOUC_BIN check "$source_path" --show-ast 2>&1 || true)"
     fi
+    cleanup_temp_source "$cleanup_path"
 
     if location="$(extract_definition_location_json "$output" "$line1" "$col1" "$file_path")"; then
         local location_uri
         location_uri="$(jq -r '.uri // empty' <<<"$location")"
+        if [[ -n "$cleanup_path" ]] && [[ -n "$location_uri" ]]; then
+            local snapshot_uri
+            snapshot_uri="$(path_to_uri "$cleanup_path")"
+            if [[ "$location_uri" == "$snapshot_uri" ]]; then
+                location_uri="$uri"
+            fi
+        fi
         if [[ -z "$location_uri" ]]; then
             location_uri="$uri"
         fi
