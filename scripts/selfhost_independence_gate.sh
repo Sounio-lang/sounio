@@ -13,6 +13,8 @@ LOG_DIR="$WORK_DIR/logs"
 BOOTSTRAP_BUNDLE_DIR="${BOOTSTRAP_BUNDLE_DIR:-bootstrap}"
 BOOTSTRAP_STATE_DIR="${BOOTSTRAP_STATE_DIR:-$WORK_DIR/bootstrap-state}"
 INDEPENDENCE_CONTRACT_PATH="${INDEPENDENCE_CONTRACT_PATH:-benchmarks/independence/contract.v1.json}"
+DRIVER_HARNESS_CACHE_DIR="${DRIVER_HARNESS_CACHE_DIR:-$WORK_DIR/driver_harness_cache}"
+PREWARM_TARGET="${PREWARM_TARGET:-examples/minimal.sio}"
 REQUIRE_SIGNED_POLICY="${SOUNIO_REQUIRE_SIGNED_POLICY:-0}"
 POLICY_PATH="${SOUNIO_OPT_POLICY_PATH:-bootstrap/policies/policy.v1.json}"
 DECISION_TRAIL_REQUIRED="${SOUNIO_OPT_DECISION_TRAIL_REQUIRED:-1}"
@@ -22,7 +24,7 @@ POLICY_SMOKE_ENV_PATH="${SOUNIO_POLICY_SMOKE_ENV_PATH:-$LOG_DIR/policy_smoke.env
 POLICY_CANONICAL_ENV_PATH="${OMEGA_CANONICAL_ENV_OUT:-$WORK_DIR/canonical_key.env}"
 POLICY_STATUS_SCRIPT="${OMEGA_POLICY_STATUS_SCRIPT:-scripts/omega/omega_policy_status.sh}"
 
-mkdir -p "$LOG_DIR"
+mkdir -p "$LOG_DIR" "$DRIVER_HARNESS_CACHE_DIR"
 
 export SOUNIO_OPT_DECISION_TRAIL_REQUIRED="$DECISION_TRAIL_REQUIRED"
 export SOUNIO_OPT_DECISION_TRAIL_PATH="$DECISION_TRAIL_PATH"
@@ -58,6 +60,8 @@ echo "manifest=$BOOTSTRAP_MANIFEST"
 echo "logs=$LOG_DIR"
 echo "decision_trail_required=$SOUNIO_OPT_DECISION_TRAIL_REQUIRED"
 echo "decision_trail_path=$SOUNIO_OPT_DECISION_TRAIL_PATH"
+echo "driver_harness_cache_dir=$DRIVER_HARNESS_CACHE_DIR"
+echo "prewarm_target=$PREWARM_TARGET"
 
 if [[ "$SKIP_BUILD" != "1" ]]; then
   echo "==> 01-cargo-check-bins (disabled: repo-hard no-rust)"
@@ -75,8 +79,24 @@ fi
 run_step "04-bootstrap-verify" "$SOUC_BIN" bootstrap verify --bundle "$BOOTSTRAP_BUNDLE_DIR"
 run_step "05-bootstrap-init" "$SOUC_BIN" bootstrap init --bundle "$BOOTSTRAP_BUNDLE_DIR" --state "$BOOTSTRAP_STATE_DIR"
 run_step "06-bootstrap-cycle" "$SOUC_BIN" bootstrap cycle --state "$BOOTSTRAP_STATE_DIR"
+echo "==> 06a-driver-harness-prewarm"
+PREWARM_LOG="$LOG_DIR/06a-driver-harness-prewarm.log"
+set +e
+run_with_timeout 180 env \
+  SOUNIO_SELFHOST_DRIVER_HARNESS_CACHE_DIR="$DRIVER_HARNESS_CACHE_DIR" \
+  "$SOUC_BIN" run "$PREWARM_TARGET" --use-sounio-compiler --check-only \
+  2>&1 | tee "$PREWARM_LOG"
+PREWARM_RC=${PIPESTATUS[0]}
+set -e
+if [[ "$PREWARM_RC" -eq 0 ]]; then
+  echo "SELFHOST_INDEPENDENCE_GATE_INFO driver_harness_prewarm_status=ok cache_dir=$DRIVER_HARNESS_CACHE_DIR"
+elif rg -n "SELFHOST_DRIVER_HARNESS_UNAVAILABLE" "$PREWARM_LOG" >/dev/null 2>&1; then
+  echo "SELFHOST_INDEPENDENCE_GATE_INFO driver_harness_prewarm_status=blocked reason=SELFHOST_DRIVER_HARNESS_UNAVAILABLE rc=$PREWARM_RC cache_dir=$DRIVER_HARNESS_CACHE_DIR"
+else
+  echo "SELFHOST_INDEPENDENCE_GATE_INFO driver_harness_prewarm_status=warn rc=$PREWARM_RC cache_dir=$DRIVER_HARNESS_CACHE_DIR"
+fi
 
-run_step "06a-independence-benchmark-contract" env \
+run_step "06b-independence-benchmark-contract" env \
   SOUC_BIN="$SOUC_BIN" \
   CONTRACT_PATH="$INDEPENDENCE_CONTRACT_PATH" \
   bash scripts/independence_benchmark_gate.sh
@@ -85,7 +105,7 @@ if [ ! -x "$POLICY_STATUS_SCRIPT" ]; then
   echo "error: policy status script not executable: $POLICY_STATUS_SCRIPT" >&2
   exit 2
 fi
-run_step "06b-opt-policy-status" "$POLICY_STATUS_SCRIPT" \
+run_step "06c-opt-policy-status" "$POLICY_STATUS_SCRIPT" \
   --policy "$POLICY_PATH" \
   --souc "$SOUC_BIN" \
   --corpus benchmarks/independence \
@@ -98,11 +118,11 @@ if [[ "$REQUIRE_SIGNED_POLICY" == "1" ]]; then
     source "$POLICY_SMOKE_ENV_PATH"
   fi
   POLICY_STATUS_PATH="${SOUNIO_POLICY_STATUS_PATH:-$POLICY_PATH}"
-  run_step "06c-opt-policy-eval" env \
+  run_step "06d-opt-policy-eval" env \
     SOUNIO_POLICY_VERIFY_KEY_PATH="${SOUNIO_POLICY_VERIFY_KEY_PATH:-}" \
     "$SOUC_BIN" opt policy eval --policy "$POLICY_STATUS_PATH"
 else
-  echo "==> 06c-opt-policy-eval (skipped, set SOUNIO_REQUIRE_SIGNED_POLICY=1 to enforce)"
+  echo "==> 06d-opt-policy-eval (skipped, set SOUNIO_REQUIRE_SIGNED_POLICY=1 to enforce)"
 fi
 
 run_step "07-selfhost-strict-check" env \
@@ -118,6 +138,7 @@ set +e
 run_with_timeout 180 env \
   SOUNIO_SELFHOST_EXECUTOR=native-driver \
   SOUNIO_SELFHOST_DRIVER_ALLOW_LOCAL_REBUILD=0 \
+  SOUNIO_SELFHOST_DRIVER_HARNESS_CACHE_DIR="$DRIVER_HARNESS_CACHE_DIR" \
   "$SOUC_BIN" run self-hosted/ --check-only \
   2>&1 | tee "$RUNTIME_LOG"
 RUNTIME_RC=${PIPESTATUS[0]}
@@ -129,8 +150,12 @@ if [[ "$RUNTIME_RC" -eq 124 || "$RUNTIME_RC" -eq 137 ]]; then
 fi
 
 if [[ "$RUNTIME_RC" -ne 0 ]]; then
-  if rg -n "SELFHOST_BOOTSTRAP_ARTIFACTS_MISSING|SELFHOST_SIGNED_HARNESS_REQUIRED|SELFHOST_SIGNED_HARNESS_MISSING|SELFHOST_STRICT_DRIVER_FAILURE|SELFHOST_SEED_ONLY_ENFORCED" "$RUNTIME_LOG" >/dev/null 2>&1; then
-    echo "SELFHOST_INDEPENDENCE_GATE_INFO runtime_fail_fast_status=expected_error rc=$RUNTIME_RC"
+  if rg -n "SELFHOST_BOOTSTRAP_ARTIFACTS_MISSING|SELFHOST_SIGNED_HARNESS_REQUIRED|SELFHOST_SIGNED_HARNESS_MISSING|SELFHOST_STRICT_DRIVER_FAILURE|SELFHOST_SEED_ONLY_ENFORCED|SELFHOST_DRIVER_HARNESS_UNAVAILABLE" "$RUNTIME_LOG" >/dev/null 2>&1; then
+    runtime_reason="expected_error"
+    if rg -n "SELFHOST_DRIVER_HARNESS_UNAVAILABLE" "$RUNTIME_LOG" >/dev/null 2>&1; then
+      runtime_reason="driver_harness_unavailable"
+    fi
+    echo "SELFHOST_INDEPENDENCE_GATE_INFO runtime_fail_fast_status=expected_error rc=$RUNTIME_RC reason=$runtime_reason"
   else
     echo "error: runtime fail-fast check returned unexpected failure (rc=$RUNTIME_RC)" >&2
     exit "$RUNTIME_RC"
