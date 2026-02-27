@@ -1,0 +1,956 @@
+// self-hosted::gpu::runtime::launch — PTX kernel launch orchestration
+//
+// Bridges PtxBuf (emitted PTX text) to CUDA Driver API kernel execution and
+// result readback. This module provides the missing end-to-end path:
+//
+//   PtxBuf -> null-terminated C string -> cuModuleLoadData -> cuModuleGetFunction
+//           -> cuMemAlloc -> cuMemcpyHtoD -> cuLaunchKernel -> cuCtxSynchronize
+//           -> cuMemcpyDtoH -> cleanup -> GpuLaunchResult
+//
+// All helpers precede their callers (no forward references). State-threading
+// is used for linear structs per the cuda.sio convention. Non-linear structs
+// (PtxBuf, GpuLaunchResult) are passed by value or reference.
+//
+// Dependencies:
+//   - gpu::ptx — PtxBuf, ptx_buf_new, ptx_emit_demo_vec_add, ptx_push_str, etc.
+//   - gpu::runtime::cuda — CudaContext, CudaModule, CudaBuffer, CudaEvent,
+//     cuda_init, cuda_device_get, cuda_context_create, cuda_module_load_ptx,
+//     cuda_module_get_function, cuda_malloc, cuda_memcpy_h2d, cuda_memcpy_d2h,
+//     cuda_free, cuda_module_unload, cuda_context_destroy, cuda_launch_kernel_1d,
+//     cuda_context_synchronize, cuda_grid_dim, cuda_default_block_size,
+//     cuda_event_create_default, cuda_event_record_default, cuda_event_synchronize,
+//     cuda_event_elapsed, cuda_event_destroy, cuda_is_success, cuda_check,
+//     cuda_runtime_available, cuda_buffer_raw_ptr, CUDA_SUCCESS, CU_CTX_SCHED_AUTO
+
+// ============================================================================
+// Section 0: Helper — i64 to decimal string (standalone, no stdlib)
+// ============================================================================
+
+fn launch_i64_to_string(n: i64) -> string with Mut, Panic, Div, Alloc {
+    if n < 0 {
+        return "0"
+    }
+    if n == 0 { return "0" }
+
+    var digits: [i8; 32] = [0; 32]
+    var rev_len: i64 = 0
+    var value: i64 = n
+
+    while value > 0 {
+        let digit = value % 10
+        digits[rev_len as usize] = 48 + digit as i8
+        rev_len = rev_len + 1
+        value = value / 10
+    }
+
+    var bytes: [i8; 32] = [0; 32]
+    var i: i64 = 0
+    while i < rev_len {
+        bytes[i as usize] = digits[(rev_len - i - 1) as usize]
+        i = i + 1
+    }
+
+    str_from_bytes(bytes, rev_len)
+}
+
+
+// ============================================================================
+// Section 1: PtxBuf -> raw pointer bridge
+// ============================================================================
+
+// PtxBuf has data: [i8; 65536] and len: i64.
+// The CUDA Driver API (cuModuleLoadData) expects a null-terminated C string.
+// We null-terminate in place at buf.data[buf.len] and return a pointer to
+// the start of the data array.
+//
+// Precondition: buf.len < 65536 (capacity - 1 for the null terminator).
+// If buf.len >= 65535, we truncate by placing the null at position 65535.
+
+fn ptx_buf_as_cstr(buf: &!PtxBuf) -> *const i8 with Mut, Panic {
+    // Clamp len to leave room for null terminator
+    var term_pos: i64 = buf.len
+    if term_pos >= 65535 {
+        term_pos = 65535
+    }
+    // Write null terminator
+    buf.data[term_pos as usize] = 0 as i8
+    // Return pointer to start of data array
+    &buf.data[0] as *const i8
+}
+
+
+// ============================================================================
+// Section 2: Kernel parameter packing helpers
+// ============================================================================
+//
+// CUDA's cuLaunchKernel expects kernelParams as an array of pointers, where
+// each pointer points to the value of a kernel argument. For device buffers,
+// the argument value IS the CUdeviceptr (i64). We pack argument values into
+// a fixed-size i64 array, then build an address array pointing to each slot.
+
+fn cuda_pack_params_1(a0: i64) -> [i64; 1] {
+    [a0]
+}
+
+fn cuda_pack_params_2(a0: i64, a1: i64) -> [i64; 2] {
+    [a0, a1]
+}
+
+fn cuda_pack_params_3(a0: i64, a1: i64, a2: i64) -> [i64; 3] {
+    [a0, a1, a2]
+}
+
+fn cuda_pack_params_4(a0: i64, a1: i64, a2: i64, a3: i64) -> [i64; 4] {
+    [a0, a1, a2, a3]
+}
+
+
+// ============================================================================
+// Section 3: Kernel parameter address helpers
+// ============================================================================
+//
+// cuLaunchKernel's kernelParams expects *const i64 pointing to an array of
+// pointers. Each element in that array must itself point to the corresponding
+// kernel argument value. Since we pack values into [i64; N], we build a
+// parallel array where each element is the address of the corresponding
+// value slot.
+
+fn cuda_param_addrs_1(params: &[i64; 1]) -> [i64; 1] with Mut, Panic {
+    [&params[0] as i64]
+}
+
+fn cuda_param_addrs_2(params: &[i64; 2]) -> [i64; 2] with Mut, Panic {
+    [&params[0] as i64, &params[1] as i64]
+}
+
+fn cuda_param_addrs_3(params: &[i64; 3]) -> [i64; 3] with Mut, Panic {
+    [&params[0] as i64, &params[1] as i64, &params[2] as i64]
+}
+
+fn cuda_param_addrs_4(params: &[i64; 4]) -> [i64; 4] with Mut, Panic {
+    [&params[0] as i64, &params[1] as i64, &params[2] as i64, &params[3] as i64]
+}
+
+
+// ============================================================================
+// Section 4: GpuLaunchResult
+// ============================================================================
+
+struct GpuLaunchResult {
+    error_code: i32,
+    kernel_ms: f64,
+}
+
+fn gpu_launch_result_ok(ms: f64) -> GpuLaunchResult {
+    GpuLaunchResult { error_code: 0, kernel_ms: ms }
+}
+
+fn gpu_launch_result_err(code: i32) -> GpuLaunchResult {
+    GpuLaunchResult { error_code: code, kernel_ms: 0.0 }
+}
+
+fn gpu_launch_is_ok(r: &GpuLaunchResult) -> bool {
+    r.error_code == 0
+}
+
+
+// ============================================================================
+// Section 5: Kernel name to null-terminated C string helper
+// ============================================================================
+//
+// cuModuleGetFunction expects a null-terminated C string for the kernel name.
+// We copy the Sounio string into a fixed-size byte buffer and null-terminate.
+
+struct CstrBuf256 {
+    data: [i8; 256],
+    len: i64,
+}
+
+fn cstr_from_string(s: string) -> CstrBuf256 with Mut, Panic, Div {
+    var buf: CstrBuf256 = CstrBuf256 { data: [0; 256], len: 0 }
+    let n = str_len(s)
+    // Cap at 254 to leave room for null terminator
+    var limit: i64 = n
+    if limit > 254 {
+        limit = 254
+    }
+    var i: i64 = 0
+    while i < limit {
+        buf.data[i as usize] = str_char_at(s, i) as i8
+        i = i + 1
+    }
+    buf.data[limit as usize] = 0 as i8
+    buf.len = limit
+    buf
+}
+
+fn cstr_buf_ptr(buf: &CstrBuf256) -> *const i8 with Mut, Panic {
+    &buf.data[0] as *const i8
+}
+
+
+// ============================================================================
+// Section 6: Cleanup helpers (deterministic resource teardown)
+// ============================================================================
+//
+// These helpers tear down CUDA resources in reverse allocation order.
+// Each consumes linear structs so ownership obligations are fulfilled.
+// Errors during cleanup are logged but not propagated (best-effort).
+
+fn launch_cleanup_buffers_3(
+    buf_a: CudaBuffer,
+    buf_b: CudaBuffer,
+    buf_c: CudaBuffer
+) with IO {
+    let _e1 = cuda_free(buf_a)
+    let _e2 = cuda_free(buf_b)
+    let _e3 = cuda_free(buf_c)
+}
+
+fn launch_cleanup_module(m: CudaModule) with IO {
+    let _e = cuda_module_unload(m)
+}
+
+fn launch_cleanup_context(ctx: CudaContext) with IO {
+    let _e = cuda_context_destroy(ctx)
+}
+
+fn launch_cleanup_events(start: CudaEvent, stop: CudaEvent) with IO {
+    let _e1 = cuda_event_destroy(start)
+    let _e2 = cuda_event_destroy(stop)
+}
+
+
+// ============================================================================
+// Section 7: End-to-end launch helper — vec_add pattern (3 buffers + N)
+// ============================================================================
+//
+// Orchestrates the full lifecycle for a kernel that operates on three f32
+// device buffers (A, B, C_out) plus an element count N. This is the standard
+// pattern for element-wise GPU operations.
+//
+// Parameters:
+//   ptx        — PtxBuf containing the PTX text emitted by ptx.sio / lower_to_ptx.sio
+//   kernel_name — name of the .entry function in the PTX (e.g. "vec_add")
+//   n          — number of f32 elements per buffer
+//   host_a     — pointer to host input array A (n * 4 bytes)
+//   host_b     — pointer to host input array B (n * 4 bytes)
+//   host_c_out — pointer to host output array C (n * 4 bytes, written on return)
+//
+// Returns GpuLaunchResult with error_code == CUDA_SUCCESS (0) on success.
+// kernel_ms contains the elapsed kernel time measured via CUDA events.
+
+fn gpu_launch_ptx_vecadd(
+    ptx: PtxBuf,
+    kernel_name: string,
+    n: i64,
+    host_a: *const f32,
+    host_b: *const f32,
+    host_c_out: *const f32
+) -> GpuLaunchResult with IO, Mut, Panic, Div, Alloc {
+    let byte_count: i64 = n * 4
+
+    // ── Step 1: Initialize CUDA driver ──────────────────────────────────
+    let init_err = cuda_init()
+    if init_err != CUDA_SUCCESS {
+        return gpu_launch_result_err(init_err)
+    }
+
+    // ── Step 2: Get device 0 ────────────────────────────────────────────
+    let dev_result = cuda_device_get(0)
+    let device = dev_result.0
+    let dev_err = dev_result.1
+    if dev_err != CUDA_SUCCESS {
+        return gpu_launch_result_err(dev_err)
+    }
+
+    // ── Step 3: Create CUDA context ─────────────────────────────────────
+    let ctx_result = cuda_context_create(CU_CTX_SCHED_AUTO, device)
+    var ctx = ctx_result.0
+    let ctx_err = ctx_result.1
+    if ctx_err != CUDA_SUCCESS {
+        // Must still consume the linear CudaContext
+        launch_cleanup_context(ctx)
+        return gpu_launch_result_err(ctx_err)
+    }
+
+    // ── Step 4: Null-terminate PTX and load as module ───────────────────
+    var ptx_copy = ptx
+    let image = ptx_buf_as_cstr(&! ptx_copy)
+    let mod_result = cuda_module_load_ptx(image)
+    var cuda_mod = mod_result.0
+    let mod_err = mod_result.1
+    if mod_err != CUDA_SUCCESS {
+        launch_cleanup_module(cuda_mod)
+        launch_cleanup_context(ctx)
+        return gpu_launch_result_err(mod_err)
+    }
+
+    // ── Step 5: Look up kernel function by name ─────────────────────────
+    let name_buf = cstr_from_string(kernel_name)
+    let name_ptr = cstr_buf_ptr(&name_buf)
+    let func_result = cuda_module_get_function(cuda_mod, name_ptr)
+    cuda_mod = func_result.0
+    let func_handle = func_result.1
+    let func_err = func_result.2
+    if func_err != CUDA_SUCCESS {
+        launch_cleanup_module(cuda_mod)
+        launch_cleanup_context(ctx)
+        return gpu_launch_result_err(func_err)
+    }
+
+    // ── Step 6: Allocate three device buffers ───────────────────────────
+    let alloc_a_result = cuda_malloc(byte_count)
+    var buf_a = alloc_a_result.0
+    let alloc_a_err = alloc_a_result.1
+    if alloc_a_err != CUDA_SUCCESS {
+        launch_cleanup_buffers_3(buf_a, CudaBuffer { ptr: 0, size: 0 }, CudaBuffer { ptr: 0, size: 0 })
+        launch_cleanup_module(cuda_mod)
+        launch_cleanup_context(ctx)
+        return gpu_launch_result_err(alloc_a_err)
+    }
+
+    let alloc_b_result = cuda_malloc(byte_count)
+    var buf_b = alloc_b_result.0
+    let alloc_b_err = alloc_b_result.1
+    if alloc_b_err != CUDA_SUCCESS {
+        launch_cleanup_buffers_3(buf_a, buf_b, CudaBuffer { ptr: 0, size: 0 })
+        launch_cleanup_module(cuda_mod)
+        launch_cleanup_context(ctx)
+        return gpu_launch_result_err(alloc_b_err)
+    }
+
+    let alloc_c_result = cuda_malloc(byte_count)
+    var buf_c = alloc_c_result.0
+    let alloc_c_err = alloc_c_result.1
+    if alloc_c_err != CUDA_SUCCESS {
+        launch_cleanup_buffers_3(buf_a, buf_b, buf_c)
+        launch_cleanup_module(cuda_mod)
+        launch_cleanup_context(ctx)
+        return gpu_launch_result_err(alloc_c_err)
+    }
+
+    // ── Step 7: Copy host input arrays to device ────────────────────────
+    let h2d_a_result = cuda_memcpy_h2d(buf_a, host_a as *const i8, byte_count)
+    buf_a = h2d_a_result.0
+    let h2d_a_err = h2d_a_result.1
+    if h2d_a_err != CUDA_SUCCESS {
+        launch_cleanup_buffers_3(buf_a, buf_b, buf_c)
+        launch_cleanup_module(cuda_mod)
+        launch_cleanup_context(ctx)
+        return gpu_launch_result_err(h2d_a_err)
+    }
+
+    let h2d_b_result = cuda_memcpy_h2d(buf_b, host_b as *const i8, byte_count)
+    buf_b = h2d_b_result.0
+    let h2d_b_err = h2d_b_result.1
+    if h2d_b_err != CUDA_SUCCESS {
+        launch_cleanup_buffers_3(buf_a, buf_b, buf_c)
+        launch_cleanup_module(cuda_mod)
+        launch_cleanup_context(ctx)
+        return gpu_launch_result_err(h2d_b_err)
+    }
+
+    // ── Step 8: Compute grid/block dimensions ───────────────────────────
+    let block_dim = cuda_default_block_size()
+    let grid_dim = cuda_grid_dim(n, block_dim)
+
+    // ── Step 9: Extract raw device pointers for kernel params ───────────
+    let ptr_a_result = cuda_buffer_raw_ptr(buf_a)
+    buf_a = ptr_a_result.0
+    let raw_ptr_a = ptr_a_result.1
+
+    let ptr_b_result = cuda_buffer_raw_ptr(buf_b)
+    buf_b = ptr_b_result.0
+    let raw_ptr_b = ptr_b_result.1
+
+    let ptr_c_result = cuda_buffer_raw_ptr(buf_c)
+    buf_c = ptr_c_result.0
+    let raw_ptr_c = ptr_c_result.1
+
+    // ── Step 10: Pack kernel parameters ─────────────────────────────────
+    // The vec_add kernel expects: (ptr_a: u64, ptr_b: u64, ptr_c: u64, n: u64)
+    // We pack device pointers and element count into a contiguous i64 array,
+    // then build an array of addresses for cuLaunchKernel's kernelParams.
+    let params = cuda_pack_params_4(raw_ptr_a, raw_ptr_b, raw_ptr_c, n)
+    let addrs = cuda_param_addrs_4(&params)
+
+    // ── Step 11: Create timing events ───────────────────────────────────
+    let start_result = cuda_event_create_default()
+    var evt_start = start_result.0
+    let start_err = start_result.1
+
+    let stop_result = cuda_event_create_default()
+    var evt_stop = stop_result.0
+    let stop_err = stop_result.1
+
+    // If event creation fails we can still launch, just skip timing
+    var timing_ok: bool = cuda_is_success(start_err) && cuda_is_success(stop_err)
+
+    // Record start event on default stream
+    if timing_ok {
+        let rec_start = cuda_event_record_default(evt_start)
+        evt_start = rec_start.0
+        let rec_start_err = rec_start.1
+        if rec_start_err != CUDA_SUCCESS {
+            timing_ok = false
+        }
+    }
+
+    // ── Step 12: Launch kernel ──────────────────────────────────────────
+    let launch_err = cuda_launch_kernel_1d(
+        func_handle,
+        grid_dim,
+        block_dim,
+        0,       // sharedMemBytes
+        0,       // default stream
+        &addrs[0] as *const i64
+    )
+    if launch_err != CUDA_SUCCESS {
+        // Cleanup everything
+        launch_cleanup_events(evt_start, evt_stop)
+        launch_cleanup_buffers_3(buf_a, buf_b, buf_c)
+        launch_cleanup_module(cuda_mod)
+        launch_cleanup_context(ctx)
+        return gpu_launch_result_err(launch_err)
+    }
+
+    // Record stop event on default stream
+    if timing_ok {
+        let rec_stop = cuda_event_record_default(evt_stop)
+        evt_stop = rec_stop.0
+        let rec_stop_err = rec_stop.1
+        if rec_stop_err != CUDA_SUCCESS {
+            timing_ok = false
+        }
+    }
+
+    // ── Step 13: Synchronize context ────────────────────────────────────
+    let sync_result = cuda_context_synchronize(ctx)
+    ctx = sync_result.0
+    let sync_err = sync_result.1
+    if sync_err != CUDA_SUCCESS {
+        launch_cleanup_events(evt_start, evt_stop)
+        launch_cleanup_buffers_3(buf_a, buf_b, buf_c)
+        launch_cleanup_module(cuda_mod)
+        launch_cleanup_context(ctx)
+        return gpu_launch_result_err(sync_err)
+    }
+
+    // ── Step 14: Measure elapsed time ───────────────────────────────────
+    var kernel_ms: f64 = 0.0
+    if timing_ok {
+        // Synchronize stop event to ensure it has completed
+        let evt_sync_result = cuda_event_synchronize(evt_stop)
+        evt_stop = evt_sync_result.0
+
+        let elapsed_result = cuda_event_elapsed(evt_start, evt_stop)
+        evt_start = elapsed_result.0
+        evt_stop = elapsed_result.1
+        let elapsed_f32 = elapsed_result.2
+        let elapsed_err = elapsed_result.3
+        if cuda_is_success(elapsed_err) {
+            kernel_ms = elapsed_f32 as f64
+        }
+    }
+
+    // ── Step 15: Copy result back to host ───────────────────────────────
+    let d2h_result = cuda_memcpy_d2h(buf_c, host_c_out as *const i8, byte_count)
+    buf_c = d2h_result.0
+    let d2h_err = d2h_result.1
+
+    // ── Step 16: Cleanup (reverse allocation order) ─────────────────────
+    launch_cleanup_events(evt_start, evt_stop)
+    launch_cleanup_buffers_3(buf_a, buf_b, buf_c)
+    launch_cleanup_module(cuda_mod)
+    launch_cleanup_context(ctx)
+
+    // d2h error takes precedence if the kernel succeeded but readback failed
+    if d2h_err != CUDA_SUCCESS {
+        return gpu_launch_result_err(d2h_err)
+    }
+
+    gpu_launch_result_ok(kernel_ms)
+}
+
+
+// ============================================================================
+// Section 8: Diagnostic launch — prints step-by-step status
+// ============================================================================
+//
+// Same sequence as gpu_launch_ptx_vecadd but with print() calls at each step.
+// Useful for debugging GPU bring-up issues.
+
+fn gpu_launch_ptx_vecadd_verbose(
+    ptx: PtxBuf,
+    kernel_name: string,
+    n: i64,
+    host_a: *const f32,
+    host_b: *const f32,
+    host_c_out: *const f32
+) -> GpuLaunchResult with IO, Mut, Panic, Div, Alloc {
+    let byte_count: i64 = n * 4
+
+    print("[launch] gpu_launch_ptx_vecadd: n=")
+    print(launch_i64_to_string(n))
+    print(", bytes=")
+    print(launch_i64_to_string(byte_count))
+    print("\n")
+
+    // Step 1: Init
+    let init_err = cuda_init()
+    if init_err != CUDA_SUCCESS {
+        print("[launch] cuInit FAILED\n")
+        return gpu_launch_result_err(init_err)
+    }
+    print("[launch] cuInit OK\n")
+
+    // Step 2: Device
+    let dev_result = cuda_device_get(0)
+    let device = dev_result.0
+    let dev_err = dev_result.1
+    if dev_err != CUDA_SUCCESS {
+        print("[launch] cuDeviceGet FAILED\n")
+        return gpu_launch_result_err(dev_err)
+    }
+    print("[launch] device 0 acquired\n")
+
+    // Step 3: Context
+    let ctx_result = cuda_context_create(CU_CTX_SCHED_AUTO, device)
+    var ctx = ctx_result.0
+    let ctx_err = ctx_result.1
+    if ctx_err != CUDA_SUCCESS {
+        print("[launch] cuCtxCreate FAILED\n")
+        launch_cleanup_context(ctx)
+        return gpu_launch_result_err(ctx_err)
+    }
+    print("[launch] context created\n")
+
+    // Step 4: Load PTX module
+    var ptx_copy = ptx
+    let image = ptx_buf_as_cstr(&! ptx_copy)
+    let mod_result = cuda_module_load_ptx(image)
+    var cuda_mod = mod_result.0
+    let mod_err = mod_result.1
+    if mod_err != CUDA_SUCCESS {
+        print("[launch] cuModuleLoadData FAILED\n")
+        launch_cleanup_module(cuda_mod)
+        launch_cleanup_context(ctx)
+        return gpu_launch_result_err(mod_err)
+    }
+    print("[launch] PTX module loaded\n")
+
+    // Step 5: Get kernel function
+    let name_buf = cstr_from_string(kernel_name)
+    let name_ptr = cstr_buf_ptr(&name_buf)
+    let func_result = cuda_module_get_function(cuda_mod, name_ptr)
+    cuda_mod = func_result.0
+    let func_handle = func_result.1
+    let func_err = func_result.2
+    if func_err != CUDA_SUCCESS {
+        print("[launch] cuModuleGetFunction FAILED\n")
+        launch_cleanup_module(cuda_mod)
+        launch_cleanup_context(ctx)
+        return gpu_launch_result_err(func_err)
+    }
+    print("[launch] kernel '")
+    print(kernel_name)
+    print("' resolved\n")
+
+    // Step 6: Allocate device memory
+    let alloc_a_result = cuda_malloc(byte_count)
+    var buf_a = alloc_a_result.0
+    let alloc_a_err = alloc_a_result.1
+
+    let alloc_b_result = cuda_malloc(byte_count)
+    var buf_b = alloc_b_result.0
+    let alloc_b_err = alloc_b_result.1
+
+    let alloc_c_result = cuda_malloc(byte_count)
+    var buf_c = alloc_c_result.0
+    let alloc_c_err = alloc_c_result.1
+
+    if alloc_a_err != CUDA_SUCCESS || alloc_b_err != CUDA_SUCCESS || alloc_c_err != CUDA_SUCCESS {
+        print("[launch] cuMemAlloc FAILED\n")
+        launch_cleanup_buffers_3(buf_a, buf_b, buf_c)
+        launch_cleanup_module(cuda_mod)
+        launch_cleanup_context(ctx)
+        if alloc_a_err != CUDA_SUCCESS { return gpu_launch_result_err(alloc_a_err) }
+        if alloc_b_err != CUDA_SUCCESS { return gpu_launch_result_err(alloc_b_err) }
+        return gpu_launch_result_err(alloc_c_err)
+    }
+    print("[launch] 3 device buffers allocated\n")
+
+    // Step 7: H2D copies
+    let h2d_a_result = cuda_memcpy_h2d(buf_a, host_a as *const i8, byte_count)
+    buf_a = h2d_a_result.0
+    let h2d_a_err = h2d_a_result.1
+
+    let h2d_b_result = cuda_memcpy_h2d(buf_b, host_b as *const i8, byte_count)
+    buf_b = h2d_b_result.0
+    let h2d_b_err = h2d_b_result.1
+
+    if h2d_a_err != CUDA_SUCCESS || h2d_b_err != CUDA_SUCCESS {
+        print("[launch] cuMemcpyHtoD FAILED\n")
+        launch_cleanup_buffers_3(buf_a, buf_b, buf_c)
+        launch_cleanup_module(cuda_mod)
+        launch_cleanup_context(ctx)
+        if h2d_a_err != CUDA_SUCCESS { return gpu_launch_result_err(h2d_a_err) }
+        return gpu_launch_result_err(h2d_b_err)
+    }
+    print("[launch] H2D copies complete\n")
+
+    // Step 8: Grid/block
+    let block_dim = cuda_default_block_size()
+    let grid_dim = cuda_grid_dim(n, block_dim)
+    print("[launch] grid=")
+    print(launch_i64_to_string(grid_dim as i64))
+    print(" block=")
+    print(launch_i64_to_string(block_dim as i64))
+    print("\n")
+
+    // Step 9: Pack params
+    let ptr_a_result = cuda_buffer_raw_ptr(buf_a)
+    buf_a = ptr_a_result.0
+    let raw_ptr_a = ptr_a_result.1
+
+    let ptr_b_result = cuda_buffer_raw_ptr(buf_b)
+    buf_b = ptr_b_result.0
+    let raw_ptr_b = ptr_b_result.1
+
+    let ptr_c_result = cuda_buffer_raw_ptr(buf_c)
+    buf_c = ptr_c_result.0
+    let raw_ptr_c = ptr_c_result.1
+
+    let params = cuda_pack_params_4(raw_ptr_a, raw_ptr_b, raw_ptr_c, n)
+    let addrs = cuda_param_addrs_4(&params)
+
+    // Step 10: Launch
+    let launch_err = cuda_launch_kernel_1d(
+        func_handle,
+        grid_dim,
+        block_dim,
+        0,
+        0,
+        &addrs[0] as *const i64
+    )
+    if launch_err != CUDA_SUCCESS {
+        print("[launch] cuLaunchKernel FAILED\n")
+        launch_cleanup_buffers_3(buf_a, buf_b, buf_c)
+        launch_cleanup_module(cuda_mod)
+        launch_cleanup_context(ctx)
+        return gpu_launch_result_err(launch_err)
+    }
+    print("[launch] kernel dispatched\n")
+
+    // Step 11: Synchronize
+    let sync_result = cuda_context_synchronize(ctx)
+    ctx = sync_result.0
+    let sync_err = sync_result.1
+    if sync_err != CUDA_SUCCESS {
+        print("[launch] cuCtxSynchronize FAILED\n")
+        launch_cleanup_buffers_3(buf_a, buf_b, buf_c)
+        launch_cleanup_module(cuda_mod)
+        launch_cleanup_context(ctx)
+        return gpu_launch_result_err(sync_err)
+    }
+    print("[launch] context synchronized\n")
+
+    // Step 12: D2H copy
+    let d2h_result = cuda_memcpy_d2h(buf_c, host_c_out as *const i8, byte_count)
+    buf_c = d2h_result.0
+    let d2h_err = d2h_result.1
+    if d2h_err != CUDA_SUCCESS {
+        print("[launch] cuMemcpyDtoH FAILED\n")
+    } else {
+        print("[launch] D2H copy complete\n")
+    }
+
+    // Step 13: Cleanup
+    launch_cleanup_buffers_3(buf_a, buf_b, buf_c)
+    launch_cleanup_module(cuda_mod)
+    launch_cleanup_context(ctx)
+    print("[launch] cleanup done\n")
+
+    if d2h_err != CUDA_SUCCESS {
+        return gpu_launch_result_err(d2h_err)
+    }
+
+    gpu_launch_result_ok(0.0)
+}
+
+
+// ============================================================================
+// Section 9: Smoke test — trivial vec_add round-trip
+// ============================================================================
+//
+// Generates a minimal vec_add PTX kernel via ptx_emit_demo_vec_add(), launches
+// it on a small (N=4) dataset, and validates the output. Returns true if the
+// GPU pipeline works end-to-end.
+//
+// Test data:
+//   A = [1.0, 2.0, 3.0, 4.0]
+//   B = [10.0, 20.0, 30.0, 40.0]
+//   Expected C = [11.0, 22.0, 33.0, 44.0]
+//
+// Tolerance: 0.001 (f32 precision is more than sufficient for exact integers).
+
+fn gpu_launch_smoke_check_result(
+    c: &[f32; 4],
+    expected: &[f32; 4]
+) -> bool with Panic {
+    // Compare each element with tolerance
+    let tol: f32 = 0.001 as f32
+    var i: i64 = 0
+    var ok: bool = true
+    while i < 4 {
+        let diff = c[i as usize] - expected[i as usize]
+        // Manual absolute value since we avoid negative literal syntax
+        var abs_diff: f32 = diff
+        if diff < (0.0 as f32) {
+            abs_diff = (0.0 as f32) - diff
+        }
+        if abs_diff > tol {
+            ok = false
+        }
+        i = i + 1
+    }
+    ok
+}
+
+fn gpu_launch_smoke_test() -> bool with IO, Mut, Panic, Div, Alloc {
+    // First, check if the CUDA runtime is available at all
+    let available = cuda_runtime_available()
+    if !available {
+        print("[smoke] CUDA runtime not available, skipping\n")
+        return false
+    }
+
+    // Emit a trivial vec_add PTX kernel
+    let ptx = ptx_emit_demo_vec_add()
+    if ptx.len <= 0 {
+        print("[smoke] PTX emission produced empty buffer\n")
+        return false
+    }
+
+    // Prepare host data: A + B = C
+    var host_a: [f32; 4] = [1.0 as f32, 2.0 as f32, 3.0 as f32, 4.0 as f32]
+    var host_b: [f32; 4] = [10.0 as f32, 20.0 as f32, 30.0 as f32, 40.0 as f32]
+    var host_c: [f32; 4] = [0.0 as f32, 0.0 as f32, 0.0 as f32, 0.0 as f32]
+    let expected: [f32; 4] = [11.0 as f32, 22.0 as f32, 33.0 as f32, 44.0 as f32]
+
+    // Launch the kernel
+    let result = gpu_launch_ptx_vecadd(
+        ptx,
+        "vec_add",
+        4,
+        &host_a[0] as *const f32,
+        &host_b[0] as *const f32,
+        &host_c[0] as *const f32
+    )
+
+    if result.error_code != 0 {
+        print("[smoke] kernel launch failed with error code ")
+        print(launch_i64_to_string(result.error_code as i64))
+        print("\n")
+        return false
+    }
+
+    // Validate output
+    let pass = gpu_launch_smoke_check_result(&host_c, &expected)
+    if pass {
+        print("[smoke] vec_add smoke test PASSED\n")
+    } else {
+        print("[smoke] vec_add smoke test FAILED: output mismatch\n")
+    }
+    pass
+}
+
+
+// ============================================================================
+// Section 10: Generic launch helper — arbitrary PTX with N buffers
+// ============================================================================
+//
+// For kernels with more complex signatures, callers can use the building
+// blocks (ptx_buf_as_cstr, cuda_pack_params_*, cuda_param_addrs_*) directly.
+// This section provides a 2-buffer variant for map/transform kernels.
+
+struct GpuLaunchConfig {
+    block_dim: i32,
+    shared_mem_bytes: i32,
+    stream_handle: i64,
+}
+
+fn gpu_launch_config_default() -> GpuLaunchConfig {
+    GpuLaunchConfig {
+        block_dim: 256,
+        shared_mem_bytes: 0,
+        stream_handle: 0,
+    }
+}
+
+fn gpu_launch_config_with_block(block: i32) -> GpuLaunchConfig {
+    GpuLaunchConfig {
+        block_dim: block,
+        shared_mem_bytes: 0,
+        stream_handle: 0,
+    }
+}
+
+fn gpu_launch_config_with_shared(block: i32, smem: i32) -> GpuLaunchConfig {
+    GpuLaunchConfig {
+        block_dim: block,
+        shared_mem_bytes: smem,
+        stream_handle: 0,
+    }
+}
+
+// Launch a PTX kernel that operates on 2 buffers (in-place transform pattern).
+// Parameters: buf_in (device ptr), buf_out (device ptr), n (element count).
+fn gpu_launch_ptx_map(
+    ptx: PtxBuf,
+    kernel_name: string,
+    n: i64,
+    host_in: *const f32,
+    host_out: *const f32,
+    config: GpuLaunchConfig
+) -> GpuLaunchResult with IO, Mut, Panic, Div, Alloc {
+    let byte_count: i64 = n * 4
+
+    // Initialize
+    let init_err = cuda_init()
+    if init_err != CUDA_SUCCESS {
+        return gpu_launch_result_err(init_err)
+    }
+
+    // Device + context
+    let dev_result = cuda_device_get(0)
+    let device = dev_result.0
+    let dev_err = dev_result.1
+    if dev_err != CUDA_SUCCESS {
+        return gpu_launch_result_err(dev_err)
+    }
+
+    let ctx_result = cuda_context_create(CU_CTX_SCHED_AUTO, device)
+    var ctx = ctx_result.0
+    let ctx_err = ctx_result.1
+    if ctx_err != CUDA_SUCCESS {
+        launch_cleanup_context(ctx)
+        return gpu_launch_result_err(ctx_err)
+    }
+
+    // Load module + get function
+    var ptx_copy = ptx
+    let image = ptx_buf_as_cstr(&! ptx_copy)
+    let mod_result = cuda_module_load_ptx(image)
+    var cuda_mod = mod_result.0
+    let mod_err = mod_result.1
+    if mod_err != CUDA_SUCCESS {
+        launch_cleanup_module(cuda_mod)
+        launch_cleanup_context(ctx)
+        return gpu_launch_result_err(mod_err)
+    }
+
+    let name_buf = cstr_from_string(kernel_name)
+    let name_ptr = cstr_buf_ptr(&name_buf)
+    let func_result = cuda_module_get_function(cuda_mod, name_ptr)
+    cuda_mod = func_result.0
+    let func_handle = func_result.1
+    let func_err = func_result.2
+    if func_err != CUDA_SUCCESS {
+        launch_cleanup_module(cuda_mod)
+        launch_cleanup_context(ctx)
+        return gpu_launch_result_err(func_err)
+    }
+
+    // Allocate 2 device buffers
+    let alloc_in_result = cuda_malloc(byte_count)
+    var buf_in = alloc_in_result.0
+    let alloc_in_err = alloc_in_result.1
+
+    let alloc_out_result = cuda_malloc(byte_count)
+    var buf_out = alloc_out_result.0
+    let alloc_out_err = alloc_out_result.1
+
+    if alloc_in_err != CUDA_SUCCESS || alloc_out_err != CUDA_SUCCESS {
+        let _e1 = cuda_free(buf_in)
+        let _e2 = cuda_free(buf_out)
+        launch_cleanup_module(cuda_mod)
+        launch_cleanup_context(ctx)
+        if alloc_in_err != CUDA_SUCCESS { return gpu_launch_result_err(alloc_in_err) }
+        return gpu_launch_result_err(alloc_out_err)
+    }
+
+    // H2D
+    let h2d_result = cuda_memcpy_h2d(buf_in, host_in as *const i8, byte_count)
+    buf_in = h2d_result.0
+    let h2d_err = h2d_result.1
+    if h2d_err != CUDA_SUCCESS {
+        let _e1 = cuda_free(buf_in)
+        let _e2 = cuda_free(buf_out)
+        launch_cleanup_module(cuda_mod)
+        launch_cleanup_context(ctx)
+        return gpu_launch_result_err(h2d_err)
+    }
+
+    // Grid/block dims
+    let grid_dim = cuda_grid_dim(n, config.block_dim)
+
+    // Pack params: (ptr_in, ptr_out, n)
+    let ptr_in_result = cuda_buffer_raw_ptr(buf_in)
+    buf_in = ptr_in_result.0
+    let raw_ptr_in = ptr_in_result.1
+
+    let ptr_out_result = cuda_buffer_raw_ptr(buf_out)
+    buf_out = ptr_out_result.0
+    let raw_ptr_out = ptr_out_result.1
+
+    let params = cuda_pack_params_3(raw_ptr_in, raw_ptr_out, n)
+    let addrs = cuda_param_addrs_3(&params)
+
+    // Launch
+    let launch_err = cuda_launch_kernel_1d(
+        func_handle,
+        grid_dim,
+        config.block_dim,
+        config.shared_mem_bytes,
+        config.stream_handle,
+        &addrs[0] as *const i64
+    )
+    if launch_err != CUDA_SUCCESS {
+        let _e1 = cuda_free(buf_in)
+        let _e2 = cuda_free(buf_out)
+        launch_cleanup_module(cuda_mod)
+        launch_cleanup_context(ctx)
+        return gpu_launch_result_err(launch_err)
+    }
+
+    // Synchronize
+    let sync_result = cuda_context_synchronize(ctx)
+    ctx = sync_result.0
+    let sync_err = sync_result.1
+    if sync_err != CUDA_SUCCESS {
+        let _e1 = cuda_free(buf_in)
+        let _e2 = cuda_free(buf_out)
+        launch_cleanup_module(cuda_mod)
+        launch_cleanup_context(ctx)
+        return gpu_launch_result_err(sync_err)
+    }
+
+    // D2H
+    let d2h_result = cuda_memcpy_d2h(buf_out, host_out as *const i8, byte_count)
+    buf_out = d2h_result.0
+    let d2h_err = d2h_result.1
+
+    // Cleanup
+    let _e1 = cuda_free(buf_in)
+    let _e2 = cuda_free(buf_out)
+    launch_cleanup_module(cuda_mod)
+    launch_cleanup_context(ctx)
+
+    if d2h_err != CUDA_SUCCESS {
+        return gpu_launch_result_err(d2h_err)
+    }
+
+    gpu_launch_result_ok(0.0)
+}

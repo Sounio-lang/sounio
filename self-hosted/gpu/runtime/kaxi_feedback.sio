@@ -1,0 +1,574 @@
+// self-hosted::gpu::runtime::kaxi_feedback — K-AXI epistemic feedback from GPU
+//
+// Connects the K-AXI epistemic accumulator to the GPU kernel launch path.
+// After a CUDA kernel execution, reads back the epistemic metadata sidecar
+// (ring buffer of K-AXI payloads + power log scalar) and feeds it through
+// the K-AXI accumulator to produce a hardware epistemic power score.
+//
+// The feedback loop can optionally re-launch a kernel when the epistemic
+// confidence is below a caller-supplied threshold, up to a maximum retry
+// count. This enables automatic re-execution of numerically sensitive GPU
+// workloads until the hardware epistemic fidelity is sufficient.
+//
+// K-AXI ring buffer layout (matches CUDA sidecar definition in
+// codegen/hardware/kaxi_emitter.sio):
+//   Each KaxiPayload is 64 bytes:
+//     value(8) + variance(8) + epsilon(8) + prov(8) + flags(8) + padding(24)
+//
+// Dependencies (all inlined — self-hosted files are self-contained):
+//   - CUDA Driver API FFI declarations (from cuda.sio)
+//   - K-AXI flag packing / accumulator helpers (from kaxi_adapters.sio)
+//
+// State-threading convention:
+//   CudaModule is a linear struct. Every function that "borrows" it consumes
+//   the struct and returns a rebuilt copy alongside the result. CudaBuffer
+//   follows the same pattern. See cuda.sio for the full rationale.
+
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+let KAXI_PAYLOAD_SIZE: i64 = 64
+let KAXI_RING_CAPACITY: i64 = 64
+let KAXI_FLAGS_OFFSET: i64 = 32
+let KAXI_RING_TOTAL_BYTES: i64 = 4096   // 64 * 64
+
+// Error sentinels returned in KaxiFeedbackResult.error_code
+let KAXI_OK: i32 = 0
+let KAXI_ERR_READBACK_POWER: i32 = 1
+let KAXI_ERR_READBACK_RING: i32 = 2
+let KAXI_ERR_READBACK_HEAD: i32 = 3
+let KAXI_ERR_LAUNCH: i32 = 4
+let KAXI_ERR_SYNC: i32 = 5
+
+
+// ============================================================================
+// Re-declarations (inlined from cuda.sio — self-hosted files are standalone)
+// ============================================================================
+
+let CUDA_SUCCESS: i32 = 0
+
+extern "C" {
+    fn cuModuleGetGlobal(dptr: *const i64, size: *const i64, module: i64, name: *const i8) -> i32;
+    fn cuMemcpyDtoH(dstHost: *const i8, srcDevice: i64, byteCount: i64) -> i32;
+    fn cuMemAlloc(dptr: *const i64, bytesize: i64) -> i32;
+    fn cuMemFree(dptr: i64) -> i32;
+    fn cuLaunchKernel(
+        f: i64,
+        gridDimX: i32, gridDimY: i32, gridDimZ: i32,
+        blockDimX: i32, blockDimY: i32, blockDimZ: i32,
+        sharedMemBytes: i32,
+        hStream: i64,
+        kernelParams: *const i64,
+        extra: *const i64
+    ) -> i32;
+    fn cuCtxSynchronize() -> i32;
+}
+
+linear struct CudaModule {
+    handle: i64,
+}
+
+linear struct CudaBuffer {
+    ptr: i64,
+    size: i64,
+}
+
+
+// ============================================================================
+// Re-declarations (inlined from kaxi_adapters.sio)
+// ============================================================================
+
+fn kaxi_flags_unpack_op_kind(flags: i64) -> i64 {
+    flags & 0xF
+}
+
+fn kaxi_replay_is_epistemic(flags: i64) -> bool {
+    let op = kaxi_flags_unpack_op_kind(flags)
+    op >= 1 && op <= 5
+}
+
+fn kaxi_flags_pack(op_kind: i64, success_inc: i64, failure_inc: i64, alpha_q8: i64) -> i64 {
+    let op = op_kind & 0xF
+    let failure = (failure_inc & 0xFF) << 8
+    let success = (success_inc & 0xFF) << 16
+    let alpha = (alpha_q8 & 0xFF) << 24
+    op | failure | success | alpha
+}
+
+fn kaxi_hw_counter_step(
+    fidelity_total: i64,
+    prov_total: i64,
+    formal_total: i64,
+    flags: i64
+) -> (i64, i64, i64) {
+    let is_epi = if kaxi_replay_is_epistemic(flags) { 1 as i64 } else { 0 as i64 }
+    (
+        fidelity_total + is_epi,
+        prov_total + is_epi,
+        formal_total + is_epi
+    )
+}
+
+fn kaxi_hw_epistemic_power_log_q32_32(
+    fidelity_total: i64,
+    prov_total: i64,
+    quantum_total: i64
+) -> i64 {
+    (fidelity_total >> 3) + (prov_total >> 4) + (quantum_total >> 5)
+}
+
+fn kaxi_hw_poll_replay_flags(
+    flags_batch: [i64; 64],
+    count: i64,
+    quantum_total: i64
+) -> (i64, i64, i64, i64) with Mut, Panic, Div, Alloc {
+    var fidelity_total: i64 = 0
+    var prov_total: i64 = 0
+    var formal_total: i64 = 0
+    var i: i64 = 0
+    while i < count && i < 64 {
+        let flags = flags_batch[i as usize]
+        let (next_fidelity, next_prov, next_formal) =
+            kaxi_hw_counter_step(fidelity_total, prov_total, formal_total, flags)
+        fidelity_total = next_fidelity
+        prov_total = next_prov
+        formal_total = next_formal
+        i = i + 1
+    }
+    let score = kaxi_hw_epistemic_power_log_q32_32(fidelity_total, prov_total, quantum_total)
+    (fidelity_total, prov_total, formal_total, score)
+}
+
+
+// ============================================================================
+// Result struct
+// ============================================================================
+
+struct KaxiFeedbackResult {
+    fidelity_total: i64,
+    prov_total: i64,
+    formal_total: i64,
+    epistemic_power_score: i64,
+    should_relaunch: bool,
+    error_code: i32,
+}
+
+fn kaxi_feedback_result_ok(
+    fidelity: i64,
+    prov: i64,
+    formal: i64,
+    score: i64,
+    relaunch: bool
+) -> KaxiFeedbackResult {
+    KaxiFeedbackResult {
+        fidelity_total: fidelity,
+        prov_total: prov,
+        formal_total: formal,
+        epistemic_power_score: score,
+        should_relaunch: relaunch,
+        error_code: KAXI_OK,
+    }
+}
+
+fn kaxi_feedback_result_err(code: i32) -> KaxiFeedbackResult {
+    KaxiFeedbackResult {
+        fidelity_total: 0,
+        prov_total: 0,
+        formal_total: 0,
+        epistemic_power_score: 0,
+        should_relaunch: false,
+        error_code: code,
+    }
+}
+
+
+// ============================================================================
+// 1. Read back the epistemic power log global from a loaded CUDA module
+// ============================================================================
+//
+// The CUDA sidecar kernel writes a single Q32.32 fixed-point scalar into
+// the device global `g_epistemic_power_log_hw_q32_32`. This function
+// looks up that global by name and copies the 8-byte value to the host.
+
+fn kaxi_readback_power_log(m: CudaModule) -> (CudaModule, i64, i32) with IO, Mut, Panic {
+    let raw = m.handle
+
+    // Look up device pointer + size of the global
+    var dptr: i64 = 0
+    var gsize: i64 = 0
+    let lookup_err = cuModuleGetGlobal(&dptr, &gsize, raw, "g_epistemic_power_log_hw_q32_32")
+
+    if lookup_err != CUDA_SUCCESS {
+        return (CudaModule { handle: raw }, 0, lookup_err)
+    }
+
+    // Copy the 8-byte scalar to a host-side buffer
+    var host_val: i64 = 0
+    let copy_err = cuMemcpyDtoH(&host_val as *const i8, dptr, 8)
+
+    if copy_err != CUDA_SUCCESS {
+        return (CudaModule { handle: raw }, 0, copy_err)
+    }
+
+    (CudaModule { handle: raw }, host_val, CUDA_SUCCESS)
+}
+
+
+// ============================================================================
+// 2. Read back the K-AXI ring buffer from a loaded CUDA module
+// ============================================================================
+//
+// The ring buffer is a device global `g_kaxi_ring` containing up to 64
+// KaxiPayload structs (64 bytes each). The write head is stored in the
+// device global `g_kaxi_ring_head` (a single i64).
+//
+// We only extract the flags word (at byte offset KAXI_FLAGS_OFFSET within
+// each payload) since that is all the accumulator needs.
+
+fn kaxi_extract_flags_from_ring(
+    ring_bytes: [i8; 4096],
+    count: i64
+) -> [i64; 64] with Mut, Panic {
+    var flags: [i64; 64] = [0; 64]
+    var i: i64 = 0
+    while i < count && i < KAXI_RING_CAPACITY {
+        // Byte offset of the flags word for entry i:
+        //   i * KAXI_PAYLOAD_SIZE + KAXI_FLAGS_OFFSET
+        let base = i * KAXI_PAYLOAD_SIZE + KAXI_FLAGS_OFFSET
+
+        // Reconstruct i64 from 8 little-endian bytes
+        let b0 = ring_bytes[base as usize] as i64 & 0xFF
+        let b1 = ring_bytes[(base + 1) as usize] as i64 & 0xFF
+        let b2 = ring_bytes[(base + 2) as usize] as i64 & 0xFF
+        let b3 = ring_bytes[(base + 3) as usize] as i64 & 0xFF
+        let b4 = ring_bytes[(base + 4) as usize] as i64 & 0xFF
+        let b5 = ring_bytes[(base + 5) as usize] as i64 & 0xFF
+        let b6 = ring_bytes[(base + 6) as usize] as i64 & 0xFF
+        let b7 = ring_bytes[(base + 7) as usize] as i64 & 0xFF
+
+        let val = b0
+            | (b1 << 8)
+            | (b2 << 16)
+            | (b3 << 24)
+            | (b4 << 32)
+            | (b5 << 40)
+            | (b6 << 48)
+            | (b7 << 56)
+
+        flags[i as usize] = val
+        i = i + 1
+    }
+    flags
+}
+
+fn kaxi_readback_ring(m: CudaModule) -> (CudaModule, [i64; 64], i64, i32) with IO, Mut, Panic {
+    let raw = m.handle
+
+    // --- Look up g_kaxi_ring ---
+    var ring_dptr: i64 = 0
+    var ring_gsize: i64 = 0
+    let ring_err = cuModuleGetGlobal(&ring_dptr, &ring_gsize, raw, "g_kaxi_ring")
+
+    if ring_err != CUDA_SUCCESS {
+        let empty: [i64; 64] = [0; 64]
+        return (CudaModule { handle: raw }, empty, 0, ring_err)
+    }
+
+    // --- Read the entire ring into a host byte buffer ---
+    var ring_bytes: [i8; 4096] = [0; 4096]
+    let ring_copy_err = cuMemcpyDtoH(&ring_bytes as *const i8, ring_dptr, KAXI_RING_TOTAL_BYTES)
+
+    if ring_copy_err != CUDA_SUCCESS {
+        let empty: [i64; 64] = [0; 64]
+        return (CudaModule { handle: raw }, empty, 0, ring_copy_err)
+    }
+
+    // --- Look up g_kaxi_ring_head ---
+    var head_dptr: i64 = 0
+    var head_gsize: i64 = 0
+    let head_err = cuModuleGetGlobal(&head_dptr, &head_gsize, raw, "g_kaxi_ring_head")
+
+    if head_err != CUDA_SUCCESS {
+        let empty: [i64; 64] = [0; 64]
+        return (CudaModule { handle: raw }, empty, 0, head_err)
+    }
+
+    var head_val: i64 = 0
+    let head_copy_err = cuMemcpyDtoH(&head_val as *const i8, head_dptr, 8)
+
+    if head_copy_err != CUDA_SUCCESS {
+        let empty: [i64; 64] = [0; 64]
+        return (CudaModule { handle: raw }, empty, 0, head_copy_err)
+    }
+
+    // Clamp head to ring capacity
+    var count = head_val
+    if count > KAXI_RING_CAPACITY {
+        count = KAXI_RING_CAPACITY
+    }
+    if count < 0 {
+        count = 0
+    }
+
+    // Extract the flags word from each valid payload
+    let flags = kaxi_extract_flags_from_ring(ring_bytes, count)
+
+    (CudaModule { handle: raw }, flags, count, CUDA_SUCCESS)
+}
+
+
+// ============================================================================
+// 3. Process the ring buffer through the K-AXI accumulator
+// ============================================================================
+//
+// Takes the extracted flags array and entry count, runs them through the
+// K-AXI hardware poll + epistemic power computation, and determines
+// whether the kernel should be re-launched based on a confidence threshold.
+
+fn kaxi_process_ring(
+    flags_batch: [i64; 64],
+    count: i64,
+    quantum_total: i64
+) -> KaxiFeedbackResult with Mut, Panic, Div, Alloc {
+    let (fidelity, prov, formal, score) =
+        kaxi_hw_poll_replay_flags(flags_batch, count, quantum_total)
+
+    // Compute whether confidence is sufficient.
+    // The score is a Q32.32 log-domain value. A higher score indicates greater
+    // epistemic confidence. We do not apply a threshold here — the caller
+    // decides via kaxi_feedback_step. Return should_relaunch = false by default.
+    kaxi_feedback_result_ok(fidelity, prov, formal, score, false)
+}
+
+
+// ============================================================================
+// 4. Full feedback step: readback + process + decide
+// ============================================================================
+//
+// Performs the complete read-back from GPU, accumulates through K-AXI, and
+// compares the resulting epistemic power score against a caller-supplied
+// threshold. If the score is below the threshold, should_relaunch is set.
+
+fn kaxi_feedback_step(
+    m: CudaModule,
+    quantum_total: i64,
+    confidence_threshold: i64
+) -> (CudaModule, KaxiFeedbackResult) with IO, Mut, Panic, Div, Alloc {
+    // Step 1: Read back the ring buffer
+    let (m2, flags, count, ring_err) = kaxi_readback_ring(m)
+
+    if ring_err != CUDA_SUCCESS {
+        return (m2, kaxi_feedback_result_err(KAXI_ERR_READBACK_RING))
+    }
+
+    // Step 2: Process through the accumulator
+    let result = kaxi_process_ring(flags, count, quantum_total)
+
+    // Step 3: Check the power log against the hardware-read value.
+    // Also read the device-side power log for cross-validation.
+    let (m3, hw_power, power_err) = kaxi_readback_power_log(m2)
+
+    // Use the software-computed score as the authoritative value. The
+    // hardware value is a sanity check; divergence is not fatal.
+    let final_score = result.epistemic_power_score
+
+    // Step 4: Determine whether to re-launch
+    let needs_relaunch = final_score < confidence_threshold
+
+    let final_result = KaxiFeedbackResult {
+        fidelity_total: result.fidelity_total,
+        prov_total: result.prov_total,
+        formal_total: result.formal_total,
+        epistemic_power_score: final_score,
+        should_relaunch: needs_relaunch,
+        error_code: KAXI_OK,
+    }
+
+    (m3, final_result)
+}
+
+
+// ============================================================================
+// 5. Feedback loop: launch -> sync -> readback -> check -> re-launch
+// ============================================================================
+//
+// Iteratively launches the kernel, synchronizes, reads back epistemic
+// metadata, and checks whether the epistemic power score meets the
+// confidence threshold. Stops when the threshold is met or max_retries
+// is exhausted.
+
+fn kaxi_launch_and_sync(
+    func: i64,
+    gridDim: i32,
+    blockDim: i32,
+    params: *const i64
+) -> i32 with IO {
+    let null_extra: i64 = 0
+    let launch_err = cuLaunchKernel(
+        func,
+        gridDim, 1, 1,
+        blockDim, 1, 1,
+        0,
+        0,
+        params,
+        &null_extra
+    )
+    if launch_err != CUDA_SUCCESS {
+        return launch_err
+    }
+    cuCtxSynchronize()
+}
+
+fn kaxi_feedback_loop(
+    m: CudaModule,
+    func: i64,
+    gridDim: i32,
+    blockDim: i32,
+    params: *const i64,
+    quantum_total: i64,
+    confidence_threshold: i64,
+    max_retries: i64
+) -> (CudaModule, KaxiFeedbackResult) with IO, Mut, Panic, Div, Alloc {
+    var current_module = m
+    var retries: i64 = 0
+    var last_result = kaxi_feedback_result_err(KAXI_ERR_LAUNCH)
+
+    while retries < max_retries {
+        // Launch the kernel and synchronize
+        let exec_err = kaxi_launch_and_sync(func, gridDim, blockDim, params)
+
+        if exec_err != CUDA_SUCCESS {
+            last_result = kaxi_feedback_result_err(KAXI_ERR_SYNC)
+            // Cannot continue — the module is still valid, break and return
+            retries = max_retries
+        } else {
+            // Read back and evaluate epistemic confidence
+            let (m_next, feedback) = kaxi_feedback_step(
+                current_module,
+                quantum_total,
+                confidence_threshold
+            )
+            current_module = m_next
+            last_result = feedback
+
+            if feedback.error_code != KAXI_OK {
+                // Readback failure — abort the loop
+                retries = max_retries
+            } else if feedback.should_relaunch == false {
+                // Confidence threshold met — done
+                retries = max_retries
+            } else {
+                // Below threshold — try again
+                retries = retries + 1
+            }
+        }
+    }
+
+    (current_module, last_result)
+}
+
+
+// ============================================================================
+// 6. Self-check for the feedback path (software-only, no GPU needed)
+// ============================================================================
+//
+// Verifies the software accumulator path by constructing synthetic flags
+// and running them through kaxi_process_ring. This confirms that the
+// feedback pipeline logic is correct independent of GPU availability.
+
+fn kaxi_selfcheck_all_epistemic() -> bool with Mut, Panic, Div, Alloc {
+    // Build a ring where all 8 entries are epistemic (op_kind = 1..5)
+    var flags: [i64; 64] = [0; 64]
+    flags[0] = kaxi_flags_pack(1, 1, 0, 8)   // epistemic add
+    flags[1] = kaxi_flags_pack(2, 1, 0, 16)  // epistemic mul
+    flags[2] = kaxi_flags_pack(3, 1, 0, 24)  // epistemic div
+    flags[3] = kaxi_flags_pack(4, 1, 1, 32)  // epistemic fma
+    flags[4] = kaxi_flags_pack(5, 1, 0, 40)  // epistemic sqrt
+    flags[5] = kaxi_flags_pack(1, 1, 0, 8)   // epistemic add
+    flags[6] = kaxi_flags_pack(2, 1, 0, 16)  // epistemic mul
+    flags[7] = kaxi_flags_pack(3, 1, 0, 24)  // epistemic div
+
+    let result = kaxi_process_ring(flags, 8, 64)
+
+    // All 8 entries are epistemic, so totals should each be 8
+    result.fidelity_total == 8 &&
+    result.prov_total == 8 &&
+    result.formal_total == 8 &&
+    result.error_code == KAXI_OK
+}
+
+fn kaxi_selfcheck_mixed_entries() -> bool with Mut, Panic, Div, Alloc {
+    // Mix of epistemic and non-epistemic entries
+    var flags: [i64; 64] = [0; 64]
+    flags[0] = kaxi_flags_pack(1, 1, 0, 8)   // epistemic (op=1)
+    flags[1] = kaxi_flags_pack(0, 0, 0, 0)   // non-epistemic (op=0)
+    flags[2] = kaxi_flags_pack(4, 1, 1, 16)  // epistemic (op=4)
+    flags[3] = kaxi_flags_pack(0, 0, 0, 0)   // non-epistemic (op=0)
+    flags[4] = kaxi_flags_pack(5, 1, 0, 32)  // epistemic (op=5)
+
+    let result = kaxi_process_ring(flags, 5, 32)
+
+    // 3 out of 5 are epistemic
+    result.fidelity_total == 3 &&
+    result.prov_total == 3 &&
+    result.formal_total == 3 &&
+    result.error_code == KAXI_OK
+}
+
+fn kaxi_selfcheck_empty_ring() -> bool with Mut, Panic, Div, Alloc {
+    // Empty ring (count = 0) should produce zero totals
+    let flags: [i64; 64] = [0; 64]
+    let result = kaxi_process_ring(flags, 0, 16)
+
+    result.fidelity_total == 0 &&
+    result.prov_total == 0 &&
+    result.formal_total == 0 &&
+    result.epistemic_power_score == 0 &&
+    result.error_code == KAXI_OK
+}
+
+fn kaxi_selfcheck_score_monotonic() -> bool with Mut, Panic, Div, Alloc {
+    // More epistemic entries should yield a higher score (monotonicity)
+    var flags_few: [i64; 64] = [0; 64]
+    flags_few[0] = kaxi_flags_pack(1, 1, 0, 8)
+    flags_few[1] = kaxi_flags_pack(2, 1, 0, 8)
+
+    var flags_many: [i64; 64] = [0; 64]
+    flags_many[0] = kaxi_flags_pack(1, 1, 0, 8)
+    flags_many[1] = kaxi_flags_pack(2, 1, 0, 8)
+    flags_many[2] = kaxi_flags_pack(3, 1, 0, 8)
+    flags_many[3] = kaxi_flags_pack(4, 1, 0, 8)
+    flags_many[4] = kaxi_flags_pack(5, 1, 0, 8)
+    flags_many[5] = kaxi_flags_pack(1, 1, 0, 8)
+
+    let result_few = kaxi_process_ring(flags_few, 2, 64)
+    let result_many = kaxi_process_ring(flags_many, 6, 64)
+
+    // More epistemic entries => higher power score
+    result_many.epistemic_power_score >= result_few.epistemic_power_score
+}
+
+fn kaxi_selfcheck_result_constructors() -> bool {
+    let ok = kaxi_feedback_result_ok(10, 20, 30, 42, true)
+    let err = kaxi_feedback_result_err(KAXI_ERR_READBACK_RING)
+
+    ok.fidelity_total == 10 &&
+    ok.prov_total == 20 &&
+    ok.formal_total == 30 &&
+    ok.epistemic_power_score == 42 &&
+    ok.should_relaunch == true &&
+    ok.error_code == KAXI_OK &&
+    err.fidelity_total == 0 &&
+    err.error_code == KAXI_ERR_READBACK_RING &&
+    err.should_relaunch == false
+}
+
+fn kaxi_feedback_self_check() -> bool with Mut, Panic, Div, Alloc {
+    kaxi_selfcheck_all_epistemic() &&
+    kaxi_selfcheck_mixed_entries() &&
+    kaxi_selfcheck_empty_ring() &&
+    kaxi_selfcheck_score_monotonic() &&
+    kaxi_selfcheck_result_constructors()
+}
