@@ -71,20 +71,41 @@ sounio-pkg update
 
 ### `add <package>[@version]`
 
-Adds a new dependency (stub - not fully implemented).
+Adds a new dependency to `Sounio.toml` and regenerates the lockfile.
 
 ```bash
-sounio-pkg add stdlib@^1.0.0
-sounio-pkg add json
+# Add registry dependency
+sounio-pkg add stdlib@^1.2.0
+
+# Add from git repository
+sounio-pkg add parser --git https://github.com/sounio/parser.git
+
+# Add from local path
+sounio-pkg add utils --path ../utils
+
+# Add as dev dependency
+sounio-pkg add test-helpers --dev
 ```
+
+**Options:**
+- `--git <url>` - Add from git repository
+- `--path <path>` - Add from local path
+- `--version <ver>` - Specify version constraint
+- `--dev` - Add to dev-dependencies instead of dependencies
 
 ### `remove <package>`
 
-Removes a dependency (stub - not fully implemented).
+Removes a dependency from `Sounio.toml` and `Sounio.lock`.
 
 ```bash
-sounio-pkg remove json
+sounio-pkg remove stdlib
+
+# Also remove from vendor directory
+sounio-pkg remove stdlib --clean
 ```
+
+**Options:**
+- `--clean` - Also remove the package from the vendor directory
 
 ### `verify`
 
@@ -209,6 +230,25 @@ my-lib = { git = "https://github.com/user/my-lib.git", version = "^1.0.0" }
 ```toml
 [dependencies]
 local-utils = { path = "../utils", version = "=1.0.0" }
+```
+
+Or using the CLI:
+
+```bash
+sounio-pkg add utils --path ../utils
+```
+
+### Using dev dependencies
+
+```toml
+[dev-dependencies]
+test-helpers = "^1.0.0"
+```
+
+Or using the CLI:
+
+```bash
+sounio-pkg add test-helpers --dev
 ```
 
 ## License

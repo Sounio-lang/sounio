@@ -16,7 +16,7 @@ source "${SCRIPT_DIR}/lib/lockfile.sh"
 source "${SCRIPT_DIR}/lib/fetch.sh"
 
 # Configuration
-readonly PKG_VERSION="0.1.0"
+readonly PKG_VERSION="0.2.0"
 readonly VENDOR_DIR="vendor"
 readonly MANIFEST_FILE="Sounio.toml"
 readonly LOCKFILE="Sounio.lock"
@@ -44,8 +44,8 @@ Usage: sounio-pkg <command> [options]
 Commands:
     install          Install dependencies from lockfile
     update           Update dependencies and generate lockfile
-    add <pkg>        Add a package dependency (stub)
-    remove <pkg>     Remove a package dependency (stub)
+    add <pkg>        Add a package dependency
+    remove <pkg>     Remove a package dependency
     verify           Verify package hashes
     clean            Remove vendor/ directory and cache
     help             Show this help message
@@ -59,6 +59,16 @@ Examples:
     sounio-pkg update
     sounio-pkg verify
     sounio-pkg clean
+
+Add Examples:
+    sounio-pkg add stdlib@^1.2.0
+    sounio-pkg add parser --git https://github.com/sounio/parser.git
+    sounio-pkg add utils --path ../utils
+    sounio-pkg add test-helpers --dev
+
+Remove Examples:
+    sounio-pkg remove stdlib
+    sounio-pkg remove stdlib --clean
 EOF
 }
 
@@ -72,6 +82,185 @@ parse_manifest() {
     fi
 
     toml_parse "$file"
+}
+
+# Query registry for available versions
+query_registry() {
+    local name="$1"
+    
+    # Try to fetch from packages.souniolang.org
+    # Fallback to hardcoded for now
+    local versions
+    versions=$(curl -s "https://packages.souniolang.org/v1/packages/$name/versions" 2>/dev/null) || true
+    
+    if [[ -n "$versions" ]]; then
+        echo "$versions" | head -1
+    else
+        # Fallback - assume 1.0.0 exists
+        echo "1.0.0"
+    fi
+}
+
+# Add registry dependency to Sounio.toml
+add_registry_dep() {
+    local name="$1"
+    local version="$2"
+    local is_dev="$3"
+    local toml_file="${4:-$MANIFEST_FILE}"
+    
+    local section="dependencies"
+    $is_dev && section="dev-dependencies"
+    
+    # Check if already exists
+    local parsed
+    parsed=$(toml_parse "$toml_file" 2>/dev/null || true)
+    
+    # Ensure [dependencies] or [dev-dependencies] section exists
+    if ! grep -q "^\[$section\]" "$toml_file" 2>/dev/null; then
+        echo "" >> "$toml_file"
+        echo "[$section]" >> "$toml_file"
+    fi
+    
+    # Check if dependency already exists
+    if grep -q "^${name}\s*=" "$toml_file" 2>/dev/null; then
+        # Update existing dependency
+        sed -i "s/^${name}\s*=.*/${name} = \"${version}\"/" "$toml_file"
+    else
+        # Add new dependency to section
+        # Find the section and add after it
+        local tmp_file="${toml_file}.tmp"
+        local in_section=false
+        local section_found=false
+        
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            if [[ "$line" == "[$section]" ]]; then
+                in_section=true
+                section_found=true
+            elif [[ "$line" =~ ^\[.*\]$ ]]; then
+                in_section=false
+            fi
+            
+            echo "$line" >> "$tmp_file"
+            
+            # Add dependency at end of section (before next section or EOF)
+            if $in_section && $section_found; then
+                if [[ "$line" =~ ^\[.*\]$ ]]; then
+                    : # Just entered section, don't add yet
+                elif [[ -z "$line" ]] || [[ "$line" =~ ^\[.*\]$ ]]; then
+                    : # Empty line or next section
+                fi
+            fi
+        done < "$toml_file"
+        
+        # Use sed to add after section header
+        sed -i "/^\[$section\]/a ${name} = \"${version}\"" "$toml_file"
+    fi
+    
+    log_info "Added $name = \"$version\" to [$section]"
+}
+
+# Add git dependency to Sounio.toml
+add_git_dep() {
+    local name="$1"
+    local git_url="$2"
+    local version="$3"
+    local is_dev="$4"
+    local toml_file="${5:-$MANIFEST_FILE}"
+    
+    local section="dependencies"
+    $is_dev && section="dev-dependencies"
+    
+    # Ensure section exists
+    if ! grep -q "^\[$section\]" "$toml_file" 2>/dev/null; then
+        echo "" >> "$toml_file"
+        echo "[$section]" >> "$toml_file"
+    fi
+    
+    # Build inline table
+    local dep_line
+    if [[ -n "$version" ]]; then
+        dep_line="${name} = { git = \"${git_url}\", version = \"${version}\" }"
+    else
+        dep_line="${name} = { git = \"${git_url}\" }"
+    fi
+    
+    # Add or update
+    if grep -q "^${name}\s*=" "$toml_file" 2>/dev/null; then
+        # Remove old entry
+        sed -i "/^${name}\s*=/d" "$toml_file"
+    fi
+    
+    # Add after section header
+    sed -i "/^\[$section\]/a ${dep_line}" "$toml_file"
+    
+    log_info "Added $name (git: $git_url) to [$section]"
+}
+
+# Add path dependency to Sounio.toml
+add_path_dep() {
+    local name="$1"
+    local path="$2"
+    local is_dev="$3"
+    local toml_file="${4:-$MANIFEST_FILE}"
+    
+    local section="dependencies"
+    $is_dev && section="dev-dependencies"
+    
+    # Ensure section exists
+    if ! grep -q "^\[$section\]" "$toml_file" 2>/dev/null; then
+        echo "" >> "$toml_file"
+        echo "[$section]" >> "$toml_file"
+    fi
+    
+    # Build inline table
+    local dep_line="${name} = { path = \"${path}\" }"
+    
+    # Add or update
+    if grep -q "^${name}\s*=" "$toml_file" 2>/dev/null; then
+        # Remove old entry
+        sed -i "/^${name}\s*=/d" "$toml_file"
+    fi
+    
+    # Add after section header
+    sed -i "/^\[$section\]/a ${dep_line}" "$toml_file"
+    
+    log_info "Added $name (path: $path) to [$section]"
+}
+
+# Remove dependency from Sounio.toml manifest
+remove_from_manifest() {
+    local name="$1"
+    local toml_file="${2:-$MANIFEST_FILE}"
+    
+    if [[ ! -f "$toml_file" ]]; then
+        log_error "Manifest file not found: $toml_file"
+        return 1
+    fi
+    
+    # Check if dependency exists
+    if ! grep -q "^${name}\s*=" "$toml_file" 2>/dev/null; then
+        log_warn "Dependency '$name' not found in $toml_file"
+        return 1
+    fi
+    
+    # Remove the line
+    sed -i "/^${name}\s*=/d" "$toml_file"
+    
+    log_info "Removed $name from $toml_file"
+    return 0
+}
+
+# Remove package from lockfile
+remove_from_lockfile() {
+    local name="$1"
+    local lock_file="${2:-$LOCKFILE}"
+    
+    if [[ ! -f "$lock_file" ]]; then
+        return 0
+    fi
+    
+    lockfile_remove "$lock_file" "$name"
+    log_info "Removed $name from $lock_file"
 }
 
 # Install dependencies from lockfile
@@ -208,6 +397,12 @@ cmd_update() {
     while IFS='=' read -r key value; do
         [[ "$key" == dependencies.* ]] || continue
         local dep="${key#dependencies.}"
+        
+        # Initialize variables
+        dep_name=""
+        dep_version=""
+        dep_source=""
+        dep_hash=""
 
         # Check if inline table or simple version
         if [[ "$value" == \{*\} ]]; then
@@ -217,7 +412,6 @@ cmd_update() {
                     version) dep_version="$v" ;;
                     git) dep_source="git+$v" ;;
                     path) dep_source="path://$v" ;;
-                    *) dep_version="$v" ;;
                 esac
             done < <(toml_parse_inline_table "$value")
         else
@@ -247,44 +441,144 @@ cmd_update() {
     log_info "Run 'sounio-pkg install' to download packages"
 }
 
-# Add a package (stub)
+# Add a package dependency
 cmd_add() {
-    local pkg="${1:-}"
-
-    if [[ -z "$pkg" ]]; then
+    local dep_spec="${1:-}"
+    
+    # Handle help flag before checking for package name
+    if [[ "$dep_spec" == "--help" ]] || [[ "$dep_spec" == "-h" ]]; then
+        echo "Usage: sounio-pkg add <package>[@version] [options]"
+        echo ""
+        echo "Add a package dependency to Sounio.toml"
+        echo ""
+        echo "Options:"
+        echo "  --git <url>       Add from git repository"
+        echo "  --path <path>     Add from local path"
+        echo "  --version <ver>   Specify version constraint"
+        echo "  --dev             Add as dev dependency"
+        echo ""
+        echo "Examples:"
+        echo "  sounio-pkg add stdlib@^1.2.0"
+        echo "  sounio-pkg add parser --git https://github.com/sounio/parser.git"
+        echo "  sounio-pkg add utils --path ../utils"
+        echo "  sounio-pkg add test-helpers --dev"
+        return 0
+    fi
+    
+    if [[ -z "$dep_spec" ]]; then
         log_error "Package name required"
-        echo "Usage: sounio-pkg add <package>[@version]"
+        echo "Usage: sounio-pkg add <package>[@version] [options]"
+        echo "Options:"
+        echo "  --git <url>       Add from git repository"
+        echo "  --path <path>     Add from local path"
+        echo "  --version <ver>   Specify version"
+        echo "  --dev             Add as dev dependency"
         return 1
     fi
-
-    log_warn "Add command is a stub - not yet implemented"
-    log_info "Would add: $pkg"
-
-    # Parse package[@version]
-    local name version
-    if [[ "$pkg" =~ @ ]]; then
-        name="${pkg%%@*}"
-        version="${pkg#*@}"
-    else
-        name="$pkg"
-        version="*"
+    shift
+    
+    # Parse name[@version]
+    local name="${dep_spec%%@*}"
+    local version="${dep_spec#*@}"
+    [[ "$version" == "$dep_spec" ]] && version=""
+    
+    # Parse options
+    local git_url=""
+    local path=""
+    local is_dev=false
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --git) git_url="$2"; shift 2 ;;
+            --path) path="$2"; shift 2 ;;
+            --version) version="$2"; shift 2 ;;
+            --dev) is_dev=true; shift ;;
+            -h|--help) 
+                echo "Usage: sounio-pkg add <package>[@version] [options]"
+                echo "Options:"
+                echo "  --git <url>       Add from git repository"
+                echo "  --path <path>     Add from local path"
+                echo "  --version <ver>   Specify version"
+                echo "  --dev             Add as dev dependency"
+                return 0
+                ;;
+            *) 
+                log_error "Unknown option: $1"
+                echo "Run 'sounio-pkg add --help' for usage"
+                return 1
+                ;;
+        esac
+    done
+    
+    # Verify manifest exists
+    if [[ ! -f "$MANIFEST_FILE" ]]; then
+        log_error "Manifest file not found: $MANIFEST_FILE"
+        return 1
     fi
-
-    log_info "Package: $name, Version: $version"
+    
+    # Update Sounio.toml
+    if [[ -n "$git_url" ]]; then
+        add_git_dep "$name" "$git_url" "$version" "$is_dev"
+    elif [[ -n "$path" ]]; then
+        add_path_dep "$name" "$path" "$is_dev"
+    else
+        # Registry dependency - query for latest if no version specified
+        if [[ -z "$version" ]]; then
+            log_info "Querying registry for $name..."
+            version=$(query_registry "$name")
+            version="^${version}"
+        fi
+        add_registry_dep "$name" "${version:-^1.0.0}" "$is_dev"
+    fi
+    
+    # Regenerate lockfile
+    cmd_update
+    
+    log_success "Added $name to dependencies"
 }
 
-# Remove a package (stub)
+# Remove a package dependency
 cmd_remove() {
-    local pkg="${1:-}"
-
-    if [[ -z "$pkg" ]]; then
+    local name="${1:-}"
+    local clean=false
+    
+    if [[ -z "$name" ]]; then
         log_error "Package name required"
-        echo "Usage: sounio-pkg remove <package>"
+        echo "Usage: sounio-pkg remove <package> [--clean]"
+        echo "Options:"
+        echo "  --clean    Also remove from vendor directory"
         return 1
     fi
-
-    log_warn "Remove command is a stub - not yet implemented"
-    log_info "Would remove: $pkg"
+    
+    # Check for --clean flag
+    if [[ "${2:-}" == "--clean" ]]; then
+        clean=true
+    fi
+    
+    # Verify manifest exists
+    if [[ ! -f "$MANIFEST_FILE" ]]; then
+        log_error "Manifest file not found: $MANIFEST_FILE"
+        return 1
+    fi
+    
+    # Remove from Sounio.toml
+    if ! remove_from_manifest "$name"; then
+        # Dependency not found, but continue to clean lockfile if exists
+        true
+    fi
+    
+    # Remove from lockfile
+    if [[ -f "$LOCKFILE" ]]; then
+        remove_from_lockfile "$name"
+    fi
+    
+    # Clean vendor if requested
+    if $clean && [[ -d "vendor/$name" ]]; then
+        rm -rf "vendor/$name"
+        log_success "Cleaned vendor/$name"
+    fi
+    
+    log_success "Removed $name"
 }
 
 # Verify package hashes
