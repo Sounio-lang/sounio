@@ -178,6 +178,37 @@ run_souc_check() {
     fi
 }
 
+build_failed_check_diagnostics() {
+    local rc="$1"
+    local err_file="$2"
+    local code="SOUNIO_LSP_CHECK_FAILED"
+    local message="souc check failed with exit code $rc"
+    local first_line
+    first_line="$(awk 'NF {print; exit}' "$err_file" | tr -d '\r')"
+
+    if [[ "$rc" -eq 124 ]]; then
+        code="SOUNIO_LSP_CHECK_TIMEOUT"
+        message="souc check timed out after ${SOUNIO_LSP_CHECK_TIMEOUT_SEC}s"
+    fi
+
+    if [[ -n "$first_line" ]]; then
+        message="$message: $first_line"
+    fi
+
+    jq -cn --arg code "$code" --arg message "$message" '[
+        {
+            range: {
+                start: {line: 0, character: 0},
+                end: {line: 0, character: 1}
+            },
+            severity: 1,
+            code: $code,
+            source: "sounio-lsp",
+            message: $message
+        }
+    ]'
+}
+
 uri_to_path() {
     python3 - "$1" <<'PY'
 import sys
@@ -474,7 +505,9 @@ run_check_and_publish() {
     ) &
     CHECK_PID="$!"
     CHECK_PID_URI="$uri"
-    if ! wait "$CHECK_PID"; then
+    if wait "$CHECK_PID"; then
+        rc=0
+    else
         rc=$?
     fi
     CHECK_PID=""
@@ -484,6 +517,9 @@ run_check_and_publish() {
         :
     else
         diagnostics='[]'
+    fi
+    if [[ "$diagnostics" == "[]" ]] && [[ "$rc" -ne 0 ]]; then
+        diagnostics="$(build_failed_check_diagnostics "$rc" "$err_file")"
     fi
 
     local params
