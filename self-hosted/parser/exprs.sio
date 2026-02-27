@@ -79,6 +79,10 @@ impl Parser {
                         fields: None,
                         cast_type: None,
                         handler_block: None,
+                        closure_params: None,
+                        closure_return: None,
+                        closure_effects: None,
+                        closure_body: None,
                     }
                 } else {
                     // Half-open range: expr..
@@ -101,6 +105,10 @@ impl Parser {
                         fields: None,
                         cast_type: None,
                         handler_block: None,
+                        closure_params: None,
+                        closure_return: None,
+                        closure_effects: None,
+                        closure_body: None,
                     }
                 }
                 continue
@@ -221,6 +229,12 @@ impl Parser {
         // Effect handler: handle<Effect> { body } with { handlers }
         else if k == TokenKind::Handle {
             self.parse_handle_expr()
+        }
+        // Closure: |params| body  or  || body
+        else if k == TokenKind::Pipe {
+            self.parse_closure_expr()
+        } else if k == TokenKind::PipePipe {
+            self.parse_closure_no_params()
         }
         // Identifier (variable, function name, enum path, struct literal)
         else if k == TokenKind::Ident {
@@ -448,6 +462,144 @@ impl Parser {
         e.block = Some(Box::new(body))
         e.handler_block = handler_opt
         (p, e)
+    }
+
+    // ============================================================
+    // Closure expression: |x: T, y: U| body  or  |x: T| -> R with E { body }
+    // ============================================================
+
+    fn parse_closure_expr(self) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()  // skip opening '|'
+
+        // Parse params until closing '|'
+        var params: Option<Box<ClosureParamList>> = None
+        if p.peek() != TokenKind::Pipe {
+            let params_pair = p.parse_closure_params()
+            p = params_pair.0
+            params = params_pair.1
+        }
+        p = p.expect(TokenKind::Pipe)  // skip closing '|'
+
+        // Parse optional return type: -> T
+        var ret_type: Option<Box<TypeExpr>> = None
+        if p.peek() == TokenKind::Arrow {
+            p = p.advance()  // skip '->'
+            let ty_pair = p.parse_type()
+            p = ty_pair.0
+            ret_type = Some(Box::new(ty_pair.1))
+        }
+
+        // Parse optional effects: with IO, Mut
+        var effects: Option<Box<EffectList>> = None
+        if p.peek() == TokenKind::With {
+            p = p.advance()  // skip 'with'
+            let eff_pair = p.parse_effect_list()
+            p = eff_pair.0
+            effects = Some(Box::new(eff_pair.1))
+        }
+
+        // Parse body: block { ... } or single expression
+        let body_pair = if p.peek() == TokenKind::LBrace {
+            let blk_pair = p.parse_block()
+            let blk_p = blk_pair.0
+            let blk = blk_pair.1
+            let blk_span = blk_p.span_from(start)
+            var blk_expr = mk_expr(ExprKind::ExprBlock, blk_span)
+            blk_expr.block = Some(Box::new(blk))
+            (blk_p, blk_expr)
+        } else {
+            p.parse_expr()
+        }
+        p = body_pair.0
+        let body = body_pair.1
+
+        let span = p.span_from(start)
+        var e = mk_expr(ExprKind::ExprClosure, span)
+        e.closure_params = params
+        e.closure_return = ret_type
+        e.closure_effects = effects
+        e.closure_body = Some(Box::new(body))
+        (p, e)
+    }
+
+    // Zero-param closure: || body  (PipePipe token)
+    fn parse_closure_no_params(self) -> (Parser, Expr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()  // skip '||'
+
+        // Parse optional return type: -> T
+        var ret_type: Option<Box<TypeExpr>> = None
+        if p.peek() == TokenKind::Arrow {
+            p = p.advance()
+            let ty_pair = p.parse_type()
+            p = ty_pair.0
+            ret_type = Some(Box::new(ty_pair.1))
+        }
+
+        // Parse optional effects: with IO, Mut
+        var effects: Option<Box<EffectList>> = None
+        if p.peek() == TokenKind::With {
+            p = p.advance()
+            let eff_pair = p.parse_effect_list()
+            p = eff_pair.0
+            effects = Some(Box::new(eff_pair.1))
+        }
+
+        // Parse body
+        let body_pair = if p.peek() == TokenKind::LBrace {
+            let blk_pair = p.parse_block()
+            let blk_p = blk_pair.0
+            let blk = blk_pair.1
+            let blk_span = blk_p.span_from(start)
+            var blk_expr = mk_expr(ExprKind::ExprBlock, blk_span)
+            blk_expr.block = Some(Box::new(blk))
+            (blk_p, blk_expr)
+        } else {
+            p.parse_expr()
+        }
+        p = body_pair.0
+        let body = body_pair.1
+
+        let span = p.span_from(start)
+        var e = mk_expr(ExprKind::ExprClosure, span)
+        e.closure_params = None
+        e.closure_return = ret_type
+        e.closure_effects = effects
+        e.closure_body = Some(Box::new(body))
+        (p, e)
+    }
+
+    // Parse comma-separated closure params: name: Type, name: Type
+    fn parse_closure_params(self) -> (Parser, Option<Box<ClosureParamList>>) with Mut, IO, Panic, Div, Alloc {
+        let pair = self.parse_closure_param()
+        var p = pair.0
+        let head = pair.1
+
+        var tail: Option<Box<ClosureParamList>> = None
+        if p.peek() == TokenKind::Comma {
+            p = p.advance()  // skip ','
+            if p.peek() != TokenKind::Pipe {
+                let rest_pair = p.parse_closure_params()
+                p = rest_pair.0
+                tail = rest_pair.1
+            }
+        }
+
+        let node = ClosureParamList { head: head, tail: tail }
+        (p, Some(Box::new(node)))
+    }
+
+    // Parse single closure param: name: Type
+    fn parse_closure_param(self) -> (Parser, ClosureParam) with Mut, IO, Panic, Div {
+        let span = self.current_span()
+        let name = self.current_name()
+        var p = self.advance()  // skip param name
+        p = p.expect(TokenKind::Colon)
+        let ty_pair = p.parse_type()
+        p = ty_pair.0
+        let ty = ty_pair.1
+        (p, ClosureParam { name: name, ty: ty, span: span })
     }
 
     // ============================================================
