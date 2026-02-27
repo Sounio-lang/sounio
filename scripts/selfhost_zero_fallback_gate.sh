@@ -216,18 +216,28 @@ if [ "$FAIL_COUNT" -eq 0 ]; then
   set +e
   run_with_timeout "$FULL_TIMEOUT_SECS" env \
     SOUNIO_SELFHOST_DRIVER_HARNESS_CACHE_DIR="$DRIVER_HARNESS_CACHE_DIR" \
-    "$SOUC_BIN" run "$PREWARM_TARGET" >"$PREWARM_LOG" 2>&1
+    "$SOUC_BIN" run "$PREWARM_TARGET" --use-sounio-compiler --check-only >"$PREWARM_LOG" 2>&1
   prewarm_code=$?
   set -e
+  prewarm_harness_unavailable=0
+  if [ -f "$PREWARM_LOG" ] && rg -n "SELFHOST_DRIVER_HARNESS_UNAVAILABLE" "$PREWARM_LOG" >/dev/null 2>&1; then
+    prewarm_harness_unavailable=1
+  fi
 
   if [ "$prewarm_code" -eq 0 ]; then
     pass "prewarm" "compiled and executed $PREWARM_TARGET to populate driver harness cache"
+  elif [ "$prewarm_harness_unavailable" -eq 1 ]; then
+    echo "SELFHOST_ZERO_GATE_INFO prewarm_status=blocked reason=SELFHOST_DRIVER_HARNESS_UNAVAILABLE cache_dir=$DRIVER_HARNESS_CACHE_DIR"
+    fail "prewarm" "driver harness unavailable during prewarm (exit=$prewarm_code target=$PREWARM_TARGET)"
   else
     fail "prewarm" "failed to prewarm harness cache (exit=$prewarm_code target=$PREWARM_TARGET)"
   fi
 
   if ls "$DRIVER_HARNESS_CACHE_DIR"/driver_harness_*.sobc >/dev/null 2>&1; then
     pass "prewarm-cache" "found driver_harness_*.sobc in $DRIVER_HARNESS_CACHE_DIR"
+  elif [ "$prewarm_harness_unavailable" -eq 1 ]; then
+    echo "SELFHOST_ZERO_GATE_INFO prewarm_cache_status=blocked reason=SELFHOST_DRIVER_HARNESS_UNAVAILABLE cache_dir=$DRIVER_HARNESS_CACHE_DIR"
+    fail "prewarm-cache" "no driver_harness_*.sobc found due to SELFHOST_DRIVER_HARNESS_UNAVAILABLE in $DRIVER_HARNESS_CACHE_DIR"
   else
     fail "prewarm-cache" "no driver_harness_*.sobc found in $DRIVER_HARNESS_CACHE_DIR"
   fi
