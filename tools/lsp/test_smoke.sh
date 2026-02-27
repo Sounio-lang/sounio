@@ -221,6 +221,95 @@ if diagnostics[0].get("severity") != 1:
 PY
 }
 
+test_didclose_clears_diagnostics() {
+    log "didClose clears diagnostics"
+    local bad_file out_file err_file
+    bad_file="$TMP_DIR/lsp_close_input.sio"
+    out_file="$TMP_DIR/didclose.out"
+    err_file="$TMP_DIR/didclose.err"
+    cat >"$bad_file" <<'EOF'
+fn main() -> i32 {
+    let x: i64 = "hello"
+    return 0
+}
+EOF
+    python3 - "$LSP_SCRIPT" "$bad_file" "$out_file" "$err_file" <<'PY'
+import json
+import pathlib
+import re
+import subprocess
+import sys
+from urllib.parse import quote
+
+lsp_script, bad_file, out_path, err_path = sys.argv[1:5]
+bad_file = pathlib.Path(bad_file).resolve()
+uri = "file://" + quote(str(bad_file))
+text = bad_file.read_text(encoding="utf-8")
+
+messages = [
+    {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"capabilities": {}}},
+    {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {"textDocument": {"uri": uri, "languageId": "sounio", "version": 1, "text": text}},
+    },
+    {"jsonrpc": "2.0", "method": "textDocument/didClose", "params": {"textDocument": {"uri": uri}}},
+    {"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": {}},
+    {"jsonrpc": "2.0", "method": "exit", "params": {}},
+]
+
+wire = bytearray()
+for msg in messages:
+    body = json.dumps(msg, separators=(",", ":")).encode("utf-8")
+    wire.extend(f"Content-Length: {len(body)}\r\n\r\n".encode("utf-8"))
+    wire.extend(body)
+
+p = subprocess.Popen(
+    ["bash", lsp_script],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+)
+out, err = p.communicate(bytes(wire), timeout=120)
+open(out_path, "wb").write(out)
+open(err_path, "wb").write(err)
+if p.returncode != 0:
+    raise SystemExit(f"lsp didClose run failed with code {p.returncode}")
+
+payloads = []
+idx = 0
+while idx < len(out):
+    sep = out.find(b"\r\n\r\n", idx)
+    if sep < 0:
+        break
+    headers = out[idx:sep].decode("utf-8", "replace")
+    match = re.search(r"Content-Length:\s*([0-9]+)", headers, flags=re.IGNORECASE)
+    if not match:
+        raise SystemExit("missing Content-Length in didClose response headers")
+    length = int(match.group(1))
+    body_start = sep + 4
+    body_end = body_start + length
+    payload = json.loads(out[body_start:body_end].decode("utf-8", "replace"))
+    payloads.append(payload)
+    idx = body_end
+
+publishes = [
+    p for p in payloads
+    if p.get("method") == "textDocument/publishDiagnostics"
+    and p.get("params", {}).get("uri") == uri
+]
+if len(publishes) < 2:
+    raise SystemExit("expected at least didOpen and didClose publishDiagnostics notifications")
+
+open_diags = publishes[0].get("params", {}).get("diagnostics", [])
+close_diags = publishes[-1].get("params", {}).get("diagnostics", [])
+if not open_diags:
+    raise SystemExit("didOpen diagnostics should be non-empty for invalid source")
+if close_diags:
+    raise SystemExit("didClose diagnostics should be empty")
+PY
+}
+
 test_didchange_unsaved_snapshot_on_save() {
     log "didChange unsaved text is used by didSave diagnostics"
     local source_file out_file err_file
@@ -796,6 +885,7 @@ main() {
     test_diag_parser
     test_lifecycle_framed
     test_didopen_publish_diagnostics
+    test_didclose_clears_diagnostics
     test_didchange_unsaved_snapshot_on_save
     test_hover_definition_roundtrip
     test_multi_uri_diagnostics_isolation
