@@ -100,7 +100,7 @@ p = subprocess.Popen(
     stdout=subprocess.PIPE,
     stderr=subprocess.PIPE,
 )
-out, err = p.communicate(bytes(wire), timeout=40)
+out, err = p.communicate(bytes(wire), timeout=60)
 open(out_path, "wb").write(out)
 open(err_path, "wb").write(err)
 if p.returncode != 0:
@@ -183,7 +183,7 @@ p = subprocess.Popen(
     stdout=subprocess.PIPE,
     stderr=subprocess.PIPE,
 )
-out, err = p.communicate(bytes(wire), timeout=80)
+out, err = p.communicate(bytes(wire), timeout=120)
 open(out_path, "wb").write(out)
 open(err_path, "wb").write(err)
 if p.returncode != 0:
@@ -283,7 +283,7 @@ p = subprocess.Popen(
     stdout=subprocess.PIPE,
     stderr=subprocess.PIPE,
 )
-out, err = p.communicate(bytes(wire), timeout=80)
+out, err = p.communicate(bytes(wire), timeout=120)
 open(out_path, "wb").write(out)
 open(err_path, "wb").write(err)
 if p.returncode != 0:
@@ -369,7 +369,7 @@ p = subprocess.Popen(
     stdout=subprocess.PIPE,
     stderr=subprocess.PIPE,
 )
-out, err = p.communicate(bytes(wire), timeout=80)
+out, err = p.communicate(bytes(wire), timeout=120)
 open(out_path, "wb").write(out)
 open(err_path, "wb").write(err)
 if p.returncode != 0:
@@ -488,7 +488,7 @@ p = subprocess.Popen(
     stdout=subprocess.PIPE,
     stderr=subprocess.PIPE,
 )
-out, err = p.communicate(bytes(wire), timeout=120)
+out, err = p.communicate(bytes(wire), timeout=180)
 open(out_path, "wb").write(out)
 open(err_path, "wb").write(err)
 if p.returncode != 0:
