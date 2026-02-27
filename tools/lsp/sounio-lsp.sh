@@ -556,6 +556,10 @@ handle_did_open() {
     local params="$1"
     local uri version text
     uri="$(jq -r '.textDocument.uri' <<<"$params")"
+    if [[ -z "$uri" || "$uri" == "null" ]]; then
+        log "didOpen missing uri; ignoring"
+        return
+    fi
     version="$(jq -r '.textDocument.version // 0' <<<"$params")"
     text="$(jq -r '.textDocument.text // ""' <<<"$params")"
 
@@ -566,18 +570,57 @@ handle_did_open() {
 
 handle_did_change() {
     local params="$1"
-    local uri version new_text
+    local uri version new_text has_change_text current_version
     uri="$(jq -r '.textDocument.uri' <<<"$params")"
+    if [[ -z "$uri" || "$uri" == "null" ]]; then
+        log "didChange missing uri; ignoring"
+        return
+    fi
     version="$(jq -r '.textDocument.version // 0' <<<"$params")"
-    new_text="$(jq -r '.contentChanges[-1].text // ""' <<<"$params")"
+
+    current_version="${OPEN_DOC_VERSION[$uri]:-0}"
+    if [[ "$version" =~ ^[0-9]+$ ]] && [[ "$current_version" =~ ^[0-9]+$ ]]; then
+        if (( version < current_version )); then
+            log "ignore stale didChange uri=$uri incoming_version=$version current_version=$current_version"
+            return
+        fi
+    fi
+
+    has_change_text="$(jq -r '
+        (.contentChanges // [])
+        | map(select(has("text")))
+        | (length > 0)
+    ' <<<"$params")"
+    if [[ "$has_change_text" != "true" ]]; then
+        log "didChange has no text entries; keeping current snapshot uri=$uri"
+        OPEN_DOC_VERSION["$uri"]="$version"
+        return
+    fi
+
+    new_text="$(jq -r '
+        (.contentChanges // [])
+        | map(select(has("text")))
+        | .[-1].text // ""
+    ' <<<"$params")"
     OPEN_DOCS["$uri"]="$new_text"
     OPEN_DOC_VERSION["$uri"]="$version"
 }
 
 handle_did_save() {
     local params="$1"
-    local uri
+    local uri has_inline_text inline_text
     uri="$(jq -r '.textDocument.uri' <<<"$params")"
+    if [[ -z "$uri" || "$uri" == "null" ]]; then
+        log "didSave missing uri; ignoring"
+        return
+    fi
+
+    has_inline_text="$(jq -r 'has("text")' <<<"$params")"
+    if [[ "$has_inline_text" == "true" ]]; then
+        inline_text="$(jq -r '.text // ""' <<<"$params")"
+        OPEN_DOCS["$uri"]="$inline_text"
+    fi
+
     run_check_and_publish "$uri" || true
 }
 
@@ -585,6 +628,10 @@ handle_did_close() {
     local params="$1"
     local uri
     uri="$(jq -r '.textDocument.uri' <<<"$params")"
+    if [[ -z "$uri" || "$uri" == "null" ]]; then
+        log "didClose missing uri; ignoring"
+        return
+    fi
     unset OPEN_DOCS["$uri"]
     unset OPEN_DOC_VERSION["$uri"]
     local clear
