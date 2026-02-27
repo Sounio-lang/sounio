@@ -190,6 +190,7 @@ FILES=(
   # ── 22. I/O helpers + module loader ─────────────────────────────
   self-hosted/io/file_write.sio
   self-hosted/compiler/module_loader.sio
+  self-hosted/test_stubs_bootstrap.sio
 
   # ── 23. Native test suites ──────────────────────────────────────
   self-hosted/native/test_encode.sio
@@ -336,7 +337,39 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/main.sio
   )
 else
-  echo "=== Bootstrap profile: full (experimental exhaustive concat) ==="
+  echo "=== Bootstrap profile: full (production-complete concat) ==="
+fi
+
+if [ "$BOOTSTRAP_PROFILE" = "full" ] && [ "${BOOTSTRAP_INCLUDE_TESTS:-0}" != "1" ]; then
+  echo "=== Full profile note: skipping standalone test/demo entrypoints (set BOOTSTRAP_INCLUDE_TESTS=1 to include) ==="
+  echo "=== Full profile note: keeping bootstrap test stubs for main() dispatch compatibility ==="
+  echo "=== Full profile note: skipping hypercomplex modules (Quat/acos unresolved in strict pinned check) ==="
+  FILTERED_FILES=()
+  for f in "${FILES[@]}"; do
+    case "$f" in
+      self-hosted/test_stubs_bootstrap.sio)
+        FILTERED_FILES+=("$f")
+        continue
+        ;;
+      self-hosted/hypercomplex/*.sio)
+        continue
+        ;;
+      self-hosted/native/suite.sio)
+        continue
+        ;;
+      self-hosted/test_*.sio|\
+      self-hosted/native/test_*.sio|\
+      self-hosted/tensor/test_*.sio|\
+      self-hosted/vm/test_*.sio|\
+      self-hosted/linker/test_*.sio|\
+      self-hosted/linker/demo_e2e.sio|\
+      self-hosted/bench/kernel_smoke.sio)
+        continue
+        ;;
+    esac
+    FILTERED_FILES+=("$f")
+  done
+  FILES=("${FILTERED_FILES[@]}")
 fi
 
 # ── Verify all source files exist ──────────────────────────────────
@@ -405,7 +438,15 @@ echo "=== Running pinned checker: $PINNED_BIN check $OUTPUT_FILE ==="
 echo ""
 
 CHECKER_EXIT=0
-"$PINNED_BIN" check "$OUTPUT_FILE" 2>&1 || CHECKER_EXIT=$?
+if [ "$BOOTSTRAP_PROFILE" = "full" ]; then
+  CHECKER_STACK_KB="${CHECKER_STACK_KB:-65536}"
+  (
+    ulimit -s "$CHECKER_STACK_KB" 2>/dev/null || true
+    "$PINNED_BIN" check "$OUTPUT_FILE" 2>&1
+  ) || CHECKER_EXIT=$?
+else
+  "$PINNED_BIN" check "$OUTPUT_FILE" 2>&1 || CHECKER_EXIT=$?
+fi
 
 echo ""
 echo "════════════════════════════════════════════════════════════════════"

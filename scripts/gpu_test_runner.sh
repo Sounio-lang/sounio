@@ -242,8 +242,25 @@ run_with_timeout "${GPU_RUN_TIMEOUT_SECS}" ./target/release/souc run experiments
 
 REMOTE_SCRIPT
 
+# ── cuBLAS baseline (optional) ────────────────────────────────────────────
+BASELINE="${BASELINE:-0}"
+if [ "$BASELINE" = "1" ]; then
+  echo ""
+  echo "=== cuBLAS SGEMM baseline ==="
+  ssh ${SSH_OPTS[@]} "${GPU_USER}@${GPU_HOST_IP}" <<BASELINE_SCRIPT
+export PATH="${REMOTE_CARGO_BIN}:\$PATH"
+cd ${REMOTE_DIR}
+GEMM_DIMS="${GEMM_M}" GEMM_ITERS="${GPU_DIRECT_ITERS}" \
+  python3 scripts/cuda_cublas_baseline.py 2>&1
+BASELINE_SCRIPT
+  echo "GPU_BASELINE_STATUS=done"
+fi
+
 echo ""
 echo "======================================================================="
 echo "  Done. Check [souc-gpu] lines above for GFLOPS measurement."
 echo "  Target: >= 500 GFLOPS sustained on L4/A5000/4000Ada"
+if [ "$BASELINE" = "1" ]; then
+  echo "  cuBLAS baseline also ran — check [souc-gpu] cublas_sgemm lines."
+fi
 echo "======================================================================="
