@@ -16,6 +16,7 @@ const MAX_TYPE_COMPLEXITY: i64 = 1000
 const MAX_BORROW_ENTRIES: i64 = 2048
 const MAX_SCOPE_DEPTH: i64 = 256
 const MAX_REFINEMENT_ENTRIES: i64 = 128
+const MAX_CONST_INT_BINDINGS: i64 = 4096
 
 // ============================================================
 // Checker state
@@ -43,6 +44,12 @@ struct Checker {
     type_depth: i64,
     expr_depth: i64,
     complexity_budget: i64,
+    const_int_names: [Name; 4096],
+    const_int_values: [i64; 4096],
+    const_int_known: [i64; 4096], // 1=known constant int, 0=shadow/unknown
+    const_int_count: i64,
+    const_int_scope_marks: [i64; 256],
+    const_int_scope_depth: i64,
 }
 
 fn checker_new() -> Checker with Mut, Panic, Div {
@@ -68,6 +75,12 @@ fn checker_new() -> Checker with Mut, Panic, Div {
         type_depth: 0,
         expr_depth: 0,
         complexity_budget: 0,
+        const_int_names: [Name { buf: [0; 128], len: 0 }; 4096],
+        const_int_values: [0; 4096],
+        const_int_known: [0; 4096],
+        const_int_count: 0,
+        const_int_scope_marks: [0; 256],
+        const_int_scope_depth: 0,
     }
 }
 
@@ -353,6 +366,63 @@ impl Checker {
         }
         c.complexity_budget = c.complexity_budget + cost
         (c, true)
+    }
+
+    fn push_const_scope(self) -> Checker with Mut {
+        var c = self
+        if c.const_int_scope_depth < MAX_SCOPE_DEPTH {
+            c.const_int_scope_marks[c.const_int_scope_depth as usize] = c.const_int_count
+            c.const_int_scope_depth = c.const_int_scope_depth + 1
+        }
+        c
+    }
+
+    fn pop_const_scope(self) -> Checker with Mut {
+        var c = self
+        if c.const_int_scope_depth > 0 {
+            c.const_int_scope_depth = c.const_int_scope_depth - 1
+            let mark = c.const_int_scope_marks[c.const_int_scope_depth as usize]
+            if mark >= 0 && mark <= c.const_int_count {
+                c.const_int_count = mark
+            }
+        }
+        c
+    }
+
+    fn const_int_bind_raw(self, name: Name, known: i64, value: i64) -> Checker with Mut {
+        var c = self
+        var idx = c.const_int_count
+        if idx >= MAX_CONST_INT_BINDINGS {
+            idx = MAX_CONST_INT_BINDINGS - 1
+        } else {
+            c.const_int_count = c.const_int_count + 1
+        }
+        c.const_int_names[idx as usize] = name
+        c.const_int_known[idx as usize] = known
+        c.const_int_values[idx as usize] = value
+        c
+    }
+
+    fn const_int_bind_unknown(self, name: Name) -> Checker with Mut {
+        self.const_int_bind_raw(name, 0, 0)
+    }
+
+    fn const_int_bind_value(self, name: Name, value: i64) -> Checker with Mut {
+        self.const_int_bind_raw(name, 1, value)
+    }
+
+    fn const_int_lookup(self, name: Name) -> (bool, i64) with Mut, Panic, Div {
+        var i = self.const_int_count - 1
+        while i >= 0 {
+            if name_eq(self.const_int_names[i as usize], name) {
+                if self.const_int_known[i as usize] == 1 {
+                    return (true, self.const_int_values[i as usize])
+                }
+                return (false, 0)
+            }
+            i = i - 1
+        }
+        (false, 0)
     }
 }
 
@@ -791,23 +861,26 @@ fn call_ref_inner_or_self(ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Allo
     }
 }
 
-fn eval_const_int_opt_expr(opt: Option<Box<Expr>>) -> (bool, i64) with Mut, Panic, Div, Alloc {
+fn eval_const_int_opt_expr(c: Checker, opt: Option<Box<Expr>>) -> (bool, i64) with Mut, Panic, Div, Alloc {
     match opt {
         Some(inner) => {
             let e = *inner
             if e.kind == ExprKind::ExprIntLit {
                 return (true, e.int_val)
             }
+            if e.kind == ExprKind::ExprIdent {
+                return c.const_int_lookup(e.name)
+            }
             if e.kind == ExprKind::ExprUnary && e.un_op == UnaryOp::OpNeg {
-                let inner_pair = eval_const_int_opt_expr(e.left)
+                let inner_pair = eval_const_int_opt_expr(c, e.left)
                 if inner_pair.0 {
                     return (true, 0 - inner_pair.1)
                 }
                 return (false, 0)
             }
             if e.kind == ExprKind::ExprBinary {
-                let left_pair = eval_const_int_opt_expr(e.left)
-                let right_pair = eval_const_int_opt_expr(e.right)
+                let left_pair = eval_const_int_opt_expr(c, e.left)
+                let right_pair = eval_const_int_opt_expr(c, e.right)
                 if !left_pair.0 || !right_pair.0 {
                     return (false, 0)
                 }
@@ -1140,6 +1213,7 @@ impl Checker {
                 c.fn_sigs = add_result.0
                 let sig_id = add_result.1
                 c.env = c.env.bind(name, ty_fn(sig_id), false)
+                c = c.const_int_bind_unknown(name)
                 c
             }
             None => self
@@ -1406,6 +1480,7 @@ impl Checker {
                 }
                 c.env = c.env.push_scope()
                 c.borrows = c.borrows.push_scope()
+                c = c.push_const_scope()
                 c = c.bind_fn_params((*fd).params)
                 let pair = c.check_block((*fd).body)
                 c = pair.0
@@ -1417,6 +1492,7 @@ impl Checker {
                         c = c.report_mismatch((*fd).span, 8, sig2.return_type, body_ty)
                     }
                 }
+                c = c.pop_const_scope()
                 c.borrows = c.borrows.pop_scope()
                 c.env = c.env.pop_scope()
                 c.current_return_type = ty_unit()
@@ -1443,6 +1519,7 @@ impl Checker {
         var c = self
         if p.is_self {
             c.env = c.env.bind(p.name, c.current_impl_type, p.is_self_mut)
+            c = c.const_int_bind_unknown(p.name)
             // Track self parameter for borrow checking
             let self_linear = c.is_linear_type(c.current_impl_type)
             c.borrows = c.borrows.track(p.name, self_linear)
@@ -1452,6 +1529,7 @@ impl Checker {
             c = pair.0
             let param_ty = pair.1
             c.env = c.env.bind(p.name, param_ty, false)
+            c = c.const_int_bind_unknown(p.name)
             // Track parameter for borrow checking (linear if struct is declared linear)
             let lin = c.is_linear_type(param_ty)
             c.borrows = c.borrows.track(p.name, lin)
@@ -1504,6 +1582,7 @@ impl Checker {
                 }
                 c.env = c.env.push_scope()
                 c.borrows = c.borrows.push_scope()
+                c = c.push_const_scope()
                 c = c.bind_fn_params((*fd).params)
                 let pair = c.check_block((*fd).body)
                 c = pair.0
@@ -1514,6 +1593,7 @@ impl Checker {
                         c = c.report_mismatch((*fd).span, 8, sig2.return_type, body_ty)
                     }
                 }
+                c = c.pop_const_scope()
                 c.borrows = c.borrows.pop_scope()
                 c.env = c.env.pop_scope()
                 c.current_return_type = ty_unit()
@@ -1536,6 +1616,7 @@ impl Checker {
         var c = self
         c.env = c.env.push_scope()
         c.borrows = c.borrows.push_scope()
+        c = c.push_const_scope()
         let pair = c.check_stmts(blk.stmts)
         c = pair.0
         let result_ty = pair.1
@@ -1549,6 +1630,7 @@ impl Checker {
             print_int(linear_check.1)
             print(" unconsumed)\n")
         }
+        c = c.pop_const_scope()
         c.borrows = c.borrows.pop_scope()
         c.env = c.env.pop_scope()
         (c, result_ty)
@@ -1597,8 +1679,14 @@ impl Checker {
         }
         // Validate refinement predicate on literal initializers
         c = c.check_refinement_literal(s.span, bind_ty)
+        let const_pair = eval_const_int_opt_expr(c, s.expr)
         let cur_env = c.env
         c.env = cur_env.bind(s.name, bind_ty, false)
+        if const_pair.0 {
+            c = c.const_int_bind_value(s.name, const_pair.1)
+        } else {
+            c = c.const_int_bind_unknown(s.name)
+        }
         // Track variable for borrow checking (linear if struct is declared linear)
         let lin = c.is_linear_type(bind_ty)
         c.borrows = c.borrows.track(s.name, lin)
@@ -1623,7 +1711,13 @@ impl Checker {
         }
         // Validate refinement predicate on literal initializers
         c = c.check_refinement_literal(s.span, bind_ty)
+        let const_pair = eval_const_int_opt_expr(c, s.expr)
         c.env = c.env.bind(s.name, bind_ty, true)
+        if const_pair.0 {
+            c = c.const_int_bind_value(s.name, const_pair.1)
+        } else {
+            c = c.const_int_bind_unknown(s.name)
+        }
         // Track variable for borrow checking (linear if struct is declared linear)
         let lin = c.is_linear_type(bind_ty)
         c.borrows = c.borrows.track(s.name, lin)
@@ -1688,6 +1782,19 @@ impl Checker {
         }
         // Check mutability: if target is an ident, it must be mutable
         c = c.check_assign_mutability(s.target, s.span)
+        match s.target {
+            Some(target) => {
+                if (*target).kind == ExprKind::ExprIdent {
+                    let rhs_pair = eval_const_int_opt_expr(c, s.expr)
+                    if rhs_pair.0 {
+                        c = c.const_int_bind_value((*target).name, rhs_pair.1)
+                    } else {
+                        c = c.const_int_bind_unknown((*target).name)
+                    }
+                }
+            }
+            None => {}
+        }
         (c, ty_unit())
     }
 
@@ -1849,12 +1956,12 @@ impl Checker {
         }
         // Division/modulo by zero: detect denominators that fold to a constant integer zero.
         if e.bin_op == BinaryOp::OpDiv {
-            let denom_pair = eval_const_int_opt_expr(e.right)
+            let denom_pair = eval_const_int_opt_expr(c, e.right)
             if denom_pair.0 && denom_pair.1 == 0 {
                 c = c.report_error_at(e.span, 56, 0, 0, 0)
             }
         } else if e.bin_op == BinaryOp::OpRem {
-            let denom_pair = eval_const_int_opt_expr(e.right)
+            let denom_pair = eval_const_int_opt_expr(c, e.right)
             if denom_pair.0 && denom_pair.1 == 0 {
                 c = c.report_error_at(e.span, 57, 0, 0, 0)
             }
@@ -2568,10 +2675,12 @@ impl Checker {
         var c = self
         c.env = c.env.push_scope()
         c.borrows = c.borrows.push_scope()
+        c = c.push_const_scope()
         c = c.bind_pattern(arm.pattern, scrut_ty)
         let pair = c.check_expr(arm.body)
         c = pair.0
         let body_ty = pair.1
+        c = c.pop_const_scope()
         c.borrows = c.borrows.pop_scope()
         c.env = c.env.pop_scope()
         (c, body_ty)
@@ -2598,6 +2707,7 @@ impl Checker {
             PatBinding => {
                 var c = self
                 c.env = c.env.bind(pat.name, scrut_ty, pat.is_mut)
+                c = c.const_int_bind_unknown(pat.name)
                 // Track pattern binding for borrow checking (linear if type is linear)
                 let lin = c.is_linear_type(scrut_ty)
                 c.borrows = c.borrows.track(pat.name, lin)
@@ -2993,6 +3103,7 @@ impl Checker {
         // Push scope for parameters
         c.env = c.env.push_scope()
         c.borrows = c.borrows.push_scope()
+        c = c.push_const_scope()
 
         // Bind closure params in environment
         c = c.bind_closure_params(e.closure_params)
@@ -3021,6 +3132,7 @@ impl Checker {
         let inferred_effect_count = c.current_effect_count
 
         // Pop scope
+        c = c.pop_const_scope()
         c.borrows = c.borrows.pop_scope()
         c.env = c.env.pop_scope()
 
@@ -3092,6 +3204,7 @@ impl Checker {
         c = pair.0
         let param_ty = pair.1
         c.env = c.env.bind(p.name, param_ty, false)
+        c = c.const_int_bind_unknown(p.name)
         c
     }
 
