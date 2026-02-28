@@ -1,0 +1,2202 @@
+// Hygienic macro expansion system for the self-hosted compiler
+//
+// Implements compile-time macro definitions, pattern matching, hygienic
+// name generation (gensym), substitution, and recursive expansion with
+// cycle detection.
+//
+// Architecture:
+//   MacroParam      — single macro parameter descriptor (name + kind)
+//   MacroTemplate   — token template with param references and literals
+//   MacroDef        — full macro definition (params + template + scope)
+//   MacroExpander   — top-level expander with definition table, expansion
+//                     stack for recursion detection, and gensym counter
+//
+// All data structures use flat-array arena pattern (no recursive types)
+// consistent with the self-hosted checker's design.
+
+// ============================================================
+// Macro parameter kind constants
+// ============================================================
+
+let MACRO_PARAM_EXPR: i64 = 1
+let MACRO_PARAM_TYPE: i64 = 2
+let MACRO_PARAM_IDENT: i64 = 3
+let MACRO_PARAM_BLOCK: i64 = 4
+
+// ============================================================
+// Expansion result status constants
+// ============================================================
+
+let EXPAND_OK: i64 = 0
+let EXPAND_ERR_NOT_FOUND: i64 = 1
+let EXPAND_ERR_RECURSION: i64 = 2
+let EXPAND_ERR_ARG_COUNT: i64 = 3
+let EXPAND_ERR_PATTERN: i64 = 4
+let EXPAND_ERR_OVERFLOW: i64 = 5
+
+// ============================================================
+// Token kind constants (for template tokens)
+// ============================================================
+
+let TOK_LITERAL: i64 = 0
+let TOK_PARAM_REF: i64 = 1
+let TOK_GENSYM: i64 = 2
+let TOK_SPLICE: i64 = 3
+let TOK_SEPARATOR: i64 = 4
+
+// ============================================================
+// MacroParam — a single macro parameter descriptor
+// ============================================================
+
+struct MacroParam {
+    name: [i8; 64],
+    name_len: i64,
+    kind: i64,
+    is_variadic: bool,
+}
+
+fn macro_param_new() -> MacroParam {
+    MacroParam {
+        name: [0; 64],
+        name_len: 0,
+        kind: MACRO_PARAM_EXPR,
+        is_variadic: false,
+    }
+}
+
+fn macro_param_with_kind(kind: i64) -> MacroParam with Mut {
+    var p = macro_param_new()
+    p.kind = kind
+    p
+}
+
+// ============================================================
+// MacroParam: set name from individual bytes
+// ============================================================
+
+fn macro_param_set_name(param: MacroParam, src: [i8; 64], src_len: i64) -> MacroParam with Mut, Panic, Div {
+    var p = param
+    var i: i64 = 0
+    while i < src_len && i < 64 {
+        p.name[i as usize] = src[i as usize]
+        i = i + 1
+    }
+    p.name_len = src_len
+    p
+}
+
+// ============================================================
+// MacroParam: name comparison
+// ============================================================
+
+fn macro_param_name_eq(a: MacroParam, b_name: [i8; 64], b_len: i64) -> bool with Mut, Panic, Div {
+    if a.name_len != b_len {
+        return false
+    }
+    var i: i64 = 0
+    while i < a.name_len {
+        if a.name[i as usize] != b_name[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// ============================================================
+// MacroTemplate — token sequence with parameter references
+// ============================================================
+//
+// tokens[]        — token kind tags (TOK_LITERAL, TOK_PARAM_REF, etc.)
+// param_refs[]    — for TOK_PARAM_REF tokens: which param index to splice
+// literal_parts[] — for TOK_LITERAL tokens: literal text content
+
+struct MacroTemplate {
+    tokens: [i64; 512],
+    token_count: i64,
+    param_refs: [i64; 64],
+    param_ref_count: i64,
+    literal_parts: [[i8; 64]; 128],
+    literal_count: i64,
+}
+
+fn macro_template_new() -> MacroTemplate {
+    MacroTemplate {
+        tokens: [0; 512],
+        token_count: 0,
+        param_refs: [0; 64],
+        param_ref_count: 0,
+        literal_parts: [[0; 64]; 128],
+        literal_count: 0,
+    }
+}
+
+// ============================================================
+// MacroTemplate: append a literal token
+// ============================================================
+
+fn macro_template_add_literal(tmpl: MacroTemplate, text: [i8; 64]) -> MacroTemplate with Mut, Panic, Div {
+    var t = tmpl
+    if t.token_count >= 512 || t.literal_count >= 128 {
+        return t
+    }
+    t.tokens[t.token_count as usize] = TOK_LITERAL
+    t.literal_parts[t.literal_count as usize] = text
+    t.literal_count = t.literal_count + 1
+    t.token_count = t.token_count + 1
+    t
+}
+
+// ============================================================
+// MacroTemplate: append a parameter reference token
+// ============================================================
+
+fn macro_template_add_param_ref(tmpl: MacroTemplate, param_idx: i64) -> MacroTemplate with Mut, Panic, Div {
+    var t = tmpl
+    if t.token_count >= 512 || t.param_ref_count >= 64 {
+        return t
+    }
+    t.tokens[t.token_count as usize] = TOK_PARAM_REF
+    t.param_refs[t.param_ref_count as usize] = param_idx
+    t.param_ref_count = t.param_ref_count + 1
+    t.token_count = t.token_count + 1
+    t
+}
+
+// ============================================================
+// MacroTemplate: append a gensym placeholder token
+// ============================================================
+
+fn macro_template_add_gensym(tmpl: MacroTemplate) -> MacroTemplate with Mut, Panic, Div {
+    var t = tmpl
+    if t.token_count >= 512 {
+        return t
+    }
+    t.tokens[t.token_count as usize] = TOK_GENSYM
+    t.token_count = t.token_count + 1
+    t
+}
+
+// ============================================================
+// MacroTemplate: append a splice (variadic expansion) token
+// ============================================================
+
+fn macro_template_add_splice(tmpl: MacroTemplate, param_idx: i64) -> MacroTemplate with Mut, Panic, Div {
+    var t = tmpl
+    if t.token_count >= 512 || t.param_ref_count >= 64 {
+        return t
+    }
+    t.tokens[t.token_count as usize] = TOK_SPLICE
+    t.param_refs[t.param_ref_count as usize] = param_idx
+    t.param_ref_count = t.param_ref_count + 1
+    t.token_count = t.token_count + 1
+    t
+}
+
+// ============================================================
+// MacroTemplate: append a separator token
+// ============================================================
+
+fn macro_template_add_separator(tmpl: MacroTemplate, sep: [i8; 64]) -> MacroTemplate with Mut, Panic, Div {
+    var t = tmpl
+    if t.token_count >= 512 || t.literal_count >= 128 {
+        return t
+    }
+    t.tokens[t.token_count as usize] = TOK_SEPARATOR
+    t.literal_parts[t.literal_count as usize] = sep
+    t.literal_count = t.literal_count + 1
+    t.token_count = t.token_count + 1
+    t
+}
+
+// ============================================================
+// MacroTemplate: count tokens of a specific kind
+// ============================================================
+
+fn macro_template_count_kind(tmpl: MacroTemplate, kind: i64) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < tmpl.token_count {
+        if tmpl.tokens[i as usize] == kind {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================
+// MacroDef — a complete macro definition
+// ============================================================
+
+struct MacroDef {
+    name: [i8; 64],
+    name_len: i64,
+    params: [MacroParam; 16],
+    param_count: i64,
+    template: MacroTemplate,
+    scope_id: i64,
+    is_builtin: bool,
+}
+
+fn macro_def_new() -> MacroDef {
+    MacroDef {
+        name: [0; 64],
+        name_len: 0,
+        params: [macro_param_new(); 16],
+        param_count: 0,
+        template: macro_template_new(),
+        scope_id: 0,
+        is_builtin: false,
+    }
+}
+
+// ============================================================
+// MacroDef: set name
+// ============================================================
+
+fn macro_def_set_name(def: MacroDef, src: [i8; 64], src_len: i64) -> MacroDef with Mut, Panic, Div {
+    var d = def
+    var i: i64 = 0
+    while i < src_len && i < 64 {
+        d.name[i as usize] = src[i as usize]
+        i = i + 1
+    }
+    d.name_len = src_len
+    d
+}
+
+// ============================================================
+// MacroDef: add a parameter
+// ============================================================
+
+fn macro_def_add_param(def: MacroDef, param: MacroParam) -> MacroDef with Mut, Panic, Div {
+    var d = def
+    if d.param_count >= 16 {
+        return d
+    }
+    d.params[d.param_count as usize] = param
+    d.param_count = d.param_count + 1
+    d
+}
+
+// ============================================================
+// MacroDef: name comparison
+// ============================================================
+
+fn macro_def_name_eq(def: MacroDef, target: [i8; 64], target_len: i64) -> bool with Mut, Panic, Div {
+    if def.name_len != target_len {
+        return false
+    }
+    var i: i64 = 0
+    while i < def.name_len {
+        if def.name[i as usize] != target[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// ============================================================
+// MacroDef: find parameter by name (returns index or -1)
+// ============================================================
+
+fn macro_def_find_param(def: MacroDef, pname: [i8; 64], plen: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < def.param_count {
+        if macro_param_name_eq(def.params[i as usize], pname, plen) {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// ============================================================
+// MacroDef: check if any parameter is variadic
+// ============================================================
+
+fn macro_def_has_variadic(def: MacroDef) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < def.param_count {
+        if def.params[i as usize].is_variadic {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// ============================================================
+// Expansion argument buffer — stores the actual arguments
+// passed to a macro invocation
+// ============================================================
+
+struct MacroArgs {
+    tokens: [[i64; 32]; 16],
+    token_counts: [i64; 16],
+    arg_count: i64,
+    arg_kinds: [i64; 16],
+}
+
+fn macro_args_new() -> MacroArgs {
+    MacroArgs {
+        tokens: [[0; 32]; 16],
+        token_counts: [0; 16],
+        arg_count: 0,
+        arg_kinds: [0; 16],
+    }
+}
+
+// ============================================================
+// MacroArgs: add an argument
+// ============================================================
+
+fn macro_args_add(args: MacroArgs, toks: [i64; 32], tok_count: i64, kind: i64) -> MacroArgs with Mut, Panic, Div {
+    var a = args
+    if a.arg_count >= 16 {
+        return a
+    }
+    let idx = a.arg_count
+    a.tokens[idx as usize] = toks
+    a.token_counts[idx as usize] = tok_count
+    a.arg_kinds[idx as usize] = kind
+    a.arg_count = a.arg_count + 1
+    a
+}
+
+// ============================================================
+// MacroArgs: get token count for argument at index
+// ============================================================
+
+fn macro_args_get_count(args: MacroArgs, idx: i64) -> i64 with Panic, Div {
+    if idx < 0 || idx >= args.arg_count {
+        return 0
+    }
+    args.token_counts[idx as usize]
+}
+
+// ============================================================
+// Expansion output buffer
+// ============================================================
+
+struct ExpansionOutput {
+    tokens: [i64; 1024],
+    token_count: i64,
+    names: [[i8; 64]; 256],
+    name_count: i64,
+    status: i64,
+}
+
+fn expansion_output_new() -> ExpansionOutput {
+    ExpansionOutput {
+        tokens: [0; 1024],
+        token_count: 0,
+        names: [[0; 64]; 256],
+        name_count: 0,
+        status: EXPAND_OK,
+    }
+}
+
+// ============================================================
+// ExpansionOutput: append a token
+// ============================================================
+
+fn expansion_output_push(out: ExpansionOutput, tok: i64) -> ExpansionOutput with Mut, Panic, Div {
+    var o = out
+    if o.token_count >= 1024 {
+        o.status = EXPAND_ERR_OVERFLOW
+        return o
+    }
+    o.tokens[o.token_count as usize] = tok
+    o.token_count = o.token_count + 1
+    o
+}
+
+// ============================================================
+// ExpansionOutput: append a generated name
+// ============================================================
+
+fn expansion_output_push_name(out: ExpansionOutput, nm: [i8; 64]) -> ExpansionOutput with Mut, Panic, Div {
+    var o = out
+    if o.name_count >= 256 {
+        o.status = EXPAND_ERR_OVERFLOW
+        return o
+    }
+    o.names[o.name_count as usize] = nm
+    o.name_count = o.name_count + 1
+    o
+}
+
+// ============================================================
+// MacroExpander — top-level expansion engine
+// ============================================================
+
+struct MacroExpander {
+    defs: [MacroDef; 256],
+    def_count: i64,
+    expansion_stack: [i64; 32],
+    stack_depth: i64,
+    gensym_counter: i64,
+    total_expansions: i64,
+    max_depth: i64,
+}
+
+fn macro_expander_new() -> MacroExpander {
+    MacroExpander {
+        defs: [macro_def_new(); 256],
+        def_count: 0,
+        expansion_stack: [0; 32],
+        stack_depth: 0,
+        gensym_counter: 0,
+        total_expansions: 0,
+        max_depth: 32,
+    }
+}
+
+// ============================================================
+// MacroExpander: register a macro definition
+// ============================================================
+
+fn macro_register(exp: MacroExpander, def: MacroDef) -> MacroExpander with Mut, Panic, Div {
+    var e = exp
+    if e.def_count >= 256 {
+        return e
+    }
+    e.defs[e.def_count as usize] = def
+    e.def_count = e.def_count + 1
+    e
+}
+
+// ============================================================
+// MacroExpander: lookup macro by name (returns index or -1)
+// ============================================================
+
+fn macro_lookup(exp: MacroExpander, name: [i8; 64], name_len: i64) -> i64 with Mut, Panic, Div {
+    // Search from most recent to earliest (supports shadowing)
+    var i: i64 = exp.def_count - 1
+    while i >= 0 {
+        if macro_def_name_eq(exp.defs[i as usize], name, name_len) {
+            return i
+        }
+        i = i - 1
+    }
+    0 - 1
+}
+
+// ============================================================
+// MacroExpander: lookup macro by name within a scope
+// ============================================================
+
+fn macro_lookup_in_scope(exp: MacroExpander, name: [i8; 64], name_len: i64, scope_id: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = exp.def_count - 1
+    while i >= 0 {
+        let def = exp.defs[i as usize]
+        if def.scope_id <= scope_id {
+            if macro_def_name_eq(def, name, name_len) {
+                return i
+            }
+        }
+        i = i - 1
+    }
+    0 - 1
+}
+
+// ============================================================
+// MacroExpander: check for infinite recursion
+// ============================================================
+
+fn macro_check_recursion(exp: MacroExpander, def_idx: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < exp.stack_depth {
+        if exp.expansion_stack[i as usize] == def_idx {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// ============================================================
+// MacroExpander: push onto expansion stack
+// ============================================================
+
+fn macro_push_stack(exp: MacroExpander, def_idx: i64) -> MacroExpander with Mut, Panic, Div {
+    var e = exp
+    if e.stack_depth >= 32 {
+        return e
+    }
+    e.expansion_stack[e.stack_depth as usize] = def_idx
+    e.stack_depth = e.stack_depth + 1
+    e
+}
+
+// ============================================================
+// MacroExpander: pop expansion stack
+// ============================================================
+
+fn macro_pop_stack(exp: MacroExpander) -> MacroExpander with Mut {
+    var e = exp
+    if e.stack_depth > 0 {
+        e.stack_depth = e.stack_depth - 1
+    }
+    e
+}
+
+// ============================================================
+// MacroExpander: generate a hygienic unique name (gensym)
+// ============================================================
+//
+// Produces a name like "__gensym_NNN" where NNN is the counter
+// value. This ensures no collisions with user-defined names.
+
+fn macro_gensym(exp: MacroExpander) -> (MacroExpander, [i8; 64], i64) with Mut, Panic, Div {
+    var e = exp
+    var buf: [i8; 64] = [0; 64]
+    // Prefix: __gensym_
+    buf[0] = 95    // '_'
+    buf[1] = 95    // '_'
+    buf[2] = 103   // 'g'
+    buf[3] = 101   // 'e'
+    buf[4] = 110   // 'n'
+    buf[5] = 115   // 's'
+    buf[6] = 121   // 'y'
+    buf[7] = 109   // 'm'
+    buf[8] = 95    // '_'
+
+    // Convert counter to decimal digits
+    var num = e.gensym_counter
+    var digits: [i8; 20] = [0; 20]
+    var digit_count: i64 = 0
+
+    if num == 0 {
+        digits[0] = 48  // '0'
+        digit_count = 1
+    } else {
+        var tmp = num
+        while tmp > 0 {
+            let d = tmp - (tmp / 10) * 10
+            digits[digit_count as usize] = (48 + d) as i8
+            digit_count = digit_count + 1
+            tmp = tmp / 10
+        }
+    }
+
+    // Write digits in reverse into buf starting at position 9
+    var pos: i64 = 9
+    var d_idx: i64 = digit_count - 1
+    while d_idx >= 0 {
+        if pos < 64 {
+            buf[pos as usize] = digits[d_idx as usize]
+            pos = pos + 1
+        }
+        d_idx = d_idx - 1
+    }
+
+    let total_len = pos
+    e.gensym_counter = e.gensym_counter + 1
+    (e, buf, total_len)
+}
+
+// ============================================================
+// MacroExpander: count total expansions performed
+// ============================================================
+
+fn macro_count_expansions(exp: MacroExpander) -> i64 {
+    exp.total_expansions
+}
+
+// ============================================================
+// Name byte comparison helper (compare two [i8; 64] arrays)
+// ============================================================
+
+fn name64_eq(a: [i8; 64], a_len: i64, b: [i8; 64], b_len: i64) -> bool with Mut, Panic, Div {
+    if a_len != b_len {
+        return false
+    }
+    var i: i64 = 0
+    while i < a_len {
+        if a[i as usize] != b[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// ============================================================
+// Name byte copy helper
+// ============================================================
+
+fn name64_copy(src: [i8; 64], src_len: i64) -> [i8; 64] with Mut, Panic, Div {
+    var dst: [i8; 64] = [0; 64]
+    var i: i64 = 0
+    while i < src_len && i < 64 {
+        dst[i as usize] = src[i as usize]
+        i = i + 1
+    }
+    dst
+}
+
+// ============================================================
+// Make a name from a short ASCII string (up to 16 chars)
+// ============================================================
+
+fn make_name64(c0: i8, c1: i8, c2: i8, c3: i8, len: i64) -> [i8; 64] with Mut, Panic, Div {
+    var buf: [i8; 64] = [0; 64]
+    if len >= 1 { buf[0] = c0 }
+    if len >= 2 { buf[1] = c1 }
+    if len >= 3 { buf[2] = c2 }
+    if len >= 4 { buf[3] = c3 }
+    buf
+}
+
+// ============================================================
+// MacroExpander: validate a macro definition
+// ============================================================
+//
+// Checks:
+//   - Name is non-empty
+//   - No duplicate parameter names
+//   - Parameter kinds are valid (1..4)
+//   - At most one variadic parameter (must be last)
+//   - Template param_refs reference valid parameter indices
+//
+// Returns 0 on success, error code on failure.
+
+fn macro_validate_def(def: MacroDef) -> i64 with Mut, Panic, Div {
+    // Check name is non-empty
+    if def.name_len <= 0 {
+        return 1
+    }
+
+    // Check parameter kinds are valid
+    var i: i64 = 0
+    while i < def.param_count {
+        let k = def.params[i as usize].kind
+        if k < MACRO_PARAM_EXPR || k > MACRO_PARAM_BLOCK {
+            return 2
+        }
+        i = i + 1
+    }
+
+    // Check for duplicate parameter names
+    var a: i64 = 0
+    while a < def.param_count {
+        var b: i64 = a + 1
+        while b < def.param_count {
+            if macro_param_name_eq(def.params[a as usize],
+                                   def.params[b as usize].name,
+                                   def.params[b as usize].name_len) {
+                return 3
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+
+    // Check variadic: at most one, must be last
+    var variadic_count: i64 = 0
+    var last_variadic_idx: i64 = 0 - 1
+    var v: i64 = 0
+    while v < def.param_count {
+        if def.params[v as usize].is_variadic {
+            variadic_count = variadic_count + 1
+            last_variadic_idx = v
+        }
+        v = v + 1
+    }
+    if variadic_count > 1 {
+        return 4
+    }
+    if variadic_count == 1 && last_variadic_idx != def.param_count - 1 {
+        return 5
+    }
+
+    // Check template param_refs reference valid indices
+    var r: i64 = 0
+    while r < def.template.param_ref_count {
+        let ref_idx = def.template.param_refs[r as usize]
+        if ref_idx < 0 || ref_idx >= def.param_count {
+            return 6
+        }
+        r = r + 1
+    }
+
+    0
+}
+
+// ============================================================
+// macro_match_pattern — check if argument tokens match the
+// expected parameter pattern of a macro definition
+// ============================================================
+//
+// Validates:
+//   - Argument count matches parameter count (or >= for variadic)
+//   - Argument kinds match parameter kinds where specified
+//
+// Returns true if pattern matches.
+
+fn macro_match_pattern(def: MacroDef, args: MacroArgs) -> bool with Mut, Panic, Div {
+    let has_variadic = macro_def_has_variadic(def)
+
+    // Non-variadic: exact count match required
+    if !has_variadic {
+        if args.arg_count != def.param_count {
+            return false
+        }
+    } else {
+        // Variadic: at least (param_count - 1) args required
+        if args.arg_count < def.param_count - 1 {
+            return false
+        }
+    }
+
+    // Check kinds for non-variadic parameters
+    var i: i64 = 0
+    let check_count = if has_variadic { def.param_count - 1 } else { def.param_count }
+    while i < check_count {
+        if i < args.arg_count {
+            let expected_kind = def.params[i as usize].kind
+            let actual_kind = args.arg_kinds[i as usize]
+            // Kind 0 means "any" — skip check
+            if actual_kind != 0 && expected_kind != actual_kind {
+                return false
+            }
+        }
+        i = i + 1
+    }
+
+    true
+}
+
+// ============================================================
+// macro_substitute — replace parameter references in template
+// with actual argument tokens
+// ============================================================
+//
+// Walks the template token array. For each TOK_PARAM_REF, looks up
+// the corresponding argument and splices it in. For TOK_GENSYM,
+// generates a fresh hygienic name. TOK_LITERAL tokens are copied
+// directly. TOK_SPLICE expands a variadic argument.
+
+fn macro_substitute(
+    exp: MacroExpander,
+    def: MacroDef,
+    args: MacroArgs
+) -> (MacroExpander, ExpansionOutput) with Mut, Panic, Div {
+    var e = exp
+    var out = expansion_output_new()
+    var param_ref_idx: i64 = 0
+    var literal_idx: i64 = 0
+
+    var t: i64 = 0
+    while t < def.template.token_count {
+        let tok_kind = def.template.tokens[t as usize]
+
+        if tok_kind == TOK_LITERAL {
+            // Copy literal token to output
+            if literal_idx < def.template.literal_count {
+                out = expansion_output_push(out, TOK_LITERAL)
+                out = expansion_output_push_name(out, def.template.literal_parts[literal_idx as usize])
+                literal_idx = literal_idx + 1
+            }
+        } else if tok_kind == TOK_PARAM_REF {
+            // Splice argument tokens at this position
+            if param_ref_idx < def.template.param_ref_count {
+                let pidx = def.template.param_refs[param_ref_idx as usize]
+                param_ref_idx = param_ref_idx + 1
+                if pidx >= 0 && pidx < args.arg_count {
+                    let arg_tc = args.token_counts[pidx as usize]
+                    var ai: i64 = 0
+                    while ai < arg_tc {
+                        let arg_tok = args.tokens[pidx as usize][ai as usize]
+                        out = expansion_output_push(out, arg_tok)
+                        ai = ai + 1
+                    }
+                }
+            }
+        } else if tok_kind == TOK_GENSYM {
+            // Generate a fresh hygienic name
+            let gs_result = macro_gensym(e)
+            e = gs_result.0
+            let gs_name = gs_result.1
+            let gs_len = gs_result.2
+            out = expansion_output_push(out, TOK_GENSYM)
+            out = expansion_output_push_name(out, gs_name)
+        } else if tok_kind == TOK_SPLICE {
+            // Splice variadic argument tokens
+            if param_ref_idx < def.template.param_ref_count {
+                let vidx = def.template.param_refs[param_ref_idx as usize]
+                param_ref_idx = param_ref_idx + 1
+                // Splice all args starting from vidx
+                var si: i64 = vidx
+                while si < args.arg_count {
+                    let stc = args.token_counts[si as usize]
+                    var sj: i64 = 0
+                    while sj < stc {
+                        let stok = args.tokens[si as usize][sj as usize]
+                        out = expansion_output_push(out, stok)
+                        sj = sj + 1
+                    }
+                    si = si + 1
+                }
+            }
+        } else if tok_kind == TOK_SEPARATOR {
+            // Copy separator literal
+            if literal_idx < def.template.literal_count {
+                out = expansion_output_push(out, TOK_SEPARATOR)
+                out = expansion_output_push_name(out, def.template.literal_parts[literal_idx as usize])
+                literal_idx = literal_idx + 1
+            }
+        }
+
+        t = t + 1
+    }
+
+    (e, out)
+}
+
+// ============================================================
+// macro_expand — main expansion entry point
+// ============================================================
+//
+// 1. Lookup the macro definition by name
+// 2. Check for recursive expansion
+// 3. Validate argument pattern
+// 4. Push onto expansion stack
+// 5. Substitute template
+// 6. Pop expansion stack
+// 7. Increment expansion counter
+
+fn macro_expand(
+    exp: MacroExpander,
+    name: [i8; 64],
+    name_len: i64,
+    args: MacroArgs
+) -> (MacroExpander, ExpansionOutput) with Mut, Panic, Div {
+    var e = exp
+
+    // Step 1: Lookup
+    let def_idx = macro_lookup(e, name, name_len)
+    if def_idx < 0 {
+        var out = expansion_output_new()
+        out.status = EXPAND_ERR_NOT_FOUND
+        return (e, out)
+    }
+
+    let def = e.defs[def_idx as usize]
+
+    // Step 2: Recursion check
+    if macro_check_recursion(e, def_idx) {
+        var out = expansion_output_new()
+        out.status = EXPAND_ERR_RECURSION
+        return (e, out)
+    }
+
+    // Step 3: Pattern match
+    if !macro_match_pattern(def, args) {
+        var out = expansion_output_new()
+        out.status = EXPAND_ERR_ARG_COUNT
+        return (e, out)
+    }
+
+    // Step 4: Push stack
+    e = macro_push_stack(e, def_idx)
+
+    // Step 5: Substitute
+    let sub_result = macro_substitute(e, def, args)
+    e = sub_result.0
+    let out = sub_result.1
+
+    // Step 6: Pop stack
+    e = macro_pop_stack(e)
+
+    // Step 7: Increment counter
+    e.total_expansions = e.total_expansions + 1
+
+    (e, out)
+}
+
+// ============================================================
+// Builtin macro helpers
+// ============================================================
+
+fn macro_make_builtin(name: [i8; 64], name_len: i64, param_count: i64) -> MacroDef with Mut, Panic, Div {
+    var def = macro_def_new()
+    def = macro_def_set_name(def, name, name_len)
+    def.is_builtin = true
+    var i: i64 = 0
+    while i < param_count && i < 16 {
+        var p = macro_param_new()
+        p.kind = MACRO_PARAM_EXPR
+        def = macro_def_add_param(def, p)
+        i = i + 1
+    }
+    def
+}
+
+// ============================================================
+// MacroExpander: register common built-in macros
+// ============================================================
+//
+// Registers placeholders for built-in compile-time macros:
+//   - line (0 params) — current source line
+//   - column (0 params) — current source column
+//   - file (0 params) — current source file
+//   - stringify (1 param) — token-to-string
+//   - concat (variadic) — concatenate literals
+
+fn macro_register_builtins(exp: MacroExpander) -> MacroExpander with Mut, Panic, Div {
+    var e = exp
+
+    // line
+    var line_name: [i8; 64] = [0; 64]
+    line_name[0] = 108  // 'l'
+    line_name[1] = 105  // 'i'
+    line_name[2] = 110  // 'n'
+    line_name[3] = 101  // 'e'
+    let line_def = macro_make_builtin(line_name, 4, 0)
+    e = macro_register(e, line_def)
+
+    // column
+    var col_name: [i8; 64] = [0; 64]
+    col_name[0] = 99   // 'c'
+    col_name[1] = 111  // 'o'
+    col_name[2] = 108  // 'l'
+    col_name[3] = 117  // 'u'
+    col_name[4] = 109  // 'm'
+    col_name[5] = 110  // 'n'
+    let col_def = macro_make_builtin(col_name, 6, 0)
+    e = macro_register(e, col_def)
+
+    // file
+    var file_name: [i8; 64] = [0; 64]
+    file_name[0] = 102  // 'f'
+    file_name[1] = 105  // 'i'
+    file_name[2] = 108  // 'l'
+    file_name[3] = 101  // 'e'
+    let file_def = macro_make_builtin(file_name, 4, 0)
+    e = macro_register(e, file_def)
+
+    // stringify (1 param)
+    var str_name: [i8; 64] = [0; 64]
+    str_name[0] = 115  // 's'
+    str_name[1] = 116  // 't'
+    str_name[2] = 114  // 'r'
+    str_name[3] = 105  // 'i'
+    str_name[4] = 110  // 'n'
+    str_name[5] = 103  // 'g'
+    str_name[6] = 105  // 'i'
+    str_name[7] = 102  // 'f'
+    str_name[8] = 121  // 'y'
+    let str_def = macro_make_builtin(str_name, 9, 1)
+    e = macro_register(e, str_def)
+
+    // concat (variadic, 1 variadic param)
+    var cat_name: [i8; 64] = [0; 64]
+    cat_name[0] = 99   // 'c'
+    cat_name[1] = 111  // 'o'
+    cat_name[2] = 110  // 'n'
+    cat_name[3] = 99   // 'c'
+    cat_name[4] = 97   // 'a'
+    cat_name[5] = 116  // 't'
+    var cat_def = macro_def_new()
+    cat_def = macro_def_set_name(cat_def, cat_name, 6)
+    cat_def.is_builtin = true
+    var vp = macro_param_new()
+    vp.kind = MACRO_PARAM_EXPR
+    vp.is_variadic = true
+    cat_def = macro_def_add_param(cat_def, vp)
+    e = macro_register(e, cat_def)
+
+    e
+}
+
+// ============================================================
+// MacroExpander: count registered macros
+// ============================================================
+
+fn macro_expander_def_count(exp: MacroExpander) -> i64 {
+    exp.def_count
+}
+
+// ============================================================
+// MacroExpander: count builtins
+// ============================================================
+
+fn macro_expander_builtin_count(exp: MacroExpander) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < exp.def_count {
+        if exp.defs[i as usize].is_builtin {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================
+// MacroExpander: reset expansion stack (for error recovery)
+// ============================================================
+
+fn macro_reset_stack(exp: MacroExpander) -> MacroExpander with Mut, Panic, Div {
+    var e = exp
+    e.stack_depth = 0
+    var i: i64 = 0
+    while i < 32 {
+        e.expansion_stack[i as usize] = 0
+        i = i + 1
+    }
+    e
+}
+
+// ============================================================
+// MacroExpander: check if a name is a known macro
+// ============================================================
+
+fn macro_is_defined(exp: MacroExpander, name: [i8; 64], name_len: i64) -> bool with Mut, Panic, Div {
+    let idx = macro_lookup(exp, name, name_len)
+    idx >= 0
+}
+
+// ============================================================
+// MacroExpander: remove a macro definition by index
+// ============================================================
+
+fn macro_unregister(exp: MacroExpander, idx: i64) -> MacroExpander with Mut, Panic, Div {
+    var e = exp
+    if idx < 0 || idx >= e.def_count {
+        return e
+    }
+    // Shift everything down
+    var i: i64 = idx
+    while i < e.def_count - 1 {
+        e.defs[i as usize] = e.defs[(i + 1) as usize]
+        i = i + 1
+    }
+    e.def_count = e.def_count - 1
+    e
+}
+
+// ============================================================
+// MacroExpander: get definition at index
+// ============================================================
+
+fn macro_get_def(exp: MacroExpander, idx: i64) -> MacroDef with Panic, Div {
+    exp.defs[idx as usize]
+}
+
+// ============================================================
+// MacroExpander: get current gensym counter value
+// ============================================================
+
+fn macro_gensym_counter(exp: MacroExpander) -> i64 {
+    exp.gensym_counter
+}
+
+// ============================================================
+// MacroExpander: get current stack depth
+// ============================================================
+
+fn macro_stack_depth(exp: MacroExpander) -> i64 {
+    exp.stack_depth
+}
+
+// ============================================================
+// Scope filtering: collect all macros visible from scope
+// ============================================================
+
+fn macro_count_in_scope(exp: MacroExpander, scope_id: i64) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < exp.def_count {
+        if exp.defs[i as usize].scope_id <= scope_id {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================
+// Template analysis: check if a template references a given param
+// ============================================================
+
+fn macro_template_uses_param(tmpl: MacroTemplate, param_idx: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < tmpl.param_ref_count {
+        if tmpl.param_refs[i as usize] == param_idx {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// ============================================================
+// Expansion depth limit check
+// ============================================================
+
+fn macro_depth_exceeded(exp: MacroExpander) -> bool {
+    exp.stack_depth >= exp.max_depth
+}
+
+// ============================================================
+// Test helpers
+// ============================================================
+
+fn macro_assert_true(cond: bool, test_id: i64) -> i64 with IO, Mut, Panic, Div {
+    if cond {
+        print("  PASS test ")
+        print_int(test_id)
+        print("\n")
+        return 0
+    } else {
+        print("  FAIL test ")
+        print_int(test_id)
+        print("\n")
+        return 1
+    }
+}
+
+// Helper: make a test name in a [i8; 64] buffer
+fn test_make_name(a: i8, b: i8, c: i8, len: i64) -> [i8; 64] with Mut, Panic, Div {
+    var buf: [i8; 64] = [0; 64]
+    if len >= 1 { buf[0] = a }
+    if len >= 2 { buf[1] = b }
+    if len >= 3 { buf[2] = c }
+    buf
+}
+
+// Helper: make a 5-char name
+fn test_make_name5(a: i8, b: i8, c: i8, d: i8, e: i8) -> [i8; 64] with Mut, Panic, Div {
+    var buf: [i8; 64] = [0; 64]
+    buf[0] = a
+    buf[1] = b
+    buf[2] = c
+    buf[3] = d
+    buf[4] = e
+    buf
+}
+
+// ============================================================
+// Test 1: MacroParam construction and defaults
+// ============================================================
+
+fn test_macro_param_new() -> i64 with IO, Mut, Panic, Div {
+    let p = macro_param_new()
+    let ok1 = p.name_len == 0
+    let ok2 = p.kind == MACRO_PARAM_EXPR
+    let ok3 = p.is_variadic == false
+    macro_assert_true(ok1 && ok2 && ok3, 1)
+}
+
+// ============================================================
+// Test 2: MacroParam kind constructor
+// ============================================================
+
+fn test_macro_param_kind() -> i64 with IO, Mut, Panic, Div {
+    let p1 = macro_param_with_kind(MACRO_PARAM_TYPE)
+    let p2 = macro_param_with_kind(MACRO_PARAM_IDENT)
+    let p3 = macro_param_with_kind(MACRO_PARAM_BLOCK)
+    let ok1 = p1.kind == MACRO_PARAM_TYPE
+    let ok2 = p2.kind == MACRO_PARAM_IDENT
+    let ok3 = p3.kind == MACRO_PARAM_BLOCK
+    macro_assert_true(ok1 && ok2 && ok3, 2)
+}
+
+// ============================================================
+// Test 3: MacroParam name set and compare
+// ============================================================
+
+fn test_macro_param_name() -> i64 with IO, Mut, Panic, Div {
+    var p = macro_param_new()
+    // name = "abc"
+    let nm = test_make_name(97, 98, 99, 3)
+    p = macro_param_set_name(p, nm, 3)
+    let ok1 = p.name_len == 3
+    let ok2 = macro_param_name_eq(p, nm, 3)
+    // Different name should not match
+    let nm2 = test_make_name(120, 121, 122, 3)
+    let ok3 = !macro_param_name_eq(p, nm2, 3)
+    macro_assert_true(ok1 && ok2 && ok3, 3)
+}
+
+// ============================================================
+// Test 4: MacroTemplate construction and add literal
+// ============================================================
+
+fn test_macro_template_literal() -> i64 with IO, Mut, Panic, Div {
+    var tmpl = macro_template_new()
+    let ok1 = tmpl.token_count == 0
+    let lit = test_make_name(65, 66, 67, 3)
+    tmpl = macro_template_add_literal(tmpl, lit)
+    let ok2 = tmpl.token_count == 1
+    let ok3 = tmpl.literal_count == 1
+    let ok4 = tmpl.tokens[0] == TOK_LITERAL
+    macro_assert_true(ok1 && ok2 && ok3 && ok4, 4)
+}
+
+// ============================================================
+// Test 5: MacroTemplate param ref
+// ============================================================
+
+fn test_macro_template_param_ref() -> i64 with IO, Mut, Panic, Div {
+    var tmpl = macro_template_new()
+    tmpl = macro_template_add_param_ref(tmpl, 0)
+    tmpl = macro_template_add_param_ref(tmpl, 2)
+    let ok1 = tmpl.token_count == 2
+    let ok2 = tmpl.param_ref_count == 2
+    let ok3 = tmpl.param_refs[0] == 0
+    let ok4 = tmpl.param_refs[1] == 2
+    let ok5 = tmpl.tokens[0] == TOK_PARAM_REF
+    let ok6 = tmpl.tokens[1] == TOK_PARAM_REF
+    macro_assert_true(ok1 && ok2 && ok3 && ok4 && ok5 && ok6, 5)
+}
+
+// ============================================================
+// Test 6: MacroTemplate mixed tokens
+// ============================================================
+
+fn test_macro_template_mixed() -> i64 with IO, Mut, Panic, Div {
+    var tmpl = macro_template_new()
+    let lit1 = test_make_name(65, 0, 0, 1)
+    tmpl = macro_template_add_literal(tmpl, lit1)
+    tmpl = macro_template_add_param_ref(tmpl, 0)
+    tmpl = macro_template_add_gensym(tmpl)
+    let lit2 = test_make_name(66, 0, 0, 1)
+    tmpl = macro_template_add_literal(tmpl, lit2)
+    let ok1 = tmpl.token_count == 4
+    let ok2 = tmpl.tokens[0] == TOK_LITERAL
+    let ok3 = tmpl.tokens[1] == TOK_PARAM_REF
+    let ok4 = tmpl.tokens[2] == TOK_GENSYM
+    let ok5 = tmpl.tokens[3] == TOK_LITERAL
+    macro_assert_true(ok1 && ok2 && ok3 && ok4 && ok5, 6)
+}
+
+// ============================================================
+// Test 7: MacroDef construction
+// ============================================================
+
+fn test_macro_def_new() -> i64 with IO, Mut, Panic, Div {
+    let d = macro_def_new()
+    let ok1 = d.name_len == 0
+    let ok2 = d.param_count == 0
+    let ok3 = d.scope_id == 0
+    let ok4 = d.is_builtin == false
+    macro_assert_true(ok1 && ok2 && ok3 && ok4, 7)
+}
+
+// ============================================================
+// Test 8: MacroDef set name and compare
+// ============================================================
+
+fn test_macro_def_name() -> i64 with IO, Mut, Panic, Div {
+    var d = macro_def_new()
+    let nm = test_make_name5(109, 121, 109, 97, 99)  // "mymac"
+    d = macro_def_set_name(d, nm, 5)
+    let ok1 = d.name_len == 5
+    let ok2 = macro_def_name_eq(d, nm, 5)
+    let bad = test_make_name(120, 121, 122, 3)
+    let ok3 = !macro_def_name_eq(d, bad, 3)
+    macro_assert_true(ok1 && ok2 && ok3, 8)
+}
+
+// ============================================================
+// Test 9: MacroDef add params and find param
+// ============================================================
+
+fn test_macro_def_params() -> i64 with IO, Mut, Panic, Div {
+    var d = macro_def_new()
+    let nm = test_make_name(102, 111, 111, 3)  // "foo"
+    d = macro_def_set_name(d, nm, 3)
+
+    // Add param "x"
+    var p1 = macro_param_new()
+    let xn = test_make_name(120, 0, 0, 1)
+    p1 = macro_param_set_name(p1, xn, 1)
+    p1.kind = MACRO_PARAM_EXPR
+    d = macro_def_add_param(d, p1)
+
+    // Add param "y"
+    var p2 = macro_param_new()
+    let yn = test_make_name(121, 0, 0, 1)
+    p2 = macro_param_set_name(p2, yn, 1)
+    p2.kind = MACRO_PARAM_TYPE
+    d = macro_def_add_param(d, p2)
+
+    let ok1 = d.param_count == 2
+    let idx_x = macro_def_find_param(d, xn, 1)
+    let idx_y = macro_def_find_param(d, yn, 1)
+    let ok2 = idx_x == 0
+    let ok3 = idx_y == 1
+    let zn = test_make_name(122, 0, 0, 1)
+    let idx_z = macro_def_find_param(d, zn, 1)
+    let ok4 = idx_z == (0 - 1)
+    macro_assert_true(ok1 && ok2 && ok3 && ok4, 9)
+}
+
+// ============================================================
+// Test 10: MacroExpander construction
+// ============================================================
+
+fn test_macro_expander_new() -> i64 with IO, Mut, Panic, Div {
+    let e = macro_expander_new()
+    let ok1 = e.def_count == 0
+    let ok2 = e.stack_depth == 0
+    let ok3 = e.gensym_counter == 0
+    let ok4 = e.total_expansions == 0
+    macro_assert_true(ok1 && ok2 && ok3 && ok4, 10)
+}
+
+// ============================================================
+// Test 11: Register and lookup a macro
+// ============================================================
+
+fn test_macro_register_lookup() -> i64 with IO, Mut, Panic, Div {
+    var exp = macro_expander_new()
+    var d = macro_def_new()
+    let nm = test_make_name5(104, 101, 108, 108, 111)  // "hello"
+    d = macro_def_set_name(d, nm, 5)
+    exp = macro_register(exp, d)
+
+    let ok1 = exp.def_count == 1
+    let idx = macro_lookup(exp, nm, 5)
+    let ok2 = idx == 0
+    let bad = test_make_name(120, 121, 122, 3)
+    let idx2 = macro_lookup(exp, bad, 3)
+    let ok3 = idx2 == (0 - 1)
+    macro_assert_true(ok1 && ok2 && ok3, 11)
+}
+
+// ============================================================
+// Test 12: Gensym generates unique names
+// ============================================================
+
+fn test_macro_gensym() -> i64 with IO, Mut, Panic, Div {
+    var exp = macro_expander_new()
+    let r1 = macro_gensym(exp)
+    exp = r1.0
+    let name1 = r1.1
+    let len1 = r1.2
+    let r2 = macro_gensym(exp)
+    exp = r2.0
+    let name2 = r2.1
+    let len2 = r2.2
+
+    // Counter should have incremented
+    let ok1 = exp.gensym_counter == 2
+    // Names should be different (at least the digit portion)
+    let ok2 = !name64_eq(name1, len1, name2, len2)
+    // Both should start with "__gensym_"
+    let ok3 = name1[0] == 95 && name1[1] == 95 && name1[2] == 103
+    let ok4 = name2[0] == 95 && name2[1] == 95 && name2[2] == 103
+    // First should end with "0", second with "1"
+    let ok5 = len1 > 9 && len2 > 9
+    macro_assert_true(ok1 && ok2 && ok3 && ok4 && ok5, 12)
+}
+
+// ============================================================
+// Test 13: Recursion detection
+// ============================================================
+
+fn test_macro_recursion_check() -> i64 with IO, Mut, Panic, Div {
+    var exp = macro_expander_new()
+    // Push macro index 5 onto stack
+    exp = macro_push_stack(exp, 5)
+    exp = macro_push_stack(exp, 3)
+    let ok1 = exp.stack_depth == 2
+    let ok2 = macro_check_recursion(exp, 5)
+    let ok3 = macro_check_recursion(exp, 3)
+    let ok4 = !macro_check_recursion(exp, 7)
+    // Pop and verify
+    exp = macro_pop_stack(exp)
+    let ok5 = exp.stack_depth == 1
+    let ok6 = !macro_check_recursion(exp, 3)
+    let ok7 = macro_check_recursion(exp, 5)
+    macro_assert_true(ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7, 13)
+}
+
+// ============================================================
+// Test 14: Validate def — valid definition
+// ============================================================
+
+fn test_macro_validate_valid() -> i64 with IO, Mut, Panic, Div {
+    var d = macro_def_new()
+    let nm = test_make_name(102, 110, 0, 2)  // "fn"
+    d = macro_def_set_name(d, nm, 2)
+    var p = macro_param_new()
+    let pn = test_make_name(120, 0, 0, 1)
+    p = macro_param_set_name(p, pn, 1)
+    p.kind = MACRO_PARAM_EXPR
+    d = macro_def_add_param(d, p)
+    // Template with one param ref
+    d.template = macro_template_add_param_ref(d.template, 0)
+    let err = macro_validate_def(d)
+    macro_assert_true(err == 0, 14)
+}
+
+// ============================================================
+// Test 15: Validate def — empty name fails
+// ============================================================
+
+fn test_macro_validate_empty_name() -> i64 with IO, Mut, Panic, Div {
+    let d = macro_def_new()
+    let err = macro_validate_def(d)
+    macro_assert_true(err == 1, 15)
+}
+
+// ============================================================
+// Test 16: Validate def — invalid param kind fails
+// ============================================================
+
+fn test_macro_validate_bad_kind() -> i64 with IO, Mut, Panic, Div {
+    var d = macro_def_new()
+    let nm = test_make_name(97, 0, 0, 1)
+    d = macro_def_set_name(d, nm, 1)
+    var p = macro_param_new()
+    p.kind = 99  // invalid
+    d = macro_def_add_param(d, p)
+    let err = macro_validate_def(d)
+    macro_assert_true(err == 2, 16)
+}
+
+// ============================================================
+// Test 17: Validate def — duplicate param names
+// ============================================================
+
+fn test_macro_validate_dup_params() -> i64 with IO, Mut, Panic, Div {
+    var d = macro_def_new()
+    let nm = test_make_name(97, 0, 0, 1)
+    d = macro_def_set_name(d, nm, 1)
+
+    let pn = test_make_name(120, 0, 0, 1)  // "x"
+    var p1 = macro_param_new()
+    p1 = macro_param_set_name(p1, pn, 1)
+    d = macro_def_add_param(d, p1)
+
+    var p2 = macro_param_new()
+    p2 = macro_param_set_name(p2, pn, 1)
+    d = macro_def_add_param(d, p2)
+
+    let err = macro_validate_def(d)
+    macro_assert_true(err == 3, 17)
+}
+
+// ============================================================
+// Test 18: Validate def — variadic not last
+// ============================================================
+
+fn test_macro_validate_variadic_not_last() -> i64 with IO, Mut, Panic, Div {
+    var d = macro_def_new()
+    let nm = test_make_name(97, 0, 0, 1)
+    d = macro_def_set_name(d, nm, 1)
+
+    var p1 = macro_param_new()
+    let pn1 = test_make_name(120, 0, 0, 1)
+    p1 = macro_param_set_name(p1, pn1, 1)
+    p1.is_variadic = true
+    d = macro_def_add_param(d, p1)
+
+    var p2 = macro_param_new()
+    let pn2 = test_make_name(121, 0, 0, 1)
+    p2 = macro_param_set_name(p2, pn2, 1)
+    d = macro_def_add_param(d, p2)
+
+    let err = macro_validate_def(d)
+    macro_assert_true(err == 5, 18)
+}
+
+// ============================================================
+// Test 19: Pattern matching — exact match
+// ============================================================
+
+fn test_macro_match_exact() -> i64 with IO, Mut, Panic, Div {
+    var d = macro_def_new()
+    let nm = test_make_name(97, 0, 0, 1)
+    d = macro_def_set_name(d, nm, 1)
+    var p = macro_param_new()
+    p.kind = MACRO_PARAM_EXPR
+    d = macro_def_add_param(d, p)
+    var p2 = macro_param_new()
+    p2.kind = MACRO_PARAM_TYPE
+    d = macro_def_add_param(d, p2)
+
+    // 2 args, kinds match
+    var args = macro_args_new()
+    var toks1: [i64; 32] = [0; 32]
+    toks1[0] = 42
+    args = macro_args_add(args, toks1, 1, MACRO_PARAM_EXPR)
+    var toks2: [i64; 32] = [0; 32]
+    toks2[0] = 7
+    args = macro_args_add(args, toks2, 1, MACRO_PARAM_TYPE)
+
+    let ok1 = macro_match_pattern(d, args)
+
+    // Wrong count
+    var args2 = macro_args_new()
+    args2 = macro_args_add(args2, toks1, 1, MACRO_PARAM_EXPR)
+    let ok2 = !macro_match_pattern(d, args2)
+
+    macro_assert_true(ok1 && ok2, 19)
+}
+
+// ============================================================
+// Test 20: Pattern matching — variadic
+// ============================================================
+
+fn test_macro_match_variadic() -> i64 with IO, Mut, Panic, Div {
+    var d = macro_def_new()
+    let nm = test_make_name(97, 0, 0, 1)
+    d = macro_def_set_name(d, nm, 1)
+    var p1 = macro_param_new()
+    p1.kind = MACRO_PARAM_EXPR
+    d = macro_def_add_param(d, p1)
+    var p2 = macro_param_new()
+    p2.kind = MACRO_PARAM_EXPR
+    p2.is_variadic = true
+    d = macro_def_add_param(d, p2)
+
+    // 3 args with variadic — should match (need >= 1 fixed)
+    var args = macro_args_new()
+    var toks: [i64; 32] = [0; 32]
+    args = macro_args_add(args, toks, 1, MACRO_PARAM_EXPR)
+    args = macro_args_add(args, toks, 1, MACRO_PARAM_EXPR)
+    args = macro_args_add(args, toks, 1, MACRO_PARAM_EXPR)
+    let ok1 = macro_match_pattern(d, args)
+
+    // 1 arg — should match (1 fixed, 0 variadic)
+    var args2 = macro_args_new()
+    args2 = macro_args_add(args2, toks, 1, MACRO_PARAM_EXPR)
+    let ok2 = macro_match_pattern(d, args2)
+
+    // 0 args — should fail (need at least 1 for fixed param)
+    let args3 = macro_args_new()
+    let ok3 = !macro_match_pattern(d, args3)
+
+    macro_assert_true(ok1 && ok2 && ok3, 20)
+}
+
+// ============================================================
+// Test 21: Simple expansion with substitution
+// ============================================================
+
+fn test_macro_simple_expand() -> i64 with IO, Mut, Panic, Div {
+    var exp = macro_expander_new()
+
+    // Define macro "add" with 2 params, template: [PARAM_REF(0), LIT(+), PARAM_REF(1)]
+    var d = macro_def_new()
+    let nm = test_make_name(97, 100, 100, 3)  // "add"
+    d = macro_def_set_name(d, nm, 3)
+
+    var p1 = macro_param_new()
+    d = macro_def_add_param(d, p1)
+    var p2 = macro_param_new()
+    d = macro_def_add_param(d, p2)
+
+    var tmpl = macro_template_new()
+    tmpl = macro_template_add_param_ref(tmpl, 0)
+    let plus = test_make_name(43, 0, 0, 1)  // "+"
+    tmpl = macro_template_add_literal(tmpl, plus)
+    tmpl = macro_template_add_param_ref(tmpl, 1)
+    d.template = tmpl
+
+    exp = macro_register(exp, d)
+
+    // Expand with args: [10], [20]
+    var args = macro_args_new()
+    var toks1: [i64; 32] = [0; 32]
+    toks1[0] = 10
+    args = macro_args_add(args, toks1, 1, MACRO_PARAM_EXPR)
+    var toks2: [i64; 32] = [0; 32]
+    toks2[0] = 20
+    args = macro_args_add(args, toks2, 1, MACRO_PARAM_EXPR)
+
+    let result = macro_expand(exp, nm, 3, args)
+    exp = result.0
+    let out = result.1
+
+    let ok1 = out.status == EXPAND_OK
+    let ok2 = out.token_count > 0
+    let ok3 = exp.total_expansions == 1
+    macro_assert_true(ok1 && ok2 && ok3, 21)
+}
+
+// ============================================================
+// Test 22: Expansion with gensym in template
+// ============================================================
+
+fn test_macro_gensym_expand() -> i64 with IO, Mut, Panic, Div {
+    var exp = macro_expander_new()
+
+    var d = macro_def_new()
+    let nm = test_make_name(103, 115, 0, 2)  // "gs"
+    d = macro_def_set_name(d, nm, 2)
+
+    var tmpl = macro_template_new()
+    tmpl = macro_template_add_gensym(tmpl)
+    tmpl = macro_template_add_gensym(tmpl)
+    d.template = tmpl
+
+    exp = macro_register(exp, d)
+
+    let args = macro_args_new()
+    let result = macro_expand(exp, nm, 2, args)
+    exp = result.0
+    let out = result.1
+
+    let ok1 = out.status == EXPAND_OK
+    // Two gensym tokens should have been generated
+    let ok2 = exp.gensym_counter == 2
+    // Output should have names for gensyms
+    let ok3 = out.name_count == 2
+    macro_assert_true(ok1 && ok2 && ok3, 22)
+}
+
+// ============================================================
+// Test 23: Expansion fails for unknown macro
+// ============================================================
+
+fn test_macro_expand_not_found() -> i64 with IO, Mut, Panic, Div {
+    let exp = macro_expander_new()
+    let nm = test_make_name(120, 121, 122, 3)
+    let args = macro_args_new()
+    let result = macro_expand(exp, nm, 3, args)
+    let out = result.1
+    let ok1 = out.status == EXPAND_ERR_NOT_FOUND
+    macro_assert_true(ok1, 23)
+}
+
+// ============================================================
+// Test 24: Expansion fails on argument count mismatch
+// ============================================================
+
+fn test_macro_expand_arg_mismatch() -> i64 with IO, Mut, Panic, Div {
+    var exp = macro_expander_new()
+    var d = macro_def_new()
+    let nm = test_make_name(97, 0, 0, 1)
+    d = macro_def_set_name(d, nm, 1)
+    var p = macro_param_new()
+    d = macro_def_add_param(d, p)
+    exp = macro_register(exp, d)
+
+    // No args when 1 is expected
+    let args = macro_args_new()
+    let result = macro_expand(exp, nm, 1, args)
+    let out = result.1
+    macro_assert_true(out.status == EXPAND_ERR_ARG_COUNT, 24)
+}
+
+// ============================================================
+// Test 25: Recursion detection during expansion
+// ============================================================
+
+fn test_macro_expand_recursion() -> i64 with IO, Mut, Panic, Div {
+    var exp = macro_expander_new()
+
+    // Register macro "rec"
+    var d = macro_def_new()
+    let nm = test_make_name5(114, 101, 99, 0, 0)  // "rec"
+    d = macro_def_set_name(d, nm, 3)
+    d.template = macro_template_new()
+    exp = macro_register(exp, d)
+
+    // Manually push it onto the stack to simulate recursion
+    exp = macro_push_stack(exp, 0)
+
+    let args = macro_args_new()
+    let result = macro_expand(exp, nm, 3, args)
+    let out = result.1
+    macro_assert_true(out.status == EXPAND_ERR_RECURSION, 25)
+}
+
+// ============================================================
+// Test 26: Register builtins
+// ============================================================
+
+fn test_macro_builtins() -> i64 with IO, Mut, Panic, Div {
+    var exp = macro_expander_new()
+    exp = macro_register_builtins(exp)
+
+    let ok1 = exp.def_count == 5  // line, column, file, stringify, concat
+    let bc = macro_expander_builtin_count(exp)
+    let ok2 = bc == 5
+
+    // Lookup "line"
+    var line_name: [i8; 64] = [0; 64]
+    line_name[0] = 108
+    line_name[1] = 105
+    line_name[2] = 110
+    line_name[3] = 101
+    let idx = macro_lookup(exp, line_name, 4)
+    let ok3 = idx >= 0
+
+    // Verify it is builtin
+    let def = macro_get_def(exp, idx)
+    let ok4 = def.is_builtin
+    macro_assert_true(ok1 && ok2 && ok3 && ok4, 26)
+}
+
+// ============================================================
+// Test 27: name64_eq helper
+// ============================================================
+
+fn test_name64_eq() -> i64 with IO, Mut, Panic, Div {
+    let a = test_make_name(65, 66, 67, 3)
+    let b = test_make_name(65, 66, 67, 3)
+    let c = test_make_name(65, 66, 68, 3)
+    let ok1 = name64_eq(a, 3, b, 3)
+    let ok2 = !name64_eq(a, 3, c, 3)
+    let ok3 = !name64_eq(a, 3, b, 2)
+    macro_assert_true(ok1 && ok2 && ok3, 27)
+}
+
+// ============================================================
+// Test 28: macro_is_defined
+// ============================================================
+
+fn test_macro_is_defined() -> i64 with IO, Mut, Panic, Div {
+    var exp = macro_expander_new()
+    var d = macro_def_new()
+    let nm = test_make_name(97, 98, 99, 3)
+    d = macro_def_set_name(d, nm, 3)
+    exp = macro_register(exp, d)
+
+    let ok1 = macro_is_defined(exp, nm, 3)
+    let bad = test_make_name(120, 121, 122, 3)
+    let ok2 = !macro_is_defined(exp, bad, 3)
+    macro_assert_true(ok1 && ok2, 28)
+}
+
+// ============================================================
+// Test 29: macro_unregister
+// ============================================================
+
+fn test_macro_unregister() -> i64 with IO, Mut, Panic, Div {
+    var exp = macro_expander_new()
+    var d1 = macro_def_new()
+    let nm1 = test_make_name(97, 0, 0, 1)
+    d1 = macro_def_set_name(d1, nm1, 1)
+    exp = macro_register(exp, d1)
+
+    var d2 = macro_def_new()
+    let nm2 = test_make_name(98, 0, 0, 1)
+    d2 = macro_def_set_name(d2, nm2, 1)
+    exp = macro_register(exp, d2)
+
+    let ok1 = exp.def_count == 2
+    exp = macro_unregister(exp, 0)
+    let ok2 = exp.def_count == 1
+    // After removing index 0, "b" should now be at index 0
+    let ok3 = macro_def_name_eq(exp.defs[0], nm2, 1)
+    macro_assert_true(ok1 && ok2 && ok3, 29)
+}
+
+// ============================================================
+// Test 30: macro_reset_stack
+// ============================================================
+
+fn test_macro_reset_stack() -> i64 with IO, Mut, Panic, Div {
+    var exp = macro_expander_new()
+    exp = macro_push_stack(exp, 1)
+    exp = macro_push_stack(exp, 2)
+    exp = macro_push_stack(exp, 3)
+    let ok1 = exp.stack_depth == 3
+    exp = macro_reset_stack(exp)
+    let ok2 = exp.stack_depth == 0
+    let ok3 = !macro_check_recursion(exp, 1)
+    macro_assert_true(ok1 && ok2 && ok3, 30)
+}
+
+// ============================================================
+// Test 31: macro_count_in_scope
+// ============================================================
+
+fn test_macro_count_in_scope() -> i64 with IO, Mut, Panic, Div {
+    var exp = macro_expander_new()
+
+    var d1 = macro_def_new()
+    let nm1 = test_make_name(97, 0, 0, 1)
+    d1 = macro_def_set_name(d1, nm1, 1)
+    d1.scope_id = 0
+    exp = macro_register(exp, d1)
+
+    var d2 = macro_def_new()
+    let nm2 = test_make_name(98, 0, 0, 1)
+    d2 = macro_def_set_name(d2, nm2, 1)
+    d2.scope_id = 5
+    exp = macro_register(exp, d2)
+
+    var d3 = macro_def_new()
+    let nm3 = test_make_name(99, 0, 0, 1)
+    d3 = macro_def_set_name(d3, nm3, 1)
+    d3.scope_id = 10
+    exp = macro_register(exp, d3)
+
+    let c1 = macro_count_in_scope(exp, 0)
+    let ok1 = c1 == 1  // only scope 0
+    let c2 = macro_count_in_scope(exp, 5)
+    let ok2 = c2 == 2  // scope 0 and 5
+    let c3 = macro_count_in_scope(exp, 100)
+    let ok3 = c3 == 3  // all visible
+    macro_assert_true(ok1 && ok2 && ok3, 31)
+}
+
+// ============================================================
+// Test 32: macro_template_count_kind
+// ============================================================
+
+fn test_macro_template_count_kind() -> i64 with IO, Mut, Panic, Div {
+    var tmpl = macro_template_new()
+    let lit = test_make_name(65, 0, 0, 1)
+    tmpl = macro_template_add_literal(tmpl, lit)
+    tmpl = macro_template_add_param_ref(tmpl, 0)
+    tmpl = macro_template_add_literal(tmpl, lit)
+    tmpl = macro_template_add_gensym(tmpl)
+    tmpl = macro_template_add_param_ref(tmpl, 1)
+
+    let lc = macro_template_count_kind(tmpl, TOK_LITERAL)
+    let pc = macro_template_count_kind(tmpl, TOK_PARAM_REF)
+    let gc = macro_template_count_kind(tmpl, TOK_GENSYM)
+    let ok1 = lc == 2
+    let ok2 = pc == 2
+    let ok3 = gc == 1
+    macro_assert_true(ok1 && ok2 && ok3, 32)
+}
+
+// ============================================================
+// Test 33: macro_template_uses_param
+// ============================================================
+
+fn test_macro_template_uses_param() -> i64 with IO, Mut, Panic, Div {
+    var tmpl = macro_template_new()
+    tmpl = macro_template_add_param_ref(tmpl, 0)
+    tmpl = macro_template_add_param_ref(tmpl, 2)
+
+    let ok1 = macro_template_uses_param(tmpl, 0)
+    let ok2 = !macro_template_uses_param(tmpl, 1)
+    let ok3 = macro_template_uses_param(tmpl, 2)
+    macro_assert_true(ok1 && ok2 && ok3, 33)
+}
+
+// ============================================================
+// Test 34: macro_depth_exceeded
+// ============================================================
+
+fn test_macro_depth_exceeded() -> i64 with IO, Mut, Panic, Div {
+    var exp = macro_expander_new()
+    let ok1 = !macro_depth_exceeded(exp)
+
+    // Fill the stack to max
+    var i: i64 = 0
+    while i < 32 {
+        exp = macro_push_stack(exp, i)
+        i = i + 1
+    }
+    let ok2 = macro_depth_exceeded(exp)
+    macro_assert_true(ok1 && ok2, 34)
+}
+
+// ============================================================
+// Test 35: Expansion counter tracks correctly
+// ============================================================
+
+fn test_macro_expansion_counter() -> i64 with IO, Mut, Panic, Div {
+    var exp = macro_expander_new()
+
+    // Register a simple zero-param macro
+    var d = macro_def_new()
+    let nm = test_make_name(120, 0, 0, 1)
+    d = macro_def_set_name(d, nm, 1)
+    d.template = macro_template_new()
+    exp = macro_register(exp, d)
+
+    let ok1 = macro_count_expansions(exp) == 0
+
+    let args = macro_args_new()
+    let r1 = macro_expand(exp, nm, 1, args)
+    exp = r1.0
+    let ok2 = macro_count_expansions(exp) == 1
+
+    let r2 = macro_expand(exp, nm, 1, args)
+    exp = r2.0
+    let ok3 = macro_count_expansions(exp) == 2
+
+    let r3 = macro_expand(exp, nm, 1, args)
+    exp = r3.0
+    let ok4 = macro_count_expansions(exp) == 3
+
+    macro_assert_true(ok1 && ok2 && ok3 && ok4, 35)
+}
+
+// ============================================================
+// Test 36: Validate def — bad param ref in template
+// ============================================================
+
+fn test_macro_validate_bad_ref() -> i64 with IO, Mut, Panic, Div {
+    var d = macro_def_new()
+    let nm = test_make_name(97, 0, 0, 1)
+    d = macro_def_set_name(d, nm, 1)
+    var p = macro_param_new()
+    d = macro_def_add_param(d, p)
+    // Template references param index 5, but only 1 param exists
+    d.template = macro_template_add_param_ref(d.template, 5)
+    let err = macro_validate_def(d)
+    macro_assert_true(err == 6, 36)
+}
+
+// ============================================================
+// Test 37: Scoped lookup
+// ============================================================
+
+fn test_macro_scoped_lookup() -> i64 with IO, Mut, Panic, Div {
+    var exp = macro_expander_new()
+
+    var d1 = macro_def_new()
+    let nm = test_make_name(97, 0, 0, 1)
+    d1 = macro_def_set_name(d1, nm, 1)
+    d1.scope_id = 10
+    exp = macro_register(exp, d1)
+
+    // Lookup at scope 5 should fail (macro at scope 10)
+    let idx1 = macro_lookup_in_scope(exp, nm, 1, 5)
+    let ok1 = idx1 == (0 - 1)
+
+    // Lookup at scope 10 should succeed
+    let idx2 = macro_lookup_in_scope(exp, nm, 1, 10)
+    let ok2 = idx2 == 0
+
+    // Lookup at scope 20 should succeed
+    let idx3 = macro_lookup_in_scope(exp, nm, 1, 20)
+    let ok3 = idx3 == 0
+
+    macro_assert_true(ok1 && ok2 && ok3, 37)
+}
+
+// ============================================================
+// Test 38: MacroArgs construction and add
+// ============================================================
+
+fn test_macro_args() -> i64 with IO, Mut, Panic, Div {
+    var args = macro_args_new()
+    let ok1 = args.arg_count == 0
+
+    var toks: [i64; 32] = [0; 32]
+    toks[0] = 42
+    toks[1] = 99
+    args = macro_args_add(args, toks, 2, MACRO_PARAM_EXPR)
+
+    let ok2 = args.arg_count == 1
+    let ok3 = macro_args_get_count(args, 0) == 2
+    let ok4 = args.tokens[0][0] == 42
+    let ok5 = args.tokens[0][1] == 99
+    let ok6 = macro_args_get_count(args, 1) == 0  // out of bounds
+    macro_assert_true(ok1 && ok2 && ok3 && ok4 && ok5 && ok6, 38)
+}
+
+// ============================================================
+// Test 39: ExpansionOutput overflow handling
+// ============================================================
+
+fn test_expansion_output_overflow() -> i64 with IO, Mut, Panic, Div {
+    var out = expansion_output_new()
+    let ok1 = out.status == EXPAND_OK
+
+    // Push up to limit
+    var i: i64 = 0
+    while i < 1024 {
+        out = expansion_output_push(out, i)
+        i = i + 1
+    }
+    let ok2 = out.token_count == 1024
+    let ok3 = out.status == EXPAND_OK
+
+    // One more should overflow
+    out = expansion_output_push(out, 999)
+    let ok4 = out.status == EXPAND_ERR_OVERFLOW
+    macro_assert_true(ok1 && ok2 && ok3 && ok4, 39)
+}
+
+// ============================================================
+// Test 40: Multiple macro shadowing
+// ============================================================
+
+fn test_macro_shadowing() -> i64 with IO, Mut, Panic, Div {
+    var exp = macro_expander_new()
+
+    // Register "m" at scope 0
+    var d1 = macro_def_new()
+    let nm = test_make_name(109, 0, 0, 1)  // "m"
+    d1 = macro_def_set_name(d1, nm, 1)
+    d1.scope_id = 0
+    exp = macro_register(exp, d1)
+
+    // Register "m" again at scope 5 (shadows first)
+    var d2 = macro_def_new()
+    d2 = macro_def_set_name(d2, nm, 1)
+    d2.scope_id = 5
+    d2.is_builtin = true  // mark differently to distinguish
+    exp = macro_register(exp, d2)
+
+    // Lookup should find the most recent (index 1)
+    let idx = macro_lookup(exp, nm, 1)
+    let ok1 = idx == 1
+    let def = macro_get_def(exp, idx)
+    let ok2 = def.is_builtin  // should be the shadowing definition
+    let ok3 = exp.def_count == 2
+    macro_assert_true(ok1 && ok2 && ok3, 40)
+}
+
+// ============================================================
+// Test 41: Validate def — variadic last is OK
+// ============================================================
+
+fn test_macro_validate_variadic_last() -> i64 with IO, Mut, Panic, Div {
+    var d = macro_def_new()
+    let nm = test_make_name(97, 0, 0, 1)
+    d = macro_def_set_name(d, nm, 1)
+
+    var p1 = macro_param_new()
+    let pn1 = test_make_name(120, 0, 0, 1)
+    p1 = macro_param_set_name(p1, pn1, 1)
+    d = macro_def_add_param(d, p1)
+
+    var p2 = macro_param_new()
+    let pn2 = test_make_name(121, 0, 0, 1)
+    p2 = macro_param_set_name(p2, pn2, 1)
+    p2.is_variadic = true
+    d = macro_def_add_param(d, p2)
+
+    let err = macro_validate_def(d)
+    macro_assert_true(err == 0, 41)
+}
+
+// ============================================================
+// Test 42: Gensym counter increments correctly across calls
+// ============================================================
+
+fn test_macro_gensym_counter() -> i64 with IO, Mut, Panic, Div {
+    var exp = macro_expander_new()
+    let ok1 = macro_gensym_counter(exp) == 0
+
+    let r1 = macro_gensym(exp)
+    exp = r1.0
+    let ok2 = macro_gensym_counter(exp) == 1
+
+    let r2 = macro_gensym(exp)
+    exp = r2.0
+    let r3 = macro_gensym(exp)
+    exp = r3.0
+    let ok3 = macro_gensym_counter(exp) == 3
+
+    macro_assert_true(ok1 && ok2 && ok3, 42)
+}
+
+// ============================================================
+// Test 43: Pattern mismatch on kind
+// ============================================================
+
+fn test_macro_match_kind_mismatch() -> i64 with IO, Mut, Panic, Div {
+    var d = macro_def_new()
+    let nm = test_make_name(97, 0, 0, 1)
+    d = macro_def_set_name(d, nm, 1)
+    var p = macro_param_new()
+    p.kind = MACRO_PARAM_TYPE
+    d = macro_def_add_param(d, p)
+
+    // Provide EXPR kind when TYPE is expected
+    var args = macro_args_new()
+    var toks: [i64; 32] = [0; 32]
+    args = macro_args_add(args, toks, 1, MACRO_PARAM_EXPR)
+    let ok1 = !macro_match_pattern(d, args)
+
+    // Kind 0 means "any" — should match
+    var args2 = macro_args_new()
+    args2 = macro_args_add(args2, toks, 1, 0)
+    let ok2 = macro_match_pattern(d, args2)
+
+    macro_assert_true(ok1 && ok2, 43)
+}
+
+// ============================================================
+// Test 44: Expansion preserves stack depth (push/pop balanced)
+// ============================================================
+
+fn test_macro_expand_stack_balanced() -> i64 with IO, Mut, Panic, Div {
+    var exp = macro_expander_new()
+
+    var d = macro_def_new()
+    let nm = test_make_name(97, 0, 0, 1)
+    d = macro_def_set_name(d, nm, 1)
+    d.template = macro_template_new()
+    exp = macro_register(exp, d)
+
+    let ok1 = macro_stack_depth(exp) == 0
+    let args = macro_args_new()
+    let result = macro_expand(exp, nm, 1, args)
+    exp = result.0
+    let ok2 = macro_stack_depth(exp) == 0  // should be balanced
+    let ok3 = result.1.status == EXPAND_OK
+    macro_assert_true(ok1 && ok2 && ok3, 44)
+}
+
+// ============================================================
+// Test runner
+// ============================================================
+
+fn macro_check_run_tests() -> i64 with IO, Mut, Panic, Div {
+    print("=== Macro expansion tests ===\n")
+    var fails: i64 = 0
+    fails = fails + test_macro_param_new()
+    fails = fails + test_macro_param_kind()
+    fails = fails + test_macro_param_name()
+    fails = fails + test_macro_template_literal()
+    fails = fails + test_macro_template_param_ref()
+    fails = fails + test_macro_template_mixed()
+    fails = fails + test_macro_def_new()
+    fails = fails + test_macro_def_name()
+    fails = fails + test_macro_def_params()
+    fails = fails + test_macro_expander_new()
+    fails = fails + test_macro_register_lookup()
+    fails = fails + test_macro_gensym()
+    fails = fails + test_macro_recursion_check()
+    fails = fails + test_macro_validate_valid()
+    fails = fails + test_macro_validate_empty_name()
+    fails = fails + test_macro_validate_bad_kind()
+    fails = fails + test_macro_validate_dup_params()
+    fails = fails + test_macro_validate_variadic_not_last()
+    fails = fails + test_macro_match_exact()
+    fails = fails + test_macro_match_variadic()
+    fails = fails + test_macro_simple_expand()
+    fails = fails + test_macro_gensym_expand()
+    fails = fails + test_macro_expand_not_found()
+    fails = fails + test_macro_expand_arg_mismatch()
+    fails = fails + test_macro_expand_recursion()
+    fails = fails + test_macro_builtins()
+    fails = fails + test_name64_eq()
+    fails = fails + test_macro_is_defined()
+    fails = fails + test_macro_unregister()
+    fails = fails + test_macro_reset_stack()
+    fails = fails + test_macro_count_in_scope()
+    fails = fails + test_macro_template_count_kind()
+    fails = fails + test_macro_template_uses_param()
+    fails = fails + test_macro_depth_exceeded()
+    fails = fails + test_macro_expansion_counter()
+    fails = fails + test_macro_validate_bad_ref()
+    fails = fails + test_macro_scoped_lookup()
+    fails = fails + test_macro_args()
+    fails = fails + test_expansion_output_overflow()
+    fails = fails + test_macro_shadowing()
+    fails = fails + test_macro_validate_variadic_last()
+    fails = fails + test_macro_gensym_counter()
+    fails = fails + test_macro_match_kind_mismatch()
+    fails = fails + test_macro_expand_stack_balanced()
+
+    print("Total failures: ")
+    print_int(fails)
+    print("\n")
+    fails
+}

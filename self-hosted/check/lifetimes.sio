@@ -1,0 +1,1846 @@
+// Lifetime / region checker for the self-hosted Sounio compiler
+//
+// Implements NLL-style region inference and borrow conflict detection:
+//   - Regions are hierarchically nested (static > fn > block > expr)
+//   - Borrows are tracked with place, kind, and originating instruction
+//   - Constraints encode sub-region outlives relationships
+//   - Solver propagates constraints to fixed point
+//   - Conflict detector finds overlapping mutable/shared borrows
+//   - Dangling reference checker ensures borrows do not escape their region
+//
+// All data structures are flat arrays (arena pattern) for self-hosted use.
+
+// ============================================================
+// Constants — region kinds
+// ============================================================
+
+fn REGION_STATIC() -> i64 { 0 }
+fn REGION_FN()     -> i64 { 1 }
+fn REGION_BLOCK()  -> i64 { 2 }
+fn REGION_EXPR()   -> i64 { 3 }
+
+// ============================================================
+// Constants — borrow kinds
+// ============================================================
+
+fn BORROW_SHARED()  -> i64 { 1 }
+fn BORROW_MUTABLE() -> i64 { 2 }
+fn BORROW_MOVE()    -> i64 { 3 }
+
+// ============================================================
+// Constants — constraint kinds
+// ============================================================
+
+fn CONSTRAINT_OUTLIVES()  -> i64 { 1 }
+fn CONSTRAINT_EQUAL()     -> i64 { 2 }
+fn CONSTRAINT_BORROW()    -> i64 { 3 }
+
+// ============================================================
+// Constants — sentinel / limit values
+// ============================================================
+
+fn REGION_NONE()   -> i64 { 0 - 1 }
+fn MAX_REGIONS()   -> i64 { 1024 }
+fn MAX_BORROWS()   -> i64 { 2048 }
+fn MAX_CONSTRAINTS() -> i64 { 4096 }
+fn MAX_ITER()      -> i64 { 256 }
+
+// ============================================================
+// Region — a lexical or non-lexical lifetime scope
+// ============================================================
+
+struct Region {
+    id: i64,
+    parent: i64,
+    start_point: i64,
+    end_point: i64,
+    kind: i64,
+}
+
+fn region_new(id: i64, parent: i64, start_point: i64, end_point: i64, kind: i64) -> Region {
+    Region {
+        id: id,
+        parent: parent,
+        start_point: start_point,
+        end_point: end_point,
+        kind: kind,
+    }
+}
+
+fn empty_region() -> Region {
+    Region {
+        id: 0 - 1,
+        parent: 0 - 1,
+        start_point: 0,
+        end_point: 0,
+        kind: 0,
+    }
+}
+
+// ============================================================
+// BorrowInfo — a single active borrow
+// ============================================================
+
+struct BorrowInfo {
+    id: i64,
+    region_id: i64,
+    place_id: i64,
+    kind: i64,
+    is_mutable: bool,
+    origin_instr: i64,
+}
+
+fn borrow_info_new(id: i64, region_id: i64, place_id: i64, kind: i64, is_mutable: bool, origin_instr: i64) -> BorrowInfo {
+    BorrowInfo {
+        id: id,
+        region_id: region_id,
+        place_id: place_id,
+        kind: kind,
+        is_mutable: is_mutable,
+        origin_instr: origin_instr,
+    }
+}
+
+fn empty_borrow_info() -> BorrowInfo {
+    BorrowInfo {
+        id: 0 - 1,
+        region_id: 0 - 1,
+        place_id: 0 - 1,
+        kind: 0,
+        is_mutable: false,
+        origin_instr: 0 - 1,
+    }
+}
+
+// ============================================================
+// LifetimeConstraint — sub-region outlives super-region
+// ============================================================
+
+struct LifetimeConstraint {
+    sub_region: i64,
+    super_region: i64,
+    origin: i64,
+    kind: i64,
+}
+
+fn constraint_new(sub_region: i64, super_region: i64, origin: i64, kind: i64) -> LifetimeConstraint {
+    LifetimeConstraint {
+        sub_region: sub_region,
+        super_region: super_region,
+        origin: origin,
+        kind: kind,
+    }
+}
+
+fn empty_constraint() -> LifetimeConstraint {
+    LifetimeConstraint {
+        sub_region: 0 - 1,
+        super_region: 0 - 1,
+        origin: 0 - 1,
+        kind: 0,
+    }
+}
+
+// ============================================================
+// ConflictPair — two borrows that are in conflict
+// ============================================================
+
+struct ConflictPair {
+    borrow_a: i64,
+    borrow_b: i64,
+    place_id: i64,
+}
+
+fn empty_conflict_pair() -> ConflictPair {
+    ConflictPair {
+        borrow_a: 0 - 1,
+        borrow_b: 0 - 1,
+        place_id: 0 - 1,
+    }
+}
+
+// ============================================================
+// LiveRange — liveness interval for a borrow
+// ============================================================
+
+struct LiveRange {
+    borrow_id: i64,
+    start_point: i64,
+    end_point: i64,
+}
+
+fn empty_live_range() -> LiveRange {
+    LiveRange {
+        borrow_id: 0 - 1,
+        start_point: 0,
+        end_point: 0,
+    }
+}
+
+// ============================================================
+// LifetimeChecker — main checker state
+// ============================================================
+
+struct LifetimeChecker {
+    regions: [Region; 1024],
+    region_count: i64,
+    borrows: [BorrowInfo; 2048],
+    borrow_count: i64,
+    constraints: [LifetimeConstraint; 4096],
+    constraint_count: i64,
+    region_parents: [i64; 1024],
+    error_count: i64,
+}
+
+fn lifetime_checker_new() -> LifetimeChecker {
+    LifetimeChecker {
+        regions: [empty_region(); 1024],
+        region_count: 0,
+        borrows: [empty_borrow_info(); 2048],
+        borrow_count: 0,
+        constraints: [empty_constraint(); 4096],
+        constraint_count: 0,
+        region_parents: [0 - 1; 1024],
+        error_count: 0,
+    }
+}
+
+// ============================================================
+// Region management
+// ============================================================
+
+// Add a region to the checker, returns its index.
+fn lt_add_region(checker: LifetimeChecker, region: Region) -> (LifetimeChecker, i64) with Mut, Div, Panic {
+    var c = checker
+    let idx = c.region_count
+    if idx < MAX_REGIONS() {
+        c.regions[idx] = region
+        c.region_parents[idx] = region.parent
+        c.region_count = idx + 1
+    }
+    (c, idx)
+}
+
+// Create and add a static region (the outermost scope).
+fn lt_add_static_region(checker: LifetimeChecker) -> (LifetimeChecker, i64) with Mut, Div, Panic {
+    let r = region_new(checker.region_count, 0 - 1, 0, 999999, REGION_STATIC())
+    lt_add_region(checker, r)
+}
+
+// Create and add a function-body region nested inside a parent.
+fn lt_add_fn_region(checker: LifetimeChecker, parent: i64, start: i64, end: i64) -> (LifetimeChecker, i64) with Mut, Div, Panic {
+    let r = region_new(checker.region_count, parent, start, end, REGION_FN())
+    lt_add_region(checker, r)
+}
+
+// Create and add a block region (loop body, if-branch, etc.).
+fn lt_add_block_region(checker: LifetimeChecker, parent: i64, start: i64, end: i64) -> (LifetimeChecker, i64) with Mut, Div, Panic {
+    let r = region_new(checker.region_count, parent, start, end, REGION_BLOCK())
+    lt_add_region(checker, r)
+}
+
+// Create and add an expression-level region.
+fn lt_add_expr_region(checker: LifetimeChecker, parent: i64, start: i64, end: i64) -> (LifetimeChecker, i64) with Mut, Div, Panic {
+    let r = region_new(checker.region_count, parent, start, end, REGION_EXPR())
+    lt_add_region(checker, r)
+}
+
+// ============================================================
+// Borrow management
+// ============================================================
+
+// Add a borrow record to the checker, returns its index.
+fn lt_add_borrow(checker: LifetimeChecker, borrow: BorrowInfo) -> (LifetimeChecker, i64) with Mut, Div, Panic {
+    var c = checker
+    let idx = c.borrow_count
+    if idx < MAX_BORROWS() {
+        c.borrows[idx] = borrow
+        c.borrow_count = idx + 1
+    }
+    (c, idx)
+}
+
+// Convenience: add a shared borrow.
+fn lt_add_shared_borrow(checker: LifetimeChecker, region_id: i64, place_id: i64, origin: i64) -> (LifetimeChecker, i64) with Mut, Div, Panic {
+    let b = borrow_info_new(checker.borrow_count, region_id, place_id, BORROW_SHARED(), false, origin)
+    lt_add_borrow(checker, b)
+}
+
+// Convenience: add a mutable borrow.
+fn lt_add_mutable_borrow(checker: LifetimeChecker, region_id: i64, place_id: i64, origin: i64) -> (LifetimeChecker, i64) with Mut, Div, Panic {
+    let b = borrow_info_new(checker.borrow_count, region_id, place_id, BORROW_MUTABLE(), true, origin)
+    lt_add_borrow(checker, b)
+}
+
+// Convenience: add a move borrow.
+fn lt_add_move_borrow(checker: LifetimeChecker, region_id: i64, place_id: i64, origin: i64) -> (LifetimeChecker, i64) with Mut, Div, Panic {
+    let b = borrow_info_new(checker.borrow_count, region_id, place_id, BORROW_MOVE(), false, origin)
+    lt_add_borrow(checker, b)
+}
+
+// ============================================================
+// Constraint management
+// ============================================================
+
+// Add a lifetime constraint. sub_region must outlive super_region.
+fn lt_add_constraint(checker: LifetimeChecker, constraint: LifetimeConstraint) -> LifetimeChecker with Mut, Div, Panic {
+    var c = checker
+    let idx = c.constraint_count
+    if idx < MAX_CONSTRAINTS() {
+        c.constraints[idx] = constraint
+        c.constraint_count = idx + 1
+    }
+    c
+}
+
+// Convenience: add an outlives constraint (sub outlives super).
+fn lt_add_outlives(checker: LifetimeChecker, sub: i64, sup: i64, origin: i64) -> LifetimeChecker with Mut, Div, Panic {
+    let ct = constraint_new(sub, sup, origin, CONSTRAINT_OUTLIVES())
+    lt_add_constraint(checker, ct)
+}
+
+// Convenience: add an equality constraint (regions must be identical).
+fn lt_add_equal(checker: LifetimeChecker, a: i64, b: i64, origin: i64) -> LifetimeChecker with Mut, Div, Panic {
+    let ct = constraint_new(a, b, origin, CONSTRAINT_EQUAL())
+    lt_add_constraint(checker, ct)
+}
+
+// ============================================================
+// Region containment and hierarchy queries
+// ============================================================
+
+// Check if region A contains (is an ancestor of) region B.
+// A region contains itself. The static region contains everything.
+fn lt_region_contains(checker: LifetimeChecker, region_a: i64, region_b: i64) -> bool with Mut, Div, Panic {
+    // A region contains itself
+    if region_a == region_b {
+        return true
+    }
+    // Walk B's parent chain looking for A
+    var current = region_b
+    var steps: i64 = 0
+    while current >= 0 && steps < MAX_REGIONS() {
+        if current == region_a {
+            return true
+        }
+        if current >= checker.region_count {
+            return false
+        }
+        current = checker.region_parents[current]
+        steps = steps + 1
+    }
+    false
+}
+
+// Compute the nesting depth of a region (static = 0, fn = 1, etc.).
+fn lt_region_depth(checker: LifetimeChecker, region_id: i64) -> i64 with Mut, Div, Panic {
+    if region_id < 0 || region_id >= checker.region_count {
+        return 0
+    }
+    var depth: i64 = 0
+    var current = region_id
+    var steps: i64 = 0
+    while steps < MAX_REGIONS() {
+        let parent = checker.region_parents[current]
+        if parent < 0 || parent >= checker.region_count {
+            return depth
+        }
+        depth = depth + 1
+        current = parent
+        steps = steps + 1
+    }
+    depth
+}
+
+// Find the common ancestor of two regions.
+// Returns the region_id of the lowest common ancestor, or -1 if none.
+fn lt_common_ancestor(checker: LifetimeChecker, region_a: i64, region_b: i64) -> i64 with Mut, Div, Panic {
+    if region_a < 0 || region_b < 0 {
+        return 0 - 1
+    }
+    if region_a == region_b {
+        return region_a
+    }
+
+    // Normalize depths: bring both to the same depth, then walk in parallel
+    var a = region_a
+    var b = region_b
+    var depth_a = lt_region_depth(checker, a)
+    var depth_b = lt_region_depth(checker, b)
+
+    // Bring a up to same depth as b
+    var steps: i64 = 0
+    while depth_a > depth_b && steps < MAX_REGIONS() {
+        if a >= 0 && a < checker.region_count {
+            a = checker.region_parents[a]
+        }
+        depth_a = depth_a - 1
+        steps = steps + 1
+    }
+
+    // Bring b up to same depth as a
+    steps = 0
+    while depth_b > depth_a && steps < MAX_REGIONS() {
+        if b >= 0 && b < checker.region_count {
+            b = checker.region_parents[b]
+        }
+        depth_b = depth_b - 1
+        steps = steps + 1
+    }
+
+    // Walk in parallel until we meet
+    steps = 0
+    while a != b && steps < MAX_REGIONS() {
+        if a >= 0 && a < checker.region_count {
+            a = checker.region_parents[a]
+        }
+        if b >= 0 && b < checker.region_count {
+            b = checker.region_parents[b]
+        }
+        steps = steps + 1
+    }
+
+    if a == b {
+        return a
+    }
+    0 - 1
+}
+
+// Check if a region is the static region (has no parent).
+fn lt_is_static(checker: LifetimeChecker, region_id: i64) -> bool with Mut, Div, Panic {
+    if region_id < 0 || region_id >= checker.region_count {
+        return false
+    }
+    checker.regions[region_id].kind == REGION_STATIC()
+}
+
+// Return the span (start, end) of a region as a tuple-like pair.
+fn lt_region_span_start(checker: LifetimeChecker, region_id: i64) -> i64 with Mut, Div, Panic {
+    if region_id < 0 || region_id >= checker.region_count {
+        return 0
+    }
+    checker.regions[region_id].start_point
+}
+
+fn lt_region_span_end(checker: LifetimeChecker, region_id: i64) -> i64 with Mut, Div, Panic {
+    if region_id < 0 || region_id >= checker.region_count {
+        return 0
+    }
+    checker.regions[region_id].end_point
+}
+
+// ============================================================
+// Outlives checking
+// ============================================================
+
+// Check if sub_region outlives super_region.
+// A region outlives another if it contains it (is an ancestor or equal),
+// or if the sub's end_point >= super's end_point and they share ancestry.
+fn lt_check_outlives(checker: LifetimeChecker, sub_region: i64, super_region: i64) -> bool with Mut, Div, Panic {
+    // Static outlives everything
+    if sub_region >= 0 && sub_region < checker.region_count {
+        if checker.regions[sub_region].kind == REGION_STATIC() {
+            return true
+        }
+    }
+
+    // A region outlives itself
+    if sub_region == super_region {
+        return true
+    }
+
+    // If sub contains super, then sub outlives super (sub is an ancestor)
+    if lt_region_contains(checker, sub_region, super_region) {
+        return true
+    }
+
+    // Span-based check: sub's span must fully cover super's span
+    if sub_region >= 0 && sub_region < checker.region_count
+       && super_region >= 0 && super_region < checker.region_count {
+        let sub_start = checker.regions[sub_region].start_point
+        let sub_end = checker.regions[sub_region].end_point
+        let super_start = checker.regions[super_region].start_point
+        let super_end = checker.regions[super_region].end_point
+        if sub_start <= super_start && sub_end >= super_end {
+            return true
+        }
+    }
+
+    false
+}
+
+// ============================================================
+// Constraint solver — propagate to fixed point
+// ============================================================
+
+// Check whether a single constraint is satisfied.
+fn lt_constraint_satisfied(checker: LifetimeChecker, idx: i64) -> bool with Mut, Div, Panic {
+    if idx < 0 || idx >= checker.constraint_count {
+        return true
+    }
+    let ct = checker.constraints[idx]
+    if ct.kind == CONSTRAINT_OUTLIVES() {
+        return lt_check_outlives(checker, ct.sub_region, ct.super_region)
+    }
+    if ct.kind == CONSTRAINT_EQUAL() {
+        // Both directions must hold
+        let fwd = lt_check_outlives(checker, ct.sub_region, ct.super_region)
+        let bwd = lt_check_outlives(checker, ct.super_region, ct.sub_region)
+        return fwd && bwd
+    }
+    if ct.kind == CONSTRAINT_BORROW() {
+        // The borrow's region must outlive the borrowed place's region
+        return lt_check_outlives(checker, ct.sub_region, ct.super_region)
+    }
+    true
+}
+
+// Attempt to widen a region's end_point so that it outlives a target.
+// Returns true if the region was actually widened (progress was made).
+fn lt_widen_region(checker: LifetimeChecker, region_id: i64, target_end: i64) -> (LifetimeChecker, bool) with Mut, Div, Panic {
+    var c = checker
+    if region_id < 0 || region_id >= c.region_count {
+        return (c, false)
+    }
+    // Do not widen the static region
+    if c.regions[region_id].kind == REGION_STATIC() {
+        return (c, false)
+    }
+    if c.regions[region_id].end_point >= target_end {
+        return (c, false)
+    }
+    c.regions[region_id].end_point = target_end
+    (c, true)
+}
+
+// Propagate all constraints to a fixed point.
+// Returns the checker with possibly-widened regions and an updated error_count.
+fn lt_solve_constraints(checker: LifetimeChecker) -> LifetimeChecker with Mut, Div, Panic {
+    var c = checker
+    var iteration: i64 = 0
+    var changed = true
+
+    while changed && iteration < MAX_ITER() {
+        changed = false
+        var i: i64 = 0
+        while i < c.constraint_count {
+            let ct = c.constraints[i]
+            if ct.kind == CONSTRAINT_OUTLIVES() || ct.kind == CONSTRAINT_BORROW() {
+                // sub must outlive super: ensure sub.end >= super.end
+                if ct.sub_region >= 0 && ct.sub_region < c.region_count
+                   && ct.super_region >= 0 && ct.super_region < c.region_count {
+                    let target_end = c.regions[ct.super_region].end_point
+                    let pair = lt_widen_region(c, ct.sub_region, target_end)
+                    c = pair.0
+                    if pair.1 {
+                        changed = true
+                    }
+                }
+            }
+            if ct.kind == CONSTRAINT_EQUAL() {
+                // Both regions must have the same extent
+                if ct.sub_region >= 0 && ct.sub_region < c.region_count
+                   && ct.super_region >= 0 && ct.super_region < c.region_count {
+                    let end_a = c.regions[ct.sub_region].end_point
+                    let end_b = c.regions[ct.super_region].end_point
+                    if end_a > end_b {
+                        let pair = lt_widen_region(c, ct.super_region, end_a)
+                        c = pair.0
+                        if pair.1 { changed = true }
+                    }
+                    if end_b > end_a {
+                        let pair2 = lt_widen_region(c, ct.sub_region, end_b)
+                        c = pair2.0
+                        if pair2.1 { changed = true }
+                    }
+                }
+            }
+            i = i + 1
+        }
+        iteration = iteration + 1
+    }
+
+    // Now check for unsatisfied constraints
+    var j: i64 = 0
+    while j < c.constraint_count {
+        if !lt_constraint_satisfied(c, j) {
+            c.error_count = c.error_count + 1
+        }
+        j = j + 1
+    }
+
+    c
+}
+
+// ============================================================
+// Borrow overlap detection
+// ============================================================
+
+// Check if two borrows' live ranges overlap.
+// Two borrows overlap if their regions intersect in program points.
+fn lt_borrows_overlap(checker: LifetimeChecker, borrow_a: i64, borrow_b: i64) -> bool with Mut, Div, Panic {
+    if borrow_a < 0 || borrow_a >= checker.borrow_count {
+        return false
+    }
+    if borrow_b < 0 || borrow_b >= checker.borrow_count {
+        return false
+    }
+    let ba = checker.borrows[borrow_a]
+    let bb = checker.borrows[borrow_b]
+
+    // Check region overlap via containment in either direction
+    if lt_region_contains(checker, ba.region_id, bb.region_id) {
+        return true
+    }
+    if lt_region_contains(checker, bb.region_id, ba.region_id) {
+        return true
+    }
+
+    // Check span-based overlap
+    if ba.region_id >= 0 && ba.region_id < checker.region_count
+       && bb.region_id >= 0 && bb.region_id < checker.region_count {
+        let a_start = checker.regions[ba.region_id].start_point
+        let a_end = checker.regions[ba.region_id].end_point
+        let b_start = checker.regions[bb.region_id].start_point
+        let b_end = checker.regions[bb.region_id].end_point
+        // Standard interval overlap: !(a_end < b_start || b_end < a_start)
+        if a_end >= b_start && b_end >= a_start {
+            return true
+        }
+    }
+
+    false
+}
+
+// Check if two borrows on the same place conflict.
+// Conflict rules:
+//   - Two shared borrows: OK
+//   - Shared + mutable: CONFLICT
+//   - Mutable + mutable: CONFLICT
+//   - Any + move: CONFLICT
+fn lt_borrows_conflict(checker: LifetimeChecker, borrow_a: i64, borrow_b: i64) -> bool with Mut, Div, Panic {
+    if borrow_a < 0 || borrow_a >= checker.borrow_count {
+        return false
+    }
+    if borrow_b < 0 || borrow_b >= checker.borrow_count {
+        return false
+    }
+    let ba = checker.borrows[borrow_a]
+    let bb = checker.borrows[borrow_b]
+
+    // Must be on the same place
+    if ba.place_id != bb.place_id {
+        return false
+    }
+
+    // Same borrow cannot conflict with itself
+    if ba.id == bb.id {
+        return false
+    }
+
+    // Must overlap in time
+    if !lt_borrows_overlap(checker, borrow_a, borrow_b) {
+        return false
+    }
+
+    // Two shared borrows do not conflict
+    if ba.kind == BORROW_SHARED() && bb.kind == BORROW_SHARED() {
+        return false
+    }
+
+    // A move conflicts with anything
+    if ba.kind == BORROW_MOVE() || bb.kind == BORROW_MOVE() {
+        return true
+    }
+
+    // Mutable + anything (that is not two shared) is a conflict
+    if ba.kind == BORROW_MUTABLE() || bb.kind == BORROW_MUTABLE() {
+        return true
+    }
+
+    false
+}
+
+// ============================================================
+// Check all borrows for conflicts
+// ============================================================
+
+// Returns the updated checker with error_count incremented for each conflict.
+fn lt_check_borrows(checker: LifetimeChecker) -> LifetimeChecker with Mut, Div, Panic {
+    var c = checker
+    var i: i64 = 0
+    while i < c.borrow_count {
+        var j = i + 1
+        while j < c.borrow_count {
+            if lt_borrows_conflict(c, i, j) {
+                c.error_count = c.error_count + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    c
+}
+
+// ============================================================
+// Find all conflicting borrow pairs
+// ============================================================
+
+// Returns up to 256 conflict pairs and the count.
+fn lt_find_conflicts(checker: LifetimeChecker) -> ([ConflictPair; 256], i64) with Mut, Div, Panic {
+    var conflicts: [ConflictPair; 256] = [empty_conflict_pair(); 256]
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < checker.borrow_count {
+        var j = i + 1
+        while j < checker.borrow_count {
+            if lt_borrows_conflict(checker, i, j) && count < 256 {
+                conflicts[count] = ConflictPair {
+                    borrow_a: i,
+                    borrow_b: j,
+                    place_id: checker.borrows[i].place_id,
+                }
+                count = count + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    (conflicts, count)
+}
+
+// ============================================================
+// Dangling reference detection
+// ============================================================
+
+// A borrow is dangling if its region outlives the region where the
+// borrowed place was defined. In practice, this means the borrow's
+// region extends beyond the end of the place's defining region.
+//
+// We check: for each borrow, if the borrow's region is NOT contained
+// in (or equal to) the place's defining region, it is dangling.
+// Here we approximate: the place_id doubles as the region where the
+// place lives, so the borrow region must be contained in region place_id.
+
+fn lt_check_dangling_single(checker: LifetimeChecker, borrow_idx: i64) -> bool with Mut, Div, Panic {
+    if borrow_idx < 0 || borrow_idx >= checker.borrow_count {
+        return false
+    }
+    let borrow = checker.borrows[borrow_idx]
+    let borrow_region = borrow.region_id
+    let place_region = borrow.place_id
+
+    // If place region is out of bounds, we cannot check
+    if place_region < 0 || place_region >= checker.region_count {
+        return false
+    }
+    // If borrow region is out of bounds, treat as dangling
+    if borrow_region < 0 || borrow_region >= checker.region_count {
+        return true
+    }
+
+    // The borrow's region must be contained within the place's region.
+    // If the place's region does not contain the borrow's region, it is dangling.
+    let contained = lt_region_contains(checker, place_region, borrow_region)
+    if contained {
+        return false
+    }
+
+    // Also check via span: borrow must not extend past place's region end
+    let borrow_end = checker.regions[borrow_region].end_point
+    let place_end = checker.regions[place_region].end_point
+    if borrow_end > place_end {
+        return true
+    }
+
+    // If not contained by hierarchy but spans are OK, still dangling (conservative)
+    true
+}
+
+// Check all borrows for dangling references. Returns updated checker.
+fn lt_check_dangling(checker: LifetimeChecker) -> LifetimeChecker with Mut, Div, Panic {
+    var c = checker
+    var i: i64 = 0
+    while i < c.borrow_count {
+        if lt_check_dangling_single(c, i) {
+            c.error_count = c.error_count + 1
+        }
+        i = i + 1
+    }
+    c
+}
+
+// Count the number of dangling borrows without mutating error_count.
+fn lt_count_dangling(checker: LifetimeChecker) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < checker.borrow_count {
+        if lt_check_dangling_single(checker, i) {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================
+// Live range computation
+// ============================================================
+
+// Compute the live range for a single borrow.
+// The live range spans from the borrow's origin instruction to the
+// end of the borrow's region.
+fn lt_live_range_for(checker: LifetimeChecker, borrow_idx: i64) -> LiveRange with Mut, Div, Panic {
+    if borrow_idx < 0 || borrow_idx >= checker.borrow_count {
+        return empty_live_range()
+    }
+    let borrow = checker.borrows[borrow_idx]
+    let region = borrow.region_id
+    if region < 0 || region >= checker.region_count {
+        return LiveRange {
+            borrow_id: borrow.id,
+            start_point: borrow.origin_instr,
+            end_point: borrow.origin_instr,
+        }
+    }
+    LiveRange {
+        borrow_id: borrow.id,
+        start_point: borrow.origin_instr,
+        end_point: checker.regions[region].end_point,
+    }
+}
+
+// Compute live ranges for all borrows. Returns up to 2048 ranges.
+fn lt_compute_live_ranges(checker: LifetimeChecker) -> ([LiveRange; 2048], i64) with Mut, Div, Panic {
+    var ranges: [LiveRange; 2048] = [empty_live_range(); 2048]
+    var i: i64 = 0
+    while i < checker.borrow_count && i < 2048 {
+        ranges[i] = lt_live_range_for(checker, i)
+        i = i + 1
+    }
+    (ranges, checker.borrow_count)
+}
+
+// ============================================================
+// Region info queries
+// ============================================================
+
+// Get the kind of a region.
+fn lt_region_kind(checker: LifetimeChecker, region_id: i64) -> i64 with Mut, Div, Panic {
+    if region_id < 0 || region_id >= checker.region_count {
+        return 0 - 1
+    }
+    checker.regions[region_id].kind
+}
+
+// Get the parent of a region.
+fn lt_region_parent(checker: LifetimeChecker, region_id: i64) -> i64 with Mut, Div, Panic {
+    if region_id < 0 || region_id >= checker.region_count {
+        return 0 - 1
+    }
+    checker.region_parents[region_id]
+}
+
+// Count the number of children of a region.
+fn lt_region_child_count(checker: LifetimeChecker, parent_id: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < checker.region_count {
+        if checker.region_parents[i] == parent_id {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Check if two live ranges overlap.
+fn lt_live_ranges_overlap(a: LiveRange, b: LiveRange) -> bool {
+    // Standard interval overlap: !(a.end < b.start || b.end < a.start)
+    if a.end_point < b.start_point {
+        return false
+    }
+    if b.end_point < a.start_point {
+        return false
+    }
+    true
+}
+
+// ============================================================
+// Full analysis pipeline
+// ============================================================
+
+// Run the complete lifetime analysis: solve constraints, check borrows,
+// check dangling. Returns the final checker state.
+fn lt_analyze(checker: LifetimeChecker) -> LifetimeChecker with Mut, Div, Panic {
+    var c = lt_solve_constraints(checker)
+    c = lt_check_borrows(c)
+    c = lt_check_dangling(c)
+    c
+}
+
+// ============================================================
+// Diagnostic helpers
+// ============================================================
+
+// Count unsatisfied constraints (without adding to error_count).
+fn lt_count_unsatisfied(checker: LifetimeChecker) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < checker.constraint_count {
+        if !lt_constraint_satisfied(checker, i) {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Count borrow conflicts (without adding to error_count).
+fn lt_count_conflicts(checker: LifetimeChecker) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < checker.borrow_count {
+        var j = i + 1
+        while j < checker.borrow_count {
+            if lt_borrows_conflict(checker, i, j) {
+                count = count + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Retrieve the borrow kind for a given borrow index.
+fn lt_borrow_kind(checker: LifetimeChecker, borrow_idx: i64) -> i64 with Mut, Div, Panic {
+    if borrow_idx < 0 || borrow_idx >= checker.borrow_count {
+        return 0
+    }
+    checker.borrows[borrow_idx].kind
+}
+
+// Retrieve the place_id for a given borrow index.
+fn lt_borrow_place(checker: LifetimeChecker, borrow_idx: i64) -> i64 with Mut, Div, Panic {
+    if borrow_idx < 0 || borrow_idx >= checker.borrow_count {
+        return 0 - 1
+    }
+    checker.borrows[borrow_idx].place_id
+}
+
+// Retrieve the region_id for a given borrow index.
+fn lt_borrow_region(checker: LifetimeChecker, borrow_idx: i64) -> i64 with Mut, Div, Panic {
+    if borrow_idx < 0 || borrow_idx >= checker.borrow_count {
+        return 0 - 1
+    }
+    checker.borrows[borrow_idx].region_id
+}
+
+// ============================================================
+// Test assertion helper
+// ============================================================
+
+fn lt_assert_true(cond: bool, test_id: i64) -> i64 with IO, Mut, Panic, Div {
+    if cond {
+        print("  PASS test ")
+        print_int(test_id)
+        print("\n")
+        return 0
+    } else {
+        print("  FAIL test ")
+        print_int(test_id)
+        print("\n")
+        return 1
+    }
+}
+
+// ============================================================
+// Test 1: Empty checker has zero counts
+// ============================================================
+
+fn lt_test_empty_checker() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+    let ok = c.region_count == 0 && c.borrow_count == 0
+             && c.constraint_count == 0 && c.error_count == 0
+    lt_assert_true(ok, 1)
+}
+
+// ============================================================
+// Test 2: Add a static region
+// ============================================================
+
+fn lt_test_add_static_region() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+    let pair = lt_add_static_region(c)
+    let c2 = pair.0
+    let idx = pair.1
+    let ok = c2.region_count == 1 && idx == 0
+             && c2.regions[0].kind == REGION_STATIC()
+    lt_assert_true(ok, 2)
+}
+
+// ============================================================
+// Test 3: Add nested regions (static > fn > block)
+// ============================================================
+
+fn lt_test_nested_regions() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+    let p1 = lt_add_static_region(c)
+    let c1 = p1.0
+    let static_id = p1.1
+
+    let p2 = lt_add_fn_region(c1, static_id, 10, 100)
+    let c2 = p2.0
+    let fn_id = p2.1
+
+    let p3 = lt_add_block_region(c2, fn_id, 20, 80)
+    let c3 = p3.0
+    let block_id = p3.1
+
+    let ok = c3.region_count == 3
+             && c3.region_parents[fn_id] == static_id
+             && c3.region_parents[block_id] == fn_id
+    lt_assert_true(ok, 3)
+}
+
+// ============================================================
+// Test 4: Region contains itself
+// ============================================================
+
+fn lt_test_region_contains_self() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+    let p1 = lt_add_static_region(c)
+    let c1 = p1.0
+    let ok = lt_region_contains(c1, 0, 0)
+    lt_assert_true(ok, 4)
+}
+
+// ============================================================
+// Test 5: Static region contains all children
+// ============================================================
+
+fn lt_test_static_contains_children() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+    let p1 = lt_add_static_region(c)
+    let c1 = p1.0
+    let p2 = lt_add_fn_region(c1, 0, 10, 100)
+    let c2 = p2.0
+    let p3 = lt_add_block_region(c2, 1, 20, 80)
+    let c3 = p3.0
+
+    let ok1 = lt_region_contains(c3, 0, 1)
+    let ok2 = lt_region_contains(c3, 0, 2)
+    let ok3 = lt_region_contains(c3, 1, 2)
+    lt_assert_true(ok1 && ok2 && ok3, 5)
+}
+
+// ============================================================
+// Test 6: Child does not contain parent
+// ============================================================
+
+fn lt_test_child_not_contains_parent() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+    let p1 = lt_add_static_region(c)
+    let c1 = p1.0
+    let p2 = lt_add_fn_region(c1, 0, 10, 100)
+    let c2 = p2.0
+    let p3 = lt_add_block_region(c2, 1, 20, 80)
+    let c3 = p3.0
+
+    let bad1 = lt_region_contains(c3, 2, 0)
+    let bad2 = lt_region_contains(c3, 2, 1)
+    lt_assert_true(!bad1 && !bad2, 6)
+}
+
+// ============================================================
+// Test 7: Region depth calculation
+// ============================================================
+
+fn lt_test_region_depth() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+    let p1 = lt_add_static_region(c)
+    let c1 = p1.0
+    let p2 = lt_add_fn_region(c1, 0, 10, 100)
+    let c2 = p2.0
+    let p3 = lt_add_block_region(c2, 1, 20, 80)
+    let c3 = p3.0
+    let p4 = lt_add_expr_region(c3, 2, 30, 50)
+    let c4 = p4.0
+
+    let d0 = lt_region_depth(c4, 0)
+    let d1 = lt_region_depth(c4, 1)
+    let d2 = lt_region_depth(c4, 2)
+    let d3 = lt_region_depth(c4, 3)
+
+    let ok = d0 == 0 && d1 == 1 && d2 == 2 && d3 == 3
+    lt_assert_true(ok, 7)
+}
+
+// ============================================================
+// Test 8: Common ancestor of siblings
+// ============================================================
+
+fn lt_test_common_ancestor_siblings() -> i64 with IO, Mut, Panic, Div {
+    // static(0) -> fn(1) -> block_a(2), block_b(3)
+    let c = lifetime_checker_new()
+    let p1 = lt_add_static_region(c)
+    let c1 = p1.0
+    let p2 = lt_add_fn_region(c1, 0, 10, 100)
+    let c2 = p2.0
+    let p3 = lt_add_block_region(c2, 1, 20, 50)
+    let c3 = p3.0
+    let p4 = lt_add_block_region(c3, 1, 60, 90)
+    let c4 = p4.0
+
+    let ancestor = lt_common_ancestor(c4, 2, 3)
+    lt_assert_true(ancestor == 1, 8)
+}
+
+// ============================================================
+// Test 9: Common ancestor of parent and child
+// ============================================================
+
+fn lt_test_common_ancestor_parent_child() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+    let p1 = lt_add_static_region(c)
+    let c1 = p1.0
+    let p2 = lt_add_fn_region(c1, 0, 10, 100)
+    let c2 = p2.0
+    let p3 = lt_add_block_region(c2, 1, 20, 80)
+    let c3 = p3.0
+
+    let ancestor = lt_common_ancestor(c3, 1, 2)
+    lt_assert_true(ancestor == 1, 9)
+}
+
+// ============================================================
+// Test 10: Add and retrieve borrows
+// ============================================================
+
+fn lt_test_add_borrows() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+    let p1 = lt_add_static_region(c)
+    let c1 = p1.0
+    let p2 = lt_add_fn_region(c1, 0, 10, 100)
+    let c2 = p2.0
+
+    let b1 = lt_add_shared_borrow(c2, 1, 1, 15)
+    let c3 = b1.0
+    let b2 = lt_add_mutable_borrow(c3, 1, 2, 20)
+    let c4 = b2.0
+
+    let ok = c4.borrow_count == 2
+             && lt_borrow_kind(c4, 0) == BORROW_SHARED()
+             && lt_borrow_kind(c4, 1) == BORROW_MUTABLE()
+    lt_assert_true(ok, 10)
+}
+
+// ============================================================
+// Test 11: Two shared borrows on same place do not conflict
+// ============================================================
+
+fn lt_test_shared_no_conflict() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+    let p1 = lt_add_static_region(c)
+    let c1 = p1.0
+    let p2 = lt_add_fn_region(c1, 0, 10, 100)
+    let c2 = p2.0
+
+    // Two shared borrows on place 5
+    let b1 = lt_add_shared_borrow(c2, 1, 5, 20)
+    let c3 = b1.0
+    let b2 = lt_add_shared_borrow(c3, 1, 5, 30)
+    let c4 = b2.0
+
+    let conflict = lt_borrows_conflict(c4, 0, 1)
+    lt_assert_true(!conflict, 11)
+}
+
+// ============================================================
+// Test 12: Mutable + shared borrow on same place conflict
+// ============================================================
+
+fn lt_test_mut_shared_conflict() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+    let p1 = lt_add_static_region(c)
+    let c1 = p1.0
+    let p2 = lt_add_fn_region(c1, 0, 10, 100)
+    let c2 = p2.0
+
+    let b1 = lt_add_mutable_borrow(c2, 1, 5, 20)
+    let c3 = b1.0
+    let b2 = lt_add_shared_borrow(c3, 1, 5, 30)
+    let c4 = b2.0
+
+    let conflict = lt_borrows_conflict(c4, 0, 1)
+    lt_assert_true(conflict, 12)
+}
+
+// ============================================================
+// Test 13: Two mutable borrows on same place conflict
+// ============================================================
+
+fn lt_test_mut_mut_conflict() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+    let p1 = lt_add_static_region(c)
+    let c1 = p1.0
+    let p2 = lt_add_fn_region(c1, 0, 10, 100)
+    let c2 = p2.0
+
+    let b1 = lt_add_mutable_borrow(c2, 1, 7, 20)
+    let c3 = b1.0
+    let b2 = lt_add_mutable_borrow(c3, 1, 7, 40)
+    let c4 = b2.0
+
+    let conflict = lt_borrows_conflict(c4, 0, 1)
+    lt_assert_true(conflict, 13)
+}
+
+// ============================================================
+// Test 14: Borrows on different places do not conflict
+// ============================================================
+
+fn lt_test_different_places_no_conflict() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+    let p1 = lt_add_static_region(c)
+    let c1 = p1.0
+    let p2 = lt_add_fn_region(c1, 0, 10, 100)
+    let c2 = p2.0
+
+    let b1 = lt_add_mutable_borrow(c2, 1, 3, 20)
+    let c3 = b1.0
+    let b2 = lt_add_mutable_borrow(c3, 1, 4, 30)
+    let c4 = b2.0
+
+    let conflict = lt_borrows_conflict(c4, 0, 1)
+    lt_assert_true(!conflict, 14)
+}
+
+// ============================================================
+// Test 15: Non-overlapping regions prevent conflict
+// ============================================================
+
+fn lt_test_non_overlapping_no_conflict() -> i64 with IO, Mut, Panic, Div {
+    // Two mutable borrows on the same place but in non-overlapping regions
+    let c = lifetime_checker_new()
+    let p1 = lt_add_static_region(c)
+    let c1 = p1.0
+    let p2 = lt_add_fn_region(c1, 0, 10, 200)
+    let c2 = p2.0
+    // Block A: [20, 50], Block B: [60, 90] — no overlap
+    let p3 = lt_add_block_region(c2, 1, 20, 50)
+    let c3 = p3.0
+    let p4 = lt_add_block_region(c3, 1, 60, 90)
+    let c4 = p4.0
+
+    let b1 = lt_add_mutable_borrow(c4, 2, 10, 25)
+    let c5 = b1.0
+    let b2 = lt_add_mutable_borrow(c5, 3, 10, 65)
+    let c6 = b2.0
+
+    let conflict = lt_borrows_conflict(c6, 0, 1)
+    lt_assert_true(!conflict, 15)
+}
+
+// ============================================================
+// Test 16: Move borrow conflicts with shared
+// ============================================================
+
+fn lt_test_move_conflicts_shared() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+    let p1 = lt_add_static_region(c)
+    let c1 = p1.0
+    let p2 = lt_add_fn_region(c1, 0, 10, 100)
+    let c2 = p2.0
+
+    let b1 = lt_add_move_borrow(c2, 1, 5, 20)
+    let c3 = b1.0
+    let b2 = lt_add_shared_borrow(c3, 1, 5, 30)
+    let c4 = b2.0
+
+    let conflict = lt_borrows_conflict(c4, 0, 1)
+    lt_assert_true(conflict, 16)
+}
+
+// ============================================================
+// Test 17: Outlives — static outlives everything
+// ============================================================
+
+fn lt_test_static_outlives_all() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+    let p1 = lt_add_static_region(c)
+    let c1 = p1.0
+    let p2 = lt_add_fn_region(c1, 0, 10, 100)
+    let c2 = p2.0
+    let p3 = lt_add_block_region(c2, 1, 20, 80)
+    let c3 = p3.0
+
+    let ok1 = lt_check_outlives(c3, 0, 1)
+    let ok2 = lt_check_outlives(c3, 0, 2)
+    lt_assert_true(ok1 && ok2, 17)
+}
+
+// ============================================================
+// Test 18: Block does not outlive fn
+// ============================================================
+
+fn lt_test_block_not_outlives_fn() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+    let p1 = lt_add_static_region(c)
+    let c1 = p1.0
+    let p2 = lt_add_fn_region(c1, 0, 10, 100)
+    let c2 = p2.0
+    let p3 = lt_add_block_region(c2, 1, 20, 80)
+    let c3 = p3.0
+
+    // block [20,80] does NOT outlive fn [10,100] because fn is larger
+    let bad = lt_check_outlives(c3, 2, 1)
+    lt_assert_true(!bad, 18)
+}
+
+// ============================================================
+// Test 19: Constraint solver widens region
+// ============================================================
+
+fn lt_test_solver_widens() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+    let p1 = lt_add_static_region(c)
+    let c1 = p1.0
+    // Region 1: [10, 50]
+    let p2 = lt_add_fn_region(c1, 0, 10, 50)
+    let c2 = p2.0
+    // Region 2: [10, 100]
+    let p3 = lt_add_fn_region(c2, 0, 10, 100)
+    let c3 = p3.0
+
+    // Constraint: region 1 must outlive region 2 (1 outlives 2)
+    // This should widen region 1's end from 50 to 100
+    let c4 = lt_add_outlives(c3, 1, 2, 0)
+    let c5 = lt_solve_constraints(c4)
+
+    let ok = c5.regions[1].end_point >= 100 && c5.error_count == 0
+    lt_assert_true(ok, 19)
+}
+
+// ============================================================
+// Test 20: Constraint solver equality propagation
+// ============================================================
+
+fn lt_test_solver_equality() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+    let p1 = lt_add_static_region(c)
+    let c1 = p1.0
+    // Region 1: [10, 50]
+    let p2 = lt_add_fn_region(c1, 0, 10, 50)
+    let c2 = p2.0
+    // Region 2: [10, 80]
+    let p3 = lt_add_fn_region(c2, 0, 10, 80)
+    let c3 = p3.0
+
+    // Equality: both must end at max(50, 80) = 80
+    let c4 = lt_add_equal(c3, 1, 2, 0)
+    let c5 = lt_solve_constraints(c4)
+
+    let ok = c5.regions[1].end_point == 80
+             && c5.regions[2].end_point == 80
+             && c5.error_count == 0
+    lt_assert_true(ok, 20)
+}
+
+// ============================================================
+// Test 21: lt_check_borrows counts conflicts
+// ============================================================
+
+fn lt_test_check_borrows_count() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+    let p1 = lt_add_static_region(c)
+    let c1 = p1.0
+    let p2 = lt_add_fn_region(c1, 0, 10, 100)
+    let c2 = p2.0
+
+    // Two conflicting mutable borrows on place 5
+    let b1 = lt_add_mutable_borrow(c2, 1, 5, 20)
+    let c3 = b1.0
+    let b2 = lt_add_mutable_borrow(c3, 1, 5, 30)
+    let c4 = b2.0
+
+    let c5 = lt_check_borrows(c4)
+    lt_assert_true(c5.error_count == 1, 21)
+}
+
+// ============================================================
+// Test 22: lt_find_conflicts returns correct pairs
+// ============================================================
+
+fn lt_test_find_conflicts_pairs() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+    let p1 = lt_add_static_region(c)
+    let c1 = p1.0
+    let p2 = lt_add_fn_region(c1, 0, 10, 100)
+    let c2 = p2.0
+
+    // Mutable + shared on place 9 -> conflict
+    let b1 = lt_add_mutable_borrow(c2, 1, 9, 20)
+    let c3 = b1.0
+    let b2 = lt_add_shared_borrow(c3, 1, 9, 30)
+    let c4 = b2.0
+    // Shared + shared on place 9 -> no conflict
+    let b3 = lt_add_shared_borrow(c4, 1, 9, 40)
+    let c5 = b3.0
+
+    let result = lt_find_conflicts(c5)
+    let conflicts = result.0
+    let count = result.1
+    // Borrow 0 (mut) conflicts with borrow 1 (shared) and borrow 2 (shared)
+    // Borrow 1 (shared) and borrow 2 (shared) do not conflict
+    let ok = count == 2
+             && conflicts[0].borrow_a == 0 && conflicts[0].borrow_b == 1
+             && conflicts[1].borrow_a == 0 && conflicts[1].borrow_b == 2
+    lt_assert_true(ok, 22)
+}
+
+// ============================================================
+// Test 23: Live range computation
+// ============================================================
+
+fn lt_test_live_ranges() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+    let p1 = lt_add_static_region(c)
+    let c1 = p1.0
+    let p2 = lt_add_fn_region(c1, 0, 10, 100)
+    let c2 = p2.0
+
+    let b1 = lt_add_shared_borrow(c2, 1, 5, 25)
+    let c3 = b1.0
+
+    let lr = lt_live_range_for(c3, 0)
+    let ok = lr.start_point == 25 && lr.end_point == 100
+    lt_assert_true(ok, 23)
+}
+
+// ============================================================
+// Test 24: Live ranges overlap detection
+// ============================================================
+
+fn lt_test_live_ranges_overlap() -> i64 with IO, Mut, Panic, Div {
+    let a = LiveRange { borrow_id: 0, start_point: 10, end_point: 50 }
+    let b = LiveRange { borrow_id: 1, start_point: 40, end_point: 80 }
+    let c = LiveRange { borrow_id: 2, start_point: 60, end_point: 90 }
+
+    let ok1 = lt_live_ranges_overlap(a, b)   // overlap at [40,50]
+    let ok2 = !lt_live_ranges_overlap(a, c)  // no overlap
+    let ok3 = lt_live_ranges_overlap(b, c)   // overlap at [60,80]
+    lt_assert_true(ok1 && ok2 && ok3, 24)
+}
+
+// ============================================================
+// Test 25: Dangling detection — borrow escapes its region
+// ============================================================
+
+fn lt_test_dangling_detection() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+    let p1 = lt_add_static_region(c)
+    let c1 = p1.0
+    let p2 = lt_add_fn_region(c1, 0, 10, 100)
+    let c2 = p2.0
+    // Inner block region [20, 50]
+    let p3 = lt_add_block_region(c2, 1, 20, 50)
+    let c3 = p3.0
+
+    // Borrow in the fn region (1) pointing to a place defined in the block region (2)
+    // region_id=1 (fn, [10,100]), place_id=2 (block, [20,50])
+    // Fn region is NOT contained in block region, so this is dangling
+    let b1 = borrow_info_new(0, 1, 2, BORROW_SHARED(), false, 15)
+    let bp = lt_add_borrow(c3, b1)
+    let c4 = bp.0
+
+    let is_dangling = lt_check_dangling_single(c4, 0)
+    lt_assert_true(is_dangling, 25)
+}
+
+// ============================================================
+// Test 26: Non-dangling borrow (contained in place region)
+// ============================================================
+
+fn lt_test_non_dangling() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+    let p1 = lt_add_static_region(c)
+    let c1 = p1.0
+    let p2 = lt_add_fn_region(c1, 0, 10, 100)
+    let c2 = p2.0
+    let p3 = lt_add_block_region(c2, 1, 20, 50)
+    let c3 = p3.0
+
+    // Borrow in block region (2) pointing to place in fn region (1)
+    // Block [20,50] is contained in fn [10,100], so NOT dangling
+    let b1 = borrow_info_new(0, 2, 1, BORROW_SHARED(), false, 25)
+    let bp = lt_add_borrow(c3, b1)
+    let c4 = bp.0
+
+    let is_dangling = lt_check_dangling_single(c4, 0)
+    lt_assert_true(!is_dangling, 26)
+}
+
+// ============================================================
+// Test 27: Region child count
+// ============================================================
+
+fn lt_test_region_child_count() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+    let p1 = lt_add_static_region(c)
+    let c1 = p1.0
+    let p2 = lt_add_fn_region(c1, 0, 10, 100)
+    let c2 = p2.0
+    let p3 = lt_add_block_region(c2, 1, 20, 50)
+    let c3 = p3.0
+    let p4 = lt_add_block_region(c3, 1, 60, 90)
+    let c4 = p4.0
+
+    let children_of_fn = lt_region_child_count(c4, 1)
+    let children_of_static = lt_region_child_count(c4, 0)
+    let ok = children_of_fn == 2 && children_of_static == 1
+    lt_assert_true(ok, 27)
+}
+
+// ============================================================
+// Test 28: Full analysis pipeline — no errors for clean program
+// ============================================================
+
+fn lt_test_clean_analysis() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+    let p1 = lt_add_static_region(c)
+    let c1 = p1.0
+    let p2 = lt_add_fn_region(c1, 0, 10, 100)
+    let c2 = p2.0
+    let p3 = lt_add_block_region(c2, 1, 20, 80)
+    let c3 = p3.0
+
+    // Two shared borrows in block, referencing place in fn — safe
+    let b1 = lt_add_shared_borrow(c3, 2, 1, 25)
+    let c4 = b1.0
+    let b2 = lt_add_shared_borrow(c4, 2, 1, 30)
+    let c5 = b2.0
+
+    // Add an outlives constraint that is already satisfied (fn outlives block)
+    let c6 = lt_add_outlives(c5, 1, 2, 0)
+
+    // Run full analysis
+    let c7 = lt_analyze(c6)
+    lt_assert_true(c7.error_count == 0, 28)
+}
+
+// ============================================================
+// Test 29: Full analysis pipeline — detects mutable conflict
+// ============================================================
+
+fn lt_test_analysis_detects_conflict() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+    let p1 = lt_add_static_region(c)
+    let c1 = p1.0
+    let p2 = lt_add_fn_region(c1, 0, 10, 100)
+    let c2 = p2.0
+
+    // Two mutable borrows on same place in the same region — conflict
+    let b1 = lt_add_mutable_borrow(c2, 1, 5, 20)
+    let c3 = b1.0
+    let b2 = lt_add_mutable_borrow(c3, 1, 5, 40)
+    let c4 = b2.0
+
+    let c5 = lt_analyze(c4)
+    // Should have at least 1 error from borrow conflict
+    lt_assert_true(c5.error_count >= 1, 29)
+}
+
+// ============================================================
+// Test 30: Region kind queries
+// ============================================================
+
+fn lt_test_region_kind_queries() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+    let p1 = lt_add_static_region(c)
+    let c1 = p1.0
+    let p2 = lt_add_fn_region(c1, 0, 10, 100)
+    let c2 = p2.0
+    let p3 = lt_add_block_region(c2, 1, 20, 80)
+    let c3 = p3.0
+    let p4 = lt_add_expr_region(c3, 2, 30, 50)
+    let c4 = p4.0
+
+    let ok = lt_region_kind(c4, 0) == REGION_STATIC()
+             && lt_region_kind(c4, 1) == REGION_FN()
+             && lt_region_kind(c4, 2) == REGION_BLOCK()
+             && lt_region_kind(c4, 3) == REGION_EXPR()
+    lt_assert_true(ok, 30)
+}
+
+// ============================================================
+// Test 31: is_static check
+// ============================================================
+
+fn lt_test_is_static() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+    let p1 = lt_add_static_region(c)
+    let c1 = p1.0
+    let p2 = lt_add_fn_region(c1, 0, 10, 100)
+    let c2 = p2.0
+
+    let ok = lt_is_static(c2, 0) && !lt_is_static(c2, 1)
+    lt_assert_true(ok, 31)
+}
+
+// ============================================================
+// Test 32: Borrow place and region accessors
+// ============================================================
+
+fn lt_test_borrow_accessors() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+    let p1 = lt_add_static_region(c)
+    let c1 = p1.0
+    let p2 = lt_add_fn_region(c1, 0, 10, 100)
+    let c2 = p2.0
+
+    let b1 = lt_add_shared_borrow(c2, 1, 42, 20)
+    let c3 = b1.0
+
+    let ok = lt_borrow_place(c3, 0) == 42
+             && lt_borrow_region(c3, 0) == 1
+             && lt_borrow_kind(c3, 0) == BORROW_SHARED()
+    lt_assert_true(ok, 32)
+}
+
+// ============================================================
+// Test 33: Count unsatisfied constraints
+// ============================================================
+
+fn lt_test_count_unsatisfied() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+    let p1 = lt_add_static_region(c)
+    let c1 = p1.0
+    // Region 1: [10, 50], Region 2: [10, 100]
+    let p2 = lt_add_fn_region(c1, 0, 10, 50)
+    let c2 = p2.0
+    let p3 = lt_add_fn_region(c2, 0, 10, 100)
+    let c3 = p3.0
+
+    // Constraint: region 1 outlives region 2 — NOT satisfied initially
+    // because region 1 [10,50] does not cover region 2 [10,100]
+    let c4 = lt_add_outlives(c3, 1, 2, 0)
+    let count = lt_count_unsatisfied(c4)
+    lt_assert_true(count == 1, 33)
+}
+
+// ============================================================
+// Test 34: Count conflicts diagnostic
+// ============================================================
+
+fn lt_test_count_conflicts() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+    let p1 = lt_add_static_region(c)
+    let c1 = p1.0
+    let p2 = lt_add_fn_region(c1, 0, 10, 100)
+    let c2 = p2.0
+
+    // Three mutable borrows on same place -> 3 pairwise conflicts
+    let b1 = lt_add_mutable_borrow(c2, 1, 5, 20)
+    let c3 = b1.0
+    let b2 = lt_add_mutable_borrow(c3, 1, 5, 30)
+    let c4 = b2.0
+    let b3 = lt_add_mutable_borrow(c4, 1, 5, 40)
+    let c5 = b3.0
+
+    let count = lt_count_conflicts(c5)
+    // C(3,2) = 3 pairwise conflicts
+    lt_assert_true(count == 3, 34)
+}
+
+// ============================================================
+// Test 35: Compute all live ranges
+// ============================================================
+
+fn lt_test_compute_all_live_ranges() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+    let p1 = lt_add_static_region(c)
+    let c1 = p1.0
+    let p2 = lt_add_fn_region(c1, 0, 10, 100)
+    let c2 = p2.0
+    let p3 = lt_add_block_region(c2, 1, 20, 50)
+    let c3 = p3.0
+
+    let b1 = lt_add_shared_borrow(c3, 1, 5, 15)
+    let c4 = b1.0
+    let b2 = lt_add_mutable_borrow(c4, 2, 6, 25)
+    let c5 = b2.0
+
+    let result = lt_compute_live_ranges(c5)
+    let ranges = result.0
+    let count = result.1
+
+    let ok = count == 2
+             && ranges[0].start_point == 15 && ranges[0].end_point == 100
+             && ranges[1].start_point == 25 && ranges[1].end_point == 50
+    lt_assert_true(ok, 35)
+}
+
+// ============================================================
+// Test 36: Solver with chained outlives constraints
+// ============================================================
+
+fn lt_test_solver_chain() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+    let p1 = lt_add_static_region(c)
+    let c1 = p1.0
+    // Region 1: [10, 30], Region 2: [10, 60], Region 3: [10, 90]
+    let p2 = lt_add_fn_region(c1, 0, 10, 30)
+    let c2 = p2.0
+    let p3 = lt_add_fn_region(c2, 0, 10, 60)
+    let c3 = p3.0
+    let p4 = lt_add_fn_region(c3, 0, 10, 90)
+    let c4 = p4.0
+
+    // Chain: region 1 outlives region 2, region 2 outlives region 3
+    let c5 = lt_add_outlives(c4, 1, 2, 0)
+    let c6 = lt_add_outlives(c5, 2, 3, 0)
+    let c7 = lt_solve_constraints(c6)
+
+    // After solving: region 1 end >= 90, region 2 end >= 90
+    let ok = c7.regions[1].end_point >= 90
+             && c7.regions[2].end_point >= 90
+             && c7.error_count == 0
+    lt_assert_true(ok, 36)
+}
+
+// ============================================================
+// Test 37: Region parent accessor
+// ============================================================
+
+fn lt_test_region_parent_accessor() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+    let p1 = lt_add_static_region(c)
+    let c1 = p1.0
+    let p2 = lt_add_fn_region(c1, 0, 10, 100)
+    let c2 = p2.0
+
+    let parent_of_fn = lt_region_parent(c2, 1)
+    let parent_of_static = lt_region_parent(c2, 0)
+
+    let ok = parent_of_fn == 0 && parent_of_static == (0 - 1)
+    lt_assert_true(ok, 37)
+}
+
+// ============================================================
+// Test 38: Region span accessors
+// ============================================================
+
+fn lt_test_region_span_accessors() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+    let p1 = lt_add_static_region(c)
+    let c1 = p1.0
+    let p2 = lt_add_fn_region(c1, 0, 42, 99)
+    let c2 = p2.0
+
+    let start = lt_region_span_start(c2, 1)
+    let end = lt_region_span_end(c2, 1)
+    let ok = start == 42 && end == 99
+    lt_assert_true(ok, 38)
+}
+
+// ============================================================
+// Test 39: Out of bounds region queries return safe defaults
+// ============================================================
+
+fn lt_test_bounds_safety() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+
+    let depth = lt_region_depth(c, 999)
+    let kind = lt_region_kind(c, 999)
+    let parent = lt_region_parent(c, 999)
+    let start = lt_region_span_start(c, 999)
+    let end = lt_region_span_end(c, 999)
+    let is_s = lt_is_static(c, 999)
+
+    let ok = depth == 0 && kind == (0 - 1) && parent == (0 - 1)
+             && start == 0 && end == 0 && !is_s
+    lt_assert_true(ok, 39)
+}
+
+// ============================================================
+// Test 40: Count dangling borrows utility
+// ============================================================
+
+fn lt_test_count_dangling() -> i64 with IO, Mut, Panic, Div {
+    let c = lifetime_checker_new()
+    let p1 = lt_add_static_region(c)
+    let c1 = p1.0
+    let p2 = lt_add_fn_region(c1, 0, 10, 100)
+    let c2 = p2.0
+    let p3 = lt_add_block_region(c2, 1, 20, 50)
+    let c3 = p3.0
+
+    // Borrow in fn region referencing place in block region — dangling
+    let b1 = borrow_info_new(0, 1, 2, BORROW_SHARED(), false, 15)
+    let bp1 = lt_add_borrow(c3, b1)
+    let c4 = bp1.0
+
+    // Borrow in block region referencing place in fn region — safe
+    let b2 = borrow_info_new(1, 2, 1, BORROW_SHARED(), false, 25)
+    let bp2 = lt_add_borrow(c4, b2)
+    let c5 = bp2.0
+
+    let dangling = lt_count_dangling(c5)
+    lt_assert_true(dangling == 1, 40)
+}
+
+// ============================================================
+// Test runner
+// ============================================================
+
+fn lifetime_check_run_tests() -> i64 with IO, Mut, Panic, Div {
+    print("=== Lifetime checker tests ===\n")
+    var fails: i64 = 0
+    fails = fails + lt_test_empty_checker()
+    fails = fails + lt_test_add_static_region()
+    fails = fails + lt_test_nested_regions()
+    fails = fails + lt_test_region_contains_self()
+    fails = fails + lt_test_static_contains_children()
+    fails = fails + lt_test_child_not_contains_parent()
+    fails = fails + lt_test_region_depth()
+    fails = fails + lt_test_common_ancestor_siblings()
+    fails = fails + lt_test_common_ancestor_parent_child()
+    fails = fails + lt_test_add_borrows()
+    fails = fails + lt_test_shared_no_conflict()
+    fails = fails + lt_test_mut_shared_conflict()
+    fails = fails + lt_test_mut_mut_conflict()
+    fails = fails + lt_test_different_places_no_conflict()
+    fails = fails + lt_test_non_overlapping_no_conflict()
+    fails = fails + lt_test_move_conflicts_shared()
+    fails = fails + lt_test_static_outlives_all()
+    fails = fails + lt_test_block_not_outlives_fn()
+    fails = fails + lt_test_solver_widens()
+    fails = fails + lt_test_solver_equality()
+    fails = fails + lt_test_check_borrows_count()
+    fails = fails + lt_test_find_conflicts_pairs()
+    fails = fails + lt_test_live_ranges()
+    fails = fails + lt_test_live_ranges_overlap()
+    fails = fails + lt_test_dangling_detection()
+    fails = fails + lt_test_non_dangling()
+    fails = fails + lt_test_region_child_count()
+    fails = fails + lt_test_clean_analysis()
+    fails = fails + lt_test_analysis_detects_conflict()
+    fails = fails + lt_test_region_kind_queries()
+    fails = fails + lt_test_is_static()
+    fails = fails + lt_test_borrow_accessors()
+    fails = fails + lt_test_count_unsatisfied()
+    fails = fails + lt_test_count_conflicts()
+    fails = fails + lt_test_compute_all_live_ranges()
+    fails = fails + lt_test_solver_chain()
+    fails = fails + lt_test_region_parent_accessor()
+    fails = fails + lt_test_region_span_accessors()
+    fails = fails + lt_test_bounds_safety()
+    fails = fails + lt_test_count_dangling()
+
+    print("Total failures: ")
+    print_int(fails)
+    print("\n")
+    fails
+}

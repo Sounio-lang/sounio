@@ -57,6 +57,8 @@ FILES=(
   self-hosted/resolve/imports.sio
   self-hosted/resolve/resolve.sio
   self-hosted/resolve/mod.sio
+  self-hosted/resolve/scopes.sio
+  self-hosted/resolve/modules.sio
 
   # ── 5. Check layer ──────────────────────────────────────────────
   self-hosted/check/types.sio
@@ -75,6 +77,9 @@ FILES=(
   self-hosted/check/infer.sio
   self-hosted/check/const_eval.sio
   self-hosted/check/traits.sio
+  self-hosted/check/macros.sio
+  self-hosted/check/lifetimes.sio
+  self-hosted/check/borrows.sio
 
   # ── 6. Effects layer ────────────────────────────────────────────
   self-hosted/effects/types.sio
@@ -117,6 +122,7 @@ FILES=(
   self-hosted/native/aarch64.sio
   self-hosted/native/dwarf.sio
   self-hosted/native/regalloc.sio
+  self-hosted/native/codegen_plan.sio
   self-hosted/native/hyper_lower.sio
   self-hosted/native/suite.sio
 
@@ -318,6 +324,8 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/resolve/imports.sio
     self-hosted/resolve/resolve.sio
     self-hosted/resolve/mod.sio
+    self-hosted/resolve/scopes.sio
+    self-hosted/resolve/modules.sio
 
     # 5. Check layer
     self-hosted/check/types.sio
@@ -336,6 +344,9 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/check/infer.sio
     self-hosted/check/const_eval.sio
     self-hosted/check/traits.sio
+    self-hosted/check/macros.sio
+    self-hosted/check/lifetimes.sio
+    self-hosted/check/borrows.sio
 
     # 5b. Diagnostics engine
     self-hosted/diagnostics/mod.sio
@@ -368,6 +379,7 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/native/aarch64.sio
     self-hosted/native/dwarf.sio
     self-hosted/native/regalloc.sio
+    self-hosted/native/codegen_plan.sio
     self-hosted/native/hyper_lower.sio
 
     # 8. WebAssembly backend

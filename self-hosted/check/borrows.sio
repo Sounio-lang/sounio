@@ -1,0 +1,1607 @@
+// Borrow checker — MIR-level ownership analysis for the self-hosted compiler
+//
+// Implements a Polonius-inspired borrow checker operating on Places, Borrows,
+// and Moves. Tracks program points for liveness, detects:
+//   - Use after move
+//   - Borrow conflicts (&! vs &)
+//   - Move while borrowed
+//
+// All data structures are flat fixed-size arrays (no heap allocation).
+// Helpers must precede callers (no forward references).
+
+// ============================================================
+// Constants
+// ============================================================
+
+// Borrow kinds
+let BC_SHARED: i64 = 1
+let BC_EXCLUSIVE: i64 = 2
+
+// Projection kinds for Place paths
+let PROJ_FIELD: i64 = 1
+let PROJ_INDEX: i64 = 2
+let PROJ_DEREF: i64 = 3
+
+// Error codes
+let ERR_USE_AFTER_MOVE: i64 = 100
+let ERR_BORROW_CONFLICT: i64 = 101
+let ERR_MOVE_WHILE_BORROWED: i64 = 102
+let ERR_DOUBLE_EXCLUSIVE: i64 = 103
+let ERR_EXCLUSIVE_WHILE_SHARED: i64 = 104
+let ERR_SHARED_WHILE_EXCLUSIVE: i64 = 105
+
+// ============================================================
+// Place — a memory location with projection path
+// ============================================================
+//
+// A Place represents a path to a memory location: base_var.field.index.deref...
+// `projections` holds the field/index identifiers, `proj_kinds` holds what
+// kind of projection each step is (PROJ_FIELD, PROJ_INDEX, PROJ_DEREF).
+
+struct Place {
+    id: i64,
+    base_var: i64,
+    projections: [i64; 16],
+    proj_count: i64,
+    proj_kinds: [i64; 16],
+}
+
+fn place_new(id: i64, base_var: i64) -> Place {
+    Place {
+        id: id,
+        base_var: base_var,
+        projections: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        proj_count: 0,
+        proj_kinds: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    }
+}
+
+fn place_with_field(p: Place, field_id: i64) -> Place with Mut, Div, Panic {
+    var result = p
+    if result.proj_count < 16 {
+        result.projections[result.proj_count as usize] = field_id
+        result.proj_kinds[result.proj_count as usize] = PROJ_FIELD
+        result.proj_count = result.proj_count + 1
+    }
+    result
+}
+
+fn place_with_index(p: Place, index_id: i64) -> Place with Mut, Div, Panic {
+    var result = p
+    if result.proj_count < 16 {
+        result.projections[result.proj_count as usize] = index_id
+        result.proj_kinds[result.proj_count as usize] = PROJ_INDEX
+        result.proj_count = result.proj_count + 1
+    }
+    result
+}
+
+fn place_with_deref(p: Place) -> Place with Mut, Div, Panic {
+    var result = p
+    if result.proj_count < 16 {
+        result.projections[result.proj_count as usize] = 0
+        result.proj_kinds[result.proj_count as usize] = PROJ_DEREF
+        result.proj_count = result.proj_count + 1
+    }
+    result
+}
+
+// ============================================================
+// Place comparison and overlap
+// ============================================================
+
+fn place_eq(a: Place, b: Place) -> bool with Mut, Div, Panic {
+    if a.base_var != b.base_var {
+        return false
+    }
+    if a.proj_count != b.proj_count {
+        return false
+    }
+    var i: i64 = 0
+    while i < a.proj_count {
+        if a.projections[i as usize] != b.projections[i as usize] {
+            return false
+        }
+        if a.proj_kinds[i as usize] != b.proj_kinds[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Check if two places overlap (alias).
+// Place A overlaps B if one is a prefix of the other.
+// e.g. x overlaps x.field, x.field overlaps x, x.field overlaps x.field
+fn bc_place_overlaps(a: Place, b: Place) -> bool with Mut, Div, Panic {
+    // Different base variables never overlap
+    if a.base_var != b.base_var {
+        return false
+    }
+
+    // Find the shorter projection length
+    var min_len = a.proj_count
+    if b.proj_count < min_len {
+        min_len = b.proj_count
+    }
+
+    // Check that the common prefix matches
+    var i: i64 = 0
+    while i < min_len {
+        if a.proj_kinds[i as usize] != b.proj_kinds[i as usize] {
+            return false
+        }
+        if a.projections[i as usize] != b.projections[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+
+    // If common prefix matches, they overlap (one is prefix of the other)
+    true
+}
+
+// Check if place A is a strict prefix of place B
+// (A is a parent of B in the projection tree)
+fn place_is_prefix_of(a: Place, b: Place) -> bool with Mut, Div, Panic {
+    if a.base_var != b.base_var {
+        return false
+    }
+    if a.proj_count >= b.proj_count {
+        return false
+    }
+    var i: i64 = 0
+    while i < a.proj_count {
+        if a.proj_kinds[i as usize] != b.proj_kinds[i as usize] {
+            return false
+        }
+        if a.projections[i as usize] != b.projections[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// ============================================================
+// BcBorrowEntry — a single borrow fact
+// ============================================================
+
+struct BcBorrowEntry {
+    id: i64,
+    place: Place,
+    kind: i64,              // BC_SHARED or BC_EXCLUSIVE
+    is_active: bool,
+    activation_point: i64,  // program point where borrow starts
+    kill_point: i64,        // program point where borrow dies (-1 = not yet killed)
+}
+
+fn borrow_entry_new(id: i64, place: Place, kind: i64, activation_point: i64) -> BcBorrowEntry {
+    BcBorrowEntry {
+        id: id,
+        place: place,
+        kind: kind,
+        is_active: true,
+        activation_point: activation_point,
+        kill_point: 0 - 1,
+    }
+}
+
+fn empty_borrow_entry_v2() -> BcBorrowEntry {
+    BcBorrowEntry {
+        id: 0,
+        place: place_new(0, 0),
+        kind: 0,
+        is_active: false,
+        activation_point: 0,
+        kill_point: 0,
+    }
+}
+
+// ============================================================
+// MoveEntry — a single move fact
+// ============================================================
+
+struct MoveEntry {
+    id: i64,
+    place_id: i64,
+    move_point: i64,        // program point where move happened
+    is_partial: bool,       // true if this is a partial move (field move)
+}
+
+fn move_entry_new(id: i64, place_id: i64, move_point: i64, is_partial: bool) -> MoveEntry {
+    MoveEntry {
+        id: id,
+        place_id: place_id,
+        move_point: move_point,
+        is_partial: is_partial,
+    }
+}
+
+fn empty_move_entry() -> MoveEntry {
+    MoveEntry {
+        id: 0,
+        place_id: 0,
+        move_point: 0,
+        is_partial: false,
+    }
+}
+
+// ============================================================
+// BorrowChecker — the main analysis state
+// ============================================================
+
+struct BorrowChecker {
+    borrows: [BcBorrowEntry; 2048],
+    borrow_count: i64,
+    moves: [MoveEntry; 2048],
+    move_count: i64,
+    place_names: [[i8; 64]; 512],
+    place_count: i64,
+    errors: [i64; 256],
+    error_count: i64,
+    current_point: i64,
+}
+
+fn borrow_checker_new() -> BorrowChecker with Mut {
+    BorrowChecker {
+        borrows: [empty_borrow_entry_v2(); 2048],
+        borrow_count: 0,
+        moves: [empty_move_entry(); 2048],
+        move_count: 0,
+        place_names: [[0; 64]; 512],
+        place_count: 0,
+        errors: [0; 256],
+        error_count: 0,
+        current_point: 0,
+    }
+}
+
+// ============================================================
+// Program point management
+// ============================================================
+
+fn bc_advance_point(bc: BorrowChecker) -> BorrowChecker with Mut {
+    var result = bc
+    result.current_point = result.current_point + 1
+    result
+}
+
+fn bc_advance_point_by(bc: BorrowChecker, n: i64) -> BorrowChecker with Mut {
+    var result = bc
+    result.current_point = result.current_point + n
+    result
+}
+
+fn bc_get_current_point(bc: BorrowChecker) -> i64 {
+    bc.current_point
+}
+
+// ============================================================
+// Error reporting
+// ============================================================
+
+fn bc_report_error(bc: BorrowChecker, error_code: i64) -> BorrowChecker with Mut, Div, Panic {
+    var result = bc
+    if result.error_count < 256 {
+        result.errors[result.error_count as usize] = error_code
+        result.error_count = result.error_count + 1
+    }
+    result
+}
+
+fn bc_has_errors(bc: BorrowChecker) -> bool {
+    bc.error_count > 0
+}
+
+fn bc_error_count(bc: BorrowChecker) -> i64 {
+    bc.error_count
+}
+
+fn bc_collect_errors(bc: BorrowChecker) -> ([i64; 256], i64) {
+    (bc.errors, bc.error_count)
+}
+
+fn bc_has_error_code(bc: BorrowChecker, code: i64) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < bc.error_count {
+        if bc.errors[i as usize] == code {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// ============================================================
+// Place name registration
+// ============================================================
+
+fn bc_register_place_name(bc: BorrowChecker, name: [i8; 64]) -> (BorrowChecker, i64) with Mut, Div, Panic {
+    var result = bc
+    let idx = result.place_count
+    if result.place_count < 512 {
+        result.place_names[result.place_count as usize] = name
+        result.place_count = result.place_count + 1
+    }
+    (result, idx)
+}
+
+fn bc_find_place_name(bc: BorrowChecker, name: [i8; 64]) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < bc.place_count {
+        var match_found = true
+        var j: i64 = 0
+        while j < 64 {
+            if bc.place_names[i as usize][j as usize] != name[j as usize] {
+                match_found = false
+            }
+            j = j + 1
+        }
+        if match_found {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// ============================================================
+// Borrow management
+// ============================================================
+
+fn bc_add_borrow(bc: BorrowChecker, place: Place, kind: i64) -> BorrowChecker with Mut, Div, Panic {
+    var result = bc
+    if result.borrow_count < 2048 {
+        let entry = borrow_entry_new(result.borrow_count, place, kind, result.current_point)
+        result.borrows[result.borrow_count as usize] = entry
+        result.borrow_count = result.borrow_count + 1
+    }
+    result
+}
+
+fn bc_activate_borrow(bc: BorrowChecker, borrow_id: i64) -> BorrowChecker with Mut, Div, Panic {
+    var result = bc
+    if borrow_id >= 0 && borrow_id < result.borrow_count {
+        result.borrows[borrow_id as usize].is_active = true
+        result.borrows[borrow_id as usize].activation_point = result.current_point
+    }
+    result
+}
+
+fn bc_kill_borrow(bc: BorrowChecker, borrow_id: i64) -> BorrowChecker with Mut, Div, Panic {
+    var result = bc
+    if borrow_id >= 0 && borrow_id < result.borrow_count {
+        result.borrows[borrow_id as usize].is_active = false
+        result.borrows[borrow_id as usize].kill_point = result.current_point
+    }
+    result
+}
+
+fn bc_kill_borrows_for_place(bc: BorrowChecker, place: Place) -> BorrowChecker with Mut, Div, Panic {
+    var result = bc
+    var i: i64 = 0
+    while i < result.borrow_count {
+        if result.borrows[i as usize].is_active {
+            if bc_place_overlaps(result.borrows[i as usize].place, place) {
+                result.borrows[i as usize].is_active = false
+                result.borrows[i as usize].kill_point = result.current_point
+            }
+        }
+        i = i + 1
+    }
+    result
+}
+
+fn bc_kill_all_borrows(bc: BorrowChecker) -> BorrowChecker with Mut, Div, Panic {
+    var result = bc
+    var i: i64 = 0
+    while i < result.borrow_count {
+        if result.borrows[i as usize].is_active {
+            result.borrows[i as usize].is_active = false
+            result.borrows[i as usize].kill_point = result.current_point
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================
+// Move management
+// ============================================================
+
+fn bc_add_move(bc: BorrowChecker, place_id: i64, is_partial: bool) -> BorrowChecker with Mut, Div, Panic {
+    var result = bc
+    if result.move_count < 2048 {
+        let entry = move_entry_new(result.move_count, place_id, result.current_point, is_partial)
+        result.moves[result.move_count as usize] = entry
+        result.move_count = result.move_count + 1
+    }
+    result
+}
+
+fn bc_uninit_move(bc: BorrowChecker, move_id: i64) -> BorrowChecker with Mut, Div, Panic {
+    var result = bc
+    if move_id >= 0 && move_id < result.move_count {
+        // Set move_point to -1 to mark as uninitialised (re-assigned)
+        result.moves[move_id as usize].move_point = 0 - 1
+    }
+    result
+}
+
+// ============================================================
+// Query helpers
+// ============================================================
+
+// Check if a place has been moved at or before the current program point
+fn bc_is_place_moved(bc: BorrowChecker, place_id: i64) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < bc.move_count {
+        if bc.moves[i as usize].place_id == place_id {
+            if bc.moves[i as usize].move_point >= 0 {
+                if bc.moves[i as usize].move_point <= bc.current_point {
+                    return true
+                }
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Check if a place has any active borrow
+fn bc_is_place_borrowed(bc: BorrowChecker, place: Place) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < bc.borrow_count {
+        if bc.borrows[i as usize].is_active {
+            if bc_place_overlaps(bc.borrows[i as usize].place, place) {
+                return true
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Check if a place has an active exclusive borrow
+fn bc_is_place_exclusively_borrowed(bc: BorrowChecker, place: Place) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < bc.borrow_count {
+        if bc.borrows[i as usize].is_active {
+            if bc.borrows[i as usize].kind == BC_EXCLUSIVE {
+                if bc_place_overlaps(bc.borrows[i as usize].place, place) {
+                    return true
+                }
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Check if a place has an active shared borrow
+fn bc_is_place_shared_borrowed(bc: BorrowChecker, place: Place) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < bc.borrow_count {
+        if bc.borrows[i as usize].is_active {
+            if bc.borrows[i as usize].kind == BC_SHARED {
+                if bc_place_overlaps(bc.borrows[i as usize].place, place) {
+                    return true
+                }
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Count active borrows on a place
+fn bc_active_borrow_count_for(bc: BorrowChecker, place: Place) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < bc.borrow_count {
+        if bc.borrows[i as usize].is_active {
+            if bc_place_overlaps(bc.borrows[i as usize].place, place) {
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Count active exclusive borrows on a place
+fn bc_active_exclusive_count_for(bc: BorrowChecker, place: Place) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < bc.borrow_count {
+        if bc.borrows[i as usize].is_active {
+            if bc.borrows[i as usize].kind == BC_EXCLUSIVE {
+                if bc_place_overlaps(bc.borrows[i as usize].place, place) {
+                    count = count + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Count active shared borrows on a place
+fn bc_active_shared_count_for(bc: BorrowChecker, place: Place) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < bc.borrow_count {
+        if bc.borrows[i as usize].is_active {
+            if bc.borrows[i as usize].kind == BC_SHARED {
+                if bc_place_overlaps(bc.borrows[i as usize].place, place) {
+                    count = count + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Find the latest move for a place_id, returns move index or -1
+fn bc_find_latest_move(bc: BorrowChecker, place_id: i64) -> i64 with Mut, Div, Panic {
+    var latest: i64 = 0 - 1
+    var latest_point: i64 = 0 - 1
+    var i: i64 = 0
+    while i < bc.move_count {
+        if bc.moves[i as usize].place_id == place_id {
+            if bc.moves[i as usize].move_point > latest_point {
+                latest = i
+                latest_point = bc.moves[i as usize].move_point
+            }
+        }
+        i = i + 1
+    }
+    latest
+}
+
+// Get the borrow kind of an active borrow on a place, or 0 if not borrowed
+fn bc_get_borrow_kind(bc: BorrowChecker, place: Place) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < bc.borrow_count {
+        if bc.borrows[i as usize].is_active {
+            if bc_place_overlaps(bc.borrows[i as usize].place, place) {
+                return bc.borrows[i as usize].kind
+            }
+        }
+        i = i + 1
+    }
+    0
+}
+
+// ============================================================
+// Core checking rules
+// ============================================================
+
+// Rule 1: Use after move
+// Detects use of a value that has already been moved.
+// place_id: the id of the Place being used
+fn bc_check_use_after_move(bc: BorrowChecker, place_id: i64) -> BorrowChecker with Mut, Div, Panic {
+    var result = bc
+    if bc_is_place_moved(result, place_id) {
+        result = bc_report_error(result, ERR_USE_AFTER_MOVE)
+    }
+    result
+}
+
+// Rule 2: Borrow conflict
+// Detects conflicting borrows:
+//   - Cannot create &! while & exists on overlapping place
+//   - Cannot create & while &! exists on overlapping place
+//   - Cannot create &! while &! exists on overlapping place
+fn bc_check_borrow_conflict(bc: BorrowChecker, place: Place, new_kind: i64) -> BorrowChecker with Mut, Div, Panic {
+    var result = bc
+    var i: i64 = 0
+    while i < result.borrow_count {
+        if result.borrows[i as usize].is_active {
+            if bc_place_overlaps(result.borrows[i as usize].place, place) {
+                let existing_kind = result.borrows[i as usize].kind
+                // Exclusive + anything = conflict
+                if new_kind == BC_EXCLUSIVE {
+                    if existing_kind == BC_EXCLUSIVE {
+                        result = bc_report_error(result, ERR_DOUBLE_EXCLUSIVE)
+                    } else if existing_kind == BC_SHARED {
+                        result = bc_report_error(result, ERR_EXCLUSIVE_WHILE_SHARED)
+                    }
+                }
+                // Shared + exclusive = conflict
+                if new_kind == BC_SHARED {
+                    if existing_kind == BC_EXCLUSIVE {
+                        result = bc_report_error(result, ERR_SHARED_WHILE_EXCLUSIVE)
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    result
+}
+
+// Convenience: check and add a borrow in one step
+fn bc_try_borrow(bc: BorrowChecker, place: Place, kind: i64) -> BorrowChecker with Mut, Div, Panic {
+    var result = bc
+    // First check for conflicts
+    result = bc_check_borrow_conflict(result, place, kind)
+    // Then add the borrow regardless (errors are already recorded)
+    result = bc_add_borrow(result, place, kind)
+    result
+}
+
+// Rule 3: Move while borrowed
+// Detects an attempt to move a value that still has an active borrow.
+fn bc_check_move_while_borrowed(bc: BorrowChecker, place: Place) -> BorrowChecker with Mut, Div, Panic {
+    var result = bc
+    if bc_is_place_borrowed(result, place) {
+        result = bc_report_error(result, ERR_MOVE_WHILE_BORROWED)
+    }
+    result
+}
+
+// Combined: check move safety (both use-after-move and move-while-borrowed)
+fn bc_try_move(bc: BorrowChecker, place: Place, place_id: i64, is_partial: bool) -> BorrowChecker with Mut, Div, Panic {
+    var result = bc
+    // Check if place is currently borrowed
+    result = bc_check_move_while_borrowed(result, place)
+    // Record the move
+    result = bc_add_move(result, place_id, is_partial)
+    result
+}
+
+// Combined: check use safety (use-after-move)
+fn bc_try_use(bc: BorrowChecker, place_id: i64) -> BorrowChecker with Mut, Div, Panic {
+    var result = bc
+    result = bc_check_use_after_move(result, place_id)
+    result
+}
+
+// ============================================================
+// Scope management — kill borrows at scope boundaries
+// ============================================================
+
+fn bc_kill_borrows_activated_after(bc: BorrowChecker, point: i64) -> BorrowChecker with Mut, Div, Panic {
+    var result = bc
+    var i: i64 = 0
+    while i < result.borrow_count {
+        if result.borrows[i as usize].is_active {
+            if result.borrows[i as usize].activation_point >= point {
+                result.borrows[i as usize].is_active = false
+                result.borrows[i as usize].kill_point = result.current_point
+            }
+        }
+        i = i + 1
+    }
+    result
+}
+
+fn bc_kill_borrows_activated_in_range(bc: BorrowChecker, from_point: i64, to_point: i64) -> BorrowChecker with Mut, Div, Panic {
+    var result = bc
+    var i: i64 = 0
+    while i < result.borrow_count {
+        if result.borrows[i as usize].is_active {
+            let ap = result.borrows[i as usize].activation_point
+            if ap >= from_point && ap <= to_point {
+                result.borrows[i as usize].is_active = false
+                result.borrows[i as usize].kill_point = result.current_point
+            }
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================
+// Re-initialization (assignment after move)
+// ============================================================
+
+// Mark a place as no longer moved (re-initialized by assignment)
+fn bc_reinit_place(bc: BorrowChecker, place_id: i64) -> BorrowChecker with Mut, Div, Panic {
+    var result = bc
+    var i: i64 = 0
+    while i < result.move_count {
+        if result.moves[i as usize].place_id == place_id {
+            // Invalidate the move by setting move_point to -1
+            result.moves[i as usize].move_point = 0 - 1
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================
+// Diagnostics — count and classify errors
+// ============================================================
+
+fn bc_count_errors_of_kind(bc: BorrowChecker, code: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < bc.error_count {
+        if bc.errors[i as usize] == code {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+fn bc_first_error(bc: BorrowChecker) -> i64 with Mut, Div, Panic {
+    if bc.error_count > 0 {
+        return bc.errors[0]
+    }
+    0 - 1
+}
+
+fn bc_last_error(bc: BorrowChecker) -> i64 with Mut, Div, Panic {
+    if bc.error_count > 0 {
+        return bc.errors[(bc.error_count - 1) as usize]
+    }
+    0 - 1
+}
+
+// ============================================================
+// Summary statistics
+// ============================================================
+
+fn bc_total_borrows(bc: BorrowChecker) -> i64 {
+    bc.borrow_count
+}
+
+fn bc_total_moves(bc: BorrowChecker) -> i64 {
+    bc.move_count
+}
+
+fn bc_active_borrow_count(bc: BorrowChecker) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < bc.borrow_count {
+        if bc.borrows[i as usize].is_active {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+fn bc_killed_borrow_count(bc: BorrowChecker) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < bc.borrow_count {
+        if !bc.borrows[i as usize].is_active {
+            if bc.borrows[i as usize].kill_point >= 0 {
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================
+// Borrow liveness query — is a borrow alive at a given point?
+// ============================================================
+
+fn bc_borrow_alive_at(bc: BorrowChecker, borrow_id: i64, point: i64) -> bool with Mut, Div, Panic {
+    if borrow_id < 0 || borrow_id >= bc.borrow_count {
+        return false
+    }
+    let entry = bc.borrows[borrow_id as usize]
+    if point < entry.activation_point {
+        return false
+    }
+    if entry.kill_point >= 0 && point >= entry.kill_point {
+        return false
+    }
+    true
+}
+
+// Check if any borrow on the place is alive at a given point
+fn bc_place_borrowed_at(bc: BorrowChecker, place: Place, point: i64) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < bc.borrow_count {
+        if bc_place_overlaps(bc.borrows[i as usize].place, place) {
+            if bc_borrow_alive_at(bc, i, point) {
+                return true
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+// ============================================================
+// Batch operations
+// ============================================================
+
+// Kill all shared borrows on a place (useful when upgrading to exclusive)
+fn bc_kill_shared_borrows_for(bc: BorrowChecker, place: Place) -> BorrowChecker with Mut, Div, Panic {
+    var result = bc
+    var i: i64 = 0
+    while i < result.borrow_count {
+        if result.borrows[i as usize].is_active {
+            if result.borrows[i as usize].kind == BC_SHARED {
+                if bc_place_overlaps(result.borrows[i as usize].place, place) {
+                    result.borrows[i as usize].is_active = false
+                    result.borrows[i as usize].kill_point = result.current_point
+                }
+            }
+        }
+        i = i + 1
+    }
+    result
+}
+
+// Kill all exclusive borrows on a place
+fn bc_kill_exclusive_borrows_for(bc: BorrowChecker, place: Place) -> BorrowChecker with Mut, Div, Panic {
+    var result = bc
+    var i: i64 = 0
+    while i < result.borrow_count {
+        if result.borrows[i as usize].is_active {
+            if result.borrows[i as usize].kind == BC_EXCLUSIVE {
+                if bc_place_overlaps(result.borrows[i as usize].place, place) {
+                    result.borrows[i as usize].is_active = false
+                    result.borrows[i as usize].kill_point = result.current_point
+                }
+            }
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================
+// Place construction helpers for common patterns
+// ============================================================
+
+fn bc_local_place(var_id: i64) -> Place {
+    place_new(var_id, var_id)
+}
+
+fn bc_field_place(var_id: i64, field_id: i64) -> Place with Mut, Div, Panic {
+    place_with_field(place_new(var_id, var_id), field_id)
+}
+
+fn bc_index_place(var_id: i64, index_id: i64) -> Place with Mut, Div, Panic {
+    place_with_index(place_new(var_id, var_id), index_id)
+}
+
+fn bc_deref_place(var_id: i64) -> Place with Mut, Div, Panic {
+    place_with_deref(place_new(var_id, var_id))
+}
+
+// ============================================================
+// Two-level projection helpers
+// ============================================================
+
+fn bc_field_field_place(var_id: i64, field1: i64, field2: i64) -> Place with Mut, Div, Panic {
+    var p = place_new(var_id, var_id)
+    p = place_with_field(p, field1)
+    p = place_with_field(p, field2)
+    p
+}
+
+fn bc_deref_field_place(var_id: i64, field_id: i64) -> Place with Mut, Div, Panic {
+    var p = place_new(var_id, var_id)
+    p = place_with_deref(p)
+    p = place_with_field(p, field_id)
+    p
+}
+
+// ============================================================
+// Validation — structural invariant checking
+// ============================================================
+
+// Verify that no active borrow has a kill_point set
+fn bc_validate_active_borrows(bc: BorrowChecker) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < bc.borrow_count {
+        if bc.borrows[i as usize].is_active {
+            if bc.borrows[i as usize].kill_point >= 0 {
+                return false
+            }
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Verify that all killed borrows have kill_point >= activation_point
+fn bc_validate_kill_points(bc: BorrowChecker) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < bc.borrow_count {
+        if !bc.borrows[i as usize].is_active {
+            if bc.borrows[i as usize].kill_point >= 0 {
+                if bc.borrows[i as usize].kill_point < bc.borrows[i as usize].activation_point {
+                    return false
+                }
+            }
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Verify borrow IDs are sequential
+fn bc_validate_borrow_ids(bc: BorrowChecker) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < bc.borrow_count {
+        if bc.borrows[i as usize].id != i {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// ============================================================
+// Reset for a new analysis pass
+// ============================================================
+
+fn bc_reset(bc: BorrowChecker) -> BorrowChecker with Mut {
+    var result = bc
+    result.borrow_count = 0
+    result.move_count = 0
+    result.error_count = 0
+    result.current_point = 0
+    // place_names are preserved across passes
+    result
+}
+
+fn bc_reset_errors(bc: BorrowChecker) -> BorrowChecker with Mut {
+    var result = bc
+    result.error_count = 0
+    result
+}
+
+// ============================================================
+// Test infrastructure
+// ============================================================
+
+fn bc_assert_true(cond: bool, test_num: i64) -> i64 with IO, Mut, Div, Panic {
+    if cond {
+        return 0
+    }
+    print("FAIL: borrow check test #")
+    print_int(test_num)
+    print("\n")
+    1
+}
+
+// ============================================================
+// Test 1: Place construction and equality
+// ============================================================
+
+fn bc_test_01_place_new() -> i64 with IO, Mut, Div, Panic {
+    let p = place_new(1, 10)
+    var fails: i64 = 0
+    fails = fails + bc_assert_true(p.id == 1, 1)
+    fails = fails + bc_assert_true(p.base_var == 10, 1)
+    fails = fails + bc_assert_true(p.proj_count == 0, 1)
+    fails
+}
+
+// ============================================================
+// Test 2: Place equality
+// ============================================================
+
+fn bc_test_02_place_eq() -> i64 with IO, Mut, Div, Panic {
+    let a = place_new(1, 10)
+    let b = place_new(2, 10)
+    let c = place_new(3, 20)
+    var fails: i64 = 0
+    fails = fails + bc_assert_true(place_eq(a, b), 2)       // same base, proj
+    fails = fails + bc_assert_true(!place_eq(a, c), 2)      // different base
+    fails
+}
+
+// ============================================================
+// Test 3: Place with field projection
+// ============================================================
+
+fn bc_test_03_place_field() -> i64 with IO, Mut, Div, Panic {
+    let base = place_new(1, 10)
+    let fp = place_with_field(base, 5)
+    var fails: i64 = 0
+    fails = fails + bc_assert_true(fp.proj_count == 1, 3)
+    fails = fails + bc_assert_true(fp.projections[0] == 5, 3)
+    fails = fails + bc_assert_true(fp.proj_kinds[0] == PROJ_FIELD, 3)
+    fails
+}
+
+// ============================================================
+// Test 4: Place overlap — same base variable
+// ============================================================
+
+fn bc_test_04_place_overlap_same_base() -> i64 with IO, Mut, Div, Panic {
+    let a = place_new(1, 10)
+    let b = place_new(2, 10)
+    var fails: i64 = 0
+    fails = fails + bc_assert_true(bc_place_overlaps(a, b), 4)
+    fails
+}
+
+// ============================================================
+// Test 5: Place overlap — different base
+// ============================================================
+
+fn bc_test_05_place_no_overlap_diff_base() -> i64 with IO, Mut, Div, Panic {
+    let a = place_new(1, 10)
+    let b = place_new(2, 20)
+    var fails: i64 = 0
+    fails = fails + bc_assert_true(!bc_place_overlaps(a, b), 5)
+    fails
+}
+
+// ============================================================
+// Test 6: Place overlap — parent overlaps child
+// ============================================================
+
+fn bc_test_06_place_overlap_parent_child() -> i64 with IO, Mut, Div, Panic {
+    let parent = place_new(1, 10)
+    let child = place_with_field(place_new(2, 10), 3)
+    var fails: i64 = 0
+    fails = fails + bc_assert_true(bc_place_overlaps(parent, child), 6)
+    fails = fails + bc_assert_true(bc_place_overlaps(child, parent), 6)
+    fails
+}
+
+// ============================================================
+// Test 7: Place overlap — siblings don't overlap
+// ============================================================
+
+fn bc_test_07_place_sibling_no_overlap() -> i64 with IO, Mut, Div, Panic {
+    let f1 = place_with_field(place_new(1, 10), 3)
+    let f2 = place_with_field(place_new(2, 10), 4)
+    var fails: i64 = 0
+    fails = fails + bc_assert_true(!bc_place_overlaps(f1, f2), 7)
+    fails
+}
+
+// ============================================================
+// Test 8: BorrowChecker construction
+// ============================================================
+
+fn bc_test_08_checker_new() -> i64 with IO, Mut, Div, Panic {
+    let bc = borrow_checker_new()
+    var fails: i64 = 0
+    fails = fails + bc_assert_true(bc.borrow_count == 0, 8)
+    fails = fails + bc_assert_true(bc.move_count == 0, 8)
+    fails = fails + bc_assert_true(bc.error_count == 0, 8)
+    fails = fails + bc_assert_true(bc.current_point == 0, 8)
+    fails
+}
+
+// ============================================================
+// Test 9: Add borrow
+// ============================================================
+
+fn bc_test_09_add_borrow() -> i64 with IO, Mut, Div, Panic {
+    var bc = borrow_checker_new()
+    let p = place_new(0, 1)
+    bc = bc_add_borrow(bc, p, BC_SHARED)
+    var fails: i64 = 0
+    fails = fails + bc_assert_true(bc.borrow_count == 1, 9)
+    fails = fails + bc_assert_true(bc.borrows[0].kind == BC_SHARED, 9)
+    fails = fails + bc_assert_true(bc.borrows[0].is_active, 9)
+    fails
+}
+
+// ============================================================
+// Test 10: Multiple shared borrows — no conflict
+// ============================================================
+
+fn bc_test_10_multiple_shared() -> i64 with IO, Mut, Div, Panic {
+    var bc = borrow_checker_new()
+    let p = place_new(0, 1)
+    bc = bc_try_borrow(bc, p, BC_SHARED)
+    bc = bc_try_borrow(bc, p, BC_SHARED)
+    bc = bc_try_borrow(bc, p, BC_SHARED)
+    var fails: i64 = 0
+    fails = fails + bc_assert_true(bc.borrow_count == 3, 10)
+    fails = fails + bc_assert_true(bc.error_count == 0, 10)
+    fails
+}
+
+// ============================================================
+// Test 11: Exclusive then exclusive — conflict
+// ============================================================
+
+fn bc_test_11_double_exclusive() -> i64 with IO, Mut, Div, Panic {
+    var bc = borrow_checker_new()
+    let p = place_new(0, 1)
+    bc = bc_try_borrow(bc, p, BC_EXCLUSIVE)
+    bc = bc_try_borrow(bc, p, BC_EXCLUSIVE)
+    var fails: i64 = 0
+    fails = fails + bc_assert_true(bc.error_count > 0, 11)
+    fails = fails + bc_assert_true(bc_has_error_code(bc, ERR_DOUBLE_EXCLUSIVE), 11)
+    fails
+}
+
+// ============================================================
+// Test 12: Shared then exclusive — conflict
+// ============================================================
+
+fn bc_test_12_shared_then_exclusive() -> i64 with IO, Mut, Div, Panic {
+    var bc = borrow_checker_new()
+    let p = place_new(0, 1)
+    bc = bc_try_borrow(bc, p, BC_SHARED)
+    bc = bc_try_borrow(bc, p, BC_EXCLUSIVE)
+    var fails: i64 = 0
+    fails = fails + bc_assert_true(bc.error_count > 0, 12)
+    fails = fails + bc_assert_true(bc_has_error_code(bc, ERR_EXCLUSIVE_WHILE_SHARED), 12)
+    fails
+}
+
+// ============================================================
+// Test 13: Exclusive then shared — conflict
+// ============================================================
+
+fn bc_test_13_exclusive_then_shared() -> i64 with IO, Mut, Div, Panic {
+    var bc = borrow_checker_new()
+    let p = place_new(0, 1)
+    bc = bc_try_borrow(bc, p, BC_EXCLUSIVE)
+    bc = bc_try_borrow(bc, p, BC_SHARED)
+    var fails: i64 = 0
+    fails = fails + bc_assert_true(bc.error_count > 0, 13)
+    fails = fails + bc_assert_true(bc_has_error_code(bc, ERR_SHARED_WHILE_EXCLUSIVE), 13)
+    fails
+}
+
+// ============================================================
+// Test 14: Kill borrow resolves conflict
+// ============================================================
+
+fn bc_test_14_kill_resolves_conflict() -> i64 with IO, Mut, Div, Panic {
+    var bc = borrow_checker_new()
+    let p = place_new(0, 1)
+    bc = bc_try_borrow(bc, p, BC_EXCLUSIVE)
+    // Kill the first borrow
+    bc = bc_kill_borrow(bc, 0)
+    // Now a new exclusive borrow should succeed
+    bc = bc_reset_errors(bc)
+    bc = bc_try_borrow(bc, p, BC_EXCLUSIVE)
+    var fails: i64 = 0
+    fails = fails + bc_assert_true(bc.error_count == 0, 14)
+    fails = fails + bc_assert_true(bc.borrow_count == 2, 14)
+    fails
+}
+
+// ============================================================
+// Test 15: Use after move detection
+// ============================================================
+
+fn bc_test_15_use_after_move() -> i64 with IO, Mut, Div, Panic {
+    var bc = borrow_checker_new()
+    let p = place_new(0, 1)
+    bc = bc_add_move(bc, 1, false)  // move place with id=1
+    bc = bc_advance_point(bc)
+    bc = bc_check_use_after_move(bc, 1)  // use after move
+    var fails: i64 = 0
+    fails = fails + bc_assert_true(bc.error_count > 0, 15)
+    fails = fails + bc_assert_true(bc_has_error_code(bc, ERR_USE_AFTER_MOVE), 15)
+    fails
+}
+
+// ============================================================
+// Test 16: Move while borrowed
+// ============================================================
+
+fn bc_test_16_move_while_borrowed() -> i64 with IO, Mut, Div, Panic {
+    var bc = borrow_checker_new()
+    let p = place_new(0, 1)
+    bc = bc_add_borrow(bc, p, BC_SHARED)
+    bc = bc_check_move_while_borrowed(bc, p)
+    var fails: i64 = 0
+    fails = fails + bc_assert_true(bc.error_count > 0, 16)
+    fails = fails + bc_assert_true(bc_has_error_code(bc, ERR_MOVE_WHILE_BORROWED), 16)
+    fails
+}
+
+// ============================================================
+// Test 17: No error on clean use (not moved)
+// ============================================================
+
+fn bc_test_17_clean_use() -> i64 with IO, Mut, Div, Panic {
+    var bc = borrow_checker_new()
+    // Use a place that was never moved
+    bc = bc_check_use_after_move(bc, 1)
+    var fails: i64 = 0
+    fails = fails + bc_assert_true(bc.error_count == 0, 17)
+    fails
+}
+
+// ============================================================
+// Test 18: Reinit after move clears moved status
+// ============================================================
+
+fn bc_test_18_reinit_after_move() -> i64 with IO, Mut, Div, Panic {
+    var bc = borrow_checker_new()
+    bc = bc_add_move(bc, 5, false)
+    bc = bc_advance_point(bc)
+    // place 5 is moved
+    var is_moved = bc_is_place_moved(bc, 5)
+    // Reinit it
+    bc = bc_reinit_place(bc, 5)
+    var is_moved_after = bc_is_place_moved(bc, 5)
+    var fails: i64 = 0
+    fails = fails + bc_assert_true(is_moved, 18)
+    fails = fails + bc_assert_true(!is_moved_after, 18)
+    fails
+}
+
+// ============================================================
+// Test 19: Advance point
+// ============================================================
+
+fn bc_test_19_advance_point() -> i64 with IO, Mut, Div, Panic {
+    var bc = borrow_checker_new()
+    bc = bc_advance_point(bc)
+    bc = bc_advance_point(bc)
+    bc = bc_advance_point(bc)
+    var fails: i64 = 0
+    fails = fails + bc_assert_true(bc.current_point == 3, 19)
+    fails
+}
+
+// ============================================================
+// Test 20: Kill borrows activated after a point
+// ============================================================
+
+fn bc_test_20_kill_borrows_after_point() -> i64 with IO, Mut, Div, Panic {
+    var bc = borrow_checker_new()
+    let p1 = place_new(0, 1)
+    let p2 = place_new(1, 2)
+    // Borrow at point 0
+    bc = bc_add_borrow(bc, p1, BC_SHARED)
+    bc = bc_advance_point(bc)
+    // Borrow at point 1
+    bc = bc_add_borrow(bc, p2, BC_SHARED)
+    bc = bc_advance_point(bc)
+    // Kill borrows activated at or after point 1
+    bc = bc_kill_borrows_activated_after(bc, 1)
+    var fails: i64 = 0
+    // First borrow (activated at 0) should still be active
+    fails = fails + bc_assert_true(bc.borrows[0].is_active, 20)
+    // Second borrow (activated at 1) should be killed
+    fails = fails + bc_assert_true(!bc.borrows[1].is_active, 20)
+    fails
+}
+
+// ============================================================
+// Test 21: Field overlap — parent borrow blocks child exclusive
+// ============================================================
+
+fn bc_test_21_field_overlap_conflict() -> i64 with IO, Mut, Div, Panic {
+    var bc = borrow_checker_new()
+    let parent = place_new(0, 1)
+    let child = place_with_field(place_new(1, 1), 3)
+    // Borrow the parent shared
+    bc = bc_try_borrow(bc, parent, BC_SHARED)
+    // Try to borrow a child exclusively — should conflict
+    bc = bc_try_borrow(bc, child, BC_EXCLUSIVE)
+    var fails: i64 = 0
+    fails = fails + bc_assert_true(bc.error_count > 0, 21)
+    fails
+}
+
+// ============================================================
+// Test 22: Disjoint fields — no conflict
+// ============================================================
+
+fn bc_test_22_disjoint_fields_ok() -> i64 with IO, Mut, Div, Panic {
+    var bc = borrow_checker_new()
+    let f1 = place_with_field(place_new(0, 1), 10)
+    let f2 = place_with_field(place_new(1, 1), 20)
+    // Exclusive borrow on field 10
+    bc = bc_try_borrow(bc, f1, BC_EXCLUSIVE)
+    // Exclusive borrow on field 20 — different field, should be fine
+    bc = bc_try_borrow(bc, f2, BC_EXCLUSIVE)
+    var fails: i64 = 0
+    fails = fails + bc_assert_true(bc.error_count == 0, 22)
+    fails
+}
+
+// ============================================================
+// Test 23: Borrow liveness at point
+// ============================================================
+
+fn bc_test_23_borrow_liveness() -> i64 with IO, Mut, Div, Panic {
+    var bc = borrow_checker_new()
+    let p = place_new(0, 1)
+    // Borrow activated at point 0
+    bc = bc_add_borrow(bc, p, BC_SHARED)
+    bc = bc_advance_point(bc)
+    bc = bc_advance_point(bc)
+    // Kill at point 2
+    bc = bc_kill_borrow(bc, 0)
+    var fails: i64 = 0
+    // Should be alive at point 0, 1
+    fails = fails + bc_assert_true(bc_borrow_alive_at(bc, 0, 0), 23)
+    fails = fails + bc_assert_true(bc_borrow_alive_at(bc, 0, 1), 23)
+    // Should not be alive at point 2 or later
+    fails = fails + bc_assert_true(!bc_borrow_alive_at(bc, 0, 2), 23)
+    fails = fails + bc_assert_true(!bc_borrow_alive_at(bc, 0, 5), 23)
+    fails
+}
+
+// ============================================================
+// Test 24: Place is_prefix_of
+// ============================================================
+
+fn bc_test_24_place_prefix() -> i64 with IO, Mut, Div, Panic {
+    let base = place_new(0, 10)
+    let child = place_with_field(place_new(1, 10), 3)
+    let grandchild = bc_field_field_place(10, 3, 7)
+    var fails: i64 = 0
+    fails = fails + bc_assert_true(place_is_prefix_of(base, child), 24)
+    fails = fails + bc_assert_true(place_is_prefix_of(child, grandchild), 24)
+    fails = fails + bc_assert_true(!place_is_prefix_of(child, base), 24)
+    fails = fails + bc_assert_true(!place_is_prefix_of(base, base), 24)  // not strict prefix
+    fails
+}
+
+// ============================================================
+// Test 25: Register and find place name
+// ============================================================
+
+fn bc_test_25_place_names() -> i64 with IO, Mut, Div, Panic {
+    var bc = borrow_checker_new()
+    var name1: [i8; 64] = [0; 64]
+    name1[0] = 120  // 'x'
+    var name2: [i8; 64] = [0; 64]
+    name2[0] = 121  // 'y'
+    let pair1 = bc_register_place_name(bc, name1)
+    bc = pair1.0
+    let idx1 = pair1.1
+    let pair2 = bc_register_place_name(bc, name2)
+    bc = pair2.0
+    let idx2 = pair2.1
+    var fails: i64 = 0
+    fails = fails + bc_assert_true(idx1 == 0, 25)
+    fails = fails + bc_assert_true(idx2 == 1, 25)
+    fails = fails + bc_assert_true(bc_find_place_name(bc, name1) == 0, 25)
+    fails = fails + bc_assert_true(bc_find_place_name(bc, name2) == 1, 25)
+    fails
+}
+
+// ============================================================
+// Test 26: Partial move
+// ============================================================
+
+fn bc_test_26_partial_move() -> i64 with IO, Mut, Div, Panic {
+    var bc = borrow_checker_new()
+    bc = bc_add_move(bc, 3, true)  // partial move of place 3
+    bc = bc_advance_point(bc)
+    var fails: i64 = 0
+    fails = fails + bc_assert_true(bc.move_count == 1, 26)
+    fails = fails + bc_assert_true(bc.moves[0].is_partial, 26)
+    fails = fails + bc_assert_true(bc_is_place_moved(bc, 3), 26)
+    fails
+}
+
+// ============================================================
+// Test 27: Validate borrow IDs
+// ============================================================
+
+fn bc_test_27_validate_ids() -> i64 with IO, Mut, Div, Panic {
+    var bc = borrow_checker_new()
+    let p1 = place_new(0, 1)
+    let p2 = place_new(1, 2)
+    let p3 = place_new(2, 3)
+    bc = bc_add_borrow(bc, p1, BC_SHARED)
+    bc = bc_add_borrow(bc, p2, BC_EXCLUSIVE)
+    bc = bc_add_borrow(bc, p3, BC_SHARED)
+    var fails: i64 = 0
+    fails = fails + bc_assert_true(bc_validate_borrow_ids(bc), 27)
+    fails = fails + bc_assert_true(bc.borrows[0].id == 0, 27)
+    fails = fails + bc_assert_true(bc.borrows[1].id == 1, 27)
+    fails = fails + bc_assert_true(bc.borrows[2].id == 2, 27)
+    fails
+}
+
+// ============================================================
+// Test 28: Active borrow count
+// ============================================================
+
+fn bc_test_28_active_count() -> i64 with IO, Mut, Div, Panic {
+    var bc = borrow_checker_new()
+    let p1 = place_new(0, 1)
+    let p2 = place_new(1, 2)
+    bc = bc_add_borrow(bc, p1, BC_SHARED)
+    bc = bc_add_borrow(bc, p2, BC_EXCLUSIVE)
+    var fails: i64 = 0
+    fails = fails + bc_assert_true(bc_active_borrow_count(bc) == 2, 28)
+    bc = bc_kill_borrow(bc, 0)
+    fails = fails + bc_assert_true(bc_active_borrow_count(bc) == 1, 28)
+    bc = bc_kill_borrow(bc, 1)
+    fails = fails + bc_assert_true(bc_active_borrow_count(bc) == 0, 28)
+    fails
+}
+
+// ============================================================
+// Test 29: Reset clears state
+// ============================================================
+
+fn bc_test_29_reset() -> i64 with IO, Mut, Div, Panic {
+    var bc = borrow_checker_new()
+    let p = place_new(0, 1)
+    bc = bc_add_borrow(bc, p, BC_SHARED)
+    bc = bc_add_move(bc, 1, false)
+    bc = bc_report_error(bc, 999)
+    bc = bc_advance_point(bc)
+    // Reset
+    bc = bc_reset(bc)
+    var fails: i64 = 0
+    fails = fails + bc_assert_true(bc.borrow_count == 0, 29)
+    fails = fails + bc_assert_true(bc.move_count == 0, 29)
+    fails = fails + bc_assert_true(bc.error_count == 0, 29)
+    fails = fails + bc_assert_true(bc.current_point == 0, 29)
+    fails
+}
+
+// ============================================================
+// Test 30: try_move detects move while borrowed
+// ============================================================
+
+fn bc_test_30_try_move_while_borrowed() -> i64 with IO, Mut, Div, Panic {
+    var bc = borrow_checker_new()
+    let p = place_new(0, 1)
+    bc = bc_add_borrow(bc, p, BC_EXCLUSIVE)
+    bc = bc_try_move(bc, p, 1, false)
+    var fails: i64 = 0
+    fails = fails + bc_assert_true(bc.error_count > 0, 30)
+    fails = fails + bc_assert_true(bc_has_error_code(bc, ERR_MOVE_WHILE_BORROWED), 30)
+    fails
+}
+
+// ============================================================
+// Test 31: Kill all borrows
+// ============================================================
+
+fn bc_test_31_kill_all() -> i64 with IO, Mut, Div, Panic {
+    var bc = borrow_checker_new()
+    let p1 = place_new(0, 1)
+    let p2 = place_new(1, 2)
+    let p3 = place_new(2, 3)
+    bc = bc_add_borrow(bc, p1, BC_SHARED)
+    bc = bc_add_borrow(bc, p2, BC_EXCLUSIVE)
+    bc = bc_add_borrow(bc, p3, BC_SHARED)
+    bc = bc_kill_all_borrows(bc)
+    var fails: i64 = 0
+    fails = fails + bc_assert_true(bc_active_borrow_count(bc) == 0, 31)
+    fails = fails + bc_assert_true(bc.borrow_count == 3, 31)  // entries still there, just not active
+    fails
+}
+
+// ============================================================
+// Test 32: Deref place construction
+// ============================================================
+
+fn bc_test_32_deref_place() -> i64 with IO, Mut, Div, Panic {
+    let dp = bc_deref_place(5)
+    var fails: i64 = 0
+    fails = fails + bc_assert_true(dp.base_var == 5, 32)
+    fails = fails + bc_assert_true(dp.proj_count == 1, 32)
+    fails = fails + bc_assert_true(dp.proj_kinds[0] == PROJ_DEREF, 32)
+    fails
+}
+
+// ============================================================
+// Test runner
+// ============================================================
+
+fn run_borrow_checker_tests() -> i32 with IO, Mut, Div, Panic {
+    var total: i64 = 0
+    var failed: i64 = 0
+
+    total = total + 1
+    failed = failed + bc_test_01_place_new()
+
+    total = total + 1
+    failed = failed + bc_test_02_place_eq()
+
+    total = total + 1
+    failed = failed + bc_test_03_place_field()
+
+    total = total + 1
+    failed = failed + bc_test_04_place_overlap_same_base()
+
+    total = total + 1
+    failed = failed + bc_test_05_place_no_overlap_diff_base()
+
+    total = total + 1
+    failed = failed + bc_test_06_place_overlap_parent_child()
+
+    total = total + 1
+    failed = failed + bc_test_07_place_sibling_no_overlap()
+
+    total = total + 1
+    failed = failed + bc_test_08_checker_new()
+
+    total = total + 1
+    failed = failed + bc_test_09_add_borrow()
+
+    total = total + 1
+    failed = failed + bc_test_10_multiple_shared()
+
+    total = total + 1
+    failed = failed + bc_test_11_double_exclusive()
+
+    total = total + 1
+    failed = failed + bc_test_12_shared_then_exclusive()
+
+    total = total + 1
+    failed = failed + bc_test_13_exclusive_then_shared()
+
+    total = total + 1
+    failed = failed + bc_test_14_kill_resolves_conflict()
+
+    total = total + 1
+    failed = failed + bc_test_15_use_after_move()
+
+    total = total + 1
+    failed = failed + bc_test_16_move_while_borrowed()
+
+    total = total + 1
+    failed = failed + bc_test_17_clean_use()
+
+    total = total + 1
+    failed = failed + bc_test_18_reinit_after_move()
+
+    total = total + 1
+    failed = failed + bc_test_19_advance_point()
+
+    total = total + 1
+    failed = failed + bc_test_20_kill_borrows_after_point()
+
+    total = total + 1
+    failed = failed + bc_test_21_field_overlap_conflict()
+
+    total = total + 1
+    failed = failed + bc_test_22_disjoint_fields_ok()
+
+    total = total + 1
+    failed = failed + bc_test_23_borrow_liveness()
+
+    total = total + 1
+    failed = failed + bc_test_24_place_prefix()
+
+    total = total + 1
+    failed = failed + bc_test_25_place_names()
+
+    total = total + 1
+    failed = failed + bc_test_26_partial_move()
+
+    total = total + 1
+    failed = failed + bc_test_27_validate_ids()
+
+    total = total + 1
+    failed = failed + bc_test_28_active_count()
+
+    total = total + 1
+    failed = failed + bc_test_29_reset()
+
+    total = total + 1
+    failed = failed + bc_test_30_try_move_while_borrowed()
+
+    total = total + 1
+    failed = failed + bc_test_31_kill_all()
+
+    total = total + 1
+    failed = failed + bc_test_32_deref_place()
+
+    print("Borrow checker tests: ")
+    print_int(total - failed)
+    print("/")
+    print_int(total)
+    print(" passed\n")
+
+    if failed > 0 {
+        return 1
+    }
+    0
+}

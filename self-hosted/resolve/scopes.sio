@@ -1,0 +1,1372 @@
+// Scope / symbol resolution system for the self-hosted compiler
+//
+// Provides a flat-array scope stack with rich entry metadata: each binding
+// records its name, kind, type_id, depth, slot, mutability, and capture
+// status.  Designed for use in closure analysis and later lowering passes
+// that need finer-grained scope information than the minimal ScopeStack in
+// scope.sio.
+//
+// Layout:
+//   RichScopeEntry  — one binding (name, kind, type, depth, slot, flags)
+//   RichScopeStack  — flat arrays: entries[2048], scope_depths[128]
+//
+// Helpers must precede callers (Sounio requirement: no forward references).
+
+// ============================================================================
+// CONSTANTS — scope entry kinds
+// ============================================================================
+
+let RSCOPE_VAR: i64 = 1
+let RSCOPE_FN: i64 = 2
+let RSCOPE_TYPE: i64 = 3
+let RSCOPE_PARAM: i64 = 4
+let RSCOPE_CONST: i64 = 5
+
+// Sentinel returned when lookup fails.
+let RSCOPE_NOT_FOUND: i64 = 0 - 1
+
+// Maximum entries and depth limits.
+let RSCOPE_MAX_ENTRIES: i64 = 2048
+let RSCOPE_MAX_DEPTH: i64 = 128
+
+// ============================================================================
+// NAME COMPARISON HELPER
+// ============================================================================
+
+// Byte-by-byte equality over fixed-size name buffers.
+// Both buffers are [i8; 64] with an accompanying length.
+fn rscope_name_eq(
+    a: [i8; 64], a_len: i64,
+    b: [i8; 64], b_len: i64
+) -> bool with Mut, Div, Panic {
+    if a_len != b_len {
+        return false
+    }
+    var i: i64 = 0
+    while i < a_len {
+        if a[i as usize] != b[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Copy up to 64 bytes from a source buffer into a destination buffer.
+fn rscope_name_copy(src: [i8; 64], len: i64) -> [i8; 64] with Mut, Div, Panic {
+    var dst: [i8; 64] = [0; 64]
+    var i: i64 = 0
+    while i < len && i < 64 {
+        dst[i as usize] = src[i as usize]
+        i = i + 1
+    }
+    dst
+}
+
+// ============================================================================
+// SCOPE ENTRY
+// ============================================================================
+
+struct RichScopeEntry {
+    name: [i8; 64],
+    name_len: i64,
+    kind: i64,
+    type_id: i64,
+    depth: i64,
+    slot: i64,
+    is_mutable: bool,
+    is_captured: bool,
+}
+
+fn rscope_entry_new() -> RichScopeEntry {
+    RichScopeEntry {
+        name: [0; 64],
+        name_len: 0,
+        kind: 0,
+        type_id: 0,
+        depth: 0,
+        slot: 0,
+        is_mutable: false,
+        is_captured: false,
+    }
+}
+
+// Create an entry with all fields specified.
+fn rscope_entry_make(
+    name: [i8; 64],
+    name_len: i64,
+    kind: i64,
+    type_id: i64,
+    depth: i64,
+    slot: i64,
+    is_mutable: bool
+) -> RichScopeEntry {
+    RichScopeEntry {
+        name: name,
+        name_len: name_len,
+        kind: kind,
+        type_id: type_id,
+        depth: depth,
+        slot: slot,
+        is_mutable: is_mutable,
+        is_captured: false,
+    }
+}
+
+// ============================================================================
+// SCOPE STACK
+// ============================================================================
+
+struct RichScopeStack {
+    entries: [RichScopeEntry; 2048],
+    entry_count: i64,
+    scope_depths: [i64; 128],
+    depth_count: i64,
+    current_depth: i64,
+}
+
+fn rscope_stack_new() -> RichScopeStack {
+    RichScopeStack {
+        entries: [rscope_entry_new(); 2048],
+        entry_count: 0,
+        scope_depths: [0; 128],
+        depth_count: 0,
+        current_depth: 0,
+    }
+}
+
+// ============================================================================
+// SCOPE PUSH / POP
+// ============================================================================
+
+// Push a new scope level.  Records the current entry_count as the
+// start-of-scope marker in scope_depths so that pop can trim back.
+fn rscope_push(stack: RichScopeStack) -> RichScopeStack with Mut, Div, Panic {
+    var s = stack
+    if s.depth_count < RSCOPE_MAX_DEPTH {
+        s.scope_depths[s.depth_count as usize] = s.entry_count
+        s.depth_count = s.depth_count + 1
+    }
+    s.current_depth = s.current_depth + 1
+    s
+}
+
+// Pop the most recent scope.  Resets entry_count to the value saved
+// when the scope was pushed, effectively removing all bindings added
+// in that scope.
+fn rscope_pop(stack: RichScopeStack) -> RichScopeStack with Mut, Div, Panic {
+    var s = stack
+    if s.depth_count > 0 {
+        s.depth_count = s.depth_count - 1
+        s.entry_count = s.scope_depths[s.depth_count as usize]
+    }
+    if s.current_depth > 0 {
+        s.current_depth = s.current_depth - 1
+    }
+    s
+}
+
+// Return the entry_count at which the current scope started.
+fn rscope_current_start(stack: RichScopeStack) -> i64 with Div, Panic {
+    if stack.depth_count > 0 {
+        stack.scope_depths[(stack.depth_count - 1) as usize]
+    } else {
+        0
+    }
+}
+
+// ============================================================================
+// SCOPE DEFINE — add a binding to the current scope
+// ============================================================================
+
+fn rscope_define(
+    stack: RichScopeStack,
+    name: [i8; 64],
+    name_len: i64,
+    kind: i64,
+    type_id: i64,
+    is_mutable: bool
+) -> RichScopeStack with Mut, Div, Panic {
+    var s = stack
+    if s.entry_count < RSCOPE_MAX_ENTRIES {
+        let slot = s.entry_count
+        s.entries[s.entry_count as usize] = RichScopeEntry {
+            name: name,
+            name_len: name_len,
+            kind: kind,
+            type_id: type_id,
+            depth: s.current_depth,
+            slot: slot,
+            is_mutable: is_mutable,
+            is_captured: false,
+        }
+        s.entry_count = s.entry_count + 1
+    }
+    s
+}
+
+// Convenience: define with a pre-built entry (inherits current_depth).
+fn rscope_define_entry(stack: RichScopeStack, entry: RichScopeEntry) -> RichScopeStack with Mut, Div, Panic {
+    rscope_define(
+        stack,
+        entry.name,
+        entry.name_len,
+        entry.kind,
+        entry.type_id,
+        entry.is_mutable
+    )
+}
+
+// ============================================================================
+// SCOPE LOOKUP — find a binding by name (innermost first)
+// ============================================================================
+
+// Returns the slot (index) of the innermost binding with the given name,
+// or RSCOPE_NOT_FOUND (-1) if not found.
+fn rscope_lookup(
+    stack: RichScopeStack,
+    name: [i8; 64],
+    name_len: i64
+) -> i64 with Mut, Div, Panic {
+    var i = stack.entry_count - 1
+    while i >= 0 {
+        let e = stack.entries[i as usize]
+        if rscope_name_eq(e.name, e.name_len, name, name_len) {
+            return e.slot
+        }
+        i = i - 1
+    }
+    RSCOPE_NOT_FOUND
+}
+
+// Return the full RichScopeEntry for the innermost binding, or a default
+// empty entry if not found.
+fn rscope_lookup_entry(
+    stack: RichScopeStack,
+    name: [i8; 64],
+    name_len: i64
+) -> RichScopeEntry with Mut, Div, Panic {
+    var i = stack.entry_count - 1
+    while i >= 0 {
+        let e = stack.entries[i as usize]
+        if rscope_name_eq(e.name, e.name_len, name, name_len) {
+            return e
+        }
+        i = i - 1
+    }
+    rscope_entry_new()
+}
+
+// ============================================================================
+// SCOPE LOOKUP IN DEPTH — find binding at a specific depth
+// ============================================================================
+
+// Returns the slot of the first binding with the given name at exactly
+// the specified depth, or RSCOPE_NOT_FOUND if none.
+fn rscope_lookup_in_depth(
+    stack: RichScopeStack,
+    name: [i8; 64],
+    name_len: i64,
+    target_depth: i64
+) -> i64 with Mut, Div, Panic {
+    var i = stack.entry_count - 1
+    while i >= 0 {
+        let e = stack.entries[i as usize]
+        if e.depth == target_depth {
+            if rscope_name_eq(e.name, e.name_len, name, name_len) {
+                return e.slot
+            }
+        }
+        i = i - 1
+    }
+    RSCOPE_NOT_FOUND
+}
+
+// ============================================================================
+// SCOPE MARK CAPTURED
+// ============================================================================
+
+// Mark the innermost binding with the given name as captured.
+// Returns the updated stack.
+fn rscope_mark_captured(
+    stack: RichScopeStack,
+    name: [i8; 64],
+    name_len: i64
+) -> RichScopeStack with Mut, Div, Panic {
+    var s = stack
+    var i = s.entry_count - 1
+    while i >= 0 {
+        if rscope_name_eq(s.entries[i as usize].name, s.entries[i as usize].name_len, name, name_len) {
+            s.entries[i as usize].is_captured = true
+            return s
+        }
+        i = i - 1
+    }
+    s
+}
+
+// ============================================================================
+// SCOPE COUNT CAPTURES
+// ============================================================================
+
+// Count the number of entries currently marked as captured.
+fn rscope_count_captures(stack: RichScopeStack) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < stack.entry_count {
+        if stack.entries[i as usize].is_captured {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Count captures at a specific depth.
+fn rscope_count_captures_at_depth(stack: RichScopeStack, target_depth: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < stack.entry_count {
+        let e = stack.entries[i as usize]
+        if e.is_captured && e.depth == target_depth {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// SCOPE IS SHADOWING
+// ============================================================================
+
+// Check whether defining a name at the current depth would shadow an
+// outer (lower-depth) binding with the same name.
+fn rscope_is_shadowing(
+    stack: RichScopeStack,
+    name: [i8; 64],
+    name_len: i64
+) -> bool with Mut, Div, Panic {
+    var i = stack.entry_count - 1
+    while i >= 0 {
+        let e = stack.entries[i as usize]
+        if rscope_name_eq(e.name, e.name_len, name, name_len) {
+            // Found an existing binding — it shadows if the depth is strictly less.
+            if e.depth < stack.current_depth {
+                return true
+            }
+        }
+        i = i - 1
+    }
+    false
+}
+
+// Check whether a name is already defined in the current scope (same depth).
+// Useful for detecting duplicate definitions.
+fn rscope_is_duplicate_in_current(
+    stack: RichScopeStack,
+    name: [i8; 64],
+    name_len: i64
+) -> bool with Mut, Div, Panic {
+    let start = rscope_current_start(stack)
+    var i = stack.entry_count - 1
+    while i >= start {
+        let e = stack.entries[i as usize]
+        if rscope_name_eq(e.name, e.name_len, name, name_len) {
+            return true
+        }
+        i = i - 1
+    }
+    false
+}
+
+// ============================================================================
+// SCOPE COLLECT LOCALS
+// ============================================================================
+
+// Collect all bindings at the current depth into a result buffer.
+// Returns the number of entries written.  Writes at most 256 entries.
+fn rscope_collect_locals(
+    stack: RichScopeStack,
+    result: [RichScopeEntry; 256]
+) -> ([RichScopeEntry; 256], i64) with Mut, Div, Panic {
+    var out = result
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < stack.entry_count {
+        let e = stack.entries[i as usize]
+        if e.depth == stack.current_depth && count < 256 {
+            out[count as usize] = e
+            count = count + 1
+        }
+        i = i + 1
+    }
+    (out, count)
+}
+
+// Collect all bindings of a specific kind across all depths.
+fn rscope_collect_by_kind(
+    stack: RichScopeStack,
+    kind: i64,
+    result: [RichScopeEntry; 256]
+) -> ([RichScopeEntry; 256], i64) with Mut, Div, Panic {
+    var out = result
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < stack.entry_count {
+        let e = stack.entries[i as usize]
+        if e.kind == kind && count < 256 {
+            out[count as usize] = e
+            count = count + 1
+        }
+        i = i + 1
+    }
+    (out, count)
+}
+
+// ============================================================================
+// SCOPE UTILITY — depth, count, entry-at-slot
+// ============================================================================
+
+// Return the current nesting depth.
+fn rscope_depth(stack: RichScopeStack) -> i64 {
+    stack.current_depth
+}
+
+// Return the total number of live entries.
+fn rscope_entry_count(stack: RichScopeStack) -> i64 {
+    stack.entry_count
+}
+
+// Return the entry at a given slot index.
+fn rscope_get_entry(stack: RichScopeStack, slot: i64) -> RichScopeEntry with Div, Panic {
+    if slot >= 0 && slot < stack.entry_count {
+        stack.entries[slot as usize]
+    } else {
+        rscope_entry_new()
+    }
+}
+
+// Check whether a given slot is valid (in range).
+fn rscope_slot_valid(stack: RichScopeStack, slot: i64) -> bool {
+    slot >= 0 && slot < stack.entry_count
+}
+
+// Return the kind of the entry at a given slot.
+fn rscope_slot_kind(stack: RichScopeStack, slot: i64) -> i64 with Div, Panic {
+    if slot >= 0 && slot < stack.entry_count {
+        stack.entries[slot as usize].kind
+    } else {
+        0
+    }
+}
+
+// Return true if the entry at the given slot is mutable.
+fn rscope_slot_is_mutable(stack: RichScopeStack, slot: i64) -> bool with Div, Panic {
+    if slot >= 0 && slot < stack.entry_count {
+        stack.entries[slot as usize].is_mutable
+    } else {
+        false
+    }
+}
+
+// ============================================================================
+// NAME BUILDER HELPERS (for tests)
+// ============================================================================
+
+// Build a 1-character name buffer.
+fn rscope_make_name1(a: i8) -> [i8; 64] with Mut, Div, Panic {
+    var buf: [i8; 64] = [0; 64]
+    buf[0] = a
+    buf
+}
+
+// Build a 2-character name buffer.
+fn rscope_make_name2(a: i8, b: i8) -> [i8; 64] with Mut, Div, Panic {
+    var buf: [i8; 64] = [0; 64]
+    buf[0] = a
+    buf[1] = b
+    buf
+}
+
+// Build a 3-character name buffer.
+fn rscope_make_name3(a: i8, b: i8, c: i8) -> [i8; 64] with Mut, Div, Panic {
+    var buf: [i8; 64] = [0; 64]
+    buf[0] = a
+    buf[1] = b
+    buf[2] = c
+    buf
+}
+
+// Build a 4-character name buffer.
+fn rscope_make_name4(a: i8, b: i8, c: i8, d: i8) -> [i8; 64] with Mut, Div, Panic {
+    var buf: [i8; 64] = [0; 64]
+    buf[0] = a
+    buf[1] = b
+    buf[2] = c
+    buf[3] = d
+    buf
+}
+
+// Build a 5-character name buffer.
+fn rscope_make_name5(a: i8, b: i8, c: i8, d: i8, e: i8) -> [i8; 64] with Mut, Div, Panic {
+    var buf: [i8; 64] = [0; 64]
+    buf[0] = a
+    buf[1] = b
+    buf[2] = c
+    buf[3] = d
+    buf[4] = e
+    buf
+}
+
+// ============================================================================
+// MULTI-SCOPE OPERATIONS
+// ============================================================================
+
+// Push N nested scopes at once (useful for quickly setting up test scenarios).
+fn rscope_push_n(stack: RichScopeStack, n: i64) -> RichScopeStack with Mut, Div, Panic {
+    var s = stack
+    var i: i64 = 0
+    while i < n {
+        s = rscope_push(s)
+        i = i + 1
+    }
+    s
+}
+
+// Pop N scopes at once.
+fn rscope_pop_n(stack: RichScopeStack, n: i64) -> RichScopeStack with Mut, Div, Panic {
+    var s = stack
+    var i: i64 = 0
+    while i < n {
+        s = rscope_pop(s)
+        i = i + 1
+    }
+    s
+}
+
+// Count entries at a specific depth.
+fn rscope_count_at_depth(stack: RichScopeStack, target_depth: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < stack.entry_count {
+        if stack.entries[i as usize].depth == target_depth {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Count all entries with a given kind.
+fn rscope_count_by_kind(stack: RichScopeStack, kind: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < stack.entry_count {
+        if stack.entries[i as usize].kind == kind {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// SCOPE SNAPSHOT / RESTORE
+// ============================================================================
+
+// A snapshot captures the entry_count and depth_count so we can restore later.
+struct RichScopeSnapshot {
+    saved_entry_count: i64,
+    saved_depth_count: i64,
+    saved_current_depth: i64,
+}
+
+fn rscope_snapshot(stack: RichScopeStack) -> RichScopeSnapshot {
+    RichScopeSnapshot {
+        saved_entry_count: stack.entry_count,
+        saved_depth_count: stack.depth_count,
+        saved_current_depth: stack.current_depth,
+    }
+}
+
+fn rscope_restore(stack: RichScopeStack, snap: RichScopeSnapshot) -> RichScopeStack with Mut {
+    var s = stack
+    s.entry_count = snap.saved_entry_count
+    s.depth_count = snap.saved_depth_count
+    s.current_depth = snap.saved_current_depth
+    s
+}
+
+// ============================================================================
+// TEST INFRASTRUCTURE
+// ============================================================================
+
+fn rscope_assert_true(cond: bool, test_num: i64) -> i64 with IO, Mut, Div, Panic {
+    if cond {
+        print("  PASS test ")
+        print_int(test_num)
+        print("\n")
+        return 1
+    }
+    print("  FAIL test ")
+    print_int(test_num)
+    print("\n")
+    0
+}
+
+fn rscope_assert_eq_i64(actual: i64, expected: i64, test_num: i64) -> i64 with IO, Mut, Div, Panic {
+    if actual == expected {
+        print("  PASS test ")
+        print_int(test_num)
+        print("\n")
+        return 1
+    }
+    print("  FAIL test ")
+    print_int(test_num)
+    print(" expected=")
+    print_int(expected)
+    print(" actual=")
+    print_int(actual)
+    print("\n")
+    0
+}
+
+// ============================================================================
+// TEST 1: Empty stack has zero entries and depth zero
+// ============================================================================
+
+fn test_rscope_empty_stack() -> i64 with IO, Mut, Div, Panic {
+    let s = rscope_stack_new()
+    let c1 = rscope_entry_count(s) == 0
+    let c2 = rscope_depth(s) == 0
+    rscope_assert_true(c1 && c2, 1)
+}
+
+// ============================================================================
+// TEST 2: Push increments depth
+// ============================================================================
+
+fn test_rscope_push_depth() -> i64 with IO, Mut, Div, Panic {
+    var s = rscope_stack_new()
+    s = rscope_push(s)
+    let c1 = rscope_depth(s) == 1
+    s = rscope_push(s)
+    let c2 = rscope_depth(s) == 2
+    rscope_assert_true(c1 && c2, 2)
+}
+
+// ============================================================================
+// TEST 3: Pop decrements depth
+// ============================================================================
+
+fn test_rscope_pop_depth() -> i64 with IO, Mut, Div, Panic {
+    var s = rscope_stack_new()
+    s = rscope_push(s)
+    s = rscope_push(s)
+    s = rscope_pop(s)
+    rscope_assert_eq_i64(rscope_depth(s), 1, 3)
+}
+
+// ============================================================================
+// TEST 4: Define adds an entry
+// ============================================================================
+
+fn test_rscope_define_basic() -> i64 with IO, Mut, Div, Panic {
+    var s = rscope_stack_new()
+    s = rscope_push(s)
+    let name_x = rscope_make_name1(120)  // 'x'
+    s = rscope_define(s, name_x, 1, RSCOPE_VAR, 10, true)
+    rscope_assert_eq_i64(rscope_entry_count(s), 1, 4)
+}
+
+// ============================================================================
+// TEST 5: Lookup finds a defined binding
+// ============================================================================
+
+fn test_rscope_lookup_found() -> i64 with IO, Mut, Div, Panic {
+    var s = rscope_stack_new()
+    s = rscope_push(s)
+    let name_x = rscope_make_name1(120)  // 'x'
+    s = rscope_define(s, name_x, 1, RSCOPE_VAR, 10, true)
+    let slot = rscope_lookup(s, name_x, 1)
+    rscope_assert_true(slot >= 0, 5)
+}
+
+// ============================================================================
+// TEST 6: Lookup returns NOT_FOUND for undefined name
+// ============================================================================
+
+fn test_rscope_lookup_not_found() -> i64 with IO, Mut, Div, Panic {
+    var s = rscope_stack_new()
+    s = rscope_push(s)
+    let name_x = rscope_make_name1(120)  // 'x'
+    let name_y = rscope_make_name1(121)  // 'y'
+    s = rscope_define(s, name_x, 1, RSCOPE_VAR, 10, true)
+    let slot = rscope_lookup(s, name_y, 1)
+    rscope_assert_eq_i64(slot, RSCOPE_NOT_FOUND, 6)
+}
+
+// ============================================================================
+// TEST 7: Inner scope shadows outer binding
+// ============================================================================
+
+fn test_rscope_shadowing() -> i64 with IO, Mut, Div, Panic {
+    var s = rscope_stack_new()
+    s = rscope_push(s)
+    let name_x = rscope_make_name1(120)  // 'x'
+    s = rscope_define(s, name_x, 1, RSCOPE_VAR, 10, false)
+    let outer_slot = rscope_lookup(s, name_x, 1)
+
+    s = rscope_push(s)
+    s = rscope_define(s, name_x, 1, RSCOPE_VAR, 20, true)
+    let inner_slot = rscope_lookup(s, name_x, 1)
+
+    // Inner slot should be different from outer (higher index)
+    let c1 = inner_slot != outer_slot
+    // Inner entry should have type_id 20
+    let e = rscope_get_entry(s, inner_slot)
+    let c2 = e.type_id == 20
+    rscope_assert_true(c1 && c2, 7)
+}
+
+// ============================================================================
+// TEST 8: Pop removes inner bindings
+// ============================================================================
+
+fn test_rscope_pop_removes() -> i64 with IO, Mut, Div, Panic {
+    var s = rscope_stack_new()
+    s = rscope_push(s)
+    let name_x = rscope_make_name1(120)  // 'x'
+    s = rscope_define(s, name_x, 1, RSCOPE_VAR, 10, false)
+
+    s = rscope_push(s)
+    let name_y = rscope_make_name1(121)  // 'y'
+    s = rscope_define(s, name_y, 1, RSCOPE_VAR, 20, false)
+    let before = rscope_entry_count(s)
+
+    s = rscope_pop(s)
+    let after = rscope_entry_count(s)
+
+    // After pop, y should be gone (entry_count decreased)
+    let c1 = after < before
+    // y should not be findable
+    let slot_y = rscope_lookup(s, name_y, 1)
+    let c2 = slot_y == RSCOPE_NOT_FOUND
+    // x should still be findable
+    let slot_x = rscope_lookup(s, name_x, 1)
+    let c3 = slot_x >= 0
+    rscope_assert_true(c1 && c2 && c3, 8)
+}
+
+// ============================================================================
+// TEST 9: rscope_lookup_in_depth finds at specific depth
+// ============================================================================
+
+fn test_rscope_lookup_in_depth() -> i64 with IO, Mut, Div, Panic {
+    var s = rscope_stack_new()
+    s = rscope_push(s)  // depth 1
+    let name_a = rscope_make_name1(97)  // 'a'
+    s = rscope_define(s, name_a, 1, RSCOPE_VAR, 10, false)
+
+    s = rscope_push(s)  // depth 2
+    let name_b = rscope_make_name1(98)  // 'b'
+    s = rscope_define(s, name_b, 1, RSCOPE_VAR, 20, false)
+
+    // 'a' should be at depth 1 only
+    let slot_a_d1 = rscope_lookup_in_depth(s, name_a, 1, 1)
+    let slot_a_d2 = rscope_lookup_in_depth(s, name_a, 1, 2)
+    let c1 = slot_a_d1 >= 0
+    let c2 = slot_a_d2 == RSCOPE_NOT_FOUND
+
+    // 'b' should be at depth 2 only
+    let slot_b_d1 = rscope_lookup_in_depth(s, name_b, 1, 1)
+    let slot_b_d2 = rscope_lookup_in_depth(s, name_b, 1, 2)
+    let c3 = slot_b_d1 == RSCOPE_NOT_FOUND
+    let c4 = slot_b_d2 >= 0
+
+    rscope_assert_true(c1 && c2 && c3 && c4, 9)
+}
+
+// ============================================================================
+// TEST 10: Mark captured and count captures
+// ============================================================================
+
+fn test_rscope_mark_captured() -> i64 with IO, Mut, Div, Panic {
+    var s = rscope_stack_new()
+    s = rscope_push(s)
+    let name_x = rscope_make_name1(120)  // 'x'
+    let name_y = rscope_make_name1(121)  // 'y'
+    s = rscope_define(s, name_x, 1, RSCOPE_VAR, 10, false)
+    s = rscope_define(s, name_y, 1, RSCOPE_VAR, 20, false)
+
+    let before = rscope_count_captures(s)
+    s = rscope_mark_captured(s, name_x, 1)
+    let after = rscope_count_captures(s)
+
+    let c1 = before == 0
+    let c2 = after == 1
+    rscope_assert_true(c1 && c2, 10)
+}
+
+// ============================================================================
+// TEST 11: is_shadowing detects shadow
+// ============================================================================
+
+fn test_rscope_is_shadowing() -> i64 with IO, Mut, Div, Panic {
+    var s = rscope_stack_new()
+    s = rscope_push(s)  // depth 1
+    let name_x = rscope_make_name1(120)  // 'x'
+    s = rscope_define(s, name_x, 1, RSCOPE_VAR, 10, false)
+
+    s = rscope_push(s)  // depth 2
+    // At depth 2, defining 'x' would shadow the one at depth 1
+    let shadows = rscope_is_shadowing(s, name_x, 1)
+    rscope_assert_true(shadows, 11)
+}
+
+// ============================================================================
+// TEST 12: is_shadowing returns false when no outer binding
+// ============================================================================
+
+fn test_rscope_no_shadowing() -> i64 with IO, Mut, Div, Panic {
+    var s = rscope_stack_new()
+    s = rscope_push(s)
+    s = rscope_push(s)
+    let name_z = rscope_make_name1(122)  // 'z'
+    let shadows = rscope_is_shadowing(s, name_z, 1)
+    rscope_assert_true(!shadows, 12)
+}
+
+// ============================================================================
+// TEST 13: collect_locals returns entries at current depth
+// ============================================================================
+
+fn test_rscope_collect_locals() -> i64 with IO, Mut, Div, Panic {
+    var s = rscope_stack_new()
+    s = rscope_push(s)  // depth 1
+    let name_a = rscope_make_name1(97)  // 'a'
+    s = rscope_define(s, name_a, 1, RSCOPE_VAR, 10, false)
+
+    s = rscope_push(s)  // depth 2
+    let name_b = rscope_make_name1(98)  // 'b'
+    let name_c = rscope_make_name1(99)  // 'c'
+    s = rscope_define(s, name_b, 1, RSCOPE_VAR, 20, false)
+    s = rscope_define(s, name_c, 1, RSCOPE_VAR, 30, true)
+
+    var result_buf: [RichScopeEntry; 256] = [rscope_entry_new(); 256]
+    let pair = rscope_collect_locals(s, result_buf)
+    let collected = pair.1
+    // Should have 2 entries at depth 2
+    rscope_assert_eq_i64(collected, 2, 13)
+}
+
+// ============================================================================
+// TEST 14: Multiple defines, correct slot ordering
+// ============================================================================
+
+fn test_rscope_slot_ordering() -> i64 with IO, Mut, Div, Panic {
+    var s = rscope_stack_new()
+    s = rscope_push(s)
+    let name_a = rscope_make_name1(97)  // 'a'
+    let name_b = rscope_make_name1(98)  // 'b'
+    let name_c = rscope_make_name1(99)  // 'c'
+    s = rscope_define(s, name_a, 1, RSCOPE_VAR, 10, false)
+    s = rscope_define(s, name_b, 1, RSCOPE_VAR, 20, false)
+    s = rscope_define(s, name_c, 1, RSCOPE_VAR, 30, false)
+
+    let slot_a = rscope_lookup(s, name_a, 1)
+    let slot_b = rscope_lookup(s, name_b, 1)
+    let slot_c = rscope_lookup(s, name_c, 1)
+
+    // Slots should be in order: a=0, b=1, c=2
+    let c1 = slot_a == 0
+    let c2 = slot_b == 1
+    let c3 = slot_c == 2
+    rscope_assert_true(c1 && c2 && c3, 14)
+}
+
+// ============================================================================
+// TEST 15: Entry kind constants
+// ============================================================================
+
+fn test_rscope_kind_constants() -> i64 with IO, Mut, Div, Panic {
+    var s = rscope_stack_new()
+    s = rscope_push(s)
+    let name_x = rscope_make_name1(120)  // 'x'
+    let name_f = rscope_make_name1(102)  // 'f'
+    let name_t = rscope_make_name1(116)  // 't' (type)
+    s = rscope_define(s, name_x, 1, RSCOPE_VAR, 10, true)
+    s = rscope_define(s, name_f, 1, RSCOPE_FN, 20, false)
+    s = rscope_define(s, name_t, 1, RSCOPE_TYPE, 30, false)
+
+    let slot_x = rscope_lookup(s, name_x, 1)
+    let slot_f = rscope_lookup(s, name_f, 1)
+    let slot_t = rscope_lookup(s, name_t, 1)
+
+    let c1 = rscope_slot_kind(s, slot_x) == RSCOPE_VAR
+    let c2 = rscope_slot_kind(s, slot_f) == RSCOPE_FN
+    let c3 = rscope_slot_kind(s, slot_t) == RSCOPE_TYPE
+    rscope_assert_true(c1 && c2 && c3, 15)
+}
+
+// ============================================================================
+// TEST 16: Mutability flag preserved
+// ============================================================================
+
+fn test_rscope_mutability() -> i64 with IO, Mut, Div, Panic {
+    var s = rscope_stack_new()
+    s = rscope_push(s)
+    let name_x = rscope_make_name1(120)  // 'x' — mutable
+    let name_y = rscope_make_name1(121)  // 'y' — immutable
+    s = rscope_define(s, name_x, 1, RSCOPE_VAR, 10, true)
+    s = rscope_define(s, name_y, 1, RSCOPE_VAR, 20, false)
+
+    let slot_x = rscope_lookup(s, name_x, 1)
+    let slot_y = rscope_lookup(s, name_y, 1)
+
+    let c1 = rscope_slot_is_mutable(s, slot_x) == true
+    let c2 = rscope_slot_is_mutable(s, slot_y) == false
+    rscope_assert_true(c1 && c2, 16)
+}
+
+// ============================================================================
+// TEST 17: Deeply nested scopes (5 levels)
+// ============================================================================
+
+fn test_rscope_deep_nesting() -> i64 with IO, Mut, Div, Panic {
+    var s = rscope_stack_new()
+    // Push 5 levels, define one var per level
+    s = rscope_push(s)  // depth 1
+    let name_a = rscope_make_name1(97)
+    s = rscope_define(s, name_a, 1, RSCOPE_VAR, 1, false)
+
+    s = rscope_push(s)  // depth 2
+    let name_b = rscope_make_name1(98)
+    s = rscope_define(s, name_b, 1, RSCOPE_VAR, 2, false)
+
+    s = rscope_push(s)  // depth 3
+    let name_c = rscope_make_name1(99)
+    s = rscope_define(s, name_c, 1, RSCOPE_VAR, 3, false)
+
+    s = rscope_push(s)  // depth 4
+    let name_d = rscope_make_name1(100)
+    s = rscope_define(s, name_d, 1, RSCOPE_VAR, 4, false)
+
+    s = rscope_push(s)  // depth 5
+    let name_e = rscope_make_name1(101)
+    s = rscope_define(s, name_e, 1, RSCOPE_VAR, 5, false)
+
+    // All should be visible from depth 5
+    let c1 = rscope_lookup(s, name_a, 1) >= 0
+    let c2 = rscope_lookup(s, name_b, 1) >= 0
+    let c3 = rscope_lookup(s, name_c, 1) >= 0
+    let c4 = rscope_lookup(s, name_d, 1) >= 0
+    let c5 = rscope_lookup(s, name_e, 1) >= 0
+    let c6 = rscope_depth(s) == 5
+
+    rscope_assert_true(c1 && c2 && c3 && c4 && c5 && c6, 17)
+}
+
+// ============================================================================
+// TEST 18: Pop restores depth and removes deeper bindings
+// ============================================================================
+
+fn test_rscope_pop_full_cycle() -> i64 with IO, Mut, Div, Panic {
+    var s = rscope_stack_new()
+    s = rscope_push(s)  // depth 1
+    let name_x = rscope_make_name1(120)
+    s = rscope_define(s, name_x, 1, RSCOPE_VAR, 10, false)
+
+    s = rscope_push(s)  // depth 2
+    let name_y = rscope_make_name1(121)
+    s = rscope_define(s, name_y, 1, RSCOPE_VAR, 20, false)
+
+    s = rscope_push(s)  // depth 3
+    let name_z = rscope_make_name1(122)
+    s = rscope_define(s, name_z, 1, RSCOPE_VAR, 30, false)
+
+    // Pop back to depth 1
+    s = rscope_pop(s)  // depth 2 — z gone
+    s = rscope_pop(s)  // depth 1 — y gone
+
+    let c1 = rscope_depth(s) == 1
+    let c2 = rscope_lookup(s, name_x, 1) >= 0
+    let c3 = rscope_lookup(s, name_y, 1) == RSCOPE_NOT_FOUND
+    let c4 = rscope_lookup(s, name_z, 1) == RSCOPE_NOT_FOUND
+    rscope_assert_true(c1 && c2 && c3 && c4, 18)
+}
+
+// ============================================================================
+// TEST 19: rscope_lookup_entry returns correct entry data
+// ============================================================================
+
+fn test_rscope_lookup_entry_data() -> i64 with IO, Mut, Div, Panic {
+    var s = rscope_stack_new()
+    s = rscope_push(s)
+    // "fn" -> 'f'=102, 'n'=110
+    let name_fn = rscope_make_name2(102, 110)
+    s = rscope_define(s, name_fn, 2, RSCOPE_FN, 42, false)
+
+    let e = rscope_lookup_entry(s, name_fn, 2)
+    let c1 = e.kind == RSCOPE_FN
+    let c2 = e.type_id == 42
+    let c3 = e.name_len == 2
+    let c4 = e.is_mutable == false
+    rscope_assert_true(c1 && c2 && c3 && c4, 19)
+}
+
+// ============================================================================
+// TEST 20: Multiple captures tracked correctly
+// ============================================================================
+
+fn test_rscope_multiple_captures() -> i64 with IO, Mut, Div, Panic {
+    var s = rscope_stack_new()
+    s = rscope_push(s)
+    let name_a = rscope_make_name1(97)
+    let name_b = rscope_make_name1(98)
+    let name_c = rscope_make_name1(99)
+    s = rscope_define(s, name_a, 1, RSCOPE_VAR, 10, false)
+    s = rscope_define(s, name_b, 1, RSCOPE_VAR, 20, false)
+    s = rscope_define(s, name_c, 1, RSCOPE_VAR, 30, false)
+
+    s = rscope_mark_captured(s, name_a, 1)
+    s = rscope_mark_captured(s, name_c, 1)
+
+    let cap_count = rscope_count_captures(s)
+    rscope_assert_eq_i64(cap_count, 2, 20)
+}
+
+// ============================================================================
+// TEST 21: rscope_is_duplicate_in_current detects same-scope duplicate
+// ============================================================================
+
+fn test_rscope_duplicate_in_current() -> i64 with IO, Mut, Div, Panic {
+    var s = rscope_stack_new()
+    s = rscope_push(s)
+    let name_x = rscope_make_name1(120)
+    s = rscope_define(s, name_x, 1, RSCOPE_VAR, 10, false)
+
+    let is_dup = rscope_is_duplicate_in_current(s, name_x, 1)
+    rscope_assert_true(is_dup, 21)
+}
+
+// ============================================================================
+// TEST 22: rscope_is_duplicate_in_current returns false when binding is in outer scope
+// ============================================================================
+
+fn test_rscope_not_duplicate_outer() -> i64 with IO, Mut, Div, Panic {
+    var s = rscope_stack_new()
+    s = rscope_push(s)
+    let name_x = rscope_make_name1(120)
+    s = rscope_define(s, name_x, 1, RSCOPE_VAR, 10, false)
+
+    s = rscope_push(s)  // new inner scope
+    // 'x' is in outer scope, not the current one
+    let is_dup = rscope_is_duplicate_in_current(s, name_x, 1)
+    rscope_assert_true(!is_dup, 22)
+}
+
+// ============================================================================
+// TEST 23: rscope_push_n / rscope_pop_n
+// ============================================================================
+
+fn test_rscope_push_pop_n() -> i64 with IO, Mut, Div, Panic {
+    var s = rscope_stack_new()
+    s = rscope_push_n(s, 5)
+    let c1 = rscope_depth(s) == 5
+    s = rscope_pop_n(s, 3)
+    let c2 = rscope_depth(s) == 2
+    rscope_assert_true(c1 && c2, 23)
+}
+
+// ============================================================================
+// TEST 24: rscope_count_at_depth
+// ============================================================================
+
+fn test_rscope_count_at_depth() -> i64 with IO, Mut, Div, Panic {
+    var s = rscope_stack_new()
+    s = rscope_push(s)  // depth 1
+    let name_a = rscope_make_name1(97)
+    let name_b = rscope_make_name1(98)
+    s = rscope_define(s, name_a, 1, RSCOPE_VAR, 10, false)
+    s = rscope_define(s, name_b, 1, RSCOPE_VAR, 20, false)
+
+    s = rscope_push(s)  // depth 2
+    let name_c = rscope_make_name1(99)
+    s = rscope_define(s, name_c, 1, RSCOPE_VAR, 30, false)
+
+    let c1 = rscope_count_at_depth(s, 1) == 2
+    let c2 = rscope_count_at_depth(s, 2) == 1
+    let c3 = rscope_count_at_depth(s, 0) == 0
+    rscope_assert_true(c1 && c2 && c3, 24)
+}
+
+// ============================================================================
+// TEST 25: rscope_count_by_kind
+// ============================================================================
+
+fn test_rscope_count_by_kind() -> i64 with IO, Mut, Div, Panic {
+    var s = rscope_stack_new()
+    s = rscope_push(s)
+    let name_x = rscope_make_name1(120)
+    let name_f = rscope_make_name1(102)
+    let name_g = rscope_make_name1(103)
+    let name_p = rscope_make_name1(112)
+    s = rscope_define(s, name_x, 1, RSCOPE_VAR, 10, false)
+    s = rscope_define(s, name_f, 1, RSCOPE_FN, 20, false)
+    s = rscope_define(s, name_g, 1, RSCOPE_FN, 30, false)
+    s = rscope_define(s, name_p, 1, RSCOPE_PARAM, 40, false)
+
+    let c1 = rscope_count_by_kind(s, RSCOPE_VAR) == 1
+    let c2 = rscope_count_by_kind(s, RSCOPE_FN) == 2
+    let c3 = rscope_count_by_kind(s, RSCOPE_PARAM) == 1
+    let c4 = rscope_count_by_kind(s, RSCOPE_TYPE) == 0
+    rscope_assert_true(c1 && c2 && c3 && c4, 25)
+}
+
+// ============================================================================
+// TEST 26: rscope_collect_by_kind
+// ============================================================================
+
+fn test_rscope_collect_by_kind() -> i64 with IO, Mut, Div, Panic {
+    var s = rscope_stack_new()
+    s = rscope_push(s)
+    let name_x = rscope_make_name1(120)
+    let name_y = rscope_make_name1(121)
+    let name_f = rscope_make_name1(102)
+    s = rscope_define(s, name_x, 1, RSCOPE_VAR, 10, false)
+    s = rscope_define(s, name_y, 1, RSCOPE_VAR, 20, true)
+    s = rscope_define(s, name_f, 1, RSCOPE_FN, 30, false)
+
+    var buf: [RichScopeEntry; 256] = [rscope_entry_new(); 256]
+    let pair = rscope_collect_by_kind(s, RSCOPE_VAR, buf)
+    let count = pair.1
+    rscope_assert_eq_i64(count, 2, 26)
+}
+
+// ============================================================================
+// TEST 27: snapshot and restore
+// ============================================================================
+
+fn test_rscope_snapshot_restore() -> i64 with IO, Mut, Div, Panic {
+    var s = rscope_stack_new()
+    s = rscope_push(s)
+    let name_x = rscope_make_name1(120)
+    s = rscope_define(s, name_x, 1, RSCOPE_VAR, 10, false)
+
+    let snap = rscope_snapshot(s)
+
+    // Add more stuff
+    s = rscope_push(s)
+    let name_y = rscope_make_name1(121)
+    s = rscope_define(s, name_y, 1, RSCOPE_VAR, 20, false)
+
+    // Restore
+    s = rscope_restore(s, snap)
+    let c1 = rscope_depth(s) == 1
+    let c2 = rscope_entry_count(s) == 1
+    let c3 = rscope_lookup(s, name_y, 1) == RSCOPE_NOT_FOUND
+    let c4 = rscope_lookup(s, name_x, 1) >= 0
+    rscope_assert_true(c1 && c2 && c3 && c4, 27)
+}
+
+// ============================================================================
+// TEST 28: rscope_slot_valid
+// ============================================================================
+
+fn test_rscope_slot_valid() -> i64 with IO, Mut, Div, Panic {
+    var s = rscope_stack_new()
+    s = rscope_push(s)
+    let name_x = rscope_make_name1(120)
+    s = rscope_define(s, name_x, 1, RSCOPE_VAR, 10, false)
+
+    let c1 = rscope_slot_valid(s, 0) == true
+    let c2 = rscope_slot_valid(s, 1) == false
+    let c3 = rscope_slot_valid(s, 0 - 1) == false
+    rscope_assert_true(c1 && c2 && c3, 28)
+}
+
+// ============================================================================
+// TEST 29: RSCOPE_CONST kind works
+// ============================================================================
+
+fn test_rscope_const_kind() -> i64 with IO, Mut, Div, Panic {
+    var s = rscope_stack_new()
+    s = rscope_push(s)
+    // "PI" -> 'P'=80, 'I'=73
+    let name_pi = rscope_make_name2(80, 73)
+    s = rscope_define(s, name_pi, 2, RSCOPE_CONST, 99, false)
+
+    let slot = rscope_lookup(s, name_pi, 2)
+    let c1 = slot >= 0
+    let c2 = rscope_slot_kind(s, slot) == RSCOPE_CONST
+    let c3 = rscope_slot_is_mutable(s, slot) == false
+    rscope_assert_true(c1 && c2 && c3, 29)
+}
+
+// ============================================================================
+// TEST 30: rscope_define_entry convenience function
+// ============================================================================
+
+fn test_rscope_define_entry() -> i64 with IO, Mut, Div, Panic {
+    var s = rscope_stack_new()
+    s = rscope_push(s)
+    let name_q = rscope_make_name1(113)  // 'q'
+    let entry = rscope_entry_make(name_q, 1, RSCOPE_PARAM, 55, 0, 0, true)
+    s = rscope_define_entry(s, entry)
+
+    let slot = rscope_lookup(s, name_q, 1)
+    let c1 = slot >= 0
+    let e = rscope_get_entry(s, slot)
+    let c2 = e.kind == RSCOPE_PARAM
+    let c3 = e.type_id == 55
+    let c4 = e.is_mutable == true
+    rscope_assert_true(c1 && c2 && c3 && c4, 30)
+}
+
+// ============================================================================
+// TEST 31: Longer name (5 chars) lookup
+// ============================================================================
+
+fn test_rscope_long_name() -> i64 with IO, Mut, Div, Panic {
+    var s = rscope_stack_new()
+    s = rscope_push(s)
+    // "hello" -> 104, 101, 108, 108, 111
+    let name_hello = rscope_make_name5(104, 101, 108, 108, 111)
+    s = rscope_define(s, name_hello, 5, RSCOPE_VAR, 77, false)
+
+    // Lookup with correct name
+    let slot = rscope_lookup(s, name_hello, 5)
+    let c1 = slot >= 0
+
+    // Lookup with different 5-char name should fail
+    // "world" -> 119, 111, 114, 108, 100
+    let name_world = rscope_make_name5(119, 111, 114, 108, 100)
+    let slot2 = rscope_lookup(s, name_world, 5)
+    let c2 = slot2 == RSCOPE_NOT_FOUND
+
+    rscope_assert_true(c1 && c2, 31)
+}
+
+// ============================================================================
+// TEST 32: rscope_count_captures_at_depth
+// ============================================================================
+
+fn test_rscope_captures_at_depth() -> i64 with IO, Mut, Div, Panic {
+    var s = rscope_stack_new()
+    s = rscope_push(s)  // depth 1
+    let name_a = rscope_make_name1(97)
+    s = rscope_define(s, name_a, 1, RSCOPE_VAR, 10, false)
+
+    s = rscope_push(s)  // depth 2
+    let name_b = rscope_make_name1(98)
+    s = rscope_define(s, name_b, 1, RSCOPE_VAR, 20, false)
+
+    // Mark both as captured
+    s = rscope_mark_captured(s, name_a, 1)
+    s = rscope_mark_captured(s, name_b, 1)
+
+    let c1 = rscope_count_captures_at_depth(s, 1) == 1
+    let c2 = rscope_count_captures_at_depth(s, 2) == 1
+    let c3 = rscope_count_captures_at_depth(s, 0) == 0
+    rscope_assert_true(c1 && c2 && c3, 32)
+}
+
+// ============================================================================
+// TEST 33: Empty name never matches a defined name
+// ============================================================================
+
+fn test_rscope_empty_name() -> i64 with IO, Mut, Div, Panic {
+    var s = rscope_stack_new()
+    s = rscope_push(s)
+    let name_x = rscope_make_name1(120)
+    s = rscope_define(s, name_x, 1, RSCOPE_VAR, 10, false)
+
+    // Empty name (length 0) should not match 'x'
+    let empty_name: [i8; 64] = [0; 64]
+    let slot = rscope_lookup(s, empty_name, 0)
+    rscope_assert_eq_i64(slot, RSCOPE_NOT_FOUND, 33)
+}
+
+// ============================================================================
+// TEST 34: rscope_name_eq symmetry
+// ============================================================================
+
+fn test_rscope_name_eq_symmetry() -> i64 with IO, Mut, Div, Panic {
+    let name_a = rscope_make_name2(97, 98)  // "ab"
+    let name_b = rscope_make_name2(97, 98)  // "ab"
+    let name_c = rscope_make_name2(97, 99)  // "ac"
+
+    let c1 = rscope_name_eq(name_a, 2, name_b, 2) == true
+    let c2 = rscope_name_eq(name_b, 2, name_a, 2) == true
+    let c3 = rscope_name_eq(name_a, 2, name_c, 2) == false
+    rscope_assert_true(c1 && c2 && c3, 34)
+}
+
+// ============================================================================
+// TEST 35: Pop below zero depth is a no-op
+// ============================================================================
+
+fn test_rscope_pop_at_zero() -> i64 with IO, Mut, Div, Panic {
+    var s = rscope_stack_new()
+    s = rscope_pop(s)
+    s = rscope_pop(s)
+    let c1 = rscope_depth(s) == 0
+    let c2 = rscope_entry_count(s) == 0
+    rscope_assert_true(c1 && c2, 35)
+}
+
+// ============================================================================
+// TEST RUNNER
+// ============================================================================
+
+fn run_rscope_tests() -> i64 with IO, Mut, Div, Panic {
+    print("=== Scope Resolution Tests ===\n")
+    var passed: i64 = 0
+    let total: i64 = 35
+
+    passed = passed + test_rscope_empty_stack()
+    passed = passed + test_rscope_push_depth()
+    passed = passed + test_rscope_pop_depth()
+    passed = passed + test_rscope_define_basic()
+    passed = passed + test_rscope_lookup_found()
+    passed = passed + test_rscope_lookup_not_found()
+    passed = passed + test_rscope_shadowing()
+    passed = passed + test_rscope_pop_removes()
+    passed = passed + test_rscope_lookup_in_depth()
+    passed = passed + test_rscope_mark_captured()
+    passed = passed + test_rscope_is_shadowing()
+    passed = passed + test_rscope_no_shadowing()
+    passed = passed + test_rscope_collect_locals()
+    passed = passed + test_rscope_slot_ordering()
+    passed = passed + test_rscope_kind_constants()
+    passed = passed + test_rscope_mutability()
+    passed = passed + test_rscope_deep_nesting()
+    passed = passed + test_rscope_pop_full_cycle()
+    passed = passed + test_rscope_lookup_entry_data()
+    passed = passed + test_rscope_multiple_captures()
+    passed = passed + test_rscope_duplicate_in_current()
+    passed = passed + test_rscope_not_duplicate_outer()
+    passed = passed + test_rscope_push_pop_n()
+    passed = passed + test_rscope_count_at_depth()
+    passed = passed + test_rscope_count_by_kind()
+    passed = passed + test_rscope_collect_by_kind()
+    passed = passed + test_rscope_snapshot_restore()
+    passed = passed + test_rscope_slot_valid()
+    passed = passed + test_rscope_const_kind()
+    passed = passed + test_rscope_define_entry()
+    passed = passed + test_rscope_long_name()
+    passed = passed + test_rscope_captures_at_depth()
+    passed = passed + test_rscope_empty_name()
+    passed = passed + test_rscope_name_eq_symmetry()
+    passed = passed + test_rscope_pop_at_zero()
+
+    print("\nScope tests: ")
+    print_int(passed)
+    print("/")
+    print_int(total)
+    print(" passed\n")
+
+    if passed == total { 0 } else { 1 }
+}

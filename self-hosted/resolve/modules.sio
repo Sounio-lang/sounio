@@ -1,0 +1,1618 @@
+// self-hosted::resolve::modules — Module system and import resolver
+//
+// Manages a flat-array module graph for cross-module name resolution.
+// Each module has a unique ID, a name, a file path, and a parent module.
+// Exports are tracked per module. Dependencies form a directed graph
+// with cycle detection and topological ordering.
+//
+// Capacity: 512 modules, 4096 exports, 2048 dependency edges.
+//
+// All mutating operations consume and return the struct (state threading).
+// Helpers precede callers (no forward references).
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+let MOD_KIND_FN: i64 = 1
+let MOD_KIND_TYPE: i64 = 2
+let MOD_KIND_CONST: i64 = 3
+let MOD_KIND_MOD: i64 = 4
+
+let MOD_MAX_MODULES: i64 = 512
+let MOD_MAX_EXPORTS: i64 = 4096
+let MOD_MAX_DEPS: i64 = 2048
+
+// ============================================================================
+// HELPER: byte-by-byte name comparison for [i8; 64]
+// ============================================================================
+
+fn mod_name_eq(a: [i8; 64], a_len: i64, b: [i8; 64], b_len: i64) -> bool with Mut, Panic, Div {
+    if a_len != b_len {
+        return false
+    }
+    var i: i64 = 0
+    while i < a_len {
+        if a[i] != b[i] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// ============================================================================
+// HELPER: copy bytes from one [i8; 64] to another
+// ============================================================================
+
+fn mod_copy_name(src: [i8; 64], len: i64) -> [i8; 64] with Mut, Panic, Div {
+    var dst: [i8; 64] = [0; 64]
+    var i: i64 = 0
+    while i < len && i < 64 {
+        dst[i] = src[i]
+        i = i + 1
+    }
+    dst
+}
+
+// ============================================================================
+// HELPER: make name from up to 3 ascii bytes
+// ============================================================================
+
+fn mod_make_name(a: i8, b: i8, c: i8, len: i64) -> [i8; 64] with Mut, Panic, Div {
+    var buf: [i8; 64] = [0; 64]
+    if len > 0 { buf[0] = a }
+    if len > 1 { buf[1] = b }
+    if len > 2 { buf[2] = c }
+    buf
+}
+
+// ============================================================================
+// HELPER: make name from up to 6 ascii bytes
+// ============================================================================
+
+fn mod_make_name6(a: i8, b: i8, c: i8, d: i8, e: i8, f: i8, len: i64) -> [i8; 64] with Mut, Panic, Div {
+    var buf: [i8; 64] = [0; 64]
+    if len > 0 { buf[0] = a }
+    if len > 1 { buf[1] = b }
+    if len > 2 { buf[2] = c }
+    if len > 3 { buf[3] = d }
+    if len > 4 { buf[4] = e }
+    if len > 5 { buf[5] = f }
+    buf
+}
+
+// ============================================================================
+// HELPER: make a path from up to 3 ascii bytes
+// ============================================================================
+
+fn mod_make_path(a: i8, b: i8, c: i8, len: i64) -> [i8; 256] with Mut, Panic, Div {
+    var buf: [i8; 256] = [0; 256]
+    if len > 0 { buf[0] = a }
+    if len > 1 { buf[1] = b }
+    if len > 2 { buf[2] = c }
+    buf
+}
+
+// ============================================================================
+// HELPER: split a qualified name "foo::bar" into segments
+// Returns (first_name, first_len, rest_name, rest_len)
+// The split is at the first "::" (bytes 58, 58)
+// ============================================================================
+
+fn mod_split_qualified(
+    name: [i8; 64], name_len: i64
+) -> ([i8; 64], i64, [i8; 64], i64) with Mut, Panic, Div {
+    // Search for "::" (58, 58) in name
+    var split_pos: i64 = 0 - 1
+    var i: i64 = 0
+    while i < name_len - 1 {
+        if name[i] == 58 && name[i + 1] == 58 {
+            split_pos = i
+            // break out by setting i to end
+            i = name_len
+        } else {
+            i = i + 1
+        }
+    }
+
+    if split_pos < 0 {
+        // No "::" found — entire name is the first segment, rest is empty
+        let empty: [i8; 64] = [0; 64]
+        return (name, name_len, empty, 0)
+    }
+
+    // Copy first segment [0, split_pos)
+    var first: [i8; 64] = [0; 64]
+    var j: i64 = 0
+    while j < split_pos {
+        first[j] = name[j]
+        j = j + 1
+    }
+
+    // Copy rest segment [split_pos + 2, name_len)
+    var rest: [i8; 64] = [0; 64]
+    var k: i64 = 0
+    let rest_start = split_pos + 2
+    while rest_start + k < name_len {
+        rest[k] = name[rest_start + k]
+        k = k + 1
+    }
+
+    (first, split_pos, rest, k)
+}
+
+// ============================================================================
+// STRUCT: MgModuleEntry
+// ============================================================================
+
+struct MgModuleEntry {
+    name: [i8; 64],
+    name_len: i64,
+    path: [i8; 256],
+    path_len: i64,
+    module_id: i64,
+    parent_id: i64,
+    is_loaded: bool,
+    is_public: bool,
+}
+
+// ============================================================================
+// STRUCT: MgModuleExport
+// ============================================================================
+
+struct MgModuleExport {
+    name: [i8; 64],
+    name_len: i64,
+    kind: i64,
+    symbol_id: i64,
+    module_id: i64,
+    is_public: bool,
+}
+
+// ============================================================================
+// STRUCT: ModuleGraph
+// ============================================================================
+
+struct ModuleGraph {
+    modules: [MgModuleEntry; 512],
+    module_count: i64,
+    exports: [MgModuleExport; 4096],
+    export_count: i64,
+    deps_from: [i64; 2048],
+    deps_to: [i64; 2048],
+    dep_count: i64,
+}
+
+// ============================================================================
+// CONSTRUCTORS
+// ============================================================================
+
+fn mod_entry_new() -> MgModuleEntry {
+    MgModuleEntry {
+        name: [0; 64],
+        name_len: 0,
+        path: [0; 256],
+        path_len: 0,
+        module_id: 0 - 1,
+        parent_id: 0 - 1,
+        is_loaded: false,
+        is_public: false,
+    }
+}
+
+fn mod_export_new() -> MgModuleExport {
+    MgModuleExport {
+        name: [0; 64],
+        name_len: 0,
+        kind: 0,
+        symbol_id: 0 - 1,
+        module_id: 0 - 1,
+        is_public: false,
+    }
+}
+
+fn mod_graph_new() -> ModuleGraph {
+    ModuleGraph {
+        modules: [mod_entry_new(); 512],
+        module_count: 0,
+        exports: [mod_export_new(); 4096],
+        export_count: 0,
+        deps_from: [0; 2048],
+        deps_to: [0; 2048],
+        dep_count: 0,
+    }
+}
+
+// ============================================================================
+// CORE: mod_graph_add_module
+// ============================================================================
+//
+// Registers a module in the graph. Returns (graph, module_id).
+// If at capacity, returns (graph, -1).
+
+fn mod_graph_add_module(
+    g: ModuleGraph,
+    name: [i8; 64],
+    name_len: i64,
+    path: [i8; 256],
+    path_len: i64,
+    parent_id: i64,
+    is_public: bool
+) -> (ModuleGraph, i64) with Mut, Panic, Div {
+    var graph = g
+    if graph.module_count >= MOD_MAX_MODULES {
+        return (graph, 0 - 1)
+    }
+    let id = graph.module_count
+    graph.modules[id] = MgModuleEntry {
+        name: name,
+        name_len: name_len,
+        path: path,
+        path_len: path_len,
+        module_id: id,
+        parent_id: parent_id,
+        is_loaded: false,
+        is_public: is_public,
+    }
+    graph.module_count = graph.module_count + 1
+    (graph, id)
+}
+
+// ============================================================================
+// CORE: mod_graph_add_export
+// ============================================================================
+//
+// Registers an export for a module. Returns the updated graph.
+
+fn mod_graph_add_export(
+    g: ModuleGraph,
+    name: [i8; 64],
+    name_len: i64,
+    kind: i64,
+    symbol_id: i64,
+    module_id: i64,
+    is_public: bool
+) -> ModuleGraph with Mut, Panic, Div {
+    var graph = g
+    if graph.export_count >= MOD_MAX_EXPORTS {
+        return graph
+    }
+    let idx = graph.export_count
+    graph.exports[idx] = MgModuleExport {
+        name: name,
+        name_len: name_len,
+        kind: kind,
+        symbol_id: symbol_id,
+        module_id: module_id,
+        is_public: is_public,
+    }
+    graph.export_count = graph.export_count + 1
+    graph
+}
+
+// ============================================================================
+// CORE: mod_graph_add_dep
+// ============================================================================
+//
+// Registers a dependency edge: module `from_id` imports from module `to_id`.
+
+fn mod_graph_add_dep(
+    g: ModuleGraph,
+    from_id: i64,
+    to_id: i64
+) -> ModuleGraph with Mut, Panic, Div {
+    var graph = g
+    if graph.dep_count >= MOD_MAX_DEPS {
+        return graph
+    }
+    if from_id < 0 || from_id >= graph.module_count {
+        return graph
+    }
+    if to_id < 0 || to_id >= graph.module_count {
+        return graph
+    }
+    let idx = graph.dep_count
+    graph.deps_from[idx] = from_id
+    graph.deps_to[idx] = to_id
+    graph.dep_count = graph.dep_count + 1
+    graph
+}
+
+// ============================================================================
+// QUERY: mod_graph_find_module
+// ============================================================================
+//
+// Find a module by name. Returns module_id or -1 if not found.
+
+fn mod_graph_find_module(
+    g: ModuleGraph,
+    name: [i8; 64],
+    name_len: i64
+) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < g.module_count {
+        if mod_name_eq(g.modules[i].name, g.modules[i].name_len, name, name_len) {
+            return g.modules[i].module_id
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// ============================================================================
+// QUERY: mod_graph_find_module_by_parent
+// ============================================================================
+//
+// Find a child module of parent_id with the given name. Returns module_id
+// or -1 if not found.
+
+fn mod_graph_find_module_by_parent(
+    g: ModuleGraph,
+    parent_id: i64,
+    name: [i8; 64],
+    name_len: i64
+) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < g.module_count {
+        if g.modules[i].parent_id == parent_id {
+            if mod_name_eq(g.modules[i].name, g.modules[i].name_len, name, name_len) {
+                return g.modules[i].module_id
+            }
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// ============================================================================
+// QUERY: mod_graph_resolve_import
+// ============================================================================
+//
+// Resolve a qualified name like "foo::bar" to a (module_id, export_index).
+// Returns (module_id, export_index) where export_index is the position in
+// the exports array. If the name cannot be resolved, returns (-1, -1).
+
+fn mod_graph_resolve_import(
+    g: ModuleGraph,
+    qualified_name: [i8; 64],
+    qualified_len: i64
+) -> (i64, i64) with Mut, Panic, Div {
+    // Split qualified name into module part and symbol part
+    let parts = mod_split_qualified(qualified_name, qualified_len)
+    let mod_name = parts.0
+    let mod_name_len = parts.1
+    let sym_name = parts.2
+    let sym_name_len = parts.3
+
+    // If no "::" found, this is an unqualified name — search all exports
+    if sym_name_len == 0 {
+        return mod_graph_find_export_anywhere(g, mod_name, mod_name_len)
+    }
+
+    // Find the module by name
+    let mod_id = mod_graph_find_module(g, mod_name, mod_name_len)
+    if mod_id < 0 {
+        return (0 - 1, 0 - 1)
+    }
+
+    // The symbol part might itself be qualified (e.g. "a::b::c")
+    // For now, handle one level of nesting: look for sym_name as an export
+    // in the found module. If sym_name still contains "::", recurse into
+    // a submodule.
+    let sub_parts = mod_split_qualified(sym_name, sym_name_len)
+    let sub_mod_name = sub_parts.0
+    let sub_mod_len = sub_parts.1
+    let sub_sym_name = sub_parts.2
+    let sub_sym_len = sub_parts.3
+
+    if sub_sym_len == 0 {
+        // Single symbol in the module — look up the export
+        return mod_graph_find_export_in_module(g, mod_id, sub_mod_name, sub_mod_len)
+    }
+
+    // Nested: find submodule within mod_id, then look for the export there
+    let sub_mod_id = mod_graph_find_module_by_parent(g, mod_id, sub_mod_name, sub_mod_len)
+    if sub_mod_id < 0 {
+        return (0 - 1, 0 - 1)
+    }
+    mod_graph_find_export_in_module(g, sub_mod_id, sub_sym_name, sub_sym_len)
+}
+
+// ============================================================================
+// HELPER: find an export by name in a specific module
+// ============================================================================
+
+fn mod_graph_find_export_in_module(
+    g: ModuleGraph,
+    module_id: i64,
+    name: [i8; 64],
+    name_len: i64
+) -> (i64, i64) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < g.export_count {
+        if g.exports[i].module_id == module_id {
+            if mod_name_eq(g.exports[i].name, g.exports[i].name_len, name, name_len) {
+                return (module_id, i)
+            }
+        }
+        i = i + 1
+    }
+    (0 - 1, 0 - 1)
+}
+
+// ============================================================================
+// HELPER: find an export by name across all modules
+// ============================================================================
+
+fn mod_graph_find_export_anywhere(
+    g: ModuleGraph,
+    name: [i8; 64],
+    name_len: i64
+) -> (i64, i64) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < g.export_count {
+        if mod_name_eq(g.exports[i].name, g.exports[i].name_len, name, name_len) {
+            return (g.exports[i].module_id, i)
+        }
+        i = i + 1
+    }
+    (0 - 1, 0 - 1)
+}
+
+// ============================================================================
+// CYCLE DETECTION: mod_graph_check_cycles
+// ============================================================================
+//
+// Detects circular dependencies via DFS. Returns true if a cycle exists.
+// Uses an explicit stack and three-color marking:
+//   0 = white (unvisited), 1 = gray (in progress), 2 = black (done)
+
+fn mod_graph_check_cycles(g: ModuleGraph) -> bool with Mut, Panic, Div {
+    var color: [i64; 512] = [0; 512]
+
+    var start: i64 = 0
+    while start < g.module_count {
+        if color[start] == 0 {
+            let found = mod_graph_dfs_cycle(g, start, color)
+            if found.0 {
+                return true
+            }
+            color = found.1
+        }
+        start = start + 1
+    }
+    false
+}
+
+// DFS cycle helper: returns (cycle_found, updated_color_array)
+fn mod_graph_dfs_cycle(
+    g: ModuleGraph,
+    start: i64,
+    color_in: [i64; 512]
+) -> (bool, [i64; 512]) with Mut, Panic, Div {
+    var color = color_in
+
+    // Explicit stack for DFS
+    var stack: [i64; 512] = [0; 512]
+    var sp: i64 = 0
+
+    // Push start
+    stack[sp] = start
+    sp = sp + 1
+    color[start] = 1  // gray
+
+    while sp > 0 {
+        let current = stack[sp - 1]
+
+        // Find next unvisited successor
+        var found_next: bool = false
+        var di: i64 = 0
+        while di < g.dep_count {
+            if g.deps_from[di] == current {
+                let neighbor = g.deps_to[di]
+                if color[neighbor] == 1 {
+                    // Back edge — cycle found
+                    return (true, color)
+                }
+                if color[neighbor] == 0 {
+                    // Unvisited — push and go deeper
+                    color[neighbor] = 1
+                    stack[sp] = neighbor
+                    sp = sp + 1
+                    found_next = true
+                    // break by setting di past end
+                    di = g.dep_count
+                } else {
+                    di = di + 1
+                }
+            } else {
+                di = di + 1
+            }
+        }
+
+        if !found_next {
+            // All successors visited — backtrack
+            color[current] = 2  // black
+            sp = sp - 1
+        }
+    }
+
+    (false, color)
+}
+
+// ============================================================================
+// TOPOLOGICAL SORT: mod_graph_topo_sort
+// ============================================================================
+//
+// Returns (count, order_array). Uses Kahn's algorithm.
+// If a cycle exists, count < module_count (not all nodes processed).
+// Returns -1 in count if cycle detected.
+
+fn mod_graph_topo_sort(
+    g: ModuleGraph
+) -> (i64, [i64; 512]) with Mut, Panic, Div {
+    var result: [i64; 512] = [0; 512]
+    var result_count: i64 = 0
+
+    if g.module_count == 0 {
+        return (0, result)
+    }
+
+    // Step 1: Compute in-degree for every module
+    var in_degree: [i64; 512] = [0; 512]
+    var ei: i64 = 0
+    while ei < g.dep_count {
+        let dst = g.deps_to[ei]
+        in_degree[dst] = in_degree[dst] + 1
+        ei = ei + 1
+    }
+
+    // Step 2: Initialize queue with all zero-in-degree modules
+    var queue: [i64; 512] = [0; 512]
+    var q_front: i64 = 0
+    var q_back: i64 = 0
+
+    var ni: i64 = 0
+    while ni < g.module_count {
+        if in_degree[ni] == 0 {
+            queue[q_back] = ni
+            q_back = q_back + 1
+        }
+        ni = ni + 1
+    }
+
+    // Step 3: Process queue
+    while q_front < q_back {
+        let current = queue[q_front]
+        q_front = q_front + 1
+
+        if result_count < MOD_MAX_MODULES {
+            result[result_count] = current
+            result_count = result_count + 1
+        }
+
+        // Decrement in-degree for successors
+        var ej: i64 = 0
+        while ej < g.dep_count {
+            if g.deps_from[ej] == current {
+                let dest = g.deps_to[ej]
+                in_degree[dest] = in_degree[dest] - 1
+                if in_degree[dest] == 0 {
+                    if q_back < MOD_MAX_MODULES {
+                        queue[q_back] = dest
+                        q_back = q_back + 1
+                    }
+                }
+            }
+            ej = ej + 1
+        }
+    }
+
+    // Step 4: Check for cycle
+    if result_count != g.module_count {
+        return (0 - 1, result)
+    }
+
+    (result_count, result)
+}
+
+// ============================================================================
+// QUERY: mod_graph_collect_exports
+// ============================================================================
+//
+// Returns (count, exports_array) for all exports belonging to a module.
+
+fn mod_graph_collect_exports(
+    g: ModuleGraph,
+    module_id: i64
+) -> (i64, [MgModuleExport; 256]) with Mut, Panic, Div {
+    var result: [MgModuleExport; 256] = [mod_export_new(); 256]
+    var count: i64 = 0
+
+    var i: i64 = 0
+    while i < g.export_count {
+        if g.exports[i].module_id == module_id {
+            if count < 256 {
+                result[count] = g.exports[i]
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    (count, result)
+}
+
+// ============================================================================
+// QUERY: mod_graph_visibility_check
+// ============================================================================
+//
+// Check if module `viewer_id` can see an export from module `owner_id`.
+// Rules:
+//   1. A module can always see its own exports.
+//   2. A parent module can see all child exports.
+//   3. A child can see parent exports marked is_public.
+//   4. Siblings or unrelated modules can only see is_public exports
+//      AND there must be a dependency edge from viewer to owner.
+
+fn mod_graph_visibility_check(
+    g: ModuleGraph,
+    viewer_id: i64,
+    owner_id: i64,
+    export_idx: i64
+) -> bool with Mut, Panic, Div {
+    // Self-visibility: always allowed
+    if viewer_id == owner_id {
+        return true
+    }
+
+    // Validate export index
+    if export_idx < 0 || export_idx >= g.export_count {
+        return false
+    }
+
+    let ex = g.exports[export_idx]
+
+    // Parent can see child exports
+    if mod_graph_is_parent(g, viewer_id, owner_id) {
+        return true
+    }
+
+    // Child can see parent exports only if public
+    if mod_graph_is_parent(g, owner_id, viewer_id) {
+        return ex.is_public
+    }
+
+    // Unrelated modules: must be public AND have a dependency edge
+    if !ex.is_public {
+        return false
+    }
+    mod_graph_has_dep(g, viewer_id, owner_id)
+}
+
+// ============================================================================
+// HELPER: check if potential_parent is a parent of child
+// ============================================================================
+
+fn mod_graph_is_parent(g: ModuleGraph, potential_parent: i64, child: i64) -> bool with Mut, Panic, Div {
+    if child < 0 || child >= g.module_count {
+        return false
+    }
+    g.modules[child].parent_id == potential_parent
+}
+
+// ============================================================================
+// HELPER: check if a dependency edge exists
+// ============================================================================
+
+fn mod_graph_has_dep(g: ModuleGraph, from_id: i64, to_id: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < g.dep_count {
+        if g.deps_from[i] == from_id && g.deps_to[i] == to_id {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// ============================================================================
+// QUERY: mod_graph_module_dep_count
+// ============================================================================
+//
+// Count how many dependencies (imports) a module has.
+
+fn mod_graph_module_dep_count(g: ModuleGraph, module_id: i64) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < g.dep_count {
+        if g.deps_from[i] == module_id {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// QUERY: mod_graph_module_reverse_dep_count
+// ============================================================================
+//
+// Count how many modules depend on this module (reverse dependencies).
+
+fn mod_graph_module_reverse_dep_count(g: ModuleGraph, module_id: i64) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < g.dep_count {
+        if g.deps_to[i] == module_id {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// MUTATION: mod_graph_mark_loaded
+// ============================================================================
+
+fn mod_graph_mark_loaded(g: ModuleGraph, module_id: i64) -> ModuleGraph with Mut, Panic, Div {
+    var graph = g
+    if module_id >= 0 && module_id < graph.module_count {
+        graph.modules[module_id].is_loaded = true
+    }
+    graph
+}
+
+// ============================================================================
+// QUERY: mod_graph_all_loaded
+// ============================================================================
+//
+// Returns true if every registered module has been loaded.
+
+fn mod_graph_all_loaded(g: ModuleGraph) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < g.module_count {
+        if !g.modules[i].is_loaded {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// ============================================================================
+// QUERY: mod_graph_export_count_for_module
+// ============================================================================
+
+fn mod_graph_export_count_for_module(g: ModuleGraph, module_id: i64) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < g.export_count {
+        if g.exports[i].module_id == module_id {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// QUERY: mod_graph_public_export_count
+// ============================================================================
+//
+// Count how many public exports a module has.
+
+fn mod_graph_public_export_count(g: ModuleGraph, module_id: i64) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < g.export_count {
+        if g.exports[i].module_id == module_id && g.exports[i].is_public {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// TEST INFRASTRUCTURE
+// ============================================================================
+
+fn mod_assert_true(cond: bool, test_num: i64) -> i64 with IO, Mut, Panic, Div {
+    if cond {
+        print("  PASS T")
+        print_int(test_num)
+        print("\n")
+        return 1
+    }
+    print("  FAIL T")
+    print_int(test_num)
+    print("\n")
+    0
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+// T01: Empty graph has zero counts
+fn test_mod_empty_graph() -> i64 with IO, Mut, Panic, Div {
+    let g = mod_graph_new()
+    let ok = g.module_count == 0 && g.export_count == 0 && g.dep_count == 0
+    mod_assert_true(ok, 1)
+}
+
+// T02: Add a single module and verify fields
+fn test_mod_add_single_module() -> i64 with IO, Mut, Panic, Div {
+    let g = mod_graph_new()
+    let name = mod_make_name(102, 111, 111, 3)  // "foo"
+    let path = mod_make_path(102, 111, 111, 3)
+    let r = mod_graph_add_module(g, name, 3, path, 3, 0 - 1, true)
+    let g2 = r.0
+    let id = r.1
+    let ok = id == 0 && g2.module_count == 1 && g2.modules[0].name_len == 3
+        && g2.modules[0].is_public
+    mod_assert_true(ok, 2)
+}
+
+// T03: Add multiple modules and verify IDs are sequential
+fn test_mod_add_multiple_modules() -> i64 with IO, Mut, Panic, Div {
+    var g = mod_graph_new()
+    let n_a = mod_make_name(97, 0, 0, 1)   // "a"
+    let n_b = mod_make_name(98, 0, 0, 1)   // "b"
+    let n_c = mod_make_name(99, 0, 0, 1)   // "c"
+    let p = mod_make_path(0, 0, 0, 0)
+
+    let r0 = mod_graph_add_module(g, n_a, 1, p, 0, 0 - 1, true)
+    g = r0.0
+    let id0 = r0.1
+    let r1 = mod_graph_add_module(g, n_b, 1, p, 0, 0 - 1, true)
+    g = r1.0
+    let id1 = r1.1
+    let r2 = mod_graph_add_module(g, n_c, 1, p, 0, 0 - 1, false)
+    g = r2.0
+    let id2 = r2.1
+
+    let ok = id0 == 0 && id1 == 1 && id2 == 2 && g.module_count == 3
+    mod_assert_true(ok, 3)
+}
+
+// T04: Find module by name
+fn test_mod_find_module() -> i64 with IO, Mut, Panic, Div {
+    var g = mod_graph_new()
+    let n_foo = mod_make_name(102, 111, 111, 3)  // "foo"
+    let n_bar = mod_make_name(98, 97, 114, 3)    // "bar"
+    let p = mod_make_path(0, 0, 0, 0)
+
+    let r0 = mod_graph_add_module(g, n_foo, 3, p, 0, 0 - 1, true)
+    g = r0.0
+    let r1 = mod_graph_add_module(g, n_bar, 3, p, 0, 0 - 1, true)
+    g = r1.0
+
+    let found_foo = mod_graph_find_module(g, n_foo, 3)
+    let found_bar = mod_graph_find_module(g, n_bar, 3)
+    let n_baz = mod_make_name(98, 97, 122, 3)    // "baz"
+    let found_baz = mod_graph_find_module(g, n_baz, 3)
+
+    let ok = found_foo == 0 && found_bar == 1 && found_baz < 0
+    mod_assert_true(ok, 4)
+}
+
+// T05: Add exports and verify count
+fn test_mod_add_exports() -> i64 with IO, Mut, Panic, Div {
+    var g = mod_graph_new()
+    let n_mod = mod_make_name(109, 0, 0, 1)  // "m"
+    let p = mod_make_path(0, 0, 0, 0)
+    let r = mod_graph_add_module(g, n_mod, 1, p, 0, 0 - 1, true)
+    g = r.0
+    let mod_id = r.1
+
+    let n_fn1 = mod_make_name(102, 49, 0, 2)  // "f1"
+    let n_fn2 = mod_make_name(102, 50, 0, 2)  // "f2"
+    g = mod_graph_add_export(g, n_fn1, 2, MOD_KIND_FN, 100, mod_id, true)
+    g = mod_graph_add_export(g, n_fn2, 2, MOD_KIND_FN, 101, mod_id, false)
+
+    let ok = g.export_count == 2
+    mod_assert_true(ok, 5)
+}
+
+// T06: Add dependency edges
+fn test_mod_add_deps() -> i64 with IO, Mut, Panic, Div {
+    var g = mod_graph_new()
+    let p = mod_make_path(0, 0, 0, 0)
+    let n_a = mod_make_name(97, 0, 0, 1)
+    let n_b = mod_make_name(98, 0, 0, 1)
+    let r0 = mod_graph_add_module(g, n_a, 1, p, 0, 0 - 1, true)
+    g = r0.0
+    let r1 = mod_graph_add_module(g, n_b, 1, p, 0, 0 - 1, true)
+    g = r1.0
+
+    g = mod_graph_add_dep(g, 1, 0)  // b depends on a
+
+    let ok = g.dep_count == 1 && g.deps_from[0] == 1 && g.deps_to[0] == 0
+    mod_assert_true(ok, 6)
+}
+
+// T07: Dependency with invalid IDs is no-op
+fn test_mod_dep_invalid_ids() -> i64 with IO, Mut, Panic, Div {
+    var g = mod_graph_new()
+    let p = mod_make_path(0, 0, 0, 0)
+    let n_a = mod_make_name(97, 0, 0, 1)
+    let r0 = mod_graph_add_module(g, n_a, 1, p, 0, 0 - 1, true)
+    g = r0.0
+
+    g = mod_graph_add_dep(g, 0, 5)   // 5 does not exist
+    g = mod_graph_add_dep(g, 5, 0)   // 5 does not exist
+    g = mod_graph_add_dep(g, 0 - 1, 0)
+
+    let ok = g.dep_count == 0
+    mod_assert_true(ok, 7)
+}
+
+// T08: No cycles in a DAG
+fn test_mod_no_cycle_dag() -> i64 with IO, Mut, Panic, Div {
+    var g = mod_graph_new()
+    let p = mod_make_path(0, 0, 0, 0)
+    let n_a = mod_make_name(97, 0, 0, 1)
+    let n_b = mod_make_name(98, 0, 0, 1)
+    let n_c = mod_make_name(99, 0, 0, 1)
+    let r0 = mod_graph_add_module(g, n_a, 1, p, 0, 0 - 1, true)
+    g = r0.0
+    let r1 = mod_graph_add_module(g, n_b, 1, p, 0, 0 - 1, true)
+    g = r1.0
+    let r2 = mod_graph_add_module(g, n_c, 1, p, 0, 0 - 1, true)
+    g = r2.0
+
+    // a -> b -> c (no cycle)
+    g = mod_graph_add_dep(g, 0, 1)
+    g = mod_graph_add_dep(g, 1, 2)
+
+    let has_cycle = mod_graph_check_cycles(g)
+    mod_assert_true(!has_cycle, 8)
+}
+
+// T09: Cycle detected in circular graph
+fn test_mod_cycle_detected() -> i64 with IO, Mut, Panic, Div {
+    var g = mod_graph_new()
+    let p = mod_make_path(0, 0, 0, 0)
+    let n_a = mod_make_name(97, 0, 0, 1)
+    let n_b = mod_make_name(98, 0, 0, 1)
+    let n_c = mod_make_name(99, 0, 0, 1)
+    let r0 = mod_graph_add_module(g, n_a, 1, p, 0, 0 - 1, true)
+    g = r0.0
+    let r1 = mod_graph_add_module(g, n_b, 1, p, 0, 0 - 1, true)
+    g = r1.0
+    let r2 = mod_graph_add_module(g, n_c, 1, p, 0, 0 - 1, true)
+    g = r2.0
+
+    // a -> b -> c -> a (cycle)
+    g = mod_graph_add_dep(g, 0, 1)
+    g = mod_graph_add_dep(g, 1, 2)
+    g = mod_graph_add_dep(g, 2, 0)
+
+    let has_cycle = mod_graph_check_cycles(g)
+    mod_assert_true(has_cycle, 9)
+}
+
+// T10: Topological sort of a linear chain
+fn test_mod_topo_sort_linear() -> i64 with IO, Mut, Panic, Div {
+    var g = mod_graph_new()
+    let p = mod_make_path(0, 0, 0, 0)
+    let n_a = mod_make_name(97, 0, 0, 1)
+    let n_b = mod_make_name(98, 0, 0, 1)
+    let n_c = mod_make_name(99, 0, 0, 1)
+    let r0 = mod_graph_add_module(g, n_a, 1, p, 0, 0 - 1, true)
+    g = r0.0
+    let r1 = mod_graph_add_module(g, n_b, 1, p, 0, 0 - 1, true)
+    g = r1.0
+    let r2 = mod_graph_add_module(g, n_c, 1, p, 0, 0 - 1, true)
+    g = r2.0
+
+    // a -> b -> c
+    g = mod_graph_add_dep(g, 0, 1)
+    g = mod_graph_add_dep(g, 1, 2)
+
+    let result = mod_graph_topo_sort(g)
+    let count = result.0
+    let order = result.1
+
+    // Should produce valid ordering of 3 modules
+    // c has no dependencies so it comes first, then b, then a
+    let ok = count == 3 && order[0] == 2 && order[1] == 1 && order[2] == 0
+    mod_assert_true(ok, 10)
+}
+
+// T11: Topological sort detects cycle and returns -1
+fn test_mod_topo_sort_cycle() -> i64 with IO, Mut, Panic, Div {
+    var g = mod_graph_new()
+    let p = mod_make_path(0, 0, 0, 0)
+    let n_a = mod_make_name(97, 0, 0, 1)
+    let n_b = mod_make_name(98, 0, 0, 1)
+    let r0 = mod_graph_add_module(g, n_a, 1, p, 0, 0 - 1, true)
+    g = r0.0
+    let r1 = mod_graph_add_module(g, n_b, 1, p, 0, 0 - 1, true)
+    g = r1.0
+
+    // a -> b -> a (cycle)
+    g = mod_graph_add_dep(g, 0, 1)
+    g = mod_graph_add_dep(g, 1, 0)
+
+    let result = mod_graph_topo_sort(g)
+    let count = result.0
+
+    let ok = count < 0
+    mod_assert_true(ok, 11)
+}
+
+// T12: Topological sort of disconnected graph
+fn test_mod_topo_sort_disconnected() -> i64 with IO, Mut, Panic, Div {
+    var g = mod_graph_new()
+    let p = mod_make_path(0, 0, 0, 0)
+    let n_a = mod_make_name(97, 0, 0, 1)
+    let n_b = mod_make_name(98, 0, 0, 1)
+    let n_c = mod_make_name(99, 0, 0, 1)
+    let n_d = mod_make_name(100, 0, 0, 1)
+    let r0 = mod_graph_add_module(g, n_a, 1, p, 0, 0 - 1, true)
+    g = r0.0
+    let r1 = mod_graph_add_module(g, n_b, 1, p, 0, 0 - 1, true)
+    g = r1.0
+    let r2 = mod_graph_add_module(g, n_c, 1, p, 0, 0 - 1, true)
+    g = r2.0
+    let r3 = mod_graph_add_module(g, n_d, 1, p, 0, 0 - 1, true)
+    g = r3.0
+
+    // a -> b, c -> d (two independent chains)
+    g = mod_graph_add_dep(g, 0, 1)
+    g = mod_graph_add_dep(g, 2, 3)
+
+    let result = mod_graph_topo_sort(g)
+    let count = result.0
+
+    let ok = count == 4
+    mod_assert_true(ok, 12)
+}
+
+// T13: Collect exports from a specific module
+fn test_mod_collect_exports() -> i64 with IO, Mut, Panic, Div {
+    var g = mod_graph_new()
+    let p = mod_make_path(0, 0, 0, 0)
+    let n_a = mod_make_name(97, 0, 0, 1)
+    let n_b = mod_make_name(98, 0, 0, 1)
+    let r0 = mod_graph_add_module(g, n_a, 1, p, 0, 0 - 1, true)
+    g = r0.0
+    let r1 = mod_graph_add_module(g, n_b, 1, p, 0, 0 - 1, true)
+    g = r1.0
+
+    // Add 2 exports to module a (id=0) and 1 to module b (id=1)
+    let e_x = mod_make_name(120, 0, 0, 1)
+    let e_y = mod_make_name(121, 0, 0, 1)
+    let e_z = mod_make_name(122, 0, 0, 1)
+    g = mod_graph_add_export(g, e_x, 1, MOD_KIND_FN, 10, 0, true)
+    g = mod_graph_add_export(g, e_y, 1, MOD_KIND_TYPE, 11, 0, true)
+    g = mod_graph_add_export(g, e_z, 1, MOD_KIND_CONST, 12, 1, true)
+
+    let result_a = mod_graph_collect_exports(g, 0)
+    let count_a = result_a.0
+    let result_b = mod_graph_collect_exports(g, 1)
+    let count_b = result_b.0
+
+    let ok = count_a == 2 && count_b == 1
+    mod_assert_true(ok, 13)
+}
+
+// T14: Visibility — self can always see own exports
+fn test_mod_visibility_self() -> i64 with IO, Mut, Panic, Div {
+    var g = mod_graph_new()
+    let p = mod_make_path(0, 0, 0, 0)
+    let n_a = mod_make_name(97, 0, 0, 1)
+    let r0 = mod_graph_add_module(g, n_a, 1, p, 0, 0 - 1, true)
+    g = r0.0
+
+    let e_priv = mod_make_name(120, 0, 0, 1)
+    g = mod_graph_add_export(g, e_priv, 1, MOD_KIND_FN, 10, 0, false)  // private!
+
+    let can_see = mod_graph_visibility_check(g, 0, 0, 0)
+    mod_assert_true(can_see, 14)
+}
+
+// T15: Visibility — unrelated module cannot see private export
+fn test_mod_visibility_private_blocked() -> i64 with IO, Mut, Panic, Div {
+    var g = mod_graph_new()
+    let p = mod_make_path(0, 0, 0, 0)
+    let n_a = mod_make_name(97, 0, 0, 1)
+    let n_b = mod_make_name(98, 0, 0, 1)
+    let r0 = mod_graph_add_module(g, n_a, 1, p, 0, 0 - 1, true)
+    g = r0.0
+    let r1 = mod_graph_add_module(g, n_b, 1, p, 0, 0 - 1, true)
+    g = r1.0
+
+    let e_priv = mod_make_name(120, 0, 0, 1)
+    g = mod_graph_add_export(g, e_priv, 1, MOD_KIND_FN, 10, 0, false)  // private
+
+    // b depends on a
+    g = mod_graph_add_dep(g, 1, 0)
+
+    let can_see = mod_graph_visibility_check(g, 1, 0, 0)
+    mod_assert_true(!can_see, 15)
+}
+
+// T16: Visibility — unrelated module can see public export with dep edge
+fn test_mod_visibility_public_with_dep() -> i64 with IO, Mut, Panic, Div {
+    var g = mod_graph_new()
+    let p = mod_make_path(0, 0, 0, 0)
+    let n_a = mod_make_name(97, 0, 0, 1)
+    let n_b = mod_make_name(98, 0, 0, 1)
+    let r0 = mod_graph_add_module(g, n_a, 1, p, 0, 0 - 1, true)
+    g = r0.0
+    let r1 = mod_graph_add_module(g, n_b, 1, p, 0, 0 - 1, true)
+    g = r1.0
+
+    let e_pub = mod_make_name(120, 0, 0, 1)
+    g = mod_graph_add_export(g, e_pub, 1, MOD_KIND_FN, 10, 0, true)  // public
+
+    // b depends on a
+    g = mod_graph_add_dep(g, 1, 0)
+
+    let can_see = mod_graph_visibility_check(g, 1, 0, 0)
+    mod_assert_true(can_see, 16)
+}
+
+// T17: Visibility — public export but no dependency edge
+fn test_mod_visibility_no_dep_edge() -> i64 with IO, Mut, Panic, Div {
+    var g = mod_graph_new()
+    let p = mod_make_path(0, 0, 0, 0)
+    let n_a = mod_make_name(97, 0, 0, 1)
+    let n_b = mod_make_name(98, 0, 0, 1)
+    let r0 = mod_graph_add_module(g, n_a, 1, p, 0, 0 - 1, true)
+    g = r0.0
+    let r1 = mod_graph_add_module(g, n_b, 1, p, 0, 0 - 1, true)
+    g = r1.0
+
+    let e_pub = mod_make_name(120, 0, 0, 1)
+    g = mod_graph_add_export(g, e_pub, 1, MOD_KIND_FN, 10, 0, true)  // public
+
+    // NO dependency from b to a
+    let can_see = mod_graph_visibility_check(g, 1, 0, 0)
+    mod_assert_true(!can_see, 17)
+}
+
+// T18: Parent module can see child's private exports
+fn test_mod_visibility_parent_sees_child() -> i64 with IO, Mut, Panic, Div {
+    var g = mod_graph_new()
+    let p = mod_make_path(0, 0, 0, 0)
+    let n_parent = mod_make_name(112, 0, 0, 1)  // "p"
+    let n_child = mod_make_name(99, 0, 0, 1)    // "c"
+    let r0 = mod_graph_add_module(g, n_parent, 1, p, 0, 0 - 1, true)
+    g = r0.0
+    let parent_id = r0.1
+    let r1 = mod_graph_add_module(g, n_child, 1, p, 0, parent_id, true)
+    g = r1.0
+    let child_id = r1.1
+
+    let e_priv = mod_make_name(120, 0, 0, 1)
+    g = mod_graph_add_export(g, e_priv, 1, MOD_KIND_FN, 10, child_id, false)  // private
+
+    let can_see = mod_graph_visibility_check(g, parent_id, child_id, 0)
+    mod_assert_true(can_see, 18)
+}
+
+// T19: Resolve a qualified import "foo::bar_fn"
+fn test_mod_resolve_qualified_import() -> i64 with IO, Mut, Panic, Div {
+    var g = mod_graph_new()
+    let p = mod_make_path(0, 0, 0, 0)
+    // Module "foo"
+    let n_foo = mod_make_name(102, 111, 111, 3)
+    let r0 = mod_graph_add_module(g, n_foo, 3, p, 0, 0 - 1, true)
+    g = r0.0
+
+    // Export "bar" in module "foo"
+    let n_bar = mod_make_name(98, 97, 114, 3)
+    g = mod_graph_add_export(g, n_bar, 3, MOD_KIND_FN, 42, 0, true)
+
+    // Build qualified name "foo::bar" as bytes: f=102,o=111,o=111,:=58,:=58,b=98,a=97,r=114
+    var qname: [i8; 64] = [0; 64]
+    qname[0] = 102  // f
+    qname[1] = 111  // o
+    qname[2] = 111  // o
+    qname[3] = 58   // :
+    qname[4] = 58   // :
+    qname[5] = 98   // b
+    qname[6] = 97   // a
+    qname[7] = 114  // r
+    let qlen: i64 = 8
+
+    let result = mod_graph_resolve_import(g, qname, qlen)
+    let resolved_mod = result.0
+    let resolved_exp = result.1
+
+    let ok = resolved_mod == 0 && resolved_exp == 0
+    mod_assert_true(ok, 19)
+}
+
+// T20: Resolve import fails for unknown module
+fn test_mod_resolve_unknown_module() -> i64 with IO, Mut, Panic, Div {
+    let g = mod_graph_new()
+
+    // Try resolving "xyz::fn1" in empty graph
+    var qname: [i8; 64] = [0; 64]
+    qname[0] = 120  // x
+    qname[1] = 121  // y
+    qname[2] = 122  // z
+    qname[3] = 58   // :
+    qname[4] = 58   // :
+    qname[5] = 102  // f
+    qname[6] = 110  // n
+    qname[7] = 49   // 1
+    let qlen: i64 = 8
+
+    let result = mod_graph_resolve_import(g, qname, qlen)
+    let resolved_mod = result.0
+
+    let ok = resolved_mod < 0
+    mod_assert_true(ok, 20)
+}
+
+// T21: Resolve import fails for unknown export in known module
+fn test_mod_resolve_unknown_export() -> i64 with IO, Mut, Panic, Div {
+    var g = mod_graph_new()
+    let p = mod_make_path(0, 0, 0, 0)
+    let n_foo = mod_make_name(102, 111, 111, 3)  // "foo"
+    let r0 = mod_graph_add_module(g, n_foo, 3, p, 0, 0 - 1, true)
+    g = r0.0
+    // Module "foo" exists but has no exports
+
+    // Try resolving "foo::bar"
+    var qname: [i8; 64] = [0; 64]
+    qname[0] = 102  // f
+    qname[1] = 111  // o
+    qname[2] = 111  // o
+    qname[3] = 58   // :
+    qname[4] = 58   // :
+    qname[5] = 98   // b
+    qname[6] = 97   // a
+    qname[7] = 114  // r
+    let qlen: i64 = 8
+
+    let result = mod_graph_resolve_import(g, qname, qlen)
+    let resolved_exp = result.1
+
+    let ok = resolved_exp < 0
+    mod_assert_true(ok, 21)
+}
+
+// T22: Mark modules loaded
+fn test_mod_mark_loaded() -> i64 with IO, Mut, Panic, Div {
+    var g = mod_graph_new()
+    let p = mod_make_path(0, 0, 0, 0)
+    let n_a = mod_make_name(97, 0, 0, 1)
+    let n_b = mod_make_name(98, 0, 0, 1)
+    let r0 = mod_graph_add_module(g, n_a, 1, p, 0, 0 - 1, true)
+    g = r0.0
+    let r1 = mod_graph_add_module(g, n_b, 1, p, 0, 0 - 1, true)
+    g = r1.0
+
+    let before = mod_graph_all_loaded(g)
+    g = mod_graph_mark_loaded(g, 0)
+    let middle = mod_graph_all_loaded(g)
+    g = mod_graph_mark_loaded(g, 1)
+    let after = mod_graph_all_loaded(g)
+
+    let ok = !before && !middle && after
+    mod_assert_true(ok, 22)
+}
+
+// T23: Export count per module
+fn test_mod_export_count_per_module() -> i64 with IO, Mut, Panic, Div {
+    var g = mod_graph_new()
+    let p = mod_make_path(0, 0, 0, 0)
+    let n_a = mod_make_name(97, 0, 0, 1)
+    let n_b = mod_make_name(98, 0, 0, 1)
+    let r0 = mod_graph_add_module(g, n_a, 1, p, 0, 0 - 1, true)
+    g = r0.0
+    let r1 = mod_graph_add_module(g, n_b, 1, p, 0, 0 - 1, true)
+    g = r1.0
+
+    let e1 = mod_make_name(120, 0, 0, 1)
+    let e2 = mod_make_name(121, 0, 0, 1)
+    let e3 = mod_make_name(122, 0, 0, 1)
+    g = mod_graph_add_export(g, e1, 1, MOD_KIND_FN, 1, 0, true)
+    g = mod_graph_add_export(g, e2, 1, MOD_KIND_FN, 2, 0, true)
+    g = mod_graph_add_export(g, e3, 1, MOD_KIND_TYPE, 3, 1, true)
+
+    let count_a = mod_graph_export_count_for_module(g, 0)
+    let count_b = mod_graph_export_count_for_module(g, 1)
+
+    let ok = count_a == 2 && count_b == 1
+    mod_assert_true(ok, 23)
+}
+
+// T24: Public vs private export count
+fn test_mod_public_export_count() -> i64 with IO, Mut, Panic, Div {
+    var g = mod_graph_new()
+    let p = mod_make_path(0, 0, 0, 0)
+    let n_a = mod_make_name(97, 0, 0, 1)
+    let r0 = mod_graph_add_module(g, n_a, 1, p, 0, 0 - 1, true)
+    g = r0.0
+
+    let e1 = mod_make_name(120, 0, 0, 1)
+    let e2 = mod_make_name(121, 0, 0, 1)
+    let e3 = mod_make_name(122, 0, 0, 1)
+    g = mod_graph_add_export(g, e1, 1, MOD_KIND_FN, 1, 0, true)    // public
+    g = mod_graph_add_export(g, e2, 1, MOD_KIND_FN, 2, 0, false)   // private
+    g = mod_graph_add_export(g, e3, 1, MOD_KIND_TYPE, 3, 0, true)  // public
+
+    let pub_count = mod_graph_public_export_count(g, 0)
+    let total = mod_graph_export_count_for_module(g, 0)
+
+    let ok = pub_count == 2 && total == 3
+    mod_assert_true(ok, 24)
+}
+
+// T25: Dependency counts (forward and reverse)
+fn test_mod_dep_counts() -> i64 with IO, Mut, Panic, Div {
+    var g = mod_graph_new()
+    let p = mod_make_path(0, 0, 0, 0)
+    let n_a = mod_make_name(97, 0, 0, 1)
+    let n_b = mod_make_name(98, 0, 0, 1)
+    let n_c = mod_make_name(99, 0, 0, 1)
+    let r0 = mod_graph_add_module(g, n_a, 1, p, 0, 0 - 1, true)
+    g = r0.0
+    let r1 = mod_graph_add_module(g, n_b, 1, p, 0, 0 - 1, true)
+    g = r1.0
+    let r2 = mod_graph_add_module(g, n_c, 1, p, 0, 0 - 1, true)
+    g = r2.0
+
+    // c depends on a and b
+    g = mod_graph_add_dep(g, 2, 0)
+    g = mod_graph_add_dep(g, 2, 1)
+    // b depends on a
+    g = mod_graph_add_dep(g, 1, 0)
+
+    let c_fwd = mod_graph_module_dep_count(g, 2)
+    let a_rev = mod_graph_module_reverse_dep_count(g, 0)
+    let a_fwd = mod_graph_module_dep_count(g, 0)
+
+    let ok = c_fwd == 2 && a_rev == 2 && a_fwd == 0
+    mod_assert_true(ok, 25)
+}
+
+// T26: Split qualified name "foo::bar"
+fn test_mod_split_qualified_basic() -> i64 with IO, Mut, Panic, Div {
+    // "foo::bar" -> ("foo", 3, "bar", 3)
+    var qname: [i8; 64] = [0; 64]
+    qname[0] = 102  // f
+    qname[1] = 111  // o
+    qname[2] = 111  // o
+    qname[3] = 58   // :
+    qname[4] = 58   // :
+    qname[5] = 98   // b
+    qname[6] = 97   // a
+    qname[7] = 114  // r
+
+    let parts = mod_split_qualified(qname, 8)
+    let first_len = parts.1
+    let rest_len = parts.3
+
+    let first = parts.0
+    let rest = parts.2
+
+    let ok = first_len == 3 && rest_len == 3
+        && first[0] == 102 && first[1] == 111 && first[2] == 111
+        && rest[0] == 98 && rest[1] == 97 && rest[2] == 114
+    mod_assert_true(ok, 26)
+}
+
+// T27: Split unqualified name "foo" -> no split
+fn test_mod_split_unqualified() -> i64 with IO, Mut, Panic, Div {
+    var qname: [i8; 64] = [0; 64]
+    qname[0] = 102  // f
+    qname[1] = 111  // o
+    qname[2] = 111  // o
+
+    let parts = mod_split_qualified(qname, 3)
+    let first_len = parts.1
+    let rest_len = parts.3
+
+    let ok = first_len == 3 && rest_len == 0
+    mod_assert_true(ok, 27)
+}
+
+// T28: Find module by parent
+fn test_mod_find_by_parent() -> i64 with IO, Mut, Panic, Div {
+    var g = mod_graph_new()
+    let p = mod_make_path(0, 0, 0, 0)
+    let n_root = mod_make_name(114, 0, 0, 1)    // "r"
+    let n_child = mod_make_name(99, 0, 0, 1)    // "c"
+    let n_other = mod_make_name(111, 0, 0, 1)   // "o"
+
+    let r0 = mod_graph_add_module(g, n_root, 1, p, 0, 0 - 1, true)
+    g = r0.0
+    let root_id = r0.1
+    let r1 = mod_graph_add_module(g, n_child, 1, p, 0, root_id, true)
+    g = r1.0
+    let child_id = r1.1
+    let r2 = mod_graph_add_module(g, n_other, 1, p, 0, 0 - 1, true)
+    g = r2.0
+
+    let found = mod_graph_find_module_by_parent(g, root_id, n_child, 1)
+    let not_found = mod_graph_find_module_by_parent(g, root_id, n_other, 1)
+
+    let ok = found == child_id && not_found < 0
+    mod_assert_true(ok, 28)
+}
+
+// T29: No cycles in empty graph
+fn test_mod_no_cycle_empty() -> i64 with IO, Mut, Panic, Div {
+    let g = mod_graph_new()
+    let has_cycle = mod_graph_check_cycles(g)
+    mod_assert_true(!has_cycle, 29)
+}
+
+// T30: Topo sort of single module
+fn test_mod_topo_sort_single() -> i64 with IO, Mut, Panic, Div {
+    var g = mod_graph_new()
+    let p = mod_make_path(0, 0, 0, 0)
+    let n_a = mod_make_name(97, 0, 0, 1)
+    let r0 = mod_graph_add_module(g, n_a, 1, p, 0, 0 - 1, true)
+    g = r0.0
+
+    let result = mod_graph_topo_sort(g)
+    let count = result.0
+    let order = result.1
+
+    let ok = count == 1 && order[0] == 0
+    mod_assert_true(ok, 30)
+}
+
+// T31: Diamond dependency graph — topo sort produces valid order
+fn test_mod_topo_sort_diamond() -> i64 with IO, Mut, Panic, Div {
+    var g = mod_graph_new()
+    let p = mod_make_path(0, 0, 0, 0)
+    let n_a = mod_make_name(97, 0, 0, 1)   // a (id=0)
+    let n_b = mod_make_name(98, 0, 0, 1)   // b (id=1)
+    let n_c = mod_make_name(99, 0, 0, 1)   // c (id=2)
+    let n_d = mod_make_name(100, 0, 0, 1)  // d (id=3)
+    let r0 = mod_graph_add_module(g, n_a, 1, p, 0, 0 - 1, true)
+    g = r0.0
+    let r1 = mod_graph_add_module(g, n_b, 1, p, 0, 0 - 1, true)
+    g = r1.0
+    let r2 = mod_graph_add_module(g, n_c, 1, p, 0, 0 - 1, true)
+    g = r2.0
+    let r3 = mod_graph_add_module(g, n_d, 1, p, 0, 0 - 1, true)
+    g = r3.0
+
+    // Diamond: a -> b, a -> c, b -> d, c -> d
+    g = mod_graph_add_dep(g, 0, 1)
+    g = mod_graph_add_dep(g, 0, 2)
+    g = mod_graph_add_dep(g, 1, 3)
+    g = mod_graph_add_dep(g, 2, 3)
+
+    let result = mod_graph_topo_sort(g)
+    let count = result.0
+    let order = result.1
+
+    // d must come before b and c, which must come before a
+    // Kahn's with sequential init gives: d (in-deg 0 = 3), b (1), c (2), a (0)
+    // Actually: node 3 (d) has 0 in-degree? No. a->b, a->c, b->d, c->d
+    // in-degree: a=0, b=1, c=1, d=2. So a starts. Then b,c become 0. Then d.
+    // Valid: a, b, c, d  or  a, c, b, d
+    let ok = count == 4 && order[0] == 0 && order[3] == 3
+    mod_assert_true(ok, 31)
+}
+
+// T32: Export kind constants
+fn test_mod_kind_constants() -> i64 with IO, Mut, Panic, Div {
+    let ok = MOD_KIND_FN == 1 && MOD_KIND_TYPE == 2 && MOD_KIND_CONST == 3 && MOD_KIND_MOD == 4
+    mod_assert_true(ok, 32)
+}
+
+// T33: Self-cycle on single module
+fn test_mod_self_cycle() -> i64 with IO, Mut, Panic, Div {
+    var g = mod_graph_new()
+    let p = mod_make_path(0, 0, 0, 0)
+    let n_a = mod_make_name(97, 0, 0, 1)
+    let r0 = mod_graph_add_module(g, n_a, 1, p, 0, 0 - 1, true)
+    g = r0.0
+
+    g = mod_graph_add_dep(g, 0, 0)  // self-loop
+
+    let has_cycle = mod_graph_check_cycles(g)
+    mod_assert_true(has_cycle, 33)
+}
+
+// T34: has_dep helper
+fn test_mod_has_dep() -> i64 with IO, Mut, Panic, Div {
+    var g = mod_graph_new()
+    let p = mod_make_path(0, 0, 0, 0)
+    let n_a = mod_make_name(97, 0, 0, 1)
+    let n_b = mod_make_name(98, 0, 0, 1)
+    let r0 = mod_graph_add_module(g, n_a, 1, p, 0, 0 - 1, true)
+    g = r0.0
+    let r1 = mod_graph_add_module(g, n_b, 1, p, 0, 0 - 1, true)
+    g = r1.0
+
+    g = mod_graph_add_dep(g, 0, 1)
+
+    let has = mod_graph_has_dep(g, 0, 1)
+    let no_rev = mod_graph_has_dep(g, 1, 0)
+    let no_self = mod_graph_has_dep(g, 0, 0)
+
+    let ok = has && !no_rev && !no_self
+    mod_assert_true(ok, 34)
+}
+
+// T35: Unqualified resolve finds export across any module
+fn test_mod_resolve_unqualified() -> i64 with IO, Mut, Panic, Div {
+    var g = mod_graph_new()
+    let p = mod_make_path(0, 0, 0, 0)
+    let n_a = mod_make_name(97, 0, 0, 1)
+    let r0 = mod_graph_add_module(g, n_a, 1, p, 0, 0 - 1, true)
+    g = r0.0
+
+    let e_fn = mod_make_name(102, 110, 0, 2)  // "fn"
+    g = mod_graph_add_export(g, e_fn, 2, MOD_KIND_FN, 99, 0, true)
+
+    // Resolve unqualified "fn" (no "::")
+    let result = mod_graph_resolve_import(g, e_fn, 2)
+    let resolved_mod = result.0
+    let resolved_exp = result.1
+
+    let ok = resolved_mod == 0 && resolved_exp == 0
+    mod_assert_true(ok, 35)
+}
+
+// ============================================================================
+// ENTRY POINT: run all module tests
+// ============================================================================
+
+fn run_module_graph_tests() -> i32 with IO, Mut, Panic, Div {
+    var passed: i64 = 0
+    let total: i64 = 35
+
+    print("=== Module Graph Tests ===\n")
+
+    passed = passed + test_mod_empty_graph()
+    passed = passed + test_mod_add_single_module()
+    passed = passed + test_mod_add_multiple_modules()
+    passed = passed + test_mod_find_module()
+    passed = passed + test_mod_add_exports()
+    passed = passed + test_mod_add_deps()
+    passed = passed + test_mod_dep_invalid_ids()
+    passed = passed + test_mod_no_cycle_dag()
+    passed = passed + test_mod_cycle_detected()
+    passed = passed + test_mod_topo_sort_linear()
+    passed = passed + test_mod_topo_sort_cycle()
+    passed = passed + test_mod_topo_sort_disconnected()
+    passed = passed + test_mod_collect_exports()
+    passed = passed + test_mod_visibility_self()
+    passed = passed + test_mod_visibility_private_blocked()
+    passed = passed + test_mod_visibility_public_with_dep()
+    passed = passed + test_mod_visibility_no_dep_edge()
+    passed = passed + test_mod_visibility_parent_sees_child()
+    passed = passed + test_mod_resolve_qualified_import()
+    passed = passed + test_mod_resolve_unknown_module()
+    passed = passed + test_mod_resolve_unknown_export()
+    passed = passed + test_mod_mark_loaded()
+    passed = passed + test_mod_export_count_per_module()
+    passed = passed + test_mod_public_export_count()
+    passed = passed + test_mod_dep_counts()
+    passed = passed + test_mod_split_qualified_basic()
+    passed = passed + test_mod_split_unqualified()
+    passed = passed + test_mod_find_by_parent()
+    passed = passed + test_mod_no_cycle_empty()
+    passed = passed + test_mod_topo_sort_single()
+    passed = passed + test_mod_topo_sort_diamond()
+    passed = passed + test_mod_kind_constants()
+    passed = passed + test_mod_self_cycle()
+    passed = passed + test_mod_has_dep()
+    passed = passed + test_mod_resolve_unqualified()
+
+    print("\nModule graph tests: ")
+    print_int(passed)
+    print("/")
+    print_int(total)
+    print(" passed\n")
+
+    if passed == total { 0 } else { 1 }
+}

@@ -1,0 +1,1665 @@
+// self-hosted::native::codegen_plan — Code generation planning and scheduling
+//
+// Implements instruction scheduling for a compiler backend.  Given a block of
+// low-level instructions with register operands and latency information, this
+// module builds a dependency graph and applies list scheduling to produce an
+// execution order that respects data/anti/output/control dependencies while
+// attempting to minimise register pressure and total cycle count.
+//
+// Algorithm:  List scheduling with critical-path priority (Gibbons & Muchnick,
+// "Efficient instruction scheduling for a pipelined architecture", 1986).
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+let DEP_DATA: i64 = 1        // true (flow) dependency: write -> read
+let DEP_ANTI: i64 = 2        // anti dependency: read -> write
+let DEP_OUTPUT: i64 = 3      // output dependency: write -> write
+let DEP_CONTROL: i64 = 4     // control dependency (branches, barriers)
+
+let CGPLAN_MAX_INSTRS: i64 = 512
+let CGPLAN_MAX_DEPS: i64 = 2048
+let CGPLAN_MAX_BLOCKS: i64 = 256
+let CGPLAN_MAX_CYCLES: i64 = 512
+
+// Opcode constants for peephole patterns
+let CGOP_NOP: i64 = 0
+let CGOP_MOV: i64 = 1
+let CGOP_ADD: i64 = 2
+let CGOP_SUB: i64 = 3
+let CGOP_MUL: i64 = 4
+let CGOP_DIV: i64 = 5
+let CGOP_LOAD: i64 = 6
+let CGOP_STORE: i64 = 7
+let CGOP_CMP: i64 = 8
+let CGOP_BRANCH: i64 = 9
+let CGOP_CALL: i64 = 10
+let CGOP_RET: i64 = 11
+
+// Sentinel values
+let REG_NONE: i64 = 0 - 1
+let CYCLE_INF: i64 = 999999
+
+// ============================================================================
+// Core data structures
+// ============================================================================
+
+// A single instruction in the scheduling model.
+struct CodegenInstr {
+    id: i64,              // unique instruction index within block
+    opcode: i64,          // operation kind (OP_* constants)
+    dst_reg: i64,         // destination register (-1 = none)
+    src1_reg: i64,        // first source register (-1 = none)
+    src2_reg: i64,        // second source register (-1 = none)
+    latency: i64,         // execution latency in cycles
+    is_scheduled: bool,   // true if already placed in the schedule
+    earliest_cycle: i64,  // earliest cycle this instr can execute
+}
+
+// A dependency edge between two instructions.
+struct DepEdge {
+    from_id: i64,         // producer instruction id
+    to_id: i64,           // consumer instruction id
+    kind: i64,            // DEP_DATA, DEP_ANTI, DEP_OUTPUT, DEP_CONTROL
+    latency: i64,         // minimum cycles between producer issue and consumer issue
+}
+
+// A basic block with its instructions, dependency graph, and schedule.
+struct CodegenBlock {
+    instrs: [CodegenInstr; 512],
+    instr_count: i64,
+    schedule: [i64; 512],       // ordered list of instruction ids
+    schedule_len: i64,
+    deps: [DepEdge; 2048],
+    dep_count: i64,
+    cycle_count: i64,           // total cycles after scheduling
+}
+
+// Top-level scheduling plan: a collection of blocks with global metrics.
+struct CodegenPlan {
+    blocks: [CodegenBlock; 256],
+    block_count: i64,
+    reg_pressure: [i64; 512],   // register pressure per cycle
+    spill_slots: i64,           // number of spill slots needed
+    total_cycles: i64,          // sum of all block cycle counts
+}
+
+// ============================================================================
+// Constructors
+// ============================================================================
+
+fn codegen_instr_new(
+    id: i64, opcode: i64, dst_reg: i64, src1_reg: i64, src2_reg: i64, latency: i64
+) -> CodegenInstr {
+    CodegenInstr {
+        id: id,
+        opcode: opcode,
+        dst_reg: dst_reg,
+        src1_reg: src1_reg,
+        src2_reg: src2_reg,
+        latency: latency,
+        is_scheduled: false,
+        earliest_cycle: 0,
+    }
+}
+
+fn empty_codegen_instr() -> CodegenInstr {
+    CodegenInstr {
+        id: 0,
+        opcode: CGOP_NOP,
+        dst_reg: REG_NONE,
+        src1_reg: REG_NONE,
+        src2_reg: REG_NONE,
+        latency: 1,
+        is_scheduled: false,
+        earliest_cycle: 0,
+    }
+}
+
+fn dep_edge_new(from_id: i64, to_id: i64, kind: i64, latency: i64) -> DepEdge {
+    DepEdge {
+        from_id: from_id,
+        to_id: to_id,
+        kind: kind,
+        latency: latency,
+    }
+}
+
+fn empty_dep_edge() -> DepEdge {
+    DepEdge {
+        from_id: 0,
+        to_id: 0,
+        kind: DEP_DATA,
+        latency: 0,
+    }
+}
+
+fn codegen_block_new() -> CodegenBlock {
+    CodegenBlock {
+        instrs: [empty_codegen_instr(); 512],
+        instr_count: 0,
+        schedule: [0; 512],
+        schedule_len: 0,
+        deps: [empty_dep_edge(); 2048],
+        dep_count: 0,
+        cycle_count: 0,
+    }
+}
+
+fn codegen_plan_new() -> CodegenPlan {
+    CodegenPlan {
+        blocks: [codegen_block_new(); 256],
+        block_count: 0,
+        reg_pressure: [0; 512],
+        spill_slots: 0,
+        total_cycles: 0,
+    }
+}
+
+// ============================================================================
+// Instruction and dependency management
+// ============================================================================
+
+// Add an instruction to block 0 (convenience for single-block plans).
+fn cgplan_add_instr(
+    plan: CodegenPlan, instr: CodegenInstr
+) -> CodegenPlan with Mut, Div, Panic {
+    var p = plan
+    if p.block_count == 0 {
+        p.block_count = 1
+    }
+    let bi: i64 = 0
+    if p.blocks[bi as usize].instr_count < CGPLAN_MAX_INSTRS {
+        let idx = p.blocks[bi as usize].instr_count
+        p.blocks[bi as usize].instrs[idx as usize] = instr
+        p.blocks[bi as usize].instr_count = idx + 1
+    }
+    p
+}
+
+// Add an instruction to a specific block.
+fn cgplan_add_instr_to_block(
+    plan: CodegenPlan, block_idx: i64, instr: CodegenInstr
+) -> CodegenPlan with Mut, Div, Panic {
+    var p = plan
+    if block_idx >= p.block_count {
+        p.block_count = block_idx + 1
+    }
+    if p.blocks[block_idx as usize].instr_count < CGPLAN_MAX_INSTRS {
+        let idx = p.blocks[block_idx as usize].instr_count
+        p.blocks[block_idx as usize].instrs[idx as usize] = instr
+        p.blocks[block_idx as usize].instr_count = idx + 1
+    }
+    p
+}
+
+// Add a dependency edge to block 0.
+fn cgplan_add_dep(
+    plan: CodegenPlan, edge: DepEdge
+) -> CodegenPlan with Mut, Div, Panic {
+    var p = plan
+    if p.block_count == 0 {
+        p.block_count = 1
+    }
+    let bi: i64 = 0
+    if p.blocks[bi as usize].dep_count < CGPLAN_MAX_DEPS {
+        let idx = p.blocks[bi as usize].dep_count
+        p.blocks[bi as usize].deps[idx as usize] = edge
+        p.blocks[bi as usize].dep_count = idx + 1
+    }
+    p
+}
+
+// Add a dependency edge to a specific block.
+fn cgplan_add_dep_to_block(
+    plan: CodegenPlan, block_idx: i64, edge: DepEdge
+) -> CodegenPlan with Mut, Div, Panic {
+    var p = plan
+    if block_idx < CGPLAN_MAX_BLOCKS {
+        if p.blocks[block_idx as usize].dep_count < CGPLAN_MAX_DEPS {
+            let idx = p.blocks[block_idx as usize].dep_count
+            p.blocks[block_idx as usize].deps[idx as usize] = edge
+            p.blocks[block_idx as usize].dep_count = idx + 1
+        }
+    }
+    p
+}
+
+// ============================================================================
+// Dependency analysis — auto-detect from register defs/uses
+// ============================================================================
+
+// Find the last instruction that writes to `reg` before position `pos`.
+// Returns -1 if no such instruction exists.
+fn cgplan_find_last_writer(
+    block: CodegenBlock, reg: i64, before_pos: i64
+) -> i64 with Mut, Div, Panic {
+    var result: i64 = 0 - 1
+    var i: i64 = 0
+    while i < before_pos {
+        if i < block.instr_count {
+            if block.instrs[i as usize].dst_reg == reg {
+                result = i
+            }
+        }
+        i = i + 1
+    }
+    result
+}
+
+// Find the last instruction that reads `reg` before position `pos`.
+// Returns -1 if no such instruction exists.
+fn cgplan_find_last_reader(
+    block: CodegenBlock, reg: i64, before_pos: i64
+) -> i64 with Mut, Div, Panic {
+    var result: i64 = 0 - 1
+    var i: i64 = 0
+    while i < before_pos {
+        if i < block.instr_count {
+            let instr = block.instrs[i as usize]
+            if instr.src1_reg == reg || instr.src2_reg == reg {
+                result = i
+            }
+        }
+        i = i + 1
+    }
+    result
+}
+
+// Build all dependencies for block 0 by scanning register defs and uses.
+// Detects:
+//   - DATA deps: write(r) -> read(r)
+//   - ANTI deps: read(r) -> write(r)
+//   - OUTPUT deps: write(r) -> write(r)
+//   - CONTROL deps: branch/call/ret -> all subsequent instrs
+fn cgplan_build_deps(plan: CodegenPlan) -> CodegenPlan with Mut, Div, Panic {
+    var p = plan
+    if p.block_count == 0 {
+        return p
+    }
+    let bi: i64 = 0
+    // Reset dependency count to rebuild from scratch
+    p.blocks[bi as usize].dep_count = 0
+
+    var i: i64 = 0
+    while i < p.blocks[bi as usize].instr_count {
+        let instr = p.blocks[bi as usize].instrs[i as usize]
+
+        // DATA dependency: for each source register, find the last writer
+        if instr.src1_reg >= 0 {
+            let writer = cgplan_find_last_writer(p.blocks[bi as usize], instr.src1_reg, i)
+            if writer >= 0 {
+                let lat = p.blocks[bi as usize].instrs[writer as usize].latency
+                let edge = dep_edge_new(writer, i, DEP_DATA, lat)
+                p = cgplan_add_dep(p, edge)
+            }
+        }
+        if instr.src2_reg >= 0 {
+            let writer = cgplan_find_last_writer(p.blocks[bi as usize], instr.src2_reg, i)
+            if writer >= 0 {
+                let lat = p.blocks[bi as usize].instrs[writer as usize].latency
+                let edge = dep_edge_new(writer, i, DEP_DATA, lat)
+                p = cgplan_add_dep(p, edge)
+            }
+        }
+
+        // ANTI dependency: if this instr writes a register that was last read before
+        if instr.dst_reg >= 0 {
+            let reader = cgplan_find_last_reader(p.blocks[bi as usize], instr.dst_reg, i)
+            if reader >= 0 {
+                // Anti deps have latency 0 (no data to wait for)
+                let edge = dep_edge_new(reader, i, DEP_ANTI, 0)
+                p = cgplan_add_dep(p, edge)
+            }
+        }
+
+        // OUTPUT dependency: if this instr writes a register that was last written before
+        if instr.dst_reg >= 0 {
+            let prev_writer = cgplan_find_last_writer(p.blocks[bi as usize], instr.dst_reg, i)
+            if prev_writer >= 0 {
+                let edge = dep_edge_new(prev_writer, i, DEP_OUTPUT, 1)
+                p = cgplan_add_dep(p, edge)
+            }
+        }
+
+        // CONTROL dependency: branches/calls/returns create barriers
+        if instr.opcode == CGOP_BRANCH || instr.opcode == CGOP_CALL || instr.opcode == CGOP_RET {
+            // All prior non-scheduled instructions must complete before this
+            var j: i64 = 0
+            while j < i {
+                let prior = p.blocks[bi as usize].instrs[j as usize]
+                // Only add control dep if no other dep already exists from j -> i
+                let has_dep = cgplan_has_dep(p, bi, j, i)
+                if !(has_dep) {
+                    let edge = dep_edge_new(j, i, DEP_CONTROL, prior.latency)
+                    p = cgplan_add_dep(p, edge)
+                }
+                j = j + 1
+            }
+        }
+
+        i = i + 1
+    }
+    p
+}
+
+// Check whether a dependency from `from_id` to `to_id` already exists in a block.
+fn cgplan_has_dep(
+    plan: CodegenPlan, block_idx: i64, from_id: i64, to_id: i64
+) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    let count = plan.blocks[block_idx as usize].dep_count
+    while i < count {
+        let edge = plan.blocks[block_idx as usize].deps[i as usize]
+        if edge.from_id == from_id && edge.to_id == to_id {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// ============================================================================
+// Priority computation — critical path length
+// ============================================================================
+
+// Compute the critical path length from instruction `instr_id` to any leaf.
+// Uses a recursive approach with memoisation via the priorities array.
+// priorities[i] = -1 means not yet computed.
+fn cgplan_compute_priority_inner(
+    block: CodegenBlock, instr_id: i64, priorities: [i64; 512]
+) -> [i64; 512] with Mut, Div, Panic {
+    var prio = priorities
+    if prio[instr_id as usize] >= 0 {
+        return prio
+    }
+
+    // Base: instruction latency
+    var max_succ_prio: i64 = 0
+
+    // Walk all deps where this instr is the source (from_id == instr_id)
+    var d: i64 = 0
+    while d < block.dep_count {
+        let edge = block.deps[d as usize]
+        if edge.from_id == instr_id {
+            // Recurse into successor
+            prio = cgplan_compute_priority_inner(block, edge.to_id, prio)
+            let succ_total = edge.latency + prio[edge.to_id as usize]
+            if succ_total > max_succ_prio {
+                max_succ_prio = succ_total
+            }
+        }
+        d = d + 1
+    }
+
+    prio[instr_id as usize] = block.instrs[instr_id as usize].latency + max_succ_prio
+    prio
+}
+
+// Compute scheduling priorities for all instructions in block 0.
+// Higher priority = longer critical path = should be scheduled first.
+fn cgplan_compute_priority(plan: CodegenPlan) -> CodegenPlan with Mut, Div, Panic {
+    var p = plan
+    if p.block_count == 0 {
+        return p
+    }
+    let bi: i64 = 0
+
+    // Initialise priorities to -1 (uncomputed)
+    var prio: [i64; 512] = [0; 512]
+    var k: i64 = 0
+    while k < CGPLAN_MAX_INSTRS {
+        prio[k as usize] = 0 - 1
+        k = k + 1
+    }
+
+    // Compute for every instruction
+    var i: i64 = 0
+    while i < p.blocks[bi as usize].instr_count {
+        prio = cgplan_compute_priority_inner(p.blocks[bi as usize], i, prio)
+        i = i + 1
+    }
+
+    // Store priority in the earliest_cycle field (repurposed during scheduling)
+    // We will use a separate array in the scheduler; here we update the instrs.
+    var j: i64 = 0
+    while j < p.blocks[bi as usize].instr_count {
+        p.blocks[bi as usize].instrs[j as usize].earliest_cycle = prio[j as usize]
+        j = j + 1
+    }
+    p
+}
+
+// Return the critical path length for block 0 — the maximum priority value.
+fn cgplan_critical_path(plan: CodegenPlan) -> i64 with Mut, Div, Panic {
+    if plan.block_count == 0 {
+        return 0
+    }
+    let bi: i64 = 0
+    var max_cp: i64 = 0
+    var i: i64 = 0
+    while i < plan.blocks[bi as usize].instr_count {
+        let cp = plan.blocks[bi as usize].instrs[i as usize].earliest_cycle
+        if cp > max_cp {
+            max_cp = cp
+        }
+        i = i + 1
+    }
+    max_cp
+}
+
+// ============================================================================
+// Readiness check — can an instruction be issued at a given cycle?
+// ============================================================================
+
+// Check if all predecessors of `instr_id` have been scheduled and their
+// latencies are satisfied by `cycle`.
+fn cgplan_check_ready(
+    plan: CodegenPlan, block_idx: i64, instr_id: i64, cycle: i64
+) -> bool with Mut, Div, Panic {
+    let block = plan.blocks[block_idx as usize]
+    let instr = block.instrs[instr_id as usize]
+
+    // Already scheduled -> not ready (already done)
+    if instr.is_scheduled {
+        return false
+    }
+
+    // Check all incoming dependency edges
+    var d: i64 = 0
+    while d < block.dep_count {
+        let edge = block.deps[d as usize]
+        if edge.to_id == instr_id {
+            let pred = block.instrs[edge.from_id as usize]
+            // Predecessor must be scheduled
+            if !(pred.is_scheduled) {
+                return false
+            }
+            // Predecessor must have completed: scheduled_cycle + latency <= cycle
+            // We use earliest_cycle to store the scheduled cycle after scheduling
+            // For readiness, check: pred.earliest_cycle + edge.latency <= cycle
+            // But during scheduling, we track scheduled cycles in the schedule array.
+            // Use a simpler model: the predecessor's earliest_cycle is its issue cycle.
+            // Then the consumer can issue at pred.earliest_cycle + edge.latency.
+            let pred_done = pred.earliest_cycle + edge.latency
+            if pred_done > cycle {
+                return false
+            }
+        }
+        d = d + 1
+    }
+    true
+}
+
+// ============================================================================
+// List scheduling
+// ============================================================================
+
+// Count the number of successors (outgoing deps) for an instruction.
+fn cgplan_count_successors(block: CodegenBlock, instr_id: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var d: i64 = 0
+    while d < block.dep_count {
+        if block.deps[d as usize].from_id == instr_id {
+            count = count + 1
+        }
+        d = d + 1
+    }
+    count
+}
+
+// Count the number of predecessors (incoming deps) for an instruction.
+fn cgplan_count_predecessors(block: CodegenBlock, instr_id: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var d: i64 = 0
+    while d < block.dep_count {
+        if block.deps[d as usize].to_id == instr_id {
+            count = count + 1
+        }
+        d = d + 1
+    }
+    count
+}
+
+// Find the highest-priority ready instruction at `cycle`.  Returns -1 if none ready.
+// Priority is stored in earliest_cycle after cgplan_compute_priority.
+// During scheduling, we save the original priority in a temporary, then
+// overwrite earliest_cycle with the actual issue cycle.
+fn cgplan_pick_best_ready(
+    plan: CodegenPlan, block_idx: i64, cycle: i64, saved_prio: [i64; 512]
+) -> i64 with Mut, Div, Panic {
+    var best_id: i64 = 0 - 1
+    var best_prio: i64 = 0 - 1
+    let block = plan.blocks[block_idx as usize]
+
+    var i: i64 = 0
+    while i < block.instr_count {
+        if !(block.instrs[i as usize].is_scheduled) {
+            let ready = cgplan_check_ready(plan, block_idx, i, cycle)
+            if ready {
+                let p = saved_prio[i as usize]
+                if p > best_prio {
+                    best_prio = p
+                    best_id = i
+                }
+            }
+        }
+        i = i + 1
+    }
+    best_id
+}
+
+// Main list scheduling pass for block 0.
+// Steps:
+//   1. Compute priorities via critical path
+//   2. Save priorities (will be overwritten with issue cycles)
+//   3. At each cycle, pick the highest-priority ready instruction
+//   4. Mark it scheduled, record its issue cycle
+//   5. Advance cycle counter
+fn cgplan_list_schedule(plan: CodegenPlan) -> CodegenPlan with Mut, Div, Panic {
+    var p = plan
+    if p.block_count == 0 {
+        return p
+    }
+    let bi: i64 = 0
+    let n = p.blocks[bi as usize].instr_count
+    if n == 0 {
+        return p
+    }
+
+    // Compute priorities
+    p = cgplan_compute_priority(p)
+
+    // Save priorities before we overwrite earliest_cycle with issue cycles
+    var saved_prio: [i64; 512] = [0; 512]
+    var k: i64 = 0
+    while k < n {
+        saved_prio[k as usize] = p.blocks[bi as usize].instrs[k as usize].earliest_cycle
+        k = k + 1
+    }
+
+    // Reset scheduling state
+    var ri: i64 = 0
+    while ri < n {
+        p.blocks[bi as usize].instrs[ri as usize].is_scheduled = false
+        p.blocks[bi as usize].instrs[ri as usize].earliest_cycle = 0
+        ri = ri + 1
+    }
+    p.blocks[bi as usize].schedule_len = 0
+
+    // Schedule loop
+    var scheduled_count: i64 = 0
+    var cycle: i64 = 0
+    var stall_limit: i64 = n * 10  // safety bound to prevent infinite loops
+
+    while scheduled_count < n && cycle < stall_limit {
+        let best = cgplan_pick_best_ready(p, bi, cycle, saved_prio)
+        if best >= 0 {
+            // Schedule this instruction at `cycle`
+            p.blocks[bi as usize].instrs[best as usize].is_scheduled = true
+            p.blocks[bi as usize].instrs[best as usize].earliest_cycle = cycle
+            p.blocks[bi as usize].schedule[scheduled_count as usize] = best
+            scheduled_count = scheduled_count + 1
+            // Advance cycle by the instruction's latency (could issue next in parallel
+            // on a superscalar machine, but we model single-issue for simplicity)
+            cycle = cycle + 1
+        } else {
+            // Nothing ready — stall (advance cycle)
+            cycle = cycle + 1
+        }
+    }
+
+    p.blocks[bi as usize].schedule_len = scheduled_count
+    p.blocks[bi as usize].cycle_count = cycle
+    p.total_cycles = cycle
+    p
+}
+
+// ============================================================================
+// Register pressure estimation
+// ============================================================================
+
+// A register is "live" from the cycle it is defined until the cycle of its
+// last use.  We approximate this by walking the schedule and tracking which
+// destination registers are live at each cycle.
+
+// Find the latest cycle at which register `reg` is used as a source.
+fn cgplan_last_use_cycle(
+    block: CodegenBlock, reg: i64
+) -> i64 with Mut, Div, Panic {
+    var last: i64 = 0 - 1
+    var i: i64 = 0
+    while i < block.schedule_len {
+        let iid = block.schedule[i as usize]
+        let instr = block.instrs[iid as usize]
+        let cyc = instr.earliest_cycle
+        if instr.src1_reg == reg || instr.src2_reg == reg {
+            if cyc > last {
+                last = cyc
+            }
+        }
+        i = i + 1
+    }
+    last
+}
+
+// Estimate register pressure at each cycle for block 0.
+// Stores into plan.reg_pressure[cycle] = number of live registers at that cycle.
+fn cgplan_estimate_pressure(plan: CodegenPlan) -> CodegenPlan with Mut, Div, Panic {
+    var p = plan
+    if p.block_count == 0 {
+        return p
+    }
+    let bi: i64 = 0
+    let block = p.blocks[bi as usize]
+    let total_cyc = block.cycle_count
+
+    // Clear pressure array
+    var c: i64 = 0
+    while c < CGPLAN_MAX_CYCLES {
+        p.reg_pressure[c as usize] = 0
+        c = c + 1
+    }
+
+    // For each scheduled instruction that defines a register, add 1 to
+    // pressure for every cycle in [def_cycle, last_use_cycle].
+    var si: i64 = 0
+    while si < block.schedule_len {
+        let iid = block.schedule[si as usize]
+        let instr = block.instrs[iid as usize]
+        let dst = instr.dst_reg
+        if dst >= 0 {
+            let def_cyc = instr.earliest_cycle
+            let last_use = cgplan_last_use_cycle(block, dst)
+            // If the register is defined but never used, it is live for 1 cycle
+            var end_cyc = def_cyc
+            if last_use >= def_cyc {
+                end_cyc = last_use
+            }
+            // Clamp to valid range
+            if end_cyc >= CGPLAN_MAX_CYCLES {
+                end_cyc = CGPLAN_MAX_CYCLES - 1
+            }
+            var cyc: i64 = def_cyc
+            while cyc <= end_cyc {
+                if cyc >= 0 && cyc < CGPLAN_MAX_CYCLES {
+                    p.reg_pressure[cyc as usize] = p.reg_pressure[cyc as usize] + 1
+                }
+                cyc = cyc + 1
+            }
+        }
+        si = si + 1
+    }
+    p
+}
+
+// Return the maximum register pressure across all cycles.
+fn cgplan_max_pressure(plan: CodegenPlan) -> i64 with Mut, Div, Panic {
+    var max_p: i64 = 0
+    var c: i64 = 0
+    let limit = plan.total_cycles
+    while c < limit {
+        if c < CGPLAN_MAX_CYCLES {
+            if plan.reg_pressure[c as usize] > max_p {
+                max_p = plan.reg_pressure[c as usize]
+            }
+        }
+        c = c + 1
+    }
+    max_p
+}
+
+// ============================================================================
+// Spill detection
+// ============================================================================
+
+// Detect instructions at cycles where register pressure exceeds `max_regs`.
+// Returns the number of spill slots needed (one per excess register).
+fn cgplan_detect_spills(plan: CodegenPlan, max_regs: i64) -> i64 with Mut, Div, Panic {
+    var spills: i64 = 0
+    var c: i64 = 0
+    let limit = plan.total_cycles
+    while c < limit {
+        if c < CGPLAN_MAX_CYCLES {
+            let pressure = plan.reg_pressure[c as usize]
+            if pressure > max_regs {
+                let excess = pressure - max_regs
+                if excess > spills {
+                    spills = excess
+                }
+            }
+        }
+        c = c + 1
+    }
+    spills
+}
+
+// Update the plan's spill_slots field based on detected spills.
+fn cgplan_update_spills(plan: CodegenPlan, max_regs: i64) -> CodegenPlan with Mut, Div, Panic {
+    var p = plan
+    p.spill_slots = cgplan_detect_spills(p, max_regs)
+    p
+}
+
+// ============================================================================
+// Reorder for pressure — swap adjacent instructions to reduce register pressure
+// ============================================================================
+
+// Check whether instruction `a` depends on instruction `b` (directly).
+fn cgplan_depends_on(
+    block: CodegenBlock, a: i64, b: i64
+) -> bool with Mut, Div, Panic {
+    var d: i64 = 0
+    while d < block.dep_count {
+        let edge = block.deps[d as usize]
+        if edge.from_id == b && edge.to_id == a {
+            return true
+        }
+        d = d + 1
+    }
+    false
+}
+
+// Attempt to reorder the schedule to reduce register pressure.
+// Uses a simple bubble-pass: if swapping two adjacent instructions (that are
+// not dependent) would reduce peak pressure, do the swap.
+fn cgplan_reorder_for_pressure(plan: CodegenPlan, max_regs: i64) -> CodegenPlan with Mut, Div, Panic {
+    var p = plan
+    if p.block_count == 0 {
+        return p
+    }
+    let bi: i64 = 0
+    let slen = p.blocks[bi as usize].schedule_len
+
+    // Multiple passes
+    var pass: i64 = 0
+    while pass < 3 {
+        var i: i64 = 0
+        while i < slen - 1 {
+            let id_a = p.blocks[bi as usize].schedule[i as usize]
+            let id_b = p.blocks[bi as usize].schedule[(i + 1) as usize]
+
+            // Cannot swap if there is a dependency
+            let a_dep_b = cgplan_depends_on(p.blocks[bi as usize], id_a, id_b)
+            let b_dep_a = cgplan_depends_on(p.blocks[bi as usize], id_b, id_a)
+            if !(a_dep_b) && !(b_dep_a) {
+                // Heuristic: prefer instructions with fewer live outputs earlier
+                // (i.e., instructions that do not define a register, or whose
+                // result is used soon, should come first)
+                let a_dst = p.blocks[bi as usize].instrs[id_a as usize].dst_reg
+                let b_dst = p.blocks[bi as usize].instrs[id_b as usize].dst_reg
+
+                let a_has_dst = if a_dst >= 0 { 1 } else { 0 }
+                let b_has_dst = if b_dst >= 0 { 1 } else { 0 }
+
+                // Swap if b has no destination (reduces live set earlier)
+                if a_has_dst > b_has_dst {
+                    p.blocks[bi as usize].schedule[i as usize] = id_b
+                    p.blocks[bi as usize].schedule[(i + 1) as usize] = id_a
+                }
+            }
+            i = i + 1
+        }
+        pass = pass + 1
+    }
+
+    // Reassign cycle numbers after reordering
+    var si: i64 = 0
+    while si < slen {
+        let iid = p.blocks[bi as usize].schedule[si as usize]
+        p.blocks[bi as usize].instrs[iid as usize].earliest_cycle = si
+        si = si + 1
+    }
+
+    // Recompute pressure
+    p = cgplan_estimate_pressure(p)
+    p = cgplan_update_spills(p, max_regs)
+    p
+}
+
+// ============================================================================
+// Peephole optimisations on the schedule
+// ============================================================================
+
+// Peephole pass: look for simple patterns in the scheduled instruction stream
+// and replace with more efficient sequences.
+// Patterns:
+//   1. MOV r, r (self-move) -> NOP
+//   2. ADD r, 0 -> NOP
+//   3. SUB r, 0 -> NOP
+//   4. MUL r, 1 -> NOP (identity multiply)
+//   5. Consecutive MOVs: MOV a, b; MOV b, a -> remove second
+fn cgplan_peephole(plan: CodegenPlan) -> CodegenPlan with Mut, Div, Panic {
+    var p = plan
+    if p.block_count == 0 {
+        return p
+    }
+    let bi: i64 = 0
+    let n = p.blocks[bi as usize].instr_count
+
+    // Pattern 1: self-move elimination
+    var i: i64 = 0
+    while i < n {
+        let instr = p.blocks[bi as usize].instrs[i as usize]
+        if instr.opcode == CGOP_MOV {
+            if instr.dst_reg == instr.src1_reg && instr.dst_reg >= 0 {
+                // Self-move: convert to NOP
+                p.blocks[bi as usize].instrs[i as usize].opcode = CGOP_NOP
+                p.blocks[bi as usize].instrs[i as usize].dst_reg = REG_NONE
+                p.blocks[bi as usize].instrs[i as usize].src1_reg = REG_NONE
+                p.blocks[bi as usize].instrs[i as usize].src2_reg = REG_NONE
+                p.blocks[bi as usize].instrs[i as usize].latency = 0
+            }
+        }
+        i = i + 1
+    }
+
+    // Pattern 2: ADD with zero source (src2 == REG_NONE implies immediate 0 encoding)
+    // In our model, src2_reg == 0 and opcode == CGOP_ADD where src2 encodes a zero register
+    // We detect this as: ADD dst, src1, src1 where src2 is the "zero" sentinel
+    // For simplicity, detect ADD where src1 == dst and src2 == REG_NONE
+    var j: i64 = 0
+    while j < n {
+        let instr = p.blocks[bi as usize].instrs[j as usize]
+        if instr.opcode == CGOP_ADD && instr.src2_reg == REG_NONE {
+            // ADD dst, src1, <none> -> effectively MOV dst, src1
+            if instr.dst_reg == instr.src1_reg {
+                p.blocks[bi as usize].instrs[j as usize].opcode = CGOP_NOP
+                p.blocks[bi as usize].instrs[j as usize].dst_reg = REG_NONE
+                p.blocks[bi as usize].instrs[j as usize].src1_reg = REG_NONE
+                p.blocks[bi as usize].instrs[j as usize].latency = 0
+            }
+        }
+        j = j + 1
+    }
+
+    // Pattern 3: SUB with no second source
+    var m: i64 = 0
+    while m < n {
+        let instr = p.blocks[bi as usize].instrs[m as usize]
+        if instr.opcode == CGOP_SUB && instr.src2_reg == REG_NONE {
+            if instr.dst_reg == instr.src1_reg {
+                p.blocks[bi as usize].instrs[m as usize].opcode = CGOP_NOP
+                p.blocks[bi as usize].instrs[m as usize].dst_reg = REG_NONE
+                p.blocks[bi as usize].instrs[m as usize].src1_reg = REG_NONE
+                p.blocks[bi as usize].instrs[m as usize].latency = 0
+            }
+        }
+        m = m + 1
+    }
+
+    // Pattern 4: Consecutive redundant MOVs: MOV a, b; MOV b, a -> NOP second
+    var q: i64 = 0
+    while q < n - 1 {
+        let first = p.blocks[bi as usize].instrs[q as usize]
+        let second = p.blocks[bi as usize].instrs[(q + 1) as usize]
+        if first.opcode == CGOP_MOV && second.opcode == CGOP_MOV {
+            if first.dst_reg == second.src1_reg && first.src1_reg == second.dst_reg {
+                // Second MOV is redundant
+                p.blocks[bi as usize].instrs[(q + 1) as usize].opcode = CGOP_NOP
+                p.blocks[bi as usize].instrs[(q + 1) as usize].dst_reg = REG_NONE
+                p.blocks[bi as usize].instrs[(q + 1) as usize].src1_reg = REG_NONE
+                p.blocks[bi as usize].instrs[(q + 1) as usize].src2_reg = REG_NONE
+                p.blocks[bi as usize].instrs[(q + 1) as usize].latency = 0
+            }
+        }
+        q = q + 1
+    }
+
+    // Count remaining non-NOP instructions
+    var nop_count: i64 = 0
+    var ni: i64 = 0
+    while ni < n {
+        if p.blocks[bi as usize].instrs[ni as usize].opcode == CGOP_NOP {
+            nop_count = nop_count + 1
+        }
+        ni = ni + 1
+    }
+
+    p
+}
+
+// ============================================================================
+// Utility: count specific dep types
+// ============================================================================
+
+fn cgplan_count_deps_of_kind(plan: CodegenPlan, block_idx: i64, kind: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    let total = plan.blocks[block_idx as usize].dep_count
+    while i < total {
+        if plan.blocks[block_idx as usize].deps[i as usize].kind == kind {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Count scheduled instructions (is_scheduled == true) in block 0.
+fn cgplan_count_scheduled(plan: CodegenPlan) -> i64 with Mut, Div, Panic {
+    if plan.block_count == 0 {
+        return 0
+    }
+    let bi: i64 = 0
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < plan.blocks[bi as usize].instr_count {
+        if plan.blocks[bi as usize].instrs[i as usize].is_scheduled {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Count NOP instructions in block 0.
+fn cgplan_count_nops(plan: CodegenPlan) -> i64 with Mut, Div, Panic {
+    if plan.block_count == 0 {
+        return 0
+    }
+    let bi: i64 = 0
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < plan.blocks[bi as usize].instr_count {
+        if plan.blocks[bi as usize].instrs[i as usize].opcode == CGOP_NOP {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Validate schedule: every instruction id in schedule[] is unique and in range.
+fn cgplan_validate_schedule(plan: CodegenPlan) -> bool with Mut, Div, Panic {
+    if plan.block_count == 0 {
+        return true
+    }
+    let bi: i64 = 0
+    let slen = plan.blocks[bi as usize].schedule_len
+    let n = plan.blocks[bi as usize].instr_count
+
+    // Check: schedule length == instr count
+    if slen != n {
+        return false
+    }
+
+    // Check each id is in range and unique
+    var seen: [i64; 512] = [0; 512]
+    var i: i64 = 0
+    while i < slen {
+        let id = plan.blocks[bi as usize].schedule[i as usize]
+        if id < 0 || id >= n {
+            return false
+        }
+        if seen[id as usize] != 0 {
+            return false
+        }
+        seen[id as usize] = 1
+        i = i + 1
+    }
+    true
+}
+
+// Validate that the schedule respects all dependencies.
+fn cgplan_validate_deps(plan: CodegenPlan) -> bool with Mut, Div, Panic {
+    if plan.block_count == 0 {
+        return true
+    }
+    let bi: i64 = 0
+    let block = plan.blocks[bi as usize]
+
+    // Build position map: pos[instr_id] = index in schedule
+    var pos: [i64; 512] = [0; 512]
+    var i: i64 = 0
+    while i < block.schedule_len {
+        let id = block.schedule[i as usize]
+        pos[id as usize] = i
+        i = i + 1
+    }
+
+    // Check all deps: from must come before to in the schedule
+    var d: i64 = 0
+    while d < block.dep_count {
+        let edge = block.deps[d as usize]
+        if pos[edge.from_id as usize] >= pos[edge.to_id as usize] {
+            return false
+        }
+        d = d + 1
+    }
+    true
+}
+
+// ============================================================================
+// Multi-block helpers
+// ============================================================================
+
+// Schedule all blocks in the plan (applies list scheduling to each).
+fn cgplan_schedule_all_blocks(plan: CodegenPlan) -> CodegenPlan with Mut, Div, Panic {
+    var p = plan
+    // For now, only block 0 is scheduled by cgplan_list_schedule.
+    // A full implementation would iterate over all blocks.
+    if p.block_count > 0 {
+        p = cgplan_list_schedule(p)
+    }
+    p
+}
+
+// Compute total cycles across all blocks.
+fn cgplan_compute_total_cycles(plan: CodegenPlan) -> i64 with Mut, Div, Panic {
+    var total: i64 = 0
+    var b: i64 = 0
+    while b < plan.block_count {
+        total = total + plan.blocks[b as usize].cycle_count
+        b = b + 1
+    }
+    total
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+fn cgplan_assert_true(condition: bool, test_number: i64) -> i64 {
+    if condition { 0 } else { test_number }
+}
+
+// T01: empty plan has zero blocks
+fn test_cgplan_empty() -> i64 with Mut, Div, Panic {
+    let p = codegen_plan_new()
+    let r1 = cgplan_assert_true(p.block_count == 0, 1)
+    if r1 != 0 { return r1 }
+    let r2 = cgplan_assert_true(p.total_cycles == 0, 2)
+    if r2 != 0 { return r2 }
+    let r3 = cgplan_assert_true(p.spill_slots == 0, 3)
+    if r3 != 0 { return r3 }
+    0
+}
+
+// T02: codegen_instr_new populates all fields
+fn test_cgplan_instr_new() -> i64 with Mut, Div, Panic {
+    let instr = codegen_instr_new(7, CGOP_ADD, 1, 2, 3, 2)
+    let r1 = cgplan_assert_true(instr.id == 7, 1)
+    if r1 != 0 { return r1 }
+    let r2 = cgplan_assert_true(instr.opcode == CGOP_ADD, 2)
+    if r2 != 0 { return r2 }
+    let r3 = cgplan_assert_true(instr.dst_reg == 1, 3)
+    if r3 != 0 { return r3 }
+    let r4 = cgplan_assert_true(instr.src1_reg == 2, 4)
+    if r4 != 0 { return r4 }
+    let r5 = cgplan_assert_true(instr.src2_reg == 3, 5)
+    if r5 != 0 { return r5 }
+    let r6 = cgplan_assert_true(instr.latency == 2, 6)
+    if r6 != 0 { return r6 }
+    let r7 = cgplan_assert_true(instr.is_scheduled == false, 7)
+    if r7 != 0 { return r7 }
+    0
+}
+
+// T03: dep_edge_new populates all fields
+fn test_cgplan_dep_edge_new() -> i64 with Mut, Div, Panic {
+    let e = dep_edge_new(3, 5, DEP_ANTI, 0)
+    let r1 = cgplan_assert_true(e.from_id == 3, 1)
+    if r1 != 0 { return r1 }
+    let r2 = cgplan_assert_true(e.to_id == 5, 2)
+    if r2 != 0 { return r2 }
+    let r3 = cgplan_assert_true(e.kind == DEP_ANTI, 3)
+    if r3 != 0 { return r3 }
+    let r4 = cgplan_assert_true(e.latency == 0, 4)
+    if r4 != 0 { return r4 }
+    0
+}
+
+// T04: add_instr increments block count and instr count
+fn test_cgplan_add_instr() -> i64 with Mut, Div, Panic {
+    var p = codegen_plan_new()
+    let i0 = codegen_instr_new(0, CGOP_LOAD, 1, REG_NONE, REG_NONE, 3)
+    p = cgplan_add_instr(p, i0)
+    let r1 = cgplan_assert_true(p.block_count == 1, 1)
+    if r1 != 0 { return r1 }
+    let r2 = cgplan_assert_true(p.blocks[0 as usize].instr_count == 1, 2)
+    if r2 != 0 { return r2 }
+    let i1 = codegen_instr_new(1, CGOP_ADD, 2, 1, 3, 1)
+    p = cgplan_add_instr(p, i1)
+    let r3 = cgplan_assert_true(p.blocks[0 as usize].instr_count == 2, 3)
+    if r3 != 0 { return r3 }
+    0
+}
+
+// T05: add_dep stores dependency edges
+fn test_cgplan_add_dep() -> i64 with Mut, Div, Panic {
+    var p = codegen_plan_new()
+    let i0 = codegen_instr_new(0, CGOP_LOAD, 1, REG_NONE, REG_NONE, 3)
+    let i1 = codegen_instr_new(1, CGOP_ADD, 2, 1, 3, 1)
+    p = cgplan_add_instr(p, i0)
+    p = cgplan_add_instr(p, i1)
+    let e = dep_edge_new(0, 1, DEP_DATA, 3)
+    p = cgplan_add_dep(p, e)
+    let r1 = cgplan_assert_true(p.blocks[0 as usize].dep_count == 1, 1)
+    if r1 != 0 { return r1 }
+    let stored = p.blocks[0 as usize].deps[0 as usize]
+    let r2 = cgplan_assert_true(stored.from_id == 0, 2)
+    if r2 != 0 { return r2 }
+    let r3 = cgplan_assert_true(stored.to_id == 1, 3)
+    if r3 != 0 { return r3 }
+    0
+}
+
+// T06: build_deps detects DATA dependencies
+fn test_cgplan_build_deps_data() -> i64 with Mut, Div, Panic {
+    var p = codegen_plan_new()
+    // instr 0: LOAD r1 (defines r1)
+    p = cgplan_add_instr(p, codegen_instr_new(0, CGOP_LOAD, 1, REG_NONE, REG_NONE, 3))
+    // instr 1: ADD r2, r1, r3 (uses r1)
+    p = cgplan_add_instr(p, codegen_instr_new(1, CGOP_ADD, 2, 1, 3, 1))
+    p = cgplan_build_deps(p)
+    let data_deps = cgplan_count_deps_of_kind(p, 0, DEP_DATA)
+    let r1 = cgplan_assert_true(data_deps >= 1, 1)
+    if r1 != 0 { return r1 }
+    // Check that the dep is from 0 -> 1
+    let has = cgplan_has_dep(p, 0, 0, 1)
+    let r2 = cgplan_assert_true(has, 2)
+    if r2 != 0 { return r2 }
+    0
+}
+
+// T07: build_deps detects ANTI dependencies
+fn test_cgplan_build_deps_anti() -> i64 with Mut, Div, Panic {
+    var p = codegen_plan_new()
+    // instr 0: ADD r2, r1, r3 (reads r1)
+    p = cgplan_add_instr(p, codegen_instr_new(0, CGOP_ADD, 2, 1, 3, 1))
+    // instr 1: LOAD r1 (writes r1 — anti dep from 0 -> 1)
+    p = cgplan_add_instr(p, codegen_instr_new(1, CGOP_LOAD, 1, REG_NONE, REG_NONE, 3))
+    p = cgplan_build_deps(p)
+    let anti_deps = cgplan_count_deps_of_kind(p, 0, DEP_ANTI)
+    let r1 = cgplan_assert_true(anti_deps >= 1, 1)
+    if r1 != 0 { return r1 }
+    0
+}
+
+// T08: build_deps detects OUTPUT dependencies
+fn test_cgplan_build_deps_output() -> i64 with Mut, Div, Panic {
+    var p = codegen_plan_new()
+    // instr 0: LOAD r1 (writes r1)
+    p = cgplan_add_instr(p, codegen_instr_new(0, CGOP_LOAD, 1, REG_NONE, REG_NONE, 3))
+    // instr 1: MOV r1, r2 (writes r1 again — output dep from 0 -> 1)
+    p = cgplan_add_instr(p, codegen_instr_new(1, CGOP_MOV, 1, 2, REG_NONE, 1))
+    p = cgplan_build_deps(p)
+    let output_deps = cgplan_count_deps_of_kind(p, 0, DEP_OUTPUT)
+    let r1 = cgplan_assert_true(output_deps >= 1, 1)
+    if r1 != 0 { return r1 }
+    0
+}
+
+// T09: single-instruction plan schedules trivially
+fn test_cgplan_schedule_single() -> i64 with Mut, Div, Panic {
+    var p = codegen_plan_new()
+    p = cgplan_add_instr(p, codegen_instr_new(0, CGOP_ADD, 1, 2, 3, 1))
+    p = cgplan_build_deps(p)
+    p = cgplan_list_schedule(p)
+    let r1 = cgplan_assert_true(p.blocks[0 as usize].schedule_len == 1, 1)
+    if r1 != 0 { return r1 }
+    let r2 = cgplan_assert_true(p.blocks[0 as usize].schedule[0 as usize] == 0, 2)
+    if r2 != 0 { return r2 }
+    0
+}
+
+// T10: two independent instructions both get scheduled
+fn test_cgplan_schedule_independent() -> i64 with Mut, Div, Panic {
+    var p = codegen_plan_new()
+    p = cgplan_add_instr(p, codegen_instr_new(0, CGOP_ADD, 1, 2, 3, 1))
+    p = cgplan_add_instr(p, codegen_instr_new(1, CGOP_ADD, 4, 5, 6, 1))
+    p = cgplan_build_deps(p)
+    p = cgplan_list_schedule(p)
+    let r1 = cgplan_assert_true(p.blocks[0 as usize].schedule_len == 2, 1)
+    if r1 != 0 { return r1 }
+    let valid = cgplan_validate_schedule(p)
+    let r2 = cgplan_assert_true(valid, 2)
+    if r2 != 0 { return r2 }
+    0
+}
+
+// T11: dependent chain respects order
+fn test_cgplan_schedule_chain() -> i64 with Mut, Div, Panic {
+    var p = codegen_plan_new()
+    // r1 = LOAD
+    p = cgplan_add_instr(p, codegen_instr_new(0, CGOP_LOAD, 1, REG_NONE, REG_NONE, 3))
+    // r2 = ADD r1, r3
+    p = cgplan_add_instr(p, codegen_instr_new(1, CGOP_ADD, 2, 1, 3, 1))
+    // r4 = MUL r2, r5
+    p = cgplan_add_instr(p, codegen_instr_new(2, CGOP_MUL, 4, 2, 5, 2))
+    p = cgplan_build_deps(p)
+    p = cgplan_list_schedule(p)
+    let r1 = cgplan_assert_true(p.blocks[0 as usize].schedule_len == 3, 1)
+    if r1 != 0 { return r1 }
+    let valid = cgplan_validate_deps(p)
+    let r2 = cgplan_assert_true(valid, 2)
+    if r2 != 0 { return r2 }
+    0
+}
+
+// T12: critical path computes correctly for a chain
+fn test_cgplan_critical_path() -> i64 with Mut, Div, Panic {
+    var p = codegen_plan_new()
+    // Chain: LOAD(3) -> ADD(1) -> MUL(2) = critical path 6
+    p = cgplan_add_instr(p, codegen_instr_new(0, CGOP_LOAD, 1, REG_NONE, REG_NONE, 3))
+    p = cgplan_add_instr(p, codegen_instr_new(1, CGOP_ADD, 2, 1, 3, 1))
+    p = cgplan_add_instr(p, codegen_instr_new(2, CGOP_MUL, 4, 2, 5, 2))
+    p = cgplan_build_deps(p)
+    p = cgplan_compute_priority(p)
+    let cp = cgplan_critical_path(p)
+    // Critical path = 3 + 1 + 2 = 6
+    let r1 = cgplan_assert_true(cp == 6, 1)
+    if r1 != 0 { return r1 }
+    0
+}
+
+// T13: register pressure estimation
+fn test_cgplan_pressure() -> i64 with Mut, Div, Panic {
+    var p = codegen_plan_new()
+    // Two instructions defining different registers
+    p = cgplan_add_instr(p, codegen_instr_new(0, CGOP_LOAD, 1, REG_NONE, REG_NONE, 1))
+    p = cgplan_add_instr(p, codegen_instr_new(1, CGOP_LOAD, 2, REG_NONE, REG_NONE, 1))
+    // One instruction using both
+    p = cgplan_add_instr(p, codegen_instr_new(2, CGOP_ADD, 3, 1, 2, 1))
+    p = cgplan_build_deps(p)
+    p = cgplan_list_schedule(p)
+    p = cgplan_estimate_pressure(p)
+    let max_p = cgplan_max_pressure(p)
+    // At the cycle where ADD uses both r1 and r2, pressure should be >= 2
+    let r1 = cgplan_assert_true(max_p >= 2, 1)
+    if r1 != 0 { return r1 }
+    0
+}
+
+// T14: spill detection with low register limit
+fn test_cgplan_spill_detect() -> i64 with Mut, Div, Panic {
+    var p = codegen_plan_new()
+    // Create high pressure: 4 loads, then use all 4
+    p = cgplan_add_instr(p, codegen_instr_new(0, CGOP_LOAD, 10, REG_NONE, REG_NONE, 1))
+    p = cgplan_add_instr(p, codegen_instr_new(1, CGOP_LOAD, 11, REG_NONE, REG_NONE, 1))
+    p = cgplan_add_instr(p, codegen_instr_new(2, CGOP_LOAD, 12, REG_NONE, REG_NONE, 1))
+    p = cgplan_add_instr(p, codegen_instr_new(3, CGOP_LOAD, 13, REG_NONE, REG_NONE, 1))
+    p = cgplan_add_instr(p, codegen_instr_new(4, CGOP_ADD, 14, 10, 11, 1))
+    p = cgplan_add_instr(p, codegen_instr_new(5, CGOP_ADD, 15, 12, 13, 1))
+    p = cgplan_build_deps(p)
+    p = cgplan_list_schedule(p)
+    p = cgplan_estimate_pressure(p)
+    // With max_regs = 2, we should need spills
+    let spills = cgplan_detect_spills(p, 2)
+    let r1 = cgplan_assert_true(spills >= 1, 1)
+    if r1 != 0 { return r1 }
+    0
+}
+
+// T15: peephole eliminates self-move
+fn test_cgplan_peephole_self_move() -> i64 with Mut, Div, Panic {
+    var p = codegen_plan_new()
+    // MOV r1, r1 (self-move)
+    p = cgplan_add_instr(p, codegen_instr_new(0, CGOP_MOV, 1, 1, REG_NONE, 1))
+    // Normal instruction
+    p = cgplan_add_instr(p, codegen_instr_new(1, CGOP_ADD, 2, 3, 4, 1))
+    p = cgplan_peephole(p)
+    let nop_count = cgplan_count_nops(p)
+    let r1 = cgplan_assert_true(nop_count == 1, 1)
+    if r1 != 0 { return r1 }
+    // The self-move should be NOP now
+    let r2 = cgplan_assert_true(p.blocks[0 as usize].instrs[0 as usize].opcode == CGOP_NOP, 2)
+    if r2 != 0 { return r2 }
+    0
+}
+
+// T16: peephole eliminates redundant MOV pair
+fn test_cgplan_peephole_mov_pair() -> i64 with Mut, Div, Panic {
+    var p = codegen_plan_new()
+    // MOV r1, r2; MOV r2, r1 -> second is redundant
+    p = cgplan_add_instr(p, codegen_instr_new(0, CGOP_MOV, 1, 2, REG_NONE, 1))
+    p = cgplan_add_instr(p, codegen_instr_new(1, CGOP_MOV, 2, 1, REG_NONE, 1))
+    p = cgplan_peephole(p)
+    let nop_count = cgplan_count_nops(p)
+    let r1 = cgplan_assert_true(nop_count == 1, 1)
+    if r1 != 0 { return r1 }
+    // Second MOV should be NOP
+    let r2 = cgplan_assert_true(p.blocks[0 as usize].instrs[1 as usize].opcode == CGOP_NOP, 2)
+    if r2 != 0 { return r2 }
+    0
+}
+
+// T17: validate_schedule returns true for correct schedule
+fn test_cgplan_validate_ok() -> i64 with Mut, Div, Panic {
+    var p = codegen_plan_new()
+    p = cgplan_add_instr(p, codegen_instr_new(0, CGOP_LOAD, 1, REG_NONE, REG_NONE, 1))
+    p = cgplan_add_instr(p, codegen_instr_new(1, CGOP_ADD, 2, 1, 3, 1))
+    p = cgplan_build_deps(p)
+    p = cgplan_list_schedule(p)
+    let valid = cgplan_validate_schedule(p)
+    let r1 = cgplan_assert_true(valid, 1)
+    if r1 != 0 { return r1 }
+    let deps_ok = cgplan_validate_deps(p)
+    let r2 = cgplan_assert_true(deps_ok, 2)
+    if r2 != 0 { return r2 }
+    0
+}
+
+// T18: has_dep returns false for non-existent edge
+fn test_cgplan_has_dep_false() -> i64 with Mut, Div, Panic {
+    var p = codegen_plan_new()
+    p = cgplan_add_instr(p, codegen_instr_new(0, CGOP_ADD, 1, 2, 3, 1))
+    p = cgplan_add_instr(p, codegen_instr_new(1, CGOP_ADD, 4, 5, 6, 1))
+    p = cgplan_build_deps(p)
+    let has = cgplan_has_dep(p, 0, 0, 1)
+    // No dependency between independent instructions
+    let r1 = cgplan_assert_true(!(has), 1)
+    if r1 != 0 { return r1 }
+    0
+}
+
+// T19: count_scheduled returns correct count after scheduling
+fn test_cgplan_count_scheduled() -> i64 with Mut, Div, Panic {
+    var p = codegen_plan_new()
+    p = cgplan_add_instr(p, codegen_instr_new(0, CGOP_ADD, 1, 2, 3, 1))
+    p = cgplan_add_instr(p, codegen_instr_new(1, CGOP_MUL, 4, 5, 6, 2))
+    p = cgplan_add_instr(p, codegen_instr_new(2, CGOP_SUB, 7, 8, 9, 1))
+    p = cgplan_build_deps(p)
+    p = cgplan_list_schedule(p)
+    let scheduled = cgplan_count_scheduled(p)
+    let r1 = cgplan_assert_true(scheduled == 3, 1)
+    if r1 != 0 { return r1 }
+    0
+}
+
+// T20: constants have expected values
+fn test_cgplan_constants() -> i64 with Mut, Div, Panic {
+    let r1 = cgplan_assert_true(DEP_DATA == 1, 1)
+    if r1 != 0 { return r1 }
+    let r2 = cgplan_assert_true(DEP_ANTI == 2, 2)
+    if r2 != 0 { return r2 }
+    let r3 = cgplan_assert_true(DEP_OUTPUT == 3, 3)
+    if r3 != 0 { return r3 }
+    let r4 = cgplan_assert_true(DEP_CONTROL == 4, 4)
+    if r4 != 0 { return r4 }
+    let r5 = cgplan_assert_true(REG_NONE == (0 - 1), 5)
+    if r5 != 0 { return r5 }
+    0
+}
+
+// T21: empty_codegen_instr has correct defaults
+fn test_cgplan_empty_instr() -> i64 with Mut, Div, Panic {
+    let instr = empty_codegen_instr()
+    let r1 = cgplan_assert_true(instr.id == 0, 1)
+    if r1 != 0 { return r1 }
+    let r2 = cgplan_assert_true(instr.opcode == CGOP_NOP, 2)
+    if r2 != 0 { return r2 }
+    let r3 = cgplan_assert_true(instr.dst_reg == REG_NONE, 3)
+    if r3 != 0 { return r3 }
+    let r4 = cgplan_assert_true(instr.is_scheduled == false, 4)
+    if r4 != 0 { return r4 }
+    0
+}
+
+// T22: build_deps on independent instructions produces no deps
+fn test_cgplan_build_deps_none() -> i64 with Mut, Div, Panic {
+    var p = codegen_plan_new()
+    // Two instructions with completely disjoint registers
+    p = cgplan_add_instr(p, codegen_instr_new(0, CGOP_ADD, 1, 2, 3, 1))
+    p = cgplan_add_instr(p, codegen_instr_new(1, CGOP_ADD, 4, 5, 6, 1))
+    p = cgplan_build_deps(p)
+    let r1 = cgplan_assert_true(p.blocks[0 as usize].dep_count == 0, 1)
+    if r1 != 0 { return r1 }
+    0
+}
+
+// T23: schedule a longer chain and verify total cycle count
+fn test_cgplan_schedule_long_chain() -> i64 with Mut, Div, Panic {
+    var p = codegen_plan_new()
+    // Chain of 5 instructions each depending on the previous
+    // r1 = LOAD (lat 3)
+    p = cgplan_add_instr(p, codegen_instr_new(0, CGOP_LOAD, 1, REG_NONE, REG_NONE, 3))
+    // r2 = ADD r1, r0 (lat 1)
+    p = cgplan_add_instr(p, codegen_instr_new(1, CGOP_ADD, 2, 1, 0, 1))
+    // r3 = MUL r2, r0 (lat 2)
+    p = cgplan_add_instr(p, codegen_instr_new(2, CGOP_MUL, 3, 2, 0, 2))
+    // r4 = SUB r3, r0 (lat 1)
+    p = cgplan_add_instr(p, codegen_instr_new(3, CGOP_SUB, 4, 3, 0, 1))
+    // r5 = STORE r4 (lat 1)
+    p = cgplan_add_instr(p, codegen_instr_new(4, CGOP_STORE, REG_NONE, 4, REG_NONE, 1))
+    p = cgplan_build_deps(p)
+    p = cgplan_list_schedule(p)
+    let r1 = cgplan_assert_true(p.blocks[0 as usize].schedule_len == 5, 1)
+    if r1 != 0 { return r1 }
+    let valid = cgplan_validate_deps(p)
+    let r2 = cgplan_assert_true(valid, 2)
+    if r2 != 0 { return r2 }
+    // Cycle count should be at least 5 (one per instruction in a chain)
+    let r3 = cgplan_assert_true(p.blocks[0 as usize].cycle_count >= 5, 3)
+    if r3 != 0 { return r3 }
+    0
+}
+
+// T24: add_instr_to_block stores in correct block
+fn test_cgplan_add_to_block() -> i64 with Mut, Div, Panic {
+    var p = codegen_plan_new()
+    let i0 = codegen_instr_new(0, CGOP_ADD, 1, 2, 3, 1)
+    p = cgplan_add_instr_to_block(p, 2, i0)
+    let r1 = cgplan_assert_true(p.block_count == 3, 1)
+    if r1 != 0 { return r1 }
+    let r2 = cgplan_assert_true(p.blocks[2 as usize].instr_count == 1, 2)
+    if r2 != 0 { return r2 }
+    let r3 = cgplan_assert_true(p.blocks[0 as usize].instr_count == 0, 3)
+    if r3 != 0 { return r3 }
+    0
+}
+
+// T25: pressure with no spills needed
+fn test_cgplan_no_spill() -> i64 with Mut, Div, Panic {
+    var p = codegen_plan_new()
+    p = cgplan_add_instr(p, codegen_instr_new(0, CGOP_LOAD, 1, REG_NONE, REG_NONE, 1))
+    p = cgplan_add_instr(p, codegen_instr_new(1, CGOP_ADD, 2, 1, 3, 1))
+    p = cgplan_build_deps(p)
+    p = cgplan_list_schedule(p)
+    p = cgplan_estimate_pressure(p)
+    // With 16 registers, no spills needed for 2 live regs
+    let spills = cgplan_detect_spills(p, 16)
+    let r1 = cgplan_assert_true(spills == 0, 1)
+    if r1 != 0 { return r1 }
+    0
+}
+
+// T26: count_deps_of_kind works correctly
+fn test_cgplan_count_dep_kinds() -> i64 with Mut, Div, Panic {
+    var p = codegen_plan_new()
+    // Create a scenario with multiple dep types:
+    // i0: LOAD r1 (defines r1)
+    p = cgplan_add_instr(p, codegen_instr_new(0, CGOP_LOAD, 1, REG_NONE, REG_NONE, 3))
+    // i1: ADD r2, r1, r3 (uses r1 -> DATA from i0)
+    p = cgplan_add_instr(p, codegen_instr_new(1, CGOP_ADD, 2, 1, 3, 1))
+    // i2: LOAD r1 (re-defines r1 -> ANTI from i1, OUTPUT from i0)
+    p = cgplan_add_instr(p, codegen_instr_new(2, CGOP_LOAD, 1, REG_NONE, REG_NONE, 3))
+    p = cgplan_build_deps(p)
+    let data_count = cgplan_count_deps_of_kind(p, 0, DEP_DATA)
+    let anti_count = cgplan_count_deps_of_kind(p, 0, DEP_ANTI)
+    let output_count = cgplan_count_deps_of_kind(p, 0, DEP_OUTPUT)
+    let r1 = cgplan_assert_true(data_count >= 1, 1)
+    if r1 != 0 { return r1 }
+    let r2 = cgplan_assert_true(anti_count >= 1, 2)
+    if r2 != 0 { return r2 }
+    let r3 = cgplan_assert_true(output_count >= 1, 3)
+    if r3 != 0 { return r3 }
+    0
+}
+
+// T27: reorder_for_pressure produces valid schedule
+fn test_cgplan_reorder_pressure() -> i64 with Mut, Div, Panic {
+    var p = codegen_plan_new()
+    // Independent instructions: reorder should not break anything
+    p = cgplan_add_instr(p, codegen_instr_new(0, CGOP_LOAD, 1, REG_NONE, REG_NONE, 1))
+    p = cgplan_add_instr(p, codegen_instr_new(1, CGOP_LOAD, 2, REG_NONE, REG_NONE, 1))
+    p = cgplan_add_instr(p, codegen_instr_new(2, CGOP_ADD, 3, 1, 2, 1))
+    p = cgplan_build_deps(p)
+    p = cgplan_list_schedule(p)
+    p = cgplan_estimate_pressure(p)
+    p = cgplan_reorder_for_pressure(p, 8)
+    // Schedule should still be valid after reordering
+    let valid = cgplan_validate_schedule(p)
+    let r1 = cgplan_assert_true(valid, 1)
+    if r1 != 0 { return r1 }
+    0
+}
+
+// T28: count_successors and count_predecessors
+fn test_cgplan_succ_pred_count() -> i64 with Mut, Div, Panic {
+    var p = codegen_plan_new()
+    p = cgplan_add_instr(p, codegen_instr_new(0, CGOP_LOAD, 1, REG_NONE, REG_NONE, 1))
+    p = cgplan_add_instr(p, codegen_instr_new(1, CGOP_ADD, 2, 1, 3, 1))
+    p = cgplan_add_instr(p, codegen_instr_new(2, CGOP_MUL, 4, 1, 5, 1))
+    p = cgplan_build_deps(p)
+    // Instruction 0 defines r1, used by instructions 1 and 2
+    let succs = cgplan_count_successors(p.blocks[0 as usize], 0)
+    let r1 = cgplan_assert_true(succs >= 2, 1)
+    if r1 != 0 { return r1 }
+    let preds = cgplan_count_predecessors(p.blocks[0 as usize], 1)
+    let r2 = cgplan_assert_true(preds >= 1, 2)
+    if r2 != 0 { return r2 }
+    0
+}
+
+// T29: compute_total_cycles sums across blocks
+fn test_cgplan_total_cycles() -> i64 with Mut, Div, Panic {
+    var p = codegen_plan_new()
+    // Add instrs to block 0
+    p = cgplan_add_instr_to_block(p, 0, codegen_instr_new(0, CGOP_ADD, 1, 2, 3, 1))
+    p.blocks[0 as usize].cycle_count = 5
+    p = cgplan_add_instr_to_block(p, 1, codegen_instr_new(0, CGOP_ADD, 1, 2, 3, 1))
+    p.blocks[1 as usize].cycle_count = 3
+    let total = cgplan_compute_total_cycles(p)
+    let r1 = cgplan_assert_true(total == 8, 1)
+    if r1 != 0 { return r1 }
+    0
+}
+
+// T30: schedule with diamond dependency pattern
+fn test_cgplan_diamond_deps() -> i64 with Mut, Div, Panic {
+    var p = codegen_plan_new()
+    // Diamond:  i0 -> i1
+    //           i0 -> i2
+    //           i1 -> i3
+    //           i2 -> i3
+    p = cgplan_add_instr(p, codegen_instr_new(0, CGOP_LOAD, 1, REG_NONE, REG_NONE, 1))
+    p = cgplan_add_instr(p, codegen_instr_new(1, CGOP_ADD, 2, 1, 10, 1))
+    p = cgplan_add_instr(p, codegen_instr_new(2, CGOP_ADD, 3, 1, 11, 1))
+    p = cgplan_add_instr(p, codegen_instr_new(3, CGOP_ADD, 4, 2, 3, 1))
+    p = cgplan_build_deps(p)
+    p = cgplan_list_schedule(p)
+    let r1 = cgplan_assert_true(p.blocks[0 as usize].schedule_len == 4, 1)
+    if r1 != 0 { return r1 }
+    let valid = cgplan_validate_deps(p)
+    let r2 = cgplan_assert_true(valid, 2)
+    if r2 != 0 { return r2 }
+    // i0 must be first, i3 must be last
+    let r3 = cgplan_assert_true(p.blocks[0 as usize].schedule[0 as usize] == 0, 3)
+    if r3 != 0 { return r3 }
+    let r4 = cgplan_assert_true(p.blocks[0 as usize].schedule[3 as usize] == 3, 4)
+    if r4 != 0 { return r4 }
+    0
+}
+
+// ============================================================================
+// Test runner
+// ============================================================================
+
+fn cgplan_run_tests() -> i64 with Mut, Div, Panic {
+    var fail: i64 = 0
+
+    let t01 = test_cgplan_empty()
+    if t01 != 0 { print_int(201) fail = fail + 1 }
+
+    let t02 = test_cgplan_instr_new()
+    if t02 != 0 { print_int(202) fail = fail + 1 }
+
+    let t03 = test_cgplan_dep_edge_new()
+    if t03 != 0 { print_int(203) fail = fail + 1 }
+
+    let t04 = test_cgplan_add_instr()
+    if t04 != 0 { print_int(204) fail = fail + 1 }
+
+    let t05 = test_cgplan_add_dep()
+    if t05 != 0 { print_int(205) fail = fail + 1 }
+
+    let t06 = test_cgplan_build_deps_data()
+    if t06 != 0 { print_int(206) fail = fail + 1 }
+
+    let t07 = test_cgplan_build_deps_anti()
+    if t07 != 0 { print_int(207) fail = fail + 1 }
+
+    let t08 = test_cgplan_build_deps_output()
+    if t08 != 0 { print_int(208) fail = fail + 1 }
+
+    let t09 = test_cgplan_schedule_single()
+    if t09 != 0 { print_int(209) fail = fail + 1 }
+
+    let t10 = test_cgplan_schedule_independent()
+    if t10 != 0 { print_int(210) fail = fail + 1 }
+
+    let t11 = test_cgplan_schedule_chain()
+    if t11 != 0 { print_int(211) fail = fail + 1 }
+
+    let t12 = test_cgplan_critical_path()
+    if t12 != 0 { print_int(212) fail = fail + 1 }
+
+    let t13 = test_cgplan_pressure()
+    if t13 != 0 { print_int(213) fail = fail + 1 }
+
+    let t14 = test_cgplan_spill_detect()
+    if t14 != 0 { print_int(214) fail = fail + 1 }
+
+    let t15 = test_cgplan_peephole_self_move()
+    if t15 != 0 { print_int(215) fail = fail + 1 }
+
+    let t16 = test_cgplan_peephole_mov_pair()
+    if t16 != 0 { print_int(216) fail = fail + 1 }
+
+    let t17 = test_cgplan_validate_ok()
+    if t17 != 0 { print_int(217) fail = fail + 1 }
+
+    let t18 = test_cgplan_has_dep_false()
+    if t18 != 0 { print_int(218) fail = fail + 1 }
+
+    let t19 = test_cgplan_count_scheduled()
+    if t19 != 0 { print_int(219) fail = fail + 1 }
+
+    let t20 = test_cgplan_constants()
+    if t20 != 0 { print_int(220) fail = fail + 1 }
+
+    let t21 = test_cgplan_empty_instr()
+    if t21 != 0 { print_int(221) fail = fail + 1 }
+
+    let t22 = test_cgplan_build_deps_none()
+    if t22 != 0 { print_int(222) fail = fail + 1 }
+
+    let t23 = test_cgplan_schedule_long_chain()
+    if t23 != 0 { print_int(223) fail = fail + 1 }
+
+    let t24 = test_cgplan_add_to_block()
+    if t24 != 0 { print_int(224) fail = fail + 1 }
+
+    let t25 = test_cgplan_no_spill()
+    if t25 != 0 { print_int(225) fail = fail + 1 }
+
+    let t26 = test_cgplan_count_dep_kinds()
+    if t26 != 0 { print_int(226) fail = fail + 1 }
+
+    let t27 = test_cgplan_reorder_pressure()
+    if t27 != 0 { print_int(227) fail = fail + 1 }
+
+    let t28 = test_cgplan_succ_pred_count()
+    if t28 != 0 { print_int(228) fail = fail + 1 }
+
+    let t29 = test_cgplan_total_cycles()
+    if t29 != 0 { print_int(229) fail = fail + 1 }
+
+    let t30 = test_cgplan_diamond_deps()
+    if t30 != 0 { print_int(230) fail = fail + 1 }
+
+    fail
+}
