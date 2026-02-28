@@ -89,6 +89,8 @@ if [[ -z "$target_pid" ]]; then
 fi
 
 kill "$target_pid" 2>/dev/null || true
+# If runner was launched with setsid, pid==pgid; signal full process group too.
+kill "-$target_pid" 2>/dev/null || true
 for _ in $(seq 1 "$WAIT_SEC"); do
   if ! is_pid_live "$target_pid"; then
     cleanup_stale_files
@@ -98,14 +100,18 @@ for _ in $(seq 1 "$WAIT_SEC"); do
   sleep 1
 done
 
-if [[ "$FORCE" -eq 1 ]]; then
-  kill -9 "$target_pid" 2>/dev/null || true
-  sleep 1
-  if ! is_pid_live "$target_pid"; then
-    cleanup_stale_files
+# Escalate to SIGKILL by default after graceful timeout.
+kill -9 "$target_pid" 2>/dev/null || true
+kill -9 "-$target_pid" 2>/dev/null || true
+sleep 1
+if ! is_pid_live "$target_pid"; then
+  cleanup_stale_files
+  if [[ "$FORCE" -eq 1 ]]; then
     echo "OVERNIGHT_PLAN_BIG_STOPPED_FORCE pid=$target_pid"
-    exit 0
+  else
+    echo "OVERNIGHT_PLAN_BIG_STOPPED pid=$target_pid mode=escalated"
   fi
+  exit 0
 fi
 
 echo "error: failed to stop overnight runner pid=$target_pid" >&2

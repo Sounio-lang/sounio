@@ -9,11 +9,18 @@ PID_FILE="${PLAN_BIG_OVERNIGHT_PID_FILE:-$ART_DIR/runner.pid}"
 LOG_FILE="${PLAN_BIG_OVERNIGHT_BG_LOG:-$ART_DIR/runner.stdout.log}"
 LOCK_DIR="${PLAN_BIG_OVERNIGHT_LOCK_DIR:-$ART_DIR/.lock}"
 LOCK_PID_FILE="$LOCK_DIR/pid"
+HEARTBEAT_JSON="${PLAN_BIG_OVERNIGHT_HEARTBEAT_JSON:-$ART_DIR/heartbeat.v1.json}"
+STARTUP_TIMEOUT_SEC="${PLAN_BIG_OVERNIGHT_STARTUP_TIMEOUT_SEC:-15}"
 
 mkdir -p "$ART_DIR"
 
 if ! command -v jq >/dev/null 2>&1; then
   echo "error: required dependency missing: jq" >&2
+  exit 1
+fi
+
+if ! [[ "$STARTUP_TIMEOUT_SEC" =~ ^[0-9]+$ ]] || [[ "$STARTUP_TIMEOUT_SEC" -eq 0 ]]; then
+  echo "error: PLAN_BIG_OVERNIGHT_STARTUP_TIMEOUT_SEC must be positive integer" >&2
   exit 1
 fi
 
@@ -51,11 +58,90 @@ check_stale_startup_state() {
 
 check_stale_startup_state
 
-nohup bash "$ROOT_DIR/scripts/overnight_plan_big_runner.sh" "$@" >"$LOG_FILE" 2>&1 &
+cleanup_stale_startup_state() {
+  local expected_pid="$1"
+  if [[ -f "$PID_FILE" ]]; then
+    local pid_file_pid
+    pid_file_pid="$(cat "$PID_FILE" 2>/dev/null | tr -d '[:space:]' || true)"
+    if [[ -z "$pid_file_pid" || "$pid_file_pid" == "$expected_pid" ]]; then
+      rm -f "$PID_FILE"
+    fi
+  fi
+  if [[ -f "$LOCK_PID_FILE" ]]; then
+    local lock_pid
+    lock_pid="$(cat "$LOCK_PID_FILE" 2>/dev/null | tr -d '[:space:]' || true)"
+    if [[ -z "$lock_pid" || "$lock_pid" == "$expected_pid" ]]; then
+      rm -f "$LOCK_PID_FILE"
+      rmdir "$LOCK_DIR" 2>/dev/null || true
+    fi
+  fi
+}
+
+startup_ready() {
+  local expected_pid="$1"
+  local runner_live=false
+  local lock_match=false
+  local heartbeat_match=false
+  local lock_pid=""
+  local heartbeat_pid=""
+
+  if is_pid_live "$expected_pid"; then
+    runner_live=true
+  fi
+  if [[ -f "$LOCK_PID_FILE" ]]; then
+    lock_pid="$(cat "$LOCK_PID_FILE" 2>/dev/null | tr -d '[:space:]' || true)"
+    if [[ "$lock_pid" == "$expected_pid" && "$runner_live" == "true" ]]; then
+      lock_match=true
+    fi
+  fi
+  if [[ -f "$HEARTBEAT_JSON" ]]; then
+    heartbeat_pid="$(jq -r '.pid // ""' "$HEARTBEAT_JSON" 2>/dev/null || true)"
+    if [[ "$heartbeat_pid" == "$expected_pid" ]]; then
+      heartbeat_match=true
+    fi
+  fi
+
+  if [[ "$runner_live" == "true" && "$lock_match" == "true" && "$heartbeat_match" == "true" ]]; then
+    return 0
+  fi
+  return 1
+}
+
+if command -v setsid >/dev/null 2>&1; then
+  setsid bash "$ROOT_DIR/scripts/overnight_plan_big_runner.sh" "$@" </dev/null >"$LOG_FILE" 2>&1 &
+else
+  nohup bash "$ROOT_DIR/scripts/overnight_plan_big_runner.sh" "$@" >"$LOG_FILE" 2>&1 &
+fi
 runner_pid=$!
 printf '%s\n' "$runner_pid" > "$PID_FILE"
 if [[ ! -s "$PID_FILE" ]]; then
   echo "error: failed to write runner pid file: $PID_FILE" >&2
+  exit 1
+fi
+
+started_ok=false
+for ((i=0; i<STARTUP_TIMEOUT_SEC; i++)); do
+  if startup_ready "$runner_pid"; then
+    started_ok=true
+    break
+  fi
+  if ! is_pid_live "$runner_pid"; then
+    break
+  fi
+  sleep 1
+done
+
+if [[ "$started_ok" != "true" ]]; then
+  if is_pid_live "$runner_pid"; then
+    kill "$runner_pid" 2>/dev/null || true
+    sleep 1
+    if is_pid_live "$runner_pid"; then
+      kill -9 "$runner_pid" 2>/dev/null || true
+    fi
+  fi
+  cleanup_stale_startup_state "$runner_pid"
+  echo "error: overnight runner failed startup health within ${STARTUP_TIMEOUT_SEC}s (pid=$runner_pid)" >&2
+  echo "error: check log: $LOG_FILE" >&2
   exit 1
 fi
 
