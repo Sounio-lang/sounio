@@ -38,6 +38,7 @@ jq '
       next_action: next_action,
       reclassify_candidate: (
         (.classification != "ready")
+        and blocker_category != "parser_or_frontend_gap"
         and ((.exit_code != 0 and .pattern_hit == false) or (.error_pattern == "(none)"))
       )
     }

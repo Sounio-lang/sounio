@@ -1,6 +1,6 @@
 # Plan BIG Status Board
 
-- generated_at_utc: 2026-02-28T02:20:27Z
+- generated_at_utc: 2026-02-28T02:23:16Z
 - overall: attention
 - run_gates: true
 
@@ -17,7 +17,7 @@
 - ready_count: 0
 - needs_fix_count: 0
 - still_blocked_count: 31
-- reclassify_candidates: 2
+- reclassify_candidates: 0
 
 ## Gate Runs
 - claude_plan_consistency: pass
@@ -26,4 +26,4 @@
 - ui_type_deignore: pass
 
 ## Workspace
-- git_dirty_count: 90
+- git_dirty_count: 84
