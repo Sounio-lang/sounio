@@ -1,0 +1,238 @@
+//@ run-pass
+//@ expect-stdout: EPI_ARENA_GATE_WAVEFORM_PASS
+// Hardware gate waveform test for the epistemic arena provenance lane.
+//
+// Simulates K-AXI gate signals during an arena alloc/free/realloc cycle.
+// At each clock cycle, outputs the signal values that would appear on
+// hardware pins (provenance_root_l64, variance, confidence, delta_32)
+// and asserts the accumulator gate bound (delta_32 < 96).
+//
+// Cycle trace (H2O lifecycle):
+//   C0: Initial state — all signals zero
+//   C1: Alloc slot 0 (O, Z=8) — provenance seeded
+//   C2: Alloc slot 1 (H, Z=1) — provenance seeded
+//   C3: Alloc slot 2 (H, Z=1) — provenance seeded
+//   C4: Free slot 2 — provenance merged (dealloc event)
+//   C5: Realloc slot 2 (H, Z=1) — provenance merged with lineage
+//   C6: Update slot 0 value — provenance merged (update event)
+//
+// Gate assertion at every cycle: delta_32(var, 0, conf) < 96
+//
+// Cross-references:
+//   hardware/rtl/kaxi/merkle_root_lane.sio — Merkle salts
+//   tests/hardware/accumulator_bounds_test.sio — delta_32 gate proof
+//   formal/omega_mathlib/OmegaMathlib/AccumulatorBounds.lean — formal bound
+
+// ============================================================================
+// MERKLE INFRASTRUCTURE (aligned with hardware RTL)
+// ============================================================================
+
+let SALT_A: i64 = 0x4F4D4547
+let SALT_B: i64 = 0x4147454E
+let SALT_C: i64 = 0x45534953
+let SALT_D: i64 = 0x76312E30
+
+fn merkle_mix(a: i64, b: i64, c: i64, salt: i64) -> i64 {
+    ((a ^ b) + c + salt) ^ (a << 5) ^ (b >> 7)
+}
+
+fn merkle_root_lane(p0: i64, p1: i64, p2: i64, p3: i64, p4: i64) -> i64 {
+    let h0 = merkle_mix(p0, p1, p2, SALT_A)
+    let h1 = merkle_mix(p3, p4, h0, SALT_B)
+    let h2 = merkle_mix(h0, h1, p0 ^ p3, SALT_C)
+    merkle_mix(h1, h2, p1 ^ p2, SALT_D)
+}
+
+fn hash_slot(slot_id: i64, value: i64) -> i64 {
+    var hash: i64 = 5381
+    hash = hash * 33 + slot_id
+    hash = hash * 33 + value
+    hash & 9223372036854775807
+}
+
+fn prov_seed(item_hash: i64) -> i64 {
+    merkle_root_lane(0, item_hash, 0, 0, 1)
+}
+
+fn prov_merge(existing: i64, item_hash: i64, variance: i64, confidence: i64) -> i64 {
+    merkle_root_lane(existing, item_hash, variance, confidence, existing ^ item_hash)
+}
+
+// ============================================================================
+// ACCUMULATOR GATE (same formula as hardware RTL)
+// ============================================================================
+
+fn residual_f(f: i64) -> i64 { f - (f / 8) * 8 }
+fn residual_p(p: i64) -> i64 { p - (p / 16) * 16 }
+fn residual_q(q: i64) -> i64 { q - (q / 32) * 32 }
+
+fn delta_32(f: i64, p: i64, q: i64) -> i64 {
+    residual_f(f) * 4 + residual_p(p) * 2 + residual_q(q)
+}
+
+fn gate_pass(variance: i64, confidence: i64) -> bool {
+    let d = delta_32(variance, 0, confidence)
+    d >= 0 && d < 96
+}
+
+// ============================================================================
+// WAVEFORM SIGNAL DUMP
+// ============================================================================
+
+fn dump_signals(
+    cycle: i64,
+    slot: i64,
+    prov: i64,
+    variance: i64,
+    confidence: i64
+) with IO {
+    print("  C")
+    print(cycle)
+    print(" slot[")
+    print(slot)
+    print("] prov=")
+    print(prov)
+    print(" var=")
+    print(variance)
+    print(" conf=")
+    print(confidence)
+    print(" d32=")
+    print(delta_32(variance, 0, confidence))
+    println(" gate=PASS")
+}
+
+// ============================================================================
+// MAIN — cycle-by-cycle gate waveform trace
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic {
+    println("=== Epistemic Arena Gate Waveform ===")
+    println("")
+
+    // Per-slot signal registers (3 slots for H2O)
+    var prov_0: i64 = 0
+    var var_0: i64 = 0
+    var conf_0: i64 = 0
+
+    var prov_1: i64 = 0
+    var var_1: i64 = 0
+    var conf_1: i64 = 0
+
+    var prov_2: i64 = 0
+    var var_2: i64 = 0
+    var conf_2: i64 = 0
+
+    // ── C0: Initial state ───────────────────────────────────────────────
+    println("C0: Initial state (all zero)")
+    assert(prov_0 == 0 && prov_1 == 0 && prov_2 == 0)
+
+    // ── C1: Alloc slot 0 — O (Z=8) ─────────────────────────────────────
+    let h0 = hash_slot(0, 8)
+    prov_0 = prov_seed(h0)
+    var_0 = 0
+    conf_0 = 1
+    assert(prov_0 != 0)
+    assert(gate_pass(var_0, conf_0))
+    assert(delta_32(var_0, 0, conf_0) == 1)
+    dump_signals(1, 0, prov_0, var_0, conf_0)
+
+    // ── C2: Alloc slot 1 — H (Z=1) ─────────────────────────────────────
+    let h1 = hash_slot(1, 1)
+    prov_1 = prov_seed(h1)
+    var_1 = 0
+    conf_1 = 1
+    assert(prov_1 != 0)
+    assert(gate_pass(var_1, conf_1))
+    assert(prov_1 != prov_0)
+    dump_signals(2, 1, prov_1, var_1, conf_1)
+
+    // ── C3: Alloc slot 2 — H (Z=1) ─────────────────────────────────────
+    let h2 = hash_slot(2, 1)
+    prov_2 = prov_seed(h2)
+    var_2 = 0
+    conf_2 = 1
+    assert(prov_2 != 0)
+    assert(gate_pass(var_2, conf_2))
+    // Same value (Z=1) but different slot → different provenance
+    assert(prov_2 != prov_1)
+    dump_signals(3, 2, prov_2, var_2, conf_2)
+
+    // ── C4: Free slot 2 — dealloc merges provenance ─────────────────────
+    let free_h = hash_slot(2, 1)
+    prov_2 = prov_merge(prov_2, free_h, var_2 + 1, conf_2 + 1)
+    var_2 = var_2 + 1
+    conf_2 = conf_2 + 1
+    assert(prov_2 != 0)
+    assert(gate_pass(var_2, conf_2))
+    // After free: var=1, conf=2 → delta_32(1,0,2) = 4*1 + 2*0 + 2 = 6
+    assert(delta_32(var_2, 0, conf_2) == 6)
+    dump_signals(4, 2, prov_2, var_2, conf_2)
+
+    // ── C5: Realloc slot 2 — H (Z=1), lineage preserved ────────────────
+    let realloc_h = hash_slot(2, 1)
+    let new_seed = prov_seed(realloc_h)
+    let prov_before_realloc = prov_2
+    prov_2 = prov_merge(prov_2, new_seed, var_2 + 1, conf_2 + 1)
+    var_2 = var_2 + 1
+    conf_2 = conf_2 + 1
+    assert(prov_2 != 0)
+    assert(gate_pass(var_2, conf_2))
+    // Lineage: provenance differs from pre-realloc
+    assert(prov_2 != prov_before_realloc)
+    // After realloc: var=2, conf=3 → delta_32(2,0,3) = 4*2 + 2*0 + 3 = 11
+    assert(delta_32(var_2, 0, conf_2) == 11)
+    // Variance bumped by free + realloc
+    assert(var_2 == 2)
+    assert(conf_2 == 3)
+    dump_signals(5, 2, prov_2, var_2, conf_2)
+
+    // ── C6: Update slot 0 value (O Z=8 → Z=16) ─────────────────────────
+    let update_h = hash_slot(0, 16)
+    let prov_0_before = prov_0
+    prov_0 = prov_merge(prov_0, update_h, var_0 + 1, conf_0 + 1)
+    var_0 = var_0 + 1
+    conf_0 = conf_0 + 1
+    assert(prov_0 != 0)
+    assert(gate_pass(var_0, conf_0))
+    assert(prov_0 != prov_0_before)
+    // After update: var=1, conf=2 → delta_32(1,0,2) = 6
+    assert(delta_32(var_0, 0, conf_0) == 6)
+    dump_signals(6, 0, prov_0, var_0, conf_0)
+
+    // ── Gate summary ────────────────────────────────────────────────────
+    println("")
+    println("=== Gate Bound Verification ===")
+
+    // All slots pass gate at final state
+    assert(gate_pass(var_0, conf_0))
+    assert(gate_pass(var_1, conf_1))
+    assert(gate_pass(var_2, conf_2))
+
+    // All provenance roots are distinct
+    assert(prov_0 != prov_1)
+    assert(prov_0 != prov_2)
+    assert(prov_1 != prov_2)
+
+    // Worst-case delta_32 across all slots
+    let d0 = delta_32(var_0, 0, conf_0)
+    let d1 = delta_32(var_1, 0, conf_1)
+    let d2 = delta_32(var_2, 0, conf_2)
+    print("  max delta_32 across slots: ")
+
+    var max_d = d0
+    if d1 > max_d { max_d = d1 }
+    if d2 > max_d { max_d = d2 }
+    println(max_d)
+
+    assert(max_d < 96)
+    print("  gate ceiling: 96, margin: ")
+    println(96 - max_d)
+
+    // Cross-check with accumulator_bounds_test maximum
+    // Max possible delta_32 = 89 (at F=7, P=15, Q=31)
+    assert(delta_32(7, 15, 31) == 89)
+
+    println("")
+    println("EPI_ARENA_GATE_WAVEFORM_PASS")
+    return 0
+}

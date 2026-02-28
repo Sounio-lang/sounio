@@ -1,0 +1,429 @@
+// self-hosted::collections::epistemic_reaction — Epistemic chemical reaction
+//
+// First self-hosted reaction primitive with Merkle provenance conservation.
+// A reaction transforms reactant molecule provenance roots into product
+// provenance roots via deterministic Merkle fold. The invariant:
+//
+//   Product provenance is a deterministic function of reactant provenance.
+//   delta_32(variance, provenance_counter, confidence) < 96 is preserved
+//   across the transformation (hardware accumulator bound).
+//
+// Design:
+//   - Reactants/products are represented by their provenance roots (i64),
+//     variance, and confidence — not full molecule structs.
+//   - The reaction merges all reactant provenance into a single reaction
+//     root, then folds that root into each product's provenance.
+//   - This is compositional: a pipeline of reactions chains provenance.
+//
+// Capacity: 8 reactants, 8 products per reaction.
+// Merkle salts aligned with hardware/rtl/kaxi/merkle_root_lane.sio.
+// All mutating operations consume and return the struct (state threading).
+
+// ============================================================================
+// MERKLE CONSTANTS (aligned with hardware RTL + molecule + intern)
+// ============================================================================
+
+let RXN_MERKLE_SALT_A: i64 = 0x4F4D4547
+let RXN_MERKLE_SALT_B: i64 = 0x4147454E
+let RXN_MERKLE_SALT_C: i64 = 0x45534953
+let RXN_MERKLE_SALT_D: i64 = 0x76312E30
+
+let RXN_MAX_SPECIES: i64 = 8
+
+// ============================================================================
+// MERKLE INFRASTRUCTURE
+// ============================================================================
+
+fn rxn_merkle_mix(a: i64, b: i64, c: i64, salt: i64) -> i64 {
+    ((a ^ b) + c + salt) ^ (a << 5) ^ (b >> 7)
+}
+
+fn rxn_merkle_root_lane_l64(
+    p0: i64, p1: i64, p2: i64, p3: i64, p4: i64
+) -> i64 {
+    let h0 = rxn_merkle_mix(p0, p1, p2, RXN_MERKLE_SALT_A)
+    let h1 = rxn_merkle_mix(p3, p4, h0, RXN_MERKLE_SALT_B)
+    let h2 = rxn_merkle_mix(h0, h1, p0 ^ p3, RXN_MERKLE_SALT_C)
+    rxn_merkle_mix(h1, h2, p1 ^ p2, RXN_MERKLE_SALT_D)
+}
+
+// Hash a metabolite name (DJB2 over packed i64 symbol).
+fn rxn_metabolite_hash(symbol: i64) -> i64 {
+    var hash: i64 = 5381
+    hash = hash * 33 + symbol
+    hash & 9223372036854775807
+}
+
+fn rxn_provenance_seed(item_hash: i64) -> i64 {
+    rxn_merkle_root_lane_l64(0, item_hash, 0, 0, 1)
+}
+
+fn rxn_provenance_merge(
+    existing_root_l64: i64,
+    item_hash: i64,
+    variance_q32_32: i64,
+    confidence_beta: i64
+) -> i64 {
+    rxn_merkle_root_lane_l64(
+        existing_root_l64,
+        item_hash,
+        variance_q32_32,
+        confidence_beta,
+        existing_root_l64 ^ item_hash
+    )
+}
+
+// 1/32-scaled accumulator residual.
+fn rxn_delta_32(fidelity: i64, provenance: i64, quantum: i64) -> i64 {
+    let frac_f = fidelity - (fidelity / 8) * 8
+    let frac_p = provenance - (provenance / 16) * 16
+    let frac_q = quantum - (quantum / 32) * 32
+    frac_f * 4 + frac_p * 2 + frac_q
+}
+
+// ============================================================================
+// STRUCT
+// ============================================================================
+
+struct EpistemicReaction {
+    // Reactant provenance snapshots (up to 8)
+    reactant_prov_l64: [i64; 8],
+    reactant_variance_q32_32: [i64; 8],
+    reactant_confidence_beta: [i64; 8],
+    reactant_count: i64,
+
+    // Product provenance (computed from reactants via Merkle fold)
+    product_prov_l64: [i64; 8],
+    product_variance_q32_32: [i64; 8],
+    product_confidence_beta: [i64; 8],
+    product_count: i64,
+
+    // Reaction-level aggregate provenance
+    rxn_provenance_l64: i64,
+    rxn_variance_q32_32: i64,
+    rxn_confidence_beta: i64,
+
+    // Enzyme/catalyst provenance (-1 if no enzyme)
+    enzyme_prov_l64: i64,
+
+    // Whether rxn_apply has been called
+    applied: i64,
+}
+
+// ============================================================================
+// CONSTRUCTOR
+// ============================================================================
+
+fn rxn_new() -> EpistemicReaction {
+    EpistemicReaction {
+        reactant_prov_l64: [0; 8],
+        reactant_variance_q32_32: [0; 8],
+        reactant_confidence_beta: [0; 8],
+        reactant_count: 0,
+
+        product_prov_l64: [0; 8],
+        product_variance_q32_32: [0; 8],
+        product_confidence_beta: [0; 8],
+        product_count: 0,
+
+        rxn_provenance_l64: 0,
+        rxn_variance_q32_32: 0,
+        rxn_confidence_beta: 1,
+
+        enzyme_prov_l64: 0 - 1,
+        applied: 0,
+    }
+}
+
+// ============================================================================
+// ADD REACTANT / PRODUCT
+// ============================================================================
+
+// Add a reactant by its molecule provenance root + epistemic metadata.
+fn rxn_add_reactant(
+    r: EpistemicReaction,
+    prov_l64: i64,
+    variance: i64,
+    confidence: i64
+) -> EpistemicReaction with Mut, Panic {
+    var rxn = r
+    if rxn.reactant_count >= RXN_MAX_SPECIES {
+        return rxn
+    }
+    let id = rxn.reactant_count
+    rxn.reactant_prov_l64[id] = prov_l64
+    rxn.reactant_variance_q32_32[id] = variance
+    rxn.reactant_confidence_beta[id] = confidence
+    rxn.reactant_count = rxn.reactant_count + 1
+    rxn
+}
+
+// Add a product slot. Before rxn_apply, product provenance is the seed
+// from the product's own molecule hash. After rxn_apply, it gets merged
+// with the reaction provenance (carrying reactant lineage).
+fn rxn_add_product(
+    r: EpistemicReaction,
+    product_hash: i64,
+    variance: i64,
+    confidence: i64
+) -> EpistemicReaction with Mut, Panic {
+    var rxn = r
+    if rxn.product_count >= RXN_MAX_SPECIES {
+        return rxn
+    }
+    let id = rxn.product_count
+    rxn.product_prov_l64[id] = rxn_provenance_seed(product_hash)
+    rxn.product_variance_q32_32[id] = variance
+    rxn.product_confidence_beta[id] = confidence
+    rxn.product_count = rxn.product_count + 1
+    rxn
+}
+
+// Set enzyme provenance (optional catalyst).
+fn rxn_set_enzyme(r: EpistemicReaction, enzyme_prov: i64) -> EpistemicReaction {
+    var rxn = r
+    rxn.enzyme_prov_l64 = enzyme_prov
+    rxn
+}
+
+// ============================================================================
+// APPLY — merge reactant provenance into products
+// ============================================================================
+
+// Phase 1: Fold all reactant provenance roots into a single reaction root.
+// Phase 2: Merge the reaction root into each product's provenance.
+//
+// This is the core invariant: product provenance is a deterministic
+// function of reactant provenance. The Merkle fold is reproducible.
+fn rxn_apply(r: EpistemicReaction) -> EpistemicReaction with Mut, Panic, Div {
+    var rxn = r
+
+    // Phase 1: fold reactant provenance into reaction root
+    var root: i64 = 0
+    var i: i64 = 0
+    while i < rxn.reactant_count {
+        root = rxn_merkle_mix(
+            root,
+            rxn.reactant_prov_l64[i],
+            rxn.reactant_variance_q32_32[i],
+            RXN_MERKLE_SALT_A
+        )
+        i = i + 1
+    }
+
+    // Include enzyme if present
+    if rxn.enzyme_prov_l64 >= 0 {
+        root = rxn_merkle_mix(
+            root,
+            rxn.enzyme_prov_l64,
+            0,
+            RXN_MERKLE_SALT_B
+        )
+    }
+
+    rxn.rxn_provenance_l64 = root
+    rxn.rxn_variance_q32_32 = rxn.rxn_variance_q32_32 + 1
+    rxn.rxn_confidence_beta = rxn.rxn_confidence_beta + 1
+
+    // Phase 2: merge reaction root into each product's provenance
+    var j: i64 = 0
+    while j < rxn.product_count {
+        let merged = rxn_provenance_merge(
+            rxn.product_prov_l64[j],
+            root,
+            rxn.product_variance_q32_32[j] + 1,
+            rxn.product_confidence_beta[j] + 1
+        )
+        rxn.product_prov_l64[j] = merged
+        rxn.product_variance_q32_32[j] = rxn.product_variance_q32_32[j] + 1
+        rxn.product_confidence_beta[j] = rxn.product_confidence_beta[j] + 1
+        j = j + 1
+    }
+
+    rxn.applied = 1
+    rxn
+}
+
+// ============================================================================
+// ACCESSORS
+// ============================================================================
+
+fn rxn_reactant_count(r: EpistemicReaction) -> i64 {
+    r.reactant_count
+}
+
+fn rxn_product_count(r: EpistemicReaction) -> i64 {
+    r.product_count
+}
+
+fn rxn_provenance(r: EpistemicReaction) -> i64 {
+    r.rxn_provenance_l64
+}
+
+fn rxn_product_provenance(r: EpistemicReaction, idx: i64) -> i64 with Panic, Div {
+    if idx < 0 || idx >= r.product_count {
+        return 0
+    }
+    r.product_prov_l64[idx]
+}
+
+fn rxn_product_variance(r: EpistemicReaction, idx: i64) -> i64 with Panic, Div {
+    if idx < 0 || idx >= r.product_count {
+        return 0
+    }
+    r.product_variance_q32_32[idx]
+}
+
+fn rxn_product_confidence(r: EpistemicReaction, idx: i64) -> i64 with Panic, Div {
+    if idx < 0 || idx >= r.product_count {
+        return 0
+    }
+    r.product_confidence_beta[idx]
+}
+
+fn rxn_is_applied(r: EpistemicReaction) -> bool {
+    r.applied == 1
+}
+
+// ============================================================================
+// CONSERVATION CHECK
+// ============================================================================
+
+// Verify provenance conservation after rxn_apply:
+//   1. Reaction root is non-zero (reactant provenance was folded in)
+//   2. Every product provenance is non-zero (reaction root was merged in)
+//   3. delta_32 bound holds for reaction-level metadata
+//   4. delta_32 bound holds for every product
+fn rxn_verify_conservation(r: EpistemicReaction) -> bool with Mut, Panic, Div {
+    if r.applied != 1 {
+        return false
+    }
+
+    // Reaction root must be non-zero
+    if r.rxn_provenance_l64 == 0 {
+        return false
+    }
+
+    // Reaction-level delta_32 bound
+    let rxn_delta = rxn_delta_32(
+        r.rxn_variance_q32_32,
+        0,
+        r.rxn_confidence_beta
+    )
+    if rxn_delta < 0 || rxn_delta >= 96 {
+        return false
+    }
+
+    // Every product must have non-zero provenance and pass delta_32
+    var i: i64 = 0
+    while i < r.product_count {
+        if r.product_prov_l64[i] == 0 {
+            return false
+        }
+        let pdelta = rxn_delta_32(
+            r.product_variance_q32_32[i],
+            0,
+            r.product_confidence_beta[i]
+        )
+        if pdelta < 0 || pdelta >= 96 {
+            return false
+        }
+        i = i + 1
+    }
+
+    true
+}
+
+// ============================================================================
+// GLYCOLYSIS STEP 1 SELF-CHECK
+// ============================================================================
+
+// Glucose + ATP → Glucose-6-Phosphate + ADP
+// (hexokinase-catalyzed phosphorylation)
+//
+// Reactants: glucose (provenance from molecule with Z=6,1,8 atoms),
+//            ATP (provenance seeded from metabolite hash)
+// Products:  G6P (glucose + phosphate group),
+//            ADP (ATP minus phosphate)
+// Enzyme:    hexokinase (provenance seeded from enzyme hash)
+//
+// Verifies: provenance conservation across the transformation.
+fn rxn_glycolysis_step1_self_check() -> bool with Mut, Panic, Div {
+    // Metabolite hashes (stand-ins for interned canonical IDs)
+    let glucose_hash = rxn_metabolite_hash(0x474C55)
+    let atp_hash = rxn_metabolite_hash(0x415450)
+    let g6p_hash = rxn_metabolite_hash(0x473650)
+    let adp_hash = rxn_metabolite_hash(0x414450)
+    let hexokinase_hash = rxn_metabolite_hash(0x48454B)
+
+    // Simulate molecule provenance roots (as if from epistemic_molecule)
+    let glucose_prov = rxn_provenance_seed(glucose_hash)
+    let atp_prov = rxn_provenance_seed(atp_hash)
+    let hexokinase_prov = rxn_provenance_seed(hexokinase_hash)
+
+    // Build reaction
+    var rxn = rxn_new()
+    rxn = rxn_add_reactant(rxn, glucose_prov, 0, 1)
+    rxn = rxn_add_reactant(rxn, atp_prov, 0, 1)
+    rxn = rxn_add_product(rxn, g6p_hash, 0, 1)
+    rxn = rxn_add_product(rxn, adp_hash, 0, 1)
+    rxn = rxn_set_enzyme(rxn, hexokinase_prov)
+
+    // Snapshot product provenance before apply
+    let g6p_before = rxn_product_provenance(rxn, 0)
+    let adp_before = rxn_product_provenance(rxn, 1)
+
+    // Apply reaction — merges reactant provenance into products
+    rxn = rxn_apply(rxn)
+
+    let g6p_after = rxn_product_provenance(rxn, 0)
+    let adp_after = rxn_product_provenance(rxn, 1)
+
+    // Verify provenance conservation
+    let applied_ok = rxn_is_applied(rxn)
+    let counts_ok = rxn_reactant_count(rxn) == 2 && rxn_product_count(rxn) == 2
+    let rxn_prov_ok = rxn_provenance(rxn) != 0
+    let products_changed = g6p_after != g6p_before && adp_after != adp_before
+    let products_nonzero = g6p_after != 0 && adp_after != 0
+    let products_differ = g6p_after != adp_after
+    let conservation = rxn_verify_conservation(rxn)
+
+    applied_ok && counts_ok && rxn_prov_ok && products_changed
+        && products_nonzero && products_differ && conservation
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn test_rxn_empty() -> bool {
+    let rxn = rxn_new()
+    rxn_reactant_count(rxn) == 0 && rxn_product_count(rxn) == 0
+        && !rxn_is_applied(rxn) && rxn_provenance(rxn) == 0
+}
+
+fn test_rxn_add_reactant() -> bool with Mut, Panic {
+    var rxn = rxn_new()
+    let prov = rxn_provenance_seed(42)
+    rxn = rxn_add_reactant(rxn, prov, 0, 1)
+    rxn_reactant_count(rxn) == 1
+}
+
+fn test_rxn_add_product() -> bool with Mut, Panic, Div {
+    var rxn = rxn_new()
+    rxn = rxn_add_product(rxn, 99, 0, 1)
+    rxn_product_count(rxn) == 1 && rxn_product_provenance(rxn, 0) != 0
+}
+
+fn test_rxn_apply_sets_provenance() -> bool with Mut, Panic, Div {
+    var rxn = rxn_new()
+    let prov = rxn_provenance_seed(42)
+    rxn = rxn_add_reactant(rxn, prov, 0, 1)
+    rxn = rxn_add_product(rxn, 99, 0, 1)
+    rxn = rxn_apply(rxn)
+    rxn_is_applied(rxn) && rxn_provenance(rxn) != 0
+}
+
+fn test_rxn_glycolysis() -> bool with Mut, Panic, Div {
+    rxn_glycolysis_step1_self_check()
+}
