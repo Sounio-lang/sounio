@@ -2224,25 +2224,44 @@ impl Checker {
     }
 
     // Release borrows taken for function call arguments after the call returns.
-    // For each arg that is a named variable passed as &x or &!x, reset borrow state.
+    // Handles:
+    //   1) implicit boundary borrows: f(x) where param is &T / &!T
+    //   2) explicit unary borrows:   f(&x) / f(&!x)
+    // Explicit borrows are always expression-scoped at the call site, so release
+    // them even when arity/type mismatches are present.
     fn release_call_arg_borrows(self, args: Option<Box<ExprList>>, params: Option<Box<FnParamList>>) -> Checker with Mut, Panic, Div, Alloc, IO {
         var c = self
         match args {
             None => c
             Some(arg_list) => {
+                let arg_expr = (*arg_list).head
+                var release_implicit_ident: bool = false
+                var next_params: Option<Box<FnParamList>> = None
+
                 match params {
-                    None => c
+                    None => {}
                     Some(param_list) => {
-                        let arg_expr = (*arg_list).head
                         let param = (*param_list).head
-                        if arg_expr.kind == ExprKind::ExprIdent {
-                            if param.ty.kind == TypeKind::TyRef || param.ty.kind == TypeKind::TyRefMut {
-                                c.borrows = c.borrows.release_borrow(arg_expr.name)
-                            }
+                        if param.ty.kind == TypeKind::TyRef || param.ty.kind == TypeKind::TyRefMut {
+                            release_implicit_ident = true
                         }
-                        c.release_call_arg_borrows((*arg_list).tail, (*param_list).tail)
+                        next_params = (*param_list).tail
                     }
                 }
+
+                if arg_expr.kind == ExprKind::ExprIdent && release_implicit_ident {
+                    c.borrows = c.borrows.release_borrow(arg_expr.name)
+                }
+
+                if arg_expr.kind == ExprKind::ExprUnary &&
+                   (arg_expr.un_op == UnaryOp::OpRef || arg_expr.un_op == UnaryOp::OpRefMut) {
+                    let borrow_name = unary_operand_name(arg_expr.left)
+                    if !name_is_empty(borrow_name) {
+                        c.borrows = c.borrows.release_borrow(borrow_name)
+                    }
+                }
+
+                c.release_call_arg_borrows((*arg_list).tail, next_params)
             }
         }
     }
