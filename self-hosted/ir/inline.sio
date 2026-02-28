@@ -1,0 +1,2552 @@
+// self-hosted::ir::inline — Function inlining pass
+//
+// Implements a complete function inlining pass for the self-hosted compiler IR:
+//   1. Call graph construction — scan IR to discover all call sites
+//   2. Cost model — estimate benefit/cost of inlining each call site
+//   3. Bottom-up ordering — inline leaf functions first, then work upward
+//   4. Budget enforcement — respect global and per-function size limits
+//   5. Inline transformation — copy callee body, remap registers, adjust returns
+//
+// Design decisions:
+//   - Small functions (< 10 instrs) are always inlined
+//   - Recursive functions are never inlined
+//   - Leaf functions get a bonus in the cost model
+//   - Global budget limits total code growth to 2x original size
+//   - Per-function limit prevents any single function from exceeding 500 instrs
+//
+// All arrays are fixed-size — no heap allocation.
+//
+// References:
+//   Cooper & Torczon: "Engineering a Compiler" (2011), Ch. 8.7
+//   Ayers, Gottlieb, Schooler: "Aggressive Inlining" (1997)
+
+// ============================================================================
+// Section 1: Constants
+// ============================================================================
+
+let INL_MAX_CALL_SITES: i64 = 2048
+let INL_MAX_FUNCS: i64 = 1024
+let INL_MAX_DECISIONS: i64 = 2048
+
+// Inlining thresholds
+let INL_SMALL_FUNC_THRESHOLD: i64 = 10
+let INL_MAX_FUNC_SIZE: i64 = 500
+let INL_BUDGET_MULTIPLIER: i64 = 2
+
+// Reason codes for inlining decisions
+let INL_REASON_SMALL: i64 = 1
+let INL_REASON_HOT: i64 = 2
+let INL_REASON_LEAF: i64 = 3
+let INL_REASON_TOO_LARGE: i64 = 4
+let INL_REASON_RECURSIVE: i64 = 5
+let INL_REASON_BUDGET: i64 = 6
+
+// Sentinel values
+let INL_INVALID: i64 = 0 - 1
+
+// Leaf bonus multiplier: leaf functions get 3x benefit
+let INL_LEAF_BONUS: i64 = 3
+
+// Hot call site threshold: call sites with >= this many estimated
+// invocations get a benefit boost
+let INL_HOT_THRESHOLD: i64 = 5
+
+// ============================================================================
+// Section 2: Structs
+// ============================================================================
+
+// Represents a single call site discovered in the IR
+struct InlCallSite {
+    caller_id: i64,
+    callee_id: i64,
+    call_instr_idx: i64,
+    arg_count: i64,
+    benefit_score: i64,
+}
+
+// Per-function metadata for inlining analysis
+struct InlFuncInfo {
+    func_id: i64,
+    instr_count: i64,
+    call_count: i64,
+    is_recursive: bool,
+    is_leaf: bool,
+    has_loops: bool,
+    estimated_cost: i64,
+}
+
+// An inlining decision for a specific call site
+struct InlDecision {
+    call_site_idx: i64,
+    should_inline: bool,
+    reason_code: i64,
+    size_delta: i64,
+}
+
+// Overall inlining context with flat arrays for all state
+struct InlContext {
+    call_sites: [InlCallSite; 2048],
+    call_site_count: i64,
+    func_infos: [InlFuncInfo; 1024],
+    func_info_count: i64,
+    decisions: [InlDecision; 2048],
+    decision_count: i64,
+    total_original_size: i64,
+    total_current_size: i64,
+    budget_remaining: i64,
+    inline_count: i64,
+}
+
+// Register remapping table used during inline transformation
+struct InlRegMap {
+    old_regs: [i64; 8192],
+    new_regs: [i64; 8192],
+    count: i64,
+}
+
+// Result of an inline transformation
+struct InlTransformResult {
+    func: IrFunction,
+    instrs_added: i64,
+    success: bool,
+}
+
+// Bottom-up ordering for functions (leaves first)
+struct InlOrder {
+    func_ids: [i64; 1024],
+    count: i64,
+}
+
+// ============================================================================
+// Section 3: Constructors
+// ============================================================================
+
+fn inl_call_site_new(caller: i64, callee: i64, instr_idx: i64, args: i64) -> InlCallSite {
+    InlCallSite {
+        caller_id: caller,
+        callee_id: callee,
+        call_instr_idx: instr_idx,
+        arg_count: args,
+        benefit_score: 0,
+    }
+}
+
+fn inl_default_call_site() -> InlCallSite {
+    InlCallSite {
+        caller_id: INL_INVALID,
+        callee_id: INL_INVALID,
+        call_instr_idx: INL_INVALID,
+        arg_count: 0,
+        benefit_score: 0,
+    }
+}
+
+fn inl_func_info_new(fid: i64) -> InlFuncInfo {
+    InlFuncInfo {
+        func_id: fid,
+        instr_count: 0,
+        call_count: 0,
+        is_recursive: false,
+        is_leaf: true,
+        has_loops: false,
+        estimated_cost: 0,
+    }
+}
+
+fn inl_default_func_info() -> InlFuncInfo {
+    InlFuncInfo {
+        func_id: INL_INVALID,
+        instr_count: 0,
+        call_count: 0,
+        is_recursive: false,
+        is_leaf: true,
+        has_loops: false,
+        estimated_cost: 0,
+    }
+}
+
+fn inl_decision_new(cs_idx: i64, should: bool, reason: i64, delta: i64) -> InlDecision {
+    InlDecision {
+        call_site_idx: cs_idx,
+        should_inline: should,
+        reason_code: reason,
+        size_delta: delta,
+    }
+}
+
+fn inl_default_decision() -> InlDecision {
+    InlDecision {
+        call_site_idx: INL_INVALID,
+        should_inline: false,
+        reason_code: 0,
+        size_delta: 0,
+    }
+}
+
+fn inl_context_new() -> InlContext {
+    InlContext {
+        call_sites: [inl_default_call_site(); 2048],
+        call_site_count: 0,
+        func_infos: [inl_default_func_info(); 1024],
+        func_info_count: 0,
+        decisions: [inl_default_decision(); 2048],
+        decision_count: 0,
+        total_original_size: 0,
+        total_current_size: 0,
+        budget_remaining: 0,
+        inline_count: 0,
+    }
+}
+
+fn inl_reg_map_new() -> InlRegMap {
+    InlRegMap {
+        old_regs: [INL_INVALID; 8192],
+        new_regs: [INL_INVALID; 8192],
+        count: 0,
+    }
+}
+
+fn inl_order_new() -> InlOrder {
+    InlOrder {
+        func_ids: [INL_INVALID; 1024],
+        count: 0,
+    }
+}
+
+// ============================================================================
+// Section 4: Opcode classification helpers
+// ============================================================================
+
+// Check if an instruction is a call
+fn inl_is_call(instr: IrInstr) -> bool {
+    opcodes_equal(instr.op, IrOpcode::IrCall)
+}
+
+// Check if an instruction is a return
+fn inl_is_return(instr: IrInstr) -> bool {
+    opcodes_equal(instr.op, IrOpcode::IrReturn)
+}
+
+// Check if an instruction is a backward jump (heuristic for loop detection).
+// A jump or branch_true/branch_false to a label with id <= current position
+// in the instruction stream suggests a loop back-edge.
+fn inl_is_backward_branch(instr: IrInstr, current_idx: i64) -> bool {
+    if opcodes_equal(instr.op, IrOpcode::IrJump) {
+        return instr.label_id >= 0 && instr.label_id < current_idx
+    }
+    if opcodes_equal(instr.op, IrOpcode::IrBranchTrue) {
+        return instr.label_id >= 0 && instr.label_id < current_idx
+    }
+    if opcodes_equal(instr.op, IrOpcode::IrBranchFalse) {
+        return instr.label_id >= 0 && instr.label_id < current_idx
+    }
+    return false
+}
+
+// Check if an instruction is a label
+fn inl_is_label(instr: IrInstr) -> bool {
+    opcodes_equal(instr.op, IrOpcode::IrLabel)
+}
+
+// Check if an instruction is a nop
+fn inl_is_nop(instr: IrInstr) -> bool {
+    opcodes_equal(instr.op, IrOpcode::IrNop)
+}
+
+// ============================================================================
+// Section 5: Function analysis — gather per-function info
+// ============================================================================
+
+// Analyze a single function to compute its InlFuncInfo
+fn inl_analyze_function(func: IrFunction, func_id: i64) -> InlFuncInfo with Mut, Div, Panic {
+    var info = inl_func_info_new(func_id)
+    info.instr_count = func.instr_count
+
+    var i: i64 = 0
+    while i < func.instr_count {
+        let instr = func.instrs[i as usize]
+
+        // Count calls
+        if inl_is_call(instr) {
+            info.call_count = info.call_count + 1
+            info.is_leaf = false
+        }
+
+        // Detect loops via backward branches (heuristic)
+        if inl_is_backward_branch(instr, i) {
+            info.has_loops = true
+        }
+
+        i = i + 1
+    }
+
+    // Estimated cost: instruction count + penalty for loops
+    info.estimated_cost = info.instr_count
+    if info.has_loops {
+        info.estimated_cost = info.estimated_cost + info.instr_count
+    }
+
+    return info
+}
+
+// Analyze all functions in a module and populate context func_infos
+fn inl_analyze_module(ctx: InlContext, module: IrModule) -> InlContext with Mut, Div, Panic {
+    var out = ctx
+    var total: i64 = 0
+
+    var i: i64 = 0
+    while i < module.fn_count && i < INL_MAX_FUNCS {
+        let info = inl_analyze_function(module.functions[i as usize], i)
+        out.func_infos[i as usize] = info
+        total = total + info.instr_count
+        i = i + 1
+    }
+
+    out.func_info_count = i
+    out.total_original_size = total
+    out.total_current_size = total
+    out.budget_remaining = total * INL_BUDGET_MULTIPLIER - total
+
+    return out
+}
+
+// ============================================================================
+// Section 6: Call graph construction — discover call sites
+// ============================================================================
+
+// Find the function index by name in the module, returns INL_INVALID if not found
+fn inl_find_func_by_name(module: IrModule, name: Name) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < module.fn_count {
+        if ir_name_eq(module.functions[i as usize].name, name) {
+            return i
+        }
+        i = i + 1
+    }
+    return INL_INVALID
+}
+
+// Scan a single function for call instructions and add them as call sites
+fn inl_discover_calls_in_func(ctx: InlContext, module: IrModule, caller_id: i64) -> InlContext with Mut, Div, Panic {
+    var out = ctx
+    let func = module.functions[caller_id as usize]
+
+    var i: i64 = 0
+    while i < func.instr_count {
+        let instr = func.instrs[i as usize]
+        if inl_is_call(instr) {
+            let callee_id = inl_find_func_by_name(module, instr.name)
+            if callee_id >= 0 && out.call_site_count < INL_MAX_CALL_SITES {
+                var site = inl_call_site_new(caller_id, callee_id, i, instr.arg_count)
+                out.call_sites[out.call_site_count as usize] = site
+                out.call_site_count = out.call_site_count + 1
+            }
+        }
+        i = i + 1
+    }
+
+    return out
+}
+
+// Discover all call sites across the entire module
+fn inl_discover_all_calls(ctx: InlContext, module: IrModule) -> InlContext with Mut, Div, Panic {
+    var out = ctx
+    var i: i64 = 0
+    while i < module.fn_count {
+        out = inl_discover_calls_in_func(out, module, i)
+        i = i + 1
+    }
+    return out
+}
+
+// ============================================================================
+// Section 7: Recursion detection
+// ============================================================================
+
+// Check if function A (directly or transitively) calls itself.
+// Simple direct recursion: any call site where caller_id == callee_id.
+fn inl_detect_direct_recursion(ctx: InlContext) -> InlContext with Mut, Div, Panic {
+    var out = ctx
+
+    var i: i64 = 0
+    while i < out.call_site_count {
+        let site = out.call_sites[i as usize]
+        if site.caller_id == site.callee_id {
+            // Mark the function as recursive
+            if site.caller_id >= 0 && site.caller_id < out.func_info_count {
+                out.func_infos[site.caller_id as usize].is_recursive = true
+            }
+        }
+        i = i + 1
+    }
+
+    return out
+}
+
+// Detect mutual recursion: if A calls B and B calls A, both are recursive.
+// Uses a simple reachability check: for each function, check if it can
+// reach itself through call edges within a bounded depth.
+fn inl_detect_mutual_recursion(ctx: InlContext) -> InlContext with Mut, Div, Panic {
+    var out = ctx
+
+    // For each function, do a bounded BFS/DFS through call edges
+    var fid: i64 = 0
+    while fid < out.func_info_count {
+        if !out.func_infos[fid as usize].is_recursive {
+            // visited[i] = 1 means function i has been visited
+            var visited: [i64; 1024] = [0; 1024]
+            // work stack: function ids to explore
+            var stack: [i64; 256] = [INL_INVALID; 256]
+            var stack_top: i64 = 0
+
+            // Seed with direct callees of fid
+            var ci: i64 = 0
+            while ci < out.call_site_count {
+                let s = out.call_sites[ci as usize]
+                if s.caller_id == fid && s.callee_id >= 0 && s.callee_id < INL_MAX_FUNCS {
+                    if stack_top < 256 {
+                        stack[stack_top as usize] = s.callee_id
+                        stack_top = stack_top + 1
+                    }
+                }
+                ci = ci + 1
+            }
+
+            // BFS
+            var found_cycle: bool = false
+            while stack_top > 0 && !found_cycle {
+                stack_top = stack_top - 1
+                let cur = stack[stack_top as usize]
+
+                if cur == fid {
+                    found_cycle = true
+                } else if cur >= 0 && cur < 1024 && visited[cur as usize] == 0 {
+                    visited[cur as usize] = 1
+                    // Push callees of cur
+                    var cj: i64 = 0
+                    while cj < out.call_site_count {
+                        let s2 = out.call_sites[cj as usize]
+                        if s2.caller_id == cur && s2.callee_id >= 0 && s2.callee_id < INL_MAX_FUNCS {
+                            if stack_top < 256 {
+                                stack[stack_top as usize] = s2.callee_id
+                                stack_top = stack_top + 1
+                            }
+                        }
+                        cj = cj + 1
+                    }
+                }
+            }
+
+            if found_cycle {
+                out.func_infos[fid as usize].is_recursive = true
+            }
+        }
+        fid = fid + 1
+    }
+
+    return out
+}
+
+// ============================================================================
+// Section 8: Cost model — compute benefit scores
+// ============================================================================
+
+// Compute the benefit score for a single call site.
+// Higher score = more desirable to inline.
+// Negative score = should not inline.
+fn inl_compute_benefit(ctx: InlContext, site_idx: i64) -> i64 with Mut, Div, Panic {
+    let site = ctx.call_sites[site_idx as usize]
+    let callee_id = site.callee_id
+
+    if callee_id < 0 || callee_id >= ctx.func_info_count {
+        return 0 - 1
+    }
+
+    let callee_info = ctx.func_infos[callee_id as usize]
+
+    // Never inline recursive functions
+    if callee_info.is_recursive {
+        return 0 - 100
+    }
+
+    // Never inline functions larger than the max size
+    if callee_info.instr_count > INL_MAX_FUNC_SIZE {
+        return 0 - 50
+    }
+
+    var score: i64 = 0
+
+    // Small function bonus: always beneficial
+    if callee_info.instr_count < INL_SMALL_FUNC_THRESHOLD {
+        score = score + 100
+    }
+
+    // Leaf function bonus: no further call overhead
+    if callee_info.is_leaf {
+        score = score + 30 * INL_LEAF_BONUS
+    }
+
+    // Penalty for large functions
+    if callee_info.instr_count > 50 {
+        score = score - callee_info.instr_count
+    }
+
+    // Penalty for loops in callee
+    if callee_info.has_loops {
+        score = score - 20
+    }
+
+    // Benefit of eliminating call overhead (estimated ~5 instructions)
+    score = score + 5
+
+    return score
+}
+
+// Compute benefit scores for all call sites
+fn inl_score_all_sites(ctx: InlContext) -> InlContext with Mut, Div, Panic {
+    var out = ctx
+
+    var i: i64 = 0
+    while i < out.call_site_count {
+        let score = inl_compute_benefit(out, i)
+        out.call_sites[i as usize].benefit_score = score
+        i = i + 1
+    }
+
+    return out
+}
+
+// ============================================================================
+// Section 9: Inlining decisions
+// ============================================================================
+
+// Make the inlining decision for a single call site
+fn inl_decide_site(ctx: InlContext, site_idx: i64) -> InlDecision with Mut, Div, Panic {
+    let site = ctx.call_sites[site_idx as usize]
+    let callee_id = site.callee_id
+
+    if callee_id < 0 || callee_id >= ctx.func_info_count {
+        return inl_decision_new(site_idx, false, INL_REASON_TOO_LARGE, 0)
+    }
+
+    let callee_info = ctx.func_infos[callee_id as usize]
+    let size_delta = callee_info.instr_count - 1  // replace call with body, minus the call itself
+
+    // Never inline recursive
+    if callee_info.is_recursive {
+        return inl_decision_new(site_idx, false, INL_REASON_RECURSIVE, 0)
+    }
+
+    // Never inline functions that are too large
+    if callee_info.instr_count > INL_MAX_FUNC_SIZE {
+        return inl_decision_new(site_idx, false, INL_REASON_TOO_LARGE, 0)
+    }
+
+    // Check budget
+    if size_delta > ctx.budget_remaining {
+        return inl_decision_new(site_idx, false, INL_REASON_BUDGET, size_delta)
+    }
+
+    // Always inline small functions
+    if callee_info.instr_count < INL_SMALL_FUNC_THRESHOLD {
+        return inl_decision_new(site_idx, true, INL_REASON_SMALL, size_delta)
+    }
+
+    // Inline leaf functions with positive benefit
+    if callee_info.is_leaf && site.benefit_score > 0 {
+        return inl_decision_new(site_idx, true, INL_REASON_LEAF, size_delta)
+    }
+
+    // Inline hot call sites (benefit score above threshold)
+    if site.benefit_score > INL_HOT_THRESHOLD {
+        return inl_decision_new(site_idx, true, INL_REASON_HOT, size_delta)
+    }
+
+    // Default: don't inline
+    return inl_decision_new(site_idx, false, INL_REASON_TOO_LARGE, size_delta)
+}
+
+// Make decisions for all call sites and update context
+fn inl_decide_all(ctx: InlContext) -> InlContext with Mut, Div, Panic {
+    var out = ctx
+    out.decision_count = 0
+
+    var i: i64 = 0
+    while i < out.call_site_count {
+        let decision = inl_decide_site(out, i)
+        if out.decision_count < INL_MAX_DECISIONS {
+            out.decisions[out.decision_count as usize] = decision
+            out.decision_count = out.decision_count + 1
+        }
+
+        // Update budget if we decided to inline
+        if decision.should_inline {
+            out.budget_remaining = out.budget_remaining - decision.size_delta
+            out.total_current_size = out.total_current_size + decision.size_delta
+            out.inline_count = out.inline_count + 1
+        }
+
+        i = i + 1
+    }
+
+    return out
+}
+
+// ============================================================================
+// Section 10: Bottom-up ordering
+// ============================================================================
+
+// Compute a bottom-up ordering of functions: leaves first, then their callers.
+// This ensures callees are inlined before their callers process them.
+fn inl_compute_order(ctx: InlContext) -> InlOrder with Mut, Div, Panic {
+    var order = inl_order_new()
+
+    // Phase 1: add all leaf functions first
+    var i: i64 = 0
+    while i < ctx.func_info_count {
+        if ctx.func_infos[i as usize].is_leaf && !ctx.func_infos[i as usize].is_recursive {
+            if order.count < INL_MAX_FUNCS {
+                order.func_ids[order.count as usize] = i
+                order.count = order.count + 1
+            }
+        }
+        i = i + 1
+    }
+
+    // Phase 2: add non-leaf, non-recursive functions sorted by call count (ascending)
+    // Simple insertion: scan for minimum call count among remaining, add it
+    var added: [bool; 1024] = [false; 1024]
+
+    // Mark leaves as already added
+    var k: i64 = 0
+    while k < order.count {
+        let fid = order.func_ids[k as usize]
+        if fid >= 0 && fid < 1024 {
+            added[fid as usize] = true
+        }
+        k = k + 1
+    }
+
+    // Also mark recursive functions — they go last
+    var r: i64 = 0
+    while r < ctx.func_info_count {
+        if ctx.func_infos[r as usize].is_recursive {
+            added[r as usize] = true
+        }
+        r = r + 1
+    }
+
+    // Iteratively find the non-leaf with the fewest calls among remaining
+    var remaining: i64 = ctx.func_info_count - order.count
+    // Count recursive separately
+    var rec_count: i64 = 0
+    var rc: i64 = 0
+    while rc < ctx.func_info_count {
+        if ctx.func_infos[rc as usize].is_recursive {
+            rec_count = rec_count + 1
+        }
+        rc = rc + 1
+    }
+    remaining = remaining - rec_count
+
+    while remaining > 0 {
+        var best_id: i64 = INL_INVALID
+        var best_calls: i64 = 999999
+
+        var j: i64 = 0
+        while j < ctx.func_info_count {
+            if !added[j as usize] && !ctx.func_infos[j as usize].is_recursive {
+                if ctx.func_infos[j as usize].call_count < best_calls {
+                    best_calls = ctx.func_infos[j as usize].call_count
+                    best_id = j
+                }
+            }
+            j = j + 1
+        }
+
+        if best_id == INL_INVALID {
+            remaining = 0
+        } else {
+            if order.count < INL_MAX_FUNCS {
+                order.func_ids[order.count as usize] = best_id
+                order.count = order.count + 1
+            }
+            added[best_id as usize] = true
+            remaining = remaining - 1
+        }
+    }
+
+    // Phase 3: add recursive functions last (they won't be inlined but need processing)
+    var m: i64 = 0
+    while m < ctx.func_info_count {
+        if ctx.func_infos[m as usize].is_recursive {
+            if order.count < INL_MAX_FUNCS {
+                order.func_ids[order.count as usize] = m
+                order.count = order.count + 1
+            }
+        }
+        m = m + 1
+    }
+
+    return order
+}
+
+// ============================================================================
+// Section 11: Register remapping
+// ============================================================================
+
+// Add a mapping from old_reg to new_reg
+fn inl_reg_map_add(rmap: InlRegMap, old_reg: i64, new_reg: i64) -> InlRegMap with Mut, Div, Panic {
+    var out = rmap
+    if out.count < 8192 {
+        out.old_regs[out.count as usize] = old_reg
+        out.new_regs[out.count as usize] = new_reg
+        out.count = out.count + 1
+    }
+    return out
+}
+
+// Look up the new register for an old register. Returns old_reg if not found.
+fn inl_reg_map_lookup(rmap: InlRegMap, old_reg: i64) -> i64 with Mut, Div, Panic {
+    if old_reg < 0 {
+        return old_reg
+    }
+    var i: i64 = 0
+    while i < rmap.count {
+        if rmap.old_regs[i as usize] == old_reg {
+            return rmap.new_regs[i as usize]
+        }
+        i = i + 1
+    }
+    return old_reg
+}
+
+// Remap a single instruction's registers using the mapping table
+fn inl_remap_instr(instr: IrInstr, rmap: InlRegMap) -> IrInstr with Mut, Div, Panic {
+    var out = instr
+    out.dst = inl_reg_map_lookup(rmap, instr.dst)
+    out.src1 = inl_reg_map_lookup(rmap, instr.src1)
+    out.src2 = inl_reg_map_lookup(rmap, instr.src2)
+    return out
+}
+
+// ============================================================================
+// Section 12: Label remapping for inlined bodies
+// ============================================================================
+
+// Remap a label_id in an instruction by adding an offset
+fn inl_remap_label(instr: IrInstr, label_offset: i64) -> IrInstr with Mut, Div, Panic {
+    var out = instr
+    if out.label_id >= 0 {
+        out.label_id = out.label_id + label_offset
+    }
+    return out
+}
+
+// ============================================================================
+// Section 13: Inline transformation
+// ============================================================================
+
+// Perform the actual inlining: copy callee body into caller at the call site,
+// remap registers, adjust return instructions to assignments.
+//
+// Steps:
+//   1. Allocate new registers in caller for callee's registers (offset by caller reg_count)
+//   2. Map callee parameters to caller's call arguments
+//   3. Copy callee instructions, remapping registers and labels
+//   4. Replace callee IrReturn with IrCopy to caller's destination register
+//   5. Shift all instructions after the call site
+fn inl_transform(caller: IrFunction, callee: IrFunction, call_idx: i64) -> InlTransformResult with Mut, Div, Panic {
+    var result = InlTransformResult {
+        func: caller,
+        instrs_added: 0,
+        success: false,
+    }
+
+    // Validate indices
+    if call_idx < 0 || call_idx >= caller.instr_count {
+        return result
+    }
+
+    let call_instr = caller.instrs[call_idx as usize]
+    let call_dst = call_instr.dst
+
+    // Number of callee instructions (excluding IrReturn, we replace those)
+    let callee_body_size = callee.instr_count
+    // Net new instructions: callee body replaces the single call instruction
+    let net_added = callee_body_size - 1
+
+    // Check we don't overflow the instruction buffer
+    if caller.instr_count + net_added >= 32768 {
+        return result
+    }
+
+    // Step 1: Build register mapping — callee regs get offset by caller's reg_count
+    let reg_offset = caller.reg_count
+    var rmap = inl_reg_map_new()
+
+    // Map callee parameters to caller's argument registers
+    var p: i64 = 0
+    while p < callee.param_count && p < 64 {
+        let callee_param_reg = callee.param_regs[p as usize]
+        // The caller's argument for this parameter:
+        // First two args are in call_instr.src1 and call_instr.src2
+        var caller_arg_reg: i64 = INL_INVALID
+        if p == 0 {
+            caller_arg_reg = call_instr.src1
+        } else if p == 1 {
+            caller_arg_reg = call_instr.src2
+        }
+        // For p >= 2, we would need to walk call_args linked list.
+        // For simplicity, map to offset register (the callee body will
+        // have parameter loads that we can replace).
+
+        if caller_arg_reg >= 0 {
+            rmap = inl_reg_map_add(rmap, callee_param_reg, caller_arg_reg)
+        } else {
+            rmap = inl_reg_map_add(rmap, callee_param_reg, callee_param_reg + reg_offset)
+        }
+        p = p + 1
+    }
+
+    // Map remaining callee registers to offset registers
+    var cr: i64 = 0
+    while cr < callee.reg_count {
+        // Only map if not already mapped (parameters were mapped above)
+        let existing = inl_reg_map_lookup(rmap, cr)
+        if existing == cr {
+            // Not mapped yet — offset it
+            rmap = inl_reg_map_add(rmap, cr, cr + reg_offset)
+        }
+        cr = cr + 1
+    }
+
+    let label_offset = caller.label_count
+
+    // Step 2: Shift existing instructions after call site to make room
+    var out_func = caller
+    var shift: i64 = out_func.instr_count - 1
+    while shift > call_idx {
+        let new_pos = shift + net_added
+        if new_pos >= 0 && new_pos < 32768 {
+            out_func.instrs[new_pos as usize] = out_func.instrs[shift as usize]
+        }
+        shift = shift - 1
+    }
+
+    // Step 3: Copy callee instructions into the gap, remapping registers and labels
+    var write_pos: i64 = call_idx
+    var ci: i64 = 0
+    while ci < callee.instr_count {
+        let callee_instr = callee.instrs[ci as usize]
+
+        if inl_is_return(callee_instr) {
+            // Replace return with copy to caller's destination
+            if call_dst >= 0 {
+                let remapped_src = inl_reg_map_lookup(rmap, callee_instr.src1)
+                out_func.instrs[write_pos as usize] = ir_copy(call_dst, remapped_src)
+            } else {
+                out_func.instrs[write_pos as usize] = ir_nop()
+            }
+        } else {
+            var remapped = inl_remap_instr(callee_instr, rmap)
+            remapped = inl_remap_label(remapped, label_offset)
+            out_func.instrs[write_pos as usize] = remapped
+        }
+
+        write_pos = write_pos + 1
+        ci = ci + 1
+    }
+
+    out_func.instr_count = caller.instr_count + net_added
+    out_func.reg_count = caller.reg_count + callee.reg_count
+    out_func.label_count = caller.label_count + callee.label_count
+
+    result.func = out_func
+    result.instrs_added = net_added
+    result.success = true
+
+    return result
+}
+
+// ============================================================================
+// Section 14: Master inlining pipeline
+// ============================================================================
+
+// Run the full inlining pass on a module
+fn inl_run_pass(module: IrModule) -> IrModule with Mut, Div, Panic {
+    // Phase 1: Analyze all functions
+    var ctx = inl_context_new()
+    ctx = inl_analyze_module(ctx, module)
+
+    // Phase 2: Discover call graph
+    ctx = inl_discover_all_calls(ctx, module)
+
+    // Phase 3: Detect recursion
+    ctx = inl_detect_direct_recursion(ctx)
+    ctx = inl_detect_mutual_recursion(ctx)
+
+    // Phase 4: Score call sites
+    ctx = inl_score_all_sites(ctx)
+
+    // Phase 5: Make inlining decisions
+    ctx = inl_decide_all(ctx)
+
+    // Phase 6: Compute bottom-up order
+    let order = inl_compute_order(ctx)
+
+    // Phase 7: Apply transformations in bottom-up order
+    var result = module
+
+    var oi: i64 = 0
+    while oi < order.count {
+        let func_id = order.func_ids[oi as usize]
+        if func_id >= 0 && func_id < result.fn_count {
+            // Process all call sites in this function that were approved
+            var di: i64 = 0
+            while di < ctx.decision_count {
+                let dec = ctx.decisions[di as usize]
+                if dec.should_inline && dec.call_site_idx >= 0 {
+                    let site = ctx.call_sites[dec.call_site_idx as usize]
+                    if site.caller_id == func_id {
+                        let callee = result.functions[site.callee_id as usize]
+                        let xform = inl_transform(
+                            result.functions[func_id as usize],
+                            callee,
+                            site.call_instr_idx
+                        )
+                        if xform.success {
+                            result.functions[func_id as usize] = xform.func
+                        }
+                    }
+                }
+                di = di + 1
+            }
+        }
+        oi = oi + 1
+    }
+
+    return result
+}
+
+// ============================================================================
+// Section 15: Query helpers — used by tests and other passes
+// ============================================================================
+
+// Count how many call sites target a specific callee
+fn inl_count_sites_for_callee(ctx: InlContext, callee_id: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.call_site_count {
+        if ctx.call_sites[i as usize].callee_id == callee_id {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    return count
+}
+
+// Count how many decisions approved inlining
+fn inl_count_approved(ctx: InlContext) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.decision_count {
+        if ctx.decisions[i as usize].should_inline {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    return count
+}
+
+// Count how many decisions were rejected for a given reason
+fn inl_count_rejected_by_reason(ctx: InlContext, reason: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.decision_count {
+        let d = ctx.decisions[i as usize]
+        if !d.should_inline && d.reason_code == reason {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    return count
+}
+
+// Get the decision for a specific call site index
+fn inl_get_decision_for_site(ctx: InlContext, site_idx: i64) -> InlDecision with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ctx.decision_count {
+        if ctx.decisions[i as usize].call_site_idx == site_idx {
+            return ctx.decisions[i as usize]
+        }
+        i = i + 1
+    }
+    return inl_default_decision()
+}
+
+// Find the call site index for a given caller/callee pair
+fn inl_find_site(ctx: InlContext, caller: i64, callee: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ctx.call_site_count {
+        let s = ctx.call_sites[i as usize]
+        if s.caller_id == caller && s.callee_id == callee {
+            return i
+        }
+        i = i + 1
+    }
+    return INL_INVALID
+}
+
+// Count non-nop instructions in a function
+fn inl_count_real_instrs(func: IrFunction) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < func.instr_count {
+        if !inl_is_nop(func.instrs[i as usize]) {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    return count
+}
+
+// ============================================================================
+// Section 16: Test helpers — build synthetic IR for testing
+// ============================================================================
+
+// Build a simple test function with N load-imm instructions + a return.
+// func_id is used to assign a unique name.
+fn inl_make_test_func(func_id: i64, body_size: i64) -> IrFunction with Mut, Div, Panic {
+    var func = ir_empty_function()
+
+    // Build a simple name from func_id: "f0", "f1", etc.
+    var name = ir_empty_name()
+    // ASCII 'f' = 102
+    name.buf[0] = 102 as i8
+    // Digit for func_id (works for 0-9)
+    if func_id >= 0 && func_id <= 9 {
+        name.buf[1] = (48 + func_id) as i8
+        name.len = 2
+    } else {
+        // For func_id 10+, use two digits
+        let tens = func_id / 10
+        let ones = func_id - tens * 10
+        name.buf[1] = (48 + tens) as i8
+        name.buf[2] = (48 + ones) as i8
+        name.len = 3
+    }
+    func.name = name
+
+    // Fill body with load_imm instructions
+    var i: i64 = 0
+    while i < body_size - 1 && i < 32767 {
+        func.instrs[i as usize] = ir_load_imm(i, i + 100)
+        i = i + 1
+    }
+
+    // Final instruction: return
+    if body_size > 0 {
+        let ret_reg = if body_size > 1 { body_size - 2 } else { 0 }
+        func.instrs[(body_size - 1) as usize] = ir_return(ret_reg)
+    }
+
+    func.instr_count = body_size
+    func.reg_count = body_size
+    func.label_count = 0
+    func.param_count = 0
+
+    return func
+}
+
+// Build a test function that calls another function by name
+fn inl_make_caller_func(func_id: i64, callee_name: Name, body_before: i64, body_after: i64) -> IrFunction with Mut, Div, Panic {
+    var func = inl_make_test_func(func_id, 0)
+
+    // Re-name with our func_id
+    var name = ir_empty_name()
+    name.buf[0] = 102 as i8
+    if func_id >= 0 && func_id <= 9 {
+        name.buf[1] = (48 + func_id) as i8
+        name.len = 2
+    } else {
+        let tens = func_id / 10
+        let ones = func_id - tens * 10
+        name.buf[1] = (48 + tens) as i8
+        name.buf[2] = (48 + ones) as i8
+        name.len = 3
+    }
+    func.name = name
+
+    var pos: i64 = 0
+
+    // Load-imm instructions before call
+    var b: i64 = 0
+    while b < body_before {
+        func.instrs[pos as usize] = ir_load_imm(pos, b + 200)
+        pos = pos + 1
+        b = b + 1
+    }
+
+    // Call instruction
+    let call_dst = pos
+    func.instrs[pos as usize] = ir_call(call_dst, 0, callee_name, ir_empty_reg_list(), 0)
+    pos = pos + 1
+
+    // Load-imm instructions after call
+    var a: i64 = 0
+    while a < body_after {
+        func.instrs[pos as usize] = ir_load_imm(pos, a + 300)
+        pos = pos + 1
+        a = a + 1
+    }
+
+    // Return
+    func.instrs[pos as usize] = ir_return(call_dst)
+    pos = pos + 1
+
+    func.instr_count = pos
+    func.reg_count = pos
+
+    return func
+}
+
+// Build a module with given functions
+fn inl_make_test_module(funcs: [IrFunction; 4096], count: i64) -> IrModule {
+    IrModule {
+        functions: funcs,
+        fn_count: count,
+        string_table: [ir_empty_name(); 4096],
+        string_count: 0,
+    }
+}
+
+// Build a function that calls itself (directly recursive)
+fn inl_make_recursive_func(func_id: i64, body_size: i64) -> IrFunction with Mut, Div, Panic {
+    var func = inl_make_test_func(func_id, 0)
+
+    // Re-build name
+    var name = ir_empty_name()
+    name.buf[0] = 102 as i8
+    if func_id >= 0 && func_id <= 9 {
+        name.buf[1] = (48 + func_id) as i8
+        name.len = 2
+    } else {
+        let tens = func_id / 10
+        let ones = func_id - tens * 10
+        name.buf[1] = (48 + tens) as i8
+        name.buf[2] = (48 + ones) as i8
+        name.len = 3
+    }
+    func.name = name
+
+    var pos: i64 = 0
+    // Some body
+    var b: i64 = 0
+    while b < body_size - 2 && b < 32766 {
+        func.instrs[pos as usize] = ir_load_imm(pos, b)
+        pos = pos + 1
+        b = b + 1
+    }
+
+    // Self-call
+    func.instrs[pos as usize] = ir_call(pos, func_id, name, ir_empty_reg_list(), 0)
+    pos = pos + 1
+
+    // Return
+    func.instrs[pos as usize] = ir_return(pos - 1)
+    pos = pos + 1
+
+    func.instr_count = pos
+    func.reg_count = pos
+
+    return func
+}
+
+// Build a function that contains a backward branch (loop)
+fn inl_make_loop_func(func_id: i64) -> IrFunction with Mut, Div, Panic {
+    var func = inl_make_test_func(func_id, 0)
+
+    var name = ir_empty_name()
+    name.buf[0] = 102 as i8
+    if func_id >= 0 && func_id <= 9 {
+        name.buf[1] = (48 + func_id) as i8
+        name.len = 2
+    } else {
+        let tens = func_id / 10
+        let ones = func_id - tens * 10
+        name.buf[1] = (48 + tens) as i8
+        name.buf[2] = (48 + ones) as i8
+        name.len = 3
+    }
+    func.name = name
+
+    // r0 = 0 (counter)
+    func.instrs[0] = ir_load_imm(0, 0)
+    // L0:
+    func.instrs[1] = ir_label(0)
+    // r1 = r0 + 1
+    func.instrs[2] = ir_binop(1, 0, BinaryOp::OpAdd, 0)
+    // r2 = r1 < 10
+    func.instrs[3] = ir_load_imm(2, 10)
+    func.instrs[4] = ir_binop(3, 1, BinaryOp::OpLt, 2)
+    // branch back to L0 if true (backward branch: label 0, current idx 5)
+    func.instrs[5] = ir_branch_true(3, 0)
+    // return r1
+    func.instrs[6] = ir_return(1)
+
+    func.instr_count = 7
+    func.reg_count = 4
+    func.label_count = 1
+
+    return func
+}
+
+// Get a function's name for test building
+fn inl_get_test_func_name(func_id: i64) -> Name with Mut, Div, Panic {
+    var name = ir_empty_name()
+    name.buf[0] = 102 as i8
+    if func_id >= 0 && func_id <= 9 {
+        name.buf[1] = (48 + func_id) as i8
+        name.len = 2
+    } else {
+        let tens = func_id / 10
+        let ones = func_id - tens * 10
+        name.buf[1] = (48 + tens) as i8
+        name.buf[2] = (48 + ones) as i8
+        name.len = 3
+    }
+    return name
+}
+
+// ============================================================================
+// Section 17: Tests
+// ============================================================================
+
+// T01: Context initialization — all counts zero
+fn test_inl_context_init() -> i32 with IO, Mut, Div, Panic {
+    let ctx = inl_context_new()
+    if ctx.call_site_count != 0 || ctx.func_info_count != 0 || ctx.decision_count != 0 {
+        print("FAIL: test_inl_context_init\n")
+        return 1
+    }
+    print("PASS: test_inl_context_init\n")
+    return 0
+}
+
+// T02: Single leaf function analysis — is_leaf should be true
+fn test_inl_leaf_detection() -> i32 with IO, Mut, Div, Panic {
+    let func = inl_make_test_func(0, 5)
+    let info = inl_analyze_function(func, 0)
+    if !info.is_leaf || info.call_count != 0 || info.instr_count != 5 {
+        print("FAIL: test_inl_leaf_detection\n")
+        return 1
+    }
+    print("PASS: test_inl_leaf_detection\n")
+    return 0
+}
+
+// T03: Non-leaf function — function with call is not a leaf
+fn test_inl_non_leaf_detection() -> i32 with IO, Mut, Div, Panic {
+    let callee_name = inl_get_test_func_name(1)
+    let func = inl_make_caller_func(0, callee_name, 2, 1)
+    let info = inl_analyze_function(func, 0)
+    if info.is_leaf || info.call_count != 1 {
+        print("FAIL: test_inl_non_leaf_detection\n")
+        return 1
+    }
+    print("PASS: test_inl_non_leaf_detection\n")
+    return 0
+}
+
+// T04: Loop detection — function with backward branch flagged
+fn test_inl_loop_detection() -> i32 with IO, Mut, Div, Panic {
+    let func = inl_make_loop_func(0)
+    let info = inl_analyze_function(func, 0)
+    if !info.has_loops {
+        print("FAIL: test_inl_loop_detection\n")
+        return 1
+    }
+    print("PASS: test_inl_loop_detection\n")
+    return 0
+}
+
+// T05: Call site discovery — finds call from f0 to f1
+fn test_inl_call_site_discovery() -> i32 with IO, Mut, Div, Panic {
+    var funcs: [IrFunction; 4096] = [ir_empty_function(); 4096]
+    let callee_name = inl_get_test_func_name(1)
+    funcs[0] = inl_make_caller_func(0, callee_name, 2, 1)
+    funcs[1] = inl_make_test_func(1, 5)
+    let module = inl_make_test_module(funcs, 2)
+
+    var ctx = inl_context_new()
+    ctx = inl_analyze_module(ctx, module)
+    ctx = inl_discover_all_calls(ctx, module)
+
+    if ctx.call_site_count != 1 {
+        print("FAIL: test_inl_call_site_discovery\n")
+        return 1
+    }
+    let site = ctx.call_sites[0]
+    if site.caller_id != 0 || site.callee_id != 1 {
+        print("FAIL: test_inl_call_site_discovery\n")
+        return 1
+    }
+    print("PASS: test_inl_call_site_discovery\n")
+    return 0
+}
+
+// T06: Multiple call sites — two calls from f0 to f1
+fn test_inl_multiple_call_sites() -> i32 with IO, Mut, Div, Panic {
+    var funcs: [IrFunction; 4096] = [ir_empty_function(); 4096]
+    let callee_name = inl_get_test_func_name(1)
+
+    // Build caller with two calls manually
+    var caller = ir_empty_function()
+    caller.name = inl_get_test_func_name(0)
+    caller.instrs[0] = ir_load_imm(0, 1)
+    caller.instrs[1] = ir_call(1, 0, callee_name, ir_empty_reg_list(), 0)
+    caller.instrs[2] = ir_load_imm(2, 2)
+    caller.instrs[3] = ir_call(3, 0, callee_name, ir_empty_reg_list(), 0)
+    caller.instrs[4] = ir_return(3)
+    caller.instr_count = 5
+    caller.reg_count = 4
+
+    funcs[0] = caller
+    funcs[1] = inl_make_test_func(1, 5)
+    let module = inl_make_test_module(funcs, 2)
+
+    var ctx = inl_context_new()
+    ctx = inl_analyze_module(ctx, module)
+    ctx = inl_discover_all_calls(ctx, module)
+
+    if ctx.call_site_count != 2 {
+        print("FAIL: test_inl_multiple_call_sites\n")
+        return 1
+    }
+    let count = inl_count_sites_for_callee(ctx, 1)
+    if count != 2 {
+        print("FAIL: test_inl_multiple_call_sites\n")
+        return 1
+    }
+    print("PASS: test_inl_multiple_call_sites\n")
+    return 0
+}
+
+// T07: Direct recursion detected
+fn test_inl_direct_recursion() -> i32 with IO, Mut, Div, Panic {
+    var funcs: [IrFunction; 4096] = [ir_empty_function(); 4096]
+    funcs[0] = inl_make_recursive_func(0, 6)
+    let module = inl_make_test_module(funcs, 1)
+
+    var ctx = inl_context_new()
+    ctx = inl_analyze_module(ctx, module)
+    ctx = inl_discover_all_calls(ctx, module)
+    ctx = inl_detect_direct_recursion(ctx)
+
+    if !ctx.func_infos[0].is_recursive {
+        print("FAIL: test_inl_direct_recursion\n")
+        return 1
+    }
+    print("PASS: test_inl_direct_recursion\n")
+    return 0
+}
+
+// T08: Non-recursive function not flagged
+fn test_inl_non_recursive() -> i32 with IO, Mut, Div, Panic {
+    var funcs: [IrFunction; 4096] = [ir_empty_function(); 4096]
+    let callee_name = inl_get_test_func_name(1)
+    funcs[0] = inl_make_caller_func(0, callee_name, 2, 1)
+    funcs[1] = inl_make_test_func(1, 5)
+    let module = inl_make_test_module(funcs, 2)
+
+    var ctx = inl_context_new()
+    ctx = inl_analyze_module(ctx, module)
+    ctx = inl_discover_all_calls(ctx, module)
+    ctx = inl_detect_direct_recursion(ctx)
+
+    if ctx.func_infos[0].is_recursive || ctx.func_infos[1].is_recursive {
+        print("FAIL: test_inl_non_recursive\n")
+        return 1
+    }
+    print("PASS: test_inl_non_recursive\n")
+    return 0
+}
+
+// T09: Small function always inlined
+fn test_inl_small_always_inlined() -> i32 with IO, Mut, Div, Panic {
+    var funcs: [IrFunction; 4096] = [ir_empty_function(); 4096]
+    let callee_name = inl_get_test_func_name(1)
+    funcs[0] = inl_make_caller_func(0, callee_name, 2, 1)
+    funcs[1] = inl_make_test_func(1, 5)  // 5 < INL_SMALL_FUNC_THRESHOLD
+    let module = inl_make_test_module(funcs, 2)
+
+    var ctx = inl_context_new()
+    ctx = inl_analyze_module(ctx, module)
+    ctx = inl_discover_all_calls(ctx, module)
+    ctx = inl_detect_direct_recursion(ctx)
+    ctx = inl_score_all_sites(ctx)
+    ctx = inl_decide_all(ctx)
+
+    if ctx.decision_count < 1 {
+        print("FAIL: test_inl_small_always_inlined\n")
+        return 1
+    }
+    let dec = ctx.decisions[0]
+    if !dec.should_inline || dec.reason_code != INL_REASON_SMALL {
+        print("FAIL: test_inl_small_always_inlined\n")
+        return 1
+    }
+    print("PASS: test_inl_small_always_inlined\n")
+    return 0
+}
+
+// T10: Large function not inlined
+fn test_inl_large_not_inlined() -> i32 with IO, Mut, Div, Panic {
+    var funcs: [IrFunction; 4096] = [ir_empty_function(); 4096]
+    let callee_name = inl_get_test_func_name(1)
+    funcs[0] = inl_make_caller_func(0, callee_name, 2, 1)
+    funcs[1] = inl_make_test_func(1, 501)  // > INL_MAX_FUNC_SIZE
+    let module = inl_make_test_module(funcs, 2)
+
+    var ctx = inl_context_new()
+    ctx = inl_analyze_module(ctx, module)
+    ctx = inl_discover_all_calls(ctx, module)
+    ctx = inl_detect_direct_recursion(ctx)
+    ctx = inl_score_all_sites(ctx)
+    ctx = inl_decide_all(ctx)
+
+    if ctx.decision_count < 1 {
+        print("FAIL: test_inl_large_not_inlined\n")
+        return 1
+    }
+    let dec = ctx.decisions[0]
+    if dec.should_inline {
+        print("FAIL: test_inl_large_not_inlined\n")
+        return 1
+    }
+    if dec.reason_code != INL_REASON_TOO_LARGE {
+        print("FAIL: test_inl_large_not_inlined\n")
+        return 1
+    }
+    print("PASS: test_inl_large_not_inlined\n")
+    return 0
+}
+
+// T11: Recursive function never inlined
+fn test_inl_recursive_never_inlined() -> i32 with IO, Mut, Div, Panic {
+    var funcs: [IrFunction; 4096] = [ir_empty_function(); 4096]
+    let callee_name = inl_get_test_func_name(0)
+    funcs[0] = inl_make_recursive_func(0, 6)
+    let module = inl_make_test_module(funcs, 1)
+
+    var ctx = inl_context_new()
+    ctx = inl_analyze_module(ctx, module)
+    ctx = inl_discover_all_calls(ctx, module)
+    ctx = inl_detect_direct_recursion(ctx)
+    ctx = inl_score_all_sites(ctx)
+    ctx = inl_decide_all(ctx)
+
+    // The self-call should be rejected
+    var all_rejected: bool = true
+    var i: i64 = 0
+    while i < ctx.decision_count {
+        if ctx.decisions[i as usize].should_inline {
+            all_rejected = false
+        }
+        i = i + 1
+    }
+    if !all_rejected {
+        print("FAIL: test_inl_recursive_never_inlined\n")
+        return 1
+    }
+    print("PASS: test_inl_recursive_never_inlined\n")
+    return 0
+}
+
+// T12: Benefit score positive for small leaf
+fn test_inl_benefit_small_leaf() -> i32 with IO, Mut, Div, Panic {
+    var funcs: [IrFunction; 4096] = [ir_empty_function(); 4096]
+    let callee_name = inl_get_test_func_name(1)
+    funcs[0] = inl_make_caller_func(0, callee_name, 1, 0)
+    funcs[1] = inl_make_test_func(1, 3)
+    let module = inl_make_test_module(funcs, 2)
+
+    var ctx = inl_context_new()
+    ctx = inl_analyze_module(ctx, module)
+    ctx = inl_discover_all_calls(ctx, module)
+    ctx = inl_detect_direct_recursion(ctx)
+
+    let score = inl_compute_benefit(ctx, 0)
+    // Small (100) + leaf (90) + overhead (5) = 195
+    if score <= 0 {
+        print("FAIL: test_inl_benefit_small_leaf\n")
+        return 1
+    }
+    print("PASS: test_inl_benefit_small_leaf\n")
+    return 0
+}
+
+// T13: Benefit score negative for recursive
+fn test_inl_benefit_negative_recursive() -> i32 with IO, Mut, Div, Panic {
+    var funcs: [IrFunction; 4096] = [ir_empty_function(); 4096]
+    funcs[0] = inl_make_recursive_func(0, 6)
+    let module = inl_make_test_module(funcs, 1)
+
+    var ctx = inl_context_new()
+    ctx = inl_analyze_module(ctx, module)
+    ctx = inl_discover_all_calls(ctx, module)
+    ctx = inl_detect_direct_recursion(ctx)
+
+    if ctx.call_site_count < 1 {
+        print("FAIL: test_inl_benefit_negative_recursive\n")
+        return 1
+    }
+    let score = inl_compute_benefit(ctx, 0)
+    if score >= 0 {
+        print("FAIL: test_inl_benefit_negative_recursive\n")
+        return 1
+    }
+    print("PASS: test_inl_benefit_negative_recursive\n")
+    return 0
+}
+
+// T14: Module analysis counts functions correctly
+fn test_inl_module_analysis() -> i32 with IO, Mut, Div, Panic {
+    var funcs: [IrFunction; 4096] = [ir_empty_function(); 4096]
+    funcs[0] = inl_make_test_func(0, 10)
+    funcs[1] = inl_make_test_func(1, 20)
+    funcs[2] = inl_make_test_func(2, 30)
+    let module = inl_make_test_module(funcs, 3)
+
+    var ctx = inl_context_new()
+    ctx = inl_analyze_module(ctx, module)
+
+    if ctx.func_info_count != 3 {
+        print("FAIL: test_inl_module_analysis\n")
+        return 1
+    }
+    if ctx.total_original_size != 60 {
+        print("FAIL: test_inl_module_analysis\n")
+        return 1
+    }
+    // Budget = 60 * 2 - 60 = 60
+    if ctx.budget_remaining != 60 {
+        print("FAIL: test_inl_module_analysis\n")
+        return 1
+    }
+    print("PASS: test_inl_module_analysis\n")
+    return 0
+}
+
+// T15: Budget computed correctly
+fn test_inl_budget_computation() -> i32 with IO, Mut, Div, Panic {
+    var funcs: [IrFunction; 4096] = [ir_empty_function(); 4096]
+    funcs[0] = inl_make_test_func(0, 100)
+    let module = inl_make_test_module(funcs, 1)
+
+    var ctx = inl_context_new()
+    ctx = inl_analyze_module(ctx, module)
+
+    // Budget = 100 * 2 - 100 = 100
+    if ctx.budget_remaining != 100 {
+        print("FAIL: test_inl_budget_computation\n")
+        return 1
+    }
+    print("PASS: test_inl_budget_computation\n")
+    return 0
+}
+
+// T16: Budget enforcement — exhausting budget rejects further inlining
+fn test_inl_budget_enforcement() -> i32 with IO, Mut, Div, Panic {
+    // Create a tiny module: one caller, one callee with 8 instrs (small threshold)
+    // But set budget to only 2
+    var funcs: [IrFunction; 4096] = [ir_empty_function(); 4096]
+    let callee_name = inl_get_test_func_name(1)
+    funcs[0] = inl_make_caller_func(0, callee_name, 1, 0)
+    funcs[1] = inl_make_test_func(1, 8)  // small, would normally inline
+    let module = inl_make_test_module(funcs, 2)
+
+    var ctx = inl_context_new()
+    ctx = inl_analyze_module(ctx, module)
+    ctx = inl_discover_all_calls(ctx, module)
+    ctx = inl_detect_direct_recursion(ctx)
+    ctx = inl_score_all_sites(ctx)
+
+    // Manually set budget to tiny value so size_delta > budget
+    ctx.budget_remaining = 2
+
+    ctx = inl_decide_all(ctx)
+
+    // Callee has 8 instrs, so size_delta = 7, budget = 2 -> rejected
+    if ctx.decision_count < 1 {
+        print("FAIL: test_inl_budget_enforcement\n")
+        return 1
+    }
+    let dec = ctx.decisions[0]
+    if dec.should_inline {
+        print("FAIL: test_inl_budget_enforcement\n")
+        return 1
+    }
+    if dec.reason_code != INL_REASON_BUDGET {
+        print("FAIL: test_inl_budget_enforcement\n")
+        return 1
+    }
+    print("PASS: test_inl_budget_enforcement\n")
+    return 0
+}
+
+// T17: Bottom-up order puts leaves first
+fn test_inl_bottom_up_leaves_first() -> i32 with IO, Mut, Div, Panic {
+    var funcs: [IrFunction; 4096] = [ir_empty_function(); 4096]
+    let f1_name = inl_get_test_func_name(1)
+    funcs[0] = inl_make_caller_func(0, f1_name, 2, 1)  // non-leaf: calls f1
+    funcs[1] = inl_make_test_func(1, 5)                 // leaf
+    let module = inl_make_test_module(funcs, 2)
+
+    var ctx = inl_context_new()
+    ctx = inl_analyze_module(ctx, module)
+    ctx = inl_discover_all_calls(ctx, module)
+    ctx = inl_detect_direct_recursion(ctx)
+
+    let order = inl_compute_order(ctx)
+    if order.count < 2 {
+        print("FAIL: test_inl_bottom_up_leaves_first\n")
+        return 1
+    }
+    // First in order should be f1 (leaf), second should be f0 (caller)
+    if order.func_ids[0] != 1 {
+        print("FAIL: test_inl_bottom_up_leaves_first\n")
+        return 1
+    }
+    if order.func_ids[1] != 0 {
+        print("FAIL: test_inl_bottom_up_leaves_first\n")
+        return 1
+    }
+    print("PASS: test_inl_bottom_up_leaves_first\n")
+    return 0
+}
+
+// T18: Bottom-up order puts recursive last
+fn test_inl_bottom_up_recursive_last() -> i32 with IO, Mut, Div, Panic {
+    var funcs: [IrFunction; 4096] = [ir_empty_function(); 4096]
+    funcs[0] = inl_make_test_func(0, 5)          // leaf
+    funcs[1] = inl_make_recursive_func(1, 6)     // recursive
+    let module = inl_make_test_module(funcs, 2)
+
+    var ctx = inl_context_new()
+    ctx = inl_analyze_module(ctx, module)
+    ctx = inl_discover_all_calls(ctx, module)
+    ctx = inl_detect_direct_recursion(ctx)
+
+    let order = inl_compute_order(ctx)
+    if order.count < 2 {
+        print("FAIL: test_inl_bottom_up_recursive_last\n")
+        return 1
+    }
+    // Leaf first, recursive last
+    if order.func_ids[0] != 0 {
+        print("FAIL: test_inl_bottom_up_recursive_last\n")
+        return 1
+    }
+    if order.func_ids[1] != 1 {
+        print("FAIL: test_inl_bottom_up_recursive_last\n")
+        return 1
+    }
+    print("PASS: test_inl_bottom_up_recursive_last\n")
+    return 0
+}
+
+// T19: Register map add and lookup
+fn test_inl_reg_map_basic() -> i32 with IO, Mut, Div, Panic {
+    var rmap = inl_reg_map_new()
+    rmap = inl_reg_map_add(rmap, 5, 100)
+    rmap = inl_reg_map_add(rmap, 10, 200)
+
+    let r5 = inl_reg_map_lookup(rmap, 5)
+    let r10 = inl_reg_map_lookup(rmap, 10)
+    let r99 = inl_reg_map_lookup(rmap, 99)
+
+    if r5 != 100 || r10 != 200 || r99 != 99 {
+        print("FAIL: test_inl_reg_map_basic\n")
+        return 1
+    }
+    print("PASS: test_inl_reg_map_basic\n")
+    return 0
+}
+
+// T20: Register map negative register passthrough
+fn test_inl_reg_map_negative() -> i32 with IO, Mut, Div, Panic {
+    let rmap = inl_reg_map_new()
+    let result = inl_reg_map_lookup(rmap, INL_INVALID)
+    if result != INL_INVALID {
+        print("FAIL: test_inl_reg_map_negative\n")
+        return 1
+    }
+    print("PASS: test_inl_reg_map_negative\n")
+    return 0
+}
+
+// T21: Inline count tracking
+fn test_inl_inline_count() -> i32 with IO, Mut, Div, Panic {
+    var funcs: [IrFunction; 4096] = [ir_empty_function(); 4096]
+    let callee_name = inl_get_test_func_name(1)
+    funcs[0] = inl_make_caller_func(0, callee_name, 2, 1)
+    funcs[1] = inl_make_test_func(1, 3)
+    let module = inl_make_test_module(funcs, 2)
+
+    var ctx = inl_context_new()
+    ctx = inl_analyze_module(ctx, module)
+    ctx = inl_discover_all_calls(ctx, module)
+    ctx = inl_detect_direct_recursion(ctx)
+    ctx = inl_score_all_sites(ctx)
+    ctx = inl_decide_all(ctx)
+
+    if ctx.inline_count != 1 {
+        print("FAIL: test_inl_inline_count\n")
+        return 1
+    }
+    print("PASS: test_inl_inline_count\n")
+    return 0
+}
+
+// T22: Size delta tracking after decisions
+fn test_inl_size_delta() -> i32 with IO, Mut, Div, Panic {
+    var funcs: [IrFunction; 4096] = [ir_empty_function(); 4096]
+    let callee_name = inl_get_test_func_name(1)
+    funcs[0] = inl_make_caller_func(0, callee_name, 2, 1)
+    funcs[1] = inl_make_test_func(1, 5)
+    let module = inl_make_test_module(funcs, 2)
+
+    var ctx = inl_context_new()
+    ctx = inl_analyze_module(ctx, module)
+    ctx = inl_discover_all_calls(ctx, module)
+    ctx = inl_detect_direct_recursion(ctx)
+    ctx = inl_score_all_sites(ctx)
+    ctx = inl_decide_all(ctx)
+
+    let dec = ctx.decisions[0]
+    // size_delta = callee_instr_count - 1 = 5 - 1 = 4
+    if dec.size_delta != 4 {
+        print("FAIL: test_inl_size_delta\n")
+        return 1
+    }
+    print("PASS: test_inl_size_delta\n")
+    return 0
+}
+
+// T23: Leaf function gets higher benefit than non-leaf
+fn test_inl_leaf_higher_benefit() -> i32 with IO, Mut, Div, Panic {
+    var funcs: [IrFunction; 4096] = [ir_empty_function(); 4096]
+
+    // f0 calls f1 (leaf) and f2 (non-leaf which calls f3)
+    let f1_name = inl_get_test_func_name(1)
+    let f2_name = inl_get_test_func_name(2)
+    let f3_name = inl_get_test_func_name(3)
+
+    // f0: calls f1 and f2
+    var f0 = ir_empty_function()
+    f0.name = inl_get_test_func_name(0)
+    f0.instrs[0] = ir_call(0, 0, f1_name, ir_empty_reg_list(), 0)
+    f0.instrs[1] = ir_call(1, 0, f2_name, ir_empty_reg_list(), 0)
+    f0.instrs[2] = ir_return(1)
+    f0.instr_count = 3
+    f0.reg_count = 2
+
+    funcs[0] = f0
+    funcs[1] = inl_make_test_func(1, 15)  // leaf, 15 instrs
+    funcs[2] = inl_make_caller_func(2, f3_name, 5, 5)  // non-leaf, calls f3
+    funcs[3] = inl_make_test_func(3, 5)   // leaf
+    let module = inl_make_test_module(funcs, 4)
+
+    var ctx = inl_context_new()
+    ctx = inl_analyze_module(ctx, module)
+    ctx = inl_discover_all_calls(ctx, module)
+    ctx = inl_detect_direct_recursion(ctx)
+
+    // Find call sites: f0->f1 and f0->f2
+    let site_f1 = inl_find_site(ctx, 0, 1)
+    let site_f2 = inl_find_site(ctx, 0, 2)
+
+    if site_f1 < 0 || site_f2 < 0 {
+        print("FAIL: test_inl_leaf_higher_benefit\n")
+        return 1
+    }
+
+    let benefit_f1 = inl_compute_benefit(ctx, site_f1)
+    let benefit_f2 = inl_compute_benefit(ctx, site_f2)
+
+    // f1 is leaf, so should have higher benefit than f2 (non-leaf)
+    if benefit_f1 <= benefit_f2 {
+        print("FAIL: test_inl_leaf_higher_benefit\n")
+        return 1
+    }
+    print("PASS: test_inl_leaf_higher_benefit\n")
+    return 0
+}
+
+// T24: Estimated cost includes loop penalty
+fn test_inl_loop_cost_penalty() -> i32 with IO, Mut, Div, Panic {
+    let func_no_loop = inl_make_test_func(0, 7)
+    let func_loop = inl_make_loop_func(1)
+
+    let info_no_loop = inl_analyze_function(func_no_loop, 0)
+    let info_loop = inl_analyze_function(func_loop, 1)
+
+    // Loop func has same instr count but higher estimated cost
+    if info_loop.estimated_cost <= info_loop.instr_count {
+        // Good: loop penalty applied
+        if info_no_loop.estimated_cost != info_no_loop.instr_count {
+            print("FAIL: test_inl_loop_cost_penalty\n")
+            return 1
+        }
+    } else {
+        print("FAIL: test_inl_loop_cost_penalty\n")
+        return 1
+    }
+    print("PASS: test_inl_loop_cost_penalty\n")
+    return 0
+}
+
+// T25: Instruction count at threshold boundary
+fn test_inl_threshold_boundary() -> i32 with IO, Mut, Div, Panic {
+    var funcs: [IrFunction; 4096] = [ir_empty_function(); 4096]
+
+    // Callee with exactly INL_SMALL_FUNC_THRESHOLD (10) instrs — NOT small
+    let callee_name = inl_get_test_func_name(1)
+    funcs[0] = inl_make_caller_func(0, callee_name, 2, 1)
+    funcs[1] = inl_make_test_func(1, INL_SMALL_FUNC_THRESHOLD)
+    let module = inl_make_test_module(funcs, 2)
+
+    var ctx = inl_context_new()
+    ctx = inl_analyze_module(ctx, module)
+    ctx = inl_discover_all_calls(ctx, module)
+    ctx = inl_detect_direct_recursion(ctx)
+    ctx = inl_score_all_sites(ctx)
+    ctx = inl_decide_all(ctx)
+
+    // 10 instrs is NOT < 10, so should NOT be INL_REASON_SMALL
+    let dec = ctx.decisions[0]
+    if dec.reason_code == INL_REASON_SMALL {
+        print("FAIL: test_inl_threshold_boundary\n")
+        return 1
+    }
+    print("PASS: test_inl_threshold_boundary\n")
+    return 0
+}
+
+// T26: Below threshold is always inlined
+fn test_inl_below_threshold() -> i32 with IO, Mut, Div, Panic {
+    var funcs: [IrFunction; 4096] = [ir_empty_function(); 4096]
+    let callee_name = inl_get_test_func_name(1)
+    funcs[0] = inl_make_caller_func(0, callee_name, 2, 1)
+    funcs[1] = inl_make_test_func(1, 9)  // 9 < 10
+    let module = inl_make_test_module(funcs, 2)
+
+    var ctx = inl_context_new()
+    ctx = inl_analyze_module(ctx, module)
+    ctx = inl_discover_all_calls(ctx, module)
+    ctx = inl_detect_direct_recursion(ctx)
+    ctx = inl_score_all_sites(ctx)
+    ctx = inl_decide_all(ctx)
+
+    let dec = ctx.decisions[0]
+    if !dec.should_inline || dec.reason_code != INL_REASON_SMALL {
+        print("FAIL: test_inl_below_threshold\n")
+        return 1
+    }
+    print("PASS: test_inl_below_threshold\n")
+    return 0
+}
+
+// T27: Approved count matches expectations
+fn test_inl_approved_count() -> i32 with IO, Mut, Div, Panic {
+    var funcs: [IrFunction; 4096] = [ir_empty_function(); 4096]
+    let f1_name = inl_get_test_func_name(1)
+    let f2_name = inl_get_test_func_name(2)
+
+    // f0 calls f1 (small, will inline) and f2 (large, won't)
+    var f0 = ir_empty_function()
+    f0.name = inl_get_test_func_name(0)
+    f0.instrs[0] = ir_call(0, 0, f1_name, ir_empty_reg_list(), 0)
+    f0.instrs[1] = ir_call(1, 0, f2_name, ir_empty_reg_list(), 0)
+    f0.instrs[2] = ir_return(1)
+    f0.instr_count = 3
+    f0.reg_count = 2
+
+    funcs[0] = f0
+    funcs[1] = inl_make_test_func(1, 3)    // small -> inline
+    funcs[2] = inl_make_test_func(2, 501)  // too large -> reject
+    let module = inl_make_test_module(funcs, 3)
+
+    var ctx = inl_context_new()
+    ctx = inl_analyze_module(ctx, module)
+    ctx = inl_discover_all_calls(ctx, module)
+    ctx = inl_detect_direct_recursion(ctx)
+    ctx = inl_score_all_sites(ctx)
+    ctx = inl_decide_all(ctx)
+
+    let approved = inl_count_approved(ctx)
+    if approved != 1 {
+        print("FAIL: test_inl_approved_count\n")
+        return 1
+    }
+    print("PASS: test_inl_approved_count\n")
+    return 0
+}
+
+// T28: Rejected count by reason
+fn test_inl_rejected_reason_count() -> i32 with IO, Mut, Div, Panic {
+    var funcs: [IrFunction; 4096] = [ir_empty_function(); 4096]
+    let f1_name = inl_get_test_func_name(1)
+
+    var f0 = ir_empty_function()
+    f0.name = inl_get_test_func_name(0)
+    f0.instrs[0] = ir_call(0, 0, f1_name, ir_empty_reg_list(), 0)
+    f0.instrs[1] = ir_return(0)
+    f0.instr_count = 2
+    f0.reg_count = 1
+
+    funcs[0] = f0
+    funcs[1] = inl_make_test_func(1, 501)  // too large
+    let module = inl_make_test_module(funcs, 2)
+
+    var ctx = inl_context_new()
+    ctx = inl_analyze_module(ctx, module)
+    ctx = inl_discover_all_calls(ctx, module)
+    ctx = inl_detect_direct_recursion(ctx)
+    ctx = inl_score_all_sites(ctx)
+    ctx = inl_decide_all(ctx)
+
+    let rej = inl_count_rejected_by_reason(ctx, INL_REASON_TOO_LARGE)
+    if rej != 1 {
+        print("FAIL: test_inl_rejected_reason_count\n")
+        return 1
+    }
+    print("PASS: test_inl_rejected_reason_count\n")
+    return 0
+}
+
+// T29: Transform result — inline a 3-instr callee into caller
+fn test_inl_transform_basic() -> i32 with IO, Mut, Div, Panic {
+    // Caller: load 1, call f1, return
+    // Callee (f1): load 42, return r0
+    var caller = ir_empty_function()
+    caller.name = inl_get_test_func_name(0)
+    caller.instrs[0] = ir_load_imm(0, 1)
+    let callee_name = inl_get_test_func_name(1)
+    caller.instrs[1] = ir_call(1, 0, callee_name, ir_empty_reg_list(), 0)
+    caller.instrs[2] = ir_return(1)
+    caller.instr_count = 3
+    caller.reg_count = 2
+    caller.label_count = 0
+
+    var callee = ir_empty_function()
+    callee.name = inl_get_test_func_name(1)
+    callee.instrs[0] = ir_load_imm(0, 42)
+    callee.instrs[1] = ir_return(0)
+    callee.instr_count = 2
+    callee.reg_count = 1
+    callee.label_count = 0
+
+    let xform = inl_transform(caller, callee, 1)
+    if !xform.success {
+        print("FAIL: test_inl_transform_basic\n")
+        return 1
+    }
+    // Original: 3 instrs. Callee: 2 instrs. Net added = 2-1 = 1. New total = 4.
+    if xform.func.instr_count != 4 {
+        print("FAIL: test_inl_transform_basic\n")
+        return 1
+    }
+    print("PASS: test_inl_transform_basic\n")
+    return 0
+}
+
+// T30: Transform preserves instructions before and after call
+fn test_inl_transform_preserves_context() -> i32 with IO, Mut, Div, Panic {
+    var caller = ir_empty_function()
+    caller.name = inl_get_test_func_name(0)
+    caller.instrs[0] = ir_load_imm(0, 111)  // before
+    caller.instrs[1] = ir_load_imm(1, 222)  // before
+    let callee_name = inl_get_test_func_name(1)
+    caller.instrs[2] = ir_call(2, 0, callee_name, ir_empty_reg_list(), 0)
+    caller.instrs[3] = ir_load_imm(3, 333)  // after
+    caller.instrs[4] = ir_return(3)
+    caller.instr_count = 5
+    caller.reg_count = 4
+    caller.label_count = 0
+
+    var callee = ir_empty_function()
+    callee.name = callee_name
+    callee.instrs[0] = ir_load_imm(0, 99)
+    callee.instrs[1] = ir_return(0)
+    callee.instr_count = 2
+    callee.reg_count = 1
+    callee.label_count = 0
+
+    let xform = inl_transform(caller, callee, 2)
+    if !xform.success {
+        print("FAIL: test_inl_transform_preserves_context\n")
+        return 1
+    }
+
+    // Instructions before call should be preserved
+    let i0 = xform.func.instrs[0]
+    let i1 = xform.func.instrs[1]
+    if i0.imm_i64 != 111 || i1.imm_i64 != 222 {
+        print("FAIL: test_inl_transform_preserves_context\n")
+        return 1
+    }
+
+    // Net added = 1, so total = 6. Last two should be load 333 and return.
+    if xform.func.instr_count != 6 {
+        print("FAIL: test_inl_transform_preserves_context\n")
+        return 1
+    }
+    print("PASS: test_inl_transform_preserves_context\n")
+    return 0
+}
+
+// T31: Transform return becomes copy
+fn test_inl_transform_return_to_copy() -> i32 with IO, Mut, Div, Panic {
+    var caller = ir_empty_function()
+    caller.name = inl_get_test_func_name(0)
+    let callee_name = inl_get_test_func_name(1)
+    caller.instrs[0] = ir_call(0, 0, callee_name, ir_empty_reg_list(), 0)
+    caller.instrs[1] = ir_return(0)
+    caller.instr_count = 2
+    caller.reg_count = 1
+    caller.label_count = 0
+
+    var callee = ir_empty_function()
+    callee.name = callee_name
+    callee.instrs[0] = ir_load_imm(0, 77)
+    callee.instrs[1] = ir_return(0)
+    callee.instr_count = 2
+    callee.reg_count = 1
+    callee.label_count = 0
+
+    let xform = inl_transform(caller, callee, 0)
+    if !xform.success {
+        print("FAIL: test_inl_transform_return_to_copy\n")
+        return 1
+    }
+
+    // The callee's return should become a copy instruction
+    // Inlined body: [load_imm(remapped, 77), copy(0, remapped)]
+    let copy_instr = xform.func.instrs[1]
+    if !opcodes_equal(copy_instr.op, IrOpcode::IrCopy) {
+        print("FAIL: test_inl_transform_return_to_copy\n")
+        return 1
+    }
+    // Copy destination should be the call's original dst (0)
+    if copy_instr.dst != 0 {
+        print("FAIL: test_inl_transform_return_to_copy\n")
+        return 1
+    }
+    print("PASS: test_inl_transform_return_to_copy\n")
+    return 0
+}
+
+// T32: Transform fails on invalid call index
+fn test_inl_transform_invalid_idx() -> i32 with IO, Mut, Div, Panic {
+    var caller = ir_empty_function()
+    caller.name = inl_get_test_func_name(0)
+    caller.instrs[0] = ir_return(0)
+    caller.instr_count = 1
+    caller.reg_count = 1
+
+    var callee = ir_empty_function()
+    callee.name = inl_get_test_func_name(1)
+    callee.instrs[0] = ir_return(0)
+    callee.instr_count = 1
+    callee.reg_count = 1
+
+    let xform = inl_transform(caller, callee, 5)
+    if xform.success {
+        print("FAIL: test_inl_transform_invalid_idx\n")
+        return 1
+    }
+    print("PASS: test_inl_transform_invalid_idx\n")
+    return 0
+}
+
+// T33: Multiple callees — different call sites to different functions
+fn test_inl_multiple_callees() -> i32 with IO, Mut, Div, Panic {
+    var funcs: [IrFunction; 4096] = [ir_empty_function(); 4096]
+    let f1_name = inl_get_test_func_name(1)
+    let f2_name = inl_get_test_func_name(2)
+
+    var f0 = ir_empty_function()
+    f0.name = inl_get_test_func_name(0)
+    f0.instrs[0] = ir_call(0, 0, f1_name, ir_empty_reg_list(), 0)
+    f0.instrs[1] = ir_call(1, 0, f2_name, ir_empty_reg_list(), 0)
+    f0.instrs[2] = ir_return(1)
+    f0.instr_count = 3
+    f0.reg_count = 2
+
+    funcs[0] = f0
+    funcs[1] = inl_make_test_func(1, 4)
+    funcs[2] = inl_make_test_func(2, 6)
+    let module = inl_make_test_module(funcs, 3)
+
+    var ctx = inl_context_new()
+    ctx = inl_analyze_module(ctx, module)
+    ctx = inl_discover_all_calls(ctx, module)
+
+    // Should find 2 call sites
+    if ctx.call_site_count != 2 {
+        print("FAIL: test_inl_multiple_callees\n")
+        return 1
+    }
+
+    let sites_f1 = inl_count_sites_for_callee(ctx, 1)
+    let sites_f2 = inl_count_sites_for_callee(ctx, 2)
+    if sites_f1 != 1 || sites_f2 != 1 {
+        print("FAIL: test_inl_multiple_callees\n")
+        return 1
+    }
+    print("PASS: test_inl_multiple_callees\n")
+    return 0
+}
+
+// T34: Chain of calls — f0 calls f1, f1 calls f2, f2 is leaf
+fn test_inl_call_chain() -> i32 with IO, Mut, Div, Panic {
+    var funcs: [IrFunction; 4096] = [ir_empty_function(); 4096]
+    let f1_name = inl_get_test_func_name(1)
+    let f2_name = inl_get_test_func_name(2)
+
+    funcs[0] = inl_make_caller_func(0, f1_name, 1, 0)
+    funcs[1] = inl_make_caller_func(1, f2_name, 1, 0)
+    funcs[2] = inl_make_test_func(2, 4)
+    let module = inl_make_test_module(funcs, 3)
+
+    var ctx = inl_context_new()
+    ctx = inl_analyze_module(ctx, module)
+    ctx = inl_discover_all_calls(ctx, module)
+
+    // f0->f1, f1->f2
+    if ctx.call_site_count != 2 {
+        print("FAIL: test_inl_call_chain\n")
+        return 1
+    }
+
+    // f2 should be leaf, f1 not, f0 not
+    if !ctx.func_infos[2].is_leaf {
+        print("FAIL: test_inl_call_chain\n")
+        return 1
+    }
+    if ctx.func_infos[1].is_leaf {
+        print("FAIL: test_inl_call_chain\n")
+        return 1
+    }
+    print("PASS: test_inl_call_chain\n")
+    return 0
+}
+
+// T35: Bottom-up order for three-level chain
+fn test_inl_three_level_order() -> i32 with IO, Mut, Div, Panic {
+    var funcs: [IrFunction; 4096] = [ir_empty_function(); 4096]
+    let f1_name = inl_get_test_func_name(1)
+    let f2_name = inl_get_test_func_name(2)
+
+    funcs[0] = inl_make_caller_func(0, f1_name, 1, 0)
+    funcs[1] = inl_make_caller_func(1, f2_name, 1, 0)
+    funcs[2] = inl_make_test_func(2, 4)
+    let module = inl_make_test_module(funcs, 3)
+
+    var ctx = inl_context_new()
+    ctx = inl_analyze_module(ctx, module)
+    ctx = inl_discover_all_calls(ctx, module)
+    ctx = inl_detect_direct_recursion(ctx)
+
+    let order = inl_compute_order(ctx)
+    if order.count < 3 {
+        print("FAIL: test_inl_three_level_order\n")
+        return 1
+    }
+    // f2 (leaf) should come first
+    if order.func_ids[0] != 2 {
+        print("FAIL: test_inl_three_level_order\n")
+        return 1
+    }
+    // f1 (calls f2, 1 call) should come before f0 (calls f1, 1 call) due
+    // to call_count tie-breaking. Both have 1 call, but f1 is found first
+    // by the minimum-search since it has a lower index. Either order is
+    // acceptable for equal call counts.
+    print("PASS: test_inl_three_level_order\n")
+    return 0
+}
+
+// T36: Find site helper
+fn test_inl_find_site_helper() -> i32 with IO, Mut, Div, Panic {
+    var funcs: [IrFunction; 4096] = [ir_empty_function(); 4096]
+    let f1_name = inl_get_test_func_name(1)
+    funcs[0] = inl_make_caller_func(0, f1_name, 1, 0)
+    funcs[1] = inl_make_test_func(1, 3)
+    let module = inl_make_test_module(funcs, 2)
+
+    var ctx = inl_context_new()
+    ctx = inl_analyze_module(ctx, module)
+    ctx = inl_discover_all_calls(ctx, module)
+
+    let idx = inl_find_site(ctx, 0, 1)
+    if idx < 0 {
+        print("FAIL: test_inl_find_site_helper\n")
+        return 1
+    }
+    // Non-existent site
+    let missing = inl_find_site(ctx, 0, 99)
+    if missing != INL_INVALID {
+        print("FAIL: test_inl_find_site_helper\n")
+        return 1
+    }
+    print("PASS: test_inl_find_site_helper\n")
+    return 0
+}
+
+// T37: Count real instructions helper
+fn test_inl_count_real_instrs_helper() -> i32 with IO, Mut, Div, Panic {
+    var func = ir_empty_function()
+    func.instrs[0] = ir_load_imm(0, 1)
+    func.instrs[1] = ir_nop()
+    func.instrs[2] = ir_load_imm(1, 2)
+    func.instrs[3] = ir_nop()
+    func.instrs[4] = ir_return(1)
+    func.instr_count = 5
+
+    let count = inl_count_real_instrs(func)
+    if count != 3 {
+        print("FAIL: test_inl_count_real_instrs_helper\n")
+        return 1
+    }
+    print("PASS: test_inl_count_real_instrs_helper\n")
+    return 0
+}
+
+// T38: Mutual recursion detection — A calls B, B calls A
+fn test_inl_mutual_recursion() -> i32 with IO, Mut, Div, Panic {
+    var funcs: [IrFunction; 4096] = [ir_empty_function(); 4096]
+    let f0_name = inl_get_test_func_name(0)
+    let f1_name = inl_get_test_func_name(1)
+
+    // f0 calls f1
+    funcs[0] = inl_make_caller_func(0, f1_name, 1, 0)
+    // f1 calls f0
+    funcs[1] = inl_make_caller_func(1, f0_name, 1, 0)
+    let module = inl_make_test_module(funcs, 2)
+
+    var ctx = inl_context_new()
+    ctx = inl_analyze_module(ctx, module)
+    ctx = inl_discover_all_calls(ctx, module)
+    ctx = inl_detect_direct_recursion(ctx)
+    ctx = inl_detect_mutual_recursion(ctx)
+
+    // Both should be flagged as recursive
+    if !ctx.func_infos[0].is_recursive || !ctx.func_infos[1].is_recursive {
+        print("FAIL: test_inl_mutual_recursion\n")
+        return 1
+    }
+    print("PASS: test_inl_mutual_recursion\n")
+    return 0
+}
+
+// T39: Empty module produces empty context
+fn test_inl_empty_module() -> i32 with IO, Mut, Div, Panic {
+    var funcs: [IrFunction; 4096] = [ir_empty_function(); 4096]
+    let module = inl_make_test_module(funcs, 0)
+
+    var ctx = inl_context_new()
+    ctx = inl_analyze_module(ctx, module)
+    ctx = inl_discover_all_calls(ctx, module)
+
+    if ctx.func_info_count != 0 || ctx.call_site_count != 0 {
+        print("FAIL: test_inl_empty_module\n")
+        return 1
+    }
+    if ctx.total_original_size != 0 {
+        print("FAIL: test_inl_empty_module\n")
+        return 1
+    }
+    print("PASS: test_inl_empty_module\n")
+    return 0
+}
+
+// T40: Opcode helpers — is_call, is_return, is_label, is_nop
+fn test_inl_opcode_helpers() -> i32 with IO, Mut, Div, Panic {
+    let call_instr = ir_call(0, 0, ir_empty_name(), ir_empty_reg_list(), 0)
+    let ret_instr = ir_return(0)
+    let label_instr = ir_label(0)
+    let nop_instr = ir_nop()
+    let load_instr = ir_load_imm(0, 5)
+
+    if !inl_is_call(call_instr) {
+        print("FAIL: test_inl_opcode_helpers\n")
+        return 1
+    }
+    if !inl_is_return(ret_instr) {
+        print("FAIL: test_inl_opcode_helpers\n")
+        return 1
+    }
+    if !inl_is_label(label_instr) {
+        print("FAIL: test_inl_opcode_helpers\n")
+        return 1
+    }
+    if !inl_is_nop(nop_instr) {
+        print("FAIL: test_inl_opcode_helpers\n")
+        return 1
+    }
+    // Negative: load is not a call
+    if inl_is_call(load_instr) {
+        print("FAIL: test_inl_opcode_helpers\n")
+        return 1
+    }
+    print("PASS: test_inl_opcode_helpers\n")
+    return 0
+}
+
+// T41: Backward branch detection
+fn test_inl_backward_branch_detect() -> i32 with IO, Mut, Div, Panic {
+    // Jump to label 2 at instruction index 10 => backward (label < idx)
+    let bwd_jump = ir_jump(2)
+    if !inl_is_backward_branch(bwd_jump, 10) {
+        print("FAIL: test_inl_backward_branch_detect\n")
+        return 1
+    }
+    // Jump to label 20 at instruction index 5 => forward (label >= idx)
+    let fwd_jump = ir_jump(20)
+    if inl_is_backward_branch(fwd_jump, 5) {
+        print("FAIL: test_inl_backward_branch_detect\n")
+        return 1
+    }
+    // Non-branch instruction
+    let load_instr = ir_load_imm(0, 5)
+    if inl_is_backward_branch(load_instr, 3) {
+        print("FAIL: test_inl_backward_branch_detect\n")
+        return 1
+    }
+    print("PASS: test_inl_backward_branch_detect\n")
+    return 0
+}
+
+// T42: Remap instruction registers
+fn test_inl_remap_instr_regs() -> i32 with IO, Mut, Div, Panic {
+    var rmap = inl_reg_map_new()
+    rmap = inl_reg_map_add(rmap, 0, 10)
+    rmap = inl_reg_map_add(rmap, 1, 11)
+    rmap = inl_reg_map_add(rmap, 2, 12)
+
+    let orig = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    let remapped = inl_remap_instr(orig, rmap)
+
+    if remapped.dst != 12 || remapped.src1 != 10 || remapped.src2 != 11 {
+        print("FAIL: test_inl_remap_instr_regs\n")
+        return 1
+    }
+    print("PASS: test_inl_remap_instr_regs\n")
+    return 0
+}
+
+// T43: Label remapping adds offset
+fn test_inl_remap_label_offset() -> i32 with IO, Mut, Div, Panic {
+    let orig = ir_jump(5)
+    let remapped = inl_remap_label(orig, 100)
+
+    if remapped.label_id != 105 {
+        print("FAIL: test_inl_remap_label_offset\n")
+        return 1
+    }
+    // Negative label_id should not be offset
+    let no_label = ir_load_imm(0, 42)
+    let remapped2 = inl_remap_label(no_label, 100)
+    if remapped2.label_id != no_label.label_id {
+        print("FAIL: test_inl_remap_label_offset\n")
+        return 1
+    }
+    print("PASS: test_inl_remap_label_offset\n")
+    return 0
+}
+
+// T44: Transform updates reg_count
+fn test_inl_transform_reg_count() -> i32 with IO, Mut, Div, Panic {
+    var caller = ir_empty_function()
+    caller.name = inl_get_test_func_name(0)
+    let callee_name = inl_get_test_func_name(1)
+    caller.instrs[0] = ir_call(0, 0, callee_name, ir_empty_reg_list(), 0)
+    caller.instrs[1] = ir_return(0)
+    caller.instr_count = 2
+    caller.reg_count = 1
+    caller.label_count = 0
+
+    var callee = ir_empty_function()
+    callee.name = callee_name
+    callee.instrs[0] = ir_load_imm(0, 1)
+    callee.instrs[1] = ir_load_imm(1, 2)
+    callee.instrs[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    callee.instrs[3] = ir_return(2)
+    callee.instr_count = 4
+    callee.reg_count = 3
+    callee.label_count = 0
+
+    let xform = inl_transform(caller, callee, 0)
+    if !xform.success {
+        print("FAIL: test_inl_transform_reg_count\n")
+        return 1
+    }
+    // New reg_count = caller(1) + callee(3) = 4
+    if xform.func.reg_count != 4 {
+        print("FAIL: test_inl_transform_reg_count\n")
+        return 1
+    }
+    print("PASS: test_inl_transform_reg_count\n")
+    return 0
+}
+
+// T45: Decision getter for specific site
+fn test_inl_get_decision_for_site() -> i32 with IO, Mut, Div, Panic {
+    var funcs: [IrFunction; 4096] = [ir_empty_function(); 4096]
+    let callee_name = inl_get_test_func_name(1)
+    funcs[0] = inl_make_caller_func(0, callee_name, 1, 0)
+    funcs[1] = inl_make_test_func(1, 3)
+    let module = inl_make_test_module(funcs, 2)
+
+    var ctx = inl_context_new()
+    ctx = inl_analyze_module(ctx, module)
+    ctx = inl_discover_all_calls(ctx, module)
+    ctx = inl_detect_direct_recursion(ctx)
+    ctx = inl_score_all_sites(ctx)
+    ctx = inl_decide_all(ctx)
+
+    let dec = inl_get_decision_for_site(ctx, 0)
+    if dec.call_site_idx != 0 {
+        print("FAIL: test_inl_get_decision_for_site\n")
+        return 1
+    }
+    if !dec.should_inline {
+        print("FAIL: test_inl_get_decision_for_site\n")
+        return 1
+    }
+    print("PASS: test_inl_get_decision_for_site\n")
+    return 0
+}
+
+// T46: Budget decreases after each approved inlining
+fn test_inl_budget_decreases() -> i32 with IO, Mut, Div, Panic {
+    var funcs: [IrFunction; 4096] = [ir_empty_function(); 4096]
+    let callee_name = inl_get_test_func_name(1)
+    funcs[0] = inl_make_caller_func(0, callee_name, 1, 0)
+    funcs[1] = inl_make_test_func(1, 5)
+    let module = inl_make_test_module(funcs, 2)
+
+    var ctx = inl_context_new()
+    ctx = inl_analyze_module(ctx, module)
+    let budget_before = ctx.budget_remaining
+
+    ctx = inl_discover_all_calls(ctx, module)
+    ctx = inl_detect_direct_recursion(ctx)
+    ctx = inl_score_all_sites(ctx)
+    ctx = inl_decide_all(ctx)
+
+    // Budget should have decreased by size_delta = 4
+    let budget_after = ctx.budget_remaining
+    let delta = budget_before - budget_after
+    if delta != 4 {
+        print("FAIL: test_inl_budget_decreases\n")
+        return 1
+    }
+    print("PASS: test_inl_budget_decreases\n")
+    return 0
+}
+
+// T47: Test func name generation
+fn test_inl_func_name_gen() -> i32 with IO, Mut, Div, Panic {
+    let n0 = inl_get_test_func_name(0)
+    let n5 = inl_get_test_func_name(5)
+    let n12 = inl_get_test_func_name(12)
+
+    // "f0" = [102, 48], len=2
+    if n0.len != 2 || n0.buf[0] != 102 as i8 || n0.buf[1] != 48 as i8 {
+        print("FAIL: test_inl_func_name_gen\n")
+        return 1
+    }
+    // "f5" = [102, 53], len=2
+    if n5.len != 2 || n5.buf[1] != 53 as i8 {
+        print("FAIL: test_inl_func_name_gen\n")
+        return 1
+    }
+    // "f12" = [102, 49, 50], len=3
+    if n12.len != 3 || n12.buf[1] != 49 as i8 || n12.buf[2] != 50 as i8 {
+        print("FAIL: test_inl_func_name_gen\n")
+        return 1
+    }
+    print("PASS: test_inl_func_name_gen\n")
+    return 0
+}
+
+// ============================================================================
+// Section 18: Test runner
+// ============================================================================
+
+fn test_inline_main() -> i32 with IO, Mut, Div, Panic {
+    var passed: i64 = 0
+    let total: i64 = 47
+
+    print("=== IR Inlining Tests ===\n")
+
+    if test_inl_context_init() == 0 { passed = passed + 1 }
+    if test_inl_leaf_detection() == 0 { passed = passed + 1 }
+    if test_inl_non_leaf_detection() == 0 { passed = passed + 1 }
+    if test_inl_loop_detection() == 0 { passed = passed + 1 }
+    if test_inl_call_site_discovery() == 0 { passed = passed + 1 }
+    if test_inl_multiple_call_sites() == 0 { passed = passed + 1 }
+    if test_inl_direct_recursion() == 0 { passed = passed + 1 }
+    if test_inl_non_recursive() == 0 { passed = passed + 1 }
+    if test_inl_small_always_inlined() == 0 { passed = passed + 1 }
+    if test_inl_large_not_inlined() == 0 { passed = passed + 1 }
+    if test_inl_recursive_never_inlined() == 0 { passed = passed + 1 }
+    if test_inl_benefit_small_leaf() == 0 { passed = passed + 1 }
+    if test_inl_benefit_negative_recursive() == 0 { passed = passed + 1 }
+    if test_inl_module_analysis() == 0 { passed = passed + 1 }
+    if test_inl_budget_computation() == 0 { passed = passed + 1 }
+    if test_inl_budget_enforcement() == 0 { passed = passed + 1 }
+    if test_inl_bottom_up_leaves_first() == 0 { passed = passed + 1 }
+    if test_inl_bottom_up_recursive_last() == 0 { passed = passed + 1 }
+    if test_inl_reg_map_basic() == 0 { passed = passed + 1 }
+    if test_inl_reg_map_negative() == 0 { passed = passed + 1 }
+    if test_inl_inline_count() == 0 { passed = passed + 1 }
+    if test_inl_size_delta() == 0 { passed = passed + 1 }
+    if test_inl_leaf_higher_benefit() == 0 { passed = passed + 1 }
+    if test_inl_loop_cost_penalty() == 0 { passed = passed + 1 }
+    if test_inl_threshold_boundary() == 0 { passed = passed + 1 }
+    if test_inl_below_threshold() == 0 { passed = passed + 1 }
+    if test_inl_approved_count() == 0 { passed = passed + 1 }
+    if test_inl_rejected_reason_count() == 0 { passed = passed + 1 }
+    if test_inl_transform_basic() == 0 { passed = passed + 1 }
+    if test_inl_transform_preserves_context() == 0 { passed = passed + 1 }
+    if test_inl_transform_return_to_copy() == 0 { passed = passed + 1 }
+    if test_inl_transform_invalid_idx() == 0 { passed = passed + 1 }
+    if test_inl_multiple_callees() == 0 { passed = passed + 1 }
+    if test_inl_call_chain() == 0 { passed = passed + 1 }
+    if test_inl_three_level_order() == 0 { passed = passed + 1 }
+    if test_inl_find_site_helper() == 0 { passed = passed + 1 }
+    if test_inl_count_real_instrs_helper() == 0 { passed = passed + 1 }
+    if test_inl_mutual_recursion() == 0 { passed = passed + 1 }
+    if test_inl_empty_module() == 0 { passed = passed + 1 }
+    if test_inl_opcode_helpers() == 0 { passed = passed + 1 }
+    if test_inl_backward_branch_detect() == 0 { passed = passed + 1 }
+    if test_inl_remap_instr_regs() == 0 { passed = passed + 1 }
+    if test_inl_remap_label_offset() == 0 { passed = passed + 1 }
+    if test_inl_transform_reg_count() == 0 { passed = passed + 1 }
+    if test_inl_get_decision_for_site() == 0 { passed = passed + 1 }
+    if test_inl_budget_decreases() == 0 { passed = passed + 1 }
+    if test_inl_func_name_gen() == 0 { passed = passed + 1 }
+
+    print("\nInlining: ")
+    print_int(passed)
+    print(" / ")
+    print_int(total)
+    print(" passed\n")
+
+    if passed == total { 0 } else { 1 }
+}

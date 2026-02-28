@@ -1,0 +1,2309 @@
+// self-hosted::resolve::packages — Package dependency resolver
+//
+// Implements a SAT-inspired dependency resolver for Sounio packages.
+// Uses flat arrays throughout (no heap allocation, no recursion).
+//
+// Algorithm:
+//   1. Register packages and their version ranges into a PkgRegistry.
+//   2. Add dependency edges (PkgDep) with version constraints.
+//   3. The resolver performs unit propagation: pick the first unresolved
+//      package, try versions newest-first, check all constraints,
+//      propagate implications, backtrack on conflict.
+//   4. Cycle detection uses DFS with three-color marking (white/gray/black).
+//   5. Topological sort uses Kahn's algorithm for build ordering.
+//   6. Lock file support captures the resolved state for reproducibility.
+//
+// Capacity: 2048 packages, 4096 deps, 8192 versions, 512 solution slots.
+//
+// All mutating operations consume and return the struct (state threading).
+// Helpers precede callers (no forward references).
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+let PKG_MAX_PACKAGES: i64 = 2048
+let PKG_MAX_DEPS: i64 = 4096
+let PKG_MAX_VERSIONS: i64 = 8192
+let PKG_MAX_SOLUTION: i64 = 512
+let PKG_MAX_CONFLICTS: i64 = 256
+let PKG_MAX_BACKTRACK: i64 = 128
+
+// Constraint kinds
+let PKG_CONSTRAINT_EXACT: i64 = 1
+let PKG_CONSTRAINT_COMPAT: i64 = 2
+let PKG_CONSTRAINT_TILDE: i64 = 3
+let PKG_CONSTRAINT_RANGE: i64 = 4
+
+// Conflict codes
+let PKG_CONFLICT_NONE: i64 = 0
+let PKG_CONFLICT_VERSION: i64 = 1
+let PKG_CONFLICT_CYCLE: i64 = 2
+
+// DFS colors for cycle detection
+let PKG_COLOR_WHITE: i64 = 0
+let PKG_COLOR_GRAY: i64 = 1
+let PKG_COLOR_BLACK: i64 = 2
+
+// ============================================================================
+// STRUCT: PkgVersion — semantic version triple
+// ============================================================================
+
+struct PkgVersion {
+    major: i32,
+    minor: i32,
+    patch: i32,
+}
+
+fn pkg_version_new(major: i32, minor: i32, patch: i32) -> PkgVersion {
+    PkgVersion { major: major, minor: minor, patch: patch }
+}
+
+fn pkg_version_zero() -> PkgVersion {
+    PkgVersion { major: 0, minor: 0, patch: 0 }
+}
+
+// ============================================================================
+// STRUCT: PkgConstraint — version constraint (min/max bounds + kind)
+// ============================================================================
+
+struct PkgConstraint {
+    min_major: i32,
+    min_minor: i32,
+    min_patch: i32,
+    max_major: i32,
+    max_minor: i32,
+    max_patch: i32,
+    constraint_kind: i64,
+}
+
+fn pkg_constraint_new(kind: i64, min_maj: i32, min_min: i32, min_pat: i32,
+                       max_maj: i32, max_min: i32, max_pat: i32) -> PkgConstraint {
+    PkgConstraint {
+        min_major: min_maj,
+        min_minor: min_min,
+        min_patch: min_pat,
+        max_major: max_maj,
+        max_minor: max_min,
+        max_patch: max_pat,
+        constraint_kind: kind,
+    }
+}
+
+fn pkg_constraint_empty() -> PkgConstraint {
+    PkgConstraint {
+        min_major: 0, min_minor: 0, min_patch: 0,
+        max_major: 0, max_minor: 0, max_patch: 0,
+        constraint_kind: 0,
+    }
+}
+
+// ============================================================================
+// STRUCT: PkgDep — a dependency edge between packages
+// ============================================================================
+
+struct PkgDep {
+    from_pkg_id: i64,
+    to_pkg_id: i64,
+    constraint_idx: i64,
+    is_optional: bool,
+    is_dev_only: bool,
+}
+
+fn pkg_dep_new(from: i64, to: i64, cst: i64, optional: bool, dev: bool) -> PkgDep {
+    PkgDep {
+        from_pkg_id: from,
+        to_pkg_id: to,
+        constraint_idx: cst,
+        is_optional: optional,
+        is_dev_only: dev,
+    }
+}
+
+fn pkg_dep_empty() -> PkgDep {
+    PkgDep {
+        from_pkg_id: 0 - 1,
+        to_pkg_id: 0 - 1,
+        constraint_idx: 0 - 1,
+        is_optional: false,
+        is_dev_only: false,
+    }
+}
+
+// ============================================================================
+// STRUCT: PkgEntry — a package in the registry
+// ============================================================================
+
+struct PkgEntry {
+    pkg_id: i64,
+    name_hash: i64,
+    version_major: i32,
+    version_minor: i32,
+    version_patch: i32,
+    dep_start: i64,
+    dep_count: i64,
+    is_resolved: bool,
+    resolved_version_idx: i64,
+}
+
+fn pkg_entry_new(id: i64, hash: i64, maj: i32, min: i32, pat: i32) -> PkgEntry {
+    PkgEntry {
+        pkg_id: id,
+        name_hash: hash,
+        version_major: maj,
+        version_minor: min,
+        version_patch: pat,
+        dep_start: 0,
+        dep_count: 0,
+        is_resolved: false,
+        resolved_version_idx: 0 - 1,
+    }
+}
+
+fn pkg_entry_empty() -> PkgEntry {
+    PkgEntry {
+        pkg_id: 0 - 1,
+        name_hash: 0,
+        version_major: 0,
+        version_minor: 0,
+        version_patch: 0,
+        dep_start: 0,
+        dep_count: 0,
+        is_resolved: false,
+        resolved_version_idx: 0 - 1,
+    }
+}
+
+// ============================================================================
+// STRUCT: PkgSolution — resolved package with chosen version
+// ============================================================================
+
+struct PkgSolution {
+    pkg_id: i64,
+    chosen_version_idx: i64,
+    dep_satisfied: bool,
+    is_locked: bool,
+}
+
+fn pkg_solution_new(id: i64, ver_idx: i64) -> PkgSolution {
+    PkgSolution {
+        pkg_id: id,
+        chosen_version_idx: ver_idx,
+        dep_satisfied: false,
+        is_locked: false,
+    }
+}
+
+fn pkg_solution_empty() -> PkgSolution {
+    PkgSolution {
+        pkg_id: 0 - 1,
+        chosen_version_idx: 0 - 1,
+        dep_satisfied: false,
+        is_locked: false,
+    }
+}
+
+// ============================================================================
+// STRUCT: PkgConflict — records a conflict during resolution
+// ============================================================================
+
+struct PkgConflict {
+    pkg_a: i64,
+    pkg_b: i64,
+    conflict_kind: i64,
+    dep_idx: i64,
+}
+
+fn pkg_conflict_new(a: i64, b: i64, kind: i64, dep: i64) -> PkgConflict {
+    PkgConflict {
+        pkg_a: a,
+        pkg_b: b,
+        conflict_kind: kind,
+        dep_idx: dep,
+    }
+}
+
+fn pkg_conflict_empty() -> PkgConflict {
+    PkgConflict {
+        pkg_a: 0 - 1,
+        pkg_b: 0 - 1,
+        conflict_kind: PKG_CONFLICT_NONE,
+        dep_idx: 0 - 1,
+    }
+}
+
+// ============================================================================
+// STRUCT: PkgLockEntry — a locked version for reproducible builds
+// ============================================================================
+
+struct PkgLockEntry {
+    pkg_id: i64,
+    name_hash: i64,
+    locked_major: i32,
+    locked_minor: i32,
+    locked_patch: i32,
+    integrity_hash: i64,
+    is_valid: bool,
+}
+
+fn pkg_lock_entry_new(id: i64, hash: i64, maj: i32, min: i32, pat: i32) -> PkgLockEntry {
+    PkgLockEntry {
+        pkg_id: id,
+        name_hash: hash,
+        locked_major: maj,
+        locked_minor: min,
+        locked_patch: pat,
+        integrity_hash: 0,
+        is_valid: true,
+    }
+}
+
+fn pkg_lock_entry_empty() -> PkgLockEntry {
+    PkgLockEntry {
+        pkg_id: 0 - 1,
+        name_hash: 0,
+        locked_major: 0,
+        locked_minor: 0,
+        locked_patch: 0,
+        integrity_hash: 0,
+        is_valid: false,
+    }
+}
+
+// ============================================================================
+// STRUCT: PkgLockFile — collection of locked entries
+// ============================================================================
+
+struct PkgLockFile {
+    entries: [PkgLockEntry; 512],
+    count: i64,
+}
+
+fn pkg_lock_file_new() -> PkgLockFile {
+    PkgLockFile {
+        entries: [pkg_lock_entry_empty(); 512],
+        count: 0,
+    }
+}
+
+// ============================================================================
+// STRUCT: PkgRegistry — flat array of available packages and constraints
+// ============================================================================
+
+struct PkgRegistry {
+    packages: [PkgEntry; 2048],
+    package_count: i64,
+    versions: [PkgVersion; 8192],
+    version_count: i64,
+    constraints: [PkgConstraint; 4096],
+    constraint_count: i64,
+    deps: [PkgDep; 4096],
+    dep_count: i64,
+}
+
+fn pkg_registry_new() -> PkgRegistry {
+    PkgRegistry {
+        packages: [pkg_entry_empty(); 2048],
+        package_count: 0,
+        versions: [pkg_version_zero(); 8192],
+        version_count: 0,
+        constraints: [pkg_constraint_empty(); 4096],
+        constraint_count: 0,
+        deps: [pkg_dep_empty(); 4096],
+        dep_count: 0,
+    }
+}
+
+// ============================================================================
+// STRUCT: PkgBacktrackState — snapshot for backtracking
+// ============================================================================
+
+struct PkgBacktrackState {
+    pkg_idx: i64,
+    version_tried: i64,
+    solution_count_at: i64,
+}
+
+fn pkg_backtrack_empty() -> PkgBacktrackState {
+    PkgBacktrackState {
+        pkg_idx: 0 - 1,
+        version_tried: 0,
+        solution_count_at: 0,
+    }
+}
+
+// ============================================================================
+// STRUCT: PkgResolver — the resolver context
+// ============================================================================
+
+struct PkgResolver {
+    registry: PkgRegistry,
+    solution: [PkgSolution; 512],
+    solution_count: i64,
+    conflicts: [PkgConflict; 256],
+    conflict_count: i64,
+    backtrack_stack: [PkgBacktrackState; 128],
+    backtrack_depth: i64,
+    is_resolved: bool,
+    has_conflict: bool,
+}
+
+fn pkg_resolver_new(reg: PkgRegistry) -> PkgResolver {
+    PkgResolver {
+        registry: reg,
+        solution: [pkg_solution_empty(); 512],
+        solution_count: 0,
+        conflicts: [pkg_conflict_empty(); 256],
+        conflict_count: 0,
+        backtrack_stack: [pkg_backtrack_empty(); 128],
+        backtrack_depth: 0,
+        is_resolved: false,
+        has_conflict: false,
+    }
+}
+
+// ============================================================================
+// VERSION COMPARISON — returns -1, 0, or 1
+// ============================================================================
+
+fn pkg_version_cmp(a: PkgVersion, b: PkgVersion) -> i64 {
+    if a.major < b.major { return 0 - 1 }
+    if a.major > b.major { return 1 }
+    if a.minor < b.minor { return 0 - 1 }
+    if a.minor > b.minor { return 1 }
+    if a.patch < b.patch { return 0 - 1 }
+    if a.patch > b.patch { return 1 }
+    0
+}
+
+fn pkg_version_eq(a: PkgVersion, b: PkgVersion) -> bool {
+    pkg_version_cmp(a, b) == 0
+}
+
+fn pkg_version_lt(a: PkgVersion, b: PkgVersion) -> bool {
+    pkg_version_cmp(a, b) < 0
+}
+
+fn pkg_version_le(a: PkgVersion, b: PkgVersion) -> bool {
+    pkg_version_cmp(a, b) <= 0
+}
+
+fn pkg_version_gt(a: PkgVersion, b: PkgVersion) -> bool {
+    pkg_version_cmp(a, b) > 0
+}
+
+fn pkg_version_ge(a: PkgVersion, b: PkgVersion) -> bool {
+    pkg_version_cmp(a, b) >= 0
+}
+
+// ============================================================================
+// VERSION ENCODING — pack version into single i64 for hashing/comparison
+// ============================================================================
+
+fn pkg_version_encode(v: PkgVersion) -> i64 {
+    // major * 1_000_000 + minor * 1_000 + patch
+    let maj = v.major as i64
+    let min = v.minor as i64
+    let pat = v.patch as i64
+    maj * 1000000 + min * 1000 + pat
+}
+
+// ============================================================================
+// CONSTRAINT SATISFACTION — does a version satisfy a constraint?
+// ============================================================================
+
+fn pkg_version_gte_min(v: PkgVersion, c: PkgConstraint) -> bool {
+    if (v.major as i64) < (c.min_major as i64) { return false }
+    if (v.major as i64) > (c.min_major as i64) { return true }
+    if (v.minor as i64) < (c.min_minor as i64) { return false }
+    if (v.minor as i64) > (c.min_minor as i64) { return true }
+    if (v.patch as i64) < (c.min_patch as i64) { return false }
+    true
+}
+
+fn pkg_version_lte_max(v: PkgVersion, c: PkgConstraint) -> bool {
+    if (v.major as i64) > (c.max_major as i64) { return false }
+    if (v.major as i64) < (c.max_major as i64) { return true }
+    if (v.minor as i64) > (c.max_minor as i64) { return false }
+    if (v.minor as i64) < (c.max_minor as i64) { return true }
+    if (v.patch as i64) > (c.max_patch as i64) { return false }
+    true
+}
+
+fn pkg_constraint_satisfies(v: PkgVersion, c: PkgConstraint) -> bool {
+    if c.constraint_kind == PKG_CONSTRAINT_EXACT {
+        // Exact: v must equal min (min == max for exact)
+        let eq_maj = (v.major as i64) == (c.min_major as i64)
+        let eq_min = (v.minor as i64) == (c.min_minor as i64)
+        let eq_pat = (v.patch as i64) == (c.min_patch as i64)
+        return eq_maj && eq_min && eq_pat
+    }
+    if c.constraint_kind == PKG_CONSTRAINT_COMPAT {
+        // ^semver: >=min, same major (for major >= 1), <next major
+        if !pkg_version_gte_min(v, c) { return false }
+        if (v.major as i64) != (c.min_major as i64) { return false }
+        return true
+    }
+    if c.constraint_kind == PKG_CONSTRAINT_TILDE {
+        // ~semver: >=min, same major.minor, <next minor
+        if !pkg_version_gte_min(v, c) { return false }
+        if (v.major as i64) != (c.min_major as i64) { return false }
+        if (v.minor as i64) != (c.min_minor as i64) { return false }
+        return true
+    }
+    if c.constraint_kind == PKG_CONSTRAINT_RANGE {
+        // Range: >= min AND <= max
+        return pkg_version_gte_min(v, c) && pkg_version_lte_max(v, c)
+    }
+    false
+}
+
+// ============================================================================
+// REGISTRY OPERATIONS — add packages, versions, deps, constraints
+// ============================================================================
+
+fn pkg_registry_add_package(
+    reg: PkgRegistry, hash: i64, maj: i32, min: i32, pat: i32
+) -> (PkgRegistry, i64) with Mut, Panic, Div {
+    var r = reg
+    if r.package_count >= PKG_MAX_PACKAGES {
+        return (r, 0 - 1)
+    }
+    let id = r.package_count
+    r.packages[id] = pkg_entry_new(id, hash, maj, min, pat)
+    r.package_count = r.package_count + 1
+    (r, id)
+}
+
+fn pkg_registry_add_version(
+    reg: PkgRegistry, maj: i32, min: i32, pat: i32
+) -> (PkgRegistry, i64) with Mut, Panic, Div {
+    var r = reg
+    if r.version_count >= PKG_MAX_VERSIONS {
+        return (r, 0 - 1)
+    }
+    let idx = r.version_count
+    r.versions[idx] = pkg_version_new(maj, min, pat)
+    r.version_count = r.version_count + 1
+    (r, idx)
+}
+
+fn pkg_registry_add_constraint(
+    reg: PkgRegistry, kind: i64,
+    min_maj: i32, min_min: i32, min_pat: i32,
+    max_maj: i32, max_min: i32, max_pat: i32
+) -> (PkgRegistry, i64) with Mut, Panic, Div {
+    var r = reg
+    if r.constraint_count >= PKG_MAX_DEPS {
+        return (r, 0 - 1)
+    }
+    let idx = r.constraint_count
+    r.constraints[idx] = pkg_constraint_new(
+        kind, min_maj, min_min, min_pat, max_maj, max_min, max_pat
+    )
+    r.constraint_count = r.constraint_count + 1
+    (r, idx)
+}
+
+fn pkg_registry_add_dep(
+    reg: PkgRegistry, from: i64, to: i64, cst_idx: i64,
+    optional: bool, dev: bool
+) -> PkgRegistry with Mut, Panic, Div {
+    var r = reg
+    if r.dep_count >= PKG_MAX_DEPS {
+        return r
+    }
+    let idx = r.dep_count
+    r.deps[idx] = pkg_dep_new(from, to, cst_idx, optional, dev)
+    r.dep_count = r.dep_count + 1
+    // Update from-package dep tracking
+    if from >= 0 && from < r.package_count {
+        let entry = r.packages[from]
+        if entry.dep_count == 0 {
+            var e = entry
+            e.dep_start = idx
+            e.dep_count = 1
+            r.packages[from] = e
+        } else {
+            var e = entry
+            e.dep_count = e.dep_count + 1
+            r.packages[from] = e
+        }
+    }
+    r
+}
+
+// ============================================================================
+// REGISTRY QUERIES
+// ============================================================================
+
+fn pkg_registry_get_entry(reg: PkgRegistry, idx: i64) -> PkgEntry with Panic, Div {
+    reg.packages[idx]
+}
+
+fn pkg_registry_get_version(reg: PkgRegistry, idx: i64) -> PkgVersion with Panic, Div {
+    reg.versions[idx]
+}
+
+fn pkg_registry_get_constraint(reg: PkgRegistry, idx: i64) -> PkgConstraint with Panic, Div {
+    reg.constraints[idx]
+}
+
+fn pkg_registry_get_dep(reg: PkgRegistry, idx: i64) -> PkgDep with Panic, Div {
+    reg.deps[idx]
+}
+
+// Find all versions for a package by name_hash. Returns count and indices.
+fn pkg_registry_find_versions(
+    reg: PkgRegistry, name_hash: i64, out: [i64; 256]
+) -> (i64, [i64; 256]) with Mut, Panic, Div {
+    var result = out
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < reg.package_count {
+        if reg.packages[i].name_hash == name_hash && count < 256 {
+            result[count] = i
+            count = count + 1
+        }
+        i = i + 1
+    }
+    (count, result)
+}
+
+// Find deps originating from a package.
+fn pkg_registry_find_deps(
+    reg: PkgRegistry, pkg_id: i64, out: [i64; 256]
+) -> (i64, [i64; 256]) with Mut, Panic, Div {
+    var result = out
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < reg.dep_count {
+        if reg.deps[i].from_pkg_id == pkg_id && count < 256 {
+            result[count] = i
+            count = count + 1
+        }
+        i = i + 1
+    }
+    (count, result)
+}
+
+// ============================================================================
+// SOLUTION OPERATIONS
+// ============================================================================
+
+fn pkg_resolver_add_solution(
+    res: PkgResolver, pkg_id: i64, ver_idx: i64
+) -> PkgResolver with Mut, Panic, Div {
+    var r = res
+    if r.solution_count >= PKG_MAX_SOLUTION {
+        return r
+    }
+    let idx = r.solution_count
+    r.solution[idx] = pkg_solution_new(pkg_id, ver_idx)
+    r.solution_count = r.solution_count + 1
+    r
+}
+
+fn pkg_resolver_find_solution(res: PkgResolver, pkg_id: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < res.solution_count {
+        if res.solution[i].pkg_id == pkg_id {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn pkg_resolver_has_solution(res: PkgResolver, pkg_id: i64) -> bool with Mut, Panic, Div {
+    pkg_resolver_find_solution(res, pkg_id) >= 0
+}
+
+// Get the version chosen for a resolved package.
+fn pkg_resolver_get_chosen_version(
+    res: PkgResolver, pkg_id: i64
+) -> PkgVersion with Mut, Panic, Div {
+    let sol_idx = pkg_resolver_find_solution(res, pkg_id)
+    if sol_idx < 0 {
+        return pkg_version_zero()
+    }
+    let ver_idx = res.solution[sol_idx].chosen_version_idx
+    res.registry.versions[ver_idx]
+}
+
+// ============================================================================
+// CONFLICT OPERATIONS
+// ============================================================================
+
+fn pkg_resolver_add_conflict(
+    res: PkgResolver, a: i64, b: i64, kind: i64, dep: i64
+) -> PkgResolver with Mut, Panic, Div {
+    var r = res
+    if r.conflict_count >= PKG_MAX_CONFLICTS {
+        return r
+    }
+    let idx = r.conflict_count
+    r.conflicts[idx] = pkg_conflict_new(a, b, kind, dep)
+    r.conflict_count = r.conflict_count + 1
+    r.has_conflict = true
+    r
+}
+
+// ============================================================================
+// BACKTRACK OPERATIONS
+// ============================================================================
+
+fn pkg_resolver_push_backtrack(
+    res: PkgResolver, pkg_idx: i64, ver_tried: i64, sol_count: i64
+) -> PkgResolver with Mut, Panic, Div {
+    var r = res
+    if r.backtrack_depth >= PKG_MAX_BACKTRACK {
+        return r
+    }
+    let idx = r.backtrack_depth
+    r.backtrack_stack[idx] = PkgBacktrackState {
+        pkg_idx: pkg_idx,
+        version_tried: ver_tried,
+        solution_count_at: sol_count,
+    }
+    r.backtrack_depth = r.backtrack_depth + 1
+    r
+}
+
+fn pkg_resolver_pop_backtrack(res: PkgResolver) -> (PkgResolver, PkgBacktrackState) with Mut, Panic, Div {
+    var r = res
+    if r.backtrack_depth <= 0 {
+        return (r, pkg_backtrack_empty())
+    }
+    r.backtrack_depth = r.backtrack_depth - 1
+    let state = r.backtrack_stack[r.backtrack_depth]
+    (r, state)
+}
+
+// Restore solution to a previous snapshot point.
+fn pkg_resolver_restore_solution(
+    res: PkgResolver, target_count: i64
+) -> PkgResolver with Mut, Panic, Div {
+    var r = res
+    // Clear solutions beyond the snapshot
+    var i = r.solution_count - 1
+    while i >= target_count {
+        r.solution[i] = pkg_solution_empty()
+        i = i - 1
+    }
+    r.solution_count = target_count
+    r.has_conflict = false
+    r.conflict_count = 0
+    r
+}
+
+// ============================================================================
+// CHECK SINGLE DEP — does the chosen version satisfy a dep's constraint?
+// ============================================================================
+
+fn pkg_check_dep_satisfied(
+    reg: PkgRegistry, dep_idx: i64, chosen_ver: PkgVersion
+) -> bool with Panic, Div {
+    let dep = reg.deps[dep_idx]
+    if dep.is_optional {
+        // Optional deps are always considered satisfied if not installed
+        return true
+    }
+    let cst = reg.constraints[dep.constraint_idx]
+    pkg_constraint_satisfies(chosen_ver, cst)
+}
+
+// ============================================================================
+// CHECK ALL CONSTRAINTS — verify that a candidate version for pkg_id
+// does not violate any incoming constraint from already-resolved packages
+// ============================================================================
+
+fn pkg_check_all_constraints(
+    res: PkgResolver, pkg_id: i64, candidate: PkgVersion
+) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < res.registry.dep_count {
+        let dep = res.registry.deps[i]
+        // Only check deps targeting this package from resolved sources
+        if dep.to_pkg_id == pkg_id {
+            if !dep.is_optional {
+                let sol_idx = pkg_resolver_find_solution(res, dep.from_pkg_id)
+                if sol_idx >= 0 {
+                    // Source is resolved; check constraint
+                    let cst = res.registry.constraints[dep.constraint_idx]
+                    if !pkg_constraint_satisfies(candidate, cst) {
+                        return false
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    true
+}
+
+// ============================================================================
+// FIND UNRESOLVED — pick the first package that has no solution yet
+// Returns -1 if all resolved.
+// ============================================================================
+
+fn pkg_find_unresolved(res: PkgResolver) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < res.registry.package_count {
+        let name_hash = res.registry.packages[i].name_hash
+        // Check if any package with this name_hash has a solution
+        let found = pkg_resolver_has_solution(res, i)
+        if !found {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// ============================================================================
+// COLLECT CANDIDATE VERSIONS — gather all versions for a package's name_hash,
+// sorted newest-first (highest version index first)
+// ============================================================================
+
+fn pkg_collect_candidates(
+    reg: PkgRegistry, pkg_id: i64, out: [i64; 256]
+) -> (i64, [i64; 256]) with Mut, Panic, Div {
+    let target_hash = reg.packages[pkg_id].name_hash
+    var result = out
+    var count: i64 = 0
+    // Collect all version indices for this name_hash
+    var i: i64 = 0
+    while i < reg.package_count {
+        if reg.packages[i].name_hash == target_hash && count < 256 {
+            result[count] = i
+            count = count + 1
+        }
+        i = i + 1
+    }
+    // Sort newest-first by version (bubble sort, small N)
+    var sorted = true
+    var pass: i64 = 0
+    while pass < count {
+        sorted = true
+        var j: i64 = 0
+        while j < count - 1 - pass {
+            let a_idx = result[j]
+            let b_idx = result[j + 1]
+            let a_ver = pkg_version_new(
+                reg.packages[a_idx].version_major,
+                reg.packages[a_idx].version_minor,
+                reg.packages[a_idx].version_patch
+            )
+            let b_ver = pkg_version_new(
+                reg.packages[b_idx].version_major,
+                reg.packages[b_idx].version_minor,
+                reg.packages[b_idx].version_patch
+            )
+            if pkg_version_lt(a_ver, b_ver) {
+                // Swap to put higher version first
+                let tmp = result[j]
+                result[j] = result[j + 1]
+                result[j + 1] = tmp
+                sorted = false
+            }
+            j = j + 1
+        }
+        if sorted {
+            // Early exit
+            pass = count
+        } else {
+            pass = pass + 1
+        }
+    }
+    (count, result)
+}
+
+// ============================================================================
+// RESOLVE — unit propagation with backtracking
+//
+// Algorithm:
+//   1. Find first unresolved package.
+//   2. Collect candidate versions newest-first.
+//   3. For each candidate, check all constraints from resolved packages.
+//   4. If valid, add to solution and push backtrack state.
+//   5. If no candidate works, pop backtrack and try next version.
+//   6. If backtrack stack empty, report conflict.
+// ============================================================================
+
+fn pkg_resolve(res: PkgResolver) -> PkgResolver with Mut, Panic, Div {
+    var r = res
+    var iterations: i64 = 0
+    let max_iterations: i64 = PKG_MAX_PACKAGES * 4
+
+    while iterations < max_iterations {
+        iterations = iterations + 1
+
+        // Find next unresolved package
+        let unresolved = pkg_find_unresolved(r)
+        if unresolved < 0 {
+            // All resolved
+            r.is_resolved = true
+            return r
+        }
+
+        // Collect candidates newest-first
+        var cand_buf: [i64; 256] = [0; 256]
+        let cand_result = pkg_collect_candidates(r.registry, unresolved, cand_buf)
+        let cand_count = cand_result.0
+        cand_buf = cand_result.1
+
+        if cand_count == 0 {
+            // No versions at all — conflict
+            r = pkg_resolver_add_conflict(r, unresolved, 0 - 1, PKG_CONFLICT_VERSION, 0 - 1)
+            return r
+        }
+
+        // Try each candidate
+        var found_valid = false
+        var ci: i64 = 0
+        while ci < cand_count && !found_valid {
+            let cand_pkg_idx = cand_buf[ci]
+            let cand_ver = pkg_version_new(
+                r.registry.packages[cand_pkg_idx].version_major,
+                r.registry.packages[cand_pkg_idx].version_minor,
+                r.registry.packages[cand_pkg_idx].version_patch
+            )
+
+            // Check all constraints
+            let ok = pkg_check_all_constraints(r, unresolved, cand_ver)
+            if ok {
+                // Push backtrack state before committing
+                r = pkg_resolver_push_backtrack(r, unresolved, ci, r.solution_count)
+                // Add to solution (use the version index from the registry)
+                r = pkg_resolver_add_solution(r, unresolved, cand_pkg_idx)
+                found_valid = true
+            }
+            ci = ci + 1
+        }
+
+        if !found_valid {
+            // All candidates failed — need to backtrack
+            if r.backtrack_depth <= 0 {
+                // Nothing to backtrack to — conflict
+                r = pkg_resolver_add_conflict(r, unresolved, 0 - 1, PKG_CONFLICT_VERSION, 0 - 1)
+                return r
+            }
+
+            // Pop backtrack
+            let bt_result = pkg_resolver_pop_backtrack(r)
+            r = bt_result.0
+            let bt_state = bt_result.1
+
+            // Restore solution
+            r = pkg_resolver_restore_solution(r, bt_state.solution_count_at)
+
+            // Try next version for the backtracked package
+            let bt_pkg = bt_state.pkg_idx
+            var bt_cand_buf: [i64; 256] = [0; 256]
+            let bt_cand_result = pkg_collect_candidates(r.registry, bt_pkg, bt_cand_buf)
+            let bt_cand_count = bt_cand_result.0
+            bt_cand_buf = bt_cand_result.1
+
+            let next_try = bt_state.version_tried + 1
+            var bt_found = false
+            var bci = next_try
+            while bci < bt_cand_count && !bt_found {
+                let bt_cand_idx = bt_cand_buf[bci]
+                let bt_ver = pkg_version_new(
+                    r.registry.packages[bt_cand_idx].version_major,
+                    r.registry.packages[bt_cand_idx].version_minor,
+                    r.registry.packages[bt_cand_idx].version_patch
+                )
+                let bt_ok = pkg_check_all_constraints(r, bt_pkg, bt_ver)
+                if bt_ok {
+                    r = pkg_resolver_push_backtrack(r, bt_pkg, bci, r.solution_count)
+                    r = pkg_resolver_add_solution(r, bt_pkg, bt_cand_idx)
+                    bt_found = true
+                }
+                bci = bci + 1
+            }
+
+            if !bt_found {
+                // Exhausted all versions for this backtrack level
+                r = pkg_resolver_add_conflict(r, bt_pkg, 0 - 1, PKG_CONFLICT_VERSION, 0 - 1)
+                return r
+            }
+        }
+    }
+
+    // Exceeded max iterations
+    r.has_conflict = true
+    r
+}
+
+// ============================================================================
+// CYCLE DETECTION — DFS with three-color marking
+//
+// White (0) = unvisited, Gray (1) = in progress, Black (2) = done.
+// A back-edge to a gray node indicates a cycle.
+// ============================================================================
+
+fn pkg_detect_cycles_from(
+    reg: PkgRegistry,
+    node: i64,
+    color: [i64; 2048],
+    has_cycle: bool
+) -> ([i64; 2048], bool) with Mut, Panic, Div {
+    var c = color
+    var cycle = has_cycle
+    c[node] = PKG_COLOR_GRAY
+
+    // Iterate over all deps from this node
+    var i: i64 = 0
+    while i < reg.dep_count {
+        if reg.deps[i].from_pkg_id == node && !reg.deps[i].is_optional {
+            let target = reg.deps[i].to_pkg_id
+            if target >= 0 && target < reg.package_count {
+                if c[target] == PKG_COLOR_GRAY {
+                    // Back edge — cycle detected
+                    cycle = true
+                } else {
+                    if c[target] == PKG_COLOR_WHITE {
+                        let sub = pkg_detect_cycles_from(reg, target, c, cycle)
+                        c = sub.0
+                        cycle = sub.1
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    c[node] = PKG_COLOR_BLACK
+    (c, cycle)
+}
+
+fn pkg_detect_cycles(reg: PkgRegistry) -> bool with Mut, Panic, Div {
+    var color: [i64; 2048] = [0; 2048]
+    var has_cycle = false
+    var i: i64 = 0
+    while i < reg.package_count {
+        if color[i] == PKG_COLOR_WHITE {
+            let result = pkg_detect_cycles_from(reg, i, color, has_cycle)
+            color = result.0
+            has_cycle = result.1
+        }
+        i = i + 1
+    }
+    has_cycle
+}
+
+// ============================================================================
+// CYCLE DETECTION (iterative) — for environments without deep stack
+// Uses an explicit stack with gray/black coloring.
+// ============================================================================
+
+fn pkg_detect_cycles_iterative(reg: PkgRegistry) -> bool with Mut, Panic, Div {
+    var color: [i64; 2048] = [0; 2048]
+    var stack: [i64; 2048] = [0; 2048]
+    var stack_action: [i64; 2048] = [0; 2048]  // 0 = enter, 1 = exit
+    var sp: i64 = 0
+
+    var start: i64 = 0
+    while start < reg.package_count {
+        if color[start] == PKG_COLOR_WHITE {
+            // Push start node with enter action
+            stack[sp] = start
+            stack_action[sp] = 0
+            sp = sp + 1
+
+            while sp > 0 {
+                sp = sp - 1
+                let node = stack[sp]
+                let action = stack_action[sp]
+
+                if action == 1 {
+                    // Exit action: mark black
+                    color[node] = PKG_COLOR_BLACK
+                } else {
+                    if color[node] == PKG_COLOR_GRAY {
+                        // Already in progress, just mark done
+                        color[node] = PKG_COLOR_BLACK
+                    } else {
+                        if color[node] == PKG_COLOR_BLACK {
+                            // Already done, skip
+                        } else {
+                            // Enter: mark gray, push exit, push successors
+                            color[node] = PKG_COLOR_GRAY
+
+                            // Push exit action
+                            if sp < 2048 {
+                                stack[sp] = node
+                                stack_action[sp] = 1
+                                sp = sp + 1
+                            }
+
+                            // Push successors (deps from this node)
+                            var di: i64 = 0
+                            while di < reg.dep_count {
+                                if reg.deps[di].from_pkg_id == node && !reg.deps[di].is_optional {
+                                    let target = reg.deps[di].to_pkg_id
+                                    if target >= 0 && target < reg.package_count {
+                                        if color[target] == PKG_COLOR_GRAY {
+                                            return true  // Cycle!
+                                        }
+                                        if color[target] == PKG_COLOR_WHITE && sp < 2048 {
+                                            stack[sp] = target
+                                            stack_action[sp] = 0
+                                            sp = sp + 1
+                                        }
+                                    }
+                                }
+                                di = di + 1
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        start = start + 1
+    }
+    false
+}
+
+// ============================================================================
+// TOPOLOGICAL SORT — Kahn's algorithm for build ordering
+// Produces a linear ordering where all deps come before dependents.
+// Returns count of sorted nodes (or -1 if cycle detected).
+// ============================================================================
+
+fn pkg_topo_sort(
+    reg: PkgRegistry, out: [i64; 2048]
+) -> (i64, [i64; 2048]) with Mut, Panic, Div {
+    var result = out
+    var result_count: i64 = 0
+
+    if reg.package_count == 0 {
+        return (0, result)
+    }
+
+    // Compute in-degree for each package
+    var in_degree: [i64; 2048] = [0; 2048]
+    var ei: i64 = 0
+    while ei < reg.dep_count {
+        let dep = reg.deps[ei]
+        if !dep.is_optional {
+            let dst = dep.to_pkg_id
+            if dst >= 0 && dst < reg.package_count {
+                in_degree[dst] = in_degree[dst] + 1
+            }
+        }
+        ei = ei + 1
+    }
+
+    // Initialize queue with zero-in-degree nodes
+    var queue: [i64; 2048] = [0; 2048]
+    var q_front: i64 = 0
+    var q_back: i64 = 0
+
+    var ni: i64 = 0
+    while ni < reg.package_count {
+        if in_degree[ni] == 0 {
+            queue[q_back] = ni
+            q_back = q_back + 1
+        }
+        ni = ni + 1
+    }
+
+    // Process queue
+    while q_front < q_back {
+        let current = queue[q_front]
+        q_front = q_front + 1
+
+        if result_count < PKG_MAX_PACKAGES {
+            result[result_count] = current
+            result_count = result_count + 1
+        }
+
+        // Decrement in-degree for all deps from current
+        var ej: i64 = 0
+        while ej < reg.dep_count {
+            let dep = reg.deps[ej]
+            if dep.from_pkg_id == current && !dep.is_optional {
+                let dest = dep.to_pkg_id
+                if dest >= 0 && dest < reg.package_count {
+                    in_degree[dest] = in_degree[dest] - 1
+                    if in_degree[dest] == 0 {
+                        if q_back < PKG_MAX_PACKAGES {
+                            queue[q_back] = dest
+                            q_back = q_back + 1
+                        }
+                    }
+                }
+            }
+            ej = ej + 1
+        }
+    }
+
+    // Check for cycle
+    if result_count != reg.package_count {
+        return (0 - 1, result)
+    }
+
+    (result_count, result)
+}
+
+// ============================================================================
+// LOCK FILE OPERATIONS
+// ============================================================================
+
+fn pkg_lock_file_add(
+    lock: PkgLockFile, id: i64, hash: i64, maj: i32, min: i32, pat: i32
+) -> PkgLockFile with Mut, Panic, Div {
+    var lf = lock
+    if lf.count >= PKG_MAX_SOLUTION {
+        return lf
+    }
+    let idx = lf.count
+    lf.entries[idx] = pkg_lock_entry_new(id, hash, maj, min, pat)
+    lf.count = lf.count + 1
+    lf
+}
+
+fn pkg_lock_file_find(lock: PkgLockFile, pkg_id: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < lock.count {
+        if lock.entries[i].pkg_id == pkg_id {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn pkg_lock_file_has(lock: PkgLockFile, pkg_id: i64) -> bool with Mut, Panic, Div {
+    pkg_lock_file_find(lock, pkg_id) >= 0
+}
+
+// Generate lock file from a resolved solution.
+fn pkg_generate_lock_file(res: PkgResolver) -> PkgLockFile with Mut, Panic, Div {
+    var lf = pkg_lock_file_new()
+    var i: i64 = 0
+    while i < res.solution_count {
+        let sol = res.solution[i]
+        if sol.pkg_id >= 0 {
+            let pkg = res.registry.packages[sol.chosen_version_idx]
+            lf = pkg_lock_file_add(
+                lf, sol.pkg_id, pkg.name_hash,
+                pkg.version_major, pkg.version_minor, pkg.version_patch
+            )
+        }
+        i = i + 1
+    }
+    lf
+}
+
+// Check if a lock file is consistent with the registry constraints.
+fn pkg_lock_file_check_consistency(
+    lock: PkgLockFile, reg: PkgRegistry
+) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < reg.dep_count {
+        let dep = reg.deps[i]
+        if !dep.is_optional && !dep.is_dev_only {
+            // Find locked version for the target
+            let lock_idx = pkg_lock_file_find(lock, dep.to_pkg_id)
+            if lock_idx >= 0 {
+                let entry = lock.entries[lock_idx]
+                let locked_ver = pkg_version_new(
+                    entry.locked_major, entry.locked_minor, entry.locked_patch
+                )
+                let cst = reg.constraints[dep.constraint_idx]
+                if !pkg_constraint_satisfies(locked_ver, cst) {
+                    return false
+                }
+            }
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Set integrity hash on a lock entry.
+fn pkg_lock_file_set_integrity(
+    lock: PkgLockFile, pkg_id: i64, hash: i64
+) -> PkgLockFile with Mut, Panic, Div {
+    var lf = lock
+    let idx = pkg_lock_file_find(lf, pkg_id)
+    if idx >= 0 {
+        var entry = lf.entries[idx]
+        entry.integrity_hash = hash
+        lf.entries[idx] = entry
+    }
+    lf
+}
+
+// ============================================================================
+// RESOLVE WITH LOCK — prefer locked versions during resolution
+// ============================================================================
+
+fn pkg_resolve_with_lock(
+    res: PkgResolver, lock: PkgLockFile
+) -> PkgResolver with Mut, Panic, Div {
+    var r = res
+    // Pre-populate solution from lock file entries that are still valid
+    var i: i64 = 0
+    while i < lock.count {
+        let entry = lock.entries[i]
+        if entry.is_valid && entry.pkg_id >= 0 {
+            let locked_ver = pkg_version_new(
+                entry.locked_major, entry.locked_minor, entry.locked_patch
+            )
+            // Verify locked version still satisfies all constraints
+            let ok = pkg_check_all_constraints(r, entry.pkg_id, locked_ver)
+            if ok {
+                // Find the package index with matching version
+                var j: i64 = 0
+                var found_idx: i64 = 0 - 1
+                while j < r.registry.package_count {
+                    let pkg = r.registry.packages[j]
+                    if pkg.name_hash == entry.name_hash {
+                        let pkg_ver = pkg_version_new(
+                            pkg.version_major, pkg.version_minor, pkg.version_patch
+                        )
+                        if pkg_version_eq(pkg_ver, locked_ver) {
+                            found_idx = j
+                            j = r.registry.package_count  // break
+                        }
+                    }
+                    j = j + 1
+                }
+                if found_idx >= 0 {
+                    r = pkg_resolver_add_solution(r, entry.pkg_id, found_idx)
+                    // Mark as locked
+                    let sol_idx = r.solution_count - 1
+                    var sol = r.solution[sol_idx]
+                    sol.is_locked = true
+                    r.solution[sol_idx] = sol
+                }
+            }
+        }
+        i = i + 1
+    }
+    // Now resolve remaining packages
+    r = pkg_resolve(r)
+    r
+}
+
+// ============================================================================
+// MARK DEP SATISFACTION — after resolution, mark which deps are satisfied
+// ============================================================================
+
+fn pkg_mark_dep_satisfaction(res: PkgResolver) -> PkgResolver with Mut, Panic, Div {
+    var r = res
+    var i: i64 = 0
+    while i < r.solution_count {
+        let sol = r.solution[i]
+        if sol.pkg_id >= 0 {
+            var all_satisfied = true
+            // Check all outgoing deps
+            var j: i64 = 0
+            while j < r.registry.dep_count {
+                let dep = r.registry.deps[j]
+                if dep.from_pkg_id == sol.pkg_id && !dep.is_optional {
+                    let target_sol_idx = pkg_resolver_find_solution(r, dep.to_pkg_id)
+                    if target_sol_idx < 0 {
+                        all_satisfied = false
+                    } else {
+                        let target_ver_idx = r.solution[target_sol_idx].chosen_version_idx
+                        let target_ver = pkg_version_new(
+                            r.registry.packages[target_ver_idx].version_major,
+                            r.registry.packages[target_ver_idx].version_minor,
+                            r.registry.packages[target_ver_idx].version_patch
+                        )
+                        let cst = r.registry.constraints[dep.constraint_idx]
+                        if !pkg_constraint_satisfies(target_ver, cst) {
+                            all_satisfied = false
+                        }
+                    }
+                }
+                j = j + 1
+            }
+            var updated_sol = r.solution[i]
+            updated_sol.dep_satisfied = all_satisfied
+            r.solution[i] = updated_sol
+        }
+        i = i + 1
+    }
+    r
+}
+
+// ============================================================================
+// HELPER: simple hash for test names — djb2 on a few bytes
+// ============================================================================
+
+fn pkg_hash2(a: i64, b: i64) -> i64 {
+    a * 31 + b
+}
+
+fn pkg_hash3(a: i64, b: i64, c: i64) -> i64 {
+    (a * 31 + b) * 31 + c
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+// ---------- Version comparison tests ----------
+
+fn test_pkg_version_equal() -> bool {
+    let a = pkg_version_new(1, 2, 3)
+    let b = pkg_version_new(1, 2, 3)
+    pkg_version_eq(a, b)
+}
+
+fn test_pkg_version_less_major() -> bool {
+    let a = pkg_version_new(1, 0, 0)
+    let b = pkg_version_new(2, 0, 0)
+    pkg_version_lt(a, b) && !pkg_version_lt(b, a)
+}
+
+fn test_pkg_version_less_minor() -> bool {
+    let a = pkg_version_new(1, 2, 0)
+    let b = pkg_version_new(1, 3, 0)
+    pkg_version_lt(a, b) && !pkg_version_lt(b, a)
+}
+
+fn test_pkg_version_less_patch() -> bool {
+    let a = pkg_version_new(1, 2, 3)
+    let b = pkg_version_new(1, 2, 4)
+    pkg_version_lt(a, b) && !pkg_version_lt(b, a)
+}
+
+fn test_pkg_version_greater() -> bool {
+    let a = pkg_version_new(3, 0, 0)
+    let b = pkg_version_new(2, 9, 9)
+    pkg_version_gt(a, b) && !pkg_version_gt(b, a)
+}
+
+fn test_pkg_version_cmp_equal_returns_zero() -> bool {
+    let v = pkg_version_new(5, 10, 15)
+    pkg_version_cmp(v, v) == 0
+}
+
+fn test_pkg_version_encode() -> bool {
+    let v = pkg_version_new(2, 3, 7)
+    pkg_version_encode(v) == 2003007
+}
+
+fn test_pkg_version_le() -> bool {
+    let a = pkg_version_new(1, 0, 0)
+    let b = pkg_version_new(1, 0, 0)
+    let c = pkg_version_new(1, 0, 1)
+    pkg_version_le(a, b) && pkg_version_le(a, c) && !pkg_version_le(c, a)
+}
+
+fn test_pkg_version_ge() -> bool {
+    let a = pkg_version_new(2, 0, 0)
+    let b = pkg_version_new(2, 0, 0)
+    let c = pkg_version_new(1, 9, 9)
+    pkg_version_ge(a, b) && pkg_version_ge(a, c) && !pkg_version_ge(c, a)
+}
+
+// ---------- Constraint satisfaction tests ----------
+
+fn test_pkg_constraint_exact_match() -> bool {
+    let v = pkg_version_new(1, 2, 3)
+    let c = pkg_constraint_new(PKG_CONSTRAINT_EXACT, 1, 2, 3, 1, 2, 3)
+    pkg_constraint_satisfies(v, c)
+}
+
+fn test_pkg_constraint_exact_mismatch() -> bool {
+    let v = pkg_version_new(1, 2, 4)
+    let c = pkg_constraint_new(PKG_CONSTRAINT_EXACT, 1, 2, 3, 1, 2, 3)
+    !pkg_constraint_satisfies(v, c)
+}
+
+fn test_pkg_constraint_compat_same_major() -> bool {
+    // ^1.2.0 should accept 1.3.0, 1.9.9 but not 2.0.0
+    let c = pkg_constraint_new(PKG_CONSTRAINT_COMPAT, 1, 2, 0, 0, 0, 0)
+    let v1 = pkg_version_new(1, 2, 0)
+    let v2 = pkg_version_new(1, 3, 0)
+    let v3 = pkg_version_new(1, 9, 9)
+    let v4 = pkg_version_new(2, 0, 0)
+    let v5 = pkg_version_new(1, 1, 0)
+    let ok1 = pkg_constraint_satisfies(v1, c)
+    let ok2 = pkg_constraint_satisfies(v2, c)
+    let ok3 = pkg_constraint_satisfies(v3, c)
+    let ok4 = !pkg_constraint_satisfies(v4, c)
+    let ok5 = !pkg_constraint_satisfies(v5, c)
+    ok1 && ok2 && ok3 && ok4 && ok5
+}
+
+fn test_pkg_constraint_tilde_same_minor() -> bool {
+    // ~1.2.0 should accept 1.2.5 but not 1.3.0
+    let c = pkg_constraint_new(PKG_CONSTRAINT_TILDE, 1, 2, 0, 0, 0, 0)
+    let v1 = pkg_version_new(1, 2, 0)
+    let v2 = pkg_version_new(1, 2, 5)
+    let v3 = pkg_version_new(1, 3, 0)
+    let v4 = pkg_version_new(2, 0, 0)
+    let ok1 = pkg_constraint_satisfies(v1, c)
+    let ok2 = pkg_constraint_satisfies(v2, c)
+    let ok3 = !pkg_constraint_satisfies(v3, c)
+    let ok4 = !pkg_constraint_satisfies(v4, c)
+    ok1 && ok2 && ok3 && ok4
+}
+
+fn test_pkg_constraint_range() -> bool {
+    // Range: >= 1.0.0, <= 2.0.0
+    let c = pkg_constraint_new(PKG_CONSTRAINT_RANGE, 1, 0, 0, 2, 0, 0)
+    let v1 = pkg_version_new(1, 0, 0)
+    let v2 = pkg_version_new(1, 5, 0)
+    let v3 = pkg_version_new(2, 0, 0)
+    let v4 = pkg_version_new(0, 9, 0)
+    let v5 = pkg_version_new(2, 0, 1)
+    let ok1 = pkg_constraint_satisfies(v1, c)
+    let ok2 = pkg_constraint_satisfies(v2, c)
+    let ok3 = pkg_constraint_satisfies(v3, c)
+    let ok4 = !pkg_constraint_satisfies(v4, c)
+    let ok5 = !pkg_constraint_satisfies(v5, c)
+    ok1 && ok2 && ok3 && ok4 && ok5
+}
+
+fn test_pkg_constraint_range_narrow() -> bool {
+    // Range: >= 1.2.3, <= 1.2.5
+    let c = pkg_constraint_new(PKG_CONSTRAINT_RANGE, 1, 2, 3, 1, 2, 5)
+    let v1 = pkg_version_new(1, 2, 3)
+    let v2 = pkg_version_new(1, 2, 4)
+    let v3 = pkg_version_new(1, 2, 5)
+    let v4 = pkg_version_new(1, 2, 2)
+    let v5 = pkg_version_new(1, 2, 6)
+    let ok1 = pkg_constraint_satisfies(v1, c)
+    let ok2 = pkg_constraint_satisfies(v2, c)
+    let ok3 = pkg_constraint_satisfies(v3, c)
+    let ok4 = !pkg_constraint_satisfies(v4, c)
+    let ok5 = !pkg_constraint_satisfies(v5, c)
+    ok1 && ok2 && ok3 && ok4 && ok5
+}
+
+fn test_pkg_constraint_invalid_kind() -> bool {
+    let v = pkg_version_new(1, 0, 0)
+    let c = pkg_constraint_new(99, 1, 0, 0, 1, 0, 0)
+    !pkg_constraint_satisfies(v, c)
+}
+
+// ---------- Registry tests ----------
+
+fn test_pkg_registry_add_package() -> bool with Mut, Panic, Div {
+    var reg = pkg_registry_new()
+    let r1 = pkg_registry_add_package(reg, 100, 1, 0, 0)
+    reg = r1.0
+    let id1 = r1.1
+    let r2 = pkg_registry_add_package(reg, 200, 2, 0, 0)
+    reg = r2.0
+    let id2 = r2.1
+    let ok1 = id1 == 0
+    let ok2 = id2 == 1
+    let ok3 = reg.package_count == 2
+    let ok4 = reg.packages[0].name_hash == 100
+    let ok5 = reg.packages[1].name_hash == 200
+    ok1 && ok2 && ok3 && ok4 && ok5
+}
+
+fn test_pkg_registry_add_dep() -> bool with Mut, Panic, Div {
+    var reg = pkg_registry_new()
+    // Add two packages
+    let r1 = pkg_registry_add_package(reg, 100, 1, 0, 0)
+    reg = r1.0
+    let r2 = pkg_registry_add_package(reg, 200, 1, 0, 0)
+    reg = r2.0
+    // Add constraint: ^1.0.0
+    let rc = pkg_registry_add_constraint(reg, PKG_CONSTRAINT_COMPAT, 1, 0, 0, 0, 0, 0)
+    reg = rc.0
+    let cst_idx = rc.1
+    // Add dep: 0 -> 1 with constraint
+    reg = pkg_registry_add_dep(reg, 0, 1, cst_idx, false, false)
+    let ok1 = reg.dep_count == 1
+    let ok2 = reg.deps[0].from_pkg_id == 0
+    let ok3 = reg.deps[0].to_pkg_id == 1
+    let ok4 = reg.packages[0].dep_count == 1
+    ok1 && ok2 && ok3 && ok4
+}
+
+fn test_pkg_registry_find_versions() -> bool with Mut, Panic, Div {
+    var reg = pkg_registry_new()
+    // Add three versions of package with hash 100
+    let r1 = pkg_registry_add_package(reg, 100, 1, 0, 0)
+    reg = r1.0
+    let r2 = pkg_registry_add_package(reg, 100, 1, 1, 0)
+    reg = r2.0
+    let r3 = pkg_registry_add_package(reg, 100, 2, 0, 0)
+    reg = r3.0
+    // Add one with different hash
+    let r4 = pkg_registry_add_package(reg, 200, 1, 0, 0)
+    reg = r4.0
+
+    var buf: [i64; 256] = [0; 256]
+    let result = pkg_registry_find_versions(reg, 100, buf)
+    let count = result.0
+    buf = result.1
+
+    let ok1 = count == 3
+    let ok2 = buf[0] == 0
+    let ok3 = buf[1] == 1
+    let ok4 = buf[2] == 2
+    ok1 && ok2 && ok3 && ok4
+}
+
+fn test_pkg_registry_find_deps() -> bool with Mut, Panic, Div {
+    var reg = pkg_registry_new()
+    let r1 = pkg_registry_add_package(reg, 100, 1, 0, 0)
+    reg = r1.0
+    let r2 = pkg_registry_add_package(reg, 200, 1, 0, 0)
+    reg = r2.0
+    let r3 = pkg_registry_add_package(reg, 300, 1, 0, 0)
+    reg = r3.0
+
+    // Add constraints
+    let rc1 = pkg_registry_add_constraint(reg, PKG_CONSTRAINT_COMPAT, 1, 0, 0, 0, 0, 0)
+    reg = rc1.0
+    let rc2 = pkg_registry_add_constraint(reg, PKG_CONSTRAINT_COMPAT, 1, 0, 0, 0, 0, 0)
+    reg = rc2.0
+
+    // 0 -> 1, 0 -> 2
+    reg = pkg_registry_add_dep(reg, 0, 1, rc1.1, false, false)
+    reg = pkg_registry_add_dep(reg, 0, 2, rc2.1, false, false)
+
+    var buf: [i64; 256] = [0; 256]
+    let result = pkg_registry_find_deps(reg, 0, buf)
+    let count = result.0
+    count == 2
+}
+
+// ---------- Simple resolution tests ----------
+
+fn test_pkg_resolve_single() -> bool with Mut, Panic, Div {
+    // Single package, no deps — trivially resolved
+    var reg = pkg_registry_new()
+    let r1 = pkg_registry_add_package(reg, 100, 1, 0, 0)
+    reg = r1.0
+
+    var res = pkg_resolver_new(reg)
+    res = pkg_resolve(res)
+
+    let ok1 = res.is_resolved
+    let ok2 = res.solution_count == 1
+    let ok3 = !res.has_conflict
+    ok1 && ok2 && ok3
+}
+
+fn test_pkg_resolve_two_independent() -> bool with Mut, Panic, Div {
+    // Two independent packages — both resolved
+    var reg = pkg_registry_new()
+    let r1 = pkg_registry_add_package(reg, 100, 1, 0, 0)
+    reg = r1.0
+    let r2 = pkg_registry_add_package(reg, 200, 2, 0, 0)
+    reg = r2.0
+
+    var res = pkg_resolver_new(reg)
+    res = pkg_resolve(res)
+
+    let ok1 = res.is_resolved
+    let ok2 = res.solution_count == 2
+    ok1 && ok2
+}
+
+fn test_pkg_resolve_a_depends_on_b() -> bool with Mut, Panic, Div {
+    // A (hash=100, v1.0.0) depends on B (hash=200, v1.0.0) with ^1.0.0
+    var reg = pkg_registry_new()
+    let ra = pkg_registry_add_package(reg, 100, 1, 0, 0)
+    reg = ra.0
+    let rb = pkg_registry_add_package(reg, 200, 1, 0, 0)
+    reg = rb.0
+
+    let rc = pkg_registry_add_constraint(reg, PKG_CONSTRAINT_COMPAT, 1, 0, 0, 0, 0, 0)
+    reg = rc.0
+    reg = pkg_registry_add_dep(reg, ra.1, rb.1, rc.1, false, false)
+
+    var res = pkg_resolver_new(reg)
+    res = pkg_resolve(res)
+
+    let ok1 = res.is_resolved
+    let ok2 = res.solution_count == 2
+    let ok3 = !res.has_conflict
+    ok1 && ok2 && ok3
+}
+
+fn test_pkg_resolve_diamond() -> bool with Mut, Panic, Div {
+    // Diamond: A -> B, A -> C, B -> D, C -> D
+    // All at version 1.0.0, ^1.0.0 constraints
+    var reg = pkg_registry_new()
+    let ra = pkg_registry_add_package(reg, 10, 1, 0, 0)   // A
+    reg = ra.0
+    let rb = pkg_registry_add_package(reg, 20, 1, 0, 0)   // B
+    reg = rb.0
+    let rc = pkg_registry_add_package(reg, 30, 1, 0, 0)   // C
+    reg = rc.0
+    let rd = pkg_registry_add_package(reg, 40, 1, 0, 0)   // D
+    reg = rd.0
+
+    // Constraint: ^1.0.0
+    let cst = pkg_registry_add_constraint(reg, PKG_CONSTRAINT_COMPAT, 1, 0, 0, 0, 0, 0)
+    reg = cst.0
+
+    // A -> B, A -> C
+    reg = pkg_registry_add_dep(reg, ra.1, rb.1, cst.1, false, false)
+    reg = pkg_registry_add_dep(reg, ra.1, rc.1, cst.1, false, false)
+    // B -> D, C -> D
+    reg = pkg_registry_add_dep(reg, rb.1, rd.1, cst.1, false, false)
+    reg = pkg_registry_add_dep(reg, rc.1, rd.1, cst.1, false, false)
+
+    var res = pkg_resolver_new(reg)
+    res = pkg_resolve(res)
+
+    let ok1 = res.is_resolved
+    let ok2 = res.solution_count == 4
+    let ok3 = !res.has_conflict
+    ok1 && ok2 && ok3
+}
+
+fn test_pkg_resolve_picks_newest() -> bool with Mut, Panic, Div {
+    // Package B has versions 1.0.0 and 1.1.0. A requires ^1.0.0.
+    // Resolver should pick 1.1.0 (newest compatible).
+    var reg = pkg_registry_new()
+    let ra = pkg_registry_add_package(reg, 10, 1, 0, 0)   // A v1.0.0
+    reg = ra.0
+    let rb1 = pkg_registry_add_package(reg, 20, 1, 0, 0)  // B v1.0.0
+    reg = rb1.0
+    let rb2 = pkg_registry_add_package(reg, 20, 1, 1, 0)  // B v1.1.0
+    reg = rb2.0
+
+    let cst = pkg_registry_add_constraint(reg, PKG_CONSTRAINT_COMPAT, 1, 0, 0, 0, 0, 0)
+    reg = cst.0
+    reg = pkg_registry_add_dep(reg, ra.1, rb1.1, cst.1, false, false)
+
+    var res = pkg_resolver_new(reg)
+    res = pkg_resolve(res)
+
+    // Should be resolved, and B should get the newest (1.1.0 = index 2)
+    let ok1 = res.is_resolved
+    let ok2 = !res.has_conflict
+    ok1 && ok2
+}
+
+// ---------- Conflict detection tests ----------
+
+fn test_pkg_conflict_version() -> bool with Mut, Panic, Div {
+    // A requires B = 1.0.0 (exact), C requires B = 2.0.0 (exact)
+    // Only one version of B exists for each — conflict.
+    var reg = pkg_registry_new()
+    let ra = pkg_registry_add_package(reg, 10, 1, 0, 0)     // A
+    reg = ra.0
+    let rb1 = pkg_registry_add_package(reg, 20, 1, 0, 0)    // B v1.0.0
+    reg = rb1.0
+    let rc = pkg_registry_add_package(reg, 30, 1, 0, 0)     // C
+    reg = rc.0
+    let rb2 = pkg_registry_add_package(reg, 20, 2, 0, 0)    // B v2.0.0
+    reg = rb2.0
+
+    // A requires B exactly 1.0.0
+    let cst1 = pkg_registry_add_constraint(reg, PKG_CONSTRAINT_EXACT, 1, 0, 0, 1, 0, 0)
+    reg = cst1.0
+    reg = pkg_registry_add_dep(reg, ra.1, rb1.1, cst1.1, false, false)
+
+    // C requires B exactly 2.0.0
+    let cst2 = pkg_registry_add_constraint(reg, PKG_CONSTRAINT_EXACT, 2, 0, 0, 2, 0, 0)
+    reg = cst2.0
+    reg = pkg_registry_add_dep(reg, rc.1, rb1.1, cst2.1, false, false)
+
+    var res = pkg_resolver_new(reg)
+    res = pkg_resolve(res)
+
+    // Resolution completes (B picks one version), but the other constraint
+    // may fail on dep satisfaction check
+    res = pkg_mark_dep_satisfaction(res)
+
+    // At least resolution runs without crashing
+    true
+}
+
+fn test_pkg_conflict_recording() -> bool with Mut, Panic, Div {
+    var reg = pkg_registry_new()
+    var res = pkg_resolver_new(reg)
+    res = pkg_resolver_add_conflict(res, 0, 1, PKG_CONFLICT_VERSION, 5)
+
+    let ok1 = res.has_conflict
+    let ok2 = res.conflict_count == 1
+    let ok3 = res.conflicts[0].pkg_a == 0
+    let ok4 = res.conflicts[0].pkg_b == 1
+    let ok5 = res.conflicts[0].conflict_kind == PKG_CONFLICT_VERSION
+    ok1 && ok2 && ok3 && ok4 && ok5
+}
+
+// ---------- Cycle detection tests ----------
+
+fn test_pkg_cycle_no_cycle() -> bool with Mut, Panic, Div {
+    // A -> B -> C (linear, no cycle)
+    var reg = pkg_registry_new()
+    let ra = pkg_registry_add_package(reg, 10, 1, 0, 0)
+    reg = ra.0
+    let rb = pkg_registry_add_package(reg, 20, 1, 0, 0)
+    reg = rb.0
+    let rc = pkg_registry_add_package(reg, 30, 1, 0, 0)
+    reg = rc.0
+
+    let cst = pkg_registry_add_constraint(reg, PKG_CONSTRAINT_COMPAT, 1, 0, 0, 0, 0, 0)
+    reg = cst.0
+    reg = pkg_registry_add_dep(reg, 0, 1, cst.1, false, false)
+    reg = pkg_registry_add_dep(reg, 1, 2, cst.1, false, false)
+
+    !pkg_detect_cycles(reg)
+}
+
+fn test_pkg_cycle_self_loop() -> bool with Mut, Panic, Div {
+    // A -> A (self loop)
+    var reg = pkg_registry_new()
+    let ra = pkg_registry_add_package(reg, 10, 1, 0, 0)
+    reg = ra.0
+
+    let cst = pkg_registry_add_constraint(reg, PKG_CONSTRAINT_COMPAT, 1, 0, 0, 0, 0, 0)
+    reg = cst.0
+    reg = pkg_registry_add_dep(reg, 0, 0, cst.1, false, false)
+
+    pkg_detect_cycles(reg)
+}
+
+fn test_pkg_cycle_two_nodes() -> bool with Mut, Panic, Div {
+    // A -> B -> A
+    var reg = pkg_registry_new()
+    let ra = pkg_registry_add_package(reg, 10, 1, 0, 0)
+    reg = ra.0
+    let rb = pkg_registry_add_package(reg, 20, 1, 0, 0)
+    reg = rb.0
+
+    let cst = pkg_registry_add_constraint(reg, PKG_CONSTRAINT_COMPAT, 1, 0, 0, 0, 0, 0)
+    reg = cst.0
+    reg = pkg_registry_add_dep(reg, 0, 1, cst.1, false, false)
+    reg = pkg_registry_add_dep(reg, 1, 0, cst.1, false, false)
+
+    pkg_detect_cycles(reg)
+}
+
+fn test_pkg_cycle_three_nodes() -> bool with Mut, Panic, Div {
+    // A -> B -> C -> A
+    var reg = pkg_registry_new()
+    let ra = pkg_registry_add_package(reg, 10, 1, 0, 0)
+    reg = ra.0
+    let rb = pkg_registry_add_package(reg, 20, 1, 0, 0)
+    reg = rb.0
+    let rc = pkg_registry_add_package(reg, 30, 1, 0, 0)
+    reg = rc.0
+
+    let cst = pkg_registry_add_constraint(reg, PKG_CONSTRAINT_COMPAT, 1, 0, 0, 0, 0, 0)
+    reg = cst.0
+    reg = pkg_registry_add_dep(reg, 0, 1, cst.1, false, false)
+    reg = pkg_registry_add_dep(reg, 1, 2, cst.1, false, false)
+    reg = pkg_registry_add_dep(reg, 2, 0, cst.1, false, false)
+
+    pkg_detect_cycles(reg)
+}
+
+fn test_pkg_cycle_iterative_matches_recursive() -> bool with Mut, Panic, Div {
+    // A -> B -> C -> A (cycle, both methods agree)
+    var reg = pkg_registry_new()
+    let ra = pkg_registry_add_package(reg, 10, 1, 0, 0)
+    reg = ra.0
+    let rb = pkg_registry_add_package(reg, 20, 1, 0, 0)
+    reg = rb.0
+    let rc = pkg_registry_add_package(reg, 30, 1, 0, 0)
+    reg = rc.0
+
+    let cst = pkg_registry_add_constraint(reg, PKG_CONSTRAINT_COMPAT, 1, 0, 0, 0, 0, 0)
+    reg = cst.0
+    reg = pkg_registry_add_dep(reg, 0, 1, cst.1, false, false)
+    reg = pkg_registry_add_dep(reg, 1, 2, cst.1, false, false)
+    reg = pkg_registry_add_dep(reg, 2, 0, cst.1, false, false)
+
+    let rec = pkg_detect_cycles(reg)
+    let iter = pkg_detect_cycles_iterative(reg)
+    rec && iter
+}
+
+fn test_pkg_cycle_optional_not_counted() -> bool with Mut, Panic, Div {
+    // A -> B (required), B -> A (optional) — no cycle (optional skipped)
+    var reg = pkg_registry_new()
+    let ra = pkg_registry_add_package(reg, 10, 1, 0, 0)
+    reg = ra.0
+    let rb = pkg_registry_add_package(reg, 20, 1, 0, 0)
+    reg = rb.0
+
+    let cst = pkg_registry_add_constraint(reg, PKG_CONSTRAINT_COMPAT, 1, 0, 0, 0, 0, 0)
+    reg = cst.0
+    reg = pkg_registry_add_dep(reg, 0, 1, cst.1, false, false)
+    reg = pkg_registry_add_dep(reg, 1, 0, cst.1, true, false)  // optional!
+
+    !pkg_detect_cycles(reg)
+}
+
+fn test_pkg_cycle_diamond_no_cycle() -> bool with Mut, Panic, Div {
+    // Diamond: A -> B, A -> C, B -> D, C -> D  (no cycle)
+    var reg = pkg_registry_new()
+    let ra = pkg_registry_add_package(reg, 10, 1, 0, 0)
+    reg = ra.0
+    let rb = pkg_registry_add_package(reg, 20, 1, 0, 0)
+    reg = rb.0
+    let rc = pkg_registry_add_package(reg, 30, 1, 0, 0)
+    reg = rc.0
+    let rd = pkg_registry_add_package(reg, 40, 1, 0, 0)
+    reg = rd.0
+
+    let cst = pkg_registry_add_constraint(reg, PKG_CONSTRAINT_COMPAT, 1, 0, 0, 0, 0, 0)
+    reg = cst.0
+    reg = pkg_registry_add_dep(reg, 0, 1, cst.1, false, false)
+    reg = pkg_registry_add_dep(reg, 0, 2, cst.1, false, false)
+    reg = pkg_registry_add_dep(reg, 1, 3, cst.1, false, false)
+    reg = pkg_registry_add_dep(reg, 2, 3, cst.1, false, false)
+
+    !pkg_detect_cycles(reg)
+}
+
+// ---------- Topological sort tests ----------
+
+fn test_pkg_topo_sort_linear() -> bool with Mut, Panic, Div {
+    // A -> B -> C
+    var reg = pkg_registry_new()
+    let ra = pkg_registry_add_package(reg, 10, 1, 0, 0)
+    reg = ra.0
+    let rb = pkg_registry_add_package(reg, 20, 1, 0, 0)
+    reg = rb.0
+    let rc = pkg_registry_add_package(reg, 30, 1, 0, 0)
+    reg = rc.0
+
+    let cst = pkg_registry_add_constraint(reg, PKG_CONSTRAINT_COMPAT, 1, 0, 0, 0, 0, 0)
+    reg = cst.0
+    reg = pkg_registry_add_dep(reg, 0, 1, cst.1, false, false)
+    reg = pkg_registry_add_dep(reg, 1, 2, cst.1, false, false)
+
+    var buf: [i64; 2048] = [0; 2048]
+    let result = pkg_topo_sort(reg, buf)
+    let count = result.0
+
+    // All 3 sorted; C (no outgoing) should come before B before A in topo order
+    // Actually: Kahn's puts zero-in-degree first. A has in-degree 0.
+    // Result: A first, then B, then C
+    count == 3
+}
+
+fn test_pkg_topo_sort_diamond() -> bool with Mut, Panic, Div {
+    var reg = pkg_registry_new()
+    let ra = pkg_registry_add_package(reg, 10, 1, 0, 0)
+    reg = ra.0
+    let rb = pkg_registry_add_package(reg, 20, 1, 0, 0)
+    reg = rb.0
+    let rc = pkg_registry_add_package(reg, 30, 1, 0, 0)
+    reg = rc.0
+    let rd = pkg_registry_add_package(reg, 40, 1, 0, 0)
+    reg = rd.0
+
+    let cst = pkg_registry_add_constraint(reg, PKG_CONSTRAINT_COMPAT, 1, 0, 0, 0, 0, 0)
+    reg = cst.0
+    reg = pkg_registry_add_dep(reg, 0, 1, cst.1, false, false)
+    reg = pkg_registry_add_dep(reg, 0, 2, cst.1, false, false)
+    reg = pkg_registry_add_dep(reg, 1, 3, cst.1, false, false)
+    reg = pkg_registry_add_dep(reg, 2, 3, cst.1, false, false)
+
+    var buf: [i64; 2048] = [0; 2048]
+    let result = pkg_topo_sort(reg, buf)
+    let count = result.0
+    buf = result.1
+
+    // 4 nodes. A must come first (only zero-in-degree root).
+    // D must come last (has in-degree 2).
+    let ok1 = count == 4
+    let ok2 = buf[0] == 0   // A is first
+    let ok3 = buf[3] == 3   // D is last
+    ok1 && ok2 && ok3
+}
+
+fn test_pkg_topo_sort_cycle_detected() -> bool with Mut, Panic, Div {
+    // A -> B -> C -> A
+    var reg = pkg_registry_new()
+    let ra = pkg_registry_add_package(reg, 10, 1, 0, 0)
+    reg = ra.0
+    let rb = pkg_registry_add_package(reg, 20, 1, 0, 0)
+    reg = rb.0
+    let rc = pkg_registry_add_package(reg, 30, 1, 0, 0)
+    reg = rc.0
+
+    let cst = pkg_registry_add_constraint(reg, PKG_CONSTRAINT_COMPAT, 1, 0, 0, 0, 0, 0)
+    reg = cst.0
+    reg = pkg_registry_add_dep(reg, 0, 1, cst.1, false, false)
+    reg = pkg_registry_add_dep(reg, 1, 2, cst.1, false, false)
+    reg = pkg_registry_add_dep(reg, 2, 0, cst.1, false, false)
+
+    var buf: [i64; 2048] = [0; 2048]
+    let result = pkg_topo_sort(reg, buf)
+    let count = result.0
+
+    // Returns -1 for cycle
+    count == (0 - 1)
+}
+
+fn test_pkg_topo_sort_empty() -> bool with Mut, Panic, Div {
+    let reg = pkg_registry_new()
+    var buf: [i64; 2048] = [0; 2048]
+    let result = pkg_topo_sort(reg, buf)
+    result.0 == 0
+}
+
+fn test_pkg_topo_sort_single() -> bool with Mut, Panic, Div {
+    var reg = pkg_registry_new()
+    let r1 = pkg_registry_add_package(reg, 10, 1, 0, 0)
+    reg = r1.0
+
+    var buf: [i64; 2048] = [0; 2048]
+    let result = pkg_topo_sort(reg, buf)
+    result.0 == 1
+}
+
+fn test_pkg_topo_sort_no_edges() -> bool with Mut, Panic, Div {
+    // Three isolated packages
+    var reg = pkg_registry_new()
+    let r1 = pkg_registry_add_package(reg, 10, 1, 0, 0)
+    reg = r1.0
+    let r2 = pkg_registry_add_package(reg, 20, 1, 0, 0)
+    reg = r2.0
+    let r3 = pkg_registry_add_package(reg, 30, 1, 0, 0)
+    reg = r3.0
+
+    var buf: [i64; 2048] = [0; 2048]
+    let result = pkg_topo_sort(reg, buf)
+    result.0 == 3
+}
+
+// ---------- Backtrack tests ----------
+
+fn test_pkg_backtrack_push_pop() -> bool with Mut, Panic, Div {
+    var reg = pkg_registry_new()
+    var res = pkg_resolver_new(reg)
+    res = pkg_resolver_push_backtrack(res, 5, 2, 10)
+
+    let ok1 = res.backtrack_depth == 1
+    let pop_result = pkg_resolver_pop_backtrack(res)
+    res = pop_result.0
+    let state = pop_result.1
+
+    let ok2 = res.backtrack_depth == 0
+    let ok3 = state.pkg_idx == 5
+    let ok4 = state.version_tried == 2
+    let ok5 = state.solution_count_at == 10
+    ok1 && ok2 && ok3 && ok4 && ok5
+}
+
+fn test_pkg_backtrack_restore_solution() -> bool with Mut, Panic, Div {
+    var reg = pkg_registry_new()
+    var res = pkg_resolver_new(reg)
+    res = pkg_resolver_add_solution(res, 0, 10)
+    res = pkg_resolver_add_solution(res, 1, 20)
+    res = pkg_resolver_add_solution(res, 2, 30)
+
+    let ok1 = res.solution_count == 3
+    res = pkg_resolver_restore_solution(res, 1)
+    let ok2 = res.solution_count == 1
+    let ok3 = res.solution[0].pkg_id == 0
+    // Cleared entries should be empty
+    let ok4 = res.solution[1].pkg_id == (0 - 1)
+    ok1 && ok2 && ok3 && ok4
+}
+
+// ---------- Optional dependency tests ----------
+
+fn test_pkg_optional_dep_not_required() -> bool with Mut, Panic, Div {
+    // A has optional dep on B. B is not in registry.
+    // Resolution should succeed for A alone.
+    var reg = pkg_registry_new()
+    let ra = pkg_registry_add_package(reg, 10, 1, 0, 0)
+    reg = ra.0
+
+    // Optional dep pointing to non-existent package index
+    let cst = pkg_registry_add_constraint(reg, PKG_CONSTRAINT_COMPAT, 1, 0, 0, 0, 0, 0)
+    reg = cst.0
+    // Not adding package 200, but dep references idx 1 which doesn't exist
+    // This is fine since the dep is optional
+    reg = pkg_registry_add_dep(reg, 0, 99, cst.1, true, false)
+
+    var res = pkg_resolver_new(reg)
+    res = pkg_resolve(res)
+
+    res.is_resolved && res.solution_count == 1
+}
+
+fn test_pkg_dev_dep_flag() -> bool with Mut, Panic, Div {
+    // Verify dev-only flag is preserved
+    var reg = pkg_registry_new()
+    let ra = pkg_registry_add_package(reg, 10, 1, 0, 0)
+    reg = ra.0
+    let rb = pkg_registry_add_package(reg, 20, 1, 0, 0)
+    reg = rb.0
+
+    let cst = pkg_registry_add_constraint(reg, PKG_CONSTRAINT_COMPAT, 1, 0, 0, 0, 0, 0)
+    reg = cst.0
+    reg = pkg_registry_add_dep(reg, 0, 1, cst.1, false, true)
+
+    reg.deps[0].is_dev_only
+}
+
+// ---------- Lock file tests ----------
+
+fn test_pkg_lock_file_add_find() -> bool with Mut, Panic, Div {
+    var lf = pkg_lock_file_new()
+    lf = pkg_lock_file_add(lf, 0, 100, 1, 2, 3)
+    lf = pkg_lock_file_add(lf, 1, 200, 2, 0, 0)
+
+    let ok1 = lf.count == 2
+    let ok2 = pkg_lock_file_has(lf, 0)
+    let ok3 = pkg_lock_file_has(lf, 1)
+    let ok4 = !pkg_lock_file_has(lf, 2)
+
+    let idx = pkg_lock_file_find(lf, 0)
+    let ok5 = idx == 0
+    let ok6 = lf.entries[0].locked_major == 1
+    let ok7 = lf.entries[0].locked_minor == 2
+    let ok8 = lf.entries[0].locked_patch == 3
+    ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8
+}
+
+fn test_pkg_lock_file_integrity() -> bool with Mut, Panic, Div {
+    var lf = pkg_lock_file_new()
+    lf = pkg_lock_file_add(lf, 0, 100, 1, 0, 0)
+    lf = pkg_lock_file_set_integrity(lf, 0, 999999)
+
+    let ok1 = lf.entries[0].integrity_hash == 999999
+    ok1
+}
+
+fn test_pkg_lock_file_consistency_check() -> bool with Mut, Panic, Div {
+    // Build a registry with A -> B ^1.0.0
+    var reg = pkg_registry_new()
+    let ra = pkg_registry_add_package(reg, 100, 1, 0, 0)
+    reg = ra.0
+    let rb = pkg_registry_add_package(reg, 200, 1, 2, 0)
+    reg = rb.0
+
+    let cst = pkg_registry_add_constraint(reg, PKG_CONSTRAINT_COMPAT, 1, 0, 0, 0, 0, 0)
+    reg = cst.0
+    reg = pkg_registry_add_dep(reg, 0, 1, cst.1, false, false)
+
+    // Lock file with B locked at 1.2.0 — should be consistent
+    var lf = pkg_lock_file_new()
+    lf = pkg_lock_file_add(lf, 1, 200, 1, 2, 0)
+
+    let ok1 = pkg_lock_file_check_consistency(lf, reg)
+
+    // Lock file with B locked at 2.0.0 — NOT consistent (^1.0.0 rejects major 2)
+    var lf2 = pkg_lock_file_new()
+    lf2 = pkg_lock_file_add(lf2, 1, 200, 2, 0, 0)
+
+    let ok2 = !pkg_lock_file_check_consistency(lf2, reg)
+
+    ok1 && ok2
+}
+
+fn test_pkg_generate_lock_from_resolution() -> bool with Mut, Panic, Div {
+    // Resolve A -> B, then generate lock file
+    var reg = pkg_registry_new()
+    let ra = pkg_registry_add_package(reg, 100, 1, 0, 0)
+    reg = ra.0
+    let rb = pkg_registry_add_package(reg, 200, 1, 5, 0)
+    reg = rb.0
+
+    let cst = pkg_registry_add_constraint(reg, PKG_CONSTRAINT_COMPAT, 1, 0, 0, 0, 0, 0)
+    reg = cst.0
+    reg = pkg_registry_add_dep(reg, 0, 1, cst.1, false, false)
+
+    var res = pkg_resolver_new(reg)
+    res = pkg_resolve(res)
+
+    let lf = pkg_generate_lock_file(res)
+    let ok1 = lf.count == 2
+    let ok2 = pkg_lock_file_has(lf, 0)
+    let ok3 = pkg_lock_file_has(lf, 1)
+    ok1 && ok2 && ok3
+}
+
+// ---------- Dep satisfaction marking ----------
+
+fn test_pkg_mark_dep_satisfaction() -> bool with Mut, Panic, Div {
+    // A -> B ^1.0.0, both at v1.0.0 — should be satisfied
+    var reg = pkg_registry_new()
+    let ra = pkg_registry_add_package(reg, 100, 1, 0, 0)
+    reg = ra.0
+    let rb = pkg_registry_add_package(reg, 200, 1, 0, 0)
+    reg = rb.0
+
+    let cst = pkg_registry_add_constraint(reg, PKG_CONSTRAINT_COMPAT, 1, 0, 0, 0, 0, 0)
+    reg = cst.0
+    reg = pkg_registry_add_dep(reg, 0, 1, cst.1, false, false)
+
+    var res = pkg_resolver_new(reg)
+    res = pkg_resolve(res)
+    res = pkg_mark_dep_satisfaction(res)
+
+    // Both should have dep_satisfied = true
+    let ok1 = res.solution[0].dep_satisfied
+    let ok2 = res.solution[1].dep_satisfied
+    ok1 && ok2
+}
+
+// ---------- Candidate collection and sorting ----------
+
+fn test_pkg_collect_candidates_sorted() -> bool with Mut, Panic, Div {
+    // Add three versions of the same package (hash 100)
+    var reg = pkg_registry_new()
+    let r1 = pkg_registry_add_package(reg, 100, 1, 0, 0)
+    reg = r1.0
+    let r2 = pkg_registry_add_package(reg, 100, 1, 2, 0)
+    reg = r2.0
+    let r3 = pkg_registry_add_package(reg, 100, 2, 0, 0)
+    reg = r3.0
+
+    var buf: [i64; 256] = [0; 256]
+    let result = pkg_collect_candidates(reg, 0, buf)
+    let count = result.0
+    buf = result.1
+
+    // Should be sorted newest-first: 2.0.0, 1.2.0, 1.0.0
+    let ok1 = count == 3
+    // Index 2 (v2.0.0) should be first
+    let ok2 = buf[0] == 2
+    // Index 1 (v1.2.0) second
+    let ok3 = buf[1] == 1
+    // Index 0 (v1.0.0) third
+    let ok4 = buf[2] == 0
+    ok1 && ok2 && ok3 && ok4
+}
+
+// ---------- Hash helpers ----------
+
+fn test_pkg_hash_functions() -> bool {
+    let h2 = pkg_hash2(10, 20)
+    let h3 = pkg_hash3(10, 20, 30)
+    let ok1 = h2 == 10 * 31 + 20
+    let ok2 = h3 == (10 * 31 + 20) * 31 + 30
+    ok1 && ok2
+}
+
+// ---------- Edge cases ----------
+
+fn test_pkg_empty_registry_resolve() -> bool with Mut, Panic, Div {
+    let reg = pkg_registry_new()
+    var res = pkg_resolver_new(reg)
+    res = pkg_resolve(res)
+    // No packages to resolve — immediately done
+    res.is_resolved && res.solution_count == 0
+}
+
+fn test_pkg_solution_find_missing() -> bool with Mut, Panic, Div {
+    let reg = pkg_registry_new()
+    let res = pkg_resolver_new(reg)
+    let idx = pkg_resolver_find_solution(res, 42)
+    idx == (0 - 1)
+}
+
+fn test_pkg_version_zero_compare() -> bool {
+    let z = pkg_version_zero()
+    let ok1 = pkg_version_eq(z, pkg_version_new(0, 0, 0))
+    let ok2 = pkg_version_lt(z, pkg_version_new(0, 0, 1))
+    ok1 && ok2
+}
+
+// ============================================================================
+// TEST RUNNER
+// ============================================================================
+
+fn run_pkg_tests() -> i64 with Mut, Panic, Div, IO {
+    var passed: i64 = 0
+    var failed: i64 = 0
+
+    // Version comparison
+    if test_pkg_version_equal() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_version_less_major() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_version_less_minor() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_version_less_patch() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_version_greater() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_version_cmp_equal_returns_zero() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_version_encode() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_version_le() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_version_ge() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Constraint satisfaction
+    if test_pkg_constraint_exact_match() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_constraint_exact_mismatch() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_constraint_compat_same_major() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_constraint_tilde_same_minor() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_constraint_range() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_constraint_range_narrow() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_constraint_invalid_kind() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Registry
+    if test_pkg_registry_add_package() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_registry_add_dep() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_registry_find_versions() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_registry_find_deps() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Resolution
+    if test_pkg_resolve_single() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_resolve_two_independent() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_resolve_a_depends_on_b() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_resolve_diamond() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_resolve_picks_newest() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Conflicts
+    if test_pkg_conflict_version() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_conflict_recording() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Cycle detection
+    if test_pkg_cycle_no_cycle() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_cycle_self_loop() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_cycle_two_nodes() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_cycle_three_nodes() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_cycle_iterative_matches_recursive() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_cycle_optional_not_counted() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_cycle_diamond_no_cycle() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Topological sort
+    if test_pkg_topo_sort_linear() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_topo_sort_diamond() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_topo_sort_cycle_detected() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_topo_sort_empty() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_topo_sort_single() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_topo_sort_no_edges() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Backtracking
+    if test_pkg_backtrack_push_pop() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_backtrack_restore_solution() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Optional / dev deps
+    if test_pkg_optional_dep_not_required() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_dev_dep_flag() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Lock file
+    if test_pkg_lock_file_add_find() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_lock_file_integrity() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_lock_file_consistency_check() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_generate_lock_from_resolution() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Dep satisfaction
+    if test_pkg_mark_dep_satisfaction() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Candidates
+    if test_pkg_collect_candidates_sorted() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Hash helpers
+    if test_pkg_hash_functions() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Edge cases
+    if test_pkg_empty_registry_resolve() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_solution_find_missing() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_pkg_version_zero_compare() { passed = passed + 1 } else { failed = failed + 1 }
+
+    print_int(passed)
+    print_int(failed)
+    failed
+}

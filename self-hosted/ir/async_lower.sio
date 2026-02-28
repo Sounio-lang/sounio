@@ -1,0 +1,2437 @@
+// self-hosted::ir::async_lower — Async/await state machine lowering
+//
+// Transforms async functions into state machines suitable for cooperative
+// multitasking. Each async function is split at its await points (suspend
+// points) into a set of states, and a poll/resume function is generated
+// that dispatches on the current state.
+//
+// Pipeline:
+//   1. Scan function body for await expressions, record suspend points
+//   2. Compute live variables at each suspend point (simple dataflow)
+//   3. Split the function into states at each suspend point
+//   4. Build a future struct that holds state tag + captured variables
+//   5. Generate a poll function with if/else dispatch on state_id
+//   6. Rewrite variable accesses to load/store from the future struct
+//   7. Handle nested async (awaiting other futures)
+//
+// All arrays are fixed-size. No heap allocation in the core lowering.
+//
+// References:
+//   Rust RFC 2033: "Experimental coroutines"
+//   Kotlin coroutines: state machine transform
+//   C# async/await: Roslyn lowering to IAsyncStateMachine
+
+// ============================================================================
+// Section 1: Constants
+// ============================================================================
+
+let ASYNC_MAX_STATES: i64 = 256
+let ASYNC_MAX_SUSPENDS: i64 = 128
+let ASYNC_MAX_CAPTURES: i64 = 64
+let ASYNC_MAX_MACHINES: i64 = 128
+let ASYNC_MAX_LIVE_VARS: i64 = 64
+let ASYNC_MAX_INSTRS_PER_STATE: i64 = 4096
+let ASYNC_MAX_NESTED: i64 = 32
+
+let ASYNC_STATE_INITIAL: i64 = 0
+let ASYNC_STATE_FINAL: i64 = 1
+
+let ASYNC_POLL_READY: i64 = 1
+let ASYNC_POLL_PENDING: i64 = 0
+
+// Instruction marker: identifies an await expression in the IR stream.
+// We use a sentinel fn_id to tag IrCall instructions that represent awaits.
+let ASYNC_AWAIT_SENTINEL: i64 = 0 - 9999
+
+// Invalid sentinel
+let ASYNC_INVALID: i64 = 0 - 1
+
+// ============================================================================
+// Section 2: Core data structures
+// ============================================================================
+
+// A variable that is live across a suspend point and must be saved/restored
+// in the future struct.
+struct AsyncLiveVar {
+    var_id: i64,
+    var_type_id: i64,
+    slot_offset: i64,
+    needs_drop: bool,
+}
+
+fn async_live_var_new() -> AsyncLiveVar {
+    AsyncLiveVar {
+        var_id: ASYNC_INVALID,
+        var_type_id: 0,
+        slot_offset: 0,
+        needs_drop: false,
+    }
+}
+
+fn async_live_var_make(vid: i64, tid: i64, offset: i64, drop: bool) -> AsyncLiveVar {
+    AsyncLiveVar {
+        var_id: vid,
+        var_type_id: tid,
+        slot_offset: offset,
+        needs_drop: drop,
+    }
+}
+
+// One state in the generated state machine.
+struct AsyncState {
+    state_id: i64,
+    entry_block: i64,
+    exit_block: i64,
+    live_vars: [AsyncLiveVar; 64],
+    var_count: i64,
+    is_initial: bool,
+    is_final: bool,
+    suspend_point_id: i64,
+    instr_start: i64,
+    instr_end: i64,
+}
+
+fn async_state_new() -> AsyncState {
+    AsyncState {
+        state_id: ASYNC_INVALID,
+        entry_block: ASYNC_INVALID,
+        exit_block: ASYNC_INVALID,
+        live_vars: [async_live_var_new(); 64],
+        var_count: 0,
+        is_initial: false,
+        is_final: false,
+        suspend_point_id: ASYNC_INVALID,
+        instr_start: 0,
+        instr_end: 0,
+    }
+}
+
+fn async_state_make(id: i64, entry: i64, exit: i64, initial: bool, final_s: bool, sp: i64) -> AsyncState {
+    AsyncState {
+        state_id: id,
+        entry_block: entry,
+        exit_block: exit,
+        live_vars: [async_live_var_new(); 64],
+        var_count: 0,
+        is_initial: initial,
+        is_final: final_s,
+        suspend_point_id: sp,
+        instr_start: 0,
+        instr_end: 0,
+    }
+}
+
+// A suspend point — where the function yields control.
+struct AsyncSuspendPoint {
+    point_id: i64,
+    state_before: i64,
+    state_after: i64,
+    awaited_future_reg: i64,
+    result_reg: i64,
+    instr_index: i64,
+}
+
+fn async_suspend_point_new() -> AsyncSuspendPoint {
+    AsyncSuspendPoint {
+        point_id: ASYNC_INVALID,
+        state_before: ASYNC_INVALID,
+        state_after: ASYNC_INVALID,
+        awaited_future_reg: ASYNC_INVALID,
+        result_reg: ASYNC_INVALID,
+        instr_index: ASYNC_INVALID,
+    }
+}
+
+fn async_suspend_point_make(pid: i64, before: i64, after: i64, future_reg: i64, res_reg: i64, idx: i64) -> AsyncSuspendPoint {
+    AsyncSuspendPoint {
+        point_id: pid,
+        state_before: before,
+        state_after: after,
+        awaited_future_reg: future_reg,
+        result_reg: res_reg,
+        instr_index: idx,
+    }
+}
+
+// The complete state machine for one async function.
+struct AsyncStateMachine {
+    func_id: i64,
+    states: [AsyncState; 256],
+    state_count: i64,
+    suspend_points: [AsyncSuspendPoint; 128],
+    suspend_count: i64,
+    captured_vars: [AsyncLiveVar; 64],
+    capture_count: i64,
+    poll_func_id: i64,
+    original_param_count: i64,
+    original_reg_count: i64,
+}
+
+fn async_state_machine_new() -> AsyncStateMachine {
+    AsyncStateMachine {
+        func_id: ASYNC_INVALID,
+        states: [async_state_new(); 256],
+        state_count: 0,
+        suspend_points: [async_suspend_point_new(); 128],
+        suspend_count: 0,
+        captured_vars: [async_live_var_new(); 64],
+        capture_count: 0,
+        poll_func_id: ASYNC_INVALID,
+        original_param_count: 0,
+        original_reg_count: 0,
+    }
+}
+
+// Top-level lowering context: tracks all state machines being built.
+struct AsyncLowerCtx {
+    machines: [AsyncStateMachine; 128],
+    machine_count: i64,
+    next_temp_reg: i64,
+    next_label: i64,
+    next_func_id: i64,
+    error_count: i64,
+}
+
+fn async_lower_ctx_new() -> AsyncLowerCtx {
+    AsyncLowerCtx {
+        machines: [async_state_machine_new(); 128],
+        machine_count: 0,
+        next_temp_reg: 0,
+        next_label: 0,
+        next_func_id: 0,
+        error_count: 0,
+    }
+}
+
+fn async_lower_ctx_init(base_reg: i64, base_label: i64, base_func: i64) -> AsyncLowerCtx {
+    AsyncLowerCtx {
+        machines: [async_state_machine_new(); 128],
+        machine_count: 0,
+        next_temp_reg: base_reg,
+        next_label: base_label,
+        next_func_id: base_func,
+        error_count: 0,
+    }
+}
+
+// ============================================================================
+// Section 3: Temporary register / label allocation
+// ============================================================================
+
+fn async_alloc_reg(ctx: AsyncLowerCtx) -> AsyncLowerCtx with Mut {
+    var result = ctx
+    result.next_temp_reg = result.next_temp_reg + 1
+    result
+}
+
+fn async_last_reg(ctx: AsyncLowerCtx) -> i64 {
+    ctx.next_temp_reg - 1
+}
+
+fn async_alloc_label(ctx: AsyncLowerCtx) -> AsyncLowerCtx with Mut {
+    var result = ctx
+    result.next_label = result.next_label + 1
+    result
+}
+
+fn async_last_label(ctx: AsyncLowerCtx) -> i64 {
+    ctx.next_label - 1
+}
+
+fn async_alloc_func(ctx: AsyncLowerCtx) -> AsyncLowerCtx with Mut {
+    var result = ctx
+    result.next_func_id = result.next_func_id + 1
+    result
+}
+
+fn async_last_func(ctx: AsyncLowerCtx) -> i64 {
+    ctx.next_func_id - 1
+}
+
+// ============================================================================
+// Section 4: Suspend point detection
+// ============================================================================
+
+// Check if an instruction is an await expression.
+// We identify awaits by an IrCall with fn_id == ASYNC_AWAIT_SENTINEL.
+fn async_is_await_instr(instr: IrInstr) -> bool {
+    if instr.fn_id == ASYNC_AWAIT_SENTINEL {
+        return true
+    }
+    false
+}
+
+// Scan a function for await instructions and record suspend points.
+// Returns the updated state machine with suspend_points populated.
+fn async_detect_suspend_points(func: IrFunction, sm: AsyncStateMachine) -> AsyncStateMachine with Mut, Panic, Div {
+    var result = sm
+    result.suspend_count = 0
+
+    var i: i64 = 0
+    while i < func.instr_count {
+        let instr = func.instrs[i as usize]
+        if async_is_await_instr(instr) {
+            if result.suspend_count < ASYNC_MAX_SUSPENDS {
+                let sp_id = result.suspend_count
+                var sp = async_suspend_point_new()
+                sp.point_id = sp_id
+                sp.awaited_future_reg = instr.src1
+                sp.result_reg = instr.dst
+                sp.instr_index = i
+                // state_before and state_after filled during state splitting
+                sp.state_before = sp_id
+                sp.state_after = sp_id + 1
+                result.suspend_points[sp_id as usize] = sp
+                result.suspend_count = sp_id + 1
+            }
+        }
+        i = i + 1
+    }
+
+    result
+}
+
+// Count the number of await instructions in a function.
+fn async_count_awaits(func: IrFunction) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < func.instr_count {
+        let instr = func.instrs[i as usize]
+        if async_is_await_instr(instr) {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// Section 5: Live variable analysis
+// ============================================================================
+
+// Bit-set representation for variable liveness (up to 64 variables tracked).
+struct AsyncVarSet {
+    bits: [bool; 64],
+    count: i64,
+}
+
+fn async_var_set_new() -> AsyncVarSet {
+    AsyncVarSet {
+        bits: [false; 64],
+        count: 0,
+    }
+}
+
+fn async_var_set_add(set: AsyncVarSet, var_id: i64) -> AsyncVarSet with Mut, Panic, Div {
+    var result = set
+    if var_id >= 0 && var_id < ASYNC_MAX_LIVE_VARS {
+        if !result.bits[var_id as usize] {
+            result.bits[var_id as usize] = true
+            result.count = result.count + 1
+        }
+    }
+    result
+}
+
+fn async_var_set_remove(set: AsyncVarSet, var_id: i64) -> AsyncVarSet with Mut, Panic, Div {
+    var result = set
+    if var_id >= 0 && var_id < ASYNC_MAX_LIVE_VARS {
+        if result.bits[var_id as usize] {
+            result.bits[var_id as usize] = false
+            result.count = result.count - 1
+        }
+    }
+    result
+}
+
+fn async_var_set_contains(set: AsyncVarSet, var_id: i64) -> bool with Panic, Div {
+    if var_id >= 0 && var_id < ASYNC_MAX_LIVE_VARS {
+        return set.bits[var_id as usize]
+    }
+    false
+}
+
+fn async_var_set_union(a: AsyncVarSet, b: AsyncVarSet) -> AsyncVarSet with Mut, Panic, Div {
+    var result = a
+    var i: i64 = 0
+    while i < ASYNC_MAX_LIVE_VARS {
+        if b.bits[i as usize] && !result.bits[i as usize] {
+            result.bits[i as usize] = true
+            result.count = result.count + 1
+        }
+        i = i + 1
+    }
+    result
+}
+
+fn async_var_set_intersect(a: AsyncVarSet, b: AsyncVarSet) -> AsyncVarSet with Mut, Panic, Div {
+    var result = async_var_set_new()
+    var i: i64 = 0
+    while i < ASYNC_MAX_LIVE_VARS {
+        if a.bits[i as usize] && b.bits[i as usize] {
+            result.bits[i as usize] = true
+            result.count = result.count + 1
+        }
+        i = i + 1
+    }
+    result
+}
+
+// Compute the set of registers defined (written) by an instruction.
+fn async_instr_defs(instr: IrInstr) -> AsyncVarSet with Mut, Panic, Div {
+    var defs = async_var_set_new()
+    if instr.dst >= 0 && instr.dst < ASYNC_MAX_LIVE_VARS {
+        defs = async_var_set_add(defs, instr.dst)
+    }
+    defs
+}
+
+// Compute the set of registers used (read) by an instruction.
+fn async_instr_uses(instr: IrInstr) -> AsyncVarSet with Mut, Panic, Div {
+    var uses = async_var_set_new()
+    if instr.src1 >= 0 && instr.src1 < ASYNC_MAX_LIVE_VARS {
+        uses = async_var_set_add(uses, instr.src1)
+    }
+    if instr.src2 >= 0 && instr.src2 < ASYNC_MAX_LIVE_VARS {
+        uses = async_var_set_add(uses, instr.src2)
+    }
+    uses
+}
+
+// Compute live-in set at a given instruction index by backward scan.
+// live_out = union of all successors' live_in
+// live_in(i) = uses(i) union (live_out(i) - defs(i))
+//
+// For simplicity we do a single backward pass from the end of the function
+// to the target instruction, collecting the live set.
+fn async_compute_live_at(func: IrFunction, target_idx: i64) -> AsyncVarSet with Mut, Panic, Div {
+    var live = async_var_set_new()
+
+    // Walk backward from end to target
+    var i: i64 = func.instr_count - 1
+    while i >= target_idx {
+        let instr = func.instrs[i as usize]
+        // Remove defs
+        if instr.dst >= 0 && instr.dst < ASYNC_MAX_LIVE_VARS {
+            live = async_var_set_remove(live, instr.dst)
+        }
+        // Add uses
+        if instr.src1 >= 0 && instr.src1 < ASYNC_MAX_LIVE_VARS {
+            live = async_var_set_add(live, instr.src1)
+        }
+        if instr.src2 >= 0 && instr.src2 < ASYNC_MAX_LIVE_VARS {
+            live = async_var_set_add(live, instr.src2)
+        }
+        i = i - 1
+    }
+
+    live
+}
+
+// Compute live variables across a suspend point.
+// A variable is live across a suspend point if it is defined before the
+// suspend and used after it.
+fn async_live_across_suspend(func: IrFunction, suspend_idx: i64) -> AsyncVarSet with Mut, Panic, Div {
+    // Step 1: compute defs before the suspend point
+    var defs_before = async_var_set_new()
+    var i: i64 = 0
+    while i < suspend_idx {
+        let instr = func.instrs[i as usize]
+        if instr.dst >= 0 && instr.dst < ASYNC_MAX_LIVE_VARS {
+            defs_before = async_var_set_add(defs_before, instr.dst)
+        }
+        i = i + 1
+    }
+
+    // Step 2: compute uses after the suspend point
+    var uses_after = async_var_set_new()
+    var j: i64 = suspend_idx + 1
+    while j < func.instr_count {
+        let instr = func.instrs[j as usize]
+        if instr.src1 >= 0 && instr.src1 < ASYNC_MAX_LIVE_VARS {
+            uses_after = async_var_set_add(uses_after, instr.src1)
+        }
+        if instr.src2 >= 0 && instr.src2 < ASYNC_MAX_LIVE_VARS {
+            uses_after = async_var_set_add(uses_after, instr.src2)
+        }
+        j = j + 1
+    }
+
+    // Step 3: intersection = defined before AND used after
+    async_var_set_intersect(defs_before, uses_after)
+}
+
+// Populate the live_vars array in each state from a var set.
+fn async_state_set_live_vars(state: AsyncState, live: AsyncVarSet) -> AsyncState with Mut, Panic, Div {
+    var result = state
+    result.var_count = 0
+    var i: i64 = 0
+    while i < ASYNC_MAX_LIVE_VARS {
+        if live.bits[i as usize] {
+            if result.var_count < ASYNC_MAX_LIVE_VARS {
+                var lv = async_live_var_new()
+                lv.var_id = i
+                lv.slot_offset = result.var_count
+                result.live_vars[result.var_count as usize] = lv
+                result.var_count = result.var_count + 1
+            }
+        }
+        i = i + 1
+    }
+    result
+}
+
+// Run live variable analysis for all suspend points in a state machine.
+fn async_analyze_liveness(func: IrFunction, sm: AsyncStateMachine) -> AsyncStateMachine with Mut, Panic, Div {
+    var result = sm
+
+    var sp: i64 = 0
+    while sp < result.suspend_count {
+        let suspend_idx = result.suspend_points[sp as usize].instr_index
+        let live = async_live_across_suspend(func, suspend_idx)
+
+        // Store live vars on the state_before (the state that suspends)
+        let state_id = result.suspend_points[sp as usize].state_before
+        if state_id >= 0 && state_id < result.state_count {
+            result.states[state_id as usize] = async_state_set_live_vars(
+                result.states[state_id as usize], live)
+        }
+
+        sp = sp + 1
+    }
+
+    result
+}
+
+// ============================================================================
+// Section 6: State splitting
+// ============================================================================
+
+// Split a function into states at each suspend point.
+// N suspend points -> N+1 states (state 0 = initial, state N = final).
+// Additionally state ASYNC_STATE_FINAL (1) is reserved for the done state.
+fn async_split_states(func: IrFunction, sm: AsyncStateMachine) -> AsyncStateMachine with Mut, Panic, Div {
+    var result = sm
+    let n_suspends = result.suspend_count
+
+    // If no suspends, the function is trivially a single initial+final state
+    if n_suspends == 0 {
+        // State 0: initial and final
+        var s0 = async_state_make(0, 0, 0, true, true, ASYNC_INVALID)
+        s0.instr_start = 0
+        s0.instr_end = func.instr_count
+        result.states[0] = s0
+        result.state_count = 1
+        return result
+    }
+
+    // State 0: from start to first suspend
+    var s_init = async_state_make(0, 0, 0, true, false, ASYNC_INVALID)
+    s_init.instr_start = 0
+    s_init.instr_end = result.suspend_points[0].instr_index
+    result.states[0] = s_init
+    result.state_count = 1
+
+    // Intermediate states: between consecutive suspend points
+    var i: i64 = 0
+    while i < n_suspends {
+        let sp = result.suspend_points[i as usize]
+        let next_state_id = i + 1
+        let is_last = (i == n_suspends - 1)
+
+        var st = async_state_make(next_state_id, 0, 0, false, false, sp.point_id)
+        st.instr_start = sp.instr_index + 1
+
+        if is_last {
+            // Last state runs to end of function
+            st.instr_end = func.instr_count
+            st.is_final = true
+        } else {
+            // Runs to next suspend point
+            st.instr_end = result.suspend_points[(i + 1) as usize].instr_index
+        }
+
+        if next_state_id < ASYNC_MAX_STATES {
+            result.states[next_state_id as usize] = st
+            result.state_count = next_state_id + 1
+        }
+
+        // Update suspend point state_before / state_after
+        result.suspend_points[i as usize].state_before = i
+        result.suspend_points[i as usize].state_after = next_state_id
+
+        i = i + 1
+    }
+
+    result
+}
+
+// ============================================================================
+// Section 7: Variable capture
+// ============================================================================
+
+// Collect all unique variables that are live across any suspend point.
+// These must be captured into the future struct.
+fn async_collect_captures(sm: AsyncStateMachine) -> AsyncStateMachine with Mut, Panic, Div {
+    var result = sm
+    result.capture_count = 0
+
+    // Track which var_ids we have already added
+    var seen: [bool; 64] = [false; 64]
+
+    var s: i64 = 0
+    while s < result.state_count {
+        let state = result.states[s as usize]
+        var v: i64 = 0
+        while v < state.var_count {
+            let lv = state.live_vars[v as usize]
+            let vid = lv.var_id
+            if vid >= 0 && vid < ASYNC_MAX_CAPTURES {
+                if !seen[vid as usize] {
+                    seen[vid as usize] = true
+                    if result.capture_count < ASYNC_MAX_CAPTURES {
+                        var cap = lv
+                        cap.slot_offset = result.capture_count
+                        result.captured_vars[result.capture_count as usize] = cap
+                        result.capture_count = result.capture_count + 1
+                    }
+                }
+            }
+            v = v + 1
+        }
+        s = s + 1
+    }
+
+    result
+}
+
+// Find the slot offset of a captured variable by var_id.
+// Returns ASYNC_INVALID if not found.
+fn async_find_capture_slot(sm: AsyncStateMachine, var_id: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < sm.capture_count {
+        if sm.captured_vars[i as usize].var_id == var_id {
+            return sm.captured_vars[i as usize].slot_offset
+        }
+        i = i + 1
+    }
+    ASYNC_INVALID
+}
+
+// Check if a variable is captured.
+fn async_is_captured(sm: AsyncStateMachine, var_id: i64) -> bool with Mut, Panic, Div {
+    async_find_capture_slot(sm, var_id) != ASYNC_INVALID
+}
+
+// ============================================================================
+// Section 8: State machine struct generation
+// ============================================================================
+
+// The future struct layout:
+//   field 0: state_tag (i64) — current state index
+//   field 1..N: captured variables
+//   field N+1: result slot
+//
+// Returns the total number of fields in the struct.
+fn async_future_struct_field_count(sm: AsyncStateMachine) -> i64 {
+    // 1 (state_tag) + capture_count + 1 (result)
+    sm.capture_count + 2
+}
+
+// Generate field index for the state tag.
+fn async_state_tag_field() -> i64 {
+    0
+}
+
+// Generate field index for captured variable at slot offset.
+fn async_capture_field(slot_offset: i64) -> i64 {
+    slot_offset + 1
+}
+
+// Generate field index for the result slot.
+fn async_result_field(sm: AsyncStateMachine) -> i64 {
+    sm.capture_count + 1
+}
+
+// Build a struct layout descriptor for the generated future.
+// Returns a StructLayoutEntry compatible with the IR's struct tracking.
+fn async_build_future_layout(sm: AsyncStateMachine, name: Name) -> StructLayoutEntry with Mut, Panic, Div {
+    var layout = empty_struct_layout_entry()
+    layout.type_name = name
+
+    // Field 0: state_tag
+    var f0 = empty_struct_field_entry()
+    f0.name = async_make_name_state_tag()
+    f0.index = 0
+    layout.fields[0] = f0
+    layout.field_count = 1
+
+    // Fields 1..N: captured vars
+    var i: i64 = 0
+    while i < sm.capture_count {
+        let cap = sm.captured_vars[i as usize]
+        var field = empty_struct_field_entry()
+        field.name = async_make_capture_name(i)
+        field.index = i + 1
+        if layout.field_count < 64 {
+            layout.fields[layout.field_count as usize] = field
+            layout.field_count = layout.field_count + 1
+        }
+        i = i + 1
+    }
+
+    // Last field: result
+    var fr = empty_struct_field_entry()
+    fr.name = async_make_name_result()
+    fr.index = layout.field_count
+    if layout.field_count < 64 {
+        layout.fields[layout.field_count as usize] = fr
+        layout.field_count = layout.field_count + 1
+    }
+
+    layout
+}
+
+// ============================================================================
+// Section 9: Name construction helpers
+// ============================================================================
+
+// Build the name "state_tag" for the state field.
+fn async_make_name_state_tag() -> Name with Mut, Panic, Div {
+    // s=115 t=116 a=97 t=116 e=101 _=95 t=116 a=97 g=103
+    var n = Name { buf: [0; 128], len: 9 }
+    n.buf[0] = 115 as i8   // s
+    n.buf[1] = 116 as i8   // t
+    n.buf[2] = 97 as i8    // a
+    n.buf[3] = 116 as i8   // t
+    n.buf[4] = 101 as i8   // e
+    n.buf[5] = 95 as i8    // _
+    n.buf[6] = 116 as i8   // t
+    n.buf[7] = 97 as i8    // a
+    n.buf[8] = 103 as i8   // g
+    n
+}
+
+// Build the name "result" for the result field.
+fn async_make_name_result() -> Name with Mut, Panic, Div {
+    // r=114 e=101 s=115 u=117 l=108 t=116
+    var n = Name { buf: [0; 128], len: 6 }
+    n.buf[0] = 114 as i8   // r
+    n.buf[1] = 101 as i8   // e
+    n.buf[2] = 115 as i8   // s
+    n.buf[3] = 117 as i8   // u
+    n.buf[4] = 108 as i8   // l
+    n.buf[5] = 116 as i8   // t
+    n
+}
+
+// Build a capture name "cap_N" where N is a digit 0-9.
+fn async_make_capture_name(idx: i64) -> Name with Mut, Panic, Div {
+    // c=99 a=97 p=112 _=95 digit
+    var n = Name { buf: [0; 128], len: 5 }
+    n.buf[0] = 99 as i8    // c
+    n.buf[1] = 97 as i8    // a
+    n.buf[2] = 112 as i8   // p
+    n.buf[3] = 95 as i8    // _
+    n.buf[4] = (48 + idx) as i8  // '0' + idx
+    if idx >= 10 {
+        // Two digit: "cap_XY"
+        let tens = idx / 10
+        let ones = idx - (tens * 10)
+        n.buf[4] = (48 + tens) as i8
+        n.buf[5] = (48 + ones) as i8
+        n.len = 6
+    }
+    n
+}
+
+// Build name "poll_" prefix + original function name suffix.
+fn async_make_poll_name(orig_name: Name) -> Name with Mut, Panic, Div {
+    // p=112 o=111 l=108 l=108 _=95
+    var n = Name { buf: [0; 128], len: 0 }
+    n.buf[0] = 112 as i8   // p
+    n.buf[1] = 111 as i8   // o
+    n.buf[2] = 108 as i8   // l
+    n.buf[3] = 108 as i8   // l
+    n.buf[4] = 95 as i8    // _
+    n.len = 5
+
+    // Append original name
+    var i: i64 = 0
+    while i < orig_name.len && n.len < 128 {
+        n.buf[n.len as usize] = orig_name.buf[i as usize]
+        n.len = n.len + 1
+        i = i + 1
+    }
+    n
+}
+
+// Build name "Future_" prefix + original function name suffix.
+fn async_make_future_name(orig_name: Name) -> Name with Mut, Panic, Div {
+    // F=70 u=117 t=116 u=117 r=114 e=101 _=95
+    var n = Name { buf: [0; 128], len: 0 }
+    n.buf[0] = 70 as i8    // F
+    n.buf[1] = 117 as i8   // u
+    n.buf[2] = 116 as i8   // t
+    n.buf[3] = 117 as i8   // u
+    n.buf[4] = 114 as i8   // r
+    n.buf[5] = 101 as i8   // e
+    n.buf[6] = 95 as i8    // _
+    n.len = 7
+
+    var i: i64 = 0
+    while i < orig_name.len && n.len < 128 {
+        n.buf[n.len as usize] = orig_name.buf[i as usize]
+        n.len = n.len + 1
+        i = i + 1
+    }
+    n
+}
+
+// ============================================================================
+// Section 10: Poll function generation
+// ============================================================================
+
+// Emit instructions for saving captured variables into the future struct
+// before a suspend. future_reg is the register holding the future struct.
+fn async_emit_save_captures(sm: AsyncStateMachine, future_reg: i64, buf: [IrInstr; 4096], offset: i64) -> i64 with Mut, Panic, Div {
+    var pos = offset
+    var i: i64 = 0
+    while i < sm.capture_count {
+        let cap = sm.captured_vars[i as usize]
+        let field_idx = async_capture_field(cap.slot_offset)
+        let field_name = async_make_capture_name(i)
+        if pos < ASYNC_MAX_INSTRS_PER_STATE {
+            buf[pos as usize] = ir_field_set(future_reg, field_idx, cap.var_id, field_name)
+            pos = pos + 1
+        }
+        i = i + 1
+    }
+    pos
+}
+
+// Emit instructions for restoring captured variables from the future struct
+// after resume. future_reg is the register holding the future struct.
+fn async_emit_restore_captures(sm: AsyncStateMachine, future_reg: i64, buf: [IrInstr; 4096], offset: i64) -> i64 with Mut, Panic, Div {
+    var pos = offset
+    var i: i64 = 0
+    while i < sm.capture_count {
+        let cap = sm.captured_vars[i as usize]
+        let field_idx = async_capture_field(cap.slot_offset)
+        let field_name = async_make_capture_name(i)
+        if pos < ASYNC_MAX_INSTRS_PER_STATE {
+            buf[pos as usize] = ir_field_get(cap.var_id, future_reg, field_idx, field_name)
+            pos = pos + 1
+        }
+        i = i + 1
+    }
+    pos
+}
+
+// Emit the state tag update: set the state_tag field to the new state.
+fn async_emit_state_update(future_reg: i64, new_state: i64, buf: [IrInstr; 4096], offset: i64, temp_reg: i64) -> i64 with Mut, Panic, Div {
+    var pos = offset
+    // Load new state into temp
+    if pos < ASYNC_MAX_INSTRS_PER_STATE {
+        buf[pos as usize] = ir_load_imm(temp_reg, new_state)
+        pos = pos + 1
+    }
+    // Set state_tag field
+    if pos < ASYNC_MAX_INSTRS_PER_STATE {
+        let tag_name = async_make_name_state_tag()
+        buf[pos as usize] = ir_field_set(future_reg, async_state_tag_field(), temp_reg, tag_name)
+        pos = pos + 1
+    }
+    pos
+}
+
+// Emit a pending return: set state, save captures, return PENDING.
+fn async_emit_suspend(sm: AsyncStateMachine, future_reg: i64, next_state: i64, buf: [IrInstr; 4096], offset: i64, temp_reg: i64, ret_reg: i64) -> i64 with Mut, Panic, Div {
+    var pos = offset
+    // Update state tag
+    pos = async_emit_state_update(future_reg, next_state, buf, pos, temp_reg)
+    // Save captures
+    pos = async_emit_save_captures(sm, future_reg, buf, pos)
+    // Load PENDING into ret_reg
+    if pos < ASYNC_MAX_INSTRS_PER_STATE {
+        buf[pos as usize] = ir_load_imm(ret_reg, ASYNC_POLL_PENDING)
+        pos = pos + 1
+    }
+    // Return
+    if pos < ASYNC_MAX_INSTRS_PER_STATE {
+        buf[pos as usize] = ir_return(ret_reg)
+        pos = pos + 1
+    }
+    pos
+}
+
+// Emit a ready return: set state to FINAL, store result, return READY.
+fn async_emit_ready(sm: AsyncStateMachine, future_reg: i64, result_val_reg: i64, buf: [IrInstr; 4096], offset: i64, temp_reg: i64, ret_reg: i64) -> i64 with Mut, Panic, Div {
+    var pos = offset
+    // Update state tag to FINAL
+    pos = async_emit_state_update(future_reg, ASYNC_STATE_FINAL, buf, pos, temp_reg)
+    // Store result value
+    if pos < ASYNC_MAX_INSTRS_PER_STATE {
+        let res_name = async_make_name_result()
+        buf[pos as usize] = ir_field_set(future_reg, async_result_field(sm), result_val_reg, res_name)
+        pos = pos + 1
+    }
+    // Load READY into ret_reg
+    if pos < ASYNC_MAX_INSTRS_PER_STATE {
+        buf[pos as usize] = ir_load_imm(ret_reg, ASYNC_POLL_READY)
+        pos = pos + 1
+    }
+    // Return
+    if pos < ASYNC_MAX_INSTRS_PER_STATE {
+        buf[pos as usize] = ir_return(ret_reg)
+        pos = pos + 1
+    }
+    pos
+}
+
+// Generate the poll function dispatch header.
+// Loads state_tag from future struct, then branches to the correct state.
+//
+// Layout:
+//   load state_tag
+//   if state_tag == 0: goto label_state_0
+//   if state_tag == 1: goto label_state_1 (final / done)
+//   ...
+//   goto label_invalid
+fn async_emit_poll_dispatch(sm: AsyncStateMachine, future_reg: i64, tag_reg: i64, state_labels: [i64; 256], buf: [IrInstr; 4096], offset: i64, temp_reg: i64) -> i64 with Mut, Panic, Div {
+    var pos = offset
+
+    // Load state_tag from future
+    let tag_name = async_make_name_state_tag()
+    if pos < ASYNC_MAX_INSTRS_PER_STATE {
+        buf[pos as usize] = ir_field_get(tag_reg, future_reg, async_state_tag_field(), tag_name)
+        pos = pos + 1
+    }
+
+    // For each state, emit: if tag_reg == state_id, goto label
+    var s: i64 = 0
+    while s < sm.state_count {
+        let state = sm.states[s as usize]
+        let sid = state.state_id
+        // Load state_id into temp
+        if pos < ASYNC_MAX_INSTRS_PER_STATE {
+            buf[pos as usize] = ir_load_imm(temp_reg, sid)
+            pos = pos + 1
+        }
+        // Compare: temp2 = (tag_reg == temp_reg)
+        let cmp_reg = temp_reg + 1
+        if pos < ASYNC_MAX_INSTRS_PER_STATE {
+            buf[pos as usize] = ir_binop(cmp_reg, tag_reg, BinaryOp::OpEq, temp_reg)
+            pos = pos + 1
+        }
+        // Branch true to state label
+        if pos < ASYNC_MAX_INSTRS_PER_STATE {
+            buf[pos as usize] = ir_branch_true(cmp_reg, state_labels[s as usize])
+            pos = pos + 1
+        }
+        s = s + 1
+    }
+
+    pos
+}
+
+// ============================================================================
+// Section 11: Full state machine construction
+// ============================================================================
+
+// Build a complete state machine from a function.
+// This is the main entry point for async lowering of a single function.
+fn async_build_machine(func: IrFunction, func_id: i64, ctx: AsyncLowerCtx) -> AsyncLowerCtx with Mut, Panic, Div {
+    var result = ctx
+
+    if result.machine_count >= ASYNC_MAX_MACHINES {
+        result.error_count = result.error_count + 1
+        return result
+    }
+
+    var sm = async_state_machine_new()
+    sm.func_id = func_id
+    sm.original_param_count = func.param_count
+    sm.original_reg_count = func.reg_count
+
+    // Step 1: Detect suspend points
+    sm = async_detect_suspend_points(func, sm)
+
+    // Step 2: Split into states
+    sm = async_split_states(func, sm)
+
+    // Step 3: Analyze liveness
+    sm = async_analyze_liveness(func, sm)
+
+    // Step 4: Collect captures
+    sm = async_collect_captures(sm)
+
+    // Step 5: Allocate poll function id
+    result = async_alloc_func(result)
+    sm.poll_func_id = async_last_func(result)
+
+    // Store machine
+    let idx = result.machine_count
+    result.machines[idx as usize] = sm
+    result.machine_count = idx + 1
+
+    result
+}
+
+// ============================================================================
+// Section 12: Nested async handling
+// ============================================================================
+
+// When an async function awaits another async function, we need to:
+// 1. Store the inner future in the outer future struct
+// 2. Poll the inner future in each resume
+// 3. Propagate pending status upward
+
+// Check if a suspend point is awaiting a function that is itself async
+// (i.e., has a state machine in our context).
+fn async_is_nested_await(ctx: AsyncLowerCtx, awaited_func_id: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < ctx.machine_count {
+        if ctx.machines[i as usize].func_id == awaited_func_id {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Find the state machine for a given function id.
+// Returns the machine index, or ASYNC_INVALID if not found.
+fn async_find_machine(ctx: AsyncLowerCtx, func_id: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < ctx.machine_count {
+        if ctx.machines[i as usize].func_id == func_id {
+            return i
+        }
+        i = i + 1
+    }
+    ASYNC_INVALID
+}
+
+// Count the number of nested awaits in a state machine.
+fn async_count_nested(sm: AsyncStateMachine) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < sm.suspend_count {
+        let sp = sm.suspend_points[i as usize]
+        // A nested await is any await; the caller determines if the
+        // awaited function is itself async.
+        count = count + 1
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// Section 13: Rewriting — replacing await exprs with poll+branch
+// ============================================================================
+
+// Rewrite a single await instruction into a poll-and-branch sequence.
+// The await `result = await future_expr` becomes:
+//   poll_result = poll(future_reg)
+//   if poll_result == PENDING: save state, return PENDING
+//   result = load_result(future_reg)
+fn async_rewrite_await(sp: AsyncSuspendPoint, future_reg: i64, poll_result_reg: i64, pending_label: i64, continue_label: i64, buf: [IrInstr; 4096], offset: i64) -> i64 with Mut, Panic, Div {
+    var pos = offset
+
+    // Emit label for this state's entry
+    if pos < ASYNC_MAX_INSTRS_PER_STATE {
+        buf[pos as usize] = ir_label(continue_label)
+        pos = pos + 1
+    }
+
+    // Check if poll_result is PENDING
+    if pos < ASYNC_MAX_INSTRS_PER_STATE {
+        buf[pos as usize] = ir_load_imm(poll_result_reg + 1, ASYNC_POLL_PENDING)
+        pos = pos + 1
+    }
+    // Compare
+    if pos < ASYNC_MAX_INSTRS_PER_STATE {
+        buf[pos as usize] = ir_binop(poll_result_reg + 2, poll_result_reg, BinaryOp::OpEq, poll_result_reg + 1)
+        pos = pos + 1
+    }
+    // Branch to pending handler
+    if pos < ASYNC_MAX_INSTRS_PER_STATE {
+        buf[pos as usize] = ir_branch_true(poll_result_reg + 2, pending_label)
+        pos = pos + 1
+    }
+
+    pos
+}
+
+// ============================================================================
+// Section 14: Module-level async lowering
+// ============================================================================
+
+// Check if a function has any await expressions.
+fn async_func_has_awaits(func: IrFunction) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < func.instr_count {
+        if async_is_await_instr(func.instrs[i as usize]) {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Lower all async functions in a module.
+// Scans for functions with await expressions, builds state machines,
+// and generates poll functions.
+fn async_lower_module(module: IrModule) -> AsyncLowerCtx with Mut, Panic, Div {
+    var ctx = async_lower_ctx_init(1000, 1000, module.fn_count)
+
+    var i: i64 = 0
+    while i < module.fn_count {
+        let func = module.functions[i as usize]
+        if async_func_has_awaits(func) {
+            ctx = async_build_machine(func, i, ctx)
+        }
+        i = i + 1
+    }
+
+    ctx
+}
+
+// Get the state machine for a specific function index.
+fn async_get_machine_for_func(ctx: AsyncLowerCtx, func_id: i64) -> AsyncStateMachine with Mut, Panic, Div {
+    let idx = async_find_machine(ctx, func_id)
+    if idx != ASYNC_INVALID {
+        return ctx.machines[idx as usize]
+    }
+    async_state_machine_new()
+}
+
+// ============================================================================
+// Section 15: Query / inspection utilities
+// ============================================================================
+
+// Get the number of states in a machine.
+fn async_machine_state_count(sm: AsyncStateMachine) -> i64 {
+    sm.state_count
+}
+
+// Get the number of suspend points in a machine.
+fn async_machine_suspend_count(sm: AsyncStateMachine) -> i64 {
+    sm.suspend_count
+}
+
+// Get the number of captures in a machine.
+fn async_machine_capture_count(sm: AsyncStateMachine) -> i64 {
+    sm.capture_count
+}
+
+// Check if state N is the initial state.
+fn async_state_is_initial(sm: AsyncStateMachine, state_idx: i64) -> bool with Panic, Div {
+    if state_idx >= 0 && state_idx < sm.state_count {
+        return sm.states[state_idx as usize].is_initial
+    }
+    false
+}
+
+// Check if state N is a final state.
+fn async_state_is_final(sm: AsyncStateMachine, state_idx: i64) -> bool with Panic, Div {
+    if state_idx >= 0 && state_idx < sm.state_count {
+        return sm.states[state_idx as usize].is_final
+    }
+    false
+}
+
+// Get the state_id of a state by index.
+fn async_state_id_at(sm: AsyncStateMachine, state_idx: i64) -> i64 with Panic, Div {
+    if state_idx >= 0 && state_idx < sm.state_count {
+        return sm.states[state_idx as usize].state_id
+    }
+    ASYNC_INVALID
+}
+
+// Get the suspend point for a given state.
+fn async_state_suspend_point(sm: AsyncStateMachine, state_idx: i64) -> i64 with Panic, Div {
+    if state_idx >= 0 && state_idx < sm.state_count {
+        return sm.states[state_idx as usize].suspend_point_id
+    }
+    ASYNC_INVALID
+}
+
+// Get the number of live vars in a state.
+fn async_state_live_count(sm: AsyncStateMachine, state_idx: i64) -> i64 with Panic, Div {
+    if state_idx >= 0 && state_idx < sm.state_count {
+        return sm.states[state_idx as usize].var_count
+    }
+    0
+}
+
+// Get instruction range for a state.
+fn async_state_instr_start(sm: AsyncStateMachine, state_idx: i64) -> i64 with Panic, Div {
+    if state_idx >= 0 && state_idx < sm.state_count {
+        return sm.states[state_idx as usize].instr_start
+    }
+    0
+}
+
+fn async_state_instr_end(sm: AsyncStateMachine, state_idx: i64) -> i64 with Panic, Div {
+    if state_idx >= 0 && state_idx < sm.state_count {
+        return sm.states[state_idx as usize].instr_end
+    }
+    0
+}
+
+// ============================================================================
+// Section 16: Validation
+// ============================================================================
+
+// Validate a state machine for internal consistency.
+// Returns 0 if valid, non-zero error code otherwise.
+fn async_validate_machine(sm: AsyncStateMachine) -> i64 with Mut, Panic, Div {
+    // Check: at least one state
+    if sm.state_count <= 0 {
+        return 1
+    }
+
+    // Check: state 0 is initial
+    if !sm.states[0].is_initial {
+        return 2
+    }
+
+    // Check: at least one final state
+    var has_final: bool = false
+    var i: i64 = 0
+    while i < sm.state_count {
+        if sm.states[i as usize].is_final {
+            has_final = true
+        }
+        i = i + 1
+    }
+    if !has_final {
+        return 3
+    }
+
+    // Check: state_ids are sequential
+    var j: i64 = 0
+    while j < sm.state_count {
+        if sm.states[j as usize].state_id != j {
+            return 4
+        }
+        j = j + 1
+    }
+
+    // Check: suspend point state_before < state_after
+    var k: i64 = 0
+    while k < sm.suspend_count {
+        let sp = sm.suspend_points[k as usize]
+        if sp.state_before >= sp.state_after {
+            return 5
+        }
+        k = k + 1
+    }
+
+    // Check: capture count <= max
+    if sm.capture_count > ASYNC_MAX_CAPTURES {
+        return 6
+    }
+
+    0
+}
+
+// Validate instruction indices of states don't overlap and cover the function.
+fn async_validate_state_ranges(sm: AsyncStateMachine, func_instr_count: i64) -> i64 with Mut, Panic, Div {
+    if sm.state_count <= 0 {
+        return 1
+    }
+
+    // First state starts at 0
+    if sm.states[0].instr_start != 0 {
+        return 2
+    }
+
+    // Last state ends at func_instr_count
+    let last = sm.state_count - 1
+    if sm.states[last as usize].instr_end != func_instr_count {
+        return 3
+    }
+
+    // Each state's end == next state's start
+    var i: i64 = 0
+    while i < sm.state_count - 1 {
+        let cur_end = sm.states[i as usize].instr_end
+        let next_start = sm.states[(i + 1) as usize].instr_start
+        // The end of a state + 1 (the await instr) should be the next state's start.
+        // Actually: cur_end is the await instr index, next_start is await_idx + 1.
+        if next_start < cur_end {
+            return 4
+        }
+        i = i + 1
+    }
+
+    0
+}
+
+// ============================================================================
+// Section 17: Helper — build test functions
+// ============================================================================
+
+// Build a simple IrFunction with N instructions for testing.
+// All instructions are NOPs except for any awaits inserted by the caller.
+fn async_make_test_func(n_instrs: i64) -> IrFunction with Mut, Panic, Div {
+    var func = ir_empty_function()
+    func.instr_count = n_instrs
+    var i: i64 = 0
+    while i < n_instrs {
+        func.instrs[i as usize] = ir_nop()
+        i = i + 1
+    }
+    func
+}
+
+// Insert an await instruction at a given index in a test function.
+// The await reads from src_reg (the future) and writes to dst_reg (the result).
+fn async_insert_await(func: IrFunction, idx: i64, dst_reg: i64, src_reg: i64) -> IrFunction with Mut, Panic, Div {
+    var result = func
+    if idx >= 0 && idx < result.instr_count {
+        var instr = ir_instr_new(IrOpcode::IrCall)
+        instr.fn_id = ASYNC_AWAIT_SENTINEL
+        instr.dst = dst_reg
+        instr.src1 = src_reg
+        result.instrs[idx as usize] = instr
+    }
+    result
+}
+
+// Build a function with explicit defs and uses for liveness testing.
+// Creates: def r0 at idx 0, def r1 at idx 1, ..., use rN at various points.
+fn async_make_liveness_test_func() -> IrFunction with Mut, Panic, Div {
+    var func = ir_empty_function()
+    func.instr_count = 8
+    func.reg_count = 6
+
+    // Instruction 0: r0 = 10
+    func.instrs[0] = ir_load_imm(0, 10)
+    // Instruction 1: r1 = 20
+    func.instrs[1] = ir_load_imm(1, 20)
+    // Instruction 2: r2 = r0 + r1
+    func.instrs[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    // Instruction 3: await (suspend point) — reads r2, writes r3
+    var await_instr = ir_instr_new(IrOpcode::IrCall)
+    await_instr.fn_id = ASYNC_AWAIT_SENTINEL
+    await_instr.dst = 3
+    await_instr.src1 = 2
+    func.instrs[3] = await_instr
+    // Instruction 4: r4 = r0 + r3  (r0 is live across suspend)
+    func.instrs[4] = ir_binop(4, 0, BinaryOp::OpAdd, 3)
+    // Instruction 5: r5 = r1 + r4  (r1 is live across suspend)
+    func.instrs[5] = ir_binop(5, 1, BinaryOp::OpAdd, 4)
+    // Instruction 6: return r5
+    func.instrs[6] = ir_return(5)
+    // Instruction 7: nop (padding)
+    func.instrs[7] = ir_nop()
+
+    func
+}
+
+// Build a function with two await points for multi-suspend testing.
+fn async_make_two_await_func() -> IrFunction with Mut, Panic, Div {
+    var func = ir_empty_function()
+    func.instr_count = 10
+    func.reg_count = 8
+
+    // 0: r0 = 100
+    func.instrs[0] = ir_load_imm(0, 100)
+    // 1: r1 = 200
+    func.instrs[1] = ir_load_imm(1, 200)
+    // 2: r2 = r0 + r1
+    func.instrs[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    // 3: r3 = await r2  (first suspend)
+    var aw1 = ir_instr_new(IrOpcode::IrCall)
+    aw1.fn_id = ASYNC_AWAIT_SENTINEL
+    aw1.dst = 3
+    aw1.src1 = 2
+    func.instrs[3] = aw1
+    // 4: r4 = r0 + r3
+    func.instrs[4] = ir_binop(4, 0, BinaryOp::OpAdd, 3)
+    // 5: r5 = r4 + r1
+    func.instrs[5] = ir_binop(5, 4, BinaryOp::OpAdd, 1)
+    // 6: r6 = await r5  (second suspend)
+    var aw2 = ir_instr_new(IrOpcode::IrCall)
+    aw2.fn_id = ASYNC_AWAIT_SENTINEL
+    aw2.dst = 6
+    aw2.src1 = 5
+    func.instrs[6] = aw2
+    // 7: r7 = r0 + r6
+    func.instrs[7] = ir_binop(7, 0, BinaryOp::OpAdd, 6)
+    // 8: return r7
+    func.instrs[8] = ir_return(7)
+    // 9: nop
+    func.instrs[9] = ir_nop()
+
+    func
+}
+
+// Build a function with no await points.
+fn async_make_no_await_func() -> IrFunction with Mut, Panic, Div {
+    var func = ir_empty_function()
+    func.instr_count = 4
+    func.reg_count = 3
+
+    func.instrs[0] = ir_load_imm(0, 42)
+    func.instrs[1] = ir_load_imm(1, 58)
+    func.instrs[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    func.instrs[3] = ir_return(2)
+
+    func
+}
+
+// Build a function with three await points for extensive state splitting.
+fn async_make_three_await_func() -> IrFunction with Mut, Panic, Div {
+    var func = ir_empty_function()
+    func.instr_count = 14
+    func.reg_count = 10
+
+    // 0: r0 = 1
+    func.instrs[0] = ir_load_imm(0, 1)
+    // 1: r1 = 2
+    func.instrs[1] = ir_load_imm(1, 2)
+    // 2: r2 = await r0  (suspend 0)
+    var aw0 = ir_instr_new(IrOpcode::IrCall)
+    aw0.fn_id = ASYNC_AWAIT_SENTINEL
+    aw0.dst = 2
+    aw0.src1 = 0
+    func.instrs[2] = aw0
+    // 3: r3 = r2 + r1
+    func.instrs[3] = ir_binop(3, 2, BinaryOp::OpAdd, 1)
+    // 4: r4 = r3 + r0
+    func.instrs[4] = ir_binop(4, 3, BinaryOp::OpAdd, 0)
+    // 5: r5 = await r4  (suspend 1)
+    var aw1 = ir_instr_new(IrOpcode::IrCall)
+    aw1.fn_id = ASYNC_AWAIT_SENTINEL
+    aw1.dst = 5
+    aw1.src1 = 4
+    func.instrs[5] = aw1
+    // 6: r6 = r5 + r1
+    func.instrs[6] = ir_binop(6, 5, BinaryOp::OpAdd, 1)
+    // 7: r7 = r0 + r6
+    func.instrs[7] = ir_binop(7, 0, BinaryOp::OpAdd, 6)
+    // 8: r8 = await r7  (suspend 2)
+    var aw2 = ir_instr_new(IrOpcode::IrCall)
+    aw2.fn_id = ASYNC_AWAIT_SENTINEL
+    aw2.dst = 8
+    aw2.src1 = 7
+    func.instrs[8] = aw2
+    // 9: r9 = r8 + r0
+    func.instrs[9] = ir_binop(9, 8, BinaryOp::OpAdd, 0)
+    // 10: return r9
+    func.instrs[10] = ir_return(9)
+    // 11-13: nop
+    func.instrs[11] = ir_nop()
+    func.instrs[12] = ir_nop()
+    func.instrs[13] = ir_nop()
+
+    func
+}
+
+// ============================================================================
+// Section 18: Tests — suspend point detection
+// ============================================================================
+
+fn test_async_no_awaits() -> i64 with Mut, Panic, Div {
+    let func = async_make_no_await_func()
+    let count = async_count_awaits(func)
+    if count != 0 { return 1 }
+    0
+}
+
+fn test_async_single_await_detection() -> i64 with Mut, Panic, Div {
+    var func = async_make_test_func(5)
+    func = async_insert_await(func, 2, 3, 1)
+    let count = async_count_awaits(func)
+    if count != 1 { return 1 }
+    0
+}
+
+fn test_async_multiple_await_detection() -> i64 with Mut, Panic, Div {
+    let func = async_make_two_await_func()
+    let count = async_count_awaits(func)
+    if count != 2 { return 1 }
+    0
+}
+
+fn test_async_three_await_detection() -> i64 with Mut, Panic, Div {
+    let func = async_make_three_await_func()
+    let count = async_count_awaits(func)
+    if count != 3 { return 1 }
+    0
+}
+
+fn test_async_suspend_point_fields() -> i64 with Mut, Panic, Div {
+    let func = async_make_liveness_test_func()
+    var sm = async_state_machine_new()
+    sm = async_detect_suspend_points(func, sm)
+    if sm.suspend_count != 1 { return 1 }
+    let sp = sm.suspend_points[0]
+    if sp.point_id != 0 { return 2 }
+    if sp.awaited_future_reg != 2 { return 3 }
+    if sp.result_reg != 3 { return 4 }
+    if sp.instr_index != 3 { return 5 }
+    0
+}
+
+fn test_async_two_suspend_points() -> i64 with Mut, Panic, Div {
+    let func = async_make_two_await_func()
+    var sm = async_state_machine_new()
+    sm = async_detect_suspend_points(func, sm)
+    if sm.suspend_count != 2 { return 1 }
+
+    let sp0 = sm.suspend_points[0]
+    if sp0.instr_index != 3 { return 2 }
+    if sp0.result_reg != 3 { return 2 }
+
+    let sp1 = sm.suspend_points[1]
+    if sp1.instr_index != 6 { return 3 }
+
+    0
+}
+
+// ============================================================================
+// Section 19: Tests — live variable analysis
+// ============================================================================
+
+fn test_async_var_set_basic() -> i64 with Mut, Panic, Div {
+    var s = async_var_set_new()
+    if s.count != 0 { return 1 }
+    s = async_var_set_add(s, 3)
+    if s.count != 1 { return 2 }
+    if !async_var_set_contains(s, 3) { return 3 }
+    if async_var_set_contains(s, 4) { return 4 }
+    // Add duplicate
+    s = async_var_set_add(s, 3)
+    if s.count != 1 { return 5 }
+    0
+}
+
+fn test_async_var_set_remove() -> i64 with Mut, Panic, Div {
+    var s = async_var_set_new()
+    s = async_var_set_add(s, 5)
+    s = async_var_set_add(s, 10)
+    if s.count != 2 { return 1 }
+    s = async_var_set_remove(s, 5)
+    if s.count != 1 { return 2 }
+    if async_var_set_contains(s, 5) { return 3 }
+    if !async_var_set_contains(s, 10) { return 4 }
+    0
+}
+
+fn test_async_var_set_union() -> i64 with Mut, Panic, Div {
+    var a = async_var_set_new()
+    a = async_var_set_add(a, 1)
+    a = async_var_set_add(a, 3)
+    var b = async_var_set_new()
+    b = async_var_set_add(b, 2)
+    b = async_var_set_add(b, 3)
+    let u = async_var_set_union(a, b)
+    if u.count != 3 { return 1 }
+    if !async_var_set_contains(u, 1) { return 2 }
+    if !async_var_set_contains(u, 2) { return 3 }
+    if !async_var_set_contains(u, 3) { return 4 }
+    0
+}
+
+fn test_async_var_set_intersect() -> i64 with Mut, Panic, Div {
+    var a = async_var_set_new()
+    a = async_var_set_add(a, 1)
+    a = async_var_set_add(a, 3)
+    a = async_var_set_add(a, 5)
+    var b = async_var_set_new()
+    b = async_var_set_add(b, 3)
+    b = async_var_set_add(b, 5)
+    b = async_var_set_add(b, 7)
+    let inter = async_var_set_intersect(a, b)
+    if inter.count != 2 { return 1 }
+    if !async_var_set_contains(inter, 3) { return 2 }
+    if !async_var_set_contains(inter, 5) { return 3 }
+    if async_var_set_contains(inter, 1) { return 4 }
+    if async_var_set_contains(inter, 7) { return 5 }
+    0
+}
+
+fn test_async_live_across_single() -> i64 with Mut, Panic, Div {
+    let func = async_make_liveness_test_func()
+    // Suspend at index 3.
+    // Defined before: r0(idx 0), r1(idx 1), r2(idx 2)
+    // Used after: r0(idx 4), r1(idx 5), r3(idx 4,5), r4(idx 5)
+    // r3 is defined AT the suspend, not before; r4 defined after.
+    // Live across = defs_before intersect uses_after = {r0, r1}
+    let live = async_live_across_suspend(func, 3)
+    if !async_var_set_contains(live, 0) { return 1 }
+    if !async_var_set_contains(live, 1) { return 2 }
+    // r2 is defined before but not used after (r2 is src of the await, used AT index 3)
+    // Actually r2 is src1 of the await at index 3 — uses_after starts at index 4.
+    if async_var_set_contains(live, 2) { return 3 }
+    if async_var_set_contains(live, 3) { return 4 }
+    0
+}
+
+fn test_async_live_across_two_suspends() -> i64 with Mut, Panic, Div {
+    let func = async_make_two_await_func()
+    // First suspend at index 3:
+    // Defined before: r0(0), r1(1), r2(2)
+    // Used after indices 4+: r0(4,7), r1(5), r3(4), r4(5), r5(6=await src), r6(7)
+    // Live across first: {r0, r1}
+    let live0 = async_live_across_suspend(func, 3)
+    if !async_var_set_contains(live0, 0) { return 1 }
+    if !async_var_set_contains(live0, 1) { return 2 }
+
+    // Second suspend at index 6:
+    // Defined before: r0(0), r1(1), r2(2), r3(3), r4(4), r5(5)
+    // Used after indices 7+: r0(7), r6(7)
+    // Live across second: {r0}
+    let live1 = async_live_across_suspend(func, 6)
+    if !async_var_set_contains(live1, 0) { return 3 }
+    if async_var_set_contains(live1, 1) { return 4 }
+    0
+}
+
+// ============================================================================
+// Section 20: Tests — state splitting
+// ============================================================================
+
+fn test_async_split_no_suspend() -> i64 with Mut, Panic, Div {
+    let func = async_make_no_await_func()
+    var sm = async_state_machine_new()
+    sm = async_detect_suspend_points(func, sm)
+    sm = async_split_states(func, sm)
+    // No awaits -> single state that is both initial and final
+    if sm.state_count != 1 { return 1 }
+    if !sm.states[0].is_initial { return 2 }
+    if !sm.states[0].is_final { return 3 }
+    if sm.states[0].instr_start != 0 { return 4 }
+    if sm.states[0].instr_end != 4 { return 5 }
+    0
+}
+
+fn test_async_split_single_suspend() -> i64 with Mut, Panic, Div {
+    let func = async_make_liveness_test_func()
+    var sm = async_state_machine_new()
+    sm = async_detect_suspend_points(func, sm)
+    sm = async_split_states(func, sm)
+    // 1 await -> 2 states
+    if sm.state_count != 2 { return 1 }
+
+    // State 0: initial, not final, instrs [0, 3)
+    if !sm.states[0].is_initial { return 2 }
+    if sm.states[0].is_final { return 3 }
+    if sm.states[0].instr_start != 0 { return 4 }
+    if sm.states[0].instr_end != 3 { return 5 }
+
+    // State 1: not initial, final, instrs [4, 8)
+    if sm.states[1].is_initial { return 6 }
+    if !sm.states[1].is_final { return 7 }
+    if sm.states[1].instr_start != 4 { return 8 }
+    if sm.states[1].instr_end != 8 { return 9 }
+    0
+}
+
+fn test_async_split_two_suspends() -> i64 with Mut, Panic, Div {
+    let func = async_make_two_await_func()
+    var sm = async_state_machine_new()
+    sm = async_detect_suspend_points(func, sm)
+    sm = async_split_states(func, sm)
+    // 2 awaits -> 3 states
+    if sm.state_count != 3 { return 1 }
+    if !sm.states[0].is_initial { return 2 }
+    if sm.states[0].is_final { return 3 }
+    if sm.states[1].is_initial { return 4 }
+    if sm.states[1].is_final { return 5 }
+    if sm.states[2].is_initial { return 6 }
+    if !sm.states[2].is_final { return 7 }
+    0
+}
+
+fn test_async_split_three_suspends() -> i64 with Mut, Panic, Div {
+    let func = async_make_three_await_func()
+    var sm = async_state_machine_new()
+    sm = async_detect_suspend_points(func, sm)
+    sm = async_split_states(func, sm)
+    // 3 awaits -> 4 states
+    if sm.state_count != 4 { return 1 }
+    if !sm.states[0].is_initial { return 2 }
+    if sm.states[3].is_initial { return 3 }
+    if !sm.states[3].is_final { return 4 }
+    // Intermediate states neither initial nor final
+    if sm.states[1].is_initial { return 5 }
+    if sm.states[1].is_final { return 6 }
+    if sm.states[2].is_initial { return 7 }
+    if sm.states[2].is_final { return 8 }
+    0
+}
+
+fn test_async_split_state_ids_sequential() -> i64 with Mut, Panic, Div {
+    let func = async_make_three_await_func()
+    var sm = async_state_machine_new()
+    sm = async_detect_suspend_points(func, sm)
+    sm = async_split_states(func, sm)
+    var i: i64 = 0
+    while i < sm.state_count {
+        if sm.states[i as usize].state_id != i {
+            return i + 1
+        }
+        i = i + 1
+    }
+    0
+}
+
+fn test_async_split_suspend_before_after() -> i64 with Mut, Panic, Div {
+    let func = async_make_two_await_func()
+    var sm = async_state_machine_new()
+    sm = async_detect_suspend_points(func, sm)
+    sm = async_split_states(func, sm)
+    // Suspend 0: state_before=0, state_after=1
+    if sm.suspend_points[0].state_before != 0 { return 1 }
+    if sm.suspend_points[0].state_after != 1 { return 2 }
+    // Suspend 1: state_before=1, state_after=2
+    if sm.suspend_points[1].state_before != 1 { return 3 }
+    if sm.suspend_points[1].state_after != 2 { return 4 }
+    0
+}
+
+// ============================================================================
+// Section 21: Tests — state machine struct layout
+// ============================================================================
+
+fn test_async_future_field_count_no_captures() -> i64 with Mut, Panic, Div {
+    var sm = async_state_machine_new()
+    sm.capture_count = 0
+    // state_tag + result = 2
+    if async_future_struct_field_count(sm) != 2 { return 1 }
+    0
+}
+
+fn test_async_future_field_count_with_captures() -> i64 with Mut, Panic, Div {
+    var sm = async_state_machine_new()
+    sm.capture_count = 5
+    // state_tag + 5 captures + result = 7
+    if async_future_struct_field_count(sm) != 7 { return 1 }
+    0
+}
+
+fn test_async_state_tag_field_is_zero() -> i64 with Mut, Panic, Div {
+    if async_state_tag_field() != 0 { return 1 }
+    0
+}
+
+fn test_async_capture_field_indices() -> i64 with Mut, Panic, Div {
+    if async_capture_field(0) != 1 { return 1 }
+    if async_capture_field(1) != 2 { return 2 }
+    if async_capture_field(4) != 5 { return 3 }
+    0
+}
+
+fn test_async_result_field_index() -> i64 with Mut, Panic, Div {
+    var sm = async_state_machine_new()
+    sm.capture_count = 3
+    // result is at capture_count + 1 = 4
+    if async_result_field(sm) != 4 { return 1 }
+    0
+}
+
+fn test_async_future_layout_structure() -> i64 with Mut, Panic, Div {
+    var sm = async_state_machine_new()
+    sm.capture_count = 2
+    sm.captured_vars[0] = async_live_var_make(0, 1, 0, false)
+    sm.captured_vars[1] = async_live_var_make(1, 1, 1, false)
+    let name = ir_empty_name()
+    let layout = async_build_future_layout(sm, name)
+    // state_tag + 2 captures + result = 4 fields
+    if layout.field_count != 4 { return 1 }
+    // Field 0 should be state_tag
+    if layout.fields[0].index != 0 { return 2 }
+    // Field 3 should be result
+    if layout.fields[3].index != 3 { return 3 }
+    0
+}
+
+// ============================================================================
+// Section 22: Tests — poll function state dispatch
+// ============================================================================
+
+fn test_async_poll_dispatch_count() -> i64 with Mut, Panic, Div {
+    // Each state gets 3 instructions in the dispatch: load_imm, binop(eq), branch_true
+    // Plus 1 for the initial field_get of state_tag.
+    let func = async_make_two_await_func()
+    var sm = async_state_machine_new()
+    sm = async_detect_suspend_points(func, sm)
+    sm = async_split_states(func, sm)
+
+    var buf: [IrInstr; 4096] = [ir_nop(); 4096]
+    var labels: [i64; 256] = [0; 256]
+    labels[0] = 100
+    labels[1] = 101
+    labels[2] = 102
+    let pos = async_emit_poll_dispatch(sm, 50, 51, labels, buf, 0, 52)
+    // 1 (field_get) + 3 states * 3 instrs = 10
+    if pos != 10 { return 1 }
+    0
+}
+
+fn test_async_emit_state_update_instrs() -> i64 with Mut, Panic, Div {
+    var buf: [IrInstr; 4096] = [ir_nop(); 4096]
+    let pos = async_emit_state_update(10, 5, buf, 0, 20)
+    // 2 instructions: load_imm + field_set
+    if pos != 2 { return 1 }
+    0
+}
+
+fn test_async_emit_suspend_instrs() -> i64 with Mut, Panic, Div {
+    var sm = async_state_machine_new()
+    sm.capture_count = 2
+    sm.captured_vars[0] = async_live_var_make(0, 1, 0, false)
+    sm.captured_vars[1] = async_live_var_make(1, 1, 1, false)
+    var buf: [IrInstr; 4096] = [ir_nop(); 4096]
+    let pos = async_emit_suspend(sm, 10, 3, buf, 0, 20, 21)
+    // state_update(2) + save_captures(2) + load_pending(1) + return(1) = 6
+    if pos != 6 { return 1 }
+    0
+}
+
+fn test_async_emit_ready_instrs() -> i64 with Mut, Panic, Div {
+    var sm = async_state_machine_new()
+    sm.capture_count = 1
+    sm.captured_vars[0] = async_live_var_make(0, 1, 0, false)
+    var buf: [IrInstr; 4096] = [ir_nop(); 4096]
+    let pos = async_emit_ready(sm, 10, 5, buf, 0, 20, 21)
+    // state_update(2) + field_set_result(1) + load_ready(1) + return(1) = 5
+    if pos != 5 { return 1 }
+    0
+}
+
+// ============================================================================
+// Section 23: Tests — variable capture
+// ============================================================================
+
+fn test_async_capture_empty() -> i64 with Mut, Panic, Div {
+    var sm = async_state_machine_new()
+    sm.state_count = 1
+    sm.states[0] = async_state_make(0, 0, 0, true, true, ASYNC_INVALID)
+    sm = async_collect_captures(sm)
+    if sm.capture_count != 0 { return 1 }
+    0
+}
+
+fn test_async_capture_from_liveness() -> i64 with Mut, Panic, Div {
+    let func = async_make_liveness_test_func()
+    var sm = async_state_machine_new()
+    sm = async_detect_suspend_points(func, sm)
+    sm = async_split_states(func, sm)
+    sm = async_analyze_liveness(func, sm)
+    sm = async_collect_captures(sm)
+    // r0 and r1 are live across the suspend
+    if sm.capture_count != 2 { return 1 }
+    // Check both vars are captured
+    if !async_is_captured(sm, 0) { return 2 }
+    if !async_is_captured(sm, 1) { return 3 }
+    if async_is_captured(sm, 2) { return 4 }
+    0
+}
+
+fn test_async_capture_slot_lookup() -> i64 with Mut, Panic, Div {
+    let func = async_make_liveness_test_func()
+    var sm = async_state_machine_new()
+    sm = async_detect_suspend_points(func, sm)
+    sm = async_split_states(func, sm)
+    sm = async_analyze_liveness(func, sm)
+    sm = async_collect_captures(sm)
+
+    let slot0 = async_find_capture_slot(sm, 0)
+    let slot1 = async_find_capture_slot(sm, 1)
+    let slot_bad = async_find_capture_slot(sm, 99)
+
+    if slot0 < 0 { return 1 }
+    if slot1 < 0 { return 2 }
+    if slot0 == slot1 { return 3 }
+    if slot_bad != ASYNC_INVALID { return 4 }
+    0
+}
+
+fn test_async_capture_dedup_across_states() -> i64 with Mut, Panic, Div {
+    // With two suspend points, r0 is live across both. Should only be captured once.
+    let func = async_make_two_await_func()
+    var sm = async_state_machine_new()
+    sm = async_detect_suspend_points(func, sm)
+    sm = async_split_states(func, sm)
+    sm = async_analyze_liveness(func, sm)
+    sm = async_collect_captures(sm)
+    // r0 is live across both suspends, r1 across the first.
+    // Should be deduplicated.
+    var r0_count: i64 = 0
+    var i: i64 = 0
+    while i < sm.capture_count {
+        if sm.captured_vars[i as usize].var_id == 0 {
+            r0_count = r0_count + 1
+        }
+        i = i + 1
+    }
+    if r0_count != 1 { return 1 }
+    0
+}
+
+// ============================================================================
+// Section 24: Tests — nested async
+// ============================================================================
+
+fn test_async_nested_detection() -> i64 with Mut, Panic, Div {
+    var ctx = async_lower_ctx_new()
+    // Add a machine for func_id=5
+    var sm = async_state_machine_new()
+    sm.func_id = 5
+    ctx.machines[0] = sm
+    ctx.machine_count = 1
+    if !async_is_nested_await(ctx, 5) { return 1 }
+    if async_is_nested_await(ctx, 6) { return 2 }
+    0
+}
+
+fn test_async_find_machine_found() -> i64 with Mut, Panic, Div {
+    var ctx = async_lower_ctx_new()
+    var sm0 = async_state_machine_new()
+    sm0.func_id = 10
+    var sm1 = async_state_machine_new()
+    sm1.func_id = 20
+    ctx.machines[0] = sm0
+    ctx.machines[1] = sm1
+    ctx.machine_count = 2
+    let idx0 = async_find_machine(ctx, 10)
+    let idx1 = async_find_machine(ctx, 20)
+    let idx2 = async_find_machine(ctx, 30)
+    if idx0 != 0 { return 1 }
+    if idx1 != 1 { return 2 }
+    if idx2 != ASYNC_INVALID { return 3 }
+    0
+}
+
+fn test_async_nested_count() -> i64 with Mut, Panic, Div {
+    let func = async_make_three_await_func()
+    var sm = async_state_machine_new()
+    sm = async_detect_suspend_points(func, sm)
+    let count = async_count_nested(sm)
+    if count != 3 { return 1 }
+    0
+}
+
+// ============================================================================
+// Section 25: Tests — no-await function (trivially ready)
+// ============================================================================
+
+fn test_async_trivially_ready() -> i64 with Mut, Panic, Div {
+    let func = async_make_no_await_func()
+    var sm = async_state_machine_new()
+    sm = async_detect_suspend_points(func, sm)
+    sm = async_split_states(func, sm)
+    // Should have exactly 1 state, both initial and final
+    if sm.state_count != 1 { return 1 }
+    if !sm.states[0].is_initial { return 2 }
+    if !sm.states[0].is_final { return 3 }
+    if sm.suspend_count != 0 { return 4 }
+    sm = async_collect_captures(sm)
+    if sm.capture_count != 0 { return 5 }
+    0
+}
+
+// ============================================================================
+// Section 26: Tests — full machine build
+// ============================================================================
+
+fn test_async_build_machine_single() -> i64 with Mut, Panic, Div {
+    let func = async_make_liveness_test_func()
+    var ctx = async_lower_ctx_init(100, 100, 10)
+    ctx = async_build_machine(func, 0, ctx)
+    if ctx.machine_count != 1 { return 1 }
+    let sm = ctx.machines[0]
+    if sm.func_id != 0 { return 2 }
+    if sm.state_count != 2 { return 3 }
+    if sm.suspend_count != 1 { return 4 }
+    if sm.capture_count != 2 { return 5 }
+    if sm.poll_func_id < 0 { return 6 }
+    0
+}
+
+fn test_async_build_machine_two_awaits() -> i64 with Mut, Panic, Div {
+    let func = async_make_two_await_func()
+    var ctx = async_lower_ctx_init(100, 100, 10)
+    ctx = async_build_machine(func, 3, ctx)
+    if ctx.machine_count != 1 { return 1 }
+    let sm = ctx.machines[0]
+    if sm.func_id != 3 { return 2 }
+    if sm.state_count != 3 { return 3 }
+    if sm.suspend_count != 2 { return 4 }
+    0
+}
+
+fn test_async_build_multiple_machines() -> i64 with Mut, Panic, Div {
+    let func1 = async_make_liveness_test_func()
+    let func2 = async_make_two_await_func()
+    var ctx = async_lower_ctx_init(100, 100, 10)
+    ctx = async_build_machine(func1, 0, ctx)
+    ctx = async_build_machine(func2, 1, ctx)
+    if ctx.machine_count != 2 { return 1 }
+    if ctx.machines[0].func_id != 0 { return 2 }
+    if ctx.machines[1].func_id != 1 { return 3 }
+    // Poll func_ids should be different
+    if ctx.machines[0].poll_func_id == ctx.machines[1].poll_func_id { return 4 }
+    0
+}
+
+// ============================================================================
+// Section 27: Tests — validation
+// ============================================================================
+
+fn test_async_validate_good_machine() -> i64 with Mut, Panic, Div {
+    let func = async_make_liveness_test_func()
+    var sm = async_state_machine_new()
+    sm = async_detect_suspend_points(func, sm)
+    sm = async_split_states(func, sm)
+    sm = async_analyze_liveness(func, sm)
+    sm = async_collect_captures(sm)
+    let err = async_validate_machine(sm)
+    if err != 0 { return err }
+    0
+}
+
+fn test_async_validate_empty_machine() -> i64 with Mut, Panic, Div {
+    let sm = async_state_machine_new()
+    let err = async_validate_machine(sm)
+    // Should fail: no states
+    if err == 0 { return 1 }
+    0
+}
+
+fn test_async_validate_state_ranges_good() -> i64 with Mut, Panic, Div {
+    let func = async_make_two_await_func()
+    var sm = async_state_machine_new()
+    sm = async_detect_suspend_points(func, sm)
+    sm = async_split_states(func, sm)
+    let err = async_validate_state_ranges(sm, func.instr_count)
+    if err != 0 { return err }
+    0
+}
+
+// ============================================================================
+// Section 28: Tests — name generation
+// ============================================================================
+
+fn test_async_name_state_tag() -> i64 with Mut, Panic, Div {
+    let n = async_make_name_state_tag()
+    if n.len != 9 { return 1 }
+    // s=115
+    if n.buf[0] != 115 as i8 { return 2 }
+    // g=103
+    if n.buf[8] != 103 as i8 { return 3 }
+    0
+}
+
+fn test_async_name_result() -> i64 with Mut, Panic, Div {
+    let n = async_make_name_result()
+    if n.len != 6 { return 1 }
+    // r=114
+    if n.buf[0] != 114 as i8 { return 2 }
+    // t=116
+    if n.buf[5] != 116 as i8 { return 3 }
+    0
+}
+
+fn test_async_name_capture() -> i64 with Mut, Panic, Div {
+    let n0 = async_make_capture_name(0)
+    if n0.len != 5 { return 1 }
+    // c=99, a=97, p=112, _=95, 0=48
+    if n0.buf[0] != 99 as i8 { return 2 }
+    if n0.buf[4] != 48 as i8 { return 3 }
+
+    let n5 = async_make_capture_name(5)
+    if n5.buf[4] != 53 as i8 { return 4 }  // '5' = 53
+
+    let n12 = async_make_capture_name(12)
+    if n12.len != 6 { return 5 }
+    // '1'=49, '2'=50
+    if n12.buf[4] != 49 as i8 { return 6 }
+    if n12.buf[5] != 50 as i8 { return 7 }
+    0
+}
+
+fn test_async_name_poll() -> i64 with Mut, Panic, Div {
+    // Build a name "foo" then make "poll_foo"
+    var orig = ir_empty_name()
+    orig.buf[0] = 102 as i8  // f
+    orig.buf[1] = 111 as i8  // o
+    orig.buf[2] = 111 as i8  // o
+    orig.len = 3
+
+    let pn = async_make_poll_name(orig)
+    // "poll_foo" = 8 chars
+    if pn.len != 8 { return 1 }
+    if pn.buf[0] != 112 as i8 { return 2 }  // p
+    if pn.buf[4] != 95 as i8 { return 3 }   // _
+    if pn.buf[5] != 102 as i8 { return 4 }  // f
+    if pn.buf[7] != 111 as i8 { return 5 }  // o
+    0
+}
+
+fn test_async_name_future() -> i64 with Mut, Panic, Div {
+    var orig = ir_empty_name()
+    orig.buf[0] = 102 as i8  // f
+    orig.len = 1
+    let fn_name = async_make_future_name(orig)
+    // "Future_f" = 8 chars
+    if fn_name.len != 8 { return 1 }
+    if fn_name.buf[0] != 70 as i8 { return 2 }   // F
+    if fn_name.buf[6] != 95 as i8 { return 3 }   // _
+    if fn_name.buf[7] != 102 as i8 { return 4 }  // f
+    0
+}
+
+// ============================================================================
+// Section 29: Tests — module-level lowering
+// ============================================================================
+
+fn test_async_lower_module_no_async() -> i64 with Mut, Panic, Div {
+    var module = ir_empty_module()
+    module.fn_count = 1
+    module.functions[0] = async_make_no_await_func()
+    let ctx = async_lower_module(module)
+    if ctx.machine_count != 0 { return 1 }
+    0
+}
+
+fn test_async_lower_module_one_async() -> i64 with Mut, Panic, Div {
+    var module = ir_empty_module()
+    module.fn_count = 2
+    module.functions[0] = async_make_no_await_func()
+    module.functions[1] = async_make_liveness_test_func()
+    let ctx = async_lower_module(module)
+    if ctx.machine_count != 1 { return 1 }
+    if ctx.machines[0].func_id != 1 { return 2 }
+    0
+}
+
+fn test_async_lower_module_two_async() -> i64 with Mut, Panic, Div {
+    var module = ir_empty_module()
+    module.fn_count = 3
+    module.functions[0] = async_make_no_await_func()
+    module.functions[1] = async_make_liveness_test_func()
+    module.functions[2] = async_make_two_await_func()
+    let ctx = async_lower_module(module)
+    if ctx.machine_count != 2 { return 1 }
+    0
+}
+
+// ============================================================================
+// Section 30: Tests — query / inspection utilities
+// ============================================================================
+
+fn test_async_query_state_properties() -> i64 with Mut, Panic, Div {
+    let func = async_make_two_await_func()
+    var ctx = async_lower_ctx_init(100, 100, 10)
+    ctx = async_build_machine(func, 0, ctx)
+    let sm = ctx.machines[0]
+
+    if async_machine_state_count(sm) != 3 { return 1 }
+    if async_machine_suspend_count(sm) != 2 { return 2 }
+    if async_state_is_initial(sm, 0) != true { return 3 }
+    if async_state_is_initial(sm, 1) != false { return 4 }
+    if async_state_is_final(sm, 2) != true { return 5 }
+    if async_state_is_final(sm, 0) != false { return 6 }
+    if async_state_id_at(sm, 0) != 0 { return 7 }
+    if async_state_id_at(sm, 1) != 1 { return 8 }
+    if async_state_id_at(sm, 2) != 2 { return 9 }
+    0
+}
+
+// ============================================================================
+// Section 31: Tests — emit save/restore captures
+// ============================================================================
+
+fn test_async_emit_save_restore_captures() -> i64 with Mut, Panic, Div {
+    var sm = async_state_machine_new()
+    sm.capture_count = 3
+    sm.captured_vars[0] = async_live_var_make(0, 1, 0, false)
+    sm.captured_vars[1] = async_live_var_make(1, 1, 1, false)
+    sm.captured_vars[2] = async_live_var_make(2, 1, 2, false)
+
+    var buf: [IrInstr; 4096] = [ir_nop(); 4096]
+    let save_pos = async_emit_save_captures(sm, 50, buf, 0)
+    if save_pos != 3 { return 1 }
+
+    var buf2: [IrInstr; 4096] = [ir_nop(); 4096]
+    let restore_pos = async_emit_restore_captures(sm, 50, buf2, 0)
+    if restore_pos != 3 { return 2 }
+    0
+}
+
+// ============================================================================
+// Section 32: Tests — rewrite await
+// ============================================================================
+
+fn test_async_rewrite_await_instrs() -> i64 with Mut, Panic, Div {
+    var sp = async_suspend_point_make(0, 0, 1, 10, 11, 3)
+    var buf: [IrInstr; 4096] = [ir_nop(); 4096]
+    let pos = async_rewrite_await(sp, 10, 20, 200, 201, buf, 0)
+    // label + load_imm + binop + branch_true = 4
+    if pos != 4 { return 1 }
+    0
+}
+
+// ============================================================================
+// Section 33: Tests — ctx allocation
+// ============================================================================
+
+fn test_async_ctx_alloc_reg() -> i64 with Mut, Panic, Div {
+    var ctx = async_lower_ctx_init(100, 200, 10)
+    ctx = async_alloc_reg(ctx)
+    if async_last_reg(ctx) != 100 { return 1 }
+    ctx = async_alloc_reg(ctx)
+    if async_last_reg(ctx) != 101 { return 2 }
+    0
+}
+
+fn test_async_ctx_alloc_label() -> i64 with Mut, Panic, Div {
+    var ctx = async_lower_ctx_init(100, 200, 10)
+    ctx = async_alloc_label(ctx)
+    if async_last_label(ctx) != 200 { return 1 }
+    ctx = async_alloc_label(ctx)
+    if async_last_label(ctx) != 201 { return 2 }
+    0
+}
+
+fn test_async_ctx_alloc_func() -> i64 with Mut, Panic, Div {
+    var ctx = async_lower_ctx_init(100, 200, 10)
+    ctx = async_alloc_func(ctx)
+    if async_last_func(ctx) != 10 { return 1 }
+    ctx = async_alloc_func(ctx)
+    if async_last_func(ctx) != 11 { return 2 }
+    0
+}
+
+// ============================================================================
+// Section 34: Tests — async_is_await_instr
+// ============================================================================
+
+fn test_async_is_await_for_sentinel() -> i64 with Mut, Panic, Div {
+    var instr = ir_instr_new(IrOpcode::IrCall)
+    instr.fn_id = ASYNC_AWAIT_SENTINEL
+    if !async_is_await_instr(instr) { return 1 }
+
+    var nop = ir_nop()
+    if async_is_await_instr(nop) { return 2 }
+
+    var regular_call = ir_instr_new(IrOpcode::IrCall)
+    regular_call.fn_id = 42
+    if async_is_await_instr(regular_call) { return 3 }
+    0
+}
+
+// ============================================================================
+// Section 35: Tests — live var across three suspends
+// ============================================================================
+
+fn test_async_liveness_three_suspends() -> i64 with Mut, Panic, Div {
+    let func = async_make_three_await_func()
+    var sm = async_state_machine_new()
+    sm = async_detect_suspend_points(func, sm)
+    sm = async_split_states(func, sm)
+    sm = async_analyze_liveness(func, sm)
+    sm = async_collect_captures(sm)
+
+    // r0 is used at indices 4, 7, 9 (after all three suspends at 2, 5, 8)
+    // r1 is used at indices 3, 6 (after suspends at 2, 5, but not after 8)
+    // Both r0 and r1 should be captured.
+    if !async_is_captured(sm, 0) { return 1 }
+    if !async_is_captured(sm, 1) { return 2 }
+    // Captures should be deduplicated
+    if sm.capture_count < 2 { return 3 }
+    0
+}
+
+// ============================================================================
+// Section 36: Test runner
+// ============================================================================
+
+fn async_lower_run_tests() -> i64 with Mut, Panic, Div {
+    var fail: i64 = 0
+
+    let t01 = test_async_no_awaits()
+    if t01 != 0 { print_int(5001) fail = fail + 1 }
+
+    let t02 = test_async_single_await_detection()
+    if t02 != 0 { print_int(5002) fail = fail + 1 }
+
+    let t03 = test_async_multiple_await_detection()
+    if t03 != 0 { print_int(5003) fail = fail + 1 }
+
+    let t04 = test_async_three_await_detection()
+    if t04 != 0 { print_int(5004) fail = fail + 1 }
+
+    let t05 = test_async_suspend_point_fields()
+    if t05 != 0 { print_int(5005) fail = fail + 1 }
+
+    let t06 = test_async_two_suspend_points()
+    if t06 != 0 { print_int(5006) fail = fail + 1 }
+
+    let t07 = test_async_var_set_basic()
+    if t07 != 0 { print_int(5007) fail = fail + 1 }
+
+    let t08 = test_async_var_set_remove()
+    if t08 != 0 { print_int(5008) fail = fail + 1 }
+
+    let t09 = test_async_var_set_union()
+    if t09 != 0 { print_int(5009) fail = fail + 1 }
+
+    let t10 = test_async_var_set_intersect()
+    if t10 != 0 { print_int(5010) fail = fail + 1 }
+
+    let t11 = test_async_live_across_single()
+    if t11 != 0 { print_int(5011) fail = fail + 1 }
+
+    let t12 = test_async_live_across_two_suspends()
+    if t12 != 0 { print_int(5012) fail = fail + 1 }
+
+    let t13 = test_async_split_no_suspend()
+    if t13 != 0 { print_int(5013) fail = fail + 1 }
+
+    let t14 = test_async_split_single_suspend()
+    if t14 != 0 { print_int(5014) fail = fail + 1 }
+
+    let t15 = test_async_split_two_suspends()
+    if t15 != 0 { print_int(5015) fail = fail + 1 }
+
+    let t16 = test_async_split_three_suspends()
+    if t16 != 0 { print_int(5016) fail = fail + 1 }
+
+    let t17 = test_async_split_state_ids_sequential()
+    if t17 != 0 { print_int(5017) fail = fail + 1 }
+
+    let t18 = test_async_split_suspend_before_after()
+    if t18 != 0 { print_int(5018) fail = fail + 1 }
+
+    let t19 = test_async_future_field_count_no_captures()
+    if t19 != 0 { print_int(5019) fail = fail + 1 }
+
+    let t20 = test_async_future_field_count_with_captures()
+    if t20 != 0 { print_int(5020) fail = fail + 1 }
+
+    let t21 = test_async_state_tag_field_is_zero()
+    if t21 != 0 { print_int(5021) fail = fail + 1 }
+
+    let t22 = test_async_capture_field_indices()
+    if t22 != 0 { print_int(5022) fail = fail + 1 }
+
+    let t23 = test_async_result_field_index()
+    if t23 != 0 { print_int(5023) fail = fail + 1 }
+
+    let t24 = test_async_future_layout_structure()
+    if t24 != 0 { print_int(5024) fail = fail + 1 }
+
+    let t25 = test_async_poll_dispatch_count()
+    if t25 != 0 { print_int(5025) fail = fail + 1 }
+
+    let t26 = test_async_emit_state_update_instrs()
+    if t26 != 0 { print_int(5026) fail = fail + 1 }
+
+    let t27 = test_async_emit_suspend_instrs()
+    if t27 != 0 { print_int(5027) fail = fail + 1 }
+
+    let t28 = test_async_emit_ready_instrs()
+    if t28 != 0 { print_int(5028) fail = fail + 1 }
+
+    let t29 = test_async_capture_empty()
+    if t29 != 0 { print_int(5029) fail = fail + 1 }
+
+    let t30 = test_async_capture_from_liveness()
+    if t30 != 0 { print_int(5030) fail = fail + 1 }
+
+    let t31 = test_async_capture_slot_lookup()
+    if t31 != 0 { print_int(5031) fail = fail + 1 }
+
+    let t32 = test_async_capture_dedup_across_states()
+    if t32 != 0 { print_int(5032) fail = fail + 1 }
+
+    let t33 = test_async_nested_detection()
+    if t33 != 0 { print_int(5033) fail = fail + 1 }
+
+    let t34 = test_async_find_machine_found()
+    if t34 != 0 { print_int(5034) fail = fail + 1 }
+
+    let t35 = test_async_nested_count()
+    if t35 != 0 { print_int(5035) fail = fail + 1 }
+
+    let t36 = test_async_trivially_ready()
+    if t36 != 0 { print_int(5036) fail = fail + 1 }
+
+    let t37 = test_async_build_machine_single()
+    if t37 != 0 { print_int(5037) fail = fail + 1 }
+
+    let t38 = test_async_build_machine_two_awaits()
+    if t38 != 0 { print_int(5038) fail = fail + 1 }
+
+    let t39 = test_async_build_multiple_machines()
+    if t39 != 0 { print_int(5039) fail = fail + 1 }
+
+    let t40 = test_async_validate_good_machine()
+    if t40 != 0 { print_int(5040) fail = fail + 1 }
+
+    let t41 = test_async_validate_empty_machine()
+    if t41 != 0 { print_int(5041) fail = fail + 1 }
+
+    let t42 = test_async_validate_state_ranges_good()
+    if t42 != 0 { print_int(5042) fail = fail + 1 }
+
+    let t43 = test_async_name_state_tag()
+    if t43 != 0 { print_int(5043) fail = fail + 1 }
+
+    let t44 = test_async_name_result()
+    if t44 != 0 { print_int(5044) fail = fail + 1 }
+
+    let t45 = test_async_name_capture()
+    if t45 != 0 { print_int(5045) fail = fail + 1 }
+
+    let t46 = test_async_name_poll()
+    if t46 != 0 { print_int(5046) fail = fail + 1 }
+
+    let t47 = test_async_name_future()
+    if t47 != 0 { print_int(5047) fail = fail + 1 }
+
+    let t48 = test_async_lower_module_no_async()
+    if t48 != 0 { print_int(5048) fail = fail + 1 }
+
+    let t49 = test_async_lower_module_one_async()
+    if t49 != 0 { print_int(5049) fail = fail + 1 }
+
+    let t50 = test_async_lower_module_two_async()
+    if t50 != 0 { print_int(5050) fail = fail + 1 }
+
+    let t51 = test_async_query_state_properties()
+    if t51 != 0 { print_int(5051) fail = fail + 1 }
+
+    let t52 = test_async_emit_save_restore_captures()
+    if t52 != 0 { print_int(5052) fail = fail + 1 }
+
+    let t53 = test_async_rewrite_await_instrs()
+    if t53 != 0 { print_int(5053) fail = fail + 1 }
+
+    let t54 = test_async_ctx_alloc_reg()
+    if t54 != 0 { print_int(5054) fail = fail + 1 }
+
+    let t55 = test_async_ctx_alloc_label()
+    if t55 != 0 { print_int(5055) fail = fail + 1 }
+
+    let t56 = test_async_ctx_alloc_func()
+    if t56 != 0 { print_int(5056) fail = fail + 1 }
+
+    let t57 = test_async_is_await_for_sentinel()
+    if t57 != 0 { print_int(5057) fail = fail + 1 }
+
+    let t58 = test_async_liveness_three_suspends()
+    if t58 != 0 { print_int(5058) fail = fail + 1 }
+
+    fail
+}

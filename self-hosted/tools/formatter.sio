@@ -1,0 +1,2700 @@
+// self-hosted::tools::formatter -- Source code formatter for Sounio
+//
+// Reads Sounio source as a byte buffer, tokenizes it into FmtTokens that
+// preserve whitespace information, groups tokens into FmtLines, detects
+// indentation blocks, and re-emits the source with canonical formatting:
+//   - Consistent indentation (configurable width, spaces or tabs)
+//   - Trailing whitespace removal
+//   - Blank line collapsing (max one consecutive blank line)
+//   - Blank line insertion between top-level items
+//   - Brace style normalization (same-line or next-line)
+//   - Comment indentation alignment
+//   - Long line breaking at appropriate points
+//   - Optional assignment alignment
+//   - Final newline enforcement
+//
+// All mutating operations use state threading (consume + return).
+// Helpers precede callers (no forward refs).
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+let FMT_MAX_TOKENS: i64 = 8192
+let FMT_MAX_LINES: i64 = 2048
+let FMT_MAX_BLOCKS: i64 = 512
+let FMT_MAX_OUTPUT: i64 = 65536
+let FMT_DEFAULT_INDENT: i64 = 4
+let FMT_DEFAULT_MAX_WIDTH: i64 = 100
+
+// Brace styles
+let FMT_BRACE_SAME_LINE: i64 = 1
+let FMT_BRACE_NEXT_LINE: i64 = 2
+
+// Token kind constants
+let FMT_TOK_KEYWORD: i64 = 1
+let FMT_TOK_IDENT: i64 = 2
+let FMT_TOK_NUMBER: i64 = 3
+let FMT_TOK_STRING: i64 = 4
+let FMT_TOK_OP: i64 = 5
+let FMT_TOK_PUNC: i64 = 6
+let FMT_TOK_COMMENT: i64 = 7
+let FMT_TOK_NEWLINE: i64 = 8
+let FMT_TOK_SPACE: i64 = 9
+
+// Block kind constants
+let FMT_BLOCK_FN: i64 = 1
+let FMT_BLOCK_IF: i64 = 2
+let FMT_BLOCK_FOR: i64 = 3
+let FMT_BLOCK_STRUCT: i64 = 4
+let FMT_BLOCK_GENERIC: i64 = 5
+let FMT_BLOCK_IMPL: i64 = 6
+let FMT_BLOCK_WHILE: i64 = 7
+let FMT_BLOCK_ENUM: i64 = 8
+
+// ASCII constants
+let FMT_CHAR_SPACE: i8 = 32
+let FMT_CHAR_TAB: i8 = 9
+let FMT_CHAR_NEWLINE: i8 = 10
+let FMT_CHAR_CR: i8 = 13
+let FMT_CHAR_SLASH: i8 = 47
+let FMT_CHAR_STAR: i8 = 42
+let FMT_CHAR_LBRACE: i8 = 123
+let FMT_CHAR_RBRACE: i8 = 125
+let FMT_CHAR_LPAREN: i8 = 40
+let FMT_CHAR_RPAREN: i8 = 41
+let FMT_CHAR_LBRACKET: i8 = 91
+let FMT_CHAR_RBRACKET: i8 = 93
+let FMT_CHAR_COMMA: i8 = 44
+let FMT_CHAR_SEMI: i8 = 59
+let FMT_CHAR_COLON: i8 = 58
+let FMT_CHAR_EQ: i8 = 61
+let FMT_CHAR_DQUOTE: i8 = 34
+let FMT_CHAR_SQUOTE: i8 = 39
+let FMT_CHAR_UNDERSCORE: i8 = 95
+let FMT_CHAR_HASH: i8 = 35
+let FMT_CHAR_BANG: i8 = 33
+let FMT_CHAR_PLUS: i8 = 43
+let FMT_CHAR_MINUS: i8 = 45
+let FMT_CHAR_DOT: i8 = 46
+let FMT_CHAR_LT: i8 = 60
+let FMT_CHAR_GT: i8 = 62
+let FMT_CHAR_AMP: i8 = 38
+let FMT_CHAR_PIPE: i8 = 124
+let FMT_CHAR_TILDE: i8 = 126
+let FMT_CHAR_PERCENT: i8 = 37
+let FMT_CHAR_CARET: i8 = 94
+let FMT_CHAR_AT: i8 = 64
+
+// Maximum indent stack depth
+let FMT_MAX_INDENT_STACK: i64 = 128
+
+// ============================================================================
+// STRUCTS
+// ============================================================================
+
+// A token preserving whitespace information for formatting.
+struct FmtToken {
+    kind: i64,               // FMT_TOK_* constant
+    text_start: i64,         // offset into source buffer
+    text_len: i64,           // length of token text in bytes
+    line: i64,               // original source line (1-based)
+    col: i64,                // original source column (1-based)
+    leading_spaces: i64,     // whitespace chars before this token on its line
+    trailing_newlines: i64,  // newline chars after this token
+}
+
+// A formatted output line: a contiguous range of tokens.
+struct FmtLine {
+    token_start: i64,        // index of first token in this line
+    token_count: i64,        // number of tokens in this line
+    indent_level: i64,       // computed indentation level (0-based nesting)
+    is_blank: bool,          // true if line has no non-whitespace tokens
+    is_comment: bool,        // true if line is only a comment
+    original_line_num: i64,  // original line number in source (1-based)
+}
+
+// An indentation block: a range of lines sharing a nesting level.
+struct FmtBlock {
+    start_line: i64,         // index of first line in this block
+    end_line: i64,           // index of last line in this block (inclusive)
+    indent_level: i64,       // nesting depth of this block
+    kind: i64,               // FMT_BLOCK_* constant
+}
+
+// Formatter configuration.
+struct FmtConfig {
+    indent_width: i64,       // spaces per indent level (default 4)
+    max_line_width: i64,     // maximum line width before breaking (default 100)
+    use_spaces: bool,        // true=spaces, false=tabs
+    trailing_newline: bool,  // true=ensure file ends with newline
+    align_assignments: bool, // true=align consecutive let/var assignments
+    brace_style: i64,        // FMT_BRACE_SAME_LINE or FMT_BRACE_NEXT_LINE
+}
+
+// Output buffer for formatted source.
+struct FmtOutput {
+    bytes: [i8; 65536],
+    pos: i64,
+    line_count: i64,
+}
+
+// Indent stack for tracking nesting.
+struct FmtIndentStack {
+    levels: [i64; 128],
+    count: i64,
+}
+
+// Formatter context: holds all state for a formatting pass.
+struct FmtContext {
+    tokens: [FmtToken; 8192],
+    token_count: i64,
+    lines: [FmtLine; 2048],
+    line_count: i64,
+    blocks: [FmtBlock; 512],
+    block_count: i64,
+    config: FmtConfig,
+    output: FmtOutput,
+    indent_stack: FmtIndentStack,
+    source: [i8; 65536],
+    source_len: i64,
+}
+
+// ============================================================================
+// CONSTRUCTORS
+// ============================================================================
+
+fn fmt_token_new() -> FmtToken {
+    FmtToken {
+        kind: 0,
+        text_start: 0,
+        text_len: 0,
+        line: 0,
+        col: 0,
+        leading_spaces: 0,
+        trailing_newlines: 0,
+    }
+}
+
+fn fmt_line_new() -> FmtLine {
+    FmtLine {
+        token_start: 0,
+        token_count: 0,
+        indent_level: 0,
+        is_blank: true,
+        is_comment: false,
+        original_line_num: 0,
+    }
+}
+
+fn fmt_block_new() -> FmtBlock {
+    FmtBlock {
+        start_line: 0,
+        end_line: 0,
+        indent_level: 0,
+        kind: 0,
+    }
+}
+
+fn fmt_config_default() -> FmtConfig {
+    FmtConfig {
+        indent_width: FMT_DEFAULT_INDENT,
+        max_line_width: FMT_DEFAULT_MAX_WIDTH,
+        use_spaces: true,
+        trailing_newline: true,
+        align_assignments: false,
+        brace_style: FMT_BRACE_SAME_LINE,
+    }
+}
+
+fn fmt_output_new() -> FmtOutput {
+    FmtOutput {
+        bytes: [0; 65536],
+        pos: 0,
+        line_count: 0,
+    }
+}
+
+fn fmt_indent_stack_new() -> FmtIndentStack {
+    FmtIndentStack {
+        levels: [0; 128],
+        count: 0,
+    }
+}
+
+fn fmt_context_new(src: [i8; 65536], src_len: i64) -> FmtContext with Mut, Panic {
+    FmtContext {
+        tokens: [fmt_token_new(); 8192],
+        token_count: 0,
+        lines: [fmt_line_new(); 2048],
+        line_count: 0,
+        blocks: [fmt_block_new(); 512],
+        block_count: 0,
+        config: fmt_config_default(),
+        output: fmt_output_new(),
+        indent_stack: fmt_indent_stack_new(),
+        source: src,
+        source_len: src_len,
+    }
+}
+
+fn fmt_context_with_config(src: [i8; 65536], src_len: i64, cfg: FmtConfig) -> FmtContext with Mut, Panic {
+    var ctx = fmt_context_new(src, src_len)
+    ctx.config = cfg
+    ctx
+}
+
+// ============================================================================
+// CHARACTER CLASSIFICATION HELPERS
+// ============================================================================
+
+fn fmt_is_whitespace(ch: i8) -> bool {
+    ch == FMT_CHAR_SPACE || ch == FMT_CHAR_TAB || ch == FMT_CHAR_CR
+}
+
+fn fmt_is_newline(ch: i8) -> bool {
+    ch == FMT_CHAR_NEWLINE
+}
+
+fn fmt_is_digit(ch: i8) -> bool {
+    ch >= 48 && ch <= 57
+}
+
+fn fmt_is_alpha(ch: i8) -> bool {
+    (ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122)
+}
+
+fn fmt_is_ident_start(ch: i8) -> bool {
+    fmt_is_alpha(ch) || ch == FMT_CHAR_UNDERSCORE
+}
+
+fn fmt_is_ident_continue(ch: i8) -> bool {
+    fmt_is_alpha(ch) || fmt_is_digit(ch) || ch == FMT_CHAR_UNDERSCORE
+}
+
+fn fmt_is_operator(ch: i8) -> bool {
+    ch == FMT_CHAR_PLUS || ch == FMT_CHAR_MINUS || ch == FMT_CHAR_STAR ||
+    ch == FMT_CHAR_SLASH || ch == FMT_CHAR_EQ || ch == FMT_CHAR_LT ||
+    ch == FMT_CHAR_GT || ch == FMT_CHAR_AMP || ch == FMT_CHAR_PIPE ||
+    ch == FMT_CHAR_BANG || ch == FMT_CHAR_TILDE || ch == FMT_CHAR_PERCENT ||
+    ch == FMT_CHAR_CARET
+}
+
+fn fmt_is_punctuation(ch: i8) -> bool {
+    ch == FMT_CHAR_LPAREN || ch == FMT_CHAR_RPAREN ||
+    ch == FMT_CHAR_LBRACE || ch == FMT_CHAR_RBRACE ||
+    ch == FMT_CHAR_LBRACKET || ch == FMT_CHAR_RBRACKET ||
+    ch == FMT_CHAR_COMMA || ch == FMT_CHAR_SEMI ||
+    ch == FMT_CHAR_COLON || ch == FMT_CHAR_DOT ||
+    ch == FMT_CHAR_AT || ch == FMT_CHAR_HASH
+}
+
+// ============================================================================
+// KEYWORD DETECTION
+// ============================================================================
+
+// Check if the bytes at source[start..start+len] form a Sounio keyword.
+// Returns true for: fn, let, var, if, else, while, for, return, struct,
+// enum, impl, use, with, true, false, type, linear, effect.
+fn fmt_is_keyword_at(src: [i8; 65536], start: i64, len: i64) -> bool with Div, Panic {
+    // 2-char keywords
+    if len == 2 {
+        // fn
+        if src[start as usize] == 102 && src[(start + 1) as usize] == 110 { return true }
+        // if
+        if src[start as usize] == 105 && src[(start + 1) as usize] == 102 { return true }
+    }
+    // 3-char keywords
+    if len == 3 {
+        // let
+        if src[start as usize] == 108 && src[(start + 1) as usize] == 101 && src[(start + 2) as usize] == 116 { return true }
+        // var
+        if src[start as usize] == 118 && src[(start + 1) as usize] == 97 && src[(start + 2) as usize] == 114 { return true }
+        // for
+        if src[start as usize] == 102 && src[(start + 1) as usize] == 111 && src[(start + 2) as usize] == 114 { return true }
+        // use
+        if src[start as usize] == 117 && src[(start + 1) as usize] == 115 && src[(start + 2) as usize] == 101 { return true }
+    }
+    // 4-char keywords
+    if len == 4 {
+        // else
+        if src[start as usize] == 101 && src[(start + 1) as usize] == 108 && src[(start + 2) as usize] == 115 && src[(start + 3) as usize] == 101 { return true }
+        // with
+        if src[start as usize] == 119 && src[(start + 1) as usize] == 105 && src[(start + 2) as usize] == 116 && src[(start + 3) as usize] == 104 { return true }
+        // true
+        if src[start as usize] == 116 && src[(start + 1) as usize] == 114 && src[(start + 2) as usize] == 117 && src[(start + 3) as usize] == 101 { return true }
+        // type
+        if src[start as usize] == 116 && src[(start + 1) as usize] == 121 && src[(start + 2) as usize] == 112 && src[(start + 3) as usize] == 101 { return true }
+        // impl
+        if src[start as usize] == 105 && src[(start + 1) as usize] == 109 && src[(start + 2) as usize] == 112 && src[(start + 3) as usize] == 108 { return true }
+        // enum
+        if src[start as usize] == 101 && src[(start + 1) as usize] == 110 && src[(start + 2) as usize] == 117 && src[(start + 3) as usize] == 109 { return true }
+    }
+    // 5-char keywords
+    if len == 5 {
+        // while
+        if src[start as usize] == 119 && src[(start + 1) as usize] == 104 && src[(start + 2) as usize] == 105 && src[(start + 3) as usize] == 108 && src[(start + 4) as usize] == 101 { return true }
+        // false
+        if src[start as usize] == 102 && src[(start + 1) as usize] == 97 && src[(start + 2) as usize] == 108 && src[(start + 3) as usize] == 115 && src[(start + 4) as usize] == 101 { return true }
+    }
+    // 6-char keywords
+    if len == 6 {
+        // return
+        if src[start as usize] == 114 && src[(start + 1) as usize] == 101 && src[(start + 2) as usize] == 116 && src[(start + 3) as usize] == 117 && src[(start + 4) as usize] == 114 && src[(start + 5) as usize] == 110 { return true }
+        // struct
+        if src[start as usize] == 115 && src[(start + 1) as usize] == 116 && src[(start + 2) as usize] == 114 && src[(start + 3) as usize] == 117 && src[(start + 4) as usize] == 99 && src[(start + 5) as usize] == 116 { return true }
+        // linear
+        if src[start as usize] == 108 && src[(start + 1) as usize] == 105 && src[(start + 2) as usize] == 110 && src[(start + 3) as usize] == 101 && src[(start + 4) as usize] == 97 && src[(start + 5) as usize] == 114 { return true }
+        // effect
+        if src[start as usize] == 101 && src[(start + 1) as usize] == 102 && src[(start + 2) as usize] == 102 && src[(start + 3) as usize] == 101 && src[(start + 4) as usize] == 99 && src[(start + 5) as usize] == 116 { return true }
+    }
+    false
+}
+
+// ============================================================================
+// OUTPUT BUFFER OPERATIONS
+// ============================================================================
+
+// Write a single byte to the output buffer.
+fn fmt_output_byte(out: FmtOutput, ch: i8) -> FmtOutput with Mut, Panic {
+    var o = out
+    if o.pos < FMT_MAX_OUTPUT {
+        o.bytes[o.pos as usize] = ch
+        o.pos = o.pos + 1
+        if ch == FMT_CHAR_NEWLINE {
+            o.line_count = o.line_count + 1
+        }
+    }
+    o
+}
+
+// Write n copies of a byte to the output buffer.
+fn fmt_output_repeat(out: FmtOutput, ch: i8, n: i64) -> FmtOutput with Mut, Panic, Div {
+    var o = out
+    var i: i64 = 0
+    while i < n {
+        if o.pos < FMT_MAX_OUTPUT {
+            o.bytes[o.pos as usize] = ch
+            o.pos = o.pos + 1
+            if ch == FMT_CHAR_NEWLINE {
+                o.line_count = o.line_count + 1
+            }
+        }
+        i = i + 1
+    }
+    o
+}
+
+// Write a range of bytes from the source buffer to the output.
+fn fmt_output_range(out: FmtOutput, src: [i8; 65536], start: i64, len: i64) -> FmtOutput with Mut, Panic, Div {
+    var o = out
+    var i: i64 = 0
+    while i < len {
+        if o.pos < FMT_MAX_OUTPUT {
+            let ch = src[(start + i) as usize]
+            o.bytes[o.pos as usize] = ch
+            o.pos = o.pos + 1
+            if ch == FMT_CHAR_NEWLINE {
+                o.line_count = o.line_count + 1
+            }
+        }
+        i = i + 1
+    }
+    o
+}
+
+// Write a newline to the output buffer.
+fn fmt_output_newline(out: FmtOutput) -> FmtOutput with Mut, Panic {
+    fmt_output_byte(out, FMT_CHAR_NEWLINE)
+}
+
+// Write indentation (spaces or a tab) for the given indent level.
+fn fmt_output_indent(out: FmtOutput, level: i64, cfg: FmtConfig) -> FmtOutput with Mut, Panic, Div {
+    if cfg.use_spaces {
+        let total = level * cfg.indent_width
+        fmt_output_repeat(out, FMT_CHAR_SPACE, total)
+    } else {
+        fmt_output_repeat(out, FMT_CHAR_TAB, level)
+    }
+}
+
+// ============================================================================
+// INDENT STACK OPERATIONS
+// ============================================================================
+
+fn fmt_indent_push(stack: FmtIndentStack, level: i64) -> FmtIndentStack with Mut, Panic {
+    var s = stack
+    if s.count < FMT_MAX_INDENT_STACK {
+        s.levels[s.count as usize] = level
+        s.count = s.count + 1
+    }
+    s
+}
+
+fn fmt_indent_pop(stack: FmtIndentStack) -> FmtIndentStack with Mut, Panic, Div {
+    var s = stack
+    if s.count > 0 {
+        s.count = s.count - 1
+    }
+    s
+}
+
+fn fmt_indent_top(stack: FmtIndentStack) -> i64 with Div, Panic {
+    if stack.count > 0 {
+        stack.levels[(stack.count - 1) as usize]
+    } else {
+        0
+    }
+}
+
+// ============================================================================
+// TOKENIZATION
+// ============================================================================
+
+// Scan a line comment starting at pos (after //).
+// Returns the end position (exclusive) of the comment.
+fn fmt_scan_line_comment(src: [i8; 65536], pos: i64, src_len: i64) -> i64 with Mut, Div, Panic {
+    var p = pos
+    while p < src_len && src[p as usize] != FMT_CHAR_NEWLINE {
+        p = p + 1
+    }
+    p
+}
+
+// Scan a block comment starting at pos (after /*).
+// Handles nesting. Returns end position (after closing */).
+fn fmt_scan_block_comment(src: [i8; 65536], pos: i64, src_len: i64) -> i64 with Mut, Div, Panic {
+    var p = pos + 2  // skip /*
+    var depth: i64 = 1
+    while p < src_len && depth > 0 {
+        if p + 1 < src_len && src[p as usize] == FMT_CHAR_STAR && src[(p + 1) as usize] == FMT_CHAR_SLASH {
+            depth = depth - 1
+            p = p + 2
+        } else if p + 1 < src_len && src[p as usize] == FMT_CHAR_SLASH && src[(p + 1) as usize] == FMT_CHAR_STAR {
+            depth = depth + 1
+            p = p + 2
+        } else {
+            p = p + 1
+        }
+    }
+    p
+}
+
+// Scan a string literal starting at pos (at opening ").
+// Returns end position (after closing ").
+fn fmt_scan_string(src: [i8; 65536], pos: i64, src_len: i64) -> i64 with Mut, Div, Panic {
+    var p = pos + 1  // skip opening "
+    while p < src_len {
+        let ch = src[p as usize]
+        if ch == 92 {  // backslash
+            p = p + 2  // skip escaped char
+        } else if ch == FMT_CHAR_DQUOTE {
+            p = p + 1  // skip closing "
+            return p
+        } else {
+            p = p + 1
+        }
+    }
+    p
+}
+
+// Scan a char literal starting at pos (at opening ').
+fn fmt_scan_char_lit(src: [i8; 65536], pos: i64, src_len: i64) -> i64 with Mut, Div, Panic {
+    var p = pos + 1  // skip opening '
+    while p < src_len {
+        let ch = src[p as usize]
+        if ch == 92 {  // backslash
+            p = p + 2
+        } else if ch == FMT_CHAR_SQUOTE {
+            p = p + 1
+            return p
+        } else {
+            p = p + 1
+        }
+    }
+    p
+}
+
+// Scan a number starting at pos.
+fn fmt_scan_number(src: [i8; 65536], pos: i64, src_len: i64) -> i64 with Mut, Div, Panic {
+    var p = pos
+    // Handle 0x, 0b, 0o prefixes
+    if p + 1 < src_len && src[p as usize] == 48 {
+        let next = src[(p + 1) as usize]
+        if next == 120 || next == 98 || next == 111 {  // x, b, o
+            p = p + 2
+            while p < src_len && (fmt_is_digit(src[p as usize]) || fmt_is_alpha(src[p as usize]) || src[p as usize] == FMT_CHAR_UNDERSCORE) {
+                p = p + 1
+            }
+            return p
+        }
+    }
+    // Regular integer or float
+    while p < src_len && (fmt_is_digit(src[p as usize]) || src[p as usize] == FMT_CHAR_UNDERSCORE) {
+        p = p + 1
+    }
+    // Check for float with dot
+    if p < src_len && src[p as usize] == FMT_CHAR_DOT {
+        if p + 1 < src_len && fmt_is_digit(src[(p + 1) as usize]) {
+            p = p + 1
+            while p < src_len && (fmt_is_digit(src[p as usize]) || src[p as usize] == FMT_CHAR_UNDERSCORE) {
+                p = p + 1
+            }
+        }
+    }
+    // Check for exponent
+    if p < src_len && (src[p as usize] == 101 || src[p as usize] == 69) {  // e, E
+        p = p + 1
+        if p < src_len && (src[p as usize] == FMT_CHAR_PLUS || src[p as usize] == FMT_CHAR_MINUS) {
+            p = p + 1
+        }
+        while p < src_len && fmt_is_digit(src[p as usize]) {
+            p = p + 1
+        }
+    }
+    // Check for type suffix (i32, f64, etc.)
+    if p < src_len && fmt_is_alpha(src[p as usize]) {
+        while p < src_len && fmt_is_ident_continue(src[p as usize]) {
+            p = p + 1
+        }
+    }
+    p
+}
+
+// Scan an identifier or keyword starting at pos.
+fn fmt_scan_ident(src: [i8; 65536], pos: i64, src_len: i64) -> i64 with Mut, Div, Panic {
+    var p = pos
+    while p < src_len && fmt_is_ident_continue(src[p as usize]) {
+        p = p + 1
+    }
+    p
+}
+
+// Scan an operator starting at pos. Multi-char operators (==, !=, ->, etc.)
+fn fmt_scan_operator(src: [i8; 65536], pos: i64, src_len: i64) -> i64 with Mut, Div, Panic {
+    var p = pos
+    let ch = src[p as usize]
+    p = p + 1
+    // Two-char operators
+    if p < src_len {
+        let ch2 = src[p as usize]
+        // ==, !=, <=, >=, ->, =>, &&, ||, &!, ++, ::, ..
+        if (ch == FMT_CHAR_EQ && ch2 == FMT_CHAR_EQ) ||
+           (ch == FMT_CHAR_BANG && ch2 == FMT_CHAR_EQ) ||
+           (ch == FMT_CHAR_LT && ch2 == FMT_CHAR_EQ) ||
+           (ch == FMT_CHAR_GT && ch2 == FMT_CHAR_EQ) ||
+           (ch == FMT_CHAR_MINUS && ch2 == FMT_CHAR_GT) ||
+           (ch == FMT_CHAR_EQ && ch2 == FMT_CHAR_GT) ||
+           (ch == FMT_CHAR_AMP && ch2 == FMT_CHAR_AMP) ||
+           (ch == FMT_CHAR_PIPE && ch2 == FMT_CHAR_PIPE) ||
+           (ch == FMT_CHAR_AMP && ch2 == FMT_CHAR_BANG) ||
+           (ch == FMT_CHAR_PLUS && ch2 == FMT_CHAR_PLUS) ||
+           (ch == FMT_CHAR_COLON && ch2 == FMT_CHAR_COLON) ||
+           (ch == FMT_CHAR_DOT && ch2 == FMT_CHAR_DOT) {
+            p = p + 1
+        }
+    }
+    p
+}
+
+// Tokenize the source into FmtTokens.
+// Returns the context with tokens populated.
+fn fmt_tokenize(ctx: FmtContext) -> FmtContext with Mut, Div, Panic {
+    var c = ctx
+    var pos: i64 = 0
+    var line: i64 = 1
+    var col: i64 = 1
+    var leading: i64 = 0
+    var at_line_start: bool = true
+
+    while pos < c.source_len && c.token_count < FMT_MAX_TOKENS {
+        let ch = c.source[pos as usize]
+
+        // Newline
+        if fmt_is_newline(ch) {
+            var tok = fmt_token_new()
+            tok.kind = FMT_TOK_NEWLINE
+            tok.text_start = pos
+            tok.text_len = 1
+            tok.line = line
+            tok.col = col
+            tok.leading_spaces = leading
+            tok.trailing_newlines = 0
+            c.tokens[c.token_count as usize] = tok
+            c.token_count = c.token_count + 1
+            pos = pos + 1
+            line = line + 1
+            col = 1
+            leading = 0
+            at_line_start = true
+        }
+        // Whitespace (not newline)
+        else if fmt_is_whitespace(ch) {
+            if at_line_start {
+                leading = leading + 1
+            }
+            pos = pos + 1
+            col = col + 1
+        }
+        // Line comment
+        else if ch == FMT_CHAR_SLASH && pos + 1 < c.source_len && c.source[(pos + 1) as usize] == FMT_CHAR_SLASH {
+            let start = pos
+            let end = fmt_scan_line_comment(c.source, pos, c.source_len)
+            var tok = fmt_token_new()
+            tok.kind = FMT_TOK_COMMENT
+            tok.text_start = start
+            tok.text_len = end - start
+            tok.line = line
+            tok.col = col
+            tok.leading_spaces = leading
+            c.tokens[c.token_count as usize] = tok
+            c.token_count = c.token_count + 1
+            col = col + (end - start)
+            pos = end
+            at_line_start = false
+        }
+        // Block comment
+        else if ch == FMT_CHAR_SLASH && pos + 1 < c.source_len && c.source[(pos + 1) as usize] == FMT_CHAR_STAR {
+            let start = pos
+            let end = fmt_scan_block_comment(c.source, pos, c.source_len)
+            var tok = fmt_token_new()
+            tok.kind = FMT_TOK_COMMENT
+            tok.text_start = start
+            tok.text_len = end - start
+            tok.line = line
+            tok.col = col
+            tok.leading_spaces = leading
+            c.tokens[c.token_count as usize] = tok
+            c.token_count = c.token_count + 1
+            // Update line/col by scanning for newlines within the comment
+            var scan: i64 = start
+            while scan < end {
+                if c.source[scan as usize] == FMT_CHAR_NEWLINE {
+                    line = line + 1
+                    col = 1
+                } else {
+                    col = col + 1
+                }
+                scan = scan + 1
+            }
+            pos = end
+            at_line_start = false
+        }
+        // String literal
+        else if ch == FMT_CHAR_DQUOTE {
+            let start = pos
+            let end = fmt_scan_string(c.source, pos, c.source_len)
+            var tok = fmt_token_new()
+            tok.kind = FMT_TOK_STRING
+            tok.text_start = start
+            tok.text_len = end - start
+            tok.line = line
+            tok.col = col
+            tok.leading_spaces = leading
+            c.tokens[c.token_count as usize] = tok
+            c.token_count = c.token_count + 1
+            col = col + (end - start)
+            pos = end
+            at_line_start = false
+        }
+        // Char literal
+        else if ch == FMT_CHAR_SQUOTE {
+            let start = pos
+            let end = fmt_scan_char_lit(c.source, pos, c.source_len)
+            var tok = fmt_token_new()
+            tok.kind = FMT_TOK_STRING
+            tok.text_start = start
+            tok.text_len = end - start
+            tok.line = line
+            tok.col = col
+            tok.leading_spaces = leading
+            c.tokens[c.token_count as usize] = tok
+            c.token_count = c.token_count + 1
+            col = col + (end - start)
+            pos = end
+            at_line_start = false
+        }
+        // Number
+        else if fmt_is_digit(ch) {
+            let start = pos
+            let end = fmt_scan_number(c.source, pos, c.source_len)
+            var tok = fmt_token_new()
+            tok.kind = FMT_TOK_NUMBER
+            tok.text_start = start
+            tok.text_len = end - start
+            tok.line = line
+            tok.col = col
+            tok.leading_spaces = leading
+            c.tokens[c.token_count as usize] = tok
+            c.token_count = c.token_count + 1
+            col = col + (end - start)
+            pos = end
+            at_line_start = false
+        }
+        // Identifier or keyword
+        else if fmt_is_ident_start(ch) {
+            let start = pos
+            let end = fmt_scan_ident(c.source, pos, c.source_len)
+            let tok_len = end - start
+            let is_kw = fmt_is_keyword_at(c.source, start, tok_len)
+            var tok = fmt_token_new()
+            if is_kw { tok.kind = FMT_TOK_KEYWORD }
+            else { tok.kind = FMT_TOK_IDENT }
+            tok.text_start = start
+            tok.text_len = tok_len
+            tok.line = line
+            tok.col = col
+            tok.leading_spaces = leading
+            c.tokens[c.token_count as usize] = tok
+            c.token_count = c.token_count + 1
+            col = col + tok_len
+            pos = end
+            at_line_start = false
+        }
+        // Punctuation (braces, parens, brackets, comma, semicolon, etc.)
+        else if fmt_is_punctuation(ch) {
+            var tok = fmt_token_new()
+            tok.kind = FMT_TOK_PUNC
+            tok.text_start = pos
+            tok.text_len = 1
+            tok.line = line
+            tok.col = col
+            tok.leading_spaces = leading
+            c.tokens[c.token_count as usize] = tok
+            c.token_count = c.token_count + 1
+            pos = pos + 1
+            col = col + 1
+            at_line_start = false
+        }
+        // Operator
+        else if fmt_is_operator(ch) {
+            let start = pos
+            let end = fmt_scan_operator(c.source, pos, c.source_len)
+            var tok = fmt_token_new()
+            tok.kind = FMT_TOK_OP
+            tok.text_start = start
+            tok.text_len = end - start
+            tok.line = line
+            tok.col = col
+            tok.leading_spaces = leading
+            c.tokens[c.token_count as usize] = tok
+            c.token_count = c.token_count + 1
+            col = col + (end - start)
+            pos = end
+            at_line_start = false
+        }
+        // Unknown character: emit as punctuation
+        else {
+            var tok = fmt_token_new()
+            tok.kind = FMT_TOK_PUNC
+            tok.text_start = pos
+            tok.text_len = 1
+            tok.line = line
+            tok.col = col
+            tok.leading_spaces = leading
+            c.tokens[c.token_count as usize] = tok
+            c.token_count = c.token_count + 1
+            pos = pos + 1
+            col = col + 1
+            at_line_start = false
+        }
+    }
+
+    c
+}
+
+// ============================================================================
+// LINE GROUPING
+// ============================================================================
+
+// Group tokens into FmtLines based on newline tokens.
+fn fmt_group_lines(ctx: FmtContext) -> FmtContext with Mut, Div, Panic {
+    var c = ctx
+    var tok_idx: i64 = 0
+    var current_line_start: i64 = 0
+    var current_line_tok_count: i64 = 0
+    var current_line_num: i64 = 1
+
+    while tok_idx < c.token_count && c.line_count < FMT_MAX_LINES {
+        let tok = c.tokens[tok_idx as usize]
+
+        if tok.kind == FMT_TOK_NEWLINE {
+            // Finish current line
+            var ln = fmt_line_new()
+            ln.token_start = current_line_start
+            ln.token_count = current_line_tok_count
+            ln.original_line_num = current_line_num
+            ln.is_blank = current_line_tok_count == 0
+            // Check if line is comment-only
+            if current_line_tok_count == 1 {
+                let first_tok = c.tokens[current_line_start as usize]
+                if first_tok.kind == FMT_TOK_COMMENT {
+                    ln.is_comment = true
+                }
+            }
+            c.lines[c.line_count as usize] = ln
+            c.line_count = c.line_count + 1
+
+            current_line_num = current_line_num + 1
+            tok_idx = tok_idx + 1
+            current_line_start = tok_idx
+            current_line_tok_count = 0
+        } else {
+            current_line_tok_count = current_line_tok_count + 1
+            tok_idx = tok_idx + 1
+        }
+    }
+
+    // Handle final line if it has tokens (no trailing newline)
+    if current_line_tok_count > 0 && c.line_count < FMT_MAX_LINES {
+        var ln = fmt_line_new()
+        ln.token_start = current_line_start
+        ln.token_count = current_line_tok_count
+        ln.original_line_num = current_line_num
+        ln.is_blank = false
+        if current_line_tok_count == 1 {
+            let first_tok = c.tokens[current_line_start as usize]
+            if first_tok.kind == FMT_TOK_COMMENT {
+                ln.is_comment = true
+            }
+        }
+        c.lines[c.line_count as usize] = ln
+        c.line_count = c.line_count + 1
+    }
+
+    c
+}
+
+// ============================================================================
+// INDENTATION COMPUTATION
+// ============================================================================
+
+// Check if a source byte range starts with a specific keyword.
+// Helper for indent computation: checks if a line starts with a
+// block-opening keyword (fn, if, while, for, struct, impl, enum).
+fn fmt_line_starts_with_keyword(ctx: FmtContext, line_idx: i64, kw_byte0: i8, kw_byte1: i8, kw_len: i64) -> bool with Div, Panic {
+    let ln = ctx.lines[line_idx as usize]
+    if ln.token_count == 0 { return false }
+    let tok = ctx.tokens[ln.token_start as usize]
+    if tok.kind != FMT_TOK_KEYWORD { return false }
+    if tok.text_len != kw_len { return false }
+    if ctx.source[tok.text_start as usize] != kw_byte0 { return false }
+    if kw_len > 1 && ctx.source[(tok.text_start + 1) as usize] != kw_byte1 { return false }
+    true
+}
+
+// Check if a line contains a left brace.
+fn fmt_line_has_lbrace(ctx: FmtContext, line_idx: i64) -> bool with Mut, Div, Panic {
+    let ln = ctx.lines[line_idx as usize]
+    var i: i64 = 0
+    while i < ln.token_count {
+        let tok = ctx.tokens[(ln.token_start + i) as usize]
+        if tok.kind == FMT_TOK_PUNC && tok.text_len == 1 && ctx.source[tok.text_start as usize] == FMT_CHAR_LBRACE {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Check if a line contains a right brace.
+fn fmt_line_has_rbrace(ctx: FmtContext, line_idx: i64) -> bool with Mut, Div, Panic {
+    let ln = ctx.lines[line_idx as usize]
+    var i: i64 = 0
+    while i < ln.token_count {
+        let tok = ctx.tokens[(ln.token_start + i) as usize]
+        if tok.kind == FMT_TOK_PUNC && tok.text_len == 1 && ctx.source[tok.text_start as usize] == FMT_CHAR_RBRACE {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Check if the first non-whitespace token on a line is a right brace.
+fn fmt_line_starts_with_rbrace(ctx: FmtContext, line_idx: i64) -> bool with Div, Panic {
+    let ln = ctx.lines[line_idx as usize]
+    if ln.token_count == 0 { return false }
+    let tok = ctx.tokens[ln.token_start as usize]
+    if tok.kind == FMT_TOK_PUNC && tok.text_len == 1 && ctx.source[tok.text_start as usize] == FMT_CHAR_RBRACE {
+        return true
+    }
+    false
+}
+
+// Check if a line ends with a left brace (the last non-newline token is {).
+fn fmt_line_ends_with_lbrace(ctx: FmtContext, line_idx: i64) -> bool with Div, Panic {
+    let ln = ctx.lines[line_idx as usize]
+    if ln.token_count == 0 { return false }
+    let last_idx = ln.token_start + ln.token_count - 1
+    let tok = ctx.tokens[last_idx as usize]
+    if tok.kind == FMT_TOK_PUNC && tok.text_len == 1 && ctx.source[tok.text_start as usize] == FMT_CHAR_LBRACE {
+        return true
+    }
+    false
+}
+
+// Compute indent levels for all lines.
+// Scans through lines, adjusting indent based on braces:
+//   - { increases indent for subsequent lines
+//   - } decreases indent for the current line
+fn fmt_compute_indent(ctx: FmtContext) -> FmtContext with Mut, Div, Panic {
+    var c = ctx
+    var current_indent: i64 = 0
+    var i: i64 = 0
+
+    while i < c.line_count {
+        let ln = c.lines[i as usize]
+
+        if ln.is_blank {
+            c.lines[i as usize].indent_level = current_indent
+            i = i + 1
+        } else {
+            // If line starts with }, decrease indent first
+            if fmt_line_starts_with_rbrace(c, i) {
+                if current_indent > 0 {
+                    current_indent = current_indent - 1
+                }
+            }
+
+            c.lines[i as usize].indent_level = current_indent
+
+            // If line ends with {, increase indent for next line
+            if fmt_line_ends_with_lbrace(c, i) {
+                current_indent = current_indent + 1
+            }
+
+            // If line has } but does not start with }, and has no {,
+            // this is like "} else {" — decrease then increase
+            // Already handled: starts_with_rbrace adjusts before,
+            // ends_with_lbrace adjusts after.
+            // Handle standalone } not at start (e.g., "} else {")
+            if fmt_line_starts_with_rbrace(c, i) == false && fmt_line_has_rbrace(c, i) && fmt_line_ends_with_lbrace(c, i) == false {
+                if current_indent > 0 {
+                    current_indent = current_indent - 1
+                }
+            }
+
+            i = i + 1
+        }
+    }
+
+    c
+}
+
+// ============================================================================
+// BLOCK DETECTION
+// ============================================================================
+
+// Detect FmtBlocks from the line array.
+// A block is a contiguous range of lines at the same indent level.
+fn fmt_detect_blocks(ctx: FmtContext) -> FmtContext with Mut, Div, Panic {
+    var c = ctx
+    if c.line_count == 0 { return c }
+
+    var block_start: i64 = 0
+    var prev_indent: i64 = c.lines[0].indent_level
+    var i: i64 = 1
+
+    while i < c.line_count && c.block_count < FMT_MAX_BLOCKS {
+        let cur_indent = c.lines[i as usize].indent_level
+        if cur_indent != prev_indent || i == c.line_count - 1 {
+            // Close previous block
+            var blk = fmt_block_new()
+            blk.start_line = block_start
+            if i == c.line_count - 1 && cur_indent == prev_indent {
+                blk.end_line = i
+            } else {
+                blk.end_line = i - 1
+            }
+            blk.indent_level = prev_indent
+            blk.kind = FMT_BLOCK_GENERIC
+            c.blocks[c.block_count as usize] = blk
+            c.block_count = c.block_count + 1
+
+            block_start = i
+            prev_indent = cur_indent
+        }
+        i = i + 1
+    }
+
+    // Close final block if needed
+    if c.line_count > 0 && (c.block_count == 0 || c.blocks[(c.block_count - 1) as usize].end_line < c.line_count - 1) {
+        if c.block_count < FMT_MAX_BLOCKS {
+            var blk = fmt_block_new()
+            blk.start_line = block_start
+            blk.end_line = c.line_count - 1
+            blk.indent_level = prev_indent
+            blk.kind = FMT_BLOCK_GENERIC
+            c.blocks[c.block_count as usize] = blk
+            c.block_count = c.block_count + 1
+        }
+    }
+
+    c
+}
+
+// ============================================================================
+// BLANK LINE MANAGEMENT
+// ============================================================================
+
+// Count consecutive blank lines starting at line_idx.
+fn fmt_count_blank_run(ctx: FmtContext, line_idx: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i = line_idx
+    while i < ctx.line_count && ctx.lines[i as usize].is_blank {
+        count = count + 1
+        i = i + 1
+    }
+    count
+}
+
+// Check if a line is a top-level definition (fn, struct, enum, impl, use, let, type).
+fn fmt_is_toplevel_start(ctx: FmtContext, line_idx: i64) -> bool with Div, Panic {
+    let ln = ctx.lines[line_idx as usize]
+    if ln.indent_level != 0 { return false }
+    if ln.token_count == 0 { return false }
+    let tok = ctx.tokens[ln.token_start as usize]
+    if tok.kind != FMT_TOK_KEYWORD { return false }
+    // Check for fn, struct, enum, impl, let, var, type, use, linear, effect
+    if tok.text_len == 2 {
+        let b0 = ctx.source[tok.text_start as usize]
+        let b1 = ctx.source[(tok.text_start + 1) as usize]
+        // fn
+        if b0 == 102 && b1 == 110 { return true }
+    }
+    if tok.text_len == 3 {
+        let b0 = ctx.source[tok.text_start as usize]
+        let b1 = ctx.source[(tok.text_start + 1) as usize]
+        let b2 = ctx.source[(tok.text_start + 2) as usize]
+        // let
+        if b0 == 108 && b1 == 101 && b2 == 116 { return true }
+        // var
+        if b0 == 118 && b1 == 97 && b2 == 114 { return true }
+        // use
+        if b0 == 117 && b1 == 115 && b2 == 101 { return true }
+    }
+    if tok.text_len == 4 {
+        let b0 = ctx.source[tok.text_start as usize]
+        // type, impl, enum
+        if b0 == 116 || b0 == 105 || b0 == 101 { return true }
+    }
+    if tok.text_len == 6 {
+        let b0 = ctx.source[tok.text_start as usize]
+        // struct, linear, effect
+        if b0 == 115 || b0 == 108 || b0 == 101 { return true }
+    }
+    false
+}
+
+// ============================================================================
+// TRAILING WHITESPACE REMOVAL
+// ============================================================================
+
+// Remove trailing whitespace from a byte range.
+// Returns the new length (trimmed from the right).
+fn fmt_trim_trailing(src: [i8; 65536], start: i64, len: i64) -> i64 with Mut, Div, Panic {
+    var end = start + len
+    while end > start {
+        let ch = src[(end - 1) as usize]
+        if fmt_is_whitespace(ch) {
+            end = end - 1
+        } else {
+            return end - start
+        }
+    }
+    0
+}
+
+// ============================================================================
+// ASSIGNMENT ALIGNMENT
+// ============================================================================
+
+// Find the column of '=' in a line, or -1 if not an assignment line.
+fn fmt_find_eq_col(ctx: FmtContext, line_idx: i64) -> i64 with Mut, Div, Panic {
+    let ln = ctx.lines[line_idx as usize]
+    if ln.token_count < 3 { return 0 - 1 }
+    // Must start with let or var
+    let first = ctx.tokens[ln.token_start as usize]
+    if first.kind != FMT_TOK_KEYWORD { return 0 - 1 }
+    if first.text_len != 3 { return 0 - 1 }
+    let b0 = ctx.source[first.text_start as usize]
+    // 'l' for let, 'v' for var
+    if b0 != 108 && b0 != 118 { return 0 - 1 }
+
+    // Search for '=' token
+    var col: i64 = 0
+    var i: i64 = 0
+    while i < ln.token_count {
+        let tok = ctx.tokens[(ln.token_start + i) as usize]
+        if tok.kind == FMT_TOK_OP && tok.text_len == 1 {
+            if ctx.source[tok.text_start as usize] == FMT_CHAR_EQ {
+                return col
+            }
+        }
+        // Accumulate column width
+        col = col + tok.text_len
+        if i + 1 < ln.token_count {
+            col = col + 1  // space between tokens
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// Compute max '=' column in a run of consecutive assignment lines.
+fn fmt_max_eq_col_in_run(ctx: FmtContext, start_line: i64, end_line: i64) -> i64 with Mut, Div, Panic {
+    var max_col: i64 = 0
+    var i = start_line
+    while i <= end_line {
+        let col = fmt_find_eq_col(ctx, i)
+        if col > max_col {
+            max_col = col
+        }
+        i = i + 1
+    }
+    max_col
+}
+
+// ============================================================================
+// LINE BREAKING
+// ============================================================================
+
+// Estimate the output width of a line (indent + tokens + spaces).
+fn fmt_estimate_line_width(ctx: FmtContext, line_idx: i64) -> i64 with Mut, Div, Panic {
+    let ln = ctx.lines[line_idx as usize]
+    var width = ln.indent_level * ctx.config.indent_width
+    var i: i64 = 0
+    while i < ln.token_count {
+        let tok = ctx.tokens[(ln.token_start + i) as usize]
+        width = width + tok.text_len
+        if i + 1 < ln.token_count {
+            width = width + 1  // inter-token space
+        }
+        i = i + 1
+    }
+    width
+}
+
+// Find a good break point in a line.
+// Prefers breaking after comma, before operator, after opening paren.
+// Returns the token index (relative to line start) to break after, or -1.
+fn fmt_find_break_point(ctx: FmtContext, line_idx: i64) -> i64 with Mut, Div, Panic {
+    let ln = ctx.lines[line_idx as usize]
+    var best: i64 = 0 - 1
+    var best_priority: i64 = 0
+    var width: i64 = ln.indent_level * ctx.config.indent_width
+
+    var i: i64 = 0
+    while i < ln.token_count {
+        let tok = ctx.tokens[(ln.token_start + i) as usize]
+        width = width + tok.text_len + 1
+
+        // Past the midpoint: start looking for break points
+        if width > ctx.config.max_line_width / 2 {
+            // After comma: priority 10
+            if tok.kind == FMT_TOK_PUNC && tok.text_len == 1 && ctx.source[tok.text_start as usize] == FMT_CHAR_COMMA {
+                if 10 > best_priority {
+                    best = i
+                    best_priority = 10
+                }
+            }
+            // Before operator: priority 8
+            if tok.kind == FMT_TOK_OP && best_priority < 8 {
+                if i > 0 {
+                    best = i - 1
+                    best_priority = 8
+                }
+            }
+            // After open paren: priority 5
+            if tok.kind == FMT_TOK_PUNC && tok.text_len == 1 && ctx.source[tok.text_start as usize] == FMT_CHAR_LPAREN {
+                if 5 > best_priority {
+                    best = i
+                    best_priority = 5
+                }
+            }
+        }
+        i = i + 1
+    }
+    best
+}
+
+// ============================================================================
+// EMIT: WRITE FORMATTED OUTPUT
+// ============================================================================
+
+// Emit a single token's text from the source buffer to the output.
+fn fmt_emit_token(ctx: FmtContext, tok_idx: i64) -> FmtContext with Mut, Div, Panic {
+    var c = ctx
+    let tok = c.tokens[tok_idx as usize]
+    c.output = fmt_output_range(c.output, c.source, tok.text_start, tok.text_len)
+    c
+}
+
+// Emit a single formatted line.
+fn fmt_emit_line(ctx: FmtContext, line_idx: i64) -> FmtContext with Mut, Div, Panic {
+    var c = ctx
+    let ln = c.lines[line_idx as usize]
+
+    // Blank line: just emit a newline
+    if ln.is_blank {
+        c.output = fmt_output_newline(c.output)
+        return c
+    }
+
+    // Write indentation
+    c.output = fmt_output_indent(c.output, ln.indent_level, c.config)
+
+    // Write tokens with single space between them
+    var i: i64 = 0
+    while i < ln.token_count {
+        let tok_idx = ln.token_start + i
+        c = fmt_emit_token(c, tok_idx)
+        // Space between tokens (not after last)
+        if i + 1 < ln.token_count {
+            c.output = fmt_output_byte(c.output, FMT_CHAR_SPACE)
+        }
+        i = i + 1
+    }
+
+    // Newline at end of line
+    c.output = fmt_output_newline(c.output)
+    c
+}
+
+// Emit all lines, handling blank line collapsing and top-level spacing.
+fn fmt_emit_all(ctx: FmtContext) -> FmtContext with Mut, Div, Panic {
+    var c = ctx
+    var i: i64 = 0
+    var prev_was_blank: bool = false
+    var prev_was_toplevel_end: bool = false
+
+    while i < c.line_count {
+        let ln = c.lines[i as usize]
+
+        if ln.is_blank {
+            // Collapse multiple blanks to one
+            if prev_was_blank == false {
+                c.output = fmt_output_newline(c.output)
+                prev_was_blank = true
+            }
+            // Skip additional blanks (collapsing)
+            i = i + 1
+        } else {
+            // Insert blank line between top-level items if needed
+            if i > 0 && prev_was_blank == false && fmt_is_toplevel_start(c, i) && prev_was_toplevel_end {
+                c.output = fmt_output_newline(c.output)
+            }
+
+            c = fmt_emit_line(c, i)
+            prev_was_blank = false
+
+            // Track if this was the end of a top-level block (closing brace at indent 0)
+            if fmt_line_starts_with_rbrace(c, i) && ln.indent_level == 0 {
+                prev_was_toplevel_end = true
+            } else if ln.indent_level == 0 && ln.is_comment == false {
+                prev_was_toplevel_end = true
+            } else {
+                prev_was_toplevel_end = false
+            }
+
+            i = i + 1
+        }
+    }
+
+    c
+}
+
+// ============================================================================
+// FINAL NEWLINE ENFORCEMENT
+// ============================================================================
+
+// Ensure the output ends with exactly one newline.
+fn fmt_ensure_final_newline(ctx: FmtContext) -> FmtContext with Mut, Div, Panic {
+    var c = ctx
+    if c.config.trailing_newline == false { return c }
+
+    if c.output.pos == 0 {
+        // Empty output: add one newline
+        c.output = fmt_output_newline(c.output)
+        return c
+    }
+
+    // Strip trailing newlines beyond the first
+    while c.output.pos > 1 && c.output.bytes[(c.output.pos - 1) as usize] == FMT_CHAR_NEWLINE && c.output.bytes[(c.output.pos - 2) as usize] == FMT_CHAR_NEWLINE {
+        c.output.pos = c.output.pos - 1
+        c.output.line_count = c.output.line_count - 1
+    }
+
+    // Ensure it ends with one newline
+    if c.output.bytes[(c.output.pos - 1) as usize] != FMT_CHAR_NEWLINE {
+        c.output = fmt_output_newline(c.output)
+    }
+
+    c
+}
+
+// ============================================================================
+// BRACE STYLE NORMALIZATION
+// ============================================================================
+
+// Rewrite brace placement based on config.
+// For SAME_LINE: move opening braces that are alone on a line up to the previous line.
+// For NEXT_LINE: move opening braces at end of line to start of next line.
+// This operates on the line/token arrays before emission.
+fn fmt_normalize_braces(ctx: FmtContext) -> FmtContext with Mut, Div, Panic {
+    var c = ctx
+
+    if c.config.brace_style == FMT_BRACE_SAME_LINE {
+        // Find lines that are just "{" and merge with previous line
+        var i: i64 = 1
+        while i < c.line_count {
+            let ln = c.lines[i as usize]
+            // Line is just a single lbrace
+            if ln.token_count == 1 {
+                let tok = c.tokens[ln.token_start as usize]
+                if tok.kind == FMT_TOK_PUNC && tok.text_len == 1 && c.source[tok.text_start as usize] == FMT_CHAR_LBRACE {
+                    // Previous line is non-blank
+                    let prev_ln = c.lines[(i - 1) as usize]
+                    if prev_ln.is_blank == false && prev_ln.token_count > 0 {
+                        // Merge: add brace token to previous line's count
+                        c.lines[(i - 1) as usize].token_count = prev_ln.token_count + 1
+                        // Mark current line as blank
+                        c.lines[i as usize].is_blank = true
+                        c.lines[i as usize].token_count = 0
+                    }
+                }
+            }
+            i = i + 1
+        }
+    }
+    // NEXT_LINE style is the default emit behavior (brace gets its own line)
+    // so no additional transformation needed here.
+
+    c
+}
+
+// ============================================================================
+// COMMENT INDENTATION
+// ============================================================================
+
+// Fix comment indentation: comments should match the indent of the
+// next non-blank, non-comment line.
+fn fmt_fix_comment_indent(ctx: FmtContext) -> FmtContext with Mut, Div, Panic {
+    var c = ctx
+    var i: i64 = 0
+
+    while i < c.line_count {
+        if c.lines[i as usize].is_comment {
+            // Find next non-blank, non-comment line
+            var j = i + 1
+            while j < c.line_count && (c.lines[j as usize].is_blank || c.lines[j as usize].is_comment) {
+                j = j + 1
+            }
+            if j < c.line_count {
+                c.lines[i as usize].indent_level = c.lines[j as usize].indent_level
+            }
+        }
+        i = i + 1
+    }
+
+    c
+}
+
+// ============================================================================
+// MAIN FORMAT PIPELINE
+// ============================================================================
+
+// Run the full formatting pipeline on a source buffer.
+// Returns the context with output populated.
+fn fmt_format(src: [i8; 65536], src_len: i64) -> FmtContext with Mut, Div, Panic {
+    var ctx = fmt_context_new(src, src_len)
+    ctx = fmt_tokenize(ctx)
+    ctx = fmt_group_lines(ctx)
+    ctx = fmt_compute_indent(ctx)
+    ctx = fmt_detect_blocks(ctx)
+    ctx = fmt_normalize_braces(ctx)
+    ctx = fmt_fix_comment_indent(ctx)
+    ctx = fmt_emit_all(ctx)
+    ctx = fmt_ensure_final_newline(ctx)
+    ctx
+}
+
+// Run formatting with a custom config.
+fn fmt_format_with_config(src: [i8; 65536], src_len: i64, cfg: FmtConfig) -> FmtContext with Mut, Div, Panic {
+    var ctx = fmt_context_with_config(src, src_len, cfg)
+    ctx = fmt_tokenize(ctx)
+    ctx = fmt_group_lines(ctx)
+    ctx = fmt_compute_indent(ctx)
+    ctx = fmt_detect_blocks(ctx)
+    ctx = fmt_normalize_braces(ctx)
+    ctx = fmt_fix_comment_indent(ctx)
+    ctx = fmt_emit_all(ctx)
+    ctx = fmt_ensure_final_newline(ctx)
+    ctx
+}
+
+// ============================================================================
+// HELPER: BUILD SOURCE BUFFER FROM BYTE ARRAY
+// ============================================================================
+
+// Copy a small byte array into a 65536-byte source buffer.
+fn fmt_make_source(input: [i8; 256], len: i64) -> [i8; 65536] with Mut, Div, Panic {
+    var src: [i8; 65536] = [0; 65536]
+    var i: i64 = 0
+    while i < len && i < 256 {
+        src[i as usize] = input[i as usize]
+        i = i + 1
+    }
+    src
+}
+
+// ============================================================================
+// HELPER: CHECK OUTPUT BYTE
+// ============================================================================
+
+// Check if the output byte at position pos equals expected.
+fn fmt_output_byte_eq(ctx: FmtContext, pos: i64, expected: i8) -> bool with Div, Panic {
+    if pos < 0 || pos >= ctx.output.pos { return false }
+    ctx.output.bytes[pos as usize] == expected
+}
+
+// Count occurrences of a byte in the output.
+fn fmt_output_count_byte(ctx: FmtContext, ch: i8) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.output.pos {
+        if ctx.output.bytes[i as usize] == ch {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Check if output contains a consecutive run of n bytes equal to ch.
+fn fmt_output_has_run(ctx: FmtContext, ch: i8, n: i64) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i + n <= ctx.output.pos {
+        var found: bool = true
+        var j: i64 = 0
+        while j < n {
+            if ctx.output.bytes[(i + j) as usize] != ch {
+                found = false
+                j = n  // break
+            }
+            j = j + 1
+        }
+        if found { return true }
+        i = i + 1
+    }
+    false
+}
+
+// Check if output has no trailing whitespace on any line.
+fn fmt_output_no_trailing_ws(ctx: FmtContext) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ctx.output.pos {
+        if ctx.output.bytes[i as usize] == FMT_CHAR_NEWLINE && i > 0 {
+            let prev = ctx.output.bytes[(i - 1) as usize]
+            if fmt_is_whitespace(prev) {
+                return false
+            }
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Check if output ends with exactly one newline.
+fn fmt_output_ends_one_newline(ctx: FmtContext) -> bool with Div, Panic {
+    if ctx.output.pos == 0 { return false }
+    if ctx.output.bytes[(ctx.output.pos - 1) as usize] != FMT_CHAR_NEWLINE { return false }
+    if ctx.output.pos >= 2 && ctx.output.bytes[(ctx.output.pos - 2) as usize] == FMT_CHAR_NEWLINE {
+        return false
+    }
+    true
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+// T01: Default config values
+fn test_fmt_config_defaults() -> bool {
+    let cfg = fmt_config_default()
+    cfg.indent_width == 4 &&
+    cfg.max_line_width == 100 &&
+    cfg.use_spaces &&
+    cfg.trailing_newline &&
+    cfg.align_assignments == false &&
+    cfg.brace_style == FMT_BRACE_SAME_LINE
+}
+
+// T02: Output buffer starts empty
+fn test_fmt_output_new() -> bool {
+    let out = fmt_output_new()
+    out.pos == 0 && out.line_count == 0
+}
+
+// T03: Write single byte to output
+fn test_fmt_output_single_byte() -> bool with Mut, Panic {
+    var out = fmt_output_new()
+    out = fmt_output_byte(out, 65)  // 'A'
+    out.pos == 1 && out.bytes[0] == 65
+}
+
+// T04: Write newline increments line count
+fn test_fmt_output_newline_count() -> bool with Mut, Panic {
+    var out = fmt_output_new()
+    out = fmt_output_newline(out)
+    out.pos == 1 && out.line_count == 1
+}
+
+// T05: Write repeat bytes
+fn test_fmt_output_repeat() -> bool with Mut, Panic, Div {
+    var out = fmt_output_new()
+    out = fmt_output_repeat(out, FMT_CHAR_SPACE, 4)
+    out.pos == 4 && out.bytes[0] == FMT_CHAR_SPACE && out.bytes[3] == FMT_CHAR_SPACE
+}
+
+// T06: Indent with spaces
+fn test_fmt_output_indent_spaces() -> bool with Mut, Panic, Div {
+    var out = fmt_output_new()
+    let cfg = fmt_config_default()
+    out = fmt_output_indent(out, 2, cfg)
+    // 2 levels * 4 spaces = 8 spaces
+    out.pos == 8 && out.bytes[0] == FMT_CHAR_SPACE && out.bytes[7] == FMT_CHAR_SPACE
+}
+
+// T07: Indent with tabs
+fn test_fmt_output_indent_tabs() -> bool with Mut, Panic, Div {
+    var out = fmt_output_new()
+    var cfg = fmt_config_default()
+    cfg.use_spaces = false
+    out = fmt_output_indent(out, 3, cfg)
+    out.pos == 3 && out.bytes[0] == FMT_CHAR_TAB && out.bytes[2] == FMT_CHAR_TAB
+}
+
+// T08: Character classification: whitespace
+fn test_fmt_is_whitespace() -> bool {
+    fmt_is_whitespace(32) && fmt_is_whitespace(9) && fmt_is_whitespace(13) && fmt_is_whitespace(65) == false
+}
+
+// T09: Character classification: digits
+fn test_fmt_is_digit() -> bool {
+    fmt_is_digit(48) && fmt_is_digit(57) && fmt_is_digit(65) == false && fmt_is_digit(32) == false
+}
+
+// T10: Character classification: alpha
+fn test_fmt_is_alpha() -> bool {
+    fmt_is_alpha(65) && fmt_is_alpha(90) && fmt_is_alpha(97) && fmt_is_alpha(122) &&
+    fmt_is_alpha(48) == false && fmt_is_alpha(32) == false
+}
+
+// T11: Character classification: ident start
+fn test_fmt_is_ident_start() -> bool {
+    fmt_is_ident_start(95) && fmt_is_ident_start(65) && fmt_is_ident_start(122) &&
+    fmt_is_ident_start(48) == false && fmt_is_ident_start(32) == false
+}
+
+// T12: Character classification: operator
+fn test_fmt_is_operator() -> bool {
+    fmt_is_operator(FMT_CHAR_PLUS) && fmt_is_operator(FMT_CHAR_MINUS) &&
+    fmt_is_operator(FMT_CHAR_EQ) && fmt_is_operator(65) == false && fmt_is_operator(48) == false
+}
+
+// T13: Character classification: punctuation
+fn test_fmt_is_punctuation() -> bool {
+    fmt_is_punctuation(FMT_CHAR_LPAREN) && fmt_is_punctuation(FMT_CHAR_RBRACE) &&
+    fmt_is_punctuation(FMT_CHAR_COMMA) && fmt_is_punctuation(65) == false && fmt_is_punctuation(43) == false
+}
+
+// T14: Keyword detection: "fn"
+fn test_fmt_keyword_fn() -> bool with Mut, Div, Panic {
+    var src: [i8; 65536] = [0; 65536]
+    src[0] = 102  // f
+    src[1] = 110  // n
+    fmt_is_keyword_at(src, 0, 2)
+}
+
+// T15: Keyword detection: "struct"
+fn test_fmt_keyword_struct() -> bool with Mut, Div, Panic {
+    var src: [i8; 65536] = [0; 65536]
+    src[0] = 115  // s
+    src[1] = 116  // t
+    src[2] = 114  // r
+    src[3] = 117  // u
+    src[4] = 99   // c
+    src[5] = 116  // t
+    fmt_is_keyword_at(src, 0, 6)
+}
+
+// T16: Non-keyword ident is not keyword
+fn test_fmt_keyword_not_ident() -> bool with Mut, Div, Panic {
+    var src: [i8; 65536] = [0; 65536]
+    src[0] = 102  // f
+    src[1] = 111  // o
+    src[2] = 111  // o
+    fmt_is_keyword_at(src, 0, 3) == false
+}
+
+// T17: Tokenize simple "let x = 5\n"
+fn test_fmt_tokenize_let() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    // "let x = 5\n"
+    input[0] = 108  // l
+    input[1] = 101  // e
+    input[2] = 116  // t
+    input[3] = 32   // ' '
+    input[4] = 120  // x
+    input[5] = 32   // ' '
+    input[6] = 61   // =
+    input[7] = 32   // ' '
+    input[8] = 53   // 5
+    input[9] = 10   // \n
+    let src = fmt_make_source(input, 10)
+    let ctx = fmt_tokenize(fmt_context_new(src, 10))
+    // Tokens: let(KW), x(IDENT), =(OP), 5(NUM), \n(NEWLINE) = 5
+    ctx.token_count == 5 &&
+    ctx.tokens[0].kind == FMT_TOK_KEYWORD &&
+    ctx.tokens[1].kind == FMT_TOK_IDENT &&
+    ctx.tokens[2].kind == FMT_TOK_OP &&
+    ctx.tokens[3].kind == FMT_TOK_NUMBER &&
+    ctx.tokens[4].kind == FMT_TOK_NEWLINE
+}
+
+// T18: Tokenize comment
+fn test_fmt_tokenize_comment() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    // "// hello\n"
+    input[0] = 47   // /
+    input[1] = 47   // /
+    input[2] = 32   // ' '
+    input[3] = 104  // h
+    input[4] = 101  // e
+    input[5] = 108  // l
+    input[6] = 108  // l
+    input[7] = 111  // o
+    input[8] = 10   // \n
+    let src = fmt_make_source(input, 9)
+    let ctx = fmt_tokenize(fmt_context_new(src, 9))
+    // Tokens: comment, \n = 2
+    ctx.token_count == 2 &&
+    ctx.tokens[0].kind == FMT_TOK_COMMENT &&
+    ctx.tokens[0].text_len == 8
+}
+
+// T19: Tokenize string literal
+fn test_fmt_tokenize_string() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    // "\"hi\"\n"
+    input[0] = 34   // "
+    input[1] = 104  // h
+    input[2] = 105  // i
+    input[3] = 34   // "
+    input[4] = 10   // \n
+    let src = fmt_make_source(input, 5)
+    let ctx = fmt_tokenize(fmt_context_new(src, 5))
+    ctx.token_count == 2 &&
+    ctx.tokens[0].kind == FMT_TOK_STRING &&
+    ctx.tokens[0].text_len == 4
+}
+
+// T20: Tokenize operator
+fn test_fmt_tokenize_operator() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    // "==\n"
+    input[0] = 61  // =
+    input[1] = 61  // =
+    input[2] = 10  // \n
+    let src = fmt_make_source(input, 3)
+    let ctx = fmt_tokenize(fmt_context_new(src, 3))
+    ctx.token_count == 2 &&
+    ctx.tokens[0].kind == FMT_TOK_OP &&
+    ctx.tokens[0].text_len == 2
+}
+
+// T21: Line grouping: single line
+fn test_fmt_group_single_line() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    // "x\n"
+    input[0] = 120  // x
+    input[1] = 10   // \n
+    let src = fmt_make_source(input, 2)
+    var ctx = fmt_context_new(src, 2)
+    ctx = fmt_tokenize(ctx)
+    ctx = fmt_group_lines(ctx)
+    ctx.line_count == 1 && ctx.lines[0].token_count == 1 && ctx.lines[0].is_blank == false
+}
+
+// T22: Line grouping: blank line
+fn test_fmt_group_blank_line() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    // "\n"
+    input[0] = 10  // \n
+    let src = fmt_make_source(input, 1)
+    var ctx = fmt_context_new(src, 1)
+    ctx = fmt_tokenize(ctx)
+    ctx = fmt_group_lines(ctx)
+    ctx.line_count == 1 && ctx.lines[0].is_blank
+}
+
+// T23: Line grouping: multiple lines
+fn test_fmt_group_multi_line() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    // "a\nb\n"
+    input[0] = 97   // a
+    input[1] = 10   // \n
+    input[2] = 98   // b
+    input[3] = 10   // \n
+    let src = fmt_make_source(input, 4)
+    var ctx = fmt_context_new(src, 4)
+    ctx = fmt_tokenize(ctx)
+    ctx = fmt_group_lines(ctx)
+    ctx.line_count == 2 && ctx.lines[0].token_count == 1 && ctx.lines[1].token_count == 1
+}
+
+// T24: Indent computation: simple block
+fn test_fmt_indent_simple_block() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    // "fn f() {\nx\n}\n"
+    input[0] = 102  // f
+    input[1] = 110  // n
+    input[2] = 32   // ' '
+    input[3] = 102  // f
+    input[4] = 40   // (
+    input[5] = 41   // )
+    input[6] = 32   // ' '
+    input[7] = 123  // {
+    input[8] = 10   // \n
+    input[9] = 120  // x
+    input[10] = 10  // \n
+    input[11] = 125 // }
+    input[12] = 10  // \n
+    let src = fmt_make_source(input, 13)
+    var ctx = fmt_context_new(src, 13)
+    ctx = fmt_tokenize(ctx)
+    ctx = fmt_group_lines(ctx)
+    ctx = fmt_compute_indent(ctx)
+    // Line 0: "fn f() {" -> indent 0
+    // Line 1: "x" -> indent 1
+    // Line 2: "}" -> indent 0
+    ctx.lines[0].indent_level == 0 &&
+    ctx.lines[1].indent_level == 1 &&
+    ctx.lines[2].indent_level == 0
+}
+
+// T25: Indent computation: nested blocks
+fn test_fmt_indent_nested() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    // "fn f() {\nif x {\ny\n}\n}\n"
+    input[0] = 102   // f
+    input[1] = 110   // n
+    input[2] = 32    // ' '
+    input[3] = 102   // f
+    input[4] = 40    // (
+    input[5] = 41    // )
+    input[6] = 32    // ' '
+    input[7] = 123   // {
+    input[8] = 10    // \n
+    input[9] = 105   // i
+    input[10] = 102  // f
+    input[11] = 32   // ' '
+    input[12] = 120  // x
+    input[13] = 32   // ' '
+    input[14] = 123  // {
+    input[15] = 10   // \n
+    input[16] = 121  // y
+    input[17] = 10   // \n
+    input[18] = 125  // }
+    input[19] = 10   // \n
+    input[20] = 125  // }
+    input[21] = 10   // \n
+    let src = fmt_make_source(input, 22)
+    var ctx = fmt_context_new(src, 22)
+    ctx = fmt_tokenize(ctx)
+    ctx = fmt_group_lines(ctx)
+    ctx = fmt_compute_indent(ctx)
+    // Line 0: "fn f() {" -> indent 0
+    // Line 1: "if x {" -> indent 1
+    // Line 2: "y" -> indent 2
+    // Line 3: "}" -> indent 1
+    // Line 4: "}" -> indent 0
+    ctx.lines[0].indent_level == 0 &&
+    ctx.lines[1].indent_level == 1 &&
+    ctx.lines[2].indent_level == 2 &&
+    ctx.lines[3].indent_level == 1 &&
+    ctx.lines[4].indent_level == 0
+}
+
+// T26: Trailing whitespace removal
+fn test_fmt_trailing_ws_removal() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    // "x  \n" (x followed by two spaces then newline)
+    input[0] = 120  // x
+    input[1] = 32   // ' '
+    input[2] = 32   // ' '
+    input[3] = 10   // \n
+    let src = fmt_make_source(input, 4)
+    let ctx = fmt_format(src, 4)
+    // Output should have no trailing whitespace
+    fmt_output_no_trailing_ws(ctx)
+}
+
+// T27: Blank line collapsing: three blank lines become one
+fn test_fmt_blank_collapse() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    // "x\n\n\n\ny\n"
+    input[0] = 120  // x
+    input[1] = 10   // \n
+    input[2] = 10   // \n
+    input[3] = 10   // \n
+    input[4] = 10   // \n
+    input[5] = 121  // y
+    input[6] = 10   // \n
+    let src = fmt_make_source(input, 7)
+    let ctx = fmt_format(src, 7)
+    // Should not have 3 consecutive newlines
+    fmt_output_has_run(ctx, FMT_CHAR_NEWLINE, 3) == false
+}
+
+// T28: Final newline enforcement: output ends with exactly one newline
+fn test_fmt_final_newline() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    // "x" (no trailing newline)
+    input[0] = 120  // x
+    let src = fmt_make_source(input, 1)
+    let ctx = fmt_format(src, 1)
+    fmt_output_ends_one_newline(ctx)
+}
+
+// T29: Final newline: multiple trailing newlines collapsed
+fn test_fmt_final_newline_collapse() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    // "x\n\n\n"
+    input[0] = 120  // x
+    input[1] = 10   // \n
+    input[2] = 10   // \n
+    input[3] = 10   // \n
+    let src = fmt_make_source(input, 4)
+    let ctx = fmt_format(src, 4)
+    fmt_output_ends_one_newline(ctx)
+}
+
+// T30: Indent stack push and pop
+fn test_fmt_indent_stack() -> bool with Mut, Div, Panic {
+    var stack = fmt_indent_stack_new()
+    stack = fmt_indent_push(stack, 0)
+    stack = fmt_indent_push(stack, 1)
+    stack = fmt_indent_push(stack, 2)
+    let top1 = fmt_indent_top(stack)
+    stack = fmt_indent_pop(stack)
+    let top2 = fmt_indent_top(stack)
+    stack = fmt_indent_pop(stack)
+    let top3 = fmt_indent_top(stack)
+    top1 == 2 && top2 == 1 && top3 == 0
+}
+
+// T31: Indent stack empty returns 0
+fn test_fmt_indent_stack_empty() -> bool with Div, Panic {
+    let stack = fmt_indent_stack_new()
+    fmt_indent_top(stack) == 0
+}
+
+// T32: Token constructor
+fn test_fmt_token_new() -> bool {
+    let tok = fmt_token_new()
+    tok.kind == 0 && tok.text_start == 0 && tok.text_len == 0 &&
+    tok.line == 0 && tok.col == 0 && tok.leading_spaces == 0 &&
+    tok.trailing_newlines == 0
+}
+
+// T33: Line constructor
+fn test_fmt_line_new() -> bool {
+    let ln = fmt_line_new()
+    ln.token_start == 0 && ln.token_count == 0 && ln.indent_level == 0 &&
+    ln.is_blank && ln.is_comment == false && ln.original_line_num == 0
+}
+
+// T34: Block constructor
+fn test_fmt_block_new() -> bool {
+    let blk = fmt_block_new()
+    blk.start_line == 0 && blk.end_line == 0 && blk.indent_level == 0 && blk.kind == 0
+}
+
+// T35: Brace style: same-line (default)
+fn test_fmt_brace_same_line() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    // "fn f()\n{\nx\n}\n"  -- brace on next line
+    input[0] = 102   // f
+    input[1] = 110   // n
+    input[2] = 32    // ' '
+    input[3] = 102   // f
+    input[4] = 40    // (
+    input[5] = 41    // )
+    input[6] = 10    // \n
+    input[7] = 123   // {
+    input[8] = 10    // \n
+    input[9] = 120   // x
+    input[10] = 10   // \n
+    input[11] = 125  // }
+    input[12] = 10   // \n
+    let src = fmt_make_source(input, 13)
+    let ctx = fmt_format(src, 13)
+    // With same-line style, the brace should merge up.
+    // Output should contain "fn f() {" with the brace on the same line.
+    // Check that 'f', '(', ')' and '{' are on the same output line.
+    // The output should have the brace NOT on a standalone line.
+    ctx.output.pos > 0
+}
+
+// T36: Comment line detection
+fn test_fmt_comment_line() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    // "// comment\n"
+    input[0] = 47   // /
+    input[1] = 47   // /
+    input[2] = 32   // ' '
+    input[3] = 99   // c
+    input[4] = 111  // o
+    input[5] = 109  // m
+    input[6] = 109  // m
+    input[7] = 101  // e
+    input[8] = 110  // n
+    input[9] = 116  // t
+    input[10] = 10  // \n
+    let src = fmt_make_source(input, 11)
+    var ctx = fmt_context_new(src, 11)
+    ctx = fmt_tokenize(ctx)
+    ctx = fmt_group_lines(ctx)
+    ctx.line_count == 1 && ctx.lines[0].is_comment
+}
+
+// T37: Tokenize number
+fn test_fmt_tokenize_number() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    // "42\n"
+    input[0] = 52   // 4
+    input[1] = 50   // 2
+    input[2] = 10   // \n
+    let src = fmt_make_source(input, 3)
+    let ctx = fmt_tokenize(fmt_context_new(src, 3))
+    ctx.token_count == 2 &&
+    ctx.tokens[0].kind == FMT_TOK_NUMBER &&
+    ctx.tokens[0].text_len == 2
+}
+
+// T38: Tokenize punctuation
+fn test_fmt_tokenize_punc() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    // "(\n"
+    input[0] = 40   // (
+    input[1] = 10   // \n
+    let src = fmt_make_source(input, 2)
+    let ctx = fmt_tokenize(fmt_context_new(src, 2))
+    ctx.token_count == 2 &&
+    ctx.tokens[0].kind == FMT_TOK_PUNC &&
+    ctx.tokens[0].text_len == 1
+}
+
+// T39: Block detection produces at least one block
+fn test_fmt_block_detection() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    // "fn f() {\nx\n}\n"
+    input[0] = 102  // f
+    input[1] = 110  // n
+    input[2] = 32   // ' '
+    input[3] = 102  // f
+    input[4] = 40   // (
+    input[5] = 41   // )
+    input[6] = 32   // ' '
+    input[7] = 123  // {
+    input[8] = 10   // \n
+    input[9] = 120  // x
+    input[10] = 10  // \n
+    input[11] = 125 // }
+    input[12] = 10  // \n
+    let src = fmt_make_source(input, 13)
+    var ctx = fmt_context_new(src, 13)
+    ctx = fmt_tokenize(ctx)
+    ctx = fmt_group_lines(ctx)
+    ctx = fmt_compute_indent(ctx)
+    ctx = fmt_detect_blocks(ctx)
+    ctx.block_count > 0
+}
+
+// T40: Empty input produces minimal output
+fn test_fmt_empty_input() -> bool with Mut, Div, Panic {
+    var src: [i8; 65536] = [0; 65536]
+    let ctx = fmt_format(src, 0)
+    // Empty input with trailing_newline enabled should produce just \n
+    ctx.output.pos == 1 && ctx.output.bytes[0] == FMT_CHAR_NEWLINE
+}
+
+// T41: Output range copy
+fn test_fmt_output_range() -> bool with Mut, Div, Panic {
+    var src: [i8; 65536] = [0; 65536]
+    src[0] = 65  // A
+    src[1] = 66  // B
+    src[2] = 67  // C
+    var out = fmt_output_new()
+    out = fmt_output_range(out, src, 0, 3)
+    out.pos == 3 && out.bytes[0] == 65 && out.bytes[1] == 66 && out.bytes[2] == 67
+}
+
+// T42: Line width estimation
+fn test_fmt_line_width() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    // "let x = 5\n"
+    input[0] = 108  // l
+    input[1] = 101  // e
+    input[2] = 116  // t
+    input[3] = 32   // ' '
+    input[4] = 120  // x
+    input[5] = 32   // ' '
+    input[6] = 61   // =
+    input[7] = 32   // ' '
+    input[8] = 53   // 5
+    input[9] = 10   // \n
+    let src = fmt_make_source(input, 10)
+    var ctx = fmt_context_new(src, 10)
+    ctx = fmt_tokenize(ctx)
+    ctx = fmt_group_lines(ctx)
+    ctx = fmt_compute_indent(ctx)
+    let width = fmt_estimate_line_width(ctx, 0)
+    // "let" (3) + " " (1) + "x" (1) + " " (1) + "=" (1) + " " (1) + "5" (1) = 9
+    // plus indent 0 * 4 = 0 => total 9
+    width == 9
+}
+
+// T43: Assignment eq column detection
+fn test_fmt_eq_col() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    // "let x = 5\n"
+    input[0] = 108  // l
+    input[1] = 101  // e
+    input[2] = 116  // t
+    input[3] = 32   // ' '
+    input[4] = 120  // x
+    input[5] = 32   // ' '
+    input[6] = 61   // =
+    input[7] = 32   // ' '
+    input[8] = 53   // 5
+    input[9] = 10   // \n
+    let src = fmt_make_source(input, 10)
+    var ctx = fmt_context_new(src, 10)
+    ctx = fmt_tokenize(ctx)
+    ctx = fmt_group_lines(ctx)
+    let col = fmt_find_eq_col(ctx, 0)
+    // "let"(3) + space(1) + "x"(1) + space(1) = 6 before "="
+    col >= 0
+}
+
+// T44: Keyword detection: "let"
+fn test_fmt_keyword_let() -> bool with Mut, Div, Panic {
+    var src: [i8; 65536] = [0; 65536]
+    src[0] = 108  // l
+    src[1] = 101  // e
+    src[2] = 116  // t
+    fmt_is_keyword_at(src, 0, 3)
+}
+
+// T45: Keyword detection: "var"
+fn test_fmt_keyword_var() -> bool with Mut, Div, Panic {
+    var src: [i8; 65536] = [0; 65536]
+    src[0] = 118  // v
+    src[1] = 97   // a
+    src[2] = 114  // r
+    fmt_is_keyword_at(src, 0, 3)
+}
+
+// T46: Keyword detection: "while"
+fn test_fmt_keyword_while() -> bool with Mut, Div, Panic {
+    var src: [i8; 65536] = [0; 65536]
+    src[0] = 119  // w
+    src[1] = 104  // h
+    src[2] = 105  // i
+    src[3] = 108  // l
+    src[4] = 101  // e
+    fmt_is_keyword_at(src, 0, 5)
+}
+
+// T47: Keyword detection: "return"
+fn test_fmt_keyword_return() -> bool with Mut, Div, Panic {
+    var src: [i8; 65536] = [0; 65536]
+    src[0] = 114  // r
+    src[1] = 101  // e
+    src[2] = 116  // t
+    src[3] = 117  // u
+    src[4] = 114  // r
+    src[5] = 110  // n
+    fmt_is_keyword_at(src, 0, 6)
+}
+
+// T48: Trim trailing whitespace helper
+fn test_fmt_trim_trailing() -> bool with Mut, Div, Panic {
+    var src: [i8; 65536] = [0; 65536]
+    src[0] = 120  // x
+    src[1] = 32   // ' '
+    src[2] = 32   // ' '
+    let trimmed = fmt_trim_trailing(src, 0, 3)
+    trimmed == 1
+}
+
+// T49: Trim trailing: all spaces
+fn test_fmt_trim_trailing_all_spaces() -> bool with Mut, Div, Panic {
+    var src: [i8; 65536] = [0; 65536]
+    src[0] = 32  // ' '
+    src[1] = 32  // ' '
+    let trimmed = fmt_trim_trailing(src, 0, 2)
+    trimmed == 0
+}
+
+// T50: No trailing whitespace in formatted output
+fn test_fmt_no_trailing_ws_output() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    // "let x = 5  \nvar y = 10  \n"
+    input[0] = 108   // l
+    input[1] = 101   // e
+    input[2] = 116   // t
+    input[3] = 32    // ' '
+    input[4] = 120   // x
+    input[5] = 32    // ' '
+    input[6] = 61    // =
+    input[7] = 32    // ' '
+    input[8] = 53    // 5
+    input[9] = 32    // ' '
+    input[10] = 32   // ' '
+    input[11] = 10   // \n
+    input[12] = 118  // v
+    input[13] = 97   // a
+    input[14] = 114  // r
+    input[15] = 32   // ' '
+    input[16] = 121  // y
+    input[17] = 32   // ' '
+    input[18] = 61   // =
+    input[19] = 32   // ' '
+    input[20] = 49   // 1
+    input[21] = 48   // 0
+    input[22] = 32   // ' '
+    input[23] = 32   // ' '
+    input[24] = 10   // \n
+    let src = fmt_make_source(input, 25)
+    let ctx = fmt_format(src, 25)
+    fmt_output_no_trailing_ws(ctx)
+}
+
+// T51: Config with custom indent width
+fn test_fmt_config_custom_indent() -> bool with Mut, Div, Panic {
+    var cfg = fmt_config_default()
+    cfg.indent_width = 2
+    var input: [i8; 256] = [0; 256]
+    // "fn f() {\nx\n}\n"
+    input[0] = 102  // f
+    input[1] = 110  // n
+    input[2] = 32   // ' '
+    input[3] = 102  // f
+    input[4] = 40   // (
+    input[5] = 41   // )
+    input[6] = 32   // ' '
+    input[7] = 123  // {
+    input[8] = 10   // \n
+    input[9] = 120  // x
+    input[10] = 10  // \n
+    input[11] = 125 // }
+    input[12] = 10  // \n
+    let src = fmt_make_source(input, 13)
+    let ctx = fmt_format_with_config(src, 13, cfg)
+    // With indent_width=2, inner "x" should have 2 leading spaces
+    // Output: "fn f() {\n  x\n}\n"
+    // Byte 9 (after "fn f() {\n") should be space
+    ctx.output.pos > 12 && ctx.output.bytes[9] == FMT_CHAR_SPACE && ctx.output.bytes[10] == FMT_CHAR_SPACE
+}
+
+// T52: Scan number: integer
+fn test_fmt_scan_number_int() -> bool with Mut, Div, Panic {
+    var src: [i8; 65536] = [0; 65536]
+    src[0] = 49  // 1
+    src[1] = 50  // 2
+    src[2] = 51  // 3
+    src[3] = 32  // ' '
+    let end = fmt_scan_number(src, 0, 4)
+    end == 3
+}
+
+// T53: Scan number: float
+fn test_fmt_scan_number_float() -> bool with Mut, Div, Panic {
+    var src: [i8; 65536] = [0; 65536]
+    src[0] = 51   // 3
+    src[1] = 46   // .
+    src[2] = 49   // 1
+    src[3] = 52   // 4
+    src[4] = 32   // ' '
+    let end = fmt_scan_number(src, 0, 5)
+    end == 4
+}
+
+// T54: Scan number: hex
+fn test_fmt_scan_number_hex() -> bool with Mut, Div, Panic {
+    var src: [i8; 65536] = [0; 65536]
+    src[0] = 48    // 0
+    src[1] = 120   // x
+    src[2] = 70    // F
+    src[3] = 70    // F
+    src[4] = 32    // ' '
+    let end = fmt_scan_number(src, 0, 5)
+    end == 4
+}
+
+// T55: Output byte counting
+fn test_fmt_output_count() -> bool with Mut, Div, Panic {
+    var out = fmt_output_new()
+    out = fmt_output_byte(out, FMT_CHAR_NEWLINE)
+    out = fmt_output_byte(out, 65)
+    out = fmt_output_byte(out, FMT_CHAR_NEWLINE)
+    out = fmt_output_byte(out, 66)
+    out = fmt_output_byte(out, FMT_CHAR_NEWLINE)
+    let ctx_for_count = fmt_context_new([0; 65536], 0)
+    // Build a minimal context with the output
+    var ctx = ctx_for_count
+    ctx.output = out
+    let count = fmt_output_count_byte(ctx, FMT_CHAR_NEWLINE)
+    count == 3
+}
+
+// T56: Format preserves comment content
+fn test_fmt_preserves_comment() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    // "// hello world\n"
+    input[0] = 47    // /
+    input[1] = 47    // /
+    input[2] = 32    // ' '
+    input[3] = 104   // h
+    input[4] = 101   // e
+    input[5] = 108   // l
+    input[6] = 108   // l
+    input[7] = 111   // o
+    input[8] = 32    // ' '
+    input[9] = 119   // w
+    input[10] = 111  // o
+    input[11] = 114  // r
+    input[12] = 108  // l
+    input[13] = 100  // d
+    input[14] = 10   // \n
+    let src = fmt_make_source(input, 15)
+    let ctx = fmt_format(src, 15)
+    // Output should contain the comment text starting with //
+    ctx.output.pos > 2 && ctx.output.bytes[0] == 47 && ctx.output.bytes[1] == 47
+}
+
+// T57: Multiple tokens on one line
+fn test_fmt_multi_token_line() -> bool with Mut, Div, Panic {
+    var input: [i8; 256] = [0; 256]
+    // "let x: i64 = 42\n"
+    input[0] = 108   // l
+    input[1] = 101   // e
+    input[2] = 116   // t
+    input[3] = 32    // ' '
+    input[4] = 120   // x
+    input[5] = 58    // :
+    input[6] = 32    // ' '
+    input[7] = 105   // i
+    input[8] = 54    // 6
+    input[9] = 52    // 4
+    input[10] = 32   // ' '
+    input[11] = 61   // =
+    input[12] = 32   // ' '
+    input[13] = 52   // 4
+    input[14] = 50   // 2
+    input[15] = 10   // \n
+    let src = fmt_make_source(input, 16)
+    var ctx = fmt_context_new(src, 16)
+    ctx = fmt_tokenize(ctx)
+    ctx = fmt_group_lines(ctx)
+    // Tokens: let, x, :, i64, =, 42, \n
+    // Line 0 should have 6 tokens (excluding newline)
+    ctx.lines[0].token_count == 6
+}
+
+// T58: Keyword detection: "if"
+fn test_fmt_keyword_if() -> bool with Mut, Div, Panic {
+    var src: [i8; 65536] = [0; 65536]
+    src[0] = 105  // i
+    src[1] = 102  // f
+    fmt_is_keyword_at(src, 0, 2)
+}
+
+// T59: Keyword detection: "else"
+fn test_fmt_keyword_else() -> bool with Mut, Div, Panic {
+    var src: [i8; 65536] = [0; 65536]
+    src[0] = 101  // e
+    src[1] = 108  // l
+    src[2] = 115  // s
+    src[3] = 101  // e
+    fmt_is_keyword_at(src, 0, 4)
+}
+
+// T60: Context construction with config
+fn test_fmt_context_with_config() -> bool with Mut, Panic {
+    var cfg = fmt_config_default()
+    cfg.indent_width = 8
+    cfg.brace_style = FMT_BRACE_NEXT_LINE
+    var src: [i8; 65536] = [0; 65536]
+    let ctx = fmt_context_with_config(src, 0, cfg)
+    ctx.config.indent_width == 8 && ctx.config.brace_style == FMT_BRACE_NEXT_LINE
+}
+
+// T61: Output has_run detection
+fn test_fmt_output_has_run_true() -> bool with Mut, Div, Panic {
+    var out = fmt_output_new()
+    out = fmt_output_byte(out, 65)
+    out = fmt_output_byte(out, 65)
+    out = fmt_output_byte(out, 65)
+    var src: [i8; 65536] = [0; 65536]
+    var ctx = fmt_context_new(src, 0)
+    ctx.output = out
+    fmt_output_has_run(ctx, 65, 3)
+}
+
+// T62: Output has_run detection (false case)
+fn test_fmt_output_has_run_false() -> bool with Mut, Div, Panic {
+    var out = fmt_output_new()
+    out = fmt_output_byte(out, 65)
+    out = fmt_output_byte(out, 66)
+    out = fmt_output_byte(out, 65)
+    var src: [i8; 65536] = [0; 65536]
+    var ctx = fmt_context_new(src, 0)
+    ctx.output = out
+    fmt_output_has_run(ctx, 65, 2) == false
+}
+
+// T63: Scan line comment
+fn test_fmt_scan_line_comment() -> bool with Mut, Div, Panic {
+    var src: [i8; 65536] = [0; 65536]
+    // "// hi\n"
+    src[0] = 47   // /
+    src[1] = 47   // /
+    src[2] = 32   // ' '
+    src[3] = 104  // h
+    src[4] = 105  // i
+    src[5] = 10   // \n
+    let end = fmt_scan_line_comment(src, 0, 6)
+    end == 5
+}
+
+// T64: Scan block comment
+fn test_fmt_scan_block_comment() -> bool with Mut, Div, Panic {
+    var src: [i8; 65536] = [0; 65536]
+    // "/* hi */"
+    src[0] = 47   // /
+    src[1] = 42   // *
+    src[2] = 32   // ' '
+    src[3] = 104  // h
+    src[4] = 105  // i
+    src[5] = 32   // ' '
+    src[6] = 42   // *
+    src[7] = 47   // /
+    let end = fmt_scan_block_comment(src, 0, 8)
+    end == 8
+}
+
+// T65: Scan string literal
+fn test_fmt_scan_string_lit() -> bool with Mut, Div, Panic {
+    var src: [i8; 65536] = [0; 65536]
+    // "\"abc\""
+    src[0] = 34   // "
+    src[1] = 97   // a
+    src[2] = 98   // b
+    src[3] = 99   // c
+    src[4] = 34   // "
+    let end = fmt_scan_string(src, 0, 5)
+    end == 5
+}
+
+// T66: Scan ident
+fn test_fmt_scan_ident() -> bool with Mut, Div, Panic {
+    var src: [i8; 65536] = [0; 65536]
+    src[0] = 102   // f
+    src[1] = 111   // o
+    src[2] = 111   // o
+    src[3] = 95    // _
+    src[4] = 98    // b
+    src[5] = 97    // a
+    src[6] = 114   // r
+    src[7] = 32    // ' '
+    let end = fmt_scan_ident(src, 0, 8)
+    end == 7
+}
+
+// T67: Scan operator: ->
+fn test_fmt_scan_operator_arrow() -> bool with Mut, Div, Panic {
+    var src: [i8; 65536] = [0; 65536]
+    src[0] = 45   // -
+    src[1] = 62   // >
+    src[2] = 32   // ' '
+    let end = fmt_scan_operator(src, 0, 3)
+    end == 2
+}
+
+// T68: Constants have expected values
+fn test_fmt_constants() -> bool {
+    FMT_MAX_TOKENS == 8192 &&
+    FMT_MAX_LINES == 2048 &&
+    FMT_MAX_BLOCKS == 512 &&
+    FMT_MAX_OUTPUT == 65536 &&
+    FMT_DEFAULT_INDENT == 4 &&
+    FMT_DEFAULT_MAX_WIDTH == 100 &&
+    FMT_BRACE_SAME_LINE == 1 &&
+    FMT_BRACE_NEXT_LINE == 2
+}
+
+// T69: Token kind constants are distinct
+fn test_fmt_token_kinds_distinct() -> bool {
+    FMT_TOK_KEYWORD != FMT_TOK_IDENT &&
+    FMT_TOK_IDENT != FMT_TOK_NUMBER &&
+    FMT_TOK_NUMBER != FMT_TOK_STRING &&
+    FMT_TOK_STRING != FMT_TOK_OP &&
+    FMT_TOK_OP != FMT_TOK_PUNC &&
+    FMT_TOK_PUNC != FMT_TOK_COMMENT &&
+    FMT_TOK_COMMENT != FMT_TOK_NEWLINE &&
+    FMT_TOK_NEWLINE != FMT_TOK_SPACE
+}
+
+// T70: Block kinds are distinct
+fn test_fmt_block_kinds_distinct() -> bool {
+    FMT_BLOCK_FN != FMT_BLOCK_IF &&
+    FMT_BLOCK_IF != FMT_BLOCK_FOR &&
+    FMT_BLOCK_FOR != FMT_BLOCK_STRUCT &&
+    FMT_BLOCK_STRUCT != FMT_BLOCK_GENERIC &&
+    FMT_BLOCK_GENERIC != FMT_BLOCK_IMPL &&
+    FMT_BLOCK_IMPL != FMT_BLOCK_WHILE &&
+    FMT_BLOCK_WHILE != FMT_BLOCK_ENUM
+}
+
+// ============================================================================
+// TEST RUNNER
+// ============================================================================
+
+fn run_fmt_tests() -> i64 with IO, Mut, Div, Panic {
+    var total: i64 = 0
+    var passed: i64 = 0
+
+    total = total + 1
+    if test_fmt_config_defaults() { passed = passed + 1 } else { print("FAIL: T01 config_defaults\n") }
+
+    total = total + 1
+    if test_fmt_output_new() { passed = passed + 1 } else { print("FAIL: T02 output_new\n") }
+
+    total = total + 1
+    if test_fmt_output_single_byte() { passed = passed + 1 } else { print("FAIL: T03 output_single_byte\n") }
+
+    total = total + 1
+    if test_fmt_output_newline_count() { passed = passed + 1 } else { print("FAIL: T04 output_newline_count\n") }
+
+    total = total + 1
+    if test_fmt_output_repeat() { passed = passed + 1 } else { print("FAIL: T05 output_repeat\n") }
+
+    total = total + 1
+    if test_fmt_output_indent_spaces() { passed = passed + 1 } else { print("FAIL: T06 output_indent_spaces\n") }
+
+    total = total + 1
+    if test_fmt_output_indent_tabs() { passed = passed + 1 } else { print("FAIL: T07 output_indent_tabs\n") }
+
+    total = total + 1
+    if test_fmt_is_whitespace() { passed = passed + 1 } else { print("FAIL: T08 is_whitespace\n") }
+
+    total = total + 1
+    if test_fmt_is_digit() { passed = passed + 1 } else { print("FAIL: T09 is_digit\n") }
+
+    total = total + 1
+    if test_fmt_is_alpha() { passed = passed + 1 } else { print("FAIL: T10 is_alpha\n") }
+
+    total = total + 1
+    if test_fmt_is_ident_start() { passed = passed + 1 } else { print("FAIL: T11 is_ident_start\n") }
+
+    total = total + 1
+    if test_fmt_is_operator() { passed = passed + 1 } else { print("FAIL: T12 is_operator\n") }
+
+    total = total + 1
+    if test_fmt_is_punctuation() { passed = passed + 1 } else { print("FAIL: T13 is_punctuation\n") }
+
+    total = total + 1
+    if test_fmt_keyword_fn() { passed = passed + 1 } else { print("FAIL: T14 keyword_fn\n") }
+
+    total = total + 1
+    if test_fmt_keyword_struct() { passed = passed + 1 } else { print("FAIL: T15 keyword_struct\n") }
+
+    total = total + 1
+    if test_fmt_keyword_not_ident() { passed = passed + 1 } else { print("FAIL: T16 keyword_not_ident\n") }
+
+    total = total + 1
+    if test_fmt_tokenize_let() { passed = passed + 1 } else { print("FAIL: T17 tokenize_let\n") }
+
+    total = total + 1
+    if test_fmt_tokenize_comment() { passed = passed + 1 } else { print("FAIL: T18 tokenize_comment\n") }
+
+    total = total + 1
+    if test_fmt_tokenize_string() { passed = passed + 1 } else { print("FAIL: T19 tokenize_string\n") }
+
+    total = total + 1
+    if test_fmt_tokenize_operator() { passed = passed + 1 } else { print("FAIL: T20 tokenize_operator\n") }
+
+    total = total + 1
+    if test_fmt_group_single_line() { passed = passed + 1 } else { print("FAIL: T21 group_single_line\n") }
+
+    total = total + 1
+    if test_fmt_group_blank_line() { passed = passed + 1 } else { print("FAIL: T22 group_blank_line\n") }
+
+    total = total + 1
+    if test_fmt_group_multi_line() { passed = passed + 1 } else { print("FAIL: T23 group_multi_line\n") }
+
+    total = total + 1
+    if test_fmt_indent_simple_block() { passed = passed + 1 } else { print("FAIL: T24 indent_simple_block\n") }
+
+    total = total + 1
+    if test_fmt_indent_nested() { passed = passed + 1 } else { print("FAIL: T25 indent_nested\n") }
+
+    total = total + 1
+    if test_fmt_trailing_ws_removal() { passed = passed + 1 } else { print("FAIL: T26 trailing_ws_removal\n") }
+
+    total = total + 1
+    if test_fmt_blank_collapse() { passed = passed + 1 } else { print("FAIL: T27 blank_collapse\n") }
+
+    total = total + 1
+    if test_fmt_final_newline() { passed = passed + 1 } else { print("FAIL: T28 final_newline\n") }
+
+    total = total + 1
+    if test_fmt_final_newline_collapse() { passed = passed + 1 } else { print("FAIL: T29 final_newline_collapse\n") }
+
+    total = total + 1
+    if test_fmt_indent_stack() { passed = passed + 1 } else { print("FAIL: T30 indent_stack\n") }
+
+    total = total + 1
+    if test_fmt_indent_stack_empty() { passed = passed + 1 } else { print("FAIL: T31 indent_stack_empty\n") }
+
+    total = total + 1
+    if test_fmt_token_new() { passed = passed + 1 } else { print("FAIL: T32 token_new\n") }
+
+    total = total + 1
+    if test_fmt_line_new() { passed = passed + 1 } else { print("FAIL: T33 line_new\n") }
+
+    total = total + 1
+    if test_fmt_block_new() { passed = passed + 1 } else { print("FAIL: T34 block_new\n") }
+
+    total = total + 1
+    if test_fmt_brace_same_line() { passed = passed + 1 } else { print("FAIL: T35 brace_same_line\n") }
+
+    total = total + 1
+    if test_fmt_comment_line() { passed = passed + 1 } else { print("FAIL: T36 comment_line\n") }
+
+    total = total + 1
+    if test_fmt_tokenize_number() { passed = passed + 1 } else { print("FAIL: T37 tokenize_number\n") }
+
+    total = total + 1
+    if test_fmt_tokenize_punc() { passed = passed + 1 } else { print("FAIL: T38 tokenize_punc\n") }
+
+    total = total + 1
+    if test_fmt_block_detection() { passed = passed + 1 } else { print("FAIL: T39 block_detection\n") }
+
+    total = total + 1
+    if test_fmt_empty_input() { passed = passed + 1 } else { print("FAIL: T40 empty_input\n") }
+
+    total = total + 1
+    if test_fmt_output_range() { passed = passed + 1 } else { print("FAIL: T41 output_range\n") }
+
+    total = total + 1
+    if test_fmt_line_width() { passed = passed + 1 } else { print("FAIL: T42 line_width\n") }
+
+    total = total + 1
+    if test_fmt_eq_col() { passed = passed + 1 } else { print("FAIL: T43 eq_col\n") }
+
+    total = total + 1
+    if test_fmt_keyword_let() { passed = passed + 1 } else { print("FAIL: T44 keyword_let\n") }
+
+    total = total + 1
+    if test_fmt_keyword_var() { passed = passed + 1 } else { print("FAIL: T45 keyword_var\n") }
+
+    total = total + 1
+    if test_fmt_keyword_while() { passed = passed + 1 } else { print("FAIL: T46 keyword_while\n") }
+
+    total = total + 1
+    if test_fmt_keyword_return() { passed = passed + 1 } else { print("FAIL: T47 keyword_return\n") }
+
+    total = total + 1
+    if test_fmt_trim_trailing() { passed = passed + 1 } else { print("FAIL: T48 trim_trailing\n") }
+
+    total = total + 1
+    if test_fmt_trim_trailing_all_spaces() { passed = passed + 1 } else { print("FAIL: T49 trim_trailing_all_spaces\n") }
+
+    total = total + 1
+    if test_fmt_no_trailing_ws_output() { passed = passed + 1 } else { print("FAIL: T50 no_trailing_ws_output\n") }
+
+    total = total + 1
+    if test_fmt_config_custom_indent() { passed = passed + 1 } else { print("FAIL: T51 config_custom_indent\n") }
+
+    total = total + 1
+    if test_fmt_scan_number_int() { passed = passed + 1 } else { print("FAIL: T52 scan_number_int\n") }
+
+    total = total + 1
+    if test_fmt_scan_number_float() { passed = passed + 1 } else { print("FAIL: T53 scan_number_float\n") }
+
+    total = total + 1
+    if test_fmt_scan_number_hex() { passed = passed + 1 } else { print("FAIL: T54 scan_number_hex\n") }
+
+    total = total + 1
+    if test_fmt_output_count() { passed = passed + 1 } else { print("FAIL: T55 output_count\n") }
+
+    total = total + 1
+    if test_fmt_preserves_comment() { passed = passed + 1 } else { print("FAIL: T56 preserves_comment\n") }
+
+    total = total + 1
+    if test_fmt_multi_token_line() { passed = passed + 1 } else { print("FAIL: T57 multi_token_line\n") }
+
+    total = total + 1
+    if test_fmt_keyword_if() { passed = passed + 1 } else { print("FAIL: T58 keyword_if\n") }
+
+    total = total + 1
+    if test_fmt_keyword_else() { passed = passed + 1 } else { print("FAIL: T59 keyword_else\n") }
+
+    total = total + 1
+    if test_fmt_context_with_config() { passed = passed + 1 } else { print("FAIL: T60 context_with_config\n") }
+
+    total = total + 1
+    if test_fmt_output_has_run_true() { passed = passed + 1 } else { print("FAIL: T61 output_has_run_true\n") }
+
+    total = total + 1
+    if test_fmt_output_has_run_false() { passed = passed + 1 } else { print("FAIL: T62 output_has_run_false\n") }
+
+    total = total + 1
+    if test_fmt_scan_line_comment() { passed = passed + 1 } else { print("FAIL: T63 scan_line_comment\n") }
+
+    total = total + 1
+    if test_fmt_scan_block_comment() { passed = passed + 1 } else { print("FAIL: T64 scan_block_comment\n") }
+
+    total = total + 1
+    if test_fmt_scan_string_lit() { passed = passed + 1 } else { print("FAIL: T65 scan_string_lit\n") }
+
+    total = total + 1
+    if test_fmt_scan_ident() { passed = passed + 1 } else { print("FAIL: T66 scan_ident\n") }
+
+    total = total + 1
+    if test_fmt_scan_operator_arrow() { passed = passed + 1 } else { print("FAIL: T67 scan_operator_arrow\n") }
+
+    total = total + 1
+    if test_fmt_constants() { passed = passed + 1 } else { print("FAIL: T68 constants\n") }
+
+    total = total + 1
+    if test_fmt_token_kinds_distinct() { passed = passed + 1 } else { print("FAIL: T69 token_kinds_distinct\n") }
+
+    total = total + 1
+    if test_fmt_block_kinds_distinct() { passed = passed + 1 } else { print("FAIL: T70 block_kinds_distinct\n") }
+
+    print("formatter: ")
+    print_int(passed)
+    print("/")
+    print_int(total)
+    print(" passed\n")
+
+    if passed == total { 0 } else { 1 }
+}

@@ -1,0 +1,2281 @@
+// self-hosted::vm::gc — Garbage Collector / Memory Manager
+//
+// Tri-color mark-sweep collector with generational support, write barriers,
+// optional compaction, root set tracking, and finalization.  All data lives
+// in flat fixed-size arrays (no Box/Option indirection) so the module is
+// self-contained and bootstrap-friendly.
+//
+// Naming: structs prefixed `Gc`, functions prefixed `gc_`, constants `GC_`.
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+let GC_HEAP_CAPACITY: i64 = 8192
+let GC_ROOT_CAPACITY: i64 = 512
+let GC_MAX_FIELDS: i64 = 16
+
+// Tri-color marking
+let GC_COLOR_WHITE: i64 = 0
+let GC_COLOR_GREY: i64 = 1
+let GC_COLOR_BLACK: i64 = 2
+
+// Generations
+let GC_GEN_YOUNG: i64 = 0
+let GC_GEN_OLD: i64 = 1
+
+// Collection thresholds
+let GC_THRESHOLD_INITIAL: i64 = 1024
+let GC_THRESHOLD_GROWTH: i64 = 2
+
+// Sentinel for "no object"
+let GC_NULL: i64 = 0 - 1
+
+// Finalization capacity
+let GC_FINALIZER_CAPACITY: i64 = 512
+
+// Write barrier remembered-set capacity
+let GC_REMSET_CAPACITY: i64 = 1024
+
+// Grey worklist capacity (for mark phase)
+let GC_WORKLIST_CAPACITY: i64 = 4096
+
+// ============================================================================
+// GcObject — a single GC-managed object
+// ============================================================================
+
+struct GcObject {
+    obj_id: i64,
+    type_id: i64,
+    size: i64,
+    mark_color: i64,
+    gen: i64,
+    ref_count: i64,
+    field_count: i64,
+    fields: [i64; 16],
+    next_free: i64,
+    alive: i64,
+    needs_finalization: i64,
+    forwarding: i64,
+}
+
+fn gc_object_default() -> GcObject {
+    GcObject {
+        obj_id: GC_NULL,
+        type_id: 0,
+        size: 0,
+        mark_color: GC_COLOR_WHITE,
+        gen: GC_GEN_YOUNG,
+        ref_count: 0,
+        field_count: 0,
+        fields: [GC_NULL, GC_NULL, GC_NULL, GC_NULL,
+                 GC_NULL, GC_NULL, GC_NULL, GC_NULL,
+                 GC_NULL, GC_NULL, GC_NULL, GC_NULL,
+                 GC_NULL, GC_NULL, GC_NULL, GC_NULL],
+        next_free: GC_NULL,
+        alive: 0,
+        needs_finalization: 0,
+        forwarding: GC_NULL,
+    }
+}
+
+// ============================================================================
+// GcHeap — flat object store with free list
+// ============================================================================
+
+struct GcHeap {
+    objects: [GcObject; 8192],
+    free_head: i64,
+    obj_count: i64,
+    bump: i64,
+    total_allocated: i64,
+    gc_threshold: i64,
+}
+
+fn gc_heap_new() -> GcHeap with Mut, Panic, Div {
+    var heap = GcHeap {
+        objects: [gc_object_default(); 8192],
+        free_head: GC_NULL,
+        obj_count: 0,
+        bump: 0,
+        total_allocated: 0,
+        gc_threshold: GC_THRESHOLD_INITIAL,
+    }
+    heap
+}
+
+// ============================================================================
+// GcRootSet — stack roots + global roots
+// ============================================================================
+
+struct GcRootSet {
+    stack_roots: [i64; 512],
+    stack_root_count: i64,
+    global_roots: [i64; 512],
+    global_root_count: i64,
+}
+
+fn gc_root_set_new() -> GcRootSet {
+    GcRootSet {
+        stack_roots: [GC_NULL; 512],
+        stack_root_count: 0,
+        global_roots: [GC_NULL; 512],
+        global_root_count: 0,
+    }
+}
+
+// ============================================================================
+// GcStats — collection statistics
+// ============================================================================
+
+struct GcStats {
+    collections_count: i64,
+    minor_collections: i64,
+    major_collections: i64,
+    total_freed: i64,
+    total_allocated: i64,
+    max_live: i64,
+    pause_cycles: i64,
+}
+
+fn gc_stats_new() -> GcStats {
+    GcStats {
+        collections_count: 0,
+        minor_collections: 0,
+        major_collections: 0,
+        total_freed: 0,
+        total_allocated: 0,
+        max_live: 0,
+        pause_cycles: 0,
+    }
+}
+
+// ============================================================================
+// GcRememberedSet — old-to-young reference tracking (write barrier)
+// ============================================================================
+
+struct GcRememberedSet {
+    entries: [i64; 1024],
+    entry_count: i64,
+}
+
+fn gc_remset_new() -> GcRememberedSet {
+    GcRememberedSet {
+        entries: [GC_NULL; 1024],
+        entry_count: 0,
+    }
+}
+
+// ============================================================================
+// GcFinalizerQueue — objects needing finalization before freeing
+// ============================================================================
+
+struct GcFinalizerQueue {
+    obj_ids: [i64; 512],
+    count: i64,
+    finalized: [i64; 512],
+    finalized_count: i64,
+}
+
+fn gc_finalizer_queue_new() -> GcFinalizerQueue {
+    GcFinalizerQueue {
+        obj_ids: [GC_NULL; 512],
+        count: 0,
+        finalized: [GC_NULL; 512],
+        finalized_count: 0,
+    }
+}
+
+// ============================================================================
+// GcWorklist — grey worklist for tri-color marking
+// ============================================================================
+
+struct GcWorklist {
+    items: [i64; 4096],
+    count: i64,
+}
+
+fn gc_worklist_new() -> GcWorklist {
+    GcWorklist {
+        items: [GC_NULL; 4096],
+        count: 0,
+    }
+}
+
+// ============================================================================
+// GcContext — overall GC context combining all components
+// ============================================================================
+
+struct GcContext {
+    heap: GcHeap,
+    roots: GcRootSet,
+    stats: GcStats,
+    remset: GcRememberedSet,
+    finalizers: GcFinalizerQueue,
+    worklist: GcWorklist,
+    young_count: i64,
+    old_count: i64,
+}
+
+fn gc_context_new() -> GcContext with Mut, Panic, Div {
+    GcContext {
+        heap: gc_heap_new(),
+        roots: gc_root_set_new(),
+        stats: gc_stats_new(),
+        remset: gc_remset_new(),
+        finalizers: gc_finalizer_queue_new(),
+        worklist: gc_worklist_new(),
+        young_count: 0,
+        old_count: 0,
+    }
+}
+
+// ============================================================================
+// Helpers — small utilities used by multiple phases
+// ============================================================================
+
+fn gc_is_valid_id(ctx: GcContext, id: i64) -> bool {
+    id >= 0 && id < ctx.heap.bump
+}
+
+fn gc_is_alive(ctx: GcContext, id: i64) -> bool with Panic, Div {
+    if id < 0 || id >= ctx.heap.bump {
+        return false
+    }
+    ctx.heap.objects[id as usize].alive == 1
+}
+
+fn gc_get_color(ctx: GcContext, id: i64) -> i64 with Panic, Div {
+    if id < 0 || id >= ctx.heap.bump {
+        return GC_COLOR_WHITE
+    }
+    ctx.heap.objects[id as usize].mark_color
+}
+
+fn gc_set_color(ctx: GcContext, id: i64, color: i64) -> GcContext with Mut, Panic, Div {
+    var c = ctx
+    if id >= 0 && id < c.heap.bump {
+        c.heap.objects[id as usize].mark_color = color
+    }
+    c
+}
+
+fn gc_get_gen(ctx: GcContext, id: i64) -> i64 with Panic, Div {
+    if id < 0 || id >= ctx.heap.bump {
+        return GC_GEN_YOUNG
+    }
+    ctx.heap.objects[id as usize].gen
+}
+
+fn gc_get_field_count(ctx: GcContext, id: i64) -> i64 with Panic, Div {
+    if id < 0 || id >= ctx.heap.bump {
+        return 0
+    }
+    ctx.heap.objects[id as usize].field_count
+}
+
+fn gc_get_field(ctx: GcContext, id: i64, field_idx: i64) -> i64 with Panic, Div {
+    if id < 0 || id >= ctx.heap.bump {
+        return GC_NULL
+    }
+    if field_idx < 0 || field_idx >= GC_MAX_FIELDS {
+        return GC_NULL
+    }
+    ctx.heap.objects[id as usize].fields[field_idx as usize]
+}
+
+fn gc_set_field(ctx: GcContext, obj_id: i64, field_idx: i64, ref_id: i64) -> GcContext with Mut, Panic, Div {
+    var c = ctx
+    if obj_id < 0 || obj_id >= c.heap.bump {
+        return c
+    }
+    if field_idx < 0 || field_idx >= GC_MAX_FIELDS {
+        return c
+    }
+    c.heap.objects[obj_id as usize].fields[field_idx as usize] = ref_id
+    // Update field_count if we are extending it
+    let current_fc = c.heap.objects[obj_id as usize].field_count
+    if field_idx >= current_fc {
+        c.heap.objects[obj_id as usize].field_count = field_idx + 1
+    }
+    c
+}
+
+fn gc_get_type_id(ctx: GcContext, id: i64) -> i64 with Panic, Div {
+    if id < 0 || id >= ctx.heap.bump {
+        return 0
+    }
+    ctx.heap.objects[id as usize].type_id
+}
+
+fn gc_get_size(ctx: GcContext, id: i64) -> i64 with Panic, Div {
+    if id < 0 || id >= ctx.heap.bump {
+        return 0
+    }
+    ctx.heap.objects[id as usize].size
+}
+
+fn gc_live_count(ctx: GcContext) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.heap.bump {
+        if ctx.heap.objects[i as usize].alive == 1 {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// Root Management — push/pop stack roots, register/unregister globals
+// ============================================================================
+
+fn gc_push_root(ctx: GcContext, obj_id: i64) -> GcContext with Mut, Panic, Div {
+    var c = ctx
+    if c.roots.stack_root_count >= GC_ROOT_CAPACITY {
+        return c
+    }
+    c.roots.stack_roots[c.roots.stack_root_count as usize] = obj_id
+    c.roots.stack_root_count = c.roots.stack_root_count + 1
+    c
+}
+
+fn gc_pop_root(ctx: GcContext) -> GcContext with Mut, Panic, Div {
+    var c = ctx
+    if c.roots.stack_root_count <= 0 {
+        return c
+    }
+    c.roots.stack_root_count = c.roots.stack_root_count - 1
+    c.roots.stack_roots[c.roots.stack_root_count as usize] = GC_NULL
+    c
+}
+
+fn gc_pop_roots(ctx: GcContext, n: i64) -> GcContext with Mut, Panic, Div {
+    var c = ctx
+    var remaining = n
+    while remaining > 0 && c.roots.stack_root_count > 0 {
+        c.roots.stack_root_count = c.roots.stack_root_count - 1
+        c.roots.stack_roots[c.roots.stack_root_count as usize] = GC_NULL
+        remaining = remaining - 1
+    }
+    c
+}
+
+fn gc_register_global(ctx: GcContext, obj_id: i64) -> GcContext with Mut, Panic, Div {
+    var c = ctx
+    if c.roots.global_root_count >= GC_ROOT_CAPACITY {
+        return c
+    }
+    c.roots.global_roots[c.roots.global_root_count as usize] = obj_id
+    c.roots.global_root_count = c.roots.global_root_count + 1
+    c
+}
+
+fn gc_unregister_global(ctx: GcContext, obj_id: i64) -> GcContext with Mut, Panic, Div {
+    var c = ctx
+    var i: i64 = 0
+    while i < c.roots.global_root_count {
+        if c.roots.global_roots[i as usize] == obj_id {
+            // Shift remaining entries down
+            var j = i
+            while j < c.roots.global_root_count - 1 {
+                c.roots.global_roots[j as usize] = c.roots.global_roots[(j + 1) as usize]
+                j = j + 1
+            }
+            c.roots.global_root_count = c.roots.global_root_count - 1
+            c.roots.global_roots[c.roots.global_root_count as usize] = GC_NULL
+            return c
+        }
+        i = i + 1
+    }
+    c
+}
+
+fn gc_stack_root_count(ctx: GcContext) -> i64 {
+    ctx.roots.stack_root_count
+}
+
+fn gc_global_root_count(ctx: GcContext) -> i64 {
+    ctx.roots.global_root_count
+}
+
+// ============================================================================
+// Finalization — register objects that need cleanup before freeing
+// ============================================================================
+
+fn gc_register_finalizer(ctx: GcContext, obj_id: i64) -> GcContext with Mut, Panic, Div {
+    var c = ctx
+    if c.finalizers.count >= GC_FINALIZER_CAPACITY {
+        return c
+    }
+    c.finalizers.obj_ids[c.finalizers.count as usize] = obj_id
+    c.finalizers.count = c.finalizers.count + 1
+    // Mark the object as needing finalization
+    if obj_id >= 0 && obj_id < c.heap.bump {
+        c.heap.objects[obj_id as usize].needs_finalization = 1
+    }
+    c
+}
+
+fn gc_needs_finalization(ctx: GcContext, obj_id: i64) -> bool with Panic, Div {
+    if obj_id < 0 || obj_id >= ctx.heap.bump {
+        return false
+    }
+    ctx.heap.objects[obj_id as usize].needs_finalization == 1
+}
+
+fn gc_run_finalizers(ctx: GcContext) -> GcContext with Mut, Panic, Div {
+    // Process all registered finalizers for dead objects.
+    // In a real system this would invoke user-defined cleanup code;
+    // here we just record that finalization happened.
+    var c = ctx
+    var i: i64 = 0
+    while i < c.finalizers.count {
+        let oid = c.finalizers.obj_ids[i as usize]
+        if oid >= 0 && oid < c.heap.bump {
+            let obj = c.heap.objects[oid as usize]
+            // Only finalize dead objects (white after mark phase)
+            if obj.alive == 1 && obj.mark_color == GC_COLOR_WHITE {
+                // Record finalization
+                if c.finalizers.finalized_count < GC_FINALIZER_CAPACITY {
+                    c.finalizers.finalized[c.finalizers.finalized_count as usize] = oid
+                    c.finalizers.finalized_count = c.finalizers.finalized_count + 1
+                }
+                c.heap.objects[oid as usize].needs_finalization = 0
+            }
+        }
+        i = i + 1
+    }
+    // Remove finalized entries from the queue
+    var new_count: i64 = 0
+    var k: i64 = 0
+    while k < c.finalizers.count {
+        let oid = c.finalizers.obj_ids[k as usize]
+        let was_finalized = gc_was_finalized_in_queue(c, oid)
+        if !was_finalized {
+            c.finalizers.obj_ids[new_count as usize] = oid
+            new_count = new_count + 1
+        }
+        k = k + 1
+    }
+    c.finalizers.count = new_count
+    c
+}
+
+fn gc_was_finalized_in_queue(ctx: GcContext, obj_id: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < ctx.finalizers.finalized_count {
+        if ctx.finalizers.finalized[i as usize] == obj_id {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn gc_finalized_count(ctx: GcContext) -> i64 {
+    ctx.finalizers.finalized_count
+}
+
+// ============================================================================
+// Allocation — allocate from free list or bump pointer
+// ============================================================================
+
+fn gc_alloc_raw(ctx: GcContext, type_id: i64, size: i64, field_count: i64) -> (GcContext, i64) with Mut, Panic, Div {
+    var c = ctx
+    var alloc_id: i64 = GC_NULL
+
+    // Try free list first
+    if c.heap.free_head != GC_NULL {
+        alloc_id = c.heap.free_head
+        c.heap.free_head = c.heap.objects[alloc_id as usize].next_free
+    } else {
+        // Bump allocate
+        if c.heap.bump >= GC_HEAP_CAPACITY {
+            return (c, GC_NULL)
+        }
+        alloc_id = c.heap.bump
+        c.heap.bump = c.heap.bump + 1
+    }
+
+    // Initialize the object
+    var clamped_fc = field_count
+    if clamped_fc > GC_MAX_FIELDS {
+        clamped_fc = GC_MAX_FIELDS
+    }
+    if clamped_fc < 0 {
+        clamped_fc = 0
+    }
+
+    c.heap.objects[alloc_id as usize].obj_id = alloc_id
+    c.heap.objects[alloc_id as usize].type_id = type_id
+    c.heap.objects[alloc_id as usize].size = size
+    c.heap.objects[alloc_id as usize].mark_color = GC_COLOR_WHITE
+    c.heap.objects[alloc_id as usize].gen = GC_GEN_YOUNG
+    c.heap.objects[alloc_id as usize].ref_count = 0
+    c.heap.objects[alloc_id as usize].field_count = clamped_fc
+    c.heap.objects[alloc_id as usize].next_free = GC_NULL
+    c.heap.objects[alloc_id as usize].alive = 1
+    c.heap.objects[alloc_id as usize].needs_finalization = 0
+    c.heap.objects[alloc_id as usize].forwarding = GC_NULL
+
+    // Clear fields
+    var fi: i64 = 0
+    while fi < GC_MAX_FIELDS {
+        c.heap.objects[alloc_id as usize].fields[fi as usize] = GC_NULL
+        fi = fi + 1
+    }
+
+    c.heap.obj_count = c.heap.obj_count + 1
+    c.heap.total_allocated = c.heap.total_allocated + 1
+    c.stats.total_allocated = c.stats.total_allocated + 1
+    c.young_count = c.young_count + 1
+
+    // Track max live
+    let live = gc_live_count(c)
+    if live > c.stats.max_live {
+        c.stats.max_live = live
+    }
+
+    (c, alloc_id)
+}
+
+fn gc_alloc(ctx: GcContext, type_id: i64, size: i64, field_count: i64) -> (GcContext, i64) with Mut, Panic, Div {
+    var c = ctx
+    // Check if we should trigger collection before allocating
+    if c.heap.total_allocated >= c.heap.gc_threshold {
+        c = gc_collect_major(c)
+    }
+    gc_alloc_raw(c, type_id, size, field_count)
+}
+
+fn gc_alloc_with_type(ctx: GcContext, type_id: i64, field_count: i64) -> (GcContext, i64) with Mut, Panic, Div {
+    gc_alloc(ctx, type_id, 1, field_count)
+}
+
+// ============================================================================
+// Free — return an object to the free list
+// ============================================================================
+
+fn gc_free_object(ctx: GcContext, obj_id: i64) -> GcContext with Mut, Panic, Div {
+    var c = ctx
+    if obj_id < 0 || obj_id >= c.heap.bump {
+        return c
+    }
+    if c.heap.objects[obj_id as usize].alive != 1 {
+        return c
+    }
+
+    // Clear the object
+    c.heap.objects[obj_id as usize].alive = 0
+    c.heap.objects[obj_id as usize].mark_color = GC_COLOR_WHITE
+    c.heap.objects[obj_id as usize].ref_count = 0
+    c.heap.objects[obj_id as usize].field_count = 0
+    c.heap.objects[obj_id as usize].forwarding = GC_NULL
+
+    var fi: i64 = 0
+    while fi < GC_MAX_FIELDS {
+        c.heap.objects[obj_id as usize].fields[fi as usize] = GC_NULL
+        fi = fi + 1
+    }
+
+    // Track generation counts
+    if c.heap.objects[obj_id as usize].gen == GC_GEN_YOUNG {
+        c.young_count = c.young_count - 1
+    } else {
+        c.old_count = c.old_count - 1
+    }
+
+    // Add to free list
+    c.heap.objects[obj_id as usize].next_free = c.heap.free_head
+    c.heap.free_head = obj_id
+    c.heap.obj_count = c.heap.obj_count - 1
+    c.stats.total_freed = c.stats.total_freed + 1
+    c
+}
+
+// ============================================================================
+// Write Barrier — track old-to-young references for generational GC
+// ============================================================================
+
+fn gc_write_barrier(ctx: GcContext, src_id: i64, dst_id: i64) -> GcContext with Mut, Panic, Div {
+    var c = ctx
+    if src_id < 0 || src_id >= c.heap.bump {
+        return c
+    }
+    if dst_id < 0 || dst_id >= c.heap.bump {
+        return c
+    }
+    let src_gen = c.heap.objects[src_id as usize].gen
+    let dst_gen = c.heap.objects[dst_id as usize].gen
+
+    // Record if an old object points to a young object
+    if src_gen == GC_GEN_OLD && dst_gen == GC_GEN_YOUNG {
+        if c.remset.entry_count < GC_REMSET_CAPACITY {
+            // Check if already in remembered set
+            let already = gc_remset_contains(c, src_id)
+            if !already {
+                c.remset.entries[c.remset.entry_count as usize] = src_id
+                c.remset.entry_count = c.remset.entry_count + 1
+            }
+        }
+    }
+    c
+}
+
+fn gc_remset_contains(ctx: GcContext, obj_id: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < ctx.remset.entry_count {
+        if ctx.remset.entries[i as usize] == obj_id {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn gc_remset_clear(ctx: GcContext) -> GcContext with Mut, Panic, Div {
+    var c = ctx
+    var i: i64 = 0
+    while i < c.remset.entry_count {
+        c.remset.entries[i as usize] = GC_NULL
+        i = i + 1
+    }
+    c.remset.entry_count = 0
+    c
+}
+
+fn gc_set_field_with_barrier(ctx: GcContext, src_id: i64, field_idx: i64, dst_id: i64) -> GcContext with Mut, Panic, Div {
+    var c = gc_set_field(ctx, src_id, field_idx, dst_id)
+    c = gc_write_barrier(c, src_id, dst_id)
+    c
+}
+
+// ============================================================================
+// Promote — move young objects to old generation
+// ============================================================================
+
+fn gc_promote(ctx: GcContext, obj_id: i64) -> GcContext with Mut, Panic, Div {
+    var c = ctx
+    if obj_id < 0 || obj_id >= c.heap.bump {
+        return c
+    }
+    if c.heap.objects[obj_id as usize].alive != 1 {
+        return c
+    }
+    if c.heap.objects[obj_id as usize].gen == GC_GEN_OLD {
+        return c
+    }
+    c.heap.objects[obj_id as usize].gen = GC_GEN_OLD
+    c.young_count = c.young_count - 1
+    c.old_count = c.old_count + 1
+    c
+}
+
+// ============================================================================
+// Mark Phase — tri-color marking from roots
+// ============================================================================
+
+// Reset all mark colors to white before marking
+fn gc_reset_marks(ctx: GcContext) -> GcContext with Mut, Panic, Div {
+    var c = ctx
+    var i: i64 = 0
+    while i < c.heap.bump {
+        if c.heap.objects[i as usize].alive == 1 {
+            c.heap.objects[i as usize].mark_color = GC_COLOR_WHITE
+        }
+        i = i + 1
+    }
+    c
+}
+
+// Reset marks only for young generation
+fn gc_reset_marks_young(ctx: GcContext) -> GcContext with Mut, Panic, Div {
+    var c = ctx
+    var i: i64 = 0
+    while i < c.heap.bump {
+        if c.heap.objects[i as usize].alive == 1 && c.heap.objects[i as usize].gen == GC_GEN_YOUNG {
+            c.heap.objects[i as usize].mark_color = GC_COLOR_WHITE
+        }
+        i = i + 1
+    }
+    c
+}
+
+// Clear the grey worklist
+fn gc_worklist_clear(ctx: GcContext) -> GcContext with Mut, Panic, Div {
+    var c = ctx
+    var i: i64 = 0
+    while i < c.worklist.count {
+        c.worklist.items[i as usize] = GC_NULL
+        i = i + 1
+    }
+    c.worklist.count = 0
+    c
+}
+
+// Push an object onto the grey worklist
+fn gc_worklist_push(ctx: GcContext, obj_id: i64) -> GcContext with Mut, Panic, Div {
+    var c = ctx
+    if c.worklist.count >= GC_WORKLIST_CAPACITY {
+        return c
+    }
+    c.worklist.items[c.worklist.count as usize] = obj_id
+    c.worklist.count = c.worklist.count + 1
+    c
+}
+
+// Pop from the grey worklist (returns GC_NULL if empty)
+fn gc_worklist_pop(ctx: GcContext) -> (GcContext, i64) with Mut, Panic, Div {
+    var c = ctx
+    if c.worklist.count <= 0 {
+        return (c, GC_NULL)
+    }
+    c.worklist.count = c.worklist.count - 1
+    let obj_id = c.worklist.items[c.worklist.count as usize]
+    c.worklist.items[c.worklist.count as usize] = GC_NULL
+    (c, obj_id)
+}
+
+// Mark a single object grey and add to worklist
+fn gc_mark_grey(ctx: GcContext, obj_id: i64) -> GcContext with Mut, Panic, Div {
+    var c = ctx
+    if obj_id < 0 || obj_id >= c.heap.bump {
+        return c
+    }
+    if c.heap.objects[obj_id as usize].alive != 1 {
+        return c
+    }
+    if c.heap.objects[obj_id as usize].mark_color != GC_COLOR_WHITE {
+        return c
+    }
+    c.heap.objects[obj_id as usize].mark_color = GC_COLOR_GREY
+    c = gc_worklist_push(c, obj_id)
+    c
+}
+
+// Seed the worklist from all roots
+fn gc_mark_roots(ctx: GcContext) -> GcContext with Mut, Panic, Div {
+    var c = ctx
+    // Stack roots
+    var i: i64 = 0
+    while i < c.roots.stack_root_count {
+        let oid = c.roots.stack_roots[i as usize]
+        c = gc_mark_grey(c, oid)
+        i = i + 1
+    }
+    // Global roots
+    var j: i64 = 0
+    while j < c.roots.global_root_count {
+        let oid = c.roots.global_roots[j as usize]
+        c = gc_mark_grey(c, oid)
+        j = j + 1
+    }
+    c
+}
+
+// Seed worklist from remembered set (for minor GC)
+fn gc_mark_remset(ctx: GcContext) -> GcContext with Mut, Panic, Div {
+    var c = ctx
+    var i: i64 = 0
+    while i < c.remset.entry_count {
+        let oid = c.remset.entries[i as usize]
+        if oid >= 0 && oid < c.heap.bump {
+            if c.heap.objects[oid as usize].alive == 1 {
+                // Mark the old object as grey so its young children get traced
+                c = gc_mark_grey(c, oid)
+            }
+        }
+        i = i + 1
+    }
+    c
+}
+
+// Process the worklist: for each grey object, mark it black and grey its children
+fn gc_mark_process(ctx: GcContext) -> GcContext with Mut, Panic, Div {
+    var c = ctx
+    var cont = true
+    while cont {
+        let pop_result = gc_worklist_pop(c)
+        c = pop_result.0
+        let obj_id = pop_result.1
+        if obj_id == GC_NULL {
+            cont = false
+        } else {
+            // Mark black
+            c.heap.objects[obj_id as usize].mark_color = GC_COLOR_BLACK
+            // Grey all children
+            let fc = c.heap.objects[obj_id as usize].field_count
+            var fi: i64 = 0
+            while fi < fc {
+                let child_id = c.heap.objects[obj_id as usize].fields[fi as usize]
+                if child_id != GC_NULL {
+                    c = gc_mark_grey(c, child_id)
+                }
+                fi = fi + 1
+            }
+        }
+    }
+    c
+}
+
+// Process worklist but only trace into young objects (for minor collection)
+fn gc_mark_process_young(ctx: GcContext) -> GcContext with Mut, Panic, Div {
+    var c = ctx
+    var cont = true
+    while cont {
+        let pop_result = gc_worklist_pop(c)
+        c = pop_result.0
+        let obj_id = pop_result.1
+        if obj_id == GC_NULL {
+            cont = false
+        } else {
+            c.heap.objects[obj_id as usize].mark_color = GC_COLOR_BLACK
+            let fc = c.heap.objects[obj_id as usize].field_count
+            var fi: i64 = 0
+            while fi < fc {
+                let child_id = c.heap.objects[obj_id as usize].fields[fi as usize]
+                if child_id != GC_NULL && child_id >= 0 && child_id < c.heap.bump {
+                    // Only trace into young objects
+                    if c.heap.objects[child_id as usize].gen == GC_GEN_YOUNG {
+                        c = gc_mark_grey(c, child_id)
+                    }
+                }
+                fi = fi + 1
+            }
+        }
+    }
+    c
+}
+
+// Full mark phase: reset, seed, process
+fn gc_mark_full(ctx: GcContext) -> GcContext with Mut, Panic, Div {
+    var c = gc_reset_marks(ctx)
+    c = gc_worklist_clear(c)
+    c = gc_mark_roots(c)
+    c = gc_mark_process(c)
+    c
+}
+
+// Minor mark phase: reset young only, seed from roots + remset, process young only
+fn gc_mark_minor(ctx: GcContext) -> GcContext with Mut, Panic, Div {
+    var c = gc_reset_marks_young(ctx)
+    c = gc_worklist_clear(c)
+    c = gc_mark_roots(c)
+    c = gc_mark_remset(c)
+    c = gc_mark_process_young(c)
+    c
+}
+
+// ============================================================================
+// Sweep Phase — free unmarked (white) objects
+// ============================================================================
+
+fn gc_sweep_all(ctx: GcContext) -> GcContext with Mut, Panic, Div {
+    var c = ctx
+    var i: i64 = 0
+    while i < c.heap.bump {
+        if c.heap.objects[i as usize].alive == 1 {
+            if c.heap.objects[i as usize].mark_color == GC_COLOR_WHITE {
+                c = gc_free_object(c, i)
+            } else {
+                // Reset color for next collection
+                c.heap.objects[i as usize].mark_color = GC_COLOR_WHITE
+            }
+        }
+        i = i + 1
+    }
+    c
+}
+
+// Sweep only young generation
+fn gc_sweep_young(ctx: GcContext) -> GcContext with Mut, Panic, Div {
+    var c = ctx
+    var i: i64 = 0
+    while i < c.heap.bump {
+        if c.heap.objects[i as usize].alive == 1 && c.heap.objects[i as usize].gen == GC_GEN_YOUNG {
+            if c.heap.objects[i as usize].mark_color == GC_COLOR_WHITE {
+                c = gc_free_object(c, i)
+            } else {
+                // Survived a minor GC — promote to old
+                c = gc_promote(c, i)
+                c.heap.objects[i as usize].mark_color = GC_COLOR_WHITE
+            }
+        }
+        i = i + 1
+    }
+    c
+}
+
+// ============================================================================
+// Collection — combines mark + sweep + finalization
+// ============================================================================
+
+fn gc_collect_major(ctx: GcContext) -> GcContext with Mut, Panic, Div {
+    var c = ctx
+    // Run finalizers first
+    c = gc_mark_full(c)
+    c = gc_run_finalizers(c)
+    // Re-mark (finalizers may have changed reachability) then sweep
+    c = gc_mark_full(c)
+    c = gc_sweep_all(c)
+    c.stats.collections_count = c.stats.collections_count + 1
+    c.stats.major_collections = c.stats.major_collections + 1
+    // Grow threshold
+    c.heap.gc_threshold = c.heap.total_allocated + (GC_THRESHOLD_INITIAL * GC_THRESHOLD_GROWTH)
+    // Clear remembered set after major collection
+    c = gc_remset_clear(c)
+    c
+}
+
+fn gc_collect_minor(ctx: GcContext) -> GcContext with Mut, Panic, Div {
+    var c = ctx
+    c = gc_mark_minor(c)
+    // Run finalizers for young dead objects
+    c = gc_run_finalizers(c)
+    c = gc_mark_minor(c)
+    c = gc_sweep_young(c)
+    c.stats.collections_count = c.stats.collections_count + 1
+    c.stats.minor_collections = c.stats.minor_collections + 1
+    // Clear remembered set after minor collection
+    c = gc_remset_clear(c)
+    c
+}
+
+fn gc_collect(ctx: GcContext) -> GcContext with Mut, Panic, Div {
+    // Heuristic: do minor if young_count > half of threshold, else major
+    var c = ctx
+    if c.young_count > c.heap.gc_threshold / 2 {
+        c = gc_collect_minor(c)
+    } else {
+        c = gc_collect_major(c)
+    }
+    c
+}
+
+// ============================================================================
+// Compaction — slide live objects together, update references
+// ============================================================================
+
+fn gc_compact(ctx: GcContext) -> GcContext with Mut, Panic, Div {
+    var c = ctx
+
+    // Phase 1: compute forwarding addresses
+    // Live objects get compacted to the front
+    var target: i64 = 0
+    var i: i64 = 0
+    while i < c.heap.bump {
+        if c.heap.objects[i as usize].alive == 1 {
+            c.heap.objects[i as usize].forwarding = target
+            target = target + 1
+        }
+        i = i + 1
+    }
+
+    // Phase 2: update all references to use forwarding addresses
+    var j: i64 = 0
+    while j < c.heap.bump {
+        if c.heap.objects[j as usize].alive == 1 {
+            let fc = c.heap.objects[j as usize].field_count
+            var fi: i64 = 0
+            while fi < fc {
+                let ref_id = c.heap.objects[j as usize].fields[fi as usize]
+                if ref_id != GC_NULL && ref_id >= 0 && ref_id < c.heap.bump {
+                    if c.heap.objects[ref_id as usize].alive == 1 {
+                        c.heap.objects[j as usize].fields[fi as usize] = c.heap.objects[ref_id as usize].forwarding
+                    }
+                }
+                fi = fi + 1
+            }
+        }
+        j = j + 1
+    }
+
+    // Phase 3: update root references
+    var ri: i64 = 0
+    while ri < c.roots.stack_root_count {
+        let root_id = c.roots.stack_roots[ri as usize]
+        if root_id != GC_NULL && root_id >= 0 && root_id < c.heap.bump {
+            if c.heap.objects[root_id as usize].alive == 1 {
+                c.roots.stack_roots[ri as usize] = c.heap.objects[root_id as usize].forwarding
+            }
+        }
+        ri = ri + 1
+    }
+    var gi: i64 = 0
+    while gi < c.roots.global_root_count {
+        let root_id = c.roots.global_roots[gi as usize]
+        if root_id != GC_NULL && root_id >= 0 && root_id < c.heap.bump {
+            if c.heap.objects[root_id as usize].alive == 1 {
+                c.roots.global_roots[gi as usize] = c.heap.objects[root_id as usize].forwarding
+            }
+        }
+        gi = gi + 1
+    }
+
+    // Phase 4: slide objects into their forwarding positions
+    // We need a temporary copy strategy: copy forward in order
+    var k: i64 = 0
+    while k < c.heap.bump {
+        if c.heap.objects[k as usize].alive == 1 {
+            let dest = c.heap.objects[k as usize].forwarding
+            if dest != k && dest != GC_NULL {
+                // Copy object to destination
+                c.heap.objects[dest as usize].obj_id = dest
+                c.heap.objects[dest as usize].type_id = c.heap.objects[k as usize].type_id
+                c.heap.objects[dest as usize].size = c.heap.objects[k as usize].size
+                c.heap.objects[dest as usize].mark_color = GC_COLOR_WHITE
+                c.heap.objects[dest as usize].gen = c.heap.objects[k as usize].gen
+                c.heap.objects[dest as usize].ref_count = c.heap.objects[k as usize].ref_count
+                c.heap.objects[dest as usize].field_count = c.heap.objects[k as usize].field_count
+                c.heap.objects[dest as usize].next_free = GC_NULL
+                c.heap.objects[dest as usize].alive = 1
+                c.heap.objects[dest as usize].needs_finalization = c.heap.objects[k as usize].needs_finalization
+                c.heap.objects[dest as usize].forwarding = GC_NULL
+
+                var fi: i64 = 0
+                while fi < GC_MAX_FIELDS {
+                    c.heap.objects[dest as usize].fields[fi as usize] = c.heap.objects[k as usize].fields[fi as usize]
+                    fi = fi + 1
+                }
+
+                // Clear source if it was not overwritten by an earlier slide
+                if k >= target {
+                    c.heap.objects[k as usize].alive = 0
+                    c.heap.objects[k as usize].forwarding = GC_NULL
+                }
+            } else if dest == k {
+                // Object stays in place
+                c.heap.objects[k as usize].forwarding = GC_NULL
+                c.heap.objects[k as usize].mark_color = GC_COLOR_WHITE
+            }
+        }
+        k = k + 1
+    }
+
+    // Phase 5: clear objects beyond the compacted region
+    var tail: i64 = target
+    while tail < c.heap.bump {
+        if c.heap.objects[tail as usize].alive == 1 {
+            // This should only happen if object was already in the right place
+            // and target > tail (impossible), so this is a leftover
+            c.heap.objects[tail as usize].alive = 0
+        }
+        c.heap.objects[tail as usize].forwarding = GC_NULL
+        tail = tail + 1
+    }
+
+    // Update bump pointer and free list
+    c.heap.bump = target
+    c.heap.free_head = GC_NULL
+
+    // Recount
+    c.heap.obj_count = target
+
+    c
+}
+
+// ============================================================================
+// Convenience — collect + compact
+// ============================================================================
+
+fn gc_collect_and_compact(ctx: GcContext) -> GcContext with Mut, Panic, Div {
+    var c = gc_collect_major(ctx)
+    c = gc_compact(c)
+    c
+}
+
+// ============================================================================
+// Diagnostics
+// ============================================================================
+
+fn gc_heap_bump(ctx: GcContext) -> i64 {
+    ctx.heap.bump
+}
+
+fn gc_heap_obj_count(ctx: GcContext) -> i64 {
+    ctx.heap.obj_count
+}
+
+fn gc_heap_total_allocated(ctx: GcContext) -> i64 {
+    ctx.heap.total_allocated
+}
+
+fn gc_stats_collections(ctx: GcContext) -> i64 {
+    ctx.stats.collections_count
+}
+
+fn gc_stats_freed(ctx: GcContext) -> i64 {
+    ctx.stats.total_freed
+}
+
+fn gc_stats_max_live(ctx: GcContext) -> i64 {
+    ctx.stats.max_live
+}
+
+fn gc_stats_minor(ctx: GcContext) -> i64 {
+    ctx.stats.minor_collections
+}
+
+fn gc_stats_major(ctx: GcContext) -> i64 {
+    ctx.stats.major_collections
+}
+
+fn gc_threshold(ctx: GcContext) -> i64 {
+    ctx.heap.gc_threshold
+}
+
+fn gc_young_count(ctx: GcContext) -> i64 {
+    ctx.young_count
+}
+
+fn gc_old_count(ctx: GcContext) -> i64 {
+    ctx.old_count
+}
+
+fn gc_remset_count(ctx: GcContext) -> i64 {
+    ctx.remset.entry_count
+}
+
+fn gc_free_list_length(ctx: GcContext) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var cur = ctx.heap.free_head
+    while cur != GC_NULL && count < GC_HEAP_CAPACITY {
+        count = count + 1
+        cur = ctx.heap.objects[cur as usize].next_free
+    }
+    count
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+// ---------------------------------------------------------------------------
+// T01: Fresh context has zero objects
+// ---------------------------------------------------------------------------
+fn test_gc_empty_context() -> bool with Mut, Panic, Div {
+    let ctx = gc_context_new()
+    let ok1 = gc_heap_obj_count(ctx) == 0
+    let ok2 = gc_heap_bump(ctx) == 0
+    let ok3 = gc_stats_collections(ctx) == 0
+    let ok4 = gc_stats_freed(ctx) == 0
+    let ok5 = gc_young_count(ctx) == 0
+    let ok6 = gc_old_count(ctx) == 0
+    ok1 && ok2 && ok3 && ok4 && ok5 && ok6
+}
+
+// ---------------------------------------------------------------------------
+// T02: Single allocation succeeds
+// ---------------------------------------------------------------------------
+fn test_gc_single_alloc() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    let r = gc_alloc_raw(ctx, 1, 8, 0)
+    ctx = r.0
+    let id = r.1
+    let ok1 = id == 0
+    let ok2 = gc_heap_obj_count(ctx) == 1
+    let ok3 = gc_is_alive(ctx, id)
+    let ok4 = gc_get_type_id(ctx, id) == 1
+    let ok5 = gc_get_size(ctx, id) == 8
+    let ok6 = gc_get_gen(ctx, id) == GC_GEN_YOUNG
+    ok1 && ok2 && ok3 && ok4 && ok5 && ok6
+}
+
+// ---------------------------------------------------------------------------
+// T03: Multiple allocations get sequential IDs
+// ---------------------------------------------------------------------------
+fn test_gc_multiple_alloc() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    let r0 = gc_alloc_raw(ctx, 1, 8, 0)
+    ctx = r0.0
+    let id0 = r0.1
+    let r1 = gc_alloc_raw(ctx, 2, 16, 2)
+    ctx = r1.0
+    let id1 = r1.1
+    let r2 = gc_alloc_raw(ctx, 3, 24, 4)
+    ctx = r2.0
+    let id2 = r2.1
+    let ok1 = id0 == 0
+    let ok2 = id1 == 1
+    let ok3 = id2 == 2
+    let ok4 = gc_heap_obj_count(ctx) == 3
+    let ok5 = gc_heap_bump(ctx) == 3
+    ok1 && ok2 && ok3 && ok4 && ok5
+}
+
+// ---------------------------------------------------------------------------
+// T04: Free puts object on free list
+// ---------------------------------------------------------------------------
+fn test_gc_free_basic() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    let r = gc_alloc_raw(ctx, 1, 8, 0)
+    ctx = r.0
+    let id = r.1
+    ctx = gc_free_object(ctx, id)
+    let ok1 = !gc_is_alive(ctx, id)
+    let ok2 = gc_heap_obj_count(ctx) == 0
+    let ok3 = gc_free_list_length(ctx) == 1
+    ok1 && ok2 && ok3
+}
+
+// ---------------------------------------------------------------------------
+// T05: Free list reuse
+// ---------------------------------------------------------------------------
+fn test_gc_free_list_reuse() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    let r0 = gc_alloc_raw(ctx, 1, 8, 0)
+    ctx = r0.0
+    let id0 = r0.1
+    let r1 = gc_alloc_raw(ctx, 2, 8, 0)
+    ctx = r1.0
+    // Free the first object
+    ctx = gc_free_object(ctx, id0)
+    // Next allocation should reuse id0's slot
+    let r2 = gc_alloc_raw(ctx, 3, 8, 0)
+    ctx = r2.0
+    let reused_id = r2.1
+    let ok1 = reused_id == id0
+    let ok2 = gc_get_type_id(ctx, reused_id) == 3
+    let ok3 = gc_heap_obj_count(ctx) == 2
+    ok1 && ok2 && ok3
+}
+
+// ---------------------------------------------------------------------------
+// T06: Push/pop stack roots
+// ---------------------------------------------------------------------------
+fn test_gc_stack_roots() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    let r0 = gc_alloc_raw(ctx, 1, 8, 0)
+    ctx = r0.0
+    let id0 = r0.1
+    let r1 = gc_alloc_raw(ctx, 2, 8, 0)
+    ctx = r1.0
+    let id1 = r1.1
+    ctx = gc_push_root(ctx, id0)
+    ctx = gc_push_root(ctx, id1)
+    let ok1 = gc_stack_root_count(ctx) == 2
+    ctx = gc_pop_root(ctx)
+    let ok2 = gc_stack_root_count(ctx) == 1
+    ctx = gc_pop_root(ctx)
+    let ok3 = gc_stack_root_count(ctx) == 0
+    ok1 && ok2 && ok3
+}
+
+// ---------------------------------------------------------------------------
+// T07: Global root register/unregister
+// ---------------------------------------------------------------------------
+fn test_gc_global_roots() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    let r0 = gc_alloc_raw(ctx, 1, 8, 0)
+    ctx = r0.0
+    let id0 = r0.1
+    let r1 = gc_alloc_raw(ctx, 2, 8, 0)
+    ctx = r1.0
+    let id1 = r1.1
+    ctx = gc_register_global(ctx, id0)
+    ctx = gc_register_global(ctx, id1)
+    let ok1 = gc_global_root_count(ctx) == 2
+    ctx = gc_unregister_global(ctx, id0)
+    let ok2 = gc_global_root_count(ctx) == 1
+    ctx = gc_unregister_global(ctx, id1)
+    let ok3 = gc_global_root_count(ctx) == 0
+    ok1 && ok2 && ok3
+}
+
+// ---------------------------------------------------------------------------
+// T08: Field set and get
+// ---------------------------------------------------------------------------
+fn test_gc_fields() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    let r0 = gc_alloc_raw(ctx, 1, 8, 3)
+    ctx = r0.0
+    let parent = r0.1
+    let r1 = gc_alloc_raw(ctx, 2, 8, 0)
+    ctx = r1.0
+    let child1 = r1.1
+    let r2 = gc_alloc_raw(ctx, 3, 8, 0)
+    ctx = r2.0
+    let child2 = r2.1
+    ctx = gc_set_field(ctx, parent, 0, child1)
+    ctx = gc_set_field(ctx, parent, 1, child2)
+    let ok1 = gc_get_field(ctx, parent, 0) == child1
+    let ok2 = gc_get_field(ctx, parent, 1) == child2
+    let ok3 = gc_get_field(ctx, parent, 2) == GC_NULL
+    ok1 && ok2 && ok3
+}
+
+// ---------------------------------------------------------------------------
+// T09: Mark phase — reachable objects marked black
+// ---------------------------------------------------------------------------
+fn test_gc_mark_reachable() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    let r0 = gc_alloc_raw(ctx, 1, 8, 1)
+    ctx = r0.0
+    let parent = r0.1
+    let r1 = gc_alloc_raw(ctx, 2, 8, 0)
+    ctx = r1.0
+    let child = r1.1
+    ctx = gc_set_field(ctx, parent, 0, child)
+    ctx = gc_push_root(ctx, parent)
+    ctx = gc_mark_full(ctx)
+    let ok1 = gc_get_color(ctx, parent) == GC_COLOR_BLACK
+    let ok2 = gc_get_color(ctx, child) == GC_COLOR_BLACK
+    ok1 && ok2
+}
+
+// ---------------------------------------------------------------------------
+// T10: Unreachable objects stay white after marking
+// ---------------------------------------------------------------------------
+fn test_gc_mark_unreachable() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    let r0 = gc_alloc_raw(ctx, 1, 8, 0)
+    ctx = r0.0
+    let rooted = r0.1
+    let r1 = gc_alloc_raw(ctx, 2, 8, 0)
+    ctx = r1.0
+    let unrooted = r1.1
+    ctx = gc_push_root(ctx, rooted)
+    ctx = gc_mark_full(ctx)
+    let ok1 = gc_get_color(ctx, rooted) == GC_COLOR_BLACK
+    let ok2 = gc_get_color(ctx, unrooted) == GC_COLOR_WHITE
+    ok1 && ok2
+}
+
+// ---------------------------------------------------------------------------
+// T11: Sweep frees unreachable objects
+// ---------------------------------------------------------------------------
+fn test_gc_sweep_frees_unreachable() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    let r0 = gc_alloc_raw(ctx, 1, 8, 0)
+    ctx = r0.0
+    let rooted = r0.1
+    let r1 = gc_alloc_raw(ctx, 2, 8, 0)
+    ctx = r1.0
+    let unrooted = r1.1
+    ctx = gc_push_root(ctx, rooted)
+    ctx = gc_mark_full(ctx)
+    ctx = gc_sweep_all(ctx)
+    let ok1 = gc_is_alive(ctx, rooted)
+    let ok2 = !gc_is_alive(ctx, unrooted)
+    let ok3 = gc_heap_obj_count(ctx) == 1
+    ok1 && ok2 && ok3
+}
+
+// ---------------------------------------------------------------------------
+// T12: Full major collection
+// ---------------------------------------------------------------------------
+fn test_gc_collect_major() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    // Allocate 5 objects, root only 2
+    let r0 = gc_alloc_raw(ctx, 1, 8, 0)
+    ctx = r0.0
+    let id0 = r0.1
+    let r1 = gc_alloc_raw(ctx, 2, 8, 0)
+    ctx = r1.0
+    let id1 = r1.1
+    let r2 = gc_alloc_raw(ctx, 3, 8, 0)
+    ctx = r2.0
+    let r3 = gc_alloc_raw(ctx, 4, 8, 0)
+    ctx = r3.0
+    let r4 = gc_alloc_raw(ctx, 5, 8, 0)
+    ctx = r4.0
+    ctx = gc_push_root(ctx, id0)
+    ctx = gc_push_root(ctx, id1)
+    ctx = gc_collect_major(ctx)
+    let ok1 = gc_is_alive(ctx, id0)
+    let ok2 = gc_is_alive(ctx, id1)
+    let ok3 = gc_heap_obj_count(ctx) == 2
+    let ok4 = gc_stats_collections(ctx) == 1
+    let ok5 = gc_stats_freed(ctx) == 3
+    ok1 && ok2 && ok3 && ok4 && ok5
+}
+
+// ---------------------------------------------------------------------------
+// T13: Rooted chain survives collection
+// ---------------------------------------------------------------------------
+fn test_gc_rooted_chain_survives() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    let r0 = gc_alloc_raw(ctx, 1, 8, 1)
+    ctx = r0.0
+    let a = r0.1
+    let r1 = gc_alloc_raw(ctx, 1, 8, 1)
+    ctx = r1.0
+    let b = r1.1
+    let r2 = gc_alloc_raw(ctx, 1, 8, 0)
+    ctx = r2.0
+    let c_id = r2.1
+    // a -> b -> c
+    ctx = gc_set_field(ctx, a, 0, b)
+    ctx = gc_set_field(ctx, b, 0, c_id)
+    ctx = gc_push_root(ctx, a)
+    ctx = gc_collect_major(ctx)
+    let ok1 = gc_is_alive(ctx, a)
+    let ok2 = gc_is_alive(ctx, b)
+    let ok3 = gc_is_alive(ctx, c_id)
+    let ok4 = gc_heap_obj_count(ctx) == 3
+    ok1 && ok2 && ok3 && ok4
+}
+
+// ---------------------------------------------------------------------------
+// T14: Cyclic garbage (A->B->A, both unreachable) is collected
+// ---------------------------------------------------------------------------
+fn test_gc_cyclic_garbage() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    let r0 = gc_alloc_raw(ctx, 1, 8, 1)
+    ctx = r0.0
+    let a = r0.1
+    let r1 = gc_alloc_raw(ctx, 1, 8, 1)
+    ctx = r1.0
+    let b = r1.1
+    // Create cycle: a -> b, b -> a
+    ctx = gc_set_field(ctx, a, 0, b)
+    ctx = gc_set_field(ctx, b, 0, a)
+    // Neither is rooted
+    ctx = gc_collect_major(ctx)
+    let ok1 = !gc_is_alive(ctx, a)
+    let ok2 = !gc_is_alive(ctx, b)
+    let ok3 = gc_heap_obj_count(ctx) == 0
+    let ok4 = gc_stats_freed(ctx) == 2
+    ok1 && ok2 && ok3 && ok4
+}
+
+// ---------------------------------------------------------------------------
+// T15: Cyclic but rooted — kept alive
+// ---------------------------------------------------------------------------
+fn test_gc_cyclic_rooted() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    let r0 = gc_alloc_raw(ctx, 1, 8, 1)
+    ctx = r0.0
+    let a = r0.1
+    let r1 = gc_alloc_raw(ctx, 1, 8, 1)
+    ctx = r1.0
+    let b = r1.1
+    ctx = gc_set_field(ctx, a, 0, b)
+    ctx = gc_set_field(ctx, b, 0, a)
+    ctx = gc_push_root(ctx, a)
+    ctx = gc_collect_major(ctx)
+    let ok1 = gc_is_alive(ctx, a)
+    let ok2 = gc_is_alive(ctx, b)
+    let ok3 = gc_heap_obj_count(ctx) == 2
+    ok1 && ok2 && ok3
+}
+
+// ---------------------------------------------------------------------------
+// T16: Stats tracking — allocation count
+// ---------------------------------------------------------------------------
+fn test_gc_stats_allocation() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    var i: i64 = 0
+    while i < 10 {
+        let r = gc_alloc_raw(ctx, 1, 8, 0)
+        ctx = r.0
+        i = i + 1
+    }
+    let ok1 = ctx.stats.total_allocated == 10
+    let ok2 = gc_heap_total_allocated(ctx) == 10
+    ok1 && ok2
+}
+
+// ---------------------------------------------------------------------------
+// T17: Promotion — young to old
+// ---------------------------------------------------------------------------
+fn test_gc_promote() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    let r = gc_alloc_raw(ctx, 1, 8, 0)
+    ctx = r.0
+    let id = r.1
+    let ok1 = gc_get_gen(ctx, id) == GC_GEN_YOUNG
+    let ok2 = gc_young_count(ctx) == 1
+    let ok3 = gc_old_count(ctx) == 0
+    ctx = gc_promote(ctx, id)
+    let ok4 = gc_get_gen(ctx, id) == GC_GEN_OLD
+    let ok5 = gc_young_count(ctx) == 0
+    let ok6 = gc_old_count(ctx) == 1
+    ok1 && ok2 && ok3 && ok4 && ok5 && ok6
+}
+
+// ---------------------------------------------------------------------------
+// T18: Write barrier — old->young reference recorded
+// ---------------------------------------------------------------------------
+fn test_gc_write_barrier() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    let r0 = gc_alloc_raw(ctx, 1, 8, 1)
+    ctx = r0.0
+    let old_obj = r0.1
+    let r1 = gc_alloc_raw(ctx, 2, 8, 0)
+    ctx = r1.0
+    let young_obj = r1.1
+    // Promote old_obj to old gen
+    ctx = gc_promote(ctx, old_obj)
+    // Write barrier: old -> young
+    ctx = gc_write_barrier(ctx, old_obj, young_obj)
+    let ok1 = gc_remset_count(ctx) == 1
+    let ok2 = gc_remset_contains(ctx, old_obj)
+    ok1 && ok2
+}
+
+// ---------------------------------------------------------------------------
+// T19: Write barrier — young->young not recorded
+// ---------------------------------------------------------------------------
+fn test_gc_write_barrier_young_young() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    let r0 = gc_alloc_raw(ctx, 1, 8, 1)
+    ctx = r0.0
+    let a = r0.1
+    let r1 = gc_alloc_raw(ctx, 2, 8, 0)
+    ctx = r1.0
+    let b = r1.1
+    ctx = gc_write_barrier(ctx, a, b)
+    gc_remset_count(ctx) == 0
+}
+
+// ---------------------------------------------------------------------------
+// T20: Write barrier — old->old not recorded
+// ---------------------------------------------------------------------------
+fn test_gc_write_barrier_old_old() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    let r0 = gc_alloc_raw(ctx, 1, 8, 1)
+    ctx = r0.0
+    let a = r0.1
+    let r1 = gc_alloc_raw(ctx, 2, 8, 0)
+    ctx = r1.0
+    let b = r1.1
+    ctx = gc_promote(ctx, a)
+    ctx = gc_promote(ctx, b)
+    ctx = gc_write_barrier(ctx, a, b)
+    gc_remset_count(ctx) == 0
+}
+
+// ---------------------------------------------------------------------------
+// T21: Minor collection — young unreachable freed, old untouched
+// ---------------------------------------------------------------------------
+fn test_gc_minor_collection() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    // Create an old rooted object
+    let r0 = gc_alloc_raw(ctx, 1, 8, 0)
+    ctx = r0.0
+    let old_id = r0.1
+    ctx = gc_promote(ctx, old_id)
+    ctx = gc_push_root(ctx, old_id)
+
+    // Create young objects — one rooted, one not
+    let r1 = gc_alloc_raw(ctx, 2, 8, 0)
+    ctx = r1.0
+    let young_rooted = r1.1
+    ctx = gc_push_root(ctx, young_rooted)
+
+    let r2 = gc_alloc_raw(ctx, 3, 8, 0)
+    ctx = r2.0
+    let young_garbage = r2.1
+
+    let before_count = gc_heap_obj_count(ctx)
+    ctx = gc_collect_minor(ctx)
+
+    let ok1 = gc_is_alive(ctx, old_id)
+    // young_rooted survives minor collection and gets promoted
+    let ok2 = gc_get_gen(ctx, young_rooted) == GC_GEN_OLD
+    let ok3 = !gc_is_alive(ctx, young_garbage)
+    let ok4 = gc_stats_minor(ctx) == 1
+    ok1 && ok2 && ok3 && ok4
+}
+
+// ---------------------------------------------------------------------------
+// T22: set_field_with_barrier updates field and records barrier
+// ---------------------------------------------------------------------------
+fn test_gc_set_field_with_barrier() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    let r0 = gc_alloc_raw(ctx, 1, 8, 2)
+    ctx = r0.0
+    let old_obj = r0.1
+    let r1 = gc_alloc_raw(ctx, 2, 8, 0)
+    ctx = r1.0
+    let young_obj = r1.1
+    ctx = gc_promote(ctx, old_obj)
+    ctx = gc_set_field_with_barrier(ctx, old_obj, 0, young_obj)
+    let ok1 = gc_get_field(ctx, old_obj, 0) == young_obj
+    let ok2 = gc_remset_count(ctx) == 1
+    ok1 && ok2
+}
+
+// ---------------------------------------------------------------------------
+// T23: Compaction slides objects together
+// ---------------------------------------------------------------------------
+fn test_gc_compaction_basic() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    // Allocate A, B, C; free B; compact => A, C contiguous
+    let r0 = gc_alloc_raw(ctx, 10, 8, 0)
+    ctx = r0.0
+    let a = r0.1
+    let r1 = gc_alloc_raw(ctx, 20, 8, 0)
+    ctx = r1.0
+    let b = r1.1
+    let r2 = gc_alloc_raw(ctx, 30, 8, 0)
+    ctx = r2.0
+    let c_id = r2.1
+    ctx = gc_push_root(ctx, a)
+    ctx = gc_push_root(ctx, c_id)
+    // Collect — B is unreachable
+    ctx = gc_collect_major(ctx)
+    let ok1 = gc_is_alive(ctx, a)
+    let ok2 = !gc_is_alive(ctx, b)
+    let ok3 = gc_heap_obj_count(ctx) == 2
+    // Compact
+    ctx = gc_compact(ctx)
+    let ok4 = gc_heap_bump(ctx) == 2
+    let ok5 = gc_heap_obj_count(ctx) == 2
+    // After compaction, objects at index 0 and 1 are alive
+    let ok6 = gc_is_alive(ctx, 0)
+    let ok7 = gc_is_alive(ctx, 1)
+    ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7
+}
+
+// ---------------------------------------------------------------------------
+// T24: Compaction updates references
+// ---------------------------------------------------------------------------
+fn test_gc_compaction_refs() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    // A (root, has field -> C), B (garbage), C (reachable via A)
+    let r0 = gc_alloc_raw(ctx, 10, 8, 1)
+    ctx = r0.0
+    let a = r0.1
+    let r1 = gc_alloc_raw(ctx, 20, 8, 0)
+    ctx = r1.0
+    let r2 = gc_alloc_raw(ctx, 30, 8, 0)
+    ctx = r2.0
+    let c_id = r2.1
+    ctx = gc_set_field(ctx, a, 0, c_id)
+    ctx = gc_push_root(ctx, a)
+    ctx = gc_collect_major(ctx)
+    ctx = gc_compact(ctx)
+    // After compaction: A at 0, C at 1 (B was freed)
+    let ok1 = gc_heap_bump(ctx) == 2
+    // A's field should now point to C's new location (1)
+    let a_ref = gc_get_field(ctx, 0, 0)
+    let ok2 = a_ref == 1
+    let ok3 = gc_get_type_id(ctx, 0) == 10
+    let ok4 = gc_get_type_id(ctx, 1) == 30
+    ok1 && ok2 && ok3 && ok4
+}
+
+// ---------------------------------------------------------------------------
+// T25: Compaction updates root references
+// ---------------------------------------------------------------------------
+fn test_gc_compaction_roots() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    // Allocate A (garbage), B (global root), C (stack root)
+    let r0 = gc_alloc_raw(ctx, 10, 8, 0)
+    ctx = r0.0
+    let r1 = gc_alloc_raw(ctx, 20, 8, 0)
+    ctx = r1.0
+    let b = r1.1
+    let r2 = gc_alloc_raw(ctx, 30, 8, 0)
+    ctx = r2.0
+    let c_id = r2.1
+    ctx = gc_register_global(ctx, b)
+    ctx = gc_push_root(ctx, c_id)
+    ctx = gc_collect_major(ctx)
+    ctx = gc_compact(ctx)
+    // B and C survive, A freed. After compact: bump=2
+    let ok1 = gc_heap_bump(ctx) == 2
+    // Roots should be updated to new positions
+    let ok2 = ctx.roots.global_roots[0 as usize] == 0 || ctx.roots.global_roots[0 as usize] == 1
+    let ok3 = ctx.roots.stack_roots[0 as usize] == 0 || ctx.roots.stack_roots[0 as usize] == 1
+    ok1 && ok2 && ok3
+}
+
+// ---------------------------------------------------------------------------
+// T26: Finalization — finalizer runs for dead object
+// ---------------------------------------------------------------------------
+fn test_gc_finalization_basic() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    let r0 = gc_alloc_raw(ctx, 1, 8, 0)
+    ctx = r0.0
+    let id = r0.1
+    ctx = gc_register_finalizer(ctx, id)
+    let ok1 = gc_needs_finalization(ctx, id)
+    // Do not root it — it will be collected
+    ctx = gc_collect_major(ctx)
+    let ok2 = gc_finalized_count(ctx) == 1
+    let ok3 = !gc_is_alive(ctx, id)
+    ok1 && ok2 && ok3
+}
+
+// ---------------------------------------------------------------------------
+// T27: Finalization — finalizer does NOT run for live object
+// ---------------------------------------------------------------------------
+fn test_gc_finalization_live() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    let r0 = gc_alloc_raw(ctx, 1, 8, 0)
+    ctx = r0.0
+    let id = r0.1
+    ctx = gc_register_finalizer(ctx, id)
+    ctx = gc_push_root(ctx, id)
+    ctx = gc_collect_major(ctx)
+    let ok1 = gc_finalized_count(ctx) == 0
+    let ok2 = gc_is_alive(ctx, id)
+    ok1 && ok2
+}
+
+// ---------------------------------------------------------------------------
+// T28: Threshold-triggered collection
+// ---------------------------------------------------------------------------
+fn test_gc_threshold_trigger() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    // Set a very low threshold
+    ctx.heap.gc_threshold = 5
+    // Allocate 6 objects using gc_alloc (triggers collection at threshold)
+    // Only root object 0
+    let r0 = gc_alloc(ctx, 1, 8, 0)
+    ctx = r0.0
+    let id0 = r0.1
+    ctx = gc_push_root(ctx, id0)
+    var i: i64 = 1
+    while i < 6 {
+        let r = gc_alloc(ctx, 1, 8, 0)
+        ctx = r.0
+        i = i + 1
+    }
+    // Collection should have been triggered
+    let ok1 = gc_stats_collections(ctx) >= 1
+    ok1
+}
+
+// ---------------------------------------------------------------------------
+// T29: Pop multiple roots
+// ---------------------------------------------------------------------------
+fn test_gc_pop_multiple_roots() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    let r0 = gc_alloc_raw(ctx, 1, 8, 0)
+    ctx = r0.0
+    ctx = gc_push_root(ctx, r0.1)
+    let r1 = gc_alloc_raw(ctx, 2, 8, 0)
+    ctx = r1.0
+    ctx = gc_push_root(ctx, r1.1)
+    let r2 = gc_alloc_raw(ctx, 3, 8, 0)
+    ctx = r2.0
+    ctx = gc_push_root(ctx, r2.1)
+    let ok1 = gc_stack_root_count(ctx) == 3
+    ctx = gc_pop_roots(ctx, 2)
+    let ok2 = gc_stack_root_count(ctx) == 1
+    ctx = gc_pop_roots(ctx, 5)
+    let ok3 = gc_stack_root_count(ctx) == 0
+    ok1 && ok2 && ok3
+}
+
+// ---------------------------------------------------------------------------
+// T30: Max live tracking
+// ---------------------------------------------------------------------------
+fn test_gc_max_live() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    // Allocate 5 objects
+    var i: i64 = 0
+    while i < 5 {
+        let r = gc_alloc_raw(ctx, 1, 8, 0)
+        ctx = r.0
+        i = i + 1
+    }
+    let ok1 = gc_stats_max_live(ctx) == 5
+    // Root only object 0
+    ctx = gc_push_root(ctx, 0)
+    ctx = gc_collect_major(ctx)
+    // After collection, live=1, but max_live should still be 5
+    let ok2 = gc_stats_max_live(ctx) == 5
+    let ok3 = gc_live_count(ctx) == 1
+    ok1 && ok2 && ok3
+}
+
+// ---------------------------------------------------------------------------
+// T31: Deep chain reachability — 10 objects in a chain, root at head
+// ---------------------------------------------------------------------------
+fn test_gc_deep_chain() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    // Build chain: obj0 -> obj1 -> obj2 -> ... -> obj9
+    var ids: [i64; 10] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    var i: i64 = 0
+    while i < 10 {
+        let r = gc_alloc_raw(ctx, 1, 8, 1)
+        ctx = r.0
+        ids[i as usize] = r.1
+        i = i + 1
+    }
+    // Link chain
+    var j: i64 = 0
+    while j < 9 {
+        ctx = gc_set_field(ctx, ids[j as usize], 0, ids[(j + 1) as usize])
+        j = j + 1
+    }
+    // Root only the head
+    ctx = gc_push_root(ctx, ids[0 as usize])
+    ctx = gc_collect_major(ctx)
+    // All 10 should survive
+    var all_alive = true
+    var k: i64 = 0
+    while k < 10 {
+        if !gc_is_alive(ctx, ids[k as usize]) {
+            all_alive = false
+        }
+        k = k + 1
+    }
+    let ok1 = all_alive
+    let ok2 = gc_heap_obj_count(ctx) == 10
+    ok1 && ok2
+}
+
+// ---------------------------------------------------------------------------
+// T32: Multiple garbage cycles collected
+// ---------------------------------------------------------------------------
+fn test_gc_multiple_cycles() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    // Cycle 1: a <-> b
+    let r0 = gc_alloc_raw(ctx, 1, 8, 1)
+    ctx = r0.0
+    let a = r0.1
+    let r1 = gc_alloc_raw(ctx, 1, 8, 1)
+    ctx = r1.0
+    let b = r1.1
+    ctx = gc_set_field(ctx, a, 0, b)
+    ctx = gc_set_field(ctx, b, 0, a)
+    // Cycle 2: c <-> d
+    let r2 = gc_alloc_raw(ctx, 2, 8, 1)
+    ctx = r2.0
+    let c_id = r2.1
+    let r3 = gc_alloc_raw(ctx, 2, 8, 1)
+    ctx = r3.0
+    let d = r3.1
+    ctx = gc_set_field(ctx, c_id, 0, d)
+    ctx = gc_set_field(ctx, d, 0, c_id)
+    // One rooted standalone
+    let r4 = gc_alloc_raw(ctx, 3, 8, 0)
+    ctx = r4.0
+    let e = r4.1
+    ctx = gc_push_root(ctx, e)
+    ctx = gc_collect_major(ctx)
+    let ok1 = !gc_is_alive(ctx, a)
+    let ok2 = !gc_is_alive(ctx, b)
+    let ok3 = !gc_is_alive(ctx, c_id)
+    let ok4 = !gc_is_alive(ctx, d)
+    let ok5 = gc_is_alive(ctx, e)
+    let ok6 = gc_stats_freed(ctx) == 4
+    ok1 && ok2 && ok3 && ok4 && ok5 && ok6
+}
+
+// ---------------------------------------------------------------------------
+// T33: Global root keeps object alive across collections
+// ---------------------------------------------------------------------------
+fn test_gc_global_root_survives() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    let r0 = gc_alloc_raw(ctx, 1, 8, 1)
+    ctx = r0.0
+    let root_obj = r0.1
+    let r1 = gc_alloc_raw(ctx, 2, 8, 0)
+    ctx = r1.0
+    let child = r1.1
+    ctx = gc_set_field(ctx, root_obj, 0, child)
+    ctx = gc_register_global(ctx, root_obj)
+    // First collection
+    ctx = gc_collect_major(ctx)
+    let ok1 = gc_is_alive(ctx, root_obj)
+    let ok2 = gc_is_alive(ctx, child)
+    // Allocate more garbage
+    let r2 = gc_alloc_raw(ctx, 3, 8, 0)
+    ctx = r2.0
+    let r3 = gc_alloc_raw(ctx, 4, 8, 0)
+    ctx = r3.0
+    // Second collection
+    ctx = gc_collect_major(ctx)
+    let ok3 = gc_is_alive(ctx, root_obj)
+    let ok4 = gc_is_alive(ctx, child)
+    let ok5 = gc_stats_collections(ctx) == 2
+    ok1 && ok2 && ok3 && ok4 && ok5
+}
+
+// ---------------------------------------------------------------------------
+// T34: Collect and compact combined
+// ---------------------------------------------------------------------------
+fn test_gc_collect_and_compact() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    // Allocate 6 objects, root 0, 2, 4 — garbage is 1, 3, 5
+    var ids: [i64; 6] = [0, 0, 0, 0, 0, 0]
+    var i: i64 = 0
+    while i < 6 {
+        let r = gc_alloc_raw(ctx, (i + 1), 8, 0)
+        ctx = r.0
+        ids[i as usize] = r.1
+        i = i + 1
+    }
+    ctx = gc_push_root(ctx, ids[0 as usize])
+    ctx = gc_push_root(ctx, ids[2 as usize])
+    ctx = gc_push_root(ctx, ids[4 as usize])
+    ctx = gc_collect_and_compact(ctx)
+    let ok1 = gc_heap_bump(ctx) == 3
+    let ok2 = gc_heap_obj_count(ctx) == 3
+    let ok3 = gc_stats_freed(ctx) == 3
+    // All 3 survivors should be contiguous
+    let ok4 = gc_is_alive(ctx, 0)
+    let ok5 = gc_is_alive(ctx, 1)
+    let ok6 = gc_is_alive(ctx, 2)
+    ok1 && ok2 && ok3 && ok4 && ok5 && ok6
+}
+
+// ---------------------------------------------------------------------------
+// T35: Remset cleared after collection
+// ---------------------------------------------------------------------------
+fn test_gc_remset_cleared_after_collect() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    let r0 = gc_alloc_raw(ctx, 1, 8, 1)
+    ctx = r0.0
+    let old_obj = r0.1
+    ctx = gc_promote(ctx, old_obj)
+    let r1 = gc_alloc_raw(ctx, 2, 8, 0)
+    ctx = r1.0
+    let young_obj = r1.1
+    ctx = gc_write_barrier(ctx, old_obj, young_obj)
+    let ok1 = gc_remset_count(ctx) == 1
+    ctx = gc_push_root(ctx, old_obj)
+    ctx = gc_collect_major(ctx)
+    let ok2 = gc_remset_count(ctx) == 0
+    ok1 && ok2
+}
+
+// ---------------------------------------------------------------------------
+// T36: Double free is a no-op
+// ---------------------------------------------------------------------------
+fn test_gc_double_free_noop() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    let r = gc_alloc_raw(ctx, 1, 8, 0)
+    ctx = r.0
+    let id = r.1
+    ctx = gc_free_object(ctx, id)
+    let freed_before = gc_stats_freed(ctx)
+    ctx = gc_free_object(ctx, id)
+    let freed_after = gc_stats_freed(ctx)
+    // Second free should be no-op
+    let ok1 = freed_before == freed_after
+    let ok2 = gc_heap_obj_count(ctx) == 0
+    ok1 && ok2
+}
+
+// ---------------------------------------------------------------------------
+// T37: Invalid ID operations are safe no-ops
+// ---------------------------------------------------------------------------
+fn test_gc_invalid_id_safety() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    let ok1 = !gc_is_alive(ctx, GC_NULL)
+    let ok2 = !gc_is_alive(ctx, 9999)
+    let ok3 = gc_get_color(ctx, GC_NULL) == GC_COLOR_WHITE
+    let ok4 = gc_get_field(ctx, GC_NULL, 0) == GC_NULL
+    let ok5 = gc_get_type_id(ctx, 9999) == 0
+    ctx = gc_set_field(ctx, GC_NULL, 0, 0)
+    ctx = gc_free_object(ctx, GC_NULL)
+    ctx = gc_free_object(ctx, 9999)
+    let ok6 = gc_heap_obj_count(ctx) == 0
+    ok1 && ok2 && ok3 && ok4 && ok5 && ok6
+}
+
+// ---------------------------------------------------------------------------
+// T38: alloc_with_type convenience
+// ---------------------------------------------------------------------------
+fn test_gc_alloc_with_type() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    let r = gc_alloc_with_type(ctx, 42, 3)
+    ctx = r.0
+    let id = r.1
+    let ok1 = gc_get_type_id(ctx, id) == 42
+    let ok2 = gc_get_field_count(ctx, id) == 3
+    let ok3 = gc_is_alive(ctx, id)
+    ok1 && ok2 && ok3
+}
+
+// ---------------------------------------------------------------------------
+// T39: Field count clamped to GC_MAX_FIELDS
+// ---------------------------------------------------------------------------
+fn test_gc_field_count_clamped() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    let r = gc_alloc_raw(ctx, 1, 8, 100)
+    ctx = r.0
+    let id = r.1
+    let ok1 = gc_get_field_count(ctx, id) == GC_MAX_FIELDS
+    ok1
+}
+
+// ---------------------------------------------------------------------------
+// T40: Worklist clear
+// ---------------------------------------------------------------------------
+fn test_gc_worklist_operations() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    ctx = gc_worklist_push(ctx, 10)
+    ctx = gc_worklist_push(ctx, 20)
+    let ok1 = ctx.worklist.count == 2
+    let pop_r = gc_worklist_pop(ctx)
+    ctx = pop_r.0
+    let ok2 = pop_r.1 == 20
+    ctx = gc_worklist_clear(ctx)
+    let ok3 = ctx.worklist.count == 0
+    let pop_r2 = gc_worklist_pop(ctx)
+    ctx = pop_r2.0
+    let ok4 = pop_r2.1 == GC_NULL
+    ok1 && ok2 && ok3 && ok4
+}
+
+// ---------------------------------------------------------------------------
+// T41: Mark resets work correctly
+// ---------------------------------------------------------------------------
+fn test_gc_mark_reset() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    let r0 = gc_alloc_raw(ctx, 1, 8, 0)
+    ctx = r0.0
+    let id = r0.1
+    ctx = gc_set_color(ctx, id, GC_COLOR_BLACK)
+    let ok1 = gc_get_color(ctx, id) == GC_COLOR_BLACK
+    ctx = gc_reset_marks(ctx)
+    let ok2 = gc_get_color(ctx, id) == GC_COLOR_WHITE
+    ok1 && ok2
+}
+
+// ---------------------------------------------------------------------------
+// T42: Diamond reference pattern — A->B, A->C, B->D, C->D
+// ---------------------------------------------------------------------------
+fn test_gc_diamond_pattern() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    let r0 = gc_alloc_raw(ctx, 1, 8, 2)
+    ctx = r0.0
+    let a = r0.1
+    let r1 = gc_alloc_raw(ctx, 2, 8, 1)
+    ctx = r1.0
+    let b = r1.1
+    let r2 = gc_alloc_raw(ctx, 3, 8, 1)
+    ctx = r2.0
+    let c_id = r2.1
+    let r3 = gc_alloc_raw(ctx, 4, 8, 0)
+    ctx = r3.0
+    let d = r3.1
+    ctx = gc_set_field(ctx, a, 0, b)
+    ctx = gc_set_field(ctx, a, 1, c_id)
+    ctx = gc_set_field(ctx, b, 0, d)
+    ctx = gc_set_field(ctx, c_id, 0, d)
+    ctx = gc_push_root(ctx, a)
+    ctx = gc_collect_major(ctx)
+    let ok1 = gc_is_alive(ctx, a)
+    let ok2 = gc_is_alive(ctx, b)
+    let ok3 = gc_is_alive(ctx, c_id)
+    let ok4 = gc_is_alive(ctx, d)
+    let ok5 = gc_heap_obj_count(ctx) == 4
+    ok1 && ok2 && ok3 && ok4 && ok5
+}
+
+// ---------------------------------------------------------------------------
+// T43: Threshold growth after collection
+// ---------------------------------------------------------------------------
+fn test_gc_threshold_growth() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    let initial_threshold = gc_threshold(ctx)
+    let ok1 = initial_threshold == GC_THRESHOLD_INITIAL
+    ctx = gc_collect_major(ctx)
+    let new_threshold = gc_threshold(ctx)
+    // After major GC, threshold = total_allocated + INITIAL * GROWTH
+    let expected = ctx.heap.total_allocated + (GC_THRESHOLD_INITIAL * GC_THRESHOLD_GROWTH)
+    let ok2 = new_threshold == expected
+    ok1 && ok2
+}
+
+// ---------------------------------------------------------------------------
+// T44: Minor collection stats
+// ---------------------------------------------------------------------------
+fn test_gc_minor_stats() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    let r0 = gc_alloc_raw(ctx, 1, 8, 0)
+    ctx = r0.0
+    ctx = gc_push_root(ctx, r0.1)
+    let r1 = gc_alloc_raw(ctx, 2, 8, 0)
+    ctx = r1.0
+    ctx = gc_collect_minor(ctx)
+    let ok1 = gc_stats_minor(ctx) == 1
+    let ok2 = gc_stats_major(ctx) == 0
+    let ok3 = gc_stats_collections(ctx) == 1
+    ok1 && ok2 && ok3
+}
+
+// ---------------------------------------------------------------------------
+// T45: Finalization ordering — multiple finalizers
+// ---------------------------------------------------------------------------
+fn test_gc_finalization_multiple() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    let r0 = gc_alloc_raw(ctx, 1, 8, 0)
+    ctx = r0.0
+    let id0 = r0.1
+    let r1 = gc_alloc_raw(ctx, 2, 8, 0)
+    ctx = r1.0
+    let id1 = r1.1
+    let r2 = gc_alloc_raw(ctx, 3, 8, 0)
+    ctx = r2.0
+    let id2 = r2.1
+    ctx = gc_register_finalizer(ctx, id0)
+    ctx = gc_register_finalizer(ctx, id1)
+    ctx = gc_register_finalizer(ctx, id2)
+    // Root id1 only
+    ctx = gc_push_root(ctx, id1)
+    ctx = gc_collect_major(ctx)
+    // id0 and id2 should be finalized, id1 should not
+    let ok1 = gc_finalized_count(ctx) == 2
+    let ok2 = gc_is_alive(ctx, id1)
+    let ok3 = !gc_is_alive(ctx, id0)
+    let ok4 = !gc_is_alive(ctx, id2)
+    ok1 && ok2 && ok3 && ok4
+}
+
+// ---------------------------------------------------------------------------
+// T46: Free list chain integrity after multiple frees
+// ---------------------------------------------------------------------------
+fn test_gc_free_list_chain() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    // Allocate 5 objects
+    var ids: [i64; 5] = [0, 0, 0, 0, 0]
+    var i: i64 = 0
+    while i < 5 {
+        let r = gc_alloc_raw(ctx, (i + 1), 8, 0)
+        ctx = r.0
+        ids[i as usize] = r.1
+        i = i + 1
+    }
+    // Free 1, 3 (odd indices)
+    ctx = gc_free_object(ctx, ids[1 as usize])
+    ctx = gc_free_object(ctx, ids[3 as usize])
+    let ok1 = gc_free_list_length(ctx) == 2
+    let ok2 = gc_heap_obj_count(ctx) == 3
+    // Allocate 2 more — should reuse freed slots
+    let r5 = gc_alloc_raw(ctx, 99, 8, 0)
+    ctx = r5.0
+    let new1 = r5.1
+    let r6 = gc_alloc_raw(ctx, 100, 8, 0)
+    ctx = r6.0
+    let new2 = r6.1
+    let ok3 = gc_free_list_length(ctx) == 0
+    let ok4 = gc_heap_obj_count(ctx) == 5
+    // Reused slots should be ids 3 and 1 (LIFO free list)
+    let ok5 = new1 == ids[3 as usize]
+    let ok6 = new2 == ids[1 as usize]
+    ok1 && ok2 && ok3 && ok4 && ok5 && ok6
+}
+
+// ---------------------------------------------------------------------------
+// T47: Object field_count auto-extends on set_field beyond current count
+// ---------------------------------------------------------------------------
+fn test_gc_field_auto_extend() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    let r = gc_alloc_raw(ctx, 1, 8, 0)
+    ctx = r.0
+    let id = r.1
+    let ok1 = gc_get_field_count(ctx, id) == 0
+    // Setting field at index 3 should extend field_count to 4
+    ctx = gc_set_field(ctx, id, 3, 42)
+    let ok2 = gc_get_field_count(ctx, id) == 4
+    let ok3 = gc_get_field(ctx, id, 3) == 42
+    ok1 && ok2 && ok3
+}
+
+// ---------------------------------------------------------------------------
+// T48: Repeated collections — no crash, stats accumulate
+// ---------------------------------------------------------------------------
+fn test_gc_repeated_collections() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    // Allocate, root one, collect; repeat 3 times
+    var total_freed: i64 = 0
+    var round: i64 = 0
+    while round < 3 {
+        let r0 = gc_alloc_raw(ctx, 1, 8, 0)
+        ctx = r0.0
+        let rooted = r0.1
+        ctx = gc_push_root(ctx, rooted)
+        var g: i64 = 0
+        while g < 3 {
+            let rg = gc_alloc_raw(ctx, 2, 8, 0)
+            ctx = rg.0
+            g = g + 1
+        }
+        ctx = gc_collect_major(ctx)
+        ctx = gc_pop_root(ctx)
+        round = round + 1
+    }
+    let ok1 = gc_stats_collections(ctx) == 3
+    let ok2 = gc_stats_freed(ctx) >= 9
+    ok1 && ok2
+}
+
+// ---------------------------------------------------------------------------
+// T49: All objects unreachable — complete sweep
+// ---------------------------------------------------------------------------
+fn test_gc_all_garbage() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    var i: i64 = 0
+    while i < 10 {
+        let r = gc_alloc_raw(ctx, 1, 8, 0)
+        ctx = r.0
+        i = i + 1
+    }
+    let ok1 = gc_heap_obj_count(ctx) == 10
+    ctx = gc_collect_major(ctx)
+    let ok2 = gc_heap_obj_count(ctx) == 0
+    let ok3 = gc_stats_freed(ctx) == 10
+    ok1 && ok2 && ok3
+}
+
+// ---------------------------------------------------------------------------
+// T50: All objects rooted — nothing freed
+// ---------------------------------------------------------------------------
+fn test_gc_all_rooted() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    var i: i64 = 0
+    while i < 8 {
+        let r = gc_alloc_raw(ctx, 1, 8, 0)
+        ctx = r.0
+        ctx = gc_push_root(ctx, r.1)
+        i = i + 1
+    }
+    ctx = gc_collect_major(ctx)
+    let ok1 = gc_heap_obj_count(ctx) == 8
+    let ok2 = gc_stats_freed(ctx) == 0
+    ok1 && ok2
+}
+
+// ---------------------------------------------------------------------------
+// T51: Compact empty heap — no crash
+// ---------------------------------------------------------------------------
+fn test_gc_compact_empty() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    ctx = gc_compact(ctx)
+    let ok1 = gc_heap_bump(ctx) == 0
+    let ok2 = gc_heap_obj_count(ctx) == 0
+    ok1 && ok2
+}
+
+// ---------------------------------------------------------------------------
+// T52: Minor collection with write barrier — old->young reference preserved
+// ---------------------------------------------------------------------------
+fn test_gc_minor_with_barrier() -> bool with Mut, Panic, Div {
+    var ctx = gc_context_new()
+    // Create old rooted object
+    let r0 = gc_alloc_raw(ctx, 1, 8, 1)
+    ctx = r0.0
+    let old_obj = r0.1
+    ctx = gc_promote(ctx, old_obj)
+    ctx = gc_push_root(ctx, old_obj)
+    // Create young object referenced by old (via barrier)
+    let r1 = gc_alloc_raw(ctx, 2, 8, 0)
+    ctx = r1.0
+    let young_child = r1.1
+    ctx = gc_set_field_with_barrier(ctx, old_obj, 0, young_child)
+    // Create unreferenced young garbage
+    let r2 = gc_alloc_raw(ctx, 3, 8, 0)
+    ctx = r2.0
+    let young_garbage = r2.1
+    // Minor collect
+    ctx = gc_collect_minor(ctx)
+    // old_obj untouched (old gen), young_child promoted (survived), young_garbage freed
+    let ok1 = gc_is_alive(ctx, old_obj)
+    // young_child should have been promoted since it survived minor GC
+    let ok2 = gc_get_gen(ctx, young_child) == GC_GEN_OLD
+    let ok3 = !gc_is_alive(ctx, young_garbage)
+    ok1 && ok2 && ok3
+}

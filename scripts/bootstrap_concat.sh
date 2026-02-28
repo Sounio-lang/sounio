@@ -60,6 +60,7 @@ FILES=(
   self-hosted/resolve/mod.sio
   self-hosted/resolve/scopes.sio
   self-hosted/resolve/modules.sio
+  self-hosted/resolve/packages.sio
 
   # ── 5. Check layer ──────────────────────────────────────────────
   self-hosted/check/types.sio
@@ -81,6 +82,8 @@ FILES=(
   self-hosted/check/macros.sio
   self-hosted/check/lifetimes.sio
   self-hosted/check/borrows.sio
+  self-hosted/check/monomorph.sio
+  self-hosted/check/pat_decision.sio
 
   # ── 6. Effects layer ────────────────────────────────────────────
   self-hosted/effects/types.sio
@@ -103,6 +106,10 @@ FILES=(
   self-hosted/ir/closure.sio
   self-hosted/ir/dep_graph.sio
   self-hosted/ir/cfg.sio
+  self-hosted/ir/inline.sio
+  self-hosted/ir/async_lower.sio
+  self-hosted/ir/dce.sio
+  self-hosted/ir/tailcall.sio
   self-hosted/ir/mod.sio
 
   # ── 8. HLIR (High-Level IR) ─────────────────────────────────────
@@ -129,6 +136,8 @@ FILES=(
   self-hosted/native/codegen_plan.sio
   self-hosted/native/abi_lower.sio
   self-hosted/native/debug_info.sio
+  self-hosted/native/macho.sio
+  self-hosted/native/ffi.sio
   self-hosted/native/hyper_lower.sio
   self-hosted/native/suite.sio
 
@@ -141,6 +150,7 @@ FILES=(
 
   # ── 11. VM ──────────────────────────────────────────────────────
   self-hosted/vm/vm.sio
+  self-hosted/vm/gc.sio
   self-hosted/vm/mod.sio
 
   # ── 12. Collections ─────────────────────────────────────────────
@@ -163,6 +173,9 @@ FILES=(
   # ── 15. Linker ──────────────────────────────────────────────────
   self-hosted/linker/mod.sio
   self-hosted/linker/elf_writer.sio
+
+  # ── 15b. Tools ─────────────────────────────────────────────────
+  self-hosted/tools/formatter.sio
 
   # ── 16. LLVM backend ────────────────────────────────────────────
   self-hosted/llvm/types.sio
@@ -190,6 +203,7 @@ FILES=(
   self-hosted/gpu/numerical.sio
   self-hosted/gpu/metal.sio
   self-hosted/gpu/spirv.sio
+  self-hosted/gpu/spirv_text.sio
   self-hosted/gpu/portable.sio
   self-hosted/gpu/tensor_epistemic.sio
 
@@ -333,6 +347,7 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/resolve/mod.sio
     self-hosted/resolve/scopes.sio
     self-hosted/resolve/modules.sio
+    self-hosted/resolve/packages.sio
 
     # 5. Check layer
     self-hosted/check/types.sio
@@ -354,6 +369,8 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/check/macros.sio
     self-hosted/check/lifetimes.sio
     self-hosted/check/borrows.sio
+    self-hosted/check/monomorph.sio
+    self-hosted/check/pat_decision.sio
 
     # 5b. Diagnostics engine
     self-hosted/diagnostics/mod.sio
@@ -374,6 +391,10 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/ir/closure.sio
     self-hosted/ir/dep_graph.sio
     self-hosted/ir/cfg.sio
+    self-hosted/ir/inline.sio
+    self-hosted/ir/async_lower.sio
+    self-hosted/ir/dce.sio
+    self-hosted/ir/tailcall.sio
     self-hosted/ir/mod.sio
 
     # 7. Native codegen layer
@@ -394,6 +415,8 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/native/codegen_plan.sio
     self-hosted/native/abi_lower.sio
     self-hosted/native/debug_info.sio
+    self-hosted/native/macho.sio
+    self-hosted/native/ffi.sio
     self-hosted/native/hyper_lower.sio
 
     # 8. WebAssembly backend
@@ -401,9 +424,10 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/wasm/encode.sio
     self-hosted/wasm/lower.sio
 
-    # 8b. Tensor + Linker expansion
+    # 8b. Tensor + Linker + Tools expansion
     self-hosted/tensor/ops.sio
     self-hosted/linker/elf_writer.sio
+    self-hosted/tools/formatter.sio
 
     # 8c. LSP protocol
     self-hosted/lsp/protocol.sio

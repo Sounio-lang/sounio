@@ -1,0 +1,2382 @@
+// Pattern match decision tree compiler
+//
+// Implements the Maranget-style algorithm for:
+//   - Exhaustiveness checking (are all cases covered?)
+//   - Usefulness checking (is each arm reachable?)
+//   - Redundancy detection (unreachable patterns)
+//   - Decision tree compilation (compile match to switch tree)
+//   - Column selection heuristics (leftmost, most-constructors)
+//   - Variable binding tracking at leaves
+//   - Guard handling (guards weaken exhaustiveness guarantees)
+//
+// Uses flat-array arena pattern (no recursive types) consistent
+// with the self-hosted checker's design.  All struct names use the
+// Pat prefix.  All function names use the pdt_ prefix.  All
+// constants use the PDT_ prefix.
+
+// ============================================================
+// Capacity constants
+// ============================================================
+
+let PDT_MAX_ROWS: i64 = 256
+let PDT_MAX_COLS: i64 = 16
+let PDT_MAX_NODES: i64 = 4096
+let PDT_MAX_BINDINGS: i64 = 8
+
+// ============================================================
+// Decision node kind constants
+// ============================================================
+
+let PDT_NODE_TEST: i64 = 1
+let PDT_NODE_LEAF: i64 = 2
+let PDT_NODE_FAIL: i64 = 3
+
+// ============================================================
+// Pattern kind constants
+// ============================================================
+
+let PDT_WILDCARD: i64 = 0
+let PDT_LITERAL: i64 = 1
+let PDT_CONSTRUCTOR: i64 = 2
+let PDT_RANGE: i64 = 3
+
+// ============================================================
+// Heuristic kind constants
+// ============================================================
+
+let PDT_HEURISTIC_LEFTMOST: i64 = 0
+let PDT_HEURISTIC_MOST_CONSTRUCTORS: i64 = 1
+
+// ============================================================
+// PdtBinding — a single variable binding (name_id + column)
+// ============================================================
+
+struct PdtBinding {
+    name_id: i64,
+    column_idx: i64,
+}
+
+fn pdt_binding_empty() -> PdtBinding {
+    PdtBinding { name_id: 0, column_idx: 0 }
+}
+
+// ============================================================
+// PdtNode — a decision tree node
+// ============================================================
+//
+// kind:
+//   PDT_NODE_TEST  — test scrutinee column against a value
+//   PDT_NODE_LEAF  — matched; execute action
+//   PDT_NODE_FAIL  — match failure (non-exhaustive)
+//
+// For TEST nodes:
+//   column_idx   = which column to test
+//   test_value   = constructor tag / literal value to compare
+//   true_child   = node index if test succeeds
+//   false_child  = node index if test fails (next alternative)
+//
+// For LEAF nodes:
+//   leaf_action_id = which match arm to execute
+//   var_bindings   = variables bound at this leaf
+//   bind_count     = number of active bindings
+//
+// For FAIL nodes: all fields zero.
+
+struct PdtNode {
+    kind: i64,
+    column_idx: i64,
+    test_value: i64,
+    true_child: i64,
+    false_child: i64,
+    leaf_action_id: i64,
+    var_bindings: [PdtBinding; 8],
+    bind_count: i64,
+}
+
+fn pdt_node_empty() -> PdtNode {
+    PdtNode {
+        kind: PDT_NODE_FAIL,
+        column_idx: 0,
+        test_value: 0,
+        true_child: 0,
+        false_child: 0,
+        leaf_action_id: 0,
+        var_bindings: [pdt_binding_empty(); 8],
+        bind_count: 0,
+    }
+}
+
+fn pdt_node_test(col: i64, val: i64, t_child: i64, f_child: i64) -> PdtNode {
+    PdtNode {
+        kind: PDT_NODE_TEST,
+        column_idx: col,
+        test_value: val,
+        true_child: t_child,
+        false_child: f_child,
+        leaf_action_id: 0,
+        var_bindings: [pdt_binding_empty(); 8],
+        bind_count: 0,
+    }
+}
+
+fn pdt_node_leaf(action: i64) -> PdtNode {
+    PdtNode {
+        kind: PDT_NODE_LEAF,
+        column_idx: 0,
+        test_value: 0,
+        true_child: 0,
+        false_child: 0,
+        leaf_action_id: action,
+        var_bindings: [pdt_binding_empty(); 8],
+        bind_count: 0,
+    }
+}
+
+fn pdt_node_fail() -> PdtNode {
+    PdtNode {
+        kind: PDT_NODE_FAIL,
+        column_idx: 0,
+        test_value: 0,
+        true_child: 0,
+        false_child: 0,
+        leaf_action_id: 0,
+        var_bindings: [pdt_binding_empty(); 8],
+        bind_count: 0,
+    }
+}
+
+// ============================================================
+// PdtRow — one row in the pattern matrix
+// ============================================================
+//
+// patterns:    column values (pattern kind encoded as:
+//              high 32 bits = PDT_WILDCARD/PDT_LITERAL/etc.,
+//              low 32 bits = value/tag)
+// guard_id:    -1 if no guard, otherwise index into guard table
+// action_id:   which arm to execute when this row matches
+// is_wildcard: per-column flag: 1 if wildcard, 0 otherwise
+// col_count:   how many columns are active
+// binding_names: per-column binding name_id (-1 if no binding)
+
+struct PdtRow {
+    patterns: [i64; 16],
+    guard_id: i64,
+    action_id: i64,
+    is_wildcard: [i64; 16],
+    col_count: i64,
+    binding_names: [i64; 16],
+}
+
+fn pdt_row_new() -> PdtRow {
+    PdtRow {
+        patterns: [0; 16],
+        guard_id: 0 - 1,
+        action_id: 0,
+        is_wildcard: [0; 16],
+        col_count: 0,
+        binding_names: [0 - 1; 16],
+    }
+}
+
+fn pdt_row_set_col(row: PdtRow, col: i64, kind: i64, value: i64) -> PdtRow with Mut, Panic, Div {
+    var r = row
+    // Encode kind and value together: kind * 1000000 + value
+    // (Sufficient for our use — values stay within range)
+    r.patterns[col as usize] = kind * 1000000 + value
+    if kind == PDT_WILDCARD {
+        r.is_wildcard[col as usize] = 1
+    } else {
+        r.is_wildcard[col as usize] = 0
+    }
+    if col >= r.col_count {
+        r.col_count = col + 1
+    }
+    r
+}
+
+fn pdt_row_get_kind(row: PdtRow, col: i64) -> i64 with Panic, Div {
+    let encoded = row.patterns[col as usize]
+    encoded / 1000000
+}
+
+fn pdt_row_get_value(row: PdtRow, col: i64) -> i64 with Panic, Div {
+    let encoded = row.patterns[col as usize]
+    let kind = encoded / 1000000
+    encoded - kind * 1000000
+}
+
+fn pdt_row_is_wild(row: PdtRow, col: i64) -> bool with Panic, Div {
+    row.is_wildcard[col as usize] == 1
+}
+
+fn pdt_row_set_binding(row: PdtRow, col: i64, name_id: i64) -> PdtRow with Mut, Panic, Div {
+    var r = row
+    r.binding_names[col as usize] = name_id
+    r
+}
+
+fn pdt_row_set_guard(row: PdtRow, guard: i64) -> PdtRow with Mut {
+    var r = row
+    r.guard_id = guard
+    r
+}
+
+fn pdt_row_has_guard(row: PdtRow) -> bool {
+    row.guard_id >= 0
+}
+
+// ============================================================
+// PdtColumn — column metadata
+// ============================================================
+
+struct PdtColumn {
+    col_idx: i64,
+    type_id: i64,
+    is_variant: bool,
+    variant_count: i64,
+    is_exhaustive: bool,
+}
+
+fn pdt_column_new(idx: i64) -> PdtColumn {
+    PdtColumn {
+        col_idx: idx,
+        type_id: 0,
+        is_variant: false,
+        variant_count: 0,
+        is_exhaustive: false,
+    }
+}
+
+fn pdt_column_set_variant(col: PdtColumn, count: i64) -> PdtColumn with Mut {
+    var c = col
+    c.is_variant = true
+    c.variant_count = count
+    c
+}
+
+fn pdt_column_set_type(col: PdtColumn, tid: i64) -> PdtColumn with Mut {
+    var c = col
+    c.type_id = tid
+    c
+}
+
+// ============================================================
+// PdtMatrix — the pattern matrix
+// ============================================================
+
+struct PdtMatrix {
+    rows: [PdtRow; 256],
+    row_count: i64,
+    columns: [PdtColumn; 16],
+    col_count: i64,
+}
+
+fn pdt_matrix_new() -> PdtMatrix {
+    PdtMatrix {
+        rows: [pdt_row_new(); 256],
+        row_count: 0,
+        columns: [pdt_column_new(0); 16],
+        col_count: 0,
+    }
+}
+
+fn pdt_matrix_add_row(matrix: PdtMatrix, row: PdtRow) -> PdtMatrix with Mut, Panic, Div {
+    var m = matrix
+    if m.row_count < PDT_MAX_ROWS {
+        m.rows[m.row_count as usize] = row
+        m.row_count = m.row_count + 1
+    }
+    m
+}
+
+fn pdt_matrix_get_row(matrix: PdtMatrix, idx: i64) -> PdtRow with Panic, Div {
+    matrix.rows[idx as usize]
+}
+
+fn pdt_matrix_set_col_meta(matrix: PdtMatrix, col: i64, meta: PdtColumn) -> PdtMatrix with Mut, Panic, Div {
+    var m = matrix
+    m.columns[col as usize] = meta
+    if col >= m.col_count {
+        m.col_count = col + 1
+    }
+    m
+}
+
+fn pdt_matrix_get_col_meta(matrix: PdtMatrix, col: i64) -> PdtColumn with Panic, Div {
+    matrix.columns[col as usize]
+}
+
+// ============================================================
+// PdtDecisionTree — compiled tree with flat node array
+// ============================================================
+
+struct PdtDecisionTree {
+    nodes: [PdtNode; 4096],
+    node_count: i64,
+    root_idx: i64,
+}
+
+fn pdt_decision_tree_new() -> PdtDecisionTree {
+    PdtDecisionTree {
+        nodes: [pdt_node_empty(); 4096],
+        node_count: 0,
+        root_idx: 0,
+    }
+}
+
+fn pdt_tree_add_node(tree: PdtDecisionTree, node: PdtNode) -> (PdtDecisionTree, i64) with Mut, Panic, Div {
+    var t = tree
+    let idx = t.node_count
+    if idx < PDT_MAX_NODES {
+        t.nodes[idx as usize] = node
+        t.node_count = idx + 1
+    }
+    (t, idx)
+}
+
+fn pdt_tree_get_node(tree: PdtDecisionTree, idx: i64) -> PdtNode with Panic, Div {
+    tree.nodes[idx as usize]
+}
+
+fn pdt_tree_set_root(tree: PdtDecisionTree, idx: i64) -> PdtDecisionTree with Mut {
+    var t = tree
+    t.root_idx = idx
+    t
+}
+
+// ============================================================
+// PdtCompiler — compiler context
+// ============================================================
+
+struct PdtCompiler {
+    matrix: PdtMatrix,
+    tree: PdtDecisionTree,
+    heuristic: i64,
+    temp_count: i64,
+    error_count: i64,
+    errors: [i64; 64],
+}
+
+fn pdt_compiler_new() -> PdtCompiler {
+    PdtCompiler {
+        matrix: pdt_matrix_new(),
+        tree: pdt_decision_tree_new(),
+        heuristic: PDT_HEURISTIC_MOST_CONSTRUCTORS,
+        temp_count: 0,
+        error_count: 0,
+        errors: [0; 64],
+    }
+}
+
+fn pdt_compiler_set_heuristic(pc: PdtCompiler, h: i64) -> PdtCompiler with Mut {
+    var c = pc
+    c.heuristic = h
+    c
+}
+
+fn pdt_compiler_set_matrix(pc: PdtCompiler, m: PdtMatrix) -> PdtCompiler with Mut {
+    var c = pc
+    c.matrix = m
+    c
+}
+
+fn pdt_compiler_add_error(pc: PdtCompiler, err: i64) -> PdtCompiler with Mut, Panic, Div {
+    var c = pc
+    if c.error_count < 64 {
+        c.errors[c.error_count as usize] = err
+        c.error_count = c.error_count + 1
+    }
+    c
+}
+
+// ============================================================
+// Unique constructor counting for a column
+// ============================================================
+//
+// Scans all rows in the matrix for the given column and counts
+// distinct non-wildcard constructor values.  Returns the count.
+
+fn pdt_count_unique_ctors(matrix: PdtMatrix, col: i64) -> i64 with Mut, Panic, Div {
+    var seen: [i64; 256] = [0 - 1; 256]
+    var seen_count: i64 = 0
+    var i: i64 = 0
+    while i < matrix.row_count {
+        let row = pdt_matrix_get_row(matrix, i)
+        if !pdt_row_is_wild(row, col) {
+            let val = pdt_row_get_value(row, col)
+            // Check if already seen
+            var found = false
+            var j: i64 = 0
+            while j < seen_count {
+                if seen[j as usize] == val {
+                    found = true
+                }
+                j = j + 1
+            }
+            if !found {
+                if seen_count < 256 {
+                    seen[seen_count as usize] = val
+                    seen_count = seen_count + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    seen_count
+}
+
+// ============================================================
+// Wildcard counting for a column
+// ============================================================
+
+fn pdt_count_wildcards(matrix: PdtMatrix, col: i64) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < matrix.row_count {
+        let row = pdt_matrix_get_row(matrix, i)
+        if pdt_row_is_wild(row, col) {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================
+// Column selection heuristic
+// ============================================================
+//
+// PDT_HEURISTIC_LEFTMOST: always pick column 0
+// PDT_HEURISTIC_MOST_CONSTRUCTORS: pick the column with the
+//   most unique constructors (tie-break: leftmost)
+
+fn pdt_select_column(matrix: PdtMatrix, heuristic: i64) -> i64 with Mut, Panic, Div {
+    if matrix.col_count <= 0 {
+        return 0
+    }
+    if heuristic == PDT_HEURISTIC_LEFTMOST {
+        return 0
+    }
+    // PDT_HEURISTIC_MOST_CONSTRUCTORS
+    var best_col: i64 = 0
+    var best_score: i64 = 0 - 1
+    var c: i64 = 0
+    while c < matrix.col_count {
+        let unique = pdt_count_unique_ctors(matrix, c)
+        if unique > best_score {
+            best_score = unique
+            best_col = c
+        }
+        c = c + 1
+    }
+    best_col
+}
+
+// ============================================================
+// Collect distinct constructor values in a column
+// ============================================================
+//
+// Returns: (values array, count)
+
+struct PdtCtorList {
+    values: [i64; 256],
+    count: i64,
+}
+
+fn pdt_ctor_list_new() -> PdtCtorList {
+    PdtCtorList {
+        values: [0; 256],
+        count: 0,
+    }
+}
+
+fn pdt_collect_ctors(matrix: PdtMatrix, col: i64) -> PdtCtorList with Mut, Panic, Div {
+    var list = pdt_ctor_list_new()
+    var i: i64 = 0
+    while i < matrix.row_count {
+        let row = pdt_matrix_get_row(matrix, i)
+        if !pdt_row_is_wild(row, col) {
+            let val = pdt_row_get_value(row, col)
+            // Add if not already present
+            var found = false
+            var j: i64 = 0
+            while j < list.count {
+                if list.values[j as usize] == val {
+                    found = true
+                }
+                j = j + 1
+            }
+            if !found {
+                if list.count < 256 {
+                    list.values[list.count as usize] = val
+                    list.count = list.count + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    list
+}
+
+// ============================================================
+// Specialization
+// ============================================================
+//
+// Given a constructor value for a chosen column, produce the
+// specialized sub-matrix: only rows whose pattern at that
+// column either matches the constructor or is a wildcard.
+// The chosen column is removed from the result.
+
+fn pdt_specialize(matrix: PdtMatrix, col: i64, ctor_val: i64) -> PdtMatrix with Mut, Panic, Div {
+    var result = pdt_matrix_new()
+    result.col_count = matrix.col_count - 1
+
+    // Copy column metadata (skip the chosen column)
+    var mc: i64 = 0
+    var dc: i64 = 0
+    while mc < matrix.col_count {
+        if mc != col {
+            result.columns[dc as usize] = matrix.columns[mc as usize]
+            dc = dc + 1
+        }
+        mc = mc + 1
+    }
+
+    var i: i64 = 0
+    while i < matrix.row_count {
+        let row = pdt_matrix_get_row(matrix, i)
+        let kind = pdt_row_get_kind(row, col)
+        let val = pdt_row_get_value(row, col)
+        let wild = pdt_row_is_wild(row, col)
+
+        if wild || (kind != PDT_WILDCARD && val == ctor_val) {
+            // Build new row without the chosen column
+            var new_row = pdt_row_new()
+            new_row.action_id = row.action_id
+            new_row.guard_id = row.guard_id
+            var src: i64 = 0
+            var dst: i64 = 0
+            while src < matrix.col_count {
+                if src != col {
+                    new_row.patterns[dst as usize] = row.patterns[src as usize]
+                    new_row.is_wildcard[dst as usize] = row.is_wildcard[src as usize]
+                    new_row.binding_names[dst as usize] = row.binding_names[src as usize]
+                    dst = dst + 1
+                }
+                src = src + 1
+            }
+            new_row.col_count = matrix.col_count - 1
+            result = pdt_matrix_add_row(result, new_row)
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================
+// Default matrix
+// ============================================================
+//
+// The fallback sub-matrix: only rows whose pattern at the
+// chosen column is a wildcard.  The chosen column is removed.
+
+fn pdt_default_matrix(matrix: PdtMatrix, col: i64) -> PdtMatrix with Mut, Panic, Div {
+    var result = pdt_matrix_new()
+    result.col_count = matrix.col_count - 1
+
+    // Copy column metadata (skip chosen)
+    var mc: i64 = 0
+    var dc: i64 = 0
+    while mc < matrix.col_count {
+        if mc != col {
+            result.columns[dc as usize] = matrix.columns[mc as usize]
+            dc = dc + 1
+        }
+        mc = mc + 1
+    }
+
+    var i: i64 = 0
+    while i < matrix.row_count {
+        let row = pdt_matrix_get_row(matrix, i)
+        if pdt_row_is_wild(row, col) {
+            var new_row = pdt_row_new()
+            new_row.action_id = row.action_id
+            new_row.guard_id = row.guard_id
+            var src: i64 = 0
+            var dst: i64 = 0
+            while src < matrix.col_count {
+                if src != col {
+                    new_row.patterns[dst as usize] = row.patterns[src as usize]
+                    new_row.is_wildcard[dst as usize] = row.is_wildcard[src as usize]
+                    new_row.binding_names[dst as usize] = row.binding_names[src as usize]
+                    dst = dst + 1
+                }
+                src = src + 1
+            }
+            new_row.col_count = matrix.col_count - 1
+            result = pdt_matrix_add_row(result, new_row)
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================
+// Exhaustiveness checking
+// ============================================================
+//
+// A pattern matrix is exhaustive if every possible input value
+// is matched by at least one row.
+//
+// Algorithm (Maranget):
+// 1. If the matrix has no columns, it is exhaustive iff row_count > 0.
+// 2. If the matrix has no rows, it is NOT exhaustive.
+// 3. Pick a column.
+// 4. Collect all constructors C_1..C_k in that column.
+// 5. If the column's type has exactly k constructors (complete):
+//    exhaustive iff S(C_i, M) is exhaustive for each C_i.
+// 6. Otherwise (incomplete): exhaustive iff D(M) is exhaustive.
+//
+// Guarded rows are treated as wildcards for exhaustiveness since
+// the guard might fail at runtime.
+
+fn pdt_is_exhaustive(matrix: PdtMatrix) -> bool with Mut, Panic, Div {
+    // Base cases
+    if matrix.col_count == 0 {
+        // Check if any row exists (guarded rows DO count for
+        // zero-column base case since the row shape matched)
+        return matrix.row_count > 0
+    }
+    if matrix.row_count == 0 {
+        return false
+    }
+
+    // Pick column 0 for exhaustiveness (leftmost is fine here)
+    let col: i64 = 0
+
+    // Check column metadata for variant info
+    let meta = pdt_matrix_get_col_meta(matrix, col)
+
+    // Collect constructors in this column (skip guarded rows for
+    // exhaustiveness constructor accounting)
+    var ctors = pdt_ctor_list_new()
+    var i: i64 = 0
+    while i < matrix.row_count {
+        let row = pdt_matrix_get_row(matrix, i)
+        if !pdt_row_is_wild(row, col) && !pdt_row_has_guard(row) {
+            let val = pdt_row_get_value(row, col)
+            var found = false
+            var j: i64 = 0
+            while j < ctors.count {
+                if ctors.values[j as usize] == val {
+                    found = true
+                }
+                j = j + 1
+            }
+            if !found {
+                if ctors.count < 256 {
+                    ctors.values[ctors.count as usize] = val
+                    ctors.count = ctors.count + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    // Determine if the constructor set is complete
+    let type_total = meta.variant_count
+    if meta.is_variant && type_total > 0 && ctors.count >= type_total {
+        // Complete: check each constructor's specialization
+        var c: i64 = 0
+        while c < ctors.count {
+            let spec = pdt_specialize(matrix, col, ctors.values[c as usize])
+            if !pdt_is_exhaustive(spec) {
+                return false
+            }
+            c = c + 1
+        }
+        return true
+    } else {
+        // Incomplete or open type: check default matrix
+        let def = pdt_default_matrix(matrix, col)
+        return pdt_is_exhaustive(def)
+    }
+}
+
+// ============================================================
+// Usefulness checking
+// ============================================================
+//
+// A row q is useful with respect to matrix P iff there exists
+// a value matched by q that is not matched by any row in P.
+//
+// Used to detect redundant/unreachable arms.
+
+fn pdt_row_is_useful(matrix: PdtMatrix, q: PdtRow) -> bool with Mut, Panic, Div {
+    // Base: no columns
+    if matrix.col_count == 0 {
+        return matrix.row_count == 0
+    }
+    if q.col_count == 0 {
+        return matrix.row_count == 0
+    }
+
+    let col: i64 = 0
+
+    let q_wild = pdt_row_is_wild(q, col)
+
+    if !q_wild {
+        // q has a constructor at column 0
+        let q_val = pdt_row_get_value(q, col)
+        let spec = pdt_specialize(matrix, col, q_val)
+
+        // Build specialized q (remove column 0)
+        var sq = pdt_row_new()
+        sq.action_id = q.action_id
+        sq.guard_id = q.guard_id
+        var src: i64 = 1
+        var dst: i64 = 0
+        while src < q.col_count {
+            sq.patterns[dst as usize] = q.patterns[src as usize]
+            sq.is_wildcard[dst as usize] = q.is_wildcard[src as usize]
+            sq.binding_names[dst as usize] = q.binding_names[src as usize]
+            dst = dst + 1
+            src = src + 1
+        }
+        sq.col_count = q.col_count - 1
+        return pdt_row_is_useful(spec, sq)
+    } else {
+        // q is wildcard at column 0
+        let meta = pdt_matrix_get_col_meta(matrix, col)
+        let ctors = pdt_collect_ctors(matrix, col)
+
+        if meta.is_variant && meta.variant_count > 0 && ctors.count >= meta.variant_count {
+            // Complete set: check each constructor
+            var c: i64 = 0
+            while c < ctors.count {
+                let spec2 = pdt_specialize(matrix, col, ctors.values[c as usize])
+                var sq2 = pdt_row_new()
+                sq2.action_id = q.action_id
+                sq2.guard_id = q.guard_id
+                var src2: i64 = 1
+                var dst2: i64 = 0
+                while src2 < q.col_count {
+                    sq2.patterns[dst2 as usize] = q.patterns[src2 as usize]
+                    sq2.is_wildcard[dst2 as usize] = q.is_wildcard[src2 as usize]
+                    sq2.binding_names[dst2 as usize] = q.binding_names[src2 as usize]
+                    dst2 = dst2 + 1
+                    src2 = src2 + 1
+                }
+                sq2.col_count = q.col_count - 1
+                if pdt_row_is_useful(spec2, sq2) {
+                    return true
+                }
+                c = c + 1
+            }
+            return false
+        } else {
+            // Incomplete: use default matrix
+            let def = pdt_default_matrix(matrix, col)
+            var sq3 = pdt_row_new()
+            sq3.action_id = q.action_id
+            sq3.guard_id = q.guard_id
+            var src3: i64 = 1
+            var dst3: i64 = 0
+            while src3 < q.col_count {
+                sq3.patterns[dst3 as usize] = q.patterns[src3 as usize]
+                sq3.is_wildcard[dst3 as usize] = q.is_wildcard[src3 as usize]
+                sq3.binding_names[dst3 as usize] = q.binding_names[src3 as usize]
+                dst3 = dst3 + 1
+                src3 = src3 + 1
+            }
+            sq3.col_count = q.col_count - 1
+            return pdt_row_is_useful(def, sq3)
+        }
+    }
+}
+
+// ============================================================
+// Redundancy detection
+// ============================================================
+//
+// Returns the index of the first redundant row, or -1 if none.
+// Builds the matrix incrementally and checks each row against
+// all preceding rows.
+
+fn pdt_find_redundant(matrix: PdtMatrix) -> i64 with Mut, Panic, Div {
+    var built = pdt_matrix_new()
+    built.col_count = matrix.col_count
+    // Copy column metadata
+    var mc: i64 = 0
+    while mc < matrix.col_count {
+        built.columns[mc as usize] = matrix.columns[mc as usize]
+        mc = mc + 1
+    }
+
+    var i: i64 = 0
+    while i < matrix.row_count {
+        let row = pdt_matrix_get_row(matrix, i)
+        if !pdt_row_is_useful(built, row) {
+            return i
+        }
+        built = pdt_matrix_add_row(built, row)
+        i = i + 1
+    }
+    0 - 1
+}
+
+// ============================================================
+// Find missing constructor
+// ============================================================
+//
+// Returns the first constructor value not covered by the matrix
+// in column 0.  Returns -1 if all are covered.
+
+fn pdt_find_missing_ctor(matrix: PdtMatrix, col: i64) -> i64 with Mut, Panic, Div {
+    let meta = pdt_matrix_get_col_meta(matrix, col)
+    if !meta.is_variant || meta.variant_count <= 0 {
+        return 0 - 1
+    }
+
+    let ctors = pdt_collect_ctors(matrix, col)
+
+    // Check each expected constructor 0..variant_count-1
+    var v: i64 = 0
+    while v < meta.variant_count {
+        var found = false
+        var j: i64 = 0
+        while j < ctors.count {
+            if ctors.values[j as usize] == v {
+                found = true
+            }
+            j = j + 1
+        }
+        if !found {
+            return v
+        }
+        v = v + 1
+    }
+    0 - 1
+}
+
+// ============================================================
+// Collect bindings from a row
+// ============================================================
+//
+// Gathers all (name_id, column_idx) pairs from a row where
+// binding_names[col] >= 0.
+
+fn pdt_collect_bindings(row: PdtRow) -> (i64, [PdtBinding; 8]) with Mut, Panic, Div {
+    var binds: [PdtBinding; 8] = [pdt_binding_empty(); 8]
+    var count: i64 = 0
+    var c: i64 = 0
+    while c < row.col_count {
+        if row.binding_names[c as usize] >= 0 {
+            if count < PDT_MAX_BINDINGS {
+                binds[count as usize] = PdtBinding {
+                    name_id: row.binding_names[c as usize],
+                    column_idx: c,
+                }
+                count = count + 1
+            }
+        }
+        c = c + 1
+    }
+    (count, binds)
+}
+
+// ============================================================
+// Tree compilation — recursive algorithm
+// ============================================================
+//
+// 1. If matrix has no rows: emit FAIL node.
+// 2. If matrix has no columns: emit LEAF for first row's action,
+//    collecting variable bindings.
+// 3. Pick column via heuristic.
+// 4. Collect constructors in that column.
+// 5. For each constructor, specialize and compile sub-tree.
+// 6. Build default sub-tree.
+// 7. Chain TEST nodes: test ctor_0, on fail test ctor_1, ...,
+//    final false_child = default sub-tree (or FAIL).
+
+fn pdt_compile_tree(pc: PdtCompiler) -> PdtCompiler with Mut, Panic, Div {
+    let matrix = pc.matrix
+    var compiler = pc
+
+    if matrix.row_count == 0 {
+        // No rows: fail
+        let fail_node = pdt_node_fail()
+        let pair = pdt_tree_add_node(compiler.tree, fail_node)
+        compiler.tree = pair.0
+        compiler.tree = pdt_tree_set_root(compiler.tree, pair.1)
+        return compiler
+    }
+
+    if matrix.col_count == 0 {
+        // No columns: leaf with first row's action
+        let row0 = pdt_matrix_get_row(matrix, 0)
+        var leaf = pdt_node_leaf(row0.action_id)
+        // Attach bindings
+        let bind_info = pdt_collect_bindings(row0)
+        leaf.bind_count = bind_info.0
+        leaf.var_bindings = bind_info.1
+        let pair2 = pdt_tree_add_node(compiler.tree, leaf)
+        compiler.tree = pair2.0
+        compiler.tree = pdt_tree_set_root(compiler.tree, pair2.1)
+        return compiler
+    }
+
+    // Check if first row is all wildcards -> immediate leaf
+    var all_wild = true
+    var aw_check: i64 = 0
+    while aw_check < matrix.col_count {
+        let row_first = pdt_matrix_get_row(matrix, 0)
+        if !pdt_row_is_wild(row_first, aw_check) {
+            all_wild = false
+        }
+        aw_check = aw_check + 1
+    }
+    if all_wild {
+        let row0b = pdt_matrix_get_row(matrix, 0)
+        var leaf2 = pdt_node_leaf(row0b.action_id)
+        let bind_info2 = pdt_collect_bindings(row0b)
+        leaf2.bind_count = bind_info2.0
+        leaf2.var_bindings = bind_info2.1
+        let pair3 = pdt_tree_add_node(compiler.tree, leaf2)
+        compiler.tree = pair3.0
+        compiler.tree = pdt_tree_set_root(compiler.tree, pair3.1)
+        return compiler
+    }
+
+    // Pick column
+    let col = pdt_select_column(matrix, compiler.heuristic)
+
+    // Collect constructors
+    let ctors = pdt_collect_ctors(matrix, col)
+
+    if ctors.count == 0 {
+        // All wildcards in this column: use default
+        let def = pdt_default_matrix(matrix, col)
+        var sub_compiler = pdt_compiler_new()
+        sub_compiler.tree = compiler.tree
+        sub_compiler.heuristic = compiler.heuristic
+        sub_compiler.matrix = def
+        sub_compiler = pdt_compile_tree(sub_compiler)
+        compiler.tree = sub_compiler.tree
+        compiler.tree = pdt_tree_set_root(compiler.tree, sub_compiler.tree.root_idx)
+        compiler.error_count = sub_compiler.error_count
+        return compiler
+    }
+
+    // Compile default sub-tree first
+    let def_matrix = pdt_default_matrix(matrix, col)
+    var default_idx: i64 = 0 - 1
+
+    if def_matrix.row_count > 0 {
+        var def_compiler = pdt_compiler_new()
+        def_compiler.tree = compiler.tree
+        def_compiler.heuristic = compiler.heuristic
+        def_compiler.matrix = def_matrix
+        def_compiler = pdt_compile_tree(def_compiler)
+        compiler.tree = def_compiler.tree
+        default_idx = def_compiler.tree.root_idx
+    } else {
+        // No default rows: fail node for default
+        let fail_n = pdt_node_fail()
+        let fp = pdt_tree_add_node(compiler.tree, fail_n)
+        compiler.tree = fp.0
+        default_idx = fp.1
+    }
+
+    // Compile sub-tree for each constructor, then chain TEST nodes
+    // Process constructors in reverse so we can chain false_child
+    // from last to first.
+
+    // First, compile all constructor sub-trees and store their root indices
+    var sub_roots: [i64; 256] = [0; 256]
+    var ci: i64 = 0
+    while ci < ctors.count {
+        let spec = pdt_specialize(matrix, col, ctors.values[ci as usize])
+        var sub_pc = pdt_compiler_new()
+        sub_pc.tree = compiler.tree
+        sub_pc.heuristic = compiler.heuristic
+        sub_pc.matrix = spec
+        sub_pc = pdt_compile_tree(sub_pc)
+        compiler.tree = sub_pc.tree
+        sub_roots[ci as usize] = sub_pc.tree.root_idx
+        ci = ci + 1
+    }
+
+    // Build chain of TEST nodes from last to first
+    // Start with the default as the false_child of the last test
+    var chain_false = default_idx
+    var k: i64 = ctors.count - 1
+    while k >= 0 {
+        let test_node = pdt_node_test(col, ctors.values[k as usize], sub_roots[k as usize], chain_false)
+        let tp = pdt_tree_add_node(compiler.tree, test_node)
+        compiler.tree = tp.0
+        chain_false = tp.1
+        k = k - 1
+    }
+
+    compiler.tree = pdt_tree_set_root(compiler.tree, chain_false)
+    compiler
+}
+
+// ============================================================
+// Convenience: compile a matrix to a decision tree
+// ============================================================
+
+fn pdt_compile(matrix: PdtMatrix, heuristic: i64) -> PdtDecisionTree with Mut, Panic, Div {
+    var pc = pdt_compiler_new()
+    pc.heuristic = heuristic
+    pc.matrix = matrix
+    pc = pdt_compile_tree(pc)
+    pc.tree
+}
+
+// ============================================================
+// Exhaustiveness check for boolean columns
+// ============================================================
+//
+// Convenience wrapper: sets up column metadata for booleans
+// (variant_count=2) and checks exhaustiveness.
+
+fn pdt_check_bool_exhaustive(matrix: PdtMatrix) -> bool with Mut, Panic, Div {
+    var m = matrix
+    var meta = pdt_column_new(0)
+    meta.is_variant = true
+    meta.variant_count = 2
+    m = pdt_matrix_set_col_meta(m, 0, meta)
+    pdt_is_exhaustive(m)
+}
+
+// ============================================================
+// Range containment check
+// ============================================================
+//
+// Returns true if value falls within [lo, hi] inclusive.
+
+fn pdt_range_contains(lo: i64, hi: i64, value: i64) -> bool {
+    value >= lo && value <= hi
+}
+
+// ============================================================
+// Range overlap check
+// ============================================================
+//
+// Returns true if [lo1, hi1] and [lo2, hi2] overlap.
+
+fn pdt_ranges_overlap(lo1: i64, hi1: i64, lo2: i64, hi2: i64) -> bool {
+    lo1 <= hi2 && lo2 <= hi1
+}
+
+// ============================================================
+// Exhaustiveness for integer ranges
+// ============================================================
+//
+// Given a set of ranges that should cover [total_lo, total_hi],
+// checks for gaps.  ranges is encoded as pairs:
+//   ranges[2*i] = lo, ranges[2*i+1] = hi
+//
+// Simple O(n^2) sweep: for each integer in the range, check if
+// any interval covers it.  Only practical for small ranges.
+
+fn pdt_ranges_cover(ranges: [i64; 64], range_count: i64, total_lo: i64, total_hi: i64) -> bool with Mut, Panic, Div {
+    var v = total_lo
+    while v <= total_hi {
+        var covered = false
+        var r: i64 = 0
+        while r < range_count {
+            let lo = ranges[(r * 2) as usize]
+            let hi = ranges[(r * 2 + 1) as usize]
+            if v >= lo && v <= hi {
+                covered = true
+            }
+            r = r + 1
+        }
+        if !covered {
+            return false
+        }
+        v = v + 1
+    }
+    true
+}
+
+// ============================================================
+// Find first gap in ranges
+// ============================================================
+
+fn pdt_ranges_find_gap(ranges: [i64; 64], range_count: i64, total_lo: i64, total_hi: i64) -> i64 with Mut, Panic, Div {
+    var v = total_lo
+    while v <= total_hi {
+        var covered = false
+        var r: i64 = 0
+        while r < range_count {
+            let lo = ranges[(r * 2) as usize]
+            let hi = ranges[(r * 2 + 1) as usize]
+            if v >= lo && v <= hi {
+                covered = true
+            }
+            r = r + 1
+        }
+        if !covered {
+            return v
+        }
+        v = v + 1
+    }
+    0 - 1
+}
+
+// ============================================================
+// Swap columns in a matrix
+// ============================================================
+//
+// Useful when the heuristic picks a non-zero column; we swap
+// it to position 0 before specializing.
+
+fn pdt_matrix_swap_columns(matrix: PdtMatrix, a: i64, b: i64) -> PdtMatrix with Mut, Panic, Div {
+    if a == b {
+        return matrix
+    }
+    var m = matrix
+    // Swap column metadata
+    let tmp_meta = m.columns[a as usize]
+    m.columns[a as usize] = m.columns[b as usize]
+    m.columns[b as usize] = tmp_meta
+
+    // Swap column data in each row
+    var i: i64 = 0
+    while i < m.row_count {
+        let tmp_pat = m.rows[i as usize].patterns[a as usize]
+        let tmp_wild = m.rows[i as usize].is_wildcard[a as usize]
+        let tmp_bind = m.rows[i as usize].binding_names[a as usize]
+
+        m.rows[i as usize].patterns[a as usize] = m.rows[i as usize].patterns[b as usize]
+        m.rows[i as usize].is_wildcard[a as usize] = m.rows[i as usize].is_wildcard[b as usize]
+        m.rows[i as usize].binding_names[a as usize] = m.rows[i as usize].binding_names[b as usize]
+
+        m.rows[i as usize].patterns[b as usize] = tmp_pat
+        m.rows[i as usize].is_wildcard[b as usize] = tmp_wild
+        m.rows[i as usize].binding_names[b as usize] = tmp_bind
+
+        i = i + 1
+    }
+    m
+}
+
+// ============================================================
+// Matrix row count for a specific constructor in a column
+// ============================================================
+
+fn pdt_count_rows_for_ctor(matrix: PdtMatrix, col: i64, ctor_val: i64) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < matrix.row_count {
+        let row = pdt_matrix_get_row(matrix, i)
+        if pdt_row_is_wild(row, col) {
+            count = count + 1
+        } else {
+            let val = pdt_row_get_value(row, col)
+            if val == ctor_val {
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================
+// Check if a column has only wildcards
+// ============================================================
+
+fn pdt_column_all_wild(matrix: PdtMatrix, col: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < matrix.row_count {
+        let row = pdt_matrix_get_row(matrix, i)
+        if !pdt_row_is_wild(row, col) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// ============================================================
+// TEST HELPERS
+// ============================================================
+
+fn pdt_assert_true(cond: bool, test_id: i64) -> i64 with IO, Mut, Panic, Div {
+    if cond {
+        print("  PASS test_pdt_")
+        print_int(test_id)
+        print("\n")
+        return 0
+    } else {
+        print("  FAIL test_pdt_")
+        print_int(test_id)
+        print("\n")
+        return 1
+    }
+}
+
+// ============================================================
+// Helper: build a 1-column bool matrix with column meta
+// ============================================================
+
+fn pdt_make_bool_matrix() -> PdtMatrix with Mut, Panic, Div {
+    var m = pdt_matrix_new()
+    m.col_count = 1
+    var meta = pdt_column_new(0)
+    meta.is_variant = true
+    meta.variant_count = 2
+    m.columns[0] = meta
+    m
+}
+
+// Helper: make a wildcard row
+fn pdt_make_wild_row(action: i64) -> PdtRow with Mut, Panic, Div {
+    var r = pdt_row_new()
+    r.action_id = action
+    r = pdt_row_set_col(r, 0, PDT_WILDCARD, 0)
+    r
+}
+
+// Helper: make a bool literal row (0=false, 1=true)
+fn pdt_make_bool_row(val: i64, action: i64) -> PdtRow with Mut, Panic, Div {
+    var r = pdt_row_new()
+    r.action_id = action
+    r = pdt_row_set_col(r, 0, PDT_LITERAL, val)
+    r
+}
+
+// Helper: make a constructor row
+fn pdt_make_ctor_row(val: i64, action: i64) -> PdtRow with Mut, Panic, Div {
+    var r = pdt_row_new()
+    r.action_id = action
+    r = pdt_row_set_col(r, 0, PDT_CONSTRUCTOR, val)
+    r
+}
+
+// ============================================================
+// TEST 1: Single wildcard pattern (always matches)
+// ============================================================
+
+fn test_pdt_single_wildcard() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_make_bool_matrix()
+    let row = pdt_make_wild_row(0)
+    m = pdt_matrix_add_row(m, row)
+    let result = pdt_is_exhaustive(m)
+    pdt_assert_true(result, 1)
+}
+
+// ============================================================
+// TEST 2: Single literal pattern (NOT exhaustive for bools)
+// ============================================================
+
+fn test_pdt_single_literal() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_make_bool_matrix()
+    let row = pdt_make_bool_row(1, 0)
+    m = pdt_matrix_add_row(m, row)
+    let result = pdt_is_exhaustive(m)
+    pdt_assert_true(!result, 2)
+}
+
+// ============================================================
+// TEST 3: Two-row literal patterns (decision tree with test node)
+// ============================================================
+
+fn test_pdt_two_literals_tree() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_make_bool_matrix()
+    m = pdt_matrix_add_row(m, pdt_make_bool_row(1, 10))
+    m = pdt_matrix_add_row(m, pdt_make_bool_row(0, 20))
+
+    let tree = pdt_compile(m, PDT_HEURISTIC_LEFTMOST)
+    let root = pdt_tree_get_node(tree, tree.root_idx)
+    // Root should be a TEST node
+    let ok1 = root.kind == PDT_NODE_TEST
+    // Should test column 0
+    let ok2 = root.column_idx == 0
+    pdt_assert_true(ok1 && ok2, 3)
+}
+
+// ============================================================
+// TEST 4: Exhaustiveness of boolean patterns (true + false)
+// ============================================================
+
+fn test_pdt_bool_exhaustive() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_make_bool_matrix()
+    m = pdt_matrix_add_row(m, pdt_make_bool_row(1, 0))
+    m = pdt_matrix_add_row(m, pdt_make_bool_row(0, 1))
+    let result = pdt_is_exhaustive(m)
+    pdt_assert_true(result, 4)
+}
+
+// ============================================================
+// TEST 5: Non-exhaustive detection (only true, missing false)
+// ============================================================
+
+fn test_pdt_bool_non_exhaustive() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_make_bool_matrix()
+    m = pdt_matrix_add_row(m, pdt_make_bool_row(1, 0))
+    let result = pdt_is_exhaustive(m)
+    pdt_assert_true(!result, 5)
+}
+
+// ============================================================
+// TEST 6: Redundant pattern detection (duplicate true)
+// ============================================================
+
+fn test_pdt_redundant_literal() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_make_bool_matrix()
+    m = pdt_matrix_add_row(m, pdt_make_bool_row(1, 0))
+    m = pdt_matrix_add_row(m, pdt_make_bool_row(1, 1))
+    m = pdt_matrix_add_row(m, pdt_make_bool_row(0, 2))
+    let redundant = pdt_find_redundant(m)
+    // Row 1 is redundant (duplicate of row 0)
+    pdt_assert_true(redundant == 1, 6)
+}
+
+// ============================================================
+// TEST 7: No redundant patterns (all distinct)
+// ============================================================
+
+fn test_pdt_no_redundant() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_make_bool_matrix()
+    m = pdt_matrix_add_row(m, pdt_make_bool_row(1, 0))
+    m = pdt_matrix_add_row(m, pdt_make_bool_row(0, 1))
+    let redundant = pdt_find_redundant(m)
+    pdt_assert_true(redundant == 0 - 1, 7)
+}
+
+// ============================================================
+// TEST 8: Column selection — leftmost heuristic
+// ============================================================
+
+fn test_pdt_heuristic_leftmost() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_matrix_new()
+    m.col_count = 3
+    // Column 0: 1 unique ctor, Column 1: 2 unique, Column 2: 1 unique
+    var r1 = pdt_row_new()
+    r1.col_count = 3
+    r1 = pdt_row_set_col(r1, 0, PDT_LITERAL, 1)
+    r1 = pdt_row_set_col(r1, 1, PDT_LITERAL, 10)
+    r1 = pdt_row_set_col(r1, 2, PDT_WILDCARD, 0)
+
+    var r2 = pdt_row_new()
+    r2.col_count = 3
+    r2 = pdt_row_set_col(r2, 0, PDT_LITERAL, 1)
+    r2 = pdt_row_set_col(r2, 1, PDT_LITERAL, 20)
+    r2 = pdt_row_set_col(r2, 2, PDT_WILDCARD, 0)
+
+    m = pdt_matrix_add_row(m, r1)
+    m = pdt_matrix_add_row(m, r2)
+
+    let col = pdt_select_column(m, PDT_HEURISTIC_LEFTMOST)
+    pdt_assert_true(col == 0, 8)
+}
+
+// ============================================================
+// TEST 9: Column selection — most constructors heuristic
+// ============================================================
+
+fn test_pdt_heuristic_most_ctors() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_matrix_new()
+    m.col_count = 3
+
+    var r1 = pdt_row_new()
+    r1.col_count = 3
+    r1 = pdt_row_set_col(r1, 0, PDT_LITERAL, 1)
+    r1 = pdt_row_set_col(r1, 1, PDT_LITERAL, 10)
+    r1 = pdt_row_set_col(r1, 2, PDT_WILDCARD, 0)
+
+    var r2 = pdt_row_new()
+    r2.col_count = 3
+    r2 = pdt_row_set_col(r2, 0, PDT_LITERAL, 1)
+    r2 = pdt_row_set_col(r2, 1, PDT_LITERAL, 20)
+    r2 = pdt_row_set_col(r2, 2, PDT_WILDCARD, 0)
+
+    m = pdt_matrix_add_row(m, r1)
+    m = pdt_matrix_add_row(m, r2)
+
+    let col = pdt_select_column(m, PDT_HEURISTIC_MOST_CONSTRUCTORS)
+    // Column 1 has 2 unique ctors (10, 20), column 0 has 1 (1), column 2 has 0
+    pdt_assert_true(col == 1, 9)
+}
+
+// ============================================================
+// TEST 10: Specialization produces correct sub-matrix
+// ============================================================
+
+fn test_pdt_specialize_basic() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_make_bool_matrix()
+    m = pdt_matrix_add_row(m, pdt_make_bool_row(1, 10))
+    m = pdt_matrix_add_row(m, pdt_make_bool_row(0, 20))
+    m = pdt_matrix_add_row(m, pdt_make_wild_row(30))
+
+    // Specialize for true (value=1)
+    let spec = pdt_specialize(m, 0, 1)
+    // Should have 2 rows: the true row (action 10) and wildcard row (action 30)
+    let ok1 = spec.row_count == 2
+    let r0 = pdt_matrix_get_row(spec, 0)
+    let r1 = pdt_matrix_get_row(spec, 1)
+    let ok2 = r0.action_id == 10
+    let ok3 = r1.action_id == 30
+    // Column count should be 0 (removed the only column)
+    let ok4 = spec.col_count == 0
+    pdt_assert_true(ok1 && ok2 && ok3 && ok4, 10)
+}
+
+// ============================================================
+// TEST 11: Default matrix construction
+// ============================================================
+
+fn test_pdt_default_matrix() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_make_bool_matrix()
+    m = pdt_matrix_add_row(m, pdt_make_bool_row(1, 10))
+    m = pdt_matrix_add_row(m, pdt_make_wild_row(20))
+    m = pdt_matrix_add_row(m, pdt_make_bool_row(0, 30))
+
+    let def = pdt_default_matrix(m, 0)
+    // Only the wildcard row (action 20) should remain
+    let ok1 = def.row_count == 1
+    let r0 = pdt_matrix_get_row(def, 0)
+    let ok2 = r0.action_id == 20
+    pdt_assert_true(ok1 && ok2, 11)
+}
+
+// ============================================================
+// TEST 12: Variable binding at leaf
+// ============================================================
+
+fn test_pdt_variable_binding() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_matrix_new()
+    m.col_count = 1
+    var meta = pdt_column_new(0)
+    m = pdt_matrix_set_col_meta(m, 0, meta)
+
+    var row = pdt_row_new()
+    row.col_count = 1
+    row.action_id = 42
+    row = pdt_row_set_col(row, 0, PDT_WILDCARD, 0)
+    row = pdt_row_set_binding(row, 0, 100)
+    m = pdt_matrix_add_row(m, row)
+
+    let tree = pdt_compile(m, PDT_HEURISTIC_LEFTMOST)
+    let root = pdt_tree_get_node(tree, tree.root_idx)
+    // Should be a leaf
+    let ok1 = root.kind == PDT_NODE_LEAF
+    let ok2 = root.leaf_action_id == 42
+    // Should have 1 binding with name_id=100
+    let ok3 = root.bind_count == 1
+    let ok4 = root.var_bindings[0].name_id == 100
+    pdt_assert_true(ok1 && ok2 && ok3 && ok4, 12)
+}
+
+// ============================================================
+// TEST 13: Guard handling — guard row doesn't count for exhaustiveness
+// ============================================================
+
+fn test_pdt_guard_not_exhaustive() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_make_bool_matrix()
+
+    // Row 0: true, no guard
+    m = pdt_matrix_add_row(m, pdt_make_bool_row(1, 0))
+
+    // Row 1: false, WITH guard (guard_id = 5)
+    var guarded = pdt_make_bool_row(0, 1)
+    guarded = pdt_row_set_guard(guarded, 5)
+    m = pdt_matrix_add_row(m, guarded)
+
+    // Should NOT be exhaustive because the false row has a guard
+    let result = pdt_is_exhaustive(m)
+    pdt_assert_true(!result, 13)
+}
+
+// ============================================================
+// TEST 14: Guard handling — unguarded false makes it exhaustive
+// ============================================================
+
+fn test_pdt_guard_with_fallback() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_make_bool_matrix()
+
+    m = pdt_matrix_add_row(m, pdt_make_bool_row(1, 0))
+
+    // Guarded false
+    var guarded = pdt_make_bool_row(0, 1)
+    guarded = pdt_row_set_guard(guarded, 5)
+    m = pdt_matrix_add_row(m, guarded)
+
+    // Unguarded wildcard fallback
+    m = pdt_matrix_add_row(m, pdt_make_wild_row(2))
+
+    let result = pdt_is_exhaustive(m)
+    pdt_assert_true(result, 14)
+}
+
+// ============================================================
+// TEST 15: Multi-column patterns — 2 bool columns, full coverage
+// ============================================================
+
+fn test_pdt_multi_column_exhaustive() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_matrix_new()
+    m.col_count = 2
+
+    var meta0 = pdt_column_new(0)
+    meta0.is_variant = true
+    meta0.variant_count = 2
+    m = pdt_matrix_set_col_meta(m, 0, meta0)
+
+    var meta1 = pdt_column_new(1)
+    meta1.is_variant = true
+    meta1.variant_count = 2
+    m = pdt_matrix_set_col_meta(m, 1, meta1)
+
+    // (true, true), (true, false), (false, _)
+    var r1 = pdt_row_new()
+    r1.col_count = 2
+    r1.action_id = 0
+    r1 = pdt_row_set_col(r1, 0, PDT_LITERAL, 1)
+    r1 = pdt_row_set_col(r1, 1, PDT_LITERAL, 1)
+    m = pdt_matrix_add_row(m, r1)
+
+    var r2 = pdt_row_new()
+    r2.col_count = 2
+    r2.action_id = 1
+    r2 = pdt_row_set_col(r2, 0, PDT_LITERAL, 1)
+    r2 = pdt_row_set_col(r2, 1, PDT_LITERAL, 0)
+    m = pdt_matrix_add_row(m, r2)
+
+    var r3 = pdt_row_new()
+    r3.col_count = 2
+    r3.action_id = 2
+    r3 = pdt_row_set_col(r3, 0, PDT_LITERAL, 0)
+    r3 = pdt_row_set_col(r3, 1, PDT_WILDCARD, 0)
+    m = pdt_matrix_add_row(m, r3)
+
+    let result = pdt_is_exhaustive(m)
+    pdt_assert_true(result, 15)
+}
+
+// ============================================================
+// TEST 16: Multi-column — missing (false, false) case
+// ============================================================
+
+fn test_pdt_multi_column_non_exhaustive() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_matrix_new()
+    m.col_count = 2
+
+    var meta0 = pdt_column_new(0)
+    meta0.is_variant = true
+    meta0.variant_count = 2
+    m = pdt_matrix_set_col_meta(m, 0, meta0)
+
+    var meta1 = pdt_column_new(1)
+    meta1.is_variant = true
+    meta1.variant_count = 2
+    m = pdt_matrix_set_col_meta(m, 1, meta1)
+
+    // (true, true), (true, false), (false, true) — missing (false, false)
+    var r1 = pdt_row_new()
+    r1.col_count = 2
+    r1.action_id = 0
+    r1 = pdt_row_set_col(r1, 0, PDT_LITERAL, 1)
+    r1 = pdt_row_set_col(r1, 1, PDT_LITERAL, 1)
+    m = pdt_matrix_add_row(m, r1)
+
+    var r2 = pdt_row_new()
+    r2.col_count = 2
+    r2.action_id = 1
+    r2 = pdt_row_set_col(r2, 0, PDT_LITERAL, 1)
+    r2 = pdt_row_set_col(r2, 1, PDT_LITERAL, 0)
+    m = pdt_matrix_add_row(m, r2)
+
+    var r3 = pdt_row_new()
+    r3.col_count = 2
+    r3.action_id = 2
+    r3 = pdt_row_set_col(r3, 0, PDT_LITERAL, 0)
+    r3 = pdt_row_set_col(r3, 1, PDT_LITERAL, 1)
+    m = pdt_matrix_add_row(m, r3)
+
+    let result = pdt_is_exhaustive(m)
+    pdt_assert_true(!result, 16)
+}
+
+// ============================================================
+// TEST 17: Constructor patterns — 3-variant enum exhaustive
+// ============================================================
+
+fn test_pdt_ctor_exhaustive() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_matrix_new()
+    m.col_count = 1
+    var meta = pdt_column_new(0)
+    meta.is_variant = true
+    meta.variant_count = 3
+    m = pdt_matrix_set_col_meta(m, 0, meta)
+
+    m = pdt_matrix_add_row(m, pdt_make_ctor_row(0, 0))
+    m = pdt_matrix_add_row(m, pdt_make_ctor_row(1, 1))
+    m = pdt_matrix_add_row(m, pdt_make_ctor_row(2, 2))
+
+    let result = pdt_is_exhaustive(m)
+    pdt_assert_true(result, 17)
+}
+
+// ============================================================
+// TEST 18: Constructor — missing variant 1
+// ============================================================
+
+fn test_pdt_ctor_missing() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_matrix_new()
+    m.col_count = 1
+    var meta = pdt_column_new(0)
+    meta.is_variant = true
+    meta.variant_count = 3
+    m = pdt_matrix_set_col_meta(m, 0, meta)
+
+    m = pdt_matrix_add_row(m, pdt_make_ctor_row(0, 0))
+    m = pdt_matrix_add_row(m, pdt_make_ctor_row(2, 2))
+
+    let missing = pdt_find_missing_ctor(m, 0)
+    pdt_assert_true(missing == 1, 18)
+}
+
+// ============================================================
+// TEST 19: Empty matrix not exhaustive
+// ============================================================
+
+fn test_pdt_empty_matrix() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_matrix_new()
+    m.col_count = 1
+    let result = pdt_is_exhaustive(m)
+    pdt_assert_true(!result, 19)
+}
+
+// ============================================================
+// TEST 20: Wildcard after exhaustive bool is redundant
+// ============================================================
+
+fn test_pdt_wildcard_redundant_after_bool() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_make_bool_matrix()
+    m = pdt_matrix_add_row(m, pdt_make_bool_row(1, 0))
+    m = pdt_matrix_add_row(m, pdt_make_bool_row(0, 1))
+    m = pdt_matrix_add_row(m, pdt_make_wild_row(2))
+
+    let redundant = pdt_find_redundant(m)
+    // Row 2 is redundant
+    pdt_assert_true(redundant == 2, 20)
+}
+
+// ============================================================
+// TEST 21: Usefulness — false is useful when only true exists
+// ============================================================
+
+fn test_pdt_usefulness_false_after_true() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_make_bool_matrix()
+    m = pdt_matrix_add_row(m, pdt_make_bool_row(1, 0))
+
+    let row = pdt_make_bool_row(0, 1)
+    let useful = pdt_row_is_useful(m, row)
+    pdt_assert_true(useful, 21)
+}
+
+// ============================================================
+// TEST 22: Usefulness — true is NOT useful when true exists
+// ============================================================
+
+fn test_pdt_usefulness_dup_true() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_make_bool_matrix()
+    m = pdt_matrix_add_row(m, pdt_make_bool_row(1, 0))
+
+    let row = pdt_make_bool_row(1, 1)
+    let useful = pdt_row_is_useful(m, row)
+    pdt_assert_true(!useful, 22)
+}
+
+// ============================================================
+// TEST 23: Unique ctor counting
+// ============================================================
+
+fn test_pdt_unique_ctor_count() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_make_bool_matrix()
+    m = pdt_matrix_add_row(m, pdt_make_bool_row(1, 0))
+    m = pdt_matrix_add_row(m, pdt_make_bool_row(0, 1))
+    m = pdt_matrix_add_row(m, pdt_make_bool_row(1, 2))
+
+    let count = pdt_count_unique_ctors(m, 0)
+    // Two unique: 1 and 0
+    pdt_assert_true(count == 2, 23)
+}
+
+// ============================================================
+// TEST 24: Wildcard counting
+// ============================================================
+
+fn test_pdt_wildcard_count() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_make_bool_matrix()
+    m = pdt_matrix_add_row(m, pdt_make_bool_row(1, 0))
+    m = pdt_matrix_add_row(m, pdt_make_wild_row(1))
+    m = pdt_matrix_add_row(m, pdt_make_wild_row(2))
+
+    let count = pdt_count_wildcards(m, 0)
+    pdt_assert_true(count == 2, 24)
+}
+
+// ============================================================
+// TEST 25: Compile — empty matrix produces fail
+// ============================================================
+
+fn test_pdt_compile_empty_fail() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_matrix_new()
+    m.col_count = 1
+    let tree = pdt_compile(m, PDT_HEURISTIC_LEFTMOST)
+    let root = pdt_tree_get_node(tree, tree.root_idx)
+    pdt_assert_true(root.kind == PDT_NODE_FAIL, 25)
+}
+
+// ============================================================
+// TEST 26: Compile — single wildcard produces leaf
+// ============================================================
+
+fn test_pdt_compile_single_wild_leaf() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_matrix_new()
+    m.col_count = 1
+    m = pdt_matrix_add_row(m, pdt_make_wild_row(99))
+    let tree = pdt_compile(m, PDT_HEURISTIC_LEFTMOST)
+    let root = pdt_tree_get_node(tree, tree.root_idx)
+    let ok1 = root.kind == PDT_NODE_LEAF
+    let ok2 = root.leaf_action_id == 99
+    pdt_assert_true(ok1 && ok2, 26)
+}
+
+// ============================================================
+// TEST 27: Compile — bool match produces test chain
+// ============================================================
+
+fn test_pdt_compile_bool_match() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_make_bool_matrix()
+    m = pdt_matrix_add_row(m, pdt_make_bool_row(1, 10))
+    m = pdt_matrix_add_row(m, pdt_make_bool_row(0, 20))
+
+    let tree = pdt_compile(m, PDT_HEURISTIC_LEFTMOST)
+    let root = pdt_tree_get_node(tree, tree.root_idx)
+
+    // Root should be a test node
+    let ok1 = root.kind == PDT_NODE_TEST
+
+    // The true_child should lead to a leaf with action 10
+    let true_node = pdt_tree_get_node(tree, root.true_child)
+    let ok2 = true_node.kind == PDT_NODE_LEAF
+    let ok3 = true_node.leaf_action_id == 10
+
+    pdt_assert_true(ok1 && ok2 && ok3, 27)
+}
+
+// ============================================================
+// TEST 28: Range containment
+// ============================================================
+
+fn test_pdt_range_contains() -> i64 with IO, Mut, Panic, Div {
+    let ok1 = pdt_range_contains(0, 10, 5)
+    let ok2 = pdt_range_contains(0, 10, 0)
+    let ok3 = pdt_range_contains(0, 10, 10)
+    let ok4 = !pdt_range_contains(0, 10, 11)
+    let ok5 = !pdt_range_contains(5, 10, 4)
+    pdt_assert_true(ok1 && ok2 && ok3 && ok4 && ok5, 28)
+}
+
+// ============================================================
+// TEST 29: Range overlap
+// ============================================================
+
+fn test_pdt_range_overlap() -> i64 with IO, Mut, Panic, Div {
+    let ok1 = pdt_ranges_overlap(0, 5, 3, 8)
+    let ok2 = pdt_ranges_overlap(0, 5, 5, 10)
+    let ok3 = !pdt_ranges_overlap(0, 5, 6, 10)
+    let ok4 = pdt_ranges_overlap(3, 3, 3, 3)
+    pdt_assert_true(ok1 && ok2 && ok3 && ok4, 29)
+}
+
+// ============================================================
+// TEST 30: Ranges cover
+// ============================================================
+
+fn test_pdt_ranges_cover() -> i64 with IO, Mut, Panic, Div {
+    // [0,2] + [3,5] covers [0,5]
+    var ranges: [i64; 64] = [0; 64]
+    ranges[0] = 0
+    ranges[1] = 2
+    ranges[2] = 3
+    ranges[3] = 5
+    let ok1 = pdt_ranges_cover(ranges, 2, 0, 5)
+
+    // [0,2] + [4,5] does NOT cover [0,5] (gap at 3)
+    var ranges2: [i64; 64] = [0; 64]
+    ranges2[0] = 0
+    ranges2[1] = 2
+    ranges2[2] = 4
+    ranges2[3] = 5
+    let ok2 = !pdt_ranges_cover(ranges2, 2, 0, 5)
+
+    pdt_assert_true(ok1 && ok2, 30)
+}
+
+// ============================================================
+// TEST 31: Find gap in ranges
+// ============================================================
+
+fn test_pdt_ranges_find_gap() -> i64 with IO, Mut, Panic, Div {
+    var ranges: [i64; 64] = [0; 64]
+    ranges[0] = 0
+    ranges[1] = 2
+    ranges[2] = 4
+    ranges[3] = 5
+    let gap = pdt_ranges_find_gap(ranges, 2, 0, 5)
+    pdt_assert_true(gap == 3, 31)
+}
+
+// ============================================================
+// TEST 32: Column swap
+// ============================================================
+
+fn test_pdt_column_swap() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_matrix_new()
+    m.col_count = 2
+    var meta0 = pdt_column_new(0)
+    meta0.type_id = 100
+    var meta1 = pdt_column_new(1)
+    meta1.type_id = 200
+    m = pdt_matrix_set_col_meta(m, 0, meta0)
+    m = pdt_matrix_set_col_meta(m, 1, meta1)
+
+    var r = pdt_row_new()
+    r.col_count = 2
+    r = pdt_row_set_col(r, 0, PDT_LITERAL, 1)
+    r = pdt_row_set_col(r, 1, PDT_LITERAL, 2)
+    m = pdt_matrix_add_row(m, r)
+
+    m = pdt_matrix_swap_columns(m, 0, 1)
+
+    // After swap: column 0 should have type_id 200, column 1 should have 100
+    let new_meta0 = pdt_matrix_get_col_meta(m, 0)
+    let new_meta1 = pdt_matrix_get_col_meta(m, 1)
+    let ok1 = new_meta0.type_id == 200
+    let ok2 = new_meta1.type_id == 100
+
+    // Row values should be swapped too
+    let row0 = pdt_matrix_get_row(m, 0)
+    let ok3 = pdt_row_get_value(row0, 0) == 2
+    let ok4 = pdt_row_get_value(row0, 1) == 1
+
+    pdt_assert_true(ok1 && ok2 && ok3 && ok4, 32)
+}
+
+// ============================================================
+// TEST 33: All wildcards in column
+// ============================================================
+
+fn test_pdt_column_all_wild() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_matrix_new()
+    m.col_count = 2
+    var r1 = pdt_row_new()
+    r1.col_count = 2
+    r1 = pdt_row_set_col(r1, 0, PDT_WILDCARD, 0)
+    r1 = pdt_row_set_col(r1, 1, PDT_LITERAL, 5)
+    m = pdt_matrix_add_row(m, r1)
+
+    var r2 = pdt_row_new()
+    r2.col_count = 2
+    r2 = pdt_row_set_col(r2, 0, PDT_WILDCARD, 0)
+    r2 = pdt_row_set_col(r2, 1, PDT_LITERAL, 6)
+    m = pdt_matrix_add_row(m, r2)
+
+    let ok1 = pdt_column_all_wild(m, 0)
+    let ok2 = !pdt_column_all_wild(m, 1)
+    pdt_assert_true(ok1 && ok2, 33)
+}
+
+// ============================================================
+// TEST 34: Rows for constructor count
+// ============================================================
+
+fn test_pdt_count_rows_for_ctor() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_make_bool_matrix()
+    m = pdt_matrix_add_row(m, pdt_make_bool_row(1, 0))
+    m = pdt_matrix_add_row(m, pdt_make_bool_row(0, 1))
+    m = pdt_matrix_add_row(m, pdt_make_wild_row(2))
+    m = pdt_matrix_add_row(m, pdt_make_bool_row(1, 3))
+
+    // Rows matching ctor 1 (true): row0, row2 (wild), row3 = 3
+    let count = pdt_count_rows_for_ctor(m, 0, 1)
+    pdt_assert_true(count == 3, 34)
+}
+
+// ============================================================
+// TEST 35: Specialize preserves action IDs
+// ============================================================
+
+fn test_pdt_specialize_preserves_actions() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_make_bool_matrix()
+    m = pdt_matrix_add_row(m, pdt_make_bool_row(1, 100))
+    m = pdt_matrix_add_row(m, pdt_make_bool_row(0, 200))
+    m = pdt_matrix_add_row(m, pdt_make_wild_row(300))
+
+    let spec_false = pdt_specialize(m, 0, 0)
+    // Should have rows: false (200) and wildcard (300)
+    let ok1 = spec_false.row_count == 2
+    let r0 = pdt_matrix_get_row(spec_false, 0)
+    let r1 = pdt_matrix_get_row(spec_false, 1)
+    let ok2 = r0.action_id == 200
+    let ok3 = r1.action_id == 300
+    pdt_assert_true(ok1 && ok2 && ok3, 35)
+}
+
+// ============================================================
+// TEST 36: Multiple bindings in a row
+// ============================================================
+
+fn test_pdt_multiple_bindings() -> i64 with IO, Mut, Panic, Div {
+    var row = pdt_row_new()
+    row.col_count = 3
+    row.action_id = 7
+    row = pdt_row_set_col(row, 0, PDT_WILDCARD, 0)
+    row = pdt_row_set_binding(row, 0, 10)
+    row = pdt_row_set_col(row, 1, PDT_WILDCARD, 0)
+    row = pdt_row_set_binding(row, 1, 20)
+    row = pdt_row_set_col(row, 2, PDT_WILDCARD, 0)
+    row = pdt_row_set_binding(row, 2, 30)
+
+    let result = pdt_collect_bindings(row)
+    let count = result.0
+    let binds = result.1
+    let ok1 = count == 3
+    let ok2 = binds[0].name_id == 10
+    let ok3 = binds[1].name_id == 20
+    let ok4 = binds[2].name_id == 30
+    pdt_assert_true(ok1 && ok2 && ok3 && ok4, 36)
+}
+
+// ============================================================
+// TEST 37: Compile with binding propagation
+// ============================================================
+
+fn test_pdt_compile_with_bindings() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_matrix_new()
+    m.col_count = 1
+
+    var row = pdt_row_new()
+    row.col_count = 1
+    row.action_id = 55
+    row = pdt_row_set_col(row, 0, PDT_WILDCARD, 0)
+    row = pdt_row_set_binding(row, 0, 77)
+    m = pdt_matrix_add_row(m, row)
+
+    let tree = pdt_compile(m, PDT_HEURISTIC_LEFTMOST)
+    let root = pdt_tree_get_node(tree, tree.root_idx)
+    let ok1 = root.kind == PDT_NODE_LEAF
+    let ok2 = root.leaf_action_id == 55
+    let ok3 = root.bind_count == 1
+    let ok4 = root.var_bindings[0].name_id == 77
+    pdt_assert_true(ok1 && ok2 && ok3 && ok4, 37)
+}
+
+// ============================================================
+// TEST 38: 3-constructor enum — decision tree has test chain
+// ============================================================
+
+fn test_pdt_compile_enum_3() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_matrix_new()
+    m.col_count = 1
+    var meta = pdt_column_new(0)
+    meta.is_variant = true
+    meta.variant_count = 3
+    m = pdt_matrix_set_col_meta(m, 0, meta)
+
+    m = pdt_matrix_add_row(m, pdt_make_ctor_row(0, 10))
+    m = pdt_matrix_add_row(m, pdt_make_ctor_row(1, 20))
+    m = pdt_matrix_add_row(m, pdt_make_ctor_row(2, 30))
+
+    let tree = pdt_compile(m, PDT_HEURISTIC_LEFTMOST)
+    let root = pdt_tree_get_node(tree, tree.root_idx)
+
+    // Root should be a TEST node (first constructor in chain)
+    let ok1 = root.kind == PDT_NODE_TEST
+    // Walk the true branch: should lead to a leaf
+    let t_node = pdt_tree_get_node(tree, root.true_child)
+    let ok2 = t_node.kind == PDT_NODE_LEAF
+
+    pdt_assert_true(ok1 && ok2, 38)
+}
+
+// ============================================================
+// TEST 39: Decision tree node accessors
+// ============================================================
+
+fn test_pdt_tree_node_accessors() -> i64 with IO, Mut, Panic, Div {
+    var tree = pdt_decision_tree_new()
+
+    let leaf = pdt_node_leaf(42)
+    let p1 = pdt_tree_add_node(tree, leaf)
+    tree = p1.0
+    let leaf_idx = p1.1
+
+    let test = pdt_node_test(3, 7, leaf_idx, leaf_idx)
+    let p2 = pdt_tree_add_node(tree, test)
+    tree = p2.0
+    let test_idx = p2.1
+
+    let fail = pdt_node_fail()
+    let p3 = pdt_tree_add_node(tree, fail)
+    tree = p3.0
+    let fail_idx = p3.1
+
+    let n_leaf = pdt_tree_get_node(tree, leaf_idx)
+    let n_test = pdt_tree_get_node(tree, test_idx)
+    let n_fail = pdt_tree_get_node(tree, fail_idx)
+
+    let ok1 = n_leaf.kind == PDT_NODE_LEAF && n_leaf.leaf_action_id == 42
+    let ok2 = n_test.kind == PDT_NODE_TEST && n_test.column_idx == 3
+    let ok3 = n_test.test_value == 7
+    let ok4 = n_fail.kind == PDT_NODE_FAIL
+    let ok5 = tree.node_count == 3
+
+    pdt_assert_true(ok1 && ok2 && ok3 && ok4 && ok5, 39)
+}
+
+// ============================================================
+// TEST 40: Specialize multi-column matrix
+// ============================================================
+
+fn test_pdt_specialize_multi_col() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_matrix_new()
+    m.col_count = 2
+
+    var r1 = pdt_row_new()
+    r1.col_count = 2
+    r1.action_id = 1
+    r1 = pdt_row_set_col(r1, 0, PDT_LITERAL, 10)
+    r1 = pdt_row_set_col(r1, 1, PDT_LITERAL, 20)
+    m = pdt_matrix_add_row(m, r1)
+
+    var r2 = pdt_row_new()
+    r2.col_count = 2
+    r2.action_id = 2
+    r2 = pdt_row_set_col(r2, 0, PDT_LITERAL, 10)
+    r2 = pdt_row_set_col(r2, 1, PDT_LITERAL, 30)
+    m = pdt_matrix_add_row(m, r2)
+
+    var r3 = pdt_row_new()
+    r3.col_count = 2
+    r3.action_id = 3
+    r3 = pdt_row_set_col(r3, 0, PDT_WILDCARD, 0)
+    r3 = pdt_row_set_col(r3, 1, PDT_LITERAL, 40)
+    m = pdt_matrix_add_row(m, r3)
+
+    // Specialize col 0 for value 10
+    let spec = pdt_specialize(m, 0, 10)
+    // Should have 3 rows (rows 1, 2 match ctor 10; row 3 is wildcard)
+    let ok1 = spec.row_count == 3
+    // All should have col_count = 1 (column 0 removed)
+    let ok2 = spec.col_count == 1
+    // Check action IDs preserved
+    let sr0 = pdt_matrix_get_row(spec, 0)
+    let sr1 = pdt_matrix_get_row(spec, 1)
+    let sr2 = pdt_matrix_get_row(spec, 2)
+    let ok3 = sr0.action_id == 1
+    let ok4 = sr1.action_id == 2
+    let ok5 = sr2.action_id == 3
+
+    pdt_assert_true(ok1 && ok2 && ok3 && ok4 && ok5, 40)
+}
+
+// ============================================================
+// TEST 41: Collect constructors
+// ============================================================
+
+fn test_pdt_collect_ctors() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_matrix_new()
+    m.col_count = 1
+
+    m = pdt_matrix_add_row(m, pdt_make_ctor_row(5, 0))
+    m = pdt_matrix_add_row(m, pdt_make_ctor_row(3, 1))
+    m = pdt_matrix_add_row(m, pdt_make_ctor_row(5, 2))
+    m = pdt_matrix_add_row(m, pdt_make_wild_row(3))
+
+    let ctors = pdt_collect_ctors(m, 0)
+    // Should have 2 unique: 5 and 3
+    let ok1 = ctors.count == 2
+    // Order: 5 first, then 3
+    let ok2 = ctors.values[0] == 5
+    let ok3 = ctors.values[1] == 3
+    pdt_assert_true(ok1 && ok2 && ok3, 41)
+}
+
+// ============================================================
+// TEST 42: Guard row counted as wildcard for default matrix
+// ============================================================
+
+fn test_pdt_guard_default_matrix() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_make_bool_matrix()
+    m = pdt_matrix_add_row(m, pdt_make_bool_row(1, 0))
+
+    var guarded = pdt_make_wild_row(1)
+    guarded = pdt_row_set_guard(guarded, 3)
+    m = pdt_matrix_add_row(m, guarded)
+
+    // Default matrix (wildcard rows)
+    let def = pdt_default_matrix(m, 0)
+    // The guarded wildcard row should appear in the default
+    let ok1 = def.row_count == 1
+    let r0 = pdt_matrix_get_row(def, 0)
+    let ok2 = r0.action_id == 1
+    let ok3 = r0.guard_id == 3
+    pdt_assert_true(ok1 && ok2 && ok3, 42)
+}
+
+// ============================================================
+// TEST 43: Row kind/value encoding
+// ============================================================
+
+fn test_pdt_row_encoding() -> i64 with IO, Mut, Panic, Div {
+    var r = pdt_row_new()
+    r = pdt_row_set_col(r, 0, PDT_LITERAL, 42)
+    r = pdt_row_set_col(r, 1, PDT_CONSTRUCTOR, 7)
+    r = pdt_row_set_col(r, 2, PDT_WILDCARD, 0)
+
+    let ok1 = pdt_row_get_kind(r, 0) == PDT_LITERAL
+    let ok2 = pdt_row_get_value(r, 0) == 42
+    let ok3 = pdt_row_get_kind(r, 1) == PDT_CONSTRUCTOR
+    let ok4 = pdt_row_get_value(r, 1) == 7
+    let ok5 = pdt_row_get_kind(r, 2) == PDT_WILDCARD
+    let ok6 = pdt_row_is_wild(r, 2)
+    let ok7 = !pdt_row_is_wild(r, 0)
+
+    pdt_assert_true(ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7, 43)
+}
+
+// ============================================================
+// TEST 44: PdtCompiler error tracking
+// ============================================================
+
+fn test_pdt_compiler_errors() -> i64 with IO, Mut, Panic, Div {
+    var pc = pdt_compiler_new()
+    pc = pdt_compiler_add_error(pc, 10)
+    pc = pdt_compiler_add_error(pc, 20)
+    pc = pdt_compiler_add_error(pc, 30)
+
+    let ok1 = pc.error_count == 3
+    let ok2 = pc.errors[0] == 10
+    let ok3 = pc.errors[1] == 20
+    let ok4 = pc.errors[2] == 30
+    pdt_assert_true(ok1 && ok2 && ok3 && ok4, 44)
+}
+
+// ============================================================
+// TEST 45: Compile 2-column matrix with heuristic
+// ============================================================
+
+fn test_pdt_compile_2col_heuristic() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_matrix_new()
+    m.col_count = 2
+
+    var meta0 = pdt_column_new(0)
+    m = pdt_matrix_set_col_meta(m, 0, meta0)
+
+    var meta1 = pdt_column_new(1)
+    meta1.is_variant = true
+    meta1.variant_count = 2
+    m = pdt_matrix_set_col_meta(m, 1, meta1)
+
+    // Col 0: all wildcards.  Col 1: bool patterns
+    var r1 = pdt_row_new()
+    r1.col_count = 2
+    r1.action_id = 10
+    r1 = pdt_row_set_col(r1, 0, PDT_WILDCARD, 0)
+    r1 = pdt_row_set_col(r1, 1, PDT_LITERAL, 1)
+    m = pdt_matrix_add_row(m, r1)
+
+    var r2 = pdt_row_new()
+    r2.col_count = 2
+    r2.action_id = 20
+    r2 = pdt_row_set_col(r2, 0, PDT_WILDCARD, 0)
+    r2 = pdt_row_set_col(r2, 1, PDT_LITERAL, 0)
+    m = pdt_matrix_add_row(m, r2)
+
+    // With MOST_CONSTRUCTORS, col 1 should be picked (2 unique ctors vs 0)
+    let tree = pdt_compile(m, PDT_HEURISTIC_MOST_CONSTRUCTORS)
+    let root = pdt_tree_get_node(tree, tree.root_idx)
+    // Root should be a TEST on column 1
+    let ok1 = root.kind == PDT_NODE_TEST
+    let ok2 = root.column_idx == 1
+    pdt_assert_true(ok1 && ok2, 45)
+}
+
+// ============================================================
+// TEST 46: Find missing ctor — all covered returns -1
+// ============================================================
+
+fn test_pdt_find_missing_none() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_matrix_new()
+    m.col_count = 1
+    var meta = pdt_column_new(0)
+    meta.is_variant = true
+    meta.variant_count = 2
+    m = pdt_matrix_set_col_meta(m, 0, meta)
+
+    m = pdt_matrix_add_row(m, pdt_make_ctor_row(0, 0))
+    m = pdt_matrix_add_row(m, pdt_make_ctor_row(1, 1))
+
+    let missing = pdt_find_missing_ctor(m, 0)
+    pdt_assert_true(missing == 0 - 1, 46)
+}
+
+// ============================================================
+// TEST 47: PdtRow has_guard
+// ============================================================
+
+fn test_pdt_row_has_guard() -> i64 with IO, Mut, Panic, Div {
+    var r1 = pdt_row_new()
+    let ok1 = !pdt_row_has_guard(r1)
+
+    var r2 = pdt_row_new()
+    r2 = pdt_row_set_guard(r2, 5)
+    let ok2 = pdt_row_has_guard(r2)
+
+    pdt_assert_true(ok1 && ok2, 47)
+}
+
+// ============================================================
+// TEST 48: Wildcard + literal exhaustive for open type
+// ============================================================
+
+fn test_pdt_open_type_with_wildcard() -> i64 with IO, Mut, Panic, Div {
+    // Open type (variant_count=0): wildcards make it exhaustive
+    var m = pdt_matrix_new()
+    m.col_count = 1
+    var meta = pdt_column_new(0)
+    meta.is_variant = false
+    meta.variant_count = 0
+    m = pdt_matrix_set_col_meta(m, 0, meta)
+
+    var r1 = pdt_row_new()
+    r1.col_count = 1
+    r1.action_id = 0
+    r1 = pdt_row_set_col(r1, 0, PDT_LITERAL, 42)
+    m = pdt_matrix_add_row(m, r1)
+
+    m = pdt_matrix_add_row(m, pdt_make_wild_row(1))
+
+    let result = pdt_is_exhaustive(m)
+    pdt_assert_true(result, 48)
+}
+
+// ============================================================
+// TEST 49: Open type without wildcard — NOT exhaustive
+// ============================================================
+
+fn test_pdt_open_type_no_wildcard() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_matrix_new()
+    m.col_count = 1
+    var meta = pdt_column_new(0)
+    meta.is_variant = false
+    meta.variant_count = 0
+    m = pdt_matrix_set_col_meta(m, 0, meta)
+
+    var r1 = pdt_row_new()
+    r1.col_count = 1
+    r1.action_id = 0
+    r1 = pdt_row_set_col(r1, 0, PDT_LITERAL, 42)
+    m = pdt_matrix_add_row(m, r1)
+
+    let result = pdt_is_exhaustive(m)
+    pdt_assert_true(!result, 49)
+}
+
+// ============================================================
+// TEST 50: Compile — wildcard fallback in test chain
+// ============================================================
+
+fn test_pdt_compile_with_wildcard_fallback() -> i64 with IO, Mut, Panic, Div {
+    var m = pdt_make_bool_matrix()
+    m = pdt_matrix_add_row(m, pdt_make_bool_row(1, 10))
+    m = pdt_matrix_add_row(m, pdt_make_wild_row(99))
+
+    let tree = pdt_compile(m, PDT_HEURISTIC_LEFTMOST)
+    let root = pdt_tree_get_node(tree, tree.root_idx)
+
+    // Root is a TEST for value 1 (true)
+    let ok1 = root.kind == PDT_NODE_TEST
+    let ok2 = root.test_value == 1
+
+    // false_child should lead to the wildcard's leaf (action 99)
+    let false_node = pdt_tree_get_node(tree, root.false_child)
+    let ok3 = false_node.kind == PDT_NODE_LEAF
+    let ok4 = false_node.leaf_action_id == 99
+
+    pdt_assert_true(ok1 && ok2 && ok3 && ok4, 50)
+}
+
+// ============================================================
+// Test runner
+// ============================================================
+
+fn pdt_check_run_tests() -> i64 with IO, Mut, Panic, Div {
+    print("=== Pattern decision tree compiler tests ===\n")
+    var fails: i64 = 0
+    fails = fails + test_pdt_single_wildcard()
+    fails = fails + test_pdt_single_literal()
+    fails = fails + test_pdt_two_literals_tree()
+    fails = fails + test_pdt_bool_exhaustive()
+    fails = fails + test_pdt_bool_non_exhaustive()
+    fails = fails + test_pdt_redundant_literal()
+    fails = fails + test_pdt_no_redundant()
+    fails = fails + test_pdt_heuristic_leftmost()
+    fails = fails + test_pdt_heuristic_most_ctors()
+    fails = fails + test_pdt_specialize_basic()
+    fails = fails + test_pdt_default_matrix()
+    fails = fails + test_pdt_variable_binding()
+    fails = fails + test_pdt_guard_not_exhaustive()
+    fails = fails + test_pdt_guard_with_fallback()
+    fails = fails + test_pdt_multi_column_exhaustive()
+    fails = fails + test_pdt_multi_column_non_exhaustive()
+    fails = fails + test_pdt_ctor_exhaustive()
+    fails = fails + test_pdt_ctor_missing()
+    fails = fails + test_pdt_empty_matrix()
+    fails = fails + test_pdt_wildcard_redundant_after_bool()
+    fails = fails + test_pdt_usefulness_false_after_true()
+    fails = fails + test_pdt_usefulness_dup_true()
+    fails = fails + test_pdt_unique_ctor_count()
+    fails = fails + test_pdt_wildcard_count()
+    fails = fails + test_pdt_compile_empty_fail()
+    fails = fails + test_pdt_compile_single_wild_leaf()
+    fails = fails + test_pdt_compile_bool_match()
+    fails = fails + test_pdt_range_contains()
+    fails = fails + test_pdt_range_overlap()
+    fails = fails + test_pdt_ranges_cover()
+    fails = fails + test_pdt_ranges_find_gap()
+    fails = fails + test_pdt_column_swap()
+    fails = fails + test_pdt_column_all_wild()
+    fails = fails + test_pdt_count_rows_for_ctor()
+    fails = fails + test_pdt_specialize_preserves_actions()
+    fails = fails + test_pdt_multiple_bindings()
+    fails = fails + test_pdt_compile_with_bindings()
+    fails = fails + test_pdt_compile_enum_3()
+    fails = fails + test_pdt_tree_node_accessors()
+    fails = fails + test_pdt_specialize_multi_col()
+    fails = fails + test_pdt_collect_ctors()
+    fails = fails + test_pdt_guard_default_matrix()
+    fails = fails + test_pdt_row_encoding()
+    fails = fails + test_pdt_compiler_errors()
+    fails = fails + test_pdt_compile_2col_heuristic()
+    fails = fails + test_pdt_find_missing_none()
+    fails = fails + test_pdt_row_has_guard()
+    fails = fails + test_pdt_open_type_with_wildcard()
+    fails = fails + test_pdt_open_type_no_wildcard()
+    fails = fails + test_pdt_compile_with_wildcard_fallback()
+
+    print("Total failures: ")
+    print_int(fails)
+    print("\n")
+    fails
+}

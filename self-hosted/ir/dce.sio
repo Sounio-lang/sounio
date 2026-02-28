@@ -1,0 +1,2027 @@
+// self-hosted::ir::dce — Dead Code Elimination pass
+//
+// A comprehensive dead code elimination pass for the Sounio self-hosted
+// compiler IR.  Implements the classic mark-sweep DCE algorithm:
+//
+//   1. Build use-def chains: for every register, record which instruction
+//      defines it, and for every instruction, record which registers it uses.
+//   2. Seed the worklist with instructions that have observable side effects
+//      (calls, stores, branches, returns, labels, IO).
+//   3. Mark phase: pop from worklist, mark live, chase use-def chains
+//      backward to mark transitive dependencies live.
+//   4. Sweep phase: replace all unmarked instructions with NOP.
+//   5. Unreachable block elimination: remove blocks not reachable from entry.
+//   6. Dead store elimination: stores to locals never read.
+//   7. Trivial phi elimination: phi nodes where all inputs are the same value.
+//
+// All arrays are fixed-size -- no heap allocation.
+//
+// References:
+//   Cytron et al.: "Efficiently Computing SSA Form and the Control
+//                   Dependence Graph" (1991)
+//   Muchnick: "Advanced Compiler Design and Implementation" (1997), Ch. 18
+//   Cooper & Torczon: "Engineering a Compiler" (2011), Ch. 10
+
+// ============================================================================
+// Section 1: Constants
+// ============================================================================
+
+let DCE_MAX_INSTRS: i64 = 8192
+let DCE_MAX_BLOCKS: i64 = 512
+let DCE_MAX_REGS: i64 = 4096
+let DCE_MAX_USES: i64 = 8
+let DCE_MAX_WORKLIST: i64 = 4096
+let DCE_MAX_PREDS: i64 = 8
+let DCE_MAX_SUCCS: i64 = 8
+let DCE_INVALID: i64 = 0 - 1
+
+// Opcode classification constants for side-effect detection.
+// These correspond to the IrOpcode enum values but are used
+// as integer tags inside DceInstr for fast comparison.
+let DCE_OP_LOAD_IMM: i64 = 1
+let DCE_OP_LOAD_FLOAT: i64 = 2
+let DCE_OP_LOAD_BOOL: i64 = 3
+let DCE_OP_LOAD_STRING: i64 = 4
+let DCE_OP_COPY: i64 = 5
+let DCE_OP_BINOP: i64 = 6
+let DCE_OP_UNARYOP: i64 = 7
+let DCE_OP_CALL: i64 = 8
+let DCE_OP_RETURN: i64 = 9
+let DCE_OP_JUMP: i64 = 10
+let DCE_OP_BRANCH_TRUE: i64 = 11
+let DCE_OP_BRANCH_FALSE: i64 = 12
+let DCE_OP_FIELD_GET: i64 = 13
+let DCE_OP_FIELD_SET: i64 = 14
+let DCE_OP_INDEX_GET: i64 = 15
+let DCE_OP_INDEX_SET: i64 = 16
+let DCE_OP_ALLOC: i64 = 17
+let DCE_OP_LABEL: i64 = 18
+let DCE_OP_NOP: i64 = 19
+let DCE_OP_PHI: i64 = 20
+
+// ============================================================================
+// Section 2: Data Structures
+// ============================================================================
+
+// Information about a single instruction for DCE analysis.
+struct DceInstr {
+    instr_idx: i64,
+    opcode: i64,
+    def_reg: i64,
+    use_regs: [i64; 8],
+    use_count: i64,
+    is_live: bool,
+    has_side_effect: bool,
+    block_id: i64,
+}
+
+// Information about a basic block.
+struct DceBlock {
+    block_id: i64,
+    instr_start: i64,
+    instr_count: i64,
+    is_reachable: bool,
+    pred_count: i64,
+    succ_count: i64,
+    preds: [i64; 8],
+    succs: [i64; 8],
+}
+
+// Use-def chains: for each register, which instruction defines it.
+struct DceUseDefChain {
+    def_instr: [i64; 4096],
+    reg_count: i64,
+}
+
+// Worklist of instruction indices to process.
+struct DceWorklist {
+    items: [i64; 4096],
+    count: i64,
+}
+
+// Statistics about the DCE pass.
+struct DceStats {
+    total_instrs: i64,
+    eliminated: i64,
+    kept: i64,
+    side_effect_kept: i64,
+    dead_stores_eliminated: i64,
+    unreachable_blocks: i64,
+    trivial_phis_eliminated: i64,
+}
+
+// Overall context for the DCE pass.
+struct DceContext {
+    instrs: [DceInstr; 8192],
+    instr_count: i64,
+    blocks: [DceBlock; 512],
+    block_count: i64,
+    use_def: DceUseDefChain,
+    worklist: DceWorklist,
+    stats: DceStats,
+}
+
+// ============================================================================
+// Section 3: Constructors
+// ============================================================================
+
+fn dce_instr_new() -> DceInstr {
+    DceInstr {
+        instr_idx: DCE_INVALID,
+        opcode: DCE_OP_NOP,
+        def_reg: DCE_INVALID,
+        use_regs: [DCE_INVALID, DCE_INVALID, DCE_INVALID, DCE_INVALID,
+                    DCE_INVALID, DCE_INVALID, DCE_INVALID, DCE_INVALID],
+        use_count: 0,
+        is_live: false,
+        has_side_effect: false,
+        block_id: DCE_INVALID,
+    }
+}
+
+fn dce_block_new() -> DceBlock {
+    DceBlock {
+        block_id: DCE_INVALID,
+        instr_start: 0,
+        instr_count: 0,
+        is_reachable: false,
+        pred_count: 0,
+        succ_count: 0,
+        preds: [DCE_INVALID, DCE_INVALID, DCE_INVALID, DCE_INVALID,
+                DCE_INVALID, DCE_INVALID, DCE_INVALID, DCE_INVALID],
+        succs: [DCE_INVALID, DCE_INVALID, DCE_INVALID, DCE_INVALID,
+                DCE_INVALID, DCE_INVALID, DCE_INVALID, DCE_INVALID],
+    }
+}
+
+fn dce_use_def_new() -> DceUseDefChain {
+    DceUseDefChain {
+        def_instr: [DCE_INVALID; 4096],
+        reg_count: 0,
+    }
+}
+
+fn dce_worklist_new() -> DceWorklist {
+    DceWorklist {
+        items: [DCE_INVALID; 4096],
+        count: 0,
+    }
+}
+
+fn dce_stats_new() -> DceStats {
+    DceStats {
+        total_instrs: 0,
+        eliminated: 0,
+        kept: 0,
+        side_effect_kept: 0,
+        dead_stores_eliminated: 0,
+        unreachable_blocks: 0,
+        trivial_phis_eliminated: 0,
+    }
+}
+
+fn dce_context_new() -> DceContext {
+    DceContext {
+        instrs: [dce_instr_new(); 8192],
+        instr_count: 0,
+        blocks: [dce_block_new(); 512],
+        block_count: 0,
+        use_def: dce_use_def_new(),
+        worklist: dce_worklist_new(),
+        stats: dce_stats_new(),
+    }
+}
+
+// ============================================================================
+// Section 4: Opcode Classification
+// ============================================================================
+
+// Map an IrOpcode enum to our integer opcode tag.
+fn dce_classify_opcode(op: IrOpcode) -> i64 {
+    if opcodes_equal(op, IrOpcode::IrLoadImm) { return DCE_OP_LOAD_IMM }
+    if opcodes_equal(op, IrOpcode::IrLoadFloat) { return DCE_OP_LOAD_FLOAT }
+    if opcodes_equal(op, IrOpcode::IrLoadBool) { return DCE_OP_LOAD_BOOL }
+    if opcodes_equal(op, IrOpcode::IrLoadString) { return DCE_OP_LOAD_STRING }
+    if opcodes_equal(op, IrOpcode::IrCopy) { return DCE_OP_COPY }
+    if opcodes_equal(op, IrOpcode::IrBinOp) { return DCE_OP_BINOP }
+    if opcodes_equal(op, IrOpcode::IrUnaryOp) { return DCE_OP_UNARYOP }
+    if opcodes_equal(op, IrOpcode::IrCall) { return DCE_OP_CALL }
+    if opcodes_equal(op, IrOpcode::IrReturn) { return DCE_OP_RETURN }
+    if opcodes_equal(op, IrOpcode::IrJump) { return DCE_OP_JUMP }
+    if opcodes_equal(op, IrOpcode::IrBranchTrue) { return DCE_OP_BRANCH_TRUE }
+    if opcodes_equal(op, IrOpcode::IrBranchFalse) { return DCE_OP_BRANCH_FALSE }
+    if opcodes_equal(op, IrOpcode::IrFieldGet) { return DCE_OP_FIELD_GET }
+    if opcodes_equal(op, IrOpcode::IrFieldSet) { return DCE_OP_FIELD_SET }
+    if opcodes_equal(op, IrOpcode::IrIndexGet) { return DCE_OP_INDEX_GET }
+    if opcodes_equal(op, IrOpcode::IrIndexSet) { return DCE_OP_INDEX_SET }
+    if opcodes_equal(op, IrOpcode::IrAlloc) { return DCE_OP_ALLOC }
+    if opcodes_equal(op, IrOpcode::IrLabel) { return DCE_OP_LABEL }
+    if opcodes_equal(op, IrOpcode::IrPhi) { return DCE_OP_PHI }
+    DCE_OP_NOP
+}
+
+// Determine if an opcode has side effects that prevent elimination.
+// Side-effectful: calls, stores, branches, jumps, returns, labels, alloc, IO.
+fn dce_has_side_effect(opcode: i64) -> bool {
+    if opcode == DCE_OP_CALL { return true }
+    if opcode == DCE_OP_RETURN { return true }
+    if opcode == DCE_OP_JUMP { return true }
+    if opcode == DCE_OP_BRANCH_TRUE { return true }
+    if opcode == DCE_OP_BRANCH_FALSE { return true }
+    if opcode == DCE_OP_FIELD_SET { return true }
+    if opcode == DCE_OP_INDEX_SET { return true }
+    if opcode == DCE_OP_LABEL { return true }
+    if opcode == DCE_OP_ALLOC { return true }
+    false
+}
+
+// Determine if an opcode is a store (for dead store elimination).
+fn dce_is_store(opcode: i64) -> bool {
+    if opcode == DCE_OP_FIELD_SET { return true }
+    if opcode == DCE_OP_INDEX_SET { return true }
+    false
+}
+
+// Determine if an opcode is a branch or jump (block terminator).
+fn dce_is_terminator(opcode: i64) -> bool {
+    if opcode == DCE_OP_JUMP { return true }
+    if opcode == DCE_OP_BRANCH_TRUE { return true }
+    if opcode == DCE_OP_BRANCH_FALSE { return true }
+    if opcode == DCE_OP_RETURN { return true }
+    false
+}
+
+// ============================================================================
+// Section 5: Instruction Analysis -- Extract defs and uses from IrInstr
+// ============================================================================
+
+// Extract the list of used registers from an IrInstr into a flat array.
+// Returns (use_regs array, use_count).
+fn dce_extract_uses(instr: IrInstr) -> DceInstr with Mut, Panic, Div {
+    var di = dce_instr_new()
+    di.opcode = dce_classify_opcode(instr.op)
+    di.def_reg = instr.dst
+    di.has_side_effect = dce_has_side_effect(di.opcode)
+    var uc: i64 = 0
+
+    // src1 is used by most instructions
+    if instr.src1 >= 0 && instr.src1 < DCE_MAX_REGS {
+        if uc < DCE_MAX_USES {
+            di.use_regs[uc as usize] = instr.src1
+            uc = uc + 1
+        }
+    }
+
+    // src2 is used by binops, index ops, field_set
+    if instr.src2 >= 0 && instr.src2 < DCE_MAX_REGS {
+        if uc < DCE_MAX_USES {
+            di.use_regs[uc as usize] = instr.src2
+            uc = uc + 1
+        }
+    }
+
+    // For IrIndexSet, imm_i64 holds the source register
+    if di.opcode == DCE_OP_INDEX_SET {
+        if instr.imm_i64 >= 0 && instr.imm_i64 < DCE_MAX_REGS {
+            if uc < DCE_MAX_USES {
+                di.use_regs[uc as usize] = instr.imm_i64
+                uc = uc + 1
+            }
+        }
+    }
+
+    di.use_count = uc
+    di
+}
+
+// ============================================================================
+// Section 6: Use-Def Chain Construction
+// ============================================================================
+
+// Build use-def chains from DceInstr array.
+// For each register, record which instruction index defines it.
+fn dce_build_use_def(ctx: &! DceContext) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < ctx.instr_count {
+        let di = ctx.instrs[i as usize]
+        let def = di.def_reg
+        if def >= 0 && def < DCE_MAX_REGS {
+            ctx.use_def.def_instr[def as usize] = i
+            if def >= ctx.use_def.reg_count {
+                ctx.use_def.reg_count = def + 1
+            }
+        }
+        i = i + 1
+    }
+    ctx.use_def.reg_count
+}
+
+// ============================================================================
+// Section 7: Worklist Operations
+// ============================================================================
+
+// Push an instruction index onto the worklist (if not already live).
+fn dce_worklist_push(ctx: &! DceContext, idx: i64) -> bool with Mut, Panic, Div {
+    if idx < 0 || idx >= ctx.instr_count {
+        return false
+    }
+    if ctx.instrs[idx as usize].is_live {
+        return false
+    }
+    if ctx.worklist.count >= DCE_MAX_WORKLIST {
+        return false
+    }
+    ctx.worklist.items[ctx.worklist.count as usize] = idx
+    ctx.worklist.count = ctx.worklist.count + 1
+    true
+}
+
+// Pop an instruction index from the worklist.  Returns DCE_INVALID if empty.
+fn dce_worklist_pop(ctx: &! DceContext) -> i64 with Mut, Panic, Div {
+    if ctx.worklist.count <= 0 {
+        return DCE_INVALID
+    }
+    ctx.worklist.count = ctx.worklist.count - 1
+    ctx.worklist.items[ctx.worklist.count as usize]
+}
+
+// ============================================================================
+// Section 8: Mark Phase
+// ============================================================================
+
+// Seed the worklist with all side-effectful instructions.
+fn dce_seed_worklist(ctx: &! DceContext) -> i64 with Mut, Panic, Div {
+    var seeded: i64 = 0
+    var i: i64 = 0
+    while i < ctx.instr_count {
+        if ctx.instrs[i as usize].has_side_effect {
+            let pushed = dce_worklist_push(ctx, i)
+            if pushed {
+                seeded = seeded + 1
+            }
+        }
+        i = i + 1
+    }
+    seeded
+}
+
+// Mark a single instruction as live and push its use-def predecessors
+// onto the worklist.
+fn dce_mark_instr_live(ctx: &! DceContext, idx: i64) -> i64 with Mut, Panic, Div {
+    if idx < 0 || idx >= ctx.instr_count {
+        return 0
+    }
+    if ctx.instrs[idx as usize].is_live {
+        return 0
+    }
+    ctx.instrs[idx as usize].is_live = true
+
+    // Chase use-def chains: for each register this instruction uses,
+    // find the defining instruction and push it onto the worklist.
+    var marked: i64 = 0
+    var u: i64 = 0
+    while u < ctx.instrs[idx as usize].use_count {
+        let used_reg = ctx.instrs[idx as usize].use_regs[u as usize]
+        if used_reg >= 0 && used_reg < DCE_MAX_REGS {
+            let def_idx = ctx.use_def.def_instr[used_reg as usize]
+            if def_idx >= 0 && def_idx < ctx.instr_count {
+                if !ctx.instrs[def_idx as usize].is_live {
+                    let pushed = dce_worklist_push(ctx, def_idx)
+                    if pushed {
+                        marked = marked + 1
+                    }
+                }
+            }
+        }
+        u = u + 1
+    }
+    marked
+}
+
+// Run the full mark phase: seed + iterate worklist until empty.
+fn dce_mark_phase(ctx: &! DceContext) -> i64 with Mut, Panic, Div {
+    let seeded = dce_seed_worklist(ctx)
+    var total_marked: i64 = seeded
+
+    var iterations: i64 = 0
+    var done = false
+    while !done {
+        let idx = dce_worklist_pop(ctx)
+        if idx == DCE_INVALID {
+            done = true
+        } else {
+            let newly_marked = dce_mark_instr_live(ctx, idx)
+            total_marked = total_marked + newly_marked
+            iterations = iterations + 1
+        }
+    }
+    total_marked
+}
+
+// ============================================================================
+// Section 9: Sweep Phase
+// ============================================================================
+
+// Sweep: replace all unmarked instructions with NOP in the original
+// IrFunction.  Returns the count of eliminated instructions.
+fn dce_sweep(ctx: &! DceContext, func: &! IrFunction) -> i64 with Mut, Panic, Div {
+    var eliminated: i64 = 0
+    var i: i64 = 0
+    while i < ctx.instr_count {
+        if !ctx.instrs[i as usize].is_live {
+            // Do not sweep NOPs that were already NOPs
+            if ctx.instrs[i as usize].opcode != DCE_OP_NOP {
+                func.instrs[i as usize] = ir_nop()
+                eliminated = eliminated + 1
+            }
+        }
+        i = i + 1
+    }
+    ctx.stats.eliminated = eliminated
+    ctx.stats.kept = ctx.instr_count - eliminated
+    eliminated
+}
+
+// ============================================================================
+// Section 10: Unreachable Block Elimination
+// ============================================================================
+
+// Build block structure from a flat instruction list.
+// A new block starts at every IrLabel and at instruction 0.
+fn dce_build_blocks(ctx: &! DceContext) -> i64 with Mut, Panic, Div {
+    var bc: i64 = 0
+
+    // Block 0 always starts at instruction 0 (entry block)
+    if ctx.instr_count > 0 {
+        ctx.blocks[0].block_id = 0
+        ctx.blocks[0].instr_start = 0
+        ctx.blocks[0].is_reachable = true
+        bc = 1
+    }
+
+    // Scan for labels to start new blocks
+    var i: i64 = 0
+    while i < ctx.instr_count {
+        if ctx.instrs[i as usize].opcode == DCE_OP_LABEL {
+            // Close previous block
+            if bc > 0 {
+                let prev = bc - 1
+                ctx.blocks[prev as usize].instr_count = i - ctx.blocks[prev as usize].instr_start
+            }
+            // Start new block
+            if bc < DCE_MAX_BLOCKS {
+                ctx.blocks[bc as usize].block_id = bc
+                ctx.blocks[bc as usize].instr_start = i
+                ctx.blocks[bc as usize].is_reachable = false
+                bc = bc + 1
+            }
+        }
+        i = i + 1
+    }
+
+    // Close last block
+    if bc > 0 {
+        let last = bc - 1
+        ctx.blocks[last as usize].instr_count = ctx.instr_count - ctx.blocks[last as usize].instr_start
+    }
+
+    ctx.block_count = bc
+    bc
+}
+
+// Build block successor/predecessor edges by scanning terminators.
+fn dce_build_block_edges(ctx: &! DceContext) -> i64 with Mut, Panic, Div {
+    var edge_count: i64 = 0
+    var b: i64 = 0
+    while b < ctx.block_count {
+        let start = ctx.blocks[b as usize].instr_start
+        let count = ctx.blocks[b as usize].instr_count
+        let end = start + count
+
+        // Find the last non-NOP instruction in this block (terminator)
+        var last_idx = end - 1
+        while last_idx >= start && ctx.instrs[last_idx as usize].opcode == DCE_OP_NOP {
+            last_idx = last_idx - 1
+        }
+
+        if last_idx >= start {
+            let opc = ctx.instrs[last_idx as usize].opcode
+
+            // Fall-through to next block if not a jump/return
+            if !dce_is_terminator(opc) {
+                if b + 1 < ctx.block_count {
+                    let sc = ctx.blocks[b as usize].succ_count
+                    if sc < DCE_MAX_SUCCS {
+                        ctx.blocks[b as usize].succs[sc as usize] = b + 1
+                        ctx.blocks[b as usize].succ_count = sc + 1
+                        let pc = ctx.blocks[(b + 1) as usize].pred_count
+                        if pc < DCE_MAX_PREDS {
+                            ctx.blocks[(b + 1) as usize].preds[pc as usize] = b
+                            ctx.blocks[(b + 1) as usize].pred_count = pc + 1
+                        }
+                        edge_count = edge_count + 1
+                    }
+                }
+            }
+
+            // For branches, the target block is found by scanning for
+            // the label_id.  For simplicity in this analysis, branches
+            // also fall through to the next block.
+            if opc == DCE_OP_BRANCH_TRUE || opc == DCE_OP_BRANCH_FALSE {
+                // Fall-through edge
+                if b + 1 < ctx.block_count {
+                    let sc = ctx.blocks[b as usize].succ_count
+                    if sc < DCE_MAX_SUCCS {
+                        ctx.blocks[b as usize].succs[sc as usize] = b + 1
+                        ctx.blocks[b as usize].succ_count = sc + 1
+                        let pc = ctx.blocks[(b + 1) as usize].pred_count
+                        if pc < DCE_MAX_PREDS {
+                            ctx.blocks[(b + 1) as usize].preds[pc as usize] = b
+                            ctx.blocks[(b + 1) as usize].pred_count = pc + 1
+                        }
+                        edge_count = edge_count + 1
+                    }
+                }
+                // Branch target edge: find block containing the target label
+                let target_label = ctx.instrs[last_idx as usize].block_id
+                if target_label >= 0 {
+                    var tb: i64 = 0
+                    while tb < ctx.block_count {
+                        if ctx.blocks[tb as usize].block_id == target_label {
+                            let sc = ctx.blocks[b as usize].succ_count
+                            if sc < DCE_MAX_SUCCS {
+                                ctx.blocks[b as usize].succs[sc as usize] = tb
+                                ctx.blocks[b as usize].succ_count = sc + 1
+                                let pc = ctx.blocks[tb as usize].pred_count
+                                if pc < DCE_MAX_PREDS {
+                                    ctx.blocks[tb as usize].preds[pc as usize] = b
+                                    ctx.blocks[tb as usize].pred_count = pc + 1
+                                }
+                                edge_count = edge_count + 1
+                            }
+                        }
+                        tb = tb + 1
+                    }
+                }
+            }
+
+            if opc == DCE_OP_JUMP {
+                let target_label = ctx.instrs[last_idx as usize].block_id
+                if target_label >= 0 {
+                    var tb: i64 = 0
+                    while tb < ctx.block_count {
+                        if ctx.blocks[tb as usize].block_id == target_label {
+                            let sc = ctx.blocks[b as usize].succ_count
+                            if sc < DCE_MAX_SUCCS {
+                                ctx.blocks[b as usize].succs[sc as usize] = tb
+                                ctx.blocks[b as usize].succ_count = sc + 1
+                                let pc = ctx.blocks[tb as usize].pred_count
+                                if pc < DCE_MAX_PREDS {
+                                    ctx.blocks[tb as usize].preds[pc as usize] = b
+                                    ctx.blocks[tb as usize].pred_count = pc + 1
+                                }
+                                edge_count = edge_count + 1
+                            }
+                        }
+                        tb = tb + 1
+                    }
+                }
+            }
+        }
+
+        b = b + 1
+    }
+    edge_count
+}
+
+// Propagate reachability from entry block using a BFS-like pass.
+fn dce_propagate_reachability(ctx: &! DceContext) -> i64 with Mut, Panic, Div {
+    // Entry block (0) is always reachable
+    if ctx.block_count <= 0 {
+        return 0
+    }
+    ctx.blocks[0].is_reachable = true
+
+    // Iterate until no change (simple fixed-point)
+    var changed = true
+    var reachable_count: i64 = 1
+    while changed {
+        changed = false
+        var b: i64 = 0
+        while b < ctx.block_count {
+            if ctx.blocks[b as usize].is_reachable {
+                var s: i64 = 0
+                while s < ctx.blocks[b as usize].succ_count {
+                    let succ = ctx.blocks[b as usize].succs[s as usize]
+                    if succ >= 0 && succ < ctx.block_count {
+                        if !ctx.blocks[succ as usize].is_reachable {
+                            ctx.blocks[succ as usize].is_reachable = true
+                            changed = true
+                            reachable_count = reachable_count + 1
+                        }
+                    }
+                    s = s + 1
+                }
+            }
+            b = b + 1
+        }
+    }
+    reachable_count
+}
+
+// Eliminate instructions in unreachable blocks by marking them dead.
+fn dce_eliminate_unreachable(ctx: &! DceContext, func: &! IrFunction) -> i64 with Mut, Panic, Div {
+    var eliminated: i64 = 0
+    var b: i64 = 0
+    while b < ctx.block_count {
+        if !ctx.blocks[b as usize].is_reachable {
+            let start = ctx.blocks[b as usize].instr_start
+            let count = ctx.blocks[b as usize].instr_count
+            var i: i64 = 0
+            while i < count {
+                let idx = start + i
+                if idx >= 0 && idx < ctx.instr_count {
+                    if ctx.instrs[idx as usize].opcode != DCE_OP_NOP {
+                        func.instrs[idx as usize] = ir_nop()
+                        ctx.instrs[idx as usize].opcode = DCE_OP_NOP
+                        ctx.instrs[idx as usize].is_live = false
+                        eliminated = eliminated + 1
+                    }
+                }
+                i = i + 1
+            }
+        }
+        b = b + 1
+    }
+    ctx.stats.unreachable_blocks = eliminated
+    eliminated
+}
+
+// ============================================================================
+// Section 11: Dead Store Elimination
+// ============================================================================
+
+// Check if a register is ever read (used) by any instruction.
+fn dce_reg_is_read(ctx: &DceContext, reg: i64) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ctx.instr_count {
+        var u: i64 = 0
+        while u < ctx.instrs[i as usize].use_count {
+            if ctx.instrs[i as usize].use_regs[u as usize] == reg {
+                return true
+            }
+            u = u + 1
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Eliminate stores (FieldSet, IndexSet) to registers that are never
+// subsequently read.  This is a conservative approximation: only
+// eliminates stores where the base register is a local that is
+// never used as a source anywhere.
+fn dce_eliminate_dead_stores(ctx: &! DceContext, func: &! IrFunction) -> i64 with Mut, Panic, Div {
+    var eliminated: i64 = 0
+    var i: i64 = 0
+    while i < ctx.instr_count {
+        let opc = ctx.instrs[i as usize].opcode
+        if dce_is_store(opc) {
+            // For a store, src1 is the base register.  If nobody else
+            // reads from that base register, the store is dead.
+            let base_reg = ctx.instrs[i as usize].use_regs[0]
+            if base_reg >= 0 && base_reg < DCE_MAX_REGS {
+                // Count how many instructions read this base reg
+                // (excluding this store itself).
+                var read_count: i64 = 0
+                var j: i64 = 0
+                while j < ctx.instr_count {
+                    if j != i {
+                        var u: i64 = 0
+                        while u < ctx.instrs[j as usize].use_count {
+                            if ctx.instrs[j as usize].use_regs[u as usize] == base_reg {
+                                read_count = read_count + 1
+                            }
+                            u = u + 1
+                        }
+                        // Also check def_reg for copy chains
+                    }
+                    j = j + 1
+                }
+                if read_count == 0 {
+                    func.instrs[i as usize] = ir_nop()
+                    ctx.instrs[i as usize].opcode = DCE_OP_NOP
+                    ctx.instrs[i as usize].has_side_effect = false
+                    ctx.instrs[i as usize].is_live = false
+                    eliminated = eliminated + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    ctx.stats.dead_stores_eliminated = eliminated
+    eliminated
+}
+
+// ============================================================================
+// Section 12: Trivial Phi Elimination
+// ============================================================================
+
+// A phi node is trivial if all its operands are the same register,
+// or if it only has one operand.  In that case, it can be replaced
+// with a simple copy.
+fn dce_eliminate_trivial_phis(ctx: &! DceContext, func: &! IrFunction) -> i64 with Mut, Panic, Div {
+    var eliminated: i64 = 0
+    var i: i64 = 0
+    while i < ctx.instr_count {
+        if ctx.instrs[i as usize].opcode == DCE_OP_PHI {
+            let uc = ctx.instrs[i as usize].use_count
+            if uc == 0 {
+                // Phi with no inputs -- dead
+                func.instrs[i as usize] = ir_nop()
+                ctx.instrs[i as usize].opcode = DCE_OP_NOP
+                ctx.instrs[i as usize].is_live = false
+                eliminated = eliminated + 1
+            } else if uc == 1 {
+                // Single input phi -> copy
+                let src = ctx.instrs[i as usize].use_regs[0]
+                let dst = ctx.instrs[i as usize].def_reg
+                if dst >= 0 && src >= 0 {
+                    func.instrs[i as usize] = ir_copy(dst, src)
+                    ctx.instrs[i as usize].opcode = DCE_OP_COPY
+                    eliminated = eliminated + 1
+                }
+            } else {
+                // Check if all inputs are the same register
+                let first_src = ctx.instrs[i as usize].use_regs[0]
+                var all_same = true
+                var u: i64 = 1
+                while u < uc {
+                    if ctx.instrs[i as usize].use_regs[u as usize] != first_src {
+                        all_same = false
+                    }
+                    u = u + 1
+                }
+                if all_same {
+                    let dst = ctx.instrs[i as usize].def_reg
+                    if dst >= 0 && first_src >= 0 {
+                        func.instrs[i as usize] = ir_copy(dst, first_src)
+                        ctx.instrs[i as usize].opcode = DCE_OP_COPY
+                        eliminated = eliminated + 1
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    ctx.stats.trivial_phis_eliminated = eliminated
+    eliminated
+}
+
+// ============================================================================
+// Section 13: Populate Context from IrFunction
+// ============================================================================
+
+// Populate the DceContext from an IrFunction.
+fn dce_populate(ctx: &! DceContext, func: &IrFunction) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < func.instr_count && i < DCE_MAX_INSTRS {
+        let instr = func.instrs[i as usize]
+        var di = dce_extract_uses(instr)
+        di.instr_idx = i
+
+        // Store the label_id into block_id for branches/jumps
+        if di.opcode == DCE_OP_JUMP || di.opcode == DCE_OP_BRANCH_TRUE || di.opcode == DCE_OP_BRANCH_FALSE {
+            di.block_id = instr.label_id
+        }
+
+        ctx.instrs[i as usize] = di
+        i = i + 1
+    }
+    ctx.instr_count = i
+    ctx.stats.total_instrs = i
+    i
+}
+
+// ============================================================================
+// Section 14: Full DCE Pipeline
+// ============================================================================
+
+// Inner implementation of the full DCE pipeline.
+// Takes already-borrowed ctx and func so all internal calls are reborrows.
+fn dce_run_impl(ctx: &! DceContext, func: &! IrFunction) -> DceStats with Mut, Panic, Div {
+    // Phase 1: Populate context from function
+    let populated = dce_populate(ctx, func)
+
+    // Phase 2: Build use-def chains
+    let reg_count = dce_build_use_def(ctx)
+
+    // Phase 3: Trivial phi elimination (before mark-sweep)
+    let phis_elim = dce_eliminate_trivial_phis(ctx, func)
+
+    // Phase 4: Dead store elimination (before mark-sweep)
+    let stores_elim = dce_eliminate_dead_stores(ctx, func)
+
+    // Phase 5: Mark phase -- seed with side-effectful instrs, propagate
+    let marked = dce_mark_phase(ctx)
+
+    // Phase 6: Sweep phase -- replace unmarked with NOP
+    let swept = dce_sweep(ctx, func)
+
+    // Phase 7: Build blocks and eliminate unreachable code
+    let blocks = dce_build_blocks(ctx)
+    let edges = dce_build_block_edges(ctx)
+    let reachable = dce_propagate_reachability(ctx)
+    let unreachable_elim = dce_eliminate_unreachable(ctx, func)
+
+    // Finalize stats
+    var stats = ctx.stats
+    stats.total_instrs = populated
+    stats.eliminated = stats.eliminated + phis_elim + stores_elim + unreachable_elim
+    stats.kept = populated - stats.eliminated
+    if stats.kept < 0 {
+        stats.kept = 0
+    }
+
+    // Count side-effect instructions kept
+    var se_kept: i64 = 0
+    var k: i64 = 0
+    while k < ctx.instr_count {
+        if ctx.instrs[k as usize].is_live && ctx.instrs[k as usize].has_side_effect {
+            se_kept = se_kept + 1
+        }
+        k = k + 1
+    }
+    stats.side_effect_kept = se_kept
+    stats
+}
+
+// Run the complete DCE pass on an IrFunction.
+// Returns updated stats.
+fn dce_run(func: &! IrFunction) -> DceStats with Mut, Panic, Div {
+    var ctx = dce_context_new()
+    dce_run_impl(&! ctx, func)
+}
+
+// Convenience: run DCE on a function and return the modified function.
+fn dce_optimize_function(func: IrFunction) -> IrFunction with Mut, Panic, Div {
+    var result = func
+    let stats = dce_run(&! result)
+    result
+}
+
+// ============================================================================
+// Section 15: Test Helpers
+// ============================================================================
+
+// Build a test IrFunction from an instruction array and count.
+fn dce_make_test_func(instrs: [IrInstr; 8192], count: i64) -> IrFunction {
+    IrFunction {
+        name: ir_empty_name(),
+        instrs: instrs,
+        instr_count: count,
+        reg_count: count + 10,
+        label_count: 0,
+        param_count: 0,
+        param_regs: [IR_INVALID_REG; 64],
+    }
+}
+
+// Check if instruction at position is a specific opcode (using IrOpcode).
+fn dce_check_opcode(func: &IrFunction, pos: i64, expected: IrOpcode) -> bool with Div, Panic {
+    if pos < 0 || pos >= func.instr_count {
+        return false
+    }
+    let instr = func.instrs[pos as usize]
+    opcodes_equal(instr.op, expected)
+}
+
+// Check if instruction at position is a NOP.
+fn dce_check_nop(func: &IrFunction, pos: i64) -> bool with Div, Panic {
+    dce_check_opcode(func, pos, IrOpcode::IrNop)
+}
+
+// Check if instruction at position is NOT a NOP (i.e., still alive).
+fn dce_check_not_nop(func: &IrFunction, pos: i64) -> bool with Div, Panic {
+    !dce_check_nop(func, pos)
+}
+
+// Build an empty 8192-element instruction array filled with NOPs.
+fn dce_empty_instrs() -> [IrInstr; 8192] {
+    [ir_nop(); 8192]
+}
+
+// Make a phi instruction with specified inputs stored in src1/src2.
+fn dce_make_phi(dst: i64, src1: i64, src2: i64) -> IrInstr {
+    let base = ir_phi(dst)
+    IrInstr {
+        op: base.op,
+        dst: dst,
+        src1: src1,
+        src2: src2,
+        imm_i64: base.imm_i64,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: base.name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
+// ============================================================================
+// Section 16: Tests
+// ============================================================================
+
+// T01 inner: run DCE and verify dead instruction removal.
+fn test_dce_simple_dead_removal_inner(func: &! IrFunction) -> bool with Mut, Panic, Div {
+    let stats = dce_run(func)
+
+    // r1 load should be eliminated
+    let dead_ok = dce_check_nop(func, 1)
+    // r0 load should survive (used by return)
+    let live_ok = dce_check_not_nop(func, 0)
+    // return should survive
+    let ret_ok = dce_check_opcode(func, 2, IrOpcode::IrReturn)
+    dead_ok && live_ok && ret_ok
+}
+
+// T01: Simple dead instruction removal -- load not used by anything.
+fn test_dce_simple_dead_removal() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_load_imm(0, 42)    // used by return
+    instrs[1] = ir_load_imm(1, 99)    // dead: r1 never referenced
+    instrs[2] = ir_return(0)
+
+    var func = dce_make_test_func(instrs, 3)
+    test_dce_simple_dead_removal_inner(&! func)
+}
+
+// T02 inner: run DCE and verify side-effect preservation.
+fn test_dce_side_effect_preservation_inner(func: &! IrFunction) -> bool with Mut, Panic, Div {
+    let stats = dce_run(func)
+    // Call must survive even though r0 is unused
+    dce_check_opcode(func, 0, IrOpcode::IrCall)
+}
+
+// T02: Side-effect preservation -- call must not be eliminated.
+fn test_dce_side_effect_preservation() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_call(0, 0, ir_empty_name(), ir_empty_reg_list(), 0)
+    instrs[1] = ir_load_imm(1, 0)
+    instrs[2] = ir_return(1)
+
+    var func = dce_make_test_func(instrs, 3)
+    test_dce_side_effect_preservation_inner(&! func)
+}
+
+// T03 inner: populate + build use-def + verify chains.
+fn test_dce_use_def_construction_inner(ctx: &! DceContext, func: &! IrFunction) -> bool with Mut, Panic, Div {
+    let pop = dce_populate(ctx, func)
+    let rc = dce_build_use_def(ctx)
+
+    // r0 should be defined by instruction 0
+    let r0_ok = ctx.use_def.def_instr[0] == 0
+    // r1 should be defined by instruction 1
+    let r1_ok = ctx.use_def.def_instr[1] == 1
+    // r2 should be defined by instruction 2
+    let r2_ok = ctx.use_def.def_instr[2] == 2
+    r0_ok && r1_ok && r2_ok
+}
+
+// T03: Use-def chain construction -- verify chains are built correctly.
+fn test_dce_use_def_construction() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_load_imm(0, 10)   // defines r0
+    instrs[1] = ir_load_imm(1, 20)   // defines r1
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)  // defines r2, uses r0, r1
+    instrs[3] = ir_return(2)
+
+    var func = dce_make_test_func(instrs, 4)
+    var ctx = dce_context_new()
+    test_dce_use_def_construction_inner(&! ctx, &! func)
+}
+
+// T04 inner: run DCE and verify transitive liveness.
+fn test_dce_transitive_liveness_inner(func: &! IrFunction) -> bool with Mut, Panic, Div {
+    let stats = dce_run(func)
+    let i0_ok = dce_check_not_nop(func, 0)
+    let i1_ok = dce_check_not_nop(func, 1)
+    let i2_ok = dce_check_not_nop(func, 2)
+    let i3_ok = dce_check_not_nop(func, 3)
+    i0_ok && i1_ok && i2_ok && i3_ok
+}
+
+// T04: Transitive liveness -- A uses B uses C, all must be live.
+fn test_dce_transitive_liveness() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_load_imm(0, 1)                     // r0 = 1 (C)
+    instrs[1] = ir_binop(1, 0, BinaryOp::OpAdd, 0)    // r1 = r0 + r0 (B)
+    instrs[2] = ir_binop(2, 1, BinaryOp::OpMul, 1)    // r2 = r1 * r1 (A)
+    instrs[3] = ir_return(2)                            // uses r2
+
+    var func = dce_make_test_func(instrs, 4)
+    test_dce_transitive_liveness_inner(&! func)
+}
+
+// T05: Dead store to unused local -- field_set to a register never read.
+fn test_dce_dead_store_unused_local() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_alloc(0, 0)                  // r0 = alloc (side effect)
+    instrs[1] = ir_load_imm(1, 42)              // r1 = 42
+    instrs[2] = ir_field_set(0, 0, 1, ir_empty_name())  // r0.f0 = r1 (store)
+    instrs[3] = ir_load_imm(2, 0)               // r2 = 0
+    instrs[4] = ir_return(2)                     // return r2
+
+    // r0 is used by field_set but nobody reads from r0 after the store,
+    // so the store is potentially dead.  However, our conservative DSE
+    // only eliminates stores where the base reg has zero other readers.
+    // Here r0 is read by field_set itself, but nobody else reads r0.
+    var func = dce_make_test_func(instrs, 5)
+    let stats = dce_run(&! func)
+
+    // The field_set should be eliminated because r0 is never read
+    // by any instruction other than the store itself.
+    stats.dead_stores_eliminated > 0
+}
+
+// T06: Statistics tracking -- verify counters are correct.
+fn test_dce_statistics_tracking() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_load_imm(0, 10)     // live (used by return)
+    instrs[1] = ir_load_imm(1, 20)     // dead
+    instrs[2] = ir_load_imm(2, 30)     // dead
+    instrs[3] = ir_return(0)           // live (side effect)
+
+    var func = dce_make_test_func(instrs, 4)
+    let stats = dce_run(&! func)
+
+    // total = 4, eliminated = 2 (r1, r2), kept = 2
+    let total_ok = stats.total_instrs == 4
+    let elim_ok = stats.eliminated >= 2
+    total_ok && elim_ok
+}
+
+// T07 inner: run DCE and verify return preserved.
+fn test_dce_return_preserved_inner(func: &! IrFunction) -> bool with Mut, Panic, Div {
+    let stats = dce_run(func)
+    dce_check_opcode(func, 1, IrOpcode::IrReturn)
+}
+
+// T07: Return must never be eliminated.
+fn test_dce_return_preserved() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_load_imm(0, 0)
+    instrs[1] = ir_return(0)
+
+    var func = dce_make_test_func(instrs, 2)
+    test_dce_return_preserved_inner(&! func)
+}
+
+// T08 inner: run DCE and verify branch preserved.
+fn test_dce_branch_preserved_inner(func: &! IrFunction) -> bool with Mut, Panic, Div {
+    let stats = dce_run(func)
+    dce_check_opcode(func, 1, IrOpcode::IrBranchTrue)
+}
+
+// T08: Branch must never be eliminated.
+fn test_dce_branch_preserved() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_load_imm(0, 1)          // condition
+    instrs[1] = ir_branch_true(0, 0)       // branch
+    instrs[2] = ir_load_imm(1, 0)
+    instrs[3] = ir_return(1)
+
+    var func = dce_make_test_func(instrs, 4)
+    test_dce_branch_preserved_inner(&! func)
+}
+
+// T09 inner: run DCE and verify jump preserved.
+fn test_dce_jump_preserved_inner(func: &! IrFunction) -> bool with Mut, Panic, Div {
+    let stats = dce_run(func)
+    dce_check_opcode(func, 0, IrOpcode::IrJump)
+}
+
+// T09: Jump must never be eliminated.
+fn test_dce_jump_preserved() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_jump(0)
+    instrs[1] = ir_label(0)
+    instrs[2] = ir_load_imm(0, 0)
+    instrs[3] = ir_return(0)
+
+    var func = dce_make_test_func(instrs, 4)
+    test_dce_jump_preserved_inner(&! func)
+}
+
+// T10 inner: run DCE and verify label preserved.
+fn test_dce_label_preserved_inner(func: &! IrFunction) -> bool with Mut, Panic, Div {
+    let stats = dce_run(func)
+    dce_check_opcode(func, 1, IrOpcode::IrLabel)
+}
+
+// T10: Label must never be eliminated.
+fn test_dce_label_preserved() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_jump(0)
+    instrs[1] = ir_label(0)
+    instrs[2] = ir_load_imm(0, 0)
+    instrs[3] = ir_return(0)
+
+    var func = dce_make_test_func(instrs, 4)
+    test_dce_label_preserved_inner(&! func)
+}
+
+// T11 inner: run DCE and verify call preserved.
+fn test_dce_call_preserved_inner(func: &! IrFunction) -> bool with Mut, Panic, Div {
+    let stats = dce_run(func)
+    dce_check_opcode(func, 0, IrOpcode::IrCall)
+}
+
+// T11: Call must never be eliminated (even if result unused).
+fn test_dce_call_preserved() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_call(0, 0, ir_empty_name(), ir_empty_reg_list(), 0)
+    instrs[1] = ir_load_imm(1, 0)
+    instrs[2] = ir_return(1)
+
+    var func = dce_make_test_func(instrs, 3)
+    test_dce_call_preserved_inner(&! func)
+}
+
+// T12 inner: run DCE and verify multiple dead removed.
+fn test_dce_multiple_dead_removed_inner(func: &! IrFunction) -> bool with Mut, Panic, Div {
+    let stats = dce_run(func)
+    let d0 = dce_check_nop(func, 0)
+    let d1 = dce_check_nop(func, 1)
+    let d2 = dce_check_nop(func, 2)
+    let d3 = dce_check_nop(func, 3)
+    let a4 = dce_check_not_nop(func, 4)
+    d0 && d1 && d2 && d3 && a4
+}
+
+// T12: Multiple dead instructions all removed.
+fn test_dce_multiple_dead_removed() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_load_imm(0, 1)      // dead
+    instrs[1] = ir_load_imm(1, 2)      // dead
+    instrs[2] = ir_load_imm(2, 3)      // dead
+    instrs[3] = ir_load_imm(3, 4)      // dead
+    instrs[4] = ir_load_imm(4, 5)      // live (used by return)
+    instrs[5] = ir_return(4)
+
+    var func = dce_make_test_func(instrs, 6)
+    test_dce_multiple_dead_removed_inner(&! func)
+}
+
+// T13 inner: run DCE and verify copy chain live.
+fn test_dce_copy_chain_live_inner(func: &! IrFunction) -> bool with Mut, Panic, Div {
+    let stats = dce_run(func)
+    let i0 = dce_check_not_nop(func, 0)
+    let i1 = dce_check_not_nop(func, 1)
+    let i2 = dce_check_not_nop(func, 2)
+    i0 && i1 && i2
+}
+
+// T13: Copy chain keeps all transitively live.
+fn test_dce_copy_chain_live() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_load_imm(0, 42)     // source
+    instrs[1] = ir_copy(1, 0)          // r1 = r0
+    instrs[2] = ir_copy(2, 1)          // r2 = r1
+    instrs[3] = ir_return(2)           // uses r2
+
+    var func = dce_make_test_func(instrs, 4)
+    test_dce_copy_chain_live_inner(&! func)
+}
+
+// T14 inner: run DCE and verify dead copy chain eliminated.
+fn test_dce_dead_copy_chain_inner(func: &! IrFunction) -> bool with Mut, Panic, Div {
+    let stats = dce_run(func)
+    let d0 = dce_check_nop(func, 0)
+    let d1 = dce_check_nop(func, 1)
+    let d2 = dce_check_nop(func, 2)
+    d0 && d1 && d2
+}
+
+// T14: Dead copy chain eliminated.
+fn test_dce_dead_copy_chain() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_load_imm(0, 42)     // dead
+    instrs[1] = ir_copy(1, 0)          // dead (r1 unused)
+    instrs[2] = ir_copy(2, 1)          // dead (r2 unused)
+    instrs[3] = ir_load_imm(3, 0)
+    instrs[4] = ir_return(3)
+
+    var func = dce_make_test_func(instrs, 5)
+    test_dce_dead_copy_chain_inner(&! func)
+}
+
+// T15 inner: run DCE and verify binop self-use.
+fn test_dce_binop_self_use_inner(func: &! IrFunction) -> bool with Mut, Panic, Div {
+    let stats = dce_run(func)
+    let i0 = dce_check_not_nop(func, 0)
+    let i1 = dce_check_not_nop(func, 1)
+    i0 && i1
+}
+
+// T15: BinaryOp with both operands from same register.
+fn test_dce_binop_self_use() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_load_imm(0, 7)
+    instrs[1] = ir_binop(1, 0, BinaryOp::OpAdd, 0)   // r1 = r0 + r0
+    instrs[2] = ir_return(1)
+
+    var func = dce_make_test_func(instrs, 3)
+    test_dce_binop_self_use_inner(&! func)
+}
+
+// T16 inner: run DCE and verify unaryop transitively live.
+fn test_dce_unaryop_transitive_inner(func: &! IrFunction) -> bool with Mut, Panic, Div {
+    let stats = dce_run(func)
+    let i0 = dce_check_not_nop(func, 0)
+    let i1 = dce_check_not_nop(func, 1)
+    i0 && i1
+}
+
+// T16: UnaryOp transitively live.
+fn test_dce_unaryop_transitive() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_load_imm(0, 5)
+    instrs[1] = ir_unaryop(1, UnaryOp::OpNeg, 0)
+    instrs[2] = ir_return(1)
+
+    var func = dce_make_test_func(instrs, 3)
+    test_dce_unaryop_transitive_inner(&! func)
+}
+
+// T17 inner: run DCE and verify dead unary op eliminated.
+fn test_dce_dead_unaryop_inner(func: &! IrFunction) -> bool with Mut, Panic, Div {
+    let stats = dce_run(func)
+    dce_check_nop(func, 1)
+}
+
+// T17: Dead unary op eliminated.
+fn test_dce_dead_unaryop() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_load_imm(0, 5)
+    instrs[1] = ir_unaryop(1, UnaryOp::OpNeg, 0)  // dead
+    instrs[2] = ir_load_imm(2, 0)
+    instrs[3] = ir_return(2)
+
+    var func = dce_make_test_func(instrs, 4)
+    test_dce_dead_unaryop_inner(&! func)
+}
+
+// T18 inner: run DCE and verify dead field get eliminated.
+fn test_dce_dead_field_get_inner(func: &! IrFunction) -> bool with Mut, Panic, Div {
+    let stats = dce_run(func)
+    dce_check_nop(func, 1)
+}
+
+// T18: Field get is dead if result unused (no side effect).
+fn test_dce_dead_field_get() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_alloc(0, 0)
+    instrs[1] = ir_field_get(1, 0, 0, ir_empty_name())  // dead: r1 unused
+    instrs[2] = ir_load_imm(2, 0)
+    instrs[3] = ir_return(2)
+
+    var func = dce_make_test_func(instrs, 4)
+    test_dce_dead_field_get_inner(&! func)
+}
+
+// T19 inner: run DCE and verify dead index get eliminated.
+fn test_dce_dead_index_get_inner(func: &! IrFunction) -> bool with Mut, Panic, Div {
+    let stats = dce_run(func)
+    dce_check_nop(func, 2)
+}
+
+// T19: Index get is dead if result unused.
+fn test_dce_dead_index_get() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_load_imm(0, 0)       // base
+    instrs[1] = ir_load_imm(1, 0)       // index
+    instrs[2] = ir_index_get(2, 0, 1)   // dead: r2 unused
+    instrs[3] = ir_load_imm(3, 0)
+    instrs[4] = ir_return(3)
+
+    var func = dce_make_test_func(instrs, 5)
+    test_dce_dead_index_get_inner(&! func)
+}
+
+// T20 inner: run DCE and verify alloc preserved.
+fn test_dce_alloc_preserved_inner(func: &! IrFunction) -> bool with Mut, Panic, Div {
+    let stats = dce_run(func)
+    dce_check_opcode(func, 0, IrOpcode::IrAlloc)
+}
+
+// T20: Alloc is side-effectful -- must not be eliminated.
+fn test_dce_alloc_preserved() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_alloc(0, 0)          // side effect
+    instrs[1] = ir_load_imm(1, 0)
+    instrs[2] = ir_return(1)
+
+    var func = dce_make_test_func(instrs, 3)
+    test_dce_alloc_preserved_inner(&! func)
+}
+
+// T21 inner: run DCE and verify field set preserved when base is live.
+fn test_dce_field_set_preserved_inner(func: &! IrFunction) -> bool with Mut, Panic, Div {
+    let stats = dce_run(func)
+    dce_check_opcode(func, 2, IrOpcode::IrFieldSet)
+}
+
+// T21: Field set is side-effectful -- preserved when base is live.
+fn test_dce_field_set_preserved_live_base() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_alloc(0, 0)
+    instrs[1] = ir_load_imm(1, 42)
+    instrs[2] = ir_field_set(0, 0, 1, ir_empty_name())
+    instrs[3] = ir_return(0)           // base reg is used by return
+
+    var func = dce_make_test_func(instrs, 4)
+    test_dce_field_set_preserved_inner(&! func)
+}
+
+// T22 inner: populate, set use_count, eliminate trivial phis, check result.
+fn test_dce_trivial_phi_single_inner(ctx: &! DceContext, func: &! IrFunction) -> bool with Mut, Panic, Div {
+    let pop = dce_populate(ctx, func)
+    // Manually set use_count to 1 for the phi
+    ctx.instrs[1].use_count = 1
+    let elim = dce_eliminate_trivial_phis(ctx, func)
+
+    // Phi should become a copy
+    let is_copy = dce_check_opcode(func, 1, IrOpcode::IrCopy)
+    let count_ok = elim == 1
+    is_copy && count_ok
+}
+
+// T22: Trivial phi with single input -- becomes copy.
+fn test_dce_trivial_phi_single_input() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_load_imm(0, 10)
+    instrs[1] = dce_make_phi(1, 0, DCE_INVALID)  // phi(r1) = r0  (single input)
+    instrs[2] = ir_return(1)
+
+    var func = dce_make_test_func(instrs, 3)
+    var ctx = dce_context_new()
+    test_dce_trivial_phi_single_inner(&! ctx, &! func)
+}
+
+// T23 inner: populate, set use_count/regs, eliminate trivial phis, check.
+fn test_dce_trivial_phi_same_inner(ctx: &! DceContext, func: &! IrFunction) -> bool with Mut, Panic, Div {
+    let pop = dce_populate(ctx, func)
+    // Set use_count to 2 for the phi with both uses being r0
+    ctx.instrs[1].use_count = 2
+    ctx.instrs[1].use_regs[0] = 0
+    ctx.instrs[1].use_regs[1] = 0
+    let elim = dce_eliminate_trivial_phis(ctx, func)
+
+    let is_copy = dce_check_opcode(func, 1, IrOpcode::IrCopy)
+    let count_ok = elim == 1
+    is_copy && count_ok
+}
+
+// T23: Trivial phi with identical inputs -- becomes copy.
+fn test_dce_trivial_phi_same_inputs() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_load_imm(0, 10)
+    instrs[1] = dce_make_phi(1, 0, 0)  // phi(r1) = r0, r0  (same input twice)
+    instrs[2] = ir_return(1)
+
+    var func = dce_make_test_func(instrs, 3)
+    var ctx = dce_context_new()
+    test_dce_trivial_phi_same_inner(&! ctx, &! func)
+}
+
+// T24 inner: populate, set use_count/regs for non-trivial phi, check not eliminated.
+fn test_dce_nontrivial_phi_kept_inner(ctx: &! DceContext, func: &! IrFunction) -> bool with Mut, Panic, Div {
+    let pop = dce_populate(ctx, func)
+    ctx.instrs[2].use_count = 2
+    ctx.instrs[2].use_regs[0] = 0
+    ctx.instrs[2].use_regs[1] = 1
+    let elim = dce_eliminate_trivial_phis(ctx, func)
+
+    // Phi should NOT be eliminated
+    elim == 0
+}
+
+// T24: Non-trivial phi with different inputs -- not eliminated.
+fn test_dce_nontrivial_phi_kept() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_load_imm(0, 10)
+    instrs[1] = ir_load_imm(1, 20)
+    instrs[2] = dce_make_phi(2, 0, 1)  // phi(r2) = r0, r1  (different inputs)
+    instrs[3] = ir_return(2)
+
+    var func = dce_make_test_func(instrs, 4)
+    var ctx = dce_context_new()
+    test_dce_nontrivial_phi_kept_inner(&! ctx, &! func)
+}
+
+// T25: Empty function -- no crash, zero stats.
+fn test_dce_empty_function() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    var func = dce_make_test_func(instrs, 0)
+    let stats = dce_run(&! func)
+
+    stats.total_instrs == 0 && stats.eliminated == 0
+}
+
+// T26: Single return, nothing to eliminate.
+fn test_dce_single_return() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_load_imm(0, 0)
+    instrs[1] = ir_return(0)
+
+    var func = dce_make_test_func(instrs, 2)
+    let stats = dce_run(&! func)
+
+    // Nothing should be eliminated
+    stats.eliminated == 0
+}
+
+// T27 inner: run DCE and verify long dead chain eliminated.
+fn test_dce_long_dead_chain_inner(func: &! IrFunction) -> bool with Mut, Panic, Div {
+    let stats = dce_run(func)
+    let d0 = dce_check_nop(func, 0)
+    let d1 = dce_check_nop(func, 1)
+    let d2 = dce_check_nop(func, 2)
+    let d3 = dce_check_nop(func, 3)
+    let d4 = dce_check_nop(func, 4)
+    d0 && d1 && d2 && d3 && d4
+}
+
+// T27: Long dead chain -- r0->r1->r2->r3->r4, none used.
+fn test_dce_long_dead_chain() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_load_imm(0, 1)
+    instrs[1] = ir_copy(1, 0)
+    instrs[2] = ir_copy(2, 1)
+    instrs[3] = ir_copy(3, 2)
+    instrs[4] = ir_copy(4, 3)
+    instrs[5] = ir_load_imm(5, 0)
+    instrs[6] = ir_return(5)
+
+    var func = dce_make_test_func(instrs, 7)
+    test_dce_long_dead_chain_inner(&! func)
+}
+
+// T28 inner: run DCE and verify diamond pattern branches live.
+fn test_dce_diamond_live_inner(func: &! IrFunction) -> bool with Mut, Panic, Div {
+    let stats = dce_run(func)
+    let br_ok = dce_check_opcode(func, 1, IrOpcode::IrBranchTrue)
+    let jmp_ok = dce_check_opcode(func, 3, IrOpcode::IrJump)
+    let lbl0_ok = dce_check_opcode(func, 4, IrOpcode::IrLabel)
+    let lbl1_ok = dce_check_opcode(func, 6, IrOpcode::IrLabel)
+    let ret_ok = dce_check_opcode(func, 8, IrOpcode::IrReturn)
+    br_ok && jmp_ok && lbl0_ok && lbl1_ok && ret_ok
+}
+
+// T28: Diamond pattern -- both branches live.
+fn test_dce_diamond_live() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_load_imm(0, 1)              // condition
+    instrs[1] = ir_branch_true(0, 0)           // branch to label 0
+    instrs[2] = ir_load_imm(1, 10)             // false path
+    instrs[3] = ir_jump(1)                     // jump to merge
+    instrs[4] = ir_label(0)                    // true path label
+    instrs[5] = ir_load_imm(2, 20)             // true path value
+    instrs[6] = ir_label(1)                    // merge label
+    instrs[7] = ir_load_imm(3, 0)
+    instrs[8] = ir_return(3)
+
+    var func = dce_make_test_func(instrs, 9)
+    test_dce_diamond_live_inner(&! func)
+}
+
+// T29 inner: run DCE and verify mixed live/dead in same block.
+fn test_dce_mixed_live_dead_inner(func: &! IrFunction) -> bool with Mut, Panic, Div {
+    let stats = dce_run(func)
+    let l0 = dce_check_not_nop(func, 0)
+    let l1 = dce_check_not_nop(func, 1)
+    let d2 = dce_check_nop(func, 2)
+    let d3 = dce_check_nop(func, 3)
+    let l4 = dce_check_not_nop(func, 4)
+    l0 && l1 && d2 && d3 && l4
+}
+
+// T29: Mixed live and dead in same block.
+fn test_dce_mixed_live_dead() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_load_imm(0, 1)      // live (used by add)
+    instrs[1] = ir_load_imm(1, 2)      // live (used by add)
+    instrs[2] = ir_load_imm(2, 3)      // dead
+    instrs[3] = ir_load_imm(3, 4)      // dead
+    instrs[4] = ir_binop(4, 0, BinaryOp::OpAdd, 1)  // live
+    instrs[5] = ir_return(4)
+
+    var func = dce_make_test_func(instrs, 6)
+    test_dce_mixed_live_dead_inner(&! func)
+}
+
+// T30 inner: run DCE and verify BranchFalse preserved.
+fn test_dce_branch_false_preserved_inner(func: &! IrFunction) -> bool with Mut, Panic, Div {
+    let stats = dce_run(func)
+    dce_check_opcode(func, 1, IrOpcode::IrBranchFalse)
+}
+
+// T30: BranchFalse preserved.
+fn test_dce_branch_false_preserved() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_load_imm(0, 0)
+    instrs[1] = ir_branch_false(0, 0)
+    instrs[2] = ir_load_imm(1, 0)
+    instrs[3] = ir_return(1)
+
+    var func = dce_make_test_func(instrs, 4)
+    test_dce_branch_false_preserved_inner(&! func)
+}
+
+// T31 inner: run DCE and verify dead load float eliminated.
+fn test_dce_dead_load_float_inner(func: &! IrFunction) -> bool with Mut, Panic, Div {
+    let stats = dce_run(func)
+    dce_check_nop(func, 0)
+}
+
+// T31: Load float dead elimination.
+fn test_dce_dead_load_float() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_load_float(0, 3.14)   // dead
+    instrs[1] = ir_load_imm(1, 0)
+    instrs[2] = ir_return(1)
+
+    var func = dce_make_test_func(instrs, 3)
+    test_dce_dead_load_float_inner(&! func)
+}
+
+// T32 inner: run DCE and verify dead load bool eliminated.
+fn test_dce_dead_load_bool_inner(func: &! IrFunction) -> bool with Mut, Panic, Div {
+    let stats = dce_run(func)
+    dce_check_nop(func, 0)
+}
+
+// T32: Load bool dead elimination.
+fn test_dce_dead_load_bool() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_load_bool(0, true)   // dead
+    instrs[1] = ir_load_imm(1, 0)
+    instrs[2] = ir_return(1)
+
+    var func = dce_make_test_func(instrs, 3)
+    test_dce_dead_load_bool_inner(&! func)
+}
+
+// T33 inner: run DCE and verify dead load string eliminated.
+fn test_dce_dead_load_string_inner(func: &! IrFunction) -> bool with Mut, Panic, Div {
+    let stats = dce_run(func)
+    dce_check_nop(func, 0)
+}
+
+// T33: Load string dead elimination.
+fn test_dce_dead_load_string() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_load_string(0, 0, ir_empty_name())  // dead
+    instrs[1] = ir_load_imm(1, 0)
+    instrs[2] = ir_return(1)
+
+    var func = dce_make_test_func(instrs, 3)
+    test_dce_dead_load_string_inner(&! func)
+}
+
+// T34: Side-effect count in stats.
+fn test_dce_side_effect_count() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_call(0, 0, ir_empty_name(), ir_empty_reg_list(), 0)  // SE
+    instrs[1] = ir_call(1, 1, ir_empty_name(), ir_empty_reg_list(), 0)  // SE
+    instrs[2] = ir_load_imm(2, 0)
+    instrs[3] = ir_return(2)           // SE
+
+    var func = dce_make_test_func(instrs, 4)
+    let stats = dce_run(&! func)
+
+    // 3 side-effectful instructions (2 calls + 1 return)
+    stats.side_effect_kept >= 3
+}
+
+// T35 inner: run DCE and verify dead binop eliminated.
+fn test_dce_dead_binop_inner(func: &! IrFunction) -> bool with Mut, Panic, Div {
+    let stats = dce_run(func)
+    let d0 = dce_check_nop(func, 0)
+    let d1 = dce_check_nop(func, 1)
+    let d2 = dce_check_nop(func, 2)
+    d0 && d1 && d2
+}
+
+// T35: Binop dead when result unused.
+fn test_dce_dead_binop() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_load_imm(0, 10)
+    instrs[1] = ir_load_imm(1, 20)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)  // dead: r2 unused
+    instrs[3] = ir_load_imm(3, 0)
+    instrs[4] = ir_return(3)
+
+    var func = dce_make_test_func(instrs, 5)
+    test_dce_dead_binop_inner(&! func)
+}
+
+// T36: Opcode classification correctness.
+fn test_dce_opcode_classification() -> bool with Mut, Panic, Div {
+    let call_se = dce_has_side_effect(DCE_OP_CALL)
+    let ret_se = dce_has_side_effect(DCE_OP_RETURN)
+    let jmp_se = dce_has_side_effect(DCE_OP_JUMP)
+    let br_se = dce_has_side_effect(DCE_OP_BRANCH_TRUE)
+    let fset_se = dce_has_side_effect(DCE_OP_FIELD_SET)
+    let iset_se = dce_has_side_effect(DCE_OP_INDEX_SET)
+    let lbl_se = dce_has_side_effect(DCE_OP_LABEL)
+    let alloc_se = dce_has_side_effect(DCE_OP_ALLOC)
+
+    let load_no_se = !dce_has_side_effect(DCE_OP_LOAD_IMM)
+    let copy_no_se = !dce_has_side_effect(DCE_OP_COPY)
+    let binop_no_se = !dce_has_side_effect(DCE_OP_BINOP)
+    let phi_no_se = !dce_has_side_effect(DCE_OP_PHI)
+
+    call_se && ret_se && jmp_se && br_se && fset_se && iset_se && lbl_se && alloc_se &&
+    load_no_se && copy_no_se && binop_no_se && phi_no_se
+}
+
+// T37 inner: push/pop operations on an already-borrowed ctx.
+fn test_dce_worklist_operations_inner(ctx: &! DceContext) -> bool with Mut, Panic, Div {
+    // Need at least one instruction for push to succeed
+    ctx.instr_count = 10
+    var i: i64 = 0
+    while i < 10 {
+        ctx.instrs[i as usize].instr_idx = i
+        ctx.instrs[i as usize].is_live = false
+        i = i + 1
+    }
+
+    let p1 = dce_worklist_push(ctx, 3)
+    let p2 = dce_worklist_push(ctx, 7)
+    let count_ok = ctx.worklist.count == 2
+
+    let v1 = dce_worklist_pop(ctx)
+    let v2 = dce_worklist_pop(ctx)
+    let v3 = dce_worklist_pop(ctx)  // should be INVALID
+
+    // Stack-like behavior: last in, first out
+    let pop_ok = v1 == 7 && v2 == 3 && v3 == DCE_INVALID
+    count_ok && pop_ok
+}
+
+// T37: Worklist push/pop operations.
+fn test_dce_worklist_operations() -> bool with Mut, Panic, Div {
+    var ctx = dce_context_new()
+    test_dce_worklist_operations_inner(&! ctx)
+}
+
+// T38 inner: duplicate push prevention on already-borrowed ctx.
+fn test_dce_no_duplicate_push_inner(ctx: &! DceContext) -> bool with Mut, Panic, Div {
+    ctx.instr_count = 5
+    var i: i64 = 0
+    while i < 5 {
+        ctx.instrs[i as usize].instr_idx = i
+        ctx.instrs[i as usize].is_live = false
+        i = i + 1
+    }
+
+    let p1 = dce_worklist_push(ctx, 2)
+    // Mark it live
+    ctx.instrs[2].is_live = true
+    // Try to push again -- should fail
+    let p2 = dce_worklist_push(ctx, 2)
+
+    p1 && !p2
+}
+
+// T38: Duplicate push prevention (already live).
+fn test_dce_no_duplicate_push() -> bool with Mut, Panic, Div {
+    var ctx = dce_context_new()
+    test_dce_no_duplicate_push_inner(&! ctx)
+}
+
+// T39: Context construction -- all fields initialized.
+fn test_dce_context_initialization() -> bool with Mut, Panic, Div {
+    let ctx = dce_context_new()
+
+    let ic_ok = ctx.instr_count == 0
+    let bc_ok = ctx.block_count == 0
+    let wl_ok = ctx.worklist.count == 0
+    let ud_ok = ctx.use_def.reg_count == 0
+    let st_ok = ctx.stats.total_instrs == 0 && ctx.stats.eliminated == 0
+
+    ic_ok && bc_ok && wl_ok && ud_ok && st_ok
+}
+
+// T40 inner: populate + build blocks + verify on already-borrowed ctx/func.
+fn test_dce_block_building_inner(ctx: &! DceContext, func: &! IrFunction) -> bool with Mut, Panic, Div {
+    let pop = dce_populate(ctx, func)
+    let bc = dce_build_blocks(ctx)
+
+    // Should have 2 blocks: [0..2) and [2..5)
+    let bc_ok = bc == 2
+    let b0_start = ctx.blocks[0].instr_start == 0
+    let b1_start = ctx.blocks[1].instr_start == 2
+    bc_ok && b0_start && b1_start
+}
+
+// T40: Block building from labels.
+fn test_dce_block_building() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_load_imm(0, 1)
+    instrs[1] = ir_jump(0)
+    instrs[2] = ir_label(0)
+    instrs[3] = ir_load_imm(1, 0)
+    instrs[4] = ir_return(1)
+
+    var func = dce_make_test_func(instrs, 5)
+    var ctx = dce_context_new()
+    test_dce_block_building_inner(&! ctx, &! func)
+}
+
+// T41: Terminator classification.
+fn test_dce_terminator_classification() -> bool with Mut, Panic, Div {
+    let j = dce_is_terminator(DCE_OP_JUMP)
+    let bt = dce_is_terminator(DCE_OP_BRANCH_TRUE)
+    let bf = dce_is_terminator(DCE_OP_BRANCH_FALSE)
+    let r = dce_is_terminator(DCE_OP_RETURN)
+    let li = !dce_is_terminator(DCE_OP_LOAD_IMM)
+    let c = !dce_is_terminator(DCE_OP_CALL)
+
+    j && bt && bf && r && li && c
+}
+
+// T42: Store classification.
+fn test_dce_store_classification() -> bool with Mut, Panic, Div {
+    let fs = dce_is_store(DCE_OP_FIELD_SET)
+    let is = dce_is_store(DCE_OP_INDEX_SET)
+    let li = !dce_is_store(DCE_OP_LOAD_IMM)
+    let ca = !dce_is_store(DCE_OP_CALL)
+
+    fs && is && li && ca
+}
+
+// T43 inner: populate, set use_count, eliminate trivial phis, check zero-input phi.
+fn test_dce_phi_zero_inputs_inner(ctx: &! DceContext, func: &! IrFunction) -> bool with Mut, Panic, Div {
+    let pop = dce_populate(ctx, func)
+    ctx.instrs[0].use_count = 0
+    let elim = dce_eliminate_trivial_phis(ctx, func)
+
+    let is_nop = dce_check_nop(func, 0)
+    let count_ok = elim == 1
+    is_nop && count_ok
+}
+
+// T43: Phi with zero inputs eliminated.
+fn test_dce_phi_zero_inputs() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_phi(0)              // phi with no inputs
+    instrs[1] = ir_load_imm(1, 0)
+    instrs[2] = ir_return(1)
+
+    var func = dce_make_test_func(instrs, 3)
+    var ctx = dce_context_new()
+    test_dce_phi_zero_inputs_inner(&! ctx, &! func)
+}
+
+// T44 inner: run DCE and verify multiple calls preserved.
+fn test_dce_multiple_calls_preserved_inner(func: &! IrFunction) -> bool with Mut, Panic, Div {
+    let stats = dce_run(func)
+    let c0 = dce_check_opcode(func, 0, IrOpcode::IrCall)
+    let c1 = dce_check_opcode(func, 1, IrOpcode::IrCall)
+    let c2 = dce_check_opcode(func, 2, IrOpcode::IrCall)
+    c0 && c1 && c2
+}
+
+// T44: Multiple calls all preserved.
+fn test_dce_multiple_calls_preserved() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_call(0, 0, ir_empty_name(), ir_empty_reg_list(), 0)
+    instrs[1] = ir_call(1, 1, ir_empty_name(), ir_empty_reg_list(), 0)
+    instrs[2] = ir_call(2, 2, ir_empty_name(), ir_empty_reg_list(), 0)
+    instrs[3] = ir_load_imm(3, 0)
+    instrs[4] = ir_return(3)
+
+    var func = dce_make_test_func(instrs, 5)
+    test_dce_multiple_calls_preserved_inner(&! func)
+}
+
+// T45 inner: run DCE and verify deep transitive chain all live.
+fn test_dce_deep_transitive_chain_inner(func: &! IrFunction) -> bool with Mut, Panic, Div {
+    let stats = dce_run(func)
+    let i0 = dce_check_not_nop(func, 0)
+    let i1 = dce_check_not_nop(func, 1)
+    let i2 = dce_check_not_nop(func, 2)
+    let i3 = dce_check_not_nop(func, 3)
+    let i4 = dce_check_not_nop(func, 4)
+    let i5 = dce_check_not_nop(func, 5)
+    i0 && i1 && i2 && i3 && i4 && i5
+}
+
+// T45: Deep transitive chain (5 levels).
+fn test_dce_deep_transitive_chain() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_load_imm(0, 1)
+    instrs[1] = ir_binop(1, 0, BinaryOp::OpAdd, 0)
+    instrs[2] = ir_binop(2, 1, BinaryOp::OpAdd, 1)
+    instrs[3] = ir_binop(3, 2, BinaryOp::OpAdd, 2)
+    instrs[4] = ir_binop(4, 3, BinaryOp::OpAdd, 3)
+    instrs[5] = ir_binop(5, 4, BinaryOp::OpAdd, 4)
+    instrs[6] = ir_return(5)
+
+    var func = dce_make_test_func(instrs, 7)
+    test_dce_deep_transitive_chain_inner(&! func)
+}
+
+// T46 inner: run DCE and verify interleaved live/dead.
+fn test_dce_interleaved_live_dead_inner(func: &! IrFunction) -> bool with Mut, Panic, Div {
+    let stats = dce_run(func)
+    let l0 = dce_check_not_nop(func, 0)
+    let d1 = dce_check_nop(func, 1)
+    let l2 = dce_check_not_nop(func, 2)
+    let d3 = dce_check_nop(func, 3)
+    let l4 = dce_check_not_nop(func, 4)
+    l0 && d1 && l2 && d3 && l4
+}
+
+// T46: Interleaved live and dead.
+fn test_dce_interleaved_live_dead() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_load_imm(0, 10)     // live
+    instrs[1] = ir_load_imm(1, 20)     // dead
+    instrs[2] = ir_load_imm(2, 30)     // live
+    instrs[3] = ir_load_imm(3, 40)     // dead
+    instrs[4] = ir_binop(4, 0, BinaryOp::OpAdd, 2)  // live
+    instrs[5] = ir_return(4)
+
+    var func = dce_make_test_func(instrs, 6)
+    test_dce_interleaved_live_dead_inner(&! func)
+}
+
+// T47 inner: run DCE and verify index set preserved when base used.
+fn test_dce_index_set_preserved_inner(func: &! IrFunction) -> bool with Mut, Panic, Div {
+    let stats = dce_run(func)
+    dce_check_opcode(func, 2, IrOpcode::IrIndexSet)
+}
+
+// T47: Index set side effect preserved when base used.
+fn test_dce_index_set_preserved() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_load_imm(0, 0)      // base
+    instrs[1] = ir_load_imm(1, 0)      // index
+    instrs[2] = ir_index_set(0, 1, 2)  // store (side effect)
+    instrs[3] = ir_return(0)
+
+    var func = dce_make_test_func(instrs, 4)
+    test_dce_index_set_preserved_inner(&! func)
+}
+
+// T48: Convenience function dce_optimize_function works.
+fn test_dce_optimize_function_convenience() -> bool with Mut, Panic, Div {
+    var instrs = dce_empty_instrs()
+    instrs[0] = ir_load_imm(0, 42)     // live
+    instrs[1] = ir_load_imm(1, 99)     // dead
+    instrs[2] = ir_return(0)
+
+    let func = dce_make_test_func(instrs, 3)
+    let optimized = dce_optimize_function(func)
+
+    let dead_ok = dce_check_nop(&optimized, 1)
+    let live_ok = dce_check_not_nop(&optimized, 0)
+    dead_ok && live_ok
+}
+
+// T49 inner: set up blocks, propagate reachability, check results.
+fn test_dce_reachability_propagation_inner(ctx: &! DceContext) -> bool with Mut, Panic, Div {
+    ctx.block_count = 3
+
+    ctx.blocks[0].block_id = 0
+    ctx.blocks[0].is_reachable = true
+    ctx.blocks[0].succ_count = 1
+    ctx.blocks[0].succs[0] = 1
+
+    ctx.blocks[1].block_id = 1
+    ctx.blocks[1].is_reachable = false
+    ctx.blocks[1].succ_count = 1
+    ctx.blocks[1].succs[0] = 2
+
+    ctx.blocks[2].block_id = 2
+    ctx.blocks[2].is_reachable = false
+    ctx.blocks[2].succ_count = 0
+
+    let reach = dce_propagate_reachability(ctx)
+
+    // All three blocks should be reachable
+    let b0 = ctx.blocks[0].is_reachable
+    let b1 = ctx.blocks[1].is_reachable
+    let b2 = ctx.blocks[2].is_reachable
+    b0 && b1 && b2
+}
+
+// T49: Reachability propagation basics.
+fn test_dce_reachability_propagation() -> bool with Mut, Panic, Div {
+    var ctx = dce_context_new()
+    test_dce_reachability_propagation_inner(&! ctx)
+}
+
+// T50: Opcode mapping covers all IR opcodes.
+fn test_dce_opcode_mapping_complete() -> bool with Mut, Panic, Div {
+    let v1 = dce_classify_opcode(IrOpcode::IrLoadImm) == DCE_OP_LOAD_IMM
+    let v2 = dce_classify_opcode(IrOpcode::IrLoadFloat) == DCE_OP_LOAD_FLOAT
+    let v3 = dce_classify_opcode(IrOpcode::IrLoadBool) == DCE_OP_LOAD_BOOL
+    let v4 = dce_classify_opcode(IrOpcode::IrCopy) == DCE_OP_COPY
+    let v5 = dce_classify_opcode(IrOpcode::IrBinOp) == DCE_OP_BINOP
+    let v6 = dce_classify_opcode(IrOpcode::IrUnaryOp) == DCE_OP_UNARYOP
+    let v7 = dce_classify_opcode(IrOpcode::IrCall) == DCE_OP_CALL
+    let v8 = dce_classify_opcode(IrOpcode::IrReturn) == DCE_OP_RETURN
+    let v9 = dce_classify_opcode(IrOpcode::IrJump) == DCE_OP_JUMP
+    let v10 = dce_classify_opcode(IrOpcode::IrBranchTrue) == DCE_OP_BRANCH_TRUE
+    let v11 = dce_classify_opcode(IrOpcode::IrBranchFalse) == DCE_OP_BRANCH_FALSE
+    let v12 = dce_classify_opcode(IrOpcode::IrFieldGet) == DCE_OP_FIELD_GET
+    let v13 = dce_classify_opcode(IrOpcode::IrFieldSet) == DCE_OP_FIELD_SET
+    let v14 = dce_classify_opcode(IrOpcode::IrIndexGet) == DCE_OP_INDEX_GET
+    let v15 = dce_classify_opcode(IrOpcode::IrIndexSet) == DCE_OP_INDEX_SET
+    let v16 = dce_classify_opcode(IrOpcode::IrAlloc) == DCE_OP_ALLOC
+    let v17 = dce_classify_opcode(IrOpcode::IrLabel) == DCE_OP_LABEL
+    let v18 = dce_classify_opcode(IrOpcode::IrNop) == DCE_OP_NOP
+    let v19 = dce_classify_opcode(IrOpcode::IrPhi) == DCE_OP_PHI
+
+    v1 && v2 && v3 && v4 && v5 && v6 && v7 && v8 && v9 && v10 &&
+    v11 && v12 && v13 && v14 && v15 && v16 && v17 && v18 && v19
+}
+
+// ============================================================================
+// Section 17: Test Runner
+// ============================================================================
+
+fn test_dce_main() -> i32 with IO, Mut, Panic, Div {
+    var passed: i64 = 0
+    let total: i64 = 50
+
+    print("=== DCE (Dead Code Elimination) Tests ===\n")
+
+    if test_dce_simple_dead_removal() { passed = passed + 1; print("  T01 OK simple_dead_removal\n") } else { print("  FAIL: T01 simple_dead_removal\n") }
+    if test_dce_side_effect_preservation() { passed = passed + 1; print("  T02 OK side_effect_preservation\n") } else { print("  FAIL: T02 side_effect_preservation\n") }
+    if test_dce_use_def_construction() { passed = passed + 1; print("  T03 OK use_def_construction\n") } else { print("  FAIL: T03 use_def_construction\n") }
+    if test_dce_transitive_liveness() { passed = passed + 1; print("  T04 OK transitive_liveness\n") } else { print("  FAIL: T04 transitive_liveness\n") }
+    if test_dce_dead_store_unused_local() { passed = passed + 1; print("  T05 OK dead_store_unused_local\n") } else { print("  FAIL: T05 dead_store_unused_local\n") }
+    if test_dce_statistics_tracking() { passed = passed + 1; print("  T06 OK statistics_tracking\n") } else { print("  FAIL: T06 statistics_tracking\n") }
+    if test_dce_return_preserved() { passed = passed + 1; print("  T07 OK return_preserved\n") } else { print("  FAIL: T07 return_preserved\n") }
+    if test_dce_branch_preserved() { passed = passed + 1; print("  T08 OK branch_preserved\n") } else { print("  FAIL: T08 branch_preserved\n") }
+    if test_dce_jump_preserved() { passed = passed + 1; print("  T09 OK jump_preserved\n") } else { print("  FAIL: T09 jump_preserved\n") }
+    if test_dce_label_preserved() { passed = passed + 1; print("  T10 OK label_preserved\n") } else { print("  FAIL: T10 label_preserved\n") }
+    if test_dce_call_preserved() { passed = passed + 1; print("  T11 OK call_preserved\n") } else { print("  FAIL: T11 call_preserved\n") }
+    if test_dce_multiple_dead_removed() { passed = passed + 1; print("  T12 OK multiple_dead_removed\n") } else { print("  FAIL: T12 multiple_dead_removed\n") }
+    if test_dce_copy_chain_live() { passed = passed + 1; print("  T13 OK copy_chain_live\n") } else { print("  FAIL: T13 copy_chain_live\n") }
+    if test_dce_dead_copy_chain() { passed = passed + 1; print("  T14 OK dead_copy_chain\n") } else { print("  FAIL: T14 dead_copy_chain\n") }
+    if test_dce_binop_self_use() { passed = passed + 1; print("  T15 OK binop_self_use\n") } else { print("  FAIL: T15 binop_self_use\n") }
+    if test_dce_unaryop_transitive() { passed = passed + 1; print("  T16 OK unaryop_transitive\n") } else { print("  FAIL: T16 unaryop_transitive\n") }
+    if test_dce_dead_unaryop() { passed = passed + 1; print("  T17 OK dead_unaryop\n") } else { print("  FAIL: T17 dead_unaryop\n") }
+    if test_dce_dead_field_get() { passed = passed + 1; print("  T18 OK dead_field_get\n") } else { print("  FAIL: T18 dead_field_get\n") }
+    if test_dce_dead_index_get() { passed = passed + 1; print("  T19 OK dead_index_get\n") } else { print("  FAIL: T19 dead_index_get\n") }
+    if test_dce_alloc_preserved() { passed = passed + 1; print("  T20 OK alloc_preserved\n") } else { print("  FAIL: T20 alloc_preserved\n") }
+    if test_dce_field_set_preserved_live_base() { passed = passed + 1; print("  T21 OK field_set_preserved\n") } else { print("  FAIL: T21 field_set_preserved\n") }
+    if test_dce_trivial_phi_single_input() { passed = passed + 1; print("  T22 OK trivial_phi_single\n") } else { print("  FAIL: T22 trivial_phi_single\n") }
+    if test_dce_trivial_phi_same_inputs() { passed = passed + 1; print("  T23 OK trivial_phi_same\n") } else { print("  FAIL: T23 trivial_phi_same\n") }
+    if test_dce_nontrivial_phi_kept() { passed = passed + 1; print("  T24 OK nontrivial_phi_kept\n") } else { print("  FAIL: T24 nontrivial_phi_kept\n") }
+    if test_dce_empty_function() { passed = passed + 1; print("  T25 OK empty_function\n") } else { print("  FAIL: T25 empty_function\n") }
+    if test_dce_single_return() { passed = passed + 1; print("  T26 OK single_return\n") } else { print("  FAIL: T26 single_return\n") }
+    if test_dce_long_dead_chain() { passed = passed + 1; print("  T27 OK long_dead_chain\n") } else { print("  FAIL: T27 long_dead_chain\n") }
+    if test_dce_diamond_live() { passed = passed + 1; print("  T28 OK diamond_live\n") } else { print("  FAIL: T28 diamond_live\n") }
+    if test_dce_mixed_live_dead() { passed = passed + 1; print("  T29 OK mixed_live_dead\n") } else { print("  FAIL: T29 mixed_live_dead\n") }
+    if test_dce_branch_false_preserved() { passed = passed + 1; print("  T30 OK branch_false_preserved\n") } else { print("  FAIL: T30 branch_false_preserved\n") }
+    if test_dce_dead_load_float() { passed = passed + 1; print("  T31 OK dead_load_float\n") } else { print("  FAIL: T31 dead_load_float\n") }
+    if test_dce_dead_load_bool() { passed = passed + 1; print("  T32 OK dead_load_bool\n") } else { print("  FAIL: T32 dead_load_bool\n") }
+    if test_dce_dead_load_string() { passed = passed + 1; print("  T33 OK dead_load_string\n") } else { print("  FAIL: T33 dead_load_string\n") }
+    if test_dce_side_effect_count() { passed = passed + 1; print("  T34 OK side_effect_count\n") } else { print("  FAIL: T34 side_effect_count\n") }
+    if test_dce_dead_binop() { passed = passed + 1; print("  T35 OK dead_binop\n") } else { print("  FAIL: T35 dead_binop\n") }
+    if test_dce_opcode_classification() { passed = passed + 1; print("  T36 OK opcode_classification\n") } else { print("  FAIL: T36 opcode_classification\n") }
+    if test_dce_worklist_operations() { passed = passed + 1; print("  T37 OK worklist_operations\n") } else { print("  FAIL: T37 worklist_operations\n") }
+    if test_dce_no_duplicate_push() { passed = passed + 1; print("  T38 OK no_duplicate_push\n") } else { print("  FAIL: T38 no_duplicate_push\n") }
+    if test_dce_context_initialization() { passed = passed + 1; print("  T39 OK context_initialization\n") } else { print("  FAIL: T39 context_initialization\n") }
+    if test_dce_block_building() { passed = passed + 1; print("  T40 OK block_building\n") } else { print("  FAIL: T40 block_building\n") }
+    if test_dce_terminator_classification() { passed = passed + 1; print("  T41 OK terminator_classification\n") } else { print("  FAIL: T41 terminator_classification\n") }
+    if test_dce_store_classification() { passed = passed + 1; print("  T42 OK store_classification\n") } else { print("  FAIL: T42 store_classification\n") }
+    if test_dce_phi_zero_inputs() { passed = passed + 1; print("  T43 OK phi_zero_inputs\n") } else { print("  FAIL: T43 phi_zero_inputs\n") }
+    if test_dce_multiple_calls_preserved() { passed = passed + 1; print("  T44 OK multiple_calls_preserved\n") } else { print("  FAIL: T44 multiple_calls_preserved\n") }
+    if test_dce_deep_transitive_chain() { passed = passed + 1; print("  T45 OK deep_transitive_chain\n") } else { print("  FAIL: T45 deep_transitive_chain\n") }
+    if test_dce_interleaved_live_dead() { passed = passed + 1; print("  T46 OK interleaved_live_dead\n") } else { print("  FAIL: T46 interleaved_live_dead\n") }
+    if test_dce_index_set_preserved() { passed = passed + 1; print("  T47 OK index_set_preserved\n") } else { print("  FAIL: T47 index_set_preserved\n") }
+    if test_dce_optimize_function_convenience() { passed = passed + 1; print("  T48 OK optimize_function_convenience\n") } else { print("  FAIL: T48 optimize_function_convenience\n") }
+    if test_dce_reachability_propagation() { passed = passed + 1; print("  T49 OK reachability_propagation\n") } else { print("  FAIL: T49 reachability_propagation\n") }
+    if test_dce_opcode_mapping_complete() { passed = passed + 1; print("  T50 OK opcode_mapping_complete\n") } else { print("  FAIL: T50 opcode_mapping_complete\n") }
+
+    print("\nDCE: ")
+    print_int(passed)
+    print(" / ")
+    print_int(total)
+    print(" passed\n")
+
+    if passed == total { 0 } else { 1 }
+}

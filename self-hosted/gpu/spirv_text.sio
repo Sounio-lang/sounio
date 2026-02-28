@@ -1,0 +1,2249 @@
+// self-hosted::gpu::spirv_text — SPIR-V text format emitter
+//
+// Emits SPIR-V assembly in human-readable text form (like spirv-dis output).
+// Complementary to spirv.sio which emits binary words; this module produces
+// readable text suitable for debugging, testing, and round-tripping through
+// spirv-as.
+//
+// Text format example:
+//   OpCapability Shader
+//   OpMemoryModel Logical GLSL450
+//   OpEntryPoint GLCompute %main "main" %gl_GlobalInvocationID
+//   %void = OpTypeVoid
+//   %uint = OpTypeInt 32 0
+//   %func_void = OpTypeFunction %void
+//   %main = OpFunction %void None %func_void
+//   %entry = OpLabel
+//   OpReturn
+//   OpFunctionEnd
+
+// ============================================================================
+// SPIR-V text opcode constants (string names for text output)
+// ============================================================================
+
+let SPVT_OP_CAPABILITY: i64       = 1
+let SPVT_OP_MEMORY_MODEL: i64    = 2
+let SPVT_OP_ENTRY_POINT: i64     = 3
+let SPVT_OP_EXECUTION_MODE: i64  = 4
+let SPVT_OP_TYPE_VOID: i64       = 5
+let SPVT_OP_TYPE_INT: i64        = 6
+let SPVT_OP_TYPE_FLOAT: i64      = 7
+let SPVT_OP_TYPE_VECTOR: i64     = 8
+let SPVT_OP_TYPE_MATRIX: i64     = 9
+let SPVT_OP_TYPE_POINTER: i64    = 10
+let SPVT_OP_TYPE_FUNCTION: i64   = 11
+let SPVT_OP_TYPE_ARRAY: i64      = 12
+let SPVT_OP_TYPE_STRUCT: i64     = 13
+let SPVT_OP_CONSTANT: i64        = 14
+let SPVT_OP_CONSTANT_TRUE: i64   = 15
+let SPVT_OP_CONSTANT_FALSE: i64  = 16
+let SPVT_OP_CONSTANT_COMPOSITE: i64 = 17
+let SPVT_OP_FUNCTION: i64        = 18
+let SPVT_OP_FUNCTION_PARAM: i64  = 19
+let SPVT_OP_FUNCTION_END: i64    = 20
+let SPVT_OP_LABEL: i64           = 21
+let SPVT_OP_RETURN: i64          = 22
+let SPVT_OP_RETURN_VALUE: i64    = 23
+let SPVT_OP_FADD: i64            = 24
+let SPVT_OP_FSUB: i64            = 25
+let SPVT_OP_FMUL: i64            = 26
+let SPVT_OP_FDIV: i64            = 27
+let SPVT_OP_IADD: i64            = 28
+let SPVT_OP_ISUB: i64            = 29
+let SPVT_OP_IMUL: i64            = 30
+let SPVT_OP_SDIV: i64            = 31
+let SPVT_OP_VARIABLE: i64        = 32
+let SPVT_OP_LOAD: i64            = 33
+let SPVT_OP_STORE: i64           = 34
+let SPVT_OP_ACCESS_CHAIN: i64    = 35
+let SPVT_OP_BRANCH: i64          = 36
+let SPVT_OP_BRANCH_COND: i64     = 37
+let SPVT_OP_SWITCH: i64          = 38
+let SPVT_OP_PHI: i64             = 39
+let SPVT_OP_SEL_MERGE: i64       = 40
+let SPVT_OP_LOOP_MERGE: i64      = 41
+let SPVT_OP_DECORATE: i64        = 42
+let SPVT_OP_NAME: i64            = 43
+let SPVT_OP_TYPE_BOOL: i64       = 44
+
+// Capability values
+let SPVT_CAP_SHADER: i64  = 1
+let SPVT_CAP_KERNEL: i64  = 6
+
+// Addressing model
+let SPVT_ADDR_LOGICAL: i64 = 0
+
+// Memory model
+let SPVT_MEM_GLSL450: i64  = 1
+let SPVT_MEM_OPENCL: i64   = 2
+
+// Execution model
+let SPVT_EXEC_VERTEX: i64     = 0
+let SPVT_EXEC_FRAGMENT: i64   = 4
+let SPVT_EXEC_GLCOMPUTE: i64  = 5
+
+// Storage class
+let SPVT_SC_INPUT: i64           = 1
+let SPVT_SC_UNIFORM: i64         = 2
+let SPVT_SC_OUTPUT: i64          = 3
+let SPVT_SC_WORKGROUP: i64       = 4
+let SPVT_SC_PRIVATE: i64         = 6
+let SPVT_SC_FUNCTION: i64        = 7
+let SPVT_SC_STORAGE_BUFFER: i64  = 12
+
+// Function control
+let SPVT_FUNC_CTRL_NONE: i64     = 0
+let SPVT_FUNC_CTRL_INLINE: i64   = 1
+let SPVT_FUNC_CTRL_NOINLINE: i64 = 2
+
+// Decoration values
+let SPVT_DEC_BUILTIN: i64        = 11
+let SPVT_DEC_LOCATION: i64       = 30
+let SPVT_DEC_BINDING: i64        = 33
+let SPVT_DEC_DESC_SET: i64       = 34
+
+// Selection/loop merge control
+let SPVT_SEL_CTRL_NONE: i64  = 0
+let SPVT_LOOP_CTRL_NONE: i64 = 0
+
+// ============================================================================
+// SpvTextInstr — one SPIR-V instruction in text form
+// ============================================================================
+
+struct SpvTextInstr {
+    opcode: i64,
+    result_id: i64,
+    type_id: i64,
+    operands: [i64; 8],
+    operand_count: i64,
+    has_result: bool,
+}
+
+fn spvt_instr_new() -> SpvTextInstr {
+    SpvTextInstr {
+        opcode: 0,
+        result_id: 0,
+        type_id: 0,
+        operands: [0; 8],
+        operand_count: 0,
+        has_result: false,
+    }
+}
+
+fn spvt_instr_with_op(opcode: i64) -> SpvTextInstr {
+    SpvTextInstr {
+        opcode: opcode,
+        result_id: 0,
+        type_id: 0,
+        operands: [0; 8],
+        operand_count: 0,
+        has_result: false,
+    }
+}
+
+fn spvt_instr_with_result(opcode: i64, result_id: i64, type_id: i64) -> SpvTextInstr {
+    SpvTextInstr {
+        opcode: opcode,
+        result_id: result_id,
+        type_id: type_id,
+        operands: [0; 8],
+        operand_count: 0,
+        has_result: true,
+    }
+}
+
+fn spvt_instr_add_operand(instr: SpvTextInstr, op: i64) -> SpvTextInstr with Mut, Panic {
+    var out = instr
+    if out.operand_count < 8 {
+        out.operands[out.operand_count as usize] = op
+        out.operand_count = out.operand_count + 1
+    }
+    out
+}
+
+// ============================================================================
+// SpvTextBlock — a basic block of instruction indices
+// ============================================================================
+
+struct SpvTextBlock {
+    label_id: i64,
+    instrs: [i64; 256],
+    instr_count: i64,
+}
+
+fn spvt_block_new(label_id: i64) -> SpvTextBlock {
+    SpvTextBlock {
+        label_id: label_id,
+        instrs: [0; 256],
+        instr_count: 0,
+    }
+}
+
+fn spvt_block_add_instr(block: SpvTextBlock, instr_idx: i64) -> SpvTextBlock with Mut, Panic {
+    var out = block
+    if out.instr_count < 256 {
+        out.instrs[out.instr_count as usize] = instr_idx
+        out.instr_count = out.instr_count + 1
+    }
+    out
+}
+
+// ============================================================================
+// SpvTextFunc — a function
+// ============================================================================
+
+struct SpvTextFunc {
+    func_id: i64,
+    return_type_id: i64,
+    param_type_ids: [i64; 16],
+    param_count: i64,
+    blocks: [SpvTextBlock; 64],
+    block_count: i64,
+    name_hash: i64,
+}
+
+fn spvt_func_new(func_id: i64, return_type_id: i64) -> SpvTextFunc {
+    SpvTextFunc {
+        func_id: func_id,
+        return_type_id: return_type_id,
+        param_type_ids: [0; 16],
+        param_count: 0,
+        blocks: [spvt_block_new(0); 64],
+        block_count: 0,
+        name_hash: 0,
+    }
+}
+
+fn spvt_func_add_param(func: SpvTextFunc, type_id: i64) -> SpvTextFunc with Mut, Panic {
+    var out = func
+    if out.param_count < 16 {
+        out.param_type_ids[out.param_count as usize] = type_id
+        out.param_count = out.param_count + 1
+    }
+    out
+}
+
+fn spvt_func_add_block(func: SpvTextFunc, block: SpvTextBlock) -> SpvTextFunc with Mut, Panic {
+    var out = func
+    if out.block_count < 64 {
+        out.blocks[out.block_count as usize] = block
+        out.block_count = out.block_count + 1
+    }
+    out
+}
+
+// ============================================================================
+// SpvTextModule — full SPIR-V module in text representation
+// ============================================================================
+
+struct SpvTextDecoration {
+    target_id: i64,
+    decoration: i64,
+    value: i64,
+}
+
+fn spvt_decoration_new() -> SpvTextDecoration {
+    SpvTextDecoration { target_id: 0, decoration: 0, value: 0 }
+}
+
+struct SpvTextEntryPoint {
+    exec_model: i64,
+    func_id: i64,
+    name_hash: i64,
+    interface_ids: [i64; 8],
+    interface_count: i64,
+}
+
+fn spvt_entry_point_new() -> SpvTextEntryPoint {
+    SpvTextEntryPoint {
+        exec_model: 0,
+        func_id: 0,
+        name_hash: 0,
+        interface_ids: [0; 8],
+        interface_count: 0,
+    }
+}
+
+struct SpvTextTypeDecl {
+    opcode: i64,
+    result_id: i64,
+    operands: [i64; 8],
+    operand_count: i64,
+}
+
+fn spvt_type_decl_new() -> SpvTextTypeDecl {
+    SpvTextTypeDecl {
+        opcode: 0,
+        result_id: 0,
+        operands: [0; 8],
+        operand_count: 0,
+    }
+}
+
+struct SpvTextGlobal {
+    var_id: i64,
+    type_id: i64,
+    storage_class: i64,
+}
+
+fn spvt_global_new() -> SpvTextGlobal {
+    SpvTextGlobal { var_id: 0, type_id: 0, storage_class: 0 }
+}
+
+struct SpvTextModule {
+    capabilities: [i64; 8],
+    cap_count: i64,
+    addr_model: i64,
+    mem_model: i64,
+    entry_points: [SpvTextEntryPoint; 8],
+    entry_count: i64,
+    types: [SpvTextTypeDecl; 128],
+    type_count: i64,
+    globals: [SpvTextGlobal; 64],
+    global_count: i64,
+    functions: [SpvTextFunc; 32],
+    func_count: i64,
+    decorations: [SpvTextDecoration; 64],
+    dec_count: i64,
+}
+
+fn spvt_module_new() -> SpvTextModule {
+    SpvTextModule {
+        capabilities: [0; 8],
+        cap_count: 0,
+        addr_model: SPVT_ADDR_LOGICAL,
+        mem_model: SPVT_MEM_GLSL450,
+        entry_points: [spvt_entry_point_new(); 8],
+        entry_count: 0,
+        types: [spvt_type_decl_new(); 128],
+        type_count: 0,
+        globals: [spvt_global_new(); 64],
+        global_count: 0,
+        functions: [spvt_func_new(0, 0); 32],
+        func_count: 0,
+        decorations: [spvt_decoration_new(); 64],
+        dec_count: 0,
+    }
+}
+
+fn spvt_module_add_cap(m: SpvTextModule, cap: i64) -> SpvTextModule with Mut, Panic {
+    var out = m
+    if out.cap_count < 8 {
+        out.capabilities[out.cap_count as usize] = cap
+        out.cap_count = out.cap_count + 1
+    }
+    out
+}
+
+fn spvt_module_add_entry(m: SpvTextModule, ep: SpvTextEntryPoint) -> SpvTextModule with Mut, Panic {
+    var out = m
+    if out.entry_count < 8 {
+        out.entry_points[out.entry_count as usize] = ep
+        out.entry_count = out.entry_count + 1
+    }
+    out
+}
+
+fn spvt_module_add_type(m: SpvTextModule, td: SpvTextTypeDecl) -> SpvTextModule with Mut, Panic {
+    var out = m
+    if out.type_count < 128 {
+        out.types[out.type_count as usize] = td
+        out.type_count = out.type_count + 1
+    }
+    out
+}
+
+fn spvt_module_add_global(m: SpvTextModule, g: SpvTextGlobal) -> SpvTextModule with Mut, Panic {
+    var out = m
+    if out.global_count < 64 {
+        out.globals[out.global_count as usize] = g
+        out.global_count = out.global_count + 1
+    }
+    out
+}
+
+fn spvt_module_add_func(m: SpvTextModule, f: SpvTextFunc) -> SpvTextModule with Mut, Panic {
+    var out = m
+    if out.func_count < 32 {
+        out.functions[out.func_count as usize] = f
+        out.func_count = out.func_count + 1
+    }
+    out
+}
+
+fn spvt_module_add_decoration(m: SpvTextModule, d: SpvTextDecoration) -> SpvTextModule with Mut, Panic {
+    var out = m
+    if out.dec_count < 64 {
+        out.decorations[out.dec_count as usize] = d
+        out.dec_count = out.dec_count + 1
+    }
+    out
+}
+
+// ============================================================================
+// SpvTextWriter — text output buffer
+// ============================================================================
+
+struct SpvTextWriter {
+    data: [i8; 65536],
+    len: i64,
+    indent: i64,
+}
+
+fn spvt_writer_new() -> SpvTextWriter {
+    SpvTextWriter { data: [0; 65536], len: 0, indent: 0 }
+}
+
+fn spvt_push_byte(w: SpvTextWriter, b: i8) -> SpvTextWriter with Mut, Panic {
+    var out = w
+    if out.len < 65536 {
+        out.data[out.len as usize] = b
+        out.len = out.len + 1
+    }
+    out
+}
+
+fn spvt_push_str(w: SpvTextWriter, s: string) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        if out.len < 65536 {
+            out.data[out.len as usize] = str_char_at(s, i) as i8
+            out.len = out.len + 1
+        }
+        i = i + 1
+    }
+    out
+}
+
+fn spvt_push_newline(w: SpvTextWriter) -> SpvTextWriter with Mut, Panic {
+    spvt_push_byte(w, 10)
+}
+
+fn spvt_push_space(w: SpvTextWriter) -> SpvTextWriter with Mut, Panic {
+    spvt_push_byte(w, 32)
+}
+
+fn spvt_push_indent(w: SpvTextWriter) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    var i: i64 = 0
+    while i < out.indent {
+        out = spvt_push_str(out, "  ")
+        i = i + 1
+    }
+    out
+}
+
+fn spvt_push_i64(w: SpvTextWriter, n: i64) -> SpvTextWriter with Mut, Panic, Div {
+    if n < 0 {
+        return spvt_push_str(w, "0")
+    }
+    if n == 0 { return spvt_push_str(w, "0") }
+
+    var digits: [i8; 32] = [0; 32]
+    var rev_len: i64 = 0
+    var value: i64 = n
+
+    while value > 0 {
+        let digit = value % 10
+        digits[rev_len as usize] = (48 + digit) as i8
+        rev_len = rev_len + 1
+        value = value / 10
+    }
+
+    var out = w
+    var i: i64 = 0
+    while i < rev_len {
+        out = spvt_push_byte(out, digits[(rev_len - i - 1) as usize])
+        i = i + 1
+    }
+    out
+}
+
+fn spvt_push_id(w: SpvTextWriter, id: i64) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_byte(out, 37)   // '%'
+    out = spvt_push_i64(out, id)
+    out
+}
+
+fn spvt_writer_contains(w: SpvTextWriter, needle: string) -> bool with Mut, Panic, Div {
+    let nlen = str_len(needle)
+    if nlen == 0 { return true }
+    if w.len < nlen { return false }
+
+    var i: i64 = 0
+    while i <= (w.len - nlen) {
+        var j: i64 = 0
+        var ok: bool = true
+        while j < nlen {
+            if w.data[(i + j) as usize] != (str_char_at(needle, j) as i8) {
+                ok = false
+                break
+            }
+            j = j + 1
+        }
+        if ok { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn spvt_to_string(w: SpvTextWriter) -> string with Mut, Panic, Div {
+    str_from_bytes(w.data, w.len)
+}
+
+// ============================================================================
+// SpvTextCtx — emitter context
+// ============================================================================
+
+struct SpvTextTypeCacheEntry {
+    tag: i64,
+    id: i64,
+}
+
+fn spvt_cache_entry_new() -> SpvTextTypeCacheEntry {
+    SpvTextTypeCacheEntry { tag: 0, id: 0 }
+}
+
+struct SpvTextTypeCache {
+    entries: [SpvTextTypeCacheEntry; 64],
+    count: i64,
+}
+
+fn spvt_type_cache_new() -> SpvTextTypeCache {
+    SpvTextTypeCache {
+        entries: [spvt_cache_entry_new(); 64],
+        count: 0,
+    }
+}
+
+struct SpvTextCtx {
+    module: SpvTextModule,
+    writer: SpvTextWriter,
+    next_id: i64,
+    type_cache: SpvTextTypeCache,
+}
+
+fn spvt_ctx_new() -> SpvTextCtx {
+    SpvTextCtx {
+        module: spvt_module_new(),
+        writer: spvt_writer_new(),
+        next_id: 1,
+        type_cache: spvt_type_cache_new(),
+    }
+}
+
+fn spvt_alloc_id(ctx: SpvTextCtx) -> SpvTextCtx with Mut {
+    var out = ctx
+    out.next_id = out.next_id + 1
+    out
+}
+
+fn spvt_current_id(ctx: SpvTextCtx) -> i64 {
+    ctx.next_id
+}
+
+fn spvt_cache_type(ctx: SpvTextCtx, tag: i64, id: i64) -> SpvTextCtx with Mut, Panic {
+    var out = ctx
+    if out.type_cache.count < 64 {
+        out.type_cache.entries[out.type_cache.count as usize] = SpvTextTypeCacheEntry { tag: tag, id: id }
+        out.type_cache.count = out.type_cache.count + 1
+    }
+    out
+}
+
+fn spvt_lookup_type(ctx: SpvTextCtx, tag: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < ctx.type_cache.count {
+        if ctx.type_cache.entries[i as usize].tag == tag {
+            return ctx.type_cache.entries[i as usize].id
+        }
+        i = i + 1
+    }
+    0
+}
+
+// ============================================================================
+// Opcode name lookup
+// ============================================================================
+
+fn spvt_opcode_name(op: i64) -> string {
+    if op == SPVT_OP_CAPABILITY      { return "OpCapability" }
+    if op == SPVT_OP_MEMORY_MODEL    { return "OpMemoryModel" }
+    if op == SPVT_OP_ENTRY_POINT     { return "OpEntryPoint" }
+    if op == SPVT_OP_EXECUTION_MODE  { return "OpExecutionMode" }
+    if op == SPVT_OP_TYPE_VOID       { return "OpTypeVoid" }
+    if op == SPVT_OP_TYPE_INT        { return "OpTypeInt" }
+    if op == SPVT_OP_TYPE_FLOAT      { return "OpTypeFloat" }
+    if op == SPVT_OP_TYPE_VECTOR     { return "OpTypeVector" }
+    if op == SPVT_OP_TYPE_MATRIX     { return "OpTypeMatrix" }
+    if op == SPVT_OP_TYPE_POINTER    { return "OpTypePointer" }
+    if op == SPVT_OP_TYPE_FUNCTION   { return "OpTypeFunction" }
+    if op == SPVT_OP_TYPE_ARRAY      { return "OpTypeArray" }
+    if op == SPVT_OP_TYPE_STRUCT     { return "OpTypeStruct" }
+    if op == SPVT_OP_TYPE_BOOL       { return "OpTypeBool" }
+    if op == SPVT_OP_CONSTANT        { return "OpConstant" }
+    if op == SPVT_OP_CONSTANT_TRUE   { return "OpConstantTrue" }
+    if op == SPVT_OP_CONSTANT_FALSE  { return "OpConstantFalse" }
+    if op == SPVT_OP_CONSTANT_COMPOSITE { return "OpConstantComposite" }
+    if op == SPVT_OP_FUNCTION        { return "OpFunction" }
+    if op == SPVT_OP_FUNCTION_PARAM  { return "OpFunctionParameter" }
+    if op == SPVT_OP_FUNCTION_END    { return "OpFunctionEnd" }
+    if op == SPVT_OP_LABEL           { return "OpLabel" }
+    if op == SPVT_OP_RETURN          { return "OpReturn" }
+    if op == SPVT_OP_RETURN_VALUE    { return "OpReturnValue" }
+    if op == SPVT_OP_FADD            { return "OpFAdd" }
+    if op == SPVT_OP_FSUB            { return "OpFSub" }
+    if op == SPVT_OP_FMUL            { return "OpFMul" }
+    if op == SPVT_OP_FDIV            { return "OpFDiv" }
+    if op == SPVT_OP_IADD            { return "OpIAdd" }
+    if op == SPVT_OP_ISUB            { return "OpISub" }
+    if op == SPVT_OP_IMUL            { return "OpIMul" }
+    if op == SPVT_OP_SDIV            { return "OpSDiv" }
+    if op == SPVT_OP_VARIABLE        { return "OpVariable" }
+    if op == SPVT_OP_LOAD            { return "OpLoad" }
+    if op == SPVT_OP_STORE           { return "OpStore" }
+    if op == SPVT_OP_ACCESS_CHAIN    { return "OpAccessChain" }
+    if op == SPVT_OP_BRANCH          { return "OpBranch" }
+    if op == SPVT_OP_BRANCH_COND     { return "OpBranchConditional" }
+    if op == SPVT_OP_SWITCH          { return "OpSwitch" }
+    if op == SPVT_OP_PHI             { return "OpPhi" }
+    if op == SPVT_OP_SEL_MERGE       { return "OpSelectionMerge" }
+    if op == SPVT_OP_LOOP_MERGE      { return "OpLoopMerge" }
+    if op == SPVT_OP_DECORATE        { return "OpDecorate" }
+    if op == SPVT_OP_NAME            { return "OpName" }
+    return "OpUnknown"
+}
+
+// ============================================================================
+// Capability name lookup
+// ============================================================================
+
+fn spvt_cap_name(cap: i64) -> string {
+    if cap == SPVT_CAP_SHADER { return "Shader" }
+    if cap == SPVT_CAP_KERNEL { return "Kernel" }
+    return "Unknown"
+}
+
+// ============================================================================
+// Memory model name lookup
+// ============================================================================
+
+fn spvt_mem_model_name(m: i64) -> string {
+    if m == SPVT_MEM_GLSL450 { return "GLSL450" }
+    if m == SPVT_MEM_OPENCL  { return "OpenCL" }
+    return "Unknown"
+}
+
+// ============================================================================
+// Addressing model name lookup
+// ============================================================================
+
+fn spvt_addr_model_name(a: i64) -> string {
+    if a == SPVT_ADDR_LOGICAL { return "Logical" }
+    return "Physical"
+}
+
+// ============================================================================
+// Execution model name lookup
+// ============================================================================
+
+fn spvt_exec_model_name(e: i64) -> string {
+    if e == SPVT_EXEC_VERTEX     { return "Vertex" }
+    if e == SPVT_EXEC_FRAGMENT   { return "Fragment" }
+    if e == SPVT_EXEC_GLCOMPUTE  { return "GLCompute" }
+    return "Unknown"
+}
+
+// ============================================================================
+// Storage class name lookup
+// ============================================================================
+
+fn spvt_storage_class_name(sc: i64) -> string {
+    if sc == SPVT_SC_INPUT          { return "Input" }
+    if sc == SPVT_SC_UNIFORM        { return "Uniform" }
+    if sc == SPVT_SC_OUTPUT         { return "Output" }
+    if sc == SPVT_SC_WORKGROUP      { return "Workgroup" }
+    if sc == SPVT_SC_PRIVATE        { return "Private" }
+    if sc == SPVT_SC_FUNCTION       { return "Function" }
+    if sc == SPVT_SC_STORAGE_BUFFER { return "StorageBuffer" }
+    return "Unknown"
+}
+
+// ============================================================================
+// Decoration name lookup
+// ============================================================================
+
+fn spvt_decoration_name(d: i64) -> string {
+    if d == SPVT_DEC_BUILTIN  { return "BuiltIn" }
+    if d == SPVT_DEC_LOCATION { return "Location" }
+    if d == SPVT_DEC_BINDING  { return "Binding" }
+    if d == SPVT_DEC_DESC_SET { return "DescriptorSet" }
+    return "Unknown"
+}
+
+// ============================================================================
+// Function control name lookup
+// ============================================================================
+
+fn spvt_func_ctrl_name(fc: i64) -> string {
+    if fc == SPVT_FUNC_CTRL_NONE     { return "None" }
+    if fc == SPVT_FUNC_CTRL_INLINE   { return "Inline" }
+    if fc == SPVT_FUNC_CTRL_NOINLINE { return "DontInline" }
+    return "None"
+}
+
+// ============================================================================
+// Capability emission
+// ============================================================================
+
+fn spvt_emit_capability(w: SpvTextWriter, cap: i64) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_str(out, "OpCapability ")
+    out = spvt_push_str(out, spvt_cap_name(cap))
+    out = spvt_push_newline(out)
+    out
+}
+
+// ============================================================================
+// Memory model emission
+// ============================================================================
+
+fn spvt_emit_memory_model(w: SpvTextWriter, addr: i64, mem: i64) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_str(out, "OpMemoryModel ")
+    out = spvt_push_str(out, spvt_addr_model_name(addr))
+    out = spvt_push_space(out)
+    out = spvt_push_str(out, spvt_mem_model_name(mem))
+    out = spvt_push_newline(out)
+    out
+}
+
+// ============================================================================
+// Entry point emission
+// ============================================================================
+
+fn spvt_emit_entry_point(w: SpvTextWriter, exec_model: i64, func_id: i64,
+                         name: string, iface_ids: [i64; 8],
+                         iface_count: i64) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_str(out, "OpEntryPoint ")
+    out = spvt_push_str(out, spvt_exec_model_name(exec_model))
+    out = spvt_push_space(out)
+    out = spvt_push_id(out, func_id)
+    out = spvt_push_str(out, " \"")
+    out = spvt_push_str(out, name)
+    out = spvt_push_str(out, "\"")
+
+    var i: i64 = 0
+    while i < iface_count {
+        out = spvt_push_space(out)
+        out = spvt_push_id(out, iface_ids[i as usize])
+        i = i + 1
+    }
+    out = spvt_push_newline(out)
+    out
+}
+
+// ============================================================================
+// Execution mode emission
+// ============================================================================
+
+fn spvt_emit_execution_mode_local_size(w: SpvTextWriter, func_id: i64,
+                                       x: i64, y: i64,
+                                       z: i64) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_str(out, "OpExecutionMode ")
+    out = spvt_push_id(out, func_id)
+    out = spvt_push_str(out, " LocalSize ")
+    out = spvt_push_i64(out, x)
+    out = spvt_push_space(out)
+    out = spvt_push_i64(out, y)
+    out = spvt_push_space(out)
+    out = spvt_push_i64(out, z)
+    out = spvt_push_newline(out)
+    out
+}
+
+// ============================================================================
+// Type declaration emission
+// ============================================================================
+
+fn spvt_emit_type_void(w: SpvTextWriter, id: i64) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_id(out, id)
+    out = spvt_push_str(out, " = OpTypeVoid")
+    out = spvt_push_newline(out)
+    out
+}
+
+fn spvt_emit_type_bool(w: SpvTextWriter, id: i64) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_id(out, id)
+    out = spvt_push_str(out, " = OpTypeBool")
+    out = spvt_push_newline(out)
+    out
+}
+
+fn spvt_emit_type_int(w: SpvTextWriter, id: i64, width: i64,
+                      signedness: i64) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_id(out, id)
+    out = spvt_push_str(out, " = OpTypeInt ")
+    out = spvt_push_i64(out, width)
+    out = spvt_push_space(out)
+    out = spvt_push_i64(out, signedness)
+    out = spvt_push_newline(out)
+    out
+}
+
+fn spvt_emit_type_float(w: SpvTextWriter, id: i64,
+                        width: i64) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_id(out, id)
+    out = spvt_push_str(out, " = OpTypeFloat ")
+    out = spvt_push_i64(out, width)
+    out = spvt_push_newline(out)
+    out
+}
+
+fn spvt_emit_type_vector(w: SpvTextWriter, id: i64, comp_id: i64,
+                         count: i64) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_id(out, id)
+    out = spvt_push_str(out, " = OpTypeVector ")
+    out = spvt_push_id(out, comp_id)
+    out = spvt_push_space(out)
+    out = spvt_push_i64(out, count)
+    out = spvt_push_newline(out)
+    out
+}
+
+fn spvt_emit_type_matrix(w: SpvTextWriter, id: i64, col_type_id: i64,
+                         col_count: i64) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_id(out, id)
+    out = spvt_push_str(out, " = OpTypeMatrix ")
+    out = spvt_push_id(out, col_type_id)
+    out = spvt_push_space(out)
+    out = spvt_push_i64(out, col_count)
+    out = spvt_push_newline(out)
+    out
+}
+
+fn spvt_emit_type_pointer(w: SpvTextWriter, id: i64, sc: i64,
+                          type_id: i64) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_id(out, id)
+    out = spvt_push_str(out, " = OpTypePointer ")
+    out = spvt_push_str(out, spvt_storage_class_name(sc))
+    out = spvt_push_space(out)
+    out = spvt_push_id(out, type_id)
+    out = spvt_push_newline(out)
+    out
+}
+
+fn spvt_emit_type_function(w: SpvTextWriter, id: i64, ret_type_id: i64,
+                           param_type_ids: [i64; 16],
+                           param_count: i64) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_id(out, id)
+    out = spvt_push_str(out, " = OpTypeFunction ")
+    out = spvt_push_id(out, ret_type_id)
+
+    var i: i64 = 0
+    while i < param_count {
+        out = spvt_push_space(out)
+        out = spvt_push_id(out, param_type_ids[i as usize])
+        i = i + 1
+    }
+    out = spvt_push_newline(out)
+    out
+}
+
+fn spvt_emit_type_array(w: SpvTextWriter, id: i64, elem_type_id: i64,
+                        length_id: i64) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_id(out, id)
+    out = spvt_push_str(out, " = OpTypeArray ")
+    out = spvt_push_id(out, elem_type_id)
+    out = spvt_push_space(out)
+    out = spvt_push_id(out, length_id)
+    out = spvt_push_newline(out)
+    out
+}
+
+fn spvt_emit_type_struct(w: SpvTextWriter, id: i64, member_ids: [i64; 8],
+                         member_count: i64) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_id(out, id)
+    out = spvt_push_str(out, " = OpTypeStruct")
+
+    var i: i64 = 0
+    while i < member_count {
+        out = spvt_push_space(out)
+        out = spvt_push_id(out, member_ids[i as usize])
+        i = i + 1
+    }
+    out = spvt_push_newline(out)
+    out
+}
+
+// ============================================================================
+// Constant emission
+// ============================================================================
+
+fn spvt_emit_constant(w: SpvTextWriter, id: i64, type_id: i64,
+                      value: i64) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_id(out, id)
+    out = spvt_push_str(out, " = OpConstant ")
+    out = spvt_push_id(out, type_id)
+    out = spvt_push_space(out)
+    out = spvt_push_i64(out, value)
+    out = spvt_push_newline(out)
+    out
+}
+
+fn spvt_emit_constant_true(w: SpvTextWriter, id: i64,
+                           type_id: i64) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_id(out, id)
+    out = spvt_push_str(out, " = OpConstantTrue ")
+    out = spvt_push_id(out, type_id)
+    out = spvt_push_newline(out)
+    out
+}
+
+fn spvt_emit_constant_false(w: SpvTextWriter, id: i64,
+                            type_id: i64) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_id(out, id)
+    out = spvt_push_str(out, " = OpConstantFalse ")
+    out = spvt_push_id(out, type_id)
+    out = spvt_push_newline(out)
+    out
+}
+
+fn spvt_emit_constant_composite(w: SpvTextWriter, id: i64, type_id: i64,
+                                constituents: [i64; 8],
+                                count: i64) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_id(out, id)
+    out = spvt_push_str(out, " = OpConstantComposite ")
+    out = spvt_push_id(out, type_id)
+
+    var i: i64 = 0
+    while i < count {
+        out = spvt_push_space(out)
+        out = spvt_push_id(out, constituents[i as usize])
+        i = i + 1
+    }
+    out = spvt_push_newline(out)
+    out
+}
+
+// ============================================================================
+// Function emission
+// ============================================================================
+
+fn spvt_emit_function(w: SpvTextWriter, id: i64, ret_type_id: i64,
+                      func_ctrl: i64,
+                      func_type_id: i64) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_id(out, id)
+    out = spvt_push_str(out, " = OpFunction ")
+    out = spvt_push_id(out, ret_type_id)
+    out = spvt_push_space(out)
+    out = spvt_push_str(out, spvt_func_ctrl_name(func_ctrl))
+    out = spvt_push_space(out)
+    out = spvt_push_id(out, func_type_id)
+    out = spvt_push_newline(out)
+    out
+}
+
+fn spvt_emit_function_parameter(w: SpvTextWriter, id: i64,
+                                type_id: i64) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_id(out, id)
+    out = spvt_push_str(out, " = OpFunctionParameter ")
+    out = spvt_push_id(out, type_id)
+    out = spvt_push_newline(out)
+    out
+}
+
+fn spvt_emit_function_end(w: SpvTextWriter) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_str(out, "OpFunctionEnd")
+    out = spvt_push_newline(out)
+    out
+}
+
+fn spvt_emit_label(w: SpvTextWriter, id: i64) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_id(out, id)
+    out = spvt_push_str(out, " = OpLabel")
+    out = spvt_push_newline(out)
+    out
+}
+
+fn spvt_emit_return(w: SpvTextWriter) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_str(out, "OpReturn")
+    out = spvt_push_newline(out)
+    out
+}
+
+fn spvt_emit_return_value(w: SpvTextWriter,
+                          value_id: i64) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_str(out, "OpReturnValue ")
+    out = spvt_push_id(out, value_id)
+    out = spvt_push_newline(out)
+    out
+}
+
+// ============================================================================
+// Arithmetic emission
+// ============================================================================
+
+fn spvt_emit_binary_arith(w: SpvTextWriter, opcode: i64, id: i64,
+                          type_id: i64, op1: i64,
+                          op2: i64) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_id(out, id)
+    out = spvt_push_str(out, " = ")
+    out = spvt_push_str(out, spvt_opcode_name(opcode))
+    out = spvt_push_space(out)
+    out = spvt_push_id(out, type_id)
+    out = spvt_push_space(out)
+    out = spvt_push_id(out, op1)
+    out = spvt_push_space(out)
+    out = spvt_push_id(out, op2)
+    out = spvt_push_newline(out)
+    out
+}
+
+fn spvt_emit_fadd(w: SpvTextWriter, id: i64, type_id: i64, op1: i64,
+                  op2: i64) -> SpvTextWriter with Mut, Panic, Div {
+    spvt_emit_binary_arith(w, SPVT_OP_FADD, id, type_id, op1, op2)
+}
+
+fn spvt_emit_fsub(w: SpvTextWriter, id: i64, type_id: i64, op1: i64,
+                  op2: i64) -> SpvTextWriter with Mut, Panic, Div {
+    spvt_emit_binary_arith(w, SPVT_OP_FSUB, id, type_id, op1, op2)
+}
+
+fn spvt_emit_fmul(w: SpvTextWriter, id: i64, type_id: i64, op1: i64,
+                  op2: i64) -> SpvTextWriter with Mut, Panic, Div {
+    spvt_emit_binary_arith(w, SPVT_OP_FMUL, id, type_id, op1, op2)
+}
+
+fn spvt_emit_fdiv(w: SpvTextWriter, id: i64, type_id: i64, op1: i64,
+                  op2: i64) -> SpvTextWriter with Mut, Panic, Div {
+    spvt_emit_binary_arith(w, SPVT_OP_FDIV, id, type_id, op1, op2)
+}
+
+fn spvt_emit_iadd(w: SpvTextWriter, id: i64, type_id: i64, op1: i64,
+                  op2: i64) -> SpvTextWriter with Mut, Panic, Div {
+    spvt_emit_binary_arith(w, SPVT_OP_IADD, id, type_id, op1, op2)
+}
+
+fn spvt_emit_isub(w: SpvTextWriter, id: i64, type_id: i64, op1: i64,
+                  op2: i64) -> SpvTextWriter with Mut, Panic, Div {
+    spvt_emit_binary_arith(w, SPVT_OP_ISUB, id, type_id, op1, op2)
+}
+
+fn spvt_emit_imul(w: SpvTextWriter, id: i64, type_id: i64, op1: i64,
+                  op2: i64) -> SpvTextWriter with Mut, Panic, Div {
+    spvt_emit_binary_arith(w, SPVT_OP_IMUL, id, type_id, op1, op2)
+}
+
+fn spvt_emit_sdiv(w: SpvTextWriter, id: i64, type_id: i64, op1: i64,
+                  op2: i64) -> SpvTextWriter with Mut, Panic, Div {
+    spvt_emit_binary_arith(w, SPVT_OP_SDIV, id, type_id, op1, op2)
+}
+
+// ============================================================================
+// Memory operations emission
+// ============================================================================
+
+fn spvt_emit_variable(w: SpvTextWriter, id: i64, type_id: i64,
+                      sc: i64) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_id(out, id)
+    out = spvt_push_str(out, " = OpVariable ")
+    out = spvt_push_id(out, type_id)
+    out = spvt_push_space(out)
+    out = spvt_push_str(out, spvt_storage_class_name(sc))
+    out = spvt_push_newline(out)
+    out
+}
+
+fn spvt_emit_load(w: SpvTextWriter, id: i64, type_id: i64,
+                  ptr_id: i64) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_id(out, id)
+    out = spvt_push_str(out, " = OpLoad ")
+    out = spvt_push_id(out, type_id)
+    out = spvt_push_space(out)
+    out = spvt_push_id(out, ptr_id)
+    out = spvt_push_newline(out)
+    out
+}
+
+fn spvt_emit_store(w: SpvTextWriter, ptr_id: i64,
+                   val_id: i64) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_str(out, "OpStore ")
+    out = spvt_push_id(out, ptr_id)
+    out = spvt_push_space(out)
+    out = spvt_push_id(out, val_id)
+    out = spvt_push_newline(out)
+    out
+}
+
+fn spvt_emit_access_chain(w: SpvTextWriter, id: i64, type_id: i64,
+                          base_id: i64,
+                          index_id: i64) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_id(out, id)
+    out = spvt_push_str(out, " = OpAccessChain ")
+    out = spvt_push_id(out, type_id)
+    out = spvt_push_space(out)
+    out = spvt_push_id(out, base_id)
+    out = spvt_push_space(out)
+    out = spvt_push_id(out, index_id)
+    out = spvt_push_newline(out)
+    out
+}
+
+// ============================================================================
+// Control flow emission
+// ============================================================================
+
+fn spvt_emit_branch(w: SpvTextWriter, target_id: i64) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_str(out, "OpBranch ")
+    out = spvt_push_id(out, target_id)
+    out = spvt_push_newline(out)
+    out
+}
+
+fn spvt_emit_branch_conditional(w: SpvTextWriter, cond_id: i64,
+                                true_id: i64,
+                                false_id: i64) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_str(out, "OpBranchConditional ")
+    out = spvt_push_id(out, cond_id)
+    out = spvt_push_space(out)
+    out = spvt_push_id(out, true_id)
+    out = spvt_push_space(out)
+    out = spvt_push_id(out, false_id)
+    out = spvt_push_newline(out)
+    out
+}
+
+fn spvt_emit_switch(w: SpvTextWriter, selector_id: i64,
+                    default_id: i64, cases: [i64; 8],
+                    targets: [i64; 8],
+                    case_count: i64) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_str(out, "OpSwitch ")
+    out = spvt_push_id(out, selector_id)
+    out = spvt_push_space(out)
+    out = spvt_push_id(out, default_id)
+
+    var i: i64 = 0
+    while i < case_count {
+        out = spvt_push_space(out)
+        out = spvt_push_i64(out, cases[i as usize])
+        out = spvt_push_space(out)
+        out = spvt_push_id(out, targets[i as usize])
+        i = i + 1
+    }
+    out = spvt_push_newline(out)
+    out
+}
+
+fn spvt_emit_phi(w: SpvTextWriter, id: i64, type_id: i64,
+                 values: [i64; 8], parents: [i64; 8],
+                 pair_count: i64) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_id(out, id)
+    out = spvt_push_str(out, " = OpPhi ")
+    out = spvt_push_id(out, type_id)
+
+    var i: i64 = 0
+    while i < pair_count {
+        out = spvt_push_space(out)
+        out = spvt_push_id(out, values[i as usize])
+        out = spvt_push_space(out)
+        out = spvt_push_id(out, parents[i as usize])
+        i = i + 1
+    }
+    out = spvt_push_newline(out)
+    out
+}
+
+fn spvt_emit_selection_merge(w: SpvTextWriter,
+                             merge_id: i64) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_str(out, "OpSelectionMerge ")
+    out = spvt_push_id(out, merge_id)
+    out = spvt_push_str(out, " None")
+    out = spvt_push_newline(out)
+    out
+}
+
+fn spvt_emit_loop_merge(w: SpvTextWriter, merge_id: i64,
+                        continue_id: i64) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_str(out, "OpLoopMerge ")
+    out = spvt_push_id(out, merge_id)
+    out = spvt_push_space(out)
+    out = spvt_push_id(out, continue_id)
+    out = spvt_push_str(out, " None")
+    out = spvt_push_newline(out)
+    out
+}
+
+// ============================================================================
+// Decoration emission
+// ============================================================================
+
+fn spvt_emit_decorate(w: SpvTextWriter, target_id: i64, decoration: i64,
+                      value: i64) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_str(out, "OpDecorate ")
+    out = spvt_push_id(out, target_id)
+    out = spvt_push_space(out)
+    out = spvt_push_str(out, spvt_decoration_name(decoration))
+    out = spvt_push_space(out)
+    out = spvt_push_i64(out, value)
+    out = spvt_push_newline(out)
+    out
+}
+
+fn spvt_emit_decorate_builtin(w: SpvTextWriter, target_id: i64,
+                              builtin: i64) -> SpvTextWriter with Mut, Panic, Div {
+    spvt_emit_decorate(w, target_id, SPVT_DEC_BUILTIN, builtin)
+}
+
+fn spvt_emit_decorate_location(w: SpvTextWriter, target_id: i64,
+                               loc: i64) -> SpvTextWriter with Mut, Panic, Div {
+    spvt_emit_decorate(w, target_id, SPVT_DEC_LOCATION, loc)
+}
+
+fn spvt_emit_decorate_binding(w: SpvTextWriter, target_id: i64,
+                              binding: i64) -> SpvTextWriter with Mut, Panic, Div {
+    spvt_emit_decorate(w, target_id, SPVT_DEC_BINDING, binding)
+}
+
+fn spvt_emit_decorate_descriptor_set(w: SpvTextWriter, target_id: i64,
+                                     set: i64) -> SpvTextWriter with Mut, Panic, Div {
+    spvt_emit_decorate(w, target_id, SPVT_DEC_DESC_SET, set)
+}
+
+// ============================================================================
+// Name emission (OpName for debug info)
+// ============================================================================
+
+fn spvt_emit_name(w: SpvTextWriter, target_id: i64,
+                  name: string) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_str(out, "OpName ")
+    out = spvt_push_id(out, target_id)
+    out = spvt_push_str(out, " \"")
+    out = spvt_push_str(out, name)
+    out = spvt_push_str(out, "\"")
+    out = spvt_push_newline(out)
+    out
+}
+
+// ============================================================================
+// Full module assembly
+// ============================================================================
+
+fn spvt_emit_module_header(w: SpvTextWriter,
+                           m: SpvTextModule) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    out = spvt_push_str(out, "; SPIR-V Text (Sounio)")
+    out = spvt_push_newline(out)
+    out = spvt_push_str(out, "; Generator: Sounio Self-Hosted Compiler")
+    out = spvt_push_newline(out)
+    out
+}
+
+fn spvt_emit_module_capabilities(w: SpvTextWriter,
+                                 m: SpvTextModule) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    var i: i64 = 0
+    while i < m.cap_count {
+        out = spvt_emit_capability(out, m.capabilities[i as usize])
+        i = i + 1
+    }
+    out
+}
+
+fn spvt_emit_module_memory_model(w: SpvTextWriter,
+                                 m: SpvTextModule) -> SpvTextWriter with Mut, Panic, Div {
+    spvt_emit_memory_model(w, m.addr_model, m.mem_model)
+}
+
+fn spvt_emit_module_entry_points(w: SpvTextWriter,
+                                 m: SpvTextModule) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    var i: i64 = 0
+    while i < m.entry_count {
+        let ep = m.entry_points[i as usize]
+        out = spvt_emit_entry_point(out, ep.exec_model, ep.func_id,
+                                    "main", ep.interface_ids,
+                                    ep.interface_count)
+        i = i + 1
+    }
+    out
+}
+
+fn spvt_emit_module_decorations(w: SpvTextWriter,
+                                m: SpvTextModule) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    var i: i64 = 0
+    while i < m.dec_count {
+        let d = m.decorations[i as usize]
+        out = spvt_emit_decorate(out, d.target_id, d.decoration, d.value)
+        i = i + 1
+    }
+    out
+}
+
+fn spvt_emit_module_types(w: SpvTextWriter,
+                          m: SpvTextModule) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    var i: i64 = 0
+    while i < m.type_count {
+        let td = m.types[i as usize]
+        if td.opcode == SPVT_OP_TYPE_VOID {
+            out = spvt_emit_type_void(out, td.result_id)
+        } else if td.opcode == SPVT_OP_TYPE_BOOL {
+            out = spvt_emit_type_bool(out, td.result_id)
+        } else if td.opcode == SPVT_OP_TYPE_INT {
+            out = spvt_emit_type_int(out, td.result_id,
+                                     td.operands[0 as usize],
+                                     td.operands[1 as usize])
+        } else if td.opcode == SPVT_OP_TYPE_FLOAT {
+            out = spvt_emit_type_float(out, td.result_id,
+                                       td.operands[0 as usize])
+        } else if td.opcode == SPVT_OP_TYPE_VECTOR {
+            out = spvt_emit_type_vector(out, td.result_id,
+                                        td.operands[0 as usize],
+                                        td.operands[1 as usize])
+        } else if td.opcode == SPVT_OP_TYPE_MATRIX {
+            out = spvt_emit_type_matrix(out, td.result_id,
+                                        td.operands[0 as usize],
+                                        td.operands[1 as usize])
+        } else if td.opcode == SPVT_OP_TYPE_POINTER {
+            out = spvt_emit_type_pointer(out, td.result_id,
+                                         td.operands[0 as usize],
+                                         td.operands[1 as usize])
+        } else if td.opcode == SPVT_OP_TYPE_FUNCTION {
+            let params: [i64; 16] = [0; 16]
+            out = spvt_emit_type_function(out, td.result_id,
+                                          td.operands[0 as usize],
+                                          params, 0)
+        } else if td.opcode == SPVT_OP_TYPE_ARRAY {
+            out = spvt_emit_type_array(out, td.result_id,
+                                       td.operands[0 as usize],
+                                       td.operands[1 as usize])
+        } else if td.opcode == SPVT_OP_TYPE_STRUCT {
+            let members: [i64; 8] = [0; 8]
+            out = spvt_emit_type_struct(out, td.result_id,
+                                        members, td.operand_count)
+        }
+        i = i + 1
+    }
+    out
+}
+
+fn spvt_emit_module_globals(w: SpvTextWriter,
+                            m: SpvTextModule) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    var i: i64 = 0
+    while i < m.global_count {
+        let g = m.globals[i as usize]
+        out = spvt_emit_variable(out, g.var_id, g.type_id, g.storage_class)
+        i = i + 1
+    }
+    out
+}
+
+fn spvt_emit_module_functions(w: SpvTextWriter,
+                              m: SpvTextModule) -> SpvTextWriter with Mut, Panic, Div {
+    var out = w
+    var fi: i64 = 0
+    while fi < m.func_count {
+        let f = m.functions[fi as usize]
+        // Emit OpFunction header
+        // Use func_type_id = return_type_id for simplicity (would normally
+        // be looked up from the module type section)
+        out = spvt_emit_function(out, f.func_id, f.return_type_id,
+                                 SPVT_FUNC_CTRL_NONE, f.return_type_id)
+
+        // Emit parameters
+        var pi: i64 = 0
+        while pi < f.param_count {
+            let param_id = f.func_id + 1 + pi
+            out = spvt_emit_function_parameter(out, param_id,
+                                               f.param_type_ids[pi as usize])
+            pi = pi + 1
+        }
+
+        // Emit blocks
+        var bi: i64 = 0
+        while bi < f.block_count {
+            let block = f.blocks[bi as usize]
+            out = spvt_emit_label(out, block.label_id)
+            bi = bi + 1
+        }
+
+        // If no blocks, emit a default label + return
+        if f.block_count == 0 {
+            out = spvt_emit_label(out, f.func_id + 100)
+            out = spvt_emit_return(out)
+        }
+
+        out = spvt_emit_function_end(out)
+        fi = fi + 1
+    }
+    out
+}
+
+fn spvt_assemble_module(m: SpvTextModule) -> SpvTextWriter with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_module_header(w, m)
+    w = spvt_emit_module_capabilities(w, m)
+    w = spvt_emit_module_memory_model(w, m)
+    w = spvt_emit_module_entry_points(w, m)
+    w = spvt_emit_module_decorations(w, m)
+    w = spvt_emit_module_types(w, m)
+    w = spvt_emit_module_globals(w, m)
+    w = spvt_emit_module_functions(w, m)
+    w
+}
+
+// ============================================================================
+// Convenience: build a minimal compute shader module
+// ============================================================================
+
+fn spvt_build_minimal_compute() -> SpvTextModule with Mut, Panic {
+    var m = spvt_module_new()
+    m = spvt_module_add_cap(m, SPVT_CAP_SHADER)
+    m.addr_model = SPVT_ADDR_LOGICAL
+    m.mem_model = SPVT_MEM_GLSL450
+
+    // void type -> id 1
+    var td_void = spvt_type_decl_new()
+    td_void.opcode = SPVT_OP_TYPE_VOID
+    td_void.result_id = 1
+    m = spvt_module_add_type(m, td_void)
+
+    // function type void() -> id 2
+    var td_func = spvt_type_decl_new()
+    td_func.opcode = SPVT_OP_TYPE_FUNCTION
+    td_func.result_id = 2
+    td_func.operands[0 as usize] = 1   // return type = void
+    td_func.operand_count = 1
+    m = spvt_module_add_type(m, td_func)
+
+    // main function -> id 3
+    let f = spvt_func_new(3, 1)
+    m = spvt_module_add_func(m, f)
+
+    // entry point
+    var ep = spvt_entry_point_new()
+    ep.exec_model = SPVT_EXEC_GLCOMPUTE
+    ep.func_id = 3
+    m = spvt_module_add_entry(m, ep)
+
+    m
+}
+
+// ============================================================================
+// Convenience: build a compute shader with types and arithmetic
+// ============================================================================
+
+fn spvt_build_arith_compute() -> SpvTextModule with Mut, Panic {
+    var m = spvt_module_new()
+    m = spvt_module_add_cap(m, SPVT_CAP_SHADER)
+    m.addr_model = SPVT_ADDR_LOGICAL
+    m.mem_model = SPVT_MEM_GLSL450
+
+    // void type -> id 1
+    var td_void = spvt_type_decl_new()
+    td_void.opcode = SPVT_OP_TYPE_VOID
+    td_void.result_id = 1
+    m = spvt_module_add_type(m, td_void)
+
+    // float32 type -> id 2
+    var td_f32 = spvt_type_decl_new()
+    td_f32.opcode = SPVT_OP_TYPE_FLOAT
+    td_f32.result_id = 2
+    td_f32.operands[0 as usize] = 32
+    td_f32.operand_count = 1
+    m = spvt_module_add_type(m, td_f32)
+
+    // uint32 type -> id 3
+    var td_u32 = spvt_type_decl_new()
+    td_u32.opcode = SPVT_OP_TYPE_INT
+    td_u32.result_id = 3
+    td_u32.operands[0 as usize] = 32
+    td_u32.operands[1 as usize] = 0
+    td_u32.operand_count = 2
+    m = spvt_module_add_type(m, td_u32)
+
+    // function type void() -> id 4
+    var td_func = spvt_type_decl_new()
+    td_func.opcode = SPVT_OP_TYPE_FUNCTION
+    td_func.result_id = 4
+    td_func.operands[0 as usize] = 1   // return type = void
+    td_func.operand_count = 1
+    m = spvt_module_add_type(m, td_func)
+
+    // main function -> id 5
+    let f = spvt_func_new(5, 1)
+    m = spvt_module_add_func(m, f)
+
+    // entry point
+    var ep = spvt_entry_point_new()
+    ep.exec_model = SPVT_EXEC_GLCOMPUTE
+    ep.func_id = 5
+    m = spvt_module_add_entry(m, ep)
+
+    // decoration: binding
+    var dec = spvt_decoration_new()
+    dec.target_id = 10
+    dec.decoration = SPVT_DEC_BINDING
+    dec.value = 0
+    m = spvt_module_add_decoration(m, dec)
+
+    m
+}
+
+// ============================================================================
+// TEST FUNCTIONS
+// ============================================================================
+
+// --- Writer basics ---
+
+fn test_spvt_01_writer_new() -> bool {
+    let w = spvt_writer_new()
+    w.len == 0 && w.indent == 0
+}
+
+fn test_spvt_02_push_byte() -> bool with Mut, Panic {
+    var w = spvt_writer_new()
+    w = spvt_push_byte(w, 65)   // 'A'
+    w.len == 1 && w.data[0 as usize] == 65
+}
+
+fn test_spvt_03_push_str() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_push_str(w, "hello")
+    w.len == 5
+}
+
+fn test_spvt_04_push_newline() -> bool with Mut, Panic {
+    var w = spvt_writer_new()
+    w = spvt_push_newline(w)
+    w.len == 1 && w.data[0 as usize] == 10
+}
+
+fn test_spvt_05_push_i64_zero() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_push_i64(w, 0)
+    w.len == 1 && w.data[0 as usize] == 48   // '0'
+}
+
+fn test_spvt_06_push_i64_42() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_push_i64(w, 42)
+    w.len == 2 && w.data[0 as usize] == 52 && w.data[1 as usize] == 50
+}
+
+fn test_spvt_07_push_id() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_push_id(w, 5)
+    // Should be "%5"
+    w.len == 2 && w.data[0 as usize] == 37 && w.data[1 as usize] == 53
+}
+
+fn test_spvt_08_writer_contains() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_push_str(w, "OpCapability Shader")
+    spvt_writer_contains(w, "Capability") &&
+    spvt_writer_contains(w, "Shader") &&
+    !spvt_writer_contains(w, "Kernel")
+}
+
+// --- Capability emission ---
+
+fn test_spvt_09_cap_shader() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_capability(w, SPVT_CAP_SHADER)
+    spvt_writer_contains(w, "OpCapability Shader")
+}
+
+fn test_spvt_10_cap_kernel() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_capability(w, SPVT_CAP_KERNEL)
+    spvt_writer_contains(w, "OpCapability Kernel")
+}
+
+// --- Memory model emission ---
+
+fn test_spvt_11_memory_model_glsl() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_memory_model(w, SPVT_ADDR_LOGICAL, SPVT_MEM_GLSL450)
+    spvt_writer_contains(w, "OpMemoryModel Logical GLSL450")
+}
+
+fn test_spvt_12_memory_model_opencl() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_memory_model(w, SPVT_ADDR_LOGICAL, SPVT_MEM_OPENCL)
+    spvt_writer_contains(w, "OpMemoryModel Logical OpenCL")
+}
+
+// --- Type declaration emission ---
+
+fn test_spvt_13_type_void() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_type_void(w, 1)
+    spvt_writer_contains(w, "%1 = OpTypeVoid")
+}
+
+fn test_spvt_14_type_bool() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_type_bool(w, 2)
+    spvt_writer_contains(w, "%2 = OpTypeBool")
+}
+
+fn test_spvt_15_type_int_32_signed() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_type_int(w, 3, 32, 1)
+    spvt_writer_contains(w, "%3 = OpTypeInt 32 1")
+}
+
+fn test_spvt_16_type_int_32_unsigned() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_type_int(w, 4, 32, 0)
+    spvt_writer_contains(w, "%4 = OpTypeInt 32 0")
+}
+
+fn test_spvt_17_type_float_32() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_type_float(w, 5, 32)
+    spvt_writer_contains(w, "%5 = OpTypeFloat 32")
+}
+
+fn test_spvt_18_type_float_64() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_type_float(w, 6, 64)
+    spvt_writer_contains(w, "%6 = OpTypeFloat 64")
+}
+
+fn test_spvt_19_type_vector() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_type_vector(w, 7, 5, 4)
+    spvt_writer_contains(w, "%7 = OpTypeVector %5 4")
+}
+
+fn test_spvt_20_type_matrix() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_type_matrix(w, 8, 7, 4)
+    spvt_writer_contains(w, "%8 = OpTypeMatrix %7 4")
+}
+
+// --- Constant emission ---
+
+fn test_spvt_21_constant() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_constant(w, 10, 3, 42)
+    spvt_writer_contains(w, "%10 = OpConstant %3 42")
+}
+
+fn test_spvt_22_constant_true() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_constant_true(w, 11, 2)
+    spvt_writer_contains(w, "%11 = OpConstantTrue %2")
+}
+
+fn test_spvt_23_constant_false() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_constant_false(w, 12, 2)
+    spvt_writer_contains(w, "%12 = OpConstantFalse %2")
+}
+
+fn test_spvt_24_constant_composite() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    var parts: [i64; 8] = [0; 8]
+    parts[0 as usize] = 10
+    parts[1 as usize] = 10
+    parts[2 as usize] = 10
+    w = spvt_emit_constant_composite(w, 13, 7, parts, 3)
+    spvt_writer_contains(w, "%13 = OpConstantComposite %7 %10 %10 %10")
+}
+
+// --- Function structure ---
+
+fn test_spvt_25_function() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_function(w, 20, 1, SPVT_FUNC_CTRL_NONE, 4)
+    spvt_writer_contains(w, "%20 = OpFunction %1 None %4")
+}
+
+fn test_spvt_26_function_parameter() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_function_parameter(w, 21, 3)
+    spvt_writer_contains(w, "%21 = OpFunctionParameter %3")
+}
+
+fn test_spvt_27_function_end() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_function_end(w)
+    spvt_writer_contains(w, "OpFunctionEnd")
+}
+
+fn test_spvt_28_label() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_label(w, 30)
+    spvt_writer_contains(w, "%30 = OpLabel")
+}
+
+fn test_spvt_29_return() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_return(w)
+    spvt_writer_contains(w, "OpReturn")
+}
+
+fn test_spvt_30_return_value() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_return_value(w, 42)
+    spvt_writer_contains(w, "OpReturnValue %42")
+}
+
+fn test_spvt_31_minimal_function() -> bool with Mut, Panic, Div {
+    // OpFunction ... OpLabel ... OpReturn ... OpFunctionEnd
+    var w = spvt_writer_new()
+    w = spvt_emit_function(w, 20, 1, SPVT_FUNC_CTRL_NONE, 4)
+    w = spvt_emit_label(w, 21)
+    w = spvt_emit_return(w)
+    w = spvt_emit_function_end(w)
+    spvt_writer_contains(w, "OpFunction") &&
+    spvt_writer_contains(w, "OpLabel") &&
+    spvt_writer_contains(w, "OpReturn") &&
+    spvt_writer_contains(w, "OpFunctionEnd")
+}
+
+// --- Arithmetic operations ---
+
+fn test_spvt_32_fadd() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_fadd(w, 50, 2, 40, 41)
+    spvt_writer_contains(w, "%50 = OpFAdd %2 %40 %41")
+}
+
+fn test_spvt_33_fsub() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_fsub(w, 51, 2, 40, 41)
+    spvt_writer_contains(w, "%51 = OpFSub %2 %40 %41")
+}
+
+fn test_spvt_34_fmul() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_fmul(w, 52, 2, 40, 41)
+    spvt_writer_contains(w, "%52 = OpFMul %2 %40 %41")
+}
+
+fn test_spvt_35_fdiv() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_fdiv(w, 53, 2, 40, 41)
+    spvt_writer_contains(w, "%53 = OpFDiv %2 %40 %41")
+}
+
+fn test_spvt_36_iadd() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_iadd(w, 54, 3, 40, 41)
+    spvt_writer_contains(w, "%54 = OpIAdd %3 %40 %41")
+}
+
+fn test_spvt_37_isub() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_isub(w, 55, 3, 40, 41)
+    spvt_writer_contains(w, "%55 = OpISub %3 %40 %41")
+}
+
+fn test_spvt_38_imul() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_imul(w, 56, 3, 40, 41)
+    spvt_writer_contains(w, "%56 = OpIMul %3 %40 %41")
+}
+
+fn test_spvt_39_sdiv() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_sdiv(w, 57, 3, 40, 41)
+    spvt_writer_contains(w, "%57 = OpSDiv %3 %40 %41")
+}
+
+// --- Memory operations ---
+
+fn test_spvt_40_variable() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_variable(w, 60, 10, SPVT_SC_FUNCTION)
+    spvt_writer_contains(w, "%60 = OpVariable %10 Function")
+}
+
+fn test_spvt_41_load() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_load(w, 61, 2, 60)
+    spvt_writer_contains(w, "%61 = OpLoad %2 %60")
+}
+
+fn test_spvt_42_store() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_store(w, 60, 61)
+    spvt_writer_contains(w, "OpStore %60 %61")
+}
+
+fn test_spvt_43_access_chain() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_access_chain(w, 62, 10, 60, 15)
+    spvt_writer_contains(w, "%62 = OpAccessChain %10 %60 %15")
+}
+
+// --- Control flow ---
+
+fn test_spvt_44_branch() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_branch(w, 100)
+    spvt_writer_contains(w, "OpBranch %100")
+}
+
+fn test_spvt_45_branch_conditional() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_branch_conditional(w, 70, 100, 101)
+    spvt_writer_contains(w, "OpBranchConditional %70 %100 %101")
+}
+
+fn test_spvt_46_selection_merge() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_selection_merge(w, 102)
+    spvt_writer_contains(w, "OpSelectionMerge %102 None")
+}
+
+fn test_spvt_47_loop_merge() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_loop_merge(w, 103, 104)
+    spvt_writer_contains(w, "OpLoopMerge %103 %104 None")
+}
+
+fn test_spvt_48_phi() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    var vals: [i64; 8] = [0; 8]
+    var pars: [i64; 8] = [0; 8]
+    vals[0 as usize] = 80
+    vals[1 as usize] = 81
+    pars[0 as usize] = 100
+    pars[1 as usize] = 101
+    w = spvt_emit_phi(w, 90, 2, vals, pars, 2)
+    spvt_writer_contains(w, "%90 = OpPhi %2 %80 %100 %81 %101")
+}
+
+// --- Entry point ---
+
+fn test_spvt_49_entry_point_compute() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    var iface: [i64; 8] = [0; 8]
+    iface[0 as usize] = 200
+    w = spvt_emit_entry_point(w, SPVT_EXEC_GLCOMPUTE, 3, "main", iface, 1)
+    spvt_writer_contains(w, "OpEntryPoint GLCompute %3 \"main\" %200")
+}
+
+fn test_spvt_50_entry_point_vertex() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    var iface: [i64; 8] = [0; 8]
+    w = spvt_emit_entry_point(w, SPVT_EXEC_VERTEX, 5, "main", iface, 0)
+    spvt_writer_contains(w, "OpEntryPoint Vertex %5 \"main\"")
+}
+
+fn test_spvt_51_entry_point_fragment() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    var iface: [i64; 8] = [0; 8]
+    w = spvt_emit_entry_point(w, SPVT_EXEC_FRAGMENT, 7, "main", iface, 0)
+    spvt_writer_contains(w, "OpEntryPoint Fragment %7 \"main\"")
+}
+
+// --- Decoration ---
+
+fn test_spvt_52_decorate_builtin() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_decorate_builtin(w, 200, 28)
+    spvt_writer_contains(w, "OpDecorate %200 BuiltIn 28")
+}
+
+fn test_spvt_53_decorate_binding() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_decorate_binding(w, 10, 0)
+    spvt_writer_contains(w, "OpDecorate %10 Binding 0")
+}
+
+fn test_spvt_54_decorate_descriptor_set() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_decorate_descriptor_set(w, 10, 0)
+    spvt_writer_contains(w, "OpDecorate %10 DescriptorSet 0")
+}
+
+fn test_spvt_55_decorate_location() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_decorate_location(w, 15, 3)
+    spvt_writer_contains(w, "OpDecorate %15 Location 3")
+}
+
+// --- Name emission ---
+
+fn test_spvt_56_name() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_name(w, 3, "main")
+    spvt_writer_contains(w, "OpName %3 \"main\"")
+}
+
+// --- Execution mode ---
+
+fn test_spvt_57_execution_mode_local_size() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_execution_mode_local_size(w, 3, 256, 1, 1)
+    spvt_writer_contains(w, "OpExecutionMode %3 LocalSize 256 1 1")
+}
+
+// --- Opcode name lookup ---
+
+fn test_spvt_58_opcode_names() -> bool {
+    spvt_opcode_name(SPVT_OP_CAPABILITY) == "OpCapability" &&
+    spvt_opcode_name(SPVT_OP_MEMORY_MODEL) == "OpMemoryModel" &&
+    spvt_opcode_name(SPVT_OP_FADD) == "OpFAdd" &&
+    spvt_opcode_name(SPVT_OP_LABEL) == "OpLabel" &&
+    spvt_opcode_name(SPVT_OP_RETURN) == "OpReturn"
+}
+
+// --- Context / ID allocation ---
+
+fn test_spvt_59_ctx_new() -> bool {
+    let ctx = spvt_ctx_new()
+    ctx.next_id == 1
+}
+
+fn test_spvt_60_ctx_alloc_id() -> bool with Mut {
+    var ctx = spvt_ctx_new()
+    let id1 = spvt_current_id(ctx)
+    ctx = spvt_alloc_id(ctx)
+    let id2 = spvt_current_id(ctx)
+    id1 == 1 && id2 == 2
+}
+
+// --- Struct / data structure tests ---
+
+fn test_spvt_61_instr_new() -> bool {
+    let i = spvt_instr_new()
+    i.opcode == 0 && i.operand_count == 0 && !i.has_result
+}
+
+fn test_spvt_62_instr_add_operand() -> bool with Mut, Panic {
+    var i = spvt_instr_with_op(SPVT_OP_FADD)
+    i = spvt_instr_add_operand(i, 10)
+    i = spvt_instr_add_operand(i, 20)
+    i.operand_count == 2 &&
+    i.operands[0 as usize] == 10 &&
+    i.operands[1 as usize] == 20
+}
+
+fn test_spvt_63_block_add_instr() -> bool with Mut, Panic {
+    var blk = spvt_block_new(100)
+    blk = spvt_block_add_instr(blk, 0)
+    blk = spvt_block_add_instr(blk, 1)
+    blk = spvt_block_add_instr(blk, 2)
+    blk.label_id == 100 && blk.instr_count == 3
+}
+
+fn test_spvt_64_func_add_param() -> bool with Mut, Panic {
+    var f = spvt_func_new(10, 1)
+    f = spvt_func_add_param(f, 2)
+    f = spvt_func_add_param(f, 3)
+    f.param_count == 2 &&
+    f.param_type_ids[0 as usize] == 2 &&
+    f.param_type_ids[1 as usize] == 3
+}
+
+fn test_spvt_65_module_add_cap() -> bool with Mut, Panic {
+    var m = spvt_module_new()
+    m = spvt_module_add_cap(m, SPVT_CAP_SHADER)
+    m = spvt_module_add_cap(m, SPVT_CAP_KERNEL)
+    m.cap_count == 2 &&
+    m.capabilities[0 as usize] == SPVT_CAP_SHADER &&
+    m.capabilities[1 as usize] == SPVT_CAP_KERNEL
+}
+
+// --- Type pointer and function type ---
+
+fn test_spvt_66_type_pointer() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_type_pointer(w, 20, SPVT_SC_FUNCTION, 5)
+    spvt_writer_contains(w, "%20 = OpTypePointer Function %5")
+}
+
+fn test_spvt_67_type_function() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    var params: [i64; 16] = [0; 16]
+    params[0 as usize] = 5
+    params[1 as usize] = 3
+    w = spvt_emit_type_function(w, 30, 1, params, 2)
+    spvt_writer_contains(w, "%30 = OpTypeFunction %1 %5 %3")
+}
+
+fn test_spvt_68_type_array() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_type_array(w, 40, 5, 15)
+    spvt_writer_contains(w, "%40 = OpTypeArray %5 %15")
+}
+
+fn test_spvt_69_type_struct() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    var members: [i64; 8] = [0; 8]
+    members[0 as usize] = 5
+    members[1 as usize] = 3
+    w = spvt_emit_type_struct(w, 50, members, 2)
+    spvt_writer_contains(w, "%50 = OpTypeStruct %5 %3")
+}
+
+// --- Full module assembly ---
+
+fn test_spvt_70_minimal_module() -> bool with Mut, Panic, Div {
+    let m = spvt_build_minimal_compute()
+    let w = spvt_assemble_module(m)
+    spvt_writer_contains(w, "OpCapability Shader") &&
+    spvt_writer_contains(w, "OpMemoryModel Logical GLSL450") &&
+    spvt_writer_contains(w, "OpEntryPoint GLCompute") &&
+    spvt_writer_contains(w, "OpTypeVoid") &&
+    spvt_writer_contains(w, "OpFunction") &&
+    spvt_writer_contains(w, "OpFunctionEnd")
+}
+
+fn test_spvt_71_arith_module_has_types() -> bool with Mut, Panic, Div {
+    let m = spvt_build_arith_compute()
+    let w = spvt_assemble_module(m)
+    spvt_writer_contains(w, "OpTypeFloat 32") &&
+    spvt_writer_contains(w, "OpTypeInt 32 0") &&
+    spvt_writer_contains(w, "OpDecorate %10 Binding 0")
+}
+
+fn test_spvt_72_module_header_comment() -> bool with Mut, Panic, Div {
+    let m = spvt_build_minimal_compute()
+    let w = spvt_assemble_module(m)
+    spvt_writer_contains(w, "; SPIR-V Text (Sounio)") &&
+    spvt_writer_contains(w, "; Generator: Sounio Self-Hosted Compiler")
+}
+
+fn test_spvt_73_switch() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    var cases: [i64; 8] = [0; 8]
+    var targets: [i64; 8] = [0; 8]
+    cases[0 as usize] = 1
+    cases[1 as usize] = 2
+    targets[0 as usize] = 110
+    targets[1 as usize] = 111
+    w = spvt_emit_switch(w, 70, 120, cases, targets, 2)
+    spvt_writer_contains(w, "OpSwitch %70 %120 1 %110 2 %111")
+}
+
+fn test_spvt_74_variable_storage_buffer() -> bool with Mut, Panic, Div {
+    var w = spvt_writer_new()
+    w = spvt_emit_variable(w, 80, 15, SPVT_SC_STORAGE_BUFFER)
+    spvt_writer_contains(w, "%80 = OpVariable %15 StorageBuffer")
+}
+
+fn test_spvt_75_type_cache() -> bool with Mut, Panic, Div {
+    var ctx = spvt_ctx_new()
+    ctx = spvt_cache_type(ctx, 100, 5)
+    ctx = spvt_cache_type(ctx, 200, 10)
+    let r1 = spvt_lookup_type(ctx, 100)
+    let r2 = spvt_lookup_type(ctx, 200)
+    let r3 = spvt_lookup_type(ctx, 999)
+    r1 == 5 && r2 == 10 && r3 == 0
+}
+
+// --- Runner ---
+
+fn run_spvt_tests() -> i32 with IO, Mut, Panic, Div {
+    var passed: i64 = 0
+    var total: i64 = 0
+
+    print("=== SPIR-V Text Emitter Tests ===\n")
+
+    total = total + 1
+    if test_spvt_01_writer_new() { passed = passed + 1; print("  T01 OK\n") } else { print("  FAIL T01 writer_new\n") }
+    total = total + 1
+    if test_spvt_02_push_byte() { passed = passed + 1; print("  T02 OK\n") } else { print("  FAIL T02 push_byte\n") }
+    total = total + 1
+    if test_spvt_03_push_str() { passed = passed + 1; print("  T03 OK\n") } else { print("  FAIL T03 push_str\n") }
+    total = total + 1
+    if test_spvt_04_push_newline() { passed = passed + 1; print("  T04 OK\n") } else { print("  FAIL T04 newline\n") }
+    total = total + 1
+    if test_spvt_05_push_i64_zero() { passed = passed + 1; print("  T05 OK\n") } else { print("  FAIL T05 i64_0\n") }
+    total = total + 1
+    if test_spvt_06_push_i64_42() { passed = passed + 1; print("  T06 OK\n") } else { print("  FAIL T06 i64_42\n") }
+    total = total + 1
+    if test_spvt_07_push_id() { passed = passed + 1; print("  T07 OK\n") } else { print("  FAIL T07 push_id\n") }
+    total = total + 1
+    if test_spvt_08_writer_contains() { passed = passed + 1; print("  T08 OK\n") } else { print("  FAIL T08 contains\n") }
+    total = total + 1
+    if test_spvt_09_cap_shader() { passed = passed + 1; print("  T09 OK\n") } else { print("  FAIL T09 cap_shader\n") }
+    total = total + 1
+    if test_spvt_10_cap_kernel() { passed = passed + 1; print("  T10 OK\n") } else { print("  FAIL T10 cap_kernel\n") }
+    total = total + 1
+    if test_spvt_11_memory_model_glsl() { passed = passed + 1; print("  T11 OK\n") } else { print("  FAIL T11 mm_glsl\n") }
+    total = total + 1
+    if test_spvt_12_memory_model_opencl() { passed = passed + 1; print("  T12 OK\n") } else { print("  FAIL T12 mm_ocl\n") }
+    total = total + 1
+    if test_spvt_13_type_void() { passed = passed + 1; print("  T13 OK\n") } else { print("  FAIL T13 void\n") }
+    total = total + 1
+    if test_spvt_14_type_bool() { passed = passed + 1; print("  T14 OK\n") } else { print("  FAIL T14 bool\n") }
+    total = total + 1
+    if test_spvt_15_type_int_32_signed() { passed = passed + 1; print("  T15 OK\n") } else { print("  FAIL T15 i32\n") }
+    total = total + 1
+    if test_spvt_16_type_int_32_unsigned() { passed = passed + 1; print("  T16 OK\n") } else { print("  FAIL T16 u32\n") }
+    total = total + 1
+    if test_spvt_17_type_float_32() { passed = passed + 1; print("  T17 OK\n") } else { print("  FAIL T17 f32\n") }
+    total = total + 1
+    if test_spvt_18_type_float_64() { passed = passed + 1; print("  T18 OK\n") } else { print("  FAIL T18 f64\n") }
+    total = total + 1
+    if test_spvt_19_type_vector() { passed = passed + 1; print("  T19 OK\n") } else { print("  FAIL T19 vec\n") }
+    total = total + 1
+    if test_spvt_20_type_matrix() { passed = passed + 1; print("  T20 OK\n") } else { print("  FAIL T20 mat\n") }
+    total = total + 1
+    if test_spvt_21_constant() { passed = passed + 1; print("  T21 OK\n") } else { print("  FAIL T21 const\n") }
+    total = total + 1
+    if test_spvt_22_constant_true() { passed = passed + 1; print("  T22 OK\n") } else { print("  FAIL T22 ctrue\n") }
+    total = total + 1
+    if test_spvt_23_constant_false() { passed = passed + 1; print("  T23 OK\n") } else { print("  FAIL T23 cfalse\n") }
+    total = total + 1
+    if test_spvt_24_constant_composite() { passed = passed + 1; print("  T24 OK\n") } else { print("  FAIL T24 ccomp\n") }
+    total = total + 1
+    if test_spvt_25_function() { passed = passed + 1; print("  T25 OK\n") } else { print("  FAIL T25 func\n") }
+    total = total + 1
+    if test_spvt_26_function_parameter() { passed = passed + 1; print("  T26 OK\n") } else { print("  FAIL T26 fparam\n") }
+    total = total + 1
+    if test_spvt_27_function_end() { passed = passed + 1; print("  T27 OK\n") } else { print("  FAIL T27 fend\n") }
+    total = total + 1
+    if test_spvt_28_label() { passed = passed + 1; print("  T28 OK\n") } else { print("  FAIL T28 label\n") }
+    total = total + 1
+    if test_spvt_29_return() { passed = passed + 1; print("  T29 OK\n") } else { print("  FAIL T29 ret\n") }
+    total = total + 1
+    if test_spvt_30_return_value() { passed = passed + 1; print("  T30 OK\n") } else { print("  FAIL T30 retval\n") }
+    total = total + 1
+    if test_spvt_31_minimal_function() { passed = passed + 1; print("  T31 OK\n") } else { print("  FAIL T31 minfn\n") }
+    total = total + 1
+    if test_spvt_32_fadd() { passed = passed + 1; print("  T32 OK\n") } else { print("  FAIL T32 fadd\n") }
+    total = total + 1
+    if test_spvt_33_fsub() { passed = passed + 1; print("  T33 OK\n") } else { print("  FAIL T33 fsub\n") }
+    total = total + 1
+    if test_spvt_34_fmul() { passed = passed + 1; print("  T34 OK\n") } else { print("  FAIL T34 fmul\n") }
+    total = total + 1
+    if test_spvt_35_fdiv() { passed = passed + 1; print("  T35 OK\n") } else { print("  FAIL T35 fdiv\n") }
+    total = total + 1
+    if test_spvt_36_iadd() { passed = passed + 1; print("  T36 OK\n") } else { print("  FAIL T36 iadd\n") }
+    total = total + 1
+    if test_spvt_37_isub() { passed = passed + 1; print("  T37 OK\n") } else { print("  FAIL T37 isub\n") }
+    total = total + 1
+    if test_spvt_38_imul() { passed = passed + 1; print("  T38 OK\n") } else { print("  FAIL T38 imul\n") }
+    total = total + 1
+    if test_spvt_39_sdiv() { passed = passed + 1; print("  T39 OK\n") } else { print("  FAIL T39 sdiv\n") }
+    total = total + 1
+    if test_spvt_40_variable() { passed = passed + 1; print("  T40 OK\n") } else { print("  FAIL T40 var\n") }
+    total = total + 1
+    if test_spvt_41_load() { passed = passed + 1; print("  T41 OK\n") } else { print("  FAIL T41 load\n") }
+    total = total + 1
+    if test_spvt_42_store() { passed = passed + 1; print("  T42 OK\n") } else { print("  FAIL T42 store\n") }
+    total = total + 1
+    if test_spvt_43_access_chain() { passed = passed + 1; print("  T43 OK\n") } else { print("  FAIL T43 achain\n") }
+    total = total + 1
+    if test_spvt_44_branch() { passed = passed + 1; print("  T44 OK\n") } else { print("  FAIL T44 br\n") }
+    total = total + 1
+    if test_spvt_45_branch_conditional() { passed = passed + 1; print("  T45 OK\n") } else { print("  FAIL T45 brcond\n") }
+    total = total + 1
+    if test_spvt_46_selection_merge() { passed = passed + 1; print("  T46 OK\n") } else { print("  FAIL T46 selm\n") }
+    total = total + 1
+    if test_spvt_47_loop_merge() { passed = passed + 1; print("  T47 OK\n") } else { print("  FAIL T47 loopm\n") }
+    total = total + 1
+    if test_spvt_48_phi() { passed = passed + 1; print("  T48 OK\n") } else { print("  FAIL T48 phi\n") }
+    total = total + 1
+    if test_spvt_49_entry_point_compute() { passed = passed + 1; print("  T49 OK\n") } else { print("  FAIL T49 ep_comp\n") }
+    total = total + 1
+    if test_spvt_50_entry_point_vertex() { passed = passed + 1; print("  T50 OK\n") } else { print("  FAIL T50 ep_vert\n") }
+    total = total + 1
+    if test_spvt_51_entry_point_fragment() { passed = passed + 1; print("  T51 OK\n") } else { print("  FAIL T51 ep_frag\n") }
+    total = total + 1
+    if test_spvt_52_decorate_builtin() { passed = passed + 1; print("  T52 OK\n") } else { print("  FAIL T52 dec_bi\n") }
+    total = total + 1
+    if test_spvt_53_decorate_binding() { passed = passed + 1; print("  T53 OK\n") } else { print("  FAIL T53 dec_bd\n") }
+    total = total + 1
+    if test_spvt_54_decorate_descriptor_set() { passed = passed + 1; print("  T54 OK\n") } else { print("  FAIL T54 dec_ds\n") }
+    total = total + 1
+    if test_spvt_55_decorate_location() { passed = passed + 1; print("  T55 OK\n") } else { print("  FAIL T55 dec_loc\n") }
+    total = total + 1
+    if test_spvt_56_name() { passed = passed + 1; print("  T56 OK\n") } else { print("  FAIL T56 name\n") }
+    total = total + 1
+    if test_spvt_57_execution_mode_local_size() { passed = passed + 1; print("  T57 OK\n") } else { print("  FAIL T57 exec\n") }
+    total = total + 1
+    if test_spvt_58_opcode_names() { passed = passed + 1; print("  T58 OK\n") } else { print("  FAIL T58 opnames\n") }
+    total = total + 1
+    if test_spvt_59_ctx_new() { passed = passed + 1; print("  T59 OK\n") } else { print("  FAIL T59 ctx\n") }
+    total = total + 1
+    if test_spvt_60_ctx_alloc_id() { passed = passed + 1; print("  T60 OK\n") } else { print("  FAIL T60 alloc\n") }
+    total = total + 1
+    if test_spvt_61_instr_new() { passed = passed + 1; print("  T61 OK\n") } else { print("  FAIL T61 instr\n") }
+    total = total + 1
+    if test_spvt_62_instr_add_operand() { passed = passed + 1; print("  T62 OK\n") } else { print("  FAIL T62 addop\n") }
+    total = total + 1
+    if test_spvt_63_block_add_instr() { passed = passed + 1; print("  T63 OK\n") } else { print("  FAIL T63 blkadd\n") }
+    total = total + 1
+    if test_spvt_64_func_add_param() { passed = passed + 1; print("  T64 OK\n") } else { print("  FAIL T64 fparam\n") }
+    total = total + 1
+    if test_spvt_65_module_add_cap() { passed = passed + 1; print("  T65 OK\n") } else { print("  FAIL T65 modcap\n") }
+    total = total + 1
+    if test_spvt_66_type_pointer() { passed = passed + 1; print("  T66 OK\n") } else { print("  FAIL T66 tptr\n") }
+    total = total + 1
+    if test_spvt_67_type_function() { passed = passed + 1; print("  T67 OK\n") } else { print("  FAIL T67 tfunc\n") }
+    total = total + 1
+    if test_spvt_68_type_array() { passed = passed + 1; print("  T68 OK\n") } else { print("  FAIL T68 tarr\n") }
+    total = total + 1
+    if test_spvt_69_type_struct() { passed = passed + 1; print("  T69 OK\n") } else { print("  FAIL T69 tstruct\n") }
+    total = total + 1
+    if test_spvt_70_minimal_module() { passed = passed + 1; print("  T70 OK\n") } else { print("  FAIL T70 minmod\n") }
+    total = total + 1
+    if test_spvt_71_arith_module_has_types() { passed = passed + 1; print("  T71 OK\n") } else { print("  FAIL T71 arithmod\n") }
+    total = total + 1
+    if test_spvt_72_module_header_comment() { passed = passed + 1; print("  T72 OK\n") } else { print("  FAIL T72 hdr\n") }
+    total = total + 1
+    if test_spvt_73_switch() { passed = passed + 1; print("  T73 OK\n") } else { print("  FAIL T73 switch\n") }
+    total = total + 1
+    if test_spvt_74_variable_storage_buffer() { passed = passed + 1; print("  T74 OK\n") } else { print("  FAIL T74 varsb\n") }
+    total = total + 1
+    if test_spvt_75_type_cache() { passed = passed + 1; print("  T75 OK\n") } else { print("  FAIL T75 tcache\n") }
+
+    if passed == total {
+        print("SPIR-V Text: all 75 passed\n")
+    } else {
+        print("SPIR-V Text: FAILED\n")
+    }
+    if passed == total { 0 } else { 1 }
+}

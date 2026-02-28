@@ -1,0 +1,2510 @@
+// self-hosted::native::macho — Mach-O 64-bit binary format writer/linker
+//
+// Generates Mach-O binaries for macOS (x86-64 and ARM64).
+// Implements header emission, segment/section layout, symbol table,
+// relocation processing, and final binary assembly.
+
+// ============================================================================
+// Constants — Mach-O magic numbers and identifiers
+// ============================================================================
+
+let MACHO_MAGIC_64: i64 = 4277009103          // 0xFEEDFACF
+let MACHO_CIGAM_64: i64 = 3489328638          // 0xCFFAEDFE (byte-swapped)
+
+let MACHO_CPU_X86_64: i64 = 16777223          // 0x01000007
+let MACHO_CPU_SUBTYPE_X86_64_ALL: i64 = 3
+let MACHO_CPU_ARM64: i64 = 16777228           // 0x0100000C
+let MACHO_CPU_SUBTYPE_ARM64_ALL: i64 = 0
+
+let MACHO_FILETYPE_OBJECT: i64 = 1            // MH_OBJECT
+let MACHO_FILETYPE_EXECUTE: i64 = 2           // MH_EXECUTE
+let MACHO_FILETYPE_DYLIB: i64 = 6             // MH_DYLIB
+let MACHO_FILETYPE_BUNDLE: i64 = 8            // MH_BUNDLE
+
+let MACHO_PAGE_SIZE: i64 = 4096
+
+// Mach-O header flags
+let MACHO_FLAG_NOUNDEFS: i64 = 1              // MH_NOUNDEFS
+let MACHO_FLAG_DYLDLINK: i64 = 4              // MH_DYLDLINK
+let MACHO_FLAG_TWOLEVEL: i64 = 128            // MH_TWOLEVEL
+let MACHO_FLAG_PIE: i64 = 2097152             // MH_PIE (0x200000)
+
+// Load command types
+let MACHO_LC_SEGMENT_64: i64 = 25             // LC_SEGMENT_64 (0x19)
+let MACHO_LC_SYMTAB: i64 = 2                  // LC_SYMTAB
+let MACHO_LC_DYSYMTAB: i64 = 11               // LC_DYSYMTAB (0x0B)
+let MACHO_LC_LOAD_DYLINKER: i64 = 14          // LC_LOAD_DYLINKER (0x0E)
+let MACHO_LC_UUID: i64 = 27                   // LC_UUID (0x1B)
+let MACHO_LC_MAIN: i64 = 2147483688           // LC_MAIN (0x80000028)
+let MACHO_LC_LOAD_DYLIB: i64 = 12             // LC_LOAD_DYLIB (0x0C)
+
+// Segment protection flags
+let MACHO_VM_PROT_NONE: i64 = 0
+let MACHO_VM_PROT_READ: i64 = 1
+let MACHO_VM_PROT_WRITE: i64 = 2
+let MACHO_VM_PROT_EXEC: i64 = 4
+
+// Section types (flags low byte)
+let MACHO_S_REGULAR: i64 = 0                  // S_REGULAR
+let MACHO_S_ZEROFILL: i64 = 1                 // S_ZEROFILL
+let MACHO_S_CSTRING_LITERALS: i64 = 2         // S_CSTRING_LITERALS
+let MACHO_S_SYMBOL_STUBS: i64 = 8             // S_SYMBOL_STUBS
+let MACHO_S_LAZY_SYMBOL_POINTERS: i64 = 7     // S_LAZY_SYMBOL_POINTERS
+let MACHO_S_NON_LAZY_SYMBOL_POINTERS: i64 = 6 // S_NON_LAZY_SYMBOL_POINTERS
+
+// Section attributes (flags high bits)
+let MACHO_S_ATTR_PURE_INSTRUCTIONS: i64 = 2147483648   // 0x80000000
+let MACHO_S_ATTR_SOME_INSTRUCTIONS: i64 = 1024         // 0x00000400
+
+// Symbol type flags (n_type field)
+let MACHO_N_UNDF: i64 = 0                     // undefined
+let MACHO_N_ABS: i64 = 2                      // absolute
+let MACHO_N_SECT: i64 = 14                    // defined in section (0x0E)
+let MACHO_N_EXT: i64 = 1                      // external symbol
+
+// Relocation types for x86-64
+let MACHO_X86_64_RELOC_UNSIGNED: i64 = 0
+let MACHO_X86_64_RELOC_SIGNED: i64 = 1
+let MACHO_X86_64_RELOC_BRANCH: i64 = 2
+let MACHO_X86_64_RELOC_GOT_LOAD: i64 = 3
+let MACHO_X86_64_RELOC_GOT: i64 = 4
+let MACHO_X86_64_RELOC_SUBTRACTOR: i64 = 5
+let MACHO_X86_64_RELOC_SIGNED_1: i64 = 6
+let MACHO_X86_64_RELOC_SIGNED_2: i64 = 7
+let MACHO_X86_64_RELOC_SIGNED_4: i64 = 8
+
+// Relocation types for ARM64
+let MACHO_ARM64_RELOC_UNSIGNED: i64 = 0
+let MACHO_ARM64_RELOC_BRANCH26: i64 = 2
+let MACHO_ARM64_RELOC_PAGE21: i64 = 3
+let MACHO_ARM64_RELOC_PAGEOFF12: i64 = 4
+let MACHO_ARM64_RELOC_GOT_LOAD_PAGE21: i64 = 5
+let MACHO_ARM64_RELOC_GOT_LOAD_PAGEOFF12: i64 = 6
+
+// Fixed sizes
+let MACHO_HEADER_SIZE_64: i64 = 32            // mach_header_64 size
+let MACHO_SEGMENT_CMD_SIZE: i64 = 72          // segment_command_64 size
+let MACHO_SECTION_SIZE: i64 = 80              // section_64 size
+let MACHO_NLIST_SIZE: i64 = 16                // nlist_64 size
+let MACHO_RELOC_SIZE: i64 = 8                 // relocation_info size
+let MACHO_SYMTAB_CMD_SIZE: i64 = 24           // symtab_command size
+let MACHO_DYSYMTAB_CMD_SIZE: i64 = 80         // dysymtab_command size
+let MACHO_MAIN_CMD_SIZE: i64 = 24             // entry_point_command size
+
+// Segment name encodings (packed i64 identifiers)
+let MACHO_SEG_PAGEZERO: i64 = 1
+let MACHO_SEG_TEXT: i64 = 2
+let MACHO_SEG_DATA: i64 = 3
+let MACHO_SEG_LINKEDIT: i64 = 4
+
+// Section name encodings
+let MACHO_SECT_TEXT: i64 = 10
+let MACHO_SECT_CONST: i64 = 11
+let MACHO_SECT_STUBS: i64 = 12
+let MACHO_SECT_STUB_HELPER: i64 = 13
+let MACHO_SECT_DATA: i64 = 20
+let MACHO_SECT_BSS: i64 = 21
+let MACHO_SECT_LA_SYMBOL_PTR: i64 = 22
+let MACHO_SECT_NL_SYMBOL_PTR: i64 = 23
+
+// ============================================================================
+// Structs
+// ============================================================================
+
+// Mach-O 64-bit file header
+struct MachoHeader {
+    magic: i64,
+    cputype: i64,
+    cpusubtype: i64,
+    filetype: i64,
+    ncmds: i64,
+    sizeofcmds: i64,
+    flags: i64,
+    reserved: i64,
+}
+
+// Segment command (LC_SEGMENT_64)
+struct MachoSegment {
+    cmd: i64,                // MACHO_LC_SEGMENT_64
+    cmdsize: i64,            // 72 + nsects * 80
+    segname: i64,            // encoded segment name identifier
+    vmaddr: i64,
+    vmsize: i64,
+    fileoff: i64,
+    filesize: i64,
+    maxprot: i64,
+    initprot: i64,
+    nsects: i64,
+    seg_flags: i64,
+}
+
+// Section within a segment
+struct MachoSection {
+    sectname: i64,           // encoded section name identifier
+    segname: i64,            // encoded segment name identifier
+    addr: i64,               // virtual memory address
+    size: i64,               // size in bytes
+    offset: i64,             // file offset
+    align_pow2: i64,         // alignment as power of 2 (e.g. 4 = 16-byte)
+    reloff: i64,             // file offset of relocations
+    nreloc: i64,             // number of relocations
+    sec_flags: i64,          // type and attributes
+    reserved1: i64,
+    reserved2: i64,
+}
+
+// Symbol table entry (nlist_64)
+struct MachoSymbol {
+    name_offset: i64,        // offset into string table
+    type_field: i64,         // n_type (N_SECT | N_EXT, etc.)
+    sect: i64,               // section ordinal (1-based, 0 = NO_SECT)
+    desc: i64,               // n_desc
+    value: i64,              // n_value (address)
+}
+
+// Relocation entry
+struct MachoReloc {
+    address: i64,            // offset in section
+    symbolnum: i64,          // symbol index or section ordinal
+    pcrel: i64,              // 1 if PC-relative, 0 if absolute
+    length: i64,             // 0=byte, 1=word, 2=long, 3=quad
+    is_extern: i64,          // 1 if symbolnum is symbol index
+    rel_type: i64,           // relocation type (arch-specific)
+}
+
+// String table for symbols
+struct MachoStringTable {
+    bytes: [i8; 65536],
+    len: i64,
+}
+
+// Main Mach-O writer context
+struct MachoWriter {
+    buf: [i8; 65536],        // output byte buffer
+    buf_len: i64,
+    // Sections (max 16)
+    sections: [MachoSection; 16],
+    section_count: i64,
+    // Symbols (max 1024)
+    symbols: [MachoSymbol; 1024],
+    symbol_count: i64,
+    // Relocations (max 4096)
+    relocs: [MachoReloc; 4096],
+    reloc_count: i64,
+    // String table
+    strtab: MachoStringTable,
+    // Header info
+    cputype: i64,
+    cpusubtype: i64,
+    filetype: i64,
+    flags: i64,
+    // Layout tracking
+    text_vmaddr: i64,
+    data_vmaddr: i64,
+    linkedit_vmaddr: i64,
+    entry_offset: i64,
+}
+
+// ============================================================================
+// Constructors
+// ============================================================================
+
+fn macho_empty_section() -> MachoSection {
+    MachoSection {
+        sectname: 0,
+        segname: 0,
+        addr: 0,
+        size: 0,
+        offset: 0,
+        align_pow2: 0,
+        reloff: 0,
+        nreloc: 0,
+        sec_flags: 0,
+        reserved1: 0,
+        reserved2: 0,
+    }
+}
+
+fn macho_empty_symbol() -> MachoSymbol {
+    MachoSymbol {
+        name_offset: 0,
+        type_field: 0,
+        sect: 0,
+        desc: 0,
+        value: 0,
+    }
+}
+
+fn macho_empty_reloc() -> MachoReloc {
+    MachoReloc {
+        address: 0,
+        symbolnum: 0,
+        pcrel: 0,
+        length: 0,
+        is_extern: 0,
+        rel_type: 0,
+    }
+}
+
+fn macho_strtab_new() -> MachoStringTable {
+    MachoStringTable {
+        bytes: [0; 65536],
+        len: 0,
+    }
+}
+
+fn macho_header_new(cputype: i64, cpusubtype: i64, filetype: i64, ncmds: i64, sizeofcmds: i64, flags: i64) -> MachoHeader {
+    MachoHeader {
+        magic: MACHO_MAGIC_64,
+        cputype: cputype,
+        cpusubtype: cpusubtype,
+        filetype: filetype,
+        ncmds: ncmds,
+        sizeofcmds: sizeofcmds,
+        flags: flags,
+        reserved: 0,
+    }
+}
+
+fn macho_writer_new() -> MachoWriter {
+    MachoWriter {
+        buf: [0; 65536],
+        buf_len: 0,
+        sections: [macho_empty_section(); 16],
+        section_count: 0,
+        symbols: [macho_empty_symbol(); 1024],
+        symbol_count: 0,
+        relocs: [macho_empty_reloc(); 4096],
+        reloc_count: 0,
+        strtab: macho_strtab_new(),
+        cputype: MACHO_CPU_X86_64,
+        cpusubtype: MACHO_CPU_SUBTYPE_X86_64_ALL,
+        filetype: MACHO_FILETYPE_EXECUTE,
+        flags: MACHO_FLAG_NOUNDEFS + MACHO_FLAG_PIE,
+        text_vmaddr: 0,
+        data_vmaddr: 0,
+        linkedit_vmaddr: 0,
+        entry_offset: 0,
+    }
+}
+
+fn macho_writer_new_object() -> MachoWriter with Mut, Panic, Div {
+    var w = macho_writer_new()
+    w.filetype = MACHO_FILETYPE_OBJECT
+    w.flags = 0
+    w
+}
+
+fn macho_writer_new_arm64() -> MachoWriter with Mut, Panic, Div {
+    var w = macho_writer_new()
+    w.cputype = MACHO_CPU_ARM64
+    w.cpusubtype = MACHO_CPU_SUBTYPE_ARM64_ALL
+    w
+}
+
+// ============================================================================
+// Low-level byte emission helpers
+// ============================================================================
+
+fn macho_low8(x: i64) -> i64 with Mut, Panic, Div {
+    var n = x % 256
+    if n < 0 { n = n + 256 }
+    n
+}
+
+fn macho_emit_byte(w: MachoWriter, b: i64) -> MachoWriter with Mut, Panic, Div {
+    var out = w
+    if out.buf_len >= 0 && out.buf_len < 65536 {
+        out.buf[out.buf_len as usize] = macho_low8(b) as i8
+        out.buf_len = out.buf_len + 1
+    }
+    out
+}
+
+fn macho_emit_u16(w: MachoWriter, val: i64) -> MachoWriter with Mut, Panic, Div {
+    var out = w
+    out = macho_emit_byte(out, macho_low8(val))
+    out = macho_emit_byte(out, macho_low8(val >> 8))
+    out
+}
+
+fn macho_emit_u32(w: MachoWriter, val: i64) -> MachoWriter with Mut, Panic, Div {
+    var out = w
+    out = macho_emit_byte(out, macho_low8(val))
+    out = macho_emit_byte(out, macho_low8(val >> 8))
+    out = macho_emit_byte(out, macho_low8(val >> 16))
+    out = macho_emit_byte(out, macho_low8(val >> 24))
+    out
+}
+
+fn macho_emit_u64(w: MachoWriter, val: i64) -> MachoWriter with Mut, Panic, Div {
+    var out = w
+    out = macho_emit_u32(out, val)
+    out = macho_emit_u32(out, val >> 32)
+    out
+}
+
+// Emit N zero bytes for padding
+fn macho_emit_zeros(w: MachoWriter, count: i64) -> MachoWriter with Mut, Panic, Div {
+    var out = w
+    var i = 0
+    while i < count {
+        out = macho_emit_byte(out, 0)
+        i = i + 1
+    }
+    out
+}
+
+// Pad to the given alignment boundary
+fn macho_emit_pad_to(w: MachoWriter, alignment: i64) -> MachoWriter with Mut, Panic, Div {
+    var out = w
+    let remainder = out.buf_len % alignment
+    if remainder != 0 {
+        let pad = alignment - remainder
+        out = macho_emit_zeros(out, pad)
+    }
+    out
+}
+
+// Patch a u32 at a specific offset in the buffer
+fn macho_patch_u32(w: MachoWriter, offset: i64, val: i64) -> MachoWriter with Mut, Panic, Div {
+    var out = w
+    if offset >= 0 && offset + 4 <= out.buf_len {
+        out.buf[offset as usize] = macho_low8(val) as i8
+        out.buf[(offset + 1) as usize] = macho_low8(val >> 8) as i8
+        out.buf[(offset + 2) as usize] = macho_low8(val >> 16) as i8
+        out.buf[(offset + 3) as usize] = macho_low8(val >> 24) as i8
+    }
+    out
+}
+
+// Patch a u64 at a specific offset in the buffer
+fn macho_patch_u64(w: MachoWriter, offset: i64, val: i64) -> MachoWriter with Mut, Panic, Div {
+    var out = w
+    out = macho_patch_u32(out, offset, val)
+    out = macho_patch_u32(out, offset + 4, val >> 32)
+    out
+}
+
+// ============================================================================
+// Alignment and page utilities
+// ============================================================================
+
+fn macho_align_to(val: i64, alignment: i64) -> i64 with Mut, Panic {
+    var aligned = val
+    let remainder = val % alignment
+    if remainder != 0 {
+        aligned = val + (alignment - remainder)
+    }
+    aligned
+}
+
+fn macho_page_align(val: i64) -> i64 with Mut, Panic {
+    macho_align_to(val, MACHO_PAGE_SIZE)
+}
+
+fn macho_align_pow2(val: i64, pow2: i64) -> i64 with Mut, Panic, Div {
+    // Compute 2^pow2 via shift
+    var alignment = 1
+    var i = 0
+    while i < pow2 {
+        alignment = alignment * 2
+        i = i + 1
+    }
+    macho_align_to(val, alignment)
+}
+
+// ============================================================================
+// String table operations
+// ============================================================================
+
+// Initialize string table with a leading null byte (index 0 = empty string)
+fn macho_strtab_init() -> MachoStringTable with Mut, Panic, Div {
+    var st = macho_strtab_new()
+    st.bytes[0] = 0
+    st.len = 1
+    st
+}
+
+// Add a string to the string table, return its offset.
+// The string is given as a fixed array of bytes and a length.
+fn macho_strtab_add(st: MachoStringTable, name: [i8; 128], name_len: i64) -> MachoStringTable with Mut, Panic, Div {
+    var t = st
+    var i = 0
+    while i < name_len && t.len < 65535 {
+        t.bytes[t.len as usize] = name[i as usize]
+        t.len = t.len + 1
+        i = i + 1
+    }
+    // Null terminator
+    if t.len < 65536 {
+        t.bytes[t.len as usize] = 0
+        t.len = t.len + 1
+    }
+    t
+}
+
+// Get the offset where the last added string starts.
+// (offset = current len - name_len - 1 for null)
+fn macho_strtab_last_offset(st: MachoStringTable, name_len: i64) -> i64 {
+    st.len - name_len - 1
+}
+
+// Search for an existing string in the table.
+// Returns offset if found, or -1 if not found.
+// This provides string deduplication.
+fn macho_strtab_find(st: MachoStringTable, name: [i8; 128], name_len: i64) -> i64 with Mut, Panic, Div {
+    var offset = 0
+    while offset < st.len {
+        // Check if string at offset matches
+        var matches = 1
+        var j = 0
+        while j < name_len {
+            let idx = offset + j
+            if idx >= st.len {
+                matches = 0
+                j = name_len  // break
+            } else if st.bytes[idx as usize] != name[j as usize] {
+                matches = 0
+                j = name_len  // break
+            } else {
+                j = j + 1
+            }
+        }
+        // Check null terminator
+        if matches == 1 {
+            let term_idx = offset + name_len
+            if term_idx < st.len {
+                if st.bytes[term_idx as usize] != 0 {
+                    matches = 0
+                }
+            } else {
+                matches = 0
+            }
+        }
+        if matches == 1 {
+            return offset
+        }
+        // Advance to next string (skip to past the null)
+        var k = offset
+        while k < st.len && st.bytes[k as usize] != 0 {
+            k = k + 1
+        }
+        offset = k + 1
+    }
+    0 - 1
+}
+
+// Add a string with deduplication: return existing offset if found,
+// otherwise append and return new offset.
+fn macho_strtab_add_dedup(st: MachoStringTable, name: [i8; 128], name_len: i64) -> MachoStringTable with Mut, Panic, Div {
+    let existing = macho_strtab_find(st, name, name_len)
+    if existing >= 0 {
+        // Already present, return table unchanged
+        return st
+    }
+    macho_strtab_add(st, name, name_len)
+}
+
+fn macho_strtab_offset_dedup(st: MachoStringTable, name: [i8; 128], name_len: i64) -> i64 with Mut, Panic, Div {
+    let existing = macho_strtab_find(st, name, name_len)
+    if existing >= 0 {
+        return existing
+    }
+    // If not found, it would be appended at current len
+    st.len
+}
+
+// ============================================================================
+// Section management
+// ============================================================================
+
+fn macho_add_section(w: MachoWriter, sec: MachoSection) -> MachoWriter with Mut, Panic, Div {
+    var out = w
+    if out.section_count < 16 {
+        out.sections[out.section_count as usize] = sec
+        out.section_count = out.section_count + 1
+    }
+    out
+}
+
+fn macho_make_text_section(addr: i64, size: i64, offset: i64) -> MachoSection {
+    MachoSection {
+        sectname: MACHO_SECT_TEXT,
+        segname: MACHO_SEG_TEXT,
+        addr: addr,
+        size: size,
+        offset: offset,
+        align_pow2: 4,         // 16-byte alignment
+        reloff: 0,
+        nreloc: 0,
+        sec_flags: MACHO_S_REGULAR + MACHO_S_ATTR_PURE_INSTRUCTIONS + MACHO_S_ATTR_SOME_INSTRUCTIONS,
+        reserved1: 0,
+        reserved2: 0,
+    }
+}
+
+fn macho_make_const_section(addr: i64, size: i64, offset: i64) -> MachoSection {
+    MachoSection {
+        sectname: MACHO_SECT_CONST,
+        segname: MACHO_SEG_TEXT,
+        addr: addr,
+        size: size,
+        offset: offset,
+        align_pow2: 3,         // 8-byte alignment
+        reloff: 0,
+        nreloc: 0,
+        sec_flags: MACHO_S_REGULAR,
+        reserved1: 0,
+        reserved2: 0,
+    }
+}
+
+fn macho_make_data_section(addr: i64, size: i64, offset: i64) -> MachoSection {
+    MachoSection {
+        sectname: MACHO_SECT_DATA,
+        segname: MACHO_SEG_DATA,
+        addr: addr,
+        size: size,
+        offset: offset,
+        align_pow2: 3,         // 8-byte alignment
+        reloff: 0,
+        nreloc: 0,
+        sec_flags: MACHO_S_REGULAR,
+        reserved1: 0,
+        reserved2: 0,
+    }
+}
+
+fn macho_make_bss_section(addr: i64, size: i64) -> MachoSection {
+    MachoSection {
+        sectname: MACHO_SECT_BSS,
+        segname: MACHO_SEG_DATA,
+        addr: addr,
+        size: size,
+        offset: 0,            // zerofill has no file content
+        align_pow2: 3,
+        reloff: 0,
+        nreloc: 0,
+        sec_flags: MACHO_S_ZEROFILL,
+        reserved1: 0,
+        reserved2: 0,
+    }
+}
+
+fn macho_make_stubs_section(addr: i64, size: i64, offset: i64, reserved1: i64, stub_size: i64) -> MachoSection {
+    MachoSection {
+        sectname: MACHO_SECT_STUBS,
+        segname: MACHO_SEG_TEXT,
+        addr: addr,
+        size: size,
+        offset: offset,
+        align_pow2: 1,         // 2-byte alignment
+        reloff: 0,
+        nreloc: 0,
+        sec_flags: MACHO_S_SYMBOL_STUBS + MACHO_S_ATTR_PURE_INSTRUCTIONS + MACHO_S_ATTR_SOME_INSTRUCTIONS,
+        reserved1: reserved1,  // indirect symbol table index
+        reserved2: stub_size,  // stub size (6 for x86-64)
+    }
+}
+
+fn macho_make_stub_helper_section(addr: i64, size: i64, offset: i64) -> MachoSection {
+    MachoSection {
+        sectname: MACHO_SECT_STUB_HELPER,
+        segname: MACHO_SEG_TEXT,
+        addr: addr,
+        size: size,
+        offset: offset,
+        align_pow2: 2,         // 4-byte alignment
+        reloff: 0,
+        nreloc: 0,
+        sec_flags: MACHO_S_REGULAR + MACHO_S_ATTR_PURE_INSTRUCTIONS + MACHO_S_ATTR_SOME_INSTRUCTIONS,
+        reserved1: 0,
+        reserved2: 0,
+    }
+}
+
+fn macho_make_la_symbol_ptr_section(addr: i64, size: i64, offset: i64, indirect_idx: i64) -> MachoSection {
+    MachoSection {
+        sectname: MACHO_SECT_LA_SYMBOL_PTR,
+        segname: MACHO_SEG_DATA,
+        addr: addr,
+        size: size,
+        offset: offset,
+        align_pow2: 3,
+        reloff: 0,
+        nreloc: 0,
+        sec_flags: MACHO_S_LAZY_SYMBOL_POINTERS,
+        reserved1: indirect_idx,
+        reserved2: 0,
+    }
+}
+
+fn macho_make_nl_symbol_ptr_section(addr: i64, size: i64, offset: i64, indirect_idx: i64) -> MachoSection {
+    MachoSection {
+        sectname: MACHO_SECT_NL_SYMBOL_PTR,
+        segname: MACHO_SEG_DATA,
+        addr: addr,
+        size: size,
+        offset: offset,
+        align_pow2: 3,
+        reloff: 0,
+        nreloc: 0,
+        sec_flags: MACHO_S_NON_LAZY_SYMBOL_POINTERS,
+        reserved1: indirect_idx,
+        reserved2: 0,
+    }
+}
+
+// ============================================================================
+// Symbol management
+// ============================================================================
+
+fn macho_add_symbol(w: MachoWriter, sym: MachoSymbol) -> MachoWriter with Mut, Panic, Div {
+    var out = w
+    if out.symbol_count < 1024 {
+        out.symbols[out.symbol_count as usize] = sym
+        out.symbol_count = out.symbol_count + 1
+    }
+    out
+}
+
+fn macho_make_local_symbol(name_offset: i64, sect: i64, value: i64) -> MachoSymbol {
+    MachoSymbol {
+        name_offset: name_offset,
+        type_field: MACHO_N_SECT,
+        sect: sect,
+        desc: 0,
+        value: value,
+    }
+}
+
+fn macho_make_extern_symbol(name_offset: i64, sect: i64, value: i64) -> MachoSymbol {
+    MachoSymbol {
+        name_offset: name_offset,
+        type_field: MACHO_N_SECT + MACHO_N_EXT,
+        sect: sect,
+        desc: 0,
+        value: value,
+    }
+}
+
+fn macho_make_undef_symbol(name_offset: i64) -> MachoSymbol {
+    MachoSymbol {
+        name_offset: name_offset,
+        type_field: MACHO_N_UNDF + MACHO_N_EXT,
+        sect: 0,
+        desc: 0,
+        value: 0,
+    }
+}
+
+// ============================================================================
+// Relocation management
+// ============================================================================
+
+fn macho_add_reloc(w: MachoWriter, rel: MachoReloc) -> MachoWriter with Mut, Panic, Div {
+    var out = w
+    if out.reloc_count < 4096 {
+        out.relocs[out.reloc_count as usize] = rel
+        out.reloc_count = out.reloc_count + 1
+    }
+    out
+}
+
+fn macho_make_branch_reloc(address: i64, symbolnum: i64) -> MachoReloc {
+    MachoReloc {
+        address: address,
+        symbolnum: symbolnum,
+        pcrel: 1,
+        length: 2,            // 4 bytes (2^2)
+        is_extern: 1,
+        rel_type: MACHO_X86_64_RELOC_BRANCH,
+    }
+}
+
+fn macho_make_signed_reloc(address: i64, symbolnum: i64) -> MachoReloc {
+    MachoReloc {
+        address: address,
+        symbolnum: symbolnum,
+        pcrel: 1,
+        length: 2,
+        is_extern: 1,
+        rel_type: MACHO_X86_64_RELOC_SIGNED,
+    }
+}
+
+fn macho_make_got_load_reloc(address: i64, symbolnum: i64) -> MachoReloc {
+    MachoReloc {
+        address: address,
+        symbolnum: symbolnum,
+        pcrel: 1,
+        length: 2,
+        is_extern: 1,
+        rel_type: MACHO_X86_64_RELOC_GOT_LOAD,
+    }
+}
+
+fn macho_make_unsigned_reloc(address: i64, symbolnum: i64, length: i64) -> MachoReloc {
+    MachoReloc {
+        address: address,
+        symbolnum: symbolnum,
+        pcrel: 0,
+        length: length,
+        is_extern: 1,
+        rel_type: MACHO_X86_64_RELOC_UNSIGNED,
+    }
+}
+
+fn macho_make_subtractor_reloc(address: i64, symbolnum: i64, length: i64) -> MachoReloc {
+    MachoReloc {
+        address: address,
+        symbolnum: symbolnum,
+        pcrel: 0,
+        length: length,
+        is_extern: 1,
+        rel_type: MACHO_X86_64_RELOC_SUBTRACTOR,
+    }
+}
+
+fn macho_make_arm64_branch26_reloc(address: i64, symbolnum: i64) -> MachoReloc {
+    MachoReloc {
+        address: address,
+        symbolnum: symbolnum,
+        pcrel: 1,
+        length: 2,
+        is_extern: 1,
+        rel_type: MACHO_ARM64_RELOC_BRANCH26,
+    }
+}
+
+fn macho_make_arm64_page21_reloc(address: i64, symbolnum: i64) -> MachoReloc {
+    MachoReloc {
+        address: address,
+        symbolnum: symbolnum,
+        pcrel: 1,
+        length: 2,
+        is_extern: 1,
+        rel_type: MACHO_ARM64_RELOC_PAGE21,
+    }
+}
+
+fn macho_make_arm64_pageoff12_reloc(address: i64, symbolnum: i64) -> MachoReloc {
+    MachoReloc {
+        address: address,
+        symbolnum: symbolnum,
+        pcrel: 0,
+        length: 2,
+        is_extern: 0,
+        rel_type: MACHO_ARM64_RELOC_PAGEOFF12,
+    }
+}
+
+// ============================================================================
+// Relocation encoding — pack a MachoReloc into the 8-byte Mach-O format
+// ============================================================================
+
+// Encode relocation info as a packed u32 (second word of relocation_info):
+//   bits 0-23:  symbolnum
+//   bit  24:    pcrel
+//   bits 25-26: length
+//   bit  27:    is_extern
+//   bits 28-31: type
+fn macho_encode_reloc_info(rel: MachoReloc) -> i64 {
+    let sym_bits = rel.symbolnum & 16777215     // 0xFFFFFF (24 bits)
+    let pcrel_bit = (rel.pcrel & 1) * 16777216  // bit 24
+    let len_bits = (rel.length & 3) * 33554432  // bits 25-26
+    let ext_bit = (rel.is_extern & 1) * 134217728  // bit 27
+    let type_bits = (rel.rel_type & 15) * 268435456 // bits 28-31
+    sym_bits + pcrel_bit + len_bits + ext_bit + type_bits
+}
+
+// ============================================================================
+// Header emission
+// ============================================================================
+
+fn macho_emit_header(w: MachoWriter, hdr: MachoHeader) -> MachoWriter with Mut, Panic, Div {
+    var out = w
+    out = macho_emit_u32(out, hdr.magic)
+    out = macho_emit_u32(out, hdr.cputype)
+    out = macho_emit_u32(out, hdr.cpusubtype)
+    out = macho_emit_u32(out, hdr.filetype)
+    out = macho_emit_u32(out, hdr.ncmds)
+    out = macho_emit_u32(out, hdr.sizeofcmds)
+    out = macho_emit_u32(out, hdr.flags)
+    out = macho_emit_u32(out, hdr.reserved)   // reserved (mach_header_64)
+    out
+}
+
+// ============================================================================
+// Segment name emission (16-byte fixed field from encoded ID)
+// ============================================================================
+
+// Emit the 16-byte segment name field.
+// Uses encoded segment name IDs to select the correct ASCII bytes.
+fn macho_emit_segname(w: MachoWriter, segname: i64) -> MachoWriter with Mut, Panic, Div {
+    var out = w
+    if segname == MACHO_SEG_PAGEZERO {
+        // "__PAGEZERO\0\0\0\0\0\0"
+        out = macho_emit_byte(out, 95)   // '_'
+        out = macho_emit_byte(out, 95)   // '_'
+        out = macho_emit_byte(out, 80)   // 'P'
+        out = macho_emit_byte(out, 65)   // 'A'
+        out = macho_emit_byte(out, 71)   // 'G'
+        out = macho_emit_byte(out, 69)   // 'E'
+        out = macho_emit_byte(out, 90)   // 'Z'
+        out = macho_emit_byte(out, 69)   // 'E'
+        out = macho_emit_byte(out, 82)   // 'R'
+        out = macho_emit_byte(out, 79)   // 'O'
+        out = macho_emit_zeros(out, 6)
+    } else if segname == MACHO_SEG_TEXT {
+        // "__TEXT\0..."
+        out = macho_emit_byte(out, 95)   // '_'
+        out = macho_emit_byte(out, 95)   // '_'
+        out = macho_emit_byte(out, 84)   // 'T'
+        out = macho_emit_byte(out, 69)   // 'E'
+        out = macho_emit_byte(out, 88)   // 'X'
+        out = macho_emit_byte(out, 84)   // 'T'
+        out = macho_emit_zeros(out, 10)
+    } else if segname == MACHO_SEG_DATA {
+        // "__DATA\0..."
+        out = macho_emit_byte(out, 95)   // '_'
+        out = macho_emit_byte(out, 95)   // '_'
+        out = macho_emit_byte(out, 68)   // 'D'
+        out = macho_emit_byte(out, 65)   // 'A'
+        out = macho_emit_byte(out, 84)   // 'T'
+        out = macho_emit_byte(out, 65)   // 'A'
+        out = macho_emit_zeros(out, 10)
+    } else if segname == MACHO_SEG_LINKEDIT {
+        // "__LINKEDIT\0..."
+        out = macho_emit_byte(out, 95)   // '_'
+        out = macho_emit_byte(out, 95)   // '_'
+        out = macho_emit_byte(out, 76)   // 'L'
+        out = macho_emit_byte(out, 73)   // 'I'
+        out = macho_emit_byte(out, 78)   // 'N'
+        out = macho_emit_byte(out, 75)   // 'K'
+        out = macho_emit_byte(out, 69)   // 'E'
+        out = macho_emit_byte(out, 68)   // 'D'
+        out = macho_emit_byte(out, 73)   // 'I'
+        out = macho_emit_byte(out, 84)   // 'T'
+        out = macho_emit_zeros(out, 6)
+    } else {
+        // Unknown — emit 16 zero bytes
+        out = macho_emit_zeros(out, 16)
+    }
+    out
+}
+
+// Emit 16-byte section name field from encoded section name ID
+fn macho_emit_sectname(w: MachoWriter, sectname: i64) -> MachoWriter with Mut, Panic, Div {
+    var out = w
+    if sectname == MACHO_SECT_TEXT {
+        // "__text\0..."
+        out = macho_emit_byte(out, 95)   // '_'
+        out = macho_emit_byte(out, 95)   // '_'
+        out = macho_emit_byte(out, 116)  // 't'
+        out = macho_emit_byte(out, 101)  // 'e'
+        out = macho_emit_byte(out, 120)  // 'x'
+        out = macho_emit_byte(out, 116)  // 't'
+        out = macho_emit_zeros(out, 10)
+    } else if sectname == MACHO_SECT_CONST {
+        // "__const\0..."
+        out = macho_emit_byte(out, 95)   // '_'
+        out = macho_emit_byte(out, 95)   // '_'
+        out = macho_emit_byte(out, 99)   // 'c'
+        out = macho_emit_byte(out, 111)  // 'o'
+        out = macho_emit_byte(out, 110)  // 'n'
+        out = macho_emit_byte(out, 115)  // 's'
+        out = macho_emit_byte(out, 116)  // 't'
+        out = macho_emit_zeros(out, 9)
+    } else if sectname == MACHO_SECT_STUBS {
+        // "__stubs\0..."
+        out = macho_emit_byte(out, 95)   // '_'
+        out = macho_emit_byte(out, 95)   // '_'
+        out = macho_emit_byte(out, 115)  // 's'
+        out = macho_emit_byte(out, 116)  // 't'
+        out = macho_emit_byte(out, 117)  // 'u'
+        out = macho_emit_byte(out, 98)   // 'b'
+        out = macho_emit_byte(out, 115)  // 's'
+        out = macho_emit_zeros(out, 9)
+    } else if sectname == MACHO_SECT_STUB_HELPER {
+        // "__stub_helper\0.."
+        out = macho_emit_byte(out, 95)   // '_'
+        out = macho_emit_byte(out, 95)   // '_'
+        out = macho_emit_byte(out, 115)  // 's'
+        out = macho_emit_byte(out, 116)  // 't'
+        out = macho_emit_byte(out, 117)  // 'u'
+        out = macho_emit_byte(out, 98)   // 'b'
+        out = macho_emit_byte(out, 95)   // '_'
+        out = macho_emit_byte(out, 104)  // 'h'
+        out = macho_emit_byte(out, 101)  // 'e'
+        out = macho_emit_byte(out, 108)  // 'l'
+        out = macho_emit_byte(out, 112)  // 'p'
+        out = macho_emit_byte(out, 101)  // 'e'
+        out = macho_emit_byte(out, 114)  // 'r'
+        out = macho_emit_zeros(out, 3)
+    } else if sectname == MACHO_SECT_DATA {
+        // "__data\0..."
+        out = macho_emit_byte(out, 95)   // '_'
+        out = macho_emit_byte(out, 95)   // '_'
+        out = macho_emit_byte(out, 100)  // 'd'
+        out = macho_emit_byte(out, 97)   // 'a'
+        out = macho_emit_byte(out, 116)  // 't'
+        out = macho_emit_byte(out, 97)   // 'a'
+        out = macho_emit_zeros(out, 10)
+    } else if sectname == MACHO_SECT_BSS {
+        // "__bss\0..."
+        out = macho_emit_byte(out, 95)   // '_'
+        out = macho_emit_byte(out, 95)   // '_'
+        out = macho_emit_byte(out, 98)   // 'b'
+        out = macho_emit_byte(out, 115)  // 's'
+        out = macho_emit_byte(out, 115)  // 's'
+        out = macho_emit_zeros(out, 11)
+    } else if sectname == MACHO_SECT_LA_SYMBOL_PTR {
+        // "__la_symbol_ptr\0"
+        out = macho_emit_byte(out, 95)   // '_'
+        out = macho_emit_byte(out, 95)   // '_'
+        out = macho_emit_byte(out, 108)  // 'l'
+        out = macho_emit_byte(out, 97)   // 'a'
+        out = macho_emit_byte(out, 95)   // '_'
+        out = macho_emit_byte(out, 115)  // 's'
+        out = macho_emit_byte(out, 121)  // 'y'
+        out = macho_emit_byte(out, 109)  // 'm'
+        out = macho_emit_byte(out, 98)   // 'b'
+        out = macho_emit_byte(out, 111)  // 'o'
+        out = macho_emit_byte(out, 108)  // 'l'
+        out = macho_emit_byte(out, 95)   // '_'
+        out = macho_emit_byte(out, 112)  // 'p'
+        out = macho_emit_byte(out, 116)  // 't'
+        out = macho_emit_byte(out, 114)  // 'r'
+        out = macho_emit_byte(out, 0)
+    } else if sectname == MACHO_SECT_NL_SYMBOL_PTR {
+        // "__nl_symbol_ptr\0"
+        out = macho_emit_byte(out, 95)   // '_'
+        out = macho_emit_byte(out, 95)   // '_'
+        out = macho_emit_byte(out, 110)  // 'n'
+        out = macho_emit_byte(out, 108)  // 'l'
+        out = macho_emit_byte(out, 95)   // '_'
+        out = macho_emit_byte(out, 115)  // 's'
+        out = macho_emit_byte(out, 121)  // 'y'
+        out = macho_emit_byte(out, 109)  // 'm'
+        out = macho_emit_byte(out, 98)   // 'b'
+        out = macho_emit_byte(out, 111)  // 'o'
+        out = macho_emit_byte(out, 108)  // 'l'
+        out = macho_emit_byte(out, 95)   // '_'
+        out = macho_emit_byte(out, 112)  // 'p'
+        out = macho_emit_byte(out, 116)  // 't'
+        out = macho_emit_byte(out, 114)  // 'r'
+        out = macho_emit_byte(out, 0)
+    } else {
+        out = macho_emit_zeros(out, 16)
+    }
+    out
+}
+
+// ============================================================================
+// Segment command emission
+// ============================================================================
+
+fn macho_emit_segment_cmd(w: MachoWriter, seg: MachoSegment) -> MachoWriter with Mut, Panic, Div {
+    var out = w
+    out = macho_emit_u32(out, seg.cmd)
+    out = macho_emit_u32(out, seg.cmdsize)
+    out = macho_emit_segname(out, seg.segname)
+    out = macho_emit_u64(out, seg.vmaddr)
+    out = macho_emit_u64(out, seg.vmsize)
+    out = macho_emit_u64(out, seg.fileoff)
+    out = macho_emit_u64(out, seg.filesize)
+    out = macho_emit_u32(out, seg.maxprot)
+    out = macho_emit_u32(out, seg.initprot)
+    out = macho_emit_u32(out, seg.nsects)
+    out = macho_emit_u32(out, seg.seg_flags)
+    out
+}
+
+// ============================================================================
+// Section command emission (within a segment)
+// ============================================================================
+
+fn macho_emit_section_cmd(w: MachoWriter, sec: MachoSection) -> MachoWriter with Mut, Panic, Div {
+    var out = w
+    // sectname (16 bytes)
+    out = macho_emit_sectname(out, sec.sectname)
+    // segname (16 bytes)
+    out = macho_emit_segname(out, sec.segname)
+    // addr, size
+    out = macho_emit_u64(out, sec.addr)
+    out = macho_emit_u64(out, sec.size)
+    // offset, align, reloff, nreloc
+    out = macho_emit_u32(out, sec.offset)
+    out = macho_emit_u32(out, sec.align_pow2)
+    out = macho_emit_u32(out, sec.reloff)
+    out = macho_emit_u32(out, sec.nreloc)
+    // flags, reserved1, reserved2
+    out = macho_emit_u32(out, sec.sec_flags)
+    out = macho_emit_u32(out, sec.reserved1)
+    out = macho_emit_u32(out, sec.reserved2)
+    out
+}
+
+// ============================================================================
+// Symbol table (LC_SYMTAB) command emission
+// ============================================================================
+
+fn macho_emit_symtab_cmd(w: MachoWriter, symoff: i64, nsyms: i64, stroff: i64, strsize: i64) -> MachoWriter with Mut, Panic, Div {
+    var out = w
+    out = macho_emit_u32(out, MACHO_LC_SYMTAB)
+    out = macho_emit_u32(out, MACHO_SYMTAB_CMD_SIZE)
+    out = macho_emit_u32(out, symoff)
+    out = macho_emit_u32(out, nsyms)
+    out = macho_emit_u32(out, stroff)
+    out = macho_emit_u32(out, strsize)
+    out
+}
+
+// ============================================================================
+// Dynamic symbol table (LC_DYSYMTAB) command emission
+// ============================================================================
+
+fn macho_emit_dysymtab_cmd(
+    w: MachoWriter,
+    ilocalsym: i64, nlocalsym: i64,
+    iextdefsym: i64, nextdefsym: i64,
+    iundefsym: i64, nundefsym: i64,
+    indirectsymoff: i64, nindirectsyms: i64
+) -> MachoWriter with Mut, Panic, Div {
+    var out = w
+    out = macho_emit_u32(out, MACHO_LC_DYSYMTAB)
+    out = macho_emit_u32(out, MACHO_DYSYMTAB_CMD_SIZE)  // cmdsize = 80
+    // Local symbols
+    out = macho_emit_u32(out, ilocalsym)
+    out = macho_emit_u32(out, nlocalsym)
+    // Externally defined symbols
+    out = macho_emit_u32(out, iextdefsym)
+    out = macho_emit_u32(out, nextdefsym)
+    // Undefined symbols
+    out = macho_emit_u32(out, iundefsym)
+    out = macho_emit_u32(out, nundefsym)
+    // Table of contents (unused)
+    out = macho_emit_u32(out, 0)           // tocoff
+    out = macho_emit_u32(out, 0)           // ntoc
+    // Module table (unused)
+    out = macho_emit_u32(out, 0)           // modtaboff
+    out = macho_emit_u32(out, 0)           // nmodtab
+    // External reference table (unused)
+    out = macho_emit_u32(out, 0)           // extrefsymoff
+    out = macho_emit_u32(out, 0)           // nextrefsyms
+    // Indirect symbol table
+    out = macho_emit_u32(out, indirectsymoff)
+    out = macho_emit_u32(out, nindirectsyms)
+    // External relocation entries (unused)
+    out = macho_emit_u32(out, 0)           // extreloff
+    out = macho_emit_u32(out, 0)           // nextrel
+    // Local relocation entries (unused)
+    out = macho_emit_u32(out, 0)           // locreloff
+    out = macho_emit_u32(out, 0)           // nlocrel
+    out
+}
+
+// ============================================================================
+// LC_MAIN command emission (entry point)
+// ============================================================================
+
+fn macho_emit_main_cmd(w: MachoWriter, entry_offset: i64, stack_size: i64) -> MachoWriter with Mut, Panic, Div {
+    var out = w
+    out = macho_emit_u32(out, MACHO_LC_MAIN)
+    out = macho_emit_u32(out, MACHO_MAIN_CMD_SIZE)
+    out = macho_emit_u64(out, entry_offset)
+    out = macho_emit_u64(out, stack_size)
+    out
+}
+
+// ============================================================================
+// Symbol table entry (nlist_64) emission
+// ============================================================================
+
+fn macho_emit_nlist(w: MachoWriter, sym: MachoSymbol) -> MachoWriter with Mut, Panic, Div {
+    var out = w
+    out = macho_emit_u32(out, sym.name_offset)    // n_strx
+    out = macho_emit_byte(out, sym.type_field)     // n_type
+    out = macho_emit_byte(out, sym.sect)           // n_sect
+    out = macho_emit_u16(out, sym.desc)            // n_desc
+    out = macho_emit_u64(out, sym.value)           // n_value
+    out
+}
+
+// ============================================================================
+// Relocation entry emission
+// ============================================================================
+
+fn macho_emit_reloc(w: MachoWriter, rel: MachoReloc) -> MachoWriter with Mut, Panic, Div {
+    var out = w
+    out = macho_emit_u32(out, rel.address)
+    out = macho_emit_u32(out, macho_encode_reloc_info(rel))
+    out
+}
+
+// ============================================================================
+// String table emission
+// ============================================================================
+
+fn macho_emit_strtab(w: MachoWriter) -> MachoWriter with Mut, Panic, Div {
+    var out = w
+    var i = 0
+    while i < out.strtab.len && i < 65536 {
+        let byte_val = out.strtab.bytes[i as usize] as i64
+        out = macho_emit_byte(out, byte_val)
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
+// Segment layout computation
+// ============================================================================
+
+// Count sections belonging to a given segment
+fn macho_count_segment_sections(w: MachoWriter, segname: i64) -> i64 with Mut, Panic, Div {
+    var count = 0
+    var i = 0
+    while i < w.section_count {
+        if w.sections[i as usize].segname == segname {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Compute the total size of sections in a segment (file-backed only)
+fn macho_segment_section_filesize(w: MachoWriter, segname: i64) -> i64 with Mut, Panic, Div {
+    var total = 0
+    var i = 0
+    while i < w.section_count {
+        let sec = w.sections[i as usize]
+        if sec.segname == segname {
+            // Skip zerofill sections (no file content)
+            if sec.sec_flags & 255 != MACHO_S_ZEROFILL {
+                total = total + sec.size
+            }
+        }
+        i = i + 1
+    }
+    total
+}
+
+// Compute total virtual size of sections in a segment (including zerofill)
+fn macho_segment_section_vmsize(w: MachoWriter, segname: i64) -> i64 with Mut, Panic, Div {
+    var total = 0
+    var i = 0
+    while i < w.section_count {
+        if w.sections[i as usize].segname == segname {
+            total = total + w.sections[i as usize].size
+        }
+        i = i + 1
+    }
+    total
+}
+
+// Compute the size of all load commands for a standard executable layout:
+//   __PAGEZERO segment + __TEXT segment (with sections) + __DATA segment (with sections)
+//   + __LINKEDIT segment + LC_SYMTAB + LC_DYSYMTAB + LC_MAIN
+fn macho_compute_load_cmds_size(w: MachoWriter) -> i64 with Mut, Panic, Div {
+    let text_nsects = macho_count_segment_sections(w, MACHO_SEG_TEXT)
+    let data_nsects = macho_count_segment_sections(w, MACHO_SEG_DATA)
+
+    // __PAGEZERO: segment only (no sections)
+    let pagezero_size = MACHO_SEGMENT_CMD_SIZE
+
+    // __TEXT: segment + sections
+    let text_cmd_size = MACHO_SEGMENT_CMD_SIZE + text_nsects * MACHO_SECTION_SIZE
+
+    // __DATA: segment + sections (only if there are data sections)
+    var data_cmd_size = 0
+    if data_nsects > 0 {
+        data_cmd_size = MACHO_SEGMENT_CMD_SIZE + data_nsects * MACHO_SECTION_SIZE
+    }
+
+    // __LINKEDIT: segment only
+    let linkedit_size = MACHO_SEGMENT_CMD_SIZE
+
+    // LC_SYMTAB + LC_DYSYMTAB + LC_MAIN
+    let misc_cmds = MACHO_SYMTAB_CMD_SIZE + MACHO_DYSYMTAB_CMD_SIZE + MACHO_MAIN_CMD_SIZE
+
+    pagezero_size + text_cmd_size + data_cmd_size + linkedit_size + misc_cmds
+}
+
+// Count the number of load commands
+fn macho_count_load_cmds(w: MachoWriter) -> i64 with Mut, Panic, Div {
+    let data_nsects = macho_count_segment_sections(w, MACHO_SEG_DATA)
+
+    // __PAGEZERO + __TEXT + __LINKEDIT + LC_SYMTAB + LC_DYSYMTAB + LC_MAIN = 6
+    var count = 6
+    // __DATA segment only if there are data sections
+    if data_nsects > 0 {
+        count = count + 1
+    }
+    count
+}
+
+// ============================================================================
+// Full executable layout and assembly
+// ============================================================================
+
+// Build a __PAGEZERO segment (occupies no file space, 4GB vmsize)
+fn macho_make_pagezero_segment() -> MachoSegment {
+    MachoSegment {
+        cmd: MACHO_LC_SEGMENT_64,
+        cmdsize: MACHO_SEGMENT_CMD_SIZE,
+        segname: MACHO_SEG_PAGEZERO,
+        vmaddr: 0,
+        vmsize: 4294967296,     // 0x100000000 (4 GB)
+        fileoff: 0,
+        filesize: 0,
+        maxprot: MACHO_VM_PROT_NONE,
+        initprot: MACHO_VM_PROT_NONE,
+        nsects: 0,
+        seg_flags: 0,
+    }
+}
+
+// Build a __TEXT segment descriptor
+fn macho_make_text_segment(nsects: i64, vmaddr: i64, vmsize: i64, fileoff: i64, filesize: i64) -> MachoSegment {
+    MachoSegment {
+        cmd: MACHO_LC_SEGMENT_64,
+        cmdsize: MACHO_SEGMENT_CMD_SIZE + nsects * MACHO_SECTION_SIZE,
+        segname: MACHO_SEG_TEXT,
+        vmaddr: vmaddr,
+        vmsize: vmsize,
+        fileoff: fileoff,
+        filesize: filesize,
+        maxprot: MACHO_VM_PROT_READ + MACHO_VM_PROT_EXEC,
+        initprot: MACHO_VM_PROT_READ + MACHO_VM_PROT_EXEC,
+        nsects: nsects,
+        seg_flags: 0,
+    }
+}
+
+// Build a __DATA segment descriptor
+fn macho_make_data_segment(nsects: i64, vmaddr: i64, vmsize: i64, fileoff: i64, filesize: i64) -> MachoSegment {
+    MachoSegment {
+        cmd: MACHO_LC_SEGMENT_64,
+        cmdsize: MACHO_SEGMENT_CMD_SIZE + nsects * MACHO_SECTION_SIZE,
+        segname: MACHO_SEG_DATA,
+        vmaddr: vmaddr,
+        vmsize: vmsize,
+        fileoff: fileoff,
+        filesize: filesize,
+        maxprot: MACHO_VM_PROT_READ + MACHO_VM_PROT_WRITE,
+        initprot: MACHO_VM_PROT_READ + MACHO_VM_PROT_WRITE,
+        nsects: nsects,
+        seg_flags: 0,
+    }
+}
+
+// Build a __LINKEDIT segment descriptor
+fn macho_make_linkedit_segment(vmaddr: i64, vmsize: i64, fileoff: i64, filesize: i64) -> MachoSegment {
+    MachoSegment {
+        cmd: MACHO_LC_SEGMENT_64,
+        cmdsize: MACHO_SEGMENT_CMD_SIZE,
+        segname: MACHO_SEG_LINKEDIT,
+        vmaddr: vmaddr,
+        vmsize: vmsize,
+        fileoff: fileoff,
+        filesize: filesize,
+        maxprot: MACHO_VM_PROT_READ,
+        initprot: MACHO_VM_PROT_READ,
+        nsects: 0,
+        seg_flags: 0,
+    }
+}
+
+// ============================================================================
+// Layout computation for a minimal executable
+// ============================================================================
+
+// Compute final binary layout for a minimal Mach-O executable.
+// Returns total file size.
+//
+// Layout:
+//   [0                        ..  header_end)     Mach-O header (32 bytes)
+//   [header_end               ..  cmds_end)       Load commands
+//   [text_section_offset      ..  text_end)       __text section content
+//   [const_section_offset     ..  const_end)      __const section content
+//   [data_page_offset         ..  data_end)       __data section content
+//   [linkedit_offset          ..  linkedit_end)   relocations + symtab + strtab
+fn macho_compute_layout(
+    text_size: i64,
+    const_size: i64,
+    data_size: i64,
+    bss_size: i64,
+    nsyms: i64,
+    nrelocs: i64,
+    strtab_size: i64
+) -> i64 with Mut, Panic, Div {
+    // Header + load commands must fit in first page
+    // For simplicity, assume all load commands fit within the first page
+    let header_and_cmds = MACHO_PAGE_SIZE
+
+    // __TEXT segment: from file offset 0, page-aligned content
+    let text_content_start = header_and_cmds
+    let text_content_end = text_content_start + text_size
+    let const_start = macho_align_to(text_content_end, 8)
+    let text_seg_file_end = const_start + const_size
+
+    // __DATA segment: page-aligned
+    var data_seg_offset = 0
+    var data_seg_file_end = 0
+    if data_size > 0 {
+        data_seg_offset = macho_align_to(text_seg_file_end, MACHO_PAGE_SIZE)
+        data_seg_file_end = data_seg_offset + data_size
+    } else {
+        data_seg_offset = macho_align_to(text_seg_file_end, MACHO_PAGE_SIZE)
+        data_seg_file_end = data_seg_offset
+    }
+
+    // __LINKEDIT segment: page-aligned
+    let linkedit_offset = macho_align_to(data_seg_file_end, MACHO_PAGE_SIZE)
+    let reloc_size = nrelocs * MACHO_RELOC_SIZE
+    let symtab_offset = linkedit_offset + reloc_size
+    let symtab_size = nsyms * MACHO_NLIST_SIZE
+    let strtab_offset = symtab_offset + symtab_size
+    let linkedit_end = strtab_offset + strtab_size
+
+    linkedit_end
+}
+
+// ============================================================================
+// Full binary assembly — build a complete Mach-O executable
+// ============================================================================
+
+// Assemble a minimal Mach-O executable with:
+//   - __text section containing code_bytes
+//   - __const section containing const_bytes
+//   - Optional __data section
+//   - Symbol table and string table in __LINKEDIT
+//
+// code_data/code_len: raw machine code bytes
+// const_data/const_len: read-only data bytes
+// entry_off: offset of entry point within __text
+fn macho_assemble_executable(
+    w: MachoWriter,
+    code_data: [i8; 65536],
+    code_len: i64,
+    const_data: [i8; 65536],
+    const_len: i64,
+    entry_off: i64
+) -> MachoWriter with Mut, Panic, Div {
+    var out = w
+
+    // -- Compute layout --
+    let text_nsects = macho_count_segment_sections(out, MACHO_SEG_TEXT)
+    let data_nsects = macho_count_segment_sections(out, MACHO_SEG_DATA)
+    let ncmds = macho_count_load_cmds(out)
+    let sizeofcmds = macho_compute_load_cmds_size(out)
+
+    let base_vmaddr: i64 = 4294967296     // 0x100000000
+
+    // Text segment starts at file offset 0, extends to page boundary after code+const
+    let text_content_offset = MACHO_PAGE_SIZE
+    let const_content_offset = macho_align_to(text_content_offset + code_len, 8)
+    let text_seg_filesize = macho_page_align(const_content_offset + const_len)
+
+    // Data segment offset (page-aligned after text)
+    let data_seg_fileoff = text_seg_filesize
+    var data_seg_filesize = 0
+    if data_nsects > 0 {
+        data_seg_filesize = macho_page_align(macho_segment_section_filesize(out, MACHO_SEG_DATA))
+    }
+
+    // Linkedit offset
+    let linkedit_fileoff = data_seg_fileoff + data_seg_filesize
+    let reloc_total_size = out.reloc_count * MACHO_RELOC_SIZE
+    let symtab_offset = linkedit_fileoff + reloc_total_size
+    let symtab_size = out.symbol_count * MACHO_NLIST_SIZE
+    let strtab_offset = symtab_offset + symtab_size
+    let strtab_size = out.strtab.len
+    let linkedit_size = reloc_total_size + symtab_size + strtab_size
+    let linkedit_filesize = macho_page_align(linkedit_size)
+
+    // Virtual addresses
+    let text_vmaddr = base_vmaddr
+    let text_vmsize = macho_page_align(text_seg_filesize)
+    let data_vmaddr = text_vmaddr + text_vmsize
+    let data_vmsize = macho_page_align(macho_segment_section_vmsize(out, MACHO_SEG_DATA))
+    let linkedit_vmaddr = data_vmaddr + data_vmsize
+    let linkedit_vmsize = macho_page_align(linkedit_size)
+
+    // -- Emit Mach-O header --
+    let hdr = macho_header_new(
+        out.cputype,
+        out.cpusubtype,
+        out.filetype,
+        ncmds,
+        sizeofcmds,
+        out.flags
+    )
+    out = macho_emit_header(out, hdr)
+
+    // -- Emit load commands --
+
+    // 1. __PAGEZERO
+    out = macho_emit_segment_cmd(out, macho_make_pagezero_segment())
+
+    // 2. __TEXT segment + sections
+    let text_seg = macho_make_text_segment(
+        text_nsects, text_vmaddr, text_vmsize, 0, text_seg_filesize
+    )
+    out = macho_emit_segment_cmd(out, text_seg)
+
+    // Emit __TEXT section descriptors
+    var si = 0
+    while si < out.section_count {
+        let sec = out.sections[si as usize]
+        if sec.segname == MACHO_SEG_TEXT {
+            out = macho_emit_section_cmd(out, sec)
+        }
+        si = si + 1
+    }
+
+    // 3. __DATA segment + sections (if any)
+    if data_nsects > 0 {
+        let data_seg = macho_make_data_segment(
+            data_nsects, data_vmaddr, data_vmsize, data_seg_fileoff, data_seg_filesize
+        )
+        out = macho_emit_segment_cmd(out, data_seg)
+
+        var di = 0
+        while di < out.section_count {
+            let dsec = out.sections[di as usize]
+            if dsec.segname == MACHO_SEG_DATA {
+                out = macho_emit_section_cmd(out, dsec)
+            }
+            di = di + 1
+        }
+    }
+
+    // 4. __LINKEDIT segment
+    out = macho_emit_segment_cmd(out, macho_make_linkedit_segment(
+        linkedit_vmaddr, linkedit_vmsize, linkedit_fileoff, linkedit_filesize
+    ))
+
+    // 5. LC_SYMTAB
+    out = macho_emit_symtab_cmd(out, symtab_offset, out.symbol_count, strtab_offset, strtab_size)
+
+    // 6. LC_DYSYMTAB
+    // Count local, extern, undef symbols
+    var nlocal = 0
+    var nextern = 0
+    var nundef = 0
+    var ci = 0
+    while ci < out.symbol_count {
+        let sym = out.symbols[ci as usize]
+        let is_ext = sym.type_field & MACHO_N_EXT
+        let sym_type = sym.type_field & 14  // mask N_TYPE bits (0x0E)
+        if sym_type == MACHO_N_UNDF {
+            nundef = nundef + 1
+        } else if is_ext != 0 {
+            nextern = nextern + 1
+        } else {
+            nlocal = nlocal + 1
+        }
+        ci = ci + 1
+    }
+    out = macho_emit_dysymtab_cmd(out,
+        0, nlocal,
+        nlocal, nextern,
+        nlocal + nextern, nundef,
+        0, 0
+    )
+
+    // 7. LC_MAIN
+    out = macho_emit_main_cmd(out, entry_off, 0)
+
+    // -- Pad to text content offset --
+    while out.buf_len < text_content_offset && out.buf_len < 65536 {
+        out = macho_emit_byte(out, 0)
+    }
+
+    // -- Emit code bytes --
+    var ci2 = 0
+    while ci2 < code_len && out.buf_len < 65536 {
+        out = macho_emit_byte(out, code_data[ci2 as usize] as i64)
+        ci2 = ci2 + 1
+    }
+
+    // -- Pad to const alignment --
+    while out.buf_len < const_content_offset && out.buf_len < 65536 {
+        out = macho_emit_byte(out, 0)
+    }
+
+    // -- Emit const bytes --
+    var ki = 0
+    while ki < const_len && out.buf_len < 65536 {
+        out = macho_emit_byte(out, const_data[ki as usize] as i64)
+        ki = ki + 1
+    }
+
+    // -- Pad to linkedit --
+    while out.buf_len < linkedit_fileoff && out.buf_len < 65536 {
+        out = macho_emit_byte(out, 0)
+    }
+
+    // -- Emit relocations --
+    var ri = 0
+    while ri < out.reloc_count {
+        out = macho_emit_reloc(out, out.relocs[ri as usize])
+        ri = ri + 1
+    }
+
+    // -- Emit symbol table (nlist_64 entries) --
+    var syi = 0
+    while syi < out.symbol_count {
+        out = macho_emit_nlist(out, out.symbols[syi as usize])
+        syi = syi + 1
+    }
+
+    // -- Emit string table --
+    out = macho_emit_strtab(out)
+
+    out
+}
+
+// ============================================================================
+// Object file assembly (for .o files)
+// ============================================================================
+
+fn macho_assemble_object(
+    w: MachoWriter,
+    code_data: [i8; 65536],
+    code_len: i64
+) -> MachoWriter with Mut, Panic, Div {
+    var out = w
+    out.filetype = MACHO_FILETYPE_OBJECT
+
+    let text_nsects = macho_count_segment_sections(out, MACHO_SEG_TEXT)
+    let total_nsects = out.section_count
+
+    // Object files have a single unnamed segment containing all sections
+    let ncmds = 3   // segment + LC_SYMTAB + LC_DYSYMTAB
+    let sizeofcmds = MACHO_SEGMENT_CMD_SIZE + total_nsects * MACHO_SECTION_SIZE
+                     + MACHO_SYMTAB_CMD_SIZE + MACHO_DYSYMTAB_CMD_SIZE
+
+    // Content starts after header + load commands
+    let content_offset = MACHO_HEADER_SIZE_64 + sizeofcmds
+
+    // Relocation data follows code
+    let reloc_offset = macho_align_to(content_offset + code_len, 4)
+    let reloc_size = out.reloc_count * MACHO_RELOC_SIZE
+
+    // Symbol table follows relocations
+    let symtab_offset = reloc_offset + reloc_size
+    let symtab_size = out.symbol_count * MACHO_NLIST_SIZE
+
+    // String table follows symbol table
+    let strtab_offset = symtab_offset + symtab_size
+    let strtab_size = out.strtab.len
+
+    // -- Header --
+    let hdr = macho_header_new(
+        out.cputype,
+        out.cpusubtype,
+        MACHO_FILETYPE_OBJECT,
+        ncmds,
+        sizeofcmds,
+        0
+    )
+    out = macho_emit_header(out, hdr)
+
+    // -- Single unnamed segment --
+    let seg = MachoSegment {
+        cmd: MACHO_LC_SEGMENT_64,
+        cmdsize: MACHO_SEGMENT_CMD_SIZE + total_nsects * MACHO_SECTION_SIZE,
+        segname: 0,       // empty name for object files
+        vmaddr: 0,
+        vmsize: code_len,
+        fileoff: content_offset,
+        filesize: code_len,
+        maxprot: MACHO_VM_PROT_READ + MACHO_VM_PROT_WRITE + MACHO_VM_PROT_EXEC,
+        initprot: MACHO_VM_PROT_READ + MACHO_VM_PROT_WRITE + MACHO_VM_PROT_EXEC,
+        nsects: total_nsects,
+        seg_flags: 0,
+    }
+    out = macho_emit_segment_cmd(out, seg)
+
+    // -- Section descriptors --
+    var si = 0
+    while si < out.section_count {
+        var sec = out.sections[si as usize]
+        // Update relocation info for sections that have relocations
+        if si == 0 && out.reloc_count > 0 {
+            sec.reloff = reloc_offset
+            sec.nreloc = out.reloc_count
+        }
+        out = macho_emit_section_cmd(out, sec)
+        si = si + 1
+    }
+
+    // -- LC_SYMTAB --
+    out = macho_emit_symtab_cmd(out, symtab_offset, out.symbol_count, strtab_offset, strtab_size)
+
+    // -- LC_DYSYMTAB --
+    var nlocal = 0
+    var nextern = 0
+    var nundef = 0
+    var ci = 0
+    while ci < out.symbol_count {
+        let sym = out.symbols[ci as usize]
+        let is_ext = sym.type_field & MACHO_N_EXT
+        let sym_type = sym.type_field & 14
+        if sym_type == MACHO_N_UNDF {
+            nundef = nundef + 1
+        } else if is_ext != 0 {
+            nextern = nextern + 1
+        } else {
+            nlocal = nlocal + 1
+        }
+        ci = ci + 1
+    }
+    out = macho_emit_dysymtab_cmd(out,
+        0, nlocal,
+        nlocal, nextern,
+        nlocal + nextern, nundef,
+        0, 0
+    )
+
+    // -- Code content --
+    var ki = 0
+    while ki < code_len && out.buf_len < 65536 {
+        out = macho_emit_byte(out, code_data[ki as usize] as i64)
+        ki = ki + 1
+    }
+
+    // -- Pad to relocation alignment --
+    while out.buf_len < reloc_offset && out.buf_len < 65536 {
+        out = macho_emit_byte(out, 0)
+    }
+
+    // -- Relocations --
+    var ri = 0
+    while ri < out.reloc_count {
+        out = macho_emit_reloc(out, out.relocs[ri as usize])
+        ri = ri + 1
+    }
+
+    // -- Symbol table --
+    var syi = 0
+    while syi < out.symbol_count {
+        out = macho_emit_nlist(out, out.symbols[syi as usize])
+        syi = syi + 1
+    }
+
+    // -- String table --
+    out = macho_emit_strtab(out)
+
+    out
+}
+
+// ============================================================================
+// Byte reading helpers (for verification)
+// ============================================================================
+
+fn macho_read_u8(w: MachoWriter, offset: i64) -> i64 with Mut, Panic, Div {
+    if offset < 0 { return 0 }
+    if offset >= w.buf_len { return 0 }
+    let val = w.buf[offset as usize] as i64
+    if val < 0 { val + 256 } else { val }
+}
+
+fn macho_read_u32_le(w: MachoWriter, offset: i64) -> i64 with Mut, Panic, Div {
+    let b0 = macho_read_u8(w, offset)
+    let b1 = macho_read_u8(w, offset + 1)
+    let b2 = macho_read_u8(w, offset + 2)
+    let b3 = macho_read_u8(w, offset + 3)
+    b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+}
+
+fn macho_read_u64_le(w: MachoWriter, offset: i64) -> i64 with Mut, Panic, Div {
+    let lo = macho_read_u32_le(w, offset)
+    let hi = macho_read_u32_le(w, offset + 4)
+    lo + hi * 4294967296
+}
+
+// ============================================================================
+// Test functions
+// ============================================================================
+
+// T01: Verify MachoHeader construction has correct magic
+fn test_macho_header_magic() -> i64 with Mut, Panic, Div {
+    let hdr = macho_header_new(MACHO_CPU_X86_64, MACHO_CPU_SUBTYPE_X86_64_ALL, MACHO_FILETYPE_EXECUTE, 0, 0, 0)
+    if hdr.magic != MACHO_MAGIC_64 { return 1 }
+    if hdr.magic != 4277009103 { return 2 }
+    0
+}
+
+// T02: Verify header fields for x86-64 executable
+fn test_macho_header_x86_64() -> i64 with Mut, Panic, Div {
+    let hdr = macho_header_new(
+        MACHO_CPU_X86_64, MACHO_CPU_SUBTYPE_X86_64_ALL,
+        MACHO_FILETYPE_EXECUTE, 5, 400, MACHO_FLAG_PIE
+    )
+    if hdr.cputype != 16777223 { return 1 }
+    if hdr.cpusubtype != 3 { return 2 }
+    if hdr.filetype != 2 { return 3 }
+    if hdr.ncmds != 5 { return 4 }
+    if hdr.sizeofcmds != 400 { return 5 }
+    if hdr.flags != 2097152 { return 6 }
+    if hdr.reserved != 0 { return 7 }
+    0
+}
+
+// T03: Verify ARM64 header construction
+fn test_macho_header_arm64() -> i64 with Mut, Panic, Div {
+    let hdr = macho_header_new(MACHO_CPU_ARM64, MACHO_CPU_SUBTYPE_ARM64_ALL, MACHO_FILETYPE_OBJECT, 2, 100, 0)
+    if hdr.cputype != 16777228 { return 1 }
+    if hdr.cpusubtype != 0 { return 2 }
+    if hdr.filetype != 1 { return 3 }
+    0
+}
+
+// T04: Verify header emission produces correct bytes
+fn test_macho_header_emission() -> i64 with Mut, Panic, Div {
+    var w = macho_writer_new()
+    let hdr = macho_header_new(MACHO_CPU_X86_64, MACHO_CPU_SUBTYPE_X86_64_ALL, MACHO_FILETYPE_EXECUTE, 0, 0, 0)
+    w = macho_emit_header(w, hdr)
+
+    // Header is 32 bytes
+    if w.buf_len != 32 { return 1 }
+
+    // Check magic: 0xFEEDFACF in little-endian = CF FA ED FE
+    if macho_read_u8(w, 0) != 0xCF { return 2 }
+    if macho_read_u8(w, 1) != 0xFA { return 3 }
+    if macho_read_u8(w, 2) != 0xED { return 4 }
+    if macho_read_u8(w, 3) != 0xFE { return 5 }
+
+    // Verify reconstructed u32
+    if macho_read_u32_le(w, 0) != MACHO_MAGIC_64 { return 6 }
+    0
+}
+
+// T05: Verify page alignment math
+fn test_macho_page_alignment() -> i64 with Mut, Panic {
+    if macho_page_align(0) != 0 { return 1 }
+    if macho_page_align(1) != 4096 { return 2 }
+    if macho_page_align(4096) != 4096 { return 3 }
+    if macho_page_align(4097) != 8192 { return 4 }
+    if macho_page_align(8192) != 8192 { return 5 }
+    if macho_page_align(8193) != 12288 { return 6 }
+    0
+}
+
+// T06: Verify generic alignment
+fn test_macho_align_to() -> i64 with Mut, Panic {
+    if macho_align_to(0, 8) != 0 { return 1 }
+    if macho_align_to(1, 8) != 8 { return 2 }
+    if macho_align_to(7, 8) != 8 { return 3 }
+    if macho_align_to(8, 8) != 8 { return 4 }
+    if macho_align_to(9, 8) != 16 { return 5 }
+    if macho_align_to(0, 16) != 0 { return 6 }
+    if macho_align_to(15, 16) != 16 { return 7 }
+    if macho_align_to(16, 16) != 16 { return 8 }
+    0
+}
+
+// T07: Verify power-of-2 alignment
+fn test_macho_align_pow2() -> i64 with Mut, Panic, Div {
+    // pow2=0 => align to 1 (identity)
+    if macho_align_pow2(5, 0) != 5 { return 1 }
+    // pow2=2 => align to 4
+    if macho_align_pow2(5, 2) != 8 { return 2 }
+    if macho_align_pow2(4, 2) != 4 { return 3 }
+    // pow2=4 => align to 16
+    if macho_align_pow2(1, 4) != 16 { return 4 }
+    if macho_align_pow2(16, 4) != 16 { return 5 }
+    if macho_align_pow2(17, 4) != 32 { return 6 }
+    0
+}
+
+// T08: Verify text section creation
+fn test_macho_text_section() -> i64 with Mut, Panic, Div {
+    let sec = macho_make_text_section(4096, 256, 4096)
+    if sec.sectname != MACHO_SECT_TEXT { return 1 }
+    if sec.segname != MACHO_SEG_TEXT { return 2 }
+    if sec.addr != 4096 { return 3 }
+    if sec.size != 256 { return 4 }
+    if sec.offset != 4096 { return 5 }
+    if sec.align_pow2 != 4 { return 6 }
+    // Should have PURE_INSTRUCTIONS and SOME_INSTRUCTIONS flags
+    let has_pure = sec.sec_flags & MACHO_S_ATTR_PURE_INSTRUCTIONS
+    if has_pure == 0 { return 7 }
+    0
+}
+
+// T09: Verify BSS section is zerofill
+fn test_macho_bss_section() -> i64 with Mut, Panic, Div {
+    let sec = macho_make_bss_section(8192, 1024)
+    if sec.sectname != MACHO_SECT_BSS { return 1 }
+    if sec.segname != MACHO_SEG_DATA { return 2 }
+    if sec.offset != 0 { return 3 }  // zerofill has no file offset
+    let sec_type = sec.sec_flags & 255
+    if sec_type != MACHO_S_ZEROFILL { return 4 }
+    if sec.size != 1024 { return 5 }
+    0
+}
+
+// T10: Verify section addition to writer
+fn test_macho_add_section() -> i64 with Mut, Panic, Div {
+    var w = macho_writer_new()
+    if w.section_count != 0 { return 1 }
+
+    let sec1 = macho_make_text_section(4096, 100, 4096)
+    w = macho_add_section(w, sec1)
+    if w.section_count != 1 { return 2 }
+
+    let sec2 = macho_make_data_section(8192, 50, 8192)
+    w = macho_add_section(w, sec2)
+    if w.section_count != 2 { return 3 }
+
+    // Verify section data
+    if w.sections[0].size != 100 { return 4 }
+    if w.sections[1].size != 50 { return 5 }
+    0
+}
+
+// T11: Verify symbol creation — local symbol
+fn test_macho_local_symbol() -> i64 with Mut, Panic, Div {
+    let sym = macho_make_local_symbol(5, 1, 4096)
+    if sym.name_offset != 5 { return 1 }
+    if sym.type_field != MACHO_N_SECT { return 2 }
+    if sym.sect != 1 { return 3 }
+    if sym.value != 4096 { return 4 }
+    if sym.desc != 0 { return 5 }
+    0
+}
+
+// T12: Verify symbol creation — external symbol
+fn test_macho_extern_symbol() -> i64 with Mut, Panic, Div {
+    let sym = macho_make_extern_symbol(10, 1, 8192)
+    if sym.name_offset != 10 { return 1 }
+    // N_SECT | N_EXT = 14 | 1 = 15
+    if sym.type_field != 15 { return 2 }
+    if sym.sect != 1 { return 3 }
+    if sym.value != 8192 { return 4 }
+    0
+}
+
+// T13: Verify symbol creation — undefined symbol
+fn test_macho_undef_symbol() -> i64 with Mut, Panic, Div {
+    let sym = macho_make_undef_symbol(20)
+    if sym.name_offset != 20 { return 1 }
+    // N_UNDF | N_EXT = 0 | 1 = 1
+    if sym.type_field != 1 { return 2 }
+    if sym.sect != 0 { return 3 }
+    if sym.value != 0 { return 4 }
+    0
+}
+
+// T14: Verify symbol addition to writer
+fn test_macho_add_symbol() -> i64 with Mut, Panic, Div {
+    var w = macho_writer_new()
+    if w.symbol_count != 0 { return 1 }
+
+    let sym = macho_make_extern_symbol(0, 1, 4096)
+    w = macho_add_symbol(w, sym)
+    if w.symbol_count != 1 { return 2 }
+
+    w = macho_add_symbol(w, macho_make_undef_symbol(5))
+    if w.symbol_count != 2 { return 3 }
+    0
+}
+
+// T15: Verify relocation encoding — branch reloc
+fn test_macho_reloc_encoding_branch() -> i64 with Mut, Panic, Div {
+    let rel = macho_make_branch_reloc(100, 5)
+    if rel.address != 100 { return 1 }
+    if rel.symbolnum != 5 { return 2 }
+    if rel.pcrel != 1 { return 3 }
+    if rel.length != 2 { return 4 }
+    if rel.is_extern != 1 { return 5 }
+    if rel.rel_type != MACHO_X86_64_RELOC_BRANCH { return 6 }
+
+    // Verify packed encoding:
+    //   symbolnum=5 (bits 0-23), pcrel=1 (bit 24), length=2 (bits 25-26),
+    //   extern=1 (bit 27), type=2 (bits 28-31)
+    let packed = macho_encode_reloc_info(rel)
+    let sym_part = packed & 16777215
+    if sym_part != 5 { return 7 }
+    0
+}
+
+// T16: Verify relocation encoding — signed reloc
+fn test_macho_reloc_encoding_signed() -> i64 with Mut, Panic, Div {
+    let rel = macho_make_signed_reloc(200, 10)
+    let packed = macho_encode_reloc_info(rel)
+    let sym_part = packed & 16777215
+    if sym_part != 10 { return 1 }
+    // pcrel=1, length=2, extern=1, type=1
+    // Expected: 10 + 16777216 + 67108864 + 134217728 + 268435456
+    0
+}
+
+// T17: Verify relocation encoding — unsigned reloc
+fn test_macho_reloc_encoding_unsigned() -> i64 with Mut, Panic, Div {
+    let rel = macho_make_unsigned_reloc(0, 3, 3)    // quad-size
+    if rel.pcrel != 0 { return 1 }
+    if rel.length != 3 { return 2 }
+    if rel.rel_type != MACHO_X86_64_RELOC_UNSIGNED { return 3 }
+
+    let packed = macho_encode_reloc_info(rel)
+    let sym_part = packed & 16777215
+    if sym_part != 3 { return 4 }
+    0
+}
+
+// T18: Verify relocation addition
+fn test_macho_add_reloc() -> i64 with Mut, Panic, Div {
+    var w = macho_writer_new()
+    if w.reloc_count != 0 { return 1 }
+
+    let rel = macho_make_branch_reloc(50, 2)
+    w = macho_add_reloc(w, rel)
+    if w.reloc_count != 1 { return 2 }
+
+    w = macho_add_reloc(w, macho_make_signed_reloc(100, 3))
+    if w.reloc_count != 2 { return 3 }
+
+    // Verify stored reloc data
+    if w.relocs[0].address != 50 { return 4 }
+    if w.relocs[1].address != 100 { return 5 }
+    0
+}
+
+// T19: Verify string table initialization
+fn test_macho_strtab_init() -> i64 with Mut, Panic, Div {
+    let st = macho_strtab_init()
+    // Should have 1 byte (null terminator for empty string at index 0)
+    if st.len != 1 { return 1 }
+    if st.bytes[0] != 0 { return 2 }
+    0
+}
+
+// T20: Verify string table add
+fn test_macho_strtab_add() -> i64 with Mut, Panic, Div {
+    var st = macho_strtab_init()
+    // Add "_main" (5 chars)
+    var name: [i8; 128] = [0; 128]
+    name[0] = 95    // '_'
+    name[1] = 109   // 'm'
+    name[2] = 97    // 'a'
+    name[3] = 105   // 'i'
+    name[4] = 110   // 'n'
+    st = macho_strtab_add(st, name, 5)
+    // len should be 1 (initial null) + 5 (chars) + 1 (null terminator) = 7
+    if st.len != 7 { return 1 }
+    // Verify the string starts at offset 1
+    if st.bytes[1] != 95 { return 2 }    // '_'
+    if st.bytes[5] != 110 { return 3 }   // 'n'
+    if st.bytes[6] != 0 { return 4 }     // null terminator
+    0
+}
+
+// T21: Verify string table dedup
+fn test_macho_strtab_dedup() -> i64 with Mut, Panic, Div {
+    var st = macho_strtab_init()
+    var name: [i8; 128] = [0; 128]
+    name[0] = 95    // '_'
+    name[1] = 102   // 'f'
+    name[2] = 111   // 'o'
+    name[3] = 111   // 'o'
+
+    st = macho_strtab_add(st, name, 4)
+    let len_after_first = st.len   // 1 + 4 + 1 = 6
+
+    // Add same string again with dedup
+    st = macho_strtab_add_dedup(st, name, 4)
+    // Length should NOT increase
+    if st.len != len_after_first { return 1 }
+
+    // But adding a different string should increase
+    var name2: [i8; 128] = [0; 128]
+    name2[0] = 95   // '_'
+    name2[1] = 98   // 'b'
+    name2[2] = 97   // 'a'
+    name2[3] = 114  // 'r'
+    st = macho_strtab_add_dedup(st, name2, 4)
+    if st.len == len_after_first { return 2 }
+    0
+}
+
+// T22: Verify string table find
+fn test_macho_strtab_find() -> i64 with Mut, Panic, Div {
+    var st = macho_strtab_init()
+    var name: [i8; 128] = [0; 128]
+    name[0] = 65    // 'A'
+    name[1] = 66    // 'B'
+    st = macho_strtab_add(st, name, 2)
+
+    // Should find "AB" at offset 1
+    let found = macho_strtab_find(st, name, 2)
+    if found != 1 { return 1 }
+
+    // Should not find "XY"
+    var other: [i8; 128] = [0; 128]
+    other[0] = 88   // 'X'
+    other[1] = 89   // 'Y'
+    let not_found = macho_strtab_find(st, other, 2)
+    if not_found != (0 - 1) { return 2 }
+    0
+}
+
+// T23: Verify segment counting
+fn test_macho_count_segment_sections() -> i64 with Mut, Panic, Div {
+    var w = macho_writer_new()
+    w = macho_add_section(w, macho_make_text_section(0, 100, 0))
+    w = macho_add_section(w, macho_make_const_section(0, 50, 0))
+    w = macho_add_section(w, macho_make_data_section(0, 200, 0))
+
+    let text_count = macho_count_segment_sections(w, MACHO_SEG_TEXT)
+    if text_count != 2 { return 1 }
+
+    let data_count = macho_count_segment_sections(w, MACHO_SEG_DATA)
+    if data_count != 1 { return 2 }
+
+    let linkedit_count = macho_count_segment_sections(w, MACHO_SEG_LINKEDIT)
+    if linkedit_count != 0 { return 3 }
+    0
+}
+
+// T24: Verify segment section file size
+fn test_macho_segment_filesize() -> i64 with Mut, Panic, Div {
+    var w = macho_writer_new()
+    w = macho_add_section(w, macho_make_text_section(0, 100, 0))
+    w = macho_add_section(w, macho_make_const_section(0, 50, 0))
+
+    let text_fsize = macho_segment_section_filesize(w, MACHO_SEG_TEXT)
+    if text_fsize != 150 { return 1 }
+
+    // Add BSS (zerofill) — should not count in filesize
+    w = macho_add_section(w, macho_make_bss_section(0, 1024))
+    let data_fsize = macho_segment_section_filesize(w, MACHO_SEG_DATA)
+    if data_fsize != 0 { return 2 }  // BSS is zerofill
+
+    let data_vmsize = macho_segment_section_vmsize(w, MACHO_SEG_DATA)
+    if data_vmsize != 1024 { return 3 }
+    0
+}
+
+// T25: Verify pagezero segment
+fn test_macho_pagezero_segment() -> i64 with Mut, Panic, Div {
+    let seg = macho_make_pagezero_segment()
+    if seg.vmaddr != 0 { return 1 }
+    if seg.vmsize != 4294967296 { return 2 }  // 4 GB
+    if seg.fileoff != 0 { return 3 }
+    if seg.filesize != 0 { return 4 }
+    if seg.maxprot != 0 { return 5 }
+    if seg.initprot != 0 { return 6 }
+    if seg.nsects != 0 { return 7 }
+    0
+}
+
+// T26: Verify text segment protections
+fn test_macho_text_segment_prot() -> i64 with Mut, Panic, Div {
+    let seg = macho_make_text_segment(2, 4294967296, 8192, 0, 8192)
+    if seg.maxprot != 5 { return 1 }    // R+X = 1+4 = 5
+    if seg.initprot != 5 { return 2 }
+    if seg.nsects != 2 { return 3 }
+    if seg.segname != MACHO_SEG_TEXT { return 4 }
+    0
+}
+
+// T27: Verify data segment protections
+fn test_macho_data_segment_prot() -> i64 with Mut, Panic, Div {
+    let seg = macho_make_data_segment(1, 8192, 4096, 8192, 4096)
+    if seg.maxprot != 3 { return 1 }    // R+W = 1+2 = 3
+    if seg.initprot != 3 { return 2 }
+    if seg.vmaddr != 8192 { return 3 }
+    0
+}
+
+// T28: Verify segment command emission size
+fn test_macho_segment_cmd_size() -> i64 with Mut, Panic, Div {
+    var w = macho_writer_new()
+    let start = w.buf_len
+    let seg = macho_make_pagezero_segment()
+    w = macho_emit_segment_cmd(w, seg)
+    let emitted = w.buf_len - start
+    // segment_command_64 = 72 bytes
+    if emitted != 72 { return 1 }
+    0
+}
+
+// T29: Verify section command emission size
+fn test_macho_section_cmd_size() -> i64 with Mut, Panic, Div {
+    var w = macho_writer_new()
+    let start = w.buf_len
+    let sec = macho_make_text_section(0, 100, 0)
+    w = macho_emit_section_cmd(w, sec)
+    let emitted = w.buf_len - start
+    // section_64 = 80 bytes
+    if emitted != 80 { return 1 }
+    0
+}
+
+// T30: Verify nlist emission size
+fn test_macho_nlist_size() -> i64 with Mut, Panic, Div {
+    var w = macho_writer_new()
+    let start = w.buf_len
+    let sym = macho_make_extern_symbol(0, 1, 4096)
+    w = macho_emit_nlist(w, sym)
+    let emitted = w.buf_len - start
+    // nlist_64 = 16 bytes
+    if emitted != 16 { return 1 }
+    0
+}
+
+// T31: Verify relocation emission size
+fn test_macho_reloc_emission_size() -> i64 with Mut, Panic, Div {
+    var w = macho_writer_new()
+    let start = w.buf_len
+    let rel = macho_make_branch_reloc(0, 0)
+    w = macho_emit_reloc(w, rel)
+    let emitted = w.buf_len - start
+    // relocation_info = 8 bytes
+    if emitted != 8 { return 1 }
+    0
+}
+
+// T32: Verify LC_SYMTAB command emission
+fn test_macho_symtab_cmd() -> i64 with Mut, Panic, Div {
+    var w = macho_writer_new()
+    w = macho_emit_symtab_cmd(w, 1000, 5, 1080, 100)
+    // LC_SYMTAB command = 24 bytes
+    if w.buf_len != 24 { return 1 }
+    // Check cmd type
+    if macho_read_u32_le(w, 0) != MACHO_LC_SYMTAB { return 2 }
+    // Check cmdsize
+    if macho_read_u32_le(w, 4) != 24 { return 3 }
+    // Check symoff
+    if macho_read_u32_le(w, 8) != 1000 { return 4 }
+    // Check nsyms
+    if macho_read_u32_le(w, 12) != 5 { return 5 }
+    0
+}
+
+// T33: Verify LC_MAIN command emission
+fn test_macho_main_cmd() -> i64 with Mut, Panic, Div {
+    var w = macho_writer_new()
+    w = macho_emit_main_cmd(w, 512, 0)
+    if w.buf_len != 24 { return 1 }
+    // Check cmd type (LC_MAIN = 0x80000028)
+    if macho_read_u32_le(w, 0) != MACHO_LC_MAIN { return 2 }
+    // Check entry offset
+    if macho_read_u64_le(w, 8) != 512 { return 3 }
+    0
+}
+
+// T34: Verify segname emission for __TEXT
+fn test_macho_segname_text() -> i64 with Mut, Panic, Div {
+    var w = macho_writer_new()
+    w = macho_emit_segname(w, MACHO_SEG_TEXT)
+    if w.buf_len != 16 { return 1 }
+    // "__TEXT" = 95 95 84 69 88 84
+    if macho_read_u8(w, 0) != 95 { return 2 }    // '_'
+    if macho_read_u8(w, 1) != 95 { return 3 }    // '_'
+    if macho_read_u8(w, 2) != 84 { return 4 }    // 'T'
+    if macho_read_u8(w, 3) != 69 { return 5 }    // 'E'
+    if macho_read_u8(w, 4) != 88 { return 6 }    // 'X'
+    if macho_read_u8(w, 5) != 84 { return 7 }    // 'T'
+    // Rest should be null
+    if macho_read_u8(w, 6) != 0 { return 8 }
+    0
+}
+
+// T35: Verify sectname emission for __text
+fn test_macho_sectname_text() -> i64 with Mut, Panic, Div {
+    var w = macho_writer_new()
+    w = macho_emit_sectname(w, MACHO_SECT_TEXT)
+    if w.buf_len != 16 { return 1 }
+    // "__text" = 95 95 116 101 120 116
+    if macho_read_u8(w, 0) != 95 { return 2 }    // '_'
+    if macho_read_u8(w, 1) != 95 { return 3 }    // '_'
+    if macho_read_u8(w, 2) != 116 { return 4 }   // 't'
+    if macho_read_u8(w, 3) != 101 { return 5 }   // 'e'
+    if macho_read_u8(w, 4) != 120 { return 6 }   // 'x'
+    if macho_read_u8(w, 5) != 116 { return 7 }   // 't'
+    if macho_read_u8(w, 6) != 0 { return 8 }
+    0
+}
+
+// T36: Verify byte emission and reading roundtrip
+fn test_macho_emit_read_roundtrip() -> i64 with Mut, Panic, Div {
+    var w = macho_writer_new()
+    w = macho_emit_u32(w, 305419896)    // 0x12345678
+    if w.buf_len != 4 { return 1 }
+    if macho_read_u32_le(w, 0) != 305419896 { return 2 }
+
+    w = macho_emit_u64(w, 4294967296)   // 0x100000000
+    if w.buf_len != 12 { return 3 }
+    if macho_read_u64_le(w, 4) != 4294967296 { return 4 }
+    0
+}
+
+// T37: Verify patch_u32 modifies buffer in-place
+fn test_macho_patch_u32() -> i64 with Mut, Panic, Div {
+    var w = macho_writer_new()
+    // Write initial value
+    w = macho_emit_u32(w, 0)
+    if macho_read_u32_le(w, 0) != 0 { return 1 }
+    // Patch with new value
+    w = macho_patch_u32(w, 0, 42)
+    if macho_read_u32_le(w, 0) != 42 { return 2 }
+    // Patch again
+    w = macho_patch_u32(w, 0, 999)
+    if macho_read_u32_le(w, 0) != 999 { return 3 }
+    0
+}
+
+// T38: Verify ARM64 relocation types
+fn test_macho_arm64_relocs() -> i64 with Mut, Panic, Div {
+    let rel1 = macho_make_arm64_branch26_reloc(0, 1)
+    if rel1.rel_type != MACHO_ARM64_RELOC_BRANCH26 { return 1 }
+    if rel1.pcrel != 1 { return 2 }
+
+    let rel2 = macho_make_arm64_page21_reloc(4, 2)
+    if rel2.rel_type != MACHO_ARM64_RELOC_PAGE21 { return 3 }
+
+    let rel3 = macho_make_arm64_pageoff12_reloc(8, 3)
+    if rel3.rel_type != MACHO_ARM64_RELOC_PAGEOFF12 { return 4 }
+    if rel3.pcrel != 0 { return 5 }
+    if rel3.is_extern != 0 { return 6 }
+    0
+}
+
+// T39: Verify GOT relocation creation
+fn test_macho_got_reloc() -> i64 with Mut, Panic, Div {
+    let rel = macho_make_got_load_reloc(64, 7)
+    if rel.address != 64 { return 1 }
+    if rel.symbolnum != 7 { return 2 }
+    if rel.pcrel != 1 { return 3 }
+    if rel.length != 2 { return 4 }
+    if rel.rel_type != MACHO_X86_64_RELOC_GOT_LOAD { return 5 }
+    0
+}
+
+// T40: Verify subtractor relocation
+fn test_macho_subtractor_reloc() -> i64 with Mut, Panic, Div {
+    let rel = macho_make_subtractor_reloc(128, 4, 3)
+    if rel.address != 128 { return 1 }
+    if rel.symbolnum != 4 { return 2 }
+    if rel.pcrel != 0 { return 3 }
+    if rel.length != 3 { return 4 }
+    if rel.rel_type != MACHO_X86_64_RELOC_SUBTRACTOR { return 5 }
+    0
+}
+
+// T41: Verify layout computation produces reasonable total size
+fn test_macho_compute_layout() -> i64 with Mut, Panic, Div {
+    let total = macho_compute_layout(256, 64, 128, 0, 3, 2, 32)
+    // text_content_start = 4096, text_content_end = 4352,
+    // const_start = align_to(4352, 8) = 4352, text_seg_file_end = 4416
+    // data_seg_offset = page_align(4416) = 8192
+    // data_seg_file_end = 8192 + 128 = 8320
+    // linkedit_offset = page_align(8320) = 12288
+    // reloc_size = 2*8 = 16, symtab = 3*16 = 48, strtab = 32
+    // total = 12288 + 16 + 48 + 32 = 12384
+    if total < 12288 { return 1 }
+    if total > 16384 { return 2 }
+    0
+}
+
+// T42: Verify load command count calculation
+fn test_macho_load_cmd_count() -> i64 with Mut, Panic, Div {
+    var w = macho_writer_new()
+    // No data sections => 6 commands
+    w = macho_add_section(w, macho_make_text_section(0, 100, 0))
+    let count1 = macho_count_load_cmds(w)
+    if count1 != 6 { return 1 }
+
+    // Add data section => 7 commands
+    w = macho_add_section(w, macho_make_data_section(0, 50, 0))
+    let count2 = macho_count_load_cmds(w)
+    if count2 != 7 { return 2 }
+    0
+}
+
+// T43: Verify load commands size calculation
+fn test_macho_load_cmds_size() -> i64 with Mut, Panic, Div {
+    var w = macho_writer_new()
+    w = macho_add_section(w, macho_make_text_section(0, 100, 0))
+
+    let size = macho_compute_load_cmds_size(w)
+    // __PAGEZERO: 72
+    // __TEXT: 72 + 1*80 = 152
+    // __DATA: 0 (no data sections)
+    // __LINKEDIT: 72
+    // LC_SYMTAB: 24
+    // LC_DYSYMTAB: 80
+    // LC_MAIN: 24
+    // Total: 72 + 152 + 72 + 24 + 80 + 24 = 424
+    if size != 424 { return 1 }
+    0
+}
+
+// T44: Verify stubs section creation
+fn test_macho_stubs_section() -> i64 with Mut, Panic, Div {
+    let sec = macho_make_stubs_section(4096, 12, 4096, 0, 6)
+    if sec.sectname != MACHO_SECT_STUBS { return 1 }
+    if sec.segname != MACHO_SEG_TEXT { return 2 }
+    if sec.reserved2 != 6 { return 3 }   // stub size
+    let sec_type = sec.sec_flags & 255
+    if sec_type != MACHO_S_SYMBOL_STUBS { return 4 }
+    0
+}
+
+// T45: Verify lazy/non-lazy symbol pointer sections
+fn test_macho_symbol_ptr_sections() -> i64 with Mut, Panic, Div {
+    let la = macho_make_la_symbol_ptr_section(8192, 16, 8192, 5)
+    if la.reserved1 != 5 { return 1 }
+    let la_type = la.sec_flags & 255
+    if la_type != MACHO_S_LAZY_SYMBOL_POINTERS { return 2 }
+
+    let nl = macho_make_nl_symbol_ptr_section(8208, 8, 8208, 7)
+    if nl.reserved1 != 7 { return 3 }
+    let nl_type = nl.sec_flags & 255
+    if nl_type != MACHO_S_NON_LAZY_SYMBOL_POINTERS { return 4 }
+    0
+}
+
+// T46: Verify LC_DYSYMTAB emission
+fn test_macho_dysymtab_cmd() -> i64 with Mut, Panic, Div {
+    var w = macho_writer_new()
+    w = macho_emit_dysymtab_cmd(w, 0, 2, 2, 3, 5, 1, 0, 0)
+    // LC_DYSYMTAB = 80 bytes
+    if w.buf_len != 80 { return 1 }
+    if macho_read_u32_le(w, 0) != MACHO_LC_DYSYMTAB { return 2 }
+    if macho_read_u32_le(w, 4) != 80 { return 3 }
+    // nlocalsym at offset 12
+    if macho_read_u32_le(w, 12) != 2 { return 4 }
+    // nextdefsym at offset 20
+    if macho_read_u32_le(w, 20) != 3 { return 5 }
+    0
+}
+
+// T47: Verify writer initialization defaults
+fn test_macho_writer_defaults() -> i64 with Mut, Panic, Div {
+    let w = macho_writer_new()
+    if w.buf_len != 0 { return 1 }
+    if w.section_count != 0 { return 2 }
+    if w.symbol_count != 0 { return 3 }
+    if w.reloc_count != 0 { return 4 }
+    if w.cputype != MACHO_CPU_X86_64 { return 5 }
+    if w.filetype != MACHO_FILETYPE_EXECUTE { return 6 }
+    if w.strtab.len != 0 { return 7 }
+    0
+}
+
+// T48: Verify object writer initialization
+fn test_macho_writer_object() -> i64 with Mut, Panic, Div {
+    let w = macho_writer_new_object()
+    if w.filetype != MACHO_FILETYPE_OBJECT { return 1 }
+    if w.flags != 0 { return 2 }
+    0
+}
+
+// T49: Verify ARM64 writer initialization
+fn test_macho_writer_arm64() -> i64 with Mut, Panic, Div {
+    let w = macho_writer_new_arm64()
+    if w.cputype != MACHO_CPU_ARM64 { return 1 }
+    if w.cpusubtype != MACHO_CPU_SUBTYPE_ARM64_ALL { return 2 }
+    0
+}
+
+// T50: Verify full header + segment emission produces valid structure
+fn test_macho_full_header_and_segment() -> i64 with Mut, Panic, Div {
+    var w = macho_writer_new()
+    let hdr = macho_header_new(
+        MACHO_CPU_X86_64, MACHO_CPU_SUBTYPE_X86_64_ALL,
+        MACHO_FILETYPE_EXECUTE, 1, MACHO_SEGMENT_CMD_SIZE, MACHO_FLAG_PIE
+    )
+    w = macho_emit_header(w, hdr)
+
+    // Emit one segment
+    let seg = macho_make_pagezero_segment()
+    w = macho_emit_segment_cmd(w, seg)
+
+    // Total: 32 (header) + 72 (segment) = 104
+    if w.buf_len != 104 { return 1 }
+
+    // Verify header magic
+    if macho_read_u32_le(w, 0) != MACHO_MAGIC_64 { return 2 }
+
+    // Verify segment cmd at offset 32
+    if macho_read_u32_le(w, 32) != MACHO_LC_SEGMENT_64 { return 3 }
+    if macho_read_u32_le(w, 36) != 72 { return 4 }
+    0
+}
+
+// ============================================================================
+// Test runner
+// ============================================================================
+
+fn test_macho_main() -> i64 with Mut, Panic, Div {
+    var failed = 0
+
+    if test_macho_header_magic() != 0 { failed = failed + 1 }
+    if test_macho_header_x86_64() != 0 { failed = failed + 1 }
+    if test_macho_header_arm64() != 0 { failed = failed + 1 }
+    if test_macho_header_emission() != 0 { failed = failed + 1 }
+    if test_macho_page_alignment() != 0 { failed = failed + 1 }
+    if test_macho_align_to() != 0 { failed = failed + 1 }
+    if test_macho_align_pow2() != 0 { failed = failed + 1 }
+    if test_macho_text_section() != 0 { failed = failed + 1 }
+    if test_macho_bss_section() != 0 { failed = failed + 1 }
+    if test_macho_add_section() != 0 { failed = failed + 1 }
+    if test_macho_local_symbol() != 0 { failed = failed + 1 }
+    if test_macho_extern_symbol() != 0 { failed = failed + 1 }
+    if test_macho_undef_symbol() != 0 { failed = failed + 1 }
+    if test_macho_add_symbol() != 0 { failed = failed + 1 }
+    if test_macho_reloc_encoding_branch() != 0 { failed = failed + 1 }
+    if test_macho_reloc_encoding_signed() != 0 { failed = failed + 1 }
+    if test_macho_reloc_encoding_unsigned() != 0 { failed = failed + 1 }
+    if test_macho_add_reloc() != 0 { failed = failed + 1 }
+    if test_macho_strtab_init() != 0 { failed = failed + 1 }
+    if test_macho_strtab_add() != 0 { failed = failed + 1 }
+    if test_macho_strtab_dedup() != 0 { failed = failed + 1 }
+    if test_macho_strtab_find() != 0 { failed = failed + 1 }
+    if test_macho_count_segment_sections() != 0 { failed = failed + 1 }
+    if test_macho_segment_filesize() != 0 { failed = failed + 1 }
+    if test_macho_pagezero_segment() != 0 { failed = failed + 1 }
+    if test_macho_text_segment_prot() != 0 { failed = failed + 1 }
+    if test_macho_data_segment_prot() != 0 { failed = failed + 1 }
+    if test_macho_segment_cmd_size() != 0 { failed = failed + 1 }
+    if test_macho_section_cmd_size() != 0 { failed = failed + 1 }
+    if test_macho_nlist_size() != 0 { failed = failed + 1 }
+    if test_macho_reloc_emission_size() != 0 { failed = failed + 1 }
+    if test_macho_symtab_cmd() != 0 { failed = failed + 1 }
+    if test_macho_main_cmd() != 0 { failed = failed + 1 }
+    if test_macho_segname_text() != 0 { failed = failed + 1 }
+    if test_macho_sectname_text() != 0 { failed = failed + 1 }
+    if test_macho_emit_read_roundtrip() != 0 { failed = failed + 1 }
+    if test_macho_patch_u32() != 0 { failed = failed + 1 }
+    if test_macho_arm64_relocs() != 0 { failed = failed + 1 }
+    if test_macho_got_reloc() != 0 { failed = failed + 1 }
+    if test_macho_subtractor_reloc() != 0 { failed = failed + 1 }
+    if test_macho_compute_layout() != 0 { failed = failed + 1 }
+    if test_macho_load_cmd_count() != 0 { failed = failed + 1 }
+    if test_macho_load_cmds_size() != 0 { failed = failed + 1 }
+    if test_macho_stubs_section() != 0 { failed = failed + 1 }
+    if test_macho_symbol_ptr_sections() != 0 { failed = failed + 1 }
+    if test_macho_dysymtab_cmd() != 0 { failed = failed + 1 }
+    if test_macho_writer_defaults() != 0 { failed = failed + 1 }
+    if test_macho_writer_object() != 0 { failed = failed + 1 }
+    if test_macho_writer_arm64() != 0 { failed = failed + 1 }
+    if test_macho_full_header_and_segment() != 0 { failed = failed + 1 }
+
+    if failed == 0 {
+        0
+    } else {
+        failed
+    }
+}

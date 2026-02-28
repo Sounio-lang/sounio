@@ -1,0 +1,2380 @@
+// Monomorphization / specialization pass for the self-hosted Sounio compiler
+//
+// Transforms polymorphic (generic) functions into specialized monomorphic
+// copies with concrete type arguments.  Runs after type checking, before
+// codegen, eliminating all type parameters from the IR.
+//
+// Architecture:
+//   MonoTypeNode   — type representation node in the MonoTypePool arena
+//   MonoTypeMap    — maps type variable IDs to concrete type IDs
+//   MonoEntry      — a single monomorphized instance (original fn, type args, specialized fn)
+//   MonoCache      — deduplication cache: (fn_id, type_args...) -> specialized_id
+//   MonoWorklist   — iterative worklist of pending specializations
+//   MonoCallSite   — records a generic call site discovered during scanning
+//   MonoDepthStack — tracks recursive monomorphization depth for cycle detection
+//
+// Algorithm:
+//   1. Scan all function bodies for generic call sites
+//   2. Collect unique (fn_id, type_args) pairs into the worklist
+//   3. For each worklist entry, create a specialized copy:
+//      a. Substitute type parameters with concrete types
+//      b. Register the specialized function in the output table
+//      c. Scan the specialized body for new generic call sites (transitive)
+//   4. Repeat until the worklist is empty (fixed-point)
+//   5. Detect recursive monomorphization cycles via depth limit
+
+// ============================================================
+// Constants
+// ============================================================
+
+let MONO_CACHE_CAP: i64 = 4096
+let MONO_MAX_DEPTH: i64 = 64
+let MONO_MAX_DEPTH_STACK: i64 = 256
+let MONO_HASH_TABLE_SIZE: i64 = 8192
+let MONO_HASH_EMPTY: i64 = 0 - 1
+let MONO_NOT_FOUND: i64 = 0 - 1
+
+// Type kind constants (simplified for monomorphization)
+let MONO_TY_I64: i64 = 1
+let MONO_TY_F64: i64 = 2
+let MONO_TY_BOOL: i64 = 3
+let MONO_TY_UNIT: i64 = 4
+let MONO_TY_STRING: i64 = 5
+let MONO_TY_I32: i64 = 6
+let MONO_TY_U8: i64 = 7
+let MONO_TY_U32: i64 = 8
+let MONO_TY_U64: i64 = 9
+let MONO_TY_F32: i64 = 10
+let MONO_TY_I8: i64 = 11
+let MONO_TY_VAR: i64 = 100
+let MONO_TY_FN: i64 = 101
+let MONO_TY_ARRAY: i64 = 102
+let MONO_TY_NAMED: i64 = 103
+let MONO_TY_REF: i64 = 104
+let MONO_TY_REF_MUT: i64 = 105
+let MONO_TY_TUPLE: i64 = 106
+let MONO_TY_ERROR: i64 = 999
+
+// Body node kinds
+let MONO_NODE_LIT: i64 = 1
+let MONO_NODE_VAR: i64 = 2
+let MONO_NODE_CALL: i64 = 3
+let MONO_NODE_BINOP: i64 = 4
+let MONO_NODE_RET: i64 = 5
+let MONO_NODE_IF: i64 = 6
+let MONO_NODE_LET: i64 = 7
+let MONO_NODE_BLOCK: i64 = 8
+let MONO_NODE_FIELD: i64 = 9
+let MONO_NODE_INDEX: i64 = 10
+
+// Error kinds
+let MONO_ERR_NONE: i64 = 0
+let MONO_ERR_DEPTH_EXCEEDED: i64 = 1
+let MONO_ERR_CACHE_FULL: i64 = 2
+let MONO_ERR_FN_NOT_FOUND: i64 = 3
+let MONO_ERR_ARG_COUNT_MISMATCH: i64 = 4
+let MONO_ERR_CYCLE_DETECTED: i64 = 5
+
+// ============================================================
+// MonoTypeNode — a single node in the type pool arena
+// ============================================================
+
+struct MonoTypeNode {
+    kind: i64,
+    name_hash: i64,
+    children: [i64; 8],
+    child_count: i64,
+    array_size: i64,
+    var_id: i64,
+}
+
+fn mono_empty_type_node() -> MonoTypeNode {
+    MonoTypeNode {
+        kind: MONO_TY_ERROR,
+        name_hash: 0,
+        children: [0, 0, 0, 0, 0, 0, 0, 0],
+        child_count: 0,
+        array_size: 0 - 1,
+        var_id: 0 - 1,
+    }
+}
+
+// ============================================================
+// MonoTypePool — arena of type nodes
+// ============================================================
+
+struct MonoTypePool {
+    nodes: [MonoTypeNode; 4096],
+    count: i64,
+}
+
+fn mono_type_pool_new() -> MonoTypePool {
+    MonoTypePool { nodes: [mono_empty_type_node(); 4096], count: 0 }
+}
+
+fn mono_type_pool_alloc(pool: MonoTypePool, node: MonoTypeNode) -> i64 with Mut, Panic, Div {
+    var p = pool
+    if p.count >= 4096 { return MONO_NOT_FOUND }
+    let idx = p.count
+    p.nodes[idx as usize] = node
+    p.count = p.count + 1
+    return idx
+}
+
+fn mono_type_pool_get(pool: MonoTypePool, idx: i64) -> MonoTypeNode with Panic, Div {
+    if idx < 0 { return mono_empty_type_node() }
+    if idx >= pool.count { return mono_empty_type_node() }
+    return pool.nodes[idx as usize]
+}
+
+fn mono_type_pool_alloc_prim(pool: MonoTypePool, kind: i64) -> i64 with Mut, Panic, Div {
+    return mono_type_pool_alloc(pool, MonoTypeNode {
+        kind: kind, name_hash: 0, children: [0, 0, 0, 0, 0, 0, 0, 0],
+        child_count: 0, array_size: 0 - 1, var_id: 0 - 1,
+    })
+}
+
+fn mono_type_pool_alloc_var(pool: MonoTypePool, var_id: i64) -> i64 with Mut, Panic, Div {
+    return mono_type_pool_alloc(pool, MonoTypeNode {
+        kind: MONO_TY_VAR, name_hash: 0, children: [0, 0, 0, 0, 0, 0, 0, 0],
+        child_count: 0, array_size: 0 - 1, var_id: var_id,
+    })
+}
+
+fn mono_type_pool_alloc_fn(pool: MonoTypePool, domain: i64, codomain: i64) -> i64 with Mut, Panic, Div {
+    return mono_type_pool_alloc(pool, MonoTypeNode {
+        kind: MONO_TY_FN, name_hash: 0, children: [domain, codomain, 0, 0, 0, 0, 0, 0],
+        child_count: 2, array_size: 0 - 1, var_id: 0 - 1,
+    })
+}
+
+fn mono_type_pool_alloc_array(pool: MonoTypePool, elem: i64, size: i64) -> i64 with Mut, Panic, Div {
+    return mono_type_pool_alloc(pool, MonoTypeNode {
+        kind: MONO_TY_ARRAY, name_hash: 0, children: [elem, 0, 0, 0, 0, 0, 0, 0],
+        child_count: 1, array_size: size, var_id: 0 - 1,
+    })
+}
+
+fn mono_type_pool_alloc_ref(pool: MonoTypePool, inner: i64, is_mut: bool) -> i64 with Mut, Panic, Div {
+    var kind = MONO_TY_REF
+    if is_mut { kind = MONO_TY_REF_MUT }
+    return mono_type_pool_alloc(pool, MonoTypeNode {
+        kind: kind, name_hash: 0, children: [inner, 0, 0, 0, 0, 0, 0, 0],
+        child_count: 1, array_size: 0 - 1, var_id: 0 - 1,
+    })
+}
+
+fn mono_type_pool_alloc_named(pool: MonoTypePool, name_hash: i64, args: [i64; 8], arg_count: i64) -> i64 with Mut, Panic, Div {
+    return mono_type_pool_alloc(pool, MonoTypeNode {
+        kind: MONO_TY_NAMED, name_hash: name_hash, children: args,
+        child_count: arg_count, array_size: 0 - 1, var_id: 0 - 1,
+    })
+}
+
+fn mono_type_pool_alloc_tuple(pool: MonoTypePool, elems: [i64; 8], count: i64) -> i64 with Mut, Panic, Div {
+    return mono_type_pool_alloc(pool, MonoTypeNode {
+        kind: MONO_TY_TUPLE, name_hash: 0, children: elems,
+        child_count: count, array_size: 0 - 1, var_id: 0 - 1,
+    })
+}
+
+// ============================================================
+// MonoTypeMap — maps type variable IDs to concrete type IDs
+// ============================================================
+
+struct MonoTypeMap {
+    var_ids: [i64; 64],
+    type_ids: [i64; 64],
+    count: i64,
+}
+
+fn mono_type_map_new() -> MonoTypeMap {
+    MonoTypeMap { var_ids: [0; 64], type_ids: [0; 64], count: 0 }
+}
+
+fn mono_type_map_insert(map: MonoTypeMap, var_id: i64, type_id: i64) -> MonoTypeMap with Mut, Panic, Div {
+    var m = map
+    var i: i64 = 0
+    while i < m.count {
+        if m.var_ids[i as usize] == var_id {
+            m.type_ids[i as usize] = type_id
+            return m
+        }
+        i = i + 1
+    }
+    if m.count < 64 {
+        m.var_ids[m.count as usize] = var_id
+        m.type_ids[m.count as usize] = type_id
+        m.count = m.count + 1
+    }
+    return m
+}
+
+fn mono_type_map_lookup(map: MonoTypeMap, var_id: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < map.count {
+        if map.var_ids[i as usize] == var_id { return map.type_ids[i as usize] }
+        i = i + 1
+    }
+    return MONO_NOT_FOUND
+}
+
+fn mono_type_map_has(map: MonoTypeMap, var_id: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < map.count {
+        if map.var_ids[i as usize] == var_id { return true }
+        i = i + 1
+    }
+    return false
+}
+
+fn mono_type_map_clear(map: MonoTypeMap) -> MonoTypeMap with Mut {
+    var m = map
+    m.count = 0
+    return m
+}
+
+fn mono_type_map_eq(a: MonoTypeMap, b: MonoTypeMap) -> bool with Mut, Panic, Div {
+    if a.count != b.count { return false }
+    var i: i64 = 0
+    while i < a.count {
+        let found = mono_type_map_lookup(b, a.var_ids[i as usize])
+        if found == MONO_NOT_FOUND { return false }
+        if found != a.type_ids[i as usize] { return false }
+        i = i + 1
+    }
+    return true
+}
+
+fn mono_type_map_copy(src: MonoTypeMap) -> MonoTypeMap with Mut, Panic, Div {
+    var dst = mono_type_map_new()
+    var i: i64 = 0
+    while i < src.count {
+        dst.var_ids[i as usize] = src.var_ids[i as usize]
+        dst.type_ids[i as usize] = src.type_ids[i as usize]
+        i = i + 1
+    }
+    dst.count = src.count
+    return dst
+}
+
+// ============================================================
+// Type substitution
+// ============================================================
+
+fn mono_substitute_type(pool: MonoTypePool, type_id: i64, map: MonoTypeMap) -> i64 with Mut, Panic, Div {
+    if type_id < 0 { return type_id }
+    if type_id >= pool.count { return type_id }
+    let node = mono_type_pool_get(pool, type_id)
+
+    if node.kind == MONO_TY_VAR {
+        let mapped = mono_type_map_lookup(map, node.var_id)
+        if mapped != MONO_NOT_FOUND { return mapped }
+        return type_id
+    }
+
+    // Primitives — no substitution needed
+    if node.kind >= MONO_TY_I64 {
+        if node.kind <= MONO_TY_I8 { return type_id }
+    }
+    if node.kind == MONO_TY_ERROR { return type_id }
+
+    if node.kind == MONO_TY_FN {
+        let new_dom = mono_substitute_type(pool, node.children[0 as usize], map)
+        let new_cod = mono_substitute_type(pool, node.children[1 as usize], map)
+        if new_dom == node.children[0 as usize] {
+            if new_cod == node.children[1 as usize] { return type_id }
+        }
+        return mono_type_pool_alloc_fn(pool, new_dom, new_cod)
+    }
+
+    if node.kind == MONO_TY_ARRAY {
+        let new_elem = mono_substitute_type(pool, node.children[0 as usize], map)
+        if new_elem == node.children[0 as usize] { return type_id }
+        return mono_type_pool_alloc_array(pool, new_elem, node.array_size)
+    }
+
+    if node.kind == MONO_TY_REF {
+        let new_inner = mono_substitute_type(pool, node.children[0 as usize], map)
+        if new_inner == node.children[0 as usize] { return type_id }
+        return mono_type_pool_alloc_ref(pool, new_inner, false)
+    }
+
+    if node.kind == MONO_TY_REF_MUT {
+        let new_inner = mono_substitute_type(pool, node.children[0 as usize], map)
+        if new_inner == node.children[0 as usize] { return type_id }
+        return mono_type_pool_alloc_ref(pool, new_inner, true)
+    }
+
+    if node.kind == MONO_TY_NAMED {
+        var new_args: [i64; 8] = [0, 0, 0, 0, 0, 0, 0, 0]
+        var changed = false
+        var j: i64 = 0
+        while j < node.child_count {
+            new_args[j as usize] = mono_substitute_type(pool, node.children[j as usize], map)
+            if new_args[j as usize] != node.children[j as usize] { changed = true }
+            j = j + 1
+        }
+        if changed == false { return type_id }
+        return mono_type_pool_alloc_named(pool, node.name_hash, new_args, node.child_count)
+    }
+
+    if node.kind == MONO_TY_TUPLE {
+        var new_elems: [i64; 8] = [0, 0, 0, 0, 0, 0, 0, 0]
+        var changed2 = false
+        var k: i64 = 0
+        while k < node.child_count {
+            new_elems[k as usize] = mono_substitute_type(pool, node.children[k as usize], map)
+            if new_elems[k as usize] != node.children[k as usize] { changed2 = true }
+            k = k + 1
+        }
+        if changed2 == false { return type_id }
+        return mono_type_pool_alloc_tuple(pool, new_elems, node.child_count)
+    }
+
+    return type_id
+}
+
+fn mono_type_has_vars(pool: MonoTypePool, type_id: i64) -> bool with Mut, Panic, Div {
+    if type_id < 0 { return false }
+    if type_id >= pool.count { return false }
+    let node = mono_type_pool_get(pool, type_id)
+    if node.kind == MONO_TY_VAR { return true }
+    var i: i64 = 0
+    while i < node.child_count {
+        if mono_type_has_vars(pool, node.children[i as usize]) { return true }
+        i = i + 1
+    }
+    return false
+}
+
+fn mono_type_eq(pool: MonoTypePool, a: i64, b: i64) -> bool with Mut, Panic, Div {
+    if a == b { return true }
+    if a < 0 { return false }
+    if b < 0 { return false }
+    let na = mono_type_pool_get(pool, a)
+    let nb = mono_type_pool_get(pool, b)
+    if na.kind != nb.kind { return false }
+    if na.name_hash != nb.name_hash { return false }
+    if na.child_count != nb.child_count { return false }
+    if na.array_size != nb.array_size { return false }
+    if na.var_id != nb.var_id { return false }
+    var i: i64 = 0
+    while i < na.child_count {
+        if mono_type_eq(pool, na.children[i as usize], nb.children[i as usize]) == false { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// ============================================================
+// MonoFnSig — a function signature
+// ============================================================
+
+struct MonoFnSig {
+    fn_id: i64,
+    name_hash: i64,
+    param_types: [i64; 16],
+    param_count: i64,
+    return_type: i64,
+    type_param_count: i64,
+    type_param_ids: [i64; 8],
+    is_generic: bool,
+}
+
+fn mono_empty_fn_sig() -> MonoFnSig {
+    MonoFnSig {
+        fn_id: 0 - 1, name_hash: 0, param_types: [0; 16], param_count: 0,
+        return_type: 0 - 1, type_param_count: 0,
+        type_param_ids: [0, 0, 0, 0, 0, 0, 0, 0], is_generic: false,
+    }
+}
+
+// ============================================================
+// MonoFnTable — table of all function signatures
+// ============================================================
+
+struct MonoFnTable {
+    fns: [MonoFnSig; 4096],
+    count: i64,
+}
+
+fn mono_fn_table_new() -> MonoFnTable {
+    MonoFnTable { fns: [mono_empty_fn_sig(); 4096], count: 0 }
+}
+
+fn mono_fn_table_add(table: MonoFnTable, sig: MonoFnSig) -> i64 with Mut, Panic, Div {
+    var t = table
+    if t.count >= 4096 { return MONO_NOT_FOUND }
+    let idx = t.count
+    t.fns[idx as usize] = sig
+    t.count = t.count + 1
+    return idx
+}
+
+fn mono_fn_table_get(table: MonoFnTable, idx: i64) -> MonoFnSig with Panic, Div {
+    if idx < 0 { return mono_empty_fn_sig() }
+    if idx >= table.count { return mono_empty_fn_sig() }
+    return table.fns[idx as usize]
+}
+
+fn mono_fn_table_find_by_hash(table: MonoFnTable, name_hash: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < table.count {
+        if table.fns[i as usize].name_hash == name_hash { return i }
+        i = i + 1
+    }
+    return MONO_NOT_FOUND
+}
+
+fn mono_fn_is_generic(table: MonoFnTable, fn_id: i64) -> bool with Panic, Div {
+    return mono_fn_table_get(table, fn_id).is_generic
+}
+
+fn mono_count_generic_fns(table: MonoFnTable) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < table.count {
+        if table.fns[i as usize].is_generic { count = count + 1 }
+        i = i + 1
+    }
+    return count
+}
+
+fn mono_count_concrete_fns(table: MonoFnTable) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < table.count {
+        if table.fns[i as usize].is_generic == false { count = count + 1 }
+        i = i + 1
+    }
+    return count
+}
+
+// ============================================================
+// MonoBodyNode — simplified body IR node
+// ============================================================
+
+struct MonoBodyNode {
+    kind: i64,
+    type_id: i64,
+    int_val: i64,
+    callee_fn_id: i64,
+    callee_type_args: [i64; 8],
+    callee_type_arg_count: i64,
+    children: [i64; 8],
+    child_count: i64,
+    op: i64,
+    var_name_hash: i64,
+}
+
+fn mono_empty_body_node() -> MonoBodyNode {
+    MonoBodyNode {
+        kind: 0, type_id: 0 - 1, int_val: 0, callee_fn_id: 0 - 1,
+        callee_type_args: [0, 0, 0, 0, 0, 0, 0, 0], callee_type_arg_count: 0,
+        children: [0, 0, 0, 0, 0, 0, 0, 0], child_count: 0, op: 0, var_name_hash: 0,
+    }
+}
+
+// ============================================================
+// MonoFnBody — function body as flat node array
+// ============================================================
+
+struct MonoFnBody {
+    nodes: [MonoBodyNode; 1024],
+    count: i64,
+    root: i64,
+}
+
+fn mono_empty_fn_body() -> MonoFnBody {
+    MonoFnBody { nodes: [mono_empty_body_node(); 1024], count: 0, root: 0 - 1 }
+}
+
+// ============================================================
+// MonoEntry — tracks a single monomorphized function instance
+// ============================================================
+
+struct MonoEntry {
+    original_fn_id: i64,
+    type_args: [i64; 8],
+    type_arg_count: i64,
+    specialized_fn_id: i64,
+    depth: i64,
+    is_valid: bool,
+}
+
+fn mono_empty_entry() -> MonoEntry {
+    MonoEntry {
+        original_fn_id: 0 - 1, type_args: [0, 0, 0, 0, 0, 0, 0, 0],
+        type_arg_count: 0, specialized_fn_id: 0 - 1, depth: 0, is_valid: false,
+    }
+}
+
+// ============================================================
+// Hash computation
+// ============================================================
+
+fn mono_hash_key(fn_id: i64, type_args: [i64; 8], type_arg_count: i64) -> i64 with Mut, Panic, Div {
+    var hash: i64 = 5381
+    hash = hash * 33 + fn_id
+    hash = hash & 9223372036854775807
+    var i: i64 = 0
+    while i < type_arg_count {
+        hash = hash * 33 + type_args[i as usize]
+        hash = hash & 9223372036854775807
+        i = i + 1
+    }
+    return hash
+}
+
+fn mono_type_args_eq(a: [i64; 8], a_count: i64, b: [i64; 8], b_count: i64) -> bool with Mut, Panic, Div {
+    if a_count != b_count { return false }
+    var i: i64 = 0
+    while i < a_count {
+        if a[i as usize] != b[i as usize] { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// ============================================================
+// MonoCache — deduplication cache with open-addressing hash table
+// ============================================================
+
+struct MonoCache {
+    entries: [MonoEntry; 4096],
+    entry_count: i64,
+    hash_table: [i64; 8192],
+}
+
+fn mono_cache_new() -> MonoCache {
+    MonoCache { entries: [mono_empty_entry(); 4096], entry_count: 0, hash_table: [0 - 1; 8192] }
+}
+
+fn mono_cache_lookup(cache: MonoCache, fn_id: i64, type_args: [i64; 8], type_arg_count: i64) -> i64 with Mut, Panic, Div {
+    let hash = mono_hash_key(fn_id, type_args, type_arg_count)
+    var slot = hash & 8191
+    var probes: i64 = 0
+    while probes < MONO_HASH_TABLE_SIZE {
+        let idx = cache.hash_table[slot as usize]
+        if idx == MONO_HASH_EMPTY { return MONO_NOT_FOUND }
+        let entry = cache.entries[idx as usize]
+        if entry.original_fn_id == fn_id {
+            if mono_type_args_eq(entry.type_args, entry.type_arg_count, type_args, type_arg_count) {
+                return entry.specialized_fn_id
+            }
+        }
+        slot = (slot + 1) & 8191
+        probes = probes + 1
+    }
+    return MONO_NOT_FOUND
+}
+
+fn mono_cache_insert(cache: MonoCache, fn_id: i64, type_args: [i64; 8], type_arg_count: i64, specialized_fn_id: i64, depth: i64) -> i64 with Mut, Panic, Div {
+    var c = cache
+    if c.entry_count >= MONO_CACHE_CAP { return MONO_NOT_FOUND }
+    let existing = mono_cache_lookup(c, fn_id, type_args, type_arg_count)
+    if existing != MONO_NOT_FOUND { return MONO_NOT_FOUND }
+
+    let entry_idx = c.entry_count
+    c.entries[entry_idx as usize] = MonoEntry {
+        original_fn_id: fn_id, type_args: type_args, type_arg_count: type_arg_count,
+        specialized_fn_id: specialized_fn_id, depth: depth, is_valid: true,
+    }
+    c.entry_count = c.entry_count + 1
+
+    let hash = mono_hash_key(fn_id, type_args, type_arg_count)
+    var slot = hash & 8191
+    var probes2: i64 = 0
+    while probes2 < MONO_HASH_TABLE_SIZE {
+        if c.hash_table[slot as usize] == MONO_HASH_EMPTY {
+            c.hash_table[slot as usize] = entry_idx
+            return entry_idx
+        }
+        slot = (slot + 1) & 8191
+        probes2 = probes2 + 1
+    }
+    return entry_idx
+}
+
+fn mono_cache_count(cache: MonoCache) -> i64 { return cache.entry_count }
+
+fn mono_cache_get(cache: MonoCache, idx: i64) -> MonoEntry with Panic, Div {
+    if idx < 0 { return mono_empty_entry() }
+    if idx >= cache.entry_count { return mono_empty_entry() }
+    return cache.entries[idx as usize]
+}
+
+fn mono_is_duplicate_instantiation(cache: MonoCache, fn_id: i64, type_args: [i64; 8], type_arg_count: i64) -> bool with Mut, Panic, Div {
+    return mono_cache_lookup(cache, fn_id, type_args, type_arg_count) != MONO_NOT_FOUND
+}
+
+// ============================================================
+// MonoCallSite — a discovered generic call site
+// ============================================================
+
+struct MonoCallSite {
+    callee_fn_id: i64,
+    type_args: [i64; 8],
+    type_arg_count: i64,
+    caller_fn_id: i64,
+    node_index: i64,
+}
+
+fn mono_empty_call_site() -> MonoCallSite {
+    MonoCallSite {
+        callee_fn_id: 0 - 1, type_args: [0, 0, 0, 0, 0, 0, 0, 0],
+        type_arg_count: 0, caller_fn_id: 0 - 1, node_index: 0 - 1,
+    }
+}
+
+struct MonoCallSiteList {
+    sites: [MonoCallSite; 512],
+    count: i64,
+}
+
+fn mono_call_site_list_new() -> MonoCallSiteList {
+    MonoCallSiteList { sites: [mono_empty_call_site(); 512], count: 0 }
+}
+
+fn mono_call_site_list_add(list: MonoCallSiteList, site: MonoCallSite) -> MonoCallSiteList with Mut, Panic, Div {
+    var l = list
+    if l.count < 512 {
+        l.sites[l.count as usize] = site
+        l.count = l.count + 1
+    }
+    return l
+}
+
+fn mono_call_site_list_has(list: MonoCallSiteList, fn_id: i64, type_args: [i64; 8], type_arg_count: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < list.count {
+        let s = list.sites[i as usize]
+        if s.callee_fn_id == fn_id {
+            if mono_type_args_eq(s.type_args, s.type_arg_count, type_args, type_arg_count) { return true }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// ============================================================
+// MonoWorklist — pending specializations (FIFO)
+// ============================================================
+
+struct MonoWorklist {
+    items: [MonoEntry; 4096],
+    count: i64,
+    head: i64,
+}
+
+fn mono_worklist_new() -> MonoWorklist {
+    MonoWorklist { items: [mono_empty_entry(); 4096], count: 0, head: 0 }
+}
+
+fn mono_worklist_push(wl: MonoWorklist, entry: MonoEntry) -> MonoWorklist with Mut, Panic, Div {
+    var w = wl
+    if w.count < 4096 {
+        w.items[w.count as usize] = entry
+        w.count = w.count + 1
+    }
+    return w
+}
+
+fn mono_worklist_is_empty(wl: MonoWorklist) -> bool { return wl.head >= wl.count }
+
+fn mono_worklist_pop(wl: MonoWorklist) -> MonoEntry with Mut, Panic, Div {
+    var w = wl
+    if w.head >= w.count { return mono_empty_entry() }
+    let entry = w.items[w.head as usize]
+    w.head = w.head + 1
+    return entry
+}
+
+fn mono_worklist_size(wl: MonoWorklist) -> i64 { return wl.count - wl.head }
+
+fn mono_worklist_has(wl: MonoWorklist, fn_id: i64, type_args: [i64; 8], type_arg_count: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = wl.head
+    while i < wl.count {
+        let item = wl.items[i as usize]
+        if item.original_fn_id == fn_id {
+            if mono_type_args_eq(item.type_args, item.type_arg_count, type_args, type_arg_count) { return true }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// ============================================================
+// MonoDepthStack — tracks recursive instantiation depth
+// ============================================================
+
+struct MonoDepthStack {
+    fn_ids: [i64; 256],
+    depths: [i64; 256],
+    count: i64,
+}
+
+fn mono_depth_stack_new() -> MonoDepthStack {
+    MonoDepthStack { fn_ids: [0; 256], depths: [0; 256], count: 0 }
+}
+
+fn mono_depth_stack_push(stack: MonoDepthStack, fn_id: i64, depth: i64) -> MonoDepthStack with Mut, Panic, Div {
+    var s = stack
+    if s.count < MONO_MAX_DEPTH_STACK {
+        s.fn_ids[s.count as usize] = fn_id
+        s.depths[s.count as usize] = depth
+        s.count = s.count + 1
+    }
+    return s
+}
+
+fn mono_depth_stack_pop(stack: MonoDepthStack) -> MonoDepthStack with Mut {
+    var s = stack
+    if s.count > 0 { s.count = s.count - 1 }
+    return s
+}
+
+fn mono_depth_stack_current_depth(stack: MonoDepthStack) -> i64 with Mut, Panic, Div {
+    if stack.count == 0 { return 0 }
+    return stack.depths[(stack.count - 1) as usize]
+}
+
+fn mono_depth_stack_contains(stack: MonoDepthStack, fn_id: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < stack.count {
+        if stack.fn_ids[i as usize] == fn_id { return true }
+        i = i + 1
+    }
+    return false
+}
+
+fn mono_depth_stack_count_fn(stack: MonoDepthStack, fn_id: i64) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < stack.count {
+        if stack.fn_ids[i as usize] == fn_id { count = count + 1 }
+        i = i + 1
+    }
+    return count
+}
+
+// ============================================================
+// MonoError — error information
+// ============================================================
+
+struct MonoError {
+    kind: i64,
+    fn_id: i64,
+    detail: i64,
+}
+
+fn mono_no_error() -> MonoError { MonoError { kind: MONO_ERR_NONE, fn_id: 0 - 1, detail: 0 } }
+fn mono_error_depth(fn_id: i64, depth: i64) -> MonoError { MonoError { kind: MONO_ERR_DEPTH_EXCEEDED, fn_id: fn_id, detail: depth } }
+fn mono_error_cycle(fn_id: i64) -> MonoError { MonoError { kind: MONO_ERR_CYCLE_DETECTED, fn_id: fn_id, detail: 0 } }
+fn mono_error_cache_full() -> MonoError { MonoError { kind: MONO_ERR_CACHE_FULL, fn_id: 0 - 1, detail: 0 } }
+fn mono_error_fn_not_found(fn_id: i64) -> MonoError { MonoError { kind: MONO_ERR_FN_NOT_FOUND, fn_id: fn_id, detail: 0 } }
+fn mono_error_arg_mismatch(fn_id: i64, expected: i64, got: i64) -> MonoError { MonoError { kind: MONO_ERR_ARG_COUNT_MISMATCH, fn_id: fn_id, detail: expected * 1000 + got } }
+
+struct MonoErrorList {
+    errors: [MonoError; 256],
+    count: i64,
+}
+
+fn mono_error_list_new() -> MonoErrorList { MonoErrorList { errors: [mono_no_error(); 256], count: 0 } }
+
+fn mono_error_list_add(list: MonoErrorList, err: MonoError) -> MonoErrorList with Mut, Panic, Div {
+    var l = list
+    if l.count < 256 {
+        l.errors[l.count as usize] = err
+        l.count = l.count + 1
+    }
+    return l
+}
+
+fn mono_error_list_has_errors(list: MonoErrorList) -> bool { return list.count > 0 }
+
+// ============================================================
+// Body scanning — find generic call sites
+// ============================================================
+
+fn mono_scan_body_for_calls(body: MonoFnBody, fn_table: MonoFnTable, caller_fn_id: i64) -> MonoCallSiteList with Mut, Panic, Div {
+    var result = mono_call_site_list_new()
+    var i: i64 = 0
+    while i < body.count {
+        let node = body.nodes[i as usize]
+        if node.kind == MONO_NODE_CALL {
+            if node.callee_type_arg_count > 0 {
+                if mono_call_site_list_has(result, node.callee_fn_id, node.callee_type_args, node.callee_type_arg_count) == false {
+                    let site = MonoCallSite {
+                        callee_fn_id: node.callee_fn_id, type_args: node.callee_type_args,
+                        type_arg_count: node.callee_type_arg_count, caller_fn_id: caller_fn_id, node_index: i,
+                    }
+                    result = mono_call_site_list_add(result, site)
+                }
+            }
+        }
+        i = i + 1
+    }
+    return result
+}
+
+// ============================================================
+// Specialization — substitute types in body and signature
+// ============================================================
+
+fn mono_specialize_body(body: MonoFnBody, pool: MonoTypePool, map: MonoTypeMap) -> MonoFnBody with Mut, Panic, Div {
+    var new_body = mono_empty_fn_body()
+    new_body.root = body.root
+    var i: i64 = 0
+    while i < body.count {
+        var node = body.nodes[i as usize]
+        if node.type_id >= 0 {
+            node.type_id = mono_substitute_type(pool, node.type_id, map)
+        }
+        if node.kind == MONO_NODE_CALL {
+            if node.callee_type_arg_count > 0 {
+                var j: i64 = 0
+                while j < node.callee_type_arg_count {
+                    node.callee_type_args[j as usize] = mono_substitute_type(pool, node.callee_type_args[j as usize], map)
+                    j = j + 1
+                }
+            }
+        }
+        new_body.nodes[i as usize] = node
+        new_body.count = new_body.count + 1
+        i = i + 1
+    }
+    return new_body
+}
+
+fn mono_specialize_sig(sig: MonoFnSig, pool: MonoTypePool, map: MonoTypeMap, new_name_hash: i64) -> MonoFnSig with Mut, Panic, Div {
+    var new_sig = sig
+    new_sig.name_hash = new_name_hash
+    new_sig.is_generic = false
+    new_sig.type_param_count = 0
+    var i: i64 = 0
+    while i < sig.param_count {
+        new_sig.param_types[i as usize] = mono_substitute_type(pool, sig.param_types[i as usize], map)
+        i = i + 1
+    }
+    new_sig.return_type = mono_substitute_type(pool, sig.return_type, map)
+    return new_sig
+}
+
+fn mono_build_type_map(sig: MonoFnSig, type_args: [i64; 8], type_arg_count: i64) -> MonoTypeMap with Mut, Panic, Div {
+    var map = mono_type_map_new()
+    var i: i64 = 0
+    var limit = sig.type_param_count
+    if type_arg_count < limit { limit = type_arg_count }
+    while i < limit {
+        map = mono_type_map_insert(map, sig.type_param_ids[i as usize], type_args[i as usize])
+        i = i + 1
+    }
+    return map
+}
+
+fn mono_specialized_name_hash(original_hash: i64, type_args: [i64; 8], type_arg_count: i64) -> i64 with Mut, Panic, Div {
+    var hash = original_hash
+    hash = hash * 65599 + 7919
+    var i: i64 = 0
+    while i < type_arg_count {
+        hash = hash * 65599 + type_args[i as usize]
+        hash = hash & 9223372036854775807
+        i = i + 1
+    }
+    return hash
+}
+
+// ============================================================
+// Validation — check no generics remain after monomorphization
+// ============================================================
+
+fn mono_validate_no_generics_in_body(body: MonoFnBody, pool: MonoTypePool) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < body.count {
+        let node = body.nodes[i as usize]
+        if node.type_id >= 0 {
+            if mono_type_has_vars(pool, node.type_id) { return false }
+        }
+        if node.callee_type_arg_count > 0 { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// ============================================================
+// Call site rewriting — replace generic calls with specialized IDs
+// ============================================================
+
+fn mono_rewrite_call_in_body(body: MonoFnBody, cache: MonoCache) -> MonoFnBody with Mut, Panic, Div {
+    var new_body = body
+    var i: i64 = 0
+    while i < new_body.count {
+        let node = new_body.nodes[i as usize]
+        if node.kind == MONO_NODE_CALL {
+            if node.callee_type_arg_count > 0 {
+                let spec_id = mono_cache_lookup(cache, node.callee_fn_id, node.callee_type_args, node.callee_type_arg_count)
+                if spec_id != MONO_NOT_FOUND {
+                    var rewritten = node
+                    rewritten.callee_fn_id = spec_id
+                    rewritten.callee_type_arg_count = 0
+                    rewritten.callee_type_args = [0, 0, 0, 0, 0, 0, 0, 0]
+                    new_body.nodes[i as usize] = rewritten
+                }
+            }
+        }
+        i = i + 1
+    }
+    return new_body
+}
+
+// ============================================================
+// MonoContext — full monomorphization context
+// ============================================================
+
+struct MonoContext {
+    cache: MonoCache,
+    fn_table: MonoFnTable,
+    type_pool: MonoTypePool,
+    worklist: MonoWorklist,
+    depth_stack: MonoDepthStack,
+    errors: MonoErrorList,
+    next_fn_id: i64,
+    bodies: [MonoFnBody; 4096],
+    body_count: i64,
+    specialized_bodies: [MonoFnBody; 4096],
+    specialized_body_count: i64,
+    iteration_count: i64,
+    max_iterations: i64,
+}
+
+fn mono_context_new() -> MonoContext {
+    MonoContext {
+        cache: mono_cache_new(), fn_table: mono_fn_table_new(),
+        type_pool: mono_type_pool_new(), worklist: mono_worklist_new(),
+        depth_stack: mono_depth_stack_new(), errors: mono_error_list_new(),
+        next_fn_id: 1000, bodies: [mono_empty_fn_body(); 4096], body_count: 0,
+        specialized_bodies: [mono_empty_fn_body(); 4096], specialized_body_count: 0,
+        iteration_count: 0, max_iterations: 10000,
+    }
+}
+
+fn mono_register_fn(ctx: MonoContext, sig: MonoFnSig, body: MonoFnBody) -> i64 with Mut, Panic, Div {
+    var c = ctx
+    let idx = mono_fn_table_add(c.fn_table, sig)
+    if idx != MONO_NOT_FOUND {
+        if idx < 4096 {
+            c.bodies[idx as usize] = body
+            c.body_count = c.body_count + 1
+        }
+    }
+    return idx
+}
+
+// ============================================================
+// Core specialization of a single function
+// ============================================================
+
+fn mono_specialize_one(ctx: MonoContext, fn_id: i64, type_args: [i64; 8], type_arg_count: i64) -> i64 with Mut, Panic, Div {
+    var c = ctx
+
+    let cached = mono_cache_lookup(c.cache, fn_id, type_args, type_arg_count)
+    if cached != MONO_NOT_FOUND { return cached }
+
+    let sig = mono_fn_table_get(c.fn_table, fn_id)
+    if sig.fn_id < 0 {
+        c.errors = mono_error_list_add(c.errors, mono_error_fn_not_found(fn_id))
+        return MONO_NOT_FOUND
+    }
+
+    if type_arg_count != sig.type_param_count {
+        c.errors = mono_error_list_add(c.errors, mono_error_arg_mismatch(fn_id, sig.type_param_count, type_arg_count))
+        return MONO_NOT_FOUND
+    }
+
+    let current_depth = mono_depth_stack_current_depth(c.depth_stack)
+    if current_depth >= MONO_MAX_DEPTH {
+        c.errors = mono_error_list_add(c.errors, mono_error_depth(fn_id, current_depth))
+        return MONO_NOT_FOUND
+    }
+
+    // Cycle detection: if fn appears >3 times on stack, it is recursive
+    let fn_occurrences = mono_depth_stack_count_fn(c.depth_stack, fn_id)
+    if fn_occurrences > 3 {
+        c.errors = mono_error_list_add(c.errors, mono_error_cycle(fn_id))
+        return MONO_NOT_FOUND
+    }
+
+    let map = mono_build_type_map(sig, type_args, type_arg_count)
+    let spec_name = mono_specialized_name_hash(sig.name_hash, type_args, type_arg_count)
+
+    var new_sig = mono_specialize_sig(sig, c.type_pool, map, spec_name)
+    let spec_fn_id = c.next_fn_id
+    new_sig.fn_id = spec_fn_id
+    c.next_fn_id = c.next_fn_id + 1
+
+    let new_idx = mono_fn_table_add(c.fn_table, new_sig)
+    let insert_result = mono_cache_insert(c.cache, fn_id, type_args, type_arg_count, spec_fn_id, current_depth + 1)
+    if insert_result == MONO_NOT_FOUND {
+        c.errors = mono_error_list_add(c.errors, mono_error_cache_full())
+        return MONO_NOT_FOUND
+    }
+
+    // Specialize body
+    if fn_id < 4096 {
+        let body = c.bodies[fn_id as usize]
+        if body.count > 0 {
+            let new_body = mono_specialize_body(body, c.type_pool, map)
+            if c.specialized_body_count < 4096 {
+                c.specialized_bodies[c.specialized_body_count as usize] = new_body
+                c.specialized_body_count = c.specialized_body_count + 1
+            }
+        }
+    }
+
+    return spec_fn_id
+}
+
+// ============================================================
+// Worklist-based driver
+// ============================================================
+
+fn mono_seed_worklist(ctx: MonoContext) -> MonoContext with Mut, Panic, Div {
+    var c = ctx
+    var i: i64 = 0
+    while i < c.fn_table.count {
+        let sig = c.fn_table.fns[i as usize]
+        if sig.is_generic == false {
+            if i < 4096 {
+                let body = c.bodies[i as usize]
+                let sites = mono_scan_body_for_calls(body, c.fn_table, i)
+                var j: i64 = 0
+                while j < sites.count {
+                    let site = sites.sites[j as usize]
+                    let cached = mono_cache_lookup(c.cache, site.callee_fn_id, site.type_args, site.type_arg_count)
+                    if cached == MONO_NOT_FOUND {
+                        if mono_worklist_has(c.worklist, site.callee_fn_id, site.type_args, site.type_arg_count) == false {
+                            let entry = MonoEntry {
+                                original_fn_id: site.callee_fn_id, type_args: site.type_args,
+                                type_arg_count: site.type_arg_count, specialized_fn_id: 0 - 1,
+                                depth: 0, is_valid: true,
+                            }
+                            c.worklist = mono_worklist_push(c.worklist, entry)
+                        }
+                    }
+                    j = j + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    return c
+}
+
+fn mono_process_worklist(ctx: MonoContext) -> MonoContext with Mut, Panic, Div {
+    var c = ctx
+    while mono_worklist_is_empty(c.worklist) == false {
+        if c.iteration_count >= c.max_iterations { return c }
+        c.iteration_count = c.iteration_count + 1
+
+        let entry = mono_worklist_pop(c.worklist)
+        c.worklist.head = c.worklist.head + 1
+
+        if entry.is_valid {
+            let cached = mono_cache_lookup(c.cache, entry.original_fn_id, entry.type_args, entry.type_arg_count)
+            if cached == MONO_NOT_FOUND {
+                c.depth_stack = mono_depth_stack_push(c.depth_stack, entry.original_fn_id, entry.depth)
+                let spec_id = mono_specialize_one(c, entry.original_fn_id, entry.type_args, entry.type_arg_count)
+                c.depth_stack = mono_depth_stack_pop(c.depth_stack)
+
+                // Discover transitive call sites in the specialized body
+                if spec_id != MONO_NOT_FOUND {
+                    if entry.original_fn_id < 4096 {
+                        let orig_body = c.bodies[entry.original_fn_id as usize]
+                        if orig_body.count > 0 {
+                            let sig = mono_fn_table_get(c.fn_table, entry.original_fn_id)
+                            let map = mono_build_type_map(sig, entry.type_args, entry.type_arg_count)
+                            let spec_body = mono_specialize_body(orig_body, c.type_pool, map)
+                            let new_sites = mono_scan_body_for_calls(spec_body, c.fn_table, spec_id)
+                            var k: i64 = 0
+                            while k < new_sites.count {
+                                let ns = new_sites.sites[k as usize]
+                                let c2 = mono_cache_lookup(c.cache, ns.callee_fn_id, ns.type_args, ns.type_arg_count)
+                                if c2 == MONO_NOT_FOUND {
+                                    if mono_worklist_has(c.worklist, ns.callee_fn_id, ns.type_args, ns.type_arg_count) == false {
+                                        let ne = MonoEntry {
+                                            original_fn_id: ns.callee_fn_id, type_args: ns.type_args,
+                                            type_arg_count: ns.type_arg_count, specialized_fn_id: 0 - 1,
+                                            depth: entry.depth + 1, is_valid: true,
+                                        }
+                                        c.worklist = mono_worklist_push(c.worklist, ne)
+                                    }
+                                }
+                                k = k + 1
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return c
+}
+
+fn mono_run_pass(ctx: MonoContext) -> MonoContext with Mut, Panic, Div {
+    var c = ctx
+    c = mono_seed_worklist(c)
+    c = mono_process_worklist(c)
+    return c
+}
+
+// ============================================================
+// MonoStats — summary statistics
+// ============================================================
+
+struct MonoStats {
+    total_specializations: i64,
+    total_iterations: i64,
+    total_errors: i64,
+    max_depth_seen: i64,
+}
+
+fn mono_compute_stats(ctx: MonoContext) -> MonoStats with Mut, Panic, Div {
+    var max_depth: i64 = 0
+    var i: i64 = 0
+    while i < ctx.cache.entry_count {
+        let entry = ctx.cache.entries[i as usize]
+        if entry.depth > max_depth { max_depth = entry.depth }
+        i = i + 1
+    }
+    return MonoStats {
+        total_specializations: ctx.cache.entry_count, total_iterations: ctx.iteration_count,
+        total_errors: ctx.errors.count, max_depth_seen: max_depth,
+    }
+}
+
+// Rewrite all bodies in the context to replace generic calls with specialized IDs.
+fn mono_rewrite_all_calls(ctx: MonoContext) -> MonoContext with Mut, Panic, Div {
+    var c = ctx
+    var i: i64 = 0
+    while i < c.body_count {
+        c.bodies[i as usize] = mono_rewrite_call_in_body(c.bodies[i as usize], c.cache)
+        i = i + 1
+    }
+    var j: i64 = 0
+    while j < c.specialized_body_count {
+        c.specialized_bodies[j as usize] = mono_rewrite_call_in_body(c.specialized_bodies[j as usize], c.cache)
+        j = j + 1
+    }
+    return c
+}
+
+// ============================================================
+// Type argument builder helpers
+// ============================================================
+
+fn mono_make_type_args_1(a: i64) -> [i64; 8] { return [a, 0, 0, 0, 0, 0, 0, 0] }
+fn mono_make_type_args_2(a: i64, b: i64) -> [i64; 8] { return [a, b, 0, 0, 0, 0, 0, 0] }
+fn mono_make_type_args_3(a: i64, b: i64, c: i64) -> [i64; 8] { return [a, b, c, 0, 0, 0, 0, 0] }
+fn mono_make_type_args_4(a: i64, b: i64, c: i64, d: i64) -> [i64; 8] { return [a, b, c, d, 0, 0, 0, 0] }
+
+// ============================================================
+// Collect all type variables in a type (for analysis)
+// ============================================================
+
+fn mono_collect_vars_in_type(pool: MonoTypePool, type_id: i64, out_vars: [i64; 64], out_count: i64) -> i64 with Mut, Panic, Div {
+    if type_id < 0 { return out_count }
+    if type_id >= pool.count { return out_count }
+    let node = mono_type_pool_get(pool, type_id)
+    if node.kind == MONO_TY_VAR {
+        var already = false
+        var k: i64 = 0
+        while k < out_count {
+            if out_vars[k as usize] == node.var_id { already = true }
+            k = k + 1
+        }
+        if already == false {
+            if out_count < 64 { return out_count + 1 }
+        }
+        return out_count
+    }
+    var current = out_count
+    var i: i64 = 0
+    while i < node.child_count {
+        current = mono_collect_vars_in_type(pool, node.children[i as usize], out_vars, current)
+        i = i + 1
+    }
+    return current
+}
+
+// ============================================================
+//
+//   T E S T S
+//
+// ============================================================
+
+// Helper: pool with 5 primitives pre-allocated at ids 0..4
+fn test_mono_make_pool() -> MonoTypePool with Mut, Panic, Div {
+    var pool = mono_type_pool_new()
+    let a0 = mono_type_pool_alloc_prim(pool, MONO_TY_I64)
+    let a1 = mono_type_pool_alloc_prim(pool, MONO_TY_F64)
+    let a2 = mono_type_pool_alloc_prim(pool, MONO_TY_BOOL)
+    let a3 = mono_type_pool_alloc_prim(pool, MONO_TY_STRING)
+    let a4 = mono_type_pool_alloc_prim(pool, MONO_TY_UNIT)
+    return pool
+}
+
+// Helper: generic identity<T>(x:T)->T, type_param T has var_id 1000
+fn test_mono_make_identity_sig(var_type_id: i64) -> MonoFnSig with Mut, Panic, Div {
+    var sig = mono_empty_fn_sig()
+    sig.fn_id = 0
+    sig.name_hash = 12345
+    sig.param_types[0 as usize] = var_type_id
+    sig.param_count = 1
+    sig.return_type = var_type_id
+    sig.type_param_count = 1
+    sig.type_param_ids[0 as usize] = 1000
+    sig.is_generic = true
+    return sig
+}
+
+fn test_mono_make_identity_body(var_type_id: i64) -> MonoFnBody with Mut, Panic, Div {
+    var body = mono_empty_fn_body()
+    var node = mono_empty_body_node()
+    node.kind = MONO_NODE_VAR
+    node.type_id = var_type_id
+    node.var_name_hash = 99
+    body.nodes[0 as usize] = node
+    body.count = 1
+    body.root = 0
+    return body
+}
+
+// ----- Test 1: Cache insert and lookup -----
+fn test_mono_cache_insert() -> i32 with IO, Mut, Div, Panic {
+    var cache = mono_cache_new()
+    let ta = mono_make_type_args_1(0)
+    let result = mono_cache_insert(cache, 42, ta, 1, 100, 0)
+    if result == MONO_NOT_FOUND {
+        print("FAIL: test_mono_cache_insert\n")
+        return 1
+    }
+    let lookup = mono_cache_lookup(cache, 42, ta, 1)
+    if lookup != 100 {
+        print("FAIL: test_mono_cache_insert - lookup\n")
+        return 1
+    }
+    print("PASS: test_mono_cache_insert\n")
+    return 0
+}
+
+// ----- Test 2: Cache lookup miss -----
+fn test_mono_cache_lookup_miss() -> i32 with IO, Mut, Div, Panic {
+    let cache = mono_cache_new()
+    let ta = mono_make_type_args_1(0)
+    if mono_cache_lookup(cache, 42, ta, 1) != MONO_NOT_FOUND {
+        print("FAIL: test_mono_cache_lookup_miss\n")
+        return 1
+    }
+    print("PASS: test_mono_cache_lookup_miss\n")
+    return 0
+}
+
+// ----- Test 3: Cache duplicate prevention -----
+fn test_mono_cache_no_duplicate() -> i32 with IO, Mut, Div, Panic {
+    var cache = mono_cache_new()
+    let ta = mono_make_type_args_1(0)
+    let r1 = mono_cache_insert(cache, 42, ta, 1, 100, 0)
+    let r2 = mono_cache_insert(cache, 42, ta, 1, 200, 0)
+    if r2 != MONO_NOT_FOUND {
+        print("FAIL: test_mono_cache_no_duplicate\n")
+        return 1
+    }
+    if mono_cache_lookup(cache, 42, ta, 1) != 100 {
+        print("FAIL: test_mono_cache_no_duplicate - value\n")
+        return 1
+    }
+    print("PASS: test_mono_cache_no_duplicate\n")
+    return 0
+}
+
+// ----- Test 4: Cache with multiple entries -----
+fn test_mono_cache_multiple() -> i32 with IO, Mut, Div, Panic {
+    var cache = mono_cache_new()
+    let r1 = mono_cache_insert(cache, 42, mono_make_type_args_1(0), 1, 100, 0)
+    let r2 = mono_cache_insert(cache, 42, mono_make_type_args_1(1), 1, 101, 0)
+    let r3 = mono_cache_insert(cache, 42, mono_make_type_args_1(2), 1, 102, 0)
+    if mono_cache_lookup(cache, 42, mono_make_type_args_1(0), 1) != 100 {
+        print("FAIL: test_mono_cache_multiple - l0\n")
+        return 1
+    }
+    if mono_cache_lookup(cache, 42, mono_make_type_args_1(1), 1) != 101 {
+        print("FAIL: test_mono_cache_multiple - l1\n")
+        return 1
+    }
+    if mono_cache_lookup(cache, 42, mono_make_type_args_1(2), 1) != 102 {
+        print("FAIL: test_mono_cache_multiple - l2\n")
+        return 1
+    }
+    print("PASS: test_mono_cache_multiple\n")
+    return 0
+}
+
+// ----- Test 5: Cache different fn_ids same type args -----
+fn test_mono_cache_different_fns() -> i32 with IO, Mut, Div, Panic {
+    var cache = mono_cache_new()
+    let ta = mono_make_type_args_1(0)
+    let r1 = mono_cache_insert(cache, 10, ta, 1, 200, 0)
+    let r2 = mono_cache_insert(cache, 20, ta, 1, 201, 0)
+    if mono_cache_lookup(cache, 10, ta, 1) != 200 {
+        print("FAIL: test_mono_cache_different_fns - 10\n")
+        return 1
+    }
+    if mono_cache_lookup(cache, 20, ta, 1) != 201 {
+        print("FAIL: test_mono_cache_different_fns - 20\n")
+        return 1
+    }
+    print("PASS: test_mono_cache_different_fns\n")
+    return 0
+}
+
+// ----- Test 6: Type map basic -----
+fn test_mono_type_map_basic() -> i32 with IO, Mut, Div, Panic {
+    var m = mono_type_map_new()
+    m = mono_type_map_insert(m, 1000, 0)
+    m = mono_type_map_insert(m, 1001, 1)
+    if mono_type_map_lookup(m, 1000) != 0 {
+        print("FAIL: test_mono_type_map_basic - 1000\n")
+        return 1
+    }
+    if mono_type_map_lookup(m, 1001) != 1 {
+        print("FAIL: test_mono_type_map_basic - 1001\n")
+        return 1
+    }
+    if mono_type_map_lookup(m, 1002) != MONO_NOT_FOUND {
+        print("FAIL: test_mono_type_map_basic - 1002\n")
+        return 1
+    }
+    print("PASS: test_mono_type_map_basic\n")
+    return 0
+}
+
+// ----- Test 7: Type map overwrite -----
+fn test_mono_type_map_overwrite() -> i32 with IO, Mut, Div, Panic {
+    var m = mono_type_map_new()
+    m = mono_type_map_insert(m, 1000, 0)
+    m = mono_type_map_insert(m, 1000, 5)
+    if mono_type_map_lookup(m, 1000) != 5 {
+        print("FAIL: test_mono_type_map_overwrite\n")
+        return 1
+    }
+    if m.count != 1 {
+        print("FAIL: test_mono_type_map_overwrite - count\n")
+        return 1
+    }
+    print("PASS: test_mono_type_map_overwrite\n")
+    return 0
+}
+
+// ----- Test 8: Type map has -----
+fn test_mono_type_map_has() -> i32 with IO, Mut, Div, Panic {
+    var m = mono_type_map_new()
+    m = mono_type_map_insert(m, 1000, 0)
+    if mono_type_map_has(m, 1000) == false {
+        print("FAIL: test_mono_type_map_has - 1000\n")
+        return 1
+    }
+    if mono_type_map_has(m, 1001) {
+        print("FAIL: test_mono_type_map_has - 1001\n")
+        return 1
+    }
+    print("PASS: test_mono_type_map_has\n")
+    return 0
+}
+
+// ----- Test 9: Type map clear -----
+fn test_mono_type_map_clear() -> i32 with IO, Mut, Div, Panic {
+    var m = mono_type_map_new()
+    m = mono_type_map_insert(m, 1000, 0)
+    m = mono_type_map_clear(m)
+    if m.count != 0 {
+        print("FAIL: test_mono_type_map_clear\n")
+        return 1
+    }
+    print("PASS: test_mono_type_map_clear\n")
+    return 0
+}
+
+// ----- Test 10: Type map equality -----
+fn test_mono_type_map_eq() -> i32 with IO, Mut, Div, Panic {
+    var m1 = mono_type_map_new()
+    m1 = mono_type_map_insert(m1, 1000, 0)
+    m1 = mono_type_map_insert(m1, 1001, 1)
+    var m2 = mono_type_map_new()
+    m2 = mono_type_map_insert(m2, 1000, 0)
+    m2 = mono_type_map_insert(m2, 1001, 1)
+    if mono_type_map_eq(m1, m2) == false {
+        print("FAIL: test_mono_type_map_eq - equal\n")
+        return 1
+    }
+    var m3 = mono_type_map_new()
+    m3 = mono_type_map_insert(m3, 1000, 0)
+    m3 = mono_type_map_insert(m3, 1001, 2)
+    if mono_type_map_eq(m1, m3) {
+        print("FAIL: test_mono_type_map_eq - not equal\n")
+        return 1
+    }
+    print("PASS: test_mono_type_map_eq\n")
+    return 0
+}
+
+// ----- Test 11: Simple type substitution -----
+fn test_mono_subst_simple() -> i32 with IO, Mut, Div, Panic {
+    var pool = test_mono_make_pool()
+    let vid = mono_type_pool_alloc_var(pool, 1000)
+    var m = mono_type_map_new()
+    m = mono_type_map_insert(m, 1000, 0)
+    let result = mono_substitute_type(pool, 5, m)
+    if result != 0 {
+        print("FAIL: test_mono_subst_simple\n")
+        return 1
+    }
+    print("PASS: test_mono_subst_simple\n")
+    return 0
+}
+
+// ----- Test 12: Substitution on function type -----
+fn test_mono_subst_fn_type() -> i32 with IO, Mut, Div, Panic {
+    var pool = test_mono_make_pool()
+    let vid = mono_type_pool_alloc_var(pool, 1000)
+    let fnt = mono_type_pool_alloc_fn(pool, 5, 5)
+    var m = mono_type_map_new()
+    m = mono_type_map_insert(m, 1000, 0)
+    let result = mono_substitute_type(pool, 6, m)
+    let rn = mono_type_pool_get(pool, result)
+    if rn.kind != MONO_TY_FN {
+        print("FAIL: test_mono_subst_fn_type - kind\n")
+        return 1
+    }
+    if rn.children[0 as usize] != 0 {
+        print("FAIL: test_mono_subst_fn_type - dom\n")
+        return 1
+    }
+    if rn.children[1 as usize] != 0 {
+        print("FAIL: test_mono_subst_fn_type - cod\n")
+        return 1
+    }
+    print("PASS: test_mono_subst_fn_type\n")
+    return 0
+}
+
+// ----- Test 13: Substitution on array type -----
+fn test_mono_subst_array() -> i32 with IO, Mut, Div, Panic {
+    var pool = test_mono_make_pool()
+    let vid = mono_type_pool_alloc_var(pool, 1000)
+    let arr = mono_type_pool_alloc_array(pool, 5, 10)
+    var m = mono_type_map_new()
+    m = mono_type_map_insert(m, 1000, 1)
+    let result = mono_substitute_type(pool, 6, m)
+    let rn = mono_type_pool_get(pool, result)
+    if rn.kind != MONO_TY_ARRAY {
+        print("FAIL: test_mono_subst_array - kind\n")
+        return 1
+    }
+    if rn.children[0 as usize] != 1 {
+        print("FAIL: test_mono_subst_array - elem\n")
+        return 1
+    }
+    if rn.array_size != 10 {
+        print("FAIL: test_mono_subst_array - size\n")
+        return 1
+    }
+    print("PASS: test_mono_subst_array\n")
+    return 0
+}
+
+// ----- Test 14: Substitution leaves concrete types unchanged -----
+fn test_mono_subst_no_change() -> i32 with IO, Mut, Div, Panic {
+    var pool = test_mono_make_pool()
+    var m = mono_type_map_new()
+    m = mono_type_map_insert(m, 1000, 1)
+    if mono_substitute_type(pool, 0, m) != 0 {
+        print("FAIL: test_mono_subst_no_change\n")
+        return 1
+    }
+    print("PASS: test_mono_subst_no_change\n")
+    return 0
+}
+
+// ----- Test 15: Nested substitution (Pair<T,U> -> Pair<i64,bool>) -----
+fn test_mono_subst_nested() -> i32 with IO, Mut, Div, Panic {
+    var pool = test_mono_make_pool()
+    let vt = mono_type_pool_alloc_var(pool, 1000)
+    let vu = mono_type_pool_alloc_var(pool, 1001)
+    var args: [i64; 8] = [5, 6, 0, 0, 0, 0, 0, 0]
+    let pair = mono_type_pool_alloc_named(pool, 9999, args, 2)
+    var m = mono_type_map_new()
+    m = mono_type_map_insert(m, 1000, 0)
+    m = mono_type_map_insert(m, 1001, 2)
+    let result = mono_substitute_type(pool, 7, m)
+    let rn = mono_type_pool_get(pool, result)
+    if rn.kind != MONO_TY_NAMED {
+        print("FAIL: test_mono_subst_nested - kind\n")
+        return 1
+    }
+    if rn.children[0 as usize] != 0 {
+        print("FAIL: test_mono_subst_nested - T\n")
+        return 1
+    }
+    if rn.children[1 as usize] != 2 {
+        print("FAIL: test_mono_subst_nested - U\n")
+        return 1
+    }
+    print("PASS: test_mono_subst_nested\n")
+    return 0
+}
+
+// ----- Test 16: Type has vars -----
+fn test_mono_type_has_vars() -> i32 with IO, Mut, Div, Panic {
+    var pool = test_mono_make_pool()
+    let vt = mono_type_pool_alloc_var(pool, 1000)
+    if mono_type_has_vars(pool, 5) == false {
+        print("FAIL: test_mono_type_has_vars - var\n")
+        return 1
+    }
+    if mono_type_has_vars(pool, 0) {
+        print("FAIL: test_mono_type_has_vars - i64\n")
+        return 1
+    }
+    print("PASS: test_mono_type_has_vars\n")
+    return 0
+}
+
+// ----- Test 17: Type equality -----
+fn test_mono_type_eq() -> i32 with IO, Mut, Div, Panic {
+    var pool = test_mono_make_pool()
+    if mono_type_eq(pool, 0, 0) == false {
+        print("FAIL: test_mono_type_eq - same\n")
+        return 1
+    }
+    if mono_type_eq(pool, 0, 1) {
+        print("FAIL: test_mono_type_eq - diff\n")
+        return 1
+    }
+    print("PASS: test_mono_type_eq\n")
+    return 0
+}
+
+// ----- Test 18: Type args equality -----
+fn test_mono_type_args_eq_test() -> i32 with IO, Mut, Div, Panic {
+    let a = mono_make_type_args_2(0, 1)
+    let b = mono_make_type_args_2(0, 1)
+    let c = mono_make_type_args_2(0, 2)
+    if mono_type_args_eq(a, 2, b, 2) == false {
+        print("FAIL: test_mono_type_args_eq_test - eq\n")
+        return 1
+    }
+    if mono_type_args_eq(a, 2, c, 2) {
+        print("FAIL: test_mono_type_args_eq_test - neq\n")
+        return 1
+    }
+    print("PASS: test_mono_type_args_eq_test\n")
+    return 0
+}
+
+// ----- Test 19: Hash determinism -----
+fn test_mono_hash_deterministic() -> i32 with IO, Mut, Div, Panic {
+    let ta = mono_make_type_args_2(10, 20)
+    let h1 = mono_hash_key(42, ta, 2)
+    let h2 = mono_hash_key(42, ta, 2)
+    if h1 != h2 {
+        print("FAIL: test_mono_hash_deterministic\n")
+        return 1
+    }
+    let h3 = mono_hash_key(43, ta, 2)
+    if h1 == h3 {
+        print("FAIL: test_mono_hash_deterministic - collision\n")
+        return 1
+    }
+    print("PASS: test_mono_hash_deterministic\n")
+    return 0
+}
+
+// ----- Test 20: Worklist push and pop -----
+fn test_mono_worklist_basic() -> i32 with IO, Mut, Div, Panic {
+    var wl = mono_worklist_new()
+    let e = MonoEntry {
+        original_fn_id: 42, type_args: mono_make_type_args_1(0), type_arg_count: 1,
+        specialized_fn_id: 0 - 1, depth: 0, is_valid: true,
+    }
+    wl = mono_worklist_push(wl, e)
+    if mono_worklist_is_empty(wl) {
+        print("FAIL: test_mono_worklist_basic - empty\n")
+        return 1
+    }
+    if mono_worklist_size(wl) != 1 {
+        print("FAIL: test_mono_worklist_basic - size\n")
+        return 1
+    }
+    let p = mono_worklist_pop(wl)
+    if p.original_fn_id != 42 {
+        print("FAIL: test_mono_worklist_basic - fn_id\n")
+        return 1
+    }
+    print("PASS: test_mono_worklist_basic\n")
+    return 0
+}
+
+// ----- Test 21: Worklist dedup check -----
+fn test_mono_worklist_has() -> i32 with IO, Mut, Div, Panic {
+    var wl = mono_worklist_new()
+    let ta = mono_make_type_args_1(0)
+    let e = MonoEntry {
+        original_fn_id: 42, type_args: ta, type_arg_count: 1,
+        specialized_fn_id: 0 - 1, depth: 0, is_valid: true,
+    }
+    wl = mono_worklist_push(wl, e)
+    if mono_worklist_has(wl, 42, ta, 1) == false {
+        print("FAIL: test_mono_worklist_has - found\n")
+        return 1
+    }
+    if mono_worklist_has(wl, 42, mono_make_type_args_1(1), 1) {
+        print("FAIL: test_mono_worklist_has - not found\n")
+        return 1
+    }
+    print("PASS: test_mono_worklist_has\n")
+    return 0
+}
+
+// ----- Test 22: Depth stack push/pop -----
+fn test_mono_depth_stack_basic() -> i32 with IO, Mut, Div, Panic {
+    var ds = mono_depth_stack_new()
+    ds = mono_depth_stack_push(ds, 10, 0)
+    ds = mono_depth_stack_push(ds, 20, 1)
+    if mono_depth_stack_current_depth(ds) != 1 {
+        print("FAIL: test_mono_depth_stack_basic - depth\n")
+        return 1
+    }
+    if mono_depth_stack_contains(ds, 10) == false {
+        print("FAIL: test_mono_depth_stack_basic - contains\n")
+        return 1
+    }
+    ds = mono_depth_stack_pop(ds)
+    if mono_depth_stack_current_depth(ds) != 0 {
+        print("FAIL: test_mono_depth_stack_basic - after pop\n")
+        return 1
+    }
+    print("PASS: test_mono_depth_stack_basic\n")
+    return 0
+}
+
+// ----- Test 23: Depth stack cycle count -----
+fn test_mono_depth_stack_count() -> i32 with IO, Mut, Div, Panic {
+    var ds = mono_depth_stack_new()
+    ds = mono_depth_stack_push(ds, 10, 0)
+    ds = mono_depth_stack_push(ds, 20, 1)
+    ds = mono_depth_stack_push(ds, 10, 2)
+    if mono_depth_stack_count_fn(ds, 10) != 2 {
+        print("FAIL: test_mono_depth_stack_count\n")
+        return 1
+    }
+    print("PASS: test_mono_depth_stack_count\n")
+    return 0
+}
+
+// ----- Test 24: Error kinds -----
+fn test_mono_error_kinds() -> i32 with IO, Mut, Div, Panic {
+    if mono_error_depth(42, 64).kind != MONO_ERR_DEPTH_EXCEEDED {
+        print("FAIL: test_mono_error_kinds - depth\n")
+        return 1
+    }
+    if mono_error_cycle(42).kind != MONO_ERR_CYCLE_DETECTED {
+        print("FAIL: test_mono_error_kinds - cycle\n")
+        return 1
+    }
+    if mono_error_fn_not_found(99).kind != MONO_ERR_FN_NOT_FOUND {
+        print("FAIL: test_mono_error_kinds - not_found\n")
+        return 1
+    }
+    print("PASS: test_mono_error_kinds\n")
+    return 0
+}
+
+// ----- Test 25: Error list -----
+fn test_mono_error_list() -> i32 with IO, Mut, Div, Panic {
+    var el = mono_error_list_new()
+    if mono_error_list_has_errors(el) {
+        print("FAIL: test_mono_error_list - empty\n")
+        return 1
+    }
+    el = mono_error_list_add(el, mono_error_depth(42, 64))
+    if mono_error_list_has_errors(el) == false {
+        print("FAIL: test_mono_error_list - has\n")
+        return 1
+    }
+    if el.count != 1 {
+        print("FAIL: test_mono_error_list - count\n")
+        return 1
+    }
+    print("PASS: test_mono_error_list\n")
+    return 0
+}
+
+// ----- Test 26: Fn table add and get -----
+fn test_mono_fn_table_basic() -> i32 with IO, Mut, Div, Panic {
+    var table = mono_fn_table_new()
+    var sig = mono_empty_fn_sig()
+    sig.fn_id = 0
+    sig.name_hash = 111
+    sig.is_generic = true
+    let idx = mono_fn_table_add(table, sig)
+    if idx != 0 {
+        print("FAIL: test_mono_fn_table_basic - idx\n")
+        return 1
+    }
+    let got = mono_fn_table_get(table, 0)
+    if got.name_hash != 111 {
+        print("FAIL: test_mono_fn_table_basic - hash\n")
+        return 1
+    }
+    print("PASS: test_mono_fn_table_basic\n")
+    return 0
+}
+
+// ----- Test 27: Fn table find by hash -----
+fn test_mono_fn_table_find() -> i32 with IO, Mut, Div, Panic {
+    var table = mono_fn_table_new()
+    var s1 = mono_empty_fn_sig()
+    s1.fn_id = 0
+    s1.name_hash = 111
+    var s2 = mono_empty_fn_sig()
+    s2.fn_id = 1
+    s2.name_hash = 222
+    let i1 = mono_fn_table_add(table, s1)
+    let i2 = mono_fn_table_add(table, s2)
+    if mono_fn_table_find_by_hash(table, 222) != 1 {
+        print("FAIL: test_mono_fn_table_find\n")
+        return 1
+    }
+    if mono_fn_table_find_by_hash(table, 333) != MONO_NOT_FOUND {
+        print("FAIL: test_mono_fn_table_find - miss\n")
+        return 1
+    }
+    print("PASS: test_mono_fn_table_find\n")
+    return 0
+}
+
+// ----- Test 28: Specialize identity signature -----
+fn test_mono_specialize_identity_sig() -> i32 with IO, Mut, Div, Panic {
+    var pool = test_mono_make_pool()
+    let vt = mono_type_pool_alloc_var(pool, 1000)
+    let sig = test_mono_make_identity_sig(5)
+    var m = mono_type_map_new()
+    m = mono_type_map_insert(m, 1000, 0)
+    let ns = mono_specialize_sig(sig, pool, m, 54321)
+    if ns.is_generic {
+        print("FAIL: test_mono_specialize_identity_sig - generic\n")
+        return 1
+    }
+    if ns.param_types[0 as usize] != 0 {
+        print("FAIL: test_mono_specialize_identity_sig - param\n")
+        return 1
+    }
+    if ns.return_type != 0 {
+        print("FAIL: test_mono_specialize_identity_sig - ret\n")
+        return 1
+    }
+    print("PASS: test_mono_specialize_identity_sig\n")
+    return 0
+}
+
+// ----- Test 29: Specialize identity body -----
+fn test_mono_specialize_identity_body() -> i32 with IO, Mut, Div, Panic {
+    var pool = test_mono_make_pool()
+    let vt = mono_type_pool_alloc_var(pool, 1000)
+    let body = test_mono_make_identity_body(5)
+    var m = mono_type_map_new()
+    m = mono_type_map_insert(m, 1000, 0)
+    let nb = mono_specialize_body(body, pool, m)
+    if nb.count != 1 {
+        print("FAIL: test_mono_specialize_identity_body - count\n")
+        return 1
+    }
+    if nb.nodes[0 as usize].type_id != 0 {
+        print("FAIL: test_mono_specialize_identity_body - type\n")
+        return 1
+    }
+    print("PASS: test_mono_specialize_identity_body\n")
+    return 0
+}
+
+// ----- Test 30: Build type map -----
+fn test_mono_build_type_map() -> i32 with IO, Mut, Div, Panic {
+    var pool = test_mono_make_pool()
+    let vt = mono_type_pool_alloc_var(pool, 1000)
+    let sig = test_mono_make_identity_sig(5)
+    let map = mono_build_type_map(sig, mono_make_type_args_1(0), 1)
+    if mono_type_map_lookup(map, 1000) != 0 {
+        print("FAIL: test_mono_build_type_map\n")
+        return 1
+    }
+    print("PASS: test_mono_build_type_map\n")
+    return 0
+}
+
+// ----- Test 31: Scan body for call sites -----
+fn test_mono_scan_calls() -> i32 with IO, Mut, Div, Panic {
+    var body = mono_empty_fn_body()
+    var cn = mono_empty_body_node()
+    cn.kind = MONO_NODE_CALL
+    cn.callee_fn_id = 42
+    cn.callee_type_args = mono_make_type_args_1(0)
+    cn.callee_type_arg_count = 1
+    body.nodes[0 as usize] = cn
+    var cn2 = mono_empty_body_node()
+    cn2.kind = MONO_NODE_CALL
+    cn2.callee_fn_id = 99
+    cn2.callee_type_arg_count = 0
+    body.nodes[1 as usize] = cn2
+    body.count = 2
+    let sites = mono_scan_body_for_calls(body, mono_fn_table_new(), 0)
+    if sites.count != 1 {
+        print("FAIL: test_mono_scan_calls\n")
+        return 1
+    }
+    if sites.sites[0 as usize].callee_fn_id != 42 {
+        print("FAIL: test_mono_scan_calls - callee\n")
+        return 1
+    }
+    print("PASS: test_mono_scan_calls\n")
+    return 0
+}
+
+// ----- Test 32: Scan deduplicates -----
+fn test_mono_scan_dedup() -> i32 with IO, Mut, Div, Panic {
+    var body = mono_empty_fn_body()
+    var cn = mono_empty_body_node()
+    cn.kind = MONO_NODE_CALL
+    cn.callee_fn_id = 42
+    cn.callee_type_args = mono_make_type_args_1(0)
+    cn.callee_type_arg_count = 1
+    body.nodes[0 as usize] = cn
+    body.nodes[1 as usize] = cn
+    body.count = 2
+    let sites = mono_scan_body_for_calls(body, mono_fn_table_new(), 0)
+    if sites.count != 1 {
+        print("FAIL: test_mono_scan_dedup\n")
+        return 1
+    }
+    print("PASS: test_mono_scan_dedup\n")
+    return 0
+}
+
+// ----- Test 33: Rewrite call in body -----
+fn test_mono_rewrite_call() -> i32 with IO, Mut, Div, Panic {
+    var body = mono_empty_fn_body()
+    var cn = mono_empty_body_node()
+    cn.kind = MONO_NODE_CALL
+    cn.callee_fn_id = 42
+    cn.callee_type_args = mono_make_type_args_1(0)
+    cn.callee_type_arg_count = 1
+    body.nodes[0 as usize] = cn
+    body.count = 1
+    var cache = mono_cache_new()
+    let ins = mono_cache_insert(cache, 42, mono_make_type_args_1(0), 1, 100, 0)
+    let rw = mono_rewrite_call_in_body(body, cache)
+    if rw.nodes[0 as usize].callee_fn_id != 100 {
+        print("FAIL: test_mono_rewrite_call - id\n")
+        return 1
+    }
+    if rw.nodes[0 as usize].callee_type_arg_count != 0 {
+        print("FAIL: test_mono_rewrite_call - args\n")
+        return 1
+    }
+    print("PASS: test_mono_rewrite_call\n")
+    return 0
+}
+
+// ----- Test 34: Specialized name hash -----
+fn test_mono_specialized_name_hash() -> i32 with IO, Mut, Div, Panic {
+    let h1 = mono_specialized_name_hash(12345, mono_make_type_args_1(0), 1)
+    let h2 = mono_specialized_name_hash(12345, mono_make_type_args_1(1), 1)
+    if h1 == 12345 {
+        print("FAIL: test_mono_specialized_name_hash - same\n")
+        return 1
+    }
+    if h1 == h2 {
+        print("FAIL: test_mono_specialized_name_hash - diff\n")
+        return 1
+    }
+    print("PASS: test_mono_specialized_name_hash\n")
+    return 0
+}
+
+// ----- Test 35: Duplicate instantiation -----
+fn test_mono_duplicate_instantiation() -> i32 with IO, Mut, Div, Panic {
+    var cache = mono_cache_new()
+    let ta = mono_make_type_args_1(0)
+    let ins = mono_cache_insert(cache, 42, ta, 1, 100, 0)
+    if mono_is_duplicate_instantiation(cache, 42, ta, 1) == false {
+        print("FAIL: test_mono_duplicate_instantiation - dup\n")
+        return 1
+    }
+    if mono_is_duplicate_instantiation(cache, 42, mono_make_type_args_1(1), 1) {
+        print("FAIL: test_mono_duplicate_instantiation - no dup\n")
+        return 1
+    }
+    print("PASS: test_mono_duplicate_instantiation\n")
+    return 0
+}
+
+// ----- Test 36: Multi-param type args -----
+fn test_mono_multi_type_args() -> i32 with IO, Mut, Div, Panic {
+    var cache = mono_cache_new()
+    let ta = mono_make_type_args_3(0, 1, 2)
+    let ins = mono_cache_insert(cache, 50, ta, 3, 200, 0)
+    if mono_cache_lookup(cache, 50, ta, 3) != 200 {
+        print("FAIL: test_mono_multi_type_args\n")
+        return 1
+    }
+    if mono_cache_lookup(cache, 50, mono_make_type_args_3(2, 1, 0), 3) != MONO_NOT_FOUND {
+        print("FAIL: test_mono_multi_type_args - order\n")
+        return 1
+    }
+    print("PASS: test_mono_multi_type_args\n")
+    return 0
+}
+
+// ----- Test 37: Ref type substitution -----
+fn test_mono_subst_ref() -> i32 with IO, Mut, Div, Panic {
+    var pool = test_mono_make_pool()
+    let vt = mono_type_pool_alloc_var(pool, 1000)
+    let rt = mono_type_pool_alloc_ref(pool, 5, false)
+    let rmt = mono_type_pool_alloc_ref(pool, 5, true)
+    var m = mono_type_map_new()
+    m = mono_type_map_insert(m, 1000, 0)
+    let r1 = mono_substitute_type(pool, 6, m)
+    let n1 = mono_type_pool_get(pool, r1)
+    if n1.kind != MONO_TY_REF {
+        print("FAIL: test_mono_subst_ref - ref\n")
+        return 1
+    }
+    if n1.children[0 as usize] != 0 {
+        print("FAIL: test_mono_subst_ref - inner\n")
+        return 1
+    }
+    let r2 = mono_substitute_type(pool, 7, m)
+    let n2 = mono_type_pool_get(pool, r2)
+    if n2.kind != MONO_TY_REF_MUT {
+        print("FAIL: test_mono_subst_ref - ref_mut\n")
+        return 1
+    }
+    print("PASS: test_mono_subst_ref\n")
+    return 0
+}
+
+// ----- Test 38: Tuple type substitution -----
+fn test_mono_subst_tuple() -> i32 with IO, Mut, Div, Panic {
+    var pool = test_mono_make_pool()
+    let vt = mono_type_pool_alloc_var(pool, 1000)
+    let vu = mono_type_pool_alloc_var(pool, 1001)
+    var elems: [i64; 8] = [5, 6, 0, 0, 0, 0, 0, 0]
+    let tup = mono_type_pool_alloc_tuple(pool, elems, 2)
+    var m = mono_type_map_new()
+    m = mono_type_map_insert(m, 1000, 0)
+    m = mono_type_map_insert(m, 1001, 2)
+    let result = mono_substitute_type(pool, 7, m)
+    let rn = mono_type_pool_get(pool, result)
+    if rn.kind != MONO_TY_TUPLE {
+        print("FAIL: test_mono_subst_tuple - kind\n")
+        return 1
+    }
+    if rn.children[0 as usize] != 0 {
+        print("FAIL: test_mono_subst_tuple - 0\n")
+        return 1
+    }
+    if rn.children[1 as usize] != 2 {
+        print("FAIL: test_mono_subst_tuple - 1\n")
+        return 1
+    }
+    print("PASS: test_mono_subst_tuple\n")
+    return 0
+}
+
+// ----- Test 39: Validate clean body -----
+fn test_mono_validate_clean() -> i32 with IO, Mut, Div, Panic {
+    var pool = test_mono_make_pool()
+    var body = mono_empty_fn_body()
+    var node = mono_empty_body_node()
+    node.kind = MONO_NODE_LIT
+    node.type_id = 0
+    body.nodes[0 as usize] = node
+    body.count = 1
+    if mono_validate_no_generics_in_body(body, pool) == false {
+        print("FAIL: test_mono_validate_clean\n")
+        return 1
+    }
+    print("PASS: test_mono_validate_clean\n")
+    return 0
+}
+
+// ----- Test 40: Validate detects type vars -----
+fn test_mono_validate_dirty() -> i32 with IO, Mut, Div, Panic {
+    var pool = test_mono_make_pool()
+    let vt = mono_type_pool_alloc_var(pool, 1000)
+    var body = mono_empty_fn_body()
+    var node = mono_empty_body_node()
+    node.kind = MONO_NODE_VAR
+    node.type_id = 5
+    body.nodes[0 as usize] = node
+    body.count = 1
+    if mono_validate_no_generics_in_body(body, pool) {
+        print("FAIL: test_mono_validate_dirty\n")
+        return 1
+    }
+    print("PASS: test_mono_validate_dirty\n")
+    return 0
+}
+
+// ----- Test 41: Validate detects generic calls -----
+fn test_mono_validate_generic_call() -> i32 with IO, Mut, Div, Panic {
+    var pool = test_mono_make_pool()
+    var body = mono_empty_fn_body()
+    var node = mono_empty_body_node()
+    node.kind = MONO_NODE_CALL
+    node.type_id = 0
+    node.callee_type_arg_count = 1
+    body.nodes[0 as usize] = node
+    body.count = 1
+    if mono_validate_no_generics_in_body(body, pool) {
+        print("FAIL: test_mono_validate_generic_call\n")
+        return 1
+    }
+    print("PASS: test_mono_validate_generic_call\n")
+    return 0
+}
+
+// ----- Test 42: Type pool round-trip -----
+fn test_mono_pool_roundtrip() -> i32 with IO, Mut, Div, Panic {
+    var pool = mono_type_pool_new()
+    let id = mono_type_pool_alloc_prim(pool, MONO_TY_I64)
+    if mono_type_pool_get(pool, id).kind != MONO_TY_I64 {
+        print("FAIL: test_mono_pool_roundtrip\n")
+        return 1
+    }
+    print("PASS: test_mono_pool_roundtrip\n")
+    return 0
+}
+
+// ----- Test 43: Count generic functions -----
+fn test_mono_count_generics() -> i32 with IO, Mut, Div, Panic {
+    var table = mono_fn_table_new()
+    var s1 = mono_empty_fn_sig()
+    s1.is_generic = true
+    var s2 = mono_empty_fn_sig()
+    s2.is_generic = false
+    var s3 = mono_empty_fn_sig()
+    s3.is_generic = true
+    let i1 = mono_fn_table_add(table, s1)
+    let i2 = mono_fn_table_add(table, s2)
+    let i3 = mono_fn_table_add(table, s3)
+    if mono_count_generic_fns(table) != 2 {
+        print("FAIL: test_mono_count_generics\n")
+        return 1
+    }
+    if mono_count_concrete_fns(table) != 1 {
+        print("FAIL: test_mono_count_generics - concrete\n")
+        return 1
+    }
+    print("PASS: test_mono_count_generics\n")
+    return 0
+}
+
+// ----- Test 44: Cache count -----
+fn test_mono_cache_count() -> i32 with IO, Mut, Div, Panic {
+    var cache = mono_cache_new()
+    if mono_cache_count(cache) != 0 {
+        print("FAIL: test_mono_cache_count - 0\n")
+        return 1
+    }
+    let ins = mono_cache_insert(cache, 42, mono_make_type_args_1(0), 1, 100, 0)
+    if mono_cache_count(cache) != 1 {
+        print("FAIL: test_mono_cache_count - 1\n")
+        return 1
+    }
+    print("PASS: test_mono_cache_count\n")
+    return 0
+}
+
+// ----- Test 45: Cache get entry -----
+fn test_mono_cache_get_entry() -> i32 with IO, Mut, Div, Panic {
+    var cache = mono_cache_new()
+    let ins = mono_cache_insert(cache, 42, mono_make_type_args_1(0), 1, 100, 3)
+    let entry = mono_cache_get(cache, 0)
+    if entry.original_fn_id != 42 {
+        print("FAIL: test_mono_cache_get_entry - orig\n")
+        return 1
+    }
+    if entry.specialized_fn_id != 100 {
+        print("FAIL: test_mono_cache_get_entry - spec\n")
+        return 1
+    }
+    if entry.depth != 3 {
+        print("FAIL: test_mono_cache_get_entry - depth\n")
+        return 1
+    }
+    print("PASS: test_mono_cache_get_entry\n")
+    return 0
+}
+
+// ----- Test 46: Entry fields -----
+fn test_mono_entry_fields() -> i32 with IO, Mut, Div, Panic {
+    let e = MonoEntry {
+        original_fn_id: 10, type_args: mono_make_type_args_2(3, 4), type_arg_count: 2,
+        specialized_fn_id: 55, depth: 7, is_valid: true,
+    }
+    if e.original_fn_id != 10 {
+        print("FAIL: test_mono_entry_fields - orig\n")
+        return 1
+    }
+    if e.type_arg_count != 2 {
+        print("FAIL: test_mono_entry_fields - argc\n")
+        return 1
+    }
+    if e.specialized_fn_id != 55 {
+        print("FAIL: test_mono_entry_fields - spec\n")
+        return 1
+    }
+    print("PASS: test_mono_entry_fields\n")
+    return 0
+}
+
+// ----- Test 47: Empty cache queries -----
+fn test_mono_empty_cache_queries() -> i32 with IO, Mut, Div, Panic {
+    let cache = mono_cache_new()
+    if mono_cache_lookup(cache, 0, mono_make_type_args_1(0), 1) != MONO_NOT_FOUND {
+        print("FAIL: test_mono_empty_cache_queries\n")
+        return 1
+    }
+    if mono_cache_lookup(cache, 999, mono_make_type_args_3(0, 1, 2), 3) != MONO_NOT_FOUND {
+        print("FAIL: test_mono_empty_cache_queries - 2\n")
+        return 1
+    }
+    print("PASS: test_mono_empty_cache_queries\n")
+    return 0
+}
+
+// ----- Test 48: Type map copy -----
+fn test_mono_type_map_copy() -> i32 with IO, Mut, Div, Panic {
+    var m = mono_type_map_new()
+    m = mono_type_map_insert(m, 1000, 5)
+    m = mono_type_map_insert(m, 1001, 10)
+    let cp = mono_type_map_copy(m)
+    if cp.count != 2 {
+        print("FAIL: test_mono_type_map_copy - count\n")
+        return 1
+    }
+    if mono_type_map_lookup(cp, 1000) != 5 {
+        print("FAIL: test_mono_type_map_copy - 1000\n")
+        return 1
+    }
+    print("PASS: test_mono_type_map_copy\n")
+    return 0
+}
+
+// ----- Test 49: Stats construction -----
+fn test_mono_stats() -> i32 with IO, Mut, Div, Panic {
+    let s = MonoStats { total_specializations: 10, total_iterations: 20, total_errors: 0, max_depth_seen: 3 }
+    if s.total_specializations != 10 {
+        print("FAIL: test_mono_stats - specs\n")
+        return 1
+    }
+    if s.max_depth_seen != 3 {
+        print("FAIL: test_mono_stats - depth\n")
+        return 1
+    }
+    print("PASS: test_mono_stats\n")
+    return 0
+}
+
+// ----- Test 50: Error arg mismatch encoding -----
+fn test_mono_error_arg_mismatch() -> i32 with IO, Mut, Div, Panic {
+    let err = mono_error_arg_mismatch(42, 2, 3)
+    if err.kind != MONO_ERR_ARG_COUNT_MISMATCH {
+        print("FAIL: test_mono_error_arg_mismatch - kind\n")
+        return 1
+    }
+    if err.detail != 2003 {
+        print("FAIL: test_mono_error_arg_mismatch - detail\n")
+        return 1
+    }
+    print("PASS: test_mono_error_arg_mismatch\n")
+    return 0
+}
+
+// ----- Test 51: Pool boundary conditions -----
+fn test_mono_pool_boundary() -> i32 with IO, Mut, Div, Panic {
+    let pool = mono_type_pool_new()
+    if mono_type_pool_get(pool, 0 - 1).kind != MONO_TY_ERROR {
+        print("FAIL: test_mono_pool_boundary - neg\n")
+        return 1
+    }
+    if mono_type_pool_get(pool, 9999).kind != MONO_TY_ERROR {
+        print("FAIL: test_mono_pool_boundary - beyond\n")
+        return 1
+    }
+    print("PASS: test_mono_pool_boundary\n")
+    return 0
+}
+
+// ----- Test 52: Cache with 4 type args -----
+fn test_mono_cache_four_args() -> i32 with IO, Mut, Div, Panic {
+    var cache = mono_cache_new()
+    let ta = mono_make_type_args_4(0, 1, 2, 3)
+    let ins = mono_cache_insert(cache, 77, ta, 4, 300, 0)
+    if mono_cache_lookup(cache, 77, ta, 4) != 300 {
+        print("FAIL: test_mono_cache_four_args\n")
+        return 1
+    }
+    if mono_cache_lookup(cache, 77, mono_make_type_args_3(0, 1, 2), 3) != MONO_NOT_FOUND {
+        print("FAIL: test_mono_cache_four_args - partial\n")
+        return 1
+    }
+    print("PASS: test_mono_cache_four_args\n")
+    return 0
+}
+
+// ----- Test 53: Worklist ordering -----
+fn test_mono_worklist_ordering() -> i32 with IO, Mut, Div, Panic {
+    var wl = mono_worklist_new()
+    let e1 = MonoEntry {
+        original_fn_id: 10, type_args: mono_make_type_args_1(0), type_arg_count: 1,
+        specialized_fn_id: 0 - 1, depth: 0, is_valid: true,
+    }
+    let e2 = MonoEntry {
+        original_fn_id: 20, type_args: mono_make_type_args_1(1), type_arg_count: 1,
+        specialized_fn_id: 0 - 1, depth: 0, is_valid: true,
+    }
+    wl = mono_worklist_push(wl, e1)
+    wl = mono_worklist_push(wl, e2)
+    let p = mono_worklist_pop(wl)
+    if p.original_fn_id != 10 {
+        print("FAIL: test_mono_worklist_ordering\n")
+        return 1
+    }
+    print("PASS: test_mono_worklist_ordering\n")
+    return 0
+}
+
+// ----- Test 54: fn_is_generic -----
+fn test_mono_fn_is_generic() -> i32 with IO, Mut, Div, Panic {
+    var table = mono_fn_table_new()
+    var s1 = mono_empty_fn_sig()
+    s1.is_generic = true
+    var s2 = mono_empty_fn_sig()
+    s2.is_generic = false
+    let i1 = mono_fn_table_add(table, s1)
+    let i2 = mono_fn_table_add(table, s2)
+    if mono_fn_is_generic(table, 0) == false {
+        print("FAIL: test_mono_fn_is_generic - yes\n")
+        return 1
+    }
+    if mono_fn_is_generic(table, 1) {
+        print("FAIL: test_mono_fn_is_generic - no\n")
+        return 1
+    }
+    print("PASS: test_mono_fn_is_generic\n")
+    return 0
+}
+
+// ----- Test 55: Call site list add -----
+fn test_mono_call_site_add() -> i32 with IO, Mut, Div, Panic {
+    var list = mono_call_site_list_new()
+    let site = MonoCallSite {
+        callee_fn_id: 10, type_args: mono_make_type_args_1(0), type_arg_count: 1,
+        caller_fn_id: 5, node_index: 0,
+    }
+    list = mono_call_site_list_add(list, site)
+    if list.count != 1 {
+        print("FAIL: test_mono_call_site_add\n")
+        return 1
+    }
+    if list.sites[0 as usize].callee_fn_id != 10 {
+        print("FAIL: test_mono_call_site_add - callee\n")
+        return 1
+    }
+    print("PASS: test_mono_call_site_add\n")
+    return 0
+}
+
+// ============================================================
+// Main test runner
+// ============================================================
+
+fn run_mono_tests() -> i32 with IO, Mut, Div, Panic {
+    var failures: i32 = 0
+    failures = failures + test_mono_cache_insert()
+    failures = failures + test_mono_cache_lookup_miss()
+    failures = failures + test_mono_cache_no_duplicate()
+    failures = failures + test_mono_cache_multiple()
+    failures = failures + test_mono_cache_different_fns()
+    failures = failures + test_mono_type_map_basic()
+    failures = failures + test_mono_type_map_overwrite()
+    failures = failures + test_mono_type_map_has()
+    failures = failures + test_mono_type_map_clear()
+    failures = failures + test_mono_type_map_eq()
+    failures = failures + test_mono_subst_simple()
+    failures = failures + test_mono_subst_fn_type()
+    failures = failures + test_mono_subst_array()
+    failures = failures + test_mono_subst_no_change()
+    failures = failures + test_mono_subst_nested()
+    failures = failures + test_mono_type_has_vars()
+    failures = failures + test_mono_type_eq()
+    failures = failures + test_mono_type_args_eq_test()
+    failures = failures + test_mono_hash_deterministic()
+    failures = failures + test_mono_worklist_basic()
+    failures = failures + test_mono_worklist_has()
+    failures = failures + test_mono_depth_stack_basic()
+    failures = failures + test_mono_depth_stack_count()
+    failures = failures + test_mono_error_kinds()
+    failures = failures + test_mono_error_list()
+    failures = failures + test_mono_fn_table_basic()
+    failures = failures + test_mono_fn_table_find()
+    failures = failures + test_mono_specialize_identity_sig()
+    failures = failures + test_mono_specialize_identity_body()
+    failures = failures + test_mono_build_type_map()
+    failures = failures + test_mono_scan_calls()
+    failures = failures + test_mono_scan_dedup()
+    failures = failures + test_mono_rewrite_call()
+    failures = failures + test_mono_specialized_name_hash()
+    failures = failures + test_mono_duplicate_instantiation()
+    failures = failures + test_mono_multi_type_args()
+    failures = failures + test_mono_subst_ref()
+    failures = failures + test_mono_subst_tuple()
+    failures = failures + test_mono_validate_clean()
+    failures = failures + test_mono_validate_dirty()
+    failures = failures + test_mono_validate_generic_call()
+    failures = failures + test_mono_pool_roundtrip()
+    failures = failures + test_mono_count_generics()
+    failures = failures + test_mono_cache_count()
+    failures = failures + test_mono_cache_get_entry()
+    failures = failures + test_mono_entry_fields()
+    failures = failures + test_mono_empty_cache_queries()
+    failures = failures + test_mono_type_map_copy()
+    failures = failures + test_mono_stats()
+    failures = failures + test_mono_error_arg_mismatch()
+    failures = failures + test_mono_pool_boundary()
+    failures = failures + test_mono_cache_four_args()
+    failures = failures + test_mono_worklist_ordering()
+    failures = failures + test_mono_fn_is_generic()
+    failures = failures + test_mono_call_site_add()
+
+    if failures == 0 {
+        print("All monomorph tests passed.\n")
+    } else {
+        print("Some monomorph tests FAILED.\n")
+    }
+    return failures
+}
+

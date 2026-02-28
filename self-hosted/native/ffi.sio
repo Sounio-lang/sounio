@@ -1,0 +1,2201 @@
+// self-hosted::native::ffi — Foreign Function Interface bridge
+//
+// Provides the infrastructure for calling C functions from Sounio code and
+// exposing Sounio functions as C-callable callbacks.  Handles type mapping
+// between Sounio and C ABI representations, marshaling of values across the
+// boundary (sign extension, pointer wrapping, struct flattening), calling
+// convention selection (System V AMD64, Win64, AAPCS), and safety validation
+// of FFI call sites.
+//
+// All data lives in fixed-size arena arrays (bootstrap pattern: no heap).
+// Names are resolved via hashes to avoid string comparisons at link time.
+//
+// References:
+//   - System V AMD64 ABI (revision 252, 2023-11)
+//   - Microsoft x64 calling convention (MSDN)
+//   - ARM AAPCS64 (IHI 0055D, 2023)
+//   - Sounio ownership model (linear/affine) vs C raw pointers
+
+// ============================================================================
+// Constants — capacity limits
+// ============================================================================
+
+let FFI_MAX_DECLS: i64 = 512
+let FFI_MAX_CALLS: i64 = 1024
+let FFI_MAX_MARSHALS: i64 = 2048
+let FFI_MAX_LIBS: i64 = 32
+let FFI_MAX_PARAMS: i64 = 16
+let FFI_MAX_TYPES: i64 = 256
+let FFI_MAX_SYMBOLS: i64 = 256
+let FFI_MAX_FIELD_TYPES: i64 = 16
+let FFI_MAX_CALLBACKS: i64 = 128
+let FFI_MAX_STRING_BUF: i64 = 4096
+
+// ============================================================================
+// Constants — FFI type kinds
+// ============================================================================
+
+let FFI_TYPE_VOID: i64 = 0
+let FFI_TYPE_I8: i64 = 1
+let FFI_TYPE_I16: i64 = 2
+let FFI_TYPE_I32: i64 = 3
+let FFI_TYPE_I64: i64 = 4
+let FFI_TYPE_F32: i64 = 5
+let FFI_TYPE_F64: i64 = 6
+let FFI_TYPE_PTR: i64 = 7
+let FFI_TYPE_STRUCT: i64 = 8
+let FFI_TYPE_ARRAY: i64 = 9
+
+// ============================================================================
+// Constants — calling conventions
+// ============================================================================
+
+let FFI_CC_SYSV: i64 = 1
+let FFI_CC_WIN64: i64 = 2
+let FFI_CC_AAPCS: i64 = 3
+
+// ============================================================================
+// Constants — marshal operation kinds
+// ============================================================================
+
+let FFI_MARSHAL_COPY: i64 = 1
+let FFI_MARSHAL_WIDEN: i64 = 2
+let FFI_MARSHAL_NARROW: i64 = 3
+let FFI_MARSHAL_PTR_TO_REF: i64 = 4
+let FFI_MARSHAL_REF_TO_PTR: i64 = 5
+let FFI_MARSHAL_STRUCT_FLATTEN: i64 = 6
+let FFI_MARSHAL_STRUCT_PACK: i64 = 7
+
+// ============================================================================
+// Constants — Sounio type kind tags (for type mapping)
+// ============================================================================
+
+let FFI_SOUNIO_I8: i64 = 1
+let FFI_SOUNIO_I16: i64 = 2
+let FFI_SOUNIO_I32: i64 = 3
+let FFI_SOUNIO_I64: i64 = 4
+let FFI_SOUNIO_F32: i64 = 5
+let FFI_SOUNIO_F64: i64 = 6
+let FFI_SOUNIO_BOOL: i64 = 7
+let FFI_SOUNIO_PTR: i64 = 8
+let FFI_SOUNIO_REF: i64 = 9
+let FFI_SOUNIO_REF_MUT: i64 = 10
+let FFI_SOUNIO_STRING: i64 = 11
+let FFI_SOUNIO_STRUCT: i64 = 12
+let FFI_SOUNIO_ARRAY: i64 = 13
+let FFI_SOUNIO_VOID: i64 = 14
+
+// ============================================================================
+// Constants — safety check result codes
+// ============================================================================
+
+let FFI_SAFE_OK: i64 = 0
+let FFI_SAFE_NULL_PTR: i64 = 1
+let FFI_SAFE_TYPE_MISMATCH: i64 = 2
+let FFI_SAFE_PARAM_COUNT: i64 = 3
+let FFI_SAFE_UNRESOLVED_SYM: i64 = 4
+let FFI_SAFE_INVALID_CC: i64 = 5
+let FFI_SAFE_OVERFLOW: i64 = 6
+
+// ============================================================================
+// Constants — register IDs for calling conventions (matching regs.sio)
+// ============================================================================
+
+let FFI_REG_RAX: i64 = 0
+let FFI_REG_RCX: i64 = 1
+let FFI_REG_RDX: i64 = 2
+let FFI_REG_RBX: i64 = 3
+let FFI_REG_RSP: i64 = 4
+let FFI_REG_RBP: i64 = 5
+let FFI_REG_RSI: i64 = 6
+let FFI_REG_RDI: i64 = 7
+let FFI_REG_R8: i64 = 8
+let FFI_REG_R9: i64 = 9
+let FFI_REG_R10: i64 = 10
+let FFI_REG_R11: i64 = 11
+let FFI_REG_NONE: i64 = 0 - 1
+
+// ============================================================================
+// Constants — callback trampoline
+// ============================================================================
+
+let FFI_TRAMPOLINE_SIZE: i64 = 64
+let FFI_TRAMPOLINE_ALIGN: i64 = 16
+
+// ============================================================================
+// Core data structures
+// ============================================================================
+
+// FFI type descriptor — describes a single C type for marshaling.
+struct FfiType {
+    kind: i64,                        // FFI_TYPE_VOID .. FFI_TYPE_ARRAY
+    size: i64,                        // size in bytes
+    alignment: i64,                   // alignment in bytes
+    field_count: i64,                 // number of fields (struct) or element count (array)
+    field_types: [i64; 16],           // type indices for struct fields / array element type
+}
+
+// Foreign function declaration — describes an extern "C" function.
+struct FfiFuncDecl {
+    name_hash: i64,                   // hash of the function name
+    param_types: [i64; 16],           // type indices for each parameter
+    param_count: i64,                 // number of parameters
+    return_type: i64,                 // type index for return type
+    calling_conv: i64,                // FFI_CC_SYSV, FFI_CC_WIN64, or FFI_CC_AAPCS
+    is_variadic: bool,                // true if the function is variadic (e.g. printf)
+    lib_name_hash: i64,               // hash of the shared library name
+}
+
+// FFI call site — represents a specific call to a foreign function in the IR.
+struct FfiCallSite {
+    decl_idx: i64,                    // index into FfiContext.decls
+    arg_regs: [i64; 16],             // source registers for each argument
+    arg_count: i64,                   // number of arguments at this call
+    result_reg: i64,                  // destination register for the return value
+    needs_marshal: bool,              // true if any argument needs conversion
+}
+
+// Marshal operation — a single conversion step between Sounio and C reps.
+struct FfiMarshalOp {
+    kind: i64,                        // FFI_MARSHAL_COPY .. FFI_MARSHAL_STRUCT_PACK
+    src_reg: i64,                     // source register
+    dst_reg: i64,                     // destination register
+    type_idx: i64,                    // type index for the conversion target
+}
+
+// Shared library descriptor — a loaded .so / .dll / .dylib.
+struct FfiLibrary {
+    name_hash: i64,                   // hash of the library name
+    symbol_count: i64,                // number of symbols exported
+    symbols: [i64; 256],              // hashes of exported symbol names
+}
+
+// Callback trampoline descriptor — wraps a Sounio function as C-callable.
+struct FfiCallback {
+    sounio_fn_idx: i64,               // index of the Sounio function
+    trampoline_offset: i64,           // offset into generated code buffer
+    param_count: i64,                 // number of parameters
+    return_type_idx: i64,             // FFI type index for the return type
+    calling_conv: i64,                // calling convention for the C side
+}
+
+// Register assignment for a single parameter in a call.
+struct FfiRegAssign {
+    param_idx: i64,                   // which parameter
+    reg: i64,                         // assigned register (FFI_REG_NONE = stack)
+    stack_offset: i64,                // offset on stack (if reg == FFI_REG_NONE)
+    is_float: bool,                   // true if this goes in a float register
+}
+
+// String marshal buffer — temporary area for C string conversion.
+struct FfiStringBuf {
+    bytes: [i8; 4096],
+    len: i64,
+}
+
+// Overall FFI context — holds all declarations, call sites, libraries, etc.
+struct FfiContext {
+    decls: [FfiFuncDecl; 512],
+    decl_count: i64,
+    calls: [FfiCallSite; 1024],
+    call_count: i64,
+    marshals: [FfiMarshalOp; 2048],
+    marshal_count: i64,
+    libs: [FfiLibrary; 32],
+    lib_count: i64,
+    types: [FfiType; 256],
+    type_count: i64,
+    callbacks: [FfiCallback; 128],
+    callback_count: i64,
+}
+
+// ============================================================================
+// Constructors
+// ============================================================================
+
+fn ffi_type_new() -> FfiType {
+    FfiType {
+        kind: FFI_TYPE_VOID,
+        size: 0,
+        alignment: 0,
+        field_count: 0,
+        field_types: [0; 16],
+    }
+}
+
+fn ffi_type_scalar(kind: i64, size: i64, align: i64) -> FfiType {
+    FfiType {
+        kind: kind,
+        size: size,
+        alignment: align,
+        field_count: 0,
+        field_types: [0; 16],
+    }
+}
+
+fn ffi_func_decl_new() -> FfiFuncDecl {
+    FfiFuncDecl {
+        name_hash: 0,
+        param_types: [0; 16],
+        param_count: 0,
+        return_type: 0,
+        calling_conv: FFI_CC_SYSV,
+        is_variadic: false,
+        lib_name_hash: 0,
+    }
+}
+
+fn ffi_call_site_new() -> FfiCallSite {
+    FfiCallSite {
+        decl_idx: 0,
+        arg_regs: [0; 16],
+        arg_count: 0,
+        result_reg: 0,
+        needs_marshal: false,
+    }
+}
+
+fn ffi_marshal_op_new() -> FfiMarshalOp {
+    FfiMarshalOp {
+        kind: FFI_MARSHAL_COPY,
+        src_reg: 0,
+        dst_reg: 0,
+        type_idx: 0,
+    }
+}
+
+fn ffi_library_new() -> FfiLibrary {
+    FfiLibrary {
+        name_hash: 0,
+        symbol_count: 0,
+        symbols: [0; 256],
+    }
+}
+
+fn ffi_callback_new() -> FfiCallback {
+    FfiCallback {
+        sounio_fn_idx: 0,
+        trampoline_offset: 0,
+        param_count: 0,
+        return_type_idx: 0,
+        calling_conv: FFI_CC_SYSV,
+    }
+}
+
+fn ffi_reg_assign_new() -> FfiRegAssign {
+    FfiRegAssign {
+        param_idx: 0,
+        reg: FFI_REG_NONE,
+        stack_offset: 0,
+        is_float: false,
+    }
+}
+
+fn ffi_string_buf_new() -> FfiStringBuf {
+    FfiStringBuf {
+        bytes: [0; 4096],
+        len: 0,
+    }
+}
+
+fn ffi_context_new() -> FfiContext {
+    FfiContext {
+        decls: [ffi_func_decl_new(); 512],
+        decl_count: 0,
+        calls: [ffi_call_site_new(); 1024],
+        call_count: 0,
+        marshals: [ffi_marshal_op_new(); 2048],
+        marshal_count: 0,
+        libs: [ffi_library_new(); 32],
+        lib_count: 0,
+        types: [ffi_type_new(); 256],
+        type_count: 0,
+        callbacks: [ffi_callback_new(); 128],
+        callback_count: 0,
+    }
+}
+
+// ============================================================================
+// Name hashing — simple FNV-1a-style hash for symbol resolution
+// ============================================================================
+
+// Compute a hash from up to 8 bytes (packed into two i64 values).
+// This is a simplified hash for the bootstrap compiler; real symbol
+// resolution would use full-length string hashing.
+fn ffi_hash_name(b0: i64, b1: i64, b2: i64, b3: i64, b4: i64, b5: i64, b6: i64, b7: i64) -> i64 with Mut, Panic {
+    var h: i64 = 2166136261   // FNV offset basis (32-bit)
+    h = h * 16777619          // FNV prime
+    h = (h * 16777619) + b0
+    h = (h * 16777619) + b1
+    h = (h * 16777619) + b2
+    h = (h * 16777619) + b3
+    h = (h * 16777619) + b4
+    h = (h * 16777619) + b5
+    h = (h * 16777619) + b6
+    h = (h * 16777619) + b7
+    // Force positive
+    if h < 0 { h = 0 - h }
+    h
+}
+
+// Simplified 4-byte hash for shorter names
+fn ffi_hash_name4(b0: i64, b1: i64, b2: i64, b3: i64) -> i64 with Mut, Panic {
+    ffi_hash_name(b0, b1, b2, b3, 0, 0, 0, 0)
+}
+
+// ============================================================================
+// Type size and alignment helpers
+// ============================================================================
+
+fn ffi_type_size(kind: i64) -> i64 {
+    if kind == FFI_TYPE_VOID { 0 }
+    else if kind == FFI_TYPE_I8 { 1 }
+    else if kind == FFI_TYPE_I16 { 2 }
+    else if kind == FFI_TYPE_I32 { 4 }
+    else if kind == FFI_TYPE_I64 { 8 }
+    else if kind == FFI_TYPE_F32 { 4 }
+    else if kind == FFI_TYPE_F64 { 8 }
+    else if kind == FFI_TYPE_PTR { 8 }
+    else { 0 }
+}
+
+fn ffi_type_align(kind: i64) -> i64 {
+    if kind == FFI_TYPE_VOID { 1 }
+    else if kind == FFI_TYPE_I8 { 1 }
+    else if kind == FFI_TYPE_I16 { 2 }
+    else if kind == FFI_TYPE_I32 { 4 }
+    else if kind == FFI_TYPE_I64 { 8 }
+    else if kind == FFI_TYPE_F32 { 4 }
+    else if kind == FFI_TYPE_F64 { 8 }
+    else if kind == FFI_TYPE_PTR { 8 }
+    else { 1 }
+}
+
+fn ffi_is_float_kind(kind: i64) -> bool {
+    kind == FFI_TYPE_F32 || kind == FFI_TYPE_F64
+}
+
+fn ffi_is_int_kind(kind: i64) -> bool {
+    kind == FFI_TYPE_I8 || kind == FFI_TYPE_I16 ||
+    kind == FFI_TYPE_I32 || kind == FFI_TYPE_I64
+}
+
+fn ffi_is_scalar_kind(kind: i64) -> bool {
+    ffi_is_int_kind(kind) || ffi_is_float_kind(kind) || kind == FFI_TYPE_PTR
+}
+
+fn ffi_is_aggregate_kind(kind: i64) -> bool {
+    kind == FFI_TYPE_STRUCT || kind == FFI_TYPE_ARRAY
+}
+
+// Align a value up to a power-of-two boundary.
+fn ffi_align_up(value: i64, align: i64) -> i64 with Mut, Panic {
+    if align <= 0 { return value }
+    let mask = align - 1
+    if (value & mask) != 0 {
+        (value + mask) & (0 - align)
+    } else {
+        value
+    }
+}
+
+// ============================================================================
+// Type registration — add types to the context
+// ============================================================================
+
+fn ffi_register_type(ctx: FfiContext, ty: FfiType) -> FfiContext with Mut, Panic, Div {
+    var c = ctx
+    if c.type_count < FFI_MAX_TYPES {
+        c.types[c.type_count as usize] = ty
+        c.type_count = c.type_count + 1
+    }
+    c
+}
+
+// Register all primitive C types and return the context.
+// After this call the type registry contains:
+//   0: void, 1: i8, 2: i16, 3: i32, 4: i64, 5: f32, 6: f64, 7: ptr
+fn ffi_register_primitives(ctx: FfiContext) -> FfiContext with Mut, Panic, Div {
+    var c = ctx
+    c = ffi_register_type(c, ffi_type_scalar(FFI_TYPE_VOID, 0, 1))
+    c = ffi_register_type(c, ffi_type_scalar(FFI_TYPE_I8, 1, 1))
+    c = ffi_register_type(c, ffi_type_scalar(FFI_TYPE_I16, 2, 2))
+    c = ffi_register_type(c, ffi_type_scalar(FFI_TYPE_I32, 4, 4))
+    c = ffi_register_type(c, ffi_type_scalar(FFI_TYPE_I64, 8, 8))
+    c = ffi_register_type(c, ffi_type_scalar(FFI_TYPE_F32, 4, 4))
+    c = ffi_register_type(c, ffi_type_scalar(FFI_TYPE_F64, 8, 8))
+    c = ffi_register_type(c, ffi_type_scalar(FFI_TYPE_PTR, 8, 8))
+    c
+}
+
+// Register a struct type with the given fields.
+fn ffi_register_struct_type(
+    ctx: FfiContext,
+    field_types: [i64; 16],
+    field_count: i64
+) -> FfiContext with Mut, Panic, Div {
+    var c = ctx
+    // Compute size and alignment from fields
+    var total_size: i64 = 0
+    var max_align: i64 = 1
+    var i: i64 = 0
+    while i < field_count && i < FFI_MAX_FIELD_TYPES {
+        let ft_idx = field_types[i as usize]
+        if ft_idx >= 0 && ft_idx < c.type_count {
+            let ft = c.types[ft_idx as usize]
+            let fa = ft.alignment
+            if fa > max_align { max_align = fa }
+            total_size = ffi_align_up(total_size, fa)
+            total_size = total_size + ft.size
+        }
+        i = i + 1
+    }
+    total_size = ffi_align_up(total_size, max_align)
+
+    var sty = ffi_type_new()
+    sty.kind = FFI_TYPE_STRUCT
+    sty.size = total_size
+    sty.alignment = max_align
+    sty.field_count = field_count
+    sty.field_types = field_types
+
+    c = ffi_register_type(c, sty)
+    c
+}
+
+// Register an array type.
+fn ffi_register_array_type(
+    ctx: FfiContext,
+    element_type_idx: i64,
+    element_count: i64
+) -> FfiContext with Mut, Panic, Div {
+    var c = ctx
+    var aty = ffi_type_new()
+    aty.kind = FFI_TYPE_ARRAY
+    if element_type_idx >= 0 && element_type_idx < c.type_count {
+        let et = c.types[element_type_idx as usize]
+        aty.size = et.size * element_count
+        aty.alignment = et.alignment
+    }
+    aty.field_count = element_count
+    aty.field_types[0 as usize] = element_type_idx
+
+    c = ffi_register_type(c, aty)
+    c
+}
+
+// ============================================================================
+// Sounio -> C type mapping
+// ============================================================================
+
+// Map a Sounio type tag to the corresponding FFI type index.
+// Returns the type index in the primitive registry (0..7) for scalars,
+// or FFI_TYPE_PTR for references and strings.
+fn ffi_map_sounio_type(sounio_kind: i64) -> i64 {
+    if sounio_kind == FFI_SOUNIO_I8 { FFI_TYPE_I8 }
+    else if sounio_kind == FFI_SOUNIO_I16 { FFI_TYPE_I16 }
+    else if sounio_kind == FFI_SOUNIO_I32 { FFI_TYPE_I32 }
+    else if sounio_kind == FFI_SOUNIO_I64 { FFI_TYPE_I64 }
+    else if sounio_kind == FFI_SOUNIO_F32 { FFI_TYPE_F32 }
+    else if sounio_kind == FFI_SOUNIO_F64 { FFI_TYPE_F64 }
+    else if sounio_kind == FFI_SOUNIO_BOOL { FFI_TYPE_I8 }
+    else if sounio_kind == FFI_SOUNIO_PTR { FFI_TYPE_PTR }
+    else if sounio_kind == FFI_SOUNIO_REF { FFI_TYPE_PTR }
+    else if sounio_kind == FFI_SOUNIO_REF_MUT { FFI_TYPE_PTR }
+    else if sounio_kind == FFI_SOUNIO_STRING { FFI_TYPE_PTR }
+    else if sounio_kind == FFI_SOUNIO_VOID { FFI_TYPE_VOID }
+    else { FFI_TYPE_VOID }
+}
+
+// Determine the C ABI size for a Sounio type.
+fn ffi_sounio_type_c_size(sounio_kind: i64) -> i64 {
+    let ffi_kind = ffi_map_sounio_type(sounio_kind)
+    ffi_type_size(ffi_kind)
+}
+
+// Determine whether a Sounio type requires marshaling when crossing FFI.
+fn ffi_needs_marshal(sounio_kind: i64) -> bool {
+    // References need pointer wrapping/unwrapping
+    if sounio_kind == FFI_SOUNIO_REF { return true }
+    if sounio_kind == FFI_SOUNIO_REF_MUT { return true }
+    // Strings need null-termination conversion
+    if sounio_kind == FFI_SOUNIO_STRING { return true }
+    // Booleans need i8 widening/narrowing
+    if sounio_kind == FFI_SOUNIO_BOOL { return true }
+    // Structs may need flattening
+    if sounio_kind == FFI_SOUNIO_STRUCT { return true }
+    // Arrays may need flattening
+    if sounio_kind == FFI_SOUNIO_ARRAY { return true }
+    false
+}
+
+// Determine what marshal kind is needed for a Sounio type.
+fn ffi_marshal_kind_for_sounio(sounio_kind: i64) -> i64 {
+    if sounio_kind == FFI_SOUNIO_REF { FFI_MARSHAL_REF_TO_PTR }
+    else if sounio_kind == FFI_SOUNIO_REF_MUT { FFI_MARSHAL_REF_TO_PTR }
+    else if sounio_kind == FFI_SOUNIO_STRING { FFI_MARSHAL_REF_TO_PTR }
+    else if sounio_kind == FFI_SOUNIO_BOOL { FFI_MARSHAL_WIDEN }
+    else if sounio_kind == FFI_SOUNIO_STRUCT { FFI_MARSHAL_STRUCT_FLATTEN }
+    else if sounio_kind == FFI_SOUNIO_ARRAY { FFI_MARSHAL_STRUCT_FLATTEN }
+    else { FFI_MARSHAL_COPY }
+}
+
+// Determine marshal kind for C -> Sounio direction (return values, callbacks).
+fn ffi_marshal_kind_from_c(sounio_kind: i64) -> i64 {
+    if sounio_kind == FFI_SOUNIO_REF { FFI_MARSHAL_PTR_TO_REF }
+    else if sounio_kind == FFI_SOUNIO_REF_MUT { FFI_MARSHAL_PTR_TO_REF }
+    else if sounio_kind == FFI_SOUNIO_STRING { FFI_MARSHAL_PTR_TO_REF }
+    else if sounio_kind == FFI_SOUNIO_BOOL { FFI_MARSHAL_NARROW }
+    else if sounio_kind == FFI_SOUNIO_STRUCT { FFI_MARSHAL_STRUCT_PACK }
+    else if sounio_kind == FFI_SOUNIO_ARRAY { FFI_MARSHAL_STRUCT_PACK }
+    else { FFI_MARSHAL_COPY }
+}
+
+// ============================================================================
+// Function declaration registration
+// ============================================================================
+
+fn ffi_register_decl(ctx: FfiContext, decl: FfiFuncDecl) -> FfiContext with Mut, Panic, Div {
+    var c = ctx
+    if c.decl_count < FFI_MAX_DECLS {
+        c.decls[c.decl_count as usize] = decl
+        c.decl_count = c.decl_count + 1
+    }
+    c
+}
+
+// Build a FfiFuncDecl for a simple (non-variadic) C function.
+fn ffi_make_decl(
+    name_hash: i64,
+    param_types: [i64; 16],
+    param_count: i64,
+    return_type: i64,
+    cc: i64,
+    lib_hash: i64
+) -> FfiFuncDecl {
+    FfiFuncDecl {
+        name_hash: name_hash,
+        param_types: param_types,
+        param_count: param_count,
+        return_type: return_type,
+        calling_conv: cc,
+        is_variadic: false,
+        lib_name_hash: lib_hash,
+    }
+}
+
+// Build a variadic FfiFuncDecl (e.g. printf).
+fn ffi_make_variadic_decl(
+    name_hash: i64,
+    param_types: [i64; 16],
+    param_count: i64,
+    return_type: i64,
+    cc: i64,
+    lib_hash: i64
+) -> FfiFuncDecl {
+    FfiFuncDecl {
+        name_hash: name_hash,
+        param_types: param_types,
+        param_count: param_count,
+        return_type: return_type,
+        calling_conv: cc,
+        is_variadic: true,
+        lib_name_hash: lib_hash,
+    }
+}
+
+// Look up a function declaration by name hash. Returns index or -1.
+fn ffi_find_decl(ctx: FfiContext, name_hash: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < ctx.decl_count {
+        if ctx.decls[i as usize].name_hash == name_hash {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// ============================================================================
+// Call site registration
+// ============================================================================
+
+fn ffi_register_call(ctx: FfiContext, call: FfiCallSite) -> FfiContext with Mut, Panic, Div {
+    var c = ctx
+    if c.call_count < FFI_MAX_CALLS {
+        c.calls[c.call_count as usize] = call
+        c.call_count = c.call_count + 1
+    }
+    c
+}
+
+// Build a call site from a declaration index and argument registers.
+fn ffi_make_call_site(
+    decl_idx: i64,
+    arg_regs: [i64; 16],
+    arg_count: i64,
+    result_reg: i64
+) -> FfiCallSite {
+    FfiCallSite {
+        decl_idx: decl_idx,
+        arg_regs: arg_regs,
+        arg_count: arg_count,
+        result_reg: result_reg,
+        needs_marshal: false,
+    }
+}
+
+// Determine whether a call site needs marshaling based on its declaration.
+fn ffi_check_call_needs_marshal(
+    ctx: FfiContext,
+    call_idx: i64
+) -> bool with Mut, Panic, Div {
+    if call_idx < 0 || call_idx >= ctx.call_count { return false }
+    let call = ctx.calls[call_idx as usize]
+    let decl_idx = call.decl_idx
+    if decl_idx < 0 || decl_idx >= ctx.decl_count { return false }
+    let decl = ctx.decls[decl_idx as usize]
+
+    // Check each parameter type
+    var i: i64 = 0
+    while i < decl.param_count && i < call.arg_count {
+        let pt = decl.param_types[i as usize]
+        if pt >= 0 && pt < ctx.type_count {
+            let ty = ctx.types[pt as usize]
+            if ffi_is_aggregate_kind(ty.kind) { return true }
+        }
+        i = i + 1
+    }
+    // Check return type
+    if decl.return_type >= 0 && decl.return_type < ctx.type_count {
+        let rt = ctx.types[decl.return_type as usize]
+        if ffi_is_aggregate_kind(rt.kind) { return true }
+    }
+    false
+}
+
+// ============================================================================
+// Marshal operations
+// ============================================================================
+
+fn ffi_register_marshal(ctx: FfiContext, op: FfiMarshalOp) -> FfiContext with Mut, Panic, Div {
+    var c = ctx
+    if c.marshal_count < FFI_MAX_MARSHALS {
+        c.marshals[c.marshal_count as usize] = op
+        c.marshal_count = c.marshal_count + 1
+    }
+    c
+}
+
+fn ffi_make_marshal_op(kind: i64, src: i64, dst: i64, type_idx: i64) -> FfiMarshalOp {
+    FfiMarshalOp {
+        kind: kind,
+        src_reg: src,
+        dst_reg: dst,
+        type_idx: type_idx,
+    }
+}
+
+// Generate marshal ops for a call site. Returns the updated context with
+// new marshal ops appended.
+fn ffi_gen_marshal_for_call(
+    ctx: FfiContext,
+    call_idx: i64
+) -> FfiContext with Mut, Panic, Div {
+    var c = ctx
+    if call_idx < 0 || call_idx >= c.call_count { return c }
+    let call = c.calls[call_idx as usize]
+    let decl_idx = call.decl_idx
+    if decl_idx < 0 || decl_idx >= c.decl_count { return c }
+    let decl = c.decls[decl_idx as usize]
+
+    var i: i64 = 0
+    while i < decl.param_count && i < call.arg_count {
+        let pt = decl.param_types[i as usize]
+        if pt >= 0 && pt < c.type_count {
+            let ty = c.types[pt as usize]
+            let src_reg = call.arg_regs[i as usize]
+            // Determine what kind of marshal is needed
+            if ffi_is_aggregate_kind(ty.kind) {
+                // Struct/array: flatten for register passing if small enough
+                if ty.size <= 16 {
+                    let op = ffi_make_marshal_op(FFI_MARSHAL_STRUCT_FLATTEN, src_reg, src_reg, pt)
+                    c = ffi_register_marshal(c, op)
+                } else {
+                    // Large aggregate: pass by pointer (copy to stack, pass address)
+                    let op = ffi_make_marshal_op(FFI_MARSHAL_REF_TO_PTR, src_reg, src_reg, pt)
+                    c = ffi_register_marshal(c, op)
+                }
+            } else if ty.kind == FFI_TYPE_I8 || ty.kind == FFI_TYPE_I16 {
+                // Narrow integer types: widen to register width
+                let op = ffi_make_marshal_op(FFI_MARSHAL_WIDEN, src_reg, src_reg, pt)
+                c = ffi_register_marshal(c, op)
+            } else {
+                // Scalar: straight copy
+                let op = ffi_make_marshal_op(FFI_MARSHAL_COPY, src_reg, src_reg, pt)
+                c = ffi_register_marshal(c, op)
+            }
+        }
+        i = i + 1
+    }
+
+    // Marshal for return value (C -> Sounio)
+    if decl.return_type >= 0 && decl.return_type < c.type_count {
+        let rty = c.types[decl.return_type as usize]
+        if ffi_is_aggregate_kind(rty.kind) {
+            if rty.size <= 16 {
+                let op = ffi_make_marshal_op(FFI_MARSHAL_STRUCT_PACK, FFI_REG_RAX, call.result_reg, decl.return_type)
+                c = ffi_register_marshal(c, op)
+            } else {
+                let op = ffi_make_marshal_op(FFI_MARSHAL_PTR_TO_REF, FFI_REG_RAX, call.result_reg, decl.return_type)
+                c = ffi_register_marshal(c, op)
+            }
+        } else if rty.kind == FFI_TYPE_I8 || rty.kind == FFI_TYPE_I16 {
+            let op = ffi_make_marshal_op(FFI_MARSHAL_NARROW, FFI_REG_RAX, call.result_reg, decl.return_type)
+            c = ffi_register_marshal(c, op)
+        }
+    }
+
+    c
+}
+
+// ============================================================================
+// Calling convention — register assignment
+// ============================================================================
+
+// Assign SysV AMD64 registers for a function's parameters.
+// SysV uses: rdi, rsi, rdx, rcx, r8, r9 for integers; xmm0..7 for floats.
+// Returns array of register assignments.
+fn ffi_assign_regs_sysv(
+    ctx: FfiContext,
+    decl_idx: i64,
+    assigns: [FfiRegAssign; 16]
+) -> [FfiRegAssign; 16] with Mut, Panic, Div {
+    var out = assigns
+    if decl_idx < 0 || decl_idx >= ctx.decl_count { return out }
+    let decl = ctx.decls[decl_idx as usize]
+
+    var int_used: i64 = 0
+    var float_used: i64 = 0
+    var stack_off: i64 = 0
+    var i: i64 = 0
+
+    while i < decl.param_count && i < FFI_MAX_PARAMS {
+        var a = ffi_reg_assign_new()
+        a.param_idx = i
+
+        let pt = decl.param_types[i as usize]
+        var is_float = false
+        if pt >= 0 && pt < ctx.type_count {
+            is_float = ffi_is_float_kind(ctx.types[pt as usize].kind)
+        }
+        a.is_float = is_float
+
+        if is_float {
+            if float_used < 8 {
+                // xmm registers encoded as 16..23
+                a.reg = 16 + float_used
+                float_used = float_used + 1
+            } else {
+                a.reg = FFI_REG_NONE
+                a.stack_offset = stack_off
+                stack_off = stack_off + 8
+            }
+        } else {
+            if int_used == 0 { a.reg = FFI_REG_RDI }
+            else if int_used == 1 { a.reg = FFI_REG_RSI }
+            else if int_used == 2 { a.reg = FFI_REG_RDX }
+            else if int_used == 3 { a.reg = FFI_REG_RCX }
+            else if int_used == 4 { a.reg = FFI_REG_R8 }
+            else if int_used == 5 { a.reg = FFI_REG_R9 }
+            else {
+                a.reg = FFI_REG_NONE
+                a.stack_offset = stack_off
+                stack_off = stack_off + 8
+            }
+            if int_used < 6 {
+                int_used = int_used + 1
+            } else {
+                // Already handled above (stack)
+            }
+        }
+
+        out[i as usize] = a
+        i = i + 1
+    }
+    out
+}
+
+// Assign Win64 registers for a function's parameters.
+// Win64 uses: rcx, rdx, r8, r9 for the first 4 parameters (positional).
+// Each slot is either int or float, not both independently.
+fn ffi_assign_regs_win64(
+    ctx: FfiContext,
+    decl_idx: i64,
+    assigns: [FfiRegAssign; 16]
+) -> [FfiRegAssign; 16] with Mut, Panic, Div {
+    var out = assigns
+    if decl_idx < 0 || decl_idx >= ctx.decl_count { return out }
+    let decl = ctx.decls[decl_idx as usize]
+
+    var stack_off: i64 = 32    // Win64 shadow space
+    var i: i64 = 0
+
+    while i < decl.param_count && i < FFI_MAX_PARAMS {
+        var a = ffi_reg_assign_new()
+        a.param_idx = i
+
+        let pt = decl.param_types[i as usize]
+        var is_float = false
+        if pt >= 0 && pt < ctx.type_count {
+            is_float = ffi_is_float_kind(ctx.types[pt as usize].kind)
+        }
+        a.is_float = is_float
+
+        if i < 4 {
+            if is_float {
+                // xmm0..xmm3 encoded as 16..19
+                a.reg = 16 + i
+            } else {
+                if i == 0 { a.reg = FFI_REG_RCX }
+                else if i == 1 { a.reg = FFI_REG_RDX }
+                else if i == 2 { a.reg = FFI_REG_R8 }
+                else { a.reg = FFI_REG_R9 }
+            }
+        } else {
+            a.reg = FFI_REG_NONE
+            a.stack_offset = stack_off
+            stack_off = stack_off + 8
+        }
+
+        out[i as usize] = a
+        i = i + 1
+    }
+    out
+}
+
+// Top-level register assignment dispatcher based on calling convention.
+fn ffi_assign_regs(
+    ctx: FfiContext,
+    decl_idx: i64
+) -> [FfiRegAssign; 16] with Mut, Panic, Div {
+    var assigns: [FfiRegAssign; 16] = [ffi_reg_assign_new(); 16]
+    if decl_idx < 0 || decl_idx >= ctx.decl_count { return assigns }
+    let cc = ctx.decls[decl_idx as usize].calling_conv
+
+    if cc == FFI_CC_SYSV {
+        assigns = ffi_assign_regs_sysv(ctx, decl_idx, assigns)
+    } else if cc == FFI_CC_WIN64 {
+        assigns = ffi_assign_regs_win64(ctx, decl_idx, assigns)
+    } else if cc == FFI_CC_AAPCS {
+        // AAPCS: x0..x7 for the first 8 integer params (simplified)
+        if decl_idx >= 0 && decl_idx < ctx.decl_count {
+            let decl = ctx.decls[decl_idx as usize]
+            var i: i64 = 0
+            while i < decl.param_count && i < FFI_MAX_PARAMS {
+                var a = ffi_reg_assign_new()
+                a.param_idx = i
+                if i < 8 {
+                    a.reg = i   // x0..x7
+                } else {
+                    a.reg = FFI_REG_NONE
+                    a.stack_offset = (i - 8) * 8
+                }
+                assigns[i as usize] = a
+                i = i + 1
+            }
+        }
+    }
+    assigns
+}
+
+// Count how many parameters spill to the stack for a given call.
+fn ffi_count_stack_params(assigns: [FfiRegAssign; 16], param_count: i64) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < param_count && i < FFI_MAX_PARAMS {
+        if assigns[i as usize].reg == FFI_REG_NONE {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Compute the total stack space needed for outgoing arguments.
+fn ffi_stack_arg_space(assigns: [FfiRegAssign; 16], param_count: i64) -> i64 with Mut, Panic, Div {
+    let count = ffi_count_stack_params(assigns, param_count)
+    let space = count * 8
+    // Align to 16 bytes
+    ffi_align_up(space, 16)
+}
+
+// ============================================================================
+// String marshaling
+// ============================================================================
+
+// Convert a Sounio-style string (ptr + len, no null terminator) to a
+// C string by copying bytes into the marshal buffer and appending '\0'.
+fn ffi_marshal_string_to_c(
+    buf: FfiStringBuf,
+    src: [i8; 4096],
+    src_len: i64
+) -> FfiStringBuf with Mut, Panic, Div {
+    var out = buf
+    var i: i64 = 0
+    let max = FFI_MAX_STRING_BUF - 1  // leave room for null terminator
+    while i < src_len && i < max {
+        out.bytes[i as usize] = src[i as usize]
+        i = i + 1
+    }
+    out.bytes[i as usize] = 0 as i8   // null terminator
+    out.len = i + 1                    // include the null byte in length
+    out
+}
+
+// Convert a C string (null-terminated) back to a Sounio string by
+// scanning for the null terminator and recording the length.
+fn ffi_marshal_string_from_c(
+    buf: FfiStringBuf,
+    src: [i8; 4096]
+) -> FfiStringBuf with Mut, Panic, Div {
+    var out = buf
+    var i: i64 = 0
+    while i < FFI_MAX_STRING_BUF {
+        if src[i as usize] == 0 as i8 {
+            out.len = i
+            return out
+        }
+        out.bytes[i as usize] = src[i as usize]
+        i = i + 1
+    }
+    out.len = i
+    out
+}
+
+// Check if a C string (in the marshal buffer) is properly null-terminated.
+fn ffi_string_is_null_terminated(buf: FfiStringBuf) -> bool with Mut, Panic, Div {
+    if buf.len <= 0 { return false }
+    if buf.len > FFI_MAX_STRING_BUF { return false }
+    buf.bytes[(buf.len - 1) as usize] == 0 as i8
+}
+
+// ============================================================================
+// Library management
+// ============================================================================
+
+fn ffi_register_library(ctx: FfiContext, lib: FfiLibrary) -> FfiContext with Mut, Panic, Div {
+    var c = ctx
+    if c.lib_count < FFI_MAX_LIBS {
+        c.libs[c.lib_count as usize] = lib
+        c.lib_count = c.lib_count + 1
+    }
+    c
+}
+
+fn ffi_make_library(name_hash: i64) -> FfiLibrary {
+    FfiLibrary {
+        name_hash: name_hash,
+        symbol_count: 0,
+        symbols: [0; 256],
+    }
+}
+
+// Add a symbol (by hash) to a library.
+fn ffi_lib_add_symbol(lib: FfiLibrary, sym_hash: i64) -> FfiLibrary with Mut, Panic, Div {
+    var l = lib
+    if l.symbol_count < FFI_MAX_SYMBOLS {
+        l.symbols[l.symbol_count as usize] = sym_hash
+        l.symbol_count = l.symbol_count + 1
+    }
+    l
+}
+
+// Find a library by name hash. Returns index or -1.
+fn ffi_find_library(ctx: FfiContext, name_hash: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < ctx.lib_count {
+        if ctx.libs[i as usize].name_hash == name_hash {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// ============================================================================
+// Symbol resolution
+// ============================================================================
+
+// Look up a symbol by hash across all registered libraries.
+// Returns the library index in the upper 32 bits and the symbol index
+// in the lower 32 bits, packed into a single i64.
+// Returns -1 if not found.
+fn ffi_resolve_symbol(ctx: FfiContext, sym_hash: i64) -> i64 with Mut, Panic, Div {
+    var li: i64 = 0
+    while li < ctx.lib_count {
+        let lib = ctx.libs[li as usize]
+        var si: i64 = 0
+        while si < lib.symbol_count {
+            if lib.symbols[si as usize] == sym_hash {
+                // Pack: lib_index * 65536 + sym_index
+                return li * 65536 + si
+            }
+            si = si + 1
+        }
+        li = li + 1
+    }
+    0 - 1
+}
+
+// Check if a symbol exists in any registered library.
+fn ffi_symbol_exists(ctx: FfiContext, sym_hash: i64) -> bool with Mut, Panic, Div {
+    ffi_resolve_symbol(ctx, sym_hash) >= 0
+}
+
+// Extract library index from a packed resolution result.
+fn ffi_resolve_lib_idx(packed: i64) -> i64 {
+    if packed < 0 { return 0 - 1 }
+    packed / 65536
+}
+
+// Extract symbol index from a packed resolution result.
+fn ffi_resolve_sym_idx(packed: i64) -> i64 {
+    if packed < 0 { return 0 - 1 }
+    packed % 65536
+}
+
+// ============================================================================
+// Callback support — trampoline generation info
+// ============================================================================
+
+fn ffi_register_callback(ctx: FfiContext, cb: FfiCallback) -> FfiContext with Mut, Panic, Div {
+    var c = ctx
+    if c.callback_count < FFI_MAX_CALLBACKS {
+        c.callbacks[c.callback_count as usize] = cb
+        c.callback_count = c.callback_count + 1
+    }
+    c
+}
+
+// Build a callback descriptor for wrapping a Sounio function as a C function pointer.
+fn ffi_make_callback(
+    sounio_fn_idx: i64,
+    param_count: i64,
+    return_type_idx: i64,
+    cc: i64
+) -> FfiCallback {
+    FfiCallback {
+        sounio_fn_idx: sounio_fn_idx,
+        trampoline_offset: 0,
+        param_count: param_count,
+        return_type_idx: return_type_idx,
+        calling_conv: cc,
+    }
+}
+
+// Compute the size of a trampoline stub for a callback.
+// The trampoline loads the Sounio function address and jumps to a universal
+// thunk that marshals C arguments to Sounio calling convention.
+fn ffi_trampoline_size(cb: FfiCallback) -> i64 {
+    // Base trampoline: mov rax, <addr> ; jmp rax = 12 bytes
+    // Plus per-param marshal overhead (8 bytes per param for moves)
+    let base = 12
+    let per_param = cb.param_count * 8
+    let raw = base + per_param
+    // Align to trampoline alignment
+    let mask = FFI_TRAMPOLINE_ALIGN - 1
+    if (raw & mask) != 0 {
+        (raw + mask) & (0 - FFI_TRAMPOLINE_ALIGN)
+    } else {
+        raw
+    }
+}
+
+// Find a callback by Sounio function index. Returns callback index or -1.
+fn ffi_find_callback(ctx: FfiContext, sounio_fn_idx: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < ctx.callback_count {
+        if ctx.callbacks[i as usize].sounio_fn_idx == sounio_fn_idx {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// ============================================================================
+// Safety checking
+// ============================================================================
+
+// Validate an FFI call site: check parameter count, type compatibility,
+// symbol resolution, and calling convention validity.
+fn ffi_validate_call(ctx: FfiContext, call_idx: i64) -> i64 with Mut, Panic, Div {
+    if call_idx < 0 || call_idx >= ctx.call_count {
+        return FFI_SAFE_OVERFLOW
+    }
+    let call = ctx.calls[call_idx as usize]
+
+    // Check that the declaration exists
+    if call.decl_idx < 0 || call.decl_idx >= ctx.decl_count {
+        return FFI_SAFE_UNRESOLVED_SYM
+    }
+    let decl = ctx.decls[call.decl_idx as usize]
+
+    // Validate calling convention
+    if decl.calling_conv != FFI_CC_SYSV && decl.calling_conv != FFI_CC_WIN64 && decl.calling_conv != FFI_CC_AAPCS {
+        return FFI_SAFE_INVALID_CC
+    }
+
+    // Check parameter count (non-variadic must match exactly)
+    if !decl.is_variadic {
+        if call.arg_count != decl.param_count {
+            return FFI_SAFE_PARAM_COUNT
+        }
+    } else {
+        // Variadic: must have at least the fixed params
+        if call.arg_count < decl.param_count {
+            return FFI_SAFE_PARAM_COUNT
+        }
+    }
+
+    // Check that the library symbol can be resolved
+    if decl.lib_name_hash != 0 {
+        let lib_idx = ffi_find_library(ctx, decl.lib_name_hash)
+        if lib_idx < 0 {
+            return FFI_SAFE_UNRESOLVED_SYM
+        }
+        // Check symbol exists in the library
+        if !ffi_symbol_exists(ctx, decl.name_hash) {
+            return FFI_SAFE_UNRESOLVED_SYM
+        }
+    }
+
+    // Validate each parameter type index is in range
+    var i: i64 = 0
+    while i < decl.param_count {
+        let pt = decl.param_types[i as usize]
+        if pt < 0 || pt >= ctx.type_count {
+            return FFI_SAFE_TYPE_MISMATCH
+        }
+        i = i + 1
+    }
+
+    // Validate return type
+    if decl.return_type < 0 || decl.return_type >= ctx.type_count {
+        return FFI_SAFE_TYPE_MISMATCH
+    }
+
+    FFI_SAFE_OK
+}
+
+// Check if a pointer argument is null (represented as register value 0).
+fn ffi_check_null_ptr(reg_value: i64) -> i64 {
+    if reg_value == 0 { FFI_SAFE_NULL_PTR } else { FFI_SAFE_OK }
+}
+
+// Validate type compatibility between a Sounio type and an FFI type.
+// Returns FFI_SAFE_OK if compatible, FFI_SAFE_TYPE_MISMATCH otherwise.
+fn ffi_check_type_compat(sounio_kind: i64, ffi_type_idx: i64, ctx: FfiContext) -> i64 with Mut, Panic, Div {
+    if ffi_type_idx < 0 || ffi_type_idx >= ctx.type_count {
+        return FFI_SAFE_TYPE_MISMATCH
+    }
+    let expected_ffi = ffi_map_sounio_type(sounio_kind)
+    let actual = ctx.types[ffi_type_idx as usize]
+
+    // Direct kind match
+    if actual.kind == expected_ffi { return FFI_SAFE_OK }
+
+    // Widening is allowed: i8/i16/i32 -> i64
+    if ffi_is_int_kind(actual.kind) && expected_ffi == FFI_TYPE_I64 { return FFI_SAFE_OK }
+
+    // Pointer types are compatible with any pointer/ref
+    if actual.kind == FFI_TYPE_PTR && expected_ffi == FFI_TYPE_PTR { return FFI_SAFE_OK }
+
+    FFI_SAFE_TYPE_MISMATCH
+}
+
+// Validate all call sites in the context. Returns count of errors.
+fn ffi_validate_all_calls(ctx: FfiContext) -> i64 with Mut, Panic, Div {
+    var errors: i64 = 0
+    var i: i64 = 0
+    while i < ctx.call_count {
+        let result = ffi_validate_call(ctx, i)
+        if result != FFI_SAFE_OK {
+            errors = errors + 1
+        }
+        i = i + 1
+    }
+    errors
+}
+
+// ============================================================================
+// Variadic function support
+// ============================================================================
+
+// For variadic calls on SysV AMD64, the number of vector (xmm) registers
+// used must be passed in AL before the call.
+fn ffi_count_variadic_float_args(
+    ctx: FfiContext,
+    decl_idx: i64,
+    arg_count: i64
+) -> i64 with Mut, Panic, Div {
+    if decl_idx < 0 || decl_idx >= ctx.decl_count { return 0 }
+    let decl = ctx.decls[decl_idx as usize]
+    var float_count: i64 = 0
+    var i: i64 = 0
+    while i < arg_count && i < FFI_MAX_PARAMS {
+        let pt = decl.param_types[i as usize]
+        if pt >= 0 && pt < ctx.type_count {
+            if ffi_is_float_kind(ctx.types[pt as usize].kind) {
+                float_count = float_count + 1
+            }
+        }
+        i = i + 1
+    }
+    // Cap at 8 (max xmm registers)
+    if float_count > 8 { 8 } else { float_count }
+}
+
+// ============================================================================
+// Struct field offset calculation (for struct flatten/pack marshaling)
+// ============================================================================
+
+// Compute the byte offset of a specific field within a struct type.
+fn ffi_struct_field_offset(ctx: FfiContext, struct_type_idx: i64, field_idx: i64) -> i64 with Mut, Panic, Div {
+    if struct_type_idx < 0 || struct_type_idx >= ctx.type_count { return 0 }
+    let sty = ctx.types[struct_type_idx as usize]
+    if sty.kind != FFI_TYPE_STRUCT { return 0 }
+
+    var offset: i64 = 0
+    var i: i64 = 0
+    while i < field_idx && i < sty.field_count {
+        let ft_idx = sty.field_types[i as usize]
+        if ft_idx >= 0 && ft_idx < ctx.type_count {
+            let ft = ctx.types[ft_idx as usize]
+            offset = ffi_align_up(offset, ft.alignment)
+            offset = offset + ft.size
+        }
+        i = i + 1
+    }
+    // Align to the target field's alignment
+    if field_idx < sty.field_count {
+        let target_idx = sty.field_types[field_idx as usize]
+        if target_idx >= 0 && target_idx < ctx.type_count {
+            let target = ctx.types[target_idx as usize]
+            offset = ffi_align_up(offset, target.alignment)
+        }
+    }
+    offset
+}
+
+// Determine how many registers a struct occupies when flattened for
+// register passing (System V: up to 2 eightbytes).
+fn ffi_struct_reg_count(ctx: FfiContext, struct_type_idx: i64) -> i64 with Mut, Panic, Div {
+    if struct_type_idx < 0 || struct_type_idx >= ctx.type_count { return 0 }
+    let sty = ctx.types[struct_type_idx as usize]
+    if sty.kind != FFI_TYPE_STRUCT { return 1 }
+    if sty.size <= 8 { return 1 }
+    if sty.size <= 16 { return 2 }
+    // Larger structs are passed by pointer, not in registers
+    0
+}
+
+// ============================================================================
+// Context queries
+// ============================================================================
+
+// Get the total number of marshal ops generated.
+fn ffi_marshal_count(ctx: FfiContext) -> i64 {
+    ctx.marshal_count
+}
+
+// Get the total number of registered FFI declarations.
+fn ffi_decl_count(ctx: FfiContext) -> i64 {
+    ctx.decl_count
+}
+
+// Get the total number of registered call sites.
+fn ffi_call_count(ctx: FfiContext) -> i64 {
+    ctx.call_count
+}
+
+// Get the total number of registered types.
+fn ffi_type_count(ctx: FfiContext) -> i64 {
+    ctx.type_count
+}
+
+// Get the total number of registered libraries.
+fn ffi_lib_count(ctx: FfiContext) -> i64 {
+    ctx.lib_count
+}
+
+// Get the total number of registered callbacks.
+fn ffi_callback_count(ctx: FfiContext) -> i64 {
+    ctx.callback_count
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+// ---------- T01: Type descriptor construction ----------
+fn test_ffi_type_void_size() -> bool {
+    let t = ffi_type_scalar(FFI_TYPE_VOID, 0, 1)
+    t.size == 0 && t.alignment == 1 && t.kind == FFI_TYPE_VOID
+}
+
+fn test_ffi_type_i32_size() -> bool {
+    let t = ffi_type_scalar(FFI_TYPE_I32, 4, 4)
+    t.size == 4 && t.alignment == 4 && t.kind == FFI_TYPE_I32
+}
+
+fn test_ffi_type_f64_size() -> bool {
+    let t = ffi_type_scalar(FFI_TYPE_F64, 8, 8)
+    t.size == 8 && t.alignment == 8 && t.kind == FFI_TYPE_F64
+}
+
+fn test_ffi_type_ptr_size() -> bool {
+    let t = ffi_type_scalar(FFI_TYPE_PTR, 8, 8)
+    t.size == 8 && t.alignment == 8 && t.kind == FFI_TYPE_PTR
+}
+
+// ---------- T02: Type size/align helper functions ----------
+fn test_ffi_type_size_helper() -> bool with Mut, Panic {
+    let ok1 = ffi_type_size(FFI_TYPE_I8) == 1
+    let ok2 = ffi_type_size(FFI_TYPE_I16) == 2
+    let ok3 = ffi_type_size(FFI_TYPE_I32) == 4
+    let ok4 = ffi_type_size(FFI_TYPE_I64) == 8
+    let ok5 = ffi_type_size(FFI_TYPE_PTR) == 8
+    let ok6 = ffi_type_size(FFI_TYPE_VOID) == 0
+    ok1 && ok2 && ok3 && ok4 && ok5 && ok6
+}
+
+fn test_ffi_type_align_helper() -> bool with Mut, Panic {
+    let ok1 = ffi_type_align(FFI_TYPE_I8) == 1
+    let ok2 = ffi_type_align(FFI_TYPE_I32) == 4
+    let ok3 = ffi_type_align(FFI_TYPE_F64) == 8
+    ok1 && ok2 && ok3
+}
+
+// ---------- T03: Primitive type registration ----------
+fn test_ffi_register_primitives() -> bool with Mut, Panic, Div {
+    var ctx = ffi_context_new()
+    ctx = ffi_register_primitives(ctx)
+    // Should have 8 types: void, i8, i16, i32, i64, f32, f64, ptr
+    if ctx.type_count != 8 { return false }
+    if ctx.types[0 as usize].kind != FFI_TYPE_VOID { return false }
+    if ctx.types[1 as usize].kind != FFI_TYPE_I8 { return false }
+    if ctx.types[3 as usize].kind != FFI_TYPE_I32 { return false }
+    if ctx.types[4 as usize].kind != FFI_TYPE_I64 { return false }
+    if ctx.types[7 as usize].kind != FFI_TYPE_PTR { return false }
+    true
+}
+
+// ---------- T04: Struct type registration ----------
+fn test_ffi_register_struct() -> bool with Mut, Panic, Div {
+    var ctx = ffi_context_new()
+    ctx = ffi_register_primitives(ctx)
+    // Register struct { i32, i64 }
+    var fields: [i64; 16] = [0; 16]
+    fields[0 as usize] = 3   // i32 (index 3)
+    fields[1 as usize] = 4   // i64 (index 4)
+    ctx = ffi_register_struct_type(ctx, fields, 2)
+    // Should be type index 8
+    if ctx.type_count != 9 { return false }
+    let sty = ctx.types[8 as usize]
+    if sty.kind != FFI_TYPE_STRUCT { return false }
+    // Size: align(0,4)+4=4, align(4,8)+8=16, align(16,8)=16
+    if sty.size != 16 { return false }
+    if sty.alignment != 8 { return false }
+    if sty.field_count != 2 { return false }
+    true
+}
+
+// ---------- T05: Function declaration registration ----------
+fn test_ffi_register_decl() -> bool with Mut, Panic, Div {
+    var ctx = ffi_context_new()
+    ctx = ffi_register_primitives(ctx)
+    var params: [i64; 16] = [0; 16]
+    params[0 as usize] = 3   // i32
+    params[1 as usize] = 3   // i32
+    let decl = ffi_make_decl(12345, params, 2, 3, FFI_CC_SYSV, 0)
+    ctx = ffi_register_decl(ctx, decl)
+    if ctx.decl_count != 1 { return false }
+    if ctx.decls[0 as usize].name_hash != 12345 { return false }
+    if ctx.decls[0 as usize].param_count != 2 { return false }
+    if ctx.decls[0 as usize].return_type != 3 { return false }
+    true
+}
+
+// ---------- T06: Variadic declaration ----------
+fn test_ffi_variadic_decl() -> bool with Mut, Panic, Div {
+    var params: [i64; 16] = [0; 16]
+    params[0 as usize] = 7   // ptr (format string)
+    let decl = ffi_make_variadic_decl(99999, params, 1, 3, FFI_CC_SYSV, 0)
+    if !decl.is_variadic { return false }
+    if decl.param_count != 1 { return false }
+    true
+}
+
+// ---------- T07: Find declaration by hash ----------
+fn test_ffi_find_decl() -> bool with Mut, Panic, Div {
+    var ctx = ffi_context_new()
+    ctx = ffi_register_primitives(ctx)
+    var params: [i64; 16] = [0; 16]
+    params[0 as usize] = 3
+    let d1 = ffi_make_decl(100, params, 1, 0, FFI_CC_SYSV, 0)
+    let d2 = ffi_make_decl(200, params, 1, 3, FFI_CC_SYSV, 0)
+    let d3 = ffi_make_decl(300, params, 1, 4, FFI_CC_SYSV, 0)
+    ctx = ffi_register_decl(ctx, d1)
+    ctx = ffi_register_decl(ctx, d2)
+    ctx = ffi_register_decl(ctx, d3)
+    if ffi_find_decl(ctx, 200) != 1 { return false }
+    if ffi_find_decl(ctx, 999) != (0 - 1) { return false }
+    true
+}
+
+// ---------- T08: Sounio type mapping ----------
+fn test_ffi_type_mapping() -> bool {
+    if ffi_map_sounio_type(FFI_SOUNIO_I32) != FFI_TYPE_I32 { return false }
+    if ffi_map_sounio_type(FFI_SOUNIO_F64) != FFI_TYPE_F64 { return false }
+    if ffi_map_sounio_type(FFI_SOUNIO_PTR) != FFI_TYPE_PTR { return false }
+    if ffi_map_sounio_type(FFI_SOUNIO_REF) != FFI_TYPE_PTR { return false }
+    if ffi_map_sounio_type(FFI_SOUNIO_REF_MUT) != FFI_TYPE_PTR { return false }
+    if ffi_map_sounio_type(FFI_SOUNIO_BOOL) != FFI_TYPE_I8 { return false }
+    if ffi_map_sounio_type(FFI_SOUNIO_STRING) != FFI_TYPE_PTR { return false }
+    if ffi_map_sounio_type(FFI_SOUNIO_VOID) != FFI_TYPE_VOID { return false }
+    true
+}
+
+// ---------- T09: Needs marshal check ----------
+fn test_ffi_needs_marshal() -> bool {
+    if ffi_needs_marshal(FFI_SOUNIO_I32) { return false }
+    if ffi_needs_marshal(FFI_SOUNIO_F64) { return false }
+    if !ffi_needs_marshal(FFI_SOUNIO_REF) { return false }
+    if !ffi_needs_marshal(FFI_SOUNIO_REF_MUT) { return false }
+    if !ffi_needs_marshal(FFI_SOUNIO_STRING) { return false }
+    if !ffi_needs_marshal(FFI_SOUNIO_BOOL) { return false }
+    if !ffi_needs_marshal(FFI_SOUNIO_STRUCT) { return false }
+    true
+}
+
+// ---------- T10: Marshal kind selection (Sounio -> C) ----------
+fn test_ffi_marshal_kind_to_c() -> bool {
+    if ffi_marshal_kind_for_sounio(FFI_SOUNIO_REF) != FFI_MARSHAL_REF_TO_PTR { return false }
+    if ffi_marshal_kind_for_sounio(FFI_SOUNIO_BOOL) != FFI_MARSHAL_WIDEN { return false }
+    if ffi_marshal_kind_for_sounio(FFI_SOUNIO_STRUCT) != FFI_MARSHAL_STRUCT_FLATTEN { return false }
+    if ffi_marshal_kind_for_sounio(FFI_SOUNIO_I64) != FFI_MARSHAL_COPY { return false }
+    true
+}
+
+// ---------- T11: Marshal kind selection (C -> Sounio) ----------
+fn test_ffi_marshal_kind_from_c() -> bool {
+    if ffi_marshal_kind_from_c(FFI_SOUNIO_REF) != FFI_MARSHAL_PTR_TO_REF { return false }
+    if ffi_marshal_kind_from_c(FFI_SOUNIO_BOOL) != FFI_MARSHAL_NARROW { return false }
+    if ffi_marshal_kind_from_c(FFI_SOUNIO_STRUCT) != FFI_MARSHAL_STRUCT_PACK { return false }
+    if ffi_marshal_kind_from_c(FFI_SOUNIO_I64) != FFI_MARSHAL_COPY { return false }
+    true
+}
+
+// ---------- T12: SysV register assignment (integer params) ----------
+fn test_ffi_sysv_int_regs() -> bool with Mut, Panic, Div {
+    var ctx = ffi_context_new()
+    ctx = ffi_register_primitives(ctx)
+    // 6 i64 params: should fill rdi, rsi, rdx, rcx, r8, r9
+    var params: [i64; 16] = [0; 16]
+    var i: i64 = 0
+    while i < 6 {
+        params[i as usize] = 4   // i64
+        i = i + 1
+    }
+    let decl = ffi_make_decl(1000, params, 6, 0, FFI_CC_SYSV, 0)
+    ctx = ffi_register_decl(ctx, decl)
+    let assigns = ffi_assign_regs(ctx, 0)
+    if assigns[0 as usize].reg != FFI_REG_RDI { return false }
+    if assigns[1 as usize].reg != FFI_REG_RSI { return false }
+    if assigns[2 as usize].reg != FFI_REG_RDX { return false }
+    if assigns[3 as usize].reg != FFI_REG_RCX { return false }
+    if assigns[4 as usize].reg != FFI_REG_R8 { return false }
+    if assigns[5 as usize].reg != FFI_REG_R9 { return false }
+    true
+}
+
+// ---------- T13: SysV spill to stack after 6 int regs ----------
+fn test_ffi_sysv_stack_spill() -> bool with Mut, Panic, Div {
+    var ctx = ffi_context_new()
+    ctx = ffi_register_primitives(ctx)
+    // 8 i64 params: first 6 in regs, last 2 on stack
+    var params: [i64; 16] = [0; 16]
+    var i: i64 = 0
+    while i < 8 {
+        params[i as usize] = 4   // i64
+        i = i + 1
+    }
+    let decl = ffi_make_decl(2000, params, 8, 0, FFI_CC_SYSV, 0)
+    ctx = ffi_register_decl(ctx, decl)
+    let assigns = ffi_assign_regs(ctx, 0)
+    // Param 6 should be on stack
+    if assigns[6 as usize].reg != FFI_REG_NONE { return false }
+    if assigns[6 as usize].stack_offset != 0 { return false }
+    // Param 7 should be on stack at offset 8
+    if assigns[7 as usize].reg != FFI_REG_NONE { return false }
+    if assigns[7 as usize].stack_offset != 8 { return false }
+    true
+}
+
+// ---------- T14: SysV float register assignment ----------
+fn test_ffi_sysv_float_regs() -> bool with Mut, Panic, Div {
+    var ctx = ffi_context_new()
+    ctx = ffi_register_primitives(ctx)
+    var params: [i64; 16] = [0; 16]
+    params[0 as usize] = 6   // f64
+    params[1 as usize] = 5   // f32
+    let decl = ffi_make_decl(3000, params, 2, 0, FFI_CC_SYSV, 0)
+    ctx = ffi_register_decl(ctx, decl)
+    let assigns = ffi_assign_regs(ctx, 0)
+    // Float params go in xmm registers (encoded 16+)
+    if assigns[0 as usize].reg != 16 { return false }
+    if assigns[1 as usize].reg != 17 { return false }
+    if !assigns[0 as usize].is_float { return false }
+    if !assigns[1 as usize].is_float { return false }
+    true
+}
+
+// ---------- T15: Win64 register assignment ----------
+fn test_ffi_win64_regs() -> bool with Mut, Panic, Div {
+    var ctx = ffi_context_new()
+    ctx = ffi_register_primitives(ctx)
+    var params: [i64; 16] = [0; 16]
+    params[0 as usize] = 4   // i64
+    params[1 as usize] = 4   // i64
+    params[2 as usize] = 4   // i64
+    params[3 as usize] = 4   // i64
+    let decl = ffi_make_decl(4000, params, 4, 0, FFI_CC_WIN64, 0)
+    ctx = ffi_register_decl(ctx, decl)
+    let assigns = ffi_assign_regs(ctx, 0)
+    if assigns[0 as usize].reg != FFI_REG_RCX { return false }
+    if assigns[1 as usize].reg != FFI_REG_RDX { return false }
+    if assigns[2 as usize].reg != FFI_REG_R8 { return false }
+    if assigns[3 as usize].reg != FFI_REG_R9 { return false }
+    true
+}
+
+// ---------- T16: Win64 stack spill ----------
+fn test_ffi_win64_stack_spill() -> bool with Mut, Panic, Div {
+    var ctx = ffi_context_new()
+    ctx = ffi_register_primitives(ctx)
+    var params: [i64; 16] = [0; 16]
+    var i: i64 = 0
+    while i < 6 {
+        params[i as usize] = 4
+        i = i + 1
+    }
+    let decl = ffi_make_decl(5000, params, 6, 0, FFI_CC_WIN64, 0)
+    ctx = ffi_register_decl(ctx, decl)
+    let assigns = ffi_assign_regs(ctx, 0)
+    // Param 4 and 5 should be on stack (shadow space = 32)
+    if assigns[4 as usize].reg != FFI_REG_NONE { return false }
+    if assigns[4 as usize].stack_offset != 32 { return false }
+    if assigns[5 as usize].reg != FFI_REG_NONE { return false }
+    if assigns[5 as usize].stack_offset != 40 { return false }
+    true
+}
+
+// ---------- T17: Win64 float in positional slot ----------
+fn test_ffi_win64_float_positional() -> bool with Mut, Panic, Div {
+    var ctx = ffi_context_new()
+    ctx = ffi_register_primitives(ctx)
+    var params: [i64; 16] = [0; 16]
+    params[0 as usize] = 4   // i64 -> rcx
+    params[1 as usize] = 6   // f64 -> xmm1
+    let decl = ffi_make_decl(5500, params, 2, 0, FFI_CC_WIN64, 0)
+    ctx = ffi_register_decl(ctx, decl)
+    let assigns = ffi_assign_regs(ctx, 0)
+    if assigns[0 as usize].reg != FFI_REG_RCX { return false }
+    // f64 in slot 1 goes to xmm1 (encoded as 17)
+    if assigns[1 as usize].reg != 17 { return false }
+    if !assigns[1 as usize].is_float { return false }
+    true
+}
+
+// ---------- T18: Marshal op construction ----------
+fn test_ffi_marshal_op_construct() -> bool {
+    let op = ffi_make_marshal_op(FFI_MARSHAL_WIDEN, 3, 5, 1)
+    if op.kind != FFI_MARSHAL_WIDEN { return false }
+    if op.src_reg != 3 { return false }
+    if op.dst_reg != 5 { return false }
+    if op.type_idx != 1 { return false }
+    true
+}
+
+// ---------- T19: Marshal registration ----------
+fn test_ffi_marshal_register() -> bool with Mut, Panic, Div {
+    var ctx = ffi_context_new()
+    let op1 = ffi_make_marshal_op(FFI_MARSHAL_COPY, 0, 1, 3)
+    let op2 = ffi_make_marshal_op(FFI_MARSHAL_WIDEN, 2, 3, 1)
+    ctx = ffi_register_marshal(ctx, op1)
+    ctx = ffi_register_marshal(ctx, op2)
+    if ctx.marshal_count != 2 { return false }
+    if ctx.marshals[0 as usize].kind != FFI_MARSHAL_COPY { return false }
+    if ctx.marshals[1 as usize].kind != FFI_MARSHAL_WIDEN { return false }
+    true
+}
+
+// ---------- T20: String marshal to C ----------
+fn test_ffi_string_to_c() -> bool with Mut, Panic, Div {
+    var src: [i8; 4096] = [0; 4096]
+    // "hello"
+    src[0 as usize] = 104 as i8  // h
+    src[1 as usize] = 101 as i8  // e
+    src[2 as usize] = 108 as i8  // l
+    src[3 as usize] = 108 as i8  // l
+    src[4 as usize] = 111 as i8  // o
+    var buf = ffi_string_buf_new()
+    buf = ffi_marshal_string_to_c(buf, src, 5)
+    if buf.len != 6 { return false }   // 5 chars + null
+    if buf.bytes[0 as usize] != 104 as i8 { return false }
+    if buf.bytes[4 as usize] != 111 as i8 { return false }
+    if buf.bytes[5 as usize] != 0 as i8 { return false }
+    true
+}
+
+// ---------- T21: String null-termination check ----------
+fn test_ffi_string_null_terminated() -> bool with Mut, Panic, Div {
+    var buf = ffi_string_buf_new()
+    buf.bytes[0 as usize] = 65 as i8
+    buf.bytes[1 as usize] = 0 as i8
+    buf.len = 2
+    if !ffi_string_is_null_terminated(buf) { return false }
+    // Empty buffer should fail
+    var empty = ffi_string_buf_new()
+    empty.len = 0
+    if ffi_string_is_null_terminated(empty) { return false }
+    true
+}
+
+// ---------- T22: String marshal from C ----------
+fn test_ffi_string_from_c() -> bool with Mut, Panic, Div {
+    var src: [i8; 4096] = [0; 4096]
+    src[0 as usize] = 65 as i8   // A
+    src[1 as usize] = 66 as i8   // B
+    src[2 as usize] = 67 as i8   // C
+    src[3 as usize] = 0 as i8    // null
+    var buf = ffi_string_buf_new()
+    buf = ffi_marshal_string_from_c(buf, src)
+    if buf.len != 3 { return false }
+    if buf.bytes[0 as usize] != 65 as i8 { return false }
+    if buf.bytes[2 as usize] != 67 as i8 { return false }
+    true
+}
+
+// ---------- T23: Library registration ----------
+fn test_ffi_register_library() -> bool with Mut, Panic, Div {
+    var ctx = ffi_context_new()
+    var lib = ffi_make_library(42)
+    lib = ffi_lib_add_symbol(lib, 100)
+    lib = ffi_lib_add_symbol(lib, 200)
+    lib = ffi_lib_add_symbol(lib, 300)
+    ctx = ffi_register_library(ctx, lib)
+    if ctx.lib_count != 1 { return false }
+    if ctx.libs[0 as usize].name_hash != 42 { return false }
+    if ctx.libs[0 as usize].symbol_count != 3 { return false }
+    true
+}
+
+// ---------- T24: Library lookup ----------
+fn test_ffi_find_library() -> bool with Mut, Panic, Div {
+    var ctx = ffi_context_new()
+    let lib1 = ffi_make_library(10)
+    let lib2 = ffi_make_library(20)
+    let lib3 = ffi_make_library(30)
+    ctx = ffi_register_library(ctx, lib1)
+    ctx = ffi_register_library(ctx, lib2)
+    ctx = ffi_register_library(ctx, lib3)
+    if ffi_find_library(ctx, 20) != 1 { return false }
+    if ffi_find_library(ctx, 99) != (0 - 1) { return false }
+    true
+}
+
+// ---------- T25: Symbol resolution ----------
+fn test_ffi_symbol_resolution() -> bool with Mut, Panic, Div {
+    var ctx = ffi_context_new()
+    var lib = ffi_make_library(50)
+    lib = ffi_lib_add_symbol(lib, 500)
+    lib = ffi_lib_add_symbol(lib, 600)
+    lib = ffi_lib_add_symbol(lib, 700)
+    ctx = ffi_register_library(ctx, lib)
+
+    let packed = ffi_resolve_symbol(ctx, 600)
+    if packed < 0 { return false }
+    if ffi_resolve_lib_idx(packed) != 0 { return false }
+    if ffi_resolve_sym_idx(packed) != 1 { return false }
+
+    // Non-existent symbol
+    if ffi_resolve_symbol(ctx, 999) != (0 - 1) { return false }
+    true
+}
+
+// ---------- T26: Symbol exists check ----------
+fn test_ffi_symbol_exists() -> bool with Mut, Panic, Div {
+    var ctx = ffi_context_new()
+    var lib = ffi_make_library(60)
+    lib = ffi_lib_add_symbol(lib, 800)
+    ctx = ffi_register_library(ctx, lib)
+    if !ffi_symbol_exists(ctx, 800) { return false }
+    if ffi_symbol_exists(ctx, 801) { return false }
+    true
+}
+
+// ---------- T27: Safety validation — valid call ----------
+fn test_ffi_validate_ok() -> bool with Mut, Panic, Div {
+    var ctx = ffi_context_new()
+    ctx = ffi_register_primitives(ctx)
+    var params: [i64; 16] = [0; 16]
+    params[0 as usize] = 3   // i32
+    let decl = ffi_make_decl(1111, params, 1, 0, FFI_CC_SYSV, 0)
+    ctx = ffi_register_decl(ctx, decl)
+
+    var args: [i64; 16] = [0; 16]
+    args[0 as usize] = 5
+    let call = ffi_make_call_site(0, args, 1, 10)
+    ctx = ffi_register_call(ctx, call)
+
+    let result = ffi_validate_call(ctx, 0)
+    result == FFI_SAFE_OK
+}
+
+// ---------- T28: Safety validation — param count mismatch ----------
+fn test_ffi_validate_param_count() -> bool with Mut, Panic, Div {
+    var ctx = ffi_context_new()
+    ctx = ffi_register_primitives(ctx)
+    var params: [i64; 16] = [0; 16]
+    params[0 as usize] = 3
+    let decl = ffi_make_decl(2222, params, 1, 0, FFI_CC_SYSV, 0)
+    ctx = ffi_register_decl(ctx, decl)
+
+    // Call with 3 args instead of 1
+    var args: [i64; 16] = [0; 16]
+    let call = ffi_make_call_site(0, args, 3, 10)
+    ctx = ffi_register_call(ctx, call)
+
+    let result = ffi_validate_call(ctx, 0)
+    result == FFI_SAFE_PARAM_COUNT
+}
+
+// ---------- T29: Safety validation — invalid calling convention ----------
+fn test_ffi_validate_bad_cc() -> bool with Mut, Panic, Div {
+    var ctx = ffi_context_new()
+    ctx = ffi_register_primitives(ctx)
+    var params: [i64; 16] = [0; 16]
+    let decl = ffi_make_decl(3333, params, 0, 0, 99, 0)  // invalid CC
+    ctx = ffi_register_decl(ctx, decl)
+    var args: [i64; 16] = [0; 16]
+    let call = ffi_make_call_site(0, args, 0, 10)
+    ctx = ffi_register_call(ctx, call)
+    let result = ffi_validate_call(ctx, 0)
+    result == FFI_SAFE_INVALID_CC
+}
+
+// ---------- T30: Safety — null pointer check ----------
+fn test_ffi_null_ptr_check() -> bool {
+    if ffi_check_null_ptr(0) != FFI_SAFE_NULL_PTR { return false }
+    if ffi_check_null_ptr(12345) != FFI_SAFE_OK { return false }
+    true
+}
+
+// ---------- T31: Variadic — float arg count for AL ----------
+fn test_ffi_variadic_float_count() -> bool with Mut, Panic, Div {
+    var ctx = ffi_context_new()
+    ctx = ffi_register_primitives(ctx)
+    var params: [i64; 16] = [0; 16]
+    params[0 as usize] = 7   // ptr (format string)
+    params[1 as usize] = 6   // f64
+    params[2 as usize] = 4   // i64
+    params[3 as usize] = 6   // f64
+    let decl = ffi_make_variadic_decl(7777, params, 4, 3, FFI_CC_SYSV, 0)
+    ctx = ffi_register_decl(ctx, decl)
+    let fcount = ffi_count_variadic_float_args(ctx, 0, 4)
+    fcount == 2
+}
+
+// ---------- T32: Callback construction ----------
+fn test_ffi_callback_construct() -> bool with Mut, Panic, Div {
+    var ctx = ffi_context_new()
+    let cb = ffi_make_callback(5, 3, 0, FFI_CC_SYSV)
+    ctx = ffi_register_callback(ctx, cb)
+    if ctx.callback_count != 1 { return false }
+    if ctx.callbacks[0 as usize].sounio_fn_idx != 5 { return false }
+    if ctx.callbacks[0 as usize].param_count != 3 { return false }
+    true
+}
+
+// ---------- T33: Callback find ----------
+fn test_ffi_callback_find() -> bool with Mut, Panic, Div {
+    var ctx = ffi_context_new()
+    let cb1 = ffi_make_callback(10, 2, 0, FFI_CC_SYSV)
+    let cb2 = ffi_make_callback(20, 3, 0, FFI_CC_SYSV)
+    ctx = ffi_register_callback(ctx, cb1)
+    ctx = ffi_register_callback(ctx, cb2)
+    if ffi_find_callback(ctx, 20) != 1 { return false }
+    if ffi_find_callback(ctx, 99) != (0 - 1) { return false }
+    true
+}
+
+// ---------- T34: Trampoline size calculation ----------
+fn test_ffi_trampoline_size() -> bool {
+    let cb0 = ffi_make_callback(0, 0, 0, FFI_CC_SYSV)
+    let sz0 = ffi_trampoline_size(cb0)
+    // 12 + 0*8 = 12, aligned to 16 => 16
+    if sz0 != 16 { return false }
+
+    let cb2 = ffi_make_callback(0, 2, 0, FFI_CC_SYSV)
+    let sz2 = ffi_trampoline_size(cb2)
+    // 12 + 2*8 = 28, aligned to 16 => 32
+    if sz2 != 32 { return false }
+
+    let cb4 = ffi_make_callback(0, 4, 0, FFI_CC_SYSV)
+    let sz4 = ffi_trampoline_size(cb4)
+    // 12 + 4*8 = 44, aligned to 16 => 48
+    if sz4 != 48 { return false }
+    true
+}
+
+// ---------- T35: Struct field offset calculation ----------
+fn test_ffi_struct_field_offset() -> bool with Mut, Panic, Div {
+    var ctx = ffi_context_new()
+    ctx = ffi_register_primitives(ctx)
+    // struct { i8(1), i32(3), i64(4) } -> index 8
+    var fields: [i64; 16] = [0; 16]
+    fields[0 as usize] = 1   // i8
+    fields[1 as usize] = 3   // i32
+    fields[2 as usize] = 4   // i64
+    ctx = ffi_register_struct_type(ctx, fields, 3)
+
+    // field 0 (i8): offset 0
+    let off0 = ffi_struct_field_offset(ctx, 8, 0)
+    if off0 != 0 { return false }
+    // field 1 (i32): offset = align(0+1, 4) = 4
+    let off1 = ffi_struct_field_offset(ctx, 8, 1)
+    if off1 != 4 { return false }
+    // field 2 (i64): offset = align(4+4, 8) = 8
+    let off2 = ffi_struct_field_offset(ctx, 8, 2)
+    if off2 != 8 { return false }
+    true
+}
+
+// ---------- T36: Struct register count ----------
+fn test_ffi_struct_reg_count() -> bool with Mut, Panic, Div {
+    var ctx = ffi_context_new()
+    ctx = ffi_register_primitives(ctx)
+    // Small struct (8 bytes): { i32, i32 }
+    var f1: [i64; 16] = [0; 16]
+    f1[0 as usize] = 3
+    f1[1 as usize] = 3
+    ctx = ffi_register_struct_type(ctx, f1, 2)  // index 8, size 8
+    let rc1 = ffi_struct_reg_count(ctx, 8)
+    if rc1 != 1 { return false }
+
+    // Medium struct (16 bytes): { i64, i64 }
+    var f2: [i64; 16] = [0; 16]
+    f2[0 as usize] = 4
+    f2[1 as usize] = 4
+    ctx = ffi_register_struct_type(ctx, f2, 2)  // index 9, size 16
+    let rc2 = ffi_struct_reg_count(ctx, 9)
+    if rc2 != 2 { return false }
+    true
+}
+
+// ---------- T37: Type compatibility checking ----------
+fn test_ffi_type_compat() -> bool with Mut, Panic, Div {
+    var ctx = ffi_context_new()
+    ctx = ffi_register_primitives(ctx)
+    // i32 Sounio -> i32 C: OK
+    if ffi_check_type_compat(FFI_SOUNIO_I32, 3, ctx) != FFI_SAFE_OK { return false }
+    // f64 Sounio -> f64 C: OK
+    if ffi_check_type_compat(FFI_SOUNIO_F64, 6, ctx) != FFI_SAFE_OK { return false }
+    // i32 Sounio -> f64 C: mismatch
+    if ffi_check_type_compat(FFI_SOUNIO_I32, 6, ctx) != FFI_SAFE_TYPE_MISMATCH { return false }
+    // i32 C -> i64 Sounio: OK (widening)
+    if ffi_check_type_compat(FFI_SOUNIO_I64, 3, ctx) != FFI_SAFE_OK { return false }
+    true
+}
+
+// ---------- T38: Call site construction ----------
+fn test_ffi_call_site_construct() -> bool with Mut, Panic, Div {
+    var args: [i64; 16] = [0; 16]
+    args[0 as usize] = 1
+    args[1 as usize] = 2
+    args[2 as usize] = 3
+    let cs = ffi_make_call_site(7, args, 3, 99)
+    if cs.decl_idx != 7 { return false }
+    if cs.arg_count != 3 { return false }
+    if cs.result_reg != 99 { return false }
+    if cs.arg_regs[0 as usize] != 1 { return false }
+    if cs.arg_regs[2 as usize] != 3 { return false }
+    true
+}
+
+// ---------- T39: Stack param counting ----------
+fn test_ffi_count_stack_params() -> bool with Mut, Panic, Div {
+    var ctx = ffi_context_new()
+    ctx = ffi_register_primitives(ctx)
+    // 8 i64 params -> 6 in regs, 2 on stack
+    var params: [i64; 16] = [0; 16]
+    var i: i64 = 0
+    while i < 8 {
+        params[i as usize] = 4
+        i = i + 1
+    }
+    let decl = ffi_make_decl(9000, params, 8, 0, FFI_CC_SYSV, 0)
+    ctx = ffi_register_decl(ctx, decl)
+    let assigns = ffi_assign_regs(ctx, 0)
+    let on_stack = ffi_count_stack_params(assigns, 8)
+    on_stack == 2
+}
+
+// ---------- T40: Validate all calls ----------
+fn test_ffi_validate_all() -> bool with Mut, Panic, Div {
+    var ctx = ffi_context_new()
+    ctx = ffi_register_primitives(ctx)
+    // Valid decl
+    var params: [i64; 16] = [0; 16]
+    params[0 as usize] = 3
+    let decl = ffi_make_decl(8000, params, 1, 0, FFI_CC_SYSV, 0)
+    ctx = ffi_register_decl(ctx, decl)
+    // Two valid calls
+    var args: [i64; 16] = [0; 16]
+    let c1 = ffi_make_call_site(0, args, 1, 10)
+    let c2 = ffi_make_call_site(0, args, 1, 11)
+    ctx = ffi_register_call(ctx, c1)
+    ctx = ffi_register_call(ctx, c2)
+    let err_count = ffi_validate_all_calls(ctx)
+    err_count == 0
+}
+
+// ---------- T41: Variadic call validation — enough fixed args ----------
+fn test_ffi_validate_variadic_ok() -> bool with Mut, Panic, Div {
+    var ctx = ffi_context_new()
+    ctx = ffi_register_primitives(ctx)
+    var params: [i64; 16] = [0; 16]
+    params[0 as usize] = 7   // ptr
+    let decl = ffi_make_variadic_decl(4444, params, 1, 3, FFI_CC_SYSV, 0)
+    ctx = ffi_register_decl(ctx, decl)
+    // Call with 3 args (>= 1 fixed) — valid
+    var args: [i64; 16] = [0; 16]
+    let call = ffi_make_call_site(0, args, 3, 10)
+    ctx = ffi_register_call(ctx, call)
+    let result = ffi_validate_call(ctx, 0)
+    result == FFI_SAFE_OK
+}
+
+// ---------- T42: Variadic call validation — too few args ----------
+fn test_ffi_validate_variadic_too_few() -> bool with Mut, Panic, Div {
+    var ctx = ffi_context_new()
+    ctx = ffi_register_primitives(ctx)
+    var params: [i64; 16] = [0; 16]
+    params[0 as usize] = 7
+    params[1 as usize] = 3
+    let decl = ffi_make_variadic_decl(5555, params, 2, 3, FFI_CC_SYSV, 0)
+    ctx = ffi_register_decl(ctx, decl)
+    // Call with 1 arg (< 2 fixed) — invalid
+    var args: [i64; 16] = [0; 16]
+    let call = ffi_make_call_site(0, args, 1, 10)
+    ctx = ffi_register_call(ctx, call)
+    let result = ffi_validate_call(ctx, 0)
+    result == FFI_SAFE_PARAM_COUNT
+}
+
+// ---------- T43: Array type registration ----------
+fn test_ffi_register_array_type() -> bool with Mut, Panic, Div {
+    var ctx = ffi_context_new()
+    ctx = ffi_register_primitives(ctx)
+    // Array of 10 i32
+    ctx = ffi_register_array_type(ctx, 3, 10)
+    if ctx.type_count != 9 { return false }
+    let aty = ctx.types[8 as usize]
+    if aty.kind != FFI_TYPE_ARRAY { return false }
+    if aty.size != 40 { return false }   // 10 * 4
+    if aty.alignment != 4 { return false }
+    if aty.field_count != 10 { return false }
+    true
+}
+
+// ---------- T44: Stack argument space calculation ----------
+fn test_ffi_stack_arg_space() -> bool with Mut, Panic, Div {
+    var ctx = ffi_context_new()
+    ctx = ffi_register_primitives(ctx)
+    // 9 params -> 3 on stack = 24 bytes, aligned to 16 => 32
+    var params: [i64; 16] = [0; 16]
+    var i: i64 = 0
+    while i < 9 {
+        params[i as usize] = 4
+        i = i + 1
+    }
+    let decl = ffi_make_decl(10000, params, 9, 0, FFI_CC_SYSV, 0)
+    ctx = ffi_register_decl(ctx, decl)
+    let assigns = ffi_assign_regs(ctx, 0)
+    let space = ffi_stack_arg_space(assigns, 9)
+    space == 32
+}
+
+// ---------- T45: Hash name function ----------
+fn test_ffi_hash_name() -> bool with Mut, Panic {
+    // "puts" = 112, 117, 116, 115
+    let h1 = ffi_hash_name4(112, 117, 116, 115)
+    let h2 = ffi_hash_name4(112, 117, 116, 115)
+    if h1 != h2 { return false }
+    // Different name should give different hash
+    let h3 = ffi_hash_name4(109, 97, 108, 108)  // "mall"
+    if h1 == h3 { return false }
+    // Hash should be positive
+    if h1 <= 0 { return false }
+    true
+}
+
+// ---------- T46: Context queries ----------
+fn test_ffi_context_queries() -> bool with Mut, Panic, Div {
+    var ctx = ffi_context_new()
+    if ffi_decl_count(ctx) != 0 { return false }
+    if ffi_call_count(ctx) != 0 { return false }
+    if ffi_marshal_count(ctx) != 0 { return false }
+    if ffi_type_count(ctx) != 0 { return false }
+    if ffi_lib_count(ctx) != 0 { return false }
+    if ffi_callback_count(ctx) != 0 { return false }
+    ctx = ffi_register_primitives(ctx)
+    if ffi_type_count(ctx) != 8 { return false }
+    true
+}
+
+// ---------- T47: Safety — unresolved symbol ----------
+fn test_ffi_validate_unresolved() -> bool with Mut, Panic, Div {
+    var ctx = ffi_context_new()
+    ctx = ffi_register_primitives(ctx)
+    var params: [i64; 16] = [0; 16]
+    // lib_name_hash != 0 but no library registered
+    let decl = ffi_make_decl(6666, params, 0, 0, FFI_CC_SYSV, 999)
+    ctx = ffi_register_decl(ctx, decl)
+    var args: [i64; 16] = [0; 16]
+    let call = ffi_make_call_site(0, args, 0, 10)
+    ctx = ffi_register_call(ctx, call)
+    let result = ffi_validate_call(ctx, 0)
+    result == FFI_SAFE_UNRESOLVED_SYM
+}
+
+// ---------- T48: AAPCS register assignment ----------
+fn test_ffi_aapcs_regs() -> bool with Mut, Panic, Div {
+    var ctx = ffi_context_new()
+    ctx = ffi_register_primitives(ctx)
+    var params: [i64; 16] = [0; 16]
+    var i: i64 = 0
+    while i < 10 {
+        params[i as usize] = 4
+        i = i + 1
+    }
+    let decl = ffi_make_decl(11000, params, 10, 0, FFI_CC_AAPCS, 0)
+    ctx = ffi_register_decl(ctx, decl)
+    let assigns = ffi_assign_regs(ctx, 0)
+    // First 8 in x0..x7
+    if assigns[0 as usize].reg != 0 { return false }
+    if assigns[7 as usize].reg != 7 { return false }
+    // Param 8 on stack
+    if assigns[8 as usize].reg != FFI_REG_NONE { return false }
+    if assigns[8 as usize].stack_offset != 0 { return false }
+    // Param 9 on stack at offset 8
+    if assigns[9 as usize].reg != FFI_REG_NONE { return false }
+    if assigns[9 as usize].stack_offset != 8 { return false }
+    true
+}
+
+// ---------- T49: Align-up helper ----------
+fn test_ffi_align_up() -> bool with Mut, Panic {
+    if ffi_align_up(0, 16) != 0 { return false }
+    if ffi_align_up(1, 16) != 16 { return false }
+    if ffi_align_up(15, 16) != 16 { return false }
+    if ffi_align_up(16, 16) != 16 { return false }
+    if ffi_align_up(17, 16) != 32 { return false }
+    if ffi_align_up(7, 8) != 8 { return false }
+    if ffi_align_up(8, 8) != 8 { return false }
+    true
+}
+
+// ---------- T50: Sounio type C size ----------
+fn test_ffi_sounio_type_c_size() -> bool {
+    if ffi_sounio_type_c_size(FFI_SOUNIO_I32) != 4 { return false }
+    if ffi_sounio_type_c_size(FFI_SOUNIO_I64) != 8 { return false }
+    if ffi_sounio_type_c_size(FFI_SOUNIO_F64) != 8 { return false }
+    if ffi_sounio_type_c_size(FFI_SOUNIO_BOOL) != 1 { return false }
+    if ffi_sounio_type_c_size(FFI_SOUNIO_PTR) != 8 { return false }
+    if ffi_sounio_type_c_size(FFI_SOUNIO_VOID) != 0 { return false }
+    true
+}
+
+// ============================================================================
+// Test runner
+// ============================================================================
+
+fn run_ffi_tests() -> i32 with IO, Mut, Panic, Div {
+    var passed: i64 = 0
+    let total: i64 = 50
+
+    print("=== FFI Bridge Tests ===\n")
+
+    if test_ffi_type_void_size() { passed = passed + 1; print("  T01 OK (type void size)\n") } else { print("  FAIL: T01 type void size\n") }
+    if test_ffi_type_i32_size() { passed = passed + 1; print("  T02 OK (type i32 size)\n") } else { print("  FAIL: T02 type i32 size\n") }
+    if test_ffi_type_f64_size() { passed = passed + 1; print("  T03 OK (type f64 size)\n") } else { print("  FAIL: T03 type f64 size\n") }
+    if test_ffi_type_ptr_size() { passed = passed + 1; print("  T04 OK (type ptr size)\n") } else { print("  FAIL: T04 type ptr size\n") }
+    if test_ffi_type_size_helper() { passed = passed + 1; print("  T05 OK (type size helper)\n") } else { print("  FAIL: T05 type size helper\n") }
+    if test_ffi_type_align_helper() { passed = passed + 1; print("  T06 OK (type align helper)\n") } else { print("  FAIL: T06 type align helper\n") }
+    if test_ffi_register_primitives() { passed = passed + 1; print("  T07 OK (register primitives)\n") } else { print("  FAIL: T07 register primitives\n") }
+    if test_ffi_register_struct() { passed = passed + 1; print("  T08 OK (register struct)\n") } else { print("  FAIL: T08 register struct\n") }
+    if test_ffi_register_decl() { passed = passed + 1; print("  T09 OK (register decl)\n") } else { print("  FAIL: T09 register decl\n") }
+    if test_ffi_variadic_decl() { passed = passed + 1; print("  T10 OK (variadic decl)\n") } else { print("  FAIL: T10 variadic decl\n") }
+    if test_ffi_find_decl() { passed = passed + 1; print("  T11 OK (find decl)\n") } else { print("  FAIL: T11 find decl\n") }
+    if test_ffi_type_mapping() { passed = passed + 1; print("  T12 OK (type mapping)\n") } else { print("  FAIL: T12 type mapping\n") }
+    if test_ffi_needs_marshal() { passed = passed + 1; print("  T13 OK (needs marshal)\n") } else { print("  FAIL: T13 needs marshal\n") }
+    if test_ffi_marshal_kind_to_c() { passed = passed + 1; print("  T14 OK (marshal to C)\n") } else { print("  FAIL: T14 marshal to C\n") }
+    if test_ffi_marshal_kind_from_c() { passed = passed + 1; print("  T15 OK (marshal from C)\n") } else { print("  FAIL: T15 marshal from C\n") }
+    if test_ffi_sysv_int_regs() { passed = passed + 1; print("  T16 OK (SysV int regs)\n") } else { print("  FAIL: T16 SysV int regs\n") }
+    if test_ffi_sysv_stack_spill() { passed = passed + 1; print("  T17 OK (SysV stack spill)\n") } else { print("  FAIL: T17 SysV stack spill\n") }
+    if test_ffi_sysv_float_regs() { passed = passed + 1; print("  T18 OK (SysV float regs)\n") } else { print("  FAIL: T18 SysV float regs\n") }
+    if test_ffi_win64_regs() { passed = passed + 1; print("  T19 OK (Win64 regs)\n") } else { print("  FAIL: T19 Win64 regs\n") }
+    if test_ffi_win64_stack_spill() { passed = passed + 1; print("  T20 OK (Win64 stack spill)\n") } else { print("  FAIL: T20 Win64 stack spill\n") }
+    if test_ffi_win64_float_positional() { passed = passed + 1; print("  T21 OK (Win64 float positional)\n") } else { print("  FAIL: T21 Win64 float positional\n") }
+    if test_ffi_marshal_op_construct() { passed = passed + 1; print("  T22 OK (marshal op construct)\n") } else { print("  FAIL: T22 marshal op construct\n") }
+    if test_ffi_marshal_register() { passed = passed + 1; print("  T23 OK (marshal register)\n") } else { print("  FAIL: T23 marshal register\n") }
+    if test_ffi_string_to_c() { passed = passed + 1; print("  T24 OK (string to C)\n") } else { print("  FAIL: T24 string to C\n") }
+    if test_ffi_string_null_terminated() { passed = passed + 1; print("  T25 OK (string null terminated)\n") } else { print("  FAIL: T25 string null terminated\n") }
+    if test_ffi_string_from_c() { passed = passed + 1; print("  T26 OK (string from C)\n") } else { print("  FAIL: T26 string from C\n") }
+    if test_ffi_register_library() { passed = passed + 1; print("  T27 OK (register library)\n") } else { print("  FAIL: T27 register library\n") }
+    if test_ffi_find_library() { passed = passed + 1; print("  T28 OK (find library)\n") } else { print("  FAIL: T28 find library\n") }
+    if test_ffi_symbol_resolution() { passed = passed + 1; print("  T29 OK (symbol resolution)\n") } else { print("  FAIL: T29 symbol resolution\n") }
+    if test_ffi_symbol_exists() { passed = passed + 1; print("  T30 OK (symbol exists)\n") } else { print("  FAIL: T30 symbol exists\n") }
+    if test_ffi_validate_ok() { passed = passed + 1; print("  T31 OK (validate OK)\n") } else { print("  FAIL: T31 validate OK\n") }
+    if test_ffi_validate_param_count() { passed = passed + 1; print("  T32 OK (validate param count)\n") } else { print("  FAIL: T32 validate param count\n") }
+    if test_ffi_validate_bad_cc() { passed = passed + 1; print("  T33 OK (validate bad CC)\n") } else { print("  FAIL: T33 validate bad CC\n") }
+    if test_ffi_null_ptr_check() { passed = passed + 1; print("  T34 OK (null ptr check)\n") } else { print("  FAIL: T34 null ptr check\n") }
+    if test_ffi_variadic_float_count() { passed = passed + 1; print("  T35 OK (variadic float count)\n") } else { print("  FAIL: T35 variadic float count\n") }
+    if test_ffi_callback_construct() { passed = passed + 1; print("  T36 OK (callback construct)\n") } else { print("  FAIL: T36 callback construct\n") }
+    if test_ffi_callback_find() { passed = passed + 1; print("  T37 OK (callback find)\n") } else { print("  FAIL: T37 callback find\n") }
+    if test_ffi_trampoline_size() { passed = passed + 1; print("  T38 OK (trampoline size)\n") } else { print("  FAIL: T38 trampoline size\n") }
+    if test_ffi_struct_field_offset() { passed = passed + 1; print("  T39 OK (struct field offset)\n") } else { print("  FAIL: T39 struct field offset\n") }
+    if test_ffi_struct_reg_count() { passed = passed + 1; print("  T40 OK (struct reg count)\n") } else { print("  FAIL: T40 struct reg count\n") }
+    if test_ffi_type_compat() { passed = passed + 1; print("  T41 OK (type compat)\n") } else { print("  FAIL: T41 type compat\n") }
+    if test_ffi_call_site_construct() { passed = passed + 1; print("  T42 OK (call site construct)\n") } else { print("  FAIL: T42 call site construct\n") }
+    if test_ffi_count_stack_params() { passed = passed + 1; print("  T43 OK (count stack params)\n") } else { print("  FAIL: T43 count stack params\n") }
+    if test_ffi_validate_all() { passed = passed + 1; print("  T44 OK (validate all)\n") } else { print("  FAIL: T44 validate all\n") }
+    if test_ffi_validate_variadic_ok() { passed = passed + 1; print("  T45 OK (variadic OK)\n") } else { print("  FAIL: T45 variadic OK\n") }
+    if test_ffi_validate_variadic_too_few() { passed = passed + 1; print("  T46 OK (variadic too few)\n") } else { print("  FAIL: T46 variadic too few\n") }
+    if test_ffi_register_array_type() { passed = passed + 1; print("  T47 OK (array type)\n") } else { print("  FAIL: T47 array type\n") }
+    if test_ffi_stack_arg_space() { passed = passed + 1; print("  T48 OK (stack arg space)\n") } else { print("  FAIL: T48 stack arg space\n") }
+    if test_ffi_hash_name() { passed = passed + 1; print("  T49 OK (hash name)\n") } else { print("  FAIL: T49 hash name\n") }
+    if test_ffi_context_queries() { passed = passed + 1; print("  T50 OK (context queries)\n") } else { print("  FAIL: T50 context queries\n") }
+
+    print("\nFFI tests: ")
+    print_int(passed)
+    print("/")
+    print_int(total)
+    print(" passed\n")
+
+    if passed == total { 0 } else { 1 }
+}

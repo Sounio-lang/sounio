@@ -834,6 +834,9 @@ struct EpistemicPtxConfig {
     warp_aggregation: bool,
     provenance_tracking: bool,
     provenance_bits: i64,
+    epistemic_mode: GpuEpistemicMode,
+    provenance_fold_interval: i64,
+    validity_pack_mode: i64, // 0=full predicates, 1=packed bit validity
 }
 
 fn epistemic_config_default() -> EpistemicPtxConfig {
@@ -846,6 +849,9 @@ fn epistemic_config_default() -> EpistemicPtxConfig {
         warp_aggregation: true,
         provenance_tracking: true,
         provenance_bits: 8,
+        epistemic_mode: GpuEpistemicMode::GpuEpistemicStrict,
+        provenance_fold_interval: 1,
+        validity_pack_mode: 0,
     }
 }
 
@@ -880,6 +886,7 @@ struct EpistemicPtxState {
     temp_f32_count: i64,
     temp_pred_count: i64,
     temp_u64_count: i64,
+    emit_counter: i64,
 }
 
 fn epistemic_ptx_new(config: EpistemicPtxConfig) -> EpistemicPtxState {
@@ -892,7 +899,31 @@ fn epistemic_ptx_new(config: EpistemicPtxConfig) -> EpistemicPtxState {
         temp_f32_count: 0,
         temp_pred_count: 0,
         temp_u64_count: 0,
+        emit_counter: 0,
     }
+}
+
+fn epistemic_is_fast_mode(cfg: EpistemicPtxConfig) -> bool {
+    cfg.epistemic_mode == GpuEpistemicMode::GpuEpistemicFast
+}
+
+fn epistemic_bump_emit_counter(st: EpistemicPtxState) -> EpistemicPtxState with Mut {
+    var out = st
+    out.emit_counter = out.emit_counter + 1
+    out
+}
+
+fn epistemic_should_fold_provenance(st: EpistemicPtxState) -> bool with Div, Panic {
+    if !st.config.provenance_tracking {
+        return false
+    }
+    if !epistemic_is_fast_mode(st.config) {
+        return true
+    }
+    if st.config.provenance_fold_interval <= 1 {
+        return true
+    }
+    (st.emit_counter % st.config.provenance_fold_interval) == 0
 }
 
 fn epistemic_alloc_shadow(
@@ -1016,28 +1047,40 @@ fn epistemic_emit_add(
     out.buf = eptx_push_str(out.buf, right.val_name)
     out.buf = eptx_push_str(out.buf, ";\n")
 
-    // Epsilon: quadrature propagation
+    // Epsilon propagation:
+    // strict: per-op quadrature with sqrt
+    // fast: accumulate epsilon terms and defer sqrt pressure
     if out.config.quadrature_propagation {
-        // ε_a²
         out.buf = eptx_push_str(out.buf, "    mul.f32 %r_eps_t0, ")
         out.buf = eptx_push_str(out.buf, left.eps_name)
         out.buf = eptx_push_str(out.buf, ", ")
         out.buf = eptx_push_str(out.buf, left.eps_name)
         out.buf = eptx_push_str(out.buf, ";\n")
-        // ε_b²
         out.buf = eptx_push_str(out.buf, "    mul.f32 %r_eps_t1, ")
         out.buf = eptx_push_str(out.buf, right.eps_name)
         out.buf = eptx_push_str(out.buf, ", ")
         out.buf = eptx_push_str(out.buf, right.eps_name)
         out.buf = eptx_push_str(out.buf, ";\n")
-        // ε_a² + ε_b²
         out.buf = eptx_push_str(out.buf, "    add.f32 %r_eps_t2, %r_eps_t0, %r_eps_t1;\n")
-        // √(ε_a² + ε_b²)
-        out.buf = eptx_push_str(out.buf, "    sqrt.approx.f32 ")
-        out.buf = eptx_push_str(out.buf, result.eps_name)
-        out.buf = eptx_push_str(out.buf, ", %r_eps_t2;\n")
+        if epistemic_is_fast_mode(out.config) {
+            out.buf = eptx_push_str(out.buf, "    add.f32 ")
+            out.buf = eptx_push_str(out.buf, result.eps_name)
+            out.buf = eptx_push_str(out.buf, ", ")
+            out.buf = eptx_push_str(out.buf, left.eps_name)
+            out.buf = eptx_push_str(out.buf, ", ")
+            out.buf = eptx_push_str(out.buf, right.eps_name)
+            out.buf = eptx_push_str(out.buf, ";\n")
+            out.buf = eptx_push_str(out.buf, "    add.f32 ")
+            out.buf = eptx_push_str(out.buf, result.eps_name)
+            out.buf = eptx_push_str(out.buf, ", ")
+            out.buf = eptx_push_str(out.buf, result.eps_name)
+            out.buf = eptx_push_str(out.buf, ", %r_eps_t2;\n")
+        } else {
+            out.buf = eptx_push_str(out.buf, "    sqrt.approx.f32 ")
+            out.buf = eptx_push_str(out.buf, result.eps_name)
+            out.buf = eptx_push_str(out.buf, ", %r_eps_t2;\n")
+        }
     } else {
-        // Simple max propagation (cheaper)
         out.buf = eptx_push_str(out.buf, "    max.f32 ")
         out.buf = eptx_push_str(out.buf, result.eps_name)
         out.buf = eptx_push_str(out.buf, ", ")
@@ -1047,17 +1090,30 @@ fn epistemic_emit_add(
         out.buf = eptx_push_str(out.buf, ";\n")
     }
 
-    // Validity: conjunction
-    out.buf = eptx_push_str(out.buf, "    and.pred ")
-    out.buf = eptx_push_str(out.buf, result.valid_name)
-    out.buf = eptx_push_str(out.buf, ", ")
-    out.buf = eptx_push_str(out.buf, left.valid_name)
-    out.buf = eptx_push_str(out.buf, ", ")
-    out.buf = eptx_push_str(out.buf, right.valid_name)
-    out.buf = eptx_push_str(out.buf, ";\n")
+    // Validity policy: strict keeps native predicates, fast packs to b32 first.
+    if out.config.validity_pack_mode == 1 {
+        out.buf = eptx_push_str(out.buf, "    selp.b32 %r_eps_t4, 1, 0, ")
+        out.buf = eptx_push_str(out.buf, left.valid_name)
+        out.buf = eptx_push_str(out.buf, ";\n")
+        out.buf = eptx_push_str(out.buf, "    selp.b32 %r_eps_t5, 1, 0, ")
+        out.buf = eptx_push_str(out.buf, right.valid_name)
+        out.buf = eptx_push_str(out.buf, ";\n")
+        out.buf = eptx_push_str(out.buf, "    and.b32 %r_eps_t4, %r_eps_t4, %r_eps_t5;\n")
+        out.buf = eptx_push_str(out.buf, "    setp.ne.s32 ")
+        out.buf = eptx_push_str(out.buf, result.valid_name)
+        out.buf = eptx_push_str(out.buf, ", %r_eps_t4, 0;\n")
+    } else {
+        out.buf = eptx_push_str(out.buf, "    and.pred ")
+        out.buf = eptx_push_str(out.buf, result.valid_name)
+        out.buf = eptx_push_str(out.buf, ", ")
+        out.buf = eptx_push_str(out.buf, left.valid_name)
+        out.buf = eptx_push_str(out.buf, ", ")
+        out.buf = eptx_push_str(out.buf, right.valid_name)
+        out.buf = eptx_push_str(out.buf, ";\n")
+    }
 
-    // Provenance: XOR merge
-    if out.config.provenance_tracking {
+    // Provenance fold cadence is stricter in strict mode and periodic in fast mode.
+    if epistemic_should_fold_provenance(out) {
         out.buf = eptx_push_str(out.buf, "    xor.b64 ")
         out.buf = eptx_push_str(out.buf, result.prov_name)
         out.buf = eptx_push_str(out.buf, ", ")
@@ -1065,8 +1121,10 @@ fn epistemic_emit_add(
         out.buf = eptx_push_str(out.buf, ", ")
         out.buf = eptx_push_str(out.buf, right.prov_name)
         out.buf = eptx_push_str(out.buf, ";\n")
+    } else if out.config.provenance_tracking {
+        out.buf = eptx_push_str(out.buf, "    // fast-mode provenance fold deferred\n")
     }
-    out
+    epistemic_bump_emit_counter(out)
 }
 
 // ── Multiplicative Propagation: ε_c = |a|·ε_b + |b|·ε_a ───────────
@@ -1088,39 +1146,55 @@ fn epistemic_emit_mul(
     out.buf = eptx_push_str(out.buf, right.val_name)
     out.buf = eptx_push_str(out.buf, ";\n")
 
-    // Epsilon: first-order error propagation
-    // |a|
+    // Epsilon: first-order error propagation.
     out.buf = eptx_push_str(out.buf, "    abs.f32 %r_eps_t0, ")
     out.buf = eptx_push_str(out.buf, left.val_name)
     out.buf = eptx_push_str(out.buf, ";\n")
-    // |b|
     out.buf = eptx_push_str(out.buf, "    abs.f32 %r_eps_t1, ")
     out.buf = eptx_push_str(out.buf, right.val_name)
     out.buf = eptx_push_str(out.buf, ";\n")
-    // |a| * ε_b
     out.buf = eptx_push_str(out.buf, "    mul.f32 %r_eps_t2, %r_eps_t0, ")
     out.buf = eptx_push_str(out.buf, right.eps_name)
     out.buf = eptx_push_str(out.buf, ";\n")
-    // |b| * ε_a
     out.buf = eptx_push_str(out.buf, "    mul.f32 %r_eps_t3, %r_eps_t1, ")
     out.buf = eptx_push_str(out.buf, left.eps_name)
     out.buf = eptx_push_str(out.buf, ";\n")
-    // Sum
-    out.buf = eptx_push_str(out.buf, "    add.f32 ")
-    out.buf = eptx_push_str(out.buf, result.eps_name)
-    out.buf = eptx_push_str(out.buf, ", %r_eps_t2, %r_eps_t3;\n")
+    if epistemic_is_fast_mode(out.config) {
+        out.buf = eptx_push_str(out.buf, "    add.f32 %r_eps_t4, %r_eps_t2, %r_eps_t3;\n")
+        out.buf = eptx_push_str(out.buf, "    mul.f32 %r_eps_t4, %r_eps_t4, %r_eps_t4;\n")
+        out.buf = eptx_push_str(out.buf, "    add.f32 ")
+        out.buf = eptx_push_str(out.buf, result.eps_name)
+        out.buf = eptx_push_str(out.buf, ", ")
+        out.buf = eptx_push_str(out.buf, left.eps_name)
+        out.buf = eptx_push_str(out.buf, ", %r_eps_t4;\n")
+    } else {
+        out.buf = eptx_push_str(out.buf, "    add.f32 ")
+        out.buf = eptx_push_str(out.buf, result.eps_name)
+        out.buf = eptx_push_str(out.buf, ", %r_eps_t2, %r_eps_t3;\n")
+    }
 
-    // Validity: conjunction
-    out.buf = eptx_push_str(out.buf, "    and.pred ")
-    out.buf = eptx_push_str(out.buf, result.valid_name)
-    out.buf = eptx_push_str(out.buf, ", ")
-    out.buf = eptx_push_str(out.buf, left.valid_name)
-    out.buf = eptx_push_str(out.buf, ", ")
-    out.buf = eptx_push_str(out.buf, right.valid_name)
-    out.buf = eptx_push_str(out.buf, ";\n")
+    if out.config.validity_pack_mode == 1 {
+        out.buf = eptx_push_str(out.buf, "    selp.b32 %r_eps_t5, 1, 0, ")
+        out.buf = eptx_push_str(out.buf, left.valid_name)
+        out.buf = eptx_push_str(out.buf, ";\n")
+        out.buf = eptx_push_str(out.buf, "    selp.b32 %r_eps_t6, 1, 0, ")
+        out.buf = eptx_push_str(out.buf, right.valid_name)
+        out.buf = eptx_push_str(out.buf, ";\n")
+        out.buf = eptx_push_str(out.buf, "    and.b32 %r_eps_t5, %r_eps_t5, %r_eps_t6;\n")
+        out.buf = eptx_push_str(out.buf, "    setp.ne.s32 ")
+        out.buf = eptx_push_str(out.buf, result.valid_name)
+        out.buf = eptx_push_str(out.buf, ", %r_eps_t5, 0;\n")
+    } else {
+        out.buf = eptx_push_str(out.buf, "    and.pred ")
+        out.buf = eptx_push_str(out.buf, result.valid_name)
+        out.buf = eptx_push_str(out.buf, ", ")
+        out.buf = eptx_push_str(out.buf, left.valid_name)
+        out.buf = eptx_push_str(out.buf, ", ")
+        out.buf = eptx_push_str(out.buf, right.valid_name)
+        out.buf = eptx_push_str(out.buf, ";\n")
+    }
 
-    // Provenance: XOR
-    if out.config.provenance_tracking {
+    if epistemic_should_fold_provenance(out) {
         out.buf = eptx_push_str(out.buf, "    xor.b64 ")
         out.buf = eptx_push_str(out.buf, result.prov_name)
         out.buf = eptx_push_str(out.buf, ", ")
@@ -1128,8 +1202,10 @@ fn epistemic_emit_mul(
         out.buf = eptx_push_str(out.buf, ", ")
         out.buf = eptx_push_str(out.buf, right.prov_name)
         out.buf = eptx_push_str(out.buf, ";\n")
+    } else if out.config.provenance_tracking {
+        out.buf = eptx_push_str(out.buf, "    // fast-mode provenance fold deferred\n")
     }
-    out
+    epistemic_bump_emit_counter(out)
 }
 
 // ── Division Propagation: ε_c = (|a|·ε_b + |b|·ε_a) / b² ─────────
@@ -1174,9 +1250,19 @@ fn epistemic_emit_div(
     out.buf = eptx_push_str(out.buf, ";\n")
 
     // ε_c = numerator / b²
-    out.buf = eptx_push_str(out.buf, "    div.approx.f32 ")
-    out.buf = eptx_push_str(out.buf, result.eps_name)
-    out.buf = eptx_push_str(out.buf, ", %r_eps_t0, %r_eps_t1;\n")
+    if epistemic_is_fast_mode(out.config) {
+        out.buf = eptx_push_str(out.buf, "    div.approx.f32 %r_eps_t6, %r_eps_t0, %r_eps_t1;\n")
+        out.buf = eptx_push_str(out.buf, "    mul.f32 %r_eps_t6, %r_eps_t6, %r_eps_t6;\n")
+        out.buf = eptx_push_str(out.buf, "    add.f32 ")
+        out.buf = eptx_push_str(out.buf, result.eps_name)
+        out.buf = eptx_push_str(out.buf, ", ")
+        out.buf = eptx_push_str(out.buf, left.eps_name)
+        out.buf = eptx_push_str(out.buf, ", %r_eps_t6;\n")
+    } else {
+        out.buf = eptx_push_str(out.buf, "    div.approx.f32 ")
+        out.buf = eptx_push_str(out.buf, result.eps_name)
+        out.buf = eptx_push_str(out.buf, ", %r_eps_t0, %r_eps_t1;\n")
+    }
 
     // Near-zero guard: if |b| < 0.0001, max out uncertainty
     out.buf = eptx_push_str(out.buf, "    abs.f32 %r_eps_t2, ")
@@ -1187,17 +1273,28 @@ fn epistemic_emit_div(
     out.buf = eptx_push_str(out.buf, result.eps_name)
     out.buf = eptx_push_str(out.buf, ", 0f3F800000;\n")  // 1.0 = max uncertainty
 
-    // Validity: conjunction AND not-near-zero
-    out.buf = eptx_push_str(out.buf, "    and.pred ")
-    out.buf = eptx_push_str(out.buf, result.valid_name)
-    out.buf = eptx_push_str(out.buf, ", ")
-    out.buf = eptx_push_str(out.buf, left.valid_name)
-    out.buf = eptx_push_str(out.buf, ", ")
-    out.buf = eptx_push_str(out.buf, right.valid_name)
-    out.buf = eptx_push_str(out.buf, ";\n")
+    if out.config.validity_pack_mode == 1 {
+        out.buf = eptx_push_str(out.buf, "    selp.b32 %r_eps_t7, 1, 0, ")
+        out.buf = eptx_push_str(out.buf, left.valid_name)
+        out.buf = eptx_push_str(out.buf, ";\n")
+        out.buf = eptx_push_str(out.buf, "    selp.b32 %r_eps_t8, 1, 0, ")
+        out.buf = eptx_push_str(out.buf, right.valid_name)
+        out.buf = eptx_push_str(out.buf, ";\n")
+        out.buf = eptx_push_str(out.buf, "    and.b32 %r_eps_t7, %r_eps_t7, %r_eps_t8;\n")
+        out.buf = eptx_push_str(out.buf, "    setp.ne.s32 ")
+        out.buf = eptx_push_str(out.buf, result.valid_name)
+        out.buf = eptx_push_str(out.buf, ", %r_eps_t7, 0;\n")
+    } else {
+        out.buf = eptx_push_str(out.buf, "    and.pred ")
+        out.buf = eptx_push_str(out.buf, result.valid_name)
+        out.buf = eptx_push_str(out.buf, ", ")
+        out.buf = eptx_push_str(out.buf, left.valid_name)
+        out.buf = eptx_push_str(out.buf, ", ")
+        out.buf = eptx_push_str(out.buf, right.valid_name)
+        out.buf = eptx_push_str(out.buf, ";\n")
+    }
 
-    // Provenance: XOR
-    if out.config.provenance_tracking {
+    if epistemic_should_fold_provenance(out) {
         out.buf = eptx_push_str(out.buf, "    xor.b64 ")
         out.buf = eptx_push_str(out.buf, result.prov_name)
         out.buf = eptx_push_str(out.buf, ", ")
@@ -1205,8 +1302,10 @@ fn epistemic_emit_div(
         out.buf = eptx_push_str(out.buf, ", ")
         out.buf = eptx_push_str(out.buf, right.prov_name)
         out.buf = eptx_push_str(out.buf, ";\n")
+    } else if out.config.provenance_tracking {
+        out.buf = eptx_push_str(out.buf, "    // fast-mode provenance fold deferred\n")
     }
-    out
+    epistemic_bump_emit_counter(out)
 }
 
 // ── FMA Propagation: ε = √((|a|·ε_b + |b|·ε_a)² + ε_c²) ──────────
@@ -1256,10 +1355,17 @@ fn epistemic_emit_fma(
     out.buf = eptx_push_str(out.buf, ";\n")
     // Sum
     out.buf = eptx_push_str(out.buf, "    add.f32 %r_eps_t2, %r_eps_t0, %r_eps_t1;\n")
-    // Final sqrt
-    out.buf = eptx_push_str(out.buf, "    sqrt.approx.f32 ")
-    out.buf = eptx_push_str(out.buf, result.eps_name)
-    out.buf = eptx_push_str(out.buf, ", %r_eps_t2;\n")
+    if epistemic_is_fast_mode(out.config) {
+        out.buf = eptx_push_str(out.buf, "    add.f32 ")
+        out.buf = eptx_push_str(out.buf, result.eps_name)
+        out.buf = eptx_push_str(out.buf, ", ")
+        out.buf = eptx_push_str(out.buf, c.eps_name)
+        out.buf = eptx_push_str(out.buf, ", %r_eps_t2;\n")
+    } else {
+        out.buf = eptx_push_str(out.buf, "    sqrt.approx.f32 ")
+        out.buf = eptx_push_str(out.buf, result.eps_name)
+        out.buf = eptx_push_str(out.buf, ", %r_eps_t2;\n")
+    }
 
     // Validity: 3-way conjunction
     out.buf = eptx_push_str(out.buf, "    and.pred %p_eps_t0, ")
@@ -1273,8 +1379,7 @@ fn epistemic_emit_fma(
     out.buf = eptx_push_str(out.buf, c.valid_name)
     out.buf = eptx_push_str(out.buf, ";\n")
 
-    // Provenance: 3-way XOR
-    if out.config.provenance_tracking {
+    if epistemic_should_fold_provenance(out) {
         out.buf = eptx_push_str(out.buf, "    xor.b64 %r_prov_t0, ")
         out.buf = eptx_push_str(out.buf, a.prov_name)
         out.buf = eptx_push_str(out.buf, ", ")
@@ -1285,8 +1390,10 @@ fn epistemic_emit_fma(
         out.buf = eptx_push_str(out.buf, ", %r_prov_t0, ")
         out.buf = eptx_push_str(out.buf, c.prov_name)
         out.buf = eptx_push_str(out.buf, ";\n")
+    } else if out.config.provenance_tracking {
+        out.buf = eptx_push_str(out.buf, "    // fast-mode provenance fold deferred\n")
     }
-    out
+    epistemic_bump_emit_counter(out)
 }
 
 // ── Confidence Gating ───────────────────────────────────────────────
