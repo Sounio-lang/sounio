@@ -41,12 +41,18 @@ assert_order_in_file() {
   fi
 }
 
-assert_historical_banner() {
+assert_historical_redirect() {
   local file="$1"
   if ! rg -q "^# Historical Context Only \(Non-Canonical\)" "$file"; then
     echo "error: missing historical-context banner in $file" >&2
     exit 1
   fi
+  assert_contains_literal "$file" "PLAN_ORIGINAL.md"
+  assert_contains_literal "$file" ".claude/offload-specs/*.md"
+  assert_contains_literal "$file" "artifacts/omega/selfhost_compiler_progress.v1.json"
+  assert_contains_literal "$file" "artifacts/omega/parallel_cutover_status.v1.json"
+  assert_contains_literal "$file" ".claude/OPERATIONAL_CANONICAL_INDEX.md"
+  assert_contains_literal "$file" ".claude/PROMPT_EXECUTION_CONTRACT.md"
 }
 
 require_file "PLAN_ORIGINAL.md"
@@ -75,13 +81,13 @@ if [[ -x "scripts/check_prompt_execution_contract.sh" ]]; then
 fi
 
 if [[ -f ".claude/plan.md" ]]; then
-  assert_historical_banner ".claude/plan.md"
+  assert_historical_redirect ".claude/plan.md"
 fi
 if [[ -f ".claude/pending.md" ]]; then
-  assert_historical_banner ".claude/pending.md"
+  assert_historical_redirect ".claude/pending.md"
 fi
 if [[ -f ".claude/session-context.md" ]]; then
-  assert_historical_banner ".claude/session-context.md"
+  assert_historical_redirect ".claude/session-context.md"
 fi
 
 echo "CLAUDE_PLAN_CONSISTENCY_PASS"
