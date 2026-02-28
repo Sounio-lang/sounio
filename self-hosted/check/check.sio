@@ -791,10 +791,45 @@ fn call_ref_inner_or_self(ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Allo
     }
 }
 
-fn opt_expr_is_int_zero(opt: Option<Box<Expr>>) -> bool {
+fn eval_const_int_opt_expr(opt: Option<Box<Expr>>) -> (bool, i64) with Mut, Panic, Div, Alloc {
     match opt {
-        Some(inner) => (*inner).kind == ExprKind::ExprIntLit && (*inner).int_val == 0
-        None => false
+        Some(inner) => {
+            let e = *inner
+            if e.kind == ExprKind::ExprIntLit {
+                return (true, e.int_val)
+            }
+            if e.kind == ExprKind::ExprUnary && e.un_op == UnaryOp::OpNeg {
+                let inner_pair = eval_const_int_opt_expr(e.left)
+                if inner_pair.0 {
+                    return (true, 0 - inner_pair.1)
+                }
+                return (false, 0)
+            }
+            if e.kind == ExprKind::ExprBinary {
+                let left_pair = eval_const_int_opt_expr(e.left)
+                let right_pair = eval_const_int_opt_expr(e.right)
+                if !left_pair.0 || !right_pair.0 {
+                    return (false, 0)
+                }
+                let lv = left_pair.1
+                let rv = right_pair.1
+                if e.bin_op == BinaryOp::OpAdd {
+                    return (true, lv + rv)
+                } else if e.bin_op == BinaryOp::OpSub {
+                    return (true, lv - rv)
+                } else if e.bin_op == BinaryOp::OpMul {
+                    return (true, lv * rv)
+                } else if e.bin_op == BinaryOp::OpDiv {
+                    if rv == 0 { return (false, 0) }
+                    return (true, lv / rv)
+                } else if e.bin_op == BinaryOp::OpRem {
+                    if rv == 0 { return (false, 0) }
+                    return (true, lv % rv)
+                }
+            }
+            (false, 0)
+        }
+        None => (false, 0)
     }
 }
 
@@ -1812,14 +1847,15 @@ impl Checker {
         if result.kind == TypeKind::TyError && !is_error_or_unknown(left_ty) && !is_error_or_unknown(right_ty) {
             c = c.report_mismatch(e.span, 4, left_ty, right_ty)
         }
-        // Division/modulo by zero: detect direct integer-literal zero denominators.
-        // This avoids false positives from nested expressions that merely contain a 0 literal.
+        // Division/modulo by zero: detect denominators that fold to a constant integer zero.
         if e.bin_op == BinaryOp::OpDiv {
-            if opt_expr_is_int_zero(e.right) {
+            let denom_pair = eval_const_int_opt_expr(e.right)
+            if denom_pair.0 && denom_pair.1 == 0 {
                 c = c.report_error_at(e.span, 56, 0, 0, 0)
             }
         } else if e.bin_op == BinaryOp::OpRem {
-            if opt_expr_is_int_zero(e.right) {
+            let denom_pair = eval_const_int_opt_expr(e.right)
+            if denom_pair.0 && denom_pair.1 == 0 {
                 c = c.report_error_at(e.span, 57, 0, 0, 0)
             }
         }
