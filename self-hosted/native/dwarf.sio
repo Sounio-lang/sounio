@@ -1,0 +1,932 @@
+// self-hosted::native::dwarf — DWARF debug information emitter
+//
+// Emits .debug_info and .debug_abbrev sections for DWARF v4 debug info.
+// Supports compile units, subprograms (functions), base types, and variables.
+//
+// The abbreviation table uses a fixed scheme:
+//   abbrev 1 = DW_TAG_compile_unit  (has children)
+//   abbrev 2 = DW_TAG_base_type     (no children)
+//   abbrev 3 = DW_TAG_subprogram    (has children)
+//   abbrev 4 = DW_TAG_variable      (no children)
+//   abbrev 5 = DW_TAG_formal_parameter (no children)
+
+// ============================================================================
+// DWARF constants
+// ============================================================================
+
+let DW_TAG_compile_unit: i64 = 0x11
+let DW_TAG_subprogram: i64 = 0x2E
+let DW_TAG_base_type: i64 = 0x24
+let DW_TAG_variable: i64 = 0x34
+let DW_TAG_formal_parameter: i64 = 0x05
+
+let DW_AT_name: i64 = 0x03
+let DW_AT_comp_dir: i64 = 0x1B
+let DW_AT_language: i64 = 0x13
+let DW_AT_low_pc: i64 = 0x11
+let DW_AT_high_pc: i64 = 0x12
+let DW_AT_byte_size: i64 = 0x0B
+let DW_AT_encoding: i64 = 0x3E
+let DW_AT_type: i64 = 0x49
+let DW_AT_location: i64 = 0x02
+let DW_AT_frame_base: i64 = 0x40
+
+let DW_FORM_string: i64 = 0x08
+let DW_FORM_data1: i64 = 0x0B
+let DW_FORM_data2: i64 = 0x05
+let DW_FORM_data4: i64 = 0x06
+let DW_FORM_data8: i64 = 0x07
+let DW_FORM_addr: i64 = 0x01
+let DW_FORM_ref4: i64 = 0x13
+let DW_FORM_exprloc: i64 = 0x18
+
+let DW_ATE_signed: i64 = 0x05
+let DW_ATE_unsigned: i64 = 0x07
+let DW_ATE_float: i64 = 0x04
+let DW_ATE_boolean: i64 = 0x02
+
+let DW_LANG_SOUNIO: i64 = 0x9000
+
+let DW_CHILDREN_yes: i64 = 1
+let DW_CHILDREN_no: i64 = 0
+
+// DWARF expression opcodes
+let DW_OP_reg6: i64 = 0x56       // rbp
+let DW_OP_fbreg: i64 = 0x91      // frame base + sleb128 offset
+
+// ============================================================================
+// DwarfBuf — byte buffer for DWARF section emission
+// ============================================================================
+
+struct DwarfBuf {
+    data: [i8; 131072],
+    len: i64,
+}
+
+struct DwarfCompileUnit {
+    name_buf: [i8; 256],
+    name_len: i64,
+    comp_dir_buf: [i8; 256],
+    comp_dir_len: i64,
+    language: i64,
+    low_pc: i64,
+    high_pc: i64,
+}
+
+struct DwarfSubprogram {
+    name_buf: [i8; 128],
+    name_len: i64,
+    low_pc: i64,
+    high_pc: i64,
+    return_type: i64,
+    frame_base_op: i64,
+}
+
+struct DwarfBaseType {
+    name_buf: [i8; 64],
+    name_len: i64,
+    encoding: i64,
+    byte_size: i64,
+}
+
+struct DwarfVariable {
+    name_buf: [i8; 128],
+    name_len: i64,
+    type_die: i64,
+    location_op: i64,
+    location_offset: i64,
+}
+
+fn dwarf_buf_new() -> DwarfBuf {
+    DwarfBuf {
+        data: [0; 131072],
+        len: 0,
+    }
+}
+
+// ============================================================================
+// Primitive emitters
+// ============================================================================
+
+// Mask a value to its low 8 bits (unsigned).
+fn dwarf_low8(x: i64) -> i64 with Mut, Panic, Div {
+    var n = x % 256
+    if n < 0 { n = n + 256 }
+    n
+}
+
+fn dwarf_push_byte(buf: DwarfBuf, b: i64) -> DwarfBuf with Mut, Panic, Div {
+    var out = buf
+    if out.len >= 0 && out.len < 131072 {
+        out.data[out.len as usize] = dwarf_low8(b) as i8
+        out.len = out.len + 1
+    }
+    out
+}
+
+fn dwarf_push_u16_le(buf: DwarfBuf, val: i64) -> DwarfBuf with Mut, Panic, Div {
+    var b = buf
+    b = dwarf_push_byte(b, dwarf_low8(val))
+    b = dwarf_push_byte(b, dwarf_low8(val >> 8))
+    b
+}
+
+fn dwarf_push_u32_le(buf: DwarfBuf, val: i64) -> DwarfBuf with Mut, Panic, Div {
+    var b = buf
+    b = dwarf_push_byte(b, dwarf_low8(val))
+    b = dwarf_push_byte(b, dwarf_low8(val >> 8))
+    b = dwarf_push_byte(b, dwarf_low8(val >> 16))
+    b = dwarf_push_byte(b, dwarf_low8(val >> 24))
+    b
+}
+
+fn dwarf_push_u64_le(buf: DwarfBuf, val: i64) -> DwarfBuf with Mut, Panic, Div {
+    var b = buf
+    b = dwarf_push_u32_le(b, val)
+    b = dwarf_push_u32_le(b, val >> 32)
+    b
+}
+
+// Emit ULEB128 encoding (unsigned LEB128).
+// ULEB128 encodes an unsigned integer in 7-bit groups, low-order first,
+// with the high bit set on all bytes except the last.
+fn dwarf_push_uleb128(buf: DwarfBuf, val: i64) -> DwarfBuf with Mut, Panic, Div {
+    var b = buf
+    var v = val
+    // Handle negative values by treating as unsigned (mask off sign extension)
+    // For our purposes, values are always small and non-negative.
+    if v < 0 { v = 0 }
+
+    var done = false
+    while !done {
+        let low7 = v & 127
+        v = v >> 7
+        if v == 0 {
+            b = dwarf_push_byte(b, low7)
+            done = true
+        } else {
+            b = dwarf_push_byte(b, low7 | 128)
+        }
+    }
+    b
+}
+
+// Emit SLEB128 encoding (signed LEB128).
+// SLEB128 encodes a signed integer in 7-bit groups with sign extension.
+fn dwarf_push_sleb128(buf: DwarfBuf, val: i64) -> DwarfBuf with Mut, Panic, Div {
+    var b = buf
+    var v = val
+    var more = true
+
+    while more {
+        let low7 = v & 127
+        v = v >> 7
+
+        // Check if we are done:
+        // If value is 0 and sign bit of byte is clear, or
+        // if value is -1 and sign bit of byte is set
+        let sign_bit = low7 & 64
+        if (v == 0 && sign_bit == 0) || (v == -1 && sign_bit != 0) {
+            b = dwarf_push_byte(b, low7)
+            more = false
+        } else {
+            b = dwarf_push_byte(b, low7 | 128)
+        }
+    }
+    b
+}
+
+// Emit a null-terminated string.
+fn dwarf_push_string_bytes(buf: DwarfBuf, s_buf: [i8; 256], s_len: i64) -> DwarfBuf with Mut, Panic, Div {
+    var b = buf
+    var i: i64 = 0
+    while i < s_len {
+        b = dwarf_push_byte(b, s_buf[i as usize] as i64)
+        i = i + 1
+    }
+    // Null terminator
+    b = dwarf_push_byte(b, 0)
+    b
+}
+
+// Emit a null-terminated string from a shorter buffer.
+fn dwarf_push_string_short(buf: DwarfBuf, s_buf: [i8; 128], s_len: i64) -> DwarfBuf with Mut, Panic, Div {
+    var b = buf
+    var i: i64 = 0
+    while i < s_len {
+        b = dwarf_push_byte(b, s_buf[i as usize] as i64)
+        i = i + 1
+    }
+    b = dwarf_push_byte(b, 0)
+    b
+}
+
+// Emit a null-terminated string from a 64-byte buffer.
+fn dwarf_push_string_tiny(buf: DwarfBuf, s_buf: [i8; 64], s_len: i64) -> DwarfBuf with Mut, Panic, Div {
+    var b = buf
+    var i: i64 = 0
+    while i < s_len {
+        b = dwarf_push_byte(b, s_buf[i as usize] as i64)
+        i = i + 1
+    }
+    b = dwarf_push_byte(b, 0)
+    b
+}
+
+// ============================================================================
+// Abbreviation table emission
+// ============================================================================
+
+// Emit the complete .debug_abbrev section.
+// Fixed abbreviation scheme:
+//   1 = compile_unit (children: yes)
+//       DW_AT_name      / DW_FORM_string
+//       DW_AT_comp_dir  / DW_FORM_string
+//       DW_AT_language  / DW_FORM_data2
+//       DW_AT_low_pc    / DW_FORM_addr
+//       DW_AT_high_pc   / DW_FORM_addr
+//
+//   2 = base_type (children: no)
+//       DW_AT_name      / DW_FORM_string
+//       DW_AT_encoding  / DW_FORM_data1
+//       DW_AT_byte_size / DW_FORM_data1
+//
+//   3 = subprogram (children: yes)
+//       DW_AT_name       / DW_FORM_string
+//       DW_AT_low_pc     / DW_FORM_addr
+//       DW_AT_high_pc    / DW_FORM_addr
+//       DW_AT_type       / DW_FORM_ref4
+//       DW_AT_frame_base / DW_FORM_exprloc
+//
+//   4 = variable (children: no)
+//       DW_AT_name     / DW_FORM_string
+//       DW_AT_type     / DW_FORM_ref4
+//       DW_AT_location / DW_FORM_exprloc
+//
+//   5 = formal_parameter (children: no)
+//       DW_AT_name     / DW_FORM_string
+//       DW_AT_type     / DW_FORM_ref4
+//       DW_AT_location / DW_FORM_exprloc
+
+fn dwarf_emit_abbrev_entry(buf: DwarfBuf, index: i64, tag: i64, has_children: i64, attrs: [i64; 16], forms: [i64; 16], attr_count: i64) -> DwarfBuf with Mut, Panic, Div {
+    var b = buf
+    // Abbreviation index
+    b = dwarf_push_uleb128(b, index)
+    // Tag
+    b = dwarf_push_uleb128(b, tag)
+    // Has children
+    b = dwarf_push_byte(b, has_children)
+    // Attribute specifications
+    var i: i64 = 0
+    while i < attr_count {
+        b = dwarf_push_uleb128(b, attrs[i as usize])
+        b = dwarf_push_uleb128(b, forms[i as usize])
+        i = i + 1
+    }
+    // Terminate attribute list with (0, 0)
+    b = dwarf_push_uleb128(b, 0)
+    b = dwarf_push_uleb128(b, 0)
+    b
+}
+
+fn dwarf_emit_abbrev_table(buf: DwarfBuf) -> DwarfBuf with Mut, Panic, Div {
+    var b = buf
+
+    // Abbrev 1: DW_TAG_compile_unit (has children)
+    var attrs1: [i64; 16] = [0; 16]
+    var forms1: [i64; 16] = [0; 16]
+    attrs1[0] = DW_AT_name;      forms1[0] = DW_FORM_string
+    attrs1[1] = DW_AT_comp_dir;  forms1[1] = DW_FORM_string
+    attrs1[2] = DW_AT_language;  forms1[2] = DW_FORM_data2
+    attrs1[3] = DW_AT_low_pc;    forms1[3] = DW_FORM_addr
+    attrs1[4] = DW_AT_high_pc;   forms1[4] = DW_FORM_addr
+    b = dwarf_emit_abbrev_entry(b, 1, DW_TAG_compile_unit, DW_CHILDREN_yes, attrs1, forms1, 5)
+
+    // Abbrev 2: DW_TAG_base_type (no children)
+    var attrs2: [i64; 16] = [0; 16]
+    var forms2: [i64; 16] = [0; 16]
+    attrs2[0] = DW_AT_name;      forms2[0] = DW_FORM_string
+    attrs2[1] = DW_AT_encoding;  forms2[1] = DW_FORM_data1
+    attrs2[2] = DW_AT_byte_size; forms2[2] = DW_FORM_data1
+    b = dwarf_emit_abbrev_entry(b, 2, DW_TAG_base_type, DW_CHILDREN_no, attrs2, forms2, 3)
+
+    // Abbrev 3: DW_TAG_subprogram (has children)
+    var attrs3: [i64; 16] = [0; 16]
+    var forms3: [i64; 16] = [0; 16]
+    attrs3[0] = DW_AT_name;       forms3[0] = DW_FORM_string
+    attrs3[1] = DW_AT_low_pc;     forms3[1] = DW_FORM_addr
+    attrs3[2] = DW_AT_high_pc;    forms3[2] = DW_FORM_addr
+    attrs3[3] = DW_AT_type;       forms3[3] = DW_FORM_ref4
+    attrs3[4] = DW_AT_frame_base; forms3[4] = DW_FORM_exprloc
+    b = dwarf_emit_abbrev_entry(b, 3, DW_TAG_subprogram, DW_CHILDREN_yes, attrs3, forms3, 5)
+
+    // Abbrev 4: DW_TAG_variable (no children)
+    var attrs4: [i64; 16] = [0; 16]
+    var forms4: [i64; 16] = [0; 16]
+    attrs4[0] = DW_AT_name;     forms4[0] = DW_FORM_string
+    attrs4[1] = DW_AT_type;     forms4[1] = DW_FORM_ref4
+    attrs4[2] = DW_AT_location; forms4[2] = DW_FORM_exprloc
+    b = dwarf_emit_abbrev_entry(b, 4, DW_TAG_variable, DW_CHILDREN_no, attrs4, forms4, 3)
+
+    // Abbrev 5: DW_TAG_formal_parameter (no children)
+    var attrs5: [i64; 16] = [0; 16]
+    var forms5: [i64; 16] = [0; 16]
+    attrs5[0] = DW_AT_name;     forms5[0] = DW_FORM_string
+    attrs5[1] = DW_AT_type;     forms5[1] = DW_FORM_ref4
+    attrs5[2] = DW_AT_location; forms5[2] = DW_FORM_exprloc
+    b = dwarf_emit_abbrev_entry(b, 5, DW_TAG_formal_parameter, DW_CHILDREN_no, attrs5, forms5, 3)
+
+    // Terminate abbreviation table with 0
+    b = dwarf_push_byte(b, 0)
+    b
+}
+
+// ============================================================================
+// Debug Info Entry (DIE) emitters
+// ============================================================================
+
+// Emit a DW_TAG_compile_unit DIE (abbreviation 1).
+fn dwarf_emit_compile_unit(buf: DwarfBuf, cu: DwarfCompileUnit) -> DwarfBuf with Mut, Panic, Div {
+    var b = buf
+    // Abbreviation code 1
+    b = dwarf_push_uleb128(b, 1)
+    // DW_AT_name: string
+    b = dwarf_push_string_bytes(b, cu.name_buf, cu.name_len)
+    // DW_AT_comp_dir: string
+    b = dwarf_push_string_bytes(b, cu.comp_dir_buf, cu.comp_dir_len)
+    // DW_AT_language: data2
+    b = dwarf_push_u16_le(b, cu.language)
+    // DW_AT_low_pc: addr (8 bytes on 64-bit)
+    b = dwarf_push_u64_le(b, cu.low_pc)
+    // DW_AT_high_pc: addr (8 bytes on 64-bit)
+    b = dwarf_push_u64_le(b, cu.high_pc)
+    b
+}
+
+// Emit a DW_TAG_base_type DIE (abbreviation 2).
+fn dwarf_emit_base_type(buf: DwarfBuf, ty: DwarfBaseType) -> DwarfBuf with Mut, Panic, Div {
+    var b = buf
+    // Abbreviation code 2
+    b = dwarf_push_uleb128(b, 2)
+    // DW_AT_name: string
+    b = dwarf_push_string_tiny(b, ty.name_buf, ty.name_len)
+    // DW_AT_encoding: data1
+    b = dwarf_push_byte(b, ty.encoding)
+    // DW_AT_byte_size: data1
+    b = dwarf_push_byte(b, ty.byte_size)
+    b
+}
+
+// Emit a DW_TAG_subprogram DIE (abbreviation 3).
+fn dwarf_emit_subprogram(buf: DwarfBuf, sub: DwarfSubprogram) -> DwarfBuf with Mut, Panic, Div {
+    var b = buf
+    // Abbreviation code 3
+    b = dwarf_push_uleb128(b, 3)
+    // DW_AT_name: string
+    b = dwarf_push_string_short(b, sub.name_buf, sub.name_len)
+    // DW_AT_low_pc: addr
+    b = dwarf_push_u64_le(b, sub.low_pc)
+    // DW_AT_high_pc: addr
+    b = dwarf_push_u64_le(b, sub.high_pc)
+    // DW_AT_type: ref4 (offset to return type DIE)
+    b = dwarf_push_u32_le(b, sub.return_type)
+    // DW_AT_frame_base: exprloc
+    // Expression: 1 byte length, then DW_OP_reg6 (rbp)
+    b = dwarf_push_uleb128(b, 1)         // expression length
+    b = dwarf_push_byte(b, sub.frame_base_op)
+    b
+}
+
+// Emit a DW_TAG_variable DIE (abbreviation 4).
+fn dwarf_emit_variable(buf: DwarfBuf, var_info: DwarfVariable) -> DwarfBuf with Mut, Panic, Div {
+    var b = buf
+    // Abbreviation code 4
+    b = dwarf_push_uleb128(b, 4)
+    // DW_AT_name: string
+    b = dwarf_push_string_short(b, var_info.name_buf, var_info.name_len)
+    // DW_AT_type: ref4
+    b = dwarf_push_u32_le(b, var_info.type_die)
+    // DW_AT_location: exprloc
+    // Expression: DW_OP_fbreg + sleb128 offset
+    // We need to compute the SLEB128 length first. For simplicity, emit
+    // into a temporary measurement and then emit the actual bytes.
+    let expr_len = dwarf_sleb128_size(var_info.location_offset) + 1
+    b = dwarf_push_uleb128(b, expr_len)
+    b = dwarf_push_byte(b, var_info.location_op)
+    b = dwarf_push_sleb128(b, var_info.location_offset)
+    b
+}
+
+// Emit a null DIE to terminate a children list.
+fn dwarf_emit_end_children(buf: DwarfBuf) -> DwarfBuf with Mut, Panic, Div {
+    dwarf_push_byte(buf, 0)
+}
+
+// ============================================================================
+// Helper: compute SLEB128 encoding size
+// ============================================================================
+
+fn dwarf_sleb128_size(val: i64) -> i64 with Mut, Panic, Div {
+    var v = val
+    var size: i64 = 0
+    var more = true
+    while more {
+        let low7 = v & 127
+        v = v >> 7
+        size = size + 1
+        let sign_bit = low7 & 64
+        if (v == 0 && sign_bit == 0) || (v == -1 && sign_bit != 0) {
+            more = false
+        }
+    }
+    size
+}
+
+// ============================================================================
+// Sounio-specific type constructors
+// ============================================================================
+
+fn dwarf_set_name_i64(buf: [i8; 64]) -> [i8; 64] with Mut, Panic, Div {
+    var out = buf
+    out[0] = 105  // 'i'
+    out[1] = 54   // '6'
+    out[2] = 52   // '4'
+    out
+}
+
+fn dwarf_set_name_f64(buf: [i8; 64]) -> [i8; 64] with Mut, Panic, Div {
+    var out = buf
+    out[0] = 102  // 'f'
+    out[1] = 54   // '6'
+    out[2] = 52   // '4'
+    out
+}
+
+fn dwarf_set_name_bool(buf: [i8; 64]) -> [i8; 64] with Mut, Panic, Div {
+    var out = buf
+    out[0] = 98   // 'b'
+    out[1] = 111  // 'o'
+    out[2] = 111  // 'o'
+    out[3] = 108  // 'l'
+    out
+}
+
+fn dwarf_set_name_i8(buf: [i8; 64]) -> [i8; 64] with Mut, Panic, Div {
+    var out = buf
+    out[0] = 105  // 'i'
+    out[1] = 56   // '8'
+    out
+}
+
+fn dwarf_sounio_i64_type() -> DwarfBaseType with Mut, Panic, Div {
+    DwarfBaseType {
+        name_buf: dwarf_set_name_i64([0; 64]),
+        name_len: 3,
+        encoding: DW_ATE_signed,
+        byte_size: 8,
+    }
+}
+
+fn dwarf_sounio_f64_type() -> DwarfBaseType with Mut, Panic, Div {
+    DwarfBaseType {
+        name_buf: dwarf_set_name_f64([0; 64]),
+        name_len: 3,
+        encoding: DW_ATE_float,
+        byte_size: 8,
+    }
+}
+
+fn dwarf_sounio_bool_type() -> DwarfBaseType with Mut, Panic, Div {
+    DwarfBaseType {
+        name_buf: dwarf_set_name_bool([0; 64]),
+        name_len: 4,
+        encoding: DW_ATE_boolean,
+        byte_size: 1,
+    }
+}
+
+fn dwarf_sounio_i8_type() -> DwarfBaseType with Mut, Panic, Div {
+    DwarfBaseType {
+        name_buf: dwarf_set_name_i8([0; 64]),
+        name_len: 2,
+        encoding: DW_ATE_signed,
+        byte_size: 1,
+    }
+}
+
+// ============================================================================
+// Full debug section emission
+// ============================================================================
+
+// Emit a complete .debug_info section with compilation unit header,
+// compile unit DIE, and subprogram DIEs.
+//
+// DWARF v4 compilation unit header:
+//   u32: unit_length (excluding this field)
+//   u16: version (4)
+//   u32: debug_abbrev_offset (0 — single abbrev section)
+//   u8:  address_size (8 for 64-bit)
+fn dwarf_emit_debug_info(cu: DwarfCompileUnit, subs: [DwarfSubprogram; 256], sub_count: i64) -> DwarfBuf with Mut, Panic, Div {
+    // First, emit the content into a temporary buffer to measure its length.
+    var content = dwarf_buf_new()
+
+    // Compile unit DIE
+    content = dwarf_emit_compile_unit(content, cu)
+
+    // Base type DIEs for Sounio primitive types
+    let i64_type = dwarf_sounio_i64_type()
+    let f64_type = dwarf_sounio_f64_type()
+    let bool_type = dwarf_sounio_bool_type()
+    let i8_type = dwarf_sounio_i8_type()
+
+    content = dwarf_emit_base_type(content, i64_type)
+    content = dwarf_emit_base_type(content, f64_type)
+    content = dwarf_emit_base_type(content, bool_type)
+    content = dwarf_emit_base_type(content, i8_type)
+
+    // Subprogram DIEs
+    var si: i64 = 0
+    while si < sub_count {
+        content = dwarf_emit_subprogram(content, subs[si as usize])
+        // End subprogram children (even if empty)
+        content = dwarf_emit_end_children(content)
+        si = si + 1
+    }
+
+    // End compile unit children
+    content = dwarf_emit_end_children(content)
+
+    // Now build the final buffer with the header.
+    var result = dwarf_buf_new()
+
+    // Header: version(2) + abbrev_offset(4) + address_size(1) = 7 bytes
+    let content_len = content.len
+    let unit_length = content_len + 7
+
+    // unit_length (u32)
+    result = dwarf_push_u32_le(result, unit_length)
+    // version (u16) — DWARF v4
+    result = dwarf_push_u16_le(result, 4)
+    // debug_abbrev_offset (u32)
+    result = dwarf_push_u32_le(result, 0)
+    // address_size (u8)
+    result = dwarf_push_byte(result, 8)
+
+    // Copy content into result
+    var ci: i64 = 0
+    while ci < content_len {
+        result = dwarf_push_byte(result, content.data[ci as usize] as i64)
+        ci = ci + 1
+    }
+
+    result
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+// Helper: read a byte from a DwarfBuf as unsigned.
+fn dwarf_read_u8(buf: DwarfBuf, pos: i64) -> i64 {
+    let raw = buf.data[pos as usize] as i64
+    if raw < 0 { raw + 256 } else { raw }
+}
+
+// Helper: read a u16 LE from a DwarfBuf.
+fn dwarf_read_u16_le(buf: DwarfBuf, pos: i64) -> i64 {
+    let b0 = dwarf_read_u8(buf, pos)
+    let b1 = dwarf_read_u8(buf, pos + 1)
+    b0 + b1 * 256
+}
+
+// Helper: read a u32 LE from a DwarfBuf.
+fn dwarf_read_u32_le(buf: DwarfBuf, pos: i64) -> i64 {
+    let b0 = dwarf_read_u8(buf, pos)
+    let b1 = dwarf_read_u8(buf, pos + 1)
+    let b2 = dwarf_read_u8(buf, pos + 2)
+    let b3 = dwarf_read_u8(buf, pos + 3)
+    b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+}
+
+// Helper: build a test compile unit.
+fn dwarf_test_compile_unit() -> DwarfCompileUnit with Mut, Panic, Div {
+    var name: [i8; 256] = [0; 256]
+    name[0] = 116  // 't'
+    name[1] = 101  // 'e'
+    name[2] = 115  // 's'
+    name[3] = 116  // 't'
+
+    var dir: [i8; 256] = [0; 256]
+    dir[0] = 47    // '/'
+    dir[1] = 116   // 't'
+    dir[2] = 109   // 'm'
+    dir[3] = 112   // 'p'
+
+    DwarfCompileUnit {
+        name_buf: name,
+        name_len: 4,
+        comp_dir_buf: dir,
+        comp_dir_len: 4,
+        language: DW_LANG_SOUNIO,
+        low_pc: 0x1000,
+        high_pc: 0x2000,
+    }
+}
+
+// Helper: build a test subprogram.
+fn dwarf_test_subprogram() -> DwarfSubprogram with Mut, Panic, Div {
+    var name: [i8; 128] = [0; 128]
+    name[0] = 109  // 'm'
+    name[1] = 97   // 'a'
+    name[2] = 105  // 'i'
+    name[3] = 110  // 'n'
+
+    DwarfSubprogram {
+        name_buf: name,
+        name_len: 4,
+        low_pc: 0x1000,
+        high_pc: 0x1100,
+        return_type: 0x30,
+        frame_base_op: DW_OP_reg6,
+    }
+}
+
+// T01: ULEB128 encoding of small values
+fn test_uleb128_encoding() -> bool with Mut, Panic, Div {
+    // 0 encodes as [0x00]
+    var b0 = dwarf_buf_new()
+    b0 = dwarf_push_uleb128(b0, 0)
+    if !(b0.len == 1) { return false }
+    if !(dwarf_read_u8(b0, 0) == 0) { return false }
+
+    // 127 encodes as [0x7F]
+    var b1 = dwarf_buf_new()
+    b1 = dwarf_push_uleb128(b1, 127)
+    if !(b1.len == 1) { return false }
+    if !(dwarf_read_u8(b1, 0) == 0x7F) { return false }
+
+    // 128 encodes as [0x80, 0x01]
+    var b2 = dwarf_buf_new()
+    b2 = dwarf_push_uleb128(b2, 128)
+    if !(b2.len == 2) { return false }
+    if !(dwarf_read_u8(b2, 0) == 0x80) { return false }
+    if !(dwarf_read_u8(b2, 1) == 0x01) { return false }
+
+    // 624485 encodes as [0xE5, 0x8E, 0x26]
+    var b3 = dwarf_buf_new()
+    b3 = dwarf_push_uleb128(b3, 624485)
+    if !(b3.len == 3) { return false }
+    if !(dwarf_read_u8(b3, 0) == 0xE5) { return false }
+    if !(dwarf_read_u8(b3, 1) == 0x8E) { return false }
+    if !(dwarf_read_u8(b3, 2) == 0x26) { return false }
+
+    true
+}
+
+// T02: SLEB128 encoding of signed values
+fn test_sleb128_encoding() -> bool with Mut, Panic, Div {
+    // 0 encodes as [0x00]
+    var b0 = dwarf_buf_new()
+    b0 = dwarf_push_sleb128(b0, 0)
+    if !(b0.len == 1) { return false }
+    if !(dwarf_read_u8(b0, 0) == 0x00) { return false }
+
+    // -1 encodes as [0x7F]
+    var b1 = dwarf_buf_new()
+    b1 = dwarf_push_sleb128(b1, 0 - 1)
+    if !(b1.len == 1) { return false }
+    if !(dwarf_read_u8(b1, 0) == 0x7F) { return false }
+
+    // 63 encodes as [0x3F]
+    var b2 = dwarf_buf_new()
+    b2 = dwarf_push_sleb128(b2, 63)
+    if !(b2.len == 1) { return false }
+    if !(dwarf_read_u8(b2, 0) == 0x3F) { return false }
+
+    // -64 encodes as [0x40]
+    var b3 = dwarf_buf_new()
+    b3 = dwarf_push_sleb128(b3, 0 - 64)
+    if !(b3.len == 1) { return false }
+    if !(dwarf_read_u8(b3, 0) == 0x40) { return false }
+
+    // 64 encodes as [0xC0, 0x00]
+    var b4 = dwarf_buf_new()
+    b4 = dwarf_push_sleb128(b4, 64)
+    if !(b4.len == 2) { return false }
+    if !(dwarf_read_u8(b4, 0) == 0xC0) { return false }
+    if !(dwarf_read_u8(b4, 1) == 0x00) { return false }
+
+    true
+}
+
+// T03: Abbreviation table starts with abbrev code 1 and ends with 0
+fn test_abbrev_table_emission() -> bool with Mut, Panic, Div {
+    var buf = dwarf_buf_new()
+    buf = dwarf_emit_abbrev_table(buf)
+
+    // Must have non-zero length
+    if buf.len <= 0 { return false }
+
+    // First byte should be ULEB128(1) = 0x01 (abbrev code 1)
+    if !(dwarf_read_u8(buf, 0) == 1) { return false }
+
+    // Last byte should be 0x00 (terminator)
+    if !(dwarf_read_u8(buf, buf.len - 1) == 0) { return false }
+
+    true
+}
+
+// T04: Compile unit DIE starts with abbrev code 1
+fn test_compile_unit_die() -> bool with Mut, Panic, Div {
+    let cu = dwarf_test_compile_unit()
+    var buf = dwarf_buf_new()
+    buf = dwarf_emit_compile_unit(buf, cu)
+
+    // Must have some data
+    if buf.len <= 0 { return false }
+
+    // First byte: ULEB128(1) = 0x01 (abbreviation code for compile_unit)
+    if !(dwarf_read_u8(buf, 0) == 1) { return false }
+
+    // After abbrev code, next bytes should be the name "test\0"
+    if !(dwarf_read_u8(buf, 1) == 116) { return false }  // 't'
+    if !(dwarf_read_u8(buf, 2) == 101) { return false }  // 'e'
+    if !(dwarf_read_u8(buf, 3) == 115) { return false }  // 's'
+    if !(dwarf_read_u8(buf, 4) == 116) { return false }  // 't'
+    if !(dwarf_read_u8(buf, 5) == 0) { return false }    // null terminator
+
+    true
+}
+
+// T05: Base type DIE encodes encoding and byte_size correctly
+fn test_base_type_die() -> bool with Mut, Panic, Div {
+    let ty = dwarf_sounio_i64_type()
+    var buf = dwarf_buf_new()
+    buf = dwarf_emit_base_type(buf, ty)
+
+    // First byte: abbrev code 2
+    if !(dwarf_read_u8(buf, 0) == 2) { return false }
+
+    // Then name "i64\0" (4 bytes)
+    if !(dwarf_read_u8(buf, 1) == 105) { return false }  // 'i'
+    if !(dwarf_read_u8(buf, 2) == 54) { return false }   // '6'
+    if !(dwarf_read_u8(buf, 3) == 52) { return false }   // '4'
+    if !(dwarf_read_u8(buf, 4) == 0) { return false }    // null
+
+    // Then encoding: DW_ATE_signed = 0x05
+    if !(dwarf_read_u8(buf, 5) == DW_ATE_signed) { return false }
+
+    // Then byte_size: 8
+    if !(dwarf_read_u8(buf, 6) == 8) { return false }
+
+    // Total: 7 bytes
+    if !(buf.len == 7) { return false }
+
+    true
+}
+
+// T06: Subprogram DIE starts with abbrev code 3 and has name
+fn test_subprogram_die() -> bool with Mut, Panic, Div {
+    let sub = dwarf_test_subprogram()
+    var buf = dwarf_buf_new()
+    buf = dwarf_emit_subprogram(buf, sub)
+
+    // First byte: abbrev code 3
+    if !(dwarf_read_u8(buf, 0) == 3) { return false }
+
+    // Then name "main\0"
+    if !(dwarf_read_u8(buf, 1) == 109) { return false }  // 'm'
+    if !(dwarf_read_u8(buf, 2) == 97) { return false }   // 'a'
+    if !(dwarf_read_u8(buf, 3) == 105) { return false }  // 'i'
+    if !(dwarf_read_u8(buf, 4) == 110) { return false }  // 'n'
+    if !(dwarf_read_u8(buf, 5) == 0) { return false }    // null
+
+    // Must have some reasonable length (name + 2 addrs + ref4 + exprloc)
+    // Name (5) + abbrev (1) + low_pc (8) + high_pc (8) + ref4 (4) + exprloc (2) = 28
+    if buf.len < 20 { return false }
+
+    true
+}
+
+// T07: Sounio type mapping produces correct types
+fn test_sounio_type_mapping() -> bool with Mut, Panic, Div {
+    let i64t = dwarf_sounio_i64_type()
+    let f64t = dwarf_sounio_f64_type()
+    let boolt = dwarf_sounio_bool_type()
+    let i8t = dwarf_sounio_i8_type()
+
+    // i64: encoding=signed, size=8
+    if !(i64t.encoding == DW_ATE_signed) { return false }
+    if !(i64t.byte_size == 8) { return false }
+    if !(i64t.name_len == 3) { return false }
+
+    // f64: encoding=float, size=8
+    if !(f64t.encoding == DW_ATE_float) { return false }
+    if !(f64t.byte_size == 8) { return false }
+    if !(f64t.name_len == 3) { return false }
+
+    // bool: encoding=boolean, size=1
+    if !(boolt.encoding == DW_ATE_boolean) { return false }
+    if !(boolt.byte_size == 1) { return false }
+    if !(boolt.name_len == 4) { return false }
+
+    // i8: encoding=signed, size=1
+    if !(i8t.encoding == DW_ATE_signed) { return false }
+    if !(i8t.byte_size == 1) { return false }
+    if !(i8t.name_len == 2) { return false }
+
+    true
+}
+
+// T08: Full debug_info section has correct DWARF v4 header
+fn test_debug_info_header() -> bool with Mut, Panic, Div {
+    let cu = dwarf_test_compile_unit()
+    var subs: [DwarfSubprogram; 256] = [dwarf_test_subprogram(); 256]
+    let buf = dwarf_emit_debug_info(cu, subs, 1)
+
+    // Must have data
+    if buf.len < 11 { return false }
+
+    // Bytes 0..3: unit_length (u32 LE) — should be buf.len - 4
+    let unit_length = dwarf_read_u32_le(buf, 0)
+    if !(unit_length == buf.len - 4) { return false }
+
+    // Bytes 4..5: version (u16 LE) — should be 4
+    let version = dwarf_read_u16_le(buf, 4)
+    if !(version == 4) { return false }
+
+    // Bytes 6..9: debug_abbrev_offset (u32 LE) — should be 0
+    let abbrev_off = dwarf_read_u32_le(buf, 6)
+    if !(abbrev_off == 0) { return false }
+
+    // Byte 10: address_size — should be 8
+    if !(dwarf_read_u8(buf, 10) == 8) { return false }
+
+    true
+}
+
+// T09: Variable DIE encodes location expression correctly
+fn test_variable_die_location() -> bool with Mut, Panic, Div {
+    var name: [i8; 128] = [0; 128]
+    name[0] = 120  // 'x'
+
+    let var_info = DwarfVariable {
+        name_buf: name,
+        name_len: 1,
+        type_die: 0x30,
+        location_op: DW_OP_fbreg,
+        location_offset: 0 - 8,
+    }
+
+    var buf = dwarf_buf_new()
+    buf = dwarf_emit_variable(buf, var_info)
+
+    // First byte: abbrev code 4
+    if !(dwarf_read_u8(buf, 0) == 4) { return false }
+
+    // Then name "x\0"
+    if !(dwarf_read_u8(buf, 1) == 120) { return false }
+    if !(dwarf_read_u8(buf, 2) == 0) { return false }
+
+    // Must have some data
+    if buf.len < 8 { return false }
+
+    true
+}
+
+// T10: End children emits a single null byte
+fn test_end_children() -> bool with Mut, Panic, Div {
+    var buf = dwarf_buf_new()
+    buf = dwarf_emit_end_children(buf)
+
+    if !(buf.len == 1) { return false }
+    if !(dwarf_read_u8(buf, 0) == 0) { return false }
+    true
+}
+
+// Test runner
+fn test_dwarf_main() -> i32 with IO, Mut, Panic, Div {
+    var passed: i64 = 0
+    let total: i64 = 10
+
+    print("=== DWARF Debug Info Tests ===\n")
+
+    if test_uleb128_encoding() { passed = passed + 1; print("  T01 OK uleb128_encoding\n") } else { print("  FAIL: T01 uleb128_encoding\n") }
+    if test_sleb128_encoding() { passed = passed + 1; print("  T02 OK sleb128_encoding\n") } else { print("  FAIL: T02 sleb128_encoding\n") }
+    if test_abbrev_table_emission() { passed = passed + 1; print("  T03 OK abbrev_table\n") } else { print("  FAIL: T03 abbrev_table\n") }
+    if test_compile_unit_die() { passed = passed + 1; print("  T04 OK compile_unit_die\n") } else { print("  FAIL: T04 compile_unit_die\n") }
+    if test_base_type_die() { passed = passed + 1; print("  T05 OK base_type_die\n") } else { print("  FAIL: T05 base_type_die\n") }
+    if test_subprogram_die() { passed = passed + 1; print("  T06 OK subprogram_die\n") } else { print("  FAIL: T06 subprogram_die\n") }
+    if test_sounio_type_mapping() { passed = passed + 1; print("  T07 OK sounio_type_mapping\n") } else { print("  FAIL: T07 sounio_type_mapping\n") }
+    if test_debug_info_header() { passed = passed + 1; print("  T08 OK debug_info_header\n") } else { print("  FAIL: T08 debug_info_header\n") }
+    if test_variable_die_location() { passed = passed + 1; print("  T09 OK variable_die_location\n") } else { print("  FAIL: T09 variable_die_location\n") }
+    if test_end_children() { passed = passed + 1; print("  T10 OK end_children\n") } else { print("  FAIL: T10 end_children\n") }
+
+    print("\nDWARF: ")
+    print_int(passed)
+    print(" / ")
+    print_int(total)
+    print(" passed\n")
+
+    if passed == total { 0 } else { 1 }
+}

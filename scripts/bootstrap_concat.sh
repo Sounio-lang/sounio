@@ -84,6 +84,7 @@ FILES=(
   self-hosted/ir/serialize.sio
   self-hosted/ir/disasm.sio
   self-hosted/ir/verify.sio
+  self-hosted/ir/optimize.sio
   self-hosted/ir/mod.sio
 
   # ── 8. HLIR (High-Level IR) ─────────────────────────────────────
@@ -103,6 +104,9 @@ FILES=(
   self-hosted/native/elf.sio
   self-hosted/native/codegen.sio
   self-hosted/native/lower_ir.sio
+  self-hosted/native/riscv.sio
+  self-hosted/native/aarch64.sio
+  self-hosted/native/dwarf.sio
   self-hosted/native/hyper_lower.sio
   self-hosted/native/suite.sio
 
@@ -193,7 +197,11 @@ FILES=(
   self-hosted/compiler/codegen/hardware/kaxi_fabric_emitter.sio
   self-hosted/compiler/codegen/hardware/kaxi_emitter.sio
 
-  # ── 22. I/O helpers + module loader ─────────────────────────────
+  # ── 22. WebAssembly backend ─────────────────────────────────────
+  self-hosted/wasm/mod.sio
+  self-hosted/wasm/encode.sio
+
+  # ── 23. I/O helpers + module loader ─────────────────────────────
   self-hosted/io/file_write.sio
   self-hosted/compiler/module_loader.sio
   self-hosted/test_stubs_bootstrap.sio
@@ -317,6 +325,7 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/ir/serialize.sio
     self-hosted/ir/disasm.sio
     self-hosted/ir/verify.sio
+    self-hosted/ir/optimize.sio
     self-hosted/ir/mod.sio
 
     # 7. Native codegen layer
@@ -330,9 +339,16 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/native/elf.sio
     self-hosted/native/codegen.sio
     self-hosted/native/lower_ir.sio
+    self-hosted/native/riscv.sio
+    self-hosted/native/aarch64.sio
+    self-hosted/native/dwarf.sio
     self-hosted/native/hyper_lower.sio
 
-    # 8. I/O helpers + module loader
+    # 8. WebAssembly backend
+    self-hosted/wasm/mod.sio
+    self-hosted/wasm/encode.sio
+
+    # 9. I/O helpers + module loader
     self-hosted/io/file_write.sio
     self-hosted/compiler/module_loader.sio
 

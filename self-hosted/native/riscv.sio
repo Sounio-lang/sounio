@@ -1,0 +1,970 @@
+// self-hosted::native::riscv — RISC-V RV64I base integer instruction encoder
+//
+// Encodes RISC-V RV64I instructions into a CodeBuffer.  Uses the same
+// CodeBuffer / emit_byte / emit_u32_le / low8 helpers from encode.sio.
+//
+// Instruction formats (all 32-bit fixed width):
+//   R-type:  [funct7  | rs2 | rs1 | funct3 | rd  | opcode]
+//   I-type:  [imm11:0       | rs1 | funct3 | rd  | opcode]
+//   S-type:  [imm11:5 | rs2 | rs1 | funct3 | imm4:0 | opcode]
+//   B-type:  [imm12|10:5 | rs2 | rs1 | funct3 | imm4:1|11 | opcode]
+//   U-type:  [imm31:12                       | rd  | opcode]
+//   J-type:  [imm20|10:1|11|19:12            | rd  | opcode]
+
+// ============================================================================
+// RISC-V register names (x0 .. x31)
+// ============================================================================
+
+let RV_X0:  i64 = 0    // zero register (hardwired 0)
+let RV_RA:  i64 = 1    // return address (x1)
+let RV_SP:  i64 = 2    // stack pointer  (x2)
+let RV_GP:  i64 = 3    // global pointer (x3)
+let RV_TP:  i64 = 4    // thread pointer (x4)
+let RV_T0:  i64 = 5    // temporary 0    (x5)
+let RV_T1:  i64 = 6    // temporary 1    (x6)
+let RV_T2:  i64 = 7    // temporary 2    (x7)
+let RV_S0:  i64 = 8    // saved / frame pointer (x8)
+let RV_S1:  i64 = 9    // saved 1        (x9)
+let RV_A0:  i64 = 10   // arg 0 / retval (x10)
+let RV_A1:  i64 = 11   // arg 1 / retval (x11)
+let RV_A2:  i64 = 12   // arg 2          (x12)
+let RV_A3:  i64 = 13   // arg 3          (x13)
+let RV_A4:  i64 = 14   // arg 4          (x14)
+let RV_A5:  i64 = 15   // arg 5          (x15)
+let RV_A6:  i64 = 16   // arg 6          (x16)
+let RV_A7:  i64 = 17   // arg 7          (x17)
+let RV_S2:  i64 = 18   // saved 2        (x18)
+let RV_S3:  i64 = 19   // saved 3        (x19)
+let RV_S4:  i64 = 20   // saved 4        (x20)
+let RV_S5:  i64 = 21   // saved 5        (x21)
+let RV_S6:  i64 = 22   // saved 6        (x22)
+let RV_S7:  i64 = 23   // saved 7        (x23)
+let RV_S8:  i64 = 24   // saved 8        (x24)
+let RV_S9:  i64 = 25   // saved 9        (x25)
+let RV_S10: i64 = 26   // saved 10       (x26)
+let RV_S11: i64 = 27   // saved 11       (x27)
+let RV_T3:  i64 = 28   // temporary 3    (x28)
+let RV_T4:  i64 = 29   // temporary 4    (x29)
+let RV_T5:  i64 = 30   // temporary 5    (x30)
+let RV_T6:  i64 = 31   // temporary 6    (x31)
+
+// Alias
+let RV_FP:  i64 = 8    // frame pointer = s0
+
+// ============================================================================
+// Bit-field helpers
+// ============================================================================
+
+// Mask the low N bits of x.
+fn rv_mask(x: i64, bits: i64) -> i64 {
+    x & ((1 << bits) - 1)
+}
+
+// Extract bit range [hi:lo] inclusive (0-indexed) from val.
+fn rv_bits(val: i64, hi: i64, lo: i64) -> i64 {
+    rv_mask(val >> lo, hi - lo + 1)
+}
+
+// ============================================================================
+// Format encoders — each returns a 32-bit instruction word
+// ============================================================================
+
+// R-type: [funct7(7) | rs2(5) | rs1(5) | funct3(3) | rd(5) | opcode(7)]
+fn rv_encode_r_type(opcode: i64, rd: i64, funct3: i64, rs1: i64, rs2: i64, funct7: i64) -> i64 {
+    rv_mask(opcode, 7)
+    | (rv_mask(rd, 5) << 7)
+    | (rv_mask(funct3, 3) << 12)
+    | (rv_mask(rs1, 5) << 15)
+    | (rv_mask(rs2, 5) << 20)
+    | (rv_mask(funct7, 7) << 25)
+}
+
+// I-type: [imm11:0(12) | rs1(5) | funct3(3) | rd(5) | opcode(7)]
+fn rv_encode_i_type(opcode: i64, rd: i64, funct3: i64, rs1: i64, imm: i64) -> i64 {
+    rv_mask(opcode, 7)
+    | (rv_mask(rd, 5) << 7)
+    | (rv_mask(funct3, 3) << 12)
+    | (rv_mask(rs1, 5) << 15)
+    | (rv_mask(imm, 12) << 20)
+}
+
+// S-type: [imm11:5(7) | rs2(5) | rs1(5) | funct3(3) | imm4:0(5) | opcode(7)]
+fn rv_encode_s_type(opcode: i64, funct3: i64, rs1: i64, rs2: i64, imm: i64) -> i64 {
+    rv_mask(opcode, 7)
+    | (rv_bits(imm, 4, 0) << 7)
+    | (rv_mask(funct3, 3) << 12)
+    | (rv_mask(rs1, 5) << 15)
+    | (rv_mask(rs2, 5) << 20)
+    | (rv_bits(imm, 11, 5) << 25)
+}
+
+// B-type: [imm12(1)|imm10:5(6) | rs2(5) | rs1(5) | funct3(3) | imm4:1(4)|imm11(1) | opcode(7)]
+fn rv_encode_b_type(opcode: i64, funct3: i64, rs1: i64, rs2: i64, imm: i64) -> i64 {
+    rv_mask(opcode, 7)
+    | (rv_bits(imm, 11, 11) << 7)
+    | (rv_bits(imm, 4, 1) << 8)
+    | (rv_mask(funct3, 3) << 12)
+    | (rv_mask(rs1, 5) << 15)
+    | (rv_mask(rs2, 5) << 20)
+    | (rv_bits(imm, 10, 5) << 25)
+    | (rv_bits(imm, 12, 12) << 31)
+}
+
+// U-type: [imm31:12(20) | rd(5) | opcode(7)]
+fn rv_encode_u_type(opcode: i64, rd: i64, imm: i64) -> i64 {
+    rv_mask(opcode, 7)
+    | (rv_mask(rd, 5) << 7)
+    | (rv_mask(imm, 20) << 12)
+}
+
+// J-type: [imm20(1)|imm10:1(10)|imm11(1)|imm19:12(8) | rd(5) | opcode(7)]
+fn rv_encode_j_type(opcode: i64, rd: i64, imm: i64) -> i64 {
+    rv_mask(opcode, 7)
+    | (rv_mask(rd, 5) << 7)
+    | (rv_bits(imm, 19, 12) << 12)
+    | (rv_bits(imm, 11, 11) << 20)
+    | (rv_bits(imm, 10, 1) << 21)
+    | (rv_bits(imm, 20, 20) << 31)
+}
+
+// ============================================================================
+// Emit helper: encode instruction word and append to buffer
+// ============================================================================
+
+fn rv_emit_instr(buf: CodeBuffer, word: i64) -> CodeBuffer with Mut, Panic, Div {
+    emit_u32_le(buf, word)
+}
+
+// ============================================================================
+// R-type arithmetic instructions  (opcode = 0x33 for RV64I integer reg-reg)
+// ============================================================================
+
+// ADD rd, rs1, rs2  — funct7=0x00, funct3=0x0, opcode=0x33
+fn rv_emit_add(buf: CodeBuffer, rd: i64, rs1: i64, rs2: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_r_type(0x33, rd, 0x0, rs1, rs2, 0x00))
+}
+
+// SUB rd, rs1, rs2  — funct7=0x20, funct3=0x0, opcode=0x33
+fn rv_emit_sub(buf: CodeBuffer, rd: i64, rs1: i64, rs2: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_r_type(0x33, rd, 0x0, rs1, rs2, 0x20))
+}
+
+// AND rd, rs1, rs2  — funct7=0x00, funct3=0x7, opcode=0x33
+fn rv_emit_and(buf: CodeBuffer, rd: i64, rs1: i64, rs2: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_r_type(0x33, rd, 0x7, rs1, rs2, 0x00))
+}
+
+// OR rd, rs1, rs2   — funct7=0x00, funct3=0x6, opcode=0x33
+fn rv_emit_or(buf: CodeBuffer, rd: i64, rs1: i64, rs2: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_r_type(0x33, rd, 0x6, rs1, rs2, 0x00))
+}
+
+// XOR rd, rs1, rs2  — funct7=0x00, funct3=0x4, opcode=0x33
+fn rv_emit_xor(buf: CodeBuffer, rd: i64, rs1: i64, rs2: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_r_type(0x33, rd, 0x4, rs1, rs2, 0x00))
+}
+
+// SLL rd, rs1, rs2  — funct7=0x00, funct3=0x1, opcode=0x33
+fn rv_emit_sll(buf: CodeBuffer, rd: i64, rs1: i64, rs2: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_r_type(0x33, rd, 0x1, rs1, rs2, 0x00))
+}
+
+// SRL rd, rs1, rs2  — funct7=0x00, funct3=0x5, opcode=0x33
+fn rv_emit_srl(buf: CodeBuffer, rd: i64, rs1: i64, rs2: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_r_type(0x33, rd, 0x5, rs1, rs2, 0x00))
+}
+
+// SRA rd, rs1, rs2  — funct7=0x20, funct3=0x5, opcode=0x33
+fn rv_emit_sra(buf: CodeBuffer, rd: i64, rs1: i64, rs2: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_r_type(0x33, rd, 0x5, rs1, rs2, 0x20))
+}
+
+// SLT rd, rs1, rs2  — funct7=0x00, funct3=0x2, opcode=0x33
+fn rv_emit_slt(buf: CodeBuffer, rd: i64, rs1: i64, rs2: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_r_type(0x33, rd, 0x2, rs1, rs2, 0x00))
+}
+
+// SLTU rd, rs1, rs2 — funct7=0x00, funct3=0x3, opcode=0x33
+fn rv_emit_sltu(buf: CodeBuffer, rd: i64, rs1: i64, rs2: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_r_type(0x33, rd, 0x3, rs1, rs2, 0x00))
+}
+
+// ============================================================================
+// RV64I word-width R-type ops  (opcode = 0x3B)
+// ============================================================================
+
+// ADDW rd, rs1, rs2 — funct7=0x00, funct3=0x0, opcode=0x3B
+fn rv_emit_addw(buf: CodeBuffer, rd: i64, rs1: i64, rs2: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_r_type(0x3B, rd, 0x0, rs1, rs2, 0x00))
+}
+
+// SUBW rd, rs1, rs2 — funct7=0x20, funct3=0x0, opcode=0x3B
+fn rv_emit_subw(buf: CodeBuffer, rd: i64, rs1: i64, rs2: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_r_type(0x3B, rd, 0x0, rs1, rs2, 0x20))
+}
+
+// ============================================================================
+// I-type arithmetic immediates  (opcode = 0x13)
+// ============================================================================
+
+// ADDI rd, rs1, imm12
+fn rv_emit_addi(buf: CodeBuffer, rd: i64, rs1: i64, imm: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_i_type(0x13, rd, 0x0, rs1, imm))
+}
+
+// ANDI rd, rs1, imm12
+fn rv_emit_andi(buf: CodeBuffer, rd: i64, rs1: i64, imm: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_i_type(0x13, rd, 0x7, rs1, imm))
+}
+
+// ORI rd, rs1, imm12
+fn rv_emit_ori(buf: CodeBuffer, rd: i64, rs1: i64, imm: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_i_type(0x13, rd, 0x6, rs1, imm))
+}
+
+// XORI rd, rs1, imm12
+fn rv_emit_xori(buf: CodeBuffer, rd: i64, rs1: i64, imm: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_i_type(0x13, rd, 0x4, rs1, imm))
+}
+
+// SLTI rd, rs1, imm12
+fn rv_emit_slti(buf: CodeBuffer, rd: i64, rs1: i64, imm: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_i_type(0x13, rd, 0x2, rs1, imm))
+}
+
+// SLTIU rd, rs1, imm12
+fn rv_emit_sltiu(buf: CodeBuffer, rd: i64, rs1: i64, imm: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_i_type(0x13, rd, 0x3, rs1, imm))
+}
+
+// ============================================================================
+// RV64I word-width I-type ops  (opcode = 0x1B)
+// ============================================================================
+
+// ADDIW rd, rs1, imm12
+fn rv_emit_addiw(buf: CodeBuffer, rd: i64, rs1: i64, imm: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_i_type(0x1B, rd, 0x0, rs1, imm))
+}
+
+// ============================================================================
+// Shift immediates  (I-type with special funct7 in upper bits)
+// For RV64I, shamt is 6 bits (bits [25:20])
+// ============================================================================
+
+// SLLI rd, rs1, shamt  — funct7=0x00 (top 6 bits), funct3=0x1, opcode=0x13
+fn rv_emit_slli(buf: CodeBuffer, rd: i64, rs1: i64, shamt: i64) -> CodeBuffer with Mut, Panic, Div {
+    // imm[11:0] = 0b000000|shamt[5:0]
+    let imm = rv_mask(shamt, 6)
+    rv_emit_instr(buf, rv_encode_i_type(0x13, rd, 0x1, rs1, imm))
+}
+
+// SRLI rd, rs1, shamt  — funct7=0x00 (top 6 bits), funct3=0x5, opcode=0x13
+fn rv_emit_srli(buf: CodeBuffer, rd: i64, rs1: i64, shamt: i64) -> CodeBuffer with Mut, Panic, Div {
+    let imm = rv_mask(shamt, 6)
+    rv_emit_instr(buf, rv_encode_i_type(0x13, rd, 0x5, rs1, imm))
+}
+
+// SRAI rd, rs1, shamt  — funct7=0x10 (bit 30 set), funct3=0x5, opcode=0x13
+fn rv_emit_srai(buf: CodeBuffer, rd: i64, rs1: i64, shamt: i64) -> CodeBuffer with Mut, Panic, Div {
+    // imm[11:0] = 0b010000|shamt[5:0]  (bit 10 = 1 -> funct7 bit 5 = 1)
+    let imm = rv_mask(shamt, 6) | (1 << 10)
+    rv_emit_instr(buf, rv_encode_i_type(0x13, rd, 0x5, rs1, imm))
+}
+
+// ============================================================================
+// Load instructions  (I-type, opcode = 0x03)
+// ============================================================================
+
+// LD rd, offset(rs1)  — 64-bit load, funct3=0x3
+fn rv_emit_ld(buf: CodeBuffer, rd: i64, rs1: i64, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_i_type(0x03, rd, 0x3, rs1, offset))
+}
+
+// LW rd, offset(rs1)  — 32-bit sign-extending load, funct3=0x2
+fn rv_emit_lw(buf: CodeBuffer, rd: i64, rs1: i64, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_i_type(0x03, rd, 0x2, rs1, offset))
+}
+
+// LWU rd, offset(rs1)  — 32-bit zero-extending load, funct3=0x6
+fn rv_emit_lwu(buf: CodeBuffer, rd: i64, rs1: i64, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_i_type(0x03, rd, 0x6, rs1, offset))
+}
+
+// LH rd, offset(rs1)  — 16-bit sign-extending load, funct3=0x1
+fn rv_emit_lh(buf: CodeBuffer, rd: i64, rs1: i64, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_i_type(0x03, rd, 0x1, rs1, offset))
+}
+
+// LHU rd, offset(rs1)  — 16-bit zero-extending load, funct3=0x5
+fn rv_emit_lhu(buf: CodeBuffer, rd: i64, rs1: i64, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_i_type(0x03, rd, 0x5, rs1, offset))
+}
+
+// LB rd, offset(rs1)  — 8-bit sign-extending load, funct3=0x0
+fn rv_emit_lb(buf: CodeBuffer, rd: i64, rs1: i64, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_i_type(0x03, rd, 0x0, rs1, offset))
+}
+
+// LBU rd, offset(rs1)  — 8-bit zero-extending load, funct3=0x4
+fn rv_emit_lbu(buf: CodeBuffer, rd: i64, rs1: i64, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_i_type(0x03, rd, 0x4, rs1, offset))
+}
+
+// ============================================================================
+// Store instructions  (S-type, opcode = 0x23)
+// ============================================================================
+
+// SD rs2, offset(rs1)  — 64-bit store, funct3=0x3
+fn rv_emit_sd(buf: CodeBuffer, rs2: i64, rs1: i64, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_s_type(0x23, 0x3, rs1, rs2, offset))
+}
+
+// SW rs2, offset(rs1)  — 32-bit store, funct3=0x2
+fn rv_emit_sw(buf: CodeBuffer, rs2: i64, rs1: i64, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_s_type(0x23, 0x2, rs1, rs2, offset))
+}
+
+// SH rs2, offset(rs1)  — 16-bit store, funct3=0x1
+fn rv_emit_sh(buf: CodeBuffer, rs2: i64, rs1: i64, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_s_type(0x23, 0x1, rs1, rs2, offset))
+}
+
+// SB rs2, offset(rs1)  — 8-bit store, funct3=0x0
+fn rv_emit_sb(buf: CodeBuffer, rs2: i64, rs1: i64, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_s_type(0x23, 0x0, rs1, rs2, offset))
+}
+
+// ============================================================================
+// Branch instructions  (B-type, opcode = 0x63)
+// ============================================================================
+
+// BEQ rs1, rs2, offset  — funct3=0x0
+fn rv_emit_beq(buf: CodeBuffer, rs1: i64, rs2: i64, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_b_type(0x63, 0x0, rs1, rs2, offset))
+}
+
+// BNE rs1, rs2, offset  — funct3=0x1
+fn rv_emit_bne(buf: CodeBuffer, rs1: i64, rs2: i64, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_b_type(0x63, 0x1, rs1, rs2, offset))
+}
+
+// BLT rs1, rs2, offset  — funct3=0x4
+fn rv_emit_blt(buf: CodeBuffer, rs1: i64, rs2: i64, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_b_type(0x63, 0x4, rs1, rs2, offset))
+}
+
+// BGE rs1, rs2, offset  — funct3=0x5
+fn rv_emit_bge(buf: CodeBuffer, rs1: i64, rs2: i64, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_b_type(0x63, 0x5, rs1, rs2, offset))
+}
+
+// BLTU rs1, rs2, offset — funct3=0x6
+fn rv_emit_bltu(buf: CodeBuffer, rs1: i64, rs2: i64, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_b_type(0x63, 0x6, rs1, rs2, offset))
+}
+
+// BGEU rs1, rs2, offset — funct3=0x7
+fn rv_emit_bgeu(buf: CodeBuffer, rs1: i64, rs2: i64, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_b_type(0x63, 0x7, rs1, rs2, offset))
+}
+
+// ============================================================================
+// Upper immediate instructions  (U-type)
+// ============================================================================
+
+// LUI rd, imm  — opcode=0x37.  imm is bits [31:12] of the result.
+fn rv_emit_lui(buf: CodeBuffer, rd: i64, imm: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_u_type(0x37, rd, imm))
+}
+
+// AUIPC rd, imm  — opcode=0x17
+fn rv_emit_auipc(buf: CodeBuffer, rd: i64, imm: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_u_type(0x17, rd, imm))
+}
+
+// ============================================================================
+// Jump instructions
+// ============================================================================
+
+// JAL rd, offset  — J-type, opcode=0x6F
+fn rv_emit_jal(buf: CodeBuffer, rd: i64, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_j_type(0x6F, rd, offset))
+}
+
+// JALR rd, rs1, offset  — I-type, opcode=0x67, funct3=0x0
+fn rv_emit_jalr(buf: CodeBuffer, rd: i64, rs1: i64, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_i_type(0x67, rd, 0x0, rs1, offset))
+}
+
+// ============================================================================
+// System instructions
+// ============================================================================
+
+// ECALL  — I-type with imm=0, rs1=0, rd=0, opcode=0x73, funct3=0x0
+fn rv_emit_ecall(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_i_type(0x73, 0, 0x0, 0, 0))
+}
+
+// EBREAK — I-type with imm=1, rs1=0, rd=0, opcode=0x73, funct3=0x0
+fn rv_emit_ebreak(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_i_type(0x73, 0, 0x0, 0, 1))
+}
+
+// FENCE — I-type, opcode=0x0F, funct3=0x0
+// pred=0b1111 (iorw), succ=0b1111 (iorw) -> imm = 0x0FF
+fn rv_emit_fence(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_i_type(0x0F, 0, 0x0, 0, 0x0FF))
+}
+
+// ============================================================================
+// Pseudoinstructions
+// ============================================================================
+
+// NOP  — addi x0, x0, 0
+fn rv_emit_nop(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_addi(buf, RV_X0, RV_X0, 0)
+}
+
+// MV rd, rs1  — addi rd, rs1, 0
+fn rv_emit_mv(buf: CodeBuffer, rd: i64, rs1: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_addi(buf, rd, rs1, 0)
+}
+
+// NOT rd, rs1 — xori rd, rs1, -1
+fn rv_emit_not(buf: CodeBuffer, rd: i64, rs1: i64) -> CodeBuffer with Mut, Panic, Div {
+    // -1 sign-extended to 12 bits = 0xFFF
+    rv_emit_xori(buf, rd, rs1, 0 - 1)
+}
+
+// NEG rd, rs1 — sub rd, x0, rs1
+fn rv_emit_neg(buf: CodeBuffer, rd: i64, rs1: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_sub(buf, rd, RV_X0, rs1)
+}
+
+// SEQZ rd, rs1 — sltiu rd, rs1, 1
+fn rv_emit_seqz(buf: CodeBuffer, rd: i64, rs1: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_sltiu(buf, rd, rs1, 1)
+}
+
+// SNEZ rd, rs1 — sltu rd, x0, rs1
+fn rv_emit_snez(buf: CodeBuffer, rd: i64, rs1: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_sltu(buf, rd, RV_X0, rs1)
+}
+
+// RET  — jalr x0, x1, 0  (jalr x0, ra, 0)
+fn rv_emit_ret(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_jalr(buf, RV_X0, RV_RA, 0)
+}
+
+// J offset — jal x0, offset  (unconditional jump, discard return addr)
+fn rv_emit_j(buf: CodeBuffer, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_jal(buf, RV_X0, offset)
+}
+
+// BEQZ rs1, offset — beq rs1, x0, offset
+fn rv_emit_beqz(buf: CodeBuffer, rs1: i64, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_beq(buf, rs1, RV_X0, offset)
+}
+
+// BNEZ rs1, offset — bne rs1, x0, offset
+fn rv_emit_bnez(buf: CodeBuffer, rs1: i64, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_bne(buf, rs1, RV_X0, offset)
+}
+
+// LI rd, imm  — load immediate (supports full 32-bit range via lui + addi)
+//
+// For values fitting in 12-bit signed: addi rd, x0, imm
+// For larger: lui rd, upper20; addi rd, rd, lower12
+// Note: if lower12 is negative (bit 11 set), we add 1 to the upper part
+// because addi sign-extends, which would subtract from the lui value.
+fn rv_emit_li(buf: CodeBuffer, rd: i64, imm: i64) -> CodeBuffer with Mut, Panic, Div {
+    // Check if fits in signed 12-bit: [-2048, 2047]
+    if imm >= 0 - 2048 {
+        if imm <= 2047 {
+            return rv_emit_addi(buf, rd, RV_X0, imm)
+        }
+    }
+
+    // Split into upper 20 and lower 12
+    var lower12 = rv_mask(imm, 12)
+    // Sign-extend lower12: if bit 11 is set, treat as negative
+    if (lower12 & 0x800) != 0 {
+        lower12 = lower12 - 0x1000
+    }
+
+    var upper20 = (imm - lower12) >> 12
+    upper20 = rv_mask(upper20, 20)
+
+    var b = buf
+    b = rv_emit_lui(b, rd, upper20)
+    if lower12 != 0 {
+        b = rv_emit_addi(b, rd, rd, lower12)
+    }
+    b
+}
+
+// CALL offset — auipc ra, upper20; jalr ra, ra, lower12
+// Two-instruction sequence for 32-bit PC-relative call.
+fn rv_emit_call(buf: CodeBuffer, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    var lower12 = rv_mask(offset, 12)
+    if (lower12 & 0x800) != 0 {
+        lower12 = lower12 - 0x1000
+    }
+    var upper20 = (offset - lower12) >> 12
+    upper20 = rv_mask(upper20, 20)
+
+    var b = buf
+    b = rv_emit_auipc(b, RV_RA, upper20)
+    b = rv_emit_jalr(b, RV_RA, RV_RA, lower12)
+    b
+}
+
+// TAIL offset — auipc t1, upper20; jalr x0, t1, lower12
+// Tail-call (no link): like CALL but rd=x0 and uses t1 as scratch.
+fn rv_emit_tail(buf: CodeBuffer, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    var lower12 = rv_mask(offset, 12)
+    if (lower12 & 0x800) != 0 {
+        lower12 = lower12 - 0x1000
+    }
+    var upper20 = (offset - lower12) >> 12
+    upper20 = rv_mask(upper20, 20)
+
+    var b = buf
+    b = rv_emit_auipc(b, RV_T1, upper20)
+    b = rv_emit_jalr(b, RV_X0, RV_T1, lower12)
+    b
+}
+
+// ============================================================================
+// M extension — multiply/divide  (opcode=0x33, funct7=0x01)
+// ============================================================================
+
+// MUL rd, rs1, rs2  — funct7=0x01, funct3=0x0
+fn rv_emit_mul(buf: CodeBuffer, rd: i64, rs1: i64, rs2: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_r_type(0x33, rd, 0x0, rs1, rs2, 0x01))
+}
+
+// MULH rd, rs1, rs2 — funct7=0x01, funct3=0x1 (signed x signed, high bits)
+fn rv_emit_mulh(buf: CodeBuffer, rd: i64, rs1: i64, rs2: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_r_type(0x33, rd, 0x1, rs1, rs2, 0x01))
+}
+
+// MULHU rd, rs1, rs2 — funct7=0x01, funct3=0x3 (unsigned x unsigned, high)
+fn rv_emit_mulhu(buf: CodeBuffer, rd: i64, rs1: i64, rs2: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_r_type(0x33, rd, 0x3, rs1, rs2, 0x01))
+}
+
+// DIV rd, rs1, rs2  — funct7=0x01, funct3=0x4
+fn rv_emit_div(buf: CodeBuffer, rd: i64, rs1: i64, rs2: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_r_type(0x33, rd, 0x4, rs1, rs2, 0x01))
+}
+
+// DIVU rd, rs1, rs2 — funct7=0x01, funct3=0x5
+fn rv_emit_divu(buf: CodeBuffer, rd: i64, rs1: i64, rs2: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_r_type(0x33, rd, 0x5, rs1, rs2, 0x01))
+}
+
+// REM rd, rs1, rs2  — funct7=0x01, funct3=0x6
+fn rv_emit_rem(buf: CodeBuffer, rd: i64, rs1: i64, rs2: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_r_type(0x33, rd, 0x6, rs1, rs2, 0x01))
+}
+
+// REMU rd, rs1, rs2 — funct7=0x01, funct3=0x7
+fn rv_emit_remu(buf: CodeBuffer, rd: i64, rs1: i64, rs2: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_r_type(0x33, rd, 0x7, rs1, rs2, 0x01))
+}
+
+// RV64M word-width multiply/divide (opcode=0x3B, funct7=0x01)
+
+// MULW rd, rs1, rs2 — funct7=0x01, funct3=0x0, opcode=0x3B
+fn rv_emit_mulw(buf: CodeBuffer, rd: i64, rs1: i64, rs2: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_r_type(0x3B, rd, 0x0, rs1, rs2, 0x01))
+}
+
+// DIVW rd, rs1, rs2 — funct7=0x01, funct3=0x4, opcode=0x3B
+fn rv_emit_divw(buf: CodeBuffer, rd: i64, rs1: i64, rs2: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_r_type(0x3B, rd, 0x4, rs1, rs2, 0x01))
+}
+
+// REMW rd, rs1, rs2 — funct7=0x01, funct3=0x6, opcode=0x3B
+fn rv_emit_remw(buf: CodeBuffer, rd: i64, rs1: i64, rs2: i64) -> CodeBuffer with Mut, Panic, Div {
+    rv_emit_instr(buf, rv_encode_r_type(0x3B, rd, 0x6, rs1, rs2, 0x01))
+}
+
+// ============================================================================
+// Stack frame helpers (common prologue/epilogue patterns)
+// ============================================================================
+
+// Standard function prologue: addi sp, sp, -framesize; sd ra, framesize-8(sp); sd s0, framesize-16(sp); addi s0, sp, framesize
+fn rv_emit_prologue(buf: CodeBuffer, frame_size: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = rv_emit_addi(b, RV_SP, RV_SP, 0 - frame_size)
+    b = rv_emit_sd(b, RV_RA, RV_SP, frame_size - 8)
+    b = rv_emit_sd(b, RV_S0, RV_SP, frame_size - 16)
+    b = rv_emit_addi(b, RV_S0, RV_SP, frame_size)
+    b
+}
+
+// Standard function epilogue: ld ra, framesize-8(sp); ld s0, framesize-16(sp); addi sp, sp, framesize; ret
+fn rv_emit_epilogue(buf: CodeBuffer, frame_size: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = rv_emit_ld(b, RV_RA, RV_SP, frame_size - 8)
+    b = rv_emit_ld(b, RV_S0, RV_SP, frame_size - 16)
+    b = rv_emit_addi(b, RV_SP, RV_SP, frame_size)
+    b = rv_emit_ret(b)
+    b
+}
+
+// ============================================================================
+// Linux RISC-V syscall helper
+// Syscall convention: a7=syscall number, a0-a5=args, ecall, result in a0
+// ============================================================================
+
+// sys_exit(code)  — syscall 93
+fn rv_emit_exit(buf: CodeBuffer, code: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = rv_emit_li(b, RV_A0, code)
+    b = rv_emit_li(b, RV_A7, 93)
+    b = rv_emit_ecall(b)
+    b
+}
+
+// sys_write(fd, buf, len) — syscall 64
+fn rv_emit_write_syscall(buf: CodeBuffer, fd: i64, data_addr: i64, data_len: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = rv_emit_li(b, RV_A0, fd)
+    b = rv_emit_li(b, RV_A1, data_addr)
+    b = rv_emit_li(b, RV_A2, data_len)
+    b = rv_emit_li(b, RV_A7, 64)
+    b = rv_emit_ecall(b)
+    b
+}
+
+// ============================================================================
+// Load address helpers (for position-independent code)
+// ============================================================================
+
+// LA rd, symbol — auipc rd, upper20; addi rd, rd, lower12
+// Same split as LI but relative to PC via AUIPC.
+fn rv_emit_la(buf: CodeBuffer, rd: i64, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    var lower12 = rv_mask(offset, 12)
+    if (lower12 & 0x800) != 0 {
+        lower12 = lower12 - 0x1000
+    }
+    var upper20 = (offset - lower12) >> 12
+    upper20 = rv_mask(upper20, 20)
+
+    var b = buf
+    b = rv_emit_auipc(b, rd, upper20)
+    b = rv_emit_addi(b, rd, rd, lower12)
+    b
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+fn rv_byte_u8(b: i8) -> i64 {
+    let x = b as i64
+    if x < 0 { x + 256 } else { x }
+}
+
+// T01: ADD x10, x11, x12 should produce the canonical encoding
+// add a0, a1, a2 => 0x00C58533
+// Breakdown: funct7=0000000, rs2=01100(12), rs1=01011(11), funct3=000, rd=01010(10), opcode=0110011
+fn rv_test_add_encoding() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = rv_emit_add(buf, RV_A0, RV_A1, RV_A2)
+    if !(buf.len == 4) { return false }
+    // Expected: 0x00C58533 in little-endian: 33 85 C5 00
+    let b0 = rv_byte_u8(buf.bytes[0])
+    let b1 = rv_byte_u8(buf.bytes[1])
+    let b2 = rv_byte_u8(buf.bytes[2])
+    let b3 = rv_byte_u8(buf.bytes[3])
+    let word = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    if !(word == 0x00C58533) { return false }
+    true
+}
+
+// T02: SUB x10, x11, x12 => 0x40C58533
+fn rv_test_sub_encoding() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = rv_emit_sub(buf, RV_A0, RV_A1, RV_A2)
+    if !(buf.len == 4) { return false }
+    let b0 = rv_byte_u8(buf.bytes[0])
+    let b1 = rv_byte_u8(buf.bytes[1])
+    let b2 = rv_byte_u8(buf.bytes[2])
+    let b3 = rv_byte_u8(buf.bytes[3])
+    let word = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    if !(word == 0x40C58533) { return false }
+    true
+}
+
+// T03: ADDI x10, x11, 42 => 0x02A58513
+// imm=42=0x02A, rs1=11, funct3=000, rd=10, opcode=0010011
+fn rv_test_addi_encoding() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = rv_emit_addi(buf, RV_A0, RV_A1, 42)
+    if !(buf.len == 4) { return false }
+    let b0 = rv_byte_u8(buf.bytes[0])
+    let b1 = rv_byte_u8(buf.bytes[1])
+    let b2 = rv_byte_u8(buf.bytes[2])
+    let b3 = rv_byte_u8(buf.bytes[3])
+    let word = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    if !(word == 0x02A58513) { return false }
+    true
+}
+
+// T04: LD x10, 8(x2) => 0x00813503
+// imm=8=0x008, rs1=2(sp), funct3=011, rd=10, opcode=0000011
+fn rv_test_ld_encoding() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = rv_emit_ld(buf, RV_A0, RV_SP, 8)
+    if !(buf.len == 4) { return false }
+    let b0 = rv_byte_u8(buf.bytes[0])
+    let b1 = rv_byte_u8(buf.bytes[1])
+    let b2 = rv_byte_u8(buf.bytes[2])
+    let b3 = rv_byte_u8(buf.bytes[3])
+    let word = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    if !(word == 0x00813503) { return false }
+    true
+}
+
+// T05: SD x10, 16(x2) => S-type: imm=16=0x010
+// funct3=011, rs1=2, rs2=10, imm[4:0]=10000=16, imm[11:5]=0000000
+// Expected: 0x00A13823
+fn rv_test_sd_encoding() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = rv_emit_sd(buf, RV_A0, RV_SP, 16)
+    if !(buf.len == 4) { return false }
+    let b0 = rv_byte_u8(buf.bytes[0])
+    let b1 = rv_byte_u8(buf.bytes[1])
+    let b2 = rv_byte_u8(buf.bytes[2])
+    let b3 = rv_byte_u8(buf.bytes[3])
+    let word = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    if !(word == 0x00A13823) { return false }
+    true
+}
+
+// T06: LUI x10, 0x12345  => U-type
+// Expected: 0x12345537
+fn rv_test_lui_encoding() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = rv_emit_lui(buf, RV_A0, 0x12345)
+    if !(buf.len == 4) { return false }
+    let b0 = rv_byte_u8(buf.bytes[0])
+    let b1 = rv_byte_u8(buf.bytes[1])
+    let b2 = rv_byte_u8(buf.bytes[2])
+    let b3 = rv_byte_u8(buf.bytes[3])
+    let word = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    if !(word == 0x12345537) { return false }
+    true
+}
+
+// T07: NOP should encode as addi x0, x0, 0 => 0x00000013
+fn rv_test_nop_encoding() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = rv_emit_nop(buf)
+    if !(buf.len == 4) { return false }
+    let b0 = rv_byte_u8(buf.bytes[0])
+    let b1 = rv_byte_u8(buf.bytes[1])
+    let b2 = rv_byte_u8(buf.bytes[2])
+    let b3 = rv_byte_u8(buf.bytes[3])
+    let word = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    if !(word == 0x00000013) { return false }
+    true
+}
+
+// T08: RET should encode as jalr x0, x1, 0 => 0x00008067
+fn rv_test_ret_encoding() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = rv_emit_ret(buf)
+    if !(buf.len == 4) { return false }
+    let b0 = rv_byte_u8(buf.bytes[0])
+    let b1 = rv_byte_u8(buf.bytes[1])
+    let b2 = rv_byte_u8(buf.bytes[2])
+    let b3 = rv_byte_u8(buf.bytes[3])
+    let word = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    if !(word == 0x00008067) { return false }
+    true
+}
+
+// T09: MV x10, x11 should encode as addi x10, x11, 0 => 0x00058513
+fn rv_test_mv_encoding() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = rv_emit_mv(buf, RV_A0, RV_A1)
+    if !(buf.len == 4) { return false }
+    let b0 = rv_byte_u8(buf.bytes[0])
+    let b1 = rv_byte_u8(buf.bytes[1])
+    let b2 = rv_byte_u8(buf.bytes[2])
+    let b3 = rv_byte_u8(buf.bytes[3])
+    let word = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    if !(word == 0x00058513) { return false }
+    true
+}
+
+// T10: MUL x10, x11, x12 => 0x02C58533 (M extension)
+// funct7=0000001, rs2=12, rs1=11, funct3=000, rd=10, opcode=0110011
+fn rv_test_mul_encoding() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = rv_emit_mul(buf, RV_A0, RV_A1, RV_A2)
+    if !(buf.len == 4) { return false }
+    let b0 = rv_byte_u8(buf.bytes[0])
+    let b1 = rv_byte_u8(buf.bytes[1])
+    let b2 = rv_byte_u8(buf.bytes[2])
+    let b3 = rv_byte_u8(buf.bytes[3])
+    let word = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    if !(word == 0x02C58533) { return false }
+    true
+}
+
+// T11: BEQ x10, x11, 8 — B-type branch
+// offset=8: imm[12]=0, imm[10:5]=000000, imm[4:1]=0100, imm[11]=0
+// rs2=11, rs1=10, funct3=000, opcode=1100011
+// Expected: 0x00B50463
+fn rv_test_beq_encoding() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = rv_emit_beq(buf, RV_A0, RV_A1, 8)
+    if !(buf.len == 4) { return false }
+    let b0 = rv_byte_u8(buf.bytes[0])
+    let b1 = rv_byte_u8(buf.bytes[1])
+    let b2 = rv_byte_u8(buf.bytes[2])
+    let b3 = rv_byte_u8(buf.bytes[3])
+    let word = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    if !(word == 0x00B50463) { return false }
+    true
+}
+
+// T12: JAL x1, 0 => J-type with offset=0
+// Expected: 0x000000EF  (rd=1=ra, opcode=1101111, all imm bits=0)
+fn rv_test_jal_encoding() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = rv_emit_jal(buf, RV_RA, 0)
+    if !(buf.len == 4) { return false }
+    let b0 = rv_byte_u8(buf.bytes[0])
+    let b1 = rv_byte_u8(buf.bytes[1])
+    let b2 = rv_byte_u8(buf.bytes[2])
+    let b3 = rv_byte_u8(buf.bytes[3])
+    let word = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    if !(word == 0x000000EF) { return false }
+    true
+}
+
+// T13: LI for small immediate — should produce single addi
+fn rv_test_li_small() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = rv_emit_li(buf, RV_A0, 42)
+    // Should be one instruction: addi a0, x0, 42
+    if !(buf.len == 4) { return false }
+    let b0 = rv_byte_u8(buf.bytes[0])
+    let b1 = rv_byte_u8(buf.bytes[1])
+    let b2 = rv_byte_u8(buf.bytes[2])
+    let b3 = rv_byte_u8(buf.bytes[3])
+    let word = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    // addi x10, x0, 42 = 0x02A00513
+    if !(word == 0x02A00513) { return false }
+    true
+}
+
+// T14: LI for large immediate — should produce lui + addi (2 instructions)
+fn rv_test_li_large() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    // Load 0x12345000 into a0: lui a0, 0x12345; no addi needed (lower12=0)
+    buf = rv_emit_li(buf, RV_A0, 0x12345000)
+    // Should be lui only (lower 12 bits are 0)
+    if !(buf.len == 4) { return false }
+    true
+}
+
+// T15: ECALL encoding => 0x00000073
+fn rv_test_ecall_encoding() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = rv_emit_ecall(buf)
+    if !(buf.len == 4) { return false }
+    let b0 = rv_byte_u8(buf.bytes[0])
+    let b1 = rv_byte_u8(buf.bytes[1])
+    let b2 = rv_byte_u8(buf.bytes[2])
+    let b3 = rv_byte_u8(buf.bytes[3])
+    let word = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    if !(word == 0x00000073) { return false }
+    true
+}
+
+// T16: DIV x10, x11, x12 => 0x02C5C533 (M extension)
+// funct7=0000001, rs2=12, rs1=11, funct3=100, rd=10, opcode=0110011
+fn rv_test_div_encoding() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = rv_emit_div(buf, RV_A0, RV_A1, RV_A2)
+    if !(buf.len == 4) { return false }
+    let b0 = rv_byte_u8(buf.bytes[0])
+    let b1 = rv_byte_u8(buf.bytes[1])
+    let b2 = rv_byte_u8(buf.bytes[2])
+    let b3 = rv_byte_u8(buf.bytes[3])
+    let word = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    if !(word == 0x02C5C533) { return false }
+    true
+}
+
+// T17: SLL x10, x11, x12 => 0x00C59533
+// funct7=0000000, rs2=12, rs1=11, funct3=001, rd=10, opcode=0110011
+fn rv_test_sll_encoding() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = rv_emit_sll(buf, RV_A0, RV_A1, RV_A2)
+    if !(buf.len == 4) { return false }
+    let b0 = rv_byte_u8(buf.bytes[0])
+    let b1 = rv_byte_u8(buf.bytes[1])
+    let b2 = rv_byte_u8(buf.bytes[2])
+    let b3 = rv_byte_u8(buf.bytes[3])
+    let word = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    if !(word == 0x00C59533) { return false }
+    true
+}
+
+// T18: Prologue/epilogue round-trip emits correct instruction count
+fn rv_test_prologue_epilogue() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = rv_emit_prologue(buf, 32)
+    buf = rv_emit_epilogue(buf, 32)
+    // Prologue: 4 instructions (addi sp, sd ra, sd s0, addi s0) = 16 bytes
+    // Epilogue: 4 instructions (ld ra, ld s0, addi sp, ret) = 16 bytes
+    if !(buf.len == 32) { return false }
+    true
+}
+
+// ============================================================================
+// Test runner
+// ============================================================================
+
+fn rv_test_main() -> i32 with IO, Mut, Panic, Div {
+    var passed: i64 = 0
+    let total: i64 = 18
+
+    print("=== RISC-V RV64I Encoder Tests ===\n")
+
+    if rv_test_add_encoding()    { passed = passed + 1; print("  T01 OK (ADD)\n")   } else { print("  FAIL: T01 ADD\n") }
+    if rv_test_sub_encoding()    { passed = passed + 1; print("  T02 OK (SUB)\n")   } else { print("  FAIL: T02 SUB\n") }
+    if rv_test_addi_encoding()   { passed = passed + 1; print("  T03 OK (ADDI)\n")  } else { print("  FAIL: T03 ADDI\n") }
+    if rv_test_ld_encoding()     { passed = passed + 1; print("  T04 OK (LD)\n")    } else { print("  FAIL: T04 LD\n") }
+    if rv_test_sd_encoding()     { passed = passed + 1; print("  T05 OK (SD)\n")    } else { print("  FAIL: T05 SD\n") }
+    if rv_test_lui_encoding()    { passed = passed + 1; print("  T06 OK (LUI)\n")   } else { print("  FAIL: T06 LUI\n") }
+    if rv_test_nop_encoding()    { passed = passed + 1; print("  T07 OK (NOP)\n")   } else { print("  FAIL: T07 NOP\n") }
+    if rv_test_ret_encoding()    { passed = passed + 1; print("  T08 OK (RET)\n")   } else { print("  FAIL: T08 RET\n") }
+    if rv_test_mv_encoding()     { passed = passed + 1; print("  T09 OK (MV)\n")    } else { print("  FAIL: T09 MV\n") }
+    if rv_test_mul_encoding()    { passed = passed + 1; print("  T10 OK (MUL)\n")   } else { print("  FAIL: T10 MUL\n") }
+    if rv_test_beq_encoding()    { passed = passed + 1; print("  T11 OK (BEQ)\n")   } else { print("  FAIL: T11 BEQ\n") }
+    if rv_test_jal_encoding()    { passed = passed + 1; print("  T12 OK (JAL)\n")   } else { print("  FAIL: T12 JAL\n") }
+    if rv_test_li_small()        { passed = passed + 1; print("  T13 OK (LI small)\n") } else { print("  FAIL: T13 LI small\n") }
+    if rv_test_li_large()        { passed = passed + 1; print("  T14 OK (LI large)\n") } else { print("  FAIL: T14 LI large\n") }
+    if rv_test_ecall_encoding()  { passed = passed + 1; print("  T15 OK (ECALL)\n") } else { print("  FAIL: T15 ECALL\n") }
+    if rv_test_div_encoding()    { passed = passed + 1; print("  T16 OK (DIV)\n")   } else { print("  FAIL: T16 DIV\n") }
+    if rv_test_sll_encoding()    { passed = passed + 1; print("  T17 OK (SLL)\n")   } else { print("  FAIL: T17 SLL\n") }
+    if rv_test_prologue_epilogue() { passed = passed + 1; print("  T18 OK (prologue/epilogue)\n") } else { print("  FAIL: T18 prologue/epilogue\n") }
+
+    print("\nRISC-V tests: ")
+    print_int(passed)
+    print("/")
+    print_int(total)
+    print(" passed\n")
+
+    if passed == total { 0 } else { 1 }
+}

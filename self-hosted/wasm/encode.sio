@@ -1,0 +1,1222 @@
+// self-hosted::wasm::encode — WebAssembly opcode emitters for function bodies
+//
+// Emits WASM instructions into a WasmFuncBody buffer.  Each emitter appends
+// the opcode byte (and any immediate operands encoded as LEB128) to the
+// body's code array, then returns the mutated body.
+//
+// Opcode reference: WebAssembly MVP specification, Section 5.4.
+//
+// Encoding conventions:
+//   - Single-byte opcodes: push 1 byte.
+//   - Opcodes with u32 immediate (local.get, call, br, etc.): opcode + u32 LEB128.
+//   - Opcodes with i32/i64 immediate (i32.const, i64.const): opcode + signed LEB128.
+//   - Memory opcodes (i32.load, etc.): opcode + alignment(LEB128) + offset(LEB128).
+//   - Block-structured (block, loop, if): opcode + blocktype byte.
+//     blocktype: 0x40 = void, 0x7F = i32, 0x7E = i64, etc.
+
+// ============================================================================
+// WASM opcode constants
+// ============================================================================
+
+// Control flow
+let WASM_OP_UNREACHABLE: i64 = 0x00
+let WASM_OP_NOP: i64 = 0x01
+let WASM_OP_BLOCK: i64 = 0x02
+let WASM_OP_LOOP: i64 = 0x03
+let WASM_OP_IF: i64 = 0x04
+let WASM_OP_ELSE: i64 = 0x05
+let WASM_OP_END: i64 = 0x0B
+let WASM_OP_BR: i64 = 0x0C
+let WASM_OP_BR_IF: i64 = 0x0D
+let WASM_OP_BR_TABLE: i64 = 0x0E
+let WASM_OP_RETURN: i64 = 0x0F
+let WASM_OP_CALL: i64 = 0x10
+let WASM_OP_CALL_INDIRECT: i64 = 0x11
+
+// Variable access
+let WASM_OP_LOCAL_GET: i64 = 0x20
+let WASM_OP_LOCAL_SET: i64 = 0x21
+let WASM_OP_LOCAL_TEE: i64 = 0x22
+let WASM_OP_GLOBAL_GET: i64 = 0x23
+let WASM_OP_GLOBAL_SET: i64 = 0x24
+
+// Memory access
+let WASM_OP_I32_LOAD: i64 = 0x28
+let WASM_OP_I64_LOAD: i64 = 0x29
+let WASM_OP_F32_LOAD: i64 = 0x2A
+let WASM_OP_F64_LOAD: i64 = 0x2B
+let WASM_OP_I32_STORE: i64 = 0x36
+let WASM_OP_I64_STORE: i64 = 0x37
+let WASM_OP_F32_STORE: i64 = 0x38
+let WASM_OP_F64_STORE: i64 = 0x39
+let WASM_OP_MEMORY_SIZE: i64 = 0x3F
+let WASM_OP_MEMORY_GROW: i64 = 0x40
+
+// I32 load sub-widths
+let WASM_OP_I32_LOAD8_S: i64 = 0x2C
+let WASM_OP_I32_LOAD8_U: i64 = 0x2D
+let WASM_OP_I32_LOAD16_S: i64 = 0x2E
+let WASM_OP_I32_LOAD16_U: i64 = 0x2F
+
+// I32 store sub-widths
+let WASM_OP_I32_STORE8: i64 = 0x3A
+let WASM_OP_I32_STORE16: i64 = 0x3B
+
+// Constants
+let WASM_OP_I32_CONST: i64 = 0x41
+let WASM_OP_I64_CONST: i64 = 0x42
+let WASM_OP_F32_CONST: i64 = 0x43
+let WASM_OP_F64_CONST: i64 = 0x44
+
+// i32 comparison
+let WASM_OP_I32_EQZ: i64 = 0x45
+let WASM_OP_I32_EQ: i64 = 0x46
+let WASM_OP_I32_NE: i64 = 0x47
+let WASM_OP_I32_LT_S: i64 = 0x48
+let WASM_OP_I32_LT_U: i64 = 0x49
+let WASM_OP_I32_GT_S: i64 = 0x4A
+let WASM_OP_I32_GT_U: i64 = 0x4B
+let WASM_OP_I32_LE_S: i64 = 0x4C
+let WASM_OP_I32_LE_U: i64 = 0x4D
+let WASM_OP_I32_GE_S: i64 = 0x4E
+let WASM_OP_I32_GE_U: i64 = 0x4F
+
+// i64 comparison
+let WASM_OP_I64_EQZ: i64 = 0x50
+let WASM_OP_I64_EQ: i64 = 0x51
+let WASM_OP_I64_NE: i64 = 0x52
+let WASM_OP_I64_LT_S: i64 = 0x53
+let WASM_OP_I64_GT_S: i64 = 0x55
+let WASM_OP_I64_LE_S: i64 = 0x57
+let WASM_OP_I64_GE_S: i64 = 0x59
+
+// f64 comparison
+let WASM_OP_F64_EQ: i64 = 0x61
+let WASM_OP_F64_NE: i64 = 0x62
+let WASM_OP_F64_LT: i64 = 0x63
+let WASM_OP_F64_GT: i64 = 0x64
+let WASM_OP_F64_LE: i64 = 0x65
+let WASM_OP_F64_GE: i64 = 0x66
+
+// i32 arithmetic
+let WASM_OP_I32_CLZ: i64 = 0x67
+let WASM_OP_I32_CTZ: i64 = 0x68
+let WASM_OP_I32_POPCNT: i64 = 0x69
+let WASM_OP_I32_ADD: i64 = 0x6A
+let WASM_OP_I32_SUB: i64 = 0x6B
+let WASM_OP_I32_MUL: i64 = 0x6C
+let WASM_OP_I32_DIV_S: i64 = 0x6D
+let WASM_OP_I32_DIV_U: i64 = 0x6E
+let WASM_OP_I32_REM_S: i64 = 0x6F
+let WASM_OP_I32_REM_U: i64 = 0x70
+let WASM_OP_I32_AND: i64 = 0x71
+let WASM_OP_I32_OR: i64 = 0x72
+let WASM_OP_I32_XOR: i64 = 0x73
+let WASM_OP_I32_SHL: i64 = 0x74
+let WASM_OP_I32_SHR_S: i64 = 0x75
+let WASM_OP_I32_SHR_U: i64 = 0x76
+let WASM_OP_I32_ROTL: i64 = 0x77
+let WASM_OP_I32_ROTR: i64 = 0x78
+
+// i64 arithmetic
+let WASM_OP_I64_CLZ: i64 = 0x79
+let WASM_OP_I64_CTZ: i64 = 0x7A
+let WASM_OP_I64_POPCNT: i64 = 0x7B
+let WASM_OP_I64_ADD: i64 = 0x7C
+let WASM_OP_I64_SUB: i64 = 0x7D
+let WASM_OP_I64_MUL: i64 = 0x7E
+let WASM_OP_I64_DIV_S: i64 = 0x7F
+let WASM_OP_I64_DIV_U: i64 = 0x80
+let WASM_OP_I64_REM_S: i64 = 0x81
+let WASM_OP_I64_AND: i64 = 0x83
+let WASM_OP_I64_OR: i64 = 0x84
+let WASM_OP_I64_XOR: i64 = 0x85
+let WASM_OP_I64_SHL: i64 = 0x86
+let WASM_OP_I64_SHR_S: i64 = 0x87
+
+// f32 arithmetic
+let WASM_OP_F32_ABS: i64 = 0x8B
+let WASM_OP_F32_NEG: i64 = 0x8C
+let WASM_OP_F32_SQRT: i64 = 0x91
+let WASM_OP_F32_ADD: i64 = 0x92
+let WASM_OP_F32_SUB: i64 = 0x93
+let WASM_OP_F32_MUL: i64 = 0x94
+let WASM_OP_F32_DIV: i64 = 0x95
+
+// f64 arithmetic
+let WASM_OP_F64_ABS: i64 = 0x99
+let WASM_OP_F64_NEG: i64 = 0x9A
+let WASM_OP_F64_CEIL: i64 = 0x9B
+let WASM_OP_F64_FLOOR: i64 = 0x9C
+let WASM_OP_F64_TRUNC: i64 = 0x9D
+let WASM_OP_F64_NEAREST: i64 = 0x9E
+let WASM_OP_F64_SQRT: i64 = 0x9F
+let WASM_OP_F64_ADD: i64 = 0xA0
+let WASM_OP_F64_SUB: i64 = 0xA1
+let WASM_OP_F64_MUL: i64 = 0xA2
+let WASM_OP_F64_DIV: i64 = 0xA3
+let WASM_OP_F64_MIN: i64 = 0xA4
+let WASM_OP_F64_MAX: i64 = 0xA5
+
+// Conversions
+let WASM_OP_I32_WRAP_I64: i64 = 0xA7
+let WASM_OP_I32_TRUNC_F32_S: i64 = 0xA8
+let WASM_OP_I32_TRUNC_F64_S: i64 = 0xAA
+let WASM_OP_I64_EXTEND_I32_S: i64 = 0xAC
+let WASM_OP_I64_EXTEND_I32_U: i64 = 0xAD
+let WASM_OP_I64_TRUNC_F64_S: i64 = 0xB0
+let WASM_OP_F32_CONVERT_I32_S: i64 = 0xB2
+let WASM_OP_F32_CONVERT_I64_S: i64 = 0xB4
+let WASM_OP_F32_DEMOTE_F64: i64 = 0xB6
+let WASM_OP_F64_CONVERT_I32_S: i64 = 0xB7
+let WASM_OP_F64_CONVERT_I64_S: i64 = 0xB9
+let WASM_OP_F64_PROMOTE_F32: i64 = 0xBB
+let WASM_OP_I32_REINTERPRET_F32: i64 = 0xBC
+let WASM_OP_I64_REINTERPRET_F64: i64 = 0xBD
+let WASM_OP_F32_REINTERPRET_I32: i64 = 0xBE
+let WASM_OP_F64_REINTERPRET_I64: i64 = 0xBF
+
+// Block type for void blocks
+let WASM_BLOCK_VOID: i64 = 0x40
+
+// Drop and select
+let WASM_OP_DROP: i64 = 0x1A
+let WASM_OP_SELECT: i64 = 0x1B
+
+// ============================================================================
+// WasmFuncBody constructors and helpers
+// ============================================================================
+
+fn wasm_body_new() -> WasmFuncBody {
+    WasmFuncBody {
+        code: [0; 8192],
+        code_len: 0,
+        locals: [WasmLocal { count: 0, val_type: 0 }; 32],
+        local_count: 0,
+    }
+}
+
+// Push a raw byte into the function body code buffer
+fn wasm_body_push_byte(body: WasmFuncBody, b: i64) -> WasmFuncBody with Mut, Panic, Div {
+    var out = body
+    if out.code_len < 8192 {
+        let masked = b % 256
+        var byte_val = masked
+        if byte_val < 0 { byte_val = byte_val + 256 }
+        out.code[out.code_len as usize] = byte_val as i8
+        out.code_len = out.code_len + 1
+    }
+    out
+}
+
+// Push unsigned LEB128 into the body code buffer
+fn wasm_body_push_u32_leb128(body: WasmFuncBody, val: i64) -> WasmFuncBody with Mut, Panic, Div {
+    var out = body
+    var v = val
+    if v < 0 { v = v + 4294967296 }
+    var done = false
+    while !done {
+        let low7 = v % 128
+        v = v / 128
+        if v == 0 {
+            out = wasm_body_push_byte(out, low7)
+            done = true
+        } else {
+            out = wasm_body_push_byte(out, low7 + 128)
+        }
+    }
+    out
+}
+
+// Push signed LEB128 (i32) into the body code buffer
+fn wasm_body_push_i32_leb128(body: WasmFuncBody, val: i64) -> WasmFuncBody with Mut, Panic, Div {
+    var out = body
+    var v = val
+    var done = false
+    while !done {
+        let low7 = v % 128
+        var byte_val = low7
+        if byte_val < 0 { byte_val = byte_val + 128 }
+        v = v / 128
+        let sign_bit = byte_val % 128
+        if v == 0 && sign_bit < 64 {
+            out = wasm_body_push_byte(out, byte_val)
+            done = true
+        } else if v == (0 - 1) && sign_bit >= 64 {
+            out = wasm_body_push_byte(out, byte_val)
+            done = true
+        } else {
+            out = wasm_body_push_byte(out, byte_val + 128)
+        }
+    }
+    out
+}
+
+// Push signed LEB128 (i64) into the body code buffer
+fn wasm_body_push_i64_leb128(body: WasmFuncBody, val: i64) -> WasmFuncBody with Mut, Panic, Div {
+    var out = body
+    var v = val
+    var done = false
+    while !done {
+        let low7 = v % 128
+        var byte_val = low7
+        if byte_val < 0 { byte_val = byte_val + 128 }
+        v = v / 128
+        let sign_bit = byte_val % 128
+        if v == 0 && sign_bit < 64 {
+            out = wasm_body_push_byte(out, byte_val)
+            done = true
+        } else if v == (0 - 1) && sign_bit >= 64 {
+            out = wasm_body_push_byte(out, byte_val)
+            done = true
+        } else {
+            out = wasm_body_push_byte(out, byte_val + 128)
+        }
+    }
+    out
+}
+
+// ============================================================================
+// Emit a single opcode byte
+// ============================================================================
+
+fn wasm_body_emit(body: WasmFuncBody, op: i64) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_push_byte(body, op)
+}
+
+// Emit opcode + unsigned LEB128 immediate
+fn wasm_body_emit_u32(body: WasmFuncBody, op: i64, val: i64) -> WasmFuncBody with Mut, Panic, Div {
+    var out = body
+    out = wasm_body_push_byte(out, op)
+    out = wasm_body_push_u32_leb128(out, val)
+    out
+}
+
+// Emit opcode + signed LEB128 immediate (i32)
+fn wasm_body_emit_i32(body: WasmFuncBody, op: i64, val: i64) -> WasmFuncBody with Mut, Panic, Div {
+    var out = body
+    out = wasm_body_push_byte(out, op)
+    out = wasm_body_push_i32_leb128(out, val)
+    out
+}
+
+// Emit opcode + signed LEB128 immediate (i64)
+fn wasm_body_emit_i64(body: WasmFuncBody, op: i64, val: i64) -> WasmFuncBody with Mut, Panic, Div {
+    var out = body
+    out = wasm_body_push_byte(out, op)
+    out = wasm_body_push_i64_leb128(out, val)
+    out
+}
+
+// ============================================================================
+// Add local declarations to a function body
+// ============================================================================
+
+fn wasm_body_add_local(body: WasmFuncBody, count: i64, val_type: i64) -> WasmFuncBody with Mut, Panic {
+    var out = body
+    if out.local_count < 32 {
+        out.locals[out.local_count as usize] = WasmLocal { count: count, val_type: val_type }
+        out.local_count = out.local_count + 1
+    }
+    out
+}
+
+// ============================================================================
+// Variable access instructions
+// ============================================================================
+
+fn wasm_body_emit_local_get(body: WasmFuncBody, idx: i64) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit_u32(body, WASM_OP_LOCAL_GET, idx)
+}
+
+fn wasm_body_emit_local_set(body: WasmFuncBody, idx: i64) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit_u32(body, WASM_OP_LOCAL_SET, idx)
+}
+
+fn wasm_body_emit_local_tee(body: WasmFuncBody, idx: i64) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit_u32(body, WASM_OP_LOCAL_TEE, idx)
+}
+
+fn wasm_body_emit_global_get(body: WasmFuncBody, idx: i64) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit_u32(body, WASM_OP_GLOBAL_GET, idx)
+}
+
+fn wasm_body_emit_global_set(body: WasmFuncBody, idx: i64) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit_u32(body, WASM_OP_GLOBAL_SET, idx)
+}
+
+// ============================================================================
+// Control flow instructions
+// ============================================================================
+
+fn wasm_body_emit_unreachable(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_UNREACHABLE)
+}
+
+fn wasm_body_emit_nop(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_NOP)
+}
+
+fn wasm_body_emit_block(body: WasmFuncBody, block_type: i64) -> WasmFuncBody with Mut, Panic, Div {
+    var out = body
+    out = wasm_body_push_byte(out, WASM_OP_BLOCK)
+    out = wasm_body_push_byte(out, block_type)
+    out
+}
+
+fn wasm_body_emit_loop(body: WasmFuncBody, block_type: i64) -> WasmFuncBody with Mut, Panic, Div {
+    var out = body
+    out = wasm_body_push_byte(out, WASM_OP_LOOP)
+    out = wasm_body_push_byte(out, block_type)
+    out
+}
+
+fn wasm_body_emit_if(body: WasmFuncBody, block_type: i64) -> WasmFuncBody with Mut, Panic, Div {
+    var out = body
+    out = wasm_body_push_byte(out, WASM_OP_IF)
+    out = wasm_body_push_byte(out, block_type)
+    out
+}
+
+fn wasm_body_emit_else(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_ELSE)
+}
+
+fn wasm_body_emit_end(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_END)
+}
+
+fn wasm_body_emit_br(body: WasmFuncBody, label: i64) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit_u32(body, WASM_OP_BR, label)
+}
+
+fn wasm_body_emit_br_if(body: WasmFuncBody, label: i64) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit_u32(body, WASM_OP_BR_IF, label)
+}
+
+fn wasm_body_emit_return(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_RETURN)
+}
+
+fn wasm_body_emit_call(body: WasmFuncBody, func_idx: i64) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit_u32(body, WASM_OP_CALL, func_idx)
+}
+
+// ============================================================================
+// Constant instructions
+// ============================================================================
+
+fn wasm_body_emit_i32_const(body: WasmFuncBody, val: i64) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit_i32(body, WASM_OP_I32_CONST, val)
+}
+
+fn wasm_body_emit_i64_const(body: WasmFuncBody, val: i64) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit_i64(body, WASM_OP_I64_CONST, val)
+}
+
+// f32.const: opcode + 4 bytes (IEEE 754 little-endian)
+// Note: for bootstrap, emit raw 4 bytes. Full float encoding is a later phase.
+fn wasm_body_emit_f32_const_raw(body: WasmFuncBody, b0: i64, b1: i64, b2: i64, b3: i64) -> WasmFuncBody with Mut, Panic, Div {
+    var out = body
+    out = wasm_body_push_byte(out, WASM_OP_F32_CONST)
+    out = wasm_body_push_byte(out, b0)
+    out = wasm_body_push_byte(out, b1)
+    out = wasm_body_push_byte(out, b2)
+    out = wasm_body_push_byte(out, b3)
+    out
+}
+
+// f64.const: opcode + 8 bytes (IEEE 754 little-endian)
+fn wasm_body_emit_f64_const_raw(
+    body: WasmFuncBody,
+    b0: i64, b1: i64, b2: i64, b3: i64,
+    b4: i64, b5: i64, b6: i64, b7: i64
+) -> WasmFuncBody with Mut, Panic, Div {
+    var out = body
+    out = wasm_body_push_byte(out, WASM_OP_F64_CONST)
+    out = wasm_body_push_byte(out, b0)
+    out = wasm_body_push_byte(out, b1)
+    out = wasm_body_push_byte(out, b2)
+    out = wasm_body_push_byte(out, b3)
+    out = wasm_body_push_byte(out, b4)
+    out = wasm_body_push_byte(out, b5)
+    out = wasm_body_push_byte(out, b6)
+    out = wasm_body_push_byte(out, b7)
+    out
+}
+
+// ============================================================================
+// i32 arithmetic instructions (single-byte opcodes)
+// ============================================================================
+
+fn wasm_body_emit_i32_add(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I32_ADD)
+}
+
+fn wasm_body_emit_i32_sub(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I32_SUB)
+}
+
+fn wasm_body_emit_i32_mul(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I32_MUL)
+}
+
+fn wasm_body_emit_i32_div_s(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I32_DIV_S)
+}
+
+fn wasm_body_emit_i32_div_u(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I32_DIV_U)
+}
+
+fn wasm_body_emit_i32_rem_s(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I32_REM_S)
+}
+
+fn wasm_body_emit_i32_rem_u(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I32_REM_U)
+}
+
+fn wasm_body_emit_i32_and(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I32_AND)
+}
+
+fn wasm_body_emit_i32_or(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I32_OR)
+}
+
+fn wasm_body_emit_i32_xor(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I32_XOR)
+}
+
+fn wasm_body_emit_i32_shl(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I32_SHL)
+}
+
+fn wasm_body_emit_i32_shr_s(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I32_SHR_S)
+}
+
+fn wasm_body_emit_i32_shr_u(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I32_SHR_U)
+}
+
+fn wasm_body_emit_i32_rotl(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I32_ROTL)
+}
+
+fn wasm_body_emit_i32_rotr(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I32_ROTR)
+}
+
+fn wasm_body_emit_i32_clz(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I32_CLZ)
+}
+
+fn wasm_body_emit_i32_ctz(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I32_CTZ)
+}
+
+fn wasm_body_emit_i32_popcnt(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I32_POPCNT)
+}
+
+// ============================================================================
+// i32 comparison instructions
+// ============================================================================
+
+fn wasm_body_emit_i32_eqz(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I32_EQZ)
+}
+
+fn wasm_body_emit_i32_eq(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I32_EQ)
+}
+
+fn wasm_body_emit_i32_ne(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I32_NE)
+}
+
+fn wasm_body_emit_i32_lt_s(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I32_LT_S)
+}
+
+fn wasm_body_emit_i32_gt_s(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I32_GT_S)
+}
+
+fn wasm_body_emit_i32_le_s(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I32_LE_S)
+}
+
+fn wasm_body_emit_i32_ge_s(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I32_GE_S)
+}
+
+// ============================================================================
+// i64 arithmetic instructions
+// ============================================================================
+
+fn wasm_body_emit_i64_add(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I64_ADD)
+}
+
+fn wasm_body_emit_i64_sub(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I64_SUB)
+}
+
+fn wasm_body_emit_i64_mul(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I64_MUL)
+}
+
+fn wasm_body_emit_i64_div_s(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I64_DIV_S)
+}
+
+fn wasm_body_emit_i64_and(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I64_AND)
+}
+
+fn wasm_body_emit_i64_or(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I64_OR)
+}
+
+fn wasm_body_emit_i64_xor(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I64_XOR)
+}
+
+fn wasm_body_emit_i64_shl(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I64_SHL)
+}
+
+fn wasm_body_emit_i64_shr_s(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I64_SHR_S)
+}
+
+// i64 comparison
+fn wasm_body_emit_i64_eqz(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I64_EQZ)
+}
+
+fn wasm_body_emit_i64_eq(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I64_EQ)
+}
+
+fn wasm_body_emit_i64_ne(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I64_NE)
+}
+
+fn wasm_body_emit_i64_lt_s(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I64_LT_S)
+}
+
+fn wasm_body_emit_i64_gt_s(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I64_GT_S)
+}
+
+fn wasm_body_emit_i64_le_s(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I64_LE_S)
+}
+
+fn wasm_body_emit_i64_ge_s(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I64_GE_S)
+}
+
+// ============================================================================
+// f64 arithmetic instructions
+// ============================================================================
+
+fn wasm_body_emit_f64_add(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_F64_ADD)
+}
+
+fn wasm_body_emit_f64_sub(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_F64_SUB)
+}
+
+fn wasm_body_emit_f64_mul(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_F64_MUL)
+}
+
+fn wasm_body_emit_f64_div(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_F64_DIV)
+}
+
+fn wasm_body_emit_f64_sqrt(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_F64_SQRT)
+}
+
+fn wasm_body_emit_f64_abs(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_F64_ABS)
+}
+
+fn wasm_body_emit_f64_neg(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_F64_NEG)
+}
+
+fn wasm_body_emit_f64_ceil(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_F64_CEIL)
+}
+
+fn wasm_body_emit_f64_floor(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_F64_FLOOR)
+}
+
+fn wasm_body_emit_f64_min(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_F64_MIN)
+}
+
+fn wasm_body_emit_f64_max(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_F64_MAX)
+}
+
+// f64 comparison
+fn wasm_body_emit_f64_eq(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_F64_EQ)
+}
+
+fn wasm_body_emit_f64_ne(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_F64_NE)
+}
+
+fn wasm_body_emit_f64_lt(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_F64_LT)
+}
+
+fn wasm_body_emit_f64_gt(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_F64_GT)
+}
+
+fn wasm_body_emit_f64_le(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_F64_LE)
+}
+
+fn wasm_body_emit_f64_ge(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_F64_GE)
+}
+
+// ============================================================================
+// f32 arithmetic instructions
+// ============================================================================
+
+fn wasm_body_emit_f32_add(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_F32_ADD)
+}
+
+fn wasm_body_emit_f32_sub(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_F32_SUB)
+}
+
+fn wasm_body_emit_f32_mul(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_F32_MUL)
+}
+
+fn wasm_body_emit_f32_div(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_F32_DIV)
+}
+
+fn wasm_body_emit_f32_sqrt(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_F32_SQRT)
+}
+
+fn wasm_body_emit_f32_abs(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_F32_ABS)
+}
+
+fn wasm_body_emit_f32_neg(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_F32_NEG)
+}
+
+// ============================================================================
+// Memory instructions: opcode + align(LEB128) + offset(LEB128)
+// ============================================================================
+
+fn wasm_body_emit_i32_load(body: WasmFuncBody, align: i64, offset: i64) -> WasmFuncBody with Mut, Panic, Div {
+    var out = body
+    out = wasm_body_push_byte(out, WASM_OP_I32_LOAD)
+    out = wasm_body_push_u32_leb128(out, align)
+    out = wasm_body_push_u32_leb128(out, offset)
+    out
+}
+
+fn wasm_body_emit_i64_load(body: WasmFuncBody, align: i64, offset: i64) -> WasmFuncBody with Mut, Panic, Div {
+    var out = body
+    out = wasm_body_push_byte(out, WASM_OP_I64_LOAD)
+    out = wasm_body_push_u32_leb128(out, align)
+    out = wasm_body_push_u32_leb128(out, offset)
+    out
+}
+
+fn wasm_body_emit_f32_load(body: WasmFuncBody, align: i64, offset: i64) -> WasmFuncBody with Mut, Panic, Div {
+    var out = body
+    out = wasm_body_push_byte(out, WASM_OP_F32_LOAD)
+    out = wasm_body_push_u32_leb128(out, align)
+    out = wasm_body_push_u32_leb128(out, offset)
+    out
+}
+
+fn wasm_body_emit_f64_load(body: WasmFuncBody, align: i64, offset: i64) -> WasmFuncBody with Mut, Panic, Div {
+    var out = body
+    out = wasm_body_push_byte(out, WASM_OP_F64_LOAD)
+    out = wasm_body_push_u32_leb128(out, align)
+    out = wasm_body_push_u32_leb128(out, offset)
+    out
+}
+
+fn wasm_body_emit_i32_store(body: WasmFuncBody, align: i64, offset: i64) -> WasmFuncBody with Mut, Panic, Div {
+    var out = body
+    out = wasm_body_push_byte(out, WASM_OP_I32_STORE)
+    out = wasm_body_push_u32_leb128(out, align)
+    out = wasm_body_push_u32_leb128(out, offset)
+    out
+}
+
+fn wasm_body_emit_i64_store(body: WasmFuncBody, align: i64, offset: i64) -> WasmFuncBody with Mut, Panic, Div {
+    var out = body
+    out = wasm_body_push_byte(out, WASM_OP_I64_STORE)
+    out = wasm_body_push_u32_leb128(out, align)
+    out = wasm_body_push_u32_leb128(out, offset)
+    out
+}
+
+fn wasm_body_emit_f32_store(body: WasmFuncBody, align: i64, offset: i64) -> WasmFuncBody with Mut, Panic, Div {
+    var out = body
+    out = wasm_body_push_byte(out, WASM_OP_F32_STORE)
+    out = wasm_body_push_u32_leb128(out, align)
+    out = wasm_body_push_u32_leb128(out, offset)
+    out
+}
+
+fn wasm_body_emit_f64_store(body: WasmFuncBody, align: i64, offset: i64) -> WasmFuncBody with Mut, Panic, Div {
+    var out = body
+    out = wasm_body_push_byte(out, WASM_OP_F64_STORE)
+    out = wasm_body_push_u32_leb128(out, align)
+    out = wasm_body_push_u32_leb128(out, offset)
+    out
+}
+
+fn wasm_body_emit_i32_load8_s(body: WasmFuncBody, align: i64, offset: i64) -> WasmFuncBody with Mut, Panic, Div {
+    var out = body
+    out = wasm_body_push_byte(out, WASM_OP_I32_LOAD8_S)
+    out = wasm_body_push_u32_leb128(out, align)
+    out = wasm_body_push_u32_leb128(out, offset)
+    out
+}
+
+fn wasm_body_emit_i32_load8_u(body: WasmFuncBody, align: i64, offset: i64) -> WasmFuncBody with Mut, Panic, Div {
+    var out = body
+    out = wasm_body_push_byte(out, WASM_OP_I32_LOAD8_U)
+    out = wasm_body_push_u32_leb128(out, align)
+    out = wasm_body_push_u32_leb128(out, offset)
+    out
+}
+
+fn wasm_body_emit_i32_store8(body: WasmFuncBody, align: i64, offset: i64) -> WasmFuncBody with Mut, Panic, Div {
+    var out = body
+    out = wasm_body_push_byte(out, WASM_OP_I32_STORE8)
+    out = wasm_body_push_u32_leb128(out, align)
+    out = wasm_body_push_u32_leb128(out, offset)
+    out
+}
+
+fn wasm_body_emit_memory_size(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    var out = body
+    out = wasm_body_push_byte(out, WASM_OP_MEMORY_SIZE)
+    out = wasm_body_push_byte(out, 0x00)  // memory index 0
+    out
+}
+
+fn wasm_body_emit_memory_grow(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    var out = body
+    out = wasm_body_push_byte(out, WASM_OP_MEMORY_GROW)
+    out = wasm_body_push_byte(out, 0x00)  // memory index 0
+    out
+}
+
+// ============================================================================
+// Conversion instructions
+// ============================================================================
+
+fn wasm_body_emit_i32_wrap_i64(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I32_WRAP_I64)
+}
+
+fn wasm_body_emit_i64_extend_i32_s(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I64_EXTEND_I32_S)
+}
+
+fn wasm_body_emit_i64_extend_i32_u(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I64_EXTEND_I32_U)
+}
+
+fn wasm_body_emit_f64_convert_i32_s(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_F64_CONVERT_I32_S)
+}
+
+fn wasm_body_emit_f64_convert_i64_s(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_F64_CONVERT_I64_S)
+}
+
+fn wasm_body_emit_i64_trunc_f64_s(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I64_TRUNC_F64_S)
+}
+
+fn wasm_body_emit_i32_trunc_f64_s(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I32_TRUNC_F64_S)
+}
+
+fn wasm_body_emit_f32_convert_i32_s(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_F32_CONVERT_I32_S)
+}
+
+fn wasm_body_emit_f32_demote_f64(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_F32_DEMOTE_F64)
+}
+
+fn wasm_body_emit_f64_promote_f32(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_F64_PROMOTE_F32)
+}
+
+fn wasm_body_emit_i32_reinterpret_f32(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I32_REINTERPRET_F32)
+}
+
+fn wasm_body_emit_i64_reinterpret_f64(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_I64_REINTERPRET_F64)
+}
+
+fn wasm_body_emit_f32_reinterpret_i32(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_F32_REINTERPRET_I32)
+}
+
+fn wasm_body_emit_f64_reinterpret_i64(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_F64_REINTERPRET_I64)
+}
+
+// ============================================================================
+// Drop and select
+// ============================================================================
+
+fn wasm_body_emit_drop(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_DROP)
+}
+
+fn wasm_body_emit_select(body: WasmFuncBody) -> WasmFuncBody with Mut, Panic, Div {
+    wasm_body_emit(body, WASM_OP_SELECT)
+}
+
+// ============================================================================
+// Full module assembly helper: build a complete WASM module from
+// high-level descriptions using the encode functions above
+// ============================================================================
+
+fn wasm_emit_full_module_with_bodies(
+    types: WasmTypeSection,
+    funcs: WasmFuncSection,
+    min_pages: i64,
+    max_pages: i64,
+    exports: WasmExportSection,
+    code: WasmCodeSection
+) -> WasmBuf with Mut, Panic, Div {
+    // Delegate to mod.sio's wasm_emit_full_module
+    wasm_emit_full_module(types, funcs, min_pages, max_pages, exports, code)
+}
+
+// ============================================================================
+// Convenience: build a simple add function module (for testing)
+// ============================================================================
+
+fn wasm_build_i32_add_module() -> WasmBuf with Mut, Panic, Div {
+    // Type: (i32, i32) -> i32
+    var ft = wasm_func_type_new()
+    ft = wasm_func_type_add_param(ft, WASM_TYPE_I32)
+    ft = wasm_func_type_add_param(ft, WASM_TYPE_I32)
+    ft = wasm_func_type_add_result(ft, WASM_TYPE_I32)
+
+    var ts = wasm_type_section_new()
+    ts = wasm_type_section_add(ts, ft)
+
+    var fs = wasm_func_section_new()
+    fs = wasm_func_section_add(fs, 0)
+
+    var es = wasm_export_section_new()
+    es = wasm_export_section_add(es, wasm_export_func("add", 0))
+
+    // Build function body using emitters
+    var body = wasm_body_new()
+    body = wasm_body_emit_local_get(body, 0)
+    body = wasm_body_emit_local_get(body, 1)
+    body = wasm_body_emit_i32_add(body)
+    body = wasm_body_emit_end(body)
+
+    var cs = wasm_code_section_new()
+    cs = wasm_code_section_add(cs, body)
+
+    wasm_emit_full_module(ts, fs, 0, 0, es, cs)
+}
+
+// ============================================================================
+// Convenience: build a factorial function module (iterative, for testing)
+// ============================================================================
+
+fn wasm_build_factorial_module() -> WasmBuf with Mut, Panic, Div {
+    // Type: (i32) -> i32
+    var ft = wasm_func_type_new()
+    ft = wasm_func_type_add_param(ft, WASM_TYPE_I32)
+    ft = wasm_func_type_add_result(ft, WASM_TYPE_I32)
+
+    var ts = wasm_type_section_new()
+    ts = wasm_type_section_add(ts, ft)
+
+    var fs = wasm_func_section_new()
+    fs = wasm_func_section_add(fs, 0)
+
+    var es = wasm_export_section_new()
+    es = wasm_export_section_add(es, wasm_export_func("factorial", 0))
+
+    // Build iterative factorial:
+    // local $result i32
+    // $result = 1
+    // block $exit
+    //   loop $loop
+    //     br_if $exit (i32.le_s local.get 0, 1)
+    //     $result = $result * $n
+    //     $n = $n - 1
+    //     br $loop
+    //   end
+    // end
+    // local.get $result
+    var body = wasm_body_new()
+    body = wasm_body_add_local(body, 1, WASM_TYPE_I32)  // local 1 = result
+
+    // result = 1
+    body = wasm_body_emit_i32_const(body, 1)
+    body = wasm_body_emit_local_set(body, 1)
+
+    // block $exit (void)
+    body = wasm_body_emit_block(body, WASM_BLOCK_VOID)
+
+    // loop $loop (void)
+    body = wasm_body_emit_loop(body, WASM_BLOCK_VOID)
+
+    // if n <= 1, break
+    body = wasm_body_emit_local_get(body, 0)    // n
+    body = wasm_body_emit_i32_const(body, 1)
+    body = wasm_body_emit_i32_le_s(body)
+    body = wasm_body_emit_br_if(body, 1)        // break to $exit
+
+    // result = result * n
+    body = wasm_body_emit_local_get(body, 1)    // result
+    body = wasm_body_emit_local_get(body, 0)    // n
+    body = wasm_body_emit_i32_mul(body)
+    body = wasm_body_emit_local_set(body, 1)    // result = result * n
+
+    // n = n - 1
+    body = wasm_body_emit_local_get(body, 0)    // n
+    body = wasm_body_emit_i32_const(body, 1)
+    body = wasm_body_emit_i32_sub(body)
+    body = wasm_body_emit_local_set(body, 0)    // n = n - 1
+
+    // br $loop
+    body = wasm_body_emit_br(body, 0)
+
+    // end loop
+    body = wasm_body_emit_end(body)
+    // end block
+    body = wasm_body_emit_end(body)
+
+    // return result
+    body = wasm_body_emit_local_get(body, 1)
+    body = wasm_body_emit_end(body)
+
+    var cs = wasm_code_section_new()
+    cs = wasm_code_section_add(cs, body)
+
+    wasm_emit_full_module(ts, fs, 0, 0, es, cs)
+}
+
+// ============================================================================
+// Inline tests
+// ============================================================================
+
+fn wasm_body_byte_at(body: WasmFuncBody, idx: i64) -> i64 with Mut, Panic {
+    if idx < 0 { return 0 }
+    if idx >= body.code_len { return 0 }
+    let raw = body.code[idx as usize] as i64
+    if raw < 0 { return raw + 256 }
+    raw
+}
+
+fn test_wasm_body_local_get() -> bool with Mut, Panic, Div {
+    var body = wasm_body_new()
+    body = wasm_body_emit_local_get(body, 3)
+    body.code_len == 2
+        && wasm_body_byte_at(body, 0) == 0x20
+        && wasm_body_byte_at(body, 1) == 3
+}
+
+fn test_wasm_body_i32_const() -> bool with Mut, Panic, Div {
+    var body = wasm_body_new()
+    body = wasm_body_emit_i32_const(body, 42)
+    body.code_len == 2
+        && wasm_body_byte_at(body, 0) == 0x41
+        && wasm_body_byte_at(body, 1) == 42
+}
+
+fn test_wasm_body_i32_const_negative() -> bool with Mut, Panic, Div {
+    // i32.const -1 => 0x41 0x7F (signed LEB128)
+    var body = wasm_body_new()
+    body = wasm_body_emit_i32_const(body, 0 - 1)
+    body.code_len == 2
+        && wasm_body_byte_at(body, 0) == 0x41
+        && wasm_body_byte_at(body, 1) == 0x7F
+}
+
+fn test_wasm_body_add_sequence() -> bool with Mut, Panic, Div {
+    // local.get 0, local.get 1, i32.add, end
+    var body = wasm_body_new()
+    body = wasm_body_emit_local_get(body, 0)
+    body = wasm_body_emit_local_get(body, 1)
+    body = wasm_body_emit_i32_add(body)
+    body = wasm_body_emit_end(body)
+
+    body.code_len == 6
+        && wasm_body_byte_at(body, 0) == 0x20   // local.get
+        && wasm_body_byte_at(body, 1) == 0x00   // 0
+        && wasm_body_byte_at(body, 2) == 0x20   // local.get
+        && wasm_body_byte_at(body, 3) == 0x01   // 1
+        && wasm_body_byte_at(body, 4) == 0x6A   // i32.add
+        && wasm_body_byte_at(body, 5) == 0x0B   // end
+}
+
+fn test_wasm_body_call() -> bool with Mut, Panic, Div {
+    var body = wasm_body_new()
+    body = wasm_body_emit_call(body, 5)
+    body.code_len == 2
+        && wasm_body_byte_at(body, 0) == 0x10
+        && wasm_body_byte_at(body, 1) == 5
+}
+
+fn test_wasm_body_block_loop() -> bool with Mut, Panic, Div {
+    // block(void), loop(void), br_if 1, br 0, end, end
+    var body = wasm_body_new()
+    body = wasm_body_emit_block(body, WASM_BLOCK_VOID)
+    body = wasm_body_emit_loop(body, WASM_BLOCK_VOID)
+    body = wasm_body_emit_br_if(body, 1)
+    body = wasm_body_emit_br(body, 0)
+    body = wasm_body_emit_end(body)
+    body = wasm_body_emit_end(body)
+
+    body.code_len == 10
+        && wasm_body_byte_at(body, 0) == 0x02   // block
+        && wasm_body_byte_at(body, 1) == 0x40   // void
+        && wasm_body_byte_at(body, 2) == 0x03   // loop
+        && wasm_body_byte_at(body, 3) == 0x40   // void
+        && wasm_body_byte_at(body, 4) == 0x0D   // br_if
+        && wasm_body_byte_at(body, 5) == 0x01   // label 1
+        && wasm_body_byte_at(body, 6) == 0x0C   // br
+        && wasm_body_byte_at(body, 7) == 0x00   // label 0
+        && wasm_body_byte_at(body, 8) == 0x0B   // end
+        && wasm_body_byte_at(body, 9) == 0x0B   // end
+}
+
+fn test_wasm_body_i32_load_store() -> bool with Mut, Panic, Div {
+    // i32.load align=2 offset=0, i32.store align=2 offset=4
+    var body = wasm_body_new()
+    body = wasm_body_emit_i32_load(body, 2, 0)
+    body = wasm_body_emit_i32_store(body, 2, 4)
+
+    body.code_len == 6
+        && wasm_body_byte_at(body, 0) == 0x28   // i32.load
+        && wasm_body_byte_at(body, 1) == 2      // align
+        && wasm_body_byte_at(body, 2) == 0      // offset
+        && wasm_body_byte_at(body, 3) == 0x36   // i32.store
+        && wasm_body_byte_at(body, 4) == 2      // align
+        && wasm_body_byte_at(body, 5) == 4      // offset
+}
+
+fn test_wasm_body_conversions() -> bool with Mut, Panic, Div {
+    var body = wasm_body_new()
+    body = wasm_body_emit_i32_wrap_i64(body)
+    body = wasm_body_emit_i64_extend_i32_s(body)
+    body = wasm_body_emit_f64_convert_i64_s(body)
+    body = wasm_body_emit_i64_trunc_f64_s(body)
+
+    body.code_len == 4
+        && wasm_body_byte_at(body, 0) == 0xA7   // i32.wrap_i64
+        && wasm_body_byte_at(body, 1) == 0xAC   // i64.extend_i32_s
+        && wasm_body_byte_at(body, 2) == 0xB9   // f64.convert_i64_s
+        && wasm_body_byte_at(body, 3) == 0xB0   // i64.trunc_f64_s
+}
+
+fn test_wasm_body_if_else() -> bool with Mut, Panic, Div {
+    // if(i32), i32.const 1, else, i32.const 0, end
+    var body = wasm_body_new()
+    body = wasm_body_emit_if(body, WASM_TYPE_I32)
+    body = wasm_body_emit_i32_const(body, 1)
+    body = wasm_body_emit_else(body)
+    body = wasm_body_emit_i32_const(body, 0)
+    body = wasm_body_emit_end(body)
+
+    body.code_len == 7
+        && wasm_body_byte_at(body, 0) == 0x04   // if
+        && wasm_body_byte_at(body, 1) == 0x7F   // i32 result type
+        && wasm_body_byte_at(body, 2) == 0x41   // i32.const
+        && wasm_body_byte_at(body, 3) == 1      // 1
+        && wasm_body_byte_at(body, 4) == 0x05   // else
+        && wasm_body_byte_at(body, 5) == 0x41   // i32.const
+        && wasm_body_byte_at(body, 6) == 0      // 0 — end omitted for brevity, it's the next byte
+}
+
+fn test_wasm_body_add_local() -> bool with Mut, Panic {
+    var body = wasm_body_new()
+    body = wasm_body_add_local(body, 3, WASM_TYPE_I32)
+    body = wasm_body_add_local(body, 1, WASM_TYPE_F64)
+
+    body.local_count == 2
+        && body.locals[0 as usize].count == 3
+        && body.locals[0 as usize].val_type == WASM_TYPE_I32
+        && body.locals[1 as usize].count == 1
+        && body.locals[1 as usize].val_type == WASM_TYPE_F64
+}
+
+fn test_wasm_build_add_module() -> bool with Mut, Panic, Div {
+    // Build the add module and verify the magic header
+    let module = wasm_build_i32_add_module()
+    module.len > 8
+        && wasm_buf_byte_at(module, 0) == 0x00
+        && wasm_buf_byte_at(module, 1) == 0x61
+        && wasm_buf_byte_at(module, 2) == 0x73
+        && wasm_buf_byte_at(module, 3) == 0x6D
+        && wasm_buf_byte_at(module, 4) == 0x01
+}
+
+fn test_wasm_body_i64_const() -> bool with Mut, Panic, Div {
+    // i64.const 256 => 0x42 0x80 0x02
+    var body = wasm_body_new()
+    body = wasm_body_emit_i64_const(body, 256)
+    body.code_len == 3
+        && wasm_body_byte_at(body, 0) == 0x42   // i64.const
+        && wasm_body_byte_at(body, 1) == 0x80   // 256 LEB128 byte 0
+        && wasm_body_byte_at(body, 2) == 0x02   // 256 LEB128 byte 1
+}
+
+fn test_wasm_body_comparison_ops() -> bool with Mut, Panic, Div {
+    var body = wasm_body_new()
+    body = wasm_body_emit_i32_eqz(body)
+    body = wasm_body_emit_i32_eq(body)
+    body = wasm_body_emit_i32_ne(body)
+    body = wasm_body_emit_i32_lt_s(body)
+    body = wasm_body_emit_i32_gt_s(body)
+    body = wasm_body_emit_i32_le_s(body)
+    body = wasm_body_emit_i32_ge_s(body)
+
+    body.code_len == 7
+        && wasm_body_byte_at(body, 0) == 0x45
+        && wasm_body_byte_at(body, 1) == 0x46
+        && wasm_body_byte_at(body, 2) == 0x47
+        && wasm_body_byte_at(body, 3) == 0x48
+        && wasm_body_byte_at(body, 4) == 0x4A
+        && wasm_body_byte_at(body, 5) == 0x4C
+        && wasm_body_byte_at(body, 6) == 0x4E
+}

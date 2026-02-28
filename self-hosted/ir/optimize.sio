@@ -1,0 +1,982 @@
+// self-hosted::ir::optimize — IR optimization passes
+//
+// Three passes run in sequence:
+//   1. Constant folding   — evaluate constant binary/unary ops at compile time
+//   2. Strength reduction — replace expensive ops with cheaper equivalents
+//   3. Dead code elimination — remove instructions whose results are unused
+//
+// The master pipeline is: const_fold -> strength_reduce -> dce.
+
+// ============================================================================
+// Pass 1: Constant Folding
+// ============================================================================
+
+// Track which registers hold known constant values.
+struct ConstInfo {
+    is_const: [bool; 8192],
+    const_val: [i64; 8192],
+    is_float_const: [bool; 8192],
+    float_val: [f64; 8192],
+}
+
+fn const_info_new() -> ConstInfo {
+    ConstInfo {
+        is_const: [false; 8192],
+        const_val: [0; 8192],
+        is_float_const: [false; 8192],
+        float_val: [0.0; 8192],
+    }
+}
+
+// Try to fold a binary operation on two known integer constants.
+// Returns (folded?, result).
+fn try_fold_binop(op: BinaryOp, a: i64, b: i64) -> (bool, i64) with Div, Panic {
+    match op {
+        BinaryOp::OpAdd => (true, a + b),
+        BinaryOp::OpSub => (true, a - b),
+        BinaryOp::OpMul => (true, a * b),
+        BinaryOp::OpDiv => {
+            if b == 0 {
+                (false, 0)
+            } else {
+                (true, a / b)
+            }
+        }
+        BinaryOp::OpRem => {
+            if b == 0 {
+                (false, 0)
+            } else {
+                (true, a % b)
+            }
+        }
+        BinaryOp::OpEq => {
+            if a == b { (true, 1) } else { (true, 0) }
+        }
+        BinaryOp::OpNe => {
+            if a != b { (true, 1) } else { (true, 0) }
+        }
+        BinaryOp::OpLt => {
+            if a < b { (true, 1) } else { (true, 0) }
+        }
+        BinaryOp::OpGt => {
+            if a > b { (true, 1) } else { (true, 0) }
+        }
+        BinaryOp::OpLe => {
+            if a <= b { (true, 1) } else { (true, 0) }
+        }
+        BinaryOp::OpGe => {
+            if a >= b { (true, 1) } else { (true, 0) }
+        }
+        BinaryOp::OpAnd => {
+            let la = if a != 0 { 1 } else { 0 }
+            let lb = if b != 0 { 1 } else { 0 }
+            if la == 1 && lb == 1 { (true, 1) } else { (true, 0) }
+        }
+        BinaryOp::OpOr => {
+            let la = if a != 0 { 1 } else { 0 }
+            let lb = if b != 0 { 1 } else { 0 }
+            if la == 1 || lb == 1 { (true, 1) } else { (true, 0) }
+        }
+        BinaryOp::OpBitAnd => (true, a & b),
+        BinaryOp::OpBitOr  => (true, a | b),
+        BinaryOp::OpBitXor => (true, a ^ b),
+        BinaryOp::OpShl => {
+            if b >= 0 && b < 64 { (true, a << b) } else { (false, 0) }
+        }
+        BinaryOp::OpShr => {
+            if b >= 0 && b < 64 { (true, a >> b) } else { (false, 0) }
+        }
+        _ => (false, 0),
+    }
+}
+
+// Try to fold a unary operation on a known integer constant.
+// Returns (folded?, result).
+fn try_fold_unop(op: UnaryOp, a: i64) -> (bool, i64) {
+    match op {
+        UnaryOp::OpNeg => (true, 0 - a),
+        UnaryOp::OpNot => {
+            if a == 0 { (true, 1) } else { (true, 0) }
+        }
+        _ => (false, 0),
+    }
+}
+
+// Build a replacement IrLoadImm instruction, preserving the destination
+// register of the original instruction.
+fn make_folded_load_imm(orig: IrInstr, value: i64) -> IrInstr {
+    IrInstr {
+        op: IrOpcode::IrLoadImm,
+        dst: orig.dst,
+        src1: IR_INVALID_REG,
+        src2: IR_INVALID_REG,
+        imm_i64: value,
+        imm_f64: 0.0,
+        label_id: IR_INVALID_LABEL,
+        fn_id: IR_INVALID_FN,
+        field_idx: -1,
+        bin_op: BinaryOp::OpAdd,
+        un_op: UnaryOp::OpNeg,
+        name: ir_empty_name(),
+        call_args: ir_empty_reg_list(),
+        arg_count: 0,
+    }
+}
+
+// Build a replacement IrCopy instruction.
+fn make_copy_instr(dst: i64, src: i64) -> IrInstr {
+    IrInstr {
+        op: IrOpcode::IrCopy,
+        dst: dst,
+        src1: src,
+        src2: IR_INVALID_REG,
+        imm_i64: 0,
+        imm_f64: 0.0,
+        label_id: IR_INVALID_LABEL,
+        fn_id: IR_INVALID_FN,
+        field_idx: -1,
+        bin_op: BinaryOp::OpAdd,
+        un_op: UnaryOp::OpNeg,
+        name: ir_empty_name(),
+        call_args: ir_empty_reg_list(),
+        arg_count: 0,
+    }
+}
+
+// Constant folding pass.
+// Scans instructions forward, tracking which registers hold known constants.
+// When both operands of a binary op (or the operand of a unary op) are known
+// constants, replaces the instruction with IrLoadImm of the computed result.
+fn const_fold_pass(func: IrFunction) -> IrFunction with Mut, Panic, Div {
+    var info = const_info_new()
+    var result = func
+
+    var i: i64 = 0
+    while i < result.instr_count {
+        let instr = result.instrs[i as usize]
+        let dst = instr.dst
+
+        match instr.op {
+            IrOpcode::IrLoadImm => {
+                // Record constant
+                if dst >= 0 && dst < 8192 {
+                    info.is_const[dst as usize] = true
+                    info.const_val[dst as usize] = instr.imm_i64
+                }
+            }
+            IrOpcode::IrLoadBool => {
+                if dst >= 0 && dst < 8192 {
+                    info.is_const[dst as usize] = true
+                    info.const_val[dst as usize] = instr.imm_i64
+                }
+            }
+            IrOpcode::IrLoadFloat => {
+                if dst >= 0 && dst < 8192 {
+                    info.is_float_const[dst as usize] = true
+                    info.float_val[dst as usize] = instr.imm_f64
+                }
+            }
+            IrOpcode::IrBinOp => {
+                let s1 = instr.src1
+                let s2 = instr.src2
+                if s1 >= 0 && s1 < 8192 && s2 >= 0 && s2 < 8192 {
+                    if info.is_const[s1 as usize] && info.is_const[s2 as usize] {
+                        let a = info.const_val[s1 as usize]
+                        let b = info.const_val[s2 as usize]
+                        let fold_result = try_fold_binop(instr.bin_op, a, b)
+                        let folded = fold_result.0
+                        let val = fold_result.1
+                        if folded {
+                            result.instrs[i as usize] = make_folded_load_imm(instr, val)
+                            if dst >= 0 && dst < 8192 {
+                                info.is_const[dst as usize] = true
+                                info.const_val[dst as usize] = val
+                            }
+                        } else {
+                            // Could not fold (e.g. division by zero); invalidate dst
+                            if dst >= 0 && dst < 8192 {
+                                info.is_const[dst as usize] = false
+                                info.is_float_const[dst as usize] = false
+                            }
+                        }
+                    } else {
+                        if dst >= 0 && dst < 8192 {
+                            info.is_const[dst as usize] = false
+                            info.is_float_const[dst as usize] = false
+                        }
+                    }
+                } else {
+                    if dst >= 0 && dst < 8192 {
+                        info.is_const[dst as usize] = false
+                        info.is_float_const[dst as usize] = false
+                    }
+                }
+            }
+            IrOpcode::IrUnaryOp => {
+                let s1 = instr.src1
+                if s1 >= 0 && s1 < 8192 && info.is_const[s1 as usize] {
+                    let a = info.const_val[s1 as usize]
+                    let fold_result = try_fold_unop(instr.un_op, a)
+                    let folded = fold_result.0
+                    let val = fold_result.1
+                    if folded {
+                        result.instrs[i as usize] = make_folded_load_imm(instr, val)
+                        if dst >= 0 && dst < 8192 {
+                            info.is_const[dst as usize] = true
+                            info.const_val[dst as usize] = val
+                        }
+                    } else {
+                        if dst >= 0 && dst < 8192 {
+                            info.is_const[dst as usize] = false
+                            info.is_float_const[dst as usize] = false
+                        }
+                    }
+                } else {
+                    if dst >= 0 && dst < 8192 {
+                        info.is_const[dst as usize] = false
+                        info.is_float_const[dst as usize] = false
+                    }
+                }
+            }
+            IrOpcode::IrCopy => {
+                // Propagate constant through copies
+                let s1 = instr.src1
+                if s1 >= 0 && s1 < 8192 && info.is_const[s1 as usize] {
+                    if dst >= 0 && dst < 8192 {
+                        info.is_const[dst as usize] = true
+                        info.const_val[dst as usize] = info.const_val[s1 as usize]
+                    }
+                } else if s1 >= 0 && s1 < 8192 && info.is_float_const[s1 as usize] {
+                    if dst >= 0 && dst < 8192 {
+                        info.is_float_const[dst as usize] = true
+                        info.float_val[dst as usize] = info.float_val[s1 as usize]
+                    }
+                } else {
+                    if dst >= 0 && dst < 8192 {
+                        info.is_const[dst as usize] = false
+                        info.is_float_const[dst as usize] = false
+                    }
+                }
+            }
+            _ => {
+                // Any other instruction that writes a register invalidates it
+                if dst >= 0 && dst < 8192 {
+                    info.is_const[dst as usize] = false
+                    info.is_float_const[dst as usize] = false
+                }
+            }
+        }
+
+        i = i + 1
+    }
+
+    result
+}
+
+// ============================================================================
+// Pass 2: Dead Code Elimination
+// ============================================================================
+
+// Count how many times each register is referenced as a source operand.
+struct UseCount {
+    counts: [i64; 8192],
+}
+
+fn use_count_new() -> UseCount {
+    UseCount { counts: [0; 8192] }
+}
+
+// Increment use count for a register if it is valid.
+fn inc_use(uc: UseCount, reg: i64) -> UseCount with Mut, Panic, Div {
+    var out = uc
+    if reg >= 0 && reg < 8192 {
+        out.counts[reg as usize] = out.counts[reg as usize] + 1
+    }
+    out
+}
+
+// Walk the call_args linked list and increment use counts for each argument.
+fn inc_uses_for_call_args(uc: UseCount, args: Option<Box<IrRegList>>) -> UseCount with Mut, Panic, Div, Alloc {
+    match args {
+        Some(list) => {
+            var out = inc_use(uc, (*list).head)
+            out = inc_uses_for_call_args(out, (*list).tail)
+            out
+        }
+        _ => uc,
+    }
+}
+
+// Count uses of all registers across the function.
+fn count_uses(func: IrFunction) -> UseCount with Mut, Panic, Div, Alloc {
+    var uc = use_count_new()
+
+    var i: i64 = 0
+    while i < func.instr_count {
+        let instr = func.instrs[i as usize]
+
+        // Count src1
+        uc = inc_use(uc, instr.src1)
+
+        // Count src2
+        uc = inc_use(uc, instr.src2)
+
+        // Count call arguments
+        uc = inc_uses_for_call_args(uc, instr.call_args)
+
+        // For IrIndexSet, imm_i64 holds the source register
+        match instr.op {
+            IrOpcode::IrIndexSet => {
+                uc = inc_use(uc, instr.imm_i64)
+            }
+            _ => {}
+        }
+
+        i = i + 1
+    }
+
+    uc
+}
+
+// Check if an instruction has side effects (should not be eliminated).
+fn instr_has_side_effects(instr: IrInstr) -> bool {
+    match instr.op {
+        IrOpcode::IrCall       => true,
+        IrOpcode::IrReturn     => true,
+        IrOpcode::IrJump       => true,
+        IrOpcode::IrBranchTrue => true,
+        IrOpcode::IrBranchFalse => true,
+        IrOpcode::IrFieldSet   => true,
+        IrOpcode::IrIndexSet   => true,
+        IrOpcode::IrLabel      => true,
+        _                      => false,
+    }
+}
+
+// Dead code elimination pass.
+// An instruction is dead if:
+//   - It writes to a destination register
+//   - That register has zero uses as a source
+//   - The instruction has no side effects
+// Dead instructions are replaced with IrNop.
+fn dce_pass(func: IrFunction) -> IrFunction with Mut, Panic, Div, Alloc {
+    let uc = count_uses(func)
+    var result = func
+
+    var i: i64 = 0
+    while i < result.instr_count {
+        let instr = result.instrs[i as usize]
+        let dst = instr.dst
+
+        if dst >= 0 && dst < 8192 {
+            if uc.counts[dst as usize] == 0 {
+                if !instr_has_side_effects(instr) {
+                    // Dead instruction: replace with NOP
+                    result.instrs[i as usize] = ir_nop()
+                }
+            }
+        }
+
+        i = i + 1
+    }
+
+    result
+}
+
+// ============================================================================
+// Pass 3: Strength Reduction
+// ============================================================================
+
+// Check if a BinaryOp is OpMul
+fn is_op_mul(op: BinaryOp) -> bool {
+    match op {
+        BinaryOp::OpMul => true,
+        _ => false,
+    }
+}
+
+// Check if a BinaryOp is OpAdd
+fn is_op_add(op: BinaryOp) -> bool {
+    match op {
+        BinaryOp::OpAdd => true,
+        _ => false,
+    }
+}
+
+// Check if a BinaryOp is OpSub
+fn is_op_sub(op: BinaryOp) -> bool {
+    match op {
+        BinaryOp::OpSub => true,
+        _ => false,
+    }
+}
+
+// Check if a BinaryOp is OpDiv
+fn is_op_div(op: BinaryOp) -> bool {
+    match op {
+        BinaryOp::OpDiv => true,
+        _ => false,
+    }
+}
+
+// Make an IrBinOp instruction with OpAdd for strength reduction (x * 2 -> x + x).
+fn make_add_self(dst: i64, src: i64) -> IrInstr {
+    IrInstr {
+        op: IrOpcode::IrBinOp,
+        dst: dst,
+        src1: src,
+        src2: src,
+        imm_i64: 0,
+        imm_f64: 0.0,
+        label_id: IR_INVALID_LABEL,
+        fn_id: IR_INVALID_FN,
+        field_idx: -1,
+        bin_op: BinaryOp::OpAdd,
+        un_op: UnaryOp::OpNeg,
+        name: ir_empty_name(),
+        call_args: ir_empty_reg_list(),
+        arg_count: 0,
+    }
+}
+
+// Strength reduction pass.
+// Replaces expensive operations with cheaper equivalents:
+//   x * 2     -> x + x
+//   x * 1     -> copy x
+//   x * 0     -> load 0
+//   x + 0     -> copy x
+//   0 + x     -> copy x
+//   x - 0     -> copy x
+//   x / 1     -> copy x
+//   x * (-1)  -> negate x (via 0 - x at IR level: load 0, sub)
+fn strength_reduce_pass(func: IrFunction) -> IrFunction with Mut, Panic, Div {
+    // We need constant information to know which operands are known values.
+    var info = const_info_new()
+    var result = func
+
+    // First pass: gather constant info (same as const_fold, but we only record,
+    // we don't fold -- const_fold already ran).
+    var j: i64 = 0
+    while j < result.instr_count {
+        let instr = result.instrs[j as usize]
+        let dst = instr.dst
+        match instr.op {
+            IrOpcode::IrLoadImm => {
+                if dst >= 0 && dst < 8192 {
+                    info.is_const[dst as usize] = true
+                    info.const_val[dst as usize] = instr.imm_i64
+                }
+            }
+            IrOpcode::IrLoadBool => {
+                if dst >= 0 && dst < 8192 {
+                    info.is_const[dst as usize] = true
+                    info.const_val[dst as usize] = instr.imm_i64
+                }
+            }
+            _ => {}
+        }
+        j = j + 1
+    }
+
+    // Second pass: apply strength reduction transforms.
+    var i: i64 = 0
+    while i < result.instr_count {
+        let instr = result.instrs[i as usize]
+
+        match instr.op {
+            IrOpcode::IrBinOp => {
+                let s1 = instr.src1
+                let s2 = instr.src2
+                let dst = instr.dst
+                let s1_const = s1 >= 0 && s1 < 8192 && info.is_const[s1 as usize]
+                let s2_const = s2 >= 0 && s2 < 8192 && info.is_const[s2 as usize]
+                let s1_val = if s1_const { info.const_val[s1 as usize] } else { 0 }
+                let s2_val = if s2_const { info.const_val[s2 as usize] } else { 0 }
+
+                if is_op_mul(instr.bin_op) {
+                    // x * 0 -> load 0
+                    if s2_const && s2_val == 0 {
+                        result.instrs[i as usize] = make_folded_load_imm(instr, 0)
+                        if dst >= 0 && dst < 8192 {
+                            info.is_const[dst as usize] = true
+                            info.const_val[dst as usize] = 0
+                        }
+                    // 0 * x -> load 0
+                    } else if s1_const && s1_val == 0 {
+                        result.instrs[i as usize] = make_folded_load_imm(instr, 0)
+                        if dst >= 0 && dst < 8192 {
+                            info.is_const[dst as usize] = true
+                            info.const_val[dst as usize] = 0
+                        }
+                    // x * 1 -> copy x
+                    } else if s2_const && s2_val == 1 {
+                        result.instrs[i as usize] = make_copy_instr(dst, s1)
+                    // 1 * x -> copy x
+                    } else if s1_const && s1_val == 1 {
+                        result.instrs[i as usize] = make_copy_instr(dst, s2)
+                    // x * 2 -> x + x
+                    } else if s2_const && s2_val == 2 {
+                        result.instrs[i as usize] = make_add_self(dst, s1)
+                    // 2 * x -> x + x
+                    } else if s1_const && s1_val == 2 {
+                        result.instrs[i as usize] = make_add_self(dst, s2)
+                    }
+                } else if is_op_add(instr.bin_op) {
+                    // x + 0 -> copy x
+                    if s2_const && s2_val == 0 {
+                        result.instrs[i as usize] = make_copy_instr(dst, s1)
+                    // 0 + x -> copy x
+                    } else if s1_const && s1_val == 0 {
+                        result.instrs[i as usize] = make_copy_instr(dst, s2)
+                    }
+                } else if is_op_sub(instr.bin_op) {
+                    // x - 0 -> copy x
+                    if s2_const && s2_val == 0 {
+                        result.instrs[i as usize] = make_copy_instr(dst, s1)
+                    }
+                } else if is_op_div(instr.bin_op) {
+                    // x / 1 -> copy x
+                    if s2_const && s2_val == 1 {
+                        result.instrs[i as usize] = make_copy_instr(dst, s1)
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        i = i + 1
+    }
+
+    result
+}
+
+// ============================================================================
+// Master optimization pipeline
+// ============================================================================
+
+// Optimize a single function: const_fold -> strength_reduce -> dce.
+fn optimize_function(func: IrFunction) -> IrFunction with Mut, Panic, Div, Alloc {
+    let f1 = const_fold_pass(func)
+    let f2 = strength_reduce_pass(f1)
+    let f3 = dce_pass(f2)
+    f3
+}
+
+// Optimize all functions in a module.
+fn optimize_module(module: IrModule) -> IrModule with Mut, Panic, Div, Alloc {
+    var result = module
+    var i: i64 = 0
+    while i < result.fn_count {
+        result.functions[i as usize] = optimize_function(result.functions[i as usize])
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================================
+// Helpers for tests
+// ============================================================================
+
+// Check if instruction at position is a specific opcode.
+fn opt_check_opcode(func: IrFunction, pos: i64, expected: IrOpcode) -> bool {
+    if pos < 0 || pos >= func.instr_count {
+        return false
+    }
+    let instr = func.instrs[pos as usize]
+    opcodes_equal(instr.op, expected)
+}
+
+// Check if instruction at position is IrLoadImm with a specific value.
+fn opt_check_load_imm(func: IrFunction, pos: i64, expected_val: i64) -> bool {
+    if pos < 0 || pos >= func.instr_count {
+        return false
+    }
+    let instr = func.instrs[pos as usize]
+    if !opcodes_equal(instr.op, IrOpcode::IrLoadImm) {
+        return false
+    }
+    instr.imm_i64 == expected_val
+}
+
+// Build a test function with given instruction count.
+fn opt_make_test_func(instrs: [IrInstr; 8192], count: i64) -> IrFunction {
+    IrFunction {
+        name: ir_empty_name(),
+        instrs: instrs,
+        instr_count: count,
+        reg_count: count + 1,
+        label_count: 0,
+        param_count: 0,
+        param_regs: [IR_INVALID_REG; 64],
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+// T01: Constant folding of addition (3 + 5 = 8)
+fn test_const_fold_add() -> bool with Mut, Panic, Div {
+    var instrs: [IrInstr; 8192] = [ir_nop(); 8192]
+    instrs[0] = ir_load_imm(0, 3)
+    instrs[1] = ir_load_imm(1, 5)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs[3] = ir_return(2)
+
+    let func = opt_make_test_func(instrs, 4)
+    let folded = const_fold_pass(func)
+
+    // Instruction 2 should now be IrLoadImm with value 8
+    opt_check_load_imm(folded, 2, 8)
+}
+
+// T02: Constant folding of multiplication (7 * 6 = 42)
+fn test_const_fold_mul() -> bool with Mut, Panic, Div {
+    var instrs: [IrInstr; 8192] = [ir_nop(); 8192]
+    instrs[0] = ir_load_imm(0, 7)
+    instrs[1] = ir_load_imm(1, 6)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpMul, 1)
+    instrs[3] = ir_return(2)
+
+    let func = opt_make_test_func(instrs, 4)
+    let folded = const_fold_pass(func)
+
+    opt_check_load_imm(folded, 2, 42)
+}
+
+// T03: Constant folding of subtraction (10 - 3 = 7)
+fn test_const_fold_sub() -> bool with Mut, Panic, Div {
+    var instrs: [IrInstr; 8192] = [ir_nop(); 8192]
+    instrs[0] = ir_load_imm(0, 10)
+    instrs[1] = ir_load_imm(1, 3)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpSub, 1)
+    instrs[3] = ir_return(2)
+
+    let func = opt_make_test_func(instrs, 4)
+    let folded = const_fold_pass(func)
+
+    opt_check_load_imm(folded, 2, 7)
+}
+
+// T04: Constant folding of comparison (5 == 5 -> 1)
+fn test_const_fold_eq() -> bool with Mut, Panic, Div {
+    var instrs: [IrInstr; 8192] = [ir_nop(); 8192]
+    instrs[0] = ir_load_imm(0, 5)
+    instrs[1] = ir_load_imm(1, 5)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpEq, 1)
+    instrs[3] = ir_return(2)
+
+    let func = opt_make_test_func(instrs, 4)
+    let folded = const_fold_pass(func)
+
+    opt_check_load_imm(folded, 2, 1)
+}
+
+// T05: Constant folding of unary negation (neg 42 = -42)
+fn test_const_fold_neg() -> bool with Mut, Panic, Div {
+    var instrs: [IrInstr; 8192] = [ir_nop(); 8192]
+    instrs[0] = ir_load_imm(0, 42)
+    instrs[1] = ir_unaryop(1, UnaryOp::OpNeg, 0)
+    instrs[2] = ir_return(1)
+
+    let func = opt_make_test_func(instrs, 3)
+    let folded = const_fold_pass(func)
+
+    // -42 is 0 - 42
+    opt_check_load_imm(folded, 1, 0 - 42)
+}
+
+// T06: Constant folding does not fold division by zero
+fn test_const_fold_div_by_zero() -> bool with Mut, Panic, Div {
+    var instrs: [IrInstr; 8192] = [ir_nop(); 8192]
+    instrs[0] = ir_load_imm(0, 10)
+    instrs[1] = ir_load_imm(1, 0)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpDiv, 1)
+    instrs[3] = ir_return(2)
+
+    let func = opt_make_test_func(instrs, 4)
+    let folded = const_fold_pass(func)
+
+    // Should NOT be folded; should still be IrBinOp
+    opt_check_opcode(folded, 2, IrOpcode::IrBinOp)
+}
+
+// T07: DCE removes a dead instruction
+fn test_dce_removes_dead_instr() -> bool with Mut, Panic, Div, Alloc {
+    var instrs: [IrInstr; 8192] = [ir_nop(); 8192]
+    instrs[0] = ir_load_imm(0, 100)   // used by return
+    instrs[1] = ir_load_imm(1, 200)   // dead: r1 never used
+    instrs[2] = ir_return(0)
+
+    let func = opt_make_test_func(instrs, 3)
+    let eliminated = dce_pass(func)
+
+    // Instruction 1 should be replaced with IrNop (dead)
+    let dead_is_nop = opt_check_opcode(eliminated, 1, IrOpcode::IrNop)
+    // Instruction 0 should still be IrLoadImm (alive)
+    let alive_ok = opt_check_opcode(eliminated, 0, IrOpcode::IrLoadImm)
+    dead_is_nop && alive_ok
+}
+
+// T08: DCE does not remove instructions with side effects
+fn test_dce_keeps_side_effects() -> bool with Mut, Panic, Div, Alloc {
+    var instrs: [IrInstr; 8192] = [ir_nop(); 8192]
+    // A call whose return value is unused should NOT be eliminated
+    instrs[0] = ir_call(0, 0, ir_empty_name(), ir_empty_reg_list(), 0)
+    instrs[1] = ir_load_imm(1, 0)
+    instrs[2] = ir_return(1)
+
+    let func = opt_make_test_func(instrs, 3)
+    let eliminated = dce_pass(func)
+
+    // The call should still be present
+    opt_check_opcode(eliminated, 0, IrOpcode::IrCall)
+}
+
+// T09: Strength reduction of x * 2 -> x + x
+fn test_strength_reduce_mul_by_2() -> bool with Mut, Panic, Div {
+    var instrs: [IrInstr; 8192] = [ir_nop(); 8192]
+    instrs[0] = ir_load_imm(0, 2)     // const 2
+    instrs[1] = ir_load_imm(1, 100)   // this will NOT be recognized as const by SR
+                                        // because SR only tracks IrLoadImm
+    // Actually: we need src1 to NOT be const for this to trigger.
+    // Let's use a call result for src1 and const 2 for src2.
+    instrs[0] = ir_call(0, 0, ir_empty_name(), ir_empty_reg_list(), 0)
+    instrs[1] = ir_load_imm(1, 2)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpMul, 1)
+    instrs[3] = ir_return(2)
+
+    let func = opt_make_test_func(instrs, 4)
+    let reduced = strength_reduce_pass(func)
+
+    // Instruction 2 should become IrBinOp with OpAdd (x + x)
+    if !opt_check_opcode(reduced, 2, IrOpcode::IrBinOp) {
+        return false
+    }
+    let instr = reduced.instrs[2]
+    // src1 and src2 should both be 0 (the non-constant operand)
+    instr.src1 == 0 && instr.src2 == 0
+}
+
+// T10: Strength reduction of x + 0 -> copy x
+fn test_strength_reduce_add_zero() -> bool with Mut, Panic, Div {
+    var instrs: [IrInstr; 8192] = [ir_nop(); 8192]
+    instrs[0] = ir_call(0, 0, ir_empty_name(), ir_empty_reg_list(), 0)
+    instrs[1] = ir_load_imm(1, 0)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs[3] = ir_return(2)
+
+    let func = opt_make_test_func(instrs, 4)
+    let reduced = strength_reduce_pass(func)
+
+    // Instruction 2 should become IrCopy
+    if !opt_check_opcode(reduced, 2, IrOpcode::IrCopy) {
+        return false
+    }
+    let instr = reduced.instrs[2]
+    instr.src1 == 0
+}
+
+// T11: Strength reduction of x * 1 -> copy x
+fn test_strength_reduce_mul_by_1() -> bool with Mut, Panic, Div {
+    var instrs: [IrInstr; 8192] = [ir_nop(); 8192]
+    instrs[0] = ir_call(0, 0, ir_empty_name(), ir_empty_reg_list(), 0)
+    instrs[1] = ir_load_imm(1, 1)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpMul, 1)
+    instrs[3] = ir_return(2)
+
+    let func = opt_make_test_func(instrs, 4)
+    let reduced = strength_reduce_pass(func)
+
+    if !opt_check_opcode(reduced, 2, IrOpcode::IrCopy) {
+        return false
+    }
+    let instr = reduced.instrs[2]
+    instr.src1 == 0
+}
+
+// T12: Strength reduction of x * 0 -> load 0
+fn test_strength_reduce_mul_by_0() -> bool with Mut, Panic, Div {
+    var instrs: [IrInstr; 8192] = [ir_nop(); 8192]
+    instrs[0] = ir_call(0, 0, ir_empty_name(), ir_empty_reg_list(), 0)
+    instrs[1] = ir_load_imm(1, 0)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpMul, 1)
+    instrs[3] = ir_return(2)
+
+    let func = opt_make_test_func(instrs, 4)
+    let reduced = strength_reduce_pass(func)
+
+    opt_check_load_imm(reduced, 2, 0)
+}
+
+// T13: Strength reduction of x / 1 -> copy x
+fn test_strength_reduce_div_by_1() -> bool with Mut, Panic, Div {
+    var instrs: [IrInstr; 8192] = [ir_nop(); 8192]
+    instrs[0] = ir_call(0, 0, ir_empty_name(), ir_empty_reg_list(), 0)
+    instrs[1] = ir_load_imm(1, 1)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpDiv, 1)
+    instrs[3] = ir_return(2)
+
+    let func = opt_make_test_func(instrs, 4)
+    let reduced = strength_reduce_pass(func)
+
+    if !opt_check_opcode(reduced, 2, IrOpcode::IrCopy) {
+        return false
+    }
+    let instr = reduced.instrs[2]
+    instr.src1 == 0
+}
+
+// T14: Strength reduction of x - 0 -> copy x
+fn test_strength_reduce_sub_zero() -> bool with Mut, Panic, Div {
+    var instrs: [IrInstr; 8192] = [ir_nop(); 8192]
+    instrs[0] = ir_call(0, 0, ir_empty_name(), ir_empty_reg_list(), 0)
+    instrs[1] = ir_load_imm(1, 0)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpSub, 1)
+    instrs[3] = ir_return(2)
+
+    let func = opt_make_test_func(instrs, 4)
+    let reduced = strength_reduce_pass(func)
+
+    if !opt_check_opcode(reduced, 2, IrOpcode::IrCopy) {
+        return false
+    }
+    let instr = reduced.instrs[2]
+    instr.src1 == 0
+}
+
+// T15: Full pipeline combines all passes
+fn test_pipeline_combined() -> bool with Mut, Panic, Div, Alloc {
+    // Build: r0 = 3, r1 = 5, r2 = r0 + r1 (folds to 8),
+    //        r3 = 100 (dead), return r2
+    var instrs: [IrInstr; 8192] = [ir_nop(); 8192]
+    instrs[0] = ir_load_imm(0, 3)
+    instrs[1] = ir_load_imm(1, 5)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs[3] = ir_load_imm(3, 100)
+    instrs[4] = ir_return(2)
+
+    let func = opt_make_test_func(instrs, 5)
+    let optimized = optimize_function(func)
+
+    // r2 should be folded to IrLoadImm(8)
+    let fold_ok = opt_check_load_imm(optimized, 2, 8)
+    // r3 should be eliminated (NOP) since it is dead after folding
+    // After const_fold: r0=IrLoadImm(3), r1=IrLoadImm(5), r2=IrLoadImm(8), r3=IrLoadImm(100), ret
+    // After strength_reduce: no change (no patterns match)
+    // After dce: r0, r1, r3 are dead (r2 is folded, only r2 used by return)
+    let r0_dead = opt_check_opcode(optimized, 0, IrOpcode::IrNop)
+    let r1_dead = opt_check_opcode(optimized, 1, IrOpcode::IrNop)
+    let r3_dead = opt_check_opcode(optimized, 3, IrOpcode::IrNop)
+
+    fold_ok && r0_dead && r1_dead && r3_dead
+}
+
+// T16: Constant folding through copy propagation
+fn test_const_fold_through_copy() -> bool with Mut, Panic, Div {
+    var instrs: [IrInstr; 8192] = [ir_nop(); 8192]
+    instrs[0] = ir_load_imm(0, 10)
+    instrs[1] = ir_copy(1, 0)           // r1 = r0 = 10
+    instrs[2] = ir_load_imm(2, 20)
+    instrs[3] = ir_binop(3, 1, BinaryOp::OpAdd, 2)  // r3 = 10 + 20 = 30
+    instrs[4] = ir_return(3)
+
+    let func = opt_make_test_func(instrs, 5)
+    let folded = const_fold_pass(func)
+
+    opt_check_load_imm(folded, 3, 30)
+}
+
+// T17: Constant folding of chained operations
+fn test_const_fold_chain() -> bool with Mut, Panic, Div {
+    var instrs: [IrInstr; 8192] = [ir_nop(); 8192]
+    instrs[0] = ir_load_imm(0, 2)
+    instrs[1] = ir_load_imm(1, 3)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpMul, 1)  // r2 = 2 * 3 = 6
+    instrs[3] = ir_load_imm(3, 4)
+    instrs[4] = ir_binop(4, 2, BinaryOp::OpAdd, 3)  // r4 = 6 + 4 = 10
+    instrs[5] = ir_return(4)
+
+    let func = opt_make_test_func(instrs, 6)
+    let folded = const_fold_pass(func)
+
+    let step1_ok = opt_check_load_imm(folded, 2, 6)
+    let step2_ok = opt_check_load_imm(folded, 4, 10)
+    step1_ok && step2_ok
+}
+
+// T18: Constant folding with bitwise AND
+fn test_const_fold_bitwise_and() -> bool with Mut, Panic, Div {
+    var instrs: [IrInstr; 8192] = [ir_nop(); 8192]
+    instrs[0] = ir_load_imm(0, 255)     // 0xFF
+    instrs[1] = ir_load_imm(1, 15)      // 0x0F
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpBitAnd, 1)
+    instrs[3] = ir_return(2)
+
+    let func = opt_make_test_func(instrs, 4)
+    let folded = const_fold_pass(func)
+
+    opt_check_load_imm(folded, 2, 15)    // 0xFF & 0x0F = 0x0F
+}
+
+// T19: Module-level optimization applies to all functions
+fn test_optimize_module_all_funcs() -> bool with Mut, Panic, Div, Alloc {
+    var instrs_a: [IrInstr; 8192] = [ir_nop(); 8192]
+    instrs_a[0] = ir_load_imm(0, 10)
+    instrs_a[1] = ir_load_imm(1, 20)
+    instrs_a[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs_a[3] = ir_return(2)
+
+    var instrs_b: [IrInstr; 8192] = [ir_nop(); 8192]
+    instrs_b[0] = ir_load_imm(0, 3)
+    instrs_b[1] = ir_load_imm(1, 7)
+    instrs_b[2] = ir_binop(2, 0, BinaryOp::OpMul, 1)
+    instrs_b[3] = ir_return(2)
+
+    var module = ir_empty_module()
+    module.functions[0] = opt_make_test_func(instrs_a, 4)
+    module.functions[1] = opt_make_test_func(instrs_b, 4)
+    module.fn_count = 2
+
+    let opt = optimize_module(module)
+
+    let fn_a_ok = opt_check_load_imm(opt.functions[0], 2, 30)
+    let fn_b_ok = opt_check_load_imm(opt.functions[1], 2, 21)
+    fn_a_ok && fn_b_ok
+}
+
+// Test runner
+fn test_optimize_main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    var passed: i64 = 0
+    let total: i64 = 19
+
+    print("=== IR Optimization Tests ===\n")
+
+    if test_const_fold_add() { passed = passed + 1; print("  T01 OK const_fold_add\n") } else { print("  FAIL: T01 const_fold_add\n") }
+    if test_const_fold_mul() { passed = passed + 1; print("  T02 OK const_fold_mul\n") } else { print("  FAIL: T02 const_fold_mul\n") }
+    if test_const_fold_sub() { passed = passed + 1; print("  T03 OK const_fold_sub\n") } else { print("  FAIL: T03 const_fold_sub\n") }
+    if test_const_fold_eq() { passed = passed + 1; print("  T04 OK const_fold_eq\n") } else { print("  FAIL: T04 const_fold_eq\n") }
+    if test_const_fold_neg() { passed = passed + 1; print("  T05 OK const_fold_neg\n") } else { print("  FAIL: T05 const_fold_neg\n") }
+    if test_const_fold_div_by_zero() { passed = passed + 1; print("  T06 OK const_fold_div_by_zero\n") } else { print("  FAIL: T06 const_fold_div_by_zero\n") }
+    if test_dce_removes_dead_instr() { passed = passed + 1; print("  T07 OK dce_removes_dead\n") } else { print("  FAIL: T07 dce_removes_dead\n") }
+    if test_dce_keeps_side_effects() { passed = passed + 1; print("  T08 OK dce_keeps_side_effects\n") } else { print("  FAIL: T08 dce_keeps_side_effects\n") }
+    if test_strength_reduce_mul_by_2() { passed = passed + 1; print("  T09 OK sr_mul_by_2\n") } else { print("  FAIL: T09 sr_mul_by_2\n") }
+    if test_strength_reduce_add_zero() { passed = passed + 1; print("  T10 OK sr_add_zero\n") } else { print("  FAIL: T10 sr_add_zero\n") }
+    if test_strength_reduce_mul_by_1() { passed = passed + 1; print("  T11 OK sr_mul_by_1\n") } else { print("  FAIL: T11 sr_mul_by_1\n") }
+    if test_strength_reduce_mul_by_0() { passed = passed + 1; print("  T12 OK sr_mul_by_0\n") } else { print("  FAIL: T12 sr_mul_by_0\n") }
+    if test_strength_reduce_div_by_1() { passed = passed + 1; print("  T13 OK sr_div_by_1\n") } else { print("  FAIL: T13 sr_div_by_1\n") }
+    if test_strength_reduce_sub_zero() { passed = passed + 1; print("  T14 OK sr_sub_zero\n") } else { print("  FAIL: T14 sr_sub_zero\n") }
+    if test_pipeline_combined() { passed = passed + 1; print("  T15 OK pipeline_combined\n") } else { print("  FAIL: T15 pipeline_combined\n") }
+    if test_const_fold_through_copy() { passed = passed + 1; print("  T16 OK const_fold_copy_prop\n") } else { print("  FAIL: T16 const_fold_copy_prop\n") }
+    if test_const_fold_chain() { passed = passed + 1; print("  T17 OK const_fold_chain\n") } else { print("  FAIL: T17 const_fold_chain\n") }
+    if test_const_fold_bitwise_and() { passed = passed + 1; print("  T18 OK const_fold_bitwise_and\n") } else { print("  FAIL: T18 const_fold_bitwise_and\n") }
+    if test_optimize_module_all_funcs() { passed = passed + 1; print("  T19 OK optimize_module\n") } else { print("  FAIL: T19 optimize_module\n") }
+
+    print("\nOptimization: ")
+    print_int(passed)
+    print(" / ")
+    print_int(total)
+    print(" passed\n")
+
+    if passed == total { 0 } else { 1 }
+}

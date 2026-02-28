@@ -1,0 +1,1055 @@
+// self-hosted::native::aarch64 — AArch64 (ARM64) instruction encoder
+//
+// Encodes AArch64 instructions into a CodeBuffer.  Uses the same
+// CodeBuffer / emit_byte / emit_u32_le / low8 helpers from encode.sio.
+//
+// All AArch64 instructions are 32 bits, fixed width, little-endian.
+//
+// Major encoding groups used here:
+//   Data processing — register   (shifted register, no shift applied)
+//   Data processing — immediate  (add/sub imm12, move wide)
+//   Loads and stores             (unsigned offset, signed offset, pair)
+//   Branches                     (unconditional, conditional, compare-and-branch)
+
+// ============================================================================
+// AArch64 register encoding
+// ============================================================================
+
+let A64_X0:  i64 = 0
+let A64_X1:  i64 = 1
+let A64_X2:  i64 = 2
+let A64_X3:  i64 = 3
+let A64_X4:  i64 = 4
+let A64_X5:  i64 = 5
+let A64_X6:  i64 = 6
+let A64_X7:  i64 = 7
+let A64_X8:  i64 = 8
+let A64_X9:  i64 = 9
+let A64_X10: i64 = 10
+let A64_X11: i64 = 11
+let A64_X12: i64 = 12
+let A64_X13: i64 = 13
+let A64_X14: i64 = 14
+let A64_X15: i64 = 15
+let A64_X16: i64 = 16  // IP0 (intra-procedure-call scratch)
+let A64_X17: i64 = 17  // IP1
+let A64_X18: i64 = 18  // platform register
+let A64_X19: i64 = 19  // callee-saved
+let A64_X20: i64 = 20
+let A64_X21: i64 = 21
+let A64_X22: i64 = 22
+let A64_X23: i64 = 23
+let A64_X24: i64 = 24
+let A64_X25: i64 = 25
+let A64_X26: i64 = 26
+let A64_X27: i64 = 27
+let A64_X28: i64 = 28
+let A64_FP:  i64 = 29  // frame pointer (x29)
+let A64_LR:  i64 = 30  // link register (x30)
+let A64_SP:  i64 = 31  // stack pointer (context-dependent: SP or XZR)
+let A64_XZR: i64 = 31  // zero register (same encoding as SP)
+
+// ============================================================================
+// Bit-field helpers
+// ============================================================================
+
+fn a64_mask(x: i64, bits: i64) -> i64 {
+    x & ((1 << bits) - 1)
+}
+
+fn a64_bits(val: i64, hi: i64, lo: i64) -> i64 {
+    a64_mask(val >> lo, hi - lo + 1)
+}
+
+// ============================================================================
+// Emit helper
+// ============================================================================
+
+fn a64_emit_instr(buf: CodeBuffer, word: i64) -> CodeBuffer with Mut, Panic, Div {
+    emit_u32_le(buf, word)
+}
+
+// ============================================================================
+// Data processing — shifted register  (sf=1 for 64-bit)
+//
+// Format: [sf(1) | opc(2) | 01011 | shift(2) | 0 | Rm(5) | imm6(6) | Rn(5) | Rd(5)]
+// For no-shift variants: shift=00, imm6=000000
+// ============================================================================
+
+// ADD Xd, Xn, Xm — sf=1, opc=00, S=0
+// Encoding: 1 00 01011 00 0 Rm 000000 Rn Rd
+// Top bits: 0x8B000000
+fn a64_emit_add(buf: CodeBuffer, rd: i64, rn: i64, rm: i64) -> CodeBuffer with Mut, Panic, Div {
+    let word = 0x8B000000
+        | (a64_mask(rm, 5) << 16)
+        | (a64_mask(rn, 5) << 5)
+        | a64_mask(rd, 5)
+    a64_emit_instr(buf, word)
+}
+
+// ADDS Xd, Xn, Xm — sf=1, opc=01, S=1 (sets flags)
+// Encoding: 1 01 01011 00 0 Rm 000000 Rn Rd
+// Top bits: 0xAB000000
+fn a64_emit_adds(buf: CodeBuffer, rd: i64, rn: i64, rm: i64) -> CodeBuffer with Mut, Panic, Div {
+    let word = 0xAB000000
+        | (a64_mask(rm, 5) << 16)
+        | (a64_mask(rn, 5) << 5)
+        | a64_mask(rd, 5)
+    a64_emit_instr(buf, word)
+}
+
+// SUB Xd, Xn, Xm — sf=1, opc=10
+// Encoding: 1 10 01011 00 0 Rm 000000 Rn Rd
+// Top bits: 0xCB000000
+fn a64_emit_sub(buf: CodeBuffer, rd: i64, rn: i64, rm: i64) -> CodeBuffer with Mut, Panic, Div {
+    let word = 0xCB000000
+        | (a64_mask(rm, 5) << 16)
+        | (a64_mask(rn, 5) << 5)
+        | a64_mask(rd, 5)
+    a64_emit_instr(buf, word)
+}
+
+// SUBS Xd, Xn, Xm — sf=1, opc=11 (sets flags)
+// Top bits: 0xEB000000
+fn a64_emit_subs(buf: CodeBuffer, rd: i64, rn: i64, rm: i64) -> CodeBuffer with Mut, Panic, Div {
+    let word = 0xEB000000
+        | (a64_mask(rm, 5) << 16)
+        | (a64_mask(rn, 5) << 5)
+        | a64_mask(rd, 5)
+    a64_emit_instr(buf, word)
+}
+
+// ============================================================================
+// Logical — shifted register  (sf=1 for 64-bit, shift=00, imm6=0)
+//
+// Format: [sf(1) | opc(2) | 01010 | shift(2) | N(1) | Rm(5) | imm6(6) | Rn(5) | Rd(5)]
+// ============================================================================
+
+// AND Xd, Xn, Xm — opc=00, N=0
+// Top bits: 0x8A000000
+fn a64_emit_and(buf: CodeBuffer, rd: i64, rn: i64, rm: i64) -> CodeBuffer with Mut, Panic, Div {
+    let word = 0x8A000000
+        | (a64_mask(rm, 5) << 16)
+        | (a64_mask(rn, 5) << 5)
+        | a64_mask(rd, 5)
+    a64_emit_instr(buf, word)
+}
+
+// ORR Xd, Xn, Xm — opc=01, N=0
+// Top bits: 0xAA000000
+fn a64_emit_orr(buf: CodeBuffer, rd: i64, rn: i64, rm: i64) -> CodeBuffer with Mut, Panic, Div {
+    let word = 0xAA000000
+        | (a64_mask(rm, 5) << 16)
+        | (a64_mask(rn, 5) << 5)
+        | a64_mask(rd, 5)
+    a64_emit_instr(buf, word)
+}
+
+// EOR Xd, Xn, Xm — opc=10, N=0
+// Top bits: 0xCA000000
+fn a64_emit_eor(buf: CodeBuffer, rd: i64, rn: i64, rm: i64) -> CodeBuffer with Mut, Panic, Div {
+    let word = 0xCA000000
+        | (a64_mask(rm, 5) << 16)
+        | (a64_mask(rn, 5) << 5)
+        | a64_mask(rd, 5)
+    a64_emit_instr(buf, word)
+}
+
+// ANDS Xd, Xn, Xm — opc=11, N=0 (logical AND, sets flags)
+// Top bits: 0xEA000000
+fn a64_emit_ands(buf: CodeBuffer, rd: i64, rn: i64, rm: i64) -> CodeBuffer with Mut, Panic, Div {
+    let word = 0xEA000000
+        | (a64_mask(rm, 5) << 16)
+        | (a64_mask(rn, 5) << 5)
+        | a64_mask(rd, 5)
+    a64_emit_instr(buf, word)
+}
+
+// ORN Xd, Xn, Xm — opc=01, N=1 (OR NOT)
+// Top bits: 0xAA200000
+fn a64_emit_orn(buf: CodeBuffer, rd: i64, rn: i64, rm: i64) -> CodeBuffer with Mut, Panic, Div {
+    let word = 0xAA200000
+        | (a64_mask(rm, 5) << 16)
+        | (a64_mask(rn, 5) << 5)
+        | a64_mask(rd, 5)
+    a64_emit_instr(buf, word)
+}
+
+// MVN Xd, Xm — ORN Xd, XZR, Xm (bitwise NOT)
+fn a64_emit_mvn(buf: CodeBuffer, rd: i64, rm: i64) -> CodeBuffer with Mut, Panic, Div {
+    a64_emit_orn(buf, rd, A64_XZR, rm)
+}
+
+// ============================================================================
+// Data processing — immediate (add/sub)
+//
+// Format: [sf(1) | op(1) | S(1) | 100010 | sh(1) | imm12(12) | Rn(5) | Rd(5)]
+// sh=0 means no shift, sh=1 means imm12 << 12.
+// Note: For SP operations, Rd/Rn encoding 31 = SP (not XZR).
+// ============================================================================
+
+// ADD Xd, Xn, #imm12  — sf=1, op=0, S=0
+// Top bits: 0x91000000
+fn a64_emit_add_imm(buf: CodeBuffer, rd: i64, rn: i64, imm: i64) -> CodeBuffer with Mut, Panic, Div {
+    let word = 0x91000000
+        | (a64_mask(imm, 12) << 10)
+        | (a64_mask(rn, 5) << 5)
+        | a64_mask(rd, 5)
+    a64_emit_instr(buf, word)
+}
+
+// ADDS Xd, Xn, #imm12 — sf=1, op=0, S=1 (sets flags)
+// Top bits: 0xB1000000
+fn a64_emit_adds_imm(buf: CodeBuffer, rd: i64, rn: i64, imm: i64) -> CodeBuffer with Mut, Panic, Div {
+    let word = 0xB1000000
+        | (a64_mask(imm, 12) << 10)
+        | (a64_mask(rn, 5) << 5)
+        | a64_mask(rd, 5)
+    a64_emit_instr(buf, word)
+}
+
+// SUB Xd, Xn, #imm12  — sf=1, op=1, S=0
+// Top bits: 0xD1000000
+fn a64_emit_sub_imm(buf: CodeBuffer, rd: i64, rn: i64, imm: i64) -> CodeBuffer with Mut, Panic, Div {
+    let word = 0xD1000000
+        | (a64_mask(imm, 12) << 10)
+        | (a64_mask(rn, 5) << 5)
+        | a64_mask(rd, 5)
+    a64_emit_instr(buf, word)
+}
+
+// SUBS Xd, Xn, #imm12 — sf=1, op=1, S=1 (sets flags)
+// Top bits: 0xF1000000
+fn a64_emit_subs_imm(buf: CodeBuffer, rd: i64, rn: i64, imm: i64) -> CodeBuffer with Mut, Panic, Div {
+    let word = 0xF1000000
+        | (a64_mask(imm, 12) << 10)
+        | (a64_mask(rn, 5) << 5)
+        | a64_mask(rd, 5)
+    a64_emit_instr(buf, word)
+}
+
+// ============================================================================
+// Move wide immediate
+//
+// MOVZ: [sf(1) | 10 | 100101 | hw(2) | imm16(16) | Rd(5)]
+// MOVK: [sf(1) | 11 | 100101 | hw(2) | imm16(16) | Rd(5)]
+// MOVN: [sf(1) | 00 | 100101 | hw(2) | imm16(16) | Rd(5)]
+//
+// hw = shift / 16:  0=bits[15:0], 1=bits[31:16], 2=bits[47:32], 3=bits[63:48]
+// ============================================================================
+
+// MOVZ Xd, #imm16, LSL #shift  — sf=1, opc=10
+// Top bits: 0xD2800000
+fn a64_emit_movz(buf: CodeBuffer, rd: i64, imm16: i64, shift: i64) -> CodeBuffer with Mut, Panic, Div {
+    let hw = shift / 16
+    let word = 0xD2800000
+        | (a64_mask(hw, 2) << 21)
+        | (a64_mask(imm16, 16) << 5)
+        | a64_mask(rd, 5)
+    a64_emit_instr(buf, word)
+}
+
+// MOVK Xd, #imm16, LSL #shift  — sf=1, opc=11 (keep other bits)
+// Top bits: 0xF2800000
+fn a64_emit_movk(buf: CodeBuffer, rd: i64, imm16: i64, shift: i64) -> CodeBuffer with Mut, Panic, Div {
+    let hw = shift / 16
+    let word = 0xF2800000
+        | (a64_mask(hw, 2) << 21)
+        | (a64_mask(imm16, 16) << 5)
+        | a64_mask(rd, 5)
+    a64_emit_instr(buf, word)
+}
+
+// MOVN Xd, #imm16, LSL #shift  — sf=1, opc=00 (move NOT)
+// Top bits: 0x92800000
+fn a64_emit_movn(buf: CodeBuffer, rd: i64, imm16: i64, shift: i64) -> CodeBuffer with Mut, Panic, Div {
+    let hw = shift / 16
+    let word = 0x92800000
+        | (a64_mask(hw, 2) << 21)
+        | (a64_mask(imm16, 16) << 5)
+        | a64_mask(rd, 5)
+    a64_emit_instr(buf, word)
+}
+
+// ============================================================================
+// Shift instructions  (Data processing 2-source)
+//
+// Format: [sf(1) | 0 | S(1) | 11010110 | Rm(5) | opcode2(6) | Rn(5) | Rd(5)]
+// S=0 for non-flag-setting.
+// ============================================================================
+
+// LSL Xd, Xn, Xm — opcode2=001000
+// Top bits: 0x9AC02000 (sf=1, S=0)
+fn a64_emit_lsl(buf: CodeBuffer, rd: i64, rn: i64, rm: i64) -> CodeBuffer with Mut, Panic, Div {
+    let word = 0x9AC02000
+        | (a64_mask(rm, 5) << 16)
+        | (a64_mask(rn, 5) << 5)
+        | a64_mask(rd, 5)
+    a64_emit_instr(buf, word)
+}
+
+// LSR Xd, Xn, Xm — opcode2=001001
+// Top bits: 0x9AC02400
+fn a64_emit_lsr(buf: CodeBuffer, rd: i64, rn: i64, rm: i64) -> CodeBuffer with Mut, Panic, Div {
+    let word = 0x9AC02400
+        | (a64_mask(rm, 5) << 16)
+        | (a64_mask(rn, 5) << 5)
+        | a64_mask(rd, 5)
+    a64_emit_instr(buf, word)
+}
+
+// ASR Xd, Xn, Xm — opcode2=001010
+// Top bits: 0x9AC02800
+fn a64_emit_asr(buf: CodeBuffer, rd: i64, rn: i64, rm: i64) -> CodeBuffer with Mut, Panic, Div {
+    let word = 0x9AC02800
+        | (a64_mask(rm, 5) << 16)
+        | (a64_mask(rn, 5) << 5)
+        | a64_mask(rd, 5)
+    a64_emit_instr(buf, word)
+}
+
+// ============================================================================
+// Load/Store — unsigned offset
+//
+// LDR (unsigned offset):
+//   Format: [size(2) | 111 | V(1) | 01 | opc(2) | imm12(12) | Rn(5) | Rt(5)]
+//   For 64-bit LDR: size=11, V=0, opc=01 => top = 0xF9400000
+//   imm12 is offset / 8 (scaled by transfer size)
+//
+// STR (unsigned offset):
+//   For 64-bit STR: size=11, V=0, opc=00 => top = 0xF9000000
+//   imm12 is offset / 8
+// ============================================================================
+
+// LDR Xt, [Xn, #offset]  — 64-bit load, unsigned offset (must be 8-byte aligned)
+// offset is in bytes, encoded as imm12 = offset / 8
+fn a64_emit_ldr(buf: CodeBuffer, rt: i64, rn: i64, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    let imm12 = offset / 8
+    let word = 0xF9400000
+        | (a64_mask(imm12, 12) << 10)
+        | (a64_mask(rn, 5) << 5)
+        | a64_mask(rt, 5)
+    a64_emit_instr(buf, word)
+}
+
+// STR Xt, [Xn, #offset]  — 64-bit store, unsigned offset
+fn a64_emit_str(buf: CodeBuffer, rt: i64, rn: i64, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    let imm12 = offset / 8
+    let word = 0xF9000000
+        | (a64_mask(imm12, 12) << 10)
+        | (a64_mask(rn, 5) << 5)
+        | a64_mask(rt, 5)
+    a64_emit_instr(buf, word)
+}
+
+// LDRW Wt, [Xn, #offset] — 32-bit load, unsigned offset
+// size=10, V=0, opc=01 => 0xB9400000, scaled by 4
+fn a64_emit_ldr_w(buf: CodeBuffer, rt: i64, rn: i64, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    let imm12 = offset / 4
+    let word = 0xB9400000
+        | (a64_mask(imm12, 12) << 10)
+        | (a64_mask(rn, 5) << 5)
+        | a64_mask(rt, 5)
+    a64_emit_instr(buf, word)
+}
+
+// STRW Wt, [Xn, #offset] — 32-bit store, unsigned offset
+// size=10, V=0, opc=00 => 0xB9000000, scaled by 4
+fn a64_emit_str_w(buf: CodeBuffer, rt: i64, rn: i64, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    let imm12 = offset / 4
+    let word = 0xB9000000
+        | (a64_mask(imm12, 12) << 10)
+        | (a64_mask(rn, 5) << 5)
+        | a64_mask(rt, 5)
+    a64_emit_instr(buf, word)
+}
+
+// LDRB Wt, [Xn, #offset] — 8-bit load, unsigned offset
+// size=00, V=0, opc=01 => 0x39400000, no scaling
+fn a64_emit_ldrb(buf: CodeBuffer, rt: i64, rn: i64, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    let word = 0x39400000
+        | (a64_mask(offset, 12) << 10)
+        | (a64_mask(rn, 5) << 5)
+        | a64_mask(rt, 5)
+    a64_emit_instr(buf, word)
+}
+
+// STRB Wt, [Xn, #offset] — 8-bit store, unsigned offset
+// size=00, V=0, opc=00 => 0x39000000
+fn a64_emit_strb(buf: CodeBuffer, rt: i64, rn: i64, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    let word = 0x39000000
+        | (a64_mask(offset, 12) << 10)
+        | (a64_mask(rn, 5) << 5)
+        | a64_mask(rt, 5)
+    a64_emit_instr(buf, word)
+}
+
+// ============================================================================
+// Load/Store pair — signed offset
+//
+// LDP: [opc(2) | 101 | V(1) | 010 | imm7(7) | Rt2(5) | Rn(5) | Rt(5)]
+//   64-bit: opc=10, V=0 => top = 0xA9400000
+//   imm7 = offset / 8 (signed, 7-bit)
+//
+// STP: [opc(2) | 101 | V(1) | 010 | imm7(7) | Rt2(5) | Rn(5) | Rt(5)]
+//   64-bit: opc=10, V=0 => top = 0xA9000000
+// ============================================================================
+
+// LDP Xt1, Xt2, [Xn, #offset]  — 64-bit load pair
+fn a64_emit_ldp(buf: CodeBuffer, rt1: i64, rt2: i64, rn: i64, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    let imm7 = offset / 8
+    let word = 0xA9400000
+        | (a64_mask(imm7, 7) << 15)
+        | (a64_mask(rt2, 5) << 10)
+        | (a64_mask(rn, 5) << 5)
+        | a64_mask(rt1, 5)
+    a64_emit_instr(buf, word)
+}
+
+// STP Xt1, Xt2, [Xn, #offset]  — 64-bit store pair
+fn a64_emit_stp(buf: CodeBuffer, rt1: i64, rt2: i64, rn: i64, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    let imm7 = offset / 8
+    let word = 0xA9000000
+        | (a64_mask(imm7, 7) << 15)
+        | (a64_mask(rt2, 5) << 10)
+        | (a64_mask(rn, 5) << 5)
+        | a64_mask(rt1, 5)
+    a64_emit_instr(buf, word)
+}
+
+// STP (pre-index): STP Xt1, Xt2, [Xn, #offset]!
+// opc=10, V=0, addressing mode=pre-index (011) => 0xA9800000
+fn a64_emit_stp_pre(buf: CodeBuffer, rt1: i64, rt2: i64, rn: i64, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    let imm7 = offset / 8
+    let word = 0xA9800000
+        | (a64_mask(imm7, 7) << 15)
+        | (a64_mask(rt2, 5) << 10)
+        | (a64_mask(rn, 5) << 5)
+        | a64_mask(rt1, 5)
+    a64_emit_instr(buf, word)
+}
+
+// LDP (post-index): LDP Xt1, Xt2, [Xn], #offset
+// opc=10, V=0, addressing mode=post-index (001) => 0xA8C00000
+fn a64_emit_ldp_post(buf: CodeBuffer, rt1: i64, rt2: i64, rn: i64, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    let imm7 = offset / 8
+    let word = 0xA8C00000
+        | (a64_mask(imm7, 7) << 15)
+        | (a64_mask(rt2, 5) << 10)
+        | (a64_mask(rn, 5) << 5)
+        | a64_mask(rt1, 5)
+    a64_emit_instr(buf, word)
+}
+
+// ============================================================================
+// Unconditional branch
+//
+// B:  [0 | 00101 | imm26(26)]  => 0x14000000
+// BL: [1 | 00101 | imm26(26)]  => 0x94000000
+// imm26 = offset / 4 (signed)
+// ============================================================================
+
+// B offset — unconditional branch (PC-relative)
+fn a64_emit_b(buf: CodeBuffer, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    let imm26 = offset / 4
+    let word = 0x14000000
+        | a64_mask(imm26, 26)
+    a64_emit_instr(buf, word)
+}
+
+// BL offset — branch with link (call)
+fn a64_emit_bl(buf: CodeBuffer, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    let imm26 = offset / 4
+    let word = 0x94000000
+        | a64_mask(imm26, 26)
+    a64_emit_instr(buf, word)
+}
+
+// ============================================================================
+// Unconditional branch — register
+//
+// BR:  [1101011 0000 11111 000000 Rn 00000] => 0xD61F0000
+// BLR: [1101011 0001 11111 000000 Rn 00000] => 0xD63F0000
+// RET: [1101011 0010 11111 000000 Rn 00000] => 0xD65F0000
+// ============================================================================
+
+// BR Xn — unconditional branch to register
+fn a64_emit_br(buf: CodeBuffer, rn: i64) -> CodeBuffer with Mut, Panic, Div {
+    let word = 0xD61F0000
+        | (a64_mask(rn, 5) << 5)
+    a64_emit_instr(buf, word)
+}
+
+// BLR Xn — branch with link to register
+fn a64_emit_blr(buf: CodeBuffer, rn: i64) -> CodeBuffer with Mut, Panic, Div {
+    let word = 0xD63F0000
+        | (a64_mask(rn, 5) << 5)
+    a64_emit_instr(buf, word)
+}
+
+// RET {Xn} — return (default Xn = X30 = LR)
+fn a64_emit_ret_reg(buf: CodeBuffer, rn: i64) -> CodeBuffer with Mut, Panic, Div {
+    let word = 0xD65F0000
+        | (a64_mask(rn, 5) << 5)
+    a64_emit_instr(buf, word)
+}
+
+// RET — return via LR (X30)
+fn a64_emit_ret(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    a64_emit_ret_reg(buf, A64_LR)
+}
+
+// ============================================================================
+// Compare and branch
+//
+// CBZ:  [sf(1) | 011010 | 0 | imm19(19) | Rt(5)] => sf=1 => 0xB4000000
+// CBNZ: [sf(1) | 011010 | 1 | imm19(19) | Rt(5)] => sf=1 => 0xB5000000
+// imm19 = offset / 4
+// ============================================================================
+
+// CBZ Xt, offset — compare and branch if zero
+fn a64_emit_cbz(buf: CodeBuffer, rt: i64, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    let imm19 = offset / 4
+    let word = 0xB4000000
+        | (a64_mask(imm19, 19) << 5)
+        | a64_mask(rt, 5)
+    a64_emit_instr(buf, word)
+}
+
+// CBNZ Xt, offset — compare and branch if not zero
+fn a64_emit_cbnz(buf: CodeBuffer, rt: i64, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    let imm19 = offset / 4
+    let word = 0xB5000000
+        | (a64_mask(imm19, 19) << 5)
+        | a64_mask(rt, 5)
+    a64_emit_instr(buf, word)
+}
+
+// ============================================================================
+// Conditional branch
+//
+// B.cond: [0101010 | 0 | imm19(19) | 0 | cond(4)]
+// Top: 0x54000000
+// imm19 = offset / 4
+//
+// Condition codes:
+//   EQ=0x0, NE=0x1, CS/HS=0x2, CC/LO=0x3,
+//   MI=0x4, PL=0x5, VS=0x6, VC=0x7,
+//   HI=0x8, LS=0x9, GE=0xA, LT=0xB,
+//   GT=0xC, LE=0xD, AL=0xE
+// ============================================================================
+
+let A64_COND_EQ: i64 = 0x0
+let A64_COND_NE: i64 = 0x1
+let A64_COND_CS: i64 = 0x2
+let A64_COND_CC: i64 = 0x3
+let A64_COND_MI: i64 = 0x4
+let A64_COND_PL: i64 = 0x5
+let A64_COND_VS: i64 = 0x6
+let A64_COND_VC: i64 = 0x7
+let A64_COND_HI: i64 = 0x8
+let A64_COND_LS: i64 = 0x9
+let A64_COND_GE: i64 = 0xA
+let A64_COND_LT: i64 = 0xB
+let A64_COND_GT: i64 = 0xC
+let A64_COND_LE: i64 = 0xD
+let A64_COND_AL: i64 = 0xE
+
+// B.cond offset — conditional branch (generic)
+fn a64_emit_b_cond(buf: CodeBuffer, cond: i64, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    let imm19 = offset / 4
+    let word = 0x54000000
+        | (a64_mask(imm19, 19) << 5)
+        | a64_mask(cond, 4)
+    a64_emit_instr(buf, word)
+}
+
+// B.EQ offset
+fn a64_emit_b_eq(buf: CodeBuffer, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    a64_emit_b_cond(buf, A64_COND_EQ, offset)
+}
+
+// B.NE offset
+fn a64_emit_b_ne(buf: CodeBuffer, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    a64_emit_b_cond(buf, A64_COND_NE, offset)
+}
+
+// B.LT offset
+fn a64_emit_b_lt(buf: CodeBuffer, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    a64_emit_b_cond(buf, A64_COND_LT, offset)
+}
+
+// B.GE offset
+fn a64_emit_b_ge(buf: CodeBuffer, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    a64_emit_b_cond(buf, A64_COND_GE, offset)
+}
+
+// B.GT offset
+fn a64_emit_b_gt(buf: CodeBuffer, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    a64_emit_b_cond(buf, A64_COND_GT, offset)
+}
+
+// B.LE offset
+fn a64_emit_b_le(buf: CodeBuffer, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    a64_emit_b_cond(buf, A64_COND_LE, offset)
+}
+
+// B.CS offset (carry set / unsigned >=)
+fn a64_emit_b_cs(buf: CodeBuffer, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    a64_emit_b_cond(buf, A64_COND_CS, offset)
+}
+
+// B.CC offset (carry clear / unsigned <)
+fn a64_emit_b_cc(buf: CodeBuffer, offset: i64) -> CodeBuffer with Mut, Panic, Div {
+    a64_emit_b_cond(buf, A64_COND_CC, offset)
+}
+
+// ============================================================================
+// Compare instructions  (aliases for SUBS with XZR destination)
+// ============================================================================
+
+// CMP Xn, Xm — SUBS XZR, Xn, Xm
+fn a64_emit_cmp(buf: CodeBuffer, rn: i64, rm: i64) -> CodeBuffer with Mut, Panic, Div {
+    a64_emit_subs(buf, A64_XZR, rn, rm)
+}
+
+// CMP Xn, #imm — SUBS XZR, Xn, #imm
+fn a64_emit_cmp_imm(buf: CodeBuffer, rn: i64, imm: i64) -> CodeBuffer with Mut, Panic, Div {
+    a64_emit_subs_imm(buf, A64_XZR, rn, imm)
+}
+
+// CMN Xn, Xm — ADDS XZR, Xn, Xm
+fn a64_emit_cmn(buf: CodeBuffer, rn: i64, rm: i64) -> CodeBuffer with Mut, Panic, Div {
+    a64_emit_adds(buf, A64_XZR, rn, rm)
+}
+
+// TST Xn, Xm — ANDS XZR, Xn, Xm
+fn a64_emit_tst(buf: CodeBuffer, rn: i64, rm: i64) -> CodeBuffer with Mut, Panic, Div {
+    a64_emit_ands(buf, A64_XZR, rn, rm)
+}
+
+// ============================================================================
+// Multiply / Divide  (Data processing 3-source / 2-source)
+//
+// MADD: [sf(1) | 00 | 11011 | 000 | Rm(5) | 0 | Ra(5) | Rn(5) | Rd(5)]
+//   sf=1 => 0x9B000000
+// MUL is MADD with Ra=XZR (31)
+//
+// SDIV: [sf(1) | 0 | 0 | 11010110 | Rm(5) | 00001 | 1 | Rn(5) | Rd(5)]
+//   sf=1 => 0x9AC00C00
+// UDIV: [sf(1) | 0 | 0 | 11010110 | Rm(5) | 00001 | 0 | Rn(5) | Rd(5)]
+//   sf=1 => 0x9AC00800
+// ============================================================================
+
+// MADD Xd, Xn, Xm, Xa — Xd = Xn * Xm + Xa
+fn a64_emit_madd(buf: CodeBuffer, rd: i64, rn: i64, rm: i64, ra: i64) -> CodeBuffer with Mut, Panic, Div {
+    let word = 0x9B000000
+        | (a64_mask(rm, 5) << 16)
+        | (a64_mask(ra, 5) << 10)
+        | (a64_mask(rn, 5) << 5)
+        | a64_mask(rd, 5)
+    a64_emit_instr(buf, word)
+}
+
+// MUL Xd, Xn, Xm — MADD Xd, Xn, Xm, XZR
+fn a64_emit_mul(buf: CodeBuffer, rd: i64, rn: i64, rm: i64) -> CodeBuffer with Mut, Panic, Div {
+    a64_emit_madd(buf, rd, rn, rm, A64_XZR)
+}
+
+// MSUB Xd, Xn, Xm, Xa — Xd = Xa - Xn * Xm
+fn a64_emit_msub(buf: CodeBuffer, rd: i64, rn: i64, rm: i64, ra: i64) -> CodeBuffer with Mut, Panic, Div {
+    let word = 0x9B008000
+        | (a64_mask(rm, 5) << 16)
+        | (a64_mask(ra, 5) << 10)
+        | (a64_mask(rn, 5) << 5)
+        | a64_mask(rd, 5)
+    a64_emit_instr(buf, word)
+}
+
+// MNEG Xd, Xn, Xm — MSUB Xd, Xn, Xm, XZR  (negate product)
+fn a64_emit_mneg(buf: CodeBuffer, rd: i64, rn: i64, rm: i64) -> CodeBuffer with Mut, Panic, Div {
+    a64_emit_msub(buf, rd, rn, rm, A64_XZR)
+}
+
+// SDIV Xd, Xn, Xm — signed divide
+fn a64_emit_sdiv(buf: CodeBuffer, rd: i64, rn: i64, rm: i64) -> CodeBuffer with Mut, Panic, Div {
+    let word = 0x9AC00C00
+        | (a64_mask(rm, 5) << 16)
+        | (a64_mask(rn, 5) << 5)
+        | a64_mask(rd, 5)
+    a64_emit_instr(buf, word)
+}
+
+// UDIV Xd, Xn, Xm — unsigned divide
+fn a64_emit_udiv(buf: CodeBuffer, rd: i64, rn: i64, rm: i64) -> CodeBuffer with Mut, Panic, Div {
+    let word = 0x9AC00800
+        | (a64_mask(rm, 5) << 16)
+        | (a64_mask(rn, 5) << 5)
+        | a64_mask(rd, 5)
+    a64_emit_instr(buf, word)
+}
+
+// ============================================================================
+// NEG Xd, Xm — SUB Xd, XZR, Xm
+// ============================================================================
+
+fn a64_emit_neg(buf: CodeBuffer, rd: i64, rm: i64) -> CodeBuffer with Mut, Panic, Div {
+    a64_emit_sub(buf, rd, A64_XZR, rm)
+}
+
+// ============================================================================
+// Pseudoinstructions
+// ============================================================================
+
+// NOP — 0xD503201F
+fn a64_emit_nop(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    a64_emit_instr(buf, 0xD503201F)
+}
+
+// MOV Xd, Xm — ORR Xd, XZR, Xm
+fn a64_emit_mov(buf: CodeBuffer, rd: i64, rm: i64) -> CodeBuffer with Mut, Panic, Div {
+    a64_emit_orr(buf, rd, A64_XZR, rm)
+}
+
+// MOV Xd, #imm64 — up to 4 instructions: MOVZ + MOVK x 3
+// Loads a full 64-bit immediate into Xd.
+fn a64_emit_mov_imm64(buf: CodeBuffer, rd: i64, val: i64) -> CodeBuffer with Mut, Panic, Div {
+    let chunk0 = a64_mask(val, 16)
+    let chunk1 = a64_mask(val >> 16, 16)
+    let chunk2 = a64_mask(val >> 32, 16)
+    let chunk3 = a64_mask(val >> 48, 16)
+
+    // Start with MOVZ for the lowest non-zero chunk (or chunk0 if all zero)
+    var b = buf
+    var started = 0
+
+    // Always emit MOVZ for bits [15:0] first
+    b = a64_emit_movz(b, rd, chunk0, 0)
+    started = 1
+
+    if chunk1 != 0 {
+        b = a64_emit_movk(b, rd, chunk1, 16)
+    }
+    if chunk2 != 0 {
+        b = a64_emit_movk(b, rd, chunk2, 32)
+    }
+    if chunk3 != 0 {
+        b = a64_emit_movk(b, rd, chunk3, 48)
+    }
+    b
+}
+
+// ============================================================================
+// System instructions
+// ============================================================================
+
+// SVC #imm16 — supervisor call (syscall)
+// Encoding: 0xD4000001 | (imm16 << 5)
+fn a64_emit_svc(buf: CodeBuffer, imm16: i64) -> CodeBuffer with Mut, Panic, Div {
+    let word = 0xD4000001
+        | (a64_mask(imm16, 16) << 5)
+    a64_emit_instr(buf, word)
+}
+
+// BRK #imm16 — breakpoint
+// Encoding: 0xD4200000 | (imm16 << 5)
+fn a64_emit_brk(buf: CodeBuffer, imm16: i64) -> CodeBuffer with Mut, Panic, Div {
+    let word = 0xD4200000
+        | (a64_mask(imm16, 16) << 5)
+    a64_emit_instr(buf, word)
+}
+
+// ============================================================================
+// ADRP — form PC-relative address to 4KB page
+// [1 | immlo(2) | 10000 | immhi(19) | Rd(5)]
+// ============================================================================
+
+fn a64_emit_adrp(buf: CodeBuffer, rd: i64, imm21: i64) -> CodeBuffer with Mut, Panic, Div {
+    // imm21 split: immlo = bits [1:0], immhi = bits [20:2]
+    let immlo = a64_mask(imm21, 2)
+    let immhi = a64_bits(imm21, 20, 2)
+    let word = 0x90000000
+        | (immlo << 29)
+        | (immhi << 5)
+        | a64_mask(rd, 5)
+    a64_emit_instr(buf, word)
+}
+
+// ============================================================================
+// Stack frame helpers
+// ============================================================================
+
+// Standard function prologue:
+//   stp x29, x30, [sp, #-framesize]!
+//   mov x29, sp
+fn a64_emit_prologue(buf: CodeBuffer, frame_size: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = a64_emit_stp_pre(b, A64_FP, A64_LR, A64_SP, 0 - frame_size)
+    b = a64_emit_mov(b, A64_FP, A64_SP)
+    b
+}
+
+// Standard function epilogue:
+//   ldp x29, x30, [sp], #framesize
+//   ret
+fn a64_emit_epilogue(buf: CodeBuffer, frame_size: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = a64_emit_ldp_post(b, A64_FP, A64_LR, A64_SP, frame_size)
+    b = a64_emit_ret(b)
+    b
+}
+
+// ============================================================================
+// Linux AArch64 syscall helpers
+// Syscall convention: x8=syscall number, x0-x5=args, svc #0, result in x0
+// ============================================================================
+
+// sys_exit(code) — syscall 93
+fn a64_emit_exit(buf: CodeBuffer, code: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = a64_emit_mov_imm64(b, A64_X0, code)
+    b = a64_emit_mov_imm64(b, A64_X8, 93)
+    b = a64_emit_svc(b, 0)
+    b
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+fn a64_byte_u8(b: i8) -> i64 {
+    let x = b as i64
+    if x < 0 { x + 256 } else { x }
+}
+
+fn a64_read_word(buf: CodeBuffer, offset: i64) -> i64 {
+    let b0 = a64_byte_u8(buf.bytes[offset as usize])
+    let b1 = a64_byte_u8(buf.bytes[(offset + 1) as usize])
+    let b2 = a64_byte_u8(buf.bytes[(offset + 2) as usize])
+    let b3 = a64_byte_u8(buf.bytes[(offset + 3) as usize])
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+}
+
+// T01: ADD X0, X1, X2 => 0x8B020020
+fn a64_test_add_reg() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = a64_emit_add(buf, A64_X0, A64_X1, A64_X2)
+    if !(buf.len == 4) { return false }
+    let word = a64_read_word(buf, 0)
+    if !(word == 0x8B020020) { return false }
+    true
+}
+
+// T02: SUB X0, X1, X2 => 0xCB020020
+fn a64_test_sub_reg() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = a64_emit_sub(buf, A64_X0, A64_X1, A64_X2)
+    if !(buf.len == 4) { return false }
+    let word = a64_read_word(buf, 0)
+    if !(word == 0xCB020020) { return false }
+    true
+}
+
+// T03: ADD X0, X1, #42 => 0x9100A820
+// imm12=42=0x2A, Rn=1, Rd=0
+fn a64_test_add_imm() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = a64_emit_add_imm(buf, A64_X0, A64_X1, 42)
+    if !(buf.len == 4) { return false }
+    let word = a64_read_word(buf, 0)
+    if !(word == 0x9100A820) { return false }
+    true
+}
+
+// T04: NOP => 0xD503201F
+fn a64_test_nop() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = a64_emit_nop(buf)
+    if !(buf.len == 4) { return false }
+    let word = a64_read_word(buf, 0)
+    if !(word == 0xD503201F) { return false }
+    true
+}
+
+// T05: RET => 0xD65F03C0 (ret x30)
+fn a64_test_ret() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = a64_emit_ret(buf)
+    if !(buf.len == 4) { return false }
+    let word = a64_read_word(buf, 0)
+    if !(word == 0xD65F03C0) { return false }
+    true
+}
+
+// T06: MOV X0, X1 => ORR X0, XZR, X1 => 0xAA0103E0
+fn a64_test_mov_reg() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = a64_emit_mov(buf, A64_X0, A64_X1)
+    if !(buf.len == 4) { return false }
+    let word = a64_read_word(buf, 0)
+    if !(word == 0xAA0103E0) { return false }
+    true
+}
+
+// T07: BLR X8 => 0xD63F0100
+fn a64_test_blr() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = a64_emit_blr(buf, A64_X8)
+    if !(buf.len == 4) { return false }
+    let word = a64_read_word(buf, 0)
+    if !(word == 0xD63F0100) { return false }
+    true
+}
+
+// T08: CMP X1, X2 => SUBS XZR, X1, X2 => 0xEB02003F
+fn a64_test_cmp_reg() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = a64_emit_cmp(buf, A64_X1, A64_X2)
+    if !(buf.len == 4) { return false }
+    let word = a64_read_word(buf, 0)
+    if !(word == 0xEB02003F) { return false }
+    true
+}
+
+// T09: MUL X0, X1, X2 => MADD X0, X1, X2, XZR => 0x9B027C20
+fn a64_test_mul() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = a64_emit_mul(buf, A64_X0, A64_X1, A64_X2)
+    if !(buf.len == 4) { return false }
+    let word = a64_read_word(buf, 0)
+    if !(word == 0x9B027C20) { return false }
+    true
+}
+
+// T10: B.EQ +8 => 0x54000040
+// imm19 = 8/4 = 2, cond = 0x0
+fn a64_test_b_eq() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = a64_emit_b_eq(buf, 8)
+    if !(buf.len == 4) { return false }
+    let word = a64_read_word(buf, 0)
+    if !(word == 0x54000040) { return false }
+    true
+}
+
+// T11: MOVZ X0, #0x1234, LSL #0 => 0xD2824680
+fn a64_test_movz() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = a64_emit_movz(buf, A64_X0, 0x1234, 0)
+    if !(buf.len == 4) { return false }
+    let word = a64_read_word(buf, 0)
+    if !(word == 0xD2824680) { return false }
+    true
+}
+
+// T12: STR X0, [X1, #8] => 0xF9000420
+// imm12 = 8/8 = 1
+fn a64_test_str() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = a64_emit_str(buf, A64_X0, A64_X1, 8)
+    if !(buf.len == 4) { return false }
+    let word = a64_read_word(buf, 0)
+    if !(word == 0xF9000420) { return false }
+    true
+}
+
+// T13: LDR X0, [X1, #16] => 0xF9400820
+// imm12 = 16/8 = 2
+fn a64_test_ldr() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = a64_emit_ldr(buf, A64_X0, A64_X1, 16)
+    if !(buf.len == 4) { return false }
+    let word = a64_read_word(buf, 0)
+    if !(word == 0xF9400820) { return false }
+    true
+}
+
+// T14: SDIV X0, X1, X2 => 0x9AC20C20
+fn a64_test_sdiv() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = a64_emit_sdiv(buf, A64_X0, A64_X1, A64_X2)
+    if !(buf.len == 4) { return false }
+    let word = a64_read_word(buf, 0)
+    if !(word == 0x9AC20C20) { return false }
+    true
+}
+
+// T15: SVC #0 => 0xD4000001
+fn a64_test_svc() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = a64_emit_svc(buf, 0)
+    if !(buf.len == 4) { return false }
+    let word = a64_read_word(buf, 0)
+    if !(word == 0xD4000001) { return false }
+    true
+}
+
+// T16: CBZ X0, +12 => 0xB4000060
+// imm19 = 12/4 = 3, Rt = 0
+fn a64_test_cbz() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = a64_emit_cbz(buf, A64_X0, 12)
+    if !(buf.len == 4) { return false }
+    let word = a64_read_word(buf, 0)
+    if !(word == 0xB4000060) { return false }
+    true
+}
+
+// T17: Prologue/epilogue produces correct instruction count
+fn a64_test_prologue_epilogue() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = a64_emit_prologue(buf, 16)
+    buf = a64_emit_epilogue(buf, 16)
+    // Prologue: stp (1) + mov (1) = 2 instructions = 8 bytes
+    // Epilogue: ldp (1) + ret (1) = 2 instructions = 8 bytes
+    if !(buf.len == 16) { return false }
+    true
+}
+
+// T18: AND X0, X1, X2 => 0x8A020020
+fn a64_test_and_reg() -> bool with Mut, Panic, Div {
+    var buf = code_buffer_new()
+    buf = a64_emit_and(buf, A64_X0, A64_X1, A64_X2)
+    if !(buf.len == 4) { return false }
+    let word = a64_read_word(buf, 0)
+    if !(word == 0x8A020020) { return false }
+    true
+}
+
+// ============================================================================
+// Test runner
+// ============================================================================
+
+fn a64_test_main() -> i32 with IO, Mut, Panic, Div {
+    var passed: i64 = 0
+    let total: i64 = 18
+
+    print("=== AArch64 Encoder Tests ===\n")
+
+    if a64_test_add_reg()   { passed = passed + 1; print("  T01 OK (ADD reg)\n")  } else { print("  FAIL: T01 ADD reg\n") }
+    if a64_test_sub_reg()   { passed = passed + 1; print("  T02 OK (SUB reg)\n")  } else { print("  FAIL: T02 SUB reg\n") }
+    if a64_test_add_imm()   { passed = passed + 1; print("  T03 OK (ADD imm)\n")  } else { print("  FAIL: T03 ADD imm\n") }
+    if a64_test_nop()       { passed = passed + 1; print("  T04 OK (NOP)\n")      } else { print("  FAIL: T04 NOP\n") }
+    if a64_test_ret()       { passed = passed + 1; print("  T05 OK (RET)\n")      } else { print("  FAIL: T05 RET\n") }
+    if a64_test_mov_reg()   { passed = passed + 1; print("  T06 OK (MOV reg)\n")  } else { print("  FAIL: T06 MOV reg\n") }
+    if a64_test_blr()       { passed = passed + 1; print("  T07 OK (BLR)\n")      } else { print("  FAIL: T07 BLR\n") }
+    if a64_test_cmp_reg()   { passed = passed + 1; print("  T08 OK (CMP reg)\n")  } else { print("  FAIL: T08 CMP reg\n") }
+    if a64_test_mul()       { passed = passed + 1; print("  T09 OK (MUL)\n")      } else { print("  FAIL: T09 MUL\n") }
+    if a64_test_b_eq()      { passed = passed + 1; print("  T10 OK (B.EQ)\n")     } else { print("  FAIL: T10 B.EQ\n") }
+    if a64_test_movz()      { passed = passed + 1; print("  T11 OK (MOVZ)\n")     } else { print("  FAIL: T11 MOVZ\n") }
+    if a64_test_str()       { passed = passed + 1; print("  T12 OK (STR)\n")      } else { print("  FAIL: T12 STR\n") }
+    if a64_test_ldr()       { passed = passed + 1; print("  T13 OK (LDR)\n")      } else { print("  FAIL: T13 LDR\n") }
+    if a64_test_sdiv()      { passed = passed + 1; print("  T14 OK (SDIV)\n")     } else { print("  FAIL: T14 SDIV\n") }
+    if a64_test_svc()       { passed = passed + 1; print("  T15 OK (SVC)\n")      } else { print("  FAIL: T15 SVC\n") }
+    if a64_test_cbz()       { passed = passed + 1; print("  T16 OK (CBZ)\n")      } else { print("  FAIL: T16 CBZ\n") }
+    if a64_test_prologue_epilogue() { passed = passed + 1; print("  T17 OK (prologue/epilogue)\n") } else { print("  FAIL: T17 prologue/epilogue\n") }
+    if a64_test_and_reg()   { passed = passed + 1; print("  T18 OK (AND reg)\n")  } else { print("  FAIL: T18 AND reg\n") }
+
+    print("\nAArch64 tests: ")
+    print_int(passed)
+    print("/")
+    print_int(total)
+    print(" passed\n")
+
+    if passed == total { 0 } else { 1 }
+}
