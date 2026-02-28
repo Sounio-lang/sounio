@@ -419,9 +419,10 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 61 { print("expression nesting exceeds maximum depth") }
     else if code == 62 { print("loop nesting exceeds maximum depth") }
     else if code == 64 { print("type complexity budget exceeded") }
-    // Range / constant (55-56)
+    // Range / constant (55-57)
     else if code == 55 { print("range endpoints must be integer types") }
     else if code == 56 { print("division by zero detected at compile time") }
+    else if code == 57 { print("modulo by zero detected at compile time") }
     else { print("unknown error") }
 }
 
@@ -584,6 +585,9 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 56 {
         print("   |\n   = help: dividing by zero is undefined; check the denominator\n")
+    }
+    else if code == 57 {
+        print("   |\n   = help: modulo by zero is undefined; check the divisor\n")
     }
     else {
         // No help available for unknown errors
@@ -750,6 +754,9 @@ fn print_error_note(code: i64) with IO, Mut, Panic, Div {
     else if code == 56 {
         print("   = note: integer division by zero causes undefined behavior\n")
     }
+    else if code == 57 {
+        print("   = note: integer modulo by zero causes undefined behavior\n")
+    }
     else {
         // No note available for unknown errors
     }
@@ -781,6 +788,13 @@ fn call_ref_inner_or_self(ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Allo
         }
     } else {
         ty
+    }
+}
+
+fn opt_expr_is_int_zero(opt: Option<Box<Expr>>) -> bool {
+    match opt {
+        Some(inner) => (*inner).kind == ExprKind::ExprIntLit && (*inner).int_val == 0
+        None => false
     }
 }
 
@@ -1798,10 +1812,15 @@ impl Checker {
         if result.kind == TypeKind::TyError && !is_error_or_unknown(left_ty) && !is_error_or_unknown(right_ty) {
             c = c.report_mismatch(e.span, 4, left_ty, right_ty)
         }
-        // Division by zero: detect literal zero denominators
-        if e.bin_op == BinaryOp::OpDiv || e.bin_op == BinaryOp::OpRem {
-            if c.last_literal_kind == 1 && c.last_literal_int == 0 {
+        // Division/modulo by zero: detect direct integer-literal zero denominators.
+        // This avoids false positives from nested expressions that merely contain a 0 literal.
+        if e.bin_op == BinaryOp::OpDiv {
+            if opt_expr_is_int_zero(e.right) {
                 c = c.report_error_at(e.span, 56, 0, 0, 0)
+            }
+        } else if e.bin_op == BinaryOp::OpRem {
+            if opt_expr_is_int_zero(e.right) {
+                c = c.report_error_at(e.span, 57, 0, 0, 0)
             }
         }
         // Unit checking for arithmetic on unit-typed values
