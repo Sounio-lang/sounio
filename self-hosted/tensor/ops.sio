@@ -1,0 +1,1222 @@
+// self-hosted::tensor::ops — Core Tensor Algebra Operations
+//
+// Implements dense tensor data structures and operations for the
+// self-hosted compiler's tensor subsystem. Supports up to 8D tensors
+// with a flat 4096-element backing store.
+//
+// ## Data Model
+//
+// TensorShape  — dimensions array + rank (up to 8D)
+// DenseTensor  — shape + flat f64 data array
+// TensorView   — offset into a tensor with custom strides
+//
+// ## Operations
+//
+// - Element-wise: add, sub, mul, scale, neg
+// - Linear algebra: dot, matmul, transpose
+// - Reductions: sum, max, min, norm, mean, sum_axis
+// - Construction: zeros, ones, fill, eye, arange
+// - Reshaping: reshape, flatten (via reshape)
+//
+// ## Indexing Convention
+//
+// Row-major (C-style) layout: last dimension varies fastest.
+// For a 2D tensor of shape [M, N], element (i, j) is at index i*N + j.
+
+// ============================================================================
+// TensorShape — Up to 8D dimension descriptor
+// ============================================================================
+
+struct TensorShape {
+    dims: [i64; 8],    // Dimension sizes
+    ndim: i64,         // Number of active dimensions (0..8)
+}
+
+fn tensor_shape_new(d0: i64, d1: i64, d2: i64, d3: i64, d4: i64, d5: i64, d6: i64, d7: i64, ndim: i64) -> TensorShape {
+    TensorShape {
+        dims: [d0, d1, d2, d3, d4, d5, d6, d7],
+        ndim: ndim,
+    }
+}
+
+fn tensor_shape_1d(n: i64) -> TensorShape {
+    tensor_shape_new(n, 0, 0, 0, 0, 0, 0, 0, 1)
+}
+
+fn tensor_shape_2d(m: i64, n: i64) -> TensorShape {
+    tensor_shape_new(m, n, 0, 0, 0, 0, 0, 0, 2)
+}
+
+fn tensor_shape_3d(m: i64, n: i64, k: i64) -> TensorShape {
+    tensor_shape_new(m, n, k, 0, 0, 0, 0, 0, 3)
+}
+
+fn tensor_shape_numel(shape: TensorShape) -> i64 with Mut, Panic, Div {
+    if shape.ndim <= 0 { return 1 }
+    var total: i64 = 1
+    var i: i64 = 0
+    while i < shape.ndim {
+        total = total * shape.dims[i as usize]
+        i = i + 1
+    }
+    total
+}
+
+fn tensor_shape_eq(a: TensorShape, b: TensorShape) -> bool with Mut, Panic, Div {
+    if a.ndim != b.ndim { return false }
+    var i: i64 = 0
+    while i < a.ndim {
+        if a.dims[i as usize] != b.dims[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+// Broadcasting: given shapes a and b, produce the broadcast shape.
+// Rules (NumPy-style):
+//   1. Align shapes from the right (trailing dimensions).
+//   2. For each pair, if both equal -> keep; if one is 1 -> take the other;
+//      else incompatible (return ndim=0 as error sentinel).
+fn tensor_shape_broadcast(a: TensorShape, b: TensorShape) -> TensorShape with Mut, Panic, Div {
+    // Result ndim is the maximum of the two
+    var out_ndim = a.ndim
+    if b.ndim > out_ndim { out_ndim = b.ndim }
+
+    var out_dims: [i64; 8] = [0; 8]
+    var i: i64 = 0
+    while i < out_ndim {
+        // Index from the right: a_idx = a.ndim - out_ndim + i
+        let a_idx = a.ndim - out_ndim + i
+        let b_idx = b.ndim - out_ndim + i
+
+        var da: i64 = 1
+        var db: i64 = 1
+        if a_idx >= 0 { da = a.dims[a_idx as usize] }
+        if b_idx >= 0 { db = b.dims[b_idx as usize] }
+
+        if da == db {
+            out_dims[i as usize] = da
+        } else if da == 1 {
+            out_dims[i as usize] = db
+        } else if db == 1 {
+            out_dims[i as usize] = da
+        } else {
+            // Incompatible — return sentinel with ndim=0
+            return TensorShape { dims: [0; 8], ndim: 0 }
+        }
+        i = i + 1
+    }
+
+    TensorShape { dims: out_dims, ndim: out_ndim }
+}
+
+// ============================================================================
+// DenseTensor — Flat storage up to 4096 elements
+// ============================================================================
+
+struct DenseTensor {
+    shape: TensorShape,
+    data: [f64; 4096],
+    len: i64,           // Number of active elements (== numel)
+}
+
+// ============================================================================
+// TensorView — Strided view into a DenseTensor
+// ============================================================================
+
+struct TensorView {
+    offset: i64,           // Start offset in the backing tensor's data
+    shape: TensorShape,
+    strides: [i64; 8],     // Strides for each dimension (in elements)
+}
+
+// Compute row-major strides for a shape
+fn compute_strides(shape: TensorShape) -> [i64; 8] with Mut, Panic, Div {
+    var strides: [i64; 8] = [0; 8]
+    if shape.ndim <= 0 { return strides }
+
+    // Last dimension stride = 1, then multiply backwards
+    strides[(shape.ndim - 1) as usize] = 1
+    var i = shape.ndim - 2
+    while i >= 0 {
+        strides[i as usize] = strides[(i + 1) as usize] * shape.dims[(i + 1) as usize]
+        i = i - 1
+    }
+    strides
+}
+
+fn tensor_view_new(offset: i64, shape: TensorShape) -> TensorView with Mut, Panic, Div {
+    TensorView {
+        offset: offset,
+        shape: shape,
+        strides: compute_strides(shape),
+    }
+}
+
+// ============================================================================
+// Tensor Constructors
+// ============================================================================
+
+fn tensor_zeros(shape: TensorShape) -> DenseTensor with Mut, Panic, Div {
+    let n = tensor_shape_numel(shape)
+    DenseTensor {
+        shape: shape,
+        data: [0.0; 4096],
+        len: n,
+    }
+}
+
+fn tensor_ones(shape: TensorShape) -> DenseTensor with Mut, Panic, Div {
+    let n = tensor_shape_numel(shape)
+    var t = DenseTensor {
+        shape: shape,
+        data: [0.0; 4096],
+        len: n,
+    }
+    var i: i64 = 0
+    while i < n {
+        t.data[i as usize] = 1.0
+        i = i + 1
+    }
+    t
+}
+
+fn tensor_fill(shape: TensorShape, val: f64) -> DenseTensor with Mut, Panic, Div {
+    let n = tensor_shape_numel(shape)
+    var t = DenseTensor {
+        shape: shape,
+        data: [0.0; 4096],
+        len: n,
+    }
+    var i: i64 = 0
+    while i < n {
+        t.data[i as usize] = val
+        i = i + 1
+    }
+    t
+}
+
+// Identity matrix of size n x n
+fn tensor_eye(n: i64) -> DenseTensor with Mut, Panic, Div {
+    let shape = tensor_shape_2d(n, n)
+    var t = tensor_zeros(shape)
+    var i: i64 = 0
+    while i < n {
+        let idx = i * n + i
+        t.data[idx as usize] = 1.0
+        i = i + 1
+    }
+    t
+}
+
+// Range tensor: [start, start+step, start+2*step, ...) while < end
+fn tensor_arange(start: f64, end: f64, step: f64) -> DenseTensor with Mut, Panic, Div {
+    // Count elements
+    var count: i64 = 0
+    var val = start
+    if step > 0.0 {
+        while val < end {
+            count = count + 1
+            val = val + step
+        }
+    } else if step < 0.0 {
+        while val > end {
+            count = count + 1
+            val = val + step
+        }
+    }
+    // step == 0 -> zero-length tensor
+
+    if count > 4096 { count = 4096 }
+
+    let shape = tensor_shape_1d(count)
+    var t = DenseTensor {
+        shape: shape,
+        data: [0.0; 4096],
+        len: count,
+    }
+
+    var i: i64 = 0
+    val = start
+    while i < count {
+        t.data[i as usize] = val
+        val = val + step
+        i = i + 1
+    }
+    t
+}
+
+// ============================================================================
+// Element Access — 1D
+// ============================================================================
+
+fn tensor_get_1d(t: DenseTensor, i: i64) -> f64 with Panic {
+    t.data[i as usize]
+}
+
+fn tensor_set_1d(t: DenseTensor, i: i64, val: f64) -> DenseTensor with Mut, Panic {
+    var out = t
+    out.data[i as usize] = val
+    out
+}
+
+// ============================================================================
+// Element Access — 2D (row-major: index = i * cols + j)
+// ============================================================================
+
+fn tensor_get_2d(t: DenseTensor, i: i64, j: i64) -> f64 with Panic {
+    let cols = t.shape.dims[1]
+    let idx = i * cols + j
+    t.data[idx as usize]
+}
+
+fn tensor_set_2d(t: DenseTensor, i: i64, j: i64, val: f64) -> DenseTensor with Mut, Panic {
+    let cols = t.shape.dims[1]
+    let idx = i * cols + j
+    var out = t
+    out.data[idx as usize] = val
+    out
+}
+
+// ============================================================================
+// Flat Index Computation (general N-D -> linear)
+// ============================================================================
+
+// Given shape and an index array (up to 8 indices), compute the linear offset.
+// Uses row-major layout.
+fn tensor_flat_index(shape: TensorShape, indices: [i64; 8]) -> i64 with Mut, Panic, Div {
+    let strides = compute_strides(shape)
+    var offset: i64 = 0
+    var i: i64 = 0
+    while i < shape.ndim {
+        offset = offset + indices[i as usize] * strides[i as usize]
+        i = i + 1
+    }
+    offset
+}
+
+// ============================================================================
+// Element-wise Arithmetic
+// ============================================================================
+
+fn tensor_add(a: DenseTensor, b: DenseTensor) -> DenseTensor with Mut, Panic, Div {
+    var out = tensor_zeros(a.shape)
+    var i: i64 = 0
+    while i < a.len {
+        out.data[i as usize] = a.data[i as usize] + b.data[i as usize]
+        i = i + 1
+    }
+    out
+}
+
+fn tensor_sub(a: DenseTensor, b: DenseTensor) -> DenseTensor with Mut, Panic, Div {
+    var out = tensor_zeros(a.shape)
+    var i: i64 = 0
+    while i < a.len {
+        out.data[i as usize] = a.data[i as usize] - b.data[i as usize]
+        i = i + 1
+    }
+    out
+}
+
+fn tensor_mul_elementwise(a: DenseTensor, b: DenseTensor) -> DenseTensor with Mut, Panic, Div {
+    var out = tensor_zeros(a.shape)
+    var i: i64 = 0
+    while i < a.len {
+        out.data[i as usize] = a.data[i as usize] * b.data[i as usize]
+        i = i + 1
+    }
+    out
+}
+
+fn tensor_scale(t: DenseTensor, scalar: f64) -> DenseTensor with Mut, Panic, Div {
+    var out = tensor_zeros(t.shape)
+    var i: i64 = 0
+    while i < t.len {
+        out.data[i as usize] = t.data[i as usize] * scalar
+        i = i + 1
+    }
+    out
+}
+
+fn tensor_neg(t: DenseTensor) -> DenseTensor with Mut, Panic, Div {
+    var out = tensor_zeros(t.shape)
+    var i: i64 = 0
+    while i < t.len {
+        out.data[i as usize] = 0.0 - t.data[i as usize]
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
+// Inner Product (1D dot product)
+// ============================================================================
+
+fn tensor_dot(a: DenseTensor, b: DenseTensor) -> f64 with Mut, Panic, Div {
+    var sum: f64 = 0.0
+    var i: i64 = 0
+    let n = a.len
+    while i < n {
+        sum = sum + a.data[i as usize] * b.data[i as usize]
+        i = i + 1
+    }
+    sum
+}
+
+// ============================================================================
+// Matrix Multiply (2D x 2D -> 2D)
+// ============================================================================
+//
+// C[i,j] = sum_k A[i,k] * B[k,j]
+// A is [M, K], B is [K, N], result C is [M, N]
+
+fn tensor_matmul(a: DenseTensor, b: DenseTensor) -> DenseTensor with Mut, Panic, Div {
+    let m = a.shape.dims[0]
+    let k = a.shape.dims[1]
+    let n = b.shape.dims[1]
+
+    let out_shape = tensor_shape_2d(m, n)
+    var c = tensor_zeros(out_shape)
+
+    var i: i64 = 0
+    while i < m {
+        var j: i64 = 0
+        while j < n {
+            var sum: f64 = 0.0
+            var p: i64 = 0
+            while p < k {
+                let a_idx = i * k + p
+                let b_idx = p * n + j
+                sum = sum + a.data[a_idx as usize] * b.data[b_idx as usize]
+                p = p + 1
+            }
+            let c_idx = i * n + j
+            c.data[c_idx as usize] = sum
+            j = j + 1
+        }
+        i = i + 1
+    }
+    c
+}
+
+// ============================================================================
+// Transpose (2D)
+// ============================================================================
+
+fn tensor_transpose(t: DenseTensor) -> DenseTensor with Mut, Panic, Div {
+    let rows = t.shape.dims[0]
+    let cols = t.shape.dims[1]
+    let out_shape = tensor_shape_2d(cols, rows)
+    var out = tensor_zeros(out_shape)
+
+    var i: i64 = 0
+    while i < rows {
+        var j: i64 = 0
+        while j < cols {
+            let src = i * cols + j
+            let dst = j * rows + i
+            out.data[dst as usize] = t.data[src as usize]
+            j = j + 1
+        }
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
+// Reductions
+// ============================================================================
+
+fn tensor_sum(t: DenseTensor) -> f64 with Mut, Panic, Div {
+    var s: f64 = 0.0
+    var i: i64 = 0
+    while i < t.len {
+        s = s + t.data[i as usize]
+        i = i + 1
+    }
+    s
+}
+
+fn tensor_max(t: DenseTensor) -> f64 with Mut, Panic, Div {
+    if t.len <= 0 { return 0.0 }
+    var m = t.data[0]
+    var i: i64 = 1
+    while i < t.len {
+        if t.data[i as usize] > m {
+            m = t.data[i as usize]
+        }
+        i = i + 1
+    }
+    m
+}
+
+fn tensor_min(t: DenseTensor) -> f64 with Mut, Panic, Div {
+    if t.len <= 0 { return 0.0 }
+    var m = t.data[0]
+    var i: i64 = 1
+    while i < t.len {
+        if t.data[i as usize] < m {
+            m = t.data[i as usize]
+        }
+        i = i + 1
+    }
+    m
+}
+
+// Frobenius norm: sqrt(sum of squares)
+// Uses Newton's method for integer-approximate sqrt since Sounio
+// does not have a built-in sqrt.
+fn approx_sqrt(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    // Newton iteration: g_{n+1} = (g_n + x / g_n) / 2
+    var g = x
+    // Initial guess: halve until reasonable
+    if g > 1.0 {
+        while g * g > x * 4.0 {
+            g = g / 2.0
+        }
+    } else {
+        g = 1.0
+    }
+    // 20 iterations is more than enough for f64 precision
+    var iter: i64 = 0
+    while iter < 20 {
+        g = (g + x / g) / 2.0
+        iter = iter + 1
+    }
+    g
+}
+
+fn tensor_norm(t: DenseTensor) -> f64 with Mut, Panic, Div {
+    var sum_sq: f64 = 0.0
+    var i: i64 = 0
+    while i < t.len {
+        let v = t.data[i as usize]
+        sum_sq = sum_sq + v * v
+        i = i + 1
+    }
+    approx_sqrt(sum_sq)
+}
+
+// ============================================================================
+// Reshape
+// ============================================================================
+
+fn tensor_reshape(t: DenseTensor, new_shape: TensorShape) -> DenseTensor with Mut, Panic, Div {
+    // The total element count must match; caller is responsible.
+    // We just copy data with the new shape.
+    let new_len = tensor_shape_numel(new_shape)
+    var out = DenseTensor {
+        shape: new_shape,
+        data: [0.0; 4096],
+        len: new_len,
+    }
+    // Copy data up to the minimum of old and new lengths
+    var n = t.len
+    if new_len < n { n = new_len }
+    var i: i64 = 0
+    while i < n {
+        out.data[i as usize] = t.data[i as usize]
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
+// Axis Reduction: sum along a single axis
+// ============================================================================
+//
+// For a tensor of shape [d0, d1, ..., d_{n-1}], summing along axis `ax`
+// produces a tensor with that dimension removed.
+//
+// Strategy: decompose the flat index into (outer, ax_idx, inner) where
+//   outer strides over dimensions 0..ax-1
+//   ax_idx strides over dimension ax
+//   inner strides over dimensions ax+1..ndim-1
+
+fn tensor_sum_axis(t: DenseTensor, axis: i64) -> DenseTensor with Mut, Panic, Div {
+    let ndim = t.shape.ndim
+
+    // Compute outer_size = product of dims before axis
+    var outer_size: i64 = 1
+    var d: i64 = 0
+    while d < axis {
+        outer_size = outer_size * t.shape.dims[d as usize]
+        d = d + 1
+    }
+
+    let ax_size = t.shape.dims[axis as usize]
+
+    // Compute inner_size = product of dims after axis
+    var inner_size: i64 = 1
+    d = axis + 1
+    while d < ndim {
+        inner_size = inner_size * t.shape.dims[d as usize]
+        d = d + 1
+    }
+
+    // Build output shape: remove the axis dimension
+    var out_dims: [i64; 8] = [0; 8]
+    var out_ndim: i64 = 0
+    d = 0
+    while d < ndim {
+        if d != axis {
+            out_dims[out_ndim as usize] = t.shape.dims[d as usize]
+            out_ndim = out_ndim + 1
+        }
+        d = d + 1
+    }
+    // Handle scalar result (all dims collapsed)
+    if out_ndim == 0 {
+        out_ndim = 1
+        out_dims[0] = 1
+    }
+
+    let out_shape = TensorShape { dims: out_dims, ndim: out_ndim }
+    var out = tensor_zeros(out_shape)
+
+    // Accumulate
+    var o: i64 = 0
+    while o < outer_size {
+        var inn: i64 = 0
+        while inn < inner_size {
+            var sum: f64 = 0.0
+            var a: i64 = 0
+            while a < ax_size {
+                let src_idx = (o * ax_size + a) * inner_size + inn
+                sum = sum + t.data[src_idx as usize]
+                a = a + 1
+            }
+            let dst_idx = o * inner_size + inn
+            out.data[dst_idx as usize] = sum
+            inn = inn + 1
+        }
+        o = o + 1
+    }
+
+    out
+}
+
+// Mean over all elements
+fn tensor_mean(t: DenseTensor) -> f64 with Mut, Panic, Div {
+    if t.len <= 0 { return 0.0 }
+    let s = tensor_sum(t)
+    s / (t.len as f64)
+}
+
+// ============================================================================
+// Approximate equality helper (for tests)
+// ============================================================================
+
+fn tops_approx_eq(a: f64, b: f64, eps: f64) -> bool {
+    let diff = if a > b { a - b } else { b - a }
+    diff < eps
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+// T01: Shape constructors and numel
+fn test_shape_basics() -> i64 with Mut, Panic, Div {
+    let s1 = tensor_shape_1d(10)
+    if s1.ndim != 1 { return 1 }
+    if s1.dims[0] != 10 { return 2 }
+    if tensor_shape_numel(s1) != 10 { return 3 }
+
+    let s2 = tensor_shape_2d(3, 4)
+    if s2.ndim != 2 { return 4 }
+    if tensor_shape_numel(s2) != 12 { return 5 }
+
+    let s3 = tensor_shape_3d(2, 3, 4)
+    if s3.ndim != 3 { return 6 }
+    if tensor_shape_numel(s3) != 24 { return 7 }
+
+    0
+}
+
+// T02: Shape equality
+fn test_shape_eq() -> i64 with Mut, Panic, Div {
+    let a = tensor_shape_2d(3, 4)
+    let b = tensor_shape_2d(3, 4)
+    let c = tensor_shape_2d(4, 3)
+
+    if !tensor_shape_eq(a, b) { return 1 }
+    if tensor_shape_eq(a, c) { return 2 }
+
+    // Different ndim
+    let d = tensor_shape_1d(12)
+    if tensor_shape_eq(a, d) { return 3 }
+
+    0
+}
+
+// T03: Broadcasting rules
+fn test_shape_broadcast() -> i64 with Mut, Panic, Div {
+    // [3, 1] + [1, 4] -> [3, 4]
+    let a = tensor_shape_2d(3, 1)
+    let b = tensor_shape_2d(1, 4)
+    let c = tensor_shape_broadcast(a, b)
+    if c.ndim != 2 { return 1 }
+    if c.dims[0] != 3 { return 2 }
+    if c.dims[1] != 4 { return 3 }
+
+    // [5] + [3, 5] -> [3, 5]  (different ndim)
+    let d = tensor_shape_1d(5)
+    let e = tensor_shape_2d(3, 5)
+    let f = tensor_shape_broadcast(d, e)
+    if f.ndim != 2 { return 4 }
+    if f.dims[0] != 3 { return 5 }
+    if f.dims[1] != 5 { return 6 }
+
+    // Incompatible: [3] + [4] -> ndim=0 (error)
+    let g = tensor_shape_1d(3)
+    let h = tensor_shape_1d(4)
+    let r = tensor_shape_broadcast(g, h)
+    if r.ndim != 0 { return 7 }
+
+    0
+}
+
+// T04: Tensor zeros, ones, fill
+fn test_constructors() -> i64 with Mut, Panic, Div {
+    let shape = tensor_shape_1d(5)
+
+    let z = tensor_zeros(shape)
+    if z.len != 5 { return 1 }
+    if z.data[0] != 0.0 { return 2 }
+    if z.data[4] != 0.0 { return 3 }
+
+    let o = tensor_ones(shape)
+    if o.data[0] != 1.0 { return 4 }
+    if o.data[4] != 1.0 { return 5 }
+
+    let f = tensor_fill(shape, 3.14)
+    if !tops_approx_eq(f.data[0], 3.14, 0.001) { return 6 }
+    if !tops_approx_eq(f.data[4], 3.14, 0.001) { return 7 }
+
+    0
+}
+
+// T05: Identity matrix
+fn test_eye() -> i64 with Mut, Panic, Div {
+    let eye3 = tensor_eye(3)
+    if eye3.shape.ndim != 2 { return 1 }
+    if eye3.shape.dims[0] != 3 { return 2 }
+    if eye3.len != 9 { return 3 }
+
+    // Diagonal elements should be 1
+    if tensor_get_2d(eye3, 0, 0) != 1.0 { return 4 }
+    if tensor_get_2d(eye3, 1, 1) != 1.0 { return 5 }
+    if tensor_get_2d(eye3, 2, 2) != 1.0 { return 6 }
+
+    // Off-diagonal should be 0
+    if tensor_get_2d(eye3, 0, 1) != 0.0 { return 7 }
+    if tensor_get_2d(eye3, 1, 0) != 0.0 { return 8 }
+
+    0
+}
+
+// T06: arange
+fn test_arange() -> i64 with Mut, Panic, Div {
+    let t = tensor_arange(0.0, 5.0, 1.0)
+    if t.len != 5 { return 1 }
+    if !tops_approx_eq(t.data[0], 0.0, 0.001) { return 2 }
+    if !tops_approx_eq(t.data[4], 4.0, 0.001) { return 3 }
+
+    // Fractional step
+    let t2 = tensor_arange(0.0, 1.0, 0.25)
+    if t2.len != 4 { return 4 }
+    if !tops_approx_eq(t2.data[0], 0.0, 0.001) { return 5 }
+    if !tops_approx_eq(t2.data[3], 0.75, 0.001) { return 6 }
+
+    0
+}
+
+// T07: 1D get/set
+fn test_get_set_1d() -> i64 with Mut, Panic, Div {
+    let shape = tensor_shape_1d(4)
+    var t = tensor_zeros(shape)
+
+    t = tensor_set_1d(t, 0, 10.0)
+    t = tensor_set_1d(t, 3, 40.0)
+
+    if tensor_get_1d(t, 0) != 10.0 { return 1 }
+    if tensor_get_1d(t, 1) != 0.0 { return 2 }
+    if tensor_get_1d(t, 3) != 40.0 { return 3 }
+
+    0
+}
+
+// T08: 2D get/set
+fn test_get_set_2d() -> i64 with Mut, Panic, Div {
+    let shape = tensor_shape_2d(2, 3)
+    var t = tensor_zeros(shape)
+
+    t = tensor_set_2d(t, 0, 0, 1.0)
+    t = tensor_set_2d(t, 0, 2, 3.0)
+    t = tensor_set_2d(t, 1, 1, 5.0)
+
+    if tensor_get_2d(t, 0, 0) != 1.0 { return 1 }
+    if tensor_get_2d(t, 0, 2) != 3.0 { return 2 }
+    if tensor_get_2d(t, 1, 1) != 5.0 { return 3 }
+    if tensor_get_2d(t, 1, 0) != 0.0 { return 4 }
+
+    0
+}
+
+// T09: flat_index for 3D tensor
+fn test_flat_index() -> i64 with Mut, Panic, Div {
+    let shape = tensor_shape_3d(2, 3, 4)
+    // For [2,3,4] row-major: strides = [12, 4, 1]
+    // index(1, 2, 3) = 1*12 + 2*4 + 3 = 23
+
+    var idx: [i64; 8] = [0; 8]
+    idx[0] = 1
+    idx[1] = 2
+    idx[2] = 3
+
+    let flat = tensor_flat_index(shape, idx)
+    if flat != 23 { return 1 }
+
+    // index(0, 0, 0) = 0
+    var idx0: [i64; 8] = [0; 8]
+    let flat0 = tensor_flat_index(shape, idx0)
+    if flat0 != 0 { return 2 }
+
+    0
+}
+
+// T10: Element-wise add, sub, mul
+fn test_elementwise_ops() -> i64 with Mut, Panic, Div {
+    let shape = tensor_shape_1d(4)
+    let a = tensor_fill(shape, 2.0)
+    let b = tensor_fill(shape, 3.0)
+
+    let sum_t = tensor_add(a, b)
+    if !tops_approx_eq(sum_t.data[0], 5.0, 0.001) { return 1 }
+
+    let diff = tensor_sub(a, b)
+    // 2.0 - 3.0 = -1.0
+    if !tops_approx_eq(diff.data[0], 0.0 - 1.0, 0.001) { return 2 }
+
+    let prod = tensor_mul_elementwise(a, b)
+    if !tops_approx_eq(prod.data[0], 6.0, 0.001) { return 3 }
+
+    0
+}
+
+// T11: Scale and negate
+fn test_scale_neg() -> i64 with Mut, Panic, Div {
+    let shape = tensor_shape_1d(3)
+    var t = tensor_zeros(shape)
+    t = tensor_set_1d(t, 0, 1.0)
+    t = tensor_set_1d(t, 1, 2.0)
+    t = tensor_set_1d(t, 2, 3.0)
+
+    let scaled = tensor_scale(t, 10.0)
+    if !tops_approx_eq(scaled.data[0], 10.0, 0.001) { return 1 }
+    if !tops_approx_eq(scaled.data[2], 30.0, 0.001) { return 2 }
+
+    let neg = tensor_neg(t)
+    if !tops_approx_eq(neg.data[0], 0.0 - 1.0, 0.001) { return 3 }
+    if !tops_approx_eq(neg.data[2], 0.0 - 3.0, 0.001) { return 4 }
+
+    0
+}
+
+// T12: Dot product
+fn test_dot_product() -> i64 with Mut, Panic, Div {
+    let shape = tensor_shape_1d(3)
+    var a = tensor_zeros(shape)
+    a = tensor_set_1d(a, 0, 1.0)
+    a = tensor_set_1d(a, 1, 2.0)
+    a = tensor_set_1d(a, 2, 3.0)
+
+    var b = tensor_zeros(shape)
+    b = tensor_set_1d(b, 0, 4.0)
+    b = tensor_set_1d(b, 1, 5.0)
+    b = tensor_set_1d(b, 2, 6.0)
+
+    // dot = 1*4 + 2*5 + 3*6 = 4 + 10 + 18 = 32
+    let d = tensor_dot(a, b)
+    if !tops_approx_eq(d, 32.0, 0.001) { return 1 }
+
+    // Dot of a vector with itself = sum of squares
+    // 1 + 4 + 9 = 14
+    let d_self = tensor_dot(a, a)
+    if !tops_approx_eq(d_self, 14.0, 0.001) { return 2 }
+
+    0
+}
+
+// T13: Matrix multiply
+fn test_matmul() -> i64 with Mut, Panic, Div {
+    // A = [[1, 2], [3, 4]]  (2x2)
+    // B = [[5, 6], [7, 8]]  (2x2)
+    // C = A * B = [[1*5+2*7, 1*6+2*8], [3*5+4*7, 3*6+4*8]]
+    //           = [[19, 22], [43, 50]]
+
+    let shape = tensor_shape_2d(2, 2)
+    var a = tensor_zeros(shape)
+    a = tensor_set_2d(a, 0, 0, 1.0)
+    a = tensor_set_2d(a, 0, 1, 2.0)
+    a = tensor_set_2d(a, 1, 0, 3.0)
+    a = tensor_set_2d(a, 1, 1, 4.0)
+
+    var b = tensor_zeros(shape)
+    b = tensor_set_2d(b, 0, 0, 5.0)
+    b = tensor_set_2d(b, 0, 1, 6.0)
+    b = tensor_set_2d(b, 1, 0, 7.0)
+    b = tensor_set_2d(b, 1, 1, 8.0)
+
+    let c = tensor_matmul(a, b)
+    if !tops_approx_eq(tensor_get_2d(c, 0, 0), 19.0, 0.001) { return 1 }
+    if !tops_approx_eq(tensor_get_2d(c, 0, 1), 22.0, 0.001) { return 2 }
+    if !tops_approx_eq(tensor_get_2d(c, 1, 0), 43.0, 0.001) { return 3 }
+    if !tops_approx_eq(tensor_get_2d(c, 1, 1), 50.0, 0.001) { return 4 }
+
+    0
+}
+
+// T14: Transpose
+fn test_transpose() -> i64 with Mut, Panic, Div {
+    // A = [[1, 2, 3], [4, 5, 6]]  (2x3)
+    // A^T = [[1, 4], [2, 5], [3, 6]]  (3x2)
+    let shape = tensor_shape_2d(2, 3)
+    var a = tensor_zeros(shape)
+    a = tensor_set_2d(a, 0, 0, 1.0)
+    a = tensor_set_2d(a, 0, 1, 2.0)
+    a = tensor_set_2d(a, 0, 2, 3.0)
+    a = tensor_set_2d(a, 1, 0, 4.0)
+    a = tensor_set_2d(a, 1, 1, 5.0)
+    a = tensor_set_2d(a, 1, 2, 6.0)
+
+    let at = tensor_transpose(a)
+    if at.shape.dims[0] != 3 { return 1 }
+    if at.shape.dims[1] != 2 { return 2 }
+
+    if !tops_approx_eq(tensor_get_2d(at, 0, 0), 1.0, 0.001) { return 3 }
+    if !tops_approx_eq(tensor_get_2d(at, 0, 1), 4.0, 0.001) { return 4 }
+    if !tops_approx_eq(tensor_get_2d(at, 1, 0), 2.0, 0.001) { return 5 }
+    if !tops_approx_eq(tensor_get_2d(at, 2, 1), 6.0, 0.001) { return 6 }
+
+    // Double transpose should recover original
+    let att = tensor_transpose(at)
+    if !tops_approx_eq(tensor_get_2d(att, 0, 0), 1.0, 0.001) { return 7 }
+    if !tops_approx_eq(tensor_get_2d(att, 1, 2), 6.0, 0.001) { return 8 }
+
+    0
+}
+
+// T15: Reductions — sum, max, min
+fn test_reductions() -> i64 with Mut, Panic, Div {
+    let shape = tensor_shape_1d(5)
+    var t = tensor_zeros(shape)
+    // [10, 20, 5, 30, 15]
+    t = tensor_set_1d(t, 0, 10.0)
+    t = tensor_set_1d(t, 1, 20.0)
+    t = tensor_set_1d(t, 2, 5.0)
+    t = tensor_set_1d(t, 3, 30.0)
+    t = tensor_set_1d(t, 4, 15.0)
+
+    let s = tensor_sum(t)
+    if !tops_approx_eq(s, 80.0, 0.001) { return 1 }
+
+    let mx = tensor_max(t)
+    if !tops_approx_eq(mx, 30.0, 0.001) { return 2 }
+
+    let mn = tensor_min(t)
+    if !tops_approx_eq(mn, 5.0, 0.001) { return 3 }
+
+    0
+}
+
+// T16: Norm (Frobenius)
+fn test_norm() -> i64 with Mut, Panic, Div {
+    // [3, 4] -> norm = sqrt(9 + 16) = sqrt(25) = 5
+    let shape = tensor_shape_1d(2)
+    var t = tensor_zeros(shape)
+    t = tensor_set_1d(t, 0, 3.0)
+    t = tensor_set_1d(t, 1, 4.0)
+
+    let n = tensor_norm(t)
+    if !tops_approx_eq(n, 5.0, 0.001) { return 1 }
+
+    // Zero tensor norm should be 0
+    let z = tensor_zeros(shape)
+    let nz = tensor_norm(z)
+    if !tops_approx_eq(nz, 0.0, 0.001) { return 2 }
+
+    0
+}
+
+// T17: Reshape
+fn test_reshape() -> i64 with Mut, Panic, Div {
+    // Create a [2, 3] tensor with data 1..6
+    let shape = tensor_shape_2d(2, 3)
+    var t = tensor_zeros(shape)
+    t = tensor_set_2d(t, 0, 0, 1.0)
+    t = tensor_set_2d(t, 0, 1, 2.0)
+    t = tensor_set_2d(t, 0, 2, 3.0)
+    t = tensor_set_2d(t, 1, 0, 4.0)
+    t = tensor_set_2d(t, 1, 1, 5.0)
+    t = tensor_set_2d(t, 1, 2, 6.0)
+
+    // Reshape to [3, 2]
+    let new_shape = tensor_shape_2d(3, 2)
+    let r = tensor_reshape(t, new_shape)
+
+    if r.shape.dims[0] != 3 { return 1 }
+    if r.shape.dims[1] != 2 { return 2 }
+    if r.len != 6 { return 3 }
+
+    // Data should be preserved in flat order
+    if !tops_approx_eq(r.data[0], 1.0, 0.001) { return 4 }
+    if !tops_approx_eq(r.data[5], 6.0, 0.001) { return 5 }
+
+    // Reshape to 1D [6]
+    let flat_shape = tensor_shape_1d(6)
+    let flat = tensor_reshape(t, flat_shape)
+    if flat.len != 6 { return 6 }
+    if !tops_approx_eq(flat.data[3], 4.0, 0.001) { return 7 }
+
+    0
+}
+
+// T18: Sum along axis
+fn test_sum_axis() -> i64 with Mut, Panic, Div {
+    // A = [[1, 2, 3], [4, 5, 6]]  shape [2, 3]
+    // sum(axis=0) = [5, 7, 9]     shape [3]
+    // sum(axis=1) = [6, 15]       shape [2]
+    let shape = tensor_shape_2d(2, 3)
+    var t = tensor_zeros(shape)
+    t = tensor_set_2d(t, 0, 0, 1.0)
+    t = tensor_set_2d(t, 0, 1, 2.0)
+    t = tensor_set_2d(t, 0, 2, 3.0)
+    t = tensor_set_2d(t, 1, 0, 4.0)
+    t = tensor_set_2d(t, 1, 1, 5.0)
+    t = tensor_set_2d(t, 1, 2, 6.0)
+
+    // Sum along axis 0 (collapse rows)
+    let s0 = tensor_sum_axis(t, 0)
+    if s0.shape.ndim != 1 { return 1 }
+    if s0.shape.dims[0] != 3 { return 2 }
+    if !tops_approx_eq(s0.data[0], 5.0, 0.001) { return 3 }
+    if !tops_approx_eq(s0.data[1], 7.0, 0.001) { return 4 }
+    if !tops_approx_eq(s0.data[2], 9.0, 0.001) { return 5 }
+
+    // Sum along axis 1 (collapse columns)
+    let s1 = tensor_sum_axis(t, 1)
+    if s1.shape.ndim != 1 { return 6 }
+    if s1.shape.dims[0] != 2 { return 7 }
+    if !tops_approx_eq(s1.data[0], 6.0, 0.001) { return 8 }
+    if !tops_approx_eq(s1.data[1], 15.0, 0.001) { return 9 }
+
+    0
+}
+
+// T19: Mean
+fn test_mean() -> i64 with Mut, Panic, Div {
+    let shape = tensor_shape_1d(4)
+    var t = tensor_zeros(shape)
+    // [2, 4, 6, 8] -> mean = 20/4 = 5.0
+    t = tensor_set_1d(t, 0, 2.0)
+    t = tensor_set_1d(t, 1, 4.0)
+    t = tensor_set_1d(t, 2, 6.0)
+    t = tensor_set_1d(t, 3, 8.0)
+
+    let m = tensor_mean(t)
+    if !tops_approx_eq(m, 5.0, 0.001) { return 1 }
+
+    0
+}
+
+// T20: Matmul with identity produces same matrix
+fn test_matmul_identity() -> i64 with Mut, Panic, Div {
+    let shape = tensor_shape_2d(3, 3)
+    var a = tensor_zeros(shape)
+    a = tensor_set_2d(a, 0, 0, 1.0)
+    a = tensor_set_2d(a, 0, 1, 2.0)
+    a = tensor_set_2d(a, 0, 2, 3.0)
+    a = tensor_set_2d(a, 1, 0, 4.0)
+    a = tensor_set_2d(a, 1, 1, 5.0)
+    a = tensor_set_2d(a, 1, 2, 6.0)
+    a = tensor_set_2d(a, 2, 0, 7.0)
+    a = tensor_set_2d(a, 2, 1, 8.0)
+    a = tensor_set_2d(a, 2, 2, 9.0)
+
+    let eye = tensor_eye(3)
+    let ai = tensor_matmul(a, eye)
+
+    // A * I = A
+    if !tops_approx_eq(tensor_get_2d(ai, 0, 0), 1.0, 0.001) { return 1 }
+    if !tops_approx_eq(tensor_get_2d(ai, 0, 2), 3.0, 0.001) { return 2 }
+    if !tops_approx_eq(tensor_get_2d(ai, 1, 1), 5.0, 0.001) { return 3 }
+    if !tops_approx_eq(tensor_get_2d(ai, 2, 0), 7.0, 0.001) { return 4 }
+    if !tops_approx_eq(tensor_get_2d(ai, 2, 2), 9.0, 0.001) { return 5 }
+
+    0
+}
+
+// T21: Non-square matmul dimensions
+fn test_matmul_nonsquare() -> i64 with Mut, Panic, Div {
+    // A = [1x3], B = [3x1]  -> C = [1x1] (scalar-like)
+    let shape_a = tensor_shape_2d(1, 3)
+    var a = tensor_zeros(shape_a)
+    a = tensor_set_2d(a, 0, 0, 1.0)
+    a = tensor_set_2d(a, 0, 1, 2.0)
+    a = tensor_set_2d(a, 0, 2, 3.0)
+
+    let shape_b = tensor_shape_2d(3, 1)
+    var b = tensor_zeros(shape_b)
+    b = tensor_set_2d(b, 0, 0, 4.0)
+    b = tensor_set_2d(b, 1, 0, 5.0)
+    b = tensor_set_2d(b, 2, 0, 6.0)
+
+    let c = tensor_matmul(a, b)
+    // 1*4 + 2*5 + 3*6 = 32
+    if c.shape.dims[0] != 1 { return 1 }
+    if c.shape.dims[1] != 1 { return 2 }
+    if !tops_approx_eq(tensor_get_2d(c, 0, 0), 32.0, 0.001) { return 3 }
+
+    0
+}
+
+// T22: Strides computation
+fn test_strides() -> i64 with Mut, Panic, Div {
+    // [2, 3, 4] -> strides = [12, 4, 1]
+    let s = tensor_shape_3d(2, 3, 4)
+    let strides = compute_strides(s)
+    if strides[0] != 12 { return 1 }
+    if strides[1] != 4 { return 2 }
+    if strides[2] != 1 { return 3 }
+
+    // [5, 10] -> strides = [10, 1]
+    let s2 = tensor_shape_2d(5, 10)
+    let strides2 = compute_strides(s2)
+    if strides2[0] != 10 { return 4 }
+    if strides2[1] != 1 { return 5 }
+
+    0
+}
+
+// T23: approx_sqrt correctness
+fn test_approx_sqrt() -> i64 with Mut, Panic, Div {
+    // sqrt(4) = 2
+    if !tops_approx_eq(approx_sqrt(4.0), 2.0, 0.0001) { return 1 }
+
+    // sqrt(9) = 3
+    if !tops_approx_eq(approx_sqrt(9.0), 3.0, 0.0001) { return 2 }
+
+    // sqrt(2) ≈ 1.41421
+    if !tops_approx_eq(approx_sqrt(2.0), 1.41421, 0.001) { return 3 }
+
+    // sqrt(0) = 0
+    if !tops_approx_eq(approx_sqrt(0.0), 0.0, 0.0001) { return 4 }
+
+    // sqrt(100) = 10
+    if !tops_approx_eq(approx_sqrt(100.0), 10.0, 0.0001) { return 5 }
+
+    0
+}
+
+// T24: Tensor add/sub inverse
+fn test_add_sub_inverse() -> i64 with Mut, Panic, Div {
+    let shape = tensor_shape_1d(4)
+    var a = tensor_zeros(shape)
+    a = tensor_set_1d(a, 0, 1.0)
+    a = tensor_set_1d(a, 1, 2.0)
+    a = tensor_set_1d(a, 2, 3.0)
+    a = tensor_set_1d(a, 3, 4.0)
+
+    var b = tensor_zeros(shape)
+    b = tensor_set_1d(b, 0, 10.0)
+    b = tensor_set_1d(b, 1, 20.0)
+    b = tensor_set_1d(b, 2, 30.0)
+    b = tensor_set_1d(b, 3, 40.0)
+
+    // (a + b) - b = a
+    let sum_t = tensor_add(a, b)
+    let diff = tensor_sub(sum_t, b)
+    if !tops_approx_eq(diff.data[0], 1.0, 0.001) { return 1 }
+    if !tops_approx_eq(diff.data[3], 4.0, 0.001) { return 2 }
+
+    0
+}
+
+// T25: TensorView creation
+fn test_tensor_view() -> i64 with Mut, Panic, Div {
+    let shape = tensor_shape_2d(4, 5)
+    let view = tensor_view_new(10, shape)
+
+    if view.offset != 10 { return 1 }
+    if view.strides[0] != 5 { return 2 }
+    if view.strides[1] != 1 { return 3 }
+
+    0
+}
+
+// ============================================================================
+// Test Runner
+// ============================================================================
+
+fn tensor_ops_run_tests() -> i64 with Mut, Panic, Div {
+    var passed: i64 = 0
+    var failed: i64 = 0
+
+    // T01
+    if test_shape_basics() == 0 { passed = passed + 1 } else { failed = failed + 1 }
+    // T02
+    if test_shape_eq() == 0 { passed = passed + 1 } else { failed = failed + 1 }
+    // T03
+    if test_shape_broadcast() == 0 { passed = passed + 1 } else { failed = failed + 1 }
+    // T04
+    if test_constructors() == 0 { passed = passed + 1 } else { failed = failed + 1 }
+    // T05
+    if test_eye() == 0 { passed = passed + 1 } else { failed = failed + 1 }
+    // T06
+    if test_arange() == 0 { passed = passed + 1 } else { failed = failed + 1 }
+    // T07
+    if test_get_set_1d() == 0 { passed = passed + 1 } else { failed = failed + 1 }
+    // T08
+    if test_get_set_2d() == 0 { passed = passed + 1 } else { failed = failed + 1 }
+    // T09
+    if test_flat_index() == 0 { passed = passed + 1 } else { failed = failed + 1 }
+    // T10
+    if test_elementwise_ops() == 0 { passed = passed + 1 } else { failed = failed + 1 }
+    // T11
+    if test_scale_neg() == 0 { passed = passed + 1 } else { failed = failed + 1 }
+    // T12
+    if test_dot_product() == 0 { passed = passed + 1 } else { failed = failed + 1 }
+    // T13
+    if test_matmul() == 0 { passed = passed + 1 } else { failed = failed + 1 }
+    // T14
+    if test_transpose() == 0 { passed = passed + 1 } else { failed = failed + 1 }
+    // T15
+    if test_reductions() == 0 { passed = passed + 1 } else { failed = failed + 1 }
+    // T16
+    if test_norm() == 0 { passed = passed + 1 } else { failed = failed + 1 }
+    // T17
+    if test_reshape() == 0 { passed = passed + 1 } else { failed = failed + 1 }
+    // T18
+    if test_sum_axis() == 0 { passed = passed + 1 } else { failed = failed + 1 }
+    // T19
+    if test_mean() == 0 { passed = passed + 1 } else { failed = failed + 1 }
+    // T20
+    if test_matmul_identity() == 0 { passed = passed + 1 } else { failed = failed + 1 }
+    // T21
+    if test_matmul_nonsquare() == 0 { passed = passed + 1 } else { failed = failed + 1 }
+    // T22
+    if test_strides() == 0 { passed = passed + 1 } else { failed = failed + 1 }
+    // T23
+    if test_approx_sqrt() == 0 { passed = passed + 1 } else { failed = failed + 1 }
+    // T24
+    if test_add_sub_inverse() == 0 { passed = passed + 1 } else { failed = failed + 1 }
+    // T25
+    if test_tensor_view() == 0 { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Return 0 if all passed, else number of failures
+    failed
+}

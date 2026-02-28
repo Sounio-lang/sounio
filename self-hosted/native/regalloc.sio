@@ -1,0 +1,920 @@
+// self-hosted::native::regalloc — Linear-scan register allocator
+//
+// Implements interval-based register allocation for the IR.  Replaces the
+// trivial round-robin allocator in regs.sio with a proper linear-scan pass
+// that computes live intervals, assigns physical registers, and spills when
+// pressure exceeds the available set.
+//
+// Algorithm:  Poletto & Sarkar, "Linear scan register allocation" (1999).
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+let RA_MAX_INTERVALS: i64 = 512
+let RA_MAX_ACTIVE: i64 = 64
+let RA_MAX_HINTS: i64 = 256
+let RA_SPILLED: i64 = 0 - 1          // sentinel: no physical register assigned
+let RA_UNASSIGNED: i64 = 0 - 2       // not yet processed
+
+// ============================================================================
+// Core data structures
+// ============================================================================
+
+// A single live interval: one virtual register, its live range, and allocation.
+struct LiveInterval {
+    vreg: i64,             // virtual register id
+    start: i64,            // first use/def position
+    end: i64,              // last use/def position (inclusive)
+    assigned_preg: i64,    // physical register (-1 = spilled, -2 = unassigned)
+    spill_slot: i64,       // stack slot index when spilled (-1 = none)
+}
+
+// Register preference hint: suggest a physical register for a vreg.
+struct RegHint {
+    vreg: i64,
+    preferred_preg: i64,
+}
+
+// Full allocator state.
+struct RegAllocState {
+    intervals: [LiveInterval; 512],
+    count: i64,
+    spill_count: i64,          // number of spill slots allocated so far
+    num_pregs: i64,            // total physical registers available
+    hints: [RegHint; 256],
+    hint_count: i64,
+    // Bookkeeping for per-preg free-until position
+    free_until: [i64; 64],    // free_until[preg] = earliest position preg is free
+}
+
+// Spill summary returned after allocation.
+struct SpillInfo {
+    total_spills: i64,
+    frame_growth: i64,         // bytes added to the stack frame (8 per slot)
+}
+
+// ============================================================================
+// Constructors and helpers
+// ============================================================================
+
+fn empty_live_interval() -> LiveInterval {
+    LiveInterval {
+        vreg: 0,
+        start: 0,
+        end: 0,
+        assigned_preg: RA_UNASSIGNED,
+        spill_slot: 0 - 1,
+    }
+}
+
+fn empty_reg_hint() -> RegHint {
+    RegHint { vreg: 0, preferred_preg: 0 }
+}
+
+fn regalloc_new() -> RegAllocState {
+    RegAllocState {
+        intervals: [empty_live_interval(); 512],
+        count: 0,
+        spill_count: 0,
+        num_pregs: 14,
+        hints: [empty_reg_hint(); 256],
+        hint_count: 0,
+        free_until: [0; 64],
+    }
+}
+
+// ============================================================================
+// Interval management
+// ============================================================================
+
+// Add a new live interval for the given vreg spanning [start, end].
+fn regalloc_add_interval(
+    state: RegAllocState, vreg: i64, start: i64, end: i64
+) -> RegAllocState with Mut, Panic, Div {
+    var s = state
+    if s.count < RA_MAX_INTERVALS {
+        s.intervals[s.count as usize] = LiveInterval {
+            vreg: vreg,
+            start: start,
+            end: end,
+            assigned_preg: RA_UNASSIGNED,
+            spill_slot: 0 - 1,
+        }
+        s.count = s.count + 1
+    }
+    s
+}
+
+// Insertion sort intervals by start position.  Ties broken by shorter interval
+// first (heuristic: shorter intervals are easier to allocate).
+fn regalloc_sort_by_start(state: RegAllocState) -> RegAllocState with Mut, Panic, Div {
+    var s = state
+    var i: i64 = 1
+    while i < s.count {
+        let key = s.intervals[i as usize]
+        var j = i - 1
+        while j >= 0 {
+            let cmp_start = s.intervals[j as usize].start > key.start
+            let same_start = s.intervals[j as usize].start == key.start
+            let cmp_end = s.intervals[j as usize].end > key.end
+            if cmp_start || (same_start && cmp_end) {
+                s.intervals[(j + 1) as usize] = s.intervals[j as usize]
+                j = j - 1
+            } else {
+                // break out of inner loop
+                j = 0 - 1
+            }
+        }
+        s.intervals[(j + 1) as usize] = key
+        i = i + 1
+    }
+    s
+}
+
+// ============================================================================
+// Active-set helpers
+// ============================================================================
+
+// Expire intervals in the active set whose end < position.
+// Returns the new active count.
+// Also frees the physical registers of expired intervals.
+fn regalloc_expire_old(
+    state: RegAllocState,
+    active: [i64; 64],
+    active_count: i64,
+    position: i64
+) -> RegAllocState with Mut, Panic, Div {
+    // We return the state with updated free_until; the caller must also
+    // receive the compacted active array.  Since Sounio does not support
+    // returning tuples of arrays easily, we encode the new active list
+    // into the first active_count slots of the state.free_until.
+    // Instead we use a helper pattern: compact in-place.
+    state
+}
+
+// In-place expire + compact.  Returns (new_state, new_active, new_active_count)
+// packed into the state and arrays.
+fn regalloc_expire_into(
+    state: RegAllocState,
+    active: [i64; 64],
+    active_count: i64,
+    position: i64
+) -> RegAllocState with Mut, Panic, Div {
+    var s = state
+    var act = active
+    var kept: i64 = 0
+    var i: i64 = 0
+    while i < active_count {
+        let idx = act[i as usize]
+        if s.intervals[idx as usize].end >= position {
+            // still live — keep
+            act[kept as usize] = idx
+            kept = kept + 1
+        }
+        // else: expired — its preg is released (handled in free_until reset)
+        i = i + 1
+    }
+    // zero-fill tail
+    var k = kept
+    while k < RA_MAX_ACTIVE {
+        act[k as usize] = 0
+        k = k + 1
+    }
+    // Write back — store compacted active in first 64 slots of free_until
+    // (ab)use: we actually return via a second call; see linear_scan below.
+    s
+}
+
+// Count how many active intervals use a given preg.
+fn regalloc_preg_in_use(
+    state: RegAllocState, active: [i64; 64], active_count: i64, preg: i64
+) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < active_count {
+        let idx = active[i as usize]
+        if state.intervals[idx as usize].assigned_preg == preg {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Find the active interval that ends latest — candidate for spilling.
+fn regalloc_find_latest_end(
+    state: RegAllocState, active: [i64; 64], active_count: i64
+) -> i64 with Mut, Panic, Div {
+    var best_idx: i64 = 0 - 1
+    var best_end: i64 = 0 - 1
+    var i: i64 = 0
+    while i < active_count {
+        let idx = active[i as usize]
+        let e = state.intervals[idx as usize].end
+        if e > best_end {
+            best_end = e
+            best_idx = i
+        }
+        i = i + 1
+    }
+    best_idx
+}
+
+// Spill the interval with the latest end point.
+// Returns (state, active, active_count) via mutation.
+fn regalloc_spill_at(
+    state: RegAllocState, active: [i64; 64], active_count: i64
+) -> RegAllocState with Mut, Panic, Div {
+    var s = state
+    let victim_active_idx = regalloc_find_latest_end(s, active, active_count)
+    if victim_active_idx >= 0 {
+        let victim_interval_idx = active[victim_active_idx as usize]
+        s.intervals[victim_interval_idx as usize].assigned_preg = RA_SPILLED
+        s.intervals[victim_interval_idx as usize].spill_slot = s.spill_count
+        s.spill_count = s.spill_count + 1
+    }
+    s
+}
+
+// ============================================================================
+// Coalescing hints
+// ============================================================================
+
+fn regalloc_add_hint(
+    state: RegAllocState, vreg: i64, preferred_preg: i64
+) -> RegAllocState with Mut, Panic, Div {
+    var s = state
+    if s.hint_count < RA_MAX_HINTS {
+        s.hints[s.hint_count as usize] = RegHint {
+            vreg: vreg,
+            preferred_preg: preferred_preg,
+        }
+        s.hint_count = s.hint_count + 1
+    }
+    s
+}
+
+// Look up the preferred preg for a vreg.  Returns -1 if none.
+fn regalloc_lookup_hint(state: RegAllocState, vreg: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < state.hint_count {
+        if state.hints[i as usize].vreg == vreg {
+            return state.hints[i as usize].preferred_preg
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// Try to assign the hinted register if it is free.  Returns the preg or -1.
+fn regalloc_try_hint(
+    state: RegAllocState,
+    active: [i64; 64],
+    active_count: i64,
+    interval_idx: i64
+) -> i64 with Mut, Panic, Div {
+    let vreg = state.intervals[interval_idx as usize].vreg
+    let hint = regalloc_lookup_hint(state, vreg)
+    if hint < 0 {
+        return 0 - 1
+    }
+    // Check if the hinted preg is currently in use
+    if regalloc_preg_in_use(state, active, active_count, hint) {
+        return 0 - 1
+    }
+    hint
+}
+
+// ============================================================================
+// Main linear-scan allocation
+// ============================================================================
+
+fn regalloc_linear_scan(state: RegAllocState, num_regs: i64) -> RegAllocState with Mut, Panic, Div {
+    var s = state
+    s.num_pregs = num_regs
+
+    // 1. Sort intervals by start
+    s = regalloc_sort_by_start(s)
+
+    // 2. Active set: indices into s.intervals[]
+    var active: [i64; 64] = [0; 64]
+    var active_count: i64 = 0
+
+    // 3. Walk each interval
+    var i: i64 = 0
+    while i < s.count {
+        let pos = s.intervals[i as usize].start
+
+        // 3a. Expire old intervals
+        var new_count: i64 = 0
+        var j: i64 = 0
+        while j < active_count {
+            let aidx = active[j as usize]
+            if s.intervals[aidx as usize].end >= pos {
+                active[new_count as usize] = aidx
+                new_count = new_count + 1
+            }
+            j = j + 1
+        }
+        active_count = new_count
+
+        // 3b. Try hinted register first
+        let hint_preg = regalloc_try_hint(s, active, active_count, i)
+        if hint_preg >= 0 {
+            s.intervals[i as usize].assigned_preg = hint_preg
+            active[active_count as usize] = i
+            active_count = active_count + 1
+        } else if active_count >= num_regs {
+            // 3c. All registers in use — need to spill
+            let victim_pos = regalloc_find_latest_end(s, active, active_count)
+            if victim_pos >= 0 {
+                let victim_idx = active[victim_pos as usize]
+                if s.intervals[victim_idx as usize].end > s.intervals[i as usize].end {
+                    // Spill the victim, give its preg to current
+                    let stolen_preg = s.intervals[victim_idx as usize].assigned_preg
+                    s.intervals[victim_idx as usize].assigned_preg = RA_SPILLED
+                    s.intervals[victim_idx as usize].spill_slot = s.spill_count
+                    s.spill_count = s.spill_count + 1
+
+                    s.intervals[i as usize].assigned_preg = stolen_preg
+
+                    // Remove victim from active, add current
+                    active[victim_pos as usize] = i
+                } else {
+                    // Current interval ends later — spill it instead
+                    s.intervals[i as usize].assigned_preg = RA_SPILLED
+                    s.intervals[i as usize].spill_slot = s.spill_count
+                    s.spill_count = s.spill_count + 1
+                }
+            } else {
+                // No victim found (should not happen) — spill current
+                s.intervals[i as usize].assigned_preg = RA_SPILLED
+                s.intervals[i as usize].spill_slot = s.spill_count
+                s.spill_count = s.spill_count + 1
+            }
+        } else {
+            // 3d. Free register available — find one
+            var found_preg: i64 = 0 - 1
+            var p: i64 = 0
+            while p < num_regs {
+                if !(regalloc_preg_in_use(s, active, active_count, p)) {
+                    found_preg = p
+                    // break
+                    p = num_regs
+                } else {
+                    p = p + 1
+                }
+            }
+            if found_preg >= 0 {
+                s.intervals[i as usize].assigned_preg = found_preg
+                active[active_count as usize] = i
+                active_count = active_count + 1
+            } else {
+                // Shouldn't happen if active_count < num_regs, but guard
+                s.intervals[i as usize].assigned_preg = RA_SPILLED
+                s.intervals[i as usize].spill_slot = s.spill_count
+                s.spill_count = s.spill_count + 1
+            }
+        }
+
+        i = i + 1
+    }
+    s
+}
+
+// ============================================================================
+// Query interface
+// ============================================================================
+
+// Look up the physical register assigned to a virtual register.
+// Returns RA_SPILLED (-1) if the vreg was spilled, RA_UNASSIGNED (-2) if
+// the vreg was never seen, or 0..N for a physical register index.
+fn regalloc_get_assignment(state: RegAllocState, vreg: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < state.count {
+        if state.intervals[i as usize].vreg == vreg {
+            return state.intervals[i as usize].assigned_preg
+        }
+        i = i + 1
+    }
+    RA_UNASSIGNED
+}
+
+// Check whether a virtual register was spilled.
+fn regalloc_is_spilled(state: RegAllocState, vreg: i64) -> bool with Mut, Panic, Div {
+    regalloc_get_assignment(state, vreg) == RA_SPILLED
+}
+
+// Get the spill slot assigned to a virtual register (-1 if not spilled).
+fn regalloc_get_spill_slot(state: RegAllocState, vreg: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < state.count {
+        if state.intervals[i as usize].vreg == vreg {
+            return state.intervals[i as usize].spill_slot
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// Compute spill summary.
+fn regalloc_spill_info(state: RegAllocState) -> SpillInfo {
+    SpillInfo {
+        total_spills: state.spill_count,
+        frame_growth: state.spill_count * 8,
+    }
+}
+
+// ============================================================================
+// Liveness analysis — build live intervals from IR instructions
+// ============================================================================
+
+// Liveness workspace: tracks def/use per vreg to build intervals.
+struct LivenessMap {
+    defs: [i64; 512],    // first definition point per vreg
+    uses: [i64; 512],    // last use point per vreg
+    seen: [i64; 512],    // 1 if vreg has been seen, 0 otherwise
+    max_vreg: i64,
+}
+
+fn liveness_map_new() -> LivenessMap {
+    LivenessMap {
+        defs: [0; 512],
+        uses: [0; 512],
+        seen: [0; 512],
+        max_vreg: 0,
+    }
+}
+
+// Record a definition of vreg at position.
+fn liveness_def_point(
+    map: LivenessMap, vreg: i64, position: i64
+) -> LivenessMap with Mut, Panic, Div {
+    var m = map
+    if vreg >= 0 && vreg < 512 {
+        if m.seen[vreg as usize] == 0 {
+            m.defs[vreg as usize] = position
+            m.uses[vreg as usize] = position
+            m.seen[vreg as usize] = 1
+        }
+        // def can extend; take min
+        if position < m.defs[vreg as usize] {
+            m.defs[vreg as usize] = position
+        }
+        if vreg >= m.max_vreg {
+            m.max_vreg = vreg + 1
+        }
+    }
+    m
+}
+
+// Record a use of vreg at position — extends the interval end.
+fn liveness_use_point(
+    map: LivenessMap, vreg: i64, position: i64
+) -> LivenessMap with Mut, Panic, Div {
+    var m = map
+    if vreg >= 0 && vreg < 512 {
+        if m.seen[vreg as usize] == 0 {
+            // Use before def (parameter or phi): treat position as both
+            m.defs[vreg as usize] = position
+            m.uses[vreg as usize] = position
+            m.seen[vreg as usize] = 1
+        }
+        if position > m.uses[vreg as usize] {
+            m.uses[vreg as usize] = position
+        }
+        if vreg >= m.max_vreg {
+            m.max_vreg = vreg + 1
+        }
+    }
+    m
+}
+
+// Build a RegAllocState from a LivenessMap.
+fn liveness_build_intervals(map: LivenessMap) -> RegAllocState with Mut, Panic, Div {
+    var s = regalloc_new()
+    var v: i64 = 0
+    while v < map.max_vreg {
+        if map.seen[v as usize] == 1 {
+            s = regalloc_add_interval(s, v, map.defs[v as usize], map.uses[v as usize])
+        }
+        v = v + 1
+    }
+    s
+}
+
+// High-level: compute intervals from an array of IrInstr.
+// Walks instructions sequentially, recording defs (dst) and uses (src1, src2).
+fn liveness_compute_intervals(
+    instrs: [IrInstr; 8192], instr_count: i64
+) -> RegAllocState with Mut, Panic, Div {
+    var map = liveness_map_new()
+    var pos: i64 = 0
+    while pos < instr_count {
+        let instr = instrs[pos as usize]
+        // Record destination as def
+        if instr.dst >= 0 {
+            map = liveness_def_point(map, instr.dst, pos)
+        }
+        // Record sources as uses
+        if instr.src1 >= 0 {
+            map = liveness_use_point(map, instr.src1, pos)
+        }
+        if instr.src2 >= 0 {
+            map = liveness_use_point(map, instr.src2, pos)
+        }
+        pos = pos + 1
+    }
+    liveness_build_intervals(map)
+}
+
+// ============================================================================
+// Utility: dump allocation (for debugging — returns count of assigned regs)
+// ============================================================================
+
+fn regalloc_count_assigned(state: RegAllocState) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < state.count {
+        if state.intervals[i as usize].assigned_preg >= 0 {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+fn regalloc_count_spilled(state: RegAllocState) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < state.count {
+        if state.intervals[i as usize].assigned_preg == RA_SPILLED {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Check that no two active (non-spilled) intervals with overlapping ranges
+// share the same physical register.
+fn regalloc_verify_no_conflicts(state: RegAllocState) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < state.count {
+        let a = state.intervals[i as usize]
+        if a.assigned_preg >= 0 {
+            var j = i + 1
+            while j < state.count {
+                let b = state.intervals[j as usize]
+                if b.assigned_preg >= 0 && b.assigned_preg == a.assigned_preg {
+                    // Check overlap: [a.start,a.end] and [b.start,b.end]
+                    if a.start <= b.end && b.start <= a.end {
+                        return false
+                    }
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    true
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+// T01: empty allocator has zero intervals
+fn test_regalloc_empty() -> i64 with Mut, Panic, Div {
+    let s = regalloc_new()
+    if s.count != 0 { return 1 }
+    if s.spill_count != 0 { return 2 }
+    if s.num_pregs != 14 { return 3 }
+    0
+}
+
+// T02: add_interval increments count
+fn test_regalloc_add() -> i64 with Mut, Panic, Div {
+    var s = regalloc_new()
+    s = regalloc_add_interval(s, 0, 0, 10)
+    if s.count != 1 { return 1 }
+    s = regalloc_add_interval(s, 1, 2, 8)
+    if s.count != 2 { return 2 }
+    if s.intervals[0 as usize].vreg != 0 { return 3 }
+    if s.intervals[1 as usize].vreg != 1 { return 4 }
+    0
+}
+
+// T03: sort orders by start
+fn test_regalloc_sort() -> i64 with Mut, Panic, Div {
+    var s = regalloc_new()
+    s = regalloc_add_interval(s, 0, 10, 20)
+    s = regalloc_add_interval(s, 1, 2, 15)
+    s = regalloc_add_interval(s, 2, 5, 12)
+    s = regalloc_sort_by_start(s)
+    if s.intervals[0 as usize].vreg != 1 { return 1 }
+    if s.intervals[1 as usize].vreg != 2 { return 2 }
+    if s.intervals[2 as usize].vreg != 0 { return 3 }
+    0
+}
+
+// T04: single interval gets preg 0
+fn test_regalloc_single() -> i64 with Mut, Panic, Div {
+    var s = regalloc_new()
+    s = regalloc_add_interval(s, 0, 0, 5)
+    s = regalloc_linear_scan(s, 4)
+    let a = regalloc_get_assignment(s, 0)
+    if a < 0 { return 1 }
+    if regalloc_is_spilled(s, 0) { return 2 }
+    0
+}
+
+// T05: two non-overlapping intervals can share one register
+fn test_regalloc_nonoverlap() -> i64 with Mut, Panic, Div {
+    var s = regalloc_new()
+    s = regalloc_add_interval(s, 0, 0, 5)
+    s = regalloc_add_interval(s, 1, 6, 10)
+    s = regalloc_linear_scan(s, 1)
+    // Both should be assigned (the same preg reused after expire)
+    if regalloc_is_spilled(s, 0) { return 1 }
+    if regalloc_is_spilled(s, 1) { return 2 }
+    0
+}
+
+// T06: two overlapping intervals with 1 reg -> one spilled
+fn test_regalloc_overlap_spill() -> i64 with Mut, Panic, Div {
+    var s = regalloc_new()
+    s = regalloc_add_interval(s, 0, 0, 10)
+    s = regalloc_add_interval(s, 1, 3, 8)
+    s = regalloc_linear_scan(s, 1)
+    let spilled = regalloc_count_spilled(s)
+    if spilled != 1 { return 1 }
+    let assigned = regalloc_count_assigned(s)
+    if assigned != 1 { return 2 }
+    0
+}
+
+// T07: three intervals, two regs, no spill needed when ranges don't all overlap
+fn test_regalloc_three_fit() -> i64 with Mut, Panic, Div {
+    var s = regalloc_new()
+    s = regalloc_add_interval(s, 0, 0, 5)
+    s = regalloc_add_interval(s, 1, 2, 10)
+    s = regalloc_add_interval(s, 2, 6, 12)
+    s = regalloc_linear_scan(s, 2)
+    // vreg 0 ends at 5, vreg 2 starts at 6 -> they can share a preg
+    if regalloc_count_spilled(s) != 0 { return 1 }
+    if !(regalloc_verify_no_conflicts(s)) { return 2 }
+    0
+}
+
+// T08: spill count and frame growth
+fn test_regalloc_spill_info() -> i64 with Mut, Panic, Div {
+    var s = regalloc_new()
+    s = regalloc_add_interval(s, 0, 0, 20)
+    s = regalloc_add_interval(s, 1, 1, 19)
+    s = regalloc_add_interval(s, 2, 2, 18)
+    s = regalloc_linear_scan(s, 2)
+    let info = regalloc_spill_info(s)
+    if info.total_spills != 1 { return 1 }
+    if info.frame_growth != 8 { return 2 }
+    0
+}
+
+// T09: get_spill_slot returns correct slot index
+fn test_regalloc_spill_slot() -> i64 with Mut, Panic, Div {
+    var s = regalloc_new()
+    s = regalloc_add_interval(s, 0, 0, 20)
+    s = regalloc_add_interval(s, 1, 1, 19)
+    s = regalloc_add_interval(s, 2, 2, 18)
+    s = regalloc_linear_scan(s, 2)
+    // One of them got spilled — find which
+    var spilled_vreg: i64 = 0 - 1
+    if regalloc_is_spilled(s, 0) { spilled_vreg = 0 }
+    if regalloc_is_spilled(s, 1) { spilled_vreg = 1 }
+    if regalloc_is_spilled(s, 2) { spilled_vreg = 2 }
+    if spilled_vreg < 0 { return 1 }
+    let slot = regalloc_get_spill_slot(s, spilled_vreg)
+    if slot < 0 { return 2 }
+    0
+}
+
+// T10: hints are respected when register is free
+fn test_regalloc_hint_respected() -> i64 with Mut, Panic, Div {
+    var s = regalloc_new()
+    s = regalloc_add_interval(s, 0, 0, 10)
+    s = regalloc_add_hint(s, 0, 3)
+    s = regalloc_linear_scan(s, 8)
+    let a = regalloc_get_assignment(s, 0)
+    if a != 3 { return 1 }
+    0
+}
+
+// T11: hints ignored when hinted preg is occupied
+fn test_regalloc_hint_busy() -> i64 with Mut, Panic, Div {
+    var s = regalloc_new()
+    s = regalloc_add_interval(s, 0, 0, 10)
+    s = regalloc_add_interval(s, 1, 1, 8)
+    // Both want preg 0
+    s = regalloc_add_hint(s, 0, 0)
+    s = regalloc_add_hint(s, 1, 0)
+    s = regalloc_linear_scan(s, 4)
+    // vreg 0 should get preg 0 (arrives first)
+    let a0 = regalloc_get_assignment(s, 0)
+    let a1 = regalloc_get_assignment(s, 1)
+    if a0 != 0 { return 1 }
+    // vreg 1 should get some other preg (hint was busy)
+    if a1 == 0 { return 2 }
+    if a1 < 0 { return 3 }
+    0
+}
+
+// T12: no-conflict verification passes for valid allocation
+fn test_regalloc_verify_ok() -> i64 with Mut, Panic, Div {
+    var s = regalloc_new()
+    s = regalloc_add_interval(s, 0, 0, 5)
+    s = regalloc_add_interval(s, 1, 3, 10)
+    s = regalloc_add_interval(s, 2, 6, 15)
+    s = regalloc_linear_scan(s, 4)
+    if !(regalloc_verify_no_conflicts(s)) { return 1 }
+    0
+}
+
+// T13: liveness_def_point and liveness_use_point
+fn test_liveness_points() -> i64 with Mut, Panic, Div {
+    var m = liveness_map_new()
+    m = liveness_def_point(m, 0, 5)
+    m = liveness_use_point(m, 0, 12)
+    if m.defs[0 as usize] != 5 { return 1 }
+    if m.uses[0 as usize] != 12 { return 2 }
+    if m.seen[0 as usize] != 1 { return 3 }
+    m = liveness_def_point(m, 0, 3)
+    // def should update to earlier position
+    if m.defs[0 as usize] != 3 { return 4 }
+    0
+}
+
+// T14: liveness_build_intervals creates correct count
+fn test_liveness_build() -> i64 with Mut, Panic, Div {
+    var m = liveness_map_new()
+    m = liveness_def_point(m, 0, 0)
+    m = liveness_use_point(m, 0, 5)
+    m = liveness_def_point(m, 1, 2)
+    m = liveness_use_point(m, 1, 7)
+    m = liveness_def_point(m, 3, 4)
+    m = liveness_use_point(m, 3, 10)
+    let s = liveness_build_intervals(m)
+    if s.count != 3 { return 1 }
+    0
+}
+
+// T15: end-to-end liveness + allocation
+fn test_liveness_allocate() -> i64 with Mut, Panic, Div {
+    var m = liveness_map_new()
+    // Simulate a small function: 4 vregs
+    m = liveness_def_point(m, 0, 0)
+    m = liveness_use_point(m, 0, 3)
+    m = liveness_def_point(m, 1, 1)
+    m = liveness_use_point(m, 1, 5)
+    m = liveness_def_point(m, 2, 4)
+    m = liveness_use_point(m, 2, 7)
+    m = liveness_def_point(m, 3, 6)
+    m = liveness_use_point(m, 3, 9)
+    var s = liveness_build_intervals(m)
+    s = regalloc_linear_scan(s, 3)
+    if regalloc_count_spilled(s) != 0 { return 1 }
+    if !(regalloc_verify_no_conflicts(s)) { return 2 }
+    0
+}
+
+// T16: many intervals with limited registers forces spills
+fn test_regalloc_pressure() -> i64 with Mut, Panic, Div {
+    var s = regalloc_new()
+    // 8 overlapping intervals, only 3 regs
+    var v: i64 = 0
+    while v < 8 {
+        s = regalloc_add_interval(s, v, v, v + 10)
+        v = v + 1
+    }
+    s = regalloc_linear_scan(s, 3)
+    let spilled = regalloc_count_spilled(s)
+    if spilled < 1 { return 1 }
+    if !(regalloc_verify_no_conflicts(s)) { return 2 }
+    0
+}
+
+// T17: sort stability — same start, shorter interval first
+fn test_regalloc_sort_tiebreak() -> i64 with Mut, Panic, Div {
+    var s = regalloc_new()
+    s = regalloc_add_interval(s, 0, 5, 20)
+    s = regalloc_add_interval(s, 1, 5, 10)
+    s = regalloc_add_interval(s, 2, 5, 15)
+    s = regalloc_sort_by_start(s)
+    // shortest first: vreg 1 (end=10), then vreg 2 (end=15), then vreg 0 (end=20)
+    if s.intervals[0 as usize].vreg != 1 { return 1 }
+    if s.intervals[1 as usize].vreg != 2 { return 2 }
+    if s.intervals[2 as usize].vreg != 0 { return 3 }
+    0
+}
+
+// T18: lookup of unassigned vreg
+fn test_regalloc_unassigned() -> i64 with Mut, Panic, Div {
+    let s = regalloc_new()
+    let a = regalloc_get_assignment(s, 42)
+    if a != RA_UNASSIGNED { return 1 }
+    if regalloc_is_spilled(s, 42) { return 2 }
+    0
+}
+
+// T19: liveness map max_vreg tracking
+fn test_liveness_max_vreg() -> i64 with Mut, Panic, Div {
+    var m = liveness_map_new()
+    m = liveness_def_point(m, 7, 0)
+    if m.max_vreg != 8 { return 1 }
+    m = liveness_def_point(m, 3, 1)
+    if m.max_vreg != 8 { return 2 }
+    m = liveness_def_point(m, 15, 2)
+    if m.max_vreg != 16 { return 3 }
+    0
+}
+
+// T20: zero-length intervals (def and last use at same point)
+fn test_regalloc_zero_length() -> i64 with Mut, Panic, Div {
+    var s = regalloc_new()
+    s = regalloc_add_interval(s, 0, 0, 0)
+    s = regalloc_add_interval(s, 1, 1, 1)
+    s = regalloc_add_interval(s, 2, 2, 2)
+    s = regalloc_linear_scan(s, 1)
+    // Each expires before the next starts -> no spills with 1 reg
+    if regalloc_count_spilled(s) != 0 { return 1 }
+    0
+}
+
+// ============================================================================
+// Test runner
+// ============================================================================
+
+fn regalloc_run_tests() -> i64 with Mut, Panic, Div {
+    var fail: i64 = 0
+
+    let t01 = test_regalloc_empty()
+    if t01 != 0 { print_int(101) fail = fail + 1 }
+
+    let t02 = test_regalloc_add()
+    if t02 != 0 { print_int(102) fail = fail + 1 }
+
+    let t03 = test_regalloc_sort()
+    if t03 != 0 { print_int(103) fail = fail + 1 }
+
+    let t04 = test_regalloc_single()
+    if t04 != 0 { print_int(104) fail = fail + 1 }
+
+    let t05 = test_regalloc_nonoverlap()
+    if t05 != 0 { print_int(105) fail = fail + 1 }
+
+    let t06 = test_regalloc_overlap_spill()
+    if t06 != 0 { print_int(106) fail = fail + 1 }
+
+    let t07 = test_regalloc_three_fit()
+    if t07 != 0 { print_int(107) fail = fail + 1 }
+
+    let t08 = test_regalloc_spill_info()
+    if t08 != 0 { print_int(108) fail = fail + 1 }
+
+    let t09 = test_regalloc_spill_slot()
+    if t09 != 0 { print_int(109) fail = fail + 1 }
+
+    let t10 = test_regalloc_hint_respected()
+    if t10 != 0 { print_int(110) fail = fail + 1 }
+
+    let t11 = test_regalloc_hint_busy()
+    if t11 != 0 { print_int(111) fail = fail + 1 }
+
+    let t12 = test_regalloc_verify_ok()
+    if t12 != 0 { print_int(112) fail = fail + 1 }
+
+    let t13 = test_liveness_points()
+    if t13 != 0 { print_int(113) fail = fail + 1 }
+
+    let t14 = test_liveness_build()
+    if t14 != 0 { print_int(114) fail = fail + 1 }
+
+    let t15 = test_liveness_allocate()
+    if t15 != 0 { print_int(115) fail = fail + 1 }
+
+    let t16 = test_regalloc_pressure()
+    if t16 != 0 { print_int(116) fail = fail + 1 }
+
+    let t17 = test_regalloc_sort_tiebreak()
+    if t17 != 0 { print_int(117) fail = fail + 1 }
+
+    let t18 = test_regalloc_unassigned()
+    if t18 != 0 { print_int(118) fail = fail + 1 }
+
+    let t19 = test_liveness_max_vreg()
+    if t19 != 0 { print_int(119) fail = fail + 1 }
+
+    let t20 = test_regalloc_zero_length()
+    if t20 != 0 { print_int(120) fail = fail + 1 }
+
+    fail
+}

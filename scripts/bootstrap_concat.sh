@@ -25,8 +25,8 @@ BOOTSTRAP_FULL_INCLUDE_EXPERIMENTAL="${BOOTSTRAP_FULL_INCLUDE_EXPERIMENTAL:-0}"
 BOOTSTRAP_FULL_INCLUDE_HYPERCOMPLEX="${BOOTSTRAP_FULL_INCLUDE_HYPERCOMPLEX:-0}"
 
 # ── Dependency-ordered file list (leaf-first) ──────────────────────
-# Full bootstrap: ALL 168 self-hosted .sio files.
-# ~103K lines — the entire self-hosted compiler, GPU stack, and test suite.
+# Full bootstrap: ALL self-hosted .sio files.
+# ~110K+ lines — the entire self-hosted compiler, GPU stack, and test suite.
 FILES=(
   # ── 1. Leaf modules (no cross-file deps) ────────────────────────
   self-hosted/intern.sio
@@ -71,10 +71,14 @@ FILES=(
   self-hosted/check/compat.sio
   self-hosted/check/check.sio
   self-hosted/check/mod.sio
+  self-hosted/check/patterns.sio
 
   # ── 6. Effects layer ────────────────────────────────────────────
   self-hosted/effects/types.sio
   self-hosted/effects/mod.sio
+
+  # ── 6b. Diagnostics engine ────────────────────────────────────
+  self-hosted/diagnostics/mod.sio
 
   # ── 7. IR layer ─────────────────────────────────────────────────
   self-hosted/ir/ir.sio
@@ -107,6 +111,7 @@ FILES=(
   self-hosted/native/riscv.sio
   self-hosted/native/aarch64.sio
   self-hosted/native/dwarf.sio
+  self-hosted/native/regalloc.sio
   self-hosted/native/hyper_lower.sio
   self-hosted/native/suite.sio
 
@@ -136,9 +141,11 @@ FILES=(
 
   # ── 14. Tensor ──────────────────────────────────────────────────
   self-hosted/tensor/contract.sio
+  self-hosted/tensor/ops.sio
 
   # ── 15. Linker ──────────────────────────────────────────────────
   self-hosted/linker/mod.sio
+  self-hosted/linker/elf_writer.sio
 
   # ── 16. LLVM backend ────────────────────────────────────────────
   self-hosted/llvm/types.sio
@@ -200,6 +207,7 @@ FILES=(
   # ── 22. WebAssembly backend ─────────────────────────────────────
   self-hosted/wasm/mod.sio
   self-hosted/wasm/encode.sio
+  self-hosted/wasm/lower.sio
 
   # ── 23. I/O helpers + module loader ─────────────────────────────
   self-hosted/io/file_write.sio
@@ -316,6 +324,10 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/check/compat.sio
     self-hosted/check/check.sio
     self-hosted/check/mod.sio
+    self-hosted/check/patterns.sio
+
+    # 5b. Diagnostics engine
+    self-hosted/diagnostics/mod.sio
 
     # 6. IR layer
     self-hosted/ir/ir.sio
@@ -342,11 +354,17 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/native/riscv.sio
     self-hosted/native/aarch64.sio
     self-hosted/native/dwarf.sio
+    self-hosted/native/regalloc.sio
     self-hosted/native/hyper_lower.sio
 
     # 8. WebAssembly backend
     self-hosted/wasm/mod.sio
     self-hosted/wasm/encode.sio
+    self-hosted/wasm/lower.sio
+
+    # 8b. Tensor + Linker expansion
+    self-hosted/tensor/ops.sio
+    self-hosted/linker/elf_writer.sio
 
     # 9. I/O helpers + module loader
     self-hosted/io/file_write.sio

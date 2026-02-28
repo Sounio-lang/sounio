@@ -1,0 +1,1237 @@
+// self-hosted::linker::elf_writer — ELF64 binary writer/linker
+//
+// Produces complete ELF64 executables from assembled sections. Supports
+// x86-64, AArch64 and RISC-V targets. This is the high-level counterpart
+// to native::elf which handles raw byte emission; elf_writer manages
+// sections, segments, symbol tables and the complete layout pipeline.
+//
+// ## Architecture
+//
+//   ElfWriter
+//     +-- sections: [ElfSection; 32]   (text, data, bss, strtab, symtab, ...)
+//     +-- segments: [Elf64Phdr; 8]     (PT_LOAD for text/data/bss)
+//     +-- header:   Elf64Header
+//     +-- strtab:   ElfBuf             (section-name string table)
+//
+//   elf_writer_new(machine, entry)
+//     -> elf_writer_add_text_section(code, len)
+//     -> elf_writer_add_data_section(data, len)
+//     -> elf_writer_add_bss_section(size)
+//     -> elf_writer_finalize()          => ElfBuf with complete ELF binary
+//
+// ## Usage
+//
+// ```sio
+// var w = elf_writer_new(EM_X86_64, 0x401000)
+// w = elf_writer_add_text_section(w, code_bytes, code_len)
+// w = elf_writer_add_data_section(w, data_bytes, data_len)
+// let elf = elf_writer_finalize(w)
+// // elf.data[0..elf.len] is a valid ELF64 executable
+// ```
+
+// ============================================================================
+// ELF64 Constants
+// ============================================================================
+
+// Object file type
+fn ELF_ET_EXEC() -> i64 { 2 }
+
+// Machine architectures
+fn ELF_EM_X86_64() -> i64 { 62 }
+fn ELF_EM_AARCH64() -> i64 { 183 }
+fn ELF_EM_RISCV() -> i64 { 243 }
+
+// Segment types
+fn ELF_PT_LOAD() -> i64 { 1 }
+fn ELF_PT_NOTE() -> i64 { 4 }
+
+// Section header types
+fn ELF_SHT_NULL() -> i64 { 0 }
+fn ELF_SHT_PROGBITS() -> i64 { 1 }
+fn ELF_SHT_SYMTAB() -> i64 { 2 }
+fn ELF_SHT_STRTAB() -> i64 { 3 }
+fn ELF_SHT_RELA() -> i64 { 4 }
+fn ELF_SHT_NOBITS() -> i64 { 8 }
+
+// Section header flags
+fn ELF_SHF_WRITE() -> i64 { 1 }
+fn ELF_SHF_ALLOC() -> i64 { 2 }
+fn ELF_SHF_EXECINSTR() -> i64 { 4 }
+
+// Symbol binding and type
+fn ELF_STB_LOCAL() -> i64 { 0 }
+fn ELF_STB_GLOBAL() -> i64 { 1 }
+fn ELF_STT_OBJECT() -> i64 { 1 }
+fn ELF_STT_FUNC() -> i64 { 2 }
+
+// Segment permission flags
+fn ELF_PF_X() -> i64 { 1 }
+fn ELF_PF_W() -> i64 { 2 }
+fn ELF_PF_R() -> i64 { 4 }
+
+// ELF ident bytes
+fn ELF_MAGIC_0() -> i64 { 0x7f }
+fn ELF_MAGIC_1() -> i64 { 0x45 }  // 'E'
+fn ELF_MAGIC_2() -> i64 { 0x4c }  // 'L'
+fn ELF_MAGIC_3() -> i64 { 0x46 }  // 'F'
+fn ELF_CLASS64() -> i64 { 2 }
+fn ELF_DATA_LSB() -> i64 { 1 }
+fn ELF_EV_CURRENT() -> i64 { 1 }
+fn ELF_OSABI_SYSV() -> i64 { 0 }
+
+// Fixed sizes
+fn ELF64_EHDR_SIZE() -> i64 { 64 }
+fn ELF64_PHDR_SIZE() -> i64 { 56 }
+fn ELF64_SHDR_SIZE() -> i64 { 64 }
+fn ELF64_SYM_SIZE() -> i64 { 24 }
+
+// Default base address for executables
+fn ELF_DEFAULT_BASE() -> i64 { 0x400000 }
+
+// Page alignment
+fn ELF_PAGE_SIZE() -> i64 { 4096 }
+
+// ============================================================================
+// Structures
+// ============================================================================
+
+// Byte buffer for ELF output (256KB max)
+struct ElfBuf {
+    data: [i8; 262144],
+    len: i64,
+}
+
+// ELF64 file header
+struct Elf64Header {
+    e_type: i64,
+    e_machine: i64,
+    e_entry: i64,
+    e_phoff: i64,
+    e_shoff: i64,
+    e_phentsize: i64,
+    e_phnum: i64,
+    e_shentsize: i64,
+    e_shnum: i64,
+    e_shstrndx: i64,
+}
+
+// ELF64 program header (segment)
+struct Elf64Phdr {
+    p_type: i64,
+    p_flags: i64,
+    p_offset: i64,
+    p_vaddr: i64,
+    p_paddr: i64,
+    p_filesz: i64,
+    p_memsz: i64,
+    p_align: i64,
+}
+
+// ELF64 section header
+struct Elf64Shdr {
+    sh_name: i64,
+    sh_type: i64,
+    sh_flags: i64,
+    sh_addr: i64,
+    sh_offset: i64,
+    sh_size: i64,
+    sh_link: i64,
+    sh_info: i64,
+    sh_addralign: i64,
+    sh_entsize: i64,
+}
+
+// Section descriptor (tracks a section during layout)
+struct ElfSection {
+    name_offset: i64,
+    shdr: Elf64Shdr,
+    data_offset: i64,
+    data_len: i64,
+}
+
+// ELF64 symbol table entry
+struct ElfSymbol {
+    st_name: i64,
+    st_info: i64,
+    st_other: i64,
+    st_shndx: i64,
+    st_value: i64,
+    st_size: i64,
+}
+
+// High-level ELF writer
+struct ElfWriter {
+    header: Elf64Header,
+    sections: [ElfSection; 32],
+    section_count: i64,
+    segments: [Elf64Phdr; 8],
+    segment_count: i64,
+    strtab: ElfBuf,
+    section_data: ElfBuf,
+    base_addr: i64,
+}
+
+// ============================================================================
+// Byte-extraction helper
+// ============================================================================
+
+fn elf_low8(x: i64) -> i64 with Mut, Panic, Div {
+    var n = x % 256
+    if n < 0 { n = n + 256 }
+    n
+}
+
+// ============================================================================
+// Buffer operations
+// ============================================================================
+
+fn elf_buf_new() -> ElfBuf {
+    ElfBuf { data: [0; 262144], len: 0 }
+}
+
+fn elf_buf_emit_byte(buf: ElfBuf, b: i64) -> ElfBuf with Mut, Panic, Div {
+    var out = buf
+    if out.len >= 0 && out.len < 262144 {
+        out.data[out.len as usize] = elf_low8(b) as i8
+        out.len = out.len + 1
+    }
+    out
+}
+
+fn elf_buf_emit_le16(buf: ElfBuf, val: i64) -> ElfBuf with Mut, Panic, Div {
+    var b = buf
+    b = elf_buf_emit_byte(b, elf_low8(val))
+    b = elf_buf_emit_byte(b, elf_low8(val >> 8))
+    b
+}
+
+fn elf_buf_emit_le32(buf: ElfBuf, val: i64) -> ElfBuf with Mut, Panic, Div {
+    var b = buf
+    b = elf_buf_emit_byte(b, elf_low8(val))
+    b = elf_buf_emit_byte(b, elf_low8(val >> 8))
+    b = elf_buf_emit_byte(b, elf_low8(val >> 16))
+    b = elf_buf_emit_byte(b, elf_low8(val >> 24))
+    b
+}
+
+fn elf_buf_emit_le64(buf: ElfBuf, val: i64) -> ElfBuf with Mut, Panic, Div {
+    var b = buf
+    b = elf_buf_emit_le32(b, val)
+    b = elf_buf_emit_le32(b, val >> 32)
+    b
+}
+
+// Emit bytes from a source array into the buffer
+fn elf_buf_emit_bytes(buf: ElfBuf, src: [i8; 262144], src_len: i64) -> ElfBuf with Mut, Panic, Div {
+    var b = buf
+    var i: i64 = 0
+    while i < src_len && b.len < 262144 {
+        b.data[b.len as usize] = src[i as usize]
+        b.len = b.len + 1
+        i = i + 1
+    }
+    b
+}
+
+// Emit a slice from a source array (from offset, for count bytes)
+fn elf_buf_emit_slice(buf: ElfBuf, src: [i8; 262144], offset: i64, count: i64) -> ElfBuf with Mut, Panic, Div {
+    var b = buf
+    var i: i64 = 0
+    while i < count && b.len < 262144 {
+        b.data[b.len as usize] = src[(offset + i) as usize]
+        b.len = b.len + 1
+        i = i + 1
+    }
+    b
+}
+
+// Pad the buffer with zeroes until it reaches the given alignment
+fn elf_buf_pad_to_alignment(buf: ElfBuf, alignment: i64) -> ElfBuf with Mut, Panic, Div {
+    var b = buf
+    if alignment <= 0 {
+        return b
+    }
+    var remainder = b.len % alignment
+    if remainder < 0 { remainder = remainder + alignment }
+    if remainder != 0 {
+        var pad = alignment - remainder
+        while pad > 0 && b.len < 262144 {
+            b.data[b.len as usize] = 0
+            b.len = b.len + 1
+            pad = pad - 1
+        }
+    }
+    b
+}
+
+// Pad buffer to an absolute offset (filling with zeroes)
+fn elf_buf_pad_to_offset(buf: ElfBuf, target: i64) -> ElfBuf with Mut, Panic, Div {
+    var b = buf
+    while b.len < target && b.len < 262144 {
+        b.data[b.len as usize] = 0
+        b.len = b.len + 1
+    }
+    b
+}
+
+// Read a byte from the buffer at position
+fn elf_buf_read_byte(buf: ElfBuf, pos: i64) -> i64 with Mut, Panic {
+    if pos >= 0 && pos < buf.len {
+        buf.data[pos as usize] as i64
+    } else {
+        0
+    }
+}
+
+// Patch a little-endian 32-bit value at a given offset
+fn elf_buf_patch_le32(buf: ElfBuf, offset: i64, val: i64) -> ElfBuf with Mut, Panic, Div {
+    var b = buf
+    if offset >= 0 && offset + 4 <= b.len {
+        b.data[offset as usize] = elf_low8(val) as i8
+        b.data[(offset + 1) as usize] = elf_low8(val >> 8) as i8
+        b.data[(offset + 2) as usize] = elf_low8(val >> 16) as i8
+        b.data[(offset + 3) as usize] = elf_low8(val >> 24) as i8
+    }
+    b
+}
+
+// Patch a little-endian 64-bit value at a given offset
+fn elf_buf_patch_le64(buf: ElfBuf, offset: i64, val: i64) -> ElfBuf with Mut, Panic, Div {
+    var b = buf
+    b = elf_buf_patch_le32(b, offset, val)
+    b = elf_buf_patch_le32(b, offset + 4, val >> 32)
+    b
+}
+
+// ============================================================================
+// Constructor helpers
+// ============================================================================
+
+fn elf64_header_new(machine: i64, entry: i64) -> Elf64Header {
+    Elf64Header {
+        e_type: ELF_ET_EXEC(),
+        e_machine: machine,
+        e_entry: entry,
+        e_phoff: ELF64_EHDR_SIZE(),
+        e_shoff: 0,
+        e_phentsize: ELF64_PHDR_SIZE(),
+        e_phnum: 0,
+        e_shentsize: ELF64_SHDR_SIZE(),
+        e_shnum: 0,
+        e_shstrndx: 0,
+    }
+}
+
+fn elf64_phdr_new() -> Elf64Phdr {
+    Elf64Phdr {
+        p_type: 0,
+        p_flags: 0,
+        p_offset: 0,
+        p_vaddr: 0,
+        p_paddr: 0,
+        p_filesz: 0,
+        p_memsz: 0,
+        p_align: 0,
+    }
+}
+
+fn elf64_shdr_new() -> Elf64Shdr {
+    Elf64Shdr {
+        sh_name: 0,
+        sh_type: ELF_SHT_NULL(),
+        sh_flags: 0,
+        sh_addr: 0,
+        sh_offset: 0,
+        sh_size: 0,
+        sh_link: 0,
+        sh_info: 0,
+        sh_addralign: 0,
+        sh_entsize: 0,
+    }
+}
+
+fn elf_section_new() -> ElfSection {
+    ElfSection {
+        name_offset: 0,
+        shdr: elf64_shdr_new(),
+        data_offset: 0,
+        data_len: 0,
+    }
+}
+
+fn elf_symbol_new() -> ElfSymbol {
+    ElfSymbol {
+        st_name: 0,
+        st_info: 0,
+        st_other: 0,
+        st_shndx: 0,
+        st_value: 0,
+        st_size: 0,
+    }
+}
+
+// Compose st_info from binding and type
+fn elf_st_info(binding: i64, stype: i64) -> i64 {
+    binding * 16 + stype
+}
+
+// ============================================================================
+// ELF emission — write binary structures to ElfBuf
+// ============================================================================
+
+// Write the 64-byte ELF header
+fn elf_emit_header(buf: ElfBuf, hdr: Elf64Header) -> ElfBuf with Mut, Panic, Div {
+    var b = buf
+
+    // e_ident[0..4]: magic
+    b = elf_buf_emit_byte(b, ELF_MAGIC_0())
+    b = elf_buf_emit_byte(b, ELF_MAGIC_1())
+    b = elf_buf_emit_byte(b, ELF_MAGIC_2())
+    b = elf_buf_emit_byte(b, ELF_MAGIC_3())
+
+    // e_ident[4]: class (64-bit)
+    b = elf_buf_emit_byte(b, ELF_CLASS64())
+
+    // e_ident[5]: data encoding (little-endian)
+    b = elf_buf_emit_byte(b, ELF_DATA_LSB())
+
+    // e_ident[6]: version
+    b = elf_buf_emit_byte(b, ELF_EV_CURRENT())
+
+    // e_ident[7]: OS/ABI
+    b = elf_buf_emit_byte(b, ELF_OSABI_SYSV())
+
+    // e_ident[8..16]: padding (8 zero bytes)
+    var pad: i64 = 0
+    while pad < 8 {
+        b = elf_buf_emit_byte(b, 0)
+        pad = pad + 1
+    }
+
+    // e_type
+    b = elf_buf_emit_le16(b, hdr.e_type)
+
+    // e_machine
+    b = elf_buf_emit_le16(b, hdr.e_machine)
+
+    // e_version
+    b = elf_buf_emit_le32(b, ELF_EV_CURRENT())
+
+    // e_entry
+    b = elf_buf_emit_le64(b, hdr.e_entry)
+
+    // e_phoff
+    b = elf_buf_emit_le64(b, hdr.e_phoff)
+
+    // e_shoff
+    b = elf_buf_emit_le64(b, hdr.e_shoff)
+
+    // e_flags
+    b = elf_buf_emit_le32(b, 0)
+
+    // e_ehsize
+    b = elf_buf_emit_le16(b, ELF64_EHDR_SIZE())
+
+    // e_phentsize
+    b = elf_buf_emit_le16(b, hdr.e_phentsize)
+
+    // e_phnum
+    b = elf_buf_emit_le16(b, hdr.e_phnum)
+
+    // e_shentsize
+    b = elf_buf_emit_le16(b, hdr.e_shentsize)
+
+    // e_shnum
+    b = elf_buf_emit_le16(b, hdr.e_shnum)
+
+    // e_shstrndx
+    b = elf_buf_emit_le16(b, hdr.e_shstrndx)
+
+    b
+}
+
+// Write a 56-byte program header
+fn elf_emit_phdr(buf: ElfBuf, phdr: Elf64Phdr) -> ElfBuf with Mut, Panic, Div {
+    var b = buf
+
+    b = elf_buf_emit_le32(b, phdr.p_type)
+    b = elf_buf_emit_le32(b, phdr.p_flags)
+    b = elf_buf_emit_le64(b, phdr.p_offset)
+    b = elf_buf_emit_le64(b, phdr.p_vaddr)
+    b = elf_buf_emit_le64(b, phdr.p_paddr)
+    b = elf_buf_emit_le64(b, phdr.p_filesz)
+    b = elf_buf_emit_le64(b, phdr.p_memsz)
+    b = elf_buf_emit_le64(b, phdr.p_align)
+
+    b
+}
+
+// Write a 64-byte section header
+fn elf_emit_shdr(buf: ElfBuf, shdr: Elf64Shdr) -> ElfBuf with Mut, Panic, Div {
+    var b = buf
+
+    b = elf_buf_emit_le32(b, shdr.sh_name)
+    b = elf_buf_emit_le32(b, shdr.sh_type)
+    b = elf_buf_emit_le64(b, shdr.sh_flags)
+    b = elf_buf_emit_le64(b, shdr.sh_addr)
+    b = elf_buf_emit_le64(b, shdr.sh_offset)
+    b = elf_buf_emit_le64(b, shdr.sh_size)
+    b = elf_buf_emit_le32(b, shdr.sh_link)
+    b = elf_buf_emit_le32(b, shdr.sh_info)
+    b = elf_buf_emit_le64(b, shdr.sh_addralign)
+    b = elf_buf_emit_le64(b, shdr.sh_entsize)
+
+    b
+}
+
+// Write a 24-byte symbol table entry
+fn elf_emit_symbol(buf: ElfBuf, sym: ElfSymbol) -> ElfBuf with Mut, Panic, Div {
+    var b = buf
+
+    b = elf_buf_emit_le32(b, sym.st_name)
+    b = elf_buf_emit_byte(b, sym.st_info)
+    b = elf_buf_emit_byte(b, sym.st_other)
+    b = elf_buf_emit_le16(b, sym.st_shndx)
+    b = elf_buf_emit_le64(b, sym.st_value)
+    b = elf_buf_emit_le64(b, sym.st_size)
+
+    b
+}
+
+// Build a string table from an array of (offset, length) pairs
+// Each string is taken from a flat byte source; null-terminated in output.
+// `strings` holds offsets into `src_bytes` and `lengths` holds their lengths.
+fn elf_build_strtab(
+    buf: ElfBuf,
+    src_bytes: [i8; 262144],
+    offsets: [i64; 64],
+    lengths: [i64; 64],
+    count: i64
+) -> ElfBuf with Mut, Panic, Div {
+    var b = buf
+    // The string table must start with a null byte
+    b = elf_buf_emit_byte(b, 0)
+
+    var i: i64 = 0
+    while i < count && i < 64 {
+        var j: i64 = 0
+        let off = offsets[i as usize]
+        let slen = lengths[i as usize]
+        while j < slen {
+            b = elf_buf_emit_byte(b, src_bytes[(off + j) as usize] as i64)
+            j = j + 1
+        }
+        // null terminator
+        b = elf_buf_emit_byte(b, 0)
+        i = i + 1
+    }
+
+    b
+}
+
+// ============================================================================
+// Alignment utility
+// ============================================================================
+
+fn elf_align_up(value: i64, alignment: i64) -> i64 with Mut, Panic {
+    if alignment <= 0 {
+        return value
+    }
+    var r = value % alignment
+    if r < 0 { r = r + alignment }
+    if r == 0 { value } else { value + (alignment - r) }
+}
+
+// ============================================================================
+// Section-name string table helpers
+// ============================================================================
+
+// Add a section name to the writer's strtab, return the name offset
+fn elf_strtab_add_name(strtab: ElfBuf, name_bytes: [i8; 32], name_len: i64) -> (ElfBuf, i64) with Mut, Panic, Div {
+    var st = strtab
+    // If strtab is empty, emit initial null byte
+    if st.len == 0 {
+        st = elf_buf_emit_byte(st, 0)
+    }
+    let offset = st.len
+    var i: i64 = 0
+    while i < name_len && st.len < 262144 {
+        st = elf_buf_emit_byte(st, name_bytes[i as usize] as i64)
+        i = i + 1
+    }
+    // null terminator
+    st = elf_buf_emit_byte(st, 0)
+    (st, offset)
+}
+
+// Helper to create a 32-byte name buffer from up to 8 ASCII characters
+fn elf_make_name8(a: i8, b: i8, c: i8, d: i8, e: i8, f: i8, g: i8, h: i8, len: i64) -> [i8; 32] with Mut, Panic {
+    var buf: [i8; 32] = [0; 32]
+    if len > 0 { buf[0] = a }
+    if len > 1 { buf[1] = b }
+    if len > 2 { buf[2] = c }
+    if len > 3 { buf[3] = d }
+    if len > 4 { buf[4] = e }
+    if len > 5 { buf[5] = f }
+    if len > 6 { buf[6] = g }
+    if len > 7 { buf[7] = h }
+    buf
+}
+
+// ============================================================================
+// High-level ElfWriter API
+// ============================================================================
+
+fn elf_writer_new(machine: i64, entry_addr: i64) -> ElfWriter with Mut, Panic, Div {
+    var w = ElfWriter {
+        header: elf64_header_new(machine, entry_addr),
+        sections: [elf_section_new(); 32],
+        section_count: 0,
+        segments: [elf64_phdr_new(); 8],
+        segment_count: 0,
+        strtab: elf_buf_new(),
+        section_data: elf_buf_new(),
+        base_addr: ELF_DEFAULT_BASE(),
+    }
+
+    // Section 0 is always the null section (SHT_NULL)
+    w.sections[0] = elf_section_new()
+    w.section_count = 1
+
+    // Initialize the strtab with a leading null byte
+    w.strtab = elf_buf_emit_byte(w.strtab, 0)
+
+    w
+}
+
+fn elf_writer_section_count(w: ElfWriter) -> i64 {
+    w.section_count
+}
+
+// Add a generic section to the writer
+fn elf_writer_add_section(
+    w: ElfWriter,
+    name_bytes: [i8; 32],
+    name_len: i64,
+    sh_type: i64,
+    sh_flags: i64,
+    data: [i8; 262144],
+    data_len: i64
+) -> ElfWriter with Mut, Panic, Div {
+    var writer = w
+    if writer.section_count >= 32 {
+        return writer
+    }
+
+    // Add name to strtab
+    let strtab_result = elf_strtab_add_name(writer.strtab, name_bytes, name_len)
+    writer.strtab = strtab_result.0
+    let name_off = strtab_result.1
+
+    // Record data offset in section_data buffer
+    let data_off = writer.section_data.len
+
+    // Copy data into section_data buffer
+    var i: i64 = 0
+    while i < data_len && writer.section_data.len < 262144 {
+        writer.section_data.data[writer.section_data.len as usize] = data[i as usize]
+        writer.section_data.len = writer.section_data.len + 1
+        i = i + 1
+    }
+
+    let idx = writer.section_count
+
+    // Set up section header (offsets/addresses resolved during finalize)
+    var shdr = elf64_shdr_new()
+    shdr.sh_name = name_off
+    shdr.sh_type = sh_type
+    shdr.sh_flags = sh_flags
+    shdr.sh_size = data_len
+    shdr.sh_addralign = if sh_flags != 0 { 16 } else { 1 }
+
+    writer.sections[idx as usize] = ElfSection {
+        name_offset: name_off,
+        shdr: shdr,
+        data_offset: data_off,
+        data_len: data_len,
+    }
+    writer.section_count = writer.section_count + 1
+
+    writer
+}
+
+// Convenience: add .text section (SHT_PROGBITS, alloc + exec)
+fn elf_writer_add_text_section(
+    w: ElfWriter,
+    code: [i8; 262144],
+    code_len: i64
+) -> ElfWriter with Mut, Panic, Div {
+    // ".text" = [46, 116, 101, 120, 116]
+    let name = elf_make_name8(46, 116, 101, 120, 116, 0, 0, 0, 5)
+    elf_writer_add_section(
+        w, name, 5,
+        ELF_SHT_PROGBITS(),
+        ELF_SHF_ALLOC() + ELF_SHF_EXECINSTR(),
+        code, code_len
+    )
+}
+
+// Convenience: add .data section (SHT_PROGBITS, alloc + write)
+fn elf_writer_add_data_section(
+    w: ElfWriter,
+    data: [i8; 262144],
+    data_len: i64
+) -> ElfWriter with Mut, Panic, Div {
+    // ".data" = [46, 100, 97, 116, 97]
+    let name = elf_make_name8(46, 100, 97, 116, 97, 0, 0, 0, 5)
+    elf_writer_add_section(
+        w, name, 5,
+        ELF_SHT_PROGBITS(),
+        ELF_SHF_ALLOC() + ELF_SHF_WRITE(),
+        data, data_len
+    )
+}
+
+// Convenience: add .bss section (SHT_NOBITS, alloc + write)
+fn elf_writer_add_bss_section(
+    w: ElfWriter,
+    size: i64
+) -> ElfWriter with Mut, Panic, Div {
+    var writer = w
+    if writer.section_count >= 32 {
+        return writer
+    }
+
+    // ".bss" = [46, 98, 115, 115]
+    let name = elf_make_name8(46, 98, 115, 115, 0, 0, 0, 0, 4)
+    let strtab_result = elf_strtab_add_name(writer.strtab, name, 4)
+    writer.strtab = strtab_result.0
+    let name_off = strtab_result.1
+
+    let idx = writer.section_count
+
+    var shdr = elf64_shdr_new()
+    shdr.sh_name = name_off
+    shdr.sh_type = ELF_SHT_NOBITS()
+    shdr.sh_flags = ELF_SHF_ALLOC() + ELF_SHF_WRITE()
+    shdr.sh_size = size
+    shdr.sh_addralign = 16
+
+    writer.sections[idx as usize] = ElfSection {
+        name_offset: name_off,
+        shdr: shdr,
+        data_offset: 0,
+        data_len: 0,
+    }
+    writer.section_count = writer.section_count + 1
+
+    writer
+}
+
+// Add a segment (program header) to the writer
+fn elf_writer_add_segment(
+    w: ElfWriter,
+    p_type: i64,
+    p_flags: i64,
+    p_offset: i64,
+    p_vaddr: i64,
+    p_filesz: i64,
+    p_memsz: i64,
+    p_align: i64
+) -> ElfWriter with Mut, Panic {
+    var writer = w
+    if writer.segment_count >= 8 {
+        return writer
+    }
+
+    let idx = writer.segment_count
+    writer.segments[idx as usize] = Elf64Phdr {
+        p_type: p_type,
+        p_flags: p_flags,
+        p_offset: p_offset,
+        p_vaddr: p_vaddr,
+        p_paddr: p_vaddr,
+        p_filesz: p_filesz,
+        p_memsz: p_memsz,
+        p_align: p_align,
+    }
+    writer.segment_count = writer.segment_count + 1
+
+    writer
+}
+
+// ============================================================================
+// Layout and finalize
+// ============================================================================
+
+// Finalize: compute layout, add .shstrtab, generate segments, emit everything
+fn elf_writer_finalize(w: ElfWriter) -> ElfBuf with Mut, Panic, Div {
+    var writer = w
+    var out = elf_buf_new()
+
+    // ---------------------------------------------------------------
+    // Step 1: Add .shstrtab as the last section (section name string table)
+    // ---------------------------------------------------------------
+    // ".shstrtab" = [46, 115, 104, 115, 116, 114, 116, 97, 98] (9 chars)
+    let shstrtab_name = elf_make_name8(46, 115, 104, 115, 116, 114, 116, 97, 9)
+    // We need to add the name for .shstrtab itself into the strtab first
+    let st_result = elf_strtab_add_name(writer.strtab, shstrtab_name, 9)
+    writer.strtab = st_result.0
+    let shstrtab_name_off = st_result.1
+
+    let shstrtab_idx = writer.section_count
+    var shstrtab_shdr = elf64_shdr_new()
+    shstrtab_shdr.sh_name = shstrtab_name_off
+    shstrtab_shdr.sh_type = ELF_SHT_STRTAB()
+    shstrtab_shdr.sh_addralign = 1
+
+    writer.sections[shstrtab_idx as usize] = ElfSection {
+        name_offset: shstrtab_name_off,
+        shdr: shstrtab_shdr,
+        data_offset: 0,
+        data_len: writer.strtab.len,
+    }
+    writer.section_count = writer.section_count + 1
+
+    // ---------------------------------------------------------------
+    // Step 2: Compute layout offsets
+    // ---------------------------------------------------------------
+    let total_sections = writer.section_count
+
+    // Count loadable sections for segment generation
+    var load_text_idx: i64 = 0 - 1
+    var load_data_idx: i64 = 0 - 1
+    var load_bss_idx: i64 = 0 - 1
+    var si: i64 = 1
+    while si < total_sections {
+        let sec = writer.sections[si as usize]
+        let flags = sec.shdr.sh_flags
+        let stype = sec.shdr.sh_type
+        if stype == ELF_SHT_PROGBITS() && (flags == ELF_SHF_ALLOC() + ELF_SHF_EXECINSTR()) {
+            load_text_idx = si
+        }
+        if stype == ELF_SHT_PROGBITS() && (flags == ELF_SHF_ALLOC() + ELF_SHF_WRITE()) {
+            load_data_idx = si
+        }
+        if stype == ELF_SHT_NOBITS() {
+            load_bss_idx = si
+        }
+        si = si + 1
+    }
+
+    // Determine how many program headers we need
+    var phnum: i64 = 0
+    if load_text_idx >= 0 { phnum = phnum + 1 }
+    if load_data_idx >= 0 { phnum = phnum + 1 }
+    if load_bss_idx >= 0 { phnum = phnum + 1 }
+    // If no loadable sections, add at least one empty segment
+    if phnum == 0 { phnum = 1 }
+
+    // Offset computation
+    let phdr_start = ELF64_EHDR_SIZE()
+    let phdr_total = phnum * ELF64_PHDR_SIZE()
+    let first_section_offset = elf_align_up(phdr_start + phdr_total, ELF_PAGE_SIZE())
+
+    // Lay out each section's file offset and virtual address
+    var current_offset = first_section_offset
+    var sec_i: i64 = 1  // skip null section
+    while sec_i < total_sections {
+        var sec = writer.sections[sec_i as usize]
+        var shdr2 = sec.shdr
+
+        if shdr2.sh_type == ELF_SHT_NOBITS() {
+            // BSS: no file data, just address
+            shdr2.sh_offset = current_offset
+            shdr2.sh_addr = writer.base_addr + current_offset
+        } else if sec_i == shstrtab_idx {
+            // .shstrtab goes last, after all data sections
+            shdr2.sh_offset = current_offset
+            shdr2.sh_addr = 0  // non-allocatable
+            current_offset = current_offset + writer.strtab.len
+        } else {
+            shdr2.sh_offset = current_offset
+            if shdr2.sh_flags != 0 {
+                shdr2.sh_addr = writer.base_addr + current_offset
+            }
+            current_offset = current_offset + sec.data_len
+            // Align next section
+            current_offset = elf_align_up(current_offset, 16)
+        }
+
+        sec.shdr = shdr2
+        writer.sections[sec_i as usize] = sec
+        sec_i = sec_i + 1
+    }
+
+    // Section header table comes after all section data
+    let shdr_table_offset = elf_align_up(current_offset, 8)
+
+    // ---------------------------------------------------------------
+    // Step 3: Populate the header
+    // ---------------------------------------------------------------
+    var hdr = writer.header
+    hdr.e_phoff = phdr_start
+    hdr.e_phnum = phnum
+    hdr.e_shoff = shdr_table_offset
+    hdr.e_shnum = total_sections
+    hdr.e_shstrndx = shstrtab_idx
+
+    // ---------------------------------------------------------------
+    // Step 4: Emit ELF header
+    // ---------------------------------------------------------------
+    out = elf_emit_header(out, hdr)
+
+    // ---------------------------------------------------------------
+    // Step 5: Emit program headers
+    // ---------------------------------------------------------------
+    if load_text_idx >= 0 {
+        let tsec = writer.sections[load_text_idx as usize]
+        var text_phdr = elf64_phdr_new()
+        text_phdr.p_type = ELF_PT_LOAD()
+        text_phdr.p_flags = ELF_PF_R() + ELF_PF_X()
+        text_phdr.p_offset = tsec.shdr.sh_offset
+        text_phdr.p_vaddr = tsec.shdr.sh_addr
+        text_phdr.p_paddr = tsec.shdr.sh_addr
+        text_phdr.p_filesz = tsec.data_len
+        text_phdr.p_memsz = tsec.data_len
+        text_phdr.p_align = ELF_PAGE_SIZE()
+        out = elf_emit_phdr(out, text_phdr)
+    }
+    if load_data_idx >= 0 {
+        let dsec = writer.sections[load_data_idx as usize]
+        var data_phdr = elf64_phdr_new()
+        data_phdr.p_type = ELF_PT_LOAD()
+        data_phdr.p_flags = ELF_PF_R() + ELF_PF_W()
+        data_phdr.p_offset = dsec.shdr.sh_offset
+        data_phdr.p_vaddr = dsec.shdr.sh_addr
+        data_phdr.p_paddr = dsec.shdr.sh_addr
+        data_phdr.p_filesz = dsec.data_len
+        data_phdr.p_memsz = dsec.data_len
+        data_phdr.p_align = ELF_PAGE_SIZE()
+        out = elf_emit_phdr(out, data_phdr)
+    }
+    if load_bss_idx >= 0 {
+        let bsec = writer.sections[load_bss_idx as usize]
+        var bss_phdr = elf64_phdr_new()
+        bss_phdr.p_type = ELF_PT_LOAD()
+        bss_phdr.p_flags = ELF_PF_R() + ELF_PF_W()
+        bss_phdr.p_offset = bsec.shdr.sh_offset
+        bss_phdr.p_vaddr = bsec.shdr.sh_addr
+        bss_phdr.p_paddr = bsec.shdr.sh_addr
+        bss_phdr.p_filesz = 0
+        bss_phdr.p_memsz = bsec.shdr.sh_size
+        bss_phdr.p_align = ELF_PAGE_SIZE()
+        out = elf_emit_phdr(out, bss_phdr)
+    }
+    // If no loadable sections, emit a dummy segment
+    if load_text_idx < 0 && load_data_idx < 0 && load_bss_idx < 0 {
+        out = elf_emit_phdr(out, elf64_phdr_new())
+    }
+
+    // ---------------------------------------------------------------
+    // Step 6: Pad to first section offset and emit section data
+    // ---------------------------------------------------------------
+    out = elf_buf_pad_to_offset(out, first_section_offset)
+
+    sec_i = 1
+    while sec_i < total_sections {
+        let sec3 = writer.sections[sec_i as usize]
+
+        // Pad to section offset
+        out = elf_buf_pad_to_offset(out, sec3.shdr.sh_offset)
+
+        if sec3.shdr.sh_type == ELF_SHT_NOBITS() {
+            // BSS: no file data
+        } else if sec_i == shstrtab_idx {
+            // Emit .shstrtab from writer.strtab
+            out = elf_buf_emit_bytes(out, writer.strtab.data, writer.strtab.len)
+        } else {
+            // Emit section data from section_data buffer
+            out = elf_buf_emit_slice(out, writer.section_data.data, sec3.data_offset, sec3.data_len)
+        }
+        sec_i = sec_i + 1
+    }
+
+    // ---------------------------------------------------------------
+    // Step 7: Pad to section header table offset and emit shdrs
+    // ---------------------------------------------------------------
+    out = elf_buf_pad_to_offset(out, shdr_table_offset)
+
+    var sh_i: i64 = 0
+    while sh_i < total_sections {
+        out = elf_emit_shdr(out, writer.sections[sh_i as usize].shdr)
+        sh_i = sh_i + 1
+    }
+
+    out
+}
+
+// ============================================================================
+// Inline Tests
+// ============================================================================
+
+// T01: elf_buf_new creates an empty buffer
+fn elf_writer_test_01_buf_new() -> bool {
+    let b = elf_buf_new()
+    b.len == 0
+}
+
+// T02: elf_buf_emit_byte appends a byte
+fn elf_writer_test_02_emit_byte() -> bool with Mut, Panic, Div {
+    var b = elf_buf_new()
+    b = elf_buf_emit_byte(b, 0x42)
+    b.len == 1 && b.data[0] as i64 == 0x42
+}
+
+// T03: elf_buf_emit_le16 writes little-endian 16-bit
+fn elf_writer_test_03_emit_le16() -> bool with Mut, Panic, Div {
+    var b = elf_buf_new()
+    b = elf_buf_emit_le16(b, 0x1234)
+    b.len == 2 && b.data[0] as i64 == 0x34 && b.data[1] as i64 == 0x12
+}
+
+// T04: elf_buf_emit_le32 writes little-endian 32-bit
+fn elf_writer_test_04_emit_le32() -> bool with Mut, Panic, Div {
+    var b = elf_buf_new()
+    b = elf_buf_emit_le32(b, 0x78)  // small value to avoid sign issues
+    b.len == 4 && b.data[0] as i64 == 0x78 && b.data[1] as i64 == 0 && b.data[2] as i64 == 0 && b.data[3] as i64 == 0
+}
+
+// T05: elf_buf_pad_to_alignment pads correctly
+fn elf_writer_test_05_pad_alignment() -> bool with Mut, Panic, Div {
+    var b = elf_buf_new()
+    b = elf_buf_emit_byte(b, 1)
+    b = elf_buf_emit_byte(b, 2)
+    b = elf_buf_emit_byte(b, 3)
+    b = elf_buf_pad_to_alignment(b, 8)
+    b.len == 8
+}
+
+// T06: elf_emit_header produces exactly 64 bytes
+fn elf_writer_test_06_header_size() -> bool with Mut, Panic, Div {
+    var b = elf_buf_new()
+    let hdr = elf64_header_new(ELF_EM_X86_64(), 0x401000)
+    b = elf_emit_header(b, hdr)
+    b.len == 64
+}
+
+// T07: ELF magic bytes are correct in the emitted header
+fn elf_writer_test_07_header_magic() -> bool with Mut, Panic, Div {
+    var b = elf_buf_new()
+    let hdr = elf64_header_new(ELF_EM_X86_64(), 0x401000)
+    b = elf_emit_header(b, hdr)
+    b.data[0] as i64 == 0x7f && b.data[1] as i64 == 0x45 && b.data[2] as i64 == 0x4c && b.data[3] as i64 == 0x46
+}
+
+// T08: elf_emit_phdr produces exactly 56 bytes
+fn elf_writer_test_08_phdr_size() -> bool with Mut, Panic, Div {
+    var b = elf_buf_new()
+    var phdr = elf64_phdr_new()
+    phdr.p_type = ELF_PT_LOAD()
+    phdr.p_flags = ELF_PF_R() + ELF_PF_X()
+    b = elf_emit_phdr(b, phdr)
+    b.len == 56
+}
+
+// T09: elf_emit_shdr produces exactly 64 bytes
+fn elf_writer_test_09_shdr_size() -> bool with Mut, Panic, Div {
+    var b = elf_buf_new()
+    let shdr = elf64_shdr_new()
+    b = elf_emit_shdr(b, shdr)
+    b.len == 64
+}
+
+// T10: elf_emit_symbol produces exactly 24 bytes
+fn elf_writer_test_10_symbol_size() -> bool with Mut, Panic, Div {
+    var b = elf_buf_new()
+    let sym = elf_symbol_new()
+    b = elf_emit_symbol(b, sym)
+    b.len == 24
+}
+
+// T11: elf_writer_new starts with 1 section (null) and 0 segments
+fn elf_writer_test_11_writer_new() -> bool with Mut, Panic, Div {
+    let w = elf_writer_new(ELF_EM_X86_64(), 0x401000)
+    w.section_count == 1 && w.segment_count == 0
+}
+
+// T12: elf_writer_add_text_section increments section count
+fn elf_writer_test_12_add_text() -> bool with Mut, Panic, Div {
+    var w = elf_writer_new(ELF_EM_X86_64(), 0x401000)
+    var code: [i8; 262144] = [0; 262144]
+    code[0] = 0xcc as i8  // INT3
+    w = elf_writer_add_text_section(w, code, 1)
+    elf_writer_section_count(w) == 2
+}
+
+// T13: elf_writer_add_data_section sets correct type
+fn elf_writer_test_13_add_data() -> bool with Mut, Panic, Div {
+    var w = elf_writer_new(ELF_EM_X86_64(), 0x401000)
+    var data: [i8; 262144] = [0; 262144]
+    data[0] = 42
+    w = elf_writer_add_data_section(w, data, 4)
+    elf_writer_section_count(w) == 2
+}
+
+// T14: elf_writer_add_bss_section creates NOBITS section
+fn elf_writer_test_14_add_bss() -> bool with Mut, Panic, Div {
+    var w = elf_writer_new(ELF_EM_X86_64(), 0x401000)
+    w = elf_writer_add_bss_section(w, 4096)
+    elf_writer_section_count(w) == 2
+}
+
+// T15: elf_buf_patch_le32 patches correctly
+fn elf_writer_test_15_patch_le32() -> bool with Mut, Panic, Div {
+    var b = elf_buf_new()
+    b = elf_buf_emit_le32(b, 0)
+    b = elf_buf_patch_le32(b, 0, 0x42)
+    b.data[0] as i64 == 0x42 && b.data[1] as i64 == 0 && b.data[2] as i64 == 0 && b.data[3] as i64 == 0
+}
+
+// T16: elf_align_up computes correctly
+fn elf_writer_test_16_align_up() -> bool with Mut, Panic {
+    let a = elf_align_up(100, 16)
+    let b_val = elf_align_up(64, 16)
+    let c = elf_align_up(0, 4096)
+    a == 112 && b_val == 64 && c == 0
+}
+
+// T17: elf_st_info composes binding and type correctly
+fn elf_writer_test_17_st_info() -> bool {
+    let info_global_func = elf_st_info(ELF_STB_GLOBAL(), ELF_STT_FUNC())
+    let info_local_obj = elf_st_info(ELF_STB_LOCAL(), ELF_STT_OBJECT())
+    info_global_func == 18 && info_local_obj == 1
+}
+
+// T18: finalize produces valid ELF with text section
+fn elf_writer_test_18_finalize_text() -> bool with Mut, Panic, Div {
+    var w = elf_writer_new(ELF_EM_X86_64(), 0x401000)
+    var code: [i8; 262144] = [0; 262144]
+    // Minimal code: mov rax, 60; xor rdi, rdi; syscall (exit(0))
+    code[0] = 0x48 as i8  // REX.W
+    code[1] = 0xc7 as i8  // MOV r/m64, imm32
+    code[2] = 0xc0 as i8  // ModRM: rax
+    code[3] = 60          // imm32: 60 (sys_exit)
+    code[4] = 0
+    code[5] = 0
+    code[6] = 0
+    code[7] = 0x48 as i8  // REX.W
+    code[8] = 0x31 as i8  // XOR r/m64, r64
+    code[9] = 0xff as i8  // ModRM: rdi, rdi
+    code[10] = 0x0f       // SYSCALL prefix
+    code[11] = 0x05       // SYSCALL
+    w = elf_writer_add_text_section(w, code, 12)
+    let elf = elf_writer_finalize(w)
+
+    // Verify it starts with ELF magic
+    let ok_magic = elf.data[0] as i64 == 0x7f && elf.data[1] as i64 == 0x45 && elf.data[2] as i64 == 0x4c && elf.data[3] as i64 == 0x46
+    // Verify it has nonzero length
+    let ok_len = elf.len > 64
+    ok_magic && ok_len
+}
+
+// T19: finalize with both .text and .data
+fn elf_writer_test_19_finalize_text_data() -> bool with Mut, Panic, Div {
+    var w = elf_writer_new(ELF_EM_AARCH64(), 0x401000)
+    var code: [i8; 262144] = [0; 262144]
+    code[0] = 0xd2 as i8  // placeholder AArch64 instruction
+    w = elf_writer_add_text_section(w, code, 4)
+
+    var data: [i8; 262144] = [0; 262144]
+    data[0] = 72  // 'H'
+    data[1] = 101 // 'e'
+    data[2] = 108 // 'l'
+    data[3] = 108 // 'l'
+    data[4] = 111 // 'o'
+    w = elf_writer_add_data_section(w, data, 5)
+
+    let elf = elf_writer_finalize(w)
+    // Should have ELF magic and multiple sections
+    elf.data[0] as i64 == 0x7f && elf.len > 64
+}
+
+// T20: elf_buf_emit_le64 writes 8 bytes
+fn elf_writer_test_20_emit_le64() -> bool with Mut, Panic, Div {
+    var b = elf_buf_new()
+    b = elf_buf_emit_le64(b, 1)
+    b.len == 8 && b.data[0] as i64 == 1 && b.data[7] as i64 == 0
+}
+
+// ============================================================================
+// Test Runner
+// ============================================================================
+
+fn elf_writer_run_tests() -> i64 with IO, Mut, Panic, Div {
+    var passed: i64 = 0
+    var total: i64 = 0
+
+    print("=== ELF Writer Tests ===\n")
+
+    total = total + 1
+    if elf_writer_test_01_buf_new() { passed = passed + 1; print("  T01 OK buf_new\n") } else { print("  FAIL T01 buf_new\n") }
+
+    total = total + 1
+    if elf_writer_test_02_emit_byte() { passed = passed + 1; print("  T02 OK emit_byte\n") } else { print("  FAIL T02 emit_byte\n") }
+
+    total = total + 1
+    if elf_writer_test_03_emit_le16() { passed = passed + 1; print("  T03 OK emit_le16\n") } else { print("  FAIL T03 emit_le16\n") }
+
+    total = total + 1
+    if elf_writer_test_04_emit_le32() { passed = passed + 1; print("  T04 OK emit_le32\n") } else { print("  FAIL T04 emit_le32\n") }
+
+    total = total + 1
+    if elf_writer_test_05_pad_alignment() { passed = passed + 1; print("  T05 OK pad_alignment\n") } else { print("  FAIL T05 pad_alignment\n") }
+
+    total = total + 1
+    if elf_writer_test_06_header_size() { passed = passed + 1; print("  T06 OK header_size\n") } else { print("  FAIL T06 header_size\n") }
+
+    total = total + 1
+    if elf_writer_test_07_header_magic() { passed = passed + 1; print("  T07 OK header_magic\n") } else { print("  FAIL T07 header_magic\n") }
+
+    total = total + 1
+    if elf_writer_test_08_phdr_size() { passed = passed + 1; print("  T08 OK phdr_size\n") } else { print("  FAIL T08 phdr_size\n") }
+
+    total = total + 1
+    if elf_writer_test_09_shdr_size() { passed = passed + 1; print("  T09 OK shdr_size\n") } else { print("  FAIL T09 shdr_size\n") }
+
+    total = total + 1
+    if elf_writer_test_10_symbol_size() { passed = passed + 1; print("  T10 OK symbol_size\n") } else { print("  FAIL T10 symbol_size\n") }
+
+    total = total + 1
+    if elf_writer_test_11_writer_new() { passed = passed + 1; print("  T11 OK writer_new\n") } else { print("  FAIL T11 writer_new\n") }
+
+    total = total + 1
+    if elf_writer_test_12_add_text() { passed = passed + 1; print("  T12 OK add_text\n") } else { print("  FAIL T12 add_text\n") }
+
+    total = total + 1
+    if elf_writer_test_13_add_data() { passed = passed + 1; print("  T13 OK add_data\n") } else { print("  FAIL T13 add_data\n") }
+
+    total = total + 1
+    if elf_writer_test_14_add_bss() { passed = passed + 1; print("  T14 OK add_bss\n") } else { print("  FAIL T14 add_bss\n") }
+
+    total = total + 1
+    if elf_writer_test_15_patch_le32() { passed = passed + 1; print("  T15 OK patch_le32\n") } else { print("  FAIL T15 patch_le32\n") }
+
+    total = total + 1
+    if elf_writer_test_16_align_up() { passed = passed + 1; print("  T16 OK align_up\n") } else { print("  FAIL T16 align_up\n") }
+
+    total = total + 1
+    if elf_writer_test_17_st_info() { passed = passed + 1; print("  T17 OK st_info\n") } else { print("  FAIL T17 st_info\n") }
+
+    total = total + 1
+    if elf_writer_test_18_finalize_text() { passed = passed + 1; print("  T18 OK finalize_text\n") } else { print("  FAIL T18 finalize_text\n") }
+
+    total = total + 1
+    if elf_writer_test_19_finalize_text_data() { passed = passed + 1; print("  T19 OK finalize_text_data\n") } else { print("  FAIL T19 finalize_text_data\n") }
+
+    total = total + 1
+    if elf_writer_test_20_emit_le64() { passed = passed + 1; print("  T20 OK emit_le64\n") } else { print("  FAIL T20 emit_le64\n") }
+
+    print("ELF Writer: ")
+    print_int(passed)
+    print("/")
+    print_int(total)
+    print(" passed\n")
+
+    if passed == total { 0 } else { 1 }
+}

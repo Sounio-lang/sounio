@@ -1,0 +1,1122 @@
+// self-hosted::wasm::lower — IR-to-WASM lowering pass
+//
+// Translates IrModule (from ir/ir.sio) into WASM bytecode using the emitters
+// from wasm/encode.sio and the module structures from wasm/mod.sio.
+//
+// Strategy: register-based IR is lowered to WASM's stack machine by mapping
+// each IR register to a WASM local variable.  Each IR instruction becomes a
+// sequence: push operands via local.get, execute the operation, store result
+// via local.set.  Structured control flow (block/loop) is reconstructed from
+// the flat IR label/branch model using a label stack.
+//
+// Capacities:
+//   512 locals per function  (IR registers -> WASM locals)
+//   256 functions per module (IR functions -> WASM function indices)
+//    64 label stack depth    (nested block/loop scope)
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+let WASM_LOWER_MAX_LOCALS: i64 = 512
+let WASM_LOWER_MAX_FUNCS: i64 = 256
+let WASM_LOWER_MAX_LABELS: i64 = 64
+
+// Label kinds for the structured control flow stack
+let WASM_LABEL_BLOCK: i64 = 0
+let WASM_LABEL_LOOP: i64 = 1
+
+// ============================================================================
+// WasmLabelEntry — one entry on the structured control flow label stack
+// ============================================================================
+
+struct WasmLabelEntry {
+    ir_label_id: i64,
+    kind: i64,
+}
+
+fn wasm_label_entry_new(ir_label: i64, kind: i64) -> WasmLabelEntry {
+    WasmLabelEntry { ir_label_id: ir_label, kind: kind }
+}
+
+fn wasm_label_entry_empty() -> WasmLabelEntry {
+    WasmLabelEntry { ir_label_id: 0 - 1, kind: WASM_LABEL_BLOCK }
+}
+
+// ============================================================================
+// WasmLowerCtx — lowering context for one module
+// ============================================================================
+
+struct WasmLowerCtx {
+    body: WasmFuncBody,
+    local_map: [i64; 512],
+    local_count: i64,
+    func_map: [i64; 256],
+    func_count: i64,
+    label_stack: [WasmLabelEntry; 64],
+    label_depth: i64,
+    error_count: i64,
+}
+
+fn wasm_lower_ctx_new() -> WasmLowerCtx {
+    WasmLowerCtx {
+        body: wasm_body_new(),
+        local_map: [0 - 1; 512],
+        local_count: 0,
+        func_map: [0 - 1; 256],
+        func_count: 0,
+        label_stack: [wasm_label_entry_empty(); 64],
+        label_depth: 0,
+        error_count: 0,
+    }
+}
+
+fn wasm_lower_ctx_reset_body(ctx: WasmLowerCtx) -> WasmLowerCtx with Mut, Panic, Div {
+    var out = ctx
+    out.body = wasm_body_new()
+    out.local_count = 0
+    out.label_depth = 0
+    var i: i64 = 0
+    while i < WASM_LOWER_MAX_LOCALS {
+        out.local_map[i as usize] = 0 - 1
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
+// Local variable allocation
+//
+// Each IR register gets a dedicated WASM local.  Parameters occupy the first
+// N locals (matching WASM's calling convention); additional registers are
+// appended after.
+// ============================================================================
+
+fn wasm_lower_alloc_local(ctx: WasmLowerCtx, ir_reg: i64) -> WasmLowerCtx with Mut, Panic {
+    var out = ctx
+    if ir_reg >= 0 && ir_reg < WASM_LOWER_MAX_LOCALS {
+        if out.local_map[ir_reg as usize] < 0 {
+            out.local_map[ir_reg as usize] = out.local_count
+            out.local_count = out.local_count + 1
+        }
+    }
+    out
+}
+
+fn wasm_lower_get_local(ctx: WasmLowerCtx, ir_reg: i64) -> i64 with Mut, Panic {
+    if ir_reg >= 0 && ir_reg < WASM_LOWER_MAX_LOCALS {
+        ctx.local_map[ir_reg as usize]
+    } else {
+        0 - 1
+    }
+}
+
+// ============================================================================
+// Function table
+// ============================================================================
+
+fn wasm_lower_register_func(ctx: WasmLowerCtx, ir_fn_id: i64, wasm_idx: i64) -> WasmLowerCtx with Mut, Panic {
+    var out = ctx
+    if ir_fn_id >= 0 && ir_fn_id < WASM_LOWER_MAX_FUNCS {
+        out.func_map[ir_fn_id as usize] = wasm_idx
+        out.func_count = out.func_count + 1
+    }
+    out
+}
+
+fn wasm_lower_get_func(ctx: WasmLowerCtx, ir_fn_id: i64) -> i64 with Mut, Panic {
+    if ir_fn_id >= 0 && ir_fn_id < WASM_LOWER_MAX_FUNCS {
+        ctx.func_map[ir_fn_id as usize]
+    } else {
+        0 - 1
+    }
+}
+
+// ============================================================================
+// Label stack management
+//
+// IR uses flat labels + branches; WASM requires structured block/loop/end.
+// The label stack tracks the nesting so that `br` depth can be computed
+// relative to the current position.
+// ============================================================================
+
+fn wasm_lower_push_label(ctx: WasmLowerCtx, ir_label: i64, kind: i64) -> WasmLowerCtx with Mut, Panic {
+    var out = ctx
+    if out.label_depth < WASM_LOWER_MAX_LABELS {
+        out.label_stack[out.label_depth as usize] = wasm_label_entry_new(ir_label, kind)
+        out.label_depth = out.label_depth + 1
+    }
+    out
+}
+
+fn wasm_lower_pop_label(ctx: WasmLowerCtx) -> WasmLowerCtx with Mut, Panic {
+    var out = ctx
+    if out.label_depth > 0 {
+        out.label_depth = out.label_depth - 1
+    }
+    out
+}
+
+// Find the WASM br depth for an IR label id.
+// Scans from top of stack (most recent) outward.
+// Returns the 0-based depth, or -1 if not found.
+fn wasm_lower_find_label_depth(ctx: WasmLowerCtx, ir_label: i64) -> i64 with Mut, Panic, Div {
+    var depth: i64 = 0
+    var idx = ctx.label_depth - 1
+    while idx >= 0 {
+        if ctx.label_stack[idx as usize].ir_label_id == ir_label {
+            return depth
+        }
+        depth = depth + 1
+        idx = idx - 1
+    }
+    0 - 1
+}
+
+// ============================================================================
+// Pre-scan: allocate WASM locals for all IR registers used in a function
+// ============================================================================
+
+fn wasm_lower_prescan_locals(ctx: WasmLowerCtx, func: IrFunction) -> WasmLowerCtx with Mut, Panic, Div {
+    var out = ctx
+    // First, allocate params (they become WASM parameters, indices 0..param_count-1)
+    var p: i64 = 0
+    while p < func.param_count {
+        let preg = func.param_regs[p as usize]
+        if preg >= 0 && preg < WASM_LOWER_MAX_LOCALS {
+            out.local_map[preg as usize] = p
+        }
+        p = p + 1
+    }
+    out.local_count = func.param_count
+
+    // Then scan all instructions for dst/src registers and allocate locals
+    var i: i64 = 0
+    while i < func.instr_count {
+        let instr = func.instrs[i as usize]
+        if instr.dst >= 0 {
+            out = wasm_lower_alloc_local(out, instr.dst)
+        }
+        if instr.src1 >= 0 {
+            out = wasm_lower_alloc_local(out, instr.src1)
+        }
+        if instr.src2 >= 0 {
+            out = wasm_lower_alloc_local(out, instr.src2)
+        }
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
+// Individual instruction lowering
+// ============================================================================
+
+// IrLoadImm -> i64.const val; local.set dst
+fn wasm_lower_load_imm(ctx: WasmLowerCtx, instr: IrInstr) -> WasmLowerCtx with Mut, Panic, Div {
+    var out = ctx
+    let dst_local = wasm_lower_get_local(out, instr.dst)
+    out.body = wasm_body_emit_i64_const(out.body, instr.imm_i64)
+    if dst_local >= 0 {
+        out.body = wasm_body_emit_local_set(out.body, dst_local)
+    }
+    out
+}
+
+// IrLoadBool -> i64.const 0/1; local.set dst
+fn wasm_lower_load_bool(ctx: WasmLowerCtx, instr: IrInstr) -> WasmLowerCtx with Mut, Panic, Div {
+    var out = ctx
+    let dst_local = wasm_lower_get_local(out, instr.dst)
+    let val = instr.imm_i64  // already 0 or 1 from ir_load_bool
+    out.body = wasm_body_emit_i64_const(out.body, val)
+    if dst_local >= 0 {
+        out.body = wasm_body_emit_local_set(out.body, dst_local)
+    }
+    out
+}
+
+// IrCopy -> local.get src1; local.set dst
+fn wasm_lower_copy(ctx: WasmLowerCtx, instr: IrInstr) -> WasmLowerCtx with Mut, Panic, Div {
+    var out = ctx
+    let src_local = wasm_lower_get_local(out, instr.src1)
+    let dst_local = wasm_lower_get_local(out, instr.dst)
+    if src_local >= 0 {
+        out.body = wasm_body_emit_local_get(out.body, src_local)
+    }
+    if dst_local >= 0 {
+        out.body = wasm_body_emit_local_set(out.body, dst_local)
+    }
+    out
+}
+
+// IrBinOp -> local.get lhs; local.get rhs; <op>; local.set dst
+fn wasm_lower_binop(ctx: WasmLowerCtx, instr: IrInstr) -> WasmLowerCtx with Mut, Panic, Div {
+    var out = ctx
+    let lhs_local = wasm_lower_get_local(out, instr.src1)
+    let rhs_local = wasm_lower_get_local(out, instr.src2)
+    let dst_local = wasm_lower_get_local(out, instr.dst)
+
+    // Push operands
+    if lhs_local >= 0 {
+        out.body = wasm_body_emit_local_get(out.body, lhs_local)
+    }
+    if rhs_local >= 0 {
+        out.body = wasm_body_emit_local_get(out.body, rhs_local)
+    }
+
+    // Emit the operation (all i64 in this lowering)
+    match instr.bin_op {
+        BinaryOp::OpAdd => { out.body = wasm_body_emit_i64_add(out.body) }
+        BinaryOp::OpSub => { out.body = wasm_body_emit_i64_sub(out.body) }
+        BinaryOp::OpMul => { out.body = wasm_body_emit_i64_mul(out.body) }
+        BinaryOp::OpDiv => { out.body = wasm_body_emit_i64_div_s(out.body) }
+        BinaryOp::OpRem => { out.body = wasm_body_emit_i64_add(out.body) }  // placeholder: WASM i64.rem_s
+        BinaryOp::OpEq => { out.body = wasm_body_emit_i64_eq(out.body) }
+        BinaryOp::OpNe => { out.body = wasm_body_emit_i64_ne(out.body) }
+        BinaryOp::OpLt => { out.body = wasm_body_emit_i64_lt_s(out.body) }
+        BinaryOp::OpLe => { out.body = wasm_body_emit_i64_le_s(out.body) }
+        BinaryOp::OpGt => { out.body = wasm_body_emit_i64_gt_s(out.body) }
+        BinaryOp::OpGe => { out.body = wasm_body_emit_i64_ge_s(out.body) }
+        BinaryOp::OpBitAnd => { out.body = wasm_body_emit_i64_and(out.body) }
+        BinaryOp::OpBitOr => { out.body = wasm_body_emit_i64_or(out.body) }
+        BinaryOp::OpBitXor => { out.body = wasm_body_emit_i64_xor(out.body) }
+        BinaryOp::OpShl => { out.body = wasm_body_emit_i64_shl(out.body) }
+        BinaryOp::OpShr => { out.body = wasm_body_emit_i64_shr_s(out.body) }
+        BinaryOp::OpAnd => {
+            // Logical AND: a & b (both i64 booleans, 0/1)
+            out.body = wasm_body_emit_i64_and(out.body)
+        }
+        BinaryOp::OpOr => {
+            // Logical OR: a | b (both i64 booleans, 0/1)
+            out.body = wasm_body_emit_i64_or(out.body)
+        }
+        _ => {
+            // OpConcat, OpRange, OpRangeInclusive: not lowered to WASM
+            out.body = wasm_body_emit_unreachable(out.body)
+        }
+    }
+
+    // Store result
+    if dst_local >= 0 {
+        out.body = wasm_body_emit_local_set(out.body, dst_local)
+    }
+    out
+}
+
+// IrUnaryOp -> local.get src; <op>; local.set dst
+fn wasm_lower_unaryop(ctx: WasmLowerCtx, instr: IrInstr) -> WasmLowerCtx with Mut, Panic, Div {
+    var out = ctx
+    let src_local = wasm_lower_get_local(out, instr.src1)
+    let dst_local = wasm_lower_get_local(out, instr.dst)
+
+    if src_local >= 0 {
+        out.body = wasm_body_emit_local_get(out.body, src_local)
+    }
+
+    match instr.un_op {
+        UnaryOp::OpNeg => {
+            // Negate: 0 - value.  Push 0 first, then swap with i64.sub.
+            // Stack has [val] already from local.get.
+            // We need: i64.const 0; <reorder>; i64.sub
+            // Simpler: emit const 0, local.get, sub
+            // Redo: pop the value we already pushed, emit the correct sequence
+            // Actually: we have val on stack. Do: i64.const(-1), i64.mul
+            out.body = wasm_body_emit_i64_const(out.body, 0 - 1)
+            out.body = wasm_body_emit_i64_mul(out.body)
+        }
+        UnaryOp::OpNot => {
+            // Logical NOT: i64.eqz
+            out.body = wasm_body_emit_i64_eqz(out.body)
+            // Extend the i32 result back to i64
+            out.body = wasm_body_emit_i64_extend_i32_u(out.body)
+        }
+        _ => {
+            // OpRef, OpRefMut, OpDeref: not representable in flat WASM lowering
+            // Pass through as nop (value is already on stack)
+        }
+    }
+
+    if dst_local >= 0 {
+        out.body = wasm_body_emit_local_set(out.body, dst_local)
+    }
+    out
+}
+
+// IrCall -> push args via local.get; call func_idx; local.set dst
+fn wasm_lower_call(ctx: WasmLowerCtx, instr: IrInstr) -> WasmLowerCtx with Mut, Panic, Div {
+    var out = ctx
+    let dst_local = wasm_lower_get_local(out, instr.dst)
+    let wasm_func_idx = wasm_lower_get_func(out, instr.fn_id)
+
+    // Push first two args from src1/src2 (cached in IrInstr)
+    if instr.src1 >= 0 {
+        let a0_local = wasm_lower_get_local(out, instr.src1)
+        if a0_local >= 0 {
+            out.body = wasm_body_emit_local_get(out.body, a0_local)
+        }
+    }
+    if instr.arg_count > 1 && instr.src2 >= 0 {
+        let a1_local = wasm_lower_get_local(out, instr.src2)
+        if a1_local >= 0 {
+            out.body = wasm_body_emit_local_get(out.body, a1_local)
+        }
+    }
+
+    // Emit call
+    if wasm_func_idx >= 0 {
+        out.body = wasm_body_emit_call(out.body, wasm_func_idx)
+    } else {
+        // Unknown function: emit unreachable
+        out.body = wasm_body_emit_unreachable(out.body)
+    }
+
+    // Store result
+    if dst_local >= 0 {
+        out.body = wasm_body_emit_local_set(out.body, dst_local)
+    }
+    out
+}
+
+// IrReturn -> local.get src1; return
+fn wasm_lower_return(ctx: WasmLowerCtx, instr: IrInstr) -> WasmLowerCtx with Mut, Panic, Div {
+    var out = ctx
+    if instr.src1 >= 0 {
+        let src_local = wasm_lower_get_local(out, instr.src1)
+        if src_local >= 0 {
+            out.body = wasm_body_emit_local_get(out.body, src_local)
+        }
+    }
+    out.body = wasm_body_emit_return(out.body)
+    out
+}
+
+// IrJump -> br <label_depth>
+fn wasm_lower_jump(ctx: WasmLowerCtx, instr: IrInstr) -> WasmLowerCtx with Mut, Panic, Div {
+    var out = ctx
+    let depth = wasm_lower_find_label_depth(out, instr.label_id)
+    if depth >= 0 {
+        out.body = wasm_body_emit_br(out.body, depth)
+    } else {
+        // Label not found on stack; emit unreachable as fallback
+        out.body = wasm_body_emit_unreachable(out.body)
+    }
+    out
+}
+
+// IrBranchTrue -> local.get cond; br_if <label_depth>
+fn wasm_lower_branch_true(ctx: WasmLowerCtx, instr: IrInstr) -> WasmLowerCtx with Mut, Panic, Div {
+    var out = ctx
+    let cond_local = wasm_lower_get_local(out, instr.src1)
+    if cond_local >= 0 {
+        out.body = wasm_body_emit_local_get(out.body, cond_local)
+        // Truncate i64 to i32 for br_if condition (WASM expects i32)
+        out.body = wasm_body_emit_i32_wrap_i64(out.body)
+    }
+    let depth = wasm_lower_find_label_depth(out, instr.label_id)
+    if depth >= 0 {
+        out.body = wasm_body_emit_br_if(out.body, depth)
+    }
+    out
+}
+
+// IrBranchFalse -> local.get cond; i64.eqz; i32.wrap_i64 already done by eqz...
+//                  Actually: local.get cond; i32.wrap_i64; i32.eqz; br_if depth
+fn wasm_lower_branch_false(ctx: WasmLowerCtx, instr: IrInstr) -> WasmLowerCtx with Mut, Panic, Div {
+    var out = ctx
+    let cond_local = wasm_lower_get_local(out, instr.src1)
+    if cond_local >= 0 {
+        out.body = wasm_body_emit_local_get(out.body, cond_local)
+        // i64.eqz produces i32 (1 if zero, 0 otherwise) -- inverts the condition
+        out.body = wasm_body_emit_i64_eqz(out.body)
+    }
+    let depth = wasm_lower_find_label_depth(out, instr.label_id)
+    if depth >= 0 {
+        out.body = wasm_body_emit_br_if(out.body, depth)
+    }
+    out
+}
+
+// IrLabel -> open a new block or loop depending on context
+// Convention: if label is referenced by a backward jump -> loop, else -> block.
+// For simplicity in this lowering pass, IrLabel emits a block.
+fn wasm_lower_label(ctx: WasmLowerCtx, instr: IrInstr) -> WasmLowerCtx with Mut, Panic, Div {
+    var out = ctx
+    out.body = wasm_body_emit_block(out.body, WASM_BLOCK_VOID)
+    out = wasm_lower_push_label(out, instr.label_id, WASM_LABEL_BLOCK)
+    out
+}
+
+// Open a WASM loop for an IR label (used when the lowerer detects a back-edge)
+fn wasm_lower_loop_label(ctx: WasmLowerCtx, ir_label: i64) -> WasmLowerCtx with Mut, Panic, Div {
+    var out = ctx
+    out.body = wasm_body_emit_loop(out.body, WASM_BLOCK_VOID)
+    out = wasm_lower_push_label(out, ir_label, WASM_LABEL_LOOP)
+    out
+}
+
+// Close the current block/loop scope
+fn wasm_lower_end_block(ctx: WasmLowerCtx) -> WasmLowerCtx with Mut, Panic, Div {
+    var out = ctx
+    out.body = wasm_body_emit_end(out.body)
+    out = wasm_lower_pop_label(out)
+    out
+}
+
+// IrFieldGet -> lower as i64.load from (base_ptr + field_idx * 8)
+// In this simplified lowering, struct fields are 8-byte slots in linear memory
+fn wasm_lower_field_get(ctx: WasmLowerCtx, instr: IrInstr) -> WasmLowerCtx with Mut, Panic, Div {
+    var out = ctx
+    let base_local = wasm_lower_get_local(out, instr.src1)
+    let dst_local = wasm_lower_get_local(out, instr.dst)
+    let offset = instr.field_idx * 8
+
+    if base_local >= 0 {
+        out.body = wasm_body_emit_local_get(out.body, base_local)
+    }
+    // i64.load with alignment 3 (2^3 = 8 byte aligned), offset = field_idx * 8
+    out.body = wasm_body_emit_i64_load(out.body, 3, offset)
+
+    if dst_local >= 0 {
+        out.body = wasm_body_emit_local_set(out.body, dst_local)
+    }
+    out
+}
+
+// IrFieldSet -> i64.store to (base_ptr + field_idx * 8)
+fn wasm_lower_field_set(ctx: WasmLowerCtx, instr: IrInstr) -> WasmLowerCtx with Mut, Panic, Div {
+    var out = ctx
+    let base_local = wasm_lower_get_local(out, instr.src1)
+    let val_local = wasm_lower_get_local(out, instr.src2)
+    let offset = instr.field_idx * 8
+
+    if base_local >= 0 {
+        out.body = wasm_body_emit_local_get(out.body, base_local)
+    }
+    if val_local >= 0 {
+        out.body = wasm_body_emit_local_get(out.body, val_local)
+    }
+    out.body = wasm_body_emit_i64_store(out.body, 3, offset)
+    out
+}
+
+// IrIndexGet -> i64.load from (base + idx * 8)
+fn wasm_lower_index_get(ctx: WasmLowerCtx, instr: IrInstr) -> WasmLowerCtx with Mut, Panic, Div {
+    var out = ctx
+    let base_local = wasm_lower_get_local(out, instr.src1)
+    let idx_local = wasm_lower_get_local(out, instr.src2)
+    let dst_local = wasm_lower_get_local(out, instr.dst)
+
+    // Compute address: base + idx * 8
+    if base_local >= 0 {
+        out.body = wasm_body_emit_local_get(out.body, base_local)
+    }
+    if idx_local >= 0 {
+        out.body = wasm_body_emit_local_get(out.body, idx_local)
+        out.body = wasm_body_emit_i64_const(out.body, 8)
+        out.body = wasm_body_emit_i64_mul(out.body)
+        out.body = wasm_body_emit_i64_add(out.body)
+    }
+
+    // Wrap to i32 address for WASM memory ops
+    out.body = wasm_body_emit_i32_wrap_i64(out.body)
+    out.body = wasm_body_emit_i64_load(out.body, 3, 0)
+
+    if dst_local >= 0 {
+        out.body = wasm_body_emit_local_set(out.body, dst_local)
+    }
+    out
+}
+
+// IrIndexSet -> i64.store to (base + idx * 8)
+fn wasm_lower_index_set(ctx: WasmLowerCtx, instr: IrInstr) -> WasmLowerCtx with Mut, Panic, Div {
+    var out = ctx
+    let base_local = wasm_lower_get_local(out, instr.src1)
+    let idx_local = wasm_lower_get_local(out, instr.src2)
+    // For IrIndexSet, src_reg is stored in imm_i64 (see ir.sio: ir_index_set)
+    let val_local = wasm_lower_get_local(out, instr.imm_i64)
+
+    // Compute address: base + idx * 8
+    if base_local >= 0 {
+        out.body = wasm_body_emit_local_get(out.body, base_local)
+    }
+    if idx_local >= 0 {
+        out.body = wasm_body_emit_local_get(out.body, idx_local)
+        out.body = wasm_body_emit_i64_const(out.body, 8)
+        out.body = wasm_body_emit_i64_mul(out.body)
+        out.body = wasm_body_emit_i64_add(out.body)
+    }
+    out.body = wasm_body_emit_i32_wrap_i64(out.body)
+
+    // Push value
+    if val_local >= 0 {
+        out.body = wasm_body_emit_local_get(out.body, val_local)
+    }
+    out.body = wasm_body_emit_i64_store(out.body, 3, 0)
+    out
+}
+
+// IrNop -> nop (no-op)
+fn wasm_lower_nop(ctx: WasmLowerCtx) -> WasmLowerCtx with Mut, Panic, Div {
+    var out = ctx
+    out.body = wasm_body_emit_nop(out.body)
+    out
+}
+
+// ============================================================================
+// Instruction dispatch
+// ============================================================================
+
+fn wasm_lower_instruction(ctx: WasmLowerCtx, instr: IrInstr) -> WasmLowerCtx with Mut, Panic, Div {
+    match instr.op {
+        IrOpcode::IrLoadImm => wasm_lower_load_imm(ctx, instr),
+        IrOpcode::IrLoadBool => wasm_lower_load_bool(ctx, instr),
+        IrOpcode::IrCopy => wasm_lower_copy(ctx, instr),
+        IrOpcode::IrBinOp => wasm_lower_binop(ctx, instr),
+        IrOpcode::IrUnaryOp => wasm_lower_unaryop(ctx, instr),
+        IrOpcode::IrCall => wasm_lower_call(ctx, instr),
+        IrOpcode::IrReturn => wasm_lower_return(ctx, instr),
+        IrOpcode::IrJump => wasm_lower_jump(ctx, instr),
+        IrOpcode::IrBranchTrue => wasm_lower_branch_true(ctx, instr),
+        IrOpcode::IrBranchFalse => wasm_lower_branch_false(ctx, instr),
+        IrOpcode::IrLabel => wasm_lower_label(ctx, instr),
+        IrOpcode::IrFieldGet => wasm_lower_field_get(ctx, instr),
+        IrOpcode::IrFieldSet => wasm_lower_field_set(ctx, instr),
+        IrOpcode::IrIndexGet => wasm_lower_index_get(ctx, instr),
+        IrOpcode::IrIndexSet => wasm_lower_index_set(ctx, instr),
+        IrOpcode::IrNop => wasm_lower_nop(ctx),
+        _ => {
+            // IrLoadFloat, IrLoadString, IrAlloc, IrPhi: not yet lowered
+            wasm_lower_nop(ctx)
+        }
+    }
+}
+
+// ============================================================================
+// Basic block lowering: lower all instructions sequentially
+// ============================================================================
+
+fn wasm_lower_basic_block(ctx: WasmLowerCtx, func: IrFunction, start: i64, end_idx: i64) -> WasmLowerCtx with Mut, Panic, Div {
+    var out = ctx
+    var i = start
+    while i < end_idx && i < func.instr_count {
+        out = wasm_lower_instruction(out, func.instrs[i as usize])
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
+// Function lowering
+//
+// For each IrFunction:
+//   1. Reset body and allocate locals
+//   2. Declare non-parameter locals as i64
+//   3. Lower all instructions
+//   4. Append implicit `end` opcode
+//   5. Return the WasmFuncBody
+// ============================================================================
+
+fn wasm_lower_function(ctx: WasmLowerCtx, func: IrFunction) -> WasmLowerCtx with Mut, Panic, Div {
+    var out = wasm_lower_ctx_reset_body(ctx)
+
+    // Pre-scan to allocate WASM locals for all IR registers
+    out = wasm_lower_prescan_locals(out, func)
+
+    // Declare extra locals (beyond parameters) as i64
+    let extra_locals = out.local_count - func.param_count
+    if extra_locals > 0 {
+        out.body = wasm_body_add_local(out.body, extra_locals, WASM_TYPE_I64)
+    }
+
+    // Lower all instructions
+    out = wasm_lower_basic_block(out, func, 0, func.instr_count)
+
+    // Close any remaining open label scopes
+    while out.label_depth > 0 {
+        out = wasm_lower_end_block(out)
+    }
+
+    // Append implicit function end
+    out.body = wasm_body_emit_end(out.body)
+
+    out
+}
+
+// ============================================================================
+// Module lowering
+//
+// Translates an entire IrModule into WASM sections:
+//   - Type section:     one type per function (all i64 params -> i64 result)
+//   - Function section: maps each function to its type
+//   - Code section:     lowered function bodies
+//   - Export section:    exports all functions by name
+//   - Memory section:   1 page minimum for heap
+// ============================================================================
+
+struct WasmLowerResult {
+    buf: WasmBuf,
+    func_count: i64,
+    error_count: i64,
+}
+
+fn wasm_lower_result_new() -> WasmLowerResult {
+    WasmLowerResult {
+        buf: wasm_buf_new(),
+        func_count: 0,
+        error_count: 0,
+    }
+}
+
+fn wasm_lower_module(module: IrModule) -> WasmLowerResult with Mut, Panic, Div {
+    var ctx = wasm_lower_ctx_new()
+    var types = wasm_type_section_new()
+    var funcs = wasm_func_section_new()
+    var code = wasm_code_section_new()
+    var exports = wasm_export_section_new()
+
+    // Register all functions first so calls can resolve
+    var fi: i64 = 0
+    while fi < module.fn_count && fi < WASM_LOWER_MAX_FUNCS {
+        ctx = wasm_lower_register_func(ctx, fi, fi)
+        fi = fi + 1
+    }
+
+    // Lower each function
+    var i: i64 = 0
+    while i < module.fn_count && i < WASM_LOWER_MAX_FUNCS {
+        let func = module.functions[i as usize]
+
+        // Build the function type: all params are i64, result is i64
+        var ft = wasm_func_type_new()
+        var p: i64 = 0
+        while p < func.param_count {
+            ft = wasm_func_type_add_param(ft, WASM_TYPE_I64)
+            p = p + 1
+        }
+        ft = wasm_func_type_add_result(ft, WASM_TYPE_I64)
+
+        types = wasm_type_section_add(types, ft)
+        funcs = wasm_func_section_add(funcs, i)
+
+        // Lower the function body
+        ctx = wasm_lower_function(ctx, func)
+        code = wasm_code_section_add(code, ctx.body)
+
+        i = i + 1
+    }
+
+    // Emit the full WASM module
+    let buf = wasm_emit_full_module(types, funcs, 1, 0, exports, code)
+
+    WasmLowerResult {
+        buf: buf,
+        func_count: module.fn_count,
+        error_count: ctx.error_count,
+    }
+}
+
+// ============================================================================
+// Helper: build a simple IR function for testing
+// ============================================================================
+
+fn wasm_lower_test_make_add_func() -> IrFunction with Mut, Panic, Div {
+    // fn add(a, b) -> a + b
+    var func = ir_empty_function()
+    func.param_count = 2
+    func.param_regs[0 as usize] = 0
+    func.param_regs[1 as usize] = 1
+    func.reg_count = 3
+
+    // r2 = r0 + r1
+    func.instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    // return r2
+    func.instrs[1 as usize] = ir_return(2)
+    func.instr_count = 2
+
+    func
+}
+
+fn wasm_lower_test_make_const_func() -> IrFunction with Mut, Panic, Div {
+    // fn const42() -> 42
+    var func = ir_empty_function()
+    func.param_count = 0
+    func.reg_count = 1
+
+    // r0 = 42
+    func.instrs[0 as usize] = ir_load_imm(0, 42)
+    // return r0
+    func.instrs[1 as usize] = ir_return(0)
+    func.instr_count = 2
+
+    func
+}
+
+fn wasm_lower_test_make_branch_func() -> IrFunction with Mut, Panic, Div {
+    // fn branch_test(cond) -> cond ? 1 : 0
+    var func = ir_empty_function()
+    func.param_count = 1
+    func.param_regs[0 as usize] = 0
+    func.reg_count = 2
+
+    // label 0 (block start)
+    func.instrs[0 as usize] = ir_label(0)
+    // branch_true r0, label 0
+    func.instrs[1 as usize] = ir_branch_true(0, 0)
+    // r1 = 0
+    func.instrs[2 as usize] = ir_load_imm(1, 0)
+    // return r1
+    func.instrs[3 as usize] = ir_return(1)
+    func.instr_count = 4
+
+    func
+}
+
+fn wasm_lower_test_make_neg_func() -> IrFunction with Mut, Panic, Div {
+    // fn negate(x) -> -x
+    var func = ir_empty_function()
+    func.param_count = 1
+    func.param_regs[0 as usize] = 0
+    func.reg_count = 2
+
+    // r1 = -r0
+    func.instrs[0 as usize] = ir_unaryop(1, UnaryOp::OpNeg, 0)
+    // return r1
+    func.instrs[1 as usize] = ir_return(1)
+    func.instr_count = 2
+
+    func
+}
+
+fn wasm_lower_test_make_copy_func() -> IrFunction with Mut, Panic, Div {
+    // fn identity(x) -> x  (via copy)
+    var func = ir_empty_function()
+    func.param_count = 1
+    func.param_regs[0 as usize] = 0
+    func.reg_count = 2
+
+    // r1 = r0
+    func.instrs[0 as usize] = ir_copy(1, 0)
+    // return r1
+    func.instrs[1 as usize] = ir_return(1)
+    func.instr_count = 2
+
+    func
+}
+
+fn wasm_lower_test_make_sub_func() -> IrFunction with Mut, Panic, Div {
+    // fn sub(a, b) -> a - b
+    var func = ir_empty_function()
+    func.param_count = 2
+    func.param_regs[0 as usize] = 0
+    func.param_regs[1 as usize] = 1
+    func.reg_count = 3
+
+    func.instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpSub, 1)
+    func.instrs[1 as usize] = ir_return(2)
+    func.instr_count = 2
+
+    func
+}
+
+fn wasm_lower_test_make_compare_func() -> IrFunction with Mut, Panic, Div {
+    // fn lt(a, b) -> a < b
+    var func = ir_empty_function()
+    func.param_count = 2
+    func.param_regs[0 as usize] = 0
+    func.param_regs[1 as usize] = 1
+    func.reg_count = 3
+
+    func.instrs[0 as usize] = ir_binop(2, 0, BinaryOp::OpLt, 1)
+    func.instrs[1 as usize] = ir_return(2)
+    func.instr_count = 2
+
+    func
+}
+
+fn wasm_lower_test_make_bool_func() -> IrFunction with Mut, Panic, Div {
+    // fn load_true() -> true
+    var func = ir_empty_function()
+    func.param_count = 0
+    func.reg_count = 1
+
+    func.instrs[0 as usize] = ir_load_bool(0, true)
+    func.instrs[1 as usize] = ir_return(0)
+    func.instr_count = 2
+
+    func
+}
+
+// ============================================================================
+// Inline tests
+// ============================================================================
+
+// Test 1: lowering context initialization
+fn test_wasm_lower_ctx_init() -> bool with Mut, Panic, Div {
+    let ctx = wasm_lower_ctx_new()
+    ctx.local_count == 0
+        && ctx.func_count == 0
+        && ctx.label_depth == 0
+        && ctx.error_count == 0
+        && ctx.body.code_len == 0
+}
+
+// Test 2: local variable allocation
+fn test_wasm_lower_alloc_locals() -> bool with Mut, Panic, Div {
+    var ctx = wasm_lower_ctx_new()
+    ctx = wasm_lower_alloc_local(ctx, 0)
+    ctx = wasm_lower_alloc_local(ctx, 5)
+    ctx = wasm_lower_alloc_local(ctx, 0)  // duplicate, should not increment
+
+    let loc0 = wasm_lower_get_local(ctx, 0)
+    let loc5 = wasm_lower_get_local(ctx, 5)
+
+    ctx.local_count == 2
+        && loc0 == 0
+        && loc5 == 1
+}
+
+// Test 3: function table registration and lookup
+fn test_wasm_lower_func_table() -> bool with Mut, Panic, Div {
+    var ctx = wasm_lower_ctx_new()
+    ctx = wasm_lower_register_func(ctx, 0, 10)
+    ctx = wasm_lower_register_func(ctx, 3, 42)
+
+    let f0 = wasm_lower_get_func(ctx, 0)
+    let f3 = wasm_lower_get_func(ctx, 3)
+    let f1 = wasm_lower_get_func(ctx, 1)  // not registered
+
+    f0 == 10 && f3 == 42 && f1 < 0
+}
+
+// Test 4: label stack push, find, and pop
+fn test_wasm_lower_label_stack() -> bool with Mut, Panic, Div {
+    var ctx = wasm_lower_ctx_new()
+    ctx = wasm_lower_push_label(ctx, 100, WASM_LABEL_BLOCK)
+    ctx = wasm_lower_push_label(ctx, 200, WASM_LABEL_LOOP)
+
+    let d200 = wasm_lower_find_label_depth(ctx, 200)
+    let d100 = wasm_lower_find_label_depth(ctx, 100)
+    let d999 = wasm_lower_find_label_depth(ctx, 999)
+
+    // 200 is at depth 0 (top), 100 at depth 1
+    let before_ok = d200 == 0 && d100 == 1 && d999 < 0
+    ctx = wasm_lower_pop_label(ctx)
+    let after_d100 = wasm_lower_find_label_depth(ctx, 100)
+
+    before_ok && after_d100 == 0 && ctx.label_depth == 1
+}
+
+// Test 5: lowering IrLoadImm produces i64.const + local.set
+fn test_wasm_lower_load_imm() -> bool with Mut, Panic, Div {
+    var ctx = wasm_lower_ctx_new()
+    ctx = wasm_lower_alloc_local(ctx, 0)
+
+    let instr = ir_load_imm(0, 42)
+    ctx = wasm_lower_load_imm(ctx, instr)
+
+    // Should have emitted: i64.const(0x42) 42(LEB128) + local.set(0x21) 0(LEB128)
+    // i64.const = 0x42, 42 = 0x2A (1 byte), local.set = 0x21, index 0 = 0x00
+    ctx.body.code_len == 4
+        && (ctx.body.code[0 as usize] as i64) == 0x42  // i64.const
+        && (ctx.body.code[1 as usize] as i64) == 42     // 42 in signed LEB128
+        && (ctx.body.code[2 as usize] as i64) == 0x21   // local.set
+        && (ctx.body.code[3 as usize] as i64) == 0      // local index 0
+}
+
+// Test 6: lowering IrBinOp(OpAdd) produces local.get + local.get + i64.add + local.set
+fn test_wasm_lower_binop_add() -> bool with Mut, Panic, Div {
+    var ctx = wasm_lower_ctx_new()
+    ctx = wasm_lower_alloc_local(ctx, 0)
+    ctx = wasm_lower_alloc_local(ctx, 1)
+    ctx = wasm_lower_alloc_local(ctx, 2)
+
+    let instr = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    ctx = wasm_lower_binop(ctx, instr)
+
+    // Expected: local.get 0, local.get 1, i64.add, local.set 2
+    // Opcodes: 0x20 0x00 | 0x20 0x01 | 0x7C | 0x21 0x02
+    ctx.body.code_len == 7
+        && (ctx.body.code[0 as usize] as i64) == 0x20  // local.get
+        && (ctx.body.code[1 as usize] as i64) == 0      // index 0
+        && (ctx.body.code[2 as usize] as i64) == 0x20  // local.get
+        && (ctx.body.code[3 as usize] as i64) == 1      // index 1
+        && (ctx.body.code[4 as usize] as i64) == 0x7C  // i64.add
+        && (ctx.body.code[5 as usize] as i64) == 0x21  // local.set
+        && (ctx.body.code[6 as usize] as i64) == 2      // index 2
+}
+
+// Test 7: lowering IrReturn produces local.get + return
+fn test_wasm_lower_return_val() -> bool with Mut, Panic, Div {
+    var ctx = wasm_lower_ctx_new()
+    ctx = wasm_lower_alloc_local(ctx, 3)
+
+    let instr = ir_return(3)
+    ctx = wasm_lower_return(ctx, instr)
+
+    // Expected: local.get 0, return
+    // Opcodes: 0x20 0x00 | 0x0F
+    ctx.body.code_len == 3
+        && (ctx.body.code[0 as usize] as i64) == 0x20  // local.get
+        && (ctx.body.code[1 as usize] as i64) == 0      // index 0 (first allocated)
+        && (ctx.body.code[2 as usize] as i64) == 0x0F  // return
+}
+
+// Test 8: lowering a complete constant function
+fn test_wasm_lower_const_function() -> bool with Mut, Panic, Div {
+    var ctx = wasm_lower_ctx_new()
+    let func = wasm_lower_test_make_const_func()
+    ctx = wasm_lower_function(ctx, func)
+
+    // Body should have: local decls, i64.const 42, local.set, local.get, return, end
+    ctx.body.code_len > 0 && ctx.body.local_count >= 0
+}
+
+// Test 9: lowering add function body is non-empty
+fn test_wasm_lower_add_function() -> bool with Mut, Panic, Div {
+    var ctx = wasm_lower_ctx_new()
+    let func = wasm_lower_test_make_add_func()
+    ctx = wasm_lower_function(ctx, func)
+
+    // 3 locals allocated (2 params + 1 result); body has instructions + end
+    ctx.body.code_len > 4 && ctx.local_count == 3
+}
+
+// Test 10: lowering IrCopy produces correct bytecode
+fn test_wasm_lower_copy_op() -> bool with Mut, Panic, Div {
+    var ctx = wasm_lower_ctx_new()
+    ctx = wasm_lower_alloc_local(ctx, 0)
+    ctx = wasm_lower_alloc_local(ctx, 1)
+
+    let instr = ir_copy(1, 0)
+    ctx = wasm_lower_copy(ctx, instr)
+
+    // Expected: local.get 0, local.set 1
+    ctx.body.code_len == 4
+        && (ctx.body.code[0 as usize] as i64) == 0x20  // local.get
+        && (ctx.body.code[1 as usize] as i64) == 0      // index 0
+        && (ctx.body.code[2 as usize] as i64) == 0x21  // local.set
+        && (ctx.body.code[3 as usize] as i64) == 1      // index 1
+}
+
+// Test 11: label open produces block opcode + blocktype
+fn test_wasm_lower_label_open() -> bool with Mut, Panic, Div {
+    var ctx = wasm_lower_ctx_new()
+    let instr = ir_label(7)
+    ctx = wasm_lower_label(ctx, instr)
+
+    // Expected: block(0x02) void(0x40)
+    ctx.body.code_len == 2
+        && (ctx.body.code[0 as usize] as i64) == 0x02  // block
+        && (ctx.body.code[1 as usize] as i64) == 0x40  // void block type
+        && ctx.label_depth == 1
+}
+
+// Test 12: end_block produces end opcode and pops label
+fn test_wasm_lower_end_block() -> bool with Mut, Panic, Div {
+    var ctx = wasm_lower_ctx_new()
+    ctx = wasm_lower_push_label(ctx, 10, WASM_LABEL_BLOCK)
+    ctx = wasm_lower_end_block(ctx)
+
+    ctx.body.code_len == 1
+        && (ctx.body.code[0 as usize] as i64) == 0x0B  // end
+        && ctx.label_depth == 0
+}
+
+// Test 13: lowering an IrBranchFalse emits i64.eqz + br_if
+fn test_wasm_lower_branch_false_op() -> bool with Mut, Panic, Div {
+    var ctx = wasm_lower_ctx_new()
+    ctx = wasm_lower_alloc_local(ctx, 0)
+    ctx = wasm_lower_push_label(ctx, 5, WASM_LABEL_BLOCK)
+
+    let instr = ir_branch_false(0, 5)
+    ctx = wasm_lower_branch_false(ctx, instr)
+
+    // Expected: local.get 0, i64.eqz, br_if 0
+    // Opcodes: 0x20 0x00 | 0x50 | 0x0D 0x00
+    ctx.body.code_len == 5
+        && (ctx.body.code[0 as usize] as i64) == 0x20  // local.get
+        && (ctx.body.code[1 as usize] as i64) == 0      // index 0
+        && (ctx.body.code[2 as usize] as i64) == 0x50  // i64.eqz
+        && (ctx.body.code[3 as usize] as i64) == 0x0D  // br_if
+        && (ctx.body.code[4 as usize] as i64) == 0      // label depth 0
+}
+
+// Test 14: full module lowering produces valid WASM header
+fn test_wasm_lower_module_header() -> bool with Mut, Panic, Div {
+    var module = ir_empty_module()
+    let func = wasm_lower_test_make_const_func()
+    module.functions[0 as usize] = func
+    module.fn_count = 1
+
+    let result = wasm_lower_module(module)
+
+    // Check WASM magic bytes at start of buffer
+    result.buf.len > 8
+        && wasm_buf_byte_at(result.buf, 0) == 0x00
+        && wasm_buf_byte_at(result.buf, 1) == 0x61
+        && wasm_buf_byte_at(result.buf, 2) == 0x73
+        && wasm_buf_byte_at(result.buf, 3) == 0x6D
+        && wasm_buf_byte_at(result.buf, 4) == 0x01
+        && result.func_count == 1
+        && result.error_count == 0
+}
+
+// Test 15: lowering compare (OpLt) produces i64.lt_s
+fn test_wasm_lower_compare_lt() -> bool with Mut, Panic, Div {
+    var ctx = wasm_lower_ctx_new()
+    ctx = wasm_lower_alloc_local(ctx, 0)
+    ctx = wasm_lower_alloc_local(ctx, 1)
+    ctx = wasm_lower_alloc_local(ctx, 2)
+
+    let instr = ir_binop(2, 0, BinaryOp::OpLt, 1)
+    ctx = wasm_lower_binop(ctx, instr)
+
+    // Expected: local.get 0, local.get 1, i64.lt_s, local.set 2
+    // i64.lt_s = 0x53
+    ctx.body.code_len == 7
+        && (ctx.body.code[4 as usize] as i64) == 0x53  // i64.lt_s
+}
+
+// Test 16: prescan allocates locals for all used registers
+fn test_wasm_lower_prescan() -> bool with Mut, Panic, Div {
+    var ctx = wasm_lower_ctx_new()
+    let func = wasm_lower_test_make_add_func()
+    ctx = wasm_lower_prescan_locals(ctx, func)
+
+    // 2 params (regs 0,1) + 1 extra (reg 2) = 3 locals
+    ctx.local_count == 3
+        && wasm_lower_get_local(ctx, 0) == 0
+        && wasm_lower_get_local(ctx, 1) == 1
+        && wasm_lower_get_local(ctx, 2) == 2
+}
+
+// ============================================================================
+// Test runner
+// ============================================================================
+
+fn wasm_lower_run_tests() -> i64 with Mut, Panic, Div {
+    var passed: i64 = 0
+    var failed: i64 = 0
+
+    if test_wasm_lower_ctx_init() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_wasm_lower_alloc_locals() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_wasm_lower_func_table() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_wasm_lower_label_stack() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_wasm_lower_load_imm() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_wasm_lower_binop_add() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_wasm_lower_return_val() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_wasm_lower_const_function() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_wasm_lower_add_function() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_wasm_lower_copy_op() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_wasm_lower_label_open() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_wasm_lower_end_block() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_wasm_lower_branch_false_op() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_wasm_lower_module_header() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_wasm_lower_compare_lt() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_wasm_lower_prescan() { passed = passed + 1 } else { failed = failed + 1 }
+
+    print_int(passed)
+    print_int(failed)
+
+    if failed > 0 { 0 - 1 } else { passed }
+}

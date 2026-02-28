@@ -1,0 +1,1734 @@
+// Pattern match compiler / exhaustiveness checker
+//
+// Implements the Maranget-style algorithm for:
+//   - Exhaustiveness checking (are all cases covered?)
+//   - Usefulness checking (is each arm reachable?)
+//   - Decision tree compilation (compile match to switch tree)
+//
+// Uses flat-array arena pattern (no recursive types) consistent
+// with the self-hosted checker's design.
+
+// ============================================================
+// Pattern kind constants
+// ============================================================
+
+let PAT_WILDCARD: i64 = 0
+let PAT_LITERAL_INT: i64 = 1
+let PAT_LITERAL_BOOL: i64 = 2
+let PAT_VARIANT: i64 = 3
+let PAT_TUPLE: i64 = 4
+let PAT_STRUCT: i64 = 5
+let PAT_OR: i64 = 6
+let PAT_BINDING: i64 = 7
+let PAT_RANGE: i64 = 8
+
+// ============================================================
+// Decision node kind constants
+// ============================================================
+
+let DECISION_LEAF: i64 = 0
+let DECISION_SWITCH: i64 = 1
+let DECISION_FAIL: i64 = 2
+
+// ============================================================
+// PatternPool — arena of pattern nodes
+// ============================================================
+//
+// Each pattern is identified by an integer ID (its index).
+// kinds[id]          = PAT_WILDCARD / PAT_LITERAL_INT / ...
+// values[id]         = literal value, variant tag, range lo, etc.
+// values2[id]        = range hi (for PAT_RANGE), bool value, etc.
+// child_offsets[id]  = start offset into children[]
+// child_counts[id]   = number of children in children[]
+
+struct PatternPool {
+    kinds: [i64; 1024],
+    values: [i64; 1024],
+    values2: [i64; 1024],
+    children: [i64; 4096],
+    child_offsets: [i64; 1024],
+    child_counts: [i64; 1024],
+    count: i64,
+    child_total: i64,
+}
+
+fn pat_pool_new() -> PatternPool {
+    PatternPool {
+        kinds: [0; 1024],
+        values: [0; 1024],
+        values2: [0; 1024],
+        children: [0; 4096],
+        child_offsets: [0; 1024],
+        child_counts: [0; 1024],
+        count: 0,
+        child_total: 0,
+    }
+}
+
+// ============================================================
+// Pool: add wildcard
+// ============================================================
+
+fn pat_pool_add_wildcard(pool: PatternPool) -> (PatternPool, i64) with Mut, Panic, Div {
+    var p = pool
+    let id = p.count
+    p.kinds[id as usize] = PAT_WILDCARD
+    p.values[id as usize] = 0
+    p.values2[id as usize] = 0
+    p.child_offsets[id as usize] = p.child_total
+    p.child_counts[id as usize] = 0
+    p.count = p.count + 1
+    (p, id)
+}
+
+// ============================================================
+// Pool: add literal int
+// ============================================================
+
+fn pat_pool_add_literal_int(pool: PatternPool, value: i64) -> (PatternPool, i64) with Mut, Panic, Div {
+    var p = pool
+    let id = p.count
+    p.kinds[id as usize] = PAT_LITERAL_INT
+    p.values[id as usize] = value
+    p.values2[id as usize] = 0
+    p.child_offsets[id as usize] = p.child_total
+    p.child_counts[id as usize] = 0
+    p.count = p.count + 1
+    (p, id)
+}
+
+// ============================================================
+// Pool: add literal bool
+// ============================================================
+
+fn pat_pool_add_literal_bool(pool: PatternPool, value: i64) -> (PatternPool, i64) with Mut, Panic, Div {
+    var p = pool
+    let id = p.count
+    p.kinds[id as usize] = PAT_LITERAL_BOOL
+    p.values[id as usize] = value
+    p.values2[id as usize] = 0
+    p.child_offsets[id as usize] = p.child_total
+    p.child_counts[id as usize] = 0
+    p.count = p.count + 1
+    (p, id)
+}
+
+// ============================================================
+// Pool: add variant (enum constructor with tag + children)
+// ============================================================
+
+fn pat_pool_add_variant(pool: PatternPool, tag: i64, children_ids: [i64; 16], child_count: i64) -> (PatternPool, i64) with Mut, Panic, Div {
+    var p = pool
+    let id = p.count
+    p.kinds[id as usize] = PAT_VARIANT
+    p.values[id as usize] = tag
+    p.values2[id as usize] = 0
+    p.child_offsets[id as usize] = p.child_total
+    p.child_counts[id as usize] = child_count
+
+    // Copy children into the children array
+    var i: i64 = 0
+    while i < child_count {
+        p.children[(p.child_total + i) as usize] = children_ids[i as usize]
+        i = i + 1
+    }
+    p.child_total = p.child_total + child_count
+    p.count = p.count + 1
+    (p, id)
+}
+
+// ============================================================
+// Pool: add tuple pattern (children are sub-patterns)
+// ============================================================
+
+fn pat_pool_add_tuple(pool: PatternPool, children_ids: [i64; 16], child_count: i64) -> (PatternPool, i64) with Mut, Panic, Div {
+    var p = pool
+    let id = p.count
+    p.kinds[id as usize] = PAT_TUPLE
+    p.values[id as usize] = 0
+    p.values2[id as usize] = 0
+    p.child_offsets[id as usize] = p.child_total
+    p.child_counts[id as usize] = child_count
+
+    var i: i64 = 0
+    while i < child_count {
+        p.children[(p.child_total + i) as usize] = children_ids[i as usize]
+        i = i + 1
+    }
+    p.child_total = p.child_total + child_count
+    p.count = p.count + 1
+    (p, id)
+}
+
+// ============================================================
+// Pool: add or-pattern (left | right)
+// ============================================================
+
+fn pat_pool_add_or(pool: PatternPool, left_id: i64, right_id: i64) -> (PatternPool, i64) with Mut, Panic, Div {
+    var p = pool
+    let id = p.count
+    p.kinds[id as usize] = PAT_OR
+    p.values[id as usize] = left_id
+    p.values2[id as usize] = right_id
+    p.child_offsets[id as usize] = p.child_total
+    p.child_counts[id as usize] = 0
+    p.count = p.count + 1
+    (p, id)
+}
+
+// ============================================================
+// Pool: add binding (equivalent to wildcard for exhaustiveness)
+// ============================================================
+
+fn pat_pool_add_binding(pool: PatternPool) -> (PatternPool, i64) with Mut, Panic, Div {
+    var p = pool
+    let id = p.count
+    p.kinds[id as usize] = PAT_BINDING
+    p.values[id as usize] = 0
+    p.values2[id as usize] = 0
+    p.child_offsets[id as usize] = p.child_total
+    p.child_counts[id as usize] = 0
+    p.count = p.count + 1
+    (p, id)
+}
+
+// ============================================================
+// Pool: add range pattern [lo..hi]
+// ============================================================
+
+fn pat_pool_add_range(pool: PatternPool, lo: i64, hi: i64) -> (PatternPool, i64) with Mut, Panic, Div {
+    var p = pool
+    let id = p.count
+    p.kinds[id as usize] = PAT_RANGE
+    p.values[id as usize] = lo
+    p.values2[id as usize] = hi
+    p.child_offsets[id as usize] = p.child_total
+    p.child_counts[id as usize] = 0
+    p.count = p.count + 1
+    (p, id)
+}
+
+// ============================================================
+// Pool: get child ID at index for a given pattern
+// ============================================================
+
+fn pat_pool_get_child(pool: PatternPool, pat_id: i64, child_idx: i64) -> i64 with Panic, Div {
+    let offset = pool.child_offsets[pat_id as usize]
+    pool.children[(offset + child_idx) as usize]
+}
+
+// ============================================================
+// Pool: check if pattern is a wildcard-like (wildcard or binding)
+// ============================================================
+
+fn pat_is_wildcard_like(pool: PatternPool, pat_id: i64) -> bool with Panic, Div {
+    let k = pool.kinds[pat_id as usize]
+    k == PAT_WILDCARD || k == PAT_BINDING
+}
+
+// ============================================================
+// PatternRow — a single row in the pattern matrix
+// ============================================================
+
+struct PatternRow {
+    patterns: [i64; 16],
+    pattern_count: i64,
+    action_id: i64,
+}
+
+fn pat_row_new() -> PatternRow {
+    PatternRow {
+        patterns: [0; 16],
+        pattern_count: 0,
+        action_id: 0,
+    }
+}
+
+fn pat_row_with_action(action: i64) -> PatternRow {
+    PatternRow {
+        patterns: [0; 16],
+        pattern_count: 0,
+        action_id: action,
+    }
+}
+
+// ============================================================
+// PatternRow: set pattern at column
+// ============================================================
+
+fn pat_row_set(row: PatternRow, col: i64, pat_id: i64) -> PatternRow with Mut, Panic, Div {
+    var r = row
+    r.patterns[col as usize] = pat_id
+    if col >= r.pattern_count {
+        r.pattern_count = col + 1
+    }
+    r
+}
+
+// ============================================================
+// PatternRow: get pattern at column
+// ============================================================
+
+fn pat_row_get(row: PatternRow, col: i64) -> i64 with Panic, Div {
+    row.patterns[col as usize]
+}
+
+// ============================================================
+// PatternRow: remove first column, shift left
+// ============================================================
+
+fn pat_row_remove_first(row: PatternRow) -> PatternRow with Mut, Panic, Div {
+    var r = pat_row_new()
+    r.action_id = row.action_id
+    var i: i64 = 1
+    while i < row.pattern_count {
+        r.patterns[(i - 1) as usize] = row.patterns[i as usize]
+        i = i + 1
+    }
+    r.pattern_count = row.pattern_count - 1
+    r
+}
+
+// ============================================================
+// PatternRow: prepend patterns from variant children
+// ============================================================
+
+fn pat_row_expand_variant(row: PatternRow, pool: PatternPool, arity: i64) -> PatternRow with Mut, Panic, Div {
+    // The first column is the variant; replace it with arity wildcards
+    // then append the remaining columns.
+    var r = pat_row_new()
+    r.action_id = row.action_id
+
+    // First: arity new columns for the variant sub-patterns
+    let first_pat_id = pat_row_get(row, 0)
+    let child_count = pool.child_counts[first_pat_id as usize]
+
+    var c: i64 = 0
+    while c < arity {
+        if c < child_count {
+            r.patterns[c as usize] = pat_pool_get_child(pool, first_pat_id, c)
+        } else {
+            // More arity positions than children -> wildcard placeholder
+            // Use pattern 0 as a convention (caller must ensure 0 is a wildcard)
+            r.patterns[c as usize] = 0
+        }
+        c = c + 1
+    }
+
+    // Then copy remaining columns from original row (skip column 0)
+    var j: i64 = 1
+    while j < row.pattern_count {
+        r.patterns[(arity + j - 1) as usize] = row.patterns[j as usize]
+        j = j + 1
+    }
+    r.pattern_count = arity + row.pattern_count - 1
+    r
+}
+
+// ============================================================
+// PatternMatrix — collection of rows
+// ============================================================
+
+struct PatternMatrix {
+    rows: [PatternRow; 128],
+    row_count: i64,
+    column_count: i64,
+}
+
+fn pat_matrix_new() -> PatternMatrix {
+    PatternMatrix {
+        rows: [pat_row_new(); 128],
+        row_count: 0,
+        column_count: 0,
+    }
+}
+
+// ============================================================
+// PatternMatrix: add row
+// ============================================================
+
+fn pat_matrix_add_row(matrix: PatternMatrix, row: PatternRow) -> PatternMatrix with Mut, Panic, Div {
+    var m = matrix
+    if m.row_count < 128 {
+        m.rows[m.row_count as usize] = row
+        m.row_count = m.row_count + 1
+        if row.pattern_count > m.column_count {
+            m.column_count = row.pattern_count
+        }
+    }
+    m
+}
+
+// ============================================================
+// PatternMatrix: get row
+// ============================================================
+
+fn pat_matrix_get_row(matrix: PatternMatrix, idx: i64) -> PatternRow with Panic, Div {
+    matrix.rows[idx as usize]
+}
+
+// ============================================================
+// CtorSet — set of constructors seen in a column
+// ============================================================
+
+struct CtorSet {
+    ctors: [i64; 64],
+    count: i64,
+    is_complete: bool,
+}
+
+fn ctor_set_new() -> CtorSet {
+    CtorSet {
+        ctors: [0; 64],
+        count: 0,
+        is_complete: false,
+    }
+}
+
+// ============================================================
+// CtorSet: add a constructor (no duplicates)
+// ============================================================
+
+fn ctor_set_add(set: CtorSet, ctor: i64) -> CtorSet with Mut, Panic, Div {
+    // Check if already present
+    var i: i64 = 0
+    while i < set.count {
+        if set.ctors[i as usize] == ctor {
+            return set
+        }
+        i = i + 1
+    }
+    var s = set
+    if s.count < 64 {
+        s.ctors[s.count as usize] = ctor
+        s.count = s.count + 1
+    }
+    s
+}
+
+// ============================================================
+// CtorSet: check membership
+// ============================================================
+
+fn ctor_set_contains(set: CtorSet, ctor: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < set.count {
+        if set.ctors[i as usize] == ctor {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// ============================================================
+// Collect head constructors from the first column
+// ============================================================
+
+fn pat_collect_head_ctors(matrix: PatternMatrix, pool: PatternPool) -> CtorSet with Mut, Panic, Div {
+    var set = ctor_set_new()
+    var i: i64 = 0
+    while i < matrix.row_count {
+        let row = pat_matrix_get_row(matrix, i)
+        if row.pattern_count > 0 {
+            let pat_id = pat_row_get(row, 0)
+            let kind = pool.kinds[pat_id as usize]
+            if kind == PAT_LITERAL_INT {
+                set = ctor_set_add(set, pool.values[pat_id as usize])
+            } else if kind == PAT_LITERAL_BOOL {
+                set = ctor_set_add(set, pool.values[pat_id as usize])
+            } else if kind == PAT_VARIANT {
+                set = ctor_set_add(set, pool.values[pat_id as usize])
+            } else if kind == PAT_OR {
+                // Recurse into or-pattern arms
+                let left_id = pool.values[pat_id as usize]
+                let right_id = pool.values2[pat_id as usize]
+                let left_kind = pool.kinds[left_id as usize]
+                let right_kind = pool.kinds[right_id as usize]
+                if left_kind == PAT_VARIANT {
+                    set = ctor_set_add(set, pool.values[left_id as usize])
+                } else if left_kind == PAT_LITERAL_INT {
+                    set = ctor_set_add(set, pool.values[left_id as usize])
+                } else if left_kind == PAT_LITERAL_BOOL {
+                    set = ctor_set_add(set, pool.values[left_id as usize])
+                }
+                if right_kind == PAT_VARIANT {
+                    set = ctor_set_add(set, pool.values[right_id as usize])
+                } else if right_kind == PAT_LITERAL_INT {
+                    set = ctor_set_add(set, pool.values[right_id as usize])
+                } else if right_kind == PAT_LITERAL_BOOL {
+                    set = ctor_set_add(set, pool.values[right_id as usize])
+                }
+            }
+            // Wildcards and bindings do not contribute constructors
+        }
+        i = i + 1
+    }
+    set
+}
+
+// ============================================================
+// Specialize matrix for a given constructor
+//
+// For each row:
+//   - If head pattern is ctor with matching tag: expand children + rest
+//   - If head pattern is wildcard/binding: expand with `arity` wildcards + rest
+//   - If head pattern is or-pattern: expand both arms
+//   - Otherwise: skip the row
+// ============================================================
+
+fn pat_specialize(matrix: PatternMatrix, pool: PatternPool, ctor: i64, arity: i64) -> PatternMatrix with Mut, Panic, Div {
+    var result = pat_matrix_new()
+    var wildcard_id: i64 = 0 - 1
+
+    // We need wildcard IDs for expansion; find or assume pool[0] is wildcard
+    // In practice, callers ensure pool[0] = wildcard
+    if pool.count > 0 && pool.kinds[0] == PAT_WILDCARD {
+        wildcard_id = 0
+    }
+
+    var i: i64 = 0
+    while i < matrix.row_count {
+        let row = pat_matrix_get_row(matrix, i)
+        if row.pattern_count == 0 {
+            i = i + 1
+            // Skip empty rows (should not happen)
+        } else {
+            let pat_id = pat_row_get(row, 0)
+            let kind = pool.kinds[pat_id as usize]
+
+            if kind == PAT_VARIANT && pool.values[pat_id as usize] == ctor {
+                // Matching variant: expand sub-patterns
+                let new_row = pat_row_expand_variant(row, pool, arity)
+                result = pat_matrix_add_row(result, new_row)
+            } else if kind == PAT_LITERAL_INT && pool.values[pat_id as usize] == ctor {
+                // Matching int literal
+                let new_row = pat_row_remove_first(row)
+                result = pat_matrix_add_row(result, new_row)
+            } else if kind == PAT_LITERAL_BOOL && pool.values[pat_id as usize] == ctor {
+                // Matching bool literal
+                let new_row = pat_row_remove_first(row)
+                result = pat_matrix_add_row(result, new_row)
+            } else if kind == PAT_WILDCARD || kind == PAT_BINDING {
+                // Wildcard matches any constructor: expand with arity wildcards
+                var new_row = pat_row_new()
+                new_row.action_id = row.action_id
+                var c: i64 = 0
+                while c < arity {
+                    if wildcard_id >= 0 {
+                        new_row.patterns[c as usize] = wildcard_id
+                    }
+                    c = c + 1
+                }
+                // Copy remaining columns
+                var j: i64 = 1
+                while j < row.pattern_count {
+                    new_row.patterns[(arity + j - 1) as usize] = row.patterns[j as usize]
+                    j = j + 1
+                }
+                new_row.pattern_count = arity + row.pattern_count - 1
+                result = pat_matrix_add_row(result, new_row)
+            } else if kind == PAT_OR {
+                // Or-pattern: try both arms
+                let left_id = pool.values[pat_id as usize]
+                let right_id = pool.values2[pat_id as usize]
+
+                // Try left arm
+                var left_row = row
+                left_row.patterns[0] = left_id
+                let left_kind = pool.kinds[left_id as usize]
+                if left_kind == PAT_WILDCARD || left_kind == PAT_BINDING {
+                    var nr = pat_row_new()
+                    nr.action_id = row.action_id
+                    var c2: i64 = 0
+                    while c2 < arity {
+                        if wildcard_id >= 0 {
+                            nr.patterns[c2 as usize] = wildcard_id
+                        }
+                        c2 = c2 + 1
+                    }
+                    var j2: i64 = 1
+                    while j2 < row.pattern_count {
+                        nr.patterns[(arity + j2 - 1) as usize] = row.patterns[j2 as usize]
+                        j2 = j2 + 1
+                    }
+                    nr.pattern_count = arity + row.pattern_count - 1
+                    result = pat_matrix_add_row(result, nr)
+                } else if left_kind == PAT_VARIANT && pool.values[left_id as usize] == ctor {
+                    let nr2 = pat_row_expand_variant(left_row, pool, arity)
+                    result = pat_matrix_add_row(result, nr2)
+                } else if left_kind == PAT_LITERAL_INT && pool.values[left_id as usize] == ctor {
+                    let nr3 = pat_row_remove_first(left_row)
+                    result = pat_matrix_add_row(result, nr3)
+                } else if left_kind == PAT_LITERAL_BOOL && pool.values[left_id as usize] == ctor {
+                    let nr4 = pat_row_remove_first(left_row)
+                    result = pat_matrix_add_row(result, nr4)
+                }
+
+                // Try right arm
+                var right_row = row
+                right_row.patterns[0] = right_id
+                let right_kind = pool.kinds[right_id as usize]
+                if right_kind == PAT_WILDCARD || right_kind == PAT_BINDING {
+                    var nr5 = pat_row_new()
+                    nr5.action_id = row.action_id
+                    var c3: i64 = 0
+                    while c3 < arity {
+                        if wildcard_id >= 0 {
+                            nr5.patterns[c3 as usize] = wildcard_id
+                        }
+                        c3 = c3 + 1
+                    }
+                    var j3: i64 = 1
+                    while j3 < row.pattern_count {
+                        nr5.patterns[(arity + j3 - 1) as usize] = row.patterns[j3 as usize]
+                        j3 = j3 + 1
+                    }
+                    nr5.pattern_count = arity + row.pattern_count - 1
+                    result = pat_matrix_add_row(result, nr5)
+                } else if right_kind == PAT_VARIANT && pool.values[right_id as usize] == ctor {
+                    let nr6 = pat_row_expand_variant(right_row, pool, arity)
+                    result = pat_matrix_add_row(result, nr6)
+                } else if right_kind == PAT_LITERAL_INT && pool.values[right_id as usize] == ctor {
+                    let nr7 = pat_row_remove_first(right_row)
+                    result = pat_matrix_add_row(result, nr7)
+                } else if right_kind == PAT_LITERAL_BOOL && pool.values[right_id as usize] == ctor {
+                    let nr8 = pat_row_remove_first(right_row)
+                    result = pat_matrix_add_row(result, nr8)
+                }
+            }
+            // All other patterns: skip row (does not match constructor)
+            i = i + 1
+        }
+    }
+    result
+}
+
+// ============================================================
+// Default matrix (rows whose first column is wildcard/binding)
+// ============================================================
+
+fn pat_default_matrix(matrix: PatternMatrix, pool: PatternPool) -> PatternMatrix with Mut, Panic, Div {
+    var result = pat_matrix_new()
+    var i: i64 = 0
+    while i < matrix.row_count {
+        let row = pat_matrix_get_row(matrix, i)
+        if row.pattern_count > 0 {
+            let pat_id = pat_row_get(row, 0)
+            let kind = pool.kinds[pat_id as usize]
+            if kind == PAT_WILDCARD || kind == PAT_BINDING {
+                let new_row = pat_row_remove_first(row)
+                result = pat_matrix_add_row(result, new_row)
+            } else if kind == PAT_OR {
+                // Or-pattern: include if either arm is wildcard-like
+                let left_id = pool.values[pat_id as usize]
+                let right_id = pool.values2[pat_id as usize]
+                if pat_is_wildcard_like(pool, left_id) || pat_is_wildcard_like(pool, right_id) {
+                    let new_row2 = pat_row_remove_first(row)
+                    result = pat_matrix_add_row(result, new_row2)
+                }
+            }
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================
+// Exhaustiveness checking (recursive)
+//
+// type_ctor_count: total number of constructors for the scrutinee
+//   type in the first column (e.g. 2 for bool, N for an enum with
+//   N variants). Use 0 or a large number for open types like i64.
+// ============================================================
+
+fn pat_is_exhaustive(matrix: PatternMatrix, pool: PatternPool, type_ctor_count: i64) -> bool with Mut, Panic, Div {
+    // Base case: no columns left -> exhaustive iff at least one row
+    if matrix.column_count == 0 {
+        return matrix.row_count > 0
+    }
+
+    // Base case: no rows -> not exhaustive (nothing matches)
+    if matrix.row_count == 0 {
+        return false
+    }
+
+    // Collect constructors in the first column
+    let head_ctors = pat_collect_head_ctors(matrix, pool)
+
+    // Check if all constructors of the type are present
+    if head_ctors.count >= type_ctor_count && type_ctor_count > 0 {
+        // Complete: check each constructor's specialization
+        var c: i64 = 0
+        while c < head_ctors.count {
+            let ctor = head_ctors.ctors[c as usize]
+            let specialized = pat_specialize(matrix, pool, ctor, 0)
+            if !pat_is_exhaustive(specialized, pool, 0) {
+                return false
+            }
+            c = c + 1
+        }
+        return true
+    } else {
+        // Incomplete set or open type: check the default matrix
+        let def = pat_default_matrix(matrix, pool)
+        return pat_is_exhaustive(def, pool, 0)
+    }
+}
+
+// ============================================================
+// Find a missing constructor (returns ctor value or -1)
+// ============================================================
+
+fn pat_find_missing(matrix: PatternMatrix, pool: PatternPool, type_ctor_count: i64) -> i64 with Mut, Panic, Div {
+    if matrix.column_count == 0 {
+        if matrix.row_count > 0 {
+            return 0 - 1
+        } else {
+            // No rows = everything is missing; return 0 as placeholder
+            return 0
+        }
+    }
+
+    if matrix.row_count == 0 {
+        return 0
+    }
+
+    let head_ctors = pat_collect_head_ctors(matrix, pool)
+
+    // Check each expected constructor
+    var c: i64 = 0
+    while c < type_ctor_count {
+        if !ctor_set_contains(head_ctors, c) {
+            return c
+        }
+        c = c + 1
+    }
+
+    // All constructors present; recurse into default
+    let def = pat_default_matrix(matrix, pool)
+    pat_find_missing(def, pool, 0)
+}
+
+// ============================================================
+// Usefulness checking
+//
+// A row (pattern vector) q is useful with respect to matrix P
+// iff there exists a value matched by q that is not matched by
+// any row in P.
+// ============================================================
+
+fn pat_is_useful(matrix: PatternMatrix, pool: PatternPool, new_row: PatternRow, type_ctor_count: i64) -> bool with Mut, Panic, Div {
+    // Base: no columns -> useful iff matrix has no rows
+    if new_row.pattern_count == 0 {
+        return matrix.row_count == 0
+    }
+
+    // Look at the first pattern in new_row
+    let q_pat_id = pat_row_get(new_row, 0)
+    let q_kind = pool.kinds[q_pat_id as usize]
+
+    if q_kind == PAT_VARIANT {
+        let tag = pool.values[q_pat_id as usize]
+        let arity = pool.child_counts[q_pat_id as usize]
+        let spec_matrix = pat_specialize(matrix, pool, tag, arity)
+        let spec_row = pat_row_expand_variant(new_row, pool, arity)
+        return pat_is_useful(spec_matrix, pool, spec_row, 0)
+    } else if q_kind == PAT_LITERAL_INT || q_kind == PAT_LITERAL_BOOL {
+        let val = pool.values[q_pat_id as usize]
+        let spec_matrix2 = pat_specialize(matrix, pool, val, 0)
+        let spec_row2 = pat_row_remove_first(new_row)
+        return pat_is_useful(spec_matrix2, pool, spec_row2, 0)
+    } else if q_kind == PAT_OR {
+        // Or-pattern: useful if either arm is useful
+        let left_id = pool.values[q_pat_id as usize]
+        let right_id = pool.values2[q_pat_id as usize]
+        var left_row = new_row
+        left_row.patterns[0] = left_id
+        var right_row = new_row
+        right_row.patterns[0] = right_id
+        if pat_is_useful(matrix, pool, left_row, type_ctor_count) {
+            return true
+        }
+        return pat_is_useful(matrix, pool, right_row, type_ctor_count)
+    } else {
+        // Wildcard / binding
+        let head_ctors = pat_collect_head_ctors(matrix, pool)
+
+        if head_ctors.count >= type_ctor_count && type_ctor_count > 0 {
+            // Complete constructor set: check each constructor
+            var c: i64 = 0
+            while c < head_ctors.count {
+                let ctor2 = head_ctors.ctors[c as usize]
+                let spec3 = pat_specialize(matrix, pool, ctor2, 0)
+                // New row with wildcard: just remove first column
+                let spec_row3 = pat_row_remove_first(new_row)
+                if pat_is_useful(spec3, pool, spec_row3, 0) {
+                    return true
+                }
+                c = c + 1
+            }
+            return false
+        } else {
+            // Incomplete: use default matrix
+            let def = pat_default_matrix(matrix, pool)
+            let def_row = pat_row_remove_first(new_row)
+            return pat_is_useful(def, pool, def_row, 0)
+        }
+    }
+}
+
+// ============================================================
+// Find first redundant row (returns row index or -1)
+// ============================================================
+
+fn pat_find_redundant(matrix: PatternMatrix, pool: PatternPool, type_ctor_count: i64) -> i64 with Mut, Panic, Div {
+    // Build matrix incrementally; check each row against preceding rows
+    var built = pat_matrix_new()
+    built.column_count = matrix.column_count
+
+    var i: i64 = 0
+    while i < matrix.row_count {
+        let row = pat_matrix_get_row(matrix, i)
+        if !pat_is_useful(built, pool, row, type_ctor_count) {
+            return i
+        }
+        built = pat_matrix_add_row(built, row)
+        i = i + 1
+    }
+    0 - 1
+}
+
+// ============================================================
+// Decision tree for compiled pattern matches
+// ============================================================
+//
+// DecisionTree encodes a tree as a flat array of nodes.
+// Each node is 4 i64 values:
+//   [kind, column_or_action, child_offset, child_count]
+//
+// DECISION_LEAF: action = column_or_action
+// DECISION_SWITCH: column = column_or_action, children at child_offset
+// DECISION_FAIL: indicates match failure
+
+struct DecisionTree {
+    nodes: [i64; 2048],
+    node_count: i64,
+}
+
+fn decision_tree_new() -> DecisionTree {
+    DecisionTree {
+        nodes: [0; 2048],
+        node_count: 0,
+    }
+}
+
+// ============================================================
+// DecisionTree: add a leaf node
+// ============================================================
+
+fn decision_tree_add_leaf(tree: DecisionTree, action: i64) -> (DecisionTree, i64) with Mut, Panic, Div {
+    var t = tree
+    let idx = t.node_count
+    let base = idx * 4
+    t.nodes[base as usize] = DECISION_LEAF
+    t.nodes[(base + 1) as usize] = action
+    t.nodes[(base + 2) as usize] = 0
+    t.nodes[(base + 3) as usize] = 0
+    t.node_count = t.node_count + 1
+    (t, idx)
+}
+
+// ============================================================
+// DecisionTree: add a fail node
+// ============================================================
+
+fn decision_tree_add_fail(tree: DecisionTree) -> (DecisionTree, i64) with Mut, Panic, Div {
+    var t = tree
+    let idx = t.node_count
+    let base = idx * 4
+    t.nodes[base as usize] = DECISION_FAIL
+    t.nodes[(base + 1) as usize] = 0
+    t.nodes[(base + 2) as usize] = 0
+    t.nodes[(base + 3) as usize] = 0
+    t.node_count = t.node_count + 1
+    (t, idx)
+}
+
+// ============================================================
+// DecisionTree: add a switch node
+// ============================================================
+
+fn decision_tree_add_switch(tree: DecisionTree, column: i64, child_offset: i64, child_count: i64) -> (DecisionTree, i64) with Mut, Panic, Div {
+    var t = tree
+    let idx = t.node_count
+    let base = idx * 4
+    t.nodes[base as usize] = DECISION_SWITCH
+    t.nodes[(base + 1) as usize] = column
+    t.nodes[(base + 2) as usize] = child_offset
+    t.nodes[(base + 3) as usize] = child_count
+    t.node_count = t.node_count + 1
+    (t, idx)
+}
+
+// ============================================================
+// DecisionTree: get node kind
+// ============================================================
+
+fn decision_tree_node_kind(tree: DecisionTree, idx: i64) -> i64 with Panic, Div {
+    tree.nodes[(idx * 4) as usize]
+}
+
+// ============================================================
+// DecisionTree: get node action (for leaf nodes)
+// ============================================================
+
+fn decision_tree_node_action(tree: DecisionTree, idx: i64) -> i64 with Panic, Div {
+    tree.nodes[(idx * 4 + 1) as usize]
+}
+
+// ============================================================
+// Compile pattern matrix to decision tree
+//
+// Simple strategy: pick first column, switch on head constructors,
+// recurse into specializations.
+// ============================================================
+
+fn pat_compile_to_decision_tree(matrix: PatternMatrix, pool: PatternPool) -> DecisionTree with Mut, Panic, Div {
+    var tree = decision_tree_new()
+    let result = pat_compile_node(tree, matrix, pool)
+    result.0
+}
+
+fn pat_compile_node(tree: DecisionTree, matrix: PatternMatrix, pool: PatternPool) -> (DecisionTree, i64) with Mut, Panic, Div {
+    // No rows: fail
+    if matrix.row_count == 0 {
+        return decision_tree_add_fail(tree)
+    }
+
+    // No columns: leaf with first row's action
+    if matrix.column_count == 0 {
+        let row = pat_matrix_get_row(matrix, 0)
+        return decision_tree_add_leaf(tree, row.action_id)
+    }
+
+    // Check if first row's first pattern is wildcard -> immediate leaf
+    let first_row = pat_matrix_get_row(matrix, 0)
+    let first_pat = pat_row_get(first_row, 0)
+    if pat_is_wildcard_like(pool, first_pat) {
+        // Check if ALL rows start with wildcards (single-column trivial case)
+        var all_wild = true
+        var k: i64 = 0
+        while k < matrix.row_count {
+            let rk = pat_matrix_get_row(matrix, k)
+            let pk = pat_row_get(rk, 0)
+            if !pat_is_wildcard_like(pool, pk) {
+                all_wild = false
+            }
+            k = k + 1
+        }
+        if all_wild && matrix.column_count == 1 {
+            return decision_tree_add_leaf(tree, first_row.action_id)
+        }
+    }
+
+    // Collect head constructors
+    let head_ctors = pat_collect_head_ctors(matrix, pool)
+
+    if head_ctors.count == 0 {
+        // All wildcards in first column: recurse on default matrix
+        let def = pat_default_matrix(matrix, pool)
+        return pat_compile_node(tree, def, pool)
+    }
+
+    // Build switch node: one child per constructor + optional default
+    let child_start = tree.node_count + 1  // reserve space for the switch itself
+    var t = tree
+    var child_indices: [i64; 64] = [0; 64]
+    var num_children: i64 = 0
+
+    var c: i64 = 0
+    while c < head_ctors.count {
+        let ctor = head_ctors.ctors[c as usize]
+        let spec = pat_specialize(matrix, pool, ctor, 0)
+        let result = pat_compile_node(t, spec, pool)
+        t = result.0
+        child_indices[c as usize] = result.1
+        num_children = num_children + 1
+        c = c + 1
+    }
+
+    // Add default branch
+    let def2 = pat_default_matrix(matrix, pool)
+    if def2.row_count > 0 {
+        let def_result = pat_compile_node(t, def2, pool)
+        t = def_result.0
+        child_indices[num_children as usize] = def_result.1
+        num_children = num_children + 1
+    }
+
+    // Now create the switch node pointing to children
+    let switch_result = decision_tree_add_switch(t, 0, child_indices[0], num_children)
+    switch_result
+}
+
+// ============================================================
+// Test helpers
+// ============================================================
+
+fn assert_true(cond: bool, test_id: i64) -> i64 with IO, Mut, Panic, Div {
+    if cond {
+        print("  PASS test ")
+        print_int(test_id)
+        print("\n")
+        return 0
+    } else {
+        print("  FAIL test ")
+        print_int(test_id)
+        print("\n")
+        return 1
+    }
+}
+
+// ============================================================
+// Test 1: Empty matrix is not exhaustive
+// ============================================================
+
+fn test_empty_not_exhaustive() -> i64 with IO, Mut, Panic, Div {
+    let pool_pair = pat_pool_add_wildcard(pat_pool_new())
+    let pool = pool_pair.0
+    let matrix = pat_matrix_new()
+    let result = pat_is_exhaustive(matrix, pool, 0)
+    assert_true(!result, 1)
+}
+
+// ============================================================
+// Test 2: Single wildcard row is exhaustive
+// ============================================================
+
+fn test_wildcard_exhaustive() -> i64 with IO, Mut, Panic, Div {
+    let pool_pair = pat_pool_add_wildcard(pat_pool_new())
+    let pool = pool_pair.0
+    let wc_id = pool_pair.1
+
+    var row = pat_row_with_action(0)
+    row = pat_row_set(row, 0, wc_id)
+
+    var matrix = pat_matrix_new()
+    matrix.column_count = 1
+    matrix = pat_matrix_add_row(matrix, row)
+
+    let result = pat_is_exhaustive(matrix, pool, 0)
+    assert_true(result, 2)
+}
+
+// ============================================================
+// Test 3: Bool exhaustive (true + false covers all)
+// ============================================================
+
+fn test_bool_exhaustive() -> i64 with IO, Mut, Panic, Div {
+    var pool = pat_pool_new()
+    // id 0: wildcard (needed for specialization)
+    let pair0 = pat_pool_add_wildcard(pool)
+    pool = pair0.0
+
+    // id 1: true (value=1)
+    let pair1 = pat_pool_add_literal_bool(pool, 1)
+    pool = pair1.0
+    let true_id = pair1.1
+
+    // id 2: false (value=0)
+    let pair2 = pat_pool_add_literal_bool(pool, 0)
+    pool = pair2.0
+    let false_id = pair2.1
+
+    var row1 = pat_row_with_action(0)
+    row1 = pat_row_set(row1, 0, true_id)
+
+    var row2 = pat_row_with_action(1)
+    row2 = pat_row_set(row2, 0, false_id)
+
+    var matrix = pat_matrix_new()
+    matrix.column_count = 1
+    matrix = pat_matrix_add_row(matrix, row1)
+    matrix = pat_matrix_add_row(matrix, row2)
+
+    let result = pat_is_exhaustive(matrix, pool, 2)
+    assert_true(result, 3)
+}
+
+// ============================================================
+// Test 4: Bool NOT exhaustive (only true)
+// ============================================================
+
+fn test_bool_not_exhaustive() -> i64 with IO, Mut, Panic, Div {
+    var pool = pat_pool_new()
+    let pair0 = pat_pool_add_wildcard(pool)
+    pool = pair0.0
+
+    let pair1 = pat_pool_add_literal_bool(pool, 1)
+    pool = pair1.0
+    let true_id = pair1.1
+
+    var row1 = pat_row_with_action(0)
+    row1 = pat_row_set(row1, 0, true_id)
+
+    var matrix = pat_matrix_new()
+    matrix.column_count = 1
+    matrix = pat_matrix_add_row(matrix, row1)
+
+    let result = pat_is_exhaustive(matrix, pool, 2)
+    assert_true(!result, 4)
+}
+
+// ============================================================
+// Test 5: Find missing constructor in bool match (only true)
+// ============================================================
+
+fn test_find_missing_bool() -> i64 with IO, Mut, Panic, Div {
+    var pool = pat_pool_new()
+    let pair0 = pat_pool_add_wildcard(pool)
+    pool = pair0.0
+
+    let pair1 = pat_pool_add_literal_bool(pool, 1)
+    pool = pair1.0
+    let true_id = pair1.1
+
+    var row1 = pat_row_with_action(0)
+    row1 = pat_row_set(row1, 0, true_id)
+
+    var matrix = pat_matrix_new()
+    matrix.column_count = 1
+    matrix = pat_matrix_add_row(matrix, row1)
+
+    let missing = pat_find_missing(matrix, pool, 2)
+    // Missing should be 0 (false)
+    assert_true(missing == 0, 5)
+}
+
+// ============================================================
+// Test 6: Variant exhaustiveness (3-variant enum, all covered)
+// ============================================================
+
+fn test_variant_exhaustive() -> i64 with IO, Mut, Panic, Div {
+    var pool = pat_pool_new()
+    let pair0 = pat_pool_add_wildcard(pool)
+    pool = pair0.0
+
+    let empty_children: [i64; 16] = [0; 16]
+
+    let pair1 = pat_pool_add_variant(pool, 0, empty_children, 0)
+    pool = pair1.0
+    let v0 = pair1.1
+
+    let pair2 = pat_pool_add_variant(pool, 1, empty_children, 0)
+    pool = pair2.0
+    let v1 = pair2.1
+
+    let pair3 = pat_pool_add_variant(pool, 2, empty_children, 0)
+    pool = pair3.0
+    let v2 = pair3.1
+
+    var row1 = pat_row_with_action(0)
+    row1 = pat_row_set(row1, 0, v0)
+    var row2 = pat_row_with_action(1)
+    row2 = pat_row_set(row2, 0, v1)
+    var row3 = pat_row_with_action(2)
+    row3 = pat_row_set(row3, 0, v2)
+
+    var matrix = pat_matrix_new()
+    matrix.column_count = 1
+    matrix = pat_matrix_add_row(matrix, row1)
+    matrix = pat_matrix_add_row(matrix, row2)
+    matrix = pat_matrix_add_row(matrix, row3)
+
+    let result = pat_is_exhaustive(matrix, pool, 3)
+    assert_true(result, 6)
+}
+
+// ============================================================
+// Test 7: Missing variant detection (3-variant, only 2 covered)
+// ============================================================
+
+fn test_missing_variant() -> i64 with IO, Mut, Panic, Div {
+    var pool = pat_pool_new()
+    let pair0 = pat_pool_add_wildcard(pool)
+    pool = pair0.0
+
+    let empty_children: [i64; 16] = [0; 16]
+
+    let pair1 = pat_pool_add_variant(pool, 0, empty_children, 0)
+    pool = pair1.0
+    let v0 = pair1.1
+
+    let pair2 = pat_pool_add_variant(pool, 2, empty_children, 0)
+    pool = pair2.0
+    let v2 = pair2.1
+
+    var row1 = pat_row_with_action(0)
+    row1 = pat_row_set(row1, 0, v0)
+    var row2 = pat_row_with_action(1)
+    row2 = pat_row_set(row2, 0, v2)
+
+    var matrix = pat_matrix_new()
+    matrix.column_count = 1
+    matrix = pat_matrix_add_row(matrix, row1)
+    matrix = pat_matrix_add_row(matrix, row2)
+
+    let missing = pat_find_missing(matrix, pool, 3)
+    // Variant tag 1 is missing
+    assert_true(missing == 1, 7)
+}
+
+// ============================================================
+// Test 8: Redundant pattern detection (duplicate wildcard)
+// ============================================================
+
+fn test_redundant_wildcard() -> i64 with IO, Mut, Panic, Div {
+    var pool = pat_pool_new()
+    let pair0 = pat_pool_add_wildcard(pool)
+    pool = pair0.0
+    let wc_id = pair0.1
+
+    let pair1 = pat_pool_add_literal_bool(pool, 1)
+    pool = pair1.0
+    let true_id = pair1.1
+
+    let pair2 = pat_pool_add_literal_bool(pool, 0)
+    pool = pair2.0
+    let false_id = pair2.1
+
+    // Rows: true, false, _  (third is redundant)
+    var row1 = pat_row_with_action(0)
+    row1 = pat_row_set(row1, 0, true_id)
+    var row2 = pat_row_with_action(1)
+    row2 = pat_row_set(row2, 0, false_id)
+    var row3 = pat_row_with_action(2)
+    row3 = pat_row_set(row3, 0, wc_id)
+
+    var matrix = pat_matrix_new()
+    matrix.column_count = 1
+    matrix = pat_matrix_add_row(matrix, row1)
+    matrix = pat_matrix_add_row(matrix, row2)
+    matrix = pat_matrix_add_row(matrix, row3)
+
+    let redundant = pat_find_redundant(matrix, pool, 2)
+    // Row 2 (index 2) is redundant
+    assert_true(redundant == 2, 8)
+}
+
+// ============================================================
+// Test 9: No redundant patterns
+// ============================================================
+
+fn test_no_redundant() -> i64 with IO, Mut, Panic, Div {
+    var pool = pat_pool_new()
+    let pair0 = pat_pool_add_wildcard(pool)
+    pool = pair0.0
+
+    let pair1 = pat_pool_add_literal_bool(pool, 1)
+    pool = pair1.0
+    let true_id = pair1.1
+
+    let pair2 = pat_pool_add_literal_bool(pool, 0)
+    pool = pair2.0
+    let false_id = pair2.1
+
+    var row1 = pat_row_with_action(0)
+    row1 = pat_row_set(row1, 0, true_id)
+    var row2 = pat_row_with_action(1)
+    row2 = pat_row_set(row2, 0, false_id)
+
+    var matrix = pat_matrix_new()
+    matrix.column_count = 1
+    matrix = pat_matrix_add_row(matrix, row1)
+    matrix = pat_matrix_add_row(matrix, row2)
+
+    let redundant = pat_find_redundant(matrix, pool, 2)
+    assert_true(redundant == 0 - 1, 9)
+}
+
+// ============================================================
+// Test 10: Specialization correctness (bool true)
+// ============================================================
+
+fn test_specialize_bool() -> i64 with IO, Mut, Panic, Div {
+    var pool = pat_pool_new()
+    let pair0 = pat_pool_add_wildcard(pool)
+    pool = pair0.0
+    let wc_id = pair0.1
+
+    let pair1 = pat_pool_add_literal_bool(pool, 1)
+    pool = pair1.0
+    let true_id = pair1.1
+
+    let pair2 = pat_pool_add_literal_bool(pool, 0)
+    pool = pair2.0
+    let false_id = pair2.1
+
+    // Matrix: row0=[true], row1=[false], row2=[_]
+    var row1 = pat_row_with_action(10)
+    row1 = pat_row_set(row1, 0, true_id)
+    var row2 = pat_row_with_action(20)
+    row2 = pat_row_set(row2, 0, false_id)
+    var row3 = pat_row_with_action(30)
+    row3 = pat_row_set(row3, 0, wc_id)
+
+    var matrix = pat_matrix_new()
+    matrix.column_count = 1
+    matrix = pat_matrix_add_row(matrix, row1)
+    matrix = pat_matrix_add_row(matrix, row2)
+    matrix = pat_matrix_add_row(matrix, row3)
+
+    // Specialize for true (value=1)
+    let spec = pat_specialize(matrix, pool, 1, 0)
+    // Should have rows: row0 (true matches) + row2 (wildcard matches) = 2 rows
+    // Actions: 10 and 30
+    let ok1 = spec.row_count == 2
+    let r0 = pat_matrix_get_row(spec, 0)
+    let r1 = pat_matrix_get_row(spec, 1)
+    let ok2 = r0.action_id == 10
+    let ok3 = r1.action_id == 30
+    assert_true(ok1 && ok2 && ok3, 10)
+}
+
+// ============================================================
+// Test 11: Default matrix correctness
+// ============================================================
+
+fn test_default_matrix() -> i64 with IO, Mut, Panic, Div {
+    var pool = pat_pool_new()
+    let pair0 = pat_pool_add_wildcard(pool)
+    pool = pair0.0
+    let wc_id = pair0.1
+
+    let pair1 = pat_pool_add_literal_bool(pool, 1)
+    pool = pair1.0
+    let true_id = pair1.1
+
+    // Matrix: row0=[true], row1=[_]
+    var row1 = pat_row_with_action(10)
+    row1 = pat_row_set(row1, 0, true_id)
+    var row2 = pat_row_with_action(20)
+    row2 = pat_row_set(row2, 0, wc_id)
+
+    var matrix = pat_matrix_new()
+    matrix.column_count = 1
+    matrix = pat_matrix_add_row(matrix, row1)
+    matrix = pat_matrix_add_row(matrix, row2)
+
+    let def = pat_default_matrix(matrix, pool)
+    // Only row1 (wildcard) should be in the default, action=20
+    let ok1 = def.row_count == 1
+    let r0 = pat_matrix_get_row(def, 0)
+    let ok2 = r0.action_id == 20
+    assert_true(ok1 && ok2, 11)
+}
+
+// ============================================================
+// Test 12: Binding treated as wildcard for exhaustiveness
+// ============================================================
+
+fn test_binding_as_wildcard() -> i64 with IO, Mut, Panic, Div {
+    var pool = pat_pool_new()
+    let pair0 = pat_pool_add_wildcard(pool)
+    pool = pair0.0
+
+    let pair1 = pat_pool_add_binding(pool)
+    pool = pair1.0
+    let bind_id = pair1.1
+
+    var row1 = pat_row_with_action(0)
+    row1 = pat_row_set(row1, 0, bind_id)
+
+    var matrix = pat_matrix_new()
+    matrix.column_count = 1
+    matrix = pat_matrix_add_row(matrix, row1)
+
+    let result = pat_is_exhaustive(matrix, pool, 0)
+    assert_true(result, 12)
+}
+
+// ============================================================
+// Test 13: Or-pattern exhaustiveness (true | false covers bool)
+// ============================================================
+
+fn test_or_pattern_exhaustive() -> i64 with IO, Mut, Panic, Div {
+    var pool = pat_pool_new()
+    let pair0 = pat_pool_add_wildcard(pool)
+    pool = pair0.0
+
+    let pair1 = pat_pool_add_literal_bool(pool, 1)
+    pool = pair1.0
+    let true_id = pair1.1
+
+    let pair2 = pat_pool_add_literal_bool(pool, 0)
+    pool = pair2.0
+    let false_id = pair2.1
+
+    let pair3 = pat_pool_add_or(pool, true_id, false_id)
+    pool = pair3.0
+    let or_id = pair3.1
+
+    var row1 = pat_row_with_action(0)
+    row1 = pat_row_set(row1, 0, or_id)
+
+    var matrix = pat_matrix_new()
+    matrix.column_count = 1
+    matrix = pat_matrix_add_row(matrix, row1)
+
+    let result = pat_is_exhaustive(matrix, pool, 2)
+    assert_true(result, 13)
+}
+
+// ============================================================
+// Test 14: Or-pattern NOT exhaustive (true | true, missing false)
+// ============================================================
+
+fn test_or_pattern_not_exhaustive() -> i64 with IO, Mut, Panic, Div {
+    var pool = pat_pool_new()
+    let pair0 = pat_pool_add_wildcard(pool)
+    pool = pair0.0
+
+    let pair1 = pat_pool_add_literal_bool(pool, 1)
+    pool = pair1.0
+    let true_id = pair1.1
+
+    // Or with duplicate: true | true
+    let pair2 = pat_pool_add_or(pool, true_id, true_id)
+    pool = pair2.0
+    let or_id = pair2.1
+
+    var row1 = pat_row_with_action(0)
+    row1 = pat_row_set(row1, 0, or_id)
+
+    var matrix = pat_matrix_new()
+    matrix.column_count = 1
+    matrix = pat_matrix_add_row(matrix, row1)
+
+    let result = pat_is_exhaustive(matrix, pool, 2)
+    assert_true(!result, 14)
+}
+
+// ============================================================
+// Test 15: Usefulness — wildcard after exhaustive bool is NOT useful
+// ============================================================
+
+fn test_usefulness_redundant_after_bool() -> i64 with IO, Mut, Panic, Div {
+    var pool = pat_pool_new()
+    let pair0 = pat_pool_add_wildcard(pool)
+    pool = pair0.0
+    let wc_id = pair0.1
+
+    let pair1 = pat_pool_add_literal_bool(pool, 1)
+    pool = pair1.0
+    let true_id = pair1.1
+
+    let pair2 = pat_pool_add_literal_bool(pool, 0)
+    pool = pair2.0
+    let false_id = pair2.1
+
+    // Matrix with true and false
+    var row1 = pat_row_with_action(0)
+    row1 = pat_row_set(row1, 0, true_id)
+    var row2 = pat_row_with_action(1)
+    row2 = pat_row_set(row2, 0, false_id)
+
+    var matrix = pat_matrix_new()
+    matrix.column_count = 1
+    matrix = pat_matrix_add_row(matrix, row1)
+    matrix = pat_matrix_add_row(matrix, row2)
+
+    // New row: wildcard — should NOT be useful
+    var new_row = pat_row_with_action(2)
+    new_row = pat_row_set(new_row, 0, wc_id)
+
+    let useful = pat_is_useful(matrix, pool, new_row, 2)
+    assert_true(!useful, 15)
+}
+
+// ============================================================
+// Test 16: Usefulness — false is useful when only true exists
+// ============================================================
+
+fn test_usefulness_false_after_true() -> i64 with IO, Mut, Panic, Div {
+    var pool = pat_pool_new()
+    let pair0 = pat_pool_add_wildcard(pool)
+    pool = pair0.0
+
+    let pair1 = pat_pool_add_literal_bool(pool, 1)
+    pool = pair1.0
+    let true_id = pair1.1
+
+    let pair2 = pat_pool_add_literal_bool(pool, 0)
+    pool = pair2.0
+    let false_id = pair2.1
+
+    var row1 = pat_row_with_action(0)
+    row1 = pat_row_set(row1, 0, true_id)
+
+    var matrix = pat_matrix_new()
+    matrix.column_count = 1
+    matrix = pat_matrix_add_row(matrix, row1)
+
+    var new_row = pat_row_with_action(1)
+    new_row = pat_row_set(new_row, 0, false_id)
+
+    let useful = pat_is_useful(matrix, pool, new_row, 2)
+    assert_true(useful, 16)
+}
+
+// ============================================================
+// Test 17: Decision tree — single wildcard produces leaf
+// ============================================================
+
+fn test_decision_tree_leaf() -> i64 with IO, Mut, Panic, Div {
+    var pool = pat_pool_new()
+    let pair0 = pat_pool_add_wildcard(pool)
+    pool = pair0.0
+    let wc_id = pair0.1
+
+    var row1 = pat_row_with_action(42)
+    row1 = pat_row_set(row1, 0, wc_id)
+
+    var matrix = pat_matrix_new()
+    matrix.column_count = 1
+    matrix = pat_matrix_add_row(matrix, row1)
+
+    let tree = pat_compile_to_decision_tree(matrix, pool)
+    // Should have at least one node, and it should be a leaf
+    let ok1 = tree.node_count >= 1
+    // Find the root node (last one added by compile)
+    let root_idx = tree.node_count - 1
+    let kind = decision_tree_node_kind(tree, root_idx)
+    let ok2 = kind == DECISION_LEAF
+    let action = decision_tree_node_action(tree, root_idx)
+    let ok3 = action == 42
+    assert_true(ok1 && ok2 && ok3, 17)
+}
+
+// ============================================================
+// Test 18: Int literal patterns (two ints, no exhaustiveness)
+// ============================================================
+
+fn test_int_literal_not_exhaustive() -> i64 with IO, Mut, Panic, Div {
+    var pool = pat_pool_new()
+    let pair0 = pat_pool_add_wildcard(pool)
+    pool = pair0.0
+
+    let pair1 = pat_pool_add_literal_int(pool, 0)
+    pool = pair1.0
+    let zero_id = pair1.1
+
+    let pair2 = pat_pool_add_literal_int(pool, 1)
+    pool = pair2.0
+    let one_id = pair2.1
+
+    var row1 = pat_row_with_action(0)
+    row1 = pat_row_set(row1, 0, zero_id)
+    var row2 = pat_row_with_action(1)
+    row2 = pat_row_set(row2, 0, one_id)
+
+    var matrix = pat_matrix_new()
+    matrix.column_count = 1
+    matrix = pat_matrix_add_row(matrix, row1)
+    matrix = pat_matrix_add_row(matrix, row2)
+
+    // i64 is an open type, so 2 literals cannot be exhaustive
+    // (type_ctor_count=0 means open type, checked via default matrix)
+    let result = pat_is_exhaustive(matrix, pool, 0)
+    assert_true(!result, 18)
+}
+
+// ============================================================
+// Test 19: Int literals + wildcard IS exhaustive
+// ============================================================
+
+fn test_int_with_wildcard_exhaustive() -> i64 with IO, Mut, Panic, Div {
+    var pool = pat_pool_new()
+    let pair0 = pat_pool_add_wildcard(pool)
+    pool = pair0.0
+    let wc_id = pair0.1
+
+    let pair1 = pat_pool_add_literal_int(pool, 42)
+    pool = pair1.0
+    let forty_two_id = pair1.1
+
+    var row1 = pat_row_with_action(0)
+    row1 = pat_row_set(row1, 0, forty_two_id)
+    var row2 = pat_row_with_action(1)
+    row2 = pat_row_set(row2, 0, wc_id)
+
+    var matrix = pat_matrix_new()
+    matrix.column_count = 1
+    matrix = pat_matrix_add_row(matrix, row1)
+    matrix = pat_matrix_add_row(matrix, row2)
+
+    let result = pat_is_exhaustive(matrix, pool, 0)
+    assert_true(result, 19)
+}
+
+// ============================================================
+// Test 20: Duplicate int literal is redundant
+// ============================================================
+
+fn test_duplicate_int_redundant() -> i64 with IO, Mut, Panic, Div {
+    var pool = pat_pool_new()
+    let pair0 = pat_pool_add_wildcard(pool)
+    pool = pair0.0
+
+    let pair1 = pat_pool_add_literal_int(pool, 5)
+    pool = pair1.0
+    let five_a = pair1.1
+
+    let pair2 = pat_pool_add_literal_int(pool, 5)
+    pool = pair2.0
+    let five_b = pair2.1
+
+    let pair3 = pat_pool_add_wildcard(pool)
+    pool = pair3.0
+    let wc_id = pair3.1
+
+    var row1 = pat_row_with_action(0)
+    row1 = pat_row_set(row1, 0, five_a)
+    var row2 = pat_row_with_action(1)
+    row2 = pat_row_set(row2, 0, five_b)
+    var row3 = pat_row_with_action(2)
+    row3 = pat_row_set(row3, 0, wc_id)
+
+    var matrix = pat_matrix_new()
+    matrix.column_count = 1
+    matrix = pat_matrix_add_row(matrix, row1)
+    matrix = pat_matrix_add_row(matrix, row2)
+    matrix = pat_matrix_add_row(matrix, row3)
+
+    let redundant = pat_find_redundant(matrix, pool, 0)
+    // Row 1 (second literal 5) is redundant
+    assert_true(redundant == 1, 20)
+}
+
+// ============================================================
+// Test 21: Or-pattern usefulness
+// ============================================================
+
+fn test_or_pattern_usefulness() -> i64 with IO, Mut, Panic, Div {
+    var pool = pat_pool_new()
+    let pair0 = pat_pool_add_wildcard(pool)
+    pool = pair0.0
+
+    let pair1 = pat_pool_add_literal_int(pool, 1)
+    pool = pair1.0
+    let one_id = pair1.1
+
+    let pair2 = pat_pool_add_literal_int(pool, 2)
+    pool = pair2.0
+    let two_id = pair2.1
+
+    let pair3 = pat_pool_add_literal_int(pool, 3)
+    pool = pair3.0
+    let three_id = pair3.1
+
+    // Matrix: 1 | 2
+    let pair4 = pat_pool_add_or(pool, one_id, two_id)
+    pool = pair4.0
+    let or_id = pair4.1
+
+    var row1 = pat_row_with_action(0)
+    row1 = pat_row_set(row1, 0, or_id)
+
+    var matrix = pat_matrix_new()
+    matrix.column_count = 1
+    matrix = pat_matrix_add_row(matrix, row1)
+
+    // New row: 3 should be useful
+    var new_row = pat_row_with_action(1)
+    new_row = pat_row_set(new_row, 0, three_id)
+
+    let useful = pat_is_useful(matrix, pool, new_row, 0)
+    assert_true(useful, 21)
+}
+
+// ============================================================
+// Test 22: Pool child access correctness
+// ============================================================
+
+fn test_pool_children() -> i64 with IO, Mut, Panic, Div {
+    var pool = pat_pool_new()
+
+    // Add a wildcard at index 0
+    let pair0 = pat_pool_add_wildcard(pool)
+    pool = pair0.0
+    let wc_id = pair0.1
+
+    // Add a variant with 2 children (both wildcard)
+    var children: [i64; 16] = [0; 16]
+    children[0] = wc_id
+    children[1] = wc_id
+    let pair1 = pat_pool_add_variant(pool, 5, children, 2)
+    pool = pair1.0
+    let var_id = pair1.1
+
+    // Check child access
+    let c0 = pat_pool_get_child(pool, var_id, 0)
+    let c1 = pat_pool_get_child(pool, var_id, 1)
+    let ok1 = c0 == wc_id
+    let ok2 = c1 == wc_id
+    let ok3 = pool.child_counts[var_id as usize] == 2
+    let ok4 = pool.values[var_id as usize] == 5
+    assert_true(ok1 && ok2 && ok3 && ok4, 22)
+}
+
+// ============================================================
+// Test 23: Decision tree — empty matrix produces fail
+// ============================================================
+
+fn test_decision_tree_fail() -> i64 with IO, Mut, Panic, Div {
+    var pool = pat_pool_new()
+    let pair0 = pat_pool_add_wildcard(pool)
+    pool = pair0.0
+
+    let matrix = pat_matrix_new()
+    let tree = pat_compile_to_decision_tree(matrix, pool)
+    let ok1 = tree.node_count >= 1
+    let root_idx = tree.node_count - 1
+    let kind = decision_tree_node_kind(tree, root_idx)
+    let ok2 = kind == DECISION_FAIL
+    assert_true(ok1 && ok2, 23)
+}
+
+// ============================================================
+// Test runner
+// ============================================================
+
+fn pattern_check_run_tests() -> i64 with IO, Mut, Panic, Div {
+    print("=== Pattern check tests ===\n")
+    var fails: i64 = 0
+    fails = fails + test_empty_not_exhaustive()
+    fails = fails + test_wildcard_exhaustive()
+    fails = fails + test_bool_exhaustive()
+    fails = fails + test_bool_not_exhaustive()
+    fails = fails + test_find_missing_bool()
+    fails = fails + test_variant_exhaustive()
+    fails = fails + test_missing_variant()
+    fails = fails + test_redundant_wildcard()
+    fails = fails + test_no_redundant()
+    fails = fails + test_specialize_bool()
+    fails = fails + test_default_matrix()
+    fails = fails + test_binding_as_wildcard()
+    fails = fails + test_or_pattern_exhaustive()
+    fails = fails + test_or_pattern_not_exhaustive()
+    fails = fails + test_usefulness_redundant_after_bool()
+    fails = fails + test_usefulness_false_after_true()
+    fails = fails + test_decision_tree_leaf()
+    fails = fails + test_int_literal_not_exhaustive()
+    fails = fails + test_int_with_wildcard_exhaustive()
+    fails = fails + test_duplicate_int_redundant()
+    fails = fails + test_or_pattern_usefulness()
+    fails = fails + test_pool_children()
+    fails = fails + test_decision_tree_fail()
+
+    print("Total failures: ")
+    print_int(fails)
+    print("\n")
+    fails
+}

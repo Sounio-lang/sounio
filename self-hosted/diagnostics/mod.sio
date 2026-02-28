@@ -1,0 +1,913 @@
+// self-hosted::diagnostics — Compiler diagnostic engine
+//
+// Formats and emits compiler error messages, warnings, notes, and
+// internal compiler errors. Provides a builder-pattern API for
+// constructing diagnostics, a DiagnosticBag for collecting them,
+// and an error code registry covering syntax, type, effect,
+// ownership, and semantic error classes.
+//
+// Design:
+//   - All strings are packed as [i64; N] character arrays (ASCII codes)
+//   - Structures use fixed-size arrays (no heap allocation)
+//   - Builder functions return new values (functional update)
+//   - Error codes follow the E000–E099 numbering scheme
+
+// ============================================================
+// Severity levels
+// ============================================================
+
+let DIAG_ERROR: i64   = 0
+let DIAG_WARNING: i64 = 1
+let DIAG_NOTE: i64    = 2
+let DIAG_HELP: i64    = 3
+let DIAG_ICE: i64     = 4
+
+// ============================================================
+// Error code constants
+// ============================================================
+
+// Syntax errors (E001–E009)
+let E001: i64 = 1     // syntax_error
+let E002: i64 = 2     // unexpected_token
+let E003: i64 = 3     // unterminated_string
+let E004: i64 = 4     // unterminated_block_comment
+let E005: i64 = 5     // invalid_escape
+let E006: i64 = 6     // invalid_number
+let E007: i64 = 7     // number_overflow
+let E008: i64 = 8     // unterminated_char
+let E009: i64 = 9     // empty_char_literal
+
+// Name resolution errors (E010–E019)
+let E010: i64 = 10    // undefined_variable
+let E011: i64 = 11    // undefined_function
+let E012: i64 = 12    // undefined_type
+let E013: i64 = 13    // undefined_module
+let E014: i64 = 14    // ambiguous_name
+let E015: i64 = 15    // import_cycle
+
+// Type errors (E020–E029)
+let E020: i64 = 20    // type_mismatch
+let E021: i64 = 21    // arity_mismatch
+let E022: i64 = 22    // return_type_mismatch
+let E023: i64 = 23    // invalid_cast
+let E024: i64 = 24    // missing_field
+let E025: i64 = 25    // extra_field
+let E026: i64 = 26    // not_a_function
+let E027: i64 = 27    // generic_param_count
+let E028: i64 = 28    // bound_not_satisfied
+
+// Effect errors (E030–E039)
+let E030: i64 = 30    // effect_not_declared
+let E031: i64 = 31    // effect_leak
+let E032: i64 = 32    // missing_handler
+let E033: i64 = 33    // handler_type_mismatch
+
+// Ownership / borrow errors (E040–E049)
+let E040: i64 = 40    // borrow_conflict
+let E041: i64 = 41    // use_after_move
+let E042: i64 = 42    // double_free
+let E043: i64 = 43    // dangling_reference
+let E044: i64 = 44    // move_out_of_ref
+let E045: i64 = 45    // linear_not_consumed
+let E046: i64 = 46    // immutable_borrow
+let E047: i64 = 47    // cannot_move_borrowed
+let E048: i64 = 48    // bitwise_float
+
+// Duplicate definition errors (E050–E059)
+let E050: i64 = 50    // duplicate_definition
+let E051: i64 = 51    // duplicate_field
+let E052: i64 = 52    // duplicate_variant
+let E053: i64 = 53    // duplicate_param
+
+// Reachability / usage warnings (E060–E069)
+let E060: i64 = 60    // unreachable_code
+let E061: i64 = 61    // unused_variable
+let E062: i64 = 62    // unused_import
+let E063: i64 = 63    // unused_function
+
+// Arithmetic / safety errors (E070–E079)
+let E070: i64 = 70    // division_by_zero
+let E071: i64 = 71    // integer_overflow
+let E072: i64 = 72    // index_out_of_bounds
+
+// Internal compiler error (E090)
+let E090: i64 = 90    // internal_compiler_error
+
+// ============================================================
+// DiagLabel — a labelled source span within a diagnostic
+// ============================================================
+
+struct DiagLabel {
+    span_start: i64,
+    span_end: i64,
+    message: [i64; 32],     // packed ASCII characters
+    message_len: i64,
+    is_primary: bool,
+}
+
+fn empty_diag_label() -> DiagLabel {
+    DiagLabel {
+        span_start: 0,
+        span_end: 0,
+        message: [0; 32],
+        message_len: 0,
+        is_primary: false,
+    }
+}
+
+// ============================================================
+// Diagnostic — a single compiler diagnostic message
+// ============================================================
+
+struct Diagnostic {
+    severity: i64,
+    code: i64,
+    message: [i64; 64],        // packed ASCII characters
+    message_len: i64,
+    labels: [DiagLabel; 8],
+    label_count: i64,
+    notes: [i64; 256],         // packed note text
+    note_count: i64,
+    suggestion_text: [i64; 64],
+    suggestion_len: i64,
+    has_suggestion: bool,
+}
+
+fn empty_diagnostic() -> Diagnostic {
+    Diagnostic {
+        severity: DIAG_ERROR,
+        code: 0,
+        message: [0; 64],
+        message_len: 0,
+        labels: [empty_diag_label(); 8],
+        label_count: 0,
+        notes: [0; 256],
+        note_count: 0,
+        suggestion_text: [0; 64],
+        suggestion_len: 0,
+        has_suggestion: false,
+    }
+}
+
+// ============================================================
+// DiagnosticBag — collects diagnostics during compilation
+// ============================================================
+
+struct DiagnosticBag {
+    diagnostics: [Diagnostic; 256],
+    count: i64,
+    error_count: i64,
+    warning_count: i64,
+}
+
+// ============================================================
+// Constructor and builder functions
+// ============================================================
+
+fn diag_new(severity: i64, code: i64) -> Diagnostic with Mut {
+    var d = empty_diagnostic()
+    d.severity = severity
+    d.code = code
+    d
+}
+
+fn diag_error(code: i64) -> Diagnostic with Mut {
+    diag_new(DIAG_ERROR, code)
+}
+
+fn diag_warning(code: i64) -> Diagnostic with Mut {
+    diag_new(DIAG_WARNING, code)
+}
+
+fn diag_note(code: i64) -> Diagnostic with Mut {
+    diag_new(DIAG_NOTE, code)
+}
+
+fn diag_help(code: i64) -> Diagnostic with Mut {
+    diag_new(DIAG_HELP, code)
+}
+
+fn diag_ice(code: i64) -> Diagnostic with Mut {
+    diag_new(DIAG_ICE, code)
+}
+
+// Add a label to a diagnostic (returns updated diagnostic)
+fn diag_add_label(diag: Diagnostic, span_start: i64, span_end: i64, is_primary: bool) -> Diagnostic with Mut, Panic, Div {
+    var d = diag
+    if d.label_count < 8 {
+        var label = empty_diag_label()
+        label.span_start = span_start
+        label.span_end = span_end
+        label.is_primary = is_primary
+        d.labels[d.label_count as usize] = label
+        d.label_count = d.label_count + 1
+    }
+    d
+}
+
+// Add a note code to a diagnostic (stores the code in notes array)
+fn diag_add_note_code(diag: Diagnostic, note_code: i64) -> Diagnostic with Mut, Panic, Div {
+    var d = diag
+    if d.note_count < 256 {
+        d.notes[d.note_count as usize] = note_code
+        d.note_count = d.note_count + 1
+    }
+    d
+}
+
+// Set suggestion text code
+fn diag_set_suggestion_code(diag: Diagnostic, suggestion_code: i64) -> Diagnostic with Mut, Panic, Div {
+    var d = diag
+    d.suggestion_text[0] = suggestion_code
+    d.suggestion_len = 1
+    d.has_suggestion = true
+    d
+}
+
+// Set a multi-character message on a diagnostic (up to 64 chars)
+fn diag_set_message(diag: Diagnostic, chars: [i64; 64], len: i64) -> Diagnostic with Mut, Panic, Div {
+    var d = diag
+    var i: i64 = 0
+    while i < len && i < 64 {
+        d.message[i as usize] = chars[i as usize]
+        i = i + 1
+    }
+    d.message_len = len
+    d
+}
+
+// Set label message on most recent label
+fn diag_set_label_message(diag: Diagnostic, chars: [i64; 32], len: i64) -> Diagnostic with Mut, Panic, Div {
+    var d = diag
+    if d.label_count > 0 {
+        var idx = d.label_count - 1
+        var i: i64 = 0
+        while i < len && i < 32 {
+            d.labels[idx as usize].message[i as usize] = chars[i as usize]
+            i = i + 1
+        }
+        d.labels[idx as usize].message_len = len
+    }
+    d
+}
+
+// ============================================================
+// Diagnostic bag operations
+// ============================================================
+
+fn diag_bag_new() -> DiagnosticBag {
+    DiagnosticBag {
+        diagnostics: [empty_diagnostic(); 256],
+        count: 0,
+        error_count: 0,
+        warning_count: 0,
+    }
+}
+
+fn diag_bag_emit(bag: DiagnosticBag, diag: Diagnostic) -> DiagnosticBag with Mut, Panic, Div {
+    var b = bag
+    if b.count < 256 {
+        b.diagnostics[b.count as usize] = diag
+        b.count = b.count + 1
+        if diag.severity == DIAG_ERROR {
+            b.error_count = b.error_count + 1
+        }
+        if diag.severity == DIAG_WARNING {
+            b.warning_count = b.warning_count + 1
+        }
+        if diag.severity == DIAG_ICE {
+            // ICEs count as errors
+            b.error_count = b.error_count + 1
+        }
+    }
+    b
+}
+
+fn diag_bag_has_errors(bag: DiagnosticBag) -> bool {
+    bag.error_count > 0
+}
+
+fn diag_bag_error_count(bag: DiagnosticBag) -> i64 {
+    bag.error_count
+}
+
+fn diag_bag_warning_count(bag: DiagnosticBag) -> i64 {
+    bag.warning_count
+}
+
+fn diag_bag_get(bag: DiagnosticBag, index: i64) -> Diagnostic with Panic, Div {
+    bag.diagnostics[index as usize]
+}
+
+fn diag_bag_count(bag: DiagnosticBag) -> i64 {
+    bag.count
+}
+
+// Count diagnostics of a specific severity in the bag
+fn diag_count_by_severity(bag: DiagnosticBag, severity: i64) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < bag.count {
+        if bag.diagnostics[i as usize].severity == severity {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================
+// Error code registry — maps code number to packed name
+// ============================================================
+
+// Returns a packed identifier for the error code name.
+// The return value encodes up to 8 ASCII characters in a single i64,
+// with the first character in the lowest byte.
+fn diag_error_code_name(code: i64) -> i64 with Mut, Panic, Div {
+    // Syntax errors
+    if code == E001 { return 1937077875 }   // "synt" packed
+    if code == E002 { return 1970170997 }   // "unex" packed
+    if code == E003 { return 1970170965 }   // "unte" packed (unterminated_string)
+    if code == E004 { return 1970170965 }   // "unte" packed (unterminated_block_comment)
+    if code == E005 { return 1702065001 }   // "esc\0" packed
+    if code == E006 { return 1836412270 }   // "numI" packed
+    if code == E007 { return 1836412270 }   // "numO" packed (number_overflow)
+    if code == E008 { return 1970170965 }   // "unte" packed (unterminated_char)
+    if code == E009 { return 1836412270 }   // "empC" packed (empty_char_literal)
+
+    // Resolution errors
+    if code == E010 { return 1969841013 }   // "uvar" packed
+    if code == E011 { return 1969841006 }   // "ufun" packed
+    if code == E012 { return 1969841012 }   // "utyp" packed
+    if code == E013 { return 1969841005 }   // "umod" packed
+    if code == E014 { return 1651270497 }   // "ambi" packed
+    if code == E015 { return 1668246881 }   // "cycl" packed
+
+    // Type errors
+    if code == E020 { return 1953459571 }   // "tmis" packed
+    if code == E021 { return 1634889569 }   // "arit" packed
+    if code == E022 { return 1919252082 }   // "rtyp" packed
+    if code == E023 { return 1668506467 }   // "cast" packed
+    if code == E024 { return 1718185581 }   // "mfld" packed
+    if code == E025 { return 1717924965 }   // "efld" packed
+    if code == E026 { return 1718185582 }   // "nfun" packed
+    if code == E027 { return 1735354465 }   // "gpar" packed
+    if code == E028 { return 1651664226 }   // "bnd\0" packed
+
+    // Effect errors
+    if code == E030 { return 1701080933 }   // "effd" packed
+    if code == E031 { return 1701080940 }   // "effl" packed
+    if code == E032 { return 1751607400 }   // "hndl" packed
+    if code == E033 { return 1751607400 }   // "hndl" packed
+
+    // Ownership errors
+    if code == E040 { return 1651864674 }   // "borr" packed
+    if code == E041 { return 1836016749 }   // "move" packed
+    if code == E042 { return 1718185060 }   // "dfre" packed
+    if code == E043 { return 1684104548 }   // "dang" packed
+    if code == E044 { return 1836016749 }   // "move" packed
+    if code == E045 { return 1818848876 }   // "linr" packed
+    if code == E046 { return 1768842857 }   // "imut" packed
+    if code == E047 { return 1836016749 }   // "move" packed
+    if code == E048 { return 1953067890 }   // "bflt" packed
+
+    // Duplicate definition
+    if code == E050 { return 1685091700 }   // "ddup" packed
+    if code == E051 { return 1685091700 }   // "ddup" packed
+    if code == E052 { return 1685091700 }   // "ddup" packed
+    if code == E053 { return 1685091700 }   // "ddup" packed
+
+    // Reachability
+    if code == E060 { return 1684497010 }   // "rch\0" packed
+    if code == E061 { return 1970170998 }   // "unsd" packed
+    if code == E062 { return 1970170998 }   // "unsd" packed
+    if code == E063 { return 1970170998 }   // "unsd" packed
+
+    // Arithmetic
+    if code == E070 { return 1986618726 }   // "divz" packed
+    if code == E071 { return 1870031215 }   // "ovfl" packed
+    if code == E072 { return 1768842856 }   // "ioob" packed
+
+    // ICE
+    if code == E090 { return 6513001 }      // "ice\0" packed
+
+    // Unknown
+    return 0
+}
+
+// ============================================================
+// Formatting helpers
+// ============================================================
+
+// Returns a packed code for the severity string.
+// 0 = "error", 1 = "warning", 2 = "note", 3 = "help", 4 = "ICE"
+fn diag_severity_str_code(severity: i64) -> i64 {
+    if severity == DIAG_ERROR   { return 0 }
+    if severity == DIAG_WARNING { return 1 }
+    if severity == DIAG_NOTE    { return 2 }
+    if severity == DIAG_HELP    { return 3 }
+    if severity == DIAG_ICE     { return 4 }
+    return 0
+}
+
+// Format error code as i64 packed "ENNN" where NNN is zero-padded
+// e.g. code 20 -> packed representation of "E020"
+fn diag_format_code_number(code: i64) -> i64 with Mut, Panic, Div {
+    // Compute digits: hundreds, tens, ones
+    let hundreds = code / 100
+    let tens = (code - hundreds * 100) / 10
+    let ones = code - hundreds * 100 - tens * 10
+    // Pack as 'E' + three digit chars
+    // 'E' = 69, '0' = 48
+    let e_char: i64 = 69
+    let d0: i64 = 48 + hundreds
+    let d1: i64 = 48 + tens
+    let d2: i64 = 48 + ones
+    // Return packed: char0 | (char1 << 8) | (char2 << 16) | (char3 << 24)
+    e_char + d0 * 256 + d1 * 65536 + d2 * 16777216
+}
+
+// Format a diagnostic header as packed integers.
+// Returns the severity code (use diag_severity_str_code) and formatted
+// error code number (use diag_format_code_number).
+// Callers combine: "error[E020]: <message>"
+fn diag_format_header_severity(diag: Diagnostic) -> i64 {
+    diag_severity_str_code(diag.severity)
+}
+
+fn diag_format_header_code(diag: Diagnostic) -> i64 with Mut, Panic, Div {
+    diag_format_code_number(diag.code)
+}
+
+// Check if a diagnostic is an error-level diagnostic (error or ICE)
+fn diag_is_error(diag: Diagnostic) -> bool {
+    diag.severity == DIAG_ERROR || diag.severity == DIAG_ICE
+}
+
+// Check if a diagnostic has any labels
+fn diag_has_labels(diag: Diagnostic) -> bool {
+    diag.label_count > 0
+}
+
+// Get the primary label span (first primary label, or first label)
+fn diag_primary_span_start(diag: Diagnostic) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < diag.label_count {
+        if diag.labels[i as usize].is_primary {
+            return diag.labels[i as usize].span_start
+        }
+        i = i + 1
+    }
+    // Fall back to first label
+    if diag.label_count > 0 {
+        return diag.labels[0].span_start
+    }
+    return 0
+}
+
+fn diag_primary_span_end(diag: Diagnostic) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < diag.label_count {
+        if diag.labels[i as usize].is_primary {
+            return diag.labels[i as usize].span_end
+        }
+        i = i + 1
+    }
+    if diag.label_count > 0 {
+        return diag.labels[0].span_end
+    }
+    return 0
+}
+
+// ============================================================
+// Diagnostic merging and filtering
+// ============================================================
+
+// Merge two diagnostic bags (appends second to first, up to capacity)
+fn diag_bag_merge(first: DiagnosticBag, second: DiagnosticBag) -> DiagnosticBag with Mut, Panic, Div {
+    var result = first
+    var i: i64 = 0
+    while i < second.count && result.count < 256 {
+        result = diag_bag_emit(result, second.diagnostics[i as usize])
+        i = i + 1
+    }
+    result
+}
+
+// Check if the bag contains any diagnostic with the given error code
+fn diag_bag_has_code(bag: DiagnosticBag, code: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < bag.count {
+        if bag.diagnostics[i as usize].code == code {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// Get the first diagnostic with a given code (returns empty if not found)
+fn diag_bag_find_by_code(bag: DiagnosticBag, code: i64) -> Diagnostic with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < bag.count {
+        if bag.diagnostics[i as usize].code == code {
+            return bag.diagnostics[i as usize]
+        }
+        i = i + 1
+    }
+    return empty_diagnostic()
+}
+
+// ============================================================
+// Convenience constructors for common diagnostics
+// ============================================================
+
+fn diag_type_mismatch(span_start: i64, span_end: i64) -> Diagnostic with Mut, Panic, Div {
+    var d = diag_error(E020)
+    d = diag_add_label(d, span_start, span_end, true)
+    d
+}
+
+fn diag_undefined_variable(span_start: i64, span_end: i64) -> Diagnostic with Mut, Panic, Div {
+    var d = diag_error(E010)
+    d = diag_add_label(d, span_start, span_end, true)
+    d
+}
+
+fn diag_undefined_function(span_start: i64, span_end: i64) -> Diagnostic with Mut, Panic, Div {
+    var d = diag_error(E011)
+    d = diag_add_label(d, span_start, span_end, true)
+    d
+}
+
+fn diag_borrow_conflict(span_start: i64, span_end: i64) -> Diagnostic with Mut, Panic, Div {
+    var d = diag_error(E040)
+    d = diag_add_label(d, span_start, span_end, true)
+    d
+}
+
+fn diag_use_after_move(span_start: i64, span_end: i64) -> Diagnostic with Mut, Panic, Div {
+    var d = diag_error(E041)
+    d = diag_add_label(d, span_start, span_end, true)
+    d
+}
+
+fn diag_effect_not_declared(span_start: i64, span_end: i64) -> Diagnostic with Mut, Panic, Div {
+    var d = diag_error(E030)
+    d = diag_add_label(d, span_start, span_end, true)
+    d
+}
+
+fn diag_division_by_zero(span_start: i64, span_end: i64) -> Diagnostic with Mut, Panic, Div {
+    var d = diag_error(E070)
+    d = diag_add_label(d, span_start, span_end, true)
+    d
+}
+
+fn diag_internal_error(span_start: i64, span_end: i64) -> Diagnostic with Mut, Panic, Div {
+    var d = diag_ice(E090)
+    d = diag_add_label(d, span_start, span_end, true)
+    d
+}
+
+// ============================================================
+// Tests
+// ============================================================
+
+// T01: diag_new creates diagnostic with correct severity and code
+fn diag_test_01_new() -> bool with Mut {
+    let d = diag_new(DIAG_ERROR, E020)
+    d.severity == DIAG_ERROR &&
+    d.code == E020 &&
+    d.label_count == 0 &&
+    d.note_count == 0 &&
+    d.has_suggestion == false
+}
+
+// T02: diag_error shortcut sets severity to DIAG_ERROR
+fn diag_test_02_error_shortcut() -> bool with Mut {
+    let d = diag_error(E010)
+    d.severity == DIAG_ERROR && d.code == E010
+}
+
+// T03: diag_warning shortcut sets severity to DIAG_WARNING
+fn diag_test_03_warning_shortcut() -> bool with Mut {
+    let d = diag_warning(E061)
+    d.severity == DIAG_WARNING && d.code == E061
+}
+
+// T04: diag_ice shortcut sets severity to DIAG_ICE
+fn diag_test_04_ice_shortcut() -> bool with Mut {
+    let d = diag_ice(E090)
+    d.severity == DIAG_ICE && d.code == E090
+}
+
+// T05: diag_add_label adds a label with correct span
+fn diag_test_05_add_label() -> bool with Mut, Panic, Div {
+    let d0 = diag_error(E020)
+    let d1 = diag_add_label(d0, 10, 25, true)
+    d1.label_count == 1 &&
+    d1.labels[0].span_start == 10 &&
+    d1.labels[0].span_end == 25 &&
+    d1.labels[0].is_primary == true
+}
+
+// T06: multiple labels can be added
+fn diag_test_06_multiple_labels() -> bool with Mut, Panic, Div {
+    let d0 = diag_error(E020)
+    let d1 = diag_add_label(d0, 10, 20, true)
+    let d2 = diag_add_label(d1, 30, 40, false)
+    d2.label_count == 2 &&
+    d2.labels[0].is_primary == true &&
+    d2.labels[1].is_primary == false &&
+    d2.labels[1].span_start == 30
+}
+
+// T07: diag_bag_new creates empty bag
+fn diag_test_07_bag_new() -> bool {
+    let bag = diag_bag_new()
+    bag.count == 0 &&
+    bag.error_count == 0 &&
+    bag.warning_count == 0
+}
+
+// T08: emitting an error increments error_count
+fn diag_test_08_bag_emit_error() -> bool with Mut, Panic, Div {
+    let bag0 = diag_bag_new()
+    let d = diag_error(E020)
+    let bag1 = diag_bag_emit(bag0, d)
+    bag1.count == 1 &&
+    bag1.error_count == 1 &&
+    bag1.warning_count == 0
+}
+
+// T09: emitting a warning increments warning_count
+fn diag_test_09_bag_emit_warning() -> bool with Mut, Panic, Div {
+    let bag0 = diag_bag_new()
+    let d = diag_warning(E061)
+    let bag1 = diag_bag_emit(bag0, d)
+    bag1.count == 1 &&
+    bag1.error_count == 0 &&
+    bag1.warning_count == 1
+}
+
+// T10: bag_has_errors returns true only when errors exist
+fn diag_test_10_bag_has_errors() -> bool with Mut, Panic, Div {
+    let bag0 = diag_bag_new()
+    let bag_w = diag_bag_emit(bag0, diag_warning(E061))
+    let bag_e = diag_bag_emit(bag_w, diag_error(E020))
+    diag_bag_has_errors(bag_w) == false &&
+    diag_bag_has_errors(bag_e) == true
+}
+
+// T11: ICE counts as error in error_count
+fn diag_test_11_ice_counts_as_error() -> bool with Mut, Panic, Div {
+    let bag0 = diag_bag_new()
+    let d = diag_ice(E090)
+    let bag1 = diag_bag_emit(bag0, d)
+    bag1.error_count == 1 &&
+    diag_bag_has_errors(bag1) == true
+}
+
+// T12: diag_count_by_severity counts correctly
+fn diag_test_12_count_by_severity() -> bool with Mut, Panic, Div {
+    let bag0 = diag_bag_new()
+    let bag1 = diag_bag_emit(bag0, diag_error(E020))
+    let bag2 = diag_bag_emit(bag1, diag_error(E010))
+    let bag3 = diag_bag_emit(bag2, diag_warning(E061))
+    let bag4 = diag_bag_emit(bag3, diag_note(E061))
+    diag_count_by_severity(bag4, DIAG_ERROR) == 2 &&
+    diag_count_by_severity(bag4, DIAG_WARNING) == 1 &&
+    diag_count_by_severity(bag4, DIAG_NOTE) == 1 &&
+    diag_count_by_severity(bag4, DIAG_HELP) == 0
+}
+
+// T13: diag_format_code_number produces correct packed E-code
+fn diag_test_13_format_code_number() -> bool with Mut, Panic, Div {
+    // E020: 'E' = 69, '0' = 48, '2' = 50, '0' = 48
+    // packed = 69 + 48*256 + 50*65536 + 48*16777216
+    //        = 69 + 12288 + 3276800 + 805306368 = 808595525
+    let packed = diag_format_code_number(20)
+    // Verify char-by-char
+    let c0 = packed % 256            // 'E' = 69
+    let c1 = (packed / 256) % 256    // '0' = 48
+    let c2 = (packed / 65536) % 256  // '2' = 50
+    let c3 = (packed / 16777216) % 256 // '0' = 48
+    c0 == 69 && c1 == 48 && c2 == 50 && c3 == 48
+}
+
+// T14: diag_add_note_code stores note correctly
+fn diag_test_14_add_note() -> bool with Mut, Panic, Div {
+    let d0 = diag_error(E020)
+    let d1 = diag_add_note_code(d0, 42)
+    let d2 = diag_add_note_code(d1, 99)
+    d2.note_count == 2 &&
+    d2.notes[0] == 42 &&
+    d2.notes[1] == 99
+}
+
+// T15: diag_set_suggestion_code sets suggestion
+fn diag_test_15_set_suggestion() -> bool with Mut, Panic, Div {
+    let d0 = diag_error(E020)
+    let d1 = diag_set_suggestion_code(d0, 77)
+    d1.has_suggestion == true &&
+    d1.suggestion_text[0] == 77 &&
+    d1.suggestion_len == 1
+}
+
+// T16: convenience constructors (type_mismatch, undefined_variable, etc.)
+fn diag_test_16_convenience_constructors() -> bool with Mut, Panic, Div {
+    let d_tm = diag_type_mismatch(5, 15)
+    let d_uv = diag_undefined_variable(0, 3)
+    let d_uf = diag_undefined_function(10, 20)
+    let d_bc = diag_borrow_conflict(50, 60)
+    let d_uam = diag_use_after_move(100, 110)
+    let d_end = diag_effect_not_declared(200, 210)
+    let d_dbz = diag_division_by_zero(300, 305)
+    let d_ice = diag_internal_error(0, 0)
+    d_tm.code == E020 && d_tm.labels[0].span_start == 5 &&
+    d_uv.code == E010 && d_uv.labels[0].span_end == 3 &&
+    d_uf.code == E011 &&
+    d_bc.code == E040 &&
+    d_uam.code == E041 &&
+    d_end.code == E030 &&
+    d_dbz.code == E070 &&
+    d_ice.code == E090 && d_ice.severity == DIAG_ICE
+}
+
+// T17: diag_bag_merge combines two bags
+fn diag_test_17_bag_merge() -> bool with Mut, Panic, Div {
+    let bag_a0 = diag_bag_new()
+    let bag_a = diag_bag_emit(bag_a0, diag_error(E020))
+    let bag_b0 = diag_bag_new()
+    let bag_b1 = diag_bag_emit(bag_b0, diag_warning(E061))
+    let bag_b = diag_bag_emit(bag_b1, diag_error(E010))
+    let merged = diag_bag_merge(bag_a, bag_b)
+    merged.count == 3 &&
+    merged.error_count == 2 &&
+    merged.warning_count == 1
+}
+
+// T18: diag_bag_has_code finds diagnostics by code
+fn diag_test_18_bag_has_code() -> bool with Mut, Panic, Div {
+    let bag0 = diag_bag_new()
+    let bag1 = diag_bag_emit(bag0, diag_error(E020))
+    let bag2 = diag_bag_emit(bag1, diag_warning(E061))
+    diag_bag_has_code(bag2, E020) == true &&
+    diag_bag_has_code(bag2, E061) == true &&
+    diag_bag_has_code(bag2, E010) == false
+}
+
+// T19: severity_str_code returns correct codes
+fn diag_test_19_severity_str_code() -> bool {
+    diag_severity_str_code(DIAG_ERROR) == 0 &&
+    diag_severity_str_code(DIAG_WARNING) == 1 &&
+    diag_severity_str_code(DIAG_NOTE) == 2 &&
+    diag_severity_str_code(DIAG_HELP) == 3 &&
+    diag_severity_str_code(DIAG_ICE) == 4
+}
+
+// T20: diag_primary_span finds primary label
+fn diag_test_20_primary_span() -> bool with Mut, Panic, Div {
+    let d0 = diag_error(E020)
+    let d1 = diag_add_label(d0, 10, 20, false)
+    let d2 = diag_add_label(d1, 30, 40, true)
+    let d3 = diag_add_label(d2, 50, 60, false)
+    // Should find the primary label (30..40), not the first
+    diag_primary_span_start(d3) == 30 &&
+    diag_primary_span_end(d3) == 40
+}
+
+// T21: diag_is_error identifies error-level diagnostics
+fn diag_test_21_is_error() -> bool with Mut {
+    let d_err = diag_error(E020)
+    let d_warn = diag_warning(E061)
+    let d_note = diag_note(E061)
+    let d_ice = diag_ice(E090)
+    diag_is_error(d_err) == true &&
+    diag_is_error(d_warn) == false &&
+    diag_is_error(d_note) == false &&
+    diag_is_error(d_ice) == true
+}
+
+// T22: diag_bag_find_by_code retrieves correct diagnostic
+fn diag_test_22_find_by_code() -> bool with Mut, Panic, Div {
+    let bag0 = diag_bag_new()
+    let bag1 = diag_bag_emit(bag0, diag_error(E020))
+    let d_w = diag_warning(E061)
+    let bag2 = diag_bag_emit(bag1, d_w)
+    let found = diag_bag_find_by_code(bag2, E061)
+    found.code == E061 && found.severity == DIAG_WARNING
+}
+
+// T23: diag_error_code_name returns non-zero for known codes
+fn diag_test_23_error_code_name() -> bool with Mut, Panic, Div {
+    let n_e020 = diag_error_code_name(E020)
+    let n_e010 = diag_error_code_name(E010)
+    let n_e090 = diag_error_code_name(E090)
+    let n_unknown = diag_error_code_name(99)
+    n_e020 != 0 && n_e010 != 0 && n_e090 != 0 && n_unknown == 0
+}
+
+// T24: label overflow protection (max 8 labels)
+fn diag_test_24_label_overflow() -> bool with Mut, Panic, Div {
+    var d = diag_error(E020)
+    // Add 10 labels, only 8 should stick
+    var i: i64 = 0
+    while i < 10 {
+        d = diag_add_label(d, i * 10, i * 10 + 5, false)
+        i = i + 1
+    }
+    d.label_count == 8
+}
+
+// ============================================================
+// Test runner
+// ============================================================
+
+fn diagnostics_run_tests() -> i64 with IO, Mut, Panic, Div {
+    var passed: i64 = 0
+    var total: i64 = 0
+
+    print("=== Diagnostics Engine Tests ===\n")
+
+    total = total + 1
+    if diag_test_01_new() { passed = passed + 1; print("  T01 OK: diag_new\n") } else { print("  FAIL: T01 diag_new\n") }
+
+    total = total + 1
+    if diag_test_02_error_shortcut() { passed = passed + 1; print("  T02 OK: diag_error\n") } else { print("  FAIL: T02 diag_error\n") }
+
+    total = total + 1
+    if diag_test_03_warning_shortcut() { passed = passed + 1; print("  T03 OK: diag_warning\n") } else { print("  FAIL: T03 diag_warning\n") }
+
+    total = total + 1
+    if diag_test_04_ice_shortcut() { passed = passed + 1; print("  T04 OK: diag_ice\n") } else { print("  FAIL: T04 diag_ice\n") }
+
+    total = total + 1
+    if diag_test_05_add_label() { passed = passed + 1; print("  T05 OK: add_label\n") } else { print("  FAIL: T05 add_label\n") }
+
+    total = total + 1
+    if diag_test_06_multiple_labels() { passed = passed + 1; print("  T06 OK: multiple_labels\n") } else { print("  FAIL: T06 multiple_labels\n") }
+
+    total = total + 1
+    if diag_test_07_bag_new() { passed = passed + 1; print("  T07 OK: bag_new\n") } else { print("  FAIL: T07 bag_new\n") }
+
+    total = total + 1
+    if diag_test_08_bag_emit_error() { passed = passed + 1; print("  T08 OK: bag_emit_error\n") } else { print("  FAIL: T08 bag_emit_error\n") }
+
+    total = total + 1
+    if diag_test_09_bag_emit_warning() { passed = passed + 1; print("  T09 OK: bag_emit_warning\n") } else { print("  FAIL: T09 bag_emit_warning\n") }
+
+    total = total + 1
+    if diag_test_10_bag_has_errors() { passed = passed + 1; print("  T10 OK: bag_has_errors\n") } else { print("  FAIL: T10 bag_has_errors\n") }
+
+    total = total + 1
+    if diag_test_11_ice_counts_as_error() { passed = passed + 1; print("  T11 OK: ice_counts_as_error\n") } else { print("  FAIL: T11 ice_counts_as_error\n") }
+
+    total = total + 1
+    if diag_test_12_count_by_severity() { passed = passed + 1; print("  T12 OK: count_by_severity\n") } else { print("  FAIL: T12 count_by_severity\n") }
+
+    total = total + 1
+    if diag_test_13_format_code_number() { passed = passed + 1; print("  T13 OK: format_code_number\n") } else { print("  FAIL: T13 format_code_number\n") }
+
+    total = total + 1
+    if diag_test_14_add_note() { passed = passed + 1; print("  T14 OK: add_note\n") } else { print("  FAIL: T14 add_note\n") }
+
+    total = total + 1
+    if diag_test_15_set_suggestion() { passed = passed + 1; print("  T15 OK: set_suggestion\n") } else { print("  FAIL: T15 set_suggestion\n") }
+
+    total = total + 1
+    if diag_test_16_convenience_constructors() { passed = passed + 1; print("  T16 OK: convenience_constructors\n") } else { print("  FAIL: T16 convenience_constructors\n") }
+
+    total = total + 1
+    if diag_test_17_bag_merge() { passed = passed + 1; print("  T17 OK: bag_merge\n") } else { print("  FAIL: T17 bag_merge\n") }
+
+    total = total + 1
+    if diag_test_18_bag_has_code() { passed = passed + 1; print("  T18 OK: bag_has_code\n") } else { print("  FAIL: T18 bag_has_code\n") }
+
+    total = total + 1
+    if diag_test_19_severity_str_code() { passed = passed + 1; print("  T19 OK: severity_str_code\n") } else { print("  FAIL: T19 severity_str_code\n") }
+
+    total = total + 1
+    if diag_test_20_primary_span() { passed = passed + 1; print("  T20 OK: primary_span\n") } else { print("  FAIL: T20 primary_span\n") }
+
+    total = total + 1
+    if diag_test_21_is_error() { passed = passed + 1; print("  T21 OK: is_error\n") } else { print("  FAIL: T21 is_error\n") }
+
+    total = total + 1
+    if diag_test_22_find_by_code() { passed = passed + 1; print("  T22 OK: find_by_code\n") } else { print("  FAIL: T22 find_by_code\n") }
+
+    total = total + 1
+    if diag_test_23_error_code_name() { passed = passed + 1; print("  T23 OK: error_code_name\n") } else { print("  FAIL: T23 error_code_name\n") }
+
+    total = total + 1
+    if diag_test_24_label_overflow() { passed = passed + 1; print("  T24 OK: label_overflow\n") } else { print("  FAIL: T24 label_overflow\n") }
+
+    print("\nDiagnostics tests: ")
+    print_int(passed)
+    print("/")
+    print_int(total)
+    print(" passed\n")
+
+    if passed == total { 0 } else { 1 }
+}
