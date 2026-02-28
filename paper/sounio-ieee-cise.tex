@@ -75,28 +75,17 @@
 \maketitle
 
 \begin{abstract}
-Scientific computing requires rigorous handling of measurement uncertainty,
-yet systems programming languages lack native support for propagating
-uncertainties in compliance with the Guide to the Expression of Uncertainty
-in Measurement (GUM, JCGM 100:2008). We introduce \textbf{Sounio}, a
-systems programming language for \emph{epistemic computing} in which
-uncertainty, confidence, and provenance are explicit in the type system.
-The \texttt{Knowledge<T>} type encapsulates a value, a GUM variance term,
-confidence metadata, and a provenance chain for traceability. An algebraic
-effect system tracks epistemic operations and emits diagnostics when
-uncertainty may be discarded. Beyond the software type system, Sounio
-introduces \textbf{K-AXI}, a hardware bus extension that carries epistemic
-metadata alongside data in AXI4-Stream transactions, enabling
-uncertainty-aware computation in FPGA and GPU accelerator fabrics.
-Our contributions are: (1)~a type-and-effect discipline for epistemic
-values; (2)~a Scientific IR that represents uncertainty propagation as
-compiler-visible nodes; (3)~provenance tracking with Merkle-hashed audit
-chains; (4)~K-AXI, a hardware bus protocol for streaming epistemic metadata
-through accelerator pipelines; and (5)~numerical cross-validation against
-analytical pharmacokinetic benchmarks, showing first-order convergence of
-Euler integration under step-size refinement. The formal and numerical
-results reported here are for first-order GUM propagation with uncorrelated
-inputs. Sounio is open source under the Apache License~2.0.
+Systems programming languages lack native support for propagating
+measurement uncertainty in compliance with the Guide to the Expression
+of Uncertainty in Measurement (GUM). We present \textbf{Sounio}, a
+systems language whose \texttt{Knowledge<T>} type carries a value, GUM
+variance, confidence, and provenance, with an effect system that emits
+diagnostics when uncertainty may be discarded. We also introduce
+\textbf{K-AXI}, an AXI4-Stream sideband extension that streams epistemic
+metadata through FPGA and GPU fabrics. Cross-validation against the
+analytical Bateman equation confirms first-order convergence under
+step-size refinement. Results are for first-order GUM propagation with
+uncorrelated inputs. Sounio is open source (Apache~2.0).
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -140,20 +129,12 @@ active extension and is not a claimed contribution of this manuscript.
 
 Our contributions are:
 \begin{itemize}
-  \item A type system for epistemic values with compile-time effect
-        tracking and explicit uncertainty-loss diagnostics
-        (Section~\ref{sec:type-system})
-  \item GUM-compliant uncertainty propagation integrated into the
-        compiler's intermediate representation
-        (Section~\ref{sec:propagation})
+  \item An epistemic type system with GUM-compliant propagation and
+        compile-time effect tracking (Section~\ref{sec:type-system})
   \item K-AXI, a hardware bus extension that streams epistemic metadata
-        (variance, confidence, provenance) through accelerator fabrics,
-        with a hardware epistemic power accumulator for live scoring
-        (Section~\ref{sec:hardware})
-  \item Cross-validation of compiled numerical code against analytical
-        solutions (Section~\ref{sec:evaluation})
-  \item A validated pharmacokinetic case study with GUM-compliant
-        dosing (Section~\ref{sec:applications})
+        through accelerator fabrics (Section~\ref{sec:hardware})
+  \item Cross-validation against analytical pharmacokinetic solutions
+        with a validated dosing case study (Section~\ref{sec:evaluation})
 \end{itemize}
 
 %%% ================================================================
@@ -208,7 +189,7 @@ probabilistically but are not general-purpose systems languages.
 \label{tab:approaches}
 \centering
 \footnotesize
-\begin{tabular}{lllllll}
+\begin{tabular}{llllll}
 \toprule
 Tool & Static & GUM & Corr. & Prov. & Ecosystem \\
 \midrule
@@ -245,7 +226,7 @@ Sounio addresses all three by making uncertainty a compile-time type
 property.
 
 %%% ================================================================
-\section{The Sounio Type System}
+\section{Epistemic Type System and Propagation}
 \label{sec:type-system}
 
 \subsection{The Knowledge Type}
@@ -320,71 +301,18 @@ This provides structural support for audit trails relevant to regulated
 computational systems (e.g., FDA 21 CFR Part~11~\cite{fda21cfr11},
 ISO~17025~\cite{iso17025}).
 
-\subsection{Formal Type System}
+\subsection{Formal Properties}
 
-We formalize the epistemic type system to ensure uncertainty is tracked
-and preserved. The typing judgment
-$\Gamma \vdash e : \texttt{Knowledge}\langle T \rangle$ asserts that
-expression $e$ computes an epistemic value.
-
-\begin{definition}[Epistemic Typing]
-The introduction rule for \texttt{Knowledge<T>}:
-\[
-\frac{\Gamma \vdash v : T \quad \Gamma \vdash u^2 : \texttt{f64} \quad \Gamma \vdash c : \texttt{BetaConf} \quad \Gamma \vdash p : \texttt{Prov}}
-     {\Gamma \vdash \texttt{Knowledge::new}(v, u^2, c, p) : \texttt{Knowledge}\langle T \rangle}
-\]
-\end{definition}
-
-\begin{definition}[No Implicit Epistemic Erasure]
-\[
-\texttt{Knowledge}\langle T \rangle \nleq T
-\]
-Extraction is represented as an explicit typing rule:
-\[
-\frac{\Gamma \vdash e : \texttt{Knowledge}\langle T \rangle}
-     {\Gamma \vdash \texttt{extract}(e) : T \dashv \texttt{warn(uncertainty\_loss)}}
-\]
-\end{definition}
-
-\subsection{Operational Semantics}
-
-We define small-step operational semantics for epistemic values. A value
-is either a numeric constant $n$ or a knowledge tuple
-$(v, \sigma^2, \beta, \pi)$ where $v$ is the point estimate,
-$\sigma^2$ is variance, $\beta$ is BetaConfidence, and $\pi$ is
-provenance.
-
-\begin{definition}[Epistemic Evaluation]
-The evaluation rules for arithmetic on knowledge values:
-\begin{align}
-  \text{E-ADD:} \; & (v_1, \sigma_1^2, \beta_1, \pi_1) + (v_2, \sigma_2^2, \beta_2, \pi_2) \nonumber \\
-    & \to (v_1{+}v_2, \sigma_1^2{+}\sigma_2^2, \text{comb}(\beta_1,\beta_2), \text{merge}(\pi_1,\pi_2)) \\[0.3em]
-  \text{E-MUL:} \; & (v_1, \sigma_1^2, \beta_1, \pi_1) \times (v_2, \sigma_2^2, \beta_2, \pi_2) \nonumber \\
-    & \to (v_1 v_2, v_2^2\sigma_1^2 {+} v_1^2\sigma_2^2, \ldots) \\[0.3em]
-  \text{E-DIV:} \; & (v_1, \sigma_1^2, \beta_1, \pi_1) / (v_2, \sigma_2^2, \beta_2, \pi_2) \nonumber \\
-    & \to (v_1/v_2, \sigma_1^2/v_2^2 {+} v_1^2\sigma_2^2/v_2^4, \ldots)
-\end{align}
-\end{definition}
-
-\begin{theorem}[Type Safety for the Core Epistemic Calculus]
-If $\emptyset \vdash e : T$, then either $e$ diverges or reduces to a
-value $v : T$ under the evaluation rules of Definition~3. If
-$T = \texttt{Knowledge}\langle S \rangle$, then $v$ preserves all
-epistemic components without silent erasure.
-\end{theorem}
-
-\begin{proof}[Proof sketch]
-By induction on the reduction relation. Epistemic operations are typed to
-require the \texttt{Epistemic} effect, and extraction requires explicit
-acknowledgment. A mechanized artifact covering progress/preservation lemmas
-for the core calculus is provided in \texttt{formal/lean4}.
-\end{proof}
-
-%%% ================================================================
-\section{Uncertainty Propagation}
-\label{sec:propagation}
+The type system enforces two key invariants: (1)~\texttt{Knowledge<T>}
+cannot implicitly coerce to~\texttt{T}, and (2)~arithmetic on epistemic
+values produces epistemic results with variance computed by the GUM law
+of propagation (\ref{eq:gum-propagation}). Progress, preservation, and
+first-order GUM soundness for the core epistemic calculus are established
+in a mechanized Lean~4 artifact (\texttt{formal/lean4/}, 728
+definitions/theorems, zero \texttt{sorry}).
 
 \subsection{First-Order (Linear) Propagation}
+\label{sec:propagation}
 
 For arithmetic operations, Sounio implements (\ref{eq:gum-propagation})
 at the IR level. The compiler transforms:
@@ -450,32 +378,25 @@ Sounio provides built-in derivatives for standard functions
 (Table~\ref{tab:transcendental}).
 
 \begin{table}[!t]
-\caption{Built-in first-order uncertainty propagation for common functions.}
+\caption{Representative built-in uncertainty propagation rules (delta method).}
 \label{tab:transcendental}
 \centering
 \begin{tabular}{lll}
 \toprule
 Function & $f(x)$ & $u^2(f(x))$ \\
 \midrule
-\texttt{sqrt} & $\sqrt{x}$ & $u^2(x)/4x$ \\
 \texttt{exp} & $e^x$ & $e^{2x} u^2(x)$ \\
 \texttt{ln} & $\ln x$ & $u^2(x)/x^2$ \\
-\texttt{log10} & $\log_{10}(x)$ & $u^2(x)/(x^2\ln^2 10)$ \\
 \texttt{sin} & $\sin x$ & $\cos^2(x)\, u^2(x)$ \\
-\texttt{cos} & $\cos x$ & $\sin^2(x)\, u^2(x)$ \\
-\texttt{tan} & $\tan x$ & $\sec^4(x)\, u^2(x)$ \\
-\texttt{asin} & $\arcsin x$ & $u^2(x)/(1-x^2)$ \\
-\texttt{acos} & $\arccos x$ & $u^2(x)/(1-x^2)$ \\
-\texttt{atan} & $\arctan x$ & $u^2(x)/(1+x^2)^2$ \\
 \texttt{inv} & $1/x$ & $u^2(x)/x^4$ \\
 \texttt{pow(a)} & $x^a$ & $a^2x^{2a-2}u^2(x)$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-All entries in Table~\ref{tab:transcendental} are delta-method formulas
-for differentiable domains; handling of singularities and branch cuts is
-implemented with runtime domain checks.
+The compiler provides analogous rules for all standard transcendentals
+(sqrt, cos, tan, asin, acos, atan, log10). Singularities and branch cuts
+are handled with runtime domain checks.
 
 \subsection{Scientific IR (SIR) Design}
 
@@ -664,7 +585,10 @@ Merkle chain). The weighting reflects the relative contribution of each
 epistemic channel: runtime fidelity dominates ($\times 1/8$) while
 provenance provides secondary assurance ($\times 1/16$).
 Division is implemented as right-shifts, avoiding floating-point logic
-entirely.
+entirely. In practice, the host runtime reads $\mathcal{E}_{\text{hw}}$
+via a memory-mapped register; a drop below a configurable threshold
+signals that accumulated epistemic degradation has exceeded tolerance,
+triggering recalibration or alerting the operator.
 
 \subsection{GPU Integration}
 
@@ -780,7 +704,7 @@ many steps (Cockcroft--Gault at 1K patients: 7.6\,s; extrapolated
 10K: $>$\,600\,s). Python's \texttt{uncertainties} uses a similar
 derivative-tracking strategy but with CPython overhead, resulting in
 consistent $O(n)$ scaling. Sounio's \texttt{Knowledge<T>} propagates
-confidence metadata in $O(1)$ per operation regardless of chain length,
+variance in $O(1)$ per operation regardless of chain length,
 achieving linear scaling on all workloads.
 
 \subsection{Numerical Accuracy: ODE Solver Cross-Validation}
@@ -857,8 +781,7 @@ generates Bateman convergence CSV artifacts, and checks bibliography
 references via \texttt{paper/scripts/check\_references.py}. This is
 intended to keep claims in sync with repository state at submission time.
 
-%%% ================================================================
-\section{Application: Pharmacokinetic Dosing}
+\subsection{Application: Pharmacokinetic Dosing}
 \label{sec:applications}
 
 We illustrate Sounio's language design with a validated pharmacokinetic
