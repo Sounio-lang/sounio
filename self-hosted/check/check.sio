@@ -2125,18 +2125,27 @@ impl Checker {
     // --------------------------------------------------------
 
     fn check_method_call(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
-        let base_pair = self.check_opt_expr(e.left)
+        // Method receiver evaluation should not eagerly consume linear values,
+        // because receiver passing mode is method-signature dependent.
+        var checker_for_base = self
+        checker_for_base.suppress_linear_consume_depth = checker_for_base.suppress_linear_consume_depth + 1
+        let base_pair = checker_for_base.check_opt_expr(e.left)
         var c = base_pair.0
+        if c.suppress_linear_consume_depth > 0 {
+            c.suppress_linear_consume_depth = c.suppress_linear_consume_depth - 1
+        }
         let base_ty = base_pair.1
         if base_ty.kind == TypeKind::TyKnowledge {
             // Knowledge<T>.unwrap() -> T
             if name_matches_str6(e.name, 117, 110, 119, 114, 97, 112) {
                 // "unwrap" = [117, 110, 119, 114, 97, 112]
-                c = c.check_expr_list_no_type(e.args)
+                c = c.check_expr_list_no_type_no_linear_consume(e.args)
+                c = c.release_call_arg_borrows(e.args, None)
                 (c, knowledge_inner(base_ty))
             } else {
                 c = c.report_error_at(e.span, 11, 0, 0, 0)
-                c = c.check_expr_list_no_type(e.args)
+                c = c.check_expr_list_no_type_no_linear_consume(e.args)
+                c = c.release_call_arg_borrows(e.args, None)
                 (c, ty_error())
             }
         } else if base_ty.kind == TypeKind::TyHyper {
@@ -2148,15 +2157,18 @@ impl Checker {
             }
             // "conjugate" = [99,111,110,106,117,103,97,116,101] (9 chars)
             if name_matches_str9(e.name, 99, 111, 110, 106, 117, 103, 97, 116, 101) {
-                c = c.check_expr_list_no_type(e.args)
+                c = c.check_expr_list_no_type_no_linear_consume(e.args)
+                c = c.release_call_arg_borrows(e.args, None)
                 (c, base_ty)  // conjugate returns same Hyper type
             // "norm" = [110,111,114,109] (4 chars)
             } else if name_matches_str4(e.name, 110, 111, 114, 109) {
-                c = c.check_expr_list_no_type(e.args)
+                c = c.check_expr_list_no_type_no_linear_consume(e.args)
+                c = c.release_call_arg_borrows(e.args, None)
                 (c, inner_ty)  // norm returns scalar
             // "inverse" = [105,110,118,101,114,115,101] (7 chars)
             } else if name_matches_str7(e.name, 105, 110, 118, 101, 114, 115, 101) {
-                c = c.check_expr_list_no_type(e.args)
+                c = c.check_expr_list_no_type_no_linear_consume(e.args)
+                c = c.release_call_arg_borrows(e.args, None)
                 // Only division algebras have inverse (alg <= 3)
                 if alg > 3 {
                     c = c.report_error_at(e.span, 32, 0, 0, 0)
@@ -2166,7 +2178,8 @@ impl Checker {
                 }
             } else {
                 c = c.report_error_at(e.span, 11, 0, 0, 0)
-                c = c.check_expr_list_no_type(e.args)
+                c = c.check_expr_list_no_type_no_linear_consume(e.args)
+                c = c.release_call_arg_borrows(e.args, None)
                 (c, ty_error())
             }
         } else if base_ty.kind == TypeKind::TyNamed {
@@ -2183,15 +2196,18 @@ impl Checker {
                 // Method not found
                 c = c.report_error_at(e.span, 11, 0, 0, 0)
                 // Still check args to accumulate errors
-                c = c.check_expr_list_no_type(e.args)
+                c = c.check_expr_list_no_type_no_linear_consume(e.args)
+                c = c.release_call_arg_borrows(e.args, None)
                 (c, ty_error())
             }
         } else if is_error_or_unknown(base_ty) {
-            c = c.check_expr_list_no_type(e.args)
+            c = c.check_expr_list_no_type_no_linear_consume(e.args)
+            c = c.release_call_arg_borrows(e.args, None)
             (c, base_ty)
         } else {
             c = c.report_error_at(e.span, 19, 0, 0, 0)
-            c = c.check_expr_list_no_type(e.args)
+            c = c.check_expr_list_no_type_no_linear_consume(e.args)
+            c = c.release_call_arg_borrows(e.args, None)
             (c, ty_error())
         }
     }
@@ -2214,11 +2230,13 @@ impl Checker {
             c = c.release_call_arg_borrows(e.args, sig.params)
             (c, sig.return_type)
         } else if is_error_or_unknown(callee_ty) {
-            c = c.check_expr_list_no_type(e.args)
+            c = c.check_expr_list_no_type_no_linear_consume(e.args)
+            c = c.release_call_arg_borrows(e.args, None)
             (c, callee_ty)
         } else {
             c = c.report_error_at(e.span, 17, 0, 0, 0)
-            c = c.check_expr_list_no_type(e.args)
+            c = c.check_expr_list_no_type_no_linear_consume(e.args)
+            c = c.release_call_arg_borrows(e.args, None)
             (c, ty_error())
         }
     }
@@ -2368,7 +2386,8 @@ impl Checker {
                 let arg_ty = pair.1
 
                 // Check against parameter type and boundary contracts
-                if !name_is_empty(param_info.name) || param_info.ty.kind != TypeKind::TyError {
+                let has_param_info = !name_is_empty(param_info.name) || param_info.ty.kind != TypeKind::TyError
+                if has_param_info {
                     if !call_arg_types_compatible(arg_expr, arg_ty, param_info.ty) {
                         c = c.report_mismatch(call_span, 9, param_info.ty, arg_ty)
                     }
@@ -2377,7 +2396,11 @@ impl Checker {
                     c = c.check_call_arg_knowledge_boundary(arg_ty, param_info.ty, call_span)
                 }
                 // Linear type consumption: if arg is linear and not implicitly borrowed, consume it
-                if arg_expr.kind == ExprKind::ExprIdent && c.is_linear_type(arg_ty) && !implicit_borrow && c.suppress_linear_consume_depth == 0 {
+                if has_param_info &&
+                   arg_expr.kind == ExprKind::ExprIdent &&
+                   c.is_linear_type(arg_ty) &&
+                   !implicit_borrow &&
+                   c.suppress_linear_consume_depth == 0 {
                     if c.borrows.is_borrowed(arg_expr.name) {
                         c = c.report_error_at(call_span, 38, 0, 0, 0)
                     } else {
@@ -2410,6 +2433,18 @@ impl Checker {
             }
             None => self
         }
+    }
+
+    // Diagnostic-only argument checking helper: validate expression shape/type
+    // without consuming linear values from identifier reads.
+    fn check_expr_list_no_type_no_linear_consume(self, opt: Option<Box<ExprList>>) -> Checker with Mut, Panic, Div, Alloc, IO {
+        var c = self
+        c.suppress_linear_consume_depth = c.suppress_linear_consume_depth + 1
+        c = c.check_expr_list_no_type(opt)
+        if c.suppress_linear_consume_depth > 0 {
+            c.suppress_linear_consume_depth = c.suppress_linear_consume_depth - 1
+        }
+        c
     }
 
     // --------------------------------------------------------

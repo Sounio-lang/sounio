@@ -50,6 +50,10 @@ fn check_knowledge_type(checker: Checker, info: KnowledgeTypeInfo) -> (Checker, 
     if !knowledge_metadata_is_valid(info.validity) {
         c = c.report_error_at(Span::dummy(), 54, 0, 0, 0)
     }
+    let meta = knowledge_meta_from_type_info(info)
+    if !knowledge_meta_is_valid(meta) {
+        c = c.report_error_at(Span::dummy(), 54, 0, 0, 0)
+    }
 
     // Validate epsilon bound if present
     var eps_val: f64 = -1.0
@@ -91,6 +95,63 @@ fn knowledge_metadata_is_valid(validity_opt: Option<Box<ValidityCondition>>) -> 
         Some(vc) => knowledge_validity_expr_non_negative((*vc).expr)
         None => true
     }
+}
+
+fn validity_from_ast(opt: Option<Box<ValidityCondition>>) -> Validity {
+    match opt {
+        Some(vc) => {
+            let value = if knowledge_validity_expr_non_negative((*vc).expr) {
+                knowledge_validity_expr_to_f64((*vc).expr)
+            } else {
+                0.0
+            }
+            match (*vc).kind {
+                AstValidityKind::ValidDuration => validity_duration(value)
+                AstValidityKind::ValidUntilTime => validity_until(value)
+                AstValidityKind::ValidWhileCond => validity_while()
+            }
+        }
+        None => validity_always()
+    }
+}
+
+fn knowledge_validity_expr_to_f64(opt: Option<Box<Expr>>) -> f64 {
+    match opt {
+        Some(e) => {
+            if (*e).kind == ExprKind::ExprIntLit {
+                (*e).int_val as f64
+            } else if (*e).kind == ExprKind::ExprFloatLit {
+                (*e).float_val
+            } else {
+                0.0
+            }
+        }
+        None => 0.0
+    }
+}
+
+fn provenance_from_ast(opt: Option<Box<AstProvenanceKind>>) -> Provenance {
+    match opt {
+        Some(p) => {
+            match *p {
+                AstProvenanceKind::AstProvDerived => provenance_new(ProvenanceKind::ProvDerived)
+                AstProvenanceKind::AstProvSource => provenance_new(ProvenanceKind::ProvSource)
+                AstProvenanceKind::AstProvComputed => provenance_new(ProvenanceKind::ProvComputed)
+                AstProvenanceKind::AstProvLiterature => provenance_new(ProvenanceKind::ProvLiterature)
+                AstProvenanceKind::AstProvMeasured => provenance_new(ProvenanceKind::ProvMeasured)
+                AstProvenanceKind::AstProvInput => provenance_new(ProvenanceKind::ProvInput)
+            }
+        }
+        None => provenance_new(ProvenanceKind::ProvDerived)
+    }
+}
+
+fn knowledge_meta_from_type_info(info: KnowledgeTypeInfo) -> KnowledgeMeta {
+    let base_eps = match info.epsilon {
+        Some(eb) => (*eb).value
+        None => -1.0
+    }
+    knowledge_meta_full(base_eps, validity_from_ast(info.validity), provenance_from_ast(info.provenance))
 }
 
 // ============================================================
@@ -611,6 +672,14 @@ fn knowledge_binary_result(op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry
             0.0
         }
 
+        if !knowledge_op_supported(op) {
+            return ty_error()
+        }
+
+        if !types_compatible(left_inner, right_inner) {
+            return ty_error()
+        }
+
         // Determine result epsilon based on operation
         let result_epsilon = match op {
             BinaryOp::OpAdd => epsilon_combine_independent(left_eps, right_eps),
@@ -618,43 +687,18 @@ fn knowledge_binary_result(op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry
             BinaryOp::OpMul => epsilon_combine_relative(left_eps, right_eps),
             BinaryOp::OpDiv => epsilon_combine_relative(left_eps, right_eps),
             BinaryOp::OpRem => epsilon_combine_independent(left_eps, right_eps),
-            // Comparisons return bool, not Knowledge
-            BinaryOp::OpEq => 0.0,
-            BinaryOp::OpNe => 0.0,
-            BinaryOp::OpLt => 0.0,
-            BinaryOp::OpLe => 0.0,
-            BinaryOp::OpGt => 0.0,
-            BinaryOp::OpGe => 0.0,
-            // Logical operators - not applicable for Knowledge types directly
-            BinaryOp::OpAnd => 0.0,
-            BinaryOp::OpOr => 0.0,
-            // Bitwise operators - treat similar to arithmetic
-            BinaryOp::OpBitAnd => epsilon_combine_independent(left_eps, right_eps),
-            BinaryOp::OpBitOr => epsilon_combine_independent(left_eps, right_eps),
-            BinaryOp::OpBitXor => epsilon_combine_independent(left_eps, right_eps),
-            BinaryOp::OpShl => epsilon_combine_independent(left_eps, right_eps),
-            BinaryOp::OpShr => epsilon_combine_independent(left_eps, right_eps),
-            // Range and concat - not typically used with Knowledge
-            BinaryOp::OpConcat => epsilon_combine_independent(left_eps, right_eps),
-            BinaryOp::OpRange => 0.0,
-            BinaryOp::OpRangeInclusive => 0.0
+            _ => 0.0
         }
 
         // Determine result type based on operation
         match op {
-            // Comparisons return bool (not Knowledge)
-            BinaryOp::OpEq => ty_bool(),
-            BinaryOp::OpNe => ty_bool(),
-            BinaryOp::OpLt => ty_bool(),
-            BinaryOp::OpLe => ty_bool(),
-            BinaryOp::OpGt => ty_bool(),
-            BinaryOp::OpGe => ty_bool(),
-            // Logical operators return bool
-            BinaryOp::OpAnd => ty_bool(),
-            BinaryOp::OpOr => ty_bool(),
-            // Range operators don't return Knowledge
-            BinaryOp::OpRange => ty_error(),
-            BinaryOp::OpRangeInclusive => ty_error(),
+            // Comparisons on Knowledge require explicit unwrap.
+            BinaryOp::OpEq => ty_error(),
+            BinaryOp::OpNe => ty_error(),
+            BinaryOp::OpLt => ty_error(),
+            BinaryOp::OpLe => ty_error(),
+            BinaryOp::OpGt => ty_error(),
+            BinaryOp::OpGe => ty_error(),
             // All other operations return Knowledge with combined epsilon
             _ => {
                 // For arithmetic operations, result is Knowledge with combined epsilon
@@ -673,17 +717,17 @@ fn knowledge_op_supported(op: BinaryOp) -> bool {
         BinaryOp::OpMul => true,
         BinaryOp::OpDiv => true,
         BinaryOp::OpRem => true,
-        BinaryOp::OpEq => true,
-        BinaryOp::OpNe => true,
-        BinaryOp::OpLt => true,
-        BinaryOp::OpLe => true,
-        BinaryOp::OpGt => true,
-        BinaryOp::OpGe => true,
+        BinaryOp::OpEq => false,
+        BinaryOp::OpNe => false,
+        BinaryOp::OpLt => false,
+        BinaryOp::OpLe => false,
+        BinaryOp::OpGt => false,
+        BinaryOp::OpGe => false,
         BinaryOp::OpAnd => false,  // Logical ops not supported for Knowledge directly
         BinaryOp::OpOr => false,
-        BinaryOp::OpBitAnd => true,
-        BinaryOp::OpBitOr => true,
-        BinaryOp::OpBitXor => true,
+        BinaryOp::OpBitAnd => false,
+        BinaryOp::OpBitOr => false,
+        BinaryOp::OpBitXor => false,
         BinaryOp::OpShl => false,  // Shift not typically used with Knowledge
         BinaryOp::OpShr => false,
         BinaryOp::OpConcat => false,
