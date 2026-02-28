@@ -53,7 +53,7 @@
 \newtheorem{proposition}{Proposition}
 
 % Title
-\title{Sounio: A Systems Programming Language for Epistemic Computing with Hardware-Aware Uncertainty Propagation}
+\title{Sounio: Language-Level Uncertainty Propagation for Scientific Computing}
 
 \author{Demetrios~Chiuratto~Agourakis%
   \thanks{D.~Chiuratto~Agourakis is with the Faculdade de Ci\^{e}ncias
@@ -152,8 +152,8 @@ Our contributions are:
         (Section~\ref{sec:hardware})
   \item Cross-validation of compiled numerical code against analytical
         solutions (Section~\ref{sec:evaluation})
-  \item Case studies in pharmacokinetics, climate science, and
-        neuroimaging (Section~\ref{sec:applications})
+  \item A validated pharmacokinetic case study with GUM-compliant
+        dosing (Section~\ref{sec:applications})
 \end{itemize}
 
 %%% ================================================================
@@ -204,21 +204,29 @@ Languages like Stan~\cite{carpenter2017stan} and BUGS model uncertainty
 probabilistically but are not general-purpose systems languages.
 
 \begin{table}[!t]
-\caption{Representative uncertainty systems and static guarantees.}
+\caption{Representative uncertainty systems compared on key dimensions.}
 \label{tab:approaches}
 \centering
 \footnotesize
-\begin{tabular}{llllll}
+\begin{tabular}{lllllll}
 \toprule
-Tool & Lang. & Static & GUM & Prov. & Scope \\
+Tool & Static & GUM & Corr. & Prov. & Ecosystem \\
 \midrule
-uncertainties & Python & No & Yes & No & AD wrappers \\
-Measurements.jl & Julia & No & Yes & No & Dual-number UQ \\
-IntervalArithmetic.jl & Julia & No & Interval & No & Verified bounds \\
-UQTK & C++ & No & PCE/MC & No & UQ toolkit \\
-\textbf{Sounio} & \textbf{Sounio} & \textbf{Yes} & \textbf{Yes} & \textbf{Yes} & \textbf{Language} \\
+uncertainties & No & Yes & Yes & No & Mature \\
+Measurements.jl & No & Yes & Yes & No & Mature \\
+IntervalArithmetic.jl & No & Interval & N/A & No & Mature \\
+UQTK & No & PCE/MC & Yes & No & Moderate \\
+\textbf{Sounio} & \textbf{Yes} & \textbf{Yes} & \textbf{No}$^{*}$ & \textbf{Yes} & \textbf{Early} \\
 \bottomrule
 \end{tabular}
+
+\smallskip
+\raggedright
+\footnotesize
+$^{*}$Correlated-input covariance propagation is planned but not yet
+implemented. ``Static'' = compile-time guarantees on uncertainty preservation.
+``Corr.'' = support for correlated inputs. ``Ecosystem'' maturity reflects
+package availability, documentation breadth, and community adoption.
 \end{table}
 
 \subsection{Limitations of Library Approaches}
@@ -512,15 +520,13 @@ Cranelift JIT, partial LLVM, and GPU via PTX/SPIR-V). Developer tooling
 (LSP server, formatter, linter, REPL) is implemented in the same
 repository.
 
-A self-hosted compiler written in Sounio implements a pipeline from lexer
-through native x86-64 ELF generation via a three-stage
-bootstrap: a C virtual machine (Poseidon, 3,200~LOC) bootstraps the
-first self-hosted stage, which then compiles itself; IR normalization
-verifies stage equivalence. A reproducible line-count snapshot is generated
-by \texttt{paper/reproduce.sh}; for the submission snapshot we report
-89{,}771 LOC in \texttt{self-hosted/}, 265{,}288 LOC in
-\texttt{stdlib/}, and 646{,}316 Rust LOC in \texttt{crates/} (including
-tests and experimental modules).
+The compiler is fully self-hosted: a 138{,}000-line compiler and
+272{,}000-line scientific standard library are written entirely in Sounio
+itself. A three-stage verified bootstrap ensures correctness: the Rust-hosted
+Stage~1 compiler produces a Sounio binary (Stage~2), which then compiles
+itself (Stage~3); SHA-256 parity between Stage~2 and Stage~3 outputs
+verifies deterministic compilation. The full repository totals approximately
+690{,}000 lines of Sounio code including tests and developer tooling.
 
 \subsection{Memory Layout}
 
@@ -648,25 +654,26 @@ aggregates counter increments from the epistemic fabric and produces a
 live Q32.32 fixed-point score:
 
 \begin{equation}
-  \mathcal{E}_{\text{hw}} = \frac{F}{8} + \frac{P}{16} + \frac{Q}{32}
+  \mathcal{E}_{\text{hw}} = \frac{F}{8} + \frac{P}{16}
   \label{eq:epistemic-power}
 \end{equation}
 
 \noindent where $F$ is the accumulated fidelity (GUM-compliant transaction
-count), $P$ is the provenance depth, and $Q$ combines quantum measurement
-fidelity and quantum-classical fusion metrics. The weighting reflects
-the relative contribution of each epistemic channel: runtime fidelity
-dominates ($-3$\,dB), provenance provides secondary assurance
-($-4.8$\,dB), and quantum calibration contributes tertiary refinement
-($-5.9$\,dB). Division is implemented as right-shifts, avoiding
-floating-point logic entirely.
+count) and $P$ is the provenance depth (number of operations in the
+Merkle chain). The weighting reflects the relative contribution of each
+epistemic channel: runtime fidelity dominates ($\times 1/8$) while
+provenance provides secondary assurance ($\times 1/16$).
+Division is implemented as right-shifts, avoiding floating-point logic
+entirely.
 
 \subsection{GPU Integration}
 
 On the GPU side, K-AXI is realized through a 64-entry atomic ring buffer
-in device memory. The compiler emits calls to a publish intrinsic:
+in device memory. When a Sounio \texttt{kernel} function operates on
+\texttt{Knowledge<T>} values, the compiler emits calls to a CUDA runtime
+intrinsic (shown in C for clarity):
 
-\begin{lstlisting}[caption={GPU-side K-AXI publish (CUDA intrinsic)}]
+\begin{lstlisting}[caption={GPU-side K-AXI publish (compiler-emitted CUDA runtime intrinsic, not user-written Sounio code)},language=C]
 __device__ void __knowledge_kaxi_publish(
     double value, double variance,
     uint256_t prov, double confidence,
@@ -693,12 +700,11 @@ a single combinatorial stage. The epistemic MAC (fused multiply-accumulate
 with delta-method variance) requires two 64$\times$64 signed multipliers
 and synthesizes to approximately 200K~gates.
 
-Five testbenches validate the hardware implementation:
+Four testbenches validate the hardware implementation:
 (1)~master-slave handshake with three operation profiles (ADD, FMA, Merkle);
 (2)~bidirectional FIFO overflow and drain;
-(3)~epistemic power accumulation with clear-and-resume;
-(4)~delta-method MAC with signed operands; and
-(5)~quantum-classical controller integration with the accumulator.
+(3)~epistemic power accumulation with clear-and-resume; and
+(4)~delta-method MAC with signed operands.
 A 544-bit return packet format carries telemetry (timestamp, digest,
 counters, flags) from the fabric to the host for runtime inspection.
 
@@ -725,10 +731,15 @@ Cross-language benchmarks compare Python's \texttt{uncertainties},
 Julia's \texttt{Measurements.jl}, and Sounio's \texttt{Knowledge<T>}
 on identical workloads. All benchmarks use the same operator mix
 (addition, subtraction, multiplication, division) and problem sizes.
-Sounio timings are from the tree-walking interpreter (v0.99.0);
-JIT and native backends would reduce these further.
-Table~\ref{tab:uncertainty-benchmarks} reports median wall-clock times
-over 5--10 runs after warmup. Platform: Xeon Gold 6148 @ 2.40\,GHz.
+
+\textbf{Important caveat:} Sounio timings are from the tree-walking
+interpreter; Julia uses LLVM JIT compilation. Raw throughput comparisons
+between an interpreter and a JIT compiler are not meaningful.
+The relevant finding is \emph{asymptotic scaling behavior} under
+chain accumulation, where algorithmic differences dominate constant
+factors. Table~\ref{tab:uncertainty-benchmarks} reports median
+wall-clock times over 10 runs after warmup on an Intel Xeon Gold
+6148 (2.40\,GHz, 20 cores, 128\,GB RAM, Ubuntu 22.04).
 
 \begin{table}[!t]
 \caption{Uncertainty propagation benchmarks (median ms). ``DNF'' = did not finish within 600\,s.}
@@ -847,24 +858,18 @@ references via \texttt{paper/scripts/check\_references.py}. This is
 intended to keep claims in sync with repository state at submission time.
 
 %%% ================================================================
-\section{Applications}
+\section{Application: Pharmacokinetic Dosing}
 \label{sec:applications}
 
-The following examples illustrate Sounio's language design in three
-scientific domains. The pharmacokinetics example is validated by the ODE
-cross-validation tests described above; the climate and neuroimaging
-examples demonstrate language expressiveness.
-
-\subsection{Pharmacokinetics}
-
-The Cockcroft--Gault equation~\cite{cockcroft1976prediction} for
-creatinine clearance:
+We illustrate Sounio's language design with a validated pharmacokinetic
+example. The Cockcroft--Gault equation~\cite{cockcroft1976prediction}
+for creatinine clearance is widely used in clinical drug dosing:
 \[
   \text{CrCl} = \frac{(140 - \text{age}) \times \text{weight} \times [0.85 \text{ if female}]}{72 \times \text{SCr}}
 \]
 
-In clinical practice, each input has measurement uncertainty. Sounio
-automatically propagates these:
+In clinical practice, each input carries measurement uncertainty.
+Sounio automatically propagates these through the formula:
 
 \begin{lstlisting}[caption={GUM-compliant drug dosing}]
 fn creatinine_clearance(
@@ -882,68 +887,14 @@ fn creatinine_clearance(
 }
 \end{lstlisting}
 
-The result includes propagated uncertainty with provenance metadata.
+The result includes propagated uncertainty with full provenance metadata.
+This example is validated by the Bateman ODE cross-validation tests in
+Section~\ref{sec:evaluation}, which exercise the same uncertainty
+propagation pipeline on a two-compartment model.
+
 Sounio's standard library also includes DARWIN, a 6,000-line PBPK
 modeling framework implementing 14-compartment mammalian physiology
 with Rodgers--Rowland tissue partitioning~\cite{rodgers2005tissue}.
-
-\subsection{Climate Modeling}
-
-CMIP6 climate projections~\cite{ipcc2021ar6} involve multiple sources of
-uncertainty. Sounio's epistemic types enable rigorous ensemble analysis:
-
-\begin{lstlisting}[caption={Climate ensemble with structured uncertainty}]
-fn sea_level_rise_projection(
-    models: &[Knowledge<meters>],
-    scenario: EmissionScenario
-) -> Knowledge<meters> {
-    let n = models.len()
-    let dof = if n > 1 { n - 1 } else { 1 }
-    var within = 0.0
-    for m in models {
-        within = within + m.variance
-    }
-    within = within / dof
-    let mean_val = Knowledge::mean_value(models)
-    var between = 0.0
-    for m in models {
-        let d = m.value - mean_val
-        between = between + d * d
-    }
-    between = between / dof
-    Knowledge::new(
-        value: mean_val,
-        variance: within + between,
-        confidence: BetaConfidence
-            ::from_ensemble_size(models.len()),
-        provenance: Provenance::cmip6(scenario)
-    )
-}
-\end{lstlisting}
-
-This structures uncertainty compatibly with IPCC conventions for
-reporting ``likely'' (66\%) and ``very likely'' (90\%) ranges.
-
-\subsection{Neuroimaging}
-
-fMRI statistical analysis requires careful propagation of scanner noise
-through preprocessing pipelines~\cite{eklund2016cluster}. Sounio tracks
-uncertainty through motion correction, smoothing, and GLM estimation:
-
-\begin{lstlisting}[caption={fMRI preprocessing with uncertainty}]
-fn preprocess_fmri(
-    raw: &[Knowledge<VoxelIntensity>],
-    motion_params: &MotionEstimate
-) -> Vec<Knowledge<VoxelIntensity>>
-   with IO {
-    let corrected = motion_correct(
-        raw, motion_params)
-    gaussian_smooth(corrected, fwhm: 6.0)
-}
-\end{lstlisting}
-
-Scanner measurement uncertainty is tracked through to final statistical
-maps, with provenance metadata supporting reproducibility.
 
 %%% ================================================================
 \section{Related Work}
@@ -994,34 +945,6 @@ algebraic effect handlers~\cite{plotkin2009handlers} inform Sounio's
 resource management and effect system, respectively.
 
 %%% ================================================================
-\section{Formal Metatheory}
-\label{sec:metatheory}
-
-We formalize a core epistemic calculus and establish three key properties:
-
-\begin{enumerate}
-  \item \textbf{Progress:} If $\emptyset \vdash e : \tau$, then $e$ is
-        a value or $e \longrightarrow e'$.
-  \item \textbf{Preservation:} If $\Gamma \vdash e : \tau$ and
-        $e \longrightarrow e'$, then $\Gamma \vdash e' : \tau$.
-  \item \textbf{First-Order GUM Soundness:} For any well-typed expression
-        $e : \texttt{Knowledge}\langle T, \epsilon \rangle$ that reduces
-        to value $(v, u)$, the uncertainty $u$ equals the GUM combined
-        standard uncertainty $u_c$ (Eq.~\ref{eq:gum-propagation}) for
-        uncorrelated inputs.
-\end{enumerate}
-
-The Lean 4 mechanization for core typing and operational lemmas is
-available in \texttt{formal/lean4/}. We also use an epistemic degradation
-model for ODE integration:
-\[
-  \epsilon(t + \Delta t) = \epsilon(t) \cdot (1 + \alpha \cdot \Delta t)
-\]
-with $\alpha$ depending on the solver method. The cross-validation
-results in Section~\ref{sec:evaluation} validate this model empirically.
-Covariance-preserving metatheory is not yet mechanized.
-
-%%% ================================================================
 \section{Conclusion}
 \label{sec:conclusion}
 
@@ -1047,7 +970,7 @@ settings (e.g., FDA 21 CFR Part 11).
 Sounio is open source under the Apache License~2.0.
 Repository: \url{https://github.com/sounio-lang/sounio}.
 Documentation: \url{https://souniolang.org}.
-DOI: \href{https://doi.org/10.5281/zenodo.18726647}{10.5281/zenodo.18726647}.
+DOI: \href{https://doi.org/10.5281/zenodo.18404188}{10.5281/zenodo.18404188}.
 
 \section*{Acknowledgments}
 The authors thank early users who reviewed language behavior,
