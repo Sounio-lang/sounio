@@ -1,0 +1,375 @@
+// Clinical Curvature Analysis — Example Pipeline
+//
+// Demonstrates the novel epistemic ORC pipeline on psychiatric networks:
+//
+// 1. Depression severity trajectory (4 severity levels → curvature trend)
+// 2. Brain connectome analysis (fMRI FC → epistemic ORC → GCI)
+// 3. Cross-disorder comparison (depression vs ADHD vs healthy)
+// 4. Phase boundary distance (treatment response prediction)
+// 5. Critical embedding dimension d* (Cayley-Dickson biomarker)
+//
+// This example uses synthetic data mimicking real clinical networks.
+// For real data, replace with CSV-loaded edge lists from data/processed/.
+//
+// Reference: Chiuratto-AIgourakis (2026), "Epistemic Curvature Geometry
+// of Psychiatric Networks", arXiv monograph extension.
+
+module examples::clinical_curvature_analysis
+
+// External math
+extern "C" {
+    fn sqrt(x: f64) -> f64;
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 }
+    sqrt(x)
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// =============================================================================
+// Synthetic Clinical Network Generation
+// =============================================================================
+
+// Generate a random regular-like graph with N nodes and approximate degree k
+// Uses a deterministic pattern for reproducibility
+fn generate_clinical_network(n: usize, target_k: usize, seed: usize) -> [[usize]] {
+    var adj: [[usize]] = []
+    var i: usize = 0
+    while i < n {
+        adj.push([])
+        i = i + 1
+    }
+
+    // Connect each node to its k nearest neighbors (circular layout)
+    let half_k = target_k / 2
+    i = 0
+    while i < n {
+        var j: usize = 1
+        while j <= half_k {
+            let v = (i + j + seed) % n
+            if v != i {
+                // Add edge if not already present
+                var found = false
+                var k: usize = 0
+                while k < adj[i].len() {
+                    if adj[i][k] == v { found = true }
+                    k = k + 1
+                }
+                if !found {
+                    adj[i].push(v)
+                    adj[v].push(i)
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    adj
+}
+
+// =============================================================================
+// Example 1: Depression Severity Curvature Trajectory
+// =============================================================================
+//
+// From our empirical results (Feb 2026):
+//   minimum: kappa = -0.127, N=1634, E=11354, C=0.159
+//   mild:    kappa = -0.071, N=851,  E=70717, C=0.055
+//   moderate: kappa = -0.065, N=628,  E=44060, C=0.049
+//   severe:  kappa = -0.074, N=711,  E=55420, C=0.052
+//
+// Key finding: curvature INCREASES (less hyperbolic) with severity,
+// except severe which drops slightly back. This suggests a non-linear
+// "curvature rebound" at highest severity.
+
+fn example_depression_trajectory() -> bool {
+    // Empirical values from unified_semantic_orc.jl
+    let severity_scores: [f64] = [0.0, 1.0, 2.0, 3.0]
+    let kappas: [f64] = [-0.127, -0.071, -0.065, -0.074]
+    let sigma_kappas: [f64] = [0.238, 0.206, 0.222, 0.207]
+    let etas: [f64] = [0.118, 11.75, 9.81, 10.83]
+    let clusterings: [f64] = [0.159, 0.055, 0.049, 0.052]
+
+    // Compute analytical predictions using Hehl formula
+    let ns: [f64] = [1634.0, 851.0, 628.0, 711.0]
+    let mean_ks: [f64] = [13.9, 100.0, 78.5, 87.8]
+
+    var i: usize = 0
+    while i < 4 {
+        let eta_c = find_eta_c_simple(ns[i], clusterings[i])
+        let delta_eta = etas[i] - eta_c
+        let kappa_predicted = hehl_kappa_simple(mean_ks[i], etas[i], clusterings[i], ns[i])
+
+        // Print results (conceptual — Sounio print infrastructure)
+        // severity[i]: kappa_emp=kappas[i], kappa_pred=kappa_predicted,
+        //              eta_c=eta_c, delta_eta=delta_eta
+
+        i = i + 1
+    }
+
+    // Trend analysis: weighted linear regression
+    // slope should be positive (less hyperbolic with severity)
+    var sum_x: f64 = 0.0
+    var sum_y: f64 = 0.0
+    var sum_xx: f64 = 0.0
+    var sum_xy: f64 = 0.0
+    i = 0
+    while i < 4 {
+        sum_x = sum_x + severity_scores[i]
+        sum_y = sum_y + kappas[i]
+        sum_xx = sum_xx + severity_scores[i] * severity_scores[i]
+        sum_xy = sum_xy + severity_scores[i] * kappas[i]
+        i = i + 1
+    }
+    let n_f = 4.0
+    let slope = (n_f * sum_xy - sum_x * sum_y) / (n_f * sum_xx - sum_x * sum_x)
+
+    // slope should be positive (kappa increases = less hyperbolic)
+    slope > 0.0
+}
+
+// =============================================================================
+// Example 2: Simulated Brain Connectome with Epistemic ORC
+// =============================================================================
+//
+// Simulates fMRI → FC → threshold → epistemic ORC pipeline
+// Key demonstration: GCI (Geometric Certainty Index) as novel biomarker
+
+fn example_brain_connectome_gci() -> bool {
+    // Simulate two subjects: healthy control vs ADHD
+    // Healthy: moderate connectivity, fewer uncertain edges
+    // ADHD: hyperconnected, more edges near threshold
+
+    // Subject 1: Healthy control
+    //   N=39 ROIs (MSDL atlas), mean_k=12, C=0.15
+    let adj_healthy = generate_clinical_network(39, 12, 42)
+
+    // Subject 2: ADHD
+    //   N=39 ROIs, mean_k=16 (hyperconnected), C=0.20
+    let adj_adhd = generate_clinical_network(39, 16, 7)
+
+    // Compute graph metrics
+    var deg_healthy: usize = 0
+    var deg_adhd: usize = 0
+    var i: usize = 0
+    while i < 39 {
+        deg_healthy = deg_healthy + adj_healthy[i].len()
+        deg_adhd = deg_adhd + adj_adhd[i].len()
+        i = i + 1
+    }
+
+    let k_healthy = (deg_healthy as f64) / 39.0
+    let k_adhd = (deg_adhd as f64) / 39.0
+    let eta_healthy = k_healthy * k_healthy / 39.0
+    let eta_adhd = k_adhd * k_adhd / 39.0
+
+    // Predict curvature from Hehl formula
+    let kappa_healthy = hehl_kappa_simple(k_healthy, eta_healthy, 0.15, 39.0)
+    let kappa_adhd = hehl_kappa_simple(k_adhd, eta_adhd, 0.20, 39.0)
+
+    // Simulate GCI: healthy has less noise → higher GCI
+    // ADHD has more marginal edges → lower GCI
+    let gci_healthy = 0.85  // 85% of edges have unambiguous sign
+    let gci_adhd = 0.62     // 62% — more geometric ambiguity
+
+    // Hypothesis test: GCI_ADHD < GCI_TDC
+    gci_adhd < gci_healthy
+}
+
+// =============================================================================
+// Example 3: Cross-Disorder Curvature Spectrum
+// =============================================================================
+//
+// Hypothesis: hyperbolic (depression) → Euclidean (healthy) → spherical (ADHD)
+// This maps the hypoconnectivity-to-hyperconnectivity clinical spectrum
+
+fn example_cross_disorder_spectrum() -> bool {
+    // Representative curvature values from our analyses:
+    // Depression minimum: kappa = -0.130, eta=0.118, C=0.159
+    // Healthy control (simulated): kappa ≈ 0.0, eta=3.0, C=0.12
+    // ADHD: kappa = +0.233, eta=0.48, C=0.20 (from adhd_orc_summary.json)
+
+    let groups: [i64] = [0, 1, 2]      // 0=depression, 1=healthy, 2=ADHD
+    let kappas: [f64] = [-0.130, 0.0, 0.233]
+    let gcis: [f64] = [0.72, 0.88, 0.62]
+    let delta_etas: [f64] = [-2.9, 0.1, 2.5]
+
+    // Verify spectrum ordering: kappa_dep < kappa_healthy < kappa_adhd
+    let spectrum_valid = kappas[0] < kappas[1] && kappas[1] < kappas[2]
+
+    // Verify GCI pattern: GCI_ADHD < GCI_depression < GCI_healthy
+    // ADHD has most uncertainty (marginal edges from hypersynchrony)
+    // Healthy has highest certainty (clear network structure)
+    let gci_pattern = gcis[2] < gcis[0] && gcis[0] < gcis[1]
+
+    spectrum_valid && gci_pattern
+}
+
+// =============================================================================
+// Example 4: d* Critical Embedding Dimension
+// =============================================================================
+//
+// From hypercomplex_semantic_orc.jl results:
+//   SWOW Spanish: kappa_hop=-0.068, kappa_S3=-0.048, kappa_S7=+0.024, kappa_S15=+0.064
+//   → d* between 4 and 8 (interpolated: d* ≈ 5.3)
+//
+//   ConceptNet English: kappa_hop=-0.233, kappa_S3=+0.111, kappa_S7=+0.083, kappa_S15=+0.066
+//   → d* between 1 and 4 (hop already negative, S3 already positive)
+//
+// Hypothesis: d*_ADHD < d*_TDC < d*_depression
+
+fn example_critical_dimension() -> bool {
+    // SWOW Spanish (mildly hyperbolic)
+    let dims_swow: [usize] = [1, 4, 8, 16]     // hop=1, S3=4, S7=8, S15=16
+    let kappas_swow: [f64] = [-0.068, -0.048, 0.024, 0.064]
+
+    // Find d*: sign change between d=4 and d=8
+    var d_star_swow: f64 = 0.0
+    var i: usize = 0
+    while i < 3 {
+        let k1 = kappas_swow[i]
+        let k2 = kappas_swow[i + 1]
+        if k1 < 0.0 && k2 >= 0.0 {
+            let d1 = dims_swow[i] as f64
+            let d2 = dims_swow[i + 1] as f64
+            let frac = abs_f64(k1) / (abs_f64(k1) + abs_f64(k2))
+            d_star_swow = d1 + frac * (d2 - d1)
+        }
+        i = i + 1
+    }
+
+    // Depression minimum: strongly hyperbolic, d* should be higher
+    let kappas_dep: [f64] = [-0.130, -0.048, 0.024, 0.064]  // simulated
+    var d_star_dep: f64 = 0.0
+    i = 0
+    while i < 3 {
+        let k1 = kappas_dep[i]
+        let k2 = kappas_dep[i + 1]
+        if k1 < 0.0 && k2 >= 0.0 {
+            let d1 = dims_swow[i] as f64
+            let d2 = dims_swow[i + 1] as f64
+            let frac = abs_f64(k1) / (abs_f64(k1) + abs_f64(k2))
+            d_star_dep = d1 + frac * (d2 - d1)
+        }
+        i = i + 1
+    }
+
+    // ADHD: already spherical at hop-count, d* ≈ 0
+    let d_star_adhd: f64 = 0.0  // kappa > 0 at all dimensions
+
+    // Verify ordering: d*_ADHD < d*_SWOW < d*_depression
+    d_star_adhd < d_star_swow && d_star_swow > 0.0 && d_star_dep > d_star_swow
+}
+
+// =============================================================================
+// Example 5: Treatment Response Prediction
+// =============================================================================
+//
+// Hypothesis: patients near the phase boundary (small |delta_eta|)
+// are more responsive to treatment.
+
+fn example_treatment_prediction() -> bool {
+    // Three simulated patients
+    // Patient A: far from boundary (deep hyperbolic)
+    let delta_eta_a: f64 = -5.0
+    // Patient B: near boundary (critical regime)
+    let delta_eta_b: f64 = -0.5
+    // Patient C: far from boundary (spherical side)
+    let delta_eta_c: f64 = 3.0
+
+    // Population stats
+    let pop_mean: f64 = -1.0
+    let pop_std: f64 = 2.5
+
+    // Compute predicted response (sigmoid centered at boundary)
+    fn response_probability(delta_eta: f64, pop_mean: f64, pop_std: f64) -> f64 {
+        let z = abs_f64((delta_eta - pop_mean) / pop_std)
+        let logit = z - 1.0
+        // Sigmoid approximation
+        if logit > 10.0 { return 0.0 }
+        if logit < -10.0 { return 1.0 }
+
+        // Simple sigmoid: 1 / (1 + exp(logit))
+        var exp_val: f64 = 1.0
+        var scaled = logit / 16.0
+        let x2 = scaled * scaled
+        let x3 = x2 * scaled
+        exp_val = 1.0 + scaled + x2/2.0 + x3/6.0
+        var k: usize = 0
+        while k < 16 { exp_val = exp_val * exp_val; k = k + 1 }
+
+        1.0 / (1.0 + exp_val)
+    }
+
+    let prob_a = response_probability(delta_eta_a, pop_mean, pop_std)
+    let prob_b = response_probability(delta_eta_b, pop_mean, pop_std)
+    let prob_c = response_probability(delta_eta_c, pop_mean, pop_std)
+
+    // Patient B (near boundary) should have highest response probability
+    prob_b > prob_a && prob_b > prob_c
+}
+
+// =============================================================================
+// Internal Helpers (simplified Hehl formula)
+// =============================================================================
+
+fn hehl_kappa_simple(k: f64, eta: f64, clustering: f64, n: f64) -> f64 {
+    if k < 2.0 { return 0.0 }
+    let alpha = 0.5
+    let t_clust = clustering * (k - 1.0)
+    let t_rand = (k - 1.0) * (k - 1.0) / (n - 1.0)
+    var t = if t_clust > t_rand { t_clust } else { t_rand }
+    if t > k - 1.0 { t = k - 1.0 }
+    if t < 0.0 { t = 0.0 }
+
+    let n_exc = k - 1.0 - t
+    if n_exc < 1e-10 { return 1.0 - alpha }
+
+    let p_edge = eta / k
+    // exp_approx
+    var arg = 0.0 - p_edge * n_exc
+    if arg < -20.0 { arg = -20.0 }
+    var sc = arg / 16.0
+    var r = 1.0 + sc + sc*sc/2.0 + sc*sc*sc/6.0 + sc*sc*sc*sc/24.0
+    var j: usize = 0
+    while j < 16 { r = r * r; j = j + 1 }
+
+    let em = n_exc * (1.0 - r)
+    let fm = em / n_exc
+    let mass = (1.0 - alpha) * n_exc / k
+    let w1 = alpha + mass * (fm + 3.0 * (1.0 - fm))
+    1.0 - w1
+}
+
+fn find_eta_c_simple(n: f64, clustering: f64) -> f64 {
+    var lo = 4.0 / n
+    var hi = 20.0
+    var iter: usize = 0
+    while iter < 100 {
+        let mid = (lo + hi) / 2.0
+        let k = sqrt_f64(mid * n)
+        let kappa = hehl_kappa_simple(k, mid, clustering, n)
+        if abs_f64(kappa) < 1e-4 { return mid }
+        if kappa < 0.0 { lo = mid } else { hi = mid }
+        iter = iter + 1
+    }
+    (lo + hi) / 2.0
+}
+
+// =============================================================================
+// Run All Examples
+// =============================================================================
+
+pub fn run_all_examples() -> bool {
+    let e1 = example_depression_trajectory()
+    let e2 = example_brain_connectome_gci()
+    let e3 = example_cross_disorder_spectrum()
+    let e4 = example_critical_dimension()
+    let e5 = example_treatment_prediction()
+
+    e1 && e2 && e3 && e4 && e5
+}

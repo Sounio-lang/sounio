@@ -1,6 +1,6 @@
 # Plan BIG Status Board
 
-- generated_at_utc: 2026-02-28T02:40:38Z
+- generated_at_utc: 2026-02-28T11:10:32Z
 - overall: attention
 - run_gates: true
 
@@ -28,4 +28,4 @@
 - ui_type_backlog_quality: pass
 
 ## Workspace
-- git_dirty_count: 87
+- git_dirty_count: 24

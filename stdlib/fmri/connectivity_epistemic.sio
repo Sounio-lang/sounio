@@ -309,4 +309,222 @@ fn status_from_uncertainty(r: f64, uncertainty: f64) -> EpistemicStatus {
 }
 
 // ============================================================================
+// BRIDGE: FC → EPISTEMIC ORC PIPELINE
+// ============================================================================
+//
+// Connects functional connectivity computation to graph::epistemic_curvature.
+// Takes an FC matrix with Fisher-z CIs, thresholds to binary graph, and
+// propagates uncertainty into the cost matrix for epistemic ORC.
+
+// Result of FC-to-graph conversion with uncertainty propagation
+struct FCtoGraphResult {
+    // Adjacency list (undirected)
+    adj: [[usize; 50]; 50],
+    adj_len: [usize; 50],
+    n_rois: usize,
+
+    // Cost uncertainty matrix for ORC
+    // sigma_d(i,j) = uncertainty on BFS distance due to edge-existence uncertainty
+    cost_uncertainty: [[f64; 50]; 50],
+
+    // Edge classification
+    n_certain_edges: usize,    // |r| - threshold > sigma_r
+    n_uncertain_edges: usize,  // |r| - threshold < sigma_r (near threshold)
+    n_total_edges: usize,
+
+    // Per-edge correlations and CIs (for provenance)
+    edge_rs: [f64; 1250],        // max 50*50/2 edges
+    edge_sigmas: [f64; 1250],
+    edge_u: [usize; 1250],
+    edge_v: [usize; 1250],
+    n_stored_edges: usize,
+}
+
+fn fc_to_graph_new() -> FCtoGraphResult {
+    FCtoGraphResult {
+        adj: [[0; 50]; 50],
+        adj_len: [0; 50],
+        n_rois: 0,
+        cost_uncertainty: [[0.0; 50]; 50],
+        n_certain_edges: 0,
+        n_uncertain_edges: 0,
+        n_total_edges: 0,
+        edge_rs: [0.0; 1250],
+        edge_sigmas: [0.0; 1250],
+        edge_u: [0; 1250],
+        edge_v: [0; 1250],
+        n_stored_edges: 0,
+    }
+}
+
+// Convert FC matrix to binary graph with epistemic edge uncertainty
+//
+// For each pair (i,j):
+//   if |r_ij| > threshold: add edge
+//   Classify edge as "certain" (|r|-threshold > sigma_r) or "uncertain"
+//
+// Cost uncertainty for BFS distance d(i,j):
+//   sigma_d ≈ sqrt(d * frac_uncertain)
+//   where frac_uncertain = n_uncertain / n_total
+//   (each hop has probability frac_uncertain of being wrong)
+fn build_epistemic_graph(
+    fc_matrix: &ConnectivityMatrix,
+    threshold: f64,
+    motion_mean_fd: f64,
+    scrub_fraction: f64
+) -> FCtoGraphResult {
+    var result = fc_to_graph_new()
+    let n = fc_matrix.n_rois
+    result.n_rois = n as usize
+
+    // Phase 1: Build adjacency and classify edges
+    var i: i64 = 0
+    while i < n {
+        var j: i64 = i + 1
+        while j < n {
+            let r = fc_matrix.matrix[i as usize][j as usize]
+            let abs_r = abs_f64(r)
+
+            if abs_r > threshold {
+                // Add edge
+                let ui = i as usize
+                let uj = j as usize
+                let li = result.adj_len[ui]
+                let lj = result.adj_len[uj]
+                result.adj[ui][li] = uj
+                result.adj[uj][lj] = ui
+                result.adj_len[ui] = li + 1
+                result.adj_len[uj] = lj + 1
+
+                // Get base uncertainty and inflate for motion
+                let base_sigma = fc_matrix.uncertainty[ui][uj]
+                let sigma_r = inflate_uncertainty_for_motion(
+                    base_sigma, motion_mean_fd, scrub_fraction
+                )
+
+                // Classify: certain if well above threshold
+                if abs_r - threshold > sigma_r {
+                    result.n_certain_edges = result.n_certain_edges + 1
+                } else {
+                    result.n_uncertain_edges = result.n_uncertain_edges + 1
+                }
+                result.n_total_edges = result.n_total_edges + 1
+
+                // Store edge provenance
+                if result.n_stored_edges < 1250 {
+                    let idx = result.n_stored_edges
+                    result.edge_rs[idx] = r
+                    result.edge_sigmas[idx] = sigma_r
+                    result.edge_u[idx] = ui
+                    result.edge_v[idx] = uj
+                    result.n_stored_edges = result.n_stored_edges + 1
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Phase 2: BFS distance matrix (for cost uncertainty computation)
+    let frac_uncertain = if result.n_total_edges > 0 {
+        (result.n_uncertain_edges as f64) / (result.n_total_edges as f64)
+    } else { 0.0 }
+
+    // BFS from each source node
+    var source: usize = 0
+    while source < (n as usize) {
+        var dist: [i64; 50] = [-1; 50]
+        dist[source] = 0
+        var queue: [usize; 50] = [0; 50]
+        queue[0] = source
+        var head: usize = 0
+        var tail: usize = 1
+
+        while head < tail {
+            let u = queue[head]
+            head = head + 1
+            var k: usize = 0
+            while k < result.adj_len[u] {
+                let v = result.adj[u][k]
+                if dist[v] == -1 {
+                    dist[v] = dist[u] + 1
+                    queue[tail] = v
+                    tail = tail + 1
+                }
+                k = k + 1
+            }
+        }
+
+        // Set cost uncertainty: sigma_d(source, target) = sqrt(d * frac_uncertain)
+        var target: usize = 0
+        while target < (n as usize) {
+            if dist[target] > 0 {
+                result.cost_uncertainty[source][target] =
+                    sqrt_f64((dist[target] as f64) * frac_uncertain)
+            }
+            target = target + 1
+        }
+
+        source = source + 1
+    }
+
+    result
+}
+
+// Compute mean ORC with uncertainty from an FC matrix
+// This is the main entry point for fMRI → curvature analysis
+//
+// Returns: (mean_kappa, sigma_kappa, gci, eta, clustering)
+struct FCCurvatureSummary {
+    mean_kappa: f64,
+    sigma_mean_kappa: f64,
+    gci: f64,
+    eta: f64,
+    clustering: f64,
+    n_nodes: usize,
+    n_edges: usize,
+    n_uncertain_edges: usize,
+    frac_uncertain: f64,
+}
+
+fn compute_fc_curvature_summary(
+    fc_matrix: &ConnectivityMatrix,
+    threshold: f64,
+    motion_mean_fd: f64,
+    scrub_fraction: f64
+) -> FCCurvatureSummary {
+    let graph = build_epistemic_graph(fc_matrix, threshold, motion_mean_fd, scrub_fraction)
+
+    // Compute eta = mean_k^2 / N
+    var total_deg: usize = 0
+    var i: usize = 0
+    while i < graph.n_rois {
+        total_deg = total_deg + graph.adj_len[i]
+        i = i + 1
+    }
+    let mean_k = if graph.n_rois > 0 {
+        (total_deg as f64) / (graph.n_rois as f64)
+    } else { 0.0 }
+    let eta = if graph.n_rois > 0 {
+        mean_k * mean_k / (graph.n_rois as f64)
+    } else { 0.0 }
+
+    let frac_unc = if graph.n_total_edges > 0 {
+        (graph.n_uncertain_edges as f64) / (graph.n_total_edges as f64)
+    } else { 0.0 }
+
+    FCCurvatureSummary {
+        mean_kappa: 0.0,          // Filled by epistemic_curvature pipeline
+        sigma_mean_kappa: 0.0,
+        gci: 1.0 - frac_unc,     // Approximate GCI from edge certainty fraction
+        eta: eta,
+        clustering: 0.0,         // Filled by graph metrics computation
+        n_nodes: graph.n_rois,
+        n_edges: graph.n_total_edges,
+        n_uncertain_edges: graph.n_uncertain_edges,
+        frac_uncertain: frac_unc,
+    }
+}
+
+// ============================================================================
 // TESTS

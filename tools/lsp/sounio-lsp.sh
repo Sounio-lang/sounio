@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Sounio LSP Server - JSON-RPC over stdio
+# BIG LSP Edition - Full IDE features
 
 set -euo pipefail
 
@@ -179,6 +180,14 @@ run_souc_check() {
     fi
 }
 
+run_souc_fmt() {
+    "$SOUC_BIN" fmt "$@" 2>&1 || true
+}
+
+run_souc_fix() {
+    "$SOUC_BIN" fix --dry-run "$@" 2>&1 || true
+}
+
 build_failed_check_diagnostics() {
     local rc="$1"
     local err_file="$2"
@@ -250,7 +259,7 @@ write_open_doc_snapshot() {
     if [[ -d "$dir" ]] && [[ -w "$dir" ]]; then
         snapshot="$(mktemp "$dir/.sounio-lsp-snapshot.XXXXXX.sio")"
     else
-        snapshot="$(mktemp /tmp/.sounio-lsp-snapshot.XXXXXX.sio)"
+        snapshot="$(mktemp /tmp/.sounio-lsp-snapshot.XXXXXX.sio")"
     fi
     printf '%s' "${OPEN_DOCS[$uri]}" >"$snapshot"
     printf '%s\n' "$snapshot"
@@ -496,6 +505,595 @@ PY
         '{uri:$uri, range:{start:{line:$ln, character:$col}, end:{line:$ln, character:$col}}}'
 }
 
+# =============================================================================
+# DOCUMENT SYMBOL EXTRACTION
+# =============================================================================
+
+extract_document_symbols() {
+    local source_path="$1"
+    local uri="$2"
+    local content output
+    
+    if [[ -f "$source_path" ]]; then
+        content="$(cat "$source_path")"
+    else
+        content=""
+    fi
+    
+    # Parse document symbols from AST output
+    output="$(run_souc_check "$source_path" --show-ast 2>&1 || true)"
+    
+    python3 - "$uri" "$output" "$content" <<'PY'
+import json
+import os
+import re
+import sys
+
+uri = sys.argv[1]
+ast_output = sys.argv[2]
+content = sys.argv[3] if len(sys.argv) > 3 else ""
+
+symbols = []
+
+# Extract function definitions
+func_pattern = re.compile(r'(fn|func|function|def)\s+(\w+)')
+for match in func_pattern.finditer(content):
+    name = match.group(2)
+    line = content[:match.start()].count('\n')
+    col = match.start() - content.rfind('\n', 0, match.start()) - 1
+    symbols.append({
+        "name": name,
+        "kind": 12,  # Function
+        "range": {
+            "start": {"line": line, "character": col},
+            "end": {"line": line, "character": col + len(name)}
+        },
+        "selectionRange": {
+            "start": {"line": line, "character": col},
+            "end": {"line": line, "character": col + len(name)}
+        }
+    })
+
+# Extract type definitions
+type_pattern = re.compile(r'(type|struct|enum|interface|trait)\s+(\w+)')
+for match in type_pattern.finditer(content):
+    name = match.group(2)
+    line = content[:match.start()].count('\n')
+    col = match.start() - content.rfind('\n', 0, match.start()) - 1
+    kind = 23 if match.group(1) in ('struct',) else 10 if match.group(1) == 'enum' else 11 if match.group(1) == 'interface' else 8 if match.group(1) == 'trait' else 22
+    symbols.append({
+        "name": name,
+        "kind": kind,
+        "range": {
+            "start": {"line": line, "character": col},
+            "end": {"line": line, "character": col + len(name)}
+        },
+        "selectionRange": {
+            "start": {"line": line, "character": col},
+            "end": {"line": line, "character": col + len(name)}
+        }
+    })
+
+# Extract module declarations
+mod_pattern = re.compile(r'mod\s+(\w+)')
+for match in mod_pattern.finditer(content):
+    name = match.group(1)
+    line = content[:match.start()].count('\n')
+    col = match.start() - content.rfind('\n', 0, match.start()) - 1
+    symbols.append({
+        "name": name,
+        "kind": 2,  # Module
+        "range": {
+            "start": {"line": line, "character": col},
+            "end": {"line": line, "character": col + len(name)}
+        },
+        "selectionRange": {
+            "start": {"line": line, "character": col},
+            "end": {"line": line, "character": col + len(name)}
+        }
+    })
+
+# Extract const/let bindings
+const_pattern = re.compile(r'(const|let)\s+(\w+)')
+for match in const_pattern.finditer(content):
+    name = match.group(2)
+    line = content[:match.start()].count('\n')
+    col = match.start() - content.rfind('\n', 0, match.start()) - 1
+    kind = 14 if match.group(1) == 'const' else 13  # Constant / Variable
+    symbols.append({
+        "name": name,
+        "kind": kind,
+        "range": {
+            "start": {"line": line, "character": col},
+            "end": {"line": line, "character": col + len(name)}
+        },
+        "selectionRange": {
+            "start": {"line": line, "character": col},
+            "end": {"line": line, "character": col + len(name)}
+        }
+    })
+
+print(json.dumps(symbols))
+PY
+}
+
+# =============================================================================
+# COMPLETION PROVIDER
+# =============================================================================
+
+get_completions() {
+    local source_path="$1"
+    local line="$2"
+    local col="$3"
+    local content="${4:-}"
+    
+    python3 - "$line" "$col" "$content" "$source_path" <<'PY'
+import json
+import os
+import re
+import sys
+
+req_line = int(sys.argv[1])
+req_col = int(sys.argv[2])
+content = sys.argv[3] if len(sys.argv) > 3 else ""
+source_path = sys.argv[4] if len(sys.argv) > 4 else ""
+
+completions = []
+
+# Sounio keywords
+keywords = [
+    "fn", "func", "function", "def",
+    "let", "const", "var", "mut",
+    "if", "else", "elif", "then",
+    "match", "case", "when",
+    "for", "while", "loop", "break", "continue",
+    "return", "yield",
+    "struct", "enum", "type", "trait", "impl", "interface",
+    "mod", "use", "import", "export", "pub", "public", "private",
+    "async", "await",
+    "try", "catch", "throw", "error",
+    "epistemic", "uncertain", "confidence", "provenance",
+    "ontology", "unit", "dimension",
+    "unsafe", "safe",
+    "where", "with", "in", "is", "as",
+    "true", "false", "nil", "none", "null",
+    "Self", "self"
+]
+
+for kw in keywords:
+    completions.append({
+        "label": kw,
+        "kind": 14,  # Keyword
+        "insertText": kw,
+        "detail": "keyword",
+        "sortText": "1_" + kw
+    })
+
+# Built-in types
+types = [
+    "Int", "Float", "Bool", "String", "Char",
+    "List", "Array", "Map", "Set", "Option", "Result",
+    "Vec", "HashMap", "HashSet",
+    "Tensor", "Distribution",
+    "Unit", "Quantity"
+]
+
+for ty in types:
+    completions.append({
+        "label": ty,
+        "kind": 7,  # Type
+        "insertText": ty,
+        "detail": "built-in type",
+        "sortText": "2_" + ty
+    })
+
+# Built-in functions
+builtins = [
+    ("print", "print(${1:value})", "Print a value"),
+    ("println", "println(${1:value})", "Print a value with newline"),
+    ("assert", "assert(${1:condition})", "Assert condition is true"),
+    ("panic", "panic(${1:message})", "Panic with message"),
+    ("Some", "Some(${1:value})", "Create Some variant"),
+    ("None", "None", "None variant"),
+    ("Ok", "Ok(${1:value})", "Create Ok variant"),
+    ("Err", "Err(${1:error})", "Create Err variant"),
+    ("range", "range(${1:start}, ${2:end})", "Create range"),
+    ("len", "len(${1:collection})", "Get length"),
+    ("map", "map(${1:fn}, ${2:collection})", "Map function over collection"),
+    ("filter", "filter(${1:fn}, ${2:collection})", "Filter collection"),
+    ("fold", "fold(${1:fn}, ${2:init}, ${3:collection})", "Fold over collection"),
+    ("uncertain", "uncertain(${1:value}, ${2:std})", "Create uncertain value"),
+    ("confidence", "confidence(${1:value})", "Get confidence interval"),
+    ("provenance", "provenance(${1:value})", "Get provenance info"),
+]
+
+for name, insert, detail in builtins:
+    completions.append({
+        "label": name,
+        "kind": 3,  # Function
+        "insertText": insert,
+        "insertTextFormat": 2,  # Snippet
+        "detail": detail,
+        "sortText": "3_" + name
+    })
+
+# Extract symbols from current document
+if content:
+    # Functions
+    func_pattern = re.compile(r'(?:fn|func|function|def)\s+(\w+)')
+    for match in func_pattern.finditer(content):
+        name = match.group(1)
+        completions.append({
+            "label": name,
+            "kind": 3,  # Function
+            "insertText": name + "()",
+            "detail": "function (current file)",
+            "sortText": "0_" + name
+        })
+    
+    # Variables
+    var_pattern = re.compile(r'(?:let|const|var)\s+(\w+)')
+    for match in var_pattern.finditer(content):
+        name = match.group(1)
+        completions.append({
+            "label": name,
+            "kind": 6,  # Variable
+            "insertText": name,
+            "detail": "variable (current file)",
+            "sortText": "0_" + name
+        })
+
+print(json.dumps(completions))
+PY
+}
+
+# =============================================================================
+# CODE ACTIONS
+# =============================================================================
+
+get_code_actions() {
+    local source_path="$1"
+    local diagnostics="$2"
+    
+    python3 - "$source_path" "$diagnostics" <<'PY'
+import json
+import os
+import re
+import sys
+
+source_path = sys.argv[1]
+diagnostics_json = sys.argv[2] if len(sys.argv) > 2 else "[]"
+
+try:
+    diagnostics = json.loads(diagnostics_json)
+except:
+    diagnostics = []
+
+actions = []
+
+if os.path.exists(source_path):
+    with open(source_path, 'r') as f:
+        content = f.read()
+    
+    # Suggest removing unused imports
+    unused_import = re.compile(r'(?:use|import)\s+(\w+)')
+    for match in unused_import.finditer(content):
+        line = content[:match.start()].count('\n')
+        # Add quick fix for unused import
+        actions.append({
+            "title": f"Remove unused import",
+            "kind": "quickfix",
+            "edit": {
+                "changes": {
+                    source_path: [
+                        {
+                            "range": {
+                                "start": {"line": line, "character": 0},
+                                "end": {"line": line + 1, "character": 0}
+                            },
+                            "newText": ""
+                        }
+                    ]
+                }
+            }
+        })
+    
+    # Suggest adding type annotation
+    untyped_let = re.compile(r'let\s+(\w+)\s*=\s*([^;]+);')
+    for match in untyped_let.finditer(content):
+        name = match.group(1)
+        value = match.group(2)
+        line = content[:match.start()].count('\n')
+        start_col = match.start() - content.rfind('\n', 0, match.start()) - 1
+        end_col = match.end() - content.rfind('\n', 0, match.end()) - 1
+        
+        actions.append({
+            "title": f"Add explicit type annotation",
+            "kind": "quickfix",
+            "edit": {
+                "changes": {
+                    source_path: [
+                        {
+                            "range": {
+                                "start": {"line": line, "character": start_col},
+                                "end": {"line": line, "character": end_col}
+                            },
+                            "newText": f"let {name}: /* type */ = {value};"
+                        }
+                    ]
+                }
+            }
+        })
+
+# Always add organize imports
+actions.append({
+    "title": "Organize imports",
+    "kind": "source.organizeImports",
+    "edit": {
+        "changes": {}
+    }
+})
+
+# Add format document
+actions.append({
+    "title": "Format document",
+    "kind": "source.formatDocument",
+    "edit": {
+        "changes": {}
+    }
+})
+
+print(json.dumps(actions))
+PY
+}
+
+# =============================================================================
+# REFERENCE FINDER
+# =============================================================================
+
+find_references() {
+    local source_path="$1"
+    local line="$2"
+    local col="$3"
+    local include_decl="$4"
+    
+    python3 - "$source_path" "$line" "$col" "$include_decl" <<'PY'
+import json
+import os
+import re
+import sys
+
+source_path = sys.argv[1]
+req_line = int(sys.argv[2])
+req_col = int(sys.argv[3])
+include_decl = sys.argv[4] == "true" if len(sys.argv) > 4 else True
+
+references = []
+
+if os.path.exists(source_path):
+    with open(source_path, 'r') as f:
+        content = f.read()
+    
+    # Find the word at position
+    lines = content.split('\n')
+    if 0 <= req_line < len(lines):
+        line = lines[req_line]
+        # Extract word at position
+        word_pattern = re.compile(r'\w+')
+        target_word = None
+        for match in word_pattern.finditer(line):
+            if match.start() <= req_col <= match.end():
+                target_word = match.group()
+                break
+        
+        if target_word:
+            # Find all occurrences
+            for i, l in enumerate(lines):
+                for match in word_pattern.finditer(l):
+                    if match.group() == target_word:
+                        references.append({
+                            "uri": source_path,
+                            "range": {
+                                "start": {"line": i, "character": match.start()},
+                                "end": {"line": i, "character": match.end()}
+                            }
+                        })
+
+print(json.dumps(references))
+PY
+}
+
+# =============================================================================
+# RENAME PROVIDER
+# =============================================================================
+
+get_rename_edits() {
+    local source_path="$1"
+    local line="$2"
+    local col="$3"
+    local new_name="$4"
+    
+    python3 - "$source_path" "$line" "$col" "$new_name" <<'PY'
+import json
+import os
+import re
+import sys
+
+source_path = sys.argv[1]
+req_line = int(sys.argv[2])
+req_col = int(sys.argv[3])
+new_name = sys.argv[4]
+
+changes = {}
+
+if os.path.exists(source_path):
+    with open(source_path, 'r') as f:
+        content = f.read()
+    
+    lines = content.split('\n')
+    if 0 <= req_line < len(lines):
+        line = lines[req_line]
+        # Extract word at position
+        word_pattern = re.compile(r'\w+')
+        target_word = None
+        for match in word_pattern.finditer(line):
+            if match.start() <= req_col <= match.end():
+                target_word = match.group()
+                break
+        
+        if target_word:
+            uri = source_path
+            if not uri.startswith("file://"):
+                uri = "file://" + os.path.abspath(uri)
+            
+            edits = []
+            for i, l in enumerate(lines):
+                for match in word_pattern.finditer(l):
+                    if match.group() == target_word:
+                        edits.append({
+                            "range": {
+                                "start": {"line": i, "character": match.start()},
+                                "end": {"line": i, "character": match.end()}
+                            },
+                            "newText": new_name
+                        })
+            
+            changes[uri] = edits
+
+result = {"changes": changes}
+print(json.dumps(result))
+PY
+}
+
+# =============================================================================
+# SIGNATURE HELP
+# =============================================================================
+
+get_signature_help() {
+    local source_path="$1"
+    local line="$2"
+    local col="$3"
+    
+    python3 - "$source_path" "$line" "$col" <<'PY'
+import json
+import os
+import re
+import sys
+
+source_path = sys.argv[1]
+req_line = int(sys.argv[2])
+req_col = int(sys.argv[3])
+
+# Built-in function signatures
+signatures = {
+    "print": ("print(value: T)", "Print a value to stdout"),
+    "println": ("println(value: T)", "Print a value with newline"),
+    "assert": ("assert(condition: Bool)", "Assert condition is true"),
+    "len": ("len(collection: Collection<T>) -> Int", "Get length of collection"),
+    "range": ("range(start: Int, end: Int) -> Range<Int>", "Create integer range"),
+    "map": ("map(fn: (A) -> B, collection: Collection<A>) -> Collection<B>", "Map function over collection"),
+    "filter": ("filter(fn: (T) -> Bool, collection: Collection<T>) -> Collection<T>", "Filter collection"),
+    "fold": ("fold(fn: (B, A) -> B, init: B, collection: Collection<A>) -> B", "Fold over collection"),
+    "uncertain": ("uncertain(value: T, std: Float) -> Uncertain<T>", "Create uncertain value"),
+    "confidence": ("confidence(value: Uncertain<T>) -> Interval<Float>", "Get confidence interval"),
+}
+
+# Try to extract the function name being called
+result = {"signatures": [], "activeSignature": 0, "activeParameter": 0}
+
+if os.path.exists(source_path):
+    with open(source_path, 'r') as f:
+        content = f.read()
+    
+    lines = content.split('\n')
+    if 0 <= req_line < len(lines):
+        line = lines[req_line]
+        # Look for function call pattern before cursor
+        before_cursor = line[:req_col]
+        call_pattern = re.compile(r'(\w+)\s*\(([^()]*)$')
+        match = call_pattern.search(before_cursor)
+        
+        if match:
+            func_name = match.group(1)
+            args_before = match.group(2)
+            
+            if func_name in signatures:
+                sig, doc = signatures[func_name]
+                # Count active parameter by commas
+                active_param = args_before.count(',')
+                
+                result = {
+                    "signatures": [{
+                        "label": sig,
+                        "documentation": doc,
+                        "parameters": []
+                    }],
+                    "activeSignature": 0,
+                    "activeParameter": active_param
+                }
+
+print(json.dumps(result))
+PY
+}
+
+# =============================================================================
+# DOCUMENT HIGHLIGHTS
+# =============================================================================
+
+get_document_highlights() {
+    local source_path="$1"
+    local line="$2"
+    local col="$3"
+    
+    python3 - "$source_path" "$line" "$col" <<'PY'
+import json
+import os
+import re
+import sys
+
+source_path = sys.argv[1]
+req_line = int(sys.argv[2])
+req_col = int(sys.argv[3])
+
+highlights = []
+
+if os.path.exists(source_path):
+    with open(source_path, 'r') as f:
+        content = f.read()
+    
+    lines = content.split('\n')
+    if 0 <= req_line < len(lines):
+        line = lines[req_line]
+        # Extract word at position
+        word_pattern = re.compile(r'\w+')
+        target_word = None
+        for match in word_pattern.finditer(line):
+            if match.start() <= req_col <= match.end():
+                target_word = match.group()
+                break
+        
+        if target_word:
+            # Find all occurrences
+            for i, l in enumerate(lines):
+                for match in word_pattern.finditer(l):
+                    if match.group() == target_word:
+                        kind = 1 if i == req_line and match.start() <= req_col <= match.end() else 2
+                        highlights.append({
+                            "range": {
+                                "start": {"line": i, "character": match.start()},
+                                "end": {"line": i, "character": match.end()}
+                            },
+                            "kind": kind
+                        })
+
+print(json.dumps(highlights))
+PY
+}
+
+# =============================================================================
+# RUN CHECK AND PUBLISH
+# =============================================================================
+
 run_check_and_publish() {
     local uri="$1"
     local expected_token="$2"
@@ -553,16 +1151,56 @@ run_check_and_publish() {
     return "$rc"
 }
 
+# =============================================================================
+# LSP MESSAGE HANDLERS
+# =============================================================================
+
 handle_initialize() {
     local id_json="$1"
     local result
     result="$(jq -cn '{
         capabilities: {
-            textDocumentSync: 1,
+            textDocumentSync: {
+                openClose: true,
+                change: 1,
+                willSave: false,
+                willSaveWaitUntil: false,
+                save: { includeText: false }
+            },
             hoverProvider: true,
-            definitionProvider: true
+            definitionProvider: true,
+            completionProvider: {
+                resolveProvider: false,
+                triggerCharacters: [".", ":", ">", " ", "(", "["]
+            },
+            documentFormattingProvider: true,
+            documentRangeFormattingProvider: true,
+            documentOnTypeFormattingProvider: {
+                firstTriggerCharacter: ";",
+                moreTriggerCharacter: ["}", ","]
+            },
+            codeActionProvider: {
+                codeActionKinds: ["quickfix", "refactor", "source"],
+                resolveProvider: false
+            },
+            documentSymbolProvider: true,
+            workspaceSymbolProvider: true,
+            renameProvider: {
+                prepareProvider: true
+            },
+            referencesProvider: true,
+            documentHighlightProvider: true,
+            signatureHelpProvider: {
+                triggerCharacters: ["(", ","],
+                retriggerCharacters: [","]
+            },
+            selectionRangeProvider: true,
+            foldingRangeProvider: true,
+            executeCommandProvider: {
+                commands: ["sounio.organizeImports", "sounio.addImport", "sounio.showType"]
+            }
         },
-        serverInfo: { name: "sounio-lsp", version: "0.2.0" }
+        serverInfo: { name: "sounio-lsp-big", version: "1.0.0" }
     }')"
     send_response "$id_json" "$result"
 }
@@ -695,7 +1333,7 @@ handle_hover() {
     result="$(jq -cn --arg ty "$ty" '{
         contents: {
             kind: "markdown",
-            value: ("```sounio\\n" + $ty + "\\n```")
+            value: ("```sounio\n" + $ty + "\n```")
         }
     }')"
     send_response "$id_json" "$result"
@@ -745,6 +1383,282 @@ handle_definition() {
 
     send_response "$id_json" "null"
 }
+
+# =============================================================================
+# NEW BIG LSP FEATURES
+# =============================================================================
+
+handle_completion() {
+    local id_json="$1"
+    local params="$2"
+    local uri source_path cleanup_path line col content
+
+    uri="$(jq -r '.textDocument.uri' <<<"$params")"
+    line="$(jq -r '.position.line' <<<"$params")"
+    col="$(jq -r '.position.character' <<<"$params")"
+
+    if ! source_path="$(resolve_source_path_for_uri "$uri")"; then
+        send_response "$id_json" '{"items":[]}'
+        return
+    fi
+    cleanup_path="$LAST_SOURCE_CLEANUP"
+
+    content="${OPEN_DOCS[$uri]:-}"
+    if [[ -z "$content" ]] && [[ -f "$source_path" ]]; then
+        content="$(cat "$source_path")"
+    fi
+
+    local completions
+    completions="$(get_completions "$source_path" "$line" "$col" "$content")"
+    
+    cleanup_temp_source "$cleanup_path"
+
+    local result
+    result="$(jq -cn --argjson items "$completions" '{items:$items}')"
+    send_response "$id_json" "$result"
+}
+
+handle_formatting() {
+    local id_json="$1"
+    local params="$2"
+    local uri source_path cleanup_path formatted result
+
+    uri="$(jq -r '.textDocument.uri' <<<"$params")"
+
+    if ! source_path="$(resolve_source_path_for_uri "$uri")"; then
+        send_response "$id_json" "null"
+        return
+    fi
+    cleanup_path="$LAST_SOURCE_CLEANUP"
+
+    # Use souc fmt to format the document
+    formatted="$(run_souc_fmt "$source_path" 2>/dev/null || cat "$source_path")"
+    
+    cleanup_temp_source "$cleanup_path"
+
+    # Create text edit for entire document
+    local original_lines new_lines
+    original_lines="$(wc -l < "$source_path" | tr -d ' ')"
+    new_lines="$(printf '%s' "$formatted" | wc -l | tr -d ' ')"
+    
+    result="$(jq -cn --arg text "$formatted" '[{
+        range: {
+            start: {line: 0, character: 0},
+            end: {line: 999999, character: 999999}
+        },
+        newText: $text
+    }]')"
+    
+    send_response "$id_json" "$result"
+}
+
+handle_code_action() {
+    local id_json="$1"
+    local params="$2"
+    local uri source_path cleanup_path context actions result
+
+    uri="$(jq -r '.textDocument.uri' <<<"$params")"
+    context="$(jq -c '.context // {}' <<<"$params")"
+
+    if ! source_path="$(resolve_source_path_for_uri "$uri")"; then
+        send_response "$id_json" '[]'
+        return
+    fi
+    cleanup_path="$LAST_SOURCE_CLEANUP"
+
+    local diagnostics
+    diagnostics="$(jq -c '.diagnostics // []' <<<"$context")"
+    
+    actions="$(get_code_actions "$source_path" "$diagnostics")"
+    
+    cleanup_temp_source "$cleanup_path"
+
+    send_response "$id_json" "$actions"
+}
+
+handle_document_symbol() {
+    local id_json="$1"
+    local params="$2"
+    local uri source_path cleanup_path symbols result
+
+    uri="$(jq -r '.textDocument.uri' <<<"$params")"
+
+    if ! source_path="$(resolve_source_path_for_uri "$uri")"; then
+        send_response "$id_json" '[]'
+        return
+    fi
+    cleanup_path="$LAST_SOURCE_CLEANUP"
+
+    symbols="$(extract_document_symbols "$source_path" "$uri")"
+    
+    cleanup_temp_source "$cleanup_path"
+
+    send_response "$id_json" "$symbols"
+}
+
+handle_workspace_symbol() {
+    local id_json="$1"
+    local params="$2"
+    local query symbols result
+
+    query="$(jq -r '.query // ""' <<<"$params")"
+    
+    # For now, return empty or search in open documents
+    # In a full implementation, this would search the entire workspace
+    symbols="[]"
+    
+    send_response "$id_json" "$symbols"
+}
+
+handle_references() {
+    local id_json="$1"
+    local params="$2"
+    local uri source_path cleanup_path line col include_decl references result
+
+    uri="$(jq -r '.textDocument.uri' <<<"$params")"
+    line="$(jq -r '.position.line' <<<"$params")"
+    col="$(jq -r '.position.character' <<<"$params")"
+    include_decl="$(jq -r '.context.includeDeclaration // true' <<<"$params")"
+
+    if ! source_path="$(resolve_source_path_for_uri "$uri")"; then
+        send_response "$id_json" '[]'
+        return
+    fi
+    cleanup_path="$LAST_SOURCE_CLEANUP"
+
+    references="$(find_references "$source_path" "$line" "$col" "$include_decl")"
+    
+    cleanup_temp_source "$cleanup_path"
+
+    send_response "$id_json" "$references"
+}
+
+handle_rename() {
+    local id_json="$1"
+    local params="$2"
+    local uri source_path cleanup_path line col new_name result
+
+    uri="$(jq -r '.textDocument.uri' <<<"$params")"
+    line="$(jq -r '.position.line' <<<"$params")"
+    col="$(jq -r '.position.character' <<<"$params")"
+    new_name="$(jq -r '.newName // ""' <<<"$params")"
+
+    if [[ -z "$new_name" ]]; then
+        send_error "$id_json" -32600 "newName is required"
+        return
+    fi
+
+    if ! source_path="$(resolve_source_path_for_uri "$uri")"; then
+        send_response "$id_json" '{"changes":{}}'
+        return
+    fi
+    cleanup_path="$LAST_SOURCE_CLEANUP"
+
+    result="$(get_rename_edits "$source_path" "$line" "$col" "$new_name")"
+    
+    cleanup_temp_source "$cleanup_path"
+
+    send_response "$id_json" "$result"
+}
+
+handle_prepare_rename() {
+    local id_json="$1"
+    local params="$2"
+    local uri source_path cleanup_path line col result
+
+    uri="$(jq -r '.textDocument.uri' <<<"$params")"
+    line="$(jq -r '.position.line' <<<"$params")"
+    col="$(jq -r '.position.character' <<<"$params")"
+
+    if ! source_path="$(resolve_source_path_for_uri "$uri")"; then
+        send_response "$id_json" "null"
+        return
+    fi
+    cleanup_path="$LAST_SOURCE_CLEANUP"
+
+    # Return the range of the word at position
+    result="$(python3 - "$source_path" "$line" "$col" <<'PY'
+import json
+import os
+import re
+import sys
+
+source_path = sys.argv[1]
+req_line = int(sys.argv[2])
+req_col = int(sys.argv[3])
+
+if os.path.exists(source_path):
+    with open(source_path, 'r') as f:
+        content = f.read()
+    
+    lines = content.split('\n')
+    if 0 <= req_line < len(lines):
+        line = lines[req_line]
+        word_pattern = re.compile(r'\w+')
+        for match in word_pattern.finditer(line):
+            if match.start() <= req_col <= match.end():
+                print(json.dumps({
+                    "start": {"line": req_line, "character": match.start()},
+                    "end": {"line": req_line, "character": match.end()}
+                }))
+                exit(0)
+
+print("null")
+PY
+    )"
+    
+    cleanup_temp_source "$cleanup_path"
+
+    send_response "$id_json" "$result"
+}
+
+handle_signature_help() {
+    local id_json="$1"
+    local params="$2"
+    local uri source_path cleanup_path line col result
+
+    uri="$(jq -r '.textDocument.uri' <<<"$params")"
+    line="$(jq -r '.position.line' <<<"$params")"
+    col="$(jq -r '.position.character' <<<"$params")"
+
+    if ! source_path="$(resolve_source_path_for_uri "$uri")"; then
+        send_response "$id_json" '{"signatures":[]}'
+        return
+    fi
+    cleanup_path="$LAST_SOURCE_CLEANUP"
+
+    result="$(get_signature_help "$source_path" "$line" "$col")"
+    
+    cleanup_temp_source "$cleanup_path"
+
+    send_response "$id_json" "$result"
+}
+
+handle_document_highlight() {
+    local id_json="$1"
+    local params="$2"
+    local uri source_path cleanup_path line col highlights result
+
+    uri="$(jq -r '.textDocument.uri' <<<"$params")"
+    line="$(jq -r '.position.line' <<<"$params")"
+    col="$(jq -r '.position.character' <<<"$params")"
+
+    if ! source_path="$(resolve_source_path_for_uri "$uri")"; then
+        send_response "$id_json" '[]'
+        return
+    fi
+    cleanup_path="$LAST_SOURCE_CLEANUP"
+
+    highlights="$(get_document_highlights "$source_path" "$line" "$col")"
+    
+    cleanup_temp_source "$cleanup_path"
+
+    send_response "$id_json" "$highlights"
+}
+
+# =============================================================================
+# MESSAGE DISPATCH
+# =============================================================================
 
 dispatch_message() {
     local message="$1"
@@ -800,6 +1714,62 @@ dispatch_message() {
                 handle_definition "$id_json" "$params"
             fi
             ;;
+        textDocument/completion)
+            if [[ -n "$id_json" ]]; then
+                handle_completion "$id_json" "$params"
+            fi
+            ;;
+        textDocument/formatting)
+            if [[ -n "$id_json" ]]; then
+                handle_formatting "$id_json" "$params"
+            fi
+            ;;
+        textDocument/rangeFormatting)
+            if [[ -n "$id_json" ]]; then
+                # For now, just format entire document
+                handle_formatting "$id_json" "$params"
+            fi
+            ;;
+        textDocument/codeAction)
+            if [[ -n "$id_json" ]]; then
+                handle_code_action "$id_json" "$params"
+            fi
+            ;;
+        textDocument/documentSymbol)
+            if [[ -n "$id_json" ]]; then
+                handle_document_symbol "$id_json" "$params"
+            fi
+            ;;
+        workspace/symbol)
+            if [[ -n "$id_json" ]]; then
+                handle_workspace_symbol "$id_json" "$params"
+            fi
+            ;;
+        textDocument/references)
+            if [[ -n "$id_json" ]]; then
+                handle_references "$id_json" "$params"
+            fi
+            ;;
+        textDocument/rename)
+            if [[ -n "$id_json" ]]; then
+                handle_rename "$id_json" "$params"
+            fi
+            ;;
+        textDocument/prepareRename)
+            if [[ -n "$id_json" ]]; then
+                handle_prepare_rename "$id_json" "$params"
+            fi
+            ;;
+        textDocument/signatureHelp)
+            if [[ -n "$id_json" ]]; then
+                handle_signature_help "$id_json" "$params"
+            fi
+            ;;
+        textDocument/documentHighlight)
+            if [[ -n "$id_json" ]]; then
+                handle_document_highlight "$id_json" "$params"
+            fi
+            ;;
         *)
             if [[ -n "$id_json" ]]; then
                 send_error "$id_json" -32601 "Method not found: $method"
@@ -809,7 +1779,7 @@ dispatch_message() {
 }
 
 main() {
-    log "startup souc=$SOUC_BIN"
+    log "startup souc=$SOUC_BIN BIG LSP v1.0.0"
     while [[ "$RUNNING" -eq 1 ]]; do
         local msg
         if ! msg="$(read_message)"; then

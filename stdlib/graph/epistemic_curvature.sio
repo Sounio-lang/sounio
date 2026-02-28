@@ -1,0 +1,997 @@
+// Epistemic Ollivier-Ricci Curvature
+//
+// Extends ORC with GUM-compliant uncertainty propagation.
+// Every kappa(e) returns Knowledge<f64> = value ± sigma with confidence.
+//
+// NOVELTY: First-ever uncertainty-quantified ORC on any network.
+// Key insight: sigma_W1^2 ≈ sum_ij gamma_ij^2 * sigma_C_ij^2
+// where gamma is the optimal transport plan (Sinkhorn output).
+//
+// References:
+//   - Ollivier (2009), Ricci curvature of Markov chains on metric spaces
+//   - Hehl (2024), arXiv:2407.08854 (analytical ORC approximation)
+//   - GUM: ISO Guide to Expression of Uncertainty in Measurement
+
+module graph::epistemic_curvature
+
+// External math
+extern "C" {
+    fn sqrt(x: f64) -> f64;
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 }
+    sqrt(x)
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn min_f64(a: f64, b: f64) -> f64 {
+    if a < b { a } else { b }
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+fn exp_approx(x: f64) -> f64 {
+    if x < -20.0 { return 0.0 }
+    if x > 20.0 { return 485165195.0 }
+    let scaled = x / 16.0
+    let x2 = scaled * scaled
+    let x3 = x2 * scaled
+    let x4 = x3 * scaled
+    let x5 = x4 * scaled
+    var result = 1.0 + scaled + x2/2.0 + x3/6.0 + x4/24.0 + x5/120.0
+    var i: usize = 0
+    while i < 16 {
+        result = result * result
+        i = i + 1
+    }
+    result
+}
+
+// =============================================================================
+// Epistemic Types for Curvature
+// =============================================================================
+
+// Edge with epistemic uncertainty (from FC thresholding)
+pub struct EpistemicEdge {
+    pub u: usize,
+    pub v: usize,
+    pub weight: f64,            // correlation or edge weight
+    pub weight_uncertainty: f64, // sigma from Fisher-z or other source
+    pub ci_lower: f64,          // 95% CI lower bound
+    pub ci_upper: f64,          // 95% CI upper bound
+}
+
+// Epistemic curvature result for a single edge
+pub struct EpistemicEdgeCurvature {
+    pub u: usize,
+    pub v: usize,
+    pub kappa: f64,             // point estimate
+    pub sigma_kappa: f64,       // standard uncertainty (GUM)
+    pub ci_lower: f64,          // kappa - 1.96*sigma
+    pub ci_upper: f64,          // kappa + 1.96*sigma
+    pub confidence: f64,        // [0,1] epistemic confidence
+    pub sign_certain: bool,     // |kappa| > 2*sigma (sign unambiguous at 95%)
+    pub geometry: GeometryClass,
+}
+
+pub enum GeometryClass {
+    Hyperbolic,       // kappa < -0.05
+    Euclidean,        // -0.05 <= kappa <= 0.05
+    Spherical,        // kappa > 0.05
+    Uncertain,        // CI crosses classification boundary
+}
+
+// Full epistemic analysis of a graph
+pub struct EpistemicCurvatureAnalysis {
+    pub mean_kappa: f64,
+    pub sigma_mean_kappa: f64,      // SE of mean (sigma / sqrt(E))
+    pub std_kappa: f64,             // standard deviation across edges
+    pub min_kappa: f64,
+    pub max_kappa: f64,
+    pub gci: f64,                   // Geometric Certainty Index [0,1]
+    pub num_sign_certain: usize,    // edges with unambiguous sign
+    pub num_edges: usize,
+    pub num_hyperbolic: usize,
+    pub num_euclidean: usize,
+    pub num_spherical: usize,
+    pub num_uncertain: usize,
+    pub dominant_geometry: GeometryClass,
+    pub mean_confidence: f64,       // mean edge confidence
+    // Phase transition theory integration
+    pub eta: f64,                   // density parameter k^2/N
+    pub clustering: f64,            // global clustering coefficient
+    pub eta_c_predicted: f64,       // analytical eta_c(C, N)
+    pub delta_eta: f64,             // eta - eta_c (distance from boundary)
+}
+
+// Parameters for epistemic curvature computation
+pub struct EpistemicCurvatureParams {
+    pub alpha: f64,             // laziness (0.5 = standard clinical)
+    pub epsilon: f64,           // Sinkhorn regularization
+    pub max_iter: usize,        // Sinkhorn iterations
+    pub confidence_level: f64,  // CI coverage (default 0.95 → z=1.96)
+    pub z_crit: f64,            // critical z-value for CI
+}
+
+impl EpistemicCurvatureParams {
+    pub fn clinical() -> EpistemicCurvatureParams {
+        EpistemicCurvatureParams {
+            alpha: 0.5,
+            epsilon: 0.1,
+            max_iter: 100,
+            confidence_level: 0.95,
+            z_crit: 1.96,
+        }
+    }
+}
+
+// =============================================================================
+// Core: Epistemic Sinkhorn with Transport Plan Extraction
+// =============================================================================
+
+// Result of Sinkhorn that also returns the transport plan gamma
+struct SinkhornWithPlan {
+    distance: f64,      // W1 estimate
+    gamma: [f64],       // transport plan (n*m flattened, row-major)
+    n: usize,
+    m: usize,
+}
+
+// Sinkhorn that extracts the optimal transport plan for uncertainty propagation
+fn sinkhorn_with_plan(
+    mu: &[f64],
+    nu: &[f64],
+    cost: &[f64],
+    n: usize,
+    m: usize,
+    epsilon: f64,
+    max_iter: usize
+) -> SinkhornWithPlan {
+    if n == 0 || m == 0 {
+        return SinkhornWithPlan { distance: 0.0, gamma: [], n: 0, m: 0 }
+    }
+
+    // Gibbs kernel K = exp(-C/epsilon)
+    var kmat: [f64] = []
+    var idx: usize = 0
+    while idx < n * m {
+        kmat.push(exp_approx(-cost[idx] / epsilon))
+        idx = idx + 1
+    }
+
+    // Scaling vectors
+    var u: [f64] = []
+    var v: [f64] = []
+    var i: usize = 0
+    while i < n { u.push(1.0); i = i + 1 }
+    i = 0
+    while i < m { v.push(1.0); i = i + 1 }
+
+    // Sinkhorn iterations
+    var iter: usize = 0
+    while iter < max_iter {
+        // Update u
+        i = 0
+        while i < n {
+            var sum: f64 = 0.0
+            var j: usize = 0
+            while j < m {
+                sum = sum + kmat[i * m + j] * v[j]
+                j = j + 1
+            }
+            if sum > 1e-10 {
+                u[i] = mu[i] / sum
+            }
+            i = i + 1
+        }
+
+        // Update v
+        var j: usize = 0
+        while j < m {
+            var sum: f64 = 0.0
+            i = 0
+            while i < n {
+                sum = sum + kmat[i * m + j] * u[i]
+                i = i + 1
+            }
+            if sum > 1e-10 {
+                v[j] = nu[j] / sum
+            }
+            j = j + 1
+        }
+
+        iter = iter + 1
+    }
+
+    // Extract transport plan gamma_ij = u_i * K_ij * v_j
+    var gamma: [f64] = []
+    var distance: f64 = 0.0
+    i = 0
+    while i < n {
+        var j: usize = 0
+        while j < m {
+            let g_ij = u[i] * kmat[i * m + j] * v[j]
+            gamma.push(g_ij)
+            distance = distance + g_ij * cost[i * m + j]
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    SinkhornWithPlan { distance, gamma, n, m }
+}
+
+// =============================================================================
+// Epistemic ORC: Uncertainty Propagation via Delta Method
+// =============================================================================
+//
+// KEY FORMULA: For ORC kappa = 1 - W1/d_uv, uncertainty propagates as:
+//
+//   sigma_W1^2 = sum_ij (gamma_ij)^2 * sigma_C_ij^2
+//
+// where gamma_ij is the optimal transport plan and sigma_C_ij is the
+// uncertainty on the (i,j) entry of the cost matrix.
+//
+// For hop-count distances on a certain graph: sigma_C = 0 → sigma_kappa = 0
+// For FC-derived graphs with edge uncertainty: sigma_C > 0 near threshold
+//
+// The transport plan gamma acts as a Jacobian: dW1/dC_ij = gamma_ij
+// This is exact in the LP limit (epsilon → 0) and approximate for Sinkhorn.
+
+// Build probability measure for a node (same as curvature.sio)
+fn neighborhood_measure_nodes(adj: &[[usize]], node: usize, alpha: f64) -> [usize] {
+    if node >= adj.len() { return [] }
+    let neighbors = &adj[node]
+    let deg = neighbors.len()
+    if deg == 0 { return [node] }
+
+    var nodes: [usize] = []
+    if alpha > 0.0 { nodes.push(node) }
+    var i: usize = 0
+    while i < deg {
+        nodes.push(neighbors[i])
+        i = i + 1
+    }
+    nodes
+}
+
+fn neighborhood_measure_probs(adj: &[[usize]], node: usize, alpha: f64) -> [f64] {
+    if node >= adj.len() { return [] }
+    let neighbors = &adj[node]
+    let deg = neighbors.len()
+    if deg == 0 { return [1.0] }
+
+    let w = (1.0 - alpha) / (deg as f64)
+    var probs: [f64] = []
+    if alpha > 0.0 { probs.push(alpha) }
+    var i: usize = 0
+    while i < deg {
+        probs.push(w)
+        i = i + 1
+    }
+    probs
+}
+
+// Compute epistemic ORC for a single edge
+// Returns kappa with GUM-propagated uncertainty from cost matrix uncertainty
+pub fn epistemic_edge_curvature(
+    adj: &[[usize]],
+    distances: &[[i64]],
+    cost_uncertainty: &[[f64]],  // sigma_d(i,j) for each node pair
+    u: usize,
+    v: usize,
+    params: &EpistemicCurvatureParams
+) -> EpistemicEdgeCurvature {
+    let d_uv = distances[u][v]
+    if d_uv <= 0 {
+        return EpistemicEdgeCurvature {
+            u, v, kappa: 0.0, sigma_kappa: 0.0,
+            ci_lower: 0.0, ci_upper: 0.0, confidence: 1.0,
+            sign_certain: true, geometry: GeometryClass::Euclidean,
+        }
+    }
+
+    // Build measures
+    let mu_nodes = neighborhood_measure_nodes(adj, u, params.alpha)
+    let mu_probs = neighborhood_measure_probs(adj, u, params.alpha)
+    let nu_nodes = neighborhood_measure_nodes(adj, v, params.alpha)
+    let nu_probs = neighborhood_measure_probs(adj, v, params.alpha)
+
+    let n = mu_nodes.len()
+    let m = nu_nodes.len()
+
+    if n == 0 || m == 0 {
+        return EpistemicEdgeCurvature {
+            u, v, kappa: 0.0, sigma_kappa: 0.0,
+            ci_lower: 0.0, ci_upper: 0.0, confidence: 1.0,
+            sign_certain: true, geometry: GeometryClass::Euclidean,
+        }
+    }
+
+    // Build cost matrix and cost uncertainty matrix
+    var cost_data: [f64] = []
+    var cost_sigma: [f64] = []
+    var i: usize = 0
+    while i < n {
+        var j: usize = 0
+        while j < m {
+            let ni = mu_nodes[i]
+            let nj = nu_nodes[j]
+            let d = distances[ni][nj]
+            if d >= 0 {
+                cost_data.push(d as f64)
+                cost_sigma.push(cost_uncertainty[ni][nj])
+            } else {
+                cost_data.push(1000.0)
+                cost_sigma.push(0.0)
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Sinkhorn with transport plan extraction
+    let result = sinkhorn_with_plan(
+        &mu_probs, &nu_probs, &cost_data,
+        n, m, params.epsilon, params.max_iter
+    )
+
+    let w1 = result.distance
+    let d_uv_f = d_uv as f64
+
+    // Point estimate: kappa = 1 - W1/d_uv
+    let kappa = 1.0 - w1 / d_uv_f
+
+    // Delta method: sigma_W1^2 = sum_ij gamma_ij^2 * sigma_C_ij^2
+    var var_w1: f64 = 0.0
+    i = 0
+    while i < n * m {
+        let g = result.gamma[i]
+        let sc = cost_sigma[i]
+        var_w1 = var_w1 + g * g * sc * sc
+        i = i + 1
+    }
+    let sigma_w1 = sqrt_f64(var_w1)
+
+    // Propagate to kappa: sigma_kappa = sigma_W1 / d_uv
+    let sigma_kappa = sigma_w1 / d_uv_f
+
+    // Confidence interval
+    let ci_lo = kappa - params.z_crit * sigma_kappa
+    let ci_hi = kappa + params.z_crit * sigma_kappa
+
+    // Sign certainty: is |kappa| > 2*sigma?
+    let sign_certain = abs_f64(kappa) > 2.0 * sigma_kappa
+
+    // Confidence: higher when uncertainty is low relative to |kappa|
+    var confidence: f64 = 1.0
+    if abs_f64(kappa) > 1e-10 {
+        let rel_unc = sigma_kappa / abs_f64(kappa)
+        if rel_unc > 1.0 {
+            confidence = 0.3  // very uncertain
+        } else if rel_unc > 0.5 {
+            confidence = 0.6  // moderately uncertain
+        } else if rel_unc > 0.1 {
+            confidence = 0.85
+        }
+        // else confidence stays 1.0
+    } else {
+        // kappa ≈ 0, check if CI is narrow
+        if sigma_kappa > 0.05 {
+            confidence = 0.5
+        }
+    }
+
+    // Geometry classification with uncertainty awareness
+    let geometry = if ci_hi < -0.05 {
+        GeometryClass::Hyperbolic   // entire CI is hyperbolic
+    } else if ci_lo > 0.05 {
+        GeometryClass::Spherical    // entire CI is spherical
+    } else if ci_lo > -0.05 && ci_hi < 0.05 {
+        GeometryClass::Euclidean    // entire CI is Euclidean
+    } else {
+        GeometryClass::Uncertain    // CI crosses boundary
+    }
+
+    EpistemicEdgeCurvature {
+        u, v, kappa, sigma_kappa,
+        ci_lower: ci_lo, ci_upper: ci_hi,
+        confidence, sign_certain, geometry,
+    }
+}
+
+// =============================================================================
+// Graph-Level Epistemic Analysis
+// =============================================================================
+
+// BFS all-pairs distance matrix
+fn compute_all_distances(adj: &[[usize]]) -> [[i64]] {
+    let n = adj.len()
+    var distances: [[i64]] = []
+    var source: usize = 0
+    while source < n {
+        var dist: [i64] = []
+        var i: usize = 0
+        while i < n { dist.push(-1); i = i + 1 }
+        dist[source] = 0
+        var queue: [usize] = [source]
+        var head: usize = 0
+        while head < queue.len() {
+            let u = queue[head]
+            head = head + 1
+            let nbrs = &adj[u]
+            var j: usize = 0
+            while j < nbrs.len() {
+                let v = nbrs[j]
+                if dist[v] == -1 {
+                    dist[v] = dist[u] + 1
+                    queue.push(v)
+                }
+                j = j + 1
+            }
+        }
+        distances.push(dist)
+        source = source + 1
+    }
+    distances
+}
+
+// Compute graph metrics: mean degree, clustering, eta
+pub struct GraphMetrics {
+    pub n_nodes: usize,
+    pub n_edges: usize,
+    pub mean_degree: f64,
+    pub clustering: f64,
+    pub eta: f64,               // k^2/N
+}
+
+pub fn compute_graph_metrics(adj: &[[usize]]) -> GraphMetrics {
+    let n = adj.len()
+    var total_degree: usize = 0
+    var n_edges: usize = 0
+
+    var u: usize = 0
+    while u < n {
+        total_degree = total_degree + adj[u].len()
+        let nbrs = &adj[u]
+        var i: usize = 0
+        while i < nbrs.len() {
+            if nbrs[i] > u { n_edges = n_edges + 1 }
+            i = i + 1
+        }
+        u = u + 1
+    }
+
+    let mean_k = if n > 0 { (total_degree as f64) / (n as f64) } else { 0.0 }
+    let eta = if n > 0 { mean_k * mean_k / (n as f64) } else { 0.0 }
+
+    // Global clustering coefficient
+    var triangles: usize = 0
+    var triplets: usize = 0
+    u = 0
+    while u < n {
+        let nbrs = &adj[u]
+        let d = nbrs.len()
+        if d >= 2 {
+            triplets = triplets + d * (d - 1) / 2
+            var i: usize = 0
+            while i < d {
+                var j: usize = i + 1
+                while j < d {
+                    // Check if nbrs[i] and nbrs[j] are connected
+                    let ni = nbrs[i]
+                    let nj = nbrs[j]
+                    let nbrs_ni = &adj[ni]
+                    var k: usize = 0
+                    while k < nbrs_ni.len() {
+                        if nbrs_ni[k] == nj {
+                            triangles = triangles + 1
+                        }
+                        k = k + 1
+                    }
+                    j = j + 1
+                }
+                i = i + 1
+            }
+        }
+        u = u + 1
+    }
+
+    let clustering = if triplets > 0 {
+        (triangles as f64) / (triplets as f64)
+    } else { 0.0 }
+
+    GraphMetrics { n_nodes: n, n_edges, mean_degree: mean_k, clustering, eta }
+}
+
+// =============================================================================
+// Geometric Certainty Index (GCI) — Novel Clinical Biomarker
+// =============================================================================
+//
+// GCI = fraction of edges where |kappa| > z_crit * sigma_kappa
+//
+// Ranges [0, 1]:
+//   GCI = 1.0: all edges have unambiguous curvature sign
+//   GCI = 0.0: all edges have uncertain geometry
+//
+// Hypothesis: GCI_ADHD < GCI_TDC (ADHD brains have more
+// geometrically ambiguous edges due to hypersynchrony noise)
+
+pub fn geometric_certainty_index(curvatures: &[EpistemicEdgeCurvature]) -> f64 {
+    let n = curvatures.len()
+    if n == 0 { return 0.0 }
+
+    var n_certain: usize = 0
+    var i: usize = 0
+    while i < n {
+        if curvatures[i].sign_certain {
+            n_certain = n_certain + 1
+        }
+        i = i + 1
+    }
+
+    (n_certain as f64) / (n as f64)
+}
+
+// =============================================================================
+// Hehl Analytical ORC Approximation (ported from Julia)
+// =============================================================================
+//
+// kappa(k, eta, C, N, alpha) = 1 - W1_approx
+//
+// From Hehl (2024) arXiv:2407.08854, extended with clustering:
+//   t = max(C*(k-1), (k-1)^2/(N-1))  [common neighbors]
+//   n_exc = k - 1 - t                  [exclusive neighbors]
+//   E[|M|] = n_exc * (1 - exp(-p * n_exc))  [matching heuristic]
+//   W1 = alpha + (1-alpha) * (n_exc/k) * (f_m + 3*(1-f_m))
+
+pub fn hehl_kappa(k: f64, eta: f64, clustering: f64, n_nodes: f64, alpha: f64) -> f64 {
+    if k < 2.0 { return 0.0 }
+
+    // Common neighbors from clustering and random incidence
+    let t_clust = clustering * (k - 1.0)
+    let t_rand = (k - 1.0) * (k - 1.0) / (n_nodes - 1.0)
+    var t = if t_clust > t_rand { t_clust } else { t_rand }
+
+    // Clamp to valid range
+    if t < 0.0 { t = 0.0 }
+    if t > k - 1.0 { t = k - 1.0 }
+
+    let n_exc = k - 1.0 - t
+    if n_exc < 1e-10 {
+        return 1.0 - alpha  // all neighbors are triangles
+    }
+
+    // Bipartite matching heuristic (Poisson approximation)
+    let p_edge = eta / k
+    let expected_matching = n_exc * (1.0 - exp_approx(0.0 - p_edge * n_exc))
+    let f_m = expected_matching / n_exc
+
+    // Transport cost
+    let mass_exc = (1.0 - alpha) * n_exc / k
+    let w1 = alpha + mass_exc * (f_m + 3.0 * (1.0 - f_m))
+
+    1.0 - w1
+}
+
+// Find eta_c (critical eta where kappa = 0) via bisection
+pub fn find_eta_c(n_nodes: f64, clustering: f64, alpha: f64) -> f64 {
+    let eta_min = 4.0 / n_nodes
+    var eta_lo = eta_min
+    var eta_hi = 20.0
+
+    // Check boundary values
+    let k_lo = sqrt_f64(eta_lo * n_nodes)
+    let kappa_lo = hehl_kappa(k_lo, eta_lo, clustering, n_nodes, alpha)
+    if kappa_lo >= 0.0 { return eta_lo }
+
+    let k_hi = sqrt_f64(eta_hi * n_nodes)
+    let kappa_hi = hehl_kappa(k_hi, eta_hi, clustering, n_nodes, alpha)
+    if kappa_hi <= 0.0 { return eta_hi }  // no crossing
+
+    // Bisection
+    var iter: usize = 0
+    while iter < 100 {
+        let eta_mid = (eta_lo + eta_hi) / 2.0
+        let k_mid = sqrt_f64(eta_mid * n_nodes)
+        let kappa_mid = hehl_kappa(k_mid, eta_mid, clustering, n_nodes, alpha)
+
+        if abs_f64(kappa_mid) < 1e-4 { return eta_mid }
+
+        if kappa_mid < 0.0 {
+            eta_lo = eta_mid
+        } else {
+            eta_hi = eta_mid
+        }
+
+        iter = iter + 1
+    }
+
+    (eta_lo + eta_hi) / 2.0
+}
+
+// Distance from phase boundary: delta_eta = eta - eta_c(C, N)
+// Positive → spherical side, negative → hyperbolic side
+pub fn phase_boundary_distance(eta: f64, clustering: f64, n_nodes: f64, alpha: f64) -> f64 {
+    let eta_c = find_eta_c(n_nodes, clustering, alpha)
+    eta - eta_c
+}
+
+// =============================================================================
+// Full Epistemic Analysis Pipeline
+// =============================================================================
+
+// Compute epistemic curvature for all edges in a graph
+// cost_uncertainty: N×N matrix of sigma_d values (0 for exact hop-count)
+pub fn analyze_epistemic_curvature(
+    adj: &[[usize]],
+    cost_uncertainty: &[[f64]],
+    params: &EpistemicCurvatureParams
+) -> EpistemicCurvatureAnalysis {
+    let distances = compute_all_distances(adj)
+    let metrics = compute_graph_metrics(adj)
+    let n = adj.len()
+
+    // Compute all edge curvatures
+    var curvatures: [EpistemicEdgeCurvature] = []
+    var u: usize = 0
+    while u < n {
+        let nbrs = &adj[u]
+        var i: usize = 0
+        while i < nbrs.len() {
+            let v = nbrs[i]
+            if u < v {
+                let ec = epistemic_edge_curvature(
+                    adj, &distances, cost_uncertainty, u, v, params
+                )
+                curvatures.push(ec)
+            }
+            i = i + 1
+        }
+        u = u + 1
+    }
+
+    let num_edges = curvatures.len()
+    if num_edges == 0 {
+        return EpistemicCurvatureAnalysis {
+            mean_kappa: 0.0, sigma_mean_kappa: 0.0, std_kappa: 0.0,
+            min_kappa: 0.0, max_kappa: 0.0,
+            gci: 0.0, num_sign_certain: 0, num_edges: 0,
+            num_hyperbolic: 0, num_euclidean: 0, num_spherical: 0,
+            num_uncertain: 0, dominant_geometry: GeometryClass::Euclidean,
+            mean_confidence: 0.0, eta: 0.0, clustering: 0.0,
+            eta_c_predicted: 0.0, delta_eta: 0.0,
+        }
+    }
+
+    // Aggregate statistics
+    var sum_k: f64 = 0.0
+    var sum_k2: f64 = 0.0
+    var sum_conf: f64 = 0.0
+    var min_k: f64 = curvatures[0].kappa
+    var max_k: f64 = curvatures[0].kappa
+    var n_hyp: usize = 0
+    var n_euc: usize = 0
+    var n_sph: usize = 0
+    var n_unc: usize = 0
+    var n_certain: usize = 0
+
+    var idx: usize = 0
+    while idx < num_edges {
+        let ec = &curvatures[idx]
+        sum_k = sum_k + ec.kappa
+        sum_k2 = sum_k2 + ec.kappa * ec.kappa
+        sum_conf = sum_conf + ec.confidence
+        if ec.kappa < min_k { min_k = ec.kappa }
+        if ec.kappa > max_k { max_k = ec.kappa }
+        if ec.sign_certain { n_certain = n_certain + 1 }
+
+        match ec.geometry {
+            GeometryClass::Hyperbolic => { n_hyp = n_hyp + 1 }
+            GeometryClass::Euclidean => { n_euc = n_euc + 1 }
+            GeometryClass::Spherical => { n_sph = n_sph + 1 }
+            GeometryClass::Uncertain => { n_unc = n_unc + 1 }
+        }
+        idx = idx + 1
+    }
+
+    let e_f = num_edges as f64
+    let mean_kappa = sum_k / e_f
+    let variance = sum_k2 / e_f - mean_kappa * mean_kappa
+    let std_kappa = sqrt_f64(if variance > 0.0 { variance } else { 0.0 })
+    let sigma_mean = std_kappa / sqrt_f64(e_f)
+    let gci = (n_certain as f64) / e_f
+    let mean_conf = sum_conf / e_f
+
+    // Phase transition integration
+    let eta_c = find_eta_c(
+        metrics.n_nodes as f64,
+        metrics.clustering,
+        params.alpha
+    )
+    let delta_eta = metrics.eta - eta_c
+
+    // Dominant geometry (considering uncertainty)
+    let dominant = if n_hyp >= n_euc && n_hyp >= n_sph && n_hyp >= n_unc {
+        GeometryClass::Hyperbolic
+    } else if n_sph >= n_euc && n_sph >= n_unc {
+        GeometryClass::Spherical
+    } else if n_unc >= n_euc {
+        GeometryClass::Uncertain
+    } else {
+        GeometryClass::Euclidean
+    }
+
+    EpistemicCurvatureAnalysis {
+        mean_kappa,
+        sigma_mean_kappa: sigma_mean,
+        std_kappa,
+        min_kappa: min_k,
+        max_kappa: max_k,
+        gci,
+        num_sign_certain: n_certain,
+        num_edges,
+        num_hyperbolic: n_hyp,
+        num_euclidean: n_euc,
+        num_spherical: n_sph,
+        num_uncertain: n_unc,
+        dominant_geometry: dominant,
+        mean_confidence: mean_conf,
+        eta: metrics.eta,
+        clustering: metrics.clustering,
+        eta_c_predicted: eta_c,
+        delta_eta,
+    }
+}
+
+// =============================================================================
+// Convenience: Zero-Uncertainty Analysis (for exact hop-count graphs)
+// =============================================================================
+
+// When the graph topology is exact (no FC uncertainty), cost_uncertainty = 0
+pub fn analyze_curvature_exact(adj: &[[usize]]) -> EpistemicCurvatureAnalysis {
+    let n = adj.len()
+
+    // Build zero uncertainty matrix
+    var zero_sigma: [[f64]] = []
+    var i: usize = 0
+    while i < n {
+        var row: [f64] = []
+        var j: usize = 0
+        while j < n {
+            row.push(0.0)
+            j = j + 1
+        }
+        zero_sigma.push(row)
+        i = i + 1
+    }
+
+    let params = EpistemicCurvatureParams::clinical()
+    analyze_epistemic_curvature(adj, &zero_sigma, &params)
+}
+
+// =============================================================================
+// FC Graph Construction with Edge Uncertainty
+// =============================================================================
+
+// Build a graph from a functional connectivity matrix with threshold
+// Returns: (adjacency list, cost uncertainty matrix)
+//
+// Edges where |r| > threshold are included.
+// Cost uncertainty for edge (i,j) = Fisher-z SE propagated through BFS.
+// For edges near threshold (|r| within 1 SE of threshold), uncertainty is high.
+pub struct FCGraphResult {
+    pub adj: [[usize]],
+    pub cost_uncertainty: [[f64]],
+    pub n_certain_edges: usize,     // edges far from threshold
+    pub n_uncertain_edges: usize,   // edges near threshold (within 1 SE)
+}
+
+pub fn build_fc_graph(
+    correlations: &[[f64]],     // N_roi × N_roi correlation matrix
+    uncertainties: &[[f64]],    // N_roi × N_roi Fisher-z SE matrix
+    n_rois: usize,
+    threshold: f64
+) -> FCGraphResult {
+    // Build adjacency list
+    var adj: [[usize]] = []
+    var i: usize = 0
+    while i < n_rois {
+        adj.push([])
+        i = i + 1
+    }
+
+    var n_certain: usize = 0
+    var n_uncertain: usize = 0
+
+    i = 0
+    while i < n_rois {
+        var j: usize = i + 1
+        while j < n_rois {
+            let r = abs_f64(correlations[i][j])
+            if r > threshold {
+                adj[i].push(j)
+                adj[j].push(i)
+
+                // Check if edge is near threshold
+                let sigma_r = uncertainties[i][j]
+                if r - threshold < sigma_r {
+                    n_uncertain = n_uncertain + 1
+                } else {
+                    n_certain = n_certain + 1
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Compute BFS distances
+    let distances = compute_all_distances(&adj)
+
+    // Build cost uncertainty matrix
+    // For hop-count distances, uncertainty comes from edge existence uncertainty.
+    // Edges near threshold could be present or absent, affecting BFS paths.
+    // Approximation: cost_sigma(i,j) = n_uncertain_on_path / total_path_length
+    // Simplified: use uniform graph-level uncertainty based on fraction of uncertain edges
+    let total_edges = n_certain + n_uncertain
+    let frac_uncertain = if total_edges > 0 {
+        (n_uncertain as f64) / (total_edges as f64)
+    } else { 0.0 }
+
+    var cost_unc: [[f64]] = []
+    i = 0
+    while i < n_rois {
+        var row: [f64] = []
+        var j: usize = 0
+        while j < n_rois {
+            let d = distances[i][j]
+            if d > 0 {
+                // Uncertainty scales with path length and fraction of uncertain edges
+                // Each hop has probability frac_uncertain of being wrong
+                // sigma_d ≈ sqrt(d * frac_uncertain)
+                row.push(sqrt_f64((d as f64) * frac_uncertain))
+            } else {
+                row.push(0.0)
+            }
+            j = j + 1
+        }
+        cost_unc.push(row)
+        i = i + 1
+    }
+
+    FCGraphResult {
+        adj,
+        cost_uncertainty: cost_unc,
+        n_certain_edges: n_certain,
+        n_uncertain_edges: n_uncertain,
+    }
+}
+
+// =============================================================================
+// Critical Embedding Dimension d* (Cayley-Dickson Biomarker)
+// =============================================================================
+//
+// For a graph embedded into S^(d-1), d* is the dimension where mean kappa
+// crosses from negative to positive. Lower d* means the network is
+// "closer to spherical" in its intrinsic geometry.
+//
+// Hypothesis: d*_ADHD < d*_TDC < d*_depression
+
+pub struct DimensionalTrajectory {
+    pub dimensions: [usize],    // [4, 8, 16, ...]
+    pub kappas: [f64],          // mean kappa at each d
+    pub d_star: f64,            // interpolated zero-crossing (0 if no crossing)
+    pub has_crossing: bool,
+}
+
+// Interpolate zero-crossing from a kappa(d) trajectory
+pub fn find_d_star(dimensions: &[usize], kappas: &[f64]) -> DimensionalTrajectory {
+    let n = dimensions.len()
+    var d_star: f64 = 0.0
+    var has_crossing = false
+
+    if n >= 2 {
+        var i: usize = 0
+        while i < n - 1 {
+            let k1 = kappas[i]
+            let k2 = kappas[i + 1]
+            // Check for sign change
+            if (k1 < 0.0 && k2 >= 0.0) || (k1 >= 0.0 && k2 < 0.0) {
+                // Linear interpolation for zero-crossing
+                let d1 = dimensions[i] as f64
+                let d2 = dimensions[i + 1] as f64
+                let frac = abs_f64(k1) / (abs_f64(k1) + abs_f64(k2))
+                d_star = d1 + frac * (d2 - d1)
+                has_crossing = true
+            }
+            i = i + 1
+        }
+    }
+
+    // Copy arrays
+    var dims: [usize] = []
+    var ks: [f64] = []
+    var i: usize = 0
+    while i < n {
+        dims.push(dimensions[i])
+        ks.push(kappas[i])
+        i = i + 1
+    }
+
+    DimensionalTrajectory { dimensions: dims, kappas: ks, d_star, has_crossing }
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+pub fn test_hehl_kappa_basic() -> bool {
+    // Random regular graph with C≈0, low eta → should be negative (hyperbolic)
+    let k_low = hehl_kappa(4.0, 0.16, 0.0, 100.0, 0.5)
+    // High eta → should be positive (spherical)
+    let k_high = hehl_kappa(20.0, 4.0, 0.0, 100.0, 0.5)
+
+    k_low < 0.0 && k_high > 0.0
+}
+
+pub fn test_find_eta_c() -> bool {
+    // For C=0, N=100, eta_c should be around 2.2
+    let eta_c = find_eta_c(100.0, 0.0, 0.5)
+    eta_c > 1.5 && eta_c < 4.0
+}
+
+pub fn test_clustering_lowers_eta_c() -> bool {
+    // Higher clustering should lower eta_c
+    let eta_c_0 = find_eta_c(100.0, 0.0, 0.5)
+    let eta_c_15 = find_eta_c(100.0, 0.15, 0.5)
+    eta_c_15 < eta_c_0
+}
+
+pub fn test_gci_range() -> bool {
+    // GCI must be in [0, 1]
+    var test_curvatures: [EpistemicEdgeCurvature] = []
+    test_curvatures.push(EpistemicEdgeCurvature {
+        u: 0, v: 1, kappa: -0.3, sigma_kappa: 0.01,
+        ci_lower: -0.32, ci_upper: -0.28, confidence: 0.95,
+        sign_certain: true, geometry: GeometryClass::Hyperbolic,
+    })
+    test_curvatures.push(EpistemicEdgeCurvature {
+        u: 1, v: 2, kappa: 0.01, sigma_kappa: 0.05,
+        ci_lower: -0.09, ci_upper: 0.11, confidence: 0.5,
+        sign_certain: false, geometry: GeometryClass::Uncertain,
+    })
+
+    let gci = geometric_certainty_index(&test_curvatures)
+    gci >= 0.0 && gci <= 1.0 && gci == 0.5
+}
+
+pub fn test_phase_boundary_distance() -> bool {
+    // Network in hyperbolic regime should have negative delta_eta
+    let delta = phase_boundary_distance(1.0, 0.15, 100.0, 0.5)
+    // eta=1.0 with C=0.15 should be below eta_c (hyperbolic side)
+    delta < 0.0
+}
+
+pub fn test_d_star_interpolation() -> bool {
+    let dims: [usize] = [4, 8, 16]
+    let kappas: [f64] = [-0.05, 0.02, 0.08]
+
+    let traj = find_d_star(&dims, &kappas)
+    traj.has_crossing && traj.d_star > 4.0 && traj.d_star < 8.0
+}
+
+pub fn run_epistemic_curvature_tests() -> bool {
+    test_hehl_kappa_basic() &&
+    test_find_eta_c() &&
+    test_clustering_lowers_eta_c() &&
+    test_gci_range() &&
+    test_phase_boundary_distance() &&
+    test_d_star_interpolation()
+}

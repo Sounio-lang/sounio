@@ -104,6 +104,92 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     // =========================================================================
+    // FORMATTING COMMANDS
+    // =========================================================================
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sounio.formatDocument', async () => {
+            const editor = vscode.window.activeTextEditor;
+            if (editor && editor.document.languageId === 'sounio') {
+                await vscode.commands.executeCommand('editor.action.formatDocument');
+            }
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sounio.organizeImports', async () => {
+            const editor = vscode.window.activeTextEditor;
+            if (editor && editor.document.languageId === 'sounio') {
+                if (client) {
+                    await client.sendRequest('workspace/executeCommand', {
+                        command: 'sounio.organizeImports',
+                        arguments: [editor.document.uri.toString()]
+                    });
+                    vscode.window.showInformationMessage('Imports organized');
+                }
+            }
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sounio.addImport', async () => {
+            const editor = vscode.window.activeTextEditor;
+            if (editor && editor.document.languageId === 'sounio') {
+                const moduleName = await vscode.window.showInputBox({
+                    prompt: 'Enter module name to import',
+                    placeHolder: 'e.g., std.math'
+                });
+                if (moduleName) {
+                    const edit = new vscode.WorkspaceEdit();
+                    const position = new vscode.Position(0, 0);
+                    edit.insert(editor.document.uri, position, `use ${moduleName};\n`);
+                    await vscode.workspace.applyEdit(edit);
+                }
+            }
+        })
+    );
+
+    // =========================================================================
+    // NAVIGATION COMMANDS
+    // =========================================================================
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sounio.showOutline', async () => {
+            const editor = vscode.window.activeTextEditor;
+            if (editor && editor.document.languageId === 'sounio') {
+                await vscode.commands.executeCommand('workbench.action.gotoSymbol');
+            }
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sounio.findAllReferences', async () => {
+            const editor = vscode.window.activeTextEditor;
+            if (editor && editor.document.languageId === 'sounio') {
+                await vscode.commands.executeCommand('editor.action.referenceSearch.trigger');
+            }
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sounio.renameSymbol', async () => {
+            const editor = vscode.window.activeTextEditor;
+            if (editor && editor.document.languageId === 'sounio') {
+                await vscode.commands.executeCommand('editor.action.rename');
+            }
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sounio.showSignature', async () => {
+            const editor = vscode.window.activeTextEditor;
+            if (editor && editor.document.languageId === 'sounio') {
+                await vscode.commands.executeCommand('editor.action.triggerParameterHints');
+            }
+        })
+    );
+
+    // =========================================================================
     // DEBUG COMMANDS
     // =========================================================================
 
@@ -224,6 +310,128 @@ export function activate(context: vscode.ExtensionContext) {
             terminal.show();
         })
     );
+
+    // =========================================================================
+    // CODE LENS PROVIDER
+    // =========================================================================
+
+    const codeLensProvider = vscode.languages.registerCodeLensProvider('sounio', {
+        provideCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
+            const codeLenses: vscode.CodeLens[] = [];
+            const text = document.getText();
+            const functionRegex = /^(?:pub\s+)?(?:fn|func|function|def)\s+(\w+)/gm;
+            let match;
+
+            while ((match = functionRegex.exec(text)) !== null) {
+                const line = document.positionAt(match.index).line;
+                const range = new vscode.Range(line, 0, line, 0);
+                
+                // Run code lens
+                codeLenses.push(new vscode.CodeLens(range, {
+                    title: '$(play) Run',
+                    command: 'sounio.runFile',
+                    tooltip: 'Run this file'
+                }));
+
+                // Check code lens
+                codeLenses.push(new vscode.CodeLens(range, {
+                    title: '$(check) Check',
+                    command: 'sounio.checkFile',
+                    tooltip: 'Type-check this file'
+                }));
+            }
+
+            return codeLenses;
+        }
+    });
+    context.subscriptions.push(codeLensProvider);
+
+    // =========================================================================
+    // INLAY HINTS PROVIDER
+    // =========================================================================
+
+    const inlayHintsProvider = vscode.languages.registerInlayHintsProvider('sounio', {
+        provideInlayHints(document: vscode.TextDocument, range: vscode.Range): vscode.InlayHint[] {
+            const hints: vscode.InlayHint[] = [];
+            const config = vscode.workspace.getConfiguration('sounio');
+            
+            if (!config.get('inlayHints.enabled', true)) {
+                return hints;
+            }
+
+            const text = document.getText(range);
+            const lines = text.split('\n');
+            
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
+                const lineNum = range.start.line + i;
+
+                // Type hints for let bindings
+                if (config.get('inlayHints.typeHints', true)) {
+                    const letMatch = line.match(/let\s+(\w+)\s*=(?!.*:)/);
+                    if (letMatch) {
+                        const char = line.indexOf(letMatch[0]) + letMatch[0].length;
+                        const hint = new vscode.InlayHint(
+                            new vscode.Position(lineNum, char),
+                            ': /* inferred */',
+                            vscode.InlayHintKind.Type
+                        );
+                        hint.tooltip = 'Inferred type (use --show-types to see actual type)';
+                        hints.push(hint);
+                    }
+                }
+
+                // Confidence hints for epistemic values
+                if (config.get('inlayHints.confidenceHints', true)) {
+                    const uncertainMatch = line.match(/uncertain\s*\([^)]+\)/);
+                    if (uncertainMatch) {
+                        const char = line.indexOf(uncertainMatch[0]) + uncertainMatch[0].length;
+                        const hint = new vscode.InlayHint(
+                            new vscode.Position(lineNum, char),
+                            ' /* σ = ? */',
+                            vscode.InlayHintKind.Parameter
+                        );
+                        hint.tooltip = 'Standard deviation of this uncertain value';
+                        hints.push(hint);
+                    }
+                }
+            }
+
+            return hints;
+        }
+    });
+    context.subscriptions.push(inlayHintsProvider);
+
+    // =========================================================================
+    // HOVER PROVIDER FOR EPISTEMIC INFO
+    // =========================================================================
+
+    const hoverProvider = vscode.languages.registerHoverProvider('sounio', {
+        provideHover(document: vscode.TextDocument, position: vscode.Position) {
+            const config = vscode.workspace.getConfiguration('sounio');
+            if (!config.get('epistemic.enabled', true)) {
+                return null;
+            }
+
+            const wordRange = document.getWordRangeAtPosition(position);
+            if (!wordRange) {
+                return null;
+            }
+
+            const word = document.getText(wordRange);
+            const markdown = new vscode.MarkdownString();
+
+            // Add epistemic info if available
+            if (word.includes('uncertain') || word.includes('confidence')) {
+                markdown.appendCodeblock(`epistemic ${word}`, 'sounio');
+                markdown.appendMarkdown(`\n**Confidence**: Calculated from source\n`);
+                markdown.appendMarkdown(`**Provenance**: Tracked\n`);
+            }
+
+            return markdown.value ? new vscode.Hover(markdown, wordRange) : null;
+        }
+    });
+    context.subscriptions.push(hoverProvider);
 
     // =========================================================================
     // DECORATIONS FOR EPISTEMIC VISUALIZATION

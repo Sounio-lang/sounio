@@ -1,7 +1,7 @@
 # UI Type De-ignore Audit
 
-- generated_at_utc: 2026-02-28T02:40:38Z
-- souc_bin: /home/demetrios/work/sounio/artifacts/omega/souc-bin/souc-linux-x86_64
+- generated_at_utc: 2026-02-28T11:10:31Z
+- souc_bin: /home/demetrios/work/sounio/souc
 - ignored_files: 31
 - safe_deignore_candidates: 0
 - ready_count: 0
