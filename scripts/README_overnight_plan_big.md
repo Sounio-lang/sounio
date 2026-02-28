@@ -55,6 +55,13 @@ Two practical startup profiles:
 - Infra/liveness (keeps health green independent of gate failures):
   - `PLAN_BIG_OVERNIGHT_GATE_SCRIPT=/bin/true bash scripts/tmux_big_ops_default.sh up --reset`
 
+Shortcut wrappers:
+
+- Infra profile wrapper:
+  - `bash scripts/tmux_big_ops_infra.sh up --reset`
+- Strict profile wrapper:
+  - `bash scripts/tmux_big_ops_strict.sh up --reset`
+
 ## Strict Health Contract
 
 Health is considered `healthy=true` only when all checks pass:
