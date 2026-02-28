@@ -14,6 +14,14 @@ resolve_souc() {
     printf '%s\n' "$SOUC_BIN"
     return 0
   fi
+  if [ -x "$ROOT_DIR/.pinned-souc/souc-linux-x86_64" ]; then
+    printf '%s\n' "$ROOT_DIR/.pinned-souc/souc-linux-x86_64"
+    return 0
+  fi
+  if [ -x "$ROOT_DIR/artifacts/omega/souc-bin/souc-linux-x86_64" ]; then
+    printf '%s\n' "$ROOT_DIR/artifacts/omega/souc-bin/souc-linux-x86_64"
+    return 0
+  fi
   OMEGA_SOUC_REQUIRE_PINNED="${OMEGA_SOUC_REQUIRE_PINNED:-1}" \
   OMEGA_SOUC_ALLOW_LOCAL_FALLBACK="${OMEGA_SOUC_ALLOW_LOCAL_FALLBACK:-0}" \
     bash "$ROOT_DIR/scripts/omega/omega_resolve_souc_bin.sh" --print-path
@@ -34,6 +42,10 @@ status="pass"
 if ! bash "$ROOT_DIR/tools/lsp/test_smoke.sh" 2>&1 | tee -a "$LOG_PATH"; then
   status="fail"
 fi
+failure_hint=""
+if [[ "$status" != "pass" ]]; then
+  failure_hint="$(grep -E '\[lsp-smoke\]\[FAIL\]|Traceback|SystemExit|error:' "$LOG_PATH" | tail -n 1 || true)"
+fi
 
 if [[ "$status" == "pass" ]]; then
   echo "LSP_SMOKE_PASS" | tee -a "$LOG_PATH"
@@ -44,6 +56,7 @@ jq -cn \
   --arg status "$status" \
   --arg log_path "${LOG_PATH#$ROOT_DIR/}" \
   --arg souc "$SOUC_RESOLVED" \
+  --arg failure_hint "$failure_hint" \
   --argjson strict_no_rust "$SOUNIO_LSP_STRICT_NO_RUST" \
   '{
     schema: "sounio.lsp.smoke.status.v1",
@@ -52,7 +65,8 @@ jq -cn \
     log_path: $log_path,
     souc_bin: $souc,
     strict_no_rust: ($strict_no_rust == 1),
-    pass_marker: ($status == "pass")
+    pass_marker: ($status == "pass"),
+    last_failure_hint: (if $status == "pass" then "" else $failure_hint end)
   }' >"$STATUS_PATH"
 
 if [[ "$status" != "pass" ]]; then

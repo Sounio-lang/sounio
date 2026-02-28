@@ -107,6 +107,7 @@ This validates:
 - `didChange` unsaved buffer used by `didSave` diagnostics
 - `hover/definition` request roundtrip
 - multi-document `didSave` sequencing keeps diagnostics isolated per URI
+- multi-document `didOpen -> didChange -> didSave` roundtrip on both URIs
 - strict no-rust fail-fast behavior
 - explicit synthetic diagnostics for timeout and non-timeout check failures
 
@@ -121,3 +122,7 @@ Gate marker emitted on success: `LSP_SMOKE_PASS`.
 When a document is open in the LSP session, diagnostics/hover/definition use the
 in-memory buffer snapshot (not only on-disk file contents). This keeps editor
 feedback aligned with unsaved changes.
+
+The server keeps a per-URI check token and suppresses stale diagnostic publishes,
+so rapid saves/changes across multiple open documents do not cross-contaminate
+results.

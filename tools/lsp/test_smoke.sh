@@ -33,6 +33,14 @@ resolve_souc_for_smoke() {
         printf '%s\n' "$SOUNIO_LSP_SOUC_BIN"
         return 0
     fi
+    if [[ -x "$ROOT_DIR/.pinned-souc/souc-linux-x86_64" ]]; then
+        printf '%s\n' "$ROOT_DIR/.pinned-souc/souc-linux-x86_64"
+        return 0
+    fi
+    if [[ -x "$ROOT_DIR/artifacts/omega/souc-bin/souc-linux-x86_64" ]]; then
+        printf '%s\n' "$ROOT_DIR/artifacts/omega/souc-bin/souc-linux-x86_64"
+        return 0
+    fi
     OMEGA_SOUC_REQUIRE_PINNED="${OMEGA_SOUC_REQUIRE_PINNED:-1}" \
     OMEGA_SOUC_ALLOW_LOCAL_FALLBACK="${OMEGA_SOUC_ALLOW_LOCAL_FALLBACK:-0}" \
         bash "$ROOT_DIR/scripts/omega/omega_resolve_souc_bin.sh" --print-path
@@ -621,13 +629,159 @@ if uri_b not in by_uri:
 if not any(d for d in by_uri[uri_a] if len(d) > 0):
     raise SystemExit("uri_a should keep non-empty diagnostics")
 
-# For uri_b we expect one failing save and then a clean save.
 if len(by_uri[uri_b]) < 2:
     raise SystemExit("uri_b should have multiple diagnostic publications")
 if len(by_uri[uri_b][-2]) == 0:
     raise SystemExit("uri_b penultimate diagnostics should report the introduced error")
 if len(by_uri[uri_b][-1]) != 0:
     raise SystemExit("uri_b final diagnostics should be clean after fix")
+PY
+}
+
+test_multi_uri_change_save_roundtrip() {
+    log "multi-document didOpen->didChange->didSave roundtrip is isolated per URI"
+    local file_a file_b out_file err_file
+    file_a="$TMP_DIR/lsp_roundtrip_a.sio"
+    file_b="$TMP_DIR/lsp_roundtrip_b.sio"
+    out_file="$TMP_DIR/multi_uri_roundtrip.out"
+    err_file="$TMP_DIR/multi_uri_roundtrip.err"
+
+    cat >"$file_a" <<'EOF'
+fn main() -> i32 {
+    let a: i64 = 1
+    return 0
+}
+EOF
+    cat >"$file_b" <<'EOF'
+fn main() -> i32 {
+    let b: i64 = 2
+    return 0
+}
+EOF
+
+    python3 - "$LSP_SCRIPT" "$file_a" "$file_b" "$out_file" "$err_file" <<'PY'
+import json
+import pathlib
+import re
+import subprocess
+import sys
+from urllib.parse import quote
+
+lsp_script, file_a, file_b, out_path, err_path = sys.argv[1:6]
+file_a = pathlib.Path(file_a).resolve()
+file_b = pathlib.Path(file_b).resolve()
+uri_a = "file://" + quote(str(file_a))
+uri_b = "file://" + quote(str(file_b))
+text_a = file_a.read_text(encoding="utf-8")
+text_b = file_b.read_text(encoding="utf-8")
+
+messages = [
+    {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"capabilities": {}}},
+    {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {"textDocument": {"uri": uri_a, "languageId": "sounio", "version": 1, "text": text_a}},
+    },
+    {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {"textDocument": {"uri": uri_b, "languageId": "sounio", "version": 1, "text": text_b}},
+    },
+    {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didChange",
+        "params": {
+            "textDocument": {"uri": uri_a, "version": 2},
+            "contentChanges": [{"text": 'fn main() -> i32 {\n    let a: i64 = "bad-a"\n    return 0\n}\n'}],
+        },
+    },
+    {"jsonrpc": "2.0", "method": "textDocument/didSave", "params": {"textDocument": {"uri": uri_a}}},
+    {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didChange",
+        "params": {
+            "textDocument": {"uri": uri_b, "version": 2},
+            "contentChanges": [{"text": 'fn main() -> i32 {\n    let b: i64 = "bad-b"\n    return 0\n}\n'}],
+        },
+    },
+    {"jsonrpc": "2.0", "method": "textDocument/didSave", "params": {"textDocument": {"uri": uri_b}}},
+    {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didChange",
+        "params": {
+            "textDocument": {"uri": uri_a, "version": 3},
+            "contentChanges": [{"text": "fn main() -> i32 {\n    let a: i64 = 3\n    return 0\n}\n"}],
+        },
+    },
+    {"jsonrpc": "2.0", "method": "textDocument/didSave", "params": {"textDocument": {"uri": uri_a}}},
+    {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didChange",
+        "params": {
+            "textDocument": {"uri": uri_b, "version": 3},
+            "contentChanges": [{"text": "fn main() -> i32 {\n    let b: i64 = 4\n    return 0\n}\n"}],
+        },
+    },
+    {"jsonrpc": "2.0", "method": "textDocument/didSave", "params": {"textDocument": {"uri": uri_b}}},
+    {"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": {}},
+    {"jsonrpc": "2.0", "method": "exit", "params": {}},
+]
+
+wire = bytearray()
+for msg in messages:
+    body = json.dumps(msg, separators=(",", ":")).encode("utf-8")
+    wire.extend(f"Content-Length: {len(body)}\r\n\r\n".encode("utf-8"))
+    wire.extend(body)
+
+p = subprocess.Popen(
+    ["bash", lsp_script],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+)
+out, err = p.communicate(bytes(wire), timeout=240)
+open(out_path, "wb").write(out)
+open(err_path, "wb").write(err)
+if p.returncode != 0:
+    raise SystemExit(f"lsp multi-uri roundtrip run failed with code {p.returncode}")
+
+payloads = []
+idx = 0
+while idx < len(out):
+    sep = out.find(b"\r\n\r\n", idx)
+    if sep < 0:
+        break
+    headers = out[idx:sep].decode("utf-8", "replace")
+    match = re.search(r"Content-Length:\s*([0-9]+)", headers, flags=re.IGNORECASE)
+    if not match:
+        raise SystemExit("missing Content-Length in multi-uri roundtrip response headers")
+    length = int(match.group(1))
+    body_start = sep + 4
+    body_end = body_start + length
+    payload = json.loads(out[body_start:body_end].decode("utf-8", "replace"))
+    payloads.append(payload)
+    idx = body_end
+
+by_uri = {}
+for p in payloads:
+    if p.get("method") != "textDocument/publishDiagnostics":
+        continue
+    uri = p.get("params", {}).get("uri")
+    if uri:
+        by_uri.setdefault(uri, []).append(p.get("params", {}).get("diagnostics", []))
+
+if uri_a not in by_uri or uri_b not in by_uri:
+    raise SystemExit("missing diagnostics stream for multi-uri roundtrip scenario")
+
+a_diags = by_uri[uri_a]
+b_diags = by_uri[uri_b]
+if len(a_diags) < 3 or len(b_diags) < 3:
+    raise SystemExit("expected at least three diagnostics publications per URI in roundtrip")
+
+if len(a_diags[-2]) == 0 or len(a_diags[-1]) != 0:
+    raise SystemExit("uri_a should transition from failing to clean diagnostics")
+if len(b_diags[-2]) == 0 or len(b_diags[-1]) != 0:
+    raise SystemExit("uri_b should transition from failing to clean diagnostics")
 PY
 }
 
@@ -1147,6 +1301,7 @@ main() {
     test_didchange_unsaved_snapshot_on_save
     test_hover_definition_roundtrip
     test_multi_uri_diagnostics_isolation
+    test_multi_uri_change_save_roundtrip
     test_rapid_didchange_didsave_version_guard
     test_rapid_multi_uri_save_isolation
     test_strict_no_rust_failfast

@@ -5,10 +5,24 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 OUT_PATH="${SOUNIO_CLAUDE_CONTRACT_OUT:-$ROOT_DIR/artifacts/omega/claude_operational_contract_status.v1.json}"
+CANONICAL_DOC="${SOUNIO_CLAUDE_CANONICAL_DOC:-$ROOT_DIR/.claude/PLAN_CANONICAL_EXECUTION.md}"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 mkdir -p "$(dirname "$OUT_PATH")"
+
+extract_marked_list_json() {
+  local file="$1"
+  local start_marker="$2"
+  local end_marker="$3"
+  awk -v start="$start_marker" -v end="$end_marker" '
+    $0 ~ start { in_section=1; next }
+    $0 ~ end { in_section=0; exit }
+    in_section { print }
+  ' "$file" \
+    | sed -n 's/.*`\([^`]*\)`.*/\1/p' \
+    | jq -R -s 'split("\n") | map(select(length > 0))'
+}
 
 run_check() {
   local name="$1"
@@ -42,26 +56,19 @@ for item in "${CHECKS[@]}"; do
 done
 
 generated_at_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+canonical_precedence_json="$(extract_marked_list_json "$CANONICAL_DOC" "CANONICAL_PRECEDENCE_START" "CANONICAL_PRECEDENCE_END")"
+locked_track_b_order_json="$(extract_marked_list_json "$CANONICAL_DOC" "LOCKED_TRACK_B_ORDER_START" "LOCKED_TRACK_B_ORDER_END")"
 
 jq -cn \
   --arg generated_at_utc "$generated_at_utc" \
   --argjson checks "[$checks_joined]" \
+  --argjson canonical_precedence "$canonical_precedence_json" \
+  --argjson locked_track_b_order "$locked_track_b_order_json" \
   '{
     schema: "sounio.claude.operational.contract.v1",
     generated_at_utc: $generated_at_utc,
-    canonical_precedence: [
-      "PLAN_ORIGINAL.md",
-      ".claude/offload-specs/*.md",
-      "artifacts/omega/selfhost_compiler_progress.v1.json",
-      "artifacts/omega/parallel_cutover_status.v1.json"
-    ],
-    locked_track_b_order: [
-      "data_structures.md",
-      "gpu_ir_expansion.md",
-      "hlir_lowering.md",
-      "metal_msl_codegen.md",
-      "ptx_regalloc_expansion.md"
-    ],
+    canonical_precedence: $canonical_precedence,
+    locked_track_b_order: $locked_track_b_order,
     checks: $checks,
     status: (if ($checks | all(.status == "pass")) then "pass" else "fail" end)
   }' >"$OUT_PATH"

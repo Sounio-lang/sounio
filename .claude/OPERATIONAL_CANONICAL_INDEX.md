@@ -6,10 +6,9 @@ This file is the required entrypoint before executing any `.claude/prompts/*.md`
 
 ## Canonical Precedence (strict)
 
-1. `PLAN_ORIGINAL.md`
-2. `.claude/offload-specs/*.md`
-3. `artifacts/omega/selfhost_compiler_progress.v1.json`
-4. `artifacts/omega/parallel_cutover_status.v1.json`
+Canonical precedence is owned by `.claude/PLAN_CANONICAL_EXECUTION.md`
+(contract fingerprint: `sounio.canonical.precedence.v1`).
+This index must not redefine the precedence list.
 
 Historical context only (non-canonical):
 

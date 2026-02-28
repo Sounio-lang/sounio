@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+CANONICAL_DOC="${SOUNIO_CLAUDE_CANONICAL_DOC:-.claude/PLAN_CANONICAL_EXECUTION.md}"
 
 require_file() {
   local p="$1"
@@ -41,40 +42,50 @@ assert_order_in_file() {
   fi
 }
 
+assert_has_marker() {
+  local file="$1"
+  local marker="$2"
+  if ! rg -q "$marker" "$file"; then
+    echo "error: missing marker '$marker' in $file" >&2
+    exit 1
+  fi
+}
+
 assert_historical_redirect() {
   local file="$1"
   if ! rg -q "^# Historical Context Only \(Non-Canonical\)" "$file"; then
     echo "error: missing historical-context banner in $file" >&2
     exit 1
   fi
-  assert_contains_literal "$file" "PLAN_ORIGINAL.md"
-  assert_contains_literal "$file" ".claude/offload-specs/*.md"
-  assert_contains_literal "$file" "artifacts/omega/selfhost_compiler_progress.v1.json"
-  assert_contains_literal "$file" "artifacts/omega/parallel_cutover_status.v1.json"
+  assert_contains_literal "$file" ".claude/PLAN_CANONICAL_EXECUTION.md"
   assert_contains_literal "$file" ".claude/OPERATIONAL_CANONICAL_INDEX.md"
   assert_contains_literal "$file" ".claude/PROMPT_EXECUTION_CONTRACT.md"
 }
 
 require_file "PLAN_ORIGINAL.md"
-require_file ".claude/PLAN_CANONICAL_EXECUTION.md"
+require_file "$CANONICAL_DOC"
 require_file ".claude/OPERATIONAL_CANONICAL_INDEX.md"
 require_file ".claude/PROMPT_EXECUTION_CONTRACT.md"
 
 assert_order_in_file "PLAN_ORIGINAL.md"
-assert_order_in_file ".claude/PLAN_CANONICAL_EXECUTION.md"
-assert_order_in_file ".claude/OPERATIONAL_CANONICAL_INDEX.md"
+assert_order_in_file "$CANONICAL_DOC"
 
-assert_contains_literal ".claude/PLAN_CANONICAL_EXECUTION.md" ".claude/session-context.md"
-assert_contains_literal ".claude/PLAN_CANONICAL_EXECUTION.md" ".claude/OPERATIONAL_CANONICAL_INDEX.md"
-assert_contains_literal ".claude/PLAN_CANONICAL_EXECUTION.md" ".claude/PROMPT_EXECUTION_CONTRACT.md"
+assert_has_marker "$CANONICAL_DOC" "CANONICAL_PRECEDENCE_START"
+assert_has_marker "$CANONICAL_DOC" "CANONICAL_PRECEDENCE_END"
+assert_has_marker "$CANONICAL_DOC" "LOCKED_TRACK_B_ORDER_START"
+assert_has_marker "$CANONICAL_DOC" "LOCKED_TRACK_B_ORDER_END"
 
-assert_contains_literal ".claude/OPERATIONAL_CANONICAL_INDEX.md" "PLAN_ORIGINAL.md"
-assert_contains_literal ".claude/OPERATIONAL_CANONICAL_INDEX.md" ".claude/offload-specs/*.md"
-assert_contains_literal ".claude/OPERATIONAL_CANONICAL_INDEX.md" "artifacts/omega/selfhost_compiler_progress.v1.json"
-assert_contains_literal ".claude/OPERATIONAL_CANONICAL_INDEX.md" "artifacts/omega/parallel_cutover_status.v1.json"
+assert_contains_literal "$CANONICAL_DOC" ".claude/session-context.md"
+assert_contains_literal "$CANONICAL_DOC" ".claude/OPERATIONAL_CANONICAL_INDEX.md"
+assert_contains_literal "$CANONICAL_DOC" ".claude/PROMPT_EXECUTION_CONTRACT.md"
+assert_contains_literal "$CANONICAL_DOC" "artifacts/omega/claude_operational_contract_status.v1.json"
+
+assert_contains_literal ".claude/OPERATIONAL_CANONICAL_INDEX.md" ".claude/PLAN_CANONICAL_EXECUTION.md"
 assert_contains_literal ".claude/OPERATIONAL_CANONICAL_INDEX.md" ".claude/plan.md"
 assert_contains_literal ".claude/OPERATIONAL_CANONICAL_INDEX.md" ".claude/pending.md"
 assert_contains_literal ".claude/OPERATIONAL_CANONICAL_INDEX.md" ".claude/session-context.md"
+
+assert_contains_literal ".claude/PROMPT_EXECUTION_CONTRACT.md" ".claude/PLAN_CANONICAL_EXECUTION.md"
 
 if [[ -x "scripts/check_prompt_execution_contract.sh" ]]; then
   bash scripts/check_prompt_execution_contract.sh

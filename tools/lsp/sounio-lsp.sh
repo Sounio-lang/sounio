@@ -112,6 +112,7 @@ log() {
 
 declare -A OPEN_DOCS
 declare -A OPEN_DOC_VERSION
+declare -A OPEN_DOC_CHECK_TOKEN
 
 CHECK_PID=""
 CHECK_PID_URI=""
@@ -289,6 +290,17 @@ kill_stale_check() {
             log "active check belongs to another uri; keeping pid=$CHECK_PID uri=$CHECK_PID_URI"
         fi
     fi
+}
+
+next_check_token() {
+    local uri="$1"
+    local current="${OPEN_DOC_CHECK_TOKEN[$uri]:-0}"
+    if ! [[ "$current" =~ ^[0-9]+$ ]]; then
+        current=0
+    fi
+    local next=$((current + 1))
+    OPEN_DOC_CHECK_TOKEN["$uri"]="$next"
+    printf '%s\n' "$next"
 }
 
 read_message() {
@@ -486,6 +498,7 @@ PY
 
 run_check_and_publish() {
     local uri="$1"
+    local expected_token="$2"
     local source_path cleanup_path
     if ! source_path="$(resolve_source_path_for_uri "$uri")"; then
         log "skip diagnostics (source missing): $(uri_to_path "$uri")"
@@ -520,6 +533,14 @@ run_check_and_publish() {
     fi
     if [[ "$diagnostics" == "[]" ]] && [[ "$rc" -ne 0 ]]; then
         diagnostics="$(build_failed_check_diagnostics "$rc" "$err_file")"
+    fi
+
+    local current_token="${OPEN_DOC_CHECK_TOKEN[$uri]:-0}"
+    if [[ "$current_token" != "$expected_token" ]]; then
+        log "drop stale diagnostics uri=$uri token=$expected_token current_token=$current_token"
+        cleanup_temp_source "$cleanup_path"
+        rm -f "$out_file" "$err_file"
+        return 0
     fi
 
     local params
@@ -565,7 +586,10 @@ handle_did_open() {
 
     OPEN_DOCS["$uri"]="$text"
     OPEN_DOC_VERSION["$uri"]="$version"
-    run_check_and_publish "$uri" || true
+    local check_token
+    next_check_token "$uri" >/dev/null
+    check_token="${OPEN_DOC_CHECK_TOKEN[$uri]}"
+    run_check_and_publish "$uri" "$check_token" || true
 }
 
 handle_did_change() {
@@ -621,7 +645,10 @@ handle_did_save() {
         OPEN_DOCS["$uri"]="$inline_text"
     fi
 
-    run_check_and_publish "$uri" || true
+    local check_token
+    next_check_token "$uri" >/dev/null
+    check_token="${OPEN_DOC_CHECK_TOKEN[$uri]}"
+    run_check_and_publish "$uri" "$check_token" || true
 }
 
 handle_did_close() {
@@ -632,6 +659,8 @@ handle_did_close() {
         log "didClose missing uri; ignoring"
         return
     fi
+    next_check_token "$uri" >/dev/null
+    kill_stale_check "$uri"
     unset OPEN_DOCS["$uri"]
     unset OPEN_DOC_VERSION["$uri"]
     local clear

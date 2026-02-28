@@ -8,10 +8,18 @@ The `.claude/` folder contains historical plans from multiple phases. Some are s
 
 ## Source-of-truth precedence
 
+This is the single authoritative precedence declaration for operational docs and gates.
+Do not duplicate this list elsewhere; downstream docs must reference this file.
+
+Contract fingerprint: `sounio.canonical.precedence.v1`
+
+<!-- CANONICAL_PRECEDENCE_START -->
 1. `PLAN_ORIGINAL.md`
 2. `.claude/offload-specs/*.md`
 3. `artifacts/omega/selfhost_compiler_progress.v1.json`
 4. `artifacts/omega/parallel_cutover_status.v1.json`
+5. `artifacts/omega/claude_operational_contract_status.v1.json`
+<!-- CANONICAL_PRECEDENCE_END -->
 
 Historical context docs (not canonical for ordering):
 - `.claude/plan.md`
@@ -34,11 +42,13 @@ Operational entrypoint docs:
 
 ### Track B: Self-hosted compiler completion (strict order)
 
+<!-- LOCKED_TRACK_B_ORDER_START -->
 1. `data_structures.md`
 2. `gpu_ir_expansion.md`
 3. `hlir_lowering.md`
 4. `metal_msl_codegen.md`
 5. `ptx_regalloc_expansion.md`
+<!-- LOCKED_TRACK_B_ORDER_END -->
 
 No reorder and no scope drift from `PLAN_ORIGINAL.md`.
 

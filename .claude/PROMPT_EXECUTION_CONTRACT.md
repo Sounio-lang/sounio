@@ -4,6 +4,11 @@ Status: active
 
 This contract defines how prompt work is dispatched, merged, and validated without drift.
 
+## Canonical Source-of-Truth
+
+Canonical precedence is owned by `.claude/PLAN_CANONICAL_EXECUTION.md`
+(`sounio.canonical.precedence.v1`). This file must not redefine precedence.
+
 ## Prompt Matrix (authoritative)
 
 | Prompt | Owner model | Phase | Depends on | Target files | Required gates | Evidence artifacts |
@@ -45,4 +50,6 @@ Verification command:
 1. Code changes land in declared target files only (or documented exceptions).
 2. Required gates pass.
 3. Evidence artifacts/log references are recorded.
-4. No canonical-order drift against `PLAN_ORIGINAL.md` and `.claude/offload-specs`.
+4. No canonical-order drift against `.claude/PLAN_CANONICAL_EXECUTION.md`, including:
+   - `artifacts/omega/selfhost_compiler_progress.v1.json`
+   - `artifacts/omega/parallel_cutover_status.v1.json`
