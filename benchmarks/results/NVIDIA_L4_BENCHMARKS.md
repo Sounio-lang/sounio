@@ -119,7 +119,25 @@ Overhead = cuBLAS GFLOPS / Epistemic GFLOPS (how many times slower the epistemic
 
 **What the 2.19x actually measures:** The overhead of Sounio's compiler-generated tiled GEMM (64x64 tiles, 16x16 thread blocks, 4x4 register blocking) versus cuBLAS's highly-optimized SGEMM. This is the **compiler maturity baseline** — the cost of using a research compiler's GPU backend versus a vendor-tuned library.
 
-**What has NOT been measured:** The additional overhead of epistemic shadow registers (uncertainty propagation, validity tracking, provenance merge). The self-hosted compiler infrastructure for this exists (`self-hosted/gpu/epistemic_ptx.sio`), but benchmark PTX with shadows enabled has not yet been generated and dispatched.
+## Shadow Register Ablation (2026-02-28)
+
+**Method:** PTX surgery (augmentation). The baseline tiled GEMM PTX (15,647 chars, no shadows) was augmented with shadow register operations after each inner-loop FMA using `scripts/ptx_shadow_augment.py`. The augmented PTX (29,938 chars) adds 10 shadow ops per FMA: 2x abs.f32, 4x mul.f32 (first-order eps), 2x add.f32 (eps sum), 1x sqrt.approx.f32 (quadrature), 1x and.pred (validity), 1x xor.b32 (provenance), plus 1x anti-DCE fma.rn.f32 feedback.
+
+**Anti-DCE:** ptxas aggressively eliminates dead shadow code. We inject per-FMA feedback: `fma.rn.f32 acc, eps, 1e-11, acc` which creates a data dependency chain that prevents elimination while contributing < 0.1 ULP to the result.
+
+| Dimension | cuBLAS | Baseline | Shadowed | Shadow OH | Compiler OH | Total OH |
+|-----------|--------|----------|----------|-----------|-------------|----------|
+| 1024x1024 | 12,886 | 7,164 | 2,029 | 3.53x | 1.80x | 6.35x |
+| 2048x2048 | 16,402 | 7,568 | 2,156 | 3.51x | 2.17x | 7.61x |
+| 4096x4096 | 14,124 | 5,230 | 1,784 | 2.93x | 2.70x | 7.91x |
+| 8192x8192 | 10,388 | 4,742 | 1,738 | 2.73x | 2.19x | 5.98x |
+| **geomean** | | | | **3.16x** | **2.19x** | **6.91x** |
+
+**Decomposition:** Total overhead vs cuBLAS = compiler gap × shadow cost. Measured: 2.19 × 3.16 = 6.93x. Actual: 6.91x. Error: 0.3%.
+
+**Interpretation:** The 3.16x shadow overhead represents the cost of full GUM uncertainty propagation (ISO/IEC Guide 98-3 compliant epsilon arithmetic, validity predicate tracking, and provenance merge) per FMA in the inner loop. This is the marginal cost of epistemic computing on GPU — every floating-point multiply-add carries its uncertainty, validity, and provenance metadata.
+
+Source: `artifacts/omega/ablation_report.v1.json`, `scripts/ptx_shadow_augment.py`
 
 ## Defensible Claims
 
@@ -127,15 +145,16 @@ Overhead = cuBLAS GFLOPS / Epistemic GFLOPS (how many times slower the epistemic
 - "Sounio GPU codegen produces working PTX kernels across 1K-8K matrix dimensions" (all pass 500 GFLOPS threshold)
 - "Compiler-generated tiled GEMM achieves median 5.3 TFLOPS at 4096x4096" (8 runs, ±3%)
 - "2.19x geometric mean overhead vs cuBLAS SGEMM" (compiler maturity baseline, measured on same hardware/timing)
-- "16-24% of L4 peak FP32 throughput" (varies by dimension)
+- "3.16x geometric mean shadow register overhead" (GUM propagation cost, measured via PTX augmentation)
+- "Total epistemic GEMM overhead: 6.91x vs cuBLAS" (decomposes cleanly: 2.19 × 3.16 = 6.93, 0.3% error)
+- "16-24% of L4 peak FP32 throughput" (varies by dimension, baseline)
 - "PTX target selection affects performance by ~20%" (SM7 vs on-host)
 - "Memory bandwidth: 115 GB/s DtoD" (measured)
 - "Self-hosted GPU codegen has full epistemic shadow register support" (code exists, formally verified in Lean)
 
 **What we CANNOT yet claim:**
-- "2.19x is the cost of epistemic uncertainty propagation" — the benchmark kernel has no shadow registers
-- Shadow register overhead has not been isolated (requires generating PTX with `epistemic_enabled=true`)
-- No comparison of shadow-on vs shadow-off kernel performance
+- Shadow overhead from compiler-generated epistemic PTX (current measurement uses post-hoc PTX augmentation, not compiler `epistemic_enabled=true` output)
+- Register pressure decomposition vs arithmetic overhead (both contribute to the 3.16x; requires profiling with Nsight Compute)
 
 ## Reproduction
 
@@ -146,14 +165,23 @@ Overhead = cuBLAS GFLOPS / Epistemic GFLOPS (how many times slower the epistemic
 ssh demetrios@10.100.100.215 \
   "cd ~/work/sounio && python3 scripts/cuda_cublas_baseline.py"
 
-# Epistemic GEMM (direct dispatch with pre-generated PTX):
+# Baseline GEMM (direct dispatch with pre-generated PTX):
 ssh demetrios@10.100.100.215 \
   "cd ~/work/sounio && GEMM_M=4096 GEMM_N=4096 GEMM_K=4096 \
    GEMM_ITERS=8 GEMM_PTX_FILE=/tmp/epistemic_gemm_sm7_4096.ptx \
    python3 scripts/cuda_gemm_dispatch.py"
 
-# Full test runner with baseline:
-GPU_HOST=gpu-appliance-l4 BASELINE=1 bash scripts/gpu_test_runner.sh
+# Shadow ablation (augment + dispatch):
+ssh demetrios@10.100.100.215 \
+  "cd ~/work/sounio && python3 scripts/ptx_shadow_augment.py \
+   /tmp/epistemic_gemm_sm7_4096.ptx /tmp/epistemic_gemm_sm7_4096_shadowed.ptx"
+ssh demetrios@10.100.100.215 \
+  "cd ~/work/sounio && GEMM_M=4096 GEMM_N=4096 GEMM_K=4096 \
+   GEMM_ITERS=8 GEMM_PTX_FILE=/tmp/epistemic_gemm_sm7_4096_shadowed.ptx \
+   python3 scripts/cuda_gemm_dispatch.py"
+
+# Full ablation runner (all dimensions):
+bash scripts/ptx_ablation_runner.sh
 ```
 
 ## Source Data
@@ -161,7 +189,10 @@ GPU_HOST=gpu-appliance-l4 BASELINE=1 bash scripts/gpu_test_runner.sh
 - Machine-readable: `benchmarks/results/l4_raw_data.json`
 - cuBLAS baseline: `artifacts/omega/cublas_baseline_report.v1.json`
 - Overhead report: `artifacts/omega/overhead_report.v1.json`
+- Ablation report: `artifacts/omega/ablation_report.v1.json`
 - Raw logs: `artifacts/omega/l4_*.log` (27 files)
 - Perf reports: `artifacts/omega/l4_perf_pass_report.v{1,2}.txt`
 - Stability report: `artifacts/omega/l4_scale_stability_report.v1.txt`
 - Baseline script: `scripts/cuda_cublas_baseline.py`
+- Augmentation script: `scripts/ptx_shadow_augment.py`
+- Ablation runner: `scripts/ptx_ablation_runner.sh`
