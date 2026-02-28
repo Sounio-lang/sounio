@@ -143,7 +143,7 @@ extern "C" {
 // Primitive helpers — must precede all callers
 // ============================================================================
 
-fn mgpu_ceil_div(a: i64, b: i64) -> i64 with Div {
+fn mgpu_ceil_div(a: i64, b: i64) -> i64 with Panic, Div {
     (a + b - 1) / b
 }
 
@@ -214,7 +214,7 @@ fn mgpu_ring_chunk_default() -> RingChunk {
 // ============================================================================
 
 // Build a DeviceDescriptor for device_idx by querying the CUDA Runtime.
-fn mgpu_query_device(device_idx: i64) -> DeviceDescriptor with IO {
+fn mgpu_query_device(device_idx: i64) -> DeviceDescriptor with Mut, Panic, IO {
     var err: i64 = cudaSetDevice(device_idx)
 
     var sm_count: i64  = 0
@@ -247,7 +247,7 @@ fn mgpu_query_device(device_idx: i64) -> DeviceDescriptor with IO {
 }
 
 // Fill the peer_access_mask field for a single device by querying all peers.
-fn mgpu_fill_peer_mask(desc: DeviceDescriptor, device_count: i64) -> DeviceDescriptor with IO {
+fn mgpu_fill_peer_mask(desc: DeviceDescriptor, device_count: i64) -> DeviceDescriptor with Mut, Div, IO {
     var mask: i64 = 0
     var peer: i64 = 0
     var can: i64  = 0
@@ -296,7 +296,7 @@ fn mgpu_check_has_nvlink(nvlink_matrix: [i64; 256], device_count: i64) -> bool {
 // Topology discovery
 // ============================================================================
 
-fn mgpu_discover_devices() -> MultiGpuTopology with IO {
+fn mgpu_discover_devices() -> MultiGpuTopology with Mut, Panic, Div, IO {
     var count: i64 = 0
     let err: i64 = cudaGetDeviceCount(&!count)
     if count > 16 {
@@ -354,7 +354,7 @@ fn mgpu_discover_devices() -> MultiGpuTopology with IO {
     }
 }
 
-fn mgpu_enable_all_peer_access(topo: MultiGpuTopology) -> (MultiGpuTopology, i64) with IO {
+fn mgpu_enable_all_peer_access(topo: MultiGpuTopology) -> (MultiGpuTopology, i64) with Mut, Panic, Div, IO {
     var enabled: i64 = 0
     var i: i64       = 0
     while i < topo.device_count {
@@ -497,7 +497,7 @@ fn mgpu_partition_plan_default(strategy: i64, device_count: i64) -> PartitionPla
     }
 }
 
-fn mgpu_partition_data_parallel(device_count: i64, global_batch: i64) -> PartitionPlan with Div {
+fn mgpu_partition_data_parallel(device_count: i64, global_batch: i64) -> PartitionPlan with Mut, Panic, Div {
     let local_batch: i64 = global_batch / device_count
     var plan: PartitionPlan = mgpu_partition_plan_default(PARTITION_DATA, device_count)
     plan = PartitionPlan {
@@ -512,7 +512,7 @@ fn mgpu_partition_data_parallel(device_count: i64, global_batch: i64) -> Partiti
     plan
 }
 
-fn mgpu_partition_model_parallel(device_count: i64, layer_count: i64) -> PartitionPlan with Div {
+fn mgpu_partition_model_parallel(device_count: i64, layer_count: i64) -> PartitionPlan with Mut, Panic, Div {
     var plan: PartitionPlan = mgpu_partition_plan_default(PARTITION_MODEL, device_count)
 
     // Assign layers round-robin across devices
@@ -535,7 +535,7 @@ fn mgpu_partition_model_parallel(device_count: i64, layer_count: i64) -> Partiti
     plan
 }
 
-fn mgpu_partition_pipeline(device_count: i64, layer_count: i64, micro_batches: i64) -> PartitionPlan with Div {
+fn mgpu_partition_pipeline(device_count: i64, layer_count: i64, micro_batches: i64) -> PartitionPlan with Mut, Panic, Div {
     var plan: PartitionPlan = mgpu_partition_plan_default(PARTITION_PIPELINE, device_count)
 
     // Assign contiguous layer ranges to devices (GPipe-style stages)
@@ -565,7 +565,7 @@ fn mgpu_partition_pipeline(device_count: i64, layer_count: i64, micro_batches: i
 // Ring AllReduce
 // ============================================================================
 
-fn ring_allreduce_chunk_count(device_count: i64, buf_size: i64, chunk_size: i64) -> i64 with Div {
+fn ring_allreduce_chunk_count(device_count: i64, buf_size: i64, chunk_size: i64) -> i64 with Panic, Div {
     mgpu_ceil_div(buf_size, chunk_size)
 }
 
@@ -640,7 +640,7 @@ fn ring_allreduce_allgather_step(state: GradSyncState, step: i64) -> ([RingChunk
 // Generate the full sequence of RingChunks for all 2*(n-1) steps.
 // Layout in result array: steps interleaved, each block of 16 is one step.
 // Returns (chunk_array, total_chunk_entries_written).
-fn ring_allreduce_plan(state: GradSyncState) -> ([RingChunk; 1024], i64) with Div {
+fn ring_allreduce_plan(state: GradSyncState) -> ([RingChunk; 1024], i64) with Mut, Panic, Div {
     var all_chunks: [RingChunk; 1024] = [mgpu_ring_chunk_default(); 1024]
 
     let n: i64 = state.device_count
@@ -684,7 +684,7 @@ fn ring_allreduce_plan(state: GradSyncState) -> ([RingChunk; 1024], i64) with Di
     (all_chunks, written)
 }
 
-fn grad_sync_state_new(device_count: i64, buf_size: i64, algo: i64) -> GradSyncState with Div {
+fn grad_sync_state_new(device_count: i64, buf_size: i64, algo: i64) -> GradSyncState with Panic, Div {
     // Double-buffering: chunk_size = buf_size / device_count / 2
     let chunk_size: i64 = buf_size / device_count / 2
     GradSyncState {
@@ -718,7 +718,7 @@ fn mgpu_p2p_transfer(src_device: i64, src_ptr: i64, dst_device: i64, dst_ptr: i6
     cudaMemcpyPeerAsync(dst_ptr, dst_device, src_ptr, src_device, bytes, stream)
 }
 
-fn mgpu_sync_all_devices(topo: MultiGpuTopology) -> (MultiGpuTopology, i64) with IO {
+fn mgpu_sync_all_devices(topo: MultiGpuTopology) -> (MultiGpuTopology, i64) with Mut, Div, IO {
     var errors: i64 = 0
     var i: i64      = 0
     while i < topo.device_count {
@@ -896,7 +896,7 @@ fn mgpu_schedule_for_pipeline(plan: PartitionPlan, micro_batches: i64) -> MultiG
 // High-level execution
 // ============================================================================
 
-fn mgpu_allreduce_sync(topo: MultiGpuTopology, gs: GradSyncState) -> (MultiGpuTopology, GradSyncState, bool) with IO {
+fn mgpu_allreduce_sync(topo: MultiGpuTopology, gs: GradSyncState) -> (MultiGpuTopology, GradSyncState, bool) with Mut, Panic, Div, IO {
     // Build the full ring allreduce plan
     let plan_result: ([RingChunk; 1024], i64) = ring_allreduce_plan(gs)
     let chunks: [RingChunk; 1024] = plan_result.0
@@ -953,7 +953,7 @@ fn mgpu_data_parallel_forward_backward(
     gs: GradSyncState,
     kernel_handles: [i64; 64],
     kernel_count: i64
-) -> (MultiGpuTopology, GradSyncState, bool) with IO {
+) -> (MultiGpuTopology, GradSyncState, bool) with Mut, Panic, Div, IO {
     // Launch all kernels on all devices asynchronously.
     // kernel_handles layout: kernel_handles[device * kernel_count + kernel_idx]
     // (Actual kernel launch would call into the backend; here we record intent
@@ -995,7 +995,7 @@ fn mgpu_data_parallel_forward_backward(
 // Diagnostics
 // ============================================================================
 
-fn mgpu_device_utilization(topo: MultiGpuTopology) -> (MultiGpuTopology, [i64; 16], i64) with IO {
+fn mgpu_device_utilization(topo: MultiGpuTopology) -> (MultiGpuTopology, [i64; 16], i64) with Mut, Panic, Div, IO {
     var utils: [i64; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     var i: i64 = 0
     while i < topo.device_count {
