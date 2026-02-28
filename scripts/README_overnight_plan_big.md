@@ -14,6 +14,46 @@ This document describes the reliability contract for the overnight Plan BIG lane
   - `bash scripts/check_overnight_plan_big_health.sh --auto-heal --tail-lines 20`
 - Burn-in:
   - `bash scripts/overnight_plan_big_burnin.sh --duration-sec 86400 --check-interval-sec 60 --auto-heal 1`
+- Hourly report snapshot:
+  - `bash scripts/overnight_plan_big_hourly_report.sh`
+- Ops-only regression suite:
+  - `bash scripts/overnight_plan_big_ops_suite.sh`
+  - isolated default (recommended for infra-only checks): uses runner gate `/bin/true`
+  - strict mode: `bash scripts/overnight_plan_big_ops_suite.sh --with-gate --runner-gate-script scripts/plan_big_gate.sh`
+
+## Tmux Default Environment
+
+Use the default ops cockpit (SSH-safe):
+
+- Start or refresh environment:
+  - `bash scripts/tmux_big_ops_default.sh up`
+- Reset session + restart runner/burn-in (recommended when changing env vars):
+  - `bash scripts/tmux_big_ops_default.sh up --reset`
+- Attach:
+  - `bash scripts/tmux_big_ops_default.sh attach`
+- Quick status:
+  - `bash scripts/tmux_big_ops_default.sh status`
+- Stop session only:
+  - `bash scripts/tmux_big_ops_default.sh down`
+- Stop session and processes:
+  - `bash scripts/tmux_big_ops_default.sh down --stop-processes`
+
+The `up` command applies tmux defaults (`mouse`, high `history-limit`, renumbered windows, remain-on-exit panes) and ensures overnight runner + burn-in are active.
+With `--reset`, it also stops existing runner/burn-in first, then starts clean (deterministic startup with current environment).
+It also opens default windows: `status`, `health`, `gate`, `report`, `burnin-log`.
+You can override runner gate command for tmux startup via:
+
+- `PLAN_BIG_OVERNIGHT_GATE_SCRIPT` (default: `scripts/plan_big_gate.sh`)
+- `PLAN_BIG_OVERNIGHT_GATE_ARGS` (default: empty)
+
+The runner accepts both executable binaries (example: `/bin/true`) and shell scripts for `PLAN_BIG_OVERNIGHT_GATE_SCRIPT`.
+
+Two practical startup profiles:
+
+- Strict (default):
+  - `bash scripts/tmux_big_ops_default.sh up --reset`
+- Infra/liveness (keeps health green independent of gate failures):
+  - `PLAN_BIG_OVERNIGHT_GATE_SCRIPT=/bin/true bash scripts/tmux_big_ops_default.sh up --reset`
 
 ## Strict Health Contract
 

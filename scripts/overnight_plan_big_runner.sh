@@ -12,6 +12,8 @@ ART_DIR="${PLAN_BIG_OVERNIGHT_ART_DIR:-$ROOT_DIR/artifacts/omega/overnight_plan_
 JSONL_PATH="${PLAN_BIG_OVERNIGHT_JSONL:-$ART_DIR/runs.v1.jsonl}"
 LATEST_JSON="${PLAN_BIG_OVERNIGHT_LATEST_JSON:-$ART_DIR/latest.v1.json}"
 GATE_STATUS_JSON="${PLAN_BIG_GATE_STATUS_JSON:-$ROOT_DIR/artifacts/omega/plan_big_gate_status.v1.json}"
+GATE_SCRIPT="${PLAN_BIG_OVERNIGHT_GATE_SCRIPT:-$ROOT_DIR/scripts/plan_big_gate.sh}"
+GATE_ARGS="${PLAN_BIG_OVERNIGHT_GATE_ARGS:-}"
 LOCK_DIR="${PLAN_BIG_OVERNIGHT_LOCK_DIR:-$ART_DIR/.lock}"
 LOCK_PID_FILE="$LOCK_DIR/pid"
 HEARTBEAT_JSON="${PLAN_BIG_OVERNIGHT_HEARTBEAT_JSON:-$ART_DIR/heartbeat.v1.json}"
@@ -73,6 +75,28 @@ if ! command -v jq >/dev/null 2>&1; then
   echo "error: jq is required for overnight plan-big runner" >&2
   exit 2
 fi
+if [[ "$GATE_SCRIPT" == */* ]]; then
+  if [[ "$GATE_SCRIPT" != /* ]]; then
+    GATE_SCRIPT="$ROOT_DIR/$GATE_SCRIPT"
+  fi
+  if [[ ! -e "$GATE_SCRIPT" ]]; then
+    echo "error: overnight gate script does not exist: $GATE_SCRIPT" >&2
+    exit 2
+  fi
+else
+  if command -v "$GATE_SCRIPT" >/dev/null 2>&1; then
+    GATE_SCRIPT="$(command -v "$GATE_SCRIPT")"
+  else
+    echo "error: overnight gate script command not found in PATH: $GATE_SCRIPT" >&2
+    exit 2
+  fi
+fi
+
+declare -a GATE_ARGS_ARRAY=()
+if [[ -n "$GATE_ARGS" ]]; then
+  # shellcheck disable=SC2206
+  GATE_ARGS_ARRAY=($GATE_ARGS)
+fi
 
 is_pid_live() {
   local pid="$1"
@@ -131,8 +155,13 @@ run_once() {
     > "$HEARTBEAT_JSON"
 
   set +e
-  bash "$ROOT_DIR/scripts/plan_big_gate.sh" >>"$run_log" 2>&1
-  gate_rc=$?
+  if [[ -x "$GATE_SCRIPT" ]]; then
+    "$GATE_SCRIPT" "${GATE_ARGS_ARRAY[@]}" >>"$run_log" 2>&1
+    gate_rc=$?
+  else
+    bash "$GATE_SCRIPT" "${GATE_ARGS_ARRAY[@]}" >>"$run_log" 2>&1
+    gate_rc=$?
+  fi
   set -e
 
   gate_status="fail"
@@ -158,6 +187,8 @@ run_once() {
     --argjson duration_sec "$duration_sec" \
     --arg log_path "$log_path_rel" \
     --arg gate_status_path "$gate_status_rel" \
+    --arg gate_script "${GATE_SCRIPT#$ROOT_DIR/}" \
+    --arg gate_args "$GATE_ARGS" \
     --argjson run_number "$((RUN_COUNT + 1))" \
     --arg pid "$$" \
     --argjson pass_marker "$pass_marker" \
@@ -172,6 +203,8 @@ run_once() {
       status: $status,
       rc: $rc,
       pass_marker: $pass_marker,
+      gate_script: $gate_script,
+      gate_args: $gate_args,
       gate_status_path: $gate_status_path,
       log_path: $log_path
     }')"
