@@ -47,17 +47,31 @@ check_no_match 'GLM_API_KEY="[^"]{20,}"' "docs/GLM_4.7_INTEGRATION.md" \
 check_no_match '\(~400 tests\)|\(3800\+ tests' "INSTALL.md" \
   "INSTALL.md contains stale hard-coded test suite counts:"
 
-workspace_version="$(awk '
-  /^\[workspace\.package\]/ { in_pkg=1; next }
-  /^\[/ && in_pkg { in_pkg=0 }
-  in_pkg && /version[[:space:]]*=/ {
-    gsub(/.*"/, "", $0); gsub(/".*/, "", $0); print; exit
-  }' Cargo.toml)"
-readme_version="$(sed -n 's/^\*\*Current Version\*\*:[[:space:]]*//p' README.md | head -n1)"
+check_no_match '3/34' "docs/WEBSITE_FEATURES.md" \
+  "docs/WEBSITE_FEATURES.md contains stale self-hosting count '3/34':"
 
-if [[ -n "$workspace_version" && -n "$readme_version" && "$workspace_version" != "$readme_version" ]]; then
-  echo "README version mismatch: README='$readme_version' Cargo.workspace='$workspace_version'"
-  fail=1
+check_no_match 'sounio-1' "docs/WEBSITE_FEATURES.md" \
+  "docs/WEBSITE_FEATURES.md contains wrong repo name 'sounio-1':"
+
+check_no_match '/home/demetrios/' "docs/WEBSITE_FEATURES.md" \
+  "docs/WEBSITE_FEATURES.md contains hardcoded local filesystem paths:"
+
+check_no_match 'v1\.0\.0.*February 2026' "docs/WEBSITE_FEATURES.md" \
+  "docs/WEBSITE_FEATURES.md contains premature release version claim:"
+
+if [[ -f Cargo.toml ]]; then
+  workspace_version="$(awk '
+    /^\[workspace\.package\]/ { in_pkg=1; next }
+    /^\[/ && in_pkg { in_pkg=0 }
+    in_pkg && /version[[:space:]]*=/ {
+      gsub(/.*"/, "", $0); gsub(/".*/, "", $0); print; exit
+    }' Cargo.toml)"
+  readme_version="$(sed -n 's/^\*\*Current Version\*\*:[[:space:]]*//p' README.md | head -n1)"
+
+  if [[ -n "$workspace_version" && -n "$readme_version" && "$workspace_version" != "$readme_version" ]]; then
+    echo "README version mismatch: README='$readme_version' Cargo.workspace='$workspace_version'"
+    fail=1
+  fi
 fi
 
 if [[ $fail -ne 0 ]]; then

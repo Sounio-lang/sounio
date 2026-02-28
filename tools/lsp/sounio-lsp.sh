@@ -259,7 +259,7 @@ write_open_doc_snapshot() {
     if [[ -d "$dir" ]] && [[ -w "$dir" ]]; then
         snapshot="$(mktemp "$dir/.sounio-lsp-snapshot.XXXXXX.sio")"
     else
-        snapshot="$(mktemp /tmp/.sounio-lsp-snapshot.XXXXXX.sio")"
+        snapshot="$(mktemp /tmp/.sounio-lsp-snapshot.XXXXXX.sio)"
     fi
     printf '%s' "${OPEN_DOCS[$uri]}" >"$snapshot"
     printf '%s\n' "$snapshot"

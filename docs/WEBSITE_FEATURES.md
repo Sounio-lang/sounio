@@ -294,7 +294,7 @@ Sounio's bootstrap path to becoming a self-compiled language, enabling full inde
 
 ### Phase 2: Embedded Bytecode (Complete ✅)
 
-- **34 embedded stdlib modules**: All compiler, math, and utility modules shipped in binary
+- **160+ embedded stdlib modules**: All compiler, math, and utility modules shipped in binary
 - **Build-time embedding**: `build.rs` discovers and compiles modules at compile time
 - **Zero-copy access**: Modules embedded as const byte arrays
 - **Automatic recompilation**: Changes to stdlib trigger rebuild
@@ -322,7 +322,7 @@ Sounio's bootstrap path to becoming a self-compiled language, enabling full inde
 **Limitations & Future Work**:
 - Advanced language features (closures, pattern matching, complex data structures)
 - Performance optimization (JIT compilation, Cranelift integration planned)
-- Full stdlib self-compilation (3/34 modules currently self-hosted)
+- Full stdlib self-compilation (164 files, 102K+ LOC self-hosted (bootstrap-verified))
 
 ### Performance Baseline
 
@@ -651,35 +651,32 @@ let concentration = dose / volume  // Type: mg/L
 
 ### Development Status
 
-- **Release**: v1.0.0 (February 2026)
+- **Release**: v0.100.3 (February 2026)
 - **License**: MIT (Open source)
 - **Repository**: github.com/sounio-lang/sounio
 - **Community**: Active contributors, peer-reviewed research
 
 ### Learning Resources
 
-- **Language Guide**: [docs/MINIMUM_VIABLE_SOUNIO.md](/home/demetrios/sounio-1/docs/MINIMUM_VIABLE_SOUNIO.md)
-- **Type System Reference**: [docs/LLM_PROGRAMMING_GUIDE.md](/home/demetrios/sounio-1/docs/LLM_PROGRAMMING_GUIDE.md)
-- **Language Specification**: [spec/LANGUAGE_SPECIFICATION.md](/home/demetrios/sounio-1/spec/LANGUAGE_SPECIFICATION.md)
+- **Language Guide**: [docs/MV_CORE_CHECKLIST.md](docs/MV_CORE_CHECKLIST.md)
+- **Type System Reference**: [docs/STYLE_GUIDE.md](docs/STYLE_GUIDE.md)
+- **Language Specification**: [spec/LANGUAGE_SPECIFICATION.md](spec/LANGUAGE_SPECIFICATION.md)
 - **Examples**: Over 100 runnable examples in `examples/`
 
 ### Build & Installation
 
 ```bash
-# Build compiler
-cd compiler && cargo build --release
+# Type-check a file
+souc check examples/hello.sio
+
+# Run a file
+souc run examples/hello.sio
+
+# Self-hosted compilation
+souc run self-hosted/ -- check examples/hello.sio
 
 # Run tests
-cargo test [test_name]
-
-# Check code
-cargo run -- check examples/file.sio --show-ast
-
-# Execute with GPU support
-cargo run --features gpu -- run examples/gpu_kernel.sio
-
-# REPL
-cargo run -- repl
+bash scripts/fast_gate.sh
 ```
 
 ---

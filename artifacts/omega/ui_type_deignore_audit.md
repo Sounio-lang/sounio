@@ -1,6 +1,6 @@
 # UI Type De-ignore Audit
 
-- generated_at_utc: 2026-02-28T11:10:31Z
+- generated_at_utc: 2026-02-28T11:53:14Z
 - souc_bin: /home/demetrios/work/sounio/souc
 - ignored_files: 31
 - safe_deignore_candidates: 0

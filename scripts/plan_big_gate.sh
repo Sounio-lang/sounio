@@ -7,6 +7,42 @@ cd "$ROOT_DIR"
 BOARD_JSON="${PLAN_BIG_STATUS_JSON:-$ROOT_DIR/artifacts/omega/plan_big_status_board.v1.json}"
 BOARD_MD="${PLAN_BIG_STATUS_MD:-$ROOT_DIR/artifacts/omega/plan_big_status_board.md}"
 OUT_JSON="${PLAN_BIG_GATE_STATUS_JSON:-$ROOT_DIR/artifacts/omega/plan_big_gate_status.v1.json}"
+OVERNIGHT_HEALTH_REQUIRED="${PLAN_BIG_OVERNIGHT_HEALTH_REQUIRED:-0}"
+OVERNIGHT_AUTO_HEAL="${PLAN_BIG_OVERNIGHT_HEALTH_AUTO_HEAL:-1}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --with-overnight-health)
+      OVERNIGHT_HEALTH_REQUIRED=1
+      shift
+      ;;
+    --without-overnight-health)
+      OVERNIGHT_HEALTH_REQUIRED=0
+      shift
+      ;;
+    --overnight-auto-heal)
+      OVERNIGHT_AUTO_HEAL=1
+      shift
+      ;;
+    --overnight-no-auto-heal)
+      OVERNIGHT_AUTO_HEAL=0
+      shift
+      ;;
+    *)
+      echo "error: unknown argument '$1'" >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ "$OVERNIGHT_HEALTH_REQUIRED" != "0" && "$OVERNIGHT_HEALTH_REQUIRED" != "1" ]]; then
+  echo "error: PLAN_BIG_OVERNIGHT_HEALTH_REQUIRED must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "$OVERNIGHT_AUTO_HEAL" != "0" && "$OVERNIGHT_AUTO_HEAL" != "1" ]]; then
+  echo "error: PLAN_BIG_OVERNIGHT_HEALTH_AUTO_HEAL must be 0 or 1" >&2
+  exit 2
+fi
 
 mkdir -p "$(dirname "$BOARD_JSON")" "$(dirname "$BOARD_MD")" "$(dirname "$OUT_JSON")"
 
@@ -25,9 +61,35 @@ fi
 
 gates_pass="false"
 critical_pass="false"
+overnight_health_pass="null"
+overnight_health_ran=false
+overnight_health_rc=0
+overnight_health_action="skipped"
 
 if jq -e '.gates | length > 0 and all(.status == "pass")' "$BOARD_JSON" >/dev/null 2>&1; then
   gates_pass="true"
+fi
+
+if [[ "$OVERNIGHT_HEALTH_REQUIRED" -eq 1 ]]; then
+  overnight_health_ran=true
+  overnight_health_action="checked"
+  if [[ "$OVERNIGHT_AUTO_HEAL" -eq 1 ]]; then
+    if bash "$ROOT_DIR/scripts/check_overnight_plan_big_health.sh" --auto-heal; then
+      overnight_health_pass="true"
+      overnight_health_rc=0
+    else
+      overnight_health_pass="false"
+      overnight_health_rc=$?
+    fi
+  else
+    if bash "$ROOT_DIR/scripts/check_overnight_plan_big_health.sh"; then
+      overnight_health_pass="true"
+      overnight_health_rc=0
+    else
+      overnight_health_pass="false"
+      overnight_health_rc=$?
+    fi
+  fi
 fi
 
 if jq -e '
@@ -43,6 +105,10 @@ if jq -e '
   critical_pass="true"
 fi
 
+if [[ "$OVERNIGHT_HEALTH_REQUIRED" -eq 1 && "$overnight_health_pass" != "true" ]]; then
+  critical_pass="false"
+fi
+
 status="fail"
 if [[ "$gates_pass" == "true" && "$critical_pass" == "true" ]]; then
   status="pass"
@@ -55,6 +121,11 @@ jq -cn \
   --arg board_md "${BOARD_MD#$ROOT_DIR/}" \
   --argjson gates_pass "$gates_pass" \
   --argjson critical_pass "$critical_pass" \
+  --argjson overnight_health_required "$OVERNIGHT_HEALTH_REQUIRED" \
+  --argjson overnight_health_ran "$overnight_health_ran" \
+  --argjson overnight_health_pass "$overnight_health_pass" \
+  --argjson overnight_health_rc "$overnight_health_rc" \
+  --arg overnight_health_action "$overnight_health_action" \
   '{
     schema: "sounio.plan.big.gate-status.v1",
     generated_at_utc: $generated_at_utc,
@@ -63,7 +134,12 @@ jq -cn \
     board_md: $board_md,
     checks: {
       gates_pass: $gates_pass,
-      critical_pass: $critical_pass
+      critical_pass: $critical_pass,
+      overnight_health_required: ($overnight_health_required == 1),
+      overnight_health_ran: $overnight_health_ran,
+      overnight_health_pass: $overnight_health_pass,
+      overnight_health_rc: $overnight_health_rc,
+      overnight_health_action: $overnight_health_action
     },
     pass_marker: ($status == "pass")
   }' > "$OUT_JSON"

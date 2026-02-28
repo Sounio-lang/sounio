@@ -1,10 +1,12 @@
 # Sounio Paper Build
 # Targets: arxiv (preprint), ieee (CiSE submission)
 
-PREPRINT = sounio-epistemic-types
 IEEE     = sounio-ieee-cise
+POPL     = popl2027/main
+PLDI     = epistemic-types/main
+ARXIV_MD = sounio_arxiv_draft.md
 
-.PHONY: all ieee arxiv clean
+.PHONY: all ieee popl pldi arxiv clean
 
 all: ieee
 
@@ -17,23 +19,25 @@ $(IEEE).pdf: $(IEEE).tex references.bib
 	pdflatex $(IEEE)
 	pdflatex $(IEEE)
 
-# ArXiv preprint
-arxiv: $(PREPRINT).pdf
+# POPL 2027 submission
+popl: $(POPL).pdf
 
-$(PREPRINT).pdf: $(PREPRINT).tex references.bib
-	pdflatex $(PREPRINT)
-	bibtex $(PREPRINT)
-	pdflatex $(PREPRINT)
-	pdflatex $(PREPRINT)
+$(POPL).pdf: $(POPL).tex popl2027/references.bib
+	cd popl2027 && pdflatex main && bibtex main && pdflatex main && pdflatex main
 
-arxiv-tar: $(PREPRINT).pdf
-	mkdir -p arxiv-submission
-	cp $(PREPRINT).tex arxiv-submission/
-	cp references.bib arxiv-submission/
-	cp $(PREPRINT).bbl arxiv-submission/
-	tar -czvf arxiv-submission.tar.gz arxiv-submission/
-	@echo "Created arxiv-submission.tar.gz for arXiv upload"
+# PLDI 2027 submission
+pldi: $(PLDI).pdf
+
+$(PLDI).pdf: $(PLDI).tex references.bib epistemic-types/gpu_benchmarks.tex
+	cd epistemic-types && pdflatex main && bibtex main && pdflatex main && pdflatex main
+
+# ArXiv preprint (Markdown source — convert via pandoc)
+arxiv: $(ARXIV_MD)
+	pandoc $(ARXIV_MD) -o sounio_arxiv_draft.pdf --pdf-engine=pdflatex \
+		--variable=geometry:margin=1in --variable=fontsize:11pt || \
+		echo "pandoc not available; $(ARXIV_MD) is the canonical arXiv source"
 
 clean:
 	rm -f *.aux *.bbl *.blg *.log *.out *.toc *.pdf
-	rm -rf arxiv-submission arxiv-submission.tar.gz
+	rm -f popl2027/*.aux popl2027/*.bbl popl2027/*.blg popl2027/*.log popl2027/*.out popl2027/*.pdf
+	rm -f epistemic-types/*.aux epistemic-types/*.bbl epistemic-types/*.blg epistemic-types/*.log epistemic-types/*.out epistemic-types/*.pdf
