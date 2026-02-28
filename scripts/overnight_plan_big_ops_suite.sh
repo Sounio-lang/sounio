@@ -90,6 +90,8 @@ bash -n scripts/overnight_plan_big_runner.sh \
   scripts/overnight_plan_big_status.sh \
   scripts/check_overnight_plan_big_health.sh \
   scripts/overnight_plan_big_burnin.sh \
+  scripts/plan_big_strict_canary.sh \
+  scripts/rotate_overnight_plan_big_artifacts.sh \
   scripts/overnight_plan_big_hourly_report.sh \
   scripts/tmux_big_ops_default.sh
 
@@ -116,7 +118,12 @@ bash scripts/overnight_plan_big_burnin.sh \
   --fail-fast 1
 
 echo "[ops-suite] hourly report"
-bash scripts/overnight_plan_big_hourly_report.sh
+if [[ "$WITH_GATE" -eq 1 ]]; then
+  bash scripts/overnight_plan_big_hourly_report.sh
+else
+  PLAN_BIG_STRICT_CANARY_ENABLE=0 bash scripts/overnight_plan_big_hourly_report.sh
+fi
+jq -e '.schema == "sounio.plan.big.overnight.hourly-report.v1" and .snapshot.strict_canary_status != null and .snapshot.retention_status != null' artifacts/omega/overnight_plan_big_hourly_report.v1.json >/dev/null
 
 if [[ "$WITH_GATE" -eq 1 ]]; then
   echo "[ops-suite] strict plan_big_gate with burn-in"

@@ -1,0 +1,66 @@
+name: Ops Lane Guardrail
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+  schedule:
+    - cron: "15 * * * *"
+
+jobs:
+  ops-lane-guardrail:
+    name: Overnight Ops Lane Guardrail
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      OMEGA_SOUC_REQUIRE_PINNED: "1"
+      OMEGA_SOUC_ALLOW_LOCAL_FALLBACK: "0"
+      SOUNIO_REPO_HARD_NO_RUST: "1"
+      PLAN_BIG_OPS_SUITE_RUNNER_GATE_SCRIPT: scripts/plan_big_gate.sh
+      PLAN_BIG_OPS_SUITE_BURNIN_DURATION_SEC: "120"
+      PLAN_BIG_OPS_SUITE_BURNIN_INTERVAL_SEC: "20"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve pinned souc binary
+        run: |
+          SOUC_BIN="$(bash scripts/omega/omega_resolve_souc_bin.sh --print-path)"
+          echo "SOUC_BIN=$SOUC_BIN" >> "$GITHUB_ENV"
+
+      - name: Run strict ops lane suite
+        run: |
+          bash scripts/overnight_plan_big_ops_suite.sh --with-gate
+
+      - name: Run strict canary snapshot
+        run: |
+          bash scripts/plan_big_strict_canary.sh
+
+      - name: Run retention rotation snapshot
+        run: |
+          bash scripts/rotate_overnight_plan_big_artifacts.sh
+
+      - name: Verify guardrail artifacts
+        run: |
+          jq -e '.schema == "sounio.plan.big.gate-status.v1" and .status == "pass" and .pass_marker == true' artifacts/omega/plan_big_gate_status.v1.json
+          jq -e '.schema == "sounio.plan.big.overnight.health.v1" and .healthy == true' artifacts/omega/overnight_plan_big_health.v1.json
+          jq -e '.schema == "sounio.plan.big.overnight.burnin.v1" and .status == "pass"' artifacts/omega/overnight_plan_big_burnin.v1.json
+          jq -e '.schema == "sounio.plan.big.strict-canary.run.v1" and .status == "pass" and .pass_marker == true' artifacts/omega/plan_big_strict_canary/latest.v1.json
+          jq -e '.schema == "sounio.plan.big.overnight-retention.v1" and .pass_marker == true' artifacts/omega/overnight_plan_big_retention.v1.json
+
+      - name: Upload ops lane artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ops-lane-guardrail
+          path: |
+            artifacts/omega/overnight_plan_big/
+            artifacts/omega/overnight_plan_big_health.v1.json
+            artifacts/omega/overnight_plan_big_burnin.v1.json
+            artifacts/omega/overnight_plan_big_hourly_report.v1.json
+            artifacts/omega/overnight_plan_big_retention.v1.json
+            artifacts/omega/plan_big_gate_status.v1.json
+            artifacts/omega/plan_big_strict_canary/
+          retention-days: 7

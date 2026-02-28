@@ -24,6 +24,7 @@ STATUS_LOOP_SEC="${PLAN_BIG_TMUX_STATUS_LOOP_SEC:-60}"
 HEALTH_LOOP_SEC="${PLAN_BIG_TMUX_HEALTH_LOOP_SEC:-300}"
 GATE_LOOP_SEC="${PLAN_BIG_TMUX_GATE_LOOP_SEC:-900}"
 REPORT_LOOP_SEC="${PLAN_BIG_TMUX_REPORT_LOOP_SEC:-3600}"
+CANARY_LOOP_SEC="${PLAN_BIG_TMUX_CANARY_LOOP_SEC:-600}"
 
 usage() {
   cat <<USAGE
@@ -130,6 +131,8 @@ mk_session() {
     "cd '$ROOT_DIR' && while true; do printf '[%s] ' \"\$(date -u +%Y-%m-%dT%H:%M:%SZ)\"; if [ -f artifacts/omega/plan_big_gate_status.v1.json ]; then jq -r '.status + \" burnin_required=\" + (.checks.overnight_burnin_required|tostring) + \" burnin_pass=\" + (.checks.overnight_burnin_pass|tostring)' artifacts/omega/plan_big_gate_status.v1.json; else echo 'GATE_STATUS_MISSING'; fi; sleep '$GATE_LOOP_SEC'; done"
   tmux new-window -t "$SESSION_NAME" -n report \
     "cd '$ROOT_DIR' && while true; do printf '[%s] ' \"\$(date -u +%Y-%m-%dT%H:%M:%SZ)\"; if bash scripts/overnight_plan_big_hourly_report.sh >/dev/null 2>&1; then echo 'REPORT_UPDATED'; else echo 'REPORT_FAIL'; fi; sleep '$REPORT_LOOP_SEC'; done"
+  tmux new-window -t "$SESSION_NAME" -n canary \
+    "cd '$ROOT_DIR' && while true; do printf '[%s] ' \"\$(date -u +%Y-%m-%dT%H:%M:%SZ)\"; if [ -f artifacts/omega/plan_big_strict_canary/latest.v1.json ]; then jq -r '.status + \"/\" + (.rc|tostring) + \" run=\" + (.run_number|tostring) + \" at=\" + .finished_at_utc' artifacts/omega/plan_big_strict_canary/latest.v1.json; else echo 'STRICT_CANARY_MISSING'; fi; sleep '$CANARY_LOOP_SEC'; done"
   tmux new-window -t "$SESSION_NAME" -n burnin-log \
     "cd '$ROOT_DIR' && touch '$BURNIN_LOG' && tail -n 200 -F '$BURNIN_LOG'"
 }
