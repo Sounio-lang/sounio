@@ -1,0 +1,1367 @@
+// Trait/interface solver — trait resolution, method dispatch, coherence
+//
+// Implements trait definitions, implementations, resolution, supertrait
+// checking, vtable construction, coherence rules, and built-in trait
+// auto-derivation for the self-hosted type checker.
+//
+// Uses flat-array arena pattern consistent with the rest of the
+// self-hosted checker (no recursive types, integer IDs everywhere).
+
+// ============================================================
+// Built-in trait ID constants
+// ============================================================
+
+let TRAIT_COPY: i64 = 1
+let TRAIT_DROP: i64 = 2
+let TRAIT_EQ: i64 = 3
+let TRAIT_ORD: i64 = 4
+let TRAIT_HASH: i64 = 5
+let TRAIT_ADD: i64 = 10
+let TRAIT_SUB: i64 = 11
+let TRAIT_MUL: i64 = 12
+let TRAIT_DIV_TRAIT: i64 = 13
+let TRAIT_DISPLAY: i64 = 20
+let TRAIT_DEBUG: i64 = 21
+
+// Sentinel for "not found"
+let TRAIT_NOT_FOUND: i64 = 0 - 1
+
+// ============================================================
+// TraitMethod — a single method declaration in a trait
+// ============================================================
+
+struct TraitMethod {
+    name: i64,
+    param_types: [i64; 8],
+    param_count: i64,
+    return_type: i64,
+    has_default_impl: bool,
+}
+
+fn empty_trait_method() -> TraitMethod {
+    TraitMethod {
+        name: 0,
+        param_types: [0; 8],
+        param_count: 0,
+        return_type: 0,
+        has_default_impl: false,
+    }
+}
+
+// ============================================================
+// TraitDef — a complete trait definition
+// ============================================================
+
+struct TraitDef {
+    name: i64,
+    methods: [TraitMethod; 16],
+    method_count: i64,
+    supertraits: [i64; 8],
+    supertrait_count: i64,
+}
+
+fn empty_trait_def() -> TraitDef {
+    TraitDef {
+        name: 0,
+        methods: [empty_trait_method(); 16],
+        method_count: 0,
+        supertraits: [0; 8],
+        supertrait_count: 0,
+    }
+}
+
+// ============================================================
+// TraitDef builder helpers
+// ============================================================
+
+fn trait_def_new(name: i64) -> TraitDef {
+    TraitDef {
+        name: name,
+        methods: [empty_trait_method(); 16],
+        method_count: 0,
+        supertraits: [0; 8],
+        supertrait_count: 0,
+    }
+}
+
+fn trait_def_add_method(def: TraitDef, method: TraitMethod) -> TraitDef with Mut, Panic, Div {
+    var d = def
+    if d.method_count < 16 {
+        d.methods[d.method_count as usize] = method
+        d.method_count = d.method_count + 1
+    }
+    d
+}
+
+fn trait_def_add_supertrait(def: TraitDef, super_id: i64) -> TraitDef with Mut, Panic, Div {
+    var d = def
+    if d.supertrait_count < 8 {
+        d.supertraits[d.supertrait_count as usize] = super_id
+        d.supertrait_count = d.supertrait_count + 1
+    }
+    d
+}
+
+fn trait_def_find_method(def: TraitDef, method_name: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < def.method_count {
+        if def.methods[i as usize].name == method_name {
+            return i
+        }
+        i = i + 1
+    }
+    TRAIT_NOT_FOUND
+}
+
+// ============================================================
+// TraitRegistry — table of all known trait definitions
+// ============================================================
+
+struct TraitRegistry {
+    traits: [TraitDef; 256],
+    count: i64,
+}
+
+fn trait_registry_new() -> TraitRegistry {
+    TraitRegistry {
+        traits: [empty_trait_def(); 256],
+        count: 0,
+    }
+}
+
+fn trait_register(reg: TraitRegistry, def: TraitDef) -> TraitRegistry with Mut, Panic, Div {
+    var r = reg
+    if r.count < 256 {
+        r.traits[r.count as usize] = def
+        r.count = r.count + 1
+    }
+    r
+}
+
+fn trait_registry_find(reg: TraitRegistry, trait_name: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < reg.count {
+        if reg.traits[i as usize].name == trait_name {
+            return i
+        }
+        i = i + 1
+    }
+    TRAIT_NOT_FOUND
+}
+
+fn trait_registry_get(reg: TraitRegistry, idx: i64) -> TraitDef with Panic, Div {
+    reg.traits[idx as usize]
+}
+
+// ============================================================
+// ImplMethod — maps a trait method to a concrete function
+// ============================================================
+
+struct ImplMethod {
+    trait_method_idx: i64,
+    impl_fn_id: i64,
+}
+
+fn empty_impl_method() -> ImplMethod {
+    ImplMethod {
+        trait_method_idx: 0,
+        impl_fn_id: 0,
+    }
+}
+
+// ============================================================
+// TraitImpl — a concrete implementation of a trait for a type
+// ============================================================
+
+struct TraitImpl {
+    trait_id: i64,
+    impl_type: i64,
+    type_params: [i64; 8],
+    type_param_count: i64,
+    methods: [ImplMethod; 16],
+    method_count: i64,
+}
+
+fn empty_trait_impl() -> TraitImpl {
+    TraitImpl {
+        trait_id: 0,
+        impl_type: 0,
+        type_params: [0; 8],
+        type_param_count: 0,
+        methods: [empty_impl_method(); 16],
+        method_count: 0,
+    }
+}
+
+fn trait_impl_new(trait_id: i64, impl_type: i64) -> TraitImpl {
+    TraitImpl {
+        trait_id: trait_id,
+        impl_type: impl_type,
+        type_params: [0; 8],
+        type_param_count: 0,
+        methods: [empty_impl_method(); 16],
+        method_count: 0,
+    }
+}
+
+fn trait_impl_add_method(ti: TraitImpl, method_idx: i64, fn_id: i64) -> TraitImpl with Mut, Panic, Div {
+    var t = ti
+    if t.method_count < 16 {
+        t.methods[t.method_count as usize] = ImplMethod {
+            trait_method_idx: method_idx,
+            impl_fn_id: fn_id,
+        }
+        t.method_count = t.method_count + 1
+    }
+    t
+}
+
+fn trait_impl_add_type_param(ti: TraitImpl, param: i64) -> TraitImpl with Mut, Panic, Div {
+    var t = ti
+    if t.type_param_count < 8 {
+        t.type_params[t.type_param_count as usize] = param
+        t.type_param_count = t.type_param_count + 1
+    }
+    t
+}
+
+fn trait_impl_find_method(ti: TraitImpl, trait_method_idx: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < ti.method_count {
+        if ti.methods[i as usize].trait_method_idx == trait_method_idx {
+            return ti.methods[i as usize].impl_fn_id
+        }
+        i = i + 1
+    }
+    TRAIT_NOT_FOUND
+}
+
+// ============================================================
+// ImplRegistry — table of all trait implementations
+// ============================================================
+
+struct ImplRegistry {
+    impls: [TraitImpl; 1024],
+    count: i64,
+}
+
+fn impl_registry_new() -> ImplRegistry {
+    ImplRegistry {
+        impls: [empty_trait_impl(); 1024],
+        count: 0,
+    }
+}
+
+fn impl_register(reg: ImplRegistry, ti: TraitImpl) -> ImplRegistry with Mut, Panic, Div {
+    var r = reg
+    if r.count < 1024 {
+        r.impls[r.count as usize] = ti
+        r.count = r.count + 1
+    }
+    r
+}
+
+// ============================================================
+// Trait resolution
+// ============================================================
+
+// Find implementation of trait_id for type_id
+// Returns (found, impl_index)
+fn trait_resolve(trait_reg: TraitRegistry, impl_reg: ImplRegistry, trait_id: i64, type_id: i64) -> (bool, i64) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < impl_reg.count {
+        if impl_reg.impls[i as usize].trait_id == trait_id && impl_reg.impls[i as usize].impl_type == type_id {
+            return (true, i)
+        }
+        i = i + 1
+    }
+    (false, TRAIT_NOT_FOUND)
+}
+
+// Resolve a specific method of a trait for a type
+// Returns (found, fn_id)
+fn trait_resolve_method(trait_reg: TraitRegistry, impl_reg: ImplRegistry, trait_id: i64, type_id: i64, method_name: i64) -> (bool, i64) with Mut, Panic, Div {
+    // First find the implementation
+    let resolve_result = trait_resolve(trait_reg, impl_reg, trait_id, type_id)
+    let found = resolve_result.0
+    let impl_idx = resolve_result.1
+    if !found {
+        return (false, TRAIT_NOT_FOUND)
+    }
+
+    // Find which method index this name corresponds to in the trait def
+    let trait_idx = trait_registry_find(trait_reg, trait_id)
+    if trait_idx == TRAIT_NOT_FOUND {
+        return (false, TRAIT_NOT_FOUND)
+    }
+    let def = trait_registry_get(trait_reg, trait_idx)
+    let method_idx = trait_def_find_method(def, method_name)
+    if method_idx == TRAIT_NOT_FOUND {
+        // Check if there is a default impl for this method name
+        return (false, TRAIT_NOT_FOUND)
+    }
+
+    // Look up the impl method
+    let fn_id = trait_impl_find_method(impl_reg.impls[impl_idx as usize], method_idx)
+    if fn_id == TRAIT_NOT_FOUND {
+        // Method not implemented; check for default
+        if def.methods[method_idx as usize].has_default_impl {
+            // Return the method index as a sentinel indicating default
+            return (true, 0 - 2)
+        }
+        return (false, TRAIT_NOT_FOUND)
+    }
+    (true, fn_id)
+}
+
+// Check if a type has an implementation of a specific trait
+fn trait_has_impl(impl_reg: ImplRegistry, trait_id: i64, type_id: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < impl_reg.count {
+        if impl_reg.impls[i as usize].trait_id == trait_id && impl_reg.impls[i as usize].impl_type == type_id {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// ============================================================
+// Supertrait checking
+// ============================================================
+
+// Check if a type satisfies all trait bounds
+fn trait_satisfies_bounds(trait_reg: TraitRegistry, impl_reg: ImplRegistry, type_id: i64, bounds: [i64; 8], bound_count: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < bound_count {
+        let bound_trait = bounds[i as usize]
+        if !trait_has_impl(impl_reg, bound_trait, type_id) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Compute the transitive closure of all supertraits for a given trait
+// Returns an array of trait IDs (up to 32)
+fn trait_all_supertraits(trait_reg: TraitRegistry, trait_id: i64) -> ([i64; 32], i64) with Mut, Panic, Div {
+    var result: [i64; 32] = [0; 32]
+    var result_count: i64 = 0
+
+    // Work queue: BFS over supertrait graph
+    var queue: [i64; 32] = [0; 32]
+    var queue_head: i64 = 0
+    var queue_tail: i64 = 0
+
+    // Seed with direct supertraits
+    let idx = trait_registry_find(trait_reg, trait_id)
+    if idx == TRAIT_NOT_FOUND {
+        return (result, 0)
+    }
+    let def = trait_registry_get(trait_reg, idx)
+    var s: i64 = 0
+    while s < def.supertrait_count {
+        queue[queue_tail as usize] = def.supertraits[s as usize]
+        queue_tail = queue_tail + 1
+        s = s + 1
+    }
+
+    // BFS
+    while queue_head < queue_tail {
+        let current = queue[queue_head as usize]
+        queue_head = queue_head + 1
+
+        // Check if already in result
+        var already = false
+        var j: i64 = 0
+        while j < result_count {
+            if result[j as usize] == current {
+                already = true
+            }
+            j = j + 1
+        }
+
+        if !already && result_count < 32 {
+            result[result_count as usize] = current
+            result_count = result_count + 1
+
+            // Enqueue supertraits of current
+            let cur_idx = trait_registry_find(trait_reg, current)
+            if cur_idx != TRAIT_NOT_FOUND {
+                let cur_def = trait_registry_get(trait_reg, cur_idx)
+                var k: i64 = 0
+                while k < cur_def.supertrait_count && queue_tail < 32 {
+                    queue[queue_tail as usize] = cur_def.supertraits[k as usize]
+                    queue_tail = queue_tail + 1
+                    k = k + 1
+                }
+            }
+        }
+    }
+
+    (result, result_count)
+}
+
+// Check if an implementation provides all required methods
+fn trait_check_impl_complete(trait_reg: TraitRegistry, ti: TraitImpl) -> bool with Mut, Panic, Div {
+    let trait_idx = trait_registry_find(trait_reg, ti.trait_id)
+    if trait_idx == TRAIT_NOT_FOUND {
+        return false
+    }
+    let def = trait_registry_get(trait_reg, trait_idx)
+
+    var i: i64 = 0
+    while i < def.method_count {
+        // If the method has a default impl, it doesn't need to be provided
+        if !def.methods[i as usize].has_default_impl {
+            // Check that the impl provides this method
+            let fn_id = trait_impl_find_method(ti, i)
+            if fn_id == TRAIT_NOT_FOUND {
+                return false
+            }
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Check that a type satisfies all supertraits of a given trait
+fn trait_check_supertrait_impls(trait_reg: TraitRegistry, impl_reg: ImplRegistry, trait_id: i64, type_id: i64) -> bool with Mut, Panic, Div {
+    let supers = trait_all_supertraits(trait_reg, trait_id)
+    let super_ids = supers.0
+    let super_count = supers.1
+
+    var i: i64 = 0
+    while i < super_count {
+        if !trait_has_impl(impl_reg, super_ids[i as usize], type_id) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// ============================================================
+// VTable — method dispatch table
+// ============================================================
+
+struct VTable {
+    method_ids: [i64; 32],
+    count: i64,
+    trait_id: i64,
+    impl_type: i64,
+}
+
+fn empty_vtable() -> VTable {
+    VTable {
+        method_ids: [0; 32],
+        count: 0,
+        trait_id: 0,
+        impl_type: 0,
+    }
+}
+
+fn vtable_build(trait_reg: TraitRegistry, impl_reg: ImplRegistry, trait_id: i64, type_id: i64) -> VTable with Mut, Panic, Div {
+    var vt = VTable {
+        method_ids: [0; 32],
+        count: 0,
+        trait_id: trait_id,
+        impl_type: type_id,
+    }
+
+    // Find the trait definition
+    let trait_idx = trait_registry_find(trait_reg, trait_id)
+    if trait_idx == TRAIT_NOT_FOUND {
+        return vt
+    }
+    let def = trait_registry_get(trait_reg, trait_idx)
+
+    // Find the implementation
+    let resolve_result = trait_resolve(trait_reg, impl_reg, trait_id, type_id)
+    let found = resolve_result.0
+    let impl_idx = resolve_result.1
+    if !found {
+        return vt
+    }
+    let ti = impl_reg.impls[impl_idx as usize]
+
+    // Build vtable: one entry per trait method, in order
+    var i: i64 = 0
+    while i < def.method_count && vt.count < 32 {
+        let fn_id = trait_impl_find_method(ti, i)
+        if fn_id != TRAIT_NOT_FOUND {
+            vt.method_ids[vt.count as usize] = fn_id
+        } else {
+            // Default impl or missing — use sentinel
+            vt.method_ids[vt.count as usize] = 0 - 1
+        }
+        vt.count = vt.count + 1
+        i = i + 1
+    }
+
+    vt
+}
+
+fn vtable_lookup(vt: VTable, method_idx: i64) -> i64 with Panic, Div {
+    if method_idx < 0 || method_idx >= vt.count {
+        return TRAIT_NOT_FOUND
+    }
+    vt.method_ids[method_idx as usize]
+}
+
+// ============================================================
+// Coherence checking
+// ============================================================
+
+// Orphan rule: an impl is valid only if the trait or the implementing
+// type is "local" (i.e., defined in the current crate). Here we use
+// a simplified model: trait_id and impl_type are encoded as packed
+// integers. The high 16 bits represent the crate ID (0 = local).
+fn trait_crate_id(packed: i64) -> i64 with Div, Panic {
+    // High 16 bits: shift right by 16
+    packed / 65536
+}
+
+fn trait_check_orphan(ti: TraitImpl) -> bool with Div, Panic {
+    let trait_crate = trait_crate_id(ti.trait_id)
+    let type_crate = trait_crate_id(ti.impl_type)
+    // At least one of trait or type must be local (crate 0)
+    trait_crate == 0 || type_crate == 0
+}
+
+// Check if a new impl overlaps with an existing one
+// Two impls overlap if they are for the same trait and same type
+fn trait_check_overlap(impl_reg: ImplRegistry, new_impl: TraitImpl) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < impl_reg.count {
+        let existing = impl_reg.impls[i as usize]
+        if existing.trait_id == new_impl.trait_id && existing.impl_type == new_impl.impl_type {
+            // Same trait + same type => overlap
+            // For generic impls, also check type param overlap
+            if existing.type_param_count == 0 && new_impl.type_param_count == 0 {
+                return true
+            }
+            // If both have type params, check if they could unify
+            if existing.type_param_count == new_impl.type_param_count {
+                var all_same = true
+                var j: i64 = 0
+                while j < existing.type_param_count {
+                    if existing.type_params[j as usize] != new_impl.type_params[j as usize] {
+                        all_same = false
+                    }
+                    j = j + 1
+                }
+                if all_same {
+                    return true
+                }
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+// ============================================================
+// Built-in trait queries
+// ============================================================
+
+fn trait_is_builtin(trait_id: i64) -> bool {
+    // Copy, Drop, Eq, Ord, Hash
+    if trait_id >= 1 && trait_id <= 5 {
+        return true
+    }
+    // Add, Sub, Mul, Div
+    if trait_id >= 10 && trait_id <= 13 {
+        return true
+    }
+    // Display, Debug
+    if trait_id >= 20 && trait_id <= 21 {
+        return true
+    }
+    false
+}
+
+// Check if all fields of a type implement a given trait.
+// field_types contains the type IDs of the struct fields.
+fn trait_fields_all_implement(impl_reg: ImplRegistry, trait_id: i64, field_types: [i64; 16], field_count: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < field_count {
+        if !trait_has_impl(impl_reg, trait_id, field_types[i as usize]) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Auto-derive: for certain built-in traits, if all fields implement the
+// trait, then the containing struct can also implement it automatically.
+// Returns true if auto-derive is possible.
+fn trait_auto_derive(trait_id: i64, type_fields: [i64; 16], field_count: i64, impl_reg: ImplRegistry) -> bool with Mut, Panic, Div {
+    // Only auto-derivable traits: Copy, Eq, Ord, Hash, Debug
+    if trait_id == TRAIT_COPY || trait_id == TRAIT_EQ || trait_id == TRAIT_ORD ||
+       trait_id == TRAIT_HASH || trait_id == TRAIT_DEBUG {
+        // All fields must implement the trait
+        return trait_fields_all_implement(impl_reg, trait_id, type_fields, field_count)
+    }
+
+    // Drop cannot be auto-derived (requires custom logic)
+    if trait_id == TRAIT_DROP {
+        return false
+    }
+
+    // Arithmetic traits not auto-derivable
+    if trait_id >= TRAIT_ADD && trait_id <= TRAIT_DIV_TRAIT {
+        return false
+    }
+
+    // Display is not auto-derivable
+    if trait_id == TRAIT_DISPLAY {
+        return false
+    }
+
+    false
+}
+
+// ============================================================
+// Primitive type trait registrations
+// ============================================================
+
+// Type ID constants for primitives (low 16 bits)
+let PRIM_I64: i64 = 1
+let PRIM_F64: i64 = 2
+let PRIM_BOOL: i64 = 3
+let PRIM_STRING: i64 = 4
+let PRIM_I32: i64 = 5
+let PRIM_U8: i64 = 6
+let PRIM_U32: i64 = 7
+let PRIM_U64: i64 = 8
+
+// Register built-in impls for primitive types
+fn impl_register_builtins(reg: ImplRegistry) -> ImplRegistry with Mut, Panic, Div {
+    var r = reg
+
+    // i64: Copy, Eq, Ord, Hash, Add, Sub, Mul, Div, Debug, Display
+    r = impl_register(r, trait_impl_new(TRAIT_COPY, PRIM_I64))
+    r = impl_register(r, trait_impl_new(TRAIT_EQ, PRIM_I64))
+    r = impl_register(r, trait_impl_new(TRAIT_ORD, PRIM_I64))
+    r = impl_register(r, trait_impl_new(TRAIT_HASH, PRIM_I64))
+    r = impl_register(r, trait_impl_new(TRAIT_ADD, PRIM_I64))
+    r = impl_register(r, trait_impl_new(TRAIT_SUB, PRIM_I64))
+    r = impl_register(r, trait_impl_new(TRAIT_MUL, PRIM_I64))
+    r = impl_register(r, trait_impl_new(TRAIT_DIV_TRAIT, PRIM_I64))
+    r = impl_register(r, trait_impl_new(TRAIT_DEBUG, PRIM_I64))
+    r = impl_register(r, trait_impl_new(TRAIT_DISPLAY, PRIM_I64))
+
+    // f64: Copy, Eq, Add, Sub, Mul, Div, Debug, Display
+    r = impl_register(r, trait_impl_new(TRAIT_COPY, PRIM_F64))
+    r = impl_register(r, trait_impl_new(TRAIT_EQ, PRIM_F64))
+    r = impl_register(r, trait_impl_new(TRAIT_ADD, PRIM_F64))
+    r = impl_register(r, trait_impl_new(TRAIT_SUB, PRIM_F64))
+    r = impl_register(r, trait_impl_new(TRAIT_MUL, PRIM_F64))
+    r = impl_register(r, trait_impl_new(TRAIT_DIV_TRAIT, PRIM_F64))
+    r = impl_register(r, trait_impl_new(TRAIT_DEBUG, PRIM_F64))
+    r = impl_register(r, trait_impl_new(TRAIT_DISPLAY, PRIM_F64))
+
+    // bool: Copy, Eq, Hash, Debug, Display
+    r = impl_register(r, trait_impl_new(TRAIT_COPY, PRIM_BOOL))
+    r = impl_register(r, trait_impl_new(TRAIT_EQ, PRIM_BOOL))
+    r = impl_register(r, trait_impl_new(TRAIT_HASH, PRIM_BOOL))
+    r = impl_register(r, trait_impl_new(TRAIT_DEBUG, PRIM_BOOL))
+    r = impl_register(r, trait_impl_new(TRAIT_DISPLAY, PRIM_BOOL))
+
+    // string: Eq, Hash, Debug, Display
+    r = impl_register(r, trait_impl_new(TRAIT_EQ, PRIM_STRING))
+    r = impl_register(r, trait_impl_new(TRAIT_HASH, PRIM_STRING))
+    r = impl_register(r, trait_impl_new(TRAIT_DEBUG, PRIM_STRING))
+    r = impl_register(r, trait_impl_new(TRAIT_DISPLAY, PRIM_STRING))
+
+    r
+}
+
+// ============================================================
+// Method resolution order (MRO) — breadth-first supertrait search
+// ============================================================
+
+// Resolve a method name across a type's trait implementations.
+// Searches all impls for the given type, looking for a matching method.
+// Returns (found, fn_id).
+fn trait_resolve_any_method(trait_reg: TraitRegistry, impl_reg: ImplRegistry, type_id: i64, method_name: i64) -> (bool, i64) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < impl_reg.count {
+        if impl_reg.impls[i as usize].impl_type == type_id {
+            let tid = impl_reg.impls[i as usize].trait_id
+            let result = trait_resolve_method(trait_reg, impl_reg, tid, type_id, method_name)
+            if result.0 {
+                return result
+            }
+        }
+        i = i + 1
+    }
+    (false, TRAIT_NOT_FOUND)
+}
+
+// Count how many traits a type implements
+fn trait_count_impls(impl_reg: ImplRegistry, type_id: i64) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < impl_reg.count {
+        if impl_reg.impls[i as usize].impl_type == type_id {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Collect all trait IDs that a type implements
+fn trait_collect_impls(impl_reg: ImplRegistry, type_id: i64) -> ([i64; 32], i64) with Mut, Panic, Div {
+    var result: [i64; 32] = [0; 32]
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < impl_reg.count {
+        if impl_reg.impls[i as usize].impl_type == type_id && count < 32 {
+            result[count as usize] = impl_reg.impls[i as usize].trait_id
+            count = count + 1
+        }
+        i = i + 1
+    }
+    (result, count)
+}
+
+// ============================================================
+// Test helpers
+// ============================================================
+
+fn traits_assert_true(cond: bool, test_id: i64) -> i64 with IO, Mut, Panic, Div {
+    if cond {
+        print("  PASS test ")
+        print_int(test_id)
+        print("\n")
+        return 0
+    } else {
+        print("  FAIL test ")
+        print_int(test_id)
+        print("\n")
+        return 1
+    }
+}
+
+// ============================================================
+// Test 1: Empty trait registry
+// ============================================================
+
+fn test_trait_empty_registry() -> i64 with IO, Mut, Panic, Div {
+    let reg = trait_registry_new()
+    let ok1 = reg.count == 0
+    let idx = trait_registry_find(reg, 42)
+    let ok2 = idx == TRAIT_NOT_FOUND
+    traits_assert_true(ok1 && ok2, 1)
+}
+
+// ============================================================
+// Test 2: Register and find a trait
+// ============================================================
+
+fn test_trait_register_and_find() -> i64 with IO, Mut, Panic, Div {
+    var reg = trait_registry_new()
+    let def = trait_def_new(100)
+    reg = trait_register(reg, def)
+    let ok1 = reg.count == 1
+    let idx = trait_registry_find(reg, 100)
+    let ok2 = idx == 0
+    let not_found = trait_registry_find(reg, 999)
+    let ok3 = not_found == TRAIT_NOT_FOUND
+    traits_assert_true(ok1 && ok2 && ok3, 2)
+}
+
+// ============================================================
+// Test 3: Trait with methods
+// ============================================================
+
+fn test_trait_with_methods() -> i64 with IO, Mut, Panic, Div {
+    var def = trait_def_new(200)
+    let m1 = TraitMethod {
+        name: 10,
+        param_types: [0; 8],
+        param_count: 1,
+        return_type: PRIM_I64,
+        has_default_impl: false,
+    }
+    let m2 = TraitMethod {
+        name: 20,
+        param_types: [0; 8],
+        param_count: 0,
+        return_type: PRIM_BOOL,
+        has_default_impl: true,
+    }
+    def = trait_def_add_method(def, m1)
+    def = trait_def_add_method(def, m2)
+    let ok1 = def.method_count == 2
+    let idx1 = trait_def_find_method(def, 10)
+    let ok2 = idx1 == 0
+    let idx2 = trait_def_find_method(def, 20)
+    let ok3 = idx2 == 1
+    let idx3 = trait_def_find_method(def, 999)
+    let ok4 = idx3 == TRAIT_NOT_FOUND
+    traits_assert_true(ok1 && ok2 && ok3 && ok4, 3)
+}
+
+// ============================================================
+// Test 4: Impl registry — register and resolve
+// ============================================================
+
+fn test_impl_register_resolve() -> i64 with IO, Mut, Panic, Div {
+    var treg = trait_registry_new()
+    let def = trait_def_new(TRAIT_EQ)
+    treg = trait_register(treg, def)
+
+    var ireg = impl_registry_new()
+    let ti = trait_impl_new(TRAIT_EQ, PRIM_I64)
+    ireg = impl_register(ireg, ti)
+
+    let ok1 = ireg.count == 1
+    let result = trait_resolve(treg, ireg, TRAIT_EQ, PRIM_I64)
+    let ok2 = result.0
+    let ok3 = result.1 == 0
+    let result2 = trait_resolve(treg, ireg, TRAIT_EQ, PRIM_STRING)
+    let ok4 = !result2.0
+    traits_assert_true(ok1 && ok2 && ok3 && ok4, 4)
+}
+
+// ============================================================
+// Test 5: trait_has_impl
+// ============================================================
+
+fn test_trait_has_impl() -> i64 with IO, Mut, Panic, Div {
+    var ireg = impl_registry_new()
+    ireg = impl_register(ireg, trait_impl_new(TRAIT_COPY, PRIM_I64))
+    ireg = impl_register(ireg, trait_impl_new(TRAIT_EQ, PRIM_I64))
+
+    let ok1 = trait_has_impl(ireg, TRAIT_COPY, PRIM_I64)
+    let ok2 = trait_has_impl(ireg, TRAIT_EQ, PRIM_I64)
+    let ok3 = !trait_has_impl(ireg, TRAIT_ORD, PRIM_I64)
+    let ok4 = !trait_has_impl(ireg, TRAIT_COPY, PRIM_STRING)
+    traits_assert_true(ok1 && ok2 && ok3 && ok4, 5)
+}
+
+// ============================================================
+// Test 6: Supertrait computation
+// ============================================================
+
+fn test_supertrait_closure() -> i64 with IO, Mut, Panic, Div {
+    var treg = trait_registry_new()
+
+    // Trait A (id=100), no supertraits
+    let def_a = trait_def_new(100)
+    treg = trait_register(treg, def_a)
+
+    // Trait B (id=101), supertrait A
+    var def_b = trait_def_new(101)
+    def_b = trait_def_add_supertrait(def_b, 100)
+    treg = trait_register(treg, def_b)
+
+    // Trait C (id=102), supertrait B
+    var def_c = trait_def_new(102)
+    def_c = trait_def_add_supertrait(def_c, 101)
+    treg = trait_register(treg, def_c)
+
+    // Transitive closure of C should include B and A
+    let result = trait_all_supertraits(treg, 102)
+    let supers = result.0
+    let count = result.1
+    let ok1 = count == 2
+
+    // Should contain 101 (B) and 100 (A)
+    var has_b = false
+    var has_a = false
+    var i: i64 = 0
+    while i < count {
+        if supers[i as usize] == 101 {
+            has_b = true
+        }
+        if supers[i as usize] == 100 {
+            has_a = true
+        }
+        i = i + 1
+    }
+    let ok2 = has_b && has_a
+    traits_assert_true(ok1 && ok2, 6)
+}
+
+// ============================================================
+// Test 7: Complete impl check
+// ============================================================
+
+fn test_impl_completeness() -> i64 with IO, Mut, Panic, Div {
+    var treg = trait_registry_new()
+    var def = trait_def_new(300)
+    let m1 = TraitMethod {
+        name: 50,
+        param_types: [0; 8],
+        param_count: 0,
+        return_type: PRIM_I64,
+        has_default_impl: false,
+    }
+    let m2 = TraitMethod {
+        name: 51,
+        param_types: [0; 8],
+        param_count: 0,
+        return_type: PRIM_BOOL,
+        has_default_impl: true,
+    }
+    def = trait_def_add_method(def, m1)
+    def = trait_def_add_method(def, m2)
+    treg = trait_register(treg, def)
+
+    // Complete impl: provides method 0 (required), skips method 1 (has default)
+    var ti_complete = trait_impl_new(300, PRIM_I64)
+    ti_complete = trait_impl_add_method(ti_complete, 0, 1000)
+    let ok1 = trait_check_impl_complete(treg, ti_complete)
+
+    // Incomplete impl: provides neither
+    let ti_incomplete = trait_impl_new(300, PRIM_I64)
+    let ok2 = !trait_check_impl_complete(treg, ti_incomplete)
+
+    // Over-complete impl: provides both
+    var ti_over = trait_impl_new(300, PRIM_I64)
+    ti_over = trait_impl_add_method(ti_over, 0, 1000)
+    ti_over = trait_impl_add_method(ti_over, 1, 1001)
+    let ok3 = trait_check_impl_complete(treg, ti_over)
+
+    traits_assert_true(ok1 && ok2 && ok3, 7)
+}
+
+// ============================================================
+// Test 8: VTable construction
+// ============================================================
+
+fn test_vtable_build() -> i64 with IO, Mut, Panic, Div {
+    var treg = trait_registry_new()
+    var def = trait_def_new(400)
+    let m1 = TraitMethod {
+        name: 60,
+        param_types: [0; 8],
+        param_count: 1,
+        return_type: PRIM_I64,
+        has_default_impl: false,
+    }
+    let m2 = TraitMethod {
+        name: 61,
+        param_types: [0; 8],
+        param_count: 0,
+        return_type: PRIM_BOOL,
+        has_default_impl: false,
+    }
+    def = trait_def_add_method(def, m1)
+    def = trait_def_add_method(def, m2)
+    treg = trait_register(treg, def)
+
+    var ireg = impl_registry_new()
+    var ti = trait_impl_new(400, PRIM_I64)
+    ti = trait_impl_add_method(ti, 0, 2000)
+    ti = trait_impl_add_method(ti, 1, 2001)
+    ireg = impl_register(ireg, ti)
+
+    let vt = vtable_build(treg, ireg, 400, PRIM_I64)
+    let ok1 = vt.count == 2
+    let ok2 = vtable_lookup(vt, 0) == 2000
+    let ok3 = vtable_lookup(vt, 1) == 2001
+    let ok4 = vt.trait_id == 400
+    let ok5 = vt.impl_type == PRIM_I64
+    let ok6 = vtable_lookup(vt, 99) == TRAIT_NOT_FOUND
+    traits_assert_true(ok1 && ok2 && ok3 && ok4 && ok5 && ok6, 8)
+}
+
+// ============================================================
+// Test 9: Orphan rule
+// ============================================================
+
+fn test_orphan_check() -> i64 with IO, Mut, Panic, Div {
+    // Local trait (crate 0), local type (crate 0) => ok
+    let ti_local = trait_impl_new(100, 200)
+    let ok1 = trait_check_orphan(ti_local)
+
+    // Foreign trait (crate 1 = 65536), local type => ok
+    let ti_foreign_trait = trait_impl_new(65536 + 100, 200)
+    let ok2 = trait_check_orphan(ti_foreign_trait)
+
+    // Local trait, foreign type => ok
+    let ti_foreign_type = trait_impl_new(100, 65536 + 200)
+    let ok3 = trait_check_orphan(ti_foreign_type)
+
+    // Foreign trait AND foreign type => NOT ok
+    let ti_both_foreign = trait_impl_new(65536 + 100, 65536 + 200)
+    let ok4 = !trait_check_orphan(ti_both_foreign)
+
+    traits_assert_true(ok1 && ok2 && ok3 && ok4, 9)
+}
+
+// ============================================================
+// Test 10: Overlap detection
+// ============================================================
+
+fn test_overlap_detection() -> i64 with IO, Mut, Panic, Div {
+    var ireg = impl_registry_new()
+    let ti1 = trait_impl_new(TRAIT_EQ, PRIM_I64)
+    ireg = impl_register(ireg, ti1)
+
+    // Same trait + same type => overlap
+    let ti_dup = trait_impl_new(TRAIT_EQ, PRIM_I64)
+    let ok1 = trait_check_overlap(ireg, ti_dup)
+
+    // Same trait, different type => no overlap
+    let ti_diff_type = trait_impl_new(TRAIT_EQ, PRIM_F64)
+    let ok2 = !trait_check_overlap(ireg, ti_diff_type)
+
+    // Different trait, same type => no overlap
+    let ti_diff_trait = trait_impl_new(TRAIT_ORD, PRIM_I64)
+    let ok3 = !trait_check_overlap(ireg, ti_diff_trait)
+
+    traits_assert_true(ok1 && ok2 && ok3, 10)
+}
+
+// ============================================================
+// Test 11: Built-in trait identification
+// ============================================================
+
+fn test_is_builtin() -> i64 with IO, Mut, Panic, Div {
+    let ok1 = trait_is_builtin(TRAIT_COPY)
+    let ok2 = trait_is_builtin(TRAIT_DROP)
+    let ok3 = trait_is_builtin(TRAIT_EQ)
+    let ok4 = trait_is_builtin(TRAIT_ADD)
+    let ok5 = trait_is_builtin(TRAIT_DISPLAY)
+    let ok6 = !trait_is_builtin(50)
+    let ok7 = !trait_is_builtin(0)
+    let ok8 = !trait_is_builtin(0 - 1)
+    traits_assert_true(ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8, 11)
+}
+
+// ============================================================
+// Test 12: Auto-derive with all fields implementing trait
+// ============================================================
+
+fn test_auto_derive_success() -> i64 with IO, Mut, Panic, Div {
+    var ireg = impl_registry_new()
+    // Register Copy for i64 and f64
+    ireg = impl_register(ireg, trait_impl_new(TRAIT_COPY, PRIM_I64))
+    ireg = impl_register(ireg, trait_impl_new(TRAIT_COPY, PRIM_F64))
+
+    // Struct with fields: [i64, f64]
+    var fields: [i64; 16] = [0; 16]
+    fields[0] = PRIM_I64
+    fields[1] = PRIM_F64
+
+    let ok1 = trait_auto_derive(TRAIT_COPY, fields, 2, ireg)
+
+    // Drop is never auto-derivable
+    let ok2 = !trait_auto_derive(TRAIT_DROP, fields, 2, ireg)
+
+    // Add is not auto-derivable
+    let ok3 = !trait_auto_derive(TRAIT_ADD, fields, 2, ireg)
+
+    traits_assert_true(ok1 && ok2 && ok3, 12)
+}
+
+// ============================================================
+// Test 13: Auto-derive fails when field lacks impl
+// ============================================================
+
+fn test_auto_derive_failure() -> i64 with IO, Mut, Panic, Div {
+    var ireg = impl_registry_new()
+    // Only register Copy for i64 (not for PRIM_STRING=4)
+    ireg = impl_register(ireg, trait_impl_new(TRAIT_COPY, PRIM_I64))
+
+    // Struct with fields: [i64, string]
+    var fields: [i64; 16] = [0; 16]
+    fields[0] = PRIM_I64
+    fields[1] = PRIM_STRING
+
+    let ok1 = !trait_auto_derive(TRAIT_COPY, fields, 2, ireg)
+    traits_assert_true(ok1, 13)
+}
+
+// ============================================================
+// Test 14: Method resolution across traits
+// ============================================================
+
+fn test_method_resolution() -> i64 with IO, Mut, Panic, Div {
+    var treg = trait_registry_new()
+
+    // Trait with method "foo" (name=500)
+    var def = trait_def_new(600)
+    let m1 = TraitMethod {
+        name: 500,
+        param_types: [0; 8],
+        param_count: 0,
+        return_type: PRIM_I64,
+        has_default_impl: false,
+    }
+    def = trait_def_add_method(def, m1)
+    treg = trait_register(treg, def)
+
+    var ireg = impl_registry_new()
+    var ti = trait_impl_new(600, PRIM_I64)
+    ti = trait_impl_add_method(ti, 0, 3000)
+    ireg = impl_register(ireg, ti)
+
+    // Should find method "foo" on i64 via trait 600
+    let result = trait_resolve_method(treg, ireg, 600, PRIM_I64, 500)
+    let ok1 = result.0
+    let ok2 = result.1 == 3000
+
+    // Should not find "bar" (name=501)
+    let result2 = trait_resolve_method(treg, ireg, 600, PRIM_I64, 501)
+    let ok3 = !result2.0
+
+    traits_assert_true(ok1 && ok2 && ok3, 14)
+}
+
+// ============================================================
+// Test 15: Bounds satisfaction check
+// ============================================================
+
+fn test_bounds_satisfaction() -> i64 with IO, Mut, Panic, Div {
+    var ireg = impl_registry_new()
+    ireg = impl_register(ireg, trait_impl_new(TRAIT_COPY, PRIM_I64))
+    ireg = impl_register(ireg, trait_impl_new(TRAIT_EQ, PRIM_I64))
+    ireg = impl_register(ireg, trait_impl_new(TRAIT_ORD, PRIM_I64))
+
+    var treg = trait_registry_new()
+
+    // Bounds: [Copy, Eq] => i64 satisfies
+    var bounds1: [i64; 8] = [0; 8]
+    bounds1[0] = TRAIT_COPY
+    bounds1[1] = TRAIT_EQ
+    let ok1 = trait_satisfies_bounds(treg, ireg, PRIM_I64, bounds1, 2)
+
+    // Bounds: [Copy, Hash] => i64 does NOT satisfy (no Hash impl)
+    var bounds2: [i64; 8] = [0; 8]
+    bounds2[0] = TRAIT_COPY
+    bounds2[1] = TRAIT_HASH
+    let ok2 = !trait_satisfies_bounds(treg, ireg, PRIM_I64, bounds2, 2)
+
+    // Empty bounds => always satisfies
+    let bounds3: [i64; 8] = [0; 8]
+    let ok3 = trait_satisfies_bounds(treg, ireg, PRIM_I64, bounds3, 0)
+
+    traits_assert_true(ok1 && ok2 && ok3, 15)
+}
+
+// ============================================================
+// Test 16: Collect impls for a type
+// ============================================================
+
+fn test_collect_impls() -> i64 with IO, Mut, Panic, Div {
+    var ireg = impl_registry_new()
+    ireg = impl_register(ireg, trait_impl_new(TRAIT_COPY, PRIM_I64))
+    ireg = impl_register(ireg, trait_impl_new(TRAIT_EQ, PRIM_I64))
+    ireg = impl_register(ireg, trait_impl_new(TRAIT_EQ, PRIM_F64))
+    ireg = impl_register(ireg, trait_impl_new(TRAIT_ORD, PRIM_I64))
+
+    let count_i64 = trait_count_impls(ireg, PRIM_I64)
+    let ok1 = count_i64 == 3
+
+    let count_f64 = trait_count_impls(ireg, PRIM_F64)
+    let ok2 = count_f64 == 1
+
+    let count_bool = trait_count_impls(ireg, PRIM_BOOL)
+    let ok3 = count_bool == 0
+
+    let collected = trait_collect_impls(ireg, PRIM_I64)
+    let ok4 = collected.1 == 3
+
+    traits_assert_true(ok1 && ok2 && ok3 && ok4, 16)
+}
+
+// ============================================================
+// Test 17: Supertrait impl check
+// ============================================================
+
+fn test_supertrait_impl_check() -> i64 with IO, Mut, Panic, Div {
+    var treg = trait_registry_new()
+
+    // Trait A (id=700), no supertraits
+    let def_a = trait_def_new(700)
+    treg = trait_register(treg, def_a)
+
+    // Trait B (id=701), supertrait A
+    var def_b = trait_def_new(701)
+    def_b = trait_def_add_supertrait(def_b, 700)
+    treg = trait_register(treg, def_b)
+
+    // Type 50 implements B and A => passes supertrait check
+    var ireg = impl_registry_new()
+    ireg = impl_register(ireg, trait_impl_new(700, 50))
+    ireg = impl_register(ireg, trait_impl_new(701, 50))
+    let ok1 = trait_check_supertrait_impls(treg, ireg, 701, 50)
+
+    // Type 51 implements B but NOT A => fails
+    var ireg2 = impl_registry_new()
+    ireg2 = impl_register(ireg2, trait_impl_new(701, 51))
+    let ok2 = !trait_check_supertrait_impls(treg, ireg2, 701, 51)
+
+    traits_assert_true(ok1 && ok2, 17)
+}
+
+// ============================================================
+// Test 18: VTable with default method
+// ============================================================
+
+fn test_vtable_default_method() -> i64 with IO, Mut, Panic, Div {
+    var treg = trait_registry_new()
+    var def = trait_def_new(800)
+    let m1 = TraitMethod {
+        name: 70,
+        param_types: [0; 8],
+        param_count: 0,
+        return_type: PRIM_I64,
+        has_default_impl: false,
+    }
+    let m2 = TraitMethod {
+        name: 71,
+        param_types: [0; 8],
+        param_count: 0,
+        return_type: PRIM_BOOL,
+        has_default_impl: true,
+    }
+    def = trait_def_add_method(def, m1)
+    def = trait_def_add_method(def, m2)
+    treg = trait_register(treg, def)
+
+    var ireg = impl_registry_new()
+    // Only implement method 0 (method 1 has default)
+    var ti = trait_impl_new(800, PRIM_I64)
+    ti = trait_impl_add_method(ti, 0, 4000)
+    ireg = impl_register(ireg, ti)
+
+    let vt = vtable_build(treg, ireg, 800, PRIM_I64)
+    let ok1 = vt.count == 2
+    let ok2 = vtable_lookup(vt, 0) == 4000
+    // Method 1 uses default => sentinel -1
+    let ok3 = vtable_lookup(vt, 1) == (0 - 1)
+    traits_assert_true(ok1 && ok2 && ok3, 18)
+}
+
+// ============================================================
+// Test 19: Builtin registrations
+// ============================================================
+
+fn test_builtin_registrations() -> i64 with IO, Mut, Panic, Div {
+    let ireg = impl_register_builtins(impl_registry_new())
+
+    // i64 has Copy, Eq, Add, Display
+    let ok1 = trait_has_impl(ireg, TRAIT_COPY, PRIM_I64)
+    let ok2 = trait_has_impl(ireg, TRAIT_EQ, PRIM_I64)
+    let ok3 = trait_has_impl(ireg, TRAIT_ADD, PRIM_I64)
+    let ok4 = trait_has_impl(ireg, TRAIT_DISPLAY, PRIM_I64)
+
+    // bool has Copy, Eq but not Add
+    let ok5 = trait_has_impl(ireg, TRAIT_COPY, PRIM_BOOL)
+    let ok6 = trait_has_impl(ireg, TRAIT_EQ, PRIM_BOOL)
+    let ok7 = !trait_has_impl(ireg, TRAIT_ADD, PRIM_BOOL)
+
+    // string has Eq but not Copy
+    let ok8 = trait_has_impl(ireg, TRAIT_EQ, PRIM_STRING)
+    let ok9 = !trait_has_impl(ireg, TRAIT_COPY, PRIM_STRING)
+
+    traits_assert_true(ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9, 19)
+}
+
+// ============================================================
+// Test 20: Impl with type params — overlap with different params
+// ============================================================
+
+fn test_type_param_overlap() -> i64 with IO, Mut, Panic, Div {
+    var ireg = impl_registry_new()
+    var ti1 = trait_impl_new(TRAIT_EQ, 100)
+    ti1 = trait_impl_add_type_param(ti1, PRIM_I64)
+    ireg = impl_register(ireg, ti1)
+
+    // Same trait+type but different type param => no overlap
+    var ti2 = trait_impl_new(TRAIT_EQ, 100)
+    ti2 = trait_impl_add_type_param(ti2, PRIM_F64)
+    let ok1 = !trait_check_overlap(ireg, ti2)
+
+    // Same trait+type, same type param => overlap
+    var ti3 = trait_impl_new(TRAIT_EQ, 100)
+    ti3 = trait_impl_add_type_param(ti3, PRIM_I64)
+    let ok2 = trait_check_overlap(ireg, ti3)
+
+    traits_assert_true(ok1 && ok2, 20)
+}
+
+// ============================================================
+// Test runner
+// ============================================================
+
+fn traits_run_tests() -> i64 with IO, Mut, Panic, Div {
+    print("=== Trait solver tests ===\n")
+    var fails: i64 = 0
+
+    let t01 = test_trait_empty_registry()
+    if t01 != 0 { fails = fails + 1 }
+
+    let t02 = test_trait_register_and_find()
+    if t02 != 0 { fails = fails + 1 }
+
+    let t03 = test_trait_with_methods()
+    if t03 != 0 { fails = fails + 1 }
+
+    let t04 = test_impl_register_resolve()
+    if t04 != 0 { fails = fails + 1 }
+
+    let t05 = test_trait_has_impl()
+    if t05 != 0 { fails = fails + 1 }
+
+    let t06 = test_supertrait_closure()
+    if t06 != 0 { fails = fails + 1 }
+
+    let t07 = test_impl_completeness()
+    if t07 != 0 { fails = fails + 1 }
+
+    let t08 = test_vtable_build()
+    if t08 != 0 { fails = fails + 1 }
+
+    let t09 = test_orphan_check()
+    if t09 != 0 { fails = fails + 1 }
+
+    let t10 = test_overlap_detection()
+    if t10 != 0 { fails = fails + 1 }
+
+    let t11 = test_is_builtin()
+    if t11 != 0 { fails = fails + 1 }
+
+    let t12 = test_auto_derive_success()
+    if t12 != 0 { fails = fails + 1 }
+
+    let t13 = test_auto_derive_failure()
+    if t13 != 0 { fails = fails + 1 }
+
+    let t14 = test_method_resolution()
+    if t14 != 0 { fails = fails + 1 }
+
+    let t15 = test_bounds_satisfaction()
+    if t15 != 0 { fails = fails + 1 }
+
+    let t16 = test_collect_impls()
+    if t16 != 0 { fails = fails + 1 }
+
+    let t17 = test_supertrait_impl_check()
+    if t17 != 0 { fails = fails + 1 }
+
+    let t18 = test_vtable_default_method()
+    if t18 != 0 { fails = fails + 1 }
+
+    let t19 = test_builtin_registrations()
+    if t19 != 0 { fails = fails + 1 }
+
+    let t20 = test_type_param_overlap()
+    if t20 != 0 { fails = fails + 1 }
+
+    print("Total failures: ")
+    print_int(fails)
+    print("\n")
+    fails
+}

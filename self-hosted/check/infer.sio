@@ -1,0 +1,1491 @@
+// Hindley-Milner type inference engine for the self-hosted checker
+//
+// Implements Algorithm W-style constraint-based type inference with:
+//   - Type variable allocation and substitution
+//   - First-order unification with occurs check
+//   - Let-polymorphism via generalize/instantiate
+//   - Environment-based type lookup
+//
+// All types are stored as integer IDs into a flat TypePool arena.
+// Substitutions are explicit maps from type-variable IDs to type IDs.
+
+// ============================================================
+// Type kind constants
+// ============================================================
+
+const TYPE_VAR: i64 = 100
+const TYPE_INT: i64 = 1
+const TYPE_FLOAT: i64 = 2
+const TYPE_BOOL: i64 = 3
+const TYPE_STRING: i64 = 4
+const TYPE_UNIT: i64 = 5
+const TYPE_FN: i64 = 10
+const TYPE_ARRAY: i64 = 11
+const TYPE_TUPLE: i64 = 12
+const TYPE_STRUCT: i64 = 13
+
+// Binary operator tags for infer_binary_op
+const OP_ADD: i64 = 1
+const OP_SUB: i64 = 2
+const OP_MUL: i64 = 3
+const OP_DIV: i64 = 4
+const OP_EQ: i64 = 5
+const OP_NEQ: i64 = 6
+const OP_LT: i64 = 7
+const OP_GT: i64 = 8
+const OP_AND: i64 = 9
+const OP_OR: i64 = 10
+
+// Sentinel for "not found" or "error"
+const TYPE_NONE: i64 = 0 - 1
+
+// ============================================================
+// TypeNode — a single node in the type pool
+// ============================================================
+//
+// kind:      one of the TYPE_* constants above
+// id:        unique index in the pool (also used as type-variable ID)
+// args:      child type IDs (e.g. domain/codomain for TYPE_FN,
+//            element type for TYPE_ARRAY, fields for TYPE_TUPLE)
+// arg_count: how many entries in args are meaningful
+// name:      packed i64 for named types / struct tags
+
+struct TypeNode {
+    kind: i64,
+    id: i64,
+    args: [i64; 8],
+    arg_count: i64,
+    name: i64,
+}
+
+fn empty_type_node() -> TypeNode {
+    TypeNode {
+        kind: 0,
+        id: 0,
+        args: [0; 8],
+        arg_count: 0,
+        name: 0,
+    }
+}
+
+// ============================================================
+// TypePool — arena of TypeNodes
+// ============================================================
+
+struct TypePool {
+    nodes: [TypeNode; 2048],
+    count: i64,
+    next_var_id: i64,
+}
+
+fn type_pool_new() -> TypePool {
+    TypePool {
+        nodes: [empty_type_node(); 2048],
+        count: 0,
+        next_var_id: 1000,
+    }
+}
+
+// ============================================================
+// TypePool helpers — allocate nodes
+// ============================================================
+
+fn pool_alloc(pool: TypePool, kind: i64, name: i64) -> (TypePool, i64) with Mut, Panic, Div {
+    var p = pool
+    let idx = p.count
+    p.nodes[idx as usize] = TypeNode {
+        kind: kind,
+        id: idx,
+        args: [0; 8],
+        arg_count: 0,
+        name: name,
+    }
+    p.count = p.count + 1
+    (p, idx)
+}
+
+fn pool_alloc_with_args(pool: TypePool, kind: i64, name: i64, a0: i64, a1: i64, argc: i64) -> (TypePool, i64) with Mut, Panic, Div {
+    var p = pool
+    let idx = p.count
+    var args: [i64; 8] = [0; 8]
+    args[0] = a0
+    args[1] = a1
+    p.nodes[idx as usize] = TypeNode {
+        kind: kind,
+        id: idx,
+        args: args,
+        arg_count: argc,
+        name: name,
+    }
+    p.count = p.count + 1
+    (p, idx)
+}
+
+fn pool_alloc_var(pool: TypePool) -> (TypePool, i64) with Mut, Panic, Div {
+    var p = pool
+    let idx = p.count
+    let vid = p.next_var_id
+    p.nodes[idx as usize] = TypeNode {
+        kind: TYPE_VAR,
+        id: idx,
+        args: [0; 8],
+        arg_count: 0,
+        name: vid,
+    }
+    p.count = p.count + 1
+    p.next_var_id = p.next_var_id + 1
+    (p, idx)
+}
+
+fn pool_get(pool: TypePool, idx: i64) -> TypeNode with Mut, Panic, Div {
+    pool.nodes[idx as usize]
+}
+
+fn pool_kind(pool: TypePool, idx: i64) -> i64 with Mut, Panic, Div {
+    pool.nodes[idx as usize].kind
+}
+
+fn pool_var_name(pool: TypePool, idx: i64) -> i64 with Mut, Panic, Div {
+    pool.nodes[idx as usize].name
+}
+
+fn pool_arg(pool: TypePool, idx: i64, n: i64) -> i64 with Mut, Panic, Div {
+    pool.nodes[idx as usize].args[n as usize]
+}
+
+fn pool_arg_count(pool: TypePool, idx: i64) -> i64 with Mut, Panic, Div {
+    pool.nodes[idx as usize].arg_count
+}
+
+// Allocate concrete primitives
+fn pool_alloc_int(pool: TypePool) -> (TypePool, i64) with Mut, Panic, Div {
+    pool_alloc(pool, TYPE_INT, 0)
+}
+
+fn pool_alloc_float(pool: TypePool) -> (TypePool, i64) with Mut, Panic, Div {
+    pool_alloc(pool, TYPE_FLOAT, 0)
+}
+
+fn pool_alloc_bool(pool: TypePool) -> (TypePool, i64) with Mut, Panic, Div {
+    pool_alloc(pool, TYPE_BOOL, 0)
+}
+
+fn pool_alloc_string(pool: TypePool) -> (TypePool, i64) with Mut, Panic, Div {
+    pool_alloc(pool, TYPE_STRING, 0)
+}
+
+fn pool_alloc_unit(pool: TypePool) -> (TypePool, i64) with Mut, Panic, Div {
+    pool_alloc(pool, TYPE_UNIT, 0)
+}
+
+// Allocate function type: domain -> codomain
+fn pool_alloc_fn(pool: TypePool, domain: i64, codomain: i64) -> (TypePool, i64) with Mut, Panic, Div {
+    pool_alloc_with_args(pool, TYPE_FN, 0, domain, codomain, 2)
+}
+
+// Allocate array type: [elem; _]
+fn pool_alloc_array(pool: TypePool, elem: i64) -> (TypePool, i64) with Mut, Panic, Div {
+    pool_alloc_with_args(pool, TYPE_ARRAY, 0, elem, 0, 1)
+}
+
+// Allocate tuple type with 2 elements
+fn pool_alloc_tuple2(pool: TypePool, a: i64, b: i64) -> (TypePool, i64) with Mut, Panic, Div {
+    pool_alloc_with_args(pool, TYPE_TUPLE, 0, a, b, 2)
+}
+
+// ============================================================
+// Substitution — maps type variable IDs to type IDs
+// ============================================================
+
+struct Substitution {
+    from_ids: [i64; 1024],
+    to_ids: [i64; 1024],
+    count: i64,
+}
+
+fn subst_new() -> Substitution {
+    Substitution {
+        from_ids: [0; 1024],
+        to_ids: [0; 1024],
+        count: 0,
+    }
+}
+
+fn subst_add(subst: Substitution, from: i64, to: i64) -> Substitution with Mut, Panic, Div {
+    var s = subst
+    // Check if mapping already exists; if so, update it
+    var i: i64 = 0
+    while i < s.count {
+        if s.from_ids[i as usize] == from {
+            s.to_ids[i as usize] = to
+            return s
+        }
+        i = i + 1
+    }
+    // New mapping
+    if s.count < 1024 {
+        s.from_ids[s.count as usize] = from
+        s.to_ids[s.count as usize] = to
+        s.count = s.count + 1
+    }
+    s
+}
+
+fn subst_lookup(subst: Substitution, var_name: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < subst.count {
+        if subst.from_ids[i as usize] == var_name {
+            return subst.to_ids[i as usize]
+        }
+        i = i + 1
+    }
+    TYPE_NONE
+}
+
+// Apply a substitution to a type, producing a new type in the pool.
+// If the type is a variable and the substitution maps it, return the mapped type.
+// For compound types (fn, array, tuple), recursively apply to children.
+fn subst_apply(subst: Substitution, pool: TypePool, type_id: i64) -> (TypePool, i64) with Mut, Panic, Div {
+    if type_id < 0 {
+        return (pool, type_id)
+    }
+    if type_id >= pool.count {
+        return (pool, type_id)
+    }
+    let node = pool_get(pool, type_id)
+    if node.kind == TYPE_VAR {
+        let mapped = subst_lookup(subst, node.name)
+        if mapped != TYPE_NONE {
+            // Recursively apply in case the target is also a variable
+            return subst_apply(subst, pool, mapped)
+        }
+        return (pool, type_id)
+    }
+    if node.kind == TYPE_FN {
+        let pair_d = subst_apply(subst, pool, node.args[0])
+        var p = pair_d.0
+        let dom = pair_d.1
+        let pair_c = subst_apply(subst, p, node.args[1])
+        p = pair_c.0
+        let cod = pair_c.1
+        // If nothing changed, return original
+        if dom == node.args[0] && cod == node.args[1] {
+            return (p, type_id)
+        }
+        return pool_alloc_fn(p, dom, cod)
+    }
+    if node.kind == TYPE_ARRAY {
+        let pair_e = subst_apply(subst, pool, node.args[0])
+        var p2 = pair_e.0
+        let elem = pair_e.1
+        if elem == node.args[0] {
+            return (p2, type_id)
+        }
+        return pool_alloc_array(p2, elem)
+    }
+    if node.kind == TYPE_TUPLE {
+        let pair_a = subst_apply(subst, pool, node.args[0])
+        var p3 = pair_a.0
+        let ta = pair_a.1
+        let pair_b = subst_apply(subst, p3, node.args[1])
+        p3 = pair_b.0
+        let tb = pair_b.1
+        if ta == node.args[0] && tb == node.args[1] {
+            return (p3, type_id)
+        }
+        return pool_alloc_tuple2(p3, ta, tb)
+    }
+    // Concrete primitive — no substitution needed
+    (pool, type_id)
+}
+
+// Compose two substitutions: applying the result is equivalent to
+// applying s2 first and then s1.  s1 . s2 = { v -> s1(s2(v)) }
+fn subst_compose(s1: Substitution, s2: Substitution, pool: TypePool) -> (Substitution, TypePool) with Mut, Panic, Div {
+    var result = subst_new()
+    var p = pool
+
+    // For each mapping in s2, apply s1 to its target
+    var i: i64 = 0
+    while i < s2.count {
+        let from = s2.from_ids[i as usize]
+        let to = s2.to_ids[i as usize]
+        let pair = subst_apply(s1, p, to)
+        p = pair.0
+        let new_to = pair.1
+        result = subst_add(result, from, new_to)
+        i = i + 1
+    }
+
+    // Add mappings from s1 that are not already in the composed result
+    var j: i64 = 0
+    while j < s1.count {
+        let from1 = s1.from_ids[j as usize]
+        let existing = subst_lookup(result, from1)
+        if existing == TYPE_NONE {
+            result = subst_add(result, from1, s1.to_ids[j as usize])
+        }
+        j = j + 1
+    }
+
+    (result, p)
+}
+
+// ============================================================
+// UnifyResult — outcome of unification
+// ============================================================
+
+struct UnifyResult {
+    ok: bool,
+    subst: Substitution,
+    error_a: i64,
+    error_b: i64,
+}
+
+fn unify_ok(s: Substitution) -> UnifyResult {
+    UnifyResult {
+        ok: true,
+        subst: s,
+        error_a: TYPE_NONE,
+        error_b: TYPE_NONE,
+    }
+}
+
+fn unify_err(a: i64, b: i64) -> UnifyResult {
+    UnifyResult {
+        ok: false,
+        subst: subst_new(),
+        error_a: a,
+        error_b: b,
+    }
+}
+
+// ============================================================
+// Occurs check — prevent infinite types
+// ============================================================
+//
+// Returns true if var_name (the name field of a TYPE_VAR node)
+// appears anywhere inside the type at type_id.
+
+fn occurs_check(pool: TypePool, var_name: i64, type_id: i64) -> bool with Mut, Panic, Div {
+    if type_id < 0 {
+        return false
+    }
+    if type_id >= pool.count {
+        return false
+    }
+    let node = pool_get(pool, type_id)
+    if node.kind == TYPE_VAR {
+        return node.name == var_name
+    }
+    if node.kind == TYPE_FN {
+        if occurs_check(pool, var_name, node.args[0]) {
+            return true
+        }
+        return occurs_check(pool, var_name, node.args[1])
+    }
+    if node.kind == TYPE_ARRAY {
+        return occurs_check(pool, var_name, node.args[0])
+    }
+    if node.kind == TYPE_TUPLE {
+        if occurs_check(pool, var_name, node.args[0]) {
+            return true
+        }
+        return occurs_check(pool, var_name, node.args[1])
+    }
+    false
+}
+
+// ============================================================
+// Unification — Robinson's algorithm
+// ============================================================
+
+// Unify argument lists of equal length.
+fn unify_args(pool: TypePool, a_id: i64, b_id: i64, count: i64) -> (UnifyResult, TypePool) with Mut, Panic, Div {
+    if count <= 0 {
+        return (unify_ok(subst_new()), pool)
+    }
+    let a_node = pool_get(pool, a_id)
+    let b_node = pool_get(pool, b_id)
+
+    // Unify first argument pair
+    var p = pool
+    let r0 = unify(p, a_node.args[0], b_node.args[0])
+    p = r0.1
+    let u0 = r0.0
+    if !u0.ok {
+        return (u0, p)
+    }
+    if count == 1 {
+        return (u0, p)
+    }
+
+    // Apply substitution from first pair to the rest, then unify second pair
+    let pair_a1 = subst_apply(u0.subst, p, a_node.args[1])
+    p = pair_a1.0
+    let a1_resolved = pair_a1.1
+    let pair_b1 = subst_apply(u0.subst, p, b_node.args[1])
+    p = pair_b1.0
+    let b1_resolved = pair_b1.1
+    let r1 = unify(p, a1_resolved, b1_resolved)
+    p = r1.1
+    let u1 = r1.0
+    if !u1.ok {
+        return (u1, p)
+    }
+
+    // Compose substitutions
+    let composed = subst_compose(u1.subst, u0.subst, p)
+    p = composed.1
+    (unify_ok(composed.0), p)
+}
+
+// Main unification: returns (UnifyResult, TypePool) because substitution
+// application may allocate new type nodes.
+fn unify(pool: TypePool, type_a: i64, type_b: i64) -> (UnifyResult, TypePool) with Mut, Panic, Div {
+    var p = pool
+
+    // Trivial: same type ID
+    if type_a == type_b {
+        return (unify_ok(subst_new()), p)
+    }
+
+    // Bounds check
+    if type_a < 0 || type_a >= p.count {
+        return (unify_err(type_a, type_b), p)
+    }
+    if type_b < 0 || type_b >= p.count {
+        return (unify_err(type_a, type_b), p)
+    }
+
+    let a = pool_get(p, type_a)
+    let b = pool_get(p, type_b)
+
+    // Variable on the left
+    if a.kind == TYPE_VAR {
+        if occurs_check(p, a.name, type_b) {
+            return (unify_err(type_a, type_b), p)
+        }
+        let s = subst_add(subst_new(), a.name, type_b)
+        return (unify_ok(s), p)
+    }
+
+    // Variable on the right
+    if b.kind == TYPE_VAR {
+        if occurs_check(p, b.name, type_a) {
+            return (unify_err(type_a, type_b), p)
+        }
+        let s = subst_add(subst_new(), b.name, type_a)
+        return (unify_ok(s), p)
+    }
+
+    // Both concrete — kinds must match
+    if a.kind != b.kind {
+        return (unify_err(type_a, type_b), p)
+    }
+
+    // Primitives with no args: INT, FLOAT, BOOL, STRING, UNIT
+    if a.kind == TYPE_INT || a.kind == TYPE_FLOAT || a.kind == TYPE_BOOL || a.kind == TYPE_STRING || a.kind == TYPE_UNIT {
+        return (unify_ok(subst_new()), p)
+    }
+
+    // Struct types: names must match
+    if a.kind == TYPE_STRUCT {
+        if a.name != b.name {
+            return (unify_err(type_a, type_b), p)
+        }
+        return (unify_ok(subst_new()), p)
+    }
+
+    // Function types: unify domain, then codomain
+    if a.kind == TYPE_FN {
+        return unify_args(p, type_a, type_b, 2)
+    }
+
+    // Array types: unify element type
+    if a.kind == TYPE_ARRAY {
+        return unify(p, a.args[0], b.args[0])
+    }
+
+    // Tuple types: unify element-wise
+    if a.kind == TYPE_TUPLE {
+        if a.arg_count != b.arg_count {
+            return (unify_err(type_a, type_b), p)
+        }
+        return unify_args(p, type_a, type_b, a.arg_count)
+    }
+
+    // Unknown kind — fail
+    (unify_err(type_a, type_b), p)
+}
+
+// ============================================================
+// InferCtx — type inference context
+// ============================================================
+//
+// Carries the pool, current substitution, and a name-to-type
+// environment for variable bindings.
+
+struct InferCtx {
+    pool: TypePool,
+    subst: Substitution,
+    env_names: [i64; 512],
+    env_types: [i64; 512],
+    env_count: i64,
+}
+
+fn infer_ctx_new() -> InferCtx {
+    InferCtx {
+        pool: type_pool_new(),
+        subst: subst_new(),
+        env_names: [0; 512],
+        env_types: [0; 512],
+        env_count: 0,
+    }
+}
+
+// Allocate a fresh type variable, returning updated context and type ID
+fn infer_fresh_var(ctx: InferCtx) -> (InferCtx, i64) with Mut, Panic, Div {
+    let pair = pool_alloc_var(ctx.pool)
+    var c = ctx
+    c.pool = pair.0
+    (c, pair.1)
+}
+
+// Bind a name to a type in the environment
+fn infer_bind(ctx: InferCtx, name: i64, type_id: i64) -> InferCtx with Mut, Panic, Div {
+    var c = ctx
+    if c.env_count < 512 {
+        c.env_names[c.env_count as usize] = name
+        c.env_types[c.env_count as usize] = type_id
+        c.env_count = c.env_count + 1
+    }
+    c
+}
+
+// Look up a name in the environment (most recent binding wins)
+fn infer_lookup(ctx: InferCtx, name: i64) -> i64 with Mut, Panic, Div {
+    var i = ctx.env_count - 1
+    while i >= 0 {
+        if ctx.env_names[i as usize] == name {
+            return ctx.env_types[i as usize]
+        }
+        i = i - 1
+    }
+    TYPE_NONE
+}
+
+// ============================================================
+// Inference helpers for literals
+// ============================================================
+
+fn infer_literal_int(ctx: InferCtx) -> (InferCtx, i64) with Mut, Panic, Div {
+    let pair = pool_alloc_int(ctx.pool)
+    var c = ctx
+    c.pool = pair.0
+    (c, pair.1)
+}
+
+fn infer_literal_float(ctx: InferCtx) -> (InferCtx, i64) with Mut, Panic, Div {
+    let pair = pool_alloc_float(ctx.pool)
+    var c = ctx
+    c.pool = pair.0
+    (c, pair.1)
+}
+
+fn infer_literal_bool(ctx: InferCtx) -> (InferCtx, i64) with Mut, Panic, Div {
+    let pair = pool_alloc_bool(ctx.pool)
+    var c = ctx
+    c.pool = pair.0
+    (c, pair.1)
+}
+
+fn infer_literal_string(ctx: InferCtx) -> (InferCtx, i64) with Mut, Panic, Div {
+    let pair = pool_alloc_string(ctx.pool)
+    var c = ctx
+    c.pool = pair.0
+    (c, pair.1)
+}
+
+fn infer_literal_unit(ctx: InferCtx) -> (InferCtx, i64) with Mut, Panic, Div {
+    let pair = pool_alloc_unit(ctx.pool)
+    var c = ctx
+    c.pool = pair.0
+    (c, pair.1)
+}
+
+// ============================================================
+// Binary operator inference
+// ============================================================
+//
+// Arithmetic ops (+, -, *, /): unify both operands, result = operand type
+// Comparison ops (==, !=, <, >): unify both operands, result = bool
+// Logical ops (&&, ||): both must be bool, result = bool
+
+fn infer_binary_op(ctx: InferCtx, op: i64, lhs_type: i64, rhs_type: i64) -> (InferCtx, i64) with Mut, Panic, Div {
+    var c = ctx
+    // Unify operands
+    let r = unify(c.pool, lhs_type, rhs_type)
+    c.pool = r.1
+    let ur = r.0
+    if !ur.ok {
+        // Type error: operands do not unify
+        // Return TYPE_NONE to signal error
+        return (c, TYPE_NONE)
+    }
+    // Merge substitution
+    let comp = subst_compose(ur.subst, c.subst, c.pool)
+    c.subst = comp.0
+    c.pool = comp.1
+
+    // Resolve the operand type after substitution
+    let resolved_pair = subst_apply(c.subst, c.pool, lhs_type)
+    c.pool = resolved_pair.0
+    let resolved_type = resolved_pair.1
+
+    // Determine result type based on operator class
+    if op == OP_ADD || op == OP_SUB || op == OP_MUL || op == OP_DIV {
+        // Arithmetic: result is the unified operand type
+        return (c, resolved_type)
+    }
+    if op == OP_EQ || op == OP_NEQ || op == OP_LT || op == OP_GT {
+        // Comparison: result is always bool
+        let bp = pool_alloc_bool(c.pool)
+        c.pool = bp.0
+        return (c, bp.1)
+    }
+    if op == OP_AND || op == OP_OR {
+        // Logical: operands must be bool, result is bool
+        let bp2 = pool_alloc_bool(c.pool)
+        c.pool = bp2.0
+        let bool_id = bp2.1
+        let ru = unify(c.pool, resolved_type, bool_id)
+        c.pool = ru.1
+        if !ru.0.ok {
+            return (c, TYPE_NONE)
+        }
+        let comp2 = subst_compose(ru.0.subst, c.subst, c.pool)
+        c.subst = comp2.0
+        c.pool = comp2.1
+        return (c, bool_id)
+    }
+    // Unknown operator
+    (c, TYPE_NONE)
+}
+
+// ============================================================
+// Function application inference
+// ============================================================
+//
+// Given a function type and an argument type:
+//   1. Unify the function's domain with the argument type
+//   2. Return the function's codomain with substitutions applied
+
+fn infer_application(ctx: InferCtx, fn_type: i64, arg_type: i64) -> (InferCtx, i64) with Mut, Panic, Div {
+    var c = ctx
+
+    // Check that fn_type is indeed a function type
+    if fn_type < 0 || fn_type >= c.pool.count {
+        return (c, TYPE_NONE)
+    }
+    let fn_node = pool_get(c.pool, fn_type)
+    if fn_node.kind != TYPE_FN {
+        // Not a function type — cannot apply
+        return (c, TYPE_NONE)
+    }
+
+    let domain = fn_node.args[0]
+    let codomain = fn_node.args[1]
+
+    // Unify domain with argument
+    let r = unify(c.pool, domain, arg_type)
+    c.pool = r.1
+    let ur = r.0
+    if !ur.ok {
+        return (c, TYPE_NONE)
+    }
+
+    // Compose with existing substitution
+    let comp = subst_compose(ur.subst, c.subst, c.pool)
+    c.subst = comp.0
+    c.pool = comp.1
+
+    // Apply composed substitution to the codomain
+    let resolved = subst_apply(c.subst, c.pool, codomain)
+    c.pool = resolved.0
+    (c, resolved.1)
+}
+
+// ============================================================
+// Let-binding inference
+// ============================================================
+
+fn infer_let_binding(ctx: InferCtx, name: i64, expr_type: i64) -> InferCtx with Mut, Panic, Div {
+    infer_bind(ctx, name, expr_type)
+}
+
+// ============================================================
+// Free variables
+// ============================================================
+//
+// Collect all type variable names reachable from a type.
+// Returns a flat array of variable names and a count via FreeVarsResult.
+
+struct FreeVarsResult {
+    vars: [i64; 64],
+    count: i64,
+}
+
+fn free_vars_empty() -> FreeVarsResult {
+    FreeVarsResult {
+        vars: [0; 64],
+        count: 0,
+    }
+}
+
+fn free_vars_add(fv: FreeVarsResult, var_name: i64) -> FreeVarsResult with Mut, Panic, Div {
+    // Check for duplicates
+    var i: i64 = 0
+    while i < fv.count {
+        if fv.vars[i as usize] == var_name {
+            return fv
+        }
+        i = i + 1
+    }
+    var result = fv
+    if result.count < 64 {
+        result.vars[result.count as usize] = var_name
+        result.count = result.count + 1
+    }
+    result
+}
+
+fn free_vars_merge(a: FreeVarsResult, b: FreeVarsResult) -> FreeVarsResult with Mut, Panic, Div {
+    var result = a
+    var i: i64 = 0
+    while i < b.count {
+        result = free_vars_add(result, b.vars[i as usize])
+        i = i + 1
+    }
+    result
+}
+
+fn free_vars(pool: TypePool, type_id: i64) -> FreeVarsResult with Mut, Panic, Div {
+    if type_id < 0 || type_id >= pool.count {
+        return free_vars_empty()
+    }
+    let node = pool_get(pool, type_id)
+    if node.kind == TYPE_VAR {
+        return free_vars_add(free_vars_empty(), node.name)
+    }
+    if node.kind == TYPE_FN {
+        let fv_d = free_vars(pool, node.args[0])
+        let fv_c = free_vars(pool, node.args[1])
+        return free_vars_merge(fv_d, fv_c)
+    }
+    if node.kind == TYPE_ARRAY {
+        return free_vars(pool, node.args[0])
+    }
+    if node.kind == TYPE_TUPLE {
+        let fv_a = free_vars(pool, node.args[0])
+        let fv_b = free_vars(pool, node.args[1])
+        return free_vars_merge(fv_a, fv_b)
+    }
+    // Concrete type — no free variables
+    free_vars_empty()
+}
+
+// ============================================================
+// Generalization
+// ============================================================
+//
+// Generalize a type over all free variables that are NOT free in the
+// environment.  This is the key to let-polymorphism.
+//
+// For simplicity in this flat-array representation, generalization
+// marks the type ID as a "scheme" by recording which variables are
+// universally quantified.  We store the scheme as:
+//   SchemeEntry { type_id, bound_vars, bound_count }
+
+struct SchemeEntry {
+    type_id: i64,
+    bound_vars: [i64; 64],
+    bound_count: i64,
+}
+
+fn scheme_mono(type_id: i64) -> SchemeEntry {
+    SchemeEntry {
+        type_id: type_id,
+        bound_vars: [0; 64],
+        bound_count: 0,
+    }
+}
+
+// Collect free variables from the entire environment
+fn env_free_vars(ctx: InferCtx) -> FreeVarsResult with Mut, Panic, Div {
+    var result = free_vars_empty()
+    var i: i64 = 0
+    while i < ctx.env_count {
+        let fv = free_vars(ctx.pool, ctx.env_types[i as usize])
+        result = free_vars_merge(result, fv)
+        i = i + 1
+    }
+    result
+}
+
+fn free_vars_contains(fv: FreeVarsResult, var_name: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < fv.count {
+        if fv.vars[i as usize] == var_name {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn generalize(ctx: InferCtx, type_id: i64) -> SchemeEntry with Mut, Panic, Div {
+    let ty_fv = free_vars(ctx.pool, type_id)
+    let env_fv = env_free_vars(ctx)
+    var scheme = scheme_mono(type_id)
+    var i: i64 = 0
+    while i < ty_fv.count {
+        let v = ty_fv.vars[i as usize]
+        if !free_vars_contains(env_fv, v) {
+            if scheme.bound_count < 64 {
+                scheme.bound_vars[scheme.bound_count as usize] = v
+                scheme.bound_count = scheme.bound_count + 1
+            }
+        }
+        i = i + 1
+    }
+    scheme
+}
+
+// ============================================================
+// Instantiation
+// ============================================================
+//
+// Replace each bound variable in a scheme with a fresh type variable.
+// Returns the instantiated type ID.
+
+fn instantiate(ctx: InferCtx, scheme: SchemeEntry) -> (InferCtx, i64) with Mut, Panic, Div {
+    if scheme.bound_count == 0 {
+        return (ctx, scheme.type_id)
+    }
+    var c = ctx
+    var rename = subst_new()
+    var i: i64 = 0
+    while i < scheme.bound_count {
+        let old_var = scheme.bound_vars[i as usize]
+        let pair = pool_alloc_var(c.pool)
+        c.pool = pair.0
+        let fresh_id = pair.1
+        rename = subst_add(rename, old_var, fresh_id)
+        i = i + 1
+    }
+    let result = subst_apply(rename, c.pool, scheme.type_id)
+    c.pool = result.0
+    (c, result.1)
+}
+
+// ============================================================
+// Scheme-aware environment
+// ============================================================
+//
+// For let-polymorphism we need to store schemes, not just type IDs.
+// SchemeEnv wraps InferCtx with a parallel scheme table.
+
+struct SchemeEnv {
+    ctx: InferCtx,
+    scheme_names: [i64; 512],
+    schemes: [SchemeEntry; 512],
+    scheme_count: i64,
+}
+
+fn scheme_env_new() -> SchemeEnv {
+    SchemeEnv {
+        ctx: infer_ctx_new(),
+        scheme_names: [0; 512],
+        schemes: [scheme_mono(0); 512],
+        scheme_count: 0,
+    }
+}
+
+fn scheme_env_bind(env: SchemeEnv, name: i64, scheme: SchemeEntry) -> SchemeEnv with Mut, Panic, Div {
+    var e = env
+    if e.scheme_count < 512 {
+        e.scheme_names[e.scheme_count as usize] = name
+        e.schemes[e.scheme_count as usize] = scheme
+        e.scheme_count = e.scheme_count + 1
+    }
+    // Also bind in the underlying ctx for free-var calculation
+    e.ctx = infer_bind(e.ctx, name, scheme.type_id)
+    e
+}
+
+fn scheme_env_lookup(env: SchemeEnv, name: i64) -> SchemeEntry with Mut, Panic, Div {
+    var i = env.scheme_count - 1
+    while i >= 0 {
+        if env.scheme_names[i as usize] == name {
+            return env.schemes[i as usize]
+        }
+        i = i - 1
+    }
+    scheme_mono(TYPE_NONE)
+}
+
+fn scheme_env_instantiate(env: SchemeEnv, name: i64) -> (SchemeEnv, i64) with Mut, Panic, Div {
+    let scheme = scheme_env_lookup(env, name)
+    if scheme.type_id == TYPE_NONE {
+        return (env, TYPE_NONE)
+    }
+    let pair = instantiate(env.ctx, scheme)
+    var e = env
+    e.ctx = pair.0
+    (e, pair.1)
+}
+
+// ============================================================
+// INLINE TESTS
+// ============================================================
+
+// --- Test 1: Fresh variable allocation ---
+fn infer_test_fresh_var() -> bool with Mut, Panic, Div {
+    let pair1 = infer_fresh_var(infer_ctx_new())
+    var ctx = pair1.0
+    let v1 = pair1.1
+    let pair2 = infer_fresh_var(ctx)
+    ctx = pair2.0
+    let v2 = pair2.1
+    // Two fresh vars should have different IDs
+    let ok1 = v1 != v2
+    // Both should be TYPE_VAR
+    let ok2 = pool_kind(ctx.pool, v1) == TYPE_VAR
+    let ok3 = pool_kind(ctx.pool, v2) == TYPE_VAR
+    // They should have different names
+    let ok4 = pool_var_name(ctx.pool, v1) != pool_var_name(ctx.pool, v2)
+    ok1 && ok2 && ok3 && ok4
+}
+
+// --- Test 2: Unify two identical concrete types ---
+fn infer_test_unify_same_concrete() -> bool with Mut, Panic, Div {
+    var ctx = infer_ctx_new()
+    let p1 = pool_alloc_int(ctx.pool)
+    ctx.pool = p1.0
+    let t1 = p1.1
+    let p2 = pool_alloc_int(ctx.pool)
+    ctx.pool = p2.0
+    let t2 = p2.1
+    let r = unify(ctx.pool, t1, t2)
+    r.0.ok
+}
+
+// --- Test 3: Unify two different concrete types fails ---
+fn infer_test_unify_different_concrete() -> bool with Mut, Panic, Div {
+    var ctx = infer_ctx_new()
+    let p1 = pool_alloc_int(ctx.pool)
+    ctx.pool = p1.0
+    let t1 = p1.1
+    let p2 = pool_alloc_bool(ctx.pool)
+    ctx.pool = p2.0
+    let t2 = p2.1
+    let r = unify(ctx.pool, t1, t2)
+    !r.0.ok
+}
+
+// --- Test 4: Unify type variable with concrete ---
+fn infer_test_unify_var_concrete() -> bool with Mut, Panic, Div {
+    var ctx = infer_ctx_new()
+    let pv = pool_alloc_var(ctx.pool)
+    ctx.pool = pv.0
+    let tv = pv.1
+    let pi = pool_alloc_int(ctx.pool)
+    ctx.pool = pi.0
+    let ti = pi.1
+    let r = unify(ctx.pool, tv, ti)
+    let ur = r.0
+    // Should succeed
+    let ok1 = ur.ok
+    // Substitution should map the variable to int
+    let var_name = pool_var_name(ctx.pool, tv)
+    let mapped = subst_lookup(ur.subst, var_name)
+    let ok2 = mapped == ti
+    ok1 && ok2
+}
+
+// --- Test 5: Unify two type variables ---
+fn infer_test_unify_two_vars() -> bool with Mut, Panic, Div {
+    var ctx = infer_ctx_new()
+    let pv1 = pool_alloc_var(ctx.pool)
+    ctx.pool = pv1.0
+    let v1 = pv1.1
+    let pv2 = pool_alloc_var(ctx.pool)
+    ctx.pool = pv2.0
+    let v2 = pv2.1
+    let r = unify(ctx.pool, v1, v2)
+    // Should succeed: one variable maps to the other
+    r.0.ok
+}
+
+// --- Test 6: Occurs check detects infinite type ---
+fn infer_test_occurs_check() -> bool with Mut, Panic, Div {
+    var ctx = infer_ctx_new()
+    // Create a type variable 'a
+    let pv = pool_alloc_var(ctx.pool)
+    ctx.pool = pv.0
+    let va = pv.1
+    let va_name = pool_var_name(ctx.pool, va)
+    // Create int
+    let pi = pool_alloc_int(ctx.pool)
+    ctx.pool = pi.0
+    let ti = pi.1
+    // Create fn(int, 'a) — 'a appears in this type
+    let pf = pool_alloc_fn(ctx.pool, ti, va)
+    ctx.pool = pf.0
+    let fn_type = pf.1
+    // occurs_check should detect 'a inside fn(int, 'a)
+    let ok1 = occurs_check(ctx.pool, va_name, fn_type)
+    // occurs_check should NOT detect 'a inside int
+    let ok2 = !occurs_check(ctx.pool, va_name, ti)
+    ok1 && ok2
+}
+
+// --- Test 7: Occurs check blocks unification (infinite type) ---
+fn infer_test_occurs_unify_fails() -> bool with Mut, Panic, Div {
+    var ctx = infer_ctx_new()
+    // Create 'a
+    let pv = pool_alloc_var(ctx.pool)
+    ctx.pool = pv.0
+    let va = pv.1
+    // Create fn('a, int) — contains 'a
+    let pi = pool_alloc_int(ctx.pool)
+    ctx.pool = pi.0
+    let ti = pi.1
+    let pf = pool_alloc_fn(ctx.pool, va, ti)
+    ctx.pool = pf.0
+    let fn_type = pf.1
+    // Trying to unify 'a with fn('a, int) should fail (infinite type)
+    let r = unify(ctx.pool, va, fn_type)
+    !r.0.ok
+}
+
+// --- Test 8: Function type inference (application) ---
+fn infer_test_fn_application() -> bool with Mut, Panic, Div {
+    var ctx = infer_ctx_new()
+    // Create fn(int) -> bool
+    let pi = pool_alloc_int(ctx.pool)
+    ctx.pool = pi.0
+    let ti = pi.1
+    let pb = pool_alloc_bool(ctx.pool)
+    ctx.pool = pb.0
+    let tb = pb.1
+    let pf = pool_alloc_fn(ctx.pool, ti, tb)
+    ctx.pool = pf.0
+    let fn_type = pf.1
+    // Create an int argument
+    let pai = pool_alloc_int(ctx.pool)
+    ctx.pool = pai.0
+    let arg_int = pai.1
+    // Apply fn to int
+    let result = infer_application(ctx, fn_type, arg_int)
+    var c = result.0
+    let result_type = result.1
+    // Result should be bool
+    let ok1 = result_type != TYPE_NONE
+    let ok2 = pool_kind(c.pool, result_type) == TYPE_BOOL
+    ok1 && ok2
+}
+
+// --- Test 9: Function application with type variable ---
+fn infer_test_fn_app_with_var() -> bool with Mut, Panic, Div {
+    var ctx = infer_ctx_new()
+    // Create 'a
+    let pv = pool_alloc_var(ctx.pool)
+    ctx.pool = pv.0
+    let va = pv.1
+    // Create fn('a) -> 'a  (identity function)
+    let pf = pool_alloc_fn(ctx.pool, va, va)
+    ctx.pool = pf.0
+    let fn_type = pf.1
+    // Create int argument
+    let pi = pool_alloc_int(ctx.pool)
+    ctx.pool = pi.0
+    let arg_int = pi.1
+    // Apply identity to int
+    let result = infer_application(ctx, fn_type, arg_int)
+    var c = result.0
+    let result_type = result.1
+    // Result should resolve to int (via substitution 'a -> int)
+    let ok1 = result_type != TYPE_NONE
+    // Apply full substitution to resolve
+    let resolved = subst_apply(c.subst, c.pool, result_type)
+    c.pool = resolved.0
+    let final_type = resolved.1
+    let ok2 = pool_kind(c.pool, final_type) == TYPE_INT
+    ok1 && ok2
+}
+
+// --- Test 10: Binary operator type checking ---
+fn infer_test_binary_add() -> bool with Mut, Panic, Div {
+    var ctx = infer_ctx_new()
+    let p1 = pool_alloc_int(ctx.pool)
+    ctx.pool = p1.0
+    let t1 = p1.1
+    let p2 = pool_alloc_int(ctx.pool)
+    ctx.pool = p2.0
+    let t2 = p2.1
+    let result = infer_binary_op(ctx, OP_ADD, t1, t2)
+    var c = result.0
+    let rt = result.1
+    let ok1 = rt != TYPE_NONE
+    let ok2 = pool_kind(c.pool, rt) == TYPE_INT
+    ok1 && ok2
+}
+
+// --- Test 11: Binary comparison returns bool ---
+fn infer_test_binary_eq() -> bool with Mut, Panic, Div {
+    var ctx = infer_ctx_new()
+    let p1 = pool_alloc_int(ctx.pool)
+    ctx.pool = p1.0
+    let t1 = p1.1
+    let p2 = pool_alloc_int(ctx.pool)
+    ctx.pool = p2.0
+    let t2 = p2.1
+    let result = infer_binary_op(ctx, OP_EQ, t1, t2)
+    var c = result.0
+    let rt = result.1
+    let ok1 = rt != TYPE_NONE
+    let ok2 = pool_kind(c.pool, rt) == TYPE_BOOL
+    ok1 && ok2
+}
+
+// --- Test 12: Binary type mismatch fails ---
+fn infer_test_binary_mismatch() -> bool with Mut, Panic, Div {
+    var ctx = infer_ctx_new()
+    let p1 = pool_alloc_int(ctx.pool)
+    ctx.pool = p1.0
+    let t1 = p1.1
+    let p2 = pool_alloc_bool(ctx.pool)
+    ctx.pool = p2.0
+    let t2 = p2.1
+    let result = infer_binary_op(ctx, OP_ADD, t1, t2)
+    // Should signal error
+    result.1 == TYPE_NONE
+}
+
+// --- Test 13: Let-binding and lookup ---
+fn infer_test_let_lookup() -> bool with Mut, Panic, Div {
+    var ctx = infer_ctx_new()
+    let pi = pool_alloc_int(ctx.pool)
+    ctx.pool = pi.0
+    let ti = pi.1
+    // Bind name 42 (arbitrary tag) to int type
+    ctx = infer_let_binding(ctx, 42, ti)
+    let looked = infer_lookup(ctx, 42)
+    let ok1 = looked == ti
+    // Missing name returns TYPE_NONE
+    let ok2 = infer_lookup(ctx, 999) == TYPE_NONE
+    ok1 && ok2
+}
+
+// --- Test 14: Substitution composition ---
+fn infer_test_subst_compose() -> bool with Mut, Panic, Div {
+    var ctx = infer_ctx_new()
+    // Create 'a, 'b, and int
+    let pva = pool_alloc_var(ctx.pool)
+    ctx.pool = pva.0
+    let va = pva.1
+    let va_name = pool_var_name(ctx.pool, va)
+    let pvb = pool_alloc_var(ctx.pool)
+    ctx.pool = pvb.0
+    let vb = pvb.1
+    let vb_name = pool_var_name(ctx.pool, vb)
+    let pi = pool_alloc_int(ctx.pool)
+    ctx.pool = pi.0
+    let ti = pi.1
+    // s1: 'b -> int
+    let s1 = subst_add(subst_new(), vb_name, ti)
+    // s2: 'a -> 'b
+    let s2 = subst_add(subst_new(), va_name, vb)
+    // Compose: s1 . s2 should give 'a -> int (because 'a -> 'b -> int)
+    let comp = subst_compose(s1, s2, ctx.pool)
+    let composed = comp.0
+    ctx.pool = comp.1
+    // Apply to 'a: should get int
+    let result = subst_apply(composed, ctx.pool, va)
+    ctx.pool = result.0
+    let resolved = result.1
+    pool_kind(ctx.pool, resolved) == TYPE_INT
+}
+
+// --- Test 15: Free variables collection ---
+fn infer_test_free_vars() -> bool with Mut, Panic, Div {
+    var ctx = infer_ctx_new()
+    // Create fn('a, 'b) where 'a and 'b are type variables
+    let pva = pool_alloc_var(ctx.pool)
+    ctx.pool = pva.0
+    let va = pva.1
+    let pvb = pool_alloc_var(ctx.pool)
+    ctx.pool = pvb.0
+    let vb = pvb.1
+    let pf = pool_alloc_fn(ctx.pool, va, vb)
+    ctx.pool = pf.0
+    let fn_type = pf.1
+    let fv = free_vars(ctx.pool, fn_type)
+    // Should have exactly 2 free variables
+    fv.count == 2
+}
+
+// --- Test 16: Generalize captures unbound vars ---
+fn infer_test_generalize() -> bool with Mut, Panic, Div {
+    var ctx = infer_ctx_new()
+    // Create 'a -> 'a (identity type)
+    let pva = pool_alloc_var(ctx.pool)
+    ctx.pool = pva.0
+    let va = pva.1
+    let pf = pool_alloc_fn(ctx.pool, va, va)
+    ctx.pool = pf.0
+    let fn_type = pf.1
+    // Empty environment => both vars are free => generalize captures them
+    let scheme = generalize(ctx, fn_type)
+    // The identity fn has 1 distinct variable, so bound_count should be 1
+    scheme.bound_count == 1
+}
+
+// --- Test 17: Instantiate produces fresh vars ---
+fn infer_test_instantiate() -> bool with Mut, Panic, Div {
+    var ctx = infer_ctx_new()
+    // Create 'a -> 'a
+    let pva = pool_alloc_var(ctx.pool)
+    ctx.pool = pva.0
+    let va = pva.1
+    let va_name = pool_var_name(ctx.pool, va)
+    let pf = pool_alloc_fn(ctx.pool, va, va)
+    ctx.pool = pf.0
+    let fn_type = pf.1
+    // Generalize
+    let scheme = generalize(ctx, fn_type)
+    // Instantiate
+    let pair = instantiate(ctx, scheme)
+    var c = pair.0
+    let inst_type = pair.1
+    // The instantiated type should be a function
+    let ok1 = pool_kind(c.pool, inst_type) == TYPE_FN
+    // Its domain should be a fresh variable (different name from original)
+    let dom = pool_arg(c.pool, inst_type, 0)
+    let ok2 = pool_kind(c.pool, dom) == TYPE_VAR
+    let new_name = pool_var_name(c.pool, dom)
+    let ok3 = new_name != va_name
+    ok1 && ok2 && ok3
+}
+
+// --- Test 18: Let polymorphism ---
+fn infer_test_let_poly() -> bool with Mut, Panic, Div {
+    // Simulate: let id = fn('a) -> 'a  (polymorphic identity)
+    // Then apply id to int => int, apply id to bool => bool
+    var env = scheme_env_new()
+
+    // Create the identity type: 'a -> 'a
+    let pva = pool_alloc_var(env.ctx.pool)
+    env.ctx.pool = pva.0
+    let va = pva.1
+    let pf = pool_alloc_fn(env.ctx.pool, va, va)
+    env.ctx.pool = pf.0
+    let id_type = pf.1
+
+    // Generalize and bind as "id" (name tag = 1)
+    let scheme = generalize(env.ctx, id_type)
+    env = scheme_env_bind(env, 1, scheme)
+
+    // Instantiate and apply to int
+    let inst1 = scheme_env_instantiate(env, 1)
+    env = inst1.0
+    let id_inst1 = inst1.1
+    let pi = pool_alloc_int(env.ctx.pool)
+    env.ctx.pool = pi.0
+    let ti = pi.1
+    let app1 = infer_application(env.ctx, id_inst1, ti)
+    env.ctx = app1.0
+    let res1 = app1.1
+    let resolved1 = subst_apply(env.ctx.subst, env.ctx.pool, res1)
+    env.ctx.pool = resolved1.0
+    let ok1 = pool_kind(env.ctx.pool, resolved1.1) == TYPE_INT
+
+    // Instantiate AGAIN and apply to bool
+    let inst2 = scheme_env_instantiate(env, 1)
+    env = inst2.0
+    let id_inst2 = inst2.1
+    let pb = pool_alloc_bool(env.ctx.pool)
+    env.ctx.pool = pb.0
+    let tb = pb.1
+    let app2 = infer_application(env.ctx, id_inst2, tb)
+    env.ctx = app2.0
+    let res2 = app2.1
+    let resolved2 = subst_apply(env.ctx.subst, env.ctx.pool, res2)
+    env.ctx.pool = resolved2.0
+    let ok2 = pool_kind(env.ctx.pool, resolved2.1) == TYPE_BOOL
+
+    // Both should work — this is the essence of let-polymorphism
+    ok1 && ok2
+}
+
+// --- Test 19: Unify function types ---
+fn infer_test_unify_fn_types() -> bool with Mut, Panic, Div {
+    var ctx = infer_ctx_new()
+    // fn(int) -> bool
+    let pi1 = pool_alloc_int(ctx.pool)
+    ctx.pool = pi1.0
+    let t_int1 = pi1.1
+    let pb1 = pool_alloc_bool(ctx.pool)
+    ctx.pool = pb1.0
+    let t_bool1 = pb1.1
+    let pf1 = pool_alloc_fn(ctx.pool, t_int1, t_bool1)
+    ctx.pool = pf1.0
+    let fn1 = pf1.1
+
+    // fn('a) -> 'b  (with fresh variables)
+    let pva = pool_alloc_var(ctx.pool)
+    ctx.pool = pva.0
+    let va = pva.1
+    let pvb = pool_alloc_var(ctx.pool)
+    ctx.pool = pvb.0
+    let vb = pvb.1
+    let pf2 = pool_alloc_fn(ctx.pool, va, vb)
+    ctx.pool = pf2.0
+    let fn2 = pf2.1
+
+    // Unify fn(int)->bool with fn('a)->'b
+    let r = unify(ctx.pool, fn1, fn2)
+    ctx.pool = r.1
+    let ur = r.0
+    let ok1 = ur.ok
+
+    // 'a should map to int, 'b should map to bool
+    let va_name = pool_var_name(ctx.pool, va)
+    let vb_name = pool_var_name(ctx.pool, vb)
+    let a_mapped = subst_lookup(ur.subst, va_name)
+    let b_mapped = subst_lookup(ur.subst, vb_name)
+    let ok2 = pool_kind(ctx.pool, a_mapped) == TYPE_INT
+    let ok3 = pool_kind(ctx.pool, b_mapped) == TYPE_BOOL
+    ok1 && ok2 && ok3
+}
+
+// --- Test 20: Substitution apply to nested type ---
+fn infer_test_subst_nested() -> bool with Mut, Panic, Div {
+    var ctx = infer_ctx_new()
+    // Create 'a
+    let pva = pool_alloc_var(ctx.pool)
+    ctx.pool = pva.0
+    let va = pva.1
+    let va_name = pool_var_name(ctx.pool, va)
+    // Create fn('a, 'a)
+    let pf = pool_alloc_fn(ctx.pool, va, va)
+    ctx.pool = pf.0
+    let fn_type = pf.1
+    // Create int
+    let pi = pool_alloc_int(ctx.pool)
+    ctx.pool = pi.0
+    let ti = pi.1
+    // Substitution: 'a -> int
+    let s = subst_add(subst_new(), va_name, ti)
+    // Apply to fn('a, 'a) => fn(int, int)
+    let result = subst_apply(s, ctx.pool, fn_type)
+    ctx.pool = result.0
+    let resolved = result.1
+    // Result should be a function type
+    let ok1 = pool_kind(ctx.pool, resolved) == TYPE_FN
+    // Domain should be int
+    let dom = pool_arg(ctx.pool, resolved, 0)
+    let ok2 = pool_kind(ctx.pool, dom) == TYPE_INT
+    // Codomain should be int
+    let cod = pool_arg(ctx.pool, resolved, 1)
+    let ok3 = pool_kind(ctx.pool, cod) == TYPE_INT
+    ok1 && ok2 && ok3
+}
+
+// --- Test 21: Logical operator requires bool ---
+fn infer_test_logical_op() -> bool with Mut, Panic, Div {
+    var ctx = infer_ctx_new()
+    let p1 = pool_alloc_bool(ctx.pool)
+    ctx.pool = p1.0
+    let b1 = p1.1
+    let p2 = pool_alloc_bool(ctx.pool)
+    ctx.pool = p2.0
+    let b2 = p2.1
+    // bool && bool => bool
+    let result = infer_binary_op(ctx, OP_AND, b1, b2)
+    var c = result.0
+    let rt = result.1
+    let ok1 = rt != TYPE_NONE
+    let ok2 = pool_kind(c.pool, rt) == TYPE_BOOL
+    ok1 && ok2
+}
+
+// --- Test 22: Logical operator with non-bool fails ---
+fn infer_test_logical_op_mismatch() -> bool with Mut, Panic, Div {
+    var ctx = infer_ctx_new()
+    let p1 = pool_alloc_int(ctx.pool)
+    ctx.pool = p1.0
+    let t1 = p1.1
+    let p2 = pool_alloc_int(ctx.pool)
+    ctx.pool = p2.0
+    let t2 = p2.1
+    // int && int => should fail (operands not bool)
+    let result = infer_binary_op(ctx, OP_AND, t1, t2)
+    result.1 == TYPE_NONE
+}
+
+// --- Test 23: Application to non-function fails ---
+fn infer_test_app_non_fn() -> bool with Mut, Panic, Div {
+    var ctx = infer_ctx_new()
+    let pi = pool_alloc_int(ctx.pool)
+    ctx.pool = pi.0
+    let ti = pi.1
+    // Trying to apply int as a function should fail
+    let result = infer_application(ctx, ti, ti)
+    result.1 == TYPE_NONE
+}
+
+// ============================================================
+// Test runner
+// ============================================================
+
+fn infer_run_tests() -> i64 with IO, Mut, Panic, Div {
+    var passed: i64 = 0
+    let total: i64 = 23
+
+    print("=== HM Type Inference Tests ===\n")
+
+    if infer_test_fresh_var() { passed = passed + 1; print("  T01 OK: fresh variable allocation\n") } else { print("  FAIL: T01 fresh variable allocation\n") }
+    if infer_test_unify_same_concrete() { passed = passed + 1; print("  T02 OK: unify identical concrete types\n") } else { print("  FAIL: T02 unify identical concrete types\n") }
+    if infer_test_unify_different_concrete() { passed = passed + 1; print("  T03 OK: unify different concrete types fails\n") } else { print("  FAIL: T03 unify different concrete types fails\n") }
+    if infer_test_unify_var_concrete() { passed = passed + 1; print("  T04 OK: unify var with concrete\n") } else { print("  FAIL: T04 unify var with concrete\n") }
+    if infer_test_unify_two_vars() { passed = passed + 1; print("  T05 OK: unify two type variables\n") } else { print("  FAIL: T05 unify two type variables\n") }
+    if infer_test_occurs_check() { passed = passed + 1; print("  T06 OK: occurs check detection\n") } else { print("  FAIL: T06 occurs check detection\n") }
+    if infer_test_occurs_unify_fails() { passed = passed + 1; print("  T07 OK: occurs check blocks infinite type\n") } else { print("  FAIL: T07 occurs check blocks infinite type\n") }
+    if infer_test_fn_application() { passed = passed + 1; print("  T08 OK: function application\n") } else { print("  FAIL: T08 function application\n") }
+    if infer_test_fn_app_with_var() { passed = passed + 1; print("  T09 OK: fn application with type var\n") } else { print("  FAIL: T09 fn application with type var\n") }
+    if infer_test_binary_add() { passed = passed + 1; print("  T10 OK: binary add int + int\n") } else { print("  FAIL: T10 binary add int + int\n") }
+    if infer_test_binary_eq() { passed = passed + 1; print("  T11 OK: binary eq returns bool\n") } else { print("  FAIL: T11 binary eq returns bool\n") }
+    if infer_test_binary_mismatch() { passed = passed + 1; print("  T12 OK: binary op type mismatch\n") } else { print("  FAIL: T12 binary op type mismatch\n") }
+    if infer_test_let_lookup() { passed = passed + 1; print("  T13 OK: let binding and lookup\n") } else { print("  FAIL: T13 let binding and lookup\n") }
+    if infer_test_subst_compose() { passed = passed + 1; print("  T14 OK: substitution composition\n") } else { print("  FAIL: T14 substitution composition\n") }
+    if infer_test_free_vars() { passed = passed + 1; print("  T15 OK: free variable collection\n") } else { print("  FAIL: T15 free variable collection\n") }
+    if infer_test_generalize() { passed = passed + 1; print("  T16 OK: generalize captures unbound vars\n") } else { print("  FAIL: T16 generalize captures unbound vars\n") }
+    if infer_test_instantiate() { passed = passed + 1; print("  T17 OK: instantiate produces fresh vars\n") } else { print("  FAIL: T17 instantiate produces fresh vars\n") }
+    if infer_test_let_poly() { passed = passed + 1; print("  T18 OK: let polymorphism\n") } else { print("  FAIL: T18 let polymorphism\n") }
+    if infer_test_unify_fn_types() { passed = passed + 1; print("  T19 OK: unify function types\n") } else { print("  FAIL: T19 unify function types\n") }
+    if infer_test_subst_nested() { passed = passed + 1; print("  T20 OK: substitution on nested type\n") } else { print("  FAIL: T20 substitution on nested type\n") }
+    if infer_test_logical_op() { passed = passed + 1; print("  T21 OK: logical op bool && bool\n") } else { print("  FAIL: T21 logical op bool && bool\n") }
+    if infer_test_logical_op_mismatch() { passed = passed + 1; print("  T22 OK: logical op int && int fails\n") } else { print("  FAIL: T22 logical op int && int fails\n") }
+    if infer_test_app_non_fn() { passed = passed + 1; print("  T23 OK: apply non-function fails\n") } else { print("  FAIL: T23 apply non-function fails\n") }
+
+    print("\nInference tests: ")
+    print_int(passed)
+    print("/")
+    print_int(total)
+    print(" passed\n")
+
+    if passed == total { 0 } else { 1 }
+}

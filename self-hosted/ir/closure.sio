@@ -1,0 +1,1413 @@
+// Closure conversion and lambda lifting for the IR pipeline
+//
+// This module transforms closures (functions that capture free variables from
+// enclosing scopes) into plain functions that receive an explicit environment
+// parameter. The pipeline is:
+//
+//   1. Free variable analysis — determine which variables a function body
+//      references but does not define locally.
+//   2. Environment construction — build a struct that packs captured variables
+//      into a single aggregate value.
+//   3. Closure conversion — rewrite each closure to accept an env parameter
+//      as its first argument and replace free-variable accesses with field
+//      loads/stores on that env.
+//   4. Lambda lifting — hoist nested lambdas to top-level functions, threading
+//      captured variables as extra parameters when the capture set is small
+//      enough to avoid heap allocation.
+//   5. Call-site lowering — replace closure-call instructions with a pair of
+//      operations: load the environment pointer, then call the lifted function
+//      with the environment prepended.
+
+// ============================================================================
+// Section 1: Free variable analysis
+// ============================================================================
+
+struct FreeVarSet {
+    vars: [i64; 256],
+    count: i64,
+}
+
+fn free_var_set_new() -> FreeVarSet with Mut, Panic, Div {
+    FreeVarSet {
+        vars: [0; 256],
+        count: 0,
+    }
+}
+
+// Add a variable to the set (deduplicating).
+fn free_var_add(set: FreeVarSet, v: i64) -> FreeVarSet with Mut, Panic, Div {
+    // Check if already present
+    var i: i64 = 0
+    while i < set.count {
+        if set.vars[i] == v {
+            return set
+        }
+        i = i + 1
+    }
+    // Bounds check
+    if set.count >= 256 {
+        return set
+    }
+    var result = set
+    result.vars[result.count] = v
+    result.count = result.count + 1
+    result
+}
+
+// Check membership.
+fn free_var_contains(set: FreeVarSet, v: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < set.count {
+        if set.vars[i] == v {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Remove a variable from the set.
+fn free_var_remove(set: FreeVarSet, v: i64) -> FreeVarSet with Mut, Panic, Div {
+    var result = free_var_set_new()
+    var i: i64 = 0
+    while i < set.count {
+        if set.vars[i] != v {
+            result.vars[result.count] = set.vars[i]
+            result.count = result.count + 1
+        }
+        i = i + 1
+    }
+    result
+}
+
+// Union of two sets.
+fn free_var_union(a: FreeVarSet, b: FreeVarSet) -> FreeVarSet with Mut, Panic, Div {
+    var result = a
+    var i: i64 = 0
+    while i < b.count {
+        result = free_var_add(result, b.vars[i])
+        i = i + 1
+    }
+    result
+}
+
+// Difference: a \ b (elements in a but not in b).
+fn free_var_difference(a: FreeVarSet, b: FreeVarSet) -> FreeVarSet with Mut, Panic, Div {
+    var result = free_var_set_new()
+    var i: i64 = 0
+    while i < a.count {
+        if !free_var_contains(b, a.vars[i]) {
+            result.vars[result.count] = a.vars[i]
+            result.count = result.count + 1
+        }
+        i = i + 1
+    }
+    result
+}
+
+// Compute free variables of a function body.
+// A register is "free" if it appears as a source operand (src1, src2) but is
+// never the destination of any instruction within this function AND is not
+// a parameter register.
+fn compute_free_vars(func: IrFunction) -> FreeVarSet with Mut, Panic, Div {
+    // Collect all defined registers (destinations + parameters)
+    var defined = free_var_set_new()
+    var i: i64 = 0
+    while i < func.param_count {
+        defined = free_var_add(defined, func.param_regs[i])
+        i = i + 1
+    }
+    i = 0
+    while i < func.instr_count {
+        let instr = func.instrs[i]
+        if instr.dst >= 0 {
+            defined = free_var_add(defined, instr.dst)
+        }
+        i = i + 1
+    }
+
+    // Collect all used registers
+    var used = free_var_set_new()
+    i = 0
+    while i < func.instr_count {
+        let instr = func.instrs[i]
+        if instr.src1 >= 0 {
+            used = free_var_add(used, instr.src1)
+        }
+        if instr.src2 >= 0 {
+            used = free_var_add(used, instr.src2)
+        }
+        i = i + 1
+    }
+
+    // Free = used \ defined
+    free_var_difference(used, defined)
+}
+
+// ============================================================================
+// Section 2: Closure environment
+// ============================================================================
+
+struct ClosureEnv {
+    captures: [i64; 128],
+    capture_types: [i64; 128],
+    count: i64,
+    env_struct_id: i64,
+}
+
+fn closure_env_new() -> ClosureEnv with Mut, Panic, Div {
+    ClosureEnv {
+        captures: [0; 128],
+        capture_types: [0; 128],
+        count: 0,
+        env_struct_id: 0,
+    }
+}
+
+// Add a capture (variable register + its type id) to the environment.
+fn closure_env_add_capture(env: ClosureEnv, v: i64, type_id: i64) -> ClosureEnv with Mut, Panic, Div {
+    // Dedup
+    var i: i64 = 0
+    while i < env.count {
+        if env.captures[i] == v {
+            return env
+        }
+        i = i + 1
+    }
+    if env.count >= 128 {
+        return env
+    }
+    var result = env
+    result.captures[result.count] = v
+    result.capture_types[result.count] = type_id
+    result.count = result.count + 1
+    result
+}
+
+// Find the position of a variable in the environment. Returns -1 if absent.
+fn closure_env_index_of(env: ClosureEnv, v: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < env.count {
+        if env.captures[i] == v {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// ============================================================================
+// Section 3: Closure conversion
+// ============================================================================
+
+struct ClosureInfo {
+    original_fn_id: i64,
+    lifted_fn_id: i64,
+    env: ClosureEnv,
+    is_closure: i64,
+}
+
+fn closure_info_new() -> ClosureInfo with Mut, Panic, Div {
+    ClosureInfo {
+        original_fn_id: 0,
+        lifted_fn_id: 0,
+        env: closure_env_new(),
+        is_closure: 0,
+    }
+}
+
+struct ClosureTable {
+    closures: [ClosureInfo; 256],
+    count: i64,
+}
+
+fn closure_table_new() -> ClosureTable with Mut, Panic, Div {
+    ClosureTable {
+        closures: [closure_info_new(); 256],
+        count: 0,
+    }
+}
+
+// Add an entry to the closure table. Returns updated table.
+fn closure_table_add(table: ClosureTable, info: ClosureInfo) -> ClosureTable with Mut, Panic, Div {
+    if table.count >= 256 {
+        return table
+    }
+    var result = table
+    result.closures[result.count] = info
+    result.count = result.count + 1
+    result
+}
+
+// Look up a closure by original function id. Returns index or -1.
+fn closure_table_lookup(table: ClosureTable, orig_fn_id: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < table.count {
+        if table.closures[i].original_fn_id == orig_fn_id {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// Build a scope set from parent parameters (the "parent_scope" tracks which
+// registers are defined in the enclosing scope).
+fn build_parent_scope(parent: IrFunction) -> FreeVarSet with Mut, Panic, Div {
+    var scope = free_var_set_new()
+    var i: i64 = 0
+    while i < parent.param_count {
+        scope = free_var_add(scope, parent.param_regs[i])
+        i = i + 1
+    }
+    i = 0
+    while i < parent.instr_count {
+        let instr = parent.instrs[i]
+        if instr.dst >= 0 {
+            scope = free_var_add(scope, instr.dst)
+        }
+        i = i + 1
+    }
+    scope
+}
+
+// Emit a single instruction into a function, returning the updated function.
+fn closure_emit_instr(func: IrFunction, instr: IrInstr) -> IrFunction with Mut, Panic, Div {
+    if func.instr_count >= 32768 {
+        return func
+    }
+    var result = func
+    result.instrs[result.instr_count] = instr
+    result.instr_count = result.instr_count + 1
+    result
+}
+
+// Allocate a fresh register in the function.
+fn closure_alloc_reg(func: IrFunction) -> (IrFunction, i64) with Mut, Panic, Div {
+    var result = func
+    let reg = result.reg_count
+    result.reg_count = result.reg_count + 1
+    (result, reg)
+}
+
+// Convert a single function: add env parameter as first param, replace
+// free-variable reads with IrFieldGet on env, writes with IrFieldSet.
+// parent_scope identifies which registers come from the enclosing scope.
+fn closure_convert_function(func: IrFunction, parent_scope: FreeVarSet, table: ClosureTable) -> (IrFunction, ClosureTable) with Mut, Panic, Div {
+    let free = compute_free_vars(func)
+
+    // If no free variables, the function is not a closure.
+    if free.count == 0 {
+        let info = ClosureInfo {
+            original_fn_id: 0,
+            lifted_fn_id: 0,
+            env: closure_env_new(),
+            is_closure: 0,
+        }
+        return (func, closure_table_add(table, info))
+    }
+
+    // Build environment from free variables
+    var env = closure_env_new()
+    var k: i64 = 0
+    while k < free.count {
+        // Use variable id as a placeholder type id
+        env = closure_env_add_capture(env, free.vars[k], free.vars[k])
+        k = k + 1
+    }
+    env.env_struct_id = table.count + 1
+
+    // Build converted function: shift all existing params right by 1,
+    // insert env_reg as param 0.
+    var converted = ir_empty_function()
+    converted.name = func.name
+    converted.reg_count = func.reg_count
+    converted.label_count = func.label_count
+
+    // Env parameter gets a fresh register
+    let pair = closure_alloc_reg(converted)
+    converted = pair.0
+    let env_reg = pair.1
+
+    // First param is the env register
+    converted.param_regs[0] = env_reg
+    var p: i64 = 0
+    while p < func.param_count && p < 63 {
+        converted.param_regs[p + 1] = func.param_regs[p]
+        p = p + 1
+    }
+    converted.param_count = func.param_count + 1
+
+    // Rewrite instructions: replace free var reads with field loads from env
+    var i: i64 = 0
+    while i < func.instr_count {
+        let instr = func.instrs[i]
+        var new_instr = instr
+
+        // Replace src1 if it is a free variable
+        if instr.src1 >= 0 {
+            let idx1 = closure_env_index_of(env, instr.src1)
+            if idx1 >= 0 {
+                // Allocate a temp register for the loaded value
+                let pair1 = closure_alloc_reg(converted)
+                converted = pair1.0
+                let tmp1 = pair1.1
+                // Emit field load: tmp1 = env_reg.field[idx1]
+                converted = closure_emit_instr(converted, ir_field_get(tmp1, env_reg, idx1, ir_empty_name()))
+                new_instr = IrInstr {
+                    op: new_instr.op,
+                    dst: new_instr.dst,
+                    src1: tmp1,
+                    src2: new_instr.src2,
+                    imm_i64: new_instr.imm_i64,
+                    imm_f64: new_instr.imm_f64,
+                    label_id: new_instr.label_id,
+                    fn_id: new_instr.fn_id,
+                    field_idx: new_instr.field_idx,
+                    bin_op: new_instr.bin_op,
+                    un_op: new_instr.un_op,
+                    name: new_instr.name,
+                    call_args: new_instr.call_args,
+                    arg_count: new_instr.arg_count,
+                }
+            }
+        }
+
+        // Replace src2 if it is a free variable
+        if new_instr.src2 >= 0 {
+            let idx2 = closure_env_index_of(env, new_instr.src2)
+            if idx2 >= 0 {
+                let pair2 = closure_alloc_reg(converted)
+                converted = pair2.0
+                let tmp2 = pair2.1
+                converted = closure_emit_instr(converted, ir_field_get(tmp2, env_reg, idx2, ir_empty_name()))
+                new_instr = IrInstr {
+                    op: new_instr.op,
+                    dst: new_instr.dst,
+                    src1: new_instr.src1,
+                    src2: tmp2,
+                    imm_i64: new_instr.imm_i64,
+                    imm_f64: new_instr.imm_f64,
+                    label_id: new_instr.label_id,
+                    fn_id: new_instr.fn_id,
+                    field_idx: new_instr.field_idx,
+                    bin_op: new_instr.bin_op,
+                    un_op: new_instr.un_op,
+                    name: new_instr.name,
+                    call_args: new_instr.call_args,
+                    arg_count: new_instr.arg_count,
+                }
+            }
+        }
+
+        // If the destination is a free variable, replace with field store
+        if new_instr.dst >= 0 {
+            let idx_dst = closure_env_index_of(env, new_instr.dst)
+            if idx_dst >= 0 {
+                // Emit the original instruction to a fresh temp
+                let pair_d = closure_alloc_reg(converted)
+                converted = pair_d.0
+                let tmp_d = pair_d.1
+                let store_instr = IrInstr {
+                    op: new_instr.op,
+                    dst: tmp_d,
+                    src1: new_instr.src1,
+                    src2: new_instr.src2,
+                    imm_i64: new_instr.imm_i64,
+                    imm_f64: new_instr.imm_f64,
+                    label_id: new_instr.label_id,
+                    fn_id: new_instr.fn_id,
+                    field_idx: new_instr.field_idx,
+                    bin_op: new_instr.bin_op,
+                    un_op: new_instr.un_op,
+                    name: new_instr.name,
+                    call_args: new_instr.call_args,
+                    arg_count: new_instr.arg_count,
+                }
+                converted = closure_emit_instr(converted, store_instr)
+                // Then store tmp_d into env field
+                converted = closure_emit_instr(converted, ir_field_set(env_reg, idx_dst, tmp_d, ir_empty_name()))
+                i = i + 1
+                // skip the normal emit below
+                continue
+            }
+        }
+
+        converted = closure_emit_instr(converted, new_instr)
+        i = i + 1
+    }
+
+    let info = ClosureInfo {
+        original_fn_id: table.count,
+        lifted_fn_id: table.count,
+        env: env,
+        is_closure: 1,
+    }
+
+    (converted, closure_table_add(table, info))
+}
+
+// ============================================================================
+// Section 4: Lambda lifting
+// ============================================================================
+
+struct LiftResult {
+    lifted_functions: [IrFunction; 64],
+    lift_count: i64,
+    call_patches: [i64; 256],
+    patch_count: i64,
+}
+
+fn lift_result_new() -> LiftResult with Mut, Panic, Div {
+    LiftResult {
+        lifted_functions: [ir_empty_function(); 64],
+        lift_count: 0,
+        call_patches: [0; 256],
+        patch_count: 0,
+    }
+}
+
+// Generate a lifted function name by appending a numeric suffix.
+fn make_lifted_name(base: Name, suffix: i64) -> Name with Mut, Panic, Div {
+    var result = base
+    // Append "_lifted_"
+    if result.len < 118 {
+        result.buf[result.len] = 95   // '_'
+        result.len = result.len + 1
+        result.buf[result.len] = 108  // 'l'
+        result.len = result.len + 1
+        result.buf[result.len] = 105  // 'i'
+        result.len = result.len + 1
+        result.buf[result.len] = 102  // 'f'
+        result.len = result.len + 1
+        result.buf[result.len] = 116  // 't'
+        result.len = result.len + 1
+        result.buf[result.len] = 95   // '_'
+        result.len = result.len + 1
+    }
+    // Append suffix digit(s)
+    if suffix < 10 {
+        result.buf[result.len] = (48 + suffix) as i8  // '0'+suffix
+        result.len = result.len + 1
+    } else {
+        let tens = suffix / 10
+        let ones = suffix % 10
+        result.buf[result.len] = (48 + tens) as i8
+        result.len = result.len + 1
+        result.buf[result.len] = (48 + ones) as i8
+        result.len = result.len + 1
+    }
+    result
+}
+
+// Lambda-lift a single function: extract to top-level, threading captured
+// variables as additional parameters.
+fn lambda_lift(func: IrFunction, module: IrModule) -> LiftResult with Mut, Panic, Div {
+    var result = lift_result_new()
+
+    let free = compute_free_vars(func)
+
+    // If no free variables, the function is already top-level
+    if free.count == 0 {
+        result.lifted_functions[0] = func
+        result.lift_count = 1
+        return result
+    }
+
+    // Create the lifted version with extra params for captured vars
+    var lifted = ir_empty_function()
+    lifted.name = make_lifted_name(func.name, result.lift_count)
+    lifted.reg_count = func.reg_count
+    lifted.label_count = func.label_count
+
+    // Copy original params
+    var p: i64 = 0
+    while p < func.param_count {
+        lifted.param_regs[p] = func.param_regs[p]
+        p = p + 1
+    }
+    lifted.param_count = func.param_count
+
+    // Add extra params for each free variable
+    var c: i64 = 0
+    while c < free.count && lifted.param_count < 64 {
+        // The extra parameter register IS the free variable register itself
+        // so no rewriting needed in the body
+        lifted.param_regs[lifted.param_count] = free.vars[c]
+        lifted.param_count = lifted.param_count + 1
+        c = c + 1
+    }
+
+    // Copy instructions verbatim (free vars are now parameters)
+    var i: i64 = 0
+    while i < func.instr_count {
+        lifted.instrs[i] = func.instrs[i]
+        i = i + 1
+    }
+    lifted.instr_count = func.instr_count
+
+    result.lifted_functions[result.lift_count] = lifted
+    result.lift_count = result.lift_count + 1
+
+    // Record which free vars need to be passed at call sites
+    c = 0
+    while c < free.count {
+        if result.patch_count < 256 {
+            result.call_patches[result.patch_count] = free.vars[c]
+            result.patch_count = result.patch_count + 1
+        }
+        c = c + 1
+    }
+
+    result
+}
+
+// Lift all functions in a module that have free variables.
+fn lambda_lift_module(module: IrModule) -> IrModule with Mut, Panic, Div {
+    var result = ir_empty_module()
+    result.string_table = module.string_table
+    result.string_count = module.string_count
+
+    var fn_idx: i64 = 0
+    while fn_idx < module.fn_count {
+        let func = module.functions[fn_idx]
+        let lr = lambda_lift(func, module)
+
+        // Add all lifted functions to the result module
+        var li: i64 = 0
+        while li < lr.lift_count {
+            if result.fn_count < 4096 {
+                result.functions[result.fn_count] = lr.lifted_functions[li]
+                result.fn_count = result.fn_count + 1
+            }
+            li = li + 1
+        }
+        fn_idx = fn_idx + 1
+    }
+
+    result
+}
+
+// ============================================================================
+// Section 5: Environment struct generation
+// ============================================================================
+
+struct EnvStruct {
+    field_types: [i64; 128],
+    field_count: i64,
+    struct_id: i64,
+}
+
+fn env_struct_new() -> EnvStruct with Mut, Panic, Div {
+    EnvStruct {
+        field_types: [0; 128],
+        field_count: 0,
+        struct_id: 0,
+    }
+}
+
+// Generate an environment struct descriptor from a ClosureEnv.
+fn generate_env_struct(env: ClosureEnv) -> EnvStruct with Mut, Panic, Div {
+    var es = env_struct_new()
+    es.struct_id = env.env_struct_id
+    var i: i64 = 0
+    while i < env.count && i < 128 {
+        es.field_types[i] = env.capture_types[i]
+        i = i + 1
+    }
+    es.field_count = env.count
+    es
+}
+
+// Emit an allocation instruction for the environment struct.
+fn emit_env_alloc(func: IrFunction, env_struct: EnvStruct) -> IrFunction with Mut, Panic, Div {
+    let pair = closure_alloc_reg(func)
+    var result = pair.0
+    let env_reg = pair.1
+    result = closure_emit_instr(result, ir_alloc(env_reg, env_struct.struct_id))
+    result
+}
+
+// Pack captured variables into the environment struct.
+// captures is the array of source registers to store into each env field.
+fn emit_env_pack(func: IrFunction, env: ClosureEnv, captures: [i64; 128]) -> IrFunction with Mut, Panic, Div {
+    // We assume the env pointer register is reg_count - 1 (allocated by emit_env_alloc)
+    let env_reg = func.reg_count - 1
+    var result = func
+    var i: i64 = 0
+    while i < env.count {
+        result = closure_emit_instr(result, ir_field_set(env_reg, i, captures[i], ir_empty_name()))
+        i = i + 1
+    }
+    result
+}
+
+// Unpack environment fields into local registers at function entry.
+// param_reg is the register that holds the env pointer parameter.
+fn emit_env_unpack(func: IrFunction, env: ClosureEnv, param_reg: i64) -> IrFunction with Mut, Panic, Div {
+    var result = func
+    var i: i64 = 0
+    while i < env.count {
+        let pair = closure_alloc_reg(result)
+        result = pair.0
+        let local_reg = pair.1
+        result = closure_emit_instr(result, ir_field_get(local_reg, param_reg, i, ir_empty_name()))
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================================
+// Section 6: Closure call lowering
+// ============================================================================
+
+// Lower a single closure call instruction: replace it with env load + direct
+// call to the lifted function with env prepended.
+fn lower_closure_call(func: IrFunction, call_idx: i64, closure_table: ClosureTable) -> IrFunction with Mut, Panic, Div {
+    if call_idx < 0 || call_idx >= func.instr_count {
+        return func
+    }
+
+    let call_instr = func.instrs[call_idx]
+
+    // Look up the target function in the closure table
+    let ct_idx = closure_table_lookup(closure_table, call_instr.fn_id)
+    if ct_idx < 0 {
+        return func  // Not a closure call
+    }
+
+    let cinfo = closure_table.closures[ct_idx]
+    if cinfo.is_closure == 0 {
+        return func  // Not actually a closure
+    }
+
+    // Build a new function with the call replaced:
+    // 1) Emit all instructions before the call
+    // 2) Load env pointer (we use a dummy field get from a "closure object")
+    // 3) Emit call to lifted function with env as first arg
+    // 4) Copy remaining instructions
+    var result = ir_empty_function()
+    result.name = func.name
+    result.reg_count = func.reg_count
+    result.label_count = func.label_count
+    result.param_count = func.param_count
+    var p: i64 = 0
+    while p < func.param_count {
+        result.param_regs[p] = func.param_regs[p]
+        p = p + 1
+    }
+
+    var i: i64 = 0
+    while i < func.instr_count {
+        if i == call_idx {
+            // Allocate register for env pointer
+            let pair = closure_alloc_reg(result)
+            result = pair.0
+            let env_ptr_reg = pair.1
+
+            // Emit: env_ptr_reg = field_get(closure_reg, 0, "env")
+            // src1 of the call was the first arg; closure object is assumed to
+            // be stored at fn_id's associated env struct
+            result = closure_emit_instr(result, ir_load_imm(env_ptr_reg, cinfo.env.env_struct_id))
+
+            // Emit the direct call to the lifted function with env prepended
+            let lifted_call = IrInstr {
+                op: IrOpcode::IrCall,
+                dst: call_instr.dst,
+                src1: env_ptr_reg,
+                src2: call_instr.src1,
+                imm_i64: call_instr.imm_i64,
+                imm_f64: call_instr.imm_f64,
+                label_id: call_instr.label_id,
+                fn_id: cinfo.lifted_fn_id,
+                field_idx: call_instr.field_idx,
+                bin_op: call_instr.bin_op,
+                un_op: call_instr.un_op,
+                name: call_instr.name,
+                call_args: call_instr.call_args,
+                arg_count: call_instr.arg_count + 1,
+            }
+            result = closure_emit_instr(result, lifted_call)
+        } else {
+            result = closure_emit_instr(result, func.instrs[i])
+        }
+        i = i + 1
+    }
+
+    result
+}
+
+// Lower all closure calls in an entire module.
+fn lower_all_closure_calls(module: IrModule, closure_table: ClosureTable) -> IrModule with Mut, Panic, Div {
+    var result = module
+
+    var fn_idx: i64 = 0
+    while fn_idx < result.fn_count {
+        var func = result.functions[fn_idx]
+
+        // Scan for call instructions that target closures.
+        // Process in reverse order so indices remain valid.
+        var ci: i64 = func.instr_count - 1
+        while ci >= 0 {
+            let instr = func.instrs[ci]
+            match instr.op {
+                IrOpcode::IrCall => {
+                    let ct_idx = closure_table_lookup(closure_table, instr.fn_id)
+                    if ct_idx >= 0 {
+                        if closure_table.closures[ct_idx].is_closure != 0 {
+                            func = lower_closure_call(func, ci, closure_table)
+                        }
+                    }
+                }
+                _ => {}
+            }
+            ci = ci - 1
+        }
+
+        result.functions[fn_idx] = func
+        fn_idx = fn_idx + 1
+    }
+
+    result
+}
+
+// ============================================================================
+// Section 7: Test helpers
+// ============================================================================
+
+// Build a trivial IR function with a given number of instructions.
+fn make_test_func(name: Name, num_instrs: i64) -> IrFunction with Mut, Panic, Div {
+    var func = ir_empty_function()
+    func.name = name
+    func.reg_count = num_instrs + 2
+    var i: i64 = 0
+    while i < num_instrs {
+        func.instrs[i] = ir_load_imm(i, i * 10)
+        i = i + 1
+    }
+    func.instr_count = num_instrs
+    func
+}
+
+// Build a function that uses registers not in its own defs (simulating free vars).
+fn make_closure_func(free_regs: [i64; 8], free_count: i64) -> IrFunction with Mut, Panic, Div {
+    var func = ir_empty_function()
+    func.name = ir_empty_name()
+    func.reg_count = 100
+
+    // Parameter register 0
+    func.param_regs[0] = 0
+    func.param_count = 1
+
+    // Instruction: dst=1, src1=free_regs[0], src2=free_regs[1]
+    // This creates free variables since those regs are not defined here
+    var i: i64 = 0
+    while i < free_count && i < 4 {
+        let src_reg = free_regs[i]
+        let dst_reg = 50 + i
+        func.instrs[func.instr_count] = ir_binop(dst_reg, src_reg, BinaryOp::OpAdd, 0)
+        func.instr_count = func.instr_count + 1
+        i = i + 1
+    }
+
+    // Return
+    func.instrs[func.instr_count] = ir_return(50)
+    func.instr_count = func.instr_count + 1
+
+    func
+}
+
+// ============================================================================
+// Section 8: Tests
+// ============================================================================
+
+fn test_free_var_set_empty() -> i64 with Mut, Panic, Div {
+    let s = free_var_set_new()
+    if s.count != 0 { return 1 }
+    if free_var_contains(s, 42) { return 2 }
+    0
+}
+
+fn test_free_var_add_and_contains() -> i64 with Mut, Panic, Div {
+    var s = free_var_set_new()
+    s = free_var_add(s, 10)
+    s = free_var_add(s, 20)
+    s = free_var_add(s, 30)
+    if s.count != 3 { return 1 }
+    if !free_var_contains(s, 10) { return 2 }
+    if !free_var_contains(s, 20) { return 3 }
+    if !free_var_contains(s, 30) { return 4 }
+    if free_var_contains(s, 99) { return 5 }
+    0
+}
+
+fn test_free_var_add_dedup() -> i64 with Mut, Panic, Div {
+    var s = free_var_set_new()
+    s = free_var_add(s, 5)
+    s = free_var_add(s, 5)
+    s = free_var_add(s, 5)
+    if s.count != 1 { return 1 }
+    0
+}
+
+fn test_free_var_remove() -> i64 with Mut, Panic, Div {
+    var s = free_var_set_new()
+    s = free_var_add(s, 1)
+    s = free_var_add(s, 2)
+    s = free_var_add(s, 3)
+    let r = free_var_remove(s, 2)
+    if r.count != 2 { return 1 }
+    if free_var_contains(r, 2) { return 2 }
+    if !free_var_contains(r, 1) { return 3 }
+    if !free_var_contains(r, 3) { return 4 }
+    0
+}
+
+fn test_free_var_union() -> i64 with Mut, Panic, Div {
+    var a = free_var_set_new()
+    a = free_var_add(a, 1)
+    a = free_var_add(a, 2)
+    var b = free_var_set_new()
+    b = free_var_add(b, 2)
+    b = free_var_add(b, 3)
+    let u = free_var_union(a, b)
+    if u.count != 3 { return 1 }
+    if !free_var_contains(u, 1) { return 2 }
+    if !free_var_contains(u, 2) { return 3 }
+    if !free_var_contains(u, 3) { return 4 }
+    0
+}
+
+fn test_free_var_difference() -> i64 with Mut, Panic, Div {
+    var a = free_var_set_new()
+    a = free_var_add(a, 1)
+    a = free_var_add(a, 2)
+    a = free_var_add(a, 3)
+    var b = free_var_set_new()
+    b = free_var_add(b, 2)
+    let d = free_var_difference(a, b)
+    if d.count != 2 { return 1 }
+    if free_var_contains(d, 2) { return 2 }
+    if !free_var_contains(d, 1) { return 3 }
+    if !free_var_contains(d, 3) { return 4 }
+    0
+}
+
+fn test_compute_free_vars_none() -> i64 with Mut, Panic, Div {
+    // A function where all used registers are defined internally
+    var func = ir_empty_function()
+    func.reg_count = 3
+    func.param_regs[0] = 0
+    func.param_count = 1
+    // dst=1, src1=0 (param), src2 not used (IR_INVALID_REG)
+    func.instrs[0] = ir_load_imm(1, 42)
+    // dst=2, src1=1 (locally defined)
+    func.instrs[1] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    func.instrs[2] = ir_return(2)
+    func.instr_count = 3
+
+    let fv = compute_free_vars(func)
+    if fv.count != 0 { return 1 }
+    0
+}
+
+fn test_compute_free_vars_some() -> i64 with Mut, Panic, Div {
+    // A function using registers 10 and 20 that are never defined
+    var free_regs: [i64; 8] = [0; 8]
+    free_regs[0] = 10
+    free_regs[1] = 20
+    let func = make_closure_func(free_regs, 2)
+    let fv = compute_free_vars(func)
+    // Registers 10 and 20 should be free (used as src but never defined)
+    if fv.count != 2 { return 1 }
+    if !free_var_contains(fv, 10) { return 2 }
+    if !free_var_contains(fv, 20) { return 3 }
+    0
+}
+
+fn test_closure_env_add_and_index() -> i64 with Mut, Panic, Div {
+    var env = closure_env_new()
+    env = closure_env_add_capture(env, 10, 100)
+    env = closure_env_add_capture(env, 20, 200)
+    env = closure_env_add_capture(env, 30, 300)
+    if env.count != 3 { return 1 }
+    let i0 = closure_env_index_of(env, 10)
+    if i0 != 0 { return 2 }
+    let i1 = closure_env_index_of(env, 20)
+    if i1 != 1 { return 3 }
+    let i2 = closure_env_index_of(env, 30)
+    if i2 != 2 { return 4 }
+    let i3 = closure_env_index_of(env, 99)
+    if i3 != 0 - 1 { return 5 }
+    0
+}
+
+fn test_closure_env_dedup() -> i64 with Mut, Panic, Div {
+    var env = closure_env_new()
+    env = closure_env_add_capture(env, 5, 50)
+    env = closure_env_add_capture(env, 5, 50)
+    env = closure_env_add_capture(env, 5, 50)
+    if env.count != 1 { return 1 }
+    0
+}
+
+fn test_closure_table_new() -> i64 with Mut, Panic, Div {
+    let t = closure_table_new()
+    if t.count != 0 { return 1 }
+    let idx = closure_table_lookup(t, 0)
+    if idx != 0 - 1 { return 2 }
+    0
+}
+
+fn test_closure_table_add_lookup() -> i64 with Mut, Panic, Div {
+    var t = closure_table_new()
+    var info = closure_info_new()
+    info.original_fn_id = 42
+    info.lifted_fn_id = 100
+    info.is_closure = 1
+    t = closure_table_add(t, info)
+    if t.count != 1 { return 1 }
+    let idx = closure_table_lookup(t, 42)
+    if idx != 0 { return 2 }
+    let miss = closure_table_lookup(t, 99)
+    if miss != 0 - 1 { return 3 }
+    0
+}
+
+fn test_closure_convert_no_free() -> i64 with Mut, Panic, Div {
+    // A function with no free variables should not be marked as closure
+    var func = ir_empty_function()
+    func.reg_count = 2
+    func.param_regs[0] = 0
+    func.param_count = 1
+    func.instrs[0] = ir_load_imm(1, 99)
+    func.instrs[1] = ir_return(1)
+    func.instr_count = 2
+
+    let scope = free_var_set_new()
+    let table = closure_table_new()
+    let pair = closure_convert_function(func, scope, table)
+    let converted = pair.0
+    let new_table = pair.1
+
+    // Should be unmodified (no env param added)
+    if converted.param_count != 1 { return 1 }
+    // Table should have one entry with is_closure = 0
+    if new_table.count != 1 { return 2 }
+    if new_table.closures[0].is_closure != 0 { return 3 }
+    0
+}
+
+fn test_closure_convert_with_free() -> i64 with Mut, Panic, Div {
+    // Build a function that captures registers 10, 20
+    var free_regs: [i64; 8] = [0; 8]
+    free_regs[0] = 10
+    free_regs[1] = 20
+    let func = make_closure_func(free_regs, 2)
+
+    let scope = free_var_set_new()
+    let table = closure_table_new()
+    let pair = closure_convert_function(func, scope, table)
+    let converted = pair.0
+    let new_table = pair.1
+
+    // Should have one extra parameter (env)
+    if converted.param_count != func.param_count + 1 { return 1 }
+    // Table entry should be marked as closure
+    if new_table.count != 1 { return 2 }
+    if new_table.closures[0].is_closure != 1 { return 3 }
+    // Env should capture 2 variables
+    if new_table.closures[0].env.count != 2 { return 4 }
+    0
+}
+
+fn test_lambda_lift_no_free() -> i64 with Mut, Panic, Div {
+    var func = ir_empty_function()
+    func.reg_count = 2
+    func.param_regs[0] = 0
+    func.param_count = 1
+    func.instrs[0] = ir_load_imm(1, 7)
+    func.instrs[1] = ir_return(1)
+    func.instr_count = 2
+
+    let module = ir_empty_module()
+    let lr = lambda_lift(func, module)
+    if lr.lift_count != 1 { return 1 }
+    // No patches needed
+    if lr.patch_count != 0 { return 2 }
+    0
+}
+
+fn test_lambda_lift_with_free() -> i64 with Mut, Panic, Div {
+    var free_regs: [i64; 8] = [0; 8]
+    free_regs[0] = 10
+    free_regs[1] = 20
+    free_regs[2] = 30
+    let func = make_closure_func(free_regs, 3)
+
+    let module = ir_empty_module()
+    let lr = lambda_lift(func, module)
+    if lr.lift_count != 1 { return 1 }
+    // The lifted function should have original params + free var params
+    let lifted = lr.lifted_functions[0]
+    if lifted.param_count != func.param_count + 3 { return 2 }
+    // 3 patches for the 3 free vars
+    if lr.patch_count != 3 { return 3 }
+    0
+}
+
+fn test_lambda_lift_module_identity() -> i64 with Mut, Panic, Div {
+    // A module with only non-closure functions should pass through unchanged
+    var module = ir_empty_module()
+    var f1 = ir_empty_function()
+    f1.reg_count = 2
+    f1.param_regs[0] = 0
+    f1.param_count = 1
+    f1.instrs[0] = ir_load_imm(1, 5)
+    f1.instrs[1] = ir_return(1)
+    f1.instr_count = 2
+    module.functions[0] = f1
+    module.fn_count = 1
+
+    let result = lambda_lift_module(module)
+    if result.fn_count != 1 { return 1 }
+    if result.functions[0].param_count != 1 { return 2 }
+    0
+}
+
+fn test_generate_env_struct() -> i64 with Mut, Panic, Div {
+    var env = closure_env_new()
+    env = closure_env_add_capture(env, 10, 100)
+    env = closure_env_add_capture(env, 20, 200)
+    env.env_struct_id = 7
+
+    let es = generate_env_struct(env)
+    if es.field_count != 2 { return 1 }
+    if es.struct_id != 7 { return 2 }
+    if es.field_types[0] != 100 { return 3 }
+    if es.field_types[1] != 200 { return 4 }
+    0
+}
+
+fn test_emit_env_alloc() -> i64 with Mut, Panic, Div {
+    var func = ir_empty_function()
+    func.reg_count = 2
+    func.instr_count = 0
+    var es = env_struct_new()
+    es.struct_id = 42
+
+    let result = emit_env_alloc(func, es)
+    // Should have 1 new instruction (IrAlloc)
+    if result.instr_count != 1 { return 1 }
+    // The alloc instruction should target the struct id
+    let alloc_instr = result.instrs[0]
+    match alloc_instr.op {
+        IrOpcode::IrAlloc => {}
+        _ => { return 2 }
+    }
+    if alloc_instr.imm_i64 != 42 { return 3 }
+    0
+}
+
+fn test_emit_env_pack() -> i64 with Mut, Panic, Div {
+    // Setup: function with reg_count = 5 (so env_reg = 4)
+    var func = ir_empty_function()
+    func.reg_count = 5
+    func.instr_count = 0
+
+    var env = closure_env_new()
+    env = closure_env_add_capture(env, 10, 100)
+    env = closure_env_add_capture(env, 20, 200)
+
+    var captures: [i64; 128] = [0; 128]
+    captures[0] = 1  // source register for capture 0
+    captures[1] = 2  // source register for capture 1
+
+    let result = emit_env_pack(func, env, captures)
+    // Should have 2 field_set instructions
+    if result.instr_count != 2 { return 1 }
+    match result.instrs[0].op {
+        IrOpcode::IrFieldSet => {}
+        _ => { return 2 }
+    }
+    match result.instrs[1].op {
+        IrOpcode::IrFieldSet => {}
+        _ => { return 3 }
+    }
+    0
+}
+
+fn test_emit_env_unpack() -> i64 with Mut, Panic, Div {
+    var func = ir_empty_function()
+    func.reg_count = 3
+    func.instr_count = 0
+
+    var env = closure_env_new()
+    env = closure_env_add_capture(env, 10, 100)
+    env = closure_env_add_capture(env, 20, 200)
+    env = closure_env_add_capture(env, 30, 300)
+
+    let result = emit_env_unpack(func, env, 0)
+    // Should have 3 field_get instructions
+    if result.instr_count != 3 { return 1 }
+    match result.instrs[0].op {
+        IrOpcode::IrFieldGet => {}
+        _ => { return 2 }
+    }
+    // reg_count should have grown by 3
+    if result.reg_count != 6 { return 3 }
+    0
+}
+
+fn test_lower_closure_call_miss() -> i64 with Mut, Panic, Div {
+    // Lowering a call that is NOT in the closure table should be a no-op
+    var func = ir_empty_function()
+    func.reg_count = 3
+    func.instrs[0] = ir_load_imm(0, 1)
+    func.instrs[1] = ir_call(1, 99, ir_empty_name(), None, 1)
+    func.instrs[2] = ir_return(1)
+    func.instr_count = 3
+
+    let table = closure_table_new()
+    let result = lower_closure_call(func, 1, table)
+    // Should be unchanged
+    if result.instr_count != 3 { return 1 }
+    0
+}
+
+fn test_lower_closure_call_hit() -> i64 with Mut, Panic, Div {
+    // Build a closure table entry
+    var table = closure_table_new()
+    var info = closure_info_new()
+    info.original_fn_id = 5
+    info.lifted_fn_id = 50
+    info.is_closure = 1
+    var env = closure_env_new()
+    env = closure_env_add_capture(env, 10, 100)
+    env.env_struct_id = 7
+    info.env = env
+    table = closure_table_add(table, info)
+
+    // Build a function with a call to fn_id=5
+    var func = ir_empty_function()
+    func.reg_count = 4
+    func.instrs[0] = ir_load_imm(0, 1)
+    func.instrs[1] = ir_call(1, 5, ir_empty_name(), None, 1)
+    func.instrs[2] = ir_return(1)
+    func.instr_count = 3
+
+    let result = lower_closure_call(func, 1, table)
+    // Should have more instructions (env load + call replaced)
+    if result.instr_count < 3 { return 1 }
+    // Should have the load_imm for env struct id
+    match result.instrs[1].op {
+        IrOpcode::IrLoadImm => {}
+        _ => { return 2 }
+    }
+    // The call should target the lifted function id
+    match result.instrs[2].op {
+        IrOpcode::IrCall => {
+            if result.instrs[2].fn_id != 50 { return 3 }
+        }
+        _ => { return 4 }
+    }
+    0
+}
+
+fn test_lower_all_closure_calls() -> i64 with Mut, Panic, Div {
+    // Build module with one function containing a closure call
+    var module = ir_empty_module()
+    var func = ir_empty_function()
+    func.reg_count = 4
+    func.instrs[0] = ir_load_imm(0, 1)
+    func.instrs[1] = ir_call(1, 5, ir_empty_name(), None, 1)
+    func.instrs[2] = ir_return(1)
+    func.instr_count = 3
+    module.functions[0] = func
+    module.fn_count = 1
+
+    var table = closure_table_new()
+    var info = closure_info_new()
+    info.original_fn_id = 5
+    info.lifted_fn_id = 50
+    info.is_closure = 1
+    var env = closure_env_new()
+    env = closure_env_add_capture(env, 10, 100)
+    env.env_struct_id = 7
+    info.env = env
+    table = closure_table_add(table, info)
+
+    let result = lower_all_closure_calls(module, table)
+    // The function should have been rewritten
+    if result.fn_count != 1 { return 1 }
+    let rewritten = result.functions[0]
+    // Should have more instructions than the original 3
+    if rewritten.instr_count < 3 { return 2 }
+    0
+}
+
+fn test_make_lifted_name() -> i64 with Mut, Panic, Div {
+    var base = ir_empty_name()
+    // "foo" = [102, 111, 111]
+    base.buf[0] = 102
+    base.buf[1] = 111
+    base.buf[2] = 111
+    base.len = 3
+
+    let lifted = make_lifted_name(base, 3)
+    // Should be "foo_lift_3"
+    // f=102, o=111, o=111, _=95, l=108, i=105, f=102, t=116, _=95, 3=51
+    if lifted.len != 10 { return 1 }
+    if lifted.buf[3] != 95 { return 2 }   // '_'
+    if lifted.buf[4] != 108 { return 3 }  // 'l'
+    if lifted.buf[9] != 51 { return 4 }   // '3'
+    0
+}
+
+fn test_free_var_set_large() -> i64 with Mut, Panic, Div {
+    // Fill a set to capacity and verify it stops growing
+    var s = free_var_set_new()
+    var i: i64 = 0
+    while i < 260 {
+        s = free_var_add(s, i)
+        i = i + 1
+    }
+    // Should cap at 256
+    if s.count != 256 { return 1 }
+    // First 256 should be present
+    if !free_var_contains(s, 0) { return 2 }
+    if !free_var_contains(s, 255) { return 3 }
+    0
+}
+
+fn test_closure_env_full() -> i64 with Mut, Panic, Div {
+    // Fill environment to capacity
+    var env = closure_env_new()
+    var i: i64 = 0
+    while i < 130 {
+        env = closure_env_add_capture(env, i, i * 10)
+        i = i + 1
+    }
+    // Should cap at 128
+    if env.count != 128 { return 1 }
+    let idx = closure_env_index_of(env, 127)
+    if idx != 127 { return 2 }
+    // 128 and 129 should not be present
+    let miss = closure_env_index_of(env, 128)
+    if miss != 0 - 1 { return 3 }
+    0
+}
+
+fn test_build_parent_scope() -> i64 with Mut, Panic, Div {
+    var parent = ir_empty_function()
+    parent.reg_count = 5
+    parent.param_regs[0] = 0
+    parent.param_regs[1] = 1
+    parent.param_count = 2
+    parent.instrs[0] = ir_load_imm(2, 10)
+    parent.instrs[1] = ir_load_imm(3, 20)
+    parent.instr_count = 2
+
+    let scope = build_parent_scope(parent)
+    // Should contain param regs 0, 1 and dst regs 2, 3
+    if !free_var_contains(scope, 0) { return 1 }
+    if !free_var_contains(scope, 1) { return 2 }
+    if !free_var_contains(scope, 2) { return 3 }
+    if !free_var_contains(scope, 3) { return 4 }
+    if free_var_contains(scope, 4) { return 5 }
+    0
+}
+
+// ============================================================================
+// Test runner
+// ============================================================================
+
+fn closure_run_tests() -> i64 with Mut, Panic, Div {
+    var fail: i64 = 0
+
+    let t01 = test_free_var_set_empty()
+    if t01 != 0 { print_int(101) fail = fail + 1 }
+
+    let t02 = test_free_var_add_and_contains()
+    if t02 != 0 { print_int(102) fail = fail + 1 }
+
+    let t03 = test_free_var_add_dedup()
+    if t03 != 0 { print_int(103) fail = fail + 1 }
+
+    let t04 = test_free_var_remove()
+    if t04 != 0 { print_int(104) fail = fail + 1 }
+
+    let t05 = test_free_var_union()
+    if t05 != 0 { print_int(105) fail = fail + 1 }
+
+    let t06 = test_free_var_difference()
+    if t06 != 0 { print_int(106) fail = fail + 1 }
+
+    let t07 = test_compute_free_vars_none()
+    if t07 != 0 { print_int(107) fail = fail + 1 }
+
+    let t08 = test_compute_free_vars_some()
+    if t08 != 0 { print_int(108) fail = fail + 1 }
+
+    let t09 = test_closure_env_add_and_index()
+    if t09 != 0 { print_int(109) fail = fail + 1 }
+
+    let t10 = test_closure_env_dedup()
+    if t10 != 0 { print_int(110) fail = fail + 1 }
+
+    let t11 = test_closure_table_new()
+    if t11 != 0 { print_int(111) fail = fail + 1 }
+
+    let t12 = test_closure_table_add_lookup()
+    if t12 != 0 { print_int(112) fail = fail + 1 }
+
+    let t13 = test_closure_convert_no_free()
+    if t13 != 0 { print_int(113) fail = fail + 1 }
+
+    let t14 = test_closure_convert_with_free()
+    if t14 != 0 { print_int(114) fail = fail + 1 }
+
+    let t15 = test_lambda_lift_no_free()
+    if t15 != 0 { print_int(115) fail = fail + 1 }
+
+    let t16 = test_lambda_lift_with_free()
+    if t16 != 0 { print_int(116) fail = fail + 1 }
+
+    let t17 = test_lambda_lift_module_identity()
+    if t17 != 0 { print_int(117) fail = fail + 1 }
+
+    let t18 = test_generate_env_struct()
+    if t18 != 0 { print_int(118) fail = fail + 1 }
+
+    let t19 = test_emit_env_alloc()
+    if t19 != 0 { print_int(119) fail = fail + 1 }
+
+    let t20 = test_emit_env_pack()
+    if t20 != 0 { print_int(120) fail = fail + 1 }
+
+    let t21 = test_emit_env_unpack()
+    if t21 != 0 { print_int(121) fail = fail + 1 }
+
+    let t22 = test_lower_closure_call_miss()
+    if t22 != 0 { print_int(122) fail = fail + 1 }
+
+    let t23 = test_lower_closure_call_hit()
+    if t23 != 0 { print_int(123) fail = fail + 1 }
+
+    let t24 = test_lower_all_closure_calls()
+    if t24 != 0 { print_int(124) fail = fail + 1 }
+
+    let t25 = test_make_lifted_name()
+    if t25 != 0 { print_int(125) fail = fail + 1 }
+
+    let t26 = test_free_var_set_large()
+    if t26 != 0 { print_int(126) fail = fail + 1 }
+
+    let t27 = test_closure_env_full()
+    if t27 != 0 { print_int(127) fail = fail + 1 }
+
+    let t28 = test_build_parent_scope()
+    if t28 != 0 { print_int(128) fail = fail + 1 }
+
+    fail
+}

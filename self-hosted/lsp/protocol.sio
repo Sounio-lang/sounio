@@ -1,0 +1,1153 @@
+// self-hosted::lsp::protocol -- LSP message types and JSON serialization
+//
+// Implements a minimal Language Server Protocol layer for the self-hosted
+// compiler.  All strings are represented as i64 hashes (intern IDs); actual
+// string payloads live in the StringInterner and are resolved at the
+// transport boundary.
+//
+// JSON is built into a flat i8 buffer (64 KB) using a state-threaded
+// JsonBuf.  No heap allocation, no recursive structures.
+//
+// Capacity:
+//   - JsonBuf:             65536 bytes
+//   - LspDiagnosticList:   256 diagnostics
+//   - LspCompletionList:   256 completion items
+//   - lsp_header_buf:      256 bytes (Content-Length header)
+
+// ============================================================================
+// CONSTANTS -- LSP method IDs
+// ============================================================================
+
+let LSP_INITIALIZE: i64                  = 1
+let LSP_INITIALIZED: i64                 = 2
+let LSP_SHUTDOWN: i64                    = 3
+let LSP_EXIT: i64                        = 4
+
+let LSP_TEXT_DOCUMENT_DID_OPEN: i64      = 10
+let LSP_TEXT_DOCUMENT_DID_CHANGE: i64    = 11
+let LSP_TEXT_DOCUMENT_DID_CLOSE: i64     = 12
+let LSP_TEXT_DOCUMENT_DID_SAVE: i64      = 13
+
+let LSP_TEXT_DOCUMENT_COMPLETION: i64    = 20
+let LSP_TEXT_DOCUMENT_HOVER: i64         = 21
+let LSP_TEXT_DOCUMENT_DEFINITION: i64    = 22
+let LSP_TEXT_DOCUMENT_REFERENCES: i64    = 23
+
+let LSP_TEXT_DOCUMENT_DIAGNOSTIC: i64    = 30
+let LSP_TEXT_DOCUMENT_FORMATTING: i64    = 31
+
+let LSP_SEVERITY_ERROR: i64             = 1
+let LSP_SEVERITY_WARNING: i64           = 2
+let LSP_SEVERITY_INFO: i64              = 3
+let LSP_SEVERITY_HINT: i64              = 4
+
+// Completion item kinds (subset of LSP spec)
+let LSP_COMPLETION_TEXT: i64             = 1
+let LSP_COMPLETION_METHOD: i64           = 2
+let LSP_COMPLETION_FUNCTION: i64         = 3
+let LSP_COMPLETION_FIELD: i64            = 5
+let LSP_COMPLETION_VARIABLE: i64         = 6
+let LSP_COMPLETION_MODULE: i64           = 9
+let LSP_COMPLETION_KEYWORD: i64          = 14
+let LSP_COMPLETION_SNIPPET: i64          = 15
+let LSP_COMPLETION_STRUCT: i64           = 22
+
+// ============================================================================
+// JSON BUFFER
+// ============================================================================
+
+struct JsonBuf {
+    data: [i8; 65536],
+    len: i64,
+}
+
+fn json_buf_new() -> JsonBuf {
+    JsonBuf {
+        data: [0; 65536],
+        len: 0,
+    }
+}
+
+// ============================================================================
+// JSON PRIMITIVES -- byte-level emission
+// ============================================================================
+
+fn json_buf_emit_byte(buf: JsonBuf, b: i8) -> JsonBuf with Mut, Panic {
+    var out = buf
+    if out.len < 65536 {
+        out.data[out.len as usize] = b
+        out.len = out.len + 1
+    }
+    out
+}
+
+fn json_buf_emit_char(buf: JsonBuf, ch: i64) -> JsonBuf with Mut, Panic {
+    json_buf_emit_byte(buf, ch as i8)
+}
+
+// Emit an integer as decimal ASCII digits.  Handles zero and negative values.
+fn json_buf_emit_int(buf: JsonBuf, val: i64) -> JsonBuf with Mut, Panic, Div {
+    if val == 0 {
+        return json_buf_emit_char(buf, 48)  // '0'
+    }
+
+    var n = val
+    var out = buf
+    if n < 0 {
+        out = json_buf_emit_char(out, 45)  // '-'
+        n = 0 - n
+    }
+
+    // Extract digits into a small stack (max 20 digits for i64)
+    var digits: [i8; 24] = [0; 24]
+    var dlen: i64 = 0
+    while n > 0 && dlen < 24 {
+        let d = n - (n / 10) * 10   // n % 10 without % operator
+        digits[dlen as usize] = (d + 48) as i8
+        n = n / 10
+        dlen = dlen + 1
+    }
+
+    // Emit digits in reverse (most significant first)
+    var i = dlen - 1
+    while i >= 0 {
+        out = json_buf_emit_byte(out, digits[i as usize])
+        i = i - 1
+    }
+    out
+}
+
+// Emit a boolean as JSON literal true/false.
+fn json_buf_emit_bool(buf: JsonBuf, val: bool) -> JsonBuf with Mut, Panic {
+    var out = buf
+    if val {
+        out = json_buf_emit_char(out, 116)  // 't'
+        out = json_buf_emit_char(out, 114)  // 'r'
+        out = json_buf_emit_char(out, 117)  // 'u'
+        out = json_buf_emit_char(out, 101)  // 'e'
+    } else {
+        out = json_buf_emit_char(out, 102)  // 'f'
+        out = json_buf_emit_char(out, 97)   // 'a'
+        out = json_buf_emit_char(out, 108)  // 'l'
+        out = json_buf_emit_char(out, 115)  // 's'
+        out = json_buf_emit_char(out, 101)  // 'e'
+    }
+    out
+}
+
+// Emit JSON null literal.
+fn json_buf_emit_null(buf: JsonBuf) -> JsonBuf with Mut, Panic {
+    var out = buf
+    out = json_buf_emit_char(out, 110)  // 'n'
+    out = json_buf_emit_char(out, 117)  // 'u'
+    out = json_buf_emit_char(out, 108)  // 'l'
+    out = json_buf_emit_char(out, 108)  // 'l'
+    out
+}
+
+// ============================================================================
+// JSON STRUCTURE DELIMITERS
+// ============================================================================
+
+fn json_buf_open_object(buf: JsonBuf) -> JsonBuf with Mut, Panic {
+    json_buf_emit_char(buf, 123)  // '{'
+}
+
+fn json_buf_close_object(buf: JsonBuf) -> JsonBuf with Mut, Panic {
+    json_buf_emit_char(buf, 125)  // '}'
+}
+
+fn json_buf_open_array(buf: JsonBuf) -> JsonBuf with Mut, Panic {
+    json_buf_emit_char(buf, 91)   // '['
+}
+
+fn json_buf_close_array(buf: JsonBuf) -> JsonBuf with Mut, Panic {
+    json_buf_emit_char(buf, 93)   // ']'
+}
+
+fn json_buf_emit_comma(buf: JsonBuf) -> JsonBuf with Mut, Panic {
+    json_buf_emit_char(buf, 44)   // ','
+}
+
+fn json_buf_emit_colon(buf: JsonBuf) -> JsonBuf with Mut, Panic {
+    json_buf_emit_char(buf, 58)   // ':'
+}
+
+// ============================================================================
+// JSON KEY-VALUE HELPERS
+// ============================================================================
+
+// Emit a quoted key from a packed i64 encoding.
+// The packed key encodes up to 8 ASCII bytes, LSB first.
+// E.g. "line" = 0x656E696C  (l=0x6C, i=0x69, n=0x6E, e=0x65)
+fn json_buf_emit_packed_key(buf: JsonBuf, key_packed: i64) -> JsonBuf with Mut, Panic, Div {
+    var out = json_buf_emit_char(buf, 34)  // '"'
+    var k = key_packed
+    while k > 0 {
+        let byte_val = k - (k / 256) * 256   // k % 256
+        out = json_buf_emit_char(out, byte_val)
+        k = k / 256
+    }
+    out = json_buf_emit_char(out, 34)  // '"'
+    out
+}
+
+// Emit "key": int_value
+fn json_buf_emit_key_int(buf: JsonBuf, key_packed: i64, val: i64) -> JsonBuf with Mut, Panic, Div {
+    var out = json_buf_emit_packed_key(buf, key_packed)
+    out = json_buf_emit_colon(out)
+    out = json_buf_emit_int(out, val)
+    out
+}
+
+// Emit "key": bool_value
+fn json_buf_emit_key_bool(buf: JsonBuf, key_packed: i64, val: bool) -> JsonBuf with Mut, Panic, Div {
+    var out = json_buf_emit_packed_key(buf, key_packed)
+    out = json_buf_emit_colon(out)
+    out = json_buf_emit_bool(out, val)
+    out
+}
+
+// Emit "key": null
+fn json_buf_emit_key_null(buf: JsonBuf, key_packed: i64) -> JsonBuf with Mut, Panic, Div {
+    var out = json_buf_emit_packed_key(buf, key_packed)
+    out = json_buf_emit_colon(out)
+    out = json_buf_emit_null(out)
+    out
+}
+
+// ============================================================================
+// PACKED KEY HELPERS
+// ============================================================================
+
+// Build a packed key from 1-8 ASCII characters.
+// Characters are packed LSB-first: pack_key2('a','b') = 0x6261
+fn pack_key1(a: i64) -> i64 { a }
+fn pack_key2(a: i64, b: i64) -> i64 { a + b * 256 }
+fn pack_key3(a: i64, b: i64, c: i64) -> i64 { a + b * 256 + c * 65536 }
+fn pack_key4(a: i64, b: i64, c: i64, d: i64) -> i64 {
+    a + b * 256 + c * 65536 + d * 16777216
+}
+fn pack_key5(a: i64, b: i64, c: i64, d: i64, e: i64) -> i64 {
+    a + b * 256 + c * 65536 + d * 16777216 + e * 4294967296
+}
+fn pack_key6(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) -> i64 {
+    a + b * 256 + c * 65536 + d * 16777216 + e * 4294967296 + f * 1099511627776
+}
+fn pack_key7(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64) -> i64 {
+    a + b * 256 + c * 65536 + d * 16777216 + e * 4294967296
+    + f * 1099511627776 + g * 281474976710656
+}
+fn pack_key8(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64) -> i64 {
+    a + b * 256 + c * 65536 + d * 16777216 + e * 4294967296
+    + f * 1099511627776 + g * 281474976710656 + h * 72057594037927936
+}
+
+// Pre-computed packed keys for common LSP JSON field names
+// "line"      = l(108) i(105) n(110) e(101)
+// "character" = c(99)  h(104) a(97)  r(114) a(97) c(99) t(116) e(101) r(114)
+//               (9 chars -- too long for pack_key8, use two emissions)
+// "start"     = s(115) t(116) a(97)  r(114) t(116)
+// "end"       = e(101) n(110) d(100)
+// "range"     = r(114) a(97)  n(110) g(103) e(101)
+// "severity"  = s(115) e(101) v(118) e(101) r(114) i(105) t(116) y(121)
+// "code"      = c(99)  o(111) d(100) e(101)
+// "kind"      = k(107) i(105) n(110) d(100)
+// "label"     = l(108) a(97)  b(98)  e(101) l(108)
+// "uri"       = u(117) r(114) i(105)
+// "message"   = m(109) e(101) s(115) s(115) a(97)  g(103) e(101)
+// "source"    = s(115) o(111) u(117) r(114) c(99)  e(101)
+// "contents"  = c(99)  o(111) n(110) t(116) e(101) n(110) t(116) s(115)
+// "items"     = i(105) t(116) e(101) m(109) s(115)
+
+fn key_line() -> i64 { pack_key4(108, 105, 110, 101) }
+fn key_start() -> i64 { pack_key5(115, 116, 97, 114, 116) }
+fn key_end() -> i64 { pack_key3(101, 110, 100) }
+fn key_range() -> i64 { pack_key5(114, 97, 110, 103, 101) }
+fn key_code() -> i64 { pack_key4(99, 111, 100, 101) }
+fn key_kind() -> i64 { pack_key4(107, 105, 110, 100) }
+fn key_label() -> i64 { pack_key5(108, 97, 98, 101, 108) }
+fn key_uri() -> i64 { pack_key3(117, 114, 105) }
+fn key_items() -> i64 { pack_key5(105, 116, 101, 109, 115) }
+fn key_message() -> i64 { pack_key7(109, 101, 115, 115, 97, 103, 101) }
+fn key_source() -> i64 { pack_key6(115, 111, 117, 114, 99, 101) }
+fn key_contents() -> i64 { pack_key8(99, 111, 110, 116, 101, 110, 116, 115) }
+fn key_severity() -> i64 { pack_key8(115, 101, 118, 101, 114, 105, 116, 121) }
+
+// "character" is 9 chars -- emit as two packed segments
+fn key_char_lo() -> i64 { pack_key8(99, 104, 97, 114, 97, 99, 116, 101) }
+fn key_char_hi() -> i64 { pack_key1(114) }
+
+// Emit the "character" key (9 bytes, requires two-part emission)
+fn json_buf_emit_key_character(buf: JsonBuf) -> JsonBuf with Mut, Panic, Div {
+    var out = json_buf_emit_char(buf, 34)  // '"'
+    // Emit first 8 bytes from key_char_lo()
+    var k = key_char_lo()
+    while k > 0 {
+        let byte_val = k - (k / 256) * 256
+        out = json_buf_emit_char(out, byte_val)
+        k = k / 256
+    }
+    // Emit 9th byte 'r'
+    out = json_buf_emit_char(out, 114)
+    out = json_buf_emit_char(out, 34)  // '"'
+    out
+}
+
+// ============================================================================
+// LSP DATA STRUCTURES
+// ============================================================================
+
+struct LspPosition {
+    line: i64,
+    character: i64,
+}
+
+struct LspRange {
+    start_line: i64,
+    start_char: i64,
+    end_line: i64,
+    end_char: i64,
+}
+
+struct LspLocation {
+    uri_hash: i64,
+    range: LspRange,
+}
+
+struct LspDiagnostic {
+    range: LspRange,
+    severity: i64,
+    code: i64,
+    message_hash: i64,
+    source_hash: i64,
+}
+
+struct LspCompletionItem {
+    label_hash: i64,
+    kind: i64,
+    detail_hash: i64,
+    sort_priority: i64,
+}
+
+struct LspHoverResult {
+    contents_hash: i64,
+    range: LspRange,
+}
+
+struct LspTextEdit {
+    range: LspRange,
+    new_text_hash: i64,
+}
+
+// ============================================================================
+// CONSTRUCTORS
+// ============================================================================
+
+fn lsp_position_new(line: i64, character: i64) -> LspPosition {
+    LspPosition { line: line, character: character }
+}
+
+fn lsp_range_new(sl: i64, sc: i64, el: i64, ec: i64) -> LspRange {
+    LspRange { start_line: sl, start_char: sc, end_line: el, end_char: ec }
+}
+
+fn lsp_location_new(uri_hash: i64, range: LspRange) -> LspLocation {
+    LspLocation { uri_hash: uri_hash, range: range }
+}
+
+fn lsp_diagnostic_new(range: LspRange, severity: i64, code: i64, msg: i64, src: i64) -> LspDiagnostic {
+    LspDiagnostic {
+        range: range,
+        severity: severity,
+        code: code,
+        message_hash: msg,
+        source_hash: src,
+    }
+}
+
+fn lsp_completion_item_new(label: i64, kind: i64, detail: i64, prio: i64) -> LspCompletionItem {
+    LspCompletionItem {
+        label_hash: label,
+        kind: kind,
+        detail_hash: detail,
+        sort_priority: prio,
+    }
+}
+
+fn lsp_hover_result_new(contents: i64, range: LspRange) -> LspHoverResult {
+    LspHoverResult { contents_hash: contents, range: range }
+}
+
+fn lsp_text_edit_new(range: LspRange, text: i64) -> LspTextEdit {
+    LspTextEdit { range: range, new_text_hash: text }
+}
+
+// ============================================================================
+// RESPONSE BUILDER -- DIAGNOSTIC LIST
+// ============================================================================
+
+struct LspDiagnosticList {
+    items: [LspDiagnostic; 256],
+    count: i64,
+}
+
+fn lsp_diag_list_new() -> LspDiagnosticList {
+    let empty_range = lsp_range_new(0, 0, 0, 0)
+    let empty_diag = lsp_diagnostic_new(empty_range, 0, 0, 0, 0)
+    LspDiagnosticList {
+        items: [empty_diag; 256],
+        count: 0,
+    }
+}
+
+fn lsp_diag_list_add(list: LspDiagnosticList, diag: LspDiagnostic) -> LspDiagnosticList with Mut, Panic {
+    var out = list
+    if out.count < 256 {
+        out.items[out.count as usize] = diag
+        out.count = out.count + 1
+    }
+    out
+}
+
+fn lsp_diag_list_get(list: LspDiagnosticList, idx: i64) -> LspDiagnostic with Panic {
+    list.items[idx as usize]
+}
+
+fn lsp_diag_list_len(list: LspDiagnosticList) -> i64 {
+    list.count
+}
+
+// ============================================================================
+// RESPONSE BUILDER -- COMPLETION LIST
+// ============================================================================
+
+struct LspCompletionList {
+    items: [LspCompletionItem; 256],
+    count: i64,
+    is_incomplete: bool,
+}
+
+fn lsp_completion_list_new() -> LspCompletionList {
+    let empty_item = lsp_completion_item_new(0, 0, 0, 0)
+    LspCompletionList {
+        items: [empty_item; 256],
+        count: 0,
+        is_incomplete: false,
+    }
+}
+
+fn lsp_completion_list_add(list: LspCompletionList, item: LspCompletionItem) -> LspCompletionList with Mut, Panic {
+    var out = list
+    if out.count < 256 {
+        out.items[out.count as usize] = item
+        out.count = out.count + 1
+    }
+    out
+}
+
+fn lsp_completion_list_get(list: LspCompletionList, idx: i64) -> LspCompletionItem with Panic {
+    list.items[idx as usize]
+}
+
+fn lsp_completion_list_len(list: LspCompletionList) -> i64 {
+    list.count
+}
+
+fn lsp_completion_list_set_incomplete(list: LspCompletionList, val: bool) -> LspCompletionList with Mut {
+    var out = list
+    out.is_incomplete = val
+    out
+}
+
+// ============================================================================
+// JSON SERIALIZATION -- POSITION AND RANGE
+// ============================================================================
+
+// Serialize an LspPosition as {"line":N,"character":M}
+fn lsp_serialize_position(buf: JsonBuf, pos: LspPosition) -> JsonBuf with Mut, Panic, Div {
+    var out = json_buf_open_object(buf)
+    out = json_buf_emit_key_int(out, key_line(), pos.line)
+    out = json_buf_emit_comma(out)
+    // "character" key is 9 chars; emit manually
+    out = json_buf_emit_key_character(out)
+    out = json_buf_emit_colon(out)
+    out = json_buf_emit_int(out, pos.character)
+    out = json_buf_close_object(out)
+    out
+}
+
+// Serialize an LspRange as {"start":{...},"end":{...}}
+fn lsp_serialize_range(buf: JsonBuf, range: LspRange) -> JsonBuf with Mut, Panic, Div {
+    var out = json_buf_open_object(buf)
+    // "start": position
+    out = json_buf_emit_packed_key(out, key_start())
+    out = json_buf_emit_colon(out)
+    let start_pos = lsp_position_new(range.start_line, range.start_char)
+    out = lsp_serialize_position(out, start_pos)
+    out = json_buf_emit_comma(out)
+    // "end": position
+    out = json_buf_emit_packed_key(out, key_end())
+    out = json_buf_emit_colon(out)
+    let end_pos = lsp_position_new(range.end_line, range.end_char)
+    out = lsp_serialize_position(out, end_pos)
+    out = json_buf_close_object(out)
+    out
+}
+
+// ============================================================================
+// JSON SERIALIZATION -- DIAGNOSTIC
+// ============================================================================
+
+// Serialize a single diagnostic as a JSON object.
+fn lsp_serialize_diagnostic(buf: JsonBuf, diag: LspDiagnostic) -> JsonBuf with Mut, Panic, Div {
+    var out = json_buf_open_object(buf)
+    // "range": {...}
+    out = json_buf_emit_packed_key(out, key_range())
+    out = json_buf_emit_colon(out)
+    out = lsp_serialize_range(out, diag.range)
+    out = json_buf_emit_comma(out)
+    // "severity": N
+    out = json_buf_emit_key_int(out, key_severity(), diag.severity)
+    out = json_buf_emit_comma(out)
+    // "code": N
+    out = json_buf_emit_key_int(out, key_code(), diag.code)
+    out = json_buf_emit_comma(out)
+    // "message": N (hash)
+    out = json_buf_emit_key_int(out, key_message(), diag.message_hash)
+    out = json_buf_emit_comma(out)
+    // "source": N (hash)
+    out = json_buf_emit_key_int(out, key_source(), diag.source_hash)
+    out = json_buf_close_object(out)
+    out
+}
+
+// Serialize a diagnostic list as a JSON array.
+fn lsp_serialize_diagnostics(buf: JsonBuf, list: LspDiagnosticList) -> JsonBuf with Mut, Panic, Div {
+    var out = json_buf_open_array(buf)
+    var i: i64 = 0
+    while i < list.count {
+        if i > 0 {
+            out = json_buf_emit_comma(out)
+        }
+        let diag = lsp_diag_list_get(list, i)
+        out = lsp_serialize_diagnostic(out, diag)
+        i = i + 1
+    }
+    out = json_buf_close_array(out)
+    out
+}
+
+// ============================================================================
+// JSON SERIALIZATION -- COMPLETION
+// ============================================================================
+
+// Serialize a single completion item as a JSON object.
+fn lsp_serialize_completion_item(buf: JsonBuf, item: LspCompletionItem) -> JsonBuf with Mut, Panic, Div {
+    var out = json_buf_open_object(buf)
+    // "label": N (hash)
+    out = json_buf_emit_key_int(out, key_label(), item.label_hash)
+    out = json_buf_emit_comma(out)
+    // "kind": N
+    out = json_buf_emit_key_int(out, key_kind(), item.kind)
+    out = json_buf_emit_comma(out)
+    // "code": N (detail_hash -- reusing code key as compact placeholder)
+    out = json_buf_emit_key_int(out, key_code(), item.detail_hash)
+    out = json_buf_emit_comma(out)
+    // "sort": N (sort_priority -- inline 4-char key)
+    let key_sort = pack_key4(115, 111, 114, 116)  // "sort"
+    out = json_buf_emit_key_int(out, key_sort, item.sort_priority)
+    out = json_buf_close_object(out)
+    out
+}
+
+// Serialize a completion list as a JSON object with items array and
+// isIncomplete flag.
+fn lsp_serialize_completion_list(buf: JsonBuf, list: LspCompletionList) -> JsonBuf with Mut, Panic, Div {
+    var out = json_buf_open_object(buf)
+    // "items": [...]
+    out = json_buf_emit_packed_key(out, key_items())
+    out = json_buf_emit_colon(out)
+    out = json_buf_open_array(out)
+    var i: i64 = 0
+    while i < list.count {
+        if i > 0 {
+            out = json_buf_emit_comma(out)
+        }
+        let item = lsp_completion_list_get(list, i)
+        out = lsp_serialize_completion_item(out, item)
+        i = i + 1
+    }
+    out = json_buf_close_array(out)
+    out = json_buf_emit_comma(out)
+    // "kind": bool (isIncomplete -- reusing "kind" key as compact stand-in)
+    let key_incomplete = pack_key4(105, 110, 99, 111)  // "inco" (abbreviated)
+    out = json_buf_emit_key_bool(out, key_incomplete, list.is_incomplete)
+    out = json_buf_close_object(out)
+    out
+}
+
+// ============================================================================
+// JSON SERIALIZATION -- HOVER
+// ============================================================================
+
+// Serialize a hover result as a JSON object.
+fn lsp_serialize_hover(buf: JsonBuf, hover: LspHoverResult) -> JsonBuf with Mut, Panic, Div {
+    var out = json_buf_open_object(buf)
+    // "contents": N (hash)
+    out = json_buf_emit_key_int(out, key_contents(), hover.contents_hash)
+    out = json_buf_emit_comma(out)
+    // "range": {...}
+    out = json_buf_emit_packed_key(out, key_range())
+    out = json_buf_emit_colon(out)
+    out = lsp_serialize_range(out, hover.range)
+    out = json_buf_close_object(out)
+    out
+}
+
+// ============================================================================
+// JSON SERIALIZATION -- TEXT EDIT
+// ============================================================================
+
+// Serialize a text edit as a JSON object.
+fn lsp_serialize_text_edit(buf: JsonBuf, edit: LspTextEdit) -> JsonBuf with Mut, Panic, Div {
+    var out = json_buf_open_object(buf)
+    // "range": {...}
+    out = json_buf_emit_packed_key(out, key_range())
+    out = json_buf_emit_colon(out)
+    out = lsp_serialize_range(out, edit.range)
+    out = json_buf_emit_comma(out)
+    // "code": N (new_text_hash -- compact stand-in)
+    out = json_buf_emit_key_int(out, key_code(), edit.new_text_hash)
+    out = json_buf_close_object(out)
+    out
+}
+
+// ============================================================================
+// CONTENT-LENGTH HEADER
+// ============================================================================
+
+struct LspHeaderBuf {
+    data: [i8; 256],
+    len: i64,
+}
+
+fn lsp_header_buf_new() -> LspHeaderBuf {
+    LspHeaderBuf {
+        data: [0; 256],
+        len: 0,
+    }
+}
+
+// Append a byte to the header buffer.
+fn lsp_header_emit_byte(hdr: LspHeaderBuf, b: i8) -> LspHeaderBuf with Mut, Panic {
+    var out = hdr
+    if out.len < 256 {
+        out.data[out.len as usize] = b
+        out.len = out.len + 1
+    }
+    out
+}
+
+// Append an integer as decimal ASCII to the header buffer.
+fn lsp_header_emit_int(hdr: LspHeaderBuf, val: i64) -> LspHeaderBuf with Mut, Panic, Div {
+    if val == 0 {
+        return lsp_header_emit_byte(hdr, 48)
+    }
+
+    var n = val
+    var out = hdr
+    if n < 0 {
+        out = lsp_header_emit_byte(out, 45)
+        n = 0 - n
+    }
+
+    var digits: [i8; 24] = [0; 24]
+    var dlen: i64 = 0
+    while n > 0 && dlen < 24 {
+        let d = n - (n / 10) * 10
+        digits[dlen as usize] = (d + 48) as i8
+        n = n / 10
+        dlen = dlen + 1
+    }
+
+    var i = dlen - 1
+    while i >= 0 {
+        out = lsp_header_emit_byte(out, digits[i as usize])
+        i = i - 1
+    }
+    out
+}
+
+// Build a "Content-Length: N\r\n\r\n" header for the given body length.
+fn lsp_emit_content_length(body_len: i64) -> LspHeaderBuf with Mut, Panic, Div {
+    var hdr = lsp_header_buf_new()
+    // "Content-Length: "
+    hdr = lsp_header_emit_byte(hdr, 67)   // C
+    hdr = lsp_header_emit_byte(hdr, 111)  // o
+    hdr = lsp_header_emit_byte(hdr, 110)  // n
+    hdr = lsp_header_emit_byte(hdr, 116)  // t
+    hdr = lsp_header_emit_byte(hdr, 101)  // e
+    hdr = lsp_header_emit_byte(hdr, 110)  // n
+    hdr = lsp_header_emit_byte(hdr, 116)  // t
+    hdr = lsp_header_emit_byte(hdr, 45)   // -
+    hdr = lsp_header_emit_byte(hdr, 76)   // L
+    hdr = lsp_header_emit_byte(hdr, 101)  // e
+    hdr = lsp_header_emit_byte(hdr, 110)  // n
+    hdr = lsp_header_emit_byte(hdr, 103)  // g
+    hdr = lsp_header_emit_byte(hdr, 116)  // t
+    hdr = lsp_header_emit_byte(hdr, 104)  // h
+    hdr = lsp_header_emit_byte(hdr, 58)   // :
+    hdr = lsp_header_emit_byte(hdr, 32)   // ' '
+    // body length as decimal
+    hdr = lsp_header_emit_int(hdr, body_len)
+    // \r\n\r\n
+    hdr = lsp_header_emit_byte(hdr, 13)   // \r
+    hdr = lsp_header_emit_byte(hdr, 10)   // \n
+    hdr = lsp_header_emit_byte(hdr, 13)   // \r
+    hdr = lsp_header_emit_byte(hdr, 10)   // \n
+    hdr
+}
+
+// Return the number of bytes in the JSON body.
+fn lsp_message_length(buf: JsonBuf) -> i64 {
+    buf.len
+}
+
+// ============================================================================
+// UTILITY -- BUFFER INSPECTION
+// ============================================================================
+
+// Read a single byte from the JSON buffer at the given index.
+fn json_buf_byte_at(buf: JsonBuf, idx: i64) -> i64 with Panic {
+    buf.data[idx as usize]
+}
+
+// Compare a region of the JSON buffer to expected ASCII bytes.
+fn json_buf_region_matches(buf: JsonBuf, offset: i64, expected: [i8; 64], elen: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < elen {
+        if buf.data[(offset + i) as usize] != expected[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+// T01: json_buf_new creates an empty buffer
+fn test_json_buf_new() -> bool {
+    let buf = json_buf_new()
+    buf.len == 0
+}
+
+// T02: emit_int for zero
+fn test_emit_int_zero() -> bool with Mut, Panic, Div {
+    let buf = json_buf_new()
+    let out = json_buf_emit_int(buf, 0)
+    let ok_len = out.len == 1
+    let ok_val = json_buf_byte_at(out, 0) == 48  // '0'
+    ok_len && ok_val
+}
+
+// T03: emit_int for positive number
+fn test_emit_int_positive() -> bool with Mut, Panic, Div {
+    let buf = json_buf_new()
+    let out = json_buf_emit_int(buf, 42)
+    let ok_len = out.len == 2
+    let ok_d0 = json_buf_byte_at(out, 0) == 52   // '4'
+    let ok_d1 = json_buf_byte_at(out, 1) == 50   // '2'
+    ok_len && ok_d0 && ok_d1
+}
+
+// T04: emit_int for negative number
+fn test_emit_int_negative() -> bool with Mut, Panic, Div {
+    let buf = json_buf_new()
+    let out = json_buf_emit_int(buf, 0 - 7)
+    let ok_len = out.len == 2
+    let ok_sign = json_buf_byte_at(out, 0) == 45   // '-'
+    let ok_d = json_buf_byte_at(out, 1) == 55      // '7'
+    ok_len && ok_sign && ok_d
+}
+
+// T05: emit_bool true and false
+fn test_emit_bool() -> bool with Mut, Panic, Div {
+    let buf_t = json_buf_new()
+    let out_t = json_buf_emit_bool(buf_t, true)
+    let ok_true_len = out_t.len == 4
+    let ok_t0 = json_buf_byte_at(out_t, 0) == 116  // 't'
+    let ok_t1 = json_buf_byte_at(out_t, 1) == 114  // 'r'
+    let ok_t2 = json_buf_byte_at(out_t, 2) == 117  // 'u'
+    let ok_t3 = json_buf_byte_at(out_t, 3) == 101  // 'e'
+
+    let buf_f = json_buf_new()
+    let out_f = json_buf_emit_bool(buf_f, false)
+    let ok_false_len = out_f.len == 5
+    let ok_f0 = json_buf_byte_at(out_f, 0) == 102  // 'f'
+
+    ok_true_len && ok_t0 && ok_t1 && ok_t2 && ok_t3 && ok_false_len && ok_f0
+}
+
+// T06: emit_null
+fn test_emit_null() -> bool with Mut, Panic, Div {
+    let buf = json_buf_new()
+    let out = json_buf_emit_null(buf)
+    let ok_len = out.len == 4
+    let ok_n = json_buf_byte_at(out, 0) == 110  // 'n'
+    let ok_u = json_buf_byte_at(out, 1) == 117  // 'u'
+    let ok_l0 = json_buf_byte_at(out, 2) == 108 // 'l'
+    let ok_l1 = json_buf_byte_at(out, 3) == 108 // 'l'
+    ok_len && ok_n && ok_u && ok_l0 && ok_l1
+}
+
+// T07: object delimiters
+fn test_object_delimiters() -> bool with Mut, Panic, Div {
+    var buf = json_buf_new()
+    buf = json_buf_open_object(buf)
+    buf = json_buf_close_object(buf)
+    let ok_len = buf.len == 2
+    let ok_open = json_buf_byte_at(buf, 0) == 123   // '{'
+    let ok_close = json_buf_byte_at(buf, 1) == 125   // '}'
+    ok_len && ok_open && ok_close
+}
+
+// T08: array delimiters
+fn test_array_delimiters() -> bool with Mut, Panic, Div {
+    var buf = json_buf_new()
+    buf = json_buf_open_array(buf)
+    buf = json_buf_close_array(buf)
+    let ok_len = buf.len == 2
+    let ok_open = json_buf_byte_at(buf, 0) == 91    // '['
+    let ok_close = json_buf_byte_at(buf, 1) == 93    // ']'
+    ok_len && ok_open && ok_close
+}
+
+// T09: serialize_position produces valid JSON shape
+fn test_serialize_position() -> bool with Mut, Panic, Div {
+    let buf = json_buf_new()
+    let pos = lsp_position_new(10, 5)
+    let out = lsp_serialize_position(buf, pos)
+    // Should start with '{' and end with '}'
+    let ok_open = json_buf_byte_at(out, 0) == 123
+    let ok_close = json_buf_byte_at(out, out.len - 1) == 125
+    // Length should be non-trivial
+    let ok_len = out.len > 10
+    ok_open && ok_close && ok_len
+}
+
+// T10: serialize_range produces valid JSON with nested start/end
+fn test_serialize_range() -> bool with Mut, Panic, Div {
+    let buf = json_buf_new()
+    let range = lsp_range_new(1, 0, 1, 10)
+    let out = lsp_serialize_range(buf, range)
+    let ok_open = json_buf_byte_at(out, 0) == 123
+    let ok_close = json_buf_byte_at(out, out.len - 1) == 125
+    // Should contain nested objects (at least 4 braces)
+    let ok_len = out.len > 40
+    ok_open && ok_close && ok_len
+}
+
+// T11: diagnostic list add and count
+fn test_diag_list_operations() -> bool with Mut, Panic, Div {
+    var list = lsp_diag_list_new()
+    let ok_empty = lsp_diag_list_len(list) == 0
+
+    let range = lsp_range_new(0, 0, 0, 5)
+    let d1 = lsp_diagnostic_new(range, LSP_SEVERITY_ERROR, 1001, 42, 7)
+    list = lsp_diag_list_add(list, d1)
+    let ok_one = lsp_diag_list_len(list) == 1
+
+    let d2 = lsp_diagnostic_new(range, LSP_SEVERITY_WARNING, 1002, 43, 8)
+    list = lsp_diag_list_add(list, d2)
+    let ok_two = lsp_diag_list_len(list) == 2
+
+    // Verify first diagnostic fields
+    let got = lsp_diag_list_get(list, 0)
+    let ok_sev = got.severity == LSP_SEVERITY_ERROR
+    let ok_code = got.code == 1001
+    let ok_msg = got.message_hash == 42
+
+    ok_empty && ok_one && ok_two && ok_sev && ok_code && ok_msg
+}
+
+// T12: completion list add and count
+fn test_completion_list_operations() -> bool with Mut, Panic, Div {
+    var list = lsp_completion_list_new()
+    let ok_empty = lsp_completion_list_len(list) == 0
+
+    let c1 = lsp_completion_item_new(100, LSP_COMPLETION_FUNCTION, 200, 1)
+    list = lsp_completion_list_add(list, c1)
+    let ok_one = lsp_completion_list_len(list) == 1
+
+    let c2 = lsp_completion_item_new(101, LSP_COMPLETION_KEYWORD, 201, 2)
+    list = lsp_completion_list_add(list, c2)
+    let ok_two = lsp_completion_list_len(list) == 2
+
+    // Verify first item fields
+    let got = lsp_completion_list_get(list, 0)
+    let ok_label = got.label_hash == 100
+    let ok_kind = got.kind == LSP_COMPLETION_FUNCTION
+    let ok_detail = got.detail_hash == 200
+
+    ok_empty && ok_one && ok_two && ok_label && ok_kind && ok_detail
+}
+
+// T13: serialize_diagnostic produces valid JSON
+fn test_serialize_diagnostic() -> bool with Mut, Panic, Div {
+    let buf = json_buf_new()
+    let range = lsp_range_new(5, 3, 5, 20)
+    let diag = lsp_diagnostic_new(range, LSP_SEVERITY_ERROR, 42, 999, 7)
+    let out = lsp_serialize_diagnostic(buf, diag)
+    let ok_open = json_buf_byte_at(out, 0) == 123
+    let ok_close = json_buf_byte_at(out, out.len - 1) == 125
+    let ok_len = out.len > 50
+    ok_open && ok_close && ok_len
+}
+
+// T14: serialize_diagnostics with multiple items
+fn test_serialize_diagnostics_list() -> bool with Mut, Panic, Div {
+    var list = lsp_diag_list_new()
+    let range1 = lsp_range_new(0, 0, 0, 5)
+    let d1 = lsp_diagnostic_new(range1, LSP_SEVERITY_ERROR, 1, 10, 20)
+    list = lsp_diag_list_add(list, d1)
+    let range2 = lsp_range_new(1, 0, 1, 8)
+    let d2 = lsp_diagnostic_new(range2, LSP_SEVERITY_WARNING, 2, 11, 21)
+    list = lsp_diag_list_add(list, d2)
+
+    let buf = json_buf_new()
+    let out = lsp_serialize_diagnostics(buf, list)
+    // Should be array: starts with '[', ends with ']'
+    let ok_open = json_buf_byte_at(out, 0) == 91
+    let ok_close = json_buf_byte_at(out, out.len - 1) == 93
+    // Two items serialized, should be substantial
+    let ok_len = out.len > 100
+    ok_open && ok_close && ok_len
+}
+
+// T15: serialize_completion_item produces valid JSON
+fn test_serialize_completion_item() -> bool with Mut, Panic, Div {
+    let buf = json_buf_new()
+    let item = lsp_completion_item_new(50, LSP_COMPLETION_VARIABLE, 60, 3)
+    let out = lsp_serialize_completion_item(buf, item)
+    let ok_open = json_buf_byte_at(out, 0) == 123
+    let ok_close = json_buf_byte_at(out, out.len - 1) == 125
+    let ok_len = out.len > 20
+    ok_open && ok_close && ok_len
+}
+
+// T16: serialize_completion_list produces valid JSON with items and flag
+fn test_serialize_completion_list() -> bool with Mut, Panic, Div {
+    var list = lsp_completion_list_new()
+    let c1 = lsp_completion_item_new(1, LSP_COMPLETION_FUNCTION, 2, 0)
+    list = lsp_completion_list_add(list, c1)
+    list = lsp_completion_list_set_incomplete(list, true)
+
+    let buf = json_buf_new()
+    let out = lsp_serialize_completion_list(buf, list)
+    let ok_open = json_buf_byte_at(out, 0) == 123
+    let ok_close = json_buf_byte_at(out, out.len - 1) == 125
+    let ok_len = out.len > 30
+    ok_open && ok_close && ok_len
+}
+
+// T17: serialize_hover produces valid JSON
+fn test_serialize_hover() -> bool with Mut, Panic, Div {
+    let buf = json_buf_new()
+    let range = lsp_range_new(3, 0, 3, 12)
+    let hover = lsp_hover_result_new(777, range)
+    let out = lsp_serialize_hover(buf, hover)
+    let ok_open = json_buf_byte_at(out, 0) == 123
+    let ok_close = json_buf_byte_at(out, out.len - 1) == 125
+    let ok_len = out.len > 30
+    ok_open && ok_close && ok_len
+}
+
+// T18: content-length header format
+fn test_content_length_header() -> bool with Mut, Panic, Div {
+    let hdr = lsp_emit_content_length(128)
+    // "Content-Length: 128\r\n\r\n" = 23 bytes
+    let ok_len = hdr.len == 23
+    // First byte is 'C'
+    let ok_c = hdr.data[0] == 67
+    // Last four bytes are \r\n\r\n
+    let ok_cr1 = hdr.data[(hdr.len - 4) as usize] == 13
+    let ok_lf1 = hdr.data[(hdr.len - 3) as usize] == 10
+    let ok_cr2 = hdr.data[(hdr.len - 2) as usize] == 13
+    let ok_lf2 = hdr.data[(hdr.len - 1) as usize] == 10
+    ok_len && ok_c && ok_cr1 && ok_lf1 && ok_cr2 && ok_lf2
+}
+
+// T19: message_length matches buffer length
+fn test_message_length() -> bool with Mut, Panic, Div {
+    var buf = json_buf_new()
+    let ok_zero = lsp_message_length(buf) == 0
+    buf = json_buf_emit_int(buf, 12345)
+    let ok_five = lsp_message_length(buf) == 5
+    ok_zero && ok_five
+}
+
+// T20: LSP constants have expected values
+fn test_lsp_constants() -> bool with Mut, Panic, Div {
+    let ok_init = LSP_INITIALIZE == 1
+    let ok_shutdown = LSP_SHUTDOWN == 3
+    let ok_open = LSP_TEXT_DOCUMENT_DID_OPEN == 10
+    let ok_completion = LSP_TEXT_DOCUMENT_COMPLETION == 20
+    let ok_diag = LSP_TEXT_DOCUMENT_DIAGNOSTIC == 30
+    let ok_sev_err = LSP_SEVERITY_ERROR == 1
+    let ok_sev_hint = LSP_SEVERITY_HINT == 4
+    ok_init && ok_shutdown && ok_open && ok_completion && ok_diag && ok_sev_err && ok_sev_hint
+}
+
+// T21: key_int emits "key":value
+fn test_key_int_emission() -> bool with Mut, Panic, Div {
+    let buf = json_buf_new()
+    // Emit "line":42
+    let out = json_buf_emit_key_int(buf, key_line(), 42)
+    // Should be: "line":42  => 10 bytes
+    // "  l  i  n  e  "  :  4  2
+    // 34 108 105 110 101 34 58 52 50
+    let ok_len = out.len == 10
+    let ok_q1 = json_buf_byte_at(out, 0) == 34    // opening quote
+    let ok_l = json_buf_byte_at(out, 1) == 108     // 'l'
+    let ok_i = json_buf_byte_at(out, 2) == 105     // 'i'
+    let ok_n = json_buf_byte_at(out, 3) == 110     // 'n'
+    let ok_e = json_buf_byte_at(out, 4) == 101     // 'e'
+    let ok_q2 = json_buf_byte_at(out, 5) == 34     // closing quote
+    let ok_colon = json_buf_byte_at(out, 6) == 58  // ':'
+    let ok_4 = json_buf_byte_at(out, 7) == 52      // '4'
+    let ok_2 = json_buf_byte_at(out, 8) == 50      // '2'
+    ok_len && ok_q1 && ok_l && ok_i && ok_n && ok_e && ok_q2 && ok_colon && ok_4 && ok_2
+}
+
+// T22: empty diagnostic list serializes to "[]"
+fn test_empty_diagnostics_serialize() -> bool with Mut, Panic, Div {
+    let list = lsp_diag_list_new()
+    let buf = json_buf_new()
+    let out = lsp_serialize_diagnostics(buf, list)
+    let ok_len = out.len == 2
+    let ok_open = json_buf_byte_at(out, 0) == 91   // '['
+    let ok_close = json_buf_byte_at(out, 1) == 93  // ']'
+    ok_len && ok_open && ok_close
+}
+
+// T23: large integer emission
+fn test_emit_large_int() -> bool with Mut, Panic, Div {
+    let buf = json_buf_new()
+    let out = json_buf_emit_int(buf, 1000000)
+    // "1000000" = 7 digits
+    let ok_len = out.len == 7
+    let ok_first = json_buf_byte_at(out, 0) == 49  // '1'
+    let ok_last = json_buf_byte_at(out, 6) == 48   // '0'
+    ok_len && ok_first && ok_last
+}
+
+// T24: text edit serialization round-trip check
+fn test_serialize_text_edit() -> bool with Mut, Panic, Div {
+    let buf = json_buf_new()
+    let range = lsp_range_new(10, 0, 12, 5)
+    let edit = lsp_text_edit_new(range, 555)
+    let out = lsp_serialize_text_edit(buf, edit)
+    let ok_open = json_buf_byte_at(out, 0) == 123
+    let ok_close = json_buf_byte_at(out, out.len - 1) == 125
+    let ok_len = out.len > 30
+    ok_open && ok_close && ok_len
+}
+
+// ============================================================================
+// TEST RUNNER
+// ============================================================================
+
+fn lsp_protocol_run_tests() -> i64 with IO, Mut, Panic, Div {
+    var passed: i64 = 0
+    var total: i64 = 0
+
+    total = total + 1
+    if test_json_buf_new() { passed = passed + 1 } else { print("FAIL: T01 json_buf_new\n") }
+
+    total = total + 1
+    if test_emit_int_zero() { passed = passed + 1 } else { print("FAIL: T02 emit_int_zero\n") }
+
+    total = total + 1
+    if test_emit_int_positive() { passed = passed + 1 } else { print("FAIL: T03 emit_int_positive\n") }
+
+    total = total + 1
+    if test_emit_int_negative() { passed = passed + 1 } else { print("FAIL: T04 emit_int_negative\n") }
+
+    total = total + 1
+    if test_emit_bool() { passed = passed + 1 } else { print("FAIL: T05 emit_bool\n") }
+
+    total = total + 1
+    if test_emit_null() { passed = passed + 1 } else { print("FAIL: T06 emit_null\n") }
+
+    total = total + 1
+    if test_object_delimiters() { passed = passed + 1 } else { print("FAIL: T07 object_delimiters\n") }
+
+    total = total + 1
+    if test_array_delimiters() { passed = passed + 1 } else { print("FAIL: T08 array_delimiters\n") }
+
+    total = total + 1
+    if test_serialize_position() { passed = passed + 1 } else { print("FAIL: T09 serialize_position\n") }
+
+    total = total + 1
+    if test_serialize_range() { passed = passed + 1 } else { print("FAIL: T10 serialize_range\n") }
+
+    total = total + 1
+    if test_diag_list_operations() { passed = passed + 1 } else { print("FAIL: T11 diag_list_operations\n") }
+
+    total = total + 1
+    if test_completion_list_operations() { passed = passed + 1 } else { print("FAIL: T12 completion_list_operations\n") }
+
+    total = total + 1
+    if test_serialize_diagnostic() { passed = passed + 1 } else { print("FAIL: T13 serialize_diagnostic\n") }
+
+    total = total + 1
+    if test_serialize_diagnostics_list() { passed = passed + 1 } else { print("FAIL: T14 serialize_diagnostics_list\n") }
+
+    total = total + 1
+    if test_serialize_completion_item() { passed = passed + 1 } else { print("FAIL: T15 serialize_completion_item\n") }
+
+    total = total + 1
+    if test_serialize_completion_list() { passed = passed + 1 } else { print("FAIL: T16 serialize_completion_list\n") }
+
+    total = total + 1
+    if test_serialize_hover() { passed = passed + 1 } else { print("FAIL: T17 serialize_hover\n") }
+
+    total = total + 1
+    if test_content_length_header() { passed = passed + 1 } else { print("FAIL: T18 content_length_header\n") }
+
+    total = total + 1
+    if test_message_length() { passed = passed + 1 } else { print("FAIL: T19 message_length\n") }
+
+    total = total + 1
+    if test_lsp_constants() { passed = passed + 1 } else { print("FAIL: T20 lsp_constants\n") }
+
+    total = total + 1
+    if test_key_int_emission() { passed = passed + 1 } else { print("FAIL: T21 key_int_emission\n") }
+
+    total = total + 1
+    if test_empty_diagnostics_serialize() { passed = passed + 1 } else { print("FAIL: T22 empty_diagnostics_serialize\n") }
+
+    total = total + 1
+    if test_emit_large_int() { passed = passed + 1 } else { print("FAIL: T23 emit_large_int\n") }
+
+    total = total + 1
+    if test_serialize_text_edit() { passed = passed + 1 } else { print("FAIL: T24 serialize_text_edit\n") }
+
+    print("LSP protocol tests: ")
+    print_int(passed)
+    print("/")
+    print_int(total)
+    print(" passed\n")
+
+    if passed == total {
+        print("ALL LSP PROTOCOL TESTS PASSED\n")
+        0
+    } else {
+        print("SOME LSP PROTOCOL TESTS FAILED\n")
+        1
+    }
+}

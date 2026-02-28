@@ -72,6 +72,9 @@ FILES=(
   self-hosted/check/check.sio
   self-hosted/check/mod.sio
   self-hosted/check/patterns.sio
+  self-hosted/check/infer.sio
+  self-hosted/check/const_eval.sio
+  self-hosted/check/traits.sio
 
   # ── 6. Effects layer ────────────────────────────────────────────
   self-hosted/effects/types.sio
@@ -89,6 +92,8 @@ FILES=(
   self-hosted/ir/disasm.sio
   self-hosted/ir/verify.sio
   self-hosted/ir/optimize.sio
+  self-hosted/ir/ssa.sio
+  self-hosted/ir/closure.sio
   self-hosted/ir/mod.sio
 
   # ── 8. HLIR (High-Level IR) ─────────────────────────────────────
@@ -209,6 +214,9 @@ FILES=(
   self-hosted/wasm/encode.sio
   self-hosted/wasm/lower.sio
 
+  # ── 22b. LSP protocol ───────────────────────────────────────────
+  self-hosted/lsp/protocol.sio
+
   # ── 23. I/O helpers + module loader ─────────────────────────────
   self-hosted/io/file_write.sio
   self-hosted/compiler/module_loader.sio
@@ -325,6 +333,9 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/check/check.sio
     self-hosted/check/mod.sio
     self-hosted/check/patterns.sio
+    self-hosted/check/infer.sio
+    self-hosted/check/const_eval.sio
+    self-hosted/check/traits.sio
 
     # 5b. Diagnostics engine
     self-hosted/diagnostics/mod.sio
@@ -338,6 +349,8 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/ir/disasm.sio
     self-hosted/ir/verify.sio
     self-hosted/ir/optimize.sio
+    self-hosted/ir/ssa.sio
+    self-hosted/ir/closure.sio
     self-hosted/ir/mod.sio
 
     # 7. Native codegen layer
@@ -365,6 +378,9 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     # 8b. Tensor + Linker expansion
     self-hosted/tensor/ops.sio
     self-hosted/linker/elf_writer.sio
+
+    # 8c. LSP protocol
+    self-hosted/lsp/protocol.sio
 
     # 9. I/O helpers + module loader
     self-hosted/io/file_write.sio

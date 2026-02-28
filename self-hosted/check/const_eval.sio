@@ -1,0 +1,2051 @@
+// Compile-time constant evaluator
+//
+// Evaluates constant expressions during type checking for array sizes,
+// const generics, and compile-time folding. Pure value-level evaluation
+// with no side effects on the type environment.
+//
+// Architecture:
+//   ConstValue  — tagged constant (int, float, bool, string, array, tuple, unit, error)
+//   ConstPool   — arena of ConstValues (flat array, ID = index)
+//   ConstExpr   — expression tree node (literal, var, binop, unop, if, array, index, field, call)
+//   ExprPool    — arena of ConstExprs
+//   ConstEnv    — name-to-value bindings for const variables
+//
+// Evaluation returns (ConstPool, i64) where i64 is the value ID in the pool.
+
+// ============================================================
+// Constant value kinds
+// ============================================================
+
+fn CONST_INT()    -> i64 { 1 }
+fn CONST_FLOAT()  -> i64 { 2 }
+fn CONST_BOOL()   -> i64 { 3 }
+fn CONST_STRING() -> i64 { 4 }
+fn CONST_ARRAY()  -> i64 { 5 }
+fn CONST_TUPLE()  -> i64 { 6 }
+fn CONST_UNIT()   -> i64 { 7 }
+fn CONST_ERROR()  -> i64 { 99 }
+
+// ============================================================
+// Constant expression kinds
+// ============================================================
+
+fn CEXPR_LIT()    -> i64 { 1 }
+fn CEXPR_VAR()    -> i64 { 2 }
+fn CEXPR_BINOP()  -> i64 { 3 }
+fn CEXPR_UNOP()   -> i64 { 4 }
+fn CEXPR_IF()     -> i64 { 5 }
+fn CEXPR_ARRAY()  -> i64 { 6 }
+fn CEXPR_INDEX()  -> i64 { 7 }
+fn CEXPR_FIELD()  -> i64 { 8 }
+fn CEXPR_CALL()   -> i64 { 9 }
+
+// ============================================================
+// Binary operator tags
+// ============================================================
+
+fn BINOP_ADD()  -> i64 { 1 }
+fn BINOP_SUB()  -> i64 { 2 }
+fn BINOP_MUL()  -> i64 { 3 }
+fn BINOP_DIV()  -> i64 { 4 }
+fn BINOP_MOD()  -> i64 { 5 }
+fn BINOP_EQ()   -> i64 { 6 }
+fn BINOP_NEQ()  -> i64 { 7 }
+fn BINOP_LT()   -> i64 { 8 }
+fn BINOP_GT()   -> i64 { 9 }
+fn BINOP_LE()   -> i64 { 10 }
+fn BINOP_GE()   -> i64 { 11 }
+fn BINOP_AND()  -> i64 { 12 }
+fn BINOP_OR()   -> i64 { 13 }
+
+// ============================================================
+// Unary operator tags
+// ============================================================
+
+fn UNOP_NEG()   -> i64 { 1 }
+fn UNOP_NOT()   -> i64 { 2 }
+
+// ============================================================
+// ConstValue — a single compile-time constant
+// ============================================================
+
+struct ConstValue {
+    kind: i64,
+    int_val: i64,
+    float_val: f64,
+    bool_val: i64,
+    children: [i64; 16],
+    child_count: i64,
+}
+
+fn empty_const_value() -> ConstValue {
+    ConstValue {
+        kind: CONST_ERROR(),
+        int_val: 0,
+        float_val: 0.0,
+        bool_val: 0,
+        children: [0; 16],
+        child_count: 0,
+    }
+}
+
+fn const_value_int(v: i64) -> ConstValue {
+    ConstValue {
+        kind: CONST_INT(),
+        int_val: v,
+        float_val: 0.0,
+        bool_val: 0,
+        children: [0; 16],
+        child_count: 0,
+    }
+}
+
+fn const_value_float(v: f64) -> ConstValue {
+    ConstValue {
+        kind: CONST_FLOAT(),
+        int_val: 0,
+        float_val: v,
+        bool_val: 0,
+        children: [0; 16],
+        child_count: 0,
+    }
+}
+
+fn const_value_bool(v: bool) -> ConstValue {
+    let bv: i64 = if v { 1 } else { 0 }
+    ConstValue {
+        kind: CONST_BOOL(),
+        int_val: 0,
+        float_val: 0.0,
+        bool_val: bv,
+        children: [0; 16],
+        child_count: 0,
+    }
+}
+
+fn const_value_unit() -> ConstValue {
+    ConstValue {
+        kind: CONST_UNIT(),
+        int_val: 0,
+        float_val: 0.0,
+        bool_val: 0,
+        children: [0; 16],
+        child_count: 0,
+    }
+}
+
+fn const_value_error() -> ConstValue {
+    ConstValue {
+        kind: CONST_ERROR(),
+        int_val: 0,
+        float_val: 0.0,
+        bool_val: 0,
+        children: [0; 16],
+        child_count: 0,
+    }
+}
+
+fn const_value_is_error(v: ConstValue) -> bool with Mut, Panic, Div {
+    v.kind == CONST_ERROR()
+}
+
+fn const_value_is_int(v: ConstValue) -> bool with Mut, Panic, Div {
+    v.kind == CONST_INT()
+}
+
+fn const_value_is_float(v: ConstValue) -> bool with Mut, Panic, Div {
+    v.kind == CONST_FLOAT()
+}
+
+fn const_value_is_bool(v: ConstValue) -> bool with Mut, Panic, Div {
+    v.kind == CONST_BOOL()
+}
+
+// ============================================================
+// ConstPool — arena of ConstValues
+// ============================================================
+
+struct ConstPool {
+    values: [ConstValue; 1024],
+    count: i64,
+}
+
+fn const_pool_new() -> ConstPool {
+    ConstPool {
+        values: [empty_const_value(); 1024],
+        count: 0,
+    }
+}
+
+fn const_pool_add(pool: ConstPool, val: ConstValue) -> (ConstPool, i64) with Mut, Panic, Div {
+    var p = pool
+    if p.count >= 1024 {
+        // Pool full — return error value at slot 0
+        return (p, 0 - 1)
+    }
+    let id = p.count
+    p.values[id as usize] = val
+    p.count = p.count + 1
+    (p, id)
+}
+
+fn const_pool_get(pool: ConstPool, id: i64) -> ConstValue with Mut, Panic, Div {
+    if id < 0 || id >= pool.count {
+        return const_value_error()
+    }
+    pool.values[id as usize]
+}
+
+fn const_pool_add_int(pool: ConstPool, v: i64) -> (ConstPool, i64) with Mut, Panic, Div {
+    const_pool_add(pool, const_value_int(v))
+}
+
+fn const_pool_add_float(pool: ConstPool, v: f64) -> (ConstPool, i64) with Mut, Panic, Div {
+    const_pool_add(pool, const_value_float(v))
+}
+
+fn const_pool_add_bool(pool: ConstPool, v: bool) -> (ConstPool, i64) with Mut, Panic, Div {
+    const_pool_add(pool, const_value_bool(v))
+}
+
+fn const_pool_add_unit(pool: ConstPool) -> (ConstPool, i64) with Mut, Panic, Div {
+    const_pool_add(pool, const_value_unit())
+}
+
+fn const_pool_add_error(pool: ConstPool) -> (ConstPool, i64) with Mut, Panic, Div {
+    const_pool_add(pool, const_value_error())
+}
+
+// ============================================================
+// ConstExpr — expression tree node
+// ============================================================
+
+struct ConstExpr {
+    kind: i64,
+    op: i64,
+    value_id: i64,
+    children: [i64; 8],
+    child_count: i64,
+    name: i64,
+}
+
+fn empty_const_expr() -> ConstExpr {
+    ConstExpr {
+        kind: CEXPR_LIT(),
+        op: 0,
+        value_id: 0 - 1,
+        children: [0; 8],
+        child_count: 0,
+        name: 0,
+    }
+}
+
+// ============================================================
+// ExprPool — arena of ConstExprs
+// ============================================================
+
+struct ExprPool {
+    exprs: [ConstExpr; 2048],
+    count: i64,
+}
+
+fn expr_pool_new() -> ExprPool {
+    ExprPool {
+        exprs: [empty_const_expr(); 2048],
+        count: 0,
+    }
+}
+
+fn expr_pool_add(pool: ExprPool, expr: ConstExpr) -> (ExprPool, i64) with Mut, Panic, Div {
+    var p = pool
+    if p.count >= 2048 {
+        return (p, 0 - 1)
+    }
+    let id = p.count
+    p.exprs[id as usize] = expr
+    p.count = p.count + 1
+    (p, id)
+}
+
+fn expr_pool_get(pool: ExprPool, id: i64) -> ConstExpr with Mut, Panic, Div {
+    if id < 0 || id >= pool.count {
+        return empty_const_expr()
+    }
+    pool.exprs[id as usize]
+}
+
+// ============================================================
+// Expression constructors
+// ============================================================
+
+fn cexpr_lit(value_id: i64) -> ConstExpr with Mut, Panic, Div {
+    var e = empty_const_expr()
+    e.kind = CEXPR_LIT()
+    e.value_id = value_id
+    e
+}
+
+fn cexpr_var(name: i64) -> ConstExpr with Mut, Panic, Div {
+    var e = empty_const_expr()
+    e.kind = CEXPR_VAR()
+    e.name = name
+    e
+}
+
+fn cexpr_binop(op: i64, lhs_id: i64, rhs_id: i64) -> ConstExpr with Mut, Panic, Div {
+    var e = empty_const_expr()
+    e.kind = CEXPR_BINOP()
+    e.op = op
+    e.children[0] = lhs_id
+    e.children[1] = rhs_id
+    e.child_count = 2
+    e
+}
+
+fn cexpr_unop(op: i64, operand_id: i64) -> ConstExpr with Mut, Panic, Div {
+    var e = empty_const_expr()
+    e.kind = CEXPR_UNOP()
+    e.op = op
+    e.children[0] = operand_id
+    e.child_count = 1
+    e
+}
+
+fn cexpr_if(cond_id: i64, then_id: i64, else_id: i64) -> ConstExpr with Mut, Panic, Div {
+    var e = empty_const_expr()
+    e.kind = CEXPR_IF()
+    e.children[0] = cond_id
+    e.children[1] = then_id
+    e.children[2] = else_id
+    e.child_count = 3
+    e
+}
+
+fn cexpr_array(elem_ids: [i64; 8], count: i64) -> ConstExpr with Mut, Panic, Div {
+    var e = empty_const_expr()
+    e.kind = CEXPR_ARRAY()
+    e.children = elem_ids
+    e.child_count = count
+    e
+}
+
+fn cexpr_index(array_id: i64, index_id: i64) -> ConstExpr with Mut, Panic, Div {
+    var e = empty_const_expr()
+    e.kind = CEXPR_INDEX()
+    e.children[0] = array_id
+    e.children[1] = index_id
+    e.child_count = 2
+    e
+}
+
+fn cexpr_field(base_id: i64, field_name: i64) -> ConstExpr with Mut, Panic, Div {
+    var e = empty_const_expr()
+    e.kind = CEXPR_FIELD()
+    e.children[0] = base_id
+    e.child_count = 1
+    e.name = field_name
+    e
+}
+
+fn cexpr_call(fn_name: i64, arg_ids: [i64; 8], arg_count: i64) -> ConstExpr with Mut, Panic, Div {
+    var e = empty_const_expr()
+    e.kind = CEXPR_CALL()
+    e.name = fn_name
+    e.children = arg_ids
+    e.child_count = arg_count
+    e
+}
+
+// ============================================================
+// ConstEnv — name-to-value binding environment
+// ============================================================
+
+struct ConstEnv {
+    names: [i64; 256],
+    values: [i64; 256],
+    count: i64,
+}
+
+fn const_env_new() -> ConstEnv {
+    ConstEnv {
+        names: [0; 256],
+        values: [0; 256],
+        count: 0,
+    }
+}
+
+fn const_env_bind(env: ConstEnv, name: i64, val_id: i64) -> ConstEnv with Mut, Panic, Div {
+    var e = env
+    if e.count >= 256 {
+        return e
+    }
+    e.names[e.count as usize] = name
+    e.values[e.count as usize] = val_id
+    e.count = e.count + 1
+    e
+}
+
+fn const_env_lookup(env: ConstEnv, name: i64) -> i64 with Mut, Panic, Div {
+    // Search backwards for most recent binding
+    var i = env.count - 1
+    while i >= 0 {
+        if env.names[i as usize] == name {
+            return env.values[i as usize]
+        }
+        i = i - 1
+    }
+    0 - 1
+}
+
+fn const_env_has(env: ConstEnv, name: i64) -> bool with Mut, Panic, Div {
+    var i = env.count - 1
+    while i >= 0 {
+        if env.names[i as usize] == name {
+            return true
+        }
+        i = i - 1
+    }
+    false
+}
+
+// ============================================================
+// Integer arithmetic on const values
+// ============================================================
+
+fn const_add_int(a: i64, b: i64) -> i64 with Mut, Panic, Div {
+    a + b
+}
+
+fn const_sub_int(a: i64, b: i64) -> i64 with Mut, Panic, Div {
+    a - b
+}
+
+fn const_mul_int(a: i64, b: i64) -> i64 with Mut, Panic, Div {
+    a * b
+}
+
+fn const_div_int(a: i64, b: i64) -> i64 with Mut, Panic, Div {
+    if b == 0 {
+        return 0
+    }
+    a / b
+}
+
+fn const_mod_int(a: i64, b: i64) -> i64 with Mut, Panic, Div {
+    if b == 0 {
+        return 0
+    }
+    a % b
+}
+
+fn const_eq_int(a: i64, b: i64) -> bool with Mut, Panic, Div {
+    a == b
+}
+
+fn const_lt_int(a: i64, b: i64) -> bool with Mut, Panic, Div {
+    a < b
+}
+
+fn const_gt_int(a: i64, b: i64) -> bool with Mut, Panic, Div {
+    a > b
+}
+
+fn const_le_int(a: i64, b: i64) -> bool with Mut, Panic, Div {
+    a <= b
+}
+
+fn const_ge_int(a: i64, b: i64) -> bool with Mut, Panic, Div {
+    a >= b
+}
+
+// ============================================================
+// Boolean operations on const values
+// ============================================================
+
+fn const_and_bool(a: bool, b: bool) -> bool with Mut, Panic, Div {
+    a && b
+}
+
+fn const_or_bool(a: bool, b: bool) -> bool with Mut, Panic, Div {
+    a || b
+}
+
+fn const_not_bool(a: bool) -> bool with Mut, Panic, Div {
+    !a
+}
+
+// ============================================================
+// Float arithmetic on const values
+// ============================================================
+
+fn const_add_float(a: f64, b: f64) -> f64 with Mut, Panic, Div {
+    a + b
+}
+
+fn const_sub_float(a: f64, b: f64) -> f64 with Mut, Panic, Div {
+    a - b
+}
+
+fn const_mul_float(a: f64, b: f64) -> f64 with Mut, Panic, Div {
+    a * b
+}
+
+fn const_div_float(a: f64, b: f64) -> f64 with Mut, Panic, Div {
+    if b == 0.0 {
+        return 0.0
+    }
+    a / b
+}
+
+// ============================================================
+// Evaluation — binary operations
+// ============================================================
+
+fn const_eval_binop(pool: ConstPool, op: i64, lhs_id: i64, rhs_id: i64) -> (ConstPool, i64) with Mut, Panic, Div {
+    let lhs = const_pool_get(pool, lhs_id)
+    let rhs = const_pool_get(pool, rhs_id)
+
+    // Error propagation
+    if const_value_is_error(lhs) || const_value_is_error(rhs) {
+        return const_pool_add_error(pool)
+    }
+
+    // Int x Int operations
+    if lhs.kind == CONST_INT() && rhs.kind == CONST_INT() {
+        if op == BINOP_ADD() {
+            return const_pool_add_int(pool, const_add_int(lhs.int_val, rhs.int_val))
+        }
+        if op == BINOP_SUB() {
+            return const_pool_add_int(pool, const_sub_int(lhs.int_val, rhs.int_val))
+        }
+        if op == BINOP_MUL() {
+            return const_pool_add_int(pool, const_mul_int(lhs.int_val, rhs.int_val))
+        }
+        if op == BINOP_DIV() {
+            return const_pool_add_int(pool, const_div_int(lhs.int_val, rhs.int_val))
+        }
+        if op == BINOP_MOD() {
+            return const_pool_add_int(pool, const_mod_int(lhs.int_val, rhs.int_val))
+        }
+        if op == BINOP_EQ() {
+            return const_pool_add_bool(pool, const_eq_int(lhs.int_val, rhs.int_val))
+        }
+        if op == BINOP_NEQ() {
+            return const_pool_add_bool(pool, !const_eq_int(lhs.int_val, rhs.int_val))
+        }
+        if op == BINOP_LT() {
+            return const_pool_add_bool(pool, const_lt_int(lhs.int_val, rhs.int_val))
+        }
+        if op == BINOP_GT() {
+            return const_pool_add_bool(pool, const_gt_int(lhs.int_val, rhs.int_val))
+        }
+        if op == BINOP_LE() {
+            return const_pool_add_bool(pool, const_le_int(lhs.int_val, rhs.int_val))
+        }
+        if op == BINOP_GE() {
+            return const_pool_add_bool(pool, const_ge_int(lhs.int_val, rhs.int_val))
+        }
+        return const_pool_add_error(pool)
+    }
+
+    // Float x Float operations
+    if lhs.kind == CONST_FLOAT() && rhs.kind == CONST_FLOAT() {
+        if op == BINOP_ADD() {
+            return const_pool_add_float(pool, const_add_float(lhs.float_val, rhs.float_val))
+        }
+        if op == BINOP_SUB() {
+            return const_pool_add_float(pool, const_sub_float(lhs.float_val, rhs.float_val))
+        }
+        if op == BINOP_MUL() {
+            return const_pool_add_float(pool, const_mul_float(lhs.float_val, rhs.float_val))
+        }
+        if op == BINOP_DIV() {
+            return const_pool_add_float(pool, const_div_float(lhs.float_val, rhs.float_val))
+        }
+        if op == BINOP_EQ() {
+            return const_pool_add_bool(pool, lhs.float_val == rhs.float_val)
+        }
+        if op == BINOP_NEQ() {
+            return const_pool_add_bool(pool, lhs.float_val != rhs.float_val)
+        }
+        if op == BINOP_LT() {
+            return const_pool_add_bool(pool, lhs.float_val < rhs.float_val)
+        }
+        if op == BINOP_GT() {
+            return const_pool_add_bool(pool, lhs.float_val > rhs.float_val)
+        }
+        if op == BINOP_LE() {
+            return const_pool_add_bool(pool, lhs.float_val <= rhs.float_val)
+        }
+        if op == BINOP_GE() {
+            return const_pool_add_bool(pool, lhs.float_val >= rhs.float_val)
+        }
+        return const_pool_add_error(pool)
+    }
+
+    // Bool x Bool operations
+    if lhs.kind == CONST_BOOL() && rhs.kind == CONST_BOOL() {
+        let lv = lhs.bool_val != 0
+        let rv = rhs.bool_val != 0
+        if op == BINOP_AND() {
+            return const_pool_add_bool(pool, const_and_bool(lv, rv))
+        }
+        if op == BINOP_OR() {
+            return const_pool_add_bool(pool, const_or_bool(lv, rv))
+        }
+        if op == BINOP_EQ() {
+            return const_pool_add_bool(pool, lv == rv)
+        }
+        if op == BINOP_NEQ() {
+            return const_pool_add_bool(pool, lv != rv)
+        }
+        return const_pool_add_error(pool)
+    }
+
+    // Mixed Int/Float — promote int to float
+    if lhs.kind == CONST_INT() && rhs.kind == CONST_FLOAT() {
+        let lf = lhs.int_val as f64
+        if op == BINOP_ADD() { return const_pool_add_float(pool, lf + rhs.float_val) }
+        if op == BINOP_SUB() { return const_pool_add_float(pool, lf - rhs.float_val) }
+        if op == BINOP_MUL() { return const_pool_add_float(pool, lf * rhs.float_val) }
+        if op == BINOP_DIV() { return const_pool_add_float(pool, const_div_float(lf, rhs.float_val)) }
+        return const_pool_add_error(pool)
+    }
+    if lhs.kind == CONST_FLOAT() && rhs.kind == CONST_INT() {
+        let rf = rhs.int_val as f64
+        if op == BINOP_ADD() { return const_pool_add_float(pool, lhs.float_val + rf) }
+        if op == BINOP_SUB() { return const_pool_add_float(pool, lhs.float_val - rf) }
+        if op == BINOP_MUL() { return const_pool_add_float(pool, lhs.float_val * rf) }
+        if op == BINOP_DIV() { return const_pool_add_float(pool, const_div_float(lhs.float_val, rf)) }
+        return const_pool_add_error(pool)
+    }
+
+    // Unsupported combination
+    const_pool_add_error(pool)
+}
+
+// ============================================================
+// Evaluation — unary operations
+// ============================================================
+
+fn const_eval_unop(pool: ConstPool, op: i64, operand_id: i64) -> (ConstPool, i64) with Mut, Panic, Div {
+    let val = const_pool_get(pool, operand_id)
+
+    if const_value_is_error(val) {
+        return const_pool_add_error(pool)
+    }
+
+    if op == UNOP_NEG() {
+        if val.kind == CONST_INT() {
+            return const_pool_add_int(pool, 0 - val.int_val)
+        }
+        if val.kind == CONST_FLOAT() {
+            return const_pool_add_float(pool, 0.0 - val.float_val)
+        }
+        return const_pool_add_error(pool)
+    }
+
+    if op == UNOP_NOT() {
+        if val.kind == CONST_BOOL() {
+            let bv = val.bool_val != 0
+            return const_pool_add_bool(pool, const_not_bool(bv))
+        }
+        return const_pool_add_error(pool)
+    }
+
+    const_pool_add_error(pool)
+}
+
+// ============================================================
+// Evaluation — conditional (if-then-else)
+// ============================================================
+
+fn const_eval_if(pool: ConstPool, expr_pool: ExprPool, env: ConstEnv, cond_id: i64, then_id: i64, else_id: i64) -> (ConstPool, i64) with Mut, Panic, Div {
+    let pair_c = const_eval(pool, expr_pool, env, cond_id)
+    var p = pair_c.0
+    let cond_val_id = pair_c.1
+    let cond_val = const_pool_get(p, cond_val_id)
+
+    if const_value_is_error(cond_val) {
+        return const_pool_add_error(p)
+    }
+
+    if cond_val.kind != CONST_BOOL() {
+        return const_pool_add_error(p)
+    }
+
+    let cond_true = cond_val.bool_val != 0
+    if cond_true {
+        return const_eval(p, expr_pool, env, then_id)
+    } else {
+        return const_eval(p, expr_pool, env, else_id)
+    }
+}
+
+// ============================================================
+// Evaluation — array indexing
+// ============================================================
+
+fn const_eval_index(pool: ConstPool, array_val_id: i64, index_val_id: i64) -> (ConstPool, i64) with Mut, Panic, Div {
+    let arr = const_pool_get(pool, array_val_id)
+    let idx = const_pool_get(pool, index_val_id)
+
+    if const_value_is_error(arr) || const_value_is_error(idx) {
+        return const_pool_add_error(pool)
+    }
+
+    if arr.kind != CONST_ARRAY() {
+        return const_pool_add_error(pool)
+    }
+    if idx.kind != CONST_INT() {
+        return const_pool_add_error(pool)
+    }
+
+    let i = idx.int_val
+    if i < 0 || i >= arr.child_count {
+        // Out of bounds
+        return const_pool_add_error(pool)
+    }
+
+    // The child at index i is a value ID in the pool
+    let child_id = arr.children[i as usize]
+    (pool, child_id)
+}
+
+// ============================================================
+// Evaluation — main evaluator
+// ============================================================
+
+fn const_eval(pool: ConstPool, expr_pool: ExprPool, env: ConstEnv, expr_id: i64) -> (ConstPool, i64) with Mut, Panic, Div {
+    if expr_id < 0 || expr_id >= expr_pool.count {
+        return const_pool_add_error(pool)
+    }
+
+    let expr = expr_pool_get(expr_pool, expr_id)
+
+    // Literal — value_id points directly into the const pool
+    if expr.kind == CEXPR_LIT() {
+        return (pool, expr.value_id)
+    }
+
+    // Variable lookup
+    if expr.kind == CEXPR_VAR() {
+        let val_id = const_env_lookup(env, expr.name)
+        if val_id < 0 {
+            return const_pool_add_error(pool)
+        }
+        return (pool, val_id)
+    }
+
+    // Binary operation
+    if expr.kind == CEXPR_BINOP() {
+        let lhs_expr_id = expr.children[0]
+        let rhs_expr_id = expr.children[1]
+        let pair_l = const_eval(pool, expr_pool, env, lhs_expr_id)
+        var p = pair_l.0
+        let lhs_val_id = pair_l.1
+        let pair_r = const_eval(p, expr_pool, env, rhs_expr_id)
+        p = pair_r.0
+        let rhs_val_id = pair_r.1
+        return const_eval_binop(p, expr.op, lhs_val_id, rhs_val_id)
+    }
+
+    // Unary operation
+    if expr.kind == CEXPR_UNOP() {
+        let operand_expr_id = expr.children[0]
+        let pair_o = const_eval(pool, expr_pool, env, operand_expr_id)
+        let p = pair_o.0
+        let operand_val_id = pair_o.1
+        return const_eval_unop(p, expr.op, operand_val_id)
+    }
+
+    // If-then-else
+    if expr.kind == CEXPR_IF() {
+        let cond_eid = expr.children[0]
+        let then_eid = expr.children[1]
+        let else_eid = expr.children[2]
+        return const_eval_if(pool, expr_pool, env, cond_eid, then_eid, else_eid)
+    }
+
+    // Array construction
+    if expr.kind == CEXPR_ARRAY() {
+        var p = pool
+        var arr_val = empty_const_value()
+        arr_val.kind = CONST_ARRAY()
+        arr_val.child_count = expr.child_count
+        var i: i64 = 0
+        while i < expr.child_count && i < 8 {
+            let elem_eid = expr.children[i as usize]
+            let pair_e = const_eval(p, expr_pool, env, elem_eid)
+            p = pair_e.0
+            let elem_vid = pair_e.1
+            if i < 16 {
+                arr_val.children[i as usize] = elem_vid
+            }
+            i = i + 1
+        }
+        return const_pool_add(p, arr_val)
+    }
+
+    // Index into array
+    if expr.kind == CEXPR_INDEX() {
+        let arr_eid = expr.children[0]
+        let idx_eid = expr.children[1]
+        let pair_a = const_eval(pool, expr_pool, env, arr_eid)
+        var p = pair_a.0
+        let arr_vid = pair_a.1
+        let pair_i = const_eval(p, expr_pool, env, idx_eid)
+        p = pair_i.0
+        let idx_vid = pair_i.1
+        return const_eval_index(p, arr_vid, idx_vid)
+    }
+
+    // Field access and call are not yet fully supported —
+    // return error for now (extensible in later stages)
+    if expr.kind == CEXPR_FIELD() || expr.kind == CEXPR_CALL() {
+        return const_pool_add_error(pool)
+    }
+
+    const_pool_add_error(pool)
+}
+
+// ============================================================
+// Value extraction helpers
+// ============================================================
+
+fn const_to_i64(pool: ConstPool, val_id: i64) -> i64 with Mut, Panic, Div {
+    let v = const_pool_get(pool, val_id)
+    if v.kind == CONST_INT() {
+        return v.int_val
+    }
+    if v.kind == CONST_BOOL() {
+        return v.bool_val
+    }
+    // Default for non-integer types
+    0
+}
+
+fn const_to_f64(pool: ConstPool, val_id: i64) -> f64 with Mut, Panic, Div {
+    let v = const_pool_get(pool, val_id)
+    if v.kind == CONST_FLOAT() {
+        return v.float_val
+    }
+    if v.kind == CONST_INT() {
+        return v.int_val as f64
+    }
+    0.0
+}
+
+fn const_to_bool(pool: ConstPool, val_id: i64) -> bool with Mut, Panic, Div {
+    let v = const_pool_get(pool, val_id)
+    if v.kind == CONST_BOOL() {
+        return v.bool_val != 0
+    }
+    if v.kind == CONST_INT() {
+        return v.int_val != 0
+    }
+    false
+}
+
+// ============================================================
+// Const-ness checking
+// ============================================================
+
+fn is_const_expr(expr_pool: ExprPool, expr_id: i64) -> bool with Mut, Panic, Div {
+    if expr_id < 0 || expr_id >= expr_pool.count {
+        return false
+    }
+    let expr = expr_pool_get(expr_pool, expr_id)
+
+    // Literals are always const
+    if expr.kind == CEXPR_LIT() {
+        return true
+    }
+
+    // Variables are const if they were bound in the const env (we assume yes
+    // here — the caller must check that the variable is actually const)
+    if expr.kind == CEXPR_VAR() {
+        return true
+    }
+
+    // Binary/unary: const if children are const
+    if expr.kind == CEXPR_BINOP() {
+        let lc = is_const_expr(expr_pool, expr.children[0])
+        let rc = is_const_expr(expr_pool, expr.children[1])
+        return lc && rc
+    }
+    if expr.kind == CEXPR_UNOP() {
+        return is_const_expr(expr_pool, expr.children[0])
+    }
+
+    // If: const if all three branches are const
+    if expr.kind == CEXPR_IF() {
+        let cc = is_const_expr(expr_pool, expr.children[0])
+        let tc = is_const_expr(expr_pool, expr.children[1])
+        let ec = is_const_expr(expr_pool, expr.children[2])
+        return cc && tc && ec
+    }
+
+    // Array: const if all elements are const
+    if expr.kind == CEXPR_ARRAY() {
+        var i: i64 = 0
+        while i < expr.child_count {
+            if !is_const_expr(expr_pool, expr.children[i as usize]) {
+                return false
+            }
+            i = i + 1
+        }
+        return true
+    }
+
+    // Index: const if both array and index are const
+    if expr.kind == CEXPR_INDEX() {
+        let ac = is_const_expr(expr_pool, expr.children[0])
+        let ic = is_const_expr(expr_pool, expr.children[1])
+        return ac && ic
+    }
+
+    // Field access and calls are not const-foldable yet
+    false
+}
+
+// ============================================================
+// Const folding integration
+// ============================================================
+
+fn try_const_fold(pool: ConstPool, expr_pool: ExprPool, env: ConstEnv, expr_id: i64) -> (bool, ConstPool, i64) with Mut, Panic, Div {
+    if !is_const_expr(expr_pool, expr_id) {
+        return (false, pool, 0 - 1)
+    }
+    let pair = const_eval(pool, expr_pool, env, expr_id)
+    let p = pair.0
+    let vid = pair.1
+    let v = const_pool_get(p, vid)
+    if const_value_is_error(v) {
+        return (false, p, vid)
+    }
+    (true, p, vid)
+}
+
+// ============================================================
+// Array const value construction (for [expr; N] patterns)
+// ============================================================
+
+fn const_make_array(pool: ConstPool, elem_id: i64, count: i64) -> (ConstPool, i64) with Mut, Panic, Div {
+    if count < 0 || count > 16 {
+        return const_pool_add_error(pool)
+    }
+    var arr = empty_const_value()
+    arr.kind = CONST_ARRAY()
+    arr.child_count = count
+    var i: i64 = 0
+    while i < count {
+        arr.children[i as usize] = elem_id
+        i = i + 1
+    }
+    const_pool_add(pool, arr)
+}
+
+// Tuple const value construction
+fn const_make_tuple(pool: ConstPool, elem_ids: [i64; 16], count: i64) -> (ConstPool, i64) with Mut, Panic, Div {
+    if count < 0 || count > 16 {
+        return const_pool_add_error(pool)
+    }
+    var tup = empty_const_value()
+    tup.kind = CONST_TUPLE()
+    tup.child_count = count
+    var i: i64 = 0
+    while i < count {
+        tup.children[i as usize] = elem_ids[i as usize]
+        i = i + 1
+    }
+    const_pool_add(pool, tup)
+}
+
+// ============================================================
+// Equality check for ConstValues
+// ============================================================
+
+fn const_values_equal(pool: ConstPool, a_id: i64, b_id: i64) -> bool with Mut, Panic, Div {
+    let a = const_pool_get(pool, a_id)
+    let b = const_pool_get(pool, b_id)
+    if a.kind != b.kind {
+        return false
+    }
+    if a.kind == CONST_INT() {
+        return a.int_val == b.int_val
+    }
+    if a.kind == CONST_FLOAT() {
+        return a.float_val == b.float_val
+    }
+    if a.kind == CONST_BOOL() {
+        return a.bool_val == b.bool_val
+    }
+    if a.kind == CONST_UNIT() {
+        return true
+    }
+    if a.kind == CONST_ARRAY() || a.kind == CONST_TUPLE() {
+        if a.child_count != b.child_count {
+            return false
+        }
+        var i: i64 = 0
+        while i < a.child_count {
+            if !const_values_equal(pool, a.children[i as usize], b.children[i as usize]) {
+                return false
+            }
+            i = i + 1
+        }
+        return true
+    }
+    if a.kind == CONST_ERROR() {
+        return true
+    }
+    false
+}
+
+// ============================================================
+// Debug: kind to tag name (returns i64 tag for printing)
+// ============================================================
+
+fn const_kind_tag(kind: i64) -> i64 with Mut, Panic, Div {
+    // Returns the kind value itself — useful for test diagnostics
+    kind
+}
+
+// ============================================================
+// Test helpers
+// ============================================================
+
+fn ce_assert_true(cond: bool, test_id: i64) -> i64 with IO, Mut, Panic, Div {
+    if cond {
+        print("  PASS test ")
+        print_int(test_id)
+        print("\n")
+        return 0
+    } else {
+        print("  FAIL test ")
+        print_int(test_id)
+        print("\n")
+        return 1
+    }
+}
+
+// ============================================================
+// Test 1: Pool add and get — integer
+// ============================================================
+
+fn test_ce_pool_int() -> i64 with IO, Mut, Panic, Div {
+    var pool = const_pool_new()
+    let pair = const_pool_add_int(pool, 42)
+    pool = pair.0
+    let id = pair.1
+    let v = const_pool_get(pool, id)
+    let ok1 = v.kind == CONST_INT()
+    let ok2 = v.int_val == 42
+    ce_assert_true(ok1 && ok2, 1)
+}
+
+// ============================================================
+// Test 2: Pool add and get — float
+// ============================================================
+
+fn test_ce_pool_float() -> i64 with IO, Mut, Panic, Div {
+    var pool = const_pool_new()
+    let pair = const_pool_add_float(pool, 3.14)
+    pool = pair.0
+    let id = pair.1
+    let v = const_pool_get(pool, id)
+    let ok1 = v.kind == CONST_FLOAT()
+    let ok2 = v.float_val == 3.14
+    ce_assert_true(ok1 && ok2, 2)
+}
+
+// ============================================================
+// Test 3: Pool add and get — bool
+// ============================================================
+
+fn test_ce_pool_bool() -> i64 with IO, Mut, Panic, Div {
+    var pool = const_pool_new()
+    let pair_t = const_pool_add_bool(pool, true)
+    pool = pair_t.0
+    let id_t = pair_t.1
+    let pair_f = const_pool_add_bool(pool, false)
+    pool = pair_f.0
+    let id_f = pair_f.1
+    let vt = const_pool_get(pool, id_t)
+    let vf = const_pool_get(pool, id_f)
+    let ok1 = vt.bool_val == 1
+    let ok2 = vf.bool_val == 0
+    let ok3 = vt.kind == CONST_BOOL() && vf.kind == CONST_BOOL()
+    ce_assert_true(ok1 && ok2 && ok3, 3)
+}
+
+// ============================================================
+// Test 4: Env bind and lookup
+// ============================================================
+
+fn test_ce_env_bind() -> i64 with IO, Mut, Panic, Div {
+    var env = const_env_new()
+    env = const_env_bind(env, 100, 42)
+    env = const_env_bind(env, 200, 77)
+    let v1 = const_env_lookup(env, 100)
+    let v2 = const_env_lookup(env, 200)
+    let v3 = const_env_lookup(env, 300)
+    let ok1 = v1 == 42
+    let ok2 = v2 == 77
+    let ok3 = v3 == (0 - 1)
+    ce_assert_true(ok1 && ok2 && ok3, 4)
+}
+
+// ============================================================
+// Test 5: Integer addition
+// ============================================================
+
+fn test_ce_int_add() -> i64 with IO, Mut, Panic, Div {
+    var pool = const_pool_new()
+    let pair_a = const_pool_add_int(pool, 10)
+    pool = pair_a.0
+    let aid = pair_a.1
+    let pair_b = const_pool_add_int(pool, 20)
+    pool = pair_b.0
+    let bid = pair_b.1
+    let pair_r = const_eval_binop(pool, BINOP_ADD(), aid, bid)
+    pool = pair_r.0
+    let rid = pair_r.1
+    let result = const_to_i64(pool, rid)
+    ce_assert_true(result == 30, 5)
+}
+
+// ============================================================
+// Test 6: Integer subtraction and multiplication
+// ============================================================
+
+fn test_ce_int_sub_mul() -> i64 with IO, Mut, Panic, Div {
+    var pool = const_pool_new()
+    let pair_a = const_pool_add_int(pool, 15)
+    pool = pair_a.0
+    let aid = pair_a.1
+    let pair_b = const_pool_add_int(pool, 7)
+    pool = pair_b.0
+    let bid = pair_b.1
+
+    let pair_sub = const_eval_binop(pool, BINOP_SUB(), aid, bid)
+    pool = pair_sub.0
+    let sub_r = const_to_i64(pool, pair_sub.1)
+
+    let pair_mul = const_eval_binop(pool, BINOP_MUL(), aid, bid)
+    pool = pair_mul.0
+    let mul_r = const_to_i64(pool, pair_mul.1)
+
+    let ok1 = sub_r == 8
+    let ok2 = mul_r == 105
+    ce_assert_true(ok1 && ok2, 6)
+}
+
+// ============================================================
+// Test 7: Integer division and modulo
+// ============================================================
+
+fn test_ce_int_div_mod() -> i64 with IO, Mut, Panic, Div {
+    var pool = const_pool_new()
+    let pair_a = const_pool_add_int(pool, 17)
+    pool = pair_a.0
+    let aid = pair_a.1
+    let pair_b = const_pool_add_int(pool, 5)
+    pool = pair_b.0
+    let bid = pair_b.1
+
+    let pair_div = const_eval_binop(pool, BINOP_DIV(), aid, bid)
+    pool = pair_div.0
+    let div_r = const_to_i64(pool, pair_div.1)
+
+    let pair_mod = const_eval_binop(pool, BINOP_MOD(), aid, bid)
+    pool = pair_mod.0
+    let mod_r = const_to_i64(pool, pair_mod.1)
+
+    let ok1 = div_r == 3
+    let ok2 = mod_r == 2
+    ce_assert_true(ok1 && ok2, 7)
+}
+
+// ============================================================
+// Test 8: Division by zero returns zero (not panic)
+// ============================================================
+
+fn test_ce_div_by_zero() -> i64 with IO, Mut, Panic, Div {
+    var pool = const_pool_new()
+    let pair_a = const_pool_add_int(pool, 42)
+    pool = pair_a.0
+    let aid = pair_a.1
+    let pair_b = const_pool_add_int(pool, 0)
+    pool = pair_b.0
+    let bid = pair_b.1
+
+    let pair_r = const_eval_binop(pool, BINOP_DIV(), aid, bid)
+    pool = pair_r.0
+    let div_r = const_to_i64(pool, pair_r.1)
+    ce_assert_true(div_r == 0, 8)
+}
+
+// ============================================================
+// Test 9: Boolean and/or/not
+// ============================================================
+
+fn test_ce_bool_ops() -> i64 with IO, Mut, Panic, Div {
+    var pool = const_pool_new()
+    let pair_t = const_pool_add_bool(pool, true)
+    pool = pair_t.0
+    let tid = pair_t.1
+    let pair_f = const_pool_add_bool(pool, false)
+    pool = pair_f.0
+    let fid = pair_f.1
+
+    // true && false = false
+    let pair_and = const_eval_binop(pool, BINOP_AND(), tid, fid)
+    pool = pair_and.0
+    let and_r = const_to_bool(pool, pair_and.1)
+
+    // true || false = true
+    let pair_or = const_eval_binop(pool, BINOP_OR(), tid, fid)
+    pool = pair_or.0
+    let or_r = const_to_bool(pool, pair_or.1)
+
+    // !true = false
+    let pair_not = const_eval_unop(pool, UNOP_NOT(), tid)
+    pool = pair_not.0
+    let not_r = const_to_bool(pool, pair_not.1)
+
+    let ok1 = and_r == false
+    let ok2 = or_r == true
+    let ok3 = not_r == false
+    ce_assert_true(ok1 && ok2 && ok3, 9)
+}
+
+// ============================================================
+// Test 10: Integer comparison operators
+// ============================================================
+
+fn test_ce_int_cmp() -> i64 with IO, Mut, Panic, Div {
+    var pool = const_pool_new()
+    let pair_a = const_pool_add_int(pool, 5)
+    pool = pair_a.0
+    let aid = pair_a.1
+    let pair_b = const_pool_add_int(pool, 10)
+    pool = pair_b.0
+    let bid = pair_b.1
+
+    let pair_lt = const_eval_binop(pool, BINOP_LT(), aid, bid)
+    pool = pair_lt.0
+    let lt_r = const_to_bool(pool, pair_lt.1)
+
+    let pair_gt = const_eval_binop(pool, BINOP_GT(), aid, bid)
+    pool = pair_gt.0
+    let gt_r = const_to_bool(pool, pair_gt.1)
+
+    let pair_eq = const_eval_binop(pool, BINOP_EQ(), aid, aid)
+    pool = pair_eq.0
+    let eq_r = const_to_bool(pool, pair_eq.1)
+
+    let pair_neq = const_eval_binop(pool, BINOP_NEQ(), aid, bid)
+    pool = pair_neq.0
+    let neq_r = const_to_bool(pool, pair_neq.1)
+
+    let ok1 = lt_r == true
+    let ok2 = gt_r == false
+    let ok3 = eq_r == true
+    let ok4 = neq_r == true
+    ce_assert_true(ok1 && ok2 && ok3 && ok4, 10)
+}
+
+// ============================================================
+// Test 11: Float arithmetic
+// ============================================================
+
+fn test_ce_float_arith() -> i64 with IO, Mut, Panic, Div {
+    var pool = const_pool_new()
+    let pair_a = const_pool_add_float(pool, 2.5)
+    pool = pair_a.0
+    let aid = pair_a.1
+    let pair_b = const_pool_add_float(pool, 1.5)
+    pool = pair_b.0
+    let bid = pair_b.1
+
+    let pair_add = const_eval_binop(pool, BINOP_ADD(), aid, bid)
+    pool = pair_add.0
+    let add_r = const_to_f64(pool, pair_add.1)
+
+    let pair_mul = const_eval_binop(pool, BINOP_MUL(), aid, bid)
+    pool = pair_mul.0
+    let mul_r = const_to_f64(pool, pair_mul.1)
+
+    let ok1 = add_r == 4.0
+    let ok2 = mul_r == 3.75
+    ce_assert_true(ok1 && ok2, 11)
+}
+
+// ============================================================
+// Test 12: Unary negation
+// ============================================================
+
+fn test_ce_unary_neg() -> i64 with IO, Mut, Panic, Div {
+    var pool = const_pool_new()
+    let pair_a = const_pool_add_int(pool, 42)
+    pool = pair_a.0
+    let aid = pair_a.1
+
+    let pair_neg = const_eval_unop(pool, UNOP_NEG(), aid)
+    pool = pair_neg.0
+    let neg_r = const_to_i64(pool, pair_neg.1)
+
+    let pair_f = const_pool_add_float(pool, 3.14)
+    pool = pair_f.0
+    let fid = pair_f.1
+    let pair_fneg = const_eval_unop(pool, UNOP_NEG(), fid)
+    pool = pair_fneg.0
+    let fneg_r = const_to_f64(pool, pair_fneg.1)
+
+    let ok1 = neg_r == (0 - 42)
+    let ok2 = fneg_r == (0.0 - 3.14)
+    ce_assert_true(ok1 && ok2, 12)
+}
+
+// ============================================================
+// Test 13: Full expression evaluation (2 + 3 * 4)
+//   Built as:  binop(+, lit(2), binop(*, lit(3), lit(4)))
+// ============================================================
+
+fn test_ce_expr_eval() -> i64 with IO, Mut, Panic, Div {
+    var pool = const_pool_new()
+    var epool = expr_pool_new()
+    let env = const_env_new()
+
+    // Add literal values to pool
+    let p2 = const_pool_add_int(pool, 2)
+    pool = p2.0
+    let vid2 = p2.1
+
+    let p3 = const_pool_add_int(pool, 3)
+    pool = p3.0
+    let vid3 = p3.1
+
+    let p4 = const_pool_add_int(pool, 4)
+    pool = p4.0
+    let vid4 = p4.1
+
+    // Build expression tree: lit(2), lit(3), lit(4), binop(*, e1, e2), binop(+, e0, e3)
+    let e0p = expr_pool_add(epool, cexpr_lit(vid2))
+    epool = e0p.0
+    let eid0 = e0p.1
+
+    let e1p = expr_pool_add(epool, cexpr_lit(vid3))
+    epool = e1p.0
+    let eid1 = e1p.1
+
+    let e2p = expr_pool_add(epool, cexpr_lit(vid4))
+    epool = e2p.0
+    let eid2 = e2p.1
+
+    let e3p = expr_pool_add(epool, cexpr_binop(BINOP_MUL(), eid1, eid2))
+    epool = e3p.0
+    let eid3 = e3p.1
+
+    let e4p = expr_pool_add(epool, cexpr_binop(BINOP_ADD(), eid0, eid3))
+    epool = e4p.0
+    let eid4 = e4p.1
+
+    // Evaluate
+    let result_pair = const_eval(pool, epool, env, eid4)
+    pool = result_pair.0
+    let result = const_to_i64(pool, result_pair.1)
+
+    // 2 + 3 * 4 = 2 + 12 = 14
+    ce_assert_true(result == 14, 13)
+}
+
+// ============================================================
+// Test 14: Variable binding and lookup in evaluation
+//   let x = 10; x + 5
+// ============================================================
+
+fn test_ce_var_eval() -> i64 with IO, Mut, Panic, Div {
+    var pool = const_pool_new()
+    var epool = expr_pool_new()
+    var env = const_env_new()
+
+    // x = 10 in pool
+    let px = const_pool_add_int(pool, 10)
+    pool = px.0
+    let xvid = px.1
+    env = const_env_bind(env, 1, xvid)  // name=1 -> x
+
+    // 5 in pool
+    let p5 = const_pool_add_int(pool, 5)
+    pool = p5.0
+    let vid5 = p5.1
+
+    // Build: var(x) + lit(5)
+    let e0p = expr_pool_add(epool, cexpr_var(1))
+    epool = e0p.0
+    let eid0 = e0p.1
+
+    let e1p = expr_pool_add(epool, cexpr_lit(vid5))
+    epool = e1p.0
+    let eid1 = e1p.1
+
+    let e2p = expr_pool_add(epool, cexpr_binop(BINOP_ADD(), eid0, eid1))
+    epool = e2p.0
+    let eid2 = e2p.1
+
+    let result_pair = const_eval(pool, epool, env, eid2)
+    pool = result_pair.0
+    let result = const_to_i64(pool, result_pair.1)
+
+    ce_assert_true(result == 15, 14)
+}
+
+// ============================================================
+// Test 15: Conditional evaluation
+//   if true then 42 else 0
+// ============================================================
+
+fn test_ce_if_eval() -> i64 with IO, Mut, Panic, Div {
+    var pool = const_pool_new()
+    var epool = expr_pool_new()
+    let env = const_env_new()
+
+    let pt = const_pool_add_bool(pool, true)
+    pool = pt.0
+    let tid = pt.1
+
+    let p42 = const_pool_add_int(pool, 42)
+    pool = p42.0
+    let vid42 = p42.1
+
+    let p0 = const_pool_add_int(pool, 0)
+    pool = p0.0
+    let vid0 = p0.1
+
+    // Build: if(lit(true), lit(42), lit(0))
+    let e0p = expr_pool_add(epool, cexpr_lit(tid))
+    epool = e0p.0
+    let cond_eid = e0p.1
+
+    let e1p = expr_pool_add(epool, cexpr_lit(vid42))
+    epool = e1p.0
+    let then_eid = e1p.1
+
+    let e2p = expr_pool_add(epool, cexpr_lit(vid0))
+    epool = e2p.0
+    let else_eid = e2p.1
+
+    let e3p = expr_pool_add(epool, cexpr_if(cond_eid, then_eid, else_eid))
+    epool = e3p.0
+    let if_eid = e3p.1
+
+    let result_pair = const_eval(pool, epool, env, if_eid)
+    pool = result_pair.0
+    let result = const_to_i64(pool, result_pair.1)
+    ce_assert_true(result == 42, 15)
+}
+
+// ============================================================
+// Test 16: Conditional false branch
+//   if false then 1 else 99
+// ============================================================
+
+fn test_ce_if_false() -> i64 with IO, Mut, Panic, Div {
+    var pool = const_pool_new()
+    var epool = expr_pool_new()
+    let env = const_env_new()
+
+    let pf = const_pool_add_bool(pool, false)
+    pool = pf.0
+    let fid = pf.1
+
+    let p1 = const_pool_add_int(pool, 1)
+    pool = p1.0
+    let vid1 = p1.1
+
+    let p99 = const_pool_add_int(pool, 99)
+    pool = p99.0
+    let vid99 = p99.1
+
+    let e0p = expr_pool_add(epool, cexpr_lit(fid))
+    epool = e0p.0
+    let cond_eid = e0p.1
+
+    let e1p = expr_pool_add(epool, cexpr_lit(vid1))
+    epool = e1p.0
+    let then_eid = e1p.1
+
+    let e2p = expr_pool_add(epool, cexpr_lit(vid99))
+    epool = e2p.0
+    let else_eid = e2p.1
+
+    let e3p = expr_pool_add(epool, cexpr_if(cond_eid, then_eid, else_eid))
+    epool = e3p.0
+    let if_eid = e3p.1
+
+    let result_pair = const_eval(pool, epool, env, if_eid)
+    pool = result_pair.0
+    let result = const_to_i64(pool, result_pair.1)
+    ce_assert_true(result == 99, 16)
+}
+
+// ============================================================
+// Test 17: Array construction and indexing
+//   [10, 20, 30][1] == 20
+// ============================================================
+
+fn test_ce_array_index() -> i64 with IO, Mut, Panic, Div {
+    var pool = const_pool_new()
+    var epool = expr_pool_new()
+    let env = const_env_new()
+
+    let p10 = const_pool_add_int(pool, 10)
+    pool = p10.0
+    let vid10 = p10.1
+
+    let p20 = const_pool_add_int(pool, 20)
+    pool = p20.0
+    let vid20 = p20.1
+
+    let p30 = const_pool_add_int(pool, 30)
+    pool = p30.0
+    let vid30 = p30.1
+
+    let pidx = const_pool_add_int(pool, 1)
+    pool = pidx.0
+    let vidx = pidx.1
+
+    // Build: array(lit(10), lit(20), lit(30))
+    let e0p = expr_pool_add(epool, cexpr_lit(vid10))
+    epool = e0p.0
+    let eid0 = e0p.1
+
+    let e1p = expr_pool_add(epool, cexpr_lit(vid20))
+    epool = e1p.0
+    let eid1 = e1p.1
+
+    let e2p = expr_pool_add(epool, cexpr_lit(vid30))
+    epool = e2p.0
+    let eid2 = e2p.1
+
+    var arr_children: [i64; 8] = [0; 8]
+    arr_children[0] = eid0
+    arr_children[1] = eid1
+    arr_children[2] = eid2
+
+    let e3p = expr_pool_add(epool, cexpr_array(arr_children, 3))
+    epool = e3p.0
+    let arr_eid = e3p.1
+
+    let e4p = expr_pool_add(epool, cexpr_lit(vidx))
+    epool = e4p.0
+    let idx_eid = e4p.1
+
+    let e5p = expr_pool_add(epool, cexpr_index(arr_eid, idx_eid))
+    epool = e5p.0
+    let index_eid = e5p.1
+
+    let result_pair = const_eval(pool, epool, env, index_eid)
+    pool = result_pair.0
+    let result = const_to_i64(pool, result_pair.1)
+    ce_assert_true(result == 20, 17)
+}
+
+// ============================================================
+// Test 18: Out of bounds index returns error
+// ============================================================
+
+fn test_ce_oob_index() -> i64 with IO, Mut, Panic, Div {
+    var pool = const_pool_new()
+
+    // Create a 2-element array value
+    let p1 = const_pool_add_int(pool, 100)
+    pool = p1.0
+    let vid1 = p1.1
+
+    let p2 = const_pool_add_int(pool, 200)
+    pool = p2.0
+    let vid2 = p2.1
+
+    let pair_arr = const_make_array(pool, vid1, 2)
+    pool = pair_arr.0
+    let arr_vid = pair_arr.1
+
+    // Index with 5 (out of bounds)
+    let pidx = const_pool_add_int(pool, 5)
+    pool = pidx.0
+    let idx_vid = pidx.1
+
+    let pair_r = const_eval_index(pool, arr_vid, idx_vid)
+    pool = pair_r.0
+    let rv = const_pool_get(pool, pair_r.1)
+    ce_assert_true(rv.kind == CONST_ERROR(), 18)
+}
+
+// ============================================================
+// Test 19: is_const_expr — literal is const
+// ============================================================
+
+fn test_ce_is_const_lit() -> i64 with IO, Mut, Panic, Div {
+    var pool = const_pool_new()
+    var epool = expr_pool_new()
+
+    let pair_v = const_pool_add_int(pool, 7)
+    pool = pair_v.0
+    let vid = pair_v.1
+
+    let pair_e = expr_pool_add(epool, cexpr_lit(vid))
+    epool = pair_e.0
+    let eid = pair_e.1
+
+    let result = is_const_expr(epool, eid)
+    ce_assert_true(result == true, 19)
+}
+
+// ============================================================
+// Test 20: is_const_expr — nested binop is const
+// ============================================================
+
+fn test_ce_is_const_binop() -> i64 with IO, Mut, Panic, Div {
+    var pool = const_pool_new()
+    var epool = expr_pool_new()
+
+    let pa = const_pool_add_int(pool, 1)
+    pool = pa.0
+    let va = pa.1
+    let pb = const_pool_add_int(pool, 2)
+    pool = pb.0
+    let vb = pb.1
+
+    let e0p = expr_pool_add(epool, cexpr_lit(va))
+    epool = e0p.0
+    let e0 = e0p.1
+
+    let e1p = expr_pool_add(epool, cexpr_lit(vb))
+    epool = e1p.0
+    let e1 = e1p.1
+
+    let e2p = expr_pool_add(epool, cexpr_binop(BINOP_ADD(), e0, e1))
+    epool = e2p.0
+    let e2 = e2p.1
+
+    let result = is_const_expr(epool, e2)
+    ce_assert_true(result == true, 20)
+}
+
+// ============================================================
+// Test 21: try_const_fold — successful fold
+// ============================================================
+
+fn test_ce_try_fold() -> i64 with IO, Mut, Panic, Div {
+    var pool = const_pool_new()
+    var epool = expr_pool_new()
+    let env = const_env_new()
+
+    let pa = const_pool_add_int(pool, 6)
+    pool = pa.0
+    let va = pa.1
+    let pb = const_pool_add_int(pool, 7)
+    pool = pb.0
+    let vb = pb.1
+
+    let e0p = expr_pool_add(epool, cexpr_lit(va))
+    epool = e0p.0
+    let e0 = e0p.1
+
+    let e1p = expr_pool_add(epool, cexpr_lit(vb))
+    epool = e1p.0
+    let e1 = e1p.1
+
+    let e2p = expr_pool_add(epool, cexpr_binop(BINOP_MUL(), e0, e1))
+    epool = e2p.0
+    let e2 = e2p.1
+
+    let triple = try_const_fold(pool, epool, env, e2)
+    let success = triple.0
+    pool = triple.1
+    let vid = triple.2
+    let result = const_to_i64(pool, vid)
+    ce_assert_true(success && result == 42, 21)
+}
+
+// ============================================================
+// Test 22: const_values_equal
+// ============================================================
+
+fn test_ce_values_equal() -> i64 with IO, Mut, Panic, Div {
+    var pool = const_pool_new()
+
+    let pa = const_pool_add_int(pool, 42)
+    pool = pa.0
+    let a = pa.1
+
+    let pb = const_pool_add_int(pool, 42)
+    pool = pb.0
+    let b = pb.1
+
+    let pc = const_pool_add_int(pool, 99)
+    pool = pc.0
+    let c = pc.1
+
+    let eq1 = const_values_equal(pool, a, b)
+    let eq2 = const_values_equal(pool, a, c)
+    ce_assert_true(eq1 && !eq2, 22)
+}
+
+// ============================================================
+// Test 23: Mixed int/float promotion
+//   int(3) + float(0.5) = float(3.5)
+// ============================================================
+
+fn test_ce_mixed_arith() -> i64 with IO, Mut, Panic, Div {
+    var pool = const_pool_new()
+    let pa = const_pool_add_int(pool, 3)
+    pool = pa.0
+    let aid = pa.1
+    let pb = const_pool_add_float(pool, 0.5)
+    pool = pb.0
+    let bid = pb.1
+
+    let pair_r = const_eval_binop(pool, BINOP_ADD(), aid, bid)
+    pool = pair_r.0
+    let rv = const_pool_get(pool, pair_r.1)
+    let ok1 = rv.kind == CONST_FLOAT()
+    let ok2 = rv.float_val == 3.5
+    ce_assert_true(ok1 && ok2, 23)
+}
+
+// ============================================================
+// Test 24: const_make_array fills correctly
+// ============================================================
+
+fn test_ce_make_array() -> i64 with IO, Mut, Panic, Div {
+    var pool = const_pool_new()
+    let pe = const_pool_add_int(pool, 7)
+    pool = pe.0
+    let eid = pe.1
+
+    let pair_a = const_make_array(pool, eid, 4)
+    pool = pair_a.0
+    let avid = pair_a.1
+
+    let arr = const_pool_get(pool, avid)
+    let ok1 = arr.kind == CONST_ARRAY()
+    let ok2 = arr.child_count == 4
+    let ok3 = arr.children[0] == eid
+    let ok4 = arr.children[3] == eid
+    ce_assert_true(ok1 && ok2 && ok3 && ok4, 24)
+}
+
+// ============================================================
+// Test 25: const_make_tuple
+// ============================================================
+
+fn test_ce_make_tuple() -> i64 with IO, Mut, Panic, Div {
+    var pool = const_pool_new()
+    let pa = const_pool_add_int(pool, 1)
+    pool = pa.0
+    let va = pa.1
+    let pb = const_pool_add_bool(pool, true)
+    pool = pb.0
+    let vb = pb.1
+
+    var elems: [i64; 16] = [0; 16]
+    elems[0] = va
+    elems[1] = vb
+    let pair_t = const_make_tuple(pool, elems, 2)
+    pool = pair_t.0
+    let tvid = pair_t.1
+
+    let tup = const_pool_get(pool, tvid)
+    let ok1 = tup.kind == CONST_TUPLE()
+    let ok2 = tup.child_count == 2
+    let ok3 = tup.children[0] == va
+    let ok4 = tup.children[1] == vb
+    ce_assert_true(ok1 && ok2 && ok3 && ok4, 25)
+}
+
+// ============================================================
+// Test 26: Env shadowing — later bind overrides earlier
+// ============================================================
+
+fn test_ce_env_shadow() -> i64 with IO, Mut, Panic, Div {
+    var env = const_env_new()
+    env = const_env_bind(env, 1, 10)
+    env = const_env_bind(env, 1, 20)  // shadow the first binding
+    let v = const_env_lookup(env, 1)
+    ce_assert_true(v == 20, 26)
+}
+
+// ============================================================
+// Test 27: Error propagation in binop
+//   error + 5 = error
+// ============================================================
+
+fn test_ce_error_propagation() -> i64 with IO, Mut, Panic, Div {
+    var pool = const_pool_new()
+    let pe = const_pool_add_error(pool)
+    pool = pe.0
+    let err_id = pe.1
+
+    let p5 = const_pool_add_int(pool, 5)
+    pool = p5.0
+    let vid5 = p5.1
+
+    let pair_r = const_eval_binop(pool, BINOP_ADD(), err_id, vid5)
+    pool = pair_r.0
+    let rv = const_pool_get(pool, pair_r.1)
+    ce_assert_true(rv.kind == CONST_ERROR(), 27)
+}
+
+// ============================================================
+// Test 28: Nested if-then-else evaluation
+//   if (3 < 5) then (10 + 20) else 0  ->  30
+// ============================================================
+
+fn test_ce_nested_if() -> i64 with IO, Mut, Panic, Div {
+    var pool = const_pool_new()
+    var epool = expr_pool_new()
+    let env = const_env_new()
+
+    // Pool values: 3, 5, 10, 20, 0
+    let p3 = const_pool_add_int(pool, 3)
+    pool = p3.0
+    let vid3 = p3.1
+
+    let p5 = const_pool_add_int(pool, 5)
+    pool = p5.0
+    let vid5 = p5.1
+
+    let p10 = const_pool_add_int(pool, 10)
+    pool = p10.0
+    let vid10 = p10.1
+
+    let p20 = const_pool_add_int(pool, 20)
+    pool = p20.0
+    let vid20 = p20.1
+
+    let p0 = const_pool_add_int(pool, 0)
+    pool = p0.0
+    let vid0 = p0.1
+
+    // Exprs: lit(3), lit(5), binop(<, 0, 1), lit(10), lit(20), binop(+, 3, 4), lit(0), if(2, 5, 6)
+    let e0p = expr_pool_add(epool, cexpr_lit(vid3))
+    epool = e0p.0
+    let e0 = e0p.1
+
+    let e1p = expr_pool_add(epool, cexpr_lit(vid5))
+    epool = e1p.0
+    let e1 = e1p.1
+
+    let e2p = expr_pool_add(epool, cexpr_binop(BINOP_LT(), e0, e1))
+    epool = e2p.0
+    let e2 = e2p.1
+
+    let e3p = expr_pool_add(epool, cexpr_lit(vid10))
+    epool = e3p.0
+    let e3 = e3p.1
+
+    let e4p = expr_pool_add(epool, cexpr_lit(vid20))
+    epool = e4p.0
+    let e4 = e4p.1
+
+    let e5p = expr_pool_add(epool, cexpr_binop(BINOP_ADD(), e3, e4))
+    epool = e5p.0
+    let e5 = e5p.1
+
+    let e6p = expr_pool_add(epool, cexpr_lit(vid0))
+    epool = e6p.0
+    let e6 = e6p.1
+
+    let e7p = expr_pool_add(epool, cexpr_if(e2, e5, e6))
+    epool = e7p.0
+    let e7 = e7p.1
+
+    let result_pair = const_eval(pool, epool, env, e7)
+    pool = result_pair.0
+    let result = const_to_i64(pool, result_pair.1)
+    ce_assert_true(result == 30, 28)
+}
+
+// ============================================================
+// Test 29: LE and GE comparison
+// ============================================================
+
+fn test_ce_le_ge() -> i64 with IO, Mut, Panic, Div {
+    var pool = const_pool_new()
+    let pa = const_pool_add_int(pool, 5)
+    pool = pa.0
+    let aid = pa.1
+    let pb = const_pool_add_int(pool, 5)
+    pool = pb.0
+    let bid = pb.1
+    let pc = const_pool_add_int(pool, 3)
+    pool = pc.0
+    let cid = pc.1
+
+    // 5 <= 5 = true
+    let pair_le = const_eval_binop(pool, BINOP_LE(), aid, bid)
+    pool = pair_le.0
+    let le_r = const_to_bool(pool, pair_le.1)
+
+    // 5 >= 3 = true
+    let pair_ge = const_eval_binop(pool, BINOP_GE(), aid, cid)
+    pool = pair_ge.0
+    let ge_r = const_to_bool(pool, pair_ge.1)
+
+    // 3 >= 5 = false
+    let pair_ge2 = const_eval_binop(pool, BINOP_GE(), cid, aid)
+    pool = pair_ge2.0
+    let ge2_r = const_to_bool(pool, pair_ge2.1)
+
+    ce_assert_true(le_r && ge_r && !ge2_r, 29)
+}
+
+// ============================================================
+// Test 30: Unit value
+// ============================================================
+
+fn test_ce_unit_value() -> i64 with IO, Mut, Panic, Div {
+    var pool = const_pool_new()
+    let pu = const_pool_add_unit(pool)
+    pool = pu.0
+    let uid = pu.1
+    let v = const_pool_get(pool, uid)
+    let ok1 = v.kind == CONST_UNIT()
+    let ok2 = const_values_equal(pool, uid, uid)
+    ce_assert_true(ok1 && ok2, 30)
+}
+
+// ============================================================
+// Test 31: Pool count tracks correctly
+// ============================================================
+
+fn test_ce_pool_count() -> i64 with IO, Mut, Panic, Div {
+    var pool = const_pool_new()
+    let ok0 = pool.count == 0
+
+    let p1 = const_pool_add_int(pool, 1)
+    pool = p1.0
+    let ok1 = pool.count == 1
+
+    let p2 = const_pool_add_float(pool, 2.0)
+    pool = p2.0
+    let ok2 = pool.count == 2
+
+    let p3 = const_pool_add_bool(pool, true)
+    pool = p3.0
+    let ok3 = pool.count == 3
+
+    ce_assert_true(ok0 && ok1 && ok2 && ok3, 31)
+}
+
+// ============================================================
+// Test runner
+// ============================================================
+
+fn const_eval_run_tests() -> i64 with IO, Mut, Panic, Div {
+    print("=== Const eval tests ===\n")
+    var fails: i64 = 0
+
+    let t01 = test_ce_pool_int()
+    if t01 != 0 { fails = fails + 1 }
+
+    let t02 = test_ce_pool_float()
+    if t02 != 0 { fails = fails + 1 }
+
+    let t03 = test_ce_pool_bool()
+    if t03 != 0 { fails = fails + 1 }
+
+    let t04 = test_ce_env_bind()
+    if t04 != 0 { fails = fails + 1 }
+
+    let t05 = test_ce_int_add()
+    if t05 != 0 { fails = fails + 1 }
+
+    let t06 = test_ce_int_sub_mul()
+    if t06 != 0 { fails = fails + 1 }
+
+    let t07 = test_ce_int_div_mod()
+    if t07 != 0 { fails = fails + 1 }
+
+    let t08 = test_ce_div_by_zero()
+    if t08 != 0 { fails = fails + 1 }
+
+    let t09 = test_ce_bool_ops()
+    if t09 != 0 { fails = fails + 1 }
+
+    let t10 = test_ce_int_cmp()
+    if t10 != 0 { fails = fails + 1 }
+
+    let t11 = test_ce_float_arith()
+    if t11 != 0 { fails = fails + 1 }
+
+    let t12 = test_ce_unary_neg()
+    if t12 != 0 { fails = fails + 1 }
+
+    let t13 = test_ce_expr_eval()
+    if t13 != 0 { fails = fails + 1 }
+
+    let t14 = test_ce_var_eval()
+    if t14 != 0 { fails = fails + 1 }
+
+    let t15 = test_ce_if_eval()
+    if t15 != 0 { fails = fails + 1 }
+
+    let t16 = test_ce_if_false()
+    if t16 != 0 { fails = fails + 1 }
+
+    let t17 = test_ce_array_index()
+    if t17 != 0 { fails = fails + 1 }
+
+    let t18 = test_ce_oob_index()
+    if t18 != 0 { fails = fails + 1 }
+
+    let t19 = test_ce_is_const_lit()
+    if t19 != 0 { fails = fails + 1 }
+
+    let t20 = test_ce_is_const_binop()
+    if t20 != 0 { fails = fails + 1 }
+
+    let t21 = test_ce_try_fold()
+    if t21 != 0 { fails = fails + 1 }
+
+    let t22 = test_ce_values_equal()
+    if t22 != 0 { fails = fails + 1 }
+
+    let t23 = test_ce_mixed_arith()
+    if t23 != 0 { fails = fails + 1 }
+
+    let t24 = test_ce_make_array()
+    if t24 != 0 { fails = fails + 1 }
+
+    let t25 = test_ce_make_tuple()
+    if t25 != 0 { fails = fails + 1 }
+
+    let t26 = test_ce_env_shadow()
+    if t26 != 0 { fails = fails + 1 }
+
+    let t27 = test_ce_error_propagation()
+    if t27 != 0 { fails = fails + 1 }
+
+    let t28 = test_ce_nested_if()
+    if t28 != 0 { fails = fails + 1 }
+
+    let t29 = test_ce_le_ge()
+    if t29 != 0 { fails = fails + 1 }
+
+    let t30 = test_ce_unit_value()
+    if t30 != 0 { fails = fails + 1 }
+
+    let t31 = test_ce_pool_count()
+    if t31 != 0 { fails = fails + 1 }
+
+    print("Total failures: ")
+    print_int(fails)
+    print("\n")
+    fails
+}
