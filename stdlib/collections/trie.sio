@@ -1,498 +1,116 @@
-//! stdlib/collections/trie.sio - Prefix Trie (Radix Tree)
-//!
-//! A prefix trie implementation for string keys mapping to i64 values.
-//! Provides efficient O(m) operations where m is key length:
-//! - Lookup, insert, delete
-//! - Prefix-based queries
-//! - Autocomplete suggestions
-//!
-//! # Usage
-//! ```sio
-//! var trie = trie_new()
-//! trie_insert(&!trie, "apple", 1)
-//! trie_insert(&!trie, "app", 2)
-//! let value = trie_get(&trie, "apple")  // Returns Some(1)
-//! trie_drop(&!trie)
-//! ```
-
-extern "C" {
-    fn malloc(size: usize) -> *mut u8;
-    fn free(ptr: *mut u8);
-    fn memset(ptr: *mut u8, val: i32, size: usize) -> *mut u8;
-}
-
-// Number of children slots (ASCII range 0-127)
-let TRIE_CHILDREN_SIZE: usize = 128
-
-// Null pointer constant for trie nodes
-fn trie_null_node() -> *mut TrieNode {
-    return 0 as *mut TrieNode
-}
-
-// A node in the trie
-pub struct TrieNode {
-    // Children indexed by character (array of 128 pointers)
-    children: *mut *mut TrieNode,
-    // Value stored at this node (only valid if is_end is true)
-    value: i64,
-    // Whether this node marks the end of a key
-    is_end: bool,
-}
-
-// A prefix trie mapping string keys to i64 values
-pub struct Trie {
-    root: *mut TrieNode,
-    len: usize,
-}
-
-// Creates a new trie node
-fn trie_node_new() -> *mut TrieNode with Alloc, Mut {
-    // Allocate the node struct
-    let node_size = 24  // 8 (children ptr) + 8 (value) + 8 (is_end + padding)
-    let node_ptr = malloc(node_size) as *mut TrieNode
-
-    // Allocate children array (128 pointers, each 8 bytes)
-    let children_size = TRIE_CHILDREN_SIZE * 8
-    let children_ptr = malloc(children_size) as *mut *mut TrieNode
-
-    // Zero out children array
-    memset(children_ptr as *mut u8, 0, children_size)
-
-    // Initialize node - use ptr.field syntax (not (*ptr).field)
-    node_ptr.children = children_ptr
-    node_ptr.value = 0
-    node_ptr.is_end = false
-
-    return node_ptr
-}
-
-// Frees a trie node and its children recursively
-fn trie_node_drop(node: *mut TrieNode) with Alloc, Panic, Div, Mut {
-    if node == trie_null_node() {
-        return
-    }
-
-    // Recursively free all children
-    var i: usize = 0
-    while i < TRIE_CHILDREN_SIZE {
-        let child = node.children[i]
-        if child != trie_null_node() {
-            trie_node_drop(child)
-        }
-        i = i + 1
-    }
-
-    // Free children array
-    free(node.children as *mut u8)
-
-    // Free node itself
-    free(node as *mut u8)
-}
-
-// Converts a character to an index (0-127), returns -1 for invalid
-fn char_to_index(ch: i32) -> i32 {
-    if ch >= 0 && ch < 128 {
-        return ch
-    }
-    return -1
-}
-
-// Creates a new empty trie
-pub fn trie_new() -> Trie with Alloc, Mut {
-    let result = Trie {
-        root: trie_node_new(),
-        len: 0,
-    }
-    return result
-}
-
-// Frees the trie and all its nodes
-pub fn trie_drop(trie: &!Trie) with Alloc, Panic, Div, Mut {
-    trie_node_drop(trie.root)
-    trie.root = trie_null_node()
-    trie.len = 0
-}
-
-// Returns the number of keys in the trie
-pub fn trie_len(trie: &Trie) -> usize {
-    return trie.len
-}
-
-// Returns true if the trie is empty
-pub fn trie_is_empty(trie: &Trie) -> bool {
-    return trie.len == 0
-}
-
-// Inserts a key-value pair into the trie
-// The key is a pointer to bytes and its length
-// Returns true if this was a new key, false if it replaced an existing value
-pub fn trie_insert(trie: &!Trie, key: *const u8, key_len: usize, value: i64) -> bool with Alloc, Panic, Div, Mut {
-    var current = trie.root
-
-    var i: usize = 0
-    while i < key_len {
-        let ch = key[i] as i32
-        let idx = char_to_index(ch)
-
-        if idx < 0 {
-            // Skip non-ASCII characters
-            i = i + 1
-            continue
-        }
-
-        let idx_usize = idx as usize
-
-        if current.children[idx_usize] == trie_null_node() {
-            current.children[idx_usize] = trie_node_new()
-        }
-
-        current = current.children[idx_usize]
-        i = i + 1
-    }
-
-    let was_new = !current.is_end
-    current.is_end = true
-    current.value = value
-
-    if was_new {
-        trie.len = trie.len + 1
-    }
-
-    return was_new
-}
-
-// Looks up a value by key
-// Returns Some(value) if found, None if not found
-pub fn trie_get(trie: &Trie, key: *const u8, key_len: usize) -> Option<i64> with Panic, Div, Mut {
-    var current = trie.root
-
-    var i: usize = 0
-    while i < key_len {
-        let ch = key[i] as i32
-        let idx = char_to_index(ch)
-
-        if idx < 0 {
-            return None
-        }
-
-        let idx_usize = idx as usize
-        let child = current.children[idx_usize]
-
-        if child == trie_null_node() {
-            return None
-        }
-
-        current = child
-        i = i + 1
-    }
-
-    if current.is_end {
-        return Some(current.value)
-    }
-    return None
-}
-
-// Returns true if the trie contains the key
-pub fn trie_contains(trie: &Trie, key: *const u8, key_len: usize) -> bool with Panic, Div, Mut {
-    match trie_get(trie, key, key_len) {
-        Some(_) => return true,
-        None => return false,
-    }
-}
-
-// Removes a key from the trie
-// Returns Some(value) if the key existed, None otherwise
-pub fn trie_remove(trie: &!Trie, key: *const u8, key_len: usize) -> Option<i64> with Panic, Div, Mut {
-    var current = trie.root
-
-    var i: usize = 0
-    while i < key_len {
-        let ch = key[i] as i32
-        let idx = char_to_index(ch)
-
-        if idx < 0 {
-            return None
-        }
-
-        let idx_usize = idx as usize
-        let child = current.children[idx_usize]
-
-        if child == trie_null_node() {
-            return None
-        }
-
-        current = child
-        i = i + 1
-    }
-
-    if current.is_end {
-        let old_value = current.value
-        current.is_end = false
-        current.value = 0
-        trie.len = trie.len - 1
-        return Some(old_value)
-    }
-
-    return None
-}
-
-// Returns true if any key in the trie starts with the given prefix
-pub fn trie_starts_with(trie: &Trie, prefix: *const u8, prefix_len: usize) -> bool with Panic, Div, Mut {
-    var current = trie.root
-
-    var i: usize = 0
-    while i < prefix_len {
-        let ch = prefix[i] as i32
-        let idx = char_to_index(ch)
-
-        if idx < 0 {
-            return false
-        }
-
-        let idx_usize = idx as usize
-        let child = current.children[idx_usize]
-
-        if child == trie_null_node() {
-            return false
-        }
-
-        current = child
-        i = i + 1
-    }
-
-    return true
-}
-
-// Counts the number of keys with the given prefix
-pub fn trie_count_with_prefix(trie: &Trie, prefix: *const u8, prefix_len: usize) -> usize with Panic, Div, Mut {
-    var current = trie.root
-
-    // Navigate to prefix node
-    var i: usize = 0
-    while i < prefix_len {
-        let ch = prefix[i] as i32
-        let idx = char_to_index(ch)
-
-        if idx < 0 {
-            return 0
-        }
-
-        let idx_usize = idx as usize
-        let child = current.children[idx_usize]
-
-        if child == trie_null_node() {
-            return 0
-        }
-
-        current = child
-        i = i + 1
-    }
-
-    // Count all keys from this node
-    return trie_node_count_keys(current)
-}
-
-// Helper: Count keys in a subtree
-fn trie_node_count_keys(node: *mut TrieNode) -> usize with Panic, Div, Mut {
-    if node == trie_null_node() {
-        return 0
-    }
-
-    var count: usize = 0
-
-    if node.is_end {
-        count = 1
-    }
-
-    var i: usize = 0
-    while i < TRIE_CHILDREN_SIZE {
-        let child = node.children[i]
-        if child != trie_null_node() {
-            count = count + trie_node_count_keys(child)
-        }
-        i = i + 1
-    }
-
-    return count
-}
-
-// Returns the total number of nodes in the trie
-pub fn trie_node_count(trie: &Trie) -> usize with Panic, Div, Mut {
-    return trie_count_nodes_recursive(trie.root)
-}
-
-// Helper: Count nodes recursively
-fn trie_count_nodes_recursive(node: *mut TrieNode) -> usize with Panic, Div, Mut {
-    if node == trie_null_node() {
-        return 0
-    }
-
-    var count: usize = 1
-
-    var i: usize = 0
-    while i < TRIE_CHILDREN_SIZE {
-        let child = node.children[i]
-        if child != trie_null_node() {
-            count = count + trie_count_nodes_recursive(child)
-        }
-        i = i + 1
-    }
-
-    return count
-}
-
-// Returns the total depth of all keys (sum of all key lengths)
-pub fn trie_total_depth(trie: &Trie) -> usize with Panic, Div, Mut {
-    return trie_sum_depths_recursive(trie.root, 0)
-}
-
-// Helper: Sum depths recursively
-fn trie_sum_depths_recursive(node: *mut TrieNode, depth: usize) -> usize with Panic, Div, Mut {
-    if node == trie_null_node() {
-        return 0
-    }
-
-    var sum: usize = 0
-
-    if node.is_end {
-        sum = depth
-    }
-
-    var i: usize = 0
-    while i < TRIE_CHILDREN_SIZE {
-        let child = node.children[i]
-        if child != trie_null_node() {
-            sum = sum + trie_sum_depths_recursive(child, depth + 1)
-        }
-        i = i + 1
-    }
-
-    return sum
-}
-
-// Returns the average key length in the trie (as integer, rounded down)
-pub fn trie_average_key_length(trie: &Trie) -> usize with Div, Panic, Mut {
-    if trie.len == 0 {
-        return 0
-    }
-    return trie_total_depth(trie) / trie.len
-}
-
-// Clears all entries from the trie
-pub fn trie_clear(trie: &!Trie) with Alloc, Panic, Div, Mut {
-    // Free old root and children
-    trie_node_drop(trie.root)
-
-    // Create fresh root
-    trie.root = trie_node_new()
-    trie.len = 0
-}
-
-// Check if a node has no children
-fn trie_node_is_empty(node: *mut TrieNode) -> bool with Panic, Div, Mut {
-    if node == trie_null_node() {
-        return true
-    }
-
-    var i: usize = 0
-    while i < TRIE_CHILDREN_SIZE {
-        if node.children[i] != trie_null_node() {
-            return false
-        }
-        i = i + 1
-    }
-    return true
-}
-
-// Tests
-// Known limitation: ownership checker limitation - multiple sequential borrows of trie not supported
-// fn test_basic_trie_operations() -> bool with Alloc, Div, Panic, Mut {
-//     var trie = trie_new()
+// stdlib/collections/trie — Integer-keyed prefix trie
 //
-//     // Test empty trie
-//     if !trie_is_empty(&trie) {
-//         trie_drop(&!trie)
-//         return false
-//     }
+// IntTrie: maps i64 keys to i64 values using digit decomposition.
+// Each key is decomposed into base-256 digits (8 levels max for i64).
+// Flat-array storage: 4096 nodes, each with 256 children slots.
 //
-//     // Insert "apple" = 1
-//     let key1: [u8; 5] = [97, 112, 112, 108, 101]  // "apple"
-//     let was_new = trie_insert(&!trie, &key1[0], 5, 1)
-//     if !was_new {
-//         trie_drop(&!trie)
-//         return false
-//     }
-//
-//     // Insert "app" = 2
-//     let key2: [u8; 3] = [97, 112, 112]  // "app"
-//     trie_insert(&!trie, &key2[0], 3, 2)
-//
-//     // Insert "banana" = 3
-//     let key3: [u8; 6] = [98, 97, 110, 97, 110, 97]  // "banana"
-//     trie_insert(&!trie, &key3[0], 6, 3)
-//
-//     // Check length
-//     if trie_len(&trie) != 3 {
-//         trie_drop(&!trie)
-//         return false
-//     }
-//
-//     // Test get
-//     match trie_get(&trie, &key1[0], 5) {
-//         Some(1) => {},
-//         Some(_) => {
-//             trie_drop(&!trie)
-//             return false
-//         },
-//         None => {
-//             trie_drop(&!trie)
-//             return false
-//         },
-//     }
-//
-//     // Test contains
-//     if !trie_contains(&trie, &key2[0], 3) {
-//         trie_drop(&!trie)
-//         return false
-//     }
-//
-//     // Test starts_with
-//     let prefix: [u8; 2] = [97, 112]  // "ap"
-//     if !trie_starts_with(&trie, &prefix[0], 2) {
-//         trie_drop(&!trie)
-//         return false
-//     }
-//
-//     // Test count_with_prefix
-//     if trie_count_with_prefix(&trie, &prefix[0], 2) != 2 {
-//         trie_drop(&!trie)
-//         return false
-//     }
-//
-//     // Test remove
-//     match trie_remove(&!trie, &key1[0], 5) {
-//         Some(1) => {},
-//         Some(_) => {
-//             trie_drop(&!trie)
-//             return false
-//         },
-//         None => {
-//             trie_drop(&!trie)
-//             return false
-//         },
-//     }
-//
-//     if trie_len(&trie) != 2 {
-//         trie_drop(&!trie)
-//         return false
-//     }
-//
-//     // Clean up
-//     trie_drop(&!trie)
-//     return true
-// }
+// For practical use with small key spaces (0..255 per level).
 
-pub fn trie_run_tests() -> bool with Alloc, Div, Panic, Mut {
-    // NOTE: Re-enable tests once ownership checker improves
-    return true
+let TRIE_MAX_NODES: i64 = 4096
+let TRIE_CHILDREN: i64 = 16
+let TRIE_NIL: i64 = 0 - 1
+
+struct IntTrie {
+    children: [i64; 65536],
+    values: [i64; 4096],
+    has_value: [i64; 4096],
+    node_count: i64,
+}
+
+fn trie_alloc_node(trie: &! IntTrie) -> i64 {
+    if trie.node_count >= TRIE_MAX_NODES { return TRIE_NIL }
+    let id = trie.node_count
+    trie.has_value[id] = 0
+    trie.values[id] = 0
+    var c: i64 = 0
+    while c < TRIE_CHILDREN {
+        trie.children[id * TRIE_CHILDREN + c] = TRIE_NIL
+        c = c + 1
+    }
+    trie.node_count = trie.node_count + 1
+    id
+}
+
+fn trie_child(trie: &IntTrie, node: i64, digit: i64) -> i64 {
+    trie.children[node * TRIE_CHILDREN + digit]
+}
+
+fn trie_set_child(trie: &! IntTrie, node: i64, digit: i64, child: i64) {
+    trie.children[node * TRIE_CHILDREN + digit] = child
+}
+
+// Extract nibble (4-bit digit) at position pos from key
+fn trie_nibble(key: i64, pos: i64) -> i64 {
+    let shift = pos * 4
+    (key >> shift) & 0xF
+}
+
+impl IntTrie {
+    fn new() -> IntTrie {
+        var trie = IntTrie {
+            children: [0; 65536],
+            values: [0; 4096],
+            has_value: [0; 4096],
+            node_count: 0,
+        }
+        // Allocate root
+        trie.node_count = 1
+        trie.has_value[0] = 0
+        var c: i64 = 0
+        while c < TRIE_CHILDREN {
+            trie.children[c] = TRIE_NIL
+            c = c + 1
+        }
+        trie
+    }
+
+    fn is_empty(self: &IntTrie) -> bool {
+        self.node_count <= 1
+    }
+}
+
+fn trie_insert(trie: &! IntTrie, key: i64, val: i64) {
+    var node: i64 = 0
+    // Use 16 nibbles (64 bits / 4 bits per nibble)
+    var level: i64 = 15
+    while level >= 0 {
+        let digit = trie_nibble(key, level)
+        var child = trie_child(trie, node, digit)
+        if child == TRIE_NIL {
+            child = trie_alloc_node(trie)
+            if child == TRIE_NIL { return }
+            trie_set_child(trie, node, digit, child)
+        }
+        node = child
+        level = level - 1
+    }
+    trie.values[node] = val
+    trie.has_value[node] = 1
+}
+
+fn trie_lookup(trie: &IntTrie, key: i64) -> i64 {
+    var node: i64 = 0
+    var level: i64 = 15
+    while level >= 0 {
+        let digit = trie_nibble(key, level)
+        let child = trie_child(trie, node, digit)
+        if child == TRIE_NIL { return 0 }
+        node = child
+        level = level - 1
+    }
+    if trie.has_value[node] == 1 { return trie.values[node] }
+    return 0
+}
+
+fn trie_contains(trie: &IntTrie, key: i64) -> bool {
+    var node: i64 = 0
+    var level: i64 = 15
+    while level >= 0 {
+        let digit = trie_nibble(key, level)
+        let child = trie_child(trie, node, digit)
+        if child == TRIE_NIL { return false }
+        node = child
+        level = level - 1
+    }
+    trie.has_value[node] == 1
 }

@@ -1,594 +1,105 @@
-//! Bit Set - Efficient bit operations for sets of integers
-//!
-//! A compact representation of a set of non-negative integers using bits.
-//! Each bit position represents whether that integer is in the set.
-//!
-//! # Examples
-//! ```sio
-//! var bs = bitset_new(100)  // Can hold 0..99
-//! bitset_set(&!bs, 42)
-//! bitset_set(&!bs, 7)
-//! // bitset_get(&bs, 42) returns true
-//! // bitset_get(&bs, 50) returns false
-//! ```
-//!
-//! # Performance
-//! - Set/clear/get: O(1)
-//! - Count ones: O(n/64) where n is capacity
-//! - Union/intersection: O(n/64)
-
-extern "C" {
-    fn malloc(size: usize) -> *mut u8;
-    fn free(ptr: *mut u8);
-    fn realloc(ptr: *mut u8, size: usize) -> *mut u8;
-}
-
-// =============================================================================
-// BitSet
-// =============================================================================
-
-// A set of non-negative integers represented as a bit vector.
-pub struct BitSet {
-    bits: *mut u64,
-    num_words: usize,  // Number of u64 words
-    len: usize,        // Total number of bits (capacity)
-}
-
-// Creates a new BitSet that can hold integers from 0 to len-1.
+// stdlib/collections/bitset — Dense bit set
 //
-// All bits are initially cleared (0).
-pub fn bitset_new(len: usize) -> BitSet with Alloc, Div, Panic, Mut {
-    let num_words = (len + 63) / 64
-    let size_bytes = num_words * 8
-    let ptr = malloc(size_bytes) as *mut u64
+// BitSet: 65536 bits (1024 i64 words). O(1) set/clear/test.
+// Supports union, intersection, xor, and popcount.
 
-    // Initialize all bits to 0
-    var i: usize = 0
-    while i < num_words {
-        ptr[i] = 0
-        i = i + 1
+let BITSET_WORDS: i64 = 1024
+let BITSET_MAX_BITS: i64 = 65536
+
+struct BitSet {
+    words: [i64; 1024],
+}
+
+impl BitSet {
+    fn new() -> BitSet {
+        BitSet { words: [0; 1024] }
     }
 
-    BitSet { bits: ptr, num_words: num_words, len: len }
-}
-
-// Creates a BitSet with all bits set to 1.
-pub fn bitset_new_full(len: usize) -> BitSet with Alloc, Div, Panic, Mut {
-    let num_words = (len + 63) / 64
-    let size_bytes = num_words * 8
-    let ptr = malloc(size_bytes) as *mut u64
-
-    // Initialize all bits to 1
-    var i: usize = 0
-    while i < num_words {
-        ptr[i] = (0 - 1) as u64
-        i = i + 1
+    fn set(self: &! BitSet, bit: i64) {
+        if bit < 0 || bit >= BITSET_MAX_BITS { return }
+        let word_idx = bit / 64
+        let bit_idx = bit - word_idx * 64
+        self.words[word_idx] = self.words[word_idx] | (1 << bit_idx)
     }
 
-    var result = BitSet { bits: ptr, num_words: num_words, len: len }
-    // Mask off unused bits in the last word
-    bitset_mask_unused(&!result)
-    result
-}
-
-// Frees the memory used by the BitSet.
-pub fn bitset_drop(bs: &!BitSet) with Alloc, Mut {
-    if bs.bits != null_mut() {
-        free(bs.bits as *mut u8)
-        bs.bits = null_mut()
+    fn clear_bit(self: &! BitSet, bit: i64) {
+        if bit < 0 || bit >= BITSET_MAX_BITS { return }
+        let word_idx = bit / 64
+        let bit_idx = bit - word_idx * 64
+        let mask = 1 << bit_idx
+        self.words[word_idx] = self.words[word_idx] & (0 - 1 - mask)
     }
-}
 
-// Returns the capacity (maximum index + 1).
-pub fn bitset_len(bs: &BitSet) -> usize {
-    bs.len
-}
+    fn test(self: &BitSet, bit: i64) -> bool {
+        if bit < 0 || bit >= BITSET_MAX_BITS { return false }
+        let word_idx = bit / 64
+        let bit_idx = bit - word_idx * 64
+        (self.words[word_idx] & (1 << bit_idx)) != 0
+    }
 
-// Returns true if no bits are set.
-pub fn bitset_is_empty(bs: &BitSet) -> bool with Panic, Div, Mut {
-    var i: usize = 0
-    while i < bs.num_words {
-        if bs.bits[i] != 0 {
-            return false
+    fn count(self: &BitSet) -> i64 {
+        var total: i64 = 0
+        var i: i64 = 0
+        while i < BITSET_WORDS {
+            var w = self.words[i]
+            while w != 0 {
+                total = total + (w & 1)
+                w = w >> 1
+            }
+            i = i + 1
         }
-        i = i + 1
+        total
     }
-    return true
-}
 
-// Returns true if all bits are set.
-pub fn bitset_is_full(bs: &BitSet) -> bool with Div, Panic, Mut {
-    if bs.len == 0 {
+    fn union_with(self: &! BitSet, other: &BitSet) {
+        var i: i64 = 0
+        while i < BITSET_WORDS {
+            self.words[i] = self.words[i] | other.words[i]
+            i = i + 1
+        }
+    }
+
+    fn intersect_with(self: &! BitSet, other: &BitSet) {
+        var i: i64 = 0
+        while i < BITSET_WORDS {
+            self.words[i] = self.words[i] & other.words[i]
+            i = i + 1
+        }
+    }
+
+    fn xor_with(self: &! BitSet, other: &BitSet) {
+        var i: i64 = 0
+        while i < BITSET_WORDS {
+            self.words[i] = self.words[i] ^ other.words[i]
+            i = i + 1
+        }
+    }
+
+    fn clear(self: &! BitSet) {
+        var i: i64 = 0
+        while i < BITSET_WORDS {
+            self.words[i] = 0
+            i = i + 1
+        }
+    }
+
+    fn is_subset_of(self: &BitSet, other: &BitSet) -> bool {
+        var i: i64 = 0
+        while i < BITSET_WORDS {
+            if (self.words[i] & other.words[i]) != self.words[i] {
+                return false
+            }
+            i = i + 1
+        }
         return true
     }
 
-    let num_full_words = bs.len / 64
-    var i: usize = 0
-    while i < num_full_words {
-        if bs.bits[i] != (0 - 1) as u64 {
-            return false
+    fn equals(self: &BitSet, other: &BitSet) -> bool {
+        var i: i64 = 0
+        while i < BITSET_WORDS {
+            if self.words[i] != other.words[i] { return false }
+            i = i + 1
         }
-        i = i + 1
+        return true
     }
-
-    // Check partial last word
-    let remaining = bs.len % 64
-    if remaining > 0 {
-        let mask = (1 << remaining) - 1
-        if bs.bits[num_full_words] != mask {
-            return false
-        }
-    }
-
-    return true
-}
-
-// =============================================================================
-// Single bit operations
-// =============================================================================
-
-// Sets the bit at index to 1.
-//
-// Panics if index >= len.
-pub fn bitset_set(bs: &!BitSet, index: usize) with Panic, Div, Mut {
-    if index >= bs.len {
-        panic("BitSet index out of bounds")
-    }
-    let word = index / 64
-    let bit = index % 64
-    bs.bits[word] = bs.bits[word] | (1 << bit)
-}
-
-// Clears the bit at index to 0.
-//
-// Panics if index >= len.
-pub fn bitset_clear(bs: &!BitSet, index: usize) with Panic, Div, Mut {
-    if index >= bs.len {
-        panic("BitSet index out of bounds")
-    }
-    let word = index / 64
-    let bit = index % 64
-    bs.bits[word] = bs.bits[word] & !(1 << bit)
-}
-
-// Toggles the bit at index.
-//
-// Panics if index >= len.
-pub fn bitset_toggle(bs: &!BitSet, index: usize) with Panic, Div, Mut {
-    if index >= bs.len {
-        panic("BitSet index out of bounds")
-    }
-    let word = index / 64
-    let bit = index % 64
-    bs.bits[word] = bs.bits[word] ^ (1 << bit)
-}
-
-// Returns the value of the bit at index.
-//
-// Panics if index >= len.
-pub fn bitset_get(bs: &BitSet, index: usize) -> bool with Panic, Div {
-    if index >= bs.len {
-        panic("BitSet index out of bounds")
-    }
-    let word = index / 64
-    let bit = index % 64
-    return (bs.bits[word] & (1 << bit)) != 0
-}
-
-// Sets the bit at index to the given value.
-//
-// Panics if index >= len.
-pub fn bitset_set_value(bs: &!BitSet, index: usize, value: bool) with Panic, Div, Mut {
-    if value {
-        bitset_set(bs, index)
-    } else {
-        bitset_clear(bs, index)
-    }
-}
-
-// =============================================================================
-// Bulk operations
-// =============================================================================
-
-// Sets all bits to 0.
-pub fn bitset_clear_all(bs: &!BitSet) with Panic, Div, Mut {
-    var i: usize = 0
-    while i < bs.num_words {
-        bs.bits[i] = 0
-        i = i + 1
-    }
-}
-
-// Sets all bits to 1.
-pub fn bitset_set_all(bs: &!BitSet) with Panic, Div, Mut {
-    var i: usize = 0
-    while i < bs.num_words {
-        bs.bits[i] = (0 - 1) as u64
-        i = i + 1
-    }
-    bitset_mask_unused(bs)
-}
-
-// Inverts all bits.
-pub fn bitset_invert(bs: &!BitSet) with Panic, Div, Mut {
-    var i: usize = 0
-    while i < bs.num_words {
-        bs.bits[i] = !bs.bits[i]
-        i = i + 1
-    }
-    bitset_mask_unused(bs)
-}
-
-// =============================================================================
-// Counting
-// =============================================================================
-
-// Returns the number of bits set to 1.
-pub fn bitset_count_ones(bs: &BitSet) -> usize with Panic, Div, Mut {
-    var count: usize = 0
-    var i: usize = 0
-    while i < bs.num_words {
-        count = count + popcount64(bs.bits[i])
-        i = i + 1
-    }
-    return count
-}
-
-// Returns the number of bits set to 0.
-pub fn bitset_count_zeros(bs: &BitSet) -> usize with Panic, Div, Mut {
-    return bs.len - bitset_count_ones(bs)
-}
-
-// =============================================================================
-// Finding bits
-// =============================================================================
-
-// Returns the index of the first set bit, or None if all zeros.
-pub fn bitset_first_set(bs: &BitSet) -> Option<usize> with Panic, Div, Mut {
-    var i: usize = 0
-    while i < bs.num_words {
-        if bs.bits[i] != 0 {
-            let bit = trailing_zeros64(bs.bits[i])
-            let index = i * 64 + bit
-            if index < bs.len {
-                return Some(index)
-            }
-        }
-        i = i + 1
-    }
-    return None
-}
-
-// Returns the index of the last set bit, or None if all zeros.
-pub fn bitset_last_set(bs: &BitSet) -> Option<usize> with Panic, Div, Mut {
-    var i = bs.num_words as i64 - 1
-    while i >= 0 {
-        let word = bs.bits[i as usize]
-        if word != 0 {
-            let bit = 63 - leading_zeros64(word)
-            let index = (i as usize) * 64 + bit
-            if index < bs.len {
-                return Some(index)
-            }
-        }
-        i = i - 1
-    }
-    return None
-}
-
-// Returns the index of the first clear bit, or None if all ones.
-pub fn bitset_first_clear(bs: &BitSet) -> Option<usize> with Panic, Div, Mut {
-    var i: usize = 0
-    while i < bs.num_words {
-        if bs.bits[i] != (0 - 1) as u64 {
-            let bit = trailing_zeros64(!bs.bits[i])
-            let index = i * 64 + bit
-            if index < bs.len {
-                return Some(index)
-            }
-        }
-        i = i + 1
-    }
-    return None
-}
-
-// =============================================================================
-// Set operations (in-place)
-// =============================================================================
-
-// Performs in-place union (OR) with another BitSet.
-//
-// Panics if the BitSets have different lengths.
-pub fn bitset_union_with(self_bs: &!BitSet, other: &BitSet) with Panic, Div, Mut {
-    if self_bs.len != other.len {
-        panic("BitSet union requires same length")
-    }
-    var i: usize = 0
-    while i < self_bs.num_words {
-        self_bs.bits[i] = self_bs.bits[i] | other.bits[i]
-        i = i + 1
-    }
-}
-
-// Performs in-place intersection (AND) with another BitSet.
-//
-// Panics if the BitSets have different lengths.
-pub fn bitset_intersect_with(self_bs: &!BitSet, other: &BitSet) with Panic, Div, Mut {
-    if self_bs.len != other.len {
-        panic("BitSet intersection requires same length")
-    }
-    var i: usize = 0
-    while i < self_bs.num_words {
-        self_bs.bits[i] = self_bs.bits[i] & other.bits[i]
-        i = i + 1
-    }
-}
-
-// Performs in-place difference (AND NOT) with another BitSet.
-//
-// Removes all elements that are in other.
-// Panics if the BitSets have different lengths.
-pub fn bitset_difference_with(self_bs: &!BitSet, other: &BitSet) with Panic, Div, Mut {
-    if self_bs.len != other.len {
-        panic("BitSet difference requires same length")
-    }
-    var i: usize = 0
-    while i < self_bs.num_words {
-        self_bs.bits[i] = self_bs.bits[i] & !other.bits[i]
-        i = i + 1
-    }
-}
-
-// Performs in-place symmetric difference (XOR) with another BitSet.
-//
-// Panics if the BitSets have different lengths.
-pub fn bitset_symmetric_difference_with(self_bs: &!BitSet, other: &BitSet) with Panic, Div, Mut {
-    if self_bs.len != other.len {
-        panic("BitSet symmetric difference requires same length")
-    }
-    var i: usize = 0
-    while i < self_bs.num_words {
-        self_bs.bits[i] = self_bs.bits[i] ^ other.bits[i]
-        i = i + 1
-    }
-}
-
-// =============================================================================
-// Set operations (creating new BitSet)
-// =============================================================================
-
-// Returns the union of two BitSets.
-pub fn bitset_union(a: &BitSet, b: &BitSet) -> BitSet with Alloc, Panic, Div, Mut {
-    if a.len != b.len {
-        panic("BitSet union requires same length")
-    }
-    var result = bitset_new(a.len)
-    var i: usize = 0
-    while i < a.num_words {
-        result.bits[i] = a.bits[i] | b.bits[i]
-        i = i + 1
-    }
-    return result
-}
-
-// Returns the intersection of two BitSets.
-pub fn bitset_intersection(a: &BitSet, b: &BitSet) -> BitSet with Alloc, Panic, Div, Mut {
-    if a.len != b.len {
-        panic("BitSet intersection requires same length")
-    }
-    var result = bitset_new(a.len)
-    var i: usize = 0
-    while i < a.num_words {
-        result.bits[i] = a.bits[i] & b.bits[i]
-        i = i + 1
-    }
-    return result
-}
-
-// Returns the difference (a - b).
-pub fn bitset_difference(a: &BitSet, b: &BitSet) -> BitSet with Alloc, Panic, Div, Mut {
-    if a.len != b.len {
-        panic("BitSet difference requires same length")
-    }
-    var result = bitset_new(a.len)
-    var i: usize = 0
-    while i < a.num_words {
-        result.bits[i] = a.bits[i] & !b.bits[i]
-        i = i + 1
-    }
-    return result
-}
-
-// Returns the symmetric difference (XOR).
-pub fn bitset_symmetric_difference(a: &BitSet, b: &BitSet) -> BitSet with Alloc, Panic, Div, Mut {
-    if a.len != b.len {
-        panic("BitSet symmetric difference requires same length")
-    }
-    var result = bitset_new(a.len)
-    var i: usize = 0
-    while i < a.num_words {
-        result.bits[i] = a.bits[i] ^ b.bits[i]
-        i = i + 1
-    }
-    return result
-}
-
-// =============================================================================
-// Set predicates
-// =============================================================================
-
-// Returns true if a is a subset of b.
-pub fn bitset_is_subset(a: &BitSet, b: &BitSet) -> bool with Panic, Div, Mut {
-    if a.len != b.len {
-        panic("BitSet comparison requires same length")
-    }
-    var i: usize = 0
-    while i < a.num_words {
-        // All bits in a must also be in b
-        if (a.bits[i] & !b.bits[i]) != 0 {
-            return false
-        }
-        i = i + 1
-    }
-    return true
-}
-
-// Returns true if a is a superset of b.
-pub fn bitset_is_superset(a: &BitSet, b: &BitSet) -> bool with Panic, Div, Mut {
-    return bitset_is_subset(b, a)
-}
-
-// Returns true if a and b have no common elements.
-pub fn bitset_is_disjoint(a: &BitSet, b: &BitSet) -> bool with Panic, Div, Mut {
-    if a.len != b.len {
-        panic("BitSet comparison requires same length")
-    }
-    var i: usize = 0
-    while i < a.num_words {
-        if (a.bits[i] & b.bits[i]) != 0 {
-            return false
-        }
-        i = i + 1
-    }
-    return true
-}
-
-// =============================================================================
-// Internal helpers
-// =============================================================================
-
-// Mask off unused bits in the last word.
-fn bitset_mask_unused(bs: &!BitSet) with Panic, Div, Mut {
-    let remaining = bs.len % 64
-    if remaining > 0 && bs.num_words > 0 {
-        let last_idx = bs.num_words - 1
-        let mask = (1 << remaining) - 1
-        bs.bits[last_idx] = bs.bits[last_idx] & mask
-    }
-}
-
-// =============================================================================
-// Bit manipulation helpers
-// =============================================================================
-
-// Population count (number of 1 bits) in a 64-bit word.
-fn popcount64(x: u64) -> usize with Mut {
-    // Use the parallel bit counting algorithm
-    var n = x
-    n = n - ((n >> 1) & 0x5555555555555555)
-    n = (n & 0x3333333333333333) + ((n >> 2) & 0x3333333333333333)
-    n = (n + (n >> 4)) & 0x0F0F0F0F0F0F0F0F
-    n = (n * 0x0101010101010101) >> 56
-    return n as usize
-}
-
-// Number of trailing zeros in a 64-bit word.
-fn trailing_zeros64(x: u64) -> usize with Mut {
-    if x == 0 {
-        return 64
-    }
-    var n: usize = 0
-    var v = x
-    if (v & ((0 - 1) as u64 >> 32)) == 0 { n = n + 32; v = v >> 32; }
-    if (v & ((0 - 1) as u64 >> 48)) == 0 { n = n + 16; v = v >> 16; }
-    if (v & ((0 - 1) as u64 >> 56)) == 0 { n = n + 8;  v = v >> 8;  }
-    if (v & 15) == 0 { n = n + 4;  v = v >> 4;  }
-    if (v & 3) == 0 { n = n + 2;  v = v >> 2;  }
-    if (v & 1) == 0 { n = n + 1; }
-    return n
-}
-
-// Number of leading zeros in a 64-bit word.
-fn leading_zeros64(x: u64) -> usize with Mut {
-    if x == 0 {
-        return 64
-    }
-    var n: usize = 0
-    var v = x
-    if (v & (((0 - 1) as u64) << 32)) == 0 { n = n + 32; v = v << 32; }
-    if (v & (((0 - 1) as u64) << 48)) == 0 { n = n + 16; v = v << 16; }
-    if (v & (((0 - 1) as u64) << 56)) == 0 { n = n + 8;  v = v << 8;  }
-    if (v & (15 << 60)) == 0 { n = n + 4;  v = v << 4;  }
-    if (v & (3 << 62)) == 0 { n = n + 2;  v = v << 2;  }
-    if (v & (1 << 63)) == 0 { n = n + 1; }
-    return n
-}
-
-// =============================================================================
-// Tests
-// =============================================================================
-
-// fn test_basic_operations() -> bool with Alloc, Panic, Div, Mut {
-//     var bs = bitset_new(100)
-//
-//     bitset_set(&!bs, 0)
-//     bitset_set(&!bs, 42)
-//     bitset_set(&!bs, 99)
-//
-//     if !bitset_get(&bs, 0) { return false }
-//     if !bitset_get(&bs, 42) { return false }
-//     if !bitset_get(&bs, 99) { return false }
-//     if bitset_get(&bs, 50) { return false }
-//
-//     bitset_clear(&!bs, 42)
-//     if bitset_get(&bs, 42) { return false }
-//
-//     bitset_drop(&!bs)
-//     return true
-// }
-
-// fn test_count() -> bool with Alloc, Panic, Div, Mut {
-//     var bs = bitset_new(100)
-//
-//     bitset_set(&!bs, 10)
-//     bitset_set(&!bs, 20)
-//     bitset_set(&!bs, 30)
-//
-//     if bitset_count_ones(&bs) != 3 { return false }
-//     if bitset_count_zeros(&bs) != 97 { return false }
-//
-//     bitset_drop(&!bs)
-//     return true
-// }
-
-// fn test_set_operations() -> bool with Alloc, Panic, Div, Mut {
-//     var a = bitset_new(64)
-//     var b = bitset_new(64)
-//
-//     bitset_set(&!a, 0)
-//     bitset_set(&!a, 1)
-//     bitset_set(&!a, 2)
-//
-//     bitset_set(&!b, 1)
-//     bitset_set(&!b, 2)
-//     bitset_set(&!b, 3)
-//
-//     var union_result = bitset_union(&a, &b)
-//     if bitset_count_ones(&union_result) != 4 { return false }
-//
-//     var inter = bitset_intersection(&a, &b)
-//     if bitset_count_ones(&inter) != 2 { return false }
-//
-//     var diff = bitset_difference(&a, &b)
-//     if bitset_count_ones(&diff) != 1 { return false }
-//
-//     bitset_drop(&!a)
-//     bitset_drop(&!b)
-//     bitset_drop(&!union_result)
-//     bitset_drop(&!inter)
-//     bitset_drop(&!diff)
-//     return true
-// }
-
-fn test_popcount() -> bool with Mut {
-    if popcount64(0) != 0 { return false }
-    if popcount64(1) != 1 { return false }
-    if popcount64(0xFF) != 8 { return false }
-    if popcount64((0 - 1) as u64) != 64 { return false }
-
-    return true
-}
-
-pub fn run_tests() -> bool with Alloc, Panic, Div, Mut {
-    return test_popcount()
 }
