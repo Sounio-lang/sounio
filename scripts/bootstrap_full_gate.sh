@@ -21,6 +21,23 @@ STATUS="${PIPESTATUS[0]}"
 set -e
 
 if [ "$STATUS" -eq 0 ]; then
+  cat >"$SUMMARY_FILE" <<EOF
+{
+  "schema": "sounio.bootstrap.full-error-summary.v1",
+  "generated_at_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "profile": "full",
+  "exit_code": 0,
+  "counts": {
+    "duplicate_definitions": 0,
+    "undefined_variables": 0,
+    "type_mismatches": 0,
+    "resolution_blocks": 0,
+    "stack_overflows": 0
+  },
+  "log_path": "$LOG_FILE",
+  "output_file": "build/bootstrap_stage1.sio"
+}
+EOF
   echo "BOOTSTRAP_FULL_GATE_PASS"
   exit 0
 fi
