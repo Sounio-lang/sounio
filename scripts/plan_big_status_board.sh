@@ -94,6 +94,7 @@ claude_contract_file="artifacts/omega/claude_operational_contract_status.v1.json
 lsp_status_file="artifacts/omega/lsp_smoke_status.v1.json"
 ui_type_file="artifacts/omega/ui_type_deignore_audit.v1.json"
 ui_type_bucket_file="artifacts/omega/ui_type_deignore_backlog_buckets.v1.json"
+ui_type_batch_plan_file="artifacts/omega/ui_type_deignore_batch_plan.v1.json"
 
 parallel_status="$(extract_json_field_or "$parallel_status_file" '.status' 'unknown')"
 track_a_status="$(extract_json_field_or "$parallel_status_file" '.track_a_status' 'unknown')"
@@ -108,6 +109,7 @@ ui_ignored="$(extract_json_field_or "$ui_type_file" '.totals.ignored_files' '0')
 ui_ready="$(extract_json_field_or "$ui_type_file" '.totals.ready_count' '0')"
 ui_needs_fix="$(extract_json_field_or "$ui_type_file" '.totals.needs_fix_count' '0')"
 ui_still_blocked="$(extract_json_field_or "$ui_type_file" '.totals.still_blocked_count' '0')"
+ui_reclassify_candidates="$(extract_json_field_or "$ui_type_batch_plan_file" '.totals.reclassify_candidates' '0')"
 
 git_dirty_count="$(git status --porcelain | wc -l | tr -d ' ')"
 
@@ -144,10 +146,12 @@ jq -cn \
   --arg lsp_smoke_status "$lsp_smoke_status" \
   --arg ui_type_file "$ui_type_file" \
   --arg ui_type_bucket_file "$ui_type_bucket_file" \
+  --arg ui_type_batch_plan_file "$ui_type_batch_plan_file" \
   --argjson ui_ignored "$ui_ignored" \
   --argjson ui_ready "$ui_ready" \
   --argjson ui_needs_fix "$ui_needs_fix" \
   --argjson ui_still_blocked "$ui_still_blocked" \
+  --argjson ui_reclassify_candidates "$ui_reclassify_candidates" \
   --argjson run_gates "$RUN_GATES" \
   --argjson gates "$gates_json" \
   --argjson git_dirty_count "$git_dirty_count" \
@@ -168,7 +172,8 @@ jq -cn \
         ignored_files: $ui_ignored,
         ready_count: $ui_ready,
         needs_fix_count: $ui_needs_fix,
-        still_blocked_count: $ui_still_blocked
+        still_blocked_count: $ui_still_blocked,
+        reclassify_candidates: $ui_reclassify_candidates
       }
     },
     sources: {
@@ -177,7 +182,8 @@ jq -cn \
       claude_operational_contract_file: $claude_contract_file,
       lsp_smoke_status_file: $lsp_status_file,
       ui_type_audit_file: $ui_type_file,
-      ui_type_bucket_file: $ui_type_bucket_file
+      ui_type_bucket_file: $ui_type_bucket_file,
+      ui_type_batch_plan_file: $ui_type_batch_plan_file
     },
     gates: $gates,
     workspace: {
@@ -205,6 +211,7 @@ jq -cn \
   echo "- ready_count: $(jq -r '.summary.ui_type.ready_count' "$OUT_JSON")"
   echo "- needs_fix_count: $(jq -r '.summary.ui_type.needs_fix_count' "$OUT_JSON")"
   echo "- still_blocked_count: $(jq -r '.summary.ui_type.still_blocked_count' "$OUT_JSON")"
+  echo "- reclassify_candidates: $(jq -r '.summary.ui_type.reclassify_candidates' "$OUT_JSON")"
   echo
   echo "## Gate Runs"
   if jq -e '.gates | length > 0' "$OUT_JSON" >/dev/null; then
