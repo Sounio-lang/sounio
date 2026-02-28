@@ -1,246 +1,53 @@
-//! Message passing with channels
-//!
-//! Channels provide a way to send i64 values between threads.
-//! This is a simplified single-producer single-consumer channel implementation
-//! without synchronization primitives (not thread-safe but demonstrates the API).
-//!
-//! # Usage
-//! ```sio
-//! var chan = channel_new(16)
-//! channel_send(&!chan, 42)
-//! let value = channel_recv(&!chan)
-//! channel_drop(&!chan)
-//! ```
+// stdlib/sync/channel — Single-producer single-consumer i64 channel
+//
+// IntChannel: bounded ring buffer for sending i64 between contexts.
+// Capacity: 1024 elements.
 
-extern "C" {
-    fn malloc(size: usize) -> *mut u8;
-    fn free(ptr: *mut u8);
+let CHANNEL_CAP: i64 = 1024
+
+struct IntChannel {
+    buf: [i64; 1024],
+    head: i64,
+    tail: i64,
+    count: i64,
+    closed: i64,
 }
 
-// Default channel buffer capacity
-const DEFAULT_CAPACITY: usize = 16
-
-// =============================================================================
-// Channel Error Types
-// =============================================================================
-
-// Error returned when sending fails because the channel is closed.
-pub enum SendError {
-    // The channel has been disconnected/closed.
-    Disconnected,
-}
-
-// Error returned when trying to receive fails.
-pub enum TryRecvError {
-    // The channel is empty but not disconnected.
-    Empty,
-    // The channel has been disconnected.
-    Disconnected,
-}
-
-// Error returned when trying to send fails.
-pub enum TrySendError {
-    // The channel buffer is full.
-    Full,
-    // The channel has been disconnected.
-    Disconnected,
-}
-
-// =============================================================================
-// Channel (for i64 values)
-// =============================================================================
-
-// A bounded channel for sending i64 values.
-// Uses a ring buffer implementation.
-// Note: This simplified version is not thread-safe. For concurrent use,
-// wrap operations with external synchronization.
-pub struct Channel {
-    // Ring buffer data
-    buffer: *mut i64,
-    // Buffer capacity
-    capacity: usize,
-    // Head index (read position)
-    head: usize,
-    // Tail index (write position)
-    tail: usize,
-    // Number of items in buffer
-    len: usize,
-    // Whether the channel is closed
-    closed: bool,
-}
-
-// Creates a new channel with the specified capacity.
-pub fn channel_new(capacity: usize) -> Channel with Alloc {
-    let cap = if capacity < 1 { 1 } else { capacity }
-    let size_bytes = cap * 8
-    let ptr = malloc(size_bytes) as *mut i64
-
-    let chan = Channel {
-        buffer: ptr,
-        capacity: cap,
-        head: 0,
-        tail: 0,
-        len: 0,
-        closed: false,
+impl IntChannel {
+    fn new() -> IntChannel {
+        IntChannel { buf: [0; 1024], head: 0, tail: 0, count: 0, closed: 0 }
     }
 
-    return chan
-}
-
-// Creates a new channel with default capacity (16).
-pub fn channel_default() -> Channel with Alloc {
-    return channel_new(DEFAULT_CAPACITY)
-}
-
-// Returns the capacity of the channel.
-pub fn channel_capacity(c: &Channel) -> usize {
-    return c.capacity
-}
-
-// Returns the number of items currently in the channel.
-pub fn channel_len(c: &Channel) -> usize {
-    return c.len
-}
-
-// Returns true if the channel is empty.
-pub fn channel_is_empty(c: &Channel) -> bool {
-    return c.len == 0
-}
-
-// Returns true if the channel is full.
-pub fn channel_is_full(c: &Channel) -> bool {
-    return c.len >= c.capacity
-}
-
-// Returns true if the channel has been closed.
-pub fn channel_is_closed(c: &Channel) -> bool {
-    return c.closed
-}
-
-// Sends a value on the channel.
-// Returns Ok(()) on success, or Err(SendError::Disconnected) if closed,
-// or blocks conceptually if full (in this simplified version, returns immediately).
-pub fn channel_send(c: &!Channel, value: i64) -> Result<(), SendError> with Div, Mut, Panic {
-    if c.closed {
-        return Err(SendError::Disconnected)
+    fn send(self: &! IntChannel, val: i64) -> bool {
+        if self.closed == 1 { return false }
+        if self.count >= CHANNEL_CAP { return false }
+        self.buf[self.tail] = val
+        self.tail = (self.tail + 1) % CHANNEL_CAP
+        self.count = self.count + 1
+        true
     }
 
-    if c.len >= c.capacity {
-        // In a real implementation, this would block. Here we just fail.
-        return Err(SendError::Disconnected)
+    fn recv(self: &! IntChannel) -> i64 {
+        if self.count == 0 { return 0 }
+        let val = self.buf[self.head]
+        self.head = (self.head + 1) % CHANNEL_CAP
+        self.count = self.count - 1
+        val
     }
 
-    c.buffer[c.tail] = value
-    c.tail = (c.tail + 1) % c.capacity
-    c.len = c.len + 1
-    return Ok(())
-}
-
-// Attempts to send a value without blocking.
-// Returns Ok(()) on success, or an error if full or disconnected.
-pub fn channel_try_send(c: &!Channel, value: i64) -> Result<(), TrySendError> with Div, Mut, Panic {
-    if c.closed {
-        return Err(TrySendError::Disconnected)
+    fn is_empty(self: &IntChannel) -> bool {
+        self.count == 0
     }
 
-    if c.len >= c.capacity {
-        return Err(TrySendError::Full)
+    fn len(self: &IntChannel) -> i64 {
+        self.count
     }
 
-    c.buffer[c.tail] = value
-    c.tail = (c.tail + 1) % c.capacity
-    c.len = c.len + 1
-    return Ok(())
-}
-
-// Receives a value from the channel.
-// Returns Ok(value) on success, or Err if the channel is closed and empty,
-// or blocks conceptually if empty (in this simplified version, returns error).
-pub fn channel_recv(c: &!Channel) -> Result<i64, TryRecvError> with Div, Mut, Panic {
-    if c.len > 0 {
-        let value = c.buffer[c.head]
-        c.head = (c.head + 1) % c.capacity
-        c.len = c.len - 1
-        return Ok(value)
+    fn close(self: &! IntChannel) {
+        self.closed = 1
     }
 
-    if c.closed {
-        return Err(TryRecvError::Disconnected)
-    }
-
-    return Err(TryRecvError::Empty)
-}
-
-// Attempts to receive a value without blocking.
-// Returns Ok(value) if available, or an error if empty or disconnected.
-pub fn channel_try_recv(c: &!Channel) -> Result<i64, TryRecvError> with Div, Mut, Panic {
-    if c.len > 0 {
-        let value = c.buffer[c.head]
-        c.head = (c.head + 1) % c.capacity
-        c.len = c.len - 1
-        return Ok(value)
-    }
-
-    if c.closed {
-        return Err(TryRecvError::Disconnected)
-    }
-
-    return Err(TryRecvError::Empty)
-}
-
-// Closes the channel. Subsequent sends will fail.
-// Receives will continue to work until the buffer is empty.
-pub fn channel_close(c: &!Channel) with Mut {
-    c.closed = true
-}
-
-// Clears all pending values from the channel.
-pub fn channel_clear(c: &!Channel) with Mut {
-    c.head = 0
-    c.tail = 0
-    c.len = 0
-}
-
-// Drops the channel and frees associated resources.
-pub fn channel_drop(c: &!Channel) with Alloc, Mut {
-    if c.buffer != null_mut() {
-        free(c.buffer as *mut u8)
-        c.buffer = null_mut()
-    }
-}
-
-// =============================================================================
-// Error utility functions
-// =============================================================================
-
-// Returns true if this is an Empty error.
-pub fn try_recv_error_is_empty(err: &TryRecvError) -> bool {
-    match err {
-        TryRecvError::Empty => true,
-        TryRecvError::Disconnected => false,
-    }
-}
-
-// Returns true if this is a Disconnected error.
-pub fn try_recv_error_is_disconnected(err: &TryRecvError) -> bool {
-    match err {
-        TryRecvError::Empty => false,
-        TryRecvError::Disconnected => true,
-    }
-}
-
-// Returns true if this is a Full error.
-pub fn try_send_error_is_full(err: &TrySendError) -> bool {
-    match err {
-        TrySendError::Full => true,
-        TrySendError::Disconnected => false,
-    }
-}
-
-// Returns true if this is a Disconnected error.
-pub fn try_send_error_is_disconnected(err: &TrySendError) -> bool {
-    match err {
-        TrySendError::Full => false,
-        TrySendError::Disconnected => true,
+    fn is_closed(self: &IntChannel) -> bool {
+        self.closed == 1
     }
 }
