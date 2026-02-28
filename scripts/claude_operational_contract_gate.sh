@@ -30,6 +30,9 @@ CHECKS+=("$check_json")
 check_json="$(run_check plan_consistency bash scripts/check_claude_plan_consistency.sh)"
 CHECKS+=("$check_json")
 
+check_json="$(run_check check_sio_window bash scripts/check_check_sio_integration_window.sh)"
+CHECKS+=("$check_json")
+
 checks_joined=""
 for item in "${CHECKS[@]}"; do
   if [[ -n "$checks_joined" ]]; then

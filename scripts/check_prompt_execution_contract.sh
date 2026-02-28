@@ -5,9 +5,14 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 FILE=".claude/PROMPT_EXECUTION_CONTRACT.md"
+WINDOW_FILE=".claude/check_sio_integration_window.v1.json"
 
 if [[ ! -f "$FILE" ]]; then
   echo "error: required file missing: $FILE" >&2
+  exit 1
+fi
+if [[ ! -f "$WINDOW_FILE" ]]; then
+  echo "error: required file missing: $WINDOW_FILE" >&2
   exit 1
 fi
 
@@ -40,6 +45,9 @@ assert_literal "2. gate-complete"
 assert_literal "3. artifact refresh"
 assert_literal "## Conflict Protocol"
 assert_literal "self-hosted/check/check.sio"
+assert_literal '## Active Serialized `check.sio` Window'
+assert_literal ".claude/check_sio_integration_window.v1.json"
+assert_literal "scripts/check_check_sio_integration_window.sh"
 assert_literal "## Done Criteria Per Prompt"
 
 echo "PROMPT_EXECUTION_CONTRACT_PASS"

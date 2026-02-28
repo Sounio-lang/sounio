@@ -47,3 +47,4 @@ No reorder and no scope drift.
 3. `self-hosted/check/check.sio` is a sensitive merge surface: only one call-path prompt modifies it at a time.
 4. No-rust policy is fail-closed; never silently fallback to local rebuild paths.
 5. Before/after `.claude` governance changes, run `bash scripts/claude_operational_contract_gate.sh` and refresh `artifacts/omega/claude_operational_contract_status.v1.json`.
+6. The active serialized `check.sio` merge window is declared in `.claude/check_sio_integration_window.v1.json` and validated by `bash scripts/check_check_sio_integration_window.sh`.

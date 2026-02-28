@@ -32,10 +32,17 @@ Do not split these three stages across unrelated changes in the same lane.
 2. If two prompts need `check.sio`, integration windows are opened in order: A.1 -> A.2 -> A.3.
 3. Each integration window must end with a targeted test run and concise evidence summary.
 
+## Active Serialized `check.sio` Window
+
+Machine-checkable window state:
+- `.claude/check_sio_integration_window.v1.json`
+
+Verification command:
+- `bash scripts/check_check_sio_integration_window.sh`
+
 ## Done Criteria Per Prompt
 
 1. Code changes land in declared target files only (or documented exceptions).
 2. Required gates pass.
 3. Evidence artifacts/log references are recorded.
 4. No canonical-order drift against `PLAN_ORIGINAL.md` and `.claude/offload-specs`.
-

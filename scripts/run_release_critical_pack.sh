@@ -99,6 +99,7 @@ run_step "11-cultural-fidelity" python3 "$ROOT_DIR/scripts/cultural_fidelity_gat
 run_step "12-r2-parity-spec-lint" python3 "$ROOT_DIR/scripts/r2/parity_spec_lint.py"
 run_step "13-r2-parity-spec-exec" python3 "$ROOT_DIR/scripts/r2/parity_spec_exec.py"
 run_step "14-warning-baseline" bash "$ROOT_DIR/scripts/check_new_warnings.sh"
+run_step "14a-claude-operational-contract-gate" bash "$ROOT_DIR/scripts/claude_operational_contract_gate.sh"
 run_step "15-build-bootstrap-seed" bash "$ROOT_DIR/scripts/build_bootstrap_seed.sh"
 run_step "16-selfhost-cycle-release-byte-equality" env WORK_DIR="$RUN_DIR/selfhost-cycle-release-gate" SOUNIO_SELFHOST_RELEASE_CYCLE_SKIP_BUILD=1 SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST=bootstrap/selfhost-kernel.manifest bash "$ROOT_DIR/scripts/selfhost_cycle_release_gate.sh"
 run_step "17-selfhost-cycle-gate-seed-root" env WORK_DIR="$RUN_DIR/selfhost-cycle-gate-seed-root" SOUNIO_SELFHOST_CYCLE_FORCE_DYNAMIC=0 SOUNIO_SELFHOST_CYCLE_SEED_ENFORCE=1 SOUNIO_SELFHOST_CYCLE_SEED_PATH=bootstrap/seeds/sounio-bootstrap-linux-x86_64.sio.bin SOUNIO_SELFHOST_BOOTSTRAP_MANIFEST=bootstrap/selfhost-kernel.manifest bash "$ROOT_DIR/scripts/selfhost_cycle_gate.sh"
