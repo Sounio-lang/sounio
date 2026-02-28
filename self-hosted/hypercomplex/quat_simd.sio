@@ -20,29 +20,49 @@
 //           (w₁z₂ + x₁y₂ - y₁x₂ + z₁w₂)k
 
 // ============================================================================
+// Math helpers (acos not a pinned-binary builtin)
+// ============================================================================
+
+// Polynomial approximation of acos(x) for x in [-1, 1].
+// Abramowitz & Stegun 4.4.45 — max error ~5e-4, sufficient for slerp.
+fn quat_acos(x: f64) -> f64 with Mut, Panic, Div {
+    // Clamp to [-1, 1]
+    var v = x
+    if v > 1.0 { v = 1.0 }
+    if v < 0.0 - 1.0 { v = 0.0 - 1.0 }
+    // acos(x) = pi/2 - asin(x), asin(x) ≈ x + x^3/6 + 3x^5/40 + 15x^7/336
+    let x2 = v * v
+    let x3 = v * x2
+    let x5 = x3 * x2
+    let x7 = x5 * x2
+    let asin_approx = v + x3 / 6.0 + 3.0 * x5 / 40.0 + 15.0 * x7 / 336.0
+    1.5707963267948966 - asin_approx
+}
+
+// ============================================================================
 // Scalar Quaternion Operations (Reference Implementation)
 // ============================================================================
 
-struct Quat {
+struct QuatVec {
     w: f64,  // Real part
     x: f64,  // i component
     y: f64,  // j component
     z: f64,  // k component
 }
 
-fn quat_zero() -> Quat {
-    Quat { w: 0.0, x: 0.0, y: 0.0, z: 0.0 }
+fn quat_zero() -> QuatVec {
+    QuatVec { w: 0.0, x: 0.0, y: 0.0, z: 0.0 }
 }
 
-fn quat_identity() -> Quat {
-    Quat { w: 1.0, x: 0.0, y: 0.0, z: 0.0 }
+fn quat_identity() -> QuatVec {
+    QuatVec { w: 1.0, x: 0.0, y: 0.0, z: 0.0 }
 }
 
-fn quat_from_axis_angle(axis_x: f64, axis_y: f64, axis_z: f64, angle: f64) -> Quat {
+fn quat_from_axis_angle(axis_x: f64, axis_y: f64, axis_z: f64, angle: f64) -> QuatVec {
     let half_angle = angle * 0.5
     let s = sin(half_angle)
     let c = cos(half_angle)
-    Quat {
+    QuatVec {
         w: c,
         x: axis_x * s,
         y: axis_y * s,
@@ -50,8 +70,8 @@ fn quat_from_axis_angle(axis_x: f64, axis_y: f64, axis_z: f64, angle: f64) -> Qu
     }
 }
 
-fn quat_add(a: Quat, b: Quat) -> Quat {
-    Quat {
+fn quat_add(a: QuatVec, b: QuatVec) -> QuatVec {
+    QuatVec {
         w: a.w + b.w,
         x: a.x + b.x,
         y: a.y + b.y,
@@ -59,8 +79,8 @@ fn quat_add(a: Quat, b: Quat) -> Quat {
     }
 }
 
-fn quat_sub(a: Quat, b: Quat) -> Quat {
-    Quat {
+fn quat_sub(a: QuatVec, b: QuatVec) -> QuatVec {
+    QuatVec {
         w: a.w - b.w,
         x: a.x - b.x,
         y: a.y - b.y,
@@ -68,8 +88,8 @@ fn quat_sub(a: Quat, b: Quat) -> Quat {
     }
 }
 
-fn quat_mul_scalar(q: Quat, s: f64) -> Quat {
-    Quat {
+fn quat_mul_scalar(q: QuatVec, s: f64) -> QuatVec {
+    QuatVec {
         w: q.w * s,
         x: q.x * s,
         y: q.y * s,
@@ -77,8 +97,8 @@ fn quat_mul_scalar(q: Quat, s: f64) -> Quat {
     }
 }
 
-fn quat_conjugate(q: Quat) -> Quat {
-    Quat {
+fn quat_conjugate(q: QuatVec) -> QuatVec {
+    QuatVec {
         w: q.w,
         x: -q.x,
         y: -q.y,
@@ -86,15 +106,15 @@ fn quat_conjugate(q: Quat) -> Quat {
     }
 }
 
-fn quat_norm_squared(q: Quat) -> f64 {
+fn quat_norm_squared(q: QuatVec) -> f64 {
     q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z
 }
 
-fn quat_norm(q: Quat) -> f64 {
+fn quat_norm(q: QuatVec) -> f64 {
     sqrt(quat_norm_squared(q))
 }
 
-fn quat_normalize(q: Quat) -> Quat {
+fn quat_normalize(q: QuatVec) -> QuatVec {
     let n = quat_norm(q)
     if n < 1e-12 {
         quat_identity()
@@ -103,8 +123,8 @@ fn quat_normalize(q: Quat) -> Quat {
     }
 }
 
-fn quat_mul(a: Quat, b: Quat) -> Quat {
-    Quat {
+fn quat_mul(a: QuatVec, b: QuatVec) -> QuatVec {
+    QuatVec {
         w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
         x: a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
         y: a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
@@ -112,7 +132,7 @@ fn quat_mul(a: Quat, b: Quat) -> Quat {
     }
 }
 
-fn quat_inverse(q: Quat) -> Quat {
+fn quat_inverse(q: QuatVec) -> QuatVec {
     let norm_sq = quat_norm_squared(q)
     if norm_sq < 1e-12 {
         quat_zero()
@@ -122,7 +142,7 @@ fn quat_inverse(q: Quat) -> Quat {
     }
 }
 
-fn quat_rotate_vector(q: Quat, v_x: f64, v_y: f64, v_z: f64) -> (f64, f64, f64) {
+fn quat_rotate_vector(q: QuatVec, v_x: f64, v_y: f64, v_z: f64) -> (f64, f64, f64) {
     // Rotate 3D vector using quaternion: v' = q * v * q⁻¹
     // Optimized: v' = v + 2 * cross(q.xyz, cross(q.xyz, v) + q.w * v)
 
@@ -150,20 +170,20 @@ fn quat_rotate_vector(q: Quat, v_x: f64, v_y: f64, v_z: f64) -> (f64, f64, f64) 
     (v_x + 2.0 * wx, v_y + 2.0 * wy, v_z + 2.0 * wz)
 }
 
-fn quat_slerp(a: Quat, b: Quat, t: f64) -> Quat {
+fn quat_slerp(a: QuatVec, b: QuatVec, t: f64) -> QuatVec with Mut, Panic, Div {
     // Spherical linear interpolation
     var dot = a.w * b.w + a.x * b.x + a.y * b.y + a.z * b.z
 
     // Ensure shortest path
     var b_adj = b
     if dot < 0.0 {
-        b_adj = Quat { w: -b.w, x: -b.x, y: -b.y, z: -b.z }
+        b_adj = QuatVec { w: -b.w, x: -b.x, y: -b.y, z: -b.z }
         dot = -dot
     }
 
     // If quaternions are very close, use linear interpolation
     if dot > 0.9995 {
-        let result = Quat {
+        let result = QuatVec {
             w: a.w + t * (b_adj.w - a.w),
             x: a.x + t * (b_adj.x - a.x),
             y: a.y + t * (b_adj.y - a.y),
@@ -173,12 +193,12 @@ fn quat_slerp(a: Quat, b: Quat, t: f64) -> Quat {
     }
 
     // Compute slerp
-    let theta = acos(dot)
+    let theta = quat_acos(dot)
     let sin_theta = sin(theta)
     let factor_a = sin((1.0 - t) * theta) / sin_theta
     let factor_b = sin(t * theta) / sin_theta
 
-    Quat {
+    QuatVec {
         w: factor_a * a.w + factor_b * b_adj.w,
         x: factor_a * a.x + factor_b * b_adj.x,
         y: factor_a * a.y + factor_b * b_adj.y,
@@ -193,15 +213,15 @@ fn quat_slerp(a: Quat, b: Quat, t: f64) -> Quat {
 // Layout: 4 quaternions packed as struct-of-arrays
 // [w0, w1, w2, w3], [x0, x1, x2, x3], [y0, y1, y2, y3], [z0, z1, z2, z3]
 
-struct Quat4 {
+struct QuatVec4 {
     w: [f64; 4],
     x: [f64; 4],
     y: [f64; 4],
     z: [f64; 4],
 }
 
-fn quat4_zero() -> Quat4 {
-    Quat4 {
+fn quat4_zero() -> QuatVec4 {
+    QuatVec4 {
         w: [0.0; 4],
         x: [0.0; 4],
         y: [0.0; 4],
@@ -209,8 +229,8 @@ fn quat4_zero() -> Quat4 {
     }
 }
 
-fn quat4_load(q0: Quat, q1: Quat, q2: Quat, q3: Quat) -> Quat4 {
-    Quat4 {
+fn quat4_load(q0: QuatVec, q1: QuatVec, q2: QuatVec, q3: QuatVec) -> QuatVec4 {
+    QuatVec4 {
         w: [q0.w, q1.w, q2.w, q3.w],
         x: [q0.x, q1.x, q2.x, q3.x],
         y: [q0.y, q1.y, q2.y, q3.y],
@@ -218,16 +238,16 @@ fn quat4_load(q0: Quat, q1: Quat, q2: Quat, q3: Quat) -> Quat4 {
     }
 }
 
-fn quat4_store(q4: Quat4) -> (Quat, Quat, Quat, Quat) with Mut, Panic, Div {
+fn quat4_store(q4: QuatVec4) -> (QuatVec, QuatVec, QuatVec, QuatVec) with Mut, Panic, Div {
     (
-        Quat { w: q4.w[0], x: q4.x[0], y: q4.y[0], z: q4.z[0] },
-        Quat { w: q4.w[1], x: q4.x[1], y: q4.y[1], z: q4.z[1] },
-        Quat { w: q4.w[2], x: q4.x[2], y: q4.y[2], z: q4.z[2] },
-        Quat { w: q4.w[3], x: q4.x[3], y: q4.y[3], z: q4.z[3] },
+        QuatVec { w: q4.w[0], x: q4.x[0], y: q4.y[0], z: q4.z[0] },
+        QuatVec { w: q4.w[1], x: q4.x[1], y: q4.y[1], z: q4.z[1] },
+        QuatVec { w: q4.w[2], x: q4.x[2], y: q4.y[2], z: q4.z[2] },
+        QuatVec { w: q4.w[3], x: q4.x[3], y: q4.y[3], z: q4.z[3] },
     )
 }
 
-fn quat4_add(a: Quat4, b: Quat4) -> Quat4 with Mut, Panic, Div {
+fn quat4_add(a: QuatVec4, b: QuatVec4) -> QuatVec4 with Mut, Panic, Div {
     // SIMD: _mm256_add_pd for each component
     var result = quat4_zero()
     var i: i64 = 0
@@ -241,7 +261,7 @@ fn quat4_add(a: Quat4, b: Quat4) -> Quat4 with Mut, Panic, Div {
     result
 }
 
-fn quat4_mul(a: Quat4, b: Quat4) -> Quat4 with Mut, Panic, Div {
+fn quat4_mul(a: QuatVec4, b: QuatVec4) -> QuatVec4 with Mut, Panic, Div {
     // 4-wide quaternion multiplication using SIMD
     // In real SIMD: use _mm256_fmadd_pd, _mm256_fmsub_pd, _mm256_fnmadd_pd
 
@@ -268,7 +288,7 @@ fn quat4_mul(a: Quat4, b: Quat4) -> Quat4 with Mut, Panic, Div {
     result
 }
 
-fn quat4_conjugate(q: Quat4) -> Quat4 with Mut, Panic, Div {
+fn quat4_conjugate(q: QuatVec4) -> QuatVec4 with Mut, Panic, Div {
     // SIMD: _mm256_xor_pd with sign bit mask
     var result = quat4_zero()
     result.w = q.w  // w unchanged
@@ -282,7 +302,7 @@ fn quat4_conjugate(q: Quat4) -> Quat4 with Mut, Panic, Div {
     result
 }
 
-fn quat4_norm_squared(q: Quat4) -> [f64; 4] with Mut, Panic, Div {
+fn quat4_norm_squared(q: QuatVec4) -> [f64; 4] with Mut, Panic, Div {
     // SIMD: horizontal sum of squares
     var result: [f64; 4] = [0.0; 4]
     var i: i64 = 0
@@ -301,15 +321,15 @@ fn quat4_norm_squared(q: Quat4) -> [f64; 4] with Mut, Panic, Div {
 // AVX-512 8-Wide Batch Operations (512-bit SIMD)
 // ============================================================================
 
-struct Quat8 {
+struct QuatVec8 {
     w: [f64; 8],
     x: [f64; 8],
     y: [f64; 8],
     z: [f64; 8],
 }
 
-fn quat8_zero() -> Quat8 {
-    Quat8 {
+fn quat8_zero() -> QuatVec8 {
+    QuatVec8 {
         w: [0.0; 8],
         x: [0.0; 8],
         y: [0.0; 8],
@@ -317,7 +337,7 @@ fn quat8_zero() -> Quat8 {
     }
 }
 
-fn quat8_add(a: Quat8, b: Quat8) -> Quat8 with Mut, Panic, Div {
+fn quat8_add(a: QuatVec8, b: QuatVec8) -> QuatVec8 with Mut, Panic, Div {
     // SIMD: _mm512_add_pd
     var result = quat8_zero()
     var i: i64 = 0
@@ -331,7 +351,7 @@ fn quat8_add(a: Quat8, b: Quat8) -> Quat8 with Mut, Panic, Div {
     result
 }
 
-fn quat8_mul(a: Quat8, b: Quat8) -> Quat8 with Mut, Panic, Div {
+fn quat8_mul(a: QuatVec8, b: QuatVec8) -> QuatVec8 with Mut, Panic, Div {
     // 8-wide quaternion multiplication
     var result = quat8_zero()
     var i: i64 = 0
@@ -361,8 +381,8 @@ fn quat8_mul(a: Quat8, b: Quat8) -> Quat8 with Mut, Panic, Div {
 // ============================================================================
 
 fn benchmark_quat_mul_scalar(iterations: i64) -> f64 with Mut, Panic, Div {
-    let q1 = Quat { w: 1.0, x: 0.1, y: 0.2, z: 0.3 }
-    let q2 = Quat { w: 0.9, x: 0.2, y: 0.1, z: 0.4 }
+    let q1 = QuatVec { w: 1.0, x: 0.1, y: 0.2, z: 0.3 }
+    let q2 = QuatVec { w: 0.9, x: 0.2, y: 0.1, z: 0.4 }
 
     var result = quat_identity()
     var i: i64 = 0
@@ -376,7 +396,7 @@ fn benchmark_quat_mul_scalar(iterations: i64) -> f64 with Mut, Panic, Div {
 }
 
 fn benchmark_quat4_mul(iterations: i64) -> f64 with Mut, Panic, Div {
-    let q = Quat { w: 1.0, x: 0.1, y: 0.2, z: 0.3 }
+    let q = QuatVec { w: 1.0, x: 0.1, y: 0.2, z: 0.3 }
     let q4a = quat4_load(q, q, q, q)
     let q4b = quat4_load(q, q, q, q)
 

@@ -123,6 +123,8 @@ FILES=(
   self-hosted/collections/graph.sio
   self-hosted/collections/epistemic_ordered_map.sio
   self-hosted/collections/epistemic_molecule.sio
+  self-hosted/collections/epistemic_arena.sio
+  self-hosted/collections/epistemic_reaction.sio
 
   # ── 13. Hypercomplex ────────────────────────────────────────────
   self-hosted/hypercomplex/octonion.sio
