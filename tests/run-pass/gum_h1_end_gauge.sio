@@ -1,0 +1,445 @@
+//@ run-pass
+// GUM H.1 End-Gauge Calibration — JCGM 100:2008 Example H.1
+//
+// Calibration of an end gauge of nominal length 50 mm.
+// Validates Sounio's uncertainty propagation against the published
+// GUM reference values:
+//   - Combined standard uncertainty: u_c = 32 nm (±5%)
+//   - Effective degrees of freedom: nu_eff ~ 16
+//   - Coverage factor k = 2.12 (95%, nu=16)
+//   - Expanded uncertainty: U = 67 nm (±5%)
+//
+// Model (JCGM 100:2008 H.1.2):
+//   l_S = l_N + d + d_l - L*(alpha_S - alpha_e)*(theta - theta_0)
+//                        - L*alpha_S*delta_theta
+//
+// Input quantities (Table H.1, simplified 5-input form):
+//   d        =  215 nm,  u = 5.8 nm,       nu = 24  (Type A)
+//   d_l      =    0 nm,  u = 25 nm,        nu = 18  (Type B, combined)
+//   delta_alpha = 0 /°C, u = 1.15e-6 /°C,  nu = 50  (Type B)
+//   theta    = -0.1 °C,  u = 0.41 °C,      nu =  2  (Type B)
+//   delta_theta = 0 °C,  u = 0.029 °C,     nu =  2  (Type B)
+//
+// Constants: L = 50 mm = 50e6 nm, alpha_S = 11.5e-6 /°C
+
+struct EVal {
+    v: f64,
+    u: f64
+}
+
+fn sqrt_f64(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var guess = x / 2.0
+    if guess < 0.001 { guess = 0.001 }
+    var i = 0
+    while i < 40 {
+        guess = (guess + x / guess) / 2.0
+        i = i + 1
+    }
+    return guess
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn pow4(x: f64) -> f64 {
+    let x2 = x * x
+    return x2 * x2
+}
+
+// GUM Addition: u(x+y) = sqrt(u(x)^2 + u(y)^2)
+fn ev_add(a: EVal, b: EVal) -> EVal {
+    return EVal {
+        v: a.v + b.v,
+        u: sqrt_f64(a.u * a.u + b.u * b.u)
+    }
+}
+
+// GUM Subtraction: same as addition for uncorrelated
+fn ev_sub(a: EVal, b: EVal) -> EVal {
+    return EVal {
+        v: a.v - b.v,
+        u: sqrt_f64(a.u * a.u + b.u * b.u)
+    }
+}
+
+// GUM Multiplication: u(x*y) = sqrt(y^2*u(x)^2 + x^2*u(y)^2)
+fn ev_mul(a: EVal, b: EVal) -> EVal {
+    let val = a.v * b.v
+    let u = sqrt_f64(b.v * b.v * a.u * a.u + a.v * a.v * b.u * b.u)
+    return EVal { v: val, u: u }
+}
+
+// Scale by exact constant (zero uncertainty)
+fn ev_scale(a: EVal, c: f64) -> EVal {
+    return EVal {
+        v: a.v * c,
+        u: abs_f64(c) * a.u
+    }
+}
+
+// Welch-Satterthwaite effective degrees of freedom
+// nu_eff = u_c^4 / sum_i( (c_i * u_i)^4 / nu_i )
+fn welch_satterthwaite(u_c: f64, contributions: [f64; 5], dofs: [f64; 5]) -> f64 {
+    let u_c4 = pow4(u_c)
+    var denominator = 0.0
+    var i = 0
+    while i < 5 {
+        let ci_ui = contributions[i as usize]
+        let nu_i = dofs[i as usize]
+        if nu_i > 0.0 {
+            denominator = denominator + pow4(ci_ui) / nu_i
+        }
+        i = i + 1
+    }
+    if denominator < 0.000001 { return 1000.0 }
+    return u_c4 / denominator
+}
+
+// Student's t lookup table (two-tailed 95% confidence)
+// Index 0 = nu=1, index 1 = nu=2, ...
+fn t_95_lookup(nu: i64) -> f64 {
+    // Selected values from t-distribution table
+    // nu:  1      2      3      4      5      6      7      8      9     10
+    //     12.706  4.303  3.182  2.776  2.571  2.447  2.365  2.306  2.262  2.228
+    // nu: 11     12     13     14     15     16     17     18     19     20
+    //     2.201  2.179  2.160  2.145  2.131  2.120  2.110  2.101  2.093  2.086
+
+    if nu <= 0 { return 12.706 }
+    if nu == 1 { return 12.706 }
+    if nu == 2 { return 4.303 }
+    if nu == 3 { return 3.182 }
+    if nu == 4 { return 2.776 }
+    if nu == 5 { return 2.571 }
+    if nu == 6 { return 2.447 }
+    if nu == 7 { return 2.365 }
+    if nu == 8 { return 2.306 }
+    if nu == 9 { return 2.262 }
+    if nu == 10 { return 2.228 }
+    if nu == 11 { return 2.201 }
+    if nu == 12 { return 2.179 }
+    if nu == 13 { return 2.160 }
+    if nu == 14 { return 2.145 }
+    if nu == 15 { return 2.131 }
+    if nu == 16 { return 2.120 }
+    if nu == 17 { return 2.110 }
+    if nu == 18 { return 2.101 }
+    if nu == 19 { return 2.093 }
+    if nu == 20 { return 2.086 }
+    if nu <= 30 { return 2.042 }
+    if nu <= 50 { return 2.009 }
+    if nu <= 100 { return 1.984 }
+    return 1.960
+}
+
+fn run_tests() -> i32 with IO, Mut, Panic {
+    println("======================================================================")
+    println("  GUM H.1 End-Gauge Calibration")
+    println("  JCGM 100:2008 Example H.1")
+    println("======================================================================")
+    println("")
+
+    // ================================================================
+    // CONSTANTS
+    // ================================================================
+    let L_nm = 50000000.0       // 50 mm in nanometers
+    let alpha_s = 0.0000115     // 11.5 x 10^-6 per °C
+
+    // ================================================================
+    // INPUT QUANTITIES (JCGM 100:2008 Table H.1)
+    // ================================================================
+
+    // d: observed difference between interferometric measurement and nominal
+    let d = EVal { v: 215.0, u: 5.8 }            // nm, nu=24, Type A
+
+    // d_l: combined systematic effects of comparator (d1 + d2)
+    let d_l = EVal { v: 0.0, u: 25.0 }           // nm, nu=18, Type B
+
+    // delta_alpha: difference in thermal expansion (alpha_S - alpha_e)
+    let delta_alpha = EVal { v: 0.0, u: 0.00000115 }  // per °C, nu=50, Type B
+
+    // theta: temperature deviation from 20°C
+    let theta = EVal { v: 0.0 - 0.1, u: 0.41 }   // °C, nu=2, Type B
+
+    // delta_theta: temperature difference between test and reference gauge
+    let delta_theta = EVal { v: 0.0, u: 0.029 }   // °C, nu=2, Type B
+
+    // ================================================================
+    // TEST 1: Step-by-step uncertainty propagation
+    //
+    // Model: l_S = l_N + d + d_l
+    //             - L * delta_alpha * theta
+    //             - L * alpha_s * delta_theta
+    // ================================================================
+
+    println("TEST 1: Step-by-step GUM propagation")
+    println("")
+
+    // Term 1: d + d_l (additive corrections)
+    let additive = ev_add(d, d_l)
+    println("  d + d_l value (nm):")
+    println(additive.v)
+    println("  d + d_l uncertainty (nm):")
+    println(additive.u)
+
+    // Term 2: L * delta_alpha (scale exact constant times uncertain quantity)
+    let L_dalpha = ev_scale(delta_alpha, L_nm)
+    // L_dalpha: v = 0, u = 50e6 * 1.15e-6 = 57.5 nm/°C
+
+    // Term 3: L_dalpha * theta (product of two uncertain quantities)
+    let thermal_1 = ev_mul(L_dalpha, theta)
+    // thermal_1: v = 57.5 * (-0.1) = -5.75 nm
+    // u = sqrt(theta^2 * u(L_dalpha)^2 + L_dalpha^2 * u(theta)^2)
+    //   = sqrt(0.01 * 3306.25 + 0 * 0.1681)
+    //   = sqrt(33.0625) = 5.75 nm
+    println("  L*delta_alpha*theta value (nm):")
+    println(thermal_1.v)
+    println("  L*delta_alpha*theta uncertainty (nm):")
+    println(thermal_1.u)
+
+    // Term 4: L * alpha_s * delta_theta (exact constant * uncertain)
+    let L_alpha_s = L_nm * alpha_s    // 575.0 nm/°C (exact)
+    let thermal_2 = ev_scale(delta_theta, L_alpha_s)
+    // thermal_2: v = 0, u = 575 * 0.029 = 16.675 nm
+    println("  L*alpha_s*delta_theta value (nm):")
+    println(thermal_2.v)
+    println("  L*alpha_s*delta_theta uncertainty (nm):")
+    println(thermal_2.u)
+
+    // Combine: l_S = l_N + additive - thermal_1 - thermal_2
+    let sub1 = ev_sub(additive, thermal_1)
+    let result = ev_sub(sub1, thermal_2)
+
+    println("")
+    println("  Combined result:")
+    println("    l_S - l_N (nm):")
+    println(result.v)
+    println("    u_c (nm):")
+    println(result.u)
+
+    // ================================================================
+    // TEST 2: Verify against analytical sensitivity coefficient computation
+    //
+    // Sensitivity coefficients evaluated at input estimates:
+    //   c_d = 1
+    //   c_dl = 1
+    //   c_dalpha = -L * theta = -50e6 * (-0.1) = 5e6 nm·°C
+    //   c_theta = -L * delta_alpha = -50e6 * 0 = 0
+    //   c_dtheta = -L * alpha_s = -575 nm/°C
+    //
+    // u_c^2 = c_d^2*u_d^2 + c_dl^2*u_dl^2 + c_dalpha^2*u_dalpha^2
+    //       + c_theta^2*u_theta^2 + c_dtheta^2*u_dtheta^2
+    // ================================================================
+
+    println("")
+    println("TEST 2: Analytical sensitivity coefficient verification")
+
+    let c_d = 1.0
+    let c_dl = 1.0
+    let c_dalpha = 0.0 - L_nm * theta.v     // -50e6 * (-0.1) = 5e6
+    let c_theta = 0.0 - L_nm * delta_alpha.v // -50e6 * 0 = 0
+    let c_dtheta = 0.0 - L_alpha_s           // -575
+
+    let u_c_sq = c_d * c_d * d.u * d.u
+               + c_dl * c_dl * d_l.u * d_l.u
+               + c_dalpha * c_dalpha * delta_alpha.u * delta_alpha.u
+               + c_theta * c_theta * theta.u * theta.u
+               + c_dtheta * c_dtheta * delta_theta.u * delta_theta.u
+    let u_c_analytical = sqrt_f64(u_c_sq)
+
+    println("  Analytical u_c (nm):")
+    println(u_c_analytical)
+
+    // Check that step-by-step propagation matches analytical
+    let err_uc = abs_f64(result.u - u_c_analytical) / u_c_analytical
+    println("  Relative error (step-by-step vs analytical):")
+    println(err_uc)
+
+    if err_uc > 0.01 {
+        println("FAIL: Step-by-step propagation diverges from analytical (>1%)")
+        return 1
+    }
+    println("  [PASS] Step-by-step matches analytical within 1%")
+
+    // ================================================================
+    // TEST 3: Compare against published GUM values
+    //
+    // GUM H.1.6 published:
+    //   u_c(l_S) = 32 nm
+    //   nu_eff = 16
+    //   k = 2.12 (95%, nu=16)
+    //   U = 67 nm (= k * u_c, rounded)
+    //
+    // Our 5-input simplification gives ~31.1 nm (the full GUM
+    // uses 6 separate inputs including d1, d2 split). We verify
+    // we're within 5% of the published value.
+    // ================================================================
+
+    println("")
+    println("TEST 3: Comparison with published GUM H.1 values")
+
+    let gum_uc = 32.0       // published combined standard uncertainty (nm)
+    let gum_nu = 16.0       // published effective DoF
+    let gum_k = 2.12        // published coverage factor
+    let gum_U = 67.0        // published expanded uncertainty (nm)
+
+    let err_vs_gum = abs_f64(u_c_analytical - gum_uc) / gum_uc
+    println("  Our u_c:")
+    println(u_c_analytical)
+    println("  GUM u_c: 32.0")
+    println("  Relative difference:")
+    println(err_vs_gum)
+
+    if err_vs_gum > 0.05 {
+        println("FAIL: u_c deviates >5% from published GUM value")
+        return 2
+    }
+    println("  [PASS] u_c within 5% of GUM published value")
+
+    // ================================================================
+    // TEST 4: Welch-Satterthwaite effective degrees of freedom
+    //
+    // Individual contributions |c_i * u_i| and their DoF:
+    // ================================================================
+
+    println("")
+    println("TEST 4: Welch-Satterthwaite effective DoF")
+
+    let contrib_d = abs_f64(c_d) * d.u                        // 5.8
+    let contrib_dl = abs_f64(c_dl) * d_l.u                    // 25.0
+    let contrib_dalpha = abs_f64(c_dalpha) * delta_alpha.u     // 5.75
+    let contrib_theta = abs_f64(c_theta) * theta.u             // 0.0
+    let contrib_dtheta = abs_f64(c_dtheta) * delta_theta.u     // 16.675
+
+    let contributions: [f64; 5] = [contrib_d, contrib_dl, contrib_dalpha,
+                                    contrib_theta, contrib_dtheta]
+    let dofs: [f64; 5] = [24.0, 18.0, 50.0, 2.0, 2.0]
+
+    let nu_eff = welch_satterthwaite(u_c_analytical, contributions, dofs)
+    println("  nu_eff:")
+    println(nu_eff)
+    println("  GUM nu_eff: 16")
+
+    // nu_eff should be in range 12-20 (sensitive to exact u_c value)
+    if nu_eff < 10.0 {
+        println("FAIL: nu_eff too low (<10)")
+        return 3
+    }
+    if nu_eff > 25.0 {
+        println("FAIL: nu_eff too high (>25)")
+        return 4
+    }
+    println("  [PASS] nu_eff in reasonable range (10-25)")
+
+    // ================================================================
+    // TEST 5: Coverage factor and expanded uncertainty
+    // ================================================================
+
+    println("")
+    println("TEST 5: Expanded uncertainty")
+
+    // Round nu_eff down to integer for t-table lookup
+    var nu_int = 16
+    if nu_eff < 16.0 { nu_int = 15 }
+    if nu_eff < 15.0 { nu_int = 14 }
+    if nu_eff < 14.0 { nu_int = 13 }
+    if nu_eff < 13.0 { nu_int = 12 }
+    if nu_eff < 12.0 { nu_int = 11 }
+    if nu_eff < 11.0 { nu_int = 10 }
+    if nu_eff > 17.0 { nu_int = 17 }
+    if nu_eff > 18.0 { nu_int = 18 }
+
+    let k = t_95_lookup(nu_int)
+    let U = k * u_c_analytical
+
+    println("  nu_int (truncated):")
+    println(nu_int)
+    println("  k (95% coverage):")
+    println(k)
+    println("  U = k * u_c (nm):")
+    println(U)
+    println("  GUM U: 67.0 nm")
+
+    let err_U = abs_f64(U - gum_U) / gum_U
+    println("  Relative difference:")
+    println(err_U)
+
+    if err_U > 0.10 {
+        println("FAIL: Expanded uncertainty deviates >10% from GUM")
+        return 5
+    }
+    println("  [PASS] Expanded uncertainty within 10% of GUM")
+
+    // ================================================================
+    // TEST 6: Individual contribution breakdown
+    //
+    // Verify each sensitivity coefficient * uncertainty contribution
+    // ================================================================
+
+    println("")
+    println("TEST 6: Contribution breakdown verification")
+
+    // c_d * u_d = 1 * 5.8 = 5.8 nm
+    let exp_d = 5.8
+    if abs_f64(contrib_d - exp_d) > 0.01 {
+        println("FAIL: d contribution incorrect")
+        return 6
+    }
+    println("  [PASS] |c_d * u_d| = 5.8 nm")
+
+    // c_dl * u_dl = 1 * 25 = 25 nm
+    let exp_dl = 25.0
+    if abs_f64(contrib_dl - exp_dl) > 0.01 {
+        println("FAIL: d_l contribution incorrect")
+        return 7
+    }
+    println("  [PASS] |c_dl * u_dl| = 25.0 nm")
+
+    // c_dalpha * u_dalpha = 5e6 * 1.15e-6 = 5.75 nm
+    let exp_dalpha = 5.75
+    if abs_f64(contrib_dalpha - exp_dalpha) > 0.1 {
+        println("FAIL: delta_alpha contribution incorrect")
+        return 8
+    }
+    println("  [PASS] |c_dalpha * u_dalpha| = 5.75 nm")
+
+    // c_dtheta * u_dtheta = 575 * 0.029 = 16.675 nm
+    let exp_dtheta = 16.675
+    if abs_f64(contrib_dtheta - exp_dtheta) > 0.01 {
+        println("FAIL: delta_theta contribution incorrect")
+        return 9
+    }
+    println("  [PASS] |c_dtheta * u_dtheta| = 16.675 nm")
+
+    // ================================================================
+    // SUMMARY
+    // ================================================================
+    println("")
+    println("======================================================================")
+    println("  GUM H.1 END-GAUGE CALIBRATION — SUMMARY")
+    println("======================================================================")
+    println("  [PASS] Step-by-step propagation matches analytical (<1%)")
+    println("  [PASS] u_c within 5% of published GUM value (32 nm)")
+    println("  [PASS] Welch-Satterthwaite nu_eff in range (10-25)")
+    println("  [PASS] Expanded uncertainty within 10% of GUM (67 nm)")
+    println("  [PASS] All individual contributions verified")
+    println("")
+    println("  Sounio u_c:")
+    println(u_c_analytical)
+    println("  GUM published u_c: 32 nm")
+    println("  Sounio U:")
+    println(U)
+    println("  GUM published U: 67 nm")
+    println("")
+    println("  Reference: JCGM 100:2008 (GUM) Section H.1")
+    println("  All 6 tests match GUM ISO/IEC Guide 98-3")
+    println("======================================================================")
+
+    return 0
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    return run_tests()
+}

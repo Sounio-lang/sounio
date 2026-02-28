@@ -1,6 +1,6 @@
 # NVIDIA L4 Epistemic GEMM Benchmark Results
 
-**Headline:** Median 5.3 TFLOPS epistemic GEMM at 4096x4096x4096 (17.3% of L4 peak FP32).
+**Headline:** Median 5.3 TFLOPS compiler-generated tiled GEMM at 4096x4096 (17.3% of L4 peak). cuBLAS SGEMM baseline at 14.1 TFLOPS. **Overhead: 2.19x geometric mean** (compiler maturity baseline — kernel generated with `epistemic_enabled=false`; shadow register overhead not yet isolated).
 
 ## Hardware Configuration
 
@@ -12,7 +12,8 @@
 | Peak FP32 | 30.3 TFLOPS |
 | Host | `gpu-appliance-l4` (10.100.100.215) |
 | Toolchain | rustc 1.93.1, cargo 1.93.1 |
-| Date range | 2026-02-25 to 2026-02-26 |
+| Date range | 2026-02-25 to 2026-02-28 |
+| Memory BW | 115.0 GB/s (DtoD, 256 MB) |
 
 ## Methodology
 
@@ -20,7 +21,11 @@ GPU kernels are generated as PTX by the Sounio compiler (`crates/souc/src/codege
 
 ## What is Epistemic GEMM
 
-This is NOT a standard SGEMM. Every `Knowledge<f32>` value on the GPU carries 4 shadow registers:
+The Sounio GPU codegen pipeline supports two modes:
+
+### Shadow-enabled mode (`epistemic_enabled=true`)
+
+Every `Knowledge<f32>` value carries 4 shadow registers:
 
 | Register | Type | Purpose |
 |----------|------|---------|
@@ -35,7 +40,11 @@ Uncertainty propagation follows ISO/IEC Guide 98-3 (the GUM):
 - **Div:** near-zero guard with validity predicate kill
 - **FMA:** combined quadrature
 
-This means every floating-point multiply-accumulate in the GEMM inner loop is accompanied by uncertainty propagation arithmetic. The workload is fundamentally heavier than plain SGEMM.
+This mode has NOT been benchmarked yet (see Investigation Finding below).
+
+### Value-only mode (`epistemic_enabled=false`) — BENCHMARKED
+
+The current benchmark kernel uses value-only mode: a compiler-generated tiled SGEMM with 64x64 tiles, 16x16 thread blocks, 4x4 register blocking, and 16 `fma.rn.f32` instructions in the inner loop. No shadow register operations are emitted. This measures the baseline cost of Sounio's GPU codegen vs vendor-optimized cuBLAS.
 
 ## Results by Matrix Size
 
@@ -47,10 +56,10 @@ Two PTX variants produce bimodal performance at 4096x4096:
 
 | Dimension | n | Median GFLOPS | Range | ms/iter | Peak % |
 |-----------|---|---------------|-------|---------|--------|
-| 1024x1024 | 1 | 6,061 | — | 0.35 | 20.0 |
-| 2048x2048 | 3 | 7,201 | 6,786-7,585 | ~2.4 | 25.0 |
-| 4096x4096 | 6 | 5,253 | 5,155-5,606 | ~25 | 17.3 |
-| 8192x8192 | 3 | 4,876 | 4,355-4,957 | ~226 | 16.1 |
+| 1024x1024 | 5 | 7,182 | 6,061-7,204 | ~0.30 | 23.7 |
+| 2048x2048 | 4 | 7,393 | 6,786-7,595 | ~2.3 | 24.4 |
+| 4096x4096 | 8 | 5,253 | 5,155-5,606 | ~26 | 17.3 |
+| 8192x8192 | 4 | 4,806 | 4,355-4,957 | ~229 | 15.9 |
 
 ### 4096x4096x4096 (all series)
 
@@ -74,43 +83,85 @@ SM7 generic PTX (~15,647 chars) outperforms on-host-generated PTX (~22,580 chars
 
 **SM89 cuModuleLoadData 0xc8:** The initial SM89-targeted PTX (22,664 chars) failed with `CUDA_ERROR_INVALID_PTX`. Resolved by falling back to SM7 generic PTX, which runs correctly on SM 8.9 hardware via forward compatibility. Subsequent SM89 PTX regeneration passed (4,463-4,527 GFLOPS).
 
+## cuBLAS SGEMM Baseline (2026-02-28)
+
+cuBLAS SGEMM (plain f32 matrix multiply, no shadow registers) measured on the same L4 hardware, same timing methodology (CUDA events), 8 iterations per dimension, 3 independent passes.
+
+| Dimension | n | Median GFLOPS | Range | Peak % |
+|-----------|---|---------------|-------|--------|
+| 1024x1024 | 3 | 12,886 | 12,886-13,026 | 42.5 |
+| 2048x2048 | 3 | 16,402 | 16,368-16,529 | 54.1 |
+| 4096x4096 | 3 | 14,124 | 13,953-15,482 | 46.6 |
+| 8192x8192 | 3 | 10,388 | 10,367-10,779 | 34.3 |
+
+Baseline script: `scripts/cuda_cublas_baseline.py` (cudart runtime API + cuBLAS via ctypes).
+Memory bandwidth: 115.0 GB/s (DtoD, 256 MB).
+
+## Overhead Analysis
+
+Overhead = cuBLAS GFLOPS / Epistemic GFLOPS (how many times slower the epistemic kernel is):
+
+| Dimension | cuBLAS | Epistemic | Overhead | Extra time |
+|-----------|--------|-----------|----------|------------|
+| 1024x1024 | 12,886 | 7,182 | 1.79x | +79% |
+| 2048x2048 | 16,402 | 7,393 | 2.22x | +122% |
+| 4096x4096 | 14,124 | 5,253 | 2.69x | +169% |
+| 8192x8192 | 10,388 | 4,806 | 2.16x | +116% |
+| **geomean** | | | **2.19x** | **+119%** |
+
+### Interpretation — Corrected (2026-02-27)
+
+**Investigation finding:** The benchmark PTX kernel (`epistemic_gemm_sm7_4096.ptx`, 15,647 chars) was generated with `epistemic_enabled=false`. The PTX contains standard registers (`.reg .f32 %f<48>`) and 16 `fma.rn.f32` instructions in the inner loop — no shadow register operations (_eps, _valid, _prov). This was confirmed by:
+
+1. Inspecting the PTX: no epsilon propagation, validity predicates, or provenance merge instructions
+2. The self-hosted codegen (`self-hosted/gpu/hlir_to_gpu.sio` line 362) gates ALL shadow emission on the `epistemic_enabled` boolean
+3. Oracle test 43 validates that `epistemic_enabled=false` produces zero shadow ops
+
+**What the 2.19x actually measures:** The overhead of Sounio's compiler-generated tiled GEMM (64x64 tiles, 16x16 thread blocks, 4x4 register blocking) versus cuBLAS's highly-optimized SGEMM. This is the **compiler maturity baseline** — the cost of using a research compiler's GPU backend versus a vendor-tuned library.
+
+**What has NOT been measured:** The additional overhead of epistemic shadow registers (uncertainty propagation, validity tracking, provenance merge). The self-hosted compiler infrastructure for this exists (`self-hosted/gpu/epistemic_ptx.sio`), but benchmark PTX with shadows enabled has not yet been generated and dispatched.
+
 ## Defensible Claims
 
 **What we CAN claim:**
-- "Epistemic GEMM achieves median 5.3 TFLOPS on NVIDIA L4 at 4096x4096x4096" (6 runs, +/-3%)
-- "17-25% of L4 peak FP32 throughput for epistemic workload" (varies by dimension)
+- "Sounio GPU codegen produces working PTX kernels across 1K-8K matrix dimensions" (all pass 500 GFLOPS threshold)
+- "Compiler-generated tiled GEMM achieves median 5.3 TFLOPS at 4096x4096" (8 runs, ±3%)
+- "2.19x geometric mean overhead vs cuBLAS SGEMM" (compiler maturity baseline, measured on same hardware/timing)
+- "16-24% of L4 peak FP32 throughput" (varies by dimension)
 - "PTX target selection affects performance by ~20%" (SM7 vs on-host)
-- "Kernel scales from 1024 to 8192 matrix dimensions" (all pass 500 GFLOPS threshold)
-- "World-first: GPU kernel with per-element uncertainty propagation in the instruction stream"
+- "Memory bandwidth: 115 GB/s DtoD" (measured)
+- "Self-hosted GPU codegen has full epistemic shadow register support" (code exists, formally verified in Lean)
 
 **What we CANNOT yet claim:**
-- Shadow register overhead % vs plain SGEMM (no plain GEMM baseline on this hardware)
-- Competitive with cuBLAS/CUTLASS/Triton for equivalent work (different workloads)
-- "Low overhead" or "< N% overhead" (undefined without baseline denominator)
-
-**What's needed next:**
-- Run cuBLAS SGEMM on same L4 for direct overhead measurement
-- Run epistemic GEMM with shadow registers disabled for ablation
-- More 1024 runs (only n=1 currently)
-- Roofline analysis with memory bandwidth measurement
+- "2.19x is the cost of epistemic uncertainty propagation" — the benchmark kernel has no shadow registers
+- Shadow register overhead has not been isolated (requires generating PTX with `epistemic_enabled=true`)
+- No comparison of shadow-on vs shadow-off kernel performance
 
 ## Reproduction
 
 ```bash
 # Requires SSH access to gpu-appliance-l4 (10.100.100.215)
-GPU_HOST=gpu-appliance-l4 GEMM_M=4096 GEMM_N=4096 GEMM_K=4096 \
-  bash scripts/gpu_test_runner.sh
 
-# Direct dispatch only (skip cargo build):
+# cuBLAS SGEMM baseline (all dimensions):
+ssh demetrios@10.100.100.215 \
+  "cd ~/work/sounio && python3 scripts/cuda_cublas_baseline.py"
+
+# Epistemic GEMM (direct dispatch with pre-generated PTX):
 ssh demetrios@10.100.100.215 \
   "cd ~/work/sounio && GEMM_M=4096 GEMM_N=4096 GEMM_K=4096 \
    GEMM_ITERS=8 GEMM_PTX_FILE=/tmp/epistemic_gemm_sm7_4096.ptx \
    python3 scripts/cuda_gemm_dispatch.py"
+
+# Full test runner with baseline:
+GPU_HOST=gpu-appliance-l4 BASELINE=1 bash scripts/gpu_test_runner.sh
 ```
 
 ## Source Data
 
 - Machine-readable: `benchmarks/results/l4_raw_data.json`
+- cuBLAS baseline: `artifacts/omega/cublas_baseline_report.v1.json`
+- Overhead report: `artifacts/omega/overhead_report.v1.json`
 - Raw logs: `artifacts/omega/l4_*.log` (27 files)
 - Perf reports: `artifacts/omega/l4_perf_pass_report.v{1,2}.txt`
 - Stability report: `artifacts/omega/l4_scale_stability_report.v1.txt`
+- Baseline script: `scripts/cuda_cublas_baseline.py`
