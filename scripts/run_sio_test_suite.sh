@@ -181,6 +181,16 @@ for f in "$ROOT_DIR"/tests/compile-fail/*.sio; do
     run_test "$f"
 done
 
+echo "--- ui tests ---"
+for f in "$ROOT_DIR"/tests/ui/type/*.sio "$ROOT_DIR"/tests/ui/effect/*.sio "$ROOT_DIR"/tests/ui/ownership/*.sio "$ROOT_DIR"/tests/ui/resolve/*.sio "$ROOT_DIR"/tests/ui/pattern/*.sio; do
+    [ -f "$f" ] && run_test "$f"
+done
+
+echo "--- stdlib e2e tests ---"
+for f in "$ROOT_DIR"/tests/stdlib/*/test_*.sio; do
+    [ -f "$f" ] && run_test "$f"
+done
+
 echo ""
 echo "=== Results ==="
 echo "  Pass: $PASS"
