@@ -9,6 +9,8 @@ BOARD_MD="${PLAN_BIG_STATUS_MD:-$ROOT_DIR/artifacts/omega/plan_big_status_board.
 OUT_JSON="${PLAN_BIG_GATE_STATUS_JSON:-$ROOT_DIR/artifacts/omega/plan_big_gate_status.v1.json}"
 OVERNIGHT_HEALTH_REQUIRED="${PLAN_BIG_OVERNIGHT_HEALTH_REQUIRED:-0}"
 OVERNIGHT_AUTO_HEAL="${PLAN_BIG_OVERNIGHT_HEALTH_AUTO_HEAL:-1}"
+OVERNIGHT_BURNIN_REQUIRED="${PLAN_BIG_OVERNIGHT_BURNIN_REQUIRED:-0}"
+OVERNIGHT_BURNIN_JSON="${PLAN_BIG_OVERNIGHT_BURNIN_JSON:-$ROOT_DIR/artifacts/omega/overnight_plan_big_burnin.v1.json}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -28,6 +30,14 @@ while [[ $# -gt 0 ]]; do
       OVERNIGHT_AUTO_HEAL=0
       shift
       ;;
+    --require-overnight-burnin)
+      OVERNIGHT_BURNIN_REQUIRED=1
+      shift
+      ;;
+    --no-require-overnight-burnin)
+      OVERNIGHT_BURNIN_REQUIRED=0
+      shift
+      ;;
     *)
       echo "error: unknown argument '$1'" >&2
       exit 2
@@ -41,6 +51,10 @@ if [[ "$OVERNIGHT_HEALTH_REQUIRED" != "0" && "$OVERNIGHT_HEALTH_REQUIRED" != "1"
 fi
 if [[ "$OVERNIGHT_AUTO_HEAL" != "0" && "$OVERNIGHT_AUTO_HEAL" != "1" ]]; then
   echo "error: PLAN_BIG_OVERNIGHT_HEALTH_AUTO_HEAL must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "$OVERNIGHT_BURNIN_REQUIRED" != "0" && "$OVERNIGHT_BURNIN_REQUIRED" != "1" ]]; then
+  echo "error: PLAN_BIG_OVERNIGHT_BURNIN_REQUIRED must be 0 or 1" >&2
   exit 2
 fi
 
@@ -65,6 +79,9 @@ overnight_health_pass="null"
 overnight_health_ran=false
 overnight_health_rc=0
 overnight_health_action="skipped"
+overnight_burnin_checked=false
+overnight_burnin_pass="null"
+overnight_burnin_reason="skipped"
 
 if jq -e '.gates | length > 0 and all(.status == "pass")' "$BOARD_JSON" >/dev/null 2>&1; then
   gates_pass="true"
@@ -108,6 +125,26 @@ fi
 if [[ "$OVERNIGHT_HEALTH_REQUIRED" -eq 1 && "$overnight_health_pass" != "true" ]]; then
   critical_pass="false"
 fi
+if [[ "$OVERNIGHT_BURNIN_REQUIRED" -eq 1 ]]; then
+  overnight_burnin_checked=true
+  if [[ ! -f "$OVERNIGHT_BURNIN_JSON" ]]; then
+    overnight_burnin_pass="false"
+    overnight_burnin_reason="missing_burnin_artifact"
+  else
+    burnin_schema="$(jq -r '.schema // ""' "$OVERNIGHT_BURNIN_JSON" 2>/dev/null || true)"
+    burnin_status="$(jq -r '.status // ""' "$OVERNIGHT_BURNIN_JSON" 2>/dev/null || true)"
+    if [[ "$burnin_schema" == "sounio.plan.big.overnight.burnin.v1" && "$burnin_status" == "pass" ]]; then
+      overnight_burnin_pass="true"
+      overnight_burnin_reason="burnin_pass"
+    else
+      overnight_burnin_pass="false"
+      overnight_burnin_reason="burnin_not_pass"
+    fi
+  fi
+fi
+if [[ "$OVERNIGHT_BURNIN_REQUIRED" -eq 1 && "$overnight_burnin_pass" != "true" ]]; then
+  critical_pass="false"
+fi
 
 status="fail"
 if [[ "$gates_pass" == "true" && "$critical_pass" == "true" ]]; then
@@ -126,6 +163,11 @@ jq -cn \
   --argjson overnight_health_pass "$overnight_health_pass" \
   --argjson overnight_health_rc "$overnight_health_rc" \
   --arg overnight_health_action "$overnight_health_action" \
+  --argjson overnight_burnin_required "$OVERNIGHT_BURNIN_REQUIRED" \
+  --argjson overnight_burnin_checked "$overnight_burnin_checked" \
+  --argjson overnight_burnin_pass "$overnight_burnin_pass" \
+  --arg overnight_burnin_reason "$overnight_burnin_reason" \
+  --arg overnight_burnin_json "${OVERNIGHT_BURNIN_JSON#$ROOT_DIR/}" \
   '{
     schema: "sounio.plan.big.gate-status.v1",
     generated_at_utc: $generated_at_utc,
@@ -139,7 +181,12 @@ jq -cn \
       overnight_health_ran: $overnight_health_ran,
       overnight_health_pass: $overnight_health_pass,
       overnight_health_rc: $overnight_health_rc,
-      overnight_health_action: $overnight_health_action
+      overnight_health_action: $overnight_health_action,
+      overnight_burnin_required: ($overnight_burnin_required == 1),
+      overnight_burnin_checked: $overnight_burnin_checked,
+      overnight_burnin_pass: $overnight_burnin_pass,
+      overnight_burnin_reason: $overnight_burnin_reason,
+      overnight_burnin_json: $overnight_burnin_json
     },
     pass_marker: ($status == "pass")
   }' > "$OUT_JSON"

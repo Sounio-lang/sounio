@@ -11,6 +11,7 @@ STOP_ON_PASS="${PLAN_BIG_OVERNIGHT_STOP_ON_PASS:-0}"
 ART_DIR="${PLAN_BIG_OVERNIGHT_ART_DIR:-$ROOT_DIR/artifacts/omega/overnight_plan_big}"
 JSONL_PATH="${PLAN_BIG_OVERNIGHT_JSONL:-$ART_DIR/runs.v1.jsonl}"
 LATEST_JSON="${PLAN_BIG_OVERNIGHT_LATEST_JSON:-$ART_DIR/latest.v1.json}"
+GATE_STATUS_JSON="${PLAN_BIG_GATE_STATUS_JSON:-$ROOT_DIR/artifacts/omega/plan_big_gate_status.v1.json}"
 LOCK_DIR="${PLAN_BIG_OVERNIGHT_LOCK_DIR:-$ART_DIR/.lock}"
 LOCK_PID_FILE="$LOCK_DIR/pid"
 HEARTBEAT_JSON="${PLAN_BIG_OVERNIGHT_HEARTBEAT_JSON:-$ART_DIR/heartbeat.v1.json}"
@@ -111,48 +112,76 @@ trap cleanup_lock EXIT INT TERM
 RUN_COUNT=0
 
 run_once() {
-  local ts run_id run_log gate_rc gate_status
-  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  local started_at_utc finished_at_utc run_id run_log gate_rc gate_status duration_sec
+  local start_epoch finish_epoch pass_marker run_result_json gate_status_rel log_path_rel
+  started_at_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  start_epoch="$(date -u +%s)"
   run_id="$(date -u +%Y%m%dT%H%M%SZ)"
   run_log="$ART_DIR/run_${run_id}.log"
+  log_path_rel="${run_log#$ROOT_DIR/}"
+  gate_status_rel="${GATE_STATUS_JSON#$ROOT_DIR/}"
 
-  echo "[overnight-plan-big] run=$((RUN_COUNT + 1)) ts=$ts start" | tee -a "$run_log"
+  echo "[overnight-plan-big] run=$((RUN_COUNT + 1)) started_at_utc=$started_at_utc start" | tee -a "$run_log"
   jq -cn \
-    --arg generated_at_utc "$ts" \
+    --arg generated_at_utc "$started_at_utc" \
     --arg phase "running" \
     --argjson run_number "$((RUN_COUNT + 1))" \
     --arg pid "$$" \
     '{schema:"sounio.plan.big.overnight-heartbeat.v1",generated_at_utc:$generated_at_utc,phase:$phase,run_number:$run_number,pid:($pid|tonumber)}' \
     > "$HEARTBEAT_JSON"
 
-  gate_rc=0
-  if bash "$ROOT_DIR/scripts/plan_big_gate.sh" >>"$run_log" 2>&1; then
+  set +e
+  bash "$ROOT_DIR/scripts/plan_big_gate.sh" >>"$run_log" 2>&1
+  gate_rc=$?
+  set -e
+
+  gate_status="fail"
+  pass_marker=false
+  if [[ "$gate_rc" -eq 0 ]]; then
     gate_status="pass"
-    gate_rc=0
-  else
-    gate_status="fail"
-    gate_rc=$?
+    pass_marker=true
   fi
 
-  jq -cn \
-    --arg generated_at_utc "$ts" \
+  finished_at_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  finish_epoch="$(date -u +%s)"
+  duration_sec=$((finish_epoch - start_epoch))
+  if [[ "$duration_sec" -lt 0 ]]; then
+    duration_sec=0
+  fi
+
+  run_result_json="$(jq -cn \
+    --arg generated_at_utc "$finished_at_utc" \
+    --arg started_at_utc "$started_at_utc" \
+    --arg finished_at_utc "$finished_at_utc" \
     --arg status "$gate_status" \
     --argjson rc "$gate_rc" \
-    --arg log_path "${run_log#$ROOT_DIR/}" \
+    --argjson duration_sec "$duration_sec" \
+    --arg log_path "$log_path_rel" \
+    --arg gate_status_path "$gate_status_rel" \
     --argjson run_number "$((RUN_COUNT + 1))" \
+    --arg pid "$$" \
+    --argjson pass_marker "$pass_marker" \
     '{
       schema: "sounio.plan.big.overnight-run.v1",
       generated_at_utc: $generated_at_utc,
+      started_at_utc: $started_at_utc,
+      finished_at_utc: $finished_at_utc,
+      duration_sec: $duration_sec,
       run_number: $run_number,
+      runner_pid: ($pid|tonumber),
       status: $status,
       rc: $rc,
+      pass_marker: $pass_marker,
+      gate_status_path: $gate_status_path,
       log_path: $log_path
-    }' | tee -a "$JSONL_PATH" > "$LATEST_JSON"
+    }')"
+  echo "$run_result_json" | tee -a "$JSONL_PATH" > "$LATEST_JSON"
 
   jq -cn \
-    --arg generated_at_utc "$ts" \
+    --arg generated_at_utc "$finished_at_utc" \
     --arg phase "idle" \
     --arg status "$gate_status" \
+    --argjson rc "$gate_rc" \
     --argjson run_number "$((RUN_COUNT + 1))" \
     --arg pid "$$" \
     '{
@@ -160,11 +189,12 @@ run_once() {
       generated_at_utc:$generated_at_utc,
       phase:$phase,
       last_status:$status,
+      last_rc:$rc,
       run_number:$run_number,
       pid:($pid|tonumber)
     }' > "$HEARTBEAT_JSON"
 
-  echo "[overnight-plan-big] run=$((RUN_COUNT + 1)) status=$gate_status rc=$gate_rc log=$run_log" | tee -a "$run_log"
+  echo "[overnight-plan-big] run=$((RUN_COUNT + 1)) status=$gate_status rc=$gate_rc started_at_utc=$started_at_utc finished_at_utc=$finished_at_utc duration_sec=$duration_sec log=$run_log gate_status_path=$gate_status_rel" | tee -a "$run_log"
 
   if [[ "$STOP_ON_PASS" -eq 1 && "$gate_status" == "pass" ]]; then
     echo "[overnight-plan-big] stop-on-pass reached; exiting" | tee -a "$run_log"
@@ -174,8 +204,10 @@ run_once() {
 }
 
 while true; do
-  run_once || rc=$?
-  rc="${rc:-0}"
+  rc=0
+  if ! run_once; then
+    rc=$?
+  fi
   RUN_COUNT=$((RUN_COUNT + 1))
 
   if [[ "$rc" -eq 10 ]]; then

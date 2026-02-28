@@ -121,6 +121,7 @@ heartbeat_last_status=""
 heartbeat_age_seconds=-1
 heartbeat_fresh=false
 heartbeat_stale=true
+heartbeat_pid_live=false
 
 if [[ -f "$HEARTBEAT_JSON" ]]; then
   heartbeat_present=true
@@ -132,8 +133,11 @@ if [[ -f "$HEARTBEAT_JSON" ]]; then
     heartbeat_run_number="$(jq -r '.run_number // 0' "$HEARTBEAT_JSON")"
     heartbeat_pid="$(jq -r '.pid // ""' "$HEARTBEAT_JSON")"
     heartbeat_last_status="$(jq -r '.last_status // ""' "$HEARTBEAT_JSON")"
+    if is_pid_live "$heartbeat_pid"; then
+      heartbeat_pid_live=true
+    fi
 
-    if [[ -n "$heartbeat_ts" ]]; then
+    if [[ "$heartbeat_pid_live" == "true" && -n "$heartbeat_ts" ]]; then
       hb_epoch="$(date -u -d "$heartbeat_ts" +%s 2>/dev/null || echo "")"
       now_epoch="$(date -u +%s)"
       if [[ -n "$hb_epoch" ]]; then
@@ -154,6 +158,12 @@ latest_run_number=0
 latest_ts=""
 latest_status=""
 latest_rc=0
+latest_started_at_utc=""
+latest_finished_at_utc=""
+latest_duration_sec=0
+latest_pass_marker=false
+latest_gate_status_path=""
+latest_runner_pid=""
 latest_log_path=""
 latest_log_abs=""
 latest_log_exists=false
@@ -165,8 +175,14 @@ if [[ -f "$LATEST_JSON" ]]; then
     latest_valid=true
     latest_run_number="$(jq -r '.run_number // 0' "$LATEST_JSON")"
     latest_ts="$(jq -r '.generated_at_utc // ""' "$LATEST_JSON")"
+    latest_started_at_utc="$(jq -r '.started_at_utc // ""' "$LATEST_JSON")"
+    latest_finished_at_utc="$(jq -r '.finished_at_utc // ""' "$LATEST_JSON")"
+    latest_duration_sec="$(jq -r '.duration_sec // 0' "$LATEST_JSON")"
     latest_status="$(jq -r '.status // ""' "$LATEST_JSON")"
     latest_rc="$(jq -r '.rc // 0' "$LATEST_JSON")"
+    latest_pass_marker="$(jq -r '.pass_marker // false' "$LATEST_JSON")"
+    latest_gate_status_path="$(jq -r '.gate_status_path // ""' "$LATEST_JSON")"
+    latest_runner_pid="$(jq -r '.runner_pid // ""' "$LATEST_JSON")"
     latest_log_path="$(jq -r '.log_path // ""' "$LATEST_JSON")"
     if [[ -n "$latest_log_path" ]]; then
       latest_log_abs="$ROOT_DIR/$latest_log_path"
@@ -211,14 +227,21 @@ status_json="$(jq -cn \
   --argjson heartbeat_age_seconds "$heartbeat_age_seconds" \
   --argjson heartbeat_fresh "$heartbeat_fresh" \
   --argjson heartbeat_stale "$heartbeat_stale" \
+  --argjson heartbeat_pid_live "$heartbeat_pid_live" \
   --arg latest_path "${LATEST_JSON#$ROOT_DIR/}" \
   --argjson latest_present "$latest_present" \
   --argjson latest_valid "$latest_valid" \
   --arg latest_schema "$latest_schema" \
   --argjson latest_run_number "$latest_run_number" \
   --arg latest_ts "$latest_ts" \
+  --arg latest_started_at_utc "$latest_started_at_utc" \
+  --arg latest_finished_at_utc "$latest_finished_at_utc" \
+  --argjson latest_duration_sec "$latest_duration_sec" \
   --arg latest_status "$latest_status" \
   --argjson latest_rc "$latest_rc" \
+  --argjson latest_pass_marker "$latest_pass_marker" \
+  --arg latest_gate_status_path "$latest_gate_status_path" \
+  --arg latest_runner_pid "$latest_runner_pid" \
   --arg latest_log_path "$latest_log_path" \
   --argjson latest_log_exists "$latest_log_exists" \
   --arg log_path "${log_path#$ROOT_DIR/}" \
@@ -231,8 +254,8 @@ status_json="$(jq -cn \
     state_reason:$state_reason,
     runner:{pid_file:$runner_pid_file,pid:$runner_pid,live:$runner_live,stale:($runner_pid != "" and ($runner_live | not))},
     lock:{dir:$lock_dir,pid:$lock_pid,live:$lock_live,dir_exists:$lock_dir_exists,stale:($lock_dir_exists and ($lock_live | not))},
-    heartbeat:{path:$heartbeat_path,present:$heartbeat_present,valid:$heartbeat_valid,schema:$heartbeat_schema,phase:$heartbeat_phase,generated_at_utc:$heartbeat_ts,run_number:$heartbeat_run_number,pid:$heartbeat_pid,last_status:$heartbeat_last_status,age_seconds:$heartbeat_age_seconds,fresh:$heartbeat_fresh,stale:$heartbeat_stale},
-    latest:{path:$latest_path,present:$latest_present,valid:$latest_valid,schema:$latest_schema,run_number:$latest_run_number,generated_at_utc:$latest_ts,status:$latest_status,rc:$latest_rc,log_path:$latest_log_path,log_exists:$latest_log_exists},
+    heartbeat:{path:$heartbeat_path,present:$heartbeat_present,valid:$heartbeat_valid,schema:$heartbeat_schema,phase:$heartbeat_phase,generated_at_utc:$heartbeat_ts,run_number:$heartbeat_run_number,pid:$heartbeat_pid,pid_live:$heartbeat_pid_live,last_status:$heartbeat_last_status,age_seconds:$heartbeat_age_seconds,fresh:$heartbeat_fresh,stale:$heartbeat_stale},
+    latest:{path:$latest_path,present:$latest_present,valid:$latest_valid,schema:$latest_schema,run_number:$latest_run_number,generated_at_utc:$latest_ts,started_at_utc:$latest_started_at_utc,finished_at_utc:$latest_finished_at_utc,duration_sec:$latest_duration_sec,runner_pid:$latest_runner_pid,status:$latest_status,rc:$latest_rc,pass_marker:$latest_pass_marker,gate_status_path:$latest_gate_status_path,log_path:$latest_log_path,log_exists:$latest_log_exists},
     log:{path:$log_path,tail_lines_requested:$tail_lines,tail:$log_tail},
     errors:[]
   }')"
@@ -246,8 +269,8 @@ if [[ "$JSON_ONLY" -eq 0 ]]; then
   echo "overnight-plan-big status: $state ($state_reason)"
   echo "runner pid: ${runner_pid:-none} live=$runner_live"
   echo "lock pid: ${lock_pid:-none} live=$lock_live dir_exists=$lock_dir_exists"
-  echo "heartbeat: present=$heartbeat_present valid=$heartbeat_valid phase=${heartbeat_phase:-none} age_sec=$heartbeat_age_seconds fresh=$heartbeat_fresh"
-  echo "latest: present=$latest_present valid=$latest_valid run=${latest_run_number:-0} status=${latest_status:-unknown} rc=${latest_rc:-0}"
+  echo "heartbeat: present=$heartbeat_present valid=$heartbeat_valid pid_live=$heartbeat_pid_live phase=${heartbeat_phase:-none} age_sec=$heartbeat_age_seconds fresh=$heartbeat_fresh"
+  echo "latest: present=$latest_present valid=$latest_valid run=${latest_run_number:-0} status=${latest_status:-unknown} rc=${latest_rc:-0} pass_marker=${latest_pass_marker:-false} duration_sec=${latest_duration_sec:-0}"
   echo "log tail ($TAIL_LINES lines): ${log_path#$ROOT_DIR/}"
   tail -n "$TAIL_LINES" "$log_path" 2>/dev/null || true
 fi

@@ -71,6 +71,7 @@ lock_pid="$(read_pid "$LOCK_PID_FILE")"
 
 if [[ -z "$runner_pid" && -z "$lock_pid" ]]; then
   cleanup_stale_files
+  echo "OVERNIGHT_PLAN_BIG_STOP_SUCCESS mode=already_stopped"
   echo "OVERNIGHT_PLAN_BIG_ALREADY_STOPPED"
   exit 0
 fi
@@ -84,6 +85,7 @@ fi
 
 if [[ -z "$target_pid" ]]; then
   cleanup_stale_files
+  echo "OVERNIGHT_PLAN_BIG_STOP_SUCCESS mode=stale_cleanup"
   echo "OVERNIGHT_PLAN_BIG_STOPPED_STALE_STATE_CLEANED"
   exit 0
 fi
@@ -94,6 +96,7 @@ kill "-$target_pid" 2>/dev/null || true
 for _ in $(seq 1 "$WAIT_SEC"); do
   if ! is_pid_live "$target_pid"; then
     cleanup_stale_files
+    echo "OVERNIGHT_PLAN_BIG_STOP_SUCCESS mode=graceful pid=$target_pid"
     echo "OVERNIGHT_PLAN_BIG_STOPPED pid=$target_pid"
     exit 0
   fi
@@ -107,8 +110,10 @@ sleep 1
 if ! is_pid_live "$target_pid"; then
   cleanup_stale_files
   if [[ "$FORCE" -eq 1 ]]; then
+    echo "OVERNIGHT_PLAN_BIG_STOP_SUCCESS mode=force_escalated pid=$target_pid"
     echo "OVERNIGHT_PLAN_BIG_STOPPED_FORCE pid=$target_pid"
   else
+    echo "OVERNIGHT_PLAN_BIG_STOP_SUCCESS mode=escalated pid=$target_pid"
     echo "OVERNIGHT_PLAN_BIG_STOPPED pid=$target_pid mode=escalated"
   fi
   exit 0
