@@ -1,0 +1,1493 @@
+// self-hosted::ir::cfg — Control Flow Graph analysis
+//
+// Standalone CFG analysis module for the self-hosted compiler IR.
+// Provides:
+//   1. CFG construction from block/edge descriptors
+//   2. Post-order and reverse post-order traversals (iterative DFS)
+//   3. Dominator computation (Cooper-Harvey-Kennedy iterative algorithm)
+//   4. Dominance frontier computation
+//   5. Natural loop identification via back-edge detection
+//   6. Loop nesting depth computation
+//   7. Reducibility check
+//   8. Critical edge detection
+//   9. Reachability and dead-block analysis
+//
+// All arrays are fixed-size — no heap allocation.
+//
+// References:
+//   Cooper, Harvey, Kennedy: "A Simple, Fast Dominance Algorithm" (2001)
+//   Cytron et al.: "Efficiently Computing Static Single Assignment Form" (1991)
+//   Muchnick: "Advanced Compiler Design and Implementation" (1997)
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+let CFG_MAX_BLOCKS: i64 = 512
+let CFG_MAX_SUCCS: i64 = 8
+let CFG_MAX_PREDS: i64 = 8
+let CFG_MAX_DF: i64 = 32
+let CFG_INVALID: i64 = 0 - 1
+
+// Edge kind constants
+let CFG_EDGE_FALL: i64 = 1
+let CFG_EDGE_BRANCH: i64 = 2
+let CFG_EDGE_BACK: i64 = 3
+let CFG_EDGE_SWITCH: i64 = 4
+
+// ============================================================================
+// Section 1: Data structures
+// ============================================================================
+
+struct CfgBlock {
+    id: i64,
+    instr_start: i64,
+    instr_end: i64,
+    succs: [i64; 8],
+    succ_count: i64,
+    preds: [i64; 8],
+    pred_count: i64,
+    is_entry: bool,
+    is_exit: bool,
+    loop_depth: i64,
+}
+
+struct CfgEdge {
+    from_bb: i64,
+    to_bb: i64,
+    kind: i64,
+    is_critical: bool,
+}
+
+struct CfgAnalysis {
+    blocks: [CfgBlock; 512],
+    block_count: i64,
+    idom: [i64; 512],
+    dom_frontier: [[i64; 32]; 512],
+    df_sizes: [i64; 512],
+    post_order: [i64; 512],
+    po_count: i64,
+    rpo: [i64; 512],
+    rpo_count: i64,
+    loop_headers: [bool; 512],
+}
+
+// ============================================================================
+// Section 2: Constructors
+// ============================================================================
+
+fn cfg_block_new(id: i64, istart: i64, iend: i64) -> CfgBlock {
+    CfgBlock {
+        id: id,
+        instr_start: istart,
+        instr_end: iend,
+        succs: [CFG_INVALID; 8],
+        succ_count: 0,
+        preds: [CFG_INVALID; 8],
+        pred_count: 0,
+        is_entry: false,
+        is_exit: false,
+        loop_depth: 0,
+    }
+}
+
+fn cfg_edge_new(from: i64, to: i64, kind: i64) -> CfgEdge {
+    CfgEdge {
+        from_bb: from,
+        to_bb: to,
+        kind: kind,
+        is_critical: false,
+    }
+}
+
+fn cfg_analysis_new() -> CfgAnalysis {
+    CfgAnalysis {
+        blocks: [cfg_block_new(0, 0, 0); 512],
+        block_count: 0,
+        idom: [CFG_INVALID; 512],
+        dom_frontier: [[CFG_INVALID; 32]; 512],
+        df_sizes: [0; 512],
+        post_order: [CFG_INVALID; 512],
+        po_count: 0,
+        rpo: [CFG_INVALID; 512],
+        rpo_count: 0,
+        loop_headers: [false; 512],
+    }
+}
+
+// ============================================================================
+// Section 3: CFG construction
+// ============================================================================
+
+// Add a block to the analysis. Returns the updated analysis.
+fn cfg_add_block(cfg: CfgAnalysis, block: CfgBlock) -> CfgAnalysis with Mut, Panic, Div {
+    var result = cfg
+    if result.block_count < CFG_MAX_BLOCKS {
+        let idx = result.block_count
+        result.blocks[idx as usize] = block
+        result.block_count = idx + 1
+    }
+    result
+}
+
+// Add a directed edge from block `from` to block `to`.
+// Appends `to` to succs of block `from` (found by scanning blocks[].id).
+fn cfg_add_edge(cfg: CfgAnalysis, from: i64, to: i64) -> CfgAnalysis with Mut, Panic, Div {
+    var result = cfg
+
+    // Find the block with id == from and add successor
+    var i: i64 = 0
+    while i < result.block_count {
+        if result.blocks[i as usize].id == from {
+            let sc = result.blocks[i as usize].succ_count
+            if sc < CFG_MAX_SUCCS {
+                result.blocks[i as usize].succs[sc as usize] = to
+                result.blocks[i as usize].succ_count = sc + 1
+            }
+        }
+        i = i + 1
+    }
+
+    result
+}
+
+// Find block index by id. Returns CFG_INVALID if not found.
+fn cfg_find_block(cfg: CfgAnalysis, id: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < cfg.block_count {
+        if cfg.blocks[i as usize].id == id {
+            return i
+        }
+        i = i + 1
+    }
+    CFG_INVALID
+}
+
+// ============================================================================
+// Section 4: Predecessor computation
+// ============================================================================
+
+// Fill in predecessor lists from successor lists.
+// Clears all pred arrays first, then scans every successor edge to build preds.
+fn cfg_compute_preds(cfg: CfgAnalysis) -> CfgAnalysis with Mut, Panic, Div {
+    var result = cfg
+
+    // Clear all predecessor lists
+    var c: i64 = 0
+    while c < result.block_count {
+        result.blocks[c as usize].pred_count = 0
+        var k: i64 = 0
+        while k < CFG_MAX_PREDS {
+            result.blocks[c as usize].preds[k as usize] = CFG_INVALID
+            k = k + 1
+        }
+        c = c + 1
+    }
+
+    // For each block, for each successor, add this block as a predecessor
+    var i: i64 = 0
+    while i < result.block_count {
+        let src_id = result.blocks[i as usize].id
+        var si: i64 = 0
+        while si < result.blocks[i as usize].succ_count {
+            let tgt_id = result.blocks[i as usize].succs[si as usize]
+            // Find the target block index
+            var j: i64 = 0
+            while j < result.block_count {
+                if result.blocks[j as usize].id == tgt_id {
+                    let pc = result.blocks[j as usize].pred_count
+                    if pc < CFG_MAX_PREDS {
+                        result.blocks[j as usize].preds[pc as usize] = src_id
+                        result.blocks[j as usize].pred_count = pc + 1
+                    }
+                }
+                j = j + 1
+            }
+            si = si + 1
+        }
+        i = i + 1
+    }
+
+    result
+}
+
+// ============================================================================
+// Section 5: Post-order and reverse post-order traversals
+// ============================================================================
+
+// Iterative DFS post-order traversal starting from the entry block (id 0).
+// Uses an explicit stack to avoid recursion.
+fn cfg_post_order(cfg: CfgAnalysis) -> CfgAnalysis with Mut, Panic, Div {
+    var result = cfg
+    result.po_count = 0
+
+    // visited[i] marks whether block with index i has been fully processed
+    var visited: [bool; 512] = [false; 512]
+    // expanded[i] marks whether block index i has had its successors pushed
+    var expanded: [bool; 512] = [false; 512]
+
+    // Explicit DFS stack (stores block indices, not ids)
+    var stack: [i64; 512] = [0; 512]
+    var sp: i64 = 0
+
+    // Push entry block (index 0, id 0)
+    let entry_idx = cfg_find_block(result, 0)
+    if entry_idx == CFG_INVALID {
+        return result
+    }
+    stack[0] = entry_idx
+    sp = 1
+
+    while sp > 0 {
+        let top = stack[(sp - 1) as usize]
+
+        if !expanded[top as usize] {
+            expanded[top as usize] = true
+
+            // Push unvisited successors in reverse order for correct DFS order
+            let blk = result.blocks[top as usize]
+            var si: i64 = blk.succ_count - 1
+            while si >= 0 {
+                let succ_id = blk.succs[si as usize]
+                let succ_idx = cfg_find_block(result, succ_id)
+                if succ_idx != CFG_INVALID && !visited[succ_idx as usize] && !expanded[succ_idx as usize] {
+                    if sp < CFG_MAX_BLOCKS {
+                        stack[sp as usize] = succ_idx
+                        sp = sp + 1
+                    }
+                }
+                si = si - 1
+            }
+        } else {
+            // All successors processed; emit this block in post-order
+            sp = sp - 1
+            if !visited[top as usize] {
+                visited[top as usize] = true
+                let blk_id = result.blocks[top as usize].id
+                if result.po_count < CFG_MAX_BLOCKS {
+                    result.post_order[result.po_count as usize] = blk_id
+                    result.po_count = result.po_count + 1
+                }
+            }
+        }
+    }
+
+    result
+}
+
+// Reverse post-order: simply reverse the post_order array.
+fn cfg_reverse_post_order(cfg: CfgAnalysis) -> CfgAnalysis with Mut, Panic, Div {
+    var result = cfg_post_order(cfg)
+
+    result.rpo_count = result.po_count
+    var i: i64 = 0
+    while i < result.po_count {
+        result.rpo[i as usize] = result.post_order[(result.po_count - 1 - i) as usize]
+        i = i + 1
+    }
+
+    result
+}
+
+// ============================================================================
+// Section 6: Dominator computation (Cooper-Harvey-Kennedy)
+// ============================================================================
+
+// Map block id to its RPO position. Returns CFG_INVALID if not found.
+fn cfg_rpo_index(cfg: CfgAnalysis, block_id: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < cfg.rpo_count {
+        if cfg.rpo[i as usize] == block_id {
+            return i
+        }
+        i = i + 1
+    }
+    CFG_INVALID
+}
+
+// Intersect function for iterative dominator algorithm.
+// Both fingers are RPO indices. Walks up the idom tree until they meet.
+fn cfg_dom_intersect(idom: [i64; 512], rpo: [i64; 512], rpo_count: i64, b1_in: i64, b2_in: i64) -> i64 with Mut, Panic, Div {
+    var f1 = b1_in
+    var f2 = b2_in
+    var guard: i64 = 0
+    while f1 != f2 && guard < 1024 {
+        while f1 > f2 && guard < 1024 {
+            // idom is indexed by block id; get the RPO index of idom[rpo[f1]]
+            let blk_id = rpo[f1 as usize]
+            let dom_id = idom[blk_id as usize]
+            if dom_id == CFG_INVALID {
+                return f2
+            }
+            f1 = cfg_dom_intersect_rpo_idx(rpo, rpo_count, dom_id)
+            if f1 == CFG_INVALID {
+                return f2
+            }
+            guard = guard + 1
+        }
+        while f2 > f1 && guard < 1024 {
+            let blk_id = rpo[f2 as usize]
+            let dom_id = idom[blk_id as usize]
+            if dom_id == CFG_INVALID {
+                return f1
+            }
+            f2 = cfg_dom_intersect_rpo_idx(rpo, rpo_count, dom_id)
+            if f2 == CFG_INVALID {
+                return f1
+            }
+            guard = guard + 1
+        }
+        guard = guard + 1
+    }
+    f1
+}
+
+// Helper: find the RPO index of a block id.
+fn cfg_dom_intersect_rpo_idx(rpo: [i64; 512], rpo_count: i64, block_id: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < rpo_count {
+        if rpo[i as usize] == block_id {
+            return i
+        }
+        i = i + 1
+    }
+    CFG_INVALID
+}
+
+// Compute immediate dominators using Cooper-Harvey-Kennedy.
+// Requires post_order and rpo to be computed first (calls cfg_reverse_post_order).
+fn cfg_compute_dominators(cfg: CfgAnalysis) -> CfgAnalysis with Mut, Panic, Div {
+    var result = cfg_reverse_post_order(cfg)
+
+    // Initialize idom: entry block (id 0) dominates itself
+    var i: i64 = 0
+    while i < CFG_MAX_BLOCKS {
+        result.idom[i as usize] = CFG_INVALID
+        i = i + 1
+    }
+    result.idom[0] = 0
+
+    // Iterative fixed-point
+    var changed: bool = true
+    var iterations: i64 = 0
+    while changed && iterations < 512 {
+        changed = false
+        iterations = iterations + 1
+
+        // Process all blocks in RPO order, skipping entry (rpo[0] == 0)
+        var ri: i64 = 1
+        while ri < result.rpo_count {
+            let b = result.rpo[ri as usize]
+            if b == 0 {
+                ri = ri + 1
+            } else {
+                // Find block index for b to get its predecessors
+                let bidx = cfg_find_block(result, b)
+                if bidx == CFG_INVALID {
+                    ri = ri + 1
+                } else {
+                    let blk = result.blocks[bidx as usize]
+                    let pcnt = blk.pred_count
+
+                    // Find the first processed predecessor (has idom set)
+                    var new_idom_rpo: i64 = CFG_INVALID
+                    var first_pred_id: i64 = CFG_INVALID
+                    var pi: i64 = 0
+                    while pi < pcnt {
+                        let pred_id = blk.preds[pi as usize]
+                        if pred_id != CFG_INVALID && result.idom[pred_id as usize] != CFG_INVALID {
+                            first_pred_id = pred_id
+                            new_idom_rpo = cfg_dom_intersect_rpo_idx(result.rpo, result.rpo_count, pred_id)
+                            pi = pcnt  // break
+                        }
+                        pi = pi + 1
+                    }
+
+                    // Intersect with remaining processed predecessors
+                    if new_idom_rpo != CFG_INVALID {
+                        var qi: i64 = 0
+                        while qi < pcnt {
+                            let pred_id = blk.preds[qi as usize]
+                            if pred_id != CFG_INVALID && pred_id != first_pred_id && result.idom[pred_id as usize] != CFG_INVALID {
+                                let pred_rpo = cfg_dom_intersect_rpo_idx(result.rpo, result.rpo_count, pred_id)
+                                if pred_rpo != CFG_INVALID {
+                                    new_idom_rpo = cfg_dom_intersect(result.idom, result.rpo, result.rpo_count, new_idom_rpo, pred_rpo)
+                                }
+                            }
+                            qi = qi + 1
+                        }
+
+                        // Convert RPO index back to block id
+                        let new_idom_id = result.rpo[new_idom_rpo as usize]
+                        if result.idom[b as usize] != new_idom_id {
+                            result.idom[b as usize] = new_idom_id
+                            changed = true
+                        }
+                    }
+
+                    ri = ri + 1
+                }
+            }
+        }
+    }
+
+    result
+}
+
+// Check if block `a` dominates block `b`.
+fn cfg_dominates(cfg: CfgAnalysis, a: i64, b: i64) -> bool with Mut, Panic, Div {
+    if a == b {
+        return true
+    }
+    if b < 0 || b >= CFG_MAX_BLOCKS {
+        return false
+    }
+    var runner = b
+    var steps: i64 = 0
+    while runner != a && steps < CFG_MAX_BLOCKS {
+        let dom = cfg.idom[runner as usize]
+        if dom == CFG_INVALID || dom == runner {
+            return false
+        }
+        runner = dom
+        steps = steps + 1
+    }
+    runner == a
+}
+
+// Strict dominance: a strictly dominates b iff a dominates b and a != b.
+fn cfg_strictly_dominates(cfg: CfgAnalysis, a: i64, b: i64) -> bool with Mut, Panic, Div {
+    if a == b {
+        return false
+    }
+    cfg_dominates(cfg, a, b)
+}
+
+// ============================================================================
+// Section 7: Dominance frontier computation
+// ============================================================================
+
+// Helper: check if a value is in a fixed-size i64 array.
+fn cfg_array_contains(arr: [i64; 32], count: i64, val: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < count {
+        if arr[i as usize] == val {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Compute dominance frontiers for all blocks.
+// DF(b) = { y : exists pred p of y such that b dominates p but b does not
+//            strictly dominate y }
+fn cfg_compute_dom_frontier(cfg: CfgAnalysis) -> CfgAnalysis with Mut, Panic, Div {
+    var result = cfg
+
+    // Clear frontier arrays
+    var c: i64 = 0
+    while c < result.block_count {
+        result.df_sizes[c as usize] = 0
+        var k: i64 = 0
+        while k < CFG_MAX_DF {
+            result.dom_frontier[c as usize][k as usize] = CFG_INVALID
+            k = k + 1
+        }
+        c = c + 1
+    }
+
+    // For each block y, for each predecessor p, walk up the dominator tree
+    // from p until we reach idom(y), adding y to each block's DF along the way.
+    var yi: i64 = 0
+    while yi < result.block_count {
+        let y_id = result.blocks[yi as usize].id
+        let y_pred_count = result.blocks[yi as usize].pred_count
+
+        if y_pred_count >= 2 {
+            // Only blocks with multiple predecessors can be in dominance frontiers
+            var pi: i64 = 0
+            while pi < y_pred_count {
+                let pred_id = result.blocks[yi as usize].preds[pi as usize]
+                if pred_id != CFG_INVALID {
+                    var runner = pred_id
+                    var guard: i64 = 0
+                    // Walk up idom tree from pred until we reach idom(y)
+                    let y_idom = result.idom[y_id as usize]
+                    while runner != y_idom && runner != CFG_INVALID && guard < CFG_MAX_BLOCKS {
+                        // Add y to DF(runner)
+                        let ridx = cfg_find_block(result, runner)
+                        if ridx != CFG_INVALID {
+                            let dfs = result.df_sizes[ridx as usize]
+                            if !cfg_array_contains(result.dom_frontier[ridx as usize], dfs, y_id) && dfs < CFG_MAX_DF {
+                                result.dom_frontier[ridx as usize][dfs as usize] = y_id
+                                result.df_sizes[ridx as usize] = dfs + 1
+                            }
+                        }
+                        runner = result.idom[runner as usize]
+                        guard = guard + 1
+                    }
+                }
+                pi = pi + 1
+            }
+        }
+        yi = yi + 1
+    }
+
+    result
+}
+
+// ============================================================================
+// Section 8: Loop analysis
+// ============================================================================
+
+// Identify natural loops via back edges.
+// A back edge (b -> h) exists when h dominates b. The target h is a loop header.
+fn cfg_identify_loops(cfg: CfgAnalysis) -> CfgAnalysis with Mut, Panic, Div {
+    var result = cfg
+
+    // Clear loop headers
+    var c: i64 = 0
+    while c < CFG_MAX_BLOCKS {
+        result.loop_headers[c as usize] = false
+        c = c + 1
+    }
+
+    // Scan all edges: for each block, for each successor, check for back edges
+    var i: i64 = 0
+    while i < result.block_count {
+        let blk = result.blocks[i as usize]
+        let src_id = blk.id
+        var si: i64 = 0
+        while si < blk.succ_count {
+            let tgt_id = blk.succs[si as usize]
+            // Back edge if target dominates source
+            if tgt_id != CFG_INVALID && cfg_dominates(result, tgt_id, src_id) {
+                if tgt_id >= 0 && tgt_id < CFG_MAX_BLOCKS {
+                    result.loop_headers[tgt_id as usize] = true
+                }
+            }
+            si = si + 1
+        }
+        i = i + 1
+    }
+
+    result
+}
+
+// Compute loop nesting depth for each block.
+// For each loop header h, find the natural loop body (blocks from which h is
+// reachable via predecessors without leaving the loop), then increment
+// loop_depth for each body block.
+fn cfg_loop_depth(cfg: CfgAnalysis) -> CfgAnalysis with Mut, Panic, Div {
+    var result = cfg_identify_loops(cfg)
+
+    // Reset loop depths
+    var c: i64 = 0
+    while c < result.block_count {
+        result.blocks[c as usize].loop_depth = 0
+        c = c + 1
+    }
+
+    // For each loop header, discover its natural loop body
+    var hi: i64 = 0
+    while hi < result.block_count {
+        let h_id = result.blocks[hi as usize].id
+        if h_id >= 0 && h_id < CFG_MAX_BLOCKS && result.loop_headers[h_id as usize] {
+            // Find all back-edge sources for this header
+            var in_loop: [bool; 512] = [false; 512]
+            in_loop[h_id as usize] = true
+
+            // Worklist: start from back-edge sources
+            var wl: [i64; 512] = [0; 512]
+            var wl_count: i64 = 0
+
+            // Find all blocks that have a back edge to h_id
+            var bi: i64 = 0
+            while bi < result.block_count {
+                let blk = result.blocks[bi as usize]
+                var si: i64 = 0
+                while si < blk.succ_count {
+                    if blk.succs[si as usize] == h_id && cfg_dominates(result, h_id, blk.id) && blk.id != h_id {
+                        if !in_loop[blk.id as usize] {
+                            in_loop[blk.id as usize] = true
+                            wl[wl_count as usize] = blk.id
+                            wl_count = wl_count + 1
+                        }
+                    }
+                    si = si + 1
+                }
+                bi = bi + 1
+            }
+
+            // Propagate backwards through predecessors
+            var head: i64 = 0
+            while head < wl_count {
+                let n = wl[head as usize]
+                head = head + 1
+
+                // Find block index for n
+                let nidx = cfg_find_block(result, n)
+                if nidx != CFG_INVALID {
+                    let nblk = result.blocks[nidx as usize]
+                    var pi: i64 = 0
+                    while pi < nblk.pred_count {
+                        let pred_id = nblk.preds[pi as usize]
+                        if pred_id != CFG_INVALID && pred_id >= 0 && pred_id < CFG_MAX_BLOCKS {
+                            if !in_loop[pred_id as usize] {
+                                in_loop[pred_id as usize] = true
+                                if wl_count < CFG_MAX_BLOCKS {
+                                    wl[wl_count as usize] = pred_id
+                                    wl_count = wl_count + 1
+                                }
+                            }
+                        }
+                        pi = pi + 1
+                    }
+                }
+            }
+
+            // Increment loop_depth for all blocks in this loop body
+            var li: i64 = 0
+            while li < result.block_count {
+                let lid = result.blocks[li as usize].id
+                if lid >= 0 && lid < CFG_MAX_BLOCKS && in_loop[lid as usize] {
+                    result.blocks[li as usize].loop_depth = result.blocks[li as usize].loop_depth + 1
+                }
+                li = li + 1
+            }
+        }
+        hi = hi + 1
+    }
+
+    result
+}
+
+// ============================================================================
+// Section 9: Reducibility check
+// ============================================================================
+
+// A CFG is reducible iff every back edge (b -> h where h dominates b) defines
+// a natural loop, and there are no irreducible regions. We check by verifying
+// that every retreating edge in a DFS is a back edge (dominator-based).
+fn cfg_is_reducible(cfg: CfgAnalysis) -> bool with Mut, Panic, Div {
+    // Perform DFS and check retreating edges
+    var visited: [bool; 512] = [false; 512]
+    var in_stack: [bool; 512] = [false; 512]
+
+    // DFS stack: (block_idx, succ_cursor)
+    var stk_block: [i64; 512] = [0; 512]
+    var stk_cursor: [i64; 512] = [0; 512]
+    var sp: i64 = 0
+
+    let entry_idx = cfg_find_block(cfg, 0)
+    if entry_idx == CFG_INVALID {
+        return true
+    }
+
+    stk_block[0] = entry_idx
+    stk_cursor[0] = 0
+    sp = 1
+    visited[entry_idx as usize] = true
+    in_stack[entry_idx as usize] = true
+
+    while sp > 0 {
+        let top_idx = stk_block[(sp - 1) as usize]
+        let cursor = stk_cursor[(sp - 1) as usize]
+        let blk = cfg.blocks[top_idx as usize]
+
+        if cursor >= blk.succ_count {
+            // Done with this block
+            in_stack[top_idx as usize] = false
+            sp = sp - 1
+        } else {
+            // Advance cursor
+            stk_cursor[(sp - 1) as usize] = cursor + 1
+            let succ_id = blk.succs[cursor as usize]
+            if succ_id == CFG_INVALID {
+                // skip
+            } else {
+                let succ_idx = cfg_find_block(cfg, succ_id)
+                if succ_idx == CFG_INVALID {
+                    // skip
+                } else if !visited[succ_idx as usize] {
+                    // Tree edge
+                    visited[succ_idx as usize] = true
+                    in_stack[succ_idx as usize] = true
+                    if sp < CFG_MAX_BLOCKS {
+                        stk_block[sp as usize] = succ_idx
+                        stk_cursor[sp as usize] = 0
+                        sp = sp + 1
+                    }
+                } else if in_stack[succ_idx as usize] {
+                    // Retreating edge — must be a back edge (target dominates source)
+                    let src_id = blk.id
+                    if !cfg_dominates(cfg, succ_id, src_id) {
+                        return false
+                    }
+                }
+                // Cross/forward edges are fine
+            }
+        }
+    }
+
+    true
+}
+
+// ============================================================================
+// Section 10: Critical edge detection
+// ============================================================================
+
+// An edge (u -> v) is critical if u has multiple successors AND v has multiple
+// predecessors. Returns a flat array of CfgEdge plus count.
+fn cfg_split_critical_edges(cfg: CfgAnalysis) -> ([CfgEdge; 512], i64) with Mut, Panic, Div {
+    var edges: [CfgEdge; 512] = [cfg_edge_new(0, 0, 0); 512]
+    var count: i64 = 0
+
+    var i: i64 = 0
+    while i < cfg.block_count {
+        let blk = cfg.blocks[i as usize]
+        if blk.succ_count > 1 {
+            // Check each successor
+            var si: i64 = 0
+            while si < blk.succ_count {
+                let succ_id = blk.succs[si as usize]
+                if succ_id != CFG_INVALID {
+                    // Find successor block
+                    let succ_idx = cfg_find_block(cfg, succ_id)
+                    if succ_idx != CFG_INVALID {
+                        if cfg.blocks[succ_idx as usize].pred_count > 1 {
+                            // Critical edge found
+                            if count < 512 {
+                                var e = cfg_edge_new(blk.id, succ_id, CFG_EDGE_BRANCH)
+                                e.is_critical = true
+                                edges[count as usize] = e
+                                count = count + 1
+                            }
+                        }
+                    }
+                }
+                si = si + 1
+            }
+        }
+        i = i + 1
+    }
+
+    (edges, count)
+}
+
+// ============================================================================
+// Section 11: Reachability
+// ============================================================================
+
+// Compute the set of block ids reachable from a given block via BFS.
+// Returns (reachable_set, count).
+fn cfg_reachable_from(cfg: CfgAnalysis, start_id: i64) -> ([i64; 512], i64) with Mut, Panic, Div {
+    var reached: [i64; 512] = [CFG_INVALID; 512]
+    var count: i64 = 0
+    var visited: [bool; 512] = [false; 512]
+
+    // BFS queue
+    var queue: [i64; 512] = [0; 512]
+    var head: i64 = 0
+    var tail: i64 = 0
+
+    if start_id >= 0 && start_id < CFG_MAX_BLOCKS {
+        queue[tail as usize] = start_id
+        tail = tail + 1
+        visited[start_id as usize] = true
+    }
+
+    while head < tail {
+        let cur = queue[head as usize]
+        head = head + 1
+
+        if count < CFG_MAX_BLOCKS {
+            reached[count as usize] = cur
+            count = count + 1
+        }
+
+        let idx = cfg_find_block(cfg, cur)
+        if idx != CFG_INVALID {
+            let blk = cfg.blocks[idx as usize]
+            var si: i64 = 0
+            while si < blk.succ_count {
+                let s = blk.succs[si as usize]
+                if s != CFG_INVALID && s >= 0 && s < CFG_MAX_BLOCKS && !visited[s as usize] {
+                    visited[s as usize] = true
+                    if tail < CFG_MAX_BLOCKS {
+                        queue[tail as usize] = s
+                        tail = tail + 1
+                    }
+                }
+                si = si + 1
+            }
+        }
+    }
+
+    (reached, count)
+}
+
+// Find unreachable (dead) blocks — blocks not reachable from the entry.
+// Returns (dead_block_ids, count).
+fn cfg_dead_blocks(cfg: CfgAnalysis) -> ([i64; 512], i64) with Mut, Panic, Div {
+    let reach_result = cfg_reachable_from(cfg, 0)
+    let reached = reach_result.0
+    let reach_count = reach_result.1
+
+    // Build a fast lookup for reached block ids
+    var is_reached: [bool; 512] = [false; 512]
+    var ri: i64 = 0
+    while ri < reach_count {
+        let rid = reached[ri as usize]
+        if rid >= 0 && rid < CFG_MAX_BLOCKS {
+            is_reached[rid as usize] = true
+        }
+        ri = ri + 1
+    }
+
+    var dead: [i64; 512] = [CFG_INVALID; 512]
+    var dead_count: i64 = 0
+
+    var i: i64 = 0
+    while i < cfg.block_count {
+        let bid = cfg.blocks[i as usize].id
+        if bid >= 0 && bid < CFG_MAX_BLOCKS && !is_reached[bid as usize] {
+            if dead_count < CFG_MAX_BLOCKS {
+                dead[dead_count as usize] = bid
+                dead_count = dead_count + 1
+            }
+        }
+        i = i + 1
+    }
+
+    (dead, dead_count)
+}
+
+// ============================================================================
+// Section 12: Test helpers
+// ============================================================================
+
+fn cfg_assert_true(cond: bool, msg: i64) -> bool with IO {
+    if !cond {
+        print("  FAIL: cfg test ")
+        print_int(msg)
+        print("\n")
+    }
+    cond
+}
+
+// Build a straight-line CFG: BB0 (entry+exit)
+fn cfg_test_straight_line() -> CfgAnalysis with Mut, Panic, Div {
+    var cfg = cfg_analysis_new()
+    var b0 = cfg_block_new(0, 0, 5)
+    b0.is_entry = true
+    b0.is_exit = true
+    cfg = cfg_add_block(cfg, b0)
+    cfg = cfg_compute_preds(cfg)
+    cfg
+}
+
+// Build a diamond CFG:
+//       BB0
+//      /   \
+//    BB1   BB2
+//      \   /
+//       BB3
+fn cfg_test_diamond() -> CfgAnalysis with Mut, Panic, Div {
+    var cfg = cfg_analysis_new()
+    var b0 = cfg_block_new(0, 0, 3)
+    b0.is_entry = true
+    var b1 = cfg_block_new(1, 3, 6)
+    var b2 = cfg_block_new(2, 6, 9)
+    var b3 = cfg_block_new(3, 9, 12)
+    b3.is_exit = true
+
+    cfg = cfg_add_block(cfg, b0)
+    cfg = cfg_add_block(cfg, b1)
+    cfg = cfg_add_block(cfg, b2)
+    cfg = cfg_add_block(cfg, b3)
+
+    cfg = cfg_add_edge(cfg, 0, 1)
+    cfg = cfg_add_edge(cfg, 0, 2)
+    cfg = cfg_add_edge(cfg, 1, 3)
+    cfg = cfg_add_edge(cfg, 2, 3)
+
+    cfg = cfg_compute_preds(cfg)
+    cfg
+}
+
+// Build a simple loop CFG:
+//   BB0 -> BB1 -> BB2
+//           ^      |
+//           +------+  (back edge BB2 -> BB1)
+fn cfg_test_simple_loop() -> CfgAnalysis with Mut, Panic, Div {
+    var cfg = cfg_analysis_new()
+    var b0 = cfg_block_new(0, 0, 3)
+    b0.is_entry = true
+    var b1 = cfg_block_new(1, 3, 6)
+    var b2 = cfg_block_new(2, 6, 9)
+    var b3 = cfg_block_new(3, 9, 12)
+    b3.is_exit = true
+
+    cfg = cfg_add_block(cfg, b0)
+    cfg = cfg_add_block(cfg, b1)
+    cfg = cfg_add_block(cfg, b2)
+    cfg = cfg_add_block(cfg, b3)
+
+    cfg = cfg_add_edge(cfg, 0, 1)
+    cfg = cfg_add_edge(cfg, 1, 2)
+    cfg = cfg_add_edge(cfg, 2, 1)  // back edge
+    cfg = cfg_add_edge(cfg, 2, 3)  // exit edge
+
+    cfg = cfg_compute_preds(cfg)
+    cfg
+}
+
+// Build a nested loop CFG:
+//   BB0 -> BB1 -> BB2 -> BB3 -> BB4
+//           ^      ^      |      |
+//           |      +------+      |
+//           +--------------------+   (back edge BB4 -> BB1)
+fn cfg_test_nested_loop() -> CfgAnalysis with Mut, Panic, Div {
+    var cfg = cfg_analysis_new()
+    var b0 = cfg_block_new(0, 0, 3)
+    b0.is_entry = true
+    var b1 = cfg_block_new(1, 3, 6)
+    var b2 = cfg_block_new(2, 6, 9)
+    var b3 = cfg_block_new(3, 9, 12)
+    var b4 = cfg_block_new(4, 12, 15)
+    var b5 = cfg_block_new(5, 15, 18)
+    b5.is_exit = true
+
+    cfg = cfg_add_block(cfg, b0)
+    cfg = cfg_add_block(cfg, b1)
+    cfg = cfg_add_block(cfg, b2)
+    cfg = cfg_add_block(cfg, b3)
+    cfg = cfg_add_block(cfg, b4)
+    cfg = cfg_add_block(cfg, b5)
+
+    cfg = cfg_add_edge(cfg, 0, 1)
+    cfg = cfg_add_edge(cfg, 1, 2)
+    cfg = cfg_add_edge(cfg, 2, 3)
+    cfg = cfg_add_edge(cfg, 3, 2)   // inner back edge
+    cfg = cfg_add_edge(cfg, 3, 4)
+    cfg = cfg_add_edge(cfg, 4, 1)   // outer back edge
+    cfg = cfg_add_edge(cfg, 4, 5)
+
+    cfg = cfg_compute_preds(cfg)
+    cfg
+}
+
+// Build a CFG with unreachable block:
+//   BB0 -> BB1 -> BB2 (exit)
+//   BB3 (unreachable)
+fn cfg_test_dead_block() -> CfgAnalysis with Mut, Panic, Div {
+    var cfg = cfg_analysis_new()
+    var b0 = cfg_block_new(0, 0, 3)
+    b0.is_entry = true
+    var b1 = cfg_block_new(1, 3, 6)
+    var b2 = cfg_block_new(2, 6, 9)
+    b2.is_exit = true
+    var b3 = cfg_block_new(3, 9, 12)  // unreachable
+
+    cfg = cfg_add_block(cfg, b0)
+    cfg = cfg_add_block(cfg, b1)
+    cfg = cfg_add_block(cfg, b2)
+    cfg = cfg_add_block(cfg, b3)
+
+    cfg = cfg_add_edge(cfg, 0, 1)
+    cfg = cfg_add_edge(cfg, 1, 2)
+    // BB3 has no incoming edges
+
+    cfg = cfg_compute_preds(cfg)
+    cfg
+}
+
+// Build a CFG with a critical edge:
+//       BB0
+//      /   \
+//    BB1   BB2
+//      |   /
+//      BB3
+// Edge BB0->BB2 and BB2->BB3: BB0 has 2 succs, BB3 has 2 preds => critical edge BB0->BB3 doesn't exist
+// Actually: BB0 has succs {BB1, BB2}, BB3 has preds {BB1, BB2}
+// So edge BB0->BB1 is not critical (BB1 has 1 pred). Edge BB0->BB2: BB2 has 1 pred.
+// Let's make a proper critical edge case:
+//       BB0
+//      /   \
+//    BB1   BB2
+//    |  \ / |
+//    |   BB3 |
+//    |       |
+//    BB4 <---+
+fn cfg_test_critical_edge() -> CfgAnalysis with Mut, Panic, Div {
+    var cfg = cfg_analysis_new()
+    var b0 = cfg_block_new(0, 0, 3)
+    b0.is_entry = true
+    var b1 = cfg_block_new(1, 3, 6)
+    var b2 = cfg_block_new(2, 6, 9)
+    var b3 = cfg_block_new(3, 9, 12)
+    b3.is_exit = true
+
+    cfg = cfg_add_block(cfg, b0)
+    cfg = cfg_add_block(cfg, b1)
+    cfg = cfg_add_block(cfg, b2)
+    cfg = cfg_add_block(cfg, b3)
+
+    // BB0 -> BB1, BB0 -> BB2 (BB0 has 2 succs)
+    cfg = cfg_add_edge(cfg, 0, 1)
+    cfg = cfg_add_edge(cfg, 0, 2)
+    // BB1 -> BB3, BB2 -> BB3 (BB3 has 2 preds)
+    cfg = cfg_add_edge(cfg, 1, 3)
+    cfg = cfg_add_edge(cfg, 2, 3)
+
+    cfg = cfg_compute_preds(cfg)
+    cfg
+}
+
+// Build a chain CFG: BB0 -> BB1 -> BB2 -> BB3 (no branches)
+fn cfg_test_chain() -> CfgAnalysis with Mut, Panic, Div {
+    var cfg = cfg_analysis_new()
+    var b0 = cfg_block_new(0, 0, 3)
+    b0.is_entry = true
+    var b1 = cfg_block_new(1, 3, 6)
+    var b2 = cfg_block_new(2, 6, 9)
+    var b3 = cfg_block_new(3, 9, 12)
+    b3.is_exit = true
+
+    cfg = cfg_add_block(cfg, b0)
+    cfg = cfg_add_block(cfg, b1)
+    cfg = cfg_add_block(cfg, b2)
+    cfg = cfg_add_block(cfg, b3)
+
+    cfg = cfg_add_edge(cfg, 0, 1)
+    cfg = cfg_add_edge(cfg, 1, 2)
+    cfg = cfg_add_edge(cfg, 2, 3)
+
+    cfg = cfg_compute_preds(cfg)
+    cfg
+}
+
+// Build an if-then CFG (no else):
+//   BB0 -> BB1 -> BB2
+//     \-----------^
+fn cfg_test_if_then() -> CfgAnalysis with Mut, Panic, Div {
+    var cfg = cfg_analysis_new()
+    var b0 = cfg_block_new(0, 0, 3)
+    b0.is_entry = true
+    var b1 = cfg_block_new(1, 3, 6)
+    var b2 = cfg_block_new(2, 6, 9)
+    b2.is_exit = true
+
+    cfg = cfg_add_block(cfg, b0)
+    cfg = cfg_add_block(cfg, b1)
+    cfg = cfg_add_block(cfg, b2)
+
+    cfg = cfg_add_edge(cfg, 0, 1)
+    cfg = cfg_add_edge(cfg, 0, 2)
+    cfg = cfg_add_edge(cfg, 1, 2)
+
+    cfg = cfg_compute_preds(cfg)
+    cfg
+}
+
+// ============================================================================
+// Section 13: Tests (25+ test functions)
+// ============================================================================
+
+// T01: Straight-line CFG has exactly 1 block
+fn test_cfga_straight_line_count() -> bool with Mut, Panic, Div, IO {
+    let cfg = cfg_test_straight_line()
+    cfg_assert_true(cfg.block_count == 1, 1)
+}
+
+// T02: Diamond CFG has 4 blocks
+fn test_cfga_diamond_block_count() -> bool with Mut, Panic, Div, IO {
+    let cfg = cfg_test_diamond()
+    cfg_assert_true(cfg.block_count == 4, 2)
+}
+
+// T03: Diamond entry block has 2 successors
+fn test_cfga_diamond_entry_succs() -> bool with Mut, Panic, Div, IO {
+    let cfg = cfg_test_diamond()
+    cfg_assert_true(cfg.blocks[0].succ_count == 2, 3)
+}
+
+// T04: Diamond merge block (BB3) has 2 predecessors
+fn test_cfga_diamond_merge_preds() -> bool with Mut, Panic, Div, IO {
+    let cfg = cfg_test_diamond()
+    let b3_idx = cfg_find_block(cfg, 3)
+    let ok = if b3_idx != CFG_INVALID { cfg.blocks[b3_idx as usize].pred_count == 2 } else { false }
+    cfg_assert_true(ok, 4)
+}
+
+// T05: Post-order traversal visits all blocks in diamond
+fn test_cfga_diamond_post_order() -> bool with Mut, Panic, Div, IO {
+    let cfg = cfg_test_diamond()
+    let analyzed = cfg_post_order(cfg)
+    cfg_assert_true(analyzed.po_count == 4, 5)
+}
+
+// T06: RPO of diamond starts with entry block (0)
+fn test_cfga_diamond_rpo_entry() -> bool with Mut, Panic, Div, IO {
+    let cfg = cfg_test_diamond()
+    let analyzed = cfg_reverse_post_order(cfg)
+    cfg_assert_true(analyzed.rpo[0] == 0, 6)
+}
+
+// T07: Diamond dominators — entry dominates all
+fn test_cfga_diamond_dom_entry() -> bool with Mut, Panic, Div, IO {
+    let cfg = cfg_test_diamond()
+    let analyzed = cfg_compute_dominators(cfg)
+    let d1 = cfg_dominates(analyzed, 0, 1)
+    let d2 = cfg_dominates(analyzed, 0, 2)
+    let d3 = cfg_dominates(analyzed, 0, 3)
+    cfg_assert_true(d1 && d2 && d3, 7)
+}
+
+// T08: Diamond — block 1 does not dominate block 2
+fn test_cfga_diamond_no_cross_dom() -> bool with Mut, Panic, Div, IO {
+    let cfg = cfg_test_diamond()
+    let analyzed = cfg_compute_dominators(cfg)
+    let no12 = !cfg_dominates(analyzed, 1, 2)
+    let no21 = !cfg_dominates(analyzed, 2, 1)
+    cfg_assert_true(no12 && no21, 8)
+}
+
+// T09: Diamond — idom of merge block is entry
+fn test_cfga_diamond_idom_merge() -> bool with Mut, Panic, Div, IO {
+    let cfg = cfg_test_diamond()
+    let analyzed = cfg_compute_dominators(cfg)
+    cfg_assert_true(analyzed.idom[3] == 0, 9)
+}
+
+// T10: Diamond — every block dominates itself
+fn test_cfga_diamond_self_dom() -> bool with Mut, Panic, Div, IO {
+    let cfg = cfg_test_diamond()
+    let analyzed = cfg_compute_dominators(cfg)
+    let s0 = cfg_dominates(analyzed, 0, 0)
+    let s1 = cfg_dominates(analyzed, 1, 1)
+    let s2 = cfg_dominates(analyzed, 2, 2)
+    let s3 = cfg_dominates(analyzed, 3, 3)
+    cfg_assert_true(s0 && s1 && s2 && s3, 10)
+}
+
+// T11: Diamond dominance frontier — DF(BB1) contains BB3
+fn test_cfga_diamond_df_bb1() -> bool with Mut, Panic, Div, IO {
+    let cfg = cfg_test_diamond()
+    let analyzed = cfg_compute_dominators(cfg)
+    let with_df = cfg_compute_dom_frontier(analyzed)
+    let b1_idx = cfg_find_block(with_df, 1)
+    let ok = if b1_idx != CFG_INVALID {
+        let dfs = with_df.df_sizes[b1_idx as usize]
+        cfg_array_contains(with_df.dom_frontier[b1_idx as usize], dfs, 3)
+    } else {
+        false
+    }
+    cfg_assert_true(ok, 11)
+}
+
+// T12: Diamond dominance frontier — DF(BB2) contains BB3
+fn test_cfga_diamond_df_bb2() -> bool with Mut, Panic, Div, IO {
+    let cfg = cfg_test_diamond()
+    let analyzed = cfg_compute_dominators(cfg)
+    let with_df = cfg_compute_dom_frontier(analyzed)
+    let b2_idx = cfg_find_block(with_df, 2)
+    let ok = if b2_idx != CFG_INVALID {
+        let dfs = with_df.df_sizes[b2_idx as usize]
+        cfg_array_contains(with_df.dom_frontier[b2_idx as usize], dfs, 3)
+    } else {
+        false
+    }
+    cfg_assert_true(ok, 12)
+}
+
+// T13: Simple loop — back edge detected, BB1 is loop header
+fn test_cfga_loop_header() -> bool with Mut, Panic, Div, IO {
+    let cfg = cfg_test_simple_loop()
+    let analyzed = cfg_compute_dominators(cfg)
+    let with_loops = cfg_identify_loops(analyzed)
+    cfg_assert_true(with_loops.loop_headers[1], 13)
+}
+
+// T14: Simple loop — BB0 is NOT a loop header
+fn test_cfga_loop_entry_not_header() -> bool with Mut, Panic, Div, IO {
+    let cfg = cfg_test_simple_loop()
+    let analyzed = cfg_compute_dominators(cfg)
+    let with_loops = cfg_identify_loops(analyzed)
+    cfg_assert_true(!with_loops.loop_headers[0], 14)
+}
+
+// T15: Simple loop — loop depth of BB1 is 1
+fn test_cfga_loop_depth_header() -> bool with Mut, Panic, Div, IO {
+    let cfg = cfg_test_simple_loop()
+    let analyzed = cfg_compute_dominators(cfg)
+    let with_depth = cfg_loop_depth(analyzed)
+    let b1_idx = cfg_find_block(with_depth, 1)
+    let ok = if b1_idx != CFG_INVALID { with_depth.blocks[b1_idx as usize].loop_depth == 1 } else { false }
+    cfg_assert_true(ok, 15)
+}
+
+// T16: Simple loop — loop depth of BB0 (entry, outside loop) is 0
+fn test_cfga_loop_depth_entry() -> bool with Mut, Panic, Div, IO {
+    let cfg = cfg_test_simple_loop()
+    let analyzed = cfg_compute_dominators(cfg)
+    let with_depth = cfg_loop_depth(analyzed)
+    cfg_assert_true(with_depth.blocks[0].loop_depth == 0, 16)
+}
+
+// T17: Nested loop — inner header BB2 has depth 2
+fn test_cfga_nested_inner_depth() -> bool with Mut, Panic, Div, IO {
+    let cfg = cfg_test_nested_loop()
+    let analyzed = cfg_compute_dominators(cfg)
+    let with_depth = cfg_loop_depth(analyzed)
+    let b2_idx = cfg_find_block(with_depth, 2)
+    let ok = if b2_idx != CFG_INVALID { with_depth.blocks[b2_idx as usize].loop_depth == 2 } else { false }
+    cfg_assert_true(ok, 17)
+}
+
+// T18: Nested loop — outer header BB1 has depth >= 1
+fn test_cfga_nested_outer_depth() -> bool with Mut, Panic, Div, IO {
+    let cfg = cfg_test_nested_loop()
+    let analyzed = cfg_compute_dominators(cfg)
+    let with_depth = cfg_loop_depth(analyzed)
+    let b1_idx = cfg_find_block(with_depth, 1)
+    let ok = if b1_idx != CFG_INVALID { with_depth.blocks[b1_idx as usize].loop_depth >= 1 } else { false }
+    cfg_assert_true(ok, 18)
+}
+
+// T19: Diamond is reducible
+fn test_cfga_diamond_reducible() -> bool with Mut, Panic, Div, IO {
+    let cfg = cfg_test_diamond()
+    let analyzed = cfg_compute_dominators(cfg)
+    cfg_assert_true(cfg_is_reducible(analyzed), 19)
+}
+
+// T20: Simple loop is reducible
+fn test_cfga_loop_reducible() -> bool with Mut, Panic, Div, IO {
+    let cfg = cfg_test_simple_loop()
+    let analyzed = cfg_compute_dominators(cfg)
+    cfg_assert_true(cfg_is_reducible(analyzed), 20)
+}
+
+// T21: Diamond has critical edges (BB0 has 2 succs, BB3 has 2 preds)
+fn test_cfga_diamond_critical() -> bool with Mut, Panic, Div, IO {
+    let cfg = cfg_test_critical_edge()
+    let analyzed = cfg_compute_preds(cfg)
+    let crit_result = cfg_split_critical_edges(analyzed)
+    let crit_count = crit_result.1
+    cfg_assert_true(crit_count > 0, 21)
+}
+
+// T22: Chain CFG has no critical edges
+fn test_cfga_chain_no_critical() -> bool with Mut, Panic, Div, IO {
+    let cfg = cfg_test_chain()
+    let crit_result = cfg_split_critical_edges(cfg)
+    let crit_count = crit_result.1
+    cfg_assert_true(crit_count == 0, 22)
+}
+
+// T23: All blocks reachable from entry in diamond
+fn test_cfga_diamond_reachable() -> bool with Mut, Panic, Div, IO {
+    let cfg = cfg_test_diamond()
+    let reach_result = cfg_reachable_from(cfg, 0)
+    let count = reach_result.1
+    cfg_assert_true(count == 4, 23)
+}
+
+// T24: Dead block detection — BB3 is unreachable
+fn test_cfga_dead_block_found() -> bool with Mut, Panic, Div, IO {
+    let cfg = cfg_test_dead_block()
+    let dead_result = cfg_dead_blocks(cfg)
+    let dead_count = dead_result.1
+    cfg_assert_true(dead_count == 1, 24)
+}
+
+// T25: Dead block detection — diamond has no dead blocks
+fn test_cfga_diamond_no_dead() -> bool with Mut, Panic, Div, IO {
+    let cfg = cfg_test_diamond()
+    let dead_result = cfg_dead_blocks(cfg)
+    let dead_count = dead_result.1
+    cfg_assert_true(dead_count == 0, 25)
+}
+
+// T26: Constructor — cfg_block_new defaults
+fn test_cfga_block_new_defaults() -> bool with Mut, Panic, Div, IO {
+    let b = cfg_block_new(42, 10, 20)
+    let ok = b.id == 42 && b.instr_start == 10 && b.instr_end == 20 && b.succ_count == 0 && b.pred_count == 0 && !b.is_entry && !b.is_exit && b.loop_depth == 0
+    cfg_assert_true(ok, 26)
+}
+
+// T27: Constructor — cfg_edge_new defaults
+fn test_cfga_edge_new_defaults() -> bool with Mut, Panic, Div, IO {
+    let e = cfg_edge_new(1, 2, CFG_EDGE_BRANCH)
+    let ok = e.from_bb == 1 && e.to_bb == 2 && e.kind == CFG_EDGE_BRANCH && !e.is_critical
+    cfg_assert_true(ok, 27)
+}
+
+// T28: cfg_find_block returns correct index
+fn test_cfga_find_block() -> bool with Mut, Panic, Div, IO {
+    let cfg = cfg_test_diamond()
+    let idx = cfg_find_block(cfg, 2)
+    cfg_assert_true(idx == 2, 28)
+}
+
+// T29: cfg_find_block returns INVALID for missing block
+fn test_cfga_find_block_missing() -> bool with Mut, Panic, Div, IO {
+    let cfg = cfg_test_diamond()
+    let idx = cfg_find_block(cfg, 99)
+    cfg_assert_true(idx == CFG_INVALID, 29)
+}
+
+// T30: Chain — RPO is 0, 1, 2, 3
+fn test_cfga_chain_rpo() -> bool with Mut, Panic, Div, IO {
+    let cfg = cfg_test_chain()
+    let analyzed = cfg_reverse_post_order(cfg)
+    let ok = analyzed.rpo_count == 4 && analyzed.rpo[0] == 0 && analyzed.rpo[1] == 1 && analyzed.rpo[2] == 2 && analyzed.rpo[3] == 3
+    cfg_assert_true(ok, 30)
+}
+
+// T31: Chain — every block dominated by all predecessors in chain
+fn test_cfga_chain_dominators() -> bool with Mut, Panic, Div, IO {
+    let cfg = cfg_test_chain()
+    let analyzed = cfg_compute_dominators(cfg)
+    let d01 = cfg_dominates(analyzed, 0, 1)
+    let d02 = cfg_dominates(analyzed, 0, 2)
+    let d12 = cfg_dominates(analyzed, 1, 2)
+    let d23 = cfg_dominates(analyzed, 2, 3)
+    cfg_assert_true(d01 && d02 && d12 && d23, 31)
+}
+
+// T32: Chain has no critical edges (single-successor blocks)
+fn test_cfga_chain_reducible() -> bool with Mut, Panic, Div, IO {
+    let cfg = cfg_test_chain()
+    let analyzed = cfg_compute_dominators(cfg)
+    cfg_assert_true(cfg_is_reducible(analyzed), 32)
+}
+
+// T33: Empty analysis has block_count 0
+fn test_cfga_empty_analysis() -> bool with Mut, Panic, Div, IO {
+    let cfg = cfg_analysis_new()
+    cfg_assert_true(cfg.block_count == 0, 33)
+}
+
+// T34: If-then CFG — BB2 has 2 predecessors
+fn test_cfga_if_then_merge_preds() -> bool with Mut, Panic, Div, IO {
+    let cfg = cfg_test_if_then()
+    let b2_idx = cfg_find_block(cfg, 2)
+    let ok = if b2_idx != CFG_INVALID { cfg.blocks[b2_idx as usize].pred_count == 2 } else { false }
+    cfg_assert_true(ok, 34)
+}
+
+// T35: If-then — BB0 dominates BB1 and BB2
+fn test_cfga_if_then_dom() -> bool with Mut, Panic, Div, IO {
+    let cfg = cfg_test_if_then()
+    let analyzed = cfg_compute_dominators(cfg)
+    let d1 = cfg_dominates(analyzed, 0, 1)
+    let d2 = cfg_dominates(analyzed, 0, 2)
+    cfg_assert_true(d1 && d2, 35)
+}
+
+// T36: Reachable from non-entry block in diamond
+fn test_cfga_reachable_from_bb1() -> bool with Mut, Panic, Div, IO {
+    let cfg = cfg_test_diamond()
+    let reach_result = cfg_reachable_from(cfg, 1)
+    let count = reach_result.1
+    // BB1 -> BB3 only (2 blocks: BB1 and BB3)
+    cfg_assert_true(count == 2, 36)
+}
+
+// T37: Strict dominance — a does not strictly dominate itself
+fn test_cfga_strict_dom_self() -> bool with Mut, Panic, Div, IO {
+    let cfg = cfg_test_diamond()
+    let analyzed = cfg_compute_dominators(cfg)
+    cfg_assert_true(!cfg_strictly_dominates(analyzed, 0, 0), 37)
+}
+
+// T38: cfg_array_contains — positive and negative
+fn test_cfga_array_contains() -> bool with Mut, Panic, Div, IO {
+    var arr: [i64; 32] = [CFG_INVALID; 32]
+    arr[0] = 3
+    arr[1] = 7
+    arr[2] = 11
+    let yes = cfg_array_contains(arr, 3, 7)
+    let no = !cfg_array_contains(arr, 3, 5)
+    cfg_assert_true(yes && no, 38)
+}
+
+// T39: Edge constants are distinct
+fn test_cfga_edge_constants() -> bool with Mut, Panic, Div, IO {
+    let ok = CFG_EDGE_FALL != CFG_EDGE_BRANCH && CFG_EDGE_BRANCH != CFG_EDGE_BACK && CFG_EDGE_BACK != CFG_EDGE_SWITCH && CFG_EDGE_FALL != CFG_EDGE_SWITCH
+    cfg_assert_true(ok, 39)
+}
+
+// T40: Diamond DF(BB0) is empty (entry dominates everything strictly)
+fn test_cfga_diamond_df_entry_empty() -> bool with Mut, Panic, Div, IO {
+    let cfg = cfg_test_diamond()
+    let analyzed = cfg_compute_dominators(cfg)
+    let with_df = cfg_compute_dom_frontier(analyzed)
+    let b0_idx = cfg_find_block(with_df, 0)
+    let ok = if b0_idx != CFG_INVALID { with_df.df_sizes[b0_idx as usize] == 0 } else { false }
+    cfg_assert_true(ok, 40)
+}
+
+// ============================================================================
+// Section 14: Test runner
+// ============================================================================
+
+fn cfg_run_tests() -> i64 with IO, Mut, Panic, Div {
+    var passed: i64 = 0
+    let total: i64 = 40
+
+    print("=== CFG Analysis Tests ===\n")
+
+    if test_cfga_straight_line_count() { passed = passed + 1; print("  T01 OK straight_line_count\n") } else { print("  FAIL: T01 straight_line_count\n") }
+    if test_cfga_diamond_block_count() { passed = passed + 1; print("  T02 OK diamond_block_count\n") } else { print("  FAIL: T02 diamond_block_count\n") }
+    if test_cfga_diamond_entry_succs() { passed = passed + 1; print("  T03 OK diamond_entry_succs\n") } else { print("  FAIL: T03 diamond_entry_succs\n") }
+    if test_cfga_diamond_merge_preds() { passed = passed + 1; print("  T04 OK diamond_merge_preds\n") } else { print("  FAIL: T04 diamond_merge_preds\n") }
+    if test_cfga_diamond_post_order() { passed = passed + 1; print("  T05 OK diamond_post_order\n") } else { print("  FAIL: T05 diamond_post_order\n") }
+    if test_cfga_diamond_rpo_entry() { passed = passed + 1; print("  T06 OK diamond_rpo_entry\n") } else { print("  FAIL: T06 diamond_rpo_entry\n") }
+    if test_cfga_diamond_dom_entry() { passed = passed + 1; print("  T07 OK diamond_dom_entry\n") } else { print("  FAIL: T07 diamond_dom_entry\n") }
+    if test_cfga_diamond_no_cross_dom() { passed = passed + 1; print("  T08 OK diamond_no_cross_dom\n") } else { print("  FAIL: T08 diamond_no_cross_dom\n") }
+    if test_cfga_diamond_idom_merge() { passed = passed + 1; print("  T09 OK diamond_idom_merge\n") } else { print("  FAIL: T09 diamond_idom_merge\n") }
+    if test_cfga_diamond_self_dom() { passed = passed + 1; print("  T10 OK diamond_self_dom\n") } else { print("  FAIL: T10 diamond_self_dom\n") }
+    if test_cfga_diamond_df_bb1() { passed = passed + 1; print("  T11 OK diamond_df_bb1\n") } else { print("  FAIL: T11 diamond_df_bb1\n") }
+    if test_cfga_diamond_df_bb2() { passed = passed + 1; print("  T12 OK diamond_df_bb2\n") } else { print("  FAIL: T12 diamond_df_bb2\n") }
+    if test_cfga_loop_header() { passed = passed + 1; print("  T13 OK loop_header\n") } else { print("  FAIL: T13 loop_header\n") }
+    if test_cfga_loop_entry_not_header() { passed = passed + 1; print("  T14 OK loop_entry_not_header\n") } else { print("  FAIL: T14 loop_entry_not_header\n") }
+    if test_cfga_loop_depth_header() { passed = passed + 1; print("  T15 OK loop_depth_header\n") } else { print("  FAIL: T15 loop_depth_header\n") }
+    if test_cfga_loop_depth_entry() { passed = passed + 1; print("  T16 OK loop_depth_entry\n") } else { print("  FAIL: T16 loop_depth_entry\n") }
+    if test_cfga_nested_inner_depth() { passed = passed + 1; print("  T17 OK nested_inner_depth\n") } else { print("  FAIL: T17 nested_inner_depth\n") }
+    if test_cfga_nested_outer_depth() { passed = passed + 1; print("  T18 OK nested_outer_depth\n") } else { print("  FAIL: T18 nested_outer_depth\n") }
+    if test_cfga_diamond_reducible() { passed = passed + 1; print("  T19 OK diamond_reducible\n") } else { print("  FAIL: T19 diamond_reducible\n") }
+    if test_cfga_loop_reducible() { passed = passed + 1; print("  T20 OK loop_reducible\n") } else { print("  FAIL: T20 loop_reducible\n") }
+    if test_cfga_diamond_critical() { passed = passed + 1; print("  T21 OK diamond_critical\n") } else { print("  FAIL: T21 diamond_critical\n") }
+    if test_cfga_chain_no_critical() { passed = passed + 1; print("  T22 OK chain_no_critical\n") } else { print("  FAIL: T22 chain_no_critical\n") }
+    if test_cfga_diamond_reachable() { passed = passed + 1; print("  T23 OK diamond_reachable\n") } else { print("  FAIL: T23 diamond_reachable\n") }
+    if test_cfga_dead_block_found() { passed = passed + 1; print("  T24 OK dead_block_found\n") } else { print("  FAIL: T24 dead_block_found\n") }
+    if test_cfga_diamond_no_dead() { passed = passed + 1; print("  T25 OK diamond_no_dead\n") } else { print("  FAIL: T25 diamond_no_dead\n") }
+    if test_cfga_block_new_defaults() { passed = passed + 1; print("  T26 OK block_new_defaults\n") } else { print("  FAIL: T26 block_new_defaults\n") }
+    if test_cfga_edge_new_defaults() { passed = passed + 1; print("  T27 OK edge_new_defaults\n") } else { print("  FAIL: T27 edge_new_defaults\n") }
+    if test_cfga_find_block() { passed = passed + 1; print("  T28 OK find_block\n") } else { print("  FAIL: T28 find_block\n") }
+    if test_cfga_find_block_missing() { passed = passed + 1; print("  T29 OK find_block_missing\n") } else { print("  FAIL: T29 find_block_missing\n") }
+    if test_cfga_chain_rpo() { passed = passed + 1; print("  T30 OK chain_rpo\n") } else { print("  FAIL: T30 chain_rpo\n") }
+    if test_cfga_chain_dominators() { passed = passed + 1; print("  T31 OK chain_dominators\n") } else { print("  FAIL: T31 chain_dominators\n") }
+    if test_cfga_chain_reducible() { passed = passed + 1; print("  T32 OK chain_reducible\n") } else { print("  FAIL: T32 chain_reducible\n") }
+    if test_cfga_empty_analysis() { passed = passed + 1; print("  T33 OK empty_analysis\n") } else { print("  FAIL: T33 empty_analysis\n") }
+    if test_cfga_if_then_merge_preds() { passed = passed + 1; print("  T34 OK if_then_merge_preds\n") } else { print("  FAIL: T34 if_then_merge_preds\n") }
+    if test_cfga_if_then_dom() { passed = passed + 1; print("  T35 OK if_then_dom\n") } else { print("  FAIL: T35 if_then_dom\n") }
+    if test_cfga_reachable_from_bb1() { passed = passed + 1; print("  T36 OK reachable_from_bb1\n") } else { print("  FAIL: T36 reachable_from_bb1\n") }
+    if test_cfga_strict_dom_self() { passed = passed + 1; print("  T37 OK strict_dom_self\n") } else { print("  FAIL: T37 strict_dom_self\n") }
+    if test_cfga_array_contains() { passed = passed + 1; print("  T38 OK array_contains\n") } else { print("  FAIL: T38 array_contains\n") }
+    if test_cfga_edge_constants() { passed = passed + 1; print("  T39 OK edge_constants\n") } else { print("  FAIL: T39 edge_constants\n") }
+    if test_cfga_diamond_df_entry_empty() { passed = passed + 1; print("  T40 OK diamond_df_entry_empty\n") } else { print("  FAIL: T40 diamond_df_entry_empty\n") }
+
+    print("\nCFG: ")
+    print_int(passed)
+    print(" / ")
+    print_int(total)
+    print(" passed\n")
+
+    if passed == total { 0 } else { 1 }
+}

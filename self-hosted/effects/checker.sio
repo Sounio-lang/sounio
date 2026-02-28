@@ -1,0 +1,2056 @@
+// self-hosted::effects::checker — Algebraic effect system checker
+//
+// Implements effect inference and verification for the Sounio self-hosted
+// compiler. Uses bitset representation for efficient effect set operations
+// and a call-graph-based fixed-point algorithm to propagate inferred effects
+// through the program.
+//
+// Architecture:
+//   - EffBitSet: compact bitset (i64) for up to 64 effects
+//   - EffectDecl: per-function declared vs inferred effect sets
+//   - EffectChecker: flat-array worklist engine with call graph
+//
+// The checker performs two phases:
+//   1. Inference: propagate effects through the call graph until fixed point
+//   2. Verification: check that declared effects cover inferred effects
+//
+// All mutating operations use state threading (consume and return).
+// Helpers precede callers (no forward references).
+
+// ============================================================================
+// EFFECT ID CONSTANTS
+// ============================================================================
+//
+// Each effect is assigned a unique bit position in the bitset.
+// The bit for effect E is (1 << E). These constants return the ID (position),
+// not the bit value.
+
+fn EFF_IO() -> i64 { 1 }
+fn EFF_MUT() -> i64 { 2 }
+fn EFF_ALLOC() -> i64 { 3 }
+fn EFF_PANIC() -> i64 { 4 }
+fn EFF_ASYNC() -> i64 { 5 }
+fn EFF_GPU() -> i64 { 6 }
+fn EFF_PROB() -> i64 { 7 }
+fn EFF_DIV() -> i64 { 8 }
+
+// Extended effects (future use)
+fn EFF_EPISTEMIC() -> i64 { 9 }
+fn EFF_CAUSAL() -> i64 { 10 }
+fn EFF_NETWORK() -> i64 { 11 }
+fn EFF_SENSOR() -> i64 { 12 }
+fn EFF_EXN() -> i64 { 13 }
+
+// Maximum effect ID (exclusive upper bound for iteration)
+fn EFF_MAX() -> i64 { 14 }
+
+// ============================================================================
+// EFFECT NAME TABLE
+// ============================================================================
+//
+// Maps effect IDs to human-readable names. Stored as fixed-size byte arrays
+// to avoid heap allocation. Each name is [i8; 16] with a length.
+
+struct EffectName {
+    buf: [i8; 16],
+    len: i64,
+}
+
+fn eff_name_empty() -> EffectName {
+    EffectName { buf: [0; 16], len: 0 }
+}
+
+// Build a name from up to 9 ASCII bytes
+fn eff_name_from(a: i8, b: i8, c: i8, d: i8, e: i8,
+                 f: i8, g: i8, h: i8, i: i8, count: i64) -> EffectName with Mut, Panic, Div {
+    var n = EffectName { buf: [0; 16], len: count }
+    if count > 0 { n.buf[0] = a }
+    if count > 1 { n.buf[1] = b }
+    if count > 2 { n.buf[2] = c }
+    if count > 3 { n.buf[3] = d }
+    if count > 4 { n.buf[4] = e }
+    if count > 5 { n.buf[5] = f }
+    if count > 6 { n.buf[6] = g }
+    if count > 7 { n.buf[7] = h }
+    if count > 8 { n.buf[8] = i }
+    n
+}
+
+// Get the canonical name for an effect ID
+fn eff_checker_format_effect(eff_id: i64) -> EffectName with Mut, Panic, Div {
+    // IO
+    if eff_id == EFF_IO() {
+        return eff_name_from(73, 79, 0, 0, 0, 0, 0, 0, 0, 2)
+    }
+    // Mut
+    if eff_id == EFF_MUT() {
+        return eff_name_from(77, 117, 116, 0, 0, 0, 0, 0, 0, 3)
+    }
+    // Alloc
+    if eff_id == EFF_ALLOC() {
+        return eff_name_from(65, 108, 108, 111, 99, 0, 0, 0, 0, 5)
+    }
+    // Panic
+    if eff_id == EFF_PANIC() {
+        return eff_name_from(80, 97, 110, 105, 99, 0, 0, 0, 0, 5)
+    }
+    // Async
+    if eff_id == EFF_ASYNC() {
+        return eff_name_from(65, 115, 121, 110, 99, 0, 0, 0, 0, 5)
+    }
+    // GPU
+    if eff_id == EFF_GPU() {
+        return eff_name_from(71, 80, 85, 0, 0, 0, 0, 0, 0, 3)
+    }
+    // Prob
+    if eff_id == EFF_PROB() {
+        return eff_name_from(80, 114, 111, 98, 0, 0, 0, 0, 0, 4)
+    }
+    // Div
+    if eff_id == EFF_DIV() {
+        return eff_name_from(68, 105, 118, 0, 0, 0, 0, 0, 0, 3)
+    }
+    // Epistemic
+    if eff_id == EFF_EPISTEMIC() {
+        return eff_name_from(69, 112, 105, 115, 116, 101, 109, 105, 99, 9)
+    }
+    // Causal
+    if eff_id == EFF_CAUSAL() {
+        return eff_name_from(67, 97, 117, 115, 97, 108, 0, 0, 0, 6)
+    }
+    // Network
+    if eff_id == EFF_NETWORK() {
+        return eff_name_from(78, 101, 116, 119, 111, 114, 107, 0, 0, 7)
+    }
+    // Sensor
+    if eff_id == EFF_SENSOR() {
+        return eff_name_from(83, 101, 110, 115, 111, 114, 0, 0, 0, 6)
+    }
+    // Exn
+    if eff_id == EFF_EXN() {
+        return eff_name_from(69, 120, 110, 0, 0, 0, 0, 0, 0, 3)
+    }
+    // Unknown
+    eff_name_from(63, 63, 63, 0, 0, 0, 0, 0, 0, 3)  // "???"
+}
+
+// Compare two EffectName values for equality
+fn eff_name_eq(a: EffectName, b: EffectName) -> bool with Mut, Panic, Div {
+    if a.len != b.len {
+        return false
+    }
+    var i: i64 = 0
+    while i < a.len {
+        if a.buf[i as usize] != b.buf[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// ============================================================================
+// EFFECT SET — bitset representation
+// ============================================================================
+//
+// An EffBitSet stores effects as bits in an i64. Bit position N corresponds
+// to effect ID N. This gives O(1) add/has/union/subset operations and a
+// compact 8-byte representation per set.
+
+struct EffBitSet {
+    bits: i64,
+}
+
+// Create an empty effect set (pure function)
+fn eff_set_empty() -> EffBitSet {
+    EffBitSet { bits: 0 }
+}
+
+// Internal: compute (1 << pos) using a loop (no built-in shift operator)
+fn eff_bit_for(pos: i64) -> i64 with Mut, Div, Panic {
+    if pos <= 0 {
+        return 1
+    }
+    var result: i64 = 1
+    var i: i64 = 0
+    while i < pos {
+        result = result * 2
+        i = i + 1
+    }
+    result
+}
+
+// Check if an effect is present in the set
+fn eff_set_has(set: EffBitSet, eff_id: i64) -> bool with Mut, Div, Panic {
+    let bit = eff_bit_for(eff_id)
+    // Check if bit is set using modular arithmetic
+    // (bits / bit) % 2 == 1 means the bit is set
+    let shifted = set.bits / bit
+    let remainder = shifted - (shifted / 2) * 2
+    remainder == 1
+}
+
+// Add an effect to the set
+fn eff_set_add(set: EffBitSet, eff_id: i64) -> EffBitSet with Mut, Div, Panic {
+    let bit = eff_bit_for(eff_id)
+    // Bitwise OR via arithmetic: if bit is not set, add it
+    if eff_set_has(set, eff_id) {
+        return set
+    }
+    EffBitSet { bits: set.bits + bit }
+}
+
+// Union of two effect sets
+fn eff_set_union(a: EffBitSet, b: EffBitSet) -> EffBitSet with Mut, Div, Panic {
+    // Iterate through all possible effect IDs and add any present in either set
+    var result = a
+    var i: i64 = 0
+    while i < EFF_MAX() {
+        if eff_set_has(b, i) {
+            result = eff_set_add(result, i)
+        }
+        i = i + 1
+    }
+    result
+}
+
+// Check if a is a subset of b (every effect in a is also in b)
+fn eff_set_subset(a: EffBitSet, b: EffBitSet) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < EFF_MAX() {
+        if eff_set_has(a, i) && !eff_set_has(b, i) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Count the number of effects in the set
+fn eff_set_count(set: EffBitSet) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < EFF_MAX() {
+        if eff_set_has(set, i) {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Compute the intersection of two effect sets
+fn eff_set_intersect(a: EffBitSet, b: EffBitSet) -> EffBitSet with Mut, Div, Panic {
+    var result = eff_set_empty()
+    var i: i64 = 0
+    while i < EFF_MAX() {
+        if eff_set_has(a, i) && eff_set_has(b, i) {
+            result = eff_set_add(result, i)
+        }
+        i = i + 1
+    }
+    result
+}
+
+// Compute the difference a \ b (effects in a but not in b)
+fn eff_set_diff(a: EffBitSet, b: EffBitSet) -> EffBitSet with Mut, Div, Panic {
+    var result = eff_set_empty()
+    var i: i64 = 0
+    while i < EFF_MAX() {
+        if eff_set_has(a, i) && !eff_set_has(b, i) {
+            result = eff_set_add(result, i)
+        }
+        i = i + 1
+    }
+    result
+}
+
+// Check if a set is empty (pure)
+fn eff_set_is_empty(set: EffBitSet) -> bool {
+    set.bits == 0
+}
+
+// Check if two effect sets are equal
+fn eff_set_eq(a: EffBitSet, b: EffBitSet) -> bool {
+    a.bits == b.bits
+}
+
+// Create a set with a single effect
+fn eff_set_singleton(eff_id: i64) -> EffBitSet with Mut, Div, Panic {
+    eff_set_add(eff_set_empty(), eff_id)
+}
+
+// Create the common IO + Mut + Panic + Div set (frequently needed)
+fn eff_set_io_mut_panic_div() -> EffBitSet with Mut, Div, Panic {
+    var s = eff_set_empty()
+    s = eff_set_add(s, EFF_IO())
+    s = eff_set_add(s, EFF_MUT())
+    s = eff_set_add(s, EFF_PANIC())
+    s = eff_set_add(s, EFF_DIV())
+    s
+}
+
+// Create the Mut + Panic + Div set
+fn eff_set_mut_panic_div() -> EffBitSet with Mut, Div, Panic {
+    var s = eff_set_empty()
+    s = eff_set_add(s, EFF_MUT())
+    s = eff_set_add(s, EFF_PANIC())
+    s = eff_set_add(s, EFF_DIV())
+    s
+}
+
+// ============================================================================
+// EFFECT DECLARATION — per-function effect tracking
+// ============================================================================
+//
+// Each function in the program gets an EffectDecl that records:
+//   - fn_id: unique function identifier
+//   - declared: effects the programmer wrote in `with ...`
+//   - inferred: effects computed from the function body
+//   - name: function name for diagnostics
+
+struct EffectDecl {
+    fn_id: i64,
+    declared: EffBitSet,
+    inferred: EffBitSet,
+    name: [i8; 64],
+    name_len: i64,
+}
+
+fn eff_decl_empty() -> EffectDecl {
+    EffectDecl {
+        fn_id: 0,
+        declared: eff_set_empty(),
+        inferred: eff_set_empty(),
+        name: [0; 64],
+        name_len: 0,
+    }
+}
+
+// Create a declaration with ID and name
+fn eff_decl_new(id: i64, name_buf: [i8; 64], name_len: i64, declared: EffBitSet) -> EffectDecl {
+    EffectDecl {
+        fn_id: id,
+        declared: declared,
+        inferred: eff_set_empty(),
+        name: name_buf,
+        name_len: name_len,
+    }
+}
+
+// Check if declared effects cover inferred effects
+fn eff_decl_is_valid(decl: EffectDecl) -> bool with Mut, Div, Panic {
+    eff_set_subset(decl.inferred, decl.declared)
+}
+
+// Get the set of missing (undeclared but inferred) effects
+fn eff_decl_missing(decl: EffectDecl) -> EffBitSet with Mut, Div, Panic {
+    eff_set_diff(decl.inferred, decl.declared)
+}
+
+// Get the set of unnecessary (declared but not inferred) effects
+fn eff_decl_unnecessary(decl: EffectDecl) -> EffBitSet with Mut, Div, Panic {
+    eff_set_diff(decl.declared, decl.inferred)
+}
+
+// ============================================================================
+// EFFECT CHECKER — main analysis engine
+// ============================================================================
+//
+// The EffectChecker maintains:
+//   - A table of function declarations with declared/inferred effect sets
+//   - A call graph (edge list: caller -> callee)
+//   - An error buffer for diagnostics
+//
+// Workflow:
+//   1. Register functions with eff_checker_add_decl
+//   2. Record call edges with eff_checker_add_call
+//   3. Run eff_checker_infer to propagate effects to fixed point
+//   4. Run eff_checker_verify to check coverage
+
+struct EffectChecker {
+    decls: [EffectDecl; 2048],
+    decl_count: i64,
+    call_graph_from: [i64; 4096],
+    call_graph_to: [i64; 4096],
+    call_count: i64,
+    errors: [[i8; 128]; 256],
+    error_count: i64,
+}
+
+fn eff_checker_new() -> EffectChecker {
+    EffectChecker {
+        decls: [eff_decl_empty(); 2048],
+        decl_count: 0,
+        call_graph_from: [0; 4096],
+        call_graph_to: [0; 4096],
+        call_count: 0,
+        errors: [[0; 128]; 256],
+        error_count: 0,
+    }
+}
+
+// ============================================================================
+// CHECKER OPERATIONS — declaration management
+// ============================================================================
+
+// Add a function declaration to the checker
+fn eff_checker_add_decl(checker: EffectChecker, decl: EffectDecl) -> EffectChecker with Mut, Panic, Div {
+    var c = checker
+    if c.decl_count >= 2048 {
+        return c
+    }
+    c.decls[c.decl_count as usize] = decl
+    c.decl_count = c.decl_count + 1
+    c
+}
+
+// Find a declaration by function ID. Returns the index, or -1 if not found.
+fn eff_checker_find_decl(checker: EffectChecker, fn_id: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < checker.decl_count {
+        if checker.decls[i as usize].fn_id == fn_id {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// Get the declared effect set for a function
+fn eff_checker_get_declared(checker: EffectChecker, fn_id: i64) -> EffBitSet with Mut, Panic, Div {
+    let idx = eff_checker_find_decl(checker, fn_id)
+    if idx < 0 {
+        return eff_set_empty()
+    }
+    checker.decls[idx as usize].declared
+}
+
+// Get the inferred effect set for a function
+fn eff_checker_get_inferred(checker: EffectChecker, fn_id: i64) -> EffBitSet with Mut, Panic, Div {
+    let idx = eff_checker_find_decl(checker, fn_id)
+    if idx < 0 {
+        return eff_set_empty()
+    }
+    checker.decls[idx as usize].inferred
+}
+
+// Set the inferred effect set for a function (used during inference)
+fn eff_checker_set_inferred(checker: EffectChecker, fn_id: i64,
+                            inferred: EffBitSet) -> EffectChecker with Mut, Panic, Div {
+    var c = checker
+    let idx = eff_checker_find_decl(c, fn_id)
+    if idx >= 0 {
+        c.decls[idx as usize].inferred = inferred
+    }
+    c
+}
+
+// ============================================================================
+// CHECKER OPERATIONS — call graph management
+// ============================================================================
+
+// Record a function call edge: caller calls callee
+fn eff_checker_add_call(checker: EffectChecker, caller_id: i64,
+                        callee_id: i64) -> EffectChecker with Mut, Panic, Div {
+    var c = checker
+    if c.call_count >= 4096 {
+        return c
+    }
+    // Check for duplicate edges
+    var i: i64 = 0
+    while i < c.call_count {
+        if c.call_graph_from[i as usize] == caller_id && c.call_graph_to[i as usize] == callee_id {
+            return c  // Already recorded
+        }
+        i = i + 1
+    }
+    c.call_graph_from[c.call_count as usize] = caller_id
+    c.call_graph_to[c.call_count as usize] = callee_id
+    c.call_count = c.call_count + 1
+    c
+}
+
+// Count how many callees a given function has
+fn eff_checker_callee_count(checker: EffectChecker, caller_id: i64) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < checker.call_count {
+        if checker.call_graph_from[i as usize] == caller_id {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Count how many callers a given function has
+fn eff_checker_caller_count(checker: EffectChecker, callee_id: i64) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < checker.call_count {
+        if checker.call_graph_to[i as usize] == callee_id {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// CHECKER OPERATIONS — error management
+// ============================================================================
+
+// Internal: write error message bytes into the error buffer
+fn eff_checker_record_error_bytes(checker: EffectChecker,
+                                  buf: [i8; 128], len: i64) -> EffectChecker with Mut, Panic, Div {
+    var c = checker
+    if c.error_count >= 256 {
+        return c
+    }
+    var i: i64 = 0
+    while i < len && i < 128 {
+        c.errors[c.error_count as usize][i as usize] = buf[i as usize]
+        i = i + 1
+    }
+    c.error_count = c.error_count + 1
+    c
+}
+
+// Helper: returns the bytes for ": missing effect " (18 chars)
+fn eff_checker_missing_msg_bytes() -> [i8; 18] with Mut, Panic, Div {
+    var b: [i8; 18] = [0; 18]
+    b[0] = 58    // :
+    b[1] = 32    // space
+    b[2] = 109   // m
+    b[3] = 105   // i
+    b[4] = 115   // s
+    b[5] = 115   // s
+    b[6] = 105   // i
+    b[7] = 110   // n
+    b[8] = 103   // g
+    b[9] = 32    // space
+    b[10] = 101  // e
+    b[11] = 102  // f
+    b[12] = 102  // f
+    b[13] = 101  // e
+    b[14] = 99   // c
+    b[15] = 116  // t
+    b[16] = 32   // space
+    b[17] = 0    // null (not counted)
+    b
+}
+
+// Build a simple error message: "fn#<id>: missing effect <name>"
+fn eff_checker_build_missing_error(fn_id: i64, eff_id: i64) -> ([i8; 128], i64) with Mut, Panic, Div {
+    var buf: [i8; 128] = [0; 128]
+    var pos: i64 = 0
+
+    // "fn#"
+    buf[0] = 102  // f
+    buf[1] = 110  // n
+    buf[2] = 35   // #
+    pos = 3
+
+    // Write fn_id as decimal digits
+    var id_tmp = fn_id
+    if id_tmp < 0 { id_tmp = 0 }
+    var digits: [i8; 20] = [0; 20]
+    var digit_count: i64 = 0
+    if id_tmp == 0 {
+        digits[0] = 48  // '0'
+        digit_count = 1
+    } else {
+        while id_tmp > 0 && digit_count < 20 {
+            let d = id_tmp - (id_tmp / 10) * 10
+            digits[digit_count as usize] = (d + 48) as i8
+            digit_count = digit_count + 1
+            id_tmp = id_tmp / 10
+        }
+    }
+    // Reverse digits into buf
+    var di: i64 = 0
+    while di < digit_count && pos < 128 {
+        buf[pos as usize] = digits[(digit_count - 1 - di) as usize]
+        pos = pos + 1
+        di = di + 1
+    }
+
+    // ": missing effect "
+    let msg_part = eff_checker_missing_msg_bytes()
+    var mi: i64 = 0
+    while mi < 18 && pos < 128 {
+        buf[pos as usize] = msg_part[mi as usize]
+        pos = pos + 1
+        mi = mi + 1
+    }
+
+    // Effect name
+    let ename = eff_checker_format_effect(eff_id)
+    var ni: i64 = 0
+    while ni < ename.len && pos < 128 {
+        buf[pos as usize] = ename.buf[ni as usize]
+        pos = pos + 1
+        ni = ni + 1
+    }
+
+    (buf, pos)
+}
+
+// ============================================================================
+// CHECKER OPERATIONS — effect inference (fixed-point)
+// ============================================================================
+//
+// Effect inference propagates effects through the call graph:
+//   For each caller -> callee edge, the caller inherits the callee's effects.
+//   This repeats until no more changes occur (fixed point).
+//
+// The algorithm is a simple worklist iteration:
+//   1. For each edge (caller, callee), compute new_inferred = old_inferred | callee.inferred
+//   2. If new_inferred != old_inferred, record the change and mark changed = true
+//   3. Repeat until changed == false
+
+fn eff_checker_infer(checker: EffectChecker) -> EffectChecker with Mut, Div, Panic {
+    var c = checker
+
+    // Fixed-point iteration with bounded iterations to prevent infinite loops
+    var max_iterations: i64 = 100
+    var iteration: i64 = 0
+    var changed: bool = true
+
+    while changed && iteration < max_iterations {
+        changed = false
+        iteration = iteration + 1
+
+        // For each call edge, propagate callee effects to caller
+        var edge_idx: i64 = 0
+        while edge_idx < c.call_count {
+            let caller_id = c.call_graph_from[edge_idx as usize]
+            let callee_id = c.call_graph_to[edge_idx as usize]
+
+            let caller_idx = eff_checker_find_decl(c, caller_id)
+            let callee_idx = eff_checker_find_decl(c, callee_id)
+
+            if caller_idx >= 0 && callee_idx >= 0 {
+                let old_inferred = c.decls[caller_idx as usize].inferred
+                let callee_inferred = c.decls[callee_idx as usize].inferred
+                let new_inferred = eff_set_union(old_inferred, callee_inferred)
+
+                if !eff_set_eq(old_inferred, new_inferred) {
+                    c.decls[caller_idx as usize].inferred = new_inferred
+                    changed = true
+                }
+            }
+
+            edge_idx = edge_idx + 1
+        }
+    }
+
+    c
+}
+
+// Return the number of iterations needed (for diagnostics)
+fn eff_checker_infer_iterations(checker: EffectChecker) -> i64 with Mut, Div, Panic {
+    var c = checker
+    var max_iterations: i64 = 100
+    var iteration: i64 = 0
+    var changed: bool = true
+
+    while changed && iteration < max_iterations {
+        changed = false
+        iteration = iteration + 1
+
+        var edge_idx: i64 = 0
+        while edge_idx < c.call_count {
+            let caller_id = c.call_graph_from[edge_idx as usize]
+            let callee_id = c.call_graph_to[edge_idx as usize]
+            let caller_idx = eff_checker_find_decl(c, caller_id)
+            let callee_idx = eff_checker_find_decl(c, callee_id)
+
+            if caller_idx >= 0 && callee_idx >= 0 {
+                let old_inferred = c.decls[caller_idx as usize].inferred
+                let callee_inferred = c.decls[callee_idx as usize].inferred
+                let new_inferred = eff_set_union(old_inferred, callee_inferred)
+                if !eff_set_eq(old_inferred, new_inferred) {
+                    c.decls[caller_idx as usize].inferred = new_inferred
+                    changed = true
+                }
+            }
+            edge_idx = edge_idx + 1
+        }
+    }
+
+    iteration
+}
+
+// ============================================================================
+// CHECKER OPERATIONS — verification
+// ============================================================================
+//
+// After inference, verify that every function's inferred effects are a subset
+// of its declared effects. Any missing effect is recorded as an error.
+
+fn eff_checker_verify(checker: EffectChecker) -> EffectChecker with Mut, Div, Panic {
+    var c = checker
+
+    var i: i64 = 0
+    while i < c.decl_count {
+        let decl = c.decls[i as usize]
+        if !eff_set_subset(decl.inferred, decl.declared) {
+            // Find each missing effect and record an error
+            var eff_id: i64 = 0
+            while eff_id < EFF_MAX() {
+                if eff_set_has(decl.inferred, eff_id) && !eff_set_has(decl.declared, eff_id) {
+                    let err = eff_checker_build_missing_error(decl.fn_id, eff_id)
+                    c = eff_checker_record_error_bytes(c, err.0, err.1)
+                }
+                eff_id = eff_id + 1
+            }
+        }
+        i = i + 1
+    }
+
+    c
+}
+
+// ============================================================================
+// CHECKER OPERATIONS — leak detection
+// ============================================================================
+//
+// Find functions whose inferred effects are not fully covered by their
+// declarations. Returns the count of such functions.
+
+fn eff_checker_find_leaks(checker: EffectChecker) -> i64 with Mut, Div, Panic {
+    var leak_count: i64 = 0
+    var i: i64 = 0
+    while i < checker.decl_count {
+        let decl = checker.decls[i as usize]
+        if !eff_set_subset(decl.inferred, decl.declared) {
+            leak_count = leak_count + 1
+        }
+        i = i + 1
+    }
+    leak_count
+}
+
+// Get the IDs of functions with leaked effects (up to 64 results)
+fn eff_checker_leaked_fn_ids(checker: EffectChecker) -> ([i64; 64], i64) with Mut, Div, Panic {
+    var ids: [i64; 64] = [0; 64]
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < checker.decl_count {
+        let decl = checker.decls[i as usize]
+        if !eff_set_subset(decl.inferred, decl.declared) && count < 64 {
+            ids[count as usize] = decl.fn_id
+            count = count + 1
+        }
+        i = i + 1
+    }
+    (ids, count)
+}
+
+// ============================================================================
+// CHECKER OPERATIONS — aggregate queries
+// ============================================================================
+
+// Count total distinct effects across all declarations (union of all inferred)
+fn eff_checker_effect_count(checker: EffectChecker) -> i64 with Mut, Div, Panic {
+    var all = eff_set_empty()
+    var i: i64 = 0
+    while i < checker.decl_count {
+        all = eff_set_union(all, checker.decls[i as usize].inferred)
+        i = i + 1
+    }
+    eff_set_count(all)
+}
+
+// Count total distinct declared effects
+fn eff_checker_declared_effect_count(checker: EffectChecker) -> i64 with Mut, Div, Panic {
+    var all = eff_set_empty()
+    var i: i64 = 0
+    while i < checker.decl_count {
+        all = eff_set_union(all, checker.decls[i as usize].declared)
+        i = i + 1
+    }
+    eff_set_count(all)
+}
+
+// Count functions with no declared effects (pure functions)
+fn eff_checker_pure_fn_count(checker: EffectChecker) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < checker.decl_count {
+        if eff_set_is_empty(checker.decls[i as usize].declared) {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Count functions with no inferred effects (truly pure after inference)
+fn eff_checker_truly_pure_count(checker: EffectChecker) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < checker.decl_count {
+        if eff_set_is_empty(checker.decls[i as usize].inferred) {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Check if a specific function is effect-safe (declared >= inferred)
+fn eff_checker_fn_is_safe(checker: EffectChecker, fn_id: i64) -> bool with Mut, Div, Panic {
+    let idx = eff_checker_find_decl(checker, fn_id)
+    if idx < 0 {
+        return true  // Unknown function — assume safe
+    }
+    eff_set_subset(checker.decls[idx as usize].inferred, checker.decls[idx as usize].declared)
+}
+
+// Check if the entire program is effect-safe
+fn eff_checker_all_safe(checker: EffectChecker) -> bool with Mut, Div, Panic {
+    eff_checker_find_leaks(checker) == 0
+}
+
+// ============================================================================
+// HELPER — build a name buffer from ASCII bytes
+// ============================================================================
+
+fn effc_make_name(a: i8, b: i8, c: i8, d: i8, count: i64) -> ([i8; 64], i64) with Mut, Panic, Div {
+    var buf: [i8; 64] = [0; 64]
+    if count > 0 { buf[0] = a }
+    if count > 1 { buf[1] = b }
+    if count > 2 { buf[2] = c }
+    if count > 3 { buf[3] = d }
+    (buf, count)
+}
+
+fn effc_make_name6(a: i8, b: i8, c: i8, d: i8, e: i8, f: i8) -> ([i8; 64], i64) with Mut, Panic, Div {
+    var buf: [i8; 64] = [0; 64]
+    buf[0] = a
+    buf[1] = b
+    buf[2] = c
+    buf[3] = d
+    buf[4] = e
+    buf[5] = f
+    (buf, 6)
+}
+
+// ============================================================================
+// TRANSITIVE EFFECT QUERIES
+// ============================================================================
+
+// Compute the full transitive effect set for a function (all effects it
+// could produce through any call chain). This is the inferred set after
+// running eff_checker_infer.
+fn eff_checker_transitive_effects(checker: EffectChecker, fn_id: i64) -> EffBitSet with Mut, Div, Panic {
+    eff_checker_get_inferred(checker, fn_id)
+}
+
+// Count the call graph edges
+fn eff_checker_edge_count(checker: EffectChecker) -> i64 {
+    checker.call_count
+}
+
+// Count the registered declarations
+fn eff_checker_decl_count(checker: EffectChecker) -> i64 {
+    checker.decl_count
+}
+
+// ============================================================================
+// EFFECT SET CONSTRUCTION HELPERS
+// ============================================================================
+
+// Build an effect set from an array of effect IDs
+fn eff_set_from_ids(ids: [i64; 8], count: i64) -> EffBitSet with Mut, Div, Panic {
+    var s = eff_set_empty()
+    var i: i64 = 0
+    while i < count && i < 8 {
+        s = eff_set_add(s, ids[i as usize])
+        i = i + 1
+    }
+    s
+}
+
+// ============================================================================
+// PRINT HELPERS (for diagnostics)
+// ============================================================================
+
+fn eff_checker_print_set(set: EffBitSet) with IO, Mut, Div, Panic {
+    print("{")
+    var first: bool = true
+    var i: i64 = 0
+    while i < EFF_MAX() {
+        if eff_set_has(set, i) {
+            if !first { print(", ") }
+            let name = eff_checker_format_effect(i)
+            // Print name bytes
+            var j: i64 = 0
+            while j < name.len {
+                print_char(name.buf[j as usize])
+                j = j + 1
+            }
+            first = false
+        }
+        i = i + 1
+    }
+    print("}")
+}
+
+fn eff_checker_print_errors(checker: EffectChecker) with IO, Mut, Div, Panic {
+    var i: i64 = 0
+    while i < checker.error_count {
+        print("  ERROR: ")
+        var j: i64 = 0
+        while j < 128 {
+            let ch = checker.errors[i as usize][j as usize]
+            if ch == 0 {
+                j = 128  // break
+            } else {
+                print_char(ch)
+                j = j + 1
+            }
+        }
+        print("\n")
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+//
+// Test naming convention: effc_test_<category>_<description>
+// Each test returns 0 on success (PASS), 1 on failure (FAIL).
+// The runner aggregates failures and prints a summary.
+
+fn effc_assert_true(condition: bool, test_number: i64) -> i64 with IO, Mut, Panic, Div {
+    if condition {
+        print("  PASS test ")
+        print_int(test_number)
+        print("\n")
+        return 0
+    } else {
+        print("  FAIL test ")
+        print_int(test_number)
+        print("\n")
+        return 1
+    }
+}
+
+// ============================================================
+// Test 1: Empty effect set has zero count
+// ============================================================
+
+fn effc_test_empty_set() -> i64 with IO, Mut, Panic, Div {
+    let s = eff_set_empty()
+    let ok1 = eff_set_is_empty(s)
+    let ok2 = eff_set_count(s) == 0
+    effc_assert_true(ok1 && ok2, 1)
+}
+
+// ============================================================
+// Test 2: Add single effect and check membership
+// ============================================================
+
+fn effc_test_add_single() -> i64 with IO, Mut, Panic, Div {
+    let s = eff_set_add(eff_set_empty(), EFF_IO())
+    let ok1 = eff_set_has(s, EFF_IO())
+    let ok2 = !eff_set_has(s, EFF_MUT())
+    let ok3 = eff_set_count(s) == 1
+    effc_assert_true(ok1 && ok2 && ok3, 2)
+}
+
+// ============================================================
+// Test 3: Add multiple effects
+// ============================================================
+
+fn effc_test_add_multiple() -> i64 with IO, Mut, Panic, Div {
+    var s = eff_set_empty()
+    s = eff_set_add(s, EFF_IO())
+    s = eff_set_add(s, EFF_MUT())
+    s = eff_set_add(s, EFF_DIV())
+    let ok1 = eff_set_has(s, EFF_IO())
+    let ok2 = eff_set_has(s, EFF_MUT())
+    let ok3 = eff_set_has(s, EFF_DIV())
+    let ok4 = !eff_set_has(s, EFF_PANIC())
+    let ok5 = eff_set_count(s) == 3
+    effc_assert_true(ok1 && ok2 && ok3 && ok4 && ok5, 3)
+}
+
+// ============================================================
+// Test 4: Idempotent add (adding same effect twice)
+// ============================================================
+
+fn effc_test_idempotent_add() -> i64 with IO, Mut, Panic, Div {
+    var s = eff_set_empty()
+    s = eff_set_add(s, EFF_IO())
+    s = eff_set_add(s, EFF_IO())
+    s = eff_set_add(s, EFF_IO())
+    let ok = eff_set_count(s) == 1
+    effc_assert_true(ok, 4)
+}
+
+// ============================================================
+// Test 5: Union of disjoint sets
+// ============================================================
+
+fn effc_test_union_disjoint() -> i64 with IO, Mut, Panic, Div {
+    var a = eff_set_empty()
+    a = eff_set_add(a, EFF_IO())
+    a = eff_set_add(a, EFF_MUT())
+
+    var b = eff_set_empty()
+    b = eff_set_add(b, EFF_PANIC())
+    b = eff_set_add(b, EFF_DIV())
+
+    let u = eff_set_union(a, b)
+    let ok1 = eff_set_count(u) == 4
+    let ok2 = eff_set_has(u, EFF_IO())
+    let ok3 = eff_set_has(u, EFF_MUT())
+    let ok4 = eff_set_has(u, EFF_PANIC())
+    let ok5 = eff_set_has(u, EFF_DIV())
+    effc_assert_true(ok1 && ok2 && ok3 && ok4 && ok5, 5)
+}
+
+// ============================================================
+// Test 6: Union of overlapping sets
+// ============================================================
+
+fn effc_test_union_overlap() -> i64 with IO, Mut, Panic, Div {
+    var a = eff_set_empty()
+    a = eff_set_add(a, EFF_IO())
+    a = eff_set_add(a, EFF_MUT())
+
+    var b = eff_set_empty()
+    b = eff_set_add(b, EFF_MUT())
+    b = eff_set_add(b, EFF_PANIC())
+
+    let u = eff_set_union(a, b)
+    let ok1 = eff_set_count(u) == 3
+    let ok2 = eff_set_has(u, EFF_IO())
+    let ok3 = eff_set_has(u, EFF_MUT())
+    let ok4 = eff_set_has(u, EFF_PANIC())
+    effc_assert_true(ok1 && ok2 && ok3 && ok4, 6)
+}
+
+// ============================================================
+// Test 7: Subset — proper subset
+// ============================================================
+
+fn effc_test_subset_proper() -> i64 with IO, Mut, Panic, Div {
+    var small = eff_set_empty()
+    small = eff_set_add(small, EFF_IO())
+
+    var big = eff_set_empty()
+    big = eff_set_add(big, EFF_IO())
+    big = eff_set_add(big, EFF_MUT())
+
+    let ok1 = eff_set_subset(small, big)
+    let ok2 = !eff_set_subset(big, small)
+    effc_assert_true(ok1 && ok2, 7)
+}
+
+// ============================================================
+// Test 8: Subset — equal sets
+// ============================================================
+
+fn effc_test_subset_equal() -> i64 with IO, Mut, Panic, Div {
+    var s = eff_set_empty()
+    s = eff_set_add(s, EFF_IO())
+    s = eff_set_add(s, EFF_MUT())
+    let ok = eff_set_subset(s, s)
+    effc_assert_true(ok, 8)
+}
+
+// ============================================================
+// Test 9: Subset — empty is subset of everything
+// ============================================================
+
+fn effc_test_subset_empty() -> i64 with IO, Mut, Panic, Div {
+    let empty = eff_set_empty()
+    var s = eff_set_empty()
+    s = eff_set_add(s, EFF_IO())
+    let ok = eff_set_subset(empty, s) && eff_set_subset(empty, empty)
+    effc_assert_true(ok, 9)
+}
+
+// ============================================================
+// Test 10: Intersection
+// ============================================================
+
+fn effc_test_intersection() -> i64 with IO, Mut, Panic, Div {
+    var a = eff_set_empty()
+    a = eff_set_add(a, EFF_IO())
+    a = eff_set_add(a, EFF_MUT())
+    a = eff_set_add(a, EFF_PANIC())
+
+    var b = eff_set_empty()
+    b = eff_set_add(b, EFF_MUT())
+    b = eff_set_add(b, EFF_PANIC())
+    b = eff_set_add(b, EFF_DIV())
+
+    let inter = eff_set_intersect(a, b)
+    let ok1 = eff_set_count(inter) == 2
+    let ok2 = eff_set_has(inter, EFF_MUT())
+    let ok3 = eff_set_has(inter, EFF_PANIC())
+    let ok4 = !eff_set_has(inter, EFF_IO())
+    let ok5 = !eff_set_has(inter, EFF_DIV())
+    effc_assert_true(ok1 && ok2 && ok3 && ok4 && ok5, 10)
+}
+
+// ============================================================
+// Test 11: Difference
+// ============================================================
+
+fn effc_test_difference() -> i64 with IO, Mut, Panic, Div {
+    var a = eff_set_empty()
+    a = eff_set_add(a, EFF_IO())
+    a = eff_set_add(a, EFF_MUT())
+    a = eff_set_add(a, EFF_PANIC())
+
+    var b = eff_set_empty()
+    b = eff_set_add(b, EFF_MUT())
+
+    let diff = eff_set_diff(a, b)
+    let ok1 = eff_set_count(diff) == 2
+    let ok2 = eff_set_has(diff, EFF_IO())
+    let ok3 = eff_set_has(diff, EFF_PANIC())
+    let ok4 = !eff_set_has(diff, EFF_MUT())
+    effc_assert_true(ok1 && ok2 && ok3 && ok4, 11)
+}
+
+// ============================================================
+// Test 12: Singleton set
+// ============================================================
+
+fn effc_test_singleton() -> i64 with IO, Mut, Panic, Div {
+    let s = eff_set_singleton(EFF_GPU())
+    let ok1 = eff_set_count(s) == 1
+    let ok2 = eff_set_has(s, EFF_GPU())
+    let ok3 = !eff_set_has(s, EFF_IO())
+    effc_assert_true(ok1 && ok2 && ok3, 12)
+}
+
+// ============================================================
+// Test 13: Equality
+// ============================================================
+
+fn effc_test_equality() -> i64 with IO, Mut, Panic, Div {
+    var a = eff_set_empty()
+    a = eff_set_add(a, EFF_IO())
+    a = eff_set_add(a, EFF_MUT())
+
+    var b = eff_set_empty()
+    b = eff_set_add(b, EFF_MUT())
+    b = eff_set_add(b, EFF_IO())
+
+    let ok1 = eff_set_eq(a, b)
+    let c = eff_set_add(b, EFF_PANIC())
+    let ok2 = !eff_set_eq(a, c)
+    effc_assert_true(ok1 && ok2, 13)
+}
+
+// ============================================================
+// Test 14: Effect name formatting
+// ============================================================
+
+fn effc_test_format_names() -> i64 with IO, Mut, Panic, Div {
+    let io_name = eff_checker_format_effect(EFF_IO())
+    let ok1 = io_name.len == 2 && io_name.buf[0] == 73 && io_name.buf[1] == 79  // "IO"
+
+    let mut_name = eff_checker_format_effect(EFF_MUT())
+    let ok2 = mut_name.len == 3  // "Mut"
+
+    let div_name = eff_checker_format_effect(EFF_DIV())
+    let ok3 = div_name.len == 3 && div_name.buf[0] == 68  // "Div"
+
+    let panic_name = eff_checker_format_effect(EFF_PANIC())
+    let ok4 = panic_name.len == 5 && panic_name.buf[0] == 80  // "Panic"
+
+    let gpu_name = eff_checker_format_effect(EFF_GPU())
+    let ok5 = gpu_name.len == 3 && gpu_name.buf[0] == 71  // "GPU"
+
+    effc_assert_true(ok1 && ok2 && ok3 && ok4 && ok5, 14)
+}
+
+// ============================================================
+// Test 15: New checker has zero counts
+// ============================================================
+
+fn effc_test_checker_new() -> i64 with IO, Mut, Panic, Div {
+    let c = eff_checker_new()
+    let ok1 = c.decl_count == 0
+    let ok2 = c.call_count == 0
+    let ok3 = c.error_count == 0
+    effc_assert_true(ok1 && ok2 && ok3, 15)
+}
+
+// ============================================================
+// Test 16: Add declaration and find it
+// ============================================================
+
+fn effc_test_add_find_decl() -> i64 with IO, Mut, Panic, Div {
+    var c = eff_checker_new()
+    let name = effc_make_name(102, 111, 111, 0, 3)  // "foo"
+    let decl = eff_decl_new(42, name.0, name.1, eff_set_singleton(EFF_IO()))
+    c = eff_checker_add_decl(c, decl)
+
+    let ok1 = c.decl_count == 1
+    let idx = eff_checker_find_decl(c, 42)
+    let ok2 = idx == 0
+    let ok3 = c.decls[0].fn_id == 42
+    let ok4 = eff_set_has(c.decls[0].declared, EFF_IO())
+    effc_assert_true(ok1 && ok2 && ok3 && ok4, 16)
+}
+
+// ============================================================
+// Test 17: Find decl returns -1 for missing ID
+// ============================================================
+
+fn effc_test_find_missing_decl() -> i64 with IO, Mut, Panic, Div {
+    let c = eff_checker_new()
+    let idx = eff_checker_find_decl(c, 999)
+    effc_assert_true(idx == (0 - 1), 17)
+}
+
+// ============================================================
+// Test 18: Add call edge and verify counts
+// ============================================================
+
+fn effc_test_add_call() -> i64 with IO, Mut, Panic, Div {
+    var c = eff_checker_new()
+    c = eff_checker_add_call(c, 1, 2)
+    c = eff_checker_add_call(c, 1, 3)
+    c = eff_checker_add_call(c, 2, 3)
+
+    let ok1 = c.call_count == 3
+    let ok2 = eff_checker_callee_count(c, 1) == 2
+    let ok3 = eff_checker_callee_count(c, 2) == 1
+    let ok4 = eff_checker_caller_count(c, 3) == 2
+    effc_assert_true(ok1 && ok2 && ok3 && ok4, 18)
+}
+
+// ============================================================
+// Test 19: Duplicate call edge is not added twice
+// ============================================================
+
+fn effc_test_duplicate_call() -> i64 with IO, Mut, Panic, Div {
+    var c = eff_checker_new()
+    c = eff_checker_add_call(c, 1, 2)
+    c = eff_checker_add_call(c, 1, 2)
+    c = eff_checker_add_call(c, 1, 2)
+    effc_assert_true(c.call_count == 1, 19)
+}
+
+// ============================================================
+// Test 20: Simple inference — callee effects propagate to caller
+// ============================================================
+
+fn effc_test_simple_inference() -> i64 with IO, Mut, Panic, Div {
+    var c = eff_checker_new()
+
+    // fn foo() with IO — has IO as both declared and inferred
+    let foo_name = effc_make_name(102, 111, 111, 0, 3)
+    var foo_decl = eff_decl_new(1, foo_name.0, foo_name.1, eff_set_singleton(EFF_IO()))
+    foo_decl.inferred = eff_set_singleton(EFF_IO())
+    c = eff_checker_add_decl(c, foo_decl)
+
+    // fn bar() with IO — calls foo, should inherit IO
+    let bar_name = effc_make_name(98, 97, 114, 0, 3)
+    let bar_decl = eff_decl_new(2, bar_name.0, bar_name.1, eff_set_singleton(EFF_IO()))
+    c = eff_checker_add_decl(c, bar_decl)
+
+    // bar -> foo
+    c = eff_checker_add_call(c, 2, 1)
+
+    // Run inference
+    c = eff_checker_infer(c)
+
+    let bar_inferred = eff_checker_get_inferred(c, 2)
+    let ok = eff_set_has(bar_inferred, EFF_IO())
+    effc_assert_true(ok, 20)
+}
+
+// ============================================================
+// Test 21: Transitive inference — A calls B calls C
+// ============================================================
+
+fn effc_test_transitive_inference() -> i64 with IO, Mut, Panic, Div {
+    var c = eff_checker_new()
+
+    // fn C() — has DIV inferred (leaf, performs division)
+    let c_name = effc_make_name(67, 0, 0, 0, 1)
+    var c_decl = eff_decl_new(3, c_name.0, c_name.1, eff_set_singleton(EFF_DIV()))
+    c_decl.inferred = eff_set_singleton(EFF_DIV())
+    c = eff_checker_add_decl(c, c_decl)
+
+    // fn B() — calls C, should inherit DIV
+    let b_name = effc_make_name(66, 0, 0, 0, 1)
+    let b_decl = eff_decl_new(2, b_name.0, b_name.1, eff_set_singleton(EFF_DIV()))
+    c = eff_checker_add_decl(c, b_decl)
+
+    // fn A() — calls B, should transitively inherit DIV
+    let a_name = effc_make_name(65, 0, 0, 0, 1)
+    let a_decl = eff_decl_new(1, a_name.0, a_name.1, eff_set_singleton(EFF_DIV()))
+    c = eff_checker_add_decl(c, a_decl)
+
+    c = eff_checker_add_call(c, 1, 2)  // A -> B
+    c = eff_checker_add_call(c, 2, 3)  // B -> C
+
+    c = eff_checker_infer(c)
+
+    let a_inferred = eff_checker_get_inferred(c, 1)
+    let ok1 = eff_set_has(a_inferred, EFF_DIV())
+    let b_inferred = eff_checker_get_inferred(c, 2)
+    let ok2 = eff_set_has(b_inferred, EFF_DIV())
+    effc_assert_true(ok1 && ok2, 21)
+}
+
+// ============================================================
+// Test 22: Verification — valid declaration passes
+// ============================================================
+
+fn effc_test_verify_valid() -> i64 with IO, Mut, Panic, Div {
+    var c = eff_checker_new()
+
+    // fn foo() with IO, Mut — inferred: IO only
+    let name = effc_make_name(102, 111, 111, 0, 3)
+    var declared = eff_set_empty()
+    declared = eff_set_add(declared, EFF_IO())
+    declared = eff_set_add(declared, EFF_MUT())
+    var decl = eff_decl_new(1, name.0, name.1, declared)
+    decl.inferred = eff_set_singleton(EFF_IO())
+    c = eff_checker_add_decl(c, decl)
+
+    c = eff_checker_verify(c)
+    effc_assert_true(c.error_count == 0, 22)
+}
+
+// ============================================================
+// Test 23: Verification — missing effect produces error
+// ============================================================
+
+fn effc_test_verify_missing() -> i64 with IO, Mut, Panic, Div {
+    var c = eff_checker_new()
+
+    // fn foo() with IO — inferred: IO + Mut (but Mut not declared)
+    let name = effc_make_name(102, 111, 111, 0, 3)
+    var inferred = eff_set_empty()
+    inferred = eff_set_add(inferred, EFF_IO())
+    inferred = eff_set_add(inferred, EFF_MUT())
+    var decl = eff_decl_new(1, name.0, name.1, eff_set_singleton(EFF_IO()))
+    decl.inferred = inferred
+    c = eff_checker_add_decl(c, decl)
+
+    c = eff_checker_verify(c)
+    effc_assert_true(c.error_count == 1, 23)
+}
+
+// ============================================================
+// Test 24: Leak detection — counts leaking functions
+// ============================================================
+
+fn effc_test_find_leaks() -> i64 with IO, Mut, Panic, Div {
+    var c = eff_checker_new()
+
+    // fn safe() with IO — inferred: IO (covered)
+    let safe_name = effc_make_name(115, 97, 102, 101, 4)  // "safe"
+    var safe_decl = eff_decl_new(1, safe_name.0, safe_name.1, eff_set_singleton(EFF_IO()))
+    safe_decl.inferred = eff_set_singleton(EFF_IO())
+    c = eff_checker_add_decl(c, safe_decl)
+
+    // fn leaky() with pure — inferred: IO (NOT covered)
+    let leak_name = effc_make_name(108, 101, 97, 107, 4)  // "leak"
+    var leak_decl = eff_decl_new(2, leak_name.0, leak_name.1, eff_set_empty())
+    leak_decl.inferred = eff_set_singleton(EFF_IO())
+    c = eff_checker_add_decl(c, leak_decl)
+
+    let leaks = eff_checker_find_leaks(c)
+    effc_assert_true(leaks == 1, 24)
+}
+
+// ============================================================
+// Test 25: Pure function count
+// ============================================================
+
+fn effc_test_pure_fn_count() -> i64 with IO, Mut, Panic, Div {
+    var c = eff_checker_new()
+
+    // fn pure_fn() — no effects declared
+    let p_name = effc_make_name(112, 0, 0, 0, 1)
+    let p_decl = eff_decl_new(1, p_name.0, p_name.1, eff_set_empty())
+    c = eff_checker_add_decl(c, p_decl)
+
+    // fn impure_fn() with IO
+    let i_name = effc_make_name(105, 0, 0, 0, 1)
+    let i_decl = eff_decl_new(2, i_name.0, i_name.1, eff_set_singleton(EFF_IO()))
+    c = eff_checker_add_decl(c, i_decl)
+
+    // fn another_pure() — no effects
+    let a_name = effc_make_name(97, 0, 0, 0, 1)
+    let a_decl = eff_decl_new(3, a_name.0, a_name.1, eff_set_empty())
+    c = eff_checker_add_decl(c, a_decl)
+
+    let pcount = eff_checker_pure_fn_count(c)
+    effc_assert_true(pcount == 2, 25)
+}
+
+// ============================================================
+// Test 26: eff_set_from_ids builds correct set
+// ============================================================
+
+fn effc_test_from_ids() -> i64 with IO, Mut, Panic, Div {
+    var ids: [i64; 8] = [0; 8]
+    ids[0] = EFF_IO()
+    ids[1] = EFF_PANIC()
+    ids[2] = EFF_GPU()
+    let s = eff_set_from_ids(ids, 3)
+    let ok1 = eff_set_count(s) == 3
+    let ok2 = eff_set_has(s, EFF_IO())
+    let ok3 = eff_set_has(s, EFF_PANIC())
+    let ok4 = eff_set_has(s, EFF_GPU())
+    let ok5 = !eff_set_has(s, EFF_MUT())
+    effc_assert_true(ok1 && ok2 && ok3 && ok4 && ok5, 26)
+}
+
+// ============================================================
+// Test 27: eff_decl_missing returns undeclared inferred effects
+// ============================================================
+
+fn effc_test_decl_missing() -> i64 with IO, Mut, Panic, Div {
+    let name = effc_make_name(102, 0, 0, 0, 1)
+    var decl = eff_decl_new(1, name.0, name.1, eff_set_singleton(EFF_IO()))
+    var inferred = eff_set_empty()
+    inferred = eff_set_add(inferred, EFF_IO())
+    inferred = eff_set_add(inferred, EFF_MUT())
+    inferred = eff_set_add(inferred, EFF_PANIC())
+    decl.inferred = inferred
+
+    let missing = eff_decl_missing(decl)
+    let ok1 = eff_set_count(missing) == 2
+    let ok2 = eff_set_has(missing, EFF_MUT())
+    let ok3 = eff_set_has(missing, EFF_PANIC())
+    let ok4 = !eff_set_has(missing, EFF_IO())
+    effc_assert_true(ok1 && ok2 && ok3 && ok4, 27)
+}
+
+// ============================================================
+// Test 28: eff_decl_unnecessary returns declared but not inferred
+// ============================================================
+
+fn effc_test_decl_unnecessary() -> i64 with IO, Mut, Panic, Div {
+    let name = effc_make_name(102, 0, 0, 0, 1)
+    var declared = eff_set_empty()
+    declared = eff_set_add(declared, EFF_IO())
+    declared = eff_set_add(declared, EFF_MUT())
+    declared = eff_set_add(declared, EFF_PANIC())
+    var decl = eff_decl_new(1, name.0, name.1, declared)
+    decl.inferred = eff_set_singleton(EFF_IO())
+
+    let unnecessary = eff_decl_unnecessary(decl)
+    let ok1 = eff_set_count(unnecessary) == 2
+    let ok2 = eff_set_has(unnecessary, EFF_MUT())
+    let ok3 = eff_set_has(unnecessary, EFF_PANIC())
+    effc_assert_true(ok1 && ok2 && ok3, 28)
+}
+
+// ============================================================
+// Test 29: Diamond call graph inference
+// ============================================================
+//
+//   A -> B -> D
+//   A -> C -> D
+//   D has IO inferred. Both B and C (and A) should inherit IO.
+
+fn effc_test_diamond_inference() -> i64 with IO, Mut, Panic, Div {
+    var c = eff_checker_new()
+
+    let d_name = effc_make_name(68, 0, 0, 0, 1)
+    var d_decl = eff_decl_new(4, d_name.0, d_name.1, eff_set_singleton(EFF_IO()))
+    d_decl.inferred = eff_set_singleton(EFF_IO())
+    c = eff_checker_add_decl(c, d_decl)
+
+    let c_name = effc_make_name(67, 0, 0, 0, 1)
+    let c_decl_val = eff_decl_new(3, c_name.0, c_name.1, eff_set_singleton(EFF_IO()))
+    c = eff_checker_add_decl(c, c_decl_val)
+
+    let b_name = effc_make_name(66, 0, 0, 0, 1)
+    let b_decl = eff_decl_new(2, b_name.0, b_name.1, eff_set_singleton(EFF_IO()))
+    c = eff_checker_add_decl(c, b_decl)
+
+    let a_name = effc_make_name(65, 0, 0, 0, 1)
+    let a_decl = eff_decl_new(1, a_name.0, a_name.1, eff_set_singleton(EFF_IO()))
+    c = eff_checker_add_decl(c, a_decl)
+
+    c = eff_checker_add_call(c, 1, 2)  // A -> B
+    c = eff_checker_add_call(c, 1, 3)  // A -> C
+    c = eff_checker_add_call(c, 2, 4)  // B -> D
+    c = eff_checker_add_call(c, 3, 4)  // C -> D
+
+    c = eff_checker_infer(c)
+
+    let a_inf = eff_checker_get_inferred(c, 1)
+    let b_inf = eff_checker_get_inferred(c, 2)
+    let c_inf = eff_checker_get_inferred(c, 3)
+    let ok1 = eff_set_has(a_inf, EFF_IO())
+    let ok2 = eff_set_has(b_inf, EFF_IO())
+    let ok3 = eff_set_has(c_inf, EFF_IO())
+    effc_assert_true(ok1 && ok2 && ok3, 29)
+}
+
+// ============================================================
+// Test 30: Multiple effects through call chain
+// ============================================================
+//
+//   foo has IO, bar has MUT, baz calls both -> should have IO+MUT
+
+fn effc_test_multi_effect_chain() -> i64 with IO, Mut, Panic, Div {
+    var c = eff_checker_new()
+
+    let foo_name = effc_make_name(102, 111, 111, 0, 3)
+    var foo_decl = eff_decl_new(1, foo_name.0, foo_name.1, eff_set_singleton(EFF_IO()))
+    foo_decl.inferred = eff_set_singleton(EFF_IO())
+    c = eff_checker_add_decl(c, foo_decl)
+
+    let bar_name = effc_make_name(98, 97, 114, 0, 3)
+    var bar_decl = eff_decl_new(2, bar_name.0, bar_name.1, eff_set_singleton(EFF_MUT()))
+    bar_decl.inferred = eff_set_singleton(EFF_MUT())
+    c = eff_checker_add_decl(c, bar_decl)
+
+    // baz calls both foo and bar, declared IO+MUT
+    let baz_name = effc_make_name(98, 97, 122, 0, 3)
+    var baz_declared = eff_set_empty()
+    baz_declared = eff_set_add(baz_declared, EFF_IO())
+    baz_declared = eff_set_add(baz_declared, EFF_MUT())
+    let baz_decl = eff_decl_new(3, baz_name.0, baz_name.1, baz_declared)
+    c = eff_checker_add_decl(c, baz_decl)
+
+    c = eff_checker_add_call(c, 3, 1)  // baz -> foo
+    c = eff_checker_add_call(c, 3, 2)  // baz -> bar
+
+    c = eff_checker_infer(c)
+
+    let baz_inf = eff_checker_get_inferred(c, 3)
+    let ok1 = eff_set_has(baz_inf, EFF_IO())
+    let ok2 = eff_set_has(baz_inf, EFF_MUT())
+    let ok3 = eff_set_count(baz_inf) == 2
+    effc_assert_true(ok1 && ok2 && ok3, 30)
+}
+
+// ============================================================
+// Test 31: All-safe on valid program
+// ============================================================
+
+fn effc_test_all_safe_valid() -> i64 with IO, Mut, Panic, Div {
+    var c = eff_checker_new()
+
+    let name = effc_make_name(102, 0, 0, 0, 1)
+    var decl = eff_decl_new(1, name.0, name.1, eff_set_singleton(EFF_IO()))
+    decl.inferred = eff_set_singleton(EFF_IO())
+    c = eff_checker_add_decl(c, decl)
+
+    let ok = eff_checker_all_safe(c)
+    effc_assert_true(ok, 31)
+}
+
+// ============================================================
+// Test 32: All-safe fails on leaky program
+// ============================================================
+
+fn effc_test_all_safe_leaky() -> i64 with IO, Mut, Panic, Div {
+    var c = eff_checker_new()
+
+    let name = effc_make_name(102, 0, 0, 0, 1)
+    var decl = eff_decl_new(1, name.0, name.1, eff_set_empty())
+    decl.inferred = eff_set_singleton(EFF_IO())
+    c = eff_checker_add_decl(c, decl)
+
+    let ok = !eff_checker_all_safe(c)
+    effc_assert_true(ok, 32)
+}
+
+// ============================================================
+// Test 33: Leaked fn IDs collection
+// ============================================================
+
+fn effc_test_leaked_fn_ids() -> i64 with IO, Mut, Panic, Div {
+    var c = eff_checker_new()
+
+    // fn 10: safe (IO declared and inferred)
+    let n1 = effc_make_name(97, 0, 0, 0, 1)
+    var d1 = eff_decl_new(10, n1.0, n1.1, eff_set_singleton(EFF_IO()))
+    d1.inferred = eff_set_singleton(EFF_IO())
+    c = eff_checker_add_decl(c, d1)
+
+    // fn 20: leaky (MUT inferred but not declared)
+    let n2 = effc_make_name(98, 0, 0, 0, 1)
+    var d2 = eff_decl_new(20, n2.0, n2.1, eff_set_empty())
+    d2.inferred = eff_set_singleton(EFF_MUT())
+    c = eff_checker_add_decl(c, d2)
+
+    // fn 30: leaky (PANIC inferred but not declared)
+    let n3 = effc_make_name(99, 0, 0, 0, 1)
+    var d3 = eff_decl_new(30, n3.0, n3.1, eff_set_empty())
+    d3.inferred = eff_set_singleton(EFF_PANIC())
+    c = eff_checker_add_decl(c, d3)
+
+    let result = eff_checker_leaked_fn_ids(c)
+    let ids = result.0
+    let count = result.1
+    let ok1 = count == 2
+    // The leaked IDs should be 20 and 30 (order depends on iteration)
+    let ok2 = (ids[0] == 20 && ids[1] == 30) || (ids[0] == 30 && ids[1] == 20)
+    effc_assert_true(ok1 && ok2, 33)
+}
+
+// ============================================================
+// Test 34: Effect count across all declarations
+// ============================================================
+
+fn effc_test_effect_count() -> i64 with IO, Mut, Panic, Div {
+    var c = eff_checker_new()
+
+    let n1 = effc_make_name(97, 0, 0, 0, 1)
+    var d1 = eff_decl_new(1, n1.0, n1.1, eff_set_empty())
+    d1.inferred = eff_set_singleton(EFF_IO())
+    c = eff_checker_add_decl(c, d1)
+
+    let n2 = effc_make_name(98, 0, 0, 0, 1)
+    var d2 = eff_decl_new(2, n2.0, n2.1, eff_set_empty())
+    var inf2 = eff_set_empty()
+    inf2 = eff_set_add(inf2, EFF_IO())
+    inf2 = eff_set_add(inf2, EFF_MUT())
+    d2.inferred = inf2
+    c = eff_checker_add_decl(c, d2)
+
+    let total = eff_checker_effect_count(c)
+    effc_assert_true(total == 2, 34)  // IO and MUT distinct
+}
+
+// ============================================================
+// Test 35: Truly pure count
+// ============================================================
+
+fn effc_test_truly_pure_count() -> i64 with IO, Mut, Panic, Div {
+    var c = eff_checker_new()
+
+    // fn pure1 — no inferred effects
+    let n1 = effc_make_name(112, 0, 0, 0, 1)
+    let d1 = eff_decl_new(1, n1.0, n1.1, eff_set_empty())
+    c = eff_checker_add_decl(c, d1)
+
+    // fn impure — inferred IO
+    let n2 = effc_make_name(105, 0, 0, 0, 1)
+    var d2 = eff_decl_new(2, n2.0, n2.1, eff_set_singleton(EFF_IO()))
+    d2.inferred = eff_set_singleton(EFF_IO())
+    c = eff_checker_add_decl(c, d2)
+
+    // fn pure2 — no inferred effects
+    let n3 = effc_make_name(113, 0, 0, 0, 1)
+    let d3 = eff_decl_new(3, n3.0, n3.1, eff_set_empty())
+    c = eff_checker_add_decl(c, d3)
+
+    let tp = eff_checker_truly_pure_count(c)
+    effc_assert_true(tp == 2, 35)
+}
+
+// ============================================================
+// Test 36: fn_is_safe per-function check
+// ============================================================
+
+fn effc_test_fn_is_safe() -> i64 with IO, Mut, Panic, Div {
+    var c = eff_checker_new()
+
+    // fn 1: declared IO, inferred IO — safe
+    let n1 = effc_make_name(97, 0, 0, 0, 1)
+    var d1 = eff_decl_new(1, n1.0, n1.1, eff_set_singleton(EFF_IO()))
+    d1.inferred = eff_set_singleton(EFF_IO())
+    c = eff_checker_add_decl(c, d1)
+
+    // fn 2: declared pure, inferred MUT — unsafe
+    let n2 = effc_make_name(98, 0, 0, 0, 1)
+    var d2 = eff_decl_new(2, n2.0, n2.1, eff_set_empty())
+    d2.inferred = eff_set_singleton(EFF_MUT())
+    c = eff_checker_add_decl(c, d2)
+
+    let ok1 = eff_checker_fn_is_safe(c, 1)
+    let ok2 = !eff_checker_fn_is_safe(c, 2)
+    // Unknown function — defaults to safe
+    let ok3 = eff_checker_fn_is_safe(c, 999)
+    effc_assert_true(ok1 && ok2 && ok3, 36)
+}
+
+// ============================================================
+// Test 37: Common effect set helpers
+// ============================================================
+
+fn effc_test_common_sets() -> i64 with IO, Mut, Panic, Div {
+    let impd = eff_set_io_mut_panic_div()
+    let ok1 = eff_set_count(impd) == 4
+    let ok2 = eff_set_has(impd, EFF_IO())
+    let ok3 = eff_set_has(impd, EFF_MUT())
+    let ok4 = eff_set_has(impd, EFF_PANIC())
+    let ok5 = eff_set_has(impd, EFF_DIV())
+
+    let mpd = eff_set_mut_panic_div()
+    let ok6 = eff_set_count(mpd) == 3
+    let ok7 = !eff_set_has(mpd, EFF_IO())
+    effc_assert_true(ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7, 37)
+}
+
+// ============================================================
+// Test 38: Inference with no call edges (leaf functions unchanged)
+// ============================================================
+
+fn effc_test_infer_no_calls() -> i64 with IO, Mut, Panic, Div {
+    var c = eff_checker_new()
+
+    let n1 = effc_make_name(97, 0, 0, 0, 1)
+    var d1 = eff_decl_new(1, n1.0, n1.1, eff_set_singleton(EFF_IO()))
+    d1.inferred = eff_set_singleton(EFF_IO())
+    c = eff_checker_add_decl(c, d1)
+
+    let n2 = effc_make_name(98, 0, 0, 0, 1)
+    var d2 = eff_decl_new(2, n2.0, n2.1, eff_set_singleton(EFF_MUT()))
+    d2.inferred = eff_set_singleton(EFF_MUT())
+    c = eff_checker_add_decl(c, d2)
+
+    c = eff_checker_infer(c)
+
+    // No edges, so inferred sets should be unchanged
+    let a_inf = eff_checker_get_inferred(c, 1)
+    let b_inf = eff_checker_get_inferred(c, 2)
+    let ok1 = eff_set_count(a_inf) == 1 && eff_set_has(a_inf, EFF_IO())
+    let ok2 = eff_set_count(b_inf) == 1 && eff_set_has(b_inf, EFF_MUT())
+    effc_assert_true(ok1 && ok2, 38)
+}
+
+// ============================================================
+// Test 39: Verify with multiple errors
+// ============================================================
+
+fn effc_test_verify_multi_error() -> i64 with IO, Mut, Panic, Div {
+    var c = eff_checker_new()
+
+    // fn 1: declared IO, inferred IO + MUT + PANIC → 2 errors
+    let n1 = effc_make_name(97, 0, 0, 0, 1)
+    var d1 = eff_decl_new(1, n1.0, n1.1, eff_set_singleton(EFF_IO()))
+    var inf1 = eff_set_empty()
+    inf1 = eff_set_add(inf1, EFF_IO())
+    inf1 = eff_set_add(inf1, EFF_MUT())
+    inf1 = eff_set_add(inf1, EFF_PANIC())
+    d1.inferred = inf1
+    c = eff_checker_add_decl(c, d1)
+
+    c = eff_checker_verify(c)
+    effc_assert_true(c.error_count == 2, 39)
+}
+
+// ============================================================
+// Test 40: eff_decl_is_valid
+// ============================================================
+
+fn effc_test_decl_is_valid() -> i64 with IO, Mut, Panic, Div {
+    let name = effc_make_name(102, 0, 0, 0, 1)
+    var declared = eff_set_empty()
+    declared = eff_set_add(declared, EFF_IO())
+    declared = eff_set_add(declared, EFF_MUT())
+    var decl_valid = eff_decl_new(1, name.0, name.1, declared)
+    decl_valid.inferred = eff_set_singleton(EFF_IO())
+
+    var decl_invalid = eff_decl_new(2, name.0, name.1, eff_set_singleton(EFF_IO()))
+    decl_invalid.inferred = declared
+
+    let ok1 = eff_decl_is_valid(decl_valid)
+    let ok2 = !eff_decl_is_valid(decl_invalid)
+    effc_assert_true(ok1 && ok2, 40)
+}
+
+// ============================================================
+// Test 41: Edge count accessor
+// ============================================================
+
+fn effc_test_edge_count() -> i64 with IO, Mut, Panic, Div {
+    var c = eff_checker_new()
+    let ok1 = eff_checker_edge_count(c) == 0
+    c = eff_checker_add_call(c, 1, 2)
+    c = eff_checker_add_call(c, 2, 3)
+    let ok2 = eff_checker_edge_count(c) == 2
+    effc_assert_true(ok1 && ok2, 41)
+}
+
+// ============================================================
+// Test 42: Decl count accessor
+// ============================================================
+
+fn effc_test_decl_count_accessor() -> i64 with IO, Mut, Panic, Div {
+    var c = eff_checker_new()
+    let ok1 = eff_checker_decl_count(c) == 0
+    let n1 = effc_make_name(97, 0, 0, 0, 1)
+    c = eff_checker_add_decl(c, eff_decl_new(1, n1.0, n1.1, eff_set_empty()))
+    let ok2 = eff_checker_decl_count(c) == 1
+    effc_assert_true(ok1 && ok2, 42)
+}
+
+// ============================================================
+// Test 43: Cycle in call graph converges
+// ============================================================
+//
+//   A -> B -> A (mutual recursion)
+//   A has IO inferred, B has MUT inferred.
+//   After fixed point, both should have IO+MUT.
+
+fn effc_test_cycle_convergence() -> i64 with IO, Mut, Panic, Div {
+    var c = eff_checker_new()
+
+    let a_name = effc_make_name(65, 0, 0, 0, 1)
+    var a_decl = eff_decl_new(1, a_name.0, a_name.1, eff_set_io_mut_panic_div())
+    a_decl.inferred = eff_set_singleton(EFF_IO())
+    c = eff_checker_add_decl(c, a_decl)
+
+    let b_name = effc_make_name(66, 0, 0, 0, 1)
+    var b_decl = eff_decl_new(2, b_name.0, b_name.1, eff_set_io_mut_panic_div())
+    b_decl.inferred = eff_set_singleton(EFF_MUT())
+    c = eff_checker_add_decl(c, b_decl)
+
+    c = eff_checker_add_call(c, 1, 2)  // A -> B
+    c = eff_checker_add_call(c, 2, 1)  // B -> A
+
+    c = eff_checker_infer(c)
+
+    let a_inf = eff_checker_get_inferred(c, 1)
+    let b_inf = eff_checker_get_inferred(c, 2)
+    let ok1 = eff_set_has(a_inf, EFF_IO()) && eff_set_has(a_inf, EFF_MUT())
+    let ok2 = eff_set_has(b_inf, EFF_IO()) && eff_set_has(b_inf, EFF_MUT())
+    effc_assert_true(ok1 && ok2, 43)
+}
+
+// ============================================================
+// Test 44: eff_name_eq comparison
+// ============================================================
+
+fn effc_test_name_eq() -> i64 with IO, Mut, Panic, Div {
+    let a = eff_checker_format_effect(EFF_IO())
+    let b = eff_checker_format_effect(EFF_IO())
+    let c_name = eff_checker_format_effect(EFF_MUT())
+    let ok1 = eff_name_eq(a, b)
+    let ok2 = !eff_name_eq(a, c_name)
+    effc_assert_true(ok1 && ok2, 44)
+}
+
+// ============================================================
+// Test 45: Set inferred updates correctly
+// ============================================================
+
+fn effc_test_set_inferred() -> i64 with IO, Mut, Panic, Div {
+    var c = eff_checker_new()
+    let n1 = effc_make_name(97, 0, 0, 0, 1)
+    let d1 = eff_decl_new(1, n1.0, n1.1, eff_set_empty())
+    c = eff_checker_add_decl(c, d1)
+
+    // Initially empty inferred
+    let inf_before = eff_checker_get_inferred(c, 1)
+    let ok1 = eff_set_is_empty(inf_before)
+
+    // Set inferred to IO
+    c = eff_checker_set_inferred(c, 1, eff_set_singleton(EFF_IO()))
+    let inf_after = eff_checker_get_inferred(c, 1)
+    let ok2 = eff_set_has(inf_after, EFF_IO())
+    let ok3 = eff_set_count(inf_after) == 1
+    effc_assert_true(ok1 && ok2 && ok3, 45)
+}
+
+// ============================================================
+// Test 46: All 8 primary effects can be represented simultaneously
+// ============================================================
+
+fn effc_test_all_primary_effects() -> i64 with IO, Mut, Panic, Div {
+    var s = eff_set_empty()
+    s = eff_set_add(s, EFF_IO())
+    s = eff_set_add(s, EFF_MUT())
+    s = eff_set_add(s, EFF_ALLOC())
+    s = eff_set_add(s, EFF_PANIC())
+    s = eff_set_add(s, EFF_ASYNC())
+    s = eff_set_add(s, EFF_GPU())
+    s = eff_set_add(s, EFF_PROB())
+    s = eff_set_add(s, EFF_DIV())
+
+    let ok1 = eff_set_count(s) == 8
+    let ok2 = eff_set_has(s, EFF_IO()) && eff_set_has(s, EFF_MUT())
+    let ok3 = eff_set_has(s, EFF_ALLOC()) && eff_set_has(s, EFF_PANIC())
+    let ok4 = eff_set_has(s, EFF_ASYNC()) && eff_set_has(s, EFF_GPU())
+    let ok5 = eff_set_has(s, EFF_PROB()) && eff_set_has(s, EFF_DIV())
+    effc_assert_true(ok1 && ok2 && ok3 && ok4 && ok5, 46)
+}
+
+// ============================================================
+// Test 47: Extended effects (Epistemic, Causal, etc.)
+// ============================================================
+
+fn effc_test_extended_effects() -> i64 with IO, Mut, Panic, Div {
+    var s = eff_set_empty()
+    s = eff_set_add(s, EFF_EPISTEMIC())
+    s = eff_set_add(s, EFF_CAUSAL())
+    s = eff_set_add(s, EFF_NETWORK())
+    s = eff_set_add(s, EFF_SENSOR())
+    s = eff_set_add(s, EFF_EXN())
+
+    let ok1 = eff_set_count(s) == 5
+    let ok2 = eff_set_has(s, EFF_EPISTEMIC())
+    let ok3 = eff_set_has(s, EFF_CAUSAL())
+    let ok4 = eff_set_has(s, EFF_NETWORK())
+    let ok5 = eff_set_has(s, EFF_SENSOR())
+    let ok6 = eff_set_has(s, EFF_EXN())
+    effc_assert_true(ok1 && ok2 && ok3 && ok4 && ok5 && ok6, 47)
+}
+
+// ============================================================
+// Test 48: get_declared returns correct set for known fn
+// ============================================================
+
+fn effc_test_get_declared() -> i64 with IO, Mut, Panic, Div {
+    var c = eff_checker_new()
+    let n1 = effc_make_name(97, 0, 0, 0, 1)
+    var declared = eff_set_empty()
+    declared = eff_set_add(declared, EFF_IO())
+    declared = eff_set_add(declared, EFF_MUT())
+    let d1 = eff_decl_new(42, n1.0, n1.1, declared)
+    c = eff_checker_add_decl(c, d1)
+
+    let got = eff_checker_get_declared(c, 42)
+    let ok1 = eff_set_has(got, EFF_IO())
+    let ok2 = eff_set_has(got, EFF_MUT())
+    let ok3 = eff_set_count(got) == 2
+
+    // Unknown fn returns empty
+    let unknown = eff_checker_get_declared(c, 999)
+    let ok4 = eff_set_is_empty(unknown)
+
+    effc_assert_true(ok1 && ok2 && ok3 && ok4, 48)
+}
+
+// ============================================================
+// Test 49: Inference iterations count
+// ============================================================
+
+fn effc_test_infer_iterations() -> i64 with IO, Mut, Panic, Div {
+    var c = eff_checker_new()
+
+    // Pure leaf — no propagation needed
+    let n1 = effc_make_name(97, 0, 0, 0, 1)
+    let d1 = eff_decl_new(1, n1.0, n1.1, eff_set_empty())
+    c = eff_checker_add_decl(c, d1)
+
+    let iters = eff_checker_infer_iterations(c)
+    // With no edges, should converge in 1 iteration
+    effc_assert_true(iters == 1, 49)
+}
+
+// ============================================================
+// Test 50: Declared effect count across checker
+// ============================================================
+
+fn effc_test_declared_effect_count() -> i64 with IO, Mut, Panic, Div {
+    var c = eff_checker_new()
+
+    let n1 = effc_make_name(97, 0, 0, 0, 1)
+    let d1 = eff_decl_new(1, n1.0, n1.1, eff_set_singleton(EFF_IO()))
+    c = eff_checker_add_decl(c, d1)
+
+    let n2 = effc_make_name(98, 0, 0, 0, 1)
+    var declared2 = eff_set_empty()
+    declared2 = eff_set_add(declared2, EFF_IO())
+    declared2 = eff_set_add(declared2, EFF_MUT())
+    declared2 = eff_set_add(declared2, EFF_DIV())
+    let d2 = eff_decl_new(2, n2.0, n2.1, declared2)
+    c = eff_checker_add_decl(c, d2)
+
+    let total_declared = eff_checker_declared_effect_count(c)
+    effc_assert_true(total_declared == 3, 50)  // IO, MUT, DIV
+}
+
+// ============================================================
+// Test runner
+// ============================================================
+
+fn effect_checker_run_tests() -> i64 with IO, Mut, Panic, Div {
+    print("=== Effect checker tests ===\n")
+    var fails: i64 = 0
+
+    // EffBitSet basics (tests 1-13)
+    fails = fails + effc_test_empty_set()
+    fails = fails + effc_test_add_single()
+    fails = fails + effc_test_add_multiple()
+    fails = fails + effc_test_idempotent_add()
+    fails = fails + effc_test_union_disjoint()
+    fails = fails + effc_test_union_overlap()
+    fails = fails + effc_test_subset_proper()
+    fails = fails + effc_test_subset_equal()
+    fails = fails + effc_test_subset_empty()
+    fails = fails + effc_test_intersection()
+    fails = fails + effc_test_difference()
+    fails = fails + effc_test_singleton()
+    fails = fails + effc_test_equality()
+
+    // Name formatting (test 14)
+    fails = fails + effc_test_format_names()
+
+    // Checker basics (tests 15-19)
+    fails = fails + effc_test_checker_new()
+    fails = fails + effc_test_add_find_decl()
+    fails = fails + effc_test_find_missing_decl()
+    fails = fails + effc_test_add_call()
+    fails = fails + effc_test_duplicate_call()
+
+    // Inference (tests 20-21, 29-30)
+    fails = fails + effc_test_simple_inference()
+    fails = fails + effc_test_transitive_inference()
+
+    // Verification (tests 22-24)
+    fails = fails + effc_test_verify_valid()
+    fails = fails + effc_test_verify_missing()
+    fails = fails + effc_test_find_leaks()
+
+    // Aggregate queries (tests 25, 34-36)
+    fails = fails + effc_test_pure_fn_count()
+    fails = fails + effc_test_from_ids()
+    fails = fails + effc_test_decl_missing()
+    fails = fails + effc_test_decl_unnecessary()
+
+    // Complex inference (tests 29-30)
+    fails = fails + effc_test_diamond_inference()
+    fails = fails + effc_test_multi_effect_chain()
+
+    // Safety checks (tests 31-33)
+    fails = fails + effc_test_all_safe_valid()
+    fails = fails + effc_test_all_safe_leaky()
+    fails = fails + effc_test_leaked_fn_ids()
+
+    // More coverage (tests 34-50)
+    fails = fails + effc_test_effect_count()
+    fails = fails + effc_test_truly_pure_count()
+    fails = fails + effc_test_fn_is_safe()
+    fails = fails + effc_test_common_sets()
+    fails = fails + effc_test_infer_no_calls()
+    fails = fails + effc_test_verify_multi_error()
+    fails = fails + effc_test_decl_is_valid()
+    fails = fails + effc_test_edge_count()
+    fails = fails + effc_test_decl_count_accessor()
+    fails = fails + effc_test_cycle_convergence()
+    fails = fails + effc_test_name_eq()
+    fails = fails + effc_test_set_inferred()
+    fails = fails + effc_test_all_primary_effects()
+    fails = fails + effc_test_extended_effects()
+    fails = fails + effc_test_get_declared()
+    fails = fails + effc_test_infer_iterations()
+    fails = fails + effc_test_declared_effect_count()
+
+    print("Total failures: ")
+    print_int(fails)
+    print("\n")
+    fails
+}

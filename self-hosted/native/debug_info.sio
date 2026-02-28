@@ -1,0 +1,1586 @@
+// self-hosted::native::debug_info — Source-level debug information generation
+//
+// Builds and manages source-level debug information for the compiler backend.
+// Tracks source locations, scopes, variables, and line tables needed for
+// debugger support.  Data is stored in flat fixed-size arrays (arena pattern)
+// suitable for the bootstrap self-hosted compiler.
+//
+// The line table uses delta encoding for compact representation, matching
+// the DWARF .debug_line state machine model.  Scopes form a tree via
+// parent_id links; scope lookup walks the tree to find the innermost
+// scope containing a given source line.
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+let DBG_SCOPE_FILE: i64 = 1
+let DBG_SCOPE_FN: i64 = 2
+let DBG_SCOPE_BLOCK: i64 = 3
+let DBG_SCOPE_LOOP: i64 = 4
+
+let DBG_MAX_FILES: i64 = 64
+let DBG_MAX_SCOPES: i64 = 512
+let DBG_MAX_VARS: i64 = 1024
+let DBG_MAX_LINES: i64 = 4096
+let DBG_FILE_NAME_LEN: i64 = 128
+let DBG_VAR_NAME_LEN: i64 = 64
+
+// Sentinel for "no parent" / "no scope"
+let DBG_NO_PARENT: i64 = 0 - 1
+let DBG_NO_SCOPE: i64 = 0 - 1
+let DBG_NO_FN: i64 = 0 - 1
+
+// ============================================================================
+// Core data structures
+// ============================================================================
+
+// A source location: file, line, column, enclosing scope.
+struct DebugLoc {
+    line: i64,
+    column: i64,
+    file_id: i64,
+    scope_id: i64,
+}
+
+// A debug variable: name, type, scope, location, and whether it is a parameter.
+struct DebugVar {
+    name: [i8; 64],
+    name_len: i64,
+    type_id: i64,
+    scope_id: i64,
+    loc: DebugLoc,
+    is_param: bool,
+    slot: i64,
+}
+
+// A lexical scope in the scope tree.
+struct DebugScope {
+    id: i64,
+    parent_id: i64,
+    kind: i64,
+    start_line: i64,
+    end_line: i64,
+    fn_id: i64,
+}
+
+// A single entry in the line number table.
+struct DebugLineEntry {
+    address: i64,
+    line: i64,
+    column: i64,
+    file_id: i64,
+    is_stmt: bool,
+    is_prologue_end: bool,
+}
+
+// A delta-encoded line program entry (output of dbg_compute_line_deltas).
+struct DebugLineDelta {
+    delta_address: i64,
+    delta_line: i64,
+    column: i64,
+    file_id: i64,
+    is_stmt: bool,
+    is_prologue_end: bool,
+}
+
+// The main builder: collects files, scopes, variables, and line entries.
+struct DebugInfoBuilder {
+    files: [[i8; 128]; 64],
+    file_lens: [i64; 64],
+    file_count: i64,
+    scopes: [DebugScope; 512],
+    scope_count: i64,
+    vars: [DebugVar; 1024],
+    var_count: i64,
+    line_table: [DebugLineEntry; 4096],
+    line_count: i64,
+    current_scope: i64,
+}
+
+// ============================================================================
+// Constructors
+// ============================================================================
+
+fn dbg_loc_new(line: i64, column: i64, file_id: i64, scope_id: i64) -> DebugLoc {
+    DebugLoc {
+        line: line,
+        column: column,
+        file_id: file_id,
+        scope_id: scope_id,
+    }
+}
+
+fn dbg_var_new(
+    name: [i8; 64], name_len: i64, type_id: i64, scope_id: i64,
+    loc: DebugLoc, is_param: bool, slot: i64
+) -> DebugVar {
+    DebugVar {
+        name: name,
+        name_len: name_len,
+        type_id: type_id,
+        scope_id: scope_id,
+        loc: loc,
+        is_param: is_param,
+        slot: slot,
+    }
+}
+
+fn dbg_scope_new(
+    id: i64, parent_id: i64, kind: i64, start_line: i64, end_line: i64, fn_id: i64
+) -> DebugScope {
+    DebugScope {
+        id: id,
+        parent_id: parent_id,
+        kind: kind,
+        start_line: start_line,
+        end_line: end_line,
+        fn_id: fn_id,
+    }
+}
+
+fn dbg_line_entry_new(
+    address: i64, line: i64, column: i64, file_id: i64,
+    is_stmt: bool, is_prologue_end: bool
+) -> DebugLineEntry {
+    DebugLineEntry {
+        address: address,
+        line: line,
+        column: column,
+        file_id: file_id,
+        is_stmt: is_stmt,
+        is_prologue_end: is_prologue_end,
+    }
+}
+
+fn dbg_line_delta_new(
+    delta_address: i64, delta_line: i64, column: i64, file_id: i64,
+    is_stmt: bool, is_prologue_end: bool
+) -> DebugLineDelta {
+    DebugLineDelta {
+        delta_address: delta_address,
+        delta_line: delta_line,
+        column: column,
+        file_id: file_id,
+        is_stmt: is_stmt,
+        is_prologue_end: is_prologue_end,
+    }
+}
+
+fn dbg_empty_scope() -> DebugScope {
+    DebugScope {
+        id: 0,
+        parent_id: DBG_NO_PARENT,
+        kind: DBG_SCOPE_FILE,
+        start_line: 0,
+        end_line: 0,
+        fn_id: DBG_NO_FN,
+    }
+}
+
+fn dbg_empty_var() -> DebugVar {
+    DebugVar {
+        name: [0; 64],
+        name_len: 0,
+        type_id: 0,
+        scope_id: 0,
+        loc: dbg_loc_new(0, 0, 0, 0),
+        is_param: false,
+        slot: 0,
+    }
+}
+
+fn dbg_empty_line_entry() -> DebugLineEntry {
+    DebugLineEntry {
+        address: 0,
+        line: 0,
+        column: 0,
+        file_id: 0,
+        is_stmt: false,
+        is_prologue_end: false,
+    }
+}
+
+fn dbg_empty_line_delta() -> DebugLineDelta {
+    DebugLineDelta {
+        delta_address: 0,
+        delta_line: 0,
+        column: 0,
+        file_id: 0,
+        is_stmt: false,
+        is_prologue_end: false,
+    }
+}
+
+fn dbg_info_new() -> DebugInfoBuilder with Mut, Panic {
+    var builder = DebugInfoBuilder {
+        files: [[0; 128]; 64],
+        file_lens: [0; 64],
+        file_count: 0,
+        scopes: [dbg_empty_scope(); 512],
+        scope_count: 0,
+        vars: [dbg_empty_var(); 1024],
+        var_count: 0,
+        line_table: [dbg_empty_line_entry(); 4096],
+        line_count: 0,
+        current_scope: DBG_NO_SCOPE,
+    }
+    builder
+}
+
+// ============================================================================
+// File management
+// ============================================================================
+
+// Add a source file and return its file_id (index).
+// The file name is stored as a fixed-size byte array with length.
+fn dbg_add_file(
+    builder: DebugInfoBuilder, name: [i8; 128], name_len: i64
+) -> DebugInfoBuilder with Mut, Div, Panic {
+    var b = builder
+    if b.file_count < DBG_MAX_FILES {
+        let idx = b.file_count
+        // Copy name bytes into the files array
+        var fi: i64 = 0
+        while fi < name_len {
+            if fi < DBG_FILE_NAME_LEN {
+                b.files[idx as usize][fi as usize] = name[fi as usize]
+            }
+            fi = fi + 1
+        }
+        b.file_lens[idx as usize] = name_len
+        b.file_count = b.file_count + 1
+    }
+    b
+}
+
+// Retrieve the file_id of the most recently added file.
+fn dbg_last_file_id(builder: DebugInfoBuilder) -> i64 {
+    if builder.file_count > 0 {
+        builder.file_count - 1
+    } else {
+        0 - 1
+    }
+}
+
+// ============================================================================
+// Scope management
+// ============================================================================
+
+// Add a scope and return the builder.  The scope id is auto-assigned as scope_count.
+fn dbg_add_scope(
+    builder: DebugInfoBuilder, parent_id: i64, kind: i64,
+    start_line: i64, end_line: i64, fn_id: i64
+) -> DebugInfoBuilder with Mut, Div, Panic {
+    var b = builder
+    if b.scope_count < DBG_MAX_SCOPES {
+        let idx = b.scope_count
+        b.scopes[idx as usize] = dbg_scope_new(idx, parent_id, kind, start_line, end_line, fn_id)
+        b.scope_count = b.scope_count + 1
+    }
+    b
+}
+
+// Enter a scope: set current_scope to the most recently added scope.
+fn dbg_enter_scope(builder: DebugInfoBuilder) -> DebugInfoBuilder with Mut, Panic {
+    var b = builder
+    if b.scope_count > 0 {
+        b.current_scope = b.scope_count - 1
+    }
+    b
+}
+
+// Leave a scope: set current_scope to the parent of the current scope.
+fn dbg_leave_scope(builder: DebugInfoBuilder) -> DebugInfoBuilder with Mut, Div, Panic {
+    var b = builder
+    if b.current_scope >= 0 && b.current_scope < b.scope_count {
+        b.current_scope = b.scopes[b.current_scope as usize].parent_id
+    }
+    b
+}
+
+// Get the current scope id.
+fn dbg_current_scope(builder: DebugInfoBuilder) -> i64 {
+    builder.current_scope
+}
+
+// ============================================================================
+// Variable management
+// ============================================================================
+
+// Add a debug variable entry.
+fn dbg_add_var(
+    builder: DebugInfoBuilder, name: [i8; 64], name_len: i64,
+    type_id: i64, scope_id: i64, loc: DebugLoc, is_param: bool, slot: i64
+) -> DebugInfoBuilder with Mut, Div, Panic {
+    var b = builder
+    if b.var_count < DBG_MAX_VARS {
+        let idx = b.var_count
+        b.vars[idx as usize] = dbg_var_new(name, name_len, type_id, scope_id, loc, is_param, slot)
+        b.var_count = b.var_count + 1
+    }
+    b
+}
+
+// Count variables in a given scope (direct members only, not inherited).
+fn dbg_count_vars_in_scope_direct(builder: DebugInfoBuilder, scope_id: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < builder.var_count {
+        if builder.vars[i as usize].scope_id == scope_id {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Collect variable indices visible in a scope.
+// Walks up the scope tree and collects variables from each ancestor scope.
+// Returns the count of collected indices; indices are written into out_indices.
+fn dbg_vars_in_scope(
+    builder: DebugInfoBuilder, scope_id: i64,
+    out_indices: [i64; 1024]
+) -> [i64; 1024] with Mut, Div, Panic {
+    var result = out_indices
+    var count: i64 = 0
+    var current = scope_id
+
+    // Walk up the scope chain (with depth limit to avoid infinite loops).
+    var depth: i64 = 0
+    let max_depth: i64 = 512
+    while current >= 0 && depth < max_depth {
+        // Scan all vars for those in this scope.
+        var i: i64 = 0
+        while i < builder.var_count {
+            if builder.vars[i as usize].scope_id == current {
+                if count < 1024 {
+                    result[count as usize] = i
+                    count = count + 1
+                }
+            }
+            i = i + 1
+        }
+        // Move to parent scope.
+        if current >= 0 && current < builder.scope_count {
+            current = builder.scopes[current as usize].parent_id
+        } else {
+            current = 0 - 1
+        }
+        depth = depth + 1
+    }
+    result
+}
+
+// Count total visible variables in a scope (including ancestors).
+fn dbg_count_vars_in_scope(
+    builder: DebugInfoBuilder, scope_id: i64
+) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var current = scope_id
+    var depth: i64 = 0
+    let max_depth: i64 = 512
+    while current >= 0 && depth < max_depth {
+        var i: i64 = 0
+        while i < builder.var_count {
+            if builder.vars[i as usize].scope_id == current {
+                count = count + 1
+            }
+            i = i + 1
+        }
+        if current >= 0 && current < builder.scope_count {
+            current = builder.scopes[current as usize].parent_id
+        } else {
+            current = 0 - 1
+        }
+        depth = depth + 1
+    }
+    count
+}
+
+// ============================================================================
+// Line table management
+// ============================================================================
+
+// Add a line table entry.
+fn dbg_add_line(
+    builder: DebugInfoBuilder, address: i64, line: i64, column: i64,
+    file_id: i64, is_stmt: bool
+) -> DebugInfoBuilder with Mut, Div, Panic {
+    var b = builder
+    if b.line_count < DBG_MAX_LINES {
+        let idx = b.line_count
+        b.line_table[idx as usize] = dbg_line_entry_new(
+            address, line, column, file_id, is_stmt, false
+        )
+        b.line_count = b.line_count + 1
+    }
+    b
+}
+
+// Mark the last line table entry as a prologue end.
+fn dbg_mark_prologue_end(builder: DebugInfoBuilder) -> DebugInfoBuilder with Mut, Div, Panic {
+    var b = builder
+    if b.line_count > 0 {
+        let idx = b.line_count - 1
+        b.line_table[idx as usize].is_prologue_end = true
+    }
+    b
+}
+
+// Sort the line table by address using insertion sort.
+fn dbg_line_table_sort(builder: DebugInfoBuilder) -> DebugInfoBuilder with Mut, Div, Panic {
+    var b = builder
+    var i: i64 = 1
+    while i < b.line_count {
+        let key = b.line_table[i as usize]
+        var j = i - 1
+        var done = false
+        while j >= 0 && !done {
+            if b.line_table[j as usize].address > key.address {
+                b.line_table[(j + 1) as usize] = b.line_table[j as usize]
+                j = j - 1
+            } else {
+                done = true
+            }
+        }
+        b.line_table[(j + 1) as usize] = key
+        i = i + 1
+    }
+    b
+}
+
+// Compute delta-encoded line program from the sorted line table.
+// The first entry has absolute values; subsequent entries have deltas.
+// Returns the count of entries written to the output array.
+fn dbg_compute_line_deltas(
+    builder: DebugInfoBuilder, out: [DebugLineDelta; 4096]
+) -> [DebugLineDelta; 4096] with Mut, Div, Panic {
+    var result = out
+    if builder.line_count == 0 {
+        return result
+    }
+
+    // First entry: absolute (delta from 0)
+    let first = builder.line_table[0 as usize]
+    result[0 as usize] = dbg_line_delta_new(
+        first.address, first.line, first.column,
+        first.file_id, first.is_stmt, first.is_prologue_end
+    )
+
+    // Subsequent entries: deltas from previous
+    var i: i64 = 1
+    while i < builder.line_count {
+        let prev = builder.line_table[(i - 1) as usize]
+        let cur = builder.line_table[i as usize]
+        result[i as usize] = dbg_line_delta_new(
+            cur.address - prev.address,
+            cur.line - prev.line,
+            cur.column,
+            cur.file_id,
+            cur.is_stmt,
+            cur.is_prologue_end
+        )
+        i = i + 1
+    }
+    result
+}
+
+// Return the number of line table entries.
+fn dbg_line_count(builder: DebugInfoBuilder) -> i64 {
+    builder.line_count
+}
+
+// ============================================================================
+// Scope queries
+// ============================================================================
+
+// Find the innermost scope containing a given line number.
+// Searches all scopes and returns the one with the smallest range that
+// still contains the line.  Returns DBG_NO_SCOPE if none found.
+fn dbg_find_scope_for_line(
+    builder: DebugInfoBuilder, line: i64
+) -> i64 with Mut, Div, Panic {
+    var best_id: i64 = DBG_NO_SCOPE
+    var best_range: i64 = 0x7FFFFFFFFFFFFFFF
+
+    var i: i64 = 0
+    while i < builder.scope_count {
+        let scope = builder.scopes[i as usize]
+        if line >= scope.start_line && line <= scope.end_line {
+            let range = scope.end_line - scope.start_line
+            if range < best_range {
+                best_range = range
+                best_id = scope.id
+            }
+        }
+        i = i + 1
+    }
+    best_id
+}
+
+// Compute the nesting depth of a scope.
+// The file-level scope (no parent) has depth 0, its children depth 1, etc.
+fn dbg_scope_depth(
+    builder: DebugInfoBuilder, scope_id: i64
+) -> i64 with Mut, Div, Panic {
+    var depth: i64 = 0
+    var current = scope_id
+    var limit: i64 = 0
+    let max_limit: i64 = 512
+    while current >= 0 && limit < max_limit {
+        if current >= 0 && current < builder.scope_count {
+            let parent = builder.scopes[current as usize].parent_id
+            if parent < 0 {
+                // Reached root
+                current = 0 - 1
+            } else {
+                depth = depth + 1
+                current = parent
+            }
+        } else {
+            current = 0 - 1
+        }
+        limit = limit + 1
+    }
+    depth
+}
+
+// Count direct children of a scope.
+fn dbg_scope_children(
+    builder: DebugInfoBuilder, scope_id: i64
+) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < builder.scope_count {
+        if builder.scopes[i as usize].parent_id == scope_id {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Collect child scope ids into an output array.  Returns the array.
+fn dbg_scope_children_ids(
+    builder: DebugInfoBuilder, scope_id: i64, out: [i64; 512]
+) -> [i64; 512] with Mut, Div, Panic {
+    var result = out
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < builder.scope_count {
+        if builder.scopes[i as usize].parent_id == scope_id {
+            if count < 512 {
+                result[count as usize] = builder.scopes[i as usize].id
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    result
+}
+
+// Check whether a scope is an ancestor of another scope.
+fn dbg_scope_is_ancestor(
+    builder: DebugInfoBuilder, ancestor_id: i64, descendant_id: i64
+) -> bool with Mut, Div, Panic {
+    var current = descendant_id
+    var limit: i64 = 0
+    let max_limit: i64 = 512
+    while current >= 0 && limit < max_limit {
+        if current == ancestor_id {
+            return true
+        }
+        if current >= 0 && current < builder.scope_count {
+            current = builder.scopes[current as usize].parent_id
+        } else {
+            current = 0 - 1
+        }
+        limit = limit + 1
+    }
+    false
+}
+
+// Return the scope kind for a given scope id.
+fn dbg_scope_kind(builder: DebugInfoBuilder, scope_id: i64) -> i64 with Mut, Div, Panic {
+    if scope_id >= 0 && scope_id < builder.scope_count {
+        builder.scopes[scope_id as usize].kind
+    } else {
+        0
+    }
+}
+
+// Return the fn_id associated with a scope, or DBG_NO_FN if none.
+fn dbg_scope_fn_id(builder: DebugInfoBuilder, scope_id: i64) -> i64 with Mut, Div, Panic {
+    if scope_id >= 0 && scope_id < builder.scope_count {
+        builder.scopes[scope_id as usize].fn_id
+    } else {
+        DBG_NO_FN
+    }
+}
+
+// Find the nearest enclosing function scope from a given scope.
+fn dbg_enclosing_fn_scope(
+    builder: DebugInfoBuilder, scope_id: i64
+) -> i64 with Mut, Div, Panic {
+    var current = scope_id
+    var limit: i64 = 0
+    let max_limit: i64 = 512
+    while current >= 0 && limit < max_limit {
+        if current >= 0 && current < builder.scope_count {
+            if builder.scopes[current as usize].kind == DBG_SCOPE_FN {
+                return current
+            }
+            current = builder.scopes[current as usize].parent_id
+        } else {
+            current = 0 - 1
+        }
+        limit = limit + 1
+    }
+    DBG_NO_SCOPE
+}
+
+// ============================================================================
+// Line table queries
+// ============================================================================
+
+// Find the line entry for a given address (linear search on sorted table).
+// Returns the index, or -1 if not found.
+fn dbg_find_line_for_address(
+    builder: DebugInfoBuilder, address: i64
+) -> i64 with Mut, Div, Panic {
+    // Find the last entry with address <= target (assumes sorted).
+    var best: i64 = 0 - 1
+    var i: i64 = 0
+    while i < builder.line_count {
+        if builder.line_table[i as usize].address <= address {
+            best = i
+        }
+        i = i + 1
+    }
+    best
+}
+
+// Count line entries that are marked as statements.
+fn dbg_count_stmts(builder: DebugInfoBuilder) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < builder.line_count {
+        if builder.line_table[i as usize].is_stmt {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Count line entries marked as prologue end.
+fn dbg_count_prologue_ends(builder: DebugInfoBuilder) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < builder.line_count {
+        if builder.line_table[i as usize].is_prologue_end {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// Helpers for building test file names
+// ============================================================================
+
+// Build a file name buffer from 4 ASCII codes (for short test names).
+fn dbg_make_name4(a: i64, b: i64, c: i64, d: i64) -> [i8; 128] with Mut, Div, Panic {
+    var buf: [i8; 128] = [0; 128]
+    buf[0] = a as i8
+    buf[1] = b as i8
+    buf[2] = c as i8
+    buf[3] = d as i8
+    buf
+}
+
+// Build a var name buffer from 3 ASCII codes.
+fn dbg_make_var_name3(a: i64, b: i64, c: i64) -> [i8; 64] with Mut, Div, Panic {
+    var buf: [i8; 64] = [0; 64]
+    buf[0] = a as i8
+    buf[1] = b as i8
+    buf[2] = c as i8
+    buf
+}
+
+// Build a var name buffer from a single ASCII code.
+fn dbg_make_var_name1(a: i64) -> [i8; 64] with Mut, Div, Panic {
+    var buf: [i8; 64] = [0; 64]
+    buf[0] = a as i8
+    buf
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+fn dbg_assert_true(condition: bool, test_number: i64) -> i64 {
+    if condition { 0 } else { test_number }
+}
+
+// T01: empty builder has zero counts
+fn test_dbg_empty_builder() -> i64 with Mut, Div, Panic {
+    let b = dbg_info_new()
+    let r1 = dbg_assert_true(b.file_count == 0, 1)
+    if r1 != 0 { return r1 }
+    let r2 = dbg_assert_true(b.scope_count == 0, 2)
+    if r2 != 0 { return r2 }
+    let r3 = dbg_assert_true(b.var_count == 0, 3)
+    if r3 != 0 { return r3 }
+    let r4 = dbg_assert_true(b.line_count == 0, 4)
+    if r4 != 0 { return r4 }
+    let r5 = dbg_assert_true(b.current_scope == DBG_NO_SCOPE, 5)
+    if r5 != 0 { return r5 }
+    0
+}
+
+// T02: DebugLoc constructor populates all fields
+fn test_dbg_loc_new() -> i64 with Mut, Div, Panic {
+    let loc = dbg_loc_new(10, 5, 0, 3)
+    let r1 = dbg_assert_true(loc.line == 10, 1)
+    if r1 != 0 { return r1 }
+    let r2 = dbg_assert_true(loc.column == 5, 2)
+    if r2 != 0 { return r2 }
+    let r3 = dbg_assert_true(loc.file_id == 0, 3)
+    if r3 != 0 { return r3 }
+    let r4 = dbg_assert_true(loc.scope_id == 3, 4)
+    if r4 != 0 { return r4 }
+    0
+}
+
+// T03: DebugScope constructor populates all fields
+fn test_dbg_scope_new() -> i64 with Mut, Div, Panic {
+    let s = dbg_scope_new(7, 2, DBG_SCOPE_BLOCK, 100, 200, 5)
+    let r1 = dbg_assert_true(s.id == 7, 1)
+    if r1 != 0 { return r1 }
+    let r2 = dbg_assert_true(s.parent_id == 2, 2)
+    if r2 != 0 { return r2 }
+    let r3 = dbg_assert_true(s.kind == DBG_SCOPE_BLOCK, 3)
+    if r3 != 0 { return r3 }
+    let r4 = dbg_assert_true(s.start_line == 100, 4)
+    if r4 != 0 { return r4 }
+    let r5 = dbg_assert_true(s.end_line == 200, 5)
+    if r5 != 0 { return r5 }
+    let r6 = dbg_assert_true(s.fn_id == 5, 6)
+    if r6 != 0 { return r6 }
+    0
+}
+
+// T04: add_file increments file_count and stores name
+fn test_dbg_add_file() -> i64 with Mut, Div, Panic {
+    var b = dbg_info_new()
+    // "main.sio" = [109, 97, 105, 110, 46, 115, 105, 111]
+    let fname = dbg_make_name4(109, 97, 105, 110)  // "main"
+    b = dbg_add_file(b, fname, 4)
+    let r1 = dbg_assert_true(b.file_count == 1, 1)
+    if r1 != 0 { return r1 }
+    let r2 = dbg_assert_true(b.file_lens[0 as usize] == 4, 2)
+    if r2 != 0 { return r2 }
+    let r3 = dbg_assert_true(b.files[0 as usize][0 as usize] == 109, 3)  // 'm'
+    if r3 != 0 { return r3 }
+    let r4 = dbg_assert_true(dbg_last_file_id(b) == 0, 4)
+    if r4 != 0 { return r4 }
+    0
+}
+
+// T05: add_scope auto-assigns ids and stores scope data
+fn test_dbg_add_scope() -> i64 with Mut, Div, Panic {
+    var b = dbg_info_new()
+    b = dbg_add_scope(b, DBG_NO_PARENT, DBG_SCOPE_FILE, 1, 100, DBG_NO_FN)
+    b = dbg_add_scope(b, 0, DBG_SCOPE_FN, 5, 50, 0)
+    let r1 = dbg_assert_true(b.scope_count == 2, 1)
+    if r1 != 0 { return r1 }
+    let r2 = dbg_assert_true(b.scopes[0 as usize].id == 0, 2)
+    if r2 != 0 { return r2 }
+    let r3 = dbg_assert_true(b.scopes[0 as usize].kind == DBG_SCOPE_FILE, 3)
+    if r3 != 0 { return r3 }
+    let r4 = dbg_assert_true(b.scopes[1 as usize].id == 1, 4)
+    if r4 != 0 { return r4 }
+    let r5 = dbg_assert_true(b.scopes[1 as usize].parent_id == 0, 5)
+    if r5 != 0 { return r5 }
+    let r6 = dbg_assert_true(b.scopes[1 as usize].kind == DBG_SCOPE_FN, 6)
+    if r6 != 0 { return r6 }
+    0
+}
+
+// T06: enter_scope / leave_scope track current_scope correctly
+fn test_dbg_enter_leave_scope() -> i64 with Mut, Div, Panic {
+    var b = dbg_info_new()
+    b = dbg_add_scope(b, DBG_NO_PARENT, DBG_SCOPE_FILE, 1, 100, DBG_NO_FN)
+    b = dbg_enter_scope(b)
+    let r1 = dbg_assert_true(dbg_current_scope(b) == 0, 1)
+    if r1 != 0 { return r1 }
+
+    b = dbg_add_scope(b, 0, DBG_SCOPE_FN, 5, 50, 0)
+    b = dbg_enter_scope(b)
+    let r2 = dbg_assert_true(dbg_current_scope(b) == 1, 2)
+    if r2 != 0 { return r2 }
+
+    b = dbg_leave_scope(b)
+    let r3 = dbg_assert_true(dbg_current_scope(b) == 0, 3)
+    if r3 != 0 { return r3 }
+
+    b = dbg_leave_scope(b)
+    // Parent of scope 0 is DBG_NO_PARENT (-1)
+    let r4 = dbg_assert_true(dbg_current_scope(b) == DBG_NO_PARENT, 4)
+    if r4 != 0 { return r4 }
+    0
+}
+
+// T07: add_var stores variable data correctly
+fn test_dbg_add_var() -> i64 with Mut, Div, Panic {
+    var b = dbg_info_new()
+    b = dbg_add_scope(b, DBG_NO_PARENT, DBG_SCOPE_FILE, 1, 100, DBG_NO_FN)
+    let loc = dbg_loc_new(10, 5, 0, 0)
+    let vname = dbg_make_var_name1(120)  // 'x'
+    b = dbg_add_var(b, vname, 1, 42, 0, loc, false, 0)
+    let r1 = dbg_assert_true(b.var_count == 1, 1)
+    if r1 != 0 { return r1 }
+    let r2 = dbg_assert_true(b.vars[0 as usize].name[0 as usize] == 120, 2)  // 'x'
+    if r2 != 0 { return r2 }
+    let r3 = dbg_assert_true(b.vars[0 as usize].name_len == 1, 3)
+    if r3 != 0 { return r3 }
+    let r4 = dbg_assert_true(b.vars[0 as usize].type_id == 42, 4)
+    if r4 != 0 { return r4 }
+    let r5 = dbg_assert_true(b.vars[0 as usize].scope_id == 0, 5)
+    if r5 != 0 { return r5 }
+    let r6 = dbg_assert_true(b.vars[0 as usize].is_param == false, 6)
+    if r6 != 0 { return r6 }
+    0
+}
+
+// T08: add_line stores entries and line_count increments
+fn test_dbg_add_line() -> i64 with Mut, Div, Panic {
+    var b = dbg_info_new()
+    b = dbg_add_line(b, 0x1000, 10, 1, 0, true)
+    b = dbg_add_line(b, 0x1008, 11, 5, 0, false)
+    let r1 = dbg_assert_true(b.line_count == 2, 1)
+    if r1 != 0 { return r1 }
+    let r2 = dbg_assert_true(b.line_table[0 as usize].address == 0x1000, 2)
+    if r2 != 0 { return r2 }
+    let r3 = dbg_assert_true(b.line_table[0 as usize].line == 10, 3)
+    if r3 != 0 { return r3 }
+    let r4 = dbg_assert_true(b.line_table[0 as usize].is_stmt == true, 4)
+    if r4 != 0 { return r4 }
+    let r5 = dbg_assert_true(b.line_table[1 as usize].address == 0x1008, 5)
+    if r5 != 0 { return r5 }
+    let r6 = dbg_assert_true(b.line_table[1 as usize].is_stmt == false, 6)
+    if r6 != 0 { return r6 }
+    0
+}
+
+// T09: mark_prologue_end sets flag on last entry
+fn test_dbg_mark_prologue_end() -> i64 with Mut, Div, Panic {
+    var b = dbg_info_new()
+    b = dbg_add_line(b, 0x1000, 5, 1, 0, true)
+    b = dbg_add_line(b, 0x1010, 6, 1, 0, true)
+    b = dbg_mark_prologue_end(b)
+    let r1 = dbg_assert_true(b.line_table[0 as usize].is_prologue_end == false, 1)
+    if r1 != 0 { return r1 }
+    let r2 = dbg_assert_true(b.line_table[1 as usize].is_prologue_end == true, 2)
+    if r2 != 0 { return r2 }
+    0
+}
+
+// T10: line_table_sort orders by address
+fn test_dbg_line_table_sort() -> i64 with Mut, Div, Panic {
+    var b = dbg_info_new()
+    // Insert out of order
+    b = dbg_add_line(b, 0x2000, 20, 1, 0, true)
+    b = dbg_add_line(b, 0x1000, 10, 1, 0, true)
+    b = dbg_add_line(b, 0x1800, 15, 1, 0, true)
+    b = dbg_line_table_sort(b)
+    let r1 = dbg_assert_true(b.line_table[0 as usize].address == 0x1000, 1)
+    if r1 != 0 { return r1 }
+    let r2 = dbg_assert_true(b.line_table[1 as usize].address == 0x1800, 2)
+    if r2 != 0 { return r2 }
+    let r3 = dbg_assert_true(b.line_table[2 as usize].address == 0x2000, 3)
+    if r3 != 0 { return r3 }
+    // Check that line numbers followed the sort
+    let r4 = dbg_assert_true(b.line_table[0 as usize].line == 10, 4)
+    if r4 != 0 { return r4 }
+    let r5 = dbg_assert_true(b.line_table[1 as usize].line == 15, 5)
+    if r5 != 0 { return r5 }
+    let r6 = dbg_assert_true(b.line_table[2 as usize].line == 20, 6)
+    if r6 != 0 { return r6 }
+    0
+}
+
+// T11: compute_line_deltas produces correct delta encoding
+fn test_dbg_compute_line_deltas() -> i64 with Mut, Div, Panic {
+    var b = dbg_info_new()
+    b = dbg_add_line(b, 0x1000, 10, 1, 0, true)
+    b = dbg_add_line(b, 0x1010, 13, 5, 0, false)
+    b = dbg_add_line(b, 0x1020, 14, 1, 0, true)
+    var deltas: [DebugLineDelta; 4096] = [dbg_empty_line_delta(); 4096]
+    deltas = dbg_compute_line_deltas(b, deltas)
+    // First entry: absolute values
+    let r1 = dbg_assert_true(deltas[0 as usize].delta_address == 0x1000, 1)
+    if r1 != 0 { return r1 }
+    let r2 = dbg_assert_true(deltas[0 as usize].delta_line == 10, 2)
+    if r2 != 0 { return r2 }
+    // Second entry: delta from first
+    let r3 = dbg_assert_true(deltas[1 as usize].delta_address == 0x10, 3)
+    if r3 != 0 { return r3 }
+    let r4 = dbg_assert_true(deltas[1 as usize].delta_line == 3, 4)
+    if r4 != 0 { return r4 }
+    // Third entry: delta from second
+    let r5 = dbg_assert_true(deltas[2 as usize].delta_address == 0x10, 5)
+    if r5 != 0 { return r5 }
+    let r6 = dbg_assert_true(deltas[2 as usize].delta_line == 1, 6)
+    if r6 != 0 { return r6 }
+    0
+}
+
+// T12: find_scope_for_line returns innermost scope
+fn test_dbg_find_scope_for_line() -> i64 with Mut, Div, Panic {
+    var b = dbg_info_new()
+    // File scope: lines 1-100
+    b = dbg_add_scope(b, DBG_NO_PARENT, DBG_SCOPE_FILE, 1, 100, DBG_NO_FN)
+    // Function scope: lines 5-50
+    b = dbg_add_scope(b, 0, DBG_SCOPE_FN, 5, 50, 0)
+    // Block scope: lines 10-20
+    b = dbg_add_scope(b, 1, DBG_SCOPE_BLOCK, 10, 20, 0)
+
+    // Line 15 should be in block scope (id=2, narrowest)
+    let s1 = dbg_find_scope_for_line(b, 15)
+    let r1 = dbg_assert_true(s1 == 2, 1)
+    if r1 != 0 { return r1 }
+
+    // Line 30 should be in function scope (id=1)
+    let s2 = dbg_find_scope_for_line(b, 30)
+    let r2 = dbg_assert_true(s2 == 1, 2)
+    if r2 != 0 { return r2 }
+
+    // Line 80 should be in file scope (id=0)
+    let s3 = dbg_find_scope_for_line(b, 80)
+    let r3 = dbg_assert_true(s3 == 0, 3)
+    if r3 != 0 { return r3 }
+
+    // Line 200 should be not found
+    let s4 = dbg_find_scope_for_line(b, 200)
+    let r4 = dbg_assert_true(s4 == DBG_NO_SCOPE, 4)
+    if r4 != 0 { return r4 }
+    0
+}
+
+// T13: scope_depth computes correct nesting
+fn test_dbg_scope_depth() -> i64 with Mut, Div, Panic {
+    var b = dbg_info_new()
+    b = dbg_add_scope(b, DBG_NO_PARENT, DBG_SCOPE_FILE, 1, 100, DBG_NO_FN)
+    b = dbg_add_scope(b, 0, DBG_SCOPE_FN, 5, 50, 0)
+    b = dbg_add_scope(b, 1, DBG_SCOPE_BLOCK, 10, 20, 0)
+    b = dbg_add_scope(b, 2, DBG_SCOPE_LOOP, 12, 18, 0)
+
+    let d0 = dbg_scope_depth(b, 0)
+    let r1 = dbg_assert_true(d0 == 0, 1)
+    if r1 != 0 { return r1 }
+
+    let d1 = dbg_scope_depth(b, 1)
+    let r2 = dbg_assert_true(d1 == 1, 2)
+    if r2 != 0 { return r2 }
+
+    let d2 = dbg_scope_depth(b, 2)
+    let r3 = dbg_assert_true(d2 == 2, 3)
+    if r3 != 0 { return r3 }
+
+    let d3 = dbg_scope_depth(b, 3)
+    let r4 = dbg_assert_true(d3 == 3, 4)
+    if r4 != 0 { return r4 }
+    0
+}
+
+// T14: scope_children counts direct children
+fn test_dbg_scope_children() -> i64 with Mut, Div, Panic {
+    var b = dbg_info_new()
+    // Scope 0: file (root)
+    b = dbg_add_scope(b, DBG_NO_PARENT, DBG_SCOPE_FILE, 1, 100, DBG_NO_FN)
+    // Scope 1: fn, child of 0
+    b = dbg_add_scope(b, 0, DBG_SCOPE_FN, 5, 50, 0)
+    // Scope 2: fn, child of 0
+    b = dbg_add_scope(b, 0, DBG_SCOPE_FN, 55, 90, 1)
+    // Scope 3: block, child of 1
+    b = dbg_add_scope(b, 1, DBG_SCOPE_BLOCK, 10, 20, 0)
+
+    let c0 = dbg_scope_children(b, 0)
+    let r1 = dbg_assert_true(c0 == 2, 1)  // scopes 1 and 2
+    if r1 != 0 { return r1 }
+
+    let c1 = dbg_scope_children(b, 1)
+    let r2 = dbg_assert_true(c1 == 1, 2)  // scope 3
+    if r2 != 0 { return r2 }
+
+    let c2 = dbg_scope_children(b, 2)
+    let r3 = dbg_assert_true(c2 == 0, 3)  // no children
+    if r3 != 0 { return r3 }
+    0
+}
+
+// T15: vars_in_scope collects variables from scope chain
+fn test_dbg_vars_in_scope() -> i64 with Mut, Div, Panic {
+    var b = dbg_info_new()
+    b = dbg_add_scope(b, DBG_NO_PARENT, DBG_SCOPE_FILE, 1, 100, DBG_NO_FN)
+    b = dbg_add_scope(b, 0, DBG_SCOPE_FN, 5, 50, 0)
+    b = dbg_add_scope(b, 1, DBG_SCOPE_BLOCK, 10, 20, 0)
+
+    let loc0 = dbg_loc_new(2, 1, 0, 0)
+    let loc1 = dbg_loc_new(6, 1, 0, 1)
+    let loc2 = dbg_loc_new(12, 1, 0, 2)
+
+    // Var in file scope (scope 0)
+    let vg = dbg_make_var_name1(103)  // 'g'
+    b = dbg_add_var(b, vg, 1, 1, 0, loc0, false, 0)
+    // Var in fn scope (scope 1)
+    let vx = dbg_make_var_name1(120)  // 'x'
+    b = dbg_add_var(b, vx, 1, 1, 1, loc1, true, 1)
+    // Var in block scope (scope 2)
+    let vy = dbg_make_var_name1(121)  // 'y'
+    b = dbg_add_var(b, vy, 1, 1, 2, loc2, false, 2)
+
+    // From block scope (2): should see g, x, y (3 total)
+    let total = dbg_count_vars_in_scope(b, 2)
+    let r1 = dbg_assert_true(total == 3, 1)
+    if r1 != 0 { return r1 }
+
+    // From fn scope (1): should see g, x (2 total)
+    let total_fn = dbg_count_vars_in_scope(b, 1)
+    let r2 = dbg_assert_true(total_fn == 2, 2)
+    if r2 != 0 { return r2 }
+
+    // From file scope (0): should see g only (1 total)
+    let total_file = dbg_count_vars_in_scope(b, 0)
+    let r3 = dbg_assert_true(total_file == 1, 3)
+    if r3 != 0 { return r3 }
+    0
+}
+
+// T16: constants have correct values
+fn test_dbg_constants() -> i64 with Mut, Div, Panic {
+    let r1 = dbg_assert_true(DBG_SCOPE_FILE == 1, 1)
+    if r1 != 0 { return r1 }
+    let r2 = dbg_assert_true(DBG_SCOPE_FN == 2, 2)
+    if r2 != 0 { return r2 }
+    let r3 = dbg_assert_true(DBG_SCOPE_BLOCK == 3, 3)
+    if r3 != 0 { return r3 }
+    let r4 = dbg_assert_true(DBG_SCOPE_LOOP == 4, 4)
+    if r4 != 0 { return r4 }
+    let r5 = dbg_assert_true(DBG_NO_PARENT == 0 - 1, 5)
+    if r5 != 0 { return r5 }
+    let r6 = dbg_assert_true(DBG_MAX_FILES == 64, 6)
+    if r6 != 0 { return r6 }
+    let r7 = dbg_assert_true(DBG_MAX_SCOPES == 512, 7)
+    if r7 != 0 { return r7 }
+    let r8 = dbg_assert_true(DBG_MAX_VARS == 1024, 8)
+    if r8 != 0 { return r8 }
+    let r9 = dbg_assert_true(DBG_MAX_LINES == 4096, 9)
+    if r9 != 0 { return r9 }
+    0
+}
+
+// T17: multiple files can be added
+fn test_dbg_multiple_files() -> i64 with Mut, Div, Panic {
+    var b = dbg_info_new()
+    let f1 = dbg_make_name4(109, 97, 105, 110)  // "main"
+    let f2 = dbg_make_name4(108, 105, 98, 46)   // "lib."
+    let f3 = dbg_make_name4(117, 116, 105, 108)  // "util"
+    b = dbg_add_file(b, f1, 4)
+    b = dbg_add_file(b, f2, 4)
+    b = dbg_add_file(b, f3, 4)
+    let r1 = dbg_assert_true(b.file_count == 3, 1)
+    if r1 != 0 { return r1 }
+    // First file starts with 'm' = 109
+    let r2 = dbg_assert_true(b.files[0 as usize][0 as usize] == 109, 2)
+    if r2 != 0 { return r2 }
+    // Second file starts with 'l' = 108
+    let r3 = dbg_assert_true(b.files[1 as usize][0 as usize] == 108, 3)
+    if r3 != 0 { return r3 }
+    // Third file starts with 'u' = 117
+    let r4 = dbg_assert_true(b.files[2 as usize][0 as usize] == 117, 4)
+    if r4 != 0 { return r4 }
+    // last_file_id should be 2
+    let r5 = dbg_assert_true(dbg_last_file_id(b) == 2, 5)
+    if r5 != 0 { return r5 }
+    0
+}
+
+// T18: DebugVar tracks parameter flag correctly
+fn test_dbg_var_param_flag() -> i64 with Mut, Div, Panic {
+    var b = dbg_info_new()
+    b = dbg_add_scope(b, DBG_NO_PARENT, DBG_SCOPE_FN, 1, 50, 0)
+    let loc = dbg_loc_new(1, 5, 0, 0)
+
+    // Add a parameter
+    let pname = dbg_make_var_name1(112)  // 'p'
+    b = dbg_add_var(b, pname, 1, 1, 0, loc, true, 0)
+
+    // Add a local
+    let lname = dbg_make_var_name1(108)  // 'l'
+    b = dbg_add_var(b, lname, 1, 1, 0, loc, false, 1)
+
+    let r1 = dbg_assert_true(b.vars[0 as usize].is_param == true, 1)
+    if r1 != 0 { return r1 }
+    let r2 = dbg_assert_true(b.vars[1 as usize].is_param == false, 2)
+    if r2 != 0 { return r2 }
+    let r3 = dbg_assert_true(b.vars[0 as usize].slot == 0, 3)
+    if r3 != 0 { return r3 }
+    let r4 = dbg_assert_true(b.vars[1 as usize].slot == 1, 4)
+    if r4 != 0 { return r4 }
+    0
+}
+
+// T19: scope_is_ancestor correctly walks the chain
+fn test_dbg_scope_is_ancestor() -> i64 with Mut, Div, Panic {
+    var b = dbg_info_new()
+    // Scope 0 (file) -> Scope 1 (fn) -> Scope 2 (block) -> Scope 3 (loop)
+    b = dbg_add_scope(b, DBG_NO_PARENT, DBG_SCOPE_FILE, 1, 100, DBG_NO_FN)
+    b = dbg_add_scope(b, 0, DBG_SCOPE_FN, 5, 50, 0)
+    b = dbg_add_scope(b, 1, DBG_SCOPE_BLOCK, 10, 30, 0)
+    b = dbg_add_scope(b, 2, DBG_SCOPE_LOOP, 15, 25, 0)
+
+    // 0 is ancestor of 3
+    let r1 = dbg_assert_true(dbg_scope_is_ancestor(b, 0, 3) == true, 1)
+    if r1 != 0 { return r1 }
+    // 1 is ancestor of 3
+    let r2 = dbg_assert_true(dbg_scope_is_ancestor(b, 1, 3) == true, 2)
+    if r2 != 0 { return r2 }
+    // 3 is ancestor of itself (trivially yes, since we check current == ancestor first)
+    let r3 = dbg_assert_true(dbg_scope_is_ancestor(b, 3, 3) == true, 3)
+    if r3 != 0 { return r3 }
+    // 3 is NOT ancestor of 0
+    let r4 = dbg_assert_true(dbg_scope_is_ancestor(b, 3, 0) == false, 4)
+    if r4 != 0 { return r4 }
+    // 2 is NOT ancestor of 1
+    let r5 = dbg_assert_true(dbg_scope_is_ancestor(b, 2, 1) == false, 5)
+    if r5 != 0 { return r5 }
+    0
+}
+
+// T20: find_line_for_address on sorted table
+fn test_dbg_find_line_for_address() -> i64 with Mut, Div, Panic {
+    var b = dbg_info_new()
+    b = dbg_add_line(b, 0x1000, 10, 1, 0, true)
+    b = dbg_add_line(b, 0x1010, 20, 1, 0, true)
+    b = dbg_add_line(b, 0x1020, 30, 1, 0, true)
+    b = dbg_line_table_sort(b)
+
+    // Exact match at 0x1010 -> index 1
+    let i1 = dbg_find_line_for_address(b, 0x1010)
+    let r1 = dbg_assert_true(i1 == 1, 1)
+    if r1 != 0 { return r1 }
+
+    // Address 0x1018 -> between entry 1 and 2, should return 1
+    let i2 = dbg_find_line_for_address(b, 0x1018)
+    let r2 = dbg_assert_true(i2 == 1, 2)
+    if r2 != 0 { return r2 }
+
+    // Address before first entry
+    let i3 = dbg_find_line_for_address(b, 0x0500)
+    let r3 = dbg_assert_true(i3 == 0 - 1, 3)
+    if r3 != 0 { return r3 }
+
+    // Address after last entry -> should return last
+    let i4 = dbg_find_line_for_address(b, 0x2000)
+    let r4 = dbg_assert_true(i4 == 2, 4)
+    if r4 != 0 { return r4 }
+    0
+}
+
+// T21: enclosing_fn_scope walks up to function scope
+fn test_dbg_enclosing_fn_scope() -> i64 with Mut, Div, Panic {
+    var b = dbg_info_new()
+    b = dbg_add_scope(b, DBG_NO_PARENT, DBG_SCOPE_FILE, 1, 100, DBG_NO_FN)
+    b = dbg_add_scope(b, 0, DBG_SCOPE_FN, 5, 50, 0)
+    b = dbg_add_scope(b, 1, DBG_SCOPE_BLOCK, 10, 30, 0)
+    b = dbg_add_scope(b, 2, DBG_SCOPE_LOOP, 15, 25, 0)
+
+    // From loop scope (3), enclosing fn is scope 1
+    let fn1 = dbg_enclosing_fn_scope(b, 3)
+    let r1 = dbg_assert_true(fn1 == 1, 1)
+    if r1 != 0 { return r1 }
+
+    // From fn scope (1), enclosing fn is itself
+    let fn2 = dbg_enclosing_fn_scope(b, 1)
+    let r2 = dbg_assert_true(fn2 == 1, 2)
+    if r2 != 0 { return r2 }
+
+    // From file scope (0), no enclosing fn
+    let fn3 = dbg_enclosing_fn_scope(b, 0)
+    let r3 = dbg_assert_true(fn3 == DBG_NO_SCOPE, 3)
+    if r3 != 0 { return r3 }
+    0
+}
+
+// T22: count_stmts and count_prologue_ends
+fn test_dbg_line_table_counts() -> i64 with Mut, Div, Panic {
+    var b = dbg_info_new()
+    b = dbg_add_line(b, 0x1000, 5, 1, 0, true)
+    b = dbg_add_line(b, 0x1004, 5, 5, 0, false)
+    b = dbg_add_line(b, 0x1010, 6, 1, 0, true)
+    b = dbg_mark_prologue_end(b)
+    b = dbg_add_line(b, 0x1020, 7, 1, 0, true)
+
+    let stmts = dbg_count_stmts(b)
+    let r1 = dbg_assert_true(stmts == 3, 1)
+    if r1 != 0 { return r1 }
+
+    let prologues = dbg_count_prologue_ends(b)
+    let r2 = dbg_assert_true(prologues == 1, 2)
+    if r2 != 0 { return r2 }
+    0
+}
+
+// T23: scope_kind and scope_fn_id return correct values
+fn test_dbg_scope_kind_fn_id() -> i64 with Mut, Div, Panic {
+    var b = dbg_info_new()
+    b = dbg_add_scope(b, DBG_NO_PARENT, DBG_SCOPE_FILE, 1, 100, DBG_NO_FN)
+    b = dbg_add_scope(b, 0, DBG_SCOPE_FN, 5, 50, 42)
+    b = dbg_add_scope(b, 1, DBG_SCOPE_LOOP, 10, 20, 42)
+
+    let k0 = dbg_scope_kind(b, 0)
+    let r1 = dbg_assert_true(k0 == DBG_SCOPE_FILE, 1)
+    if r1 != 0 { return r1 }
+
+    let k1 = dbg_scope_kind(b, 1)
+    let r2 = dbg_assert_true(k1 == DBG_SCOPE_FN, 2)
+    if r2 != 0 { return r2 }
+
+    let k2 = dbg_scope_kind(b, 2)
+    let r3 = dbg_assert_true(k2 == DBG_SCOPE_LOOP, 3)
+    if r3 != 0 { return r3 }
+
+    let f0 = dbg_scope_fn_id(b, 0)
+    let r4 = dbg_assert_true(f0 == DBG_NO_FN, 4)
+    if r4 != 0 { return r4 }
+
+    let f1 = dbg_scope_fn_id(b, 1)
+    let r5 = dbg_assert_true(f1 == 42, 5)
+    if r5 != 0 { return r5 }
+    0
+}
+
+// T24: direct var count in scope (no ancestor walk)
+fn test_dbg_count_vars_direct() -> i64 with Mut, Div, Panic {
+    var b = dbg_info_new()
+    b = dbg_add_scope(b, DBG_NO_PARENT, DBG_SCOPE_FILE, 1, 100, DBG_NO_FN)
+    b = dbg_add_scope(b, 0, DBG_SCOPE_FN, 5, 50, 0)
+    let loc = dbg_loc_new(6, 1, 0, 1)
+
+    // 3 vars in fn scope
+    let va = dbg_make_var_name1(97)   // 'a'
+    let vb = dbg_make_var_name1(98)   // 'b'
+    let vc = dbg_make_var_name1(99)   // 'c'
+    b = dbg_add_var(b, va, 1, 1, 1, loc, true, 0)
+    b = dbg_add_var(b, vb, 1, 1, 1, loc, true, 1)
+    b = dbg_add_var(b, vc, 1, 1, 1, loc, false, 2)
+
+    // 1 var in file scope
+    let vd = dbg_make_var_name1(100)  // 'd'
+    let loc2 = dbg_loc_new(2, 1, 0, 0)
+    b = dbg_add_var(b, vd, 1, 1, 0, loc2, false, 3)
+
+    let c_fn = dbg_count_vars_in_scope_direct(b, 1)
+    let r1 = dbg_assert_true(c_fn == 3, 1)
+    if r1 != 0 { return r1 }
+
+    let c_file = dbg_count_vars_in_scope_direct(b, 0)
+    let r2 = dbg_assert_true(c_file == 1, 2)
+    if r2 != 0 { return r2 }
+    0
+}
+
+// T25: line delta encoding with negative line deltas
+fn test_dbg_line_deltas_negative() -> i64 with Mut, Div, Panic {
+    var b = dbg_info_new()
+    b = dbg_add_line(b, 0x1000, 20, 1, 0, true)
+    b = dbg_add_line(b, 0x1010, 15, 1, 0, true)   // Line goes backward
+    b = dbg_add_line(b, 0x1020, 25, 1, 0, true)
+    var deltas: [DebugLineDelta; 4096] = [dbg_empty_line_delta(); 4096]
+    deltas = dbg_compute_line_deltas(b, deltas)
+
+    // Second entry has negative line delta: 15 - 20 = -5
+    let r1 = dbg_assert_true(deltas[1 as usize].delta_line == 0 - 5, 1)
+    if r1 != 0 { return r1 }
+    // Third entry: 25 - 15 = 10
+    let r2 = dbg_assert_true(deltas[2 as usize].delta_line == 10, 2)
+    if r2 != 0 { return r2 }
+    0
+}
+
+// T26: scope_children_ids collects correct ids
+fn test_dbg_scope_children_ids() -> i64 with Mut, Div, Panic {
+    var b = dbg_info_new()
+    b = dbg_add_scope(b, DBG_NO_PARENT, DBG_SCOPE_FILE, 1, 100, DBG_NO_FN)
+    b = dbg_add_scope(b, 0, DBG_SCOPE_FN, 5, 40, 0)
+    b = dbg_add_scope(b, 0, DBG_SCOPE_FN, 45, 80, 1)
+    b = dbg_add_scope(b, 0, DBG_SCOPE_FN, 85, 95, 2)
+
+    var ids: [i64; 512] = [0 - 1; 512]
+    ids = dbg_scope_children_ids(b, 0, ids)
+
+    let r1 = dbg_assert_true(ids[0 as usize] == 1, 1)
+    if r1 != 0 { return r1 }
+    let r2 = dbg_assert_true(ids[1 as usize] == 2, 2)
+    if r2 != 0 { return r2 }
+    let r3 = dbg_assert_true(ids[2 as usize] == 3, 3)
+    if r3 != 0 { return r3 }
+
+    let child_count = dbg_scope_children(b, 0)
+    let r4 = dbg_assert_true(child_count == 3, 4)
+    if r4 != 0 { return r4 }
+    0
+}
+
+// T27: integrated test — build a small function's debug info
+fn test_dbg_integrated_function() -> i64 with Mut, Div, Panic {
+    var b = dbg_info_new()
+
+    // Add source file
+    let fname = dbg_make_name4(109, 97, 105, 110)  // "main"
+    b = dbg_add_file(b, fname, 4)
+
+    // Add file scope (scope 0)
+    b = dbg_add_scope(b, DBG_NO_PARENT, DBG_SCOPE_FILE, 1, 50, DBG_NO_FN)
+    b = dbg_enter_scope(b)
+
+    // Add function scope (scope 1)
+    b = dbg_add_scope(b, 0, DBG_SCOPE_FN, 3, 20, 0)
+    b = dbg_enter_scope(b)
+
+    // Add parameter
+    let px = dbg_make_var_name1(120)  // 'x'
+    let ploc = dbg_loc_new(3, 10, 0, 1)
+    b = dbg_add_var(b, px, 1, 1, 1, ploc, true, 0)
+
+    // Add prologue line entries
+    b = dbg_add_line(b, 0x1000, 3, 1, 0, true)
+    b = dbg_add_line(b, 0x1008, 3, 10, 0, false)
+    b = dbg_mark_prologue_end(b)
+
+    // Add block scope (scope 2) for the body
+    b = dbg_add_scope(b, 1, DBG_SCOPE_BLOCK, 4, 19, 0)
+    b = dbg_enter_scope(b)
+
+    // Add local variable
+    let vy = dbg_make_var_name1(121)  // 'y'
+    let vloc = dbg_loc_new(5, 5, 0, 2)
+    b = dbg_add_var(b, vy, 1, 1, 2, vloc, false, 1)
+
+    // Add body line entries
+    b = dbg_add_line(b, 0x1010, 5, 5, 0, true)
+    b = dbg_add_line(b, 0x1020, 10, 1, 0, true)
+    b = dbg_add_line(b, 0x1030, 19, 1, 0, true)
+
+    // Leave block, leave function
+    b = dbg_leave_scope(b)
+    b = dbg_leave_scope(b)
+
+    // Sort line table
+    b = dbg_line_table_sort(b)
+
+    // Verify
+    let r1 = dbg_assert_true(b.file_count == 1, 1)
+    if r1 != 0 { return r1 }
+    let r2 = dbg_assert_true(b.scope_count == 3, 2)
+    if r2 != 0 { return r2 }
+    let r3 = dbg_assert_true(b.var_count == 2, 3)
+    if r3 != 0 { return r3 }
+    let r4 = dbg_assert_true(b.line_count == 5, 4)
+    if r4 != 0 { return r4 }
+
+    // current_scope should be back at file scope (0)
+    let r5 = dbg_assert_true(b.current_scope == 0, 5)
+    if r5 != 0 { return r5 }
+
+    // Line table should be sorted
+    let r6 = dbg_assert_true(b.line_table[0 as usize].address == 0x1000, 6)
+    if r6 != 0 { return r6 }
+    let r7 = dbg_assert_true(b.line_table[4 as usize].address == 0x1030, 7)
+    if r7 != 0 { return r7 }
+
+    // Prologue end should be on the right entry
+    let r8 = dbg_assert_true(b.line_table[1 as usize].is_prologue_end == true, 8)
+    if r8 != 0 { return r8 }
+
+    // Scope depth check
+    let d = dbg_scope_depth(b, 2)
+    let r9 = dbg_assert_true(d == 2, 9)
+    if r9 != 0 { return r9 }
+
+    // Enclosing fn of block scope 2 should be scope 1
+    let fn_s = dbg_enclosing_fn_scope(b, 2)
+    let r10 = dbg_assert_true(fn_s == 1, 10)
+    if r10 != 0 { return r10 }
+    0
+}
+
+// T28: empty line table produces empty deltas
+fn test_dbg_empty_line_deltas() -> i64 with Mut, Div, Panic {
+    let b = dbg_info_new()
+    var deltas: [DebugLineDelta; 4096] = [dbg_empty_line_delta(); 4096]
+    deltas = dbg_compute_line_deltas(b, deltas)
+    // With zero entries, deltas should remain zeroed
+    let r1 = dbg_assert_true(deltas[0 as usize].delta_address == 0, 1)
+    if r1 != 0 { return r1 }
+    let r2 = dbg_assert_true(deltas[0 as usize].delta_line == 0, 2)
+    if r2 != 0 { return r2 }
+    0
+}
+
+// T29: sort preserves entry data integrity
+fn test_dbg_sort_preserves_data() -> i64 with Mut, Div, Panic {
+    var b = dbg_info_new()
+    b = dbg_add_line(b, 0x3000, 30, 3, 2, false)
+    b = dbg_add_line(b, 0x1000, 10, 1, 0, true)
+    b = dbg_add_line(b, 0x2000, 20, 2, 1, true)
+    b = dbg_line_table_sort(b)
+
+    // After sort: addresses should be in order
+    let r1 = dbg_assert_true(b.line_table[0 as usize].address == 0x1000, 1)
+    if r1 != 0 { return r1 }
+    // Check that file_id moved correctly
+    let r2 = dbg_assert_true(b.line_table[0 as usize].file_id == 0, 2)
+    if r2 != 0 { return r2 }
+    let r3 = dbg_assert_true(b.line_table[1 as usize].file_id == 1, 3)
+    if r3 != 0 { return r3 }
+    let r4 = dbg_assert_true(b.line_table[2 as usize].file_id == 2, 4)
+    if r4 != 0 { return r4 }
+    // Check that column moved correctly
+    let r5 = dbg_assert_true(b.line_table[0 as usize].column == 1, 5)
+    if r5 != 0 { return r5 }
+    let r6 = dbg_assert_true(b.line_table[2 as usize].column == 3, 6)
+    if r6 != 0 { return r6 }
+    0
+}
+
+// T30: scope out-of-range returns safe defaults
+fn test_dbg_scope_out_of_range() -> i64 with Mut, Div, Panic {
+    let b = dbg_info_new()
+    // Query on empty builder
+    let k = dbg_scope_kind(b, 99)
+    let r1 = dbg_assert_true(k == 0, 1)
+    if r1 != 0 { return r1 }
+
+    let f = dbg_scope_fn_id(b, 99)
+    let r2 = dbg_assert_true(f == DBG_NO_FN, 2)
+    if r2 != 0 { return r2 }
+
+    let d = dbg_scope_depth(b, 99)
+    let r3 = dbg_assert_true(d == 0, 3)
+    if r3 != 0 { return r3 }
+
+    let c = dbg_scope_children(b, 99)
+    let r4 = dbg_assert_true(c == 0, 4)
+    if r4 != 0 { return r4 }
+
+    let s = dbg_find_scope_for_line(b, 50)
+    let r5 = dbg_assert_true(s == DBG_NO_SCOPE, 5)
+    if r5 != 0 { return r5 }
+    0
+}
+
+// ============================================================================
+// Test runner
+// ============================================================================
+
+fn dbg_info_run_tests() -> i64 with Mut, Div, Panic {
+    var fail: i64 = 0
+
+    let t01 = test_dbg_empty_builder()
+    if t01 != 0 { print_int(501) fail = fail + 1 }
+
+    let t02 = test_dbg_loc_new()
+    if t02 != 0 { print_int(502) fail = fail + 1 }
+
+    let t03 = test_dbg_scope_new()
+    if t03 != 0 { print_int(503) fail = fail + 1 }
+
+    let t04 = test_dbg_add_file()
+    if t04 != 0 { print_int(504) fail = fail + 1 }
+
+    let t05 = test_dbg_add_scope()
+    if t05 != 0 { print_int(505) fail = fail + 1 }
+
+    let t06 = test_dbg_enter_leave_scope()
+    if t06 != 0 { print_int(506) fail = fail + 1 }
+
+    let t07 = test_dbg_add_var()
+    if t07 != 0 { print_int(507) fail = fail + 1 }
+
+    let t08 = test_dbg_add_line()
+    if t08 != 0 { print_int(508) fail = fail + 1 }
+
+    let t09 = test_dbg_mark_prologue_end()
+    if t09 != 0 { print_int(509) fail = fail + 1 }
+
+    let t10 = test_dbg_line_table_sort()
+    if t10 != 0 { print_int(510) fail = fail + 1 }
+
+    let t11 = test_dbg_compute_line_deltas()
+    if t11 != 0 { print_int(511) fail = fail + 1 }
+
+    let t12 = test_dbg_find_scope_for_line()
+    if t12 != 0 { print_int(512) fail = fail + 1 }
+
+    let t13 = test_dbg_scope_depth()
+    if t13 != 0 { print_int(513) fail = fail + 1 }
+
+    let t14 = test_dbg_scope_children()
+    if t14 != 0 { print_int(514) fail = fail + 1 }
+
+    let t15 = test_dbg_vars_in_scope()
+    if t15 != 0 { print_int(515) fail = fail + 1 }
+
+    let t16 = test_dbg_constants()
+    if t16 != 0 { print_int(516) fail = fail + 1 }
+
+    let t17 = test_dbg_multiple_files()
+    if t17 != 0 { print_int(517) fail = fail + 1 }
+
+    let t18 = test_dbg_var_param_flag()
+    if t18 != 0 { print_int(518) fail = fail + 1 }
+
+    let t19 = test_dbg_scope_is_ancestor()
+    if t19 != 0 { print_int(519) fail = fail + 1 }
+
+    let t20 = test_dbg_find_line_for_address()
+    if t20 != 0 { print_int(520) fail = fail + 1 }
+
+    let t21 = test_dbg_enclosing_fn_scope()
+    if t21 != 0 { print_int(521) fail = fail + 1 }
+
+    let t22 = test_dbg_line_table_counts()
+    if t22 != 0 { print_int(522) fail = fail + 1 }
+
+    let t23 = test_dbg_scope_kind_fn_id()
+    if t23 != 0 { print_int(523) fail = fail + 1 }
+
+    let t24 = test_dbg_count_vars_direct()
+    if t24 != 0 { print_int(524) fail = fail + 1 }
+
+    let t25 = test_dbg_line_deltas_negative()
+    if t25 != 0 { print_int(525) fail = fail + 1 }
+
+    let t26 = test_dbg_scope_children_ids()
+    if t26 != 0 { print_int(526) fail = fail + 1 }
+
+    let t27 = test_dbg_integrated_function()
+    if t27 != 0 { print_int(527) fail = fail + 1 }
+
+    let t28 = test_dbg_empty_line_deltas()
+    if t28 != 0 { print_int(528) fail = fail + 1 }
+
+    let t29 = test_dbg_sort_preserves_data()
+    if t29 != 0 { print_int(529) fail = fail + 1 }
+
+    let t30 = test_dbg_scope_out_of_range()
+    if t30 != 0 { print_int(530) fail = fail + 1 }
+
+    fail
+}

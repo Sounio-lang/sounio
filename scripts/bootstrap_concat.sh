@@ -50,6 +50,7 @@ FILES=(
   self-hosted/parser/types.sio
   self-hosted/parser/patterns.sio
   self-hosted/parser/mod.sio
+  self-hosted/parser/recovery.sio
 
   # ── 4. Resolve layer ────────────────────────────────────────────
   self-hosted/resolve/scope.sio
@@ -84,6 +85,7 @@ FILES=(
   # ── 6. Effects layer ────────────────────────────────────────────
   self-hosted/effects/types.sio
   self-hosted/effects/mod.sio
+  self-hosted/effects/checker.sio
 
   # ── 6b. Diagnostics engine ────────────────────────────────────
   self-hosted/diagnostics/mod.sio
@@ -99,6 +101,8 @@ FILES=(
   self-hosted/ir/optimize.sio
   self-hosted/ir/ssa.sio
   self-hosted/ir/closure.sio
+  self-hosted/ir/dep_graph.sio
+  self-hosted/ir/cfg.sio
   self-hosted/ir/mod.sio
 
   # ── 8. HLIR (High-Level IR) ─────────────────────────────────────
@@ -123,6 +127,8 @@ FILES=(
   self-hosted/native/dwarf.sio
   self-hosted/native/regalloc.sio
   self-hosted/native/codegen_plan.sio
+  self-hosted/native/abi_lower.sio
+  self-hosted/native/debug_info.sio
   self-hosted/native/hyper_lower.sio
   self-hosted/native/suite.sio
 
@@ -317,6 +323,7 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/parser/types.sio
     self-hosted/parser/patterns.sio
     self-hosted/parser/mod.sio
+    self-hosted/parser/recovery.sio
 
     # 4. Resolve layer
     self-hosted/resolve/scope.sio
@@ -351,6 +358,9 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     # 5b. Diagnostics engine
     self-hosted/diagnostics/mod.sio
 
+    # 5c. Effects checker
+    self-hosted/effects/checker.sio
+
     # 6. IR layer
     self-hosted/ir/ir.sio
     self-hosted/ir/algebra.sio
@@ -362,6 +372,8 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/ir/optimize.sio
     self-hosted/ir/ssa.sio
     self-hosted/ir/closure.sio
+    self-hosted/ir/dep_graph.sio
+    self-hosted/ir/cfg.sio
     self-hosted/ir/mod.sio
 
     # 7. Native codegen layer
@@ -380,6 +392,8 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/native/dwarf.sio
     self-hosted/native/regalloc.sio
     self-hosted/native/codegen_plan.sio
+    self-hosted/native/abi_lower.sio
+    self-hosted/native/debug_info.sio
     self-hosted/native/hyper_lower.sio
 
     # 8. WebAssembly backend

@@ -1,0 +1,1948 @@
+// self-hosted::ir::dep_graph — Dependency graph for IR pass scheduling
+//
+// Models data, control, memory, and anti-dependencies between IR instructions.
+// Used by the pass manager to determine safe orderings, detect cycles, and
+// compute critical paths through the instruction dependency lattice.
+//
+// Algorithms implemented:
+//   1. Kahn's algorithm for topological sort
+//   2. DFS-based back-edge detection
+//   3. Tarjan's SCC (strongly connected components)
+//   4. Longest-path critical path analysis
+//   5. Simple dominator computation
+//   6. Reachability via DFS
+//
+// All arrays are fixed-size — no heap allocation.
+
+// ============================================================================
+// Section 1: Constants — dependency edge kinds
+// ============================================================================
+
+// Data dependency: instruction B uses a value produced by A
+let DEPG_DATA: i64 = 1
+
+// Control dependency: B is control-dependent on A (branch/jump)
+let DEPG_CTRL: i64 = 2
+
+// Memory dependency: B reads/writes memory that A writes/reads
+let DEPG_MEM: i64 = 3
+
+// Anti-dependency: B writes a location that A previously read (WAR hazard)
+let DEPG_ANTI: i64 = 4
+
+// Capacity constants
+let DEPG_MAX_NODES: i64 = 2048
+let DEPG_MAX_EDGES: i64 = 8192
+
+// Sentinel for "no node"
+let DEPG_INVALID: i64 = 0 - 1
+
+// DFS color constants for Tarjan / back-edge detection
+let DEPG_WHITE: i64 = 0
+let DEPG_GRAY: i64 = 1
+let DEPG_BLACK: i64 = 2
+
+// ============================================================================
+// Section 2: Structs
+// ============================================================================
+
+struct DepNode {
+    id: i64,
+    kind: i64,
+    instr_id: i64,
+    bb_id: i64,
+    is_visited: bool,
+    order: i64,
+}
+
+struct DepGraphEdge {
+    from: i64,
+    to: i64,
+    kind: i64,
+    is_back_edge: bool,
+}
+
+struct DepGraph {
+    nodes: [DepNode; 2048],
+    node_count: i64,
+    edges: [DepGraphEdge; 8192],
+    edge_count: i64,
+    topo_order: [i64; 2048],
+    topo_count: i64,
+    scc_ids: [i64; 2048],
+    scc_count: i64,
+}
+
+// ============================================================================
+// Section 3: Constructors
+// ============================================================================
+
+fn depg_node_new(id: i64, kind: i64, instr_id: i64, bb_id: i64) -> DepNode {
+    DepNode {
+        id: id,
+        kind: kind,
+        instr_id: instr_id,
+        bb_id: bb_id,
+        is_visited: false,
+        order: 0 - 1,
+    }
+}
+
+fn depg_edge_new(from: i64, to: i64, kind: i64) -> DepGraphEdge {
+    DepGraphEdge {
+        from: from,
+        to: to,
+        kind: kind,
+        is_back_edge: false,
+    }
+}
+
+fn depg_default_node() -> DepNode {
+    DepNode {
+        id: 0 - 1,
+        kind: 0,
+        instr_id: 0 - 1,
+        bb_id: 0 - 1,
+        is_visited: false,
+        order: 0 - 1,
+    }
+}
+
+fn depg_default_edge() -> DepGraphEdge {
+    DepGraphEdge {
+        from: 0 - 1,
+        to: 0 - 1,
+        kind: 0,
+        is_back_edge: false,
+    }
+}
+
+fn depg_new() -> DepGraph {
+    DepGraph {
+        nodes: [depg_default_node(); 2048],
+        node_count: 0,
+        edges: [depg_default_edge(); 8192],
+        edge_count: 0,
+        topo_order: [0 - 1; 2048],
+        topo_count: 0,
+        scc_ids: [0 - 1; 2048],
+        scc_count: 0,
+    }
+}
+
+// ============================================================================
+// Section 4: Graph building — add nodes and edges
+// ============================================================================
+
+fn depg_add_node(g: DepGraph, kind: i64, instr_id: i64, bb_id: i64) -> DepGraph with Mut, Div, Panic {
+    var out = g
+    let idx = out.node_count
+    if idx >= DEPG_MAX_NODES {
+        return out
+    }
+    out.nodes[idx] = depg_node_new(idx, kind, instr_id, bb_id)
+    out.node_count = idx + 1
+    out
+}
+
+fn depg_add_edge(g: DepGraph, from: i64, to: i64, kind: i64) -> DepGraph with Mut, Div, Panic {
+    var out = g
+    let idx = out.edge_count
+    if idx >= DEPG_MAX_EDGES {
+        return out
+    }
+    if from < 0 || from >= out.node_count {
+        return out
+    }
+    if to < 0 || to >= out.node_count {
+        return out
+    }
+    out.edges[idx] = depg_edge_new(from, to, kind)
+    out.edge_count = idx + 1
+    out
+}
+
+// ============================================================================
+// Section 5: Neighbor queries — predecessors and successors
+// ============================================================================
+
+// Collect successor node IDs for a given node.
+// Returns (buffer, count).
+fn depg_successors(g: DepGraph, node_id: i64) -> ([i64; 2048], i64) with Mut, Div, Panic {
+    var buf: [i64; 2048] = [0 - 1; 2048]
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < g.edge_count {
+        if g.edges[i].from == node_id {
+            if count < DEPG_MAX_NODES {
+                buf[count] = g.edges[i].to
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    (buf, count)
+}
+
+// Collect predecessor node IDs for a given node.
+// Returns (buffer, count).
+fn depg_predecessors(g: DepGraph, node_id: i64) -> ([i64; 2048], i64) with Mut, Div, Panic {
+    var buf: [i64; 2048] = [0 - 1; 2048]
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < g.edge_count {
+        if g.edges[i].to == node_id {
+            if count < DEPG_MAX_NODES {
+                buf[count] = g.edges[i].from
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    (buf, count)
+}
+
+// Count in-degree for a single node (number of incoming edges).
+fn depg_in_degree(g: DepGraph, node_id: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < g.edge_count {
+        if g.edges[i].to == node_id {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Count out-degree for a single node (number of outgoing edges).
+fn depg_out_degree(g: DepGraph, node_id: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < g.edge_count {
+        if g.edges[i].from == node_id {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// Section 6: Topological sort — Kahn's algorithm
+// ============================================================================
+
+// Kahn's algorithm: iteratively remove nodes with in-degree 0.
+// Populates g.topo_order and g.topo_count.
+// If topo_count < node_count, the graph has a cycle.
+fn depg_topo_sort(g: DepGraph) -> DepGraph with Mut, Div, Panic {
+    var out = g
+
+    // Step 1: compute in-degrees for all nodes
+    var in_deg: [i64; 2048] = [0; 2048]
+    var i: i64 = 0
+    while i < out.edge_count {
+        let t = out.edges[i].to
+        if t >= 0 && t < out.node_count {
+            in_deg[t] = in_deg[t] + 1
+        }
+        i = i + 1
+    }
+
+    // Step 2: initialize queue with all nodes that have in-degree 0
+    var queue: [i64; 2048] = [0 - 1; 2048]
+    var q_head: i64 = 0
+    var q_tail: i64 = 0
+    var j: i64 = 0
+    while j < out.node_count {
+        if in_deg[j] == 0 {
+            queue[q_tail] = j
+            q_tail = q_tail + 1
+        }
+        j = j + 1
+    }
+
+    // Step 3: BFS — dequeue, add to topo order, decrement successors
+    var topo_idx: i64 = 0
+    while q_head < q_tail {
+        let curr = queue[q_head]
+        q_head = q_head + 1
+
+        out.topo_order[topo_idx] = curr
+        topo_idx = topo_idx + 1
+
+        // Decrement in-degree of all successors
+        var k: i64 = 0
+        while k < out.edge_count {
+            if out.edges[k].from == curr {
+                let succ = out.edges[k].to
+                if succ >= 0 && succ < out.node_count {
+                    in_deg[succ] = in_deg[succ] - 1
+                    if in_deg[succ] == 0 {
+                        queue[q_tail] = succ
+                        q_tail = q_tail + 1
+                    }
+                }
+            }
+            k = k + 1
+        }
+    }
+
+    out.topo_count = topo_idx
+    out
+}
+
+// ============================================================================
+// Section 7: Back-edge detection — DFS coloring
+// ============================================================================
+
+// DFS visit for back-edge detection.
+// color: WHITE=0 (unvisited), GRAY=1 (on stack), BLACK=2 (finished)
+// back_edge_flags[e] = true if edge e is a back edge.
+fn depg_dfs_visit_back(
+    g: DepGraph,
+    node: i64,
+    color: [i64; 2048],
+    back_edge_flags: [bool; 8192]
+) -> ([i64; 2048], [bool; 8192]) with Mut, Div, Panic {
+    var c = color
+    var bf = back_edge_flags
+    c[node] = DEPG_GRAY
+
+    var i: i64 = 0
+    while i < g.edge_count {
+        if g.edges[i].from == node {
+            let succ = g.edges[i].to
+            if succ >= 0 && succ < g.node_count {
+                if c[succ] == DEPG_GRAY {
+                    // Back edge: successor is on the current DFS stack
+                    bf[i] = true
+                } else if c[succ] == DEPG_WHITE {
+                    let pair = depg_dfs_visit_back(g, succ, c, bf)
+                    c = pair.0
+                    bf = pair.1
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    c[node] = DEPG_BLACK
+    (c, bf)
+}
+
+// Find all back edges in the graph using DFS.
+// Sets is_back_edge on each edge that is a back edge.
+fn depg_find_back_edges(g: DepGraph) -> DepGraph with Mut, Div, Panic {
+    var out = g
+    var color: [i64; 2048] = [DEPG_WHITE; 2048]
+    var back_flags: [bool; 8192] = [false; 8192]
+
+    var i: i64 = 0
+    while i < out.node_count {
+        if color[i] == DEPG_WHITE {
+            let pair = depg_dfs_visit_back(out, i, color, back_flags)
+            color = pair.0
+            back_flags = pair.1
+        }
+        i = i + 1
+    }
+
+    // Copy back-edge flags into edge structs
+    var j: i64 = 0
+    while j < out.edge_count {
+        if back_flags[j] {
+            out.edges[j] = DepGraphEdge {
+                from: out.edges[j].from,
+                to: out.edges[j].to,
+                kind: out.edges[j].kind,
+                is_back_edge: true,
+            }
+        }
+        j = j + 1
+    }
+
+    out
+}
+
+// ============================================================================
+// Section 8: Tarjan's SCC algorithm
+// ============================================================================
+
+// Tarjan state — carried through recursive DFS
+struct TarjanState {
+    index_counter: i64,
+    disc: [i64; 2048],
+    low: [i64; 2048],
+    on_stack: [bool; 2048],
+    stack: [i64; 2048],
+    stack_top: i64,
+    scc_ids: [i64; 2048],
+    scc_count: i64,
+}
+
+fn tarjan_state_new(node_count: i64) -> TarjanState with Mut, Div, Panic {
+    var st = TarjanState {
+        index_counter: 0,
+        disc: [0 - 1; 2048],
+        low: [0 - 1; 2048],
+        on_stack: [false; 2048],
+        stack: [0 - 1; 2048],
+        stack_top: 0,
+        scc_ids: [0 - 1; 2048],
+        scc_count: 0,
+    }
+    // Initialize disc/low to -1 (unvisited)
+    var i: i64 = 0
+    while i < node_count {
+        st.disc[i] = 0 - 1
+        st.low[i] = 0 - 1
+        i = i + 1
+    }
+    st
+}
+
+// Minimum of two i64 values.
+fn depg_min(a: i64, b: i64) -> i64 {
+    if a < b { a } else { b }
+}
+
+// Maximum of two i64 values.
+fn depg_max(a: i64, b: i64) -> i64 {
+    if a > b { a } else { b }
+}
+
+// Tarjan DFS visit for a single node.
+fn tarjan_visit(g: DepGraph, v: i64, st: TarjanState) -> TarjanState with Mut, Div, Panic {
+    var s = st
+    s.disc[v] = s.index_counter
+    s.low[v] = s.index_counter
+    s.index_counter = s.index_counter + 1
+
+    // Push v onto stack
+    s.stack[s.stack_top] = v
+    s.stack_top = s.stack_top + 1
+    s.on_stack[v] = true
+
+    // Visit all successors
+    var i: i64 = 0
+    while i < g.edge_count {
+        if g.edges[i].from == v {
+            let w = g.edges[i].to
+            if w >= 0 && w < g.node_count {
+                if s.disc[w] == (0 - 1) {
+                    // w not yet visited — recurse
+                    s = tarjan_visit(g, w, s)
+                    s.low[v] = depg_min(s.low[v], s.low[w])
+                } else if s.on_stack[w] {
+                    // w is on the stack — part of current SCC
+                    s.low[v] = depg_min(s.low[v], s.disc[w])
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    // If v is a root node of an SCC, pop the SCC from the stack
+    if s.low[v] == s.disc[v] {
+        let scc_id = s.scc_count
+        var done: bool = false
+        while !done && s.stack_top > 0 {
+            s.stack_top = s.stack_top - 1
+            let w = s.stack[s.stack_top]
+            s.on_stack[w] = false
+            s.scc_ids[w] = scc_id
+            if w == v {
+                done = true
+            }
+        }
+        s.scc_count = s.scc_count + 1
+    }
+
+    s
+}
+
+// Run Tarjan's SCC on the entire graph.
+// Populates g.scc_ids (SCC id for each node) and g.scc_count.
+fn depg_tarjan_scc(g: DepGraph) -> DepGraph with Mut, Div, Panic {
+    var out = g
+    var st = tarjan_state_new(out.node_count)
+
+    var i: i64 = 0
+    while i < out.node_count {
+        if st.disc[i] == (0 - 1) {
+            st = tarjan_visit(out, i, st)
+        }
+        i = i + 1
+    }
+
+    // Copy results back to graph
+    var j: i64 = 0
+    while j < out.node_count {
+        out.scc_ids[j] = st.scc_ids[j]
+        j = j + 1
+    }
+    out.scc_count = st.scc_count
+
+    out
+}
+
+// ============================================================================
+// Section 9: DAG check
+// ============================================================================
+
+// A graph is a DAG if topological sort produces exactly node_count entries.
+fn depg_is_dag(g: DepGraph) -> bool with Mut, Div, Panic {
+    let sorted = depg_topo_sort(g)
+    sorted.topo_count == sorted.node_count
+}
+
+// Alternative: a graph is a DAG if every SCC has exactly one node (no cycles).
+fn depg_is_dag_via_scc(g: DepGraph) -> bool with Mut, Div, Panic {
+    let scc_g = depg_tarjan_scc(g)
+
+    // Count nodes in each SCC
+    var scc_size: [i64; 2048] = [0; 2048]
+    var i: i64 = 0
+    while i < scc_g.node_count {
+        let sid = scc_g.scc_ids[i]
+        if sid >= 0 && sid < DEPG_MAX_NODES {
+            scc_size[sid] = scc_size[sid] + 1
+        }
+        i = i + 1
+    }
+
+    // Check that no SCC has more than one node
+    var j: i64 = 0
+    while j < scc_g.scc_count {
+        if scc_size[j] > 1 {
+            return false
+        }
+        j = j + 1
+    }
+    true
+}
+
+// ============================================================================
+// Section 10: Reachability — DFS from source to target
+// ============================================================================
+
+// DFS visit for reachability.
+fn depg_reach_visit(
+    g: DepGraph,
+    node: i64,
+    target: i64,
+    visited: [bool; 2048]
+) -> ([bool; 2048], bool) with Mut, Div, Panic {
+    var vis = visited
+    vis[node] = true
+
+    if node == target {
+        return (vis, true)
+    }
+
+    var i: i64 = 0
+    while i < g.edge_count {
+        if g.edges[i].from == node {
+            let succ = g.edges[i].to
+            if succ >= 0 && succ < g.node_count && !vis[succ] {
+                let pair = depg_reach_visit(g, succ, target, vis)
+                vis = pair.0
+                if pair.1 {
+                    return (vis, true)
+                }
+            }
+        }
+        i = i + 1
+    }
+    (vis, false)
+}
+
+// Check if node target_id is reachable from source_id.
+fn depg_reachable(g: DepGraph, source_id: i64, target_id: i64) -> bool with Mut, Div, Panic {
+    if source_id < 0 || source_id >= g.node_count {
+        return false
+    }
+    if target_id < 0 || target_id >= g.node_count {
+        return false
+    }
+    if source_id == target_id {
+        return true
+    }
+    var visited: [bool; 2048] = [false; 2048]
+    let pair = depg_reach_visit(g, source_id, target_id, visited)
+    pair.1
+}
+
+// ============================================================================
+// Section 11: Critical path — longest path in a DAG
+// ============================================================================
+
+// Compute the longest path from any source to any sink in the DAG.
+// Uses topological order + dynamic programming.
+// Returns (path_length, sink_node_id).
+// Each node has weight 1 (instruction count). path_length counts nodes.
+fn depg_critical_path(g: DepGraph) -> (i64, i64) with Mut, Div, Panic {
+    let sorted = depg_topo_sort(g)
+
+    // dist[v] = longest path ending at v
+    var dist: [i64; 2048] = [0; 2048]
+
+    // Initialize: every node has distance 1 (itself)
+    var i: i64 = 0
+    while i < sorted.node_count {
+        dist[i] = 1
+        i = i + 1
+    }
+
+    // Process in topological order
+    var t: i64 = 0
+    while t < sorted.topo_count {
+        let u = sorted.topo_order[t]
+        if u >= 0 && u < sorted.node_count {
+            // Relax all outgoing edges
+            var k: i64 = 0
+            while k < sorted.edge_count {
+                if sorted.edges[k].from == u {
+                    let v = sorted.edges[k].to
+                    if v >= 0 && v < sorted.node_count {
+                        let candidate = dist[u] + 1
+                        if candidate > dist[v] {
+                            dist[v] = candidate
+                        }
+                    }
+                }
+                k = k + 1
+            }
+        }
+        t = t + 1
+    }
+
+    // Find the maximum distance (critical path length) and which node
+    var max_dist: i64 = 0
+    var max_node: i64 = 0 - 1
+    var m: i64 = 0
+    while m < sorted.node_count {
+        if dist[m] > max_dist {
+            max_dist = dist[m]
+            max_node = m
+        }
+        m = m + 1
+    }
+
+    (max_dist, max_node)
+}
+
+// ============================================================================
+// Section 12: Reverse graph
+// ============================================================================
+
+// Create a new graph with all edges reversed.
+fn depg_reverse(g: DepGraph) -> DepGraph with Mut, Div, Panic {
+    var rev = depg_new()
+
+    // Copy nodes
+    var i: i64 = 0
+    while i < g.node_count {
+        rev.nodes[i] = g.nodes[i]
+        i = i + 1
+    }
+    rev.node_count = g.node_count
+
+    // Reverse edges
+    var j: i64 = 0
+    while j < g.edge_count {
+        rev.edges[j] = DepGraphEdge {
+            from: g.edges[j].to,
+            to: g.edges[j].from,
+            kind: g.edges[j].kind,
+            is_back_edge: g.edges[j].is_back_edge,
+        }
+        j = j + 1
+    }
+    rev.edge_count = g.edge_count
+
+    rev
+}
+
+// ============================================================================
+// Section 13: Dominators — simple iterative algorithm
+// ============================================================================
+
+// Compute immediate dominators using the iterative data-flow approach.
+// Assumes node 0 is the entry. Returns idom array where idom[v] is the
+// immediate dominator of v, and idom[0] = 0.
+//
+// Uses the Cooper-Harvey-Kennedy iterative algorithm:
+//   dom[0] = {0}
+//   for all other nodes: dom[v] = {v} union intersect(dom[p] for p in preds(v))
+//   Iterate until fixed point.
+//
+// We represent dom sets as bit vectors (one i64 per 64 nodes, up to 2048).
+// For simplicity we use a dominates-check approach with idom arrays.
+fn depg_dominators(g: DepGraph) -> [i64; 2048] with Mut, Div, Panic {
+    var idom: [i64; 2048] = [0 - 1; 2048]
+    let n = g.node_count
+    if n <= 0 {
+        return idom
+    }
+
+    // Entry node dominates itself
+    idom[0] = 0
+
+    // We need topological order (excluding entry) to iterate in RPO
+    let sorted = depg_topo_sort(g)
+
+    // Iterate until no changes
+    var changed: bool = true
+    while changed {
+        changed = false
+        var t: i64 = 0
+        while t < sorted.topo_count {
+            let b = sorted.topo_order[t]
+            if b > 0 && b < n {
+                // Find new idom as the intersection of dominators of all predecessors
+                let pred_pair = depg_predecessors(g, b)
+                let pred_buf = pred_pair.0
+                let pred_count = pred_pair.1
+
+                var new_idom: i64 = 0 - 1
+                var p: i64 = 0
+                while p < pred_count {
+                    let pred = pred_buf[p]
+                    if pred >= 0 && pred < n && idom[pred] != (0 - 1) {
+                        if new_idom == (0 - 1) {
+                            new_idom = pred
+                        } else {
+                            // Intersect: walk up the dominator tree
+                            new_idom = depg_intersect_dom(idom, new_idom, pred)
+                        }
+                    }
+                    p = p + 1
+                }
+
+                if new_idom != (0 - 1) && new_idom != idom[b] {
+                    idom[b] = new_idom
+                    changed = true
+                }
+            }
+            t = t + 1
+        }
+    }
+
+    idom
+}
+
+// Intersect two nodes in the dominator tree by walking up to their LCA.
+// Uses node indices as a proxy for RPO numbering (lower index = earlier).
+fn depg_intersect_dom(idom: [i64; 2048], a: i64, b: i64) -> i64 with Mut, Div, Panic {
+    var finger1 = a
+    var finger2 = b
+    // Walk up dominator tree until fingers meet
+    // Use a bounded loop to prevent infinite iteration
+    var iter: i64 = 0
+    while finger1 != finger2 && iter < DEPG_MAX_NODES {
+        while finger1 > finger2 && iter < DEPG_MAX_NODES {
+            finger1 = idom[finger1]
+            iter = iter + 1
+        }
+        while finger2 > finger1 && iter < DEPG_MAX_NODES {
+            finger2 = idom[finger2]
+            iter = iter + 1
+        }
+    }
+    finger1
+}
+
+// Check if node a dominates node b, given the idom array.
+fn depg_dominates(idom: [i64; 2048], a: i64, b: i64) -> bool with Mut, Div, Panic {
+    if a == b {
+        return true
+    }
+    var runner = b
+    var iter: i64 = 0
+    while runner != a && runner != idom[runner] && iter < DEPG_MAX_NODES {
+        runner = idom[runner]
+        iter = iter + 1
+    }
+    runner == a
+}
+
+// ============================================================================
+// Section 14: Edge queries and statistics
+// ============================================================================
+
+// Count edges of a specific kind.
+fn depg_count_edges_of_kind(g: DepGraph, kind: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < g.edge_count {
+        if g.edges[i].kind == kind {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Count back edges (after depg_find_back_edges has been run).
+fn depg_count_back_edges(g: DepGraph) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < g.edge_count {
+        if g.edges[i].is_back_edge {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Check if there is an edge from node a to node b.
+fn depg_has_edge(g: DepGraph, from: i64, to: i64) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < g.edge_count {
+        if g.edges[i].from == from && g.edges[i].to == to {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Check if there is an edge from a to b with a specific kind.
+fn depg_has_edge_of_kind(g: DepGraph, from: i64, to: i64, kind: i64) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < g.edge_count {
+        if g.edges[i].from == from && g.edges[i].to == to && g.edges[i].kind == kind {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Find all source nodes (in-degree 0).
+fn depg_sources(g: DepGraph) -> ([i64; 2048], i64) with Mut, Div, Panic {
+    var buf: [i64; 2048] = [0 - 1; 2048]
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < g.node_count {
+        if depg_in_degree(g, i) == 0 {
+            if count < DEPG_MAX_NODES {
+                buf[count] = i
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    (buf, count)
+}
+
+// Find all sink nodes (out-degree 0).
+fn depg_sinks(g: DepGraph) -> ([i64; 2048], i64) with Mut, Div, Panic {
+    var buf: [i64; 2048] = [0 - 1; 2048]
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < g.node_count {
+        if depg_out_degree(g, i) == 0 {
+            if count < DEPG_MAX_NODES {
+                buf[count] = i
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    (buf, count)
+}
+
+// ============================================================================
+// Section 15: Subgraph extraction
+// ============================================================================
+
+// Extract a subgraph containing only nodes in a given SCC.
+fn depg_extract_scc(g: DepGraph, scc_id: i64) -> DepGraph with Mut, Div, Panic {
+    var sub = depg_new()
+
+    // Mapping from old node id to new node id
+    var old_to_new: [i64; 2048] = [0 - 1; 2048]
+
+    // Add nodes belonging to this SCC
+    var i: i64 = 0
+    while i < g.node_count {
+        if g.scc_ids[i] == scc_id {
+            let new_id = sub.node_count
+            old_to_new[i] = new_id
+            sub.nodes[new_id] = depg_node_new(new_id, g.nodes[i].kind, g.nodes[i].instr_id, g.nodes[i].bb_id)
+            sub.node_count = sub.node_count + 1
+        }
+        i = i + 1
+    }
+
+    // Add edges where both endpoints are in this SCC
+    var j: i64 = 0
+    while j < g.edge_count {
+        let from_old = g.edges[j].from
+        let to_old = g.edges[j].to
+        if from_old >= 0 && from_old < g.node_count && to_old >= 0 && to_old < g.node_count {
+            let from_new = old_to_new[from_old]
+            let to_new = old_to_new[to_old]
+            if from_new != (0 - 1) && to_new != (0 - 1) {
+                if sub.edge_count < DEPG_MAX_EDGES {
+                    sub.edges[sub.edge_count] = depg_edge_new(from_new, to_new, g.edges[j].kind)
+                    sub.edge_count = sub.edge_count + 1
+                }
+            }
+        }
+        j = j + 1
+    }
+
+    sub
+}
+
+// ============================================================================
+// Section 16: Node property queries
+// ============================================================================
+
+// Get the kind of edge dependency for the first edge from a to b.
+fn depg_edge_kind(g: DepGraph, from: i64, to: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < g.edge_count {
+        if g.edges[i].from == from && g.edges[i].to == to {
+            return g.edges[i].kind
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// Get the basic-block id associated with a node.
+fn depg_node_bb(g: DepGraph, node_id: i64) -> i64 with Div, Panic {
+    if node_id < 0 || node_id >= g.node_count {
+        return 0 - 1
+    }
+    g.nodes[node_id].bb_id
+}
+
+// Get the instruction id associated with a node.
+fn depg_node_instr(g: DepGraph, node_id: i64) -> i64 with Div, Panic {
+    if node_id < 0 || node_id >= g.node_count {
+        return 0 - 1
+    }
+    g.nodes[node_id].instr_id
+}
+
+// Set the order field on a node (used after scheduling).
+fn depg_set_order(g: DepGraph, node_id: i64, order: i64) -> DepGraph with Mut, Div, Panic {
+    var out = g
+    if node_id >= 0 && node_id < out.node_count {
+        out.nodes[node_id] = DepNode {
+            id: out.nodes[node_id].id,
+            kind: out.nodes[node_id].kind,
+            instr_id: out.nodes[node_id].instr_id,
+            bb_id: out.nodes[node_id].bb_id,
+            is_visited: out.nodes[node_id].is_visited,
+            order: order,
+        }
+    }
+    out
+}
+
+// Mark a node as visited.
+fn depg_mark_visited(g: DepGraph, node_id: i64) -> DepGraph with Mut, Div, Panic {
+    var out = g
+    if node_id >= 0 && node_id < out.node_count {
+        out.nodes[node_id] = DepNode {
+            id: out.nodes[node_id].id,
+            kind: out.nodes[node_id].kind,
+            instr_id: out.nodes[node_id].instr_id,
+            bb_id: out.nodes[node_id].bb_id,
+            is_visited: true,
+            order: out.nodes[node_id].order,
+        }
+    }
+    out
+}
+
+// Clear all visited flags.
+fn depg_clear_visited(g: DepGraph) -> DepGraph with Mut, Div, Panic {
+    var out = g
+    var i: i64 = 0
+    while i < out.node_count {
+        out.nodes[i] = DepNode {
+            id: out.nodes[i].id,
+            kind: out.nodes[i].kind,
+            instr_id: out.nodes[i].instr_id,
+            bb_id: out.nodes[i].bb_id,
+            is_visited: false,
+            order: out.nodes[i].order,
+        }
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
+// Section 17: Graph merge
+// ============================================================================
+
+// Merge graph b into graph a. Node IDs in b are shifted by a.node_count.
+fn depg_merge(a: DepGraph, b: DepGraph) -> DepGraph with Mut, Div, Panic {
+    var out = a
+    let offset = out.node_count
+
+    // Copy nodes from b
+    var i: i64 = 0
+    while i < b.node_count {
+        let new_idx = offset + i
+        if new_idx < DEPG_MAX_NODES {
+            out.nodes[new_idx] = DepNode {
+                id: new_idx,
+                kind: b.nodes[i].kind,
+                instr_id: b.nodes[i].instr_id,
+                bb_id: b.nodes[i].bb_id,
+                is_visited: b.nodes[i].is_visited,
+                order: b.nodes[i].order,
+            }
+        }
+        i = i + 1
+    }
+    out.node_count = offset + b.node_count
+    if out.node_count > DEPG_MAX_NODES {
+        out.node_count = DEPG_MAX_NODES
+    }
+
+    // Copy edges from b, shifting node references
+    var j: i64 = 0
+    while j < b.edge_count {
+        let new_edge_idx = out.edge_count
+        if new_edge_idx < DEPG_MAX_EDGES {
+            out.edges[new_edge_idx] = DepGraphEdge {
+                from: b.edges[j].from + offset,
+                to: b.edges[j].to + offset,
+                kind: b.edges[j].kind,
+                is_back_edge: b.edges[j].is_back_edge,
+            }
+            out.edge_count = out.edge_count + 1
+        }
+        j = j + 1
+    }
+
+    out
+}
+
+// ============================================================================
+// Section 18: DFS traversal order
+// ============================================================================
+
+// Compute DFS pre-order traversal starting from node start.
+// Returns (order_buf, count).
+fn depg_dfs_preorder(g: DepGraph, start: i64) -> ([i64; 2048], i64) with Mut, Div, Panic {
+    var order: [i64; 2048] = [0 - 1; 2048]
+    var count: i64 = 0
+    var visited: [bool; 2048] = [false; 2048]
+    // Use an explicit stack for iterative DFS
+    var stack: [i64; 2048] = [0 - 1; 2048]
+    var sp: i64 = 0
+
+    if start < 0 || start >= g.node_count {
+        return (order, count)
+    }
+
+    stack[sp] = start
+    sp = sp + 1
+
+    while sp > 0 {
+        sp = sp - 1
+        let node = stack[sp]
+
+        if node >= 0 && node < g.node_count && !visited[node] {
+            visited[node] = true
+            order[count] = node
+            count = count + 1
+
+            // Push successors in reverse order so lowest-id successor is visited first
+            // First, collect successors
+            var succ_buf: [i64; 2048] = [0 - 1; 2048]
+            var succ_count: i64 = 0
+            var e: i64 = 0
+            while e < g.edge_count {
+                if g.edges[e].from == node {
+                    let s = g.edges[e].to
+                    if s >= 0 && s < g.node_count && !visited[s] {
+                        if succ_count < DEPG_MAX_NODES {
+                            succ_buf[succ_count] = s
+                            succ_count = succ_count + 1
+                        }
+                    }
+                }
+                e = e + 1
+            }
+            // Push in reverse order
+            var ri: i64 = succ_count - 1
+            while ri >= 0 {
+                if sp < DEPG_MAX_NODES {
+                    stack[sp] = succ_buf[ri]
+                    sp = sp + 1
+                }
+                ri = ri - 1
+            }
+        }
+    }
+
+    (order, count)
+}
+
+// Compute DFS post-order traversal starting from node start.
+// Returns (order_buf, count).
+fn depg_dfs_postorder(g: DepGraph, start: i64) -> ([i64; 2048], i64) with Mut, Div, Panic {
+    var order: [i64; 2048] = [0 - 1; 2048]
+    var count: i64 = 0
+    var visited: [bool; 2048] = [false; 2048]
+
+    if start < 0 || start >= g.node_count {
+        return (order, count)
+    }
+
+    // Use two-stack approach for iterative post-order
+    var stack1: [i64; 2048] = [0 - 1; 2048]
+    var sp1: i64 = 0
+    var stack2: [i64; 2048] = [0 - 1; 2048]
+    var sp2: i64 = 0
+
+    stack1[sp1] = start
+    sp1 = sp1 + 1
+
+    while sp1 > 0 {
+        sp1 = sp1 - 1
+        let node = stack1[sp1]
+
+        if node >= 0 && node < g.node_count && !visited[node] {
+            visited[node] = true
+            stack2[sp2] = node
+            sp2 = sp2 + 1
+
+            // Push successors onto stack1
+            var e: i64 = 0
+            while e < g.edge_count {
+                if g.edges[e].from == node {
+                    let s = g.edges[e].to
+                    if s >= 0 && s < g.node_count && !visited[s] {
+                        if sp1 < DEPG_MAX_NODES {
+                            stack1[sp1] = s
+                            sp1 = sp1 + 1
+                        }
+                    }
+                }
+                e = e + 1
+            }
+        }
+    }
+
+    // Pop from stack2 to get post-order
+    while sp2 > 0 {
+        sp2 = sp2 - 1
+        order[count] = stack2[sp2]
+        count = count + 1
+    }
+
+    (order, count)
+}
+
+// ============================================================================
+// Section 19: Transitive closure (limited — for small graphs)
+// ============================================================================
+
+// Compute transitive closure using repeated DFS.
+// reach[i * DEPG_MAX_NODES + j] = true if j is reachable from i.
+// Only practical for small node counts.
+fn depg_transitive_closure(g: DepGraph) -> [bool; 2048] with Mut, Div, Panic {
+    // We only use a flat 2048 array as a limited reachability matrix.
+    // For full N*N we would need N^2 entries; here we just compute
+    // row 0 for demonstration or use the depg_reachable function.
+    var reach: [bool; 2048] = [false; 2048]
+    if g.node_count <= 0 {
+        return reach
+    }
+
+    // Compute reachability from node 0
+    var visited: [bool; 2048] = [false; 2048]
+    var stack: [i64; 2048] = [0 - 1; 2048]
+    var sp: i64 = 0
+    stack[sp] = 0
+    sp = sp + 1
+
+    while sp > 0 {
+        sp = sp - 1
+        let node = stack[sp]
+        if node >= 0 && node < g.node_count && !visited[node] {
+            visited[node] = true
+            reach[node] = true
+
+            var e: i64 = 0
+            while e < g.edge_count {
+                if g.edges[e].from == node {
+                    let s = g.edges[e].to
+                    if s >= 0 && s < g.node_count && !visited[s] {
+                        if sp < DEPG_MAX_NODES {
+                            stack[sp] = s
+                            sp = sp + 1
+                        }
+                    }
+                }
+                e = e + 1
+            }
+        }
+    }
+
+    reach
+}
+
+// ============================================================================
+// Section 20: Topological depth (longest path from any source)
+// ============================================================================
+
+// Compute the topological depth of each node: the longest path from
+// any source node (in-degree 0) to this node.
+fn depg_topo_depth(g: DepGraph) -> [i64; 2048] with Mut, Div, Panic {
+    var depth: [i64; 2048] = [0; 2048]
+    let sorted = depg_topo_sort(g)
+
+    var t: i64 = 0
+    while t < sorted.topo_count {
+        let u = sorted.topo_order[t]
+        if u >= 0 && u < sorted.node_count {
+            var k: i64 = 0
+            while k < sorted.edge_count {
+                if sorted.edges[k].from == u {
+                    let v = sorted.edges[k].to
+                    if v >= 0 && v < sorted.node_count {
+                        let candidate = depth[u] + 1
+                        if candidate > depth[v] {
+                            depth[v] = candidate
+                        }
+                    }
+                }
+                k = k + 1
+            }
+        }
+        t = t + 1
+    }
+
+    depth
+}
+
+// ============================================================================
+// Section 21: Test helpers
+// ============================================================================
+
+fn depg_assert_true(cond: bool, code: i64) -> i64 {
+    if cond { 0 } else { code }
+}
+
+// Build a simple linear chain: 0 -> 1 -> 2 -> ... -> (n-1)
+fn depg_make_chain(n: i64) -> DepGraph with Mut, Div, Panic {
+    var g = depg_new()
+    var i: i64 = 0
+    while i < n {
+        g = depg_add_node(g, DEPG_DATA, i, 0)
+        i = i + 1
+    }
+    var j: i64 = 0
+    while j < n - 1 {
+        g = depg_add_edge(g, j, j + 1, DEPG_DATA)
+        j = j + 1
+    }
+    g
+}
+
+// Build a diamond: 0 -> 1, 0 -> 2, 1 -> 3, 2 -> 3
+fn depg_make_diamond() -> DepGraph with Mut, Div, Panic {
+    var g = depg_new()
+    g = depg_add_node(g, DEPG_DATA, 0, 0)   // node 0
+    g = depg_add_node(g, DEPG_DATA, 1, 0)   // node 1
+    g = depg_add_node(g, DEPG_DATA, 2, 0)   // node 2
+    g = depg_add_node(g, DEPG_DATA, 3, 0)   // node 3
+    g = depg_add_edge(g, 0, 1, DEPG_DATA)
+    g = depg_add_edge(g, 0, 2, DEPG_DATA)
+    g = depg_add_edge(g, 1, 3, DEPG_DATA)
+    g = depg_add_edge(g, 2, 3, DEPG_DATA)
+    g
+}
+
+// Build a cycle: 0 -> 1 -> 2 -> 0
+fn depg_make_triangle_cycle() -> DepGraph with Mut, Div, Panic {
+    var g = depg_new()
+    g = depg_add_node(g, DEPG_CTRL, 0, 0)
+    g = depg_add_node(g, DEPG_CTRL, 1, 0)
+    g = depg_add_node(g, DEPG_CTRL, 2, 0)
+    g = depg_add_edge(g, 0, 1, DEPG_CTRL)
+    g = depg_add_edge(g, 1, 2, DEPG_CTRL)
+    g = depg_add_edge(g, 2, 0, DEPG_CTRL)
+    g
+}
+
+// Build a graph with two SCCs: {0,1,2} cycle and {3,4} cycle, connected 2->3
+fn depg_make_two_sccs() -> DepGraph with Mut, Div, Panic {
+    var g = depg_new()
+    // SCC 1: 0 -> 1 -> 2 -> 0
+    g = depg_add_node(g, DEPG_DATA, 0, 0)
+    g = depg_add_node(g, DEPG_DATA, 1, 0)
+    g = depg_add_node(g, DEPG_DATA, 2, 0)
+    // SCC 2: 3 -> 4 -> 3
+    g = depg_add_node(g, DEPG_DATA, 3, 1)
+    g = depg_add_node(g, DEPG_DATA, 4, 1)
+
+    g = depg_add_edge(g, 0, 1, DEPG_DATA)
+    g = depg_add_edge(g, 1, 2, DEPG_DATA)
+    g = depg_add_edge(g, 2, 0, DEPG_DATA)
+    g = depg_add_edge(g, 3, 4, DEPG_DATA)
+    g = depg_add_edge(g, 4, 3, DEPG_DATA)
+    // Cross-SCC edge
+    g = depg_add_edge(g, 2, 3, DEPG_DATA)
+    g
+}
+
+// ============================================================================
+// Section 22: Tests
+// ============================================================================
+
+// Test 1: empty graph has zero nodes and edges
+fn depg_test_empty_graph() -> i64 with Mut, Div, Panic {
+    let g = depg_new()
+    let r1 = depg_assert_true(g.node_count == 0, 1)
+    if r1 != 0 { return r1 }
+    let r2 = depg_assert_true(g.edge_count == 0, 2)
+    if r2 != 0 { return r2 }
+    let r3 = depg_assert_true(g.topo_count == 0, 3)
+    if r3 != 0 { return r3 }
+    let r4 = depg_assert_true(g.scc_count == 0, 4)
+    if r4 != 0 { return r4 }
+    0
+}
+
+// Test 2: add nodes increments count
+fn depg_test_add_nodes() -> i64 with Mut, Div, Panic {
+    var g = depg_new()
+    g = depg_add_node(g, DEPG_DATA, 10, 0)
+    g = depg_add_node(g, DEPG_CTRL, 11, 1)
+    g = depg_add_node(g, DEPG_MEM, 12, 2)
+    let r1 = depg_assert_true(g.node_count == 3, 1)
+    if r1 != 0 { return r1 }
+    let r2 = depg_assert_true(g.nodes[0].instr_id == 10, 2)
+    if r2 != 0 { return r2 }
+    let r3 = depg_assert_true(g.nodes[1].kind == DEPG_CTRL, 3)
+    if r3 != 0 { return r3 }
+    let r4 = depg_assert_true(g.nodes[2].bb_id == 2, 4)
+    if r4 != 0 { return r4 }
+    0
+}
+
+// Test 3: add edges increments count and stores correctly
+fn depg_test_add_edges() -> i64 with Mut, Div, Panic {
+    var g = depg_new()
+    g = depg_add_node(g, DEPG_DATA, 0, 0)
+    g = depg_add_node(g, DEPG_DATA, 1, 0)
+    g = depg_add_edge(g, 0, 1, DEPG_DATA)
+    let r1 = depg_assert_true(g.edge_count == 1, 1)
+    if r1 != 0 { return r1 }
+    let r2 = depg_assert_true(g.edges[0].from == 0, 2)
+    if r2 != 0 { return r2 }
+    let r3 = depg_assert_true(g.edges[0].to == 1, 3)
+    if r3 != 0 { return r3 }
+    let r4 = depg_assert_true(g.edges[0].kind == DEPG_DATA, 4)
+    if r4 != 0 { return r4 }
+    0
+}
+
+// Test 4: invalid edge (out-of-range) is rejected
+fn depg_test_invalid_edge() -> i64 with Mut, Div, Panic {
+    var g = depg_new()
+    g = depg_add_node(g, DEPG_DATA, 0, 0)
+    g = depg_add_edge(g, 0, 5, DEPG_DATA)  // node 5 does not exist
+    let r1 = depg_assert_true(g.edge_count == 0, 1)
+    if r1 != 0 { return r1 }
+    0
+}
+
+// Test 5: successors of a node
+fn depg_test_successors() -> i64 with Mut, Div, Panic {
+    let g = depg_make_diamond()
+    let pair = depg_successors(g, 0)
+    let buf = pair.0
+    let count = pair.1
+    let r1 = depg_assert_true(count == 2, 1)
+    if r1 != 0 { return r1 }
+    let r2 = depg_assert_true(buf[0] == 1, 2)
+    if r2 != 0 { return r2 }
+    let r3 = depg_assert_true(buf[1] == 2, 3)
+    if r3 != 0 { return r3 }
+    0
+}
+
+// Test 6: predecessors of a node
+fn depg_test_predecessors() -> i64 with Mut, Div, Panic {
+    let g = depg_make_diamond()
+    let pair = depg_predecessors(g, 3)
+    let count = pair.1
+    let r1 = depg_assert_true(count == 2, 1)
+    if r1 != 0 { return r1 }
+    0
+}
+
+// Test 7: in-degree and out-degree
+fn depg_test_degree() -> i64 with Mut, Div, Panic {
+    let g = depg_make_diamond()
+    let r1 = depg_assert_true(depg_in_degree(g, 0) == 0, 1)
+    if r1 != 0 { return r1 }
+    let r2 = depg_assert_true(depg_out_degree(g, 0) == 2, 2)
+    if r2 != 0 { return r2 }
+    let r3 = depg_assert_true(depg_in_degree(g, 3) == 2, 3)
+    if r3 != 0 { return r3 }
+    let r4 = depg_assert_true(depg_out_degree(g, 3) == 0, 4)
+    if r4 != 0 { return r4 }
+    0
+}
+
+// Test 8: topological sort of a chain
+fn depg_test_topo_chain() -> i64 with Mut, Div, Panic {
+    let g = depg_make_chain(5)
+    let sorted = depg_topo_sort(g)
+    let r1 = depg_assert_true(sorted.topo_count == 5, 1)
+    if r1 != 0 { return r1 }
+    // Topo order of a chain must be 0, 1, 2, 3, 4
+    let r2 = depg_assert_true(sorted.topo_order[0] == 0, 2)
+    if r2 != 0 { return r2 }
+    let r3 = depg_assert_true(sorted.topo_order[1] == 1, 3)
+    if r3 != 0 { return r3 }
+    let r4 = depg_assert_true(sorted.topo_order[4] == 4, 4)
+    if r4 != 0 { return r4 }
+    0
+}
+
+// Test 9: topological sort of a diamond
+fn depg_test_topo_diamond() -> i64 with Mut, Div, Panic {
+    let g = depg_make_diamond()
+    let sorted = depg_topo_sort(g)
+    let r1 = depg_assert_true(sorted.topo_count == 4, 1)
+    if r1 != 0 { return r1 }
+    // Node 0 must come first, node 3 must come last
+    let r2 = depg_assert_true(sorted.topo_order[0] == 0, 2)
+    if r2 != 0 { return r2 }
+    let r3 = depg_assert_true(sorted.topo_order[3] == 3, 3)
+    if r3 != 0 { return r3 }
+    0
+}
+
+// Test 10: topological sort of a cycle is incomplete
+fn depg_test_topo_cycle() -> i64 with Mut, Div, Panic {
+    let g = depg_make_triangle_cycle()
+    let sorted = depg_topo_sort(g)
+    // Cycle means not all nodes can be sorted
+    let r1 = depg_assert_true(sorted.topo_count < 3, 1)
+    if r1 != 0 { return r1 }
+    0
+}
+
+// Test 11: DAG check on acyclic graph
+fn depg_test_is_dag_true() -> i64 with Mut, Div, Panic {
+    let g = depg_make_diamond()
+    let r1 = depg_assert_true(depg_is_dag(g), 1)
+    if r1 != 0 { return r1 }
+    0
+}
+
+// Test 12: DAG check on cyclic graph
+fn depg_test_is_dag_false() -> i64 with Mut, Div, Panic {
+    let g = depg_make_triangle_cycle()
+    let r1 = depg_assert_true(!depg_is_dag(g), 1)
+    if r1 != 0 { return r1 }
+    0
+}
+
+// Test 13: back edge detection in a cycle
+fn depg_test_back_edges_cycle() -> i64 with Mut, Div, Panic {
+    let g = depg_make_triangle_cycle()
+    let g2 = depg_find_back_edges(g)
+    let back_count = depg_count_back_edges(g2)
+    // Triangle cycle 0->1->2->0 has exactly 1 back edge (2->0)
+    let r1 = depg_assert_true(back_count == 1, 1)
+    if r1 != 0 { return r1 }
+    0
+}
+
+// Test 14: no back edges in a DAG
+fn depg_test_back_edges_dag() -> i64 with Mut, Div, Panic {
+    let g = depg_make_chain(4)
+    let g2 = depg_find_back_edges(g)
+    let back_count = depg_count_back_edges(g2)
+    let r1 = depg_assert_true(back_count == 0, 1)
+    if r1 != 0 { return r1 }
+    0
+}
+
+// Test 15: Tarjan SCC on a triangle cycle => 1 SCC with 3 nodes
+fn depg_test_tarjan_single_cycle() -> i64 with Mut, Div, Panic {
+    let g = depg_make_triangle_cycle()
+    let g2 = depg_tarjan_scc(g)
+    // All 3 nodes should be in the same SCC
+    let r1 = depg_assert_true(g2.scc_ids[0] == g2.scc_ids[1], 1)
+    if r1 != 0 { return r1 }
+    let r2 = depg_assert_true(g2.scc_ids[1] == g2.scc_ids[2], 2)
+    if r2 != 0 { return r2 }
+    0
+}
+
+// Test 16: Tarjan SCC on a DAG => each node is its own SCC
+fn depg_test_tarjan_dag() -> i64 with Mut, Div, Panic {
+    let g = depg_make_chain(4)
+    let g2 = depg_tarjan_scc(g)
+    let r1 = depg_assert_true(g2.scc_count == 4, 1)
+    if r1 != 0 { return r1 }
+    // Each node in a different SCC
+    let r2 = depg_assert_true(g2.scc_ids[0] != g2.scc_ids[1], 2)
+    if r2 != 0 { return r2 }
+    0
+}
+
+// Test 17: Tarjan SCC on two SCCs
+fn depg_test_tarjan_two_sccs() -> i64 with Mut, Div, Panic {
+    let g = depg_make_two_sccs()
+    let g2 = depg_tarjan_scc(g)
+    // Nodes 0,1,2 should share an SCC
+    let r1 = depg_assert_true(g2.scc_ids[0] == g2.scc_ids[1], 1)
+    if r1 != 0 { return r1 }
+    let r2 = depg_assert_true(g2.scc_ids[1] == g2.scc_ids[2], 2)
+    if r2 != 0 { return r2 }
+    // Nodes 3,4 should share a different SCC
+    let r3 = depg_assert_true(g2.scc_ids[3] == g2.scc_ids[4], 3)
+    if r3 != 0 { return r3 }
+    // The two SCCs should be different
+    let r4 = depg_assert_true(g2.scc_ids[0] != g2.scc_ids[3], 4)
+    if r4 != 0 { return r4 }
+    0
+}
+
+// Test 18: reachability in a chain
+fn depg_test_reachable_chain() -> i64 with Mut, Div, Panic {
+    let g = depg_make_chain(5)
+    let r1 = depg_assert_true(depg_reachable(g, 0, 4), 1)
+    if r1 != 0 { return r1 }
+    let r2 = depg_assert_true(depg_reachable(g, 0, 2), 2)
+    if r2 != 0 { return r2 }
+    // Not reachable in reverse direction
+    let r3 = depg_assert_true(!depg_reachable(g, 4, 0), 3)
+    if r3 != 0 { return r3 }
+    // Self-reachable
+    let r4 = depg_assert_true(depg_reachable(g, 2, 2), 4)
+    if r4 != 0 { return r4 }
+    0
+}
+
+// Test 19: reachability in a diamond
+fn depg_test_reachable_diamond() -> i64 with Mut, Div, Panic {
+    let g = depg_make_diamond()
+    let r1 = depg_assert_true(depg_reachable(g, 0, 3), 1)
+    if r1 != 0 { return r1 }
+    // Nodes 1 and 2 are not reachable from each other (parallel paths)
+    let r2 = depg_assert_true(!depg_reachable(g, 1, 2), 2)
+    if r2 != 0 { return r2 }
+    let r3 = depg_assert_true(!depg_reachable(g, 2, 1), 3)
+    if r3 != 0 { return r3 }
+    0
+}
+
+// Test 20: critical path length of a chain
+fn depg_test_critical_path_chain() -> i64 with Mut, Div, Panic {
+    let g = depg_make_chain(5)
+    let pair = depg_critical_path(g)
+    let path_len = pair.0
+    let sink = pair.1
+    // Chain of 5 nodes: critical path length is 5
+    let r1 = depg_assert_true(path_len == 5, 1)
+    if r1 != 0 { return r1 }
+    let r2 = depg_assert_true(sink == 4, 2)
+    if r2 != 0 { return r2 }
+    0
+}
+
+// Test 21: critical path of a diamond (two parallel paths of length 3)
+fn depg_test_critical_path_diamond() -> i64 with Mut, Div, Panic {
+    let g = depg_make_diamond()
+    let pair = depg_critical_path(g)
+    let path_len = pair.0
+    // Diamond: 0->1->3 or 0->2->3, both length 3
+    let r1 = depg_assert_true(path_len == 3, 1)
+    if r1 != 0 { return r1 }
+    0
+}
+
+// Test 22: reverse graph swaps edge directions
+fn depg_test_reverse() -> i64 with Mut, Div, Panic {
+    let g = depg_make_chain(3)
+    let rev = depg_reverse(g)
+    let r1 = depg_assert_true(rev.node_count == 3, 1)
+    if r1 != 0 { return r1 }
+    let r2 = depg_assert_true(rev.edge_count == 2, 2)
+    if r2 != 0 { return r2 }
+    // Original: 0->1, 1->2 => Reversed: 1->0, 2->1
+    let r3 = depg_assert_true(depg_has_edge(rev, 1, 0), 3)
+    if r3 != 0 { return r3 }
+    let r4 = depg_assert_true(depg_has_edge(rev, 2, 1), 4)
+    if r4 != 0 { return r4 }
+    // Original edges should not exist in reverse
+    let r5 = depg_assert_true(!depg_has_edge(rev, 0, 1), 5)
+    if r5 != 0 { return r5 }
+    0
+}
+
+// Test 23: dominators of a chain
+fn depg_test_dominators_chain() -> i64 with Mut, Div, Panic {
+    let g = depg_make_chain(4)
+    let idom = depg_dominators(g)
+    // In a chain: idom[0]=0, idom[1]=0, idom[2]=1, idom[3]=2
+    let r1 = depg_assert_true(idom[0] == 0, 1)
+    if r1 != 0 { return r1 }
+    let r2 = depg_assert_true(idom[1] == 0, 2)
+    if r2 != 0 { return r2 }
+    let r3 = depg_assert_true(idom[2] == 1, 3)
+    if r3 != 0 { return r3 }
+    let r4 = depg_assert_true(idom[3] == 2, 4)
+    if r4 != 0 { return r4 }
+    0
+}
+
+// Test 24: dominators of a diamond
+fn depg_test_dominators_diamond() -> i64 with Mut, Div, Panic {
+    let g = depg_make_diamond()
+    let idom = depg_dominators(g)
+    // idom[0]=0, idom[1]=0, idom[2]=0, idom[3]=0 (0 dominates all)
+    let r1 = depg_assert_true(idom[0] == 0, 1)
+    if r1 != 0 { return r1 }
+    let r2 = depg_assert_true(idom[1] == 0, 2)
+    if r2 != 0 { return r2 }
+    let r3 = depg_assert_true(idom[2] == 0, 3)
+    if r3 != 0 { return r3 }
+    // Node 3 is dominated by 0 (the only common ancestor of 1 and 2)
+    let r4 = depg_assert_true(idom[3] == 0, 4)
+    if r4 != 0 { return r4 }
+    0
+}
+
+// Test 25: has_edge and has_edge_of_kind
+fn depg_test_has_edge() -> i64 with Mut, Div, Panic {
+    var g = depg_new()
+    g = depg_add_node(g, DEPG_DATA, 0, 0)
+    g = depg_add_node(g, DEPG_DATA, 1, 0)
+    g = depg_add_node(g, DEPG_DATA, 2, 0)
+    g = depg_add_edge(g, 0, 1, DEPG_DATA)
+    g = depg_add_edge(g, 1, 2, DEPG_MEM)
+    let r1 = depg_assert_true(depg_has_edge(g, 0, 1), 1)
+    if r1 != 0 { return r1 }
+    let r2 = depg_assert_true(!depg_has_edge(g, 1, 0), 2)
+    if r2 != 0 { return r2 }
+    let r3 = depg_assert_true(depg_has_edge_of_kind(g, 0, 1, DEPG_DATA), 3)
+    if r3 != 0 { return r3 }
+    let r4 = depg_assert_true(!depg_has_edge_of_kind(g, 0, 1, DEPG_MEM), 4)
+    if r4 != 0 { return r4 }
+    let r5 = depg_assert_true(depg_has_edge_of_kind(g, 1, 2, DEPG_MEM), 5)
+    if r5 != 0 { return r5 }
+    0
+}
+
+// Test 26: sources and sinks
+fn depg_test_sources_sinks() -> i64 with Mut, Div, Panic {
+    let g = depg_make_diamond()
+    let src_pair = depg_sources(g)
+    let src_count = src_pair.1
+    let sink_pair = depg_sinks(g)
+    let sink_count = sink_pair.1
+    let r1 = depg_assert_true(src_count == 1, 1)
+    if r1 != 0 { return r1 }
+    let r2 = depg_assert_true(src_pair.0[0] == 0, 2)
+    if r2 != 0 { return r2 }
+    let r3 = depg_assert_true(sink_count == 1, 3)
+    if r3 != 0 { return r3 }
+    let r4 = depg_assert_true(sink_pair.0[0] == 3, 4)
+    if r4 != 0 { return r4 }
+    0
+}
+
+// Test 27: edge kind constants are distinct
+fn depg_test_constants() -> i64 with Mut, Div, Panic {
+    let r1 = depg_assert_true(DEPG_DATA != DEPG_CTRL, 1)
+    if r1 != 0 { return r1 }
+    let r2 = depg_assert_true(DEPG_CTRL != DEPG_MEM, 2)
+    if r2 != 0 { return r2 }
+    let r3 = depg_assert_true(DEPG_MEM != DEPG_ANTI, 3)
+    if r3 != 0 { return r3 }
+    let r4 = depg_assert_true(DEPG_DATA == 1, 4)
+    if r4 != 0 { return r4 }
+    let r5 = depg_assert_true(DEPG_ANTI == 4, 5)
+    if r5 != 0 { return r5 }
+    0
+}
+
+// Test 28: count edges by kind
+fn depg_test_count_edges_by_kind() -> i64 with Mut, Div, Panic {
+    var g = depg_new()
+    g = depg_add_node(g, DEPG_DATA, 0, 0)
+    g = depg_add_node(g, DEPG_DATA, 1, 0)
+    g = depg_add_node(g, DEPG_DATA, 2, 0)
+    g = depg_add_edge(g, 0, 1, DEPG_DATA)
+    g = depg_add_edge(g, 0, 2, DEPG_DATA)
+    g = depg_add_edge(g, 1, 2, DEPG_MEM)
+    let r1 = depg_assert_true(depg_count_edges_of_kind(g, DEPG_DATA) == 2, 1)
+    if r1 != 0 { return r1 }
+    let r2 = depg_assert_true(depg_count_edges_of_kind(g, DEPG_MEM) == 1, 2)
+    if r2 != 0 { return r2 }
+    let r3 = depg_assert_true(depg_count_edges_of_kind(g, DEPG_CTRL) == 0, 3)
+    if r3 != 0 { return r3 }
+    0
+}
+
+// Test 29: DFS preorder traversal
+fn depg_test_dfs_preorder() -> i64 with Mut, Div, Panic {
+    let g = depg_make_chain(4)
+    let pair = depg_dfs_preorder(g, 0)
+    let count = pair.1
+    let r1 = depg_assert_true(count == 4, 1)
+    if r1 != 0 { return r1 }
+    // Chain: preorder is 0, 1, 2, 3
+    let r2 = depg_assert_true(pair.0[0] == 0, 2)
+    if r2 != 0 { return r2 }
+    let r3 = depg_assert_true(pair.0[1] == 1, 3)
+    if r3 != 0 { return r3 }
+    let r4 = depg_assert_true(pair.0[3] == 3, 4)
+    if r4 != 0 { return r4 }
+    0
+}
+
+// Test 30: node property setters
+fn depg_test_node_properties() -> i64 with Mut, Div, Panic {
+    var g = depg_new()
+    g = depg_add_node(g, DEPG_DATA, 42, 7)
+    let r1 = depg_assert_true(depg_node_instr(g, 0) == 42, 1)
+    if r1 != 0 { return r1 }
+    let r2 = depg_assert_true(depg_node_bb(g, 0) == 7, 2)
+    if r2 != 0 { return r2 }
+    g = depg_set_order(g, 0, 99)
+    let r3 = depg_assert_true(g.nodes[0].order == 99, 3)
+    if r3 != 0 { return r3 }
+    g = depg_mark_visited(g, 0)
+    let r4 = depg_assert_true(g.nodes[0].is_visited, 4)
+    if r4 != 0 { return r4 }
+    g = depg_clear_visited(g)
+    let r5 = depg_assert_true(!g.nodes[0].is_visited, 5)
+    if r5 != 0 { return r5 }
+    0
+}
+
+// Test 31: merge two graphs
+fn depg_test_merge() -> i64 with Mut, Div, Panic {
+    let a = depg_make_chain(3)  // 0->1->2
+    let b = depg_make_chain(2)  // 0->1, will become 3->4
+    let merged = depg_merge(a, b)
+    let r1 = depg_assert_true(merged.node_count == 5, 1)
+    if r1 != 0 { return r1 }
+    let r2 = depg_assert_true(merged.edge_count == 3, 2)
+    if r2 != 0 { return r2 }
+    // Original edges from a
+    let r3 = depg_assert_true(depg_has_edge(merged, 0, 1), 3)
+    if r3 != 0 { return r3 }
+    // Shifted edges from b: 0->1 becomes 3->4
+    let r4 = depg_assert_true(depg_has_edge(merged, 3, 4), 4)
+    if r4 != 0 { return r4 }
+    0
+}
+
+// Test 32: extract SCC subgraph
+fn depg_test_extract_scc() -> i64 with Mut, Div, Panic {
+    let g = depg_make_two_sccs()
+    let g2 = depg_tarjan_scc(g)
+    // Extract the SCC containing nodes 0,1,2
+    let scc_id_012 = g2.scc_ids[0]
+    let sub = depg_extract_scc(g2, scc_id_012)
+    let r1 = depg_assert_true(sub.node_count == 3, 1)
+    if r1 != 0 { return r1 }
+    // The subgraph should have 3 edges (0->1, 1->2, 2->0 mapped to new ids)
+    let r2 = depg_assert_true(sub.edge_count == 3, 2)
+    if r2 != 0 { return r2 }
+    0
+}
+
+// Test 33: DAG check via SCC agrees with Kahn's
+fn depg_test_is_dag_via_scc() -> i64 with Mut, Div, Panic {
+    let dag = depg_make_diamond()
+    let cyc = depg_make_triangle_cycle()
+    let r1 = depg_assert_true(depg_is_dag_via_scc(dag), 1)
+    if r1 != 0 { return r1 }
+    let r2 = depg_assert_true(!depg_is_dag_via_scc(cyc), 2)
+    if r2 != 0 { return r2 }
+    0
+}
+
+// Test 34: topo depth of chain nodes
+fn depg_test_topo_depth() -> i64 with Mut, Div, Panic {
+    let g = depg_make_chain(5)
+    let depth = depg_topo_depth(g)
+    let r1 = depg_assert_true(depth[0] == 0, 1)
+    if r1 != 0 { return r1 }
+    let r2 = depg_assert_true(depth[1] == 1, 2)
+    if r2 != 0 { return r2 }
+    let r3 = depg_assert_true(depth[4] == 4, 3)
+    if r3 != 0 { return r3 }
+    0
+}
+
+// Test 35: edge_kind query
+fn depg_test_edge_kind() -> i64 with Mut, Div, Panic {
+    var g = depg_new()
+    g = depg_add_node(g, DEPG_DATA, 0, 0)
+    g = depg_add_node(g, DEPG_DATA, 1, 0)
+    g = depg_add_edge(g, 0, 1, DEPG_ANTI)
+    let k = depg_edge_kind(g, 0, 1)
+    let r1 = depg_assert_true(k == DEPG_ANTI, 1)
+    if r1 != 0 { return r1 }
+    // Non-existent edge returns -1
+    let k2 = depg_edge_kind(g, 1, 0)
+    let r2 = depg_assert_true(k2 == (0 - 1), 2)
+    if r2 != 0 { return r2 }
+    0
+}
+
+// Test 36: dominates check
+fn depg_test_dominates() -> i64 with Mut, Div, Panic {
+    let g = depg_make_chain(4)
+    let idom = depg_dominators(g)
+    // 0 dominates everything in a chain
+    let r1 = depg_assert_true(depg_dominates(idom, 0, 3), 1)
+    if r1 != 0 { return r1 }
+    let r2 = depg_assert_true(depg_dominates(idom, 0, 1), 2)
+    if r2 != 0 { return r2 }
+    // 3 does not dominate 0
+    let r3 = depg_assert_true(!depg_dominates(idom, 3, 0), 3)
+    if r3 != 0 { return r3 }
+    // Every node dominates itself
+    let r4 = depg_assert_true(depg_dominates(idom, 2, 2), 4)
+    if r4 != 0 { return r4 }
+    0
+}
+
+// ============================================================================
+// Section 23: Test runner
+// ============================================================================
+
+fn depg_run_all_tests() -> i64 with Mut, Div, Panic {
+    var fail_count: i64 = 0
+
+    let t1 = depg_test_empty_graph()
+    if t1 != 0 { fail_count = fail_count + 1 }
+
+    let t2 = depg_test_add_nodes()
+    if t2 != 0 { fail_count = fail_count + 1 }
+
+    let t3 = depg_test_add_edges()
+    if t3 != 0 { fail_count = fail_count + 1 }
+
+    let t4 = depg_test_invalid_edge()
+    if t4 != 0 { fail_count = fail_count + 1 }
+
+    let t5 = depg_test_successors()
+    if t5 != 0 { fail_count = fail_count + 1 }
+
+    let t6 = depg_test_predecessors()
+    if t6 != 0 { fail_count = fail_count + 1 }
+
+    let t7 = depg_test_degree()
+    if t7 != 0 { fail_count = fail_count + 1 }
+
+    let t8 = depg_test_topo_chain()
+    if t8 != 0 { fail_count = fail_count + 1 }
+
+    let t9 = depg_test_topo_diamond()
+    if t9 != 0 { fail_count = fail_count + 1 }
+
+    let t10 = depg_test_topo_cycle()
+    if t10 != 0 { fail_count = fail_count + 1 }
+
+    let t11 = depg_test_is_dag_true()
+    if t11 != 0 { fail_count = fail_count + 1 }
+
+    let t12 = depg_test_is_dag_false()
+    if t12 != 0 { fail_count = fail_count + 1 }
+
+    let t13 = depg_test_back_edges_cycle()
+    if t13 != 0 { fail_count = fail_count + 1 }
+
+    let t14 = depg_test_back_edges_dag()
+    if t14 != 0 { fail_count = fail_count + 1 }
+
+    let t15 = depg_test_tarjan_single_cycle()
+    if t15 != 0 { fail_count = fail_count + 1 }
+
+    let t16 = depg_test_tarjan_dag()
+    if t16 != 0 { fail_count = fail_count + 1 }
+
+    let t17 = depg_test_tarjan_two_sccs()
+    if t17 != 0 { fail_count = fail_count + 1 }
+
+    let t18 = depg_test_reachable_chain()
+    if t18 != 0 { fail_count = fail_count + 1 }
+
+    let t19 = depg_test_reachable_diamond()
+    if t19 != 0 { fail_count = fail_count + 1 }
+
+    let t20 = depg_test_critical_path_chain()
+    if t20 != 0 { fail_count = fail_count + 1 }
+
+    let t21 = depg_test_critical_path_diamond()
+    if t21 != 0 { fail_count = fail_count + 1 }
+
+    let t22 = depg_test_reverse()
+    if t22 != 0 { fail_count = fail_count + 1 }
+
+    let t23 = depg_test_dominators_chain()
+    if t23 != 0 { fail_count = fail_count + 1 }
+
+    let t24 = depg_test_dominators_diamond()
+    if t24 != 0 { fail_count = fail_count + 1 }
+
+    let t25 = depg_test_has_edge()
+    if t25 != 0 { fail_count = fail_count + 1 }
+
+    let t26 = depg_test_sources_sinks()
+    if t26 != 0 { fail_count = fail_count + 1 }
+
+    let t27 = depg_test_constants()
+    if t27 != 0 { fail_count = fail_count + 1 }
+
+    let t28 = depg_test_count_edges_by_kind()
+    if t28 != 0 { fail_count = fail_count + 1 }
+
+    let t29 = depg_test_dfs_preorder()
+    if t29 != 0 { fail_count = fail_count + 1 }
+
+    let t30 = depg_test_node_properties()
+    if t30 != 0 { fail_count = fail_count + 1 }
+
+    let t31 = depg_test_merge()
+    if t31 != 0 { fail_count = fail_count + 1 }
+
+    let t32 = depg_test_extract_scc()
+    if t32 != 0 { fail_count = fail_count + 1 }
+
+    let t33 = depg_test_is_dag_via_scc()
+    if t33 != 0 { fail_count = fail_count + 1 }
+
+    let t34 = depg_test_topo_depth()
+    if t34 != 0 { fail_count = fail_count + 1 }
+
+    let t35 = depg_test_edge_kind()
+    if t35 != 0 { fail_count = fail_count + 1 }
+
+    let t36 = depg_test_dominates()
+    if t36 != 0 { fail_count = fail_count + 1 }
+
+    fail_count
+}

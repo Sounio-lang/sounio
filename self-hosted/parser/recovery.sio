@@ -1,0 +1,1380 @@
+// self-hosted::parser::recovery — Parser error recovery strategies
+//
+// Implements structured error recovery for the self-hosted Sounio parser.
+// Recovery is based on synchronization points: when the parser encounters
+// an unexpected token, it enters panic mode and skips tokens until it finds
+// a known synchronization token (e.g., semicolon, closing brace, keyword).
+//
+// Architecture:
+//   RecoveryPoint  — saved parser state for backtracking
+//   ErrorInfo      — a single recorded parse error with context
+//   RecoveryState  — flat-array accumulator for errors, recovery stack, sync tokens
+//
+// All mutating operations use state threading (consume + return) and `var`.
+// Helpers precede callers. No forward references.
+
+// ============================================================================
+// CONSTANTS — recovery point kinds
+// ============================================================================
+
+fn RECV_STMT() -> i64 { 1 }
+fn RECV_EXPR() -> i64 { 2 }
+fn RECV_BLOCK() -> i64 { 3 }
+fn RECV_ITEM() -> i64 { 4 }
+fn RECV_TYPE() -> i64 { 5 }
+
+// Error kind constants
+fn RECV_ERR_UNEXPECTED() -> i64 { 1 }
+fn RECV_ERR_MISSING() -> i64 { 2 }
+fn RECV_ERR_EXTRA() -> i64 { 3 }
+fn RECV_ERR_MISMATCH() -> i64 { 4 }
+fn RECV_ERR_CASCADE() -> i64 { 5 }
+
+// Suggestion kind constants
+fn RECV_SUGGEST_INSERT() -> i64 { 1 }
+fn RECV_SUGGEST_DELETE() -> i64 { 2 }
+fn RECV_SUGGEST_REPLACE() -> i64 { 3 }
+
+// Limits
+fn RECV_MAX_ERRORS_DEFAULT() -> i64 { 64 }
+fn RECV_CASCADE_WINDOW() -> i64 { 3 }
+fn RECV_CASCADE_LINE_DIST() -> i64 { 2 }
+
+// ============================================================================
+// STRUCTS
+// ============================================================================
+
+struct RecoveryPoint {
+    kind: i64,
+    token_pos: i64,
+    depth: i64,
+    sync_token: i64,
+}
+
+struct ErrorInfo {
+    kind: i64,
+    message: [i8; 128],
+    msg_len: i64,
+    line: i64,
+    col: i64,
+    token_kind: i64,
+    expected: [i64; 16],
+    expected_count: i64,
+}
+
+struct RecoveryState {
+    errors: [ErrorInfo; 256],
+    error_count: i64,
+    recovery_stack: [RecoveryPoint; 64],
+    stack_depth: i64,
+    sync_tokens: [i64; 32],
+    sync_count: i64,
+    max_errors: i64,
+    panic_mode: bool,
+    tokens_skipped: i64,
+}
+
+// ============================================================================
+// CONSTRUCTORS — helpers precede callers
+// ============================================================================
+
+fn recv_point_new(kind: i64, token_pos: i64, depth: i64, sync_token: i64) -> RecoveryPoint {
+    RecoveryPoint {
+        kind: kind,
+        token_pos: token_pos,
+        depth: depth,
+        sync_token: sync_token,
+    }
+}
+
+fn recv_error_new(kind: i64, line: i64, col: i64, token_kind: i64) -> ErrorInfo {
+    ErrorInfo {
+        kind: kind,
+        message: [0; 128],
+        msg_len: 0,
+        line: line,
+        col: col,
+        token_kind: token_kind,
+        expected: [0; 16],
+        expected_count: 0,
+    }
+}
+
+fn recv_state_new() -> RecoveryState {
+    RecoveryState {
+        errors: [recv_error_new(0, 0, 0, 0); 256],
+        error_count: 0,
+        recovery_stack: [recv_point_new(0, 0, 0, 0); 64],
+        stack_depth: 0,
+        sync_tokens: [0; 32],
+        sync_count: 0,
+        max_errors: RECV_MAX_ERRORS_DEFAULT(),
+        panic_mode: false,
+        tokens_skipped: 0,
+    }
+}
+
+// ============================================================================
+// ERROR INFO HELPERS — message copying, expected token management
+// ============================================================================
+
+// Copy a message byte array into an ErrorInfo. Truncates at 128 bytes.
+fn recv_error_set_message(err: ErrorInfo, msg: [i8; 128], msg_len: i64) -> ErrorInfo with Mut, Panic, Div {
+    var e = err
+    var i: i64 = 0
+    let limit = if msg_len < 128 { msg_len } else { 128 }
+    while i < limit {
+        e.message[i as usize] = msg[i as usize]
+        i = i + 1
+    }
+    e.msg_len = limit
+    e
+}
+
+// Add an expected token kind to an ErrorInfo. Returns updated ErrorInfo.
+fn recv_error_add_expected(err: ErrorInfo, token_kind: i64) -> ErrorInfo with Mut, Panic, Div {
+    var e = err
+    if e.expected_count < 16 {
+        e.expected[e.expected_count as usize] = token_kind
+        e.expected_count = e.expected_count + 1
+    }
+    e
+}
+
+// Check if a token kind is in the expected list.
+fn recv_error_expects(err: ErrorInfo, token_kind: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < err.expected_count {
+        if err.expected[i as usize] == token_kind {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// ============================================================================
+// RECOVERY STACK MANAGEMENT
+// ============================================================================
+
+// Push a recovery point onto the stack. Returns updated state.
+fn recv_push_recovery(state: RecoveryState, point: RecoveryPoint) -> RecoveryState with Mut, Panic, Div {
+    var s = state
+    if s.stack_depth < 64 {
+        s.recovery_stack[s.stack_depth as usize] = point
+        s.stack_depth = s.stack_depth + 1
+    }
+    s
+}
+
+// Pop the top recovery point from the stack. Returns (state, point).
+// If the stack is empty, returns a zeroed recovery point.
+fn recv_pop_recovery(state: RecoveryState) -> (RecoveryState, RecoveryPoint) with Mut, Panic, Div {
+    var s = state
+    if s.stack_depth > 0 {
+        s.stack_depth = s.stack_depth - 1
+        let point = s.recovery_stack[s.stack_depth as usize]
+        (s, point)
+    } else {
+        (s, recv_point_new(0, 0, 0, 0))
+    }
+}
+
+// Peek at the top recovery point without removing it.
+fn recv_peek_recovery(state: RecoveryState) -> RecoveryPoint with Panic, Div {
+    if state.stack_depth > 0 {
+        state.recovery_stack[(state.stack_depth - 1) as usize]
+    } else {
+        recv_point_new(0, 0, 0, 0)
+    }
+}
+
+// Return the current stack depth.
+fn recv_stack_depth(state: RecoveryState) -> i64 {
+    state.stack_depth
+}
+
+// ============================================================================
+// SYNC TOKEN MANAGEMENT
+// ============================================================================
+
+// Add a token kind to the sync token set. Duplicates are ignored.
+fn recv_add_sync_token(state: RecoveryState, token_kind: i64) -> RecoveryState with Mut, Panic, Div {
+    // Check for duplicate first
+    var i: i64 = 0
+    while i < state.sync_count {
+        if state.sync_tokens[i as usize] == token_kind {
+            return state
+        }
+        i = i + 1
+    }
+    var s = state
+    if s.sync_count < 32 {
+        s.sync_tokens[s.sync_count as usize] = token_kind
+        s.sync_count = s.sync_count + 1
+    }
+    s
+}
+
+// Remove a token kind from the sync token set. Returns updated state.
+fn recv_remove_sync_token(state: RecoveryState, token_kind: i64) -> RecoveryState with Mut, Panic, Div {
+    var s = state
+    var i: i64 = 0
+    while i < s.sync_count {
+        if s.sync_tokens[i as usize] == token_kind {
+            // Shift remaining entries left
+            var j: i64 = i
+            while j < s.sync_count - 1 {
+                s.sync_tokens[j as usize] = s.sync_tokens[(j + 1) as usize]
+                j = j + 1
+            }
+            s.sync_count = s.sync_count - 1
+            return s
+        }
+        i = i + 1
+    }
+    s
+}
+
+// Check if a token kind is in the sync token set.
+fn recv_is_sync_token(state: RecoveryState, token_kind: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < state.sync_count {
+        if state.sync_tokens[i as usize] == token_kind {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Return the number of sync tokens registered.
+fn recv_sync_count(state: RecoveryState) -> i64 {
+    state.sync_count
+}
+
+// ============================================================================
+// ERROR RECORDING
+// ============================================================================
+
+// Record an error with full context. Returns updated state.
+// If max_errors has been reached, silently drops new errors.
+fn recv_report_error(
+    state: RecoveryState,
+    kind: i64,
+    line: i64,
+    col: i64,
+    token_kind: i64,
+    msg: [i8; 128],
+    msg_len: i64
+) -> RecoveryState with Mut, Panic, Div {
+    var s = state
+    if s.error_count >= s.max_errors {
+        return s
+    }
+    if s.error_count >= 256 {
+        return s
+    }
+    var err = recv_error_new(kind, line, col, token_kind)
+    err = recv_error_set_message(err, msg, msg_len)
+    s.errors[s.error_count as usize] = err
+    s.error_count = s.error_count + 1
+    s
+}
+
+// Record an error with expected tokens. Returns updated state.
+fn recv_report_error_with_expected(
+    state: RecoveryState,
+    kind: i64,
+    line: i64,
+    col: i64,
+    token_kind: i64,
+    msg: [i8; 128],
+    msg_len: i64,
+    expected: [i64; 16],
+    expected_count: i64
+) -> RecoveryState with Mut, Panic, Div {
+    var s = state
+    if s.error_count >= s.max_errors {
+        return s
+    }
+    if s.error_count >= 256 {
+        return s
+    }
+    var err = recv_error_new(kind, line, col, token_kind)
+    err = recv_error_set_message(err, msg, msg_len)
+    var i: i64 = 0
+    while i < expected_count && i < 16 {
+        err.expected[i as usize] = expected[i as usize]
+        i = i + 1
+    }
+    err.expected_count = expected_count
+    s.errors[s.error_count as usize] = err
+    s.error_count = s.error_count + 1
+    s
+}
+
+// Return the total number of recorded errors.
+fn recv_error_count(state: RecoveryState) -> i64 {
+    state.error_count
+}
+
+// Get the error at a given index. Returns a zeroed error if out of bounds.
+fn recv_get_error(state: RecoveryState, index: i64) -> ErrorInfo with Panic, Div {
+    if index >= 0 && index < state.error_count {
+        state.errors[index as usize]
+    } else {
+        recv_error_new(0, 0, 0, 0)
+    }
+}
+
+// ============================================================================
+// PANIC MODE — enter, exit, skip-to-sync
+// ============================================================================
+
+// Enter panic mode. Sets the flag and begins tracking skipped tokens.
+fn recv_enter_panic_mode(state: RecoveryState) -> RecoveryState with Mut {
+    var s = state
+    s.panic_mode = true
+    s
+}
+
+// Exit panic mode. Clears the flag.
+fn recv_exit_panic_mode(state: RecoveryState) -> RecoveryState with Mut {
+    var s = state
+    s.panic_mode = false
+    s
+}
+
+// Check if currently in panic mode.
+fn recv_in_panic_mode(state: RecoveryState) -> bool {
+    state.panic_mode
+}
+
+// Skip tokens in a token array until a sync token is found or end is reached.
+// token_kinds is a flat array of token kind values, token_count is how many
+// tokens exist, and start_pos is where to begin scanning.
+// Returns (updated_state, new_position).
+fn recv_skip_to_sync(
+    state: RecoveryState,
+    token_kinds: [i64; 4096],
+    token_count: i64,
+    start_pos: i64
+) -> (RecoveryState, i64) with Mut, Panic, Div {
+    var s = state
+    var pos: i64 = start_pos
+    while pos < token_count {
+        let tk = token_kinds[pos as usize]
+        // Check if this token is a sync token
+        if recv_is_sync_token(s, tk) {
+            s = recv_exit_panic_mode(s)
+            return (s, pos)
+        }
+        // Check against recovery stack top's sync_token
+        if s.stack_depth > 0 {
+            let top = s.recovery_stack[(s.stack_depth - 1) as usize]
+            if top.sync_token != 0 && tk == top.sync_token {
+                s = recv_exit_panic_mode(s)
+                return (s, pos)
+            }
+        }
+        s.tokens_skipped = s.tokens_skipped + 1
+        pos = pos + 1
+    }
+    // Reached end of tokens without finding sync point
+    s = recv_exit_panic_mode(s)
+    (s, pos)
+}
+
+// Return how many tokens have been skipped in total.
+fn recv_tokens_skipped(state: RecoveryState) -> i64 {
+    state.tokens_skipped
+}
+
+// ============================================================================
+// CONTINUATION AND CASCADE DETECTION
+// ============================================================================
+
+// Check if parsing should continue. Returns false if max_errors is reached
+// or if errors are cascading too severely.
+fn recv_can_continue(state: RecoveryState) -> bool {
+    if state.error_count >= state.max_errors {
+        return false
+    }
+    if state.error_count >= 256 {
+        return false
+    }
+    true
+}
+
+// Detect if recent errors are cascading (multiple errors on nearby lines).
+// Returns true if the last RECV_CASCADE_WINDOW errors are all within
+// RECV_CASCADE_LINE_DIST lines of each other.
+fn recv_error_cascade_check(state: RecoveryState) -> bool with Mut, Panic, Div {
+    let window = RECV_CASCADE_WINDOW()
+    if state.error_count < window {
+        return false
+    }
+    let start_idx = state.error_count - window
+    var i: i64 = start_idx
+    while i < state.error_count - 1 {
+        let err_a = state.errors[i as usize]
+        let err_b = state.errors[(i + 1) as usize]
+        var diff: i64 = err_b.line - err_a.line
+        if diff < 0 {
+            diff = 0 - diff
+        }
+        if diff > RECV_CASCADE_LINE_DIST() {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// ============================================================================
+// SUGGESTIONS — insertion and deletion
+// ============================================================================
+
+// Suggest inserting a missing token. Records an error of kind RECV_ERR_MISSING
+// with the token_kind set to the suggested insertion.
+fn recv_suggest_insertion(
+    state: RecoveryState,
+    line: i64,
+    col: i64,
+    missing_token: i64,
+    msg: [i8; 128],
+    msg_len: i64
+) -> RecoveryState with Mut, Panic, Div {
+    var s = state
+    s = recv_report_error(s, RECV_ERR_MISSING(), line, col, missing_token, msg, msg_len)
+    s
+}
+
+// Suggest deleting an unexpected token. Records an error of kind RECV_ERR_EXTRA
+// with the token_kind set to the extraneous token.
+fn recv_suggest_deletion(
+    state: RecoveryState,
+    line: i64,
+    col: i64,
+    extra_token: i64,
+    msg: [i8; 128],
+    msg_len: i64
+) -> RecoveryState with Mut, Panic, Div {
+    var s = state
+    s = recv_report_error(s, RECV_ERR_EXTRA(), line, col, extra_token, msg, msg_len)
+    s
+}
+
+// ============================================================================
+// ERROR MERGING — collapse adjacent errors with same cause
+// ============================================================================
+
+// Check if two errors are merge-candidates: same kind, same line,
+// columns within 5 of each other.
+fn recv_errors_mergeable(a: ErrorInfo, b: ErrorInfo) -> bool {
+    if a.kind != b.kind {
+        return false
+    }
+    if a.line != b.line {
+        return false
+    }
+    var col_diff: i64 = b.col - a.col
+    if col_diff < 0 {
+        col_diff = 0 - col_diff
+    }
+    col_diff <= 5
+}
+
+// Merge adjacent errors with the same cause. Removes duplicates in-place
+// by keeping the first error of each group. Returns updated state.
+fn recv_merge_errors(state: RecoveryState) -> RecoveryState with Mut, Panic, Div {
+    var s = state
+    if s.error_count <= 1 {
+        return s
+    }
+    // Write pointer for compacted array
+    var write: i64 = 1
+    var read: i64 = 1
+    while read < s.error_count {
+        let prev = s.errors[(write - 1) as usize]
+        let curr = s.errors[read as usize]
+        if recv_errors_mergeable(prev, curr) {
+            // Skip this error (merge into previous)
+            read = read + 1
+        } else {
+            s.errors[write as usize] = s.errors[read as usize]
+            write = write + 1
+            read = read + 1
+        }
+    }
+    s.error_count = write
+    s
+}
+
+// ============================================================================
+// ERROR FORMATTING — produce a human-readable message
+// ============================================================================
+
+// Write a decimal integer into a byte buffer starting at offset.
+// Returns the number of bytes written.
+fn recv_write_int(buf: [i8; 128], offset: i64, value: i64) -> ([i8; 128], i64) with Mut, Panic, Div {
+    var b = buf
+    var val: i64 = value
+    if val < 0 {
+        b[offset as usize] = 45 as i8  // '-'
+        val = 0 - val
+        return recv_write_int_positive(b, offset + 1, val)
+    }
+    if val == 0 {
+        b[offset as usize] = 48 as i8  // '0'
+        return (b, 1)
+    }
+    recv_write_int_positive(b, offset, val)
+}
+
+// Write a non-negative integer into a buffer. Returns (buffer, bytes_written).
+fn recv_write_int_positive(buf: [i8; 128], offset: i64, value: i64) -> ([i8; 128], i64) with Mut, Panic, Div {
+    var b = buf
+    // First, count digits
+    var tmp: i64 = value
+    var digit_count: i64 = 0
+    while tmp > 0 {
+        digit_count = digit_count + 1
+        tmp = tmp / 10
+    }
+    if digit_count == 0 {
+        b[offset as usize] = 48 as i8
+        return (b, 1)
+    }
+    // Write digits in reverse order
+    var remaining: i64 = value
+    var pos: i64 = offset + digit_count - 1
+    while remaining > 0 && pos >= offset {
+        let digit = remaining - (remaining / 10) * 10
+        b[pos as usize] = (48 + digit) as i8
+        remaining = remaining / 10
+        pos = pos - 1
+    }
+    (b, digit_count)
+}
+
+// Copy a string literal into a buffer at an offset. Returns bytes written.
+fn recv_copy_str(buf: [i8; 128], offset: i64, src: [i8; 128], src_len: i64) -> ([i8; 128], i64) with Mut, Panic, Div {
+    var b = buf
+    var i: i64 = 0
+    while i < src_len && (offset + i) < 128 {
+        b[(offset + i) as usize] = src[i as usize]
+        i = i + 1
+    }
+    (b, i)
+}
+
+// Format an error into a human-readable byte buffer.
+// Produces: "error[KIND] at LINE:COL: MESSAGE"
+// Returns (buffer, length).
+fn recv_format_error(err: ErrorInfo) -> ([i8; 128], i64) with Mut, Panic, Div {
+    var buf: [i8; 128] = [0; 128]
+    var pos: i64 = 0
+
+    // "error["
+    buf[0] = 101 as i8   // e
+    buf[1] = 114 as i8   // r
+    buf[2] = 114 as i8   // r
+    buf[3] = 111 as i8   // o
+    buf[4] = 114 as i8   // r
+    buf[5] = 91 as i8    // [
+    pos = 6
+
+    // Write error kind number
+    let pair1 = recv_write_int(buf, pos, err.kind)
+    buf = pair1.0
+    pos = pos + pair1.1
+
+    // "] at "
+    buf[pos as usize] = 93 as i8   // ]
+    pos = pos + 1
+    buf[pos as usize] = 32 as i8   // space
+    pos = pos + 1
+    buf[pos as usize] = 97 as i8   // a
+    pos = pos + 1
+    buf[pos as usize] = 116 as i8  // t
+    pos = pos + 1
+    buf[pos as usize] = 32 as i8   // space
+    pos = pos + 1
+
+    // Write line number
+    let pair2 = recv_write_int(buf, pos, err.line)
+    buf = pair2.0
+    pos = pos + pair2.1
+
+    // ":"
+    buf[pos as usize] = 58 as i8
+    pos = pos + 1
+
+    // Write column number
+    let pair3 = recv_write_int(buf, pos, err.col)
+    buf = pair3.0
+    pos = pos + pair3.1
+
+    // ": "
+    buf[pos as usize] = 58 as i8
+    pos = pos + 1
+    buf[pos as usize] = 32 as i8
+    pos = pos + 1
+
+    // Copy message (truncate to fit remaining space)
+    var msg_i: i64 = 0
+    while msg_i < err.msg_len && pos < 128 {
+        buf[pos as usize] = err.message[msg_i as usize]
+        pos = pos + 1
+        msg_i = msg_i + 1
+    }
+
+    (buf, pos)
+}
+
+// ============================================================================
+// STATE QUERY HELPERS
+// ============================================================================
+
+// Return true if the state has any errors recorded.
+fn recv_has_errors(state: RecoveryState) -> bool {
+    state.error_count > 0
+}
+
+// Return the max_errors limit.
+fn recv_max_errors(state: RecoveryState) -> i64 {
+    state.max_errors
+}
+
+// Set a new max_errors limit. Returns updated state.
+fn recv_set_max_errors(state: RecoveryState, limit: i64) -> RecoveryState with Mut {
+    var s = state
+    s.max_errors = limit
+    s
+}
+
+// Reset the entire recovery state to its initial values.
+fn recv_reset(state: RecoveryState) -> RecoveryState with Mut {
+    var s = state
+    s.error_count = 0
+    s.stack_depth = 0
+    s.sync_count = 0
+    s.max_errors = RECV_MAX_ERRORS_DEFAULT()
+    s.panic_mode = false
+    s.tokens_skipped = 0
+    s
+}
+
+// Return the error at the last position, or a zeroed error if none.
+fn recv_last_error(state: RecoveryState) -> ErrorInfo with Panic, Div {
+    if state.error_count > 0 {
+        state.errors[(state.error_count - 1) as usize]
+    } else {
+        recv_error_new(0, 0, 0, 0)
+    }
+}
+
+// Check if two adjacent errors have the same token_kind (potential duplicate).
+fn recv_is_duplicate_error(state: RecoveryState, line: i64, col: i64, token_kind: i64) -> bool with Panic, Div {
+    if state.error_count == 0 {
+        return false
+    }
+    let last = state.errors[(state.error_count - 1) as usize]
+    last.line == line && last.col == col && last.token_kind == token_kind
+}
+
+// ============================================================================
+// RECOVERY POINT INSPECTION
+// ============================================================================
+
+// Get the kind of a recovery point.
+fn recv_point_kind(point: RecoveryPoint) -> i64 {
+    point.kind
+}
+
+// Get the token position of a recovery point.
+fn recv_point_token_pos(point: RecoveryPoint) -> i64 {
+    point.token_pos
+}
+
+// Get the depth of a recovery point.
+fn recv_point_depth(point: RecoveryPoint) -> i64 {
+    point.depth
+}
+
+// Get the sync token of a recovery point.
+fn recv_point_sync_token(point: RecoveryPoint) -> i64 {
+    point.sync_token
+}
+
+// ============================================================================
+// ASSERTION HELPER — used in tests
+// ============================================================================
+
+fn recv_assert_true(cond: bool, test_name: [i8; 128], name_len: i64) -> bool with IO, Mut, Panic, Div {
+    if !cond {
+        print("FAIL: ")
+        var i: i64 = 0
+        while i < name_len {
+            print_char(test_name[i as usize])
+            i = i + 1
+        }
+        print("\n")
+    }
+    cond
+}
+
+// Build a test label from ASCII codes. Returns ([i8; 128], length).
+fn recv_test_label(
+    c0: i8, c1: i8, c2: i8, c3: i8, c4: i8,
+    c5: i8, c6: i8, c7: i8, c8: i8, c9: i8,
+    len: i64
+) -> ([i8; 128], i64) with Mut, Panic, Div {
+    var buf: [i8; 128] = [0; 128]
+    if len > 0 { buf[0] = c0 }
+    if len > 1 { buf[1] = c1 }
+    if len > 2 { buf[2] = c2 }
+    if len > 3 { buf[3] = c3 }
+    if len > 4 { buf[4] = c4 }
+    if len > 5 { buf[5] = c5 }
+    if len > 6 { buf[6] = c6 }
+    if len > 7 { buf[7] = c7 }
+    if len > 8 { buf[8] = c8 }
+    if len > 9 { buf[9] = c9 }
+    (buf, len)
+}
+
+// ============================================================================
+// TESTS — 25 test functions using recv_assert_true pattern
+// ============================================================================
+
+// T01: New state has zero errors
+fn recv_test_new_state_no_errors() -> bool with IO, Mut, Panic, Div {
+    let s = recv_state_new()
+    let label = recv_test_label(
+        84, 48, 49, 0, 0, 0, 0, 0, 0, 0, 3)  // "T01"
+    recv_assert_true(
+        s.error_count == 0 && !s.panic_mode && s.stack_depth == 0,
+        label.0, label.1)
+}
+
+// T02: New state has default max_errors
+fn recv_test_default_max_errors() -> bool with IO, Mut, Panic, Div {
+    let s = recv_state_new()
+    let label = recv_test_label(
+        84, 48, 50, 0, 0, 0, 0, 0, 0, 0, 3)  // "T02"
+    recv_assert_true(
+        recv_max_errors(s) == RECV_MAX_ERRORS_DEFAULT(),
+        label.0, label.1)
+}
+
+// T03: Push and pop recovery point
+fn recv_test_push_pop_recovery() -> bool with IO, Mut, Panic, Div {
+    var s = recv_state_new()
+    let pt = recv_point_new(RECV_STMT(), 10, 1, 42)
+    s = recv_push_recovery(s, pt)
+    let ok1 = recv_stack_depth(s) == 1
+    let result = recv_pop_recovery(s)
+    s = result.0
+    let popped = result.1
+    let ok2 = recv_stack_depth(s) == 0
+    let ok3 = recv_point_kind(popped) == RECV_STMT()
+    let ok4 = recv_point_token_pos(popped) == 10
+    let ok5 = recv_point_depth(popped) == 1
+    let ok6 = recv_point_sync_token(popped) == 42
+    let label = recv_test_label(
+        84, 48, 51, 0, 0, 0, 0, 0, 0, 0, 3)  // "T03"
+    recv_assert_true(ok1 && ok2 && ok3 && ok4 && ok5 && ok6, label.0, label.1)
+}
+
+// T04: Pop from empty stack returns zero point
+fn recv_test_pop_empty_stack() -> bool with IO, Mut, Panic, Div {
+    var s = recv_state_new()
+    let result = recv_pop_recovery(s)
+    let pt = result.1
+    let label = recv_test_label(
+        84, 48, 52, 0, 0, 0, 0, 0, 0, 0, 3)  // "T04"
+    recv_assert_true(
+        recv_point_kind(pt) == 0 && recv_point_token_pos(pt) == 0,
+        label.0, label.1)
+}
+
+// T05: Push multiple recovery points and verify LIFO order
+fn recv_test_push_multiple_lifo() -> bool with IO, Mut, Panic, Div {
+    var s = recv_state_new()
+    s = recv_push_recovery(s, recv_point_new(RECV_STMT(), 1, 0, 0))
+    s = recv_push_recovery(s, recv_point_new(RECV_EXPR(), 2, 0, 0))
+    s = recv_push_recovery(s, recv_point_new(RECV_BLOCK(), 3, 0, 0))
+    let ok1 = recv_stack_depth(s) == 3
+
+    let r1 = recv_pop_recovery(s)
+    s = r1.0
+    let ok2 = recv_point_kind(r1.1) == RECV_BLOCK()
+
+    let r2 = recv_pop_recovery(s)
+    s = r2.0
+    let ok3 = recv_point_kind(r2.1) == RECV_EXPR()
+
+    let r3 = recv_pop_recovery(s)
+    s = r3.0
+    let ok4 = recv_point_kind(r3.1) == RECV_STMT()
+
+    let label = recv_test_label(
+        84, 48, 53, 0, 0, 0, 0, 0, 0, 0, 3)  // "T05"
+    recv_assert_true(ok1 && ok2 && ok3 && ok4, label.0, label.1)
+}
+
+// T06: Add and check sync tokens
+fn recv_test_add_sync_token() -> bool with IO, Mut, Panic, Div {
+    var s = recv_state_new()
+    s = recv_add_sync_token(s, 10)
+    s = recv_add_sync_token(s, 20)
+    s = recv_add_sync_token(s, 30)
+    let ok1 = recv_sync_count(s) == 3
+    let ok2 = recv_is_sync_token(s, 10)
+    let ok3 = recv_is_sync_token(s, 20)
+    let ok4 = recv_is_sync_token(s, 30)
+    let ok5 = !recv_is_sync_token(s, 99)
+    let label = recv_test_label(
+        84, 48, 54, 0, 0, 0, 0, 0, 0, 0, 3)  // "T06"
+    recv_assert_true(ok1 && ok2 && ok3 && ok4 && ok5, label.0, label.1)
+}
+
+// T07: Duplicate sync tokens are ignored
+fn recv_test_sync_token_dedup() -> bool with IO, Mut, Panic, Div {
+    var s = recv_state_new()
+    s = recv_add_sync_token(s, 10)
+    s = recv_add_sync_token(s, 10)
+    s = recv_add_sync_token(s, 10)
+    let label = recv_test_label(
+        84, 48, 55, 0, 0, 0, 0, 0, 0, 0, 3)  // "T07"
+    recv_assert_true(recv_sync_count(s) == 1, label.0, label.1)
+}
+
+// T08: Remove sync token
+fn recv_test_remove_sync_token() -> bool with IO, Mut, Panic, Div {
+    var s = recv_state_new()
+    s = recv_add_sync_token(s, 10)
+    s = recv_add_sync_token(s, 20)
+    s = recv_add_sync_token(s, 30)
+    s = recv_remove_sync_token(s, 20)
+    let ok1 = recv_sync_count(s) == 2
+    let ok2 = recv_is_sync_token(s, 10)
+    let ok3 = !recv_is_sync_token(s, 20)
+    let ok4 = recv_is_sync_token(s, 30)
+    let label = recv_test_label(
+        84, 48, 56, 0, 0, 0, 0, 0, 0, 0, 3)  // "T08"
+    recv_assert_true(ok1 && ok2 && ok3 && ok4, label.0, label.1)
+}
+
+// T09: Report error and verify count
+fn recv_test_report_error() -> bool with IO, Mut, Panic, Div {
+    var s = recv_state_new()
+    var msg: [i8; 128] = [0; 128]
+    msg[0] = 101 as i8  // 'e'
+    msg[1] = 114 as i8  // 'r'
+    msg[2] = 114 as i8  // 'r'
+    s = recv_report_error(s, RECV_ERR_UNEXPECTED(), 5, 12, 7, msg, 3)
+    let ok1 = recv_error_count(s) == 1
+    let err = recv_get_error(s, 0)
+    let ok2 = err.kind == RECV_ERR_UNEXPECTED()
+    let ok3 = err.line == 5
+    let ok4 = err.col == 12
+    let ok5 = err.token_kind == 7
+    let ok6 = err.msg_len == 3
+    let label = recv_test_label(
+        84, 48, 57, 0, 0, 0, 0, 0, 0, 0, 3)  // "T09"
+    recv_assert_true(ok1 && ok2 && ok3 && ok4 && ok5 && ok6, label.0, label.1)
+}
+
+// T10: Report multiple errors
+fn recv_test_report_multiple_errors() -> bool with IO, Mut, Panic, Div {
+    var s = recv_state_new()
+    var msg: [i8; 128] = [0; 128]
+    s = recv_report_error(s, RECV_ERR_UNEXPECTED(), 1, 1, 1, msg, 0)
+    s = recv_report_error(s, RECV_ERR_MISSING(), 2, 5, 3, msg, 0)
+    s = recv_report_error(s, RECV_ERR_EXTRA(), 3, 8, 5, msg, 0)
+    let ok1 = recv_error_count(s) == 3
+    let ok2 = recv_get_error(s, 0).kind == RECV_ERR_UNEXPECTED()
+    let ok3 = recv_get_error(s, 1).kind == RECV_ERR_MISSING()
+    let ok4 = recv_get_error(s, 2).kind == RECV_ERR_EXTRA()
+    let label = recv_test_label(
+        84, 49, 48, 0, 0, 0, 0, 0, 0, 0, 3)  // "T10"
+    recv_assert_true(ok1 && ok2 && ok3 && ok4, label.0, label.1)
+}
+
+// T11: Enter and exit panic mode
+fn recv_test_panic_mode() -> bool with IO, Mut, Panic, Div {
+    var s = recv_state_new()
+    let ok1 = !recv_in_panic_mode(s)
+    s = recv_enter_panic_mode(s)
+    let ok2 = recv_in_panic_mode(s)
+    s = recv_exit_panic_mode(s)
+    let ok3 = !recv_in_panic_mode(s)
+    let label = recv_test_label(
+        84, 49, 49, 0, 0, 0, 0, 0, 0, 0, 3)  // "T11"
+    recv_assert_true(ok1 && ok2 && ok3, label.0, label.1)
+}
+
+// T12: can_continue returns true when under limit
+fn recv_test_can_continue_under_limit() -> bool with IO, Mut, Panic, Div {
+    var s = recv_state_new()
+    let ok1 = recv_can_continue(s)
+    var msg: [i8; 128] = [0; 128]
+    s = recv_report_error(s, 1, 1, 1, 1, msg, 0)
+    let ok2 = recv_can_continue(s)
+    let label = recv_test_label(
+        84, 49, 50, 0, 0, 0, 0, 0, 0, 0, 3)  // "T12"
+    recv_assert_true(ok1 && ok2, label.0, label.1)
+}
+
+// T13: can_continue returns false when max_errors reached
+fn recv_test_can_continue_at_limit() -> bool with IO, Mut, Panic, Div {
+    var s = recv_state_new()
+    s = recv_set_max_errors(s, 3)
+    var msg: [i8; 128] = [0; 128]
+    s = recv_report_error(s, 1, 1, 1, 1, msg, 0)
+    s = recv_report_error(s, 1, 2, 1, 1, msg, 0)
+    s = recv_report_error(s, 1, 3, 1, 1, msg, 0)
+    let label = recv_test_label(
+        84, 49, 51, 0, 0, 0, 0, 0, 0, 0, 3)  // "T13"
+    recv_assert_true(!recv_can_continue(s), label.0, label.1)
+}
+
+// T14: Error cascade detection — cascading
+fn recv_test_cascade_detected() -> bool with IO, Mut, Panic, Div {
+    var s = recv_state_new()
+    var msg: [i8; 128] = [0; 128]
+    // 3 errors on consecutive lines => cascade
+    s = recv_report_error(s, 1, 10, 1, 1, msg, 0)
+    s = recv_report_error(s, 1, 11, 1, 1, msg, 0)
+    s = recv_report_error(s, 1, 12, 1, 1, msg, 0)
+    let label = recv_test_label(
+        84, 49, 52, 0, 0, 0, 0, 0, 0, 0, 3)  // "T14"
+    recv_assert_true(recv_error_cascade_check(s), label.0, label.1)
+}
+
+// T15: Error cascade detection — not cascading (far-apart lines)
+fn recv_test_cascade_not_detected() -> bool with IO, Mut, Panic, Div {
+    var s = recv_state_new()
+    var msg: [i8; 128] = [0; 128]
+    s = recv_report_error(s, 1, 10, 1, 1, msg, 0)
+    s = recv_report_error(s, 1, 50, 1, 1, msg, 0)
+    s = recv_report_error(s, 1, 100, 1, 1, msg, 0)
+    let label = recv_test_label(
+        84, 49, 53, 0, 0, 0, 0, 0, 0, 0, 3)  // "T15"
+    recv_assert_true(!recv_error_cascade_check(s), label.0, label.1)
+}
+
+// T16: Skip to sync finds correct position
+fn recv_test_skip_to_sync() -> bool with IO, Mut, Panic, Div {
+    var s = recv_state_new()
+    s = recv_add_sync_token(s, 50)  // sync on token kind 50
+    s = recv_enter_panic_mode(s)
+
+    // Token kinds: [10, 20, 30, 50, 60]
+    var kinds: [i64; 4096] = [0; 4096]
+    kinds[0] = 10
+    kinds[1] = 20
+    kinds[2] = 30
+    kinds[3] = 50
+    kinds[4] = 60
+
+    let result = recv_skip_to_sync(s, kinds, 5, 0)
+    s = result.0
+    let pos = result.1
+    let ok1 = pos == 3  // found sync token at index 3
+    let ok2 = !recv_in_panic_mode(s)  // exited panic mode
+    let ok3 = recv_tokens_skipped(s) == 3  // skipped 3 tokens
+    let label = recv_test_label(
+        84, 49, 54, 0, 0, 0, 0, 0, 0, 0, 3)  // "T16"
+    recv_assert_true(ok1 && ok2 && ok3, label.0, label.1)
+}
+
+// T17: Skip to sync reaches end when no sync token found
+fn recv_test_skip_to_sync_no_match() -> bool with IO, Mut, Panic, Div {
+    var s = recv_state_new()
+    s = recv_add_sync_token(s, 99)
+    s = recv_enter_panic_mode(s)
+
+    var kinds: [i64; 4096] = [0; 4096]
+    kinds[0] = 10
+    kinds[1] = 20
+    kinds[2] = 30
+
+    let result = recv_skip_to_sync(s, kinds, 3, 0)
+    s = result.0
+    let pos = result.1
+    let ok1 = pos == 3  // reached end
+    let ok2 = !recv_in_panic_mode(s)  // still exits panic mode
+    let label = recv_test_label(
+        84, 49, 55, 0, 0, 0, 0, 0, 0, 0, 3)  // "T17"
+    recv_assert_true(ok1 && ok2, label.0, label.1)
+}
+
+// T18: Suggest insertion records RECV_ERR_MISSING
+fn recv_test_suggest_insertion() -> bool with IO, Mut, Panic, Div {
+    var s = recv_state_new()
+    var msg: [i8; 128] = [0; 128]
+    msg[0] = 59 as i8  // ';'
+    s = recv_suggest_insertion(s, 7, 15, 42, msg, 1)
+    let ok1 = recv_error_count(s) == 1
+    let err = recv_get_error(s, 0)
+    let ok2 = err.kind == RECV_ERR_MISSING()
+    let ok3 = err.token_kind == 42
+    let ok4 = err.line == 7
+    let ok5 = err.col == 15
+    let label = recv_test_label(
+        84, 49, 56, 0, 0, 0, 0, 0, 0, 0, 3)  // "T18"
+    recv_assert_true(ok1 && ok2 && ok3 && ok4 && ok5, label.0, label.1)
+}
+
+// T19: Suggest deletion records RECV_ERR_EXTRA
+fn recv_test_suggest_deletion() -> bool with IO, Mut, Panic, Div {
+    var s = recv_state_new()
+    var msg: [i8; 128] = [0; 128]
+    s = recv_suggest_deletion(s, 3, 9, 55, msg, 0)
+    let ok1 = recv_error_count(s) == 1
+    let err = recv_get_error(s, 0)
+    let ok2 = err.kind == RECV_ERR_EXTRA()
+    let ok3 = err.token_kind == 55
+    let label = recv_test_label(
+        84, 49, 57, 0, 0, 0, 0, 0, 0, 0, 3)  // "T19"
+    recv_assert_true(ok1 && ok2 && ok3, label.0, label.1)
+}
+
+// T20: Merge adjacent errors with same kind and line
+fn recv_test_merge_errors() -> bool with IO, Mut, Panic, Div {
+    var s = recv_state_new()
+    var msg: [i8; 128] = [0; 128]
+    // Three errors on same line within 5 columns => should merge to 1
+    s = recv_report_error(s, RECV_ERR_UNEXPECTED(), 10, 1, 5, msg, 0)
+    s = recv_report_error(s, RECV_ERR_UNEXPECTED(), 10, 3, 5, msg, 0)
+    s = recv_report_error(s, RECV_ERR_UNEXPECTED(), 10, 5, 5, msg, 0)
+    let ok1 = recv_error_count(s) == 3
+    s = recv_merge_errors(s)
+    let ok2 = recv_error_count(s) == 1
+    let label = recv_test_label(
+        84, 50, 48, 0, 0, 0, 0, 0, 0, 0, 3)  // "T20"
+    recv_assert_true(ok1 && ok2, label.0, label.1)
+}
+
+// T21: Merge does not collapse errors on different lines
+fn recv_test_merge_errors_different_lines() -> bool with IO, Mut, Panic, Div {
+    var s = recv_state_new()
+    var msg: [i8; 128] = [0; 128]
+    s = recv_report_error(s, RECV_ERR_UNEXPECTED(), 10, 1, 5, msg, 0)
+    s = recv_report_error(s, RECV_ERR_UNEXPECTED(), 20, 1, 5, msg, 0)
+    s = recv_report_error(s, RECV_ERR_UNEXPECTED(), 30, 1, 5, msg, 0)
+    s = recv_merge_errors(s)
+    let label = recv_test_label(
+        84, 50, 49, 0, 0, 0, 0, 0, 0, 0, 3)  // "T21"
+    recv_assert_true(recv_error_count(s) == 3, label.0, label.1)
+}
+
+// T22: Format error produces non-empty output
+fn recv_test_format_error() -> bool with IO, Mut, Panic, Div {
+    var err = recv_error_new(RECV_ERR_UNEXPECTED(), 5, 12, 7)
+    var msg: [i8; 128] = [0; 128]
+    msg[0] = 111 as i8  // 'o'
+    msg[1] = 111 as i8  // 'o'
+    msg[2] = 112 as i8  // 'p'
+    msg[3] = 115 as i8  // 's'
+    err = recv_error_set_message(err, msg, 4)
+    let result = recv_format_error(err)
+    let buf = result.0
+    let len = result.1
+    // Should start with 'e' for "error["
+    let ok1 = len > 10
+    let ok2 = buf[0] == 101 as i8  // 'e'
+    let label = recv_test_label(
+        84, 50, 50, 0, 0, 0, 0, 0, 0, 0, 3)  // "T22"
+    recv_assert_true(ok1 && ok2, label.0, label.1)
+}
+
+// T23: Error with expected tokens
+fn recv_test_error_with_expected() -> bool with IO, Mut, Panic, Div {
+    var s = recv_state_new()
+    var msg: [i8; 128] = [0; 128]
+    var expected: [i64; 16] = [0; 16]
+    expected[0] = 10
+    expected[1] = 20
+    expected[2] = 30
+    s = recv_report_error_with_expected(
+        s, RECV_ERR_MISMATCH(), 4, 8, 99, msg, 0, expected, 3)
+    let err = recv_get_error(s, 0)
+    let ok1 = err.expected_count == 3
+    let ok2 = recv_error_expects(err, 10)
+    let ok3 = recv_error_expects(err, 20)
+    let ok4 = recv_error_expects(err, 30)
+    let ok5 = !recv_error_expects(err, 99)
+    let label = recv_test_label(
+        84, 50, 51, 0, 0, 0, 0, 0, 0, 0, 3)  // "T23"
+    recv_assert_true(ok1 && ok2 && ok3 && ok4 && ok5, label.0, label.1)
+}
+
+// T24: Peek recovery point without pop
+fn recv_test_peek_recovery() -> bool with IO, Mut, Panic, Div {
+    var s = recv_state_new()
+    s = recv_push_recovery(s, recv_point_new(RECV_ITEM(), 42, 3, 7))
+    let peeked = recv_peek_recovery(s)
+    let ok1 = recv_point_kind(peeked) == RECV_ITEM()
+    let ok2 = recv_point_token_pos(peeked) == 42
+    let ok3 = recv_stack_depth(s) == 1  // still on stack
+    let label = recv_test_label(
+        84, 50, 52, 0, 0, 0, 0, 0, 0, 0, 3)  // "T24"
+    recv_assert_true(ok1 && ok2 && ok3, label.0, label.1)
+}
+
+// T25: Reset clears everything
+fn recv_test_reset() -> bool with IO, Mut, Panic, Div {
+    var s = recv_state_new()
+    var msg: [i8; 128] = [0; 128]
+    s = recv_report_error(s, 1, 1, 1, 1, msg, 0)
+    s = recv_push_recovery(s, recv_point_new(1, 1, 1, 1))
+    s = recv_add_sync_token(s, 10)
+    s = recv_enter_panic_mode(s)
+    s = recv_set_max_errors(s, 10)
+    s = recv_reset(s)
+    let ok1 = recv_error_count(s) == 0
+    let ok2 = recv_stack_depth(s) == 0
+    let ok3 = recv_sync_count(s) == 0
+    let ok4 = !recv_in_panic_mode(s)
+    let ok5 = recv_max_errors(s) == RECV_MAX_ERRORS_DEFAULT()
+    let ok6 = recv_tokens_skipped(s) == 0
+    let label = recv_test_label(
+        84, 50, 53, 0, 0, 0, 0, 0, 0, 0, 3)  // "T25"
+    recv_assert_true(ok1 && ok2 && ok3 && ok4 && ok5 && ok6, label.0, label.1)
+}
+
+// T26: Error limit enforcement — errors beyond max_errors are dropped
+fn recv_test_error_limit_enforcement() -> bool with IO, Mut, Panic, Div {
+    var s = recv_state_new()
+    s = recv_set_max_errors(s, 2)
+    var msg: [i8; 128] = [0; 128]
+    s = recv_report_error(s, 1, 1, 1, 1, msg, 0)
+    s = recv_report_error(s, 1, 2, 2, 2, msg, 0)
+    s = recv_report_error(s, 1, 3, 3, 3, msg, 0)  // should be dropped
+    s = recv_report_error(s, 1, 4, 4, 4, msg, 0)  // should be dropped
+    let label = recv_test_label(
+        84, 50, 54, 0, 0, 0, 0, 0, 0, 0, 3)  // "T26"
+    recv_assert_true(recv_error_count(s) == 2, label.0, label.1)
+}
+
+// T27: Duplicate error detection
+fn recv_test_duplicate_error_detection() -> bool with IO, Mut, Panic, Div {
+    var s = recv_state_new()
+    var msg: [i8; 128] = [0; 128]
+    s = recv_report_error(s, 1, 5, 10, 42, msg, 0)
+    let ok1 = recv_is_duplicate_error(s, 5, 10, 42)
+    let ok2 = !recv_is_duplicate_error(s, 5, 10, 99)
+    let ok3 = !recv_is_duplicate_error(s, 5, 11, 42)
+    let ok4 = !recv_is_duplicate_error(s, 6, 10, 42)
+    let label = recv_test_label(
+        84, 50, 55, 0, 0, 0, 0, 0, 0, 0, 3)  // "T27"
+    recv_assert_true(ok1 && ok2 && ok3 && ok4, label.0, label.1)
+}
+
+// T28: has_errors returns correct value
+fn recv_test_has_errors() -> bool with IO, Mut, Panic, Div {
+    var s = recv_state_new()
+    let ok1 = !recv_has_errors(s)
+    var msg: [i8; 128] = [0; 128]
+    s = recv_report_error(s, 1, 1, 1, 1, msg, 0)
+    let ok2 = recv_has_errors(s)
+    let label = recv_test_label(
+        84, 50, 56, 0, 0, 0, 0, 0, 0, 0, 3)  // "T28"
+    recv_assert_true(ok1 && ok2, label.0, label.1)
+}
+
+// T29: last_error returns most recent
+fn recv_test_last_error() -> bool with IO, Mut, Panic, Div {
+    var s = recv_state_new()
+    var msg: [i8; 128] = [0; 128]
+    s = recv_report_error(s, RECV_ERR_UNEXPECTED(), 1, 1, 10, msg, 0)
+    s = recv_report_error(s, RECV_ERR_MISSING(), 5, 3, 20, msg, 0)
+    let last = recv_last_error(s)
+    let ok1 = last.kind == RECV_ERR_MISSING()
+    let ok2 = last.line == 5
+    let ok3 = last.token_kind == 20
+    let label = recv_test_label(
+        84, 50, 57, 0, 0, 0, 0, 0, 0, 0, 3)  // "T29"
+    recv_assert_true(ok1 && ok2 && ok3, label.0, label.1)
+}
+
+// T30: Recovery constants have expected values
+fn recv_test_constants() -> bool with IO, Mut, Panic, Div {
+    let ok1 = RECV_STMT() == 1
+    let ok2 = RECV_EXPR() == 2
+    let ok3 = RECV_BLOCK() == 3
+    let ok4 = RECV_ITEM() == 4
+    let ok5 = RECV_TYPE() == 5
+    let ok6 = RECV_ERR_UNEXPECTED() == 1
+    let ok7 = RECV_ERR_MISSING() == 2
+    let ok8 = RECV_ERR_EXTRA() == 3
+    let ok9 = RECV_ERR_MISMATCH() == 4
+    let ok10 = RECV_ERR_CASCADE() == 5
+    let label = recv_test_label(
+        84, 51, 48, 0, 0, 0, 0, 0, 0, 0, 3)  // "T30"
+    recv_assert_true(
+        ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9 && ok10,
+        label.0, label.1)
+}
+
+// T31: get_error out of bounds returns zeroed error
+fn recv_test_get_error_out_of_bounds() -> bool with IO, Mut, Panic, Div {
+    let s = recv_state_new()
+    let err = recv_get_error(s, 0)
+    let ok1 = err.kind == 0
+    let ok2 = err.line == 0
+    let err2 = recv_get_error(s, 100)
+    let ok3 = err2.kind == 0
+    let err3 = recv_get_error(s, 0 - 1)
+    let ok4 = err3.kind == 0
+    let label = recv_test_label(
+        84, 51, 49, 0, 0, 0, 0, 0, 0, 0, 3)  // "T31"
+    recv_assert_true(ok1 && ok2 && ok3 && ok4, label.0, label.1)
+}
+
+// T32: Skip to sync with start_pos offset
+fn recv_test_skip_to_sync_with_offset() -> bool with IO, Mut, Panic, Div {
+    var s = recv_state_new()
+    s = recv_add_sync_token(s, 50)
+    s = recv_enter_panic_mode(s)
+
+    var kinds: [i64; 4096] = [0; 4096]
+    kinds[0] = 50  // sync at 0 — but we start at 2
+    kinds[1] = 10
+    kinds[2] = 20
+    kinds[3] = 50  // sync at 3
+    kinds[4] = 60
+
+    let result = recv_skip_to_sync(s, kinds, 5, 2)
+    s = result.0
+    let pos = result.1
+    let ok1 = pos == 3  // found sync at index 3, not 0
+    let ok2 = recv_tokens_skipped(s) == 1  // skipped kind[2]=20
+    let label = recv_test_label(
+        84, 51, 50, 0, 0, 0, 0, 0, 0, 0, 3)  // "T32"
+    recv_assert_true(ok1 && ok2, label.0, label.1)
+}
+
+// ============================================================================
+// TEST RUNNER
+// ============================================================================
+
+fn run_recovery_tests() -> i32 with IO, Mut, Panic, Div {
+    var passed: i64 = 0
+    var total: i64 = 0
+
+    total = total + 1
+    if recv_test_new_state_no_errors() { passed = passed + 1 }
+
+    total = total + 1
+    if recv_test_default_max_errors() { passed = passed + 1 }
+
+    total = total + 1
+    if recv_test_push_pop_recovery() { passed = passed + 1 }
+
+    total = total + 1
+    if recv_test_pop_empty_stack() { passed = passed + 1 }
+
+    total = total + 1
+    if recv_test_push_multiple_lifo() { passed = passed + 1 }
+
+    total = total + 1
+    if recv_test_add_sync_token() { passed = passed + 1 }
+
+    total = total + 1
+    if recv_test_sync_token_dedup() { passed = passed + 1 }
+
+    total = total + 1
+    if recv_test_remove_sync_token() { passed = passed + 1 }
+
+    total = total + 1
+    if recv_test_report_error() { passed = passed + 1 }
+
+    total = total + 1
+    if recv_test_report_multiple_errors() { passed = passed + 1 }
+
+    total = total + 1
+    if recv_test_panic_mode() { passed = passed + 1 }
+
+    total = total + 1
+    if recv_test_can_continue_under_limit() { passed = passed + 1 }
+
+    total = total + 1
+    if recv_test_can_continue_at_limit() { passed = passed + 1 }
+
+    total = total + 1
+    if recv_test_cascade_detected() { passed = passed + 1 }
+
+    total = total + 1
+    if recv_test_cascade_not_detected() { passed = passed + 1 }
+
+    total = total + 1
+    if recv_test_skip_to_sync() { passed = passed + 1 }
+
+    total = total + 1
+    if recv_test_skip_to_sync_no_match() { passed = passed + 1 }
+
+    total = total + 1
+    if recv_test_suggest_insertion() { passed = passed + 1 }
+
+    total = total + 1
+    if recv_test_suggest_deletion() { passed = passed + 1 }
+
+    total = total + 1
+    if recv_test_merge_errors() { passed = passed + 1 }
+
+    total = total + 1
+    if recv_test_merge_errors_different_lines() { passed = passed + 1 }
+
+    total = total + 1
+    if recv_test_format_error() { passed = passed + 1 }
+
+    total = total + 1
+    if recv_test_error_with_expected() { passed = passed + 1 }
+
+    total = total + 1
+    if recv_test_peek_recovery() { passed = passed + 1 }
+
+    total = total + 1
+    if recv_test_reset() { passed = passed + 1 }
+
+    total = total + 1
+    if recv_test_error_limit_enforcement() { passed = passed + 1 }
+
+    total = total + 1
+    if recv_test_duplicate_error_detection() { passed = passed + 1 }
+
+    total = total + 1
+    if recv_test_has_errors() { passed = passed + 1 }
+
+    total = total + 1
+    if recv_test_last_error() { passed = passed + 1 }
+
+    total = total + 1
+    if recv_test_constants() { passed = passed + 1 }
+
+    total = total + 1
+    if recv_test_get_error_out_of_bounds() { passed = passed + 1 }
+
+    total = total + 1
+    if recv_test_skip_to_sync_with_offset() { passed = passed + 1 }
+
+    print("Recovery tests: ")
+    print_int(passed)
+    print("/")
+    print_int(total)
+    print("\n")
+
+    if passed == total {
+        print("ALL RECOVERY TESTS PASSED\n")
+        0
+    } else {
+        1
+    }
+}
