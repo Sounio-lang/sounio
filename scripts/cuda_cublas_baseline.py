@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """cuda_cublas_baseline.py — cuBLAS SGEMM baseline on local CUDA GPU.
 
-Uses CUDA Driver API + cuBLAS via ctypes only — no pycuda, no pip packages.
+Uses CUDA Runtime API (cudart) + cuBLAS via ctypes only — no pycuda, no pip packages.
 Same timing methodology as cuda_gemm_dispatch.py for apples-to-apples comparison
 with the Sounio epistemic GEMM kernel.
+
+Key: uses cudart (runtime API) throughout instead of CUDA Driver API to avoid
+the runtime/driver context conflict that occurs when cuBLAS (which requires cudart)
+is mixed with cuCtxCreate.
 
 Usage (on GPU node):
     python3 scripts/cuda_cublas_baseline.py                     # default dims
@@ -22,62 +26,123 @@ import struct
 import sys
 import time
 
-# ── CUDA driver API via ctypes ────────────────────────────────────────────────
+# ── cudart constants ─────────────────────────────────────────────────────────
 
-CUdevice    = ctypes.c_int
-CUcontext   = ctypes.c_void_p
-CUdeviceptr = ctypes.c_uint64
-CUevent     = ctypes.c_void_p
+cudaMemcpyHostToDevice   = 1
+cudaMemcpyDeviceToHost   = 2
+cudaMemcpyDeviceToDevice = 3
+
+# ── Library loading ──────────────────────────────────────────────────────────
+
+
+def _find_lib(names, search_dirs=None):
+    """Try loading a shared library by name, then search common directories."""
+    for name in names:
+        try:
+            return ctypes.CDLL(name)
+        except OSError:
+            pass
+
+    dirs = list(search_dirs or [])
+    dirs.extend(["/usr/local/cuda/lib64", "/usr/lib/x86_64-linux-gnu"])
+    home = os.path.expanduser("~")
+    for conda_root in (os.path.join(home, "miniconda3"), os.path.join(home, "anaconda3")):
+        dirs.append(os.path.join(conda_root, "targets", "x86_64-linux", "lib"))
+        dirs.append(os.path.join(conda_root, "lib"))
+    for d in os.environ.get("LD_LIBRARY_PATH", "").split(":"):
+        if d:
+            dirs.append(d)
+
+    base = names[0].split(".so")[0] if names else "libunknown"
+    import glob as _glob
+    for prefix in dirs:
+        if not os.path.isdir(prefix):
+            continue
+        # Try versioned .so files
+        for f in sorted(_glob.glob(os.path.join(prefix, base + ".so*")), reverse=True):
+            try:
+                return ctypes.CDLL(f)
+            except OSError:
+                pass
+    return None
+
+
+def _load_cudart():
+    """Load CUDA runtime library."""
+    lib = _find_lib(["libcudart.so", "libcudart.so.13", "libcudart.so.12"])
+    if lib is None:
+        raise RuntimeError("libcudart.so not found. Is the CUDA toolkit installed?")
+    return lib
+
+
+def _load_cublas():
+    """Load cuBLAS library."""
+    lib = _find_lib(["libcublas.so", "libcublas.so.13", "libcublas.so.12", "libcublas.so.11"])
+    if lib is None:
+        raise RuntimeError("libcublas.so not found. Is the CUDA toolkit installed?")
+    return lib
 
 
 def _load_libcuda():
-    for name in ("libcuda.so.1", "libcuda.so", "nvcuda.dll"):
+    """Load CUDA driver API (only for cuDeviceGetName — no context creation)."""
+    for name in ("libcuda.so.1", "libcuda.so"):
         try:
             lib = ctypes.CDLL(name)
             lib.cuInit(0)
             return lib
         except (OSError, AttributeError):
             pass
-    raise RuntimeError("libcuda.so.1 not found. Is the NVIDIA driver installed?")
+    return None  # Non-fatal: we can get GPU name from nvidia-smi instead
 
 
-def _load_libcublas():
-    for name in ("libcublas.so", "libcublas.so.12", "libcublas.so.11", "cublas64_12.dll"):
-        try:
-            return ctypes.CDLL(name)
-        except OSError:
-            pass
-    # Try CUDA toolkit path
-    for prefix in ("/usr/local/cuda/lib64", "/usr/lib/x86_64-linux-gnu"):
-        for ver in ("12", "11", ""):
-            path = os.path.join(prefix, f"libcublas.so{'.'+ver if ver else ''}")
-            if os.path.isfile(path):
-                try:
-                    return ctypes.CDLL(path)
-                except OSError:
-                    pass
-    raise RuntimeError("libcublas.so not found. Is the CUDA toolkit installed?")
-
-
-def _cu(fn, *args):
+def _rc(fn, *args):
+    """Call a CUDA runtime function and check return code."""
     ret = fn(*args)
     if ret != 0:
-        raise RuntimeError(f"{fn.__name__} returned {ret:#010x}")
+        raise RuntimeError(f"{fn.__name__} returned {ret}")
+
+
+# ── GPU name helper ──────────────────────────────────────────────────────────
+
+def _get_gpu_name(cuda_driver=None):
+    """Get GPU name via driver API or nvidia-smi fallback."""
+    if cuda_driver is not None:
+        try:
+            device = ctypes.c_int(0)
+            cuda_driver.cuDeviceGet(ctypes.byref(device), 0)
+            name_buf = ctypes.create_string_buffer(256)
+            cuda_driver.cuDeviceGetName(name_buf, 256, device)
+            return name_buf.value.decode()
+        except Exception:
+            pass
+    # Fallback: nvidia-smi
+    import subprocess
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            text=True, timeout=5,
+        )
+        return out.strip().split("\n")[0]
+    except Exception:
+        return "Unknown GPU"
 
 
 # ── Benchmark routines ───────────────────────────────────────────────────────
 
-def run_cublas_sgemm(cuda, cublas, M, N, K, n_iters):
+def run_cublas_sgemm(cudart, cublas, M, N, K, n_iters):
     """Run cuBLAS SGEMM and return GFLOPS with CUDA event timing."""
 
-    # Allocate device memory
     size_A = M * K * 4
     size_B = K * N * 4
     size_C = M * N * 4
 
-    d_A = CUdeviceptr(0); _cu(cuda.cuMemAlloc, ctypes.byref(d_A), size_A)
-    d_B = CUdeviceptr(0); _cu(cuda.cuMemAlloc, ctypes.byref(d_B), size_B)
-    d_C = CUdeviceptr(0); _cu(cuda.cuMemAlloc, ctypes.byref(d_C), size_C)
+    # Allocate device memory via cudaMalloc
+    d_A = ctypes.c_void_p(0)
+    d_B = ctypes.c_void_p(0)
+    d_C = ctypes.c_void_p(0)
+    _rc(cudart.cudaMalloc, ctypes.byref(d_A), ctypes.c_size_t(size_A))
+    _rc(cudart.cudaMalloc, ctypes.byref(d_B), ctypes.c_size_t(size_B))
+    _rc(cudart.cudaMalloc, ctypes.byref(d_C), ctypes.c_size_t(size_C))
 
     # Fill with same random seed as cuda_gemm_dispatch.py
     rng = random.Random(42)
@@ -85,9 +150,9 @@ def run_cublas_sgemm(cuda, cublas, M, N, K, n_iters):
     h_B = struct.pack(f"{K*N}f", *[rng.gauss(0, 1) for _ in range(K * N)])
     h_C = b"\x00" * size_C
 
-    _cu(cuda.cuMemcpyHtoD, d_A, ctypes.c_char_p(h_A), size_A)
-    _cu(cuda.cuMemcpyHtoD, d_B, ctypes.c_char_p(h_B), size_B)
-    _cu(cuda.cuMemcpyHtoD, d_C, ctypes.c_char_p(h_C), size_C)
+    _rc(cudart.cudaMemcpy, d_A, ctypes.c_char_p(h_A), ctypes.c_size_t(size_A), cudaMemcpyHostToDevice)
+    _rc(cudart.cudaMemcpy, d_B, ctypes.c_char_p(h_B), ctypes.c_size_t(size_B), cudaMemcpyHostToDevice)
+    _rc(cudart.cudaMemcpy, d_C, ctypes.c_char_p(h_C), ctypes.c_size_t(size_C), cudaMemcpyHostToDevice)
 
     # cuBLAS handle
     handle = ctypes.c_void_p(0)
@@ -97,12 +162,6 @@ def run_cublas_sgemm(cuda, cublas, M, N, K, n_iters):
 
     alpha = ctypes.c_float(1.0)
     beta = ctypes.c_float(0.0)
-
-    # cuBLAS uses column-major. For row-major A(M,K) * B(K,N) = C(M,N):
-    # Compute C^T = B^T * A^T in column-major, which is:
-    #   cublasSgemm(N, M, K, alpha, B, K, A, K, beta, C, N)  [with OP_T, OP_T]
-    # Or just pass as column-major with OP_N:
-    #   cublasSgemm(M, N, K, alpha, A, M, B, K, beta, C, M)
     CUBLAS_OP_N = 0
 
     def launch():
@@ -111,30 +170,32 @@ def run_cublas_sgemm(cuda, cublas, M, N, K, n_iters):
             CUBLAS_OP_N, CUBLAS_OP_N,
             M, N, K,
             ctypes.byref(alpha),
-            ctypes.c_void_p(d_A.value), M,
-            ctypes.c_void_p(d_B.value), K,
+            d_A, M,
+            d_B, K,
             ctypes.byref(beta),
-            ctypes.c_void_p(d_C.value), M,
+            d_C, M,
         )
         if rc != 0:
             raise RuntimeError(f"cublasSgemm_v2 returned {rc}")
 
     # Warmup
     launch()
-    _cu(cuda.cuCtxSynchronize)
+    _rc(cudart.cudaDeviceSynchronize)
 
-    # Timed iterations
-    ev_start = CUevent(0); _cu(cuda.cuEventCreate, ctypes.byref(ev_start), 0)
-    ev_stop  = CUevent(0); _cu(cuda.cuEventCreate, ctypes.byref(ev_stop),  0)
+    # Timed iterations via cudaEvent
+    ev_start = ctypes.c_void_p(0)
+    ev_stop = ctypes.c_void_p(0)
+    _rc(cudart.cudaEventCreate, ctypes.byref(ev_start))
+    _rc(cudart.cudaEventCreate, ctypes.byref(ev_stop))
 
-    _cu(cuda.cuEventRecord, ev_start, None)
+    _rc(cudart.cudaEventRecord, ev_start, None)
     for _ in range(n_iters):
         launch()
-    _cu(cuda.cuEventRecord, ev_stop, None)
-    _cu(cuda.cuEventSynchronize, ev_stop)
+    _rc(cudart.cudaEventRecord, ev_stop, None)
+    _rc(cudart.cudaEventSynchronize, ev_stop)
 
     ms = ctypes.c_float(0.0)
-    _cu(cuda.cuEventElapsedTime, ctypes.byref(ms), ev_start, ev_stop)
+    _rc(cudart.cudaEventElapsedTime, ctypes.byref(ms), ev_start, ev_stop)
     ms_per_iter = ms.value / n_iters
 
     flops = 2.0 * M * N * K
@@ -142,13 +203,15 @@ def run_cublas_sgemm(cuda, cublas, M, N, K, n_iters):
 
     # Read back first element
     r0 = ctypes.c_float(0.0)
-    _cu(cuda.cuMemcpyDtoH, ctypes.byref(r0), d_C, 4)
+    _rc(cudart.cudaMemcpy, ctypes.byref(r0), d_C, ctypes.c_size_t(4), cudaMemcpyDeviceToHost)
 
     # Cleanup
-    cuda.cuEventDestroy(ev_start)
-    cuda.cuEventDestroy(ev_stop)
+    cudart.cudaEventDestroy(ev_start)
+    cudart.cudaEventDestroy(ev_stop)
     cublas.cublasDestroy_v2(handle)
-    cuda.cuMemFree(d_A); cuda.cuMemFree(d_B); cuda.cuMemFree(d_C)
+    cudart.cudaFree(d_A)
+    cudart.cudaFree(d_B)
+    cudart.cudaFree(d_C)
 
     return {
         "gflops": round(gflops, 1),
@@ -158,35 +221,40 @@ def run_cublas_sgemm(cuda, cublas, M, N, K, n_iters):
     }
 
 
-def measure_bandwidth(cuda, size_mb=256):
-    """Measure device-to-device memory bandwidth via cuMemcpyDtoD."""
+def measure_bandwidth(cudart, size_mb=256):
+    """Measure device-to-device memory bandwidth via cudaMemcpy DtoD."""
     size_bytes = size_mb * 1024 * 1024
     n_iters = 20
 
-    d_src = CUdeviceptr(0); _cu(cuda.cuMemAlloc, ctypes.byref(d_src), size_bytes)
-    d_dst = CUdeviceptr(0); _cu(cuda.cuMemAlloc, ctypes.byref(d_dst), size_bytes)
+    d_src = ctypes.c_void_p(0)
+    d_dst = ctypes.c_void_p(0)
+    _rc(cudart.cudaMalloc, ctypes.byref(d_src), ctypes.c_size_t(size_bytes))
+    _rc(cudart.cudaMalloc, ctypes.byref(d_dst), ctypes.c_size_t(size_bytes))
 
     # Warmup
-    _cu(cuda.cuMemcpyDtoD, d_dst, d_src, size_bytes)
-    _cu(cuda.cuCtxSynchronize)
+    _rc(cudart.cudaMemcpy, d_dst, d_src, ctypes.c_size_t(size_bytes), cudaMemcpyDeviceToDevice)
+    _rc(cudart.cudaDeviceSynchronize)
 
-    ev_start = CUevent(0); _cu(cuda.cuEventCreate, ctypes.byref(ev_start), 0)
-    ev_stop  = CUevent(0); _cu(cuda.cuEventCreate, ctypes.byref(ev_stop),  0)
+    ev_start = ctypes.c_void_p(0)
+    ev_stop = ctypes.c_void_p(0)
+    _rc(cudart.cudaEventCreate, ctypes.byref(ev_start))
+    _rc(cudart.cudaEventCreate, ctypes.byref(ev_stop))
 
-    _cu(cuda.cuEventRecord, ev_start, None)
+    _rc(cudart.cudaEventRecord, ev_start, None)
     for _ in range(n_iters):
-        _cu(cuda.cuMemcpyDtoD, d_dst, d_src, size_bytes)
-    _cu(cuda.cuEventRecord, ev_stop, None)
-    _cu(cuda.cuEventSynchronize, ev_stop)
+        _rc(cudart.cudaMemcpy, d_dst, d_src, ctypes.c_size_t(size_bytes), cudaMemcpyDeviceToDevice)
+    _rc(cudart.cudaEventRecord, ev_stop, None)
+    _rc(cudart.cudaEventSynchronize, ev_stop)
 
     ms = ctypes.c_float(0.0)
-    _cu(cuda.cuEventElapsedTime, ctypes.byref(ms), ev_start, ev_stop)
+    _rc(cudart.cudaEventElapsedTime, ctypes.byref(ms), ev_start, ev_stop)
 
     gb_s = (size_bytes * n_iters) / (ms.value * 1e-3) / 1e9
 
-    cuda.cuEventDestroy(ev_start)
-    cuda.cuEventDestroy(ev_stop)
-    cuda.cuMemFree(d_src); cuda.cuMemFree(d_dst)
+    cudart.cudaEventDestroy(ev_start)
+    cudart.cudaEventDestroy(ev_stop)
+    cudart.cudaFree(d_src)
+    cudart.cudaFree(d_dst)
 
     return round(gb_s, 1)
 
@@ -203,19 +271,15 @@ def main():
                      "artifacts", "omega", "cublas_baseline_report.v1.json")
     )
 
-    cuda = _load_libcuda()
-    cublas = _load_libcublas()
+    # Load libraries — cudart first, then cuBLAS (both use runtime context)
+    cudart = _load_cudart()
+    _rc(cudart.cudaSetDevice, 0)
 
-    # Init device + context
-    device = CUdevice(0)
-    _cu(cuda.cuDeviceGet, ctypes.byref(device), 0)
+    # Get GPU name via driver API (no context creation) or nvidia-smi
+    cuda_driver = _load_libcuda()
+    gpu_name = _get_gpu_name(cuda_driver)
 
-    name_buf = ctypes.create_string_buffer(256)
-    cuda.cuDeviceGetName(name_buf, 256, device)
-    gpu_name = name_buf.value.decode()
-
-    ctx = CUcontext(0)
-    _cu(cuda.cuCtxCreate, ctypes.byref(ctx), 0, device)
+    cublas = _load_cublas()
 
     print(f"[souc-gpu] cuBLAS SGEMM baseline on {gpu_name}")
     print(f"  dims:  {dims}")
@@ -223,7 +287,7 @@ def main():
     print()
 
     # Memory bandwidth
-    bw = measure_bandwidth(cuda)
+    bw = measure_bandwidth(cudart)
     print(f"[souc-gpu] memory bandwidth: {bw} GB/s (DtoD, 256 MB)")
     print()
 
@@ -231,7 +295,7 @@ def main():
     for dim in dims:
         M = N = K = dim
         print(f"=== cuBLAS SGEMM {M}x{N}x{K} (iters={n_iters}) ===")
-        res = run_cublas_sgemm(cuda, cublas, M, N, K, n_iters)
+        res = run_cublas_sgemm(cudart, cublas, M, N, K, n_iters)
         results[str(dim)] = res
 
         print("=======================================================================")
@@ -257,9 +321,6 @@ def main():
     with open(report_path, "w") as f:
         json.dump(report, f, indent=2)
     print(f"[souc-gpu] report written to {report_path}")
-
-    # Cleanup
-    cuda.cuCtxDestroy(ctx)
 
 
 if __name__ == "__main__":

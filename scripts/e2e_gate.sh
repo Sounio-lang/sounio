@@ -4,6 +4,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
 
+# Ensure stdlib is discoverable for tests that import from it.
+export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
+
 if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
   if [[ "$CARGO_TARGET_DIR" = /* ]]; then
     TARGET_DIR="$CARGO_TARGET_DIR"

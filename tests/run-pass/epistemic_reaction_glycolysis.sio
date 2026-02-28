@@ -1,0 +1,483 @@
+//@ run-pass
+//@ expect-stdout: ALL 10 TESTS PASSED
+//@ expect-stdout: Failed: 0
+// Epistemic Reaction — Glycolysis Step 1 Test Suite
+//
+// First provenance-conserving chemical reaction in any self-hosted language.
+// Glucose + ATP → Glucose-6-Phosphate + ADP (hexokinase)
+//
+// Verifies the invariant: product provenance is a deterministic function
+// of reactant provenance, and delta_32 < 96 is preserved across the
+// transformation (hardware accumulator bound).
+//
+// All functions inlined (tests cannot import stdlib).
+
+// ============================================================================
+// MERKLE INFRASTRUCTURE (inlined)
+// ============================================================================
+
+let RXN_MERKLE_SALT_A: i64 = 0x4F4D4547
+let RXN_MERKLE_SALT_B: i64 = 0x4147454E
+let RXN_MERKLE_SALT_C: i64 = 0x45534953
+let RXN_MERKLE_SALT_D: i64 = 0x76312E30
+let RXN_MAX_SPECIES: i64 = 8
+
+fn rxn_merkle_mix(a: i64, b: i64, c: i64, salt: i64) -> i64 {
+    ((a ^ b) + c + salt) ^ (a << 5) ^ (b >> 7)
+}
+
+fn rxn_merkle_root_lane_l64(
+    p0: i64, p1: i64, p2: i64, p3: i64, p4: i64
+) -> i64 {
+    let h0 = rxn_merkle_mix(p0, p1, p2, RXN_MERKLE_SALT_A)
+    let h1 = rxn_merkle_mix(p3, p4, h0, RXN_MERKLE_SALT_B)
+    let h2 = rxn_merkle_mix(h0, h1, p0 ^ p3, RXN_MERKLE_SALT_C)
+    rxn_merkle_mix(h1, h2, p1 ^ p2, RXN_MERKLE_SALT_D)
+}
+
+fn rxn_metabolite_hash(symbol: i64) -> i64 {
+    var hash: i64 = 5381
+    hash = hash * 33 + symbol
+    hash & 9223372036854775807
+}
+
+fn rxn_provenance_seed(item_hash: i64) -> i64 {
+    rxn_merkle_root_lane_l64(0, item_hash, 0, 0, 1)
+}
+
+fn rxn_provenance_merge(
+    existing_root_l64: i64,
+    item_hash: i64,
+    variance_q32_32: i64,
+    confidence_beta: i64
+) -> i64 {
+    rxn_merkle_root_lane_l64(
+        existing_root_l64,
+        item_hash,
+        variance_q32_32,
+        confidence_beta,
+        existing_root_l64 ^ item_hash
+    )
+}
+
+fn rxn_delta_32(fidelity: i64, provenance: i64, quantum: i64) -> i64 {
+    let frac_f = fidelity - (fidelity / 8) * 8
+    let frac_p = provenance - (provenance / 16) * 16
+    let frac_q = quantum - (quantum / 32) * 32
+    frac_f * 4 + frac_p * 2 + frac_q
+}
+
+// ============================================================================
+// EPISTEMIC REACTION STRUCT (inlined)
+// ============================================================================
+
+struct EpistemicReaction {
+    reactant_prov_l64: [i64; 8],
+    reactant_variance_q32_32: [i64; 8],
+    reactant_confidence_beta: [i64; 8],
+    reactant_count: i64,
+
+    product_prov_l64: [i64; 8],
+    product_variance_q32_32: [i64; 8],
+    product_confidence_beta: [i64; 8],
+    product_count: i64,
+
+    rxn_provenance_l64: i64,
+    rxn_variance_q32_32: i64,
+    rxn_confidence_beta: i64,
+
+    enzyme_prov_l64: i64,
+    applied: i64,
+}
+
+fn rxn_new() -> EpistemicReaction {
+    EpistemicReaction {
+        reactant_prov_l64: [0; 8],
+        reactant_variance_q32_32: [0; 8],
+        reactant_confidence_beta: [0; 8],
+        reactant_count: 0,
+
+        product_prov_l64: [0; 8],
+        product_variance_q32_32: [0; 8],
+        product_confidence_beta: [0; 8],
+        product_count: 0,
+
+        rxn_provenance_l64: 0,
+        rxn_variance_q32_32: 0,
+        rxn_confidence_beta: 1,
+
+        enzyme_prov_l64: 0 - 1,
+        applied: 0,
+    }
+}
+
+fn rxn_add_reactant(
+    r: EpistemicReaction, prov_l64: i64, variance: i64, confidence: i64
+) -> EpistemicReaction with Mut, Panic {
+    var rxn = r
+    if rxn.reactant_count >= RXN_MAX_SPECIES {
+        return rxn
+    }
+    let id = rxn.reactant_count
+    rxn.reactant_prov_l64[id] = prov_l64
+    rxn.reactant_variance_q32_32[id] = variance
+    rxn.reactant_confidence_beta[id] = confidence
+    rxn.reactant_count = rxn.reactant_count + 1
+    rxn
+}
+
+fn rxn_add_product(
+    r: EpistemicReaction, product_hash: i64, variance: i64, confidence: i64
+) -> EpistemicReaction with Mut, Panic {
+    var rxn = r
+    if rxn.product_count >= RXN_MAX_SPECIES {
+        return rxn
+    }
+    let id = rxn.product_count
+    rxn.product_prov_l64[id] = rxn_provenance_seed(product_hash)
+    rxn.product_variance_q32_32[id] = variance
+    rxn.product_confidence_beta[id] = confidence
+    rxn.product_count = rxn.product_count + 1
+    rxn
+}
+
+fn rxn_set_enzyme(r: EpistemicReaction, enzyme_prov: i64) -> EpistemicReaction {
+    var rxn = r
+    rxn.enzyme_prov_l64 = enzyme_prov
+    rxn
+}
+
+fn rxn_reactant_count(r: EpistemicReaction) -> i64 { r.reactant_count }
+fn rxn_product_count(r: EpistemicReaction) -> i64 { r.product_count }
+fn rxn_provenance(r: EpistemicReaction) -> i64 { r.rxn_provenance_l64 }
+fn rxn_is_applied(r: EpistemicReaction) -> bool { r.applied == 1 }
+
+fn rxn_product_provenance(r: EpistemicReaction, idx: i64) -> i64 with Panic, Div {
+    if idx < 0 || idx >= r.product_count { return 0 }
+    r.product_prov_l64[idx]
+}
+
+fn rxn_product_variance(r: EpistemicReaction, idx: i64) -> i64 with Panic, Div {
+    if idx < 0 || idx >= r.product_count { return 0 }
+    r.product_variance_q32_32[idx]
+}
+
+fn rxn_product_confidence(r: EpistemicReaction, idx: i64) -> i64 with Panic, Div {
+    if idx < 0 || idx >= r.product_count { return 0 }
+    r.product_confidence_beta[idx]
+}
+
+fn rxn_apply(r: EpistemicReaction) -> EpistemicReaction with Mut, Panic, Div {
+    var rxn = r
+
+    // Phase 1: fold reactant provenance into reaction root
+    var root: i64 = 0
+    var i: i64 = 0
+    while i < rxn.reactant_count {
+        root = rxn_merkle_mix(
+            root,
+            rxn.reactant_prov_l64[i],
+            rxn.reactant_variance_q32_32[i],
+            RXN_MERKLE_SALT_A
+        )
+        i = i + 1
+    }
+
+    // Include enzyme if present
+    if rxn.enzyme_prov_l64 >= 0 {
+        root = rxn_merkle_mix(root, rxn.enzyme_prov_l64, 0, RXN_MERKLE_SALT_B)
+    }
+
+    rxn.rxn_provenance_l64 = root
+    rxn.rxn_variance_q32_32 = rxn.rxn_variance_q32_32 + 1
+    rxn.rxn_confidence_beta = rxn.rxn_confidence_beta + 1
+
+    // Phase 2: merge reaction root into each product's provenance
+    var j: i64 = 0
+    while j < rxn.product_count {
+        let merged = rxn_provenance_merge(
+            rxn.product_prov_l64[j],
+            root,
+            rxn.product_variance_q32_32[j] + 1,
+            rxn.product_confidence_beta[j] + 1
+        )
+        rxn.product_prov_l64[j] = merged
+        rxn.product_variance_q32_32[j] = rxn.product_variance_q32_32[j] + 1
+        rxn.product_confidence_beta[j] = rxn.product_confidence_beta[j] + 1
+        j = j + 1
+    }
+
+    rxn.applied = 1
+    rxn
+}
+
+fn rxn_verify_conservation(r: EpistemicReaction) -> bool with Mut, Panic, Div {
+    if r.applied != 1 { return false }
+    if r.rxn_provenance_l64 == 0 { return false }
+
+    let rxn_delta = rxn_delta_32(r.rxn_variance_q32_32, 0, r.rxn_confidence_beta)
+    if rxn_delta < 0 || rxn_delta >= 96 { return false }
+
+    var i: i64 = 0
+    while i < r.product_count {
+        if r.product_prov_l64[i] == 0 { return false }
+        let pdelta = rxn_delta_32(r.product_variance_q32_32[i], 0, r.product_confidence_beta[i])
+        if pdelta < 0 || pdelta >= 96 { return false }
+        i = i + 1
+    }
+    true
+}
+
+// ============================================================================
+// TEST FUNCTIONS
+// ============================================================================
+
+fn test_empty_reaction() -> bool {
+    let rxn = rxn_new()
+    rxn_reactant_count(rxn) == 0 && rxn_product_count(rxn) == 0
+        && !rxn_is_applied(rxn) && rxn_provenance(rxn) == 0
+}
+
+fn test_add_reactant() -> bool with Mut, Panic {
+    var rxn = rxn_new()
+    let prov = rxn_provenance_seed(42)
+    rxn = rxn_add_reactant(rxn, prov, 0, 1)
+    rxn_reactant_count(rxn) == 1
+}
+
+fn test_add_product() -> bool with Mut, Panic, Div {
+    var rxn = rxn_new()
+    rxn = rxn_add_product(rxn, 99, 0, 1)
+    rxn_product_count(rxn) == 1 && rxn_product_provenance(rxn, 0) != 0
+}
+
+fn test_apply_sets_provenance() -> bool with Mut, Panic, Div {
+    var rxn = rxn_new()
+    rxn = rxn_add_reactant(rxn, rxn_provenance_seed(42), 0, 1)
+    rxn = rxn_add_product(rxn, 99, 0, 1)
+    rxn = rxn_apply(rxn)
+    rxn_is_applied(rxn) && rxn_provenance(rxn) != 0
+}
+
+fn test_apply_changes_product_provenance() -> bool with Mut, Panic, Div {
+    var rxn = rxn_new()
+    rxn = rxn_add_reactant(rxn, rxn_provenance_seed(42), 0, 1)
+    rxn = rxn_add_product(rxn, 99, 0, 1)
+    let before = rxn_product_provenance(rxn, 0)
+    rxn = rxn_apply(rxn)
+    let after = rxn_product_provenance(rxn, 0)
+    before != 0 && after != 0 && before != after
+}
+
+fn test_different_reactants_different_root() -> bool with Mut, Panic, Div {
+    var rxn1 = rxn_new()
+    rxn1 = rxn_add_reactant(rxn1, rxn_provenance_seed(10), 0, 1)
+    rxn1 = rxn_add_product(rxn1, 99, 0, 1)
+    rxn1 = rxn_apply(rxn1)
+
+    var rxn2 = rxn_new()
+    rxn2 = rxn_add_reactant(rxn2, rxn_provenance_seed(20), 0, 1)
+    rxn2 = rxn_add_product(rxn2, 99, 0, 1)
+    rxn2 = rxn_apply(rxn2)
+
+    rxn_provenance(rxn1) != rxn_provenance(rxn2)
+}
+
+fn test_enzyme_changes_root() -> bool with Mut, Panic, Div {
+    var rxn1 = rxn_new()
+    rxn1 = rxn_add_reactant(rxn1, rxn_provenance_seed(42), 0, 1)
+    rxn1 = rxn_add_product(rxn1, 99, 0, 1)
+    rxn1 = rxn_apply(rxn1)
+
+    var rxn2 = rxn_new()
+    rxn2 = rxn_add_reactant(rxn2, rxn_provenance_seed(42), 0, 1)
+    rxn2 = rxn_add_product(rxn2, 99, 0, 1)
+    rxn2 = rxn_set_enzyme(rxn2, rxn_provenance_seed(777))
+    rxn2 = rxn_apply(rxn2)
+
+    rxn_provenance(rxn1) != rxn_provenance(rxn2)
+}
+
+fn test_delta_32_bound() -> bool with Mut, Panic, Div {
+    var rxn = rxn_new()
+    rxn = rxn_add_reactant(rxn, rxn_provenance_seed(1), 0, 1)
+    rxn = rxn_add_reactant(rxn, rxn_provenance_seed(2), 0, 1)
+    rxn = rxn_add_product(rxn, 3, 0, 1)
+    rxn = rxn_add_product(rxn, 4, 0, 1)
+    rxn = rxn_apply(rxn)
+    rxn_verify_conservation(rxn)
+}
+
+fn test_glycolysis_step1() -> bool with Mut, Panic, Div {
+    let glucose_hash = rxn_metabolite_hash(0x474C55)
+    let atp_hash = rxn_metabolite_hash(0x415450)
+    let g6p_hash = rxn_metabolite_hash(0x473650)
+    let adp_hash = rxn_metabolite_hash(0x414450)
+    let hexokinase_hash = rxn_metabolite_hash(0x48454B)
+
+    let glucose_prov = rxn_provenance_seed(glucose_hash)
+    let atp_prov = rxn_provenance_seed(atp_hash)
+    let hexokinase_prov = rxn_provenance_seed(hexokinase_hash)
+
+    var rxn = rxn_new()
+    rxn = rxn_add_reactant(rxn, glucose_prov, 0, 1)
+    rxn = rxn_add_reactant(rxn, atp_prov, 0, 1)
+    rxn = rxn_add_product(rxn, g6p_hash, 0, 1)
+    rxn = rxn_add_product(rxn, adp_hash, 0, 1)
+    rxn = rxn_set_enzyme(rxn, hexokinase_prov)
+
+    let g6p_before = rxn_product_provenance(rxn, 0)
+    let adp_before = rxn_product_provenance(rxn, 1)
+
+    rxn = rxn_apply(rxn)
+
+    let g6p_after = rxn_product_provenance(rxn, 0)
+    let adp_after = rxn_product_provenance(rxn, 1)
+
+    let applied_ok = rxn_is_applied(rxn)
+    let counts_ok = rxn_reactant_count(rxn) == 2 && rxn_product_count(rxn) == 2
+    let rxn_prov_ok = rxn_provenance(rxn) != 0
+    let changed = g6p_after != g6p_before && adp_after != adp_before
+    let nonzero = g6p_after != 0 && adp_after != 0
+    let differ = g6p_after != adp_after
+    let conserved = rxn_verify_conservation(rxn)
+
+    applied_ok && counts_ok && rxn_prov_ok && changed
+        && nonzero && differ && conserved
+}
+
+fn test_deterministic_replay() -> bool with Mut, Panic, Div {
+    // Same inputs → same outputs (provenance is deterministic)
+    let glucose_prov = rxn_provenance_seed(rxn_metabolite_hash(0x474C55))
+    let atp_prov = rxn_provenance_seed(rxn_metabolite_hash(0x415450))
+
+    var rxn1 = rxn_new()
+    rxn1 = rxn_add_reactant(rxn1, glucose_prov, 0, 1)
+    rxn1 = rxn_add_reactant(rxn1, atp_prov, 0, 1)
+    rxn1 = rxn_add_product(rxn1, 0x473650, 0, 1)
+    rxn1 = rxn_apply(rxn1)
+
+    var rxn2 = rxn_new()
+    rxn2 = rxn_add_reactant(rxn2, glucose_prov, 0, 1)
+    rxn2 = rxn_add_reactant(rxn2, atp_prov, 0, 1)
+    rxn2 = rxn_add_product(rxn2, 0x473650, 0, 1)
+    rxn2 = rxn_apply(rxn2)
+
+    rxn_provenance(rxn1) == rxn_provenance(rxn2)
+        && rxn_product_provenance(rxn1, 0) == rxn_product_provenance(rxn2, 0)
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    println("=== Epistemic Reaction Glycolysis Tests ===")
+    println("")
+
+    var passed = 0
+    var failed = 0
+
+    print("Test  1: Empty reaction.................. ")
+    if test_empty_reaction() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  2: Add reactant.................... ")
+    if test_add_reactant() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  3: Add product..................... ")
+    if test_add_product() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  4: Apply sets provenance........... ")
+    if test_apply_sets_provenance() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  5: Apply changes product prov...... ")
+    if test_apply_changes_product_provenance() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  6: Different reactants diff root... ")
+    if test_different_reactants_different_root() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  7: Enzyme changes root............. ")
+    if test_enzyme_changes_root() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  8: delta_32 bound [0, 96).......... ")
+    if test_delta_32_bound() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test  9: Glycolysis step 1 (Glu+ATP)..... ")
+    if test_glycolysis_step1() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    print("Test 10: Deterministic replay............ ")
+    if test_deterministic_replay() {
+        println("PASS")
+        passed = passed + 1
+    } else {
+        println("FAIL")
+        failed = failed + 1
+    }
+
+    println("")
+    print("Passed: ")
+    println(passed)
+    print("Failed: ")
+    println(failed)
+
+    if failed > 0 {
+        println("SOME TESTS FAILED")
+        return 1
+    }
+    println("ALL 10 TESTS PASSED")
+    return 0
+}

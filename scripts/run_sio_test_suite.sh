@@ -23,6 +23,9 @@ cd "$ROOT_DIR"
 source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
 sounio_require_souc
 
+# Ensure stdlib is discoverable for tests that import from it.
+export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
+
 FILTER="${1:-}"
 VERBOSE="${2:-}"
 if [[ "$FILTER" == "--verbose" ]]; then
