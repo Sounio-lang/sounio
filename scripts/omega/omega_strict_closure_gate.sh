@@ -153,6 +153,16 @@ if ! run_step "$STATE_CYCLE_LOG" "$SOUC_BIN" bootstrap cycle --state "$BOOTSTRAP
 fi
 CHECKPOINT_BOOTSTRAP_STATE="pass"
 
+# Seed driver harness cache from bootstrap bundle seeds (if not already populated).
+# The bundle includes driver_harness_*.sobc alongside the seed bytecode.
+# This must happen after bootstrap init so DRIVER_HARNESS_CACHE_DIR exists.
+if ! ls "$DRIVER_HARNESS_CACHE_DIR"/driver_harness_*.sobc >/dev/null 2>&1; then
+  if ls "$BOOTSTRAP_BUNDLE_DIR/seeds"/driver_harness_*.sobc >/dev/null 2>&1; then
+    cp "$BOOTSTRAP_BUNDLE_DIR/seeds"/driver_harness_*.sobc "$DRIVER_HARNESS_CACHE_DIR/"
+    echo "STRICT_CLOSURE_GATE driver_harness seeded from bundle seeds: $(ls "$DRIVER_HARNESS_CACHE_DIR"/driver_harness_*.sobc)"
+  fi
+fi
+
 # Checkpoint 2: driver harness available.
 if ! run_step "$PREWARM_LOG" env \
   SOUNIO_SELFHOST_DRIVER_HARNESS_CACHE_DIR="$DRIVER_HARNESS_CACHE_DIR" \
