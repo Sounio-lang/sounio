@@ -1,0 +1,2797 @@
+// self-hosted::lsp::completions -- LSP completion provider for Sounio
+//
+// Context-aware code completions for identifiers, keywords, types, fields,
+// methods, and modules.  All string data is represented as i64 intern IDs;
+// the actual text lives in the StringInterner and is resolved at the
+// transport boundary.
+//
+// The provider maintains a scope stack, field/method tables, and keyword
+// registry.  Completion generation walks visible scope entries, scores
+// them against the user's prefix, and emits LspCompletionItem values
+// (from lsp/protocol.sio) into an LspCompletionList.
+//
+// Capacity:
+//   - Scope entries:   2048
+//   - Fields:          64 per struct
+//   - Methods:         128
+//   - Keywords:        64
+//   - Modules:         64
+//   - Completions:     256 (matches LspCompletionList capacity)
+
+// ============================================================================
+// Section 1: CONSTANTS
+// ============================================================================
+
+let LSC_MAX_SCOPE_ENTRIES: i64 = 2048
+let LSC_MAX_COMPLETIONS: i64   = 256
+let LSC_MAX_KEYWORDS: i64      = 64
+let LSC_MAX_TYPES: i64         = 512
+let LSC_MAX_FIELDS: i64        = 64
+let LSC_MAX_METHODS: i64       = 128
+let LSC_MAX_MODULES: i64       = 64
+let LSC_INVALID: i64           = 0 - 1
+
+// Completion kinds (matching LSP specification)
+let LSC_KIND_TEXT: i64         = 1
+let LSC_KIND_METHOD: i64       = 2
+let LSC_KIND_FUNCTION: i64     = 3
+let LSC_KIND_CONSTRUCTOR: i64  = 4
+let LSC_KIND_FIELD: i64        = 5
+let LSC_KIND_VARIABLE: i64     = 6
+let LSC_KIND_CLASS: i64        = 7
+let LSC_KIND_MODULE: i64       = 9
+let LSC_KIND_PROPERTY: i64     = 10
+let LSC_KIND_KEYWORD: i64      = 14
+let LSC_KIND_SNIPPET: i64      = 15
+let LSC_KIND_ENUM_MEMBER: i64  = 20
+let LSC_KIND_STRUCT: i64       = 22
+let LSC_KIND_TYPE_PARAM: i64   = 25
+
+// ============================================================================
+// Section 2: COMPLETION CONTEXT
+// ============================================================================
+
+enum LscTriggerKind {
+    LscTriggerInvoked,
+    LscTriggerChar,
+    LscTriggerIncomplete,
+}
+
+struct LscCompletionContext {
+    trigger_kind: LscTriggerKind,
+    trigger_char: i64,
+    line: i64,
+    col: i64,
+    in_function: bool,
+    in_struct: bool,
+    in_type_position: bool,
+    after_dot: bool,
+    after_colon_colon: bool,
+    prefix: [i8; 256],
+    prefix_len: i64,
+}
+
+// ============================================================================
+// Section 3: SCOPE ENTRY TYPES
+// ============================================================================
+
+enum LscScopeKind {
+    LscScopeVar,
+    LscScopeFunc,
+    LscScopeType,
+    LscScopeModule,
+    LscScopeField,
+    LscScopeMethod,
+    LscScopeEnum,
+    LscScopeConst,
+}
+
+struct LscScopeEntry {
+    name_id: i64,
+    kind: LscScopeKind,
+    type_id: i64,
+    detail_id: i64,
+    depth: i64,
+    visible: bool,
+}
+
+struct LscFieldInfo {
+    name_id: i64,
+    type_id: i64,
+    struct_id: i64,
+}
+
+struct LscMethodInfo {
+    name_id: i64,
+    type_id: i64,
+    receiver_type: i64,
+    param_count: i64,
+}
+
+// ============================================================================
+// Section 4: PROVIDER STATE
+// ============================================================================
+
+struct LscProvider {
+    scope_entries: [LscScopeEntry; 2048],
+    scope_count: i64,
+    fields: [LscFieldInfo; 64],
+    field_count: i64,
+    methods: [LscMethodInfo; 128],
+    method_count: i64,
+    keywords: [i64; 64],
+    keyword_count: i64,
+    current_depth: i64,
+}
+
+// ============================================================================
+// Section 5: CONSTRUCTOR FUNCTIONS
+// ============================================================================
+
+fn lsc_empty_entry() -> LscScopeEntry {
+    LscScopeEntry {
+        name_id: 0,
+        kind: LscScopeKind::LscScopeVar,
+        type_id: 0,
+        detail_id: 0,
+        depth: 0,
+        visible: false,
+    }
+}
+
+fn lsc_empty_field() -> LscFieldInfo {
+    LscFieldInfo {
+        name_id: 0,
+        type_id: 0,
+        struct_id: 0,
+    }
+}
+
+fn lsc_empty_method() -> LscMethodInfo {
+    LscMethodInfo {
+        name_id: 0,
+        type_id: 0,
+        receiver_type: 0,
+        param_count: 0,
+    }
+}
+
+fn lsc_provider_new() -> LscProvider {
+    LscProvider {
+        scope_entries: [lsc_empty_entry(); 2048],
+        scope_count: 0,
+        fields: [lsc_empty_field(); 64],
+        field_count: 0,
+        methods: [lsc_empty_method(); 128],
+        method_count: 0,
+        keywords: [0; 64],
+        keyword_count: 0,
+        current_depth: 0,
+    }
+}
+
+fn lsc_context_new() -> LscCompletionContext {
+    LscCompletionContext {
+        trigger_kind: LscTriggerKind::LscTriggerInvoked,
+        trigger_char: 0,
+        line: 0,
+        col: 0,
+        in_function: false,
+        in_struct: false,
+        in_type_position: false,
+        after_dot: false,
+        after_colon_colon: false,
+        prefix: [0; 256],
+        prefix_len: 0,
+    }
+}
+
+// ============================================================================
+// Section 5b: CONTEXT BUILDER HELPERS
+// ============================================================================
+
+// Set the prefix on a completion context from a byte array and length.
+fn lsc_context_set_prefix(ctx: LscCompletionContext, buf: [i8; 256], len: i64) -> LscCompletionContext with Mut, Div, Panic {
+    var out = ctx
+    var i: i64 = 0
+    while i < len && i < 256 {
+        out.prefix[i as usize] = buf[i as usize]
+        i = i + 1
+    }
+    out.prefix_len = len
+    out
+}
+
+// Create a context for dot-triggered completion.
+fn lsc_context_dot(receiver_type: i64, line: i64, col: i64) -> LscCompletionContext {
+    LscCompletionContext {
+        trigger_kind: LscTriggerKind::LscTriggerChar,
+        trigger_char: receiver_type,
+        line: line,
+        col: col,
+        in_function: true,
+        in_struct: false,
+        in_type_position: false,
+        after_dot: true,
+        after_colon_colon: false,
+        prefix: [0; 256],
+        prefix_len: 0,
+    }
+}
+
+// Create a context for path-triggered completion (::).
+fn lsc_context_path(module_id: i64, line: i64, col: i64) -> LscCompletionContext {
+    LscCompletionContext {
+        trigger_kind: LscTriggerKind::LscTriggerChar,
+        trigger_char: module_id,
+        line: line,
+        col: col,
+        in_function: true,
+        in_struct: false,
+        in_type_position: false,
+        after_dot: false,
+        after_colon_colon: true,
+        prefix: [0; 256],
+        prefix_len: 0,
+    }
+}
+
+// Create a context for type-position completion.
+fn lsc_context_type_pos(line: i64, col: i64) -> LscCompletionContext {
+    LscCompletionContext {
+        trigger_kind: LscTriggerKind::LscTriggerInvoked,
+        trigger_char: 0,
+        line: line,
+        col: col,
+        in_function: true,
+        in_struct: false,
+        in_type_position: true,
+        after_dot: false,
+        after_colon_colon: false,
+        prefix: [0; 256],
+        prefix_len: 0,
+    }
+}
+
+// ============================================================================
+// Section 5c: PROVIDER QUERY HELPERS
+// ============================================================================
+
+// Look up a scope entry by name_id.  Returns the index if found, LSC_INVALID
+// if not found.  Searches from most recent to oldest (inner-to-outer).
+fn lsc_lookup_name(p: &LscProvider, name_id: i64) -> i64 with Mut, Div, Panic {
+    var i = p.scope_count - 1
+    while i >= 0 {
+        let entry = p.scope_entries[i as usize]
+        if entry.visible && entry.name_id == name_id {
+            return i
+        }
+        i = i - 1
+    }
+    LSC_INVALID
+}
+
+// Count the number of visible entries in the provider.
+fn lsc_visible_count(p: &LscProvider) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < p.scope_count {
+        if p.scope_entries[i as usize].visible {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Count the number of fields for a given struct_id.
+fn lsc_field_count_for(p: &LscProvider, struct_id: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < p.field_count {
+        if p.fields[i as usize].struct_id == struct_id {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Count the number of methods for a given receiver type.
+fn lsc_method_count_for(p: &LscProvider, receiver_type: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < p.method_count {
+        if p.methods[i as usize].receiver_type == receiver_type {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Reset all scope entries to invisible (for testing scope management).
+fn lsc_hide_all(p: &! LscProvider) -> i64 with Mut, Div, Panic {
+    var hidden: i64 = 0
+    var i: i64 = 0
+    while i < p.scope_count {
+        if p.scope_entries[i as usize].visible {
+            p.scope_entries[i as usize].visible = false
+            hidden = hidden + 1
+        }
+        i = i + 1
+    }
+    hidden
+}
+
+// Add an enum variant to the scope.
+fn lsc_add_enum(p: &! LscProvider, name_id: i64, detail_id: i64) -> i64 with Mut, Div, Panic {
+    if p.scope_count >= LSC_MAX_SCOPE_ENTRIES {
+        return LSC_INVALID
+    }
+    let idx = p.scope_count
+    p.scope_entries[idx as usize] = LscScopeEntry {
+        name_id: name_id,
+        kind: LscScopeKind::LscScopeEnum,
+        type_id: 0,
+        detail_id: detail_id,
+        depth: p.current_depth,
+        visible: true,
+    }
+    p.scope_count = p.scope_count + 1
+    idx
+}
+
+// Add a constant to the scope.
+fn lsc_add_const(p: &! LscProvider, name_id: i64, type_id: i64) -> i64 with Mut, Div, Panic {
+    if p.scope_count >= LSC_MAX_SCOPE_ENTRIES {
+        return LSC_INVALID
+    }
+    let idx = p.scope_count
+    p.scope_entries[idx as usize] = LscScopeEntry {
+        name_id: name_id,
+        kind: LscScopeKind::LscScopeConst,
+        type_id: type_id,
+        detail_id: 0,
+        depth: p.current_depth,
+        visible: true,
+    }
+    p.scope_count = p.scope_count + 1
+    idx
+}
+
+// ============================================================================
+// Section 6: STRING MATCHING HELPERS
+// ============================================================================
+
+// Check if a character is an ASCII letter [A-Za-z]
+fn lsc_is_letter(c: i8) -> bool {
+    let cv = c as i64
+    if cv >= 65 && cv <= 90 {
+        return true
+    }
+    if cv >= 97 && cv <= 122 {
+        return true
+    }
+    false
+}
+
+// Check if a character is an ASCII uppercase letter [A-Z]
+fn lsc_is_upper(c: i8) -> bool {
+    let cv = c as i64
+    cv >= 65 && cv <= 90
+}
+
+// Convert an ASCII character to lowercase.
+// If the character is uppercase [A-Z], returns the corresponding lowercase.
+// Otherwise returns the character unchanged.
+fn lsc_char_to_lower(c: i8) -> i8 {
+    let cv = c as i64
+    if cv >= 65 && cv <= 90 {
+        return (cv + 32) as i8
+    }
+    c
+}
+
+// Case-insensitive prefix match.
+// Returns true if the first prefix_len bytes of name (lowered) match
+// the first prefix_len bytes of prefix (lowered).
+fn lsc_name_matches_prefix(name: [i8; 256], name_len: i64, prefix: [i8; 256], prefix_len: i64) -> bool with Mut, Div, Panic {
+    if prefix_len == 0 {
+        return true
+    }
+    if name_len < prefix_len {
+        return false
+    }
+    var i: i64 = 0
+    while i < prefix_len {
+        let nc = lsc_char_to_lower(name[i as usize])
+        let pc = lsc_char_to_lower(prefix[i as usize])
+        if nc != pc {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Fuzzy match score for a name against a prefix.
+// Returns 0 for no match, higher values for better matches.
+// Scoring:
+//   - Exact prefix match: 100 + (prefix_len * 10)
+//   - Case-sensitive prefix match: 100 + (prefix_len * 10) + 50
+//   - Substring match: 50
+//   - Camel-case initial match: 30
+//   - No match: 0
+fn lsc_name_score(name: [i8; 256], name_len: i64, prefix: [i8; 256], prefix_len: i64) -> i64 with Mut, Div, Panic {
+    if prefix_len == 0 {
+        return 1
+    }
+    if name_len < 1 {
+        return 0
+    }
+
+    // Check case-sensitive exact prefix match first
+    var exact_match = true
+    if name_len >= prefix_len {
+        var i: i64 = 0
+        while i < prefix_len {
+            if name[i as usize] != prefix[i as usize] {
+                exact_match = false
+                i = prefix_len
+            }
+            i = i + 1
+        }
+    } else {
+        exact_match = false
+    }
+
+    if exact_match {
+        // Bonus for exact length match (name == prefix)
+        if name_len == prefix_len {
+            return 200 + prefix_len * 10
+        }
+        return 150 + prefix_len * 10
+    }
+
+    // Check case-insensitive prefix match
+    let ci_match = lsc_name_matches_prefix(name, name_len, prefix, prefix_len)
+    if ci_match {
+        return 100 + prefix_len * 10
+    }
+
+    // Check substring match: scan for prefix appearing anywhere in name
+    var pos: i64 = 0
+    while pos <= name_len - prefix_len {
+        var sub_match = true
+        var j: i64 = 0
+        while j < prefix_len {
+            let nc = lsc_char_to_lower(name[(pos + j) as usize])
+            let pc = lsc_char_to_lower(prefix[j as usize])
+            if nc != pc {
+                sub_match = false
+                j = prefix_len
+            }
+            j = j + 1
+        }
+        if sub_match {
+            return 50
+        }
+        pos = pos + 1
+    }
+
+    // Check camel-case initial match: e.g. prefix "sp" matches "ScopeProvider"
+    // by matching against the first letters of camel-case segments
+    var camel_idx: i64 = 0
+    var prefix_idx: i64 = 0
+    while camel_idx < name_len && prefix_idx < prefix_len {
+        if camel_idx == 0 || lsc_is_upper(name[camel_idx as usize]) {
+            let nc = lsc_char_to_lower(name[camel_idx as usize])
+            let pc = lsc_char_to_lower(prefix[prefix_idx as usize])
+            if nc == pc {
+                prefix_idx = prefix_idx + 1
+            }
+        }
+        camel_idx = camel_idx + 1
+    }
+    if prefix_idx == prefix_len {
+        return 30
+    }
+
+    0
+}
+
+// ============================================================================
+// Section 7: SCOPE MANAGEMENT
+// ============================================================================
+
+// Add a variable to the provider scope.  Returns the index of the new entry,
+// or LSC_INVALID if full.
+fn lsc_add_variable(p: &! LscProvider, name_id: i64, type_id: i64) -> i64 with Mut, Div, Panic {
+    if p.scope_count >= LSC_MAX_SCOPE_ENTRIES {
+        return LSC_INVALID
+    }
+    let idx = p.scope_count
+    p.scope_entries[idx as usize] = LscScopeEntry {
+        name_id: name_id,
+        kind: LscScopeKind::LscScopeVar,
+        type_id: type_id,
+        detail_id: 0,
+        depth: p.current_depth,
+        visible: true,
+    }
+    p.scope_count = p.scope_count + 1
+    idx
+}
+
+// Add a function to the provider scope.
+fn lsc_add_function(p: &! LscProvider, name_id: i64, type_id: i64) -> i64 with Mut, Div, Panic {
+    if p.scope_count >= LSC_MAX_SCOPE_ENTRIES {
+        return LSC_INVALID
+    }
+    let idx = p.scope_count
+    p.scope_entries[idx as usize] = LscScopeEntry {
+        name_id: name_id,
+        kind: LscScopeKind::LscScopeFunc,
+        type_id: type_id,
+        detail_id: 0,
+        depth: p.current_depth,
+        visible: true,
+    }
+    p.scope_count = p.scope_count + 1
+    idx
+}
+
+// Add a type to the provider scope.
+fn lsc_add_type(p: &! LscProvider, name_id: i64, detail_id: i64) -> i64 with Mut, Div, Panic {
+    if p.scope_count >= LSC_MAX_SCOPE_ENTRIES {
+        return LSC_INVALID
+    }
+    let idx = p.scope_count
+    p.scope_entries[idx as usize] = LscScopeEntry {
+        name_id: name_id,
+        kind: LscScopeKind::LscScopeType,
+        type_id: 0,
+        detail_id: detail_id,
+        depth: p.current_depth,
+        visible: true,
+    }
+    p.scope_count = p.scope_count + 1
+    idx
+}
+
+// Add a module to the provider scope.
+fn lsc_add_module(p: &! LscProvider, name_id: i64) -> i64 with Mut, Div, Panic {
+    if p.scope_count >= LSC_MAX_SCOPE_ENTRIES {
+        return LSC_INVALID
+    }
+    let idx = p.scope_count
+    p.scope_entries[idx as usize] = LscScopeEntry {
+        name_id: name_id,
+        kind: LscScopeKind::LscScopeModule,
+        type_id: 0,
+        detail_id: 0,
+        depth: p.current_depth,
+        visible: true,
+    }
+    p.scope_count = p.scope_count + 1
+    idx
+}
+
+// Add a field info entry.  Returns the index, or LSC_INVALID if full.
+fn lsc_add_field(p: &! LscProvider, name_id: i64, type_id: i64, struct_id: i64) -> i64 with Mut, Div, Panic {
+    if p.field_count >= LSC_MAX_FIELDS {
+        return LSC_INVALID
+    }
+    let idx = p.field_count
+    p.fields[idx as usize] = LscFieldInfo {
+        name_id: name_id,
+        type_id: type_id,
+        struct_id: struct_id,
+    }
+    p.field_count = p.field_count + 1
+    idx
+}
+
+// Add a method info entry.  Returns the index, or LSC_INVALID if full.
+fn lsc_add_method(p: &! LscProvider, name_id: i64, type_id: i64, receiver: i64, params: i64) -> i64 with Mut, Div, Panic {
+    if p.method_count >= LSC_MAX_METHODS {
+        return LSC_INVALID
+    }
+    let idx = p.method_count
+    p.methods[idx as usize] = LscMethodInfo {
+        name_id: name_id,
+        type_id: type_id,
+        receiver_type: receiver,
+        param_count: params,
+    }
+    p.method_count = p.method_count + 1
+    idx
+}
+
+// Enter a new scope.  Returns the previous depth for restoration.
+fn lsc_enter_scope(p: &! LscProvider) -> i64 with Mut {
+    let saved = p.current_depth
+    p.current_depth = p.current_depth + 1
+    saved
+}
+
+// Exit a scope.  Marks entries deeper than saved_depth as not visible.
+// Returns the number of entries hidden.
+fn lsc_exit_scope(p: &! LscProvider, saved_depth: i64) -> i64 with Mut, Div, Panic {
+    p.current_depth = saved_depth
+    var hidden: i64 = 0
+    var i: i64 = 0
+    while i < p.scope_count {
+        if p.scope_entries[i as usize].depth > saved_depth {
+            if p.scope_entries[i as usize].visible {
+                p.scope_entries[i as usize].visible = false
+                hidden = hidden + 1
+            }
+        }
+        i = i + 1
+    }
+    hidden
+}
+
+// ============================================================================
+// Section 8: KEYWORD REGISTRATION
+// ============================================================================
+
+// Helper: push a keyword intern-id into the keyword table.
+fn lsc_push_keyword(p: &! LscProvider, kw_id: i64) -> i64 with Mut, Div, Panic {
+    if p.keyword_count >= LSC_MAX_KEYWORDS {
+        return LSC_INVALID
+    }
+    let idx = p.keyword_count
+    p.keywords[idx as usize] = kw_id
+    p.keyword_count = p.keyword_count + 1
+    idx
+}
+
+// Register all Sounio keywords.  The caller must have already interned
+// each keyword string.  The integer IDs here are placeholder intern IDs
+// (1..N); the actual integration layer will replace them with real intern
+// IDs from the StringInterner.
+//
+// Keywords registered:
+//   fn, let, var, struct, enum, if, else, while, for, return,
+//   match, use, with, true, false, break, continue, impl, trait,
+//   type, as, in, linear, where, effect, handle, resume, self
+fn lsc_register_sounio_keywords(p: &! LscProvider) -> i64 with Mut, Div, Panic {
+    // We use consecutive placeholder IDs starting from 1001.
+    // In real integration these come from the interner.
+    var base: i64 = 1001
+
+    // fn
+    let r0 = lsc_push_keyword(p, base)
+    base = base + 1
+    // let
+    let r1 = lsc_push_keyword(p, base)
+    base = base + 1
+    // var
+    let r2 = lsc_push_keyword(p, base)
+    base = base + 1
+    // struct
+    let r3 = lsc_push_keyword(p, base)
+    base = base + 1
+    // enum
+    let r4 = lsc_push_keyword(p, base)
+    base = base + 1
+    // if
+    let r5 = lsc_push_keyword(p, base)
+    base = base + 1
+    // else
+    let r6 = lsc_push_keyword(p, base)
+    base = base + 1
+    // while
+    let r7 = lsc_push_keyword(p, base)
+    base = base + 1
+    // for
+    let r8 = lsc_push_keyword(p, base)
+    base = base + 1
+    // return
+    let r9 = lsc_push_keyword(p, base)
+    base = base + 1
+    // match
+    let r10 = lsc_push_keyword(p, base)
+    base = base + 1
+    // use
+    let r11 = lsc_push_keyword(p, base)
+    base = base + 1
+    // with
+    let r12 = lsc_push_keyword(p, base)
+    base = base + 1
+    // true
+    let r13 = lsc_push_keyword(p, base)
+    base = base + 1
+    // false
+    let r14 = lsc_push_keyword(p, base)
+    base = base + 1
+    // break
+    let r15 = lsc_push_keyword(p, base)
+    base = base + 1
+    // continue
+    let r16 = lsc_push_keyword(p, base)
+    base = base + 1
+    // impl
+    let r17 = lsc_push_keyword(p, base)
+    base = base + 1
+    // trait
+    let r18 = lsc_push_keyword(p, base)
+    base = base + 1
+    // type
+    let r19 = lsc_push_keyword(p, base)
+    base = base + 1
+    // as
+    let r20 = lsc_push_keyword(p, base)
+    base = base + 1
+    // in
+    let r21 = lsc_push_keyword(p, base)
+    base = base + 1
+    // linear
+    let r22 = lsc_push_keyword(p, base)
+    base = base + 1
+    // where
+    let r23 = lsc_push_keyword(p, base)
+    base = base + 1
+    // effect
+    let r24 = lsc_push_keyword(p, base)
+    base = base + 1
+    // handle
+    let r25 = lsc_push_keyword(p, base)
+    base = base + 1
+    // resume
+    let r26 = lsc_push_keyword(p, base)
+    base = base + 1
+    // self
+    let r27 = lsc_push_keyword(p, base)
+    base = base + 1
+
+    p.keyword_count
+}
+
+// Check if a name_id is a registered keyword.
+fn lsc_is_keyword(p: &LscProvider, name_id: i64) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < p.keyword_count {
+        if p.keywords[i as usize] == name_id {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// ============================================================================
+// Section 8b: KEYWORD TABLE HELPERS
+// ============================================================================
+
+// Return the keyword count after registration.
+fn lsc_keyword_table_size(p: &LscProvider) -> i64 {
+    p.keyword_count
+}
+
+// Find a keyword by its intern-id.  Returns the index or LSC_INVALID.
+fn lsc_find_keyword(p: &LscProvider, kw_id: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < p.keyword_count {
+        if p.keywords[i as usize] == kw_id {
+            return i
+        }
+        i = i + 1
+    }
+    LSC_INVALID
+}
+
+// ============================================================================
+// Section 9: COMPLETION GENERATION
+// ============================================================================
+
+// Helper: map a scope kind to an LSP completion kind.
+fn lsc_scope_kind_to_completion_kind(kind: LscScopeKind) -> i64 {
+    match kind {
+        LscScopeKind::LscScopeVar => LSC_KIND_VARIABLE,
+        LscScopeKind::LscScopeFunc => LSC_KIND_FUNCTION,
+        LscScopeKind::LscScopeType => LSC_KIND_STRUCT,
+        LscScopeKind::LscScopeModule => LSC_KIND_MODULE,
+        LscScopeKind::LscScopeField => LSC_KIND_FIELD,
+        LscScopeKind::LscScopeMethod => LSC_KIND_METHOD,
+        LscScopeKind::LscScopeEnum => LSC_KIND_ENUM_MEMBER,
+        LscScopeKind::LscScopeConst => LSC_KIND_VARIABLE,
+    }
+}
+
+// Helper: compute a priority bonus for a scope entry based on depth.
+// Deeper (more local) entries get higher priority.
+fn lsc_depth_priority(entry_depth: i64, current_depth: i64) -> i64 {
+    // Base priority 50; +10 per depth level of locality
+    if entry_depth <= current_depth {
+        return 50 + (entry_depth * 10)
+    }
+    50
+}
+
+// Complete bare identifiers.  Walks visible scope entries and returns
+// those whose name matches the prefix in the completion context.
+fn lsc_complete_identifier(p: &LscProvider, ctx: &LscCompletionContext) -> LspCompletionList with Mut, Div, Panic {
+    var list = lsp_completion_list_new()
+    var i: i64 = 0
+    while i < p.scope_count {
+        let entry = p.scope_entries[i as usize]
+        if entry.visible {
+            // Build a dummy name buffer from the intern ID.
+            // In real integration the interner resolves name_id -> bytes.
+            // Here we use the name_id directly as the label hash.
+            let score = lsc_entry_score_by_id(entry.name_id, ctx)
+            if score > 0 {
+                let ck = lsc_scope_kind_to_completion_kind(entry.kind)
+                let prio = lsc_depth_priority(entry.depth, p.current_depth) + score
+                let item = lsp_completion_item_new(entry.name_id, ck, entry.detail_id, prio)
+                list = lsp_completion_list_add(list, item)
+            }
+        }
+        i = i + 1
+    }
+    list
+}
+
+// Score helper: when the prefix_len is zero every entry matches with score 1.
+// When prefix_len > 0 we cannot do byte comparison without the interner, so
+// we use a name_id-based heuristic: if the prefix_len is > 0 and the name_id
+// is nonzero, we return a base score.  The real integration layer will replace
+// this with proper byte-level matching via lsc_name_score.
+fn lsc_entry_score_by_id(name_id: i64, ctx: &LscCompletionContext) -> i64 with Div, Panic {
+    if ctx.prefix_len == 0 {
+        return 1
+    }
+    if name_id > 0 {
+        return 10
+    }
+    0
+}
+
+// Complete after '.' -- field and method access on a receiver type.
+fn lsc_complete_dot(p: &LscProvider, ctx: &LscCompletionContext, receiver_type: i64) -> LspCompletionList with Mut, Div, Panic {
+    var list = lsp_completion_list_new()
+
+    // Add matching fields
+    var i: i64 = 0
+    while i < p.field_count {
+        let fi = p.fields[i as usize]
+        if fi.struct_id == receiver_type {
+            let score = lsc_entry_score_by_id(fi.name_id, ctx)
+            if score > 0 {
+                let prio = 100 + score
+                let item = lsp_completion_item_new(fi.name_id, LSC_KIND_FIELD, fi.type_id, prio)
+                list = lsp_completion_list_add(list, item)
+            }
+        }
+        i = i + 1
+    }
+
+    // Add matching methods
+    var j: i64 = 0
+    while j < p.method_count {
+        let mi = p.methods[j as usize]
+        if mi.receiver_type == receiver_type {
+            let score = lsc_entry_score_by_id(mi.name_id, ctx)
+            if score > 0 {
+                let prio = 90 + score
+                let item = lsp_completion_item_new(mi.name_id, LSC_KIND_METHOD, mi.type_id, prio)
+                list = lsp_completion_list_add(list, item)
+            }
+        }
+        j = j + 1
+    }
+
+    list
+}
+
+// Complete after '::' -- path-qualified names within a module.
+fn lsc_complete_path(p: &LscProvider, ctx: &LscCompletionContext, module_id: i64) -> LspCompletionList with Mut, Div, Panic {
+    var list = lsp_completion_list_new()
+
+    // Walk scope entries looking for items whose detail_id references
+    // the module.  In the real implementation, the module_id maps to a
+    // namespace of exported symbols.
+    var i: i64 = 0
+    while i < p.scope_count {
+        let entry = p.scope_entries[i as usize]
+        if entry.visible && entry.detail_id == module_id {
+            let score = lsc_entry_score_by_id(entry.name_id, ctx)
+            if score > 0 {
+                let ck = lsc_scope_kind_to_completion_kind(entry.kind)
+                let prio = 80 + score
+                let item = lsp_completion_item_new(entry.name_id, ck, entry.detail_id, prio)
+                list = lsp_completion_list_add(list, item)
+            }
+        }
+        i = i + 1
+    }
+
+    list
+}
+
+// Complete in type position -- only type-like entries (structs, enums,
+// type params, modules).
+fn lsc_complete_type(p: &LscProvider, ctx: &LscCompletionContext) -> LspCompletionList with Mut, Div, Panic {
+    var list = lsp_completion_list_new()
+    var i: i64 = 0
+    while i < p.scope_count {
+        let entry = p.scope_entries[i as usize]
+        if entry.visible {
+            let is_type = lsc_is_type_like_kind(entry.kind)
+            if is_type {
+                let score = lsc_entry_score_by_id(entry.name_id, ctx)
+                if score > 0 {
+                    let ck = lsc_scope_kind_to_completion_kind(entry.kind)
+                    let prio = 120 + score
+                    let item = lsp_completion_item_new(entry.name_id, ck, entry.detail_id, prio)
+                    list = lsp_completion_list_add(list, item)
+                }
+            }
+        }
+        i = i + 1
+    }
+    list
+}
+
+// Helper: check if a scope kind represents a type-like entity.
+fn lsc_is_type_like_kind(kind: LscScopeKind) -> bool {
+    match kind {
+        LscScopeKind::LscScopeType => true,
+        LscScopeKind::LscScopeModule => true,
+        LscScopeKind::LscScopeEnum => true,
+        _ => false,
+    }
+}
+
+// Complete keywords -- walks registered keywords and returns those
+// matching the prefix.
+fn lsc_complete_keyword(p: &LscProvider, ctx: &LscCompletionContext) -> LspCompletionList with Mut, Div, Panic {
+    var list = lsp_completion_list_new()
+    var i: i64 = 0
+    while i < p.keyword_count {
+        let kw_id = p.keywords[i as usize]
+        let score = lsc_entry_score_by_id(kw_id, ctx)
+        if score > 0 {
+            // Keywords get lower priority than variables/functions
+            let prio = 40 + score
+            let item = lsp_completion_item_new(kw_id, LSC_KIND_KEYWORD, 0, prio)
+            list = lsp_completion_list_add(list, item)
+        }
+        i = i + 1
+    }
+    list
+}
+
+// ============================================================================
+// Section 10: TOP-LEVEL COMPLETION DISPATCH
+// ============================================================================
+
+// Main entry point: dispatch to the appropriate completion strategy based
+// on context flags.
+fn lsc_provide_completions(p: &LscProvider, ctx: &LscCompletionContext) -> LspCompletionList with Mut, Div, Panic {
+    // After-dot completions take precedence
+    if ctx.after_dot {
+        // receiver_type defaults to 0 when not resolved; the caller should
+        // set ctx.trigger_char to the receiver's type_id in practice.
+        return lsc_complete_dot(p, ctx, ctx.trigger_char)
+    }
+
+    // After-:: completions for path-qualified names
+    if ctx.after_colon_colon {
+        return lsc_complete_path(p, ctx, ctx.trigger_char)
+    }
+
+    // Type-position completions
+    if ctx.in_type_position {
+        let type_list = lsc_complete_type(p, ctx)
+        return type_list
+    }
+
+    // General identifier + keyword completions
+    let id_list = lsc_complete_identifier(p, ctx)
+    let kw_list = lsc_complete_keyword(p, ctx)
+    let merged = lsc_merge_completions(id_list, kw_list)
+
+    merged
+}
+
+// Sort completions by priority in descending order (highest priority first).
+// Uses insertion sort, which is efficient for the small (<=256) list size.
+fn lsc_sort_completions(list: LspCompletionList) -> LspCompletionList with Mut, Div, Panic {
+    var out = list
+    var i: i64 = 1
+    while i < out.count {
+        let current = out.items[i as usize]
+        var j = i - 1
+        while j >= 0 {
+            let j_prio = out.items[j as usize].sort_priority
+            if j_prio < current.sort_priority {
+                out.items[(j + 1) as usize] = out.items[j as usize]
+                j = j - 1
+            } else {
+                j = 0 - 1
+            }
+        }
+        out.items[(j + 1) as usize] = current
+        i = i + 1
+    }
+    out
+}
+
+// Filter completions to at most max items.  Returns the truncated list
+// with is_incomplete set to true if items were dropped.
+fn lsc_filter_completions(list: LspCompletionList, max: i64) -> LspCompletionList with Mut, Div, Panic {
+    if list.count <= max {
+        return list
+    }
+    var out = list
+    out.count = max
+    out.is_incomplete = true
+    out
+}
+
+// Merge two completion lists into one.  Appends items from b to a,
+// stopping at the LSC_MAX_COMPLETIONS capacity.
+fn lsc_merge_completions(a: LspCompletionList, b: LspCompletionList) -> LspCompletionList with Mut, Div, Panic {
+    var out = a
+    var i: i64 = 0
+    while i < b.count {
+        if out.count >= LSC_MAX_COMPLETIONS {
+            out.is_incomplete = true
+            return out
+        }
+        out.items[out.count as usize] = b.items[i as usize]
+        out.count = out.count + 1
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
+// Section 10b: COMPLETION LIST UTILITIES
+// ============================================================================
+
+// Check if a completion list contains an item with the given label_hash.
+fn lsc_list_contains_label(list: LspCompletionList, label: i64) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < list.count {
+        if list.items[i as usize].label_hash == label {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Find the index of an item with the given label_hash.  Returns LSC_INVALID
+// if not found.
+fn lsc_list_find_label(list: LspCompletionList, label: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < list.count {
+        if list.items[i as usize].label_hash == label {
+            return i
+        }
+        i = i + 1
+    }
+    LSC_INVALID
+}
+
+// Return the maximum priority in a completion list.
+fn lsc_list_max_priority(list: LspCompletionList) -> i64 with Mut, Div, Panic {
+    if list.count == 0 {
+        return 0
+    }
+    var max_prio = list.items[0].sort_priority
+    var i: i64 = 1
+    while i < list.count {
+        if list.items[i as usize].sort_priority > max_prio {
+            max_prio = list.items[i as usize].sort_priority
+        }
+        i = i + 1
+    }
+    max_prio
+}
+
+// Return the minimum priority in a completion list.
+fn lsc_list_min_priority(list: LspCompletionList) -> i64 with Mut, Div, Panic {
+    if list.count == 0 {
+        return 0
+    }
+    var min_prio = list.items[0].sort_priority
+    var i: i64 = 1
+    while i < list.count {
+        if list.items[i as usize].sort_priority < min_prio {
+            min_prio = list.items[i as usize].sort_priority
+        }
+        i = i + 1
+    }
+    min_prio
+}
+
+// Count items with a specific kind in a completion list.
+fn lsc_list_count_kind(list: LspCompletionList, kind: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < list.count {
+        if list.items[i as usize].kind == kind {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Check if a completion list is sorted by priority (descending).
+fn lsc_list_is_sorted(list: LspCompletionList) -> bool with Mut, Div, Panic {
+    if list.count <= 1 {
+        return true
+    }
+    var i: i64 = 1
+    while i < list.count {
+        if list.items[i as usize].sort_priority > list.items[(i - 1) as usize].sort_priority {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Deduplicate a completion list by label_hash.  Keeps the first occurrence
+// of each label.  Returns the deduplicated list.
+fn lsc_dedup_completions(list: LspCompletionList) -> LspCompletionList with Mut, Div, Panic {
+    var out = lsp_completion_list_new()
+    var i: i64 = 0
+    while i < list.count {
+        let label = list.items[i as usize].label_hash
+        let found = lsc_list_contains_label(out, label)
+        if found == false {
+            out = lsp_completion_list_add(out, list.items[i as usize])
+        }
+        i = i + 1
+    }
+    out.is_incomplete = list.is_incomplete
+    out
+}
+
+// ============================================================================
+// Section 11: SNIPPET GENERATION
+// ============================================================================
+
+// Each snippet function returns an LspCompletionItem with kind=SNIPPET
+// and a label_hash representing the snippet text.  The label hashes are
+// placeholder intern IDs; the real integration layer maps them to the
+// actual snippet strings.
+
+// Snippet IDs: using a distinctive range 9001..9007 to avoid collisions
+let LSC_SNIPPET_FN_ID: i64       = 9001
+let LSC_SNIPPET_STRUCT_ID: i64   = 9002
+let LSC_SNIPPET_ENUM_ID: i64     = 9003
+let LSC_SNIPPET_MATCH_ID: i64    = 9004
+let LSC_SNIPPET_IF_ID: i64       = 9005
+let LSC_SNIPPET_WHILE_ID: i64    = 9006
+let LSC_SNIPPET_FOR_ID: i64      = 9007
+
+// `fn name() -> T { }`
+fn lsc_snippet_fn() -> LspCompletionItem {
+    lsp_completion_item_new(LSC_SNIPPET_FN_ID, LSC_KIND_SNIPPET, 0, 60)
+}
+
+// `struct Name { }`
+fn lsc_snippet_struct() -> LspCompletionItem {
+    lsp_completion_item_new(LSC_SNIPPET_STRUCT_ID, LSC_KIND_SNIPPET, 0, 60)
+}
+
+// `enum Name { }`
+fn lsc_snippet_enum() -> LspCompletionItem {
+    lsp_completion_item_new(LSC_SNIPPET_ENUM_ID, LSC_KIND_SNIPPET, 0, 60)
+}
+
+// `match expr { }`
+fn lsc_snippet_match() -> LspCompletionItem {
+    lsp_completion_item_new(LSC_SNIPPET_MATCH_ID, LSC_KIND_SNIPPET, 0, 55)
+}
+
+// `if cond { }`
+fn lsc_snippet_if() -> LspCompletionItem {
+    lsp_completion_item_new(LSC_SNIPPET_IF_ID, LSC_KIND_SNIPPET, 0, 55)
+}
+
+// `while cond { }`
+fn lsc_snippet_while() -> LspCompletionItem {
+    lsp_completion_item_new(LSC_SNIPPET_WHILE_ID, LSC_KIND_SNIPPET, 0, 55)
+}
+
+// `for x in iter { }`
+fn lsc_snippet_for() -> LspCompletionItem {
+    lsp_completion_item_new(LSC_SNIPPET_FOR_ID, LSC_KIND_SNIPPET, 0, 55)
+}
+
+// ============================================================================
+// Section 12: TESTS
+// ============================================================================
+
+// -------------------------------------------------------
+// String matching tests (T01-T05)
+// -------------------------------------------------------
+
+// T01: lsc_char_to_lower converts uppercase to lowercase
+fn test_lsc_char_to_lower() -> bool {
+    let a_lower = lsc_char_to_lower(65)  // 'A' -> 'a'
+    let ok_a = a_lower == 97
+    let z_lower = lsc_char_to_lower(90)  // 'Z' -> 'z'
+    let ok_z = z_lower == 122
+    // lowercase and non-alpha unchanged
+    let x_unchanged = lsc_char_to_lower(120)  // 'x' stays 'x'
+    let ok_x = x_unchanged == 120
+    let digit_unchanged = lsc_char_to_lower(48)  // '0' stays '0'
+    let ok_d = digit_unchanged == 48
+    ok_a && ok_z && ok_x && ok_d
+}
+
+// T02: lsc_is_letter detects letters
+fn test_lsc_is_letter() -> bool {
+    let ok_a = lsc_is_letter(65)   // 'A'
+    let ok_z = lsc_is_letter(122)  // 'z'
+    let not_digit = lsc_is_letter(48) == false  // '0'
+    let not_space = lsc_is_letter(32) == false  // ' '
+    ok_a && ok_z && not_digit && not_space
+}
+
+// T03: lsc_is_upper detects uppercase
+fn test_lsc_is_upper() -> bool {
+    let ok_A = lsc_is_upper(65)    // 'A'
+    let ok_Z = lsc_is_upper(90)    // 'Z'
+    let not_a = lsc_is_upper(97) == false  // 'a'
+    let not_0 = lsc_is_upper(48) == false  // '0'
+    ok_A && ok_Z && not_a && not_0
+}
+
+// T04: lsc_name_matches_prefix basic matching
+fn test_lsc_name_matches_prefix() -> bool with Mut, Div, Panic {
+    // Build name "hello" -> [104, 101, 108, 108, 111, ...]
+    var name: [i8; 256] = [0; 256]
+    name[0] = 104  // 'h'
+    name[1] = 101  // 'e'
+    name[2] = 108  // 'l'
+    name[3] = 108  // 'l'
+    name[4] = 111  // 'o'
+
+    // prefix "hel"
+    var pfx: [i8; 256] = [0; 256]
+    pfx[0] = 104  // 'h'
+    pfx[1] = 101  // 'e'
+    pfx[2] = 108  // 'l'
+
+    let ok_match = lsc_name_matches_prefix(name, 5, pfx, 3)
+
+    // prefix "HEL" (case-insensitive)
+    var pfx2: [i8; 256] = [0; 256]
+    pfx2[0] = 72  // 'H'
+    pfx2[1] = 69  // 'E'
+    pfx2[2] = 76  // 'L'
+    let ok_ci = lsc_name_matches_prefix(name, 5, pfx2, 3)
+
+    // prefix "xyz" should not match
+    var pfx3: [i8; 256] = [0; 256]
+    pfx3[0] = 120  // 'x'
+    pfx3[1] = 121  // 'y'
+    pfx3[2] = 122  // 'z'
+    let no_match = lsc_name_matches_prefix(name, 5, pfx3, 3) == false
+
+    // empty prefix matches everything
+    let empty_pfx: [i8; 256] = [0; 256]
+    let ok_empty = lsc_name_matches_prefix(name, 5, empty_pfx, 0)
+
+    ok_match && ok_ci && no_match && ok_empty
+}
+
+// T05: lsc_name_score scoring tiers
+fn test_lsc_name_score() -> bool with Mut, Div, Panic {
+    // Build name "count" -> [99, 111, 117, 110, 116]
+    var name: [i8; 256] = [0; 256]
+    name[0] = 99   // 'c'
+    name[1] = 111  // 'o'
+    name[2] = 117  // 'u'
+    name[3] = 110  // 'n'
+    name[4] = 116  // 't'
+
+    // Exact prefix "co" -> high score
+    var pfx: [i8; 256] = [0; 256]
+    pfx[0] = 99   // 'c'
+    pfx[1] = 111  // 'o'
+    let score_exact = lsc_name_score(name, 5, pfx, 2)
+    let ok_exact = score_exact >= 150
+
+    // Case-insensitive prefix "CO" -> medium-high score
+    var pfx_ci: [i8; 256] = [0; 256]
+    pfx_ci[0] = 67   // 'C'
+    pfx_ci[1] = 79   // 'O'
+    let score_ci = lsc_name_score(name, 5, pfx_ci, 2)
+    let ok_ci = score_ci >= 100
+
+    // Non-matching prefix "zz"
+    var pfx_no: [i8; 256] = [0; 256]
+    pfx_no[0] = 122  // 'z'
+    pfx_no[1] = 122  // 'z'
+    let score_no = lsc_name_score(name, 5, pfx_no, 2)
+    let ok_no = score_no == 0
+
+    // Empty prefix -> minimal score
+    let empty: [i8; 256] = [0; 256]
+    let score_empty = lsc_name_score(name, 5, empty, 0)
+    let ok_empty = score_empty == 1
+
+    ok_exact && ok_ci && ok_no && ok_empty
+}
+
+// -------------------------------------------------------
+// Scope management tests (T06-T10)
+// -------------------------------------------------------
+
+// T06: add variable and verify count
+fn test_lsc_add_variable_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let idx = lsc_add_variable(p, 100, 200)
+    let ok_idx = idx == 0
+    let ok_count = p.scope_count == 1
+    let ok_name = p.scope_entries[0].name_id == 100
+    let ok_type = p.scope_entries[0].type_id == 200
+    let ok_vis = p.scope_entries[0].visible
+    ok_idx && ok_count && ok_name && ok_type && ok_vis
+}
+fn test_lsc_add_variable() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_add_variable_inner(&! p)
+}
+
+// T07: add function and verify kind
+fn test_lsc_add_function_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let idx = lsc_add_function(p, 101, 201)
+    let ok_idx = idx >= 0
+    let ok_kind = match p.scope_entries[idx as usize].kind {
+        LscScopeKind::LscScopeFunc => true,
+        _ => false,
+    }
+    ok_idx && ok_kind
+}
+fn test_lsc_add_function() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_add_function_inner(&! p)
+}
+
+// T08: add type entry
+fn test_lsc_add_type_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let idx = lsc_add_type(p, 102, 999)
+    let ok_idx = idx >= 0
+    let ok_kind = match p.scope_entries[idx as usize].kind {
+        LscScopeKind::LscScopeType => true,
+        _ => false,
+    }
+    let ok_detail = p.scope_entries[idx as usize].detail_id == 999
+    ok_idx && ok_kind && ok_detail
+}
+fn test_lsc_add_type() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_add_type_inner(&! p)
+}
+
+// T09: scope enter and exit hides entries
+fn test_lsc_scope_enter_exit_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    // Add entry at depth 0
+    let idx0 = lsc_add_variable(p, 50, 0)
+    // Enter scope
+    let saved = lsc_enter_scope(p)
+    let ok_depth = p.current_depth == 1
+    // Add entry at depth 1
+    let idx1 = lsc_add_variable(p, 51, 0)
+    let ok_inner_vis = p.scope_entries[idx1 as usize].visible
+    // Exit scope
+    let hidden = lsc_exit_scope(p, saved)
+    let ok_hidden = hidden == 1
+    let ok_outer_vis = p.scope_entries[idx0 as usize].visible
+    let ok_inner_gone = p.scope_entries[idx1 as usize].visible == false
+    ok_depth && ok_inner_vis && ok_hidden && ok_outer_vis && ok_inner_gone
+}
+fn test_lsc_scope_enter_exit() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_scope_enter_exit_inner(&! p)
+}
+
+// T10: add module entry
+fn test_lsc_add_module_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let idx = lsc_add_module(p, 103)
+    let ok_idx = idx >= 0
+    let ok_kind = match p.scope_entries[idx as usize].kind {
+        LscScopeKind::LscScopeModule => true,
+        _ => false,
+    }
+    ok_idx && ok_kind
+}
+fn test_lsc_add_module() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_add_module_inner(&! p)
+}
+
+// -------------------------------------------------------
+// Identifier completion tests (T11-T15)
+// -------------------------------------------------------
+
+// T11: complete identifier with empty prefix returns all visible
+fn test_lsc_complete_id_empty_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let v1 = lsc_add_variable(p, 10, 0)
+    let v2 = lsc_add_function(p, 11, 0)
+    let v3 = lsc_add_variable(p, 12, 0)
+
+    let ctx = lsc_context_new()
+    let list = lsc_complete_identifier(p, &ctx)
+    list.count == 3
+}
+fn test_lsc_complete_id_empty() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_complete_id_empty_inner(&! p)
+}
+
+// T12: complete identifier ignores hidden scope entries
+fn test_lsc_complete_id_scope_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let v1 = lsc_add_variable(p, 10, 0)
+    let saved = lsc_enter_scope(p)
+    let v2 = lsc_add_variable(p, 11, 0)
+    let hidden = lsc_exit_scope(p, saved)
+
+    let ctx = lsc_context_new()
+    let list = lsc_complete_identifier(p, &ctx)
+    // Only the outer variable should appear
+    list.count == 1
+}
+fn test_lsc_complete_id_scope() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_complete_id_scope_inner(&! p)
+}
+
+// T13: complete identifier with prefix filters by name_id heuristic
+fn test_lsc_complete_id_prefix_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let v1 = lsc_add_variable(p, 10, 0)
+    let v2 = lsc_add_function(p, 0, 0)  // name_id=0 will not match non-empty prefix
+
+    var ctx = lsc_context_new()
+    ctx.prefix[0] = 102  // 'f'
+    ctx.prefix_len = 1
+
+    let list = lsc_complete_identifier(p, &ctx)
+    // Only name_id=10 (nonzero) should match
+    list.count == 1
+}
+fn test_lsc_complete_id_prefix() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_complete_id_prefix_inner(&! p)
+}
+
+// T14: complete identifier returns correct kind
+fn test_lsc_complete_id_kind_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let v1 = lsc_add_function(p, 20, 0)
+
+    let ctx = lsc_context_new()
+    let list = lsc_complete_identifier(p, &ctx)
+    let ok_count = list.count == 1
+    let ok_kind = list.items[0].kind == LSC_KIND_FUNCTION
+    ok_count && ok_kind
+}
+fn test_lsc_complete_id_kind() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_complete_id_kind_inner(&! p)
+}
+
+// T15: complete identifier respects depth priority
+fn test_lsc_complete_id_depth_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let v1 = lsc_add_variable(p, 30, 0)  // depth 0
+    let saved = lsc_enter_scope(p)
+    let v2 = lsc_add_variable(p, 31, 0)  // depth 1
+
+    let ctx = lsc_context_new()
+    let list = lsc_complete_identifier(p, &ctx)
+    let ok_count = list.count == 2
+    // Deeper entry should have higher priority
+    let prio0 = list.items[0].sort_priority
+    let prio1 = list.items[1].sort_priority
+    let ok_prio = prio1 > prio0
+    ok_count && ok_prio
+}
+fn test_lsc_complete_id_depth() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_complete_id_depth_inner(&! p)
+}
+
+// -------------------------------------------------------
+// Dot completion tests (T16-T20)
+// -------------------------------------------------------
+
+// T16: dot completion returns fields for matching struct
+fn test_lsc_complete_dot_fields_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let f1 = lsc_add_field(p, 40, 200, 500)  // field on struct 500
+    let f2 = lsc_add_field(p, 41, 201, 500)  // field on struct 500
+    let f3 = lsc_add_field(p, 42, 202, 501)  // field on different struct
+
+    let ctx = lsc_context_new()
+    let list = lsc_complete_dot(p, &ctx, 500)
+    list.count == 2
+}
+fn test_lsc_complete_dot_fields() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_complete_dot_fields_inner(&! p)
+}
+
+// T17: dot completion returns methods for matching receiver
+fn test_lsc_complete_dot_methods_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let m1 = lsc_add_method(p, 50, 300, 600, 1)
+    let m2 = lsc_add_method(p, 51, 301, 600, 2)
+    let m3 = lsc_add_method(p, 52, 302, 601, 0)
+
+    let ctx = lsc_context_new()
+    let list = lsc_complete_dot(p, &ctx, 600)
+    list.count == 2
+}
+fn test_lsc_complete_dot_methods() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_complete_dot_methods_inner(&! p)
+}
+
+// T18: dot completion returns both fields and methods
+fn test_lsc_complete_dot_mixed_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let f1 = lsc_add_field(p, 60, 200, 700)
+    let m1 = lsc_add_method(p, 61, 300, 700, 1)
+
+    let ctx = lsc_context_new()
+    let list = lsc_complete_dot(p, &ctx, 700)
+    let ok_count = list.count == 2
+    // First should be field (fields listed before methods), second method
+    let ok_field_kind = list.items[0].kind == LSC_KIND_FIELD
+    let ok_method_kind = list.items[1].kind == LSC_KIND_METHOD
+    ok_count && ok_field_kind && ok_method_kind
+}
+fn test_lsc_complete_dot_mixed() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_complete_dot_mixed_inner(&! p)
+}
+
+// T19: dot completion returns empty for unknown receiver
+fn test_lsc_complete_dot_unknown_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let f1 = lsc_add_field(p, 70, 200, 800)
+
+    let ctx = lsc_context_new()
+    let list = lsc_complete_dot(p, &ctx, 999)
+    list.count == 0
+}
+fn test_lsc_complete_dot_unknown() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_complete_dot_unknown_inner(&! p)
+}
+
+// T20: dot completion field kind is correct
+fn test_lsc_complete_dot_field_kind_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let f1 = lsc_add_field(p, 80, 200, 900)
+
+    let ctx = lsc_context_new()
+    let list = lsc_complete_dot(p, &ctx, 900)
+    let ok_count = list.count == 1
+    let ok_kind = list.items[0].kind == LSC_KIND_FIELD
+    let ok_label = list.items[0].label_hash == 80
+    ok_count && ok_kind && ok_label
+}
+fn test_lsc_complete_dot_field_kind() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_complete_dot_field_kind_inner(&! p)
+}
+
+// -------------------------------------------------------
+// Path completion tests (T21-T25)
+// -------------------------------------------------------
+
+// T21: path completion finds entries belonging to module
+fn test_lsc_complete_path_basic_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    // Add entries with detail_id matching a module
+    let v1 = lsc_add_function(p, 90, 0)
+    // Manually set detail_id to module id 555
+    p.scope_entries[0].detail_id = 555
+
+    let v2 = lsc_add_function(p, 91, 0)
+    p.scope_entries[1].detail_id = 556  // different module
+
+    let ctx = lsc_context_new()
+    let list = lsc_complete_path(p, &ctx, 555)
+    list.count == 1
+}
+fn test_lsc_complete_path_basic() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_complete_path_basic_inner(&! p)
+}
+
+// T22: path completion returns empty for unknown module
+fn test_lsc_complete_path_empty_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let v1 = lsc_add_function(p, 92, 0)
+    p.scope_entries[0].detail_id = 555
+
+    let ctx = lsc_context_new()
+    let list = lsc_complete_path(p, &ctx, 999)
+    list.count == 0
+}
+fn test_lsc_complete_path_empty() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_complete_path_empty_inner(&! p)
+}
+
+// T23: path completion respects visibility
+fn test_lsc_complete_path_vis_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let v1 = lsc_add_function(p, 93, 0)
+    p.scope_entries[0].detail_id = 555
+
+    // Enter and exit scope to hide the entry
+    let saved = lsc_enter_scope(p)
+    let v2 = lsc_add_function(p, 94, 0)
+    p.scope_entries[1].detail_id = 555
+    let hidden = lsc_exit_scope(p, saved)
+
+    let ctx = lsc_context_new()
+    let list = lsc_complete_path(p, &ctx, 555)
+    // Only the visible entry should appear
+    list.count == 1
+}
+fn test_lsc_complete_path_vis() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_complete_path_vis_inner(&! p)
+}
+
+// T24: path completion multiple entries
+fn test_lsc_complete_path_multi_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let v1 = lsc_add_function(p, 95, 0)
+    p.scope_entries[0].detail_id = 777
+    let v2 = lsc_add_type(p, 96, 777)
+    let v3 = lsc_add_variable(p, 97, 0)
+    p.scope_entries[2].detail_id = 777
+
+    let ctx = lsc_context_new()
+    let list = lsc_complete_path(p, &ctx, 777)
+    list.count == 3
+}
+fn test_lsc_complete_path_multi() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_complete_path_multi_inner(&! p)
+}
+
+// T25: path completion preserves kind
+fn test_lsc_complete_path_kind_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let v1 = lsc_add_type(p, 98, 888)
+
+    let ctx = lsc_context_new()
+    let list = lsc_complete_path(p, &ctx, 888)
+    let ok_count = list.count == 1
+    let ok_kind = list.items[0].kind == LSC_KIND_STRUCT
+    ok_count && ok_kind
+}
+fn test_lsc_complete_path_kind() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_complete_path_kind_inner(&! p)
+}
+
+// -------------------------------------------------------
+// Type completion tests (T26-T30)
+// -------------------------------------------------------
+
+// T26: type completion only returns type-like entries
+fn test_lsc_complete_type_basic_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let v1 = lsc_add_variable(p, 110, 0)  // variable -- not type-like
+    let v2 = lsc_add_type(p, 111, 0)      // type -- type-like
+    let v3 = lsc_add_function(p, 112, 0)  // function -- not type-like
+    let v4 = lsc_add_module(p, 113)        // module -- type-like
+
+    let ctx = lsc_context_new()
+    let list = lsc_complete_type(p, &ctx)
+    list.count == 2
+}
+fn test_lsc_complete_type_basic() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_complete_type_basic_inner(&! p)
+}
+
+// T27: type completion returns empty when no types in scope
+fn test_lsc_complete_type_empty_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let v1 = lsc_add_variable(p, 120, 0)
+    let v2 = lsc_add_function(p, 121, 0)
+
+    let ctx = lsc_context_new()
+    let list = lsc_complete_type(p, &ctx)
+    list.count == 0
+}
+fn test_lsc_complete_type_empty() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_complete_type_empty_inner(&! p)
+}
+
+// T28: type completion respects visibility
+fn test_lsc_complete_type_vis_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let v1 = lsc_add_type(p, 130, 0)
+    let saved = lsc_enter_scope(p)
+    let v2 = lsc_add_type(p, 131, 0)
+    let hidden = lsc_exit_scope(p, saved)
+
+    let ctx = lsc_context_new()
+    let list = lsc_complete_type(p, &ctx)
+    list.count == 1
+}
+fn test_lsc_complete_type_vis() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_complete_type_vis_inner(&! p)
+}
+
+// T29: type completion kind is correct
+fn test_lsc_complete_type_kind_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let v1 = lsc_add_type(p, 140, 0)
+
+    let ctx = lsc_context_new()
+    let list = lsc_complete_type(p, &ctx)
+    let ok_count = list.count == 1
+    let ok_kind = list.items[0].kind == LSC_KIND_STRUCT
+    ok_count && ok_kind
+}
+fn test_lsc_complete_type_kind() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_complete_type_kind_inner(&! p)
+}
+
+// T30: type completion includes modules
+fn test_lsc_complete_type_module_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let v1 = lsc_add_module(p, 150)
+
+    let ctx = lsc_context_new()
+    let list = lsc_complete_type(p, &ctx)
+    let ok_count = list.count == 1
+    let ok_kind = list.items[0].kind == LSC_KIND_MODULE
+    ok_count && ok_kind
+}
+fn test_lsc_complete_type_module() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_complete_type_module_inner(&! p)
+}
+
+// -------------------------------------------------------
+// Keyword completion tests (T31-T35)
+// -------------------------------------------------------
+
+// T31: keyword completion returns registered keywords
+fn test_lsc_keyword_basic_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let count = lsc_register_sounio_keywords(p)
+    let ok_count = count == 28
+
+    let ctx = lsc_context_new()
+    let list = lsc_complete_keyword(p, &ctx)
+    list.count == 28
+}
+fn test_lsc_keyword_basic() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_keyword_basic_inner(&! p)
+}
+
+// T32: lsc_is_keyword works after registration
+fn test_lsc_is_keyword_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let count = lsc_register_sounio_keywords(p)
+    // Keywords were registered with IDs 1001..1028
+    let ok_fn = lsc_is_keyword(p, 1001)
+    let ok_let = lsc_is_keyword(p, 1002)
+    let ok_var = lsc_is_keyword(p, 1003)
+    let not_random = lsc_is_keyword(p, 9999) == false
+    ok_fn && ok_let && ok_var && not_random
+}
+fn test_lsc_is_keyword() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_is_keyword_inner(&! p)
+}
+
+// T33: keyword completion items have correct kind
+fn test_lsc_keyword_kind_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let count = lsc_register_sounio_keywords(p)
+
+    let ctx = lsc_context_new()
+    let list = lsc_complete_keyword(p, &ctx)
+    // All items should have LSC_KIND_KEYWORD
+    var all_ok = true
+    var i: i64 = 0
+    while i < list.count {
+        if list.items[i as usize].kind != LSC_KIND_KEYWORD {
+            all_ok = false
+        }
+        i = i + 1
+    }
+    all_ok
+}
+fn test_lsc_keyword_kind() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_keyword_kind_inner(&! p)
+}
+
+// T34: keyword completion with non-empty prefix filters by id heuristic
+fn test_lsc_keyword_prefix_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    // Manually push one keyword with name_id=0
+    let r1 = lsc_push_keyword(p, 0)
+    // And one with name_id=5
+    let r2 = lsc_push_keyword(p, 5)
+
+    var ctx = lsc_context_new()
+    ctx.prefix[0] = 102  // 'f'
+    ctx.prefix_len = 1
+
+    let list = lsc_complete_keyword(p, &ctx)
+    // Only name_id=5 (nonzero) should match
+    list.count == 1
+}
+fn test_lsc_keyword_prefix() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_keyword_prefix_inner(&! p)
+}
+
+// T35: keyword priority is lower than variables
+fn test_lsc_keyword_priority_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let count = lsc_register_sounio_keywords(p)
+
+    let ctx = lsc_context_new()
+    let kw_list = lsc_complete_keyword(p, &ctx)
+    // Keyword priority should be 40 + score (score=1 for empty prefix) = 41
+    let ok_prio = kw_list.items[0].sort_priority == 41
+    ok_prio
+}
+fn test_lsc_keyword_priority() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_keyword_priority_inner(&! p)
+}
+
+// -------------------------------------------------------
+// Snippet generation tests (T36-T40)
+// -------------------------------------------------------
+
+// T36: fn snippet has correct kind and label
+fn test_lsc_snippet_fn() -> bool {
+    let item = lsc_snippet_fn()
+    let ok_kind = item.kind == LSC_KIND_SNIPPET
+    let ok_label = item.label_hash == LSC_SNIPPET_FN_ID
+    ok_kind && ok_label
+}
+
+// T37: struct snippet
+fn test_lsc_snippet_struct() -> bool {
+    let item = lsc_snippet_struct()
+    let ok_kind = item.kind == LSC_KIND_SNIPPET
+    let ok_label = item.label_hash == LSC_SNIPPET_STRUCT_ID
+    ok_kind && ok_label
+}
+
+// T38: enum snippet
+fn test_lsc_snippet_enum() -> bool {
+    let item = lsc_snippet_enum()
+    let ok_kind = item.kind == LSC_KIND_SNIPPET
+    let ok_label = item.label_hash == LSC_SNIPPET_ENUM_ID
+    ok_kind && ok_label
+}
+
+// T39: match snippet
+fn test_lsc_snippet_match() -> bool {
+    let item = lsc_snippet_match()
+    let ok_kind = item.kind == LSC_KIND_SNIPPET
+    let ok_label = item.label_hash == LSC_SNIPPET_MATCH_ID
+    ok_kind && ok_label
+}
+
+// T40: if, while, for snippets
+fn test_lsc_snippet_control_flow() -> bool {
+    let if_item = lsc_snippet_if()
+    let while_item = lsc_snippet_while()
+    let for_item = lsc_snippet_for()
+    let ok_if = if_item.kind == LSC_KIND_SNIPPET && if_item.label_hash == LSC_SNIPPET_IF_ID
+    let ok_while = while_item.kind == LSC_KIND_SNIPPET && while_item.label_hash == LSC_SNIPPET_WHILE_ID
+    let ok_for = for_item.kind == LSC_KIND_SNIPPET && for_item.label_hash == LSC_SNIPPET_FOR_ID
+    ok_if && ok_while && ok_for
+}
+
+// -------------------------------------------------------
+// Sorting / Filtering tests (T41-T45)
+// -------------------------------------------------------
+
+// T41: sort completions orders by priority descending
+fn test_lsc_sort_basic() -> bool with Mut, Div, Panic {
+    var list = lsp_completion_list_new()
+    let i1 = lsp_completion_item_new(1, LSC_KIND_VARIABLE, 0, 10)
+    let i2 = lsp_completion_item_new(2, LSC_KIND_VARIABLE, 0, 50)
+    let i3 = lsp_completion_item_new(3, LSC_KIND_VARIABLE, 0, 30)
+    list = lsp_completion_list_add(list, i1)
+    list = lsp_completion_list_add(list, i2)
+    list = lsp_completion_list_add(list, i3)
+
+    let sorted = lsc_sort_completions(list)
+    let ok_first = sorted.items[0].label_hash == 2   // prio 50
+    let ok_second = sorted.items[1].label_hash == 3  // prio 30
+    let ok_third = sorted.items[2].label_hash == 1   // prio 10
+    ok_first && ok_second && ok_third
+}
+
+// T42: sort on already-sorted list is stable
+fn test_lsc_sort_presorted() -> bool with Mut, Div, Panic {
+    var list = lsp_completion_list_new()
+    let i1 = lsp_completion_item_new(1, LSC_KIND_VARIABLE, 0, 100)
+    let i2 = lsp_completion_item_new(2, LSC_KIND_VARIABLE, 0, 50)
+    list = lsp_completion_list_add(list, i1)
+    list = lsp_completion_list_add(list, i2)
+
+    let sorted = lsc_sort_completions(list)
+    let ok_first = sorted.items[0].label_hash == 1
+    let ok_second = sorted.items[1].label_hash == 2
+    ok_first && ok_second
+}
+
+// T43: filter completions truncates
+fn test_lsc_filter_basic() -> bool with Mut, Div, Panic {
+    var list = lsp_completion_list_new()
+    var i: i64 = 0
+    while i < 10 {
+        let item = lsp_completion_item_new(i + 1, LSC_KIND_VARIABLE, 0, 0)
+        list = lsp_completion_list_add(list, item)
+        i = i + 1
+    }
+
+    let filtered = lsc_filter_completions(list, 5)
+    let ok_count = filtered.count == 5
+    let ok_incomplete = filtered.is_incomplete
+    ok_count && ok_incomplete
+}
+
+// T44: filter completions does not truncate when under limit
+fn test_lsc_filter_under_limit() -> bool with Mut, Div, Panic {
+    var list = lsp_completion_list_new()
+    let item = lsp_completion_item_new(1, LSC_KIND_VARIABLE, 0, 0)
+    list = lsp_completion_list_add(list, item)
+
+    let filtered = lsc_filter_completions(list, 10)
+    let ok_count = filtered.count == 1
+    let ok_complete = filtered.is_incomplete == false
+    ok_count && ok_complete
+}
+
+// T45: merge completions combines two lists
+fn test_lsc_merge_basic() -> bool with Mut, Div, Panic {
+    var a = lsp_completion_list_new()
+    let ia = lsp_completion_item_new(1, LSC_KIND_VARIABLE, 0, 10)
+    a = lsp_completion_list_add(a, ia)
+
+    var b = lsp_completion_list_new()
+    let ib = lsp_completion_item_new(2, LSC_KIND_KEYWORD, 0, 5)
+    b = lsp_completion_list_add(b, ib)
+
+    let merged = lsc_merge_completions(a, b)
+    let ok_count = merged.count == 2
+    let ok_first = merged.items[0].label_hash == 1
+    let ok_second = merged.items[1].label_hash == 2
+    ok_count && ok_first && ok_second
+}
+
+// -------------------------------------------------------
+// Integration tests (T46-T50)
+// -------------------------------------------------------
+
+// T46: provide_completions dispatches to dot completion
+fn test_lsc_dispatch_dot_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let f1 = lsc_add_field(p, 200, 300, 400)
+
+    var ctx = lsc_context_new()
+    ctx.after_dot = true
+    ctx.trigger_char = 400  // receiver_type
+
+    let list = lsc_provide_completions(p, &ctx)
+    let ok_count = list.count == 1
+    let ok_kind = list.items[0].kind == LSC_KIND_FIELD
+    ok_count && ok_kind
+}
+fn test_lsc_dispatch_dot() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_dispatch_dot_inner(&! p)
+}
+
+// T47: provide_completions dispatches to path completion
+fn test_lsc_dispatch_path_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let v1 = lsc_add_function(p, 210, 0)
+    p.scope_entries[0].detail_id = 444
+
+    var ctx = lsc_context_new()
+    ctx.after_colon_colon = true
+    ctx.trigger_char = 444
+
+    let list = lsc_provide_completions(p, &ctx)
+    list.count == 1
+}
+fn test_lsc_dispatch_path() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_dispatch_path_inner(&! p)
+}
+
+// T48: provide_completions dispatches to type completion
+fn test_lsc_dispatch_type_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let v1 = lsc_add_type(p, 220, 0)
+    let v2 = lsc_add_variable(p, 221, 0)
+
+    var ctx = lsc_context_new()
+    ctx.in_type_position = true
+
+    let list = lsc_provide_completions(p, &ctx)
+    // Only the type should appear
+    list.count == 1
+}
+fn test_lsc_dispatch_type() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_dispatch_type_inner(&! p)
+}
+
+// T49: provide_completions merges identifiers and keywords
+fn test_lsc_dispatch_merged_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let v1 = lsc_add_variable(p, 230, 0)
+    let kw_count = lsc_register_sounio_keywords(p)
+
+    let ctx = lsc_context_new()
+    let list = lsc_provide_completions(p, &ctx)
+    // Should have 1 variable + 28 keywords = 29
+    list.count == 29
+}
+fn test_lsc_dispatch_merged() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_dispatch_merged_inner(&! p)
+}
+
+// T50: end-to-end: add items, complete, sort, filter
+fn test_lsc_e2e_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let v1 = lsc_add_variable(p, 300, 0)
+    let v2 = lsc_add_function(p, 301, 0)
+    let v3 = lsc_add_type(p, 302, 0)
+    let kw_count = lsc_register_sounio_keywords(p)
+
+    let ctx = lsc_context_new()
+    let raw = lsc_provide_completions(p, &ctx)
+    let sorted = lsc_sort_completions(raw)
+    let filtered = lsc_filter_completions(sorted, 10)
+
+    let ok_count = filtered.count == 10
+    let ok_incomplete = filtered.is_incomplete
+    // First item should have highest priority
+    let ok_sorted = filtered.items[0].sort_priority >= filtered.items[1].sort_priority
+    ok_count && ok_incomplete && ok_sorted
+}
+fn test_lsc_e2e() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_e2e_inner(&! p)
+}
+
+// T51: provider_new creates empty state
+fn test_lsc_provider_new() -> bool {
+    let p = lsc_provider_new()
+    let ok_scope = p.scope_count == 0
+    let ok_field = p.field_count == 0
+    let ok_method = p.method_count == 0
+    let ok_kw = p.keyword_count == 0
+    let ok_depth = p.current_depth == 0
+    ok_scope && ok_field && ok_method && ok_kw && ok_depth
+}
+
+// T52: context_new creates default context
+fn test_lsc_context_new() -> bool {
+    let ctx = lsc_context_new()
+    let ok_line = ctx.line == 0
+    let ok_col = ctx.col == 0
+    let ok_in_fn = ctx.in_function == false
+    let ok_in_st = ctx.in_struct == false
+    let ok_dot = ctx.after_dot == false
+    let ok_cc = ctx.after_colon_colon == false
+    let ok_pfx = ctx.prefix_len == 0
+    ok_line && ok_col && ok_in_fn && ok_in_st && ok_dot && ok_cc && ok_pfx
+}
+
+// T53: empty_entry has correct defaults
+fn test_lsc_empty_entry() -> bool {
+    let e = lsc_empty_entry()
+    let ok_name = e.name_id == 0
+    let ok_type = e.type_id == 0
+    let ok_vis = e.visible == false
+    let ok_depth = e.depth == 0
+    ok_name && ok_type && ok_vis && ok_depth
+}
+
+// T54: scope_kind_to_completion_kind maps correctly
+fn test_lsc_kind_mapping() -> bool {
+    let ok_var = lsc_scope_kind_to_completion_kind(LscScopeKind::LscScopeVar) == LSC_KIND_VARIABLE
+    let ok_func = lsc_scope_kind_to_completion_kind(LscScopeKind::LscScopeFunc) == LSC_KIND_FUNCTION
+    let ok_type = lsc_scope_kind_to_completion_kind(LscScopeKind::LscScopeType) == LSC_KIND_STRUCT
+    let ok_mod = lsc_scope_kind_to_completion_kind(LscScopeKind::LscScopeModule) == LSC_KIND_MODULE
+    let ok_field = lsc_scope_kind_to_completion_kind(LscScopeKind::LscScopeField) == LSC_KIND_FIELD
+    let ok_method = lsc_scope_kind_to_completion_kind(LscScopeKind::LscScopeMethod) == LSC_KIND_METHOD
+    ok_var && ok_func && ok_type && ok_mod && ok_field && ok_method
+}
+
+// T55: depth_priority increases with depth
+fn test_lsc_depth_priority() -> bool {
+    let p0 = lsc_depth_priority(0, 3)
+    let p1 = lsc_depth_priority(1, 3)
+    let p2 = lsc_depth_priority(2, 3)
+    let p3 = lsc_depth_priority(3, 3)
+    let ok_order = p1 > p0 && p2 > p1 && p3 > p2
+    ok_order
+}
+
+// -------------------------------------------------------
+// Context builder tests (T56-T58)
+// -------------------------------------------------------
+
+// T56: lsc_context_dot creates correct context
+fn test_lsc_context_dot() -> bool {
+    let ctx = lsc_context_dot(42, 10, 5)
+    let ok_dot = ctx.after_dot
+    let ok_trigger = ctx.trigger_char == 42
+    let ok_line = ctx.line == 10
+    let ok_col = ctx.col == 5
+    let ok_in_fn = ctx.in_function
+    let ok_not_cc = ctx.after_colon_colon == false
+    ok_dot && ok_trigger && ok_line && ok_col && ok_in_fn && ok_not_cc
+}
+
+// T57: lsc_context_path creates correct context
+fn test_lsc_context_path() -> bool {
+    let ctx = lsc_context_path(99, 20, 15)
+    let ok_cc = ctx.after_colon_colon
+    let ok_trigger = ctx.trigger_char == 99
+    let ok_not_dot = ctx.after_dot == false
+    ok_cc && ok_trigger && ok_not_dot
+}
+
+// T58: lsc_context_type_pos creates correct context
+fn test_lsc_context_type_pos() -> bool {
+    let ctx = lsc_context_type_pos(5, 3)
+    let ok_type = ctx.in_type_position
+    let ok_line = ctx.line == 5
+    let ok_col = ctx.col == 3
+    let ok_not_dot = ctx.after_dot == false
+    let ok_not_cc = ctx.after_colon_colon == false
+    ok_type && ok_line && ok_col && ok_not_dot && ok_not_cc
+}
+
+// -------------------------------------------------------
+// Provider query tests (T59-T63)
+// -------------------------------------------------------
+
+// T59: lsc_lookup_name finds entries
+fn test_lsc_lookup_name_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let v1 = lsc_add_variable(p, 500, 0)
+    let v2 = lsc_add_function(p, 501, 0)
+
+    let idx = lsc_lookup_name(p, 500)
+    let ok_found = idx == 0
+    let idx2 = lsc_lookup_name(p, 501)
+    let ok_found2 = idx2 == 1
+    let idx3 = lsc_lookup_name(p, 999)
+    let ok_not_found = idx3 == LSC_INVALID
+    ok_found && ok_found2 && ok_not_found
+}
+fn test_lsc_lookup_name() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_lookup_name_inner(&! p)
+}
+
+// T60: lsc_visible_count counts only visible entries
+fn test_lsc_visible_count_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let v1 = lsc_add_variable(p, 510, 0)
+    let saved = lsc_enter_scope(p)
+    let v2 = lsc_add_variable(p, 511, 0)
+    let hidden = lsc_exit_scope(p, saved)
+
+    let count = lsc_visible_count(p)
+    count == 1
+}
+fn test_lsc_visible_count() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_visible_count_inner(&! p)
+}
+
+// T61: lsc_field_count_for counts fields per struct
+fn test_lsc_field_count_for_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let f1 = lsc_add_field(p, 1, 0, 100)
+    let f2 = lsc_add_field(p, 2, 0, 100)
+    let f3 = lsc_add_field(p, 3, 0, 200)
+
+    let count_100 = lsc_field_count_for(p, 100)
+    let count_200 = lsc_field_count_for(p, 200)
+    let count_999 = lsc_field_count_for(p, 999)
+    count_100 == 2 && count_200 == 1 && count_999 == 0
+}
+fn test_lsc_field_count_for() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_field_count_for_inner(&! p)
+}
+
+// T62: lsc_method_count_for counts methods per receiver
+fn test_lsc_method_count_for_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let m1 = lsc_add_method(p, 1, 0, 300, 1)
+    let m2 = lsc_add_method(p, 2, 0, 300, 2)
+    let m3 = lsc_add_method(p, 3, 0, 400, 0)
+
+    let count_300 = lsc_method_count_for(p, 300)
+    let count_400 = lsc_method_count_for(p, 400)
+    count_300 == 2 && count_400 == 1
+}
+fn test_lsc_method_count_for() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_method_count_for_inner(&! p)
+}
+
+// T63: lsc_hide_all hides all visible entries
+fn test_lsc_hide_all_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let v1 = lsc_add_variable(p, 520, 0)
+    let v2 = lsc_add_variable(p, 521, 0)
+    let v3 = lsc_add_variable(p, 522, 0)
+
+    let hidden = lsc_hide_all(p)
+    let ok_hidden = hidden == 3
+    let ok_vis = lsc_visible_count(p) == 0
+    ok_hidden && ok_vis
+}
+fn test_lsc_hide_all() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_hide_all_inner(&! p)
+}
+
+// -------------------------------------------------------
+// Enum and const tests (T64-T65)
+// -------------------------------------------------------
+
+// T64: add enum entry
+fn test_lsc_add_enum_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let idx = lsc_add_enum(p, 600, 601)
+    let ok_idx = idx >= 0
+    let ok_kind = match p.scope_entries[idx as usize].kind {
+        LscScopeKind::LscScopeEnum => true,
+        _ => false,
+    }
+    let ok_detail = p.scope_entries[idx as usize].detail_id == 601
+    ok_idx && ok_kind && ok_detail
+}
+fn test_lsc_add_enum() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_add_enum_inner(&! p)
+}
+
+// T65: add const entry
+fn test_lsc_add_const_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let idx = lsc_add_const(p, 700, 701)
+    let ok_idx = idx >= 0
+    let ok_kind = match p.scope_entries[idx as usize].kind {
+        LscScopeKind::LscScopeConst => true,
+        _ => false,
+    }
+    let ok_type = p.scope_entries[idx as usize].type_id == 701
+    ok_idx && ok_kind && ok_type
+}
+fn test_lsc_add_const() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_add_const_inner(&! p)
+}
+
+// -------------------------------------------------------
+// List utility tests (T66-T70)
+// -------------------------------------------------------
+
+// T66: lsc_list_contains_label
+fn test_lsc_list_contains() -> bool with Mut, Div, Panic {
+    var list = lsp_completion_list_new()
+    let item = lsp_completion_item_new(42, LSC_KIND_VARIABLE, 0, 0)
+    list = lsp_completion_list_add(list, item)
+
+    let ok_found = lsc_list_contains_label(list, 42)
+    let ok_not = lsc_list_contains_label(list, 99) == false
+    ok_found && ok_not
+}
+
+// T67: lsc_list_find_label
+fn test_lsc_list_find() -> bool with Mut, Div, Panic {
+    var list = lsp_completion_list_new()
+    let i1 = lsp_completion_item_new(10, LSC_KIND_VARIABLE, 0, 0)
+    let i2 = lsp_completion_item_new(20, LSC_KIND_FUNCTION, 0, 0)
+    list = lsp_completion_list_add(list, i1)
+    list = lsp_completion_list_add(list, i2)
+
+    let idx1 = lsc_list_find_label(list, 10)
+    let idx2 = lsc_list_find_label(list, 20)
+    let idx3 = lsc_list_find_label(list, 30)
+    idx1 == 0 && idx2 == 1 && idx3 == LSC_INVALID
+}
+
+// T68: lsc_list_max_priority and lsc_list_min_priority
+fn test_lsc_list_priority_range() -> bool with Mut, Div, Panic {
+    var list = lsp_completion_list_new()
+    let i1 = lsp_completion_item_new(1, LSC_KIND_VARIABLE, 0, 10)
+    let i2 = lsp_completion_item_new(2, LSC_KIND_VARIABLE, 0, 50)
+    let i3 = lsp_completion_item_new(3, LSC_KIND_VARIABLE, 0, 30)
+    list = lsp_completion_list_add(list, i1)
+    list = lsp_completion_list_add(list, i2)
+    list = lsp_completion_list_add(list, i3)
+
+    let max_p = lsc_list_max_priority(list)
+    let min_p = lsc_list_min_priority(list)
+    max_p == 50 && min_p == 10
+}
+
+// T69: lsc_list_count_kind
+fn test_lsc_list_count_kind() -> bool with Mut, Div, Panic {
+    var list = lsp_completion_list_new()
+    let i1 = lsp_completion_item_new(1, LSC_KIND_VARIABLE, 0, 0)
+    let i2 = lsp_completion_item_new(2, LSC_KIND_FUNCTION, 0, 0)
+    let i3 = lsp_completion_item_new(3, LSC_KIND_VARIABLE, 0, 0)
+    let i4 = lsp_completion_item_new(4, LSC_KIND_KEYWORD, 0, 0)
+    list = lsp_completion_list_add(list, i1)
+    list = lsp_completion_list_add(list, i2)
+    list = lsp_completion_list_add(list, i3)
+    list = lsp_completion_list_add(list, i4)
+
+    let var_count = lsc_list_count_kind(list, LSC_KIND_VARIABLE)
+    let fn_count = lsc_list_count_kind(list, LSC_KIND_FUNCTION)
+    let kw_count = lsc_list_count_kind(list, LSC_KIND_KEYWORD)
+    let mod_count = lsc_list_count_kind(list, LSC_KIND_MODULE)
+    var_count == 2 && fn_count == 1 && kw_count == 1 && mod_count == 0
+}
+
+// T70: lsc_dedup_completions removes duplicates
+fn test_lsc_dedup() -> bool with Mut, Div, Panic {
+    var list = lsp_completion_list_new()
+    let i1 = lsp_completion_item_new(10, LSC_KIND_VARIABLE, 0, 50)
+    let i2 = lsp_completion_item_new(10, LSC_KIND_VARIABLE, 0, 30)  // duplicate label
+    let i3 = lsp_completion_item_new(20, LSC_KIND_FUNCTION, 0, 40)
+    list = lsp_completion_list_add(list, i1)
+    list = lsp_completion_list_add(list, i2)
+    list = lsp_completion_list_add(list, i3)
+
+    let deduped = lsc_dedup_completions(list)
+    let ok_count = deduped.count == 2
+    // First occurrence of label 10 is kept (prio 50)
+    let ok_first = deduped.items[0].sort_priority == 50
+    ok_count && ok_first
+}
+
+// T71: lsc_list_is_sorted detects sorted and unsorted lists
+fn test_lsc_list_is_sorted() -> bool with Mut, Div, Panic {
+    // Sorted list (descending)
+    var sorted_list = lsp_completion_list_new()
+    let s1 = lsp_completion_item_new(1, LSC_KIND_VARIABLE, 0, 100)
+    let s2 = lsp_completion_item_new(2, LSC_KIND_VARIABLE, 0, 50)
+    let s3 = lsp_completion_item_new(3, LSC_KIND_VARIABLE, 0, 10)
+    sorted_list = lsp_completion_list_add(sorted_list, s1)
+    sorted_list = lsp_completion_list_add(sorted_list, s2)
+    sorted_list = lsp_completion_list_add(sorted_list, s3)
+    let ok_sorted = lsc_list_is_sorted(sorted_list)
+
+    // Unsorted list
+    var unsorted_list = lsp_completion_list_new()
+    let u1 = lsp_completion_item_new(1, LSC_KIND_VARIABLE, 0, 10)
+    let u2 = lsp_completion_item_new(2, LSC_KIND_VARIABLE, 0, 100)
+    unsorted_list = lsp_completion_list_add(unsorted_list, u1)
+    unsorted_list = lsp_completion_list_add(unsorted_list, u2)
+    let ok_unsorted = lsc_list_is_sorted(unsorted_list) == false
+
+    ok_sorted && ok_unsorted
+}
+
+// T72: context_set_prefix sets prefix correctly
+fn test_lsc_context_set_prefix() -> bool with Mut, Div, Panic {
+    var ctx = lsc_context_new()
+    var buf: [i8; 256] = [0; 256]
+    buf[0] = 102  // 'f'
+    buf[1] = 110  // 'n'
+    ctx = lsc_context_set_prefix(ctx, buf, 2)
+    let ok_len = ctx.prefix_len == 2
+    let ok_f = ctx.prefix[0] == 102
+    let ok_n = ctx.prefix[1] == 110
+    ok_len && ok_f && ok_n
+}
+
+// T73: empty field info has correct defaults
+fn test_lsc_empty_field() -> bool {
+    let f = lsc_empty_field()
+    let ok_name = f.name_id == 0
+    let ok_type = f.type_id == 0
+    let ok_struct = f.struct_id == 0
+    ok_name && ok_type && ok_struct
+}
+
+// T74: empty method info has correct defaults
+fn test_lsc_empty_method() -> bool {
+    let m = lsc_empty_method()
+    let ok_name = m.name_id == 0
+    let ok_type = m.type_id == 0
+    let ok_recv = m.receiver_type == 0
+    let ok_params = m.param_count == 0
+    ok_name && ok_type && ok_recv && ok_params
+}
+
+// T75: LSC_INVALID constant is correct
+fn test_lsc_invalid_constant() -> bool {
+    let ok = LSC_INVALID < 0
+    ok
+}
+
+// T76: keyword find helper
+fn test_lsc_find_keyword_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let count = lsc_register_sounio_keywords(p)
+    // fn is at index 0 with id 1001
+    let idx_fn = lsc_find_keyword(p, 1001)
+    let ok_fn = idx_fn == 0
+    // var is at index 2 with id 1003
+    let idx_var = lsc_find_keyword(p, 1003)
+    let ok_var = idx_var == 2
+    // non-existent keyword
+    let idx_bad = lsc_find_keyword(p, 9999)
+    let ok_bad = idx_bad == LSC_INVALID
+    ok_fn && ok_var && ok_bad
+}
+fn test_lsc_find_keyword() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_find_keyword_inner(&! p)
+}
+
+// T77: sort then filter pipeline
+fn test_lsc_sort_filter_pipeline() -> bool with Mut, Div, Panic {
+    var list = lsp_completion_list_new()
+    var i: i64 = 0
+    while i < 20 {
+        let item = lsp_completion_item_new(i + 1, LSC_KIND_VARIABLE, 0, i * 5)
+        list = lsp_completion_list_add(list, item)
+        i = i + 1
+    }
+
+    let sorted = lsc_sort_completions(list)
+    let ok_sorted = lsc_list_is_sorted(sorted)
+    let filtered = lsc_filter_completions(sorted, 5)
+    let ok_count = filtered.count == 5
+    // After sort (desc) and filter(5), top 5 items should have highest prios
+    let ok_top = filtered.items[0].sort_priority == 95  // 19*5
+    ok_sorted && ok_count && ok_top
+}
+
+// T78: merge overflow marks incomplete
+fn test_lsc_merge_overflow() -> bool with Mut, Div, Panic {
+    // Fill list a close to capacity
+    var a = lsp_completion_list_new()
+    var i: i64 = 0
+    while i < 250 {
+        let item = lsp_completion_item_new(i + 1, LSC_KIND_VARIABLE, 0, 0)
+        a = lsp_completion_list_add(a, item)
+        i = i + 1
+    }
+
+    // Create b with 10 items
+    var b = lsp_completion_list_new()
+    var j: i64 = 0
+    while j < 10 {
+        let item = lsp_completion_item_new(1000 + j, LSC_KIND_KEYWORD, 0, 0)
+        b = lsp_completion_list_add(b, item)
+        j = j + 1
+    }
+
+    let merged = lsc_merge_completions(a, b)
+    // Total should be capped at 256
+    let ok_cap = merged.count == 256
+    let ok_incomplete = merged.is_incomplete
+    ok_cap && ok_incomplete
+}
+
+// T79: nested scope management (enter, enter, exit, exit)
+fn test_lsc_nested_scopes_inner(p: &! LscProvider) -> bool with Mut, Div, Panic {
+    let v0 = lsc_add_variable(p, 800, 0)   // depth 0
+    let s1 = lsc_enter_scope(p)              // depth -> 1
+    let v1 = lsc_add_variable(p, 801, 0)   // depth 1
+    let s2 = lsc_enter_scope(p)              // depth -> 2
+    let v2 = lsc_add_variable(p, 802, 0)   // depth 2
+
+    let ok_depth_2 = p.current_depth == 2
+    let vis_at_2 = lsc_visible_count(p)
+    let ok_vis_3 = vis_at_2 == 3
+
+    // Exit inner scope
+    let hidden_inner = lsc_exit_scope(p, s2)
+    let ok_hidden_1 = hidden_inner == 1
+    let ok_depth_1 = p.current_depth == 1
+    let vis_at_1 = lsc_visible_count(p)
+    let ok_vis_2 = vis_at_1 == 2
+
+    // Exit outer scope
+    let hidden_outer = lsc_exit_scope(p, s1)
+    let ok_hidden_2 = hidden_outer == 1
+    let ok_depth_0 = p.current_depth == 0
+    let vis_at_0 = lsc_visible_count(p)
+    let ok_vis_1 = vis_at_0 == 1
+
+    ok_depth_2 && ok_vis_3 && ok_hidden_1 && ok_depth_1 && ok_vis_2
+        && ok_hidden_2 && ok_depth_0 && ok_vis_1
+}
+fn test_lsc_nested_scopes() -> bool with Mut, Div, Panic {
+    var p = lsc_provider_new()
+    test_lsc_nested_scopes_inner(&! p)
+}
+
+// T80: is_type_like_kind distinguishes type-like from value-like
+fn test_lsc_is_type_like_kind() -> bool {
+    let ok_type = lsc_is_type_like_kind(LscScopeKind::LscScopeType)
+    let ok_mod = lsc_is_type_like_kind(LscScopeKind::LscScopeModule)
+    let ok_enum = lsc_is_type_like_kind(LscScopeKind::LscScopeEnum)
+    let not_var = lsc_is_type_like_kind(LscScopeKind::LscScopeVar) == false
+    let not_func = lsc_is_type_like_kind(LscScopeKind::LscScopeFunc) == false
+    let not_field = lsc_is_type_like_kind(LscScopeKind::LscScopeField) == false
+    ok_type && ok_mod && ok_enum && not_var && not_func && not_field
+}
+
+// ============================================================================
+// TEST RUNNER
+// ============================================================================
+
+fn lsc_run_tests() -> i64 with Mut, Div, Panic {
+    var passed: i64 = 0
+    var total: i64 = 0
+
+    // ---- String matching tests (T01-T05) ----
+    total = total + 1
+    if test_lsc_char_to_lower() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_is_letter() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_is_upper() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_name_matches_prefix() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_name_score() { passed = passed + 1 }
+
+    // ---- Scope management tests (T06-T10) ----
+    total = total + 1
+    if test_lsc_add_variable() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_add_function() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_add_type() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_scope_enter_exit() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_add_module() { passed = passed + 1 }
+
+    // ---- Identifier completion tests (T11-T15) ----
+    total = total + 1
+    if test_lsc_complete_id_empty() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_complete_id_scope() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_complete_id_prefix() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_complete_id_kind() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_complete_id_depth() { passed = passed + 1 }
+
+    // ---- Dot completion tests (T16-T20) ----
+    total = total + 1
+    if test_lsc_complete_dot_fields() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_complete_dot_methods() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_complete_dot_mixed() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_complete_dot_unknown() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_complete_dot_field_kind() { passed = passed + 1 }
+
+    // ---- Path completion tests (T21-T25) ----
+    total = total + 1
+    if test_lsc_complete_path_basic() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_complete_path_empty() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_complete_path_vis() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_complete_path_multi() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_complete_path_kind() { passed = passed + 1 }
+
+    // ---- Type completion tests (T26-T30) ----
+    total = total + 1
+    if test_lsc_complete_type_basic() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_complete_type_empty() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_complete_type_vis() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_complete_type_kind() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_complete_type_module() { passed = passed + 1 }
+
+    // ---- Keyword completion tests (T31-T35) ----
+    total = total + 1
+    if test_lsc_keyword_basic() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_is_keyword() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_keyword_kind() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_keyword_prefix() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_keyword_priority() { passed = passed + 1 }
+
+    // ---- Snippet generation tests (T36-T40) ----
+    total = total + 1
+    if test_lsc_snippet_fn() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_snippet_struct() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_snippet_enum() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_snippet_match() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_snippet_control_flow() { passed = passed + 1 }
+
+    // ---- Sorting / Filtering tests (T41-T45) ----
+    total = total + 1
+    if test_lsc_sort_basic() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_sort_presorted() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_filter_basic() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_filter_under_limit() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_merge_basic() { passed = passed + 1 }
+
+    // ---- Integration tests (T46-T50) ----
+    total = total + 1
+    if test_lsc_dispatch_dot() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_dispatch_path() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_dispatch_type() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_dispatch_merged() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_e2e() { passed = passed + 1 }
+
+    // ---- Constructor / constant tests (T51-T55) ----
+    total = total + 1
+    if test_lsc_provider_new() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_context_new() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_empty_entry() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_kind_mapping() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_depth_priority() { passed = passed + 1 }
+
+    // ---- Context builder tests (T56-T58) ----
+    total = total + 1
+    if test_lsc_context_dot() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_context_path() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_context_type_pos() { passed = passed + 1 }
+
+    // ---- Provider query tests (T59-T63) ----
+    total = total + 1
+    if test_lsc_lookup_name() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_visible_count() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_field_count_for() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_method_count_for() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_hide_all() { passed = passed + 1 }
+
+    // ---- Enum and const tests (T64-T65) ----
+    total = total + 1
+    if test_lsc_add_enum() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_add_const() { passed = passed + 1 }
+
+    // ---- List utility tests (T66-T72) ----
+    total = total + 1
+    if test_lsc_list_contains() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_list_find() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_list_priority_range() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_list_count_kind() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_dedup() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_list_is_sorted() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_context_set_prefix() { passed = passed + 1 }
+
+    // ---- Empty / default tests (T73-T75) ----
+    total = total + 1
+    if test_lsc_empty_field() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_empty_method() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_invalid_constant() { passed = passed + 1 }
+
+    // ---- Advanced tests (T76-T80) ----
+    total = total + 1
+    if test_lsc_find_keyword() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_sort_filter_pipeline() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_merge_overflow() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_nested_scopes() { passed = passed + 1 }
+
+    total = total + 1
+    if test_lsc_is_type_like_kind() { passed = passed + 1 }
+
+    passed
+}

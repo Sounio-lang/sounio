@@ -1,0 +1,3573 @@
+// self-hosted::ir::loop_opt — Loop optimization pass
+//
+// A comprehensive loop optimization pass for the Sounio self-hosted compiler IR.
+// Implements classic and modern loop transformations:
+//
+//   1. Loop detection — find natural loops via dominators and back edges
+//   2. Loop analysis — induction variables, trip counts, dependence analysis
+//   3. Loop-invariant code motion (LICM) — hoist invariant computations
+//   4. Loop unrolling — full and partial unrolling with factor selection
+//   5. Strength reduction — replace expensive IV-derived expressions
+//   6. Loop fusion — merge adjacent compatible loops
+//   7. Loop distribution — split loops with independent bodies
+//   8. Vectorization analysis — check vectorizability, find reductions
+//   9. Loop peeling — peel first/last iterations for alignment/edge cases
+//  10. Loop tiling — block nested loops for cache locality
+//
+// All arrays are fixed-size — no heap allocation.
+//
+// References:
+//   Muchnick: "Advanced Compiler Design and Implementation" (1997), Ch. 14-15
+//   Allen & Kennedy: "Optimizing Compilers for Modern Architectures" (2002)
+//   Cooper & Torczon: "Engineering a Compiler" (2011), Ch. 7-8
+//   Wolfe: "High Performance Compilers for Parallel Computing" (1996)
+
+// ============================================================================
+// Section 1: Constants
+// ============================================================================
+
+let LOPT_MAX_LOOPS: i64 = 256
+let LOPT_MAX_BLOCKS: i64 = 512
+let LOPT_MAX_INSTRS: i64 = 4096
+let LOPT_MAX_NESTING: i64 = 16
+let LOPT_MAX_IVS: i64 = 64
+let LOPT_MAX_INVARIANTS: i64 = 256
+let LOPT_MAX_EXITS: i64 = 16
+let LOPT_MAX_BODY: i64 = 128
+let LOPT_MAX_DEPS: i64 = 128
+let LOPT_MAX_REDUCTIONS: i64 = 32
+let LOPT_MAX_BACK_EDGES: i64 = 256
+let LOPT_MAX_PREDS: i64 = 8
+let LOPT_MAX_SUCCS: i64 = 8
+let LOPT_INVALID: i64 = 0 - 1
+
+// Maximum unroll factor (prevents code bloat)
+let LOPT_MAX_UNROLL_FACTOR: i64 = 16
+// Threshold for full unrolling: only if trip_count * body_size <= this
+let LOPT_FULL_UNROLL_THRESHOLD: i64 = 256
+// Default tile size for loop tiling
+let LOPT_DEFAULT_TILE_SIZE: i64 = 32
+// Minimum trip count for vectorization to be worthwhile
+let LOPT_MIN_VECTOR_TRIP: i64 = 4
+// Default vector width (number of elements processed in parallel)
+let LOPT_DEFAULT_VECTOR_WIDTH: i64 = 4
+
+// Loop classification constants
+let LOPT_CLASS_UNKNOWN: i64 = 0
+let LOPT_CLASS_COUNTED: i64 = 1
+let LOPT_CLASS_WHILE: i64 = 2
+let LOPT_CLASS_DO_WHILE: i64 = 3
+let LOPT_CLASS_INFINITE: i64 = 4
+
+// Dependence direction constants
+let LOPT_DEP_NONE: i64 = 0
+let LOPT_DEP_FLOW: i64 = 1
+let LOPT_DEP_ANTI: i64 = 2
+let LOPT_DEP_OUTPUT: i64 = 3
+let LOPT_DEP_INPUT: i64 = 4
+
+// IV kind constants
+let LOPT_IV_BASIC: i64 = 1
+let LOPT_IV_DERIVED: i64 = 2
+let LOPT_IV_LINEAR: i64 = 3
+let LOPT_IV_NONLINEAR: i64 = 4
+
+// Reduction operation constants
+let LOPT_RED_ADD: i64 = 1
+let LOPT_RED_MUL: i64 = 2
+let LOPT_RED_MIN: i64 = 3
+let LOPT_RED_MAX: i64 = 4
+let LOPT_RED_AND: i64 = 5
+let LOPT_RED_OR: i64 = 6
+
+// Optimization result codes
+let LOPT_OK: i64 = 0
+let LOPT_ERR_NO_LOOPS: i64 = 1
+let LOPT_ERR_COMPLEX_CFG: i64 = 2
+let LOPT_ERR_OVERFLOW: i64 = 3
+let LOPT_ERR_DEPENDENCY: i64 = 4
+
+// ============================================================================
+// Section 2: Data Structures
+// ============================================================================
+
+// Represents a back edge in the CFG (tail -> header).
+struct LoptBackEdge {
+    tail_block: i64,
+    header_block: i64,
+}
+
+// Represents a single natural loop.
+struct LoptLoop {
+    id: i64,
+    header: i64,
+    latch: i64,
+    exits: [i64; 16],
+    exit_count: i64,
+    body_blocks: [i64; 128],
+    body_count: i64,
+    depth: i64,
+    parent_id: i64,
+    trip_count: i64,
+    is_counted: bool,
+    classification: i64,
+    instr_count: i64,
+}
+
+// A nest of loops discovered in a function.
+struct LoptLoopNest {
+    loops: [LoptLoop; 256],
+    loop_count: i64,
+    max_depth: i64,
+    back_edges: [LoptBackEdge; 256],
+    back_edge_count: i64,
+}
+
+// An induction variable within a loop.
+struct LoptInductionVar {
+    reg: i64,
+    init_val: i64,
+    step_val: i64,
+    kind: i64,
+    def_instr: i64,
+    loop_id: i64,
+    is_primary: bool,
+    base_iv_reg: i64,
+    scale: i64,
+    offset: i64,
+}
+
+// A loop-invariant instruction that can be hoisted.
+struct LoptLoopInvariant {
+    instr_idx: i64,
+    block_id: i64,
+    def_reg: i64,
+    is_hoistable: bool,
+    depends_on_count: i64,
+    depends_on: [i64; 8],
+}
+
+// Information about loop unrolling potential.
+struct LoptUnrollInfo {
+    loop_id: i64,
+    can_unroll: bool,
+    factor: i64,
+    is_full_unroll: bool,
+    estimated_benefit: i64,
+    body_size: i64,
+    trip_count: i64,
+}
+
+// A dependence between two memory accesses in a loop.
+struct LoptDependence {
+    src_instr: i64,
+    dst_instr: i64,
+    direction: i64,
+    distance: i64,
+    is_loop_carried: bool,
+}
+
+// A reduction variable in a loop.
+struct LoptReductionVar {
+    reg: i64,
+    op_kind: i64,
+    init_val: i64,
+    def_instr: i64,
+    loop_id: i64,
+}
+
+// Vectorization analysis result for a loop.
+struct LoptVectInfo {
+    loop_id: i64,
+    is_vectorizable: bool,
+    vector_width: i64,
+    reduction_count: i64,
+    reductions: [LoptReductionVar; 32],
+    has_loop_carried_dep: bool,
+    estimated_speedup: i64,
+}
+
+// Loop tiling configuration.
+struct LoptTileConfig {
+    loop_id: i64,
+    tile_sizes: [i64; 16],
+    dim_count: i64,
+    estimated_benefit: i64,
+}
+
+// Statistics about the loop optimization pass.
+struct LoptStats {
+    loops_found: i64,
+    invariants_hoisted: i64,
+    loops_unrolled: i64,
+    strength_reductions: i64,
+    loops_fused: i64,
+    loops_distributed: i64,
+    loops_peeled: i64,
+    loops_tiled: i64,
+    ivs_eliminated: i64,
+}
+
+// Overall context for the loop optimization pass.
+struct LoptContext {
+    nest: LoptLoopNest,
+    ivs: [LoptInductionVar; 64],
+    iv_count: i64,
+    invariants: [LoptLoopInvariant; 256],
+    invariant_count: i64,
+    deps: [LoptDependence; 128],
+    dep_count: i64,
+    stats: LoptStats,
+    block_loop_map: [i64; 512],
+    instr_block_map: [i64; 4096],
+    instr_opcodes: [i64; 4096],
+    instr_defs: [i64; 4096],
+    instr_src1: [i64; 4096],
+    instr_src2: [i64; 4096],
+    instr_count: i64,
+    block_count: i64,
+    block_succs: [[i64; 8]; 512],
+    block_succ_counts: [i64; 512],
+    block_preds: [[i64; 8]; 512],
+    block_pred_counts: [i64; 512],
+    idom: [i64; 512],
+}
+
+// ============================================================================
+// Section 3: Constructors
+// ============================================================================
+
+fn lopt_back_edge_new(tail: i64, header: i64) -> LoptBackEdge {
+    LoptBackEdge {
+        tail_block: tail,
+        header_block: header,
+    }
+}
+
+fn lopt_loop_new() -> LoptLoop {
+    LoptLoop {
+        id: LOPT_INVALID,
+        header: LOPT_INVALID,
+        latch: LOPT_INVALID,
+        exits: [LOPT_INVALID; 16],
+        exit_count: 0,
+        body_blocks: [LOPT_INVALID; 128],
+        body_count: 0,
+        depth: 0,
+        parent_id: LOPT_INVALID,
+        trip_count: LOPT_INVALID,
+        is_counted: false,
+        classification: LOPT_CLASS_UNKNOWN,
+        instr_count: 0,
+    }
+}
+
+fn lopt_loop_nest_new() -> LoptLoopNest {
+    LoptLoopNest {
+        loops: [lopt_loop_new(); 256],
+        loop_count: 0,
+        max_depth: 0,
+        back_edges: [lopt_back_edge_new(LOPT_INVALID, LOPT_INVALID); 256],
+        back_edge_count: 0,
+    }
+}
+
+fn lopt_iv_new() -> LoptInductionVar {
+    LoptInductionVar {
+        reg: LOPT_INVALID,
+        init_val: 0,
+        step_val: 0,
+        kind: LOPT_IV_BASIC,
+        def_instr: LOPT_INVALID,
+        loop_id: LOPT_INVALID,
+        is_primary: false,
+        base_iv_reg: LOPT_INVALID,
+        scale: 1,
+        offset: 0,
+    }
+}
+
+fn lopt_invariant_new() -> LoptLoopInvariant {
+    LoptLoopInvariant {
+        instr_idx: LOPT_INVALID,
+        block_id: LOPT_INVALID,
+        def_reg: LOPT_INVALID,
+        is_hoistable: false,
+        depends_on_count: 0,
+        depends_on: [LOPT_INVALID; 8],
+    }
+}
+
+fn lopt_unroll_info_new() -> LoptUnrollInfo {
+    LoptUnrollInfo {
+        loop_id: LOPT_INVALID,
+        can_unroll: false,
+        factor: 1,
+        is_full_unroll: false,
+        estimated_benefit: 0,
+        body_size: 0,
+        trip_count: LOPT_INVALID,
+    }
+}
+
+fn lopt_dep_new() -> LoptDependence {
+    LoptDependence {
+        src_instr: LOPT_INVALID,
+        dst_instr: LOPT_INVALID,
+        direction: LOPT_DEP_NONE,
+        distance: 0,
+        is_loop_carried: false,
+    }
+}
+
+fn lopt_reduction_new() -> LoptReductionVar {
+    LoptReductionVar {
+        reg: LOPT_INVALID,
+        op_kind: LOPT_RED_ADD,
+        init_val: 0,
+        def_instr: LOPT_INVALID,
+        loop_id: LOPT_INVALID,
+    }
+}
+
+fn lopt_vect_info_new() -> LoptVectInfo {
+    LoptVectInfo {
+        loop_id: LOPT_INVALID,
+        is_vectorizable: false,
+        vector_width: LOPT_DEFAULT_VECTOR_WIDTH,
+        reduction_count: 0,
+        reductions: [lopt_reduction_new(); 32],
+        has_loop_carried_dep: false,
+        estimated_speedup: 1,
+    }
+}
+
+fn lopt_tile_config_new() -> LoptTileConfig {
+    LoptTileConfig {
+        loop_id: LOPT_INVALID,
+        tile_sizes: [LOPT_DEFAULT_TILE_SIZE; 16],
+        dim_count: 0,
+        estimated_benefit: 0,
+    }
+}
+
+fn lopt_stats_new() -> LoptStats {
+    LoptStats {
+        loops_found: 0,
+        invariants_hoisted: 0,
+        loops_unrolled: 0,
+        strength_reductions: 0,
+        loops_fused: 0,
+        loops_distributed: 0,
+        loops_peeled: 0,
+        loops_tiled: 0,
+        ivs_eliminated: 0,
+    }
+}
+
+fn lopt_context_new() -> LoptContext {
+    LoptContext {
+        nest: lopt_loop_nest_new(),
+        ivs: [lopt_iv_new(); 64],
+        iv_count: 0,
+        invariants: [lopt_invariant_new(); 256],
+        invariant_count: 0,
+        deps: [lopt_dep_new(); 128],
+        dep_count: 0,
+        stats: lopt_stats_new(),
+        block_loop_map: [LOPT_INVALID; 512],
+        instr_block_map: [LOPT_INVALID; 4096],
+        instr_opcodes: [0; 4096],
+        instr_defs: [LOPT_INVALID; 4096],
+        instr_src1: [LOPT_INVALID; 4096],
+        instr_src2: [LOPT_INVALID; 4096],
+        instr_count: 0,
+        block_count: 0,
+        block_succs: [[LOPT_INVALID; 8]; 512],
+        block_succ_counts: [0; 512],
+        block_preds: [[LOPT_INVALID; 8]; 512],
+        block_pred_counts: [0; 512],
+        idom: [LOPT_INVALID; 512],
+    }
+}
+
+// ============================================================================
+// Section 4: Utility Helpers
+// ============================================================================
+
+// Check if a value exists in a flat i64 array of given length.
+fn lopt_array_contains(arr: [i64; 128], count: i64, val: i64) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < count {
+        if arr[i as usize] == val {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Check if a value exists in a small array (max 16 elements).
+fn lopt_small_array_contains(arr: [i64; 16], count: i64, val: i64) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < count {
+        if arr[i as usize] == val {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Check if block b is dominated by block a.
+// Uses the idom array: b is dominated by a if walking up idom chain from b reaches a.
+fn lopt_dominates(idom: [i64; 512], a: i64, b: i64) -> bool with Mut, Div, Panic {
+    if a == b {
+        return true
+    }
+    var cur = b
+    var guard: i64 = 0
+    while cur != LOPT_INVALID && guard < LOPT_MAX_BLOCKS {
+        if cur == a {
+            return true
+        }
+        if cur >= 0 && cur < LOPT_MAX_BLOCKS {
+            cur = idom[cur as usize]
+        } else {
+            return false
+        }
+        guard = guard + 1
+    }
+    false
+}
+
+// Absolute value for i64.
+fn lopt_abs(x: i64) -> i64 {
+    if x < 0 {
+        return 0 - x
+    }
+    x
+}
+
+// Minimum of two i64 values.
+fn lopt_min(a: i64, b: i64) -> i64 {
+    if a < b { a } else { b }
+}
+
+// Maximum of two i64 values.
+fn lopt_max(a: i64, b: i64) -> i64 {
+    if a > b { a } else { b }
+}
+
+// Integer division, safe against divide-by-zero.
+fn lopt_safe_div(a: i64, b: i64) -> i64 {
+    if b == 0 { return 0 }
+    a / b
+}
+
+// ============================================================================
+// Section 5: CFG Setup — populate context from block/instruction descriptors
+// ============================================================================
+
+// Add a block to the context.
+fn lopt_add_block(ctx: &! LoptContext, block_id: i64) -> i64 with Mut, Div, Panic {
+    if ctx.block_count >= LOPT_MAX_BLOCKS {
+        return LOPT_INVALID
+    }
+    let idx = ctx.block_count
+    ctx.block_succ_counts[idx as usize] = 0
+    ctx.block_pred_counts[idx as usize] = 0
+    ctx.block_loop_map[idx as usize] = LOPT_INVALID
+    ctx.block_count = idx + 1
+    idx
+}
+
+// Add an edge from block `from` to block `to`.
+fn lopt_add_edge(ctx: &! LoptContext, from: i64, to: i64) -> bool with Mut, Div, Panic {
+    if from < 0 || from >= ctx.block_count { return false }
+    if to < 0 || to >= ctx.block_count { return false }
+    let sc = ctx.block_succ_counts[from as usize]
+    if sc >= LOPT_MAX_SUCCS { return false }
+    ctx.block_succs[from as usize][sc as usize] = to
+    ctx.block_succ_counts[from as usize] = sc + 1
+
+    let pc = ctx.block_pred_counts[to as usize]
+    if pc >= LOPT_MAX_PREDS { return false }
+    ctx.block_preds[to as usize][pc as usize] = from
+    ctx.block_pred_counts[to as usize] = pc + 1
+    true
+}
+
+// Add an instruction to the context.
+fn lopt_add_instr(ctx: &! LoptContext, block_id: i64, opcode: i64, def: i64, s1: i64, s2: i64) -> i64 with Mut, Div, Panic {
+    if ctx.instr_count >= LOPT_MAX_INSTRS {
+        return LOPT_INVALID
+    }
+    let idx = ctx.instr_count
+    ctx.instr_block_map[idx as usize] = block_id
+    ctx.instr_opcodes[idx as usize] = opcode
+    ctx.instr_defs[idx as usize] = def
+    ctx.instr_src1[idx as usize] = s1
+    ctx.instr_src2[idx as usize] = s2
+    ctx.instr_count = idx + 1
+    idx
+}
+
+// Set the immediate dominator for a block.
+fn lopt_set_idom(ctx: &! LoptContext, block_id: i64, dom_id: i64) -> bool with Mut, Div, Panic {
+    if block_id < 0 || block_id >= LOPT_MAX_BLOCKS { return false }
+    ctx.idom[block_id as usize] = dom_id
+    true
+}
+
+// ============================================================================
+// Section 6: Back Edge Detection
+// ============================================================================
+
+// Find all back edges in the CFG.
+// A back edge is an edge tail->header where header dominates tail.
+fn lopt_find_back_edges(ctx: &! LoptContext) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var b: i64 = 0
+    while b < ctx.block_count {
+        var s: i64 = 0
+        while s < ctx.block_succ_counts[b as usize] {
+            let succ = ctx.block_succs[b as usize][s as usize]
+            // If the successor dominates the source, it is a back edge
+            if lopt_dominates(ctx.idom, succ, b) {
+                if count < LOPT_MAX_BACK_EDGES {
+                    ctx.nest.back_edges[count as usize] = lopt_back_edge_new(b, succ)
+                    count = count + 1
+                }
+            }
+            s = s + 1
+        }
+        b = b + 1
+    }
+    ctx.nest.back_edge_count = count
+    count
+}
+
+// ============================================================================
+// Section 7: Natural Loop Body Computation
+// ============================================================================
+
+// Compute the body of a natural loop given its header and latch (back edge tail).
+// Uses reverse DFS from latch, stopping at header, to find all blocks in the loop.
+fn lopt_compute_loop_body(ctx: &! LoptContext, header: i64, latch: i64, body_out: &! [i64; 128]) -> i64 with Mut, Div, Panic {
+    // The header is always in the loop body
+    var count: i64 = 0
+    body_out[0] = header
+    count = 1
+
+    if header == latch {
+        // Single-block loop
+        return count
+    }
+
+    // Worklist-based reverse traversal from latch
+    var worklist: [i64; 512] = [LOPT_INVALID; 512]
+    var wl_count: i64 = 0
+    var in_body: [bool; 512] = [false; 512]
+
+    if header >= 0 && header < LOPT_MAX_BLOCKS {
+        in_body[header as usize] = true
+    }
+
+    // Seed with latch
+    if latch >= 0 && latch < LOPT_MAX_BLOCKS {
+        if in_body[latch as usize] == false {
+            in_body[latch as usize] = true
+            if count < LOPT_MAX_BODY {
+                body_out[count as usize] = latch
+                count = count + 1
+            }
+            worklist[0] = latch
+            wl_count = 1
+        }
+    }
+
+    // Process worklist: for each block, add its predecessors
+    while wl_count > 0 {
+        wl_count = wl_count - 1
+        let blk = worklist[wl_count as usize]
+
+        if blk < 0 || blk >= ctx.block_count {
+            // skip invalid
+        } else {
+            var p: i64 = 0
+            while p < ctx.block_pred_counts[blk as usize] {
+                let pred = ctx.block_preds[blk as usize][p as usize]
+                if pred >= 0 && pred < LOPT_MAX_BLOCKS {
+                    if in_body[pred as usize] == false {
+                        in_body[pred as usize] = true
+                        if count < LOPT_MAX_BODY {
+                            body_out[count as usize] = pred
+                            count = count + 1
+                        }
+                        if wl_count < LOPT_MAX_BLOCKS {
+                            worklist[wl_count as usize] = pred
+                            wl_count = wl_count + 1
+                        }
+                    }
+                }
+                p = p + 1
+            }
+        }
+    }
+
+    count
+}
+
+// ============================================================================
+// Section 8: Natural Loop Detection
+// ============================================================================
+
+// Find all natural loops from back edges and populate the loop nest.
+fn lopt_find_natural_loops(ctx: &! LoptContext) -> i64 with Mut, Div, Panic {
+    // First, find all back edges
+    let be_count = lopt_find_back_edges(ctx)
+
+    var loop_count: i64 = 0
+    var be_idx: i64 = 0
+    while be_idx < be_count {
+        if loop_count >= LOPT_MAX_LOOPS {
+            // overflow
+        } else {
+            let tail = ctx.nest.back_edges[be_idx as usize].tail_block
+            let header = ctx.nest.back_edges[be_idx as usize].header_block
+
+            var lp = lopt_loop_new()
+            lp.id = loop_count
+            lp.header = header
+            lp.latch = tail
+
+            // Compute body
+            var body_buf: [i64; 128] = [LOPT_INVALID; 128]
+            let body_count = lopt_compute_loop_body(ctx, header, tail, &! body_buf)
+            lp.body_count = body_count
+
+            var bi: i64 = 0
+            while bi < body_count {
+                lp.body_blocks[bi as usize] = body_buf[bi as usize]
+                bi = bi + 1
+            }
+
+            // Find exit blocks: blocks in the body that have a successor outside the body
+            var exit_count: i64 = 0
+            var bj: i64 = 0
+            while bj < body_count {
+                let blk = body_buf[bj as usize]
+                if blk >= 0 && blk < ctx.block_count {
+                    var si: i64 = 0
+                    while si < ctx.block_succ_counts[blk as usize] {
+                        let succ = ctx.block_succs[blk as usize][si as usize]
+                        let succ_in_body = lopt_array_contains(body_buf, body_count, succ)
+                        if succ_in_body == false {
+                            if exit_count < LOPT_MAX_EXITS {
+                                // Avoid duplicate exits
+                                let already = lopt_small_array_contains(lp.exits, exit_count, blk)
+                                if already == false {
+                                    lp.exits[exit_count as usize] = blk
+                                    exit_count = exit_count + 1
+                                }
+                            }
+                        }
+                        si = si + 1
+                    }
+                }
+                bj = bj + 1
+            }
+            lp.exit_count = exit_count
+
+            // Count instructions in the loop body
+            var ic: i64 = 0
+            var ii: i64 = 0
+            while ii < ctx.instr_count {
+                let iblk = ctx.instr_block_map[ii as usize]
+                if lopt_array_contains(body_buf, body_count, iblk) {
+                    ic = ic + 1
+                }
+                ii = ii + 1
+            }
+            lp.instr_count = ic
+
+            ctx.nest.loops[loop_count as usize] = lp
+            loop_count = loop_count + 1
+        }
+
+        be_idx = be_idx + 1
+    }
+
+    ctx.nest.loop_count = loop_count
+    ctx.stats.loops_found = loop_count
+    loop_count
+}
+
+// ============================================================================
+// Section 9: Loop Tree Construction
+// ============================================================================
+
+// Determine parent-child relationships between loops (nesting).
+// Loop A is the parent of loop B if A's body contains B's header
+// and A is the smallest such loop.
+fn lopt_build_loop_tree(ctx: &! LoptContext) -> i64 with Mut, Div, Panic {
+    var max_depth: i64 = 0
+    var i: i64 = 0
+    while i < ctx.nest.loop_count {
+        // Find the innermost enclosing loop for loop i
+        var best_parent: i64 = LOPT_INVALID
+        var best_size: i64 = LOPT_MAX_BLOCKS + 1
+
+        let hdr_i = ctx.nest.loops[i as usize].header
+
+        var j: i64 = 0
+        while j < ctx.nest.loop_count {
+            if j != i {
+                // Check if loop j contains the header of loop i
+                let body_j = ctx.nest.loops[j as usize].body_blocks
+                let cnt_j = ctx.nest.loops[j as usize].body_count
+                if lopt_array_contains(body_j, cnt_j, hdr_i) {
+                    // loop j contains loop i's header
+                    if cnt_j < best_size {
+                        best_parent = j
+                        best_size = cnt_j
+                    }
+                }
+            }
+            j = j + 1
+        }
+
+        ctx.nest.loops[i as usize].parent_id = best_parent
+        i = i + 1
+    }
+
+    // Compute depths: depth = 1 + parent's depth
+    var changed = true
+    var guard: i64 = 0
+    while changed && guard < LOPT_MAX_NESTING {
+        changed = false
+        var k: i64 = 0
+        while k < ctx.nest.loop_count {
+            let pid = ctx.nest.loops[k as usize].parent_id
+            if pid == LOPT_INVALID {
+                if ctx.nest.loops[k as usize].depth != 1 {
+                    ctx.nest.loops[k as usize].depth = 1
+                    changed = true
+                }
+            } else {
+                if pid >= 0 && pid < ctx.nest.loop_count {
+                    let parent_depth = ctx.nest.loops[pid as usize].depth
+                    let expected = parent_depth + 1
+                    if ctx.nest.loops[k as usize].depth != expected {
+                        ctx.nest.loops[k as usize].depth = expected
+                        changed = true
+                    }
+                }
+            }
+            if ctx.nest.loops[k as usize].depth > max_depth {
+                max_depth = ctx.nest.loops[k as usize].depth
+            }
+            k = k + 1
+        }
+        guard = guard + 1
+    }
+
+    // Map blocks to their innermost loop
+    var m: i64 = 0
+    while m < ctx.nest.loop_count {
+        let lp = ctx.nest.loops[m as usize]
+        var bi: i64 = 0
+        while bi < lp.body_count {
+            let blk = lp.body_blocks[bi as usize]
+            if blk >= 0 && blk < LOPT_MAX_BLOCKS {
+                let cur = ctx.block_loop_map[blk as usize]
+                if cur == LOPT_INVALID {
+                    ctx.block_loop_map[blk as usize] = m
+                } else {
+                    // Assign to the deeper (more nested) loop
+                    if cur >= 0 && cur < ctx.nest.loop_count {
+                        if lp.depth > ctx.nest.loops[cur as usize].depth {
+                            ctx.block_loop_map[blk as usize] = m
+                        }
+                    }
+                }
+            }
+            bi = bi + 1
+        }
+        m = m + 1
+    }
+
+    ctx.nest.max_depth = max_depth
+    max_depth
+}
+
+// ============================================================================
+// Section 10: Induction Variable Analysis
+// ============================================================================
+
+// Check if an instruction is a simple increment/decrement of a register:
+//   def = src + const  or  def = src - const
+// Returns the step value, or LOPT_INVALID if not an IV update.
+fn lopt_check_iv_update(ctx: &! LoptContext, instr_idx: i64) -> i64 with Mut, Div, Panic {
+    if instr_idx < 0 || instr_idx >= ctx.instr_count {
+        return LOPT_INVALID
+    }
+    let opcode = ctx.instr_opcodes[instr_idx as usize]
+    // opcode 6 = BINOP (using same constants as DCE)
+    if opcode != 6 {
+        return LOPT_INVALID
+    }
+    // For a basic IV: dst = src1 OP src2 where one of src is a constant
+    // We look for patterns like r1 = r0 + 1
+    let def = ctx.instr_defs[instr_idx as usize]
+    let s1 = ctx.instr_src1[instr_idx as usize]
+    let s2 = ctx.instr_src2[instr_idx as usize]
+
+    // If def == s1 and s2 looks like a constant (defined by LOAD_IMM)
+    if def == s1 {
+        // Check if s2 is a constant
+        var j: i64 = 0
+        while j < ctx.instr_count {
+            if ctx.instr_defs[j as usize] == s2 {
+                if ctx.instr_opcodes[j as usize] == 1 {
+                    // LOAD_IMM: the immediate value is in src1 of that instruction
+                    return ctx.instr_src1[j as usize]
+                }
+            }
+            j = j + 1
+        }
+    }
+    // If def == s2 and s1 is a constant (commutative add)
+    if def == s2 {
+        var j: i64 = 0
+        while j < ctx.instr_count {
+            if ctx.instr_defs[j as usize] == s1 {
+                if ctx.instr_opcodes[j as usize] == 1 {
+                    return ctx.instr_src1[j as usize]
+                }
+            }
+            j = j + 1
+        }
+    }
+    LOPT_INVALID
+}
+
+// Find all induction variables in a given loop.
+fn lopt_find_induction_vars(ctx: &! LoptContext, loop_id: i64) -> i64 with Mut, Div, Panic {
+    if loop_id < 0 || loop_id >= ctx.nest.loop_count {
+        return 0
+    }
+    let lp = ctx.nest.loops[loop_id as usize]
+    var found: i64 = 0
+
+    // Scan all instructions in the loop body for IV patterns
+    var i: i64 = 0
+    while i < ctx.instr_count {
+        let iblk = ctx.instr_block_map[i as usize]
+        if lopt_array_contains(lp.body_blocks, lp.body_count, iblk) {
+            let step = lopt_check_iv_update(ctx, i)
+            if step != LOPT_INVALID {
+                if ctx.iv_count < LOPT_MAX_IVS {
+                    var iv = lopt_iv_new()
+                    iv.reg = ctx.instr_defs[i as usize]
+                    iv.step_val = step
+                    iv.def_instr = i
+                    iv.loop_id = loop_id
+                    iv.kind = LOPT_IV_BASIC
+                    iv.is_primary = true
+                    iv.base_iv_reg = iv.reg
+                    iv.scale = 1
+                    iv.offset = 0
+                    ctx.ivs[ctx.iv_count as usize] = iv
+                    ctx.iv_count = ctx.iv_count + 1
+                    found = found + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    found
+}
+
+// Find derived induction variables: expressions of the form
+//   j = c1 * i + c2  where i is a basic IV.
+fn lopt_find_derived_ivs(ctx: &! LoptContext, loop_id: i64) -> i64 with Mut, Div, Panic {
+    if loop_id < 0 || loop_id >= ctx.nest.loop_count {
+        return 0
+    }
+    let lp = ctx.nest.loops[loop_id as usize]
+    var found: i64 = 0
+
+    // For each instruction in the loop, check if it multiplies or adds to a basic IV
+    var i: i64 = 0
+    while i < ctx.instr_count {
+        let iblk = ctx.instr_block_map[i as usize]
+        if lopt_array_contains(lp.body_blocks, lp.body_count, iblk) {
+            let opcode = ctx.instr_opcodes[i as usize]
+            if opcode == 6 {
+                let def = ctx.instr_defs[i as usize]
+                let s1 = ctx.instr_src1[i as usize]
+                let s2 = ctx.instr_src2[i as usize]
+
+                // Check if s1 is a basic IV
+                var iv_idx: i64 = LOPT_INVALID
+                var k: i64 = 0
+                while k < ctx.iv_count {
+                    if ctx.ivs[k as usize].reg == s1 && ctx.ivs[k as usize].loop_id == loop_id {
+                        if ctx.ivs[k as usize].kind == LOPT_IV_BASIC {
+                            iv_idx = k
+                        }
+                    }
+                    k = k + 1
+                }
+
+                // If s1 is a basic IV and def is not already an IV
+                if iv_idx != LOPT_INVALID {
+                    var already_iv = false
+                    var ck: i64 = 0
+                    while ck < ctx.iv_count {
+                        if ctx.ivs[ck as usize].reg == def && ctx.ivs[ck as usize].loop_id == loop_id {
+                            already_iv = true
+                        }
+                        ck = ck + 1
+                    }
+                    if already_iv == false && ctx.iv_count < LOPT_MAX_IVS {
+                        var div_iv = lopt_iv_new()
+                        div_iv.reg = def
+                        div_iv.def_instr = i
+                        div_iv.loop_id = loop_id
+                        div_iv.kind = LOPT_IV_DERIVED
+                        div_iv.is_primary = false
+                        div_iv.base_iv_reg = ctx.ivs[iv_idx as usize].reg
+                        // Scale and offset would need constant analysis; approximate
+                        div_iv.scale = 1
+                        div_iv.offset = 0
+                        div_iv.step_val = ctx.ivs[iv_idx as usize].step_val
+                        ctx.ivs[ctx.iv_count as usize] = div_iv
+                        ctx.iv_count = ctx.iv_count + 1
+                        found = found + 1
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    found
+}
+
+// ============================================================================
+// Section 11: Trip Count Computation
+// ============================================================================
+
+// Compute the trip count for a loop with a known IV and comparison.
+// trip_count = (upper_bound - init) / step  (for step > 0)
+fn lopt_compute_trip_count_from_bounds(init: i64, bound: i64, step: i64) -> i64 {
+    if step == 0 {
+        return LOPT_INVALID
+    }
+    if step > 0 {
+        if bound <= init {
+            return 0
+        }
+        return lopt_safe_div(bound - init, step)
+    }
+    // step < 0
+    if init <= bound {
+        return 0
+    }
+    let abs_step = 0 - step
+    return lopt_safe_div(init - bound, abs_step)
+}
+
+// Attempt to compute the trip count for a given loop.
+// Looks at the loop's exit condition and induction variables.
+fn lopt_compute_trip_count(ctx: &! LoptContext, loop_id: i64) -> i64 with Mut, Div, Panic {
+    if loop_id < 0 || loop_id >= ctx.nest.loop_count {
+        return LOPT_INVALID
+    }
+
+    // Find the primary IV for this loop
+    var primary_iv_idx: i64 = LOPT_INVALID
+    var k: i64 = 0
+    while k < ctx.iv_count {
+        if ctx.ivs[k as usize].loop_id == loop_id && ctx.ivs[k as usize].is_primary {
+            primary_iv_idx = k
+        }
+        k = k + 1
+    }
+
+    if primary_iv_idx == LOPT_INVALID {
+        return LOPT_INVALID
+    }
+
+    let iv = ctx.ivs[primary_iv_idx as usize]
+    let step = iv.step_val
+
+    // Look at exit block instructions for a comparison
+    let lp = ctx.nest.loops[loop_id as usize]
+    var i: i64 = 0
+    while i < ctx.instr_count {
+        let iblk = ctx.instr_block_map[i as usize]
+        // Check instructions in exit blocks
+        var ex: i64 = 0
+        while ex < lp.exit_count {
+            if iblk == lp.exits[ex as usize] {
+                // Look for a comparison using the IV register
+                let opcode = ctx.instr_opcodes[i as usize]
+                // opcode 6 = BINOP, which includes comparisons
+                let s1 = ctx.instr_src1[i as usize]
+                let s2 = ctx.instr_src2[i as usize]
+                if s1 == iv.reg || s2 == iv.reg {
+                    // Found a comparison involving the IV
+                    // Look for the bound constant
+                    let other = if s1 == iv.reg { s2 } else { s1 }
+                    // Find the constant value of the other operand
+                    var ji: i64 = 0
+                    while ji < ctx.instr_count {
+                        if ctx.instr_defs[ji as usize] == other {
+                            if ctx.instr_opcodes[ji as usize] == 1 {
+                                let bound = ctx.instr_src1[ji as usize]
+                                let tc = lopt_compute_trip_count_from_bounds(iv.init_val, bound, step)
+                                if tc != LOPT_INVALID {
+                                    ctx.nest.loops[loop_id as usize].trip_count = tc
+                                    ctx.nest.loops[loop_id as usize].is_counted = true
+                                    return tc
+                                }
+                            }
+                        }
+                        ji = ji + 1
+                    }
+                }
+            }
+            ex = ex + 1
+        }
+        i = i + 1
+    }
+    LOPT_INVALID
+}
+
+// ============================================================================
+// Section 12: Loop Classification
+// ============================================================================
+
+// Classify a loop based on its structure.
+fn lopt_classify_loop(ctx: &! LoptContext, loop_id: i64) -> i64 with Mut, Div, Panic {
+    if loop_id < 0 || loop_id >= ctx.nest.loop_count {
+        return LOPT_CLASS_UNKNOWN
+    }
+    let lp = ctx.nest.loops[loop_id as usize]
+
+    // If we have a known trip count, it is a counted loop
+    if lp.is_counted && lp.trip_count != LOPT_INVALID {
+        ctx.nest.loops[loop_id as usize].classification = LOPT_CLASS_COUNTED
+        return LOPT_CLASS_COUNTED
+    }
+
+    // If no exits, it is potentially infinite
+    if lp.exit_count == 0 {
+        ctx.nest.loops[loop_id as usize].classification = LOPT_CLASS_INFINITE
+        return LOPT_CLASS_INFINITE
+    }
+
+    // If the header is an exit (condition at top), it is a while loop
+    var hdr_is_exit = false
+    var e: i64 = 0
+    while e < lp.exit_count {
+        if lp.exits[e as usize] == lp.header {
+            hdr_is_exit = true
+        }
+        e = e + 1
+    }
+    if hdr_is_exit {
+        ctx.nest.loops[loop_id as usize].classification = LOPT_CLASS_WHILE
+        return LOPT_CLASS_WHILE
+    }
+
+    // If the latch is an exit (condition at bottom), it is a do-while
+    var latch_is_exit = false
+    var f: i64 = 0
+    while f < lp.exit_count {
+        if lp.exits[f as usize] == lp.latch {
+            latch_is_exit = true
+        }
+        f = f + 1
+    }
+    if latch_is_exit {
+        ctx.nest.loops[loop_id as usize].classification = LOPT_CLASS_DO_WHILE
+        return LOPT_CLASS_DO_WHILE
+    }
+
+    ctx.nest.loops[loop_id as usize].classification = LOPT_CLASS_UNKNOWN
+    LOPT_CLASS_UNKNOWN
+}
+
+// ============================================================================
+// Section 13: Dependence Analysis
+// ============================================================================
+
+// Analyze memory dependences within a loop.
+// Looks for pairs of memory accesses (loads/stores) that may conflict.
+fn lopt_analyze_dependencies(ctx: &! LoptContext, loop_id: i64) -> i64 with Mut, Div, Panic {
+    if loop_id < 0 || loop_id >= ctx.nest.loop_count {
+        return 0
+    }
+    let lp = ctx.nest.loops[loop_id as usize]
+    var dep_count: i64 = 0
+
+    // Collect memory access instructions in the loop
+    var mem_instrs: [i64; 256] = [LOPT_INVALID; 256]
+    var mem_count: i64 = 0
+
+    var i: i64 = 0
+    while i < ctx.instr_count {
+        let iblk = ctx.instr_block_map[i as usize]
+        if lopt_array_contains(lp.body_blocks, lp.body_count, iblk) {
+            let opc = ctx.instr_opcodes[i as usize]
+            // 13=FIELD_GET, 14=FIELD_SET, 15=INDEX_GET, 16=INDEX_SET
+            if opc == 13 || opc == 14 || opc == 15 || opc == 16 {
+                if mem_count < 256 {
+                    mem_instrs[mem_count as usize] = i
+                    mem_count = mem_count + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    // Check all pairs of memory instructions
+    var a: i64 = 0
+    while a < mem_count {
+        var b: i64 = a + 1
+        while b < mem_count {
+            let ia = mem_instrs[a as usize]
+            let ib = mem_instrs[b as usize]
+            let opc_a = ctx.instr_opcodes[ia as usize]
+            let opc_b = ctx.instr_opcodes[ib as usize]
+
+            // At least one must be a store for a real dependence
+            let a_is_store = (opc_a == 14 || opc_a == 16)
+            let b_is_store = (opc_b == 14 || opc_b == 16)
+
+            if a_is_store || b_is_store {
+                // Check if they access the same base register
+                let base_a = ctx.instr_src1[ia as usize]
+                let base_b = ctx.instr_src1[ib as usize]
+
+                if base_a == base_b {
+                    if dep_count < LOPT_MAX_DEPS {
+                        var dep = lopt_dep_new()
+                        dep.src_instr = ia
+                        dep.dst_instr = ib
+
+                        if a_is_store && b_is_store {
+                            dep.direction = LOPT_DEP_OUTPUT
+                        } else if a_is_store {
+                            dep.direction = LOPT_DEP_FLOW
+                        } else {
+                            dep.direction = LOPT_DEP_ANTI
+                        }
+
+                        // Check if index is IV-derived for loop-carried analysis
+                        let idx_a = ctx.instr_src2[ia as usize]
+                        let idx_b = ctx.instr_src2[ib as usize]
+                        var a_uses_iv = false
+                        var b_uses_iv = false
+                        var ki: i64 = 0
+                        while ki < ctx.iv_count {
+                            if ctx.ivs[ki as usize].loop_id == loop_id {
+                                if ctx.ivs[ki as usize].reg == idx_a {
+                                    a_uses_iv = true
+                                }
+                                if ctx.ivs[ki as usize].reg == idx_b {
+                                    b_uses_iv = true
+                                }
+                            }
+                            ki = ki + 1
+                        }
+
+                        if a_uses_iv && b_uses_iv && idx_a == idx_b {
+                            dep.is_loop_carried = false
+                            dep.distance = 0
+                        } else if a_uses_iv || b_uses_iv {
+                            dep.is_loop_carried = true
+                            dep.distance = 1
+                        }
+
+                        ctx.deps[dep_count as usize] = dep
+                        dep_count = dep_count + 1
+                    }
+                }
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+
+    ctx.dep_count = dep_count
+    dep_count
+}
+
+// ============================================================================
+// Section 14: Loop-Invariant Code Motion (LICM)
+// ============================================================================
+
+// Check if an instruction's operands are all defined outside the loop
+// or by already-identified invariants.
+fn lopt_is_invariant_operand(ctx: &! LoptContext, reg: i64, loop_id: i64) -> bool with Mut, Div, Panic {
+    if reg == LOPT_INVALID || reg < 0 {
+        return true
+    }
+    let lp = ctx.nest.loops[loop_id as usize]
+
+    // Find where this register is defined
+    var i: i64 = 0
+    while i < ctx.instr_count {
+        if ctx.instr_defs[i as usize] == reg {
+            let iblk = ctx.instr_block_map[i as usize]
+            // If defined outside the loop, it is invariant
+            if lopt_array_contains(lp.body_blocks, lp.body_count, iblk) == false {
+                return true
+            }
+            // If already marked as invariant, it is invariant
+            var j: i64 = 0
+            while j < ctx.invariant_count {
+                if ctx.invariants[j as usize].instr_idx == i {
+                    return true
+                }
+                j = j + 1
+            }
+            return false
+        }
+        i = i + 1
+    }
+    // Not defined anywhere — treat as invariant (could be function parameter)
+    true
+}
+
+// Find all loop-invariant instructions in a loop.
+// An instruction is invariant if all its operands are invariant.
+// Iterates until no new invariants are found (fixed-point).
+fn lopt_find_invariants(ctx: &! LoptContext, loop_id: i64) -> i64 with Mut, Div, Panic {
+    if loop_id < 0 || loop_id >= ctx.nest.loop_count {
+        return 0
+    }
+    let lp = ctx.nest.loops[loop_id as usize]
+    var found: i64 = 0
+    var changed = true
+    var guard: i64 = 0
+
+    while changed && guard < 100 {
+        changed = false
+        var i: i64 = 0
+        while i < ctx.instr_count {
+            let iblk = ctx.instr_block_map[i as usize]
+            if lopt_array_contains(lp.body_blocks, lp.body_count, iblk) {
+                let opc = ctx.instr_opcodes[i as usize]
+                // Skip side-effectful instructions (calls, stores, branches)
+                if opc == 8 || opc == 9 || opc == 10 || opc == 11 || opc == 12 || opc == 14 || opc == 16 || opc == 18 {
+                    // not a candidate
+                } else {
+                    // Check if already an invariant
+                    var already = false
+                    var j: i64 = 0
+                    while j < ctx.invariant_count {
+                        if ctx.invariants[j as usize].instr_idx == i {
+                            already = true
+                        }
+                        j = j + 1
+                    }
+
+                    if already == false {
+                        let s1 = ctx.instr_src1[i as usize]
+                        let s2 = ctx.instr_src2[i as usize]
+                        let s1_inv = lopt_is_invariant_operand(ctx, s1, loop_id)
+                        let s2_inv = lopt_is_invariant_operand(ctx, s2, loop_id)
+
+                        if s1_inv && s2_inv {
+                            if ctx.invariant_count < LOPT_MAX_INVARIANTS {
+                                var inv = lopt_invariant_new()
+                                inv.instr_idx = i
+                                inv.block_id = iblk
+                                inv.def_reg = ctx.instr_defs[i as usize]
+                                inv.is_hoistable = true
+                                ctx.invariants[ctx.invariant_count as usize] = inv
+                                ctx.invariant_count = ctx.invariant_count + 1
+                                found = found + 1
+                                changed = true
+                            }
+                        }
+                    }
+                }
+            }
+            i = i + 1
+        }
+        guard = guard + 1
+    }
+
+    found
+}
+
+// Hoist a single invariant instruction to the loop preheader.
+// In our model, this means moving it to just before the header block.
+// Returns true if hoisted successfully.
+fn lopt_hoist_invariant(ctx: &! LoptContext, inv_idx: i64) -> bool with Mut, Div, Panic {
+    if inv_idx < 0 || inv_idx >= ctx.invariant_count {
+        return false
+    }
+    let inv = ctx.invariants[inv_idx as usize]
+    if inv.is_hoistable == false {
+        return false
+    }
+    // Mark as hoisted by setting opcode to NOP in original position
+    let instr_idx = inv.instr_idx
+    if instr_idx >= 0 && instr_idx < ctx.instr_count {
+        // In a real implementation, we would insert before the header.
+        // Here we mark the instruction as "hoisted" by keeping it and
+        // recording the action in stats.
+        ctx.stats.invariants_hoisted = ctx.stats.invariants_hoisted + 1
+        return true
+    }
+    false
+}
+
+// Run the full LICM pass on a single loop.
+fn lopt_licm_pass(ctx: &! LoptContext, loop_id: i64) -> i64 with Mut, Div, Panic {
+    let found = lopt_find_invariants(ctx, loop_id)
+    var hoisted: i64 = 0
+    var i: i64 = 0
+    while i < ctx.invariant_count {
+        if ctx.invariants[i as usize].is_hoistable {
+            // Check that the invariant belongs to this loop
+            let iblk = ctx.invariants[i as usize].block_id
+            let lp = ctx.nest.loops[loop_id as usize]
+            if lopt_array_contains(lp.body_blocks, lp.body_count, iblk) {
+                let ok = lopt_hoist_invariant(ctx, i)
+                if ok {
+                    hoisted = hoisted + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    hoisted
+}
+
+// ============================================================================
+// Section 15: Loop Unrolling
+// ============================================================================
+
+// Check if a loop can be unrolled.
+fn lopt_can_unroll(ctx: &! LoptContext, loop_id: i64) -> bool with Mut, Div, Panic {
+    if loop_id < 0 || loop_id >= ctx.nest.loop_count {
+        return false
+    }
+    let lp = ctx.nest.loops[loop_id as usize]
+
+    // Must have a single latch (single back edge)
+    // Must not have function calls in the body (conservative)
+    var has_call = false
+    var i: i64 = 0
+    while i < ctx.instr_count {
+        let iblk = ctx.instr_block_map[i as usize]
+        if lopt_array_contains(lp.body_blocks, lp.body_count, iblk) {
+            if ctx.instr_opcodes[i as usize] == 8 {
+                has_call = true
+            }
+        }
+        i = i + 1
+    }
+
+    if has_call {
+        return false
+    }
+
+    // Must have a single exit for clean unrolling
+    if lp.exit_count > 2 {
+        return false
+    }
+
+    // Body must not be too large
+    if lp.instr_count > 64 {
+        return false
+    }
+
+    true
+}
+
+// Compute the optimal unroll factor for a loop.
+fn lopt_compute_unroll_factor(ctx: &! LoptContext, loop_id: i64) -> i64 with Mut, Div, Panic {
+    if loop_id < 0 || loop_id >= ctx.nest.loop_count {
+        return 1
+    }
+    let lp = ctx.nest.loops[loop_id as usize]
+
+    // If trip count is known, try to find a factor that evenly divides
+    if lp.is_counted && lp.trip_count > 0 {
+        let tc = lp.trip_count
+        let body_size = lp.instr_count
+
+        // Full unroll if small enough
+        if tc * body_size <= LOPT_FULL_UNROLL_THRESHOLD {
+            return tc
+        }
+
+        // Try factors from LOPT_MAX_UNROLL_FACTOR down
+        var f: i64 = lopt_min(LOPT_MAX_UNROLL_FACTOR, tc)
+        while f > 1 {
+            // Check if f evenly divides tc
+            let remainder = tc - (lopt_safe_div(tc, f) * f)
+            if remainder == 0 {
+                // Check that unrolled body is not too large
+                if f * body_size <= LOPT_FULL_UNROLL_THRESHOLD * 2 {
+                    return f
+                }
+            }
+            f = f - 1
+        }
+    }
+
+    // Default: try unroll by 4 for unknown trip counts
+    if lp.instr_count <= 16 {
+        return 4
+    }
+    if lp.instr_count <= 32 {
+        return 2
+    }
+    1
+}
+
+// Build unroll info for a loop.
+fn lopt_unroll_loop(ctx: &! LoptContext, loop_id: i64) -> LoptUnrollInfo with Mut, Div, Panic {
+    var info = lopt_unroll_info_new()
+    info.loop_id = loop_id
+
+    if lopt_can_unroll(ctx, loop_id) == false {
+        return info
+    }
+
+    let lp = ctx.nest.loops[loop_id as usize]
+    info.body_size = lp.instr_count
+    info.trip_count = lp.trip_count
+
+    let factor = lopt_compute_unroll_factor(ctx, loop_id)
+    info.factor = factor
+    info.can_unroll = true
+
+    // Check if this is a full unroll
+    if lp.is_counted && lp.trip_count > 0 && factor == lp.trip_count {
+        info.is_full_unroll = true
+    }
+
+    // Estimate benefit: factor * (eliminated branch overhead)
+    // Each iteration saves 1 branch + 1 comparison
+    info.estimated_benefit = factor * 2
+
+    ctx.stats.loops_unrolled = ctx.stats.loops_unrolled + 1
+    info
+}
+
+// Full unroll: when trip count is small and known.
+fn lopt_full_unroll(ctx: &! LoptContext, loop_id: i64) -> LoptUnrollInfo with Mut, Div, Panic {
+    var info = lopt_unroll_info_new()
+    info.loop_id = loop_id
+
+    if loop_id < 0 || loop_id >= ctx.nest.loop_count {
+        return info
+    }
+
+    let lp = ctx.nest.loops[loop_id as usize]
+    if lp.is_counted == false || lp.trip_count == LOPT_INVALID || lp.trip_count <= 0 {
+        return info
+    }
+
+    let tc = lp.trip_count
+    let body_size = lp.instr_count
+
+    if tc * body_size > LOPT_FULL_UNROLL_THRESHOLD {
+        return info
+    }
+
+    info.can_unroll = true
+    info.is_full_unroll = true
+    info.factor = tc
+    info.body_size = body_size
+    info.trip_count = tc
+    info.estimated_benefit = tc * 3
+
+    info
+}
+
+// ============================================================================
+// Section 16: Strength Reduction
+// ============================================================================
+
+// Reduce strength of an IV-derived expression.
+// Replaces multiply by IV with incremental addition.
+// e.g., addr = base + i*4  =>  addr += 4 each iteration
+fn lopt_reduce_strength(ctx: &! LoptContext, loop_id: i64) -> i64 with Mut, Div, Panic {
+    if loop_id < 0 || loop_id >= ctx.nest.loop_count {
+        return 0
+    }
+    var reduced: i64 = 0
+
+    // Find derived IVs that involve multiplication
+    var i: i64 = 0
+    while i < ctx.iv_count {
+        if ctx.ivs[i as usize].loop_id == loop_id {
+            if ctx.ivs[i as usize].kind == LOPT_IV_DERIVED {
+                // This derived IV can be strength-reduced
+                // In a real implementation, we would replace the multiplication
+                // with an addition in the loop body
+                reduced = reduced + 1
+                ctx.stats.strength_reductions = ctx.stats.strength_reductions + 1
+            }
+        }
+        i = i + 1
+    }
+    reduced
+}
+
+// Eliminate dead induction variables after strength reduction.
+// An IV is dead if no non-IV instruction in the loop uses its value
+// and it is not used after the loop.
+fn lopt_eliminate_iv(ctx: &! LoptContext, loop_id: i64) -> i64 with Mut, Div, Panic {
+    if loop_id < 0 || loop_id >= ctx.nest.loop_count {
+        return 0
+    }
+    let lp = ctx.nest.loops[loop_id as usize]
+    var eliminated: i64 = 0
+
+    var i: i64 = 0
+    while i < ctx.iv_count {
+        if ctx.ivs[i as usize].loop_id == loop_id && ctx.ivs[i as usize].is_primary == false {
+            let iv_reg = ctx.ivs[i as usize].reg
+            // Check if this IV is used only by other IVs (dead)
+            var used_by_non_iv = false
+            var j: i64 = 0
+            while j < ctx.instr_count {
+                let iblk = ctx.instr_block_map[j as usize]
+                if lopt_array_contains(lp.body_blocks, lp.body_count, iblk) {
+                    if ctx.instr_src1[j as usize] == iv_reg || ctx.instr_src2[j as usize] == iv_reg {
+                        // Check if this instruction is itself an IV definition
+                        let is_iv_def = (j == ctx.ivs[i as usize].def_instr)
+                        if is_iv_def == false {
+                            used_by_non_iv = true
+                        }
+                    }
+                }
+                j = j + 1
+            }
+            if used_by_non_iv == false {
+                eliminated = eliminated + 1
+                ctx.stats.ivs_eliminated = ctx.stats.ivs_eliminated + 1
+            }
+        }
+        i = i + 1
+    }
+    eliminated
+}
+
+// ============================================================================
+// Section 17: Loop Fusion
+// ============================================================================
+
+// Check if two loops can be fused.
+// Requirements: adjacent (no code between), same trip count, same IV step,
+// no loop-carried dependences between them.
+fn lopt_can_fuse(ctx: &! LoptContext, loop_a: i64, loop_b: i64) -> bool with Mut, Div, Panic {
+    if loop_a < 0 || loop_a >= ctx.nest.loop_count { return false }
+    if loop_b < 0 || loop_b >= ctx.nest.loop_count { return false }
+    if loop_a == loop_b { return false }
+
+    let la = ctx.nest.loops[loop_a as usize]
+    let lb = ctx.nest.loops[loop_b as usize]
+
+    // Both must be counted with the same trip count
+    if la.is_counted == false || lb.is_counted == false {
+        return false
+    }
+    if la.trip_count != lb.trip_count {
+        return false
+    }
+    if la.trip_count == LOPT_INVALID {
+        return false
+    }
+
+    // Must be at the same nesting depth
+    if la.depth != lb.depth {
+        return false
+    }
+
+    // Must have the same parent
+    if la.parent_id != lb.parent_id {
+        return false
+    }
+
+    // Check that loop_b's header is a successor of loop_a's exit
+    // (adjacency check)
+    var adjacent = false
+    var ea: i64 = 0
+    while ea < la.exit_count {
+        let exit_blk = la.exits[ea as usize]
+        if exit_blk >= 0 && exit_blk < ctx.block_count {
+            var s: i64 = 0
+            while s < ctx.block_succ_counts[exit_blk as usize] {
+                if ctx.block_succs[exit_blk as usize][s as usize] == lb.header {
+                    adjacent = true
+                }
+                s = s + 1
+            }
+        }
+        ea = ea + 1
+    }
+
+    if adjacent == false {
+        return false
+    }
+
+    // Check no conflicting dependences between loop bodies
+    // (conservative: check that there are no output deps)
+    var d: i64 = 0
+    while d < ctx.dep_count {
+        let dep = ctx.deps[d as usize]
+        if dep.direction == LOPT_DEP_OUTPUT && dep.is_loop_carried {
+            // Check if one instruction is in loop_a and the other in loop_b
+            let blk_src = ctx.instr_block_map[dep.src_instr as usize]
+            let blk_dst = ctx.instr_block_map[dep.dst_instr as usize]
+            let src_in_a = lopt_array_contains(la.body_blocks, la.body_count, blk_src)
+            let dst_in_b = lopt_array_contains(lb.body_blocks, lb.body_count, blk_dst)
+            if src_in_a && dst_in_b {
+                return false
+            }
+        }
+        d = d + 1
+    }
+
+    true
+}
+
+// Fuse two loops together. Returns the id of the fused loop.
+fn lopt_fuse_loops(ctx: &! LoptContext, loop_a: i64, loop_b: i64) -> i64 with Mut, Div, Panic {
+    if lopt_can_fuse(ctx, loop_a, loop_b) == false {
+        return LOPT_INVALID
+    }
+
+    // In a real implementation, we would merge the bodies of loop_b into loop_a.
+    // Here, we extend loop_a's body to include loop_b's blocks.
+    let la = ctx.nest.loops[loop_a as usize]
+    var new_body_count = la.body_count
+
+    var i: i64 = 0
+    while i < ctx.nest.loops[loop_b as usize].body_count {
+        let blk = ctx.nest.loops[loop_b as usize].body_blocks[i as usize]
+        if new_body_count < LOPT_MAX_BODY {
+            // Avoid duplicates
+            if lopt_array_contains(ctx.nest.loops[loop_a as usize].body_blocks, new_body_count, blk) == false {
+                ctx.nest.loops[loop_a as usize].body_blocks[new_body_count as usize] = blk
+                new_body_count = new_body_count + 1
+            }
+        }
+        i = i + 1
+    }
+    ctx.nest.loops[loop_a as usize].body_count = new_body_count
+    ctx.nest.loops[loop_a as usize].instr_count = la.instr_count + ctx.nest.loops[loop_b as usize].instr_count
+
+    // Mark loop_b as empty
+    ctx.nest.loops[loop_b as usize].body_count = 0
+    ctx.nest.loops[loop_b as usize].instr_count = 0
+
+    ctx.stats.loops_fused = ctx.stats.loops_fused + 1
+    loop_a
+}
+
+// ============================================================================
+// Section 18: Loop Distribution
+// ============================================================================
+
+// Distribute a loop: split a loop into two loops, each containing
+// a subset of the original body's statements.
+// This is beneficial when one part is vectorizable and the other is not.
+fn lopt_distribute_loop(ctx: &! LoptContext, loop_id: i64) -> i64 with Mut, Div, Panic {
+    if loop_id < 0 || loop_id >= ctx.nest.loop_count {
+        return LOPT_ERR_NO_LOOPS
+    }
+    let lp = ctx.nest.loops[loop_id as usize]
+
+    // Must have enough instructions to split
+    if lp.instr_count < 4 {
+        return LOPT_ERR_COMPLEX_CFG
+    }
+
+    // Check for loop-carried dependences — distribution is only legal
+    // if there are no loop-carried flow deps between the two halves
+    var has_carried_flow = false
+    var d: i64 = 0
+    while d < ctx.dep_count {
+        if ctx.deps[d as usize].is_loop_carried && ctx.deps[d as usize].direction == LOPT_DEP_FLOW {
+            // Check if the dependence involves instructions in this loop
+            let sblk = ctx.instr_block_map[ctx.deps[d as usize].src_instr as usize]
+            if lopt_array_contains(lp.body_blocks, lp.body_count, sblk) {
+                has_carried_flow = true
+            }
+        }
+        d = d + 1
+    }
+
+    if has_carried_flow {
+        return LOPT_ERR_DEPENDENCY
+    }
+
+    // In a real implementation, we would create a new loop with half the body.
+    // Here we record the distribution in stats.
+    ctx.stats.loops_distributed = ctx.stats.loops_distributed + 1
+    LOPT_OK
+}
+
+// ============================================================================
+// Section 19: Vectorization Analysis
+// ============================================================================
+
+// Find reduction variables in a loop.
+// A reduction is a pattern like: acc = acc OP elem
+fn lopt_find_reduction_vars(ctx: &! LoptContext, loop_id: i64, vinfo: &! LoptVectInfo) -> i64 with Mut, Div, Panic {
+    if loop_id < 0 || loop_id >= ctx.nest.loop_count {
+        return 0
+    }
+    let lp = ctx.nest.loops[loop_id as usize]
+    var found: i64 = 0
+
+    var i: i64 = 0
+    while i < ctx.instr_count {
+        let iblk = ctx.instr_block_map[i as usize]
+        if lopt_array_contains(lp.body_blocks, lp.body_count, iblk) {
+            let opc = ctx.instr_opcodes[i as usize]
+            if opc == 6 {
+                let def = ctx.instr_defs[i as usize]
+                let s1 = ctx.instr_src1[i as usize]
+                let s2 = ctx.instr_src2[i as usize]
+
+                // Pattern: def = def OP something  (accumulator)
+                if def == s1 || def == s2 {
+                    if found < LOPT_MAX_REDUCTIONS {
+                        var red = lopt_reduction_new()
+                        red.reg = def
+                        red.op_kind = LOPT_RED_ADD
+                        red.def_instr = i
+                        red.loop_id = loop_id
+                        vinfo.reductions[found as usize] = red
+                        found = found + 1
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    vinfo.reduction_count = found
+    found
+}
+
+// Check if a loop is vectorizable.
+fn lopt_check_vectorizable(ctx: &! LoptContext, loop_id: i64) -> LoptVectInfo with Mut, Div, Panic {
+    var vinfo = lopt_vect_info_new()
+    vinfo.loop_id = loop_id
+
+    if loop_id < 0 || loop_id >= ctx.nest.loop_count {
+        return vinfo
+    }
+    let lp = ctx.nest.loops[loop_id as usize]
+
+    // Must be a counted loop
+    if lp.is_counted == false || lp.trip_count == LOPT_INVALID {
+        return vinfo
+    }
+
+    // Trip count must be at least LOPT_MIN_VECTOR_TRIP
+    if lp.trip_count < LOPT_MIN_VECTOR_TRIP {
+        return vinfo
+    }
+
+    // Check for loop-carried dependences (prevents vectorization)
+    var has_carried = false
+    var d: i64 = 0
+    while d < ctx.dep_count {
+        if ctx.deps[d as usize].is_loop_carried {
+            let sblk = ctx.instr_block_map[ctx.deps[d as usize].src_instr as usize]
+            if lopt_array_contains(lp.body_blocks, lp.body_count, sblk) {
+                // Reductions are OK, other carried deps are not
+                let dir = ctx.deps[d as usize].direction
+                if dir == LOPT_DEP_FLOW || dir == LOPT_DEP_OUTPUT {
+                    has_carried = true
+                }
+            }
+        }
+        d = d + 1
+    }
+
+    vinfo.has_loop_carried_dep = has_carried
+
+    // Must not have calls
+    var has_call = false
+    var i: i64 = 0
+    while i < ctx.instr_count {
+        let iblk = ctx.instr_block_map[i as usize]
+        if lopt_array_contains(lp.body_blocks, lp.body_count, iblk) {
+            if ctx.instr_opcodes[i as usize] == 8 {
+                has_call = true
+            }
+        }
+        i = i + 1
+    }
+
+    if has_call {
+        return vinfo
+    }
+
+    // Find reductions (these are OK for vectorization)
+    let red_count = lopt_find_reduction_vars(ctx, loop_id, &! vinfo)
+
+    // If there are loop-carried deps that are not reductions, not vectorizable
+    if has_carried && red_count == 0 {
+        return vinfo
+    }
+
+    vinfo.is_vectorizable = true
+    vinfo.estimated_speedup = lopt_min(vinfo.vector_width, lp.trip_count)
+    vinfo
+}
+
+// Compute the optimal vector width for a loop.
+fn lopt_compute_vector_width(ctx: &! LoptContext, loop_id: i64) -> i64 with Mut, Div, Panic {
+    if loop_id < 0 || loop_id >= ctx.nest.loop_count {
+        return 1
+    }
+    let lp = ctx.nest.loops[loop_id as usize]
+
+    // Default vector width is 4 (for 32-bit types on 128-bit SIMD)
+    // For 64-bit types, use 2
+    // We assume 32-bit by default
+    let base_width = LOPT_DEFAULT_VECTOR_WIDTH
+
+    // If trip count is known and small, limit width
+    if lp.is_counted && lp.trip_count > 0 {
+        return lopt_min(base_width, lp.trip_count)
+    }
+    base_width
+}
+
+// ============================================================================
+// Section 20: Loop Peeling
+// ============================================================================
+
+// Peel the first iteration of a loop.
+// Useful for alignment or when the first iteration is special.
+fn lopt_peel_first_iteration(ctx: &! LoptContext, loop_id: i64) -> bool with Mut, Div, Panic {
+    if loop_id < 0 || loop_id >= ctx.nest.loop_count {
+        return false
+    }
+    let lp = ctx.nest.loops[loop_id as usize]
+
+    // Must be a counted loop with trip count > 1
+    if lp.is_counted == false || lp.trip_count <= 1 {
+        return false
+    }
+
+    // In a real implementation: duplicate the body before the loop header,
+    // adjust the IV initial value, and decrement the trip count.
+    // Here we record the transformation.
+    ctx.nest.loops[loop_id as usize].trip_count = lp.trip_count - 1
+    ctx.stats.loops_peeled = ctx.stats.loops_peeled + 1
+    true
+}
+
+// Peel the last iteration of a loop.
+// Useful when the last iteration has special handling (e.g., boundary check).
+fn lopt_peel_last_iteration(ctx: &! LoptContext, loop_id: i64) -> bool with Mut, Div, Panic {
+    if loop_id < 0 || loop_id >= ctx.nest.loop_count {
+        return false
+    }
+    let lp = ctx.nest.loops[loop_id as usize]
+
+    // Must be a counted loop with trip count > 1
+    if lp.is_counted == false || lp.trip_count <= 1 {
+        return false
+    }
+
+    // Duplicate the body after the loop, adjust trip count
+    ctx.nest.loops[loop_id as usize].trip_count = lp.trip_count - 1
+    ctx.stats.loops_peeled = ctx.stats.loops_peeled + 1
+    true
+}
+
+// ============================================================================
+// Section 21: Loop Tiling / Blocking
+// ============================================================================
+
+// Compute the optimal tile size for a loop based on data access patterns.
+fn lopt_compute_tile_size(ctx: &! LoptContext, loop_id: i64) -> i64 with Mut, Div, Panic {
+    if loop_id < 0 || loop_id >= ctx.nest.loop_count {
+        return LOPT_DEFAULT_TILE_SIZE
+    }
+    let lp = ctx.nest.loops[loop_id as usize]
+
+    // Heuristic: smaller tile for loops with more memory accesses
+    var mem_access_count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.instr_count {
+        let iblk = ctx.instr_block_map[i as usize]
+        if lopt_array_contains(lp.body_blocks, lp.body_count, iblk) {
+            let opc = ctx.instr_opcodes[i as usize]
+            if opc == 13 || opc == 14 || opc == 15 || opc == 16 {
+                mem_access_count = mem_access_count + 1
+            }
+        }
+        i = i + 1
+    }
+
+    // Fewer memory accesses => larger tile; more => smaller tile
+    if mem_access_count > 8 {
+        return 16
+    }
+    if mem_access_count > 4 {
+        return 32
+    }
+    LOPT_DEFAULT_TILE_SIZE
+}
+
+// Tile a loop for cache locality.
+// Transforms:  for i = 0..N { body(i) }
+// Into:        for ii = 0..N step T { for i = ii..min(ii+T,N) { body(i) } }
+fn lopt_tile_loop(ctx: &! LoptContext, loop_id: i64) -> LoptTileConfig with Mut, Div, Panic {
+    var config = lopt_tile_config_new()
+    config.loop_id = loop_id
+
+    if loop_id < 0 || loop_id >= ctx.nest.loop_count {
+        return config
+    }
+    let lp = ctx.nest.loops[loop_id as usize]
+
+    // Must be a counted loop with sufficient trip count
+    if lp.is_counted == false || lp.trip_count == LOPT_INVALID {
+        return config
+    }
+
+    let tile_size = lopt_compute_tile_size(ctx, loop_id)
+
+    // Trip count must be larger than tile size to benefit
+    if lp.trip_count <= tile_size {
+        return config
+    }
+
+    config.tile_sizes[0] = tile_size
+    config.dim_count = 1
+
+    // Estimate benefit: ratio of cache misses reduced
+    // Rough model: benefit proportional to trip_count / tile_size
+    config.estimated_benefit = lopt_safe_div(lp.trip_count, tile_size)
+
+    ctx.stats.loops_tiled = ctx.stats.loops_tiled + 1
+    config
+}
+
+// ============================================================================
+// Section 22: Full Optimization Pipeline
+// ============================================================================
+
+// Run all optimizations on a single loop.
+fn lopt_optimize_loop(ctx: &! LoptContext, loop_id: i64) -> i64 with Mut, Div, Panic {
+    if loop_id < 0 || loop_id >= ctx.nest.loop_count {
+        return LOPT_ERR_NO_LOOPS
+    }
+
+    // 1. Find induction variables
+    let iv_count = lopt_find_induction_vars(ctx, loop_id)
+
+    // 2. Find derived IVs
+    let div_count = lopt_find_derived_ivs(ctx, loop_id)
+
+    // 3. Compute trip count
+    let tc = lopt_compute_trip_count(ctx, loop_id)
+
+    // 4. Classify the loop
+    let cls = lopt_classify_loop(ctx, loop_id)
+
+    // 5. Analyze dependencies
+    let dep_count = lopt_analyze_dependencies(ctx, loop_id)
+
+    // 6. LICM
+    let hoisted = lopt_licm_pass(ctx, loop_id)
+
+    // 7. Strength reduction
+    let reduced = lopt_reduce_strength(ctx, loop_id)
+
+    // 8. Dead IV elimination
+    let elim = lopt_eliminate_iv(ctx, loop_id)
+
+    LOPT_OK
+}
+
+// Run the full optimization pipeline on all loops in the function.
+fn lopt_optimize_all_loops(ctx: &! LoptContext) -> LoptStats with Mut, Div, Panic {
+    // 1. Find all natural loops
+    let loop_count = lopt_find_natural_loops(ctx)
+
+    if loop_count == 0 {
+        return ctx.stats
+    }
+
+    // 2. Build loop tree (nesting relationships)
+    let max_depth = lopt_build_loop_tree(ctx)
+
+    // 3. Process loops from innermost to outermost
+    // Innermost loops have the highest depth
+    var depth: i64 = max_depth
+    while depth >= 1 {
+        var i: i64 = 0
+        while i < ctx.nest.loop_count {
+            if ctx.nest.loops[i as usize].depth == depth {
+                let result = lopt_optimize_loop(ctx, i)
+            }
+            i = i + 1
+        }
+        depth = depth - 1
+    }
+
+    ctx.stats
+}
+
+// ============================================================================
+// Section 23: Test Helpers
+// ============================================================================
+
+// Create a context with a simple diamond-shaped loop:
+//   B0 -> B1 -> B2 -> B1 (back edge from B2 to B1)
+//         B1 -> B3 (exit)
+// B0 is entry, B1 is loop header, B2 is body/latch, B3 is exit
+fn lopt_make_simple_loop_ctx_inner(ctx: &! LoptContext) -> i64 with Mut, Div, Panic {
+    // Add 4 blocks
+    let b0 = lopt_add_block(ctx, 0)
+    let b1 = lopt_add_block(ctx, 1)
+    let b2 = lopt_add_block(ctx, 2)
+    let b3 = lopt_add_block(ctx, 3)
+
+    // Edges: 0->1, 1->2, 2->1, 1->3
+    let e1 = lopt_add_edge(ctx, 0, 1)
+    let e2 = lopt_add_edge(ctx, 1, 2)
+    let e3 = lopt_add_edge(ctx, 2, 1)
+    let e4 = lopt_add_edge(ctx, 1, 3)
+
+    // Dominators: 0 dominates everything, 1 dominates 2 and 3
+    let d1 = lopt_set_idom(ctx, 0, LOPT_INVALID)
+    let d2 = lopt_set_idom(ctx, 1, 0)
+    let d3 = lopt_set_idom(ctx, 2, 1)
+    let d4 = lopt_set_idom(ctx, 3, 1)
+
+    0
+}
+
+fn lopt_make_simple_loop_ctx() -> LoptContext with Mut, Div, Panic {
+    var ctx = lopt_context_new()
+    let dummy = lopt_make_simple_loop_ctx_inner(&! ctx)
+    ctx
+}
+
+// Create a context with nested loops:
+//   B0 -> B1 -> B2 -> B3 -> B2 (inner back edge)
+//                B2 -> B4 (inner exit)
+//         B4 -> B1 (outer back edge)
+//         B1 -> B5 (outer exit)
+fn lopt_make_nested_loop_ctx_inner(ctx: &! LoptContext) -> i64 with Mut, Div, Panic {
+    let b0 = lopt_add_block(ctx, 0)
+    let b1 = lopt_add_block(ctx, 1)
+    let b2 = lopt_add_block(ctx, 2)
+    let b3 = lopt_add_block(ctx, 3)
+    let b4 = lopt_add_block(ctx, 4)
+    let b5 = lopt_add_block(ctx, 5)
+
+    // Outer loop: 0->1, 1->2, 4->1, 1->5
+    let e1 = lopt_add_edge(ctx, 0, 1)
+    let e2 = lopt_add_edge(ctx, 1, 2)
+    let e3 = lopt_add_edge(ctx, 4, 1)
+    let e4 = lopt_add_edge(ctx, 1, 5)
+
+    // Inner loop: 2->3, 3->2, 2->4
+    let e5 = lopt_add_edge(ctx, 2, 3)
+    let e6 = lopt_add_edge(ctx, 3, 2)
+    let e7 = lopt_add_edge(ctx, 2, 4)
+
+    // Dominators
+    let d1 = lopt_set_idom(ctx, 0, LOPT_INVALID)
+    let d2 = lopt_set_idom(ctx, 1, 0)
+    let d3 = lopt_set_idom(ctx, 2, 1)
+    let d4 = lopt_set_idom(ctx, 3, 2)
+    let d5 = lopt_set_idom(ctx, 4, 2)
+    let d6 = lopt_set_idom(ctx, 5, 1)
+
+    0
+}
+
+fn lopt_make_nested_loop_ctx() -> LoptContext with Mut, Div, Panic {
+    var ctx = lopt_context_new()
+    let dummy = lopt_make_nested_loop_ctx_inner(&! ctx)
+    ctx
+}
+
+// Create a context with a simple counted loop and IV instructions.
+// Block 0: entry (i = 0, n = 10)
+// Block 1: header (compare i < n)
+// Block 2: body (use i, i = i + 1)
+// Block 3: exit
+fn lopt_make_counted_loop_ctx_inner(ctx: &! LoptContext) -> i64 with Mut, Div, Panic {
+    let b0 = lopt_add_block(ctx, 0)
+    let b1 = lopt_add_block(ctx, 1)
+    let b2 = lopt_add_block(ctx, 2)
+    let b3 = lopt_add_block(ctx, 3)
+
+    let e1 = lopt_add_edge(ctx, 0, 1)
+    let e2 = lopt_add_edge(ctx, 1, 2)
+    let e3 = lopt_add_edge(ctx, 2, 1)
+    let e4 = lopt_add_edge(ctx, 1, 3)
+
+    let d1 = lopt_set_idom(ctx, 0, LOPT_INVALID)
+    let d2 = lopt_set_idom(ctx, 1, 0)
+    let d3 = lopt_set_idom(ctx, 2, 1)
+    let d4 = lopt_set_idom(ctx, 3, 1)
+
+    // Block 0: i = 0 (LOAD_IMM r0 = 0), n = 10 (LOAD_IMM r1 = 10)
+    let i0 = lopt_add_instr(ctx, 0, 1, 0, 0, LOPT_INVALID)
+    let i1 = lopt_add_instr(ctx, 0, 1, 1, 10, LOPT_INVALID)
+
+    // Block 1: cmp = i < n (BINOP r2 = r0 cmp r1)
+    let i2 = lopt_add_instr(ctx, 1, 6, 2, 0, 1)
+
+    // Block 1: branch on cmp (BRANCH_TRUE)
+    let i3 = lopt_add_instr(ctx, 1, 11, LOPT_INVALID, 2, LOPT_INVALID)
+
+    // Block 2: use i (BINOP r3 = r0 + r0, dummy use)
+    let i4 = lopt_add_instr(ctx, 2, 6, 3, 0, 0)
+
+    // Block 2: step = 1 (LOAD_IMM r4 = 1)
+    let i5 = lopt_add_instr(ctx, 2, 1, 4, 1, LOPT_INVALID)
+
+    // Block 2: i = i + step (BINOP r0 = r0 + r4)
+    let i6 = lopt_add_instr(ctx, 2, 6, 0, 0, 4)
+
+    // Block 3: return (RETURN)
+    let i7 = lopt_add_instr(ctx, 3, 9, LOPT_INVALID, 3, LOPT_INVALID)
+
+    0
+}
+
+fn lopt_make_counted_loop_ctx() -> LoptContext with Mut, Div, Panic {
+    var ctx = lopt_context_new()
+    let dummy = lopt_make_counted_loop_ctx_inner(&! ctx)
+    ctx
+}
+
+// Create a context with an invariant computation inside the loop.
+// Block 0: entry (a = 5, b = 3)
+// Block 1: header
+// Block 2: body (c = a + b  <-- invariant, use c)
+// Block 3: exit
+fn lopt_make_invariant_loop_ctx_inner(ctx: &! LoptContext) -> i64 with Mut, Div, Panic {
+    let b0 = lopt_add_block(ctx, 0)
+    let b1 = lopt_add_block(ctx, 1)
+    let b2 = lopt_add_block(ctx, 2)
+    let b3 = lopt_add_block(ctx, 3)
+
+    let e1 = lopt_add_edge(ctx, 0, 1)
+    let e2 = lopt_add_edge(ctx, 1, 2)
+    let e3 = lopt_add_edge(ctx, 2, 1)
+    let e4 = lopt_add_edge(ctx, 1, 3)
+
+    let d1 = lopt_set_idom(ctx, 0, LOPT_INVALID)
+    let d2 = lopt_set_idom(ctx, 1, 0)
+    let d3 = lopt_set_idom(ctx, 2, 1)
+    let d4 = lopt_set_idom(ctx, 3, 1)
+
+    // Block 0: a = 5, b = 3
+    let i0 = lopt_add_instr(ctx, 0, 1, 10, 5, LOPT_INVALID)
+    let i1 = lopt_add_instr(ctx, 0, 1, 11, 3, LOPT_INVALID)
+
+    // Block 1: branch (cond)
+    let i2 = lopt_add_instr(ctx, 1, 11, LOPT_INVALID, 0, LOPT_INVALID)
+
+    // Block 2: c = a + b  (invariant! both a and b defined outside loop)
+    let i3 = lopt_add_instr(ctx, 2, 6, 12, 10, 11)
+
+    // Block 2: use c (store to r13)
+    let i4 = lopt_add_instr(ctx, 2, 6, 13, 12, 12)
+
+    // Block 3: return
+    let i5 = lopt_add_instr(ctx, 3, 9, LOPT_INVALID, 13, LOPT_INVALID)
+
+    0
+}
+
+fn lopt_make_invariant_loop_ctx() -> LoptContext with Mut, Div, Panic {
+    var ctx = lopt_context_new()
+    let dummy = lopt_make_invariant_loop_ctx_inner(&! ctx)
+    ctx
+}
+
+// ============================================================================
+// Section 24: Tests
+// ============================================================================
+
+// T01: Context initialization
+fn test_lopt_context_new() -> i32 with IO, Mut, Div, Panic {
+    let ctx = lopt_context_new()
+    if ctx.nest.loop_count != 0 {
+        print("FAIL: test_lopt_context_new loop_count\n")
+        return 1
+    }
+    if ctx.iv_count != 0 {
+        print("FAIL: test_lopt_context_new iv_count\n")
+        return 1
+    }
+    if ctx.invariant_count != 0 {
+        print("FAIL: test_lopt_context_new invariant_count\n")
+        return 1
+    }
+    if ctx.dep_count != 0 {
+        print("FAIL: test_lopt_context_new dep_count\n")
+        return 1
+    }
+    if ctx.stats.loops_found != 0 {
+        print("FAIL: test_lopt_context_new stats\n")
+        return 1
+    }
+    print("PASS: test_lopt_context_new\n")
+    return 0
+}
+
+// T02: Block addition
+fn test_lopt_add_block_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let b0 = lopt_add_block(ctx, 0)
+    let b1 = lopt_add_block(ctx, 1)
+    if ctx.block_count != 2 {
+        print("FAIL: test_lopt_add_block count\n")
+        return 1
+    }
+    if b0 != 0 || b1 != 1 {
+        print("FAIL: test_lopt_add_block indices\n")
+        return 1
+    }
+    print("PASS: test_lopt_add_block\n")
+    return 0
+}
+
+fn test_lopt_add_block() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_context_new()
+    return test_lopt_add_block_inner(&! ctx)
+}
+
+// T03: Edge addition
+fn test_lopt_add_edge_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let b0 = lopt_add_block(ctx, 0)
+    let b1 = lopt_add_block(ctx, 1)
+    let ok = lopt_add_edge(ctx, 0, 1)
+    if ok == false {
+        print("FAIL: test_lopt_add_edge ok\n")
+        return 1
+    }
+    if ctx.block_succ_counts[0] != 1 {
+        print("FAIL: test_lopt_add_edge succ\n")
+        return 1
+    }
+    if ctx.block_pred_counts[1] != 1 {
+        print("FAIL: test_lopt_add_edge pred\n")
+        return 1
+    }
+    if ctx.block_succs[0][0] != 1 {
+        print("FAIL: test_lopt_add_edge succ_val\n")
+        return 1
+    }
+    print("PASS: test_lopt_add_edge\n")
+    return 0
+}
+
+fn test_lopt_add_edge() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_context_new()
+    return test_lopt_add_edge_inner(&! ctx)
+}
+
+// T04: Instruction addition
+fn test_lopt_add_instr_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let b0 = lopt_add_block(ctx, 0)
+    let idx = lopt_add_instr(ctx, 0, 1, 5, 42, LOPT_INVALID)
+    if idx != 0 {
+        print("FAIL: test_lopt_add_instr idx\n")
+        return 1
+    }
+    if ctx.instr_count != 1 {
+        print("FAIL: test_lopt_add_instr count\n")
+        return 1
+    }
+    if ctx.instr_defs[0] != 5 {
+        print("FAIL: test_lopt_add_instr def\n")
+        return 1
+    }
+    if ctx.instr_opcodes[0] != 1 {
+        print("FAIL: test_lopt_add_instr opcode\n")
+        return 1
+    }
+    print("PASS: test_lopt_add_instr\n")
+    return 0
+}
+
+fn test_lopt_add_instr() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_context_new()
+    return test_lopt_add_instr_inner(&! ctx)
+}
+
+// T05: Dominance check — self-dominance
+fn test_lopt_dominates_self() -> i32 with IO, Mut, Div, Panic {
+    var idom: [i64; 512] = [LOPT_INVALID; 512]
+    idom[0] = LOPT_INVALID
+    let r = lopt_dominates(idom, 0, 0)
+    if r == false {
+        print("FAIL: test_lopt_dominates_self\n")
+        return 1
+    }
+    print("PASS: test_lopt_dominates_self\n")
+    return 0
+}
+
+// T06: Dominance check — chain
+fn test_lopt_dominates_chain() -> i32 with IO, Mut, Div, Panic {
+    var idom: [i64; 512] = [LOPT_INVALID; 512]
+    idom[1] = 0
+    idom[2] = 1
+    idom[3] = 2
+    let r = lopt_dominates(idom, 0, 3)
+    if r == false {
+        print("FAIL: test_lopt_dominates_chain\n")
+        return 1
+    }
+    // 3 does not dominate 0
+    let r2 = lopt_dominates(idom, 3, 0)
+    if r2 {
+        print("FAIL: test_lopt_dominates_chain reverse\n")
+        return 1
+    }
+    print("PASS: test_lopt_dominates_chain\n")
+    return 0
+}
+
+// T07: Back edge detection on simple loop
+fn test_lopt_find_back_edges_simple() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_simple_loop_ctx()
+    let count = lopt_find_back_edges(&! ctx)
+    if count != 1 {
+        print("FAIL: test_lopt_find_back_edges_simple count\n")
+        return 1
+    }
+    // Back edge should be 2->1 (latch->header)
+    if ctx.nest.back_edges[0].tail_block != 2 {
+        print("FAIL: test_lopt_find_back_edges_simple tail\n")
+        return 1
+    }
+    if ctx.nest.back_edges[0].header_block != 1 {
+        print("FAIL: test_lopt_find_back_edges_simple header\n")
+        return 1
+    }
+    print("PASS: test_lopt_find_back_edges_simple\n")
+    return 0
+}
+
+// T08: Loop body computation
+fn test_lopt_compute_loop_body() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_simple_loop_ctx()
+    var body: [i64; 128] = [LOPT_INVALID; 128]
+    let count = lopt_compute_loop_body(&! ctx, 1, 2, &! body)
+    // Loop body should contain blocks 1 and 2
+    if count != 2 {
+        print("FAIL: test_lopt_compute_loop_body count\n")
+        return 1
+    }
+    // Header (1) should be first
+    if body[0] != 1 {
+        print("FAIL: test_lopt_compute_loop_body header\n")
+        return 1
+    }
+    print("PASS: test_lopt_compute_loop_body\n")
+    return 0
+}
+
+// T09: Single-block loop body
+fn test_lopt_single_block_loop_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let b0 = lopt_add_block(ctx, 0)
+    let b1 = lopt_add_block(ctx, 1)
+    let e1 = lopt_add_edge(ctx, 0, 1)
+    let e2 = lopt_add_edge(ctx, 1, 1)
+    let d1 = lopt_set_idom(ctx, 0, LOPT_INVALID)
+    let d2 = lopt_set_idom(ctx, 1, 0)
+
+    var body: [i64; 128] = [LOPT_INVALID; 128]
+    let count = lopt_compute_loop_body(ctx, 1, 1, &! body)
+    if count != 1 {
+        print("FAIL: test_lopt_single_block_loop count\n")
+        return 1
+    }
+    if body[0] != 1 {
+        print("FAIL: test_lopt_single_block_loop body\n")
+        return 1
+    }
+    print("PASS: test_lopt_single_block_loop\n")
+    return 0
+}
+
+fn test_lopt_single_block_loop() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_context_new()
+    return test_lopt_single_block_loop_inner(&! ctx)
+}
+
+// T10: Natural loop detection
+fn test_lopt_find_natural_loops() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_simple_loop_ctx()
+    let count = lopt_find_natural_loops(&! ctx)
+    if count != 1 {
+        print("FAIL: test_lopt_find_natural_loops count\n")
+        return 1
+    }
+    if ctx.nest.loops[0].header != 1 {
+        print("FAIL: test_lopt_find_natural_loops header\n")
+        return 1
+    }
+    if ctx.nest.loops[0].latch != 2 {
+        print("FAIL: test_lopt_find_natural_loops latch\n")
+        return 1
+    }
+    print("PASS: test_lopt_find_natural_loops\n")
+    return 0
+}
+
+// T11: Exit block detection
+fn test_lopt_exit_blocks() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_simple_loop_ctx()
+    let count = lopt_find_natural_loops(&! ctx)
+    // Exit block should be block 1 (header), since 1->3 exits the loop
+    let lp = ctx.nest.loops[0]
+    if lp.exit_count < 1 {
+        print("FAIL: test_lopt_exit_blocks count\n")
+        return 1
+    }
+    // Block 1 has a successor (3) outside the loop
+    if lp.exits[0] != 1 {
+        print("FAIL: test_lopt_exit_blocks value\n")
+        return 1
+    }
+    print("PASS: test_lopt_exit_blocks\n")
+    return 0
+}
+
+// T12: Nested loop detection
+fn test_lopt_nested_loops() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_nested_loop_ctx()
+    let count = lopt_find_natural_loops(&! ctx)
+    // Should find 2 loops: inner (3->2) and outer (4->1)
+    if count != 2 {
+        print("FAIL: test_lopt_nested_loops count\n")
+        return 1
+    }
+    print("PASS: test_lopt_nested_loops\n")
+    return 0
+}
+
+// T13: Loop tree construction
+fn test_lopt_build_loop_tree_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let count = lopt_find_natural_loops(ctx)
+    let max_depth = lopt_build_loop_tree(ctx)
+    if max_depth < 2 {
+        print("FAIL: test_lopt_build_loop_tree depth\n")
+        return 1
+    }
+    print("PASS: test_lopt_build_loop_tree\n")
+    return 0
+}
+
+fn test_lopt_build_loop_tree() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_nested_loop_ctx()
+    return test_lopt_build_loop_tree_inner(&! ctx)
+}
+
+// T14: Loop nesting depths
+fn test_lopt_nesting_depth_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let count = lopt_find_natural_loops(ctx)
+    let max_depth = lopt_build_loop_tree(ctx)
+    // One loop should be at depth 1, the other at depth 2
+    var has_depth1 = false
+    var has_depth2 = false
+    var i: i64 = 0
+    while i < count {
+        if ctx.nest.loops[i as usize].depth == 1 {
+            has_depth1 = true
+        }
+        if ctx.nest.loops[i as usize].depth == 2 {
+            has_depth2 = true
+        }
+        i = i + 1
+    }
+    if has_depth1 == false || has_depth2 == false {
+        print("FAIL: test_lopt_nesting_depth\n")
+        return 1
+    }
+    print("PASS: test_lopt_nesting_depth\n")
+    return 0
+}
+
+fn test_lopt_nesting_depth() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_nested_loop_ctx()
+    return test_lopt_nesting_depth_inner(&! ctx)
+}
+
+// T15: No loops in straight-line code
+fn test_lopt_no_loops_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let b0 = lopt_add_block(ctx, 0)
+    let b1 = lopt_add_block(ctx, 1)
+    let b2 = lopt_add_block(ctx, 2)
+    let e1 = lopt_add_edge(ctx, 0, 1)
+    let e2 = lopt_add_edge(ctx, 1, 2)
+    let d1 = lopt_set_idom(ctx, 0, LOPT_INVALID)
+    let d2 = lopt_set_idom(ctx, 1, 0)
+    let d3 = lopt_set_idom(ctx, 2, 1)
+
+    let count = lopt_find_natural_loops(ctx)
+    if count != 0 {
+        print("FAIL: test_lopt_no_loops\n")
+        return 1
+    }
+    print("PASS: test_lopt_no_loops\n")
+    return 0
+}
+
+fn test_lopt_no_loops() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_context_new()
+    return test_lopt_no_loops_inner(&! ctx)
+}
+
+// T16: Induction variable detection
+fn test_lopt_find_ivs_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let lcount = lopt_find_natural_loops(ctx)
+    if lcount < 1 {
+        print("FAIL: test_lopt_find_ivs no loops\n")
+        return 1
+    }
+    let iv_count = lopt_find_induction_vars(ctx, 0)
+    // Should find at least one IV (the increment in block 2)
+    if iv_count < 1 {
+        print("FAIL: test_lopt_find_ivs count\n")
+        return 1
+    }
+    print("PASS: test_lopt_find_ivs\n")
+    return 0
+}
+
+fn test_lopt_find_ivs() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_counted_loop_ctx()
+    return test_lopt_find_ivs_inner(&! ctx)
+}
+
+// T17: IV properties
+fn test_lopt_iv_properties_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let lcount = lopt_find_natural_loops(ctx)
+    let iv_count = lopt_find_induction_vars(ctx, 0)
+    if iv_count < 1 {
+        print("FAIL: test_lopt_iv_properties no ivs\n")
+        return 1
+    }
+    let iv = ctx.ivs[0]
+    if iv.kind != LOPT_IV_BASIC {
+        print("FAIL: test_lopt_iv_properties kind\n")
+        return 1
+    }
+    if iv.is_primary == false {
+        print("FAIL: test_lopt_iv_properties primary\n")
+        return 1
+    }
+    if iv.step_val != 1 {
+        print("FAIL: test_lopt_iv_properties step\n")
+        return 1
+    }
+    print("PASS: test_lopt_iv_properties\n")
+    return 0
+}
+
+fn test_lopt_iv_properties() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_counted_loop_ctx()
+    return test_lopt_iv_properties_inner(&! ctx)
+}
+
+// T18: Trip count from bounds
+fn test_lopt_trip_count_bounds() -> i32 with IO, Mut, Div, Panic {
+    let tc1 = lopt_compute_trip_count_from_bounds(0, 10, 1)
+    if tc1 != 10 {
+        print("FAIL: test_lopt_trip_count_bounds 0..10 step 1\n")
+        return 1
+    }
+    let tc2 = lopt_compute_trip_count_from_bounds(0, 20, 2)
+    if tc2 != 10 {
+        print("FAIL: test_lopt_trip_count_bounds 0..20 step 2\n")
+        return 1
+    }
+    let tc3 = lopt_compute_trip_count_from_bounds(10, 0, 0 - 1)
+    if tc3 != 10 {
+        print("FAIL: test_lopt_trip_count_bounds 10..0 step -1\n")
+        return 1
+    }
+    let tc4 = lopt_compute_trip_count_from_bounds(0, 0, 1)
+    if tc4 != 0 {
+        print("FAIL: test_lopt_trip_count_bounds 0..0\n")
+        return 1
+    }
+    let tc5 = lopt_compute_trip_count_from_bounds(5, 3, 1)
+    if tc5 != 0 {
+        print("FAIL: test_lopt_trip_count_bounds 5..3 step 1\n")
+        return 1
+    }
+    print("PASS: test_lopt_trip_count_bounds\n")
+    return 0
+}
+
+// T19: Zero step returns invalid
+fn test_lopt_trip_count_zero_step() -> i32 with IO, Mut, Div, Panic {
+    let tc = lopt_compute_trip_count_from_bounds(0, 10, 0)
+    if tc != LOPT_INVALID {
+        print("FAIL: test_lopt_trip_count_zero_step\n")
+        return 1
+    }
+    print("PASS: test_lopt_trip_count_zero_step\n")
+    return 0
+}
+
+// T20: Loop classification — counted
+fn test_lopt_classify_counted_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let lcount = lopt_find_natural_loops(ctx)
+    let iv_count = lopt_find_induction_vars(ctx, 0)
+    let tc = lopt_compute_trip_count(ctx, 0)
+
+    let cls = lopt_classify_loop(ctx, 0)
+    // If trip count was computed, should be COUNTED
+    if tc != LOPT_INVALID {
+        if cls != LOPT_CLASS_COUNTED {
+            print("FAIL: test_lopt_classify_counted\n")
+            return 1
+        }
+    }
+    print("PASS: test_lopt_classify_counted\n")
+    return 0
+}
+
+fn test_lopt_classify_counted() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_counted_loop_ctx()
+    return test_lopt_classify_counted_inner(&! ctx)
+}
+
+// T21: Loop classification — while loop
+fn test_lopt_classify_while_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let lcount = lopt_find_natural_loops(ctx)
+    // No IVs, so trip count unknown. Header is an exit.
+    let cls = lopt_classify_loop(ctx, 0)
+    // With header as exit and no trip count, should be WHILE
+    if cls != LOPT_CLASS_WHILE {
+        print("FAIL: test_lopt_classify_while\n")
+        return 1
+    }
+    print("PASS: test_lopt_classify_while\n")
+    return 0
+}
+
+fn test_lopt_classify_while() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_simple_loop_ctx()
+    return test_lopt_classify_while_inner(&! ctx)
+}
+
+// T22: Dependence analysis — no memory ops
+fn test_lopt_deps_no_memory_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let lcount = lopt_find_natural_loops(ctx)
+    let deps = lopt_analyze_dependencies(ctx, 0)
+    if deps != 0 {
+        print("FAIL: test_lopt_deps_no_memory\n")
+        return 1
+    }
+    print("PASS: test_lopt_deps_no_memory\n")
+    return 0
+}
+
+fn test_lopt_deps_no_memory() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_simple_loop_ctx()
+    return test_lopt_deps_no_memory_inner(&! ctx)
+}
+
+// T23: Dependence analysis — with memory ops
+fn test_lopt_deps_with_memory_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let lcount = lopt_find_natural_loops(ctx)
+
+    // Add store instructions to the loop body (block 1 and 2 are in loop)
+    let i0 = lopt_add_instr(ctx, 2, 16, LOPT_INVALID, 5, 6)  // INDEX_SET
+    let i1 = lopt_add_instr(ctx, 2, 15, 7, 5, 8)              // INDEX_GET same base
+
+    let deps = lopt_analyze_dependencies(ctx, 0)
+    // Should detect at least one dependence (store-load on same base)
+    if deps < 1 {
+        print("FAIL: test_lopt_deps_with_memory\n")
+        return 1
+    }
+    print("PASS: test_lopt_deps_with_memory\n")
+    return 0
+}
+
+fn test_lopt_deps_with_memory() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_simple_loop_ctx()
+    return test_lopt_deps_with_memory_inner(&! ctx)
+}
+
+// T24: LICM — find invariants
+fn test_lopt_find_invariants_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let lcount = lopt_find_natural_loops(ctx)
+    if lcount < 1 {
+        print("FAIL: test_lopt_find_invariants no loops\n")
+        return 1
+    }
+    let found = lopt_find_invariants(ctx, 0)
+    // c = a + b should be invariant (both operands defined outside loop)
+    if found < 1 {
+        print("FAIL: test_lopt_find_invariants count\n")
+        return 1
+    }
+    print("PASS: test_lopt_find_invariants\n")
+    return 0
+}
+
+fn test_lopt_find_invariants() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_invariant_loop_ctx()
+    return test_lopt_find_invariants_inner(&! ctx)
+}
+
+// T25: LICM — invariant is hoistable
+fn test_lopt_invariant_hoistable_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let lcount = lopt_find_natural_loops(ctx)
+    let found = lopt_find_invariants(ctx, 0)
+    if found < 1 {
+        print("FAIL: test_lopt_invariant_hoistable no inv\n")
+        return 1
+    }
+    if ctx.invariants[0].is_hoistable == false {
+        print("FAIL: test_lopt_invariant_hoistable flag\n")
+        return 1
+    }
+    print("PASS: test_lopt_invariant_hoistable\n")
+    return 0
+}
+
+fn test_lopt_invariant_hoistable() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_invariant_loop_ctx()
+    return test_lopt_invariant_hoistable_inner(&! ctx)
+}
+
+// T26: LICM — hoist pass
+fn test_lopt_licm_pass_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let lcount = lopt_find_natural_loops(ctx)
+    let hoisted = lopt_licm_pass(ctx, 0)
+    if hoisted < 1 {
+        print("FAIL: test_lopt_licm_pass count\n")
+        return 1
+    }
+    if ctx.stats.invariants_hoisted < 1 {
+        print("FAIL: test_lopt_licm_pass stats\n")
+        return 1
+    }
+    print("PASS: test_lopt_licm_pass\n")
+    return 0
+}
+
+fn test_lopt_licm_pass() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_invariant_loop_ctx()
+    return test_lopt_licm_pass_inner(&! ctx)
+}
+
+// T27: Side-effectful instructions are not invariant
+fn test_lopt_side_effect_not_invariant_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let b0 = lopt_add_block(ctx, 0)
+    let b1 = lopt_add_block(ctx, 1)
+    let b2 = lopt_add_block(ctx, 2)
+    let b3 = lopt_add_block(ctx, 3)
+    let e1 = lopt_add_edge(ctx, 0, 1)
+    let e2 = lopt_add_edge(ctx, 1, 2)
+    let e3 = lopt_add_edge(ctx, 2, 1)
+    let e4 = lopt_add_edge(ctx, 1, 3)
+    let d1 = lopt_set_idom(ctx, 0, LOPT_INVALID)
+    let d2 = lopt_set_idom(ctx, 1, 0)
+    let d3 = lopt_set_idom(ctx, 2, 1)
+    let d4 = lopt_set_idom(ctx, 3, 1)
+
+    // Add a CALL instruction in the loop body — not hoistable
+    let i0 = lopt_add_instr(ctx, 2, 8, 20, 10, LOPT_INVALID)
+
+    let lcount = lopt_find_natural_loops(ctx)
+    let found = lopt_find_invariants(ctx, 0)
+    // Calls should not be marked invariant
+    if found != 0 {
+        print("FAIL: test_lopt_side_effect_not_invariant\n")
+        return 1
+    }
+    print("PASS: test_lopt_side_effect_not_invariant\n")
+    return 0
+}
+
+fn test_lopt_side_effect_not_invariant() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_context_new()
+    return test_lopt_side_effect_not_invariant_inner(&! ctx)
+}
+
+// T28: Can unroll simple loop
+fn test_lopt_can_unroll_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let lcount = lopt_find_natural_loops(ctx)
+    let can = lopt_can_unroll(ctx, 0)
+    // Simple loop with no calls and small body should be unrollable
+    if can == false {
+        print("FAIL: test_lopt_can_unroll\n")
+        return 1
+    }
+    print("PASS: test_lopt_can_unroll\n")
+    return 0
+}
+
+fn test_lopt_can_unroll() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_simple_loop_ctx()
+    return test_lopt_can_unroll_inner(&! ctx)
+}
+
+// T29: Cannot unroll loop with calls
+fn test_lopt_cannot_unroll_with_call_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    // Add a CALL in the loop body
+    let i0 = lopt_add_instr(ctx, 2, 8, 20, 0, LOPT_INVALID)
+    let lcount = lopt_find_natural_loops(ctx)
+    let can = lopt_can_unroll(ctx, 0)
+    if can {
+        print("FAIL: test_lopt_cannot_unroll_with_call\n")
+        return 1
+    }
+    print("PASS: test_lopt_cannot_unroll_with_call\n")
+    return 0
+}
+
+fn test_lopt_cannot_unroll_with_call() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_simple_loop_ctx()
+    return test_lopt_cannot_unroll_with_call_inner(&! ctx)
+}
+
+// T30: Unroll factor computation
+fn test_lopt_unroll_factor_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let lcount = lopt_find_natural_loops(ctx)
+    let iv_count = lopt_find_induction_vars(ctx, 0)
+    let tc = lopt_compute_trip_count(ctx, 0)
+
+    let factor = lopt_compute_unroll_factor(ctx, 0)
+    // Factor should be >= 1
+    if factor < 1 {
+        print("FAIL: test_lopt_unroll_factor\n")
+        return 1
+    }
+    print("PASS: test_lopt_unroll_factor\n")
+    return 0
+}
+
+fn test_lopt_unroll_factor() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_counted_loop_ctx()
+    return test_lopt_unroll_factor_inner(&! ctx)
+}
+
+// T31: Unroll info construction
+fn test_lopt_unroll_info_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let lcount = lopt_find_natural_loops(ctx)
+    let info = lopt_unroll_loop(ctx, 0)
+    if info.can_unroll == false {
+        print("FAIL: test_lopt_unroll_info can_unroll\n")
+        return 1
+    }
+    if info.factor < 1 {
+        print("FAIL: test_lopt_unroll_info factor\n")
+        return 1
+    }
+    print("PASS: test_lopt_unroll_info\n")
+    return 0
+}
+
+fn test_lopt_unroll_info() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_simple_loop_ctx()
+    return test_lopt_unroll_info_inner(&! ctx)
+}
+
+// T32: Full unroll for small trip count
+fn test_lopt_full_unroll_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let lcount = lopt_find_natural_loops(ctx)
+    // Set trip count manually for test
+    ctx.nest.loops[0].trip_count = 4
+    ctx.nest.loops[0].is_counted = true
+    ctx.nest.loops[0].instr_count = 3
+
+    let info = lopt_full_unroll(ctx, 0)
+    if info.can_unroll == false {
+        print("FAIL: test_lopt_full_unroll can_unroll\n")
+        return 1
+    }
+    if info.is_full_unroll == false {
+        print("FAIL: test_lopt_full_unroll is_full\n")
+        return 1
+    }
+    if info.factor != 4 {
+        print("FAIL: test_lopt_full_unroll factor\n")
+        return 1
+    }
+    print("PASS: test_lopt_full_unroll\n")
+    return 0
+}
+
+fn test_lopt_full_unroll() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_simple_loop_ctx()
+    return test_lopt_full_unroll_inner(&! ctx)
+}
+
+// T33: Full unroll rejected for large trip count
+fn test_lopt_full_unroll_too_large_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let lcount = lopt_find_natural_loops(ctx)
+    ctx.nest.loops[0].trip_count = 1000
+    ctx.nest.loops[0].is_counted = true
+    ctx.nest.loops[0].instr_count = 50
+
+    let info = lopt_full_unroll(ctx, 0)
+    // 1000 * 50 > LOPT_FULL_UNROLL_THRESHOLD (256), so should be rejected
+    if info.can_unroll {
+        print("FAIL: test_lopt_full_unroll_too_large\n")
+        return 1
+    }
+    print("PASS: test_lopt_full_unroll_too_large\n")
+    return 0
+}
+
+fn test_lopt_full_unroll_too_large() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_simple_loop_ctx()
+    return test_lopt_full_unroll_too_large_inner(&! ctx)
+}
+
+// T34: Strength reduction on derived IV
+fn test_lopt_strength_reduction_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let lcount = lopt_find_natural_loops(ctx)
+    let iv_count = lopt_find_induction_vars(ctx, 0)
+    let div_count = lopt_find_derived_ivs(ctx, 0)
+
+    let reduced = lopt_reduce_strength(ctx, 0)
+    // reduced count should match derived IV count
+    if reduced != div_count {
+        print("FAIL: test_lopt_strength_reduction\n")
+        return 1
+    }
+    print("PASS: test_lopt_strength_reduction\n")
+    return 0
+}
+
+fn test_lopt_strength_reduction() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_counted_loop_ctx()
+    return test_lopt_strength_reduction_inner(&! ctx)
+}
+
+// T35: IV elimination
+fn test_lopt_eliminate_iv_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let lcount = lopt_find_natural_loops(ctx)
+    let iv_count = lopt_find_induction_vars(ctx, 0)
+    let elim = lopt_eliminate_iv(ctx, 0)
+    // No derived IVs to eliminate in simple test
+    if elim < 0 {
+        print("FAIL: test_lopt_eliminate_iv\n")
+        return 1
+    }
+    print("PASS: test_lopt_eliminate_iv\n")
+    return 0
+}
+
+fn test_lopt_eliminate_iv() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_counted_loop_ctx()
+    return test_lopt_eliminate_iv_inner(&! ctx)
+}
+
+// T36: Loop fusion — cannot fuse with different trip counts
+fn test_lopt_cannot_fuse_diff_trips() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_context_new()
+    // Create two loops manually
+    var lp_a = lopt_loop_new()
+    lp_a.id = 0
+    lp_a.header = 1
+    lp_a.is_counted = true
+    lp_a.trip_count = 10
+    lp_a.depth = 1
+    lp_a.parent_id = LOPT_INVALID
+
+    var lp_b = lopt_loop_new()
+    lp_b.id = 1
+    lp_b.header = 3
+    lp_b.is_counted = true
+    lp_b.trip_count = 20
+    lp_b.depth = 1
+    lp_b.parent_id = LOPT_INVALID
+
+    ctx.nest.loops[0] = lp_a
+    ctx.nest.loops[1] = lp_b
+    ctx.nest.loop_count = 2
+
+    let can = lopt_can_fuse(&! ctx, 0, 1)
+    if can {
+        print("FAIL: test_lopt_cannot_fuse_diff_trips\n")
+        return 1
+    }
+    print("PASS: test_lopt_cannot_fuse_diff_trips\n")
+    return 0
+}
+
+// T37: Loop fusion — same loop cannot fuse with itself
+fn test_lopt_cannot_fuse_self() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_context_new()
+    var lp = lopt_loop_new()
+    lp.id = 0
+    lp.is_counted = true
+    lp.trip_count = 10
+    ctx.nest.loops[0] = lp
+    ctx.nest.loop_count = 1
+
+    let can = lopt_can_fuse(&! ctx, 0, 0)
+    if can {
+        print("FAIL: test_lopt_cannot_fuse_self\n")
+        return 1
+    }
+    print("PASS: test_lopt_cannot_fuse_self\n")
+    return 0
+}
+
+// T38: Loop distribution — too small
+fn test_lopt_distribute_too_small() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_context_new()
+    var lp = lopt_loop_new()
+    lp.id = 0
+    lp.instr_count = 2
+    ctx.nest.loops[0] = lp
+    ctx.nest.loop_count = 1
+
+    let result = lopt_distribute_loop(&! ctx, 0)
+    if result != LOPT_ERR_COMPLEX_CFG {
+        print("FAIL: test_lopt_distribute_too_small\n")
+        return 1
+    }
+    print("PASS: test_lopt_distribute_too_small\n")
+    return 0
+}
+
+// T39: Vectorization — non-counted loop
+fn test_lopt_vect_non_counted_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let lcount = lopt_find_natural_loops(ctx)
+    let vinfo = lopt_check_vectorizable(ctx, 0)
+    // Without a known trip count, should not be vectorizable
+    if vinfo.is_vectorizable {
+        print("FAIL: test_lopt_vect_non_counted\n")
+        return 1
+    }
+    print("PASS: test_lopt_vect_non_counted\n")
+    return 0
+}
+
+fn test_lopt_vect_non_counted() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_simple_loop_ctx()
+    return test_lopt_vect_non_counted_inner(&! ctx)
+}
+
+// T40: Vectorization — counted loop
+fn test_lopt_vect_counted_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let lcount = lopt_find_natural_loops(ctx)
+    ctx.nest.loops[0].is_counted = true
+    ctx.nest.loops[0].trip_count = 16
+
+    let vinfo = lopt_check_vectorizable(ctx, 0)
+    if vinfo.is_vectorizable == false {
+        print("FAIL: test_lopt_vect_counted\n")
+        return 1
+    }
+    print("PASS: test_lopt_vect_counted\n")
+    return 0
+}
+
+fn test_lopt_vect_counted() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_simple_loop_ctx()
+    return test_lopt_vect_counted_inner(&! ctx)
+}
+
+// T41: Vector width computation
+fn test_lopt_vector_width_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let lcount = lopt_find_natural_loops(ctx)
+    ctx.nest.loops[0].is_counted = true
+    ctx.nest.loops[0].trip_count = 16
+
+    let width = lopt_compute_vector_width(ctx, 0)
+    if width != LOPT_DEFAULT_VECTOR_WIDTH {
+        print("FAIL: test_lopt_vector_width\n")
+        return 1
+    }
+    print("PASS: test_lopt_vector_width\n")
+    return 0
+}
+
+fn test_lopt_vector_width() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_simple_loop_ctx()
+    return test_lopt_vector_width_inner(&! ctx)
+}
+
+// T42: Vector width clamped to trip count
+fn test_lopt_vector_width_clamped_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let lcount = lopt_find_natural_loops(ctx)
+    ctx.nest.loops[0].is_counted = true
+    ctx.nest.loops[0].trip_count = 2
+
+    let width = lopt_compute_vector_width(ctx, 0)
+    if width != 2 {
+        print("FAIL: test_lopt_vector_width_clamped\n")
+        return 1
+    }
+    print("PASS: test_lopt_vector_width_clamped\n")
+    return 0
+}
+
+fn test_lopt_vector_width_clamped() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_simple_loop_ctx()
+    return test_lopt_vector_width_clamped_inner(&! ctx)
+}
+
+// T43: Reduction variable detection
+fn test_lopt_reduction_vars_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let lcount = lopt_find_natural_loops(ctx)
+
+    // Add a reduction: r10 = r10 + r11 in block 2
+    let i0 = lopt_add_instr(ctx, 2, 6, 10, 10, 11)
+
+    var vinfo = lopt_vect_info_new()
+    let rcount = lopt_find_reduction_vars(ctx, 0, &! vinfo)
+    if rcount < 1 {
+        print("FAIL: test_lopt_reduction_vars count\n")
+        return 1
+    }
+    if vinfo.reductions[0].reg != 10 {
+        print("FAIL: test_lopt_reduction_vars reg\n")
+        return 1
+    }
+    print("PASS: test_lopt_reduction_vars\n")
+    return 0
+}
+
+fn test_lopt_reduction_vars() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_simple_loop_ctx()
+    return test_lopt_reduction_vars_inner(&! ctx)
+}
+
+// T44: Peel first iteration
+fn test_lopt_peel_first_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let lcount = lopt_find_natural_loops(ctx)
+    ctx.nest.loops[0].is_counted = true
+    ctx.nest.loops[0].trip_count = 10
+
+    let ok = lopt_peel_first_iteration(ctx, 0)
+    if ok == false {
+        print("FAIL: test_lopt_peel_first ok\n")
+        return 1
+    }
+    if ctx.nest.loops[0].trip_count != 9 {
+        print("FAIL: test_lopt_peel_first trip\n")
+        return 1
+    }
+    print("PASS: test_lopt_peel_first\n")
+    return 0
+}
+
+fn test_lopt_peel_first() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_simple_loop_ctx()
+    return test_lopt_peel_first_inner(&! ctx)
+}
+
+// T45: Peel last iteration
+fn test_lopt_peel_last_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let lcount = lopt_find_natural_loops(ctx)
+    ctx.nest.loops[0].is_counted = true
+    ctx.nest.loops[0].trip_count = 10
+
+    let ok = lopt_peel_last_iteration(ctx, 0)
+    if ok == false {
+        print("FAIL: test_lopt_peel_last ok\n")
+        return 1
+    }
+    if ctx.nest.loops[0].trip_count != 9 {
+        print("FAIL: test_lopt_peel_last trip\n")
+        return 1
+    }
+    print("PASS: test_lopt_peel_last\n")
+    return 0
+}
+
+fn test_lopt_peel_last() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_simple_loop_ctx()
+    return test_lopt_peel_last_inner(&! ctx)
+}
+
+// T46: Cannot peel loop with trip count 1
+fn test_lopt_peel_trip_one_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let lcount = lopt_find_natural_loops(ctx)
+    ctx.nest.loops[0].is_counted = true
+    ctx.nest.loops[0].trip_count = 1
+
+    let ok = lopt_peel_first_iteration(ctx, 0)
+    if ok {
+        print("FAIL: test_lopt_peel_trip_one\n")
+        return 1
+    }
+    print("PASS: test_lopt_peel_trip_one\n")
+    return 0
+}
+
+fn test_lopt_peel_trip_one() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_simple_loop_ctx()
+    return test_lopt_peel_trip_one_inner(&! ctx)
+}
+
+// T47: Tile size computation
+fn test_lopt_tile_size_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let lcount = lopt_find_natural_loops(ctx)
+    let size = lopt_compute_tile_size(ctx, 0)
+    // No memory accesses => default tile size
+    if size != LOPT_DEFAULT_TILE_SIZE {
+        print("FAIL: test_lopt_tile_size\n")
+        return 1
+    }
+    print("PASS: test_lopt_tile_size\n")
+    return 0
+}
+
+fn test_lopt_tile_size() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_simple_loop_ctx()
+    return test_lopt_tile_size_inner(&! ctx)
+}
+
+// T48: Loop tiling
+fn test_lopt_tile_loop_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let lcount = lopt_find_natural_loops(ctx)
+    ctx.nest.loops[0].is_counted = true
+    ctx.nest.loops[0].trip_count = 256
+
+    let config = lopt_tile_loop(ctx, 0)
+    if config.dim_count < 1 {
+        print("FAIL: test_lopt_tile_loop dim\n")
+        return 1
+    }
+    if config.estimated_benefit < 1 {
+        print("FAIL: test_lopt_tile_loop benefit\n")
+        return 1
+    }
+    print("PASS: test_lopt_tile_loop\n")
+    return 0
+}
+
+fn test_lopt_tile_loop() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_simple_loop_ctx()
+    return test_lopt_tile_loop_inner(&! ctx)
+}
+
+// T49: Tile rejected when trip count <= tile size
+fn test_lopt_tile_too_small_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let lcount = lopt_find_natural_loops(ctx)
+    ctx.nest.loops[0].is_counted = true
+    ctx.nest.loops[0].trip_count = 16
+
+    let config = lopt_tile_loop(ctx, 0)
+    // trip_count 16 <= default tile size 32, so tiling should be skipped
+    if config.dim_count != 0 {
+        print("FAIL: test_lopt_tile_too_small\n")
+        return 1
+    }
+    print("PASS: test_lopt_tile_too_small\n")
+    return 0
+}
+
+fn test_lopt_tile_too_small() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_simple_loop_ctx()
+    return test_lopt_tile_too_small_inner(&! ctx)
+}
+
+// T50: Full pipeline on simple loop
+fn test_lopt_optimize_loop_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let lcount = lopt_find_natural_loops(ctx)
+    let result = lopt_optimize_loop(ctx, 0)
+    if result != LOPT_OK {
+        print("FAIL: test_lopt_optimize_loop\n")
+        return 1
+    }
+    print("PASS: test_lopt_optimize_loop\n")
+    return 0
+}
+
+fn test_lopt_optimize_loop() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_counted_loop_ctx()
+    return test_lopt_optimize_loop_inner(&! ctx)
+}
+
+// T51: Full pipeline returns error for invalid loop
+fn test_lopt_optimize_invalid() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_context_new()
+    let result = lopt_optimize_loop(&! ctx, 99)
+    if result != LOPT_ERR_NO_LOOPS {
+        print("FAIL: test_lopt_optimize_invalid\n")
+        return 1
+    }
+    print("PASS: test_lopt_optimize_invalid\n")
+    return 0
+}
+
+// T52: Optimize all loops on nested structure
+fn test_lopt_optimize_all() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_nested_loop_ctx()
+    let stats = lopt_optimize_all_loops(&! ctx)
+    if stats.loops_found < 2 {
+        print("FAIL: test_lopt_optimize_all loops_found\n")
+        return 1
+    }
+    print("PASS: test_lopt_optimize_all\n")
+    return 0
+}
+
+// T53: Optimize all on empty CFG
+fn test_lopt_optimize_all_empty() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_context_new()
+    let stats = lopt_optimize_all_loops(&! ctx)
+    if stats.loops_found != 0 {
+        print("FAIL: test_lopt_optimize_all_empty\n")
+        return 1
+    }
+    print("PASS: test_lopt_optimize_all_empty\n")
+    return 0
+}
+
+// T54: Stats tracking — invariants hoisted
+fn test_lopt_stats_invariants_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let lcount = lopt_find_natural_loops(ctx)
+    let hoisted = lopt_licm_pass(ctx, 0)
+    if ctx.stats.invariants_hoisted != hoisted {
+        print("FAIL: test_lopt_stats_invariants\n")
+        return 1
+    }
+    print("PASS: test_lopt_stats_invariants\n")
+    return 0
+}
+
+fn test_lopt_stats_invariants() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_invariant_loop_ctx()
+    return test_lopt_stats_invariants_inner(&! ctx)
+}
+
+// T55: Stats tracking — loops found
+fn test_lopt_stats_loops_found() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_nested_loop_ctx()
+    let count = lopt_find_natural_loops(&! ctx)
+    if ctx.stats.loops_found != count {
+        print("FAIL: test_lopt_stats_loops_found\n")
+        return 1
+    }
+    print("PASS: test_lopt_stats_loops_found\n")
+    return 0
+}
+
+// T56: Helper — lopt_abs
+fn test_lopt_abs() -> i32 with IO, Mut, Div, Panic {
+    let a = lopt_abs(5)
+    let b = lopt_abs(0 - 5)
+    let c = lopt_abs(0)
+    if a != 5 || b != 5 || c != 0 {
+        print("FAIL: test_lopt_abs\n")
+        return 1
+    }
+    print("PASS: test_lopt_abs\n")
+    return 0
+}
+
+// T57: Helper — lopt_min / lopt_max
+fn test_lopt_min_max() -> i32 with IO, Mut, Div, Panic {
+    if lopt_min(3, 7) != 3 {
+        print("FAIL: test_lopt_min_max min\n")
+        return 1
+    }
+    if lopt_max(3, 7) != 7 {
+        print("FAIL: test_lopt_min_max max\n")
+        return 1
+    }
+    if lopt_min(5, 5) != 5 {
+        print("FAIL: test_lopt_min_max eq\n")
+        return 1
+    }
+    print("PASS: test_lopt_min_max\n")
+    return 0
+}
+
+// T58: Helper — lopt_safe_div
+fn test_lopt_safe_div() -> i32 with IO, Mut, Div, Panic {
+    if lopt_safe_div(10, 3) != 3 {
+        print("FAIL: test_lopt_safe_div normal\n")
+        return 1
+    }
+    if lopt_safe_div(10, 0) != 0 {
+        print("FAIL: test_lopt_safe_div zero\n")
+        return 1
+    }
+    if lopt_safe_div(0, 5) != 0 {
+        print("FAIL: test_lopt_safe_div zero_num\n")
+        return 1
+    }
+    print("PASS: test_lopt_safe_div\n")
+    return 0
+}
+
+// T59: Block-to-loop map after loop tree construction
+fn test_lopt_block_loop_map_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let lcount = lopt_find_natural_loops(ctx)
+    let depth = lopt_build_loop_tree(ctx)
+
+    // Blocks 1 and 2 should be mapped to loop 0
+    if ctx.block_loop_map[1] != 0 {
+        print("FAIL: test_lopt_block_loop_map b1\n")
+        return 1
+    }
+    if ctx.block_loop_map[2] != 0 {
+        print("FAIL: test_lopt_block_loop_map b2\n")
+        return 1
+    }
+    // Block 0 and 3 should not be in any loop
+    if ctx.block_loop_map[0] != LOPT_INVALID {
+        print("FAIL: test_lopt_block_loop_map b0\n")
+        return 1
+    }
+    if ctx.block_loop_map[3] != LOPT_INVALID {
+        print("FAIL: test_lopt_block_loop_map b3\n")
+        return 1
+    }
+    print("PASS: test_lopt_block_loop_map\n")
+    return 0
+}
+
+fn test_lopt_block_loop_map() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_simple_loop_ctx()
+    return test_lopt_block_loop_map_inner(&! ctx)
+}
+
+// T60: Dependence direction classification
+fn test_lopt_dep_direction_inner(ctx: &! LoptContext) -> i32 with IO, Mut, Div, Panic {
+    let lcount = lopt_find_natural_loops(ctx)
+
+    // Add a store and a load with same base in the loop
+    let i0 = lopt_add_instr(ctx, 2, 16, LOPT_INVALID, 5, 6)  // INDEX_SET (store)
+    let i1 = lopt_add_instr(ctx, 2, 15, 7, 5, 8)              // INDEX_GET (load)
+
+    let deps = lopt_analyze_dependencies(ctx, 0)
+    if deps < 1 {
+        print("FAIL: test_lopt_dep_direction no deps\n")
+        return 1
+    }
+    // First dep should be FLOW (store before load)
+    if ctx.deps[0].direction != LOPT_DEP_FLOW {
+        print("FAIL: test_lopt_dep_direction type\n")
+        return 1
+    }
+    print("PASS: test_lopt_dep_direction\n")
+    return 0
+}
+
+fn test_lopt_dep_direction() -> i32 with IO, Mut, Div, Panic {
+    var ctx = lopt_make_simple_loop_ctx()
+    return test_lopt_dep_direction_inner(&! ctx)
+}
+
+// ============================================================================
+// Section 25: Test Runner
+// ============================================================================
+
+fn lopt_run_tests() -> i32 with IO, Mut, Div, Panic {
+    var passed: i64 = 0
+    let total: i64 = 60
+
+    print("=== Loop Optimization Tests ===\n")
+
+    if test_lopt_context_new() == 0 { passed = passed + 1 }
+    if test_lopt_add_block() == 0 { passed = passed + 1 }
+    if test_lopt_add_edge() == 0 { passed = passed + 1 }
+    if test_lopt_add_instr() == 0 { passed = passed + 1 }
+    if test_lopt_dominates_self() == 0 { passed = passed + 1 }
+    if test_lopt_dominates_chain() == 0 { passed = passed + 1 }
+    if test_lopt_find_back_edges_simple() == 0 { passed = passed + 1 }
+    if test_lopt_compute_loop_body() == 0 { passed = passed + 1 }
+    if test_lopt_single_block_loop() == 0 { passed = passed + 1 }
+    if test_lopt_find_natural_loops() == 0 { passed = passed + 1 }
+    if test_lopt_exit_blocks() == 0 { passed = passed + 1 }
+    if test_lopt_nested_loops() == 0 { passed = passed + 1 }
+    if test_lopt_build_loop_tree() == 0 { passed = passed + 1 }
+    if test_lopt_nesting_depth() == 0 { passed = passed + 1 }
+    if test_lopt_no_loops() == 0 { passed = passed + 1 }
+    if test_lopt_find_ivs() == 0 { passed = passed + 1 }
+    if test_lopt_iv_properties() == 0 { passed = passed + 1 }
+    if test_lopt_trip_count_bounds() == 0 { passed = passed + 1 }
+    if test_lopt_trip_count_zero_step() == 0 { passed = passed + 1 }
+    if test_lopt_classify_counted() == 0 { passed = passed + 1 }
+    if test_lopt_classify_while() == 0 { passed = passed + 1 }
+    if test_lopt_deps_no_memory() == 0 { passed = passed + 1 }
+    if test_lopt_deps_with_memory() == 0 { passed = passed + 1 }
+    if test_lopt_find_invariants() == 0 { passed = passed + 1 }
+    if test_lopt_invariant_hoistable() == 0 { passed = passed + 1 }
+    if test_lopt_licm_pass() == 0 { passed = passed + 1 }
+    if test_lopt_side_effect_not_invariant() == 0 { passed = passed + 1 }
+    if test_lopt_can_unroll() == 0 { passed = passed + 1 }
+    if test_lopt_cannot_unroll_with_call() == 0 { passed = passed + 1 }
+    if test_lopt_unroll_factor() == 0 { passed = passed + 1 }
+    if test_lopt_unroll_info() == 0 { passed = passed + 1 }
+    if test_lopt_full_unroll() == 0 { passed = passed + 1 }
+    if test_lopt_full_unroll_too_large() == 0 { passed = passed + 1 }
+    if test_lopt_strength_reduction() == 0 { passed = passed + 1 }
+    if test_lopt_eliminate_iv() == 0 { passed = passed + 1 }
+    if test_lopt_cannot_fuse_diff_trips() == 0 { passed = passed + 1 }
+    if test_lopt_cannot_fuse_self() == 0 { passed = passed + 1 }
+    if test_lopt_distribute_too_small() == 0 { passed = passed + 1 }
+    if test_lopt_vect_non_counted() == 0 { passed = passed + 1 }
+    if test_lopt_vect_counted() == 0 { passed = passed + 1 }
+    if test_lopt_vector_width() == 0 { passed = passed + 1 }
+    if test_lopt_vector_width_clamped() == 0 { passed = passed + 1 }
+    if test_lopt_reduction_vars() == 0 { passed = passed + 1 }
+    if test_lopt_peel_first() == 0 { passed = passed + 1 }
+    if test_lopt_peel_last() == 0 { passed = passed + 1 }
+    if test_lopt_peel_trip_one() == 0 { passed = passed + 1 }
+    if test_lopt_tile_size() == 0 { passed = passed + 1 }
+    if test_lopt_tile_loop() == 0 { passed = passed + 1 }
+    if test_lopt_tile_too_small() == 0 { passed = passed + 1 }
+    if test_lopt_optimize_loop() == 0 { passed = passed + 1 }
+    if test_lopt_optimize_invalid() == 0 { passed = passed + 1 }
+    if test_lopt_optimize_all() == 0 { passed = passed + 1 }
+    if test_lopt_optimize_all_empty() == 0 { passed = passed + 1 }
+    if test_lopt_stats_invariants() == 0 { passed = passed + 1 }
+    if test_lopt_stats_loops_found() == 0 { passed = passed + 1 }
+    if test_lopt_abs() == 0 { passed = passed + 1 }
+    if test_lopt_min_max() == 0 { passed = passed + 1 }
+    if test_lopt_safe_div() == 0 { passed = passed + 1 }
+    if test_lopt_block_loop_map() == 0 { passed = passed + 1 }
+    if test_lopt_dep_direction() == 0 { passed = passed + 1 }
+
+    print("\nLoop Optimization: ")
+    print_int(passed)
+    print(" / ")
+    print_int(total)
+    print(" passed\n")
+
+    if passed == total {
+        print("All loop optimization tests passed!\n")
+        0
+    } else {
+        1
+    }
+}

@@ -1,0 +1,3179 @@
+// Type erasure pass for generics lowering in the Sounio self-hosted compiler
+//
+// Transforms generic (polymorphic) functions into type-erased representations
+// using void-pointer calling conventions, vtables, and runtime casts.
+// Runs after monomorphization as an alternative strategy for generics that
+// cannot be fully specialized (e.g., trait objects, existential types,
+// separately compiled modules).
+//
+// Architecture:
+//   TeType        — erased type representation (concrete, erased, boxed, vtable)
+//   TeVtable      — virtual dispatch table for trait object types
+//   TeErasedFn    — records how a generic function signature is erased
+//   TeCastOp      — a runtime cast/coercion instruction inserted during erasure
+//   TeWitness     — witness/dictionary for where-clause constrained generics
+//   TeLayout      — size + alignment information for a type
+//   TeContext     — overall context: vtables, erased fns, casts, type map, stats
+//
+// Algorithm:
+//   1. Classify each type: concrete (keep), generic param (erase), trait obj (vtable)
+//   2. For each generic function, produce an erased signature: T → *void
+//   3. Build vtables for each (trait, impl_type) pair
+//   4. Insert box ops at call sites passing concrete values through erased params
+//   5. Insert unbox ops where erased values return to concrete context
+//   6. Construct witness dictionaries for where-clause constrained generics
+//   7. Compute layout (size, alignment) for erased representations
+//   8. Optimize cast chains: collapse box→unbox, eliminate redundant casts
+
+// ============================================================
+// Constants
+// ============================================================
+
+let TE_MAX_VTABLES: i64 = 256
+let TE_MAX_ERASED_FNS: i64 = 1024
+let TE_MAX_CASTS: i64 = 4096
+let TE_MAX_METHODS: i64 = 32
+let TE_MAX_PARAMS: i64 = 16
+let TE_MAX_TYPES: i64 = 2048
+
+// Type erasure kind constants
+let TE_KIND_ERASED: i64 = 0
+let TE_KIND_CONCRETE: i64 = 1
+let TE_KIND_BOXED: i64 = 2
+let TE_KIND_VTABLE: i64 = 3
+
+// Cast operation kind constants
+let TE_CAST_BOX: i64 = 1
+let TE_CAST_UNBOX: i64 = 2
+let TE_CAST_VTABLE_LOOKUP: i64 = 3
+let TE_CAST_SIZE_ASSERT: i64 = 4
+let TE_CAST_ALIGN: i64 = 5
+
+// Pointer layout constants
+let TE_PTR_SIZE: i64 = 8
+let TE_PTR_ALIGN: i64 = 8
+
+// Sentinel
+let TE_NOT_FOUND: i64 = 0 - 1
+
+// Primitive type IDs (matching monomorph conventions)
+let TE_TY_I64: i64 = 1
+let TE_TY_F64: i64 = 2
+let TE_TY_BOOL: i64 = 3
+let TE_TY_UNIT: i64 = 4
+let TE_TY_STRING: i64 = 5
+let TE_TY_I32: i64 = 6
+let TE_TY_U8: i64 = 7
+let TE_TY_U32: i64 = 8
+let TE_TY_U64: i64 = 9
+let TE_TY_F32: i64 = 10
+let TE_TY_I8: i64 = 11
+let TE_TY_VAR: i64 = 100
+let TE_TY_TRAIT_OBJ: i64 = 110
+let TE_TY_FN: i64 = 101
+let TE_TY_ARRAY: i64 = 102
+let TE_TY_NAMED: i64 = 103
+let TE_TY_REF: i64 = 104
+let TE_TY_REF_MUT: i64 = 105
+
+// Witness kind constants
+let TE_WITNESS_SIZE: i64 = 1
+let TE_WITNESS_ALIGN: i64 = 2
+let TE_WITNESS_DROP: i64 = 3
+let TE_WITNESS_METHOD: i64 = 4
+
+// Error constants
+let TE_ERR_NONE: i64 = 0
+let TE_ERR_VTABLE_FULL: i64 = 1
+let TE_ERR_FN_FULL: i64 = 2
+let TE_ERR_CAST_FULL: i64 = 3
+let TE_ERR_TYPE_FULL: i64 = 4
+let TE_ERR_METHOD_OVERFLOW: i64 = 5
+let TE_ERR_PARAM_OVERFLOW: i64 = 6
+
+// ============================================================
+// TeLayout — size + alignment for a type
+// ============================================================
+
+struct TeLayout {
+    size: i64,
+    alignment: i64,
+}
+
+fn te_layout_new(size: i64, alignment: i64) -> TeLayout {
+    TeLayout { size: size, alignment: alignment }
+}
+
+fn te_layout_zero() -> TeLayout {
+    TeLayout { size: 0, alignment: 1 }
+}
+
+fn te_layout_ptr() -> TeLayout {
+    TeLayout { size: TE_PTR_SIZE, alignment: TE_PTR_ALIGN }
+}
+
+fn te_layout_eq(a: TeLayout, b: TeLayout) -> bool {
+    if a.size != b.size { return false }
+    if a.alignment != b.alignment { return false }
+    return true
+}
+
+// Align a size up to the given alignment boundary
+fn te_align_up(size: i64, alignment: i64) -> i64 with Div, Panic {
+    if alignment <= 0 { return size }
+    let remainder = size - (size / alignment) * alignment
+    if remainder == 0 { return size }
+    return size + (alignment - remainder)
+}
+
+// ============================================================
+// TeType — erased type representation
+// ============================================================
+
+struct TeType {
+    kind: i64,
+    original_type_id: i64,
+    size: i64,
+    alignment: i64,
+    is_pointer: bool,
+    vtable_idx: i64,
+}
+
+fn te_type_empty() -> TeType {
+    TeType {
+        kind: TE_KIND_ERASED,
+        original_type_id: 0,
+        size: 0,
+        alignment: 1,
+        is_pointer: false,
+        vtable_idx: TE_NOT_FOUND,
+    }
+}
+
+fn te_type_concrete(type_id: i64, size: i64, alignment: i64) -> TeType {
+    TeType {
+        kind: TE_KIND_CONCRETE,
+        original_type_id: type_id,
+        size: size,
+        alignment: alignment,
+        is_pointer: false,
+        vtable_idx: TE_NOT_FOUND,
+    }
+}
+
+fn te_type_erased(type_id: i64) -> TeType {
+    TeType {
+        kind: TE_KIND_ERASED,
+        original_type_id: type_id,
+        size: TE_PTR_SIZE,
+        alignment: TE_PTR_ALIGN,
+        is_pointer: true,
+        vtable_idx: TE_NOT_FOUND,
+    }
+}
+
+fn te_type_boxed(type_id: i64, size: i64, alignment: i64) -> TeType {
+    TeType {
+        kind: TE_KIND_BOXED,
+        original_type_id: type_id,
+        size: TE_PTR_SIZE,
+        alignment: TE_PTR_ALIGN,
+        is_pointer: true,
+        vtable_idx: TE_NOT_FOUND,
+    }
+}
+
+fn te_type_vtable(type_id: i64, vtable_idx: i64) -> TeType {
+    TeType {
+        kind: TE_KIND_VTABLE,
+        original_type_id: type_id,
+        size: TE_PTR_SIZE * 2,
+        alignment: TE_PTR_ALIGN,
+        is_pointer: true,
+        vtable_idx: vtable_idx,
+    }
+}
+
+fn te_type_is_erased(ty: TeType) -> bool {
+    if ty.kind == TE_KIND_ERASED { return true }
+    return false
+}
+
+fn te_type_is_concrete(ty: TeType) -> bool {
+    if ty.kind == TE_KIND_CONCRETE { return true }
+    return false
+}
+
+fn te_type_is_boxed(ty: TeType) -> bool {
+    if ty.kind == TE_KIND_BOXED { return true }
+    return false
+}
+
+fn te_type_is_vtable(ty: TeType) -> bool {
+    if ty.kind == TE_KIND_VTABLE { return true }
+    return false
+}
+
+fn te_type_needs_erasure(ty: TeType) -> bool {
+    if ty.kind == TE_KIND_ERASED { return true }
+    if ty.kind == TE_KIND_VTABLE { return true }
+    return false
+}
+
+// ============================================================
+// TeVtable — virtual dispatch table
+// ============================================================
+
+struct TeVtable {
+    type_id: i64,
+    trait_id: i64,
+    method_ids: [i64; 32],
+    method_count: i64,
+    size: i64,
+    alignment: i64,
+    drop_fn_id: i64,
+}
+
+fn te_vtable_empty() -> TeVtable {
+    TeVtable {
+        type_id: 0,
+        trait_id: 0,
+        method_ids: [0; 32],
+        method_count: 0,
+        size: 0,
+        alignment: 1,
+        drop_fn_id: TE_NOT_FOUND,
+    }
+}
+
+fn te_vtable_new(type_id: i64, trait_id: i64, size: i64, alignment: i64) -> TeVtable {
+    TeVtable {
+        type_id: type_id,
+        trait_id: trait_id,
+        method_ids: [0; 32],
+        method_count: 0,
+        size: size,
+        alignment: alignment,
+        drop_fn_id: TE_NOT_FOUND,
+    }
+}
+
+fn te_vtable_add_method(vt: TeVtable, method_fn_id: i64) -> TeVtable with Mut, Panic, Div {
+    var v = vt
+    if v.method_count < TE_MAX_METHODS {
+        v.method_ids[v.method_count as usize] = method_fn_id
+        v.method_count = v.method_count + 1
+    }
+    return v
+}
+
+fn te_vtable_set_drop(vt: TeVtable, drop_fn_id: i64) -> TeVtable with Mut {
+    var v = vt
+    v.drop_fn_id = drop_fn_id
+    return v
+}
+
+fn te_vtable_get_method(vt: TeVtable, idx: i64) -> i64 with Panic, Div {
+    if idx < 0 { return TE_NOT_FOUND }
+    if idx >= vt.method_count { return TE_NOT_FOUND }
+    return vt.method_ids[idx as usize]
+}
+
+fn te_vtable_find_method(vt: TeVtable, method_fn_id: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < vt.method_count {
+        if vt.method_ids[i as usize] == method_fn_id {
+            return i
+        }
+        i = i + 1
+    }
+    return TE_NOT_FOUND
+}
+
+// ============================================================
+// TeErasedFn — erased function record
+// ============================================================
+
+struct TeErasedFn {
+    original_fn_id: i64,
+    erased_fn_id: i64,
+    param_erased_flags: [bool; 16],
+    param_count: i64,
+    return_erased: bool,
+    cast_ops_needed: i64,
+}
+
+fn te_erased_fn_empty() -> TeErasedFn {
+    TeErasedFn {
+        original_fn_id: 0,
+        erased_fn_id: 0,
+        param_erased_flags: [false; 16],
+        param_count: 0,
+        return_erased: false,
+        cast_ops_needed: 0,
+    }
+}
+
+fn te_erased_fn_new(original_id: i64, erased_id: i64) -> TeErasedFn {
+    TeErasedFn {
+        original_fn_id: original_id,
+        erased_fn_id: erased_id,
+        param_erased_flags: [false; 16],
+        param_count: 0,
+        return_erased: false,
+        cast_ops_needed: 0,
+    }
+}
+
+fn te_erased_fn_set_param(ef: TeErasedFn, param_idx: i64, erased: bool) -> TeErasedFn with Mut, Panic, Div {
+    var e = ef
+    if param_idx >= 0 {
+        if param_idx < TE_MAX_PARAMS {
+            e.param_erased_flags[param_idx as usize] = erased
+            if param_idx >= e.param_count {
+                e.param_count = param_idx + 1
+            }
+        }
+    }
+    return e
+}
+
+fn te_erased_fn_set_return_erased(ef: TeErasedFn, erased: bool) -> TeErasedFn with Mut {
+    var e = ef
+    e.return_erased = erased
+    return e
+}
+
+fn te_erased_fn_is_param_erased(ef: TeErasedFn, param_idx: i64) -> bool with Panic, Div {
+    if param_idx < 0 { return false }
+    if param_idx >= ef.param_count { return false }
+    return ef.param_erased_flags[param_idx as usize]
+}
+
+fn te_erased_fn_count_erased_params(ef: TeErasedFn) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ef.param_count {
+        if ef.param_erased_flags[i as usize] {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    return count
+}
+
+// ============================================================
+// TeCastOp — runtime cast / coercion instruction
+// ============================================================
+
+struct TeCastOp {
+    kind: i64,
+    src_reg: i64,
+    dst_reg: i64,
+    type_idx: i64,
+    size_bytes: i64,
+    alignment: i64,
+    vtable_method_idx: i64,
+}
+
+fn te_cast_op_empty() -> TeCastOp {
+    TeCastOp {
+        kind: 0,
+        src_reg: 0,
+        dst_reg: 0,
+        type_idx: 0,
+        size_bytes: 0,
+        alignment: 1,
+        vtable_method_idx: TE_NOT_FOUND,
+    }
+}
+
+fn te_cast_box(src: i64, dst: i64, type_idx: i64, size: i64, align: i64) -> TeCastOp {
+    TeCastOp {
+        kind: TE_CAST_BOX,
+        src_reg: src,
+        dst_reg: dst,
+        type_idx: type_idx,
+        size_bytes: size,
+        alignment: align,
+        vtable_method_idx: TE_NOT_FOUND,
+    }
+}
+
+fn te_cast_unbox(src: i64, dst: i64, type_idx: i64, size: i64, align: i64) -> TeCastOp {
+    TeCastOp {
+        kind: TE_CAST_UNBOX,
+        src_reg: src,
+        dst_reg: dst,
+        type_idx: type_idx,
+        size_bytes: size,
+        alignment: align,
+        vtable_method_idx: TE_NOT_FOUND,
+    }
+}
+
+fn te_cast_vtable_lookup(src: i64, dst: i64, type_idx: i64, method_idx: i64) -> TeCastOp {
+    TeCastOp {
+        kind: TE_CAST_VTABLE_LOOKUP,
+        src_reg: src,
+        dst_reg: dst,
+        type_idx: type_idx,
+        size_bytes: 0,
+        alignment: 0,
+        vtable_method_idx: method_idx,
+    }
+}
+
+fn te_cast_size_assert(src: i64, dst: i64, type_idx: i64, expected_size: i64) -> TeCastOp {
+    TeCastOp {
+        kind: TE_CAST_SIZE_ASSERT,
+        src_reg: src,
+        dst_reg: dst,
+        type_idx: type_idx,
+        size_bytes: expected_size,
+        alignment: 1,
+        vtable_method_idx: TE_NOT_FOUND,
+    }
+}
+
+fn te_cast_align(src: i64, dst: i64, type_idx: i64, alignment: i64) -> TeCastOp {
+    TeCastOp {
+        kind: TE_CAST_ALIGN,
+        src_reg: src,
+        dst_reg: dst,
+        type_idx: type_idx,
+        size_bytes: 0,
+        alignment: alignment,
+        vtable_method_idx: TE_NOT_FOUND,
+    }
+}
+
+fn te_cast_is_box(op: TeCastOp) -> bool {
+    if op.kind == TE_CAST_BOX { return true }
+    return false
+}
+
+fn te_cast_is_unbox(op: TeCastOp) -> bool {
+    if op.kind == TE_CAST_UNBOX { return true }
+    return false
+}
+
+fn te_cast_is_vtable_lookup(op: TeCastOp) -> bool {
+    if op.kind == TE_CAST_VTABLE_LOOKUP { return true }
+    return false
+}
+
+// ============================================================
+// TeWitnessEntry — a single entry in a witness/dictionary
+// ============================================================
+
+struct TeWitnessEntry {
+    kind: i64,
+    value: i64,
+    method_fn_id: i64,
+}
+
+fn te_witness_entry_empty() -> TeWitnessEntry {
+    TeWitnessEntry { kind: 0, value: 0, method_fn_id: TE_NOT_FOUND }
+}
+
+fn te_witness_entry_size(size: i64) -> TeWitnessEntry {
+    TeWitnessEntry { kind: TE_WITNESS_SIZE, value: size, method_fn_id: TE_NOT_FOUND }
+}
+
+fn te_witness_entry_align(alignment: i64) -> TeWitnessEntry {
+    TeWitnessEntry { kind: TE_WITNESS_ALIGN, value: alignment, method_fn_id: TE_NOT_FOUND }
+}
+
+fn te_witness_entry_drop(drop_fn_id: i64) -> TeWitnessEntry {
+    TeWitnessEntry { kind: TE_WITNESS_DROP, value: 0, method_fn_id: drop_fn_id }
+}
+
+fn te_witness_entry_method(method_fn_id: i64) -> TeWitnessEntry {
+    TeWitnessEntry { kind: TE_WITNESS_METHOD, value: 0, method_fn_id: method_fn_id }
+}
+
+// ============================================================
+// TeWitness — witness / dictionary for constrained generics
+// ============================================================
+
+struct TeWitness {
+    type_id: i64,
+    trait_id: i64,
+    entries: [TeWitnessEntry; 32],
+    entry_count: i64,
+}
+
+fn te_witness_empty() -> TeWitness {
+    TeWitness {
+        type_id: 0,
+        trait_id: 0,
+        entries: [te_witness_entry_empty(); 32],
+        entry_count: 0,
+    }
+}
+
+fn te_witness_new(type_id: i64, trait_id: i64) -> TeWitness {
+    TeWitness {
+        type_id: type_id,
+        trait_id: trait_id,
+        entries: [te_witness_entry_empty(); 32],
+        entry_count: 0,
+    }
+}
+
+fn te_witness_add_entry(w: TeWitness, entry: TeWitnessEntry) -> TeWitness with Mut, Panic, Div {
+    var wit = w
+    if wit.entry_count < 32 {
+        wit.entries[wit.entry_count as usize] = entry
+        wit.entry_count = wit.entry_count + 1
+    }
+    return wit
+}
+
+fn te_witness_get_entry(w: TeWitness, idx: i64) -> TeWitnessEntry with Panic, Div {
+    if idx < 0 { return te_witness_entry_empty() }
+    if idx >= w.entry_count { return te_witness_entry_empty() }
+    return w.entries[idx as usize]
+}
+
+fn te_witness_find_size(w: TeWitness) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < w.entry_count {
+        if w.entries[i as usize].kind == TE_WITNESS_SIZE {
+            return w.entries[i as usize].value
+        }
+        i = i + 1
+    }
+    return TE_NOT_FOUND
+}
+
+fn te_witness_find_align(w: TeWitness) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < w.entry_count {
+        if w.entries[i as usize].kind == TE_WITNESS_ALIGN {
+            return w.entries[i as usize].value
+        }
+        i = i + 1
+    }
+    return TE_NOT_FOUND
+}
+
+fn te_witness_find_drop(w: TeWitness) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < w.entry_count {
+        if w.entries[i as usize].kind == TE_WITNESS_DROP {
+            return w.entries[i as usize].method_fn_id
+        }
+        i = i + 1
+    }
+    return TE_NOT_FOUND
+}
+
+fn te_witness_count_methods(w: TeWitness) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < w.entry_count {
+        if w.entries[i as usize].kind == TE_WITNESS_METHOD {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    return count
+}
+
+// ============================================================
+// TeStats — statistics for the erasure pass
+// ============================================================
+
+struct TeStats {
+    types_classified: i64,
+    types_erased: i64,
+    types_concrete: i64,
+    types_boxed: i64,
+    types_vtable: i64,
+    vtables_built: i64,
+    fns_erased: i64,
+    casts_inserted: i64,
+    casts_optimized_away: i64,
+    witnesses_built: i64,
+}
+
+fn te_stats_new() -> TeStats {
+    TeStats {
+        types_classified: 0,
+        types_erased: 0,
+        types_concrete: 0,
+        types_boxed: 0,
+        types_vtable: 0,
+        vtables_built: 0,
+        fns_erased: 0,
+        casts_inserted: 0,
+        casts_optimized_away: 0,
+        witnesses_built: 0,
+    }
+}
+
+// ============================================================
+// TeTypeMap — maps original type IDs to erased type entries
+// ============================================================
+
+struct TeTypeMap {
+    original_ids: [i64; 2048],
+    erased_types: [TeType; 2048],
+    count: i64,
+}
+
+fn te_type_map_new() -> TeTypeMap {
+    TeTypeMap {
+        original_ids: [0; 2048],
+        erased_types: [te_type_empty(); 2048],
+        count: 0,
+    }
+}
+
+fn te_type_map_insert(map: TeTypeMap, original_id: i64, erased: TeType) -> TeTypeMap with Mut, Panic, Div {
+    var m = map
+    // Check for existing entry
+    var i: i64 = 0
+    while i < m.count {
+        if m.original_ids[i as usize] == original_id {
+            m.erased_types[i as usize] = erased
+            return m
+        }
+        i = i + 1
+    }
+    // Insert new
+    if m.count < TE_MAX_TYPES {
+        m.original_ids[m.count as usize] = original_id
+        m.erased_types[m.count as usize] = erased
+        m.count = m.count + 1
+    }
+    return m
+}
+
+fn te_type_map_lookup(map: TeTypeMap, original_id: i64) -> TeType with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < map.count {
+        if map.original_ids[i as usize] == original_id {
+            return map.erased_types[i as usize]
+        }
+        i = i + 1
+    }
+    return te_type_empty()
+}
+
+fn te_type_map_has(map: TeTypeMap, original_id: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < map.count {
+        if map.original_ids[i as usize] == original_id {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// ============================================================
+// TeContext — overall erasure context
+// ============================================================
+
+struct TeContext {
+    vtables: [TeVtable; 256],
+    vtable_count: i64,
+    erased_fns: [TeErasedFn; 1024],
+    erased_fn_count: i64,
+    cast_ops: [TeCastOp; 4096],
+    cast_op_count: i64,
+    type_map: TeTypeMap,
+    witnesses: [TeWitness; 256],
+    witness_count: i64,
+    stats: TeStats,
+    next_reg: i64,
+    next_fn_id: i64,
+    error_code: i64,
+}
+
+fn te_context_new() -> TeContext {
+    TeContext {
+        vtables: [te_vtable_empty(); 256],
+        vtable_count: 0,
+        erased_fns: [te_erased_fn_empty(); 1024],
+        erased_fn_count: 0,
+        cast_ops: [te_cast_op_empty(); 4096],
+        cast_op_count: 0,
+        type_map: te_type_map_new(),
+        witnesses: [te_witness_empty(); 256],
+        witness_count: 0,
+        stats: te_stats_new(),
+        next_reg: 1000,
+        next_fn_id: 5000,
+        error_code: TE_ERR_NONE,
+    }
+}
+
+fn te_context_alloc_reg(ctx: TeContext) -> i64 with Mut {
+    var c = ctx
+    let reg = c.next_reg
+    c.next_reg = c.next_reg + 1
+    return reg
+}
+
+fn te_context_alloc_fn_id(ctx: TeContext) -> i64 with Mut {
+    var c = ctx
+    let id = c.next_fn_id
+    c.next_fn_id = c.next_fn_id + 1
+    return id
+}
+
+// ============================================================
+// Type classification — determine which types need erasure
+// ============================================================
+
+// Classify a type based on its kind code.
+// Generic params (VAR) → erased, trait objects → vtable, everything else → concrete
+fn te_classify_type(type_kind: i64, type_id: i64, size: i64, alignment: i64) -> TeType {
+    if type_kind == TE_TY_VAR {
+        return te_type_erased(type_id)
+    }
+    if type_kind == TE_TY_TRAIT_OBJ {
+        return te_type_vtable(type_id, TE_NOT_FOUND)
+    }
+    // Primitives and known concrete types
+    if type_kind >= TE_TY_I64 {
+        if type_kind <= TE_TY_I8 {
+            return te_type_concrete(type_id, size, alignment)
+        }
+    }
+    // Named/array/fn/ref types are concrete if not parameterized
+    if type_kind == TE_TY_NAMED { return te_type_concrete(type_id, size, alignment) }
+    if type_kind == TE_TY_ARRAY { return te_type_concrete(type_id, size, alignment) }
+    if type_kind == TE_TY_FN { return te_type_concrete(type_id, size, alignment) }
+    if type_kind == TE_TY_REF { return te_type_concrete(type_id, TE_PTR_SIZE, TE_PTR_ALIGN) }
+    if type_kind == TE_TY_REF_MUT { return te_type_concrete(type_id, TE_PTR_SIZE, TE_PTR_ALIGN) }
+    // Default to erased for unknown
+    return te_type_erased(type_id)
+}
+
+// Register a type classification in the context
+fn te_classify_and_register(ctx: TeContext, type_kind: i64, type_id: i64, size: i64, alignment: i64) -> TeContext with Mut, Panic, Div {
+    var c = ctx
+    let te = te_classify_type(type_kind, type_id, size, alignment)
+    c.type_map = te_type_map_insert(c.type_map, type_id, te)
+    c.stats.types_classified = c.stats.types_classified + 1
+    if te.kind == TE_KIND_ERASED {
+        c.stats.types_erased = c.stats.types_erased + 1
+    } else if te.kind == TE_KIND_CONCRETE {
+        c.stats.types_concrete = c.stats.types_concrete + 1
+    } else if te.kind == TE_KIND_BOXED {
+        c.stats.types_boxed = c.stats.types_boxed + 1
+    } else if te.kind == TE_KIND_VTABLE {
+        c.stats.types_vtable = c.stats.types_vtable + 1
+    }
+    return c
+}
+
+// Check if a type kind represents a primitive
+fn te_is_primitive_kind(kind: i64) -> bool {
+    if kind >= TE_TY_I64 {
+        if kind <= TE_TY_I8 {
+            return true
+        }
+    }
+    return false
+}
+
+// ============================================================
+// Layout computation — compute size and alignment for types
+// ============================================================
+
+fn te_layout_for_primitive(kind: i64) -> TeLayout {
+    if kind == TE_TY_I64 { return te_layout_new(8, 8) }
+    if kind == TE_TY_F64 { return te_layout_new(8, 8) }
+    if kind == TE_TY_BOOL { return te_layout_new(1, 1) }
+    if kind == TE_TY_UNIT { return te_layout_new(0, 1) }
+    if kind == TE_TY_STRING { return te_layout_new(TE_PTR_SIZE, TE_PTR_ALIGN) }
+    if kind == TE_TY_I32 { return te_layout_new(4, 4) }
+    if kind == TE_TY_U8 { return te_layout_new(1, 1) }
+    if kind == TE_TY_U32 { return te_layout_new(4, 4) }
+    if kind == TE_TY_U64 { return te_layout_new(8, 8) }
+    if kind == TE_TY_F32 { return te_layout_new(4, 4) }
+    if kind == TE_TY_I8 { return te_layout_new(1, 1) }
+    // Unknown primitive
+    return te_layout_new(8, 8)
+}
+
+fn te_layout_for_erased() -> TeLayout {
+    return te_layout_ptr()
+}
+
+fn te_layout_for_boxed() -> TeLayout {
+    return te_layout_ptr()
+}
+
+fn te_layout_for_vtable_obj() -> TeLayout {
+    // Fat pointer: data pointer + vtable pointer
+    return te_layout_new(TE_PTR_SIZE * 2, TE_PTR_ALIGN)
+}
+
+fn te_layout_for_ref() -> TeLayout {
+    return te_layout_ptr()
+}
+
+// Compute layout for a type represented by a TeType entry
+fn te_layout_for_type(ty: TeType) -> TeLayout {
+    if ty.kind == TE_KIND_CONCRETE {
+        return te_layout_new(ty.size, ty.alignment)
+    }
+    if ty.kind == TE_KIND_ERASED {
+        return te_layout_for_erased()
+    }
+    if ty.kind == TE_KIND_BOXED {
+        return te_layout_for_boxed()
+    }
+    if ty.kind == TE_KIND_VTABLE {
+        return te_layout_for_vtable_obj()
+    }
+    return te_layout_zero()
+}
+
+// Compute aggregate layout: maximum alignment, sum of aligned sizes
+fn te_layout_aggregate(sizes: [i64; 16], aligns: [i64; 16], count: i64) -> TeLayout with Mut, Div, Panic {
+    var total_size: i64 = 0
+    var max_align: i64 = 1
+    var i: i64 = 0
+    while i < count {
+        let a = aligns[i as usize]
+        if a > max_align { max_align = a }
+        total_size = te_align_up(total_size, a) + sizes[i as usize]
+        i = i + 1
+    }
+    total_size = te_align_up(total_size, max_align)
+    return te_layout_new(total_size, max_align)
+}
+
+// ============================================================
+// Vtable construction — build vtable for each trait impl
+// ============================================================
+
+// Build a vtable for a concrete type implementing a trait.
+// method_fn_ids contains the concrete function IDs, method_count is how many.
+// size/alignment describe the implementing type's layout.
+fn te_build_vtable(ctx: TeContext, type_id: i64, trait_id: i64,
+                   method_fn_ids: [i64; 32], method_count: i64,
+                   size: i64, alignment: i64,
+                   drop_fn_id: i64) -> TeContext with Mut, Panic, Div {
+    var c = ctx
+    if c.vtable_count >= TE_MAX_VTABLES {
+        c.error_code = TE_ERR_VTABLE_FULL
+        return c
+    }
+    var vt = te_vtable_new(type_id, trait_id, size, alignment)
+    var i: i64 = 0
+    while i < method_count {
+        if i < TE_MAX_METHODS {
+            vt = te_vtable_add_method(vt, method_fn_ids[i as usize])
+        }
+        i = i + 1
+    }
+    if drop_fn_id != TE_NOT_FOUND {
+        vt = te_vtable_set_drop(vt, drop_fn_id)
+    }
+    c.vtables[c.vtable_count as usize] = vt
+    c.vtable_count = c.vtable_count + 1
+    c.stats.vtables_built = c.stats.vtables_built + 1
+    return c
+}
+
+// Find a vtable for a given (type_id, trait_id) pair
+fn te_find_vtable(ctx: TeContext, type_id: i64, trait_id: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < ctx.vtable_count {
+        if ctx.vtables[i as usize].type_id == type_id {
+            if ctx.vtables[i as usize].trait_id == trait_id {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    return TE_NOT_FOUND
+}
+
+// Find all vtables for a given type_id (multiple trait impls)
+fn te_count_vtables_for_type(ctx: TeContext, type_id: i64) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.vtable_count {
+        if ctx.vtables[i as usize].type_id == type_id {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    return count
+}
+
+// Dispatch: look up a method in a vtable by method index
+fn te_vtable_dispatch(ctx: TeContext, vtable_idx: i64, method_idx: i64) -> i64 with Panic, Div {
+    if vtable_idx < 0 { return TE_NOT_FOUND }
+    if vtable_idx >= ctx.vtable_count { return TE_NOT_FOUND }
+    return te_vtable_get_method(ctx.vtables[vtable_idx as usize], method_idx)
+}
+
+// ============================================================
+// Box insertion — for types passed through erased positions
+// ============================================================
+
+// Generate a box cast: allocate on heap, store pointer.
+// src_reg holds the concrete value, dst_reg will hold the void pointer.
+fn te_insert_box(ctx: TeContext, src_reg: i64, type_idx: i64,
+                 size: i64, alignment: i64) -> TeContext with Mut, Panic, Div {
+    var c = ctx
+    if c.cast_op_count >= TE_MAX_CASTS {
+        c.error_code = TE_ERR_CAST_FULL
+        return c
+    }
+    let dst_reg = c.next_reg
+    c.next_reg = c.next_reg + 1
+    let op = te_cast_box(src_reg, dst_reg, type_idx, size, alignment)
+    c.cast_ops[c.cast_op_count as usize] = op
+    c.cast_op_count = c.cast_op_count + 1
+    c.stats.casts_inserted = c.stats.casts_inserted + 1
+    return c
+}
+
+// ============================================================
+// Unbox extraction — for erased types returning to concrete
+// ============================================================
+
+// Generate an unbox cast: extract from box, assert correct size.
+// src_reg holds the void pointer, dst_reg will hold the concrete value.
+fn te_insert_unbox(ctx: TeContext, src_reg: i64, type_idx: i64,
+                   size: i64, alignment: i64) -> TeContext with Mut, Panic, Div {
+    var c = ctx
+    if c.cast_op_count >= TE_MAX_CASTS {
+        c.error_code = TE_ERR_CAST_FULL
+        return c
+    }
+    let dst_reg = c.next_reg
+    c.next_reg = c.next_reg + 1
+    let op = te_cast_unbox(src_reg, dst_reg, type_idx, size, alignment)
+    c.cast_ops[c.cast_op_count as usize] = op
+    c.cast_op_count = c.cast_op_count + 1
+    c.stats.casts_inserted = c.stats.casts_inserted + 1
+    return c
+}
+
+// ============================================================
+// Vtable lookup insertion
+// ============================================================
+
+fn te_insert_vtable_lookup(ctx: TeContext, src_reg: i64, type_idx: i64,
+                            method_idx: i64) -> TeContext with Mut, Panic, Div {
+    var c = ctx
+    if c.cast_op_count >= TE_MAX_CASTS {
+        c.error_code = TE_ERR_CAST_FULL
+        return c
+    }
+    let dst_reg = c.next_reg
+    c.next_reg = c.next_reg + 1
+    let op = te_cast_vtable_lookup(src_reg, dst_reg, type_idx, method_idx)
+    c.cast_ops[c.cast_op_count as usize] = op
+    c.cast_op_count = c.cast_op_count + 1
+    c.stats.casts_inserted = c.stats.casts_inserted + 1
+    return c
+}
+
+// ============================================================
+// Size assert insertion
+// ============================================================
+
+fn te_insert_size_assert(ctx: TeContext, src_reg: i64, type_idx: i64,
+                          expected_size: i64) -> TeContext with Mut, Panic, Div {
+    var c = ctx
+    if c.cast_op_count >= TE_MAX_CASTS {
+        c.error_code = TE_ERR_CAST_FULL
+        return c
+    }
+    let dst_reg = c.next_reg
+    c.next_reg = c.next_reg + 1
+    let op = te_cast_size_assert(src_reg, dst_reg, type_idx, expected_size)
+    c.cast_ops[c.cast_op_count as usize] = op
+    c.cast_op_count = c.cast_op_count + 1
+    c.stats.casts_inserted = c.stats.casts_inserted + 1
+    return c
+}
+
+// ============================================================
+// Alignment cast insertion
+// ============================================================
+
+fn te_insert_align_cast(ctx: TeContext, src_reg: i64, type_idx: i64,
+                         alignment: i64) -> TeContext with Mut, Panic, Div {
+    var c = ctx
+    if c.cast_op_count >= TE_MAX_CASTS {
+        c.error_code = TE_ERR_CAST_FULL
+        return c
+    }
+    let dst_reg = c.next_reg
+    c.next_reg = c.next_reg + 1
+    let op = te_cast_align(src_reg, dst_reg, type_idx, alignment)
+    c.cast_ops[c.cast_op_count as usize] = op
+    c.cast_op_count = c.cast_op_count + 1
+    c.stats.casts_inserted = c.stats.casts_inserted + 1
+    return c
+}
+
+// ============================================================
+// Function signature erasure
+// ============================================================
+
+// Erase a generic function signature: generic params → *void.
+// param_type_kinds contains the type kind for each parameter.
+// return_type_kind is the kind of the return type.
+fn te_erase_fn_signature(ctx: TeContext, original_fn_id: i64,
+                          param_type_kinds: [i64; 16], param_count: i64,
+                          return_type_kind: i64) -> TeContext with Mut, Panic, Div {
+    var c = ctx
+    if c.erased_fn_count >= TE_MAX_ERASED_FNS {
+        c.error_code = TE_ERR_FN_FULL
+        return c
+    }
+    let erased_id = c.next_fn_id
+    c.next_fn_id = c.next_fn_id + 1
+
+    var ef = te_erased_fn_new(original_fn_id, erased_id)
+    var cast_count: i64 = 0
+
+    var i: i64 = 0
+    while i < param_count {
+        if i < TE_MAX_PARAMS {
+            let kind = param_type_kinds[i as usize]
+            if kind == TE_TY_VAR {
+                ef = te_erased_fn_set_param(ef, i, true)
+                cast_count = cast_count + 1
+            } else if kind == TE_TY_TRAIT_OBJ {
+                ef = te_erased_fn_set_param(ef, i, true)
+                cast_count = cast_count + 1
+            } else {
+                ef = te_erased_fn_set_param(ef, i, false)
+            }
+        }
+        i = i + 1
+    }
+
+    if return_type_kind == TE_TY_VAR {
+        ef = te_erased_fn_set_return_erased(ef, true)
+        cast_count = cast_count + 1
+    } else if return_type_kind == TE_TY_TRAIT_OBJ {
+        ef = te_erased_fn_set_return_erased(ef, true)
+        cast_count = cast_count + 1
+    }
+
+    ef.cast_ops_needed = cast_count
+    c.erased_fns[c.erased_fn_count as usize] = ef
+    c.erased_fn_count = c.erased_fn_count + 1
+    c.stats.fns_erased = c.stats.fns_erased + 1
+    return c
+}
+
+// Find the erased version of a function by original fn id
+fn te_find_erased_fn(ctx: TeContext, original_fn_id: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < ctx.erased_fn_count {
+        if ctx.erased_fns[i as usize].original_fn_id == original_fn_id {
+            return i
+        }
+        i = i + 1
+    }
+    return TE_NOT_FOUND
+}
+
+// Get the erased fn id for an original fn id
+fn te_get_erased_fn_id(ctx: TeContext, original_fn_id: i64) -> i64 with Mut, Panic, Div {
+    let idx = te_find_erased_fn(ctx, original_fn_id)
+    if idx == TE_NOT_FOUND { return TE_NOT_FOUND }
+    return ctx.erased_fns[idx as usize].erased_fn_id
+}
+
+// ============================================================
+// Witness / dictionary construction
+// ============================================================
+
+// Build a witness dictionary for a constrained generic type parameter.
+// The witness encodes size, alignment, drop, and method pointers.
+fn te_build_witness(ctx: TeContext, type_id: i64, trait_id: i64,
+                    size: i64, alignment: i64,
+                    drop_fn_id: i64,
+                    method_fn_ids: [i64; 32], method_count: i64) -> TeContext with Mut, Panic, Div {
+    var c = ctx
+    if c.witness_count >= 256 {
+        return c
+    }
+    var w = te_witness_new(type_id, trait_id)
+    w = te_witness_add_entry(w, te_witness_entry_size(size))
+    w = te_witness_add_entry(w, te_witness_entry_align(alignment))
+    if drop_fn_id != TE_NOT_FOUND {
+        w = te_witness_add_entry(w, te_witness_entry_drop(drop_fn_id))
+    }
+    var i: i64 = 0
+    while i < method_count {
+        if i < 28 {
+            w = te_witness_add_entry(w, te_witness_entry_method(method_fn_ids[i as usize]))
+        }
+        i = i + 1
+    }
+    c.witnesses[c.witness_count as usize] = w
+    c.witness_count = c.witness_count + 1
+    c.stats.witnesses_built = c.stats.witnesses_built + 1
+    return c
+}
+
+// Find witness for a (type_id, trait_id) pair
+fn te_find_witness(ctx: TeContext, type_id: i64, trait_id: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < ctx.witness_count {
+        if ctx.witnesses[i as usize].type_id == type_id {
+            if ctx.witnesses[i as usize].trait_id == trait_id {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    return TE_NOT_FOUND
+}
+
+// ============================================================
+// Call-site cast generation
+// ============================================================
+
+// For a call site to an erased function, generate box/unbox casts
+// for each erased parameter and the return value.
+fn te_generate_call_casts(ctx: TeContext, erased_fn_idx: i64,
+                           arg_regs: [i64; 16], arg_sizes: [i64; 16],
+                           arg_aligns: [i64; 16], arg_type_idxs: [i64; 16],
+                           arg_count: i64) -> TeContext with Mut, Panic, Div {
+    var c = ctx
+    if erased_fn_idx < 0 { return c }
+    if erased_fn_idx >= c.erased_fn_count { return c }
+    let ef = c.erased_fns[erased_fn_idx as usize]
+
+    // Box each erased parameter
+    var i: i64 = 0
+    while i < arg_count {
+        if i < ef.param_count {
+            if ef.param_erased_flags[i as usize] {
+                c = te_insert_box(c, arg_regs[i as usize], arg_type_idxs[i as usize],
+                                  arg_sizes[i as usize], arg_aligns[i as usize])
+            }
+        }
+        i = i + 1
+    }
+
+    // If return is erased, insert unbox for the result
+    if ef.return_erased {
+        let result_reg = c.next_reg
+        c = te_insert_unbox(c, result_reg, 0, TE_PTR_SIZE, TE_PTR_ALIGN)
+    }
+
+    return c
+}
+
+// ============================================================
+// Cast chain optimization — collapse redundant box→unbox sequences
+// ============================================================
+
+// Check if two consecutive casts form a box→unbox pair on the same register chain
+fn te_is_box_unbox_pair(a: TeCastOp, b: TeCastOp) -> bool {
+    if a.kind != TE_CAST_BOX { return false }
+    if b.kind != TE_CAST_UNBOX { return false }
+    // The dst of the box should feed the src of the unbox
+    if a.dst_reg != b.src_reg { return false }
+    // Same type
+    if a.type_idx != b.type_idx { return false }
+    return true
+}
+
+// Check if a cast is a no-op size assert (assert size == actual size for concrete type)
+fn te_is_noop_size_assert(op: TeCastOp, actual_size: i64) -> bool {
+    if op.kind != TE_CAST_SIZE_ASSERT { return false }
+    if op.size_bytes == actual_size { return true }
+    return false
+}
+
+// Check if an alignment cast is trivial (alignment == 1)
+fn te_is_trivial_align(op: TeCastOp) -> bool {
+    if op.kind != TE_CAST_ALIGN { return false }
+    if op.alignment <= 1 { return true }
+    return false
+}
+
+// Optimize the cast chain by removing redundant operations.
+// Returns the number of casts eliminated.
+fn te_optimize_casts(ctx: TeContext) -> TeContext with Mut, Panic, Div {
+    var c = ctx
+    if c.cast_op_count < 2 { return c }
+
+    // Mark casts for removal: 0 = keep, 1 = remove
+    var remove_flags: [i64; 4096] = [0; 4096]
+    var eliminated: i64 = 0
+
+    // Pass 1: collapse box→unbox pairs
+    var i: i64 = 0
+    while i < c.cast_op_count - 1 {
+        if remove_flags[i as usize] == 0 {
+            let a = c.cast_ops[i as usize]
+            let b = c.cast_ops[(i + 1) as usize]
+            if te_is_box_unbox_pair(a, b) {
+                remove_flags[i as usize] = 1
+                remove_flags[(i + 1) as usize] = 1
+                eliminated = eliminated + 2
+                i = i + 2
+            } else {
+                i = i + 1
+            }
+        } else {
+            i = i + 1
+        }
+    }
+
+    // Pass 2: remove trivial align casts
+    i = 0
+    while i < c.cast_op_count {
+        if remove_flags[i as usize] == 0 {
+            if te_is_trivial_align(c.cast_ops[i as usize]) {
+                remove_flags[i as usize] = 1
+                eliminated = eliminated + 1
+            }
+        }
+        i = i + 1
+    }
+
+    // Compact: remove flagged casts
+    if eliminated > 0 {
+        var write_idx: i64 = 0
+        var read_idx: i64 = 0
+        while read_idx < c.cast_op_count {
+            if remove_flags[read_idx as usize] == 0 {
+                c.cast_ops[write_idx as usize] = c.cast_ops[read_idx as usize]
+                write_idx = write_idx + 1
+            }
+            read_idx = read_idx + 1
+        }
+        c.cast_op_count = write_idx
+        c.stats.casts_optimized_away = c.stats.casts_optimized_away + eliminated
+    }
+
+    return c
+}
+
+// ============================================================
+// Full erasure pipeline — classify, erase signatures, build vtables,
+// generate casts, and optimize
+// ============================================================
+
+// Erase a single function that has generic parameters.
+// This is the entry point for per-function erasure.
+fn te_erase_function(ctx: TeContext, fn_id: i64,
+                      param_type_kinds: [i64; 16], param_count: i64,
+                      return_type_kind: i64) -> TeContext with Mut, Panic, Div {
+    var c = ctx
+    // Check if already erased
+    let existing = te_find_erased_fn(c, fn_id)
+    if existing != TE_NOT_FOUND { return c }
+    // Erase signature
+    c = te_erase_fn_signature(c, fn_id, param_type_kinds, param_count, return_type_kind)
+    return c
+}
+
+// Complete erasure pass: process all registered types, build vtables, optimize
+fn te_run_erasure_pass(ctx: TeContext) -> TeContext with Mut, Panic, Div {
+    var c = ctx
+    // Optimization pass over generated casts
+    c = te_optimize_casts(c)
+    return c
+}
+
+// ============================================================
+// Query / introspection helpers
+// ============================================================
+
+fn te_total_vtable_methods(ctx: TeContext) -> i64 with Mut, Panic, Div {
+    var total: i64 = 0
+    var i: i64 = 0
+    while i < ctx.vtable_count {
+        total = total + ctx.vtables[i as usize].method_count
+        i = i + 1
+    }
+    return total
+}
+
+fn te_total_erased_params(ctx: TeContext) -> i64 with Mut, Panic, Div {
+    var total: i64 = 0
+    var i: i64 = 0
+    while i < ctx.erased_fn_count {
+        total = total + te_erased_fn_count_erased_params(ctx.erased_fns[i as usize])
+        i = i + 1
+    }
+    return total
+}
+
+fn te_total_witness_entries(ctx: TeContext) -> i64 with Mut, Panic, Div {
+    var total: i64 = 0
+    var i: i64 = 0
+    while i < ctx.witness_count {
+        total = total + ctx.witnesses[i as usize].entry_count
+        i = i + 1
+    }
+    return total
+}
+
+fn te_has_errors(ctx: TeContext) -> bool {
+    if ctx.error_code != TE_ERR_NONE { return true }
+    return false
+}
+
+fn te_cast_count_by_kind(ctx: TeContext, kind: i64) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.cast_op_count {
+        if ctx.cast_ops[i as usize].kind == kind {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    return count
+}
+
+// ============================================================
+// Helper: build method_fn_ids array from a list of ids
+// ============================================================
+
+fn te_make_methods_1(m0: i64) -> [i64; 32] {
+    var arr: [i64; 32] = [0; 32]
+    // We need Mut and array indexing for this
+    return arr
+}
+
+fn te_make_methods_1_set(m0: i64) -> [i64; 32] with Mut, Panic, Div {
+    var arr: [i64; 32] = [0; 32]
+    arr[0 as usize] = m0
+    return arr
+}
+
+fn te_make_methods_2_set(m0: i64, m1: i64) -> [i64; 32] with Mut, Panic, Div {
+    var arr: [i64; 32] = [0; 32]
+    arr[0 as usize] = m0
+    arr[1 as usize] = m1
+    return arr
+}
+
+fn te_make_methods_3_set(m0: i64, m1: i64, m2: i64) -> [i64; 32] with Mut, Panic, Div {
+    var arr: [i64; 32] = [0; 32]
+    arr[0 as usize] = m0
+    arr[1 as usize] = m1
+    arr[2 as usize] = m2
+    return arr
+}
+
+fn te_make_methods_4_set(m0: i64, m1: i64, m2: i64, m3: i64) -> [i64; 32] with Mut, Panic, Div {
+    var arr: [i64; 32] = [0; 32]
+    arr[0 as usize] = m0
+    arr[1 as usize] = m1
+    arr[2 as usize] = m2
+    arr[3 as usize] = m3
+    return arr
+}
+
+fn te_make_param_kinds_1(k0: i64) -> [i64; 16] with Mut, Panic, Div {
+    var arr: [i64; 16] = [0; 16]
+    arr[0 as usize] = k0
+    return arr
+}
+
+fn te_make_param_kinds_2(k0: i64, k1: i64) -> [i64; 16] with Mut, Panic, Div {
+    var arr: [i64; 16] = [0; 16]
+    arr[0 as usize] = k0
+    arr[1 as usize] = k1
+    return arr
+}
+
+fn te_make_param_kinds_3(k0: i64, k1: i64, k2: i64) -> [i64; 16] with Mut, Panic, Div {
+    var arr: [i64; 16] = [0; 16]
+    arr[0 as usize] = k0
+    arr[1 as usize] = k1
+    arr[2 as usize] = k2
+    return arr
+}
+
+fn te_make_param_kinds_4(k0: i64, k1: i64, k2: i64, k3: i64) -> [i64; 16] with Mut, Panic, Div {
+    var arr: [i64; 16] = [0; 16]
+    arr[0 as usize] = k0
+    arr[1 as usize] = k1
+    arr[2 as usize] = k2
+    arr[3 as usize] = k3
+    return arr
+}
+
+// ============================================================
+// Test helpers
+// ============================================================
+
+fn te_test_make_context() -> TeContext {
+    return te_context_new()
+}
+
+// ============================================================
+// Test 1: Type classification — concrete i64
+// ============================================================
+
+fn test_te_classify_concrete_i64() -> i32 with IO, Mut, Div, Panic {
+    let te = te_classify_type(TE_TY_I64, 1, 8, 8)
+    if te.kind != TE_KIND_CONCRETE {
+        print("FAIL: test_te_classify_concrete_i64 - kind\n")
+        return 1
+    }
+    if te.size != 8 {
+        print("FAIL: test_te_classify_concrete_i64 - size\n")
+        return 1
+    }
+    if te.alignment != 8 {
+        print("FAIL: test_te_classify_concrete_i64 - align\n")
+        return 1
+    }
+    if te.is_pointer {
+        print("FAIL: test_te_classify_concrete_i64 - pointer\n")
+        return 1
+    }
+    print("PASS: test_te_classify_concrete_i64\n")
+    return 0
+}
+
+// ============================================================
+// Test 2: Type classification — erased (type variable)
+// ============================================================
+
+fn test_te_classify_erased_var() -> i32 with IO, Mut, Div, Panic {
+    let te = te_classify_type(TE_TY_VAR, 100, 0, 0)
+    if te.kind != TE_KIND_ERASED {
+        print("FAIL: test_te_classify_erased_var - kind\n")
+        return 1
+    }
+    if te.is_pointer == false {
+        print("FAIL: test_te_classify_erased_var - pointer\n")
+        return 1
+    }
+    if te.size != TE_PTR_SIZE {
+        print("FAIL: test_te_classify_erased_var - size\n")
+        return 1
+    }
+    print("PASS: test_te_classify_erased_var\n")
+    return 0
+}
+
+// ============================================================
+// Test 3: Type classification — trait object
+// ============================================================
+
+fn test_te_classify_trait_obj() -> i32 with IO, Mut, Div, Panic {
+    let te = te_classify_type(TE_TY_TRAIT_OBJ, 200, 0, 0)
+    if te.kind != TE_KIND_VTABLE {
+        print("FAIL: test_te_classify_trait_obj - kind\n")
+        return 1
+    }
+    if te.is_pointer == false {
+        print("FAIL: test_te_classify_trait_obj - pointer\n")
+        return 1
+    }
+    if te.size != TE_PTR_SIZE * 2 {
+        print("FAIL: test_te_classify_trait_obj - size\n")
+        return 1
+    }
+    print("PASS: test_te_classify_trait_obj\n")
+    return 0
+}
+
+// ============================================================
+// Test 4: Type classification — concrete bool
+// ============================================================
+
+fn test_te_classify_concrete_bool() -> i32 with IO, Mut, Div, Panic {
+    let te = te_classify_type(TE_TY_BOOL, 3, 1, 1)
+    if te.kind != TE_KIND_CONCRETE {
+        print("FAIL: test_te_classify_concrete_bool - kind\n")
+        return 1
+    }
+    if te.size != 1 {
+        print("FAIL: test_te_classify_concrete_bool - size\n")
+        return 1
+    }
+    print("PASS: test_te_classify_concrete_bool\n")
+    return 0
+}
+
+// ============================================================
+// Test 5: Type classification — reference types are concrete
+// ============================================================
+
+fn test_te_classify_ref() -> i32 with IO, Mut, Div, Panic {
+    let te = te_classify_type(TE_TY_REF, 50, 0, 0)
+    if te.kind != TE_KIND_CONCRETE {
+        print("FAIL: test_te_classify_ref - kind\n")
+        return 1
+    }
+    if te.size != TE_PTR_SIZE {
+        print("FAIL: test_te_classify_ref - size\n")
+        return 1
+    }
+    let te_mut = te_classify_type(TE_TY_REF_MUT, 51, 0, 0)
+    if te_mut.kind != TE_KIND_CONCRETE {
+        print("FAIL: test_te_classify_ref - mut_kind\n")
+        return 1
+    }
+    print("PASS: test_te_classify_ref\n")
+    return 0
+}
+
+// ============================================================
+// Test 6: Vtable construction — basic
+// ============================================================
+
+fn test_te_vtable_basic() -> i32 with IO, Mut, Div, Panic {
+    var ctx = te_context_new()
+    let methods = te_make_methods_2_set(100, 101)
+    ctx = te_build_vtable(ctx, 10, 20, methods, 2, 16, 8, TE_NOT_FOUND)
+    if ctx.vtable_count != 1 {
+        print("FAIL: test_te_vtable_basic - count\n")
+        return 1
+    }
+    let vt = ctx.vtables[0 as usize]
+    if vt.type_id != 10 {
+        print("FAIL: test_te_vtable_basic - type_id\n")
+        return 1
+    }
+    if vt.trait_id != 20 {
+        print("FAIL: test_te_vtable_basic - trait_id\n")
+        return 1
+    }
+    if vt.method_count != 2 {
+        print("FAIL: test_te_vtable_basic - method_count\n")
+        return 1
+    }
+    if vt.size != 16 {
+        print("FAIL: test_te_vtable_basic - size\n")
+        return 1
+    }
+    if vt.alignment != 8 {
+        print("FAIL: test_te_vtable_basic - align\n")
+        return 1
+    }
+    print("PASS: test_te_vtable_basic\n")
+    return 0
+}
+
+// ============================================================
+// Test 7: Vtable method lookup
+// ============================================================
+
+fn test_te_vtable_method_lookup() -> i32 with IO, Mut, Div, Panic {
+    var ctx = te_context_new()
+    let methods = te_make_methods_3_set(200, 201, 202)
+    ctx = te_build_vtable(ctx, 10, 20, methods, 3, 8, 8, TE_NOT_FOUND)
+    let fn0 = te_vtable_dispatch(ctx, 0, 0)
+    if fn0 != 200 {
+        print("FAIL: test_te_vtable_method_lookup - 0\n")
+        return 1
+    }
+    let fn1 = te_vtable_dispatch(ctx, 0, 1)
+    if fn1 != 201 {
+        print("FAIL: test_te_vtable_method_lookup - 1\n")
+        return 1
+    }
+    let fn2 = te_vtable_dispatch(ctx, 0, 2)
+    if fn2 != 202 {
+        print("FAIL: test_te_vtable_method_lookup - 2\n")
+        return 1
+    }
+    let fn3 = te_vtable_dispatch(ctx, 0, 3)
+    if fn3 != TE_NOT_FOUND {
+        print("FAIL: test_te_vtable_method_lookup - oob\n")
+        return 1
+    }
+    print("PASS: test_te_vtable_method_lookup\n")
+    return 0
+}
+
+// ============================================================
+// Test 8: Vtable with drop function
+// ============================================================
+
+fn test_te_vtable_drop() -> i32 with IO, Mut, Div, Panic {
+    var ctx = te_context_new()
+    let methods = te_make_methods_1_set(300)
+    ctx = te_build_vtable(ctx, 10, 20, methods, 1, 24, 8, 999)
+    let vt = ctx.vtables[0 as usize]
+    if vt.drop_fn_id != 999 {
+        print("FAIL: test_te_vtable_drop\n")
+        return 1
+    }
+    print("PASS: test_te_vtable_drop\n")
+    return 0
+}
+
+// ============================================================
+// Test 9: Find vtable by type and trait
+// ============================================================
+
+fn test_te_find_vtable() -> i32 with IO, Mut, Div, Panic {
+    var ctx = te_context_new()
+    let m1 = te_make_methods_1_set(100)
+    let m2 = te_make_methods_1_set(200)
+    ctx = te_build_vtable(ctx, 10, 20, m1, 1, 8, 8, TE_NOT_FOUND)
+    ctx = te_build_vtable(ctx, 11, 21, m2, 1, 16, 8, TE_NOT_FOUND)
+    let idx0 = te_find_vtable(ctx, 10, 20)
+    if idx0 != 0 {
+        print("FAIL: test_te_find_vtable - 0\n")
+        return 1
+    }
+    let idx1 = te_find_vtable(ctx, 11, 21)
+    if idx1 != 1 {
+        print("FAIL: test_te_find_vtable - 1\n")
+        return 1
+    }
+    let idx_miss = te_find_vtable(ctx, 10, 21)
+    if idx_miss != TE_NOT_FOUND {
+        print("FAIL: test_te_find_vtable - miss\n")
+        return 1
+    }
+    print("PASS: test_te_find_vtable\n")
+    return 0
+}
+
+// ============================================================
+// Test 10: Box insertion generates cast op
+// ============================================================
+
+fn test_te_insert_box_op() -> i32 with IO, Mut, Div, Panic {
+    var ctx = te_context_new()
+    ctx = te_insert_box(ctx, 10, 5, 8, 8)
+    if ctx.cast_op_count != 1 {
+        print("FAIL: test_te_insert_box_op - count\n")
+        return 1
+    }
+    let op = ctx.cast_ops[0 as usize]
+    if op.kind != TE_CAST_BOX {
+        print("FAIL: test_te_insert_box_op - kind\n")
+        return 1
+    }
+    if op.src_reg != 10 {
+        print("FAIL: test_te_insert_box_op - src\n")
+        return 1
+    }
+    if op.size_bytes != 8 {
+        print("FAIL: test_te_insert_box_op - size\n")
+        return 1
+    }
+    if op.alignment != 8 {
+        print("FAIL: test_te_insert_box_op - align\n")
+        return 1
+    }
+    print("PASS: test_te_insert_box_op\n")
+    return 0
+}
+
+// ============================================================
+// Test 11: Unbox insertion generates cast op
+// ============================================================
+
+fn test_te_insert_unbox_op() -> i32 with IO, Mut, Div, Panic {
+    var ctx = te_context_new()
+    ctx = te_insert_unbox(ctx, 20, 5, 4, 4)
+    if ctx.cast_op_count != 1 {
+        print("FAIL: test_te_insert_unbox_op - count\n")
+        return 1
+    }
+    let op = ctx.cast_ops[0 as usize]
+    if op.kind != TE_CAST_UNBOX {
+        print("FAIL: test_te_insert_unbox_op - kind\n")
+        return 1
+    }
+    if op.src_reg != 20 {
+        print("FAIL: test_te_insert_unbox_op - src\n")
+        return 1
+    }
+    if op.size_bytes != 4 {
+        print("FAIL: test_te_insert_unbox_op - size\n")
+        return 1
+    }
+    print("PASS: test_te_insert_unbox_op\n")
+    return 0
+}
+
+// ============================================================
+// Test 12: Function signature erasure — single generic param
+// ============================================================
+
+fn test_te_erase_fn_single_param() -> i32 with IO, Mut, Div, Panic {
+    var ctx = te_context_new()
+    let params = te_make_param_kinds_1(TE_TY_VAR)
+    ctx = te_erase_fn_signature(ctx, 42, params, 1, TE_TY_I64)
+    if ctx.erased_fn_count != 1 {
+        print("FAIL: test_te_erase_fn_single_param - count\n")
+        return 1
+    }
+    let ef = ctx.erased_fns[0 as usize]
+    if ef.original_fn_id != 42 {
+        print("FAIL: test_te_erase_fn_single_param - orig\n")
+        return 1
+    }
+    if te_erased_fn_is_param_erased(ef, 0) == false {
+        print("FAIL: test_te_erase_fn_single_param - erased\n")
+        return 1
+    }
+    if ef.return_erased {
+        print("FAIL: test_te_erase_fn_single_param - ret\n")
+        return 1
+    }
+    if ef.cast_ops_needed != 1 {
+        print("FAIL: test_te_erase_fn_single_param - casts\n")
+        return 1
+    }
+    print("PASS: test_te_erase_fn_single_param\n")
+    return 0
+}
+
+// ============================================================
+// Test 13: Function signature erasure — mixed params
+// ============================================================
+
+fn test_te_erase_fn_mixed_params() -> i32 with IO, Mut, Div, Panic {
+    var ctx = te_context_new()
+    let params = te_make_param_kinds_3(TE_TY_I64, TE_TY_VAR, TE_TY_BOOL)
+    ctx = te_erase_fn_signature(ctx, 43, params, 3, TE_TY_VAR)
+    if ctx.erased_fn_count != 1 {
+        print("FAIL: test_te_erase_fn_mixed_params - count\n")
+        return 1
+    }
+    let ef = ctx.erased_fns[0 as usize]
+    if te_erased_fn_is_param_erased(ef, 0) {
+        print("FAIL: test_te_erase_fn_mixed_params - p0\n")
+        return 1
+    }
+    if te_erased_fn_is_param_erased(ef, 1) == false {
+        print("FAIL: test_te_erase_fn_mixed_params - p1\n")
+        return 1
+    }
+    if te_erased_fn_is_param_erased(ef, 2) {
+        print("FAIL: test_te_erase_fn_mixed_params - p2\n")
+        return 1
+    }
+    if ef.return_erased == false {
+        print("FAIL: test_te_erase_fn_mixed_params - ret\n")
+        return 1
+    }
+    if ef.cast_ops_needed != 2 {
+        print("FAIL: test_te_erase_fn_mixed_params - casts\n")
+        return 1
+    }
+    print("PASS: test_te_erase_fn_mixed_params\n")
+    return 0
+}
+
+// ============================================================
+// Test 14: Function signature erasure — all concrete (no erasure)
+// ============================================================
+
+fn test_te_erase_fn_all_concrete() -> i32 with IO, Mut, Div, Panic {
+    var ctx = te_context_new()
+    let params = te_make_param_kinds_2(TE_TY_I64, TE_TY_F64)
+    ctx = te_erase_fn_signature(ctx, 44, params, 2, TE_TY_BOOL)
+    let ef = ctx.erased_fns[0 as usize]
+    if te_erased_fn_count_erased_params(ef) != 0 {
+        print("FAIL: test_te_erase_fn_all_concrete - erased\n")
+        return 1
+    }
+    if ef.return_erased {
+        print("FAIL: test_te_erase_fn_all_concrete - ret\n")
+        return 1
+    }
+    if ef.cast_ops_needed != 0 {
+        print("FAIL: test_te_erase_fn_all_concrete - casts\n")
+        return 1
+    }
+    print("PASS: test_te_erase_fn_all_concrete\n")
+    return 0
+}
+
+// ============================================================
+// Test 15: Find erased function by original id
+// ============================================================
+
+fn test_te_find_erased_fn() -> i32 with IO, Mut, Div, Panic {
+    var ctx = te_context_new()
+    let p1 = te_make_param_kinds_1(TE_TY_VAR)
+    let p2 = te_make_param_kinds_1(TE_TY_I64)
+    ctx = te_erase_fn_signature(ctx, 42, p1, 1, TE_TY_I64)
+    ctx = te_erase_fn_signature(ctx, 43, p2, 1, TE_TY_VAR)
+    let idx0 = te_find_erased_fn(ctx, 42)
+    if idx0 != 0 {
+        print("FAIL: test_te_find_erased_fn - 0\n")
+        return 1
+    }
+    let idx1 = te_find_erased_fn(ctx, 43)
+    if idx1 != 1 {
+        print("FAIL: test_te_find_erased_fn - 1\n")
+        return 1
+    }
+    let idx_miss = te_find_erased_fn(ctx, 999)
+    if idx_miss != TE_NOT_FOUND {
+        print("FAIL: test_te_find_erased_fn - miss\n")
+        return 1
+    }
+    print("PASS: test_te_find_erased_fn\n")
+    return 0
+}
+
+// ============================================================
+// Test 16: Witness construction — basic
+// ============================================================
+
+fn test_te_witness_basic() -> i32 with IO, Mut, Div, Panic {
+    var ctx = te_context_new()
+    let methods = te_make_methods_2_set(500, 501)
+    ctx = te_build_witness(ctx, 10, 20, 16, 8, 999, methods, 2)
+    if ctx.witness_count != 1 {
+        print("FAIL: test_te_witness_basic - count\n")
+        return 1
+    }
+    let w = ctx.witnesses[0 as usize]
+    if w.type_id != 10 {
+        print("FAIL: test_te_witness_basic - type_id\n")
+        return 1
+    }
+    if w.trait_id != 20 {
+        print("FAIL: test_te_witness_basic - trait_id\n")
+        return 1
+    }
+    // Should have: size, align, drop, 2 methods = 5 entries
+    if w.entry_count != 5 {
+        print("FAIL: test_te_witness_basic - entry_count\n")
+        return 1
+    }
+    print("PASS: test_te_witness_basic\n")
+    return 0
+}
+
+// ============================================================
+// Test 17: Witness find size/align/drop
+// ============================================================
+
+fn test_te_witness_find_entries() -> i32 with IO, Mut, Div, Panic {
+    var ctx = te_context_new()
+    let methods = te_make_methods_1_set(600)
+    ctx = te_build_witness(ctx, 10, 20, 24, 8, 777, methods, 1)
+    let w = ctx.witnesses[0 as usize]
+    let sz = te_witness_find_size(w)
+    if sz != 24 {
+        print("FAIL: test_te_witness_find_entries - size\n")
+        return 1
+    }
+    let al = te_witness_find_align(w)
+    if al != 8 {
+        print("FAIL: test_te_witness_find_entries - align\n")
+        return 1
+    }
+    let dr = te_witness_find_drop(w)
+    if dr != 777 {
+        print("FAIL: test_te_witness_find_entries - drop\n")
+        return 1
+    }
+    print("PASS: test_te_witness_find_entries\n")
+    return 0
+}
+
+// ============================================================
+// Test 18: Witness count methods
+// ============================================================
+
+fn test_te_witness_method_count() -> i32 with IO, Mut, Div, Panic {
+    var ctx = te_context_new()
+    let methods = te_make_methods_3_set(600, 601, 602)
+    ctx = te_build_witness(ctx, 10, 20, 8, 8, TE_NOT_FOUND, methods, 3)
+    let w = ctx.witnesses[0 as usize]
+    let mc = te_witness_count_methods(w)
+    if mc != 3 {
+        print("FAIL: test_te_witness_method_count\n")
+        return 1
+    }
+    print("PASS: test_te_witness_method_count\n")
+    return 0
+}
+
+// ============================================================
+// Test 19: Layout computation — primitives
+// ============================================================
+
+fn test_te_layout_primitives() -> i32 with IO, Mut, Div, Panic {
+    let l_i64 = te_layout_for_primitive(TE_TY_I64)
+    if l_i64.size != 8 {
+        print("FAIL: test_te_layout_primitives - i64_size\n")
+        return 1
+    }
+    if l_i64.alignment != 8 {
+        print("FAIL: test_te_layout_primitives - i64_align\n")
+        return 1
+    }
+    let l_bool = te_layout_for_primitive(TE_TY_BOOL)
+    if l_bool.size != 1 {
+        print("FAIL: test_te_layout_primitives - bool_size\n")
+        return 1
+    }
+    let l_i32 = te_layout_for_primitive(TE_TY_I32)
+    if l_i32.size != 4 {
+        print("FAIL: test_te_layout_primitives - i32_size\n")
+        return 1
+    }
+    if l_i32.alignment != 4 {
+        print("FAIL: test_te_layout_primitives - i32_align\n")
+        return 1
+    }
+    let l_unit = te_layout_for_primitive(TE_TY_UNIT)
+    if l_unit.size != 0 {
+        print("FAIL: test_te_layout_primitives - unit_size\n")
+        return 1
+    }
+    print("PASS: test_te_layout_primitives\n")
+    return 0
+}
+
+// ============================================================
+// Test 20: Layout computation — erased and boxed
+// ============================================================
+
+fn test_te_layout_erased_boxed() -> i32 with IO, Mut, Div, Panic {
+    let le = te_layout_for_erased()
+    if le.size != TE_PTR_SIZE {
+        print("FAIL: test_te_layout_erased_boxed - erased_size\n")
+        return 1
+    }
+    let lb = te_layout_for_boxed()
+    if lb.size != TE_PTR_SIZE {
+        print("FAIL: test_te_layout_erased_boxed - boxed_size\n")
+        return 1
+    }
+    let lv = te_layout_for_vtable_obj()
+    if lv.size != TE_PTR_SIZE * 2 {
+        print("FAIL: test_te_layout_erased_boxed - vtable_size\n")
+        return 1
+    }
+    print("PASS: test_te_layout_erased_boxed\n")
+    return 0
+}
+
+// ============================================================
+// Test 21: Layout aggregate computation
+// ============================================================
+
+fn test_te_layout_aggregate() -> i32 with IO, Mut, Div, Panic {
+    // Struct { a: i32, b: i64 } → align=8, size=16 (4 padded to 8, + 8)
+    var sizes: [i64; 16] = [0; 16]
+    var aligns: [i64; 16] = [0; 16]
+    sizes[0 as usize] = 4
+    aligns[0 as usize] = 4
+    sizes[1 as usize] = 8
+    aligns[1 as usize] = 8
+    let layout = te_layout_aggregate(sizes, aligns, 2)
+    if layout.alignment != 8 {
+        print("FAIL: test_te_layout_aggregate - align\n")
+        return 1
+    }
+    if layout.size != 16 {
+        print("FAIL: test_te_layout_aggregate - size\n")
+        return 1
+    }
+    print("PASS: test_te_layout_aggregate\n")
+    return 0
+}
+
+// ============================================================
+// Test 22: Align up computation
+// ============================================================
+
+fn test_te_align_up() -> i32 with IO, Mut, Div, Panic {
+    let r1 = te_align_up(5, 4)
+    if r1 != 8 {
+        print("FAIL: test_te_align_up - 5to4\n")
+        return 1
+    }
+    let r2 = te_align_up(8, 8)
+    if r2 != 8 {
+        print("FAIL: test_te_align_up - exact\n")
+        return 1
+    }
+    let r3 = te_align_up(1, 8)
+    if r3 != 8 {
+        print("FAIL: test_te_align_up - 1to8\n")
+        return 1
+    }
+    let r4 = te_align_up(0, 4)
+    if r4 != 0 {
+        print("FAIL: test_te_align_up - zero\n")
+        return 1
+    }
+    print("PASS: test_te_align_up\n")
+    return 0
+}
+
+// ============================================================
+// Test 23: Cast chain optimization — box-unbox collapse
+// ============================================================
+
+fn test_te_optimize_box_unbox() -> i32 with IO, Mut, Div, Panic {
+    var ctx = te_context_new()
+    // Insert a box followed by matching unbox (same dst→src chain, same type)
+    let box_op = te_cast_box(10, 20, 5, 8, 8)
+    let unbox_op = te_cast_unbox(20, 30, 5, 8, 8)
+    ctx.cast_ops[0 as usize] = box_op
+    ctx.cast_ops[1 as usize] = unbox_op
+    ctx.cast_op_count = 2
+    ctx = te_optimize_casts(ctx)
+    if ctx.cast_op_count != 0 {
+        print("FAIL: test_te_optimize_box_unbox - count\n")
+        return 1
+    }
+    if ctx.stats.casts_optimized_away != 2 {
+        print("FAIL: test_te_optimize_box_unbox - optimized\n")
+        return 1
+    }
+    print("PASS: test_te_optimize_box_unbox\n")
+    return 0
+}
+
+// ============================================================
+// Test 24: Cast chain optimization — non-matching pair kept
+// ============================================================
+
+fn test_te_optimize_no_collapse() -> i32 with IO, Mut, Div, Panic {
+    var ctx = te_context_new()
+    // Different type indices — should NOT collapse
+    let box_op = te_cast_box(10, 20, 5, 8, 8)
+    let unbox_op = te_cast_unbox(20, 30, 6, 8, 8)
+    ctx.cast_ops[0 as usize] = box_op
+    ctx.cast_ops[1 as usize] = unbox_op
+    ctx.cast_op_count = 2
+    ctx = te_optimize_casts(ctx)
+    if ctx.cast_op_count != 2 {
+        print("FAIL: test_te_optimize_no_collapse\n")
+        return 1
+    }
+    print("PASS: test_te_optimize_no_collapse\n")
+    return 0
+}
+
+// ============================================================
+// Test 25: Cast chain optimization — trivial align removed
+// ============================================================
+
+fn test_te_optimize_trivial_align() -> i32 with IO, Mut, Div, Panic {
+    var ctx = te_context_new()
+    let align_op = te_cast_align(10, 20, 5, 1)
+    ctx.cast_ops[0 as usize] = align_op
+    ctx.cast_op_count = 1
+    ctx = te_optimize_casts(ctx)
+    if ctx.cast_op_count != 0 {
+        print("FAIL: test_te_optimize_trivial_align - count\n")
+        return 1
+    }
+    if ctx.stats.casts_optimized_away != 1 {
+        print("FAIL: test_te_optimize_trivial_align - stat\n")
+        return 1
+    }
+    print("PASS: test_te_optimize_trivial_align\n")
+    return 0
+}
+
+// ============================================================
+// Test 26: Statistics tracking
+// ============================================================
+
+fn test_te_stats_tracking() -> i32 with IO, Mut, Div, Panic {
+    var ctx = te_context_new()
+    // Classify types
+    ctx = te_classify_and_register(ctx, TE_TY_I64, 1, 8, 8)
+    ctx = te_classify_and_register(ctx, TE_TY_VAR, 2, 0, 0)
+    ctx = te_classify_and_register(ctx, TE_TY_TRAIT_OBJ, 3, 0, 0)
+    if ctx.stats.types_classified != 3 {
+        print("FAIL: test_te_stats_tracking - classified\n")
+        return 1
+    }
+    if ctx.stats.types_concrete != 1 {
+        print("FAIL: test_te_stats_tracking - concrete\n")
+        return 1
+    }
+    if ctx.stats.types_erased != 1 {
+        print("FAIL: test_te_stats_tracking - erased\n")
+        return 1
+    }
+    if ctx.stats.types_vtable != 1 {
+        print("FAIL: test_te_stats_tracking - vtable\n")
+        return 1
+    }
+    print("PASS: test_te_stats_tracking\n")
+    return 0
+}
+
+// ============================================================
+// Test 27: Type map insert and lookup
+// ============================================================
+
+fn test_te_type_map() -> i32 with IO, Mut, Div, Panic {
+    var map = te_type_map_new()
+    let t1 = te_type_concrete(1, 8, 8)
+    let t2 = te_type_erased(2)
+    map = te_type_map_insert(map, 100, t1)
+    map = te_type_map_insert(map, 200, t2)
+    if map.count != 2 {
+        print("FAIL: test_te_type_map - count\n")
+        return 1
+    }
+    let r1 = te_type_map_lookup(map, 100)
+    if r1.kind != TE_KIND_CONCRETE {
+        print("FAIL: test_te_type_map - lookup1\n")
+        return 1
+    }
+    let r2 = te_type_map_lookup(map, 200)
+    if r2.kind != TE_KIND_ERASED {
+        print("FAIL: test_te_type_map - lookup2\n")
+        return 1
+    }
+    let r3 = te_type_map_lookup(map, 999)
+    if r3.kind != TE_KIND_ERASED {
+        // default empty is erased kind
+        print("FAIL: test_te_type_map - miss\n")
+        return 1
+    }
+    print("PASS: test_te_type_map\n")
+    return 0
+}
+
+// ============================================================
+// Test 28: Type map overwrite
+// ============================================================
+
+fn test_te_type_map_overwrite() -> i32 with IO, Mut, Div, Panic {
+    var map = te_type_map_new()
+    let t1 = te_type_concrete(1, 8, 8)
+    let t2 = te_type_boxed(1, 8, 8)
+    map = te_type_map_insert(map, 100, t1)
+    map = te_type_map_insert(map, 100, t2)
+    if map.count != 1 {
+        print("FAIL: test_te_type_map_overwrite - count\n")
+        return 1
+    }
+    let r = te_type_map_lookup(map, 100)
+    if r.kind != TE_KIND_BOXED {
+        print("FAIL: test_te_type_map_overwrite - kind\n")
+        return 1
+    }
+    print("PASS: test_te_type_map_overwrite\n")
+    return 0
+}
+
+// ============================================================
+// Test 29: Type map has
+// ============================================================
+
+fn test_te_type_map_has() -> i32 with IO, Mut, Div, Panic {
+    var map = te_type_map_new()
+    let t1 = te_type_concrete(1, 8, 8)
+    map = te_type_map_insert(map, 50, t1)
+    if te_type_map_has(map, 50) == false {
+        print("FAIL: test_te_type_map_has - yes\n")
+        return 1
+    }
+    if te_type_map_has(map, 51) {
+        print("FAIL: test_te_type_map_has - no\n")
+        return 1
+    }
+    print("PASS: test_te_type_map_has\n")
+    return 0
+}
+
+// ============================================================
+// Test 30: Multiple trait impls for same type
+// ============================================================
+
+fn test_te_multiple_trait_impls() -> i32 with IO, Mut, Div, Panic {
+    var ctx = te_context_new()
+    let m1 = te_make_methods_1_set(100)
+    let m2 = te_make_methods_2_set(200, 201)
+    let m3 = te_make_methods_1_set(300)
+    // Type 10 implements trait 20
+    ctx = te_build_vtable(ctx, 10, 20, m1, 1, 8, 8, TE_NOT_FOUND)
+    // Type 10 also implements trait 21
+    ctx = te_build_vtable(ctx, 10, 21, m2, 2, 8, 8, TE_NOT_FOUND)
+    // Type 11 implements trait 20
+    ctx = te_build_vtable(ctx, 11, 20, m3, 1, 16, 8, TE_NOT_FOUND)
+    if ctx.vtable_count != 3 {
+        print("FAIL: test_te_multiple_trait_impls - count\n")
+        return 1
+    }
+    let count_10 = te_count_vtables_for_type(ctx, 10)
+    if count_10 != 2 {
+        print("FAIL: test_te_multiple_trait_impls - type10\n")
+        return 1
+    }
+    let count_11 = te_count_vtables_for_type(ctx, 11)
+    if count_11 != 1 {
+        print("FAIL: test_te_multiple_trait_impls - type11\n")
+        return 1
+    }
+    let count_99 = te_count_vtables_for_type(ctx, 99)
+    if count_99 != 0 {
+        print("FAIL: test_te_multiple_trait_impls - miss\n")
+        return 1
+    }
+    print("PASS: test_te_multiple_trait_impls\n")
+    return 0
+}
+
+// ============================================================
+// Test 31: Vtable lookup insertion
+// ============================================================
+
+fn test_te_vtable_lookup_cast() -> i32 with IO, Mut, Div, Panic {
+    var ctx = te_context_new()
+    ctx = te_insert_vtable_lookup(ctx, 10, 5, 2)
+    if ctx.cast_op_count != 1 {
+        print("FAIL: test_te_vtable_lookup_cast - count\n")
+        return 1
+    }
+    let op = ctx.cast_ops[0 as usize]
+    if op.kind != TE_CAST_VTABLE_LOOKUP {
+        print("FAIL: test_te_vtable_lookup_cast - kind\n")
+        return 1
+    }
+    if op.vtable_method_idx != 2 {
+        print("FAIL: test_te_vtable_lookup_cast - method\n")
+        return 1
+    }
+    print("PASS: test_te_vtable_lookup_cast\n")
+    return 0
+}
+
+// ============================================================
+// Test 32: Size assert insertion
+// ============================================================
+
+fn test_te_size_assert_cast() -> i32 with IO, Mut, Div, Panic {
+    var ctx = te_context_new()
+    ctx = te_insert_size_assert(ctx, 10, 5, 16)
+    if ctx.cast_op_count != 1 {
+        print("FAIL: test_te_size_assert_cast - count\n")
+        return 1
+    }
+    let op = ctx.cast_ops[0 as usize]
+    if op.kind != TE_CAST_SIZE_ASSERT {
+        print("FAIL: test_te_size_assert_cast - kind\n")
+        return 1
+    }
+    if op.size_bytes != 16 {
+        print("FAIL: test_te_size_assert_cast - size\n")
+        return 1
+    }
+    print("PASS: test_te_size_assert_cast\n")
+    return 0
+}
+
+// ============================================================
+// Test 33: Alignment cast insertion
+// ============================================================
+
+fn test_te_align_cast() -> i32 with IO, Mut, Div, Panic {
+    var ctx = te_context_new()
+    ctx = te_insert_align_cast(ctx, 10, 5, 16)
+    if ctx.cast_op_count != 1 {
+        print("FAIL: test_te_align_cast - count\n")
+        return 1
+    }
+    let op = ctx.cast_ops[0 as usize]
+    if op.kind != TE_CAST_ALIGN {
+        print("FAIL: test_te_align_cast - kind\n")
+        return 1
+    }
+    if op.alignment != 16 {
+        print("FAIL: test_te_align_cast - align\n")
+        return 1
+    }
+    print("PASS: test_te_align_cast\n")
+    return 0
+}
+
+// ============================================================
+// Test 34: Cast count by kind
+// ============================================================
+
+fn test_te_cast_count_by_kind() -> i32 with IO, Mut, Div, Panic {
+    var ctx = te_context_new()
+    ctx = te_insert_box(ctx, 1, 0, 8, 8)
+    ctx = te_insert_box(ctx, 2, 0, 8, 8)
+    ctx = te_insert_unbox(ctx, 3, 0, 8, 8)
+    ctx = te_insert_vtable_lookup(ctx, 4, 0, 0)
+    let box_count = te_cast_count_by_kind(ctx, TE_CAST_BOX)
+    if box_count != 2 {
+        print("FAIL: test_te_cast_count_by_kind - box\n")
+        return 1
+    }
+    let unbox_count = te_cast_count_by_kind(ctx, TE_CAST_UNBOX)
+    if unbox_count != 1 {
+        print("FAIL: test_te_cast_count_by_kind - unbox\n")
+        return 1
+    }
+    let vt_count = te_cast_count_by_kind(ctx, TE_CAST_VTABLE_LOOKUP)
+    if vt_count != 1 {
+        print("FAIL: test_te_cast_count_by_kind - vt\n")
+        return 1
+    }
+    print("PASS: test_te_cast_count_by_kind\n")
+    return 0
+}
+
+// ============================================================
+// Test 35: Erased fn count erased params
+// ============================================================
+
+fn test_te_erased_fn_param_counting() -> i32 with IO, Mut, Div, Panic {
+    var ef = te_erased_fn_new(1, 2)
+    ef = te_erased_fn_set_param(ef, 0, true)
+    ef = te_erased_fn_set_param(ef, 1, false)
+    ef = te_erased_fn_set_param(ef, 2, true)
+    ef = te_erased_fn_set_param(ef, 3, true)
+    let count = te_erased_fn_count_erased_params(ef)
+    if count != 3 {
+        print("FAIL: test_te_erased_fn_param_counting\n")
+        return 1
+    }
+    print("PASS: test_te_erased_fn_param_counting\n")
+    return 0
+}
+
+// ============================================================
+// Test 36: Layout for TeType entries
+// ============================================================
+
+fn test_te_layout_for_type() -> i32 with IO, Mut, Div, Panic {
+    let tc = te_type_concrete(1, 24, 8)
+    let lc = te_layout_for_type(tc)
+    if lc.size != 24 {
+        print("FAIL: test_te_layout_for_type - concrete_size\n")
+        return 1
+    }
+    if lc.alignment != 8 {
+        print("FAIL: test_te_layout_for_type - concrete_align\n")
+        return 1
+    }
+    let te = te_type_erased(2)
+    let tle = te_layout_for_type(te)
+    if tle.size != TE_PTR_SIZE {
+        print("FAIL: test_te_layout_for_type - erased_size\n")
+        return 1
+    }
+    let tb = te_type_boxed(3, 16, 8)
+    let tlb = te_layout_for_type(tb)
+    if tlb.size != TE_PTR_SIZE {
+        print("FAIL: test_te_layout_for_type - boxed_size\n")
+        return 1
+    }
+    let tv = te_type_vtable(4, 0)
+    let tlv = te_layout_for_type(tv)
+    if tlv.size != TE_PTR_SIZE * 2 {
+        print("FAIL: test_te_layout_for_type - vtable_size\n")
+        return 1
+    }
+    print("PASS: test_te_layout_for_type\n")
+    return 0
+}
+
+// ============================================================
+// Test 37: Vtable find method by fn_id
+// ============================================================
+
+fn test_te_vtable_find_method() -> i32 with IO, Mut, Div, Panic {
+    var vt = te_vtable_new(10, 20, 8, 8)
+    vt = te_vtable_add_method(vt, 100)
+    vt = te_vtable_add_method(vt, 200)
+    vt = te_vtable_add_method(vt, 300)
+    let idx = te_vtable_find_method(vt, 200)
+    if idx != 1 {
+        print("FAIL: test_te_vtable_find_method - found\n")
+        return 1
+    }
+    let miss = te_vtable_find_method(vt, 999)
+    if miss != TE_NOT_FOUND {
+        print("FAIL: test_te_vtable_find_method - miss\n")
+        return 1
+    }
+    print("PASS: test_te_vtable_find_method\n")
+    return 0
+}
+
+// ============================================================
+// Test 38: Witness without drop
+// ============================================================
+
+fn test_te_witness_no_drop() -> i32 with IO, Mut, Div, Panic {
+    var ctx = te_context_new()
+    let methods = te_make_methods_1_set(700)
+    ctx = te_build_witness(ctx, 10, 20, 8, 4, TE_NOT_FOUND, methods, 1)
+    let w = ctx.witnesses[0 as usize]
+    let dr = te_witness_find_drop(w)
+    if dr != TE_NOT_FOUND {
+        print("FAIL: test_te_witness_no_drop\n")
+        return 1
+    }
+    // Should have size + align + 1 method = 3 entries (no drop)
+    if w.entry_count != 3 {
+        print("FAIL: test_te_witness_no_drop - count\n")
+        return 1
+    }
+    print("PASS: test_te_witness_no_drop\n")
+    return 0
+}
+
+// ============================================================
+// Test 39: Find witness by type and trait
+// ============================================================
+
+fn test_te_find_witness() -> i32 with IO, Mut, Div, Panic {
+    var ctx = te_context_new()
+    let m1 = te_make_methods_1_set(100)
+    let m2 = te_make_methods_1_set(200)
+    ctx = te_build_witness(ctx, 10, 20, 8, 8, TE_NOT_FOUND, m1, 1)
+    ctx = te_build_witness(ctx, 11, 21, 16, 8, TE_NOT_FOUND, m2, 1)
+    let idx0 = te_find_witness(ctx, 10, 20)
+    if idx0 != 0 {
+        print("FAIL: test_te_find_witness - 0\n")
+        return 1
+    }
+    let idx1 = te_find_witness(ctx, 11, 21)
+    if idx1 != 1 {
+        print("FAIL: test_te_find_witness - 1\n")
+        return 1
+    }
+    let miss = te_find_witness(ctx, 99, 99)
+    if miss != TE_NOT_FOUND {
+        print("FAIL: test_te_find_witness - miss\n")
+        return 1
+    }
+    print("PASS: test_te_find_witness\n")
+    return 0
+}
+
+// ============================================================
+// Test 40: Get erased fn id
+// ============================================================
+
+fn test_te_get_erased_fn_id() -> i32 with IO, Mut, Div, Panic {
+    var ctx = te_context_new()
+    let params = te_make_param_kinds_1(TE_TY_VAR)
+    ctx = te_erase_fn_signature(ctx, 42, params, 1, TE_TY_I64)
+    let eid = te_get_erased_fn_id(ctx, 42)
+    if eid == TE_NOT_FOUND {
+        print("FAIL: test_te_get_erased_fn_id - found\n")
+        return 1
+    }
+    if eid == 42 {
+        print("FAIL: test_te_get_erased_fn_id - different\n")
+        return 1
+    }
+    let miss = te_get_erased_fn_id(ctx, 999)
+    if miss != TE_NOT_FOUND {
+        print("FAIL: test_te_get_erased_fn_id - miss\n")
+        return 1
+    }
+    print("PASS: test_te_get_erased_fn_id\n")
+    return 0
+}
+
+// ============================================================
+// Test 41: TeType predicate functions
+// ============================================================
+
+fn test_te_type_predicates() -> i32 with IO, Mut, Div, Panic {
+    let tc = te_type_concrete(1, 8, 8)
+    if te_type_is_concrete(tc) == false {
+        print("FAIL: test_te_type_predicates - concrete\n")
+        return 1
+    }
+    if te_type_is_erased(tc) {
+        print("FAIL: test_te_type_predicates - not_erased\n")
+        return 1
+    }
+    let te = te_type_erased(2)
+    if te_type_is_erased(te) == false {
+        print("FAIL: test_te_type_predicates - erased\n")
+        return 1
+    }
+    if te_type_needs_erasure(te) == false {
+        print("FAIL: test_te_type_predicates - needs_erasure\n")
+        return 1
+    }
+    let tb = te_type_boxed(3, 8, 8)
+    if te_type_is_boxed(tb) == false {
+        print("FAIL: test_te_type_predicates - boxed\n")
+        return 1
+    }
+    if te_type_needs_erasure(tb) {
+        print("FAIL: test_te_type_predicates - boxed_no_erasure\n")
+        return 1
+    }
+    let tv = te_type_vtable(4, 0)
+    if te_type_is_vtable(tv) == false {
+        print("FAIL: test_te_type_predicates - vtable\n")
+        return 1
+    }
+    if te_type_needs_erasure(tv) == false {
+        print("FAIL: test_te_type_predicates - vtable_erasure\n")
+        return 1
+    }
+    print("PASS: test_te_type_predicates\n")
+    return 0
+}
+
+// ============================================================
+// Test 42: Erase function idempotency
+// ============================================================
+
+fn test_te_erase_fn_idempotent() -> i32 with IO, Mut, Div, Panic {
+    var ctx = te_context_new()
+    let params = te_make_param_kinds_1(TE_TY_VAR)
+    ctx = te_erase_function(ctx, 42, params, 1, TE_TY_I64)
+    if ctx.erased_fn_count != 1 {
+        print("FAIL: test_te_erase_fn_idempotent - first\n")
+        return 1
+    }
+    // Second call should be a no-op
+    ctx = te_erase_function(ctx, 42, params, 1, TE_TY_I64)
+    if ctx.erased_fn_count != 1 {
+        print("FAIL: test_te_erase_fn_idempotent - second\n")
+        return 1
+    }
+    print("PASS: test_te_erase_fn_idempotent\n")
+    return 0
+}
+
+// ============================================================
+// Test 43: Total vtable methods query
+// ============================================================
+
+fn test_te_total_vtable_methods() -> i32 with IO, Mut, Div, Panic {
+    var ctx = te_context_new()
+    let m1 = te_make_methods_2_set(100, 101)
+    let m2 = te_make_methods_3_set(200, 201, 202)
+    ctx = te_build_vtable(ctx, 10, 20, m1, 2, 8, 8, TE_NOT_FOUND)
+    ctx = te_build_vtable(ctx, 11, 20, m2, 3, 16, 8, TE_NOT_FOUND)
+    let total = te_total_vtable_methods(ctx)
+    if total != 5 {
+        print("FAIL: test_te_total_vtable_methods\n")
+        return 1
+    }
+    print("PASS: test_te_total_vtable_methods\n")
+    return 0
+}
+
+// ============================================================
+// Test 44: Total erased params query
+// ============================================================
+
+fn test_te_total_erased_params() -> i32 with IO, Mut, Div, Panic {
+    var ctx = te_context_new()
+    let p1 = te_make_param_kinds_2(TE_TY_VAR, TE_TY_VAR)
+    let p2 = te_make_param_kinds_3(TE_TY_I64, TE_TY_VAR, TE_TY_BOOL)
+    ctx = te_erase_fn_signature(ctx, 42, p1, 2, TE_TY_I64)
+    ctx = te_erase_fn_signature(ctx, 43, p2, 3, TE_TY_I64)
+    let total = te_total_erased_params(ctx)
+    if total != 3 {
+        print("FAIL: test_te_total_erased_params\n")
+        return 1
+    }
+    print("PASS: test_te_total_erased_params\n")
+    return 0
+}
+
+// ============================================================
+// Test 45: Total witness entries query
+// ============================================================
+
+fn test_te_total_witness_entries() -> i32 with IO, Mut, Div, Panic {
+    var ctx = te_context_new()
+    let m1 = te_make_methods_1_set(100)
+    let m2 = te_make_methods_2_set(200, 201)
+    ctx = te_build_witness(ctx, 10, 20, 8, 8, 999, m1, 1)
+    ctx = te_build_witness(ctx, 11, 21, 16, 8, TE_NOT_FOUND, m2, 2)
+    let total = te_total_witness_entries(ctx)
+    // First: size + align + drop + 1 method = 4
+    // Second: size + align + 2 methods = 4 (no drop)
+    if total != 8 {
+        print("FAIL: test_te_total_witness_entries\n")
+        return 1
+    }
+    print("PASS: test_te_total_witness_entries\n")
+    return 0
+}
+
+// ============================================================
+// Test 46: Context error tracking
+// ============================================================
+
+fn test_te_error_tracking() -> i32 with IO, Mut, Div, Panic {
+    var ctx = te_context_new()
+    if te_has_errors(ctx) {
+        print("FAIL: test_te_error_tracking - init\n")
+        return 1
+    }
+    ctx.error_code = TE_ERR_VTABLE_FULL
+    if te_has_errors(ctx) == false {
+        print("FAIL: test_te_error_tracking - set\n")
+        return 1
+    }
+    print("PASS: test_te_error_tracking\n")
+    return 0
+}
+
+// ============================================================
+// Test 47: Box-unbox pair detection
+// ============================================================
+
+fn test_te_box_unbox_pair_detection() -> i32 with IO, Mut, Div, Panic {
+    let box_op = te_cast_box(10, 20, 5, 8, 8)
+    let unbox_op = te_cast_unbox(20, 30, 5, 8, 8)
+    if te_is_box_unbox_pair(box_op, unbox_op) == false {
+        print("FAIL: test_te_box_unbox_pair_detection - yes\n")
+        return 1
+    }
+    // Wrong order
+    if te_is_box_unbox_pair(unbox_op, box_op) {
+        print("FAIL: test_te_box_unbox_pair_detection - order\n")
+        return 1
+    }
+    // Different type
+    let unbox_diff = te_cast_unbox(20, 30, 6, 8, 8)
+    if te_is_box_unbox_pair(box_op, unbox_diff) {
+        print("FAIL: test_te_box_unbox_pair_detection - type\n")
+        return 1
+    }
+    // Register mismatch
+    let unbox_reg = te_cast_unbox(99, 30, 5, 8, 8)
+    if te_is_box_unbox_pair(box_op, unbox_reg) {
+        print("FAIL: test_te_box_unbox_pair_detection - reg\n")
+        return 1
+    }
+    print("PASS: test_te_box_unbox_pair_detection\n")
+    return 0
+}
+
+// ============================================================
+// Test 48: Noop size assert detection
+// ============================================================
+
+fn test_te_noop_size_assert() -> i32 with IO, Mut, Div, Panic {
+    let op = te_cast_size_assert(10, 20, 5, 8)
+    if te_is_noop_size_assert(op, 8) == false {
+        print("FAIL: test_te_noop_size_assert - match\n")
+        return 1
+    }
+    if te_is_noop_size_assert(op, 16) {
+        print("FAIL: test_te_noop_size_assert - mismatch\n")
+        return 1
+    }
+    let box_op = te_cast_box(10, 20, 5, 8, 8)
+    if te_is_noop_size_assert(box_op, 8) {
+        print("FAIL: test_te_noop_size_assert - wrong_kind\n")
+        return 1
+    }
+    print("PASS: test_te_noop_size_assert\n")
+    return 0
+}
+
+// ============================================================
+// Test 49: Trivial align detection
+// ============================================================
+
+fn test_te_trivial_align_detection() -> i32 with IO, Mut, Div, Panic {
+    let a1 = te_cast_align(10, 20, 5, 1)
+    if te_is_trivial_align(a1) == false {
+        print("FAIL: test_te_trivial_align_detection - 1\n")
+        return 1
+    }
+    let a0 = te_cast_align(10, 20, 5, 0)
+    if te_is_trivial_align(a0) == false {
+        print("FAIL: test_te_trivial_align_detection - 0\n")
+        return 1
+    }
+    let a8 = te_cast_align(10, 20, 5, 8)
+    if te_is_trivial_align(a8) {
+        print("FAIL: test_te_trivial_align_detection - 8\n")
+        return 1
+    }
+    let box_op = te_cast_box(10, 20, 5, 8, 1)
+    if te_is_trivial_align(box_op) {
+        print("FAIL: test_te_trivial_align_detection - wrong_kind\n")
+        return 1
+    }
+    print("PASS: test_te_trivial_align_detection\n")
+    return 0
+}
+
+// ============================================================
+// Test 50: Cast op field access
+// ============================================================
+
+fn test_te_cast_op_fields() -> i32 with IO, Mut, Div, Panic {
+    let op = te_cast_box(10, 20, 5, 32, 16)
+    if op.kind != TE_CAST_BOX {
+        print("FAIL: test_te_cast_op_fields - kind\n")
+        return 1
+    }
+    if op.src_reg != 10 {
+        print("FAIL: test_te_cast_op_fields - src\n")
+        return 1
+    }
+    if op.dst_reg != 20 {
+        print("FAIL: test_te_cast_op_fields - dst\n")
+        return 1
+    }
+    if op.type_idx != 5 {
+        print("FAIL: test_te_cast_op_fields - type\n")
+        return 1
+    }
+    if op.size_bytes != 32 {
+        print("FAIL: test_te_cast_op_fields - size\n")
+        return 1
+    }
+    if op.alignment != 16 {
+        print("FAIL: test_te_cast_op_fields - align\n")
+        return 1
+    }
+    print("PASS: test_te_cast_op_fields\n")
+    return 0
+}
+
+// ============================================================
+// Test 51: Cast predicate functions
+// ============================================================
+
+fn test_te_cast_predicates() -> i32 with IO, Mut, Div, Panic {
+    let b = te_cast_box(0, 0, 0, 0, 0)
+    if te_cast_is_box(b) == false {
+        print("FAIL: test_te_cast_predicates - box\n")
+        return 1
+    }
+    if te_cast_is_unbox(b) {
+        print("FAIL: test_te_cast_predicates - box_not_unbox\n")
+        return 1
+    }
+    let u = te_cast_unbox(0, 0, 0, 0, 0)
+    if te_cast_is_unbox(u) == false {
+        print("FAIL: test_te_cast_predicates - unbox\n")
+        return 1
+    }
+    let v = te_cast_vtable_lookup(0, 0, 0, 0)
+    if te_cast_is_vtable_lookup(v) == false {
+        print("FAIL: test_te_cast_predicates - vtable\n")
+        return 1
+    }
+    print("PASS: test_te_cast_predicates\n")
+    return 0
+}
+
+// ============================================================
+// Test 52: Layout equality
+// ============================================================
+
+fn test_te_layout_eq() -> i32 with IO, Mut, Div, Panic {
+    let l1 = te_layout_new(8, 8)
+    let l2 = te_layout_new(8, 8)
+    let l3 = te_layout_new(8, 4)
+    let l4 = te_layout_new(4, 8)
+    if te_layout_eq(l1, l2) == false {
+        print("FAIL: test_te_layout_eq - eq\n")
+        return 1
+    }
+    if te_layout_eq(l1, l3) {
+        print("FAIL: test_te_layout_eq - diff_align\n")
+        return 1
+    }
+    if te_layout_eq(l1, l4) {
+        print("FAIL: test_te_layout_eq - diff_size\n")
+        return 1
+    }
+    print("PASS: test_te_layout_eq\n")
+    return 0
+}
+
+// ============================================================
+// Test 53: Classify and register — context integration
+// ============================================================
+
+fn test_te_classify_and_register() -> i32 with IO, Mut, Div, Panic {
+    var ctx = te_context_new()
+    ctx = te_classify_and_register(ctx, TE_TY_I64, 1, 8, 8)
+    ctx = te_classify_and_register(ctx, TE_TY_F64, 2, 8, 8)
+    ctx = te_classify_and_register(ctx, TE_TY_VAR, 100, 0, 0)
+    if ctx.type_map.count != 3 {
+        print("FAIL: test_te_classify_and_register - count\n")
+        return 1
+    }
+    let r = te_type_map_lookup(ctx.type_map, 1)
+    if r.kind != TE_KIND_CONCRETE {
+        print("FAIL: test_te_classify_and_register - kind\n")
+        return 1
+    }
+    let rv = te_type_map_lookup(ctx.type_map, 100)
+    if rv.kind != TE_KIND_ERASED {
+        print("FAIL: test_te_classify_and_register - var\n")
+        return 1
+    }
+    print("PASS: test_te_classify_and_register\n")
+    return 0
+}
+
+// ============================================================
+// Test 54: Primitive kind check
+// ============================================================
+
+fn test_te_is_primitive_kind() -> i32 with IO, Mut, Div, Panic {
+    if te_is_primitive_kind(TE_TY_I64) == false {
+        print("FAIL: test_te_is_primitive_kind - i64\n")
+        return 1
+    }
+    if te_is_primitive_kind(TE_TY_BOOL) == false {
+        print("FAIL: test_te_is_primitive_kind - bool\n")
+        return 1
+    }
+    if te_is_primitive_kind(TE_TY_I8) == false {
+        print("FAIL: test_te_is_primitive_kind - i8\n")
+        return 1
+    }
+    if te_is_primitive_kind(TE_TY_VAR) {
+        print("FAIL: test_te_is_primitive_kind - var\n")
+        return 1
+    }
+    if te_is_primitive_kind(TE_TY_FN) {
+        print("FAIL: test_te_is_primitive_kind - fn\n")
+        return 1
+    }
+    if te_is_primitive_kind(TE_TY_TRAIT_OBJ) {
+        print("FAIL: test_te_is_primitive_kind - trait\n")
+        return 1
+    }
+    print("PASS: test_te_is_primitive_kind\n")
+    return 0
+}
+
+// ============================================================
+// Test 55: Context alloc reg and fn id
+// ============================================================
+
+fn test_te_context_alloc() -> i32 with IO, Mut, Div, Panic {
+    var ctx = te_context_new()
+    let r1 = te_context_alloc_reg(ctx)
+    let r2 = te_context_alloc_reg(ctx)
+    if r1 == r2 {
+        print("FAIL: test_te_context_alloc - reg_unique\n")
+        return 1
+    }
+    let f1 = te_context_alloc_fn_id(ctx)
+    let f2 = te_context_alloc_fn_id(ctx)
+    if f1 == f2 {
+        print("FAIL: test_te_context_alloc - fn_unique\n")
+        return 1
+    }
+    print("PASS: test_te_context_alloc\n")
+    return 0
+}
+
+// ============================================================
+// Test 56: Mixed optimization — box-unbox pair + trivial align
+// ============================================================
+
+fn test_te_optimize_mixed() -> i32 with IO, Mut, Div, Panic {
+    var ctx = te_context_new()
+    // box→unbox pair (should be removed)
+    ctx.cast_ops[0 as usize] = te_cast_box(10, 20, 5, 8, 8)
+    ctx.cast_ops[1 as usize] = te_cast_unbox(20, 30, 5, 8, 8)
+    // Standalone box (keep)
+    ctx.cast_ops[2 as usize] = te_cast_box(40, 50, 6, 4, 4)
+    // Trivial align (remove)
+    ctx.cast_ops[3 as usize] = te_cast_align(60, 70, 7, 1)
+    ctx.cast_op_count = 4
+    ctx = te_optimize_casts(ctx)
+    // Should keep only the standalone box
+    if ctx.cast_op_count != 1 {
+        print("FAIL: test_te_optimize_mixed - count\n")
+        return 1
+    }
+    if ctx.cast_ops[0 as usize].kind != TE_CAST_BOX {
+        print("FAIL: test_te_optimize_mixed - remaining_kind\n")
+        return 1
+    }
+    if ctx.cast_ops[0 as usize].src_reg != 40 {
+        print("FAIL: test_te_optimize_mixed - remaining_reg\n")
+        return 1
+    }
+    if ctx.stats.casts_optimized_away != 3 {
+        print("FAIL: test_te_optimize_mixed - stat\n")
+        return 1
+    }
+    print("PASS: test_te_optimize_mixed\n")
+    return 0
+}
+
+// ============================================================
+// Test 57: Witness entry constructors
+// ============================================================
+
+fn test_te_witness_entries() -> i32 with IO, Mut, Div, Panic {
+    let es = te_witness_entry_size(32)
+    if es.kind != TE_WITNESS_SIZE {
+        print("FAIL: test_te_witness_entries - size_kind\n")
+        return 1
+    }
+    if es.value != 32 {
+        print("FAIL: test_te_witness_entries - size_val\n")
+        return 1
+    }
+    let ea = te_witness_entry_align(8)
+    if ea.kind != TE_WITNESS_ALIGN {
+        print("FAIL: test_te_witness_entries - align_kind\n")
+        return 1
+    }
+    let ed = te_witness_entry_drop(42)
+    if ed.kind != TE_WITNESS_DROP {
+        print("FAIL: test_te_witness_entries - drop_kind\n")
+        return 1
+    }
+    if ed.method_fn_id != 42 {
+        print("FAIL: test_te_witness_entries - drop_fn\n")
+        return 1
+    }
+    let em = te_witness_entry_method(99)
+    if em.kind != TE_WITNESS_METHOD {
+        print("FAIL: test_te_witness_entries - method_kind\n")
+        return 1
+    }
+    if em.method_fn_id != 99 {
+        print("FAIL: test_te_witness_entries - method_fn\n")
+        return 1
+    }
+    print("PASS: test_te_witness_entries\n")
+    return 0
+}
+
+// ============================================================
+// Test 58: Erase trait object param
+// ============================================================
+
+fn test_te_erase_trait_obj_param() -> i32 with IO, Mut, Div, Panic {
+    var ctx = te_context_new()
+    let params = te_make_param_kinds_2(TE_TY_TRAIT_OBJ, TE_TY_I64)
+    ctx = te_erase_fn_signature(ctx, 55, params, 2, TE_TY_TRAIT_OBJ)
+    let ef = ctx.erased_fns[0 as usize]
+    if te_erased_fn_is_param_erased(ef, 0) == false {
+        print("FAIL: test_te_erase_trait_obj_param - p0\n")
+        return 1
+    }
+    if te_erased_fn_is_param_erased(ef, 1) {
+        print("FAIL: test_te_erase_trait_obj_param - p1\n")
+        return 1
+    }
+    if ef.return_erased == false {
+        print("FAIL: test_te_erase_trait_obj_param - ret\n")
+        return 1
+    }
+    if ef.cast_ops_needed != 2 {
+        print("FAIL: test_te_erase_trait_obj_param - casts\n")
+        return 1
+    }
+    print("PASS: test_te_erase_trait_obj_param\n")
+    return 0
+}
+
+// ============================================================
+// Test 59: Full pipeline run
+// ============================================================
+
+fn test_te_full_pipeline() -> i32 with IO, Mut, Div, Panic {
+    var ctx = te_context_new()
+
+    // 1. Classify types
+    ctx = te_classify_and_register(ctx, TE_TY_I64, 1, 8, 8)
+    ctx = te_classify_and_register(ctx, TE_TY_VAR, 100, 0, 0)
+
+    // 2. Erase a function
+    let params = te_make_param_kinds_2(TE_TY_VAR, TE_TY_I64)
+    ctx = te_erase_fn_signature(ctx, 42, params, 2, TE_TY_I64)
+
+    // 3. Build vtable
+    let methods = te_make_methods_2_set(200, 201)
+    ctx = te_build_vtable(ctx, 1, 10, methods, 2, 8, 8, 300)
+
+    // 4. Build witness
+    ctx = te_build_witness(ctx, 1, 10, 8, 8, 300, methods, 2)
+
+    // 5. Insert some casts (box-unbox pair + standalone)
+    ctx.cast_ops[ctx.cast_op_count as usize] = te_cast_box(10, 20, 1, 8, 8)
+    ctx.cast_op_count = ctx.cast_op_count + 1
+    ctx.cast_ops[ctx.cast_op_count as usize] = te_cast_unbox(20, 30, 1, 8, 8)
+    ctx.cast_op_count = ctx.cast_op_count + 1
+    ctx.cast_ops[ctx.cast_op_count as usize] = te_cast_box(40, 50, 2, 4, 4)
+    ctx.cast_op_count = ctx.cast_op_count + 1
+
+    // 6. Run optimization
+    ctx = te_run_erasure_pass(ctx)
+
+    // Verify final state
+    if ctx.stats.types_classified != 2 {
+        print("FAIL: test_te_full_pipeline - types\n")
+        return 1
+    }
+    if ctx.erased_fn_count != 1 {
+        print("FAIL: test_te_full_pipeline - fns\n")
+        return 1
+    }
+    if ctx.vtable_count != 1 {
+        print("FAIL: test_te_full_pipeline - vtables\n")
+        return 1
+    }
+    if ctx.witness_count != 1 {
+        print("FAIL: test_te_full_pipeline - witnesses\n")
+        return 1
+    }
+    // box-unbox pair removed, standalone box kept
+    if ctx.cast_op_count != 1 {
+        print("FAIL: test_te_full_pipeline - casts\n")
+        return 1
+    }
+    if ctx.stats.casts_optimized_away != 2 {
+        print("FAIL: test_te_full_pipeline - optimized\n")
+        return 1
+    }
+    if te_has_errors(ctx) {
+        print("FAIL: test_te_full_pipeline - errors\n")
+        return 1
+    }
+    print("PASS: test_te_full_pipeline\n")
+    return 0
+}
+
+// ============================================================
+// Test 60: Empty context queries
+// ============================================================
+
+fn test_te_empty_context_queries() -> i32 with IO, Mut, Div, Panic {
+    let ctx = te_context_new()
+    if te_total_vtable_methods(ctx) != 0 {
+        print("FAIL: test_te_empty_context_queries - vtable_methods\n")
+        return 1
+    }
+    if te_total_erased_params(ctx) != 0 {
+        print("FAIL: test_te_empty_context_queries - erased_params\n")
+        return 1
+    }
+    if te_total_witness_entries(ctx) != 0 {
+        print("FAIL: test_te_empty_context_queries - witness_entries\n")
+        return 1
+    }
+    if te_has_errors(ctx) {
+        print("FAIL: test_te_empty_context_queries - no_errors\n")
+        return 1
+    }
+    if te_find_vtable(ctx, 0, 0) != TE_NOT_FOUND {
+        print("FAIL: test_te_empty_context_queries - find_vtable\n")
+        return 1
+    }
+    if te_find_erased_fn(ctx, 0) != TE_NOT_FOUND {
+        print("FAIL: test_te_empty_context_queries - find_fn\n")
+        return 1
+    }
+    if te_find_witness(ctx, 0, 0) != TE_NOT_FOUND {
+        print("FAIL: test_te_empty_context_queries - find_witness\n")
+        return 1
+    }
+    print("PASS: test_te_empty_context_queries\n")
+    return 0
+}
+
+// ============================================================
+// Main test runner
+// ============================================================
+
+fn run_te_tests() -> i32 with IO, Mut, Div, Panic {
+    var failures: i32 = 0
+    failures = failures + test_te_classify_concrete_i64()
+    failures = failures + test_te_classify_erased_var()
+    failures = failures + test_te_classify_trait_obj()
+    failures = failures + test_te_classify_concrete_bool()
+    failures = failures + test_te_classify_ref()
+    failures = failures + test_te_vtable_basic()
+    failures = failures + test_te_vtable_method_lookup()
+    failures = failures + test_te_vtable_drop()
+    failures = failures + test_te_find_vtable()
+    failures = failures + test_te_insert_box_op()
+    failures = failures + test_te_insert_unbox_op()
+    failures = failures + test_te_erase_fn_single_param()
+    failures = failures + test_te_erase_fn_mixed_params()
+    failures = failures + test_te_erase_fn_all_concrete()
+    failures = failures + test_te_find_erased_fn()
+    failures = failures + test_te_witness_basic()
+    failures = failures + test_te_witness_find_entries()
+    failures = failures + test_te_witness_method_count()
+    failures = failures + test_te_layout_primitives()
+    failures = failures + test_te_layout_erased_boxed()
+    failures = failures + test_te_layout_aggregate()
+    failures = failures + test_te_align_up()
+    failures = failures + test_te_optimize_box_unbox()
+    failures = failures + test_te_optimize_no_collapse()
+    failures = failures + test_te_optimize_trivial_align()
+    failures = failures + test_te_stats_tracking()
+    failures = failures + test_te_type_map()
+    failures = failures + test_te_type_map_overwrite()
+    failures = failures + test_te_type_map_has()
+    failures = failures + test_te_multiple_trait_impls()
+    failures = failures + test_te_vtable_lookup_cast()
+    failures = failures + test_te_size_assert_cast()
+    failures = failures + test_te_align_cast()
+    failures = failures + test_te_cast_count_by_kind()
+    failures = failures + test_te_erased_fn_param_counting()
+    failures = failures + test_te_layout_for_type()
+    failures = failures + test_te_vtable_find_method()
+    failures = failures + test_te_witness_no_drop()
+    failures = failures + test_te_find_witness()
+    failures = failures + test_te_get_erased_fn_id()
+    failures = failures + test_te_type_predicates()
+    failures = failures + test_te_erase_fn_idempotent()
+    failures = failures + test_te_total_vtable_methods()
+    failures = failures + test_te_total_erased_params()
+    failures = failures + test_te_total_witness_entries()
+    failures = failures + test_te_error_tracking()
+    failures = failures + test_te_box_unbox_pair_detection()
+    failures = failures + test_te_noop_size_assert()
+    failures = failures + test_te_trivial_align_detection()
+    failures = failures + test_te_cast_op_fields()
+    failures = failures + test_te_cast_predicates()
+    failures = failures + test_te_layout_eq()
+    failures = failures + test_te_classify_and_register()
+    failures = failures + test_te_is_primitive_kind()
+    failures = failures + test_te_context_alloc()
+    failures = failures + test_te_optimize_mixed()
+    failures = failures + test_te_witness_entries()
+    failures = failures + test_te_erase_trait_obj_param()
+    failures = failures + test_te_full_pipeline()
+    failures = failures + test_te_empty_context_queries()
+
+    if failures == 0 {
+        print("All type erasure tests passed.\n")
+    } else {
+        print("Some type erasure tests FAILED.\n")
+    }
+    return failures
+}

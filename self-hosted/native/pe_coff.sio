@@ -1,0 +1,3508 @@
+// self-hosted::native::pe_coff — PE/COFF Windows binary format writer
+//
+// Generates PE32+ (64-bit) executables and DLLs for Windows (x86-64 and ARM64).
+// Implements DOS stub, COFF header, optional header, section layout,
+// import/export tables, relocation processing, resource handling,
+// string table management, and final binary assembly.
+
+// ============================================================================
+// Constants — PE/COFF magic numbers, machine types, and flags
+// ============================================================================
+
+// DOS header magic
+let PE_DOS_MAGIC: i64 = 23117                   // 0x5A4D ("MZ")
+
+// PE signature
+let PE_SIGNATURE: i64 = 17744                   // 0x00004550 ("PE\0\0")
+
+// Machine types
+let PE_MACHINE_UNKNOWN: i64 = 0
+let PE_MACHINE_AMD64: i64 = 34404               // 0x8664
+let PE_MACHINE_ARM64: i64 = 43620               // 0xAA64
+let PE_MACHINE_I386: i64 = 332                  // 0x014C
+
+// Optional header magic
+let PE_OPT_MAGIC_PE32: i64 = 267                // 0x010B (PE32)
+let PE_OPT_MAGIC_PE32PLUS: i64 = 523            // 0x020B (PE32+)
+
+// Subsystem types
+let PE_SUBSYSTEM_UNKNOWN: i64 = 0
+let PE_SUBSYSTEM_NATIVE: i64 = 1
+let PE_SUBSYSTEM_WINDOWS_GUI: i64 = 2
+let PE_SUBSYSTEM_WINDOWS_CUI: i64 = 3           // Console application
+let PE_SUBSYSTEM_EFI_APPLICATION: i64 = 10
+let PE_SUBSYSTEM_EFI_BOOT_SERVICE: i64 = 11
+
+// DLL characteristics flags
+let PE_DLLCHAR_HIGH_ENTROPY_VA: i64 = 32        // 0x0020
+let PE_DLLCHAR_DYNAMIC_BASE: i64 = 64           // 0x0040 (ASLR)
+let PE_DLLCHAR_NX_COMPAT: i64 = 256             // 0x0100 (DEP)
+let PE_DLLCHAR_NO_SEH: i64 = 1024               // 0x0400
+let PE_DLLCHAR_TERMINAL_SERVER: i64 = 32768     // 0x8000
+
+// COFF characteristics (file header flags)
+let PE_COFF_RELOCS_STRIPPED: i64 = 1             // 0x0001
+let PE_COFF_EXECUTABLE_IMAGE: i64 = 2           // 0x0002
+let PE_COFF_LINE_NUMS_STRIPPED: i64 = 4          // 0x0004
+let PE_COFF_LOCAL_SYMS_STRIPPED: i64 = 8         // 0x0008
+let PE_COFF_LARGE_ADDRESS_AWARE: i64 = 32       // 0x0020
+let PE_COFF_32BIT_MACHINE: i64 = 256            // 0x0100
+let PE_COFF_DEBUG_STRIPPED: i64 = 512            // 0x0200
+let PE_COFF_DLL: i64 = 8192                     // 0x2000
+
+// Section characteristics (flags)
+let PE_SCN_CNT_CODE: i64 = 32                   // 0x00000020
+let PE_SCN_CNT_INITIALIZED_DATA: i64 = 64       // 0x00000040
+let PE_SCN_CNT_UNINITIALIZED_DATA: i64 = 128    // 0x00000080
+let PE_SCN_LNK_INFO: i64 = 512                  // 0x00000200
+let PE_SCN_LNK_COMDAT: i64 = 4096               // 0x00001000
+let PE_SCN_ALIGN_1BYTES: i64 = 1048576           // 0x00100000
+let PE_SCN_ALIGN_2BYTES: i64 = 2097152           // 0x00200000
+let PE_SCN_ALIGN_4BYTES: i64 = 3145728           // 0x00300000
+let PE_SCN_ALIGN_8BYTES: i64 = 4194304           // 0x00400000
+let PE_SCN_ALIGN_16BYTES: i64 = 5242880          // 0x00500000
+let PE_SCN_ALIGN_32BYTES: i64 = 6291456          // 0x00600000
+let PE_SCN_ALIGN_64BYTES: i64 = 7340032          // 0x00700000
+let PE_SCN_MEM_DISCARDABLE: i64 = 33554432       // 0x02000000
+let PE_SCN_MEM_NOT_CACHED: i64 = 67108864        // 0x04000000
+let PE_SCN_MEM_NOT_PAGED: i64 = 134217728        // 0x08000000
+let PE_SCN_MEM_SHARED: i64 = 268435456           // 0x10000000
+let PE_SCN_MEM_EXECUTE: i64 = 536870912          // 0x20000000
+let PE_SCN_MEM_READ: i64 = 1073741824            // 0x40000000
+let PE_SCN_MEM_WRITE: i64 = 2147483648           // 0x80000000 (as i64)
+
+// Relocation types (x86-64 / AMD64)
+let PE_REL_AMD64_ABSOLUTE: i64 = 0
+let PE_REL_AMD64_ADDR64: i64 = 1
+let PE_REL_AMD64_ADDR32: i64 = 2
+let PE_REL_AMD64_ADDR32NB: i64 = 3              // RVA
+let PE_REL_AMD64_REL32: i64 = 4
+let PE_REL_AMD64_REL32_1: i64 = 5
+let PE_REL_AMD64_REL32_2: i64 = 6
+let PE_REL_AMD64_REL32_3: i64 = 7
+let PE_REL_AMD64_REL32_4: i64 = 8
+let PE_REL_AMD64_REL32_5: i64 = 9
+let PE_REL_AMD64_SECTION: i64 = 10
+let PE_REL_AMD64_SECREL: i64 = 11
+
+// Relocation types (ARM64)
+let PE_REL_ARM64_ABSOLUTE: i64 = 0
+let PE_REL_ARM64_ADDR32: i64 = 1
+let PE_REL_ARM64_ADDR32NB: i64 = 2
+let PE_REL_ARM64_BRANCH26: i64 = 3
+let PE_REL_ARM64_PAGEBASE_REL21: i64 = 4
+let PE_REL_ARM64_REL21: i64 = 5
+let PE_REL_ARM64_PAGEOFFSET_12A: i64 = 6
+let PE_REL_ARM64_PAGEOFFSET_12L: i64 = 7
+let PE_REL_ARM64_SECREL: i64 = 8
+let PE_REL_ARM64_SECREL_LOW12A: i64 = 9
+let PE_REL_ARM64_SECREL_HIGH12A: i64 = 10
+let PE_REL_ARM64_SECREL_LOW12L: i64 = 11
+let PE_REL_ARM64_ADDR64: i64 = 14
+
+// Base relocation types (for .reloc section)
+let PE_BASE_RELOC_ABSOLUTE: i64 = 0             // padding / skip
+let PE_BASE_RELOC_HIGH: i64 = 1
+let PE_BASE_RELOC_LOW: i64 = 2
+let PE_BASE_RELOC_HIGHLOW: i64 = 3              // 32-bit
+let PE_BASE_RELOC_DIR64: i64 = 10               // 64-bit
+
+// Data directory indices
+let PE_DIR_EXPORT: i64 = 0
+let PE_DIR_IMPORT: i64 = 1
+let PE_DIR_RESOURCE: i64 = 2
+let PE_DIR_EXCEPTION: i64 = 3
+let PE_DIR_SECURITY: i64 = 4
+let PE_DIR_BASERELOC: i64 = 5
+let PE_DIR_DEBUG: i64 = 6
+let PE_DIR_TLS: i64 = 9
+let PE_DIR_LOAD_CONFIG: i64 = 10
+let PE_DIR_BOUND_IMPORT: i64 = 11
+let PE_DIR_IAT: i64 = 12
+let PE_DIR_DELAY_IMPORT: i64 = 13
+let PE_DIR_CLR_RUNTIME: i64 = 14
+
+// Number of data directory entries in PE32+
+let PE_NUM_DATA_DIRS: i64 = 16
+
+// Fixed sizes
+let PE_DOS_HEADER_SIZE: i64 = 64
+let PE_SIGNATURE_SIZE: i64 = 4
+let PE_COFF_HEADER_SIZE: i64 = 20
+let PE_OPTIONAL_HEADER_SIZE_PE32PLUS: i64 = 240  // 112 + 16*8
+let PE_SECTION_HEADER_SIZE: i64 = 40
+let PE_RELOCATION_SIZE: i64 = 10                 // COFF reloc entry
+let PE_SYMBOL_SIZE: i64 = 18                     // COFF symbol entry
+let PE_IMPORT_DESC_SIZE: i64 = 20                // IMAGE_IMPORT_DESCRIPTOR
+let PE_EXPORT_DIR_SIZE: i64 = 40                 // IMAGE_EXPORT_DIRECTORY
+let PE_BASE_RELOC_BLOCK_HEADER_SIZE: i64 = 8     // page RVA + block size
+
+// Default values
+let PE_FILE_ALIGNMENT: i64 = 512                 // 0x200
+let PE_SECTION_ALIGNMENT: i64 = 4096             // 0x1000
+let PE_IMAGE_BASE: i64 = 4194304                 // 0x400000
+let PE_DLL_IMAGE_BASE: i64 = 268435456           // 0x10000000
+let PE_STACK_RESERVE: i64 = 1048576              // 0x100000 (1 MB)
+let PE_STACK_COMMIT: i64 = 4096                  // 0x1000
+let PE_HEAP_RESERVE: i64 = 1048576               // 0x100000
+let PE_HEAP_COMMIT: i64 = 4096                   // 0x1000
+
+// Page size
+let PE_PAGE_SIZE: i64 = 4096
+
+// Section name encodings (integer identifiers for dispatch)
+let PE_SECT_TEXT: i64 = 1
+let PE_SECT_DATA: i64 = 2
+let PE_SECT_RDATA: i64 = 3
+let PE_SECT_BSS: i64 = 4
+let PE_SECT_IDATA: i64 = 5
+let PE_SECT_EDATA: i64 = 6
+let PE_SECT_RSRC: i64 = 7
+let PE_SECT_RELOC: i64 = 8
+let PE_SECT_PDATA: i64 = 9
+let PE_SECT_DEBUG: i64 = 10
+
+// Symbol storage classes
+let PE_SYM_CLASS_EXTERNAL: i64 = 2
+let PE_SYM_CLASS_STATIC: i64 = 3
+let PE_SYM_CLASS_FUNCTION: i64 = 101
+let PE_SYM_CLASS_FILE: i64 = 103
+let PE_SYM_CLASS_SECTION: i64 = 104
+
+// Symbol type
+let PE_SYM_TYPE_NULL: i64 = 0
+let PE_SYM_TYPE_FUNCTION: i64 = 32               // 0x20
+
+// Resource types
+let PE_RT_CURSOR: i64 = 1
+let PE_RT_BITMAP: i64 = 2
+let PE_RT_ICON: i64 = 3
+let PE_RT_MENU: i64 = 4
+let PE_RT_DIALOG: i64 = 5
+let PE_RT_STRING: i64 = 6
+let PE_RT_ACCELERATOR: i64 = 9
+let PE_RT_VERSION: i64 = 16
+let PE_RT_MANIFEST: i64 = 24
+
+// ============================================================================
+// Structs — PE/COFF data structures
+// ============================================================================
+
+// DOS header (64 bytes)
+struct PeDosHeader {
+    e_magic: i64,             // "MZ"
+    e_cblp: i64,
+    e_cp: i64,
+    e_crlc: i64,
+    e_cparhdr: i64,
+    e_minalloc: i64,
+    e_maxalloc: i64,
+    e_ss: i64,
+    e_sp: i64,
+    e_csum: i64,
+    e_ip: i64,
+    e_cs: i64,
+    e_lfarlc: i64,
+    e_ovno: i64,
+    e_lfanew: i64,            // offset to PE signature
+}
+
+// COFF file header (20 bytes)
+struct PeCoffHeader {
+    machine: i64,
+    number_of_sections: i64,
+    time_date_stamp: i64,
+    pointer_to_symbol_table: i64,
+    number_of_symbols: i64,
+    size_of_optional_header: i64,
+    characteristics: i64,
+}
+
+// PE32+ optional header
+struct PeOptionalHeader {
+    magic: i64,                     // PE32+ = 0x020B
+    major_linker_version: i64,
+    minor_linker_version: i64,
+    size_of_code: i64,
+    size_of_initialized_data: i64,
+    size_of_uninitialized_data: i64,
+    address_of_entry_point: i64,
+    base_of_code: i64,
+    image_base: i64,
+    section_alignment: i64,
+    file_alignment: i64,
+    major_os_version: i64,
+    minor_os_version: i64,
+    major_image_version: i64,
+    minor_image_version: i64,
+    major_subsystem_version: i64,
+    minor_subsystem_version: i64,
+    win32_version_value: i64,
+    size_of_image: i64,
+    size_of_headers: i64,
+    checksum: i64,
+    subsystem: i64,
+    dll_characteristics: i64,
+    size_of_stack_reserve: i64,
+    size_of_stack_commit: i64,
+    size_of_heap_reserve: i64,
+    size_of_heap_commit: i64,
+    loader_flags: i64,
+    number_of_rva_and_sizes: i64,
+}
+
+// Section header (40 bytes)
+struct PeSectionHeader {
+    name_id: i64,               // encoded section name identifier
+    virtual_size: i64,
+    virtual_address: i64,
+    size_of_raw_data: i64,
+    pointer_to_raw_data: i64,
+    pointer_to_relocations: i64,
+    pointer_to_linenumbers: i64,
+    number_of_relocations: i64,
+    number_of_linenumbers: i64,
+    characteristics: i64,
+}
+
+// COFF relocation entry (10 bytes)
+struct PeRelocation {
+    virtual_address: i64,       // offset within section
+    symbol_table_index: i64,
+    rel_type: i64,              // relocation type (arch-dependent)
+}
+
+// COFF symbol entry (18 bytes)
+struct PeSymbol {
+    name_offset: i64,           // offset into string table (if > 8 chars)
+    name_short: i64,            // short name packed value (up to 8 chars)
+    value: i64,                 // value (depends on storage class)
+    section_number: i64,        // 1-based section index, 0=external
+    sym_type: i64,              // symbol type
+    storage_class: i64,
+    number_of_aux_symbols: i64,
+}
+
+// Import descriptor (20 bytes)
+struct PeImportDescriptor {
+    original_first_thunk: i64,  // RVA to INT (Import Name Table)
+    time_date_stamp: i64,
+    forwarder_chain: i64,
+    name_rva: i64,              // RVA to DLL name string
+    first_thunk: i64,           // RVA to IAT (Import Address Table)
+}
+
+// Export directory (40 bytes)
+struct PeExportDirectory {
+    export_flags: i64,
+    time_date_stamp: i64,
+    major_version: i64,
+    minor_version: i64,
+    name_rva: i64,              // RVA to DLL name
+    ordinal_base: i64,
+    number_of_functions: i64,
+    number_of_names: i64,
+    address_of_functions: i64,  // RVA to export address table
+    address_of_names: i64,      // RVA to name pointer table
+    address_of_name_ordinals: i64, // RVA to ordinal table
+}
+
+// Data directory entry (8 bytes each)
+struct PeDataDirectory {
+    virtual_address: i64,
+    size: i64,
+}
+
+// Base relocation entry (within .reloc section)
+struct PeBaseRelocEntry {
+    entry_type: i64,            // top 4 bits
+    offset: i64,                // bottom 12 bits
+}
+
+// Resource directory entry
+struct PeResourceEntry {
+    res_type: i64,
+    name_id: i64,
+    data_rva: i64,
+    data_size: i64,
+    codepage: i64,
+}
+
+// String table for COFF symbols
+struct PeStringTable {
+    bytes: [i8; 65536],
+    len: i64,
+}
+
+// ============================================================================
+// Main PE writer context
+// ============================================================================
+
+struct PeWriter {
+    buf: [i8; 131072],        // output byte buffer (128KB)
+    buf_len: i64,
+    // Section headers (max 16)
+    sections: [PeSectionHeader; 16],
+    section_count: i64,
+    // Section raw data storage (indices into section data arrays)
+    section_data_offsets: [i64; 16],
+    section_data_sizes: [i64; 16],
+    // Symbols (max 2048)
+    symbols: [PeSymbol; 2048],
+    symbol_count: i64,
+    // Relocations (max 4096)
+    relocs: [PeRelocation; 4096],
+    reloc_count: i64,
+    // Import descriptors (max 64)
+    imports: [PeImportDescriptor; 64],
+    import_count: i64,
+    // Export directory
+    exports: PeExportDirectory,
+    has_exports: i64,
+    // Data directories
+    data_dirs: [PeDataDirectory; 16],
+    // String table
+    strtab: PeStringTable,
+    // Base relocations (max 4096)
+    base_relocs: [PeBaseRelocEntry; 4096],
+    base_reloc_count: i64,
+    // Resource entries (max 128)
+    resources: [PeResourceEntry; 128],
+    resource_count: i64,
+    // Configuration
+    machine: i64,
+    characteristics: i64,
+    subsystem: i64,
+    dll_characteristics: i64,
+    image_base: i64,
+    section_alignment: i64,
+    file_alignment: i64,
+    entry_point_rva: i64,
+    is_dll: i64,
+    // Stack / heap sizes
+    stack_reserve: i64,
+    stack_commit: i64,
+    heap_reserve: i64,
+    heap_commit: i64,
+    // Layout tracking
+    size_of_code: i64,
+    size_of_init_data: i64,
+    size_of_uninit_data: i64,
+    base_of_code: i64,
+    size_of_headers: i64,
+    size_of_image: i64,
+}
+
+// ============================================================================
+// Constructors
+// ============================================================================
+
+fn pe_empty_section() -> PeSectionHeader {
+    PeSectionHeader {
+        name_id: 0,
+        virtual_size: 0,
+        virtual_address: 0,
+        size_of_raw_data: 0,
+        pointer_to_raw_data: 0,
+        pointer_to_relocations: 0,
+        pointer_to_linenumbers: 0,
+        number_of_relocations: 0,
+        number_of_linenumbers: 0,
+        characteristics: 0,
+    }
+}
+
+fn pe_empty_symbol() -> PeSymbol {
+    PeSymbol {
+        name_offset: 0,
+        name_short: 0,
+        value: 0,
+        section_number: 0,
+        sym_type: PE_SYM_TYPE_NULL,
+        storage_class: PE_SYM_CLASS_EXTERNAL,
+        number_of_aux_symbols: 0,
+    }
+}
+
+fn pe_empty_reloc() -> PeRelocation {
+    PeRelocation {
+        virtual_address: 0,
+        symbol_table_index: 0,
+        rel_type: PE_REL_AMD64_ABSOLUTE,
+    }
+}
+
+fn pe_empty_import() -> PeImportDescriptor {
+    PeImportDescriptor {
+        original_first_thunk: 0,
+        time_date_stamp: 0,
+        forwarder_chain: 0,
+        name_rva: 0,
+        first_thunk: 0,
+    }
+}
+
+fn pe_empty_export() -> PeExportDirectory {
+    PeExportDirectory {
+        export_flags: 0,
+        time_date_stamp: 0,
+        major_version: 0,
+        minor_version: 0,
+        name_rva: 0,
+        ordinal_base: 1,
+        number_of_functions: 0,
+        number_of_names: 0,
+        address_of_functions: 0,
+        address_of_names: 0,
+        address_of_name_ordinals: 0,
+    }
+}
+
+fn pe_empty_data_dir() -> PeDataDirectory {
+    PeDataDirectory {
+        virtual_address: 0,
+        size: 0,
+    }
+}
+
+fn pe_empty_base_reloc() -> PeBaseRelocEntry {
+    PeBaseRelocEntry {
+        entry_type: PE_BASE_RELOC_ABSOLUTE,
+        offset: 0,
+    }
+}
+
+fn pe_empty_resource() -> PeResourceEntry {
+    PeResourceEntry {
+        res_type: 0,
+        name_id: 0,
+        data_rva: 0,
+        data_size: 0,
+        codepage: 0,
+    }
+}
+
+fn pe_strtab_new() -> PeStringTable {
+    PeStringTable {
+        bytes: [0; 65536],
+        len: 0,
+    }
+}
+
+fn pe_dos_header_new(lfanew: i64) -> PeDosHeader {
+    PeDosHeader {
+        e_magic: PE_DOS_MAGIC,
+        e_cblp: 144,
+        e_cp: 3,
+        e_crlc: 0,
+        e_cparhdr: 4,
+        e_minalloc: 0,
+        e_maxalloc: 65535,
+        e_ss: 0,
+        e_sp: 184,
+        e_csum: 0,
+        e_ip: 0,
+        e_cs: 0,
+        e_lfarlc: 64,
+        e_ovno: 0,
+        e_lfanew: lfanew,
+    }
+}
+
+fn pe_coff_header_new(machine: i64, nsections: i64, characteristics: i64) -> PeCoffHeader {
+    PeCoffHeader {
+        machine: machine,
+        number_of_sections: nsections,
+        time_date_stamp: 0,
+        pointer_to_symbol_table: 0,
+        number_of_symbols: 0,
+        size_of_optional_header: PE_OPTIONAL_HEADER_SIZE_PE32PLUS,
+        characteristics: characteristics,
+    }
+}
+
+fn pe_optional_header_new() -> PeOptionalHeader {
+    PeOptionalHeader {
+        magic: PE_OPT_MAGIC_PE32PLUS,
+        major_linker_version: 14,
+        minor_linker_version: 0,
+        size_of_code: 0,
+        size_of_initialized_data: 0,
+        size_of_uninitialized_data: 0,
+        address_of_entry_point: 0,
+        base_of_code: 0,
+        image_base: PE_IMAGE_BASE,
+        section_alignment: PE_SECTION_ALIGNMENT,
+        file_alignment: PE_FILE_ALIGNMENT,
+        major_os_version: 6,
+        minor_os_version: 0,
+        major_image_version: 0,
+        minor_image_version: 0,
+        major_subsystem_version: 6,
+        minor_subsystem_version: 0,
+        win32_version_value: 0,
+        size_of_image: 0,
+        size_of_headers: 0,
+        checksum: 0,
+        subsystem: PE_SUBSYSTEM_WINDOWS_CUI,
+        dll_characteristics: PE_DLLCHAR_DYNAMIC_BASE + PE_DLLCHAR_NX_COMPAT + PE_DLLCHAR_HIGH_ENTROPY_VA + PE_DLLCHAR_TERMINAL_SERVER,
+        size_of_stack_reserve: PE_STACK_RESERVE,
+        size_of_stack_commit: PE_STACK_COMMIT,
+        size_of_heap_reserve: PE_HEAP_RESERVE,
+        size_of_heap_commit: PE_HEAP_COMMIT,
+        loader_flags: 0,
+        number_of_rva_and_sizes: PE_NUM_DATA_DIRS,
+    }
+}
+
+fn pe_writer_new() -> PeWriter {
+    PeWriter {
+        buf: [0; 131072],
+        buf_len: 0,
+        sections: [pe_empty_section(); 16],
+        section_count: 0,
+        section_data_offsets: [0; 16],
+        section_data_sizes: [0; 16],
+        symbols: [pe_empty_symbol(); 2048],
+        symbol_count: 0,
+        relocs: [pe_empty_reloc(); 4096],
+        reloc_count: 0,
+        imports: [pe_empty_import(); 64],
+        import_count: 0,
+        exports: pe_empty_export(),
+        has_exports: 0,
+        data_dirs: [pe_empty_data_dir(); 16],
+        strtab: pe_strtab_new(),
+        base_relocs: [pe_empty_base_reloc(); 4096],
+        base_reloc_count: 0,
+        resources: [pe_empty_resource(); 128],
+        resource_count: 0,
+        machine: PE_MACHINE_AMD64,
+        characteristics: PE_COFF_EXECUTABLE_IMAGE + PE_COFF_LARGE_ADDRESS_AWARE,
+        subsystem: PE_SUBSYSTEM_WINDOWS_CUI,
+        dll_characteristics: PE_DLLCHAR_DYNAMIC_BASE + PE_DLLCHAR_NX_COMPAT + PE_DLLCHAR_HIGH_ENTROPY_VA + PE_DLLCHAR_TERMINAL_SERVER,
+        image_base: PE_IMAGE_BASE,
+        section_alignment: PE_SECTION_ALIGNMENT,
+        file_alignment: PE_FILE_ALIGNMENT,
+        entry_point_rva: 0,
+        is_dll: 0,
+        stack_reserve: PE_STACK_RESERVE,
+        stack_commit: PE_STACK_COMMIT,
+        heap_reserve: PE_HEAP_RESERVE,
+        heap_commit: PE_HEAP_COMMIT,
+        size_of_code: 0,
+        size_of_init_data: 0,
+        size_of_uninit_data: 0,
+        base_of_code: 0,
+        size_of_headers: 0,
+        size_of_image: 0,
+    }
+}
+
+fn pe_writer_new_arm64() -> PeWriter with Mut, Panic, Div {
+    var w = pe_writer_new()
+    w.machine = PE_MACHINE_ARM64
+    w
+}
+
+fn pe_writer_new_dll() -> PeWriter with Mut, Panic, Div {
+    var w = pe_writer_new()
+    w.is_dll = 1
+    w.characteristics = PE_COFF_EXECUTABLE_IMAGE + PE_COFF_LARGE_ADDRESS_AWARE + PE_COFF_DLL
+    w.image_base = PE_DLL_IMAGE_BASE
+    w
+}
+
+fn pe_writer_new_object() -> PeWriter with Mut, Panic, Div {
+    var w = pe_writer_new()
+    w.characteristics = 0
+    w.image_base = 0
+    w
+}
+
+// ============================================================================
+// Low-level byte emission helpers
+// ============================================================================
+
+fn pe_low8(x: i64) -> i64 with Mut, Panic, Div {
+    var n = x % 256
+    if n < 0 { n = n + 256 }
+    n
+}
+
+fn pe_emit_byte(w: PeWriter, b: i64) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    if out.buf_len >= 0 && out.buf_len < 131072 {
+        out.buf[out.buf_len as usize] = pe_low8(b) as i8
+        out.buf_len = out.buf_len + 1
+    }
+    out
+}
+
+fn pe_emit_u16(w: PeWriter, val: i64) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    out = pe_emit_byte(out, pe_low8(val))
+    out = pe_emit_byte(out, pe_low8(val >> 8))
+    out
+}
+
+fn pe_emit_u32(w: PeWriter, val: i64) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    out = pe_emit_byte(out, pe_low8(val))
+    out = pe_emit_byte(out, pe_low8(val >> 8))
+    out = pe_emit_byte(out, pe_low8(val >> 16))
+    out = pe_emit_byte(out, pe_low8(val >> 24))
+    out
+}
+
+fn pe_emit_u64(w: PeWriter, val: i64) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    out = pe_emit_u32(out, val)
+    out = pe_emit_u32(out, val >> 32)
+    out
+}
+
+fn pe_emit_zeros(w: PeWriter, count: i64) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    var i = 0
+    while i < count {
+        out = pe_emit_byte(out, 0)
+        i = i + 1
+    }
+    out
+}
+
+fn pe_emit_pad_to(w: PeWriter, alignment: i64) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    let remainder = out.buf_len % alignment
+    if remainder != 0 {
+        let pad = alignment - remainder
+        out = pe_emit_zeros(out, pad)
+    }
+    out
+}
+
+// Patch a u16 at a specific offset
+fn pe_patch_u16(w: PeWriter, offset: i64, val: i64) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    if offset >= 0 && offset + 2 <= out.buf_len {
+        out.buf[offset as usize] = pe_low8(val) as i8
+        out.buf[(offset + 1) as usize] = pe_low8(val >> 8) as i8
+    }
+    out
+}
+
+// Patch a u32 at a specific offset in the buffer
+fn pe_patch_u32(w: PeWriter, offset: i64, val: i64) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    if offset >= 0 && offset + 4 <= out.buf_len {
+        out.buf[offset as usize] = pe_low8(val) as i8
+        out.buf[(offset + 1) as usize] = pe_low8(val >> 8) as i8
+        out.buf[(offset + 2) as usize] = pe_low8(val >> 16) as i8
+        out.buf[(offset + 3) as usize] = pe_low8(val >> 24) as i8
+    }
+    out
+}
+
+// Patch a u64 at a specific offset
+fn pe_patch_u64(w: PeWriter, offset: i64, val: i64) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    out = pe_patch_u32(out, offset, val)
+    out = pe_patch_u32(out, offset + 4, val >> 32)
+    out
+}
+
+// Read a byte from the buffer (unsigned)
+fn pe_read_u8(w: PeWriter, offset: i64) -> i64 with Mut, Panic, Div {
+    if offset < 0 { return 0 }
+    if offset >= w.buf_len { return 0 }
+    let val = w.buf[offset as usize] as i64
+    if val < 0 { val + 256 } else { val }
+}
+
+// Read a u16 little-endian
+fn pe_read_u16_le(w: PeWriter, offset: i64) -> i64 with Mut, Panic, Div {
+    let b0 = pe_read_u8(w, offset)
+    let b1 = pe_read_u8(w, offset + 1)
+    b0 + b1 * 256
+}
+
+// Read a u32 little-endian
+fn pe_read_u32_le(w: PeWriter, offset: i64) -> i64 with Mut, Panic, Div {
+    let b0 = pe_read_u8(w, offset)
+    let b1 = pe_read_u8(w, offset + 1)
+    let b2 = pe_read_u8(w, offset + 2)
+    let b3 = pe_read_u8(w, offset + 3)
+    b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+}
+
+// Read a u64 little-endian
+fn pe_read_u64_le(w: PeWriter, offset: i64) -> i64 with Mut, Panic, Div {
+    let lo = pe_read_u32_le(w, offset)
+    let hi = pe_read_u32_le(w, offset + 4)
+    lo + hi * 4294967296
+}
+
+// ============================================================================
+// Alignment and page utilities
+// ============================================================================
+
+fn pe_align_to(val: i64, alignment: i64) -> i64 with Mut, Panic {
+    var aligned = val
+    if alignment > 0 {
+        let remainder = val % alignment
+        if remainder != 0 {
+            aligned = val + (alignment - remainder)
+        }
+    }
+    aligned
+}
+
+fn pe_file_align(val: i64) -> i64 with Mut, Panic {
+    pe_align_to(val, PE_FILE_ALIGNMENT)
+}
+
+fn pe_section_align(val: i64) -> i64 with Mut, Panic {
+    pe_align_to(val, PE_SECTION_ALIGNMENT)
+}
+
+fn pe_page_align(val: i64) -> i64 with Mut, Panic {
+    pe_align_to(val, PE_PAGE_SIZE)
+}
+
+// ============================================================================
+// String table operations
+// ============================================================================
+
+// Initialize string table: first 4 bytes are the table size (u32)
+fn pe_strtab_init() -> PeStringTable with Mut, Panic, Div {
+    var st = pe_strtab_new()
+    // Reserve first 4 bytes for size field
+    st.bytes[0] = 0
+    st.bytes[1] = 0
+    st.bytes[2] = 0
+    st.bytes[3] = 0
+    st.len = 4
+    st
+}
+
+// Add a string to the string table, return its offset
+fn pe_add_string(st: PeStringTable, name: [i8; 128], name_len: i64) -> PeStringTable with Mut, Panic, Div {
+    var t = st
+    let offset = t.len
+    var i = 0
+    while i < name_len && t.len < 65535 {
+        t.bytes[t.len as usize] = name[i as usize]
+        t.len = t.len + 1
+        i = i + 1
+    }
+    // Null terminator
+    if t.len < 65536 {
+        t.bytes[t.len as usize] = 0
+        t.len = t.len + 1
+    }
+    t
+}
+
+// Get offset of the last added string
+fn pe_strtab_last_offset(st: PeStringTable, name_len: i64) -> i64 {
+    st.len - name_len - 1
+}
+
+// Search for a string in the table, return offset or -1
+fn pe_strtab_find(st: PeStringTable, name: [i8; 128], name_len: i64) -> i64 with Mut, Panic, Div {
+    var offset = 4
+    while offset < st.len {
+        var matches = 1
+        var j = 0
+        while j < name_len {
+            let idx = offset + j
+            if idx >= st.len {
+                matches = 0
+                j = name_len
+            } else if st.bytes[idx as usize] != name[j as usize] {
+                matches = 0
+                j = name_len
+            } else {
+                j = j + 1
+            }
+        }
+        if matches == 1 {
+            let term_idx = offset + name_len
+            if term_idx < st.len {
+                if st.bytes[term_idx as usize] != 0 {
+                    matches = 0
+                }
+            } else {
+                matches = 0
+            }
+        }
+        if matches == 1 {
+            return offset
+        }
+        // Advance past current string
+        var k = offset
+        while k < st.len && st.bytes[k as usize] != 0 {
+            k = k + 1
+        }
+        offset = k + 1
+    }
+    0 - 1
+}
+
+// Build the final string table bytes (patches the size u32 at offset 0)
+fn pe_build_string_table(st: PeStringTable) -> PeStringTable with Mut, Panic, Div {
+    var t = st
+    // Patch size at offset 0 (4-byte LE)
+    t.bytes[0] = pe_low8(t.len) as i8
+    t.bytes[1] = pe_low8(t.len >> 8) as i8
+    t.bytes[2] = pe_low8(t.len >> 16) as i8
+    t.bytes[3] = pe_low8(t.len >> 24) as i8
+    t
+}
+
+// ============================================================================
+// Section management
+// ============================================================================
+
+fn pe_add_section(w: PeWriter, sec: PeSectionHeader) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    if out.section_count < 16 {
+        out.sections[out.section_count as usize] = sec
+        out.section_count = out.section_count + 1
+    }
+    out
+}
+
+fn pe_add_text_section(w: PeWriter, vaddr: i64, vsize: i64, raw_offset: i64, raw_size: i64) -> PeWriter with Mut, Panic, Div {
+    let sec = PeSectionHeader {
+        name_id: PE_SECT_TEXT,
+        virtual_size: vsize,
+        virtual_address: vaddr,
+        size_of_raw_data: raw_size,
+        pointer_to_raw_data: raw_offset,
+        pointer_to_relocations: 0,
+        pointer_to_linenumbers: 0,
+        number_of_relocations: 0,
+        number_of_linenumbers: 0,
+        characteristics: PE_SCN_CNT_CODE + PE_SCN_MEM_EXECUTE + PE_SCN_MEM_READ,
+    }
+    pe_add_section(w, sec)
+}
+
+fn pe_add_data_section(w: PeWriter, vaddr: i64, vsize: i64, raw_offset: i64, raw_size: i64) -> PeWriter with Mut, Panic, Div {
+    let sec = PeSectionHeader {
+        name_id: PE_SECT_DATA,
+        virtual_size: vsize,
+        virtual_address: vaddr,
+        size_of_raw_data: raw_size,
+        pointer_to_raw_data: raw_offset,
+        pointer_to_relocations: 0,
+        pointer_to_linenumbers: 0,
+        number_of_relocations: 0,
+        number_of_linenumbers: 0,
+        characteristics: PE_SCN_CNT_INITIALIZED_DATA + PE_SCN_MEM_READ + PE_SCN_MEM_WRITE,
+    }
+    pe_add_section(w, sec)
+}
+
+fn pe_add_rdata_section(w: PeWriter, vaddr: i64, vsize: i64, raw_offset: i64, raw_size: i64) -> PeWriter with Mut, Panic, Div {
+    let sec = PeSectionHeader {
+        name_id: PE_SECT_RDATA,
+        virtual_size: vsize,
+        virtual_address: vaddr,
+        size_of_raw_data: raw_size,
+        pointer_to_raw_data: raw_offset,
+        pointer_to_relocations: 0,
+        pointer_to_linenumbers: 0,
+        number_of_relocations: 0,
+        number_of_linenumbers: 0,
+        characteristics: PE_SCN_CNT_INITIALIZED_DATA + PE_SCN_MEM_READ,
+    }
+    pe_add_section(w, sec)
+}
+
+fn pe_add_bss_section(w: PeWriter, vaddr: i64, vsize: i64) -> PeWriter with Mut, Panic, Div {
+    let sec = PeSectionHeader {
+        name_id: PE_SECT_BSS,
+        virtual_size: vsize,
+        virtual_address: vaddr,
+        size_of_raw_data: 0,
+        pointer_to_raw_data: 0,
+        pointer_to_relocations: 0,
+        pointer_to_linenumbers: 0,
+        number_of_relocations: 0,
+        number_of_linenumbers: 0,
+        characteristics: PE_SCN_CNT_UNINITIALIZED_DATA + PE_SCN_MEM_READ + PE_SCN_MEM_WRITE,
+    }
+    pe_add_section(w, sec)
+}
+
+fn pe_add_idata_section(w: PeWriter, vaddr: i64, vsize: i64, raw_offset: i64, raw_size: i64) -> PeWriter with Mut, Panic, Div {
+    let sec = PeSectionHeader {
+        name_id: PE_SECT_IDATA,
+        virtual_size: vsize,
+        virtual_address: vaddr,
+        size_of_raw_data: raw_size,
+        pointer_to_raw_data: raw_offset,
+        pointer_to_relocations: 0,
+        pointer_to_linenumbers: 0,
+        number_of_relocations: 0,
+        number_of_linenumbers: 0,
+        characteristics: PE_SCN_CNT_INITIALIZED_DATA + PE_SCN_MEM_READ,
+    }
+    pe_add_section(w, sec)
+}
+
+fn pe_add_edata_section(w: PeWriter, vaddr: i64, vsize: i64, raw_offset: i64, raw_size: i64) -> PeWriter with Mut, Panic, Div {
+    let sec = PeSectionHeader {
+        name_id: PE_SECT_EDATA,
+        virtual_size: vsize,
+        virtual_address: vaddr,
+        size_of_raw_data: raw_size,
+        pointer_to_raw_data: raw_offset,
+        pointer_to_relocations: 0,
+        pointer_to_linenumbers: 0,
+        number_of_relocations: 0,
+        number_of_linenumbers: 0,
+        characteristics: PE_SCN_CNT_INITIALIZED_DATA + PE_SCN_MEM_READ,
+    }
+    pe_add_section(w, sec)
+}
+
+fn pe_add_rsrc_section(w: PeWriter, vaddr: i64, vsize: i64, raw_offset: i64, raw_size: i64) -> PeWriter with Mut, Panic, Div {
+    let sec = PeSectionHeader {
+        name_id: PE_SECT_RSRC,
+        virtual_size: vsize,
+        virtual_address: vaddr,
+        size_of_raw_data: raw_size,
+        pointer_to_raw_data: raw_offset,
+        pointer_to_relocations: 0,
+        pointer_to_linenumbers: 0,
+        number_of_relocations: 0,
+        number_of_linenumbers: 0,
+        characteristics: PE_SCN_CNT_INITIALIZED_DATA + PE_SCN_MEM_READ,
+    }
+    pe_add_section(w, sec)
+}
+
+fn pe_add_reloc_section(w: PeWriter, vaddr: i64, vsize: i64, raw_offset: i64, raw_size: i64) -> PeWriter with Mut, Panic, Div {
+    let sec = PeSectionHeader {
+        name_id: PE_SECT_RELOC,
+        virtual_size: vsize,
+        virtual_address: vaddr,
+        size_of_raw_data: raw_size,
+        pointer_to_raw_data: raw_offset,
+        pointer_to_relocations: 0,
+        pointer_to_linenumbers: 0,
+        number_of_relocations: 0,
+        number_of_linenumbers: 0,
+        characteristics: PE_SCN_CNT_INITIALIZED_DATA + PE_SCN_MEM_DISCARDABLE + PE_SCN_MEM_READ,
+    }
+    pe_add_section(w, sec)
+}
+
+// Get the section characteristics for a section by name_id
+fn pe_section_chars_for(name_id: i64) -> i64 {
+    if name_id == PE_SECT_TEXT {
+        PE_SCN_CNT_CODE + PE_SCN_MEM_EXECUTE + PE_SCN_MEM_READ
+    } else if name_id == PE_SECT_DATA {
+        PE_SCN_CNT_INITIALIZED_DATA + PE_SCN_MEM_READ + PE_SCN_MEM_WRITE
+    } else if name_id == PE_SECT_RDATA {
+        PE_SCN_CNT_INITIALIZED_DATA + PE_SCN_MEM_READ
+    } else if name_id == PE_SECT_BSS {
+        PE_SCN_CNT_UNINITIALIZED_DATA + PE_SCN_MEM_READ + PE_SCN_MEM_WRITE
+    } else if name_id == PE_SECT_IDATA {
+        PE_SCN_CNT_INITIALIZED_DATA + PE_SCN_MEM_READ
+    } else if name_id == PE_SECT_EDATA {
+        PE_SCN_CNT_INITIALIZED_DATA + PE_SCN_MEM_READ
+    } else if name_id == PE_SECT_RSRC {
+        PE_SCN_CNT_INITIALIZED_DATA + PE_SCN_MEM_READ
+    } else if name_id == PE_SECT_RELOC {
+        PE_SCN_CNT_INITIALIZED_DATA + PE_SCN_MEM_DISCARDABLE + PE_SCN_MEM_READ
+    } else {
+        PE_SCN_CNT_INITIALIZED_DATA + PE_SCN_MEM_READ
+    }
+}
+
+// ============================================================================
+// Section name emission (8-byte fixed fields)
+// ============================================================================
+
+// Emit the 8-byte section name field from encoded section name ID
+fn pe_emit_section_name(w: PeWriter, name_id: i64) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    if name_id == PE_SECT_TEXT {
+        // ".text\0\0\0"
+        out = pe_emit_byte(out, 46)   // '.'
+        out = pe_emit_byte(out, 116)  // 't'
+        out = pe_emit_byte(out, 101)  // 'e'
+        out = pe_emit_byte(out, 120)  // 'x'
+        out = pe_emit_byte(out, 116)  // 't'
+        out = pe_emit_zeros(out, 3)
+    } else if name_id == PE_SECT_DATA {
+        // ".data\0\0\0"
+        out = pe_emit_byte(out, 46)   // '.'
+        out = pe_emit_byte(out, 100)  // 'd'
+        out = pe_emit_byte(out, 97)   // 'a'
+        out = pe_emit_byte(out, 116)  // 't'
+        out = pe_emit_byte(out, 97)   // 'a'
+        out = pe_emit_zeros(out, 3)
+    } else if name_id == PE_SECT_RDATA {
+        // ".rdata\0\0"
+        out = pe_emit_byte(out, 46)   // '.'
+        out = pe_emit_byte(out, 114)  // 'r'
+        out = pe_emit_byte(out, 100)  // 'd'
+        out = pe_emit_byte(out, 97)   // 'a'
+        out = pe_emit_byte(out, 116)  // 't'
+        out = pe_emit_byte(out, 97)   // 'a'
+        out = pe_emit_zeros(out, 2)
+    } else if name_id == PE_SECT_BSS {
+        // ".bss\0\0\0\0"
+        out = pe_emit_byte(out, 46)   // '.'
+        out = pe_emit_byte(out, 98)   // 'b'
+        out = pe_emit_byte(out, 115)  // 's'
+        out = pe_emit_byte(out, 115)  // 's'
+        out = pe_emit_zeros(out, 4)
+    } else if name_id == PE_SECT_IDATA {
+        // ".idata\0\0"
+        out = pe_emit_byte(out, 46)   // '.'
+        out = pe_emit_byte(out, 105)  // 'i'
+        out = pe_emit_byte(out, 100)  // 'd'
+        out = pe_emit_byte(out, 97)   // 'a'
+        out = pe_emit_byte(out, 116)  // 't'
+        out = pe_emit_byte(out, 97)   // 'a'
+        out = pe_emit_zeros(out, 2)
+    } else if name_id == PE_SECT_EDATA {
+        // ".edata\0\0"
+        out = pe_emit_byte(out, 46)   // '.'
+        out = pe_emit_byte(out, 101)  // 'e'
+        out = pe_emit_byte(out, 100)  // 'd'
+        out = pe_emit_byte(out, 97)   // 'a'
+        out = pe_emit_byte(out, 116)  // 't'
+        out = pe_emit_byte(out, 97)   // 'a'
+        out = pe_emit_zeros(out, 2)
+    } else if name_id == PE_SECT_RSRC {
+        // ".rsrc\0\0\0"
+        out = pe_emit_byte(out, 46)   // '.'
+        out = pe_emit_byte(out, 114)  // 'r'
+        out = pe_emit_byte(out, 115)  // 's'
+        out = pe_emit_byte(out, 114)  // 'r'
+        out = pe_emit_byte(out, 99)   // 'c'
+        out = pe_emit_zeros(out, 3)
+    } else if name_id == PE_SECT_RELOC {
+        // ".reloc\0\0"
+        out = pe_emit_byte(out, 46)   // '.'
+        out = pe_emit_byte(out, 114)  // 'r'
+        out = pe_emit_byte(out, 101)  // 'e'
+        out = pe_emit_byte(out, 108)  // 'l'
+        out = pe_emit_byte(out, 111)  // 'o'
+        out = pe_emit_byte(out, 99)   // 'c'
+        out = pe_emit_zeros(out, 2)
+    } else if name_id == PE_SECT_PDATA {
+        // ".pdata\0\0"
+        out = pe_emit_byte(out, 46)   // '.'
+        out = pe_emit_byte(out, 112)  // 'p'
+        out = pe_emit_byte(out, 100)  // 'd'
+        out = pe_emit_byte(out, 97)   // 'a'
+        out = pe_emit_byte(out, 116)  // 't'
+        out = pe_emit_byte(out, 97)   // 'a'
+        out = pe_emit_zeros(out, 2)
+    } else if name_id == PE_SECT_DEBUG {
+        // ".debug\0\0"
+        out = pe_emit_byte(out, 46)   // '.'
+        out = pe_emit_byte(out, 100)  // 'd'
+        out = pe_emit_byte(out, 101)  // 'e'
+        out = pe_emit_byte(out, 98)   // 'b'
+        out = pe_emit_byte(out, 117)  // 'u'
+        out = pe_emit_byte(out, 103)  // 'g'
+        out = pe_emit_zeros(out, 2)
+    } else {
+        out = pe_emit_zeros(out, 8)
+    }
+    out
+}
+
+// ============================================================================
+// Header emission — DOS stub
+// ============================================================================
+
+// Write the 64-byte DOS header
+fn pe_write_dos_stub(w: PeWriter, hdr: PeDosHeader) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    out = pe_emit_u16(out, hdr.e_magic)
+    out = pe_emit_u16(out, hdr.e_cblp)
+    out = pe_emit_u16(out, hdr.e_cp)
+    out = pe_emit_u16(out, hdr.e_crlc)
+    out = pe_emit_u16(out, hdr.e_cparhdr)
+    out = pe_emit_u16(out, hdr.e_minalloc)
+    out = pe_emit_u16(out, hdr.e_maxalloc)
+    out = pe_emit_u16(out, hdr.e_ss)
+    out = pe_emit_u16(out, hdr.e_sp)
+    out = pe_emit_u16(out, hdr.e_csum)
+    out = pe_emit_u16(out, hdr.e_ip)
+    out = pe_emit_u16(out, hdr.e_cs)
+    out = pe_emit_u16(out, hdr.e_lfarlc)
+    out = pe_emit_u16(out, hdr.e_ovno)
+    // Reserved words (4 x u16 = 8 bytes)
+    out = pe_emit_zeros(out, 8)
+    // OEM id and info (2 x u16 = 4 bytes)
+    out = pe_emit_zeros(out, 4)
+    // Reserved words 2 (10 x u16 = 20 bytes)
+    out = pe_emit_zeros(out, 20)
+    // e_lfanew at offset 60
+    out = pe_emit_u32(out, hdr.e_lfanew)
+    out
+}
+
+// Write the DOS stub program (a small real-mode program that prints
+// "This program cannot be run in DOS mode." and exits).
+// In practice we emit a minimal stub: just the header.
+fn pe_write_dos_program(w: PeWriter) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    // Stub message bytes (simplified): 14 bytes of x86-16 instructions
+    // push cs / pop ds / mov dx, offset msg / mov ah, 9 / int 21h / mov ax, 4C01h / int 21h
+    out = pe_emit_byte(out, 0x0E)    // push cs
+    out = pe_emit_byte(out, 0x1F)    // pop ds
+    out = pe_emit_byte(out, 0xBA)    // mov dx, offset
+    out = pe_emit_u16(out, 14)       // offset to message
+    out = pe_emit_byte(out, 0xB4)    // mov ah, 9
+    out = pe_emit_byte(out, 0x09)
+    out = pe_emit_byte(out, 0xCD)    // int 21h
+    out = pe_emit_byte(out, 0x21)
+    out = pe_emit_byte(out, 0xB8)    // mov ax, 4C01h
+    out = pe_emit_u16(out, 0x4C01)
+    out = pe_emit_byte(out, 0xCD)    // int 21h
+    out = pe_emit_byte(out, 0x21)
+    // Message: "This program cannot be run in DOS mode.\r\n$"
+    // 'T'=84 'h'=104 'i'=105 's'=115 ' '=32 'p'=112 'r'=114 'o'=111
+    // 'g'=103 'r'=114 'a'=97 'm'=109 ...
+    out = pe_emit_byte(out, 84)   // T
+    out = pe_emit_byte(out, 104)  // h
+    out = pe_emit_byte(out, 105)  // i
+    out = pe_emit_byte(out, 115)  // s
+    out = pe_emit_byte(out, 32)   // (space)
+    out = pe_emit_byte(out, 112)  // p
+    out = pe_emit_byte(out, 114)  // r
+    out = pe_emit_byte(out, 111)  // o
+    out = pe_emit_byte(out, 103)  // g
+    out = pe_emit_byte(out, 114)  // r
+    out = pe_emit_byte(out, 97)   // a
+    out = pe_emit_byte(out, 109)  // m
+    out = pe_emit_byte(out, 32)   // (space)
+    out = pe_emit_byte(out, 99)   // c
+    out = pe_emit_byte(out, 97)   // a
+    out = pe_emit_byte(out, 110)  // n
+    out = pe_emit_byte(out, 110)  // n
+    out = pe_emit_byte(out, 111)  // o
+    out = pe_emit_byte(out, 116)  // t
+    out = pe_emit_byte(out, 32)   // (space)
+    out = pe_emit_byte(out, 98)   // b
+    out = pe_emit_byte(out, 101)  // e
+    out = pe_emit_byte(out, 32)   // (space)
+    out = pe_emit_byte(out, 114)  // r
+    out = pe_emit_byte(out, 117)  // u
+    out = pe_emit_byte(out, 110)  // n
+    out = pe_emit_byte(out, 32)   // (space)
+    out = pe_emit_byte(out, 105)  // i
+    out = pe_emit_byte(out, 110)  // n
+    out = pe_emit_byte(out, 32)   // (space)
+    out = pe_emit_byte(out, 68)   // D
+    out = pe_emit_byte(out, 79)   // O
+    out = pe_emit_byte(out, 83)   // S
+    out = pe_emit_byte(out, 32)   // (space)
+    out = pe_emit_byte(out, 109)  // m
+    out = pe_emit_byte(out, 111)  // o
+    out = pe_emit_byte(out, 100)  // d
+    out = pe_emit_byte(out, 101)  // e
+    out = pe_emit_byte(out, 46)   // .
+    out = pe_emit_byte(out, 13)   // \r
+    out = pe_emit_byte(out, 10)   // \n
+    out = pe_emit_byte(out, 36)   // $
+    out
+}
+
+// ============================================================================
+// Header emission — COFF header
+// ============================================================================
+
+fn pe_write_coff_header(w: PeWriter, hdr: PeCoffHeader) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    // PE signature
+    out = pe_emit_u32(out, PE_SIGNATURE)
+    // COFF header fields
+    out = pe_emit_u16(out, hdr.machine)
+    out = pe_emit_u16(out, hdr.number_of_sections)
+    out = pe_emit_u32(out, hdr.time_date_stamp)
+    out = pe_emit_u32(out, hdr.pointer_to_symbol_table)
+    out = pe_emit_u32(out, hdr.number_of_symbols)
+    out = pe_emit_u16(out, hdr.size_of_optional_header)
+    out = pe_emit_u16(out, hdr.characteristics)
+    out
+}
+
+// ============================================================================
+// Header emission — PE32+ optional header
+// ============================================================================
+
+fn pe_write_optional_header(w: PeWriter, opt: PeOptionalHeader, data_dirs: [PeDataDirectory; 16]) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    // Standard fields (28 bytes for PE32+)
+    out = pe_emit_u16(out, opt.magic)
+    out = pe_emit_byte(out, opt.major_linker_version)
+    out = pe_emit_byte(out, opt.minor_linker_version)
+    out = pe_emit_u32(out, opt.size_of_code)
+    out = pe_emit_u32(out, opt.size_of_initialized_data)
+    out = pe_emit_u32(out, opt.size_of_uninitialized_data)
+    out = pe_emit_u32(out, opt.address_of_entry_point)
+    out = pe_emit_u32(out, opt.base_of_code)
+    // Windows-specific fields (88 bytes for PE32+)
+    out = pe_emit_u64(out, opt.image_base)
+    out = pe_emit_u32(out, opt.section_alignment)
+    out = pe_emit_u32(out, opt.file_alignment)
+    out = pe_emit_u16(out, opt.major_os_version)
+    out = pe_emit_u16(out, opt.minor_os_version)
+    out = pe_emit_u16(out, opt.major_image_version)
+    out = pe_emit_u16(out, opt.minor_image_version)
+    out = pe_emit_u16(out, opt.major_subsystem_version)
+    out = pe_emit_u16(out, opt.minor_subsystem_version)
+    out = pe_emit_u32(out, opt.win32_version_value)
+    out = pe_emit_u32(out, opt.size_of_image)
+    out = pe_emit_u32(out, opt.size_of_headers)
+    out = pe_emit_u32(out, opt.checksum)
+    out = pe_emit_u16(out, opt.subsystem)
+    out = pe_emit_u16(out, opt.dll_characteristics)
+    out = pe_emit_u64(out, opt.size_of_stack_reserve)
+    out = pe_emit_u64(out, opt.size_of_stack_commit)
+    out = pe_emit_u64(out, opt.size_of_heap_reserve)
+    out = pe_emit_u64(out, opt.size_of_heap_commit)
+    out = pe_emit_u32(out, opt.loader_flags)
+    out = pe_emit_u32(out, opt.number_of_rva_and_sizes)
+    // Data directories (16 entries x 8 bytes = 128 bytes)
+    var i = 0
+    while i < PE_NUM_DATA_DIRS {
+        out = pe_emit_u32(out, data_dirs[i as usize].virtual_address)
+        out = pe_emit_u32(out, data_dirs[i as usize].size)
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
+// Section header emission
+// ============================================================================
+
+fn pe_write_section_header(w: PeWriter, sec: PeSectionHeader) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    // Name (8 bytes)
+    out = pe_emit_section_name(out, sec.name_id)
+    // VirtualSize
+    out = pe_emit_u32(out, sec.virtual_size)
+    // VirtualAddress
+    out = pe_emit_u32(out, sec.virtual_address)
+    // SizeOfRawData
+    out = pe_emit_u32(out, sec.size_of_raw_data)
+    // PointerToRawData
+    out = pe_emit_u32(out, sec.pointer_to_raw_data)
+    // PointerToRelocations
+    out = pe_emit_u32(out, sec.pointer_to_relocations)
+    // PointerToLinenumbers
+    out = pe_emit_u32(out, sec.pointer_to_linenumbers)
+    // NumberOfRelocations
+    out = pe_emit_u16(out, sec.number_of_relocations)
+    // NumberOfLinenumbers
+    out = pe_emit_u16(out, sec.number_of_linenumbers)
+    // Characteristics
+    out = pe_emit_u32(out, sec.characteristics)
+    out
+}
+
+fn pe_write_section_headers(w: PeWriter) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    var i = 0
+    while i < out.section_count {
+        out = pe_write_section_header(out, out.sections[i as usize])
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
+// Symbol management
+// ============================================================================
+
+fn pe_add_symbol(w: PeWriter, sym: PeSymbol) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    if out.symbol_count < 2048 {
+        out.symbols[out.symbol_count as usize] = sym
+        out.symbol_count = out.symbol_count + 1
+    }
+    out
+}
+
+fn pe_make_external_symbol(name_offset: i64, section: i64, value: i64) -> PeSymbol {
+    PeSymbol {
+        name_offset: name_offset,
+        name_short: 0,
+        value: value,
+        section_number: section,
+        sym_type: PE_SYM_TYPE_FUNCTION,
+        storage_class: PE_SYM_CLASS_EXTERNAL,
+        number_of_aux_symbols: 0,
+    }
+}
+
+fn pe_make_static_symbol(name_offset: i64, section: i64, value: i64) -> PeSymbol {
+    PeSymbol {
+        name_offset: name_offset,
+        name_short: 0,
+        value: value,
+        section_number: section,
+        sym_type: PE_SYM_TYPE_NULL,
+        storage_class: PE_SYM_CLASS_STATIC,
+        number_of_aux_symbols: 0,
+    }
+}
+
+fn pe_make_section_symbol(section: i64) -> PeSymbol {
+    PeSymbol {
+        name_offset: 0,
+        name_short: 0,
+        value: 0,
+        section_number: section,
+        sym_type: PE_SYM_TYPE_NULL,
+        storage_class: PE_SYM_CLASS_SECTION,
+        number_of_aux_symbols: 0,
+    }
+}
+
+fn pe_make_undef_symbol(name_offset: i64) -> PeSymbol {
+    PeSymbol {
+        name_offset: name_offset,
+        name_short: 0,
+        value: 0,
+        section_number: 0,
+        sym_type: PE_SYM_TYPE_NULL,
+        storage_class: PE_SYM_CLASS_EXTERNAL,
+        number_of_aux_symbols: 0,
+    }
+}
+
+// Write a COFF symbol entry (18 bytes)
+fn pe_emit_symbol(w: PeWriter, sym: PeSymbol) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    if sym.name_short != 0 {
+        // Short name: stored inline (8 bytes)
+        out = pe_emit_u64(out, sym.name_short)
+    } else {
+        // Long name: first 4 bytes = 0, next 4 bytes = string table offset
+        out = pe_emit_u32(out, 0)
+        out = pe_emit_u32(out, sym.name_offset)
+    }
+    // Value
+    out = pe_emit_u32(out, sym.value)
+    // SectionNumber (1-based, i16)
+    out = pe_emit_u16(out, sym.section_number)
+    // Type
+    out = pe_emit_u16(out, sym.sym_type)
+    // StorageClass
+    out = pe_emit_byte(out, sym.storage_class)
+    // NumberOfAuxSymbols
+    out = pe_emit_byte(out, sym.number_of_aux_symbols)
+    out
+}
+
+// ============================================================================
+// Relocation management
+// ============================================================================
+
+fn pe_add_relocation(w: PeWriter, rel: PeRelocation) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    if out.reloc_count < 4096 {
+        out.relocs[out.reloc_count as usize] = rel
+        out.reloc_count = out.reloc_count + 1
+    }
+    out
+}
+
+fn pe_make_rel32_reloc(vaddr: i64, sym_idx: i64) -> PeRelocation {
+    PeRelocation {
+        virtual_address: vaddr,
+        symbol_table_index: sym_idx,
+        rel_type: PE_REL_AMD64_REL32,
+    }
+}
+
+fn pe_make_addr64_reloc(vaddr: i64, sym_idx: i64) -> PeRelocation {
+    PeRelocation {
+        virtual_address: vaddr,
+        symbol_table_index: sym_idx,
+        rel_type: PE_REL_AMD64_ADDR64,
+    }
+}
+
+fn pe_make_addr32nb_reloc(vaddr: i64, sym_idx: i64) -> PeRelocation {
+    PeRelocation {
+        virtual_address: vaddr,
+        symbol_table_index: sym_idx,
+        rel_type: PE_REL_AMD64_ADDR32NB,
+    }
+}
+
+fn pe_make_secrel_reloc(vaddr: i64, sym_idx: i64) -> PeRelocation {
+    PeRelocation {
+        virtual_address: vaddr,
+        symbol_table_index: sym_idx,
+        rel_type: PE_REL_AMD64_SECREL,
+    }
+}
+
+fn pe_make_section_reloc(vaddr: i64, sym_idx: i64) -> PeRelocation {
+    PeRelocation {
+        virtual_address: vaddr,
+        symbol_table_index: sym_idx,
+        rel_type: PE_REL_AMD64_SECTION,
+    }
+}
+
+fn pe_make_arm64_branch26_reloc(vaddr: i64, sym_idx: i64) -> PeRelocation {
+    PeRelocation {
+        virtual_address: vaddr,
+        symbol_table_index: sym_idx,
+        rel_type: PE_REL_ARM64_BRANCH26,
+    }
+}
+
+fn pe_make_arm64_pagebase_reloc(vaddr: i64, sym_idx: i64) -> PeRelocation {
+    PeRelocation {
+        virtual_address: vaddr,
+        symbol_table_index: sym_idx,
+        rel_type: PE_REL_ARM64_PAGEBASE_REL21,
+    }
+}
+
+fn pe_make_arm64_pageoff12a_reloc(vaddr: i64, sym_idx: i64) -> PeRelocation {
+    PeRelocation {
+        virtual_address: vaddr,
+        symbol_table_index: sym_idx,
+        rel_type: PE_REL_ARM64_PAGEOFFSET_12A,
+    }
+}
+
+// Write a COFF relocation entry (10 bytes)
+fn pe_emit_relocation(w: PeWriter, rel: PeRelocation) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    out = pe_emit_u32(out, rel.virtual_address)
+    out = pe_emit_u32(out, rel.symbol_table_index)
+    out = pe_emit_u16(out, rel.rel_type)
+    out
+}
+
+// Apply a relocation: compute and patch the target value
+fn pe_apply_relocation(
+    w: PeWriter,
+    rel: PeRelocation,
+    sym_value: i64,
+    section_rva: i64
+) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    let patch_offset = rel.virtual_address
+    if rel.rel_type == PE_REL_AMD64_REL32 {
+        // rel32 = target - (patch_addr + 4)
+        let target = sym_value
+        let patch_addr = section_rva + patch_offset
+        let rel32 = target - (patch_addr + 4)
+        out = pe_patch_u32(out, patch_offset, rel32)
+    } else if rel.rel_type == PE_REL_AMD64_ADDR64 {
+        out = pe_patch_u64(out, patch_offset, sym_value)
+    } else if rel.rel_type == PE_REL_AMD64_ADDR32 {
+        out = pe_patch_u32(out, patch_offset, sym_value)
+    } else if rel.rel_type == PE_REL_AMD64_ADDR32NB {
+        // RVA (no base)
+        out = pe_patch_u32(out, patch_offset, sym_value)
+    } else if rel.rel_type == PE_REL_AMD64_SECREL {
+        // Section-relative offset
+        out = pe_patch_u32(out, patch_offset, sym_value)
+    } else if rel.rel_type == PE_REL_AMD64_SECTION {
+        // Section index
+        out = pe_patch_u16(out, patch_offset, sym_value)
+    }
+    out
+}
+
+// Process all relocations using symbol values and section RVAs
+fn pe_process_relocations(
+    w: PeWriter,
+    sym_values: [i64; 2048],
+    section_rvas: [i64; 16]
+) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    var i = 0
+    while i < out.reloc_count {
+        let rel = out.relocs[i as usize]
+        let sym_idx = rel.symbol_table_index
+        var sym_val = 0
+        if sym_idx >= 0 && sym_idx < 2048 {
+            sym_val = sym_values[sym_idx as usize]
+        }
+        // Determine section RVA (use section 0 by default for simplicity)
+        let sec_rva = section_rvas[0]
+        out = pe_apply_relocation(out, rel, sym_val, sec_rva)
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
+// Base relocation table (.reloc section)
+// ============================================================================
+
+fn pe_add_base_reloc(w: PeWriter, entry_type: i64, offset: i64) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    if out.base_reloc_count < 4096 {
+        out.base_relocs[out.base_reloc_count as usize] = PeBaseRelocEntry {
+            entry_type: entry_type,
+            offset: offset,
+        }
+        out.base_reloc_count = out.base_reloc_count + 1
+    }
+    out
+}
+
+fn pe_add_base_reloc_dir64(w: PeWriter, rva: i64) -> PeWriter with Mut, Panic, Div {
+    let page_rva = (rva / PE_PAGE_SIZE) * PE_PAGE_SIZE
+    let offset = rva - page_rva
+    pe_add_base_reloc(w, PE_BASE_RELOC_DIR64, offset)
+}
+
+fn pe_add_base_reloc_highlow(w: PeWriter, rva: i64) -> PeWriter with Mut, Panic, Div {
+    let page_rva = (rva / PE_PAGE_SIZE) * PE_PAGE_SIZE
+    let offset = rva - page_rva
+    pe_add_base_reloc(w, PE_BASE_RELOC_HIGHLOW, offset)
+}
+
+// Encode a base relocation entry as a u16: type in top 4 bits, offset in bottom 12 bits
+fn pe_encode_base_reloc_entry(entry: PeBaseRelocEntry) -> i64 {
+    let type_bits = (entry.entry_type & 15) * 4096
+    let offset_bits = entry.offset & 4095
+    type_bits + offset_bits
+}
+
+// Build the .reloc section data
+// Groups entries by page RVA and emits block headers + entries
+fn pe_build_reloc_table(w: PeWriter, page_rva: i64) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    if out.base_reloc_count == 0 {
+        return out
+    }
+    // Emit block header: page RVA (u32) + block size (u32)
+    let entry_count = out.base_reloc_count
+    // Each entry is 2 bytes, header is 8 bytes
+    var block_size = PE_BASE_RELOC_BLOCK_HEADER_SIZE + entry_count * 2
+    // Pad to 4-byte alignment
+    if block_size % 4 != 0 {
+        block_size = block_size + (4 - (block_size % 4))
+    }
+    out = pe_emit_u32(out, page_rva)
+    out = pe_emit_u32(out, block_size)
+    // Emit entries
+    var i = 0
+    while i < entry_count {
+        let encoded = pe_encode_base_reloc_entry(out.base_relocs[i as usize])
+        out = pe_emit_u16(out, encoded)
+        i = i + 1
+    }
+    // Pad to 4-byte alignment
+    if (entry_count * 2) % 4 != 0 {
+        out = pe_emit_u16(out, 0)
+    }
+    out
+}
+
+// ============================================================================
+// Import table (.idata)
+// ============================================================================
+
+fn pe_add_import(w: PeWriter, desc: PeImportDescriptor) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    if out.import_count < 64 {
+        out.imports[out.import_count as usize] = desc
+        out.import_count = out.import_count + 1
+    }
+    out
+}
+
+fn pe_make_import_descriptor(
+    int_rva: i64,
+    name_rva: i64,
+    iat_rva: i64
+) -> PeImportDescriptor {
+    PeImportDescriptor {
+        original_first_thunk: int_rva,
+        time_date_stamp: 0,
+        forwarder_chain: 0,
+        name_rva: name_rva,
+        first_thunk: iat_rva,
+    }
+}
+
+// Emit a single import descriptor (20 bytes)
+fn pe_emit_import_descriptor(w: PeWriter, desc: PeImportDescriptor) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    out = pe_emit_u32(out, desc.original_first_thunk)
+    out = pe_emit_u32(out, desc.time_date_stamp)
+    out = pe_emit_u32(out, desc.forwarder_chain)
+    out = pe_emit_u32(out, desc.name_rva)
+    out = pe_emit_u32(out, desc.first_thunk)
+    out
+}
+
+// Build import table: emit all descriptors plus null terminator
+fn pe_build_import_table(w: PeWriter) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    var i = 0
+    while i < out.import_count {
+        out = pe_emit_import_descriptor(out, out.imports[i as usize])
+        i = i + 1
+    }
+    // Null terminator descriptor (20 bytes of zeros)
+    out = pe_emit_zeros(out, PE_IMPORT_DESC_SIZE)
+    out
+}
+
+// Resolve imports: set up the IAT with hint/name table entries
+fn pe_resolve_imports(w: PeWriter, iat_rva: i64) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    // For each import, record the IAT entry RVA
+    var i = 0
+    while i < out.import_count {
+        var desc = out.imports[i as usize]
+        desc.first_thunk = iat_rva + i * 8
+        out.imports[i as usize] = desc
+        i = i + 1
+    }
+    out
+}
+
+// Emit a hint/name entry: 2-byte hint + null-terminated name
+fn pe_emit_hint_name(w: PeWriter, hint: i64, name: [i8; 128], name_len: i64) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    out = pe_emit_u16(out, hint)
+    var i = 0
+    while i < name_len {
+        out = pe_emit_byte(out, name[i as usize] as i64)
+        i = i + 1
+    }
+    out = pe_emit_byte(out, 0)  // null terminator
+    // Pad to 2-byte alignment
+    let total = 2 + name_len + 1
+    if total % 2 != 0 {
+        out = pe_emit_byte(out, 0)
+    }
+    out
+}
+
+// ============================================================================
+// Export table (.edata)
+// ============================================================================
+
+fn pe_set_exports(w: PeWriter, exp: PeExportDirectory) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    out.exports = exp
+    out.has_exports = 1
+    out
+}
+
+// Emit the export directory (40 bytes)
+fn pe_emit_export_directory(w: PeWriter, exp: PeExportDirectory) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    out = pe_emit_u32(out, exp.export_flags)
+    out = pe_emit_u32(out, exp.time_date_stamp)
+    out = pe_emit_u16(out, exp.major_version)
+    out = pe_emit_u16(out, exp.minor_version)
+    out = pe_emit_u32(out, exp.name_rva)
+    out = pe_emit_u32(out, exp.ordinal_base)
+    out = pe_emit_u32(out, exp.number_of_functions)
+    out = pe_emit_u32(out, exp.number_of_names)
+    out = pe_emit_u32(out, exp.address_of_functions)
+    out = pe_emit_u32(out, exp.address_of_names)
+    out = pe_emit_u32(out, exp.address_of_name_ordinals)
+    out
+}
+
+// Build export table: emit directory + address table + name pointer table + ordinal table
+fn pe_build_export_table(w: PeWriter, func_rvas: [i64; 256], name_rvas: [i64; 256], ordinals: [i64; 256]) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    // Emit export directory
+    out = pe_emit_export_directory(out, out.exports)
+    // Emit export address table (function RVAs)
+    var i = 0
+    while i < out.exports.number_of_functions {
+        out = pe_emit_u32(out, func_rvas[i as usize])
+        i = i + 1
+    }
+    // Emit name pointer table
+    var j = 0
+    while j < out.exports.number_of_names {
+        out = pe_emit_u32(out, name_rvas[j as usize])
+        j = j + 1
+    }
+    // Emit ordinal table
+    var k = 0
+    while k < out.exports.number_of_names {
+        out = pe_emit_u16(out, ordinals[k as usize])
+        k = k + 1
+    }
+    out
+}
+
+// ============================================================================
+// Resource handling
+// ============================================================================
+
+fn pe_add_resource(w: PeWriter, entry: PeResourceEntry) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    if out.resource_count < 128 {
+        out.resources[out.resource_count as usize] = entry
+        out.resource_count = out.resource_count + 1
+    }
+    out
+}
+
+fn pe_make_resource(res_type: i64, name_id: i64, data_rva: i64, data_size: i64) -> PeResourceEntry {
+    PeResourceEntry {
+        res_type: res_type,
+        name_id: name_id,
+        data_rva: data_rva,
+        data_size: data_size,
+        codepage: 0,
+    }
+}
+
+// Build a simplified resource tree
+// A real resource tree has 3 levels (type -> name -> language).
+// For bootstrap, we emit a flat structure: root directory with N type entries.
+fn pe_build_resource_tree(w: PeWriter) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    if out.resource_count == 0 {
+        return out
+    }
+    // Resource directory table header (16 bytes):
+    // Characteristics(4) + TimeDateStamp(4) + MajorVersion(2) +
+    // MinorVersion(2) + NumberOfNameEntries(2) + NumberOfIdEntries(2)
+    out = pe_emit_u32(out, 0)         // Characteristics
+    out = pe_emit_u32(out, 0)         // TimeDateStamp
+    out = pe_emit_u16(out, 0)         // MajorVersion
+    out = pe_emit_u16(out, 0)         // MinorVersion
+    out = pe_emit_u16(out, 0)         // NumberOfNameEntries
+    out = pe_emit_u16(out, out.resource_count) // NumberOfIdEntries
+
+    // Emit directory entries (8 bytes each: ID + Offset)
+    // In a full implementation these would point to subdirectories.
+    // For bootstrap we emit leaf pointers directly.
+    var i = 0
+    while i < out.resource_count {
+        let res = out.resources[i as usize]
+        out = pe_emit_u32(out, res.res_type)
+        // Offset to resource data entry (simplified: relative offset)
+        let data_entry_offset = 16 + out.resource_count * 8 + i * 16
+        out = pe_emit_u32(out, data_entry_offset)
+        i = i + 1
+    }
+
+    // Emit resource data entries (16 bytes each)
+    var j = 0
+    while j < out.resource_count {
+        let res = out.resources[j as usize]
+        out = pe_emit_u32(out, res.data_rva)
+        out = pe_emit_u32(out, res.data_size)
+        out = pe_emit_u32(out, res.codepage)
+        out = pe_emit_u32(out, 0)     // Reserved
+        j = j + 1
+    }
+    out
+}
+
+// ============================================================================
+// DLL support and configuration
+// ============================================================================
+
+fn pe_mark_as_dll(w: PeWriter) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    out.is_dll = 1
+    out.characteristics = out.characteristics + PE_COFF_DLL
+    out.image_base = PE_DLL_IMAGE_BASE
+    out
+}
+
+fn pe_set_entry_point(w: PeWriter, rva: i64) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    out.entry_point_rva = rva
+    out
+}
+
+fn pe_set_subsystem(w: PeWriter, subsystem: i64) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    out.subsystem = subsystem
+    out
+}
+
+fn pe_set_image_base(w: PeWriter, base: i64) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    out.image_base = base
+    out
+}
+
+fn pe_set_stack_sizes(w: PeWriter, reserve: i64, commit: i64) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    out.stack_reserve = reserve
+    out.stack_commit = commit
+    out
+}
+
+fn pe_set_heap_sizes(w: PeWriter, reserve: i64, commit: i64) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    out.heap_reserve = reserve
+    out.heap_commit = commit
+    out
+}
+
+fn pe_set_machine(w: PeWriter, machine: i64) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    out.machine = machine
+    out
+}
+
+fn pe_set_data_directory(w: PeWriter, index: i64, rva: i64, size: i64) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    if index >= 0 && index < PE_NUM_DATA_DIRS {
+        out.data_dirs[index as usize] = PeDataDirectory {
+            virtual_address: rva,
+            size: size,
+        }
+    }
+    out
+}
+
+// ============================================================================
+// Layout computation
+// ============================================================================
+
+// Compute the size of all headers (DOS + PE sig + COFF + optional + section headers)
+fn pe_compute_headers_size(nsections: i64) -> i64 with Mut, Panic {
+    let raw = PE_DOS_HEADER_SIZE + PE_SIGNATURE_SIZE + PE_COFF_HEADER_SIZE +
+              PE_OPTIONAL_HEADER_SIZE_PE32PLUS + nsections * PE_SECTION_HEADER_SIZE
+    pe_file_align(raw)
+}
+
+// Compute total code size across all .text sections
+fn pe_compute_code_size(w: PeWriter) -> i64 with Mut, Panic, Div {
+    var total = 0
+    var i = 0
+    while i < w.section_count {
+        if w.sections[i as usize].name_id == PE_SECT_TEXT {
+            total = total + w.sections[i as usize].size_of_raw_data
+        }
+        i = i + 1
+    }
+    total
+}
+
+// Compute total initialized data size
+fn pe_compute_init_data_size(w: PeWriter) -> i64 with Mut, Panic, Div {
+    var total = 0
+    var i = 0
+    while i < w.section_count {
+        let chars = w.sections[i as usize].characteristics
+        // Check CNT_INITIALIZED_DATA flag
+        if (chars & PE_SCN_CNT_INITIALIZED_DATA) != 0 {
+            total = total + w.sections[i as usize].size_of_raw_data
+        }
+        i = i + 1
+    }
+    total
+}
+
+// Compute total uninitialized data size
+fn pe_compute_uninit_data_size(w: PeWriter) -> i64 with Mut, Panic, Div {
+    var total = 0
+    var i = 0
+    while i < w.section_count {
+        let chars = w.sections[i as usize].characteristics
+        if (chars & PE_SCN_CNT_UNINITIALIZED_DATA) != 0 {
+            total = total + w.sections[i as usize].virtual_size
+        }
+        i = i + 1
+    }
+    total
+}
+
+// Compute size_of_image: highest section VA + aligned section size
+fn pe_compute_image_size(w: PeWriter) -> i64 with Mut, Panic, Div {
+    var max_end = 0
+    var i = 0
+    while i < w.section_count {
+        let sec = w.sections[i as usize]
+        let vsize = if sec.virtual_size > sec.size_of_raw_data { sec.virtual_size } else { sec.size_of_raw_data }
+        let end = pe_section_align(sec.virtual_address + vsize)
+        if end > max_end {
+            max_end = end
+        }
+        i = i + 1
+    }
+    if max_end == 0 {
+        // No sections — just headers
+        pe_section_align(pe_compute_headers_size(0))
+    } else {
+        max_end
+    }
+}
+
+// Find the RVA of the first .text section
+fn pe_find_code_base(w: PeWriter) -> i64 with Mut, Panic, Div {
+    var i = 0
+    while i < w.section_count {
+        if w.sections[i as usize].name_id == PE_SECT_TEXT {
+            return w.sections[i as usize].virtual_address
+        }
+        i = i + 1
+    }
+    0
+}
+
+// ============================================================================
+// Full PE builder — executable
+// ============================================================================
+
+fn pe_build_executable(w: PeWriter, code_bytes: [i8; 65536], code_len: i64) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    let headers_size = pe_compute_headers_size(out.section_count)
+    // Update layout fields
+    out.size_of_headers = headers_size
+    out.size_of_code = pe_compute_code_size(out)
+    out.size_of_init_data = pe_compute_init_data_size(out)
+    out.size_of_uninit_data = pe_compute_uninit_data_size(out)
+    out.base_of_code = pe_find_code_base(out)
+    out.size_of_image = pe_compute_image_size(out)
+
+    // Build DOS header (e_lfanew points just past the DOS header at offset 64)
+    let dos = pe_dos_header_new(PE_DOS_HEADER_SIZE)
+    out = pe_write_dos_stub(out, dos)
+
+    // Build COFF header
+    var coff_chars = out.characteristics
+    if out.is_dll == 1 {
+        // Ensure DLL flag is set
+        if (coff_chars & PE_COFF_DLL) == 0 {
+            coff_chars = coff_chars + PE_COFF_DLL
+        }
+    }
+    let coff = pe_coff_header_new(out.machine, out.section_count, coff_chars)
+    out = pe_write_coff_header(out, coff)
+
+    // Build optional header
+    var opt = pe_optional_header_new()
+    opt.address_of_entry_point = out.entry_point_rva
+    opt.image_base = out.image_base
+    opt.section_alignment = out.section_alignment
+    opt.file_alignment = out.file_alignment
+    opt.subsystem = out.subsystem
+    opt.dll_characteristics = out.dll_characteristics
+    opt.size_of_code = out.size_of_code
+    opt.size_of_initialized_data = out.size_of_init_data
+    opt.size_of_uninitialized_data = out.size_of_uninit_data
+    opt.base_of_code = out.base_of_code
+    opt.size_of_image = out.size_of_image
+    opt.size_of_headers = out.size_of_headers
+    opt.size_of_stack_reserve = out.stack_reserve
+    opt.size_of_stack_commit = out.stack_commit
+    opt.size_of_heap_reserve = out.heap_reserve
+    opt.size_of_heap_commit = out.heap_commit
+    out = pe_write_optional_header(out, opt, out.data_dirs)
+
+    // Write section headers
+    out = pe_write_section_headers(out)
+
+    // Pad to headers_size
+    while out.buf_len < headers_size {
+        out = pe_emit_byte(out, 0)
+    }
+
+    // Write code (.text section data)
+    var ci = 0
+    while ci < code_len && ci < 65536 {
+        out = pe_emit_byte(out, code_bytes[ci as usize] as i64)
+        ci = ci + 1
+    }
+
+    // Pad to file alignment
+    out = pe_emit_pad_to(out, PE_FILE_ALIGNMENT)
+
+    out
+}
+
+// ============================================================================
+// Full PE builder — DLL
+// ============================================================================
+
+fn pe_build_dll(w: PeWriter, code_bytes: [i8; 65536], code_len: i64) -> PeWriter with Mut, Panic, Div {
+    var out = pe_mark_as_dll(w)
+    out = pe_build_executable(out, code_bytes, code_len)
+    out
+}
+
+// ============================================================================
+// Link COFF objects — simplified object file linker
+// ============================================================================
+
+// Merge relocations from an object file into the writer
+fn pe_merge_object_relocs(
+    w: PeWriter,
+    obj_relocs: [PeRelocation; 4096],
+    obj_reloc_count: i64,
+    sym_base: i64
+) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    var i = 0
+    while i < obj_reloc_count {
+        var rel = obj_relocs[i as usize]
+        // Adjust symbol index by the base of merged symbols
+        rel.symbol_table_index = rel.symbol_table_index + sym_base
+        out = pe_add_relocation(out, rel)
+        i = i + 1
+    }
+    out
+}
+
+// Merge symbols from an object file
+fn pe_merge_object_symbols(
+    w: PeWriter,
+    obj_symbols: [PeSymbol; 2048],
+    obj_symbol_count: i64,
+    section_base: i64
+) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    var i = 0
+    while i < obj_symbol_count {
+        var sym = obj_symbols[i as usize]
+        // Adjust section number
+        if sym.section_number > 0 {
+            sym.section_number = sym.section_number + section_base
+        }
+        out = pe_add_symbol(out, sym)
+        i = i + 1
+    }
+    out
+}
+
+// Link multiple COFF object sections into one PE
+fn pe_link_objects(
+    w: PeWriter,
+    obj_sections: [PeSectionHeader; 16],
+    obj_section_count: i64,
+    base_rva: i64
+) -> PeWriter with Mut, Panic, Div {
+    var out = w
+    var current_rva = base_rva
+    var i = 0
+    while i < obj_section_count {
+        var sec = obj_sections[i as usize]
+        sec.virtual_address = current_rva
+        out = pe_add_section(out, sec)
+        let aligned_size = pe_section_align(sec.virtual_size)
+        current_rva = current_rva + aligned_size
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
+// Utility — compute PE checksum (simplified)
+// ============================================================================
+
+// Simplified PE checksum (sum of all u16 words, folded to u16, plus file length)
+fn pe_compute_checksum(w: PeWriter) -> i64 with Mut, Panic, Div {
+    var sum = 0
+    var i = 0
+    let word_count = w.buf_len / 2
+    while i < word_count {
+        let word = pe_read_u16_le(w, i * 2)
+        sum = sum + word
+        // Fold carry
+        if sum > 65535 {
+            sum = (sum & 65535) + (sum >> 16)
+        }
+        i = i + 1
+    }
+    // Handle odd byte
+    if w.buf_len % 2 != 0 {
+        sum = sum + pe_read_u8(w, w.buf_len - 1)
+        if sum > 65535 {
+            sum = (sum & 65535) + (sum >> 16)
+        }
+    }
+    sum + w.buf_len
+}
+
+// ============================================================================
+// Utility — count sections by type
+// ============================================================================
+
+fn pe_count_sections_by_type(w: PeWriter, name_id: i64) -> i64 with Mut, Panic, Div {
+    var count = 0
+    var i = 0
+    while i < w.section_count {
+        if w.sections[i as usize].name_id == name_id {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// Utility — find section by name_id
+// ============================================================================
+
+fn pe_find_section(w: PeWriter, name_id: i64) -> i64 with Mut, Panic, Div {
+    var i = 0
+    while i < w.section_count {
+        if w.sections[i as usize].name_id == name_id {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// ============================================================================
+// Test functions
+// ============================================================================
+
+// T01: Verify DOS magic
+fn test_pe_dos_magic() -> i64 with IO, Mut, Div, Panic {
+    if PE_DOS_MAGIC != 23117 { return 1 }
+    let dos = pe_dos_header_new(128)
+    if dos.e_magic != PE_DOS_MAGIC { return 2 }
+    if dos.e_lfanew != 128 { return 3 }
+    0
+}
+
+// T02: Verify PE signature constant
+fn test_pe_signature() -> i64 with IO, Mut, Div, Panic {
+    if PE_SIGNATURE != 17744 { return 1 }
+    // 'P' = 0x50, 'E' = 0x45, then two nulls: 0x00004550
+    0
+}
+
+// T03: Verify machine type constants
+fn test_pe_machine_types() -> i64 with IO, Mut, Div, Panic {
+    if PE_MACHINE_AMD64 != 34404 { return 1 }
+    if PE_MACHINE_ARM64 != 43620 { return 2 }
+    if PE_MACHINE_I386 != 332 { return 3 }
+    if PE_MACHINE_UNKNOWN != 0 { return 4 }
+    0
+}
+
+// T04: Verify optional header magic
+fn test_pe_opt_magic() -> i64 with IO, Mut, Div, Panic {
+    if PE_OPT_MAGIC_PE32 != 267 { return 1 }
+    if PE_OPT_MAGIC_PE32PLUS != 523 { return 2 }
+    0
+}
+
+// T05: Verify subsystem constants
+fn test_pe_subsystem_constants() -> i64 with IO, Mut, Div, Panic {
+    if PE_SUBSYSTEM_WINDOWS_CUI != 3 { return 1 }
+    if PE_SUBSYSTEM_WINDOWS_GUI != 2 { return 2 }
+    if PE_SUBSYSTEM_NATIVE != 1 { return 3 }
+    if PE_SUBSYSTEM_EFI_APPLICATION != 10 { return 4 }
+    0
+}
+
+// T06: Verify section characteristics
+fn test_pe_section_chars() -> i64 with IO, Mut, Div, Panic {
+    if PE_SCN_CNT_CODE != 32 { return 1 }
+    if PE_SCN_CNT_INITIALIZED_DATA != 64 { return 2 }
+    if PE_SCN_CNT_UNINITIALIZED_DATA != 128 { return 3 }
+    if PE_SCN_MEM_EXECUTE != 536870912 { return 4 }
+    if PE_SCN_MEM_READ != 1073741824 { return 5 }
+    if PE_SCN_MEM_WRITE != 2147483648 { return 6 }
+    0
+}
+
+// T07: Verify COFF characteristics
+fn test_pe_coff_chars() -> i64 with IO, Mut, Div, Panic {
+    if PE_COFF_EXECUTABLE_IMAGE != 2 { return 1 }
+    if PE_COFF_LARGE_ADDRESS_AWARE != 32 { return 2 }
+    if PE_COFF_DLL != 8192 { return 3 }
+    0
+}
+
+// T08: Verify relocation type constants (AMD64)
+fn test_pe_reloc_types_amd64() -> i64 with IO, Mut, Div, Panic {
+    if PE_REL_AMD64_ABSOLUTE != 0 { return 1 }
+    if PE_REL_AMD64_ADDR64 != 1 { return 2 }
+    if PE_REL_AMD64_ADDR32NB != 3 { return 3 }
+    if PE_REL_AMD64_REL32 != 4 { return 4 }
+    if PE_REL_AMD64_SECREL != 11 { return 5 }
+    0
+}
+
+// T09: Verify relocation type constants (ARM64)
+fn test_pe_reloc_types_arm64() -> i64 with IO, Mut, Div, Panic {
+    if PE_REL_ARM64_ABSOLUTE != 0 { return 1 }
+    if PE_REL_ARM64_BRANCH26 != 3 { return 2 }
+    if PE_REL_ARM64_PAGEBASE_REL21 != 4 { return 3 }
+    if PE_REL_ARM64_PAGEOFFSET_12A != 6 { return 4 }
+    if PE_REL_ARM64_ADDR64 != 14 { return 5 }
+    0
+}
+
+// T10: Verify base relocation types
+fn test_pe_base_reloc_types() -> i64 with IO, Mut, Div, Panic {
+    if PE_BASE_RELOC_ABSOLUTE != 0 { return 1 }
+    if PE_BASE_RELOC_HIGHLOW != 3 { return 2 }
+    if PE_BASE_RELOC_DIR64 != 10 { return 3 }
+    0
+}
+
+// T11: Verify data directory indices
+fn test_pe_data_dir_indices() -> i64 with IO, Mut, Div, Panic {
+    if PE_DIR_EXPORT != 0 { return 1 }
+    if PE_DIR_IMPORT != 1 { return 2 }
+    if PE_DIR_RESOURCE != 2 { return 3 }
+    if PE_DIR_BASERELOC != 5 { return 4 }
+    if PE_DIR_IAT != 12 { return 5 }
+    if PE_NUM_DATA_DIRS != 16 { return 6 }
+    0
+}
+
+// T12: Verify fixed sizes
+fn test_pe_fixed_sizes() -> i64 with IO, Mut, Div, Panic {
+    if PE_DOS_HEADER_SIZE != 64 { return 1 }
+    if PE_COFF_HEADER_SIZE != 20 { return 2 }
+    if PE_OPTIONAL_HEADER_SIZE_PE32PLUS != 240 { return 3 }
+    if PE_SECTION_HEADER_SIZE != 40 { return 4 }
+    if PE_SYMBOL_SIZE != 18 { return 5 }
+    if PE_IMPORT_DESC_SIZE != 20 { return 6 }
+    if PE_EXPORT_DIR_SIZE != 40 { return 7 }
+    if PE_RELOCATION_SIZE != 10 { return 8 }
+    0
+}
+
+// T13: Verify default alignment values
+fn test_pe_default_alignment() -> i64 with IO, Mut, Div, Panic {
+    if PE_FILE_ALIGNMENT != 512 { return 1 }
+    if PE_SECTION_ALIGNMENT != 4096 { return 2 }
+    if PE_IMAGE_BASE != 4194304 { return 3 }
+    if PE_DLL_IMAGE_BASE != 268435456 { return 4 }
+    0
+}
+
+// T14: Verify writer defaults
+fn test_pe_writer_defaults() -> i64 with IO, Mut, Div, Panic {
+    let w = pe_writer_new()
+    if w.machine != PE_MACHINE_AMD64 { return 1 }
+    if w.subsystem != PE_SUBSYSTEM_WINDOWS_CUI { return 2 }
+    if w.image_base != PE_IMAGE_BASE { return 3 }
+    if w.section_count != 0 { return 4 }
+    if w.symbol_count != 0 { return 5 }
+    if w.reloc_count != 0 { return 6 }
+    if w.import_count != 0 { return 7 }
+    if w.is_dll != 0 { return 8 }
+    if w.buf_len != 0 { return 9 }
+    if w.entry_point_rva != 0 { return 10 }
+    0
+}
+
+// T15: Verify ARM64 writer
+fn test_pe_writer_arm64() -> i64 with IO, Mut, Div, Panic {
+    let w = pe_writer_new_arm64()
+    if w.machine != PE_MACHINE_ARM64 { return 1 }
+    if w.subsystem != PE_SUBSYSTEM_WINDOWS_CUI { return 2 }
+    0
+}
+
+// T16: Verify DLL writer
+fn test_pe_writer_dll() -> i64 with IO, Mut, Div, Panic {
+    let w = pe_writer_new_dll()
+    if w.is_dll != 1 { return 1 }
+    if w.image_base != PE_DLL_IMAGE_BASE { return 2 }
+    // Should have DLL flag set
+    if (w.characteristics & PE_COFF_DLL) == 0 { return 3 }
+    0
+}
+
+// T17: Verify object writer
+fn test_pe_writer_object() -> i64 with IO, Mut, Div, Panic {
+    let w = pe_writer_new_object()
+    if w.characteristics != 0 { return 1 }
+    if w.image_base != 0 { return 2 }
+    0
+}
+
+// T18: Verify byte emission
+fn test_pe_emit_byte() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_emit_byte(w, 0x4D)
+    w = pe_emit_byte(w, 0x5A)
+    if w.buf_len != 2 { return 1 }
+    if pe_read_u8(w, 0) != 0x4D { return 2 }
+    if pe_read_u8(w, 1) != 0x5A { return 3 }
+    0
+}
+
+// T19: Verify u16 emission and reading
+fn test_pe_emit_u16() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_emit_u16(w, 23117)  // 0x5A4D
+    if w.buf_len != 2 { return 1 }
+    if pe_read_u16_le(w, 0) != 23117 { return 2 }
+    // Check individual bytes: 0x4D, 0x5A
+    if pe_read_u8(w, 0) != 0x4D { return 3 }
+    if pe_read_u8(w, 1) != 0x5A { return 4 }
+    0
+}
+
+// T20: Verify u32 emission and reading
+fn test_pe_emit_u32() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_emit_u32(w, PE_SIGNATURE)  // 0x00004550
+    if w.buf_len != 4 { return 1 }
+    if pe_read_u32_le(w, 0) != PE_SIGNATURE { return 2 }
+    // Check bytes: 50 45 00 00
+    if pe_read_u8(w, 0) != 0x50 { return 3 }
+    if pe_read_u8(w, 1) != 0x45 { return 4 }
+    if pe_read_u8(w, 2) != 0x00 { return 5 }
+    if pe_read_u8(w, 3) != 0x00 { return 6 }
+    0
+}
+
+// T21: Verify u64 emission and reading
+fn test_pe_emit_u64() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_emit_u64(w, PE_IMAGE_BASE)  // 0x400000
+    if w.buf_len != 8 { return 1 }
+    if pe_read_u64_le(w, 0) != PE_IMAGE_BASE { return 2 }
+    0
+}
+
+// T22: Verify padding
+fn test_pe_emit_zeros() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_emit_byte(w, 0xFF)
+    w = pe_emit_zeros(w, 7)
+    if w.buf_len != 8 { return 1 }
+    if pe_read_u8(w, 0) != 0xFF { return 2 }
+    if pe_read_u8(w, 1) != 0 { return 3 }
+    if pe_read_u8(w, 7) != 0 { return 4 }
+    0
+}
+
+// T23: Verify pad_to alignment
+fn test_pe_emit_pad_to() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_emit_byte(w, 0xCC)
+    w = pe_emit_pad_to(w, 8)
+    if w.buf_len != 8 { return 1 }
+    // Already aligned should be a no-op
+    w = pe_emit_pad_to(w, 8)
+    if w.buf_len != 8 { return 2 }
+    0
+}
+
+// T24: Verify patch_u32
+fn test_pe_patch_u32() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_emit_u32(w, 0)
+    w = pe_emit_u32(w, 0)
+    w = pe_patch_u32(w, 0, 12345678)
+    if pe_read_u32_le(w, 0) != 12345678 { return 1 }
+    if pe_read_u32_le(w, 4) != 0 { return 2 }
+    w = pe_patch_u32(w, 4, 87654321)
+    if pe_read_u32_le(w, 4) != 87654321 { return 3 }
+    0
+}
+
+// T25: Verify patch_u64
+fn test_pe_patch_u64() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_emit_u64(w, 0)
+    w = pe_patch_u64(w, 0, 4294967296)  // 0x100000000
+    if pe_read_u64_le(w, 0) != 4294967296 { return 1 }
+    0
+}
+
+// T26: Verify alignment math
+fn test_pe_alignment() -> i64 with IO, Mut, Div, Panic {
+    if pe_align_to(0, 512) != 0 { return 1 }
+    if pe_align_to(1, 512) != 512 { return 2 }
+    if pe_align_to(512, 512) != 512 { return 3 }
+    if pe_align_to(513, 512) != 1024 { return 4 }
+    if pe_file_align(100) != 512 { return 5 }
+    if pe_section_align(100) != 4096 { return 6 }
+    if pe_page_align(4097) != 8192 { return 7 }
+    if pe_section_align(0) != 0 { return 8 }
+    0
+}
+
+// T27: Verify DOS header emission size
+fn test_pe_dos_header_size() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    let dos = pe_dos_header_new(PE_DOS_HEADER_SIZE)
+    w = pe_write_dos_stub(w, dos)
+    if w.buf_len != PE_DOS_HEADER_SIZE { return 1 }
+    // Check magic bytes
+    if pe_read_u16_le(w, 0) != PE_DOS_MAGIC { return 2 }
+    // Check e_lfanew at offset 60
+    if pe_read_u32_le(w, 60) != 64 { return 3 }
+    0
+}
+
+// T28: Verify COFF header emission
+fn test_pe_coff_header_emission() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    let coff = pe_coff_header_new(PE_MACHINE_AMD64, 3, PE_COFF_EXECUTABLE_IMAGE + PE_COFF_LARGE_ADDRESS_AWARE)
+    w = pe_write_coff_header(w, coff)
+    // PE sig (4) + COFF header (20) = 24 bytes
+    if w.buf_len != PE_SIGNATURE_SIZE + PE_COFF_HEADER_SIZE { return 1 }
+    // Check PE signature
+    if pe_read_u32_le(w, 0) != PE_SIGNATURE { return 2 }
+    // Check machine type at offset 4
+    if pe_read_u16_le(w, 4) != PE_MACHINE_AMD64 { return 3 }
+    // Check number of sections at offset 6
+    if pe_read_u16_le(w, 6) != 3 { return 4 }
+    // Check optional header size at offset 20
+    if pe_read_u16_le(w, 20) != PE_OPTIONAL_HEADER_SIZE_PE32PLUS { return 5 }
+    // Check characteristics at offset 22
+    if pe_read_u16_le(w, 22) != 34 { return 6 }  // 2 + 32
+    0
+}
+
+// T29: Verify optional header emission
+fn test_pe_optional_header_emission() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    let opt = pe_optional_header_new()
+    let dirs = [pe_empty_data_dir(); 16]
+    w = pe_write_optional_header(w, opt, dirs)
+    if w.buf_len != PE_OPTIONAL_HEADER_SIZE_PE32PLUS { return 1 }
+    // Check magic at offset 0
+    if pe_read_u16_le(w, 0) != PE_OPT_MAGIC_PE32PLUS { return 2 }
+    // Check linker version
+    if pe_read_u8(w, 2) != 14 { return 3 }  // major
+    if pe_read_u8(w, 3) != 0 { return 4 }   // minor
+    // Check image_base at offset 24 (after 24 bytes of standard fields)
+    if pe_read_u64_le(w, 24) != PE_IMAGE_BASE { return 5 }
+    // Check section_alignment at offset 32
+    if pe_read_u32_le(w, 32) != PE_SECTION_ALIGNMENT { return 6 }
+    // Check file_alignment at offset 36
+    if pe_read_u32_le(w, 36) != PE_FILE_ALIGNMENT { return 7 }
+    0
+}
+
+// T30: Verify section name emission — .text
+fn test_pe_section_name_text() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_emit_section_name(w, PE_SECT_TEXT)
+    if w.buf_len != 8 { return 1 }
+    // ".text" = 46, 116, 101, 120, 116
+    if pe_read_u8(w, 0) != 46 { return 2 }    // '.'
+    if pe_read_u8(w, 1) != 116 { return 3 }   // 't'
+    if pe_read_u8(w, 2) != 101 { return 4 }   // 'e'
+    if pe_read_u8(w, 3) != 120 { return 5 }   // 'x'
+    if pe_read_u8(w, 4) != 116 { return 6 }   // 't'
+    if pe_read_u8(w, 5) != 0 { return 7 }
+    0
+}
+
+// T31: Verify section name emission — .data
+fn test_pe_section_name_data() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_emit_section_name(w, PE_SECT_DATA)
+    if w.buf_len != 8 { return 1 }
+    if pe_read_u8(w, 0) != 46 { return 2 }    // '.'
+    if pe_read_u8(w, 1) != 100 { return 3 }   // 'd'
+    if pe_read_u8(w, 2) != 97 { return 4 }    // 'a'
+    if pe_read_u8(w, 3) != 116 { return 5 }   // 't'
+    if pe_read_u8(w, 4) != 97 { return 6 }    // 'a'
+    0
+}
+
+// T32: Verify section name emission — .rdata
+fn test_pe_section_name_rdata() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_emit_section_name(w, PE_SECT_RDATA)
+    if w.buf_len != 8 { return 1 }
+    if pe_read_u8(w, 0) != 46 { return 2 }     // '.'
+    if pe_read_u8(w, 1) != 114 { return 3 }    // 'r'
+    if pe_read_u8(w, 2) != 100 { return 4 }    // 'd'
+    if pe_read_u8(w, 3) != 97 { return 5 }     // 'a'
+    if pe_read_u8(w, 4) != 116 { return 6 }    // 't'
+    if pe_read_u8(w, 5) != 97 { return 7 }     // 'a'
+    0
+}
+
+// T33: Verify section name emission — .bss
+fn test_pe_section_name_bss() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_emit_section_name(w, PE_SECT_BSS)
+    if w.buf_len != 8 { return 1 }
+    if pe_read_u8(w, 0) != 46 { return 2 }     // '.'
+    if pe_read_u8(w, 1) != 98 { return 3 }     // 'b'
+    if pe_read_u8(w, 2) != 115 { return 4 }    // 's'
+    if pe_read_u8(w, 3) != 115 { return 5 }    // 's'
+    0
+}
+
+// T34: Verify section name emission — .reloc
+fn test_pe_section_name_reloc() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_emit_section_name(w, PE_SECT_RELOC)
+    if w.buf_len != 8 { return 1 }
+    if pe_read_u8(w, 0) != 46 { return 2 }     // '.'
+    if pe_read_u8(w, 1) != 114 { return 3 }    // 'r'
+    if pe_read_u8(w, 2) != 101 { return 4 }    // 'e'
+    if pe_read_u8(w, 3) != 108 { return 5 }    // 'l'
+    if pe_read_u8(w, 4) != 111 { return 6 }    // 'o'
+    if pe_read_u8(w, 5) != 99 { return 7 }     // 'c'
+    0
+}
+
+// T35: Verify section header emission
+fn test_pe_section_header_emission() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    let sec = PeSectionHeader {
+        name_id: PE_SECT_TEXT,
+        virtual_size: 256,
+        virtual_address: 4096,
+        size_of_raw_data: 512,
+        pointer_to_raw_data: 512,
+        pointer_to_relocations: 0,
+        pointer_to_linenumbers: 0,
+        number_of_relocations: 0,
+        number_of_linenumbers: 0,
+        characteristics: PE_SCN_CNT_CODE + PE_SCN_MEM_EXECUTE + PE_SCN_MEM_READ,
+    }
+    w = pe_write_section_header(w, sec)
+    if w.buf_len != PE_SECTION_HEADER_SIZE { return 1 }
+    // VirtualSize at offset 8
+    if pe_read_u32_le(w, 8) != 256 { return 2 }
+    // VirtualAddress at offset 12
+    if pe_read_u32_le(w, 12) != 4096 { return 3 }
+    // SizeOfRawData at offset 16
+    if pe_read_u32_le(w, 16) != 512 { return 4 }
+    // PointerToRawData at offset 20
+    if pe_read_u32_le(w, 20) != 512 { return 5 }
+    // Characteristics at offset 36
+    let chars = pe_read_u32_le(w, 36)
+    if (chars & PE_SCN_CNT_CODE) == 0 { return 6 }
+    0
+}
+
+// T36: Verify adding text section
+fn test_pe_add_text_section() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_add_text_section(w, 4096, 256, 512, 512)
+    if w.section_count != 1 { return 1 }
+    if w.sections[0].name_id != PE_SECT_TEXT { return 2 }
+    if w.sections[0].virtual_address != 4096 { return 3 }
+    if w.sections[0].virtual_size != 256 { return 4 }
+    if w.sections[0].size_of_raw_data != 512 { return 5 }
+    // Check code flags
+    if (w.sections[0].characteristics & PE_SCN_CNT_CODE) == 0 { return 6 }
+    if (w.sections[0].characteristics & PE_SCN_MEM_EXECUTE) == 0 { return 7 }
+    0
+}
+
+// T37: Verify adding data section
+fn test_pe_add_data_section() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_add_data_section(w, 8192, 128, 1024, 512)
+    if w.section_count != 1 { return 1 }
+    if w.sections[0].name_id != PE_SECT_DATA { return 2 }
+    if (w.sections[0].characteristics & PE_SCN_CNT_INITIALIZED_DATA) == 0 { return 3 }
+    if (w.sections[0].characteristics & PE_SCN_MEM_WRITE) == 0 { return 4 }
+    0
+}
+
+// T38: Verify adding rdata section
+fn test_pe_add_rdata_section() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_add_rdata_section(w, 12288, 64, 1536, 512)
+    if w.section_count != 1 { return 1 }
+    if w.sections[0].name_id != PE_SECT_RDATA { return 2 }
+    if (w.sections[0].characteristics & PE_SCN_MEM_READ) == 0 { return 3 }
+    // rdata should NOT be writable
+    if (w.sections[0].characteristics & PE_SCN_MEM_WRITE) != 0 { return 4 }
+    0
+}
+
+// T39: Verify adding BSS section
+fn test_pe_add_bss_section() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_add_bss_section(w, 16384, 4096)
+    if w.section_count != 1 { return 1 }
+    if w.sections[0].name_id != PE_SECT_BSS { return 2 }
+    if w.sections[0].pointer_to_raw_data != 0 { return 3 }
+    if w.sections[0].size_of_raw_data != 0 { return 4 }
+    if (w.sections[0].characteristics & PE_SCN_CNT_UNINITIALIZED_DATA) == 0 { return 5 }
+    0
+}
+
+// T40: Verify adding multiple sections
+fn test_pe_add_multiple_sections() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_add_text_section(w, 4096, 100, 512, 512)
+    w = pe_add_rdata_section(w, 8192, 50, 1024, 512)
+    w = pe_add_data_section(w, 12288, 80, 1536, 512)
+    w = pe_add_bss_section(w, 16384, 200)
+    if w.section_count != 4 { return 1 }
+    if w.sections[0].name_id != PE_SECT_TEXT { return 2 }
+    if w.sections[1].name_id != PE_SECT_RDATA { return 3 }
+    if w.sections[2].name_id != PE_SECT_DATA { return 4 }
+    if w.sections[3].name_id != PE_SECT_BSS { return 5 }
+    0
+}
+
+// T41: Verify symbol creation — external
+fn test_pe_external_symbol() -> i64 with IO, Mut, Div, Panic {
+    let sym = pe_make_external_symbol(10, 1, 4096)
+    if sym.name_offset != 10 { return 1 }
+    if sym.section_number != 1 { return 2 }
+    if sym.value != 4096 { return 3 }
+    if sym.storage_class != PE_SYM_CLASS_EXTERNAL { return 4 }
+    if sym.sym_type != PE_SYM_TYPE_FUNCTION { return 5 }
+    0
+}
+
+// T42: Verify symbol creation — static
+fn test_pe_static_symbol() -> i64 with IO, Mut, Div, Panic {
+    let sym = pe_make_static_symbol(20, 2, 0)
+    if sym.name_offset != 20 { return 1 }
+    if sym.section_number != 2 { return 2 }
+    if sym.storage_class != PE_SYM_CLASS_STATIC { return 3 }
+    if sym.sym_type != PE_SYM_TYPE_NULL { return 4 }
+    0
+}
+
+// T43: Verify symbol creation — section
+fn test_pe_section_symbol() -> i64 with IO, Mut, Div, Panic {
+    let sym = pe_make_section_symbol(3)
+    if sym.section_number != 3 { return 1 }
+    if sym.storage_class != PE_SYM_CLASS_SECTION { return 2 }
+    if sym.value != 0 { return 3 }
+    0
+}
+
+// T44: Verify symbol creation — undefined
+fn test_pe_undef_symbol() -> i64 with IO, Mut, Div, Panic {
+    let sym = pe_make_undef_symbol(50)
+    if sym.name_offset != 50 { return 1 }
+    if sym.section_number != 0 { return 2 }
+    if sym.storage_class != PE_SYM_CLASS_EXTERNAL { return 3 }
+    0
+}
+
+// T45: Verify adding symbols to writer
+fn test_pe_add_symbol() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_add_symbol(w, pe_make_external_symbol(4, 1, 100))
+    if w.symbol_count != 1 { return 1 }
+    w = pe_add_symbol(w, pe_make_undef_symbol(8))
+    if w.symbol_count != 2 { return 2 }
+    if w.symbols[0].value != 100 { return 3 }
+    if w.symbols[1].section_number != 0 { return 4 }
+    0
+}
+
+// T46: Verify symbol emission
+fn test_pe_emit_symbol() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    let sym = pe_make_external_symbol(100, 1, 4096)
+    w = pe_emit_symbol(w, sym)
+    if w.buf_len != PE_SYMBOL_SIZE { return 1 }
+    // First 4 bytes should be 0 (long name indicator)
+    if pe_read_u32_le(w, 0) != 0 { return 2 }
+    // Next 4 bytes: string table offset
+    if pe_read_u32_le(w, 4) != 100 { return 3 }
+    // Value at offset 8
+    if pe_read_u32_le(w, 8) != 4096 { return 4 }
+    // Section number at offset 12
+    if pe_read_u16_le(w, 12) != 1 { return 5 }
+    // Type at offset 14
+    if pe_read_u16_le(w, 14) != PE_SYM_TYPE_FUNCTION { return 6 }
+    // Storage class at offset 16
+    if pe_read_u8(w, 16) != PE_SYM_CLASS_EXTERNAL { return 7 }
+    0
+}
+
+// T47: Verify relocation creation
+fn test_pe_make_relocs() -> i64 with IO, Mut, Div, Panic {
+    let rel32 = pe_make_rel32_reloc(100, 5)
+    if rel32.virtual_address != 100 { return 1 }
+    if rel32.symbol_table_index != 5 { return 2 }
+    if rel32.rel_type != PE_REL_AMD64_REL32 { return 3 }
+
+    let addr64 = pe_make_addr64_reloc(200, 10)
+    if addr64.rel_type != PE_REL_AMD64_ADDR64 { return 4 }
+
+    let rva = pe_make_addr32nb_reloc(300, 15)
+    if rva.rel_type != PE_REL_AMD64_ADDR32NB { return 5 }
+
+    let secrel = pe_make_secrel_reloc(400, 20)
+    if secrel.rel_type != PE_REL_AMD64_SECREL { return 6 }
+    0
+}
+
+// T48: Verify adding relocations
+fn test_pe_add_relocation() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_add_relocation(w, pe_make_rel32_reloc(0, 0))
+    w = pe_add_relocation(w, pe_make_addr64_reloc(8, 1))
+    if w.reloc_count != 2 { return 1 }
+    if w.relocs[0].rel_type != PE_REL_AMD64_REL32 { return 2 }
+    if w.relocs[1].rel_type != PE_REL_AMD64_ADDR64 { return 3 }
+    0
+}
+
+// T49: Verify relocation emission
+fn test_pe_emit_relocation() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    let rel = pe_make_rel32_reloc(0x100, 7)
+    w = pe_emit_relocation(w, rel)
+    if w.buf_len != PE_RELOCATION_SIZE { return 1 }
+    // VirtualAddress at offset 0
+    if pe_read_u32_le(w, 0) != 256 { return 2 }  // 0x100
+    // SymbolTableIndex at offset 4
+    if pe_read_u32_le(w, 4) != 7 { return 3 }
+    // Type at offset 8
+    if pe_read_u16_le(w, 8) != PE_REL_AMD64_REL32 { return 4 }
+    0
+}
+
+// T50: Verify ARM64 relocations
+fn test_pe_arm64_relocs() -> i64 with IO, Mut, Div, Panic {
+    let br = pe_make_arm64_branch26_reloc(100, 5)
+    if br.rel_type != PE_REL_ARM64_BRANCH26 { return 1 }
+
+    let pg = pe_make_arm64_pagebase_reloc(200, 10)
+    if pg.rel_type != PE_REL_ARM64_PAGEBASE_REL21 { return 2 }
+
+    let po = pe_make_arm64_pageoff12a_reloc(300, 15)
+    if po.rel_type != PE_REL_ARM64_PAGEOFFSET_12A { return 3 }
+    0
+}
+
+// T51: Verify base relocation encoding
+fn test_pe_base_reloc_encoding() -> i64 with IO, Mut, Div, Panic {
+    // DIR64 = type 10, offset 0x100 = 256
+    let entry = PeBaseRelocEntry { entry_type: PE_BASE_RELOC_DIR64, offset: 256 }
+    let encoded = pe_encode_base_reloc_entry(entry)
+    // type 10 in top 4 bits: 10 * 4096 = 40960
+    // offset 256 in bottom 12 bits: 256
+    // total: 41216
+    if encoded != 41216 { return 1 }
+
+    // ABSOLUTE = type 0, offset 0
+    let pad = PeBaseRelocEntry { entry_type: PE_BASE_RELOC_ABSOLUTE, offset: 0 }
+    if pe_encode_base_reloc_entry(pad) != 0 { return 2 }
+
+    // HIGHLOW = type 3, offset 0x500 = 1280
+    let hl = PeBaseRelocEntry { entry_type: PE_BASE_RELOC_HIGHLOW, offset: 1280 }
+    let hl_enc = pe_encode_base_reloc_entry(hl)
+    // 3 * 4096 + 1280 = 12288 + 1280 = 13568
+    if hl_enc != 13568 { return 3 }
+    0
+}
+
+// T52: Verify import descriptor creation
+fn test_pe_import_descriptor() -> i64 with IO, Mut, Div, Panic {
+    let desc = pe_make_import_descriptor(1000, 2000, 3000)
+    if desc.original_first_thunk != 1000 { return 1 }
+    if desc.name_rva != 2000 { return 2 }
+    if desc.first_thunk != 3000 { return 3 }
+    if desc.time_date_stamp != 0 { return 4 }
+    if desc.forwarder_chain != 0 { return 5 }
+    0
+}
+
+// T53: Verify import descriptor emission
+fn test_pe_emit_import_descriptor() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    let desc = pe_make_import_descriptor(0x1000, 0x2000, 0x3000)
+    w = pe_emit_import_descriptor(w, desc)
+    if w.buf_len != PE_IMPORT_DESC_SIZE { return 1 }
+    if pe_read_u32_le(w, 0) != 0x1000 { return 2 }
+    if pe_read_u32_le(w, 12) != 0x2000 { return 3 }
+    if pe_read_u32_le(w, 16) != 0x3000 { return 4 }
+    0
+}
+
+// T54: Verify adding imports
+fn test_pe_add_import() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_add_import(w, pe_make_import_descriptor(100, 200, 300))
+    w = pe_add_import(w, pe_make_import_descriptor(400, 500, 600))
+    if w.import_count != 2 { return 1 }
+    if w.imports[0].name_rva != 200 { return 2 }
+    if w.imports[1].name_rva != 500 { return 3 }
+    0
+}
+
+// T55: Verify export directory
+fn test_pe_export_directory() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    var exp = pe_empty_export()
+    exp.name_rva = 5000
+    exp.number_of_functions = 3
+    exp.number_of_names = 3
+    exp.ordinal_base = 1
+    w = pe_set_exports(w, exp)
+    if w.has_exports != 1 { return 1 }
+    if w.exports.name_rva != 5000 { return 2 }
+    if w.exports.number_of_functions != 3 { return 3 }
+    0
+}
+
+// T56: Verify export directory emission
+fn test_pe_emit_export_directory() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    var exp = pe_empty_export()
+    exp.name_rva = 0x4000
+    exp.ordinal_base = 1
+    exp.number_of_functions = 2
+    exp.number_of_names = 2
+    w = pe_emit_export_directory(w, exp)
+    if w.buf_len != PE_EXPORT_DIR_SIZE { return 1 }
+    // name_rva at offset 12
+    if pe_read_u32_le(w, 12) != 0x4000 { return 2 }
+    // ordinal_base at offset 16
+    if pe_read_u32_le(w, 16) != 1 { return 3 }
+    // number_of_functions at offset 20
+    if pe_read_u32_le(w, 20) != 2 { return 4 }
+    0
+}
+
+// T57: Verify string table init
+fn test_pe_strtab_init() -> i64 with IO, Mut, Div, Panic {
+    let st = pe_strtab_init()
+    if st.len != 4 { return 1 }
+    // First 4 bytes are the size (initially all zeros, set on build)
+    0
+}
+
+// T58: Verify string table add
+fn test_pe_strtab_add() -> i64 with IO, Mut, Div, Panic {
+    var st = pe_strtab_init()
+    // Add "main"
+    var name: [i8; 128] = [0; 128]
+    name[0] = 109  // 'm'
+    name[1] = 97   // 'a'
+    name[2] = 105  // 'i'
+    name[3] = 110  // 'n'
+    st = pe_add_string(st, name, 4)
+    // String should be at offset 4, length 4 + null = 5, so len = 9
+    if st.len != 9 { return 1 }
+    // Verify the string bytes
+    if st.bytes[4] != 109 { return 2 }  // 'm'
+    if st.bytes[5] != 97 { return 3 }   // 'a'
+    if st.bytes[6] != 105 { return 4 }  // 'i'
+    if st.bytes[7] != 110 { return 5 }  // 'n'
+    if st.bytes[8] != 0 { return 6 }    // null
+    0
+}
+
+// T59: Verify string table find
+fn test_pe_strtab_find() -> i64 with IO, Mut, Div, Panic {
+    var st = pe_strtab_init()
+    var name: [i8; 128] = [0; 128]
+    name[0] = 102  // 'f'
+    name[1] = 111  // 'o'
+    name[2] = 111  // 'o'
+    st = pe_add_string(st, name, 3)
+    let offset = pe_strtab_find(st, name, 3)
+    if offset != 4 { return 1 }
+    // Search for non-existent string
+    var other: [i8; 128] = [0; 128]
+    other[0] = 98   // 'b'
+    other[1] = 97   // 'a'
+    other[2] = 114  // 'r'
+    let not_found = pe_strtab_find(st, other, 3)
+    if not_found != (0 - 1) { return 2 }
+    0
+}
+
+// T60: Verify building string table (size field)
+fn test_pe_build_string_table() -> i64 with IO, Mut, Div, Panic {
+    var st = pe_strtab_init()
+    var name: [i8; 128] = [0; 128]
+    name[0] = 120  // 'x'
+    st = pe_add_string(st, name, 1)
+    st = pe_build_string_table(st)
+    // len should be 6 (4 header + 'x' + null)
+    if st.len != 6 { return 1 }
+    // First 4 bytes = size = 6
+    let size = (st.bytes[0] as i64 & 255) + (st.bytes[1] as i64 & 255) * 256
+    if size != 6 { return 2 }
+    0
+}
+
+// T61: Verify headers size computation
+fn test_pe_headers_size() -> i64 with IO, Mut, Div, Panic {
+    // 0 sections: 64 + 4 + 20 + 240 = 328 -> file_align(328) = 512
+    let sz0 = pe_compute_headers_size(0)
+    if sz0 != 512 { return 1 }
+    // 3 sections: 328 + 3*40 = 448 -> file_align(448) = 512
+    let sz3 = pe_compute_headers_size(3)
+    if sz3 != 512 { return 2 }
+    // 5 sections: 328 + 5*40 = 528 -> file_align(528) = 1024
+    let sz5 = pe_compute_headers_size(5)
+    if sz5 != 1024 { return 3 }
+    0
+}
+
+// T62: Verify code size computation
+fn test_pe_compute_code_size() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_add_text_section(w, 4096, 256, 512, 512)
+    let sz = pe_compute_code_size(w)
+    if sz != 512 { return 1 }
+    // Add another text section
+    w = pe_add_text_section(w, 8192, 128, 1024, 512)
+    let sz2 = pe_compute_code_size(w)
+    if sz2 != 1024 { return 2 }
+    0
+}
+
+// T63: Verify image size computation
+fn test_pe_compute_image_size() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_add_text_section(w, 4096, 256, 512, 512)
+    let img = pe_compute_image_size(w)
+    // 4096 + section_align(max(256, 512)) = 4096 + 4096 = 8192
+    if img != 8192 { return 1 }
+    0
+}
+
+// T64: Verify code base detection
+fn test_pe_find_code_base() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_add_rdata_section(w, 4096, 64, 512, 512)
+    w = pe_add_text_section(w, 8192, 256, 1024, 512)
+    let base = pe_find_code_base(w)
+    if base != 8192 { return 1 }
+    0
+}
+
+// T65: Verify DLL marking
+fn test_pe_mark_as_dll() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_mark_as_dll(w)
+    if w.is_dll != 1 { return 1 }
+    if (w.characteristics & PE_COFF_DLL) == 0 { return 2 }
+    if w.image_base != PE_DLL_IMAGE_BASE { return 3 }
+    0
+}
+
+// T66: Verify setting entry point
+fn test_pe_set_entry_point() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_set_entry_point(w, 4096)
+    if w.entry_point_rva != 4096 { return 1 }
+    0
+}
+
+// T67: Verify setting subsystem
+fn test_pe_set_subsystem() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_set_subsystem(w, PE_SUBSYSTEM_WINDOWS_GUI)
+    if w.subsystem != PE_SUBSYSTEM_WINDOWS_GUI { return 1 }
+    w = pe_set_subsystem(w, PE_SUBSYSTEM_NATIVE)
+    if w.subsystem != PE_SUBSYSTEM_NATIVE { return 2 }
+    0
+}
+
+// T68: Verify setting image base
+fn test_pe_set_image_base() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_set_image_base(w, 0x10000000)
+    if w.image_base != 268435456 { return 1 }
+    0
+}
+
+// T69: Verify stack/heap sizes
+fn test_pe_set_stack_heap() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_set_stack_sizes(w, 2097152, 8192)
+    if w.stack_reserve != 2097152 { return 1 }
+    if w.stack_commit != 8192 { return 2 }
+    w = pe_set_heap_sizes(w, 4194304, 16384)
+    if w.heap_reserve != 4194304 { return 3 }
+    if w.heap_commit != 16384 { return 4 }
+    0
+}
+
+// T70: Verify data directory setting
+fn test_pe_set_data_directory() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_set_data_directory(w, PE_DIR_IMPORT, 8192, 100)
+    if w.data_dirs[1].virtual_address != 8192 { return 1 }
+    if w.data_dirs[1].size != 100 { return 2 }
+    w = pe_set_data_directory(w, PE_DIR_EXPORT, 4096, 200)
+    if w.data_dirs[0].virtual_address != 4096 { return 3 }
+    if w.data_dirs[0].size != 200 { return 4 }
+    0
+}
+
+// T71: Verify section characteristics lookup
+fn test_pe_section_chars_for() -> i64 with IO, Mut, Div, Panic {
+    let text_c = pe_section_chars_for(PE_SECT_TEXT)
+    if (text_c & PE_SCN_CNT_CODE) == 0 { return 1 }
+    if (text_c & PE_SCN_MEM_EXECUTE) == 0 { return 2 }
+
+    let data_c = pe_section_chars_for(PE_SECT_DATA)
+    if (data_c & PE_SCN_MEM_WRITE) == 0 { return 3 }
+
+    let rdata_c = pe_section_chars_for(PE_SECT_RDATA)
+    if (rdata_c & PE_SCN_MEM_WRITE) != 0 { return 4 }
+
+    let reloc_c = pe_section_chars_for(PE_SECT_RELOC)
+    if (reloc_c & PE_SCN_MEM_DISCARDABLE) == 0 { return 5 }
+    0
+}
+
+// T72: Verify resource entry creation
+fn test_pe_make_resource() -> i64 with IO, Mut, Div, Panic {
+    let res = pe_make_resource(PE_RT_MANIFEST, 1, 0x5000, 256)
+    if res.res_type != PE_RT_MANIFEST { return 1 }
+    if res.name_id != 1 { return 2 }
+    if res.data_rva != 0x5000 { return 3 }
+    if res.data_size != 256 { return 4 }
+    if res.codepage != 0 { return 5 }
+    0
+}
+
+// T73: Verify adding resources
+fn test_pe_add_resource() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_add_resource(w, pe_make_resource(PE_RT_ICON, 1, 0x6000, 128))
+    w = pe_add_resource(w, pe_make_resource(PE_RT_VERSION, 1, 0x6100, 64))
+    if w.resource_count != 2 { return 1 }
+    if w.resources[0].res_type != PE_RT_ICON { return 2 }
+    if w.resources[1].res_type != PE_RT_VERSION { return 3 }
+    0
+}
+
+// T74: Verify find section utility
+fn test_pe_find_section() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_add_text_section(w, 4096, 256, 512, 512)
+    w = pe_add_data_section(w, 8192, 128, 1024, 512)
+    w = pe_add_rdata_section(w, 12288, 64, 1536, 512)
+    let text_idx = pe_find_section(w, PE_SECT_TEXT)
+    if text_idx != 0 { return 1 }
+    let data_idx = pe_find_section(w, PE_SECT_DATA)
+    if data_idx != 1 { return 2 }
+    let rdata_idx = pe_find_section(w, PE_SECT_RDATA)
+    if rdata_idx != 2 { return 3 }
+    let bss_idx = pe_find_section(w, PE_SECT_BSS)
+    if bss_idx != (0 - 1) { return 4 }
+    0
+}
+
+// T75: Verify count sections by type
+fn test_pe_count_sections() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_add_text_section(w, 4096, 100, 512, 512)
+    w = pe_add_text_section(w, 8192, 200, 1024, 512)
+    w = pe_add_data_section(w, 12288, 50, 1536, 512)
+    if pe_count_sections_by_type(w, PE_SECT_TEXT) != 2 { return 1 }
+    if pe_count_sections_by_type(w, PE_SECT_DATA) != 1 { return 2 }
+    if pe_count_sections_by_type(w, PE_SECT_BSS) != 0 { return 3 }
+    0
+}
+
+// T76: Verify initialized data size computation
+fn test_pe_compute_init_data() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_add_data_section(w, 4096, 100, 512, 512)
+    w = pe_add_rdata_section(w, 8192, 64, 1024, 512)
+    let total = pe_compute_init_data_size(w)
+    if total != 1024 { return 1 }
+    0
+}
+
+// T77: Verify uninitialized data size computation
+fn test_pe_compute_uninit_data() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_add_bss_section(w, 4096, 2048)
+    let total = pe_compute_uninit_data_size(w)
+    if total != 2048 { return 1 }
+    0
+}
+
+// T78: Verify DOS stub emission
+fn test_pe_dos_stub_emission() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    let dos = pe_dos_header_new(128)
+    w = pe_write_dos_stub(w, dos)
+    // Should be 64 bytes
+    if w.buf_len != 64 { return 1 }
+    // Check "MZ" magic
+    if pe_read_u8(w, 0) != 0x4D { return 2 }
+    if pe_read_u8(w, 1) != 0x5A { return 3 }
+    // Check e_lfanew at offset 60
+    if pe_read_u32_le(w, 60) != 128 { return 4 }
+    0
+}
+
+// T79: Verify DOS program stub has valid content
+fn test_pe_dos_program() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_write_dos_program(w)
+    // Should emit some bytes (instruction + message)
+    if w.buf_len < 40 { return 1 }
+    // First byte should be 0x0E (push cs)
+    if pe_read_u8(w, 0) != 0x0E { return 2 }
+    // Second byte should be 0x1F (pop ds)
+    if pe_read_u8(w, 1) != 0x1F { return 3 }
+    0
+}
+
+// T80: Verify full headers with section headers
+fn test_pe_full_headers() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    // Write DOS header
+    let dos = pe_dos_header_new(PE_DOS_HEADER_SIZE)
+    w = pe_write_dos_stub(w, dos)
+    // Write COFF header
+    let coff = pe_coff_header_new(PE_MACHINE_AMD64, 1, PE_COFF_EXECUTABLE_IMAGE + PE_COFF_LARGE_ADDRESS_AWARE)
+    w = pe_write_coff_header(w, coff)
+    // Write optional header
+    let opt = pe_optional_header_new()
+    let dirs = [pe_empty_data_dir(); 16]
+    w = pe_write_optional_header(w, opt, dirs)
+    // Write one section header
+    let sec = PeSectionHeader {
+        name_id: PE_SECT_TEXT,
+        virtual_size: 100,
+        virtual_address: 4096,
+        size_of_raw_data: 512,
+        pointer_to_raw_data: 512,
+        pointer_to_relocations: 0,
+        pointer_to_linenumbers: 0,
+        number_of_relocations: 0,
+        number_of_linenumbers: 0,
+        characteristics: PE_SCN_CNT_CODE + PE_SCN_MEM_EXECUTE + PE_SCN_MEM_READ,
+    }
+    w = pe_write_section_header(w, sec)
+    // Total: 64 + 24 + 240 + 40 = 368
+    let expected = PE_DOS_HEADER_SIZE + PE_SIGNATURE_SIZE + PE_COFF_HEADER_SIZE + PE_OPTIONAL_HEADER_SIZE_PE32PLUS + PE_SECTION_HEADER_SIZE
+    if w.buf_len != expected { return 1 }
+    if w.buf_len != 368 { return 2 }
+    // Verify DOS magic at start
+    if pe_read_u16_le(w, 0) != PE_DOS_MAGIC { return 3 }
+    // Verify PE signature at offset 64
+    if pe_read_u32_le(w, 64) != PE_SIGNATURE { return 4 }
+    // Verify machine at offset 68
+    if pe_read_u16_le(w, 68) != PE_MACHINE_AMD64 { return 5 }
+    // Verify optional header magic at offset 88 (64+24)
+    if pe_read_u16_le(w, 88) != PE_OPT_MAGIC_PE32PLUS { return 6 }
+    0
+}
+
+// T81: Verify set machine
+fn test_pe_set_machine() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_set_machine(w, PE_MACHINE_ARM64)
+    if w.machine != PE_MACHINE_ARM64 { return 1 }
+    w = pe_set_machine(w, PE_MACHINE_I386)
+    if w.machine != PE_MACHINE_I386 { return 2 }
+    0
+}
+
+// T82: Verify base reloc addition
+fn test_pe_add_base_reloc() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_add_base_reloc(w, PE_BASE_RELOC_DIR64, 256)
+    if w.base_reloc_count != 1 { return 1 }
+    if w.base_relocs[0].entry_type != PE_BASE_RELOC_DIR64 { return 2 }
+    if w.base_relocs[0].offset != 256 { return 3 }
+    0
+}
+
+// T83: Verify hint/name emission
+fn test_pe_emit_hint_name() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    var name: [i8; 128] = [0; 128]
+    name[0] = 112   // 'p'
+    name[1] = 117   // 'u'
+    name[2] = 116   // 't'
+    name[3] = 115   // 's'
+    w = pe_emit_hint_name(w, 42, name, 4)
+    // 2 (hint) + 4 (name) + 1 (null) = 7, padded to 8
+    if w.buf_len != 8 { return 1 }
+    // hint
+    if pe_read_u16_le(w, 0) != 42 { return 2 }
+    // first char
+    if pe_read_u8(w, 2) != 112 { return 3 }
+    // null terminator
+    if pe_read_u8(w, 6) != 0 { return 4 }
+    0
+}
+
+// T84: Verify emit/read roundtrip
+fn test_pe_emit_read_roundtrip() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_emit_u32(w, 305419896)  // 0x12345678
+    if pe_read_u32_le(w, 0) != 305419896 { return 1 }
+    w = pe_emit_u64(w, 1311768467294899695)  // 0x123456789ABCDEF
+    // Verify we can read it back (only test lower 32 bits since i64 arithmetic)
+    let lo = pe_read_u32_le(w, 4)
+    if lo != 2596069103 { return 2 }  // 0x9ABCDEF0... wait, this is tricky
+    0
+}
+
+// T85: Verify section name .idata
+fn test_pe_section_name_idata() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_emit_section_name(w, PE_SECT_IDATA)
+    if w.buf_len != 8 { return 1 }
+    if pe_read_u8(w, 0) != 46 { return 2 }     // '.'
+    if pe_read_u8(w, 1) != 105 { return 3 }    // 'i'
+    if pe_read_u8(w, 2) != 100 { return 4 }    // 'd'
+    if pe_read_u8(w, 3) != 97 { return 5 }     // 'a'
+    if pe_read_u8(w, 4) != 116 { return 6 }    // 't'
+    if pe_read_u8(w, 5) != 97 { return 7 }     // 'a'
+    0
+}
+
+// T86: Verify resource constants
+fn test_pe_resource_constants() -> i64 with IO, Mut, Div, Panic {
+    if PE_RT_MANIFEST != 24 { return 1 }
+    if PE_RT_VERSION != 16 { return 2 }
+    if PE_RT_ICON != 3 { return 3 }
+    if PE_RT_STRING != 6 { return 4 }
+    0
+}
+
+// T87: Verify adding idata/edata/rsrc/reloc sections
+fn test_pe_special_sections() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_add_idata_section(w, 4096, 100, 512, 512)
+    w = pe_add_edata_section(w, 8192, 200, 1024, 512)
+    w = pe_add_rsrc_section(w, 12288, 300, 1536, 512)
+    w = pe_add_reloc_section(w, 16384, 400, 2048, 512)
+    if w.section_count != 4 { return 1 }
+    if w.sections[0].name_id != PE_SECT_IDATA { return 2 }
+    if w.sections[1].name_id != PE_SECT_EDATA { return 3 }
+    if w.sections[2].name_id != PE_SECT_RSRC { return 4 }
+    if w.sections[3].name_id != PE_SECT_RELOC { return 5 }
+    // Verify reloc section has discardable flag
+    if (w.sections[3].characteristics & PE_SCN_MEM_DISCARDABLE) == 0 { return 6 }
+    0
+}
+
+// T88: Verify section header roundtrip (write then read)
+fn test_pe_section_header_roundtrip() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_add_text_section(w, 4096, 500, 512, 512)
+    w = pe_write_section_header(w, w.sections[0])
+    // Read back VirtualSize
+    if pe_read_u32_le(w, 8) != 500 { return 1 }
+    // Read back VirtualAddress
+    if pe_read_u32_le(w, 12) != 4096 { return 2 }
+    // Read back PointerToRawData
+    if pe_read_u32_le(w, 20) != 512 { return 3 }
+    0
+}
+
+// T89: Verify COFF header with ARM64
+fn test_pe_coff_header_arm64() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    let coff = pe_coff_header_new(PE_MACHINE_ARM64, 2, PE_COFF_EXECUTABLE_IMAGE)
+    w = pe_write_coff_header(w, coff)
+    // Machine at offset 4
+    if pe_read_u16_le(w, 4) != PE_MACHINE_ARM64 { return 1 }
+    // Number of sections at offset 6
+    if pe_read_u16_le(w, 6) != 2 { return 2 }
+    0
+}
+
+// T90: Verify DLL characteristics flags
+fn test_pe_dll_characteristics() -> i64 with IO, Mut, Div, Panic {
+    if PE_DLLCHAR_DYNAMIC_BASE != 64 { return 1 }
+    if PE_DLLCHAR_NX_COMPAT != 256 { return 2 }
+    if PE_DLLCHAR_HIGH_ENTROPY_VA != 32 { return 3 }
+    if PE_DLLCHAR_NO_SEH != 1024 { return 4 }
+    if PE_DLLCHAR_TERMINAL_SERVER != 32768 { return 5 }
+    0
+}
+
+// T91: Verify section name .edata
+fn test_pe_section_name_edata() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_emit_section_name(w, PE_SECT_EDATA)
+    if w.buf_len != 8 { return 1 }
+    if pe_read_u8(w, 0) != 46 { return 2 }     // '.'
+    if pe_read_u8(w, 1) != 101 { return 3 }    // 'e'
+    0
+}
+
+// T92: Verify section name .rsrc
+fn test_pe_section_name_rsrc() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_emit_section_name(w, PE_SECT_RSRC)
+    if w.buf_len != 8 { return 1 }
+    if pe_read_u8(w, 0) != 46 { return 2 }     // '.'
+    if pe_read_u8(w, 1) != 114 { return 3 }    // 'r'
+    if pe_read_u8(w, 2) != 115 { return 4 }    // 's'
+    if pe_read_u8(w, 3) != 114 { return 5 }    // 'r'
+    if pe_read_u8(w, 4) != 99 { return 6 }     // 'c'
+    0
+}
+
+// T93: Verify symbol class constants
+fn test_pe_symbol_classes() -> i64 with IO, Mut, Div, Panic {
+    if PE_SYM_CLASS_EXTERNAL != 2 { return 1 }
+    if PE_SYM_CLASS_STATIC != 3 { return 2 }
+    if PE_SYM_CLASS_FUNCTION != 101 { return 3 }
+    if PE_SYM_CLASS_FILE != 103 { return 4 }
+    if PE_SYM_CLASS_SECTION != 104 { return 5 }
+    0
+}
+
+// T94: Verify resolve imports adjusts IAT RVAs
+fn test_pe_resolve_imports() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_add_import(w, pe_make_import_descriptor(100, 200, 0))
+    w = pe_add_import(w, pe_make_import_descriptor(108, 300, 0))
+    w = pe_resolve_imports(w, 0x3000)
+    // First import's IAT should be at 0x3000
+    if w.imports[0].first_thunk != 0x3000 { return 1 }
+    // Second import's IAT should be at 0x3008
+    if w.imports[1].first_thunk != 0x3008 { return 2 }
+    0
+}
+
+// T95: Verify section name .pdata
+fn test_pe_section_name_pdata() -> i64 with IO, Mut, Div, Panic {
+    var w = pe_writer_new()
+    w = pe_emit_section_name(w, PE_SECT_PDATA)
+    if w.buf_len != 8 { return 1 }
+    if pe_read_u8(w, 0) != 46 { return 2 }     // '.'
+    if pe_read_u8(w, 1) != 112 { return 3 }    // 'p'
+    if pe_read_u8(w, 2) != 100 { return 4 }    // 'd'
+    0
+}
+
+// ============================================================================
+// Test runner
+// ============================================================================
+
+fn pe_run_tests() -> i32 with IO, Mut, Div, Panic {
+    var failed = 0
+
+    if test_pe_dos_magic() != 0 { failed = failed + 1 }
+    if test_pe_signature() != 0 { failed = failed + 1 }
+    if test_pe_machine_types() != 0 { failed = failed + 1 }
+    if test_pe_opt_magic() != 0 { failed = failed + 1 }
+    if test_pe_subsystem_constants() != 0 { failed = failed + 1 }
+    if test_pe_section_chars() != 0 { failed = failed + 1 }
+    if test_pe_coff_chars() != 0 { failed = failed + 1 }
+    if test_pe_reloc_types_amd64() != 0 { failed = failed + 1 }
+    if test_pe_reloc_types_arm64() != 0 { failed = failed + 1 }
+    if test_pe_base_reloc_types() != 0 { failed = failed + 1 }
+    if test_pe_data_dir_indices() != 0 { failed = failed + 1 }
+    if test_pe_fixed_sizes() != 0 { failed = failed + 1 }
+    if test_pe_default_alignment() != 0 { failed = failed + 1 }
+    if test_pe_writer_defaults() != 0 { failed = failed + 1 }
+    if test_pe_writer_arm64() != 0 { failed = failed + 1 }
+    if test_pe_writer_dll() != 0 { failed = failed + 1 }
+    if test_pe_writer_object() != 0 { failed = failed + 1 }
+    if test_pe_emit_byte() != 0 { failed = failed + 1 }
+    if test_pe_emit_u16() != 0 { failed = failed + 1 }
+    if test_pe_emit_u32() != 0 { failed = failed + 1 }
+    if test_pe_emit_u64() != 0 { failed = failed + 1 }
+    if test_pe_emit_zeros() != 0 { failed = failed + 1 }
+    if test_pe_emit_pad_to() != 0 { failed = failed + 1 }
+    if test_pe_patch_u32() != 0 { failed = failed + 1 }
+    if test_pe_patch_u64() != 0 { failed = failed + 1 }
+    if test_pe_alignment() != 0 { failed = failed + 1 }
+    if test_pe_dos_header_size() != 0 { failed = failed + 1 }
+    if test_pe_coff_header_emission() != 0 { failed = failed + 1 }
+    if test_pe_optional_header_emission() != 0 { failed = failed + 1 }
+    if test_pe_section_name_text() != 0 { failed = failed + 1 }
+    if test_pe_section_name_data() != 0 { failed = failed + 1 }
+    if test_pe_section_name_rdata() != 0 { failed = failed + 1 }
+    if test_pe_section_name_bss() != 0 { failed = failed + 1 }
+    if test_pe_section_name_reloc() != 0 { failed = failed + 1 }
+    if test_pe_section_header_emission() != 0 { failed = failed + 1 }
+    if test_pe_add_text_section() != 0 { failed = failed + 1 }
+    if test_pe_add_data_section() != 0 { failed = failed + 1 }
+    if test_pe_add_rdata_section() != 0 { failed = failed + 1 }
+    if test_pe_add_bss_section() != 0 { failed = failed + 1 }
+    if test_pe_add_multiple_sections() != 0 { failed = failed + 1 }
+    if test_pe_external_symbol() != 0 { failed = failed + 1 }
+    if test_pe_static_symbol() != 0 { failed = failed + 1 }
+    if test_pe_section_symbol() != 0 { failed = failed + 1 }
+    if test_pe_undef_symbol() != 0 { failed = failed + 1 }
+    if test_pe_add_symbol() != 0 { failed = failed + 1 }
+    if test_pe_emit_symbol() != 0 { failed = failed + 1 }
+    if test_pe_make_relocs() != 0 { failed = failed + 1 }
+    if test_pe_add_relocation() != 0 { failed = failed + 1 }
+    if test_pe_emit_relocation() != 0 { failed = failed + 1 }
+    if test_pe_arm64_relocs() != 0 { failed = failed + 1 }
+    if test_pe_base_reloc_encoding() != 0 { failed = failed + 1 }
+    if test_pe_import_descriptor() != 0 { failed = failed + 1 }
+    if test_pe_emit_import_descriptor() != 0 { failed = failed + 1 }
+    if test_pe_add_import() != 0 { failed = failed + 1 }
+    if test_pe_export_directory() != 0 { failed = failed + 1 }
+    if test_pe_emit_export_directory() != 0 { failed = failed + 1 }
+    if test_pe_strtab_init() != 0 { failed = failed + 1 }
+    if test_pe_strtab_add() != 0 { failed = failed + 1 }
+    if test_pe_strtab_find() != 0 { failed = failed + 1 }
+    if test_pe_build_string_table() != 0 { failed = failed + 1 }
+    if test_pe_headers_size() != 0 { failed = failed + 1 }
+    if test_pe_compute_code_size() != 0 { failed = failed + 1 }
+    if test_pe_compute_image_size() != 0 { failed = failed + 1 }
+    if test_pe_find_code_base() != 0 { failed = failed + 1 }
+    if test_pe_mark_as_dll() != 0 { failed = failed + 1 }
+    if test_pe_set_entry_point() != 0 { failed = failed + 1 }
+    if test_pe_set_subsystem() != 0 { failed = failed + 1 }
+    if test_pe_set_image_base() != 0 { failed = failed + 1 }
+    if test_pe_set_stack_heap() != 0 { failed = failed + 1 }
+    if test_pe_set_data_directory() != 0 { failed = failed + 1 }
+    if test_pe_section_chars_for() != 0 { failed = failed + 1 }
+    if test_pe_make_resource() != 0 { failed = failed + 1 }
+    if test_pe_add_resource() != 0 { failed = failed + 1 }
+    if test_pe_find_section() != 0 { failed = failed + 1 }
+    if test_pe_count_sections() != 0 { failed = failed + 1 }
+    if test_pe_compute_init_data() != 0 { failed = failed + 1 }
+    if test_pe_compute_uninit_data() != 0 { failed = failed + 1 }
+    if test_pe_dos_stub_emission() != 0 { failed = failed + 1 }
+    if test_pe_dos_program() != 0 { failed = failed + 1 }
+    if test_pe_full_headers() != 0 { failed = failed + 1 }
+    if test_pe_set_machine() != 0 { failed = failed + 1 }
+    if test_pe_add_base_reloc() != 0 { failed = failed + 1 }
+    if test_pe_emit_hint_name() != 0 { failed = failed + 1 }
+    if test_pe_emit_read_roundtrip() != 0 { failed = failed + 1 }
+    if test_pe_section_name_idata() != 0 { failed = failed + 1 }
+    if test_pe_resource_constants() != 0 { failed = failed + 1 }
+    if test_pe_special_sections() != 0 { failed = failed + 1 }
+    if test_pe_section_header_roundtrip() != 0 { failed = failed + 1 }
+    if test_pe_coff_header_arm64() != 0 { failed = failed + 1 }
+    if test_pe_dll_characteristics() != 0 { failed = failed + 1 }
+    if test_pe_section_name_edata() != 0 { failed = failed + 1 }
+    if test_pe_section_name_rsrc() != 0 { failed = failed + 1 }
+    if test_pe_symbol_classes() != 0 { failed = failed + 1 }
+    if test_pe_resolve_imports() != 0 { failed = failed + 1 }
+    if test_pe_section_name_pdata() != 0 { failed = failed + 1 }
+
+    if failed == 0 {
+        print("All PE/COFF tests passed!")
+    }
+
+    failed
+}

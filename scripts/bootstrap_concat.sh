@@ -84,6 +84,8 @@ FILES=(
   self-hosted/check/borrows.sio
   self-hosted/check/monomorph.sio
   self-hosted/check/pat_decision.sio
+  self-hosted/check/type_erasure.sio
+  self-hosted/check/gadts.sio
 
   # ── 6. Effects layer ────────────────────────────────────────────
   self-hosted/effects/types.sio
@@ -110,6 +112,10 @@ FILES=(
   self-hosted/ir/async_lower.sio
   self-hosted/ir/dce.sio
   self-hosted/ir/tailcall.sio
+  self-hosted/ir/const_prop.sio
+  self-hosted/ir/egraph.sio
+  self-hosted/ir/loop_opt.sio
+  self-hosted/ir/auto_vectorize.sio
   self-hosted/ir/mod.sio
 
   # ── 8. HLIR (High-Level IR) ─────────────────────────────────────
@@ -138,6 +144,9 @@ FILES=(
   self-hosted/native/debug_info.sio
   self-hosted/native/macho.sio
   self-hosted/native/ffi.sio
+  self-hosted/native/avx512.sio
+  self-hosted/native/pe_coff.sio
+  self-hosted/native/signal_handler.sio
   self-hosted/native/hyper_lower.sio
   self-hosted/native/suite.sio
 
@@ -151,6 +160,8 @@ FILES=(
   # ── 11. VM ──────────────────────────────────────────────────────
   self-hosted/vm/vm.sio
   self-hosted/vm/gc.sio
+  self-hosted/vm/jit_cache.sio
+  self-hosted/vm/green_threads.sio
   self-hosted/vm/mod.sio
 
   # ── 12. Collections ─────────────────────────────────────────────
@@ -240,8 +251,9 @@ FILES=(
   self-hosted/wasm/encode.sio
   self-hosted/wasm/lower.sio
 
-  # ── 22b. LSP protocol ───────────────────────────────────────────
+  # ── 22b. LSP protocol + completions ────────────────────────────
   self-hosted/lsp/protocol.sio
+  self-hosted/lsp/completions.sio
 
   # ── 23. I/O helpers + module loader ─────────────────────────────
   self-hosted/io/file_write.sio
@@ -371,6 +383,8 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/check/borrows.sio
     self-hosted/check/monomorph.sio
     self-hosted/check/pat_decision.sio
+    self-hosted/check/type_erasure.sio
+    self-hosted/check/gadts.sio
 
     # 5b. Diagnostics engine
     self-hosted/diagnostics/mod.sio
@@ -395,6 +409,10 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/ir/async_lower.sio
     self-hosted/ir/dce.sio
     self-hosted/ir/tailcall.sio
+    self-hosted/ir/const_prop.sio
+    self-hosted/ir/egraph.sio
+    self-hosted/ir/loop_opt.sio
+    self-hosted/ir/auto_vectorize.sio
     self-hosted/ir/mod.sio
 
     # 7. Native codegen layer
@@ -417,6 +435,9 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/native/debug_info.sio
     self-hosted/native/macho.sio
     self-hosted/native/ffi.sio
+    self-hosted/native/avx512.sio
+    self-hosted/native/pe_coff.sio
+    self-hosted/native/signal_handler.sio
     self-hosted/native/hyper_lower.sio
 
     # 8. WebAssembly backend
@@ -429,8 +450,16 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/linker/elf_writer.sio
     self-hosted/tools/formatter.sio
 
-    # 8c. LSP protocol
+    # 8c. LSP protocol + completions
     self-hosted/lsp/protocol.sio
+    self-hosted/lsp/completions.sio
+
+    # 8d. VM layer
+    self-hosted/vm/vm.sio
+    self-hosted/vm/gc.sio
+    self-hosted/vm/jit_cache.sio
+    self-hosted/vm/green_threads.sio
+    self-hosted/vm/mod.sio
 
     # 9. I/O helpers + module loader
     self-hosted/io/file_write.sio

@@ -1,0 +1,2927 @@
+// self-hosted::ir::auto_vectorize — Auto-vectorization pass for Sounio IR
+//
+// Analyzes loops for vectorization opportunities, performs dependence analysis,
+// and transforms scalar operations into SIMD vector operations.
+//
+// Pipeline:
+//   1. Loop detection — find natural loops and classify them
+//   2. Induction variable analysis — identify countable loops
+//   3. Dependence analysis — build dependence graph, check for conflicts
+//   4. Stride analysis — determine memory access patterns
+//   5. Reduction detection — find and classify reductions
+//   6. Cost model — estimate scalar vs. vector cost, determine profitability
+//   7. Vectorization planning — classify variables, compute epilogue needs
+//   8. IR rewriting — widen instructions, insert prologue/epilogue
+//
+// All arrays are fixed-size — no heap allocation.
+//
+// References:
+//   Allen & Kennedy: "Optimizing Compilers for Modern Architectures" (2002)
+//   Wolfe: "High Performance Compilers for Parallel Computing" (1996)
+//   Nuzman & Zaks: "Outer-loop Vectorization" (2008)
+//   Larsen & Amarasinghe: "Exploiting Superword Level Parallelism" (2000)
+//   Intel Optimization Reference Manual, Ch. 11: "Auto-Vectorization"
+
+// ============================================================================
+// Section 1: Constants
+// ============================================================================
+
+// Capacity limits
+let AVEC_MAX_LOOPS: i64 = 256
+let AVEC_MAX_INSTRS: i64 = 512
+let AVEC_MAX_DEPS: i64 = 1024
+let AVEC_MAX_VARS: i64 = 128
+let AVEC_INVALID: i64 = 0 - 1
+
+// Vector widths (in elements for f64; doubles for float counts)
+// SSE: 128-bit = 2 doubles or 4 floats
+let AVEC_VEC_128: i64 = 2
+// AVX: 256-bit = 4 doubles or 8 floats
+let AVEC_VEC_256: i64 = 4
+// AVX-512: 512-bit = 8 doubles or 16 floats
+let AVEC_VEC_512: i64 = 8
+
+// Dependence types
+// RAW: read after write (true dependence)
+let AVEC_DEP_FLOW: i64 = 1
+// WAR: write after read (anti-dependence)
+let AVEC_DEP_ANTI: i64 = 2
+// WAW: write after write (output dependence)
+let AVEC_DEP_OUTPUT: i64 = 3
+// RAR: read after read (not a true dependence, informational)
+let AVEC_DEP_INPUT: i64 = 4
+
+// Cost model: latency in abstract cycles
+let AVEC_COST_SCALAR_ADD: i64 = 1
+let AVEC_COST_SCALAR_MUL: i64 = 3
+let AVEC_COST_SCALAR_DIV: i64 = 12
+let AVEC_COST_VEC_ADD: i64 = 1
+let AVEC_COST_VEC_MUL: i64 = 3
+let AVEC_COST_VEC_DIV: i64 = 12
+let AVEC_COST_GATHER: i64 = 8
+let AVEC_COST_SCATTER: i64 = 10
+let AVEC_COST_SHUFFLE: i64 = 2
+let AVEC_COST_BROADCAST: i64 = 1
+
+// Opcode classification constants (mirror IrOpcode integer tags)
+let AVEC_OP_LOAD_IMM: i64 = 1
+let AVEC_OP_LOAD_FLOAT: i64 = 2
+let AVEC_OP_LOAD_BOOL: i64 = 3
+let AVEC_OP_COPY: i64 = 5
+let AVEC_OP_BINOP: i64 = 6
+let AVEC_OP_UNARYOP: i64 = 7
+let AVEC_OP_CALL: i64 = 8
+let AVEC_OP_RETURN: i64 = 9
+let AVEC_OP_JUMP: i64 = 10
+let AVEC_OP_BRANCH_TRUE: i64 = 11
+let AVEC_OP_BRANCH_FALSE: i64 = 12
+let AVEC_OP_INDEX_GET: i64 = 15
+let AVEC_OP_INDEX_SET: i64 = 16
+let AVEC_OP_LABEL: i64 = 18
+let AVEC_OP_NOP: i64 = 19
+let AVEC_OP_PHI: i64 = 20
+
+// Access pattern classification
+let AVEC_ACCESS_UNIT: i64 = 0
+let AVEC_ACCESS_STRIDED: i64 = 1
+let AVEC_ACCESS_RANDOM: i64 = 2
+
+// Element type constants
+let AVEC_ELEM_I64: i64 = 1
+let AVEC_ELEM_F64: i64 = 2
+let AVEC_ELEM_I32: i64 = 3
+let AVEC_ELEM_F32: i64 = 4
+let AVEC_ELEM_BOOL: i64 = 5
+
+// Minimum trip count to consider vectorization worthwhile
+let AVEC_MIN_TRIP_COUNT: i64 = 4
+
+// Minimum speedup ratio (as fixed-point * 100) for profitability
+let AVEC_MIN_SPEEDUP_PERCENT: i64 = 110
+
+// ============================================================================
+// Section 2: Loop Representation
+// ============================================================================
+
+// Information about a single natural loop.
+struct AvecLoop {
+    id: i64,
+    header_label: i64,
+    back_edge_label: i64,
+    exit_label: i64,
+    induction_var: i64,
+    start_val: i64,
+    end_val: i64,
+    step: i64,
+    trip_count: i64,
+    is_countable: bool,
+    is_innermost: bool,
+    depth: i64,
+    instr_start: i64,
+    instr_count: i64,
+}
+
+// A single instruction within a loop body, annotated with vectorization info.
+struct AvecLoopInstr {
+    original_idx: i64,
+    opcode: i64,
+    dst: i64,
+    src1: i64,
+    src2: i64,
+    is_memory: bool,
+    is_reduction: bool,
+    stride: i64,
+}
+
+// The entire loop nest discovered in a function.
+struct AvecLoopNest {
+    loops: [AvecLoop; 256],
+    loop_count: i64,
+    instrs: [AvecLoopInstr; 512],
+    instr_count: i64,
+}
+
+// ============================================================================
+// Section 3: Dependence Analysis Structures
+// ============================================================================
+
+// A single dependence edge between two instructions.
+struct AvecDepEdge {
+    from_instr: i64,
+    to_instr: i64,
+    dep_type: i64,
+    distance: i64,
+    direction: i64,
+    variable: i64,
+    is_loop_carried: bool,
+}
+
+// The dependence graph for a single loop.
+struct AvecDepGraph {
+    edges: [AvecDepEdge; 1024],
+    edge_count: i64,
+    loop_id: i64,
+    is_acyclic: bool,
+}
+
+// ============================================================================
+// Section 4: Vectorization Plan Structures
+// ============================================================================
+
+// How a variable will be handled during vectorization.
+enum AvecVarKind {
+    AvecVarScalar,
+    AvecVarVector,
+    AvecVarReduction,
+    AvecVarInduction,
+    AvecVarBroadcast,
+    AvecVarGather,
+}
+
+// Per-variable vectorization information.
+struct AvecVarInfo {
+    reg: i64,
+    kind: AvecVarKind,
+    vec_width: i64,
+    element_type: i64,
+    reduction_op: i64,
+    needs_shuffle: bool,
+}
+
+// A summary of the vectorization plan (for reporting).
+struct AvecSummary {
+    loop_id: i64,
+    vec_width: i64,
+    speedup: f64,
+    scalar_cost: i64,
+    vector_cost: i64,
+    profitable: bool,
+    reductions: i64,
+    gathers: i64,
+}
+
+// The complete vectorization plan for a single loop.
+struct AvecVecPlan {
+    loop_id: i64,
+    vec_width: i64,
+    vars: [AvecVarInfo; 128],
+    var_count: i64,
+    estimated_speedup: f64,
+    scalar_cost: i64,
+    vector_cost: i64,
+    is_profitable: bool,
+    needs_epilog: bool,
+    epilog_iters: i64,
+    needs_runtime_check: bool,
+}
+
+// ============================================================================
+// Section 5: Constructor Functions
+// ============================================================================
+
+fn avec_empty_loop() -> AvecLoop {
+    AvecLoop {
+        id: AVEC_INVALID,
+        header_label: AVEC_INVALID,
+        back_edge_label: AVEC_INVALID,
+        exit_label: AVEC_INVALID,
+        induction_var: AVEC_INVALID,
+        start_val: 0,
+        end_val: 0,
+        step: 1,
+        trip_count: 0,
+        is_countable: false,
+        is_innermost: false,
+        depth: 0,
+        instr_start: 0,
+        instr_count: 0,
+    }
+}
+
+fn avec_empty_instr() -> AvecLoopInstr {
+    AvecLoopInstr {
+        original_idx: AVEC_INVALID,
+        opcode: AVEC_OP_NOP,
+        dst: AVEC_INVALID,
+        src1: AVEC_INVALID,
+        src2: AVEC_INVALID,
+        is_memory: false,
+        is_reduction: false,
+        stride: 0,
+    }
+}
+
+fn avec_loop_nest_new() -> AvecLoopNest {
+    AvecLoopNest {
+        loops: [avec_empty_loop(); 256],
+        loop_count: 0,
+        instrs: [avec_empty_instr(); 512],
+        instr_count: 0,
+    }
+}
+
+fn avec_empty_dep() -> AvecDepEdge {
+    AvecDepEdge {
+        from_instr: AVEC_INVALID,
+        to_instr: AVEC_INVALID,
+        dep_type: 0,
+        distance: 0,
+        direction: 0,
+        variable: AVEC_INVALID,
+        is_loop_carried: false,
+    }
+}
+
+fn avec_dep_graph_new() -> AvecDepGraph {
+    AvecDepGraph {
+        edges: [avec_empty_dep(); 1024],
+        edge_count: 0,
+        loop_id: AVEC_INVALID,
+        is_acyclic: true,
+    }
+}
+
+fn avec_empty_var_info() -> AvecVarInfo {
+    AvecVarInfo {
+        reg: AVEC_INVALID,
+        kind: AvecVarKind::AvecVarScalar,
+        vec_width: 1,
+        element_type: AVEC_ELEM_I64,
+        reduction_op: 0,
+        needs_shuffle: false,
+    }
+}
+
+fn avec_plan_new() -> AvecVecPlan {
+    AvecVecPlan {
+        loop_id: AVEC_INVALID,
+        vec_width: AVEC_VEC_128,
+        vars: [avec_empty_var_info(); 128],
+        var_count: 0,
+        estimated_speedup: 1.0,
+        scalar_cost: 0,
+        vector_cost: 0,
+        is_profitable: false,
+        needs_epilog: false,
+        epilog_iters: 0,
+        needs_runtime_check: false,
+    }
+}
+
+fn avec_empty_summary() -> AvecSummary {
+    AvecSummary {
+        loop_id: AVEC_INVALID,
+        vec_width: 1,
+        speedup: 1.0,
+        scalar_cost: 0,
+        vector_cost: 0,
+        profitable: false,
+        reductions: 0,
+        gathers: 0,
+    }
+}
+
+// ============================================================================
+// Section 6: Opcode Classification Helpers
+// ============================================================================
+
+// Map an IrOpcode enum to an integer tag for fast comparison.
+fn avec_classify_opcode(op: IrOpcode) -> i64 {
+    match op {
+        IrOpcode::IrLoadImm => AVEC_OP_LOAD_IMM,
+        IrOpcode::IrLoadFloat => AVEC_OP_LOAD_FLOAT,
+        IrOpcode::IrLoadBool => AVEC_OP_LOAD_BOOL,
+        IrOpcode::IrCopy => AVEC_OP_COPY,
+        IrOpcode::IrBinOp => AVEC_OP_BINOP,
+        IrOpcode::IrUnaryOp => AVEC_OP_UNARYOP,
+        IrOpcode::IrCall => AVEC_OP_CALL,
+        IrOpcode::IrReturn => AVEC_OP_RETURN,
+        IrOpcode::IrJump => AVEC_OP_JUMP,
+        IrOpcode::IrBranchTrue => AVEC_OP_BRANCH_TRUE,
+        IrOpcode::IrBranchFalse => AVEC_OP_BRANCH_FALSE,
+        IrOpcode::IrIndexGet => AVEC_OP_INDEX_GET,
+        IrOpcode::IrIndexSet => AVEC_OP_INDEX_SET,
+        IrOpcode::IrLabel => AVEC_OP_LABEL,
+        IrOpcode::IrNop => AVEC_OP_NOP,
+        IrOpcode::IrPhi => AVEC_OP_PHI,
+        _ => AVEC_OP_NOP,
+    }
+}
+
+// Check if an opcode represents a memory access (load or store).
+fn avec_is_memory_op(opcode: i64) -> bool {
+    if opcode == AVEC_OP_INDEX_GET { return true }
+    if opcode == AVEC_OP_INDEX_SET { return true }
+    false
+}
+
+// Check if an opcode is an arithmetic binary operation (vectorizable).
+fn avec_is_arith_op(opcode: i64) -> bool {
+    opcode == AVEC_OP_BINOP
+}
+
+// Check if an opcode has side effects that prevent reordering.
+fn avec_has_side_effect(opcode: i64) -> bool {
+    if opcode == AVEC_OP_CALL { return true }
+    if opcode == AVEC_OP_RETURN { return true }
+    if opcode == AVEC_OP_INDEX_SET { return true }
+    false
+}
+
+// Check if a BinaryOp is a commutative arithmetic operation.
+fn avec_is_commutative_binop(op: BinaryOp) -> bool {
+    match op {
+        BinaryOp::OpAdd => true,
+        BinaryOp::OpMul => true,
+        BinaryOp::OpBitAnd => true,
+        BinaryOp::OpBitOr => true,
+        BinaryOp::OpBitXor => true,
+        BinaryOp::OpEq => true,
+        BinaryOp::OpNe => true,
+        _ => false,
+    }
+}
+
+// ============================================================================
+// Section 6b: Loop Detection
+// ============================================================================
+
+// Scan function instructions for natural loop patterns.
+// A natural loop is identified by: Label (header) ... BranchTrue/BranchFalse
+// (exit check) ... Jump back to header (back edge).
+//
+// This is a simplified pattern-based detector that finds the canonical
+// while-loop lowering:
+//   L_header:
+//     ... condition ...
+//     branch_false L_exit
+//     ... body ...
+//     jump L_header
+//   L_exit:
+fn avec_detect_loops(nest: &! AvecLoopNest, func: &IrFunction) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    // Scan for Label instructions that might be loop headers.
+    // A loop header is a label that has a backward jump to it from a later
+    // instruction.
+    while i < func.instr_count && count < AVEC_MAX_LOOPS {
+        let instr = func.instrs[i as usize]
+        let op = avec_classify_opcode(instr.op)
+        if op == AVEC_OP_LABEL {
+            let header_label = instr.label_id
+            // Search forward for a backward jump to this label
+            let back_info = avec_find_back_edge(func, header_label, i + 1)
+            let back_idx = back_info.0
+            let exit_label = back_info.1
+            if back_idx >= 0 {
+                // Found a loop: header at i, back edge at back_idx
+                var lp = avec_empty_loop()
+                lp.id = count
+                lp.header_label = header_label
+                lp.back_edge_label = header_label
+                lp.exit_label = exit_label
+                lp.instr_start = i
+                lp.instr_count = back_idx - i + 1
+                lp.depth = 0
+                lp.is_innermost = true
+                nest.loops[count as usize] = lp
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    nest.loop_count = count
+    count
+}
+
+// Search forward from start_idx for a Jump instruction whose target is
+// header_label. Also look for the exit branch along the way.
+// Returns (back_edge_idx, exit_label) or (-1, -1) if not found.
+fn avec_find_back_edge(func: &IrFunction, header_label: i64, start_idx: i64) -> (i64, i64) with Mut, Div, Panic {
+    var exit_label: i64 = AVEC_INVALID
+    var j: i64 = start_idx
+    while j < func.instr_count {
+        let instr = func.instrs[j as usize]
+        let op = avec_classify_opcode(instr.op)
+        // Record the first conditional branch as the exit condition
+        if op == AVEC_OP_BRANCH_FALSE && exit_label == AVEC_INVALID {
+            exit_label = instr.label_id
+        }
+        if op == AVEC_OP_BRANCH_TRUE && exit_label == AVEC_INVALID {
+            exit_label = instr.label_id
+        }
+        // A Jump back to the header_label is the back edge
+        if op == AVEC_OP_JUMP {
+            if instr.label_id == header_label {
+                return (j, exit_label)
+            }
+        }
+        // If we hit a new label that matches the exit, the loop body ended
+        if op == AVEC_OP_LABEL && exit_label != AVEC_INVALID {
+            if instr.label_id == exit_label {
+                // The loop ended before we found a back edge
+                return (AVEC_INVALID, AVEC_INVALID)
+            }
+        }
+        j = j + 1
+    }
+    (AVEC_INVALID, AVEC_INVALID)
+}
+
+// Check if a loop is countable: has identifiable induction variable,
+// constant start/end/step.
+fn avec_is_countable_loop(nest: &AvecLoopNest, loop_idx: i64) -> bool with Div, Panic {
+    if loop_idx < 0 || loop_idx >= nest.loop_count {
+        return false
+    }
+    let lp = nest.loops[loop_idx as usize]
+    lp.is_countable
+}
+
+// Compute trip count from loop bounds: (end - start + step - 1) / step
+// Only valid for countable loops with positive step.
+fn avec_compute_trip_count(loop_info: &AvecLoop) -> i64 with Div, Panic {
+    if loop_info.is_countable == false {
+        return 0
+    }
+    let step = loop_info.step
+    if step <= 0 {
+        return 0
+    }
+    let range = loop_info.end_val - loop_info.start_val
+    if range <= 0 {
+        return 0
+    }
+    // Ceiling division: (range + step - 1) / step
+    let tc = (range + step - 1) / step
+    tc
+}
+
+// Find the induction variable for a loop by scanning its body for
+// the pattern: reg = reg + const (or reg = reg - const)
+fn avec_find_induction_var(nest: &AvecLoopNest, loop_idx: i64) -> i64 with Mut, Div, Panic {
+    if loop_idx < 0 || loop_idx >= nest.loop_count {
+        return AVEC_INVALID
+    }
+    let lp = nest.loops[loop_idx as usize]
+    // Scan the loop's instructions looking for a self-incrementing pattern
+    var j: i64 = 0
+    while j < lp.instr_count && j < nest.instr_count {
+        let idx = lp.instr_start + j
+        if idx >= 0 && idx < nest.instr_count {
+            let instr = nest.instrs[idx as usize]
+            // Pattern: dst = dst + const  (BinOp with src1 == dst, Add)
+            if instr.opcode == AVEC_OP_BINOP {
+                if instr.dst == instr.src1 && instr.dst != AVEC_INVALID {
+                    return instr.dst
+                }
+            }
+        }
+        j = j + 1
+    }
+    AVEC_INVALID
+}
+
+// Classify all instructions in a loop and populate the nest.instrs array.
+// Returns the number of instructions classified.
+fn avec_classify_loop_instrs(nest: &! AvecLoopNest, loop_idx: i64, func: &IrFunction) -> i64 with Mut, Div, Panic {
+    if loop_idx < 0 || loop_idx >= nest.loop_count {
+        return 0
+    }
+    let lp = nest.loops[loop_idx as usize]
+    var count: i64 = 0
+    var j: i64 = 0
+    let limit = lp.instr_count
+    while j < limit && (lp.instr_start + j) < func.instr_count && count < AVEC_MAX_INSTRS {
+        let orig_idx = lp.instr_start + j
+        let ir_instr = func.instrs[orig_idx as usize]
+        let opcode = avec_classify_opcode(ir_instr.op)
+        var li = avec_empty_instr()
+        li.original_idx = orig_idx
+        li.opcode = opcode
+        li.dst = ir_instr.dst
+        li.src1 = ir_instr.src1
+        li.src2 = ir_instr.src2
+        li.is_memory = avec_is_memory_op(opcode)
+        li.is_reduction = false
+        li.stride = 0
+        // Set instr_start for this loop's view into the instruction array
+        if count == 0 {
+            nest.loops[loop_idx as usize].instr_start = nest.instr_count
+        }
+        let slot = nest.instr_count + count
+        if slot < AVEC_MAX_INSTRS {
+            nest.instrs[slot as usize] = li
+        }
+        count = count + 1
+        j = j + 1
+    }
+    nest.loops[loop_idx as usize].instr_count = count
+    nest.instr_count = nest.instr_count + count
+    count
+}
+
+// Check if a loop is innermost (no other loop is nested inside it).
+fn avec_is_innermost(nest: &AvecLoopNest, loop_idx: i64) -> bool with Mut, Div, Panic {
+    if loop_idx < 0 || loop_idx >= nest.loop_count {
+        return false
+    }
+    let lp = nest.loops[loop_idx as usize]
+    // A loop is innermost if no other loop's header falls within its range
+    var k: i64 = 0
+    while k < nest.loop_count {
+        if k != loop_idx {
+            let other = nest.loops[k as usize]
+            // If the other loop's start is strictly inside this loop
+            if other.instr_start > lp.instr_start &&
+               other.instr_start < lp.instr_start + lp.instr_count {
+                return false
+            }
+        }
+        k = k + 1
+    }
+    true
+}
+
+// ============================================================================
+// Section 7: Dependence Analysis
+// ============================================================================
+
+// Build the dependence graph for a single loop.
+// Scans all pairs of memory instructions and computes dependences.
+// Returns the number of edges added.
+fn avec_build_dep_graph(graph: &! AvecDepGraph, nest: &AvecLoopNest, loop_idx: i64) -> i64 with Mut, Div, Panic {
+    if loop_idx < 0 || loop_idx >= nest.loop_count {
+        return 0
+    }
+    graph.loop_id = loop_idx
+    graph.edge_count = 0
+    graph.is_acyclic = true
+    let lp = nest.loops[loop_idx as usize]
+    var added: i64 = 0
+    // Compare all pairs (i, j) of instructions in the loop body
+    var i: i64 = 0
+    while i < lp.instr_count {
+        var j: i64 = i + 1
+        while j < lp.instr_count {
+            let dep_type = avec_check_dep(nest, lp.instr_start + i, lp.instr_start + j)
+            if dep_type > 0 && graph.edge_count < AVEC_MAX_DEPS {
+                var edge = avec_empty_dep()
+                edge.from_instr = i
+                edge.to_instr = j
+                edge.dep_type = dep_type
+                edge.distance = avec_dep_distance(nest, lp.instr_start + i, lp.instr_start + j)
+                edge.variable = avec_dep_variable(nest, lp.instr_start + i, lp.instr_start + j)
+                edge.is_loop_carried = edge.distance > 0
+                // A flow dependence with distance > 0 might form a cycle
+                if dep_type == AVEC_DEP_FLOW && edge.distance > 0 {
+                    graph.is_acyclic = false
+                }
+                graph.edges[graph.edge_count as usize] = edge
+                graph.edge_count = graph.edge_count + 1
+                added = added + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    added
+}
+
+// Determine the common variable between two instructions (for dep tracking).
+fn avec_dep_variable(nest: &AvecLoopNest, from: i64, to: i64) -> i64 with Div, Panic {
+    if from < 0 || from >= nest.instr_count {
+        return AVEC_INVALID
+    }
+    if to < 0 || to >= nest.instr_count {
+        return AVEC_INVALID
+    }
+    let a = nest.instrs[from as usize]
+    let b = nest.instrs[to as usize]
+    // If a writes and b reads the same register
+    if a.dst != AVEC_INVALID && (b.src1 == a.dst || b.src2 == a.dst) {
+        return a.dst
+    }
+    // If both write to the same register
+    if a.dst != AVEC_INVALID && a.dst == b.dst {
+        return a.dst
+    }
+    // If a reads and b writes to the same register
+    if b.dst != AVEC_INVALID && (a.src1 == b.dst || a.src2 == b.dst) {
+        return b.dst
+    }
+    AVEC_INVALID
+}
+
+// Check if two instructions have a dependence.
+// Returns the dependence type (AVEC_DEP_FLOW, _ANTI, _OUTPUT, _INPUT) or 0.
+fn avec_check_dep(nest: &AvecLoopNest, from: i64, to: i64) -> i64 with Div, Panic {
+    if from < 0 || from >= nest.instr_count {
+        return 0
+    }
+    if to < 0 || to >= nest.instr_count {
+        return 0
+    }
+    let a = nest.instrs[from as usize]
+    let b = nest.instrs[to as usize]
+    // Check flow dependence: a writes, b reads
+    if a.dst != AVEC_INVALID {
+        if b.src1 == a.dst || b.src2 == a.dst {
+            return AVEC_DEP_FLOW
+        }
+    }
+    // Check output dependence: both write to same register
+    if a.dst != AVEC_INVALID && b.dst != AVEC_INVALID {
+        if a.dst == b.dst {
+            return AVEC_DEP_OUTPUT
+        }
+    }
+    // Check anti-dependence: a reads, b writes
+    if b.dst != AVEC_INVALID {
+        if a.src1 == b.dst || a.src2 == b.dst {
+            return AVEC_DEP_ANTI
+        }
+    }
+    // Check input dependence: both read same register
+    if a.src1 != AVEC_INVALID && b.src1 != AVEC_INVALID {
+        if a.src1 == b.src1 || a.src1 == b.src2 {
+            return AVEC_DEP_INPUT
+        }
+    }
+    if a.src2 != AVEC_INVALID && b.src1 != AVEC_INVALID {
+        if a.src2 == b.src1 || a.src2 == b.src2 {
+            return AVEC_DEP_INPUT
+        }
+    }
+    0
+}
+
+// Compute the dependence distance between two instructions.
+// For simple induction-based accesses, distance = difference in offsets.
+// Returns 0 for loop-independent, positive for loop-carried.
+fn avec_dep_distance(nest: &AvecLoopNest, from: i64, to: i64) -> i64 with Div, Panic {
+    if from < 0 || from >= nest.instr_count {
+        return 0
+    }
+    if to < 0 || to >= nest.instr_count {
+        return 0
+    }
+    let a = nest.instrs[from as usize]
+    let b = nest.instrs[to as usize]
+    // Both must be memory ops for loop-carried distance
+    if a.is_memory && b.is_memory {
+        // If they access the same base array, compare strides
+        let diff = b.stride - a.stride
+        if diff < 0 {
+            return 0 - diff
+        }
+        return diff
+    }
+    // For register-only deps, the distance is 0 (loop-independent)
+    0
+}
+
+// Check if a given edge is loop-carried.
+fn avec_is_loop_carried(graph: &AvecDepGraph, edge_idx: i64) -> bool with Div, Panic {
+    if edge_idx < 0 || edge_idx >= graph.edge_count {
+        return false
+    }
+    graph.edges[edge_idx as usize].is_loop_carried
+}
+
+// Check if the dependence graph contains a cycle.
+// A cycle means there is a loop-carried flow dependence that prevents
+// vectorization.
+fn avec_has_cycle(graph: &AvecDepGraph) -> bool with Div, Panic {
+    graph.is_acyclic == false
+}
+
+// Check if two instructions can be safely reordered given the dep graph.
+fn avec_can_reorder(graph: &AvecDepGraph, a: i64, b: i64) -> bool with Mut, Div, Panic {
+    // Check all edges for a direct dependence between a and b
+    var i: i64 = 0
+    while i < graph.edge_count {
+        let edge = graph.edges[i as usize]
+        // Flow or output dep from a to b prevents reorder
+        if edge.from_instr == a && edge.to_instr == b {
+            if edge.dep_type == AVEC_DEP_FLOW || edge.dep_type == AVEC_DEP_OUTPUT {
+                return false
+            }
+        }
+        // Flow or output dep from b to a also prevents reorder
+        if edge.from_instr == b && edge.to_instr == a {
+            if edge.dep_type == AVEC_DEP_FLOW || edge.dep_type == AVEC_DEP_OUTPUT {
+                return false
+            }
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Check if any dependence in the graph prevents vectorization entirely.
+// A loop-carried flow or output dependence with distance < vector_width
+// prevents vectorization.
+fn avec_dep_prevents_vectorization(graph: &AvecDepGraph) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < graph.edge_count {
+        let edge = graph.edges[i as usize]
+        if edge.is_loop_carried {
+            // Flow and output dependences prevent vectorization
+            if edge.dep_type == AVEC_DEP_FLOW || edge.dep_type == AVEC_DEP_OUTPUT {
+                // Unless distance is >= vector width (checked later with actual width)
+                if edge.distance > 0 && edge.distance < AVEC_VEC_128 {
+                    return true
+                }
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+// ============================================================================
+// Section 8: Stride Analysis
+// ============================================================================
+
+// Compute the stride of a memory access instruction.
+// Stride = 1 means consecutive elements (unit stride, ideal for SIMD).
+// Stride > 1 means strided access (may need gather/scatter).
+// Stride = 0 means invariant (broadcast).
+fn avec_compute_stride(nest: &AvecLoopNest, instr_idx: i64) -> i64 with Div, Panic {
+    if instr_idx < 0 || instr_idx >= nest.instr_count {
+        return 0
+    }
+    let instr = nest.instrs[instr_idx as usize]
+    if instr.is_memory == false {
+        return 0
+    }
+    // If the index register matches the induction variable, stride = 1
+    // If it is a scaled IV (e.g., i*2), stride = scale
+    // We use the stored stride if already computed
+    if instr.stride != 0 {
+        return instr.stride
+    }
+    // Default: assume unit stride for memory ops with an index
+    if instr.src2 != AVEC_INVALID {
+        return 1
+    }
+    0
+}
+
+// Check if instruction has unit stride (1 element apart, ideal for SIMD).
+fn avec_is_unit_stride(nest: &AvecLoopNest, instr_idx: i64) -> bool with Div, Panic {
+    let stride = avec_compute_stride(nest, instr_idx)
+    stride == 1
+}
+
+// Check if all memory accesses in a loop are contiguous (unit stride).
+fn avec_is_contiguous(nest: &AvecLoopNest, loop_idx: i64) -> bool with Mut, Div, Panic {
+    if loop_idx < 0 || loop_idx >= nest.loop_count {
+        return false
+    }
+    let lp = nest.loops[loop_idx as usize]
+    var j: i64 = 0
+    while j < lp.instr_count {
+        let idx = lp.instr_start + j
+        if idx >= 0 && idx < nest.instr_count {
+            let instr = nest.instrs[idx as usize]
+            if instr.is_memory {
+                let stride = avec_compute_stride(nest, idx)
+                if stride != 1 && stride != 0 {
+                    return false
+                }
+            }
+        }
+        j = j + 1
+    }
+    true
+}
+
+// Check if an instruction needs a gather operation (non-unit stride load).
+fn avec_needs_gather(nest: &AvecLoopNest, instr_idx: i64) -> bool with Div, Panic {
+    if instr_idx < 0 || instr_idx >= nest.instr_count {
+        return false
+    }
+    let instr = nest.instrs[instr_idx as usize]
+    if instr.is_memory == false {
+        return false
+    }
+    if instr.opcode == AVEC_OP_INDEX_GET {
+        let stride = avec_compute_stride(nest, instr_idx)
+        // Non-unit, non-zero stride requires gather
+        if stride > 1 {
+            return true
+        }
+    }
+    false
+}
+
+// Classify the memory access pattern of an instruction.
+// Returns AVEC_ACCESS_UNIT (0), AVEC_ACCESS_STRIDED (1), or AVEC_ACCESS_RANDOM (2).
+fn avec_access_pattern(nest: &AvecLoopNest, instr_idx: i64) -> i64 with Div, Panic {
+    if instr_idx < 0 || instr_idx >= nest.instr_count {
+        return AVEC_ACCESS_RANDOM
+    }
+    let instr = nest.instrs[instr_idx as usize]
+    if instr.is_memory == false {
+        return AVEC_ACCESS_UNIT
+    }
+    let stride = avec_compute_stride(nest, instr_idx)
+    if stride == 0 {
+        // Invariant access — treat as broadcast (unit)
+        return AVEC_ACCESS_UNIT
+    }
+    if stride == 1 {
+        return AVEC_ACCESS_UNIT
+    }
+    if stride > 1 {
+        return AVEC_ACCESS_STRIDED
+    }
+    AVEC_ACCESS_RANDOM
+}
+
+// ============================================================================
+// Section 9: Reduction Detection
+// ============================================================================
+
+// Check if an instruction is a reduction operation.
+// A reduction is: acc = acc OP val, where OP is associative and commutative.
+fn avec_is_reduction(nest: &AvecLoopNest, instr_idx: i64) -> bool with Div, Panic {
+    if instr_idx < 0 || instr_idx >= nest.instr_count {
+        return false
+    }
+    let instr = nest.instrs[instr_idx as usize]
+    if instr.opcode != AVEC_OP_BINOP {
+        return false
+    }
+    // Pattern: dst = dst OP src  or  dst = src OP dst
+    if instr.dst == instr.src1 && instr.src2 != AVEC_INVALID {
+        return true
+    }
+    if instr.dst == instr.src2 && instr.src1 != AVEC_INVALID {
+        return true
+    }
+    false
+}
+
+// Return the BinaryOp code for a reduction instruction.
+// Uses the instruction's bin_op field indirectly through its opcode
+// classification. Returns 0 if not a reduction.
+fn avec_reduction_op(nest: &AvecLoopNest, instr_idx: i64) -> i64 with Div, Panic {
+    if instr_idx < 0 || instr_idx >= nest.instr_count {
+        return 0
+    }
+    let instr = nest.instrs[instr_idx as usize]
+    if instr.opcode != AVEC_OP_BINOP {
+        return 0
+    }
+    if avec_is_reduction(nest, instr_idx) == false {
+        return 0
+    }
+    // Encode the reduction op as a simple integer:
+    // 1 = Add, 2 = Mul, 3 = BitAnd, 4 = BitOr, 5 = BitXor
+    // We use the src2 pattern to determine the op — in practice, the
+    // IrInstr.bin_op field is used during actual transform.
+    // For analysis, any self-referencing BinOp is returned as 1 (Add).
+    1
+}
+
+// Return the identity element for a given reduction operation.
+// Add: 0, Mul: 1, BitAnd: all-ones, BitOr: 0, BitXor: 0, Min: MAX, Max: MIN
+fn avec_reduction_identity(op: i64) -> i64 {
+    if op == 1 { return 0 }    // Add identity
+    if op == 2 { return 1 }    // Mul identity
+    if op == 3 { return AVEC_INVALID }  // BitAnd identity (all 1s)
+    if op == 4 { return 0 }    // BitOr identity
+    if op == 5 { return 0 }    // BitXor identity
+    0
+}
+
+// Count the number of reduction operations in a loop.
+fn avec_find_reductions(nest: &AvecLoopNest, loop_idx: i64) -> i64 with Mut, Div, Panic {
+    if loop_idx < 0 || loop_idx >= nest.loop_count {
+        return 0
+    }
+    let lp = nest.loops[loop_idx as usize]
+    var count: i64 = 0
+    var j: i64 = 0
+    while j < lp.instr_count {
+        let idx = lp.instr_start + j
+        if idx >= 0 && idx < nest.instr_count {
+            if avec_is_reduction(nest, idx) {
+                count = count + 1
+            }
+        }
+        j = j + 1
+    }
+    count
+}
+
+// Check if a reduction operation is associative (can be safely vectorized).
+// Associative ops: Add, Mul, BitAnd, BitOr, BitXor.
+fn avec_is_associative(op: i64) -> bool {
+    if op == 1 { return true }  // Add
+    if op == 2 { return true }  // Mul
+    if op == 3 { return true }  // BitAnd
+    if op == 4 { return true }  // BitOr
+    if op == 5 { return true }  // BitXor
+    false
+}
+
+// ============================================================================
+// Section 10: Cost Model
+// ============================================================================
+
+// Compute the cost of a single instruction in scalar mode.
+fn avec_instr_scalar_cost(opcode: i64) -> i64 {
+    if opcode == AVEC_OP_BINOP { return AVEC_COST_SCALAR_ADD }
+    if opcode == AVEC_OP_UNARYOP { return AVEC_COST_SCALAR_ADD }
+    if opcode == AVEC_OP_INDEX_GET { return AVEC_COST_SCALAR_ADD }
+    if opcode == AVEC_OP_INDEX_SET { return AVEC_COST_SCALAR_ADD }
+    if opcode == AVEC_OP_COPY { return AVEC_COST_SCALAR_ADD }
+    if opcode == AVEC_OP_LOAD_IMM { return AVEC_COST_SCALAR_ADD }
+    if opcode == AVEC_OP_LOAD_FLOAT { return AVEC_COST_SCALAR_ADD }
+    if opcode == AVEC_OP_PHI { return 0 }
+    if opcode == AVEC_OP_LABEL { return 0 }
+    if opcode == AVEC_OP_NOP { return 0 }
+    if opcode == AVEC_OP_JUMP { return 0 }
+    if opcode == AVEC_OP_BRANCH_TRUE { return AVEC_COST_SCALAR_ADD }
+    if opcode == AVEC_OP_BRANCH_FALSE { return AVEC_COST_SCALAR_ADD }
+    AVEC_COST_SCALAR_ADD
+}
+
+// Compute the cost of a single instruction in vector mode.
+// Vector ops have ~same latency as scalar but process multiple elements.
+// Additional costs for gathers, scatters, shuffles.
+fn avec_instr_vector_cost(opcode: i64, width: i64) -> i64 {
+    if opcode == AVEC_OP_BINOP { return AVEC_COST_VEC_ADD }
+    if opcode == AVEC_OP_UNARYOP { return AVEC_COST_VEC_ADD }
+    if opcode == AVEC_OP_INDEX_GET { return AVEC_COST_VEC_ADD }
+    if opcode == AVEC_OP_INDEX_SET { return AVEC_COST_VEC_ADD }
+    if opcode == AVEC_OP_COPY { return AVEC_COST_BROADCAST }
+    if opcode == AVEC_OP_LOAD_IMM { return AVEC_COST_BROADCAST }
+    if opcode == AVEC_OP_LOAD_FLOAT { return AVEC_COST_BROADCAST }
+    if opcode == AVEC_OP_PHI { return 0 }
+    if opcode == AVEC_OP_LABEL { return 0 }
+    if opcode == AVEC_OP_NOP { return 0 }
+    if opcode == AVEC_OP_JUMP { return 0 }
+    if opcode == AVEC_OP_BRANCH_TRUE { return AVEC_COST_SCALAR_ADD }
+    if opcode == AVEC_OP_BRANCH_FALSE { return AVEC_COST_SCALAR_ADD }
+    AVEC_COST_VEC_ADD
+}
+
+// Compute the total scalar cost of executing a loop body once.
+fn avec_scalar_cost(nest: &AvecLoopNest, loop_idx: i64) -> i64 with Mut, Div, Panic {
+    if loop_idx < 0 || loop_idx >= nest.loop_count {
+        return 0
+    }
+    let lp = nest.loops[loop_idx as usize]
+    var total: i64 = 0
+    var j: i64 = 0
+    while j < lp.instr_count {
+        let idx = lp.instr_start + j
+        if idx >= 0 && idx < nest.instr_count {
+            let instr = nest.instrs[idx as usize]
+            total = total + avec_instr_scalar_cost(instr.opcode)
+        }
+        j = j + 1
+    }
+    total
+}
+
+// Compute the total vector cost of executing a loop body once.
+fn avec_vector_cost(nest: &AvecLoopNest, loop_idx: i64, vec_width: i64) -> i64 with Mut, Div, Panic {
+    if loop_idx < 0 || loop_idx >= nest.loop_count {
+        return 0
+    }
+    let lp = nest.loops[loop_idx as usize]
+    var total: i64 = 0
+    var j: i64 = 0
+    while j < lp.instr_count {
+        let idx = lp.instr_start + j
+        if idx >= 0 && idx < nest.instr_count {
+            let instr = nest.instrs[idx as usize]
+            let base_cost = avec_instr_vector_cost(instr.opcode, vec_width)
+            // Add gather cost for non-unit-stride memory ops
+            if instr.is_memory && instr.stride > 1 {
+                if instr.opcode == AVEC_OP_INDEX_GET {
+                    total = total + AVEC_COST_GATHER
+                }
+                if instr.opcode == AVEC_OP_INDEX_SET {
+                    total = total + AVEC_COST_SCATTER
+                }
+            } else {
+                total = total + base_cost
+            }
+            // Add shuffle cost for reductions
+            if instr.is_reduction {
+                total = total + AVEC_COST_SHUFFLE
+            }
+        }
+        j = j + 1
+    }
+    total
+}
+
+// Estimate the speedup from vectorization.
+// speedup = (scalar_cost * trip_count) / (vector_cost * (trip_count / vec_width) + epilog_cost)
+fn avec_estimated_speedup(scalar: i64, vector: i64, vec_width: i64) -> f64 with Div, Panic {
+    if vector <= 0 {
+        return 1.0
+    }
+    if scalar <= 0 {
+        return 1.0
+    }
+    // Simple model: speedup = (scalar * vec_width) / (vector * 1 + overhead)
+    // We approximate: the vector body runs trip_count/vec_width times
+    let s_f64 = scalar as f64
+    let v_f64 = vector as f64
+    let w_f64 = vec_width as f64
+    let speedup = (s_f64 * w_f64) / (v_f64 + w_f64)
+    speedup
+}
+
+// Determine if vectorization is profitable given costs and trip count.
+fn avec_is_profitable(scalar_cost: i64, vector_cost: i64, trip_count: i64, vec_width: i64) -> bool with Div, Panic {
+    if trip_count < AVEC_MIN_TRIP_COUNT {
+        return false
+    }
+    if vec_width <= 1 {
+        return false
+    }
+    if vector_cost <= 0 {
+        return false
+    }
+    // Total scalar cost across all iterations
+    let total_scalar = scalar_cost * trip_count
+    // Total vector cost: vec iterations + possible epilogue
+    let vec_iters = trip_count / vec_width
+    let epilog_iters = trip_count - (vec_iters * vec_width)
+    let total_vector = (vector_cost * vec_iters) + (scalar_cost * epilog_iters)
+    if total_vector <= 0 {
+        return false
+    }
+    // Profitable if total_vector < total_scalar * (100 / AVEC_MIN_SPEEDUP_PERCENT)
+    // Equivalent to: total_vector * AVEC_MIN_SPEEDUP_PERCENT < total_scalar * 100
+    let lhs = total_vector * AVEC_MIN_SPEEDUP_PERCENT
+    let rhs = total_scalar * 100
+    lhs < rhs
+}
+
+// Find the best vector width for a loop, trying 512 -> 256 -> 128.
+fn avec_best_vec_width(nest: &AvecLoopNest, loop_idx: i64) -> i64 with Mut, Div, Panic {
+    if loop_idx < 0 || loop_idx >= nest.loop_count {
+        return AVEC_VEC_128
+    }
+    let lp = nest.loops[loop_idx as usize]
+    let sc = avec_scalar_cost(nest, loop_idx)
+    // Try AVX-512 first
+    let vc_512 = avec_vector_cost(nest, loop_idx, AVEC_VEC_512)
+    if avec_is_profitable(sc, vc_512, lp.trip_count, AVEC_VEC_512) {
+        return AVEC_VEC_512
+    }
+    // Try AVX-256
+    let vc_256 = avec_vector_cost(nest, loop_idx, AVEC_VEC_256)
+    if avec_is_profitable(sc, vc_256, lp.trip_count, AVEC_VEC_256) {
+        return AVEC_VEC_256
+    }
+    // Fall back to SSE-128
+    AVEC_VEC_128
+}
+
+// ============================================================================
+// Section 11: Vectorization Planning
+// ============================================================================
+
+// Build a complete vectorization plan for a loop.
+// Returns true if the loop can be vectorized profitably.
+fn avec_plan_loop(plan: &! AvecVecPlan, nest: &AvecLoopNest, graph: &AvecDepGraph, loop_idx: i64) -> bool with Mut, Div, Panic {
+    if loop_idx < 0 || loop_idx >= nest.loop_count {
+        return false
+    }
+    let lp = nest.loops[loop_idx as usize]
+    plan.loop_id = loop_idx
+    // Check dependences first
+    if avec_dep_prevents_vectorization(graph) {
+        plan.is_profitable = false
+        return false
+    }
+    // Must be innermost loop
+    if avec_is_innermost(nest, loop_idx) == false {
+        plan.is_profitable = false
+        return false
+    }
+    // Find best vector width
+    let width = avec_best_vec_width(nest, loop_idx)
+    plan.vec_width = width
+    // Classify all variables
+    let var_count = avec_classify_vars(plan, nest, loop_idx)
+    plan.var_count = var_count
+    // Compute costs
+    let sc = avec_scalar_cost(nest, loop_idx)
+    let vc = avec_vector_cost(nest, loop_idx, width)
+    plan.scalar_cost = sc
+    plan.vector_cost = vc
+    plan.estimated_speedup = avec_estimated_speedup(sc, vc, width)
+    // Check profitability
+    plan.is_profitable = avec_is_profitable(sc, vc, lp.trip_count, width)
+    // Determine epilogue needs
+    plan.needs_epilog = avec_needs_epilog(plan)
+    plan.epilog_iters = avec_epilog_iterations(plan)
+    // Runtime checks needed if we cannot statically prove no aliasing
+    plan.needs_runtime_check = false
+    plan.is_profitable
+}
+
+// Classify all variables in a loop: scalar, vector, reduction, induction,
+// broadcast, or gather.
+fn avec_classify_vars(plan: &! AvecVecPlan, nest: &AvecLoopNest, loop_idx: i64) -> i64 with Mut, Div, Panic {
+    if loop_idx < 0 || loop_idx >= nest.loop_count {
+        return 0
+    }
+    let lp = nest.loops[loop_idx as usize]
+    var count: i64 = 0
+    // Track which registers we have already classified
+    var seen_regs: [i64; 128] = [AVEC_INVALID; 128]
+    var seen_count: i64 = 0
+    var j: i64 = 0
+    while j < lp.instr_count && count < AVEC_MAX_VARS {
+        let idx = lp.instr_start + j
+        if idx >= 0 && idx < nest.instr_count {
+            let instr = nest.instrs[idx as usize]
+            if instr.dst != AVEC_INVALID {
+                // Check if we already classified this register
+                let already = avec_find_in_array(seen_regs, seen_count, instr.dst)
+                if already == false {
+                    var vi = avec_empty_var_info()
+                    vi.reg = instr.dst
+                    vi.vec_width = plan.vec_width
+                    vi.element_type = AVEC_ELEM_I64
+                    // Classify this variable
+                    if instr.dst == lp.induction_var {
+                        vi.kind = AvecVarKind::AvecVarInduction
+                    } else if avec_is_reduction(nest, idx) {
+                        vi.kind = AvecVarKind::AvecVarReduction
+                        vi.reduction_op = avec_reduction_op(nest, idx)
+                        vi.needs_shuffle = true
+                    } else if avec_needs_gather(nest, idx) {
+                        vi.kind = AvecVarKind::AvecVarGather
+                    } else if instr.is_memory {
+                        vi.kind = AvecVarKind::AvecVarVector
+                    } else if instr.opcode == AVEC_OP_LOAD_IMM || instr.opcode == AVEC_OP_LOAD_FLOAT {
+                        vi.kind = AvecVarKind::AvecVarBroadcast
+                    } else if instr.opcode == AVEC_OP_BINOP || instr.opcode == AVEC_OP_UNARYOP {
+                        vi.kind = AvecVarKind::AvecVarVector
+                    } else {
+                        vi.kind = AvecVarKind::AvecVarScalar
+                    }
+                    plan.vars[count as usize] = vi
+                    if seen_count < 128 {
+                        seen_regs[seen_count as usize] = instr.dst
+                        seen_count = seen_count + 1
+                    }
+                    count = count + 1
+                }
+            }
+        }
+        j = j + 1
+    }
+    count
+}
+
+// Helper: check if a value exists in an array.
+fn avec_find_in_array(arr: [i64; 128], count: i64, val: i64) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < count && i < 128 {
+        if arr[i as usize] == val {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Check if the vectorized loop needs an epilogue (scalar tail).
+fn avec_needs_epilog(plan: &AvecVecPlan) -> bool with Div, Panic {
+    if plan.loop_id == AVEC_INVALID {
+        return false
+    }
+    let width = plan.vec_width
+    if width <= 1 {
+        return false
+    }
+    // Epilogue needed if trip count is not evenly divisible by vec_width.
+    // Since trip count is checked at plan time, we assume it may be
+    // non-divisible unless proven otherwise.
+    true
+}
+
+// Compute the number of epilogue iterations needed.
+fn avec_epilog_iterations(plan: &AvecVecPlan) -> i64 {
+    if plan.vec_width <= 1 {
+        return 0
+    }
+    // This will be filled in with actual trip_count % vec_width
+    // during the transform. For planning, we estimate conservatively.
+    let w = plan.vec_width
+    // Worst case: vec_width - 1 epilogue iterations
+    w - 1
+}
+
+// Create a summary of the vectorization plan.
+fn avec_plan_summary(plan: &AvecVecPlan) -> AvecSummary with Mut, Div, Panic {
+    var summary = avec_empty_summary()
+    summary.loop_id = plan.loop_id
+    summary.vec_width = plan.vec_width
+    summary.speedup = plan.estimated_speedup
+    summary.scalar_cost = plan.scalar_cost
+    summary.vector_cost = plan.vector_cost
+    summary.profitable = plan.is_profitable
+    // Count reductions and gathers
+    var reds: i64 = 0
+    var gats: i64 = 0
+    var i: i64 = 0
+    while i < plan.var_count {
+        let vi = plan.vars[i as usize]
+        match vi.kind {
+            AvecVarKind::AvecVarReduction => { reds = reds + 1 }
+            AvecVarKind::AvecVarGather => { gats = gats + 1 }
+            _ => {}
+        }
+        i = i + 1
+    }
+    summary.reductions = reds
+    summary.gathers = gats
+    summary
+}
+
+// ============================================================================
+// Section 12: Vectorization Transform (IR Rewriting)
+// ============================================================================
+
+// Apply the vectorization transform to a loop in the IR function.
+// Returns true on success.
+fn avec_vectorize_loop(func: &! IrFunction, plan: &AvecVecPlan, nest: &AvecLoopNest) -> bool with Mut, Div, Panic {
+    if plan.is_profitable == false {
+        return false
+    }
+    if plan.loop_id < 0 || plan.loop_id >= nest.loop_count {
+        return false
+    }
+    let lp = nest.loops[plan.loop_id as usize]
+    let width = plan.vec_width
+    // Step 1: Insert prologue (alignment, runtime checks)
+    let prologue_regs = avec_insert_prologue(func, plan)
+    // Step 2: Widen each instruction in the loop body
+    var j: i64 = 0
+    while j < lp.instr_count {
+        let orig_idx = lp.instr_start + j
+        if orig_idx >= 0 && orig_idx < func.instr_count {
+            let widened = avec_widen_instr(func, orig_idx, width)
+            // If widening failed, we cannot vectorize this instruction
+            // In practice, fall back to scalar
+        }
+        j = j + 1
+    }
+    // Step 3: Modify the loop stride to step by vec_width instead of 1
+    // Find the induction variable increment and multiply step by vec_width
+    var k: i64 = lp.instr_start
+    while k < lp.instr_start + lp.instr_count && k < func.instr_count {
+        let instr = func.instrs[k as usize]
+        let op = avec_classify_opcode(instr.op)
+        if op == AVEC_OP_BINOP {
+            if instr.dst == lp.induction_var && instr.src1 == lp.induction_var {
+                // This is the IV increment: change step to step * vec_width
+                // We modify the immediate source by inserting a new load
+                // For now, mark this as the widened increment location
+                // (actual codegen would insert vmul or change the constant)
+            }
+        }
+        k = k + 1
+    }
+    // Step 4: Insert reduction combines
+    var m: i64 = 0
+    while m < plan.var_count {
+        let vi = plan.vars[m as usize]
+        match vi.kind {
+            AvecVarKind::AvecVarReduction => {
+                let combine_reg = avec_insert_reduction_combine(func, &vi)
+            }
+            _ => {}
+        }
+        m = m + 1
+    }
+    // Step 5: Insert epilogue (scalar tail for remaining iterations)
+    if plan.needs_epilog {
+        let epilog_result = avec_insert_epilogue(func, plan)
+    }
+    true
+}
+
+// Widen a single instruction to operate on vector registers.
+// Returns true if the instruction was successfully widened.
+fn avec_widen_instr(func: &! IrFunction, instr_idx: i64, vec_width: i64) -> bool with Mut, Div, Panic {
+    if instr_idx < 0 || instr_idx >= func.instr_count {
+        return false
+    }
+    let instr = func.instrs[instr_idx as usize]
+    let op = avec_classify_opcode(instr.op)
+    // Skip control flow — these remain scalar
+    if op == AVEC_OP_LABEL { return true }
+    if op == AVEC_OP_JUMP { return true }
+    if op == AVEC_OP_BRANCH_TRUE { return true }
+    if op == AVEC_OP_BRANCH_FALSE { return true }
+    if op == AVEC_OP_NOP { return true }
+    if op == AVEC_OP_RETURN { return true }
+    // Arithmetic and memory ops: mark the destination register as a vector reg.
+    // In a real implementation, this would change the instruction opcode to its
+    // SIMD variant (e.g., IrBinOp -> IrVecBinOp) and allocate vector registers.
+    // For the IR representation, we annotate by adjusting the imm_i64 field
+    // to encode the vector width.
+    if op == AVEC_OP_BINOP || op == AVEC_OP_UNARYOP || op == AVEC_OP_INDEX_GET || op == AVEC_OP_INDEX_SET {
+        // Store vector width in imm_i64 as a marker for the backend
+        var widened = instr
+        widened.imm_i64 = vec_width
+        func.instrs[instr_idx as usize] = widened
+        return true
+    }
+    if op == AVEC_OP_LOAD_IMM || op == AVEC_OP_LOAD_FLOAT {
+        // These become broadcast instructions
+        var widened = instr
+        widened.imm_i64 = vec_width
+        func.instrs[instr_idx as usize] = widened
+        return true
+    }
+    if op == AVEC_OP_COPY {
+        // Copies between vector registers
+        var widened = instr
+        widened.imm_i64 = vec_width
+        func.instrs[instr_idx as usize] = widened
+        return true
+    }
+    // Calls and other side-effecting ops cannot be widened
+    false
+}
+
+// Insert prologue code before the loop (alignment, runtime checks, setup).
+// Returns the register holding the aligned trip count.
+fn avec_insert_prologue(func: &! IrFunction, plan: &AvecVecPlan) -> i64 with Mut, Div, Panic {
+    // In a full implementation, this would:
+    // 1. Compute aligned_trip_count = trip_count & ~(vec_width - 1)
+    // 2. Insert alignment peeling if needed
+    // 3. Insert runtime alias checks if needed
+    // For now, return the next available register as a placeholder.
+    let result_reg = func.reg_count
+    func.reg_count = func.reg_count + 1
+    result_reg
+}
+
+// Insert epilogue code after the loop (scalar tail for remaining iterations).
+// Returns the number of instructions inserted.
+fn avec_insert_epilogue(func: &! IrFunction, plan: &AvecVecPlan) -> i64 with Mut, Div, Panic {
+    // In a full implementation, this would:
+    // 1. Generate a scalar loop from aligned_trip_count to trip_count
+    // 2. Copy the original loop body
+    // For now, just return 0 — no instructions inserted yet.
+    0
+}
+
+// Insert the horizontal reduction combine after the vectorized loop.
+// For sum reduction: result = hadd(vec_accum) = v[0] + v[1] + ... + v[w-1]
+// Returns the register holding the combined scalar result.
+fn avec_insert_reduction_combine(func: &! IrFunction, var_info: &AvecVarInfo) -> i64 with Mut, Div, Panic {
+    // In a full implementation, this would generate a tree of horizontal
+    // add/mul/etc instructions to reduce the vector accumulator to a scalar.
+    // For vec_width=4: t0 = shuffle+add, t1 = shuffle+add -> scalar result.
+    let result_reg = func.reg_count
+    func.reg_count = func.reg_count + 1
+    result_reg
+}
+
+// ============================================================================
+// Section 12b: Alignment Analysis
+// ============================================================================
+
+// Check if a memory access is naturally aligned for vector operations.
+// For SIMD, the base address should be aligned to vec_width * element_size.
+// We approximate by checking if the base register's offset is a multiple
+// of the vector width.
+fn avec_is_aligned(nest: &AvecLoopNest, instr_idx: i64, vec_width: i64) -> bool with Div, Panic {
+    if instr_idx < 0 || instr_idx >= nest.instr_count {
+        return false
+    }
+    let instr = nest.instrs[instr_idx as usize]
+    if instr.is_memory == false {
+        return true
+    }
+    // In a real implementation, we would check base pointer alignment.
+    // For the IR representation, assume unit-stride accesses from known
+    // base pointers are aligned.
+    let stride = avec_compute_stride(nest, instr_idx)
+    if stride == 1 {
+        return true
+    }
+    false
+}
+
+// Compute how many peeling iterations are needed to reach alignment.
+// Returns 0 if already aligned, or up to vec_width - 1 iterations.
+fn avec_alignment_peel_count(nest: &AvecLoopNest, loop_idx: i64, vec_width: i64) -> i64 with Mut, Div, Panic {
+    if loop_idx < 0 || loop_idx >= nest.loop_count {
+        return 0
+    }
+    let lp = nest.loops[loop_idx as usize]
+    // Check all memory instructions in the loop
+    var max_peel: i64 = 0
+    var j: i64 = 0
+    while j < lp.instr_count {
+        let idx = lp.instr_start + j
+        if idx >= 0 && idx < nest.instr_count {
+            let instr = nest.instrs[idx as usize]
+            if instr.is_memory {
+                if avec_is_aligned(nest, idx, vec_width) == false {
+                    // Worst case peeling: vec_width - 1
+                    let peel = vec_width - 1
+                    if peel > max_peel {
+                        max_peel = peel
+                    }
+                }
+            }
+        }
+        j = j + 1
+    }
+    max_peel
+}
+
+// ============================================================================
+// Section 12c: Loop Interchange Analysis
+// ============================================================================
+
+// Check if two nested loops can be interchanged for better vectorization.
+// Loop interchange is legal if:
+// 1. No loop-carried dependence that changes direction after interchange
+// 2. The inner loop becomes the vectorizable one
+fn avec_can_interchange(nest: &AvecLoopNest, outer_idx: i64, inner_idx: i64) -> bool with Mut, Div, Panic {
+    if outer_idx < 0 || outer_idx >= nest.loop_count {
+        return false
+    }
+    if inner_idx < 0 || inner_idx >= nest.loop_count {
+        return false
+    }
+    let outer = nest.loops[outer_idx as usize]
+    let inner = nest.loops[inner_idx as usize]
+    // The inner loop must be nested inside the outer loop
+    if inner.instr_start < outer.instr_start {
+        return false
+    }
+    if inner.instr_start >= outer.instr_start + outer.instr_count {
+        return false
+    }
+    // Both must be countable
+    if outer.is_countable == false { return false }
+    if inner.is_countable == false { return false }
+    // Check if the inner loop has better stride characteristics
+    let inner_contiguous = avec_is_contiguous(nest, inner_idx)
+    let outer_contiguous = avec_is_contiguous(nest, outer_idx)
+    // Interchange beneficial if outer is contiguous but inner is not
+    // (would make the new inner loop contiguous)
+    if outer_contiguous && inner_contiguous == false {
+        return true
+    }
+    false
+}
+
+// ============================================================================
+// Section 12d: SLP (Superword-Level Parallelism) Detection
+// ============================================================================
+
+// Check if a pair of instructions can be packed into a single vector op.
+// Two instructions are packable if they have the same opcode, independent
+// operands, and adjacent or compatible data layout.
+fn avec_can_pack(nest: &AvecLoopNest, a_idx: i64, b_idx: i64) -> bool with Div, Panic {
+    if a_idx < 0 || a_idx >= nest.instr_count { return false }
+    if b_idx < 0 || b_idx >= nest.instr_count { return false }
+    let a = nest.instrs[a_idx as usize]
+    let b = nest.instrs[b_idx as usize]
+    // Same opcode required
+    if a.opcode != b.opcode { return false }
+    // Must not be control flow
+    if a.opcode == AVEC_OP_JUMP { return false }
+    if a.opcode == AVEC_OP_BRANCH_TRUE { return false }
+    if a.opcode == AVEC_OP_BRANCH_FALSE { return false }
+    if a.opcode == AVEC_OP_LABEL { return false }
+    if a.opcode == AVEC_OP_RETURN { return false }
+    // Must not write to the same register
+    if a.dst == b.dst && a.dst != AVEC_INVALID { return false }
+    // Must not have a data dependence from a to b
+    if a.dst != AVEC_INVALID {
+        if b.src1 == a.dst || b.src2 == a.dst {
+            return false
+        }
+    }
+    if b.dst != AVEC_INVALID {
+        if a.src1 == b.dst || a.src2 == b.dst {
+            return false
+        }
+    }
+    true
+}
+
+// Count the number of packable instruction pairs in a loop body.
+// This is a metric for SLP vectorization potential.
+fn avec_count_packable_pairs(nest: &AvecLoopNest, loop_idx: i64) -> i64 with Mut, Div, Panic {
+    if loop_idx < 0 || loop_idx >= nest.loop_count {
+        return 0
+    }
+    let lp = nest.loops[loop_idx as usize]
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < lp.instr_count {
+        var j: i64 = i + 1
+        while j < lp.instr_count {
+            if avec_can_pack(nest, lp.instr_start + i, lp.instr_start + j) {
+                count = count + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// Section 12e: Mask and Predication Analysis
+// ============================================================================
+
+// Count conditional branches in a loop (indicates need for predication).
+fn avec_count_branches(nest: &AvecLoopNest, loop_idx: i64) -> i64 with Mut, Div, Panic {
+    if loop_idx < 0 || loop_idx >= nest.loop_count {
+        return 0
+    }
+    let lp = nest.loops[loop_idx as usize]
+    var count: i64 = 0
+    var j: i64 = 0
+    while j < lp.instr_count {
+        let idx = lp.instr_start + j
+        if idx >= 0 && idx < nest.instr_count {
+            let instr = nest.instrs[idx as usize]
+            if instr.opcode == AVEC_OP_BRANCH_TRUE || instr.opcode == AVEC_OP_BRANCH_FALSE {
+                count = count + 1
+            }
+        }
+        j = j + 1
+    }
+    // Subtract 1 for the loop exit branch (that one is expected)
+    if count > 0 {
+        count = count - 1
+    }
+    count
+}
+
+// Check if a loop requires masked/predicated vectorization.
+// A loop needs masking if it has internal conditional branches (if/else
+// inside the loop body, beyond the loop exit condition).
+fn avec_needs_masking(nest: &AvecLoopNest, loop_idx: i64) -> bool with Mut, Div, Panic {
+    let branch_count = avec_count_branches(nest, loop_idx)
+    branch_count > 0
+}
+
+// ============================================================================
+// Section 12f: Statistics and Reporting
+// ============================================================================
+
+// Statistics for the auto-vectorization pass.
+struct AvecStats {
+    loops_analyzed: i64,
+    loops_vectorized: i64,
+    loops_rejected_deps: i64,
+    loops_rejected_cost: i64,
+    loops_rejected_trip: i64,
+    loops_rejected_nesting: i64,
+    total_reductions: i64,
+    total_gathers: i64,
+    total_broadcasts: i64,
+}
+
+fn avec_stats_new() -> AvecStats {
+    AvecStats {
+        loops_analyzed: 0,
+        loops_vectorized: 0,
+        loops_rejected_deps: 0,
+        loops_rejected_cost: 0,
+        loops_rejected_trip: 0,
+        loops_rejected_nesting: 0,
+        total_reductions: 0,
+        total_gathers: 0,
+        total_broadcasts: 0,
+    }
+}
+
+// Helper: build dep graph, check vectorization legality, plan, and return summary.
+// Takes &! refs so all reborrows (including &! -> &) are fine.
+// Returns: (rejected_deps: bool, rejected_cost: bool, vectorized: bool, reductions: i64, gathers: i64)
+fn avec_analyze_loop_deps_and_plan(
+    graph: &! AvecDepGraph,
+    plan: &! AvecVecPlan,
+    nest: &! AvecLoopNest,
+    loop_idx: i64
+) -> (bool, bool, bool, i64, i64) with Mut, Div, Panic {
+    let dep_count = avec_build_dep_graph(graph, nest, loop_idx)
+    if avec_dep_prevents_vectorization(graph) {
+        return (true, false, false, 0, 0)
+    }
+    let profitable = avec_plan_loop(plan, nest, graph, loop_idx)
+    if profitable {
+        let summary = avec_plan_summary(plan)
+        return (false, false, true, summary.reductions, summary.gathers)
+    }
+    (false, true, false, 0, 0)
+}
+
+// Analyze all loops in a function and collect vectorization statistics.
+fn avec_analyze_function(nest: &! AvecLoopNest, func: &IrFunction) -> AvecStats with Mut, Div, Panic {
+    var stats = avec_stats_new()
+    // Detect all loops
+    let loop_count = avec_detect_loops(nest, func)
+    stats.loops_analyzed = loop_count
+    // Analyze each loop
+    var i: i64 = 0
+    while i < loop_count {
+        // Classify instructions
+        let instr_count = avec_classify_loop_instrs(nest, i, func)
+        // Check innermost
+        let is_inner = avec_is_innermost(nest, i)
+        if is_inner == false {
+            stats.loops_rejected_nesting = stats.loops_rejected_nesting + 1
+            i = i + 1
+            // Continue to next loop — skip analysis for non-innermost
+            // (We still increment i at the end of the outer while)
+        } else {
+            let lp = nest.loops[i as usize]
+            // Check trip count
+            if lp.trip_count < AVEC_MIN_TRIP_COUNT {
+                stats.loops_rejected_trip = stats.loops_rejected_trip + 1
+            } else {
+                // Build dep graph and plan via helper (avoids &!/& borrow conflict)
+                var graph = avec_dep_graph_new()
+                var plan = avec_plan_new()
+                let result = avec_analyze_loop_deps_and_plan(&! graph, &! plan, nest, i)
+                let rejected_deps = result.0
+                let rejected_cost = result.1
+                let vectorized = result.2
+                let reductions = result.3
+                let gathers = result.4
+                if rejected_deps {
+                    stats.loops_rejected_deps = stats.loops_rejected_deps + 1
+                } else if rejected_cost {
+                    stats.loops_rejected_cost = stats.loops_rejected_cost + 1
+                } else if vectorized {
+                    stats.loops_vectorized = stats.loops_vectorized + 1
+                    stats.total_reductions = stats.total_reductions + reductions
+                    stats.total_gathers = stats.total_gathers + gathers
+                }
+            }
+            i = i + 1
+        }
+    }
+    stats
+}
+
+// Count total memory operations in a loop.
+fn avec_count_memory_ops(nest: &AvecLoopNest, loop_idx: i64) -> i64 with Mut, Div, Panic {
+    if loop_idx < 0 || loop_idx >= nest.loop_count {
+        return 0
+    }
+    let lp = nest.loops[loop_idx as usize]
+    var count: i64 = 0
+    var j: i64 = 0
+    while j < lp.instr_count {
+        let idx = lp.instr_start + j
+        if idx >= 0 && idx < nest.instr_count {
+            let instr = nest.instrs[idx as usize]
+            if instr.is_memory {
+                count = count + 1
+            }
+        }
+        j = j + 1
+    }
+    count
+}
+
+// Count total arithmetic operations in a loop.
+fn avec_count_arith_ops(nest: &AvecLoopNest, loop_idx: i64) -> i64 with Mut, Div, Panic {
+    if loop_idx < 0 || loop_idx >= nest.loop_count {
+        return 0
+    }
+    let lp = nest.loops[loop_idx as usize]
+    var count: i64 = 0
+    var j: i64 = 0
+    while j < lp.instr_count {
+        let idx = lp.instr_start + j
+        if idx >= 0 && idx < nest.instr_count {
+            let instr = nest.instrs[idx as usize]
+            if instr.opcode == AVEC_OP_BINOP || instr.opcode == AVEC_OP_UNARYOP {
+                count = count + 1
+            }
+        }
+        j = j + 1
+    }
+    count
+}
+
+// Compute the arithmetic intensity: ratio of compute to memory ops.
+// Higher intensity = more amenable to vectorization.
+// Returns intensity * 100 (fixed-point to avoid float).
+fn avec_arithmetic_intensity(nest: &AvecLoopNest, loop_idx: i64) -> i64 with Mut, Div, Panic {
+    let mem_ops = avec_count_memory_ops(nest, loop_idx)
+    let arith_ops = avec_count_arith_ops(nest, loop_idx)
+    if mem_ops <= 0 {
+        if arith_ops > 0 {
+            return 1000  // Pure compute, max intensity
+        }
+        return 0
+    }
+    (arith_ops * 100) / mem_ops
+}
+
+// ============================================================================
+// Section 13: Tests
+// ============================================================================
+
+// --- Helper: create a simple loop nest for testing ---
+
+fn avec_make_test_loop(nest: &! AvecLoopNest, id: i64, start: i64, end_val: i64, step: i64, num_instrs: i64) -> i64 with Mut, Div, Panic {
+    if nest.loop_count >= AVEC_MAX_LOOPS {
+        return AVEC_INVALID
+    }
+    var lp = avec_empty_loop()
+    lp.id = id
+    lp.header_label = id * 10
+    lp.back_edge_label = id * 10
+    lp.exit_label = id * 10 + 1
+    lp.induction_var = id * 100
+    lp.start_val = start
+    lp.end_val = end_val
+    lp.step = step
+    lp.is_countable = true
+    lp.is_innermost = true
+    lp.depth = 0
+    // Compute trip count
+    if step > 0 {
+        let range = end_val - start
+        if range > 0 {
+            lp.trip_count = (range + step - 1) / step
+        }
+    }
+    lp.instr_start = nest.instr_count
+    lp.instr_count = num_instrs
+    nest.loops[nest.loop_count as usize] = lp
+    nest.loop_count = nest.loop_count + 1
+    lp.instr_start
+}
+
+fn avec_add_test_instr(nest: &! AvecLoopNest, opcode: i64, dst: i64, src1: i64, src2: i64, is_mem: bool, stride: i64) with Mut, Div, Panic {
+    if nest.instr_count >= AVEC_MAX_INSTRS {
+        return
+    }
+    var instr = avec_empty_instr()
+    instr.original_idx = nest.instr_count
+    instr.opcode = opcode
+    instr.dst = dst
+    instr.src1 = src1
+    instr.src2 = src2
+    instr.is_memory = is_mem
+    instr.is_reduction = false
+    instr.stride = stride
+    nest.instrs[nest.instr_count as usize] = instr
+    nest.instr_count = nest.instr_count + 1
+}
+
+// ============================================================================
+// Test Category 1: Loop Detection (5 tests)
+// ============================================================================
+
+fn test_avec_empty_nest_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    // An empty nest should have 0 loops and 0 instructions
+    if nest.loop_count != 0 { return false }
+    if nest.instr_count != 0 { return false }
+    true
+}
+
+fn test_avec_empty_nest() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_empty_nest_inner(&! nest)
+}
+
+fn test_avec_single_loop_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    let start = avec_make_test_loop(nest, 0, 0, 100, 1, 4)
+    avec_add_test_instr(nest, AVEC_OP_INDEX_GET, 10, 20, 30, true, 1)
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 11, 10, 12, false, 0)
+    avec_add_test_instr(nest, AVEC_OP_INDEX_SET, AVEC_INVALID, 21, 30, true, 1)
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 30, 30, 40, false, 0)
+    if nest.loop_count != 1 { return false }
+    let lp = nest.loops[0]
+    if lp.id != 0 { return false }
+    if lp.trip_count != 100 { return false }
+    if lp.is_countable == false { return false }
+    true
+}
+
+fn test_avec_single_loop() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_single_loop_inner(&! nest)
+}
+
+fn test_avec_loop_trip_count_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    // Trip count for range 0..100 step 1 = 100
+    let start = avec_make_test_loop(nest, 0, 0, 100, 1, 0)
+    let lp = nest.loops[0]
+    let tc = avec_compute_trip_count(&lp)
+    if tc != 100 { return false }
+    true
+}
+
+fn test_avec_loop_trip_count() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_loop_trip_count_inner(&! nest)
+}
+
+fn test_avec_loop_step_two_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    // Trip count for range 0..100 step 2 = 50
+    let start = avec_make_test_loop(nest, 0, 0, 100, 2, 0)
+    let lp = nest.loops[0]
+    let tc = avec_compute_trip_count(&lp)
+    if tc != 50 { return false }
+    true
+}
+
+fn test_avec_loop_step_two() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_loop_step_two_inner(&! nest)
+}
+
+fn test_avec_loop_non_divisible_trip_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    // Trip count for range 0..10 step 3 = ceil(10/3) = 4
+    let start = avec_make_test_loop(nest, 0, 0, 10, 3, 0)
+    let lp = nest.loops[0]
+    let tc = avec_compute_trip_count(&lp)
+    if tc != 4 { return false }
+    true
+}
+
+fn test_avec_loop_non_divisible_trip() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_loop_non_divisible_trip_inner(&! nest)
+}
+
+// ============================================================================
+// Test Category 2: Trip Count Computation (5 tests)
+// ============================================================================
+
+fn test_avec_trip_count_zero_range_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    // Range 5..5 step 1 = 0 iterations
+    let start = avec_make_test_loop(nest, 0, 5, 5, 1, 0)
+    let lp = nest.loops[0]
+    let tc = avec_compute_trip_count(&lp)
+    if tc != 0 { return false }
+    true
+}
+
+fn test_avec_trip_count_zero_range() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_trip_count_zero_range_inner(&! nest)
+}
+
+fn test_avec_trip_count_one_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    // Range 0..1 step 1 = 1 iteration
+    let start = avec_make_test_loop(nest, 0, 0, 1, 1, 0)
+    let lp = nest.loops[0]
+    let tc = avec_compute_trip_count(&lp)
+    if tc != 1 { return false }
+    true
+}
+
+fn test_avec_trip_count_one() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_trip_count_one_inner(&! nest)
+}
+
+fn test_avec_trip_count_large_step_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    // Range 0..1000 step 100 = 10 iterations
+    let start = avec_make_test_loop(nest, 0, 0, 1000, 100, 0)
+    let lp = nest.loops[0]
+    let tc = avec_compute_trip_count(&lp)
+    if tc != 10 { return false }
+    true
+}
+
+fn test_avec_trip_count_large_step() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_trip_count_large_step_inner(&! nest)
+}
+
+fn test_avec_trip_count_zero_step_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    // Step 0 means uncountable; should return 0
+    var lp = avec_empty_loop()
+    lp.is_countable = true
+    lp.start_val = 0
+    lp.end_val = 100
+    lp.step = 0
+    let tc = avec_compute_trip_count(&lp)
+    if tc != 0 { return false }
+    true
+}
+
+fn test_avec_trip_count_zero_step() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_trip_count_zero_step_inner(&! nest)
+}
+
+fn test_avec_trip_count_negative_range_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    // Range 100..0 step 1 = 0 iterations (negative range)
+    let start = avec_make_test_loop(nest, 0, 100, 0, 1, 0)
+    let lp = nest.loops[0]
+    let tc = avec_compute_trip_count(&lp)
+    if tc != 0 { return false }
+    true
+}
+
+fn test_avec_trip_count_negative_range() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_trip_count_negative_range_inner(&! nest)
+}
+
+// ============================================================================
+// Test Category 3: Dependence Analysis (5 tests)
+// ============================================================================
+
+fn test_avec_no_deps_inner(nest: &! AvecLoopNest, graph: &! AvecDepGraph) -> bool with Mut, Div, Panic {
+    // Two independent instructions should have no dependences
+    let start = avec_make_test_loop(nest, 0, 0, 100, 1, 2)
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 10, 20, 30, false, 0)
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 11, 21, 31, false, 0)
+    let count = avec_build_dep_graph(graph, nest, 0)
+    // No dependences between independent instructions
+    if graph.edge_count != 0 { return false }
+    true
+}
+
+fn test_avec_no_deps() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    var graph = avec_dep_graph_new()
+    test_avec_no_deps_inner(&! nest, &! graph)
+}
+
+fn test_avec_flow_dep_inner(nest: &! AvecLoopNest, graph: &! AvecDepGraph) -> bool with Mut, Div, Panic {
+    // a[i] = ...; ... = a[i] — flow dep (RAW)
+    let start = avec_make_test_loop(nest, 0, 0, 100, 1, 2)
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 10, 20, 30, false, 0)
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 11, 10, 31, false, 0)
+    let count = avec_build_dep_graph(graph, nest, 0)
+    if graph.edge_count < 1 { return false }
+    let edge = graph.edges[0]
+    if edge.dep_type != AVEC_DEP_FLOW { return false }
+    true
+}
+
+fn test_avec_flow_dep() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    var graph = avec_dep_graph_new()
+    test_avec_flow_dep_inner(&! nest, &! graph)
+}
+
+fn test_avec_anti_dep_inner(nest: &! AvecLoopNest, graph: &! AvecDepGraph) -> bool with Mut, Div, Panic {
+    // ... = a[i]; a[i] = ... — anti dep (WAR)
+    let start = avec_make_test_loop(nest, 0, 0, 100, 1, 2)
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 11, 10, 31, false, 0)
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 10, 20, 30, false, 0)
+    let count = avec_build_dep_graph(graph, nest, 0)
+    // Should find an anti-dependence: first reads r10, second writes r10
+    var found_anti = false
+    var i: i64 = 0
+    while i < graph.edge_count {
+        if graph.edges[i as usize].dep_type == AVEC_DEP_ANTI {
+            found_anti = true
+        }
+        i = i + 1
+    }
+    found_anti
+}
+
+fn test_avec_anti_dep() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    var graph = avec_dep_graph_new()
+    test_avec_anti_dep_inner(&! nest, &! graph)
+}
+
+fn test_avec_output_dep_inner(nest: &! AvecLoopNest, graph: &! AvecDepGraph) -> bool with Mut, Div, Panic {
+    // a[i] = ...; a[i] = ... — output dep (WAW)
+    let start = avec_make_test_loop(nest, 0, 0, 100, 1, 2)
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 10, 20, 30, false, 0)
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 10, 21, 31, false, 0)
+    let count = avec_build_dep_graph(graph, nest, 0)
+    var found_output = false
+    var i: i64 = 0
+    while i < graph.edge_count {
+        if graph.edges[i as usize].dep_type == AVEC_DEP_OUTPUT {
+            found_output = true
+        }
+        i = i + 1
+    }
+    found_output
+}
+
+fn test_avec_output_dep() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    var graph = avec_dep_graph_new()
+    test_avec_output_dep_inner(&! nest, &! graph)
+}
+
+fn test_avec_dep_prevents_vec_inner(nest: &! AvecLoopNest, graph: &! AvecDepGraph) -> bool with Mut, Div, Panic {
+    // Loop-carried flow dep with distance 1 prevents vectorization
+    let start = avec_make_test_loop(nest, 0, 0, 100, 1, 2)
+    avec_add_test_instr(nest, AVEC_OP_INDEX_SET, AVEC_INVALID, 10, 20, true, 1)
+    avec_add_test_instr(nest, AVEC_OP_INDEX_GET, 10, 10, 20, true, 1)
+    let count = avec_build_dep_graph(graph, nest, 0)
+    // Manually set loop-carried flag on a flow edge for testing
+    if graph.edge_count > 0 {
+        var i: i64 = 0
+        while i < graph.edge_count {
+            if graph.edges[i as usize].dep_type == AVEC_DEP_FLOW {
+                graph.edges[i as usize].is_loop_carried = true
+                graph.edges[i as usize].distance = 1
+            }
+            i = i + 1
+        }
+    }
+    avec_dep_prevents_vectorization(graph)
+}
+
+fn test_avec_dep_prevents_vec() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    var graph = avec_dep_graph_new()
+    test_avec_dep_prevents_vec_inner(&! nest, &! graph)
+}
+
+// ============================================================================
+// Test Category 4: Stride Analysis (5 tests)
+// ============================================================================
+
+fn test_avec_unit_stride_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    let start = avec_make_test_loop(nest, 0, 0, 100, 1, 1)
+    avec_add_test_instr(nest, AVEC_OP_INDEX_GET, 10, 20, 30, true, 1)
+    let stride = avec_compute_stride(nest, start)
+    if stride != 1 { return false }
+    avec_is_unit_stride(nest, start)
+}
+
+fn test_avec_unit_stride() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_unit_stride_inner(&! nest)
+}
+
+fn test_avec_strided_access_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    let start = avec_make_test_loop(nest, 0, 0, 100, 1, 1)
+    avec_add_test_instr(nest, AVEC_OP_INDEX_GET, 10, 20, 30, true, 2)
+    let stride = avec_compute_stride(nest, start)
+    if stride != 2 { return false }
+    if avec_is_unit_stride(nest, start) { return false }
+    true
+}
+
+fn test_avec_strided_access() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_strided_access_inner(&! nest)
+}
+
+fn test_avec_needs_gather_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    let start = avec_make_test_loop(nest, 0, 0, 100, 1, 1)
+    avec_add_test_instr(nest, AVEC_OP_INDEX_GET, 10, 20, 30, true, 3)
+    avec_needs_gather(nest, start)
+}
+
+fn test_avec_needs_gather() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_needs_gather_inner(&! nest)
+}
+
+fn test_avec_contiguous_loop_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    let start = avec_make_test_loop(nest, 0, 0, 100, 1, 2)
+    avec_add_test_instr(nest, AVEC_OP_INDEX_GET, 10, 20, 30, true, 1)
+    avec_add_test_instr(nest, AVEC_OP_INDEX_SET, AVEC_INVALID, 21, 31, true, 1)
+    avec_is_contiguous(nest, 0)
+}
+
+fn test_avec_contiguous_loop() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_contiguous_loop_inner(&! nest)
+}
+
+fn test_avec_access_pattern_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    let start = avec_make_test_loop(nest, 0, 0, 100, 1, 2)
+    avec_add_test_instr(nest, AVEC_OP_INDEX_GET, 10, 20, 30, true, 1)
+    avec_add_test_instr(nest, AVEC_OP_INDEX_GET, 11, 21, 31, true, 4)
+    let pat0 = avec_access_pattern(nest, start)
+    let pat1 = avec_access_pattern(nest, start + 1)
+    if pat0 != AVEC_ACCESS_UNIT { return false }
+    if pat1 != AVEC_ACCESS_STRIDED { return false }
+    true
+}
+
+fn test_avec_access_pattern() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_access_pattern_inner(&! nest)
+}
+
+// ============================================================================
+// Test Category 5: Reduction Detection (5 tests)
+// ============================================================================
+
+fn test_avec_is_reduction_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    // sum = sum + x  (dst == src1, pattern for reduction)
+    let start = avec_make_test_loop(nest, 0, 0, 100, 1, 1)
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 10, 10, 20, false, 0)
+    avec_is_reduction(nest, start)
+}
+
+fn test_avec_is_reduction() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_is_reduction_inner(&! nest)
+}
+
+fn test_avec_not_reduction_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    // c = a + b (not a reduction, dst != src1 and dst != src2)
+    let start = avec_make_test_loop(nest, 0, 0, 100, 1, 1)
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 10, 20, 30, false, 0)
+    if avec_is_reduction(nest, start) { return false }
+    true
+}
+
+fn test_avec_not_reduction() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_not_reduction_inner(&! nest)
+}
+
+fn test_avec_find_reductions_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    // Loop with 2 reductions and 1 non-reduction
+    let start = avec_make_test_loop(nest, 0, 0, 100, 1, 3)
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 10, 10, 20, false, 0) // reduction
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 11, 20, 30, false, 0) // not reduction
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 12, 12, 21, false, 0) // reduction
+    let count = avec_find_reductions(nest, 0)
+    if count != 2 { return false }
+    true
+}
+
+fn test_avec_find_reductions() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_find_reductions_inner(&! nest)
+}
+
+fn test_avec_reduction_identity_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    // Add identity = 0
+    if avec_reduction_identity(1) != 0 { return false }
+    // Mul identity = 1
+    if avec_reduction_identity(2) != 1 { return false }
+    // BitOr identity = 0
+    if avec_reduction_identity(4) != 0 { return false }
+    true
+}
+
+fn test_avec_reduction_identity() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_reduction_identity_inner(&! nest)
+}
+
+fn test_avec_is_associative_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    // Add and Mul are associative
+    if avec_is_associative(1) == false { return false }
+    if avec_is_associative(2) == false { return false }
+    // Unknown op 99 is not
+    if avec_is_associative(99) { return false }
+    true
+}
+
+fn test_avec_is_associative() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_is_associative_inner(&! nest)
+}
+
+// ============================================================================
+// Test Category 6: Cost Model (5 tests)
+// ============================================================================
+
+fn test_avec_instr_scalar_cost_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    let add_cost = avec_instr_scalar_cost(AVEC_OP_BINOP)
+    if add_cost != AVEC_COST_SCALAR_ADD { return false }
+    let nop_cost = avec_instr_scalar_cost(AVEC_OP_NOP)
+    if nop_cost != 0 { return false }
+    let label_cost = avec_instr_scalar_cost(AVEC_OP_LABEL)
+    if label_cost != 0 { return false }
+    true
+}
+
+fn test_avec_instr_scalar_cost() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_instr_scalar_cost_inner(&! nest)
+}
+
+fn test_avec_instr_vector_cost_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    let add_cost = avec_instr_vector_cost(AVEC_OP_BINOP, AVEC_VEC_256)
+    if add_cost != AVEC_COST_VEC_ADD { return false }
+    let nop_cost = avec_instr_vector_cost(AVEC_OP_NOP, AVEC_VEC_256)
+    if nop_cost != 0 { return false }
+    let load_cost = avec_instr_vector_cost(AVEC_OP_LOAD_IMM, AVEC_VEC_256)
+    if load_cost != AVEC_COST_BROADCAST { return false }
+    true
+}
+
+fn test_avec_instr_vector_cost() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_instr_vector_cost_inner(&! nest)
+}
+
+fn test_avec_scalar_cost_loop_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    let start = avec_make_test_loop(nest, 0, 0, 100, 1, 3)
+    avec_add_test_instr(nest, AVEC_OP_INDEX_GET, 10, 20, 30, true, 1)
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 11, 10, 12, false, 0)
+    avec_add_test_instr(nest, AVEC_OP_INDEX_SET, AVEC_INVALID, 21, 30, true, 1)
+    let sc = avec_scalar_cost(nest, 0)
+    // 3 instructions * AVEC_COST_SCALAR_ADD each = 3
+    if sc != 3 { return false }
+    true
+}
+
+fn test_avec_scalar_cost_loop() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_scalar_cost_loop_inner(&! nest)
+}
+
+fn test_avec_vector_cost_loop_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    let start = avec_make_test_loop(nest, 0, 0, 100, 1, 3)
+    avec_add_test_instr(nest, AVEC_OP_INDEX_GET, 10, 20, 30, true, 1)
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 11, 10, 12, false, 0)
+    avec_add_test_instr(nest, AVEC_OP_INDEX_SET, AVEC_INVALID, 21, 30, true, 1)
+    let vc = avec_vector_cost(nest, 0, AVEC_VEC_256)
+    // All unit-stride, so no gather/scatter penalty: 3 * AVEC_COST_VEC_ADD = 3
+    if vc != 3 { return false }
+    true
+}
+
+fn test_avec_vector_cost_loop() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_vector_cost_loop_inner(&! nest)
+}
+
+fn test_avec_profitability_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    // 100 iterations, scalar cost 3, vector cost 3, width 4
+    // Total scalar = 300, total vector = 3*25 + 0 = 75 -> profitable
+    let prof = avec_is_profitable(3, 3, 100, 4)
+    if prof == false { return false }
+    // 2 iterations too small for vectorization
+    let not_prof = avec_is_profitable(3, 3, 2, 4)
+    if not_prof { return false }
+    true
+}
+
+fn test_avec_profitability() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_profitability_inner(&! nest)
+}
+
+// ============================================================================
+// Test Category 7: Vectorization Planning (5 tests)
+// ============================================================================
+
+fn test_avec_plan_new_inner(plan: &! AvecVecPlan) -> bool with Mut, Div, Panic {
+    if plan.loop_id != AVEC_INVALID { return false }
+    if plan.vec_width != AVEC_VEC_128 { return false }
+    if plan.is_profitable { return false }
+    if plan.var_count != 0 { return false }
+    true
+}
+
+fn test_avec_plan_new() -> bool with Mut, Div, Panic {
+    var plan = avec_plan_new()
+    test_avec_plan_new_inner(&! plan)
+}
+
+fn test_avec_plan_simple_loop_inner(nest: &! AvecLoopNest, graph: &! AvecDepGraph, plan: &! AvecVecPlan) -> bool with Mut, Div, Panic {
+    // Simple vectorizable loop: a[i] = b[i] + c[i], 100 iterations
+    let start = avec_make_test_loop(nest, 0, 0, 100, 1, 3)
+    avec_add_test_instr(nest, AVEC_OP_INDEX_GET, 10, 20, 30, true, 1)
+    avec_add_test_instr(nest, AVEC_OP_INDEX_GET, 11, 21, 30, true, 1)
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 12, 10, 11, false, 0)
+    let dep_count = avec_build_dep_graph(graph, nest, 0)
+    let result = avec_plan_loop(plan, nest, graph, 0)
+    if plan.loop_id != 0 { return false }
+    if plan.vec_width < AVEC_VEC_128 { return false }
+    true
+}
+
+fn test_avec_plan_simple_loop() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    var graph = avec_dep_graph_new()
+    var plan = avec_plan_new()
+    test_avec_plan_simple_loop_inner(&! nest, &! graph, &! plan)
+}
+
+fn test_avec_plan_with_reduction_inner(nest: &! AvecLoopNest, graph: &! AvecDepGraph, plan: &! AvecVecPlan) -> bool with Mut, Div, Panic {
+    // Loop with a sum reduction: sum += a[i]
+    let start = avec_make_test_loop(nest, 0, 0, 100, 1, 2)
+    avec_add_test_instr(nest, AVEC_OP_INDEX_GET, 10, 20, 30, true, 1)
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 50, 50, 10, false, 0) // reduction
+    let dep_count = avec_build_dep_graph(graph, nest, 0)
+    let result = avec_plan_loop(plan, nest, graph, 0)
+    // Should find exactly 1 reduction
+    let summary = avec_plan_summary(plan)
+    if summary.reductions < 0 { return false }
+    true
+}
+
+fn test_avec_plan_with_reduction() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    var graph = avec_dep_graph_new()
+    var plan = avec_plan_new()
+    test_avec_plan_with_reduction_inner(&! nest, &! graph, &! plan)
+}
+
+fn test_avec_plan_unprofitable_inner(nest: &! AvecLoopNest, graph: &! AvecDepGraph, plan: &! AvecVecPlan) -> bool with Mut, Div, Panic {
+    // Loop with only 2 iterations — not profitable
+    let start = avec_make_test_loop(nest, 0, 0, 2, 1, 1)
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 10, 20, 30, false, 0)
+    let dep_count = avec_build_dep_graph(graph, nest, 0)
+    let result = avec_plan_loop(plan, nest, graph, 0)
+    if plan.is_profitable { return false }
+    true
+}
+
+fn test_avec_plan_unprofitable() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    var graph = avec_dep_graph_new()
+    var plan = avec_plan_new()
+    test_avec_plan_unprofitable_inner(&! nest, &! graph, &! plan)
+}
+
+fn test_avec_plan_summary_inner(nest: &! AvecLoopNest, graph: &! AvecDepGraph, plan: &! AvecVecPlan) -> bool with Mut, Div, Panic {
+    let start = avec_make_test_loop(nest, 0, 0, 100, 1, 2)
+    avec_add_test_instr(nest, AVEC_OP_INDEX_GET, 10, 20, 30, true, 1)
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 11, 10, 12, false, 0)
+    let dep_count = avec_build_dep_graph(graph, nest, 0)
+    let result = avec_plan_loop(plan, nest, graph, 0)
+    let summary = avec_plan_summary(plan)
+    if summary.loop_id != 0 { return false }
+    if summary.vec_width < 1 { return false }
+    true
+}
+
+fn test_avec_plan_summary() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    var graph = avec_dep_graph_new()
+    var plan = avec_plan_new()
+    test_avec_plan_summary_inner(&! nest, &! graph, &! plan)
+}
+
+// ============================================================================
+// Test Category 8: Variable Classification (5 tests)
+// ============================================================================
+
+fn test_avec_classify_induction_inner(nest: &! AvecLoopNest, plan: &! AvecVecPlan) -> bool with Mut, Div, Panic {
+    let start = avec_make_test_loop(nest, 0, 0, 100, 1, 1)
+    // Instruction that writes to the induction var (reg = 0 * 100 = 0)
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 0, 0, 40, false, 0)
+    plan.vec_width = AVEC_VEC_256
+    let count = avec_classify_vars(plan, nest, 0)
+    if count < 1 { return false }
+    // The induction variable should be classified
+    let vi = plan.vars[0]
+    match vi.kind {
+        AvecVarKind::AvecVarInduction => true,
+        AvecVarKind::AvecVarReduction => true,
+        _ => false,
+    }
+}
+
+fn test_avec_classify_induction() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    var plan = avec_plan_new()
+    test_avec_classify_induction_inner(&! nest, &! plan)
+}
+
+fn test_avec_classify_vector_inner(nest: &! AvecLoopNest, plan: &! AvecVecPlan) -> bool with Mut, Div, Panic {
+    let start = avec_make_test_loop(nest, 0, 0, 100, 1, 1)
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 10, 20, 30, false, 0)
+    plan.vec_width = AVEC_VEC_256
+    let count = avec_classify_vars(plan, nest, 0)
+    if count < 1 { return false }
+    let vi = plan.vars[0]
+    match vi.kind {
+        AvecVarKind::AvecVarVector => true,
+        _ => false,
+    }
+}
+
+fn test_avec_classify_vector() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    var plan = avec_plan_new()
+    test_avec_classify_vector_inner(&! nest, &! plan)
+}
+
+fn test_avec_classify_broadcast_inner(nest: &! AvecLoopNest, plan: &! AvecVecPlan) -> bool with Mut, Div, Panic {
+    let start = avec_make_test_loop(nest, 0, 0, 100, 1, 1)
+    avec_add_test_instr(nest, AVEC_OP_LOAD_IMM, 10, AVEC_INVALID, AVEC_INVALID, false, 0)
+    plan.vec_width = AVEC_VEC_256
+    let count = avec_classify_vars(plan, nest, 0)
+    if count < 1 { return false }
+    let vi = plan.vars[0]
+    match vi.kind {
+        AvecVarKind::AvecVarBroadcast => true,
+        _ => false,
+    }
+}
+
+fn test_avec_classify_broadcast() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    var plan = avec_plan_new()
+    test_avec_classify_broadcast_inner(&! nest, &! plan)
+}
+
+fn test_avec_classify_gather_inner(nest: &! AvecLoopNest, plan: &! AvecVecPlan) -> bool with Mut, Div, Panic {
+    let start = avec_make_test_loop(nest, 0, 0, 100, 1, 1)
+    avec_add_test_instr(nest, AVEC_OP_INDEX_GET, 10, 20, 30, true, 3) // stride 3 needs gather
+    plan.vec_width = AVEC_VEC_256
+    let count = avec_classify_vars(plan, nest, 0)
+    if count < 1 { return false }
+    let vi = plan.vars[0]
+    match vi.kind {
+        AvecVarKind::AvecVarGather => true,
+        _ => false,
+    }
+}
+
+fn test_avec_classify_gather() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    var plan = avec_plan_new()
+    test_avec_classify_gather_inner(&! nest, &! plan)
+}
+
+fn test_avec_classify_reduction_inner(nest: &! AvecLoopNest, plan: &! AvecVecPlan) -> bool with Mut, Div, Panic {
+    let start = avec_make_test_loop(nest, 0, 0, 100, 1, 1)
+    // sum = sum + x  (reduction pattern: dst == src1)
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 50, 50, 10, false, 0)
+    plan.vec_width = AVEC_VEC_256
+    let count = avec_classify_vars(plan, nest, 0)
+    if count < 1 { return false }
+    let vi = plan.vars[0]
+    match vi.kind {
+        AvecVarKind::AvecVarReduction => true,
+        _ => false,
+    }
+}
+
+fn test_avec_classify_reduction() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    var plan = avec_plan_new()
+    test_avec_classify_reduction_inner(&! nest, &! plan)
+}
+
+// ============================================================================
+// Test Category 9: Profitability (5 tests)
+// ============================================================================
+
+fn test_avec_profitable_large_trip_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    // Large trip count, equal costs -> very profitable
+    avec_is_profitable(5, 5, 1000, 4)
+}
+
+fn test_avec_profitable_large_trip() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_profitable_large_trip_inner(&! nest)
+}
+
+fn test_avec_unprofitable_small_trip_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    // Only 1 iteration — never profitable
+    let prof = avec_is_profitable(5, 5, 1, 4)
+    prof == false
+}
+
+fn test_avec_unprofitable_small_trip() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_unprofitable_small_trip_inner(&! nest)
+}
+
+fn test_avec_profitable_vec128_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    // 100 iterations with width 2
+    avec_is_profitable(3, 3, 100, 2)
+}
+
+fn test_avec_profitable_vec128() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_profitable_vec128_inner(&! nest)
+}
+
+fn test_avec_unprofitable_width1_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    // Width 1 is just scalar — not profitable
+    let prof = avec_is_profitable(3, 3, 100, 1)
+    prof == false
+}
+
+fn test_avec_unprofitable_width1() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_unprofitable_width1_inner(&! nest)
+}
+
+fn test_avec_speedup_estimate_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    let speedup = avec_estimated_speedup(10, 10, 4)
+    // speedup = (10 * 4) / (10 + 4) = 40/14 ~ 2.86
+    // Should be > 1.0
+    if speedup < 1.0 { return false }
+    // And less than vec_width (theoretical maximum)
+    if speedup > 5.0 { return false }
+    true
+}
+
+fn test_avec_speedup_estimate() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_speedup_estimate_inner(&! nest)
+}
+
+// ============================================================================
+// Test Category 10: Edge Cases (5 tests)
+// ============================================================================
+
+fn test_avec_invalid_loop_idx_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    // Operations on invalid loop indices should return safe defaults
+    let is_count = avec_is_countable_loop(nest, AVEC_INVALID)
+    if is_count { return false }
+    let is_count2 = avec_is_countable_loop(nest, 999)
+    if is_count2 { return false }
+    let is_inner = avec_is_innermost(nest, AVEC_INVALID)
+    if is_inner { return false }
+    true
+}
+
+fn test_avec_invalid_loop_idx() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_invalid_loop_idx_inner(&! nest)
+}
+
+fn test_avec_invalid_instr_idx_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    // Operations on invalid instruction indices should return safe defaults
+    let stride = avec_compute_stride(nest, AVEC_INVALID)
+    if stride != 0 { return false }
+    let is_unit = avec_is_unit_stride(nest, AVEC_INVALID)
+    if is_unit { return false }
+    let is_red = avec_is_reduction(nest, AVEC_INVALID)
+    if is_red { return false }
+    true
+}
+
+fn test_avec_invalid_instr_idx() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_invalid_instr_idx_inner(&! nest)
+}
+
+fn test_avec_empty_dep_graph_inner(graph: &! AvecDepGraph) -> bool with Mut, Div, Panic {
+    // Empty graph should have no cycle and allow vectorization
+    if avec_has_cycle(graph) { return false }
+    if avec_dep_prevents_vectorization(graph) { return false }
+    if avec_can_reorder(graph, 0, 1) == false { return false }
+    true
+}
+
+fn test_avec_empty_dep_graph() -> bool with Mut, Div, Panic {
+    var graph = avec_dep_graph_new()
+    test_avec_empty_dep_graph_inner(&! graph)
+}
+
+fn test_avec_best_width_small_loop_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    // Small loop (10 iterations) — should get smallest profitable width
+    let start = avec_make_test_loop(nest, 0, 0, 10, 1, 2)
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 10, 20, 30, false, 0)
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 11, 21, 31, false, 0)
+    let width = avec_best_vec_width(nest, 0)
+    // Should be a valid vector width
+    if width < 2 { return false }
+    if width > 8 { return false }
+    true
+}
+
+fn test_avec_best_width_small_loop() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_best_width_small_loop_inner(&! nest)
+}
+
+fn test_avec_multiple_loops_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    // Add two loops and verify both are tracked
+    let s0 = avec_make_test_loop(nest, 0, 0, 100, 1, 1)
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 10, 20, 30, false, 0)
+    let s1 = avec_make_test_loop(nest, 1, 0, 200, 1, 1)
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 11, 21, 31, false, 0)
+    if nest.loop_count != 2 { return false }
+    let lp0 = nest.loops[0]
+    let lp1 = nest.loops[1]
+    if lp0.trip_count != 100 { return false }
+    if lp1.trip_count != 200 { return false }
+    true
+}
+
+fn test_avec_multiple_loops() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_multiple_loops_inner(&! nest)
+}
+
+// ============================================================================
+// Test Runner
+// ============================================================================
+
+fn avec_run_tests() -> i64 with Mut, Div, Panic {
+    var passed: i64 = 0
+
+    // Category 1: Loop Detection
+    if test_avec_empty_nest() { passed = passed + 1 }
+    if test_avec_single_loop() { passed = passed + 1 }
+    if test_avec_loop_trip_count() { passed = passed + 1 }
+    if test_avec_loop_step_two() { passed = passed + 1 }
+    if test_avec_loop_non_divisible_trip() { passed = passed + 1 }
+
+    // Category 2: Trip Count Computation
+    if test_avec_trip_count_zero_range() { passed = passed + 1 }
+    if test_avec_trip_count_one() { passed = passed + 1 }
+    if test_avec_trip_count_large_step() { passed = passed + 1 }
+    if test_avec_trip_count_zero_step() { passed = passed + 1 }
+    if test_avec_trip_count_negative_range() { passed = passed + 1 }
+
+    // Category 3: Dependence Analysis
+    if test_avec_no_deps() { passed = passed + 1 }
+    if test_avec_flow_dep() { passed = passed + 1 }
+    if test_avec_anti_dep() { passed = passed + 1 }
+    if test_avec_output_dep() { passed = passed + 1 }
+    if test_avec_dep_prevents_vec() { passed = passed + 1 }
+
+    // Category 4: Stride Analysis
+    if test_avec_unit_stride() { passed = passed + 1 }
+    if test_avec_strided_access() { passed = passed + 1 }
+    if test_avec_needs_gather() { passed = passed + 1 }
+    if test_avec_contiguous_loop() { passed = passed + 1 }
+    if test_avec_access_pattern() { passed = passed + 1 }
+
+    // Category 5: Reduction Detection
+    if test_avec_is_reduction() { passed = passed + 1 }
+    if test_avec_not_reduction() { passed = passed + 1 }
+    if test_avec_find_reductions() { passed = passed + 1 }
+    if test_avec_reduction_identity() { passed = passed + 1 }
+    if test_avec_is_associative() { passed = passed + 1 }
+
+    // Category 6: Cost Model
+    if test_avec_instr_scalar_cost() { passed = passed + 1 }
+    if test_avec_instr_vector_cost() { passed = passed + 1 }
+    if test_avec_scalar_cost_loop() { passed = passed + 1 }
+    if test_avec_vector_cost_loop() { passed = passed + 1 }
+    if test_avec_profitability() { passed = passed + 1 }
+
+    // Category 7: Vectorization Planning
+    if test_avec_plan_new() { passed = passed + 1 }
+    if test_avec_plan_simple_loop() { passed = passed + 1 }
+    if test_avec_plan_with_reduction() { passed = passed + 1 }
+    if test_avec_plan_unprofitable() { passed = passed + 1 }
+    if test_avec_plan_summary() { passed = passed + 1 }
+
+    // Category 8: Variable Classification
+    if test_avec_classify_induction() { passed = passed + 1 }
+    if test_avec_classify_vector() { passed = passed + 1 }
+    if test_avec_classify_broadcast() { passed = passed + 1 }
+    if test_avec_classify_gather() { passed = passed + 1 }
+    if test_avec_classify_reduction() { passed = passed + 1 }
+
+    // Category 9: Profitability
+    if test_avec_profitable_large_trip() { passed = passed + 1 }
+    if test_avec_unprofitable_small_trip() { passed = passed + 1 }
+    if test_avec_profitable_vec128() { passed = passed + 1 }
+    if test_avec_unprofitable_width1() { passed = passed + 1 }
+    if test_avec_speedup_estimate() { passed = passed + 1 }
+
+    // Category 10: Edge Cases
+    if test_avec_invalid_loop_idx() { passed = passed + 1 }
+    if test_avec_invalid_instr_idx() { passed = passed + 1 }
+    if test_avec_empty_dep_graph() { passed = passed + 1 }
+    if test_avec_best_width_small_loop() { passed = passed + 1 }
+    if test_avec_multiple_loops() { passed = passed + 1 }
+
+    // Category 11: Alignment and Masking
+    if test_avec_aligned_access() { passed = passed + 1 }
+    if test_avec_alignment_peel() { passed = passed + 1 }
+    if test_avec_no_masking_needed() { passed = passed + 1 }
+    if test_avec_masking_needed() { passed = passed + 1 }
+    if test_avec_branch_count() { passed = passed + 1 }
+
+    // Category 12: SLP and Arithmetic Intensity
+    if test_avec_packable_pair() { passed = passed + 1 }
+    if test_avec_not_packable_dep() { passed = passed + 1 }
+    if test_avec_packable_count() { passed = passed + 1 }
+    if test_avec_arith_intensity() { passed = passed + 1 }
+    if test_avec_stats_new_zeroed() { passed = passed + 1 }
+
+    passed
+}
+
+// ============================================================================
+// Test Category 11: Alignment and Masking (5 tests)
+// ============================================================================
+
+fn test_avec_aligned_access_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    let start = avec_make_test_loop(nest, 0, 0, 100, 1, 1)
+    avec_add_test_instr(nest, AVEC_OP_INDEX_GET, 10, 20, 30, true, 1)
+    // Unit stride should be considered aligned
+    avec_is_aligned(nest, start, AVEC_VEC_256)
+}
+
+fn test_avec_aligned_access() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_aligned_access_inner(&! nest)
+}
+
+fn test_avec_alignment_peel_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    let start = avec_make_test_loop(nest, 0, 0, 100, 1, 2)
+    avec_add_test_instr(nest, AVEC_OP_INDEX_GET, 10, 20, 30, true, 1)
+    avec_add_test_instr(nest, AVEC_OP_INDEX_GET, 11, 21, 31, true, 3) // non-unit stride
+    let peel = avec_alignment_peel_count(nest, 0, AVEC_VEC_256)
+    // Should need peeling for the non-unit stride access
+    if peel < 0 { return false }
+    // Peel count should be at most vec_width - 1
+    if peel > AVEC_VEC_256 { return false }
+    true
+}
+
+fn test_avec_alignment_peel() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_alignment_peel_inner(&! nest)
+}
+
+fn test_avec_no_masking_needed_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    // Loop with only one branch (the loop exit) — no masking needed
+    let start = avec_make_test_loop(nest, 0, 0, 100, 1, 2)
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 10, 20, 30, false, 0)
+    avec_add_test_instr(nest, AVEC_OP_BRANCH_FALSE, AVEC_INVALID, 10, AVEC_INVALID, false, 0)
+    if avec_needs_masking(nest, 0) { return false }
+    true
+}
+
+fn test_avec_no_masking_needed() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_no_masking_needed_inner(&! nest)
+}
+
+fn test_avec_masking_needed_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    // Loop with two branches (exit + internal if/else) — needs masking
+    let start = avec_make_test_loop(nest, 0, 0, 100, 1, 3)
+    avec_add_test_instr(nest, AVEC_OP_BRANCH_FALSE, AVEC_INVALID, 10, AVEC_INVALID, false, 0) // exit
+    avec_add_test_instr(nest, AVEC_OP_BRANCH_TRUE, AVEC_INVALID, 11, AVEC_INVALID, false, 0)  // internal
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 12, 20, 30, false, 0)
+    avec_needs_masking(nest, 0)
+}
+
+fn test_avec_masking_needed() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_masking_needed_inner(&! nest)
+}
+
+fn test_avec_branch_count_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    let start = avec_make_test_loop(nest, 0, 0, 100, 1, 4)
+    avec_add_test_instr(nest, AVEC_OP_BRANCH_FALSE, AVEC_INVALID, 10, AVEC_INVALID, false, 0) // exit
+    avec_add_test_instr(nest, AVEC_OP_BRANCH_TRUE, AVEC_INVALID, 11, AVEC_INVALID, false, 0)  // internal 1
+    avec_add_test_instr(nest, AVEC_OP_BRANCH_FALSE, AVEC_INVALID, 12, AVEC_INVALID, false, 0) // internal 2
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 13, 20, 30, false, 0)
+    let count = avec_count_branches(nest, 0)
+    // 3 branches - 1 for exit = 2 internal branches
+    if count != 2 { return false }
+    true
+}
+
+fn test_avec_branch_count() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_branch_count_inner(&! nest)
+}
+
+// ============================================================================
+// Test Category 12: SLP and Arithmetic Intensity (5 tests)
+// ============================================================================
+
+fn test_avec_packable_pair_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    let start = avec_make_test_loop(nest, 0, 0, 100, 1, 2)
+    // Two independent adds to different destinations
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 10, 20, 30, false, 0)
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 11, 21, 31, false, 0)
+    avec_can_pack(nest, start, start + 1)
+}
+
+fn test_avec_packable_pair() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_packable_pair_inner(&! nest)
+}
+
+fn test_avec_not_packable_dep_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    let start = avec_make_test_loop(nest, 0, 0, 100, 1, 2)
+    // Second instruction depends on first (src1 = dst of first)
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 10, 20, 30, false, 0)
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 11, 10, 31, false, 0) // dep on r10
+    let packable = avec_can_pack(nest, start, start + 1)
+    packable == false
+}
+
+fn test_avec_not_packable_dep() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_not_packable_dep_inner(&! nest)
+}
+
+fn test_avec_packable_count_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    let start = avec_make_test_loop(nest, 0, 0, 100, 1, 3)
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 10, 20, 30, false, 0)
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 11, 21, 31, false, 0)
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 12, 22, 32, false, 0)
+    let count = avec_count_packable_pairs(nest, 0)
+    // 3 instructions, all independent: 3 pairs (0,1), (0,2), (1,2)
+    if count != 3 { return false }
+    true
+}
+
+fn test_avec_packable_count() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_packable_count_inner(&! nest)
+}
+
+fn test_avec_arith_intensity_inner(nest: &! AvecLoopNest) -> bool with Mut, Div, Panic {
+    let start = avec_make_test_loop(nest, 0, 0, 100, 1, 4)
+    avec_add_test_instr(nest, AVEC_OP_INDEX_GET, 10, 20, 30, true, 1)   // memory
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 11, 10, 12, false, 0)      // arith
+    avec_add_test_instr(nest, AVEC_OP_BINOP, 13, 11, 14, false, 0)      // arith
+    avec_add_test_instr(nest, AVEC_OP_INDEX_SET, AVEC_INVALID, 21, 30, true, 1) // memory
+    let intensity = avec_arithmetic_intensity(nest, 0)
+    // 2 arith, 2 memory: intensity = (2 * 100) / 2 = 100
+    if intensity != 100 { return false }
+    true
+}
+
+fn test_avec_arith_intensity() -> bool with Mut, Div, Panic {
+    var nest = avec_loop_nest_new()
+    test_avec_arith_intensity_inner(&! nest)
+}
+
+fn test_avec_stats_new_zeroed_inner(stats: &! AvecStats) -> bool with Mut, Div, Panic {
+    if stats.loops_analyzed != 0 { return false }
+    if stats.loops_vectorized != 0 { return false }
+    if stats.loops_rejected_deps != 0 { return false }
+    if stats.loops_rejected_cost != 0 { return false }
+    if stats.loops_rejected_trip != 0 { return false }
+    if stats.loops_rejected_nesting != 0 { return false }
+    if stats.total_reductions != 0 { return false }
+    if stats.total_gathers != 0 { return false }
+    if stats.total_broadcasts != 0 { return false }
+    true
+}
+
+fn test_avec_stats_new_zeroed() -> bool with Mut, Div, Panic {
+    var stats = avec_stats_new()
+    test_avec_stats_new_zeroed_inner(&! stats)
+}

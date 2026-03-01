@@ -1,0 +1,2140 @@
+// self-hosted::ir::egraph — E-Graph Equality Saturation Optimizer
+//
+// An e-graph (equivalence graph) implementation for the Sounio self-hosted
+// compiler.  E-graphs compactly represent many equivalent expressions
+// simultaneously, enabling powerful rewrite-based optimization via
+// equality saturation:
+//
+//   1. Build an initial e-graph from the input expression.
+//   2. Repeatedly apply rewrite rules, merging e-classes when two
+//      expressions are proven equivalent.
+//   3. Use hashconsing to deduplicate e-nodes, and a union-find to
+//      track which e-classes have been merged.
+//   4. Rebuild the hash table after merges to restore the congruence
+//      invariant.
+//   5. Extract the cheapest equivalent expression via bottom-up
+//      cost analysis.
+//
+// All arrays are fixed-size -- no heap allocation.
+//
+// References:
+//   Willsey et al.: "egg: Fast and Extensible Equality Saturation" (2021)
+//   Nelson & Oppen: "Fast Decision Procedures Based on Congruence
+//                    Closure" (1980)
+//   Tate et al.: "Equality Saturation: A New Approach to Optimization" (2009)
+
+// ============================================================================
+// Section 1: Constants
+// ============================================================================
+
+let EG_MAX_NODES: i64 = 16384
+let EG_MAX_CLASSES: i64 = 8192
+let EG_MAX_RULES: i64 = 256
+let EG_MAX_CHILDREN: i64 = 4
+let EG_MAX_CLASS_NODES: i64 = 32
+let EG_MAX_ITERATIONS: i64 = 30
+let EG_INVALID: i64 = 0 - 1
+
+// Opcode constants
+let EG_OP_CONST: i64 = 1
+let EG_OP_VAR: i64 = 2
+let EG_OP_ADD: i64 = 3
+let EG_OP_SUB: i64 = 4
+let EG_OP_MUL: i64 = 5
+let EG_OP_DIV: i64 = 6
+let EG_OP_NEG: i64 = 7
+
+// Cost model constants
+let EG_COST_CONST: i64 = 1
+let EG_COST_VAR: i64 = 1
+let EG_COST_OP: i64 = 2
+
+// Hash table constants
+let EG_HASH_EMPTY: i64 = 0 - 1
+let EG_HASH_PRIME: i64 = 16381
+
+// ============================================================================
+// Section 2: Data Structures
+// ============================================================================
+
+struct EgNode {
+    op: i64,
+    children: [i64; 4],
+    child_count: i64,
+    value: i64,
+    eclass_id: i64,
+}
+
+struct EgClass {
+    class_id: i64,
+    nodes: [i64; 32],
+    node_count: i64,
+    canonical: i64,
+    cost: i64,
+}
+
+struct EgUnionFind {
+    parent: [i64; 8192],
+    rank: [i64; 8192],
+    size: i64,
+}
+
+struct EgRule {
+    lhs_op: i64,
+    lhs_children: [i64; 4],
+    rhs_op: i64,
+    rhs_children: [i64; 4],
+    lhs_child_count: i64,
+    rhs_child_count: i64,
+    name_hash: i64,
+    is_commutative: bool,
+}
+
+struct EgRuleSet {
+    rules: [EgRule; 256],
+    rule_count: i64,
+}
+
+struct EgGraph {
+    nodes: [EgNode; 16384],
+    node_count: i64,
+    classes: [EgClass; 8192],
+    class_count: i64,
+    union_find: EgUnionFind,
+    hash_table: [i64; 16384],
+}
+
+struct EgExtractor {
+    costs: [i64; 8192],
+    best_node: [i64; 8192],
+}
+
+struct EgStats {
+    iterations: i64,
+    nodes_added: i64,
+    merges: i64,
+    rules_applied: i64,
+    saturated: bool,
+}
+
+struct EgContext {
+    graph: EgGraph,
+    rules: EgRuleSet,
+    extractor: EgExtractor,
+    iteration_count: i64,
+    stats: EgStats,
+}
+
+struct EgMatch {
+    matched_class: i64,
+    matched_node: i64,
+    bindings: [i64; 4],
+    binding_count: i64,
+    valid: bool,
+}
+
+struct EgMatchBatch {
+    matches: [EgMatch; 512],
+    match_count: i64,
+}
+
+// ============================================================================
+// Section 3: Constructors
+// ============================================================================
+
+fn eg_node_new() -> EgNode {
+    EgNode {
+        op: 0,
+        children: [EG_INVALID, EG_INVALID, EG_INVALID, EG_INVALID],
+        child_count: 0,
+        value: 0,
+        eclass_id: EG_INVALID,
+    }
+}
+
+fn eg_class_new() -> EgClass {
+    EgClass {
+        class_id: EG_INVALID,
+        nodes: [EG_INVALID, EG_INVALID, EG_INVALID, EG_INVALID,
+                EG_INVALID, EG_INVALID, EG_INVALID, EG_INVALID,
+                EG_INVALID, EG_INVALID, EG_INVALID, EG_INVALID,
+                EG_INVALID, EG_INVALID, EG_INVALID, EG_INVALID,
+                EG_INVALID, EG_INVALID, EG_INVALID, EG_INVALID,
+                EG_INVALID, EG_INVALID, EG_INVALID, EG_INVALID,
+                EG_INVALID, EG_INVALID, EG_INVALID, EG_INVALID,
+                EG_INVALID, EG_INVALID, EG_INVALID, EG_INVALID],
+        node_count: 0,
+        canonical: EG_INVALID,
+        cost: 999999,
+    }
+}
+
+fn eg_union_find_new() -> EgUnionFind {
+    EgUnionFind {
+        parent: [EG_INVALID; 8192],
+        rank: [0; 8192],
+        size: 0,
+    }
+}
+
+fn eg_rule_new() -> EgRule {
+    EgRule {
+        lhs_op: 0,
+        lhs_children: [EG_INVALID, EG_INVALID, EG_INVALID, EG_INVALID],
+        rhs_op: 0,
+        rhs_children: [EG_INVALID, EG_INVALID, EG_INVALID, EG_INVALID],
+        lhs_child_count: 0,
+        rhs_child_count: 0,
+        name_hash: 0,
+        is_commutative: false,
+    }
+}
+
+fn eg_rule_set_new() -> EgRuleSet {
+    EgRuleSet {
+        rules: [eg_rule_new(); 256],
+        rule_count: 0,
+    }
+}
+
+fn eg_graph_new() -> EgGraph {
+    EgGraph {
+        nodes: [eg_node_new(); 16384],
+        node_count: 0,
+        classes: [eg_class_new(); 8192],
+        class_count: 0,
+        union_find: eg_union_find_new(),
+        hash_table: [EG_HASH_EMPTY; 16384],
+    }
+}
+
+fn eg_extractor_new() -> EgExtractor {
+    EgExtractor {
+        costs: [999999; 8192],
+        best_node: [EG_INVALID; 8192],
+    }
+}
+
+fn eg_stats_new() -> EgStats {
+    EgStats {
+        iterations: 0,
+        nodes_added: 0,
+        merges: 0,
+        rules_applied: 0,
+        saturated: false,
+    }
+}
+
+fn eg_match_new() -> EgMatch {
+    EgMatch {
+        matched_class: EG_INVALID,
+        matched_node: EG_INVALID,
+        bindings: [EG_INVALID, EG_INVALID, EG_INVALID, EG_INVALID],
+        binding_count: 0,
+        valid: false,
+    }
+}
+
+fn eg_match_batch_new() -> EgMatchBatch {
+    EgMatchBatch {
+        matches: [eg_match_new(); 512],
+        match_count: 0,
+    }
+}
+
+fn eg_context_new() -> EgContext {
+    EgContext {
+        graph: eg_graph_new(),
+        rules: eg_rule_set_new(),
+        extractor: eg_extractor_new(),
+        iteration_count: 0,
+        stats: eg_stats_new(),
+    }
+}
+
+// ============================================================================
+// Section 4: Union-Find Operations
+// ============================================================================
+
+fn eg_find(uf: &! EgUnionFind, x: i64) -> i64 with Mut, Div, Panic {
+    if x < 0 || x >= EG_MAX_CLASSES {
+        return x
+    }
+    var root = x
+    while uf.parent[root as usize] != root {
+        root = uf.parent[root as usize]
+    }
+    var cur = x
+    while cur != root {
+        let next = uf.parent[cur as usize]
+        uf.parent[cur as usize] = root
+        cur = next
+    }
+    root
+}
+
+fn eg_uf_make_set(uf: &! EgUnionFind) -> i64 with Mut, Div, Panic {
+    let id = uf.size
+    if id >= EG_MAX_CLASSES {
+        return EG_INVALID
+    }
+    uf.parent[id as usize] = id
+    uf.rank[id as usize] = 0
+    uf.size = uf.size + 1
+    id
+}
+
+fn eg_union(uf: &! EgUnionFind, a: i64, b: i64) -> i64 with Mut, Div, Panic {
+    let ra = eg_find(uf, a)
+    let rb = eg_find(uf, b)
+    if ra == rb {
+        return ra
+    }
+    let rank_a = uf.rank[ra as usize]
+    let rank_b = uf.rank[rb as usize]
+    if rank_a < rank_b {
+        uf.parent[ra as usize] = rb
+        return rb
+    } else if rank_a > rank_b {
+        uf.parent[rb as usize] = ra
+        return ra
+    } else {
+        uf.parent[rb as usize] = ra
+        uf.rank[ra as usize] = rank_a + 1
+        return ra
+    }
+}
+
+fn eg_same_set(uf: &! EgUnionFind, a: i64, b: i64) -> bool with Mut, Div, Panic {
+    let ra = eg_find(uf, a)
+    let rb = eg_find(uf, b)
+    ra == rb
+}
+
+// Graph-level union-find wrappers (avoid sub-borrowing graph.union_find)
+fn eg_graph_find(graph: &! EgGraph, x: i64) -> i64 with Mut, Div, Panic {
+    eg_find(&! graph.union_find, x)
+}
+
+fn eg_graph_union(graph: &! EgGraph, a: i64, b: i64) -> i64 with Mut, Div, Panic {
+    eg_union(&! graph.union_find, a, b)
+}
+
+fn eg_graph_same_set(graph: &! EgGraph, a: i64, b: i64) -> bool with Mut, Div, Panic {
+    eg_same_set(&! graph.union_find, a, b)
+}
+
+fn eg_graph_make_set(graph: &! EgGraph) -> i64 with Mut, Div, Panic {
+    eg_uf_make_set(&! graph.union_find)
+}
+
+// ============================================================================
+// Section 5: Hashing
+// ============================================================================
+
+fn eg_hash_node(op: i64, children: [i64; 4], child_count: i64) -> i64 with Mut, Div, Panic {
+    var h: i64 = op * 2654435761
+    var i: i64 = 0
+    while i < child_count {
+        let c = children[i as usize]
+        h = h * 31 + c * 2654435761
+        i = i + 1
+    }
+    if h < 0 {
+        h = 0 - h
+    }
+    h % EG_MAX_NODES
+}
+
+fn eg_hashcons_lookup(graph: &EgGraph, op: i64, children: [i64; 4], child_count: i64) -> i64 with Mut, Div, Panic {
+    let h = eg_hash_node(op, children, child_count)
+    var idx = h
+    var probes: i64 = 0
+    while probes < EG_MAX_NODES {
+        let slot = graph.hash_table[idx as usize]
+        if slot == EG_HASH_EMPTY {
+            return EG_HASH_EMPTY
+        }
+        if slot >= 0 && slot < graph.node_count {
+            let node = graph.nodes[slot as usize]
+            if node.op == op && node.child_count == child_count {
+                var match_ok = true
+                var j: i64 = 0
+                while j < child_count {
+                    if node.children[j as usize] != children[j as usize] {
+                        match_ok = false
+                    }
+                    j = j + 1
+                }
+                if match_ok {
+                    return slot
+                }
+            }
+        }
+        idx = (idx + 1) % EG_MAX_NODES
+        probes = probes + 1
+    }
+    EG_HASH_EMPTY
+}
+
+fn eg_hashcons_insert(graph: &! EgGraph, node_idx: i64) -> bool with Mut, Div, Panic {
+    if node_idx < 0 || node_idx >= graph.node_count {
+        return false
+    }
+    let node = graph.nodes[node_idx as usize]
+    let h = eg_hash_node(node.op, node.children, node.child_count)
+    var idx = h
+    var probes: i64 = 0
+    while probes < EG_MAX_NODES {
+        let slot = graph.hash_table[idx as usize]
+        if slot == EG_HASH_EMPTY {
+            graph.hash_table[idx as usize] = node_idx
+            return true
+        }
+        idx = (idx + 1) % EG_MAX_NODES
+        probes = probes + 1
+    }
+    false
+}
+
+fn eg_rebuild_hash_table(graph: &! EgGraph) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < EG_MAX_NODES {
+        graph.hash_table[i as usize] = EG_HASH_EMPTY
+        i = i + 1
+    }
+    var inserted: i64 = 0
+    i = 0
+    while i < graph.node_count {
+        if graph.nodes[i as usize].eclass_id != EG_INVALID {
+            var j: i64 = 0
+            while j < graph.nodes[i as usize].child_count {
+                let child = graph.nodes[i as usize].children[j as usize]
+                if child != EG_INVALID {
+                    let canonical_child = eg_graph_find(graph, child)
+                    graph.nodes[i as usize].children[j as usize] = canonical_child
+                }
+                j = j + 1
+            }
+            let ok = eg_hashcons_insert(graph, i)
+            if ok {
+                inserted = inserted + 1
+            }
+        }
+        i = i + 1
+    }
+    inserted
+}
+
+// ============================================================================
+// Section 6: E-Graph Core Operations
+// ============================================================================
+
+fn eg_new_class(graph: &! EgGraph) -> i64 with Mut, Div, Panic {
+    let id = graph.class_count
+    if id >= EG_MAX_CLASSES {
+        return EG_INVALID
+    }
+    let uf_id = eg_graph_make_set(graph)
+    graph.classes[id as usize].class_id = id
+    graph.classes[id as usize].node_count = 0
+    graph.classes[id as usize].canonical = EG_INVALID
+    graph.classes[id as usize].cost = 999999
+    graph.class_count = graph.class_count + 1
+    id
+}
+
+fn eg_add_node(graph: &! EgGraph, op: i64, children: [i64; 4], child_count: i64, value: i64) -> i64 with Mut, Div, Panic {
+    var canon_children: [i64; 4] = [EG_INVALID, EG_INVALID, EG_INVALID, EG_INVALID]
+    var i: i64 = 0
+    while i < child_count {
+        canon_children[i as usize] = eg_graph_find(graph, children[i as usize])
+        i = i + 1
+    }
+
+    let existing = eg_hashcons_lookup(graph, op, canon_children, child_count)
+    if existing != EG_HASH_EMPTY {
+        return graph.nodes[existing as usize].eclass_id
+    }
+
+    let node_idx = graph.node_count
+    if node_idx >= EG_MAX_NODES {
+        return EG_INVALID
+    }
+    graph.nodes[node_idx as usize].op = op
+    graph.nodes[node_idx as usize].children = canon_children
+    graph.nodes[node_idx as usize].child_count = child_count
+    graph.nodes[node_idx as usize].value = value
+
+    let class_id = eg_new_class(graph)
+    if class_id == EG_INVALID {
+        return EG_INVALID
+    }
+    graph.nodes[node_idx as usize].eclass_id = class_id
+    graph.node_count = graph.node_count + 1
+
+    let nc = graph.classes[class_id as usize].node_count
+    if nc < EG_MAX_CLASS_NODES {
+        graph.classes[class_id as usize].nodes[nc as usize] = node_idx
+        graph.classes[class_id as usize].node_count = nc + 1
+    }
+    graph.classes[class_id as usize].canonical = node_idx
+
+    let ok = eg_hashcons_insert(graph, node_idx)
+
+    class_id
+}
+
+fn eg_add_const(graph: &! EgGraph, value: i64) -> i64 with Mut, Div, Panic {
+    let no_children: [i64; 4] = [EG_INVALID, EG_INVALID, EG_INVALID, EG_INVALID]
+    eg_add_node(graph, EG_OP_CONST, no_children, 0, value)
+}
+
+fn eg_add_var(graph: &! EgGraph, var_id: i64) -> i64 with Mut, Div, Panic {
+    let no_children: [i64; 4] = [EG_INVALID, EG_INVALID, EG_INVALID, EG_INVALID]
+    eg_add_node(graph, EG_OP_VAR, no_children, 0, var_id)
+}
+
+fn eg_add_binop(graph: &! EgGraph, op: i64, lhs: i64, rhs: i64) -> i64 with Mut, Div, Panic {
+    let children: [i64; 4] = [lhs, rhs, EG_INVALID, EG_INVALID]
+    eg_add_node(graph, op, children, 2, 0)
+}
+
+fn eg_add_unop(graph: &! EgGraph, op: i64, child: i64) -> i64 with Mut, Div, Panic {
+    let children: [i64; 4] = [child, EG_INVALID, EG_INVALID, EG_INVALID]
+    eg_add_node(graph, op, children, 1, 0)
+}
+
+// ============================================================================
+// Section 7: E-Class Merging
+// ============================================================================
+
+fn eg_merge(graph: &! EgGraph, a: i64, b: i64) -> i64 with Mut, Div, Panic {
+    let ca = eg_graph_find(graph, a)
+    let cb = eg_graph_find(graph, b)
+    if ca == cb {
+        return ca
+    }
+
+    let new_root = eg_graph_union(graph, ca, cb)
+
+    let absorbed = if new_root == ca { cb } else { ca }
+
+    var i: i64 = 0
+    while i < graph.classes[absorbed as usize].node_count {
+        let nidx = graph.classes[absorbed as usize].nodes[i as usize]
+        if nidx != EG_INVALID {
+            graph.nodes[nidx as usize].eclass_id = new_root
+            let nc = graph.classes[new_root as usize].node_count
+            if nc < EG_MAX_CLASS_NODES {
+                graph.classes[new_root as usize].nodes[nc as usize] = nidx
+                graph.classes[new_root as usize].node_count = nc + 1
+            }
+        }
+        i = i + 1
+    }
+
+    graph.classes[absorbed as usize].node_count = 0
+
+    let cost_a = graph.classes[ca as usize].cost
+    let cost_b = graph.classes[cb as usize].cost
+    if cost_a < cost_b {
+        graph.classes[new_root as usize].cost = cost_a
+    } else {
+        graph.classes[new_root as usize].cost = cost_b
+    }
+
+    new_root
+}
+
+fn eg_rebuild(graph: &! EgGraph) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < graph.node_count {
+        let old_class = graph.nodes[i as usize].eclass_id
+        if old_class != EG_INVALID {
+            let new_class = eg_graph_find(graph, old_class)
+            graph.nodes[i as usize].eclass_id = new_class
+        }
+        var j: i64 = 0
+        while j < graph.nodes[i as usize].child_count {
+            let child = graph.nodes[i as usize].children[j as usize]
+            if child != EG_INVALID {
+                let canon = eg_graph_find(graph, child)
+                graph.nodes[i as usize].children[j as usize] = canon
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    let inserted = eg_rebuild_hash_table(graph)
+    inserted
+}
+
+fn eg_canonical_class(graph: &! EgGraph, class_id: i64) -> i64 with Mut, Div, Panic {
+    eg_graph_find(graph, class_id)
+}
+
+fn eg_class_size(graph: &EgGraph, class_id: i64) -> i64 with Div, Panic {
+    if class_id < 0 || class_id >= graph.class_count {
+        return 0
+    }
+    graph.classes[class_id as usize].node_count
+}
+
+// ============================================================================
+// Section 8: Rule Construction
+// ============================================================================
+
+fn eg_make_rule(lhs_op: i64, lhs_children: [i64; 4], lhs_child_count: i64,
+                rhs_op: i64, rhs_children: [i64; 4], rhs_child_count: i64,
+                name_hash: i64, is_commutative: bool) -> EgRule {
+    EgRule {
+        lhs_op: lhs_op,
+        lhs_children: lhs_children,
+        rhs_op: rhs_op,
+        rhs_children: rhs_children,
+        lhs_child_count: lhs_child_count,
+        rhs_child_count: rhs_child_count,
+        name_hash: name_hash,
+        is_commutative: is_commutative,
+    }
+}
+
+fn eg_add_rule(rules: &! EgRuleSet, rule: EgRule) -> i64 with Mut, Div, Panic {
+    let idx = rules.rule_count
+    if idx >= EG_MAX_RULES {
+        return EG_INVALID
+    }
+    rules.rules[idx as usize] = rule
+    rules.rule_count = idx + 1
+    idx
+}
+
+let EG_PAT_VAR_A: i64 = 0 - 1
+let EG_PAT_VAR_B: i64 = 0 - 2
+let EG_PAT_VAR_C: i64 = 0 - 3
+let EG_PAT_VAR_D: i64 = 0 - 4
+
+fn eg_resolve_pat(pat_child: i64, bindings: [i64; 4]) -> i64 with Div, Panic {
+    if pat_child == EG_PAT_VAR_A { return bindings[0 as usize] }
+    if pat_child == EG_PAT_VAR_B { return bindings[1 as usize] }
+    if pat_child == EG_PAT_VAR_C { return bindings[2 as usize] }
+    if pat_child == EG_PAT_VAR_D { return bindings[3 as usize] }
+    pat_child
+}
+
+// ============================================================================
+// Section 9: Rule Matching
+// ============================================================================
+
+fn eg_match_rule_node(graph: &! EgGraph, rule: &EgRule, node_idx: i64) -> EgMatch with Mut, Div, Panic {
+    var result = eg_match_new()
+    if node_idx < 0 || node_idx >= graph.node_count {
+        return result
+    }
+    let node = graph.nodes[node_idx as usize]
+
+    if node.op != rule.lhs_op { return result }
+    if node.child_count != rule.lhs_child_count { return result }
+
+    var bindings: [i64; 4] = [EG_INVALID, EG_INVALID, EG_INVALID, EG_INVALID]
+    var binding_idx: i64 = 0
+    var j: i64 = 0
+    var ok = true
+    while j < rule.lhs_child_count {
+        let pat = rule.lhs_children[j as usize]
+        let actual = eg_graph_find(graph, node.children[j as usize])
+        if pat < 0 {
+            let slot = 0 - pat - 1
+            if slot >= 0 && slot < 4 {
+                bindings[slot as usize] = actual
+                if slot >= binding_idx {
+                    binding_idx = slot + 1
+                }
+            }
+        } else {
+            let canon_pat = eg_graph_find(graph, pat)
+            if canon_pat != actual {
+                ok = false
+            }
+        }
+        j = j + 1
+    }
+    if ok == false { return result }
+
+    result.matched_class = node.eclass_id
+    result.matched_node = node_idx
+    result.bindings = bindings
+    result.binding_count = binding_idx
+    result.valid = true
+    result
+}
+
+fn eg_match_all_rules(graph: &! EgGraph, rules: &EgRuleSet) -> EgMatchBatch with Mut, Div, Panic {
+    var batch = eg_match_batch_new()
+    var r: i64 = 0
+    while r < rules.rule_count {
+        var n: i64 = 0
+        while n < graph.node_count {
+            if graph.nodes[n as usize].eclass_id != EG_INVALID {
+                let m = eg_match_rule_node(graph, &rules.rules[r as usize], n)
+                if m.valid {
+                    if batch.match_count < 512 {
+                        var stored = m
+                        stored.matched_node = r
+                        batch.matches[batch.match_count as usize] = stored
+                        batch.match_count = batch.match_count + 1
+                    }
+                }
+                if rules.rules[r as usize].is_commutative {
+                    if graph.nodes[n as usize].child_count == 2 {
+                        let orig_c0 = graph.nodes[n as usize].children[0 as usize]
+                        let orig_c1 = graph.nodes[n as usize].children[1 as usize]
+                        graph.nodes[n as usize].children[0 as usize] = orig_c1
+                        graph.nodes[n as usize].children[1 as usize] = orig_c0
+                        let m2 = eg_match_rule_node(graph, &rules.rules[r as usize], n)
+                        graph.nodes[n as usize].children[0 as usize] = orig_c0
+                        graph.nodes[n as usize].children[1 as usize] = orig_c1
+                        if m2.valid {
+                            if batch.match_count < 512 {
+                                var stored2 = m2
+                                stored2.matched_node = r
+                                stored2.matched_class = graph.nodes[n as usize].eclass_id
+                                batch.matches[batch.match_count as usize] = stored2
+                                batch.match_count = batch.match_count + 1
+                            }
+                        }
+                    }
+                }
+            }
+            n = n + 1
+        }
+        r = r + 1
+    }
+    batch
+}
+
+// ============================================================================
+// Section 10: Rule Application
+// ============================================================================
+
+fn eg_apply_match(graph: &! EgGraph, rules: &EgRuleSet, m: &EgMatch) -> i64 with Mut, Div, Panic {
+    if m.valid == false { return EG_INVALID }
+    let rule_idx = m.matched_node
+    if rule_idx < 0 || rule_idx >= rules.rule_count { return EG_INVALID }
+    let rule = rules.rules[rule_idx as usize]
+
+    var rhs_children: [i64; 4] = [EG_INVALID, EG_INVALID, EG_INVALID, EG_INVALID]
+    var i: i64 = 0
+    while i < rule.rhs_child_count {
+        rhs_children[i as usize] = eg_resolve_pat(rule.rhs_children[i as usize], m.bindings)
+        i = i + 1
+    }
+
+    let rhs_class = eg_add_node(graph, rule.rhs_op, rhs_children, rule.rhs_child_count, 0)
+    if rhs_class == EG_INVALID { return EG_INVALID }
+
+    let merged_class = eg_graph_find(graph, m.matched_class)
+    let result = eg_merge(graph, merged_class, rhs_class)
+    result
+}
+
+fn eg_apply_all_matches(graph: &! EgGraph, rules: &EgRuleSet, batch: &EgMatchBatch) -> i64 with Mut, Div, Panic {
+    var applied: i64 = 0
+    var i: i64 = 0
+    while i < batch.match_count {
+        let result = eg_apply_match(graph, rules, &batch.matches[i as usize])
+        if result != EG_INVALID {
+            applied = applied + 1
+        }
+        i = i + 1
+    }
+    applied
+}
+
+// ============================================================================
+// Section 11: Equality Saturation
+// ============================================================================
+
+fn eg_saturate_step_inner(graph: &! EgGraph, rules: &EgRuleSet) -> i64 with Mut, Div, Panic {
+    let batch = eg_match_all_rules(graph, rules)
+    let applied = eg_apply_all_matches(graph, rules, &batch)
+    let rebuilt = eg_rebuild(graph)
+    applied
+}
+
+fn eg_saturate_step(ctx: &! EgContext) -> i64 with Mut, Div, Panic {
+    let applied = eg_saturate_step_inner(&! ctx.graph, &ctx.rules)
+    ctx.stats.rules_applied = ctx.stats.rules_applied + applied
+    ctx.stats.nodes_added = ctx.graph.node_count
+    applied
+}
+
+fn eg_saturate(ctx: &! EgContext) -> EgStats with Mut, Div, Panic {
+    var iter: i64 = 0
+    while iter < EG_MAX_ITERATIONS {
+        let old_node_count = ctx.graph.node_count
+        let old_class_count = ctx.graph.class_count
+
+        let applied = eg_saturate_step(ctx)
+
+        ctx.stats.iterations = iter + 1
+        ctx.iteration_count = iter + 1
+
+        if applied == 0 {
+            ctx.stats.saturated = true
+            return ctx.stats
+        }
+        if ctx.graph.node_count == old_node_count && ctx.graph.class_count == old_class_count {
+            ctx.stats.saturated = true
+            return ctx.stats
+        }
+
+        iter = iter + 1
+    }
+    ctx.stats
+}
+
+// ============================================================================
+// Section 12: Cost-Based Extraction
+// ============================================================================
+
+fn eg_node_cost(graph: &EgGraph, extractor: &EgExtractor, node_idx: i64) -> i64 with Mut, Div, Panic {
+    if node_idx < 0 || node_idx >= graph.node_count { return 999999 }
+    let node = graph.nodes[node_idx as usize]
+    var base_cost: i64 = EG_COST_OP
+    if node.op == EG_OP_CONST { base_cost = EG_COST_CONST }
+    else if node.op == EG_OP_VAR { base_cost = EG_COST_VAR }
+    var total = base_cost
+    var i: i64 = 0
+    while i < node.child_count {
+        let child_class = node.children[i as usize]
+        if child_class >= 0 && child_class < EG_MAX_CLASSES {
+            let child_cost = extractor.costs[child_class as usize]
+            total = total + child_cost
+        } else {
+            total = total + 999999
+        }
+        i = i + 1
+    }
+    total
+}
+
+fn eg_extract(graph: &! EgGraph, extractor: &! EgExtractor) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < EG_MAX_CLASSES {
+        extractor.costs[i as usize] = 999999
+        extractor.best_node[i as usize] = EG_INVALID
+        i = i + 1
+    }
+
+    var changed = true
+    var pass: i64 = 0
+    while changed && pass < 100 {
+        changed = false
+        i = 0
+        while i < graph.node_count {
+            let node = graph.nodes[i as usize]
+            if node.eclass_id != EG_INVALID {
+                let class_id = eg_graph_find(graph, node.eclass_id)
+                let cost = eg_node_cost(graph, extractor, i)
+                if cost < extractor.costs[class_id as usize] {
+                    extractor.costs[class_id as usize] = cost
+                    extractor.best_node[class_id as usize] = i
+                    changed = true
+                }
+            }
+            i = i + 1
+        }
+        pass = pass + 1
+    }
+    pass
+}
+
+fn eg_best_node_for_class(graph: &! EgGraph, extractor: &EgExtractor, class_id: i64) -> i64 with Mut, Div, Panic {
+    let canon = eg_graph_find(graph, class_id)
+    if canon >= 0 && canon < EG_MAX_CLASSES {
+        return extractor.best_node[canon as usize]
+    }
+    EG_INVALID
+}
+
+fn eg_best_cost_for_class(graph: &! EgGraph, extractor: &EgExtractor, class_id: i64) -> i64 with Mut, Div, Panic {
+    let canon = eg_graph_find(graph, class_id)
+    if canon >= 0 && canon < EG_MAX_CLASSES {
+        return extractor.costs[canon as usize]
+    }
+    999999
+}
+
+// ============================================================================
+// Section 13: Built-In Algebraic Rules
+// ============================================================================
+
+fn eg_rule_add_commute() -> EgRule {
+    let lhs_ch: [i64; 4] = [EG_PAT_VAR_A, EG_PAT_VAR_B, EG_INVALID, EG_INVALID]
+    let rhs_ch: [i64; 4] = [EG_PAT_VAR_B, EG_PAT_VAR_A, EG_INVALID, EG_INVALID]
+    eg_make_rule(EG_OP_ADD, lhs_ch, 2, EG_OP_ADD, rhs_ch, 2, 101, false)
+}
+
+fn eg_rule_mul_commute() -> EgRule {
+    let lhs_ch: [i64; 4] = [EG_PAT_VAR_A, EG_PAT_VAR_B, EG_INVALID, EG_INVALID]
+    let rhs_ch: [i64; 4] = [EG_PAT_VAR_B, EG_PAT_VAR_A, EG_INVALID, EG_INVALID]
+    eg_make_rule(EG_OP_MUL, lhs_ch, 2, EG_OP_MUL, rhs_ch, 2, 102, false)
+}
+
+fn eg_class_has_const(graph: &! EgGraph, class_id: i64, value: i64) -> bool with Mut, Div, Panic {
+    let canon = eg_graph_find(graph, class_id)
+    if canon < 0 || canon >= graph.class_count { return false }
+    var i: i64 = 0
+    while i < graph.classes[canon as usize].node_count {
+        let nidx = graph.classes[canon as usize].nodes[i as usize]
+        if nidx >= 0 && nidx < graph.node_count {
+            let node = graph.nodes[nidx as usize]
+            if node.op == EG_OP_CONST && node.value == value { return true }
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn eg_apply_add_identity(graph: &! EgGraph) -> i64 with Mut, Div, Panic {
+    var merges: i64 = 0
+    var i: i64 = 0
+    while i < graph.node_count {
+        let node = graph.nodes[i as usize]
+        if node.op == EG_OP_ADD && node.child_count == 2 && node.eclass_id != EG_INVALID {
+            let c0 = eg_graph_find(graph, node.children[0 as usize])
+            let c1 = eg_graph_find(graph, node.children[1 as usize])
+            if eg_class_has_const(graph, c1, 0) {
+                let result_class = eg_graph_find(graph, node.eclass_id)
+                if eg_graph_same_set(graph, result_class, c0) == false {
+                    let m = eg_merge(graph, result_class, c0)
+                    merges = merges + 1
+                }
+            }
+            if eg_class_has_const(graph, c0, 0) {
+                let result_class2 = eg_graph_find(graph, node.eclass_id)
+                if eg_graph_same_set(graph, result_class2, c1) == false {
+                    let m2 = eg_merge(graph, result_class2, c1)
+                    merges = merges + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    merges
+}
+
+fn eg_apply_mul_identity(graph: &! EgGraph) -> i64 with Mut, Div, Panic {
+    var merges: i64 = 0
+    var i: i64 = 0
+    while i < graph.node_count {
+        let node = graph.nodes[i as usize]
+        if node.op == EG_OP_MUL && node.child_count == 2 && node.eclass_id != EG_INVALID {
+            let c0 = eg_graph_find(graph, node.children[0 as usize])
+            let c1 = eg_graph_find(graph, node.children[1 as usize])
+            if eg_class_has_const(graph, c1, 1) {
+                let result_class = eg_graph_find(graph, node.eclass_id)
+                if eg_graph_same_set(graph, result_class, c0) == false {
+                    let m = eg_merge(graph, result_class, c0)
+                    merges = merges + 1
+                }
+            }
+            if eg_class_has_const(graph, c0, 1) {
+                let result_class2 = eg_graph_find(graph, node.eclass_id)
+                if eg_graph_same_set(graph, result_class2, c1) == false {
+                    let m2 = eg_merge(graph, result_class2, c1)
+                    merges = merges + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    merges
+}
+
+fn eg_apply_mul_annihilation(graph: &! EgGraph) -> i64 with Mut, Div, Panic {
+    var merges: i64 = 0
+    var i: i64 = 0
+    while i < graph.node_count {
+        let node = graph.nodes[i as usize]
+        if node.op == EG_OP_MUL && node.child_count == 2 && node.eclass_id != EG_INVALID {
+            let c0 = eg_graph_find(graph, node.children[0 as usize])
+            let c1 = eg_graph_find(graph, node.children[1 as usize])
+            if eg_class_has_const(graph, c1, 0) {
+                let result_class = eg_graph_find(graph, node.eclass_id)
+                if eg_graph_same_set(graph, result_class, c1) == false {
+                    let m = eg_merge(graph, result_class, c1)
+                    merges = merges + 1
+                }
+            }
+            if eg_class_has_const(graph, c0, 0) {
+                let result_class2 = eg_graph_find(graph, node.eclass_id)
+                if eg_graph_same_set(graph, result_class2, c0) == false {
+                    let m2 = eg_merge(graph, result_class2, c0)
+                    merges = merges + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    merges
+}
+
+fn eg_apply_double_neg(graph: &! EgGraph) -> i64 with Mut, Div, Panic {
+    var merges: i64 = 0
+    var i: i64 = 0
+    while i < graph.node_count {
+        let node = graph.nodes[i as usize]
+        if node.op == EG_OP_NEG && node.child_count == 1 && node.eclass_id != EG_INVALID {
+            let inner_class = eg_graph_find(graph, node.children[0 as usize])
+            if inner_class >= 0 && inner_class < graph.class_count {
+                var j: i64 = 0
+                while j < graph.classes[inner_class as usize].node_count {
+                    let inner_nidx = graph.classes[inner_class as usize].nodes[j as usize]
+                    if inner_nidx >= 0 && inner_nidx < graph.node_count {
+                        let inner_node = graph.nodes[inner_nidx as usize]
+                        if inner_node.op == EG_OP_NEG && inner_node.child_count == 1 {
+                            let x_class = eg_graph_find(graph, inner_node.children[0 as usize])
+                            let outer_class = eg_graph_find(graph, node.eclass_id)
+                            if eg_graph_same_set(graph, outer_class, x_class) == false {
+                                let m = eg_merge(graph, outer_class, x_class)
+                                merges = merges + 1
+                            }
+                        }
+                    }
+                    j = j + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    merges
+}
+
+fn eg_apply_sub_identity(graph: &! EgGraph) -> i64 with Mut, Div, Panic {
+    var merges: i64 = 0
+    var i: i64 = 0
+    while i < graph.node_count {
+        let node = graph.nodes[i as usize]
+        if node.op == EG_OP_SUB && node.child_count == 2 && node.eclass_id != EG_INVALID {
+            let c1 = eg_graph_find(graph, node.children[1 as usize])
+            if eg_class_has_const(graph, c1, 0) {
+                let c0 = eg_graph_find(graph, node.children[0 as usize])
+                let result_class = eg_graph_find(graph, node.eclass_id)
+                if eg_graph_same_set(graph, result_class, c0) == false {
+                    let m = eg_merge(graph, result_class, c0)
+                    merges = merges + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    merges
+}
+
+fn eg_apply_sub_self(graph: &! EgGraph, zero_class: i64) -> i64 with Mut, Div, Panic {
+    var merges: i64 = 0
+    var i: i64 = 0
+    while i < graph.node_count {
+        let node = graph.nodes[i as usize]
+        if node.op == EG_OP_SUB && node.child_count == 2 && node.eclass_id != EG_INVALID {
+            let c0 = eg_graph_find(graph, node.children[0 as usize])
+            let c1 = eg_graph_find(graph, node.children[1 as usize])
+            if c0 == c1 {
+                let result_class = eg_graph_find(graph, node.eclass_id)
+                let canon_zero = eg_graph_find(graph, zero_class)
+                if eg_graph_same_set(graph, result_class, canon_zero) == false {
+                    let m = eg_merge(graph, result_class, canon_zero)
+                    merges = merges + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    merges
+}
+
+fn eg_apply_distributivity(graph: &! EgGraph) -> i64 with Mut, Div, Panic {
+    var merges: i64 = 0
+    var i: i64 = 0
+    while i < graph.node_count {
+        let node = graph.nodes[i as usize]
+        if node.op == EG_OP_MUL && node.child_count == 2 && node.eclass_id != EG_INVALID {
+            let a_class = eg_graph_find(graph, node.children[0 as usize])
+            let bc_class = eg_graph_find(graph, node.children[1 as usize])
+            if bc_class >= 0 && bc_class < graph.class_count {
+                var j: i64 = 0
+                while j < graph.classes[bc_class as usize].node_count {
+                    let add_nidx = graph.classes[bc_class as usize].nodes[j as usize]
+                    if add_nidx >= 0 && add_nidx < graph.node_count {
+                        let add_node = graph.nodes[add_nidx as usize]
+                        if add_node.op == EG_OP_ADD && add_node.child_count == 2 {
+                            let b_class = eg_graph_find(graph, add_node.children[0 as usize])
+                            let c_class = eg_graph_find(graph, add_node.children[1 as usize])
+                            let ab = eg_add_binop(graph, EG_OP_MUL, a_class, b_class)
+                            let ac = eg_add_binop(graph, EG_OP_MUL, a_class, c_class)
+                            let ab_plus_ac = eg_add_binop(graph, EG_OP_ADD, ab, ac)
+                            let orig_class = eg_graph_find(graph, node.eclass_id)
+                            if eg_graph_same_set(graph, orig_class, ab_plus_ac) == false {
+                                let m = eg_merge(graph, orig_class, ab_plus_ac)
+                                merges = merges + 1
+                            }
+                        }
+                    }
+                    j = j + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    merges
+}
+
+fn eg_apply_algebraic_rules(graph: &! EgGraph) -> i64 with Mut, Div, Panic {
+    var total_merges: i64 = 0
+    total_merges = total_merges + eg_apply_add_identity(graph)
+    total_merges = total_merges + eg_apply_mul_identity(graph)
+    total_merges = total_merges + eg_apply_mul_annihilation(graph)
+    total_merges = total_merges + eg_apply_double_neg(graph)
+    total_merges = total_merges + eg_apply_sub_identity(graph)
+    total_merges
+}
+
+fn eg_algebraic_saturate_step_inner(graph: &! EgGraph, rules: &EgRuleSet) -> i64 with Mut, Div, Panic {
+    let alg_merges = eg_apply_algebraic_rules(graph)
+    let batch = eg_match_all_rules(graph, rules)
+    let pat_applied = eg_apply_all_matches(graph, rules, &batch)
+    let rebuilt = eg_rebuild(graph)
+    // Encode both values: alg_merges * 1000000 + pat_applied
+    alg_merges * 1000000 + pat_applied
+}
+
+fn eg_algebraic_saturate(ctx: &! EgContext) -> EgStats with Mut, Div, Panic {
+    var iter: i64 = 0
+    while iter < EG_MAX_ITERATIONS {
+        let old_node_count = ctx.graph.node_count
+
+        let combined = eg_algebraic_saturate_step_inner(&! ctx.graph, &ctx.rules)
+        let alg_merges = combined / 1000000
+        let pat_applied = combined % 1000000
+
+        ctx.stats.iterations = iter + 1
+        ctx.stats.merges = ctx.stats.merges + alg_merges
+        ctx.stats.rules_applied = ctx.stats.rules_applied + pat_applied
+        ctx.stats.nodes_added = ctx.graph.node_count
+        ctx.iteration_count = iter + 1
+
+        if alg_merges == 0 && pat_applied == 0 {
+            ctx.stats.saturated = true
+            return ctx.stats
+        }
+        if ctx.graph.node_count == old_node_count && alg_merges == 0 {
+            ctx.stats.saturated = true
+            return ctx.stats
+        }
+
+        iter = iter + 1
+    }
+    ctx.stats
+}
+
+// ============================================================================
+// Section 14: Utility / Query Functions
+// ============================================================================
+
+fn eg_node_op(graph: &EgGraph, node_idx: i64) -> i64 with Div, Panic {
+    if node_idx < 0 || node_idx >= graph.node_count { return 0 }
+    graph.nodes[node_idx as usize].op
+}
+
+fn eg_node_value(graph: &EgGraph, node_idx: i64) -> i64 with Div, Panic {
+    if node_idx < 0 || node_idx >= graph.node_count { return 0 }
+    graph.nodes[node_idx as usize].value
+}
+
+fn eg_node_class(graph: &EgGraph, node_idx: i64) -> i64 with Div, Panic {
+    if node_idx < 0 || node_idx >= graph.node_count { return EG_INVALID }
+    graph.nodes[node_idx as usize].eclass_id
+}
+
+fn eg_node_child(graph: &EgGraph, node_idx: i64, child_idx: i64) -> i64 with Div, Panic {
+    if node_idx < 0 || node_idx >= graph.node_count { return EG_INVALID }
+    if child_idx < 0 || child_idx >= graph.nodes[node_idx as usize].child_count { return EG_INVALID }
+    graph.nodes[node_idx as usize].children[child_idx as usize]
+}
+
+fn eg_are_equivalent(graph: &! EgGraph, a: i64, b: i64) -> bool with Mut, Div, Panic {
+    eg_graph_same_set(graph, a, b)
+}
+
+fn eg_count_live_classes(graph: &! EgGraph) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < graph.class_count {
+        let canon = eg_graph_find(graph, i)
+        if canon == i { count = count + 1 }
+        i = i + 1
+    }
+    count
+}
+
+fn eg_op_name_hash(op: i64) -> i64 {
+    if op == EG_OP_CONST { return 100 }
+    if op == EG_OP_VAR { return 200 }
+    if op == EG_OP_ADD { return 300 }
+    if op == EG_OP_SUB { return 400 }
+    if op == EG_OP_MUL { return 500 }
+    if op == EG_OP_DIV { return 600 }
+    if op == EG_OP_NEG { return 700 }
+    0
+}
+
+// ============================================================================
+// Section 14b: Context-Level Wrappers
+// ============================================================================
+
+fn eg_ctx_add_const(ctx: &! EgContext, value: i64) -> i64 with Mut, Div, Panic {
+    eg_add_const(&! ctx.graph, value)
+}
+fn eg_ctx_add_var(ctx: &! EgContext, var_id: i64) -> i64 with Mut, Div, Panic {
+    eg_add_var(&! ctx.graph, var_id)
+}
+fn eg_ctx_add_binop(ctx: &! EgContext, op: i64, lhs: i64, rhs: i64) -> i64 with Mut, Div, Panic {
+    eg_add_binop(&! ctx.graph, op, lhs, rhs)
+}
+fn eg_ctx_add_unop(ctx: &! EgContext, op: i64, child: i64) -> i64 with Mut, Div, Panic {
+    eg_add_unop(&! ctx.graph, op, child)
+}
+fn eg_ctx_merge(ctx: &! EgContext, a: i64, b: i64) -> i64 with Mut, Div, Panic {
+    eg_merge(&! ctx.graph, a, b)
+}
+fn eg_ctx_rebuild(ctx: &! EgContext) -> i64 with Mut, Div, Panic {
+    eg_rebuild(&! ctx.graph)
+}
+fn eg_ctx_are_equivalent(ctx: &! EgContext, a: i64, b: i64) -> bool with Mut, Div, Panic {
+    eg_are_equivalent(&! ctx.graph, a, b)
+}
+fn eg_ctx_count_live_classes(ctx: &! EgContext) -> i64 with Mut, Div, Panic {
+    eg_count_live_classes(&! ctx.graph)
+}
+fn eg_ctx_class_has_const(ctx: &! EgContext, class_id: i64, value: i64) -> bool with Mut, Div, Panic {
+    eg_class_has_const(&! ctx.graph, class_id, value)
+}
+fn eg_ctx_apply_add_identity(ctx: &! EgContext) -> i64 with Mut, Div, Panic {
+    eg_apply_add_identity(&! ctx.graph)
+}
+fn eg_ctx_apply_mul_identity(ctx: &! EgContext) -> i64 with Mut, Div, Panic {
+    eg_apply_mul_identity(&! ctx.graph)
+}
+fn eg_ctx_apply_mul_annihilation(ctx: &! EgContext) -> i64 with Mut, Div, Panic {
+    eg_apply_mul_annihilation(&! ctx.graph)
+}
+fn eg_ctx_apply_double_neg(ctx: &! EgContext) -> i64 with Mut, Div, Panic {
+    eg_apply_double_neg(&! ctx.graph)
+}
+fn eg_ctx_apply_sub_identity(ctx: &! EgContext) -> i64 with Mut, Div, Panic {
+    eg_apply_sub_identity(&! ctx.graph)
+}
+fn eg_ctx_apply_sub_self(ctx: &! EgContext, zero_class: i64) -> i64 with Mut, Div, Panic {
+    eg_apply_sub_self(&! ctx.graph, zero_class)
+}
+fn eg_ctx_add_rule(ctx: &! EgContext, rule: EgRule) -> i64 with Mut, Div, Panic {
+    eg_add_rule(&! ctx.rules, rule)
+}
+fn eg_ctx_match_rule_node(ctx: &! EgContext, rule: &EgRule, node_idx: i64) -> EgMatch with Mut, Div, Panic {
+    eg_match_rule_node(&! ctx.graph, rule, node_idx)
+}
+fn eg_ctx_match_all_rules(ctx: &! EgContext) -> EgMatchBatch with Mut, Div, Panic {
+    eg_match_all_rules(&! ctx.graph, &ctx.rules)
+}
+fn eg_ctx_apply_all_matches(ctx: &! EgContext, batch: &EgMatchBatch) -> i64 with Mut, Div, Panic {
+    eg_apply_all_matches(&! ctx.graph, &ctx.rules, batch)
+}
+fn eg_ctx_extract(ctx: &! EgContext) -> i64 with Mut, Div, Panic {
+    eg_extract(&! ctx.graph, &! ctx.extractor)
+}
+fn eg_ctx_best_node_for_class(ctx: &! EgContext, class_id: i64) -> i64 with Mut, Div, Panic {
+    eg_best_node_for_class(&! ctx.graph, &ctx.extractor, class_id)
+}
+fn eg_ctx_best_cost_for_class(ctx: &! EgContext, class_id: i64) -> i64 with Mut, Div, Panic {
+    eg_best_cost_for_class(&! ctx.graph, &ctx.extractor, class_id)
+}
+fn eg_ctx_graph_find(ctx: &! EgContext, x: i64) -> i64 with Mut, Div, Panic {
+    eg_graph_find(&! ctx.graph, x)
+}
+fn eg_ctx_class_size(ctx: &EgContext, class_id: i64) -> i64 with Div, Panic {
+    eg_class_size(&ctx.graph, class_id)
+}
+fn eg_ctx_node_op(ctx: &EgContext, node_idx: i64) -> i64 with Div, Panic {
+    eg_node_op(&ctx.graph, node_idx)
+}
+fn eg_ctx_node_value(ctx: &EgContext, node_idx: i64) -> i64 with Div, Panic {
+    eg_node_value(&ctx.graph, node_idx)
+}
+fn eg_ctx_node_child(ctx: &EgContext, node_idx: i64, child_idx: i64) -> i64 with Div, Panic {
+    eg_node_child(&ctx.graph, node_idx, child_idx)
+}
+
+// ============================================================================
+// Section 15: Test Helpers
+// ============================================================================
+
+fn eg_test_context() -> EgContext { eg_context_new() }
+fn eg_assert(cond: bool) -> i64 { if cond { 1 } else { 0 } }
+
+// ============================================================================
+// Section 16: Tests — Union-Find
+// ============================================================================
+
+fn test_eg_uf_make_set_inner(uf: &! EgUnionFind) -> bool with Mut, Div, Panic {
+    let a = eg_uf_make_set(uf)
+    let b = eg_uf_make_set(uf)
+    let c = eg_uf_make_set(uf)
+    a == 0 && b == 1 && c == 2 && uf.size == 3
+}
+fn test_eg_uf_make_set() -> bool with Mut, Div, Panic {
+    var uf = eg_union_find_new()
+    return test_eg_uf_make_set_inner(&! uf)
+}
+
+fn test_eg_uf_find_self_inner(uf: &! EgUnionFind) -> bool with Mut, Div, Panic {
+    let a = eg_uf_make_set(uf)
+    let b = eg_uf_make_set(uf)
+    let fa = eg_find(uf, a)
+    let fb = eg_find(uf, b)
+    fa == 0 && fb == 1
+}
+fn test_eg_uf_find_self() -> bool with Mut, Div, Panic {
+    var uf = eg_union_find_new()
+    return test_eg_uf_find_self_inner(&! uf)
+}
+
+fn test_eg_uf_union_basic_inner(uf: &! EgUnionFind) -> bool with Mut, Div, Panic {
+    let a = eg_uf_make_set(uf)
+    let b = eg_uf_make_set(uf)
+    let r = eg_union(uf, a, b)
+    let same = eg_same_set(uf, a, b)
+    same
+}
+fn test_eg_uf_union_basic() -> bool with Mut, Div, Panic {
+    var uf = eg_union_find_new()
+    return test_eg_uf_union_basic_inner(&! uf)
+}
+
+fn test_eg_uf_path_compression_inner(uf: &! EgUnionFind) -> bool with Mut, Div, Panic {
+    let a = eg_uf_make_set(uf)
+    let b = eg_uf_make_set(uf)
+    let c = eg_uf_make_set(uf)
+    let d = eg_uf_make_set(uf)
+    let r1 = eg_union(uf, a, b)
+    let r2 = eg_union(uf, b, c)
+    let r3 = eg_union(uf, c, d)
+    let fd = eg_find(uf, d)
+    let fa = eg_find(uf, a)
+    fd == fa
+}
+fn test_eg_uf_path_compression() -> bool with Mut, Div, Panic {
+    var uf = eg_union_find_new()
+    return test_eg_uf_path_compression_inner(&! uf)
+}
+
+fn test_eg_uf_rank_inner(uf: &! EgUnionFind) -> bool with Mut, Div, Panic {
+    let a = eg_uf_make_set(uf)
+    let b = eg_uf_make_set(uf)
+    let c = eg_uf_make_set(uf)
+    let r1 = eg_union(uf, a, b)
+    let r2 = eg_union(uf, r1, c)
+    r2 == r1
+}
+fn test_eg_uf_rank() -> bool with Mut, Div, Panic {
+    var uf = eg_union_find_new()
+    return test_eg_uf_rank_inner(&! uf)
+}
+
+fn test_eg_uf_multi_union_inner(uf: &! EgUnionFind) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < 10 { let s = eg_uf_make_set(uf); i = i + 1 }
+    i = 1
+    while i < 10 { let r = eg_union(uf, 0, i); i = i + 1 }
+    var all_same = true
+    i = 1
+    while i < 10 {
+        if eg_same_set(uf, 0, i) == false { all_same = false }
+        i = i + 1
+    }
+    all_same
+}
+fn test_eg_uf_multi_union() -> bool with Mut, Div, Panic {
+    var uf = eg_union_find_new()
+    return test_eg_uf_multi_union_inner(&! uf)
+}
+
+fn test_eg_uf_disjoint_inner(uf: &! EgUnionFind) -> bool with Mut, Div, Panic {
+    let a = eg_uf_make_set(uf)
+    let b = eg_uf_make_set(uf)
+    let c = eg_uf_make_set(uf)
+    let d = eg_uf_make_set(uf)
+    let r1 = eg_union(uf, a, b)
+    let r2 = eg_union(uf, c, d)
+    let ab_same = eg_same_set(uf, a, b)
+    let cd_same = eg_same_set(uf, c, d)
+    let ac_diff = eg_same_set(uf, a, c) == false
+    ab_same && cd_same && ac_diff
+}
+fn test_eg_uf_disjoint() -> bool with Mut, Div, Panic {
+    var uf = eg_union_find_new()
+    return test_eg_uf_disjoint_inner(&! uf)
+}
+
+// ============================================================================
+// Section 17: Tests — E-Node Creation and Hashing
+// ============================================================================
+
+fn test_eg_add_const_node_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let c42 = eg_ctx_add_const(ctx, 42)
+    c42 >= 0 && ctx.graph.node_count == 1 && ctx.graph.class_count == 1
+}
+fn test_eg_add_const_node() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_add_const_node_inner(&! ctx)
+}
+
+fn test_eg_add_var_node_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let v0 = eg_ctx_add_var(ctx, 0)
+    let v1 = eg_ctx_add_var(ctx, 1)
+    v0 != v1 && ctx.graph.node_count == 2
+}
+fn test_eg_add_var_node() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_add_var_node_inner(&! ctx)
+}
+
+fn test_eg_add_binop_node_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let a = eg_ctx_add_var(ctx, 0)
+    let b = eg_ctx_add_var(ctx, 1)
+    let sum = eg_ctx_add_binop(ctx, EG_OP_ADD, a, b)
+    sum >= 0 && ctx.graph.node_count == 3
+}
+fn test_eg_add_binop_node() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_add_binop_node_inner(&! ctx)
+}
+
+fn test_eg_hashcons_dedup_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let c1 = eg_ctx_add_const(ctx, 42)
+    let c2 = eg_ctx_add_const(ctx, 42)
+    c1 == c2 && ctx.graph.node_count == 1
+}
+fn test_eg_hashcons_dedup() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_hashcons_dedup_inner(&! ctx)
+}
+
+fn test_eg_different_consts_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let c1 = eg_ctx_add_const(ctx, 10)
+    let c2 = eg_ctx_add_const(ctx, 20)
+    c1 != c2 && ctx.graph.node_count == 2
+}
+fn test_eg_different_consts() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_different_consts_inner(&! ctx)
+}
+
+fn test_eg_hashcons_binop_dedup_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let a = eg_ctx_add_var(ctx, 0)
+    let b = eg_ctx_add_var(ctx, 1)
+    let sum1 = eg_ctx_add_binop(ctx, EG_OP_ADD, a, b)
+    let sum2 = eg_ctx_add_binop(ctx, EG_OP_ADD, a, b)
+    sum1 == sum2 && ctx.graph.node_count == 3
+}
+fn test_eg_hashcons_binop_dedup() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_hashcons_binop_dedup_inner(&! ctx)
+}
+
+fn test_eg_different_ops_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let a = eg_ctx_add_var(ctx, 0)
+    let b = eg_ctx_add_var(ctx, 1)
+    let sum = eg_ctx_add_binop(ctx, EG_OP_ADD, a, b)
+    let prod = eg_ctx_add_binop(ctx, EG_OP_MUL, a, b)
+    sum != prod && ctx.graph.node_count == 4
+}
+fn test_eg_different_ops() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_different_ops_inner(&! ctx)
+}
+
+fn test_eg_hash_distribution() -> bool with Mut, Div, Panic {
+    let no_ch: [i64; 4] = [EG_INVALID, EG_INVALID, EG_INVALID, EG_INVALID]
+    let h1 = eg_hash_node(EG_OP_ADD, no_ch, 0)
+    let h2 = eg_hash_node(EG_OP_MUL, no_ch, 0)
+    h1 != h2 && h1 >= 0 && h1 < EG_MAX_NODES && h2 >= 0 && h2 < EG_MAX_NODES
+}
+
+// ============================================================================
+// Section 18-28: Remaining Tests
+// ============================================================================
+
+fn test_eg_class_one_node_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let c = eg_ctx_add_const(ctx, 5)
+    eg_ctx_class_size(ctx, c) == 1
+}
+fn test_eg_class_one_node() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_class_one_node_inner(&! ctx)
+}
+
+fn test_eg_merge_combines_nodes_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let a = eg_ctx_add_const(ctx, 1)
+    let b = eg_ctx_add_const(ctx, 2)
+    let merged = eg_ctx_merge(ctx, a, b)
+    let canon = eg_ctx_graph_find(ctx, merged)
+    let size = ctx.graph.classes[canon as usize].node_count
+    size == 2
+}
+fn test_eg_merge_combines_nodes() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_merge_combines_nodes_inner(&! ctx)
+}
+
+fn test_eg_merge_same_class_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let a = eg_ctx_add_const(ctx, 7)
+    let merged = eg_ctx_merge(ctx, a, a)
+    merged == a
+}
+fn test_eg_merge_same_class() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_merge_same_class_inner(&! ctx)
+}
+
+fn test_eg_merge_equivalence_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let a = eg_ctx_add_const(ctx, 10)
+    let b = eg_ctx_add_const(ctx, 20)
+    let m = eg_ctx_merge(ctx, a, b)
+    eg_ctx_are_equivalent(ctx, a, b)
+}
+fn test_eg_merge_equivalence() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_merge_equivalence_inner(&! ctx)
+}
+
+fn test_eg_multi_merge_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let a = eg_ctx_add_const(ctx, 1)
+    let b = eg_ctx_add_const(ctx, 2)
+    let c = eg_ctx_add_const(ctx, 3)
+    let d = eg_ctx_add_const(ctx, 4)
+    let m1 = eg_ctx_merge(ctx, a, b)
+    let m2 = eg_ctx_merge(ctx, c, d)
+    let m3 = eg_ctx_merge(ctx, a, c)
+    let ab = eg_ctx_are_equivalent(ctx, a, b)
+    let ac = eg_ctx_are_equivalent(ctx, a, c)
+    let ad = eg_ctx_are_equivalent(ctx, a, d)
+    ab && ac && ad
+}
+fn test_eg_multi_merge() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_multi_merge_inner(&! ctx)
+}
+
+fn test_eg_rebuild_canonicalizes_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let a = eg_ctx_add_var(ctx, 0)
+    let b = eg_ctx_add_var(ctx, 1)
+    let sum = eg_ctx_add_binop(ctx, EG_OP_ADD, a, b)
+    let m = eg_ctx_merge(ctx, a, b)
+    let rebuilt = eg_ctx_rebuild(ctx)
+    let canon_a = eg_ctx_graph_find(ctx, a)
+    let canon_b = eg_ctx_graph_find(ctx, b)
+    canon_a == canon_b
+}
+fn test_eg_rebuild_canonicalizes() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_rebuild_canonicalizes_inner(&! ctx)
+}
+
+fn test_eg_rule_match_add_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let a = eg_ctx_add_var(ctx, 0)
+    let b = eg_ctx_add_var(ctx, 1)
+    let sum = eg_ctx_add_binop(ctx, EG_OP_ADD, a, b)
+    let rule = eg_rule_add_commute()
+    let m = eg_ctx_match_rule_node(ctx, &rule, 2)
+    m.valid && m.matched_class == sum
+}
+fn test_eg_rule_match_add() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_rule_match_add_inner(&! ctx)
+}
+
+fn test_eg_rule_no_match_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let a = eg_ctx_add_var(ctx, 0)
+    let b = eg_ctx_add_var(ctx, 1)
+    let prod = eg_ctx_add_binop(ctx, EG_OP_MUL, a, b)
+    let rule = eg_rule_add_commute()
+    let m = eg_ctx_match_rule_node(ctx, &rule, 2)
+    m.valid == false
+}
+fn test_eg_rule_no_match() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_rule_no_match_inner(&! ctx)
+}
+
+fn test_eg_rule_match_bindings_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let a = eg_ctx_add_var(ctx, 0)
+    let b = eg_ctx_add_var(ctx, 1)
+    let sum = eg_ctx_add_binop(ctx, EG_OP_ADD, a, b)
+    let rule = eg_rule_add_commute()
+    let m = eg_ctx_match_rule_node(ctx, &rule, 2)
+    let bind_a = eg_ctx_graph_find(ctx, m.bindings[0 as usize])
+    let bind_b = eg_ctx_graph_find(ctx, m.bindings[1 as usize])
+    let canon_a = eg_ctx_graph_find(ctx, a)
+    let canon_b = eg_ctx_graph_find(ctx, b)
+    bind_a == canon_a && bind_b == canon_b
+}
+fn test_eg_rule_match_bindings() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_rule_match_bindings_inner(&! ctx)
+}
+
+fn test_eg_commutativity_add_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let a = eg_ctx_add_var(ctx, 0)
+    let b = eg_ctx_add_var(ctx, 1)
+    let ab = eg_ctx_add_binop(ctx, EG_OP_ADD, a, b)
+    let ba = eg_ctx_add_binop(ctx, EG_OP_ADD, b, a)
+    let before = eg_ctx_are_equivalent(ctx, ab, ba) == false
+    let rule = eg_rule_add_commute()
+    let idx = eg_ctx_add_rule(ctx, rule)
+    let batch = eg_ctx_match_all_rules(ctx)
+    let applied = eg_ctx_apply_all_matches(ctx, &batch)
+    let rebuilt = eg_ctx_rebuild(ctx)
+    let after = eg_ctx_are_equivalent(ctx, ab, ba)
+    before && after
+}
+fn test_eg_commutativity_add() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_commutativity_add_inner(&! ctx)
+}
+
+fn test_eg_commutativity_mul_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let a = eg_ctx_add_var(ctx, 0)
+    let b = eg_ctx_add_var(ctx, 1)
+    let ab = eg_ctx_add_binop(ctx, EG_OP_MUL, a, b)
+    let ba = eg_ctx_add_binop(ctx, EG_OP_MUL, b, a)
+    let rule = eg_rule_mul_commute()
+    let idx = eg_ctx_add_rule(ctx, rule)
+    let batch = eg_ctx_match_all_rules(ctx)
+    let applied = eg_ctx_apply_all_matches(ctx, &batch)
+    let rebuilt = eg_ctx_rebuild(ctx)
+    eg_ctx_are_equivalent(ctx, ab, ba)
+}
+fn test_eg_commutativity_mul() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_commutativity_mul_inner(&! ctx)
+}
+
+fn test_eg_add_identity_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let x = eg_ctx_add_var(ctx, 0)
+    let zero = eg_ctx_add_const(ctx, 0)
+    let xp0 = eg_ctx_add_binop(ctx, EG_OP_ADD, x, zero)
+    let merges = eg_ctx_apply_add_identity(ctx)
+    let rebuilt = eg_ctx_rebuild(ctx)
+    eg_ctx_are_equivalent(ctx, xp0, x)
+}
+fn test_eg_add_identity() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_add_identity_inner(&! ctx)
+}
+
+fn test_eg_add_identity_symmetric_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let x = eg_ctx_add_var(ctx, 0)
+    let zero = eg_ctx_add_const(ctx, 0)
+    let zeropx = eg_ctx_add_binop(ctx, EG_OP_ADD, zero, x)
+    let merges = eg_ctx_apply_add_identity(ctx)
+    let rebuilt = eg_ctx_rebuild(ctx)
+    eg_ctx_are_equivalent(ctx, zeropx, x)
+}
+fn test_eg_add_identity_symmetric() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_add_identity_symmetric_inner(&! ctx)
+}
+
+fn test_eg_mul_identity_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let x = eg_ctx_add_var(ctx, 0)
+    let one = eg_ctx_add_const(ctx, 1)
+    let xm1 = eg_ctx_add_binop(ctx, EG_OP_MUL, x, one)
+    let merges = eg_ctx_apply_mul_identity(ctx)
+    let rebuilt = eg_ctx_rebuild(ctx)
+    eg_ctx_are_equivalent(ctx, xm1, x)
+}
+fn test_eg_mul_identity() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_mul_identity_inner(&! ctx)
+}
+
+fn test_eg_mul_identity_symmetric_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let x = eg_ctx_add_var(ctx, 0)
+    let one = eg_ctx_add_const(ctx, 1)
+    let onemx = eg_ctx_add_binop(ctx, EG_OP_MUL, one, x)
+    let merges = eg_ctx_apply_mul_identity(ctx)
+    let rebuilt = eg_ctx_rebuild(ctx)
+    eg_ctx_are_equivalent(ctx, onemx, x)
+}
+fn test_eg_mul_identity_symmetric() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_mul_identity_symmetric_inner(&! ctx)
+}
+
+fn test_eg_mul_annihilation_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let x = eg_ctx_add_var(ctx, 0)
+    let zero = eg_ctx_add_const(ctx, 0)
+    let xm0 = eg_ctx_add_binop(ctx, EG_OP_MUL, x, zero)
+    let merges = eg_ctx_apply_mul_annihilation(ctx)
+    let rebuilt = eg_ctx_rebuild(ctx)
+    eg_ctx_are_equivalent(ctx, xm0, zero)
+}
+fn test_eg_mul_annihilation() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_mul_annihilation_inner(&! ctx)
+}
+
+fn test_eg_mul_annihilation_symmetric_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let x = eg_ctx_add_var(ctx, 0)
+    let zero = eg_ctx_add_const(ctx, 0)
+    let zeromx = eg_ctx_add_binop(ctx, EG_OP_MUL, zero, x)
+    let merges = eg_ctx_apply_mul_annihilation(ctx)
+    let rebuilt = eg_ctx_rebuild(ctx)
+    eg_ctx_are_equivalent(ctx, zeromx, zero)
+}
+fn test_eg_mul_annihilation_symmetric() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_mul_annihilation_symmetric_inner(&! ctx)
+}
+
+fn test_eg_double_negation_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let x = eg_ctx_add_var(ctx, 0)
+    let neg_x = eg_ctx_add_unop(ctx, EG_OP_NEG, x)
+    let neg_neg_x = eg_ctx_add_unop(ctx, EG_OP_NEG, neg_x)
+    let merges = eg_ctx_apply_double_neg(ctx)
+    let rebuilt = eg_ctx_rebuild(ctx)
+    eg_ctx_are_equivalent(ctx, neg_neg_x, x)
+}
+fn test_eg_double_negation() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_double_negation_inner(&! ctx)
+}
+
+fn test_eg_single_negation_kept_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let x = eg_ctx_add_var(ctx, 0)
+    let neg_x = eg_ctx_add_unop(ctx, EG_OP_NEG, x)
+    let merges = eg_ctx_apply_double_neg(ctx)
+    eg_ctx_are_equivalent(ctx, neg_x, x) == false
+}
+fn test_eg_single_negation_kept() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_single_negation_kept_inner(&! ctx)
+}
+
+fn test_eg_sub_identity_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let x = eg_ctx_add_var(ctx, 0)
+    let zero = eg_ctx_add_const(ctx, 0)
+    let xm0 = eg_ctx_add_binop(ctx, EG_OP_SUB, x, zero)
+    let merges = eg_ctx_apply_sub_identity(ctx)
+    let rebuilt = eg_ctx_rebuild(ctx)
+    eg_ctx_are_equivalent(ctx, xm0, x)
+}
+fn test_eg_sub_identity() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_sub_identity_inner(&! ctx)
+}
+
+fn test_eg_sub_self_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let x = eg_ctx_add_var(ctx, 0)
+    let zero = eg_ctx_add_const(ctx, 0)
+    let xmx = eg_ctx_add_binop(ctx, EG_OP_SUB, x, x)
+    let merges = eg_ctx_apply_sub_self(ctx, zero)
+    let rebuilt = eg_ctx_rebuild(ctx)
+    eg_ctx_are_equivalent(ctx, xmx, zero)
+}
+fn test_eg_sub_self() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_sub_self_inner(&! ctx)
+}
+
+fn test_eg_cost_prefer_const_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let c5 = eg_ctx_add_const(ctx, 5)
+    let c3 = eg_ctx_add_const(ctx, 3)
+    let c2 = eg_ctx_add_const(ctx, 2)
+    let add_expr = eg_ctx_add_binop(ctx, EG_OP_ADD, c3, c2)
+    let m = eg_ctx_merge(ctx, add_expr, c5)
+    let rebuilt = eg_ctx_rebuild(ctx)
+    let passes = eg_ctx_extract(ctx)
+    let best = eg_ctx_best_node_for_class(ctx, c5)
+    if best >= 0 && best < ctx.graph.node_count {
+        let best_op = ctx.graph.nodes[best as usize].op
+        return best_op == EG_OP_CONST
+    }
+    false
+}
+fn test_eg_cost_prefer_const() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_cost_prefer_const_inner(&! ctx)
+}
+
+fn test_eg_cost_var_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let x = eg_ctx_add_var(ctx, 0)
+    let passes = eg_ctx_extract(ctx)
+    let cost = eg_ctx_best_cost_for_class(ctx, x)
+    cost == EG_COST_VAR
+}
+fn test_eg_cost_var() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_cost_var_inner(&! ctx)
+}
+
+fn test_eg_cost_prefer_simpler_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let x = eg_ctx_add_var(ctx, 0)
+    let zero = eg_ctx_add_const(ctx, 0)
+    let xp0 = eg_ctx_add_binop(ctx, EG_OP_ADD, x, zero)
+    let merges = eg_ctx_apply_add_identity(ctx)
+    let rebuilt = eg_ctx_rebuild(ctx)
+    let passes = eg_ctx_extract(ctx)
+    let best = eg_ctx_best_node_for_class(ctx, xp0)
+    if best >= 0 && best < ctx.graph.node_count {
+        let best_op = ctx.graph.nodes[best as usize].op
+        return best_op == EG_OP_VAR
+    }
+    false
+}
+fn test_eg_cost_prefer_simpler() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_cost_prefer_simpler_inner(&! ctx)
+}
+
+fn test_eg_saturation_converges_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let a = eg_ctx_add_var(ctx, 0)
+    let b = eg_ctx_add_var(ctx, 1)
+    let ab = eg_ctx_add_binop(ctx, EG_OP_ADD, a, b)
+    let rule = eg_rule_add_commute()
+    let idx = eg_ctx_add_rule(ctx, rule)
+    let stats = eg_saturate(ctx)
+    stats.saturated
+}
+fn test_eg_saturation_converges() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_saturation_converges_inner(&! ctx)
+}
+
+fn test_eg_algebraic_saturation_identity_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let x = eg_ctx_add_var(ctx, 0)
+    let zero = eg_ctx_add_const(ctx, 0)
+    let xp0 = eg_ctx_add_binop(ctx, EG_OP_ADD, x, zero)
+    let stats = eg_algebraic_saturate(ctx)
+    eg_ctx_are_equivalent(ctx, xp0, x)
+}
+fn test_eg_algebraic_saturation_identity() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_algebraic_saturation_identity_inner(&! ctx)
+}
+
+fn test_eg_algebraic_saturation_annihilation_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let x = eg_ctx_add_var(ctx, 0)
+    let zero = eg_ctx_add_const(ctx, 0)
+    let xm0 = eg_ctx_add_binop(ctx, EG_OP_MUL, x, zero)
+    let stats = eg_algebraic_saturate(ctx)
+    eg_ctx_are_equivalent(ctx, xm0, zero)
+}
+fn test_eg_algebraic_saturation_annihilation() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_algebraic_saturation_annihilation_inner(&! ctx)
+}
+
+fn test_eg_multi_iteration_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let x = eg_ctx_add_var(ctx, 0)
+    let zero = eg_ctx_add_const(ctx, 0)
+    let one = eg_ctx_add_const(ctx, 1)
+    let xm1 = eg_ctx_add_binop(ctx, EG_OP_MUL, x, one)
+    let xm1p0 = eg_ctx_add_binop(ctx, EG_OP_ADD, xm1, zero)
+    let stats = eg_algebraic_saturate(ctx)
+    eg_ctx_are_equivalent(ctx, xm1p0, x)
+}
+fn test_eg_multi_iteration() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_multi_iteration_inner(&! ctx)
+}
+
+fn test_eg_saturation_double_neg_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let x = eg_ctx_add_var(ctx, 0)
+    let neg_x = eg_ctx_add_unop(ctx, EG_OP_NEG, x)
+    let neg_neg_x = eg_ctx_add_unop(ctx, EG_OP_NEG, neg_x)
+    let stats = eg_algebraic_saturate(ctx)
+    eg_ctx_are_equivalent(ctx, neg_neg_x, x)
+}
+fn test_eg_saturation_double_neg() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_saturation_double_neg_inner(&! ctx)
+}
+
+fn test_eg_associativity_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let a = eg_ctx_add_var(ctx, 0)
+    let b = eg_ctx_add_var(ctx, 1)
+    let c = eg_ctx_add_var(ctx, 2)
+    let ab = eg_ctx_add_binop(ctx, EG_OP_ADD, a, b)
+    let abc_left = eg_ctx_add_binop(ctx, EG_OP_ADD, ab, c)
+    let bc = eg_ctx_add_binop(ctx, EG_OP_ADD, b, c)
+    let abc_right = eg_ctx_add_binop(ctx, EG_OP_ADD, a, bc)
+    let m = eg_ctx_merge(ctx, abc_left, abc_right)
+    let rebuilt = eg_ctx_rebuild(ctx)
+    eg_ctx_are_equivalent(ctx, abc_left, abc_right)
+}
+fn test_eg_associativity() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_associativity_inner(&! ctx)
+}
+
+fn test_eg_combined_simplification_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let x = eg_ctx_add_var(ctx, 0)
+    let zero = eg_ctx_add_const(ctx, 0)
+    let one = eg_ctx_add_const(ctx, 1)
+    let xp0 = eg_ctx_add_binop(ctx, EG_OP_ADD, x, zero)
+    let xp0_m1 = eg_ctx_add_binop(ctx, EG_OP_MUL, xp0, one)
+    let stats = eg_algebraic_saturate(ctx)
+    eg_ctx_are_equivalent(ctx, xp0_m1, x)
+}
+fn test_eg_combined_simplification() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_combined_simplification_inner(&! ctx)
+}
+
+fn test_eg_live_class_count_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let a = eg_ctx_add_const(ctx, 1)
+    let b = eg_ctx_add_const(ctx, 2)
+    let c = eg_ctx_add_const(ctx, 3)
+    let before = eg_ctx_count_live_classes(ctx)
+    let m = eg_ctx_merge(ctx, a, b)
+    let after = eg_ctx_count_live_classes(ctx)
+    before == 3 && after == 2
+}
+fn test_eg_live_class_count() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_live_class_count_inner(&! ctx)
+}
+
+fn test_eg_node_queries_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let c42 = eg_ctx_add_const(ctx, 42)
+    let x = eg_ctx_add_var(ctx, 7)
+    let sum = eg_ctx_add_binop(ctx, EG_OP_ADD, c42, x)
+    let op0 = eg_ctx_node_op(ctx, 0)
+    let val0 = eg_ctx_node_value(ctx, 0)
+    let op1 = eg_ctx_node_op(ctx, 1)
+    let val1 = eg_ctx_node_value(ctx, 1)
+    let op2 = eg_ctx_node_op(ctx, 2)
+    let child0 = eg_ctx_node_child(ctx, 2, 0)
+    let child1 = eg_ctx_node_child(ctx, 2, 1)
+    op0 == EG_OP_CONST && val0 == 42 &&
+    op1 == EG_OP_VAR && val1 == 7 &&
+    op2 == EG_OP_ADD &&
+    child0 == c42 && child1 == x
+}
+fn test_eg_node_queries() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_node_queries_inner(&! ctx)
+}
+
+fn test_eg_hashcons_after_rebuild_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let a = eg_ctx_add_var(ctx, 0)
+    let b = eg_ctx_add_var(ctx, 1)
+    let sum = eg_ctx_add_binop(ctx, EG_OP_ADD, a, b)
+    let rebuilt = eg_ctx_rebuild(ctx)
+    let sum2 = eg_ctx_add_binop(ctx, EG_OP_ADD, a, b)
+    sum == sum2
+}
+fn test_eg_hashcons_after_rebuild() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_hashcons_after_rebuild_inner(&! ctx)
+}
+
+fn test_eg_extract_after_saturation_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let x = eg_ctx_add_var(ctx, 0)
+    let zero = eg_ctx_add_const(ctx, 0)
+    let one = eg_ctx_add_const(ctx, 1)
+    let xp0 = eg_ctx_add_binop(ctx, EG_OP_ADD, x, zero)
+    let expr = eg_ctx_add_binop(ctx, EG_OP_MUL, xp0, one)
+    let stats = eg_algebraic_saturate(ctx)
+    let passes = eg_ctx_extract(ctx)
+    let cost = eg_ctx_best_cost_for_class(ctx, expr)
+    cost == EG_COST_VAR
+}
+fn test_eg_extract_after_saturation() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_extract_after_saturation_inner(&! ctx)
+}
+
+fn test_eg_empty_graph() -> bool {
+    let ctx = eg_test_context()
+    ctx.graph.node_count == 0 && ctx.graph.class_count == 0
+}
+
+fn test_eg_op_name_hash() -> bool {
+    let h_const = eg_op_name_hash(EG_OP_CONST)
+    let h_var = eg_op_name_hash(EG_OP_VAR)
+    let h_add = eg_op_name_hash(EG_OP_ADD)
+    let h_mul = eg_op_name_hash(EG_OP_MUL)
+    let h_neg = eg_op_name_hash(EG_OP_NEG)
+    h_const == 100 && h_var == 200 && h_add == 300 && h_mul == 500 && h_neg == 700
+}
+
+fn test_eg_class_has_const_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let c0 = eg_ctx_add_const(ctx, 0)
+    let c1 = eg_ctx_add_const(ctx, 1)
+    let x = eg_ctx_add_var(ctx, 42)
+    let has0 = eg_ctx_class_has_const(ctx, c0, 0)
+    let has1 = eg_ctx_class_has_const(ctx, c1, 1)
+    let not_has = eg_ctx_class_has_const(ctx, x, 0) == false
+    has0 && has1 && not_has
+}
+fn test_eg_class_has_const() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_class_has_const_inner(&! ctx)
+}
+
+fn test_eg_pat_var_resolve() -> bool with Div, Panic {
+    let bindings: [i64; 4] = [10, 20, 30, 40]
+    let ra = eg_resolve_pat(EG_PAT_VAR_A, bindings)
+    let rb = eg_resolve_pat(EG_PAT_VAR_B, bindings)
+    let rc = eg_resolve_pat(EG_PAT_VAR_C, bindings)
+    let rd = eg_resolve_pat(EG_PAT_VAR_D, bindings)
+    let literal = eg_resolve_pat(99, bindings)
+    ra == 10 && rb == 20 && rc == 30 && rd == 40 && literal == 99
+}
+
+fn test_eg_rule_set_add_inner(rs: &! EgRuleSet) -> bool with Mut, Div, Panic {
+    let r1 = eg_rule_add_commute()
+    let r2 = eg_rule_mul_commute()
+    let idx1 = eg_add_rule(rs, r1)
+    let idx2 = eg_add_rule(rs, r2)
+    idx1 == 0 && idx2 == 1 && rs.rule_count == 2
+}
+fn test_eg_rule_set_add() -> bool with Mut, Div, Panic {
+    var rs = eg_rule_set_new()
+    return test_eg_rule_set_add_inner(&! rs)
+}
+
+fn test_eg_saturation_iteration_count_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let x = eg_ctx_add_var(ctx, 0)
+    let y = eg_ctx_add_var(ctx, 1)
+    let sum = eg_ctx_add_binop(ctx, EG_OP_ADD, x, y)
+    let rule = eg_rule_add_commute()
+    let idx = eg_ctx_add_rule(ctx, rule)
+    let stats = eg_saturate(ctx)
+    stats.iterations > 0 && stats.iterations <= EG_MAX_ITERATIONS
+}
+fn test_eg_saturation_iteration_count() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_saturation_iteration_count_inner(&! ctx)
+}
+
+fn test_eg_merge_with_children_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let a = eg_ctx_add_var(ctx, 0)
+    let b = eg_ctx_add_var(ctx, 1)
+    let c = eg_ctx_add_var(ctx, 2)
+    let ab = eg_ctx_add_binop(ctx, EG_OP_ADD, a, b)
+    let ac = eg_ctx_add_binop(ctx, EG_OP_ADD, a, c)
+    let m = eg_ctx_merge(ctx, b, c)
+    let rebuilt = eg_ctx_rebuild(ctx)
+    eg_ctx_are_equivalent(ctx, b, c)
+}
+fn test_eg_merge_with_children() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_merge_with_children_inner(&! ctx)
+}
+
+fn test_eg_unary_node_inner(ctx: &! EgContext) -> bool with Mut, Div, Panic {
+    let x = eg_ctx_add_var(ctx, 0)
+    let neg = eg_ctx_add_unop(ctx, EG_OP_NEG, x)
+    let op = eg_ctx_node_op(ctx, 1)
+    let child = eg_ctx_node_child(ctx, 1, 0)
+    op == EG_OP_NEG && child == x && ctx.graph.node_count == 2
+}
+fn test_eg_unary_node() -> bool with Mut, Div, Panic {
+    var ctx = eg_test_context()
+    return test_eg_unary_node_inner(&! ctx)
+}
+
+// ============================================================================
+// Section 29: Test Runner
+// ============================================================================
+
+fn test_eg_main() -> i32 with IO, Mut, Panic, Div {
+    var passed: i64 = 0
+    let total: i64 = 58
+
+    print("=== E-Graph Equality Saturation Tests ===\n")
+
+    if test_eg_uf_make_set() { passed = passed + 1; print("  T01 OK uf_make_set\n") } else { print("  FAIL: T01 uf_make_set\n") }
+    if test_eg_uf_find_self() { passed = passed + 1; print("  T02 OK uf_find_self\n") } else { print("  FAIL: T02 uf_find_self\n") }
+    if test_eg_uf_union_basic() { passed = passed + 1; print("  T03 OK uf_union_basic\n") } else { print("  FAIL: T03 uf_union_basic\n") }
+    if test_eg_uf_path_compression() { passed = passed + 1; print("  T04 OK uf_path_compression\n") } else { print("  FAIL: T04 uf_path_compression\n") }
+    if test_eg_uf_rank() { passed = passed + 1; print("  T05 OK uf_rank\n") } else { print("  FAIL: T05 uf_rank\n") }
+    if test_eg_uf_multi_union() { passed = passed + 1; print("  T06 OK uf_multi_union\n") } else { print("  FAIL: T06 uf_multi_union\n") }
+    if test_eg_uf_disjoint() { passed = passed + 1; print("  T07 OK uf_disjoint\n") } else { print("  FAIL: T07 uf_disjoint\n") }
+    if test_eg_add_const_node() { passed = passed + 1; print("  T08 OK add_const_node\n") } else { print("  FAIL: T08 add_const_node\n") }
+    if test_eg_add_var_node() { passed = passed + 1; print("  T09 OK add_var_node\n") } else { print("  FAIL: T09 add_var_node\n") }
+    if test_eg_add_binop_node() { passed = passed + 1; print("  T10 OK add_binop_node\n") } else { print("  FAIL: T10 add_binop_node\n") }
+    if test_eg_hashcons_dedup() { passed = passed + 1; print("  T11 OK hashcons_dedup\n") } else { print("  FAIL: T11 hashcons_dedup\n") }
+    if test_eg_different_consts() { passed = passed + 1; print("  T12 OK different_consts\n") } else { print("  FAIL: T12 different_consts\n") }
+    if test_eg_hashcons_binop_dedup() { passed = passed + 1; print("  T13 OK hashcons_binop_dedup\n") } else { print("  FAIL: T13 hashcons_binop_dedup\n") }
+    if test_eg_different_ops() { passed = passed + 1; print("  T14 OK different_ops\n") } else { print("  FAIL: T14 different_ops\n") }
+    if test_eg_hash_distribution() { passed = passed + 1; print("  T15 OK hash_distribution\n") } else { print("  FAIL: T15 hash_distribution\n") }
+    if test_eg_class_one_node() { passed = passed + 1; print("  T16 OK class_one_node\n") } else { print("  FAIL: T16 class_one_node\n") }
+    if test_eg_merge_combines_nodes() { passed = passed + 1; print("  T17 OK merge_combines_nodes\n") } else { print("  FAIL: T17 merge_combines_nodes\n") }
+    if test_eg_merge_same_class() { passed = passed + 1; print("  T18 OK merge_same_class\n") } else { print("  FAIL: T18 merge_same_class\n") }
+    if test_eg_merge_equivalence() { passed = passed + 1; print("  T19 OK merge_equivalence\n") } else { print("  FAIL: T19 merge_equivalence\n") }
+    if test_eg_multi_merge() { passed = passed + 1; print("  T20 OK multi_merge\n") } else { print("  FAIL: T20 multi_merge\n") }
+    if test_eg_rebuild_canonicalizes() { passed = passed + 1; print("  T21 OK rebuild_canonicalizes\n") } else { print("  FAIL: T21 rebuild_canonicalizes\n") }
+    if test_eg_rule_match_add() { passed = passed + 1; print("  T22 OK rule_match_add\n") } else { print("  FAIL: T22 rule_match_add\n") }
+    if test_eg_rule_no_match() { passed = passed + 1; print("  T23 OK rule_no_match\n") } else { print("  FAIL: T23 rule_no_match\n") }
+    if test_eg_rule_match_bindings() { passed = passed + 1; print("  T24 OK rule_match_bindings\n") } else { print("  FAIL: T24 rule_match_bindings\n") }
+    if test_eg_commutativity_add() { passed = passed + 1; print("  T25 OK commutativity_add\n") } else { print("  FAIL: T25 commutativity_add\n") }
+    if test_eg_commutativity_mul() { passed = passed + 1; print("  T26 OK commutativity_mul\n") } else { print("  FAIL: T26 commutativity_mul\n") }
+    if test_eg_add_identity() { passed = passed + 1; print("  T27 OK add_identity\n") } else { print("  FAIL: T27 add_identity\n") }
+    if test_eg_add_identity_symmetric() { passed = passed + 1; print("  T28 OK add_identity_symmetric\n") } else { print("  FAIL: T28 add_identity_symmetric\n") }
+    if test_eg_mul_identity() { passed = passed + 1; print("  T29 OK mul_identity\n") } else { print("  FAIL: T29 mul_identity\n") }
+    if test_eg_mul_identity_symmetric() { passed = passed + 1; print("  T30 OK mul_identity_symmetric\n") } else { print("  FAIL: T30 mul_identity_symmetric\n") }
+    if test_eg_mul_annihilation() { passed = passed + 1; print("  T31 OK mul_annihilation\n") } else { print("  FAIL: T31 mul_annihilation\n") }
+    if test_eg_mul_annihilation_symmetric() { passed = passed + 1; print("  T32 OK mul_annihilation_sym\n") } else { print("  FAIL: T32 mul_annihilation_sym\n") }
+    if test_eg_double_negation() { passed = passed + 1; print("  T33 OK double_negation\n") } else { print("  FAIL: T33 double_negation\n") }
+    if test_eg_single_negation_kept() { passed = passed + 1; print("  T34 OK single_negation_kept\n") } else { print("  FAIL: T34 single_negation_kept\n") }
+    if test_eg_sub_identity() { passed = passed + 1; print("  T35 OK sub_identity\n") } else { print("  FAIL: T35 sub_identity\n") }
+    if test_eg_sub_self() { passed = passed + 1; print("  T36 OK sub_self\n") } else { print("  FAIL: T36 sub_self\n") }
+    if test_eg_cost_prefer_const() { passed = passed + 1; print("  T37 OK cost_prefer_const\n") } else { print("  FAIL: T37 cost_prefer_const\n") }
+    if test_eg_cost_var() { passed = passed + 1; print("  T38 OK cost_var\n") } else { print("  FAIL: T38 cost_var\n") }
+    if test_eg_cost_prefer_simpler() { passed = passed + 1; print("  T39 OK cost_prefer_simpler\n") } else { print("  FAIL: T39 cost_prefer_simpler\n") }
+    if test_eg_saturation_converges() { passed = passed + 1; print("  T40 OK saturation_converges\n") } else { print("  FAIL: T40 saturation_converges\n") }
+    if test_eg_algebraic_saturation_identity() { passed = passed + 1; print("  T41 OK alg_sat_identity\n") } else { print("  FAIL: T41 alg_sat_identity\n") }
+    if test_eg_algebraic_saturation_annihilation() { passed = passed + 1; print("  T42 OK alg_sat_annihilation\n") } else { print("  FAIL: T42 alg_sat_annihilation\n") }
+    if test_eg_multi_iteration() { passed = passed + 1; print("  T43 OK multi_iteration\n") } else { print("  FAIL: T43 multi_iteration\n") }
+    if test_eg_saturation_double_neg() { passed = passed + 1; print("  T44 OK sat_double_neg\n") } else { print("  FAIL: T44 sat_double_neg\n") }
+    if test_eg_associativity() { passed = passed + 1; print("  T45 OK associativity\n") } else { print("  FAIL: T45 associativity\n") }
+    if test_eg_combined_simplification() { passed = passed + 1; print("  T46 OK combined_simplify\n") } else { print("  FAIL: T46 combined_simplify\n") }
+    if test_eg_live_class_count() { passed = passed + 1; print("  T47 OK live_class_count\n") } else { print("  FAIL: T47 live_class_count\n") }
+    if test_eg_node_queries() { passed = passed + 1; print("  T48 OK node_queries\n") } else { print("  FAIL: T48 node_queries\n") }
+    if test_eg_hashcons_after_rebuild() { passed = passed + 1; print("  T49 OK hashcons_rebuild\n") } else { print("  FAIL: T49 hashcons_rebuild\n") }
+    if test_eg_extract_after_saturation() { passed = passed + 1; print("  T50 OK extract_after_sat\n") } else { print("  FAIL: T50 extract_after_sat\n") }
+    if test_eg_empty_graph() { passed = passed + 1; print("  T51 OK empty_graph\n") } else { print("  FAIL: T51 empty_graph\n") }
+    if test_eg_op_name_hash() { passed = passed + 1; print("  T52 OK op_name_hash\n") } else { print("  FAIL: T52 op_name_hash\n") }
+    if test_eg_class_has_const() { passed = passed + 1; print("  T53 OK class_has_const\n") } else { print("  FAIL: T53 class_has_const\n") }
+    if test_eg_pat_var_resolve() { passed = passed + 1; print("  T54 OK pat_var_resolve\n") } else { print("  FAIL: T54 pat_var_resolve\n") }
+    if test_eg_rule_set_add() { passed = passed + 1; print("  T55 OK rule_set_add\n") } else { print("  FAIL: T55 rule_set_add\n") }
+    if test_eg_saturation_iteration_count() { passed = passed + 1; print("  T56 OK sat_iter_count\n") } else { print("  FAIL: T56 sat_iter_count\n") }
+    if test_eg_merge_with_children() { passed = passed + 1; print("  T57 OK merge_with_children\n") } else { print("  FAIL: T57 merge_with_children\n") }
+    if test_eg_unary_node() { passed = passed + 1; print("  T58 OK unary_node\n") } else { print("  FAIL: T58 unary_node\n") }
+
+    print("\nE-Graph: ")
+    print_int(passed)
+    print(" / ")
+    print_int(total)
+    print(" passed\n")
+
+    if passed == total { 0 } else { 1 }
+}

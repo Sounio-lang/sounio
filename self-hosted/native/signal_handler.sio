@@ -1,0 +1,2029 @@
+// self-hosted::native::signal_handler — Signal handling infrastructure
+//
+// Provides signal registration, disposition management, signal-safe operations,
+// and platform-specific signal encoding for the Sounio native backend.
+//
+// Implements a software signal table that mirrors POSIX semantics: signals can
+// be caught, ignored, blocked, or left at their default disposition.  Pending
+// signals are queued and delivered in priority order when unblocked.  Signal
+// frames track the register context needed for stack unwinding across handler
+// invocations.
+//
+// The native code emission helpers produce raw x86-64 machine code for
+// rt_sigaction, rt_sigreturn, and signal handler trampolines, suitable for
+// direct injection into ELF .text segments.
+//
+// All data lives in fixed-size arena arrays (bootstrap pattern: no heap).
+
+// ============================================================================
+// Section 1: Signal Constants
+// ============================================================================
+
+// Standard POSIX signal numbers (Linux x86-64)
+let SIGH_HUP:  i64 = 1
+let SIGH_INT:  i64 = 2
+let SIGH_QUIT: i64 = 3
+let SIGH_ILL:  i64 = 4
+let SIGH_TRAP: i64 = 5
+let SIGH_ABRT: i64 = 6
+let SIGH_BUS:  i64 = 7
+let SIGH_FPE:  i64 = 8
+let SIGH_KILL: i64 = 9
+let SIGH_USR1: i64 = 10
+let SIGH_SEGV: i64 = 11
+let SIGH_USR2: i64 = 12
+let SIGH_PIPE: i64 = 13
+let SIGH_ALRM: i64 = 14
+let SIGH_TERM: i64 = 15
+let SIGH_CHLD: i64 = 17
+let SIGH_CONT: i64 = 18
+let SIGH_STOP: i64 = 19
+let SIGH_TSTP: i64 = 20
+
+// Table capacity
+let SIGH_MAX_SIGNALS: i64 = 32
+
+// Sentinel for invalid signal
+let SIGH_INVALID: i64 = 0 - 1
+
+// Disposition types
+let SIGH_DFL:   i64 = 0
+let SIGH_IGN:   i64 = 1
+let SIGH_CATCH: i64 = 2
+let SIGH_BLOCK: i64 = 3
+
+// Pending queue capacity
+let SIGH_MAX_PENDING: i64 = 256
+
+// Frame stack capacity
+let SIGH_MAX_FRAMES: i64 = 32
+
+// Default action codes (returned by sigh_default_action)
+let SIGH_ACT_TERM:    i64 = 1
+let SIGH_ACT_CORE:    i64 = 2
+let SIGH_ACT_STOP:    i64 = 3
+let SIGH_ACT_CONT:    i64 = 4
+let SIGH_ACT_IGNORE:  i64 = 5
+
+// Signal name codes (returned by sigh_name as integer identifiers)
+let SIGH_NAME_HUP:     i64 = 100
+let SIGH_NAME_INT:     i64 = 101
+let SIGH_NAME_QUIT:    i64 = 102
+let SIGH_NAME_ILL:     i64 = 103
+let SIGH_NAME_TRAP:    i64 = 104
+let SIGH_NAME_ABRT:    i64 = 105
+let SIGH_NAME_BUS:     i64 = 106
+let SIGH_NAME_FPE:     i64 = 107
+let SIGH_NAME_KILL:    i64 = 108
+let SIGH_NAME_USR1:    i64 = 109
+let SIGH_NAME_SEGV:    i64 = 110
+let SIGH_NAME_USR2:    i64 = 111
+let SIGH_NAME_PIPE:    i64 = 112
+let SIGH_NAME_ALRM:    i64 = 113
+let SIGH_NAME_TERM:    i64 = 114
+let SIGH_NAME_CHLD:    i64 = 115
+let SIGH_NAME_CONT:    i64 = 116
+let SIGH_NAME_STOP:    i64 = 117
+let SIGH_NAME_TSTP:    i64 = 118
+let SIGH_NAME_UNKNOWN: i64 = 199
+
+// Linux syscall numbers (x86-64)
+let SIGH_SYS_RT_SIGACTION:  i64 = 13
+let SIGH_SYS_RT_SIGRETURN:  i64 = 15
+
+// Signal flags
+let SIGH_SA_RESTORER: i64 = 0x04000000
+let SIGH_SA_SIGINFO:  i64 = 4
+
+// ============================================================================
+// Section 2: Data Structures
+// ============================================================================
+
+// Signal action — describes how a signal should be handled.
+struct SighAction {
+    signal_num:   i64,
+    disposition:  i64,
+    handler_func: i64,
+    flags:        i64,
+    mask:         [bool; 32],
+    restart:      bool,
+}
+
+// Pending signal — a signal that has been raised but not yet delivered.
+struct SighPending {
+    signal_num: i64,
+    info_code:  i64,
+    info_pid:   i64,
+    timestamp:  i64,
+    delivered:  bool,
+}
+
+// Signal mask — tracks which signals are blocked and a saved copy for restore.
+struct SighMask {
+    blocked: [bool; 32],
+    saved:   [bool; 32],
+}
+
+// Signal frame — saved register context for stack unwinding during handling.
+struct SighFrame {
+    saved_pc:    i64,
+    saved_sp:    i64,
+    saved_bp:    i64,
+    signal_num:  i64,
+    return_addr: i64,
+}
+
+// ============================================================================
+// Section 3: Signal Table
+// ============================================================================
+
+// The main signal table — holds all actions, pending signals, mask, and frames.
+struct SighTable {
+    actions:         [SighAction; 32],
+    pending:         [SighPending; 256],
+    pending_count:   i64,
+    mask:            SighMask,
+    frames:          [SighFrame; 32],
+    frame_count:     i64,
+    total_caught:    i64,
+    total_ignored:   i64,
+    total_delivered: i64,
+    in_handler:      bool,
+    handler_depth:   i64,
+}
+
+// ============================================================================
+// Section 4: Constructor Functions
+// ============================================================================
+
+fn sigh_empty_action() -> SighAction {
+    SighAction {
+        signal_num:   0,
+        disposition:  SIGH_DFL,
+        handler_func: 0,
+        flags:        0,
+        mask:         [false; 32],
+        restart:      false,
+    }
+}
+
+fn sigh_empty_pending() -> SighPending {
+    SighPending {
+        signal_num: 0,
+        info_code:  0,
+        info_pid:   0,
+        timestamp:  0,
+        delivered:  false,
+    }
+}
+
+fn sigh_empty_mask() -> SighMask {
+    SighMask {
+        blocked: [false; 32],
+        saved:   [false; 32],
+    }
+}
+
+fn sigh_empty_frame() -> SighFrame {
+    SighFrame {
+        saved_pc:    0,
+        saved_sp:    0,
+        saved_bp:    0,
+        signal_num:  0,
+        return_addr: 0,
+    }
+}
+
+fn sigh_table_new() -> SighTable with Mut, Panic {
+    let empty_act = sigh_empty_action()
+    let empty_pend = sigh_empty_pending()
+    let empty_frame = sigh_empty_frame()
+    let empty_mask = sigh_empty_mask()
+
+    SighTable {
+        actions:         [empty_act; 32],
+        pending:         [empty_pend; 256],
+        pending_count:   0,
+        mask:            empty_mask,
+        frames:          [empty_frame; 32],
+        frame_count:     0,
+        total_caught:    0,
+        total_ignored:   0,
+        total_delivered: 0,
+        in_handler:      false,
+        handler_depth:   0,
+    }
+}
+
+// ============================================================================
+// Section 5: Signal Name / Description
+// ============================================================================
+
+// Return a signal name as an integer code.
+fn sigh_name(sig: i64) -> i64 {
+    if sig == SIGH_HUP  { SIGH_NAME_HUP }
+    else if sig == SIGH_INT  { SIGH_NAME_INT }
+    else if sig == SIGH_QUIT { SIGH_NAME_QUIT }
+    else if sig == SIGH_ILL  { SIGH_NAME_ILL }
+    else if sig == SIGH_TRAP { SIGH_NAME_TRAP }
+    else if sig == SIGH_ABRT { SIGH_NAME_ABRT }
+    else if sig == SIGH_BUS  { SIGH_NAME_BUS }
+    else if sig == SIGH_FPE  { SIGH_NAME_FPE }
+    else if sig == SIGH_KILL { SIGH_NAME_KILL }
+    else if sig == SIGH_USR1 { SIGH_NAME_USR1 }
+    else if sig == SIGH_SEGV { SIGH_NAME_SEGV }
+    else if sig == SIGH_USR2 { SIGH_NAME_USR2 }
+    else if sig == SIGH_PIPE { SIGH_NAME_PIPE }
+    else if sig == SIGH_ALRM { SIGH_NAME_ALRM }
+    else if sig == SIGH_TERM { SIGH_NAME_TERM }
+    else if sig == SIGH_CHLD { SIGH_NAME_CHLD }
+    else if sig == SIGH_CONT { SIGH_NAME_CONT }
+    else if sig == SIGH_STOP { SIGH_NAME_STOP }
+    else if sig == SIGH_TSTP { SIGH_NAME_TSTP }
+    else { SIGH_NAME_UNKNOWN }
+}
+
+// Check whether a signal number is valid (1..31).
+fn sigh_is_valid(sig: i64) -> bool {
+    if sig >= 1 && sig < SIGH_MAX_SIGNALS { true }
+    else { false }
+}
+
+// KILL and STOP cannot be caught or ignored.
+fn sigh_is_catchable(sig: i64) -> bool {
+    if sigh_is_valid(sig) == false { false }
+    else if sig == SIGH_KILL { false }
+    else if sig == SIGH_STOP { false }
+    else { true }
+}
+
+// Signals whose default action is to terminate the process.
+fn sigh_is_fatal(sig: i64) -> bool {
+    if sig == SIGH_HUP  { true }
+    else if sig == SIGH_INT  { true }
+    else if sig == SIGH_QUIT { true }
+    else if sig == SIGH_ILL  { true }
+    else if sig == SIGH_ABRT { true }
+    else if sig == SIGH_BUS  { true }
+    else if sig == SIGH_FPE  { true }
+    else if sig == SIGH_KILL { true }
+    else if sig == SIGH_SEGV { true }
+    else if sig == SIGH_PIPE { true }
+    else if sig == SIGH_ALRM { true }
+    else if sig == SIGH_TERM { true }
+    else if sig == SIGH_USR1 { true }
+    else if sig == SIGH_USR2 { true }
+    else { false }
+}
+
+// Signals that can be safely ignored.
+fn sigh_is_ignorable(sig: i64) -> bool {
+    if sigh_is_valid(sig) == false { false }
+    else if sig == SIGH_KILL { false }
+    else if sig == SIGH_STOP { false }
+    else { true }
+}
+
+// ============================================================================
+// Section 6: Disposition Management
+// ============================================================================
+
+// Set the action for a signal.  Returns true on success.
+fn sigh_set_action(table: &! SighTable, sig: i64, disp: i64, handler: i64) -> bool with Mut, Div, Panic {
+    if sigh_is_valid(sig) == false { return false }
+    if sigh_is_catchable(sig) == false && disp != SIGH_DFL { return false }
+    table.actions[sig as usize].signal_num = sig
+    table.actions[sig as usize].disposition = disp
+    table.actions[sig as usize].handler_func = handler
+    true
+}
+
+// Get a copy of the action for a signal.
+fn sigh_get_action(table: &SighTable, sig: i64) -> SighAction with Div, Panic {
+    if sigh_is_valid(sig) == false { return sigh_empty_action() }
+    table.actions[sig as usize]
+}
+
+// Reset signal to default disposition.
+fn sigh_set_default(table: &! SighTable, sig: i64) -> bool with Mut, Div, Panic {
+    if sigh_is_valid(sig) == false { return false }
+    table.actions[sig as usize].disposition = SIGH_DFL
+    table.actions[sig as usize].handler_func = 0
+    table.actions[sig as usize].flags = 0
+    table.actions[sig as usize].restart = false
+    true
+}
+
+// Set signal to be ignored.
+fn sigh_set_ignore(table: &! SighTable, sig: i64) -> bool with Mut, Div, Panic {
+    if sigh_is_valid(sig) == false { return false }
+    if sigh_is_catchable(sig) == false { return false }
+    table.actions[sig as usize].disposition = SIGH_IGN
+    table.actions[sig as usize].handler_func = 0
+    true
+}
+
+// Install a handler function for a signal.
+fn sigh_set_handler(table: &! SighTable, sig: i64, handler_func: i64, restart: bool) -> bool with Mut, Div, Panic {
+    if sigh_is_valid(sig) == false { return false }
+    if sigh_is_catchable(sig) == false { return false }
+    table.actions[sig as usize].signal_num = sig
+    table.actions[sig as usize].disposition = SIGH_CATCH
+    table.actions[sig as usize].handler_func = handler_func
+    table.actions[sig as usize].restart = restart
+    true
+}
+
+// Reset all signals to default.  Returns count of signals reset.
+fn sigh_reset_all(table: &! SighTable) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 1
+    while i < SIGH_MAX_SIGNALS {
+        table.actions[i as usize].disposition = SIGH_DFL
+        table.actions[i as usize].handler_func = 0
+        table.actions[i as usize].flags = 0
+        table.actions[i as usize].restart = false
+        count = count + 1
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// Section 7: Signal Mask Operations
+// ============================================================================
+
+// Block a signal.  Returns true on success.
+fn sigh_block(table: &! SighTable, sig: i64) -> bool with Mut, Div, Panic {
+    if sigh_is_valid(sig) == false { return false }
+    // KILL and STOP cannot be blocked
+    if sig == SIGH_KILL { return false }
+    if sig == SIGH_STOP { return false }
+    table.mask.blocked[sig as usize] = true
+    true
+}
+
+// Unblock a signal.  Returns true on success.
+fn sigh_unblock(table: &! SighTable, sig: i64) -> bool with Mut, Div, Panic {
+    if sigh_is_valid(sig) == false { return false }
+    table.mask.blocked[sig as usize] = false
+    true
+}
+
+// Check if a signal is blocked.
+fn sigh_is_blocked(table: &SighTable, sig: i64) -> bool with Div, Panic {
+    if sigh_is_valid(sig) == false { return false }
+    table.mask.blocked[sig as usize]
+}
+
+// Block all blockable signals.  Returns count of signals blocked.
+fn sigh_block_all(table: &! SighTable) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 1
+    while i < SIGH_MAX_SIGNALS {
+        if i != SIGH_KILL && i != SIGH_STOP {
+            table.mask.blocked[i as usize] = true
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Unblock all signals.  Returns count of signals unblocked.
+fn sigh_unblock_all(table: &! SighTable) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 1
+    while i < SIGH_MAX_SIGNALS {
+        if table.mask.blocked[i as usize] {
+            table.mask.blocked[i as usize] = false
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Save the current mask into the saved slot.  Returns 0 on success.
+fn sigh_save_mask(table: &! SighTable) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < SIGH_MAX_SIGNALS {
+        table.mask.saved[i as usize] = table.mask.blocked[i as usize]
+        i = i + 1
+    }
+    0
+}
+
+// Restore the mask from the saved slot.  Returns 0 on success.
+fn sigh_restore_mask(table: &! SighTable) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < SIGH_MAX_SIGNALS {
+        table.mask.blocked[i as usize] = table.mask.saved[i as usize]
+        i = i + 1
+    }
+    0
+}
+
+// Set the entire mask from an external array.  Returns 0 on success.
+fn sigh_set_mask(table: &! SighTable, new_mask: [bool; 32]) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < SIGH_MAX_SIGNALS {
+        // Enforce that KILL and STOP cannot be blocked
+        if i == SIGH_KILL || i == SIGH_STOP {
+            table.mask.blocked[i as usize] = false
+        } else {
+            table.mask.blocked[i as usize] = new_mask[i as usize]
+        }
+        i = i + 1
+    }
+    0
+}
+
+// ============================================================================
+// Section 8: Signal Delivery
+// ============================================================================
+
+// Raise (post) a signal.  Returns true if the signal was queued.
+fn sigh_raise(table: &! SighTable, sig: i64) -> bool with Mut, Div, Panic {
+    if sigh_is_valid(sig) == false { return false }
+    if table.pending_count >= SIGH_MAX_PENDING { return false }
+
+    // Check disposition: if ignored, count and discard
+    let disp = table.actions[sig as usize].disposition
+    if disp == SIGH_IGN {
+        table.total_ignored = table.total_ignored + 1
+        return true
+    }
+
+    // Enqueue the signal
+    let idx = table.pending_count
+    table.pending[idx as usize].signal_num = sig
+    table.pending[idx as usize].info_code = 0
+    table.pending[idx as usize].info_pid = 0
+    table.pending[idx as usize].timestamp = 0
+    table.pending[idx as usize].delivered = false
+    table.pending_count = table.pending_count + 1
+    true
+}
+
+// Deliver all pending non-blocked signals.  Returns count delivered.
+fn sigh_deliver_pending(table: &! SighTable) -> i64 with Mut, Div, Panic {
+    var delivered: i64 = 0
+    var i: i64 = 0
+    while i < table.pending_count {
+        let sig = table.pending[i as usize].signal_num
+        let already = table.pending[i as usize].delivered
+        if already == false {
+            if sigh_is_valid(sig) {
+                // Only deliver if not blocked
+                if table.mask.blocked[sig as usize] == false {
+                    let disp = table.actions[sig as usize].disposition
+                    if disp == SIGH_CATCH {
+                        table.total_caught = table.total_caught + 1
+                    }
+                    table.pending[i as usize].delivered = true
+                    table.total_delivered = table.total_delivered + 1
+                    delivered = delivered + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    // Compact the pending queue: remove delivered entries
+    var write_idx: i64 = 0
+    var read_idx: i64 = 0
+    while read_idx < table.pending_count {
+        if table.pending[read_idx as usize].delivered == false {
+            if write_idx != read_idx {
+                table.pending[write_idx as usize] = table.pending[read_idx as usize]
+            }
+            write_idx = write_idx + 1
+        }
+        read_idx = read_idx + 1
+    }
+    table.pending_count = write_idx
+
+    delivered
+}
+
+// Check whether any signals are pending.
+fn sigh_has_pending(table: &SighTable) -> bool {
+    if table.pending_count > 0 { true }
+    else { false }
+}
+
+// Return the count of pending signals.
+fn sigh_pending_count(table: &SighTable) -> i64 {
+    table.pending_count
+}
+
+// Return the signal number of the next deliverable (non-blocked) pending signal,
+// or SIGH_INVALID if none.
+fn sigh_next_pending(table: &SighTable) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < table.pending_count {
+        let sig = table.pending[i as usize].signal_num
+        if table.pending[i as usize].delivered == false {
+            if sigh_is_valid(sig) {
+                if table.mask.blocked[sig as usize] == false {
+                    return sig
+                }
+            }
+        }
+        i = i + 1
+    }
+    SIGH_INVALID
+}
+
+// Clear all pending instances of a specific signal.  Returns count cleared.
+fn sigh_clear_pending(table: &! SighTable, sig: i64) -> i64 with Mut, Div, Panic {
+    var cleared: i64 = 0
+    var write_idx: i64 = 0
+    var read_idx: i64 = 0
+    while read_idx < table.pending_count {
+        if table.pending[read_idx as usize].signal_num == sig {
+            cleared = cleared + 1
+        } else {
+            if write_idx != read_idx {
+                table.pending[write_idx as usize] = table.pending[read_idx as usize]
+            }
+            write_idx = write_idx + 1
+        }
+        read_idx = read_idx + 1
+    }
+    table.pending_count = write_idx
+    cleared
+}
+
+// ============================================================================
+// Section 9: Signal Frame Management
+// ============================================================================
+
+// Push a signal frame onto the frame stack.  Returns true on success.
+fn sigh_push_frame(table: &! SighTable, pc: i64, sp: i64, bp: i64, sig: i64) -> bool with Mut, Div, Panic {
+    if table.frame_count >= SIGH_MAX_FRAMES { return false }
+    let idx = table.frame_count
+    table.frames[idx as usize].saved_pc = pc
+    table.frames[idx as usize].saved_sp = sp
+    table.frames[idx as usize].saved_bp = bp
+    table.frames[idx as usize].signal_num = sig
+    table.frames[idx as usize].return_addr = pc + 1
+    table.frame_count = table.frame_count + 1
+    table.in_handler = true
+    table.handler_depth = table.handler_depth + 1
+    true
+}
+
+// Pop a signal frame from the frame stack.
+fn sigh_pop_frame(table: &! SighTable) -> SighFrame with Mut, Div, Panic {
+    if table.frame_count <= 0 { return sigh_empty_frame() }
+    table.frame_count = table.frame_count - 1
+    let idx = table.frame_count
+    let frame = table.frames[idx as usize]
+    table.handler_depth = table.handler_depth - 1
+    if table.handler_depth <= 0 {
+        table.in_handler = false
+        table.handler_depth = 0
+    }
+    frame
+}
+
+// Get the current (topmost) signal frame without removing it.
+fn sigh_current_frame(table: &SighTable) -> SighFrame with Div, Panic {
+    if table.frame_count <= 0 { return sigh_empty_frame() }
+    let idx = table.frame_count - 1
+    table.frames[idx as usize]
+}
+
+// Check whether we are currently inside a signal handler.
+fn sigh_in_handler(table: &SighTable) -> bool {
+    table.in_handler
+}
+
+// Return the current handler nesting depth.
+fn sigh_handler_depth(table: &SighTable) -> i64 {
+    table.handler_depth
+}
+
+// ============================================================================
+// Section 10: Native Code Emission Helpers
+// ============================================================================
+
+// Helper: mask a value to its low 8 bits (unsigned).
+fn sigh_low8(x: i64) -> i64 with Mut, Panic, Div {
+    var n = x % 256
+    if n < 0 { n = n + 256 }
+    n
+}
+
+// Helper: write a byte to a buffer at a given position.
+fn sigh_buf_write(buf: [i8; 64], pos: i64, val: i64) -> [i8; 64] with Mut, Div, Panic {
+    var out = buf
+    if pos >= 0 && pos < 64 {
+        out[pos as usize] = sigh_low8(val) as i8
+    }
+    out
+}
+
+// Helper: write a byte to a 16-byte buffer.
+fn sigh_buf16_write(buf: [i8; 16], pos: i64, val: i64) -> [i8; 16] with Mut, Div, Panic {
+    var out = buf
+    if pos >= 0 && pos < 16 {
+        out[pos as usize] = sigh_low8(val) as i8
+    }
+    out
+}
+
+// Helper: write a byte to a 128-byte buffer.
+fn sigh_buf128_write(buf: [i8; 128], pos: i64, val: i64) -> [i8; 128] with Mut, Div, Panic {
+    var out = buf
+    if pos >= 0 && pos < 128 {
+        out[pos as usize] = sigh_low8(val) as i8
+    }
+    out
+}
+
+// Helper: write a u32 little-endian to a 64-byte buffer starting at pos.
+fn sigh_buf_write_u32(buf: [i8; 64], pos: i64, val: i64) -> [i8; 64] with Mut, Div, Panic {
+    var out = buf
+    out = sigh_buf_write(out, pos,     sigh_low8(val))
+    out = sigh_buf_write(out, pos + 1, sigh_low8(val >> 8))
+    out = sigh_buf_write(out, pos + 2, sigh_low8(val >> 16))
+    out = sigh_buf_write(out, pos + 3, sigh_low8(val >> 24))
+    out
+}
+
+// Helper: write a u32 little-endian to a 128-byte buffer.
+fn sigh_buf128_write_u32(buf: [i8; 128], pos: i64, val: i64) -> [i8; 128] with Mut, Div, Panic {
+    var out = buf
+    out = sigh_buf128_write(out, pos,     sigh_low8(val))
+    out = sigh_buf128_write(out, pos + 1, sigh_low8(val >> 8))
+    out = sigh_buf128_write(out, pos + 2, sigh_low8(val >> 16))
+    out = sigh_buf128_write(out, pos + 3, sigh_low8(val >> 24))
+    out
+}
+
+// Encode an x86-64 rt_sigaction syscall sequence.
+//
+// Instruction sequence:
+//   mov rax, 13          (syscall number for rt_sigaction)
+//   mov rdi, <sig>       (signal number)
+//   mov rsi, <handler>   (pointer to new sigaction struct)
+//   xor rdx, rdx         (old sigaction = NULL)
+//   mov r10, 8           (sigset size = 8 bytes)
+//   syscall
+//
+// Total: ~30 bytes of machine code in a 64-byte buffer.
+fn sigh_encode_sigaction_syscall(sig: i64, handler_addr: i64) -> [i8; 64] with Mut, Div, Panic {
+    var buf: [i8; 64] = [0; 64]
+    var pos: i64 = 0
+
+    // mov rax, 13  (48 c7 c0 0d 00 00 00)
+    buf = sigh_buf_write(buf, pos, 0x48)
+    pos = pos + 1
+    buf = sigh_buf_write(buf, pos, 0xc7)
+    pos = pos + 1
+    buf = sigh_buf_write(buf, pos, 0xc0)
+    pos = pos + 1
+    buf = sigh_buf_write_u32(buf, pos, SIGH_SYS_RT_SIGACTION)
+    pos = pos + 4
+
+    // mov rdi, <sig>  (48 c7 c7 <imm32>)
+    buf = sigh_buf_write(buf, pos, 0x48)
+    pos = pos + 1
+    buf = sigh_buf_write(buf, pos, 0xc7)
+    pos = pos + 1
+    buf = sigh_buf_write(buf, pos, 0xc7)
+    pos = pos + 1
+    buf = sigh_buf_write_u32(buf, pos, sig)
+    pos = pos + 4
+
+    // mov rsi, <handler_addr>  (48 c7 c6 <imm32>)
+    buf = sigh_buf_write(buf, pos, 0x48)
+    pos = pos + 1
+    buf = sigh_buf_write(buf, pos, 0xc7)
+    pos = pos + 1
+    buf = sigh_buf_write(buf, pos, 0xc6)
+    pos = pos + 1
+    buf = sigh_buf_write_u32(buf, pos, handler_addr)
+    pos = pos + 4
+
+    // xor rdx, rdx  (48 31 d2)
+    buf = sigh_buf_write(buf, pos, 0x48)
+    pos = pos + 1
+    buf = sigh_buf_write(buf, pos, 0x31)
+    pos = pos + 1
+    buf = sigh_buf_write(buf, pos, 0xd2)
+    pos = pos + 1
+
+    // mov r10, 8  (49 c7 c2 08 00 00 00)
+    buf = sigh_buf_write(buf, pos, 0x49)
+    pos = pos + 1
+    buf = sigh_buf_write(buf, pos, 0xc7)
+    pos = pos + 1
+    buf = sigh_buf_write(buf, pos, 0xc2)
+    pos = pos + 1
+    buf = sigh_buf_write_u32(buf, pos, 8)
+    pos = pos + 4
+
+    // syscall  (0f 05)
+    buf = sigh_buf_write(buf, pos, 0x0f)
+    pos = pos + 1
+    buf = sigh_buf_write(buf, pos, 0x05)
+    pos = pos + 1
+
+    buf
+}
+
+// Encode an rt_sigreturn syscall (used at end of signal handler).
+//
+// Instruction sequence:
+//   mov rax, 15    (rt_sigreturn syscall number)
+//   syscall
+//
+// Total: 9 bytes in a 16-byte buffer.
+fn sigh_encode_sigreturn() -> [i8; 16] with Mut, Div, Panic {
+    var buf: [i8; 16] = [0; 16]
+
+    // mov rax, 15  (48 c7 c0 0f 00 00 00)
+    buf = sigh_buf16_write(buf, 0, 0x48)
+    buf = sigh_buf16_write(buf, 1, 0xc7)
+    buf = sigh_buf16_write(buf, 2, 0xc0)
+    buf = sigh_buf16_write(buf, 3, sigh_low8(SIGH_SYS_RT_SIGRETURN))
+    buf = sigh_buf16_write(buf, 4, 0x00)
+    buf = sigh_buf16_write(buf, 5, 0x00)
+    buf = sigh_buf16_write(buf, 6, 0x00)
+
+    // syscall  (0f 05)
+    buf = sigh_buf16_write(buf, 7, 0x0f)
+    buf = sigh_buf16_write(buf, 8, 0x05)
+
+    buf
+}
+
+// Encode a signal handler trampoline.
+//
+// The trampoline:
+//   1. Saves callee-saved registers (rbx, r12, r13, r14, r15)
+//   2. Aligns the stack to 16 bytes
+//   3. Moves the signal number from rdi (kernel convention) to rdi (first arg)
+//   4. Calls the actual handler at handler_offset via relative call
+//   5. Restores callee-saved registers
+//   6. Calls rt_sigreturn to return from the signal context
+//
+// Encoded into a 128-byte buffer.
+fn sigh_encode_signal_trampoline(handler_offset: i64) -> [i8; 128] with Mut, Div, Panic {
+    var buf: [i8; 128] = [0; 128]
+    var pos: i64 = 0
+
+    // push rbp  (55)
+    buf = sigh_buf128_write(buf, pos, 0x55)
+    pos = pos + 1
+
+    // mov rbp, rsp  (48 89 e5)
+    buf = sigh_buf128_write(buf, pos, 0x48)
+    pos = pos + 1
+    buf = sigh_buf128_write(buf, pos, 0x89)
+    pos = pos + 1
+    buf = sigh_buf128_write(buf, pos, 0xe5)
+    pos = pos + 1
+
+    // push rbx  (53)
+    buf = sigh_buf128_write(buf, pos, 0x53)
+    pos = pos + 1
+
+    // push r12  (41 54)
+    buf = sigh_buf128_write(buf, pos, 0x41)
+    pos = pos + 1
+    buf = sigh_buf128_write(buf, pos, 0x54)
+    pos = pos + 1
+
+    // push r13  (41 55)
+    buf = sigh_buf128_write(buf, pos, 0x41)
+    pos = pos + 1
+    buf = sigh_buf128_write(buf, pos, 0x55)
+    pos = pos + 1
+
+    // push r14  (41 56)
+    buf = sigh_buf128_write(buf, pos, 0x41)
+    pos = pos + 1
+    buf = sigh_buf128_write(buf, pos, 0x56)
+    pos = pos + 1
+
+    // push r15  (41 57)
+    buf = sigh_buf128_write(buf, pos, 0x41)
+    pos = pos + 1
+    buf = sigh_buf128_write(buf, pos, 0x57)
+    pos = pos + 1
+
+    // sub rsp, 8  (align stack to 16, 48 83 ec 08)
+    buf = sigh_buf128_write(buf, pos, 0x48)
+    pos = pos + 1
+    buf = sigh_buf128_write(buf, pos, 0x83)
+    pos = pos + 1
+    buf = sigh_buf128_write(buf, pos, 0xec)
+    pos = pos + 1
+    buf = sigh_buf128_write(buf, pos, 0x08)
+    pos = pos + 1
+
+    // Signal number is already in rdi from the kernel.
+    // call rel32 <handler_offset>  (e8 <disp32>)
+    // The displacement is handler_offset relative to the next instruction.
+    let call_pos = pos
+    buf = sigh_buf128_write(buf, pos, 0xe8)
+    pos = pos + 1
+    // rel32 displacement: handler_offset - (call_pos + 5)
+    let disp = handler_offset - (call_pos + 5)
+    buf = sigh_buf128_write_u32(buf, pos, disp)
+    pos = pos + 4
+
+    // add rsp, 8  (48 83 c4 08)
+    buf = sigh_buf128_write(buf, pos, 0x48)
+    pos = pos + 1
+    buf = sigh_buf128_write(buf, pos, 0x83)
+    pos = pos + 1
+    buf = sigh_buf128_write(buf, pos, 0xc4)
+    pos = pos + 1
+    buf = sigh_buf128_write(buf, pos, 0x08)
+    pos = pos + 1
+
+    // pop r15  (41 5f)
+    buf = sigh_buf128_write(buf, pos, 0x41)
+    pos = pos + 1
+    buf = sigh_buf128_write(buf, pos, 0x5f)
+    pos = pos + 1
+
+    // pop r14  (41 5e)
+    buf = sigh_buf128_write(buf, pos, 0x41)
+    pos = pos + 1
+    buf = sigh_buf128_write(buf, pos, 0x5e)
+    pos = pos + 1
+
+    // pop r13  (41 5d)
+    buf = sigh_buf128_write(buf, pos, 0x41)
+    pos = pos + 1
+    buf = sigh_buf128_write(buf, pos, 0x5d)
+    pos = pos + 1
+
+    // pop r12  (41 5c)
+    buf = sigh_buf128_write(buf, pos, 0x41)
+    pos = pos + 1
+    buf = sigh_buf128_write(buf, pos, 0x5c)
+    pos = pos + 1
+
+    // pop rbx  (5b)
+    buf = sigh_buf128_write(buf, pos, 0x5b)
+    pos = pos + 1
+
+    // pop rbp  (5d)
+    buf = sigh_buf128_write(buf, pos, 0x5d)
+    pos = pos + 1
+
+    // mov rax, 15  (48 c7 c0 0f 00 00 00)  — rt_sigreturn
+    buf = sigh_buf128_write(buf, pos, 0x48)
+    pos = pos + 1
+    buf = sigh_buf128_write(buf, pos, 0xc7)
+    pos = pos + 1
+    buf = sigh_buf128_write(buf, pos, 0xc0)
+    pos = pos + 1
+    buf = sigh_buf128_write_u32(buf, pos, SIGH_SYS_RT_SIGRETURN)
+    pos = pos + 4
+
+    // syscall  (0f 05)
+    buf = sigh_buf128_write(buf, pos, 0x0f)
+    pos = pos + 1
+    buf = sigh_buf128_write(buf, pos, 0x05)
+    pos = pos + 1
+
+    buf
+}
+
+// Return the size of the signal trampoline in bytes.
+// This is the fixed size of the trampoline generated by sigh_encode_signal_trampoline.
+// push rbp(1) + mov rbp,rsp(3) + push rbx(1) + push r12(2) + push r13(2) +
+// push r14(2) + push r15(2) + sub rsp,8(4) + call rel32(5) + add rsp,8(4) +
+// pop r15(2) + pop r14(2) + pop r13(2) + pop r12(2) + pop rbx(1) + pop rbp(1) +
+// mov rax,15(7) + syscall(2) = 43
+fn sigh_trampoline_size() -> i64 {
+    43
+}
+
+// ============================================================================
+// Section 11: Platform Signal Mapping
+// ============================================================================
+
+// Map abstract signal number to Linux x86-64 signal number.
+// Our abstract numbers match Linux exactly, so this is identity for valid signals.
+fn sigh_to_platform(sig: i64) -> i64 {
+    if sigh_is_valid(sig) { sig }
+    else { SIGH_INVALID }
+}
+
+// Map platform (Linux) signal number to abstract signal number.
+fn sigh_from_platform(platform_sig: i64) -> i64 {
+    if sigh_is_valid(platform_sig) { platform_sig }
+    else { SIGH_INVALID }
+}
+
+// Return the default action for a given signal.
+fn sigh_default_action(sig: i64) -> i64 {
+    // Terminate: HUP, INT, KILL, PIPE, ALRM, TERM, USR1, USR2
+    if sig == SIGH_HUP  { SIGH_ACT_TERM }
+    else if sig == SIGH_INT  { SIGH_ACT_TERM }
+    else if sig == SIGH_KILL { SIGH_ACT_TERM }
+    else if sig == SIGH_PIPE { SIGH_ACT_TERM }
+    else if sig == SIGH_ALRM { SIGH_ACT_TERM }
+    else if sig == SIGH_TERM { SIGH_ACT_TERM }
+    else if sig == SIGH_USR1 { SIGH_ACT_TERM }
+    else if sig == SIGH_USR2 { SIGH_ACT_TERM }
+    // Core dump: QUIT, ILL, ABRT, BUS, FPE, SEGV, TRAP
+    else if sig == SIGH_QUIT { SIGH_ACT_CORE }
+    else if sig == SIGH_ILL  { SIGH_ACT_CORE }
+    else if sig == SIGH_ABRT { SIGH_ACT_CORE }
+    else if sig == SIGH_BUS  { SIGH_ACT_CORE }
+    else if sig == SIGH_FPE  { SIGH_ACT_CORE }
+    else if sig == SIGH_SEGV { SIGH_ACT_CORE }
+    else if sig == SIGH_TRAP { SIGH_ACT_CORE }
+    // Stop: STOP, TSTP
+    else if sig == SIGH_STOP { SIGH_ACT_STOP }
+    else if sig == SIGH_TSTP { SIGH_ACT_STOP }
+    // Continue: CONT
+    else if sig == SIGH_CONT { SIGH_ACT_CONT }
+    // Ignore: CHLD
+    else if sig == SIGH_CHLD { SIGH_ACT_IGNORE }
+    // Default for unknown
+    else { SIGH_ACT_TERM }
+}
+
+// Return an array indicating which signals produce core dumps.
+fn sigh_coredump_signals() -> [bool; 32] with Mut, Div, Panic {
+    var result: [bool; 32] = [false; 32]
+    result[SIGH_QUIT as usize] = true
+    result[SIGH_ILL as usize]  = true
+    result[SIGH_ABRT as usize] = true
+    result[SIGH_BUS as usize]  = true
+    result[SIGH_FPE as usize]  = true
+    result[SIGH_SEGV as usize] = true
+    result[SIGH_TRAP as usize] = true
+    result
+}
+
+// ============================================================================
+// Section 12: Statistics
+// ============================================================================
+
+// Statistics snapshot for the signal table.
+struct SighStats {
+    total_caught:      i64,
+    total_ignored:     i64,
+    total_delivered:   i64,
+    pending_count:     i64,
+    handlers_installed: i64,
+    signals_blocked:   i64,
+}
+
+// Count the number of installed (non-default) handlers.
+fn sigh_handlers_installed(table: &SighTable) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 1
+    while i < SIGH_MAX_SIGNALS {
+        if table.actions[i as usize].disposition == SIGH_CATCH {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Count the number of blocked signals.
+fn sigh_signals_blocked(table: &SighTable) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 1
+    while i < SIGH_MAX_SIGNALS {
+        if table.mask.blocked[i as usize] {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Gather a statistics snapshot from the signal table.
+fn sigh_stats(table: &SighTable) -> SighStats with Mut, Div, Panic {
+    SighStats {
+        total_caught:      table.total_caught,
+        total_ignored:     table.total_ignored,
+        total_delivered:   table.total_delivered,
+        pending_count:     table.pending_count,
+        handlers_installed: sigh_handlers_installed(table),
+        signals_blocked:   sigh_signals_blocked(table),
+    }
+}
+
+// ============================================================================
+// Section 13: Tests
+// ============================================================================
+
+// Test assertion helper.  Returns 0 on success, test_id on failure.
+fn sigh_assert(cond: bool, test_id: i64) -> i64 {
+    if cond { 0 }
+    else { test_id }
+}
+
+// --- Signal constants / validity (5 tests) ---
+
+fn test_sigh_constants_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    // Verify signal numbers match POSIX
+    let r1 = sigh_assert(SIGH_HUP == 1, 1)
+    if r1 != 0 { return false }
+    let r2 = sigh_assert(SIGH_INT == 2, 2)
+    if r2 != 0 { return false }
+    let r3 = sigh_assert(SIGH_KILL == 9, 3)
+    if r3 != 0 { return false }
+    let r4 = sigh_assert(SIGH_SEGV == 11, 4)
+    if r4 != 0 { return false }
+    let r5 = sigh_assert(SIGH_TERM == 15, 5)
+    if r5 != 0 { return false }
+    true
+}
+fn test_sigh_constants() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_constants_inner(&! table)
+}
+
+fn test_sigh_valid_signals_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let r1 = sigh_assert(sigh_is_valid(1), 1)
+    if r1 != 0 { return false }
+    let r2 = sigh_assert(sigh_is_valid(15), 2)
+    if r2 != 0 { return false }
+    let r3 = sigh_assert(sigh_is_valid(31), 3)
+    if r3 != 0 { return false }
+    let r4 = sigh_assert(sigh_is_valid(0) == false, 4)
+    if r4 != 0 { return false }
+    let r5 = sigh_assert(sigh_is_valid(32) == false, 5)
+    if r5 != 0 { return false }
+    true
+}
+fn test_sigh_valid_signals() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_valid_signals_inner(&! table)
+}
+
+fn test_sigh_catchable_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let r1 = sigh_assert(sigh_is_catchable(SIGH_INT), 1)
+    if r1 != 0 { return false }
+    let r2 = sigh_assert(sigh_is_catchable(SIGH_TERM), 2)
+    if r2 != 0 { return false }
+    let r3 = sigh_assert(sigh_is_catchable(SIGH_KILL) == false, 3)
+    if r3 != 0 { return false }
+    let r4 = sigh_assert(sigh_is_catchable(SIGH_STOP) == false, 4)
+    if r4 != 0 { return false }
+    let r5 = sigh_assert(sigh_is_catchable(0) == false, 5)
+    if r5 != 0 { return false }
+    true
+}
+fn test_sigh_catchable() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_catchable_inner(&! table)
+}
+
+fn test_sigh_fatal_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let r1 = sigh_assert(sigh_is_fatal(SIGH_HUP), 1)
+    if r1 != 0 { return false }
+    let r2 = sigh_assert(sigh_is_fatal(SIGH_KILL), 2)
+    if r2 != 0 { return false }
+    let r3 = sigh_assert(sigh_is_fatal(SIGH_SEGV), 3)
+    if r3 != 0 { return false }
+    let r4 = sigh_assert(sigh_is_fatal(SIGH_CHLD) == false, 4)
+    if r4 != 0 { return false }
+    let r5 = sigh_assert(sigh_is_fatal(SIGH_CONT) == false, 5)
+    if r5 != 0 { return false }
+    true
+}
+fn test_sigh_fatal() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_fatal_inner(&! table)
+}
+
+fn test_sigh_name_lookup_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let r1 = sigh_assert(sigh_name(SIGH_INT) == SIGH_NAME_INT, 1)
+    if r1 != 0 { return false }
+    let r2 = sigh_assert(sigh_name(SIGH_KILL) == SIGH_NAME_KILL, 2)
+    if r2 != 0 { return false }
+    let r3 = sigh_assert(sigh_name(SIGH_SEGV) == SIGH_NAME_SEGV, 3)
+    if r3 != 0 { return false }
+    let r4 = sigh_assert(sigh_name(99) == SIGH_NAME_UNKNOWN, 4)
+    if r4 != 0 { return false }
+    let r5 = sigh_assert(sigh_name(0) == SIGH_NAME_UNKNOWN, 5)
+    if r5 != 0 { return false }
+    true
+}
+fn test_sigh_name_lookup() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_name_lookup_inner(&! table)
+}
+
+// --- Disposition management (5 tests) ---
+
+fn test_sigh_set_action_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let ok = sigh_set_action(table, SIGH_INT, SIGH_CATCH, 0x1000)
+    let r1 = sigh_assert(ok, 1)
+    if r1 != 0 { return false }
+    let act = sigh_get_action(table, SIGH_INT)
+    let r2 = sigh_assert(act.disposition == SIGH_CATCH, 2)
+    if r2 != 0 { return false }
+    let r3 = sigh_assert(act.handler_func == 0x1000, 3)
+    if r3 != 0 { return false }
+    true
+}
+fn test_sigh_set_action() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_set_action_inner(&! table)
+}
+
+fn test_sigh_set_default_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let ok1 = sigh_set_handler(table, SIGH_INT, 0x2000, true)
+    let r1 = sigh_assert(ok1, 1)
+    if r1 != 0 { return false }
+    let ok2 = sigh_set_default(table, SIGH_INT)
+    let r2 = sigh_assert(ok2, 2)
+    if r2 != 0 { return false }
+    let act = sigh_get_action(table, SIGH_INT)
+    let r3 = sigh_assert(act.disposition == SIGH_DFL, 3)
+    if r3 != 0 { return false }
+    let r4 = sigh_assert(act.handler_func == 0, 4)
+    if r4 != 0 { return false }
+    true
+}
+fn test_sigh_set_default() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_set_default_inner(&! table)
+}
+
+fn test_sigh_set_ignore_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let ok = sigh_set_ignore(table, SIGH_PIPE)
+    let r1 = sigh_assert(ok, 1)
+    if r1 != 0 { return false }
+    let act = sigh_get_action(table, SIGH_PIPE)
+    let r2 = sigh_assert(act.disposition == SIGH_IGN, 2)
+    if r2 != 0 { return false }
+    // Cannot ignore KILL
+    let ok2 = sigh_set_ignore(table, SIGH_KILL)
+    let r3 = sigh_assert(ok2 == false, 3)
+    if r3 != 0 { return false }
+    true
+}
+fn test_sigh_set_ignore() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_set_ignore_inner(&! table)
+}
+
+fn test_sigh_set_handler_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let ok = sigh_set_handler(table, SIGH_TERM, 0x3000, true)
+    let r1 = sigh_assert(ok, 1)
+    if r1 != 0 { return false }
+    let act = sigh_get_action(table, SIGH_TERM)
+    let r2 = sigh_assert(act.disposition == SIGH_CATCH, 2)
+    if r2 != 0 { return false }
+    let r3 = sigh_assert(act.handler_func == 0x3000, 3)
+    if r3 != 0 { return false }
+    let r4 = sigh_assert(act.restart, 4)
+    if r4 != 0 { return false }
+    // Cannot set handler for KILL
+    let ok2 = sigh_set_handler(table, SIGH_KILL, 0x4000, false)
+    let r5 = sigh_assert(ok2 == false, 5)
+    if r5 != 0 { return false }
+    true
+}
+fn test_sigh_set_handler() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_set_handler_inner(&! table)
+}
+
+fn test_sigh_reset_all_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let ok1 = sigh_set_handler(table, SIGH_INT, 0x1000, false)
+    let ok2 = sigh_set_handler(table, SIGH_TERM, 0x2000, true)
+    let ok3 = sigh_set_ignore(table, SIGH_PIPE)
+    let r1 = sigh_assert(ok1 && ok2 && ok3, 1)
+    if r1 != 0 { return false }
+    let count = sigh_reset_all(table)
+    let r2 = sigh_assert(count == 31, 2)
+    if r2 != 0 { return false }
+    let act = sigh_get_action(table, SIGH_INT)
+    let r3 = sigh_assert(act.disposition == SIGH_DFL, 3)
+    if r3 != 0 { return false }
+    true
+}
+fn test_sigh_reset_all() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_reset_all_inner(&! table)
+}
+
+// --- Signal masking (5 tests) ---
+
+fn test_sigh_block_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let ok = sigh_block(table, SIGH_INT)
+    let r1 = sigh_assert(ok, 1)
+    if r1 != 0 { return false }
+    let blocked = sigh_is_blocked(table, SIGH_INT)
+    let r2 = sigh_assert(blocked, 2)
+    if r2 != 0 { return false }
+    // Cannot block KILL
+    let ok2 = sigh_block(table, SIGH_KILL)
+    let r3 = sigh_assert(ok2 == false, 3)
+    if r3 != 0 { return false }
+    true
+}
+fn test_sigh_block() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_block_inner(&! table)
+}
+
+fn test_sigh_unblock_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let ok1 = sigh_block(table, SIGH_TERM)
+    let r1 = sigh_assert(ok1, 1)
+    if r1 != 0 { return false }
+    let ok2 = sigh_unblock(table, SIGH_TERM)
+    let r2 = sigh_assert(ok2, 2)
+    if r2 != 0 { return false }
+    let blocked = sigh_is_blocked(table, SIGH_TERM)
+    let r3 = sigh_assert(blocked == false, 3)
+    if r3 != 0 { return false }
+    true
+}
+fn test_sigh_unblock() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_unblock_inner(&! table)
+}
+
+fn test_sigh_block_all_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let count = sigh_block_all(table)
+    // 31 signals (1..31), minus KILL and STOP = 29
+    let r1 = sigh_assert(count == 29, 1)
+    if r1 != 0 { return false }
+    let r2 = sigh_assert(sigh_is_blocked(table, SIGH_INT), 2)
+    if r2 != 0 { return false }
+    let r3 = sigh_assert(sigh_is_blocked(table, SIGH_KILL) == false, 3)
+    if r3 != 0 { return false }
+    let r4 = sigh_assert(sigh_is_blocked(table, SIGH_STOP) == false, 4)
+    if r4 != 0 { return false }
+    true
+}
+fn test_sigh_block_all() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_block_all_inner(&! table)
+}
+
+fn test_sigh_unblock_all_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let c1 = sigh_block_all(table)
+    let c2 = sigh_unblock_all(table)
+    let r1 = sigh_assert(c2 == 29, 1)
+    if r1 != 0 { return false }
+    let r2 = sigh_assert(sigh_is_blocked(table, SIGH_INT) == false, 2)
+    if r2 != 0 { return false }
+    let r3 = sigh_assert(sigh_is_blocked(table, SIGH_TERM) == false, 3)
+    if r3 != 0 { return false }
+    true
+}
+fn test_sigh_unblock_all() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_unblock_all_inner(&! table)
+}
+
+fn test_sigh_save_restore_mask_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let ok1 = sigh_block(table, SIGH_INT)
+    let ok2 = sigh_block(table, SIGH_TERM)
+    let s = sigh_save_mask(table)
+    let r1 = sigh_assert(s == 0, 1)
+    if r1 != 0 { return false }
+    // Unblock everything
+    let c = sigh_unblock_all(table)
+    let r2 = sigh_assert(sigh_is_blocked(table, SIGH_INT) == false, 2)
+    if r2 != 0 { return false }
+    // Restore
+    let r = sigh_restore_mask(table)
+    let r3 = sigh_assert(r == 0, 3)
+    if r3 != 0 { return false }
+    let r4 = sigh_assert(sigh_is_blocked(table, SIGH_INT), 4)
+    if r4 != 0 { return false }
+    let r5 = sigh_assert(sigh_is_blocked(table, SIGH_TERM), 5)
+    if r5 != 0 { return false }
+    true
+}
+fn test_sigh_save_restore_mask() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_save_restore_mask_inner(&! table)
+}
+
+// --- Signal delivery (5 tests) ---
+
+fn test_sigh_raise_basic_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let ok = sigh_raise(table, SIGH_INT)
+    let r1 = sigh_assert(ok, 1)
+    if r1 != 0 { return false }
+    let r2 = sigh_assert(sigh_has_pending(table), 2)
+    if r2 != 0 { return false }
+    let r3 = sigh_assert(sigh_pending_count(table) == 1, 3)
+    if r3 != 0 { return false }
+    true
+}
+fn test_sigh_raise_basic() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_raise_basic_inner(&! table)
+}
+
+fn test_sigh_raise_ignored_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let ok1 = sigh_set_ignore(table, SIGH_PIPE)
+    let r1 = sigh_assert(ok1, 1)
+    if r1 != 0 { return false }
+    let ok2 = sigh_raise(table, SIGH_PIPE)
+    let r2 = sigh_assert(ok2, 2)
+    if r2 != 0 { return false }
+    // Should not be queued since it's ignored
+    let r3 = sigh_assert(sigh_pending_count(table) == 0, 3)
+    if r3 != 0 { return false }
+    let r4 = sigh_assert(table.total_ignored == 1, 4)
+    if r4 != 0 { return false }
+    true
+}
+fn test_sigh_raise_ignored() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_raise_ignored_inner(&! table)
+}
+
+fn test_sigh_deliver_pending_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let ok1 = sigh_set_handler(table, SIGH_INT, 0x1000, false)
+    let ok2 = sigh_raise(table, SIGH_INT)
+    let r1 = sigh_assert(ok1 && ok2, 1)
+    if r1 != 0 { return false }
+    let delivered = sigh_deliver_pending(table)
+    let r2 = sigh_assert(delivered == 1, 2)
+    if r2 != 0 { return false }
+    let r3 = sigh_assert(sigh_pending_count(table) == 0, 3)
+    if r3 != 0 { return false }
+    let r4 = sigh_assert(table.total_caught == 1, 4)
+    if r4 != 0 { return false }
+    let r5 = sigh_assert(table.total_delivered == 1, 5)
+    if r5 != 0 { return false }
+    true
+}
+fn test_sigh_deliver_pending() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_deliver_pending_inner(&! table)
+}
+
+fn test_sigh_deliver_blocked_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let ok1 = sigh_set_handler(table, SIGH_TERM, 0x2000, false)
+    let ok2 = sigh_block(table, SIGH_TERM)
+    let ok3 = sigh_raise(table, SIGH_TERM)
+    let r1 = sigh_assert(ok1 && ok2 && ok3, 1)
+    if r1 != 0 { return false }
+    // Should not deliver blocked signal
+    let delivered = sigh_deliver_pending(table)
+    let r2 = sigh_assert(delivered == 0, 2)
+    if r2 != 0 { return false }
+    let r3 = sigh_assert(sigh_pending_count(table) == 1, 3)
+    if r3 != 0 { return false }
+    // Unblock and deliver
+    let ok4 = sigh_unblock(table, SIGH_TERM)
+    let delivered2 = sigh_deliver_pending(table)
+    let r4 = sigh_assert(delivered2 == 1, 4)
+    if r4 != 0 { return false }
+    let r5 = sigh_assert(sigh_pending_count(table) == 0, 5)
+    if r5 != 0 { return false }
+    true
+}
+fn test_sigh_deliver_blocked() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_deliver_blocked_inner(&! table)
+}
+
+fn test_sigh_raise_invalid_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let ok1 = sigh_raise(table, 0)
+    let r1 = sigh_assert(ok1 == false, 1)
+    if r1 != 0 { return false }
+    let ok2 = sigh_raise(table, 99)
+    let r2 = sigh_assert(ok2 == false, 2)
+    if r2 != 0 { return false }
+    let r3 = sigh_assert(sigh_pending_count(table) == 0, 3)
+    if r3 != 0 { return false }
+    true
+}
+fn test_sigh_raise_invalid() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_raise_invalid_inner(&! table)
+}
+
+// --- Pending signals (5 tests) ---
+
+fn test_sigh_has_pending_empty_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let r1 = sigh_assert(sigh_has_pending(table) == false, 1)
+    if r1 != 0 { return false }
+    let r2 = sigh_assert(sigh_pending_count(table) == 0, 2)
+    if r2 != 0 { return false }
+    true
+}
+fn test_sigh_has_pending_empty() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_has_pending_empty_inner(&! table)
+}
+
+fn test_sigh_next_pending_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let ok1 = sigh_raise(table, SIGH_INT)
+    let ok2 = sigh_raise(table, SIGH_TERM)
+    let r1 = sigh_assert(ok1 && ok2, 1)
+    if r1 != 0 { return false }
+    let next = sigh_next_pending(table)
+    let r2 = sigh_assert(next == SIGH_INT, 2)
+    if r2 != 0 { return false }
+    true
+}
+fn test_sigh_next_pending() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_next_pending_inner(&! table)
+}
+
+fn test_sigh_next_pending_blocked_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let ok1 = sigh_block(table, SIGH_INT)
+    let ok2 = sigh_raise(table, SIGH_INT)
+    let ok3 = sigh_raise(table, SIGH_TERM)
+    let r1 = sigh_assert(ok1 && ok2 && ok3, 1)
+    if r1 != 0 { return false }
+    // Next pending should skip blocked INT and return TERM
+    let next = sigh_next_pending(table)
+    let r2 = sigh_assert(next == SIGH_TERM, 2)
+    if r2 != 0 { return false }
+    true
+}
+fn test_sigh_next_pending_blocked() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_next_pending_blocked_inner(&! table)
+}
+
+fn test_sigh_clear_pending_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let ok1 = sigh_raise(table, SIGH_INT)
+    let ok2 = sigh_raise(table, SIGH_INT)
+    let ok3 = sigh_raise(table, SIGH_TERM)
+    let r1 = sigh_assert(ok1 && ok2 && ok3, 1)
+    if r1 != 0 { return false }
+    let cleared = sigh_clear_pending(table, SIGH_INT)
+    let r2 = sigh_assert(cleared == 2, 2)
+    if r2 != 0 { return false }
+    let r3 = sigh_assert(sigh_pending_count(table) == 1, 3)
+    if r3 != 0 { return false }
+    true
+}
+fn test_sigh_clear_pending() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_clear_pending_inner(&! table)
+}
+
+fn test_sigh_next_pending_none_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let next = sigh_next_pending(table)
+    let r1 = sigh_assert(next == SIGH_INVALID, 1)
+    if r1 != 0 { return false }
+    true
+}
+fn test_sigh_next_pending_none() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_next_pending_none_inner(&! table)
+}
+
+// --- Frame management (5 tests) ---
+
+fn test_sigh_push_frame_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let ok = sigh_push_frame(table, 0x1000, 0x2000, 0x3000, SIGH_INT)
+    let r1 = sigh_assert(ok, 1)
+    if r1 != 0 { return false }
+    let r2 = sigh_assert(sigh_in_handler(table), 2)
+    if r2 != 0 { return false }
+    let r3 = sigh_assert(sigh_handler_depth(table) == 1, 3)
+    if r3 != 0 { return false }
+    true
+}
+fn test_sigh_push_frame() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_push_frame_inner(&! table)
+}
+
+fn test_sigh_pop_frame_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let ok = sigh_push_frame(table, 0x1000, 0x2000, 0x3000, SIGH_INT)
+    let frame = sigh_pop_frame(table)
+    let r1 = sigh_assert(frame.saved_pc == 0x1000, 1)
+    if r1 != 0 { return false }
+    let r2 = sigh_assert(frame.saved_sp == 0x2000, 2)
+    if r2 != 0 { return false }
+    let r3 = sigh_assert(frame.saved_bp == 0x3000, 3)
+    if r3 != 0 { return false }
+    let r4 = sigh_assert(frame.signal_num == SIGH_INT, 4)
+    if r4 != 0 { return false }
+    let r5 = sigh_assert(sigh_in_handler(table) == false, 5)
+    if r5 != 0 { return false }
+    true
+}
+fn test_sigh_pop_frame() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_pop_frame_inner(&! table)
+}
+
+fn test_sigh_current_frame_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let ok1 = sigh_push_frame(table, 0x100, 0x200, 0x300, SIGH_TERM)
+    let ok2 = sigh_push_frame(table, 0x400, 0x500, 0x600, SIGH_SEGV)
+    let cur = sigh_current_frame(table)
+    let r1 = sigh_assert(cur.saved_pc == 0x400, 1)
+    if r1 != 0 { return false }
+    let r2 = sigh_assert(cur.signal_num == SIGH_SEGV, 2)
+    if r2 != 0 { return false }
+    let r3 = sigh_assert(sigh_handler_depth(table) == 2, 3)
+    if r3 != 0 { return false }
+    true
+}
+fn test_sigh_current_frame() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_current_frame_inner(&! table)
+}
+
+fn test_sigh_nested_frames_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let ok1 = sigh_push_frame(table, 0x10, 0x20, 0x30, SIGH_INT)
+    let ok2 = sigh_push_frame(table, 0x40, 0x50, 0x60, SIGH_TERM)
+    let ok3 = sigh_push_frame(table, 0x70, 0x80, 0x90, SIGH_SEGV)
+    let r1 = sigh_assert(sigh_handler_depth(table) == 3, 1)
+    if r1 != 0 { return false }
+    let f3 = sigh_pop_frame(table)
+    let r2 = sigh_assert(f3.signal_num == SIGH_SEGV, 2)
+    if r2 != 0 { return false }
+    let f2 = sigh_pop_frame(table)
+    let r3 = sigh_assert(f2.signal_num == SIGH_TERM, 3)
+    if r3 != 0 { return false }
+    let f1 = sigh_pop_frame(table)
+    let r4 = sigh_assert(f1.signal_num == SIGH_INT, 4)
+    if r4 != 0 { return false }
+    let r5 = sigh_assert(sigh_in_handler(table) == false, 5)
+    if r5 != 0 { return false }
+    true
+}
+fn test_sigh_nested_frames() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_nested_frames_inner(&! table)
+}
+
+fn test_sigh_pop_empty_frame_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let frame = sigh_pop_frame(table)
+    let r1 = sigh_assert(frame.saved_pc == 0, 1)
+    if r1 != 0 { return false }
+    let r2 = sigh_assert(frame.saved_sp == 0, 2)
+    if r2 != 0 { return false }
+    let r3 = sigh_assert(sigh_in_handler(table) == false, 3)
+    if r3 != 0 { return false }
+    true
+}
+fn test_sigh_pop_empty_frame() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_pop_empty_frame_inner(&! table)
+}
+
+// --- Code emission (5 tests) ---
+
+fn test_sigh_encode_sigaction_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let buf = sigh_encode_sigaction_syscall(SIGH_INT, 0x1000)
+    // First byte should be 0x48 (REX.W prefix for mov rax, imm32)
+    let r1 = sigh_assert(buf[0 as usize] == 0x48 as i8, 1)
+    if r1 != 0 { return false }
+    // Second byte should be 0xc7 (mov r/m64, imm32)
+    let r2 = sigh_assert(buf[1 as usize] == 0xc7 as i8, 2)
+    if r2 != 0 { return false }
+    // Third byte should be 0xc0 (ModRM: rax)
+    let r3 = sigh_assert(buf[2 as usize] == 0xc0 as i8, 3)
+    if r3 != 0 { return false }
+    // imm32 should be 13 (rt_sigaction syscall number) in LE
+    let r4 = sigh_assert(buf[3 as usize] == 13 as i8, 4)
+    if r4 != 0 { return false }
+    true
+}
+fn test_sigh_encode_sigaction() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_encode_sigaction_inner(&! table)
+}
+
+fn test_sigh_encode_sigreturn_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let buf = sigh_encode_sigreturn()
+    // mov rax, 15 -> 48 c7 c0 0f 00 00 00
+    let r1 = sigh_assert(buf[0 as usize] == 0x48 as i8, 1)
+    if r1 != 0 { return false }
+    let r2 = sigh_assert(buf[1 as usize] == 0xc7 as i8, 2)
+    if r2 != 0 { return false }
+    let r3 = sigh_assert(buf[2 as usize] == 0xc0 as i8, 3)
+    if r3 != 0 { return false }
+    let r4 = sigh_assert(buf[3 as usize] == 0x0f as i8, 4)
+    if r4 != 0 { return false }
+    // syscall -> 0f 05
+    let r5 = sigh_assert(buf[7 as usize] == 0x0f as i8, 5)
+    if r5 != 0 { return false }
+    true
+}
+fn test_sigh_encode_sigreturn() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_encode_sigreturn_inner(&! table)
+}
+
+fn test_sigh_encode_trampoline_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let buf = sigh_encode_signal_trampoline(0x100)
+    // First byte should be push rbp (0x55)
+    let r1 = sigh_assert(buf[0 as usize] == 0x55 as i8, 1)
+    if r1 != 0 { return false }
+    // mov rbp, rsp starts at offset 1: 48 89 e5
+    let r2 = sigh_assert(buf[1 as usize] == 0x48 as i8, 2)
+    if r2 != 0 { return false }
+    let r3 = sigh_assert(buf[2 as usize] == 0x89 as i8, 3)
+    if r3 != 0 { return false }
+    let r4 = sigh_assert(buf[3 as usize] == 0xe5 as i8, 4)
+    if r4 != 0 { return false }
+    true
+}
+fn test_sigh_encode_trampoline() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_encode_trampoline_inner(&! table)
+}
+
+fn test_sigh_trampoline_size_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let size = sigh_trampoline_size()
+    let r1 = sigh_assert(size == 43, 1)
+    if r1 != 0 { return false }
+    let r2 = sigh_assert(size > 0, 2)
+    if r2 != 0 { return false }
+    true
+}
+fn test_sigh_trampoline_size() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_trampoline_size_inner(&! table)
+}
+
+fn test_sigh_sigreturn_syscall_bytes_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let buf = sigh_encode_sigreturn()
+    // Verify the syscall instruction at offset 7-8
+    let r1 = sigh_assert(buf[8 as usize] == 0x05 as i8, 1)
+    if r1 != 0 { return false }
+    // Verify remaining bytes are zero-padded
+    let r2 = sigh_assert(buf[9 as usize] == 0 as i8, 2)
+    if r2 != 0 { return false }
+    let r3 = sigh_assert(buf[15 as usize] == 0 as i8, 3)
+    if r3 != 0 { return false }
+    true
+}
+fn test_sigh_sigreturn_syscall_bytes() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_sigreturn_syscall_bytes_inner(&! table)
+}
+
+// --- Platform mapping (5 tests) ---
+
+fn test_sigh_to_platform_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let r1 = sigh_assert(sigh_to_platform(SIGH_INT) == SIGH_INT, 1)
+    if r1 != 0 { return false }
+    let r2 = sigh_assert(sigh_to_platform(SIGH_KILL) == SIGH_KILL, 2)
+    if r2 != 0 { return false }
+    let r3 = sigh_assert(sigh_to_platform(0) == SIGH_INVALID, 3)
+    if r3 != 0 { return false }
+    true
+}
+fn test_sigh_to_platform() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_to_platform_inner(&! table)
+}
+
+fn test_sigh_from_platform_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let r1 = sigh_assert(sigh_from_platform(2) == SIGH_INT, 1)
+    if r1 != 0 { return false }
+    let r2 = sigh_assert(sigh_from_platform(9) == SIGH_KILL, 2)
+    if r2 != 0 { return false }
+    let r3 = sigh_assert(sigh_from_platform(99) == SIGH_INVALID, 3)
+    if r3 != 0 { return false }
+    true
+}
+fn test_sigh_from_platform() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_from_platform_inner(&! table)
+}
+
+fn test_sigh_default_action_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let r1 = sigh_assert(sigh_default_action(SIGH_INT) == SIGH_ACT_TERM, 1)
+    if r1 != 0 { return false }
+    let r2 = sigh_assert(sigh_default_action(SIGH_QUIT) == SIGH_ACT_CORE, 2)
+    if r2 != 0 { return false }
+    let r3 = sigh_assert(sigh_default_action(SIGH_STOP) == SIGH_ACT_STOP, 3)
+    if r3 != 0 { return false }
+    let r4 = sigh_assert(sigh_default_action(SIGH_CONT) == SIGH_ACT_CONT, 4)
+    if r4 != 0 { return false }
+    let r5 = sigh_assert(sigh_default_action(SIGH_CHLD) == SIGH_ACT_IGNORE, 5)
+    if r5 != 0 { return false }
+    true
+}
+fn test_sigh_default_action() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_default_action_inner(&! table)
+}
+
+fn test_sigh_coredump_signals_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let cd = sigh_coredump_signals()
+    let r1 = sigh_assert(cd[SIGH_QUIT as usize], 1)
+    if r1 != 0 { return false }
+    let r2 = sigh_assert(cd[SIGH_ABRT as usize], 2)
+    if r2 != 0 { return false }
+    let r3 = sigh_assert(cd[SIGH_SEGV as usize], 3)
+    if r3 != 0 { return false }
+    let r4 = sigh_assert(cd[SIGH_INT as usize] == false, 4)
+    if r4 != 0 { return false }
+    let r5 = sigh_assert(cd[SIGH_TERM as usize] == false, 5)
+    if r5 != 0 { return false }
+    true
+}
+fn test_sigh_coredump_signals() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_coredump_signals_inner(&! table)
+}
+
+fn test_sigh_platform_roundtrip_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    // Verify roundtrip: to_platform(from_platform(x)) == x for valid signals
+    let r1 = sigh_assert(sigh_to_platform(sigh_from_platform(1)) == 1, 1)
+    if r1 != 0 { return false }
+    let r2 = sigh_assert(sigh_to_platform(sigh_from_platform(15)) == 15, 2)
+    if r2 != 0 { return false }
+    let r3 = sigh_assert(sigh_to_platform(sigh_from_platform(31)) == 31, 3)
+    if r3 != 0 { return false }
+    // Invalid roundtrip
+    let r4 = sigh_assert(sigh_from_platform(0) == SIGH_INVALID, 4)
+    if r4 != 0 { return false }
+    true
+}
+fn test_sigh_platform_roundtrip() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_platform_roundtrip_inner(&! table)
+}
+
+// --- Statistics (5 tests) ---
+
+fn test_sigh_stats_empty_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let st = sigh_stats(table)
+    let r1 = sigh_assert(st.total_caught == 0, 1)
+    if r1 != 0 { return false }
+    let r2 = sigh_assert(st.total_ignored == 0, 2)
+    if r2 != 0 { return false }
+    let r3 = sigh_assert(st.total_delivered == 0, 3)
+    if r3 != 0 { return false }
+    let r4 = sigh_assert(st.pending_count == 0, 4)
+    if r4 != 0 { return false }
+    let r5 = sigh_assert(st.handlers_installed == 0, 5)
+    if r5 != 0 { return false }
+    true
+}
+fn test_sigh_stats_empty() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_stats_empty_inner(&! table)
+}
+
+fn test_sigh_stats_after_handlers_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let ok1 = sigh_set_handler(table, SIGH_INT, 0x1000, false)
+    let ok2 = sigh_set_handler(table, SIGH_TERM, 0x2000, false)
+    let st = sigh_stats(table)
+    let r1 = sigh_assert(st.handlers_installed == 2, 1)
+    if r1 != 0 { return false }
+    true
+}
+fn test_sigh_stats_after_handlers() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_stats_after_handlers_inner(&! table)
+}
+
+fn test_sigh_stats_after_block_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let ok1 = sigh_block(table, SIGH_INT)
+    let ok2 = sigh_block(table, SIGH_TERM)
+    let ok3 = sigh_block(table, SIGH_HUP)
+    let st = sigh_stats(table)
+    let r1 = sigh_assert(st.signals_blocked == 3, 1)
+    if r1 != 0 { return false }
+    true
+}
+fn test_sigh_stats_after_block() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_stats_after_block_inner(&! table)
+}
+
+fn test_sigh_handlers_installed_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let r1 = sigh_assert(sigh_handlers_installed(table) == 0, 1)
+    if r1 != 0 { return false }
+    let ok = sigh_set_handler(table, SIGH_ALRM, 0x5000, false)
+    let r2 = sigh_assert(sigh_handlers_installed(table) == 1, 2)
+    if r2 != 0 { return false }
+    let ok2 = sigh_set_default(table, SIGH_ALRM)
+    let r3 = sigh_assert(sigh_handlers_installed(table) == 0, 3)
+    if r3 != 0 { return false }
+    true
+}
+fn test_sigh_handlers_installed() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_handlers_installed_inner(&! table)
+}
+
+fn test_sigh_signals_blocked_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let r1 = sigh_assert(sigh_signals_blocked(table) == 0, 1)
+    if r1 != 0 { return false }
+    let ok = sigh_block(table, SIGH_USR1)
+    let r2 = sigh_assert(sigh_signals_blocked(table) == 1, 2)
+    if r2 != 0 { return false }
+    let ok2 = sigh_unblock(table, SIGH_USR1)
+    let r3 = sigh_assert(sigh_signals_blocked(table) == 0, 3)
+    if r3 != 0 { return false }
+    true
+}
+fn test_sigh_signals_blocked() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_signals_blocked_inner(&! table)
+}
+
+// --- Edge cases (5 tests) ---
+
+fn test_sigh_empty_table_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    // All actions should be default
+    let act = sigh_get_action(table, SIGH_INT)
+    let r1 = sigh_assert(act.disposition == SIGH_DFL, 1)
+    if r1 != 0 { return false }
+    let r2 = sigh_assert(sigh_in_handler(table) == false, 2)
+    if r2 != 0 { return false }
+    let r3 = sigh_assert(sigh_handler_depth(table) == 0, 3)
+    if r3 != 0 { return false }
+    true
+}
+fn test_sigh_empty_table() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_empty_table_inner(&! table)
+}
+
+fn test_sigh_kill_not_catchable_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    // Cannot set handler for KILL
+    let ok1 = sigh_set_handler(table, SIGH_KILL, 0x9999, false)
+    let r1 = sigh_assert(ok1 == false, 1)
+    if r1 != 0 { return false }
+    // Cannot ignore KILL
+    let ok2 = sigh_set_ignore(table, SIGH_KILL)
+    let r2 = sigh_assert(ok2 == false, 2)
+    if r2 != 0 { return false }
+    // Cannot block KILL
+    let ok3 = sigh_block(table, SIGH_KILL)
+    let r3 = sigh_assert(ok3 == false, 3)
+    if r3 != 0 { return false }
+    // Can still set KILL to SIGH_DFL (no-op since already default)
+    let ok4 = sigh_set_default(table, SIGH_KILL)
+    let r4 = sigh_assert(ok4, 4)
+    if r4 != 0 { return false }
+    true
+}
+fn test_sigh_kill_not_catchable() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_kill_not_catchable_inner(&! table)
+}
+
+fn test_sigh_stop_not_catchable_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let ok1 = sigh_set_handler(table, SIGH_STOP, 0x8888, false)
+    let r1 = sigh_assert(ok1 == false, 1)
+    if r1 != 0 { return false }
+    let ok2 = sigh_set_ignore(table, SIGH_STOP)
+    let r2 = sigh_assert(ok2 == false, 2)
+    if r2 != 0 { return false }
+    let ok3 = sigh_block(table, SIGH_STOP)
+    let r3 = sigh_assert(ok3 == false, 3)
+    if r3 != 0 { return false }
+    true
+}
+fn test_sigh_stop_not_catchable() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_stop_not_catchable_inner(&! table)
+}
+
+fn test_sigh_multiple_raise_deliver_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    let ok1 = sigh_set_handler(table, SIGH_INT, 0x1000, false)
+    let ok2 = sigh_set_handler(table, SIGH_TERM, 0x2000, false)
+    // Raise multiple signals
+    let ok3 = sigh_raise(table, SIGH_INT)
+    let ok4 = sigh_raise(table, SIGH_TERM)
+    let ok5 = sigh_raise(table, SIGH_INT)
+    let r1 = sigh_assert(sigh_pending_count(table) == 3, 1)
+    if r1 != 0 { return false }
+    let delivered = sigh_deliver_pending(table)
+    let r2 = sigh_assert(delivered == 3, 2)
+    if r2 != 0 { return false }
+    let r3 = sigh_assert(table.total_caught == 3, 3)
+    if r3 != 0 { return false }
+    let r4 = sigh_assert(sigh_pending_count(table) == 0, 4)
+    if r4 != 0 { return false }
+    true
+}
+fn test_sigh_multiple_raise_deliver() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_multiple_raise_deliver_inner(&! table)
+}
+
+fn test_sigh_set_mask_inner(table: &! SighTable) -> bool with Mut, Div, Panic {
+    var new_mask: [bool; 32] = [false; 32]
+    new_mask[SIGH_INT as usize] = true
+    new_mask[SIGH_TERM as usize] = true
+    new_mask[SIGH_KILL as usize] = true   // Should be silently ignored
+    new_mask[SIGH_STOP as usize] = true   // Should be silently ignored
+    let r = sigh_set_mask(table, new_mask)
+    let r1 = sigh_assert(r == 0, 1)
+    if r1 != 0 { return false }
+    let r2 = sigh_assert(sigh_is_blocked(table, SIGH_INT), 2)
+    if r2 != 0 { return false }
+    let r3 = sigh_assert(sigh_is_blocked(table, SIGH_TERM), 3)
+    if r3 != 0 { return false }
+    // KILL and STOP must not be blocked
+    let r4 = sigh_assert(sigh_is_blocked(table, SIGH_KILL) == false, 4)
+    if r4 != 0 { return false }
+    let r5 = sigh_assert(sigh_is_blocked(table, SIGH_STOP) == false, 5)
+    if r5 != 0 { return false }
+    true
+}
+fn test_sigh_set_mask() -> bool with Mut, Div, Panic {
+    var table = sigh_table_new()
+    test_sigh_set_mask_inner(&! table)
+}
+
+// ============================================================================
+// Test Runner
+// ============================================================================
+
+fn sigh_run_tests() -> i64 with Mut, Div, Panic {
+    var passed: i64 = 0
+
+    // Signal constants / validity (5 tests)
+    if test_sigh_constants() { passed = passed + 1 }
+    if test_sigh_valid_signals() { passed = passed + 1 }
+    if test_sigh_catchable() { passed = passed + 1 }
+    if test_sigh_fatal() { passed = passed + 1 }
+    if test_sigh_name_lookup() { passed = passed + 1 }
+
+    // Disposition management (5 tests)
+    if test_sigh_set_action() { passed = passed + 1 }
+    if test_sigh_set_default() { passed = passed + 1 }
+    if test_sigh_set_ignore() { passed = passed + 1 }
+    if test_sigh_set_handler() { passed = passed + 1 }
+    if test_sigh_reset_all() { passed = passed + 1 }
+
+    // Signal masking (5 tests)
+    if test_sigh_block() { passed = passed + 1 }
+    if test_sigh_unblock() { passed = passed + 1 }
+    if test_sigh_block_all() { passed = passed + 1 }
+    if test_sigh_unblock_all() { passed = passed + 1 }
+    if test_sigh_save_restore_mask() { passed = passed + 1 }
+
+    // Signal delivery (5 tests)
+    if test_sigh_raise_basic() { passed = passed + 1 }
+    if test_sigh_raise_ignored() { passed = passed + 1 }
+    if test_sigh_deliver_pending() { passed = passed + 1 }
+    if test_sigh_deliver_blocked() { passed = passed + 1 }
+    if test_sigh_raise_invalid() { passed = passed + 1 }
+
+    // Pending signals (5 tests)
+    if test_sigh_has_pending_empty() { passed = passed + 1 }
+    if test_sigh_next_pending() { passed = passed + 1 }
+    if test_sigh_next_pending_blocked() { passed = passed + 1 }
+    if test_sigh_clear_pending() { passed = passed + 1 }
+    if test_sigh_next_pending_none() { passed = passed + 1 }
+
+    // Frame management (5 tests)
+    if test_sigh_push_frame() { passed = passed + 1 }
+    if test_sigh_pop_frame() { passed = passed + 1 }
+    if test_sigh_current_frame() { passed = passed + 1 }
+    if test_sigh_nested_frames() { passed = passed + 1 }
+    if test_sigh_pop_empty_frame() { passed = passed + 1 }
+
+    // Code emission (5 tests)
+    if test_sigh_encode_sigaction() { passed = passed + 1 }
+    if test_sigh_encode_sigreturn() { passed = passed + 1 }
+    if test_sigh_encode_trampoline() { passed = passed + 1 }
+    if test_sigh_trampoline_size() { passed = passed + 1 }
+    if test_sigh_sigreturn_syscall_bytes() { passed = passed + 1 }
+
+    // Platform mapping (5 tests)
+    if test_sigh_to_platform() { passed = passed + 1 }
+    if test_sigh_from_platform() { passed = passed + 1 }
+    if test_sigh_default_action() { passed = passed + 1 }
+    if test_sigh_coredump_signals() { passed = passed + 1 }
+    if test_sigh_platform_roundtrip() { passed = passed + 1 }
+
+    // Statistics (5 tests)
+    if test_sigh_stats_empty() { passed = passed + 1 }
+    if test_sigh_stats_after_handlers() { passed = passed + 1 }
+    if test_sigh_stats_after_block() { passed = passed + 1 }
+    if test_sigh_handlers_installed() { passed = passed + 1 }
+    if test_sigh_signals_blocked() { passed = passed + 1 }
+
+    // Edge cases (5 tests)
+    if test_sigh_empty_table() { passed = passed + 1 }
+    if test_sigh_kill_not_catchable() { passed = passed + 1 }
+    if test_sigh_stop_not_catchable() { passed = passed + 1 }
+    if test_sigh_multiple_raise_deliver() { passed = passed + 1 }
+    if test_sigh_set_mask() { passed = passed + 1 }
+
+    passed
+}

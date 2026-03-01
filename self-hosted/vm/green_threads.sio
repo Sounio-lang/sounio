@@ -1,0 +1,2765 @@
+// self-hosted::vm::green_threads — Cooperative Green Thread Scheduler
+//
+// Cooperative coroutine scheduler for the Sounio VM.  Provides thread
+// creation, round-robin + priority scheduling, preemption via time-slice,
+// join/wait synchronisation, and buffered message channels.
+//
+// All state lives in flat fixed-size arrays — no heap allocation, no Box,
+// no Option indirection — keeping the module bootstrap-friendly and
+// deterministic.
+//
+// Naming: structs prefixed `Gth`, functions prefixed `gth_`, constants `GTH_`.
+
+// ============================================================================
+// Section 1: Constants
+// ============================================================================
+
+// Capacity limits
+let GTH_MAX_THREADS: i64 = 1024
+let GTH_STACK_SIZE: i64 = 8192
+let GTH_MAX_READY: i64 = 1024
+let GTH_MAX_CHANNELS: i64 = 256
+let GTH_MAX_CHANNEL_BUF: i64 = 64
+
+// Sentinel for "no thread" / invalid id
+let GTH_INVALID: i64 = 0 - 1
+
+// Thread states
+let GTH_STATE_CREATED: i64 = 0
+let GTH_STATE_READY: i64 = 1
+let GTH_STATE_RUNNING: i64 = 2
+let GTH_STATE_BLOCKED: i64 = 3
+let GTH_STATE_SLEEPING: i64 = 4
+let GTH_STATE_DONE: i64 = 5
+let GTH_STATE_DEAD: i64 = 6
+
+// Priority levels
+let GTH_PRIO_LOW: i64 = 0
+let GTH_PRIO_NORMAL: i64 = 1
+let GTH_PRIO_HIGH: i64 = 2
+let GTH_PRIO_REALTIME: i64 = 3
+
+// Default time quantum (ticks before preemption)
+let GTH_DEFAULT_QUANTUM: i64 = 100
+
+// ============================================================================
+// Section 2: Thread Data Structures
+// ============================================================================
+
+struct GthStack {
+    slots: [i64; 8192],
+    sp: i64,
+}
+
+struct GthThread {
+    id: i64,
+    state: i64,
+    priority: i64,
+    stack: GthStack,
+    pc: i64,
+    func_id: i64,
+    result: i64,
+    parent_id: i64,
+    join_count: i64,
+    time_slice: i64,
+    ticks_used: i64,
+    yield_count: i64,
+}
+
+struct GthReadyQueue {
+    thread_ids: [i64; 1024],
+    count: i64,
+    head: i64,
+    tail: i64,
+}
+
+// ============================================================================
+// Section 3: Channel Data Structures
+// ============================================================================
+
+struct GthMessage {
+    value: i64,
+    sender_id: i64,
+    tag: i64,
+}
+
+struct GthChannel {
+    id: i64,
+    buffer: [GthMessage; 64],
+    buf_count: i64,
+    buf_head: i64,
+    buf_tail: i64,
+    capacity: i64,
+    sender_count: i64,
+    receiver_count: i64,
+    closed: bool,
+}
+
+struct GthWaitEntry {
+    thread_id: i64,
+    channel_id: i64,
+    is_send: bool,
+}
+
+// ============================================================================
+// Section 4: Scheduler
+// ============================================================================
+
+struct GthScheduler {
+    threads: [GthThread; 1024],
+    thread_count: i64,
+    ready_queue: GthReadyQueue,
+    channels: [GthChannel; 256],
+    channel_count: i64,
+    current_thread: i64,
+    total_switches: i64,
+    total_yields: i64,
+    total_spawns: i64,
+    time_quantum: i64,
+    idle_count: i64,
+}
+
+// ============================================================================
+// Section 5: Constructor Functions
+// ============================================================================
+
+fn gth_empty_stack() -> GthStack {
+    GthStack {
+        slots: [0; 8192],
+        sp: 0,
+    }
+}
+
+fn gth_empty_message() -> GthMessage {
+    GthMessage {
+        value: 0,
+        sender_id: GTH_INVALID,
+        tag: 0,
+    }
+}
+
+fn gth_empty_thread() -> GthThread {
+    GthThread {
+        id: GTH_INVALID,
+        state: GTH_STATE_DEAD,
+        priority: GTH_PRIO_NORMAL,
+        stack: gth_empty_stack(),
+        pc: 0,
+        func_id: GTH_INVALID,
+        result: 0,
+        parent_id: GTH_INVALID,
+        join_count: 0,
+        time_slice: GTH_DEFAULT_QUANTUM,
+        ticks_used: 0,
+        yield_count: 0,
+    }
+}
+
+fn gth_empty_channel() -> GthChannel {
+    GthChannel {
+        id: GTH_INVALID,
+        buffer: [gth_empty_message(); 64],
+        buf_count: 0,
+        buf_head: 0,
+        buf_tail: 0,
+        capacity: GTH_MAX_CHANNEL_BUF,
+        sender_count: 0,
+        receiver_count: 0,
+        closed: false,
+    }
+}
+
+fn gth_empty_ready_queue() -> GthReadyQueue {
+    GthReadyQueue {
+        thread_ids: [GTH_INVALID; 1024],
+        count: 0,
+        head: 0,
+        tail: 0,
+    }
+}
+
+fn gth_scheduler_new() -> GthScheduler {
+    GthScheduler {
+        threads: [gth_empty_thread(); 1024],
+        thread_count: 0,
+        ready_queue: gth_empty_ready_queue(),
+        channels: [gth_empty_channel(); 256],
+        channel_count: 0,
+        current_thread: GTH_INVALID,
+        total_switches: 0,
+        total_yields: 0,
+        total_spawns: 0,
+        time_quantum: GTH_DEFAULT_QUANTUM,
+        idle_count: 0,
+    }
+}
+
+// ============================================================================
+// Section 6: Stack Operations
+// ============================================================================
+
+fn gth_stack_push(stack: &! GthStack, val: i64) -> bool with Mut, Div, Panic {
+    if stack.sp >= GTH_STACK_SIZE {
+        return false
+    }
+    stack.slots[stack.sp as usize] = val
+    stack.sp = stack.sp + 1
+    true
+}
+
+fn gth_stack_pop(stack: &! GthStack) -> i64 with Mut, Div, Panic {
+    if stack.sp <= 0 {
+        return GTH_INVALID
+    }
+    stack.sp = stack.sp - 1
+    stack.slots[stack.sp as usize]
+}
+
+fn gth_stack_peek(stack: &GthStack) -> i64 with Div, Panic {
+    if stack.sp <= 0 {
+        return GTH_INVALID
+    }
+    stack.slots[(stack.sp - 1) as usize]
+}
+
+fn gth_stack_depth(stack: &GthStack) -> i64 {
+    stack.sp
+}
+
+fn gth_stack_reset(stack: &! GthStack) -> i64 with Mut {
+    let old_sp = stack.sp
+    stack.sp = 0
+    old_sp
+}
+
+// ============================================================================
+// Section 7: Ready Queue Operations
+// ============================================================================
+
+fn gth_enqueue(q: &! GthReadyQueue, thread_id: i64) -> bool with Mut, Div, Panic {
+    if q.count >= GTH_MAX_READY {
+        return false
+    }
+    q.thread_ids[q.tail as usize] = thread_id
+    q.tail = (q.tail + 1) % GTH_MAX_READY
+    q.count = q.count + 1
+    true
+}
+
+fn gth_dequeue(q: &! GthReadyQueue) -> i64 with Mut, Div, Panic {
+    if q.count <= 0 {
+        return GTH_INVALID
+    }
+    let tid = q.thread_ids[q.head as usize]
+    q.thread_ids[q.head as usize] = GTH_INVALID
+    q.head = (q.head + 1) % GTH_MAX_READY
+    q.count = q.count - 1
+    tid
+}
+
+fn gth_queue_len(q: &GthReadyQueue) -> i64 {
+    q.count
+}
+
+fn gth_queue_is_empty(q: &GthReadyQueue) -> bool {
+    q.count <= 0
+}
+
+// Priority-aware enqueue: REALTIME and HIGH go to front, others to back.
+// For front insertion we walk backwards from tail to head shifting entries,
+// then place the new id at the head.  For back insertion we use normal enqueue.
+fn gth_enqueue_priority(q: &! GthReadyQueue, thread_id: i64, priority: i64) -> bool with Mut, Div, Panic {
+    if q.count >= GTH_MAX_READY {
+        return false
+    }
+    // REALTIME and HIGH threads jump to front of queue
+    if priority >= GTH_PRIO_HIGH {
+        // Shift everything one slot toward the tail
+        var i: i64 = q.count
+        while i > 0 {
+            let src_idx = (q.head + i - 1) % GTH_MAX_READY
+            let dst_idx = (q.head + i) % GTH_MAX_READY
+            q.thread_ids[dst_idx as usize] = q.thread_ids[src_idx as usize]
+            i = i - 1
+        }
+        q.thread_ids[q.head as usize] = thread_id
+        q.tail = (q.tail + 1) % GTH_MAX_READY
+        q.count = q.count + 1
+        return true
+    }
+    // Normal / low priority goes to back
+    gth_enqueue(q, thread_id)
+}
+
+// ============================================================================
+// Section 8: Thread Lifecycle
+// ============================================================================
+
+fn gth_spawn(sched: &! GthScheduler, func_id: i64, priority: i64) -> i64 with Mut, Div, Panic {
+    if sched.thread_count >= GTH_MAX_THREADS {
+        return GTH_INVALID
+    }
+    let tid = sched.thread_count
+    sched.threads[tid as usize].id = tid
+    sched.threads[tid as usize].state = GTH_STATE_CREATED
+    sched.threads[tid as usize].priority = priority
+    sched.threads[tid as usize].pc = 0
+    sched.threads[tid as usize].func_id = func_id
+    sched.threads[tid as usize].result = 0
+    sched.threads[tid as usize].parent_id = sched.current_thread
+    sched.threads[tid as usize].join_count = 0
+    sched.threads[tid as usize].time_slice = sched.time_quantum
+    sched.threads[tid as usize].ticks_used = 0
+    sched.threads[tid as usize].yield_count = 0
+    sched.threads[tid as usize].stack.sp = 0
+    sched.thread_count = sched.thread_count + 1
+    sched.total_spawns = sched.total_spawns + 1
+    // Enqueue onto ready queue with priority
+    let ok = gth_enqueue_priority(&! sched.ready_queue, tid, priority)
+    sched.threads[tid as usize].state = GTH_STATE_READY
+    tid
+}
+
+fn gth_set_state(sched: &! GthScheduler, thread_id: i64, state: i64) -> bool with Mut, Div, Panic {
+    if thread_id < 0 || thread_id >= sched.thread_count {
+        return false
+    }
+    sched.threads[thread_id as usize].state = state
+    true
+}
+
+fn gth_get_state(sched: &GthScheduler, thread_id: i64) -> i64 with Div, Panic {
+    if thread_id < 0 || thread_id >= sched.thread_count {
+        return GTH_STATE_DEAD
+    }
+    sched.threads[thread_id as usize].state
+}
+
+fn gth_make_ready(sched: &! GthScheduler, thread_id: i64) -> bool with Mut, Div, Panic {
+    if thread_id < 0 || thread_id >= sched.thread_count {
+        return false
+    }
+    let st = sched.threads[thread_id as usize].state
+    if st == GTH_STATE_DONE || st == GTH_STATE_DEAD {
+        return false
+    }
+    sched.threads[thread_id as usize].state = GTH_STATE_READY
+    sched.threads[thread_id as usize].ticks_used = 0
+    let prio = sched.threads[thread_id as usize].priority
+    let ok = gth_enqueue_priority(&! sched.ready_queue, thread_id, prio)
+    true
+}
+
+fn gth_mark_done(sched: &! GthScheduler, thread_id: i64, result: i64) -> bool with Mut, Div, Panic {
+    if thread_id < 0 || thread_id >= sched.thread_count {
+        return false
+    }
+    sched.threads[thread_id as usize].state = GTH_STATE_DONE
+    sched.threads[thread_id as usize].result = result
+    // Unblock any thread that was join-waiting on this one
+    var i: i64 = 0
+    while i < sched.thread_count {
+        if sched.threads[i as usize].state == GTH_STATE_BLOCKED {
+            if sched.threads[i as usize].join_count == thread_id {
+                // The join_count field doubles as "target thread id" for simple join
+                sched.threads[i as usize].state = GTH_STATE_READY
+                sched.threads[i as usize].join_count = 0
+                let prio = sched.threads[i as usize].priority
+                let ok = gth_enqueue_priority(&! sched.ready_queue, i, prio)
+            }
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn gth_kill(sched: &! GthScheduler, thread_id: i64) -> bool with Mut, Div, Panic {
+    if thread_id < 0 || thread_id >= sched.thread_count {
+        return false
+    }
+    sched.threads[thread_id as usize].state = GTH_STATE_DEAD
+    sched.threads[thread_id as usize].stack.sp = 0
+    true
+}
+
+fn gth_is_alive(sched: &GthScheduler, thread_id: i64) -> bool with Div, Panic {
+    if thread_id < 0 || thread_id >= sched.thread_count {
+        return false
+    }
+    let st = sched.threads[thread_id as usize].state
+    st != GTH_STATE_DEAD && st != GTH_STATE_DONE
+}
+
+// ============================================================================
+// Section 9: Scheduling
+// ============================================================================
+
+// Helper: dequeue from the scheduler's ready queue.  Encapsulates the
+// sub-borrow of sched.ready_queue so the caller can continue to use sched.
+fn gth_do_dequeue(sched: &! GthScheduler) -> i64 with Mut, Div, Panic {
+    gth_dequeue(&! sched.ready_queue)
+}
+
+// Helper: re-enqueue a thread onto the scheduler's ready queue with priority.
+fn gth_do_enqueue(sched: &! GthScheduler, thread_id: i64, priority: i64) -> bool with Mut, Div, Panic {
+    gth_enqueue_priority(&! sched.ready_queue, thread_id, priority)
+}
+
+fn gth_schedule_next(sched: &! GthScheduler) -> i64 with Mut, Div, Panic {
+    let next_id = gth_do_dequeue(sched)
+    if next_id == GTH_INVALID {
+        sched.idle_count = sched.idle_count + 1
+        return GTH_INVALID
+    }
+    // Suspend current thread if it is running
+    let cur = sched.current_thread
+    if cur != GTH_INVALID && cur >= 0 && cur < sched.thread_count {
+        if sched.threads[cur as usize].state == GTH_STATE_RUNNING {
+            sched.threads[cur as usize].state = GTH_STATE_READY
+            sched.threads[cur as usize].ticks_used = 0
+            let prio = sched.threads[cur as usize].priority
+            let ok = gth_do_enqueue(sched, cur, prio)
+        }
+    }
+    // Activate next thread
+    sched.threads[next_id as usize].state = GTH_STATE_RUNNING
+    sched.threads[next_id as usize].ticks_used = 0
+    sched.current_thread = next_id
+    sched.total_switches = sched.total_switches + 1
+    next_id
+}
+
+fn gth_yield_current(sched: &! GthScheduler) -> i64 with Mut, Div, Panic {
+    let cur = sched.current_thread
+    if cur != GTH_INVALID && cur >= 0 && cur < sched.thread_count {
+        sched.threads[cur as usize].yield_count = sched.threads[cur as usize].yield_count + 1
+        sched.total_yields = sched.total_yields + 1
+    }
+    gth_schedule_next(sched)
+}
+
+fn gth_preempt_check(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let cur = sched.current_thread
+    if cur == GTH_INVALID || cur < 0 || cur >= sched.thread_count {
+        return false
+    }
+    if sched.threads[cur as usize].state != GTH_STATE_RUNNING {
+        return false
+    }
+    // Check if ticks_used exceeded time_slice
+    if sched.threads[cur as usize].ticks_used >= sched.threads[cur as usize].time_slice {
+        // Preempt: yield current thread
+        let next = gth_yield_current(sched)
+        return true
+    }
+    false
+}
+
+fn gth_tick(sched: &! GthScheduler) -> i64 with Mut, Div, Panic {
+    let cur = sched.current_thread
+    if cur == GTH_INVALID || cur < 0 || cur >= sched.thread_count {
+        // No thread running; try to schedule one
+        let next = gth_schedule_next(sched)
+        return next
+    }
+    if sched.threads[cur as usize].state != GTH_STATE_RUNNING {
+        // Current thread no longer running; schedule next
+        let next = gth_schedule_next(sched)
+        return next
+    }
+    // Increment ticks
+    sched.threads[cur as usize].ticks_used = sched.threads[cur as usize].ticks_used + 1
+    // Check preemption
+    let preempted = gth_preempt_check(sched)
+    sched.current_thread
+}
+
+fn gth_run_until_idle(sched: &! GthScheduler) -> i64 with Mut, Div, Panic {
+    var total_ticks: i64 = 0
+    // Ensure we have a running thread
+    if sched.current_thread == GTH_INVALID {
+        let first = gth_schedule_next(sched)
+        if first == GTH_INVALID {
+            return 0
+        }
+    }
+    // Simulate ticks.  Each iteration we advance one tick.
+    // We stop when the ready queue is empty AND no thread is running.
+    var cont = true
+    while cont {
+        let cur = sched.current_thread
+        if cur == GTH_INVALID {
+            // Try to schedule
+            let next = gth_schedule_next(sched)
+            if next == GTH_INVALID {
+                cont = false
+            }
+        } else {
+            // Simulate the running thread consuming its time slice,
+            // then completing.
+            sched.threads[cur as usize].ticks_used = sched.threads[cur as usize].ticks_used + 1
+            total_ticks = total_ticks + 1
+
+            // After time_slice ticks the thread is considered "done" for
+            // simulation purposes.
+            if sched.threads[cur as usize].ticks_used >= sched.threads[cur as usize].time_slice {
+                let ok = gth_mark_done(sched, cur, cur)
+                sched.current_thread = GTH_INVALID
+                // Try next thread
+                let next = gth_schedule_next(sched)
+                if next == GTH_INVALID {
+                    // Check if any threads are still alive
+                    var any_alive = false
+                    var k: i64 = 0
+                    while k < sched.thread_count {
+                        let st = sched.threads[k as usize].state
+                        if st != GTH_STATE_DONE && st != GTH_STATE_DEAD {
+                            any_alive = true
+                        }
+                        k = k + 1
+                    }
+                    if !any_alive {
+                        cont = false
+                    }
+                }
+            }
+        }
+    }
+    total_ticks
+}
+
+// ============================================================================
+// Section 9b: Thread Information Queries
+// ============================================================================
+
+// Get the priority of a thread.
+fn gth_get_priority(sched: &GthScheduler, thread_id: i64) -> i64 with Div, Panic {
+    if thread_id < 0 || thread_id >= sched.thread_count {
+        return GTH_INVALID
+    }
+    sched.threads[thread_id as usize].priority
+}
+
+// Set the priority of a thread.
+fn gth_set_priority(sched: &! GthScheduler, thread_id: i64, priority: i64) -> bool with Mut, Div, Panic {
+    if thread_id < 0 || thread_id >= sched.thread_count {
+        return false
+    }
+    sched.threads[thread_id as usize].priority = priority
+    true
+}
+
+// Get the func_id of a thread.
+fn gth_get_func_id(sched: &GthScheduler, thread_id: i64) -> i64 with Div, Panic {
+    if thread_id < 0 || thread_id >= sched.thread_count {
+        return GTH_INVALID
+    }
+    sched.threads[thread_id as usize].func_id
+}
+
+// Get the parent_id of a thread.
+fn gth_get_parent_id(sched: &GthScheduler, thread_id: i64) -> i64 with Div, Panic {
+    if thread_id < 0 || thread_id >= sched.thread_count {
+        return GTH_INVALID
+    }
+    sched.threads[thread_id as usize].parent_id
+}
+
+// Get the ticks_used of a thread.
+fn gth_get_ticks_used(sched: &GthScheduler, thread_id: i64) -> i64 with Div, Panic {
+    if thread_id < 0 || thread_id >= sched.thread_count {
+        return 0
+    }
+    sched.threads[thread_id as usize].ticks_used
+}
+
+// Get the yield_count of a thread.
+fn gth_get_yield_count(sched: &GthScheduler, thread_id: i64) -> i64 with Div, Panic {
+    if thread_id < 0 || thread_id >= sched.thread_count {
+        return 0
+    }
+    sched.threads[thread_id as usize].yield_count
+}
+
+// Get the program counter of a thread.
+fn gth_get_pc(sched: &GthScheduler, thread_id: i64) -> i64 with Div, Panic {
+    if thread_id < 0 || thread_id >= sched.thread_count {
+        return GTH_INVALID
+    }
+    sched.threads[thread_id as usize].pc
+}
+
+// Set the program counter of a thread.
+fn gth_set_pc(sched: &! GthScheduler, thread_id: i64, pc: i64) -> bool with Mut, Div, Panic {
+    if thread_id < 0 || thread_id >= sched.thread_count {
+        return false
+    }
+    sched.threads[thread_id as usize].pc = pc
+    true
+}
+
+// Get the time_slice of a thread.
+fn gth_get_time_slice(sched: &GthScheduler, thread_id: i64) -> i64 with Div, Panic {
+    if thread_id < 0 || thread_id >= sched.thread_count {
+        return 0
+    }
+    sched.threads[thread_id as usize].time_slice
+}
+
+// Set the time_slice of a thread.
+fn gth_set_time_slice(sched: &! GthScheduler, thread_id: i64, ts: i64) -> bool with Mut, Div, Panic {
+    if thread_id < 0 || thread_id >= sched.thread_count {
+        return false
+    }
+    sched.threads[thread_id as usize].time_slice = ts
+    true
+}
+
+// Return the id of the currently running thread (or GTH_INVALID if none).
+fn gth_current(sched: &GthScheduler) -> i64 {
+    sched.current_thread
+}
+
+// Set the global time quantum for newly spawned threads.
+fn gth_set_quantum(sched: &! GthScheduler, quantum: i64) -> i64 with Mut {
+    let old = sched.time_quantum
+    sched.time_quantum = quantum
+    old
+}
+
+// Count how many threads have a specific state.
+fn gth_count_by_state(sched: &GthScheduler, state: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < sched.thread_count {
+        if sched.threads[i as usize].state == state {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Count how many threads have a specific priority (among alive threads).
+fn gth_count_by_priority(sched: &GthScheduler, priority: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < sched.thread_count {
+        let st = sched.threads[i as usize].state
+        if st != GTH_STATE_DEAD && st != GTH_STATE_DONE {
+            if sched.threads[i as usize].priority == priority {
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Find the first thread with a given state, or GTH_INVALID if none.
+fn gth_find_by_state(sched: &GthScheduler, state: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < sched.thread_count {
+        if sched.threads[i as usize].state == state {
+            return i
+        }
+        i = i + 1
+    }
+    GTH_INVALID
+}
+
+// Check if a thread is the current running thread.
+fn gth_is_current(sched: &GthScheduler, thread_id: i64) -> bool {
+    sched.current_thread == thread_id
+}
+
+// Reset a thread for re-use (set to CREATED state, clear stack and counters).
+fn gth_reset_thread(sched: &! GthScheduler, thread_id: i64) -> bool with Mut, Div, Panic {
+    if thread_id < 0 || thread_id >= sched.thread_count {
+        return false
+    }
+    let st = sched.threads[thread_id as usize].state
+    // Only reset dead or done threads
+    if st != GTH_STATE_DEAD && st != GTH_STATE_DONE {
+        return false
+    }
+    sched.threads[thread_id as usize].state = GTH_STATE_CREATED
+    sched.threads[thread_id as usize].pc = 0
+    sched.threads[thread_id as usize].result = 0
+    sched.threads[thread_id as usize].join_count = 0
+    sched.threads[thread_id as usize].ticks_used = 0
+    sched.threads[thread_id as usize].yield_count = 0
+    sched.threads[thread_id as usize].stack.sp = 0
+    true
+}
+
+// Suspend a running thread (move to SLEEPING state).
+fn gth_suspend(sched: &! GthScheduler, thread_id: i64) -> bool with Mut, Div, Panic {
+    if thread_id < 0 || thread_id >= sched.thread_count {
+        return false
+    }
+    let st = sched.threads[thread_id as usize].state
+    if st != GTH_STATE_RUNNING && st != GTH_STATE_READY {
+        return false
+    }
+    sched.threads[thread_id as usize].state = GTH_STATE_SLEEPING
+    true
+}
+
+// Resume a sleeping thread back to ready.
+fn gth_resume(sched: &! GthScheduler, thread_id: i64) -> bool with Mut, Div, Panic {
+    if thread_id < 0 || thread_id >= sched.thread_count {
+        return false
+    }
+    if sched.threads[thread_id as usize].state != GTH_STATE_SLEEPING {
+        return false
+    }
+    sched.threads[thread_id as usize].state = GTH_STATE_READY
+    sched.threads[thread_id as usize].ticks_used = 0
+    let prio = sched.threads[thread_id as usize].priority
+    let ok = gth_enqueue_priority(&! sched.ready_queue, thread_id, prio)
+    true
+}
+
+// Compute total yield count across all threads.
+fn gth_total_yields_all(sched: &GthScheduler) -> i64 with Mut, Div, Panic {
+    var total: i64 = 0
+    var i: i64 = 0
+    while i < sched.thread_count {
+        total = total + sched.threads[i as usize].yield_count
+        i = i + 1
+    }
+    total
+}
+
+// Compute total ticks consumed across all threads.
+fn gth_total_ticks_all(sched: &GthScheduler) -> i64 with Mut, Div, Panic {
+    var total: i64 = 0
+    var i: i64 = 0
+    while i < sched.thread_count {
+        total = total + sched.threads[i as usize].ticks_used
+        i = i + 1
+    }
+    total
+}
+
+// ============================================================================
+// Section 9c: Queue Inspection Utilities
+// ============================================================================
+
+// Check whether a thread_id is currently in the ready queue.
+fn gth_queue_contains(q: &GthReadyQueue, thread_id: i64) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < q.count {
+        let idx = (q.head + i) % GTH_MAX_READY
+        if q.thread_ids[idx as usize] == thread_id {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Peek at the front of the ready queue without removing.
+fn gth_queue_peek(q: &GthReadyQueue) -> i64 with Div, Panic {
+    if q.count <= 0 {
+        return GTH_INVALID
+    }
+    q.thread_ids[q.head as usize]
+}
+
+// Clear all entries in the ready queue.
+fn gth_queue_clear(q: &! GthReadyQueue) -> i64 with Mut {
+    let old_count = q.count
+    q.count = 0
+    q.head = 0
+    q.tail = 0
+    old_count
+}
+
+// ============================================================================
+// Section 9d: Channel Inspection Utilities
+// ============================================================================
+
+// Get total messages sent on a channel.
+fn gth_channel_send_count(sched: &GthScheduler, ch_id: i64) -> i64 with Div, Panic {
+    if ch_id < 0 || ch_id >= sched.channel_count {
+        return 0
+    }
+    sched.channels[ch_id as usize].sender_count
+}
+
+// Get total messages received from a channel.
+fn gth_channel_recv_count(sched: &GthScheduler, ch_id: i64) -> i64 with Div, Panic {
+    if ch_id < 0 || ch_id >= sched.channel_count {
+        return 0
+    }
+    sched.channels[ch_id as usize].receiver_count
+}
+
+// Get the capacity of a channel.
+fn gth_channel_capacity(sched: &GthScheduler, ch_id: i64) -> i64 with Div, Panic {
+    if ch_id < 0 || ch_id >= sched.channel_count {
+        return 0
+    }
+    sched.channels[ch_id as usize].capacity
+}
+
+// Check if channel is empty.
+fn gth_channel_is_empty(sched: &GthScheduler, ch_id: i64) -> bool with Div, Panic {
+    if ch_id < 0 || ch_id >= sched.channel_count {
+        return true
+    }
+    sched.channels[ch_id as usize].buf_count <= 0
+}
+
+// Drain all messages from a channel (discard them).  Returns count drained.
+fn gth_channel_drain(sched: &! GthScheduler, ch_id: i64) -> i64 with Mut, Div, Panic {
+    if ch_id < 0 || ch_id >= sched.channel_count {
+        return 0
+    }
+    var drained: i64 = 0
+    var cont = true
+    while cont {
+        if sched.channels[ch_id as usize].buf_count <= 0 {
+            cont = false
+        } else {
+            let msg = gth_channel_recv(sched, ch_id)
+            drained = drained + 1
+        }
+    }
+    drained
+}
+
+// ============================================================================
+// Section 10: Join / Wait
+// ============================================================================
+
+fn gth_join(sched: &! GthScheduler, waiter: i64, target: i64) -> bool with Mut, Div, Panic {
+    if waiter < 0 || waiter >= sched.thread_count {
+        return false
+    }
+    if target < 0 || target >= sched.thread_count {
+        return false
+    }
+    // If target is already done, no need to block
+    let target_state = sched.threads[target as usize].state
+    if target_state == GTH_STATE_DONE || target_state == GTH_STATE_DEAD {
+        return true
+    }
+    // Block the waiter
+    sched.threads[waiter as usize].state = GTH_STATE_BLOCKED
+    // Store target thread id in join_count so mark_done can find us
+    sched.threads[waiter as usize].join_count = target
+    true
+}
+
+fn gth_try_join(sched: &GthScheduler, target: i64) -> bool with Div, Panic {
+    if target < 0 || target >= sched.thread_count {
+        return false
+    }
+    let st = sched.threads[target as usize].state
+    st == GTH_STATE_DONE || st == GTH_STATE_DEAD
+}
+
+fn gth_get_result(sched: &GthScheduler, thread_id: i64) -> i64 with Div, Panic {
+    if thread_id < 0 || thread_id >= sched.thread_count {
+        return GTH_INVALID
+    }
+    sched.threads[thread_id as usize].result
+}
+
+fn gth_wait_all(sched: &! GthScheduler, thread_ids: [i64; 1024], count: i64) -> bool with Mut, Div, Panic {
+    var all_done = true
+    var i: i64 = 0
+    while i < count {
+        let tid = thread_ids[i as usize]
+        if tid >= 0 && tid < sched.thread_count {
+            let st = sched.threads[tid as usize].state
+            if st != GTH_STATE_DONE && st != GTH_STATE_DEAD {
+                all_done = false
+            }
+        }
+        i = i + 1
+    }
+    all_done
+}
+
+// ============================================================================
+// Section 11: Channels
+// ============================================================================
+
+fn gth_channel_create(sched: &! GthScheduler, capacity: i64) -> i64 with Mut, Div, Panic {
+    if sched.channel_count >= GTH_MAX_CHANNELS {
+        return GTH_INVALID
+    }
+    let ch_id = sched.channel_count
+    sched.channels[ch_id as usize].id = ch_id
+    sched.channels[ch_id as usize].buf_count = 0
+    sched.channels[ch_id as usize].buf_head = 0
+    sched.channels[ch_id as usize].buf_tail = 0
+    sched.channels[ch_id as usize].closed = false
+    sched.channels[ch_id as usize].sender_count = 0
+    sched.channels[ch_id as usize].receiver_count = 0
+    // Clamp capacity to max buffer size
+    if capacity > GTH_MAX_CHANNEL_BUF {
+        sched.channels[ch_id as usize].capacity = GTH_MAX_CHANNEL_BUF
+    } else {
+        if capacity <= 0 {
+            sched.channels[ch_id as usize].capacity = 1
+        } else {
+            sched.channels[ch_id as usize].capacity = capacity
+        }
+    }
+    sched.channel_count = sched.channel_count + 1
+    ch_id
+}
+
+fn gth_channel_send(sched: &! GthScheduler, ch_id: i64, msg: GthMessage) -> bool with Mut, Div, Panic {
+    if ch_id < 0 || ch_id >= sched.channel_count {
+        return false
+    }
+    if sched.channels[ch_id as usize].closed {
+        return false
+    }
+    if sched.channels[ch_id as usize].buf_count >= sched.channels[ch_id as usize].capacity {
+        return false
+    }
+    let tail = sched.channels[ch_id as usize].buf_tail
+    sched.channels[ch_id as usize].buffer[tail as usize] = msg
+    sched.channels[ch_id as usize].buf_tail = (tail + 1) % GTH_MAX_CHANNEL_BUF
+    sched.channels[ch_id as usize].buf_count = sched.channels[ch_id as usize].buf_count + 1
+    sched.channels[ch_id as usize].sender_count = sched.channels[ch_id as usize].sender_count + 1
+    true
+}
+
+fn gth_channel_recv(sched: &! GthScheduler, ch_id: i64) -> GthMessage with Mut, Div, Panic {
+    if ch_id < 0 || ch_id >= sched.channel_count {
+        return gth_empty_message()
+    }
+    if sched.channels[ch_id as usize].buf_count <= 0 {
+        return gth_empty_message()
+    }
+    let head = sched.channels[ch_id as usize].buf_head
+    let msg = sched.channels[ch_id as usize].buffer[head as usize]
+    sched.channels[ch_id as usize].buffer[head as usize] = gth_empty_message()
+    sched.channels[ch_id as usize].buf_head = (head + 1) % GTH_MAX_CHANNEL_BUF
+    sched.channels[ch_id as usize].buf_count = sched.channels[ch_id as usize].buf_count - 1
+    sched.channels[ch_id as usize].receiver_count = sched.channels[ch_id as usize].receiver_count + 1
+    msg
+}
+
+fn gth_channel_try_recv(sched: &GthScheduler, ch_id: i64) -> GthMessage with Div, Panic {
+    if ch_id < 0 || ch_id >= sched.channel_count {
+        return gth_empty_message()
+    }
+    if sched.channels[ch_id as usize].buf_count <= 0 {
+        return gth_empty_message()
+    }
+    let head = sched.channels[ch_id as usize].buf_head
+    sched.channels[ch_id as usize].buffer[head as usize]
+}
+
+fn gth_channel_close(sched: &! GthScheduler, ch_id: i64) -> bool with Mut, Div, Panic {
+    if ch_id < 0 || ch_id >= sched.channel_count {
+        return false
+    }
+    sched.channels[ch_id as usize].closed = true
+    true
+}
+
+fn gth_channel_is_closed(sched: &GthScheduler, ch_id: i64) -> bool with Div, Panic {
+    if ch_id < 0 || ch_id >= sched.channel_count {
+        return true
+    }
+    sched.channels[ch_id as usize].closed
+}
+
+fn gth_channel_len(sched: &GthScheduler, ch_id: i64) -> i64 with Div, Panic {
+    if ch_id < 0 || ch_id >= sched.channel_count {
+        return 0
+    }
+    sched.channels[ch_id as usize].buf_count
+}
+
+fn gth_channel_is_full(sched: &GthScheduler, ch_id: i64) -> bool with Div, Panic {
+    if ch_id < 0 || ch_id >= sched.channel_count {
+        return true
+    }
+    sched.channels[ch_id as usize].buf_count >= sched.channels[ch_id as usize].capacity
+}
+
+// ============================================================================
+// Section 12: Statistics
+// ============================================================================
+
+fn gth_active_count(sched: &GthScheduler) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < sched.thread_count {
+        let st = sched.threads[i as usize].state
+        if st != GTH_STATE_DEAD && st != GTH_STATE_DONE {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+fn gth_ready_count(sched: &GthScheduler) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < sched.thread_count {
+        if sched.threads[i as usize].state == GTH_STATE_READY {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+fn gth_blocked_count(sched: &GthScheduler) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < sched.thread_count {
+        if sched.threads[i as usize].state == GTH_STATE_BLOCKED {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+fn gth_done_count(sched: &GthScheduler) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < sched.thread_count {
+        if sched.threads[i as usize].state == GTH_STATE_DONE {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+struct GthSchedStats {
+    total_threads: i64,
+    active: i64,
+    ready: i64,
+    blocked: i64,
+    done: i64,
+    switches: i64,
+    yields: i64,
+    spawns: i64,
+}
+
+fn gth_stats(sched: &GthScheduler) -> GthSchedStats with Mut, Div, Panic {
+    GthSchedStats {
+        total_threads: sched.thread_count,
+        active: gth_active_count(sched),
+        ready: gth_ready_count(sched),
+        blocked: gth_blocked_count(sched),
+        done: gth_done_count(sched),
+        switches: sched.total_switches,
+        yields: sched.total_yields,
+        spawns: sched.total_spawns,
+    }
+}
+
+// ============================================================================
+// Section 13: Tests
+// ============================================================================
+
+// ---------------------------------------------------------------------------
+// Stack operations — T01: push and pop
+// ---------------------------------------------------------------------------
+fn test_gth_stack_push_pop_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    // Spawn a thread so we have a stack to work with
+    let tid = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let ok1 = gth_stack_push(&! sched.threads[0 as usize].stack, 42)
+    let ok2 = gth_stack_push(&! sched.threads[0 as usize].stack, 99)
+    let v1 = gth_stack_pop(&! sched.threads[0 as usize].stack)
+    let v2 = gth_stack_pop(&! sched.threads[0 as usize].stack)
+    ok1 && ok2 && v1 == 99 && v2 == 42
+}
+fn test_gth_stack_push_pop() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_stack_push_pop_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Stack operations — T02: peek without pop
+// ---------------------------------------------------------------------------
+fn test_gth_stack_peek_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let tid = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let ok1 = gth_stack_push(&! sched.threads[0 as usize].stack, 77)
+    let peeked = gth_stack_peek(&sched.threads[0 as usize].stack)
+    let depth = gth_stack_depth(&sched.threads[0 as usize].stack)
+    peeked == 77 && depth == 1
+}
+fn test_gth_stack_peek() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_stack_peek_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Stack operations — T03: pop empty stack returns GTH_INVALID
+// ---------------------------------------------------------------------------
+fn test_gth_stack_empty_pop_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let tid = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let v = gth_stack_pop(&! sched.threads[0 as usize].stack)
+    v == GTH_INVALID
+}
+fn test_gth_stack_empty_pop() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_stack_empty_pop_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Stack operations — T04: peek empty stack returns GTH_INVALID
+// ---------------------------------------------------------------------------
+fn test_gth_stack_empty_peek_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let tid = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let v = gth_stack_peek(&sched.threads[0 as usize].stack)
+    v == GTH_INVALID
+}
+fn test_gth_stack_empty_peek() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_stack_empty_peek_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Stack operations — T05: stack reset
+// ---------------------------------------------------------------------------
+fn test_gth_stack_reset_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let tid = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let ok1 = gth_stack_push(&! sched.threads[0 as usize].stack, 1)
+    let ok2 = gth_stack_push(&! sched.threads[0 as usize].stack, 2)
+    let ok3 = gth_stack_push(&! sched.threads[0 as usize].stack, 3)
+    let old_sp = gth_stack_reset(&! sched.threads[0 as usize].stack)
+    let new_depth = gth_stack_depth(&sched.threads[0 as usize].stack)
+    old_sp == 3 && new_depth == 0
+}
+fn test_gth_stack_reset() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_stack_reset_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Ready queue — T06: enqueue and dequeue order (FIFO)
+// ---------------------------------------------------------------------------
+fn test_gth_queue_fifo_sub(q: &! GthReadyQueue) -> bool with Mut, Div, Panic {
+    let ok1 = gth_enqueue(q, 10)
+    let ok2 = gth_enqueue(q, 20)
+    let ok3 = gth_enqueue(q, 30)
+    let v1 = gth_dequeue(q)
+    let v2 = gth_dequeue(q)
+    let v3 = gth_dequeue(q)
+    v1 == 10 && v2 == 20 && v3 == 30
+}
+fn test_gth_queue_fifo_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    var q = gth_empty_ready_queue()
+    test_gth_queue_fifo_sub(&! q)
+}
+fn test_gth_queue_fifo() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_queue_fifo_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Ready queue — T07: dequeue empty returns GTH_INVALID
+// ---------------------------------------------------------------------------
+fn test_gth_queue_empty_dequeue_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    var q = gth_empty_ready_queue()
+    let v = gth_dequeue(&! q)
+    v == GTH_INVALID
+}
+fn test_gth_queue_empty_dequeue() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_queue_empty_dequeue_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Ready queue — T08: queue length tracking
+// ---------------------------------------------------------------------------
+fn test_gth_queue_len_sub(q: &! GthReadyQueue) -> bool with Mut, Div, Panic {
+    let ok1 = gth_queue_is_empty(q)
+    let ok2 = gth_enqueue(q, 5)
+    let ok3 = gth_enqueue(q, 6)
+    let len = gth_queue_len(q)
+    let not_empty = !gth_queue_is_empty(q)
+    ok1 && len == 2 && not_empty
+}
+fn test_gth_queue_len_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    var q = gth_empty_ready_queue()
+    test_gth_queue_len_sub(&! q)
+}
+fn test_gth_queue_len() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_queue_len_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Ready queue — T09: priority enqueue (high goes to front)
+// ---------------------------------------------------------------------------
+fn test_gth_queue_priority_sub(q: &! GthReadyQueue) -> bool with Mut, Div, Panic {
+    let ok1 = gth_enqueue_priority(q, 100, GTH_PRIO_LOW)
+    let ok2 = gth_enqueue_priority(q, 200, GTH_PRIO_NORMAL)
+    let ok3 = gth_enqueue_priority(q, 300, GTH_PRIO_HIGH)
+    // 300 (HIGH) should be at front
+    let v1 = gth_dequeue(q)
+    let v2 = gth_dequeue(q)
+    let v3 = gth_dequeue(q)
+    v1 == 300 && v2 == 100 && v3 == 200
+}
+fn test_gth_queue_priority_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    var q = gth_empty_ready_queue()
+    test_gth_queue_priority_sub(&! q)
+}
+fn test_gth_queue_priority() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_queue_priority_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Ready queue — T10: enqueue wrap-around (circular buffer)
+// ---------------------------------------------------------------------------
+fn test_gth_queue_wrap_sub(q: &! GthReadyQueue) -> bool with Mut, Div, Panic {
+    // Fill and drain a few times to advance head/tail
+    var r: i64 = 0
+    while r < 5 {
+        let ok = gth_enqueue(q, r)
+        r = r + 1
+    }
+    var d: i64 = 0
+    while d < 5 {
+        let v = gth_dequeue(q)
+        d = d + 1
+    }
+    // Now head and tail are at offset 5; enqueue more
+    let ok1 = gth_enqueue(q, 50)
+    let ok2 = gth_enqueue(q, 60)
+    let v1 = gth_dequeue(q)
+    let v2 = gth_dequeue(q)
+    v1 == 50 && v2 == 60 && gth_queue_is_empty(q)
+}
+fn test_gth_queue_wrap_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    var q = gth_empty_ready_queue()
+    test_gth_queue_wrap_sub(&! q)
+}
+fn test_gth_queue_wrap() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_queue_wrap_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Thread spawn/lifecycle — T11: spawn creates thread with READY state
+// ---------------------------------------------------------------------------
+fn test_gth_spawn_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let tid = gth_spawn(sched, 42, GTH_PRIO_NORMAL)
+    let ok1 = tid == 0
+    let ok2 = sched.thread_count == 1
+    let ok3 = sched.threads[0 as usize].state == GTH_STATE_READY
+    let ok4 = sched.threads[0 as usize].func_id == 42
+    let ok5 = sched.threads[0 as usize].priority == GTH_PRIO_NORMAL
+    ok1 && ok2 && ok3 && ok4 && ok5
+}
+fn test_gth_spawn() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_spawn_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Thread spawn/lifecycle — T12: spawn multiple threads
+// ---------------------------------------------------------------------------
+fn test_gth_spawn_multiple_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t0 = gth_spawn(sched, 10, GTH_PRIO_LOW)
+    let t1 = gth_spawn(sched, 20, GTH_PRIO_NORMAL)
+    let t2 = gth_spawn(sched, 30, GTH_PRIO_HIGH)
+    let ok1 = t0 == 0 && t1 == 1 && t2 == 2
+    let ok2 = sched.thread_count == 3
+    let ok3 = sched.threads[0 as usize].priority == GTH_PRIO_LOW
+    let ok4 = sched.threads[1 as usize].priority == GTH_PRIO_NORMAL
+    let ok5 = sched.threads[2 as usize].priority == GTH_PRIO_HIGH
+    ok1 && ok2 && ok3 && ok4 && ok5
+}
+fn test_gth_spawn_multiple() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_spawn_multiple_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Thread spawn/lifecycle — T13: set and get state
+// ---------------------------------------------------------------------------
+fn test_gth_state_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let tid = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let ok1 = gth_get_state(sched, tid) == GTH_STATE_READY
+    let ok2 = gth_set_state(sched, tid, GTH_STATE_BLOCKED)
+    let ok3 = gth_get_state(sched, tid) == GTH_STATE_BLOCKED
+    ok1 && ok2 && ok3
+}
+fn test_gth_state() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_state_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Thread spawn/lifecycle — T14: kill a thread
+// ---------------------------------------------------------------------------
+fn test_gth_kill_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let tid = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let ok1 = gth_is_alive(sched, tid)
+    let ok2 = gth_kill(sched, tid)
+    let ok3 = !gth_is_alive(sched, tid)
+    let ok4 = gth_get_state(sched, tid) == GTH_STATE_DEAD
+    ok1 && ok2 && ok3 && ok4
+}
+fn test_gth_kill() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_kill_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Thread spawn/lifecycle — T15: mark done with result
+// ---------------------------------------------------------------------------
+fn test_gth_mark_done_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let tid = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let ok1 = gth_mark_done(sched, tid, 42)
+    let ok2 = gth_get_state(sched, tid) == GTH_STATE_DONE
+    let ok3 = gth_get_result(sched, tid) == 42
+    let ok4 = !gth_is_alive(sched, tid)
+    ok1 && ok2 && ok3 && ok4
+}
+fn test_gth_mark_done() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_mark_done_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Scheduling/yield — T16: schedule_next picks from ready queue
+// ---------------------------------------------------------------------------
+fn test_gth_schedule_next_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let t1 = gth_spawn(sched, 2, GTH_PRIO_NORMAL)
+    let next = gth_schedule_next(sched)
+    let ok1 = next == t0
+    let ok2 = sched.current_thread == t0
+    let ok3 = sched.threads[t0 as usize].state == GTH_STATE_RUNNING
+    ok1 && ok2 && ok3
+}
+fn test_gth_schedule_next() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_schedule_next_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Scheduling/yield — T17: yield rotates to next thread
+// ---------------------------------------------------------------------------
+fn test_gth_yield_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let t1 = gth_spawn(sched, 2, GTH_PRIO_NORMAL)
+    // Schedule t0 as running
+    let first = gth_schedule_next(sched)
+    let ok1 = sched.current_thread == t0
+    // Yield -> should switch to t1
+    let next = gth_yield_current(sched)
+    let ok2 = sched.current_thread == t1
+    let ok3 = sched.total_yields == 1
+    ok1 && ok2 && ok3
+}
+fn test_gth_yield() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_yield_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Scheduling/yield — T18: schedule with empty queue returns GTH_INVALID
+// ---------------------------------------------------------------------------
+fn test_gth_schedule_empty_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let next = gth_schedule_next(sched)
+    next == GTH_INVALID
+}
+fn test_gth_schedule_empty() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_schedule_empty_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Scheduling/yield — T19: total switches increment
+// ---------------------------------------------------------------------------
+fn test_gth_switches_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let t1 = gth_spawn(sched, 2, GTH_PRIO_NORMAL)
+    let s0 = sched.total_switches
+    let first = gth_schedule_next(sched)
+    let s1 = sched.total_switches
+    let next = gth_yield_current(sched)
+    let s2 = sched.total_switches
+    s0 == 0 && s1 == 1 && s2 == 2
+}
+fn test_gth_switches() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_switches_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Scheduling/yield — T20: yield count per thread
+// ---------------------------------------------------------------------------
+fn test_gth_yield_count_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let t1 = gth_spawn(sched, 2, GTH_PRIO_NORMAL)
+    let first = gth_schedule_next(sched)
+    let yc_before = sched.threads[t0 as usize].yield_count
+    let next = gth_yield_current(sched)
+    let yc_after = sched.threads[t0 as usize].yield_count
+    yc_before == 0 && yc_after == 1
+}
+fn test_gth_yield_count() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_yield_count_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Preemption — T21: ticks_used increments
+// ---------------------------------------------------------------------------
+fn test_gth_tick_increment_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let first = gth_schedule_next(sched)
+    let ticks_before = sched.threads[t0 as usize].ticks_used
+    let cur = gth_tick(sched)
+    let ticks_after = sched.threads[t0 as usize].ticks_used
+    ticks_before == 0 && ticks_after == 1
+}
+fn test_gth_tick_increment() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_tick_increment_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Preemption — T22: no preempt before time slice expires
+// ---------------------------------------------------------------------------
+fn test_gth_no_preempt_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let t1 = gth_spawn(sched, 2, GTH_PRIO_NORMAL)
+    let first = gth_schedule_next(sched)
+    // Tick a few times, should not preempt
+    var i: i64 = 0
+    while i < 5 {
+        let cur = gth_tick(sched)
+        i = i + 1
+    }
+    // Still on t0
+    sched.current_thread == t0
+}
+fn test_gth_no_preempt() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_no_preempt_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Preemption — T23: preempt after time slice
+// ---------------------------------------------------------------------------
+fn test_gth_preempt_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    // Set a short time slice
+    sched.time_quantum = 3
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let t1 = gth_spawn(sched, 2, GTH_PRIO_NORMAL)
+    // Override time_slice on spawned threads
+    sched.threads[t0 as usize].time_slice = 3
+    sched.threads[t1 as usize].time_slice = 3
+    let first = gth_schedule_next(sched)
+    let ok1 = sched.current_thread == t0
+    // Tick 3 times to exceed time slice
+    var i: i64 = 0
+    while i < 3 {
+        let cur = gth_tick(sched)
+        i = i + 1
+    }
+    // After 3 ticks, should have preempted to t1
+    sched.current_thread == t1
+}
+fn test_gth_preempt() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_preempt_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Preemption — T24: preempt_check returns false when under budget
+// ---------------------------------------------------------------------------
+fn test_gth_preempt_check_false_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let first = gth_schedule_next(sched)
+    sched.threads[t0 as usize].ticks_used = 2
+    sched.threads[t0 as usize].time_slice = 100
+    let preempted = gth_preempt_check(sched)
+    !preempted
+}
+fn test_gth_preempt_check_false() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_preempt_check_false_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Preemption — T25: preempt_check returns true when over budget
+// ---------------------------------------------------------------------------
+fn test_gth_preempt_check_true_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let t1 = gth_spawn(sched, 2, GTH_PRIO_NORMAL)
+    let first = gth_schedule_next(sched)
+    sched.threads[t0 as usize].ticks_used = 100
+    sched.threads[t0 as usize].time_slice = 100
+    let preempted = gth_preempt_check(sched)
+    preempted
+}
+fn test_gth_preempt_check_true() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_preempt_check_true_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Join/wait — T26: join on already-done thread succeeds immediately
+// ---------------------------------------------------------------------------
+fn test_gth_join_done_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let t1 = gth_spawn(sched, 2, GTH_PRIO_NORMAL)
+    let ok1 = gth_mark_done(sched, t1, 99)
+    // t0 joins on t1 which is already done
+    let ok2 = gth_join(sched, t0, t1)
+    // t0 should NOT be blocked since t1 is done
+    let ok3 = sched.threads[t0 as usize].state == GTH_STATE_READY
+    ok1 && ok2 && ok3
+}
+fn test_gth_join_done() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_join_done_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Join/wait — T27: join blocks waiter on running thread
+// ---------------------------------------------------------------------------
+fn test_gth_join_blocks_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let t1 = gth_spawn(sched, 2, GTH_PRIO_NORMAL)
+    // t0 joins on t1 which is still READY (not done)
+    let ok1 = gth_join(sched, t0, t1)
+    // t0 should now be BLOCKED
+    let ok2 = sched.threads[t0 as usize].state == GTH_STATE_BLOCKED
+    ok1 && ok2
+}
+fn test_gth_join_blocks() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_join_blocks_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Join/wait — T28: mark_done unblocks joiners
+// ---------------------------------------------------------------------------
+fn test_gth_join_unblock_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let t1 = gth_spawn(sched, 2, GTH_PRIO_NORMAL)
+    // t0 joins on t1
+    let ok1 = gth_join(sched, t0, t1)
+    let ok2 = sched.threads[t0 as usize].state == GTH_STATE_BLOCKED
+    // Now mark t1 as done -> should unblock t0
+    let ok3 = gth_mark_done(sched, t1, 55)
+    let ok4 = sched.threads[t0 as usize].state == GTH_STATE_READY
+    ok1 && ok2 && ok3 && ok4
+}
+fn test_gth_join_unblock() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_join_unblock_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Join/wait — T29: try_join
+// ---------------------------------------------------------------------------
+fn test_gth_try_join_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let ok1 = !gth_try_join(sched, t0)
+    let ok2 = gth_mark_done(sched, t0, 10)
+    let ok3 = gth_try_join(sched, t0)
+    ok1 && ok2 && ok3
+}
+fn test_gth_try_join() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_try_join_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Join/wait — T30: get_result on invalid thread
+// ---------------------------------------------------------------------------
+fn test_gth_get_result_invalid_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let r = gth_get_result(sched, 999)
+    r == GTH_INVALID
+}
+fn test_gth_get_result_invalid() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_get_result_invalid_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Channels basic — T31: create channel
+// ---------------------------------------------------------------------------
+fn test_gth_channel_create_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let ch = gth_channel_create(sched, 10)
+    let ok1 = ch == 0
+    let ok2 = sched.channel_count == 1
+    let ok3 = sched.channels[0 as usize].capacity == 10
+    let ok4 = !gth_channel_is_closed(sched, ch)
+    ok1 && ok2 && ok3 && ok4
+}
+fn test_gth_channel_create() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_channel_create_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Channels basic — T32: channel capacity clamping
+// ---------------------------------------------------------------------------
+fn test_gth_channel_cap_clamp_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let ch1 = gth_channel_create(sched, 0)
+    let ok1 = sched.channels[ch1 as usize].capacity == 1
+    let ch2 = gth_channel_create(sched, 999)
+    let ok2 = sched.channels[ch2 as usize].capacity == GTH_MAX_CHANNEL_BUF
+    ok1 && ok2
+}
+fn test_gth_channel_cap_clamp() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_channel_cap_clamp_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Channels basic — T33: close channel
+// ---------------------------------------------------------------------------
+fn test_gth_channel_close_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let ch = gth_channel_create(sched, 10)
+    let ok1 = !gth_channel_is_closed(sched, ch)
+    let ok2 = gth_channel_close(sched, ch)
+    let ok3 = gth_channel_is_closed(sched, ch)
+    ok1 && ok2 && ok3
+}
+fn test_gth_channel_close() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_channel_close_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Channels basic — T34: channel len starts at zero
+// ---------------------------------------------------------------------------
+fn test_gth_channel_empty_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let ch = gth_channel_create(sched, 10)
+    let ok1 = gth_channel_len(sched, ch) == 0
+    let ok2 = !gth_channel_is_full(sched, ch)
+    ok1 && ok2
+}
+fn test_gth_channel_empty() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_channel_empty_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Channels basic — T35: channel_is_full
+// ---------------------------------------------------------------------------
+fn test_gth_channel_full_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let ch = gth_channel_create(sched, 2)
+    let msg1 = GthMessage { value: 1, sender_id: 0, tag: 0 }
+    let msg2 = GthMessage { value: 2, sender_id: 0, tag: 0 }
+    let ok1 = gth_channel_send(sched, ch, msg1)
+    let ok2 = !gth_channel_is_full(sched, ch)
+    let ok3 = gth_channel_send(sched, ch, msg2)
+    let ok4 = gth_channel_is_full(sched, ch)
+    ok1 && ok2 && ok3 && ok4
+}
+fn test_gth_channel_full() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_channel_full_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Channel send/recv — T36: send and recv basic
+// ---------------------------------------------------------------------------
+fn test_gth_channel_send_recv_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let ch = gth_channel_create(sched, 10)
+    let msg = GthMessage { value: 42, sender_id: 5, tag: 7 }
+    let ok1 = gth_channel_send(sched, ch, msg)
+    let ok2 = gth_channel_len(sched, ch) == 1
+    let received = gth_channel_recv(sched, ch)
+    let ok3 = received.value == 42
+    let ok4 = received.sender_id == 5
+    let ok5 = received.tag == 7
+    let ok6 = gth_channel_len(sched, ch) == 0
+    ok1 && ok2 && ok3 && ok4 && ok5 && ok6
+}
+fn test_gth_channel_send_recv() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_channel_send_recv_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Channel send/recv — T37: FIFO order on channel
+// ---------------------------------------------------------------------------
+fn test_gth_channel_fifo_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let ch = gth_channel_create(sched, 10)
+    let m1 = GthMessage { value: 10, sender_id: 0, tag: 0 }
+    let m2 = GthMessage { value: 20, sender_id: 0, tag: 0 }
+    let m3 = GthMessage { value: 30, sender_id: 0, tag: 0 }
+    let ok1 = gth_channel_send(sched, ch, m1)
+    let ok2 = gth_channel_send(sched, ch, m2)
+    let ok3 = gth_channel_send(sched, ch, m3)
+    let r1 = gth_channel_recv(sched, ch)
+    let r2 = gth_channel_recv(sched, ch)
+    let r3 = gth_channel_recv(sched, ch)
+    r1.value == 10 && r2.value == 20 && r3.value == 30
+}
+fn test_gth_channel_fifo() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_channel_fifo_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Channel send/recv — T38: send on closed channel fails
+// ---------------------------------------------------------------------------
+fn test_gth_channel_send_closed_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let ch = gth_channel_create(sched, 10)
+    let ok1 = gth_channel_close(sched, ch)
+    let msg = GthMessage { value: 1, sender_id: 0, tag: 0 }
+    let ok2 = gth_channel_send(sched, ch, msg)
+    // send should fail on closed channel
+    !ok2
+}
+fn test_gth_channel_send_closed() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_channel_send_closed_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Channel send/recv — T39: recv on empty channel returns empty message
+// ---------------------------------------------------------------------------
+fn test_gth_channel_recv_empty_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let ch = gth_channel_create(sched, 10)
+    let msg = gth_channel_recv(sched, ch)
+    msg.sender_id == GTH_INVALID
+}
+fn test_gth_channel_recv_empty() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_channel_recv_empty_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Channel send/recv — T40: send on full channel fails
+// ---------------------------------------------------------------------------
+fn test_gth_channel_send_full_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let ch = gth_channel_create(sched, 1)
+    let m1 = GthMessage { value: 1, sender_id: 0, tag: 0 }
+    let ok1 = gth_channel_send(sched, ch, m1)
+    let m2 = GthMessage { value: 2, sender_id: 0, tag: 0 }
+    let ok2 = gth_channel_send(sched, ch, m2)
+    // First should succeed, second should fail (capacity 1)
+    ok1 && !ok2
+}
+fn test_gth_channel_send_full() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_channel_send_full_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Statistics — T41: initial stats are zero
+// ---------------------------------------------------------------------------
+fn test_gth_stats_initial_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let s = gth_stats(sched)
+    let ok1 = s.total_threads == 0
+    let ok2 = s.active == 0
+    let ok3 = s.ready == 0
+    let ok4 = s.blocked == 0
+    let ok5 = s.done == 0
+    let ok6 = s.switches == 0
+    let ok7 = s.yields == 0
+    let ok8 = s.spawns == 0
+    ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8
+}
+fn test_gth_stats_initial() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_stats_initial_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Statistics — T42: stats after spawns
+// ---------------------------------------------------------------------------
+fn test_gth_stats_after_spawn_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let t1 = gth_spawn(sched, 2, GTH_PRIO_NORMAL)
+    let t2 = gth_spawn(sched, 3, GTH_PRIO_NORMAL)
+    let s = gth_stats(sched)
+    let ok1 = s.total_threads == 3
+    let ok2 = s.spawns == 3
+    let ok3 = s.active == 3
+    let ok4 = s.ready == 3
+    ok1 && ok2 && ok3 && ok4
+}
+fn test_gth_stats_after_spawn() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_stats_after_spawn_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Statistics — T43: active count excludes dead and done
+// ---------------------------------------------------------------------------
+fn test_gth_active_count_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let t1 = gth_spawn(sched, 2, GTH_PRIO_NORMAL)
+    let t2 = gth_spawn(sched, 3, GTH_PRIO_NORMAL)
+    let ok1 = gth_active_count(sched) == 3
+    let ok2 = gth_kill(sched, t0)
+    let ok3 = gth_active_count(sched) == 2
+    let ok4 = gth_mark_done(sched, t1, 0)
+    let ok5 = gth_active_count(sched) == 1
+    ok1 && ok2 && ok3 && ok4 && ok5
+}
+fn test_gth_active_count() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_active_count_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Statistics — T44: blocked count
+// ---------------------------------------------------------------------------
+fn test_gth_blocked_count_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let t1 = gth_spawn(sched, 2, GTH_PRIO_NORMAL)
+    let ok1 = gth_blocked_count(sched) == 0
+    let ok2 = gth_set_state(sched, t0, GTH_STATE_BLOCKED)
+    let ok3 = gth_blocked_count(sched) == 1
+    ok1 && ok2 && ok3
+}
+fn test_gth_blocked_count() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_blocked_count_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Statistics — T45: done count
+// ---------------------------------------------------------------------------
+fn test_gth_done_count_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let t1 = gth_spawn(sched, 2, GTH_PRIO_NORMAL)
+    let ok1 = gth_done_count(sched) == 0
+    let ok2 = gth_mark_done(sched, t0, 0)
+    let ok3 = gth_done_count(sched) == 1
+    let ok4 = gth_mark_done(sched, t1, 0)
+    let ok5 = gth_done_count(sched) == 2
+    ok1 && ok2 && ok3 && ok4 && ok5
+}
+fn test_gth_done_count() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_done_count_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Edge cases — T46: spawn with invalid priority still works
+// ---------------------------------------------------------------------------
+fn test_gth_spawn_invalid_prio_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let tid = gth_spawn(sched, 1, 99)
+    let ok1 = tid == 0
+    let ok2 = sched.threads[0 as usize].priority == 99
+    ok1 && ok2
+}
+fn test_gth_spawn_invalid_prio() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_spawn_invalid_prio_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Edge cases — T47: get_state on invalid thread_id
+// ---------------------------------------------------------------------------
+fn test_gth_get_state_invalid_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let st = gth_get_state(sched, GTH_INVALID)
+    st == GTH_STATE_DEAD
+}
+fn test_gth_get_state_invalid() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_get_state_invalid_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Edge cases — T48: set_state on invalid thread_id
+// ---------------------------------------------------------------------------
+fn test_gth_set_state_invalid_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let ok = gth_set_state(sched, GTH_INVALID, GTH_STATE_READY)
+    !ok
+}
+fn test_gth_set_state_invalid() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_set_state_invalid_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Edge cases — T49: channel operations on invalid channel id
+// ---------------------------------------------------------------------------
+fn test_gth_channel_invalid_id_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let ok1 = gth_channel_is_closed(sched, GTH_INVALID)
+    let ok2 = gth_channel_len(sched, GTH_INVALID) == 0
+    let ok3 = gth_channel_is_full(sched, GTH_INVALID)
+    let msg = GthMessage { value: 1, sender_id: 0, tag: 0 }
+    let ok4 = !gth_channel_send(sched, GTH_INVALID, msg)
+    let ok5 = !gth_channel_close(sched, GTH_INVALID)
+    ok1 && ok2 && ok3 && ok4 && ok5
+}
+fn test_gth_channel_invalid_id() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_channel_invalid_id_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Edge cases — T50: make_ready on dead thread fails
+// ---------------------------------------------------------------------------
+fn test_gth_make_ready_dead_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let ok1 = gth_kill(sched, t0)
+    let ok2 = gth_make_ready(sched, t0)
+    !ok2
+}
+fn test_gth_make_ready_dead() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_make_ready_dead_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Edge cases — T51: multiple channels
+// ---------------------------------------------------------------------------
+fn test_gth_multi_channel_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let ch0 = gth_channel_create(sched, 5)
+    let ch1 = gth_channel_create(sched, 5)
+    let ok1 = ch0 == 0 && ch1 == 1
+    let m0 = GthMessage { value: 100, sender_id: 0, tag: 0 }
+    let m1 = GthMessage { value: 200, sender_id: 0, tag: 0 }
+    let ok2 = gth_channel_send(sched, ch0, m0)
+    let ok3 = gth_channel_send(sched, ch1, m1)
+    let r0 = gth_channel_recv(sched, ch0)
+    let r1 = gth_channel_recv(sched, ch1)
+    r0.value == 100 && r1.value == 200
+}
+fn test_gth_multi_channel() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_multi_channel_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Edge cases — T52: try_recv does not consume
+// ---------------------------------------------------------------------------
+fn test_gth_try_recv_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let ch = gth_channel_create(sched, 10)
+    let msg = GthMessage { value: 77, sender_id: 3, tag: 1 }
+    let ok1 = gth_channel_send(sched, ch, msg)
+    let peeked = gth_channel_try_recv(sched, ch)
+    let ok2 = peeked.value == 77
+    // try_recv is non-destructive — channel len should still be 1
+    let ok3 = gth_channel_len(sched, ch) == 1
+    // Now do a real recv
+    let received = gth_channel_recv(sched, ch)
+    let ok4 = received.value == 77
+    let ok5 = gth_channel_len(sched, ch) == 0
+    ok1 && ok2 && ok3 && ok4 && ok5
+}
+fn test_gth_try_recv() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_try_recv_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Edge cases — T53: run_until_idle with single short thread
+// ---------------------------------------------------------------------------
+fn test_gth_run_until_idle_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    sched.time_quantum = 5
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    sched.threads[t0 as usize].time_slice = 5
+    let ticks = gth_run_until_idle(sched)
+    let ok1 = ticks >= 5
+    let ok2 = sched.threads[t0 as usize].state == GTH_STATE_DONE
+    ok1 && ok2
+}
+fn test_gth_run_until_idle() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_run_until_idle_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Edge cases — T54: parent_id is set on spawn
+// ---------------------------------------------------------------------------
+fn test_gth_parent_id_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    // t0 is spawned when current_thread is GTH_INVALID
+    let ok1 = sched.threads[t0 as usize].parent_id == GTH_INVALID
+    // Schedule t0 as running, then spawn t1
+    let first = gth_schedule_next(sched)
+    let t1 = gth_spawn(sched, 2, GTH_PRIO_NORMAL)
+    let ok2 = sched.threads[t1 as usize].parent_id == t0
+    ok1 && ok2
+}
+fn test_gth_parent_id() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_parent_id_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Edge cases — T55: idle count increments on empty schedule
+// ---------------------------------------------------------------------------
+fn test_gth_idle_count_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let ok1 = sched.idle_count == 0
+    let next = gth_schedule_next(sched)
+    let ok2 = next == GTH_INVALID
+    let ok3 = sched.idle_count == 1
+    ok1 && ok2 && ok3
+}
+fn test_gth_idle_count() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_idle_count_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Thread info queries — T56: get/set priority
+// ---------------------------------------------------------------------------
+fn test_gth_priority_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_LOW)
+    let ok1 = gth_get_priority(sched, t0) == GTH_PRIO_LOW
+    let ok2 = gth_set_priority(sched, t0, GTH_PRIO_HIGH)
+    let ok3 = gth_get_priority(sched, t0) == GTH_PRIO_HIGH
+    ok1 && ok2 && ok3
+}
+fn test_gth_priority() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_priority_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Thread info queries — T57: get func_id
+// ---------------------------------------------------------------------------
+fn test_gth_func_id_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t0 = gth_spawn(sched, 123, GTH_PRIO_NORMAL)
+    let ok1 = gth_get_func_id(sched, t0) == 123
+    let ok2 = gth_get_func_id(sched, 999) == GTH_INVALID
+    ok1 && ok2
+}
+fn test_gth_func_id() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_func_id_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Thread info queries — T58: get/set pc
+// ---------------------------------------------------------------------------
+fn test_gth_pc_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let ok1 = gth_get_pc(sched, t0) == 0
+    let ok2 = gth_set_pc(sched, t0, 42)
+    let ok3 = gth_get_pc(sched, t0) == 42
+    ok1 && ok2 && ok3
+}
+fn test_gth_pc() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_pc_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Thread info queries — T59: get/set time_slice
+// ---------------------------------------------------------------------------
+fn test_gth_time_slice_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let ok1 = gth_get_time_slice(sched, t0) == GTH_DEFAULT_QUANTUM
+    let ok2 = gth_set_time_slice(sched, t0, 50)
+    let ok3 = gth_get_time_slice(sched, t0) == 50
+    ok1 && ok2 && ok3
+}
+fn test_gth_time_slice() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_time_slice_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Thread info queries — T60: gth_current
+// ---------------------------------------------------------------------------
+fn test_gth_current_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let ok1 = gth_current(sched) == GTH_INVALID
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let first = gth_schedule_next(sched)
+    let ok2 = gth_current(sched) == t0
+    ok1 && ok2
+}
+fn test_gth_current() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_current_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Thread info queries — T61: is_current
+// ---------------------------------------------------------------------------
+fn test_gth_is_current_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let t1 = gth_spawn(sched, 2, GTH_PRIO_NORMAL)
+    let first = gth_schedule_next(sched)
+    let ok1 = gth_is_current(sched, t0)
+    let ok2 = !gth_is_current(sched, t1)
+    ok1 && ok2
+}
+fn test_gth_is_current() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_is_current_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Thread info queries — T62: count_by_state
+// ---------------------------------------------------------------------------
+fn test_gth_count_by_state_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let t1 = gth_spawn(sched, 2, GTH_PRIO_NORMAL)
+    let t2 = gth_spawn(sched, 3, GTH_PRIO_NORMAL)
+    let ok1 = gth_count_by_state(sched, GTH_STATE_READY) == 3
+    let ok2 = gth_set_state(sched, t0, GTH_STATE_BLOCKED)
+    let ok3 = gth_count_by_state(sched, GTH_STATE_READY) == 2
+    let ok4 = gth_count_by_state(sched, GTH_STATE_BLOCKED) == 1
+    ok1 && ok2 && ok3 && ok4
+}
+fn test_gth_count_by_state() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_count_by_state_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Thread info queries — T63: count_by_priority
+// ---------------------------------------------------------------------------
+fn test_gth_count_by_priority_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_LOW)
+    let t1 = gth_spawn(sched, 2, GTH_PRIO_NORMAL)
+    let t2 = gth_spawn(sched, 3, GTH_PRIO_LOW)
+    let ok1 = gth_count_by_priority(sched, GTH_PRIO_LOW) == 2
+    let ok2 = gth_count_by_priority(sched, GTH_PRIO_NORMAL) == 1
+    let ok3 = gth_count_by_priority(sched, GTH_PRIO_HIGH) == 0
+    ok1 && ok2 && ok3
+}
+fn test_gth_count_by_priority() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_count_by_priority_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Thread info queries — T64: find_by_state
+// ---------------------------------------------------------------------------
+fn test_gth_find_by_state_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let t1 = gth_spawn(sched, 2, GTH_PRIO_NORMAL)
+    let ok1 = gth_set_state(sched, t0, GTH_STATE_BLOCKED)
+    let found = gth_find_by_state(sched, GTH_STATE_BLOCKED)
+    let ok2 = found == t0
+    let not_found = gth_find_by_state(sched, GTH_STATE_SLEEPING)
+    let ok3 = not_found == GTH_INVALID
+    ok1 && ok2 && ok3
+}
+fn test_gth_find_by_state() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_find_by_state_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Thread info queries — T65: set_quantum changes default
+// ---------------------------------------------------------------------------
+fn test_gth_set_quantum_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let old = gth_set_quantum(sched, 50)
+    let ok1 = old == GTH_DEFAULT_QUANTUM
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    // New threads should get quantum 50
+    let ok2 = sched.threads[t0 as usize].time_slice == 50
+    ok1 && ok2
+}
+fn test_gth_set_quantum() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_set_quantum_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Suspend/resume — T66: suspend a running thread
+// ---------------------------------------------------------------------------
+fn test_gth_suspend_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let first = gth_schedule_next(sched)
+    let ok1 = sched.threads[t0 as usize].state == GTH_STATE_RUNNING
+    let ok2 = gth_suspend(sched, t0)
+    let ok3 = sched.threads[t0 as usize].state == GTH_STATE_SLEEPING
+    ok1 && ok2 && ok3
+}
+fn test_gth_suspend() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_suspend_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Suspend/resume — T67: resume a sleeping thread
+// ---------------------------------------------------------------------------
+fn test_gth_resume_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let first = gth_schedule_next(sched)
+    let ok1 = gth_suspend(sched, t0)
+    let ok2 = sched.threads[t0 as usize].state == GTH_STATE_SLEEPING
+    let ok3 = gth_resume(sched, t0)
+    let ok4 = sched.threads[t0 as usize].state == GTH_STATE_READY
+    ok1 && ok2 && ok3 && ok4
+}
+fn test_gth_resume() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_resume_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Suspend/resume — T68: resume on non-sleeping thread fails
+// ---------------------------------------------------------------------------
+fn test_gth_resume_not_sleeping_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    // t0 is READY, not SLEEPING
+    let ok = gth_resume(sched, t0)
+    !ok
+}
+fn test_gth_resume_not_sleeping() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_resume_not_sleeping_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Reset — T69: reset a dead thread
+// ---------------------------------------------------------------------------
+fn test_gth_reset_thread_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let ok1 = gth_kill(sched, t0)
+    let ok2 = gth_reset_thread(sched, t0)
+    let ok3 = sched.threads[t0 as usize].state == GTH_STATE_CREATED
+    let ok4 = sched.threads[t0 as usize].ticks_used == 0
+    let ok5 = sched.threads[t0 as usize].yield_count == 0
+    ok1 && ok2 && ok3 && ok4 && ok5
+}
+fn test_gth_reset_thread() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_reset_thread_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Reset — T70: reset a running thread fails
+// ---------------------------------------------------------------------------
+fn test_gth_reset_running_fails_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let first = gth_schedule_next(sched)
+    let ok = gth_reset_thread(sched, t0)
+    // Should fail because thread is RUNNING
+    !ok
+}
+fn test_gth_reset_running_fails() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_reset_running_fails_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Queue utilities — T71: queue_contains
+// ---------------------------------------------------------------------------
+fn test_gth_queue_contains_sub(q: &! GthReadyQueue) -> bool with Mut, Div, Panic {
+    let ok1 = gth_enqueue(q, 10)
+    let ok2 = gth_enqueue(q, 20)
+    let ok3 = gth_queue_contains(q, 10)
+    let ok4 = gth_queue_contains(q, 20)
+    let ok5 = !gth_queue_contains(q, 30)
+    ok1 && ok2 && ok3 && ok4 && ok5
+}
+fn test_gth_queue_contains_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    var q = gth_empty_ready_queue()
+    test_gth_queue_contains_sub(&! q)
+}
+fn test_gth_queue_contains() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_queue_contains_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Queue utilities — T72: queue_peek
+// ---------------------------------------------------------------------------
+fn test_gth_queue_peek_sub(q: &! GthReadyQueue) -> bool with Mut, Div, Panic {
+    let ok1 = gth_queue_peek(q) == GTH_INVALID
+    let ok2 = gth_enqueue(q, 55)
+    let ok3 = gth_queue_peek(q) == 55
+    // Peek should not consume
+    let ok4 = gth_queue_len(q) == 1
+    ok1 && ok2 && ok3 && ok4
+}
+fn test_gth_queue_peek_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    var q = gth_empty_ready_queue()
+    test_gth_queue_peek_sub(&! q)
+}
+fn test_gth_queue_peek() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_queue_peek_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Queue utilities — T73: queue_clear
+// ---------------------------------------------------------------------------
+fn test_gth_queue_clear_sub(q: &! GthReadyQueue) -> bool with Mut, Div, Panic {
+    let ok1 = gth_enqueue(q, 1)
+    let ok2 = gth_enqueue(q, 2)
+    let ok3 = gth_enqueue(q, 3)
+    let cleared = gth_queue_clear(q)
+    let ok4 = cleared == 3
+    let ok5 = gth_queue_is_empty(q)
+    ok1 && ok2 && ok3 && ok4 && ok5
+}
+fn test_gth_queue_clear_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    var q = gth_empty_ready_queue()
+    test_gth_queue_clear_sub(&! q)
+}
+fn test_gth_queue_clear() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_queue_clear_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Channel utilities — T74: channel_is_empty
+// ---------------------------------------------------------------------------
+fn test_gth_channel_is_empty_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let ch = gth_channel_create(sched, 10)
+    let ok1 = gth_channel_is_empty(sched, ch)
+    let msg = GthMessage { value: 1, sender_id: 0, tag: 0 }
+    let ok2 = gth_channel_send(sched, ch, msg)
+    let ok3 = !gth_channel_is_empty(sched, ch)
+    ok1 && ok2 && ok3
+}
+fn test_gth_channel_is_empty() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_channel_is_empty_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Channel utilities — T75: channel_capacity
+// ---------------------------------------------------------------------------
+fn test_gth_channel_capacity_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let ch = gth_channel_create(sched, 32)
+    let ok1 = gth_channel_capacity(sched, ch) == 32
+    let ok2 = gth_channel_capacity(sched, 999) == 0
+    ok1 && ok2
+}
+fn test_gth_channel_capacity() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_channel_capacity_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Channel utilities — T76: channel send/recv counts
+// ---------------------------------------------------------------------------
+fn test_gth_channel_counts_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let ch = gth_channel_create(sched, 10)
+    let m1 = GthMessage { value: 1, sender_id: 0, tag: 0 }
+    let m2 = GthMessage { value: 2, sender_id: 0, tag: 0 }
+    let ok1 = gth_channel_send(sched, ch, m1)
+    let ok2 = gth_channel_send(sched, ch, m2)
+    let ok3 = gth_channel_send_count(sched, ch) == 2
+    let r = gth_channel_recv(sched, ch)
+    let ok4 = gth_channel_recv_count(sched, ch) == 1
+    ok1 && ok2 && ok3 && ok4
+}
+fn test_gth_channel_counts() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_channel_counts_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Channel utilities — T77: channel_drain
+// ---------------------------------------------------------------------------
+fn test_gth_channel_drain_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let ch = gth_channel_create(sched, 10)
+    let m1 = GthMessage { value: 1, sender_id: 0, tag: 0 }
+    let m2 = GthMessage { value: 2, sender_id: 0, tag: 0 }
+    let m3 = GthMessage { value: 3, sender_id: 0, tag: 0 }
+    let ok1 = gth_channel_send(sched, ch, m1)
+    let ok2 = gth_channel_send(sched, ch, m2)
+    let ok3 = gth_channel_send(sched, ch, m3)
+    let drained = gth_channel_drain(sched, ch)
+    let ok4 = drained == 3
+    let ok5 = gth_channel_is_empty(sched, ch)
+    ok1 && ok2 && ok3 && ok4 && ok5
+}
+fn test_gth_channel_drain() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_channel_drain_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Combined scenarios — T78: spawn, schedule, yield, done cycle
+// ---------------------------------------------------------------------------
+fn test_gth_full_lifecycle_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    sched.time_quantum = 10
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let t1 = gth_spawn(sched, 2, GTH_PRIO_NORMAL)
+    sched.threads[t0 as usize].time_slice = 10
+    sched.threads[t1 as usize].time_slice = 10
+    // Schedule t0
+    let first = gth_schedule_next(sched)
+    let ok1 = sched.current_thread == t0
+    // Yield to t1
+    let next = gth_yield_current(sched)
+    let ok2 = sched.current_thread == t1
+    // Mark t1 done
+    let ok3 = gth_mark_done(sched, t1, 100)
+    // Mark t0 done
+    let ok4 = gth_mark_done(sched, t0, 200)
+    let ok5 = gth_get_result(sched, t0) == 200
+    let ok6 = gth_get_result(sched, t1) == 100
+    let ok7 = gth_done_count(sched) == 2
+    ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7
+}
+fn test_gth_full_lifecycle() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_full_lifecycle_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Combined scenarios — T79: channel producer/consumer
+// ---------------------------------------------------------------------------
+fn test_gth_producer_consumer_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let ch = gth_channel_create(sched, 5)
+    // Simulate producer: send 5 messages
+    var i: i64 = 0
+    while i < 5 {
+        let msg = GthMessage { value: i * 10, sender_id: 0, tag: 0 }
+        let ok = gth_channel_send(sched, ch, msg)
+        i = i + 1
+    }
+    let ok1 = gth_channel_is_full(sched, ch)
+    // Simulate consumer: recv 5 messages
+    var sum: i64 = 0
+    var j: i64 = 0
+    while j < 5 {
+        let msg = gth_channel_recv(sched, ch)
+        sum = sum + msg.value
+        j = j + 1
+    }
+    // sum = 0 + 10 + 20 + 30 + 40 = 100
+    let ok2 = sum == 100
+    let ok3 = gth_channel_is_empty(sched, ch)
+    ok1 && ok2 && ok3
+}
+fn test_gth_producer_consumer() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_producer_consumer_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Combined scenarios — T80: total_yields_all
+// ---------------------------------------------------------------------------
+fn test_gth_total_yields_all_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let t1 = gth_spawn(sched, 2, GTH_PRIO_NORMAL)
+    // Schedule and yield a few times
+    let first = gth_schedule_next(sched)
+    let next1 = gth_yield_current(sched)
+    let next2 = gth_yield_current(sched)
+    let total = gth_total_yields_all(sched)
+    total == 2
+}
+fn test_gth_total_yields_all() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_total_yields_all_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Combined scenarios — T81: wait_all with all done
+// ---------------------------------------------------------------------------
+fn test_gth_wait_all_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let t1 = gth_spawn(sched, 2, GTH_PRIO_NORMAL)
+    let t2 = gth_spawn(sched, 3, GTH_PRIO_NORMAL)
+    var ids: [i64; 1024] = [GTH_INVALID; 1024]
+    ids[0 as usize] = t0
+    ids[1 as usize] = t1
+    ids[2 as usize] = t2
+    let ok1 = !gth_wait_all(sched, ids, 3)
+    let ok2 = gth_mark_done(sched, t0, 0)
+    let ok3 = gth_mark_done(sched, t1, 0)
+    let ok4 = !gth_wait_all(sched, ids, 3)
+    let ok5 = gth_mark_done(sched, t2, 0)
+    let ok6 = gth_wait_all(sched, ids, 3)
+    ok1 && ok2 && ok3 && ok4 && ok5 && ok6
+}
+fn test_gth_wait_all() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_wait_all_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Combined scenarios — T82: multiple priority levels scheduling
+// ---------------------------------------------------------------------------
+fn test_gth_multi_priority_sched_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    // Spawn low, then high priority
+    let t_low = gth_spawn(sched, 1, GTH_PRIO_LOW)
+    let t_high = gth_spawn(sched, 2, GTH_PRIO_HIGH)
+    // HIGH should be at front of queue
+    let first = gth_schedule_next(sched)
+    let ok1 = first == t_high
+    ok1
+}
+fn test_gth_multi_priority_sched() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_multi_priority_sched_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Combined scenarios — T83: REALTIME priority goes before HIGH
+// ---------------------------------------------------------------------------
+fn test_gth_realtime_priority_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t_low = gth_spawn(sched, 1, GTH_PRIO_LOW)
+    let t_high = gth_spawn(sched, 2, GTH_PRIO_HIGH)
+    let t_rt = gth_spawn(sched, 3, GTH_PRIO_REALTIME)
+    // REALTIME should be at absolute front
+    let first = gth_schedule_next(sched)
+    let ok1 = first == t_rt
+    ok1
+}
+fn test_gth_realtime_priority() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_realtime_priority_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Edge cases — T84: suspend on dead thread fails
+// ---------------------------------------------------------------------------
+fn test_gth_suspend_dead_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let ok1 = gth_kill(sched, t0)
+    let ok2 = gth_suspend(sched, t0)
+    !ok2
+}
+fn test_gth_suspend_dead() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_suspend_dead_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Edge cases — T85: channel message tag preservation
+// ---------------------------------------------------------------------------
+fn test_gth_channel_tag_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let ch = gth_channel_create(sched, 10)
+    let msg = GthMessage { value: 42, sender_id: 7, tag: 255 }
+    let ok1 = gth_channel_send(sched, ch, msg)
+    let received = gth_channel_recv(sched, ch)
+    let ok2 = received.value == 42
+    let ok3 = received.sender_id == 7
+    let ok4 = received.tag == 255
+    ok1 && ok2 && ok3 && ok4
+}
+fn test_gth_channel_tag() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_channel_tag_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Edge cases — T86: multiple spawns track spawns counter
+// ---------------------------------------------------------------------------
+fn test_gth_spawns_counter_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let ok1 = sched.total_spawns == 0
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let ok2 = sched.total_spawns == 1
+    let t1 = gth_spawn(sched, 2, GTH_PRIO_NORMAL)
+    let t2 = gth_spawn(sched, 3, GTH_PRIO_NORMAL)
+    let ok3 = sched.total_spawns == 3
+    ok1 && ok2 && ok3
+}
+fn test_gth_spawns_counter() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_spawns_counter_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Edge cases — T87: stack multiple push/pop interleave
+// ---------------------------------------------------------------------------
+fn test_gth_stack_interleave_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let tid = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    let ok1 = gth_stack_push(&! sched.threads[tid as usize].stack, 10)
+    let ok2 = gth_stack_push(&! sched.threads[tid as usize].stack, 20)
+    let v1 = gth_stack_pop(&! sched.threads[tid as usize].stack)
+    let ok3 = gth_stack_push(&! sched.threads[tid as usize].stack, 30)
+    let ok4 = gth_stack_push(&! sched.threads[tid as usize].stack, 40)
+    let v2 = gth_stack_pop(&! sched.threads[tid as usize].stack)
+    let v3 = gth_stack_pop(&! sched.threads[tid as usize].stack)
+    let v4 = gth_stack_pop(&! sched.threads[tid as usize].stack)
+    v1 == 20 && v2 == 40 && v3 == 30 && v4 == 10
+}
+fn test_gth_stack_interleave() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_stack_interleave_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Edge cases — T88: channel drain on empty channel
+// ---------------------------------------------------------------------------
+fn test_gth_channel_drain_empty_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let ch = gth_channel_create(sched, 10)
+    let drained = gth_channel_drain(sched, ch)
+    drained == 0
+}
+fn test_gth_channel_drain_empty() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_channel_drain_empty_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Edge cases — T89: join on self (thread joins itself, should block)
+// ---------------------------------------------------------------------------
+fn test_gth_join_self_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let t0 = gth_spawn(sched, 1, GTH_PRIO_NORMAL)
+    // Thread joins itself - it's still READY so it should block
+    let ok1 = gth_join(sched, t0, t0)
+    let ok2 = sched.threads[t0 as usize].state == GTH_STATE_BLOCKED
+    ok1 && ok2
+}
+fn test_gth_join_self() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_join_self_inner(&! sched)
+}
+
+// ---------------------------------------------------------------------------
+// Edge cases — T90: get_parent_id on invalid thread
+// ---------------------------------------------------------------------------
+fn test_gth_get_parent_invalid_inner(sched: &! GthScheduler) -> bool with Mut, Div, Panic {
+    let p = gth_get_parent_id(sched, 999)
+    p == GTH_INVALID
+}
+fn test_gth_get_parent_invalid() -> bool with Mut, Div, Panic {
+    var sched = gth_scheduler_new()
+    test_gth_get_parent_invalid_inner(&! sched)
+}
+
+// ============================================================================
+// Test Runner
+// ============================================================================
+
+fn gth_run_tests() -> i64 with Mut, Div, Panic {
+    var passed: i64 = 0
+    var failed: i64 = 0
+
+    // Stack operations (T01-T05)
+    if test_gth_stack_push_pop() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_stack_peek() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_stack_empty_pop() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_stack_empty_peek() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_stack_reset() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Ready queue (T06-T10)
+    if test_gth_queue_fifo() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_queue_empty_dequeue() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_queue_len() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_queue_priority() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_queue_wrap() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Thread spawn/lifecycle (T11-T15)
+    if test_gth_spawn() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_spawn_multiple() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_state() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_kill() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_mark_done() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Scheduling/yield (T16-T20)
+    if test_gth_schedule_next() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_yield() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_schedule_empty() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_switches() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_yield_count() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Preemption (T21-T25)
+    if test_gth_tick_increment() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_no_preempt() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_preempt() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_preempt_check_false() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_preempt_check_true() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Join/wait (T26-T30)
+    if test_gth_join_done() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_join_blocks() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_join_unblock() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_try_join() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_get_result_invalid() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Channels basic (T31-T35)
+    if test_gth_channel_create() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_channel_cap_clamp() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_channel_close() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_channel_empty() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_channel_full() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Channel send/recv (T36-T40)
+    if test_gth_channel_send_recv() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_channel_fifo() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_channel_send_closed() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_channel_recv_empty() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_channel_send_full() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Statistics (T41-T45)
+    if test_gth_stats_initial() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_stats_after_spawn() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_active_count() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_blocked_count() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_done_count() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Edge cases (T46-T55)
+    if test_gth_spawn_invalid_prio() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_get_state_invalid() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_set_state_invalid() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_channel_invalid_id() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_make_ready_dead() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_multi_channel() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_try_recv() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_run_until_idle() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_parent_id() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_idle_count() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Thread info queries (T56-T65)
+    if test_gth_priority() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_func_id() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_pc() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_time_slice() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_current() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_is_current() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_count_by_state() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_count_by_priority() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_find_by_state() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_set_quantum() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Suspend/resume (T66-T68)
+    if test_gth_suspend() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_resume() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_resume_not_sleeping() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Reset (T69-T70)
+    if test_gth_reset_thread() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_reset_running_fails() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Queue utilities (T71-T73)
+    if test_gth_queue_contains() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_queue_peek() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_queue_clear() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Channel utilities (T74-T77)
+    if test_gth_channel_is_empty() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_channel_capacity() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_channel_counts() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_channel_drain() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Combined scenarios (T78-T83)
+    if test_gth_full_lifecycle() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_producer_consumer() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_total_yields_all() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_wait_all() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_multi_priority_sched() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_realtime_priority() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Additional edge cases (T84-T90)
+    if test_gth_suspend_dead() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_channel_tag() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_spawns_counter() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_stack_interleave() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_channel_drain_empty() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_join_self() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_gth_get_parent_invalid() { passed = passed + 1 } else { failed = failed + 1 }
+
+    passed
+}

@@ -1,0 +1,2353 @@
+// Generalized Algebraic Data Types (GADTs) for the self-hosted type checker
+//
+// Implements GADT type refinement in pattern match arms, evidence-based type
+// equality, and GADT constructor checking.
+//
+// Architecture:
+//   GadtType       — type representation with kind tag and params
+//   GadtConstraint — type equality constraint (lhs ~ rhs) from constructor
+//   GadtEvidence   — type refinement evidence for scope-bounded var refinement
+//   GadtCtor       — constructor with fields and result type params
+//   GadtDef        — GADT definition with type params and constructors
+//   GadtEnv        — flat-array arena holding all GADT state
+//
+// Algorithm:
+//   1. Register GADT definitions and constructors
+//   2. When pattern matching on a GADT value, activate constraints from the
+//      matched constructor
+//   3. Constraints produce evidence: type variable refinements scoped to
+//      the match arm
+//   4. Evidence is consulted during type checking within the arm body
+//   5. On exiting the arm, evidence is popped (scope-based)
+//
+// Uses flat-array arena pattern (no recursive types) consistent with the
+// self-hosted checker's design.
+
+// ============================================================
+// Section 1: Constants
+// ============================================================
+
+let GADT_MAX_CTORS: i64 = 512
+let GADT_MAX_PARAMS: i64 = 16
+let GADT_MAX_FIELDS: i64 = 32
+let GADT_MAX_CONSTRAINTS: i64 = 256
+let GADT_MAX_EVIDENCE: i64 = 512
+let GADT_MAX_TYPES: i64 = 128
+let GADT_MAX_DEFS: i64 = 64
+let GADT_INVALID: i64 = 0 - 1
+
+// ============================================================
+// Section 2: Type Representations
+// ============================================================
+
+enum GadtTypeKind {
+    GadtTyVar,
+    GadtTyApp,
+    GadtTyCon,
+    GadtTyInt,
+    GadtTyBool,
+    GadtTyFloat,
+    GadtTyString,
+    GadtTyUnit,
+    GadtTyFunc,
+    GadtTyArray,
+}
+
+struct GadtType {
+    kind: GadtTypeKind,
+    var_id: i64,
+    con_id: i64,
+    param_count: i64,
+    params: [i64; 16],
+    return_ty: i64,
+}
+
+struct GadtConstraint {
+    lhs_type: i64,
+    rhs_type: i64,
+    source_ctor: i64,
+    active: bool,
+}
+
+struct GadtEvidence {
+    var_id: i64,
+    refined_type: i64,
+    from_constraint: i64,
+    scope_depth: i64,
+}
+
+// ============================================================
+// Section 3: GADT Definitions
+// ============================================================
+
+struct GadtCtor {
+    name_id: i64,
+    gadt_id: i64,
+    field_count: i64,
+    field_types: [i64; 32],
+    result_params: [i64; 16],
+    result_param_count: i64,
+    constraint_start: i64,
+    constraint_count: i64,
+}
+
+struct GadtDef {
+    name_id: i64,
+    param_count: i64,
+    param_names: [i64; 16],
+    ctor_start: i64,
+    ctor_count: i64,
+}
+
+struct GadtEnv {
+    types: [GadtType; 128],
+    type_count: i64,
+    defs: [GadtDef; 64],
+    def_count: i64,
+    ctors: [GadtCtor; 512],
+    ctor_count: i64,
+    constraints: [GadtConstraint; 256],
+    constraint_count: i64,
+    evidence: [GadtEvidence; 512],
+    evidence_count: i64,
+    scope_depth: i64,
+}
+
+// ============================================================
+// Section 4: Constructor Functions
+// ============================================================
+
+fn gadt_empty_type() -> GadtType {
+    GadtType {
+        kind: GadtTypeKind::GadtTyUnit,
+        var_id: 0 - 1,
+        con_id: 0 - 1,
+        param_count: 0,
+        params: [0; 16],
+        return_ty: 0 - 1,
+    }
+}
+
+fn gadt_empty_ctor() -> GadtCtor {
+    GadtCtor {
+        name_id: 0 - 1,
+        gadt_id: 0 - 1,
+        field_count: 0,
+        field_types: [0; 32],
+        result_params: [0; 16],
+        result_param_count: 0,
+        constraint_start: 0 - 1,
+        constraint_count: 0,
+    }
+}
+
+fn gadt_empty_def() -> GadtDef {
+    GadtDef {
+        name_id: 0 - 1,
+        param_count: 0,
+        param_names: [0; 16],
+        ctor_start: 0 - 1,
+        ctor_count: 0,
+    }
+}
+
+fn gadt_empty_constraint() -> GadtConstraint {
+    GadtConstraint {
+        lhs_type: 0 - 1,
+        rhs_type: 0 - 1,
+        source_ctor: 0 - 1,
+        active: false,
+    }
+}
+
+fn gadt_empty_evidence() -> GadtEvidence {
+    GadtEvidence {
+        var_id: 0 - 1,
+        refined_type: 0 - 1,
+        from_constraint: 0 - 1,
+        scope_depth: 0,
+    }
+}
+
+fn gadt_env_new() -> GadtEnv {
+    GadtEnv {
+        types: [gadt_empty_type(); 128],
+        type_count: 0,
+        defs: [gadt_empty_def(); 64],
+        def_count: 0,
+        ctors: [gadt_empty_ctor(); 512],
+        ctor_count: 0,
+        constraints: [gadt_empty_constraint(); 256],
+        constraint_count: 0,
+        evidence: [gadt_empty_evidence(); 512],
+        evidence_count: 0,
+        scope_depth: 0,
+    }
+}
+
+// ============================================================
+// Section 5: Type Construction Helpers
+// ============================================================
+
+// Allocate a type-variable node in the type pool.  Returns the index.
+fn gadt_mk_var(env: &! GadtEnv, var_id: i64) -> i64 with Mut, Div, Panic {
+    let idx = env.type_count
+    if idx >= GADT_MAX_TYPES {
+        return GADT_INVALID
+    }
+    env.types[idx as usize] = GadtType {
+        kind: GadtTypeKind::GadtTyVar,
+        var_id: var_id,
+        con_id: 0 - 1,
+        param_count: 0,
+        params: [0; 16],
+        return_ty: 0 - 1,
+    }
+    env.type_count = idx + 1
+    idx
+}
+
+// Allocate a type constructor (no params applied yet).
+fn gadt_mk_con(env: &! GadtEnv, con_id: i64) -> i64 with Mut, Div, Panic {
+    let idx = env.type_count
+    if idx >= GADT_MAX_TYPES {
+        return GADT_INVALID
+    }
+    env.types[idx as usize] = GadtType {
+        kind: GadtTypeKind::GadtTyCon,
+        var_id: 0 - 1,
+        con_id: con_id,
+        param_count: 0,
+        params: [0; 16],
+        return_ty: 0 - 1,
+    }
+    env.type_count = idx + 1
+    idx
+}
+
+// Allocate a type application: con applied to params.
+fn gadt_mk_app(env: &! GadtEnv, con: i64, params: [i64; 16], param_count: i64) -> i64 with Mut, Div, Panic {
+    let idx = env.type_count
+    if idx >= GADT_MAX_TYPES {
+        return GADT_INVALID
+    }
+    var p: [i64; 16] = [0; 16]
+    var i: i64 = 0
+    while i < param_count {
+        if i < GADT_MAX_PARAMS {
+            p[i as usize] = params[i as usize]
+        }
+        i = i + 1
+    }
+    env.types[idx as usize] = GadtType {
+        kind: GadtTypeKind::GadtTyApp,
+        var_id: 0 - 1,
+        con_id: con,
+        param_count: param_count,
+        params: p,
+        return_ty: 0 - 1,
+    }
+    env.type_count = idx + 1
+    idx
+}
+
+// Allocate the built-in Int type.
+fn gadt_mk_int(env: &! GadtEnv) -> i64 with Mut, Div, Panic {
+    let idx = env.type_count
+    if idx >= GADT_MAX_TYPES {
+        return GADT_INVALID
+    }
+    env.types[idx as usize] = GadtType {
+        kind: GadtTypeKind::GadtTyInt,
+        var_id: 0 - 1,
+        con_id: 0 - 1,
+        param_count: 0,
+        params: [0; 16],
+        return_ty: 0 - 1,
+    }
+    env.type_count = idx + 1
+    idx
+}
+
+// Allocate the built-in Bool type.
+fn gadt_mk_bool(env: &! GadtEnv) -> i64 with Mut, Div, Panic {
+    let idx = env.type_count
+    if idx >= GADT_MAX_TYPES {
+        return GADT_INVALID
+    }
+    env.types[idx as usize] = GadtType {
+        kind: GadtTypeKind::GadtTyBool,
+        var_id: 0 - 1,
+        con_id: 0 - 1,
+        param_count: 0,
+        params: [0; 16],
+        return_ty: 0 - 1,
+    }
+    env.type_count = idx + 1
+    idx
+}
+
+// Allocate the built-in Float type.
+fn gadt_mk_float(env: &! GadtEnv) -> i64 with Mut, Div, Panic {
+    let idx = env.type_count
+    if idx >= GADT_MAX_TYPES {
+        return GADT_INVALID
+    }
+    env.types[idx as usize] = GadtType {
+        kind: GadtTypeKind::GadtTyFloat,
+        var_id: 0 - 1,
+        con_id: 0 - 1,
+        param_count: 0,
+        params: [0; 16],
+        return_ty: 0 - 1,
+    }
+    env.type_count = idx + 1
+    idx
+}
+
+// Allocate a function type: param_ty -> ret_ty.
+fn gadt_mk_func(env: &! GadtEnv, param_ty: i64, ret_ty: i64) -> i64 with Mut, Div, Panic {
+    let idx = env.type_count
+    if idx >= GADT_MAX_TYPES {
+        return GADT_INVALID
+    }
+    var p: [i64; 16] = [0; 16]
+    p[0 as usize] = param_ty
+    env.types[idx as usize] = GadtType {
+        kind: GadtTypeKind::GadtTyFunc,
+        var_id: 0 - 1,
+        con_id: 0 - 1,
+        param_count: 1,
+        params: p,
+        return_ty: ret_ty,
+    }
+    env.type_count = idx + 1
+    idx
+}
+
+// Query the kind of a type at a given index.
+fn gadt_type_kind(env: &GadtEnv, ty: i64) -> GadtTypeKind with Div, Panic {
+    if ty < 0 || ty >= env.type_count {
+        return GadtTypeKind::GadtTyUnit
+    }
+    env.types[ty as usize].kind
+}
+
+// ============================================================
+// Section 6: GADT Definition Management
+// ============================================================
+
+// Register a new GADT definition.  Returns the def index.
+fn gadt_add_def(env: &! GadtEnv, name_id: i64, param_count: i64, param_names: [i64; 16]) -> i64 with Mut, Div, Panic {
+    let idx = env.def_count
+    if idx >= GADT_MAX_DEFS {
+        return GADT_INVALID
+    }
+    env.defs[idx as usize] = GadtDef {
+        name_id: name_id,
+        param_count: param_count,
+        param_names: param_names,
+        ctor_start: env.ctor_count,
+        ctor_count: 0,
+    }
+    env.def_count = idx + 1
+    idx
+}
+
+// Register a new constructor for a GADT.  Returns the ctor index.
+fn gadt_add_ctor(env: &! GadtEnv, gadt_id: i64, name_id: i64, field_types: [i64; 32], field_count: i64, result_params: [i64; 16], result_param_count: i64) -> i64 with Mut, Div, Panic {
+    let idx = env.ctor_count
+    if idx >= GADT_MAX_CTORS {
+        return GADT_INVALID
+    }
+    if gadt_id < 0 || gadt_id >= env.def_count {
+        return GADT_INVALID
+    }
+    let cstart = env.constraint_count
+    env.ctors[idx as usize] = GadtCtor {
+        name_id: name_id,
+        gadt_id: gadt_id,
+        field_count: field_count,
+        field_types: field_types,
+        result_params: result_params,
+        result_param_count: result_param_count,
+        constraint_start: cstart,
+        constraint_count: 0,
+    }
+    env.ctor_count = idx + 1
+
+    // Increment the GADT def's ctor_count
+    let old_count = env.defs[gadt_id as usize].ctor_count
+    env.defs[gadt_id as usize].ctor_count = old_count + 1
+
+    // Generate type equality constraints from the constructor's result params
+    // compared to the GADT's formal params.
+    let def_param_count = env.defs[gadt_id as usize].param_count
+    var ci: i64 = 0
+    var generated: i64 = 0
+    while ci < result_param_count {
+        if ci < def_param_count {
+            // Constraint: formal_param[ci] ~ result_param[ci]
+            let formal_var = env.defs[gadt_id as usize].param_names[ci as usize]
+            let actual_ty = result_params[ci as usize]
+            let cid = gadt_add_constraint_raw(env, formal_var, actual_ty, idx)
+            generated = generated + 1
+        }
+        ci = ci + 1
+    }
+    env.ctors[idx as usize].constraint_count = generated
+
+    idx
+}
+
+// Internal: add a raw constraint without going through the public API.
+fn gadt_add_constraint_raw(env: &! GadtEnv, lhs: i64, rhs: i64, ctor: i64) -> i64 with Mut, Div, Panic {
+    let idx = env.constraint_count
+    if idx >= GADT_MAX_CONSTRAINTS {
+        return GADT_INVALID
+    }
+    env.constraints[idx as usize] = GadtConstraint {
+        lhs_type: lhs,
+        rhs_type: rhs,
+        source_ctor: ctor,
+        active: false,
+    }
+    env.constraint_count = idx + 1
+    idx
+}
+
+// Find a GADT definition by name_id.  Returns def index or GADT_INVALID.
+fn gadt_find_def(env: &GadtEnv, name_id: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < env.def_count {
+        if env.defs[i as usize].name_id == name_id {
+            return i
+        }
+        i = i + 1
+    }
+    GADT_INVALID
+}
+
+// Find a constructor by name_id.  Returns ctor index or GADT_INVALID.
+fn gadt_find_ctor(env: &GadtEnv, name_id: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < env.ctor_count {
+        if env.ctors[i as usize].name_id == name_id {
+            return i
+        }
+        i = i + 1
+    }
+    GADT_INVALID
+}
+
+// Given a ctor index, return the GADT def index it belongs to.
+fn gadt_ctor_gadt(env: &GadtEnv, ctor_idx: i64) -> i64 with Div, Panic {
+    if ctor_idx < 0 || ctor_idx >= env.ctor_count {
+        return GADT_INVALID
+    }
+    env.ctors[ctor_idx as usize].gadt_id
+}
+
+// ============================================================
+// Section 7: Type Substitution
+// ============================================================
+
+// Substitute all occurrences of type variable from_var with to_type in ty.
+// Returns the resulting type index (may allocate new types).
+fn gadt_subst_type(env: &! GadtEnv, ty: i64, from_var: i64, to_type: i64) -> i64 with Mut, Div, Panic {
+    if ty < 0 || ty >= env.type_count {
+        return ty
+    }
+    let k = env.types[ty as usize].kind
+    // If this is a type variable matching from_var, replace it.
+    if k == GadtTypeKind::GadtTyVar {
+        if env.types[ty as usize].var_id == from_var {
+            return to_type
+        }
+        return ty
+    }
+    // If it is a type application, substitute in all children.
+    if k == GadtTypeKind::GadtTyApp {
+        let con = env.types[ty as usize].con_id
+        let pc = env.types[ty as usize].param_count
+        var new_params: [i64; 16] = [0; 16]
+        var changed = false
+        var i: i64 = 0
+        while i < pc {
+            let old_p = env.types[ty as usize].params[i as usize]
+            let new_p = gadt_subst_type(env, old_p, from_var, to_type)
+            new_params[i as usize] = new_p
+            if new_p != old_p {
+                changed = true
+            }
+            i = i + 1
+        }
+        if changed {
+            return gadt_mk_app(env, con, new_params, pc)
+        }
+        return ty
+    }
+    // If it is a function type, substitute in domain and codomain.
+    if k == GadtTypeKind::GadtTyFunc {
+        let dom = env.types[ty as usize].params[0 as usize]
+        let cod = env.types[ty as usize].return_ty
+        let new_dom = gadt_subst_type(env, dom, from_var, to_type)
+        let new_cod = gadt_subst_type(env, cod, from_var, to_type)
+        if new_dom != dom || new_cod != cod {
+            return gadt_mk_func(env, new_dom, new_cod)
+        }
+        return ty
+    }
+    // Primitive types do not contain type variables.
+    ty
+}
+
+// Apply a parallel substitution: subst_vars[i] -> subst_types[i].
+fn gadt_apply_subst(env: &! GadtEnv, ty: i64, subst_vars: [i64; 16], subst_types: [i64; 16], subst_count: i64) -> i64 with Mut, Div, Panic {
+    var result = ty
+    var i: i64 = 0
+    while i < subst_count {
+        result = gadt_subst_type(env, result, subst_vars[i as usize], subst_types[i as usize])
+        i = i + 1
+    }
+    result
+}
+
+// Substitute all formal GADT params in a constructor's field types
+// with actual_params.  Returns the ctor index unchanged (fields are
+// resolved via gadt_apply_subst on each field type when needed).
+// This convenience function returns the substituted result type index.
+fn gadt_subst_all_params(env: &! GadtEnv, ctor_idx: i64, actual_params: [i64; 16], param_count: i64) -> i64 with Mut, Div, Panic {
+    if ctor_idx < 0 || ctor_idx >= env.ctor_count {
+        return GADT_INVALID
+    }
+    let gadt_id = env.ctors[ctor_idx as usize].gadt_id
+    if gadt_id < 0 || gadt_id >= env.def_count {
+        return GADT_INVALID
+    }
+    let def_pc = env.defs[gadt_id as usize].param_count
+    // Build substitution: param_names[i] -> actual_params[i]
+    var subst_vars: [i64; 16] = [0; 16]
+    var i: i64 = 0
+    while i < def_pc {
+        if i < param_count {
+            subst_vars[i as usize] = env.defs[gadt_id as usize].param_names[i as usize]
+        }
+        i = i + 1
+    }
+    // Build result type: apply the GADT con to actual params
+    let con = gadt_mk_con(env, gadt_id)
+    let result = gadt_mk_app(env, con, actual_params, param_count)
+    result
+}
+
+// ============================================================
+// Section 8: Type Unification
+// ============================================================
+
+// Structural equality of two types (without variable instantiation).
+fn gadt_types_equal(env: &GadtEnv, a: i64, b: i64) -> bool with Mut, Div, Panic {
+    if a == b {
+        return true
+    }
+    if a < 0 || a >= env.type_count || b < 0 || b >= env.type_count {
+        return false
+    }
+    let ka = env.types[a as usize].kind
+    let kb = env.types[b as usize].kind
+    if ka != kb {
+        return false
+    }
+    // Type variables are equal iff they have the same var_id
+    if ka == GadtTypeKind::GadtTyVar {
+        return env.types[a as usize].var_id == env.types[b as usize].var_id
+    }
+    // Type constructors are equal iff they have the same con_id
+    if ka == GadtTypeKind::GadtTyCon {
+        return env.types[a as usize].con_id == env.types[b as usize].con_id
+    }
+    // Type applications: constructor must be equal and all params
+    if ka == GadtTypeKind::GadtTyApp {
+        if env.types[a as usize].con_id != env.types[b as usize].con_id {
+            return false
+        }
+        let pc = env.types[a as usize].param_count
+        if pc != env.types[b as usize].param_count {
+            return false
+        }
+        var i: i64 = 0
+        while i < pc {
+            if gadt_types_equal(env, env.types[a as usize].params[i as usize], env.types[b as usize].params[i as usize]) == false {
+                return false
+            }
+            i = i + 1
+        }
+        return true
+    }
+    // Function types: domain and codomain must match
+    if ka == GadtTypeKind::GadtTyFunc {
+        let dom_eq = gadt_types_equal(env, env.types[a as usize].params[0 as usize], env.types[b as usize].params[0 as usize])
+        let cod_eq = gadt_types_equal(env, env.types[a as usize].return_ty, env.types[b as usize].return_ty)
+        return dom_eq && cod_eq
+    }
+    // Primitive types of the same kind are always equal (Int == Int, etc.)
+    true
+}
+
+// Occurs check: does var_id appear anywhere inside ty?
+fn gadt_occurs_check(env: &GadtEnv, var_id: i64, ty: i64) -> bool with Mut, Div, Panic {
+    if ty < 0 || ty >= env.type_count {
+        return false
+    }
+    let k = env.types[ty as usize].kind
+    if k == GadtTypeKind::GadtTyVar {
+        return env.types[ty as usize].var_id == var_id
+    }
+    if k == GadtTypeKind::GadtTyApp {
+        var i: i64 = 0
+        let pc = env.types[ty as usize].param_count
+        while i < pc {
+            if gadt_occurs_check(env, var_id, env.types[ty as usize].params[i as usize]) {
+                return true
+            }
+            i = i + 1
+        }
+        return false
+    }
+    if k == GadtTypeKind::GadtTyFunc {
+        if gadt_occurs_check(env, var_id, env.types[ty as usize].params[0 as usize]) {
+            return true
+        }
+        return gadt_occurs_check(env, var_id, env.types[ty as usize].return_ty)
+    }
+    false
+}
+
+// Attempt to unify two types.  Returns true if unifiable.
+// For variables, records evidence (substitution) as a side effect.
+fn gadt_unify(env: &! GadtEnv, a: i64, b: i64) -> bool with Mut, Div, Panic {
+    if a == b {
+        return true
+    }
+    if a < 0 || a >= env.type_count || b < 0 || b >= env.type_count {
+        return false
+    }
+    let ka = env.types[a as usize].kind
+    let kb = env.types[b as usize].kind
+    // Variable on the left: bind it to the right (with occurs check)
+    if ka == GadtTypeKind::GadtTyVar {
+        let vid = env.types[a as usize].var_id
+        if gadt_occurs_check(env, vid, b) {
+            return false
+        }
+        let eidx = gadt_push_evidence(env, vid, b, GADT_INVALID)
+        return true
+    }
+    // Variable on the right: bind it to the left
+    if kb == GadtTypeKind::GadtTyVar {
+        let vid = env.types[b as usize].var_id
+        if gadt_occurs_check(env, vid, a) {
+            return false
+        }
+        let eidx = gadt_push_evidence(env, vid, a, GADT_INVALID)
+        return true
+    }
+    // Kind mismatch => not unifiable
+    if ka != kb {
+        return false
+    }
+    // Type constructors: must have the same con_id
+    if ka == GadtTypeKind::GadtTyCon {
+        return env.types[a as usize].con_id == env.types[b as usize].con_id
+    }
+    // Type applications: unify constructor and all params
+    if ka == GadtTypeKind::GadtTyApp {
+        if env.types[a as usize].con_id != env.types[b as usize].con_id {
+            return false
+        }
+        let pc = env.types[a as usize].param_count
+        if pc != env.types[b as usize].param_count {
+            return false
+        }
+        return gadt_unify_params(env, env.types[a as usize].params, env.types[b as usize].params, pc)
+    }
+    // Function types
+    if ka == GadtTypeKind::GadtTyFunc {
+        let dom_ok = gadt_unify(env, env.types[a as usize].params[0 as usize], env.types[b as usize].params[0 as usize])
+        if dom_ok == false {
+            return false
+        }
+        return gadt_unify(env, env.types[a as usize].return_ty, env.types[b as usize].return_ty)
+    }
+    // Primitives of the same kind are unifiable
+    true
+}
+
+// Unify arrays of type parameters element-wise.
+fn gadt_unify_params(env: &! GadtEnv, params_a: [i64; 16], params_b: [i64; 16], count: i64) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < count {
+        if gadt_unify(env, params_a[i as usize], params_b[i as usize]) == false {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// ============================================================
+// Section 9: Constraint Management
+// ============================================================
+
+// Add a type equality constraint.  Returns constraint index.
+fn gadt_add_constraint(env: &! GadtEnv, lhs: i64, rhs: i64, ctor: i64) -> i64 with Mut, Div, Panic {
+    gadt_add_constraint_raw(env, lhs, rhs, ctor)
+}
+
+// Activate all constraints sourced from a given constructor.
+// Returns the number of constraints activated.
+fn gadt_activate_constraints(env: &! GadtEnv, ctor_idx: i64) -> i64 with Mut, Div, Panic {
+    var activated: i64 = 0
+    var i: i64 = 0
+    while i < env.constraint_count {
+        if env.constraints[i as usize].source_ctor == ctor_idx {
+            if env.constraints[i as usize].active == false {
+                env.constraints[i as usize].active = true
+                activated = activated + 1
+            }
+        }
+        i = i + 1
+    }
+    activated
+}
+
+// Deactivate all constraints sourced from a given constructor.
+// Returns the number of constraints deactivated.
+fn gadt_deactivate_constraints(env: &! GadtEnv, ctor_idx: i64) -> i64 with Mut, Div, Panic {
+    var deactivated: i64 = 0
+    var i: i64 = 0
+    while i < env.constraint_count {
+        if env.constraints[i as usize].source_ctor == ctor_idx {
+            if env.constraints[i as usize].active {
+                env.constraints[i as usize].active = false
+                deactivated = deactivated + 1
+            }
+        }
+        i = i + 1
+    }
+    deactivated
+}
+
+// Count active constraints.
+fn gadt_get_active_constraints(env: &GadtEnv) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < env.constraint_count {
+        if env.constraints[i as usize].active {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================
+// Section 10: Evidence and Refinement
+// ============================================================
+
+// Push a type refinement evidence entry.  Returns the evidence index.
+fn gadt_push_evidence(env: &! GadtEnv, var_id: i64, refined_type: i64, from_constraint: i64) -> i64 with Mut, Div, Panic {
+    let idx = env.evidence_count
+    if idx >= GADT_MAX_EVIDENCE {
+        return GADT_INVALID
+    }
+    env.evidence[idx as usize] = GadtEvidence {
+        var_id: var_id,
+        refined_type: refined_type,
+        from_constraint: from_constraint,
+        scope_depth: env.scope_depth,
+    }
+    env.evidence_count = idx + 1
+    idx
+}
+
+// Pop all evidence entries above the given depth.
+// Returns the number of entries removed.
+fn gadt_pop_evidence_to(env: &! GadtEnv, depth: i64) -> i64 with Mut, Div, Panic {
+    var removed: i64 = 0
+    while env.evidence_count > 0 {
+        let top = env.evidence_count - 1
+        if env.evidence[top as usize].scope_depth > depth {
+            env.evidence_count = top
+            removed = removed + 1
+        } else {
+            return removed
+        }
+    }
+    removed
+}
+
+// Find the most recent evidence for a type variable.
+// Returns the refined_type or GADT_INVALID if none found.
+fn gadt_find_evidence(env: &GadtEnv, var_id: i64) -> i64 with Mut, Div, Panic {
+    // Search from most recent to oldest for last-write-wins semantics.
+    var i = env.evidence_count - 1
+    while i >= 0 {
+        if env.evidence[i as usize].var_id == var_id {
+            return env.evidence[i as usize].refined_type
+        }
+        i = i - 1
+    }
+    GADT_INVALID
+}
+
+// Apply all active evidence to refine a type.
+// If the type is a variable and we have evidence for it, return the refined type.
+// Recursively applies evidence for compound types.
+fn gadt_refine_type(env: &GadtEnv, ty: i64) -> i64 with Mut, Div, Panic {
+    if ty < 0 || ty >= env.type_count {
+        return ty
+    }
+    let k = env.types[ty as usize].kind
+    if k == GadtTypeKind::GadtTyVar {
+        let vid = env.types[ty as usize].var_id
+        let refined = gadt_find_evidence(env, vid)
+        if refined != GADT_INVALID {
+            return refined
+        }
+        return ty
+    }
+    // For compound types, we would need to recursively refine.
+    // Refinement of application / function types requires mutation for
+    // new type allocation, so this read-only version handles only variables.
+    ty
+}
+
+// Enter a new evidence scope.  Returns the new depth.
+fn gadt_enter_scope(env: &! GadtEnv) -> i64 with Mut {
+    env.scope_depth = env.scope_depth + 1
+    env.scope_depth
+}
+
+// Exit to a previous scope depth.  Pops evidence and returns the count removed.
+fn gadt_exit_scope(env: &! GadtEnv, saved_depth: i64) -> i64 with Mut, Div, Panic {
+    let removed = gadt_pop_evidence_to(env, saved_depth)
+    env.scope_depth = saved_depth
+    removed
+}
+
+// ============================================================
+// Section 11: Pattern Match Integration
+// ============================================================
+
+// Check a match arm against a GADT scrutinee type and constructor.
+// Activates constraints from the matched constructor, pushes evidence
+// from unifying formal params with the scrutinee's actual params.
+// Returns true if the arm is well-typed.
+fn gadt_check_match_arm(env: &! GadtEnv, scrutinee_ty: i64, ctor_idx: i64) -> bool with Mut, Div, Panic {
+    if ctor_idx < 0 || ctor_idx >= env.ctor_count {
+        return false
+    }
+    let gadt_id = env.ctors[ctor_idx as usize].gadt_id
+    if gadt_id < 0 || gadt_id >= env.def_count {
+        return false
+    }
+
+    // Activate this constructor's constraints
+    let activated = gadt_activate_constraints(env, ctor_idx)
+
+    // Generate evidence from the constructor's result_params.
+    // Each result_param refines the corresponding GADT formal param.
+    let rpc = env.ctors[ctor_idx as usize].result_param_count
+    let dpc = env.defs[gadt_id as usize].param_count
+    var i: i64 = 0
+    while i < rpc {
+        if i < dpc {
+            let formal = env.defs[gadt_id as usize].param_names[i as usize]
+            let actual = env.ctors[ctor_idx as usize].result_params[i as usize]
+            let eidx = gadt_push_evidence(env, formal, actual, i)
+        }
+        i = i + 1
+    }
+
+    true
+}
+
+// Infer the result type of a constructor applied to actual type params.
+// Returns the inferred type index.
+fn gadt_infer_ctor_result(env: &GadtEnv, ctor_idx: i64, actual_params: [i64; 16], param_count: i64) -> i64 with Div, Panic {
+    if ctor_idx < 0 || ctor_idx >= env.ctor_count {
+        return GADT_INVALID
+    }
+    let gadt_id = env.ctors[ctor_idx as usize].gadt_id
+    if gadt_id < 0 || gadt_id >= env.def_count {
+        return GADT_INVALID
+    }
+    // The result type is the GADT applied to the constructor's result_params.
+    // But we need to substitute the formal params with actual_params.
+    // For now, return the gadt_id to indicate which GADT this belongs to.
+    gadt_id
+}
+
+// Check exhaustiveness: given a GADT and the set of covered constructors,
+// return true if all constructors are covered.
+fn gadt_check_exhaustiveness(env: &GadtEnv, gadt_id: i64, covered_ctors: [i64; 512], covered_count: i64) -> bool with Mut, Div, Panic {
+    if gadt_id < 0 || gadt_id >= env.def_count {
+        return false
+    }
+    let total_ctors = env.defs[gadt_id as usize].ctor_count
+    let missing = gadt_missing_ctors_count(env, gadt_id, covered_ctors, covered_count)
+    missing == 0
+}
+
+// Count missing constructors (those not in covered_ctors).
+fn gadt_missing_ctors(env: &GadtEnv, gadt_id: i64, covered_ctors: [i64; 512], covered_count: i64) -> i64 with Mut, Div, Panic {
+    gadt_missing_ctors_count(env, gadt_id, covered_ctors, covered_count)
+}
+
+// Internal helper for missing ctor counting.
+fn gadt_missing_ctors_count(env: &GadtEnv, gadt_id: i64, covered_ctors: [i64; 512], covered_count: i64) -> i64 with Mut, Div, Panic {
+    if gadt_id < 0 || gadt_id >= env.def_count {
+        return 0
+    }
+    let ctor_start = env.defs[gadt_id as usize].ctor_start
+    let ctor_count = env.defs[gadt_id as usize].ctor_count
+    var missing: i64 = 0
+    var ci: i64 = 0
+    while ci < ctor_count {
+        let ctor_idx = ctor_start + ci
+        var found = false
+        var j: i64 = 0
+        while j < covered_count {
+            if covered_ctors[j as usize] == ctor_idx {
+                found = true
+            }
+            j = j + 1
+        }
+        if found == false {
+            missing = missing + 1
+        }
+        ci = ci + 1
+    }
+    missing
+}
+
+// ============================================================
+// Section 12: Validation
+// ============================================================
+
+// Validate a GADT definition: check that name_id is set, param_count
+// is within bounds, and all constructors reference valid types.
+fn gadt_validate_def(env: &GadtEnv, def_idx: i64) -> bool with Mut, Div, Panic {
+    if def_idx < 0 || def_idx >= env.def_count {
+        return false
+    }
+    let def = env.defs[def_idx as usize]
+    if def.name_id < 0 {
+        return false
+    }
+    if def.param_count < 0 || def.param_count > GADT_MAX_PARAMS {
+        return false
+    }
+    // Check all constructors belonging to this GADT
+    var i: i64 = 0
+    while i < def.ctor_count {
+        let ctor_idx = def.ctor_start + i
+        if gadt_validate_ctor(env, ctor_idx) == false {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Validate a constructor: check field counts, gadt_id references.
+fn gadt_validate_ctor(env: &GadtEnv, ctor_idx: i64) -> bool with Div, Panic {
+    if ctor_idx < 0 || ctor_idx >= env.ctor_count {
+        return false
+    }
+    let ctor = env.ctors[ctor_idx as usize]
+    if ctor.name_id < 0 {
+        return false
+    }
+    if ctor.gadt_id < 0 || ctor.gadt_id >= env.def_count {
+        return false
+    }
+    if ctor.field_count < 0 || ctor.field_count > GADT_MAX_FIELDS {
+        return false
+    }
+    if ctor.result_param_count < 0 || ctor.result_param_count > GADT_MAX_PARAMS {
+        return false
+    }
+    true
+}
+
+// Check that all field types in a constructor reference valid type indices.
+fn gadt_check_ctor_types(env: &GadtEnv, ctor_idx: i64) -> bool with Mut, Div, Panic {
+    if ctor_idx < 0 || ctor_idx >= env.ctor_count {
+        return false
+    }
+    let ctor = env.ctors[ctor_idx as usize]
+    var i: i64 = 0
+    while i < ctor.field_count {
+        let ft = ctor.field_types[i as usize]
+        if ft < 0 || ft >= env.type_count {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Check if a GADT definition is recursive: does any constructor's field types
+// reference the GADT itself (directly or through a type application)?
+fn gadt_is_recursive(env: &GadtEnv, def_idx: i64) -> bool with Mut, Div, Panic {
+    if def_idx < 0 || def_idx >= env.def_count {
+        return false
+    }
+    let def = env.defs[def_idx as usize]
+    var ci: i64 = 0
+    while ci < def.ctor_count {
+        let ctor_idx = def.ctor_start + ci
+        if ctor_idx >= 0 && ctor_idx < env.ctor_count {
+            let ctor = env.ctors[ctor_idx as usize]
+            var fi: i64 = 0
+            while fi < ctor.field_count {
+                let ft = ctor.field_types[fi as usize]
+                if gadt_type_mentions_def(env, ft, def_idx) {
+                    return true
+                }
+                fi = fi + 1
+            }
+        }
+        ci = ci + 1
+    }
+    false
+}
+
+// Helper: check if a type references a GADT def (by con_id match).
+fn gadt_type_mentions_def(env: &GadtEnv, ty: i64, def_idx: i64) -> bool with Mut, Div, Panic {
+    if ty < 0 || ty >= env.type_count {
+        return false
+    }
+    let k = env.types[ty as usize].kind
+    if k == GadtTypeKind::GadtTyCon {
+        return env.types[ty as usize].con_id == def_idx
+    }
+    if k == GadtTypeKind::GadtTyApp {
+        // Check the constructor
+        let con = env.types[ty as usize].con_id
+        if con >= 0 && con < env.type_count {
+            if gadt_type_mentions_def(env, con, def_idx) {
+                return true
+            }
+        }
+        // Also check the applied con_id directly (often it is the def index)
+        if env.types[ty as usize].con_id == def_idx {
+            return true
+        }
+        // Check params
+        let pc = env.types[ty as usize].param_count
+        var i: i64 = 0
+        while i < pc {
+            if gadt_type_mentions_def(env, env.types[ty as usize].params[i as usize], def_idx) {
+                return true
+            }
+            i = i + 1
+        }
+        return false
+    }
+    if k == GadtTypeKind::GadtTyFunc {
+        if gadt_type_mentions_def(env, env.types[ty as usize].params[0 as usize], def_idx) {
+            return true
+        }
+        return gadt_type_mentions_def(env, env.types[ty as usize].return_ty, def_idx)
+    }
+    false
+}
+
+// ============================================================
+// Section 13: Tests
+// ============================================================
+// All tests use the _inner pattern: the inner function takes &! GadtEnv,
+// the outer function creates var env = gadt_env_new() and passes &! env.
+
+// ---- Type Construction Tests (5 tests) ----
+
+fn test_gadt_mk_var_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let v0 = gadt_mk_var(env, 100)
+    let v1 = gadt_mk_var(env, 200)
+    if v0 != 0 { return false }
+    if v1 != 1 { return false }
+    if env.type_count != 2 { return false }
+    let k0 = gadt_type_kind(env, v0)
+    let k1 = gadt_type_kind(env, v1)
+    k0 == GadtTypeKind::GadtTyVar && k1 == GadtTypeKind::GadtTyVar
+}
+fn test_gadt_mk_var() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_mk_var_inner(&! env)
+}
+
+fn test_gadt_mk_con_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let c0 = gadt_mk_con(env, 10)
+    let c1 = gadt_mk_con(env, 20)
+    if c0 != 0 { return false }
+    if c1 != 1 { return false }
+    let k = gadt_type_kind(env, c0)
+    k == GadtTypeKind::GadtTyCon && env.types[c0 as usize].con_id == 10
+}
+fn test_gadt_mk_con() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_mk_con_inner(&! env)
+}
+
+fn test_gadt_mk_app_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let con = gadt_mk_con(env, 5)
+    let p0 = gadt_mk_int(env)
+    let p1 = gadt_mk_bool(env)
+    var params: [i64; 16] = [0; 16]
+    params[0 as usize] = p0
+    params[1 as usize] = p1
+    let app = gadt_mk_app(env, con, params, 2)
+    let k = gadt_type_kind(env, app)
+    if k != GadtTypeKind::GadtTyApp { return false }
+    env.types[app as usize].param_count == 2
+}
+fn test_gadt_mk_app() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_mk_app_inner(&! env)
+}
+
+fn test_gadt_mk_primitives_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let ti = gadt_mk_int(env)
+    let tb = gadt_mk_bool(env)
+    let tf = gadt_mk_float(env)
+    let ki = gadt_type_kind(env, ti)
+    let kb = gadt_type_kind(env, tb)
+    let kf = gadt_type_kind(env, tf)
+    ki == GadtTypeKind::GadtTyInt && kb == GadtTypeKind::GadtTyBool && kf == GadtTypeKind::GadtTyFloat
+}
+fn test_gadt_mk_primitives() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_mk_primitives_inner(&! env)
+}
+
+fn test_gadt_mk_func_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let ti = gadt_mk_int(env)
+    let tb = gadt_mk_bool(env)
+    let ft = gadt_mk_func(env, ti, tb)
+    let k = gadt_type_kind(env, ft)
+    if k != GadtTypeKind::GadtTyFunc { return false }
+    if env.types[ft as usize].params[0 as usize] != ti { return false }
+    env.types[ft as usize].return_ty == tb
+}
+fn test_gadt_mk_func() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_mk_func_inner(&! env)
+}
+
+// ---- GADT Definition Tests (5 tests) ----
+
+fn test_gadt_add_def_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    var pnames: [i64; 16] = [0; 16]
+    pnames[0 as usize] = 1000
+    pnames[1 as usize] = 1001
+    let def_id = gadt_add_def(env, 42, 2, pnames)
+    if def_id != 0 { return false }
+    if env.def_count != 1 { return false }
+    if env.defs[0 as usize].name_id != 42 { return false }
+    env.defs[0 as usize].param_count == 2
+}
+fn test_gadt_add_def() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_add_def_inner(&! env)
+}
+
+fn test_gadt_find_def_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    var pn: [i64; 16] = [0; 16]
+    let d0 = gadt_add_def(env, 100, 1, pn)
+    let d1 = gadt_add_def(env, 200, 1, pn)
+    let d2 = gadt_add_def(env, 300, 1, pn)
+    let f0 = gadt_find_def(env, 100)
+    let f1 = gadt_find_def(env, 200)
+    let f2 = gadt_find_def(env, 300)
+    let fmiss = gadt_find_def(env, 999)
+    f0 == 0 && f1 == 1 && f2 == 2 && fmiss == GADT_INVALID
+}
+fn test_gadt_find_def() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_find_def_inner(&! env)
+}
+
+fn test_gadt_def_param_names_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    var pn: [i64; 16] = [0; 16]
+    pn[0 as usize] = 500
+    pn[1 as usize] = 501
+    pn[2 as usize] = 502
+    let did = gadt_add_def(env, 77, 3, pn)
+    if env.defs[did as usize].param_names[0 as usize] != 500 { return false }
+    if env.defs[did as usize].param_names[1 as usize] != 501 { return false }
+    env.defs[did as usize].param_names[2 as usize] == 502
+}
+fn test_gadt_def_param_names() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_def_param_names_inner(&! env)
+}
+
+fn test_gadt_multiple_defs_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    var pn: [i64; 16] = [0; 16]
+    let d0 = gadt_add_def(env, 10, 1, pn)
+    let d1 = gadt_add_def(env, 20, 2, pn)
+    let d2 = gadt_add_def(env, 30, 0, pn)
+    if env.def_count != 3 { return false }
+    if env.defs[0 as usize].param_count != 1 { return false }
+    if env.defs[1 as usize].param_count != 2 { return false }
+    env.defs[2 as usize].param_count == 0
+}
+fn test_gadt_multiple_defs() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_multiple_defs_inner(&! env)
+}
+
+fn test_gadt_def_ctor_start_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    var pn: [i64; 16] = [0; 16]
+    let d0 = gadt_add_def(env, 10, 1, pn)
+    // ctor_start should be 0 since no ctors exist yet
+    env.defs[d0 as usize].ctor_start == 0
+}
+fn test_gadt_def_ctor_start() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_def_ctor_start_inner(&! env)
+}
+
+// ---- Constructor Operations Tests (5 tests) ----
+
+fn test_gadt_add_ctor_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    var pn: [i64; 16] = [0; 16]
+    pn[0 as usize] = 1000
+    let did = gadt_add_def(env, 42, 1, pn)
+    let int_ty = gadt_mk_int(env)
+    var fields: [i64; 32] = [0; 32]
+    fields[0 as usize] = int_ty
+    var rparams: [i64; 16] = [0; 16]
+    rparams[0 as usize] = int_ty
+    let cid = gadt_add_ctor(env, did, 100, fields, 1, rparams, 1)
+    if cid != 0 { return false }
+    if env.ctor_count != 1 { return false }
+    env.ctors[0 as usize].name_id == 100
+}
+fn test_gadt_add_ctor() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_add_ctor_inner(&! env)
+}
+
+fn test_gadt_find_ctor_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    var pn: [i64; 16] = [0; 16]
+    let did = gadt_add_def(env, 42, 0, pn)
+    var fields: [i64; 32] = [0; 32]
+    var rp: [i64; 16] = [0; 16]
+    let c0 = gadt_add_ctor(env, did, 200, fields, 0, rp, 0)
+    let c1 = gadt_add_ctor(env, did, 300, fields, 0, rp, 0)
+    let f0 = gadt_find_ctor(env, 200)
+    let f1 = gadt_find_ctor(env, 300)
+    let fmiss = gadt_find_ctor(env, 999)
+    f0 == c0 && f1 == c1 && fmiss == GADT_INVALID
+}
+fn test_gadt_find_ctor() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_find_ctor_inner(&! env)
+}
+
+fn test_gadt_ctor_gadt_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    var pn: [i64; 16] = [0; 16]
+    let d0 = gadt_add_def(env, 10, 0, pn)
+    let d1 = gadt_add_def(env, 20, 0, pn)
+    var fields: [i64; 32] = [0; 32]
+    var rp: [i64; 16] = [0; 16]
+    let c0 = gadt_add_ctor(env, d0, 100, fields, 0, rp, 0)
+    let c1 = gadt_add_ctor(env, d1, 200, fields, 0, rp, 0)
+    let g0 = gadt_ctor_gadt(env, c0)
+    let g1 = gadt_ctor_gadt(env, c1)
+    g0 == d0 && g1 == d1
+}
+fn test_gadt_ctor_gadt() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_ctor_gadt_inner(&! env)
+}
+
+fn test_gadt_ctor_field_types_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    var pn: [i64; 16] = [0; 16]
+    let did = gadt_add_def(env, 50, 0, pn)
+    let ti = gadt_mk_int(env)
+    let tb = gadt_mk_bool(env)
+    let tf = gadt_mk_float(env)
+    var fields: [i64; 32] = [0; 32]
+    fields[0 as usize] = ti
+    fields[1 as usize] = tb
+    fields[2 as usize] = tf
+    var rp: [i64; 16] = [0; 16]
+    let cid = gadt_add_ctor(env, did, 101, fields, 3, rp, 0)
+    if env.ctors[cid as usize].field_count != 3 { return false }
+    if env.ctors[cid as usize].field_types[0 as usize] != ti { return false }
+    if env.ctors[cid as usize].field_types[1 as usize] != tb { return false }
+    env.ctors[cid as usize].field_types[2 as usize] == tf
+}
+fn test_gadt_ctor_field_types() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_ctor_field_types_inner(&! env)
+}
+
+fn test_gadt_ctor_increments_def_count_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    var pn: [i64; 16] = [0; 16]
+    let did = gadt_add_def(env, 60, 0, pn)
+    var fields: [i64; 32] = [0; 32]
+    var rp: [i64; 16] = [0; 16]
+    let c0 = gadt_add_ctor(env, did, 600, fields, 0, rp, 0)
+    let c1 = gadt_add_ctor(env, did, 601, fields, 0, rp, 0)
+    let c2 = gadt_add_ctor(env, did, 602, fields, 0, rp, 0)
+    env.defs[did as usize].ctor_count == 3
+}
+fn test_gadt_ctor_increments_def_count() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_ctor_increments_def_count_inner(&! env)
+}
+
+// ---- Type Substitution Tests (5 tests) ----
+
+fn test_gadt_subst_var_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let v = gadt_mk_var(env, 10)
+    let ti = gadt_mk_int(env)
+    let result = gadt_subst_type(env, v, 10, ti)
+    result == ti
+}
+fn test_gadt_subst_var() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_subst_var_inner(&! env)
+}
+
+fn test_gadt_subst_no_match_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let v = gadt_mk_var(env, 10)
+    let ti = gadt_mk_int(env)
+    let result = gadt_subst_type(env, v, 99, ti)
+    // Should not substitute — different var_id
+    result == v
+}
+fn test_gadt_subst_no_match() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_subst_no_match_inner(&! env)
+}
+
+fn test_gadt_subst_app_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let con = gadt_mk_con(env, 5)
+    let v = gadt_mk_var(env, 10)
+    var params: [i64; 16] = [0; 16]
+    params[0 as usize] = v
+    let app = gadt_mk_app(env, con, params, 1)
+    let ti = gadt_mk_int(env)
+    let result = gadt_subst_type(env, app, 10, ti)
+    // Should get a new app with Int in place of the variable
+    if result == app { return false }
+    let k = gadt_type_kind(env, result)
+    k == GadtTypeKind::GadtTyApp
+}
+fn test_gadt_subst_app() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_subst_app_inner(&! env)
+}
+
+fn test_gadt_subst_func_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let v = gadt_mk_var(env, 20)
+    let tb = gadt_mk_bool(env)
+    let ft = gadt_mk_func(env, v, tb)
+    let ti = gadt_mk_int(env)
+    let result = gadt_subst_type(env, ft, 20, ti)
+    if result == ft { return false }
+    let k = gadt_type_kind(env, result)
+    k == GadtTypeKind::GadtTyFunc
+}
+fn test_gadt_subst_func() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_subst_func_inner(&! env)
+}
+
+fn test_gadt_apply_subst_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let v0 = gadt_mk_var(env, 10)
+    let v1 = gadt_mk_var(env, 20)
+    let ti = gadt_mk_int(env)
+    let tb = gadt_mk_bool(env)
+    let ft = gadt_mk_func(env, v0, v1)
+    var sv: [i64; 16] = [0; 16]
+    var st: [i64; 16] = [0; 16]
+    sv[0 as usize] = 10
+    sv[1 as usize] = 20
+    st[0 as usize] = ti
+    st[1 as usize] = tb
+    let result = gadt_apply_subst(env, ft, sv, st, 2)
+    // Should produce Int -> Bool
+    let k = gadt_type_kind(env, result)
+    k == GadtTypeKind::GadtTyFunc
+}
+fn test_gadt_apply_subst() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_apply_subst_inner(&! env)
+}
+
+// ---- Unification Tests (5 tests) ----
+
+fn test_gadt_types_equal_same_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let ti = gadt_mk_int(env)
+    gadt_types_equal(env, ti, ti)
+}
+fn test_gadt_types_equal_same() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_types_equal_same_inner(&! env)
+}
+
+fn test_gadt_types_equal_diff_kind_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let ti = gadt_mk_int(env)
+    let tb = gadt_mk_bool(env)
+    gadt_types_equal(env, ti, tb) == false
+}
+fn test_gadt_types_equal_diff_kind() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_types_equal_diff_kind_inner(&! env)
+}
+
+fn test_gadt_unify_var_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let v = gadt_mk_var(env, 50)
+    let ti = gadt_mk_int(env)
+    let ok = gadt_unify(env, v, ti)
+    if ok == false { return false }
+    // Evidence should have been pushed
+    let refined = gadt_find_evidence(env, 50)
+    refined == ti
+}
+fn test_gadt_unify_var() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_unify_var_inner(&! env)
+}
+
+fn test_gadt_unify_app_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let con = gadt_mk_con(env, 1)
+    let ti = gadt_mk_int(env)
+    let tb = gadt_mk_bool(env)
+    var p1: [i64; 16] = [0; 16]
+    var p2: [i64; 16] = [0; 16]
+    p1[0 as usize] = ti
+    p2[0 as usize] = ti
+    let a1 = gadt_mk_app(env, con, p1, 1)
+    let a2 = gadt_mk_app(env, con, p2, 1)
+    gadt_unify(env, a1, a2)
+}
+fn test_gadt_unify_app() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_unify_app_inner(&! env)
+}
+
+fn test_gadt_occurs_check_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let v = gadt_mk_var(env, 77)
+    let con = gadt_mk_con(env, 1)
+    var p: [i64; 16] = [0; 16]
+    p[0 as usize] = v
+    let app = gadt_mk_app(env, con, p, 1)
+    // v occurs in app, so occurs check should find it
+    let found = gadt_occurs_check(env, 77, app)
+    if found == false { return false }
+    // v does not occur in a separate int type
+    let ti = gadt_mk_int(env)
+    let not_found = gadt_occurs_check(env, 77, ti)
+    not_found == false
+}
+fn test_gadt_occurs_check() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_occurs_check_inner(&! env)
+}
+
+// ---- Constraint Tests (5 tests) ----
+
+fn test_gadt_add_constraint_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let ti = gadt_mk_int(env)
+    let tb = gadt_mk_bool(env)
+    let cid = gadt_add_constraint(env, ti, tb, 0)
+    if cid != 0 { return false }
+    if env.constraint_count != 1 { return false }
+    env.constraints[0 as usize].lhs_type == ti && env.constraints[0 as usize].rhs_type == tb
+}
+fn test_gadt_add_constraint() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_add_constraint_inner(&! env)
+}
+
+fn test_gadt_activate_constraints_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let ti = gadt_mk_int(env)
+    let tb = gadt_mk_bool(env)
+    let c0 = gadt_add_constraint(env, ti, tb, 5)
+    let c1 = gadt_add_constraint(env, tb, ti, 5)
+    let c2 = gadt_add_constraint(env, ti, ti, 6)
+    let activated = gadt_activate_constraints(env, 5)
+    if activated != 2 { return false }
+    let active_count = gadt_get_active_constraints(env)
+    active_count == 2
+}
+fn test_gadt_activate_constraints() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_activate_constraints_inner(&! env)
+}
+
+fn test_gadt_deactivate_constraints_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let ti = gadt_mk_int(env)
+    let tb = gadt_mk_bool(env)
+    let c0 = gadt_add_constraint(env, ti, tb, 7)
+    let c1 = gadt_add_constraint(env, tb, ti, 7)
+    let activated = gadt_activate_constraints(env, 7)
+    let deactivated = gadt_deactivate_constraints(env, 7)
+    if deactivated != 2 { return false }
+    let active_count = gadt_get_active_constraints(env)
+    active_count == 0
+}
+fn test_gadt_deactivate_constraints() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_deactivate_constraints_inner(&! env)
+}
+
+fn test_gadt_constraint_inactive_by_default_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let ti = gadt_mk_int(env)
+    let c0 = gadt_add_constraint(env, ti, ti, 0)
+    env.constraints[0 as usize].active == false
+}
+fn test_gadt_constraint_inactive_by_default() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_constraint_inactive_by_default_inner(&! env)
+}
+
+fn test_gadt_activate_only_matching_ctor_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let ti = gadt_mk_int(env)
+    let tb = gadt_mk_bool(env)
+    let c0 = gadt_add_constraint(env, ti, tb, 10)
+    let c1 = gadt_add_constraint(env, tb, ti, 11)
+    let c2 = gadt_add_constraint(env, ti, ti, 10)
+    let activated = gadt_activate_constraints(env, 10)
+    if activated != 2 { return false }
+    // Constraint from ctor 11 should still be inactive
+    env.constraints[1 as usize].active == false
+}
+fn test_gadt_activate_only_matching_ctor() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_activate_only_matching_ctor_inner(&! env)
+}
+
+// ---- Evidence / Refinement Tests (5 tests) ----
+
+fn test_gadt_push_evidence_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let ti = gadt_mk_int(env)
+    let eid = gadt_push_evidence(env, 100, ti, GADT_INVALID)
+    if eid != 0 { return false }
+    if env.evidence_count != 1 { return false }
+    env.evidence[0 as usize].var_id == 100 && env.evidence[0 as usize].refined_type == ti
+}
+fn test_gadt_push_evidence() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_push_evidence_inner(&! env)
+}
+
+fn test_gadt_find_evidence_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let ti = gadt_mk_int(env)
+    let tb = gadt_mk_bool(env)
+    let e0 = gadt_push_evidence(env, 100, ti, GADT_INVALID)
+    let e1 = gadt_push_evidence(env, 200, tb, GADT_INVALID)
+    let f100 = gadt_find_evidence(env, 100)
+    let f200 = gadt_find_evidence(env, 200)
+    let fmiss = gadt_find_evidence(env, 999)
+    f100 == ti && f200 == tb && fmiss == GADT_INVALID
+}
+fn test_gadt_find_evidence() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_find_evidence_inner(&! env)
+}
+
+fn test_gadt_evidence_shadowing_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let ti = gadt_mk_int(env)
+    let tb = gadt_mk_bool(env)
+    let e0 = gadt_push_evidence(env, 100, ti, GADT_INVALID)
+    let e1 = gadt_push_evidence(env, 100, tb, GADT_INVALID)
+    // Most recent should win
+    let result = gadt_find_evidence(env, 100)
+    result == tb
+}
+fn test_gadt_evidence_shadowing() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_evidence_shadowing_inner(&! env)
+}
+
+fn test_gadt_refine_type_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let v = gadt_mk_var(env, 55)
+    let ti = gadt_mk_int(env)
+    let e0 = gadt_push_evidence(env, 55, ti, GADT_INVALID)
+    let refined = gadt_refine_type(env, v)
+    refined == ti
+}
+fn test_gadt_refine_type() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_refine_type_inner(&! env)
+}
+
+fn test_gadt_refine_no_evidence_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let v = gadt_mk_var(env, 66)
+    let refined = gadt_refine_type(env, v)
+    // No evidence, should return original type
+    refined == v
+}
+fn test_gadt_refine_no_evidence() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_refine_no_evidence_inner(&! env)
+}
+
+// ---- Pattern Matching Tests (5 tests) ----
+
+fn test_gadt_check_match_arm_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    // Set up: GADT Expr<T> with ctor IntLit : Expr<Int>
+    var pn: [i64; 16] = [0; 16]
+    pn[0 as usize] = 1000  // formal param T
+    let did = gadt_add_def(env, 42, 1, pn)
+    let int_ty = gadt_mk_int(env)
+    var fields: [i64; 32] = [0; 32]
+    fields[0 as usize] = int_ty
+    var rp: [i64; 16] = [0; 16]
+    rp[0 as usize] = int_ty  // result param: T = Int
+    let cid = gadt_add_ctor(env, did, 100, fields, 1, rp, 1)
+    // Now check the match arm
+    let scru_ty = gadt_mk_int(env)
+    let ok = gadt_check_match_arm(env, scru_ty, cid)
+    ok
+}
+fn test_gadt_check_match_arm() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_check_match_arm_inner(&! env)
+}
+
+fn test_gadt_check_match_arm_invalid_ctor_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let ti = gadt_mk_int(env)
+    // No constructors registered; check should fail
+    let ok = gadt_check_match_arm(env, ti, 999)
+    ok == false
+}
+fn test_gadt_check_match_arm_invalid_ctor() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_check_match_arm_invalid_ctor_inner(&! env)
+}
+
+fn test_gadt_infer_ctor_result_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    var pn: [i64; 16] = [0; 16]
+    let did = gadt_add_def(env, 50, 1, pn)
+    var fields: [i64; 32] = [0; 32]
+    var rp: [i64; 16] = [0; 16]
+    let cid = gadt_add_ctor(env, did, 200, fields, 0, rp, 0)
+    var ap: [i64; 16] = [0; 16]
+    let result = gadt_infer_ctor_result(env, cid, ap, 0)
+    // Should return the gadt_id
+    result == did
+}
+fn test_gadt_infer_ctor_result() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_infer_ctor_result_inner(&! env)
+}
+
+fn test_gadt_match_arm_pushes_evidence_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    var pn: [i64; 16] = [0; 16]
+    pn[0 as usize] = 800  // formal param T
+    let did = gadt_add_def(env, 70, 1, pn)
+    let bool_ty = gadt_mk_bool(env)
+    var fields: [i64; 32] = [0; 32]
+    var rp: [i64; 16] = [0; 16]
+    rp[0 as usize] = bool_ty  // T = Bool
+    let cid = gadt_add_ctor(env, did, 300, fields, 0, rp, 1)
+    let scru = gadt_mk_int(env)
+    let old_ec = env.evidence_count
+    let ok = gadt_check_match_arm(env, scru, cid)
+    if ok == false { return false }
+    // Should have pushed evidence for param 800 -> bool_ty
+    env.evidence_count > old_ec
+}
+fn test_gadt_match_arm_pushes_evidence() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_match_arm_pushes_evidence_inner(&! env)
+}
+
+fn test_gadt_match_arm_evidence_correct_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    var pn: [i64; 16] = [0; 16]
+    pn[0 as usize] = 900  // formal param T
+    let did = gadt_add_def(env, 80, 1, pn)
+    let float_ty = gadt_mk_float(env)
+    var fields: [i64; 32] = [0; 32]
+    var rp: [i64; 16] = [0; 16]
+    rp[0 as usize] = float_ty  // T = Float
+    let cid = gadt_add_ctor(env, did, 400, fields, 0, rp, 1)
+    let scru = gadt_mk_int(env)
+    let ok = gadt_check_match_arm(env, scru, cid)
+    if ok == false { return false }
+    let ev = gadt_find_evidence(env, 900)
+    ev == float_ty
+}
+fn test_gadt_match_arm_evidence_correct() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_match_arm_evidence_correct_inner(&! env)
+}
+
+// ---- Exhaustiveness Tests (5 tests) ----
+
+fn test_gadt_exhaustive_all_covered_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    var pn: [i64; 16] = [0; 16]
+    let did = gadt_add_def(env, 1, 0, pn)
+    var fields: [i64; 32] = [0; 32]
+    var rp: [i64; 16] = [0; 16]
+    let c0 = gadt_add_ctor(env, did, 10, fields, 0, rp, 0)
+    let c1 = gadt_add_ctor(env, did, 11, fields, 0, rp, 0)
+    var covered: [i64; 512] = [0; 512]
+    covered[0 as usize] = c0
+    covered[1 as usize] = c1
+    gadt_check_exhaustiveness(env, did, covered, 2)
+}
+fn test_gadt_exhaustive_all_covered() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_exhaustive_all_covered_inner(&! env)
+}
+
+fn test_gadt_exhaustive_missing_one_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    var pn: [i64; 16] = [0; 16]
+    let did = gadt_add_def(env, 2, 0, pn)
+    var fields: [i64; 32] = [0; 32]
+    var rp: [i64; 16] = [0; 16]
+    let c0 = gadt_add_ctor(env, did, 20, fields, 0, rp, 0)
+    let c1 = gadt_add_ctor(env, did, 21, fields, 0, rp, 0)
+    let c2 = gadt_add_ctor(env, did, 22, fields, 0, rp, 0)
+    var covered: [i64; 512] = [0; 512]
+    covered[0 as usize] = c0
+    covered[1 as usize] = c2
+    // Missing c1
+    gadt_check_exhaustiveness(env, did, covered, 2) == false
+}
+fn test_gadt_exhaustive_missing_one() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_exhaustive_missing_one_inner(&! env)
+}
+
+fn test_gadt_missing_ctors_count_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    var pn: [i64; 16] = [0; 16]
+    let did = gadt_add_def(env, 3, 0, pn)
+    var fields: [i64; 32] = [0; 32]
+    var rp: [i64; 16] = [0; 16]
+    let c0 = gadt_add_ctor(env, did, 30, fields, 0, rp, 0)
+    let c1 = gadt_add_ctor(env, did, 31, fields, 0, rp, 0)
+    let c2 = gadt_add_ctor(env, did, 32, fields, 0, rp, 0)
+    var covered: [i64; 512] = [0; 512]
+    covered[0 as usize] = c0
+    let count = gadt_missing_ctors(env, did, covered, 1)
+    count == 2
+}
+fn test_gadt_missing_ctors_count() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_missing_ctors_count_inner(&! env)
+}
+
+fn test_gadt_exhaustive_single_ctor_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    var pn: [i64; 16] = [0; 16]
+    let did = gadt_add_def(env, 4, 0, pn)
+    var fields: [i64; 32] = [0; 32]
+    var rp: [i64; 16] = [0; 16]
+    let c0 = gadt_add_ctor(env, did, 40, fields, 0, rp, 0)
+    var covered: [i64; 512] = [0; 512]
+    covered[0 as usize] = c0
+    gadt_check_exhaustiveness(env, did, covered, 1)
+}
+fn test_gadt_exhaustive_single_ctor() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_exhaustive_single_ctor_inner(&! env)
+}
+
+fn test_gadt_exhaustive_empty_covered_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    var pn: [i64; 16] = [0; 16]
+    let did = gadt_add_def(env, 5, 0, pn)
+    var fields: [i64; 32] = [0; 32]
+    var rp: [i64; 16] = [0; 16]
+    let c0 = gadt_add_ctor(env, did, 50, fields, 0, rp, 0)
+    var covered: [i64; 512] = [0; 512]
+    gadt_check_exhaustiveness(env, did, covered, 0) == false
+}
+fn test_gadt_exhaustive_empty_covered() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_exhaustive_empty_covered_inner(&! env)
+}
+
+// ---- Validation Tests (5 tests) ----
+
+fn test_gadt_validate_def_ok_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    var pn: [i64; 16] = [0; 16]
+    pn[0 as usize] = 1000
+    let did = gadt_add_def(env, 42, 1, pn)
+    var fields: [i64; 32] = [0; 32]
+    var rp: [i64; 16] = [0; 16]
+    let cid = gadt_add_ctor(env, did, 100, fields, 0, rp, 0)
+    gadt_validate_def(env, did)
+}
+fn test_gadt_validate_def_ok() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_validate_def_ok_inner(&! env)
+}
+
+fn test_gadt_validate_def_invalid_idx_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    gadt_validate_def(env, 999) == false
+}
+fn test_gadt_validate_def_invalid_idx() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_validate_def_invalid_idx_inner(&! env)
+}
+
+fn test_gadt_validate_ctor_ok_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    var pn: [i64; 16] = [0; 16]
+    let did = gadt_add_def(env, 10, 0, pn)
+    var fields: [i64; 32] = [0; 32]
+    var rp: [i64; 16] = [0; 16]
+    let cid = gadt_add_ctor(env, did, 200, fields, 0, rp, 0)
+    gadt_validate_ctor(env, cid)
+}
+fn test_gadt_validate_ctor_ok() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_validate_ctor_ok_inner(&! env)
+}
+
+fn test_gadt_check_ctor_types_ok_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    var pn: [i64; 16] = [0; 16]
+    let did = gadt_add_def(env, 10, 0, pn)
+    let ti = gadt_mk_int(env)
+    let tb = gadt_mk_bool(env)
+    var fields: [i64; 32] = [0; 32]
+    fields[0 as usize] = ti
+    fields[1 as usize] = tb
+    var rp: [i64; 16] = [0; 16]
+    let cid = gadt_add_ctor(env, did, 300, fields, 2, rp, 0)
+    gadt_check_ctor_types(env, cid)
+}
+fn test_gadt_check_ctor_types_ok() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_check_ctor_types_ok_inner(&! env)
+}
+
+fn test_gadt_is_recursive_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    // Create a GADT that references itself: List<T> = Cons(T, List<T>) | Nil
+    var pn: [i64; 16] = [0; 16]
+    pn[0 as usize] = 1000
+    let did = gadt_add_def(env, 42, 1, pn)
+    let ti = gadt_mk_int(env)
+    // Create a type that references the GADT itself (con_id = did)
+    let self_ref = gadt_mk_con(env, did)
+    var params_app: [i64; 16] = [0; 16]
+    params_app[0 as usize] = ti
+    let list_int = gadt_mk_app(env, self_ref, params_app, 1)
+
+    // Cons ctor with fields [T, List<T>]
+    var fields_cons: [i64; 32] = [0; 32]
+    fields_cons[0 as usize] = ti
+    fields_cons[1 as usize] = list_int
+    var rp: [i64; 16] = [0; 16]
+    let cons_id = gadt_add_ctor(env, did, 100, fields_cons, 2, rp, 0)
+
+    // Nil ctor with no fields
+    var fields_nil: [i64; 32] = [0; 32]
+    let nil_id = gadt_add_ctor(env, did, 101, fields_nil, 0, rp, 0)
+
+    gadt_is_recursive(env, did)
+}
+fn test_gadt_is_recursive() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_is_recursive_inner(&! env)
+}
+
+// ---- Scope Tests (5 additional tests for scoping) ----
+
+fn test_gadt_enter_exit_scope_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let d0 = env.scope_depth
+    let d1 = gadt_enter_scope(env)
+    if d1 != d0 + 1 { return false }
+    let d2 = gadt_enter_scope(env)
+    if d2 != d0 + 2 { return false }
+    let removed = gadt_exit_scope(env, d1)
+    env.scope_depth == d1
+}
+fn test_gadt_enter_exit_scope() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_enter_exit_scope_inner(&! env)
+}
+
+fn test_gadt_scope_pops_evidence_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let ti = gadt_mk_int(env)
+    let tb = gadt_mk_bool(env)
+    let saved = env.scope_depth
+    let d1 = gadt_enter_scope(env)
+    let e0 = gadt_push_evidence(env, 100, ti, GADT_INVALID)
+    let e1 = gadt_push_evidence(env, 200, tb, GADT_INVALID)
+    if env.evidence_count != 2 { return false }
+    let removed = gadt_exit_scope(env, saved)
+    if removed != 2 { return false }
+    env.evidence_count == 0
+}
+fn test_gadt_scope_pops_evidence() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_scope_pops_evidence_inner(&! env)
+}
+
+fn test_gadt_nested_scopes_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let ti = gadt_mk_int(env)
+    let tb = gadt_mk_bool(env)
+    let tf = gadt_mk_float(env)
+    let saved0 = env.scope_depth
+    let d1 = gadt_enter_scope(env)
+    let e0 = gadt_push_evidence(env, 100, ti, GADT_INVALID)
+    let saved1 = env.scope_depth
+    let d2 = gadt_enter_scope(env)
+    let e1 = gadt_push_evidence(env, 200, tb, GADT_INVALID)
+    let e2 = gadt_push_evidence(env, 300, tf, GADT_INVALID)
+    if env.evidence_count != 3 { return false }
+    // Exit inner scope — should pop 2 entries (those at depth d2)
+    let removed_inner = gadt_exit_scope(env, saved1)
+    if removed_inner != 2 { return false }
+    if env.evidence_count != 1 { return false }
+    // Evidence from outer scope should still be there
+    let ev100 = gadt_find_evidence(env, 100)
+    if ev100 != ti { return false }
+    // Exit outer scope
+    let removed_outer = gadt_exit_scope(env, saved0)
+    env.evidence_count == 0
+}
+fn test_gadt_nested_scopes() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_nested_scopes_inner(&! env)
+}
+
+fn test_gadt_scope_preserves_outer_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let ti = gadt_mk_int(env)
+    let tb = gadt_mk_bool(env)
+    // Push evidence at depth 0
+    let e0 = gadt_push_evidence(env, 500, ti, GADT_INVALID)
+    let saved = env.scope_depth
+    let d1 = gadt_enter_scope(env)
+    let e1 = gadt_push_evidence(env, 600, tb, GADT_INVALID)
+    let removed = gadt_exit_scope(env, saved)
+    if removed != 1 { return false }
+    // Evidence from depth 0 should remain
+    let ev500 = gadt_find_evidence(env, 500)
+    ev500 == ti
+}
+fn test_gadt_scope_preserves_outer() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_scope_preserves_outer_inner(&! env)
+}
+
+fn test_gadt_pop_evidence_to_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let ti = gadt_mk_int(env)
+    let tb = gadt_mk_bool(env)
+    let tf = gadt_mk_float(env)
+    let d1 = gadt_enter_scope(env)
+    let e0 = gadt_push_evidence(env, 10, ti, GADT_INVALID)
+    let d2 = gadt_enter_scope(env)
+    let e1 = gadt_push_evidence(env, 20, tb, GADT_INVALID)
+    let d3 = gadt_enter_scope(env)
+    let e2 = gadt_push_evidence(env, 30, tf, GADT_INVALID)
+    // Pop to depth d1 — should remove entries at d2 and d3
+    let removed = gadt_pop_evidence_to(env, d1)
+    removed == 2
+}
+fn test_gadt_pop_evidence_to() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_pop_evidence_to_inner(&! env)
+}
+
+// ---- Advanced Type Equality Tests (5 additional) ----
+
+fn test_gadt_types_equal_vars_same_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let v0 = gadt_mk_var(env, 42)
+    let v1 = gadt_mk_var(env, 42)
+    gadt_types_equal(env, v0, v1)
+}
+fn test_gadt_types_equal_vars_same() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_types_equal_vars_same_inner(&! env)
+}
+
+fn test_gadt_types_equal_vars_diff_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let v0 = gadt_mk_var(env, 42)
+    let v1 = gadt_mk_var(env, 43)
+    gadt_types_equal(env, v0, v1) == false
+}
+fn test_gadt_types_equal_vars_diff() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_types_equal_vars_diff_inner(&! env)
+}
+
+fn test_gadt_types_equal_apps_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let con = gadt_mk_con(env, 5)
+    let ti = gadt_mk_int(env)
+    var p1: [i64; 16] = [0; 16]
+    var p2: [i64; 16] = [0; 16]
+    p1[0 as usize] = ti
+    p2[0 as usize] = ti
+    let a1 = gadt_mk_app(env, con, p1, 1)
+    let a2 = gadt_mk_app(env, con, p2, 1)
+    gadt_types_equal(env, a1, a2)
+}
+fn test_gadt_types_equal_apps() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_types_equal_apps_inner(&! env)
+}
+
+fn test_gadt_types_equal_apps_diff_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let con = gadt_mk_con(env, 5)
+    let ti = gadt_mk_int(env)
+    let tb = gadt_mk_bool(env)
+    var p1: [i64; 16] = [0; 16]
+    var p2: [i64; 16] = [0; 16]
+    p1[0 as usize] = ti
+    p2[0 as usize] = tb
+    let a1 = gadt_mk_app(env, con, p1, 1)
+    let a2 = gadt_mk_app(env, con, p2, 1)
+    gadt_types_equal(env, a1, a2) == false
+}
+fn test_gadt_types_equal_apps_diff() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_types_equal_apps_diff_inner(&! env)
+}
+
+fn test_gadt_types_equal_funcs_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let ti = gadt_mk_int(env)
+    let tb = gadt_mk_bool(env)
+    let f1 = gadt_mk_func(env, ti, tb)
+    let f2 = gadt_mk_func(env, ti, tb)
+    let f3 = gadt_mk_func(env, tb, ti)
+    if gadt_types_equal(env, f1, f2) == false { return false }
+    gadt_types_equal(env, f1, f3) == false
+}
+fn test_gadt_types_equal_funcs() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_types_equal_funcs_inner(&! env)
+}
+
+// ---- Advanced Unification Tests (5 additional) ----
+
+fn test_gadt_unify_primitives_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let i1 = gadt_mk_int(env)
+    let i2 = gadt_mk_int(env)
+    let b1 = gadt_mk_bool(env)
+    if gadt_unify(env, i1, i2) == false { return false }
+    gadt_unify(env, i1, b1) == false
+}
+fn test_gadt_unify_primitives() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_unify_primitives_inner(&! env)
+}
+
+fn test_gadt_unify_var_right_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let ti = gadt_mk_int(env)
+    let v = gadt_mk_var(env, 88)
+    let ok = gadt_unify(env, ti, v)
+    if ok == false { return false }
+    let refined = gadt_find_evidence(env, 88)
+    refined == ti
+}
+fn test_gadt_unify_var_right() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_unify_var_right_inner(&! env)
+}
+
+fn test_gadt_unify_occurs_fail_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let v = gadt_mk_var(env, 99)
+    let con = gadt_mk_con(env, 1)
+    var p: [i64; 16] = [0; 16]
+    p[0 as usize] = v
+    let app = gadt_mk_app(env, con, p, 1)
+    // Should fail: v occurs in app
+    gadt_unify(env, v, app) == false
+}
+fn test_gadt_unify_occurs_fail() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_unify_occurs_fail_inner(&! env)
+}
+
+fn test_gadt_unify_func_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let ti = gadt_mk_int(env)
+    let tb = gadt_mk_bool(env)
+    let f1 = gadt_mk_func(env, ti, tb)
+    let f2 = gadt_mk_func(env, ti, tb)
+    let f3 = gadt_mk_func(env, tb, ti)
+    if gadt_unify(env, f1, f2) == false { return false }
+    // f1 and f3 have different domain/codomain
+    gadt_unify(env, f1, f3) == false
+}
+fn test_gadt_unify_func() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_unify_func_inner(&! env)
+}
+
+fn test_gadt_unify_params_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let ti = gadt_mk_int(env)
+    let tb = gadt_mk_bool(env)
+    var pa: [i64; 16] = [0; 16]
+    var pb: [i64; 16] = [0; 16]
+    pa[0 as usize] = ti
+    pa[1 as usize] = tb
+    pb[0 as usize] = ti
+    pb[1 as usize] = tb
+    let ok = gadt_unify_params(env, pa, pb, 2)
+    if ok == false { return false }
+    // Mismatch case
+    var pc: [i64; 16] = [0; 16]
+    pc[0 as usize] = tb
+    pc[1 as usize] = ti
+    gadt_unify_params(env, pa, pc, 2) == false
+}
+fn test_gadt_unify_params() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_unify_params_inner(&! env)
+}
+
+// ---- Integration Tests (5 additional) ----
+
+// Full GADT Expr<T> scenario: IntLit : Expr<Int>, BoolLit : Expr<Bool>
+fn test_gadt_expr_scenario_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    // Define Expr<T>
+    var pn: [i64; 16] = [0; 16]
+    pn[0 as usize] = 7000  // T
+    let expr_id = gadt_add_def(env, 999, 1, pn)
+
+    let int_ty = gadt_mk_int(env)
+    let bool_ty = gadt_mk_bool(env)
+
+    // IntLit : Expr<Int>
+    var fields_il: [i64; 32] = [0; 32]
+    fields_il[0 as usize] = int_ty
+    var rp_il: [i64; 16] = [0; 16]
+    rp_il[0 as usize] = int_ty
+    let intlit_id = gadt_add_ctor(env, expr_id, 5000, fields_il, 1, rp_il, 1)
+
+    // BoolLit : Expr<Bool>
+    var fields_bl: [i64; 32] = [0; 32]
+    fields_bl[0 as usize] = bool_ty
+    var rp_bl: [i64; 16] = [0; 16]
+    rp_bl[0 as usize] = bool_ty
+    let boollit_id = gadt_add_ctor(env, expr_id, 5001, fields_bl, 1, rp_bl, 1)
+
+    // Validate definition
+    if gadt_validate_def(env, expr_id) == false { return false }
+
+    // Check exhaustiveness with both ctors
+    var covered: [i64; 512] = [0; 512]
+    covered[0 as usize] = intlit_id
+    covered[1 as usize] = boollit_id
+    if gadt_check_exhaustiveness(env, expr_id, covered, 2) == false { return false }
+
+    // Match on IntLit arm: should refine T to Int
+    let saved = env.scope_depth
+    let d1 = gadt_enter_scope(env)
+    let arm_ok = gadt_check_match_arm(env, int_ty, intlit_id)
+    if arm_ok == false { return false }
+    let ev = gadt_find_evidence(env, 7000)
+    if ev != int_ty { return false }
+    let removed = gadt_exit_scope(env, saved)
+
+    // After exiting, evidence should be gone
+    let ev_after = gadt_find_evidence(env, 7000)
+    ev_after == GADT_INVALID
+}
+fn test_gadt_expr_scenario() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_expr_scenario_inner(&! env)
+}
+
+// Non-recursive GADT should report not recursive
+fn test_gadt_not_recursive_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    var pn: [i64; 16] = [0; 16]
+    let did = gadt_add_def(env, 1, 0, pn)
+    let ti = gadt_mk_int(env)
+    var fields: [i64; 32] = [0; 32]
+    fields[0 as usize] = ti
+    var rp: [i64; 16] = [0; 16]
+    let cid = gadt_add_ctor(env, did, 10, fields, 1, rp, 0)
+    gadt_is_recursive(env, did) == false
+}
+fn test_gadt_not_recursive() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_not_recursive_inner(&! env)
+}
+
+// Type pool capacity: fill up and check GADT_INVALID is returned
+fn test_gadt_type_pool_overflow_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < GADT_MAX_TYPES {
+        let t = gadt_mk_int(env)
+        i = i + 1
+    }
+    // Next allocation should return GADT_INVALID
+    let overflow = gadt_mk_int(env)
+    overflow == GADT_INVALID
+}
+fn test_gadt_type_pool_overflow() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_type_pool_overflow_inner(&! env)
+}
+
+// Substitution on primitives is a no-op
+fn test_gadt_subst_primitive_noop_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    let ti = gadt_mk_int(env)
+    let tb = gadt_mk_bool(env)
+    let result = gadt_subst_type(env, ti, 999, tb)
+    result == ti
+}
+fn test_gadt_subst_primitive_noop() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_subst_primitive_noop_inner(&! env)
+}
+
+// Multi-param GADT: Pair<A, B> with MkPair(A, B) : Pair<A, B>
+fn test_gadt_multi_param_inner(env: &! GadtEnv) -> bool with Mut, Div, Panic {
+    var pn: [i64; 16] = [0; 16]
+    pn[0 as usize] = 8000  // A
+    pn[1 as usize] = 8001  // B
+    let pair_id = gadt_add_def(env, 555, 2, pn)
+
+    let int_ty = gadt_mk_int(env)
+    let bool_ty = gadt_mk_bool(env)
+
+    var fields: [i64; 32] = [0; 32]
+    fields[0 as usize] = int_ty
+    fields[1 as usize] = bool_ty
+    var rp: [i64; 16] = [0; 16]
+    rp[0 as usize] = int_ty
+    rp[1 as usize] = bool_ty
+    let mkpair_id = gadt_add_ctor(env, pair_id, 6000, fields, 2, rp, 2)
+
+    if gadt_validate_def(env, pair_id) == false { return false }
+    if env.defs[pair_id as usize].param_count != 2 { return false }
+
+    // Check match arm
+    let saved = env.scope_depth
+    let d1 = gadt_enter_scope(env)
+    let arm_ok = gadt_check_match_arm(env, int_ty, mkpair_id)
+    if arm_ok == false { return false }
+    let ev_a = gadt_find_evidence(env, 8000)
+    let ev_b = gadt_find_evidence(env, 8001)
+    if ev_a != int_ty { return false }
+    if ev_b != bool_ty { return false }
+    let removed = gadt_exit_scope(env, saved)
+    true
+}
+fn test_gadt_multi_param() -> bool with Mut, Div, Panic {
+    var env = gadt_env_new()
+    return test_gadt_multi_param_inner(&! env)
+}
+
+// ============================================================
+// Test Runner
+// ============================================================
+
+fn gadt_run_tests() -> i64 with Mut, Div, Panic {
+    var passed: i64 = 0
+
+    // Type construction (5)
+    if test_gadt_mk_var() { passed = passed + 1 }
+    if test_gadt_mk_con() { passed = passed + 1 }
+    if test_gadt_mk_app() { passed = passed + 1 }
+    if test_gadt_mk_primitives() { passed = passed + 1 }
+    if test_gadt_mk_func() { passed = passed + 1 }
+
+    // GADT definition (5)
+    if test_gadt_add_def() { passed = passed + 1 }
+    if test_gadt_find_def() { passed = passed + 1 }
+    if test_gadt_def_param_names() { passed = passed + 1 }
+    if test_gadt_multiple_defs() { passed = passed + 1 }
+    if test_gadt_def_ctor_start() { passed = passed + 1 }
+
+    // Constructor operations (5)
+    if test_gadt_add_ctor() { passed = passed + 1 }
+    if test_gadt_find_ctor() { passed = passed + 1 }
+    if test_gadt_ctor_gadt() { passed = passed + 1 }
+    if test_gadt_ctor_field_types() { passed = passed + 1 }
+    if test_gadt_ctor_increments_def_count() { passed = passed + 1 }
+
+    // Type substitution (5)
+    if test_gadt_subst_var() { passed = passed + 1 }
+    if test_gadt_subst_no_match() { passed = passed + 1 }
+    if test_gadt_subst_app() { passed = passed + 1 }
+    if test_gadt_subst_func() { passed = passed + 1 }
+    if test_gadt_apply_subst() { passed = passed + 1 }
+
+    // Unification (5)
+    if test_gadt_types_equal_same() { passed = passed + 1 }
+    if test_gadt_types_equal_diff_kind() { passed = passed + 1 }
+    if test_gadt_unify_var() { passed = passed + 1 }
+    if test_gadt_unify_app() { passed = passed + 1 }
+    if test_gadt_occurs_check() { passed = passed + 1 }
+
+    // Constraints (5)
+    if test_gadt_add_constraint() { passed = passed + 1 }
+    if test_gadt_activate_constraints() { passed = passed + 1 }
+    if test_gadt_deactivate_constraints() { passed = passed + 1 }
+    if test_gadt_constraint_inactive_by_default() { passed = passed + 1 }
+    if test_gadt_activate_only_matching_ctor() { passed = passed + 1 }
+
+    // Evidence / refinement (5)
+    if test_gadt_push_evidence() { passed = passed + 1 }
+    if test_gadt_find_evidence() { passed = passed + 1 }
+    if test_gadt_evidence_shadowing() { passed = passed + 1 }
+    if test_gadt_refine_type() { passed = passed + 1 }
+    if test_gadt_refine_no_evidence() { passed = passed + 1 }
+
+    // Pattern matching (5)
+    if test_gadt_check_match_arm() { passed = passed + 1 }
+    if test_gadt_check_match_arm_invalid_ctor() { passed = passed + 1 }
+    if test_gadt_infer_ctor_result() { passed = passed + 1 }
+    if test_gadt_match_arm_pushes_evidence() { passed = passed + 1 }
+    if test_gadt_match_arm_evidence_correct() { passed = passed + 1 }
+
+    // Exhaustiveness (5)
+    if test_gadt_exhaustive_all_covered() { passed = passed + 1 }
+    if test_gadt_exhaustive_missing_one() { passed = passed + 1 }
+    if test_gadt_missing_ctors_count() { passed = passed + 1 }
+    if test_gadt_exhaustive_single_ctor() { passed = passed + 1 }
+    if test_gadt_exhaustive_empty_covered() { passed = passed + 1 }
+
+    // Validation (5)
+    if test_gadt_validate_def_ok() { passed = passed + 1 }
+    if test_gadt_validate_def_invalid_idx() { passed = passed + 1 }
+    if test_gadt_validate_ctor_ok() { passed = passed + 1 }
+    if test_gadt_check_ctor_types_ok() { passed = passed + 1 }
+    if test_gadt_is_recursive() { passed = passed + 1 }
+
+    // Scope (5)
+    if test_gadt_enter_exit_scope() { passed = passed + 1 }
+    if test_gadt_scope_pops_evidence() { passed = passed + 1 }
+    if test_gadt_nested_scopes() { passed = passed + 1 }
+    if test_gadt_scope_preserves_outer() { passed = passed + 1 }
+    if test_gadt_pop_evidence_to() { passed = passed + 1 }
+
+    // Advanced type equality (5)
+    if test_gadt_types_equal_vars_same() { passed = passed + 1 }
+    if test_gadt_types_equal_vars_diff() { passed = passed + 1 }
+    if test_gadt_types_equal_apps() { passed = passed + 1 }
+    if test_gadt_types_equal_apps_diff() { passed = passed + 1 }
+    if test_gadt_types_equal_funcs() { passed = passed + 1 }
+
+    // Advanced unification (5)
+    if test_gadt_unify_primitives() { passed = passed + 1 }
+    if test_gadt_unify_var_right() { passed = passed + 1 }
+    if test_gadt_unify_occurs_fail() { passed = passed + 1 }
+    if test_gadt_unify_func() { passed = passed + 1 }
+    if test_gadt_unify_params() { passed = passed + 1 }
+
+    // Integration (5)
+    if test_gadt_expr_scenario() { passed = passed + 1 }
+    if test_gadt_not_recursive() { passed = passed + 1 }
+    if test_gadt_type_pool_overflow() { passed = passed + 1 }
+    if test_gadt_subst_primitive_noop() { passed = passed + 1 }
+    if test_gadt_multi_param() { passed = passed + 1 }
+
+    passed
+}

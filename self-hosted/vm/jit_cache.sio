@@ -1,0 +1,2624 @@
+// self-hosted::vm::jit_cache — JIT Compilation Cache
+//
+// Provides code caching, invalidation, tiered compilation tracking, and
+// profiling data for hot-code detection in the Sounio VM.  All data lives
+// in flat fixed-size arrays (no heap allocation) so the module is
+// self-contained and bootstrap-friendly.
+//
+// Naming: structs prefixed `Jc`, functions prefixed `jc_`, constants `JC_`.
+//
+// Tiered compilation model:
+//   INTERP   (0) — interpreted, no compiled code
+//   BASELINE (1) — quick non-optimizing compile
+//   OPT      (2) — optimized with inlining and register allocation
+//   NATIVE   (3) — fully native, ahead-of-time quality
+//
+// Profiling drives promotion:  call_count >= WARM_THRESHOLD  -> BASELINE
+//                               call_count >= HOT_THRESHOLD   -> OPT
+
+// ============================================================================
+// Section 1: Constants
+// ============================================================================
+
+let JC_MAX_ENTRIES: i64 = 4096
+let JC_MAX_CODE: i64 = 65536
+let JC_TIER_INTERP: i64 = 0
+let JC_TIER_BASELINE: i64 = 1
+let JC_TIER_OPT: i64 = 2
+let JC_TIER_NATIVE: i64 = 3
+let JC_INVALID: i64 = 0 - 1
+let JC_MAX_PROFILE: i64 = 1024
+let JC_HOT_THRESHOLD: i64 = 100
+let JC_WARM_THRESHOLD: i64 = 10
+
+// Invalidation reason codes
+let JC_REASON_MANUAL: i64 = 0
+let JC_REASON_DEOPT: i64 = 1
+let JC_REASON_TIER_UP: i64 = 2
+let JC_REASON_EVICTION: i64 = 3
+
+// ============================================================================
+// Section 2: Core Data Structures
+// ============================================================================
+
+struct JcCodeEntry {
+    func_id: i64,
+    tier: i64,
+    code_bytes: [i8; 65536],
+    code_len: i64,
+    entry_point: i64,
+    valid: bool,
+    version: i64,
+    hit_count: i64,
+}
+
+struct JcProfileData {
+    func_id: i64,
+    call_count: i64,
+    loop_count: i64,
+    branch_taken: i64,
+    branch_not_taken: i64,
+    total_cycles: i64,
+    last_tier: i64,
+}
+
+struct JcInvalidation {
+    func_id: i64,
+    reason: i64,
+    timestamp: i64,
+}
+
+struct JcStatsSummary {
+    total_entries: i64,
+    valid_entries: i64,
+    total_code_bytes: i64,
+    hit_rate_pct: f64,
+    compilations: i64,
+    invalidations: i64,
+}
+
+struct JcCache {
+    entries: [JcCodeEntry; 4096],
+    entry_count: i64,
+    profiles: [JcProfileData; 1024],
+    profile_count: i64,
+    total_compilations: i64,
+    total_invalidations: i64,
+    total_hits: i64,
+    total_misses: i64,
+}
+
+// ============================================================================
+// Section 3: Constructor Functions
+// ============================================================================
+
+fn jc_empty_entry() -> JcCodeEntry {
+    JcCodeEntry {
+        func_id: JC_INVALID,
+        tier: JC_TIER_INTERP,
+        code_bytes: [0; 65536],
+        code_len: 0,
+        entry_point: 0,
+        valid: false,
+        version: 0,
+        hit_count: 0,
+    }
+}
+
+fn jc_empty_profile() -> JcProfileData {
+    JcProfileData {
+        func_id: JC_INVALID,
+        call_count: 0,
+        loop_count: 0,
+        branch_taken: 0,
+        branch_not_taken: 0,
+        total_cycles: 0,
+        last_tier: JC_TIER_INTERP,
+    }
+}
+
+fn jc_cache_new() -> JcCache {
+    JcCache {
+        entries: [jc_empty_entry(); 4096],
+        entry_count: 0,
+        profiles: [jc_empty_profile(); 1024],
+        profile_count: 0,
+        total_compilations: 0,
+        total_invalidations: 0,
+        total_hits: 0,
+        total_misses: 0,
+    }
+}
+
+fn jc_invalidation_new(func_id: i64, reason: i64) -> JcInvalidation {
+    JcInvalidation {
+        func_id: func_id,
+        reason: reason,
+        timestamp: 0,
+    }
+}
+
+fn jc_stats_summary_new() -> JcStatsSummary {
+    JcStatsSummary {
+        total_entries: 0,
+        valid_entries: 0,
+        total_code_bytes: 0,
+        hit_rate_pct: 0.0,
+        compilations: 0,
+        invalidations: 0,
+    }
+}
+
+// ============================================================================
+// Section 4: Cache Lookup
+// ============================================================================
+
+// Linear scan for the first valid entry matching func_id. Returns index or JC_INVALID.
+fn jc_find_entry(cache: &JcCache, func_id: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < cache.entry_count {
+        if cache.entries[i as usize].func_id == func_id {
+            if cache.entries[i as usize].valid {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    JC_INVALID
+}
+
+// Find entry matching both func_id and tier. Returns index or JC_INVALID.
+fn jc_find_entry_tier(cache: &JcCache, func_id: i64, tier: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < cache.entry_count {
+        if cache.entries[i as usize].func_id == func_id {
+            if cache.entries[i as usize].tier == tier {
+                if cache.entries[i as usize].valid {
+                    return i
+                }
+            }
+        }
+        i = i + 1
+    }
+    JC_INVALID
+}
+
+// Check whether a valid compiled entry exists for func_id.
+fn jc_has_compiled(cache: &JcCache, func_id: i64) -> bool with Mut, Div, Panic {
+    let idx = jc_find_entry(cache, func_id)
+    if idx == JC_INVALID { return false }
+    true
+}
+
+// Retrieve a copy of the entry at index idx. Returns empty entry if out of range.
+fn jc_get_entry(cache: &JcCache, idx: i64) -> JcCodeEntry with Div, Panic {
+    if idx < 0 { return jc_empty_entry() }
+    if idx >= cache.entry_count { return jc_empty_entry() }
+    cache.entries[idx as usize]
+}
+
+// Get the code length for the first valid entry of func_id. Returns 0 if not found.
+fn jc_get_code_len(cache: &JcCache, func_id: i64) -> i64 with Mut, Div, Panic {
+    let idx = jc_find_entry(cache, func_id)
+    if idx == JC_INVALID { return 0 }
+    cache.entries[idx as usize].code_len
+}
+
+// ============================================================================
+// Section 5: Cache Insert / Update
+// ============================================================================
+
+// Insert a new cache entry. Returns the index it was placed at, or JC_INVALID if full.
+fn jc_insert_entry(cache: &! JcCache, func_id: i64, tier: i64, code: [i8; 65536], code_len: i64) -> i64 with Mut, Div, Panic {
+    if cache.entry_count >= JC_MAX_ENTRIES {
+        return JC_INVALID
+    }
+    let idx = cache.entry_count
+    cache.entries[idx as usize].func_id = func_id
+    cache.entries[idx as usize].tier = tier
+    cache.entries[idx as usize].code_len = code_len
+    cache.entries[idx as usize].entry_point = 0
+    cache.entries[idx as usize].valid = true
+    cache.entries[idx as usize].version = 1
+    cache.entries[idx as usize].hit_count = 0
+
+    // Copy code bytes
+    var j: i64 = 0
+    while j < code_len {
+        if j < JC_MAX_CODE {
+            cache.entries[idx as usize].code_bytes[j as usize] = code[j as usize]
+        }
+        j = j + 1
+    }
+
+    cache.entry_count = cache.entry_count + 1
+    cache.total_compilations = cache.total_compilations + 1
+    idx
+}
+
+// Update an existing entry with new code and tier. Returns false if idx is invalid.
+fn jc_update_entry(cache: &! JcCache, idx: i64, code: [i8; 65536], code_len: i64, new_tier: i64) -> bool with Mut, Div, Panic {
+    if idx < 0 { return false }
+    if idx >= cache.entry_count { return false }
+    if cache.entries[idx as usize].valid == false { return false }
+
+    cache.entries[idx as usize].tier = new_tier
+    cache.entries[idx as usize].code_len = code_len
+    cache.entries[idx as usize].version = cache.entries[idx as usize].version + 1
+
+    // Copy code bytes
+    var j: i64 = 0
+    while j < code_len {
+        if j < JC_MAX_CODE {
+            cache.entries[idx as usize].code_bytes[j as usize] = code[j as usize]
+        }
+        j = j + 1
+    }
+
+    cache.total_compilations = cache.total_compilations + 1
+    true
+}
+
+// Set the entry point offset for a cached entry.
+fn jc_set_entry_point(cache: &! JcCache, idx: i64, entry_point: i64) -> bool with Mut, Div, Panic {
+    if idx < 0 { return false }
+    if idx >= cache.entry_count { return false }
+    if cache.entries[idx as usize].valid == false { return false }
+    cache.entries[idx as usize].entry_point = entry_point
+    true
+}
+
+// Bump the version counter of an entry. Returns the new version, or JC_INVALID on error.
+fn jc_bump_version(cache: &! JcCache, idx: i64) -> i64 with Mut, Div, Panic {
+    if idx < 0 { return JC_INVALID }
+    if idx >= cache.entry_count { return JC_INVALID }
+    cache.entries[idx as usize].version = cache.entries[idx as usize].version + 1
+    cache.entries[idx as usize].version
+}
+
+// ============================================================================
+// Section 6: Cache Invalidation
+// ============================================================================
+
+// Invalidate a single entry by index. Returns false if idx is invalid.
+fn jc_invalidate_entry(cache: &! JcCache, idx: i64) -> bool with Mut, Div, Panic {
+    if idx < 0 { return false }
+    if idx >= cache.entry_count { return false }
+    if cache.entries[idx as usize].valid == false { return false }
+    cache.entries[idx as usize].valid = false
+    cache.total_invalidations = cache.total_invalidations + 1
+    true
+}
+
+// Invalidate all entries for a given func_id. Returns count invalidated.
+fn jc_invalidate_func(cache: &! JcCache, func_id: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < cache.entry_count {
+        if cache.entries[i as usize].func_id == func_id {
+            if cache.entries[i as usize].valid {
+                cache.entries[i as usize].valid = false
+                cache.total_invalidations = cache.total_invalidations + 1
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Invalidate every entry in the cache. Returns count invalidated.
+fn jc_invalidate_all(cache: &! JcCache) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < cache.entry_count {
+        if cache.entries[i as usize].valid {
+            cache.entries[i as usize].valid = false
+            cache.total_invalidations = cache.total_invalidations + 1
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Invalidate all entries at a specific compilation tier. Returns count invalidated.
+fn jc_invalidate_tier(cache: &! JcCache, tier: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < cache.entry_count {
+        if cache.entries[i as usize].tier == tier {
+            if cache.entries[i as usize].valid {
+                cache.entries[i as usize].valid = false
+                cache.total_invalidations = cache.total_invalidations + 1
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Check whether an entry at index idx is valid.
+fn jc_is_valid(cache: &JcCache, idx: i64) -> bool with Div, Panic {
+    if idx < 0 { return false }
+    if idx >= cache.entry_count { return false }
+    cache.entries[idx as usize].valid
+}
+
+// ============================================================================
+// Section 7: Profiling
+// ============================================================================
+
+// Find the profile index for a given func_id. Returns JC_INVALID if not found.
+fn jc_find_profile(cache: &JcCache, func_id: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < cache.profile_count {
+        if cache.profiles[i as usize].func_id == func_id {
+            return i
+        }
+        i = i + 1
+    }
+    JC_INVALID
+}
+
+// Find or create a profile slot for func_id. Returns profile index.
+fn jc_get_or_create_profile(cache: &! JcCache, func_id: i64) -> i64 with Mut, Div, Panic {
+    // Try to find existing
+    var i: i64 = 0
+    while i < cache.profile_count {
+        if cache.profiles[i as usize].func_id == func_id {
+            return i
+        }
+        i = i + 1
+    }
+    // Create new
+    if cache.profile_count >= JC_MAX_PROFILE {
+        return JC_INVALID
+    }
+    let idx = cache.profile_count
+    cache.profiles[idx as usize].func_id = func_id
+    cache.profiles[idx as usize].call_count = 0
+    cache.profiles[idx as usize].loop_count = 0
+    cache.profiles[idx as usize].branch_taken = 0
+    cache.profiles[idx as usize].branch_not_taken = 0
+    cache.profiles[idx as usize].total_cycles = 0
+    cache.profiles[idx as usize].last_tier = JC_TIER_INTERP
+    cache.profile_count = cache.profile_count + 1
+    idx
+}
+
+// Record a call to func_id. Returns the new call count.
+fn jc_record_call(cache: &! JcCache, func_id: i64) -> i64 with Mut, Div, Panic {
+    let pidx = jc_get_or_create_profile(cache, func_id)
+    if pidx == JC_INVALID { return 0 }
+    cache.profiles[pidx as usize].call_count = cache.profiles[pidx as usize].call_count + 1
+    cache.profiles[pidx as usize].call_count
+}
+
+// Record a loop iteration for func_id. Returns the new loop count.
+fn jc_record_loop(cache: &! JcCache, func_id: i64) -> i64 with Mut, Div, Panic {
+    let pidx = jc_get_or_create_profile(cache, func_id)
+    if pidx == JC_INVALID { return 0 }
+    cache.profiles[pidx as usize].loop_count = cache.profiles[pidx as usize].loop_count + 1
+    cache.profiles[pidx as usize].loop_count
+}
+
+// Record a branch outcome for func_id. Returns the relevant counter.
+fn jc_record_branch(cache: &! JcCache, func_id: i64, taken: bool) -> i64 with Mut, Div, Panic {
+    let pidx = jc_get_or_create_profile(cache, func_id)
+    if pidx == JC_INVALID { return 0 }
+    if taken {
+        cache.profiles[pidx as usize].branch_taken = cache.profiles[pidx as usize].branch_taken + 1
+        return cache.profiles[pidx as usize].branch_taken
+    }
+    cache.profiles[pidx as usize].branch_not_taken = cache.profiles[pidx as usize].branch_not_taken + 1
+    cache.profiles[pidx as usize].branch_not_taken
+}
+
+// Add cycles to the total for func_id. Returns updated total.
+fn jc_add_cycles(cache: &! JcCache, func_id: i64, cycles: i64) -> i64 with Mut, Div, Panic {
+    let pidx = jc_get_or_create_profile(cache, func_id)
+    if pidx == JC_INVALID { return 0 }
+    cache.profiles[pidx as usize].total_cycles = cache.profiles[pidx as usize].total_cycles + cycles
+    cache.profiles[pidx as usize].total_cycles
+}
+
+// ============================================================================
+// Section 8: Tiered Compilation Decisions
+// ============================================================================
+
+// Helper: get call count for a func_id from its profile. Returns 0 if no profile.
+fn jc_get_call_count(cache: &JcCache, func_id: i64) -> i64 with Mut, Div, Panic {
+    let pidx = jc_find_profile(cache, func_id)
+    if pidx == JC_INVALID { return 0 }
+    cache.profiles[pidx as usize].call_count
+}
+
+// Helper: get last_tier for a func_id from its profile. Returns JC_TIER_INTERP if no profile.
+fn jc_get_last_tier(cache: &JcCache, func_id: i64) -> i64 with Mut, Div, Panic {
+    let pidx = jc_find_profile(cache, func_id)
+    if pidx == JC_INVALID { return JC_TIER_INTERP }
+    cache.profiles[pidx as usize].last_tier
+}
+
+// Determine the recommended compilation tier for func_id based on profiling data.
+// Returns JC_TIER_INTERP if no compilation is needed, otherwise the recommended tier.
+fn jc_should_compile(cache: &JcCache, func_id: i64) -> i64 with Mut, Div, Panic {
+    let pidx = jc_find_profile(cache, func_id)
+    if pidx == JC_INVALID { return JC_TIER_INTERP }
+
+    let calls = cache.profiles[pidx as usize].call_count
+    let current = cache.profiles[pidx as usize].last_tier
+
+    // Already at max tier
+    if current >= JC_TIER_NATIVE { return JC_TIER_INTERP }
+
+    // Hot path: promote to OPT if currently at BASELINE or lower
+    if calls >= JC_HOT_THRESHOLD {
+        if current < JC_TIER_OPT {
+            return JC_TIER_OPT
+        }
+        return JC_TIER_INTERP
+    }
+
+    // Warm path: promote to BASELINE if currently interpreted
+    if calls >= JC_WARM_THRESHOLD {
+        if current < JC_TIER_BASELINE {
+            return JC_TIER_BASELINE
+        }
+        return JC_TIER_INTERP
+    }
+
+    JC_TIER_INTERP
+}
+
+// Check if a function is "hot" (call count >= HOT_THRESHOLD).
+fn jc_is_hot(cache: &JcCache, func_id: i64) -> bool with Mut, Div, Panic {
+    let calls = jc_get_call_count(cache, func_id)
+    calls >= JC_HOT_THRESHOLD
+}
+
+// Check if a function is "warm" (call count >= WARM_THRESHOLD).
+fn jc_is_warm(cache: &JcCache, func_id: i64) -> bool with Mut, Div, Panic {
+    let calls = jc_get_call_count(cache, func_id)
+    calls >= JC_WARM_THRESHOLD
+}
+
+// Get the current compilation tier for func_id from the cache entry.
+// Returns JC_TIER_INTERP if no compiled entry exists.
+fn jc_current_tier(cache: &JcCache, func_id: i64) -> i64 with Mut, Div, Panic {
+    let idx = jc_find_entry(cache, func_id)
+    if idx == JC_INVALID { return JC_TIER_INTERP }
+    cache.entries[idx as usize].tier
+}
+
+// Promote a function to a new tier. Updates both the cache entry and the profile.
+// Returns false if func_id has no cached entry or if new_tier <= current tier.
+fn jc_promote_tier(cache: &! JcCache, func_id: i64, new_tier: i64) -> bool with Mut, Div, Panic {
+    let idx = jc_find_entry(cache, func_id)
+    if idx == JC_INVALID { return false }
+    let current = cache.entries[idx as usize].tier
+    if new_tier <= current { return false }
+    cache.entries[idx as usize].tier = new_tier
+    cache.entries[idx as usize].version = cache.entries[idx as usize].version + 1
+
+    // Update profile's last_tier
+    let pidx = jc_get_or_create_profile(cache, func_id)
+    if pidx != JC_INVALID {
+        cache.profiles[pidx as usize].last_tier = new_tier
+    }
+    true
+}
+
+// ============================================================================
+// Section 9: Cache Statistics
+// ============================================================================
+
+// Record a cache hit. Returns new total hits.
+fn jc_record_hit(cache: &! JcCache) -> i64 with Mut {
+    cache.total_hits = cache.total_hits + 1
+    cache.total_hits
+}
+
+// Record a cache miss. Returns new total misses.
+fn jc_record_miss(cache: &! JcCache) -> i64 with Mut {
+    cache.total_misses = cache.total_misses + 1
+    cache.total_misses
+}
+
+// Compute the cache hit rate as a percentage (0.0 - 100.0).
+// Returns 0.0 if no lookups have been made.
+fn jc_hit_rate(cache: &JcCache) -> f64 with Div, Panic {
+    let total = cache.total_hits + cache.total_misses
+    if total == 0 { return 0.0 }
+    let hits_f = cache.total_hits as f64
+    let total_f = total as f64
+    (hits_f / total_f) * 100.0
+}
+
+// Sum of code_len for all valid entries.
+fn jc_total_code_bytes(cache: &JcCache) -> i64 with Mut, Div, Panic {
+    var total: i64 = 0
+    var i: i64 = 0
+    while i < cache.entry_count {
+        if cache.entries[i as usize].valid {
+            total = total + cache.entries[i as usize].code_len
+        }
+        i = i + 1
+    }
+    total
+}
+
+// Count of valid entries.
+fn jc_valid_entry_count(cache: &JcCache) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < cache.entry_count {
+        if cache.entries[i as usize].valid {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Build a statistics summary struct.
+fn jc_stats_summary(cache: &JcCache) -> JcStatsSummary with Mut, Div, Panic {
+    let valid = jc_valid_entry_count(cache)
+    let code_bytes = jc_total_code_bytes(cache)
+    let rate = jc_hit_rate(cache)
+    JcStatsSummary {
+        total_entries: cache.entry_count,
+        valid_entries: valid,
+        total_code_bytes: code_bytes,
+        hit_rate_pct: rate,
+        compilations: cache.total_compilations,
+        invalidations: cache.total_invalidations,
+    }
+}
+
+// ============================================================================
+// Section 10: Code Patching
+// ============================================================================
+
+// Patch a single byte in an entry's code buffer. Returns false on invalid index/offset.
+fn jc_patch_byte(cache: &! JcCache, idx: i64, offset: i64, val: i8) -> bool with Mut, Div, Panic {
+    if idx < 0 { return false }
+    if idx >= cache.entry_count { return false }
+    if cache.entries[idx as usize].valid == false { return false }
+    if offset < 0 { return false }
+    if offset >= cache.entries[idx as usize].code_len { return false }
+    cache.entries[idx as usize].code_bytes[offset as usize] = val
+    true
+}
+
+// Patch a 32-bit little-endian value at offset in an entry's code buffer.
+// Writes 4 bytes: val[7:0], val[15:8], val[23:16], val[31:24].
+fn jc_patch_i32_le(cache: &! JcCache, idx: i64, offset: i64, val: i64) -> bool with Mut, Div, Panic {
+    if idx < 0 { return false }
+    if idx >= cache.entry_count { return false }
+    if cache.entries[idx as usize].valid == false { return false }
+    if offset < 0 { return false }
+    let end = offset + 4
+    if end > cache.entries[idx as usize].code_len { return false }
+
+    // Byte 0: bits 0-7
+    let b0 = val % 256
+    cache.entries[idx as usize].code_bytes[offset as usize] = b0 as i8
+
+    // Byte 1: bits 8-15
+    let shifted1 = val / 256
+    let b1 = shifted1 % 256
+    cache.entries[idx as usize].code_bytes[(offset + 1) as usize] = b1 as i8
+
+    // Byte 2: bits 16-23
+    let shifted2 = shifted1 / 256
+    let b2 = shifted2 % 256
+    cache.entries[idx as usize].code_bytes[(offset + 2) as usize] = b2 as i8
+
+    // Byte 3: bits 24-31
+    let shifted3 = shifted2 / 256
+    let b3 = shifted3 % 256
+    cache.entries[idx as usize].code_bytes[(offset + 3) as usize] = b3 as i8
+
+    true
+}
+
+// Patch a 64-bit little-endian value at offset in an entry's code buffer.
+// Writes 8 bytes in little-endian order.
+fn jc_patch_i64_le(cache: &! JcCache, idx: i64, offset: i64, val: i64) -> bool with Mut, Div, Panic {
+    if idx < 0 { return false }
+    if idx >= cache.entry_count { return false }
+    if cache.entries[idx as usize].valid == false { return false }
+    if offset < 0 { return false }
+    let end = offset + 8
+    if end > cache.entries[idx as usize].code_len { return false }
+
+    var remaining = val
+    var k: i64 = 0
+    while k < 8 {
+        let byte_val = remaining % 256
+        cache.entries[idx as usize].code_bytes[(offset + k) as usize] = byte_val as i8
+        remaining = remaining / 256
+        k = k + 1
+    }
+
+    true
+}
+
+// Copy the code bytes of entry idx into dst. Returns the code_len copied, or 0 on error.
+fn jc_copy_code(cache: &JcCache, idx: i64, dst: &! [i8; 65536]) -> i64 with Mut, Div, Panic {
+    if idx < 0 { return 0 }
+    if idx >= cache.entry_count { return 0 }
+    if cache.entries[idx as usize].valid == false { return 0 }
+
+    let len = cache.entries[idx as usize].code_len
+    var j: i64 = 0
+    while j < len {
+        dst[j as usize] = cache.entries[idx as usize].code_bytes[j as usize]
+        j = j + 1
+    }
+    len
+}
+
+// ============================================================================
+// Section 11: LRU / Eviction
+// ============================================================================
+
+// Find the valid entry with the lowest hit_count (approximation of LRU).
+// Returns the index of that entry, or JC_INVALID if no valid entries.
+fn jc_find_lru_entry(cache: &JcCache) -> i64 with Mut, Div, Panic {
+    var best_idx: i64 = JC_INVALID
+    var best_hits: i64 = 0
+    var first: bool = true
+    var i: i64 = 0
+    while i < cache.entry_count {
+        if cache.entries[i as usize].valid {
+            if first {
+                best_idx = i
+                best_hits = cache.entries[i as usize].hit_count
+                first = false
+            } else {
+                if cache.entries[i as usize].hit_count < best_hits {
+                    best_idx = i
+                    best_hits = cache.entries[i as usize].hit_count
+                }
+            }
+        }
+        i = i + 1
+    }
+    best_idx
+}
+
+// Evict the least recently used valid entry. Returns the func_id of the evicted entry,
+// or JC_INVALID if cache is empty.
+fn jc_evict_lru(cache: &! JcCache) -> i64 with Mut, Div, Panic {
+    let idx = jc_find_lru_entry(cache)
+    if idx == JC_INVALID { return JC_INVALID }
+    let fid = cache.entries[idx as usize].func_id
+    cache.entries[idx as usize].valid = false
+    cache.total_invalidations = cache.total_invalidations + 1
+    fid
+}
+
+// Evict all entries with hit_count below threshold. Returns count evicted.
+fn jc_evict_cold(cache: &! JcCache, threshold: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < cache.entry_count {
+        if cache.entries[i as usize].valid {
+            if cache.entries[i as usize].hit_count < threshold {
+                cache.entries[i as usize].valid = false
+                cache.total_invalidations = cache.total_invalidations + 1
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Compact the cache by moving valid entries to the front, removing gaps left by
+// invalidated entries. Returns the number of slots freed.
+fn jc_compact(cache: &! JcCache) -> i64 with Mut, Div, Panic {
+    let old_count = cache.entry_count
+    var write_idx: i64 = 0
+    var read_idx: i64 = 0
+
+    while read_idx < old_count {
+        if cache.entries[read_idx as usize].valid {
+            if write_idx != read_idx {
+                // Copy entry from read_idx to write_idx
+                cache.entries[write_idx as usize].func_id = cache.entries[read_idx as usize].func_id
+                cache.entries[write_idx as usize].tier = cache.entries[read_idx as usize].tier
+                cache.entries[write_idx as usize].code_len = cache.entries[read_idx as usize].code_len
+                cache.entries[write_idx as usize].entry_point = cache.entries[read_idx as usize].entry_point
+                cache.entries[write_idx as usize].valid = true
+                cache.entries[write_idx as usize].version = cache.entries[read_idx as usize].version
+                cache.entries[write_idx as usize].hit_count = cache.entries[read_idx as usize].hit_count
+
+                // Copy code bytes
+                var k: i64 = 0
+                while k < cache.entries[read_idx as usize].code_len {
+                    cache.entries[write_idx as usize].code_bytes[k as usize] = cache.entries[read_idx as usize].code_bytes[k as usize]
+                    k = k + 1
+                }
+
+                // Invalidate the old slot
+                cache.entries[read_idx as usize].valid = false
+            }
+            write_idx = write_idx + 1
+        }
+        read_idx = read_idx + 1
+    }
+
+    // Clear slots after the last valid entry
+    var c: i64 = write_idx
+    while c < old_count {
+        cache.entries[c as usize].func_id = JC_INVALID
+        cache.entries[c as usize].valid = false
+        cache.entries[c as usize].code_len = 0
+        c = c + 1
+    }
+
+    let freed = old_count - write_idx
+    cache.entry_count = write_idx
+    freed
+}
+
+// ============================================================================
+// Section 12: Extended Utilities
+// ============================================================================
+
+// --------------------------------------------------------------------------
+// Batch operations
+// --------------------------------------------------------------------------
+
+// Bump hit_count for an entry by index. Returns the new hit_count, or 0 on error.
+fn jc_bump_hit_count(cache: &! JcCache, idx: i64) -> i64 with Mut, Div, Panic {
+    if idx < 0 { return 0 }
+    if idx >= cache.entry_count { return 0 }
+    if cache.entries[idx as usize].valid == false { return 0 }
+    cache.entries[idx as usize].hit_count = cache.entries[idx as usize].hit_count + 1
+    cache.entries[idx as usize].hit_count
+}
+
+// Reset all hit counts to zero. Returns the number of entries reset.
+fn jc_reset_hit_counts(cache: &! JcCache) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < cache.entry_count {
+        if cache.entries[i as usize].valid {
+            cache.entries[i as usize].hit_count = 0
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Count how many entries belong to a particular tier.
+fn jc_count_tier(cache: &JcCache, tier: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < cache.entry_count {
+        if cache.entries[i as usize].valid {
+            if cache.entries[i as usize].tier == tier {
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Get the highest tier entry for a given func_id. Returns the tier, or JC_TIER_INTERP
+// if no compiled entry exists.
+fn jc_best_tier(cache: &JcCache, func_id: i64) -> i64 with Mut, Div, Panic {
+    var best: i64 = JC_TIER_INTERP
+    var i: i64 = 0
+    while i < cache.entry_count {
+        if cache.entries[i as usize].func_id == func_id {
+            if cache.entries[i as usize].valid {
+                if cache.entries[i as usize].tier > best {
+                    best = cache.entries[i as usize].tier
+                }
+            }
+        }
+        i = i + 1
+    }
+    best
+}
+
+// Count how many distinct func_ids have compiled entries.
+fn jc_distinct_funcs(cache: &JcCache) -> i64 with Mut, Div, Panic {
+    // Simple O(n^2) approach with no auxiliary storage
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < cache.entry_count {
+        if cache.entries[i as usize].valid {
+            // Check if this func_id appeared in any earlier valid entry
+            var seen: bool = false
+            var j: i64 = 0
+            while j < i {
+                if cache.entries[j as usize].valid {
+                    if cache.entries[j as usize].func_id == cache.entries[i as usize].func_id {
+                        seen = true
+                    }
+                }
+                j = j + 1
+            }
+            if seen == false {
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Invalidate entries for func_id that are below a given tier.
+// Useful when promoting: invalidate old BASELINE after compiling OPT.
+// Returns count invalidated.
+fn jc_invalidate_below_tier(cache: &! JcCache, func_id: i64, tier: i64) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < cache.entry_count {
+        if cache.entries[i as usize].func_id == func_id {
+            if cache.entries[i as usize].valid {
+                if cache.entries[i as usize].tier < tier {
+                    cache.entries[i as usize].valid = false
+                    cache.total_invalidations = cache.total_invalidations + 1
+                    count = count + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Get the total number of profiled functions.
+fn jc_profiled_func_count(cache: &JcCache) -> i64 {
+    cache.profile_count
+}
+
+// Reset all profiling counters to zero. Does not remove the profile entries.
+// Returns count of profiles reset.
+fn jc_reset_profiles(cache: &! JcCache) -> i64 with Mut, Div, Panic {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < cache.profile_count {
+        cache.profiles[i as usize].call_count = 0
+        cache.profiles[i as usize].loop_count = 0
+        cache.profiles[i as usize].branch_taken = 0
+        cache.profiles[i as usize].branch_not_taken = 0
+        cache.profiles[i as usize].total_cycles = 0
+        count = count + 1
+        i = i + 1
+    }
+    count
+}
+
+// Get the profile data for a func_id. Returns an empty profile if not found.
+fn jc_get_profile(cache: &JcCache, func_id: i64) -> JcProfileData with Mut, Div, Panic {
+    let pidx = jc_find_profile(cache, func_id)
+    if pidx == JC_INVALID { return jc_empty_profile() }
+    cache.profiles[pidx as usize]
+}
+
+// Get the loop count for a func_id. Returns 0 if no profile.
+fn jc_get_loop_count(cache: &JcCache, func_id: i64) -> i64 with Mut, Div, Panic {
+    let pidx = jc_find_profile(cache, func_id)
+    if pidx == JC_INVALID { return 0 }
+    cache.profiles[pidx as usize].loop_count
+}
+
+// Get the branch ratio (taken / total branches) for a func_id.
+// Returns 0.0 if no branches recorded.
+fn jc_branch_taken_ratio(cache: &JcCache, func_id: i64) -> f64 with Mut, Div, Panic {
+    let pidx = jc_find_profile(cache, func_id)
+    if pidx == JC_INVALID { return 0.0 }
+    let taken = cache.profiles[pidx as usize].branch_taken
+    let not_taken = cache.profiles[pidx as usize].branch_not_taken
+    let total = taken + not_taken
+    if total == 0 { return 0.0 }
+    let taken_f = taken as f64
+    let total_f = total as f64
+    taken_f / total_f
+}
+
+// Get the total cycles for a func_id. Returns 0 if no profile.
+fn jc_get_total_cycles(cache: &JcCache, func_id: i64) -> i64 with Mut, Div, Panic {
+    let pidx = jc_find_profile(cache, func_id)
+    if pidx == JC_INVALID { return 0 }
+    cache.profiles[pidx as usize].total_cycles
+}
+
+// Get average cycles per call. Returns 0.0 if no calls recorded.
+fn jc_avg_cycles_per_call(cache: &JcCache, func_id: i64) -> f64 with Mut, Div, Panic {
+    let pidx = jc_find_profile(cache, func_id)
+    if pidx == JC_INVALID { return 0.0 }
+    let calls = cache.profiles[pidx as usize].call_count
+    if calls == 0 { return 0.0 }
+    let cycles_f = cache.profiles[pidx as usize].total_cycles as f64
+    let calls_f = calls as f64
+    cycles_f / calls_f
+}
+
+// --------------------------------------------------------------------------
+// Diagnostic helpers
+// --------------------------------------------------------------------------
+
+// Check if cache is at capacity (entry_count == JC_MAX_ENTRIES).
+fn jc_is_full(cache: &JcCache) -> bool {
+    cache.entry_count >= JC_MAX_ENTRIES
+}
+
+// Check if profile storage is at capacity.
+fn jc_profiles_full(cache: &JcCache) -> bool {
+    cache.profile_count >= JC_MAX_PROFILE
+}
+
+// Compute cache utilization as a percentage (0.0 - 100.0).
+fn jc_utilization(cache: &JcCache) -> f64 with Div, Panic {
+    if JC_MAX_ENTRIES == 0 { return 0.0 }
+    let used = cache.entry_count as f64
+    let max = JC_MAX_ENTRIES as f64
+    (used / max) * 100.0
+}
+
+// Compute valid-entry utilization (valid entries / max entries as percentage).
+fn jc_valid_utilization(cache: &JcCache) -> f64 with Mut, Div, Panic {
+    if JC_MAX_ENTRIES == 0 { return 0.0 }
+    let valid = jc_valid_entry_count(cache) as f64
+    let max = JC_MAX_ENTRIES as f64
+    (valid / max) * 100.0
+}
+
+// Return the fragmentation ratio: (total_entries - valid_entries) / total_entries.
+// Higher values mean more wasted slots from invalidation.
+fn jc_fragmentation(cache: &JcCache) -> f64 with Mut, Div, Panic {
+    if cache.entry_count == 0 { return 0.0 }
+    let total_f = cache.entry_count as f64
+    let valid = jc_valid_entry_count(cache)
+    let invalid = cache.entry_count - valid
+    let invalid_f = invalid as f64
+    invalid_f / total_f
+}
+
+// Find the entry with the highest hit count. Returns its index or JC_INVALID.
+fn jc_find_hottest_entry(cache: &JcCache) -> i64 with Mut, Div, Panic {
+    var best_idx: i64 = JC_INVALID
+    var best_hits: i64 = 0
+    var i: i64 = 0
+    while i < cache.entry_count {
+        if cache.entries[i as usize].valid {
+            if cache.entries[i as usize].hit_count > best_hits {
+                best_idx = i
+                best_hits = cache.entries[i as usize].hit_count
+            }
+        }
+        i = i + 1
+    }
+    best_idx
+}
+
+// Sum of all hit_counts across all valid entries.
+fn jc_total_hits_all_entries(cache: &JcCache) -> i64 with Mut, Div, Panic {
+    var total: i64 = 0
+    var i: i64 = 0
+    while i < cache.entry_count {
+        if cache.entries[i as usize].valid {
+            total = total + cache.entries[i as usize].hit_count
+        }
+        i = i + 1
+    }
+    total
+}
+
+// Get the average code length across valid entries. Returns 0.0 if no valid entries.
+fn jc_avg_code_len(cache: &JcCache) -> f64 with Mut, Div, Panic {
+    let valid = jc_valid_entry_count(cache)
+    if valid == 0 { return 0.0 }
+    let total = jc_total_code_bytes(cache) as f64
+    let valid_f = valid as f64
+    total / valid_f
+}
+
+// Find the entry with the largest code_len among valid entries. Returns index or JC_INVALID.
+fn jc_find_largest_entry(cache: &JcCache) -> i64 with Mut, Div, Panic {
+    var best_idx: i64 = JC_INVALID
+    var best_len: i64 = 0
+    var i: i64 = 0
+    while i < cache.entry_count {
+        if cache.entries[i as usize].valid {
+            if cache.entries[i as usize].code_len > best_len {
+                best_idx = i
+                best_len = cache.entries[i as usize].code_len
+            }
+        }
+        i = i + 1
+    }
+    best_idx
+}
+
+// --------------------------------------------------------------------------
+// Verification / consistency checks
+// --------------------------------------------------------------------------
+
+// Verify that all entries before entry_count have a non-JC_INVALID func_id
+// (i.e., they were properly initialized). Returns count of anomalies found.
+fn jc_verify_entries(cache: &JcCache) -> i64 with Mut, Div, Panic {
+    var anomalies: i64 = 0
+    var i: i64 = 0
+    while i < cache.entry_count {
+        // A valid entry should have a real func_id
+        if cache.entries[i as usize].valid {
+            if cache.entries[i as usize].func_id == JC_INVALID {
+                anomalies = anomalies + 1
+            }
+            // code_len should be non-negative
+            if cache.entries[i as usize].code_len < 0 {
+                anomalies = anomalies + 1
+            }
+            // code_len should not exceed buffer size
+            if cache.entries[i as usize].code_len > JC_MAX_CODE {
+                anomalies = anomalies + 1
+            }
+            // version should be positive
+            if cache.entries[i as usize].version <= 0 {
+                anomalies = anomalies + 1
+            }
+        }
+        i = i + 1
+    }
+    anomalies
+}
+
+// Verify profile array consistency. Returns count of anomalies.
+fn jc_verify_profiles(cache: &JcCache) -> i64 with Mut, Div, Panic {
+    var anomalies: i64 = 0
+    var i: i64 = 0
+    while i < cache.profile_count {
+        // func_id should not be JC_INVALID in a used profile slot
+        if cache.profiles[i as usize].func_id == JC_INVALID {
+            anomalies = anomalies + 1
+        }
+        // Counts should be non-negative
+        if cache.profiles[i as usize].call_count < 0 {
+            anomalies = anomalies + 1
+        }
+        if cache.profiles[i as usize].loop_count < 0 {
+            anomalies = anomalies + 1
+        }
+        if cache.profiles[i as usize].branch_taken < 0 {
+            anomalies = anomalies + 1
+        }
+        if cache.profiles[i as usize].branch_not_taken < 0 {
+            anomalies = anomalies + 1
+        }
+        if cache.profiles[i as usize].total_cycles < 0 {
+            anomalies = anomalies + 1
+        }
+        i = i + 1
+    }
+    anomalies
+}
+
+// Full cache integrity check. Returns 0 if clean, positive for number of issues.
+fn jc_verify_all(cache: &JcCache) -> i64 with Mut, Div, Panic {
+    let e_issues = jc_verify_entries(cache)
+    let p_issues = jc_verify_profiles(cache)
+    e_issues + p_issues
+}
+
+// ============================================================================
+// Section 13: Tests
+// ============================================================================
+
+// --------------------------------------------------------------------------
+// Test helper: build a small code buffer filled with a pattern byte
+// --------------------------------------------------------------------------
+
+fn jc_test_code(pattern: i8, len: i64) -> [i8; 65536] with Mut, Div, Panic {
+    var buf: [i8; 65536] = [0; 65536]
+    var i: i64 = 0
+    while i < len {
+        if i < JC_MAX_CODE {
+            buf[i as usize] = pattern
+        }
+        i = i + 1
+    }
+    buf
+}
+
+// --------------------------------------------------------------------------
+// Category 1: Lookup / Insert Basics  (T01 - T05)
+// --------------------------------------------------------------------------
+
+// T01: Insert one entry and look it up by func_id
+fn test_jc_insert_lookup_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(42 as i8, 16)
+    let idx = jc_insert_entry(cache, 100, JC_TIER_BASELINE, code, 16)
+    if idx != 0 { return false }
+    let found = jc_find_entry(cache, 100)
+    if found != 0 { return false }
+    let entry = jc_get_entry(cache, found)
+    if entry.func_id != 100 { return false }
+    if entry.tier != JC_TIER_BASELINE { return false }
+    if entry.code_len != 16 { return false }
+    if entry.valid == false { return false }
+    true
+}
+fn test_jc_insert_lookup() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_insert_lookup_inner(&! cache)
+}
+
+// T02: has_compiled returns true for inserted, false for missing
+fn test_jc_has_compiled_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    if jc_has_compiled(cache, 200) { return false }
+    let code = jc_test_code(1 as i8, 8)
+    let idx = jc_insert_entry(cache, 200, JC_TIER_BASELINE, code, 8)
+    if jc_has_compiled(cache, 200) == false { return false }
+    if jc_has_compiled(cache, 201) { return false }
+    true
+}
+fn test_jc_has_compiled() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_has_compiled_inner(&! cache)
+}
+
+// T03: find_entry returns JC_INVALID for non-existent func_id
+fn test_jc_find_miss_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let idx = jc_find_entry(cache, 999)
+    idx == JC_INVALID
+}
+fn test_jc_find_miss() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_find_miss_inner(&! cache)
+}
+
+// T04: get_entry returns empty for out-of-range index
+fn test_jc_get_entry_oob_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let entry = jc_get_entry(cache, 9999)
+    if entry.func_id != JC_INVALID { return false }
+    let entry_neg = jc_get_entry(cache, 0 - 5)
+    entry_neg.func_id == JC_INVALID
+}
+fn test_jc_get_entry_oob() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_get_entry_oob_inner(&! cache)
+}
+
+// T05: get_code_len returns correct length after insert
+fn test_jc_get_code_len_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(7 as i8, 128)
+    let idx = jc_insert_entry(cache, 300, JC_TIER_OPT, code, 128)
+    let len = jc_get_code_len(cache, 300)
+    if len != 128 { return false }
+    let missing_len = jc_get_code_len(cache, 301)
+    missing_len == 0
+}
+fn test_jc_get_code_len() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_get_code_len_inner(&! cache)
+}
+
+// --------------------------------------------------------------------------
+// Category 2: Cache Miss / Hit Tracking  (T06 - T10)
+// --------------------------------------------------------------------------
+
+// T06: Record hits and misses
+fn test_jc_hit_miss_tracking_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let h1 = jc_record_hit(cache)
+    let h2 = jc_record_hit(cache)
+    let m1 = jc_record_miss(cache)
+    if h1 != 1 { return false }
+    if h2 != 2 { return false }
+    if m1 != 1 { return false }
+    if cache.total_hits != 2 { return false }
+    cache.total_misses == 1
+}
+fn test_jc_hit_miss_tracking() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_hit_miss_tracking_inner(&! cache)
+}
+
+// T07: Hit rate calculation — 50%
+fn test_jc_hit_rate_50_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let h = jc_record_hit(cache)
+    let m = jc_record_miss(cache)
+    let rate = jc_hit_rate(cache)
+    // rate should be 50.0
+    if rate < 49.9 { return false }
+    if rate > 50.1 { return false }
+    true
+}
+fn test_jc_hit_rate_50() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_hit_rate_50_inner(&! cache)
+}
+
+// T08: Hit rate of empty cache is 0.0
+fn test_jc_hit_rate_zero_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let rate = jc_hit_rate(cache)
+    rate == 0.0
+}
+fn test_jc_hit_rate_zero() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_hit_rate_zero_inner(&! cache)
+}
+
+// T09: Hit rate 100%
+fn test_jc_hit_rate_100_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let h1 = jc_record_hit(cache)
+    let h2 = jc_record_hit(cache)
+    let h3 = jc_record_hit(cache)
+    let rate = jc_hit_rate(cache)
+    if rate < 99.9 { return false }
+    if rate > 100.1 { return false }
+    true
+}
+fn test_jc_hit_rate_100() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_hit_rate_100_inner(&! cache)
+}
+
+// T10: total_compilations increments on insert
+fn test_jc_compilation_count_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    if cache.total_compilations != 0 { return false }
+    let code = jc_test_code(1 as i8, 4)
+    let idx1 = jc_insert_entry(cache, 1, JC_TIER_BASELINE, code, 4)
+    if cache.total_compilations != 1 { return false }
+    let idx2 = jc_insert_entry(cache, 2, JC_TIER_OPT, code, 4)
+    cache.total_compilations == 2
+}
+fn test_jc_compilation_count() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_compilation_count_inner(&! cache)
+}
+
+// --------------------------------------------------------------------------
+// Category 3: Tier Promotion  (T11 - T15)
+// --------------------------------------------------------------------------
+
+// T11: Promote from BASELINE to OPT
+fn test_jc_promote_baseline_to_opt_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(10 as i8, 32)
+    let idx = jc_insert_entry(cache, 500, JC_TIER_BASELINE, code, 32)
+    let ok = jc_promote_tier(cache, 500, JC_TIER_OPT)
+    if ok == false { return false }
+    let tier = jc_current_tier(cache, 500)
+    tier == JC_TIER_OPT
+}
+fn test_jc_promote_baseline_to_opt() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_promote_baseline_to_opt_inner(&! cache)
+}
+
+// T12: Promote rejects downgrade (OPT -> BASELINE)
+fn test_jc_promote_reject_downgrade_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(10 as i8, 32)
+    let idx = jc_insert_entry(cache, 501, JC_TIER_OPT, code, 32)
+    let ok = jc_promote_tier(cache, 501, JC_TIER_BASELINE)
+    ok == false
+}
+fn test_jc_promote_reject_downgrade() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_promote_reject_downgrade_inner(&! cache)
+}
+
+// T13: Promote rejects same tier
+fn test_jc_promote_reject_same_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(10 as i8, 32)
+    let idx = jc_insert_entry(cache, 502, JC_TIER_BASELINE, code, 32)
+    let ok = jc_promote_tier(cache, 502, JC_TIER_BASELINE)
+    ok == false
+}
+fn test_jc_promote_reject_same() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_promote_reject_same_inner(&! cache)
+}
+
+// T14: Promote updates profile last_tier
+fn test_jc_promote_updates_profile_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(10 as i8, 16)
+    let idx = jc_insert_entry(cache, 503, JC_TIER_BASELINE, code, 16)
+    // Create a profile for this func
+    let cc = jc_record_call(cache, 503)
+    let ok = jc_promote_tier(cache, 503, JC_TIER_OPT)
+    if ok == false { return false }
+    let lt = jc_get_last_tier(cache, 503)
+    lt == JC_TIER_OPT
+}
+fn test_jc_promote_updates_profile() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_promote_updates_profile_inner(&! cache)
+}
+
+// T15: Promote from BASELINE to NATIVE
+fn test_jc_promote_to_native_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(10 as i8, 64)
+    let idx = jc_insert_entry(cache, 504, JC_TIER_BASELINE, code, 64)
+    let ok = jc_promote_tier(cache, 504, JC_TIER_NATIVE)
+    if ok == false { return false }
+    let tier = jc_current_tier(cache, 504)
+    tier == JC_TIER_NATIVE
+}
+fn test_jc_promote_to_native() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_promote_to_native_inner(&! cache)
+}
+
+// --------------------------------------------------------------------------
+// Category 4: Invalidation  (T16 - T20)
+// --------------------------------------------------------------------------
+
+// T16: Invalidate single entry
+fn test_jc_invalidate_single_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(5 as i8, 8)
+    let idx = jc_insert_entry(cache, 600, JC_TIER_BASELINE, code, 8)
+    if jc_is_valid(cache, idx) == false { return false }
+    let ok = jc_invalidate_entry(cache, idx)
+    if ok == false { return false }
+    if jc_is_valid(cache, idx) { return false }
+    true
+}
+fn test_jc_invalidate_single() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_invalidate_single_inner(&! cache)
+}
+
+// T17: Invalidate by func_id
+fn test_jc_invalidate_func_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(5 as i8, 8)
+    let idx1 = jc_insert_entry(cache, 601, JC_TIER_BASELINE, code, 8)
+    let idx2 = jc_insert_entry(cache, 601, JC_TIER_OPT, code, 8)
+    let idx3 = jc_insert_entry(cache, 602, JC_TIER_BASELINE, code, 8)
+    let count = jc_invalidate_func(cache, 601)
+    if count != 2 { return false }
+    // 602 should still be valid
+    jc_is_valid(cache, idx3)
+}
+fn test_jc_invalidate_func() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_invalidate_func_inner(&! cache)
+}
+
+// T18: Invalidate all
+fn test_jc_invalidate_all_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(5 as i8, 8)
+    let idx1 = jc_insert_entry(cache, 700, JC_TIER_BASELINE, code, 8)
+    let idx2 = jc_insert_entry(cache, 701, JC_TIER_OPT, code, 8)
+    let idx3 = jc_insert_entry(cache, 702, JC_TIER_NATIVE, code, 8)
+    let count = jc_invalidate_all(cache)
+    if count != 3 { return false }
+    let valid = jc_valid_entry_count(cache)
+    valid == 0
+}
+fn test_jc_invalidate_all() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_invalidate_all_inner(&! cache)
+}
+
+// T19: Invalidate by tier
+fn test_jc_invalidate_tier_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(5 as i8, 8)
+    let idx1 = jc_insert_entry(cache, 800, JC_TIER_BASELINE, code, 8)
+    let idx2 = jc_insert_entry(cache, 801, JC_TIER_BASELINE, code, 8)
+    let idx3 = jc_insert_entry(cache, 802, JC_TIER_OPT, code, 8)
+    let count = jc_invalidate_tier(cache, JC_TIER_BASELINE)
+    if count != 2 { return false }
+    // OPT entry should survive
+    jc_is_valid(cache, idx3)
+}
+fn test_jc_invalidate_tier() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_invalidate_tier_inner(&! cache)
+}
+
+// T20: Invalidate already-invalid entry returns false
+fn test_jc_invalidate_already_invalid_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(5 as i8, 8)
+    let idx = jc_insert_entry(cache, 900, JC_TIER_BASELINE, code, 8)
+    let ok1 = jc_invalidate_entry(cache, idx)
+    if ok1 == false { return false }
+    let ok2 = jc_invalidate_entry(cache, idx)
+    ok2 == false
+}
+fn test_jc_invalidate_already_invalid() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_invalidate_already_invalid_inner(&! cache)
+}
+
+// --------------------------------------------------------------------------
+// Category 5: Profiling Counters  (T21 - T25)
+// --------------------------------------------------------------------------
+
+// T21: record_call increments call count
+fn test_jc_record_call_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let c1 = jc_record_call(cache, 1000)
+    let c2 = jc_record_call(cache, 1000)
+    let c3 = jc_record_call(cache, 1000)
+    if c1 != 1 { return false }
+    if c2 != 2 { return false }
+    c3 == 3
+}
+fn test_jc_record_call() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_record_call_inner(&! cache)
+}
+
+// T22: record_loop increments loop count
+fn test_jc_record_loop_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let l1 = jc_record_loop(cache, 1001)
+    let l2 = jc_record_loop(cache, 1001)
+    if l1 != 1 { return false }
+    l2 == 2
+}
+fn test_jc_record_loop() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_record_loop_inner(&! cache)
+}
+
+// T23: record_branch tracks taken and not-taken
+fn test_jc_record_branch_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let t1 = jc_record_branch(cache, 1002, true)
+    let t2 = jc_record_branch(cache, 1002, true)
+    let nt1 = jc_record_branch(cache, 1002, false)
+    if t1 != 1 { return false }
+    if t2 != 2 { return false }
+    nt1 == 1
+}
+fn test_jc_record_branch() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_record_branch_inner(&! cache)
+}
+
+// T24: add_cycles accumulates
+fn test_jc_add_cycles_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let c1 = jc_add_cycles(cache, 1003, 500)
+    let c2 = jc_add_cycles(cache, 1003, 300)
+    if c1 != 500 { return false }
+    c2 == 800
+}
+fn test_jc_add_cycles() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_add_cycles_inner(&! cache)
+}
+
+// T25: get_or_create_profile re-uses existing profile
+fn test_jc_profile_reuse_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let p1 = jc_get_or_create_profile(cache, 1004)
+    let p2 = jc_get_or_create_profile(cache, 1004)
+    if p1 == JC_INVALID { return false }
+    p1 == p2
+}
+fn test_jc_profile_reuse() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_profile_reuse_inner(&! cache)
+}
+
+// --------------------------------------------------------------------------
+// Category 6: Hot / Warm Detection  (T26 - T30)
+// --------------------------------------------------------------------------
+
+// T26: is_warm returns false initially
+fn test_jc_not_warm_initially_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let w = jc_is_warm(cache, 1100)
+    w == false
+}
+fn test_jc_not_warm_initially() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_not_warm_initially_inner(&! cache)
+}
+
+// T27: is_warm becomes true after WARM_THRESHOLD calls
+fn test_jc_becomes_warm_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < JC_WARM_THRESHOLD {
+        let c = jc_record_call(cache, 1101)
+        i = i + 1
+    }
+    jc_is_warm(cache, 1101)
+}
+fn test_jc_becomes_warm() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_becomes_warm_inner(&! cache)
+}
+
+// T28: is_hot returns false at WARM_THRESHOLD
+fn test_jc_not_hot_at_warm_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < JC_WARM_THRESHOLD {
+        let c = jc_record_call(cache, 1102)
+        i = i + 1
+    }
+    let hot = jc_is_hot(cache, 1102)
+    hot == false
+}
+fn test_jc_not_hot_at_warm() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_not_hot_at_warm_inner(&! cache)
+}
+
+// T29: is_hot becomes true after HOT_THRESHOLD calls
+fn test_jc_becomes_hot_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < JC_HOT_THRESHOLD {
+        let c = jc_record_call(cache, 1103)
+        i = i + 1
+    }
+    jc_is_hot(cache, 1103)
+}
+fn test_jc_becomes_hot() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_becomes_hot_inner(&! cache)
+}
+
+// T30: should_compile recommends BASELINE for warm function
+fn test_jc_should_compile_warm_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < JC_WARM_THRESHOLD {
+        let c = jc_record_call(cache, 1104)
+        i = i + 1
+    }
+    let tier = jc_should_compile(cache, 1104)
+    tier == JC_TIER_BASELINE
+}
+fn test_jc_should_compile_warm() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_should_compile_warm_inner(&! cache)
+}
+
+// --------------------------------------------------------------------------
+// Category 7: Code Patching  (T31 - T35)
+// --------------------------------------------------------------------------
+
+// T31: Patch a single byte and verify
+fn test_jc_patch_byte_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(0 as i8, 32)
+    let idx = jc_insert_entry(cache, 1200, JC_TIER_OPT, code, 32)
+    let ok = jc_patch_byte(cache, idx, 5, 99 as i8)
+    if ok == false { return false }
+    let entry = jc_get_entry(cache, idx)
+    entry.code_bytes[5 as usize] == 99 as i8
+}
+fn test_jc_patch_byte() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_patch_byte_inner(&! cache)
+}
+
+// T32: Patch byte out of range returns false
+fn test_jc_patch_byte_oob_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(0 as i8, 8)
+    let idx = jc_insert_entry(cache, 1201, JC_TIER_BASELINE, code, 8)
+    let ok = jc_patch_byte(cache, idx, 8, 1 as i8)
+    ok == false
+}
+fn test_jc_patch_byte_oob() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_patch_byte_oob_inner(&! cache)
+}
+
+// T33: Patch i32 little-endian
+fn test_jc_patch_i32_le_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(0 as i8, 32)
+    let idx = jc_insert_entry(cache, 1202, JC_TIER_OPT, code, 32)
+    // Patch value 0x04030201 = 67305985 at offset 4
+    let ok = jc_patch_i32_le(cache, idx, 4, 67305985)
+    if ok == false { return false }
+    let entry = jc_get_entry(cache, idx)
+    // Little-endian: byte 4 = 0x01, byte 5 = 0x02, byte 6 = 0x03, byte 7 = 0x04
+    if entry.code_bytes[4 as usize] != 1 as i8 { return false }
+    if entry.code_bytes[5 as usize] != 2 as i8 { return false }
+    if entry.code_bytes[6 as usize] != 3 as i8 { return false }
+    if entry.code_bytes[7 as usize] != 4 as i8 { return false }
+    true
+}
+fn test_jc_patch_i32_le() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_patch_i32_le_inner(&! cache)
+}
+
+// T34: Patch i64 little-endian
+fn test_jc_patch_i64_le_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(0 as i8, 32)
+    let idx = jc_insert_entry(cache, 1203, JC_TIER_OPT, code, 32)
+    // Patch value 256 = 0x0000000000000100 at offset 0
+    let ok = jc_patch_i64_le(cache, idx, 0, 256)
+    if ok == false { return false }
+    let entry = jc_get_entry(cache, idx)
+    // Little-endian: byte 0 = 0x00, byte 1 = 0x01, bytes 2-7 = 0x00
+    if entry.code_bytes[0 as usize] != 0 as i8 { return false }
+    if entry.code_bytes[1 as usize] != 1 as i8 { return false }
+    if entry.code_bytes[2 as usize] != 0 as i8 { return false }
+    true
+}
+fn test_jc_patch_i64_le() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_patch_i64_le_inner(&! cache)
+}
+
+// T35: Patch on invalid entry returns false
+fn test_jc_patch_invalid_entry_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let ok = jc_patch_byte(cache, 0, 0, 1 as i8)
+    ok == false
+}
+fn test_jc_patch_invalid_entry() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_patch_invalid_entry_inner(&! cache)
+}
+
+// --------------------------------------------------------------------------
+// Category 8: LRU Eviction  (T36 - T40)
+// --------------------------------------------------------------------------
+
+// T36: find_lru_entry returns entry with lowest hit_count
+fn test_jc_find_lru_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(1 as i8, 4)
+    let idx0 = jc_insert_entry(cache, 1300, JC_TIER_BASELINE, code, 4)
+    let idx1 = jc_insert_entry(cache, 1301, JC_TIER_BASELINE, code, 4)
+    let idx2 = jc_insert_entry(cache, 1302, JC_TIER_BASELINE, code, 4)
+    // Bump hit count of entries 0 and 2
+    cache.entries[idx0 as usize].hit_count = 10
+    cache.entries[idx2 as usize].hit_count = 5
+    // Entry 1 has hit_count = 0, should be LRU
+    let lru = jc_find_lru_entry(cache)
+    lru == idx1
+}
+fn test_jc_find_lru() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_find_lru_inner(&! cache)
+}
+
+// T37: evict_lru removes the LRU entry
+fn test_jc_evict_lru_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(1 as i8, 4)
+    let idx0 = jc_insert_entry(cache, 1400, JC_TIER_BASELINE, code, 4)
+    let idx1 = jc_insert_entry(cache, 1401, JC_TIER_BASELINE, code, 4)
+    cache.entries[idx0 as usize].hit_count = 50
+    // idx1 has hit_count = 0
+    let evicted_fid = jc_evict_lru(cache)
+    if evicted_fid != 1401 { return false }
+    if jc_is_valid(cache, idx1) { return false }
+    jc_is_valid(cache, idx0)
+}
+fn test_jc_evict_lru() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_evict_lru_inner(&! cache)
+}
+
+// T38: evict_lru on empty cache returns JC_INVALID
+fn test_jc_evict_lru_empty_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let fid = jc_evict_lru(cache)
+    fid == JC_INVALID
+}
+fn test_jc_evict_lru_empty() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_evict_lru_empty_inner(&! cache)
+}
+
+// T39: evict_cold removes entries below threshold
+fn test_jc_evict_cold_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(1 as i8, 4)
+    let idx0 = jc_insert_entry(cache, 1500, JC_TIER_BASELINE, code, 4)
+    let idx1 = jc_insert_entry(cache, 1501, JC_TIER_BASELINE, code, 4)
+    let idx2 = jc_insert_entry(cache, 1502, JC_TIER_BASELINE, code, 4)
+    cache.entries[idx0 as usize].hit_count = 100
+    cache.entries[idx1 as usize].hit_count = 3
+    cache.entries[idx2 as usize].hit_count = 1
+    let evicted = jc_evict_cold(cache, 5)
+    if evicted != 2 { return false }
+    if jc_is_valid(cache, idx0) == false { return false }
+    if jc_is_valid(cache, idx1) { return false }
+    if jc_is_valid(cache, idx2) { return false }
+    true
+}
+fn test_jc_evict_cold() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_evict_cold_inner(&! cache)
+}
+
+// T40: compact removes gaps
+fn test_jc_compact_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(1 as i8, 4)
+    let idx0 = jc_insert_entry(cache, 1600, JC_TIER_BASELINE, code, 4)
+    let idx1 = jc_insert_entry(cache, 1601, JC_TIER_BASELINE, code, 4)
+    let idx2 = jc_insert_entry(cache, 1602, JC_TIER_BASELINE, code, 4)
+    // Invalidate the middle entry
+    let ok = jc_invalidate_entry(cache, idx1)
+    let freed = jc_compact(cache)
+    if freed != 1 { return false }
+    if cache.entry_count != 2 { return false }
+    // Entry 0 should still be func 1600
+    let e0 = jc_get_entry(cache, 0)
+    if e0.func_id != 1600 { return false }
+    // Entry 1 should now be func 1602 (moved forward)
+    let e1 = jc_get_entry(cache, 1)
+    e1.func_id == 1602
+}
+fn test_jc_compact() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_compact_inner(&! cache)
+}
+
+// --------------------------------------------------------------------------
+// Category 9: Statistics  (T41 - T45)
+// --------------------------------------------------------------------------
+
+// T41: total_code_bytes sums valid entries only
+fn test_jc_total_code_bytes_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(1 as i8, 100)
+    let idx0 = jc_insert_entry(cache, 1700, JC_TIER_BASELINE, code, 100)
+    let idx1 = jc_insert_entry(cache, 1701, JC_TIER_BASELINE, code, 200)
+    let idx2 = jc_insert_entry(cache, 1702, JC_TIER_BASELINE, code, 50)
+    let ok = jc_invalidate_entry(cache, idx1)
+    let total = jc_total_code_bytes(cache)
+    total == 150
+}
+fn test_jc_total_code_bytes() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_total_code_bytes_inner(&! cache)
+}
+
+// T42: valid_entry_count
+fn test_jc_valid_entry_count_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(1 as i8, 4)
+    let idx0 = jc_insert_entry(cache, 1800, JC_TIER_BASELINE, code, 4)
+    let idx1 = jc_insert_entry(cache, 1801, JC_TIER_OPT, code, 4)
+    let idx2 = jc_insert_entry(cache, 1802, JC_TIER_NATIVE, code, 4)
+    let ok = jc_invalidate_entry(cache, idx0)
+    let count = jc_valid_entry_count(cache)
+    count == 2
+}
+fn test_jc_valid_entry_count() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_valid_entry_count_inner(&! cache)
+}
+
+// T43: stats_summary fields
+fn test_jc_stats_summary_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(1 as i8, 16)
+    let idx0 = jc_insert_entry(cache, 1900, JC_TIER_BASELINE, code, 16)
+    let idx1 = jc_insert_entry(cache, 1901, JC_TIER_OPT, code, 32)
+    let h = jc_record_hit(cache)
+    let m = jc_record_miss(cache)
+    let summary = jc_stats_summary(cache)
+    if summary.total_entries != 2 { return false }
+    if summary.valid_entries != 2 { return false }
+    if summary.total_code_bytes != 48 { return false }
+    if summary.compilations != 2 { return false }
+    if summary.invalidations != 0 { return false }
+    // Hit rate should be 50%
+    if summary.hit_rate_pct < 49.9 { return false }
+    if summary.hit_rate_pct > 50.1 { return false }
+    true
+}
+fn test_jc_stats_summary() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_stats_summary_inner(&! cache)
+}
+
+// T44: total_invalidations tracks correctly
+fn test_jc_invalidation_count_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(1 as i8, 4)
+    let idx0 = jc_insert_entry(cache, 2000, JC_TIER_BASELINE, code, 4)
+    let idx1 = jc_insert_entry(cache, 2001, JC_TIER_BASELINE, code, 4)
+    let ok0 = jc_invalidate_entry(cache, idx0)
+    let ok1 = jc_invalidate_entry(cache, idx1)
+    cache.total_invalidations == 2
+}
+fn test_jc_invalidation_count() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_invalidation_count_inner(&! cache)
+}
+
+// T45: empty cache stats
+fn test_jc_empty_stats_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let summary = jc_stats_summary(cache)
+    if summary.total_entries != 0 { return false }
+    if summary.valid_entries != 0 { return false }
+    if summary.total_code_bytes != 0 { return false }
+    if summary.compilations != 0 { return false }
+    summary.invalidations == 0
+}
+fn test_jc_empty_stats() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_empty_stats_inner(&! cache)
+}
+
+// --------------------------------------------------------------------------
+// Category 10: Edge Cases  (T46 - T55)
+// --------------------------------------------------------------------------
+
+// T46: Update entry changes code and tier
+fn test_jc_update_entry_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code1 = jc_test_code(10 as i8, 16)
+    let idx = jc_insert_entry(cache, 2100, JC_TIER_BASELINE, code1, 16)
+    let code2 = jc_test_code(20 as i8, 32)
+    let ok = jc_update_entry(cache, idx, code2, 32, JC_TIER_OPT)
+    if ok == false { return false }
+    let entry = jc_get_entry(cache, idx)
+    if entry.tier != JC_TIER_OPT { return false }
+    if entry.code_len != 32 { return false }
+    // Version should have been bumped
+    if entry.version < 2 { return false }
+    // Verify code byte changed
+    entry.code_bytes[0 as usize] == 20 as i8
+}
+fn test_jc_update_entry() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_update_entry_inner(&! cache)
+}
+
+// T47: Set entry point
+fn test_jc_set_entry_point_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(0 as i8, 64)
+    let idx = jc_insert_entry(cache, 2200, JC_TIER_OPT, code, 64)
+    let ok = jc_set_entry_point(cache, idx, 16)
+    if ok == false { return false }
+    let entry = jc_get_entry(cache, idx)
+    entry.entry_point == 16
+}
+fn test_jc_set_entry_point() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_set_entry_point_inner(&! cache)
+}
+
+// T48: Bump version
+fn test_jc_bump_version_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(0 as i8, 4)
+    let idx = jc_insert_entry(cache, 2300, JC_TIER_BASELINE, code, 4)
+    let v1 = jc_bump_version(cache, idx)
+    let v2 = jc_bump_version(cache, idx)
+    if v1 != 2 { return false }
+    v2 == 3
+}
+fn test_jc_bump_version() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_bump_version_inner(&! cache)
+}
+
+// T49: find_entry_tier finds correct tier
+fn test_jc_find_entry_tier_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(1 as i8, 4)
+    let idx0 = jc_insert_entry(cache, 2400, JC_TIER_BASELINE, code, 4)
+    let idx1 = jc_insert_entry(cache, 2400, JC_TIER_OPT, code, 4)
+    let found = jc_find_entry_tier(cache, 2400, JC_TIER_OPT)
+    found == idx1
+}
+fn test_jc_find_entry_tier() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_find_entry_tier_inner(&! cache)
+}
+
+// T50: copy_code produces correct output
+fn test_jc_copy_code_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(77 as i8, 10)
+    let idx = jc_insert_entry(cache, 2500, JC_TIER_OPT, code, 10)
+    var dst: [i8; 65536] = [0; 65536]
+    let len = jc_copy_code(cache, idx, &! dst)
+    if len != 10 { return false }
+    if dst[0 as usize] != 77 as i8 { return false }
+    if dst[9 as usize] != 77 as i8 { return false }
+    // Byte past end should be 0
+    dst[10 as usize] == 0 as i8
+}
+fn test_jc_copy_code() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_copy_code_inner(&! cache)
+}
+
+// T51: should_compile recommends OPT for hot function
+fn test_jc_should_compile_hot_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < JC_HOT_THRESHOLD {
+        let c = jc_record_call(cache, 2600)
+        i = i + 1
+    }
+    let tier = jc_should_compile(cache, 2600)
+    tier == JC_TIER_OPT
+}
+fn test_jc_should_compile_hot() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_should_compile_hot_inner(&! cache)
+}
+
+// T52: should_compile returns INTERP for cold function
+fn test_jc_should_compile_cold_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let c = jc_record_call(cache, 2700)
+    let tier = jc_should_compile(cache, 2700)
+    tier == JC_TIER_INTERP
+}
+fn test_jc_should_compile_cold() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_should_compile_cold_inner(&! cache)
+}
+
+// T53: invalidation_new creates correct record
+fn test_jc_invalidation_new() -> bool with Mut, Div, Panic {
+    let inv = jc_invalidation_new(42, JC_REASON_DEOPT)
+    if inv.func_id != 42 { return false }
+    inv.reason == JC_REASON_DEOPT
+}
+
+// T54: update_entry on invalid index returns false
+fn test_jc_update_invalid_idx_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(0 as i8, 4)
+    let ok = jc_update_entry(cache, 999, code, 4, JC_TIER_OPT)
+    ok == false
+}
+fn test_jc_update_invalid_idx() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_update_invalid_idx_inner(&! cache)
+}
+
+// T55: bump_version on invalid index returns JC_INVALID
+fn test_jc_bump_version_invalid_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let v = jc_bump_version(cache, 0 - 5)
+    v == JC_INVALID
+}
+fn test_jc_bump_version_invalid() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_bump_version_invalid_inner(&! cache)
+}
+
+// --------------------------------------------------------------------------
+// Category 11: Extended Utility Tests  (T56 - T65)
+// --------------------------------------------------------------------------
+
+// T56: bump_hit_count increments correctly
+fn test_jc_bump_hit_count_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(1 as i8, 4)
+    let idx = jc_insert_entry(cache, 3000, JC_TIER_BASELINE, code, 4)
+    let h1 = jc_bump_hit_count(cache, idx)
+    let h2 = jc_bump_hit_count(cache, idx)
+    let h3 = jc_bump_hit_count(cache, idx)
+    if h1 != 1 { return false }
+    if h2 != 2 { return false }
+    h3 == 3
+}
+fn test_jc_bump_hit_count() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_bump_hit_count_inner(&! cache)
+}
+
+// T57: reset_hit_counts zeroes all valid entries
+fn test_jc_reset_hit_counts_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(1 as i8, 4)
+    let idx0 = jc_insert_entry(cache, 3100, JC_TIER_BASELINE, code, 4)
+    let idx1 = jc_insert_entry(cache, 3101, JC_TIER_OPT, code, 4)
+    cache.entries[idx0 as usize].hit_count = 50
+    cache.entries[idx1 as usize].hit_count = 30
+    let count = jc_reset_hit_counts(cache)
+    if count != 2 { return false }
+    if cache.entries[idx0 as usize].hit_count != 0 { return false }
+    cache.entries[idx1 as usize].hit_count == 0
+}
+fn test_jc_reset_hit_counts() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_reset_hit_counts_inner(&! cache)
+}
+
+// T58: count_tier returns correct count
+fn test_jc_count_tier_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(1 as i8, 4)
+    let idx0 = jc_insert_entry(cache, 3200, JC_TIER_BASELINE, code, 4)
+    let idx1 = jc_insert_entry(cache, 3201, JC_TIER_BASELINE, code, 4)
+    let idx2 = jc_insert_entry(cache, 3202, JC_TIER_OPT, code, 4)
+    let idx3 = jc_insert_entry(cache, 3203, JC_TIER_NATIVE, code, 4)
+    let bl_count = jc_count_tier(cache, JC_TIER_BASELINE)
+    let opt_count = jc_count_tier(cache, JC_TIER_OPT)
+    let nat_count = jc_count_tier(cache, JC_TIER_NATIVE)
+    if bl_count != 2 { return false }
+    if opt_count != 1 { return false }
+    nat_count == 1
+}
+fn test_jc_count_tier() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_count_tier_inner(&! cache)
+}
+
+// T59: best_tier returns highest tier for a func
+fn test_jc_best_tier_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(1 as i8, 4)
+    let idx0 = jc_insert_entry(cache, 3300, JC_TIER_BASELINE, code, 4)
+    let idx1 = jc_insert_entry(cache, 3300, JC_TIER_OPT, code, 4)
+    let idx2 = jc_insert_entry(cache, 3300, JC_TIER_BASELINE, code, 4)
+    let best = jc_best_tier(cache, 3300)
+    best == JC_TIER_OPT
+}
+fn test_jc_best_tier() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_best_tier_inner(&! cache)
+}
+
+// T60: distinct_funcs counts unique func_ids
+fn test_jc_distinct_funcs_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(1 as i8, 4)
+    let idx0 = jc_insert_entry(cache, 3400, JC_TIER_BASELINE, code, 4)
+    let idx1 = jc_insert_entry(cache, 3400, JC_TIER_OPT, code, 4)
+    let idx2 = jc_insert_entry(cache, 3401, JC_TIER_BASELINE, code, 4)
+    let idx3 = jc_insert_entry(cache, 3402, JC_TIER_NATIVE, code, 4)
+    let count = jc_distinct_funcs(cache)
+    count == 3
+}
+fn test_jc_distinct_funcs() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_distinct_funcs_inner(&! cache)
+}
+
+// T61: invalidate_below_tier removes lower tiers
+fn test_jc_invalidate_below_tier_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(1 as i8, 4)
+    let idx0 = jc_insert_entry(cache, 3500, JC_TIER_BASELINE, code, 4)
+    let idx1 = jc_insert_entry(cache, 3500, JC_TIER_OPT, code, 4)
+    let idx2 = jc_insert_entry(cache, 3500, JC_TIER_NATIVE, code, 4)
+    let count = jc_invalidate_below_tier(cache, 3500, JC_TIER_OPT)
+    if count != 1 { return false }
+    // BASELINE should be invalid
+    if jc_is_valid(cache, idx0) { return false }
+    // OPT and NATIVE should survive
+    if jc_is_valid(cache, idx1) == false { return false }
+    jc_is_valid(cache, idx2)
+}
+fn test_jc_invalidate_below_tier() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_invalidate_below_tier_inner(&! cache)
+}
+
+// T62: reset_profiles clears all counters
+fn test_jc_reset_profiles_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let c1 = jc_record_call(cache, 3600)
+    let c2 = jc_record_call(cache, 3600)
+    let l1 = jc_record_loop(cache, 3600)
+    let reset_count = jc_reset_profiles(cache)
+    if reset_count != 1 { return false }
+    let cc = jc_get_call_count(cache, 3600)
+    let lc = jc_get_loop_count(cache, 3600)
+    if cc != 0 { return false }
+    lc == 0
+}
+fn test_jc_reset_profiles() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_reset_profiles_inner(&! cache)
+}
+
+// T63: branch_taken_ratio computes correctly
+fn test_jc_branch_taken_ratio_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    // 3 taken, 1 not taken = 0.75
+    let b1 = jc_record_branch(cache, 3700, true)
+    let b2 = jc_record_branch(cache, 3700, true)
+    let b3 = jc_record_branch(cache, 3700, true)
+    let b4 = jc_record_branch(cache, 3700, false)
+    let ratio = jc_branch_taken_ratio(cache, 3700)
+    if ratio < 0.74 { return false }
+    if ratio > 0.76 { return false }
+    true
+}
+fn test_jc_branch_taken_ratio() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_branch_taken_ratio_inner(&! cache)
+}
+
+// T64: avg_cycles_per_call computes correctly
+fn test_jc_avg_cycles_per_call_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let c1 = jc_record_call(cache, 3800)
+    let c2 = jc_record_call(cache, 3800)
+    let cy1 = jc_add_cycles(cache, 3800, 100)
+    let cy2 = jc_add_cycles(cache, 3800, 200)
+    // Total = 300 cycles, 2 calls => avg = 150.0
+    let avg = jc_avg_cycles_per_call(cache, 3800)
+    if avg < 149.9 { return false }
+    if avg > 150.1 { return false }
+    true
+}
+fn test_jc_avg_cycles_per_call() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_avg_cycles_per_call_inner(&! cache)
+}
+
+// T65: is_full / utilization on empty cache
+fn test_jc_is_full_empty_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    if jc_is_full(cache) { return false }
+    let util = jc_utilization(cache)
+    util == 0.0
+}
+fn test_jc_is_full_empty() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_is_full_empty_inner(&! cache)
+}
+
+// --------------------------------------------------------------------------
+// Category 12: Verification / Diagnostic Tests  (T66 - T75)
+// --------------------------------------------------------------------------
+
+// T66: verify_entries returns 0 for a clean cache
+fn test_jc_verify_clean_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(1 as i8, 4)
+    let idx = jc_insert_entry(cache, 4000, JC_TIER_BASELINE, code, 4)
+    let issues = jc_verify_entries(cache)
+    issues == 0
+}
+fn test_jc_verify_clean() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_verify_clean_inner(&! cache)
+}
+
+// T67: verify_profiles returns 0 for clean profiles
+fn test_jc_verify_profiles_clean_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let c = jc_record_call(cache, 4100)
+    let issues = jc_verify_profiles(cache)
+    issues == 0
+}
+fn test_jc_verify_profiles_clean() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_verify_profiles_clean_inner(&! cache)
+}
+
+// T68: verify_all returns 0 for fully clean cache
+fn test_jc_verify_all_clean_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(1 as i8, 16)
+    let idx = jc_insert_entry(cache, 4200, JC_TIER_OPT, code, 16)
+    let c = jc_record_call(cache, 4200)
+    let issues = jc_verify_all(cache)
+    issues == 0
+}
+fn test_jc_verify_all_clean() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_verify_all_clean_inner(&! cache)
+}
+
+// T69: fragmentation is 0.0 when all entries are valid
+fn test_jc_no_fragmentation_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(1 as i8, 4)
+    let idx0 = jc_insert_entry(cache, 4300, JC_TIER_BASELINE, code, 4)
+    let idx1 = jc_insert_entry(cache, 4301, JC_TIER_BASELINE, code, 4)
+    let frag = jc_fragmentation(cache)
+    frag == 0.0
+}
+fn test_jc_no_fragmentation() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_no_fragmentation_inner(&! cache)
+}
+
+// T70: fragmentation increases after invalidation
+fn test_jc_fragmentation_after_invalidate_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(1 as i8, 4)
+    let idx0 = jc_insert_entry(cache, 4400, JC_TIER_BASELINE, code, 4)
+    let idx1 = jc_insert_entry(cache, 4401, JC_TIER_BASELINE, code, 4)
+    let ok = jc_invalidate_entry(cache, idx0)
+    let frag = jc_fragmentation(cache)
+    // 1 invalid out of 2 entries = 0.5
+    if frag < 0.49 { return false }
+    frag > 0.0
+}
+fn test_jc_fragmentation_after_invalidate() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_fragmentation_after_invalidate_inner(&! cache)
+}
+
+// T71: find_hottest_entry
+fn test_jc_find_hottest_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(1 as i8, 4)
+    let idx0 = jc_insert_entry(cache, 4500, JC_TIER_BASELINE, code, 4)
+    let idx1 = jc_insert_entry(cache, 4501, JC_TIER_BASELINE, code, 4)
+    let idx2 = jc_insert_entry(cache, 4502, JC_TIER_BASELINE, code, 4)
+    cache.entries[idx0 as usize].hit_count = 5
+    cache.entries[idx1 as usize].hit_count = 100
+    cache.entries[idx2 as usize].hit_count = 50
+    let hottest = jc_find_hottest_entry(cache)
+    hottest == idx1
+}
+fn test_jc_find_hottest() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_find_hottest_inner(&! cache)
+}
+
+// T72: total_hits_all_entries
+fn test_jc_total_hits_all_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(1 as i8, 4)
+    let idx0 = jc_insert_entry(cache, 4600, JC_TIER_BASELINE, code, 4)
+    let idx1 = jc_insert_entry(cache, 4601, JC_TIER_BASELINE, code, 4)
+    cache.entries[idx0 as usize].hit_count = 10
+    cache.entries[idx1 as usize].hit_count = 20
+    let total = jc_total_hits_all_entries(cache)
+    total == 30
+}
+fn test_jc_total_hits_all() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_total_hits_all_inner(&! cache)
+}
+
+// T73: avg_code_len
+fn test_jc_avg_code_len_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(1 as i8, 100)
+    let idx0 = jc_insert_entry(cache, 4700, JC_TIER_BASELINE, code, 100)
+    let idx1 = jc_insert_entry(cache, 4701, JC_TIER_BASELINE, code, 200)
+    // avg = (100 + 200) / 2 = 150
+    let avg = jc_avg_code_len(cache)
+    if avg < 149.9 { return false }
+    avg > 149.9
+}
+fn test_jc_avg_code_len() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_avg_code_len_inner(&! cache)
+}
+
+// T74: find_largest_entry
+fn test_jc_find_largest_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(1 as i8, 500)
+    let idx0 = jc_insert_entry(cache, 4800, JC_TIER_BASELINE, code, 50)
+    let idx1 = jc_insert_entry(cache, 4801, JC_TIER_BASELINE, code, 500)
+    let idx2 = jc_insert_entry(cache, 4802, JC_TIER_BASELINE, code, 200)
+    let largest = jc_find_largest_entry(cache)
+    largest == idx1
+}
+fn test_jc_find_largest() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_find_largest_inner(&! cache)
+}
+
+// T75: profiled_func_count
+fn test_jc_profiled_func_count_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    if jc_profiled_func_count(cache) != 0 { return false }
+    let c1 = jc_record_call(cache, 4900)
+    let c2 = jc_record_call(cache, 4901)
+    let c3 = jc_record_call(cache, 4902)
+    jc_profiled_func_count(cache) == 3
+}
+fn test_jc_profiled_func_count() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_profiled_func_count_inner(&! cache)
+}
+
+// --------------------------------------------------------------------------
+// Category 13: Multi-step Integration Tests  (T76 - T80)
+// --------------------------------------------------------------------------
+
+// T76: Full workflow — insert, profile, promote, verify
+fn test_jc_full_workflow_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    // Insert a BASELINE entry
+    let code = jc_test_code(11 as i8, 64)
+    let idx = jc_insert_entry(cache, 5000, JC_TIER_BASELINE, code, 64)
+    if idx == JC_INVALID { return false }
+
+    // Profile it up to warm threshold
+    var i: i64 = 0
+    while i < JC_WARM_THRESHOLD {
+        let c = jc_record_call(cache, 5000)
+        i = i + 1
+    }
+
+    // Verify it is warm
+    if jc_is_warm(cache, 5000) == false { return false }
+
+    // Promote to OPT
+    let promoted = jc_promote_tier(cache, 5000, JC_TIER_OPT)
+    if promoted == false { return false }
+
+    // Current tier should be OPT
+    if jc_current_tier(cache, 5000) != JC_TIER_OPT { return false }
+
+    // Verify clean
+    let issues = jc_verify_all(cache)
+    issues == 0
+}
+fn test_jc_full_workflow() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_full_workflow_inner(&! cache)
+}
+
+// T77: Insert, invalidate, compact, verify
+fn test_jc_insert_invalidate_compact_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(1 as i8, 4)
+    let idx0 = jc_insert_entry(cache, 5100, JC_TIER_BASELINE, code, 4)
+    let idx1 = jc_insert_entry(cache, 5101, JC_TIER_BASELINE, code, 4)
+    let idx2 = jc_insert_entry(cache, 5102, JC_TIER_BASELINE, code, 4)
+    let idx3 = jc_insert_entry(cache, 5103, JC_TIER_BASELINE, code, 4)
+
+    // Invalidate entries 1 and 2
+    let ok1 = jc_invalidate_entry(cache, idx1)
+    let ok2 = jc_invalidate_entry(cache, idx2)
+
+    // Before compact: 4 total, 2 valid
+    if cache.entry_count != 4 { return false }
+    if jc_valid_entry_count(cache) != 2 { return false }
+
+    // Compact
+    let freed = jc_compact(cache)
+    if freed != 2 { return false }
+    if cache.entry_count != 2 { return false }
+
+    // Verify the remaining entries are correct
+    let e0 = jc_get_entry(cache, 0)
+    let e1 = jc_get_entry(cache, 1)
+    if e0.func_id != 5100 { return false }
+    e1.func_id == 5103
+}
+fn test_jc_insert_invalidate_compact() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_insert_invalidate_compact_inner(&! cache)
+}
+
+// T78: Multiple funcs at different tiers, evict cold
+fn test_jc_multi_tier_evict_cold_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(1 as i8, 16)
+    let idx0 = jc_insert_entry(cache, 5200, JC_TIER_BASELINE, code, 16)
+    let idx1 = jc_insert_entry(cache, 5201, JC_TIER_OPT, code, 16)
+    let idx2 = jc_insert_entry(cache, 5202, JC_TIER_NATIVE, code, 16)
+    // Set hit counts: 0 is cold, 1 is hot, 2 is medium
+    cache.entries[idx0 as usize].hit_count = 0
+    cache.entries[idx1 as usize].hit_count = 50
+    cache.entries[idx2 as usize].hit_count = 20
+
+    let evicted = jc_evict_cold(cache, 10)
+    if evicted != 1 { return false }
+    // Entry 0 (hit_count=0) should be evicted
+    if jc_is_valid(cache, idx0) { return false }
+    // Others should survive
+    if jc_is_valid(cache, idx1) == false { return false }
+    jc_is_valid(cache, idx2)
+}
+fn test_jc_multi_tier_evict_cold() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_multi_tier_evict_cold_inner(&! cache)
+}
+
+// T79: Patch code and then copy it
+fn test_jc_patch_and_copy_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(0 as i8, 16)
+    let idx = jc_insert_entry(cache, 5300, JC_TIER_OPT, code, 16)
+
+    // Patch some bytes
+    let ok1 = jc_patch_byte(cache, idx, 0, 0x90 as i8)
+    let ok2 = jc_patch_byte(cache, idx, 1, 0xCC as i8)
+    if ok1 == false { return false }
+    if ok2 == false { return false }
+
+    // Copy and verify
+    var dst: [i8; 65536] = [0; 65536]
+    let len = jc_copy_code(cache, idx, &! dst)
+    if len != 16 { return false }
+    if dst[0 as usize] != 0x90 as i8 { return false }
+    dst[1 as usize] == 0xCC as i8
+}
+fn test_jc_patch_and_copy() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_patch_and_copy_inner(&! cache)
+}
+
+// T80: Statistics after many operations
+fn test_jc_stats_after_ops_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(1 as i8, 32)
+
+    // Insert 5 entries
+    let idx0 = jc_insert_entry(cache, 5400, JC_TIER_BASELINE, code, 32)
+    let idx1 = jc_insert_entry(cache, 5401, JC_TIER_BASELINE, code, 64)
+    let idx2 = jc_insert_entry(cache, 5402, JC_TIER_OPT, code, 128)
+    let idx3 = jc_insert_entry(cache, 5403, JC_TIER_OPT, code, 256)
+    let idx4 = jc_insert_entry(cache, 5404, JC_TIER_NATIVE, code, 16)
+
+    // Record some hits and misses
+    let h1 = jc_record_hit(cache)
+    let h2 = jc_record_hit(cache)
+    let h3 = jc_record_hit(cache)
+    let m1 = jc_record_miss(cache)
+
+    // Invalidate 2 entries
+    let ok1 = jc_invalidate_entry(cache, idx1)
+    let ok2 = jc_invalidate_entry(cache, idx3)
+
+    let summary = jc_stats_summary(cache)
+    if summary.total_entries != 5 { return false }
+    if summary.valid_entries != 3 { return false }
+    // Valid code bytes: 32 + 128 + 16 = 176
+    if summary.total_code_bytes != 176 { return false }
+    if summary.compilations != 5 { return false }
+    if summary.invalidations != 2 { return false }
+    // Hit rate: 3 / (3 + 1) = 75%
+    if summary.hit_rate_pct < 74.9 { return false }
+    if summary.hit_rate_pct > 75.1 { return false }
+    true
+}
+fn test_jc_stats_after_ops() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_stats_after_ops_inner(&! cache)
+}
+
+// --------------------------------------------------------------------------
+// Category 14: Additional Edge Cases  (T81 - T85)
+// --------------------------------------------------------------------------
+
+// T81: should_compile returns INTERP when already at NATIVE
+fn test_jc_should_compile_at_native_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    // Get profile for func and set last_tier to NATIVE
+    let pidx = jc_get_or_create_profile(cache, 5500)
+    cache.profiles[pidx as usize].last_tier = JC_TIER_NATIVE
+    // Even with lots of calls, should not recommend compilation
+    var i: i64 = 0
+    while i < 200 {
+        let c = jc_record_call(cache, 5500)
+        i = i + 1
+    }
+    let tier = jc_should_compile(cache, 5500)
+    tier == JC_TIER_INTERP
+}
+fn test_jc_should_compile_at_native() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_should_compile_at_native_inner(&! cache)
+}
+
+// T82: Copy code from invalid entry returns 0
+fn test_jc_copy_code_invalid_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    var dst: [i8; 65536] = [0; 65536]
+    let len = jc_copy_code(cache, 999, &! dst)
+    len == 0
+}
+fn test_jc_copy_code_invalid() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_copy_code_invalid_inner(&! cache)
+}
+
+// T83: Patch i32 out of bounds fails
+fn test_jc_patch_i32_oob_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(0 as i8, 8)
+    let idx = jc_insert_entry(cache, 5600, JC_TIER_BASELINE, code, 8)
+    // Offset 6 + 4 bytes = 10, exceeds code_len=8
+    let ok = jc_patch_i32_le(cache, idx, 6, 42)
+    ok == false
+}
+fn test_jc_patch_i32_oob() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_patch_i32_oob_inner(&! cache)
+}
+
+// T84: Patch i64 out of bounds fails
+fn test_jc_patch_i64_oob_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let code = jc_test_code(0 as i8, 8)
+    let idx = jc_insert_entry(cache, 5700, JC_TIER_BASELINE, code, 8)
+    // Offset 2 + 8 bytes = 10, exceeds code_len=8
+    let ok = jc_patch_i64_le(cache, idx, 2, 42)
+    ok == false
+}
+fn test_jc_patch_i64_oob() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_patch_i64_oob_inner(&! cache)
+}
+
+// T85: Promote on non-existent func returns false
+fn test_jc_promote_nonexistent_inner(cache: &! JcCache) -> bool with Mut, Div, Panic {
+    let ok = jc_promote_tier(cache, 9999, JC_TIER_OPT)
+    ok == false
+}
+fn test_jc_promote_nonexistent() -> bool with Mut, Div, Panic {
+    var cache = jc_cache_new()
+    test_jc_promote_nonexistent_inner(&! cache)
+}
+
+// --------------------------------------------------------------------------
+// Test Runner
+// --------------------------------------------------------------------------
+
+fn jc_run_tests() -> i64 with Mut, Div, Panic {
+    var passed: i64 = 0
+
+    // Category 1: Lookup / Insert Basics (T01-T05)
+    if test_jc_insert_lookup() { passed = passed + 1 }
+    if test_jc_has_compiled() { passed = passed + 1 }
+    if test_jc_find_miss() { passed = passed + 1 }
+    if test_jc_get_entry_oob() { passed = passed + 1 }
+    if test_jc_get_code_len() { passed = passed + 1 }
+
+    // Category 2: Cache Miss / Hit Tracking (T06-T10)
+    if test_jc_hit_miss_tracking() { passed = passed + 1 }
+    if test_jc_hit_rate_50() { passed = passed + 1 }
+    if test_jc_hit_rate_zero() { passed = passed + 1 }
+    if test_jc_hit_rate_100() { passed = passed + 1 }
+    if test_jc_compilation_count() { passed = passed + 1 }
+
+    // Category 3: Tier Promotion (T11-T15)
+    if test_jc_promote_baseline_to_opt() { passed = passed + 1 }
+    if test_jc_promote_reject_downgrade() { passed = passed + 1 }
+    if test_jc_promote_reject_same() { passed = passed + 1 }
+    if test_jc_promote_updates_profile() { passed = passed + 1 }
+    if test_jc_promote_to_native() { passed = passed + 1 }
+
+    // Category 4: Invalidation (T16-T20)
+    if test_jc_invalidate_single() { passed = passed + 1 }
+    if test_jc_invalidate_func() { passed = passed + 1 }
+    if test_jc_invalidate_all() { passed = passed + 1 }
+    if test_jc_invalidate_tier() { passed = passed + 1 }
+    if test_jc_invalidate_already_invalid() { passed = passed + 1 }
+
+    // Category 5: Profiling Counters (T21-T25)
+    if test_jc_record_call() { passed = passed + 1 }
+    if test_jc_record_loop() { passed = passed + 1 }
+    if test_jc_record_branch() { passed = passed + 1 }
+    if test_jc_add_cycles() { passed = passed + 1 }
+    if test_jc_profile_reuse() { passed = passed + 1 }
+
+    // Category 6: Hot / Warm Detection (T26-T30)
+    if test_jc_not_warm_initially() { passed = passed + 1 }
+    if test_jc_becomes_warm() { passed = passed + 1 }
+    if test_jc_not_hot_at_warm() { passed = passed + 1 }
+    if test_jc_becomes_hot() { passed = passed + 1 }
+    if test_jc_should_compile_warm() { passed = passed + 1 }
+
+    // Category 7: Code Patching (T31-T35)
+    if test_jc_patch_byte() { passed = passed + 1 }
+    if test_jc_patch_byte_oob() { passed = passed + 1 }
+    if test_jc_patch_i32_le() { passed = passed + 1 }
+    if test_jc_patch_i64_le() { passed = passed + 1 }
+    if test_jc_patch_invalid_entry() { passed = passed + 1 }
+
+    // Category 8: LRU Eviction (T36-T40)
+    if test_jc_find_lru() { passed = passed + 1 }
+    if test_jc_evict_lru() { passed = passed + 1 }
+    if test_jc_evict_lru_empty() { passed = passed + 1 }
+    if test_jc_evict_cold() { passed = passed + 1 }
+    if test_jc_compact() { passed = passed + 1 }
+
+    // Category 9: Statistics (T41-T45)
+    if test_jc_total_code_bytes() { passed = passed + 1 }
+    if test_jc_valid_entry_count() { passed = passed + 1 }
+    if test_jc_stats_summary() { passed = passed + 1 }
+    if test_jc_invalidation_count() { passed = passed + 1 }
+    if test_jc_empty_stats() { passed = passed + 1 }
+
+    // Category 10: Edge Cases (T46-T55)
+    if test_jc_update_entry() { passed = passed + 1 }
+    if test_jc_set_entry_point() { passed = passed + 1 }
+    if test_jc_bump_version() { passed = passed + 1 }
+    if test_jc_find_entry_tier() { passed = passed + 1 }
+    if test_jc_copy_code() { passed = passed + 1 }
+    if test_jc_should_compile_hot() { passed = passed + 1 }
+    if test_jc_should_compile_cold() { passed = passed + 1 }
+    if test_jc_invalidation_new() { passed = passed + 1 }
+    if test_jc_update_invalid_idx() { passed = passed + 1 }
+    if test_jc_bump_version_invalid() { passed = passed + 1 }
+
+    // Category 11: Extended Utility Tests (T56-T65)
+    if test_jc_bump_hit_count() { passed = passed + 1 }
+    if test_jc_reset_hit_counts() { passed = passed + 1 }
+    if test_jc_count_tier() { passed = passed + 1 }
+    if test_jc_best_tier() { passed = passed + 1 }
+    if test_jc_distinct_funcs() { passed = passed + 1 }
+    if test_jc_invalidate_below_tier() { passed = passed + 1 }
+    if test_jc_reset_profiles() { passed = passed + 1 }
+    if test_jc_branch_taken_ratio() { passed = passed + 1 }
+    if test_jc_avg_cycles_per_call() { passed = passed + 1 }
+    if test_jc_is_full_empty() { passed = passed + 1 }
+
+    // Category 12: Verification / Diagnostic Tests (T66-T75)
+    if test_jc_verify_clean() { passed = passed + 1 }
+    if test_jc_verify_profiles_clean() { passed = passed + 1 }
+    if test_jc_verify_all_clean() { passed = passed + 1 }
+    if test_jc_no_fragmentation() { passed = passed + 1 }
+    if test_jc_fragmentation_after_invalidate() { passed = passed + 1 }
+    if test_jc_find_hottest() { passed = passed + 1 }
+    if test_jc_total_hits_all() { passed = passed + 1 }
+    if test_jc_avg_code_len() { passed = passed + 1 }
+    if test_jc_find_largest() { passed = passed + 1 }
+    if test_jc_profiled_func_count() { passed = passed + 1 }
+
+    // Category 13: Multi-step Integration Tests (T76-T80)
+    if test_jc_full_workflow() { passed = passed + 1 }
+    if test_jc_insert_invalidate_compact() { passed = passed + 1 }
+    if test_jc_multi_tier_evict_cold() { passed = passed + 1 }
+    if test_jc_patch_and_copy() { passed = passed + 1 }
+    if test_jc_stats_after_ops() { passed = passed + 1 }
+
+    // Category 14: Additional Edge Cases (T81-T85)
+    if test_jc_should_compile_at_native() { passed = passed + 1 }
+    if test_jc_copy_code_invalid() { passed = passed + 1 }
+    if test_jc_patch_i32_oob() { passed = passed + 1 }
+    if test_jc_patch_i64_oob() { passed = passed + 1 }
+    if test_jc_promote_nonexistent() { passed = passed + 1 }
+
+    passed
+}

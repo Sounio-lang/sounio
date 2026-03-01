@@ -1,0 +1,2783 @@
+// self-hosted::ir::const_prop — Constant Propagation and Folding Pass
+//
+// A comprehensive sparse conditional constant propagation (SCCP) pass for the
+// Sounio self-hosted compiler IR.  Implements:
+//
+//   1. Lattice-based constant tracking: TOP (unknown) -> CONST -> BOTTOM (varying)
+//   2. Constant folding: evaluate binary/unary ops on known constants at compile time
+//   3. Strength reduction: replace expensive ops with cheaper equivalents
+//   4. Branch folding: replace conditional branches with unconditional when condition is known
+//   5. Copy propagation: propagate constants through copy chains
+//   6. Phi resolution: fold phi nodes where all inputs agree on a constant
+//   7. Sparse conditional constant propagation (SCCP): worklist algorithm combining
+//      constant propagation with reachability analysis
+//   8. Dead branch elimination: remove unreachable blocks after branch folding
+//
+// All arrays are fixed-size -- no heap allocation.
+//
+// References:
+//   Wegman & Zadeck: "Constant Propagation with Conditional Branches" (1991)
+//   Click & Cooper: "Combining Analyses, Combining Optimizations" (1995)
+//   Cooper & Torczon: "Engineering a Compiler" (2011), Ch. 9-10
+
+// ============================================================================
+// Section 1: Constants
+// ============================================================================
+
+let CP_MAX_REGS: i64 = 4096
+let CP_MAX_WORKLIST: i64 = 4096
+let CP_MAX_INSTRS: i64 = 8192
+let CP_MAX_BLOCKS: i64 = 512
+let CP_MAX_PHI_INPUTS: i64 = 8
+let CP_MAX_SUCCS: i64 = 8
+let CP_MAX_PREDS: i64 = 8
+let CP_INVALID: i64 = 0 - 1
+
+// Lattice kinds:
+//   TOP    = not yet evaluated / unreachable (optimistic assumption)
+//   CONST  = known constant value
+//   BOTTOM = varying / multiple possible values
+let CP_TOP: i64 = 0
+let CP_CONST: i64 = 1
+let CP_BOTTOM: i64 = 2
+
+// Opcode tags for instruction classification (integer comparison, no enums).
+let CP_OP_NOP: i64 = 0
+let CP_OP_LOAD_IMM: i64 = 1
+let CP_OP_LOAD_FLOAT: i64 = 2
+let CP_OP_LOAD_BOOL: i64 = 3
+let CP_OP_LOAD_STRING: i64 = 4
+let CP_OP_COPY: i64 = 5
+let CP_OP_BINOP: i64 = 6
+let CP_OP_UNARYOP: i64 = 7
+let CP_OP_CALL: i64 = 8
+let CP_OP_RETURN: i64 = 9
+let CP_OP_JUMP: i64 = 10
+let CP_OP_BRANCH_TRUE: i64 = 11
+let CP_OP_BRANCH_FALSE: i64 = 12
+let CP_OP_FIELD_GET: i64 = 13
+let CP_OP_FIELD_SET: i64 = 14
+let CP_OP_INDEX_GET: i64 = 15
+let CP_OP_INDEX_SET: i64 = 16
+let CP_OP_ALLOC: i64 = 17
+let CP_OP_LABEL: i64 = 18
+let CP_OP_PHI: i64 = 19
+
+// Binary operation tags for constant folding.
+let CP_BINOP_ADD: i64 = 1
+let CP_BINOP_SUB: i64 = 2
+let CP_BINOP_MUL: i64 = 3
+let CP_BINOP_DIV: i64 = 4
+let CP_BINOP_MOD: i64 = 5
+let CP_BINOP_AND: i64 = 6
+let CP_BINOP_OR: i64 = 7
+let CP_BINOP_XOR: i64 = 8
+let CP_BINOP_SHL: i64 = 9
+let CP_BINOP_SHR: i64 = 10
+let CP_BINOP_EQ: i64 = 11
+let CP_BINOP_NE: i64 = 12
+let CP_BINOP_LT: i64 = 13
+let CP_BINOP_GT: i64 = 14
+let CP_BINOP_LE: i64 = 15
+let CP_BINOP_GE: i64 = 16
+let CP_BINOP_BIT_AND: i64 = 17
+let CP_BINOP_BIT_OR: i64 = 18
+
+// ============================================================================
+// Section 2: Data Structures
+// ============================================================================
+
+// Lattice value for a single register.
+// kind: CP_TOP, CP_CONST, or CP_BOTTOM
+// int_val / float_val / bool_val: the constant value when kind == CP_CONST
+// is_int / is_float / is_bool: which type of constant is held
+struct CpLattice {
+    kind: i64,
+    int_val: i64,
+    float_val: f64,
+    bool_val: bool,
+    is_int: bool,
+    is_float: bool,
+    is_bool: bool,
+}
+
+// Lattice values for all registers.
+struct CpState {
+    values: [CpLattice; 4096],
+    reg_count: i64,
+}
+
+// Worklist of instruction indices to re-evaluate.
+struct CpWorklist {
+    indices: [i64; 4096],
+    count: i64,
+}
+
+// Statistics about the constant propagation pass.
+struct CpStats {
+    folded_ops: i64,
+    folded_branches: i64,
+    eliminated_unreachable: i64,
+    propagated_copies: i64,
+    strength_reduced: i64,
+    phi_folded: i64,
+    total_instrs: i64,
+    iterations: i64,
+}
+
+// Cached instruction info for analysis.
+struct CpInstr {
+    idx: i64,
+    opcode: i64,
+    dst: i64,
+    src1: i64,
+    src2: i64,
+    imm_int: i64,
+    imm_float: f64,
+    imm_bool: bool,
+    binop_tag: i64,
+    label_id: i64,
+    block_id: i64,
+    phi_inputs: [i64; 8],
+    phi_count: i64,
+}
+
+// Block reachability information.
+struct CpBlock {
+    block_id: i64,
+    instr_start: i64,
+    instr_count: i64,
+    is_reachable: bool,
+    succ_count: i64,
+    succs: [i64; 8],
+    pred_count: i64,
+    preds: [i64; 8],
+}
+
+// Overall context for the constant propagation pass.
+struct CpContext {
+    state: CpState,
+    worklist: CpWorklist,
+    stats: CpStats,
+    instrs: [CpInstr; 8192],
+    instr_count: i64,
+    blocks: [CpBlock; 512],
+    block_count: i64,
+    block_reachable: [bool; 512],
+}
+
+// ============================================================================
+// Section 3: Constructors
+// ============================================================================
+
+fn cp_lattice_top() -> CpLattice {
+    CpLattice {
+        kind: CP_TOP,
+        int_val: 0,
+        float_val: 0.0,
+        bool_val: false,
+        is_int: false,
+        is_float: false,
+        is_bool: false,
+    }
+}
+
+fn cp_lattice_bottom() -> CpLattice {
+    CpLattice {
+        kind: CP_BOTTOM,
+        int_val: 0,
+        float_val: 0.0,
+        bool_val: false,
+        is_int: false,
+        is_float: false,
+        is_bool: false,
+    }
+}
+
+fn cp_lattice_int(val: i64) -> CpLattice {
+    CpLattice {
+        kind: CP_CONST,
+        int_val: val,
+        float_val: 0.0,
+        bool_val: false,
+        is_int: true,
+        is_float: false,
+        is_bool: false,
+    }
+}
+
+fn cp_lattice_float(val: f64) -> CpLattice {
+    CpLattice {
+        kind: CP_CONST,
+        int_val: 0,
+        float_val: val,
+        bool_val: false,
+        is_int: false,
+        is_float: true,
+        is_bool: false,
+    }
+}
+
+fn cp_lattice_bool(val: bool) -> CpLattice {
+    CpLattice {
+        kind: CP_CONST,
+        int_val: 0,
+        float_val: 0.0,
+        bool_val: val,
+        is_int: false,
+        is_float: false,
+        is_bool: true,
+    }
+}
+
+fn cp_state_new() -> CpState {
+    CpState {
+        values: [cp_lattice_top(); 4096],
+        reg_count: 0,
+    }
+}
+
+fn cp_worklist_new() -> CpWorklist {
+    CpWorklist {
+        indices: [0; 4096],
+        count: 0,
+    }
+}
+
+fn cp_stats_new() -> CpStats {
+    CpStats {
+        folded_ops: 0,
+        folded_branches: 0,
+        eliminated_unreachable: 0,
+        propagated_copies: 0,
+        strength_reduced: 0,
+        phi_folded: 0,
+        total_instrs: 0,
+        iterations: 0,
+    }
+}
+
+fn cp_instr_new() -> CpInstr {
+    CpInstr {
+        idx: CP_INVALID,
+        opcode: CP_OP_NOP,
+        dst: CP_INVALID,
+        src1: CP_INVALID,
+        src2: CP_INVALID,
+        imm_int: 0,
+        imm_float: 0.0,
+        imm_bool: false,
+        binop_tag: 0,
+        label_id: CP_INVALID,
+        block_id: CP_INVALID,
+        phi_inputs: [CP_INVALID, CP_INVALID, CP_INVALID, CP_INVALID,
+                     CP_INVALID, CP_INVALID, CP_INVALID, CP_INVALID],
+        phi_count: 0,
+    }
+}
+
+fn cp_block_new() -> CpBlock {
+    CpBlock {
+        block_id: CP_INVALID,
+        instr_start: 0,
+        instr_count: 0,
+        is_reachable: false,
+        succ_count: 0,
+        succs: [CP_INVALID, CP_INVALID, CP_INVALID, CP_INVALID,
+                CP_INVALID, CP_INVALID, CP_INVALID, CP_INVALID],
+        pred_count: 0,
+        preds: [CP_INVALID, CP_INVALID, CP_INVALID, CP_INVALID,
+                CP_INVALID, CP_INVALID, CP_INVALID, CP_INVALID],
+    }
+}
+
+fn cp_context_new() -> CpContext {
+    CpContext {
+        state: cp_state_new(),
+        worklist: cp_worklist_new(),
+        stats: cp_stats_new(),
+        instrs: [cp_instr_new(); 8192],
+        instr_count: 0,
+        blocks: [cp_block_new(); 512],
+        block_count: 0,
+        block_reachable: [false; 512],
+    }
+}
+
+// ============================================================================
+// Section 4: Lattice Operations
+// ============================================================================
+
+// Check if two lattice values are equal.
+fn cp_lattice_eq(a: CpLattice, b: CpLattice) -> bool {
+    if a.kind != b.kind {
+        return false
+    }
+    if a.kind != CP_CONST {
+        return true
+    }
+    // Both are CONST -- compare values by type
+    if a.is_int && b.is_int {
+        return a.int_val == b.int_val
+    }
+    if a.is_float && b.is_float {
+        return a.float_val == b.float_val
+    }
+    if a.is_bool && b.is_bool {
+        return a.bool_val == b.bool_val
+    }
+    // Different types of constants
+    false
+}
+
+// Meet operation on the lattice:
+//   TOP   meet x     = x
+//   x     meet TOP   = x
+//   x     meet BOTTOM = BOTTOM
+//   BOTTOM meet x     = BOTTOM
+//   c1    meet c2    = c1 if c1 == c2, else BOTTOM
+fn cp_lattice_meet(a: CpLattice, b: CpLattice) -> CpLattice {
+    // TOP meet x = x
+    if a.kind == CP_TOP {
+        return b
+    }
+    // x meet TOP = x
+    if b.kind == CP_TOP {
+        return a
+    }
+    // BOTTOM meet x = BOTTOM
+    if a.kind == CP_BOTTOM {
+        return cp_lattice_bottom()
+    }
+    // x meet BOTTOM = BOTTOM
+    if b.kind == CP_BOTTOM {
+        return cp_lattice_bottom()
+    }
+    // Both CONST: equal -> keep, otherwise BOTTOM
+    if cp_lattice_eq(a, b) {
+        return a
+    }
+    cp_lattice_bottom()
+}
+
+// Check if a lattice value is TOP.
+fn cp_is_top(lat: CpLattice) -> bool {
+    lat.kind == CP_TOP
+}
+
+// Check if a lattice value is CONST.
+fn cp_is_const(lat: CpLattice) -> bool {
+    lat.kind == CP_CONST
+}
+
+// Check if a lattice value is BOTTOM.
+fn cp_is_bottom(lat: CpLattice) -> bool {
+    lat.kind == CP_BOTTOM
+}
+
+// Check if a lattice value is a constant integer.
+fn cp_is_const_int(lat: CpLattice) -> bool {
+    if lat.kind != CP_CONST {
+        return false
+    }
+    lat.is_int
+}
+
+// Check if a lattice value is a constant boolean.
+fn cp_is_const_bool(lat: CpLattice) -> bool {
+    if lat.kind != CP_CONST {
+        return false
+    }
+    lat.is_bool
+}
+
+// Check if a lattice value is a constant float.
+fn cp_is_const_float(lat: CpLattice) -> bool {
+    if lat.kind != CP_CONST {
+        return false
+    }
+    lat.is_float
+}
+
+// ============================================================================
+// Section 5: Opcode Classification
+// ============================================================================
+
+// Map an IrOpcode to our integer opcode tag.
+fn cp_classify_opcode(op: IrOpcode) -> i64 {
+    if opcodes_equal(op, IrOpcode::IrLoadImm) { return CP_OP_LOAD_IMM }
+    if opcodes_equal(op, IrOpcode::IrLoadFloat) { return CP_OP_LOAD_FLOAT }
+    if opcodes_equal(op, IrOpcode::IrLoadBool) { return CP_OP_LOAD_BOOL }
+    if opcodes_equal(op, IrOpcode::IrLoadString) { return CP_OP_LOAD_STRING }
+    if opcodes_equal(op, IrOpcode::IrCopy) { return CP_OP_COPY }
+    if opcodes_equal(op, IrOpcode::IrBinOp) { return CP_OP_BINOP }
+    if opcodes_equal(op, IrOpcode::IrUnaryOp) { return CP_OP_UNARYOP }
+    if opcodes_equal(op, IrOpcode::IrCall) { return CP_OP_CALL }
+    if opcodes_equal(op, IrOpcode::IrReturn) { return CP_OP_RETURN }
+    if opcodes_equal(op, IrOpcode::IrJump) { return CP_OP_JUMP }
+    if opcodes_equal(op, IrOpcode::IrBranchTrue) { return CP_OP_BRANCH_TRUE }
+    if opcodes_equal(op, IrOpcode::IrBranchFalse) { return CP_OP_BRANCH_FALSE }
+    if opcodes_equal(op, IrOpcode::IrFieldGet) { return CP_OP_FIELD_GET }
+    if opcodes_equal(op, IrOpcode::IrFieldSet) { return CP_OP_FIELD_SET }
+    if opcodes_equal(op, IrOpcode::IrIndexGet) { return CP_OP_INDEX_GET }
+    if opcodes_equal(op, IrOpcode::IrIndexSet) { return CP_OP_INDEX_SET }
+    if opcodes_equal(op, IrOpcode::IrAlloc) { return CP_OP_ALLOC }
+    if opcodes_equal(op, IrOpcode::IrLabel) { return CP_OP_LABEL }
+    if opcodes_equal(op, IrOpcode::IrPhi) { return CP_OP_PHI }
+    CP_OP_NOP
+}
+
+// Map a BinaryOp to our integer binop tag.
+fn cp_classify_binop(op: BinaryOp) -> i64 {
+    if op == BinaryOp::OpAdd { return CP_BINOP_ADD }
+    if op == BinaryOp::OpSub { return CP_BINOP_SUB }
+    if op == BinaryOp::OpMul { return CP_BINOP_MUL }
+    if op == BinaryOp::OpDiv { return CP_BINOP_DIV }
+    if op == BinaryOp::OpRem { return CP_BINOP_MOD }
+    if op == BinaryOp::OpEq { return CP_BINOP_EQ }
+    if op == BinaryOp::OpNe { return CP_BINOP_NE }
+    if op == BinaryOp::OpLt { return CP_BINOP_LT }
+    if op == BinaryOp::OpGt { return CP_BINOP_GT }
+    if op == BinaryOp::OpLe { return CP_BINOP_LE }
+    if op == BinaryOp::OpGe { return CP_BINOP_GE }
+    if op == BinaryOp::OpAnd { return CP_BINOP_AND }
+    if op == BinaryOp::OpOr { return CP_BINOP_OR }
+    if op == BinaryOp::OpBitAnd { return CP_BINOP_BIT_AND }
+    if op == BinaryOp::OpBitOr { return CP_BINOP_BIT_OR }
+    if op == BinaryOp::OpBitXor { return CP_BINOP_XOR }
+    if op == BinaryOp::OpShl { return CP_BINOP_SHL }
+    if op == BinaryOp::OpShr { return CP_BINOP_SHR }
+    0
+}
+
+// Check if an opcode has side effects.
+fn cp_has_side_effect(opcode: i64) -> bool {
+    if opcode == CP_OP_CALL { return true }
+    if opcode == CP_OP_RETURN { return true }
+    if opcode == CP_OP_JUMP { return true }
+    if opcode == CP_OP_BRANCH_TRUE { return true }
+    if opcode == CP_OP_BRANCH_FALSE { return true }
+    if opcode == CP_OP_FIELD_SET { return true }
+    if opcode == CP_OP_INDEX_SET { return true }
+    if opcode == CP_OP_LABEL { return true }
+    if opcode == CP_OP_ALLOC { return true }
+    false
+}
+
+// Check if an opcode is a branch or jump (block terminator).
+fn cp_is_terminator(opcode: i64) -> bool {
+    if opcode == CP_OP_JUMP { return true }
+    if opcode == CP_OP_BRANCH_TRUE { return true }
+    if opcode == CP_OP_BRANCH_FALSE { return true }
+    if opcode == CP_OP_RETURN { return true }
+    false
+}
+
+// Check if an opcode is a conditional branch.
+fn cp_is_conditional_branch(opcode: i64) -> bool {
+    if opcode == CP_OP_BRANCH_TRUE { return true }
+    if opcode == CP_OP_BRANCH_FALSE { return true }
+    false
+}
+
+// ============================================================================
+// Section 6: State Operations
+// ============================================================================
+
+// Get the lattice value for a register.
+fn cp_get_reg(state: &CpState, reg: i64) -> CpLattice with Div, Panic {
+    if reg < 0 || reg >= CP_MAX_REGS {
+        return cp_lattice_bottom()
+    }
+    state.values[reg as usize]
+}
+
+// Set the lattice value for a register.  Returns true if the value changed.
+fn cp_set_reg(state: &! CpState, reg: i64, val: CpLattice) -> bool with Mut, Div, Panic {
+    if reg < 0 || reg >= CP_MAX_REGS {
+        return false
+    }
+    let old = state.values[reg as usize]
+    if cp_lattice_eq(old, val) {
+        return false
+    }
+    state.values[reg as usize] = val
+    if reg >= state.reg_count {
+        state.reg_count = reg + 1
+    }
+    true
+}
+
+// ============================================================================
+// Section 7: Worklist Operations
+// ============================================================================
+
+// Push an instruction index onto the worklist.
+fn cp_worklist_push(wl: &! CpWorklist, idx: i64) -> bool with Mut, Div, Panic {
+    if wl.count >= CP_MAX_WORKLIST {
+        return false
+    }
+    if idx < 0 {
+        return false
+    }
+    // Check for duplicates (linear scan; fine for bounded worklist)
+    var i: i64 = 0
+    while i < wl.count {
+        if wl.indices[i as usize] == idx {
+            return false
+        }
+        i = i + 1
+    }
+    wl.indices[wl.count as usize] = idx
+    wl.count = wl.count + 1
+    true
+}
+
+// Pop an instruction index from the worklist.  Returns CP_INVALID if empty.
+fn cp_worklist_pop(wl: &! CpWorklist) -> i64 with Mut, Div, Panic {
+    if wl.count <= 0 {
+        return CP_INVALID
+    }
+    wl.count = wl.count - 1
+    wl.indices[wl.count as usize]
+}
+
+// Check if the worklist is empty.
+fn cp_worklist_empty(wl: &CpWorklist) -> bool {
+    wl.count <= 0
+}
+
+// Clear the worklist.
+fn cp_worklist_clear(wl: &! CpWorklist) -> i64 with Mut {
+    wl.count = 0
+    0
+}
+
+// ============================================================================
+// Section 8: Constant Folding -- Binary Operations
+// ============================================================================
+
+// Fold a binary operation on two known integer constants.
+// Returns a CpLattice: CONST with the result, or BOTTOM if cannot fold.
+fn cp_fold_binop_int(op: i64, a: i64, b: i64) -> CpLattice with Div, Panic {
+    if op == CP_BINOP_ADD {
+        return cp_lattice_int(a + b)
+    }
+    if op == CP_BINOP_SUB {
+        return cp_lattice_int(a - b)
+    }
+    if op == CP_BINOP_MUL {
+        return cp_lattice_int(a * b)
+    }
+    if op == CP_BINOP_DIV {
+        if b == 0 {
+            return cp_lattice_bottom()
+        }
+        return cp_lattice_int(a / b)
+    }
+    if op == CP_BINOP_MOD {
+        if b == 0 {
+            return cp_lattice_bottom()
+        }
+        return cp_lattice_int(a % b)
+    }
+    if op == CP_BINOP_BIT_AND {
+        return cp_lattice_int(a & b)
+    }
+    if op == CP_BINOP_BIT_OR {
+        return cp_lattice_int(a | b)
+    }
+    if op == CP_BINOP_XOR {
+        return cp_lattice_int(a ^ b)
+    }
+    if op == CP_BINOP_SHL {
+        if b >= 0 && b < 64 {
+            return cp_lattice_int(a << b)
+        }
+        return cp_lattice_bottom()
+    }
+    if op == CP_BINOP_SHR {
+        if b >= 0 && b < 64 {
+            return cp_lattice_int(a >> b)
+        }
+        return cp_lattice_bottom()
+    }
+    if op == CP_BINOP_EQ {
+        if a == b { return cp_lattice_int(1) } else { return cp_lattice_int(0) }
+    }
+    if op == CP_BINOP_NE {
+        if a != b { return cp_lattice_int(1) } else { return cp_lattice_int(0) }
+    }
+    if op == CP_BINOP_LT {
+        if a < b { return cp_lattice_int(1) } else { return cp_lattice_int(0) }
+    }
+    if op == CP_BINOP_GT {
+        if a > b { return cp_lattice_int(1) } else { return cp_lattice_int(0) }
+    }
+    if op == CP_BINOP_LE {
+        if a <= b { return cp_lattice_int(1) } else { return cp_lattice_int(0) }
+    }
+    if op == CP_BINOP_GE {
+        if a >= b { return cp_lattice_int(1) } else { return cp_lattice_int(0) }
+    }
+    if op == CP_BINOP_AND {
+        let la = if a != 0 { 1 } else { 0 }
+        let lb = if b != 0 { 1 } else { 0 }
+        if la == 1 && lb == 1 { return cp_lattice_int(1) } else { return cp_lattice_int(0) }
+    }
+    if op == CP_BINOP_OR {
+        let la = if a != 0 { 1 } else { 0 }
+        let lb = if b != 0 { 1 } else { 0 }
+        if la == 1 || lb == 1 { return cp_lattice_int(1) } else { return cp_lattice_int(0) }
+    }
+    cp_lattice_bottom()
+}
+
+// Fold a binary operation on two known float constants.
+fn cp_fold_binop_float(op: i64, a: f64, b: f64) -> CpLattice with Div, Panic {
+    if op == CP_BINOP_ADD {
+        return cp_lattice_float(a + b)
+    }
+    if op == CP_BINOP_SUB {
+        return cp_lattice_float(a - b)
+    }
+    if op == CP_BINOP_MUL {
+        return cp_lattice_float(a * b)
+    }
+    if op == CP_BINOP_DIV {
+        if b == 0.0 {
+            return cp_lattice_bottom()
+        }
+        return cp_lattice_float(a / b)
+    }
+    cp_lattice_bottom()
+}
+
+// ============================================================================
+// Section 9: Strength Reduction
+// ============================================================================
+
+// Try strength reduction on a binary op where we know at least one operand.
+// Returns: (reduced: bool, result_kind: i64, result_int: i64, copy_src: i64)
+//   reduced = true if we found a strength reduction
+//   result_kind = 0 for "load constant", 1 for "copy reg", 2 for "add self"
+//   result_int = the constant for kind 0
+//   copy_src = the register for kind 1 or 2
+struct CpStrengthResult {
+    reduced: bool,
+    result_kind: i64,
+    result_int: i64,
+    copy_src: i64,
+}
+
+fn cp_strength_result_none() -> CpStrengthResult {
+    CpStrengthResult {
+        reduced: false,
+        result_kind: 0,
+        result_int: 0,
+        copy_src: CP_INVALID,
+    }
+}
+
+fn cp_try_strength_reduce(op: i64, src1: i64, src2: i64,
+                          s1_const: bool, s2_const: bool,
+                          s1_val: i64, s2_val: i64) -> CpStrengthResult {
+    // Multiplication strength reductions
+    if op == CP_BINOP_MUL {
+        // x * 0 -> 0
+        if s2_const && s2_val == 0 {
+            return CpStrengthResult { reduced: true, result_kind: 0, result_int: 0, copy_src: CP_INVALID }
+        }
+        // 0 * x -> 0
+        if s1_const && s1_val == 0 {
+            return CpStrengthResult { reduced: true, result_kind: 0, result_int: 0, copy_src: CP_INVALID }
+        }
+        // x * 1 -> x
+        if s2_const && s2_val == 1 {
+            return CpStrengthResult { reduced: true, result_kind: 1, result_int: 0, copy_src: src1 }
+        }
+        // 1 * x -> x
+        if s1_const && s1_val == 1 {
+            return CpStrengthResult { reduced: true, result_kind: 1, result_int: 0, copy_src: src2 }
+        }
+        // x * 2 -> x + x
+        if s2_const && s2_val == 2 {
+            return CpStrengthResult { reduced: true, result_kind: 2, result_int: 0, copy_src: src1 }
+        }
+        // 2 * x -> x + x
+        if s1_const && s1_val == 2 {
+            return CpStrengthResult { reduced: true, result_kind: 2, result_int: 0, copy_src: src2 }
+        }
+        return cp_strength_result_none()
+    }
+
+    // Addition strength reductions
+    if op == CP_BINOP_ADD {
+        // x + 0 -> x
+        if s2_const && s2_val == 0 {
+            return CpStrengthResult { reduced: true, result_kind: 1, result_int: 0, copy_src: src1 }
+        }
+        // 0 + x -> x
+        if s1_const && s1_val == 0 {
+            return CpStrengthResult { reduced: true, result_kind: 1, result_int: 0, copy_src: src2 }
+        }
+        return cp_strength_result_none()
+    }
+
+    // Subtraction strength reductions
+    if op == CP_BINOP_SUB {
+        // x - 0 -> x
+        if s2_const && s2_val == 0 {
+            return CpStrengthResult { reduced: true, result_kind: 1, result_int: 0, copy_src: src1 }
+        }
+        return cp_strength_result_none()
+    }
+
+    // Division strength reductions
+    if op == CP_BINOP_DIV {
+        // x / 1 -> x
+        if s2_const && s2_val == 1 {
+            return CpStrengthResult { reduced: true, result_kind: 1, result_int: 0, copy_src: src1 }
+        }
+        return cp_strength_result_none()
+    }
+
+    // Shift strength reductions
+    if op == CP_BINOP_SHL {
+        // x << 0 -> x
+        if s2_const && s2_val == 0 {
+            return CpStrengthResult { reduced: true, result_kind: 1, result_int: 0, copy_src: src1 }
+        }
+        return cp_strength_result_none()
+    }
+    if op == CP_BINOP_SHR {
+        // x >> 0 -> x
+        if s2_const && s2_val == 0 {
+            return CpStrengthResult { reduced: true, result_kind: 1, result_int: 0, copy_src: src1 }
+        }
+        return cp_strength_result_none()
+    }
+
+    // Bitwise AND strength reductions
+    if op == CP_BINOP_BIT_AND {
+        // x & 0 -> 0
+        if s2_const && s2_val == 0 {
+            return CpStrengthResult { reduced: true, result_kind: 0, result_int: 0, copy_src: CP_INVALID }
+        }
+        // 0 & x -> 0
+        if s1_const && s1_val == 0 {
+            return CpStrengthResult { reduced: true, result_kind: 0, result_int: 0, copy_src: CP_INVALID }
+        }
+        return cp_strength_result_none()
+    }
+
+    // Bitwise OR strength reductions
+    if op == CP_BINOP_BIT_OR {
+        // x | 0 -> x
+        if s2_const && s2_val == 0 {
+            return CpStrengthResult { reduced: true, result_kind: 1, result_int: 0, copy_src: src1 }
+        }
+        // 0 | x -> x
+        if s1_const && s1_val == 0 {
+            return CpStrengthResult { reduced: true, result_kind: 1, result_int: 0, copy_src: src2 }
+        }
+        return cp_strength_result_none()
+    }
+
+    cp_strength_result_none()
+}
+
+// ============================================================================
+// Section 10: Instruction Evaluation
+// ============================================================================
+
+// Evaluate a single instruction and return the lattice value for its destination.
+fn cp_eval_instr(ctx: &CpContext, ci: CpInstr) -> CpLattice with Mut, Div, Panic {
+    let opc = ci.opcode
+
+    // Load immediate integer
+    if opc == CP_OP_LOAD_IMM {
+        return cp_lattice_int(ci.imm_int)
+    }
+
+    // Load float
+    if opc == CP_OP_LOAD_FLOAT {
+        return cp_lattice_float(ci.imm_float)
+    }
+
+    // Load bool
+    if opc == CP_OP_LOAD_BOOL {
+        return cp_lattice_bool(ci.imm_bool)
+    }
+
+    // Copy: propagate source lattice
+    if opc == CP_OP_COPY {
+        if ci.src1 >= 0 && ci.src1 < CP_MAX_REGS {
+            return cp_get_reg(&ctx.state, ci.src1)
+        }
+        return cp_lattice_bottom()
+    }
+
+    // Binary operation
+    if opc == CP_OP_BINOP {
+        let lat1 = if ci.src1 >= 0 && ci.src1 < CP_MAX_REGS {
+            cp_get_reg(&ctx.state, ci.src1)
+        } else {
+            cp_lattice_bottom()
+        }
+        let lat2 = if ci.src2 >= 0 && ci.src2 < CP_MAX_REGS {
+            cp_get_reg(&ctx.state, ci.src2)
+        } else {
+            cp_lattice_bottom()
+        }
+
+        // If either is BOTTOM, result is BOTTOM
+        if cp_is_bottom(lat1) || cp_is_bottom(lat2) {
+            // But try strength reduction first
+            let s1_const = cp_is_const_int(lat1)
+            let s2_const = cp_is_const_int(lat2)
+            let s1_val = if s1_const { lat1.int_val } else { 0 }
+            let s2_val = if s2_const { lat2.int_val } else { 0 }
+            let sr = cp_try_strength_reduce(ci.binop_tag, ci.src1, ci.src2,
+                                            s1_const, s2_const, s1_val, s2_val)
+            if sr.reduced {
+                if sr.result_kind == 0 {
+                    // Load constant
+                    return cp_lattice_int(sr.result_int)
+                }
+                // Otherwise cannot determine constant from strength reduction alone
+            }
+            return cp_lattice_bottom()
+        }
+
+        // If either is TOP, result is TOP (optimistic)
+        if cp_is_top(lat1) || cp_is_top(lat2) {
+            return cp_lattice_top()
+        }
+
+        // Both CONST: fold
+        if cp_is_const_int(lat1) && cp_is_const_int(lat2) {
+            return cp_fold_binop_int(ci.binop_tag, lat1.int_val, lat2.int_val)
+        }
+        if cp_is_const_float(lat1) && cp_is_const_float(lat2) {
+            return cp_fold_binop_float(ci.binop_tag, lat1.float_val, lat2.float_val)
+        }
+
+        return cp_lattice_bottom()
+    }
+
+    // Phi: meet all inputs
+    if opc == CP_OP_PHI {
+        var result = cp_lattice_top()
+        var p: i64 = 0
+        while p < ci.phi_count {
+            let input_reg = ci.phi_inputs[p as usize]
+            if input_reg >= 0 && input_reg < CP_MAX_REGS {
+                let input_lat = cp_get_reg(&ctx.state, input_reg)
+                result = cp_lattice_meet(result, input_lat)
+            }
+            p = p + 1
+        }
+        return result
+    }
+
+    // Call, alloc, field_get, index_get, load_string: result is BOTTOM (unknown)
+    if opc == CP_OP_CALL || opc == CP_OP_ALLOC || opc == CP_OP_FIELD_GET ||
+       opc == CP_OP_INDEX_GET || opc == CP_OP_LOAD_STRING {
+        return cp_lattice_bottom()
+    }
+
+    // Unary operation
+    if opc == CP_OP_UNARYOP {
+        let lat1 = if ci.src1 >= 0 && ci.src1 < CP_MAX_REGS {
+            cp_get_reg(&ctx.state, ci.src1)
+        } else {
+            cp_lattice_bottom()
+        }
+        if cp_is_bottom(lat1) { return cp_lattice_bottom() }
+        if cp_is_top(lat1) { return cp_lattice_top() }
+        if cp_is_const_int(lat1) {
+            // Negate
+            return cp_lattice_int(0 - lat1.int_val)
+        }
+        return cp_lattice_bottom()
+    }
+
+    // Default: anything else that defines a register is BOTTOM
+    cp_lattice_bottom()
+}
+
+// ============================================================================
+// Section 11: Populate Context from IrFunction
+// ============================================================================
+
+// Extract CpInstr from IrInstr.
+fn cp_extract_instr(instr: IrInstr, idx: i64) -> CpInstr with Mut, Div, Panic {
+    var ci = cp_instr_new()
+    ci.idx = idx
+    ci.opcode = cp_classify_opcode(instr.op)
+    ci.dst = instr.dst
+    ci.src1 = instr.src1
+    ci.src2 = instr.src2
+    ci.imm_int = instr.imm_i64
+    ci.imm_float = instr.imm_f64
+    ci.label_id = instr.label_id
+
+    // Bool: stored as imm_i64 == 1 for true
+    if ci.opcode == CP_OP_LOAD_BOOL {
+        ci.imm_bool = instr.imm_i64 != 0
+    }
+
+    // Classify binary op
+    if ci.opcode == CP_OP_BINOP {
+        ci.binop_tag = cp_classify_binop(instr.bin_op)
+    }
+
+    // For phi nodes, inputs are stored in src1 and src2
+    if ci.opcode == CP_OP_PHI {
+        var pc: i64 = 0
+        if instr.src1 >= 0 && instr.src1 < CP_MAX_REGS {
+            ci.phi_inputs[pc as usize] = instr.src1
+            pc = pc + 1
+        }
+        if instr.src2 >= 0 && instr.src2 < CP_MAX_REGS {
+            ci.phi_inputs[pc as usize] = instr.src2
+            pc = pc + 1
+        }
+        ci.phi_count = pc
+    }
+
+    // For branches/jumps, store label_id as block_id
+    if ci.opcode == CP_OP_JUMP || ci.opcode == CP_OP_BRANCH_TRUE || ci.opcode == CP_OP_BRANCH_FALSE {
+        ci.block_id = instr.label_id
+    }
+
+    ci
+}
+
+// Populate the CpContext from an IrFunction.
+fn cp_populate(ctx: &! CpContext, func: &IrFunction) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < func.instr_count && i < CP_MAX_INSTRS {
+        let instr = func.instrs[i as usize]
+        ctx.instrs[i as usize] = cp_extract_instr(instr, i)
+        i = i + 1
+    }
+    ctx.instr_count = i
+    ctx.stats.total_instrs = i
+    i
+}
+
+// ============================================================================
+// Section 12: Block Structure
+// ============================================================================
+
+// Build block structure from instruction list.
+fn cp_build_blocks(ctx: &! CpContext) -> i64 with Mut, Div, Panic {
+    var bc: i64 = 0
+
+    // Block 0 always exists as entry block
+    if ctx.instr_count > 0 {
+        ctx.blocks[0].block_id = 0
+        ctx.blocks[0].instr_start = 0
+        ctx.blocks[0].is_reachable = true
+        ctx.block_reachable[0] = true
+        bc = 1
+    }
+
+    // Scan for labels to start new blocks
+    var i: i64 = 0
+    while i < ctx.instr_count {
+        if ctx.instrs[i as usize].opcode == CP_OP_LABEL {
+            // Close previous block
+            if bc > 0 {
+                let prev = bc - 1
+                ctx.blocks[prev as usize].instr_count = i - ctx.blocks[prev as usize].instr_start
+            }
+            // Start new block
+            if bc < CP_MAX_BLOCKS {
+                ctx.blocks[bc as usize].block_id = bc
+                ctx.blocks[bc as usize].instr_start = i
+                ctx.blocks[bc as usize].is_reachable = false
+                ctx.block_reachable[bc as usize] = false
+                bc = bc + 1
+            }
+        }
+        i = i + 1
+    }
+
+    // Close last block
+    if bc > 0 {
+        let last = bc - 1
+        ctx.blocks[last as usize].instr_count = ctx.instr_count - ctx.blocks[last as usize].instr_start
+    }
+
+    ctx.block_count = bc
+    bc
+}
+
+// Build block edges by scanning terminators.
+fn cp_build_block_edges(ctx: &! CpContext) -> i64 with Mut, Div, Panic {
+    var edge_count: i64 = 0
+    var b: i64 = 0
+    while b < ctx.block_count {
+        let start = ctx.blocks[b as usize].instr_start
+        let count = ctx.blocks[b as usize].instr_count
+        let end = start + count
+
+        // Find the last non-NOP instruction
+        var last_idx = end - 1
+        while last_idx >= start && ctx.instrs[last_idx as usize].opcode == CP_OP_NOP {
+            last_idx = last_idx - 1
+        }
+
+        if last_idx >= start {
+            let opc = ctx.instrs[last_idx as usize].opcode
+
+            // Fall-through to next block if not a terminator
+            if cp_is_terminator(opc) == false {
+                if b + 1 < ctx.block_count {
+                    let sc = ctx.blocks[b as usize].succ_count
+                    if sc < CP_MAX_SUCCS {
+                        ctx.blocks[b as usize].succs[sc as usize] = b + 1
+                        ctx.blocks[b as usize].succ_count = sc + 1
+                        let pc = ctx.blocks[(b + 1) as usize].pred_count
+                        if pc < CP_MAX_PREDS {
+                            ctx.blocks[(b + 1) as usize].preds[pc as usize] = b
+                            ctx.blocks[(b + 1) as usize].pred_count = pc + 1
+                        }
+                        edge_count = edge_count + 1
+                    }
+                }
+            }
+
+            // Conditional branches: target + fallthrough
+            if cp_is_conditional_branch(opc) {
+                // Fallthrough
+                if b + 1 < ctx.block_count {
+                    let sc = ctx.blocks[b as usize].succ_count
+                    if sc < CP_MAX_SUCCS {
+                        ctx.blocks[b as usize].succs[sc as usize] = b + 1
+                        ctx.blocks[b as usize].succ_count = sc + 1
+                        let pc = ctx.blocks[(b + 1) as usize].pred_count
+                        if pc < CP_MAX_PREDS {
+                            ctx.blocks[(b + 1) as usize].preds[pc as usize] = b
+                            ctx.blocks[(b + 1) as usize].pred_count = pc + 1
+                        }
+                        edge_count = edge_count + 1
+                    }
+                }
+                // Branch target
+                let target_label = ctx.instrs[last_idx as usize].block_id
+                if target_label >= 0 {
+                    var tb: i64 = 0
+                    while tb < ctx.block_count {
+                        if ctx.blocks[tb as usize].block_id == target_label {
+                            let sc = ctx.blocks[b as usize].succ_count
+                            if sc < CP_MAX_SUCCS {
+                                ctx.blocks[b as usize].succs[sc as usize] = tb
+                                ctx.blocks[b as usize].succ_count = sc + 1
+                                let pc = ctx.blocks[tb as usize].pred_count
+                                if pc < CP_MAX_PREDS {
+                                    ctx.blocks[tb as usize].preds[pc as usize] = b
+                                    ctx.blocks[tb as usize].pred_count = pc + 1
+                                }
+                                edge_count = edge_count + 1
+                            }
+                        }
+                        tb = tb + 1
+                    }
+                }
+            }
+
+            // Unconditional jump
+            if opc == CP_OP_JUMP {
+                let target_label = ctx.instrs[last_idx as usize].block_id
+                if target_label >= 0 {
+                    var tb: i64 = 0
+                    while tb < ctx.block_count {
+                        if ctx.blocks[tb as usize].block_id == target_label {
+                            let sc = ctx.blocks[b as usize].succ_count
+                            if sc < CP_MAX_SUCCS {
+                                ctx.blocks[b as usize].succs[sc as usize] = tb
+                                ctx.blocks[b as usize].succ_count = sc + 1
+                                let pc = ctx.blocks[tb as usize].pred_count
+                                if pc < CP_MAX_PREDS {
+                                    ctx.blocks[tb as usize].preds[pc as usize] = b
+                                    ctx.blocks[tb as usize].pred_count = pc + 1
+                                }
+                                edge_count = edge_count + 1
+                            }
+                        }
+                        tb = tb + 1
+                    }
+                }
+            }
+        }
+
+        b = b + 1
+    }
+    edge_count
+}
+
+// Propagate reachability from entry block.
+fn cp_propagate_reachability(ctx: &! CpContext) -> i64 with Mut, Div, Panic {
+    if ctx.block_count <= 0 {
+        return 0
+    }
+    ctx.blocks[0].is_reachable = true
+    ctx.block_reachable[0] = true
+
+    var changed = true
+    var reachable_count: i64 = 1
+    while changed {
+        changed = false
+        var b: i64 = 0
+        while b < ctx.block_count {
+            if ctx.block_reachable[b as usize] {
+                var s: i64 = 0
+                while s < ctx.blocks[b as usize].succ_count {
+                    let succ = ctx.blocks[b as usize].succs[s as usize]
+                    if succ >= 0 && succ < ctx.block_count {
+                        if ctx.block_reachable[succ as usize] == false {
+                            ctx.block_reachable[succ as usize] = true
+                            ctx.blocks[succ as usize].is_reachable = true
+                            changed = true
+                            reachable_count = reachable_count + 1
+                        }
+                    }
+                    s = s + 1
+                }
+            }
+            b = b + 1
+        }
+    }
+    reachable_count
+}
+
+// ============================================================================
+// Section 13: Branch Folding
+// ============================================================================
+
+// If a conditional branch's condition is a known constant, replace it with
+// either a jump (condition true for BranchTrue / false for BranchFalse)
+// or a NOP (fall through).
+// Returns the number of branches folded.
+fn cp_fold_branches(ctx: &! CpContext, func: &! IrFunction) -> i64 with Mut, Div, Panic {
+    var folded: i64 = 0
+    var i: i64 = 0
+    while i < ctx.instr_count {
+        let ci = ctx.instrs[i as usize]
+        if cp_is_conditional_branch(ci.opcode) {
+            let cond_reg = ci.src1
+            if cond_reg >= 0 && cond_reg < CP_MAX_REGS {
+                let cond_lat = cp_get_reg(&ctx.state, cond_reg)
+                if cp_is_const_int(cond_lat) {
+                    let cond_val = cond_lat.int_val
+                    let takes_branch = if ci.opcode == CP_OP_BRANCH_TRUE {
+                        cond_val != 0
+                    } else {
+                        cond_val == 0
+                    }
+                    if takes_branch {
+                        // Replace with unconditional jump
+                        func.instrs[i as usize] = ir_jump(ci.label_id)
+                        ctx.instrs[i as usize].opcode = CP_OP_JUMP
+                    } else {
+                        // Branch not taken: replace with NOP (fall through)
+                        func.instrs[i as usize] = ir_nop()
+                        ctx.instrs[i as usize].opcode = CP_OP_NOP
+                    }
+                    folded = folded + 1
+                } else if cp_is_const_bool(cond_lat) {
+                    let cond_val = cond_lat.bool_val
+                    let takes_branch = if ci.opcode == CP_OP_BRANCH_TRUE {
+                        cond_val
+                    } else {
+                        cond_val == false
+                    }
+                    if takes_branch {
+                        func.instrs[i as usize] = ir_jump(ci.label_id)
+                        ctx.instrs[i as usize].opcode = CP_OP_JUMP
+                    } else {
+                        func.instrs[i as usize] = ir_nop()
+                        ctx.instrs[i as usize].opcode = CP_OP_NOP
+                    }
+                    folded = folded + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    ctx.stats.folded_branches = folded
+    folded
+}
+
+// ============================================================================
+// Section 14: Copy Propagation
+// ============================================================================
+
+// Propagate constants through copy chains.
+// If a copy's source is a known constant, replace the copy with a load of that constant.
+fn cp_propagate_copies(ctx: &! CpContext, func: &! IrFunction) -> i64 with Mut, Div, Panic {
+    var propagated: i64 = 0
+    var i: i64 = 0
+    while i < ctx.instr_count {
+        let ci = ctx.instrs[i as usize]
+        if ci.opcode == CP_OP_COPY {
+            let src = ci.src1
+            if src >= 0 && src < CP_MAX_REGS {
+                let src_lat = cp_get_reg(&ctx.state, src)
+                if cp_is_const_int(src_lat) {
+                    func.instrs[i as usize] = ir_load_imm(ci.dst, src_lat.int_val)
+                    ctx.instrs[i as usize].opcode = CP_OP_LOAD_IMM
+                    ctx.instrs[i as usize].imm_int = src_lat.int_val
+                    propagated = propagated + 1
+                } else if cp_is_const_float(src_lat) {
+                    func.instrs[i as usize] = ir_load_float(ci.dst, src_lat.float_val)
+                    ctx.instrs[i as usize].opcode = CP_OP_LOAD_FLOAT
+                    ctx.instrs[i as usize].imm_float = src_lat.float_val
+                    propagated = propagated + 1
+                } else if cp_is_const_bool(src_lat) {
+                    let bval = if src_lat.bool_val { 1 } else { 0 }
+                    func.instrs[i as usize] = ir_load_bool(ci.dst, src_lat.bool_val)
+                    ctx.instrs[i as usize].opcode = CP_OP_LOAD_BOOL
+                    ctx.instrs[i as usize].imm_bool = src_lat.bool_val
+                    propagated = propagated + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    ctx.stats.propagated_copies = propagated
+    propagated
+}
+
+// ============================================================================
+// Section 15: Constant Folding Application
+// ============================================================================
+
+// Apply constant folding: replace binary ops with known-constant results
+// with load immediate instructions.
+fn cp_apply_folding(ctx: &! CpContext, func: &! IrFunction) -> i64 with Mut, Div, Panic {
+    var folded: i64 = 0
+    var i: i64 = 0
+    while i < ctx.instr_count {
+        let ci = ctx.instrs[i as usize]
+
+        if ci.opcode == CP_OP_BINOP {
+            let dst = ci.dst
+            if dst >= 0 && dst < CP_MAX_REGS {
+                let dst_lat = cp_get_reg(&ctx.state, dst)
+                if cp_is_const_int(dst_lat) {
+                    func.instrs[i as usize] = ir_load_imm(dst, dst_lat.int_val)
+                    ctx.instrs[i as usize].opcode = CP_OP_LOAD_IMM
+                    ctx.instrs[i as usize].imm_int = dst_lat.int_val
+                    folded = folded + 1
+                } else if cp_is_const_float(dst_lat) {
+                    func.instrs[i as usize] = ir_load_float(dst, dst_lat.float_val)
+                    ctx.instrs[i as usize].opcode = CP_OP_LOAD_FLOAT
+                    ctx.instrs[i as usize].imm_float = dst_lat.float_val
+                    folded = folded + 1
+                }
+            }
+        }
+
+        if ci.opcode == CP_OP_UNARYOP {
+            let dst = ci.dst
+            if dst >= 0 && dst < CP_MAX_REGS {
+                let dst_lat = cp_get_reg(&ctx.state, dst)
+                if cp_is_const_int(dst_lat) {
+                    func.instrs[i as usize] = ir_load_imm(dst, dst_lat.int_val)
+                    ctx.instrs[i as usize].opcode = CP_OP_LOAD_IMM
+                    ctx.instrs[i as usize].imm_int = dst_lat.int_val
+                    folded = folded + 1
+                }
+            }
+        }
+
+        // Phi nodes that resolved to a constant
+        if ci.opcode == CP_OP_PHI {
+            let dst = ci.dst
+            if dst >= 0 && dst < CP_MAX_REGS {
+                let dst_lat = cp_get_reg(&ctx.state, dst)
+                if cp_is_const_int(dst_lat) {
+                    func.instrs[i as usize] = ir_load_imm(dst, dst_lat.int_val)
+                    ctx.instrs[i as usize].opcode = CP_OP_LOAD_IMM
+                    ctx.instrs[i as usize].imm_int = dst_lat.int_val
+                    folded = folded + 1
+                }
+            }
+        }
+
+        i = i + 1
+    }
+    ctx.stats.folded_ops = folded
+    folded
+}
+
+// ============================================================================
+// Section 16: Strength Reduction Application
+// ============================================================================
+
+// Apply strength reduction to instructions where at least one operand is constant.
+fn cp_apply_strength_reduction(ctx: &! CpContext, func: &! IrFunction) -> i64 with Mut, Div, Panic {
+    var reduced: i64 = 0
+    var i: i64 = 0
+    while i < ctx.instr_count {
+        let ci = ctx.instrs[i as usize]
+        if ci.opcode == CP_OP_BINOP {
+            let src1 = ci.src1
+            let src2 = ci.src2
+            let s1_lat = if src1 >= 0 && src1 < CP_MAX_REGS {
+                cp_get_reg(&ctx.state, src1)
+            } else {
+                cp_lattice_bottom()
+            }
+            let s2_lat = if src2 >= 0 && src2 < CP_MAX_REGS {
+                cp_get_reg(&ctx.state, src2)
+            } else {
+                cp_lattice_bottom()
+            }
+
+            let s1_const = cp_is_const_int(s1_lat)
+            let s2_const = cp_is_const_int(s2_lat)
+            let s1_val = if s1_const { s1_lat.int_val } else { 0 }
+            let s2_val = if s2_const { s2_lat.int_val } else { 0 }
+
+            // Only apply strength reduction when result is NOT already const-folded
+            let dst = ci.dst
+            let dst_lat = if dst >= 0 && dst < CP_MAX_REGS {
+                cp_get_reg(&ctx.state, dst)
+            } else {
+                cp_lattice_bottom()
+            }
+
+            if cp_is_const(dst_lat) == false {
+                let sr = cp_try_strength_reduce(ci.binop_tag, src1, src2,
+                                                s1_const, s2_const, s1_val, s2_val)
+                if sr.reduced {
+                    if sr.result_kind == 0 {
+                        // Load constant
+                        func.instrs[i as usize] = ir_load_imm(dst, sr.result_int)
+                        ctx.instrs[i as usize].opcode = CP_OP_LOAD_IMM
+                        ctx.instrs[i as usize].imm_int = sr.result_int
+                        reduced = reduced + 1
+                    } else if sr.result_kind == 1 {
+                        // Copy
+                        func.instrs[i as usize] = ir_copy(dst, sr.copy_src)
+                        ctx.instrs[i as usize].opcode = CP_OP_COPY
+                        ctx.instrs[i as usize].src1 = sr.copy_src
+                        reduced = reduced + 1
+                    } else if sr.result_kind == 2 {
+                        // Add self (x + x)
+                        func.instrs[i as usize] = ir_binop(dst, sr.copy_src, BinaryOp::OpAdd, sr.copy_src)
+                        ctx.instrs[i as usize].binop_tag = CP_BINOP_ADD
+                        ctx.instrs[i as usize].src1 = sr.copy_src
+                        ctx.instrs[i as usize].src2 = sr.copy_src
+                        reduced = reduced + 1
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    ctx.stats.strength_reduced = reduced
+    reduced
+}
+
+// ============================================================================
+// Section 17: Dead Branch Elimination
+// ============================================================================
+
+// Eliminate instructions in unreachable blocks.
+fn cp_eliminate_unreachable(ctx: &! CpContext, func: &! IrFunction) -> i64 with Mut, Div, Panic {
+    var eliminated: i64 = 0
+    var b: i64 = 0
+    while b < ctx.block_count {
+        if ctx.block_reachable[b as usize] == false {
+            let start = ctx.blocks[b as usize].instr_start
+            let count = ctx.blocks[b as usize].instr_count
+            var j: i64 = 0
+            while j < count {
+                let idx = start + j
+                if idx >= 0 && idx < ctx.instr_count {
+                    if ctx.instrs[idx as usize].opcode != CP_OP_NOP {
+                        func.instrs[idx as usize] = ir_nop()
+                        ctx.instrs[idx as usize].opcode = CP_OP_NOP
+                        eliminated = eliminated + 1
+                    }
+                }
+                j = j + 1
+            }
+        }
+        b = b + 1
+    }
+    ctx.stats.eliminated_unreachable = eliminated
+    eliminated
+}
+
+// ============================================================================
+// Section 18: SCCP -- Sparse Conditional Constant Propagation
+// ============================================================================
+
+// Find all instructions that use a given register as a source.
+// Push them onto the worklist.
+fn cp_push_users(ctx: &! CpContext, reg: i64) -> i64 with Mut, Div, Panic {
+    var pushed: i64 = 0
+    var i: i64 = 0
+    while i < ctx.instr_count {
+        let ci = ctx.instrs[i as usize]
+        var uses_reg = false
+        if ci.src1 == reg { uses_reg = true }
+        if ci.src2 == reg { uses_reg = true }
+        // Check phi inputs
+        if ci.opcode == CP_OP_PHI {
+            var p: i64 = 0
+            while p < ci.phi_count {
+                if ci.phi_inputs[p as usize] == reg {
+                    uses_reg = true
+                }
+                p = p + 1
+            }
+        }
+        if uses_reg {
+            let ok = cp_worklist_push(&! ctx.worklist, i)
+            if ok { pushed = pushed + 1 }
+        }
+        i = i + 1
+    }
+    pushed
+}
+
+// Initialize the SCCP analysis: set lattice values for all load_imm, load_float,
+// load_bool instructions, then seed the worklist with their users.
+fn cp_sccp_init(ctx: &! CpContext) -> i64 with Mut, Div, Panic {
+    var seeded: i64 = 0
+    var i: i64 = 0
+    while i < ctx.instr_count {
+        let ci = ctx.instrs[i as usize]
+        let opc = ci.opcode
+        let dst = ci.dst
+
+        if opc == CP_OP_LOAD_IMM {
+            if dst >= 0 && dst < CP_MAX_REGS {
+                let changed = cp_set_reg(&! ctx.state, dst, cp_lattice_int(ci.imm_int))
+                if changed {
+                    let p = cp_push_users(ctx, dst)
+                    seeded = seeded + p
+                }
+            }
+        } else if opc == CP_OP_LOAD_FLOAT {
+            if dst >= 0 && dst < CP_MAX_REGS {
+                let changed = cp_set_reg(&! ctx.state, dst, cp_lattice_float(ci.imm_float))
+                if changed {
+                    let p = cp_push_users(ctx, dst)
+                    seeded = seeded + p
+                }
+            }
+        } else if opc == CP_OP_LOAD_BOOL {
+            if dst >= 0 && dst < CP_MAX_REGS {
+                let changed = cp_set_reg(&! ctx.state, dst, cp_lattice_bool(ci.imm_bool))
+                if changed {
+                    let p = cp_push_users(ctx, dst)
+                    seeded = seeded + p
+                }
+            }
+        } else if opc == CP_OP_CALL || opc == CP_OP_ALLOC || opc == CP_OP_FIELD_GET ||
+                  opc == CP_OP_INDEX_GET || opc == CP_OP_LOAD_STRING {
+            // These produce unknown values
+            if dst >= 0 && dst < CP_MAX_REGS {
+                let changed = cp_set_reg(&! ctx.state, dst, cp_lattice_bottom())
+                if changed {
+                    let p = cp_push_users(ctx, dst)
+                    seeded = seeded + p
+                }
+            }
+        }
+
+        i = i + 1
+    }
+    seeded
+}
+
+// Read-merge-write a register via mutable state reference (avoids sub-borrow conflict).
+fn cp_update_reg(state: &! CpState, dst: i64, new_val: CpLattice) -> bool with Mut, Div, Panic {
+    if dst < 0 || dst >= CP_MAX_REGS {
+        return false
+    }
+    let old_val = state.values[dst as usize]
+    let merged = cp_lattice_meet(old_val, new_val)
+    if cp_lattice_eq(old_val, merged) {
+        return false
+    }
+    state.values[dst as usize] = merged
+    if dst >= state.reg_count {
+        state.reg_count = dst + 1
+    }
+    true
+}
+
+// Apply a lattice update: read old, meet, write, push users if changed.
+fn cp_apply_update(ctx: &! CpContext, dst: i64, new_val: CpLattice) -> i64 with Mut, Div, Panic {
+    let changed = cp_update_reg(&! ctx.state, dst, new_val)
+    if changed {
+        let pushed = cp_push_users(ctx, dst)
+    }
+    1
+}
+
+// Run one SCCP iteration: pop from worklist, evaluate, update, push users.
+// Returns 1 if progress was made, 0 otherwise.
+fn cp_sccp_step(ctx: &! CpContext) -> i64 with Mut, Div, Panic {
+    let idx = cp_worklist_pop(&! ctx.worklist)
+    if idx == CP_INVALID {
+        return 0
+    }
+    let ci = ctx.instrs[idx as usize]
+    let dst = ci.dst
+
+    if dst < 0 || dst >= CP_MAX_REGS {
+        return 1
+    }
+
+    let new_val = cp_eval_instr(ctx, ci)
+    cp_apply_update(ctx, dst, new_val)
+}
+
+// Run the full SCCP fixed-point iteration.
+fn cp_sccp_solve(ctx: &! CpContext) -> i64 with Mut, Div, Panic {
+    let seeded = cp_sccp_init(ctx)
+    var iterations: i64 = 0
+    var max_iters: i64 = CP_MAX_REGS * 4
+
+    var done = false
+    while done == false {
+        if cp_worklist_empty(&ctx.worklist) {
+            done = true
+        } else if iterations >= max_iters {
+            done = true
+        } else {
+            let progress = cp_sccp_step(ctx)
+            iterations = iterations + 1
+        }
+    }
+    ctx.stats.iterations = iterations
+    iterations
+}
+
+// ============================================================================
+// Section 19: Full Constant Propagation Pipeline
+// ============================================================================
+
+// Inner implementation: takes already-borrowed ctx and func.
+fn cp_run_impl(ctx: &! CpContext, func: &! IrFunction) -> CpStats with Mut, Div, Panic {
+    // Phase 1: Populate instruction cache
+    let populated = cp_populate(ctx, func)
+
+    // Phase 2: Build blocks and edges
+    let blocks = cp_build_blocks(ctx)
+    let edges = cp_build_block_edges(ctx)
+
+    // Phase 3: Propagate reachability
+    let reachable = cp_propagate_reachability(ctx)
+
+    // Phase 4: SCCP fixed-point iteration
+    let iterations = cp_sccp_solve(ctx)
+
+    // Phase 5: Apply constant folding
+    let folded = cp_apply_folding(ctx, func)
+
+    // Phase 6: Apply strength reduction
+    let reduced = cp_apply_strength_reduction(ctx, func)
+
+    // Phase 7: Copy propagation
+    let propagated = cp_propagate_copies(ctx, func)
+
+    // Phase 8: Branch folding
+    let branches = cp_fold_branches(ctx, func)
+
+    // Phase 9: Rebuild reachability after branch folding
+    // Reset reachability
+    var rb: i64 = 0
+    while rb < ctx.block_count {
+        ctx.block_reachable[rb as usize] = false
+        ctx.blocks[rb as usize].is_reachable = false
+        rb = rb + 1
+    }
+    let reachable2 = cp_propagate_reachability(ctx)
+
+    // Phase 10: Dead branch elimination
+    let eliminated = cp_eliminate_unreachable(ctx, func)
+
+    ctx.stats
+}
+
+// Run the complete constant propagation pass on an IrFunction.
+fn cp_run(func: &! IrFunction) -> CpStats with Mut, Div, Panic {
+    var ctx = cp_context_new()
+    cp_run_impl(&! ctx, func)
+}
+
+// Convenience: run constant propagation and return the modified function.
+fn cp_optimize_function(func: IrFunction) -> IrFunction with Mut, Div, Panic {
+    var result = func
+    let stats = cp_run(&! result)
+    result
+}
+
+// ============================================================================
+// Section 20: Test Helpers
+// ============================================================================
+
+// Build a test IrFunction from an instruction array and count.
+fn cp_make_test_func(instrs: [IrInstr; 8192], count: i64) -> IrFunction {
+    IrFunction {
+        name: ir_empty_name(),
+        instrs: instrs,
+        instr_count: count,
+        reg_count: count + 10,
+        label_count: 0,
+        param_count: 0,
+        param_regs: [IR_INVALID_REG; 64],
+    }
+}
+
+// Build an empty instruction array filled with NOPs.
+fn cp_empty_instrs() -> [IrInstr; 8192] {
+    [ir_nop(); 8192]
+}
+
+// Check if instruction at position is a specific opcode.
+fn cp_check_opcode(func: &IrFunction, pos: i64, expected: IrOpcode) -> bool with Div, Panic {
+    if pos < 0 || pos >= func.instr_count {
+        return false
+    }
+    let instr = func.instrs[pos as usize]
+    opcodes_equal(instr.op, expected)
+}
+
+// Check if instruction at position is IrLoadImm with a specific value.
+fn cp_check_load_imm(func: &IrFunction, pos: i64, expected_val: i64) -> bool with Div, Panic {
+    if pos < 0 || pos >= func.instr_count {
+        return false
+    }
+    let instr = func.instrs[pos as usize]
+    if opcodes_equal(instr.op, IrOpcode::IrLoadImm) == false {
+        return false
+    }
+    instr.imm_i64 == expected_val
+}
+
+// Check if instruction at position is a NOP.
+fn cp_check_nop(func: &IrFunction, pos: i64) -> bool with Div, Panic {
+    cp_check_opcode(func, pos, IrOpcode::IrNop)
+}
+
+// Make a phi instruction with two inputs.
+fn cp_make_phi(dst: i64, src1: i64, src2: i64) -> IrInstr {
+    let base = ir_phi(dst)
+    IrInstr {
+        op: base.op,
+        dst: dst,
+        src1: src1,
+        src2: src2,
+        imm_i64: base.imm_i64,
+        imm_f64: base.imm_f64,
+        label_id: base.label_id,
+        fn_id: base.fn_id,
+        field_idx: base.field_idx,
+        bin_op: base.bin_op,
+        un_op: base.un_op,
+        name: base.name,
+        call_args: base.call_args,
+        arg_count: base.arg_count,
+    }
+}
+
+// ============================================================================
+// Section 21: Tests -- Lattice Operations
+// ============================================================================
+
+// T01: TOP meet TOP = TOP
+fn test_cp_meet_top_top() -> bool {
+    let a = cp_lattice_top()
+    let b = cp_lattice_top()
+    let result = cp_lattice_meet(a, b)
+    result.kind == CP_TOP
+}
+
+// T02: TOP meet CONST = CONST
+fn test_cp_meet_top_const() -> bool {
+    let a = cp_lattice_top()
+    let b = cp_lattice_int(42)
+    let result = cp_lattice_meet(a, b)
+    if result.kind != CP_CONST { return false }
+    result.int_val == 42
+}
+
+// T03: CONST meet TOP = CONST
+fn test_cp_meet_const_top() -> bool {
+    let a = cp_lattice_int(7)
+    let b = cp_lattice_top()
+    let result = cp_lattice_meet(a, b)
+    if result.kind != CP_CONST { return false }
+    result.int_val == 7
+}
+
+// T04: CONST meet same CONST = CONST
+fn test_cp_meet_const_same() -> bool {
+    let a = cp_lattice_int(99)
+    let b = cp_lattice_int(99)
+    let result = cp_lattice_meet(a, b)
+    if result.kind != CP_CONST { return false }
+    result.int_val == 99
+}
+
+// T05: CONST meet different CONST = BOTTOM
+fn test_cp_meet_const_diff() -> bool {
+    let a = cp_lattice_int(10)
+    let b = cp_lattice_int(20)
+    let result = cp_lattice_meet(a, b)
+    result.kind == CP_BOTTOM
+}
+
+// T06: BOTTOM meet anything = BOTTOM
+fn test_cp_meet_bottom_any() -> bool {
+    let a = cp_lattice_bottom()
+    let b = cp_lattice_int(5)
+    let r1 = cp_lattice_meet(a, b)
+    let r2 = cp_lattice_meet(a, cp_lattice_top())
+    let r3 = cp_lattice_meet(a, cp_lattice_bottom())
+    if r1.kind != CP_BOTTOM { return false }
+    if r2.kind != CP_BOTTOM { return false }
+    r3.kind == CP_BOTTOM
+}
+
+// T07: anything meet BOTTOM = BOTTOM
+fn test_cp_meet_any_bottom() -> bool {
+    let a = cp_lattice_int(5)
+    let b = cp_lattice_bottom()
+    let result = cp_lattice_meet(a, b)
+    result.kind == CP_BOTTOM
+}
+
+// T08: Float CONST meet same = CONST
+fn test_cp_meet_float_same() -> bool {
+    let a = cp_lattice_float(3.14)
+    let b = cp_lattice_float(3.14)
+    let result = cp_lattice_meet(a, b)
+    if result.kind != CP_CONST { return false }
+    result.is_float
+}
+
+// T09: Bool CONST meet same = CONST
+fn test_cp_meet_bool_same() -> bool {
+    let a = cp_lattice_bool(true)
+    let b = cp_lattice_bool(true)
+    let result = cp_lattice_meet(a, b)
+    if result.kind != CP_CONST { return false }
+    result.is_bool
+}
+
+// T10: Bool CONST meet different = BOTTOM
+fn test_cp_meet_bool_diff() -> bool {
+    let a = cp_lattice_bool(true)
+    let b = cp_lattice_bool(false)
+    let result = cp_lattice_meet(a, b)
+    result.kind == CP_BOTTOM
+}
+
+// ============================================================================
+// Section 22: Tests -- Constant Folding
+// ============================================================================
+
+// T11: Fold addition 3 + 5 = 8
+fn test_cp_fold_add() -> bool with Div, Panic {
+    let result = cp_fold_binop_int(CP_BINOP_ADD, 3, 5)
+    if result.kind != CP_CONST { return false }
+    result.int_val == 8
+}
+
+// T12: Fold subtraction 10 - 3 = 7
+fn test_cp_fold_sub() -> bool with Div, Panic {
+    let result = cp_fold_binop_int(CP_BINOP_SUB, 10, 3)
+    if result.kind != CP_CONST { return false }
+    result.int_val == 7
+}
+
+// T13: Fold multiplication 7 * 6 = 42
+fn test_cp_fold_mul() -> bool with Div, Panic {
+    let result = cp_fold_binop_int(CP_BINOP_MUL, 7, 6)
+    if result.kind != CP_CONST { return false }
+    result.int_val == 42
+}
+
+// T14: Fold division 20 / 4 = 5
+fn test_cp_fold_div() -> bool with Div, Panic {
+    let result = cp_fold_binop_int(CP_BINOP_DIV, 20, 4)
+    if result.kind != CP_CONST { return false }
+    result.int_val == 5
+}
+
+// T15: Division by zero returns BOTTOM
+fn test_cp_fold_div_zero() -> bool with Div, Panic {
+    let result = cp_fold_binop_int(CP_BINOP_DIV, 10, 0)
+    result.kind == CP_BOTTOM
+}
+
+// T16: Fold modulo 10 % 3 = 1
+fn test_cp_fold_mod() -> bool with Div, Panic {
+    let result = cp_fold_binop_int(CP_BINOP_MOD, 10, 3)
+    if result.kind != CP_CONST { return false }
+    result.int_val == 1
+}
+
+// T17: Fold equality 5 == 5 -> 1
+fn test_cp_fold_eq_true() -> bool with Div, Panic {
+    let result = cp_fold_binop_int(CP_BINOP_EQ, 5, 5)
+    if result.kind != CP_CONST { return false }
+    result.int_val == 1
+}
+
+// T18: Fold equality 5 == 6 -> 0
+fn test_cp_fold_eq_false() -> bool with Div, Panic {
+    let result = cp_fold_binop_int(CP_BINOP_EQ, 5, 6)
+    if result.kind != CP_CONST { return false }
+    result.int_val == 0
+}
+
+// T19: Fold less-than 3 < 5 -> 1
+fn test_cp_fold_lt_true() -> bool with Div, Panic {
+    let result = cp_fold_binop_int(CP_BINOP_LT, 3, 5)
+    if result.kind != CP_CONST { return false }
+    result.int_val == 1
+}
+
+// T20: Fold less-than 5 < 3 -> 0
+fn test_cp_fold_lt_false() -> bool with Div, Panic {
+    let result = cp_fold_binop_int(CP_BINOP_LT, 5, 3)
+    if result.kind != CP_CONST { return false }
+    result.int_val == 0
+}
+
+// T21: Fold greater-than 7 > 2 -> 1
+fn test_cp_fold_gt() -> bool with Div, Panic {
+    let result = cp_fold_binop_int(CP_BINOP_GT, 7, 2)
+    if result.kind != CP_CONST { return false }
+    result.int_val == 1
+}
+
+// T22: Fold less-equal 5 <= 5 -> 1
+fn test_cp_fold_le() -> bool with Div, Panic {
+    let result = cp_fold_binop_int(CP_BINOP_LE, 5, 5)
+    if result.kind != CP_CONST { return false }
+    result.int_val == 1
+}
+
+// T23: Fold greater-equal 3 >= 5 -> 0
+fn test_cp_fold_ge() -> bool with Div, Panic {
+    let result = cp_fold_binop_int(CP_BINOP_GE, 3, 5)
+    if result.kind != CP_CONST { return false }
+    result.int_val == 0
+}
+
+// T24: Fold not-equal 3 != 5 -> 1
+fn test_cp_fold_ne() -> bool with Div, Panic {
+    let result = cp_fold_binop_int(CP_BINOP_NE, 3, 5)
+    if result.kind != CP_CONST { return false }
+    result.int_val == 1
+}
+
+// T25: Fold bitwise AND 0xFF & 0x0F = 0x0F
+fn test_cp_fold_bit_and() -> bool with Div, Panic {
+    let result = cp_fold_binop_int(CP_BINOP_BIT_AND, 255, 15)
+    if result.kind != CP_CONST { return false }
+    result.int_val == 15
+}
+
+// T26: Fold bitwise OR 0xF0 | 0x0F = 0xFF
+fn test_cp_fold_bit_or() -> bool with Div, Panic {
+    let result = cp_fold_binop_int(CP_BINOP_BIT_OR, 240, 15)
+    if result.kind != CP_CONST { return false }
+    result.int_val == 255
+}
+
+// T27: Fold XOR 0xFF ^ 0x0F = 0xF0
+fn test_cp_fold_xor() -> bool with Div, Panic {
+    let result = cp_fold_binop_int(CP_BINOP_XOR, 255, 15)
+    if result.kind != CP_CONST { return false }
+    result.int_val == 240
+}
+
+// T28: Fold shift left 1 << 3 = 8
+fn test_cp_fold_shl() -> bool with Div, Panic {
+    let result = cp_fold_binop_int(CP_BINOP_SHL, 1, 3)
+    if result.kind != CP_CONST { return false }
+    result.int_val == 8
+}
+
+// T29: Fold shift right 16 >> 2 = 4
+fn test_cp_fold_shr() -> bool with Div, Panic {
+    let result = cp_fold_binop_int(CP_BINOP_SHR, 16, 2)
+    if result.kind != CP_CONST { return false }
+    result.int_val == 4
+}
+
+// ============================================================================
+// Section 23: Tests -- Strength Reduction
+// ============================================================================
+
+// T30: x * 0 -> load 0
+fn test_cp_strength_mul_zero() -> bool {
+    let sr = cp_try_strength_reduce(CP_BINOP_MUL, 0, 1, false, true, 0, 0)
+    if sr.reduced == false { return false }
+    if sr.result_kind != 0 { return false }
+    sr.result_int == 0
+}
+
+// T31: x * 1 -> copy x
+fn test_cp_strength_mul_one() -> bool {
+    let sr = cp_try_strength_reduce(CP_BINOP_MUL, 5, 6, false, true, 0, 1)
+    if sr.reduced == false { return false }
+    if sr.result_kind != 1 { return false }
+    sr.copy_src == 5
+}
+
+// T32: x * 2 -> x + x
+fn test_cp_strength_mul_two() -> bool {
+    let sr = cp_try_strength_reduce(CP_BINOP_MUL, 3, 4, false, true, 0, 2)
+    if sr.reduced == false { return false }
+    if sr.result_kind != 2 { return false }
+    sr.copy_src == 3
+}
+
+// T33: x + 0 -> copy x
+fn test_cp_strength_add_zero() -> bool {
+    let sr = cp_try_strength_reduce(CP_BINOP_ADD, 7, 8, false, true, 0, 0)
+    if sr.reduced == false { return false }
+    if sr.result_kind != 1 { return false }
+    sr.copy_src == 7
+}
+
+// T34: 0 + x -> copy x
+fn test_cp_strength_zero_add() -> bool {
+    let sr = cp_try_strength_reduce(CP_BINOP_ADD, 7, 8, true, false, 0, 0)
+    if sr.reduced == false { return false }
+    if sr.result_kind != 1 { return false }
+    sr.copy_src == 8
+}
+
+// T35: x - 0 -> copy x
+fn test_cp_strength_sub_zero() -> bool {
+    let sr = cp_try_strength_reduce(CP_BINOP_SUB, 9, 10, false, true, 0, 0)
+    if sr.reduced == false { return false }
+    if sr.result_kind != 1 { return false }
+    sr.copy_src == 9
+}
+
+// T36: x / 1 -> copy x
+fn test_cp_strength_div_one() -> bool {
+    let sr = cp_try_strength_reduce(CP_BINOP_DIV, 11, 12, false, true, 0, 1)
+    if sr.reduced == false { return false }
+    if sr.result_kind != 1 { return false }
+    sr.copy_src == 11
+}
+
+// T37: x << 0 -> copy x
+fn test_cp_strength_shl_zero() -> bool {
+    let sr = cp_try_strength_reduce(CP_BINOP_SHL, 13, 14, false, true, 0, 0)
+    if sr.reduced == false { return false }
+    if sr.result_kind != 1 { return false }
+    sr.copy_src == 13
+}
+
+// T38: x & 0 -> load 0
+fn test_cp_strength_and_zero() -> bool {
+    let sr = cp_try_strength_reduce(CP_BINOP_BIT_AND, 15, 16, false, true, 0, 0)
+    if sr.reduced == false { return false }
+    if sr.result_kind != 0 { return false }
+    sr.result_int == 0
+}
+
+// T39: x | 0 -> copy x
+fn test_cp_strength_or_zero() -> bool {
+    let sr = cp_try_strength_reduce(CP_BINOP_BIT_OR, 17, 18, false, true, 0, 0)
+    if sr.reduced == false { return false }
+    if sr.result_kind != 1 { return false }
+    sr.copy_src == 17
+}
+
+// ============================================================================
+// Section 24: Tests -- Branch Folding
+// ============================================================================
+
+// T40: Branch folding with constant true condition (BranchTrue -> Jump)
+fn test_cp_branch_fold_true_inner(ctx: &! CpContext, func: &! IrFunction) -> bool with Mut, Div, Panic {
+    let pop = cp_populate(ctx, func)
+    let seeded = cp_sccp_init(ctx)
+    let iters = cp_sccp_solve(ctx)
+    let folded = cp_fold_branches(ctx, func)
+
+    // Branch at position 1 should be replaced with jump
+    if folded < 1 { return false }
+    cp_check_opcode(func, 1, IrOpcode::IrJump)
+}
+fn test_cp_branch_fold_true() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 1)       // r0 = 1 (true)
+    instrs[1] = ir_branch_true(0, 2)    // if r0 goto L2
+    instrs[2] = ir_load_imm(1, 0)       // fallthrough
+    instrs[3] = ir_return(1)
+    instrs[4] = ir_label(2)
+    instrs[5] = ir_load_imm(2, 42)
+    instrs[6] = ir_return(2)
+
+    var func = cp_make_test_func(instrs, 7)
+    var ctx = cp_context_new()
+    return test_cp_branch_fold_true_inner(&! ctx, &! func)
+}
+
+// T41: Branch folding with constant false condition (BranchTrue -> NOP)
+fn test_cp_branch_fold_false_inner(ctx: &! CpContext, func: &! IrFunction) -> bool with Mut, Div, Panic {
+    let pop = cp_populate(ctx, func)
+    let seeded = cp_sccp_init(ctx)
+    let iters = cp_sccp_solve(ctx)
+    let folded = cp_fold_branches(ctx, func)
+
+    // Branch at position 1 should be replaced with NOP
+    if folded < 1 { return false }
+    cp_check_nop(func, 1)
+}
+fn test_cp_branch_fold_false() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 0)       // r0 = 0 (false)
+    instrs[1] = ir_branch_true(0, 2)    // if r0 goto L2 -- not taken
+    instrs[2] = ir_load_imm(1, 99)
+    instrs[3] = ir_return(1)
+    instrs[4] = ir_label(2)
+    instrs[5] = ir_load_imm(2, 42)
+    instrs[6] = ir_return(2)
+
+    var func = cp_make_test_func(instrs, 7)
+    var ctx = cp_context_new()
+    return test_cp_branch_fold_false_inner(&! ctx, &! func)
+}
+
+// ============================================================================
+// Section 25: Tests -- Copy Propagation
+// ============================================================================
+
+// T42: Copy propagation through a chain: r0 = 42, r1 = copy r0, r2 = copy r1
+fn test_cp_copy_propagation_chain_inner(ctx: &! CpContext, func: &! IrFunction) -> bool with Mut, Div, Panic {
+    let pop = cp_populate(ctx, func)
+    let seeded = cp_sccp_init(ctx)
+    let iters = cp_sccp_solve(ctx)
+    let propagated = cp_propagate_copies(ctx, func)
+
+    // Both copies should become load_imm 42
+    let c1_ok = cp_check_load_imm(func, 1, 42)
+    let c2_ok = cp_check_load_imm(func, 2, 42)
+    c1_ok && c2_ok
+}
+fn test_cp_copy_propagation_chain() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 42)    // r0 = 42
+    instrs[1] = ir_copy(1, 0)         // r1 = r0
+    instrs[2] = ir_copy(2, 1)         // r2 = r1
+    instrs[3] = ir_return(2)
+
+    var func = cp_make_test_func(instrs, 4)
+    var ctx = cp_context_new()
+    return test_cp_copy_propagation_chain_inner(&! ctx, &! func)
+}
+
+// T43: Copy propagation does not propagate non-constant
+fn test_cp_copy_no_propagate_varying_inner(ctx: &! CpContext, func: &! IrFunction) -> bool with Mut, Div, Panic {
+    let pop = cp_populate(ctx, func)
+    let seeded = cp_sccp_init(ctx)
+    let iters = cp_sccp_solve(ctx)
+    let propagated = cp_propagate_copies(ctx, func)
+
+    // Copy should NOT be replaced since source is unknown
+    if propagated != 0 { return false }
+    cp_check_opcode(func, 1, IrOpcode::IrCopy)
+}
+fn test_cp_copy_no_propagate_varying() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_call(0, 0, ir_empty_name(), ir_empty_reg_list(), 0)  // r0 = call (unknown)
+    instrs[1] = ir_copy(1, 0)         // r1 = r0
+    instrs[2] = ir_return(1)
+
+    var func = cp_make_test_func(instrs, 3)
+    var ctx = cp_context_new()
+    return test_cp_copy_no_propagate_varying_inner(&! ctx, &! func)
+}
+
+// ============================================================================
+// Section 26: Tests -- Phi Resolution
+// ============================================================================
+
+// T44: Phi with uniform inputs resolves to constant
+fn test_cp_phi_uniform_inner(ctx: &! CpContext, func: &! IrFunction) -> bool with Mut, Div, Panic {
+    let pop = cp_populate(ctx, func)
+    let seeded = cp_sccp_init(ctx)
+    let iters = cp_sccp_solve(ctx)
+
+    // r2 should have converged to CONST 10
+    let lat = cp_get_reg(&ctx.state, 2)
+    if lat.kind != CP_CONST { return false }
+    lat.int_val == 10
+}
+fn test_cp_phi_uniform() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 10)       // r0 = 10
+    instrs[1] = ir_load_imm(1, 10)       // r1 = 10
+    instrs[2] = cp_make_phi(2, 0, 1)     // r2 = phi(r0, r1)
+    instrs[3] = ir_return(2)
+
+    var func = cp_make_test_func(instrs, 4)
+    var ctx = cp_context_new()
+    return test_cp_phi_uniform_inner(&! ctx, &! func)
+}
+
+// T45: Phi with differing inputs is BOTTOM
+fn test_cp_phi_differing_inner(ctx: &! CpContext, func: &! IrFunction) -> bool with Mut, Div, Panic {
+    let pop = cp_populate(ctx, func)
+    let seeded = cp_sccp_init(ctx)
+    let iters = cp_sccp_solve(ctx)
+
+    // r2 should be BOTTOM (differing constants)
+    let lat = cp_get_reg(&ctx.state, 2)
+    lat.kind == CP_BOTTOM
+}
+fn test_cp_phi_differing() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 10)       // r0 = 10
+    instrs[1] = ir_load_imm(1, 20)       // r1 = 20
+    instrs[2] = cp_make_phi(2, 0, 1)     // r2 = phi(r0, r1)
+    instrs[3] = ir_return(2)
+
+    var func = cp_make_test_func(instrs, 4)
+    var ctx = cp_context_new()
+    return test_cp_phi_differing_inner(&! ctx, &! func)
+}
+
+// ============================================================================
+// Section 27: Tests -- SCCP Convergence
+// ============================================================================
+
+// T46: SCCP converges on simple constant program
+fn test_cp_sccp_simple_convergence_inner(ctx: &! CpContext, func: &! IrFunction) -> bool with Mut, Div, Panic {
+    let pop = cp_populate(ctx, func)
+    let iters = cp_sccp_solve(ctx)
+
+    // r2 should be 8
+    let lat2 = cp_get_reg(&ctx.state, 2)
+    if lat2.kind != CP_CONST { return false }
+    if lat2.int_val != 8 { return false }
+
+    // r3 should be 24
+    let lat3 = cp_get_reg(&ctx.state, 3)
+    if lat3.kind != CP_CONST { return false }
+    lat3.int_val == 24
+}
+fn test_cp_sccp_simple_convergence() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 3)                     // r0 = 3
+    instrs[1] = ir_load_imm(1, 5)                     // r1 = 5
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)    // r2 = r0 + r1 = 8
+    instrs[3] = ir_binop(3, 2, BinaryOp::OpMul, 0)    // r3 = r2 * r0 = 24
+    instrs[4] = ir_return(3)
+
+    var func = cp_make_test_func(instrs, 5)
+    var ctx = cp_context_new()
+    return test_cp_sccp_simple_convergence_inner(&! ctx, &! func)
+}
+
+// T47: SCCP with non-constant value stays BOTTOM
+fn test_cp_sccp_with_call_inner(ctx: &! CpContext, func: &! IrFunction) -> bool with Mut, Div, Panic {
+    let pop = cp_populate(ctx, func)
+    let iters = cp_sccp_solve(ctx)
+
+    // r0 should be BOTTOM (call result)
+    let lat0 = cp_get_reg(&ctx.state, 0)
+    if lat0.kind != CP_BOTTOM { return false }
+
+    // r2 should also be BOTTOM
+    let lat2 = cp_get_reg(&ctx.state, 2)
+    lat2.kind == CP_BOTTOM
+}
+fn test_cp_sccp_with_call() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_call(0, 0, ir_empty_name(), ir_empty_reg_list(), 0)  // r0 = unknown
+    instrs[1] = ir_load_imm(1, 5)                     // r1 = 5
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)    // r2 = r0 + r1 (BOTTOM)
+    instrs[3] = ir_return(2)
+
+    var func = cp_make_test_func(instrs, 4)
+    var ctx = cp_context_new()
+    return test_cp_sccp_with_call_inner(&! ctx, &! func)
+}
+
+// T48: SCCP folds nested operations
+fn test_cp_sccp_nested_fold_inner(ctx: &! CpContext, func: &! IrFunction) -> bool with Mut, Div, Panic {
+    let pop = cp_populate(ctx, func)
+    let iters = cp_sccp_solve(ctx)
+
+    let lat4 = cp_get_reg(&ctx.state, 4)
+    if lat4.kind != CP_CONST { return false }
+    lat4.int_val == 23
+}
+fn test_cp_sccp_nested_fold() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 2)                     // r0 = 2
+    instrs[1] = ir_load_imm(1, 3)                     // r1 = 3
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)    // r2 = 5
+    instrs[3] = ir_binop(3, 2, BinaryOp::OpMul, 2)    // r3 = 25
+    instrs[4] = ir_binop(4, 3, BinaryOp::OpSub, 0)    // r4 = 23
+    instrs[5] = ir_return(4)
+
+    var func = cp_make_test_func(instrs, 6)
+    var ctx = cp_context_new()
+    return test_cp_sccp_nested_fold_inner(&! ctx, &! func)
+}
+
+// ============================================================================
+// Section 28: Tests -- Full Pipeline
+// ============================================================================
+
+// T49: Full pipeline folds constants and produces correct IR
+fn test_cp_full_pipeline_fold_inner(func: &! IrFunction) -> bool with Mut, Div, Panic {
+    let stats = cp_run(func)
+    cp_check_load_imm(func, 2, 30)
+}
+fn test_cp_full_pipeline_fold() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 10)                    // r0 = 10
+    instrs[1] = ir_load_imm(1, 20)                    // r1 = 20
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)    // r2 = 30
+    instrs[3] = ir_return(2)
+
+    var func = cp_make_test_func(instrs, 4)
+    test_cp_full_pipeline_fold_inner(&! func)
+}
+
+// T50: Full pipeline with copy chain
+fn test_cp_full_pipeline_copy_chain_inner(func: &! IrFunction) -> bool with Mut, Div, Panic {
+    let stats = cp_run(func)
+    let c1_ok = cp_check_load_imm(func, 1, 77)
+    let c2_ok = cp_check_load_imm(func, 2, 77)
+    c1_ok && c2_ok
+}
+fn test_cp_full_pipeline_copy_chain() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 77)   // r0 = 77
+    instrs[1] = ir_copy(1, 0)        // r1 = r0
+    instrs[2] = ir_copy(2, 1)        // r2 = r1
+    instrs[3] = ir_return(2)
+
+    var func = cp_make_test_func(instrs, 4)
+    test_cp_full_pipeline_copy_chain_inner(&! func)
+}
+
+// ============================================================================
+// Section 29: Tests -- Statistics Tracking
+// ============================================================================
+
+// T51: Statistics tracking on constant folding
+fn test_cp_stats_folding() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 3)
+    instrs[1] = ir_load_imm(1, 5)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)    // should be folded
+    instrs[3] = ir_binop(3, 0, BinaryOp::OpMul, 1)    // should be folded
+    instrs[4] = ir_return(3)
+
+    var func = cp_make_test_func(instrs, 5)
+    let stats = cp_run(&! func)
+
+    // At least 2 operations should have been folded
+    stats.folded_ops >= 2
+}
+
+// T52: Statistics tracking total instructions
+fn test_cp_stats_total() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 1)
+    instrs[1] = ir_load_imm(1, 2)
+    instrs[2] = ir_return(0)
+
+    var func = cp_make_test_func(instrs, 3)
+    let stats = cp_run(&! func)
+
+    stats.total_instrs == 3
+}
+
+// T53: Statistics with copy propagation
+fn test_cp_stats_copies() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 42)
+    instrs[1] = ir_copy(1, 0)
+    instrs[2] = ir_return(1)
+
+    var func = cp_make_test_func(instrs, 3)
+    let stats = cp_run(&! func)
+
+    stats.propagated_copies >= 1
+}
+
+// ============================================================================
+// Section 30: Tests -- Edge Cases and Comparisons
+// ============================================================================
+
+// T54: Logical AND folding
+fn test_cp_fold_logical_and() -> bool with Div, Panic {
+    let r1 = cp_fold_binop_int(CP_BINOP_AND, 1, 1)
+    if r1.kind != CP_CONST { return false }
+    if r1.int_val != 1 { return false }
+
+    let r2 = cp_fold_binop_int(CP_BINOP_AND, 1, 0)
+    if r2.kind != CP_CONST { return false }
+    r2.int_val == 0
+}
+
+// T55: Logical OR folding
+fn test_cp_fold_logical_or() -> bool with Div, Panic {
+    let r1 = cp_fold_binop_int(CP_BINOP_OR, 0, 0)
+    if r1.kind != CP_CONST { return false }
+    if r1.int_val != 0 { return false }
+
+    let r2 = cp_fold_binop_int(CP_BINOP_OR, 0, 1)
+    if r2.kind != CP_CONST { return false }
+    r2.int_val == 1
+}
+
+// T56: SHL with invalid shift amount returns BOTTOM
+fn test_cp_fold_shl_invalid() -> bool with Div, Panic {
+    let result = cp_fold_binop_int(CP_BINOP_SHL, 1, 64)
+    result.kind == CP_BOTTOM
+}
+
+// T57: SHR with invalid shift amount returns BOTTOM
+fn test_cp_fold_shr_invalid() -> bool with Div, Panic {
+    let result = cp_fold_binop_int(CP_BINOP_SHR, 1, 0 - 1)
+    result.kind == CP_BOTTOM
+}
+
+// T58: Modulo by zero returns BOTTOM
+fn test_cp_fold_mod_zero() -> bool with Div, Panic {
+    let result = cp_fold_binop_int(CP_BINOP_MOD, 10, 0)
+    result.kind == CP_BOTTOM
+}
+
+// T59: Float constant folding (add)
+fn test_cp_fold_float_add() -> bool with Div, Panic {
+    let result = cp_fold_binop_float(CP_BINOP_ADD, 1.5, 2.5)
+    if result.kind != CP_CONST { return false }
+    // Check within tolerance: 4.0
+    let diff = result.float_val - 4.0
+    let abs_diff = if diff < 0.0 { 0.0 - diff } else { diff }
+    abs_diff < 0.001
+}
+
+// T60: Float division by zero returns BOTTOM
+fn test_cp_fold_float_div_zero() -> bool with Div, Panic {
+    let result = cp_fold_binop_float(CP_BINOP_DIV, 1.0, 0.0)
+    result.kind == CP_BOTTOM
+}
+
+// T61: Lattice equality for integers
+fn test_cp_lattice_eq_int() -> bool {
+    let a = cp_lattice_int(42)
+    let b = cp_lattice_int(42)
+    let c = cp_lattice_int(43)
+    let eq_same = cp_lattice_eq(a, b)
+    let eq_diff = cp_lattice_eq(a, c)
+    if eq_same == false { return false }
+    eq_diff == false
+}
+
+// T62: Lattice equality for booleans
+fn test_cp_lattice_eq_bool() -> bool {
+    let a = cp_lattice_bool(true)
+    let b = cp_lattice_bool(true)
+    let c = cp_lattice_bool(false)
+    let eq_same = cp_lattice_eq(a, b)
+    let eq_diff = cp_lattice_eq(a, c)
+    if eq_same == false { return false }
+    eq_diff == false
+}
+
+// T63: State set and get round-trip
+fn test_cp_state_set_get_inner(state: &! CpState) -> bool with Mut, Div, Panic {
+    let val = cp_lattice_int(123)
+    let changed = cp_set_reg(state, 5, val)
+    if changed == false { return false }
+    let got = cp_get_reg(state, 5)
+    if got.kind != CP_CONST { return false }
+    got.int_val == 123
+}
+fn test_cp_state_set_get() -> bool with Mut, Div, Panic {
+    var state = cp_state_new()
+    return test_cp_state_set_get_inner(&! state)
+}
+
+// T64: Setting same value returns false (no change)
+fn test_cp_state_no_change_inner(state: &! CpState) -> bool with Mut, Div, Panic {
+    let val = cp_lattice_int(99)
+    let c1 = cp_set_reg(state, 3, val)
+    let c2 = cp_set_reg(state, 3, val)
+    if c1 == false { return false }
+    c2 == false
+}
+fn test_cp_state_no_change() -> bool with Mut, Div, Panic {
+    var state = cp_state_new()
+    return test_cp_state_no_change_inner(&! state)
+}
+
+// T65: Worklist push and pop
+fn test_cp_worklist_push_pop_inner(wl: &! CpWorklist) -> bool with Mut, Div, Panic {
+    let p1 = cp_worklist_push(wl, 10)
+    let p2 = cp_worklist_push(wl, 20)
+    let p3 = cp_worklist_push(wl, 30)
+    if p1 == false { return false }
+    if p2 == false { return false }
+    if p3 == false { return false }
+    // Pop returns in LIFO order
+    let v1 = cp_worklist_pop(wl)
+    let v2 = cp_worklist_pop(wl)
+    let v3 = cp_worklist_pop(wl)
+    if v1 != 30 { return false }
+    if v2 != 20 { return false }
+    v3 == 10
+}
+fn test_cp_worklist_push_pop() -> bool with Mut, Div, Panic {
+    var wl = cp_worklist_new()
+    return test_cp_worklist_push_pop_inner(&! wl)
+}
+
+// T66: Worklist rejects duplicates
+fn test_cp_worklist_no_dup_inner(wl: &! CpWorklist) -> bool with Mut, Div, Panic {
+    let p1 = cp_worklist_push(wl, 5)
+    let p2 = cp_worklist_push(wl, 5)
+    if p1 == false { return false }
+    // Second push should be rejected (duplicate)
+    if p2 { return false }
+    wl.count == 1
+}
+fn test_cp_worklist_no_dup() -> bool with Mut, Div, Panic {
+    var wl = cp_worklist_new()
+    return test_cp_worklist_no_dup_inner(&! wl)
+}
+
+// T67: Empty worklist pop returns INVALID
+fn test_cp_worklist_empty_pop() -> bool with Mut, Div, Panic {
+    var wl = cp_worklist_new()
+    let v = cp_worklist_pop(&! wl)
+    v == CP_INVALID
+}
+
+// T68: 0 * x strength reduction (commutative)
+fn test_cp_strength_zero_mul() -> bool {
+    let sr = cp_try_strength_reduce(CP_BINOP_MUL, 0, 1, true, false, 0, 0)
+    if sr.reduced == false { return false }
+    if sr.result_kind != 0 { return false }
+    sr.result_int == 0
+}
+
+// T69: x >> 0 -> x
+fn test_cp_strength_shr_zero() -> bool {
+    let sr = cp_try_strength_reduce(CP_BINOP_SHR, 20, 21, false, true, 0, 0)
+    if sr.reduced == false { return false }
+    if sr.result_kind != 1 { return false }
+    sr.copy_src == 20
+}
+
+// T70: 0 & x -> 0
+fn test_cp_strength_zero_and() -> bool {
+    let sr = cp_try_strength_reduce(CP_BINOP_BIT_AND, 22, 23, true, false, 0, 0)
+    if sr.reduced == false { return false }
+    if sr.result_kind != 0 { return false }
+    sr.result_int == 0
+}
+
+// T71: Full pipeline strength reduction of x * 0
+fn test_cp_full_strength_mul_zero_inner(func: &! IrFunction) -> bool with Mut, Div, Panic {
+    let stats = cp_run(func)
+    cp_check_load_imm(func, 2, 0)
+}
+fn test_cp_full_strength_mul_zero() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_call(0, 0, ir_empty_name(), ir_empty_reg_list(), 0)  // r0 = unknown
+    instrs[1] = ir_load_imm(1, 0)                     // r1 = 0
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpMul, 1)    // r2 = r0 * 0
+    instrs[3] = ir_return(2)
+
+    var func = cp_make_test_func(instrs, 4)
+    test_cp_full_strength_mul_zero_inner(&! func)
+}
+
+// T72: Comparison chaining: (3 < 5) -> 1, then branch on that
+fn test_cp_comparison_chain_inner(ctx: &! CpContext, func: &! IrFunction) -> bool with Mut, Div, Panic {
+    let pop = cp_populate(ctx, func)
+    let iters = cp_sccp_solve(ctx)
+
+    let lat2 = cp_get_reg(&ctx.state, 2)
+    if lat2.kind != CP_CONST { return false }
+    lat2.int_val == 1
+}
+fn test_cp_comparison_chain() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 3)                     // r0 = 3
+    instrs[1] = ir_load_imm(1, 5)                     // r1 = 5
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpLt, 1)     // r2 = (3 < 5) = 1
+    instrs[3] = ir_return(2)
+
+    var func = cp_make_test_func(instrs, 4)
+    var ctx = cp_context_new()
+    return test_cp_comparison_chain_inner(&! ctx, &! func)
+}
+
+// T73: 2 * x -> x + x (commutative strength reduction)
+fn test_cp_strength_two_mul() -> bool {
+    let sr = cp_try_strength_reduce(CP_BINOP_MUL, 3, 4, true, false, 2, 0)
+    if sr.reduced == false { return false }
+    if sr.result_kind != 2 { return false }
+    sr.copy_src == 4
+}
+
+// T74: 1 * x -> copy x (commutative)
+fn test_cp_strength_one_mul() -> bool {
+    let sr = cp_try_strength_reduce(CP_BINOP_MUL, 3, 4, true, false, 1, 0)
+    if sr.reduced == false { return false }
+    if sr.result_kind != 1 { return false }
+    sr.copy_src == 4
+}
+
+// T75: 0 | x -> copy x
+fn test_cp_strength_zero_or() -> bool {
+    let sr = cp_try_strength_reduce(CP_BINOP_BIT_OR, 25, 26, true, false, 0, 0)
+    if sr.reduced == false { return false }
+    if sr.result_kind != 1 { return false }
+    sr.copy_src == 26
+}
+
+// T76: No reduction for non-reducible operations (e.g., x * 3)
+fn test_cp_strength_no_reduce() -> bool {
+    let sr = cp_try_strength_reduce(CP_BINOP_MUL, 0, 1, false, true, 0, 3)
+    sr.reduced == false
+}
+
+// T77: Lattice meet associativity: (a meet b) meet c == a meet (b meet c)
+fn test_cp_lattice_meet_assoc() -> bool {
+    let a = cp_lattice_int(5)
+    let b = cp_lattice_top()
+    let c = cp_lattice_int(5)
+    let ab_c = cp_lattice_meet(cp_lattice_meet(a, b), c)
+    let a_bc = cp_lattice_meet(a, cp_lattice_meet(b, c))
+    cp_lattice_eq(ab_c, a_bc)
+}
+
+// T78: Lattice meet commutativity
+fn test_cp_lattice_meet_commut() -> bool {
+    let a = cp_lattice_int(7)
+    let b = cp_lattice_int(8)
+    let ab = cp_lattice_meet(a, b)
+    let ba = cp_lattice_meet(b, a)
+    cp_lattice_eq(ab, ba)
+}
+
+// T79: SCCP iteration count is positive for non-trivial programs
+fn test_cp_sccp_iterations_positive() -> bool with Mut, Div, Panic {
+    var instrs = cp_empty_instrs()
+    instrs[0] = ir_load_imm(0, 1)
+    instrs[1] = ir_load_imm(1, 2)
+    instrs[2] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    instrs[3] = ir_return(2)
+
+    var func = cp_make_test_func(instrs, 4)
+    let stats = cp_run(&! func)
+
+    stats.iterations > 0
+}
+
+// T80: Classify opcodes correctly
+fn test_cp_classify_opcodes() -> bool {
+    let o1 = cp_classify_opcode(IrOpcode::IrLoadImm)
+    let o2 = cp_classify_opcode(IrOpcode::IrBinOp)
+    let o3 = cp_classify_opcode(IrOpcode::IrJump)
+    let o4 = cp_classify_opcode(IrOpcode::IrReturn)
+    let o5 = cp_classify_opcode(IrOpcode::IrPhi)
+    if o1 != CP_OP_LOAD_IMM { return false }
+    if o2 != CP_OP_BINOP { return false }
+    if o3 != CP_OP_JUMP { return false }
+    if o4 != CP_OP_RETURN { return false }
+    o5 == CP_OP_PHI
+}
+
+// T81: Side-effect detection
+fn test_cp_side_effects() -> bool {
+    let se1 = cp_has_side_effect(CP_OP_CALL)
+    let se2 = cp_has_side_effect(CP_OP_RETURN)
+    let se3 = cp_has_side_effect(CP_OP_LOAD_IMM)
+    let se4 = cp_has_side_effect(CP_OP_BINOP)
+    if se1 == false { return false }
+    if se2 == false { return false }
+    if se3 { return false }
+    se4 == false
+}
+
+// T82: Terminator detection
+fn test_cp_terminators() -> bool {
+    let t1 = cp_is_terminator(CP_OP_JUMP)
+    let t2 = cp_is_terminator(CP_OP_RETURN)
+    let t3 = cp_is_terminator(CP_OP_BRANCH_TRUE)
+    let t4 = cp_is_terminator(CP_OP_LOAD_IMM)
+    if t1 == false { return false }
+    if t2 == false { return false }
+    if t3 == false { return false }
+    t4 == false
+}
+
+// T83: Out-of-range register get returns BOTTOM
+fn test_cp_get_oob_reg() -> bool with Div, Panic {
+    let state = cp_state_new()
+    let lat = cp_get_reg(&state, 0 - 1)
+    if lat.kind != CP_BOTTOM { return false }
+    let lat2 = cp_get_reg(&state, 5000)
+    lat2.kind == CP_BOTTOM
+}
+
+// T84: Out-of-range register set returns false
+fn test_cp_set_oob_reg_inner(state: &! CpState) -> bool with Mut, Div, Panic {
+    let r1 = cp_set_reg(state, 0 - 1, cp_lattice_int(1))
+    let r2 = cp_set_reg(state, 5000, cp_lattice_int(1))
+    if r1 { return false }
+    r2 == false
+}
+fn test_cp_set_oob_reg() -> bool with Mut, Div, Panic {
+    var state = cp_state_new()
+    return test_cp_set_oob_reg_inner(&! state)
+}
+
+// ============================================================================
+// Section 31: Test Runner
+// ============================================================================
+
+fn test_cp_run_all() -> i32 with Mut, Div, Panic {
+    var passed: i64 = 0
+    var failed: i64 = 0
+
+    // Lattice tests (T01-T10)
+    if test_cp_meet_top_top() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_meet_top_const() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_meet_const_top() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_meet_const_same() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_meet_const_diff() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_meet_bottom_any() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_meet_any_bottom() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_meet_float_same() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_meet_bool_same() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_meet_bool_diff() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Constant folding tests (T11-T29)
+    if test_cp_fold_add() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_fold_sub() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_fold_mul() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_fold_div() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_fold_div_zero() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_fold_mod() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_fold_eq_true() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_fold_eq_false() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_fold_lt_true() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_fold_lt_false() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_fold_gt() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_fold_le() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_fold_ge() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_fold_ne() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_fold_bit_and() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_fold_bit_or() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_fold_xor() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_fold_shl() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_fold_shr() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Strength reduction tests (T30-T39)
+    if test_cp_strength_mul_zero() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_strength_mul_one() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_strength_mul_two() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_strength_add_zero() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_strength_zero_add() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_strength_sub_zero() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_strength_div_one() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_strength_shl_zero() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_strength_and_zero() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_strength_or_zero() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Branch folding tests (T40-T41)
+    if test_cp_branch_fold_true() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_branch_fold_false() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Copy propagation tests (T42-T43)
+    if test_cp_copy_propagation_chain() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_copy_no_propagate_varying() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Phi tests (T44-T45)
+    if test_cp_phi_uniform() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_phi_differing() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // SCCP tests (T46-T48)
+    if test_cp_sccp_simple_convergence() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_sccp_with_call() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_sccp_nested_fold() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Full pipeline tests (T49-T50)
+    if test_cp_full_pipeline_fold() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_full_pipeline_copy_chain() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Statistics tests (T51-T53)
+    if test_cp_stats_folding() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_stats_total() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_stats_copies() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Edge cases and comparisons (T54-T84)
+    if test_cp_fold_logical_and() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_fold_logical_or() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_fold_shl_invalid() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_fold_shr_invalid() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_fold_mod_zero() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_fold_float_add() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_fold_float_div_zero() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_lattice_eq_int() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_lattice_eq_bool() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_state_set_get() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_state_no_change() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_worklist_push_pop() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_worklist_no_dup() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_worklist_empty_pop() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_strength_zero_mul() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_strength_shr_zero() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_strength_zero_and() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_full_strength_mul_zero() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_comparison_chain() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_strength_two_mul() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_strength_one_mul() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_strength_zero_or() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_strength_no_reduce() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_lattice_meet_assoc() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_lattice_meet_commut() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_sccp_iterations_positive() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_classify_opcodes() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_side_effects() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_terminators() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_get_oob_reg() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_cp_set_oob_reg() { passed = passed + 1 } else { failed = failed + 1 }
+
+    print_int(passed)
+    print_int(failed)
+
+    if failed > 0 {
+        return 1
+    }
+    0
+}
