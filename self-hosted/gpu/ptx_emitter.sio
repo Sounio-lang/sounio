@@ -1,0 +1,371 @@
+// self-hosted/gpu/ptx_emitter.sio
+//
+// PTX CODE EMITTER FOR EPISTEMIC TENSOR CORE
+// Generates PTX assembly from Sounio GPU kernels
+
+use io
+use string
+use epistemic_tensor_core
+
+// ============================================================================
+// PTX EMITTER STRUCT
+// ============================================================================
+
+struct PtxEmitter {
+    output: string,
+    indent: i64,
+    label_count: i64,
+    register_count: i64,
+}
+
+struct PtxConfig {
+    target_arch: string,   // sm_80, sm_90, etc.
+    wmma_supported: bool,
+    tensor_cores: bool,
+    gum_counters: bool,
+    max_registers: i64,
+}
+
+// ============================================================================
+// PTX GENERATION
+// ============================================================================
+
+fn ptx_emitter_new() -> PtxEmitter {
+    PtxEmitter {
+        output: "",
+        indent: 0,
+        label_count: 0,
+        register_count: 0,
+    }
+}
+
+fn emit_ptx_header(emit: PtxEmitter, config: PtxConfig) -> PtxEmitter with {
+    var e = emit
+    
+    e = ptx_emitln(e, "// Sounio Epistemic Tensor Core PTX Output")
+    e = ptx_emitln(e, "// Target: " + config.target_arch)
+    e = ptx_emitln(e, "// Features: WMMA, Tensor Cores, GUM Counters")
+    e = ptx_emitln(e, "")
+    e = ptx_emitln(e, ".version 8.0")
+    e = ptx_emitln(e, ".target " + config.target_arch)
+    e = ptx_emitln(e, ".address_size 64")
+    e = ptx_emitln(e, "")
+    
+    // Include WMMA headers for tensor cores
+    if config.wmma_supported {
+        e = ptx_emitln(e, "// WMMA Tensor Core Support")
+        e = ptx_emitln(e, ".extern .func wmma.load_a.sync.aligned.col.m16n16k16.f32")
+        e = ptx_emitln(e, "// ...")
+        e = ptx_emitln(e, "")
+    }
+    
+    e
+}
+
+fn emit_epistemic_gemm_kernel(emit: PtxEmitter) -> PtxEmitter with Mut, Panic {
+    var e = emit
+    
+    e = ptx_emitln(e, "// Epistemic GEMM Kernel: WMMA + Provenance Merge + GUM Gate")
+    e = ptx_emitln(e, ".visible .entry epistemic_gemm_fused(")
+    e.indent = e.indent + 1
+    
+    // Parameters
+    e = ptx_emitln(e, ".param .u64 epistemic_gemm_fused_param_0, // A data")
+    e = ptx_emitln(e, ".param .u64 epistemic_gemm_fused_param_1, // A provenance")
+    e = ptx_emitln(e, ".param .u64 epistemic_gemm_fused_param_2, // A variance")
+    e = ptx_emitln(e, ".param .u64 epistemic_gemm_fused_param_3, // B data")
+    e = ptx_emitln(e, ".param .u64 epistemic_gemm_fused_param_4, // B provenance")
+    e = ptx_emitln(e, ".param .u64 epistemic_gemm_fused_param_5, // C data")
+    e = ptx_emitln(e, ".param .u64 epistemic_gemm_fused_param_6, // C provenance")
+    e = ptx_emitln(e, ".param .u32 epistemic_gemm_fused_param_7, // M")
+    e = ptx_emitln(e, ".param .u32 epistemic_gemm_fused_param_8, // N")
+    e = ptx_emitln(e, ".param .u32 epistemic_gemm_fused_param_9  // K")
+    e = ptx_emitln(e, ")")
+    e.indent = e.indent - 1
+    e = ptx_emitln(e, "{")
+    e.indent = e.indent + 1
+    
+    // Register declarations
+    e = ptx_emitln(e, "// Thread indexing")
+    e = ptx_emitln(e, ".reg .u32 %r<16>;")
+    e = ptx_emitln(e, ".reg .u64 %rd<32>;")
+    e = ptx_emitln(e, ".reg .f32 %f<32>;")
+    e = ptx_emitln(e, ".reg .pred %p<8>;")
+    e = ptx_emitln(e, "")
+    
+    // WMMA fragment declarations
+    e = ptx_emitln(e, "// WMMA fragments")
+    e = ptx_emitln(e, ".reg .b32 %fa<8>;   // Fragment A (matrix_a)")
+    e = ptx_emitln(e, ".reg .b32 %fb<8>;   // Fragment B (matrix_b)")
+    e = ptx_emitln(e, ".reg .b32 %fc<8>;   // Fragment C (accumulator)")
+    e = ptx_emitln(e, "")
+    
+    // Thread/block indexing
+    e = ptx_emitln(e, "// Get thread indices")
+    e = ptx_emitln(e, "mov.u32 %r0, %ctaid.x;")
+    e = ptx_emitln(e, "mov.u32 %r1, %ctaid.y;")
+    e = ptx_emitln(e, "mov.u32 %r2, %tid.x;")
+    e = ptx_emitln(e, "mov.u32 %r3, %tid.y;")
+    e = ptx_emitln(e, "")
+    
+    // Compute lane ID for GUM
+    e = ptx_emitln(e, "// Compute lane ID for GUM hardware counter")
+    e = ptx_emitln(e, "shl.b32 %r4, %r0, 5;")
+    e = ptx_emitln(e, "or.b32 %r5, %r4, %r2;")
+    e = ptx_emitln(e, "// %r5 = lane_id (0-95 on H100)")
+    e = ptx_emitln(e, "")
+    
+    // WMMA load A
+    e = ptx_emitln(e, "// WMMA Load A matrix")
+    e = ptx_emitln(e, "wmma.load_a.sync.aligned.col.m16n16k16.f32")
+    e = ptx_emitln(e, "    %fa0, %fa1, %fa2, %fa3,")
+    e = ptx_emitln(e, "    %fa4, %fa5, %fa6, %fa7,")
+    e = ptx_emitln(e, "    [%rd0], 16;")
+    e = ptx_emitln(e, "")
+    
+    // WMMA load B
+    e = ptx_emitln(e, "// WMMA Load B matrix")
+    e = ptx_emitln(e, "wmma.load_b.sync.aligned.col.m16n16k16.f32")
+    e = ptx_emitln(e, "    %fb0, %fb1, %fb2, %fb3,")
+    e = ptx_emitln(e, "    %fb4, %fb5, %fb6, %fb7,")
+    e = ptx_emitln(e, "    [%rd1], 16;")
+    e = ptx_emitln(e, "")
+    
+    // WMMA MMA (multiply-accumulate)
+    e = ptx_emitln(e, "// WMMA MMA (tensor core compute)")
+    e = ptx_emitln(e, "wmma.mma.sync.aligned.col.col.m16n16k16.f32.f32")
+    e = ptx_emitln(e, "    %fc0, %fc1, %fc2, %fc3,")
+    e = ptx_emitln(e, "    %fc4, %fc5, %fc6, %fc7,")
+    e = ptx_emitln(e, "    %fa0, %fa1, %fa2, %fa3,")
+    e = ptx_emitln(e, "    %fa4, %fa5, %fa6, %fa7,")
+    e = ptx_emitln(e, "    %fb0, %fb1, %fb2, %fb3,")
+    e = ptx_emitln(e, "    %fb4, %fb5, %fb6, %fb7,")
+    e = ptx_emitln(e, "    %fc0, %fc1, %fc2, %fc3,")
+    e = ptx_emitln(e, "    %fc4, %fc5, %fc6, %fc7;")
+    e = ptx_emitln(e, "")
+    
+    // Shared memory provenance merge
+    e = ptx_emitln(e, "// Shared memory provenance merge (per-lane)")
+    e = ptx_emitln(e, "// Load provenance from shared memory")
+    e = ptx_emitln(e, "ld.shared.u64 %rd10, [%rd2];")
+    e = ptx_emitln(e, "ld.shared.u64 %rd11, [%rd3];")
+    e = ptx_emitln(e, "")
+    
+    // Merkle merge using KAXI instruction
+    e = ptx_emitln(e, "// Merkle root computation (KAXI lane operation)")
+    e = ptx_emitln(e, "// This maps to the Sounio merkle_root_lane_l64 intrinsic")
+    e = ptx_emitln(e, "mov.u64 %rd12, 0x4F4D4547;  // SALT_A")
+    e = ptx_emitln(e, "mov.u64 %rd13, 0x4147454E;  // SALT_B")
+    e = ptx_emitln(e, "xor.b64 %rd14, %rd10, %rd12;")
+    e = ptx_emitln(e, "xor.b64 %rd15, %rd11, %rd13;")
+    e = ptx_emitln(e, "add.u64 %rd16, %rd14, %rd15;")
+    e = ptx_emitln(e, "")
+    
+    // GUM hardware counter check
+    e = ptx_emitln(e, "// GUM power gate check")
+    e = ptx_emitln(e, "// Read GUM counter (simplified - actual is hardware register)")
+    e = ptx_emitln(e, "mov.u32 %r6, 50;  // Placeholder for GUM counter read")
+    e = ptx_emitln(e, "setp.lt.u32 %p0, %r6, 96;  // Check < 96mW")
+    e = ptx_emitln(e, "@!%p0 bra POWER_VIOLATION;")
+    e = ptx_emitln(e, "")
+    
+    // WMMA store C
+    e = ptx_emitln(e, "// WMMA Store C matrix")
+    e = ptx_emitln(e, "wmma.store_d.sync.aligned.col.m16n16k16.f32")
+    e = ptx_emitln(e, "    [%rd4], %fc0, %fc1, %fc2, %fc3,")
+    e = ptx_emitln(e, "    %fc4, %fc5, %fc6, %fc7, 16;")
+    e = ptx_emitln(e, "")
+    
+    // Store provenance result
+    e = ptx_emitln(e, "// Store merged provenance")
+    e = ptx_emitln(e, "st.shared.u64 [%rd5], %rd16;")
+    e = ptx_emitln(e, "")
+    
+    // Sync and exit
+    e = ptx_emitln(e, "bar.sync 0;")
+    e = ptx_emitln(e, "ret;")
+    e = ptx_emitln(e, "")
+    
+    // Power violation handler
+    e = ptx_emitln(e, "POWER_VIOLATION:")
+    e = ptx_emitln(e, "    // Handle power bound violation")
+    e = ptx_emitln(e, "    mov.u32 %r7, 1;")
+    e = ptx_emitln(e, "    st.global.u32 [%rd6], %r7;  // Set error flag")
+    e = ptx_emitln(e, "    trap;  // Halt kernel")
+    e = ptx_emitln(e, "")
+    
+    e.indent = e.indent - 1
+    e = ptx_emitln(e, "}")
+    e = ptx_emitln(e, "")
+    
+    e
+}
+
+fn emit_glycolysis_kernel(emit: PtxEmitter) -> PtxEmitter with Mut, Panic {
+    var e = emit
+    
+    e = ptx_emitln(e, "// Glycolysis 10-Step Atom-Level Simulation Kernel")
+    e = ptx_emitln(e, ".visible .entry glycolysis_atom_gpu(")
+    e.indent = e.indent + 1
+    
+    e = ptx_emitln(e, ".param .u64 glycolysis_param_0,  // atom_positions")
+    e = ptx_emitln(e, ".param .u64 glycolysis_param_1,  // atom_velocities")
+    e = ptx_emitln(e, ".param .u64 glycolysis_param_2,  // atom_energies")
+    e = ptx_emitln(e, ".param .u64 glycolysis_param_3,  // bonds")
+    e = ptx_emitln(e, ".param .u64 glycolysis_param_4,  // provenance")
+    e = ptx_emitln(e, ".param .u32 glycolysis_param_5,  // atom_count")
+    e = ptx_emitln(e, ".param .u32 glycolysis_param_6   // bond_count")
+    e = ptx_emitln(e, ")")
+    e.indent = e.indent - 1
+    e = ptx_emitln(e, "{")
+    e.indent = e.indent + 1
+    
+    e = ptx_emitln(e, "// Per-atom thread mapping")
+    e = ptx_emitln(e, ".reg .u32 %atom_id;")
+    e = ptx_emitln(e, ".reg .f32 %fx, %fy, %fz;")
+    e = ptx_emitln(e, "")
+    
+    e = ptx_emitln(e, "mov.u32 %atom_id, %tid.x;")
+    e = ptx_emitln(e, "")
+    
+    // Load atom position
+    e = ptx_emitln(e, "// Load atom position")
+    e = ptx_emitln(e, "mul.lo.u64 %rd0, %atom_id, 12;  // 3 floats * 4 bytes")
+    e = ptx_emitln(e, "ld.global.f32 %fx, [%rd0+0];")
+    e = ptx_emitln(e, "ld.global.f32 %fy, [%rd0+4];")
+    e = ptx_emitln(e, "ld.global.f32 %fz, [%rd0+8];")
+    e = ptx_emitln(e, "")
+    
+    // Compute forces (simplified - would use tensor core GEMM)
+    e = ptx_emitln(e, "// Compute forces (placeholder)")
+    e = ptx_emitln(e, "mul.f32 %fx, %fx, 0.01;  // damping")
+    e = ptx_emitln(e, "mul.f32 %fy, %fy, 0.01;")
+    e = ptx_emitln(e, "mul.f32 %fz, %fz, 0.01;")
+    e = ptx_emitln(e, "")
+    
+    // Update velocity
+    e = ptx_emitln(e, "// Update velocity")
+    e = ptx_emitln(e, "mul.lo.u64 %rd1, %atom_id, 12;")
+    e = ptx_emitln(e, "ld.global.f32 %f0, [%rd1+0];  // vx")
+    e = ptx_emitln(e, "ld.global.f32 %f1, [%rd1+4];  // vy")
+    e = ptx_emitln(e, "ld.global.f32 %f2, [%rd1+8];  // vz")
+    e = ptx_emitln(e, "add.f32 %f0, %f0, %fx;")
+    e = ptx_emitln(e, "add.f32 %f1, %f1, %fy;")
+    e = ptx_emitln(e, "add.f32 %f2, %f2, %fz;")
+    e = ptx_emitln(e, "st.global.f32 [%rd1+0], %f0;")
+    e = ptx_emitln(e, "st.global.f32 [%rd1+4], %f1;")
+    e = ptx_emitln(e, "st.global.f32 [%rd1+8], %f2;")
+    e = ptx_emitln(e, "")
+    
+    // Update position
+    e = ptx_emitln(e, "// Update position")
+    e = ptx_emitln(e, "add.f32 %fx, %fx, %f0;")
+    e = ptx_emitln(e, "add.f32 %fy, %fy, %f1;")
+    e = ptx_emitln(e, "add.f32 %fz, %fz, %f2;")
+    e = ptx_emitln(e, "st.global.f32 [%rd0+0], %fx;")
+    e = ptx_emitln(e, "st.global.f32 [%rd0+4], %fy;")
+    e = ptx_emitln(e, "st.global.f32 [%rd0+8], %fz;")
+    e = ptx_emitln(e, "")
+    
+    e = ptx_emitln(e, "ret;")
+    e.indent = e.indent - 1
+    e = ptx_emitln(e, "}")
+    e = ptx_emitln(e, "")
+    
+    e
+}
+
+// ============================================================================
+// EMITTER UTILITIES
+// ============================================================================
+
+fn ptx_emit(emit: PtxEmitter, s: string) -> PtxEmitter with {
+    var e = emit
+    e.output = e.output + s
+    e
+}
+
+fn ptx_emitln(emit: PtxEmitter, s: string) -> PtxEmitter with {
+    var e = emit
+    
+    // Add indentation
+    var i: i64 = 0
+    while i < e.indent {
+        e.output = e.output + "    "
+        i = i + 1
+    }
+    
+    e.output = e.output + s + "\n"
+    e
+}
+
+// ============================================================================
+// PUBLIC API
+// ============================================================================
+
+fn generate_epistemic_ptx() -> string with Mut, Panic {
+    var emit = ptx_emitter_new()
+    
+    let config = PtxConfig {
+        target_arch: "sm_90",  // Hopper
+        wmma_supported: true,
+        tensor_cores: true,
+        gum_counters: true,
+        max_registers: 255,
+    }
+    
+    emit = emit_ptx_header(emit, config)
+    emit = emit_epistemic_gemm_kernel(emit)
+    emit = emit_glycolysis_kernel(emit)
+    
+    emit.output
+}
+
+fn compile_to_ptx_file(output_path: string) -> Result<(), string> with IO, Panic {
+    let ptx_code = generate_epistemic_ptx()
+    
+    // Would write to file in real implementation
+    // write_file(output_path, ptx_code)
+    
+    Result::Ok(())
+}
+
+// Main entry for PTX generation
+fn main() with IO, Panic {
+    println("Generating Epistemic Tensor Core PTX...")
+    
+    let ptx = generate_epistemic_ptx()
+    
+    println("")
+    println("PTX Output (first 1000 chars):")
+    println(str_substr(ptx, 0, 1000))
+    println("...")
+    println("")
+    println("Total PTX size: " + int_to_string(str_len(ptx)) + " bytes")
+}
+
+fn int_to_string(n: i64) -> string with Mut, Panic, Div {
+    if n == 0 {
+        "0"
+    } else {
+        let negative = n < 0
+        var num = if negative { -n } else { n }
+        var result = ""
+        while num > 0 {
+            let digit = num % 10
+            let ch = 48 + digit
+            result = char_from_i64(ch) + result
+            num = num / 10
+        }
+        if negative { "-" + result } else { result }
+    }
+}
+
+fn char_from_i64(n: i64) -> string with Mut, Panic {
+    str_substr("0123456789", n, 1)
+}
+
+enum Result<T, E> {
+    Ok(T),
+    Err(E),
+}

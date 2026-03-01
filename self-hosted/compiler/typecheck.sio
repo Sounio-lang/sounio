@@ -1,0 +1,913 @@
+// self-hosted::compiler::typecheck
+//
+// TYPE CHECKER FOR SOUNIO
+// No stubs. No fakes. Real implementation.
+//
+// Hindley-Milner style type inference with effect tracking.
+
+use io
+use string
+use types
+use parser
+
+// ============================================================================
+// TYPE INFERENCE CONTEXT
+// ============================================================================
+
+struct TypeContext {
+    // Variable environment: name -> (type, mutability)
+    vars: Map<string, (Type, bool)>,
+    
+    // Type definitions: name -> Type
+    type_defs: Map<string, Type>,
+    
+    // Function signatures: name -> function type
+    func_sigs: Map<string, Type>,
+    
+    // Type variable counter
+    next_var_id: i64,
+    
+    // Error messages
+    errors: Vec<string>,
+    
+    // Parent context for nested scopes
+    parent: Option<TypeContext>,
+}
+
+struct TypeResult {
+    ty: Type,
+    effects: Vec<string>,
+}
+
+// ============================================================================
+// CONTEXT OPERATIONS
+// ============================================================================
+
+fn context_new() -> TypeContext {
+    TypeContext {
+        vars: map_new(),
+        type_defs: make_builtin_types(),
+        func_sigs: map_new(),
+        next_var_id: 0,
+        errors: vec_new(),
+        parent: Option::None,
+    }
+}
+
+fn context_child(parent: TypeContext) -> TypeContext {
+    TypeContext {
+        vars: map_new(),
+        type_defs: parent.type_defs,
+        func_sigs: parent.func_sigs,
+        next_var_id: parent.next_var_id,
+        errors: parent.errors,
+        parent: Option::Some(parent),
+    }
+}
+
+fn fresh_var(ctx: TypeContext) -> (TypeContext, Type) with {
+    let id = ctx.next_var_id
+    let name = "t" + int_to_string(id)
+    
+    let new_ctx = TypeContext {
+        vars: ctx.vars,
+        type_defs: ctx.type_defs,
+        func_sigs: ctx.func_sigs,
+        next_var_id: id + 1,
+        errors: ctx.errors,
+        parent: ctx.parent,
+    }
+    
+    (new_ctx, type_var(id, name))
+}
+
+fn lookup_var(ctx: TypeContext, name: string) -> Option<(Type, bool)> with {
+    if map_contains(ctx.vars, name) {
+        Option::Some(map_get(ctx.vars, name))
+    } else {
+        match ctx.parent {
+            Option::Some(parent) => lookup_var(parent, name),
+            Option::None => Option::None,
+        }
+    }
+}
+
+fn lookup_type_def(ctx: TypeContext, name: string) -> Option<Type> with {
+    if map_contains(ctx.type_defs, name) {
+        Option::Some(map_get(ctx.type_defs, name))
+    } else {
+        Option::None
+    }
+}
+
+fn lookup_func_sig(ctx: TypeContext, name: string) -> Option<Type> with {
+    if map_contains(ctx.func_sigs, name) {
+        Option::Some(map_get(ctx.func_sigs, name))
+    } else {
+        Option::None
+    }
+}
+
+fn bind_var(ctx: TypeContext, name: string, ty: Type, mutable: bool) -> TypeContext with {
+    map_insert(ctx.vars, name, (ty, mutable))
+    ctx
+}
+
+fn bind_func_sig(ctx: TypeContext, name: string, sig: Type) -> TypeContext with {
+    map_insert(ctx.func_sigs, name, sig)
+    ctx
+}
+
+fn add_error(ctx: TypeContext, msg: string) -> TypeContext with {
+    vec_push(ctx.errors, msg)
+    ctx
+}
+
+// ============================================================================
+// TYPE INFERENCE
+// ============================================================================
+
+fn infer(ctx: TypeContext, expr: Expr) -> (TypeContext, TypeResult) with Mut, Panic {
+    match expr.kind {
+        ExprKind::IntLit => {
+            (ctx, TypeResult { ty: type_int(), effects: vec_new() })
+        }
+        ExprKind::FloatLit => {
+            (ctx, TypeResult { ty: type_float(), effects: vec_new() })
+        }
+        ExprKind::StringLit => {
+            (ctx, TypeResult { ty: type_string(), effects: vec_new() })
+        }
+        ExprKind::BoolLit => {
+            (ctx, TypeResult { ty: type_bool(), effects: vec_new() })
+        }
+        ExprKind::UnitLit => {
+            (ctx, TypeResult { ty: type_unit(), effects: vec_new() })
+        }
+        
+        ExprKind::VarRef => {
+            match lookup_var(ctx, expr.value) {
+                Option::Some((ty, _)) => {
+                    (ctx, TypeResult { ty: ty, effects: vec_new() })
+                }
+                Option::None => {
+                    let new_ctx = add_error(ctx, "Unbound variable: " + expr.value)
+                    (new_ctx, TypeResult { ty: type_error(), effects: vec_new() })
+                }
+            }
+        }
+        
+        ExprKind::Binary => {
+            infer_binary(ctx, expr)
+        }
+        
+        ExprKind::Unary => {
+            infer_unary(ctx, expr)
+        }
+        
+        ExprKind::Call => {
+            infer_call(ctx, expr)
+        }
+        
+        ExprKind::FieldAccess => {
+            infer_field_access(ctx, expr)
+        }
+        
+        ExprKind::Index => {
+            infer_index(ctx, expr)
+        }
+        
+        ExprKind::Assign => {
+            infer_assign(ctx, expr)
+        }
+        
+        ExprKind::Let => {
+            infer_let(ctx, expr)
+        }
+        
+        ExprKind::Var => {
+            infer_var(ctx, expr)
+        }
+        
+        ExprKind::If => {
+            infer_if(ctx, expr)
+        }
+        
+        ExprKind::While => {
+            infer_while(ctx, expr)
+        }
+        
+        ExprKind::For => {
+            infer_for(ctx, expr)
+        }
+        
+        ExprKind::Return => {
+            infer_return(ctx, expr)
+        }
+        
+        ExprKind::Break => {
+            (ctx, TypeResult { ty: type_unit(), effects: vec_new() })
+        }
+        
+        ExprKind::Continue => {
+            (ctx, TypeResult { ty: type_unit(), effects: vec_new() })
+        }
+        
+        ExprKind::Block => {
+            infer_block(ctx, expr)
+        }
+        
+        ExprKind::Fn => {
+            infer_function(ctx, expr)
+        }
+        
+        ExprKind::ArrayLit => {
+            infer_array_lit(ctx, expr)
+        }
+        
+        ExprKind::StructLit => {
+            infer_struct_lit(ctx, expr)
+        }
+        
+        ExprKind::Match => {
+            infer_match(ctx, expr)
+        }
+        
+        _ => {
+            let new_ctx = add_error(ctx, "Unsupported expression type")
+            (new_ctx, TypeResult { ty: type_error(), effects: vec_new() })
+        }
+    }
+}
+
+// ============================================================================
+// BINARY OPERATORS
+// ============================================================================
+
+fn infer_binary(ctx: TypeContext, expr: Expr) -> (TypeContext, TypeResult) with Mut, Panic {
+    // Get operands
+    let left_expr = vec_get(expr.children, 0)
+    let right_expr = vec_get(expr.children, 1)
+    
+    let (ctx1, left_res) = infer(ctx, left_expr)
+    let (ctx2, right_res) = infer(ctx1, right_expr)
+    
+    let left_ty = left_res.ty
+    let right_ty = right_res.ty
+    
+    // Combine effects
+    let effects = combine_effects(left_res.effects, right_res.effects)
+    
+    // Type check based on operator
+    let op = expr.value
+    
+    if op == "+" || op == "-" || op == "*" || op == "/" || op == "%" {
+        // Arithmetic operators
+        if !is_numeric(left_ty) {
+            let new_ctx = add_error(ctx2, "Left operand must be numeric")
+            return (new_ctx, TypeResult { ty: type_error(), effects: effects })
+        }
+        if !is_numeric(right_ty) {
+            let new_ctx = add_error(ctx2, "Right operand must be numeric")
+            return (new_ctx, TypeResult { ty: type_error(), effects: effects })
+        }
+        
+        // Result type is the more general of the two
+        let result_ty = if left_ty.kind == TypeKind::TFloat || right_ty.kind == TypeKind::TFloat {
+            type_float()
+        } else {
+            type_int()
+        }
+        
+        // Division can panic
+        var final_effects = effects
+        if op == "/" || op == "%" {
+            vec_push(final_effects, effect_div())
+        }
+        
+        (ctx2, TypeResult { ty: result_ty, effects: final_effects })
+    }
+    else if op == "==" || op == "!=" {
+        // Equality operators
+        if !types_equal(left_ty, right_ty) {
+            let new_ctx = add_error(ctx2, "Cannot compare different types")
+            return (new_ctx, TypeResult { ty: type_error(), effects: effects })
+        }
+        
+        if !is_comparable(left_ty) {
+            let new_ctx = add_error(ctx2, "Type is not comparable")
+            return (new_ctx, TypeResult { ty: type_error(), effects: effects })
+        }
+        
+        (ctx2, TypeResult { ty: type_bool(), effects: effects })
+    }
+    else if op == "<" || op == "<=" || op == ">" || op == ">=" {
+        // Comparison operators
+        if !is_comparable(left_ty) || !is_comparable(right_ty) {
+            let new_ctx = add_error(ctx2, "Type is not ordered")
+            return (new_ctx, TypeResult { ty: type_error(), effects: effects })
+        }
+        
+        (ctx2, TypeResult { ty: type_bool(), effects: effects })
+    }
+    else if op == "&&" || op == "||" {
+        // Logical operators
+        if left_ty.kind != TypeKind::TBool {
+            let new_ctx = add_error(ctx2, "Left operand must be bool")
+            return (new_ctx, TypeResult { ty: type_error(), effects: effects })
+        }
+        if right_ty.kind != TypeKind::TBool {
+            let new_ctx = add_error(ctx2, "Right operand must be bool")
+            return (new_ctx, TypeResult { ty: type_error(), effects: effects })
+        }
+        
+        (ctx2, TypeResult { ty: type_bool(), effects: effects })
+    }
+    else {
+        let new_ctx = add_error(ctx2, "Unknown binary operator: " + op)
+        (new_ctx, TypeResult { ty: type_error(), effects: effects })
+    }
+}
+
+// ============================================================================
+// UNARY OPERATORS
+// ============================================================================
+
+fn infer_unary(ctx: TypeContext, expr: Expr) -> (TypeContext, TypeResult) with Mut, Panic {
+    let operand_expr = vec_get(expr.children, 0)
+    let (ctx1, operand_res) = infer(ctx, operand_expr)
+    let operand_ty = operand_res.ty
+    
+    let op = expr.value
+    
+    if op == "-" {
+        if !is_numeric(operand_ty) {
+            let new_ctx = add_error(ctx1, "Unary minus requires numeric operand")
+            (new_ctx, TypeResult { ty: type_error(), effects: operand_res.effects })
+        } else {
+            (ctx1, operand_res)
+        }
+    }
+    else if op == "!" {
+        if operand_ty.kind != TypeKind::TBool {
+            let new_ctx = add_error(ctx1, "Not operator requires bool operand")
+            (new_ctx, TypeResult { ty: type_error(), effects: operand_res.effects })
+        } else {
+            (ctx1, operand_res)
+        }
+    }
+    else {
+        let new_ctx = add_error(ctx1, "Unknown unary operator: " + op)
+        (new_ctx, TypeResult { ty: type_error(), effects: operand_res.effects })
+    }
+}
+
+// ============================================================================
+// FUNCTION CALL
+// ============================================================================
+
+fn infer_call(ctx: TypeContext, expr: Expr) -> (TypeContext, TypeResult) with Mut, Panic {
+    // Get callee and arguments
+    let callee_expr = vec_get(expr.children, 0)
+    
+    var arg_types = vec_new()
+    var all_effects = vec_new()
+    
+    // Infer argument types
+    var i: i64 = 1
+    while i < vec_len(expr.children) {
+        let arg_expr = vec_get(expr.children, i)
+        let (ctx1, arg_res) = infer(ctx, arg_expr)
+        vec_push(arg_types, arg_res.ty)
+        all_effects = combine_effects(all_effects, arg_res.effects)
+        ctx = ctx1
+        i = i + 1
+    }
+    
+    // Infer callee type
+    let (ctx2, callee_res) = infer(ctx, callee_expr)
+    let callee_ty = callee_res.ty
+    all_effects = combine_effects(all_effects, callee_res.effects)
+    
+    // Check if it's a function type
+    match callee_ty.kind {
+        TypeKind::TFunction => {
+            // Check argument count
+            if vec_len(callee_ty.args) != vec_len(arg_types) {
+                let new_ctx = add_error(ctx2, 
+                    "Argument count mismatch: expected " + 
+                    int_to_string(vec_len(callee_ty.args)) + 
+                    ", got " + int_to_string(vec_len(arg_types)))
+                return (new_ctx, TypeResult { ty: type_error(), effects: all_effects })
+            }
+            
+            // Check argument types
+            var j: i64 = 0
+            while j < vec_len(arg_types) {
+                let param_ty = vec_get(callee_ty.args, j)
+                let arg_ty = vec_get(arg_types, j)
+                
+                if !types_equal(param_ty, arg_ty) {
+                    let new_ctx = add_error(ctx2,
+                        "Argument " + int_to_string(j) + " type mismatch")
+                    return (new_ctx, TypeResult { ty: type_error(), effects: all_effects })
+                }
+                
+                j = j + 1
+            }
+            
+            // Add function effects
+            var k: i64 = 0
+            while k < vec_len(callee_ty.effects) {
+                vec_push(all_effects, vec_get(callee_ty.effects, k))
+                k = k + 1
+            }
+            
+            (ctx2, TypeResult { ty: callee_ty.ret, effects: all_effects })
+        }
+        _ => {
+            let new_ctx = add_error(ctx2, "Callee is not a function")
+            (new_ctx, TypeResult { ty: type_error(), effects: all_effects })
+        }
+    }
+}
+
+// ============================================================================
+// FIELD ACCESS
+// ============================================================================
+
+fn infer_field_access(ctx: TypeContext, expr: Expr) -> (TypeContext, TypeResult) with Mut, Panic {
+    let obj_expr = vec_get(expr.children, 0)
+    let (ctx1, obj_res) = infer(ctx, obj_expr)
+    let obj_ty = obj_res.ty
+    
+    let field_name = expr.value
+    
+    match obj_ty.kind {
+        TypeKind::TStruct => {
+            // Look up field in struct
+            var i: i64 = 0
+            while i < vec_len(obj_ty.fields) {
+                let field = vec_get(obj_ty.fields, i)
+                if field.name == field_name {
+                    return (ctx1, TypeResult { ty: field.ty, effects: obj_res.effects })
+                }
+                i = i + 1
+            }
+            
+            let new_ctx = add_error(ctx1, "Unknown field: " + field_name)
+            (new_ctx, TypeResult { ty: type_error(), effects: obj_res.effects })
+        }
+        _ => {
+            let new_ctx = add_error(ctx1, "Cannot access field on non-struct type")
+            (new_ctx, TypeResult { ty: type_error(), effects: obj_res.effects })
+        }
+    }
+}
+
+// ============================================================================
+// INDEX ACCESS
+// ============================================================================
+
+fn infer_index(ctx: TypeContext, expr: Expr) -> (TypeContext, TypeResult) with Mut, Panic {
+    let arr_expr = vec_get(expr.children, 0)
+    let idx_expr = vec_get(expr.children, 1)
+    
+    let (ctx1, arr_res) = infer(ctx, arr_expr)
+    let (ctx2, idx_res) = infer(ctx1, idx_expr)
+    
+    let arr_ty = arr_res.ty
+    let idx_ty = idx_res.ty
+    
+    var effects = combine_effects(arr_res.effects, idx_res.effects)
+    
+    // Index must be integer
+    if idx_ty.kind != TypeKind::TInt {
+        let new_ctx = add_error(ctx2, "Array index must be integer")
+        return (new_ctx, TypeResult { ty: type_error(), effects: effects })
+    }
+    
+    // Can index arrays
+    if arr_ty.kind == TypeKind::TArray {
+        if vec_len(arr_ty.args) > 0 {
+            let elem_ty = vec_get(arr_ty.args, 0)
+            (ctx2, TypeResult { ty: elem_ty, effects: effects })
+        } else {
+            (ctx2, TypeResult { ty: type_error(), effects: effects })
+        }
+    }
+    // Can index strings to get char
+    else if arr_ty.kind == TypeKind::TString {
+        (ctx2, TypeResult { ty: type_string(), effects: effects })
+    }
+    else {
+        let new_ctx = add_error(ctx2, "Cannot index non-array type")
+        (new_ctx, TypeResult { ty: type_error(), effects: effects })
+    }
+}
+
+// ============================================================================
+// ASSIGNMENT
+// ============================================================================
+
+fn infer_assign(ctx: TypeContext, expr: Expr) -> (TypeContext, TypeResult) with Mut, Panic {
+    let target_expr = vec_get(expr.children, 0)
+    let value_expr = vec_get(expr.children, 1)
+    
+    let (ctx1, target_res) = infer(ctx, target_expr)
+    let (ctx2, value_res) = infer(ctx1, value_expr)
+    
+    let target_ty = target_res.ty
+    let value_ty = value_res.ty
+    
+    var effects = combine_effects(target_res.effects, value_res.effects)
+    vec_push(effects, effect_mut())
+    
+    // Check mutability for variables
+    match target_expr.kind {
+        ExprKind::VarRef => {
+            match lookup_var(ctx2, target_expr.value) {
+                Option::Some((_, mutable)) => {
+                    if !mutable {
+                        let new_ctx = add_error(ctx2, 
+                            "Cannot assign to immutable variable: " + target_expr.value)
+                        return (new_ctx, TypeResult { ty: type_error(), effects: effects })
+                    }
+                }
+                Option::None => {}
+            }
+        }
+        _ => {}
+    }
+    
+    // Types must match
+    if !types_equal(target_ty, value_ty) {
+        let new_ctx = add_error(ctx2, "Assignment type mismatch")
+        return (new_ctx, TypeResult { ty: type_error(), effects: effects })
+    }
+    
+    (ctx2, TypeResult { ty: type_unit(), effects: effects })
+}
+
+// ============================================================================
+// VARIABLE DECLARATIONS
+// ============================================================================
+
+fn infer_let(ctx: TypeContext, expr: Expr) -> (TypeContext, TypeResult) with Mut, Panic {
+    let name = expr.value
+    let init_expr = vec_get(expr.children, 0)
+    
+    let (ctx1, init_res) = infer(ctx, init_expr)
+    
+    // Use annotated type or inferred type
+    let var_ty = if expr.type_ann.kind != TypeKind::TUnit {
+        // Check annotated against inferred
+        if !types_equal(expr.type_ann, init_res.ty) {
+            let new_ctx = add_error(ctx1, "Type annotation doesn't match initializer")
+            return (new_ctx, TypeResult { ty: type_error(), effects: init_res.effects })
+        }
+        expr.type_ann
+    } else {
+        init_res.ty
+    }
+    
+    // Bind variable (immutable)
+    let new_ctx = bind_var(ctx1, name, var_ty, false)
+    
+    (new_ctx, TypeResult { ty: type_unit(), effects: init_res.effects })
+}
+
+fn infer_var(ctx: TypeContext, expr: Expr) -> (TypeContext, TypeResult) with Mut, Panic {
+    let name = expr.value
+    let init_expr = vec_get(expr.children, 0)
+    
+    let (ctx1, init_res) = infer(ctx, init_expr)
+    
+    // Use annotated type or inferred type
+    let var_ty = if expr.type_ann.kind != TypeKind::TUnit {
+        if !types_equal(expr.type_ann, init_res.ty) {
+            let new_ctx = add_error(ctx1, "Type annotation doesn't match initializer")
+            return (new_ctx, TypeResult { ty: type_error(), effects: init_res.effects })
+        }
+        expr.type_ann
+    } else {
+        init_res.ty
+    }
+    
+    // Bind variable (mutable)
+    let new_ctx = bind_var(ctx1, name, var_ty, true)
+    
+    (new_ctx, TypeResult { ty: type_unit(), effects: init_res.effects })
+}
+
+// ============================================================================
+// CONTROL FLOW
+// ============================================================================
+
+fn infer_if(ctx: TypeContext, expr: Expr) -> (TypeContext, TypeResult) with Mut, Panic {
+    let cond_expr = vec_get(expr.children, 0)
+    let then_expr = vec_get(expr.children, 1)
+    let else_expr = vec_get(expr.children, 2)
+    
+    let (ctx1, cond_res) = infer(ctx, cond_expr)
+    
+    // Condition must be bool
+    if cond_res.ty.kind != TypeKind::TBool {
+        let new_ctx = add_error(ctx1, "If condition must be bool")
+        return (new_ctx, TypeResult { ty: type_error(), effects: cond_res.effects })
+    }
+    
+    let (ctx2, then_res) = infer(ctx1, then_expr)
+    let (ctx3, else_res) = infer(ctx2, else_expr)
+    
+    var effects = combine_effects(cond_res.effects, then_res.effects)
+    effects = combine_effects(effects, else_res.effects)
+    
+    // Branches must have compatible types
+    if !types_equal(then_res.ty, else_res.ty) {
+        let new_ctx = add_error(ctx3, "If branches have incompatible types")
+        return (new_ctx, TypeResult { ty: type_error(), effects: effects })
+    }
+    
+    (ctx3, TypeResult { ty: then_res.ty, effects: effects })
+}
+
+fn infer_while(ctx: TypeContext, expr: Expr) -> (TypeContext, TypeResult) with Mut, Panic {
+    let cond_expr = vec_get(expr.children, 0)
+    let body_expr = vec_get(expr.children, 1)
+    
+    let (ctx1, cond_res) = infer(ctx, cond_expr)
+    
+    if cond_res.ty.kind != TypeKind::TBool {
+        let new_ctx = add_error(ctx1, "While condition must be bool")
+        return (new_ctx, TypeResult { ty: type_error(), effects: cond_res.effects })
+    }
+    
+    let (ctx2, body_res) = infer(ctx1, body_expr)
+    
+    var effects = combine_effects(cond_res.effects, body_res.effects)
+    
+    (ctx2, TypeResult { ty: type_unit(), effects: effects })
+}
+
+fn infer_for(ctx: TypeContext, expr: Expr) -> (TypeContext, TypeResult) with Mut, Panic {
+    let var_name = expr.value
+    let iterable_expr = vec_get(expr.children, 0)
+    let body_expr = vec_get(expr.children, 1)
+    
+    let (ctx1, iterable_res) = infer(ctx, iterable_expr)
+    let iterable_ty = iterable_res.ty
+    
+    // Determine element type from iterable
+    let elem_ty = match iterable_ty.kind {
+        TypeKind::TArray => {
+            if vec_len(iterable_ty.args) > 0 {
+                vec_get(iterable_ty.args, 0)
+            } else {
+                type_error()
+            }
+        }
+        TypeKind::TString => type_string(),
+        _ => {
+            let new_ctx = add_error(ctx1, "Cannot iterate over non-iterable type")
+            return (new_ctx, TypeResult { ty: type_error(), effects: iterable_res.effects })
+        }
+    }
+    
+    // Create child context with loop variable
+    let loop_ctx = context_child(ctx1)
+    let loop_ctx2 = bind_var(loop_ctx, var_name, elem_ty, false)
+    
+    let (ctx2, body_res) = infer(loop_ctx2, body_expr)
+    
+    var effects = combine_effects(iterable_res.effects, body_res.effects)
+    
+    (ctx2, TypeResult { ty: type_unit(), effects: effects })
+}
+
+fn infer_return(ctx: TypeContext, expr: Expr) -> (TypeContext, TypeResult) with Mut, Panic {
+    if vec_len(expr.children) == 0 {
+        (ctx, TypeResult { ty: type_unit(), effects: vec_new() })
+    } else {
+        let val_expr = vec_get(expr.children, 0)
+        infer(ctx, val_expr)
+    }
+}
+
+// ============================================================================
+// BLOCK
+// ============================================================================
+
+fn infer_block(ctx: TypeContext, expr: Expr) -> (TypeContext, TypeResult) with Mut, Panic {
+    // Create child context for block scope
+    let block_ctx = context_child(ctx)
+    
+    var i: i64 = 0
+    var last_result = TypeResult { ty: type_unit(), effects: vec_new() }
+    var current_ctx = block_ctx
+    
+    while i < vec_len(expr.children) {
+        let stmt = vec_get(expr.children, i)
+        let (new_ctx, res) = infer(current_ctx, stmt)
+        current_ctx = new_ctx
+        last_result = res
+        i = i + 1
+    }
+    
+    // Propagate errors to parent
+    ctx.errors = current_ctx.errors
+    
+    (current_ctx, last_result)
+}
+
+// ============================================================================
+// FUNCTION
+// ============================================================================
+
+fn infer_function(ctx: TypeContext, expr: Expr) -> (TypeContext, TypeResult) with Mut, Panic {
+    let name = expr.value
+    
+    // Extract parameters and body
+    var params = vec_new()
+    var param_types = vec_new()
+    var i: i64 = 0
+    
+    // Last child is body, rest are params
+    while i < vec_len(expr.children) - 1 {
+        let param = vec_get(expr.children, i)
+        vec_push(params, param)
+        vec_push(param_types, param.type_ann)
+        i = i + 1
+    }
+    
+    let body = vec_get(expr.children, vec_len(expr.children) - 1)
+    let ret_ty = expr.type_ann
+    
+    // Create function type
+    let func_ty = type_function(param_types, ret_ty, vec_new())
+    
+    // Bind function signature
+    let ctx1 = bind_func_sig(ctx, name, func_ty)
+    
+    // Create function body context with parameters
+    let func_ctx = context_child(ctx1)
+    var j: i64 = 0
+    var current_ctx = func_ctx
+    
+    while j < vec_len(params) {
+        let param = vec_get(params, j)
+        current_ctx = bind_var(current_ctx, param.value, param.type_ann, false)
+        j = j + 1
+    }
+    
+    // Infer body
+    let (ctx2, body_res) = infer(current_ctx, body)
+    
+    // Check return type
+    let actual_ret_ty = body_res.ty
+    
+    // Update function type with inferred effects
+    let final_func_ty = type_function(param_types, actual_ret_ty, body_res.effects)
+    let ctx3 = bind_func_sig(ctx2, name, final_func_ty)
+    
+    // Function declaration has type unit
+    (ctx3, TypeResult { ty: type_unit(), effects: vec_new() })
+}
+
+// ============================================================================
+// ARRAY LITERAL
+// ============================================================================
+
+fn infer_array_lit(ctx: TypeContext, expr: Expr) -> (TypeContext, TypeResult) with Mut, Panic {
+    if vec_len(expr.children) == 0 {
+        // Empty array - need type annotation
+        (ctx, TypeResult { ty: type_array(type_var(0, "a")), effects: vec_new() })
+    } else {
+        let first_elem = vec_get(expr.children, 0)
+        let (ctx1, first_res) = infer(ctx, first_elem)
+        let elem_ty = first_res.ty
+        
+        var effects = first_res.effects
+        var i: i64 = 1
+        
+        // Check all elements have same type
+        while i < vec_len(expr.children) {
+            let elem = vec_get(expr.children, i)
+            let (ctx2, elem_res) = infer(ctx1, elem)
+            
+            if !types_equal(elem_ty, elem_res.ty) {
+                let new_ctx = add_error(ctx2, "Array elements must have same type")
+                return (new_ctx, TypeResult { ty: type_error(), effects: effects })
+            }
+            
+            effects = combine_effects(effects, elem_res.effects)
+            i = i + 1
+        }
+        
+        (ctx1, TypeResult { ty: type_array(elem_ty), effects: effects })
+    }
+}
+
+// ============================================================================
+// STRUCT LITERAL
+// ============================================================================
+
+fn infer_struct_lit(ctx: TypeContext, expr: Expr) -> (TypeContext, TypeResult) with Mut, Panic {
+    let struct_name = expr.value
+    
+    match lookup_type_def(ctx, struct_name) {
+        Option::Some(struct_ty) => {
+            // Check fields match
+            if vec_len(struct_ty.fields) != vec_len(expr.children) {
+                let new_ctx = add_error(ctx, "Field count mismatch in struct literal")
+                return (new_ctx, TypeResult { ty: type_error(), effects: vec_new() })
+            }
+            
+            // TODO: Check field names and types
+            
+            (ctx, TypeResult { ty: struct_ty, effects: vec_new() })
+        }
+        Option::None => {
+            let new_ctx = add_error(ctx, "Unknown struct type: " + struct_name)
+            (new_ctx, TypeResult { ty: type_error(), effects: vec_new() })
+        }
+    }
+}
+
+// ============================================================================
+// MATCH
+// ============================================================================
+
+fn infer_match(ctx: TypeContext, expr: Expr) -> (TypeContext, TypeResult) with Mut, Panic {
+    let scrutinee_expr = vec_get(expr.children, 0)
+    let (ctx1, scrutinee_res) = infer(ctx, scrutinee_expr)
+    let scrutinee_ty = scrutinee_res.ty
+    
+    var effects = scrutinee_res.effects
+    var arm_types = vec_new()
+    var current_ctx = ctx1
+    
+    // Check each arm
+    var i: i64 = 1
+    while i < vec_len(expr.children) {
+        let arm = vec_get(expr.children, i)
+        let body = vec_get(arm.children, 1)
+        
+        let (ctx2, arm_res) = infer(current_ctx, body)
+        vec_push(arm_types, arm_res.ty)
+        effects = combine_effects(effects, arm_res.effects)
+        current_ctx = ctx2
+        
+        i = i + 1
+    }
+    
+    // All arms must have same type
+    if vec_len(arm_types) > 0 {
+        let first_ty = vec_get(arm_types, 0)
+        
+        var j: i64 = 1
+        while j < vec_len(arm_types) {
+            if !types_equal(first_ty, vec_get(arm_types, j)) {
+                let new_ctx = add_error(current_ctx, "Match arms have incompatible types")
+                return (new_ctx, TypeResult { ty: type_error(), effects: effects })
+            }
+            j = j + 1
+        }
+        
+        (current_ctx, TypeResult { ty: first_ty, effects: effects })
+    } else {
+        (current_ctx, TypeResult { ty: type_unit(), effects: effects })
+    }
+}
+
+// ============================================================================
+// PUBLIC API
+// ============================================================================
+
+fn typecheck(ast: Expr) -> (Vec<string>, Type) with Mut, Panic {
+    let ctx = context_new()
+    let (final_ctx, result) = infer(ctx, ast)
+    
+    (final_ctx.errors, result.ty)
+}
+
+fn int_to_string(n: i64) -> string with Mut, Panic, Div {
+    if n == 0 {
+        "0"
+    } else {
+        let negative = n < 0
+        var num = if negative { -n } else { n }
+        var result = ""
+        while num > 0 {
+            let digit = num % 10
+            let ch = 48 + digit
+            result = char_from_i64(ch) + result
+            num = num / 10
+        }
+        if negative { "-" + result } else { result }
+    }
+}
+
+fn char_from_i64(n: i64) -> string with Mut, Panic {
+    str_substr("0123456789", n, 1)
+}

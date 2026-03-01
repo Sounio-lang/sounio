@@ -1,0 +1,442 @@
+// self-hosted::distributed::scheduler
+//
+// ACTOR SCHEDULER FOR DISTRIBUTED SOUNIO
+// Preemptive multitasking with work stealing.
+
+use io
+use string
+use actor
+
+// ============================================================================
+// SCHEDULER TYPES
+// ============================================================================
+
+// Scheduler per OS thread
+struct Scheduler {
+    id: i64,
+    run_queue: Vec<Pid>,
+    current: Option<Pid>,
+    reductions: i64,       // Reduction counter for preemption
+    max_reductions: i64,   // Preemption threshold
+    stealing: bool,
+}
+
+// Global scheduler state
+struct SchedulerPool {
+    schedulers: Vec<Scheduler>,
+    process_table: Map<Pid, Process>,
+    next_pid: i64,
+    next_scheduler: i64,   // For round-robin assignment
+}
+
+// Process states
+enum ProcessState {
+    Runnable,
+    Running,
+    Waiting,      // Blocked on receive
+    Suspended,    // Explicit yield
+    Exiting,
+    Dead,
+}
+
+struct ProcessEntry {
+    proc: Process,
+    state: ProcessState,
+    scheduler: i64,        // Which scheduler owns this process
+    reductions: i64,       // Total reductions executed
+}
+
+// ============================================================================
+// SCHEDULER CREATION
+// ============================================================================
+
+fn scheduler_new(id: i64) -> Scheduler {
+    Scheduler {
+        id: id,
+        run_queue: vec_new(),
+        current: Option::None,
+        reductions: 0,
+        max_reductions: 2000,  // Preempt after 2000 reductions
+        stealing: false,
+    }
+}
+
+fn scheduler_pool_new(num_schedulers: i64) -> SchedulerPool with {
+    var pool = SchedulerPool {
+        schedulers: vec_new(),
+        process_table: map_new(),
+        next_pid: 1,
+        next_scheduler: 0,
+    }
+    
+    var i: i64 = 0
+    while i < num_schedulers {
+        vec_push(pool.schedulers, scheduler_new(i))
+        i = i + 1
+    }
+    
+    pool
+}
+
+// ============================================================================
+// PROCESS SCHEDULING
+// ============================================================================
+
+fn schedule_new_process(pool: SchedulerPool, proc: Process) -> (SchedulerPool, Pid) with Mut {
+    let pid = proc.pid
+    let scheduler_id = pool.next_scheduler
+    
+    let entry = ProcessEntry {
+        proc: proc,
+        state: ProcessState::Runnable,
+        scheduler: scheduler_id,
+        reductions: 0,
+    }
+    
+    map_insert(pool.process_table, pid, entry)
+    
+    // Add to scheduler's run queue
+    let sched = vec_get(pool.schedulers, scheduler_id)
+    vec_push(sched.run_queue, pid)
+    vec_set(pool.schedulers, scheduler_id, sched)
+    
+    // Round-robin next scheduler
+    pool.next_scheduler = (pool.next_scheduler + 1) % vec_len(pool.schedulers)
+    
+    (pool, pid)
+}
+
+fn schedule_process(pool: SchedulerPool, pid: Pid) -> SchedulerPool with Mut {
+    match map_get_option(pool.process_table, pid) {
+        Option::Some(entry) => {
+            if entry.state == ProcessState::Waiting ||
+               entry.state == ProcessState::Suspended {
+                
+                var new_entry = entry
+                new_entry.state = ProcessState::Runnable
+                map_insert(pool.process_table, pid, new_entry)
+                
+                // Add to scheduler's queue
+                let sched_id = entry.scheduler
+                let sched = vec_get(pool.schedulers, sched_id)
+                vec_push(sched.run_queue, pid)
+                vec_set(pool.schedulers, sched_id, sched)
+                
+                pool
+            } else {
+                pool
+            }
+        }
+        Option::None => pool
+    }
+}
+
+// ============================================================================
+// SCHEDULER LOOP
+// ============================================================================
+
+fn scheduler_loop(sched: Scheduler, pool: SchedulerPool) -> () with Mut, IO {
+    var current_sched = sched
+    var current_pool = pool
+    
+    loop {
+        // Try to get next process from run queue
+        match scheduler_get_next(current_sched) {
+            Option::Some(pid) => {
+                // Run the process
+                let (new_sched, new_pool, ran) = scheduler_run_process(
+                    current_sched, current_pool, pid
+                )
+                
+                current_sched = new_sched
+                current_pool = new_pool
+                
+                // If run queue empty, try work stealing
+                if vec_len(current_sched.run_queue) == 0 && !current_sched.stealing {
+                    let (s, p) = scheduler_steal_work(current_sched, current_pool)
+                    current_sched = s
+                    current_pool = p
+                }
+            }
+            Option::None => {
+                // No work - try stealing or sleep
+                if !current_sched.stealing {
+                    let (s, p) = scheduler_steal_work(current_sched, current_pool)
+                    current_sched = s
+                    current_pool = p
+                }
+                
+                // Still no work - yield to OS
+                if vec_len(current_sched.run_queue) == 0 {
+                    os_yield()
+                }
+            }
+        }
+    }
+}
+
+fn scheduler_get_next(sched: Scheduler) -> Option<Pid> with Mut {
+    if vec_len(sched.run_queue) > 0 {
+        let pid = vec_get(sched.run_queue, 0)
+        sched.run_queue = vec_remove_at(sched.run_queue, 0)
+        Option::Some(pid)
+    } else {
+        Option::None
+    }
+}
+
+fn scheduler_run_process(
+    sched: Scheduler,
+    pool: SchedulerPool,
+    pid: Pid
+) -> (Scheduler, SchedulerPool, bool) with Mut, IO {
+    
+    sched.current = Option::Some(pid)
+    sched.reductions = 0
+    
+    match map_get_option(pool.process_table, pid) {
+        Option::Some(entry) => {
+            var new_entry = entry
+            new_entry.state = ProcessState::Running
+            map_insert(pool.process_table, pid, new_entry)
+            
+            // Run until preempted or blocked
+            let (new_pool, completed, reductions) = run_process_until_preempt(
+                pool, pid, sched.max_reductions
+            )
+            
+            sched.reductions = reductions
+            
+            // Update process state
+            match map_get_option(new_pool.process_table, pid) {
+                Option::Some(updated_entry) => {
+                    var final_entry = updated_entry
+                    final_entry.reductions = final_entry.reductions + reductions
+                    
+                    if completed {
+                        final_entry.state = ProcessState::Dead
+                        // Cleanup
+                        new_pool = cleanup_process(new_pool, pid)
+                    } else if final_entry.state == ProcessState::Running {
+                        // Preempted - add back to run queue
+                        final_entry.state = ProcessState::Runnable
+                        vec_push(sched.run_queue, pid)
+                    }
+                    // else: Waiting (blocked on receive)
+                    
+                    map_insert(new_pool.process_table, pid, final_entry)
+                }
+                Option::None => {}
+            }
+            
+            sched.current = Option::None
+            (sched, new_pool, completed)
+        }
+        Option::None => (sched, pool, false)
+    }
+}
+
+fn run_process_until_preempt(
+    pool: SchedulerPool,
+    pid: Pid,
+    max_reductions: i64
+) -> (SchedulerPool, bool, i64) with Mut, IO {
+    
+    var current_pool = pool
+    var reductions: i64 = 0
+    var completed = false
+    
+    while reductions < max_reductions {
+        // Check if process has messages to handle
+        match get_next_message(pid) {
+            Option::Some(msg) => {
+                // Execute message handler
+                let (new_pool, handled, more) = execute_message_handler(
+                    current_pool, pid, msg
+                )
+                
+                current_pool = new_pool
+                reductions = reductions + 1
+                
+                if !more {
+                    // Process exited
+                    completed = true
+                    break
+                }
+            }
+            Option::None => {
+                // No messages - process blocks
+                mark_process_waiting(current_pool, pid)
+                break
+            }
+        }
+    }
+    
+    (current_pool, completed, reductions)
+}
+
+// ============================================================================
+// WORK STEALING
+// ============================================================================
+
+fn scheduler_steal_work(sched: Scheduler, pool: SchedulerPool) -> (Scheduler, SchedulerPool) with Mut {
+    sched.stealing = true
+    
+    var victim_id = (sched.id + 1) % vec_len(pool.schedulers)
+    
+    while victim_id != sched.id {
+        let victim = vec_get(pool.schedulers, victim_id)
+        
+        if vec_len(victim.run_queue) > 1 {
+            // Steal half the queue
+            let steal_count = vec_len(victim.run_queue) / 2
+            var stolen = vec_new()
+            
+            var i: i64 = 0
+            while i < steal_count {
+                let idx = vec_len(victim.run_queue) - steal_count + i
+                vec_push(stolen, vec_get(victim.run_queue, idx))
+                i = i + 1
+            }
+            
+            // Update victim's queue
+            var new_victim = victim
+            new_victim.run_queue = vec_truncate(victim.run_queue, vec_len(victim.run_queue) - steal_count)
+            vec_set(pool.schedulers, victim_id, new_victim)
+            
+            // Add stolen work to our queue
+            var i2: i64 = 0
+            while i2 < vec_len(stolen) {
+                vec_push(sched.run_queue, vec_get(stolen, i2))
+                i2 = i2 + 1
+            }
+            
+            sched.stealing = false
+            return (sched, pool)
+        }
+        
+        victim_id = (victim_id + 1) % vec_len(pool.schedulers)
+    }
+    
+    sched.stealing = false
+    (sched, pool)
+}
+
+// ============================================================================
+// PROCESS MIGRATION (for load balancing)
+// ============================================================================
+
+fn migrate_process(pool: SchedulerPool, pid: Pid, to_scheduler: i64) -> SchedulerPool with Mut {
+    match map_get_option(pool.process_table, pid) {
+        Option::Some(entry) => {
+            // Only migrate if process is not running
+            if entry.state != ProcessState::Running {
+                // Remove from old scheduler
+                let old_sched = vec_get(pool.schedulers, entry.scheduler)
+                var new_old_sched = old_sched
+                new_old_sched.run_queue = vec_remove_pid_from_queue(old_sched.run_queue, pid)
+                vec_set(pool.schedulers, entry.scheduler, new_old_sched)
+                
+                // Add to new scheduler
+                let new_sched = vec_get(pool.schedulers, to_scheduler)
+                var new_new_sched = new_sched
+                vec_push(new_new_sched.run_queue, pid)
+                vec_set(pool.schedulers, to_scheduler, new_new_sched)
+                
+                // Update process entry
+                var new_entry = entry
+                new_entry.scheduler = to_scheduler
+                map_insert(pool.process_table, pid, new_entry)
+            }
+            pool
+        }
+        Option::None => pool
+    }
+}
+
+// ============================================================================
+// PRIORITY SCHEDULING
+// ============================================================================
+
+fn scheduler_insert_priority(sched: Scheduler, pid: Pid, priority: i64) -> Scheduler with Mut {
+    // Higher priority = earlier in queue
+    // Simple implementation: insert at front for high priority
+    if priority > 0 && vec_len(sched.run_queue) > 0 {
+        // Insert near front
+        let insert_pos = vec_len(sched.run_queue) / (priority + 1)
+        sched.run_queue = vec_insert_at(sched.run_queue, insert_pos, pid)
+    } else {
+        vec_push(sched.run_queue, pid)
+    }
+    sched
+}
+
+// ============================================================================
+// UTILITIES
+// ============================================================================
+
+fn vec_remove_at<T>(v: Vec<T>, idx: i64) -> Vec<T> with {
+    var result = vec_new()
+    var i: i64 = 0
+    while i < vec_len(v) {
+        if i != idx {
+            vec_push(result, vec_get(v, i))
+        }
+        i = i + 1
+    }
+    result
+}
+
+fn vec_truncate<T>(v: Vec<T>, len: i64) -> Vec<T> with {
+    var result = vec_new()
+    var i: i64 = 0
+    while i < len && i < vec_len(v) {
+        vec_push(result, vec_get(v, i))
+        i = i + 1
+    }
+    result
+}
+
+fn vec_insert_at<T>(v: Vec<T>, idx: i64, item: T) -> Vec<T> with {
+    var result = vec_new()
+    var i: i64 = 0
+    while i < vec_len(v) {
+        if i == idx {
+            vec_push(result, item)
+        }
+        vec_push(result, vec_get(v, i))
+        i = i + 1
+    }
+    if idx >= vec_len(v) {
+        vec_push(result, item)
+    }
+    result
+}
+
+fn vec_remove_pid_from_queue(v: Vec<Pid>, pid: Pid) -> Vec<Pid> with {
+    var result = vec_new()
+    var i: i64 = 0
+    while i < vec_len(v) {
+        if !pid_eq(vec_get(v, i), pid) {
+            vec_push(result, vec_get(v, i))
+        }
+        i = i + 1
+    }
+    result
+}
+
+fn vec_set<T>(v: Vec<T>, idx: i64, item: T) -> () with {
+    // Would update vector in place
+}
+
+// ============================================================================
+// STUBS
+// ============================================================================
+
+fn map_get_option<K, V>(m: Map<K, V>, k: K) -> Option<V> with { Option::None }
+fn map_insert<K, V>(m: Map<K, V>, k: K, v: V) -> () with {}
+fn cleanup_process(pool: SchedulerPool, pid: Pid) -> SchedulerPool with { pool }
+fn mark_process_waiting(pool: SchedulerPool, pid: Pid) -> () with {}
+fn get_next_message(pid: Pid) -> Option<Message> with { Option::None }
+fn execute_message_handler(pool: SchedulerPool, pid: Pid, msg: Message) -> (SchedulerPool, bool, bool) with { (pool, true, true) }
+fn os_yield() -> () with IO {}

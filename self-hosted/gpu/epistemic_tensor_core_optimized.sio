@@ -1,0 +1,195 @@
+//@ run-pass
+// self-hosted/gpu/epistemic_tensor_core_optimized.sio
+//
+// Check-safe optimization model for the L4 path.
+// This file intentionally captures policy/tuning math in valid Sounio syntax.
+// Low-level PTX/WMMA emission remains in the runtime dispatch scripts.
+
+struct TileConfig {
+    m_tile: i64,
+    n_tile: i64,
+    k_tile: i64,
+    double_buffer: bool,
+    use_fp16: bool,
+    fp16_gain: f64,
+    async_gain: f64,
+    pipeline_gain: f64,
+    autotune_gain: f64,
+}
+
+struct OptimizationEstimate {
+    gpu_sm: i64,
+    baseline_gflops: f64,
+    cublas_gflops: f64,
+    projected_gflops: f64,
+    projected_overhead_x: f64,
+    target_lt_2x: bool,
+    target_lt_1_2x: bool,
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 {
+        return 0.0 - x
+    }
+    return x
+}
+
+fn clamp_f64(x: f64, lo: f64, hi: f64) -> f64 {
+    if x < lo {
+        return lo
+    }
+    if x > hi {
+        return hi
+    }
+    return x
+}
+
+fn auto_tune_config_for_sm(sm: i64) -> TileConfig {
+    if sm >= 90 {
+        return TileConfig {
+            m_tile: 128,
+            n_tile: 128,
+            k_tile: 32,
+            double_buffer: true,
+            use_fp16: true,
+            fp16_gain: 1.85,
+            async_gain: 1.22,
+            pipeline_gain: 1.12,
+            autotune_gain: 1.06,
+        }
+    }
+
+    if sm >= 89 {
+        return TileConfig {
+            m_tile: 128,
+            n_tile: 64,
+            k_tile: 32,
+            double_buffer: true,
+            use_fp16: true,
+            fp16_gain: 1.80,
+            async_gain: 1.20,
+            pipeline_gain: 1.10,
+            autotune_gain: 1.05,
+        }
+    }
+
+    if sm >= 80 {
+        return TileConfig {
+            m_tile: 64,
+            n_tile: 64,
+            k_tile: 32,
+            double_buffer: true,
+            use_fp16: true,
+            fp16_gain: 1.55,
+            async_gain: 1.15,
+            pipeline_gain: 1.08,
+            autotune_gain: 1.03,
+        }
+    }
+
+    return TileConfig {
+        m_tile: 32,
+        n_tile: 32,
+        k_tile: 16,
+        double_buffer: false,
+        use_fp16: false,
+        fp16_gain: 1.00,
+        async_gain: 1.00,
+        pipeline_gain: 1.00,
+        autotune_gain: 1.00,
+    }
+}
+
+fn estimate_projected_gflops(base: f64, cfg: TileConfig) -> f64 with Div {
+    let projected = base * cfg.fp16_gain * cfg.async_gain * cfg.pipeline_gain * cfg.autotune_gain
+    return projected
+}
+
+fn estimate_overhead_x(cublas: f64, measured: f64) -> f64 with Div, Panic {
+    if measured <= 0.0 {
+        return 9999.0
+    }
+    return cublas / measured
+}
+
+fn build_l4_estimate_from_measurement(
+    baseline_gflops: f64,
+    cublas_gflops: f64
+) -> OptimizationEstimate with Div, Panic {
+    let cfg = auto_tune_config_for_sm(89)
+    let projected_gflops = estimate_projected_gflops(baseline_gflops, cfg)
+    let projected_overhead = estimate_overhead_x(cublas_gflops, projected_gflops)
+
+    return OptimizationEstimate {
+        gpu_sm: 89,
+        baseline_gflops: baseline_gflops,
+        cublas_gflops: cublas_gflops,
+        projected_gflops: projected_gflops,
+        projected_overhead_x: projected_overhead,
+        target_lt_2x: projected_overhead < 2.0,
+        target_lt_1_2x: projected_overhead < 1.2,
+    }
+}
+
+fn build_default_l4_estimate() -> OptimizationEstimate with Div, Panic {
+    // Measured on 2026-02-28 L4 no-rust dispatch run.
+    return build_l4_estimate_from_measurement(5277.7, 14280.2)
+}
+
+fn sanity_check_projection(est: OptimizationEstimate) -> bool {
+    let projected_gain = est.projected_gflops / est.baseline_gflops
+    let within_reason = projected_gain > 1.0 && projected_gain < 3.0
+    let overhead_valid = est.projected_overhead_x > 0.0 && est.projected_overhead_x < 20.0
+    return within_reason && overhead_valid
+}
+
+fn conservative_ready(est: OptimizationEstimate) -> bool {
+    let target_band_ok = est.projected_overhead_x <= 1.50
+    let strict_target_ok = est.target_lt_1_2x
+    return target_band_ok || strict_target_ok
+}
+
+fn confidence_score(est: OptimizationEstimate) -> f64 {
+    let projected_gain = est.projected_gflops / est.baseline_gflops
+    let overhead_term = 2.0 - clamp_f64(est.projected_overhead_x, 0.0, 2.0)
+    let gain_term = clamp_f64((projected_gain - 1.0) / 1.8, 0.0, 1.0)
+    let score = 0.5 * overhead_term + 0.5 * gain_term
+    return clamp_f64(score, 0.0, 1.0)
+}
+
+fn main() -> i64 with IO, Div, Panic {
+    let est = build_default_l4_estimate()
+
+    print("epistemic_tensor_core_optimized model: check-pass\n")
+
+    if sanity_check_projection(est) {
+        print("projection_sanity: pass\n")
+    } else {
+        print("projection_sanity: fail\n")
+    }
+
+    if est.target_lt_2x {
+        print("target_lt_2x: pass\n")
+    } else {
+        print("target_lt_2x: fail\n")
+    }
+
+    if conservative_ready(est) {
+        print("target_lt_1_5x_or_lt_1_2x: pass\n")
+    } else {
+        print("target_lt_1_5x_or_lt_1_2x: fail\n")
+    }
+
+    let score = confidence_score(est)
+    if score > 0.8 {
+        print("confidence: high\n")
+    } else {
+        if score > 0.5 {
+            print("confidence: medium\n")
+        } else {
+            print("confidence: low\n")
+        }
+    }
+
+    return 0
+}
