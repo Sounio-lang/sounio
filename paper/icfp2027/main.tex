@@ -1,0 +1,277 @@
+% Causal-Epistemic Type Theory with Mechanized Metatheory
+% Target: ICFP 2027
+%
+% The THEORY paper. Pure formalism + Lean proofs.
+% No LOC counts, no benchmarks, no "self-hosted" marketing.
+%
+% Compile: pdflatex main && bibtex main && pdflatex main && pdflatex main
+
+\documentclass[acmsmall,screen,review,anonymous]{acmart}
+
+% Packages
+\usepackage{mathpartir}
+\usepackage{stmaryrd}
+\usepackage{booktabs}
+\usepackage{subcaption}
+\usepackage{xspace}
+
+% Macros
+\newcommand{\sounio}{\textsc{Sounio}\xspace}
+\newcommand{\know}[1]{\texttt{Knowledge}\langle #1 \rangle}
+\newcommand{\knowfull}[4]{\texttt{Knowledge}\langle #1, #2, #3, #4 \rangle}
+\newcommand{\cknow}[3]{\texttt{CausalKnowledge}\langle #1, #2, #3 \rangle}
+\newcommand{\eps}{\epsilon}
+\newcommand{\lean}{\textsc{Lean\,4}\xspace}
+
+% Code listing style
+\lstdefinelanguage{sounio}{
+  keywords={fn, let, var, if, else, while, for, return, struct, enum, match,
+            with, kernel, linear, type, use, effect, handle, perform, do},
+  keywordstyle=\color{blue!60!black}\bfseries,
+  ndkeywords={Knowledge, CausalKnowledge, CausalGraph, f64, i32, bool,
+              IO, Mut, Alloc, GPU, Prob, Epistemic},
+  ndkeywordstyle=\color{purple!60!black},
+  sensitive=true,
+  comment=[l]{//},
+  commentstyle=\color{green!40!black}\itshape,
+  stringstyle=\color{red!60!black},
+  morestring=[b]",
+}
+
+\lstset{
+  language=sounio,
+  basicstyle=\ttfamily\small,
+  frame=single,
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  breaklines=true,
+  captionpos=b,
+  xleftmargin=2em,
+  aboveskip=0.8em,
+  belowskip=0.5em,
+}
+
+% ACM metadata
+\setcopyright{acmcopyright}
+\acmJournal{PACMPL}
+\acmVolume{1}
+\acmNumber{ICFP}
+\acmArticle{1}
+\acmYear{2027}
+\acmMonth{9}
+\acmDOI{10.1145/nnnnnnn.nnnnnnn}
+
+\begin{document}
+
+\title{Causal-Epistemic Type Theory: \\
+Mechanized Metatheory for Uncertainty-Aware Causal Reasoning}
+
+\author{Anonymous}
+\affiliation{%
+  \institution{Anonymous Institution}
+  \country{Anonymous}
+}
+\email{anonymous@example.org}
+
+\begin{abstract}
+Scientific reasoning requires both \emph{epistemic judgment}---how
+precisely is a quantity known?---and \emph{causal judgment}---what
+would happen under intervention?
+We present a type system that unifies these two concerns.
+\emph{Epistemic types} $\know{T}$ attach measurement uncertainty and
+provenance to values, with arithmetic that automatically propagates
+uncertainty following the Guide to the Expression of Uncertainty in
+Measurement (GUM, ISO/IEC~98-3).
+\emph{Causal types} $\cknow{Y}{\eps}{\texttt{do}(X)}$ embed Pearl's
+do-calculus into the type system, rejecting programs that compute
+causal effects from non-identifiable queries.
+
+We prove that the combined system is type-safe (progress and
+preservation) and GUM-compliant (the computed uncertainty equals the
+GUM combined standard uncertainty for all well-typed programs).
+These results compose with linear types (four-modality lattice),
+algebraic effects (row-polymorphic effect tracking), and units of
+measure (dimensional analysis).
+
+\textbf{All metatheory is mechanized in \lean: 731 definitions and
+theorems with zero \texttt{sorry} and zero Mathlib dependency.}
+To our knowledge, this is the first mechanized treatment of
+Pearl's causal hierarchy in a type system context, and the first
+type safety proof for a language combining epistemic uncertainty,
+causal reasoning, linear resources, algebraic effects, and
+dimensional analysis.
+\end{abstract}
+
+\begin{CCSXML}
+<ccs2012>
+<concept><concept_id>10011007.10011006.10011008.10011009.10011012</concept_id>
+<concept_desc>Software and its engineering~Functional languages</concept_desc>
+<concept_significance>500</concept_significance></concept>
+<concept><concept_id>10003752.10010124.10010138</concept_id>
+<concept_desc>Theory of computation~Program verification</concept_desc>
+<concept_significance>500</concept_significance></concept>
+<concept><concept_id>10003752.10010124.10010131</concept_id>
+<concept_desc>Theory of computation~Type theory</concept_desc>
+<concept_significance>500</concept_significance></concept>
+</ccs2012>
+\end{CCSXML}
+
+\ccsdesc[500]{Software and its engineering~Functional languages}
+\ccsdesc[500]{Theory of computation~Program verification}
+\ccsdesc[500]{Theory of computation~Type theory}
+
+\keywords{epistemic types, causal inference, do-calculus, type safety,
+mechanized metatheory, GUM, Lean~4, uncertainty quantification}
+
+\maketitle
+
+% ============================================================================
+\section{Introduction}
+\label{sec:intro}
+% ============================================================================
+
+Every measured quantity carries uncertainty.
+A laboratory balance reports mass as $m = 10.023 \pm 0.002\,\text{g}$;
+a clinical assay yields serum creatinine as $\text{SCr} = 1.2 \pm 0.1\,\text{mg/dL}$;
+an ODE solver accumulates numerical error proportional to step count.
+When these quantities enter computation---drug dosing calculations,
+climate projections, neural network training---their uncertainties must
+propagate correctly through every arithmetic operation,
+or the results are scientifically meaningless.
+
+But uncertainty alone is insufficient.
+A clinician does not merely ask ``what is this patient's creatinine?''
+but ``what \emph{would} the creatinine be if we changed the dosing
+regimen?''---a causal question that cannot be answered from
+observational data alone without structural assumptions.
+Current programming languages offer no type-level support for either
+concern: uncertainty is tracked (if at all) by runtime libraries
+that provide no static guarantees~\cite{lebigot2024uncertainties,
+giordano2016measurements}, and causal reasoning is entirely
+outside the type system.
+
+We present a type system that makes both epistemic and causal
+reasoning first-class type-level concerns, with the following
+contributions:
+
+\begin{enumerate}
+  \item A type system for \emph{epistemic values} with formal typing
+        rules, operational semantics, and proofs of progress,
+        preservation, and GUM compliance soundness
+        (\S\ref{sec:epistemic}).
+
+  \item A type system for \emph{causal reasoning} that embeds Pearl's
+        do-calculus~\cite{pearl2009causality} into the type system,
+        rejecting programs that compute causal effects from
+        non-identifiable queries (\S\ref{sec:causal}).
+
+  \item The \emph{composition} of epistemic and causal types with
+        linear types, algebraic effects, and units of measure,
+        yielding a unified type system for scientific reasoning
+        (\S\ref{sec:composition}).
+
+  \item \textbf{Full mechanization in \lean}: 731 definitions and
+        theorems covering type safety, epistemic confidence lattices,
+        causal type theory with do-calculus, linear types with
+        four-modality lattice, algebraic effect rows, and units of
+        measure---all with zero \texttt{sorry} and zero Mathlib
+        dependency (\S\ref{sec:mechanization}).
+\end{enumerate}
+
+% ============================================================================
+\section{Epistemic Types}
+\label{sec:epistemic}
+% ============================================================================
+
+% TODO: Extract and refine from popl2027/main.tex sections 2.1--2.3
+% Focus on: Syntax, Typing Rules, Operational Semantics
+% Include: T-Measure, T-Add, T-Mul, T-Transform, T-Extract
+% Include: E-Add, E-Mul, E-Extract, E-Beta, E-LetP
+
+\textbf{[Content from POPL S2: Epistemic Type System --- to be extracted]}
+
+% ============================================================================
+\section{Causal Types}
+\label{sec:causal}
+% ============================================================================
+
+% TODO: Expand from popl2027/main.tex section 5.4 (Causal Types)
+% This section becomes MUCH longer --- it's now a core contribution, not an extension.
+%
+% Subsections:
+% 3.1 Structural Causal Models (syntax + typing)
+% 3.2 Do-Operator at the Type Level (T-Do rule)
+% 3.3 Identifiability as a Type Constraint
+% 3.4 d-Separation and Conditional Independence
+% 3.5 Back-Door and Front-Door Criteria
+% 3.6 Causal-Epistemic Interaction
+
+\textbf{[Content: Expand causal types from POPL S5.4 into full section]}
+
+% ============================================================================
+\section{Metatheory}
+\label{sec:metatheory}
+% ============================================================================
+
+% TODO: Extract from popl2027/main.tex section 3
+% Theorems: Determinism, Progress, Preservation, Type Safety, GUM Soundness
+% ADD: Causal-specific theorems (identifiability soundness, d-sep monotonicity)
+
+\textbf{[Content from POPL S3: Metatheory --- to be extracted]}
+
+% ============================================================================
+\section{Composition with Other Type Disciplines}
+\label{sec:composition}
+% ============================================================================
+
+% TODO: Extract from popl2027/main.tex section 5 (Extensions)
+% Linear types, algebraic effects, units of measure
+% Key point: all compose cleanly with epistemic + causal
+
+\textbf{[Content from POPL S5: Extensions --- to be extracted]}
+
+% ============================================================================
+\section{Mechanization in Lean 4}
+\label{sec:mechanization}
+% ============================================================================
+
+% TODO: Extract from popl2027/main.tex section 4
+% Table of modules, proof architecture, novel results
+% EXPAND: Causal theorem inventory (106 theorems)
+
+\textbf{[Content from POPL S4: Mechanization --- to be extracted]}
+
+% ============================================================================
+\section{Motivating Example}
+\label{sec:example}
+% ============================================================================
+
+% A SHORT (10-15 line) example showing epistemic + causal types in action.
+% E.g., pharmacokinetic intervention: "what would the drug concentration
+% be if we changed the dosing regimen?" with uncertainty bounds.
+% This is NOT a benchmark or evaluation --- just a taste.
+
+\textbf{[One concise motivating example]}
+
+% ============================================================================
+\section{Related Work}
+\label{sec:related}
+% ============================================================================
+
+% TODO: Extract and expand from popl2027/main.tex section 7
+% ADD: More causal inference references (Bareinboim, Tian, Shpitser)
+% ADD: Comparison to probabilistic programming for causal inference
+
+\textbf{[Content from POPL S7: Related Work --- to be expanded]}
+
+% ============================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+% ============================================================================
+
+\textbf{[To be written]}
+
+\bibliographystyle{ACM-Reference-Format}
+\bibliography{references}
+
+\end{document}
