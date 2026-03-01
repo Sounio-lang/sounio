@@ -1,0 +1,1166 @@
+// self-hosted::ir::constant_fold — Constant Folding and Propagation IR pass
+//
+// Evaluates constant expressions at compile time and propagates values through
+// the IR.  This module operates on a self-contained instruction representation
+// using integer opcodes (no external enum dependencies).
+//
+// Algorithm:
+//   1. Scan instructions in order.
+//   2. If both sources of a binary op are known constants, fold to a constant.
+//   3. Propagate: record dst -> constant in environment.
+//   4. Replace src references to known constants with immediate operands.
+//   5. Repeat until fixed point (no more folds in a pass).
+//
+// Division-by-zero handling: if divisor is zero, fold to 0 (safe sentinel).
+//
+// Opcodes: CF_ADD=0, CF_SUB=1, CF_MUL=2, CF_DIV=3, CF_MOV=4,
+//          CF_IMM=5, CF_CMP=6, CF_NOP=7, CF_AND=8, CF_OR=9, CF_XOR=10
+//
+// References:
+//   Wegman & Zadeck (1991): Constant Propagation with Conditional Branches
+//   Allen & Cocke (1977): Program Optimization
+
+// ============================================================================
+// Section 1: Constants
+// ============================================================================
+
+let CF_MAX_INSTRS: i64 = 128
+let CF_MAX_REGS: i64   = 256
+let CF_ENV_CAP: i64    = 256
+let CF_INVALID: i64    = 0 - 1
+
+// Opcodes
+let CF_ADD: i64 = 0
+let CF_SUB: i64 = 1
+let CF_MUL: i64 = 2
+let CF_DIV: i64 = 3
+let CF_MOV: i64 = 4
+let CF_IMM: i64 = 5
+let CF_CMP: i64 = 6
+let CF_NOP: i64 = 7
+let CF_AND: i64 = 8
+let CF_OR:  i64 = 9
+let CF_XOR: i64 = 10
+
+// Compare operations (embedded in src2 of CF_CMP).
+let CF_CMP_EQ: i64 = 0
+let CF_CMP_NE: i64 = 1
+let CF_CMP_LT: i64 = 2
+let CF_CMP_LE: i64 = 3
+let CF_CMP_GT: i64 = 4
+let CF_CMP_GE: i64 = 5
+
+// ============================================================================
+// Section 2: Data Structures
+// ============================================================================
+
+// A constant value stored in the folding environment.
+struct CfValue {
+    is_const: bool,   // false = not a known constant
+    int_val: i64,     // integer value (when is_float=false)
+    float_val: f64,   // float value  (when is_float=true)
+    is_float: bool,   // true if this is a float constant
+}
+
+// A single IR instruction for constant folding.
+struct CfInstr {
+    opcode: i64,
+    dst: i64,    // destination register (-1 = none)
+    src1: i64,   // source register 1  (-1 = none)
+    src2: i64,   // source register 2  (-1 = none)
+    imm: i64,    // immediate integer value (when is_imm=true)
+    is_imm: bool, // whether imm is the actual constant value to use
+}
+
+// A basic block of instructions.
+struct CfBlock {
+    instrs: [CfInstr; 128],
+    count: i64,
+}
+
+// Mapping from virtual register to known constant value.
+// Uses a flat array indexed by register number.
+struct CfEnv {
+    values: [CfValue; 256],
+    count: i64,  // high-water mark of reg indices set
+}
+
+// Statistics from a folding pass.
+struct CfStats {
+    folded: i64,    // number of instructions replaced by IMM
+    propagated: i64, // number of source registers replaced by known value
+    passes: i64,    // number of full passes run
+}
+
+// ============================================================================
+// Section 3: Constructors
+// ============================================================================
+
+fn cf_value_unknown() -> CfValue {
+    CfValue {
+        is_const: false,
+        int_val: 0,
+        float_val: 0.0,
+        is_float: false,
+    }
+}
+
+fn cf_value_int(v: i64) -> CfValue {
+    CfValue {
+        is_const: true,
+        int_val: v,
+        float_val: 0.0,
+        is_float: false,
+    }
+}
+
+fn cf_value_float(v: f64) -> CfValue {
+    CfValue {
+        is_const: true,
+        int_val: 0,
+        float_val: v,
+        is_float: true,
+    }
+}
+
+fn cf_value_bool(b: bool) -> CfValue {
+    var v: i64 = 0
+    if b { v = 1 }
+    cf_value_int(v)
+}
+
+fn cf_instr_new(op: i64, dst: i64, src1: i64, src2: i64, imm: i64, is_imm: bool) -> CfInstr {
+    CfInstr {
+        opcode: op,
+        dst: dst,
+        src1: src1,
+        src2: src2,
+        imm: imm,
+        is_imm: is_imm,
+    }
+}
+
+fn cf_instr_nop() -> CfInstr {
+    cf_instr_new(CF_NOP, CF_INVALID, CF_INVALID, CF_INVALID, 0, false)
+}
+
+fn cf_instr_imm(dst: i64, val: i64) -> CfInstr {
+    cf_instr_new(CF_IMM, dst, CF_INVALID, CF_INVALID, val, true)
+}
+
+fn cf_block_new() -> CfBlock {
+    CfBlock {
+        instrs: [cf_instr_nop(); 128],
+        count: 0,
+    }
+}
+
+fn cf_env_new() -> CfEnv {
+    CfEnv {
+        values: [cf_value_unknown(); 256],
+        count: 0,
+    }
+}
+
+fn cf_stats_new() -> CfStats {
+    CfStats {
+        folded: 0,
+        propagated: 0,
+        passes: 0,
+    }
+}
+
+// ============================================================================
+// Section 4: Block Mutation
+// ============================================================================
+
+// Add an instruction to a block.
+fn cf_add_instr(b: &! CfBlock, op: i64, dst: i64, src1: i64, src2: i64, imm: i64, is_imm: bool) with Mut, Panic {
+    if b.count >= CF_MAX_INSTRS { return }
+    let idx = b.count
+    b.instrs[idx as usize] = cf_instr_new(op, dst, src1, src2, imm, is_imm)
+    b.count = b.count + 1
+}
+
+// ============================================================================
+// Section 5: Environment Operations
+// ============================================================================
+
+// Set the constant value for a virtual register.
+fn cf_env_set(e: &! CfEnv, vreg: i64, val: CfValue) with Mut, Panic {
+    if vreg < 0 { return }
+    if vreg >= CF_ENV_CAP { return }
+    e.values[vreg as usize] = val
+    if vreg >= e.count { e.count = vreg + 1 }
+}
+
+// Get the constant value for a virtual register.
+// Returns cf_value_unknown() if not found or out of range.
+fn cf_env_get(e: &CfEnv, vreg: i64) -> CfValue {
+    if vreg < 0 { return cf_value_unknown() }
+    if vreg >= CF_ENV_CAP { return cf_value_unknown() }
+    e.values[vreg as usize]
+}
+
+// Returns true if a register has a known constant value.
+fn cf_env_has(e: &CfEnv, vreg: i64) -> bool {
+    if vreg < 0 { return false }
+    if vreg >= CF_ENV_CAP { return false }
+    e.values[vreg as usize].is_const
+}
+
+// Clear the environment (reset all to unknown).
+fn cf_env_clear(e: &! CfEnv) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < CF_ENV_CAP {
+        e.values[i as usize] = cf_value_unknown()
+        i = i + 1
+    }
+    e.count = 0
+}
+
+// ============================================================================
+// Section 6: Constant Arithmetic
+// ============================================================================
+
+// Fold ADD for integers.
+fn cf_fold_add(a: CfValue, b: CfValue) -> CfValue {
+    if a.is_const == false { return cf_value_unknown() }
+    if b.is_const == false { return cf_value_unknown() }
+    if a.is_float {
+        if b.is_float { return cf_value_float(a.float_val + b.float_val) }
+        return cf_value_unknown()
+    }
+    if b.is_float { return cf_value_unknown() }
+    cf_value_int(a.int_val + b.int_val)
+}
+
+// Fold SUB for integers.
+fn cf_fold_sub(a: CfValue, b: CfValue) -> CfValue {
+    if a.is_const == false { return cf_value_unknown() }
+    if b.is_const == false { return cf_value_unknown() }
+    if a.is_float {
+        if b.is_float { return cf_value_float(a.float_val - b.float_val) }
+        return cf_value_unknown()
+    }
+    if b.is_float { return cf_value_unknown() }
+    cf_value_int(a.int_val - b.int_val)
+}
+
+// Fold MUL.
+fn cf_fold_mul(a: CfValue, b: CfValue) -> CfValue {
+    if a.is_const == false { return cf_value_unknown() }
+    if b.is_const == false { return cf_value_unknown() }
+    if a.is_float {
+        if b.is_float { return cf_value_float(a.float_val * b.float_val) }
+        return cf_value_unknown()
+    }
+    if b.is_float { return cf_value_unknown() }
+    cf_value_int(a.int_val * b.int_val)
+}
+
+// Fold DIV.  Division by zero produces 0 (safe sentinel).
+fn cf_fold_div(a: CfValue, b: CfValue) -> CfValue with Div, Panic {
+    if a.is_const == false { return cf_value_unknown() }
+    if b.is_const == false { return cf_value_unknown() }
+    if a.is_float {
+        if b.is_float {
+            if b.float_val == 0.0 { return cf_value_float(0.0) }
+            return cf_value_float(a.float_val / b.float_val)
+        }
+        return cf_value_unknown()
+    }
+    if b.is_float { return cf_value_unknown() }
+    if b.int_val == 0 { return cf_value_int(0) }
+    cf_value_int(a.int_val / b.int_val)
+}
+
+// Fold AND (bitwise).
+fn cf_fold_and(a: CfValue, b: CfValue) -> CfValue {
+    if a.is_const == false { return cf_value_unknown() }
+    if b.is_const == false { return cf_value_unknown() }
+    if a.is_float { return cf_value_unknown() }
+    if b.is_float { return cf_value_unknown() }
+    cf_value_int(a.int_val & b.int_val)
+}
+
+// Fold OR (bitwise).
+fn cf_fold_or(a: CfValue, b: CfValue) -> CfValue {
+    if a.is_const == false { return cf_value_unknown() }
+    if b.is_const == false { return cf_value_unknown() }
+    if a.is_float { return cf_value_unknown() }
+    if b.is_float { return cf_value_unknown() }
+    cf_value_int(a.int_val | b.int_val)
+}
+
+// Fold XOR (bitwise).
+fn cf_fold_xor(a: CfValue, b: CfValue) -> CfValue {
+    if a.is_const == false { return cf_value_unknown() }
+    if b.is_const == false { return cf_value_unknown() }
+    if a.is_float { return cf_value_unknown() }
+    if b.is_float { return cf_value_unknown() }
+    cf_value_int(a.int_val ^ b.int_val)
+}
+
+// Fold a CMP instruction.  cmp_kind is CF_CMP_*.
+fn cf_fold_cmp(a: CfValue, b: CfValue, cmp_kind: i64) -> CfValue {
+    if a.is_const == false { return cf_value_unknown() }
+    if b.is_const == false { return cf_value_unknown() }
+    if a.is_float { return cf_value_unknown() }
+    if b.is_float { return cf_value_unknown() }
+    let av = a.int_val
+    let bv = b.int_val
+    if cmp_kind == CF_CMP_EQ { return cf_value_bool(av == bv) }
+    if cmp_kind == CF_CMP_NE { return cf_value_bool(av != bv) }
+    if cmp_kind == CF_CMP_LT { return cf_value_bool(av < bv) }
+    if cmp_kind == CF_CMP_LE { return cf_value_bool(av <= bv) }
+    if cmp_kind == CF_CMP_GT { return cf_value_bool(av > bv) }
+    if cmp_kind == CF_CMP_GE { return cf_value_bool(av >= bv) }
+    cf_value_unknown()
+}
+
+// ============================================================================
+// Section 7: Instruction-Level Folding
+// ============================================================================
+
+// Attempt to fold a single instruction given the current environment.
+// Returns the resulting CfValue (may be unknown if not foldable).
+fn cf_fold_instr(instr: &CfInstr, env: &CfEnv) -> CfValue {
+    let op = instr.opcode
+    // IMM: trivially a constant.
+    if op == CF_IMM {
+        if instr.is_imm { return cf_value_int(instr.imm) }
+        return cf_value_unknown()
+    }
+    // MOV: propagate source.
+    if op == CF_MOV {
+        if instr.src1 >= 0 { return cf_env_get(env, instr.src1) }
+        return cf_value_unknown()
+    }
+    // NOP: nothing.
+    if op == CF_NOP { return cf_value_unknown() }
+    // Binary ops: need both sources.
+    let s1 = instr.src1
+    let s2 = instr.src2
+    let v1 = cf_env_get(env, s1)
+    let v2 = cf_env_get(env, s2)
+    if op == CF_ADD { return cf_fold_add(v1, v2) }
+    if op == CF_SUB { return cf_fold_sub(v1, v2) }
+    if op == CF_MUL { return cf_fold_mul(v1, v2) }
+    if op == CF_AND { return cf_fold_and(v1, v2) }
+    if op == CF_OR  { return cf_fold_or(v1, v2) }
+    if op == CF_XOR { return cf_fold_xor(v1, v2) }
+    if op == CF_CMP { return cf_fold_cmp(v1, v2, s2) }
+    cf_value_unknown()
+}
+
+// Attempt to fold a single instruction with Div effect (for CF_DIV).
+fn cf_fold_instr_div(instr: &CfInstr, env: &CfEnv) -> CfValue with Div, Panic {
+    let op = instr.opcode
+    if op == CF_DIV {
+        let v1 = cf_env_get(env, instr.src1)
+        let v2 = cf_env_get(env, instr.src2)
+        return cf_fold_div(v1, v2)
+    }
+    cf_fold_instr(instr, env)
+}
+
+// ============================================================================
+// Section 8: Block-Level Propagation
+// ============================================================================
+
+// Run one forward pass over the block, folding constants and updating env.
+// Returns the number of instructions folded in this pass.
+fn cf_propagate(b: &! CfBlock, env: &! CfEnv) -> i64 with Mut, Div, Panic {
+    var folded: i64 = 0
+    var i: i64 = 0
+    while i < b.count {
+        let instr = &b.instrs[i as usize]
+        let op = instr.opcode
+        let dst = instr.dst
+        // Try folding.
+        var result = cf_value_unknown()
+        if op == CF_DIV {
+            result = cf_fold_instr_div(instr, env)
+        } else {
+            result = cf_fold_instr(instr, env)
+        }
+        if result.is_const {
+            // Record in environment.
+            if dst >= 0 {
+                if dst < CF_ENV_CAP {
+                    env.values[dst as usize] = result
+                    if dst >= env.count { env.count = dst + 1 }
+                }
+            }
+            // Replace instruction with IMM if it wasn't already.
+            if op != CF_IMM {
+                if op != CF_NOP {
+                    let mut_instr = &! b.instrs[i as usize]
+                    mut_instr.opcode = CF_IMM
+                    mut_instr.imm = result.int_val
+                    mut_instr.is_imm = true
+                    mut_instr.src1 = CF_INVALID
+                    mut_instr.src2 = CF_INVALID
+                    folded = folded + 1
+                }
+            }
+        } else {
+            // Not foldable: but maybe sources are known constants?
+            // Propagate source values into imm fields.
+            let s1 = instr.src1
+            if s1 >= 0 {
+                let sv1 = cf_env_get(env, s1)
+                if sv1.is_const {
+                    if sv1.is_float == false {
+                        let mut_instr = &! b.instrs[i as usize]
+                        // Record that src1 is a known constant (for later passes).
+                        // We don't rewrite the instruction here to keep it simple.
+                        let _ = sv1.int_val
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    folded
+}
+
+// Run propagation until fixed point (no more folding).
+// Returns total instructions folded over all passes.
+fn cf_propagate_to_fixpoint(b: &! CfBlock, env: &! CfEnv) -> i64 with Mut, Div, Panic {
+    var total: i64 = 0
+    var pass: i64 = 0
+    while pass < 32 {
+        let n = cf_propagate(b, env)
+        total = total + n
+        if n == 0 { return total }
+        pass = pass + 1
+    }
+    total
+}
+
+// ============================================================================
+// Section 9: Query Helpers
+// ============================================================================
+
+// Count NOP instructions in a block.
+fn cf_count_nops(b: &CfBlock) -> i64 {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < b.count {
+        if b.instrs[i as usize].opcode == CF_NOP { count = count + 1 }
+        i = i + 1
+    }
+    count
+}
+
+// Count IMM instructions in a block (folded constants).
+fn cf_count_imm(b: &CfBlock) -> i64 {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < b.count {
+        if b.instrs[i as usize].opcode == CF_IMM { count = count + 1 }
+        i = i + 1
+    }
+    count
+}
+
+// Get the opcode of instruction i.
+fn cf_get_opcode(b: &CfBlock, i: i64) -> i64 {
+    if i < 0 { return CF_NOP }
+    if i >= b.count { return CF_NOP }
+    b.instrs[i as usize].opcode
+}
+
+// Get the imm value of instruction i (only meaningful if opcode == CF_IMM).
+fn cf_get_imm(b: &CfBlock, i: i64) -> i64 {
+    if i < 0 { return 0 }
+    if i >= b.count { return 0 }
+    b.instrs[i as usize].imm
+}
+
+// Returns true if instruction i has been folded to IMM.
+fn cf_is_folded(b: &CfBlock, i: i64) -> bool {
+    cf_get_opcode(b, i) == CF_IMM
+}
+
+// Returns true if instruction i is still a non-constant opcode.
+fn cf_is_unfolded(b: &CfBlock, i: i64) -> bool {
+    let op = cf_get_opcode(b, i)
+    if op == CF_IMM { return false }
+    if op == CF_NOP { return false }
+    true
+}
+
+// ============================================================================
+// Section 10: Tests
+// ============================================================================
+
+// T01: cf_value_unknown is not a constant.
+fn test_cf_value_unknown_not_const() -> bool {
+    cf_value_unknown().is_const == false
+}
+
+// T02: cf_value_int creates an integer constant.
+fn test_cf_value_int_const() -> bool {
+    let v = cf_value_int(42)
+    v.is_const && v.int_val == 42 && v.is_float == false
+}
+
+// T03: cf_value_float creates a float constant.
+fn test_cf_value_float_const() -> bool {
+    let v = cf_value_float(3.14)
+    v.is_const && v.is_float
+}
+
+// T04: cf_value_bool(true) -> int_val = 1.
+fn test_cf_value_bool_true() -> bool {
+    let v = cf_value_bool(true)
+    v.is_const && v.int_val == 1
+}
+
+// T05: cf_value_bool(false) -> int_val = 0.
+fn test_cf_value_bool_false() -> bool {
+    let v = cf_value_bool(false)
+    v.is_const && v.int_val == 0
+}
+
+// T06: cf_fold_add(2, 3) = 5.
+fn test_cf_fold_add_basic() -> bool {
+    let a = cf_value_int(2)
+    let b = cf_value_int(3)
+    let r = cf_fold_add(a, b)
+    r.is_const && r.int_val == 5
+}
+
+// T07: cf_fold_add with unknown returns unknown.
+fn test_cf_fold_add_unknown() -> bool {
+    let a = cf_value_unknown()
+    let b = cf_value_int(3)
+    cf_fold_add(a, b).is_const == false
+}
+
+// T08: cf_fold_sub(10, 4) = 6.
+fn test_cf_fold_sub_basic() -> bool {
+    let a = cf_value_int(10)
+    let b = cf_value_int(4)
+    let r = cf_fold_sub(a, b)
+    r.is_const && r.int_val == 6
+}
+
+// T09: cf_fold_sub(4, 10) = -6.
+fn test_cf_fold_sub_negative() -> bool {
+    let a = cf_value_int(4)
+    let b = cf_value_int(10)
+    let r = cf_fold_sub(a, b)
+    r.is_const && r.int_val == 0 - 6
+}
+
+// T10: cf_fold_mul(3, 7) = 21.
+fn test_cf_fold_mul_basic() -> bool {
+    let a = cf_value_int(3)
+    let b = cf_value_int(7)
+    let r = cf_fold_mul(a, b)
+    r.is_const && r.int_val == 21
+}
+
+// T11: cf_fold_mul(0, N) = 0.
+fn test_cf_fold_mul_zero() -> bool {
+    let a = cf_value_int(0)
+    let b = cf_value_int(999)
+    let r = cf_fold_mul(a, b)
+    r.is_const && r.int_val == 0
+}
+
+// T12: cf_fold_div(12, 4) = 3.
+fn test_cf_fold_div_basic() -> bool with Div, Panic {
+    let a = cf_value_int(12)
+    let b = cf_value_int(4)
+    let r = cf_fold_div(a, b)
+    r.is_const && r.int_val == 3
+}
+
+// T13: cf_fold_div(N, 0) = 0 (safe sentinel).
+fn test_cf_fold_div_by_zero() -> bool with Div, Panic {
+    let a = cf_value_int(10)
+    let b = cf_value_int(0)
+    let r = cf_fold_div(a, b)
+    r.is_const && r.int_val == 0
+}
+
+// T14: cf_fold_div with unknown divisor returns unknown.
+fn test_cf_fold_div_unknown_divisor() -> bool with Div, Panic {
+    let a = cf_value_int(10)
+    let b = cf_value_unknown()
+    cf_fold_div(a, b).is_const == false
+}
+
+// T15: cf_fold_and(0b1100, 0b1010) = 0b1000 = 8.
+fn test_cf_fold_and_basic() -> bool {
+    let a = cf_value_int(12)
+    let b = cf_value_int(10)
+    let r = cf_fold_and(a, b)
+    r.is_const && r.int_val == 8
+}
+
+// T16: cf_fold_or(0b1100, 0b1010) = 0b1110 = 14.
+fn test_cf_fold_or_basic() -> bool {
+    let a = cf_value_int(12)
+    let b = cf_value_int(10)
+    let r = cf_fold_or(a, b)
+    r.is_const && r.int_val == 14
+}
+
+// T17: cf_fold_xor(0b1100, 0b1010) = 0b0110 = 6.
+fn test_cf_fold_xor_basic() -> bool {
+    let a = cf_value_int(12)
+    let b = cf_value_int(10)
+    let r = cf_fold_xor(a, b)
+    r.is_const && r.int_val == 6
+}
+
+// T18: cf_fold_cmp EQ(5, 5) = 1.
+fn test_cf_fold_cmp_eq_true() -> bool {
+    let a = cf_value_int(5)
+    let b = cf_value_int(5)
+    let r = cf_fold_cmp(a, b, CF_CMP_EQ)
+    r.is_const && r.int_val == 1
+}
+
+// T19: cf_fold_cmp EQ(5, 6) = 0.
+fn test_cf_fold_cmp_eq_false() -> bool {
+    let a = cf_value_int(5)
+    let b = cf_value_int(6)
+    let r = cf_fold_cmp(a, b, CF_CMP_EQ)
+    r.is_const && r.int_val == 0
+}
+
+// T20: cf_fold_cmp LT(3, 5) = 1.
+fn test_cf_fold_cmp_lt_true() -> bool {
+    let a = cf_value_int(3)
+    let b = cf_value_int(5)
+    let r = cf_fold_cmp(a, b, CF_CMP_LT)
+    r.is_const && r.int_val == 1
+}
+
+// T21: cf_fold_cmp LT(5, 3) = 0.
+fn test_cf_fold_cmp_lt_false() -> bool {
+    let a = cf_value_int(5)
+    let b = cf_value_int(3)
+    let r = cf_fold_cmp(a, b, CF_CMP_LT)
+    r.is_const && r.int_val == 0
+}
+
+// T22: cf_fold_cmp GT(5, 3) = 1.
+fn test_cf_fold_cmp_gt() -> bool {
+    let a = cf_value_int(5)
+    let b = cf_value_int(3)
+    let r = cf_fold_cmp(a, b, CF_CMP_GT)
+    r.is_const && r.int_val == 1
+}
+
+// T23: cf_fold_cmp LE(3, 3) = 1.
+fn test_cf_fold_cmp_le_eq() -> bool {
+    let a = cf_value_int(3)
+    let b = cf_value_int(3)
+    let r = cf_fold_cmp(a, b, CF_CMP_LE)
+    r.is_const && r.int_val == 1
+}
+
+// T24: cf_fold_cmp GE(4, 3) = 1.
+fn test_cf_fold_cmp_ge() -> bool {
+    let a = cf_value_int(4)
+    let b = cf_value_int(3)
+    let r = cf_fold_cmp(a, b, CF_CMP_GE)
+    r.is_const && r.int_val == 1
+}
+
+// T25: cf_fold_cmp NE(5, 6) = 1.
+fn test_cf_fold_cmp_ne() -> bool {
+    let a = cf_value_int(5)
+    let b = cf_value_int(6)
+    let r = cf_fold_cmp(a, b, CF_CMP_NE)
+    r.is_const && r.int_val == 1
+}
+
+// T26: cf_env_new has count=0.
+fn test_cf_env_new() -> bool {
+    let e = cf_env_new()
+    e.count == 0
+}
+
+// T27: cf_env_set then cf_env_get retrieves value.
+fn test_cf_env_set_get() -> bool with Mut, Panic {
+    var e = cf_env_new()
+    cf_env_set(&! e, 5, cf_value_int(42))
+    let v = cf_env_get(&e, 5)
+    v.is_const && v.int_val == 42
+}
+
+// T28: cf_env_get on unset register returns unknown.
+fn test_cf_env_get_unset() -> bool {
+    let e = cf_env_new()
+    cf_env_get(&e, 10).is_const == false
+}
+
+// T29: cf_env_has on set register returns true.
+fn test_cf_env_has_set() -> bool with Mut, Panic {
+    var e = cf_env_new()
+    cf_env_set(&! e, 3, cf_value_int(100))
+    cf_env_has(&e, 3)
+}
+
+// T30: cf_env_has on unset register returns false.
+fn test_cf_env_has_unset() -> bool {
+    let e = cf_env_new()
+    cf_env_has(&e, 3) == false
+}
+
+// T31: cf_env_clear resets all to unknown.
+fn test_cf_env_clear() -> bool with Mut, Panic, Div {
+    var e = cf_env_new()
+    cf_env_set(&! e, 5, cf_value_int(42))
+    cf_env_clear(&! e)
+    cf_env_has(&e, 5) == false && e.count == 0
+}
+
+// T32: cf_block_new has count=0.
+fn test_cf_block_new() -> bool {
+    let b = cf_block_new()
+    b.count == 0
+}
+
+// T33: cf_add_instr increments count.
+fn test_cf_add_instr_count() -> bool with Mut, Panic {
+    var b = cf_block_new()
+    cf_add_instr(&! b, CF_ADD, 2, 0, 1, 0, false)
+    b.count == 1
+}
+
+// T34: cf_add_instr stores correct opcode.
+fn test_cf_add_instr_opcode() -> bool with Mut, Panic {
+    var b = cf_block_new()
+    cf_add_instr(&! b, CF_ADD, 2, 0, 1, 0, false)
+    b.instrs[0].opcode == CF_ADD
+}
+
+// T35: cf_fold_instr on IMM returns its value.
+fn test_cf_fold_instr_imm() -> bool {
+    let e = cf_env_new()
+    let instr = cf_instr_imm(0, 99)
+    let v = cf_fold_instr(&instr, &e)
+    v.is_const && v.int_val == 99
+}
+
+// T36: cf_fold_instr on ADD with known sources = correct sum.
+fn test_cf_fold_instr_add() -> bool with Mut, Panic {
+    var e = cf_env_new()
+    cf_env_set(&! e, 0, cf_value_int(10))
+    cf_env_set(&! e, 1, cf_value_int(20))
+    let instr = cf_instr_new(CF_ADD, 2, 0, 1, 0, false)
+    let v = cf_fold_instr(&instr, &e)
+    v.is_const && v.int_val == 30
+}
+
+// T37: cf_fold_instr on ADD with unknown src returns unknown.
+fn test_cf_fold_instr_add_unknown() -> bool {
+    let e = cf_env_new()
+    let instr = cf_instr_new(CF_ADD, 2, 0, 1, 0, false)
+    cf_fold_instr(&instr, &e).is_const == false
+}
+
+// T38: cf_fold_instr on MOV with known source propagates it.
+fn test_cf_fold_instr_mov() -> bool with Mut, Panic {
+    var e = cf_env_new()
+    cf_env_set(&! e, 5, cf_value_int(77))
+    let instr = cf_instr_new(CF_MOV, 6, 5, CF_INVALID, 0, false)
+    let v = cf_fold_instr(&instr, &e)
+    v.is_const && v.int_val == 77
+}
+
+// T39: cf_fold_instr on NOP returns unknown.
+fn test_cf_fold_instr_nop() -> bool {
+    let e = cf_env_new()
+    let instr = cf_instr_nop()
+    cf_fold_instr(&instr, &e).is_const == false
+}
+
+// T40: Propagation: 2+3=5, result in env.
+fn test_cf_propagate_add() -> bool with Mut, Div, Panic {
+    var b = cf_block_new()
+    var e = cf_env_new()
+    // r0 = IMM 2
+    cf_add_instr(&! b, CF_IMM, 0, CF_INVALID, CF_INVALID, 2, true)
+    // r1 = IMM 3
+    cf_add_instr(&! b, CF_IMM, 1, CF_INVALID, CF_INVALID, 3, true)
+    // r2 = ADD r0, r1
+    cf_add_instr(&! b, CF_ADD, 2, 0, 1, 0, false)
+    cf_propagate(&! b, &! e)
+    let v = cf_env_get(&e, 2)
+    v.is_const && v.int_val == 5
+}
+
+// T41: After propagation, ADD instruction becomes IMM.
+fn test_cf_propagate_add_becomes_imm() -> bool with Mut, Div, Panic {
+    var b = cf_block_new()
+    var e = cf_env_new()
+    cf_add_instr(&! b, CF_IMM, 0, CF_INVALID, CF_INVALID, 2, true)
+    cf_add_instr(&! b, CF_IMM, 1, CF_INVALID, CF_INVALID, 3, true)
+    cf_add_instr(&! b, CF_ADD, 2, 0, 1, 0, false)
+    cf_propagate(&! b, &! e)
+    cf_is_folded(&b, 2)
+}
+
+// T42: Propagation returns count of folded instructions.
+fn test_cf_propagate_count() -> bool with Mut, Div, Panic {
+    var b = cf_block_new()
+    var e = cf_env_new()
+    cf_add_instr(&! b, CF_IMM, 0, CF_INVALID, CF_INVALID, 5, true)
+    cf_add_instr(&! b, CF_IMM, 1, CF_INVALID, CF_INVALID, 6, true)
+    cf_add_instr(&! b, CF_ADD, 2, 0, 1, 0, false)
+    let n = cf_propagate(&! b, &! e)
+    n == 1
+}
+
+// T43: x=5; y=x+1 => y=6.
+fn test_cf_propagate_chain() -> bool with Mut, Div, Panic {
+    var b = cf_block_new()
+    var e = cf_env_new()
+    cf_add_instr(&! b, CF_IMM, 0, CF_INVALID, CF_INVALID, 5, true) // r0=5
+    cf_add_instr(&! b, CF_IMM, 1, CF_INVALID, CF_INVALID, 1, true) // r1=1
+    cf_add_instr(&! b, CF_ADD, 2, 0, 1, 0, false)                   // r2=r0+r1=6
+    cf_propagate_to_fixpoint(&! b, &! e)
+    let v = cf_env_get(&e, 2)
+    v.is_const && v.int_val == 6
+}
+
+// T44: Unknown variable stops folding chain.
+fn test_cf_propagate_unknown_stops() -> bool with Mut, Div, Panic {
+    var b = cf_block_new()
+    var e = cf_env_new()
+    // r0 is unknown (no IMM for it)
+    cf_add_instr(&! b, CF_IMM, 1, CF_INVALID, CF_INVALID, 5, true) // r1=5
+    cf_add_instr(&! b, CF_ADD, 2, 0, 1, 0, false) // r2 = r0 + r1 (unknown)
+    cf_propagate(&! b, &! e)
+    cf_is_unfolded(&b, 1)
+}
+
+// T45: Division by zero produces 0 (safe).
+fn test_cf_propagate_div_by_zero() -> bool with Mut, Div, Panic {
+    var b = cf_block_new()
+    var e = cf_env_new()
+    cf_add_instr(&! b, CF_IMM, 0, CF_INVALID, CF_INVALID, 10, true)
+    cf_add_instr(&! b, CF_IMM, 1, CF_INVALID, CF_INVALID, 0, true)
+    cf_add_instr(&! b, CF_DIV, 2, 0, 1, 0, false)
+    cf_propagate(&! b, &! e)
+    let v = cf_env_get(&e, 2)
+    v.is_const && v.int_val == 0
+}
+
+// T46: Float fold: 1.5 + 2.5 = 4.0.
+fn test_cf_fold_add_float() -> bool {
+    let a = cf_value_float(1.5)
+    let b = cf_value_float(2.5)
+    let r = cf_fold_add(a, b)
+    r.is_const && r.is_float
+}
+
+// T47: Float-int mix returns unknown.
+fn test_cf_fold_add_float_int_mix() -> bool {
+    let a = cf_value_float(1.5)
+    let b = cf_value_int(2)
+    cf_fold_add(a, b).is_const == false
+}
+
+// T48: cf_count_imm = 0 before propagation.
+fn test_cf_count_imm_before() -> bool with Mut, Panic {
+    var b = cf_block_new()
+    cf_add_instr(&! b, CF_ADD, 2, 0, 1, 0, false)
+    cf_count_imm(&b) == 0
+}
+
+// T49: cf_count_imm = 1 after one fold.
+fn test_cf_count_imm_after() -> bool with Mut, Div, Panic {
+    var b = cf_block_new()
+    var e = cf_env_new()
+    cf_add_instr(&! b, CF_IMM, 0, CF_INVALID, CF_INVALID, 2, true)
+    cf_add_instr(&! b, CF_IMM, 1, CF_INVALID, CF_INVALID, 3, true)
+    cf_add_instr(&! b, CF_ADD, 2, 0, 1, 0, false)
+    cf_propagate(&! b, &! e)
+    // Initial 2 IMMs + 1 folded ADD = 3 IMMs.
+    cf_count_imm(&b) == 3
+}
+
+// T50: cf_count_nops = 0 after basic propagation.
+fn test_cf_count_nops_after_fold() -> bool with Mut, Div, Panic {
+    var b = cf_block_new()
+    var e = cf_env_new()
+    cf_add_instr(&! b, CF_IMM, 0, CF_INVALID, CF_INVALID, 5, true)
+    cf_add_instr(&! b, CF_IMM, 1, CF_INVALID, CF_INVALID, 6, true)
+    cf_add_instr(&! b, CF_ADD, 2, 0, 1, 0, false)
+    cf_propagate(&! b, &! e)
+    cf_count_nops(&b) == 0
+}
+
+// T51: cf_get_imm returns folded value.
+fn test_cf_get_imm_after_fold() -> bool with Mut, Div, Panic {
+    var b = cf_block_new()
+    var e = cf_env_new()
+    cf_add_instr(&! b, CF_IMM, 0, CF_INVALID, CF_INVALID, 2, true)
+    cf_add_instr(&! b, CF_IMM, 1, CF_INVALID, CF_INVALID, 3, true)
+    cf_add_instr(&! b, CF_ADD, 2, 0, 1, 0, false)
+    cf_propagate(&! b, &! e)
+    cf_get_imm(&b, 2) == 5
+}
+
+// T52: Multiply chain: 2*3=6, 6*4=24.
+fn test_cf_propagate_mul_chain() -> bool with Mut, Div, Panic {
+    var b = cf_block_new()
+    var e = cf_env_new()
+    cf_add_instr(&! b, CF_IMM, 0, CF_INVALID, CF_INVALID, 2, true)
+    cf_add_instr(&! b, CF_IMM, 1, CF_INVALID, CF_INVALID, 3, true)
+    cf_add_instr(&! b, CF_MUL, 2, 0, 1, 0, false) // r2 = 2*3 = 6
+    cf_add_instr(&! b, CF_IMM, 3, CF_INVALID, CF_INVALID, 4, true)
+    cf_add_instr(&! b, CF_MUL, 4, 2, 3, 0, false) // r4 = r2*4 = 24
+    cf_propagate_to_fixpoint(&! b, &! e)
+    let v = cf_env_get(&e, 4)
+    v.is_const && v.int_val == 24
+}
+
+// T53: SUB fold: 100 - 37 = 63.
+fn test_cf_propagate_sub() -> bool with Mut, Div, Panic {
+    var b = cf_block_new()
+    var e = cf_env_new()
+    cf_add_instr(&! b, CF_IMM, 0, CF_INVALID, CF_INVALID, 100, true)
+    cf_add_instr(&! b, CF_IMM, 1, CF_INVALID, CF_INVALID, 37, true)
+    cf_add_instr(&! b, CF_SUB, 2, 0, 1, 0, false)
+    cf_propagate(&! b, &! e)
+    let v = cf_env_get(&e, 2)
+    v.is_const && v.int_val == 63
+}
+
+// T54: DIV fold: 100 / 4 = 25.
+fn test_cf_propagate_div() -> bool with Mut, Div, Panic {
+    var b = cf_block_new()
+    var e = cf_env_new()
+    cf_add_instr(&! b, CF_IMM, 0, CF_INVALID, CF_INVALID, 100, true)
+    cf_add_instr(&! b, CF_IMM, 1, CF_INVALID, CF_INVALID, 4, true)
+    cf_add_instr(&! b, CF_DIV, 2, 0, 1, 0, false)
+    cf_propagate(&! b, &! e)
+    let v = cf_env_get(&e, 2)
+    v.is_const && v.int_val == 25
+}
+
+// T55: MOV propagation: r1 = IMM 7; r2 = MOV r1 => r2 = 7.
+fn test_cf_propagate_mov() -> bool with Mut, Div, Panic {
+    var b = cf_block_new()
+    var e = cf_env_new()
+    cf_add_instr(&! b, CF_IMM, 1, CF_INVALID, CF_INVALID, 7, true)
+    cf_add_instr(&! b, CF_MOV, 2, 1, CF_INVALID, 0, false)
+    cf_propagate(&! b, &! e)
+    let v = cf_env_get(&e, 2)
+    v.is_const && v.int_val == 7
+}
+
+// T56: AND fold: 15 & 9 = 9.
+fn test_cf_propagate_and() -> bool with Mut, Div, Panic {
+    var b = cf_block_new()
+    var e = cf_env_new()
+    cf_add_instr(&! b, CF_IMM, 0, CF_INVALID, CF_INVALID, 15, true)
+    cf_add_instr(&! b, CF_IMM, 1, CF_INVALID, CF_INVALID, 9, true)
+    cf_add_instr(&! b, CF_AND, 2, 0, 1, 0, false)
+    cf_propagate(&! b, &! e)
+    let v = cf_env_get(&e, 2)
+    v.is_const && v.int_val == 9
+}
+
+// T57: OR fold: 5 | 10 = 15.
+fn test_cf_propagate_or() -> bool with Mut, Div, Panic {
+    var b = cf_block_new()
+    var e = cf_env_new()
+    cf_add_instr(&! b, CF_IMM, 0, CF_INVALID, CF_INVALID, 5, true)
+    cf_add_instr(&! b, CF_IMM, 1, CF_INVALID, CF_INVALID, 10, true)
+    cf_add_instr(&! b, CF_OR, 2, 0, 1, 0, false)
+    cf_propagate(&! b, &! e)
+    let v = cf_env_get(&e, 2)
+    v.is_const && v.int_val == 15
+}
+
+// T58: XOR fold: 12 ^ 10 = 6.
+fn test_cf_propagate_xor() -> bool with Mut, Div, Panic {
+    var b = cf_block_new()
+    var e = cf_env_new()
+    cf_add_instr(&! b, CF_IMM, 0, CF_INVALID, CF_INVALID, 12, true)
+    cf_add_instr(&! b, CF_IMM, 1, CF_INVALID, CF_INVALID, 10, true)
+    cf_add_instr(&! b, CF_XOR, 2, 0, 1, 0, false)
+    cf_propagate(&! b, &! e)
+    let v = cf_env_get(&e, 2)
+    v.is_const && v.int_val == 6
+}
+
+// T59: cf_fold_mul returns unknown if one is unknown.
+fn test_cf_fold_mul_unknown() -> bool {
+    let a = cf_value_unknown()
+    let b = cf_value_int(5)
+    cf_fold_mul(a, b).is_const == false
+}
+
+// T60: cf_fold_sub returns unknown if both unknown.
+fn test_cf_fold_sub_unknown() -> bool {
+    cf_fold_sub(cf_value_unknown(), cf_value_unknown()).is_const == false
+}
+
+// T61: cf_stats_new has all zeros.
+fn test_cf_stats_new() -> bool {
+    let s = cf_stats_new()
+    s.folded == 0 && s.propagated == 0 && s.passes == 0
+}
+
+// T62: cf_instr_nop has opcode CF_NOP.
+fn test_cf_instr_nop_opcode() -> bool {
+    cf_instr_nop().opcode == CF_NOP
+}
+
+// T63: cf_instr_imm has opcode CF_IMM.
+fn test_cf_instr_imm_opcode() -> bool {
+    cf_instr_imm(0, 42).opcode == CF_IMM
+}
+
+// T64: cf_instr_imm stores correct value.
+fn test_cf_instr_imm_value() -> bool {
+    cf_instr_imm(0, 42).imm == 42
+}
+
+// T65: cf_env_set updates count.
+fn test_cf_env_set_updates_count() -> bool with Mut, Panic {
+    var e = cf_env_new()
+    cf_env_set(&! e, 10, cf_value_int(1))
+    e.count == 11
+}
+
+// T66: cf_propagate with no foldable instrs returns 0.
+fn test_cf_propagate_no_fold() -> bool with Mut, Div, Panic {
+    var b = cf_block_new()
+    var e = cf_env_new()
+    cf_add_instr(&! b, CF_ADD, 2, 0, 1, 0, false) // unknown sources
+    let n = cf_propagate(&! b, &! e)
+    n == 0
+}
+
+// T67: cf_fold_cmp with float sources returns unknown.
+fn test_cf_fold_cmp_float() -> bool {
+    let a = cf_value_float(1.0)
+    let b = cf_value_float(2.0)
+    cf_fold_cmp(a, b, CF_CMP_LT).is_const == false
+}
+
+// T68: cf_get_opcode out of range returns CF_NOP.
+fn test_cf_get_opcode_oob() -> bool {
+    let b = cf_block_new()
+    cf_get_opcode(&b, 99) == CF_NOP
+}
+
+// T69: cf_is_folded on ADD before fold = false.
+fn test_cf_is_folded_before() -> bool with Mut, Panic {
+    var b = cf_block_new()
+    cf_add_instr(&! b, CF_ADD, 2, 0, 1, 0, false)
+    cf_is_folded(&b, 0) == false
+}
+
+// T70: cf_is_unfolded on IMM = false.
+fn test_cf_is_unfolded_imm() -> bool with Mut, Panic {
+    var b = cf_block_new()
+    cf_add_instr(&! b, CF_IMM, 0, CF_INVALID, CF_INVALID, 42, true)
+    cf_is_unfolded(&b, 0) == false
+}
+
+// ============================================================================
+// Section 11: Test Runner
+// ============================================================================
+
+fn test_cf_main() -> i32 with IO, Mut, Panic, Div {
+    var passed: i64 = 0
+    let total: i64 = 70
+
+    print("=== Constant Folding & Propagation Tests ===\n")
+
+    if test_cf_value_unknown_not_const() { passed = passed + 1; print("  T01 OK value_unknown_not_const\n") } else { print("  FAIL T01 value_unknown_not_const\n") }
+    if test_cf_value_int_const() { passed = passed + 1; print("  T02 OK value_int_const\n") } else { print("  FAIL T02 value_int_const\n") }
+    if test_cf_value_float_const() { passed = passed + 1; print("  T03 OK value_float_const\n") } else { print("  FAIL T03 value_float_const\n") }
+    if test_cf_value_bool_true() { passed = passed + 1; print("  T04 OK value_bool_true\n") } else { print("  FAIL T04 value_bool_true\n") }
+    if test_cf_value_bool_false() { passed = passed + 1; print("  T05 OK value_bool_false\n") } else { print("  FAIL T05 value_bool_false\n") }
+    if test_cf_fold_add_basic() { passed = passed + 1; print("  T06 OK fold_add_basic\n") } else { print("  FAIL T06 fold_add_basic\n") }
+    if test_cf_fold_add_unknown() { passed = passed + 1; print("  T07 OK fold_add_unknown\n") } else { print("  FAIL T07 fold_add_unknown\n") }
+    if test_cf_fold_sub_basic() { passed = passed + 1; print("  T08 OK fold_sub_basic\n") } else { print("  FAIL T08 fold_sub_basic\n") }
+    if test_cf_fold_sub_negative() { passed = passed + 1; print("  T09 OK fold_sub_negative\n") } else { print("  FAIL T09 fold_sub_negative\n") }
+    if test_cf_fold_mul_basic() { passed = passed + 1; print("  T10 OK fold_mul_basic\n") } else { print("  FAIL T10 fold_mul_basic\n") }
+    if test_cf_fold_mul_zero() { passed = passed + 1; print("  T11 OK fold_mul_zero\n") } else { print("  FAIL T11 fold_mul_zero\n") }
+    if test_cf_fold_div_basic() { passed = passed + 1; print("  T12 OK fold_div_basic\n") } else { print("  FAIL T12 fold_div_basic\n") }
+    if test_cf_fold_div_by_zero() { passed = passed + 1; print("  T13 OK fold_div_by_zero\n") } else { print("  FAIL T13 fold_div_by_zero\n") }
+    if test_cf_fold_div_unknown_divisor() { passed = passed + 1; print("  T14 OK fold_div_unknown\n") } else { print("  FAIL T14 fold_div_unknown\n") }
+    if test_cf_fold_and_basic() { passed = passed + 1; print("  T15 OK fold_and_basic\n") } else { print("  FAIL T15 fold_and_basic\n") }
+    if test_cf_fold_or_basic() { passed = passed + 1; print("  T16 OK fold_or_basic\n") } else { print("  FAIL T16 fold_or_basic\n") }
+    if test_cf_fold_xor_basic() { passed = passed + 1; print("  T17 OK fold_xor_basic\n") } else { print("  FAIL T17 fold_xor_basic\n") }
+    if test_cf_fold_cmp_eq_true() { passed = passed + 1; print("  T18 OK fold_cmp_eq_true\n") } else { print("  FAIL T18 fold_cmp_eq_true\n") }
+    if test_cf_fold_cmp_eq_false() { passed = passed + 1; print("  T19 OK fold_cmp_eq_false\n") } else { print("  FAIL T19 fold_cmp_eq_false\n") }
+    if test_cf_fold_cmp_lt_true() { passed = passed + 1; print("  T20 OK fold_cmp_lt_true\n") } else { print("  FAIL T20 fold_cmp_lt_true\n") }
+    if test_cf_fold_cmp_lt_false() { passed = passed + 1; print("  T21 OK fold_cmp_lt_false\n") } else { print("  FAIL T21 fold_cmp_lt_false\n") }
+    if test_cf_fold_cmp_gt() { passed = passed + 1; print("  T22 OK fold_cmp_gt\n") } else { print("  FAIL T22 fold_cmp_gt\n") }
+    if test_cf_fold_cmp_le_eq() { passed = passed + 1; print("  T23 OK fold_cmp_le_eq\n") } else { print("  FAIL T23 fold_cmp_le_eq\n") }
+    if test_cf_fold_cmp_ge() { passed = passed + 1; print("  T24 OK fold_cmp_ge\n") } else { print("  FAIL T24 fold_cmp_ge\n") }
+    if test_cf_fold_cmp_ne() { passed = passed + 1; print("  T25 OK fold_cmp_ne\n") } else { print("  FAIL T25 fold_cmp_ne\n") }
+    if test_cf_env_new() { passed = passed + 1; print("  T26 OK env_new\n") } else { print("  FAIL T26 env_new\n") }
+    if test_cf_env_set_get() { passed = passed + 1; print("  T27 OK env_set_get\n") } else { print("  FAIL T27 env_set_get\n") }
+    if test_cf_env_get_unset() { passed = passed + 1; print("  T28 OK env_get_unset\n") } else { print("  FAIL T28 env_get_unset\n") }
+    if test_cf_env_has_set() { passed = passed + 1; print("  T29 OK env_has_set\n") } else { print("  FAIL T29 env_has_set\n") }
+    if test_cf_env_has_unset() { passed = passed + 1; print("  T30 OK env_has_unset\n") } else { print("  FAIL T30 env_has_unset\n") }
+    if test_cf_env_clear() { passed = passed + 1; print("  T31 OK env_clear\n") } else { print("  FAIL T31 env_clear\n") }
+    if test_cf_block_new() { passed = passed + 1; print("  T32 OK block_new\n") } else { print("  FAIL T32 block_new\n") }
+    if test_cf_add_instr_count() { passed = passed + 1; print("  T33 OK add_instr_count\n") } else { print("  FAIL T33 add_instr_count\n") }
+    if test_cf_add_instr_opcode() { passed = passed + 1; print("  T34 OK add_instr_opcode\n") } else { print("  FAIL T34 add_instr_opcode\n") }
+    if test_cf_fold_instr_imm() { passed = passed + 1; print("  T35 OK fold_instr_imm\n") } else { print("  FAIL T35 fold_instr_imm\n") }
+    if test_cf_fold_instr_add() { passed = passed + 1; print("  T36 OK fold_instr_add\n") } else { print("  FAIL T36 fold_instr_add\n") }
+    if test_cf_fold_instr_add_unknown() { passed = passed + 1; print("  T37 OK fold_instr_add_unknown\n") } else { print("  FAIL T37 fold_instr_add_unknown\n") }
+    if test_cf_fold_instr_mov() { passed = passed + 1; print("  T38 OK fold_instr_mov\n") } else { print("  FAIL T38 fold_instr_mov\n") }
+    if test_cf_fold_instr_nop() { passed = passed + 1; print("  T39 OK fold_instr_nop\n") } else { print("  FAIL T39 fold_instr_nop\n") }
+    if test_cf_propagate_add() { passed = passed + 1; print("  T40 OK propagate_add\n") } else { print("  FAIL T40 propagate_add\n") }
+    if test_cf_propagate_add_becomes_imm() { passed = passed + 1; print("  T41 OK propagate_add_becomes_imm\n") } else { print("  FAIL T41 propagate_add_becomes_imm\n") }
+    if test_cf_propagate_count() { passed = passed + 1; print("  T42 OK propagate_count\n") } else { print("  FAIL T42 propagate_count\n") }
+    if test_cf_propagate_chain() { passed = passed + 1; print("  T43 OK propagate_chain\n") } else { print("  FAIL T43 propagate_chain\n") }
+    if test_cf_propagate_unknown_stops() { passed = passed + 1; print("  T44 OK propagate_unknown_stops\n") } else { print("  FAIL T44 propagate_unknown_stops\n") }
+    if test_cf_propagate_div_by_zero() { passed = passed + 1; print("  T45 OK propagate_div_by_zero\n") } else { print("  FAIL T45 propagate_div_by_zero\n") }
+    if test_cf_fold_add_float() { passed = passed + 1; print("  T46 OK fold_add_float\n") } else { print("  FAIL T46 fold_add_float\n") }
+    if test_cf_fold_add_float_int_mix() { passed = passed + 1; print("  T47 OK fold_add_float_int_mix\n") } else { print("  FAIL T47 fold_add_float_int_mix\n") }
+    if test_cf_count_imm_before() { passed = passed + 1; print("  T48 OK count_imm_before\n") } else { print("  FAIL T48 count_imm_before\n") }
+    if test_cf_count_imm_after() { passed = passed + 1; print("  T49 OK count_imm_after\n") } else { print("  FAIL T49 count_imm_after\n") }
+    if test_cf_count_nops_after_fold() { passed = passed + 1; print("  T50 OK count_nops_after_fold\n") } else { print("  FAIL T50 count_nops_after_fold\n") }
+    if test_cf_get_imm_after_fold() { passed = passed + 1; print("  T51 OK get_imm_after_fold\n") } else { print("  FAIL T51 get_imm_after_fold\n") }
+    if test_cf_propagate_mul_chain() { passed = passed + 1; print("  T52 OK propagate_mul_chain\n") } else { print("  FAIL T52 propagate_mul_chain\n") }
+    if test_cf_propagate_sub() { passed = passed + 1; print("  T53 OK propagate_sub\n") } else { print("  FAIL T53 propagate_sub\n") }
+    if test_cf_propagate_div() { passed = passed + 1; print("  T54 OK propagate_div\n") } else { print("  FAIL T54 propagate_div\n") }
+    if test_cf_propagate_mov() { passed = passed + 1; print("  T55 OK propagate_mov\n") } else { print("  FAIL T55 propagate_mov\n") }
+    if test_cf_propagate_and() { passed = passed + 1; print("  T56 OK propagate_and\n") } else { print("  FAIL T56 propagate_and\n") }
+    if test_cf_propagate_or() { passed = passed + 1; print("  T57 OK propagate_or\n") } else { print("  FAIL T57 propagate_or\n") }
+    if test_cf_propagate_xor() { passed = passed + 1; print("  T58 OK propagate_xor\n") } else { print("  FAIL T58 propagate_xor\n") }
+    if test_cf_fold_mul_unknown() { passed = passed + 1; print("  T59 OK fold_mul_unknown\n") } else { print("  FAIL T59 fold_mul_unknown\n") }
+    if test_cf_fold_sub_unknown() { passed = passed + 1; print("  T60 OK fold_sub_unknown\n") } else { print("  FAIL T60 fold_sub_unknown\n") }
+    if test_cf_stats_new() { passed = passed + 1; print("  T61 OK stats_new\n") } else { print("  FAIL T61 stats_new\n") }
+    if test_cf_instr_nop_opcode() { passed = passed + 1; print("  T62 OK instr_nop_opcode\n") } else { print("  FAIL T62 instr_nop_opcode\n") }
+    if test_cf_instr_imm_opcode() { passed = passed + 1; print("  T63 OK instr_imm_opcode\n") } else { print("  FAIL T63 instr_imm_opcode\n") }
+    if test_cf_instr_imm_value() { passed = passed + 1; print("  T64 OK instr_imm_value\n") } else { print("  FAIL T64 instr_imm_value\n") }
+    if test_cf_env_set_updates_count() { passed = passed + 1; print("  T65 OK env_set_updates_count\n") } else { print("  FAIL T65 env_set_updates_count\n") }
+    if test_cf_propagate_no_fold() { passed = passed + 1; print("  T66 OK propagate_no_fold\n") } else { print("  FAIL T66 propagate_no_fold\n") }
+    if test_cf_fold_cmp_float() { passed = passed + 1; print("  T67 OK fold_cmp_float\n") } else { print("  FAIL T67 fold_cmp_float\n") }
+    if test_cf_get_opcode_oob() { passed = passed + 1; print("  T68 OK get_opcode_oob\n") } else { print("  FAIL T68 get_opcode_oob\n") }
+    if test_cf_is_folded_before() { passed = passed + 1; print("  T69 OK is_folded_before\n") } else { print("  FAIL T69 is_folded_before\n") }
+    if test_cf_is_unfolded_imm() { passed = passed + 1; print("  T70 OK is_unfolded_imm\n") } else { print("  FAIL T70 is_unfolded_imm\n") }
+
+    print("\nCF: ")
+    print_int(passed)
+    print(" / ")
+    print_int(total)
+    print(" passed\n")
+
+    if passed == total { 0 } else { 1 }
+}

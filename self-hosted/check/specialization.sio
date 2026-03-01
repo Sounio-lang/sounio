@@ -1,0 +1,1337 @@
+// self-hosted::check::specialization — Generic specialization tracker
+//
+// Tracks which generic functions and structs have been specialized
+// (monomorphized) for specific type arguments.  Maintains a deduplication
+// table so each (fn_name, type_arg) pair is specialized at most once, and
+// a pending-work queue for the driver loop.
+//
+// All storage is fixed-size arrays — no heap allocation.
+//
+// Algorithm:
+//   1. When a generic call site is encountered, call spec_table_lookup.
+//   2. If not found, call spec_table_insert — returns the mangled name.
+//   3. Push the (fn_name, type_arg) key to spec_queue for the work loop.
+//   4. Driver dequeues keys, generates specialized copies, marks done.
+//
+// Name mangling:
+//   spec_mangle_name("map", "i64") -> "map__i64"
+//   Double-underscore separator distinguishes from normal identifiers.
+//
+// References:
+//   Kennedy & Syme: "Design and Implementation of Generics for the .NET CLR"
+//   (PLDI 2001) — monomorphization vs. sharing trade-offs.
+//   Peyton Jones et al.: "Implementing Type Classes" (PLDI 1993) — dictionary
+//   passing vs. specialization.
+
+// ============================================================================
+// Section 1: Constants
+// ============================================================================
+
+let SPEC_TABLE_CAP: i64 = 512
+let SPEC_QUEUE_CAP: i64 = 256
+let SPEC_NOT_FOUND: i64 = 0 - 1
+let SPEC_NAME_MAX: i64  = 128
+
+// Well-known primitive type argument names (used for testing and hashing).
+let SPEC_TY_I64: i64    = 1
+let SPEC_TY_F64: i64    = 2
+let SPEC_TY_BOOL: i64   = 3
+let SPEC_TY_STRING: i64 = 4
+let SPEC_TY_I32: i64    = 5
+let SPEC_TY_U8: i64     = 6
+let SPEC_TY_U32: i64    = 7
+let SPEC_TY_U64: i64    = 8
+let SPEC_TY_F32: i64    = 9
+let SPEC_TY_I8: i64     = 10
+let SPEC_TY_UNIT: i64   = 11
+let SPEC_TY_UNKNOWN: i64 = 0
+
+// ============================================================================
+// Section 2: Data Structures
+// ============================================================================
+
+// A specialization key: identifies one (fn, type_arg) pair.
+// We store names as hash integers to avoid string ownership issues
+// in the fixed-size table.  fn_hash and type_hash are stable hashes
+// of the original name strings.
+struct SpecKey {
+    fn_hash: i64,
+    type_hash: i64,
+    // Cached short label (first 16 ASCII bytes of fn_name + type_arg).
+    label: [i64; 16],
+    label_len: i64,
+}
+
+// One row in the specialization table.
+struct SpecEntry {
+    key: SpecKey,
+    // The mangled name hash for the specialized function.
+    specialized_hash: i64,
+    // Whether specialization has been completed (body generated).
+    done: bool,
+    // Slot is occupied.
+    occupied: bool,
+}
+
+// The full deduplication table mapping (fn, type_arg) -> specialized_hash.
+struct SpecTable {
+    entries: [SpecEntry; 512],
+    count: i64,
+    // Total successful insertions (including deduped).
+    total_inserts: i64,
+    // Number of lookups that hit an existing entry.
+    cache_hits: i64,
+}
+
+// Pending-work queue: FIFO of SpecKeys awaiting specialization.
+struct SpecQueue {
+    keys: [SpecKey; 256],
+    head: i64,
+    tail: i64,
+    // Total keys ever enqueued (for statistics).
+    total_pushed: i64,
+}
+
+// Statistics summary from a specialization pass.
+struct SpecStats {
+    total_entries: i64,
+    completed: i64,
+    pending: i64,
+    cache_hits: i64,
+    total_inserts: i64,
+}
+
+// ============================================================================
+// Section 3: Hash Utilities
+// ============================================================================
+
+// Compute a simple polynomial rolling hash for a single i64 value sequence.
+// Combines two i64 seeds using the FNV-1a mixing strategy.
+fn spec_mix_hash(a: i64, b: i64) -> i64 {
+    // FNV-1a inspired: XOR then multiply by prime 0x100000001B3
+    // We keep only the low bits for stability.
+    let prime: i64 = 1099511628211
+    let h = a * prime
+    let r = h + b
+    // Ensure non-negative (Sounio i64 arithmetic may produce negatives).
+    if r < 0 { return 0 - r }
+    r
+}
+
+// Hash an integer tag (used for type argument kinds).
+fn spec_hash_type_tag(tag: i64) -> i64 {
+    spec_mix_hash(6364136223846793005, tag)
+}
+
+// Produce a combined key hash for (fn_hash, type_hash).
+fn spec_key_hash(fn_hash: i64, type_hash: i64) -> i64 {
+    spec_mix_hash(fn_hash, type_hash)
+}
+
+// Check equality of two SpecKey values.
+fn spec_key_eq(a: SpecKey, b: SpecKey) -> bool {
+    if a.fn_hash != b.fn_hash { return false }
+    if a.type_hash != b.type_hash { return false }
+    true
+}
+
+// Build a label array from two i64 tag values.
+// Uses a compact encoding: stores fn_hash and type_hash as 8 bytes each.
+fn spec_make_label(fn_hash: i64, type_hash: i64) -> [i64; 16] {
+    var label: [i64; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    label[0] = fn_hash
+    label[1] = type_hash
+    label
+}
+
+// ============================================================================
+// Section 4: SpecKey Constructors
+// ============================================================================
+
+fn spec_key_empty() -> SpecKey {
+    SpecKey {
+        fn_hash: 0,
+        type_hash: 0,
+        label: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        label_len: 0,
+    }
+}
+
+// Build a SpecKey from pre-computed hashes.
+fn spec_key_from_hashes(fn_hash: i64, type_hash: i64) -> SpecKey {
+    SpecKey {
+        fn_hash: fn_hash,
+        type_hash: type_hash,
+        label: spec_make_label(fn_hash, type_hash),
+        label_len: 2,
+    }
+}
+
+// Build a SpecKey for a primitive type argument.
+// fn_hash is the caller's stable hash; type_tag is one of SPEC_TY_*.
+fn spec_key_prim(fn_hash: i64, type_tag: i64) -> SpecKey {
+    let th = spec_hash_type_tag(type_tag)
+    spec_key_from_hashes(fn_hash, th)
+}
+
+// ============================================================================
+// Section 5: SpecEntry Constructors
+// ============================================================================
+
+fn spec_entry_empty() -> SpecEntry {
+    SpecEntry {
+        key: spec_key_empty(),
+        specialized_hash: 0,
+        done: false,
+        occupied: false,
+    }
+}
+
+fn spec_entry_new(key: SpecKey, specialized_hash: i64) -> SpecEntry {
+    SpecEntry {
+        key: key,
+        specialized_hash: specialized_hash,
+        done: false,
+        occupied: true,
+    }
+}
+
+// ============================================================================
+// Section 6: SpecTable Constructors and Operations
+// ============================================================================
+
+fn spec_table_new() -> SpecTable {
+    SpecTable {
+        entries: [spec_entry_empty(); 512],
+        count: 0,
+        total_inserts: 0,
+        cache_hits: 0,
+    }
+}
+
+// Open-addressing linear probe: find slot for (fn_hash, type_hash).
+fn spec_table_probe(t: &SpecTable, fn_hash: i64, type_hash: i64) -> i64 {
+    let h = spec_key_hash(fn_hash, type_hash)
+    var slot = h % SPEC_TABLE_CAP
+    if slot < 0 { slot = 0 - slot }
+    var probe: i64 = 0
+    while probe < SPEC_TABLE_CAP {
+        let e = t.entries[slot as usize]
+        if e.occupied == false { return slot }
+        if e.key.fn_hash == fn_hash {
+            if e.key.type_hash == type_hash { return slot }
+        }
+        slot = (slot + 1) % SPEC_TABLE_CAP
+        probe = probe + 1
+    }
+    SPEC_NOT_FOUND
+}
+
+// Look up a (fn_hash, type_hash) pair.  Returns the SpecEntry index (>= 0)
+// or SPEC_NOT_FOUND if absent.
+fn spec_table_lookup_hashes(t: &SpecTable, fn_hash: i64, type_hash: i64) -> i64 {
+    let h = spec_key_hash(fn_hash, type_hash)
+    var slot = h % SPEC_TABLE_CAP
+    if slot < 0 { slot = 0 - slot }
+    var probe: i64 = 0
+    while probe < SPEC_TABLE_CAP {
+        let e = t.entries[slot as usize]
+        if e.occupied == false { return SPEC_NOT_FOUND }
+        if e.key.fn_hash == fn_hash {
+            if e.key.type_hash == type_hash { return slot }
+        }
+        slot = (slot + 1) % SPEC_TABLE_CAP
+        probe = probe + 1
+    }
+    SPEC_NOT_FOUND
+}
+
+// Public API: lookup by integer hashes; returns entry index or SPEC_NOT_FOUND.
+fn spec_table_lookup(t: &SpecTable, fn_hash: i64, type_hash: i64) -> i64 {
+    spec_table_lookup_hashes(t, fn_hash, type_hash)
+}
+
+// Insert a new specialization entry.  If already present, returns existing
+// specialized_hash.  Returns SPEC_NOT_FOUND if table is full.
+fn spec_table_insert_hashes(t: &! SpecTable, fn_hash: i64, type_hash: i64, specialized_hash: i64) -> i64 with Mut, Panic, Div {
+    // Check for existing entry first.
+    let existing = spec_table_lookup_hashes(t, fn_hash, type_hash)
+    if existing != SPEC_NOT_FOUND {
+        t.cache_hits = t.cache_hits + 1
+        return t.entries[existing as usize].specialized_hash
+    }
+    // Table full?
+    if t.count >= SPEC_TABLE_CAP { return SPEC_NOT_FOUND }
+    // Find insertion slot.
+    let h = spec_key_hash(fn_hash, type_hash)
+    var slot = h % SPEC_TABLE_CAP
+    if slot < 0 { slot = 0 - slot }
+    var probe: i64 = 0
+    while probe < SPEC_TABLE_CAP {
+        let e = t.entries[slot as usize]
+        if e.occupied == false {
+            let key = spec_key_from_hashes(fn_hash, type_hash)
+            t.entries[slot as usize] = spec_entry_new(key, specialized_hash)
+            t.count = t.count + 1
+            t.total_inserts = t.total_inserts + 1
+            return specialized_hash
+        }
+        slot = (slot + 1) % SPEC_TABLE_CAP
+        probe = probe + 1
+    }
+    SPEC_NOT_FOUND
+}
+
+// Mark an entry as done (body generated).
+fn spec_table_mark_done(t: &! SpecTable, fn_hash: i64, type_hash: i64) with Mut, Panic {
+    let idx = spec_table_lookup_hashes(t, fn_hash, type_hash)
+    if idx == SPEC_NOT_FOUND { return }
+    t.entries[idx as usize].done = true
+}
+
+// Check if an entry is marked done.
+fn spec_table_is_done(t: &SpecTable, fn_hash: i64, type_hash: i64) -> bool {
+    let idx = spec_table_lookup_hashes(t, fn_hash, type_hash)
+    if idx == SPEC_NOT_FOUND { return false }
+    t.entries[idx as usize].done
+}
+
+// Get the specialized_hash for an existing entry (returns 0 if not found).
+fn spec_table_get_hash(t: &SpecTable, fn_hash: i64, type_hash: i64) -> i64 {
+    let idx = spec_table_lookup_hashes(t, fn_hash, type_hash)
+    if idx == SPEC_NOT_FOUND { return 0 }
+    t.entries[idx as usize].specialized_hash
+}
+
+// Count how many entries are marked done.
+fn spec_table_count_done(t: &SpecTable) -> i64 {
+    var done: i64 = 0
+    var i: i64 = 0
+    while i < SPEC_TABLE_CAP {
+        if t.entries[i as usize].occupied {
+            if t.entries[i as usize].done {
+                done = done + 1
+            }
+        }
+        i = i + 1
+    }
+    done
+}
+
+// Count how many entries are pending (not yet done).
+fn spec_table_count_pending(t: &SpecTable) -> i64 {
+    var pending: i64 = 0
+    var i: i64 = 0
+    while i < SPEC_TABLE_CAP {
+        if t.entries[i as usize].occupied {
+            if t.entries[i as usize].done == false {
+                pending = pending + 1
+            }
+        }
+        i = i + 1
+    }
+    pending
+}
+
+// Collect all pending keys into a flat array (at most max_out).
+// Returns the number collected.
+fn spec_table_pending_keys(t: &SpecTable, out: &! [SpecKey; 256], max_out: i64) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < SPEC_TABLE_CAP {
+        if count >= max_out { return count }
+        let e = t.entries[i as usize]
+        if e.occupied {
+            if e.done == false {
+                out[count as usize] = e.key
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// Section 7: SpecQueue Operations
+// ============================================================================
+
+fn spec_queue_new() -> SpecQueue {
+    SpecQueue {
+        keys: [spec_key_empty(); 256],
+        head: 0,
+        tail: 0,
+        total_pushed: 0,
+    }
+}
+
+// Returns true if the queue is empty.
+fn spec_queue_empty(q: &SpecQueue) -> bool {
+    q.head == q.tail
+}
+
+// Returns the number of items currently in the queue.
+fn spec_queue_size(q: &SpecQueue) -> i64 {
+    let diff = q.tail - q.head
+    if diff < 0 { return diff + SPEC_QUEUE_CAP }
+    diff
+}
+
+// Push a SpecKey onto the queue.  Panics (returns early) if full.
+fn spec_queue_push(q: &! SpecQueue, key: SpecKey) with Mut, Panic {
+    let next_tail = (q.tail + 1) % SPEC_QUEUE_CAP
+    if next_tail == q.head {
+        // Queue full — silently drop (capacity should be sufficient in practice).
+        return
+    }
+    q.keys[q.tail as usize] = key
+    q.tail = next_tail
+    q.total_pushed = q.total_pushed + 1
+}
+
+// Push by hashes.
+fn spec_queue_push_hashes(q: &! SpecQueue, fn_hash: i64, type_hash: i64) with Mut, Panic {
+    let key = spec_key_from_hashes(fn_hash, type_hash)
+    spec_queue_push(q, key)
+}
+
+// Pop a SpecKey from the front of the queue.  Returns spec_key_empty() if empty.
+fn spec_queue_pop(q: &! SpecQueue) -> SpecKey with Mut, Panic {
+    if spec_queue_empty(q) { return spec_key_empty() }
+    let key = q.keys[q.head as usize]
+    q.head = (q.head + 1) % SPEC_QUEUE_CAP
+    key
+}
+
+// Peek at the front without removing.
+fn spec_queue_peek(q: &SpecQueue) -> SpecKey {
+    if q.head == q.tail { return spec_key_empty() }
+    q.keys[q.head as usize]
+}
+
+// ============================================================================
+// Section 8: Name Mangling
+// ============================================================================
+
+// Compute a mangled name hash for (fn_hash, type_hash).
+// Encoding: H(fn_hash, separator_hash, type_hash)
+// The separator is the hash of the double-underscore string "__".
+fn spec_mangle_hash(fn_hash: i64, type_hash: i64) -> i64 {
+    let sep: i64 = 7103070
+    spec_mix_hash(spec_mix_hash(fn_hash, sep), type_hash)
+}
+
+// Compute the type hash for a well-known primitive type tag.
+fn spec_type_hash_for_tag(tag: i64) -> i64 {
+    spec_hash_type_tag(tag)
+}
+
+// Map a primitive type tag to a string label index (for display in tests).
+// Returns a code: 1=i64, 2=f64, 3=bool, 4=string, 5=i32, 6=u8, 7=u32,
+//                 8=u64, 9=f32, 10=i8, 11=unit, 0=unknown
+fn spec_type_tag_name_code(tag: i64) -> i64 {
+    if tag == SPEC_TY_I64    { return 1 }
+    if tag == SPEC_TY_F64    { return 2 }
+    if tag == SPEC_TY_BOOL   { return 3 }
+    if tag == SPEC_TY_STRING { return 4 }
+    if tag == SPEC_TY_I32    { return 5 }
+    if tag == SPEC_TY_U8     { return 6 }
+    if tag == SPEC_TY_U32    { return 7 }
+    if tag == SPEC_TY_U64    { return 8 }
+    if tag == SPEC_TY_F32    { return 9 }
+    if tag == SPEC_TY_I8     { return 10 }
+    if tag == SPEC_TY_UNIT   { return 11 }
+    0
+}
+
+// Check if two mangled hashes collide (they should not for distinct inputs).
+fn spec_mangle_distinct(fh1: i64, th1: i64, fh2: i64, th2: i64) -> bool {
+    let m1 = spec_mangle_hash(fh1, th1)
+    let m2 = spec_mangle_hash(fh2, th2)
+    m1 != m2
+}
+
+// ============================================================================
+// Section 9: Statistics
+// ============================================================================
+
+fn spec_stats_from_table(t: &SpecTable) -> SpecStats {
+    SpecStats {
+        total_entries: t.count,
+        completed: spec_table_count_done(t),
+        pending: spec_table_count_pending(t),
+        cache_hits: t.cache_hits,
+        total_inserts: t.total_inserts,
+    }
+}
+
+fn spec_stats_new() -> SpecStats {
+    SpecStats {
+        total_entries: 0,
+        completed: 0,
+        pending: 0,
+        cache_hits: 0,
+        total_inserts: 0,
+    }
+}
+
+// ============================================================================
+// Section 10: High-Level Driver Helpers
+// ============================================================================
+
+// Register a specialization request for (fn_hash, type_tag).
+// Inserts into table (if new) and pushes to queue (if new).
+// Returns the mangled hash for the specialization.
+fn spec_request(t: &! SpecTable, q: &! SpecQueue, fn_hash: i64, type_tag: i64) -> i64 with Mut, Panic, Div {
+    let type_hash = spec_hash_type_tag(type_tag)
+    let mangled = spec_mangle_hash(fn_hash, type_hash)
+    let result = spec_table_insert_hashes(t, fn_hash, type_hash, mangled)
+    if result == mangled {
+        // Freshly inserted: push to work queue.
+        spec_queue_push_hashes(q, fn_hash, type_hash)
+    }
+    mangled
+}
+
+// Process the next pending specialization.
+// Returns the SpecKey that was dequeued (check spec_key_eq with empty to detect done).
+fn spec_process_next(t: &! SpecTable, q: &! SpecQueue) -> SpecKey with Mut, Panic {
+    if spec_queue_empty(q) { return spec_key_empty() }
+    let key = spec_queue_pop(q)
+    // Mark as done in table.
+    spec_table_mark_done(t, key.fn_hash, key.type_hash)
+    key
+}
+
+// Drain entire queue, marking all as done.
+// Returns number processed.
+fn spec_drain(t: &! SpecTable, q: &! SpecQueue) -> i64 with Mut, Panic, Div {
+    var count: i64 = 0
+    while spec_queue_empty(q) == false {
+        let key = spec_queue_pop(q)
+        spec_table_mark_done(t, key.fn_hash, key.type_hash)
+        count = count + 1
+    }
+    count
+}
+
+// Check whether specialization for (fn_hash, type_tag) already exists.
+fn spec_exists(t: &SpecTable, fn_hash: i64, type_tag: i64) -> bool {
+    let type_hash = spec_hash_type_tag(type_tag)
+    spec_table_lookup_hashes(t, fn_hash, type_hash) != SPEC_NOT_FOUND
+}
+
+// Check whether specialization for (fn_hash, type_tag) is complete.
+fn spec_is_done(t: &SpecTable, fn_hash: i64, type_tag: i64) -> bool {
+    let type_hash = spec_hash_type_tag(type_tag)
+    spec_table_is_done(t, fn_hash, type_hash)
+}
+
+// ============================================================================
+// Section 11: Batch Operations
+// ============================================================================
+
+// Request specializations for a function over multiple primitive type tags.
+// Returns the number of new specializations inserted.
+fn spec_request_all_prims(t: &! SpecTable, q: &! SpecQueue, fn_hash: i64) -> i64 with Mut, Panic, Div {
+    var inserted: i64 = 0
+    var tag: i64 = 1
+    while tag <= 11 {
+        let type_hash = spec_hash_type_tag(tag)
+        let mangled = spec_mangle_hash(fn_hash, type_hash)
+        let before = t.count
+        let result = spec_table_insert_hashes(t, fn_hash, type_hash, mangled)
+        if t.count > before {
+            spec_queue_push_hashes(q, fn_hash, type_hash)
+            inserted = inserted + 1
+        }
+        tag = tag + 1
+    }
+    inserted
+}
+
+// Count how many of the primitive types have been specialized for fn_hash.
+fn spec_count_prim_specializations(t: &SpecTable, fn_hash: i64) -> i64 {
+    var count: i64 = 0
+    var tag: i64 = 1
+    while tag <= 11 {
+        let type_hash = spec_hash_type_tag(tag)
+        if spec_table_lookup_hashes(t, fn_hash, type_hash) != SPEC_NOT_FOUND {
+            count = count + 1
+        }
+        tag = tag + 1
+    }
+    count
+}
+
+// ============================================================================
+// Section 12: Table Integrity Checks
+// ============================================================================
+
+// Verify that every occupied slot has a non-zero specialized_hash.
+fn spec_table_valid(t: &SpecTable) -> bool {
+    var i: i64 = 0
+    while i < SPEC_TABLE_CAP {
+        let e = t.entries[i as usize]
+        if e.occupied {
+            if e.specialized_hash == 0 { return false }
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Verify that count matches actual occupied slots.
+fn spec_table_count_consistent(t: &SpecTable) -> bool {
+    var actual: i64 = 0
+    var i: i64 = 0
+    while i < SPEC_TABLE_CAP {
+        if t.entries[i as usize].occupied { actual = actual + 1 }
+        i = i + 1
+    }
+    actual == t.count
+}
+
+// ============================================================================
+// Section 13: Test Helpers
+// ============================================================================
+
+// Stable test hashes for commonly used function names.
+let TEST_FN_MAP: i64 = 1000001
+let TEST_FN_FILTER: i64 = 1000002
+let TEST_FN_FOLD: i64 = 1000003
+let TEST_FN_SORT: i64 = 1000004
+let TEST_FN_FIND: i64 = 1000005
+let TEST_FN_IDENTITY: i64 = 1000006
+let TEST_FN_COMPOSE: i64 = 1000007
+let TEST_FN_ZIP: i64 = 1000008
+let TEST_FN_FLAT: i64 = 1000009
+let TEST_FN_SCAN: i64 = 1000010
+
+// Insert a known (fn_hash, type_tag) pair and return if successful.
+fn spec_test_insert(t: &! SpecTable, q: &! SpecQueue, fn_hash: i64, tag: i64) -> bool with Mut, Panic, Div {
+    let mh = spec_request(t, q, fn_hash, tag)
+    mh != 0
+}
+
+// ============================================================================
+// Section 14: Tests
+// ============================================================================
+
+// T01: New table has zero count.
+fn test_spec_table_new_count() -> bool {
+    let t = spec_table_new()
+    t.count == 0
+}
+
+// T02: New queue is empty.
+fn test_spec_queue_new_empty() -> bool {
+    let q = spec_queue_new()
+    spec_queue_empty(&q)
+}
+
+// T03: Lookup in empty table returns SPEC_NOT_FOUND.
+fn test_spec_lookup_empty() -> bool {
+    let t = spec_table_new()
+    spec_table_lookup(&t, TEST_FN_MAP, spec_hash_type_tag(SPEC_TY_I64)) == SPEC_NOT_FOUND
+}
+
+// T04: Insert one entry, count becomes 1.
+fn test_spec_insert_one() -> bool with Mut, Panic, Div {
+    var t = spec_table_new()
+    var q = spec_queue_new()
+    spec_request(&! t, &! q, TEST_FN_MAP, SPEC_TY_I64)
+    t.count == 1
+}
+
+// T05: After insert, lookup succeeds.
+fn test_spec_lookup_after_insert_inner(t: &! SpecTable, q: &! SpecQueue) -> bool with Mut, Panic, Div {
+    spec_request(t, q, TEST_FN_MAP, SPEC_TY_I64)
+    let th = spec_hash_type_tag(SPEC_TY_I64)
+    let idx = spec_table_lookup(t, TEST_FN_MAP, th)
+    idx != SPEC_NOT_FOUND
+}
+fn test_spec_lookup_after_insert() -> bool with Mut, Panic, Div {
+    var t = spec_table_new()
+    var q = spec_queue_new()
+    test_spec_lookup_after_insert_inner(&! t, &! q)
+}
+
+// T06: Duplicate insert returns same mangled hash.
+fn test_spec_insert_dedup_inner(t: &! SpecTable, q: &! SpecQueue) -> bool with Mut, Panic, Div {
+    let mh1 = spec_request(t, q, TEST_FN_MAP, SPEC_TY_I64)
+    let mh2 = spec_request(t, q, TEST_FN_MAP, SPEC_TY_I64)
+    mh1 == mh2
+}
+fn test_spec_insert_dedup() -> bool with Mut, Panic, Div {
+    var t = spec_table_new()
+    var q = spec_queue_new()
+    test_spec_insert_dedup_inner(&! t, &! q)
+}
+
+// T07: Duplicate insert does not increase count.
+fn test_spec_dedup_count() -> bool with Mut, Panic, Div {
+    var t = spec_table_new()
+    var q = spec_queue_new()
+    spec_request(&! t, &! q, TEST_FN_MAP, SPEC_TY_I64)
+    spec_request(&! t, &! q, TEST_FN_MAP, SPEC_TY_I64)
+    t.count == 1
+}
+
+// T08: Different type args produce different mangled hashes.
+fn test_spec_mangle_distinct_types() -> bool {
+    let fh = TEST_FN_MAP
+    let th1 = spec_hash_type_tag(SPEC_TY_I64)
+    let th2 = spec_hash_type_tag(SPEC_TY_F64)
+    let m1 = spec_mangle_hash(fh, th1)
+    let m2 = spec_mangle_hash(fh, th2)
+    m1 != m2
+}
+
+// T09: Different fn hashes produce different mangled hashes for same type.
+fn test_spec_mangle_distinct_fns() -> bool {
+    let th = spec_hash_type_tag(SPEC_TY_I64)
+    let m1 = spec_mangle_hash(TEST_FN_MAP, th)
+    let m2 = spec_mangle_hash(TEST_FN_FILTER, th)
+    m1 != m2
+}
+
+// T10: Queue push increases size by 1.
+fn test_spec_queue_push_size() -> bool with Mut, Panic {
+    var q = spec_queue_new()
+    let key = spec_key_prim(TEST_FN_MAP, SPEC_TY_I64)
+    spec_queue_push(&! q, key)
+    spec_queue_size(&q) == 1
+}
+
+// T11: Queue pop retrieves pushed key.
+fn test_spec_queue_pop() -> bool with Mut, Panic {
+    var q = spec_queue_new()
+    let key = spec_key_prim(TEST_FN_MAP, SPEC_TY_I64)
+    spec_queue_push(&! q, key)
+    let popped = spec_queue_pop(&! q)
+    spec_key_eq(popped, key)
+}
+
+// T12: Queue becomes empty after popping last element.
+fn test_spec_queue_empty_after_pop() -> bool with Mut, Panic {
+    var q = spec_queue_new()
+    let key = spec_key_prim(TEST_FN_MAP, SPEC_TY_I64)
+    spec_queue_push(&! q, key)
+    spec_queue_pop(&! q)
+    spec_queue_empty(&q)
+}
+
+// T13: Queue is FIFO: first in, first out.
+fn test_spec_queue_fifo_inner(q: &! SpecQueue, k1: SpecKey, k2: SpecKey) -> bool with Mut, Panic {
+    let p1 = spec_queue_pop(q)
+    let p2 = spec_queue_pop(q)
+    spec_key_eq(p1, k1) && spec_key_eq(p2, k2)
+}
+fn test_spec_queue_fifo() -> bool with Mut, Panic {
+    var q = spec_queue_new()
+    let k1 = spec_key_prim(TEST_FN_MAP, SPEC_TY_I64)
+    let k2 = spec_key_prim(TEST_FN_MAP, SPEC_TY_F64)
+    spec_queue_push(&! q, k1)
+    spec_queue_push(&! q, k2)
+    test_spec_queue_fifo_inner(&! q, k1, k2)
+}
+
+// T14: Queue size after two pushes and one pop = 1.
+fn test_spec_queue_size_after_mixed() -> bool with Mut, Panic {
+    var q = spec_queue_new()
+    let k1 = spec_key_prim(TEST_FN_MAP, SPEC_TY_I64)
+    let k2 = spec_key_prim(TEST_FN_MAP, SPEC_TY_F64)
+    spec_queue_push(&! q, k1)
+    spec_queue_push(&! q, k2)
+    spec_queue_pop(&! q)
+    spec_queue_size(&q) == 1
+}
+
+// T15: Two different type args insert independently.
+fn test_spec_insert_two_types() -> bool with Mut, Panic, Div {
+    var t = spec_table_new()
+    var q = spec_queue_new()
+    spec_request(&! t, &! q, TEST_FN_MAP, SPEC_TY_I64)
+    spec_request(&! t, &! q, TEST_FN_MAP, SPEC_TY_F64)
+    t.count == 2
+}
+
+// T16: Two different fns insert independently.
+fn test_spec_insert_two_fns() -> bool with Mut, Panic, Div {
+    var t = spec_table_new()
+    var q = spec_queue_new()
+    spec_request(&! t, &! q, TEST_FN_MAP, SPEC_TY_I64)
+    spec_request(&! t, &! q, TEST_FN_FILTER, SPEC_TY_I64)
+    t.count == 2
+}
+
+// T17: spec_exists returns false before insert.
+fn test_spec_exists_before_insert() -> bool with Mut, Panic {
+    let t = spec_table_new()
+    spec_exists(&t, TEST_FN_MAP, SPEC_TY_I64) == false
+}
+
+// T18: spec_exists returns true after insert.
+fn test_spec_exists_after_insert() -> bool with Mut, Panic, Div {
+    var t = spec_table_new()
+    var q = spec_queue_new()
+    spec_request(&! t, &! q, TEST_FN_MAP, SPEC_TY_I64)
+    spec_exists(&t, TEST_FN_MAP, SPEC_TY_I64)
+}
+
+// T19: spec_is_done returns false before mark.
+fn test_spec_is_done_before_mark() -> bool with Mut, Panic, Div {
+    var t = spec_table_new()
+    var q = spec_queue_new()
+    spec_request(&! t, &! q, TEST_FN_MAP, SPEC_TY_I64)
+    spec_is_done(&t, TEST_FN_MAP, SPEC_TY_I64) == false
+}
+
+// T20: spec_is_done returns true after mark_done.
+fn test_spec_is_done_after_mark() -> bool with Mut, Panic, Div {
+    var t = spec_table_new()
+    var q = spec_queue_new()
+    spec_request(&! t, &! q, TEST_FN_MAP, SPEC_TY_I64)
+    let th = spec_hash_type_tag(SPEC_TY_I64)
+    spec_table_mark_done(&! t, TEST_FN_MAP, th)
+    spec_is_done(&t, TEST_FN_MAP, SPEC_TY_I64)
+}
+
+// T21: spec_process_next pops queue and marks done.
+fn test_spec_process_next() -> bool with Mut, Panic, Div {
+    var t = spec_table_new()
+    var q = spec_queue_new()
+    spec_request(&! t, &! q, TEST_FN_MAP, SPEC_TY_I64)
+    spec_process_next(&! t, &! q)
+    spec_is_done(&t, TEST_FN_MAP, SPEC_TY_I64)
+}
+
+// T22: spec_drain empties the queue.
+fn test_spec_drain_empties_queue() -> bool with Mut, Panic, Div {
+    var t = spec_table_new()
+    var q = spec_queue_new()
+    spec_request(&! t, &! q, TEST_FN_MAP, SPEC_TY_I64)
+    spec_request(&! t, &! q, TEST_FN_FILTER, SPEC_TY_F64)
+    spec_drain(&! t, &! q)
+    spec_queue_empty(&q)
+}
+
+// T23: spec_drain returns count of items processed.
+fn test_spec_drain_count() -> bool with Mut, Panic, Div {
+    var t = spec_table_new()
+    var q = spec_queue_new()
+    spec_request(&! t, &! q, TEST_FN_MAP, SPEC_TY_I64)
+    spec_request(&! t, &! q, TEST_FN_FILTER, SPEC_TY_F64)
+    let count = spec_drain(&! t, &! q)
+    count == 2
+}
+
+// T24: count_done = 0 before any processing.
+fn test_spec_count_done_initial() -> bool with Mut, Panic, Div {
+    var t = spec_table_new()
+    var q = spec_queue_new()
+    spec_request(&! t, &! q, TEST_FN_MAP, SPEC_TY_I64)
+    spec_table_count_done(&t) == 0
+}
+
+// T25: count_done = 1 after processing one.
+fn test_spec_count_done_one() -> bool with Mut, Panic, Div {
+    var t = spec_table_new()
+    var q = spec_queue_new()
+    spec_request(&! t, &! q, TEST_FN_MAP, SPEC_TY_I64)
+    spec_process_next(&! t, &! q)
+    spec_table_count_done(&t) == 1
+}
+
+// T26: count_pending = 1 before processing.
+fn test_spec_count_pending_one() -> bool with Mut, Panic, Div {
+    var t = spec_table_new()
+    var q = spec_queue_new()
+    spec_request(&! t, &! q, TEST_FN_MAP, SPEC_TY_I64)
+    spec_table_count_pending(&t) == 1
+}
+
+// T27: count_pending = 0 after drain.
+fn test_spec_count_pending_zero_after_drain() -> bool with Mut, Panic, Div {
+    var t = spec_table_new()
+    var q = spec_queue_new()
+    spec_request(&! t, &! q, TEST_FN_MAP, SPEC_TY_I64)
+    spec_request(&! t, &! q, TEST_FN_FILTER, SPEC_TY_F64)
+    spec_drain(&! t, &! q)
+    spec_table_count_pending(&t) == 0
+}
+
+// T28: spec_table_valid on empty table.
+fn test_spec_table_valid_empty() -> bool {
+    let t = spec_table_new()
+    spec_table_valid(&t)
+}
+
+// T29: spec_table_valid after insertions.
+fn test_spec_table_valid_after_insert() -> bool with Mut, Panic, Div {
+    var t = spec_table_new()
+    var q = spec_queue_new()
+    spec_request(&! t, &! q, TEST_FN_MAP, SPEC_TY_I64)
+    spec_request(&! t, &! q, TEST_FN_FILTER, SPEC_TY_F64)
+    spec_table_valid(&t)
+}
+
+// T30: spec_table_count_consistent on empty table.
+fn test_spec_count_consistent_empty() -> bool {
+    let t = spec_table_new()
+    spec_table_count_consistent(&t)
+}
+
+// T31: spec_table_count_consistent after insertions.
+fn test_spec_count_consistent_after_insert() -> bool with Mut, Panic, Div {
+    var t = spec_table_new()
+    var q = spec_queue_new()
+    spec_request(&! t, &! q, TEST_FN_MAP, SPEC_TY_I64)
+    spec_request(&! t, &! q, TEST_FN_FILTER, SPEC_TY_F64)
+    spec_table_count_consistent(&t)
+}
+
+// T32: cache_hits increments on duplicate insert.
+fn test_spec_cache_hits() -> bool with Mut, Panic, Div {
+    var t = spec_table_new()
+    var q = spec_queue_new()
+    spec_request(&! t, &! q, TEST_FN_MAP, SPEC_TY_I64)
+    spec_request(&! t, &! q, TEST_FN_MAP, SPEC_TY_I64)
+    t.cache_hits >= 1
+}
+
+// T33: total_inserts tracks fresh insertions.
+fn test_spec_total_inserts() -> bool with Mut, Panic, Div {
+    var t = spec_table_new()
+    var q = spec_queue_new()
+    spec_request(&! t, &! q, TEST_FN_MAP, SPEC_TY_I64)
+    spec_request(&! t, &! q, TEST_FN_FILTER, SPEC_TY_F64)
+    spec_request(&! t, &! q, TEST_FN_MAP, SPEC_TY_I64)  // duplicate
+    t.total_inserts == 2
+}
+
+// T34: total_pushed on queue = number of new specializations.
+fn test_spec_queue_total_pushed() -> bool with Mut, Panic, Div {
+    var t = spec_table_new()
+    var q = spec_queue_new()
+    spec_request(&! t, &! q, TEST_FN_MAP, SPEC_TY_I64)
+    spec_request(&! t, &! q, TEST_FN_FILTER, SPEC_TY_F64)
+    q.total_pushed == 2
+}
+
+// T35: Duplicate does not push to queue again.
+fn test_spec_duplicate_no_extra_push() -> bool with Mut, Panic, Div {
+    var t = spec_table_new()
+    var q = spec_queue_new()
+    spec_request(&! t, &! q, TEST_FN_MAP, SPEC_TY_I64)
+    spec_request(&! t, &! q, TEST_FN_MAP, SPEC_TY_I64)
+    q.total_pushed == 1
+}
+
+// T36: spec_key_eq on same key.
+fn test_spec_key_eq_same() -> bool {
+    let k1 = spec_key_prim(TEST_FN_MAP, SPEC_TY_I64)
+    let k2 = spec_key_prim(TEST_FN_MAP, SPEC_TY_I64)
+    spec_key_eq(k1, k2)
+}
+
+// T37: spec_key_eq on different fn_hash.
+fn test_spec_key_eq_diff_fn() -> bool {
+    let k1 = spec_key_prim(TEST_FN_MAP, SPEC_TY_I64)
+    let k2 = spec_key_prim(TEST_FN_FILTER, SPEC_TY_I64)
+    spec_key_eq(k1, k2) == false
+}
+
+// T38: spec_key_eq on different type_hash.
+fn test_spec_key_eq_diff_type() -> bool {
+    let k1 = spec_key_prim(TEST_FN_MAP, SPEC_TY_I64)
+    let k2 = spec_key_prim(TEST_FN_MAP, SPEC_TY_F64)
+    spec_key_eq(k1, k2) == false
+}
+
+// T39: spec_stats_from_table returns correct totals.
+fn test_spec_stats_from_table() -> bool with Mut, Panic, Div {
+    var t = spec_table_new()
+    var q = spec_queue_new()
+    spec_request(&! t, &! q, TEST_FN_MAP, SPEC_TY_I64)
+    spec_request(&! t, &! q, TEST_FN_FILTER, SPEC_TY_F64)
+    spec_process_next(&! t, &! q)
+    let s = spec_stats_from_table(&t)
+    s.total_entries == 2 && s.completed == 1 && s.pending == 1
+}
+
+// T40: spec_request_all_prims inserts 11 entries.
+fn test_spec_request_all_prims() -> bool with Mut, Panic, Div {
+    var t = spec_table_new()
+    var q = spec_queue_new()
+    let n = spec_request_all_prims(&! t, &! q, TEST_FN_IDENTITY)
+    n == 11 && t.count == 11
+}
+
+// T41: spec_count_prim_specializations after all prims = 11.
+fn test_spec_count_prim_specs() -> bool with Mut, Panic, Div {
+    var t = spec_table_new()
+    var q = spec_queue_new()
+    spec_request_all_prims(&! t, &! q, TEST_FN_IDENTITY)
+    spec_count_prim_specializations(&t, TEST_FN_IDENTITY) == 11
+}
+
+// T42: spec_count_prim_specializations for unrelated fn = 0.
+fn test_spec_count_prim_specs_zero() -> bool with Mut, Panic, Div {
+    var t = spec_table_new()
+    var q = spec_queue_new()
+    spec_request_all_prims(&! t, &! q, TEST_FN_IDENTITY)
+    spec_count_prim_specializations(&t, TEST_FN_FILTER) == 0
+}
+
+// T43: spec_mix_hash is symmetric only when args are same.
+fn test_spec_mix_hash_diff() -> bool {
+    let h1 = spec_mix_hash(100, 200)
+    let h2 = spec_mix_hash(200, 100)
+    // They CAN differ (asymmetric) — just verify they're both non-negative.
+    h1 >= 0 && h2 >= 0
+}
+
+// T44: spec_mangle_distinct for different type tags.
+fn test_spec_mangle_distinct_tags() -> bool {
+    let fh = TEST_FN_MAP
+    let th1 = spec_hash_type_tag(SPEC_TY_I64)
+    let th2 = spec_hash_type_tag(SPEC_TY_F64)
+    spec_mangle_distinct(fh, th1, fh, th2)
+}
+
+// T45: spec_type_tag_name_code covers all 11 known tags.
+fn test_spec_type_tag_name_codes() -> bool {
+    let ok1 = spec_type_tag_name_code(SPEC_TY_I64) == 1
+    let ok2 = spec_type_tag_name_code(SPEC_TY_F64) == 2
+    let ok3 = spec_type_tag_name_code(SPEC_TY_BOOL) == 3
+    let ok4 = spec_type_tag_name_code(SPEC_TY_STRING) == 4
+    let ok5 = spec_type_tag_name_code(SPEC_TY_I32) == 5
+    let ok6 = spec_type_tag_name_code(SPEC_TY_U8) == 6
+    let ok7 = spec_type_tag_name_code(SPEC_TY_U32) == 7
+    let ok8 = spec_type_tag_name_code(SPEC_TY_U64) == 8
+    let ok9 = spec_type_tag_name_code(SPEC_TY_F32) == 9
+    let ok10 = spec_type_tag_name_code(SPEC_TY_I8) == 10
+    let ok11 = spec_type_tag_name_code(SPEC_TY_UNIT) == 11
+    ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9 && ok10 && ok11
+}
+
+// T46: spec_type_tag_name_code for unknown returns 0.
+fn test_spec_type_tag_name_code_unknown() -> bool {
+    spec_type_tag_name_code(SPEC_TY_UNKNOWN) == 0
+}
+
+// T47: spec_queue_peek does not remove element.
+fn test_spec_queue_peek_no_remove() -> bool with Mut, Panic {
+    var q = spec_queue_new()
+    let key = spec_key_prim(TEST_FN_MAP, SPEC_TY_I64)
+    spec_queue_push(&! q, key)
+    spec_queue_peek(&q)
+    spec_queue_size(&q) == 1
+}
+
+// T48: spec_queue_peek returns same key as pop.
+fn test_spec_queue_peek_matches_pop_inner(q: &! SpecQueue) -> bool with Mut, Panic {
+    let peeked = spec_queue_peek(q)
+    let popped = spec_queue_pop(q)
+    spec_key_eq(peeked, popped)
+}
+fn test_spec_queue_peek_matches_pop() -> bool with Mut, Panic {
+    var q = spec_queue_new()
+    let key = spec_key_prim(TEST_FN_MAP, SPEC_TY_I64)
+    spec_queue_push(&! q, key)
+    test_spec_queue_peek_matches_pop_inner(&! q)
+}
+
+// T49: spec_table_pending_keys collects correct keys.
+fn test_spec_pending_keys() -> bool with Mut, Panic, Div {
+    var t = spec_table_new()
+    var q = spec_queue_new()
+    spec_request(&! t, &! q, TEST_FN_MAP, SPEC_TY_I64)
+    spec_request(&! t, &! q, TEST_FN_FILTER, SPEC_TY_F64)
+    var out: [SpecKey; 256] = [spec_key_empty(); 256]
+    let n = spec_table_pending_keys(&t, &! out, 256)
+    n == 2
+}
+
+// T50: After drain, pending_keys returns 0.
+fn test_spec_pending_keys_after_drain() -> bool with Mut, Panic, Div {
+    var t = spec_table_new()
+    var q = spec_queue_new()
+    spec_request(&! t, &! q, TEST_FN_MAP, SPEC_TY_I64)
+    spec_drain(&! t, &! q)
+    var out: [SpecKey; 256] = [spec_key_empty(); 256]
+    let n = spec_table_pending_keys(&t, &! out, 256)
+    n == 0
+}
+
+// T51: spec_table_get_hash returns mangled hash after insert.
+fn test_spec_get_hash_inner(t: &! SpecTable, q: &! SpecQueue) -> bool with Mut, Panic, Div {
+    let mh = spec_request(t, q, TEST_FN_MAP, SPEC_TY_I64)
+    let th = spec_hash_type_tag(SPEC_TY_I64)
+    let got = spec_table_get_hash(t, TEST_FN_MAP, th)
+    got == mh
+}
+fn test_spec_get_hash() -> bool with Mut, Panic, Div {
+    var t = spec_table_new()
+    var q = spec_queue_new()
+    test_spec_get_hash_inner(&! t, &! q)
+}
+
+// T52: spec_table_get_hash returns 0 for missing entry.
+fn test_spec_get_hash_missing() -> bool {
+    let t = spec_table_new()
+    spec_table_get_hash(&t, TEST_FN_MAP, 99999) == 0
+}
+
+// T53: Insert 10 distinct entries.
+fn test_spec_insert_ten() -> bool with Mut, Panic, Div {
+    var t = spec_table_new()
+    var q = spec_queue_new()
+    spec_request(&! t, &! q, TEST_FN_MAP, SPEC_TY_I64)
+    spec_request(&! t, &! q, TEST_FN_MAP, SPEC_TY_F64)
+    spec_request(&! t, &! q, TEST_FN_MAP, SPEC_TY_BOOL)
+    spec_request(&! t, &! q, TEST_FN_FILTER, SPEC_TY_I64)
+    spec_request(&! t, &! q, TEST_FN_FILTER, SPEC_TY_F64)
+    spec_request(&! t, &! q, TEST_FN_FOLD, SPEC_TY_I64)
+    spec_request(&! t, &! q, TEST_FN_FOLD, SPEC_TY_F64)
+    spec_request(&! t, &! q, TEST_FN_SORT, SPEC_TY_I64)
+    spec_request(&! t, &! q, TEST_FN_FIND, SPEC_TY_I64)
+    spec_request(&! t, &! q, TEST_FN_IDENTITY, SPEC_TY_STRING)
+    t.count == 10
+}
+
+// T54: Queue FIFO order with three elements.
+fn test_spec_queue_three_fifo_inner(q: &! SpecQueue, k1: SpecKey, k2: SpecKey, k3: SpecKey) -> bool with Mut, Panic {
+    let p1 = spec_queue_pop(q)
+    let p2 = spec_queue_pop(q)
+    let p3 = spec_queue_pop(q)
+    spec_key_eq(p1, k1) && spec_key_eq(p2, k2) && spec_key_eq(p3, k3)
+}
+fn test_spec_queue_three_fifo() -> bool with Mut, Panic {
+    var q = spec_queue_new()
+    let k1 = spec_key_prim(TEST_FN_MAP, SPEC_TY_I64)
+    let k2 = spec_key_prim(TEST_FN_FILTER, SPEC_TY_F64)
+    let k3 = spec_key_prim(TEST_FN_FOLD, SPEC_TY_BOOL)
+    spec_queue_push(&! q, k1)
+    spec_queue_push(&! q, k2)
+    spec_queue_push(&! q, k3)
+    test_spec_queue_three_fifo_inner(&! q, k1, k2, k3)
+}
+
+// T55: spec_hash_type_tag is deterministic.
+fn test_spec_hash_type_tag_deterministic() -> bool {
+    let h1 = spec_hash_type_tag(SPEC_TY_I64)
+    let h2 = spec_hash_type_tag(SPEC_TY_I64)
+    h1 == h2
+}
+
+// T56: spec_hash_type_tag produces distinct values for distinct tags.
+fn test_spec_hash_type_tag_distinct() -> bool {
+    let h1 = spec_hash_type_tag(SPEC_TY_I64)
+    let h2 = spec_hash_type_tag(SPEC_TY_F64)
+    let h3 = spec_hash_type_tag(SPEC_TY_BOOL)
+    h1 != h2 && h2 != h3 && h1 != h3
+}
+
+// T57: spec_key_from_hashes stores fn_hash and type_hash correctly.
+fn test_spec_key_from_hashes_fields() -> bool {
+    let fh: i64 = 42
+    let th: i64 = 99
+    let k = spec_key_from_hashes(fh, th)
+    k.fn_hash == fh && k.type_hash == th
+}
+
+// T58: spec_entry_new stores key and specialized_hash.
+fn test_spec_entry_new_fields() -> bool {
+    let key = spec_key_prim(TEST_FN_MAP, SPEC_TY_I64)
+    let e = spec_entry_new(key, 12345)
+    e.specialized_hash == 12345 && e.occupied
+}
+
+// T59: spec_entry_empty is not occupied.
+fn test_spec_entry_empty_not_occupied() -> bool {
+    let e = spec_entry_empty()
+    e.occupied == false
+}
+
+// T60: spec_stats_new has all zeros.
+fn test_spec_stats_new_zeros() -> bool {
+    let s = spec_stats_new()
+    s.total_entries == 0 && s.completed == 0 && s.pending == 0 && s.cache_hits == 0
+}
+
+// T61: Mark done on non-existent key is a no-op (no crash).
+fn test_spec_mark_done_nonexistent() -> bool with Mut, Panic {
+    var t = spec_table_new()
+    spec_table_mark_done(&! t, TEST_FN_MAP, 12345)
+    t.count == 0
+}
+
+// T62: spec_process_next on empty queue returns empty key.
+fn test_spec_process_next_empty() -> bool with Mut, Panic {
+    var t = spec_table_new()
+    var q = spec_queue_new()
+    let key = spec_process_next(&! t, &! q)
+    key.fn_hash == 0 && key.type_hash == 0
+}
+
+// T63: Queue total_pushed tracks pushes.
+fn test_spec_queue_total_pushed_increments() -> bool with Mut, Panic {
+    var q = spec_queue_new()
+    let k1 = spec_key_prim(TEST_FN_MAP, SPEC_TY_I64)
+    let k2 = spec_key_prim(TEST_FN_FILTER, SPEC_TY_F64)
+    spec_queue_push(&! q, k1)
+    spec_queue_push(&! q, k2)
+    q.total_pushed == 2
+}
+
+// T64: spec_queue_push_hashes works equivalently to spec_queue_push.
+fn test_spec_queue_push_hashes_equiv() -> bool with Mut, Panic {
+    var q = spec_queue_new()
+    let fh: i64 = TEST_FN_MAP
+    let th: i64 = spec_hash_type_tag(SPEC_TY_I64)
+    spec_queue_push_hashes(&! q, fh, th)
+    let peeked = spec_queue_peek(&q)
+    peeked.fn_hash == fh && peeked.type_hash == th
+}
+
+// T65: Checking specialize lookup after request_all_prims.
+fn test_spec_lookup_after_all_prims() -> bool with Mut, Panic, Div {
+    var t = spec_table_new()
+    var q = spec_queue_new()
+    spec_request_all_prims(&! t, &! q, TEST_FN_COMPOSE)
+    let th_f64 = spec_hash_type_tag(SPEC_TY_F64)
+    let idx = spec_table_lookup(&t, TEST_FN_COMPOSE, th_f64)
+    idx != SPEC_NOT_FOUND
+}
+
+// T66: spec_table_valid remains true after drain.
+fn test_spec_table_valid_after_drain() -> bool with Mut, Panic, Div {
+    var t = spec_table_new()
+    var q = spec_queue_new()
+    spec_request(&! t, &! q, TEST_FN_MAP, SPEC_TY_I64)
+    spec_request(&! t, &! q, TEST_FN_FILTER, SPEC_TY_F64)
+    spec_drain(&! t, &! q)
+    spec_table_valid(&t)
+}
+
+// T67: spec_count_consistent after drain.
+fn test_spec_count_consistent_after_drain() -> bool with Mut, Panic, Div {
+    var t = spec_table_new()
+    var q = spec_queue_new()
+    spec_request(&! t, &! q, TEST_FN_MAP, SPEC_TY_I64)
+    spec_drain(&! t, &! q)
+    spec_table_count_consistent(&t)
+}
+
+// T68: Pop from empty queue returns empty key (fn_hash=0, type_hash=0).
+fn test_spec_queue_pop_empty() -> bool with Mut, Panic {
+    var q = spec_queue_new()
+    let k = spec_queue_pop(&! q)
+    k.fn_hash == 0 && k.type_hash == 0
+}
+
+// T69: spec_mix_hash result is non-negative.
+fn test_spec_mix_hash_nonneg() -> bool {
+    let h = spec_mix_hash(123456789, 987654321)
+    h >= 0
+}
+
+// T70: spec_mangle_hash result is non-negative.
+fn test_spec_mangle_hash_nonneg() -> bool {
+    let fh = TEST_FN_MAP
+    let th = spec_hash_type_tag(SPEC_TY_I64)
+    spec_mangle_hash(fh, th) >= 0
+}
+
+// ============================================================================
+// Section 15: Test Runner
+// ============================================================================
+
+fn test_spec_main() -> i32 with IO, Mut, Panic, Div {
+    var passed: i64 = 0
+    let total: i64 = 70
+
+    print("=== Specialization Tracker Tests ===\n")
+
+    if test_spec_table_new_count() { passed = passed + 1; print("  T01 OK table_new_count\n") } else { print("  FAIL T01 table_new_count\n") }
+    if test_spec_queue_new_empty() { passed = passed + 1; print("  T02 OK queue_new_empty\n") } else { print("  FAIL T02 queue_new_empty\n") }
+    if test_spec_lookup_empty() { passed = passed + 1; print("  T03 OK lookup_empty\n") } else { print("  FAIL T03 lookup_empty\n") }
+    if test_spec_insert_one() { passed = passed + 1; print("  T04 OK insert_one\n") } else { print("  FAIL T04 insert_one\n") }
+    if test_spec_lookup_after_insert() { passed = passed + 1; print("  T05 OK lookup_after_insert\n") } else { print("  FAIL T05 lookup_after_insert\n") }
+    if test_spec_insert_dedup() { passed = passed + 1; print("  T06 OK insert_dedup\n") } else { print("  FAIL T06 insert_dedup\n") }
+    if test_spec_dedup_count() { passed = passed + 1; print("  T07 OK dedup_count\n") } else { print("  FAIL T07 dedup_count\n") }
+    if test_spec_mangle_distinct_types() { passed = passed + 1; print("  T08 OK mangle_distinct_types\n") } else { print("  FAIL T08 mangle_distinct_types\n") }
+    if test_spec_mangle_distinct_fns() { passed = passed + 1; print("  T09 OK mangle_distinct_fns\n") } else { print("  FAIL T09 mangle_distinct_fns\n") }
+    if test_spec_queue_push_size() { passed = passed + 1; print("  T10 OK queue_push_size\n") } else { print("  FAIL T10 queue_push_size\n") }
+    if test_spec_queue_pop() { passed = passed + 1; print("  T11 OK queue_pop\n") } else { print("  FAIL T11 queue_pop\n") }
+    if test_spec_queue_empty_after_pop() { passed = passed + 1; print("  T12 OK queue_empty_after_pop\n") } else { print("  FAIL T12 queue_empty_after_pop\n") }
+    if test_spec_queue_fifo() { passed = passed + 1; print("  T13 OK queue_fifo\n") } else { print("  FAIL T13 queue_fifo\n") }
+    if test_spec_queue_size_after_mixed() { passed = passed + 1; print("  T14 OK queue_size_after_mixed\n") } else { print("  FAIL T14 queue_size_after_mixed\n") }
+    if test_spec_insert_two_types() { passed = passed + 1; print("  T15 OK insert_two_types\n") } else { print("  FAIL T15 insert_two_types\n") }
+    if test_spec_insert_two_fns() { passed = passed + 1; print("  T16 OK insert_two_fns\n") } else { print("  FAIL T16 insert_two_fns\n") }
+    if test_spec_exists_before_insert() { passed = passed + 1; print("  T17 OK exists_before_insert\n") } else { print("  FAIL T17 exists_before_insert\n") }
+    if test_spec_exists_after_insert() { passed = passed + 1; print("  T18 OK exists_after_insert\n") } else { print("  FAIL T18 exists_after_insert\n") }
+    if test_spec_is_done_before_mark() { passed = passed + 1; print("  T19 OK is_done_before_mark\n") } else { print("  FAIL T19 is_done_before_mark\n") }
+    if test_spec_is_done_after_mark() { passed = passed + 1; print("  T20 OK is_done_after_mark\n") } else { print("  FAIL T20 is_done_after_mark\n") }
+    if test_spec_process_next() { passed = passed + 1; print("  T21 OK process_next\n") } else { print("  FAIL T21 process_next\n") }
+    if test_spec_drain_empties_queue() { passed = passed + 1; print("  T22 OK drain_empties_queue\n") } else { print("  FAIL T22 drain_empties_queue\n") }
+    if test_spec_drain_count() { passed = passed + 1; print("  T23 OK drain_count\n") } else { print("  FAIL T23 drain_count\n") }
+    if test_spec_count_done_initial() { passed = passed + 1; print("  T24 OK count_done_initial\n") } else { print("  FAIL T24 count_done_initial\n") }
+    if test_spec_count_done_one() { passed = passed + 1; print("  T25 OK count_done_one\n") } else { print("  FAIL T25 count_done_one\n") }
+    if test_spec_count_pending_one() { passed = passed + 1; print("  T26 OK count_pending_one\n") } else { print("  FAIL T26 count_pending_one\n") }
+    if test_spec_count_pending_zero_after_drain() { passed = passed + 1; print("  T27 OK count_pending_zero\n") } else { print("  FAIL T27 count_pending_zero\n") }
+    if test_spec_table_valid_empty() { passed = passed + 1; print("  T28 OK table_valid_empty\n") } else { print("  FAIL T28 table_valid_empty\n") }
+    if test_spec_table_valid_after_insert() { passed = passed + 1; print("  T29 OK table_valid_after_insert\n") } else { print("  FAIL T29 table_valid_after_insert\n") }
+    if test_spec_count_consistent_empty() { passed = passed + 1; print("  T30 OK count_consistent_empty\n") } else { print("  FAIL T30 count_consistent_empty\n") }
+    if test_spec_count_consistent_after_insert() { passed = passed + 1; print("  T31 OK count_consistent_after_insert\n") } else { print("  FAIL T31 count_consistent_after_insert\n") }
+    if test_spec_cache_hits() { passed = passed + 1; print("  T32 OK cache_hits\n") } else { print("  FAIL T32 cache_hits\n") }
+    if test_spec_total_inserts() { passed = passed + 1; print("  T33 OK total_inserts\n") } else { print("  FAIL T33 total_inserts\n") }
+    if test_spec_queue_total_pushed() { passed = passed + 1; print("  T34 OK queue_total_pushed\n") } else { print("  FAIL T34 queue_total_pushed\n") }
+    if test_spec_duplicate_no_extra_push() { passed = passed + 1; print("  T35 OK duplicate_no_extra_push\n") } else { print("  FAIL T35 duplicate_no_extra_push\n") }
+    if test_spec_key_eq_same() { passed = passed + 1; print("  T36 OK key_eq_same\n") } else { print("  FAIL T36 key_eq_same\n") }
+    if test_spec_key_eq_diff_fn() { passed = passed + 1; print("  T37 OK key_eq_diff_fn\n") } else { print("  FAIL T37 key_eq_diff_fn\n") }
+    if test_spec_key_eq_diff_type() { passed = passed + 1; print("  T38 OK key_eq_diff_type\n") } else { print("  FAIL T38 key_eq_diff_type\n") }
+    if test_spec_stats_from_table() { passed = passed + 1; print("  T39 OK stats_from_table\n") } else { print("  FAIL T39 stats_from_table\n") }
+    if test_spec_request_all_prims() { passed = passed + 1; print("  T40 OK request_all_prims\n") } else { print("  FAIL T40 request_all_prims\n") }
+    if test_spec_count_prim_specs() { passed = passed + 1; print("  T41 OK count_prim_specs\n") } else { print("  FAIL T41 count_prim_specs\n") }
+    if test_spec_count_prim_specs_zero() { passed = passed + 1; print("  T42 OK count_prim_specs_zero\n") } else { print("  FAIL T42 count_prim_specs_zero\n") }
+    if test_spec_mix_hash_diff() { passed = passed + 1; print("  T43 OK mix_hash_diff\n") } else { print("  FAIL T43 mix_hash_diff\n") }
+    if test_spec_mangle_distinct_tags() { passed = passed + 1; print("  T44 OK mangle_distinct_tags\n") } else { print("  FAIL T44 mangle_distinct_tags\n") }
+    if test_spec_type_tag_name_codes() { passed = passed + 1; print("  T45 OK type_tag_name_codes\n") } else { print("  FAIL T45 type_tag_name_codes\n") }
+    if test_spec_type_tag_name_code_unknown() { passed = passed + 1; print("  T46 OK type_tag_name_code_unknown\n") } else { print("  FAIL T46 type_tag_name_code_unknown\n") }
+    if test_spec_queue_peek_no_remove() { passed = passed + 1; print("  T47 OK queue_peek_no_remove\n") } else { print("  FAIL T47 queue_peek_no_remove\n") }
+    if test_spec_queue_peek_matches_pop() { passed = passed + 1; print("  T48 OK queue_peek_matches_pop\n") } else { print("  FAIL T48 queue_peek_matches_pop\n") }
+    if test_spec_pending_keys() { passed = passed + 1; print("  T49 OK pending_keys\n") } else { print("  FAIL T49 pending_keys\n") }
+    if test_spec_pending_keys_after_drain() { passed = passed + 1; print("  T50 OK pending_keys_after_drain\n") } else { print("  FAIL T50 pending_keys_after_drain\n") }
+    if test_spec_get_hash() { passed = passed + 1; print("  T51 OK get_hash\n") } else { print("  FAIL T51 get_hash\n") }
+    if test_spec_get_hash_missing() { passed = passed + 1; print("  T52 OK get_hash_missing\n") } else { print("  FAIL T52 get_hash_missing\n") }
+    if test_spec_insert_ten() { passed = passed + 1; print("  T53 OK insert_ten\n") } else { print("  FAIL T53 insert_ten\n") }
+    if test_spec_queue_three_fifo() { passed = passed + 1; print("  T54 OK queue_three_fifo\n") } else { print("  FAIL T54 queue_three_fifo\n") }
+    if test_spec_hash_type_tag_deterministic() { passed = passed + 1; print("  T55 OK hash_type_tag_deterministic\n") } else { print("  FAIL T55 hash_type_tag_deterministic\n") }
+    if test_spec_hash_type_tag_distinct() { passed = passed + 1; print("  T56 OK hash_type_tag_distinct\n") } else { print("  FAIL T56 hash_type_tag_distinct\n") }
+    if test_spec_key_from_hashes_fields() { passed = passed + 1; print("  T57 OK key_from_hashes_fields\n") } else { print("  FAIL T57 key_from_hashes_fields\n") }
+    if test_spec_entry_new_fields() { passed = passed + 1; print("  T58 OK entry_new_fields\n") } else { print("  FAIL T58 entry_new_fields\n") }
+    if test_spec_entry_empty_not_occupied() { passed = passed + 1; print("  T59 OK entry_empty_not_occupied\n") } else { print("  FAIL T59 entry_empty_not_occupied\n") }
+    if test_spec_stats_new_zeros() { passed = passed + 1; print("  T60 OK stats_new_zeros\n") } else { print("  FAIL T60 stats_new_zeros\n") }
+    if test_spec_mark_done_nonexistent() { passed = passed + 1; print("  T61 OK mark_done_nonexistent\n") } else { print("  FAIL T61 mark_done_nonexistent\n") }
+    if test_spec_process_next_empty() { passed = passed + 1; print("  T62 OK process_next_empty\n") } else { print("  FAIL T62 process_next_empty\n") }
+    if test_spec_queue_total_pushed_increments() { passed = passed + 1; print("  T63 OK queue_total_pushed_increments\n") } else { print("  FAIL T63 queue_total_pushed_increments\n") }
+    if test_spec_queue_push_hashes_equiv() { passed = passed + 1; print("  T64 OK queue_push_hashes_equiv\n") } else { print("  FAIL T64 queue_push_hashes_equiv\n") }
+    if test_spec_lookup_after_all_prims() { passed = passed + 1; print("  T65 OK lookup_after_all_prims\n") } else { print("  FAIL T65 lookup_after_all_prims\n") }
+    if test_spec_table_valid_after_drain() { passed = passed + 1; print("  T66 OK table_valid_after_drain\n") } else { print("  FAIL T66 table_valid_after_drain\n") }
+    if test_spec_count_consistent_after_drain() { passed = passed + 1; print("  T67 OK count_consistent_after_drain\n") } else { print("  FAIL T67 count_consistent_after_drain\n") }
+    if test_spec_queue_pop_empty() { passed = passed + 1; print("  T68 OK queue_pop_empty\n") } else { print("  FAIL T68 queue_pop_empty\n") }
+    if test_spec_mix_hash_nonneg() { passed = passed + 1; print("  T69 OK mix_hash_nonneg\n") } else { print("  FAIL T69 mix_hash_nonneg\n") }
+    if test_spec_mangle_hash_nonneg() { passed = passed + 1; print("  T70 OK mangle_hash_nonneg\n") } else { print("  FAIL T70 mangle_hash_nonneg\n") }
+
+    print("\nSpec: ")
+    print_int(passed)
+    print(" / ")
+    print_int(total)
+    print(" passed\n")
+
+    if passed == total { 0 } else { 1 }
+}

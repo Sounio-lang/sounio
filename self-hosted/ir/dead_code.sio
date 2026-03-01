@@ -1,0 +1,1385 @@
+// self-hosted::ir::dead_code — Dead Code Elimination IR pass
+//
+// Removes unreachable instructions and unused definitions from a simplified IR.
+//
+// This module operates on a self-contained CFG representation using integer
+// opcodes (no external enum dependencies).  The algorithm:
+//
+//   1. Mark reachable blocks (BFS from entry).
+//   2. Mark live instructions (mark side-effectful as roots, then trace use-def).
+//   3. Eliminate dead instructions (replace with NOP) and unreachable blocks.
+//
+// All arrays are fixed-size — no heap allocation.
+//
+// Opcodes (DCE_NOP=0, DCE_MOV=1, DCE_ADD=2, DCE_RET=3,
+//          DCE_JUMP=4, DCE_BRANCH=5, DCE_CALL=6,
+//          DCE_SUB=7, DCE_MUL=8, DCE_LOAD=9, DCE_STORE=10, DCE_PHI=11)
+//
+// References:
+//   Cytron et al. (1991): Efficiently Computing SSA Form
+//   Cooper & Torczon (2011): Engineering a Compiler, Ch. 10
+
+// ============================================================================
+// Section 1: Constants
+// ============================================================================
+
+let DCE2_MAX_INSTRS: i64  = 128
+let DCE2_MAX_BLOCKS: i64  = 64
+let DCE2_MAX_REGS: i64    = 256
+let DCE2_MAX_SUCCS: i64   = 4
+let DCE2_MAX_PREDS: i64   = 4
+let DCE2_INVALID: i64     = 0 - 1
+
+// Opcodes
+let DCE2_NOP: i64    = 0
+let DCE2_MOV: i64    = 1
+let DCE2_ADD: i64    = 2
+let DCE2_RET: i64    = 3
+let DCE2_JUMP: i64   = 4
+let DCE2_BRANCH: i64 = 5
+let DCE2_CALL: i64   = 6
+let DCE2_SUB: i64    = 7
+let DCE2_MUL: i64    = 8
+let DCE2_LOAD: i64   = 9
+let DCE2_STORE: i64  = 10
+let DCE2_PHI: i64    = 11
+
+// ============================================================================
+// Section 2: Data Structures
+// ============================================================================
+
+// A single IR instruction in the DCE analysis.
+struct DceInstr {
+    opcode: i64,
+    dst: i64,      // destination virtual register (-1 = none)
+    src1: i64,     // source 1 virtual register (-1 = none)
+    src2: i64,     // source 2 virtual register (-1 = none)
+    used: bool,    // is result used somewhere?
+    reachable: bool, // instruction is in a reachable block?
+}
+
+// A basic block containing up to DCE2_MAX_INSTRS instructions.
+struct DceBlock {
+    id: i64,
+    instrs: [DceInstr; 128],
+    count: i64,
+    reachable: bool,
+    succs: [i64; 4],
+    succ_count: i64,
+    preds: [i64; 4],
+    pred_count: i64,
+}
+
+// The control-flow graph.
+struct DceCfg {
+    blocks: [DceBlock; 64],
+    count: i64,
+    entry: i64,   // index of entry block
+}
+
+// Result summary of one DCE pass.
+struct DceResult {
+    removed_instrs: i64,
+    removed_blocks: i64,
+    total_instrs: i64,
+    total_blocks: i64,
+}
+
+// ============================================================================
+// Section 3: Constructors
+// ============================================================================
+
+fn dce2_instr_new(opcode: i64, dst: i64, src1: i64, src2: i64) -> DceInstr {
+    DceInstr {
+        opcode: opcode,
+        dst: dst,
+        src1: src1,
+        src2: src2,
+        used: false,
+        reachable: false,
+    }
+}
+
+fn dce2_instr_nop() -> DceInstr {
+    dce2_instr_new(DCE2_NOP, DCE2_INVALID, DCE2_INVALID, DCE2_INVALID)
+}
+
+fn dce2_block_new(id: i64) -> DceBlock {
+    DceBlock {
+        id: id,
+        instrs: [dce2_instr_nop(); 128],
+        count: 0,
+        reachable: false,
+        succs: [DCE2_INVALID, DCE2_INVALID, DCE2_INVALID, DCE2_INVALID],
+        succ_count: 0,
+        preds: [DCE2_INVALID, DCE2_INVALID, DCE2_INVALID, DCE2_INVALID],
+        pred_count: 0,
+    }
+}
+
+fn dce2_cfg_new() -> DceCfg {
+    DceCfg {
+        blocks: [dce2_block_new(DCE2_INVALID); 64],
+        count: 0,
+        entry: 0,
+    }
+}
+
+fn dce2_result_new() -> DceResult {
+    DceResult {
+        removed_instrs: 0,
+        removed_blocks: 0,
+        total_instrs: 0,
+        total_blocks: 0,
+    }
+}
+
+// ============================================================================
+// Section 4: CFG Building
+// ============================================================================
+
+// Add a new block to the CFG.  Returns the block's index.
+fn dce_add_block(cfg: &! DceCfg, b: DceBlock) -> i64 with Mut, Panic {
+    if cfg.count >= DCE2_MAX_BLOCKS { return DCE2_INVALID }
+    let idx = cfg.count
+    cfg.blocks[idx as usize] = b
+    cfg.count = cfg.count + 1
+    idx
+}
+
+// Add an instruction to block block_id.
+fn dce_add_instr(cfg: &! DceCfg, block_id: i64, op: i64, dst: i64, src1: i64, src2: i64) with Mut, Panic {
+    if block_id < 0 { return }
+    if block_id >= cfg.count { return }
+    let bref = &! cfg.blocks[block_id as usize]
+    if bref.count >= DCE2_MAX_INSTRS { return }
+    let idx = bref.count
+    bref.instrs[idx as usize] = dce2_instr_new(op, dst, src1, src2)
+    bref.count = bref.count + 1
+}
+
+// Add a successor edge block_id -> succ_id.
+fn dce_add_succ(cfg: &! DceCfg, block_id: i64, succ_id: i64) with Mut, Panic {
+    if block_id < 0 { return }
+    if block_id >= cfg.count { return }
+    let bref = &! cfg.blocks[block_id as usize]
+    if bref.succ_count >= DCE2_MAX_SUCCS { return }
+    let i = bref.succ_count
+    bref.succs[i as usize] = succ_id
+    bref.succ_count = bref.succ_count + 1
+    // Also add reverse pred edge.
+    if succ_id >= 0 {
+        if succ_id < cfg.count {
+            let sref = &! cfg.blocks[succ_id as usize]
+            if sref.pred_count < DCE2_MAX_PREDS {
+                let j = sref.pred_count
+                sref.preds[j as usize] = block_id
+                sref.pred_count = sref.pred_count + 1
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Section 5: Opcode Classification
+// ============================================================================
+
+// Returns true if the opcode has observable side effects.
+fn dce2_has_side_effect(op: i64) -> bool {
+    if op == DCE2_RET    { return true }
+    if op == DCE2_JUMP   { return true }
+    if op == DCE2_BRANCH { return true }
+    if op == DCE2_CALL   { return true }
+    if op == DCE2_STORE  { return true }
+    false
+}
+
+// Returns true if the opcode is a terminator (ends a basic block).
+fn dce2_is_terminator(op: i64) -> bool {
+    if op == DCE2_RET    { return true }
+    if op == DCE2_JUMP   { return true }
+    if op == DCE2_BRANCH { return true }
+    false
+}
+
+// Returns true if the opcode produces a value.
+fn dce2_has_dst(op: i64) -> bool {
+    if op == DCE2_NOP    { return false }
+    if op == DCE2_RET    { return false }
+    if op == DCE2_JUMP   { return false }
+    if op == DCE2_BRANCH { return false }
+    if op == DCE2_STORE  { return false }
+    if op == DCE2_CALL   { return false }
+    true
+}
+
+// ============================================================================
+// Section 6: Reachability Analysis
+// ============================================================================
+
+// BFS from the entry block to mark all reachable blocks.
+// Uses a flat worklist array (no dynamic allocation).
+fn dce_mark_reachable(cfg: &! DceCfg, start: i64) with Mut, Panic, Div {
+    if start < 0 { return }
+    if start >= cfg.count { return }
+    // Worklist: flat array + head/tail for BFS.
+    var worklist: [i64; 64] = [DCE2_INVALID; 64]
+    var whead: i64 = 0
+    var wtail: i64 = 0
+    // Seed with start block.
+    worklist[wtail as usize] = start
+    wtail = wtail + 1
+    cfg.blocks[start as usize].reachable = true
+    while whead < wtail {
+        let bid = worklist[whead as usize]
+        whead = whead + 1
+        let b = &cfg.blocks[bid as usize]
+        var s: i64 = 0
+        while s < b.succ_count {
+            let sid = b.succs[s as usize]
+            if sid >= 0 {
+                if sid < cfg.count {
+                    if cfg.blocks[sid as usize].reachable == false {
+                        cfg.blocks[sid as usize].reachable = true
+                        if wtail < 64 {
+                            worklist[wtail as usize] = sid
+                            wtail = wtail + 1
+                        }
+                    }
+                }
+            }
+            s = s + 1
+        }
+    }
+    // Propagate reachability to instructions in reachable blocks.
+    var bi: i64 = 0
+    while bi < cfg.count {
+        if cfg.blocks[bi as usize].reachable {
+            var ii: i64 = 0
+            while ii < cfg.blocks[bi as usize].count {
+                cfg.blocks[bi as usize].instrs[ii as usize].reachable = true
+                ii = ii + 1
+            }
+        }
+        bi = bi + 1
+    }
+}
+
+// ============================================================================
+// Section 7: Live Definition Analysis
+// ============================================================================
+
+// Use-def map: for each virtual register (dst), the (block_id, instr_idx) pair.
+// Stored as flat arrays indexed by reg number.
+struct DceUseDef {
+    def_block: [i64; 256],
+    def_instr: [i64; 256],
+    valid: [bool; 256],
+}
+
+fn dce2_use_def_new() -> DceUseDef {
+    DceUseDef {
+        def_block: [DCE2_INVALID; 256],
+        def_instr: [DCE2_INVALID; 256],
+        valid: [false; 256],
+    }
+}
+
+// Build use-def chains by scanning all instructions in all reachable blocks.
+fn dce2_build_use_def(cfg: &DceCfg, ud: &! DceUseDef) with Mut, Panic, Div {
+    var bi: i64 = 0
+    while bi < cfg.count {
+        let b = &cfg.blocks[bi as usize]
+        if b.reachable {
+            var ii: i64 = 0
+            while ii < b.count {
+                let instr = &b.instrs[ii as usize]
+                let dst = instr.dst
+                if dst >= 0 {
+                    if dst < DCE2_MAX_REGS {
+                        ud.def_block[dst as usize] = bi
+                        ud.def_instr[dst as usize] = ii
+                        ud.valid[dst as usize] = true
+                    }
+                }
+                ii = ii + 1
+            }
+        }
+        bi = bi + 1
+    }
+}
+
+// Mark a register's defining instruction as used (and recursively mark its sources).
+// Depth-limited to avoid infinite recursion.
+fn dce2_mark_reg_used(cfg: &! DceCfg, ud: &DceUseDef, reg: i64, depth: i64) with Mut, Panic {
+    if depth <= 0 { return }
+    if reg < 0 { return }
+    if reg >= DCE2_MAX_REGS { return }
+    if ud.valid[reg as usize] == false { return }
+    let bi = ud.def_block[reg as usize]
+    let ii = ud.def_instr[reg as usize]
+    if bi < 0 { return }
+    if ii < 0 { return }
+    let instr = &! cfg.blocks[bi as usize].instrs[ii as usize]
+    if instr.used { return } // already marked
+    instr.used = true
+    // Trace sources.
+    let s1 = instr.src1
+    let s2 = instr.src2
+    dce2_mark_reg_used(cfg, ud, s1, depth - 1)
+    dce2_mark_reg_used(cfg, ud, s2, depth - 1)
+}
+
+// Mark all live definitions by seeding from side-effectful instructions.
+fn dce_mark_live_defs(cfg: &! DceCfg) with Mut, Panic, Div {
+    var ud = dce2_use_def_new()
+    dce2_build_use_def(cfg, &! ud)
+    // Seed: mark all instructions with side effects as used.
+    var bi: i64 = 0
+    while bi < cfg.count {
+        let b = &! cfg.blocks[bi as usize]
+        if b.reachable {
+            var ii: i64 = 0
+            while ii < b.count {
+                let instr = &! b.instrs[ii as usize]
+                if dce2_has_side_effect(instr.opcode) {
+                    instr.used = true
+                    // Trace sources.
+                    dce2_mark_reg_used(cfg, &ud, instr.src1, 64)
+                    dce2_mark_reg_used(cfg, &ud, instr.src2, 64)
+                }
+                ii = ii + 1
+            }
+        }
+        bi = bi + 1
+    }
+}
+
+// ============================================================================
+// Section 8: Elimination
+// ============================================================================
+
+// Replace dead instructions with NOP, count eliminated and removed blocks.
+fn dce_eliminate(cfg: &! DceCfg) -> DceResult with Mut, Panic, Div {
+    var result = dce2_result_new()
+    result.total_blocks = cfg.count
+    var bi: i64 = 0
+    while bi < cfg.count {
+        let b = &! cfg.blocks[bi as usize]
+        if b.reachable == false {
+            result.removed_blocks = result.removed_blocks + 1
+        }
+        var ii: i64 = 0
+        while ii < b.count {
+            result.total_instrs = result.total_instrs + 1
+            let instr = &! b.instrs[ii as usize]
+            if b.reachable {
+                // In reachable block: eliminate unused non-side-effect instrs.
+                if instr.used == false {
+                    if dce2_has_side_effect(instr.opcode) == false {
+                        instr.opcode = DCE2_NOP
+                        instr.dst = DCE2_INVALID
+                        instr.src1 = DCE2_INVALID
+                        instr.src2 = DCE2_INVALID
+                        result.removed_instrs = result.removed_instrs + 1
+                    }
+                }
+            } else {
+                // Unreachable block: NOP everything.
+                instr.opcode = DCE2_NOP
+                instr.dst = DCE2_INVALID
+                instr.src1 = DCE2_INVALID
+                instr.src2 = DCE2_INVALID
+                result.removed_instrs = result.removed_instrs + 1
+            }
+            ii = ii + 1
+        }
+        bi = bi + 1
+    }
+    result
+}
+
+// ============================================================================
+// Section 9: Full Pass
+// ============================================================================
+
+// Run the complete DCE pass: mark reachable, mark live, eliminate.
+fn dce_run(cfg: &! DceCfg) -> DceResult with Mut, Panic, Div {
+    dce_mark_reachable(cfg, cfg.entry)
+    dce_mark_live_defs(cfg)
+    dce_eliminate(cfg)
+}
+
+// ============================================================================
+// Section 10: Query Helpers
+// ============================================================================
+
+// Count NOP instructions in block b_id.
+fn dce2_count_nops_in_block(cfg: &DceCfg, b_id: i64) -> i64 {
+    if b_id < 0 { return 0 }
+    if b_id >= cfg.count { return 0 }
+    var count: i64 = 0
+    let b = &cfg.blocks[b_id as usize]
+    var i: i64 = 0
+    while i < b.count {
+        if b.instrs[i as usize].opcode == DCE2_NOP {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Count non-NOP instructions in block b_id.
+fn dce2_count_live_in_block(cfg: &DceCfg, b_id: i64) -> i64 {
+    if b_id < 0 { return 0 }
+    if b_id >= cfg.count { return 0 }
+    var count: i64 = 0
+    let b = &cfg.blocks[b_id as usize]
+    var i: i64 = 0
+    while i < b.count {
+        if b.instrs[i as usize].opcode != DCE2_NOP {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Check if instruction at (b_id, i_id) is a NOP.
+fn dce2_is_nop(cfg: &DceCfg, b_id: i64, i_id: i64) -> bool {
+    if b_id < 0 { return false }
+    if b_id >= cfg.count { return false }
+    let b = &cfg.blocks[b_id as usize]
+    if i_id < 0 { return false }
+    if i_id >= b.count { return false }
+    b.instrs[i_id as usize].opcode == DCE2_NOP
+}
+
+// Check if instruction at (b_id, i_id) is NOT a NOP.
+fn dce2_not_nop(cfg: &DceCfg, b_id: i64, i_id: i64) -> bool {
+    dce2_is_nop(cfg, b_id, i_id) == false
+}
+
+// Get opcode at (b_id, i_id).
+fn dce2_get_opcode(cfg: &DceCfg, b_id: i64, i_id: i64) -> i64 {
+    if b_id < 0 { return DCE2_NOP }
+    if b_id >= cfg.count { return DCE2_NOP }
+    let b = &cfg.blocks[b_id as usize]
+    if i_id < 0 { return DCE2_NOP }
+    if i_id >= b.count { return DCE2_NOP }
+    b.instrs[i_id as usize].opcode
+}
+
+// Count total instructions across all blocks.
+fn dce2_total_instrs(cfg: &DceCfg) -> i64 {
+    var total: i64 = 0
+    var bi: i64 = 0
+    while bi < cfg.count {
+        total = total + cfg.blocks[bi as usize].count
+        bi = bi + 1
+    }
+    total
+}
+
+// Count total NOPs across all blocks.
+fn dce2_total_nops(cfg: &DceCfg) -> i64 {
+    var total: i64 = 0
+    var bi: i64 = 0
+    while bi < cfg.count {
+        var ii: i64 = 0
+        while ii < cfg.blocks[bi as usize].count {
+            if cfg.blocks[bi as usize].instrs[ii as usize].opcode == DCE2_NOP {
+                total = total + 1
+            }
+            ii = ii + 1
+        }
+        bi = bi + 1
+    }
+    total
+}
+
+// ============================================================================
+// Section 11: Test Helpers
+// ============================================================================
+
+// Build a simple linear CFG: entry -> one block with given instructions -> done.
+fn dce2_make_linear(ops: [i64; 8], dsts: [i64; 8], srcs1: [i64; 8], srcs2: [i64; 8], n: i64) -> DceCfg with Mut, Panic, Div {
+    var cfg = dce2_cfg_new()
+    var b = dce2_block_new(0)
+    b.id = 0
+    var i: i64 = 0
+    while i < n {
+        if b.count < DCE2_MAX_INSTRS {
+            let idx = b.count
+            b.instrs[idx as usize] = dce2_instr_new(ops[i as usize], dsts[i as usize], srcs1[i as usize], srcs2[i as usize])
+            b.count = b.count + 1
+        }
+        i = i + 1
+    }
+    cfg.blocks[0] = b
+    cfg.count = 1
+    cfg.entry = 0
+    cfg
+}
+
+// Build a two-block CFG: entry block + unreachable block (no edge).
+fn dce2_make_with_dead_block() -> DceCfg with Mut, Panic {
+    var cfg = dce2_cfg_new()
+    // Block 0: entry, has a RET.
+    var b0 = dce2_block_new(0)
+    b0.instrs[0] = dce2_instr_new(DCE2_RET, DCE2_INVALID, 1, DCE2_INVALID)
+    b0.count = 1
+    cfg.blocks[0] = b0
+    // Block 1: unreachable, has an ADD.
+    var b1 = dce2_block_new(1)
+    b1.instrs[0] = dce2_instr_new(DCE2_ADD, 5, 1, 2)
+    b1.count = 1
+    cfg.blocks[1] = b1
+    cfg.count = 2
+    cfg.entry = 0
+    cfg
+}
+
+// Build a two-block CFG where block 0 jumps to block 1.
+fn dce2_make_two_blocks_linked() -> DceCfg with Mut, Panic {
+    var cfg = dce2_cfg_new()
+    // Block 0: loads reg 0 = 5 (dead), then jumps to 1.
+    var b0 = dce2_block_new(0)
+    b0.instrs[0] = dce2_instr_new(DCE2_MOV, 0, DCE2_INVALID, DCE2_INVALID)
+    b0.instrs[1] = dce2_instr_new(DCE2_JUMP, DCE2_INVALID, DCE2_INVALID, DCE2_INVALID)
+    b0.count = 2
+    b0.succs[0] = 1
+    b0.succ_count = 1
+    cfg.blocks[0] = b0
+    // Block 1: returns reg 0.
+    var b1 = dce2_block_new(1)
+    b1.instrs[0] = dce2_instr_new(DCE2_RET, DCE2_INVALID, 0, DCE2_INVALID)
+    b1.count = 1
+    b1.preds[0] = 0
+    b1.pred_count = 1
+    cfg.blocks[1] = b1
+    cfg.count = 2
+    cfg.entry = 0
+    cfg
+}
+
+// ============================================================================
+// Section 12: Tests
+// ============================================================================
+
+// T01: New CFG has zero blocks.
+fn test_dce2_cfg_new() -> bool {
+    let cfg = dce2_cfg_new()
+    cfg.count == 0
+}
+
+// T02: dce_add_block increments count.
+fn test_dce2_add_block() -> bool with Mut, Panic, Div {
+    var cfg = dce2_cfg_new()
+    let b = dce2_block_new(0)
+    dce_add_block(&! cfg, b)
+    cfg.count == 1
+}
+
+// T03: dce_add_instr adds instruction to block.
+fn test_dce2_add_instr() -> bool with Mut, Panic, Div {
+    var cfg = dce2_cfg_new()
+    let b = dce2_block_new(0)
+    dce_add_block(&! cfg, b)
+    dce_add_instr(&! cfg, 0, DCE2_ADD, 2, 0, 1)
+    cfg.blocks[0].count == 1
+}
+
+// T04: Added instr has correct opcode.
+fn test_dce2_instr_opcode() -> bool with Mut, Panic, Div {
+    var cfg = dce2_cfg_new()
+    let b = dce2_block_new(0)
+    dce_add_block(&! cfg, b)
+    dce_add_instr(&! cfg, 0, DCE2_ADD, 2, 0, 1)
+    cfg.blocks[0].instrs[0].opcode == DCE2_ADD
+}
+
+// T05: Single block with RET is reachable.
+fn test_dce2_mark_reachable_entry() -> bool with Mut, Panic, Div {
+    var cfg = dce2_cfg_new()
+    var b = dce2_block_new(0)
+    b.instrs[0] = dce2_instr_new(DCE2_RET, DCE2_INVALID, DCE2_INVALID, DCE2_INVALID)
+    b.count = 1
+    cfg.blocks[0] = b
+    cfg.count = 1
+    cfg.entry = 0
+    dce_mark_reachable(&! cfg, 0)
+    cfg.blocks[0].reachable
+}
+
+// T06: Unreachable block stays unreachable.
+fn test_dce2_unreachable_block() -> bool with Mut, Panic, Div {
+    var cfg = dce2_make_with_dead_block()
+    dce_mark_reachable(&! cfg, 0)
+    cfg.blocks[1].reachable == false
+}
+
+// T07: Block linked to entry is reachable.
+fn test_dce2_linked_block_reachable() -> bool with Mut, Panic, Div {
+    var cfg = dce2_make_two_blocks_linked()
+    dce_mark_reachable(&! cfg, 0)
+    cfg.blocks[1].reachable
+}
+
+// T08: Dead instruction in reachable block becomes NOP after eliminate.
+fn test_dce2_dead_instr_becomes_nop() -> bool with Mut, Panic, Div {
+    var ops: [i64; 8] = [DCE2_MOV, DCE2_RET, 0, 0, 0, 0, 0, 0]
+    var dsts: [i64; 8] = [0, DCE2_INVALID, 0, 0, 0, 0, 0, 0]
+    var s1: [i64; 8] = [DCE2_INVALID, DCE2_INVALID, 0, 0, 0, 0, 0, 0]
+    var s2: [i64; 8] = [DCE2_INVALID, DCE2_INVALID, 0, 0, 0, 0, 0, 0]
+    var cfg = dce2_make_linear(ops, dsts, s1, s2, 2)
+    dce_run(&! cfg)
+    // reg 0 is loaded by MOV but never used (RET doesn't use it in this test).
+    // MOV should become NOP.
+    dce2_is_nop(&cfg, 0, 0)
+}
+
+// T09: RET instruction is preserved.
+fn test_dce2_ret_preserved() -> bool with Mut, Panic, Div {
+    var ops: [i64; 8] = [DCE2_RET, 0, 0, 0, 0, 0, 0, 0]
+    var dsts: [i64; 8] = [DCE2_INVALID, 0, 0, 0, 0, 0, 0, 0]
+    var s1: [i64; 8] = [DCE2_INVALID, 0, 0, 0, 0, 0, 0, 0]
+    var s2: [i64; 8] = [DCE2_INVALID, 0, 0, 0, 0, 0, 0, 0]
+    var cfg = dce2_make_linear(ops, dsts, s1, s2, 1)
+    dce_run(&! cfg)
+    dce2_not_nop(&cfg, 0, 0)
+}
+
+// T10: CALL instruction is preserved.
+fn test_dce2_call_preserved() -> bool with Mut, Panic, Div {
+    var ops: [i64; 8] = [DCE2_CALL, DCE2_RET, 0, 0, 0, 0, 0, 0]
+    var dsts: [i64; 8] = [DCE2_INVALID, DCE2_INVALID, 0, 0, 0, 0, 0, 0]
+    var s1: [i64; 8] = [DCE2_INVALID, DCE2_INVALID, 0, 0, 0, 0, 0, 0]
+    var s2: [i64; 8] = [DCE2_INVALID, DCE2_INVALID, 0, 0, 0, 0, 0, 0]
+    var cfg = dce2_make_linear(ops, dsts, s1, s2, 2)
+    dce_run(&! cfg)
+    dce2_not_nop(&cfg, 0, 0)
+}
+
+// T11: STORE instruction is preserved.
+fn test_dce2_store_preserved() -> bool with Mut, Panic, Div {
+    var ops: [i64; 8] = [DCE2_STORE, DCE2_RET, 0, 0, 0, 0, 0, 0]
+    var dsts: [i64; 8] = [DCE2_INVALID, DCE2_INVALID, 0, 0, 0, 0, 0, 0]
+    var s1: [i64; 8] = [0, DCE2_INVALID, 0, 0, 0, 0, 0, 0]
+    var s2: [i64; 8] = [DCE2_INVALID, DCE2_INVALID, 0, 0, 0, 0, 0, 0]
+    var cfg = dce2_make_linear(ops, dsts, s1, s2, 2)
+    dce_run(&! cfg)
+    dce2_not_nop(&cfg, 0, 0)
+}
+
+// T12: Unreachable block instruction becomes NOP.
+fn test_dce2_unreachable_instr_nop() -> bool with Mut, Panic, Div {
+    var cfg = dce2_make_with_dead_block()
+    dce_run(&! cfg)
+    dce2_is_nop(&cfg, 1, 0)
+}
+
+// T13: Reachable block instruction is not affected if live.
+fn test_dce2_reachable_live_not_nop() -> bool with Mut, Panic, Div {
+    var cfg = dce2_make_with_dead_block()
+    dce_run(&! cfg)
+    dce2_not_nop(&cfg, 0, 0)
+}
+
+// T14: dce_run returns correct removed_blocks count.
+fn test_dce2_run_removed_blocks() -> bool with Mut, Panic, Div {
+    var cfg = dce2_make_with_dead_block()
+    let result = dce_run(&! cfg)
+    result.removed_blocks == 1
+}
+
+// T15: dce_run returns correct removed_instrs for unreachable block.
+fn test_dce2_run_removed_instrs() -> bool with Mut, Panic, Div {
+    var cfg = dce2_make_with_dead_block()
+    let result = dce_run(&! cfg)
+    result.removed_instrs >= 1
+}
+
+// T16: dce_run removed_instrs does not count live instructions.
+fn test_dce2_run_removed_excludes_live() -> bool with Mut, Panic, Div {
+    // Single block: just a RET (live, side effect).
+    var cfg = dce2_cfg_new()
+    var b0 = dce2_block_new(0)
+    b0.instrs[0] = dce2_instr_new(DCE2_RET, DCE2_INVALID, DCE2_INVALID, DCE2_INVALID)
+    b0.count = 1
+    cfg.blocks[0] = b0
+    cfg.count = 1
+    cfg.entry = 0
+    let result = dce_run(&! cfg)
+    result.removed_instrs == 0
+}
+
+// T17: Transitive liveness: ADD result used by RET => ADD not removed.
+fn test_dce2_transitive_liveness() -> bool with Mut, Panic, Div {
+    // reg2 = ADD reg0, reg1; RET reg2
+    var cfg = dce2_cfg_new()
+    var b0 = dce2_block_new(0)
+    b0.instrs[0] = dce2_instr_new(DCE2_MOV, 0, DCE2_INVALID, DCE2_INVALID) // reg0 = MOV
+    b0.instrs[1] = dce2_instr_new(DCE2_MOV, 1, DCE2_INVALID, DCE2_INVALID) // reg1 = MOV
+    b0.instrs[2] = dce2_instr_new(DCE2_ADD, 2, 0, 1)                         // reg2 = ADD r0, r1
+    b0.instrs[3] = dce2_instr_new(DCE2_RET, DCE2_INVALID, 2, DCE2_INVALID)   // RET r2
+    b0.count = 4
+    cfg.blocks[0] = b0
+    cfg.count = 1
+    cfg.entry = 0
+    dce_run(&! cfg)
+    // ADD should be preserved.
+    dce2_not_nop(&cfg, 0, 2)
+}
+
+// T18: Dead ADD (result unused) becomes NOP.
+fn test_dce2_dead_add_nop() -> bool with Mut, Panic, Div {
+    var cfg = dce2_cfg_new()
+    var b0 = dce2_block_new(0)
+    b0.instrs[0] = dce2_instr_new(DCE2_ADD, 2, 0, 1) // dead
+    b0.instrs[1] = dce2_instr_new(DCE2_RET, DCE2_INVALID, DCE2_INVALID, DCE2_INVALID)
+    b0.count = 2
+    cfg.blocks[0] = b0
+    cfg.count = 1
+    cfg.entry = 0
+    dce_run(&! cfg)
+    dce2_is_nop(&cfg, 0, 0)
+}
+
+// T19: Dead MOV becomes NOP.
+fn test_dce2_dead_mov_nop() -> bool with Mut, Panic, Div {
+    var cfg = dce2_cfg_new()
+    var b0 = dce2_block_new(0)
+    b0.instrs[0] = dce2_instr_new(DCE2_MOV, 5, DCE2_INVALID, DCE2_INVALID)
+    b0.instrs[1] = dce2_instr_new(DCE2_RET, DCE2_INVALID, DCE2_INVALID, DCE2_INVALID)
+    b0.count = 2
+    cfg.blocks[0] = b0
+    cfg.count = 1
+    cfg.entry = 0
+    dce_run(&! cfg)
+    dce2_is_nop(&cfg, 0, 0)
+}
+
+// T20: Dead SUB becomes NOP.
+fn test_dce2_dead_sub_nop() -> bool with Mut, Panic, Div {
+    var cfg = dce2_cfg_new()
+    var b0 = dce2_block_new(0)
+    b0.instrs[0] = dce2_instr_new(DCE2_SUB, 3, 0, 1)
+    b0.instrs[1] = dce2_instr_new(DCE2_RET, DCE2_INVALID, DCE2_INVALID, DCE2_INVALID)
+    b0.count = 2
+    cfg.blocks[0] = b0
+    cfg.count = 1
+    cfg.entry = 0
+    dce_run(&! cfg)
+    dce2_is_nop(&cfg, 0, 0)
+}
+
+// T21: Dead MUL becomes NOP.
+fn test_dce2_dead_mul_nop() -> bool with Mut, Panic, Div {
+    var cfg = dce2_cfg_new()
+    var b0 = dce2_block_new(0)
+    b0.instrs[0] = dce2_instr_new(DCE2_MUL, 4, 0, 1)
+    b0.instrs[1] = dce2_instr_new(DCE2_RET, DCE2_INVALID, DCE2_INVALID, DCE2_INVALID)
+    b0.count = 2
+    cfg.blocks[0] = b0
+    cfg.count = 1
+    cfg.entry = 0
+    dce_run(&! cfg)
+    dce2_is_nop(&cfg, 0, 0)
+}
+
+// T22: JUMP instruction is preserved.
+fn test_dce2_jump_preserved() -> bool with Mut, Panic, Div {
+    var cfg = dce2_make_two_blocks_linked()
+    dce_run(&! cfg)
+    dce2_not_nop(&cfg, 0, 1)
+}
+
+// T23: BRANCH instruction is preserved.
+fn test_dce2_branch_preserved() -> bool with Mut, Panic, Div {
+    var cfg = dce2_cfg_new()
+    var b0 = dce2_block_new(0)
+    b0.instrs[0] = dce2_instr_new(DCE2_BRANCH, DCE2_INVALID, 0, DCE2_INVALID)
+    b0.instrs[1] = dce2_instr_new(DCE2_RET, DCE2_INVALID, DCE2_INVALID, DCE2_INVALID)
+    b0.count = 2
+    cfg.blocks[0] = b0
+    cfg.count = 1
+    cfg.entry = 0
+    dce_run(&! cfg)
+    dce2_not_nop(&cfg, 0, 0)
+}
+
+// T24: dce2_count_nops_in_block counts correctly.
+fn test_dce2_count_nops() -> bool with Mut, Panic, Div {
+    var cfg = dce2_cfg_new()
+    var b0 = dce2_block_new(0)
+    b0.instrs[0] = dce2_instr_new(DCE2_NOP, DCE2_INVALID, DCE2_INVALID, DCE2_INVALID)
+    b0.instrs[1] = dce2_instr_new(DCE2_ADD, 0, 1, 2)
+    b0.instrs[2] = dce2_instr_new(DCE2_NOP, DCE2_INVALID, DCE2_INVALID, DCE2_INVALID)
+    b0.count = 3
+    cfg.blocks[0] = b0
+    cfg.count = 1
+    dce2_count_nops_in_block(&cfg, 0) == 2
+}
+
+// T25: dce2_count_live_in_block counts correctly.
+fn test_dce2_count_live() -> bool with Mut, Panic, Div {
+    var cfg = dce2_cfg_new()
+    var b0 = dce2_block_new(0)
+    b0.instrs[0] = dce2_instr_new(DCE2_NOP, DCE2_INVALID, DCE2_INVALID, DCE2_INVALID)
+    b0.instrs[1] = dce2_instr_new(DCE2_ADD, 0, 1, 2)
+    b0.instrs[2] = dce2_instr_new(DCE2_RET, DCE2_INVALID, 0, DCE2_INVALID)
+    b0.count = 3
+    cfg.blocks[0] = b0
+    cfg.count = 1
+    dce2_count_live_in_block(&cfg, 0) == 2
+}
+
+// T26: dce2_total_instrs counts across all blocks.
+fn test_dce2_total_instrs() -> bool with Mut, Panic, Div {
+    var cfg = dce2_make_two_blocks_linked()
+    dce2_total_instrs(&cfg) == 3
+}
+
+// T27: dce2_total_nops = 0 on fresh cfg before DCE.
+fn test_dce2_total_nops_fresh() -> bool with Mut, Panic, Div {
+    var cfg = dce2_make_two_blocks_linked()
+    dce2_total_nops(&cfg) == 0
+}
+
+// T28: Multiple dead instructions all become NOP.
+fn test_dce2_multiple_dead_nop() -> bool with Mut, Panic, Div {
+    var cfg = dce2_cfg_new()
+    var b0 = dce2_block_new(0)
+    b0.instrs[0] = dce2_instr_new(DCE2_ADD, 5, 0, 1)  // dead
+    b0.instrs[1] = dce2_instr_new(DCE2_SUB, 6, 0, 1)  // dead
+    b0.instrs[2] = dce2_instr_new(DCE2_MUL, 7, 0, 1)  // dead
+    b0.instrs[3] = dce2_instr_new(DCE2_RET, DCE2_INVALID, DCE2_INVALID, DCE2_INVALID)
+    b0.count = 4
+    cfg.blocks[0] = b0
+    cfg.count = 1
+    cfg.entry = 0
+    dce_run(&! cfg)
+    let n0 = dce2_is_nop(&cfg, 0, 0)
+    let n1 = dce2_is_nop(&cfg, 0, 1)
+    let n2 = dce2_is_nop(&cfg, 0, 2)
+    n0 && n1 && n2
+}
+
+// T29: Mixed live and dead instructions handled correctly.
+fn test_dce2_mixed_live_dead() -> bool with Mut, Panic, Div {
+    // reg2 = ADD r0, r1 (live, used by STORE)
+    // reg3 = MUL r0, r1 (dead)
+    // STORE reg2
+    // RET
+    var cfg = dce2_cfg_new()
+    var b0 = dce2_block_new(0)
+    b0.instrs[0] = dce2_instr_new(DCE2_ADD, 2, 0, 1)               // live (used by STORE)
+    b0.instrs[1] = dce2_instr_new(DCE2_MUL, 3, 0, 1)               // dead
+    b0.instrs[2] = dce2_instr_new(DCE2_STORE, DCE2_INVALID, 2, DCE2_INVALID) // live
+    b0.instrs[3] = dce2_instr_new(DCE2_RET, DCE2_INVALID, DCE2_INVALID, DCE2_INVALID)
+    b0.count = 4
+    cfg.blocks[0] = b0
+    cfg.count = 1
+    cfg.entry = 0
+    dce_run(&! cfg)
+    let add_live = dce2_not_nop(&cfg, 0, 0)
+    let mul_dead = dce2_is_nop(&cfg, 0, 1)
+    let store_live = dce2_not_nop(&cfg, 0, 2)
+    let ret_live = dce2_not_nop(&cfg, 0, 3)
+    add_live && mul_dead && store_live && ret_live
+}
+
+// T30: dce2_instr_nop() creates NOP.
+fn test_dce2_instr_nop_constructor() -> bool {
+    let i = dce2_instr_nop()
+    i.opcode == DCE2_NOP
+}
+
+// T31: dce2_has_side_effect identifies RET.
+fn test_dce2_side_effect_ret() -> bool {
+    dce2_has_side_effect(DCE2_RET)
+}
+
+// T32: dce2_has_side_effect identifies CALL.
+fn test_dce2_side_effect_call() -> bool {
+    dce2_has_side_effect(DCE2_CALL)
+}
+
+// T33: dce2_has_side_effect identifies STORE.
+fn test_dce2_side_effect_store() -> bool {
+    dce2_has_side_effect(DCE2_STORE)
+}
+
+// T34: dce2_has_side_effect returns false for ADD.
+fn test_dce2_no_side_effect_add() -> bool {
+    dce2_has_side_effect(DCE2_ADD) == false
+}
+
+// T35: dce2_has_side_effect returns false for MOV.
+fn test_dce2_no_side_effect_mov() -> bool {
+    dce2_has_side_effect(DCE2_MOV) == false
+}
+
+// T36: dce2_is_terminator identifies JUMP.
+fn test_dce2_terminator_jump() -> bool {
+    dce2_is_terminator(DCE2_JUMP)
+}
+
+// T37: dce2_is_terminator identifies RET.
+fn test_dce2_terminator_ret() -> bool {
+    dce2_is_terminator(DCE2_RET)
+}
+
+// T38: dce2_is_terminator identifies BRANCH.
+fn test_dce2_terminator_branch() -> bool {
+    dce2_is_terminator(DCE2_BRANCH)
+}
+
+// T39: dce2_is_terminator returns false for ADD.
+fn test_dce2_not_terminator_add() -> bool {
+    dce2_is_terminator(DCE2_ADD) == false
+}
+
+// T40: dce2_has_dst returns false for NOP.
+fn test_dce2_no_dst_nop() -> bool {
+    dce2_has_dst(DCE2_NOP) == false
+}
+
+// T41: dce2_has_dst returns true for ADD.
+fn test_dce2_has_dst_add() -> bool {
+    dce2_has_dst(DCE2_ADD)
+}
+
+// T42: dce2_has_dst returns false for RET.
+fn test_dce2_no_dst_ret() -> bool {
+    dce2_has_dst(DCE2_RET) == false
+}
+
+// T43: Entry block always reachable.
+fn test_dce2_entry_reachable() -> bool with Mut, Panic, Div {
+    var cfg = dce2_cfg_new()
+    var b = dce2_block_new(0)
+    b.instrs[0] = dce2_instr_new(DCE2_RET, DCE2_INVALID, DCE2_INVALID, DCE2_INVALID)
+    b.count = 1
+    cfg.blocks[0] = b
+    cfg.count = 1
+    cfg.entry = 0
+    dce_mark_reachable(&! cfg, 0)
+    cfg.blocks[0].reachable
+}
+
+// T44: Instructions in unreachable block have reachable=false before DCE.
+fn test_dce2_unreachable_instr_flag() -> bool with Mut, Panic, Div {
+    var cfg = dce2_make_with_dead_block()
+    dce_mark_reachable(&! cfg, 0)
+    cfg.blocks[1].instrs[0].reachable == false
+}
+
+// T45: Instructions in reachable block have reachable=true after mark.
+fn test_dce2_reachable_instr_flag() -> bool with Mut, Panic, Div {
+    var cfg = dce2_cfg_new()
+    var b0 = dce2_block_new(0)
+    b0.instrs[0] = dce2_instr_new(DCE2_RET, DCE2_INVALID, DCE2_INVALID, DCE2_INVALID)
+    b0.count = 1
+    cfg.blocks[0] = b0
+    cfg.count = 1
+    cfg.entry = 0
+    dce_mark_reachable(&! cfg, 0)
+    cfg.blocks[0].instrs[0].reachable
+}
+
+// T46: Three-block linear chain all reachable.
+fn test_dce2_three_block_chain() -> bool with Mut, Panic, Div {
+    var cfg = dce2_cfg_new()
+    // b0 -> b1 -> b2
+    var b0 = dce2_block_new(0)
+    b0.instrs[0] = dce2_instr_new(DCE2_JUMP, DCE2_INVALID, DCE2_INVALID, DCE2_INVALID)
+    b0.count = 1
+    b0.succs[0] = 1
+    b0.succ_count = 1
+    cfg.blocks[0] = b0
+    var b1 = dce2_block_new(1)
+    b1.instrs[0] = dce2_instr_new(DCE2_JUMP, DCE2_INVALID, DCE2_INVALID, DCE2_INVALID)
+    b1.count = 1
+    b1.succs[0] = 2
+    b1.succ_count = 1
+    cfg.blocks[1] = b1
+    var b2 = dce2_block_new(2)
+    b2.instrs[0] = dce2_instr_new(DCE2_RET, DCE2_INVALID, DCE2_INVALID, DCE2_INVALID)
+    b2.count = 1
+    cfg.blocks[2] = b2
+    cfg.count = 3
+    cfg.entry = 0
+    dce_mark_reachable(&! cfg, 0)
+    cfg.blocks[0].reachable && cfg.blocks[1].reachable && cfg.blocks[2].reachable
+}
+
+// T47: dce_add_succ sets successor correctly.
+fn test_dce2_add_succ() -> bool with Mut, Panic, Div {
+    var cfg = dce2_cfg_new()
+    let b0 = dce2_block_new(0)
+    let b1 = dce2_block_new(1)
+    dce_add_block(&! cfg, b0)
+    dce_add_block(&! cfg, b1)
+    dce_add_succ(&! cfg, 0, 1)
+    cfg.blocks[0].succ_count == 1 && cfg.blocks[0].succs[0] == 1
+}
+
+// T48: dce_add_succ also sets reverse predecessor.
+fn test_dce2_add_succ_pred() -> bool with Mut, Panic, Div {
+    var cfg = dce2_cfg_new()
+    let b0 = dce2_block_new(0)
+    let b1 = dce2_block_new(1)
+    dce_add_block(&! cfg, b0)
+    dce_add_block(&! cfg, b1)
+    dce_add_succ(&! cfg, 0, 1)
+    cfg.blocks[1].pred_count == 1 && cfg.blocks[1].preds[0] == 0
+}
+
+// T49: dce2_get_opcode retrieves correct opcode.
+fn test_dce2_get_opcode() -> bool with Mut, Panic, Div {
+    var cfg = dce2_cfg_new()
+    var b0 = dce2_block_new(0)
+    b0.instrs[0] = dce2_instr_new(DCE2_ADD, 0, 1, 2)
+    b0.count = 1
+    cfg.blocks[0] = b0
+    cfg.count = 1
+    dce2_get_opcode(&cfg, 0, 0) == DCE2_ADD
+}
+
+// T50: dce2_get_opcode returns NOP for out-of-range.
+fn test_dce2_get_opcode_oob() -> bool with Mut, Panic, Div {
+    let cfg = dce2_cfg_new()
+    dce2_get_opcode(&cfg, 99, 0) == DCE2_NOP
+}
+
+// T51: dce_run on empty block CFG returns 0 removed.
+fn test_dce2_run_empty_block() -> bool with Mut, Panic, Div {
+    var cfg = dce2_cfg_new()
+    var b0 = dce2_block_new(0)
+    b0.count = 0
+    cfg.blocks[0] = b0
+    cfg.count = 1
+    cfg.entry = 0
+    let result = dce_run(&! cfg)
+    result.removed_instrs == 0
+}
+
+// T52: LOAD result used in STORE: LOAD preserved.
+fn test_dce2_load_used_preserved() -> bool with Mut, Panic, Div {
+    var cfg = dce2_cfg_new()
+    var b0 = dce2_block_new(0)
+    b0.instrs[0] = dce2_instr_new(DCE2_LOAD, 1, DCE2_INVALID, DCE2_INVALID) // reg1 = LOAD
+    b0.instrs[1] = dce2_instr_new(DCE2_STORE, DCE2_INVALID, 1, DCE2_INVALID)  // STORE r1
+    b0.instrs[2] = dce2_instr_new(DCE2_RET, DCE2_INVALID, DCE2_INVALID, DCE2_INVALID)
+    b0.count = 3
+    cfg.blocks[0] = b0
+    cfg.count = 1
+    cfg.entry = 0
+    dce_run(&! cfg)
+    dce2_not_nop(&cfg, 0, 0)
+}
+
+// T53: LOAD result unused: LOAD becomes NOP.
+fn test_dce2_load_unused_nop() -> bool with Mut, Panic, Div {
+    var cfg = dce2_cfg_new()
+    var b0 = dce2_block_new(0)
+    b0.instrs[0] = dce2_instr_new(DCE2_LOAD, 1, DCE2_INVALID, DCE2_INVALID)  // dead
+    b0.instrs[1] = dce2_instr_new(DCE2_RET, DCE2_INVALID, DCE2_INVALID, DCE2_INVALID)
+    b0.count = 2
+    cfg.blocks[0] = b0
+    cfg.count = 1
+    cfg.entry = 0
+    dce_run(&! cfg)
+    dce2_is_nop(&cfg, 0, 0)
+}
+
+// T54: PHI result used in RET is preserved.
+fn test_dce2_phi_used_preserved() -> bool with Mut, Panic, Div {
+    var cfg = dce2_cfg_new()
+    var b0 = dce2_block_new(0)
+    b0.instrs[0] = dce2_instr_new(DCE2_PHI, 1, 0, DCE2_INVALID) // reg1 = PHI(r0)
+    b0.instrs[1] = dce2_instr_new(DCE2_RET, DCE2_INVALID, 1, DCE2_INVALID)  // RET r1
+    b0.count = 2
+    cfg.blocks[0] = b0
+    cfg.count = 1
+    cfg.entry = 0
+    dce_run(&! cfg)
+    dce2_not_nop(&cfg, 0, 0)
+}
+
+// T55: PHI result unused: PHI becomes NOP.
+fn test_dce2_phi_unused_nop() -> bool with Mut, Panic, Div {
+    var cfg = dce2_cfg_new()
+    var b0 = dce2_block_new(0)
+    b0.instrs[0] = dce2_instr_new(DCE2_PHI, 1, 0, DCE2_INVALID) // dead
+    b0.instrs[1] = dce2_instr_new(DCE2_RET, DCE2_INVALID, DCE2_INVALID, DCE2_INVALID)
+    b0.count = 2
+    cfg.blocks[0] = b0
+    cfg.count = 1
+    cfg.entry = 0
+    dce_run(&! cfg)
+    dce2_is_nop(&cfg, 0, 0)
+}
+
+// T56: Two dead chains: both eliminated.
+fn test_dce2_two_dead_chains() -> bool with Mut, Panic, Div {
+    var cfg = dce2_cfg_new()
+    var b0 = dce2_block_new(0)
+    // chain 1: r10 = ADD r0, r1 (dead)
+    b0.instrs[0] = dce2_instr_new(DCE2_ADD, 10, 0, 1)
+    // chain 2: r11 = SUB r0, r1; r12 = MUL r11, r10 (both dead)
+    b0.instrs[1] = dce2_instr_new(DCE2_SUB, 11, 0, 1)
+    b0.instrs[2] = dce2_instr_new(DCE2_MUL, 12, 11, 10)
+    b0.instrs[3] = dce2_instr_new(DCE2_RET, DCE2_INVALID, DCE2_INVALID, DCE2_INVALID)
+    b0.count = 4
+    cfg.blocks[0] = b0
+    cfg.count = 1
+    cfg.entry = 0
+    dce_run(&! cfg)
+    dce2_is_nop(&cfg, 0, 0) && dce2_is_nop(&cfg, 0, 1) && dce2_is_nop(&cfg, 0, 2)
+}
+
+// T57: result_total_instrs matches actual instruction count.
+fn test_dce2_result_total_instrs() -> bool with Mut, Panic, Div {
+    var cfg = dce2_cfg_new()
+    var b0 = dce2_block_new(0)
+    b0.instrs[0] = dce2_instr_new(DCE2_ADD, 0, 1, 2)
+    b0.instrs[1] = dce2_instr_new(DCE2_RET, DCE2_INVALID, DCE2_INVALID, DCE2_INVALID)
+    b0.count = 2
+    cfg.blocks[0] = b0
+    cfg.count = 1
+    cfg.entry = 0
+    let result = dce_run(&! cfg)
+    result.total_instrs == 2
+}
+
+// T58: total_blocks in result = cfg.count.
+fn test_dce2_result_total_blocks() -> bool with Mut, Panic, Div {
+    var cfg = dce2_make_with_dead_block()
+    let result = dce_run(&! cfg)
+    result.total_blocks == 2
+}
+
+// T59: dce2_make_linear creates correct block.
+fn test_dce2_make_linear_correct() -> bool with Mut, Panic, Div {
+    var ops: [i64; 8] = [DCE2_ADD, DCE2_RET, 0, 0, 0, 0, 0, 0]
+    var dsts: [i64; 8] = [0, DCE2_INVALID, 0, 0, 0, 0, 0, 0]
+    var s1: [i64; 8] = [1, DCE2_INVALID, 0, 0, 0, 0, 0, 0]
+    var s2: [i64; 8] = [2, DCE2_INVALID, 0, 0, 0, 0, 0, 0]
+    let cfg = dce2_make_linear(ops, dsts, s1, s2, 2)
+    cfg.blocks[0].count == 2 && cfg.blocks[0].instrs[0].opcode == DCE2_ADD
+}
+
+// T60: dce2_block_new initializes count to 0.
+fn test_dce2_block_new_count_zero() -> bool {
+    let b = dce2_block_new(42)
+    b.count == 0 && b.id == 42
+}
+
+// T61: dce_result_new has all zeros.
+fn test_dce2_result_new_zeros() -> bool {
+    let r = dce2_result_new()
+    r.removed_instrs == 0 && r.removed_blocks == 0
+}
+
+// T62: dce2_use_def_new has all invalid entries.
+fn test_dce2_use_def_new() -> bool {
+    let ud = dce2_use_def_new()
+    ud.def_block[0] == DCE2_INVALID && ud.valid[0] == false
+}
+
+// T63: Block with zero instructions: run produces no change.
+fn test_dce2_empty_block_no_change() -> bool with Mut, Panic, Div {
+    var cfg = dce2_cfg_new()
+    var b0 = dce2_block_new(0)
+    b0.count = 0
+    cfg.blocks[0] = b0
+    cfg.count = 1
+    cfg.entry = 0
+    let result = dce_run(&! cfg)
+    result.removed_instrs == 0 && result.removed_blocks == 0
+}
+
+// T64: dce2_total_nops after DCE on single dead MOV = 1.
+fn test_dce2_total_nops_after_dce() -> bool with Mut, Panic, Div {
+    var cfg = dce2_cfg_new()
+    var b0 = dce2_block_new(0)
+    b0.instrs[0] = dce2_instr_new(DCE2_MOV, 5, DCE2_INVALID, DCE2_INVALID)
+    b0.instrs[1] = dce2_instr_new(DCE2_RET, DCE2_INVALID, DCE2_INVALID, DCE2_INVALID)
+    b0.count = 2
+    cfg.blocks[0] = b0
+    cfg.count = 1
+    cfg.entry = 0
+    dce_run(&! cfg)
+    dce2_total_nops(&cfg) == 1
+}
+
+// T65: Long dead chain: all eliminated.
+fn test_dce2_long_dead_chain() -> bool with Mut, Panic, Div {
+    var cfg = dce2_cfg_new()
+    var b0 = dce2_block_new(0)
+    // r1 = ADD r0, r0  (dead)
+    // r2 = ADD r1, r1  (dead, uses r1)
+    // r3 = ADD r2, r2  (dead, uses r2)
+    // RET
+    b0.instrs[0] = dce2_instr_new(DCE2_ADD, 1, 0, 0)
+    b0.instrs[1] = dce2_instr_new(DCE2_ADD, 2, 1, 1)
+    b0.instrs[2] = dce2_instr_new(DCE2_ADD, 3, 2, 2)
+    b0.instrs[3] = dce2_instr_new(DCE2_RET, DCE2_INVALID, DCE2_INVALID, DCE2_INVALID)
+    b0.count = 4
+    cfg.blocks[0] = b0
+    cfg.count = 1
+    cfg.entry = 0
+    dce_run(&! cfg)
+    let n0 = dce2_is_nop(&cfg, 0, 0)
+    let n1 = dce2_is_nop(&cfg, 0, 1)
+    let n2 = dce2_is_nop(&cfg, 0, 2)
+    let r = dce2_not_nop(&cfg, 0, 3)
+    n0 && n1 && n2 && r
+}
+
+// T66: Two blocks: entry reachable, isolated dead block not reachable.
+fn test_dce2_isolated_block_unreachable() -> bool with Mut, Panic, Div {
+    var cfg = dce2_cfg_new()
+    var b0 = dce2_block_new(0)
+    b0.instrs[0] = dce2_instr_new(DCE2_RET, DCE2_INVALID, DCE2_INVALID, DCE2_INVALID)
+    b0.count = 1
+    cfg.blocks[0] = b0
+    var b1 = dce2_block_new(1)
+    b1.instrs[0] = dce2_instr_new(DCE2_MOV, 0, DCE2_INVALID, DCE2_INVALID)
+    b1.count = 1
+    cfg.blocks[1] = b1
+    cfg.count = 2
+    cfg.entry = 0
+    dce_run(&! cfg)
+    cfg.blocks[1].reachable == false && dce2_is_nop(&cfg, 1, 0)
+}
+
+// T67: Live computation chain: all preserved.
+fn test_dce2_live_chain_preserved() -> bool with Mut, Panic, Div {
+    // r2 = ADD r0, r1; r3 = ADD r2, r2; STORE r3; RET
+    var cfg = dce2_cfg_new()
+    var b0 = dce2_block_new(0)
+    b0.instrs[0] = dce2_instr_new(DCE2_ADD, 2, 0, 1)                         // live
+    b0.instrs[1] = dce2_instr_new(DCE2_ADD, 3, 2, 2)                          // live (used by STORE)
+    b0.instrs[2] = dce2_instr_new(DCE2_STORE, DCE2_INVALID, 3, DCE2_INVALID)  // side effect
+    b0.instrs[3] = dce2_instr_new(DCE2_RET, DCE2_INVALID, DCE2_INVALID, DCE2_INVALID)
+    b0.count = 4
+    cfg.blocks[0] = b0
+    cfg.count = 1
+    cfg.entry = 0
+    dce_run(&! cfg)
+    dce2_not_nop(&cfg, 0, 0) && dce2_not_nop(&cfg, 0, 1) &&
+    dce2_not_nop(&cfg, 0, 2) && dce2_not_nop(&cfg, 0, 3)
+}
+
+// T68: dce2_block_new sets reachable=false by default.
+fn test_dce2_block_default_unreachable() -> bool {
+    let b = dce2_block_new(0)
+    b.reachable == false
+}
+
+// T69: dce2_instr_new initializes used=false.
+fn test_dce2_instr_used_false() -> bool {
+    let i = dce2_instr_new(DCE2_ADD, 0, 1, 2)
+    i.used == false
+}
+
+// T70: dce2_cfg_new sets entry=0.
+fn test_dce2_cfg_entry() -> bool {
+    let cfg = dce2_cfg_new()
+    cfg.entry == 0
+}
+
+// ============================================================================
+// Section 13: Test Runner
+// ============================================================================
+
+fn test_dce2_main() -> i32 with IO, Mut, Panic, Div {
+    var passed: i64 = 0
+    let total: i64 = 70
+
+    print("=== Dead Code Elimination Tests ===\n")
+
+    if test_dce2_cfg_new() { passed = passed + 1; print("  T01 OK cfg_new\n") } else { print("  FAIL T01 cfg_new\n") }
+    if test_dce2_add_block() { passed = passed + 1; print("  T02 OK add_block\n") } else { print("  FAIL T02 add_block\n") }
+    if test_dce2_add_instr() { passed = passed + 1; print("  T03 OK add_instr\n") } else { print("  FAIL T03 add_instr\n") }
+    if test_dce2_instr_opcode() { passed = passed + 1; print("  T04 OK instr_opcode\n") } else { print("  FAIL T04 instr_opcode\n") }
+    if test_dce2_mark_reachable_entry() { passed = passed + 1; print("  T05 OK mark_reachable_entry\n") } else { print("  FAIL T05 mark_reachable_entry\n") }
+    if test_dce2_unreachable_block() { passed = passed + 1; print("  T06 OK unreachable_block\n") } else { print("  FAIL T06 unreachable_block\n") }
+    if test_dce2_linked_block_reachable() { passed = passed + 1; print("  T07 OK linked_block_reachable\n") } else { print("  FAIL T07 linked_block_reachable\n") }
+    if test_dce2_dead_instr_becomes_nop() { passed = passed + 1; print("  T08 OK dead_instr_nop\n") } else { print("  FAIL T08 dead_instr_nop\n") }
+    if test_dce2_ret_preserved() { passed = passed + 1; print("  T09 OK ret_preserved\n") } else { print("  FAIL T09 ret_preserved\n") }
+    if test_dce2_call_preserved() { passed = passed + 1; print("  T10 OK call_preserved\n") } else { print("  FAIL T10 call_preserved\n") }
+    if test_dce2_store_preserved() { passed = passed + 1; print("  T11 OK store_preserved\n") } else { print("  FAIL T11 store_preserved\n") }
+    if test_dce2_unreachable_instr_nop() { passed = passed + 1; print("  T12 OK unreachable_instr_nop\n") } else { print("  FAIL T12 unreachable_instr_nop\n") }
+    if test_dce2_reachable_live_not_nop() { passed = passed + 1; print("  T13 OK reachable_live_not_nop\n") } else { print("  FAIL T13 reachable_live_not_nop\n") }
+    if test_dce2_run_removed_blocks() { passed = passed + 1; print("  T14 OK run_removed_blocks\n") } else { print("  FAIL T14 run_removed_blocks\n") }
+    if test_dce2_run_removed_instrs() { passed = passed + 1; print("  T15 OK run_removed_instrs\n") } else { print("  FAIL T15 run_removed_instrs\n") }
+    if test_dce2_run_removed_excludes_live() { passed = passed + 1; print("  T16 OK removed_excludes_live\n") } else { print("  FAIL T16 removed_excludes_live\n") }
+    if test_dce2_transitive_liveness() { passed = passed + 1; print("  T17 OK transitive_liveness\n") } else { print("  FAIL T17 transitive_liveness\n") }
+    if test_dce2_dead_add_nop() { passed = passed + 1; print("  T18 OK dead_add_nop\n") } else { print("  FAIL T18 dead_add_nop\n") }
+    if test_dce2_dead_mov_nop() { passed = passed + 1; print("  T19 OK dead_mov_nop\n") } else { print("  FAIL T19 dead_mov_nop\n") }
+    if test_dce2_dead_sub_nop() { passed = passed + 1; print("  T20 OK dead_sub_nop\n") } else { print("  FAIL T20 dead_sub_nop\n") }
+    if test_dce2_dead_mul_nop() { passed = passed + 1; print("  T21 OK dead_mul_nop\n") } else { print("  FAIL T21 dead_mul_nop\n") }
+    if test_dce2_jump_preserved() { passed = passed + 1; print("  T22 OK jump_preserved\n") } else { print("  FAIL T22 jump_preserved\n") }
+    if test_dce2_branch_preserved() { passed = passed + 1; print("  T23 OK branch_preserved\n") } else { print("  FAIL T23 branch_preserved\n") }
+    if test_dce2_count_nops() { passed = passed + 1; print("  T24 OK count_nops\n") } else { print("  FAIL T24 count_nops\n") }
+    if test_dce2_count_live() { passed = passed + 1; print("  T25 OK count_live\n") } else { print("  FAIL T25 count_live\n") }
+    if test_dce2_total_instrs() { passed = passed + 1; print("  T26 OK total_instrs\n") } else { print("  FAIL T26 total_instrs\n") }
+    if test_dce2_total_nops_fresh() { passed = passed + 1; print("  T27 OK total_nops_fresh\n") } else { print("  FAIL T27 total_nops_fresh\n") }
+    if test_dce2_multiple_dead_nop() { passed = passed + 1; print("  T28 OK multiple_dead_nop\n") } else { print("  FAIL T28 multiple_dead_nop\n") }
+    if test_dce2_mixed_live_dead() { passed = passed + 1; print("  T29 OK mixed_live_dead\n") } else { print("  FAIL T29 mixed_live_dead\n") }
+    if test_dce2_instr_nop_constructor() { passed = passed + 1; print("  T30 OK instr_nop_constructor\n") } else { print("  FAIL T30 instr_nop_constructor\n") }
+    if test_dce2_side_effect_ret() { passed = passed + 1; print("  T31 OK side_effect_ret\n") } else { print("  FAIL T31 side_effect_ret\n") }
+    if test_dce2_side_effect_call() { passed = passed + 1; print("  T32 OK side_effect_call\n") } else { print("  FAIL T32 side_effect_call\n") }
+    if test_dce2_side_effect_store() { passed = passed + 1; print("  T33 OK side_effect_store\n") } else { print("  FAIL T33 side_effect_store\n") }
+    if test_dce2_no_side_effect_add() { passed = passed + 1; print("  T34 OK no_side_effect_add\n") } else { print("  FAIL T34 no_side_effect_add\n") }
+    if test_dce2_no_side_effect_mov() { passed = passed + 1; print("  T35 OK no_side_effect_mov\n") } else { print("  FAIL T35 no_side_effect_mov\n") }
+    if test_dce2_terminator_jump() { passed = passed + 1; print("  T36 OK terminator_jump\n") } else { print("  FAIL T36 terminator_jump\n") }
+    if test_dce2_terminator_ret() { passed = passed + 1; print("  T37 OK terminator_ret\n") } else { print("  FAIL T37 terminator_ret\n") }
+    if test_dce2_terminator_branch() { passed = passed + 1; print("  T38 OK terminator_branch\n") } else { print("  FAIL T38 terminator_branch\n") }
+    if test_dce2_not_terminator_add() { passed = passed + 1; print("  T39 OK not_terminator_add\n") } else { print("  FAIL T39 not_terminator_add\n") }
+    if test_dce2_no_dst_nop() { passed = passed + 1; print("  T40 OK no_dst_nop\n") } else { print("  FAIL T40 no_dst_nop\n") }
+    if test_dce2_has_dst_add() { passed = passed + 1; print("  T41 OK has_dst_add\n") } else { print("  FAIL T41 has_dst_add\n") }
+    if test_dce2_no_dst_ret() { passed = passed + 1; print("  T42 OK no_dst_ret\n") } else { print("  FAIL T42 no_dst_ret\n") }
+    if test_dce2_entry_reachable() { passed = passed + 1; print("  T43 OK entry_reachable\n") } else { print("  FAIL T43 entry_reachable\n") }
+    if test_dce2_unreachable_instr_flag() { passed = passed + 1; print("  T44 OK unreachable_instr_flag\n") } else { print("  FAIL T44 unreachable_instr_flag\n") }
+    if test_dce2_reachable_instr_flag() { passed = passed + 1; print("  T45 OK reachable_instr_flag\n") } else { print("  FAIL T45 reachable_instr_flag\n") }
+    if test_dce2_three_block_chain() { passed = passed + 1; print("  T46 OK three_block_chain\n") } else { print("  FAIL T46 three_block_chain\n") }
+    if test_dce2_add_succ() { passed = passed + 1; print("  T47 OK add_succ\n") } else { print("  FAIL T47 add_succ\n") }
+    if test_dce2_add_succ_pred() { passed = passed + 1; print("  T48 OK add_succ_pred\n") } else { print("  FAIL T48 add_succ_pred\n") }
+    if test_dce2_get_opcode() { passed = passed + 1; print("  T49 OK get_opcode\n") } else { print("  FAIL T49 get_opcode\n") }
+    if test_dce2_get_opcode_oob() { passed = passed + 1; print("  T50 OK get_opcode_oob\n") } else { print("  FAIL T50 get_opcode_oob\n") }
+    if test_dce2_run_empty_block() { passed = passed + 1; print("  T51 OK run_empty_block\n") } else { print("  FAIL T51 run_empty_block\n") }
+    if test_dce2_load_used_preserved() { passed = passed + 1; print("  T52 OK load_used_preserved\n") } else { print("  FAIL T52 load_used_preserved\n") }
+    if test_dce2_load_unused_nop() { passed = passed + 1; print("  T53 OK load_unused_nop\n") } else { print("  FAIL T53 load_unused_nop\n") }
+    if test_dce2_phi_used_preserved() { passed = passed + 1; print("  T54 OK phi_used_preserved\n") } else { print("  FAIL T54 phi_used_preserved\n") }
+    if test_dce2_phi_unused_nop() { passed = passed + 1; print("  T55 OK phi_unused_nop\n") } else { print("  FAIL T55 phi_unused_nop\n") }
+    if test_dce2_two_dead_chains() { passed = passed + 1; print("  T56 OK two_dead_chains\n") } else { print("  FAIL T56 two_dead_chains\n") }
+    if test_dce2_result_total_instrs() { passed = passed + 1; print("  T57 OK result_total_instrs\n") } else { print("  FAIL T57 result_total_instrs\n") }
+    if test_dce2_result_total_blocks() { passed = passed + 1; print("  T58 OK result_total_blocks\n") } else { print("  FAIL T58 result_total_blocks\n") }
+    if test_dce2_make_linear_correct() { passed = passed + 1; print("  T59 OK make_linear_correct\n") } else { print("  FAIL T59 make_linear_correct\n") }
+    if test_dce2_block_new_count_zero() { passed = passed + 1; print("  T60 OK block_new_count_zero\n") } else { print("  FAIL T60 block_new_count_zero\n") }
+    if test_dce2_result_new_zeros() { passed = passed + 1; print("  T61 OK result_new_zeros\n") } else { print("  FAIL T61 result_new_zeros\n") }
+    if test_dce2_use_def_new() { passed = passed + 1; print("  T62 OK use_def_new\n") } else { print("  FAIL T62 use_def_new\n") }
+    if test_dce2_empty_block_no_change() { passed = passed + 1; print("  T63 OK empty_block_no_change\n") } else { print("  FAIL T63 empty_block_no_change\n") }
+    if test_dce2_total_nops_after_dce() { passed = passed + 1; print("  T64 OK total_nops_after_dce\n") } else { print("  FAIL T64 total_nops_after_dce\n") }
+    if test_dce2_long_dead_chain() { passed = passed + 1; print("  T65 OK long_dead_chain\n") } else { print("  FAIL T65 long_dead_chain\n") }
+    if test_dce2_isolated_block_unreachable() { passed = passed + 1; print("  T66 OK isolated_block_unreachable\n") } else { print("  FAIL T66 isolated_block_unreachable\n") }
+    if test_dce2_live_chain_preserved() { passed = passed + 1; print("  T67 OK live_chain_preserved\n") } else { print("  FAIL T67 live_chain_preserved\n") }
+    if test_dce2_block_default_unreachable() { passed = passed + 1; print("  T68 OK block_default_unreachable\n") } else { print("  FAIL T68 block_default_unreachable\n") }
+    if test_dce2_instr_used_false() { passed = passed + 1; print("  T69 OK instr_used_false\n") } else { print("  FAIL T69 instr_used_false\n") }
+    if test_dce2_cfg_entry() { passed = passed + 1; print("  T70 OK cfg_entry\n") } else { print("  FAIL T70 cfg_entry\n") }
+
+    print("\nDCE2: ")
+    print_int(passed)
+    print(" / ")
+    print_int(total)
+    print(" passed\n")
+
+    if passed == total { 0 } else { 1 }
+}

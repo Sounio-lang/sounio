@@ -1,0 +1,1431 @@
+// self-hosted::analysis::lifetime — Lifetime Analysis for Borrow Checker Support
+//
+// Tracks when references are live and detects borrow conflicts.  This is a
+// simplified lifetime model suitable for supporting the borrow checker of the
+// Sounio self-hosted compiler.
+//
+// Core concepts:
+//   - LtRegion: a contiguous range of program points [start, end) in which
+//     a reference is valid.  Regions can be nested (inner ⊆ outer).
+//     parent=-1 means the region has no enclosing region.
+//   - LtBorrow: an association of a referent (variable/allocation id),
+//     a lifetime region, and a mutability flag.
+//   - LtConflict: a pair of borrows that overlap in time on the same referent
+//     in an incompatible way (two mutable borrows, or mutable + shared).
+//   - LtContext: holds all regions, borrows, and detected conflicts.
+//
+// Conflict rules (Rust-like):
+//   1. Two mutable borrows of the same referent in overlapping regions → conflict.
+//   2. A mutable borrow and a shared borrow of the same referent in overlapping
+//      regions → conflict.
+//   3. Two shared borrows → no conflict regardless of overlap.
+//
+// Region hierarchy:
+//   - A region is nested inside another if its range is fully contained within
+//     the outer range, i.e. inner.start >= outer.start && inner.end <= outer.end.
+//   - Region overlap: two regions overlap if their ranges share at least one point.
+//
+// All arrays are fixed-size — no heap allocation.
+//
+// References:
+//   Matsakis & Klock: "The Rust Language" (ACM SIGAda 2014)
+//   Jung, Jourdan, Krebbers, Dreyer: "RustBelt: Securing the Foundations
+//     of the Rust Programming Language" (POPL 2018)
+//   Weiss et al.: "Oxide: The Essence of Rust" (arXiv 2019)
+//   Polonius: "Polonius Book" — NLL/lifetime analysis for Rust (2021)
+
+// ============================================================================
+// Section 1: Constants
+// ============================================================================
+
+let LT_MAX_REGIONS: i64 = 256
+let LT_MAX_BORROWS: i64 = 512
+let LT_MAX_CONFLICTS: i64 = 128
+let LT_NO_PARENT: i64 = 0 - 1
+let LT_INVALID: i64 = 0 - 1
+
+// ============================================================================
+// Section 2: Data Structures
+// ============================================================================
+
+// A lifetime region: a half-open interval [start, end) of program points.
+// parent = LT_NO_PARENT if this is a root region.
+struct LtRegion {
+    id: i64,
+    start: i64,
+    end: i64,
+    parent: i64,
+}
+
+// A borrow: ties a referent to a region and a mutability flag.
+// referent — id of the value being borrowed
+// region   — id of the region during which the borrow is live
+// is_mut   — true for exclusive (&!) borrows, false for shared (&) borrows
+struct LtBorrow {
+    id: i64,
+    referent: i64,
+    region: i64,
+    is_mut: bool,
+}
+
+// A program point: block + instruction index.
+struct LtPoint {
+    block: i64,
+    instr: i64,
+}
+
+// A conflict between two borrows at a given program point.
+struct LtConflict {
+    borrow1: i64,
+    borrow2: i64,
+    at: LtPoint,
+}
+
+// The full lifetime analysis context.
+struct LtContext {
+    regions: [LtRegion; 256],
+    borrows: [LtBorrow; 512],
+    conflicts: [LtConflict; 128],
+    region_count: i64,
+    borrow_count: i64,
+    conflict_count: i64,
+}
+
+// ============================================================================
+// Section 3: Constructors
+// ============================================================================
+
+fn lt_region_new(id: i64, start: i64, end: i64, parent: i64) -> LtRegion {
+    LtRegion {
+        id: id,
+        start: start,
+        end: end,
+        parent: parent,
+    }
+}
+
+fn lt_borrow_new(id: i64, referent: i64, region: i64, is_mut: bool) -> LtBorrow {
+    LtBorrow {
+        id: id,
+        referent: referent,
+        region: region,
+        is_mut: is_mut,
+    }
+}
+
+fn lt_point_new(block: i64, instr: i64) -> LtPoint {
+    LtPoint {
+        block: block,
+        instr: instr,
+    }
+}
+
+fn lt_conflict_new(b1: i64, b2: i64, at: LtPoint) -> LtConflict {
+    LtConflict {
+        borrow1: b1,
+        borrow2: b2,
+        at: at,
+    }
+}
+
+fn lt_context_new() -> LtContext {
+    LtContext {
+        regions: [lt_region_new(LT_INVALID, 0, 0, LT_NO_PARENT); 256],
+        borrows: [lt_borrow_new(LT_INVALID, LT_INVALID, LT_INVALID, false); 512],
+        conflicts: [lt_conflict_new(LT_INVALID, LT_INVALID, lt_point_new(0, 0)); 128],
+        region_count: 0,
+        borrow_count: 0,
+        conflict_count: 0,
+    }
+}
+
+// ============================================================================
+// Section 4: Region Operations
+// ============================================================================
+
+// Add a new region [start, end) with the given parent.
+// Returns the new region's id.  Returns LT_INVALID if full.
+fn lt_add_region(ctx: &! LtContext, start: i64, end: i64, parent: i64) -> i64 with Mut, Panic {
+    if ctx.region_count >= LT_MAX_REGIONS {
+        return LT_INVALID
+    }
+    let id = ctx.region_count
+    ctx.regions[id as usize] = lt_region_new(id, start, end, parent)
+    ctx.region_count = ctx.region_count + 1
+    id
+}
+
+// Get a region by id.  Returns a dummy invalid region if out of range.
+fn lt_get_region(ctx: &LtContext, id: i64) -> LtRegion {
+    if id < 0 { return lt_region_new(LT_INVALID, 0, 0, LT_NO_PARENT) }
+    if id >= ctx.region_count { return lt_region_new(LT_INVALID, 0, 0, LT_NO_PARENT) }
+    ctx.regions[id as usize]
+}
+
+// Check if program point `point` is inside region `region`.
+// A point is inside iff region.start <= point < region.end.
+fn lt_region_contains(ctx: &LtContext, region: i64, point: i64) -> bool {
+    if region < 0 { return false }
+    if region >= ctx.region_count { return false }
+    let r = ctx.regions[region as usize]
+    point >= r.start && point < r.end
+}
+
+// Check if two regions overlap (share at least one program point).
+fn lt_regions_overlap(ctx: &LtContext, r1: i64, r2: i64) -> bool {
+    if r1 < 0 || r1 >= ctx.region_count { return false }
+    if r2 < 0 || r2 >= ctx.region_count { return false }
+    let a = ctx.regions[r1 as usize]
+    let b = ctx.regions[r2 as usize]
+    // Overlap if NOT (a ends before b starts or b ends before a starts).
+    if a.end <= b.start { return false }
+    if b.end <= a.start { return false }
+    true
+}
+
+// Check if `inner` is fully nested inside `outer`.
+// inner.start >= outer.start AND inner.end <= outer.end.
+fn lt_region_nested(ctx: &LtContext, inner: i64, outer: i64) -> bool {
+    if inner < 0 || inner >= ctx.region_count { return false }
+    if outer < 0 || outer >= ctx.region_count { return false }
+    let ri = ctx.regions[inner as usize]
+    let ro = ctx.regions[outer as usize]
+    ri.start >= ro.start && ri.end <= ro.end
+}
+
+// Compute the overlap length of two regions (0 if no overlap).
+fn lt_regions_overlap_length(ctx: &LtContext, r1: i64, r2: i64) -> i64 {
+    if r1 < 0 || r1 >= ctx.region_count { return 0 }
+    if r2 < 0 || r2 >= ctx.region_count { return 0 }
+    let a = ctx.regions[r1 as usize]
+    let b = ctx.regions[r2 as usize]
+    var ostart = a.start
+    if b.start > ostart { ostart = b.start }
+    var oend = a.end
+    if b.end < oend { oend = b.end }
+    if oend <= ostart { return 0 }
+    oend - ostart
+}
+
+// Check if a region is valid (id != LT_INVALID, sensible range).
+fn lt_region_valid(ctx: &LtContext, id: i64) -> bool {
+    if id < 0 { return false }
+    if id >= ctx.region_count { return false }
+    let r = ctx.regions[id as usize]
+    r.id != LT_INVALID && r.start <= r.end
+}
+
+// Check if region r1 is a direct parent of r2.
+fn lt_region_is_parent(ctx: &LtContext, r1: i64, r2: i64) -> bool {
+    if r2 < 0 || r2 >= ctx.region_count { return false }
+    ctx.regions[r2 as usize].parent == r1
+}
+
+// Walk up the parent chain and check if `anc` is an ancestor of `desc`.
+fn lt_region_is_ancestor(ctx: &LtContext, anc: i64, desc: i64) -> bool {
+    if anc < 0 { return false }
+    if desc < 0 { return false }
+    var cur = desc
+    var steps: i64 = 0
+    while steps < LT_MAX_REGIONS {
+        if cur == anc { return true }
+        if cur < 0 || cur >= ctx.region_count { return false }
+        let p = ctx.regions[cur as usize].parent
+        if p == LT_NO_PARENT { return false }
+        cur = p
+        steps = steps + 1
+    }
+    false
+}
+
+// ============================================================================
+// Section 5: Borrow Operations
+// ============================================================================
+
+// Add a borrow of `referent` in `region` with given mutability.
+// Returns the new borrow's id.  Returns LT_INVALID if full.
+fn lt_add_borrow(ctx: &! LtContext, referent: i64, region: i64, is_mut: bool) -> i64 with Mut, Panic {
+    if ctx.borrow_count >= LT_MAX_BORROWS {
+        return LT_INVALID
+    }
+    let id = ctx.borrow_count
+    ctx.borrows[id as usize] = lt_borrow_new(id, referent, region, is_mut)
+    ctx.borrow_count = ctx.borrow_count + 1
+    id
+}
+
+// Get a borrow by id.
+fn lt_get_borrow(ctx: &LtContext, id: i64) -> LtBorrow {
+    if id < 0 { return lt_borrow_new(LT_INVALID, LT_INVALID, LT_INVALID, false) }
+    if id >= ctx.borrow_count { return lt_borrow_new(LT_INVALID, LT_INVALID, LT_INVALID, false) }
+    ctx.borrows[id as usize]
+}
+
+// Check if two borrows conflict.
+// Conflict conditions:
+//   - Same referent
+//   - Overlapping regions
+//   - At least one is mutable (mut+mut OR mut+shared)
+fn lt_borrows_conflict(ctx: &LtContext, b1: i64, b2: i64) -> bool {
+    if b1 < 0 || b1 >= ctx.borrow_count { return false }
+    if b2 < 0 || b2 >= ctx.borrow_count { return false }
+    if b1 == b2 { return false }
+    let borrow1 = ctx.borrows[b1 as usize]
+    let borrow2 = ctx.borrows[b2 as usize]
+    // Must borrow the same referent.
+    if borrow1.referent != borrow2.referent { return false }
+    // At least one must be mutable.
+    if borrow1.is_mut == false && borrow2.is_mut == false { return false }
+    // Regions must overlap.
+    lt_regions_overlap(ctx, borrow1.region, borrow2.region)
+}
+
+// Count all borrows of a given referent.
+fn lt_count_borrows_of(ctx: &LtContext, referent: i64) -> i64 {
+    var cnt: i64 = 0
+    var bi: i64 = 0
+    while bi < ctx.borrow_count {
+        if ctx.borrows[bi as usize].referent == referent {
+            cnt = cnt + 1
+        }
+        bi = bi + 1
+    }
+    cnt
+}
+
+// Count mutable borrows of a given referent.
+fn lt_count_mut_borrows_of(ctx: &LtContext, referent: i64) -> i64 {
+    var cnt: i64 = 0
+    var bi: i64 = 0
+    while bi < ctx.borrow_count {
+        let b = ctx.borrows[bi as usize]
+        if b.referent == referent && b.is_mut {
+            cnt = cnt + 1
+        }
+        bi = bi + 1
+    }
+    cnt
+}
+
+// Count shared borrows of a given referent.
+fn lt_count_shared_borrows_of(ctx: &LtContext, referent: i64) -> i64 {
+    var cnt: i64 = 0
+    var bi: i64 = 0
+    while bi < ctx.borrow_count {
+        let b = ctx.borrows[bi as usize]
+        if b.referent == referent && b.is_mut == false {
+            cnt = cnt + 1
+        }
+        bi = bi + 1
+    }
+    cnt
+}
+
+// Check if borrow b is live at the given program point (its region contains the point).
+fn lt_borrow_live_at(ctx: &LtContext, b: i64, point: i64) -> bool {
+    if b < 0 || b >= ctx.borrow_count { return false }
+    let borrow = ctx.borrows[b as usize]
+    lt_region_contains(ctx, borrow.region, point)
+}
+
+// ============================================================================
+// Section 6: Conflict Detection
+// ============================================================================
+
+// Add a conflict record.  No-op if full.
+fn lt_add_conflict(ctx: &! LtContext, b1: i64, b2: i64, at: LtPoint) with Mut, Panic {
+    if ctx.conflict_count >= LT_MAX_CONFLICTS {
+        return
+    }
+    ctx.conflicts[ctx.conflict_count as usize] = lt_conflict_new(b1, b2, at)
+    ctx.conflict_count = ctx.conflict_count + 1
+}
+
+// Check if a conflict between b1 and b2 already exists (in either order).
+fn lt_conflict_exists(ctx: &LtContext, b1: i64, b2: i64) -> bool {
+    var ci: i64 = 0
+    while ci < ctx.conflict_count {
+        let c = ctx.conflicts[ci as usize]
+        if c.borrow1 == b1 && c.borrow2 == b2 { return true }
+        if c.borrow1 == b2 && c.borrow2 == b1 { return true }
+        ci = ci + 1
+    }
+    false
+}
+
+// Scan all pairs of borrows for conflicts and record them.
+// The conflict point is reported as the start of the overlapping region.
+fn lt_check_conflicts(ctx: &! LtContext) with Mut, Div, Panic {
+    var b1: i64 = 0
+    while b1 < ctx.borrow_count {
+        var b2: i64 = b1 + 1
+        while b2 < ctx.borrow_count {
+            if lt_borrows_conflict(ctx, b1, b2) {
+                if lt_conflict_exists(ctx, b1, b2) == false {
+                    // Compute the overlap start as the conflict point.
+                    let borrow1 = ctx.borrows[b1 as usize]
+                    let borrow2 = ctx.borrows[b2 as usize]
+                    let r1 = ctx.regions[borrow1.region as usize]
+                    let r2 = ctx.regions[borrow2.region as usize]
+                    var ostart = r1.start
+                    if r2.start > ostart { ostart = r2.start }
+                    let at = lt_point_new(0, ostart)
+                    lt_add_conflict(ctx, b1, b2, at)
+                }
+            }
+            b2 = b2 + 1
+        }
+        b1 = b1 + 1
+    }
+}
+
+// Return true if any conflict has been detected.
+fn lt_has_conflicts(ctx: &LtContext) -> bool {
+    ctx.conflict_count > 0
+}
+
+// Return the number of conflicts detected.
+fn lt_conflict_count(ctx: &LtContext) -> i64 {
+    ctx.conflict_count
+}
+
+// Get a conflict by index.
+fn lt_get_conflict(ctx: &LtContext, i: i64) -> LtConflict {
+    if i < 0 { return lt_conflict_new(LT_INVALID, LT_INVALID, lt_point_new(0, 0)) }
+    if i >= ctx.conflict_count { return lt_conflict_new(LT_INVALID, LT_INVALID, lt_point_new(0, 0)) }
+    ctx.conflicts[i as usize]
+}
+
+// ============================================================================
+// Section 7: Utility and Statistics
+// ============================================================================
+
+// Return the number of regions in the context.
+fn lt_region_count(ctx: &LtContext) -> i64 {
+    ctx.region_count
+}
+
+// Return the number of borrows in the context.
+fn lt_borrow_count(ctx: &LtContext) -> i64 {
+    ctx.borrow_count
+}
+
+// Count regions that have no parent (root regions).
+fn lt_count_root_regions(ctx: &LtContext) -> i64 {
+    var cnt: i64 = 0
+    var ri: i64 = 0
+    while ri < ctx.region_count {
+        if ctx.regions[ri as usize].parent == LT_NO_PARENT {
+            cnt = cnt + 1
+        }
+        ri = ri + 1
+    }
+    cnt
+}
+
+// Count borrows that are live at a given program point.
+fn lt_count_live_at(ctx: &LtContext, point: i64) -> i64 {
+    var cnt: i64 = 0
+    var bi: i64 = 0
+    while bi < ctx.borrow_count {
+        if lt_borrow_live_at(ctx, bi, point) {
+            cnt = cnt + 1
+        }
+        bi = bi + 1
+    }
+    cnt
+}
+
+// Count mutable borrows live at a given point.
+fn lt_count_mut_live_at(ctx: &LtContext, point: i64) -> i64 {
+    var cnt: i64 = 0
+    var bi: i64 = 0
+    while bi < ctx.borrow_count {
+        let b = ctx.borrows[bi as usize]
+        if b.is_mut && lt_borrow_live_at(ctx, bi, point) {
+            cnt = cnt + 1
+        }
+        bi = bi + 1
+    }
+    cnt
+}
+
+// Find a borrow of `referent` that is live at `point` and mutable.
+// Returns borrow id or LT_INVALID if none found.
+fn lt_find_mut_borrow_at(ctx: &LtContext, referent: i64, point: i64) -> i64 {
+    var bi: i64 = 0
+    while bi < ctx.borrow_count {
+        let b = ctx.borrows[bi as usize]
+        if b.referent == referent && b.is_mut {
+            if lt_borrow_live_at(ctx, bi, point) {
+                return bi
+            }
+        }
+        bi = bi + 1
+    }
+    LT_INVALID
+}
+
+// Return the total span of a region (end - start), or 0 for invalid.
+fn lt_region_span(ctx: &LtContext, id: i64) -> i64 {
+    if id < 0 || id >= ctx.region_count { return 0 }
+    let r = ctx.regions[id as usize]
+    if r.end < r.start { return 0 }
+    r.end - r.start
+}
+
+// ============================================================================
+// Section 8: Tests — Category 1: Context and Region Construction (10 tests)
+// ============================================================================
+
+// T01: Fresh context has zero counts.
+fn test_lt_context_new() -> bool {
+    let ctx = lt_context_new()
+    ctx.region_count == 0 && ctx.borrow_count == 0 && ctx.conflict_count == 0
+}
+
+// T02: lt_add_region returns sequential ids.
+fn test_lt_add_region_ids_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 10, LT_NO_PARENT)
+    let r1 = lt_add_region(ctx, 5, 15, LT_NO_PARENT)
+    r0 == 0 && r1 == 1 && ctx.region_count == 2
+}
+fn test_lt_add_region_ids() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_add_region_ids_inner(&! ctx)
+}
+
+// T03: lt_get_region retrieves correct data.
+fn test_lt_get_region_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 3, 17, LT_NO_PARENT)
+    let reg = lt_get_region(ctx, r0)
+    reg.start == 3 && reg.end == 17 && reg.parent == LT_NO_PARENT
+}
+fn test_lt_get_region() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_get_region_inner(&! ctx)
+}
+
+// T04: lt_get_region out of range returns invalid.
+fn test_lt_get_region_oob() -> bool {
+    let ctx = lt_context_new()
+    let reg = lt_get_region(&ctx, 5)
+    reg.id == LT_INVALID
+}
+
+// T05: lt_region_valid returns true for valid region.
+fn test_lt_region_valid_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 10, LT_NO_PARENT)
+    lt_region_valid(ctx, r0)
+}
+fn test_lt_region_valid() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_region_valid_inner(&! ctx)
+}
+
+// T06: lt_region_valid returns false for invalid id.
+fn test_lt_region_valid_invalid() -> bool {
+    let ctx = lt_context_new()
+    let v = lt_region_valid(&ctx, LT_INVALID)
+    v == false
+}
+
+// T07: lt_count_root_regions counts root regions.
+fn test_lt_count_root_regions_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 20, LT_NO_PARENT)
+    let r1 = lt_add_region(ctx, 2, 10, r0)
+    let r2 = lt_add_region(ctx, 0, 5, LT_NO_PARENT)
+    lt_count_root_regions(ctx) == 2
+}
+fn test_lt_count_root_regions() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_count_root_regions_inner(&! ctx)
+}
+
+// T08: lt_region_is_parent returns true for direct parent.
+fn test_lt_region_is_parent_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 20, LT_NO_PARENT)
+    let r1 = lt_add_region(ctx, 2, 10, r0)
+    lt_region_is_parent(ctx, r0, r1)
+}
+fn test_lt_region_is_parent() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_region_is_parent_inner(&! ctx)
+}
+
+// T09: lt_region_is_parent returns false for non-parent.
+fn test_lt_region_not_parent_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 20, LT_NO_PARENT)
+    let r1 = lt_add_region(ctx, 2, 10, LT_NO_PARENT)
+    let v = lt_region_is_parent(ctx, r0, r1)
+    v == false
+}
+fn test_lt_region_not_parent() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_region_not_parent_inner(&! ctx)
+}
+
+// T10: lt_region_span returns correct length.
+fn test_lt_region_span_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 5, 15, LT_NO_PARENT)
+    lt_region_span(ctx, r0) == 10
+}
+fn test_lt_region_span() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_region_span_inner(&! ctx)
+}
+
+// ============================================================================
+// Section 9: Tests — Category 2: Region Overlap and Containment (12 tests)
+// ============================================================================
+
+// T11: Non-overlapping regions (before) → false.
+fn test_lt_regions_no_overlap_before_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 5, LT_NO_PARENT)
+    let r1 = lt_add_region(ctx, 5, 10, LT_NO_PARENT)
+    let v = lt_regions_overlap(ctx, r0, r1)
+    v == false
+}
+fn test_lt_regions_no_overlap_before() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_regions_no_overlap_before_inner(&! ctx)
+}
+
+// T12: Non-overlapping regions (after) → false.
+fn test_lt_regions_no_overlap_after_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 10, 20, LT_NO_PARENT)
+    let r1 = lt_add_region(ctx, 0, 10, LT_NO_PARENT)
+    let v = lt_regions_overlap(ctx, r0, r1)
+    v == false
+}
+fn test_lt_regions_no_overlap_after() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_regions_no_overlap_after_inner(&! ctx)
+}
+
+// T13: Overlapping regions (partial) → true.
+fn test_lt_regions_overlap_partial_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 10, LT_NO_PARENT)
+    let r1 = lt_add_region(ctx, 5, 15, LT_NO_PARENT)
+    lt_regions_overlap(ctx, r0, r1)
+}
+fn test_lt_regions_overlap_partial() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_regions_overlap_partial_inner(&! ctx)
+}
+
+// T14: Fully contained region → overlaps.
+fn test_lt_regions_overlap_contained_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 20, LT_NO_PARENT)
+    let r1 = lt_add_region(ctx, 5, 15, LT_NO_PARENT)
+    lt_regions_overlap(ctx, r0, r1)
+}
+fn test_lt_regions_overlap_contained() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_regions_overlap_contained_inner(&! ctx)
+}
+
+// T15: Same region overlaps itself.
+fn test_lt_regions_overlap_self_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 10, LT_NO_PARENT)
+    lt_regions_overlap(ctx, r0, r0)
+}
+fn test_lt_regions_overlap_self() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_regions_overlap_self_inner(&! ctx)
+}
+
+// T16: lt_region_contains: point inside → true.
+fn test_lt_region_contains_inside_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 5, 15, LT_NO_PARENT)
+    lt_region_contains(ctx, r0, 10)
+}
+fn test_lt_region_contains_inside() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_region_contains_inside_inner(&! ctx)
+}
+
+// T17: lt_region_contains: point at start → true (start is inclusive).
+fn test_lt_region_contains_at_start_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 5, 15, LT_NO_PARENT)
+    lt_region_contains(ctx, r0, 5)
+}
+fn test_lt_region_contains_at_start() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_region_contains_at_start_inner(&! ctx)
+}
+
+// T18: lt_region_contains: point at end → false (end is exclusive).
+fn test_lt_region_contains_at_end_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 5, 15, LT_NO_PARENT)
+    let v = lt_region_contains(ctx, r0, 15)
+    v == false
+}
+fn test_lt_region_contains_at_end() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_region_contains_at_end_inner(&! ctx)
+}
+
+// T19: lt_region_contains: point before start → false.
+fn test_lt_region_contains_before_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 5, 15, LT_NO_PARENT)
+    let v = lt_region_contains(ctx, r0, 4)
+    v == false
+}
+fn test_lt_region_contains_before() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_region_contains_before_inner(&! ctx)
+}
+
+// T20: lt_region_nested: inner fully inside outer → true.
+fn test_lt_region_nested_true_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let outer = lt_add_region(ctx, 0, 20, LT_NO_PARENT)
+    let inner = lt_add_region(ctx, 5, 15, outer)
+    lt_region_nested(ctx, inner, outer)
+}
+fn test_lt_region_nested_true() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_region_nested_true_inner(&! ctx)
+}
+
+// T21: lt_region_nested: not nested → false.
+fn test_lt_region_nested_false_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 10, LT_NO_PARENT)
+    let r1 = lt_add_region(ctx, 5, 20, LT_NO_PARENT)
+    let v = lt_region_nested(ctx, r1, r0)
+    v == false
+}
+fn test_lt_region_nested_false() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_region_nested_false_inner(&! ctx)
+}
+
+// T22: lt_regions_overlap_length: partial overlap.
+fn test_lt_regions_overlap_length_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 10, LT_NO_PARENT)
+    let r1 = lt_add_region(ctx, 6, 16, LT_NO_PARENT)
+    lt_regions_overlap_length(ctx, r0, r1) == 4
+}
+fn test_lt_regions_overlap_length() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_regions_overlap_length_inner(&! ctx)
+}
+
+// ============================================================================
+// Section 10: Tests — Category 3: Borrow Construction (8 tests)
+// ============================================================================
+
+// T23: lt_add_borrow returns sequential ids.
+fn test_lt_add_borrow_ids_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 10, LT_NO_PARENT)
+    let b0 = lt_add_borrow(ctx, 1, r0, true)
+    let b1 = lt_add_borrow(ctx, 1, r0, false)
+    b0 == 0 && b1 == 1 && ctx.borrow_count == 2
+}
+fn test_lt_add_borrow_ids() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_add_borrow_ids_inner(&! ctx)
+}
+
+// T24: lt_get_borrow retrieves correct data.
+fn test_lt_get_borrow_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 10, LT_NO_PARENT)
+    let b0 = lt_add_borrow(ctx, 42, r0, true)
+    let borrow = lt_get_borrow(ctx, b0)
+    borrow.referent == 42 && borrow.region == r0 && borrow.is_mut
+}
+fn test_lt_get_borrow() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_get_borrow_inner(&! ctx)
+}
+
+// T25: lt_get_borrow out of range returns invalid.
+fn test_lt_get_borrow_oob() -> bool {
+    let ctx = lt_context_new()
+    let b = lt_get_borrow(&ctx, 5)
+    b.id == LT_INVALID
+}
+
+// T26: lt_count_borrows_of counts correctly.
+fn test_lt_count_borrows_of_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 10, LT_NO_PARENT)
+    let b0 = lt_add_borrow(ctx, 5, r0, true)
+    let b1 = lt_add_borrow(ctx, 5, r0, false)
+    let b2 = lt_add_borrow(ctx, 6, r0, true)
+    lt_count_borrows_of(ctx, 5) == 2
+}
+fn test_lt_count_borrows_of() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_count_borrows_of_inner(&! ctx)
+}
+
+// T27: lt_count_mut_borrows_of counts correctly.
+fn test_lt_count_mut_borrows_of_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 10, LT_NO_PARENT)
+    let b0 = lt_add_borrow(ctx, 5, r0, true)
+    let b1 = lt_add_borrow(ctx, 5, r0, false)
+    let b2 = lt_add_borrow(ctx, 5, r0, true)
+    lt_count_mut_borrows_of(ctx, 5) == 2
+}
+fn test_lt_count_mut_borrows_of() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_count_mut_borrows_of_inner(&! ctx)
+}
+
+// T28: lt_count_shared_borrows_of counts correctly.
+fn test_lt_count_shared_borrows_of_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 10, LT_NO_PARENT)
+    let b0 = lt_add_borrow(ctx, 5, r0, true)
+    let b1 = lt_add_borrow(ctx, 5, r0, false)
+    let b2 = lt_add_borrow(ctx, 5, r0, false)
+    lt_count_shared_borrows_of(ctx, 5) == 2
+}
+fn test_lt_count_shared_borrows_of() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_count_shared_borrows_of_inner(&! ctx)
+}
+
+// T29: lt_borrow_live_at: point inside region → true.
+fn test_lt_borrow_live_at_inside_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 10, LT_NO_PARENT)
+    let b0 = lt_add_borrow(ctx, 1, r0, false)
+    lt_borrow_live_at(ctx, b0, 5)
+}
+fn test_lt_borrow_live_at_inside() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_borrow_live_at_inside_inner(&! ctx)
+}
+
+// T30: lt_borrow_live_at: point outside region → false.
+fn test_lt_borrow_live_at_outside_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 5, LT_NO_PARENT)
+    let b0 = lt_add_borrow(ctx, 1, r0, false)
+    let v = lt_borrow_live_at(ctx, b0, 10)
+    v == false
+}
+fn test_lt_borrow_live_at_outside() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_borrow_live_at_outside_inner(&! ctx)
+}
+
+// ============================================================================
+// Section 11: Tests — Category 4: Conflict Detection (15 tests)
+// ============================================================================
+
+// T31: Two mutable borrows to same referent in overlapping regions → conflict.
+fn test_lt_conflict_mut_mut_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 10, LT_NO_PARENT)
+    let r1 = lt_add_region(ctx, 5, 15, LT_NO_PARENT)
+    let b0 = lt_add_borrow(ctx, 1, r0, true)
+    let b1 = lt_add_borrow(ctx, 1, r1, true)
+    lt_borrows_conflict(ctx, b0, b1)
+}
+fn test_lt_conflict_mut_mut() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_conflict_mut_mut_inner(&! ctx)
+}
+
+// T32: Mutable + shared borrow to same referent in overlapping regions → conflict.
+fn test_lt_conflict_mut_shared_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 10, LT_NO_PARENT)
+    let r1 = lt_add_region(ctx, 5, 15, LT_NO_PARENT)
+    let b0 = lt_add_borrow(ctx, 1, r0, true)
+    let b1 = lt_add_borrow(ctx, 1, r1, false)
+    lt_borrows_conflict(ctx, b0, b1)
+}
+fn test_lt_conflict_mut_shared() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_conflict_mut_shared_inner(&! ctx)
+}
+
+// T33: Two shared borrows, same referent, overlapping → no conflict.
+fn test_lt_no_conflict_shared_shared_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 10, LT_NO_PARENT)
+    let r1 = lt_add_region(ctx, 5, 15, LT_NO_PARENT)
+    let b0 = lt_add_borrow(ctx, 1, r0, false)
+    let b1 = lt_add_borrow(ctx, 1, r1, false)
+    let v = lt_borrows_conflict(ctx, b0, b1)
+    v == false
+}
+fn test_lt_no_conflict_shared_shared() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_no_conflict_shared_shared_inner(&! ctx)
+}
+
+// T34: Mut borrows to different referents → no conflict.
+fn test_lt_no_conflict_different_referents_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 10, LT_NO_PARENT)
+    let b0 = lt_add_borrow(ctx, 1, r0, true)
+    let b1 = lt_add_borrow(ctx, 2, r0, true)
+    let v = lt_borrows_conflict(ctx, b0, b1)
+    v == false
+}
+fn test_lt_no_conflict_different_referents() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_no_conflict_different_referents_inner(&! ctx)
+}
+
+// T35: Mut borrows to same referent in non-overlapping regions → no conflict.
+fn test_lt_no_conflict_non_overlapping_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 5, LT_NO_PARENT)
+    let r1 = lt_add_region(ctx, 5, 10, LT_NO_PARENT)
+    let b0 = lt_add_borrow(ctx, 1, r0, true)
+    let b1 = lt_add_borrow(ctx, 1, r1, true)
+    let v = lt_borrows_conflict(ctx, b0, b1)
+    v == false
+}
+fn test_lt_no_conflict_non_overlapping() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_no_conflict_non_overlapping_inner(&! ctx)
+}
+
+// T36: lt_check_conflicts detects mut+mut conflict.
+fn test_lt_check_conflicts_mut_mut_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 10, LT_NO_PARENT)
+    let r1 = lt_add_region(ctx, 5, 15, LT_NO_PARENT)
+    let b0 = lt_add_borrow(ctx, 1, r0, true)
+    let b1 = lt_add_borrow(ctx, 1, r1, true)
+    lt_check_conflicts(ctx)
+    ctx.conflict_count == 1
+}
+fn test_lt_check_conflicts_mut_mut() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_check_conflicts_mut_mut_inner(&! ctx)
+}
+
+// T37: lt_check_conflicts with no conflicts leaves count=0.
+fn test_lt_check_conflicts_none_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 5, LT_NO_PARENT)
+    let r1 = lt_add_region(ctx, 5, 10, LT_NO_PARENT)
+    let b0 = lt_add_borrow(ctx, 1, r0, true)
+    let b1 = lt_add_borrow(ctx, 1, r1, true)
+    lt_check_conflicts(ctx)
+    ctx.conflict_count == 0
+}
+fn test_lt_check_conflicts_none() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_check_conflicts_none_inner(&! ctx)
+}
+
+// T38: lt_check_conflicts shared+shared no conflict.
+fn test_lt_check_shared_shared_no_conflict_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 10, LT_NO_PARENT)
+    let r1 = lt_add_region(ctx, 5, 15, LT_NO_PARENT)
+    let b0 = lt_add_borrow(ctx, 1, r0, false)
+    let b1 = lt_add_borrow(ctx, 1, r1, false)
+    lt_check_conflicts(ctx)
+    ctx.conflict_count == 0
+}
+fn test_lt_check_shared_shared_no_conflict() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_check_shared_shared_no_conflict_inner(&! ctx)
+}
+
+// T39: lt_conflict_exists detects both orders.
+fn test_lt_conflict_exists_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let at = lt_point_new(0, 5)
+    lt_add_conflict(ctx, 0, 1, at)
+    let e1 = lt_conflict_exists(ctx, 0, 1)
+    let e2 = lt_conflict_exists(ctx, 1, 0)
+    e1 && e2
+}
+fn test_lt_conflict_exists() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_conflict_exists_inner(&! ctx)
+}
+
+// T40: lt_conflict_exists returns false for non-existent conflict.
+fn test_lt_conflict_not_exists_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let at = lt_point_new(0, 5)
+    lt_add_conflict(ctx, 0, 1, at)
+    let e = lt_conflict_exists(ctx, 0, 2)
+    e == false
+}
+fn test_lt_conflict_not_exists() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_conflict_not_exists_inner(&! ctx)
+}
+
+// T41: lt_borrows_conflict: borrow with itself = no conflict (b1==b2).
+fn test_lt_borrow_self_no_conflict_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 10, LT_NO_PARENT)
+    let b0 = lt_add_borrow(ctx, 1, r0, true)
+    let v = lt_borrows_conflict(ctx, b0, b0)
+    v == false
+}
+fn test_lt_borrow_self_no_conflict() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_borrow_self_no_conflict_inner(&! ctx)
+}
+
+// T42: lt_has_conflicts returns false initially.
+fn test_lt_has_conflicts_false() -> bool {
+    let ctx = lt_context_new()
+    lt_has_conflicts(&ctx) == false
+}
+
+// T43: lt_has_conflicts returns true after conflict recorded.
+fn test_lt_has_conflicts_true_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let at = lt_point_new(0, 0)
+    lt_add_conflict(ctx, 0, 1, at)
+    lt_has_conflicts(ctx)
+}
+fn test_lt_has_conflicts_true() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_has_conflicts_true_inner(&! ctx)
+}
+
+// T44: lt_check_conflicts records conflict point correctly.
+fn test_lt_conflict_point_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 2, 12, LT_NO_PARENT)
+    let r1 = lt_add_region(ctx, 8, 18, LT_NO_PARENT)
+    let b0 = lt_add_borrow(ctx, 7, r0, true)
+    let b1 = lt_add_borrow(ctx, 7, r1, true)
+    lt_check_conflicts(ctx)
+    let c = lt_get_conflict(ctx, 0)
+    // Overlap start = max(2, 8) = 8
+    c.at.instr == 8
+}
+fn test_lt_conflict_point() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_conflict_point_inner(&! ctx)
+}
+
+// T45: lt_check_conflicts: multiple conflicting pairs.
+fn test_lt_check_multiple_conflicts_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 10, LT_NO_PARENT)
+    let r1 = lt_add_region(ctx, 5, 15, LT_NO_PARENT)
+    let b0 = lt_add_borrow(ctx, 1, r0, true)
+    let b1 = lt_add_borrow(ctx, 1, r1, true)
+    let b2 = lt_add_borrow(ctx, 2, r0, true)
+    let b3 = lt_add_borrow(ctx, 2, r1, true)
+    lt_check_conflicts(ctx)
+    ctx.conflict_count == 2
+}
+fn test_lt_check_multiple_conflicts() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_check_multiple_conflicts_inner(&! ctx)
+}
+
+// ============================================================================
+// Section 12: Tests — Category 5: Live Borrow Counting (8 tests)
+// ============================================================================
+
+// T46: lt_count_live_at: no borrows → 0.
+fn test_lt_count_live_at_zero() -> bool {
+    let ctx = lt_context_new()
+    lt_count_live_at(&ctx, 5) == 0
+}
+
+// T47: lt_count_live_at: one borrow live at point.
+fn test_lt_count_live_at_one_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 10, LT_NO_PARENT)
+    let b0 = lt_add_borrow(ctx, 1, r0, false)
+    lt_count_live_at(ctx, 5) == 1
+}
+fn test_lt_count_live_at_one() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_count_live_at_one_inner(&! ctx)
+}
+
+// T48: lt_count_live_at: borrow outside range → 0.
+fn test_lt_count_live_at_outside_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 5, LT_NO_PARENT)
+    let b0 = lt_add_borrow(ctx, 1, r0, false)
+    lt_count_live_at(ctx, 10) == 0
+}
+fn test_lt_count_live_at_outside() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_count_live_at_outside_inner(&! ctx)
+}
+
+// T49: lt_count_mut_live_at counts only mutable borrows.
+fn test_lt_count_mut_live_at_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 10, LT_NO_PARENT)
+    let b0 = lt_add_borrow(ctx, 1, r0, true)
+    let b1 = lt_add_borrow(ctx, 1, r0, false)
+    lt_count_mut_live_at(ctx, 5) == 1
+}
+fn test_lt_count_mut_live_at() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_count_mut_live_at_inner(&! ctx)
+}
+
+// T50: lt_find_mut_borrow_at finds the correct borrow.
+fn test_lt_find_mut_borrow_at_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 10, LT_NO_PARENT)
+    let b0 = lt_add_borrow(ctx, 99, r0, true)
+    let found = lt_find_mut_borrow_at(ctx, 99, 5)
+    found == b0
+}
+fn test_lt_find_mut_borrow_at() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_find_mut_borrow_at_inner(&! ctx)
+}
+
+// T51: lt_find_mut_borrow_at returns LT_INVALID if none found.
+fn test_lt_find_mut_borrow_at_none_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 10, LT_NO_PARENT)
+    let b0 = lt_add_borrow(ctx, 99, r0, false)
+    let found = lt_find_mut_borrow_at(ctx, 99, 5)
+    found == LT_INVALID
+}
+fn test_lt_find_mut_borrow_at_none() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_find_mut_borrow_at_none_inner(&! ctx)
+}
+
+// T52: lt_count_live_at with multiple overlapping borrows.
+fn test_lt_count_live_multiple_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 20, LT_NO_PARENT)
+    let r1 = lt_add_region(ctx, 5, 15, LT_NO_PARENT)
+    let r2 = lt_add_region(ctx, 0, 10, LT_NO_PARENT)
+    let b0 = lt_add_borrow(ctx, 1, r0, false)
+    let b1 = lt_add_borrow(ctx, 2, r1, false)
+    let b2 = lt_add_borrow(ctx, 3, r2, true)
+    lt_count_live_at(ctx, 7) == 3
+}
+fn test_lt_count_live_multiple() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_count_live_multiple_inner(&! ctx)
+}
+
+// T53: lt_borrow_live_at at boundary point.
+fn test_lt_borrow_live_at_boundary_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 10, 20, LT_NO_PARENT)
+    let b0 = lt_add_borrow(ctx, 1, r0, false)
+    let at_start = lt_borrow_live_at(ctx, b0, 10)
+    let before = lt_borrow_live_at(ctx, b0, 9)
+    let at_end = lt_borrow_live_at(ctx, b0, 20)
+    at_start && (before == false) && (at_end == false)
+}
+fn test_lt_borrow_live_at_boundary() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_borrow_live_at_boundary_inner(&! ctx)
+}
+
+// ============================================================================
+// Section 13: Tests — Category 6: Ancestor and Hierarchy (7 tests)
+// ============================================================================
+
+// T54: lt_region_is_ancestor: direct parent is ancestor.
+fn test_lt_ancestor_direct_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 100, LT_NO_PARENT)
+    let r1 = lt_add_region(ctx, 10, 50, r0)
+    lt_region_is_ancestor(ctx, r0, r1)
+}
+fn test_lt_ancestor_direct() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_ancestor_direct_inner(&! ctx)
+}
+
+// T55: lt_region_is_ancestor: grandparent is ancestor.
+fn test_lt_ancestor_grandparent_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 100, LT_NO_PARENT)
+    let r1 = lt_add_region(ctx, 10, 50, r0)
+    let r2 = lt_add_region(ctx, 15, 30, r1)
+    lt_region_is_ancestor(ctx, r0, r2)
+}
+fn test_lt_ancestor_grandparent() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_ancestor_grandparent_inner(&! ctx)
+}
+
+// T56: lt_region_is_ancestor: unrelated → false.
+fn test_lt_ancestor_unrelated_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 10, LT_NO_PARENT)
+    let r1 = lt_add_region(ctx, 0, 10, LT_NO_PARENT)
+    let v = lt_region_is_ancestor(ctx, r0, r1)
+    v == false
+}
+fn test_lt_ancestor_unrelated() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_ancestor_unrelated_inner(&! ctx)
+}
+
+// T57: lt_region_is_ancestor: self is own ancestor in this impl.
+fn test_lt_ancestor_self_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 10, LT_NO_PARENT)
+    // With r0 as both anc and desc: cur starts as r0 = anc → returns true.
+    lt_region_is_ancestor(ctx, r0, r0)
+}
+fn test_lt_ancestor_self() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_ancestor_self_inner(&! ctx)
+}
+
+// T58: lt_region_nested: same region is nested in itself.
+fn test_lt_region_nested_self_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 5, 15, LT_NO_PARENT)
+    lt_region_nested(ctx, r0, r0)
+}
+fn test_lt_region_nested_self() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_region_nested_self_inner(&! ctx)
+}
+
+// T59: lt_region_nested: child is nested in parent.
+fn test_lt_region_nested_child_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let outer = lt_add_region(ctx, 0, 20, LT_NO_PARENT)
+    let inner = lt_add_region(ctx, 3, 17, outer)
+    lt_region_nested(ctx, inner, outer)
+}
+fn test_lt_region_nested_child() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_region_nested_child_inner(&! ctx)
+}
+
+// T60: lt_region_nested: parent is NOT nested in child.
+fn test_lt_region_not_nested_parent_in_child_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let outer = lt_add_region(ctx, 0, 20, LT_NO_PARENT)
+    let inner = lt_add_region(ctx, 5, 10, outer)
+    let v = lt_region_nested(ctx, outer, inner)
+    v == false
+}
+fn test_lt_region_not_nested_parent_in_child() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_region_not_nested_parent_in_child_inner(&! ctx)
+}
+
+// ============================================================================
+// Section 14: Tests — Category 7: Integration Scenarios (10 tests)
+// ============================================================================
+
+// T61: Scenario: single mutable borrow, no conflict.
+fn test_lt_scenario_single_mut_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 10, LT_NO_PARENT)
+    let b0 = lt_add_borrow(ctx, 1, r0, true)
+    lt_check_conflicts(ctx)
+    ctx.conflict_count == 0
+}
+fn test_lt_scenario_single_mut() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_scenario_single_mut_inner(&! ctx)
+}
+
+// T62: Scenario: sequential mutable borrows, no conflict.
+fn test_lt_scenario_sequential_mut_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 5, LT_NO_PARENT)
+    let r1 = lt_add_region(ctx, 5, 10, LT_NO_PARENT)
+    let b0 = lt_add_borrow(ctx, 1, r0, true)
+    let b1 = lt_add_borrow(ctx, 1, r1, true)
+    lt_check_conflicts(ctx)
+    ctx.conflict_count == 0
+}
+fn test_lt_scenario_sequential_mut() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_scenario_sequential_mut_inner(&! ctx)
+}
+
+// T63: Scenario: overlapping mutable borrows → conflict.
+fn test_lt_scenario_overlapping_mut_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 10, LT_NO_PARENT)
+    let r1 = lt_add_region(ctx, 3, 13, LT_NO_PARENT)
+    let b0 = lt_add_borrow(ctx, 5, r0, true)
+    let b1 = lt_add_borrow(ctx, 5, r1, true)
+    lt_check_conflicts(ctx)
+    lt_has_conflicts(ctx)
+}
+fn test_lt_scenario_overlapping_mut() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_scenario_overlapping_mut_inner(&! ctx)
+}
+
+// T64: Scenario: shared borrows never conflict, even overlapping.
+fn test_lt_scenario_many_shared_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 100, LT_NO_PARENT)
+    let b0 = lt_add_borrow(ctx, 1, r0, false)
+    let b1 = lt_add_borrow(ctx, 1, r0, false)
+    let b2 = lt_add_borrow(ctx, 1, r0, false)
+    lt_check_conflicts(ctx)
+    ctx.conflict_count == 0
+}
+fn test_lt_scenario_many_shared() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_scenario_many_shared_inner(&! ctx)
+}
+
+// T65: Scenario: nested regions, inner mut borrow and outer shared → conflict.
+fn test_lt_scenario_nested_conflict_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let outer = lt_add_region(ctx, 0, 20, LT_NO_PARENT)
+    let inner = lt_add_region(ctx, 5, 15, outer)
+    let b0 = lt_add_borrow(ctx, 7, outer, false)
+    let b1 = lt_add_borrow(ctx, 7, inner, true)
+    lt_check_conflicts(ctx)
+    lt_has_conflicts(ctx)
+}
+fn test_lt_scenario_nested_conflict() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_scenario_nested_conflict_inner(&! ctx)
+}
+
+// T66: Scenario: different referents, no conflict.
+fn test_lt_scenario_different_referents_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 10, LT_NO_PARENT)
+    let b0 = lt_add_borrow(ctx, 1, r0, true)
+    let b1 = lt_add_borrow(ctx, 2, r0, true)
+    lt_check_conflicts(ctx)
+    ctx.conflict_count == 0
+}
+fn test_lt_scenario_different_referents() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_scenario_different_referents_inner(&! ctx)
+}
+
+// T67: Scenario: three borrows, two conflict, one is fine.
+fn test_lt_scenario_three_borrows_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 10, LT_NO_PARENT)
+    let r1 = lt_add_region(ctx, 5, 15, LT_NO_PARENT)
+    let r2 = lt_add_region(ctx, 20, 30, LT_NO_PARENT)
+    let b0 = lt_add_borrow(ctx, 1, r0, true)
+    let b1 = lt_add_borrow(ctx, 1, r1, true)
+    let b2 = lt_add_borrow(ctx, 1, r2, true)
+    lt_check_conflicts(ctx)
+    // b0-b1 conflict, b0-b2 no (non-overlapping), b1-b2 no (non-overlapping)
+    ctx.conflict_count == 1
+}
+fn test_lt_scenario_three_borrows() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_scenario_three_borrows_inner(&! ctx)
+}
+
+// T68: Scenario: count live borrows changes over program.
+fn test_lt_scenario_live_count_changes_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 5, LT_NO_PARENT)
+    let r1 = lt_add_region(ctx, 3, 10, LT_NO_PARENT)
+    let r2 = lt_add_region(ctx, 7, 15, LT_NO_PARENT)
+    let b0 = lt_add_borrow(ctx, 1, r0, false)
+    let b1 = lt_add_borrow(ctx, 2, r1, false)
+    let b2 = lt_add_borrow(ctx, 3, r2, false)
+    let c0 = lt_count_live_at(ctx, 0)
+    let c1 = lt_count_live_at(ctx, 4)
+    let c2 = lt_count_live_at(ctx, 8)
+    c0 == 1 && c1 == 2 && c2 == 2
+}
+fn test_lt_scenario_live_count_changes() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_scenario_live_count_changes_inner(&! ctx)
+}
+
+// T69: Scenario: conflict detection is idempotent (running twice same count).
+fn test_lt_scenario_idempotent_conflict_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 0, 10, LT_NO_PARENT)
+    let r1 = lt_add_region(ctx, 5, 15, LT_NO_PARENT)
+    let b0 = lt_add_borrow(ctx, 1, r0, true)
+    let b1 = lt_add_borrow(ctx, 1, r1, true)
+    lt_check_conflicts(ctx)
+    let c1 = ctx.conflict_count
+    lt_check_conflicts(ctx)
+    let c2 = ctx.conflict_count
+    c1 == 1 && c2 == 1
+}
+fn test_lt_scenario_idempotent_conflict() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_scenario_idempotent_conflict_inner(&! ctx)
+}
+
+// T70: Scenario: region_span zero for empty region.
+fn test_lt_scenario_region_span_zero_inner(ctx: &! LtContext) -> bool with Mut, Div, Panic {
+    let r0 = lt_add_region(ctx, 5, 5, LT_NO_PARENT)
+    lt_region_span(ctx, r0) == 0
+}
+fn test_lt_scenario_region_span_zero() -> bool with Mut, Div, Panic {
+    var ctx = lt_context_new()
+    test_lt_scenario_region_span_zero_inner(&! ctx)
+}
+
+// ============================================================================
+// Section 15: Test Runner
+// ============================================================================
+
+fn lt_run_tests() -> i64 with Mut, Div, Panic {
+    var passed: i64 = 0
+    var failed: i64 = 0
+
+    // Category 1: Context and Region Construction (10)
+    if test_lt_context_new() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_add_region_ids() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_get_region() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_get_region_oob() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_region_valid() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_region_valid_invalid() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_count_root_regions() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_region_is_parent() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_region_not_parent() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_region_span() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 2: Region Overlap and Containment (12)
+    if test_lt_regions_no_overlap_before() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_regions_no_overlap_after() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_regions_overlap_partial() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_regions_overlap_contained() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_regions_overlap_self() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_region_contains_inside() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_region_contains_at_start() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_region_contains_at_end() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_region_contains_before() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_region_nested_true() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_region_nested_false() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_regions_overlap_length() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 3: Borrow Construction (8)
+    if test_lt_add_borrow_ids() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_get_borrow() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_get_borrow_oob() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_count_borrows_of() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_count_mut_borrows_of() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_count_shared_borrows_of() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_borrow_live_at_inside() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_borrow_live_at_outside() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 4: Conflict Detection (15)
+    if test_lt_conflict_mut_mut() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_conflict_mut_shared() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_no_conflict_shared_shared() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_no_conflict_different_referents() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_no_conflict_non_overlapping() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_check_conflicts_mut_mut() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_check_conflicts_none() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_check_shared_shared_no_conflict() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_conflict_exists() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_conflict_not_exists() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_borrow_self_no_conflict() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_has_conflicts_false() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_has_conflicts_true() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_conflict_point() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_check_multiple_conflicts() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 5: Live Borrow Counting (8)
+    if test_lt_count_live_at_zero() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_count_live_at_one() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_count_live_at_outside() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_count_mut_live_at() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_find_mut_borrow_at() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_find_mut_borrow_at_none() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_count_live_multiple() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_borrow_live_at_boundary() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 6: Ancestor and Hierarchy (7)
+    if test_lt_ancestor_direct() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_ancestor_grandparent() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_ancestor_unrelated() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_ancestor_self() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_region_nested_self() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_region_nested_child() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_region_not_nested_parent_in_child() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 7: Integration Scenarios (10)
+    if test_lt_scenario_single_mut() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_scenario_sequential_mut() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_scenario_overlapping_mut() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_scenario_many_shared() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_scenario_nested_conflict() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_scenario_different_referents() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_scenario_three_borrows() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_scenario_live_count_changes() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_scenario_idempotent_conflict() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lt_scenario_region_span_zero() { passed = passed + 1 } else { failed = failed + 1 }
+
+    if failed > 0 { return 0 - failed }
+    passed
+}

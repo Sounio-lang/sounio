@@ -1,0 +1,1202 @@
+// self-hosted::lsp::diagnostics -- LSP diagnostics aggregator and formatter
+//
+// Collects, filters, sorts, merges, and formats diagnostics for LSP
+// textDocument/publishDiagnostics responses.  All state lives in flat
+// fixed-size arenas -- no heap allocation, no recursive structures.
+//
+// Severity levels follow the LSP spec:
+//   1 = Error, 2 = Warning, 3 = Information, 4 = Hint
+//
+// Capacities:
+//   - Diagnostics per buffer: 512
+//   - Related entries per diag: 8
+//
+// All public names carry the `lspd_` prefix to avoid collisions.
+
+// ============================================================================
+// Section 1: CONSTANTS
+// ============================================================================
+
+let LSPD_MAX_DIAGS:   i64 = 512
+let LSPD_MAX_RELATED: i64 = 8
+let LSPD_INVALID:     i64 = 0 - 1
+
+// Severity codes
+let LSPD_ERROR:   i64 = 1
+let LSPD_WARN:    i64 = 2
+let LSPD_INFO:    i64 = 3
+let LSPD_HINT:    i64 = 4
+
+// ============================================================================
+// Section 2: CORE STRUCTS
+// ============================================================================
+
+struct LspdPosition {
+    line: i64,
+    col:  i64,
+}
+
+struct LspdRange {
+    start: LspdPosition,
+    end:   LspdPosition,
+}
+
+struct LspdDiag {
+    severity:      i64,
+    code:          i64,
+    source:        string,
+    message:       string,
+    range:         LspdRange,
+    related_count: i64,
+    related:       [i64; 8],
+}
+
+struct LspdBuffer {
+    diags:   [LspdDiag; 512],
+    count:   i64,
+    file_id: i64,
+}
+
+struct LspdSummary {
+    error_count: i64,
+    warn_count:  i64,
+    info_count:  i64,
+    hint_count:  i64,
+}
+
+struct LspdFilter {
+    min_severity:      i64,
+    max_count:         i64,
+    source_filter:     string,
+    use_source_filter: bool,
+}
+
+// ============================================================================
+// Section 3: ZERO-VALUE CONSTRUCTORS (helpers must precede callers)
+// ============================================================================
+
+fn lspd_position_new(line: i64, col: i64) -> LspdPosition {
+    LspdPosition {
+        line: line,
+        col:  col,
+    }
+}
+
+fn lspd_position_zero() -> LspdPosition {
+    LspdPosition {
+        line: 0,
+        col:  0,
+    }
+}
+
+fn lspd_range_new(sl: i64, sc: i64, el: i64, ec: i64) -> LspdRange {
+    LspdRange {
+        start: lspd_position_new(sl, sc),
+        end:   lspd_position_new(el, ec),
+    }
+}
+
+fn lspd_range_zero() -> LspdRange {
+    LspdRange {
+        start: lspd_position_zero(),
+        end:   lspd_position_zero(),
+    }
+}
+
+fn lspd_diag_zero() -> LspdDiag {
+    LspdDiag {
+        severity:      LSPD_INFO,
+        code:          0,
+        source:        "",
+        message:       "",
+        range:         lspd_range_zero(),
+        related_count: 0,
+        related:       [0; 8],
+    }
+}
+
+fn lspd_buffer_new(file_id: i64) -> LspdBuffer {
+    LspdBuffer {
+        diags:   [lspd_diag_zero(); 512],
+        count:   0,
+        file_id: file_id,
+    }
+}
+
+fn lspd_summary_zero() -> LspdSummary {
+    LspdSummary {
+        error_count: 0,
+        warn_count:  0,
+        info_count:  0,
+        hint_count:  0,
+    }
+}
+
+fn lspd_filter_new(min_sev: i64, max_count: i64) -> LspdFilter {
+    LspdFilter {
+        min_severity:      min_sev,
+        max_count:         max_count,
+        source_filter:     "",
+        use_source_filter: false,
+    }
+}
+
+fn lspd_filter_with_source(min_sev: i64, max_count: i64, src: string) -> LspdFilter {
+    LspdFilter {
+        min_severity:      min_sev,
+        max_count:         max_count,
+        source_filter:     src,
+        use_source_filter: true,
+    }
+}
+
+// ============================================================================
+// Section 4: BUFFER OPERATIONS
+// ============================================================================
+
+// Add a diagnostic to the buffer.
+fn lspd_add(b: &! LspdBuffer, sev: i64, code: i64, source: string, msg: string, sl: i64, sc: i64, el: i64, ec: i64) with Mut, Panic {
+    if b.count >= LSPD_MAX_DIAGS {
+        return
+    }
+    let idx = b.count
+    b.diags[idx as usize] = LspdDiag {
+        severity:      sev,
+        code:          code,
+        source:        source,
+        message:       msg,
+        range:         lspd_range_new(sl, sc, el, ec),
+        related_count: 0,
+        related:       [0; 8],
+    }
+    b.count = b.count + 1
+}
+
+// Add a related-diag id to an existing diagnostic.
+fn lspd_add_related(b: &! LspdBuffer, diag_idx: i64, related_id: i64) with Mut, Panic {
+    if diag_idx < 0 || diag_idx >= b.count { return }
+    let rc = b.diags[diag_idx as usize].related_count
+    if rc >= LSPD_MAX_RELATED { return }
+    b.diags[diag_idx as usize].related[rc as usize] = related_id
+    b.diags[diag_idx as usize].related_count = rc + 1
+}
+
+// Return the total number of diagnostics in the buffer.
+fn lspd_count(b: &LspdBuffer) -> i64 {
+    b.count
+}
+
+// Access a specific diagnostic by index.
+fn lspd_diag_at(b: &LspdBuffer, idx: i64) -> LspdDiag with Panic {
+    if idx < 0 || idx >= b.count {
+        return lspd_diag_zero()
+    }
+    b.diags[idx as usize]
+}
+
+// Get the file_id of a buffer.
+fn lspd_file_id(b: &LspdBuffer) -> i64 {
+    b.file_id
+}
+
+// ============================================================================
+// Section 5: SUMMARY
+// ============================================================================
+
+// Compute severity counts for the entire buffer.
+fn lspd_summary(b: &LspdBuffer) -> LspdSummary {
+    var s = lspd_summary_zero()
+    var i: i64 = 0
+    while i < b.count {
+        let sev = b.diags[i as usize].severity
+        if sev == LSPD_ERROR { s.error_count = s.error_count + 1 }
+        if sev == LSPD_WARN  { s.warn_count  = s.warn_count  + 1 }
+        if sev == LSPD_INFO  { s.info_count  = s.info_count  + 1 }
+        if sev == LSPD_HINT  { s.hint_count  = s.hint_count  + 1 }
+        i = i + 1
+    }
+    s
+}
+
+// Total number of diagnostics in a summary.
+fn lspd_summary_total(s: &LspdSummary) -> i64 {
+    s.error_count + s.warn_count + s.info_count + s.hint_count
+}
+
+// ============================================================================
+// Section 6: FILTER
+// ============================================================================
+
+// Return a filtered copy of a buffer according to filter parameters.
+// Only keeps diagnostics where:
+//   severity <= filter.min_severity  (lower sev number = more severe)
+//   AND (if use_source_filter) source == filter.source_filter
+// Stops after filter.max_count entries.
+fn lspd_filter(b: &LspdBuffer, f: &LspdFilter) -> LspdBuffer {
+    var out = lspd_buffer_new(b.file_id)
+    var i: i64 = 0
+    while i < b.count && out.count < f.max_count {
+        let d = &b.diags[i as usize]
+        let sev_ok = d.severity <= f.min_severity
+        let src_ok = f.use_source_filter == false || str_eq(d.source, f.source_filter)
+        if sev_ok && src_ok {
+            out.diags[out.count as usize] = b.diags[i as usize]
+            out.count = out.count + 1
+        }
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
+// Section 7: SORT
+// ============================================================================
+
+// Stable insertion-sort the buffer by range.start.line ascending.
+fn lspd_sort_by_line(b: &! LspdBuffer) with Mut, Div, Panic {
+    var i: i64 = 1
+    while i < b.count {
+        let key = b.diags[i as usize]
+        var j: i64 = i - 1
+        while j >= 0 {
+            if b.diags[j as usize].range.start.line > key.range.start.line {
+                b.diags[(j + 1) as usize] = b.diags[j as usize]
+                j = j - 1
+            } else {
+                j = 0 - 1
+            }
+        }
+        b.diags[(j + 1) as usize] = key
+        i = i + 1
+    }
+}
+
+// Check that buffer is sorted by start line.
+fn lspd_is_sorted(b: &LspdBuffer) -> bool {
+    if b.count <= 1 { return true }
+    var i: i64 = 1
+    while i < b.count {
+        if b.diags[(i - 1) as usize].range.start.line > b.diags[i as usize].range.start.line {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// ============================================================================
+// Section 8: SEVERITY HELPERS
+// ============================================================================
+
+// Convert a severity code to its string label.
+fn lspd_severity_str(sev: i64) -> string {
+    if sev == LSPD_ERROR { return "error"   }
+    if sev == LSPD_WARN  { return "warning" }
+    if sev == LSPD_INFO  { return "info"    }
+    if sev == LSPD_HINT  { return "hint"    }
+    "unknown"
+}
+
+// Convert a severity string back to code.  Returns INVALID for unknown.
+fn lspd_severity_code(s: string) -> i64 {
+    if str_eq(s, "error")   { return LSPD_ERROR }
+    if str_eq(s, "warning") { return LSPD_WARN  }
+    if str_eq(s, "info")    { return LSPD_INFO  }
+    if str_eq(s, "hint")    { return LSPD_HINT  }
+    LSPD_INVALID
+}
+
+// Return true if sev is a valid severity code.
+fn lspd_severity_valid(sev: i64) -> bool {
+    sev >= LSPD_ERROR && sev <= LSPD_HINT
+}
+
+// ============================================================================
+// Section 9: FORMAT
+// ============================================================================
+
+// Integer-to-string helper (stub — returns "" in self-hosted bootstrap context).
+fn lspd_int_to_string(n: i64) -> string with Mut, Panic, Div { "" }
+
+// Format a diagnostic as "line:col: severity: message"
+fn lspd_format_diag(d: &LspdDiag) -> string with Mut, Panic, Div {
+    let sev_s = lspd_severity_str(d.severity)
+    let line_s = lspd_int_to_string(d.range.start.line)
+    let col_s  = lspd_int_to_string(d.range.start.col)
+    str_concat(
+        str_concat(
+            str_concat(line_s, ":"),
+            str_concat(col_s, ": ")
+        ),
+        str_concat(
+            str_concat(sev_s, ": "),
+            d.message
+        )
+    )
+}
+
+// Format a diagnostic including file_id.
+fn lspd_format_diag_full(file_id: i64, d: &LspdDiag) -> string with Mut, Panic, Div {
+    let fid_s  = lspd_int_to_string(file_id)
+    let line_s = lspd_int_to_string(d.range.start.line)
+    let col_s  = lspd_int_to_string(d.range.start.col)
+    let sev_s  = lspd_severity_str(d.severity)
+    str_concat(
+        str_concat(
+            str_concat(fid_s, ":"),
+            str_concat(line_s, ":")
+        ),
+        str_concat(
+            str_concat(col_s, ": "),
+            str_concat(sev_s, str_concat(": ", d.message))
+        )
+    )
+}
+
+// ============================================================================
+// Section 10: MERGE
+// ============================================================================
+
+// Merge two buffers into a new buffer (takes all diags from a, then from b).
+// Both a and b must refer to the same file (file_id is taken from a).
+fn lspd_merge(a: &LspdBuffer, b: &LspdBuffer) -> LspdBuffer {
+    var out = lspd_buffer_new(a.file_id)
+    var i: i64 = 0
+    while i < a.count && out.count < LSPD_MAX_DIAGS {
+        out.diags[out.count as usize] = a.diags[i as usize]
+        out.count = out.count + 1
+        i = i + 1
+    }
+    var j: i64 = 0
+    while j < b.count && out.count < LSPD_MAX_DIAGS {
+        out.diags[out.count as usize] = b.diags[j as usize]
+        out.count = out.count + 1
+        j = j + 1
+    }
+    out
+}
+
+// ============================================================================
+// Section 11: QUERY HELPERS
+// ============================================================================
+
+// Count diagnostics of a given severity.
+fn lspd_count_by_severity(b: &LspdBuffer, sev: i64) -> i64 {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < b.count {
+        if b.diags[i as usize].severity == sev {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Count diagnostics from a given source.
+fn lspd_count_by_source(b: &LspdBuffer, source: string) -> i64 {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < b.count {
+        if str_eq(b.diags[i as usize].source, source) {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Count diagnostics with a given code.
+fn lspd_count_by_code(b: &LspdBuffer, code: i64) -> i64 {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < b.count {
+        if b.diags[i as usize].code == code {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Find the first diagnostic on a given line (by start.line).  Returns index or INVALID.
+fn lspd_find_first_on_line(b: &LspdBuffer, line: i64) -> i64 {
+    var i: i64 = 0
+    while i < b.count {
+        if b.diags[i as usize].range.start.line == line {
+            return i
+        }
+        i = i + 1
+    }
+    LSPD_INVALID
+}
+
+// Find the first diagnostic with a given code.  Returns index or INVALID.
+fn lspd_find_by_code(b: &LspdBuffer, code: i64) -> i64 {
+    var i: i64 = 0
+    while i < b.count {
+        if b.diags[i as usize].code == code {
+            return i
+        }
+        i = i + 1
+    }
+    LSPD_INVALID
+}
+
+// Find the first error diagnostic.  Returns index or INVALID.
+fn lspd_find_first_error(b: &LspdBuffer) -> i64 {
+    var i: i64 = 0
+    while i < b.count {
+        if b.diags[i as usize].severity == LSPD_ERROR {
+            return i
+        }
+        i = i + 1
+    }
+    LSPD_INVALID
+}
+
+// Return the maximum severity present in the buffer (lowest numeric code = most severe).
+fn lspd_worst_severity(b: &LspdBuffer) -> i64 {
+    if b.count == 0 { return LSPD_INVALID }
+    var worst: i64 = LSPD_HINT
+    var i: i64 = 0
+    while i < b.count {
+        let sev = b.diags[i as usize].severity
+        if sev < worst {
+            worst = sev
+        }
+        i = i + 1
+    }
+    worst
+}
+
+// Return the minimum severity present (highest numeric code = least severe).
+fn lspd_best_severity(b: &LspdBuffer) -> i64 {
+    if b.count == 0 { return LSPD_INVALID }
+    var best: i64 = LSPD_ERROR
+    var i: i64 = 0
+    while i < b.count {
+        let sev = b.diags[i as usize].severity
+        if sev > best {
+            best = sev
+        }
+        i = i + 1
+    }
+    best
+}
+
+// ============================================================================
+// Section 12: POSITION / RANGE UTILITIES
+// ============================================================================
+
+fn lspd_position_eq(a: &LspdPosition, b: &LspdPosition) -> bool {
+    a.line == b.line && a.col == b.col
+}
+
+fn lspd_position_before(a: &LspdPosition, b: &LspdPosition) -> bool {
+    if a.line < b.line { return true }
+    if a.line == b.line && a.col < b.col { return true }
+    false
+}
+
+fn lspd_range_eq(a: &LspdRange, b: &LspdRange) -> bool {
+    lspd_position_eq(&a.start, &b.start) && lspd_position_eq(&a.end, &b.end)
+}
+
+fn lspd_range_is_zero(r: &LspdRange) -> bool {
+    r.start.line == 0 && r.start.col == 0 && r.end.line == 0 && r.end.col == 0
+}
+
+fn lspd_range_same_line(r: &LspdRange) -> bool {
+    r.start.line == r.end.line
+}
+
+fn lspd_range_line_span(r: &LspdRange) -> i64 {
+    r.end.line - r.start.line + 1
+}
+
+// Check if position p is contained within range r (inclusive).
+fn lspd_position_in_range(p: &LspdPosition, r: &LspdRange) -> bool {
+    if p.line < r.start.line { return false }
+    if p.line > r.end.line   { return false }
+    if r.start.line == r.end.line {
+        return p.col >= r.start.col && p.col <= r.end.col
+    }
+    if p.line == r.start.line { return p.col >= r.start.col }
+    if p.line == r.end.line   { return p.col <= r.end.col   }
+    true
+}
+
+// ============================================================================
+// Section 13: RELATED DIAGNOSTIC HELPERS
+// ============================================================================
+
+// Get the related_count for diagnostic at index idx.
+fn lspd_related_count(b: &LspdBuffer, idx: i64) -> i64 with Panic {
+    if idx < 0 || idx >= b.count { return 0 }
+    b.diags[idx as usize].related_count
+}
+
+// Get the Nth related id for diagnostic at index idx.
+fn lspd_related_at(b: &LspdBuffer, idx: i64, rel_idx: i64) -> i64 with Panic {
+    if idx < 0 || idx >= b.count { return LSPD_INVALID }
+    let rc = b.diags[idx as usize].related_count
+    if rel_idx < 0 || rel_idx >= rc { return LSPD_INVALID }
+    b.diags[idx as usize].related[rel_idx as usize]
+}
+
+// ============================================================================
+// Section 14: DEDUPLICATION
+// ============================================================================
+
+// Remove duplicate diagnostics (same code + same start position).
+// Returns a new buffer with duplicates removed.
+fn lspd_dedup(b: &LspdBuffer) -> LspdBuffer {
+    var out = lspd_buffer_new(b.file_id)
+    var i: i64 = 0
+    while i < b.count {
+        let d = &b.diags[i as usize]
+        // Check if already present in out
+        var found: bool = false
+        var j: i64 = 0
+        while j < out.count {
+            let o = &out.diags[j as usize]
+            if o.code == d.code
+                && o.range.start.line == d.range.start.line
+                && o.range.start.col  == d.range.start.col {
+                found = true
+            }
+            j = j + 1
+        }
+        if found == false && out.count < LSPD_MAX_DIAGS {
+            out.diags[out.count as usize] = b.diags[i as usize]
+            out.count = out.count + 1
+        }
+        i = i + 1
+    }
+    out
+}
+
+// ============================================================================
+// Section 15: TESTS
+// ============================================================================
+
+// T01: lspd_buffer_new initializes correctly
+fn test_lspd_buffer_new() -> bool {
+    let b = lspd_buffer_new(7)
+    b.file_id == 7 && b.count == 0
+}
+
+// T02: lspd_add increments count
+fn test_lspd_add_count() -> bool with Mut, Div, Panic {
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_ERROR, 100, "souc", "msg", 1, 0, 1, 5)
+    b.count == 1
+}
+
+// T03: lspd_add stores severity
+fn test_lspd_add_severity() -> bool with Mut, Div, Panic {
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_WARN, 200, "souc", "warn msg", 3, 4, 3, 10)
+    b.diags[0].severity == LSPD_WARN
+}
+
+// T04: lspd_add stores code
+fn test_lspd_add_code() -> bool with Mut, Div, Panic {
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_ERROR, 404, "souc", "msg", 1, 0, 1, 5)
+    b.diags[0].code == 404
+}
+
+// T05: lspd_add stores source
+fn test_lspd_add_source() -> bool with Mut, Div, Panic {
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_ERROR, 1, "mycheck", "msg", 1, 0, 1, 3)
+    str_eq(b.diags[0].source, "mycheck")
+}
+
+// T06: lspd_add stores message
+fn test_lspd_add_message() -> bool with Mut, Div, Panic {
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_INFO, 0, "src", "hello world", 1, 0, 1, 5)
+    str_eq(b.diags[0].message, "hello world")
+}
+
+// T07: lspd_add stores range.start
+fn test_lspd_add_range_start() -> bool with Mut, Div, Panic {
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_ERROR, 1, "s", "m", 5, 3, 5, 8)
+    b.diags[0].range.start.line == 5 && b.diags[0].range.start.col == 3
+}
+
+// T08: lspd_add stores range.end
+fn test_lspd_add_range_end() -> bool with Mut, Div, Panic {
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_ERROR, 1, "s", "m", 5, 3, 7, 12)
+    b.diags[0].range.end.line == 7 && b.diags[0].range.end.col == 12
+}
+
+// T09: lspd_add multiple diags
+fn test_lspd_add_multiple() -> bool with Mut, Div, Panic {
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_ERROR, 1, "s", "e1", 1, 0, 1, 5)
+    lspd_add(&! b, LSPD_WARN,  2, "s", "w1", 2, 0, 2, 3)
+    lspd_add(&! b, LSPD_INFO,  3, "s", "i1", 3, 0, 3, 2)
+    b.count == 3
+}
+
+// T10: lspd_summary correct counts
+fn test_lspd_summary() -> bool with Mut, Div, Panic {
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_ERROR, 1, "s", "e", 1, 0, 1, 1)
+    lspd_add(&! b, LSPD_ERROR, 2, "s", "e", 2, 0, 2, 1)
+    lspd_add(&! b, LSPD_WARN,  3, "s", "w", 3, 0, 3, 1)
+    lspd_add(&! b, LSPD_HINT,  4, "s", "h", 4, 0, 4, 1)
+    let s = lspd_summary(&b)
+    s.error_count == 2 && s.warn_count == 1 && s.info_count == 0 && s.hint_count == 1
+}
+
+// T11: lspd_summary_total correct
+fn test_lspd_summary_total() -> bool with Mut, Div, Panic {
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_ERROR, 1, "s", "e", 1, 0, 1, 1)
+    lspd_add(&! b, LSPD_WARN,  2, "s", "w", 2, 0, 2, 1)
+    let s = lspd_summary(&b)
+    lspd_summary_total(&s) == 2
+}
+
+// T12: lspd_filter by severity keeps only matching
+fn test_lspd_filter_severity() -> bool with Mut, Div, Panic {
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_ERROR, 1, "s", "e", 1, 0, 1, 1)
+    lspd_add(&! b, LSPD_WARN,  2, "s", "w", 2, 0, 2, 1)
+    lspd_add(&! b, LSPD_INFO,  3, "s", "i", 3, 0, 3, 1)
+    let f = lspd_filter_new(LSPD_WARN, 100)
+    let out = lspd_filter(&b, &f)
+    out.count == 2
+}
+
+// T13: lspd_filter by max_count limits output
+fn test_lspd_filter_max_count() -> bool with Mut, Div, Panic {
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_ERROR, 1, "s", "e1", 1, 0, 1, 1)
+    lspd_add(&! b, LSPD_ERROR, 2, "s", "e2", 2, 0, 2, 1)
+    lspd_add(&! b, LSPD_ERROR, 3, "s", "e3", 3, 0, 3, 1)
+    let f = lspd_filter_new(LSPD_ERROR, 2)
+    let out = lspd_filter(&b, &f)
+    out.count == 2
+}
+
+// T14: lspd_filter by source keeps only matching source
+fn test_lspd_filter_source() -> bool with Mut, Div, Panic {
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_ERROR, 1, "souc",  "e", 1, 0, 1, 1)
+    lspd_add(&! b, LSPD_ERROR, 2, "clippy","c", 2, 0, 2, 1)
+    lspd_add(&! b, LSPD_ERROR, 3, "souc",  "e", 3, 0, 3, 1)
+    let f = lspd_filter_with_source(LSPD_ERROR, 100, "souc")
+    let out = lspd_filter(&b, &f)
+    out.count == 2
+}
+
+// T15: lspd_filter preserves file_id
+fn test_lspd_filter_file_id() -> bool with Mut, Div, Panic {
+    var b = lspd_buffer_new(42)
+    lspd_add(&! b, LSPD_ERROR, 1, "s", "e", 1, 0, 1, 1)
+    let f = lspd_filter_new(LSPD_ERROR, 100)
+    let out = lspd_filter(&b, &f)
+    out.file_id == 42
+}
+
+// T16: lspd_sort_by_line sorts ascending
+fn test_lspd_sort_by_line() -> bool with Mut, Div, Panic {
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_ERROR, 1, "s", "e", 10, 0, 10, 1)
+    lspd_add(&! b, LSPD_ERROR, 2, "s", "e", 3,  0, 3,  1)
+    lspd_add(&! b, LSPD_ERROR, 3, "s", "e", 7,  0, 7,  1)
+    lspd_sort_by_line(&! b)
+    lspd_is_sorted(&b)
+}
+
+// T17: lspd_sort_by_line already sorted stays sorted
+fn test_lspd_sort_already_sorted() -> bool with Mut, Div, Panic {
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_ERROR, 1, "s", "e", 1, 0, 1, 1)
+    lspd_add(&! b, LSPD_ERROR, 2, "s", "e", 5, 0, 5, 1)
+    lspd_sort_by_line(&! b)
+    lspd_is_sorted(&b)
+}
+
+// T18: lspd_sort_by_line single element stays sorted
+fn test_lspd_sort_single() -> bool with Mut, Div, Panic {
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_ERROR, 1, "s", "e", 3, 0, 3, 1)
+    lspd_sort_by_line(&! b)
+    lspd_is_sorted(&b)
+}
+
+// T19: lspd_is_sorted false for unsorted
+fn test_lspd_is_sorted_false() -> bool with Mut, Div, Panic {
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_ERROR, 1, "s", "e", 10, 0, 10, 1)
+    lspd_add(&! b, LSPD_ERROR, 2, "s", "e", 3,  0, 3,  1)
+    lspd_is_sorted(&b) == false
+}
+
+// T20: lspd_severity_str returns "error"
+fn test_lspd_severity_str_error() -> bool {
+    str_eq(lspd_severity_str(LSPD_ERROR), "error")
+}
+
+// T21: lspd_severity_str returns "warning"
+fn test_lspd_severity_str_warning() -> bool {
+    str_eq(lspd_severity_str(LSPD_WARN), "warning")
+}
+
+// T22: lspd_severity_str returns "info"
+fn test_lspd_severity_str_info() -> bool {
+    str_eq(lspd_severity_str(LSPD_INFO), "info")
+}
+
+// T23: lspd_severity_str returns "hint"
+fn test_lspd_severity_str_hint() -> bool {
+    str_eq(lspd_severity_str(LSPD_HINT), "hint")
+}
+
+// T24: lspd_severity_str returns "unknown" for invalid
+fn test_lspd_severity_str_unknown() -> bool {
+    str_eq(lspd_severity_str(99), "unknown")
+}
+
+// T25: lspd_severity_code roundtrip error
+fn test_lspd_severity_code_error() -> bool {
+    lspd_severity_code("error") == LSPD_ERROR
+}
+
+// T26: lspd_severity_code roundtrip warning
+fn test_lspd_severity_code_warning() -> bool {
+    lspd_severity_code("warning") == LSPD_WARN
+}
+
+// T27: lspd_severity_code returns INVALID for unknown
+fn test_lspd_severity_code_invalid() -> bool {
+    lspd_severity_code("critical") == LSPD_INVALID
+}
+
+// T28: lspd_severity_valid true for 1-4
+fn test_lspd_severity_valid_true() -> bool {
+    lspd_severity_valid(1) && lspd_severity_valid(2) && lspd_severity_valid(3) && lspd_severity_valid(4)
+}
+
+// T29: lspd_severity_valid false for 0 and 5
+fn test_lspd_severity_valid_false() -> bool {
+    lspd_severity_valid(0) == false && lspd_severity_valid(5) == false
+}
+
+// T30: lspd_format_diag contains message
+fn test_lspd_format_diag_contains_msg() -> bool with Mut, Div, Panic {
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_ERROR, 1, "s", "type mismatch", 3, 5, 3, 10)
+    let d = lspd_diag_at(&b, 0)
+    let formatted = lspd_format_diag(&d)
+    str_len(formatted) > 0
+}
+
+// T31: lspd_format_diag contains severity string
+fn test_lspd_format_diag_has_severity() -> bool with Mut, Div, Panic {
+    // We can't do substring search easily, but we can check it's non-empty
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_WARN, 2, "s", "unused var", 1, 0, 1, 3)
+    let d = lspd_diag_at(&b, 0)
+    let formatted = lspd_format_diag(&d)
+    str_len(formatted) > str_len("unused var")
+}
+
+// T32: lspd_merge combines two buffers
+fn test_lspd_merge_count() -> bool with Mut, Div, Panic {
+    var a = lspd_buffer_new(1)
+    var b = lspd_buffer_new(1)
+    lspd_add(&! a, LSPD_ERROR, 1, "s", "e1", 1, 0, 1, 1)
+    lspd_add(&! a, LSPD_ERROR, 2, "s", "e2", 2, 0, 2, 1)
+    lspd_add(&! b, LSPD_WARN,  3, "s", "w1", 3, 0, 3, 1)
+    let merged = lspd_merge(&a, &b)
+    merged.count == 3
+}
+
+// T33: lspd_merge preserves file_id from a
+fn test_lspd_merge_file_id() -> bool with Mut, Div, Panic {
+    var a = lspd_buffer_new(10)
+    var b = lspd_buffer_new(20)
+    let merged = lspd_merge(&a, &b)
+    merged.file_id == 10
+}
+
+// T34: lspd_merge with empty a gives all from b
+fn test_lspd_merge_empty_a() -> bool with Mut, Div, Panic {
+    var a = lspd_buffer_new(1)
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_ERROR, 1, "s", "e", 1, 0, 1, 1)
+    let merged = lspd_merge(&a, &b)
+    merged.count == 1
+}
+
+// T35: lspd_merge with empty b gives all from a
+fn test_lspd_merge_empty_b() -> bool with Mut, Div, Panic {
+    var a = lspd_buffer_new(1)
+    var b = lspd_buffer_new(1)
+    lspd_add(&! a, LSPD_ERROR, 1, "s", "e", 1, 0, 1, 1)
+    lspd_add(&! a, LSPD_WARN,  2, "s", "w", 2, 0, 2, 1)
+    let merged = lspd_merge(&a, &b)
+    merged.count == 2
+}
+
+// T36: lspd_count_by_severity counts correctly
+fn test_lspd_count_by_severity() -> bool with Mut, Div, Panic {
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_ERROR, 1, "s", "e1", 1, 0, 1, 1)
+    lspd_add(&! b, LSPD_ERROR, 2, "s", "e2", 2, 0, 2, 1)
+    lspd_add(&! b, LSPD_WARN,  3, "s", "w",  3, 0, 3, 1)
+    lspd_count_by_severity(&b, LSPD_ERROR) == 2
+}
+
+// T37: lspd_count_by_source counts correctly
+fn test_lspd_count_by_source() -> bool with Mut, Div, Panic {
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_ERROR, 1, "souc",  "e", 1, 0, 1, 1)
+    lspd_add(&! b, LSPD_ERROR, 2, "souc",  "e", 2, 0, 2, 1)
+    lspd_add(&! b, LSPD_ERROR, 3, "clippy","c", 3, 0, 3, 1)
+    lspd_count_by_source(&b, "souc") == 2
+}
+
+// T38: lspd_count_by_code counts correctly
+fn test_lspd_count_by_code() -> bool with Mut, Div, Panic {
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_ERROR, 100, "s", "e", 1, 0, 1, 1)
+    lspd_add(&! b, LSPD_ERROR, 100, "s", "e", 2, 0, 2, 1)
+    lspd_add(&! b, LSPD_ERROR, 200, "s", "e", 3, 0, 3, 1)
+    lspd_count_by_code(&b, 100) == 2
+}
+
+// T39: lspd_find_first_on_line finds correct index
+fn test_lspd_find_first_on_line() -> bool with Mut, Div, Panic {
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_ERROR, 1, "s", "e1", 3, 0, 3, 1)
+    lspd_add(&! b, LSPD_ERROR, 2, "s", "e2", 7, 0, 7, 1)
+    lspd_find_first_on_line(&b, 7) == 1
+}
+
+// T40: lspd_find_first_on_line returns INVALID for missing line
+fn test_lspd_find_first_on_line_miss() -> bool with Mut, Div, Panic {
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_ERROR, 1, "s", "e", 3, 0, 3, 1)
+    lspd_find_first_on_line(&b, 99) == LSPD_INVALID
+}
+
+// T41: lspd_find_by_code finds correct index
+fn test_lspd_find_by_code() -> bool with Mut, Div, Panic {
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_ERROR, 100, "s", "e", 1, 0, 1, 1)
+    lspd_add(&! b, LSPD_WARN,  200, "s", "w", 2, 0, 2, 1)
+    lspd_find_by_code(&b, 200) == 1
+}
+
+// T42: lspd_find_first_error finds first error
+fn test_lspd_find_first_error() -> bool with Mut, Div, Panic {
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_WARN,  1, "s", "w", 1, 0, 1, 1)
+    lspd_add(&! b, LSPD_ERROR, 2, "s", "e", 2, 0, 2, 1)
+    lspd_find_first_error(&b) == 1
+}
+
+// T43: lspd_find_first_error returns INVALID when no errors
+fn test_lspd_find_first_error_none() -> bool with Mut, Div, Panic {
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_WARN, 1, "s", "w", 1, 0, 1, 1)
+    lspd_find_first_error(&b) == LSPD_INVALID
+}
+
+// T44: lspd_worst_severity returns smallest code
+fn test_lspd_worst_severity() -> bool with Mut, Div, Panic {
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_HINT,  1, "s", "h", 1, 0, 1, 1)
+    lspd_add(&! b, LSPD_ERROR, 2, "s", "e", 2, 0, 2, 1)
+    lspd_add(&! b, LSPD_WARN,  3, "s", "w", 3, 0, 3, 1)
+    lspd_worst_severity(&b) == LSPD_ERROR
+}
+
+// T45: lspd_worst_severity on empty buffer returns INVALID
+fn test_lspd_worst_severity_empty() -> bool {
+    let b = lspd_buffer_new(1)
+    lspd_worst_severity(&b) == LSPD_INVALID
+}
+
+// T46: lspd_best_severity returns largest code
+fn test_lspd_best_severity() -> bool with Mut, Div, Panic {
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_ERROR, 1, "s", "e", 1, 0, 1, 1)
+    lspd_add(&! b, LSPD_HINT,  2, "s", "h", 2, 0, 2, 1)
+    lspd_best_severity(&b) == LSPD_HINT
+}
+
+// T47: lspd_position_new stores values
+fn test_lspd_position_new() -> bool {
+    let p = lspd_position_new(10, 5)
+    p.line == 10 && p.col == 5
+}
+
+// T48: lspd_range_new stores values
+fn test_lspd_range_new() -> bool {
+    let r = lspd_range_new(3, 4, 7, 8)
+    r.start.line == 3 && r.start.col == 4 && r.end.line == 7 && r.end.col == 8
+}
+
+// T49: lspd_position_eq true for equal positions
+fn test_lspd_position_eq_true() -> bool {
+    let a = lspd_position_new(5, 3)
+    let b = lspd_position_new(5, 3)
+    lspd_position_eq(&a, &b)
+}
+
+// T50: lspd_position_eq false for different
+fn test_lspd_position_eq_false() -> bool {
+    let a = lspd_position_new(5, 3)
+    let b = lspd_position_new(5, 4)
+    lspd_position_eq(&a, &b) == false
+}
+
+// T51: lspd_position_before true
+fn test_lspd_position_before_true() -> bool {
+    let a = lspd_position_new(3, 2)
+    let b = lspd_position_new(3, 5)
+    lspd_position_before(&a, &b)
+}
+
+// T52: lspd_position_before false
+fn test_lspd_position_before_false() -> bool {
+    let a = lspd_position_new(5, 0)
+    let b = lspd_position_new(3, 0)
+    lspd_position_before(&a, &b) == false
+}
+
+// T53: lspd_range_eq true
+fn test_lspd_range_eq_true() -> bool {
+    let a = lspd_range_new(1, 2, 3, 4)
+    let b = lspd_range_new(1, 2, 3, 4)
+    lspd_range_eq(&a, &b)
+}
+
+// T54: lspd_range_eq false
+fn test_lspd_range_eq_false() -> bool {
+    let a = lspd_range_new(1, 2, 3, 4)
+    let b = lspd_range_new(1, 2, 3, 5)
+    lspd_range_eq(&a, &b) == false
+}
+
+// T55: lspd_range_same_line true
+fn test_lspd_range_same_line_true() -> bool {
+    let r = lspd_range_new(5, 0, 5, 10)
+    lspd_range_same_line(&r)
+}
+
+// T56: lspd_range_same_line false
+fn test_lspd_range_same_line_false() -> bool {
+    let r = lspd_range_new(5, 0, 6, 10)
+    lspd_range_same_line(&r) == false
+}
+
+// T57: lspd_range_line_span
+fn test_lspd_range_line_span() -> bool {
+    let r = lspd_range_new(3, 0, 6, 0)
+    lspd_range_line_span(&r) == 4
+}
+
+// T58: lspd_position_in_range true for inside
+fn test_lspd_position_in_range_true() -> bool {
+    let r = lspd_range_new(3, 5, 3, 15)
+    let p = lspd_position_new(3, 10)
+    lspd_position_in_range(&p, &r)
+}
+
+// T59: lspd_position_in_range false for outside
+fn test_lspd_position_in_range_false() -> bool {
+    let r = lspd_range_new(3, 5, 3, 15)
+    let p = lspd_position_new(3, 20)
+    lspd_position_in_range(&p, &r) == false
+}
+
+// T60: lspd_add_related stores related id
+fn test_lspd_add_related() -> bool with Mut, Div, Panic {
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_ERROR, 1, "s", "e", 1, 0, 1, 5)
+    lspd_add_related(&! b, 0, 42)
+    b.diags[0].related_count == 1 && b.diags[0].related[0] == 42
+}
+
+// T61: lspd_related_at returns correct id
+fn test_lspd_related_at() -> bool with Mut, Div, Panic {
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_ERROR, 1, "s", "e", 1, 0, 1, 5)
+    lspd_add_related(&! b, 0, 99)
+    lspd_related_at(&b, 0, 0) == 99
+}
+
+// T62: lspd_dedup removes exact duplicates
+fn test_lspd_dedup() -> bool with Mut, Div, Panic {
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_ERROR, 100, "s", "e", 3, 5, 3, 10)
+    lspd_add(&! b, LSPD_ERROR, 100, "s", "e", 3, 5, 3, 10)
+    lspd_add(&! b, LSPD_WARN,  200, "s", "w", 4, 0, 4, 5)
+    let deduped = lspd_dedup(&b)
+    deduped.count == 2
+}
+
+// T63: lspd_dedup keeps unique entries
+fn test_lspd_dedup_unique() -> bool with Mut, Div, Panic {
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_ERROR, 100, "s", "e1", 1, 0, 1, 5)
+    lspd_add(&! b, LSPD_ERROR, 100, "s", "e2", 2, 0, 2, 5)
+    let deduped = lspd_dedup(&b)
+    deduped.count == 2
+}
+
+// T64: lspd_range_is_zero true for zero range
+fn test_lspd_range_is_zero_true() -> bool {
+    let r = lspd_range_zero()
+    lspd_range_is_zero(&r)
+}
+
+// T65: lspd_range_is_zero false for non-zero
+fn test_lspd_range_is_zero_false() -> bool {
+    let r = lspd_range_new(1, 0, 1, 5)
+    lspd_range_is_zero(&r) == false
+}
+
+// T66: lspd_count returns buffer count
+fn test_lspd_count() -> bool with Mut, Div, Panic {
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_ERROR, 1, "s", "e", 1, 0, 1, 1)
+    lspd_add(&! b, LSPD_WARN,  2, "s", "w", 2, 0, 2, 1)
+    lspd_count(&b) == 2
+}
+
+// T67: lspd_diag_at returns correct diag
+fn test_lspd_diag_at() -> bool with Mut, Div, Panic {
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_ERROR, 42, "src", "msg", 5, 3, 5, 8)
+    let d = lspd_diag_at(&b, 0)
+    d.severity == LSPD_ERROR && d.code == 42 && str_eq(d.message, "msg")
+}
+
+// T68: lspd_diag_at out-of-bounds returns zero
+fn test_lspd_diag_at_oob() -> bool with Mut, Div, Panic {
+    var b = lspd_buffer_new(1)
+    lspd_add(&! b, LSPD_ERROR, 1, "s", "e", 1, 0, 1, 1)
+    let d = lspd_diag_at(&b, 99)
+    d.severity == LSPD_INFO && d.code == 0
+}
+
+// T69: lspd_file_id returns file_id
+fn test_lspd_file_id() -> bool {
+    let b = lspd_buffer_new(99)
+    lspd_file_id(&b) == 99
+}
+
+// T70: full pipeline — add, sort, filter, merge, summary
+fn test_lspd_full_pipeline() -> bool with Mut, Div, Panic {
+    var b1 = lspd_buffer_new(1)
+    var b2 = lspd_buffer_new(1)
+    lspd_add(&! b1, LSPD_ERROR, 1, "souc", "type error", 10, 0, 10, 5)
+    lspd_add(&! b1, LSPD_WARN,  2, "souc", "unused",     3,  0, 3,  3)
+    lspd_add(&! b2, LSPD_HINT,  3, "lint", "consider",   7,  0, 7,  4)
+    let merged = lspd_merge(&b1, &b2)
+    var sorted = lspd_merge(&b1, &b2)
+    lspd_sort_by_line(&! sorted)
+    let s = lspd_summary(&merged)
+    let ok = s.error_count == 1 && s.warn_count == 1 && s.hint_count == 1
+    let is_sorted = lspd_is_sorted(&sorted)
+    ok && is_sorted && merged.count == 3
+}
+
+// ============================================================================
+// Section 16: TEST RUNNER
+// ============================================================================
+
+fn lspd_run_all_tests() -> i64 with Mut, Div, Panic {
+    var passed: i64 = 0
+    var failed: i64 = 0
+
+    if test_lspd_buffer_new()              { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_add_count()               { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_add_severity()            { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_add_code()                { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_add_source()              { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_add_message()             { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_add_range_start()         { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_add_range_end()           { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_add_multiple()            { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_summary()                 { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_summary_total()           { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_filter_severity()         { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_filter_max_count()        { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_filter_source()           { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_filter_file_id()          { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_sort_by_line()            { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_sort_already_sorted()     { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_sort_single()             { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_is_sorted_false()         { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_severity_str_error()      { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_severity_str_warning()    { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_severity_str_info()       { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_severity_str_hint()       { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_severity_str_unknown()    { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_severity_code_error()     { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_severity_code_warning()   { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_severity_code_invalid()   { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_severity_valid_true()     { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_severity_valid_false()    { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_format_diag_contains_msg(){ passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_format_diag_has_severity(){ passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_merge_count()             { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_merge_file_id()           { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_merge_empty_a()           { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_merge_empty_b()           { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_count_by_severity()       { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_count_by_source()         { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_count_by_code()           { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_find_first_on_line()      { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_find_first_on_line_miss() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_find_by_code()            { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_find_first_error()        { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_find_first_error_none()   { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_worst_severity()          { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_worst_severity_empty()    { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_best_severity()           { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_position_new()            { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_range_new()               { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_position_eq_true()        { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_position_eq_false()       { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_position_before_true()    { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_position_before_false()   { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_range_eq_true()           { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_range_eq_false()          { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_range_same_line_true()    { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_range_same_line_false()   { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_range_line_span()         { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_position_in_range_true()  { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_position_in_range_false() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_add_related()             { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_related_at()              { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_dedup()                   { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_dedup_unique()            { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_range_is_zero_true()      { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_range_is_zero_false()     { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_count()                   { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_diag_at()                 { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_diag_at_oob()             { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_file_id()                 { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspd_full_pipeline()           { passed = passed + 1 } else { failed = failed + 1 }
+
+    if failed == 0 {
+        return 0
+    }
+    failed
+}

@@ -1,0 +1,1278 @@
+// self-hosted::analysis::escape — Escape Analysis
+//
+// Determines whether heap allocations escape the function in which they
+// are created.  An allocation "escapes" if it can be observed outside its
+// creating function — through a return value, a store to a global, or
+// being passed as a reference to a callee.
+//
+// Algorithm:
+//   1. Build an escape graph: nodes represent allocations / values, edges
+//      represent data-flow relationships (copy, assignment, field store).
+//   2. Seed escape: mark nodes that are directly returned, stored to
+//      globals, or passed as references to callees.
+//   3. Propagate: for each ASSIGN and FLOW edge from a non-escaping source
+//      to an escaping destination, mark the source as escaping too.
+//      Repeat until a fixed point.
+//   4. Summarize: count escaping and local allocations.
+//
+// Edge kinds:
+//   FLOW=0   — direct data flow (copy/phi)
+//   DEREF=1  — pointer dereference
+//   ASSIGN=2 — value is assigned into an escaping container
+//
+// Node escape reasons:
+//   ESC_NONE=0         — does not escape
+//   ESC_RETURNED=1     — returned from function
+//   ESC_STORED_GLOBAL=2 — stored into a global variable
+//   ESC_PASSED_REF=3   — passed as reference argument
+//
+// All arrays are fixed-size — no heap allocation.
+//
+// References:
+//   Choi, Gupta, Serrano, Sreedhar, Midkiff:
+//     "Escape Analysis for Java" (OOPSLA 1999)
+//   Blanchet: "Escape Analysis for JavaTM: Theory and Practice" (TOPLAS 2003)
+//   Whaley & Rinard: "Compositional Pointer and Escape Analysis for
+//     Java Programs" (OOPSLA 1999)
+
+// ============================================================================
+// Section 1: Constants
+// ============================================================================
+
+let ESC_MAX_NODES: i64 = 256
+let ESC_MAX_EDGES: i64 = 512
+let ESC_INVALID: i64 = 0 - 1
+
+// Node kinds
+let ESC_LOCAL: i64 = 0
+let ESC_PARAM: i64 = 1
+let ESC_RETURN: i64 = 2
+let ESC_FIELD: i64 = 3
+
+// Escape reasons
+let ESC_NONE: i64 = 0
+let ESC_RETURNED: i64 = 1
+let ESC_STORED_GLOBAL: i64 = 2
+let ESC_PASSED_REF: i64 = 3
+
+// Edge kinds
+let ESC_FLOW: i64 = 0
+let ESC_DEREF: i64 = 1
+let ESC_ASSIGN: i64 = 2
+
+// ============================================================================
+// Section 2: Data Structures
+// ============================================================================
+
+// A single node in the escape graph.
+// id     — unique integer identifier (0-based)
+// kind   — ESC_LOCAL / ESC_PARAM / ESC_RETURN / ESC_FIELD
+// escapes — true once the node is determined to escape
+// reason  — why it escapes (ESC_NONE if it doesn't)
+struct EscNode {
+    id: i64,
+    kind: i64,
+    escapes: bool,
+    reason: i64,
+}
+
+// A directed edge in the escape graph.
+// from/to reference node ids.
+// kind: FLOW, DEREF, or ASSIGN.
+struct EscEdge {
+    from: i64,
+    to: i64,
+    kind: i64,
+}
+
+// The full escape graph.
+struct EscGraph {
+    nodes: [EscNode; 256],
+    edges: [EscEdge; 512],
+    node_count: i64,
+    edge_count: i64,
+}
+
+// Summary result after analysis.
+struct EscResult {
+    escape_count: i64,
+    local_count: i64,
+}
+
+// ============================================================================
+// Section 3: Constructors
+// ============================================================================
+
+fn esc_node_new(id: i64, kind: i64) -> EscNode {
+    EscNode {
+        id: id,
+        kind: kind,
+        escapes: false,
+        reason: ESC_NONE,
+    }
+}
+
+fn esc_edge_new(from: i64, to: i64, kind: i64) -> EscEdge {
+    EscEdge {
+        from: from,
+        to: to,
+        kind: kind,
+    }
+}
+
+fn esc_graph_new() -> EscGraph {
+    EscGraph {
+        nodes: [esc_node_new(ESC_INVALID, ESC_LOCAL); 256],
+        edges: [esc_edge_new(ESC_INVALID, ESC_INVALID, ESC_FLOW); 512],
+        node_count: 0,
+        edge_count: 0,
+    }
+}
+
+fn esc_result_new() -> EscResult {
+    EscResult {
+        escape_count: 0,
+        local_count: 0,
+    }
+}
+
+// ============================================================================
+// Section 4: Graph Mutation
+// ============================================================================
+
+// Add a new node of the given kind to the graph.
+// Returns the new node's id (0-based index).
+// Panics if the graph is full.
+fn esc_add_node(g: &! EscGraph, kind: i64) -> i64 with Mut, Panic {
+    if g.node_count >= ESC_MAX_NODES {
+        return ESC_INVALID
+    }
+    let id = g.node_count
+    g.nodes[id as usize] = esc_node_new(id, kind)
+    g.node_count = g.node_count + 1
+    id
+}
+
+// Add a directed edge from → to with the given kind.
+// No-op (silently) if the edge array is full.
+fn esc_add_edge(g: &! EscGraph, from: i64, to: i64, kind: i64) with Mut, Panic {
+    if g.edge_count >= ESC_MAX_EDGES {
+        return
+    }
+    g.edges[g.edge_count as usize] = esc_edge_new(from, to, kind)
+    g.edge_count = g.edge_count + 1
+}
+
+// ============================================================================
+// Section 5: Escape Marking
+// ============================================================================
+
+// Mark a node as escaping via the RETURN path.
+fn esc_mark_returned(g: &! EscGraph, id: i64) with Mut, Panic {
+    if id < 0 { return }
+    if id >= g.node_count { return }
+    g.nodes[id as usize].escapes = true
+    g.nodes[id as usize].reason = ESC_RETURNED
+}
+
+// Mark a node as escaping via store to a global.
+fn esc_mark_global(g: &! EscGraph, id: i64) with Mut, Panic {
+    if id < 0 { return }
+    if id >= g.node_count { return }
+    g.nodes[id as usize].escapes = true
+    g.nodes[id as usize].reason = ESC_STORED_GLOBAL
+}
+
+// Mark a node as escaping via reference passed to a callee.
+fn esc_mark_ref(g: &! EscGraph, id: i64) with Mut, Panic {
+    if id < 0 { return }
+    if id >= g.node_count { return }
+    g.nodes[id as usize].escapes = true
+    g.nodes[id as usize].reason = ESC_PASSED_REF
+}
+
+// Check if a node escapes.
+fn esc_node_escapes(g: &EscGraph, id: i64) -> bool {
+    if id < 0 { return false }
+    if id >= g.node_count { return false }
+    g.nodes[id as usize].escapes
+}
+
+// Get the escape reason for a node.
+fn esc_node_reason(g: &EscGraph, id: i64) -> i64 {
+    if id < 0 { return ESC_NONE }
+    if id >= g.node_count { return ESC_NONE }
+    g.nodes[id as usize].reason
+}
+
+// Get the kind of a node.
+fn esc_node_kind(g: &EscGraph, id: i64) -> i64 {
+    if id < 0 { return ESC_INVALID }
+    if id >= g.node_count { return ESC_INVALID }
+    g.nodes[id as usize].kind
+}
+
+// ============================================================================
+// Section 6: Escape Propagation
+// ============================================================================
+
+// One propagation step: for each edge (from → to), if `to` escapes then
+// mark `from` as escaping as well (escape flows backward through data-flow).
+// Returns the number of nodes newly marked as escaping in this step.
+fn esc_propagate_step(g: &! EscGraph) -> i64 with Mut, Div, Panic {
+    var newly_escaped: i64 = 0
+    var ei: i64 = 0
+    while ei < g.edge_count {
+        let edge = g.edges[ei as usize]
+        let to_id = edge.to
+        let from_id = edge.from
+        // If the destination escapes and the source doesn't yet, propagate.
+        if to_id >= 0 && to_id < g.node_count {
+            if g.nodes[to_id as usize].escapes {
+                if from_id >= 0 && from_id < g.node_count {
+                    if g.nodes[from_id as usize].escapes == false {
+                        g.nodes[from_id as usize].escapes = true
+                        // Preserve the downstream reason.
+                        g.nodes[from_id as usize].reason = g.nodes[to_id as usize].reason
+                        newly_escaped = newly_escaped + 1
+                    }
+                }
+            }
+        }
+        ei = ei + 1
+    }
+    newly_escaped
+}
+
+// Run propagation to a fixed point (iterate until no new nodes escape).
+// Bounded by ESC_MAX_NODES iterations.
+fn esc_propagate(g: &! EscGraph) with Mut, Div, Panic {
+    var iters: i64 = 0
+    var max_iters: i64 = ESC_MAX_NODES
+    while iters < max_iters {
+        let delta = esc_propagate_step(g)
+        if delta == 0 { return }
+        iters = iters + 1
+    }
+}
+
+// ============================================================================
+// Section 7: Summary Analysis
+// ============================================================================
+
+// Run the full escape analysis: propagate and then count escaping vs local nodes.
+fn esc_analyze(g: &! EscGraph) -> EscResult with Mut, Div, Panic {
+    esc_propagate(g)
+    var result = esc_result_new()
+    var ni: i64 = 0
+    while ni < g.node_count {
+        if g.nodes[ni as usize].escapes {
+            result.escape_count = result.escape_count + 1
+        } else {
+            result.local_count = result.local_count + 1
+        }
+        ni = ni + 1
+    }
+    result
+}
+
+// Count nodes with a specific escape reason.
+fn esc_count_reason(g: &EscGraph, reason: i64) -> i64 {
+    var cnt: i64 = 0
+    var ni: i64 = 0
+    while ni < g.node_count {
+        if g.nodes[ni as usize].reason == reason {
+            cnt = cnt + 1
+        }
+        ni = ni + 1
+    }
+    cnt
+}
+
+// Count nodes with a specific kind.
+fn esc_count_kind(g: &EscGraph, kind: i64) -> i64 {
+    var cnt: i64 = 0
+    var ni: i64 = 0
+    while ni < g.node_count {
+        if g.nodes[ni as usize].kind == kind {
+            cnt = cnt + 1
+        }
+        ni = ni + 1
+    }
+    cnt
+}
+
+// Check if any node in the graph escapes.
+fn esc_any_escapes(g: &EscGraph) -> bool {
+    var ni: i64 = 0
+    while ni < g.node_count {
+        if g.nodes[ni as usize].escapes { return true }
+        ni = ni + 1
+    }
+    false
+}
+
+// Check if all nodes in the graph escape.
+fn esc_all_escape(g: &EscGraph) -> bool {
+    if g.node_count == 0 { return false }
+    var ni: i64 = 0
+    while ni < g.node_count {
+        if g.nodes[ni as usize].escapes == false { return false }
+        ni = ni + 1
+    }
+    true
+}
+
+// Count edges from a given node.
+fn esc_out_degree(g: &EscGraph, id: i64) -> i64 {
+    var cnt: i64 = 0
+    var ei: i64 = 0
+    while ei < g.edge_count {
+        if g.edges[ei as usize].from == id {
+            cnt = cnt + 1
+        }
+        ei = ei + 1
+    }
+    cnt
+}
+
+// Count edges into a given node.
+fn esc_in_degree(g: &EscGraph, id: i64) -> i64 {
+    var cnt: i64 = 0
+    var ei: i64 = 0
+    while ei < g.edge_count {
+        if g.edges[ei as usize].to == id {
+            cnt = cnt + 1
+        }
+        ei = ei + 1
+    }
+    cnt
+}
+
+// Check if there is a direct edge from → to.
+fn esc_has_edge(g: &EscGraph, from: i64, to: i64) -> bool {
+    var ei: i64 = 0
+    while ei < g.edge_count {
+        let e = g.edges[ei as usize]
+        if e.from == from && e.to == to { return true }
+        ei = ei + 1
+    }
+    false
+}
+
+// ============================================================================
+// Section 8: Tests — Category 1: Graph Construction (10 tests)
+// ============================================================================
+
+// T01: Empty graph has zero nodes.
+fn test_esc_empty_graph() -> bool {
+    let g = esc_graph_new()
+    g.node_count == 0 && g.edge_count == 0
+}
+
+// T02: esc_add_node returns sequential ids.
+fn test_esc_add_node_ids_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let id0 = esc_add_node(g, ESC_LOCAL)
+    let id1 = esc_add_node(g, ESC_LOCAL)
+    let id2 = esc_add_node(g, ESC_FIELD)
+    id0 == 0 && id1 == 1 && id2 == 2 && g.node_count == 3
+}
+fn test_esc_add_node_ids() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_add_node_ids_inner(&! g)
+}
+
+// T03: esc_add_node creates non-escaping nodes.
+fn test_esc_add_node_not_escaping_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let id = esc_add_node(g, ESC_LOCAL)
+    esc_node_escapes(g, id) == false
+}
+fn test_esc_add_node_not_escaping() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_add_node_not_escaping_inner(&! g)
+}
+
+// T04: esc_add_edge increments edge count.
+fn test_esc_add_edge_count_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_LOCAL)
+    let n1 = esc_add_node(g, ESC_LOCAL)
+    esc_add_edge(g, n0, n1, ESC_FLOW)
+    g.edge_count == 1
+}
+fn test_esc_add_edge_count() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_add_edge_count_inner(&! g)
+}
+
+// T05: esc_has_edge detects an added edge.
+fn test_esc_has_edge_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_LOCAL)
+    let n1 = esc_add_node(g, ESC_LOCAL)
+    esc_add_edge(g, n0, n1, ESC_FLOW)
+    esc_has_edge(g, n0, n1)
+}
+fn test_esc_has_edge() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_has_edge_inner(&! g)
+}
+
+// T06: esc_has_edge returns false for missing edge.
+fn test_esc_no_edge_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_LOCAL)
+    let n1 = esc_add_node(g, ESC_LOCAL)
+    let r = esc_has_edge(g, n0, n1)
+    r == false
+}
+fn test_esc_no_edge() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_no_edge_inner(&! g)
+}
+
+// T07: esc_out_degree counts outgoing edges.
+fn test_esc_out_degree_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_LOCAL)
+    let n1 = esc_add_node(g, ESC_LOCAL)
+    let n2 = esc_add_node(g, ESC_LOCAL)
+    esc_add_edge(g, n0, n1, ESC_FLOW)
+    esc_add_edge(g, n0, n2, ESC_ASSIGN)
+    esc_out_degree(g, n0) == 2
+}
+fn test_esc_out_degree() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_out_degree_inner(&! g)
+}
+
+// T08: esc_in_degree counts incoming edges.
+fn test_esc_in_degree_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_LOCAL)
+    let n1 = esc_add_node(g, ESC_LOCAL)
+    let n2 = esc_add_node(g, ESC_LOCAL)
+    esc_add_edge(g, n0, n2, ESC_FLOW)
+    esc_add_edge(g, n1, n2, ESC_FLOW)
+    esc_in_degree(g, n2) == 2
+}
+fn test_esc_in_degree() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_in_degree_inner(&! g)
+}
+
+// T09: esc_node_kind returns correct kind.
+fn test_esc_node_kind_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_PARAM)
+    let n1 = esc_add_node(g, ESC_RETURN)
+    esc_node_kind(g, n0) == ESC_PARAM && esc_node_kind(g, n1) == ESC_RETURN
+}
+fn test_esc_node_kind() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_node_kind_inner(&! g)
+}
+
+// T10: esc_count_kind counts correctly.
+fn test_esc_count_kind_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_LOCAL)
+    let n1 = esc_add_node(g, ESC_LOCAL)
+    let n2 = esc_add_node(g, ESC_PARAM)
+    esc_count_kind(g, ESC_LOCAL) == 2 && esc_count_kind(g, ESC_PARAM) == 1
+}
+fn test_esc_count_kind() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_count_kind_inner(&! g)
+}
+
+// ============================================================================
+// Section 9: Tests — Category 2: Escape Marking (10 tests)
+// ============================================================================
+
+// T11: esc_mark_returned marks node as escaping.
+fn test_esc_mark_returned_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let id = esc_add_node(g, ESC_LOCAL)
+    esc_mark_returned(g, id)
+    esc_node_escapes(g, id) && esc_node_reason(g, id) == ESC_RETURNED
+}
+fn test_esc_mark_returned() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_mark_returned_inner(&! g)
+}
+
+// T12: esc_mark_global marks node as escaping.
+fn test_esc_mark_global_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let id = esc_add_node(g, ESC_LOCAL)
+    esc_mark_global(g, id)
+    esc_node_escapes(g, id) && esc_node_reason(g, id) == ESC_STORED_GLOBAL
+}
+fn test_esc_mark_global() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_mark_global_inner(&! g)
+}
+
+// T13: esc_mark_ref marks node as escaping via reference.
+fn test_esc_mark_ref_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let id = esc_add_node(g, ESC_LOCAL)
+    esc_mark_ref(g, id)
+    esc_node_escapes(g, id) && esc_node_reason(g, id) == ESC_PASSED_REF
+}
+fn test_esc_mark_ref() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_mark_ref_inner(&! g)
+}
+
+// T14: esc_node_escapes returns false for fresh node.
+fn test_esc_fresh_not_escaping_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let id = esc_add_node(g, ESC_LOCAL)
+    esc_node_escapes(g, id) == false
+}
+fn test_esc_fresh_not_escaping() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_fresh_not_escaping_inner(&! g)
+}
+
+// T15: esc_node_reason returns ESC_NONE for fresh node.
+fn test_esc_fresh_reason_none_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let id = esc_add_node(g, ESC_LOCAL)
+    esc_node_reason(g, id) == ESC_NONE
+}
+fn test_esc_fresh_reason_none() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_fresh_reason_none_inner(&! g)
+}
+
+// T16: esc_any_escapes returns false when nothing escapes.
+fn test_esc_any_escapes_false_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_LOCAL)
+    let n1 = esc_add_node(g, ESC_LOCAL)
+    esc_any_escapes(g) == false
+}
+fn test_esc_any_escapes_false() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_any_escapes_false_inner(&! g)
+}
+
+// T17: esc_any_escapes returns true after marking.
+fn test_esc_any_escapes_true_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_LOCAL)
+    let n1 = esc_add_node(g, ESC_LOCAL)
+    esc_mark_returned(g, n0)
+    esc_any_escapes(g)
+}
+fn test_esc_any_escapes_true() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_any_escapes_true_inner(&! g)
+}
+
+// T18: esc_all_escape false when some local.
+fn test_esc_all_escape_false_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_LOCAL)
+    let n1 = esc_add_node(g, ESC_LOCAL)
+    esc_mark_returned(g, n0)
+    esc_all_escape(g) == false
+}
+fn test_esc_all_escape_false() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_all_escape_false_inner(&! g)
+}
+
+// T19: esc_all_escape true when all marked.
+fn test_esc_all_escape_true_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_LOCAL)
+    let n1 = esc_add_node(g, ESC_LOCAL)
+    esc_mark_returned(g, n0)
+    esc_mark_global(g, n1)
+    esc_all_escape(g)
+}
+fn test_esc_all_escape_true() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_all_escape_true_inner(&! g)
+}
+
+// T20: esc_mark_returned on invalid id is a no-op (no panic).
+fn test_esc_mark_invalid_id_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    esc_mark_returned(g, ESC_INVALID)
+    esc_mark_returned(g, 9999)
+    g.node_count == 0
+}
+fn test_esc_mark_invalid_id() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_mark_invalid_id_inner(&! g)
+}
+
+// ============================================================================
+// Section 10: Tests — Category 3: Propagation (12 tests)
+// ============================================================================
+
+// T21: Local node not connected to any escaping node → stays local.
+fn test_esc_local_no_escape_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_LOCAL)
+    esc_propagate(g)
+    esc_node_escapes(g, n0) == false
+}
+fn test_esc_local_no_escape() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_local_no_escape_inner(&! g)
+}
+
+// T22: Node flowing into a returned node → escapes.
+fn test_esc_flow_to_returned_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_LOCAL)
+    let n1 = esc_add_node(g, ESC_LOCAL)
+    esc_add_edge(g, n0, n1, ESC_FLOW)
+    esc_mark_returned(g, n1)
+    esc_propagate(g)
+    esc_node_escapes(g, n0)
+}
+fn test_esc_flow_to_returned() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_flow_to_returned_inner(&! g)
+}
+
+// T23: Chain propagation: a→b→c, c escapes → all escape.
+fn test_esc_chain_propagation_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let na = esc_add_node(g, ESC_LOCAL)
+    let nb = esc_add_node(g, ESC_LOCAL)
+    let nc = esc_add_node(g, ESC_LOCAL)
+    esc_add_edge(g, na, nb, ESC_FLOW)
+    esc_add_edge(g, nb, nc, ESC_FLOW)
+    esc_mark_returned(g, nc)
+    esc_propagate(g)
+    esc_node_escapes(g, na) && esc_node_escapes(g, nb)
+}
+fn test_esc_chain_propagation() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_chain_propagation_inner(&! g)
+}
+
+// T24: Unconnected node is not affected by propagation.
+fn test_esc_isolated_stays_local_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_LOCAL)
+    let n1 = esc_add_node(g, ESC_LOCAL)
+    esc_mark_returned(g, n1)
+    esc_propagate(g)
+    esc_node_escapes(g, n0) == false
+}
+fn test_esc_isolated_stays_local() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_isolated_stays_local_inner(&! g)
+}
+
+// T25: ASSIGN edge propagates escape.
+fn test_esc_assign_propagation_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_LOCAL)
+    let n1 = esc_add_node(g, ESC_LOCAL)
+    esc_add_edge(g, n0, n1, ESC_ASSIGN)
+    esc_mark_global(g, n1)
+    esc_propagate(g)
+    esc_node_escapes(g, n0)
+}
+fn test_esc_assign_propagation() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_assign_propagation_inner(&! g)
+}
+
+// T26: DEREF edge propagates escape.
+fn test_esc_deref_propagation_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_LOCAL)
+    let n1 = esc_add_node(g, ESC_LOCAL)
+    esc_add_edge(g, n0, n1, ESC_DEREF)
+    esc_mark_ref(g, n1)
+    esc_propagate(g)
+    esc_node_escapes(g, n0)
+}
+fn test_esc_deref_propagation() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_deref_propagation_inner(&! g)
+}
+
+// T27: Multiple predecessors: at least one edge to escaping → escapes.
+fn test_esc_multi_pred_escapes_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_LOCAL)
+    let n1 = esc_add_node(g, ESC_LOCAL)
+    let n2 = esc_add_node(g, ESC_LOCAL)
+    esc_add_edge(g, n0, n2, ESC_FLOW)
+    esc_add_edge(g, n1, n2, ESC_FLOW)
+    esc_mark_returned(g, n2)
+    esc_propagate(g)
+    esc_node_escapes(g, n0) && esc_node_escapes(g, n1)
+}
+fn test_esc_multi_pred_escapes() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_multi_pred_escapes_inner(&! g)
+}
+
+// T28: Node flowing into local node doesn't escape.
+fn test_esc_flow_to_local_no_escape_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_LOCAL)
+    let n1 = esc_add_node(g, ESC_LOCAL)
+    esc_add_edge(g, n0, n1, ESC_FLOW)
+    esc_propagate(g)
+    esc_node_escapes(g, n0) == false
+}
+fn test_esc_flow_to_local_no_escape() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_flow_to_local_no_escape_inner(&! g)
+}
+
+// T29: Propagation terminates on empty graph.
+fn test_esc_propagate_empty() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    esc_propagate(&! g)
+    g.node_count == 0
+}
+
+// T30: esc_count_reason counts correctly after propagation.
+fn test_esc_count_reason_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_LOCAL)
+    let n1 = esc_add_node(g, ESC_LOCAL)
+    let n2 = esc_add_node(g, ESC_LOCAL)
+    esc_mark_returned(g, n0)
+    esc_mark_global(g, n1)
+    esc_propagate(g)
+    esc_count_reason(g, ESC_RETURNED) == 1 && esc_count_reason(g, ESC_STORED_GLOBAL) == 1 && esc_count_reason(g, ESC_NONE) == 1
+}
+fn test_esc_count_reason() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_count_reason_inner(&! g)
+}
+
+// T31: Propagation of reason through chain.
+fn test_esc_reason_propagates_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_LOCAL)
+    let n1 = esc_add_node(g, ESC_LOCAL)
+    esc_add_edge(g, n0, n1, ESC_FLOW)
+    esc_mark_returned(g, n1)
+    esc_propagate(g)
+    esc_node_reason(g, n0) == ESC_RETURNED
+}
+fn test_esc_reason_propagates() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_reason_propagates_inner(&! g)
+}
+
+// T32: esc_propagate_step returns delta count.
+fn test_esc_propagate_step_delta_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_LOCAL)
+    let n1 = esc_add_node(g, ESC_LOCAL)
+    esc_add_edge(g, n0, n1, ESC_FLOW)
+    esc_mark_returned(g, n1)
+    let delta = esc_propagate_step(g)
+    delta == 1
+}
+fn test_esc_propagate_step_delta() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_propagate_step_delta_inner(&! g)
+}
+
+// ============================================================================
+// Section 11: Tests — Category 4: esc_analyze Summary (10 tests)
+// ============================================================================
+
+// T33: esc_analyze on empty graph returns zero counts.
+fn test_esc_analyze_empty() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    let r = esc_analyze(&! g)
+    r.escape_count == 0 && r.local_count == 0
+}
+
+// T34: All local nodes → escape_count=0.
+fn test_esc_analyze_all_local_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_LOCAL)
+    let n1 = esc_add_node(g, ESC_LOCAL)
+    let r = esc_analyze(g)
+    r.escape_count == 0 && r.local_count == 2
+}
+fn test_esc_analyze_all_local() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_analyze_all_local_inner(&! g)
+}
+
+// T35: One returned node → escape_count=1.
+fn test_esc_analyze_one_returned_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_LOCAL)
+    let n1 = esc_add_node(g, ESC_LOCAL)
+    esc_mark_returned(g, n0)
+    let r = esc_analyze(g)
+    r.escape_count == 1 && r.local_count == 1
+}
+fn test_esc_analyze_one_returned() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_analyze_one_returned_inner(&! g)
+}
+
+// T36: Propagated escape is counted.
+fn test_esc_analyze_propagated_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_LOCAL)
+    let n1 = esc_add_node(g, ESC_LOCAL)
+    esc_add_edge(g, n0, n1, ESC_FLOW)
+    esc_mark_returned(g, n1)
+    let r = esc_analyze(g)
+    r.escape_count == 2 && r.local_count == 0
+}
+fn test_esc_analyze_propagated() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_analyze_propagated_inner(&! g)
+}
+
+// T37: Local alloc not returned → doesn't escape.
+fn test_esc_analyze_local_alloc_no_escape_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let alloc = esc_add_node(g, ESC_LOCAL)
+    let n1 = esc_add_node(g, ESC_LOCAL)
+    esc_mark_returned(g, n1)
+    let r = esc_analyze(g)
+    esc_node_escapes(g, alloc) == false
+}
+fn test_esc_analyze_local_alloc_no_escape() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_analyze_local_alloc_no_escape_inner(&! g)
+}
+
+// T38: Returned node escape count.
+fn test_esc_analyze_returned_count_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_LOCAL)
+    let n1 = esc_add_node(g, ESC_LOCAL)
+    let n2 = esc_add_node(g, ESC_LOCAL)
+    esc_mark_returned(g, n0)
+    esc_mark_returned(g, n1)
+    let r = esc_analyze(g)
+    r.escape_count == 2 && r.local_count == 1
+}
+fn test_esc_analyze_returned_count() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_analyze_returned_count_inner(&! g)
+}
+
+// T39: Global escape is counted.
+fn test_esc_analyze_global_escape_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_LOCAL)
+    esc_mark_global(g, n0)
+    let r = esc_analyze(g)
+    r.escape_count == 1
+}
+fn test_esc_analyze_global_escape() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_analyze_global_escape_inner(&! g)
+}
+
+// T40: Mixed: global + returned + local.
+fn test_esc_analyze_mixed_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_LOCAL)
+    let n1 = esc_add_node(g, ESC_LOCAL)
+    let n2 = esc_add_node(g, ESC_LOCAL)
+    esc_mark_global(g, n0)
+    esc_mark_returned(g, n1)
+    let r = esc_analyze(g)
+    r.escape_count == 2 && r.local_count == 1
+}
+fn test_esc_analyze_mixed() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_analyze_mixed_inner(&! g)
+}
+
+// T41: Ref-passed escape is counted.
+fn test_esc_analyze_ref_escape_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_LOCAL)
+    esc_mark_ref(g, n0)
+    let r = esc_analyze(g)
+    r.escape_count == 1
+}
+fn test_esc_analyze_ref_escape() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_analyze_ref_escape_inner(&! g)
+}
+
+// T42: Single node, not returned → local_count=1.
+fn test_esc_analyze_single_local_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_LOCAL)
+    let r = esc_analyze(g)
+    r.local_count == 1 && r.escape_count == 0
+}
+fn test_esc_analyze_single_local() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_analyze_single_local_inner(&! g)
+}
+
+// ============================================================================
+// Section 12: Tests — Category 5: Edge Cases and Robustness (13 tests)
+// ============================================================================
+
+// T43: esc_node_escapes on invalid id returns false.
+fn test_esc_escapes_invalid_id() -> bool {
+    let g = esc_graph_new()
+    let r = esc_node_escapes(&g, ESC_INVALID)
+    r == false
+}
+
+// T44: esc_node_reason on invalid id returns ESC_NONE.
+fn test_esc_reason_invalid_id() -> bool {
+    let g = esc_graph_new()
+    let r = esc_node_reason(&g, 999)
+    r == ESC_NONE
+}
+
+// T45: esc_node_kind on invalid id returns ESC_INVALID.
+fn test_esc_kind_invalid_id() -> bool {
+    let g = esc_graph_new()
+    let r = esc_node_kind(&g, ESC_INVALID)
+    r == ESC_INVALID
+}
+
+// T46: esc_out_degree on node with no edges = 0.
+fn test_esc_out_degree_zero_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_LOCAL)
+    esc_out_degree(g, n0) == 0
+}
+fn test_esc_out_degree_zero() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_out_degree_zero_inner(&! g)
+}
+
+// T47: esc_in_degree on node with no edges = 0.
+fn test_esc_in_degree_zero_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_LOCAL)
+    esc_in_degree(g, n0) == 0
+}
+fn test_esc_in_degree_zero() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_in_degree_zero_inner(&! g)
+}
+
+// T48: Two separate chains don't interfere.
+fn test_esc_two_chains_independent_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let a0 = esc_add_node(g, ESC_LOCAL)
+    let a1 = esc_add_node(g, ESC_LOCAL)
+    let b0 = esc_add_node(g, ESC_LOCAL)
+    let b1 = esc_add_node(g, ESC_LOCAL)
+    esc_add_edge(g, a0, a1, ESC_FLOW)
+    esc_add_edge(g, b0, b1, ESC_FLOW)
+    esc_mark_returned(g, a1)
+    esc_propagate(g)
+    esc_node_escapes(g, a0) && esc_node_escapes(g, b0) == false
+}
+fn test_esc_two_chains_independent() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_two_chains_independent_inner(&! g)
+}
+
+// T49: ESC_FIELD kind nodes behave normally.
+fn test_esc_field_kind_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_FIELD)
+    esc_node_kind(g, n0) == ESC_FIELD
+}
+fn test_esc_field_kind() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_field_kind_inner(&! g)
+}
+
+// T50: esc_count_kind for FIELD kind.
+fn test_esc_count_field_kind_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_FIELD)
+    let n1 = esc_add_node(g, ESC_LOCAL)
+    let n2 = esc_add_node(g, ESC_FIELD)
+    esc_count_kind(g, ESC_FIELD) == 2
+}
+fn test_esc_count_field_kind() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_count_field_kind_inner(&! g)
+}
+
+// T51: Single propagate step on already-escaped node does nothing (delta=0).
+fn test_esc_propagate_step_idempotent_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_LOCAL)
+    let n1 = esc_add_node(g, ESC_LOCAL)
+    esc_add_edge(g, n0, n1, ESC_FLOW)
+    esc_mark_returned(g, n1)
+    let d1 = esc_propagate_step(g)
+    let d2 = esc_propagate_step(g)
+    d1 == 1 && d2 == 0
+}
+fn test_esc_propagate_step_idempotent() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_propagate_step_idempotent_inner(&! g)
+}
+
+// T52: Multiple edge kinds from same source.
+fn test_esc_multiple_edge_kinds_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_LOCAL)
+    let n1 = esc_add_node(g, ESC_LOCAL)
+    esc_add_edge(g, n0, n1, ESC_FLOW)
+    esc_add_edge(g, n0, n1, ESC_DEREF)
+    esc_add_edge(g, n0, n1, ESC_ASSIGN)
+    esc_out_degree(g, n0) == 3
+}
+fn test_esc_multiple_edge_kinds() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_multiple_edge_kinds_inner(&! g)
+}
+
+// T53: esc_all_escape on empty graph returns false.
+fn test_esc_all_escape_empty() -> bool {
+    let g = esc_graph_new()
+    esc_all_escape(&g) == false
+}
+
+// T54: mark global then check reason.
+fn test_esc_global_reason_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_LOCAL)
+    esc_mark_global(g, n0)
+    esc_node_reason(g, n0) == ESC_STORED_GLOBAL
+}
+fn test_esc_global_reason() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_global_reason_inner(&! g)
+}
+
+// T55: mark ref then check reason.
+fn test_esc_ref_reason_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_LOCAL)
+    esc_mark_ref(g, n0)
+    esc_node_reason(g, n0) == ESC_PASSED_REF
+}
+fn test_esc_ref_reason() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_ref_reason_inner(&! g)
+}
+
+// ============================================================================
+// Section 13: Tests — Category 6: Integration Scenarios (10 tests)
+// ============================================================================
+
+// T56: Scenario: local alloc only used locally → doesn't escape.
+fn test_esc_scenario_local_only_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let alloc = esc_add_node(g, ESC_LOCAL)
+    let use1 = esc_add_node(g, ESC_LOCAL)
+    let use2 = esc_add_node(g, ESC_LOCAL)
+    let ret = esc_add_node(g, ESC_RETURN)
+    esc_add_edge(g, alloc, use1, ESC_FLOW)
+    esc_add_edge(g, alloc, use2, ESC_FLOW)
+    esc_mark_returned(g, ret)
+    esc_propagate(g)
+    esc_node_escapes(g, alloc) == false
+}
+fn test_esc_scenario_local_only() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_scenario_local_only_inner(&! g)
+}
+
+// T57: Scenario: alloc returned directly → escapes.
+fn test_esc_scenario_alloc_returned_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let alloc = esc_add_node(g, ESC_LOCAL)
+    esc_mark_returned(g, alloc)
+    esc_propagate(g)
+    esc_node_escapes(g, alloc)
+}
+fn test_esc_scenario_alloc_returned() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_scenario_alloc_returned_inner(&! g)
+}
+
+// T58: Scenario: alloc stored in global → escapes.
+fn test_esc_scenario_stored_global_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let alloc = esc_add_node(g, ESC_LOCAL)
+    esc_mark_global(g, alloc)
+    let r = esc_analyze(g)
+    r.escape_count == 1
+}
+fn test_esc_scenario_stored_global() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_scenario_stored_global_inner(&! g)
+}
+
+// T59: Scenario: alloc passed as ref → escapes.
+fn test_esc_scenario_passed_ref_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let alloc = esc_add_node(g, ESC_LOCAL)
+    esc_mark_ref(g, alloc)
+    let r = esc_analyze(g)
+    r.escape_count == 1
+}
+fn test_esc_scenario_passed_ref() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_scenario_passed_ref_inner(&! g)
+}
+
+// T60: Scenario: two allocs, one escapes via flow, one doesn't.
+fn test_esc_scenario_two_allocs_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let a0 = esc_add_node(g, ESC_LOCAL)
+    let a1 = esc_add_node(g, ESC_LOCAL)
+    let ret = esc_add_node(g, ESC_RETURN)
+    esc_add_edge(g, a0, ret, ESC_FLOW)
+    esc_mark_returned(g, ret)
+    esc_propagate(g)
+    esc_node_escapes(g, a0) && (esc_node_escapes(g, a1) == false)
+}
+fn test_esc_scenario_two_allocs() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_scenario_two_allocs_inner(&! g)
+}
+
+// T61: Scenario: indirect escape through intermediate.
+fn test_esc_scenario_indirect_escape_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let alloc = esc_add_node(g, ESC_LOCAL)
+    let mid = esc_add_node(g, ESC_LOCAL)
+    let ret = esc_add_node(g, ESC_RETURN)
+    esc_add_edge(g, alloc, mid, ESC_FLOW)
+    esc_add_edge(g, mid, ret, ESC_FLOW)
+    esc_mark_returned(g, ret)
+    esc_propagate(g)
+    esc_node_escapes(g, alloc) && esc_node_escapes(g, mid)
+}
+fn test_esc_scenario_indirect_escape() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_scenario_indirect_escape_inner(&! g)
+}
+
+// T62: Scenario: param node always escapes (it came from caller).
+fn test_esc_scenario_param_escapes_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let param = esc_add_node(g, ESC_PARAM)
+    esc_mark_returned(g, param)
+    esc_propagate(g)
+    esc_node_escapes(g, param)
+}
+fn test_esc_scenario_param_escapes() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_scenario_param_escapes_inner(&! g)
+}
+
+// T63: Scenario: graph with 5 nodes, 4 edges, one escape root.
+fn test_esc_scenario_five_node_chain_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_LOCAL)
+    let n1 = esc_add_node(g, ESC_LOCAL)
+    let n2 = esc_add_node(g, ESC_LOCAL)
+    let n3 = esc_add_node(g, ESC_LOCAL)
+    let n4 = esc_add_node(g, ESC_RETURN)
+    esc_add_edge(g, n0, n1, ESC_FLOW)
+    esc_add_edge(g, n1, n2, ESC_FLOW)
+    esc_add_edge(g, n2, n3, ESC_FLOW)
+    esc_add_edge(g, n3, n4, ESC_FLOW)
+    esc_mark_returned(g, n4)
+    let r = esc_analyze(g)
+    r.escape_count == 5 && r.local_count == 0
+}
+fn test_esc_scenario_five_node_chain() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_scenario_five_node_chain_inner(&! g)
+}
+
+// T64: Scenario: diamond graph, only top escapes if bottom escapes.
+fn test_esc_scenario_diamond_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let top = esc_add_node(g, ESC_LOCAL)
+    let left = esc_add_node(g, ESC_LOCAL)
+    let right = esc_add_node(g, ESC_LOCAL)
+    let bot = esc_add_node(g, ESC_LOCAL)
+    esc_add_edge(g, top, left, ESC_FLOW)
+    esc_add_edge(g, top, right, ESC_FLOW)
+    esc_add_edge(g, left, bot, ESC_FLOW)
+    esc_add_edge(g, right, bot, ESC_FLOW)
+    esc_mark_returned(g, bot)
+    let r = esc_analyze(g)
+    r.escape_count == 4
+}
+fn test_esc_scenario_diamond() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_scenario_diamond_inner(&! g)
+}
+
+// T65: Scenario: count escaping by reason across multiple roots.
+fn test_esc_scenario_multi_reason_inner(g: &! EscGraph) -> bool with Mut, Div, Panic {
+    let n0 = esc_add_node(g, ESC_LOCAL)
+    let n1 = esc_add_node(g, ESC_LOCAL)
+    let n2 = esc_add_node(g, ESC_LOCAL)
+    let n3 = esc_add_node(g, ESC_LOCAL)
+    esc_mark_returned(g, n0)
+    esc_mark_global(g, n1)
+    esc_mark_ref(g, n2)
+    esc_propagate(g)
+    let rr = esc_count_reason(g, ESC_RETURNED)
+    let rg = esc_count_reason(g, ESC_STORED_GLOBAL)
+    let rp = esc_count_reason(g, ESC_PASSED_REF)
+    rr == 1 && rg == 1 && rp == 1
+}
+fn test_esc_scenario_multi_reason() -> bool with Mut, Div, Panic {
+    var g = esc_graph_new()
+    test_esc_scenario_multi_reason_inner(&! g)
+}
+
+// ============================================================================
+// Section 15: Test Runner
+// ============================================================================
+
+fn esc_run_tests() -> i64 with Mut, Div, Panic {
+    var passed: i64 = 0
+    var failed: i64 = 0
+
+    // Category 1: Construction (10)
+    if test_esc_empty_graph() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_add_node_ids() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_add_node_not_escaping() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_add_edge_count() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_has_edge() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_no_edge() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_out_degree() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_in_degree() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_node_kind() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_count_kind() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 2: Escape Marking (10)
+    if test_esc_mark_returned() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_mark_global() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_mark_ref() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_fresh_not_escaping() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_fresh_reason_none() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_any_escapes_false() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_any_escapes_true() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_all_escape_false() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_all_escape_true() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_mark_invalid_id() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 3: Propagation (12)
+    if test_esc_local_no_escape() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_flow_to_returned() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_chain_propagation() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_isolated_stays_local() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_assign_propagation() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_deref_propagation() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_multi_pred_escapes() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_flow_to_local_no_escape() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_propagate_empty() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_count_reason() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_reason_propagates() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_propagate_step_delta() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 4: esc_analyze Summary (10)
+    if test_esc_analyze_empty() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_analyze_all_local() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_analyze_one_returned() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_analyze_propagated() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_analyze_local_alloc_no_escape() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_analyze_returned_count() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_analyze_global_escape() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_analyze_mixed() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_analyze_ref_escape() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_analyze_single_local() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 5: Edge Cases (13)
+    if test_esc_escapes_invalid_id() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_reason_invalid_id() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_kind_invalid_id() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_out_degree_zero() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_in_degree_zero() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_two_chains_independent() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_field_kind() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_count_field_kind() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_propagate_step_idempotent() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_multiple_edge_kinds() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_all_escape_empty() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_global_reason() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_ref_reason() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 6: Integration (10)
+    if test_esc_scenario_local_only() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_scenario_alloc_returned() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_scenario_stored_global() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_scenario_passed_ref() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_scenario_two_allocs() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_scenario_indirect_escape() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_scenario_param_escapes() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_scenario_five_node_chain() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_scenario_diamond() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_esc_scenario_multi_reason() { passed = passed + 1 } else { failed = failed + 1 }
+
+    if failed > 0 { return 0 - failed }
+    passed
+}

@@ -1,0 +1,1219 @@
+// self-hosted::ir::alias_analysis — Alias Analysis for IR
+//
+// Determines whether two memory accesses can refer to the same memory
+// location (aliasing). Implements a conservative flow-insensitive alias
+// analysis with the following strategies:
+//
+//   1. Kind-based separation: stack / heap / global / unknown locations
+//      are tracked by their allocation kind.  Two pointers with
+//      incompatible kinds (e.g., stack vs. heap) cannot alias.
+//   2. Base + offset + size range overlap: for same-kind stack or heap
+//      allocations, we check if the byte ranges [offset, offset+size)
+//      overlap.  Non-overlapping ranges → no alias.
+//   3. Unique base IDs: heap and global allocations carry a unique integer
+//      base ID.  Different base IDs → no alias.
+//   4. Unknown pointers alias everything (conservative soundness).
+//   5. AaSet tracks a set of pointers for batch queries.
+//   6. AaContext holds up to 64 sets.
+//
+// All arrays are fixed-size — no heap allocation.
+//
+// References:
+//   Landi & Ryder: "A Safe Approximate Algorithm for Interprocedural
+//                   Pointer Aliasing" (PLDI 1992)
+//   Hind: "Pointer Analysis: Haven't We Solved This Problem Yet?" (PASTE 2001)
+//   Muchnick: "Advanced Compiler Design and Implementation" (1997), Ch. 7
+
+// ============================================================================
+// Section 1: Constants
+// ============================================================================
+
+let AA_STACK: i64 = 0
+let AA_HEAP: i64 = 1
+let AA_GLOBAL: i64 = 2
+let AA_UNKNOWN: i64 = 3
+
+let AA_MAX_SET_PTRS: i64 = 128
+let AA_MAX_SETS: i64 = 64
+let AA_INVALID: i64 = 0 - 1
+
+// ============================================================================
+// Section 2: Data Structures
+// ============================================================================
+
+// An abstract pointer: base allocation id, byte offset, size, and kind.
+// For stack pointers, base encodes the stack-frame slot id.
+// For heap/global pointers, base encodes the unique allocation id.
+// For unknown pointers, base is AA_INVALID.
+struct AaPtr {
+    base: i64,
+    offset: i64,
+    size: i64,
+    kind: i64,
+}
+
+// A single memory access: a pointer plus read/write direction and source location.
+struct AaAccess {
+    ptr: AaPtr,
+    is_write: bool,
+    loc: i64,
+}
+
+// A named set of pointers for may-alias batch queries.
+struct AaSet {
+    ptrs: [AaPtr; 128],
+    count: i64,
+    id: i64,
+}
+
+// Result of an alias query between two accesses.
+struct AaResult {
+    may_alias: bool,
+    must_alias: bool,
+}
+
+// Analysis context: holds all named pointer sets.
+struct AaContext {
+    sets: [AaSet; 64],
+    count: i64,
+}
+
+// ============================================================================
+// Section 3: AaPtr Constructors
+// ============================================================================
+
+// Create a stack pointer: base = stack slot id, offset and size in bytes.
+fn aa_ptr_stack(offset: i64, size: i64) -> AaPtr {
+    AaPtr {
+        base: 0,
+        offset: offset,
+        size: size,
+        kind: AA_STACK,
+    }
+}
+
+// Create a stack pointer with an explicit slot id.
+fn aa_ptr_stack_slot(slot: i64, offset: i64, size: i64) -> AaPtr {
+    AaPtr {
+        base: slot,
+        offset: offset,
+        size: size,
+        kind: AA_STACK,
+    }
+}
+
+// Create a heap pointer: base = unique allocation id.
+fn aa_ptr_heap(id: i64, size: i64) -> AaPtr {
+    AaPtr {
+        base: id,
+        offset: 0,
+        size: size,
+        kind: AA_HEAP,
+    }
+}
+
+// Create a heap pointer with a byte offset into the allocation.
+fn aa_ptr_heap_offset(id: i64, offset: i64, size: i64) -> AaPtr {
+    AaPtr {
+        base: id,
+        offset: offset,
+        size: size,
+        kind: AA_HEAP,
+    }
+}
+
+// Create a global pointer: base = global variable id.
+fn aa_ptr_global(id: i64, size: i64) -> AaPtr {
+    AaPtr {
+        base: id,
+        offset: 0,
+        size: size,
+        kind: AA_GLOBAL,
+    }
+}
+
+// Create a global pointer with an offset (e.g. field access into a global struct).
+fn aa_ptr_global_offset(id: i64, offset: i64, size: i64) -> AaPtr {
+    AaPtr {
+        base: id,
+        offset: offset,
+        size: size,
+        kind: AA_GLOBAL,
+    }
+}
+
+// Create an unknown pointer: aliases everything.
+fn aa_ptr_unknown() -> AaPtr {
+    AaPtr {
+        base: AA_INVALID,
+        offset: 0,
+        size: 0,
+        kind: AA_UNKNOWN,
+    }
+}
+
+// Create an AaAccess wrapping a pointer.
+fn aa_access_new(ptr: AaPtr, is_write: bool, loc: i64) -> AaAccess {
+    AaAccess {
+        ptr: ptr,
+        is_write: is_write,
+        loc: loc,
+    }
+}
+
+// Create an AaResult.
+fn aa_result_new(may: bool, must: bool) -> AaResult {
+    AaResult {
+        may_alias: may,
+        must_alias: must,
+    }
+}
+
+// ============================================================================
+// Section 4: AaSet Operations
+// ============================================================================
+
+// Create an empty named pointer set.
+fn aa_set_new(id: i64) -> AaSet {
+    AaSet {
+        ptrs: [aa_ptr_unknown(); 128],
+        count: 0,
+        id: id,
+    }
+}
+
+// Create an AaContext with no sets.
+fn aa_context_new() -> AaContext {
+    AaContext {
+        sets: [aa_set_new(0); 64],
+        count: 0,
+    }
+}
+
+// Add a pointer to an AaSet.  Returns true if added, false if full.
+fn aa_set_add(s: &! AaSet, p: AaPtr) -> bool with Mut, Panic {
+    if s.count >= AA_MAX_SET_PTRS {
+        return false
+    }
+    s.ptrs[s.count as usize] = p
+    s.count = s.count + 1
+    true
+}
+
+// Get the pointer at index i from a set (returns unknown ptr if out of range).
+fn aa_set_get(s: &AaSet, i: i64) -> AaPtr {
+    if i < 0 { return aa_ptr_unknown() }
+    if i >= s.count { return aa_ptr_unknown() }
+    s.ptrs[i as usize]
+}
+
+// Add a new named set to the context and return its index.
+fn aa_context_add_set(ctx: &! AaContext, id: i64) -> i64 with Mut, Panic {
+    if ctx.count >= AA_MAX_SETS {
+        return AA_INVALID
+    }
+    let idx = ctx.count
+    ctx.sets[idx as usize] = aa_set_new(id)
+    ctx.count = ctx.count + 1
+    idx
+}
+
+// Get the set at index i (returns empty set if out of range).
+fn aa_context_get_set(ctx: &AaContext, i: i64) -> AaSet {
+    if i < 0 { return aa_set_new(AA_INVALID) }
+    if i >= ctx.count { return aa_set_new(AA_INVALID) }
+    ctx.sets[i as usize]
+}
+
+// ============================================================================
+// Section 5: Range Overlap
+// ============================================================================
+
+// Check if byte ranges [off1, off1+sz1) and [off2, off2+sz2) overlap.
+// Returns true when they share at least one byte.
+fn aa_ranges_overlap(off1: i64, sz1: i64, off2: i64, sz2: i64) -> bool {
+    // Zero-size accesses cannot overlap with anything.
+    if sz1 <= 0 { return false }
+    if sz2 <= 0 { return false }
+    // Overlap iff NOT (one ends before the other starts).
+    let end1 = off1 + sz1
+    let end2 = off2 + sz2
+    // No overlap: range1 ends at or before range2 starts, or vice versa.
+    if end1 <= off2 { return false }
+    if end2 <= off1 { return false }
+    true
+}
+
+// Compute overlap size (0 if no overlap).
+fn aa_overlap_size(off1: i64, sz1: i64, off2: i64, sz2: i64) -> i64 {
+    if sz1 <= 0 { return 0 }
+    if sz2 <= 0 { return 0 }
+    let end1 = off1 + sz1
+    let end2 = off2 + sz2
+    // Overlap start = max(off1, off2), overlap end = min(end1, end2)
+    var ostart = off1
+    if off2 > ostart { ostart = off2 }
+    var oend = end1
+    if end2 < oend { oend = end2 }
+    if oend <= ostart { return 0 }
+    oend - ostart
+}
+
+// ============================================================================
+// Section 6: Core Alias Predicates
+// ============================================================================
+
+// Check if two pointers may alias (conservative — unknown → yes).
+// Implements the following rules:
+//   1. If either is UNKNOWN → may alias.
+//   2. If kinds differ → no alias (stack ≠ heap ≠ global).
+//   3. For STACK: different base slots → no alias; same slot → range overlap.
+//   4. For HEAP/GLOBAL: different base IDs → no alias; same base → range overlap.
+fn aa_may_alias(a: &AaPtr, b: &AaPtr) -> bool {
+    // Rule 1: unknown pointers alias everything.
+    if a.kind == AA_UNKNOWN { return true }
+    if b.kind == AA_UNKNOWN { return true }
+    // Rule 2: incompatible kinds do not alias.
+    if a.kind != b.kind { return false }
+    // Same kind: check base IDs.
+    if a.base != b.base { return false }
+    // Same base: check byte-range overlap.
+    aa_ranges_overlap(a.offset, a.size, b.offset, b.size)
+}
+
+// Check if two pointers must alias (definitely the same location).
+// Must alias: same kind, same base, same offset, same size, and both non-unknown.
+fn aa_must_alias(a: &AaPtr, b: &AaPtr) -> bool {
+    if a.kind == AA_UNKNOWN { return false }
+    if b.kind == AA_UNKNOWN { return false }
+    if a.kind != b.kind { return false }
+    if a.base != b.base { return false }
+    if a.offset != b.offset { return false }
+    if a.size != b.size { return false }
+    true
+}
+
+// No alias: the complement of may-alias.
+fn aa_no_alias(a: &AaPtr, b: &AaPtr) -> bool {
+    let ma = aa_may_alias(a, b)
+    ma == false
+}
+
+// Check if two pointers definitely access disjoint byte ranges.
+// Requires: same kind, same base, no range overlap.
+fn aa_disjoint(a: &AaPtr, b: &AaPtr) -> bool {
+    if a.kind == AA_UNKNOWN { return false }
+    if b.kind == AA_UNKNOWN { return false }
+    if a.kind != b.kind { return true }
+    if a.base != b.base { return true }
+    let ov = aa_ranges_overlap(a.offset, a.size, b.offset, b.size)
+    ov == false
+}
+
+// ============================================================================
+// Section 7: Access-Level Alias Check
+// ============================================================================
+
+// Check whether two memory accesses can alias.
+// Two read accesses to the same location still count as may-alias (they share
+// the location), but they do not cause conflicts.
+// Returns AaResult { may_alias, must_alias }.
+fn aa_check(ctx: &AaContext, acc1: &AaAccess, acc2: &AaAccess) -> AaResult {
+    let may = aa_may_alias(&acc1.ptr, &acc2.ptr)
+    let must = aa_must_alias(&acc1.ptr, &acc2.ptr)
+    AaResult {
+        may_alias: may,
+        must_alias: must,
+    }
+}
+
+// Check if two accesses create a read-write conflict (one writes, both may alias).
+fn aa_is_conflict(acc1: &AaAccess, acc2: &AaAccess) -> bool {
+    if aa_may_alias(&acc1.ptr, &acc2.ptr) == false { return false }
+    // Conflict if at least one is a write.
+    acc1.is_write || acc2.is_write
+}
+
+// Check if two accesses are write-write conflicts.
+fn aa_is_write_write(acc1: &AaAccess, acc2: &AaAccess) -> bool {
+    if aa_may_alias(&acc1.ptr, &acc2.ptr) == false { return false }
+    acc1.is_write && acc2.is_write
+}
+
+// ============================================================================
+// Section 8: Set-Level Alias Queries
+// ============================================================================
+
+// Check if any pointer in a set may alias with a given pointer.
+fn aa_set_may_alias_any(s: &AaSet, p: &AaPtr) -> bool {
+    var i: i64 = 0
+    while i < s.count {
+        let q = s.ptrs[i as usize]
+        if aa_may_alias(&q, p) { return true }
+        i = i + 1
+    }
+    false
+}
+
+// Count how many pointers in a set may alias with a given pointer.
+fn aa_set_alias_count(s: &AaSet, p: &AaPtr) -> i64 {
+    var cnt: i64 = 0
+    var i: i64 = 0
+    while i < s.count {
+        let q = s.ptrs[i as usize]
+        if aa_may_alias(&q, p) { cnt = cnt + 1 }
+        i = i + 1
+    }
+    cnt
+}
+
+// Check if any pointer in set A may alias any pointer in set B.
+fn aa_sets_may_alias(a: &AaSet, b: &AaSet) -> bool {
+    var i: i64 = 0
+    while i < a.count {
+        let p = a.ptrs[i as usize]
+        var j: i64 = 0
+        while j < b.count {
+            let q = b.ptrs[j as usize]
+            if aa_may_alias(&p, &q) { return true }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Count the number of aliasing pairs between two sets.
+fn aa_sets_alias_pairs(a: &AaSet, b: &AaSet) -> i64 {
+    var cnt: i64 = 0
+    var i: i64 = 0
+    while i < a.count {
+        let p = a.ptrs[i as usize]
+        var j: i64 = 0
+        while j < b.count {
+            let q = b.ptrs[j as usize]
+            if aa_may_alias(&p, &q) { cnt = cnt + 1 }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    cnt
+}
+
+// Check if two pointers in the same set must alias (for all pairs).
+fn aa_set_all_must_alias(s: &AaSet) -> bool {
+    if s.count <= 1 { return true }
+    let first = s.ptrs[0]
+    var i: i64 = 1
+    while i < s.count {
+        let q = s.ptrs[i as usize]
+        if aa_must_alias(&first, &q) == false { return false }
+        i = i + 1
+    }
+    true
+}
+
+// ============================================================================
+// Section 9: Utility Functions
+// ============================================================================
+
+// Advance a pointer by adding delta to its offset.
+fn aa_ptr_offset_by(p: AaPtr, delta: i64) -> AaPtr {
+    AaPtr {
+        base: p.base,
+        offset: p.offset + delta,
+        size: p.size,
+        kind: p.kind,
+    }
+}
+
+// Narrow a pointer's size (for a sub-range access).
+fn aa_ptr_narrow(p: AaPtr, new_size: i64) -> AaPtr {
+    AaPtr {
+        base: p.base,
+        offset: p.offset,
+        size: new_size,
+        kind: p.kind,
+    }
+}
+
+// Return a pointer kind as an integer (for comparison in tests).
+fn aa_ptr_kind(p: &AaPtr) -> i64 {
+    p.kind
+}
+
+// Check if a pointer is stack-allocated.
+fn aa_is_stack(p: &AaPtr) -> bool {
+    p.kind == AA_STACK
+}
+
+// Check if a pointer is heap-allocated.
+fn aa_is_heap(p: &AaPtr) -> bool {
+    p.kind == AA_HEAP
+}
+
+// Check if a pointer is global.
+fn aa_is_global(p: &AaPtr) -> bool {
+    p.kind == AA_GLOBAL
+}
+
+// Check if a pointer is unknown.
+fn aa_is_unknown(p: &AaPtr) -> bool {
+    p.kind == AA_UNKNOWN
+}
+
+// Return the base id of a pointer.
+fn aa_ptr_base(p: &AaPtr) -> i64 {
+    p.base
+}
+
+// Return the offset of a pointer.
+fn aa_ptr_offset(p: &AaPtr) -> i64 {
+    p.offset
+}
+
+// Return the size of a pointer.
+fn aa_ptr_size(p: &AaPtr) -> i64 {
+    p.size
+}
+
+// ============================================================================
+// Section 10: Tests — Category 1: Basic Construction (10 tests)
+// ============================================================================
+
+// T01: Stack pointer constructor sets correct kind.
+fn test_aa_stack_kind() -> bool {
+    let p = aa_ptr_stack(0, 8)
+    p.kind == AA_STACK
+}
+
+// T02: Heap pointer constructor sets correct kind.
+fn test_aa_heap_kind() -> bool {
+    let p = aa_ptr_heap(1, 16)
+    p.kind == AA_HEAP
+}
+
+// T03: Global pointer constructor sets correct kind.
+fn test_aa_global_kind() -> bool {
+    let p = aa_ptr_global(2, 4)
+    p.kind == AA_GLOBAL
+}
+
+// T04: Unknown pointer constructor sets correct kind.
+fn test_aa_unknown_kind() -> bool {
+    let p = aa_ptr_unknown()
+    p.kind == AA_UNKNOWN
+}
+
+// T05: Stack pointer carries offset.
+fn test_aa_stack_offset() -> bool {
+    let p = aa_ptr_stack(24, 8)
+    p.offset == 24 && p.size == 8
+}
+
+// T06: Heap pointer carries id and size.
+fn test_aa_heap_id_size() -> bool {
+    let p = aa_ptr_heap(42, 32)
+    p.base == 42 && p.size == 32
+}
+
+// T07: Global pointer carries id.
+fn test_aa_global_id() -> bool {
+    let p = aa_ptr_global(7, 64)
+    p.base == 7
+}
+
+// T08: Unknown pointer has AA_INVALID base.
+fn test_aa_unknown_base() -> bool {
+    let p = aa_ptr_unknown()
+    p.base == AA_INVALID
+}
+
+// T09: aa_context_new creates empty context.
+fn test_aa_context_new() -> bool {
+    let ctx = aa_context_new()
+    ctx.count == 0
+}
+
+// T10: aa_set_new creates empty set with given id.
+fn test_aa_set_new() -> bool {
+    let s = aa_set_new(99)
+    s.count == 0 && s.id == 99
+}
+
+// ============================================================================
+// Section 11: Tests — Category 2: Range Overlap (10 tests)
+// ============================================================================
+
+// T11: Non-overlapping ranges (a before b) → false.
+fn test_aa_ranges_no_overlap_before() -> bool {
+    let r = aa_ranges_overlap(0, 8, 8, 8)
+    r == false
+}
+
+// T12: Non-overlapping ranges (b before a) → false.
+fn test_aa_ranges_no_overlap_after() -> bool {
+    let r = aa_ranges_overlap(16, 8, 0, 8)
+    r == false
+}
+
+// T13: Exact adjacent ranges → no overlap.
+fn test_aa_ranges_adjacent() -> bool {
+    let r = aa_ranges_overlap(0, 4, 4, 4)
+    r == false
+}
+
+// T14: Overlapping ranges → true.
+fn test_aa_ranges_overlap_partial() -> bool {
+    aa_ranges_overlap(0, 8, 4, 8)
+}
+
+// T15: Fully contained range → true.
+fn test_aa_ranges_contained() -> bool {
+    aa_ranges_overlap(0, 16, 4, 4)
+}
+
+// T16: Identical ranges → true.
+fn test_aa_ranges_identical() -> bool {
+    aa_ranges_overlap(8, 8, 8, 8)
+}
+
+// T17: Zero-size range → no overlap.
+fn test_aa_ranges_zero_size() -> bool {
+    let r = aa_ranges_overlap(0, 0, 0, 8)
+    r == false
+}
+
+// T18: Single-byte overlap at boundary → true.
+fn test_aa_ranges_single_byte_overlap() -> bool {
+    aa_ranges_overlap(0, 5, 4, 4)
+}
+
+// T19: overlap_size of non-overlapping ranges = 0.
+fn test_aa_overlap_size_none() -> bool {
+    let sz = aa_overlap_size(0, 4, 8, 4)
+    sz == 0
+}
+
+// T20: overlap_size of partially overlapping ranges.
+fn test_aa_overlap_size_partial() -> bool {
+    let sz = aa_overlap_size(0, 8, 4, 8)
+    sz == 4
+}
+
+// ============================================================================
+// Section 12: Tests — Category 3: May-Alias Rules (12 tests)
+// ============================================================================
+
+// T21: Unknown ptr may-aliases anything.
+fn test_aa_unknown_may_aliases_stack() -> bool {
+    let u = aa_ptr_unknown()
+    let s = aa_ptr_stack(0, 8)
+    aa_may_alias(&u, &s)
+}
+
+// T22: Unknown ptr may-aliases heap.
+fn test_aa_unknown_may_aliases_heap() -> bool {
+    let u = aa_ptr_unknown()
+    let h = aa_ptr_heap(1, 16)
+    aa_may_alias(&u, &h)
+}
+
+// T23: Two unknown ptrs may-alias.
+fn test_aa_unknown_may_aliases_unknown() -> bool {
+    let u1 = aa_ptr_unknown()
+    let u2 = aa_ptr_unknown()
+    aa_may_alias(&u1, &u2)
+}
+
+// T24: Stack and heap do NOT alias (different kinds).
+fn test_aa_stack_heap_no_alias() -> bool {
+    let s = aa_ptr_stack(0, 8)
+    let h = aa_ptr_heap(0, 8)
+    let r = aa_may_alias(&s, &h)
+    r == false
+}
+
+// T25: Stack and global do NOT alias.
+fn test_aa_stack_global_no_alias() -> bool {
+    let s = aa_ptr_stack(0, 8)
+    let g = aa_ptr_global(0, 8)
+    let r = aa_may_alias(&s, &g)
+    r == false
+}
+
+// T26: Heap and global do NOT alias.
+fn test_aa_heap_global_no_alias() -> bool {
+    let h = aa_ptr_heap(0, 8)
+    let g = aa_ptr_global(0, 8)
+    let r = aa_may_alias(&h, &g)
+    r == false
+}
+
+// T27: Stack ptrs from different slots do NOT alias.
+fn test_aa_stack_different_slots_no_alias() -> bool {
+    let s0 = aa_ptr_stack_slot(0, 0, 8)
+    let s1 = aa_ptr_stack_slot(1, 0, 8)
+    let r = aa_may_alias(&s0, &s1)
+    r == false
+}
+
+// T28: Stack ptrs same slot, disjoint offsets → no alias.
+fn test_aa_stack_same_slot_disjoint() -> bool {
+    let s0 = aa_ptr_stack_slot(0, 0, 4)
+    let s1 = aa_ptr_stack_slot(0, 8, 4)
+    let r = aa_may_alias(&s0, &s1)
+    r == false
+}
+
+// T29: Stack ptrs same slot, overlapping offsets → alias.
+fn test_aa_stack_same_slot_overlap() -> bool {
+    let s0 = aa_ptr_stack_slot(0, 0, 8)
+    let s1 = aa_ptr_stack_slot(0, 4, 8)
+    aa_may_alias(&s0, &s1)
+}
+
+// T30: Heap ptrs different ids → no alias.
+fn test_aa_heap_different_ids_no_alias() -> bool {
+    let h0 = aa_ptr_heap(10, 16)
+    let h1 = aa_ptr_heap(20, 16)
+    let r = aa_may_alias(&h0, &h1)
+    r == false
+}
+
+// T31: Heap ptrs same id, overlapping offsets → alias.
+fn test_aa_heap_same_id_overlap() -> bool {
+    let h0 = aa_ptr_heap_offset(5, 0, 8)
+    let h1 = aa_ptr_heap_offset(5, 4, 8)
+    aa_may_alias(&h0, &h1)
+}
+
+// T32: Heap ptrs same id, disjoint offsets → no alias.
+fn test_aa_heap_same_id_disjoint() -> bool {
+    let h0 = aa_ptr_heap_offset(5, 0, 4)
+    let h1 = aa_ptr_heap_offset(5, 8, 4)
+    let r = aa_may_alias(&h0, &h1)
+    r == false
+}
+
+// ============================================================================
+// Section 13: Tests — Category 4: Must-Alias (8 tests)
+// ============================================================================
+
+// T33: Same stack ptr → must alias.
+fn test_aa_must_alias_stack_same() -> bool {
+    let s = aa_ptr_stack_slot(0, 8, 4)
+    aa_must_alias(&s, &s)
+}
+
+// T34: Two identical stack ptrs → must alias.
+fn test_aa_must_alias_stack_equal() -> bool {
+    let s0 = aa_ptr_stack_slot(0, 8, 4)
+    let s1 = aa_ptr_stack_slot(0, 8, 4)
+    aa_must_alias(&s0, &s1)
+}
+
+// T35: Same heap ptr → must alias.
+fn test_aa_must_alias_heap_same() -> bool {
+    let h = aa_ptr_heap(3, 16)
+    aa_must_alias(&h, &h)
+}
+
+// T36: Heap ptrs same id, same offset, different size → NOT must alias.
+fn test_aa_must_alias_heap_different_size() -> bool {
+    let h0 = aa_ptr_heap_offset(3, 0, 8)
+    let h1 = aa_ptr_heap_offset(3, 0, 16)
+    let r = aa_must_alias(&h0, &h1)
+    r == false
+}
+
+// T37: Unknown ptr → never must alias.
+fn test_aa_must_alias_unknown_never() -> bool {
+    let u = aa_ptr_unknown()
+    let s = aa_ptr_stack(0, 8)
+    let r = aa_must_alias(&u, &s)
+    r == false
+}
+
+// T38: Different kinds → never must alias.
+fn test_aa_must_alias_different_kinds() -> bool {
+    let s = aa_ptr_stack(0, 8)
+    let h = aa_ptr_heap(0, 8)
+    let r = aa_must_alias(&s, &h)
+    r == false
+}
+
+// T39: Global ptr same id/offset/size → must alias.
+fn test_aa_must_alias_global_equal() -> bool {
+    let g0 = aa_ptr_global_offset(1, 0, 4)
+    let g1 = aa_ptr_global_offset(1, 0, 4)
+    aa_must_alias(&g0, &g1)
+}
+
+// T40: Global ptrs different offsets → not must alias.
+fn test_aa_must_alias_global_different_offset() -> bool {
+    let g0 = aa_ptr_global_offset(1, 0, 4)
+    let g1 = aa_ptr_global_offset(1, 4, 4)
+    let r = aa_must_alias(&g0, &g1)
+    r == false
+}
+
+// ============================================================================
+// Section 14: Tests — Category 5: AaResult and AaAccess (8 tests)
+// ============================================================================
+
+// T41: aa_check on two identical stack accesses → must + may alias.
+fn test_aa_check_stack_same() -> bool {
+    let ctx = aa_context_new()
+    let s = aa_ptr_stack_slot(0, 0, 8)
+    let acc1 = aa_access_new(s, false, 1)
+    let acc2 = aa_access_new(s, false, 2)
+    let r = aa_check(&ctx, &acc1, &acc2)
+    r.may_alias && r.must_alias
+}
+
+// T42: aa_check on different heap allocations → no alias.
+fn test_aa_check_heap_different() -> bool {
+    let ctx = aa_context_new()
+    let h0 = aa_ptr_heap(0, 8)
+    let h1 = aa_ptr_heap(1, 8)
+    let acc1 = aa_access_new(h0, false, 1)
+    let acc2 = aa_access_new(h1, false, 2)
+    let r = aa_check(&ctx, &acc1, &acc2)
+    let r1 = r.may_alias == false
+    let r2 = r.must_alias == false
+    r1 && r2
+}
+
+// T43: aa_is_conflict: write-read conflict when ptrs alias.
+fn test_aa_conflict_write_read() -> bool {
+    let s = aa_ptr_stack_slot(0, 0, 8)
+    let acc1 = aa_access_new(s, true, 1)
+    let acc2 = aa_access_new(s, false, 2)
+    aa_is_conflict(&acc1, &acc2)
+}
+
+// T44: aa_is_conflict: read-read no conflict.
+fn test_aa_no_conflict_read_read() -> bool {
+    let s = aa_ptr_stack_slot(0, 0, 8)
+    let acc1 = aa_access_new(s, false, 1)
+    let acc2 = aa_access_new(s, false, 2)
+    let r = aa_is_conflict(&acc1, &acc2)
+    r == false
+}
+
+// T45: aa_is_conflict: disjoint ptrs never conflict.
+fn test_aa_no_conflict_disjoint() -> bool {
+    let s0 = aa_ptr_stack_slot(0, 0, 4)
+    let s1 = aa_ptr_stack_slot(0, 8, 4)
+    let acc1 = aa_access_new(s0, true, 1)
+    let acc2 = aa_access_new(s1, true, 2)
+    let r = aa_is_conflict(&acc1, &acc2)
+    r == false
+}
+
+// T46: aa_is_write_write: both write same location → true.
+fn test_aa_write_write_conflict() -> bool {
+    let h = aa_ptr_heap(5, 8)
+    let acc1 = aa_access_new(h, true, 1)
+    let acc2 = aa_access_new(h, true, 2)
+    aa_is_write_write(&acc1, &acc2)
+}
+
+// T47: aa_is_write_write: read+write → not write-write.
+fn test_aa_write_write_read_write() -> bool {
+    let h = aa_ptr_heap(5, 8)
+    let acc1 = aa_access_new(h, false, 1)
+    let acc2 = aa_access_new(h, true, 2)
+    let r = aa_is_write_write(&acc1, &acc2)
+    r == false
+}
+
+// T48: aa_no_alias returns true for disjoint stack slots.
+fn test_aa_no_alias_disjoint_slots() -> bool {
+    let s0 = aa_ptr_stack_slot(0, 0, 4)
+    let s1 = aa_ptr_stack_slot(1, 0, 4)
+    aa_no_alias(&s0, &s1)
+}
+
+// ============================================================================
+// Section 15: Tests — Category 6: Set Operations (8 tests)
+// ============================================================================
+
+// T49: aa_set_add and count.
+fn test_aa_set_add_count_inner(s: &! AaSet) -> bool with Mut, Panic {
+    let p0 = aa_ptr_stack(0, 8)
+    let p1 = aa_ptr_heap(1, 8)
+    let ok0 = aa_set_add(s, p0)
+    let ok1 = aa_set_add(s, p1)
+    ok0 && ok1 && s.count == 2
+}
+fn test_aa_set_add_count() -> bool with Mut, Panic {
+    var s = aa_set_new(1)
+    test_aa_set_add_count_inner(&! s)
+}
+
+// T50: aa_set_get returns the correct pointer.
+fn test_aa_set_get_inner(s: &! AaSet) -> bool with Mut, Panic {
+    let p = aa_ptr_heap(10, 32)
+    let ok = aa_set_add(s, p)
+    let q = aa_set_get(s, 0)
+    ok && q.base == 10 && q.kind == AA_HEAP
+}
+fn test_aa_set_get() -> bool with Mut, Panic {
+    var s = aa_set_new(2)
+    test_aa_set_get_inner(&! s)
+}
+
+// T51: aa_set_get out of range returns unknown ptr.
+fn test_aa_set_get_oob() -> bool {
+    let s = aa_set_new(3)
+    let q = aa_set_get(&s, 5)
+    q.kind == AA_UNKNOWN
+}
+
+// T52: aa_set_may_alias_any finds aliasing pointer.
+fn test_aa_set_may_alias_any_found_inner(s: &! AaSet) -> bool with Mut, Panic {
+    let p = aa_ptr_stack_slot(0, 0, 8)
+    let ok = aa_set_add(s, p)
+    let q = aa_ptr_stack_slot(0, 4, 4)
+    aa_set_may_alias_any(s, &q)
+}
+fn test_aa_set_may_alias_any_found() -> bool with Mut, Panic {
+    var s = aa_set_new(4)
+    test_aa_set_may_alias_any_found_inner(&! s)
+}
+
+// T53: aa_set_may_alias_any returns false for disjoint set.
+fn test_aa_set_may_alias_any_not_found_inner(s: &! AaSet) -> bool with Mut, Panic {
+    let p = aa_ptr_heap(10, 8)
+    let ok = aa_set_add(s, p)
+    let q = aa_ptr_heap(20, 8)
+    let r = aa_set_may_alias_any(s, &q)
+    r == false
+}
+fn test_aa_set_may_alias_any_not_found() -> bool with Mut, Panic {
+    var s = aa_set_new(5)
+    test_aa_set_may_alias_any_not_found_inner(&! s)
+}
+
+// T54: aa_set_alias_count counts correctly.
+fn test_aa_set_alias_count_inner(s: &! AaSet) -> bool with Mut, Panic {
+    let p0 = aa_ptr_heap_offset(1, 0, 8)
+    let p1 = aa_ptr_heap_offset(1, 4, 8)
+    let p2 = aa_ptr_heap(2, 8)
+    let ok0 = aa_set_add(s, p0)
+    let ok1 = aa_set_add(s, p1)
+    let ok2 = aa_set_add(s, p2)
+    let q = aa_ptr_heap_offset(1, 2, 4)
+    let cnt = aa_set_alias_count(s, &q)
+    cnt == 2
+}
+fn test_aa_set_alias_count() -> bool with Mut, Panic {
+    var s = aa_set_new(6)
+    test_aa_set_alias_count_inner(&! s)
+}
+
+// T55: aa_sets_may_alias detects cross-set aliasing.
+fn test_aa_sets_may_alias_true_inner(sa: &! AaSet, sb: &! AaSet) -> bool with Mut, Panic {
+    let p = aa_ptr_heap(5, 16)
+    let q = aa_ptr_heap_offset(5, 8, 8)
+    let ok1 = aa_set_add(sa, p)
+    let ok2 = aa_set_add(sb, q)
+    aa_sets_may_alias(sa, sb)
+}
+fn test_aa_sets_may_alias_true() -> bool with Mut, Panic {
+    var sa = aa_set_new(7)
+    var sb = aa_set_new(8)
+    test_aa_sets_may_alias_true_inner(&! sa, &! sb)
+}
+
+// T56: aa_sets_may_alias returns false for disjoint sets.
+fn test_aa_sets_may_alias_false_inner(sa: &! AaSet, sb: &! AaSet) -> bool with Mut, Panic {
+    let p = aa_ptr_heap(1, 8)
+    let q = aa_ptr_heap(2, 8)
+    let ok1 = aa_set_add(sa, p)
+    let ok2 = aa_set_add(sb, q)
+    let r = aa_sets_may_alias(sa, sb)
+    r == false
+}
+fn test_aa_sets_may_alias_false() -> bool with Mut, Panic {
+    var sa = aa_set_new(9)
+    var sb = aa_set_new(10)
+    test_aa_sets_may_alias_false_inner(&! sa, &! sb)
+}
+
+// ============================================================================
+// Section 16: Tests — Category 7: Context Operations (7 tests)
+// ============================================================================
+
+// T57: aa_context_add_set increments count.
+fn test_aa_context_add_set_inner(ctx: &! AaContext) -> bool with Mut, Panic {
+    let idx = aa_context_add_set(ctx, 100)
+    idx == 0 && ctx.count == 1
+}
+fn test_aa_context_add_set() -> bool with Mut, Panic {
+    var ctx = aa_context_new()
+    test_aa_context_add_set_inner(&! ctx)
+}
+
+// T58: aa_context_get_set returns the inserted set.
+fn test_aa_context_get_set_inner(ctx: &! AaContext) -> bool with Mut, Panic {
+    let idx = aa_context_add_set(ctx, 200)
+    let s = aa_context_get_set(ctx, idx)
+    s.id == 200
+}
+fn test_aa_context_get_set() -> bool with Mut, Panic {
+    var ctx = aa_context_new()
+    test_aa_context_get_set_inner(&! ctx)
+}
+
+// T59: aa_context_get_set out of range returns invalid set.
+fn test_aa_context_get_set_oob() -> bool {
+    let ctx = aa_context_new()
+    let s = aa_context_get_set(&ctx, 5)
+    s.id == AA_INVALID
+}
+
+// T60: Multiple sets in context.
+fn test_aa_context_multiple_sets_inner(ctx: &! AaContext) -> bool with Mut, Panic {
+    let idx0 = aa_context_add_set(ctx, 10)
+    let idx1 = aa_context_add_set(ctx, 20)
+    let idx2 = aa_context_add_set(ctx, 30)
+    let s0 = aa_context_get_set(ctx, idx0)
+    let s2 = aa_context_get_set(ctx, idx2)
+    ctx.count == 3 && s0.id == 10 && s2.id == 30
+}
+fn test_aa_context_multiple_sets() -> bool with Mut, Panic {
+    var ctx = aa_context_new()
+    test_aa_context_multiple_sets_inner(&! ctx)
+}
+
+// T61: aa_disjoint for same-kind, non-overlapping.
+fn test_aa_disjoint_same_kind() -> bool {
+    let h0 = aa_ptr_heap_offset(1, 0, 4)
+    let h1 = aa_ptr_heap_offset(1, 8, 4)
+    aa_disjoint(&h0, &h1)
+}
+
+// T62: aa_disjoint for unknown returns false.
+fn test_aa_disjoint_unknown() -> bool {
+    let u = aa_ptr_unknown()
+    let h = aa_ptr_heap(1, 8)
+    let r = aa_disjoint(&u, &h)
+    r == false
+}
+
+// T63: aa_sets_alias_pairs counts correctly.
+fn test_aa_sets_alias_pairs_inner(sa: &! AaSet, sb: &! AaSet) -> bool with Mut, Panic {
+    let p0 = aa_ptr_heap_offset(1, 0, 8)
+    let p1 = aa_ptr_heap_offset(1, 4, 8)
+    let q0 = aa_ptr_heap_offset(1, 2, 4)
+    let q1 = aa_ptr_heap(2, 8)
+    let ok0 = aa_set_add(sa, p0)
+    let ok1 = aa_set_add(sa, p1)
+    let ok2 = aa_set_add(sb, q0)
+    let ok3 = aa_set_add(sb, q1)
+    let cnt = aa_sets_alias_pairs(sa, sb)
+    cnt == 2
+}
+fn test_aa_sets_alias_pairs() -> bool with Mut, Panic {
+    var sa = aa_set_new(11)
+    var sb = aa_set_new(12)
+    test_aa_sets_alias_pairs_inner(&! sa, &! sb)
+}
+
+// ============================================================================
+// Section 17: Tests — Category 8: Utility Functions (7 tests)
+// ============================================================================
+
+// T64: aa_ptr_offset_by adds to offset.
+fn test_aa_ptr_offset_by() -> bool {
+    let h = aa_ptr_heap_offset(3, 0, 8)
+    let h2 = aa_ptr_offset_by(h, 16)
+    h2.offset == 16 && h2.base == 3
+}
+
+// T65: aa_ptr_narrow reduces size.
+fn test_aa_ptr_narrow() -> bool {
+    let h = aa_ptr_heap(5, 64)
+    let hn = aa_ptr_narrow(h, 8)
+    hn.size == 8 && hn.base == 5
+}
+
+// T66: aa_is_stack returns correct bool.
+fn test_aa_is_stack() -> bool {
+    let s = aa_ptr_stack(0, 8)
+    let h = aa_ptr_heap(0, 8)
+    aa_is_stack(&s) && (aa_is_stack(&h) == false)
+}
+
+// T67: aa_is_heap returns correct bool.
+fn test_aa_is_heap() -> bool {
+    let h = aa_ptr_heap(0, 8)
+    let g = aa_ptr_global(0, 8)
+    aa_is_heap(&h) && (aa_is_heap(&g) == false)
+}
+
+// T68: aa_is_global returns correct bool.
+fn test_aa_is_global() -> bool {
+    let g = aa_ptr_global(0, 8)
+    let u = aa_ptr_unknown()
+    aa_is_global(&g) && (aa_is_global(&u) == false)
+}
+
+// T69: aa_is_unknown returns correct bool.
+fn test_aa_is_unknown() -> bool {
+    let u = aa_ptr_unknown()
+    let s = aa_ptr_stack(0, 8)
+    aa_is_unknown(&u) && (aa_is_unknown(&s) == false)
+}
+
+// T70: aa_set_all_must_alias for single-element set.
+fn test_aa_set_all_must_alias_singleton() -> bool {
+    let s = aa_set_new(0)
+    aa_set_all_must_alias(&s)
+}
+
+// ============================================================================
+// Section 18: Tests — Category 9: Edge Cases (5 tests)
+// ============================================================================
+
+// T71: Stack ptr with size 0 does not alias overlapping range.
+fn test_aa_zero_size_no_alias() -> bool {
+    let s0 = aa_ptr_stack_slot(0, 4, 0)
+    let s1 = aa_ptr_stack_slot(0, 0, 16)
+    let r = aa_may_alias(&s0, &s1)
+    r == false
+}
+
+// T72: Heap ptr with large offset offset beyond allocation.
+fn test_aa_heap_large_offset_no_alias() -> bool {
+    let h0 = aa_ptr_heap_offset(1, 0, 8)
+    let h1 = aa_ptr_heap_offset(1, 1024, 8)
+    let r = aa_may_alias(&h0, &h1)
+    r == false
+}
+
+// T73: aa_ptr_base returns correct value.
+fn test_aa_ptr_base() -> bool {
+    let h = aa_ptr_heap(77, 8)
+    aa_ptr_base(&h) == 77
+}
+
+// T74: aa_ptr_offset returns correct value.
+fn test_aa_ptr_offset_accessor() -> bool {
+    let h = aa_ptr_heap_offset(1, 32, 8)
+    aa_ptr_offset(&h) == 32
+}
+
+// T75: aa_ptr_size returns correct value.
+fn test_aa_ptr_size_accessor() -> bool {
+    let h = aa_ptr_heap(1, 128)
+    aa_ptr_size(&h) == 128
+}
+
+// ============================================================================
+// Section 19: Test Runner
+// ============================================================================
+
+fn aa_run_tests() -> i64 with Mut, Panic {
+    var passed: i64 = 0
+    var failed: i64 = 0
+
+    // Category 1: Basic Construction (10)
+    if test_aa_stack_kind() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_heap_kind() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_global_kind() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_unknown_kind() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_stack_offset() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_heap_id_size() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_global_id() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_unknown_base() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_context_new() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_set_new() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 2: Range Overlap (10)
+    if test_aa_ranges_no_overlap_before() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_ranges_no_overlap_after() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_ranges_adjacent() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_ranges_overlap_partial() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_ranges_contained() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_ranges_identical() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_ranges_zero_size() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_ranges_single_byte_overlap() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_overlap_size_none() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_overlap_size_partial() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 3: May-Alias (12)
+    if test_aa_unknown_may_aliases_stack() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_unknown_may_aliases_heap() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_unknown_may_aliases_unknown() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_stack_heap_no_alias() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_stack_global_no_alias() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_heap_global_no_alias() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_stack_different_slots_no_alias() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_stack_same_slot_disjoint() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_stack_same_slot_overlap() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_heap_different_ids_no_alias() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_heap_same_id_overlap() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_heap_same_id_disjoint() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 4: Must-Alias (8)
+    if test_aa_must_alias_stack_same() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_must_alias_stack_equal() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_must_alias_heap_same() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_must_alias_heap_different_size() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_must_alias_unknown_never() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_must_alias_different_kinds() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_must_alias_global_equal() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_must_alias_global_different_offset() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 5: AaResult and AaAccess (8)
+    if test_aa_check_stack_same() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_check_heap_different() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_conflict_write_read() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_no_conflict_read_read() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_no_conflict_disjoint() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_write_write_conflict() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_write_write_read_write() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_no_alias_disjoint_slots() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 6: Set Operations (8)
+    if test_aa_set_add_count() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_set_get() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_set_get_oob() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_set_may_alias_any_found() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_set_may_alias_any_not_found() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_set_alias_count() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_sets_may_alias_true() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_sets_may_alias_false() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 7: Context Operations (7)
+    if test_aa_context_add_set() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_context_get_set() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_context_get_set_oob() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_context_multiple_sets() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_disjoint_same_kind() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_disjoint_unknown() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_sets_alias_pairs() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 8: Utility Functions (7)
+    if test_aa_ptr_offset_by() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_ptr_narrow() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_is_stack() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_is_heap() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_is_global() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_is_unknown() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_set_all_must_alias_singleton() { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Category 9: Edge Cases (5)
+    if test_aa_zero_size_no_alias() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_heap_large_offset_no_alias() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_ptr_base() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_ptr_offset_accessor() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_aa_ptr_size_accessor() { passed = passed + 1 } else { failed = failed + 1 }
+
+    if failed > 0 { return 0 - failed }
+    passed
+}

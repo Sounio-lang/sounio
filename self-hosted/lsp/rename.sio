@@ -1,0 +1,1541 @@
+// self-hosted::lsp::rename -- LSP rename symbol provider for Sounio
+//
+// Given a symbol name, finds all references and produces a list of edits
+// that rename every occurrence (definition and uses) to the new name.
+// All data lives in flat fixed-size arenas; no heap allocation, no
+// recursive structures.
+//
+// Capacities:
+//   - Symbols:       512
+//   - Refs per sym:  256
+//   - Edits:         512
+//
+// All public names carry the `lspr_` prefix to avoid collisions.
+
+// ============================================================================
+// Section 1: CONSTANTS
+// ============================================================================
+
+let LSPR_MAX_SYMBOLS: i64  = 512
+let LSPR_MAX_REFS: i64     = 256
+let LSPR_MAX_EDITS: i64    = 512
+let LSPR_INVALID: i64      = 0 - 1
+
+// Reference kinds
+let LSPR_KIND_DEF: i64  = 0
+let LSPR_KIND_USE: i64  = 1
+let LSPR_KIND_TYPE: i64 = 2
+
+// Identifier character classification constants (ASCII)
+let LSPR_ASCII_UNDERSCORE: i64 = 95
+let LSPR_ASCII_LOWER_A: i64   = 97
+let LSPR_ASCII_LOWER_Z: i64   = 122
+let LSPR_ASCII_UPPER_A: i64   = 65
+let LSPR_ASCII_UPPER_Z: i64   = 90
+let LSPR_ASCII_DIGIT_0: i64   = 48
+let LSPR_ASCII_DIGIT_9: i64   = 57
+
+// ============================================================================
+// Section 2: CORE STRUCTS
+// ============================================================================
+
+struct LsprLocation {
+    file_id:  i64,
+    line:     i64,
+    col:      i64,
+    end_col:  i64,
+}
+
+struct LsprEdit {
+    loc:      LsprLocation,
+    old_name: string,
+    new_name: string,
+}
+
+struct LsprRefEntry {
+    loc:  LsprLocation,
+    kind: i64,
+}
+
+struct LsprSymbol {
+    name:      string,
+    id:        i64,
+    refs:      [LsprRefEntry; 256],
+    ref_count: i64,
+}
+
+struct LsprRenameTable {
+    symbols: [LsprSymbol; 512],
+    count:   i64,
+}
+
+struct LsprRenameResult {
+    edits: [LsprEdit;  512],
+    count: i64,
+    valid: bool,
+    error: string,
+}
+
+// ============================================================================
+// Section 3: ZERO-VALUE CONSTRUCTORS (helpers must precede callers)
+// ============================================================================
+
+fn lspr_location_new(file_id: i64, line: i64, col: i64, end_col: i64) -> LsprLocation {
+    LsprLocation {
+        file_id: file_id,
+        line:    line,
+        col:     col,
+        end_col: end_col,
+    }
+}
+
+fn lspr_location_zero() -> LsprLocation {
+    LsprLocation {
+        file_id: 0,
+        line:    0,
+        col:     0,
+        end_col: 0,
+    }
+}
+
+fn lspr_ref_entry_zero() -> LsprRefEntry {
+    LsprRefEntry {
+        loc:  lspr_location_zero(),
+        kind: LSPR_KIND_USE,
+    }
+}
+
+fn lspr_edit_zero() -> LsprEdit {
+    LsprEdit {
+        loc:      lspr_location_zero(),
+        old_name: "",
+        new_name: "",
+    }
+}
+
+fn lspr_symbol_zero() -> LsprSymbol {
+    LsprSymbol {
+        name:      "",
+        id:        LSPR_INVALID,
+        refs:      [lspr_ref_entry_zero(); 256],
+        ref_count: 0,
+    }
+}
+
+fn lspr_table_new() -> LsprRenameTable {
+    LsprRenameTable {
+        symbols: [lspr_symbol_zero(); 512],
+        count:   0,
+    }
+}
+
+fn lspr_result_new() -> LsprRenameResult {
+    LsprRenameResult {
+        edits: [lspr_edit_zero(); 512],
+        count: 0,
+        valid: true,
+        error: "",
+    }
+}
+
+fn lspr_result_error(msg: string) -> LsprRenameResult {
+    LsprRenameResult {
+        edits: [lspr_edit_zero(); 512],
+        count: 0,
+        valid: false,
+        error: msg,
+    }
+}
+
+// ============================================================================
+// Section 4: NAME VALIDATION
+// ============================================================================
+
+// Check whether a single character (given as i64 ASCII code) is valid in an
+// identifier.  Valid chars: a-z, A-Z, 0-9, _
+fn lspr_is_ident_char(c: i64) -> bool {
+    if c >= LSPR_ASCII_LOWER_A && c <= LSPR_ASCII_LOWER_Z { return true }
+    if c >= LSPR_ASCII_UPPER_A && c <= LSPR_ASCII_UPPER_Z { return true }
+    if c >= LSPR_ASCII_DIGIT_0 && c <= LSPR_ASCII_DIGIT_9 { return true }
+    if c == LSPR_ASCII_UNDERSCORE { return true }
+    false
+}
+
+// Check whether a character is valid as the FIRST character of an identifier.
+// First char: a-z, A-Z, _  (no digits)
+fn lspr_is_ident_start(c: i64) -> bool {
+    if c >= LSPR_ASCII_LOWER_A && c <= LSPR_ASCII_LOWER_Z { return true }
+    if c >= LSPR_ASCII_UPPER_A && c <= LSPR_ASCII_UPPER_Z { return true }
+    if c == LSPR_ASCII_UNDERSCORE { return true }
+    false
+}
+
+// Validate that `name` is a well-formed Sounio identifier.
+// Returns true iff name is non-empty, starts with a letter or underscore,
+// and contains only letters, digits, and underscores.
+fn lspr_validate_name(name: string) -> bool {
+    let n = str_len(name)
+    if n == 0 { return false }
+    // Check first character
+    // We use str_len tricks to get individual chars via substring comparison.
+    // Strategy: compare substrings character by character using str_eq on 1-char slices.
+    // Since Sounio exposes str_byte_at as i64, use that.
+    let c0 = str_char_at(name, 0)
+    if lspr_is_ident_start(c0) == false { return false }
+    // Check remaining characters
+    var i: i64 = 1
+    while i < n {
+        let c = str_char_at(name, i)
+        if lspr_is_ident_char(c) == false { return false }
+        i = i + 1
+    }
+    true
+}
+
+// ============================================================================
+// Section 5: SYMBOL TABLE OPERATIONS
+// ============================================================================
+
+// Find a symbol by name.  Returns its id (index) or LSPR_INVALID.
+fn lspr_find_symbol(t: &LsprRenameTable, name: string) -> i64 {
+    var i: i64 = 0
+    while i < t.count {
+        if str_eq(t.symbols[i as usize].name, name) {
+            return t.symbols[i as usize].id
+        }
+        i = i + 1
+    }
+    LSPR_INVALID
+}
+
+// Add a new symbol with the given name.  Returns the newly assigned id.
+// Panics (returns LSPR_INVALID) if the table is full.
+fn lspr_add_symbol(t: &! LsprRenameTable, name: string) -> i64 with Mut, Panic {
+    if t.count >= LSPR_MAX_SYMBOLS {
+        return LSPR_INVALID
+    }
+    let id = t.count
+    t.symbols[id as usize] = LsprSymbol {
+        name:      name,
+        id:        id,
+        refs:      [lspr_ref_entry_zero(); 256],
+        ref_count: 0,
+    }
+    t.count = t.count + 1
+    id
+}
+
+// Add a reference entry to the symbol with sym_id.
+fn lspr_add_ref(t: &! LsprRenameTable, sym_id: i64, file_id: i64, line: i64, col: i64, end_col: i64, kind: i64) with Mut, Panic {
+    if sym_id < 0 || sym_id >= t.count {
+        return
+    }
+    let rc = t.symbols[sym_id as usize].ref_count
+    if rc >= LSPR_MAX_REFS {
+        return
+    }
+    t.symbols[sym_id as usize].refs[rc as usize] = LsprRefEntry {
+        loc:  lspr_location_new(file_id, line, col, end_col),
+        kind: kind,
+    }
+    t.symbols[sym_id as usize].ref_count = rc + 1
+}
+
+// Get the name of symbol sym_id.
+fn lspr_symbol_name(t: &LsprRenameTable, sym_id: i64) -> string with Panic {
+    if sym_id < 0 || sym_id >= t.count {
+        return ""
+    }
+    t.symbols[sym_id as usize].name
+}
+
+// Get the ref count of symbol sym_id.
+fn lspr_symbol_ref_count(t: &LsprRenameTable, sym_id: i64) -> i64 with Panic {
+    if sym_id < 0 || sym_id >= t.count {
+        return 0
+    }
+    t.symbols[sym_id as usize].ref_count
+}
+
+// Get a specific ref entry from symbol sym_id.
+fn lspr_symbol_ref_at(t: &LsprRenameTable, sym_id: i64, ref_idx: i64) -> LsprRefEntry with Panic {
+    if sym_id < 0 || sym_id >= t.count {
+        return lspr_ref_entry_zero()
+    }
+    let rc = t.symbols[sym_id as usize].ref_count
+    if ref_idx < 0 || ref_idx >= rc {
+        return lspr_ref_entry_zero()
+    }
+    t.symbols[sym_id as usize].refs[ref_idx as usize]
+}
+
+// Count symbols in the table.
+fn lspr_table_count(t: &LsprRenameTable) -> i64 {
+    t.count
+}
+
+// Count how many refs of a given kind belong to symbol sym_id.
+fn lspr_count_refs_of_kind(t: &LsprRenameTable, sym_id: i64, kind: i64) -> i64 with Mut, Div, Panic {
+    if sym_id < 0 || sym_id >= t.count {
+        return 0
+    }
+    let rc = t.symbols[sym_id as usize].ref_count
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < rc {
+        if t.symbols[sym_id as usize].refs[i as usize].kind == kind {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// Section 6: RENAME OPERATION
+// ============================================================================
+
+// Produce a LsprRenameResult for renaming symbol sym_id to new_name.
+// - Validates new_name as a proper identifier.
+// - Returns an error result if sym_id is out of range.
+// - Returns an error result if new_name is the same as the current name.
+// - Returns an error result if new_name conflicts with an existing symbol.
+// - Produces one LsprEdit per reference in the symbol's ref list.
+fn lspr_rename(t: &LsprRenameTable, sym_id: i64, new_name: string) -> LsprRenameResult {
+    // Validate sym_id range
+    if sym_id < 0 || sym_id >= t.count {
+        return lspr_result_error("invalid symbol id")
+    }
+
+    let old_name = t.symbols[sym_id as usize].name
+
+    // Validate new_name
+    if lspr_validate_name(new_name) == false {
+        return lspr_result_error("invalid identifier")
+    }
+
+    // Detect no-op rename
+    if str_eq(old_name, new_name) {
+        return lspr_result_error("new name is identical to old name")
+    }
+
+    // Check for conflict with another existing symbol
+    let conflict_id = lspr_find_symbol(t, new_name)
+    if conflict_id != LSPR_INVALID && conflict_id != sym_id {
+        return lspr_result_error("name already exists in scope")
+    }
+
+    // Build edit list
+    var result = lspr_result_new()
+    let rc = t.symbols[sym_id as usize].ref_count
+    var i: i64 = 0
+    while i < rc && result.count < LSPR_MAX_EDITS {
+        let ref_e = t.symbols[sym_id as usize].refs[i as usize]
+        result.edits[result.count as usize] = LsprEdit {
+            loc:      ref_e.loc,
+            old_name: old_name,
+            new_name: new_name,
+        }
+        result.count = result.count + 1
+        i = i + 1
+    }
+    result.valid = true
+    result
+}
+
+// ============================================================================
+// Section 7: RESULT QUERY HELPERS
+// ============================================================================
+
+fn lspr_result_valid(r: &LsprRenameResult) -> bool {
+    r.valid
+}
+
+fn lspr_result_edit_count(r: &LsprRenameResult) -> i64 {
+    r.count
+}
+
+fn lspr_result_error_msg(r: &LsprRenameResult) -> string {
+    r.error
+}
+
+fn lspr_result_edit_at(r: &LsprRenameResult, idx: i64) -> LsprEdit with Panic {
+    if idx < 0 || idx >= r.count {
+        return lspr_edit_zero()
+    }
+    r.edits[idx as usize]
+}
+
+fn lspr_result_old_name(r: &LsprRenameResult, idx: i64) -> string with Panic {
+    if idx < 0 || idx >= r.count {
+        return ""
+    }
+    r.edits[idx as usize].old_name
+}
+
+fn lspr_result_new_name(r: &LsprRenameResult, idx: i64) -> string with Panic {
+    if idx < 0 || idx >= r.count {
+        return ""
+    }
+    r.edits[idx as usize].new_name
+}
+
+fn lspr_result_edit_line(r: &LsprRenameResult, idx: i64) -> i64 with Panic {
+    if idx < 0 || idx >= r.count {
+        return 0 - 1
+    }
+    r.edits[idx as usize].loc.line
+}
+
+fn lspr_result_edit_col(r: &LsprRenameResult, idx: i64) -> i64 with Panic {
+    if idx < 0 || idx >= r.count {
+        return 0 - 1
+    }
+    r.edits[idx as usize].loc.col
+}
+
+fn lspr_result_edit_end_col(r: &LsprRenameResult, idx: i64) -> i64 with Panic {
+    if idx < 0 || idx >= r.count {
+        return 0 - 1
+    }
+    r.edits[idx as usize].loc.end_col
+}
+
+fn lspr_result_edit_file(r: &LsprRenameResult, idx: i64) -> i64 with Panic {
+    if idx < 0 || idx >= r.count {
+        return 0 - 1
+    }
+    r.edits[idx as usize].loc.file_id
+}
+
+// Count edits that touch a particular file.
+fn lspr_result_edits_in_file(r: &LsprRenameResult, file_id: i64) -> i64 {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < r.count {
+        if r.edits[i as usize].loc.file_id == file_id {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Count edits of a particular kind (DEF, USE, TYPE) in the result.
+// This requires matching kind from corresponding ref entries.
+// Since LsprEdit doesn't store kind directly, we check if old_name == new_name
+// (impossible) or use external cross-reference. In this module edits don't
+// carry kind, so this helper counts all edits on a given line.
+fn lspr_result_edits_on_line(r: &LsprRenameResult, line: i64) -> i64 {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < r.count {
+        if r.edits[i as usize].loc.line == line {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// Section 8: LOCATION UTILITIES
+// ============================================================================
+
+fn lspr_location_eq(a: &LsprLocation, b: &LsprLocation) -> bool {
+    a.file_id == b.file_id
+        && a.line == b.line
+        && a.col == b.col
+        && a.end_col == b.end_col
+}
+
+fn lspr_location_contains_col(loc: &LsprLocation, col: i64) -> bool {
+    col >= loc.col && col <= loc.end_col
+}
+
+fn lspr_location_span(loc: &LsprLocation) -> i64 {
+    loc.end_col - loc.col + 1
+}
+
+fn lspr_location_is_zero(loc: &LsprLocation) -> bool {
+    loc.file_id == 0 && loc.line == 0 && loc.col == 0 && loc.end_col == 0
+}
+
+// ============================================================================
+// Section 9: TABLE-LEVEL STATISTICS
+// ============================================================================
+
+// Count total references across all symbols.
+fn lspr_table_total_refs(t: &LsprRenameTable) -> i64 {
+    var total: i64 = 0
+    var i: i64 = 0
+    while i < t.count {
+        total = total + t.symbols[i as usize].ref_count
+        i = i + 1
+    }
+    total
+}
+
+// Count how many symbols have at least one reference.
+fn lspr_table_used_symbols(t: &LsprRenameTable) -> i64 {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < t.count {
+        if t.symbols[i as usize].ref_count > 0 {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Count how many symbols have NO references.
+fn lspr_table_unreferenced_symbols(t: &LsprRenameTable) -> i64 {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < t.count {
+        if t.symbols[i as usize].ref_count == 0 {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Find the symbol with the most references.  Returns its id.
+fn lspr_table_most_referenced(t: &LsprRenameTable) -> i64 {
+    if t.count == 0 { return LSPR_INVALID }
+    var best_id: i64 = 0
+    var best_rc: i64 = t.symbols[0].ref_count
+    var i: i64 = 1
+    while i < t.count {
+        let rc = t.symbols[i as usize].ref_count
+        if rc > best_rc {
+            best_rc = rc
+            best_id = i
+        }
+        i = i + 1
+    }
+    best_id
+}
+
+// ============================================================================
+// Section 10: CROSS-FILE RENAME HELPERS
+// ============================================================================
+
+// Count how many distinct file_ids appear in a symbol's ref list.
+fn lspr_symbol_file_count(t: &LsprRenameTable, sym_id: i64) -> i64 with Mut, Div, Panic {
+    if sym_id < 0 || sym_id >= t.count {
+        return 0
+    }
+    // Use a tiny array to track seen file ids (up to 32 distinct files)
+    var seen: [i64; 32] = [0 - 1; 32]
+    var seen_count: i64 = 0
+    let rc = t.symbols[sym_id as usize].ref_count
+    var i: i64 = 0
+    while i < rc {
+        let fid = t.symbols[sym_id as usize].refs[i as usize].loc.file_id
+        var found: bool = false
+        var j: i64 = 0
+        while j < seen_count {
+            if seen[j as usize] == fid {
+                found = true
+            }
+            j = j + 1
+        }
+        if found == false && seen_count < 32 {
+            seen[seen_count as usize] = fid
+            seen_count = seen_count + 1
+        }
+        i = i + 1
+    }
+    seen_count
+}
+
+// Collect all edits from a rename result that belong to a given file.
+// Returns a new result containing only those edits.
+fn lspr_filter_edits_by_file(r: &LsprRenameResult, file_id: i64) -> LsprRenameResult {
+    var out = lspr_result_new()
+    var i: i64 = 0
+    while i < r.count && out.count < LSPR_MAX_EDITS {
+        if r.edits[i as usize].loc.file_id == file_id {
+            out.edits[out.count as usize] = r.edits[i as usize]
+            out.count = out.count + 1
+        }
+        i = i + 1
+    }
+    out.valid = r.valid
+    out.error = r.error
+    out
+}
+
+// ============================================================================
+// Section 11: SORT EDITS BY POSITION
+// ============================================================================
+
+// Insertion-sort the edits in a result by (file_id, line, col) ascending.
+// This ensures predictable application order.
+fn lspr_sort_edits(r: &! LsprRenameResult) with Mut, Div, Panic {
+    var i: i64 = 1
+    while i < r.count {
+        let key = r.edits[i as usize]
+        var j: i64 = i - 1
+        while j >= 0 {
+            let cmp_file = r.edits[j as usize].loc.file_id - key.loc.file_id
+            let cmp_line = r.edits[j as usize].loc.line - key.loc.line
+            let cmp_col  = r.edits[j as usize].loc.col  - key.loc.col
+            let is_after = cmp_file > 0
+                || (cmp_file == 0 && cmp_line > 0)
+                || (cmp_file == 0 && cmp_line == 0 && cmp_col > 0)
+            if is_after {
+                r.edits[(j + 1) as usize] = r.edits[j as usize]
+                j = j - 1
+            } else {
+                j = 0 - 1
+            }
+        }
+        r.edits[(j + 1) as usize] = key
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// Section 12: EDIT VERIFICATION
+// ============================================================================
+
+// Verify that all edits in a result have consistent old_name.
+fn lspr_edits_consistent(r: &LsprRenameResult) -> bool {
+    if r.count == 0 { return true }
+    let first_old = r.edits[0].old_name
+    let first_new = r.edits[0].new_name
+    var i: i64 = 1
+    while i < r.count {
+        if str_eq(r.edits[i as usize].old_name, first_old) == false {
+            return false
+        }
+        if str_eq(r.edits[i as usize].new_name, first_new) == false {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Verify that no two edits share the exact same location.
+fn lspr_edits_unique_locations(r: &LsprRenameResult) -> bool {
+    var i: i64 = 0
+    while i < r.count {
+        var j: i64 = i + 1
+        while j < r.count {
+            let ai = &r.edits[i as usize].loc
+            let aj = &r.edits[j as usize].loc
+            if lspr_location_eq(ai, aj) {
+                return false
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    true
+}
+
+// ============================================================================
+// Section 13: BATCH RENAME (rename multiple symbols at once)
+// ============================================================================
+
+// Rename symbol by name (looks up the symbol first, then renames).
+fn lspr_rename_by_name(t: &LsprRenameTable, old_name: string, new_name: string) -> LsprRenameResult {
+    let sym_id = lspr_find_symbol(t, old_name)
+    if sym_id == LSPR_INVALID {
+        return lspr_result_error("symbol not found")
+    }
+    lspr_rename(t, sym_id, new_name)
+}
+
+// ============================================================================
+// Section 14: INTEGRATION HELPERS
+// ============================================================================
+
+// Check whether a rename result is apply-safe:
+// - valid == true
+// - count > 0
+// - all edits have non-empty old/new names
+// - all edits have unique locations
+fn lspr_result_is_safe(r: &LsprRenameResult) -> bool {
+    if r.valid == false { return false }
+    if r.count == 0 { return false }
+    var i: i64 = 0
+    while i < r.count {
+        if str_len(r.edits[i as usize].old_name) == 0 { return false }
+        if str_len(r.edits[i as usize].new_name) == 0 { return false }
+        i = i + 1
+    }
+    lspr_edits_unique_locations(r)
+}
+
+// Return the maximum line number touched by any edit.
+fn lspr_result_max_line(r: &LsprRenameResult) -> i64 {
+    if r.count == 0 { return 0 - 1 }
+    var max: i64 = r.edits[0].loc.line
+    var i: i64 = 1
+    while i < r.count {
+        if r.edits[i as usize].loc.line > max {
+            max = r.edits[i as usize].loc.line
+        }
+        i = i + 1
+    }
+    max
+}
+
+// Return the minimum line number touched by any edit.
+fn lspr_result_min_line(r: &LsprRenameResult) -> i64 {
+    if r.count == 0 { return 0 - 1 }
+    var min: i64 = r.edits[0].loc.line
+    var i: i64 = 1
+    while i < r.count {
+        if r.edits[i as usize].loc.line < min {
+            min = r.edits[i as usize].loc.line
+        }
+        i = i + 1
+    }
+    min
+}
+
+// ============================================================================
+// Section 15: TESTS
+// ============================================================================
+// Inner helpers encapsulate sequences of &! borrows within a single borrow scope.
+
+fn tir_inner_add_symbol_count(t: &! LsprRenameTable) -> bool with Mut, Panic {
+    let _a = lspr_add_symbol(t, "foo")
+    let _b = lspr_add_symbol(t, "bar")
+    t.count == 2
+}
+
+fn tir_inner_find_symbol_found(t: &! LsprRenameTable) -> bool with Mut, Panic {
+    let id = lspr_add_symbol(t, "alpha")
+    let found = lspr_find_symbol(t, "alpha")
+    found == id
+}
+
+fn tir_inner_find_symbol_miss(t: &! LsprRenameTable) -> bool with Mut, Panic {
+    let _id = lspr_add_symbol(t, "alpha")
+    let found = lspr_find_symbol(t, "beta")
+    found == LSPR_INVALID
+}
+
+fn tir_inner_add_ref_basic(t: &! LsprRenameTable) -> bool with Mut, Panic {
+    let id = lspr_add_symbol(t, "foo")
+    lspr_add_ref(t, id, 1, 10, 5, 7, LSPR_KIND_DEF)
+    t.symbols[id as usize].ref_count == 1
+}
+
+fn tir_inner_add_ref_file_id(t: &! LsprRenameTable) -> bool with Mut, Panic {
+    let id = lspr_add_symbol(t, "foo")
+    lspr_add_ref(t, id, 42, 1, 0, 2, LSPR_KIND_USE)
+    t.symbols[id as usize].refs[0].loc.file_id == 42
+}
+
+fn tir_inner_add_ref_line(t: &! LsprRenameTable) -> bool with Mut, Panic {
+    let id = lspr_add_symbol(t, "bar")
+    lspr_add_ref(t, id, 1, 99, 0, 2, LSPR_KIND_USE)
+    t.symbols[id as usize].refs[0].loc.line == 99
+}
+
+fn tir_inner_add_ref_kind(t: &! LsprRenameTable) -> bool with Mut, Panic {
+    let id = lspr_add_symbol(t, "baz")
+    lspr_add_ref(t, id, 1, 1, 0, 2, LSPR_KIND_TYPE)
+    t.symbols[id as usize].refs[0].kind == LSPR_KIND_TYPE
+}
+
+fn tir_inner_add_ref_multiple(t: &! LsprRenameTable) -> bool with Mut, Panic {
+    let id = lspr_add_symbol(t, "x")
+    lspr_add_ref(t, id, 1, 1, 0, 0, LSPR_KIND_DEF)
+    lspr_add_ref(t, id, 1, 5, 0, 0, LSPR_KIND_USE)
+    lspr_add_ref(t, id, 1, 9, 0, 0, LSPR_KIND_USE)
+    t.symbols[id as usize].ref_count == 3
+}
+
+fn tir_inner_rename_bad_name(t: &! LsprRenameTable) -> bool with Mut, Panic {
+    let id = lspr_add_symbol(t, "foo")
+    let r = lspr_rename(t, id, "123bad")
+    r.valid == false
+}
+
+fn tir_inner_rename_same_name(t: &! LsprRenameTable) -> bool with Mut, Panic {
+    let id = lspr_add_symbol(t, "foo")
+    let r = lspr_rename(t, id, "foo")
+    r.valid == false
+}
+
+fn tir_inner_rename_conflict(t: &! LsprRenameTable) -> bool with Mut, Panic {
+    let _a = lspr_add_symbol(t, "foo")
+    let id_b = lspr_add_symbol(t, "bar")
+    let r = lspr_rename(t, id_b, "foo")
+    r.valid == false
+}
+
+fn tir_inner_rename_edit_count(t: &! LsprRenameTable) -> bool with Mut, Panic {
+    let id = lspr_add_symbol(t, "old")
+    lspr_add_ref(t, id, 1, 1, 0, 2, LSPR_KIND_DEF)
+    lspr_add_ref(t, id, 1, 5, 0, 2, LSPR_KIND_USE)
+    lspr_add_ref(t, id, 1, 9, 0, 2, LSPR_KIND_USE)
+    let r = lspr_rename(t, id, "new_name")
+    r.valid && r.count == 3
+}
+
+fn tir_inner_rename_old_name(t: &! LsprRenameTable) -> bool with Mut, Panic {
+    let id = lspr_add_symbol(t, "alpha")
+    lspr_add_ref(t, id, 1, 1, 0, 4, LSPR_KIND_DEF)
+    let r = lspr_rename(t, id, "beta")
+    str_eq(r.edits[0].old_name, "alpha")
+}
+
+fn tir_inner_rename_new_name(t: &! LsprRenameTable) -> bool with Mut, Panic {
+    let id = lspr_add_symbol(t, "alpha")
+    lspr_add_ref(t, id, 1, 1, 0, 4, LSPR_KIND_DEF)
+    let r = lspr_rename(t, id, "beta")
+    str_eq(r.edits[0].new_name, "beta")
+}
+
+fn tir_inner_rename_location(t: &! LsprRenameTable) -> bool with Mut, Panic {
+    let id = lspr_add_symbol(t, "x")
+    lspr_add_ref(t, id, 3, 7, 2, 10, LSPR_KIND_DEF)
+    let r = lspr_rename(t, id, "y")
+    let e = r.edits[0]
+    e.loc.file_id == 3 && e.loc.line == 7 && e.loc.col == 2 && e.loc.end_col == 10
+}
+
+fn tir_inner_rename_no_refs(t: &! LsprRenameTable) -> bool with Mut, Panic {
+    let id = lspr_add_symbol(t, "unused")
+    let r = lspr_rename(t, id, "renamed")
+    r.valid && r.count == 0
+}
+
+fn tir_inner_rename_by_name(t: &! LsprRenameTable) -> bool with Mut, Panic {
+    let id = lspr_add_symbol(t, "dog")
+    lspr_add_ref(t, id, 1, 1, 0, 2, LSPR_KIND_DEF)
+    let r = lspr_rename_by_name(t, "dog", "cat")
+    r.valid && r.count == 1 && str_eq(r.edits[0].new_name, "cat")
+}
+
+fn tir_inner_table_total_refs(t: &! LsprRenameTable) -> bool with Mut, Div, Panic {
+    let id_a = lspr_add_symbol(t, "a")
+    let id_b = lspr_add_symbol(t, "b")
+    lspr_add_ref(t, id_a, 1, 1, 0, 0, LSPR_KIND_DEF)
+    lspr_add_ref(t, id_a, 1, 2, 0, 0, LSPR_KIND_USE)
+    lspr_add_ref(t, id_b, 1, 3, 0, 0, LSPR_KIND_DEF)
+    lspr_table_total_refs(t) == 3
+}
+
+fn tir_inner_table_used_symbols(t: &! LsprRenameTable) -> bool with Mut, Div, Panic {
+    let id_a = lspr_add_symbol(t, "a")
+    let _id_b = lspr_add_symbol(t, "b")
+    lspr_add_ref(t, id_a, 1, 1, 0, 0, LSPR_KIND_DEF)
+    lspr_table_used_symbols(t) == 1
+}
+
+fn tir_inner_table_unreferenced(t: &! LsprRenameTable) -> bool with Mut, Div, Panic {
+    let id_a = lspr_add_symbol(t, "a")
+    let _id_b = lspr_add_symbol(t, "b")
+    lspr_add_ref(t, id_a, 1, 1, 0, 0, LSPR_KIND_DEF)
+    lspr_table_unreferenced_symbols(t) == 1
+}
+
+fn tir_inner_table_most_referenced(t: &! LsprRenameTable) -> bool with Mut, Div, Panic {
+    let id_a = lspr_add_symbol(t, "a")
+    let id_b = lspr_add_symbol(t, "b")
+    lspr_add_ref(t, id_a, 1, 1, 0, 0, LSPR_KIND_DEF)
+    lspr_add_ref(t, id_b, 1, 2, 0, 0, LSPR_KIND_DEF)
+    lspr_add_ref(t, id_b, 1, 3, 0, 0, LSPR_KIND_USE)
+    lspr_table_most_referenced(t) == id_b
+}
+
+fn tir_inner_count_refs_def(t: &! LsprRenameTable) -> bool with Mut, Div, Panic {
+    let id = lspr_add_symbol(t, "f")
+    lspr_add_ref(t, id, 1, 1, 0, 0, LSPR_KIND_DEF)
+    lspr_add_ref(t, id, 1, 2, 0, 0, LSPR_KIND_USE)
+    lspr_add_ref(t, id, 1, 3, 0, 0, LSPR_KIND_USE)
+    lspr_count_refs_of_kind(t, id, LSPR_KIND_DEF) == 1
+}
+
+fn tir_inner_count_refs_use(t: &! LsprRenameTable) -> bool with Mut, Div, Panic {
+    let id = lspr_add_symbol(t, "f")
+    lspr_add_ref(t, id, 1, 1, 0, 0, LSPR_KIND_DEF)
+    lspr_add_ref(t, id, 1, 2, 0, 0, LSPR_KIND_USE)
+    lspr_add_ref(t, id, 1, 3, 0, 0, LSPR_KIND_USE)
+    lspr_count_refs_of_kind(t, id, LSPR_KIND_USE) == 2
+}
+
+fn tir_inner_count_refs_type(t: &! LsprRenameTable) -> bool with Mut, Div, Panic {
+    let id = lspr_add_symbol(t, "MyType")
+    lspr_add_ref(t, id, 1, 1, 0, 5, LSPR_KIND_DEF)
+    lspr_add_ref(t, id, 1, 10, 0, 5, LSPR_KIND_TYPE)
+    lspr_add_ref(t, id, 1, 20, 0, 5, LSPR_KIND_TYPE)
+    lspr_count_refs_of_kind(t, id, LSPR_KIND_TYPE) == 2
+}
+
+fn tir_inner_edits_consistent(t: &! LsprRenameTable) -> bool with Mut, Div, Panic {
+    let id = lspr_add_symbol(t, "old")
+    lspr_add_ref(t, id, 1, 1, 0, 2, LSPR_KIND_DEF)
+    lspr_add_ref(t, id, 1, 5, 0, 2, LSPR_KIND_USE)
+    let r = lspr_rename(t, id, "new_sym")
+    lspr_edits_consistent(&r)
+}
+
+fn tir_inner_edits_unique(t: &! LsprRenameTable) -> bool with Mut, Div, Panic {
+    let id = lspr_add_symbol(t, "p")
+    lspr_add_ref(t, id, 1, 1, 0, 0, LSPR_KIND_DEF)
+    lspr_add_ref(t, id, 1, 5, 0, 0, LSPR_KIND_USE)
+    let r = lspr_rename(t, id, "q")
+    lspr_edits_unique_locations(&r)
+}
+
+fn tir_inner_result_is_safe(t: &! LsprRenameTable) -> bool with Mut, Div, Panic {
+    let id = lspr_add_symbol(t, "old_name")
+    lspr_add_ref(t, id, 1, 1, 0, 7, LSPR_KIND_DEF)
+    let r = lspr_rename(t, id, "new_name")
+    lspr_result_is_safe(&r)
+}
+
+fn tir_inner_filter_by_file(t: &! LsprRenameTable) -> bool with Mut, Div, Panic {
+    let id = lspr_add_symbol(t, "x")
+    lspr_add_ref(t, id, 1, 1, 0, 0, LSPR_KIND_DEF)
+    lspr_add_ref(t, id, 2, 3, 0, 0, LSPR_KIND_USE)
+    lspr_add_ref(t, id, 1, 5, 0, 0, LSPR_KIND_USE)
+    let r = lspr_rename(t, id, "y")
+    let filtered = lspr_filter_edits_by_file(&r, 1)
+    filtered.count == 2
+}
+
+fn tir_inner_edits_in_file(t: &! LsprRenameTable) -> bool with Mut, Div, Panic {
+    let id = lspr_add_symbol(t, "v")
+    lspr_add_ref(t, id, 10, 1, 0, 0, LSPR_KIND_DEF)
+    lspr_add_ref(t, id, 10, 2, 0, 0, LSPR_KIND_USE)
+    lspr_add_ref(t, id, 20, 3, 0, 0, LSPR_KIND_USE)
+    let r = lspr_rename(t, id, "w")
+    lspr_result_edits_in_file(&r, 10) == 2
+}
+
+fn tir_inner_edits_on_line(t: &! LsprRenameTable) -> bool with Mut, Div, Panic {
+    let id = lspr_add_symbol(t, "n")
+    lspr_add_ref(t, id, 1, 5, 0, 0, LSPR_KIND_DEF)
+    lspr_add_ref(t, id, 1, 5, 3, 5, LSPR_KIND_USE)
+    lspr_add_ref(t, id, 1, 7, 0, 0, LSPR_KIND_USE)
+    let r = lspr_rename(t, id, "m")
+    lspr_result_edits_on_line(&r, 5) == 2
+}
+
+fn tir_inner_sort_edits(t: &! LsprRenameTable) -> bool with Mut, Div, Panic {
+    let id = lspr_add_symbol(t, "z")
+    lspr_add_ref(t, id, 1, 10, 0, 0, LSPR_KIND_USE)
+    lspr_add_ref(t, id, 1, 3, 0, 0, LSPR_KIND_DEF)
+    lspr_add_ref(t, id, 1, 7, 0, 0, LSPR_KIND_USE)
+    var r = lspr_rename(t, id, "zz")
+    lspr_sort_edits(&! r)
+    r.edits[0].loc.line <= r.edits[1].loc.line && r.edits[1].loc.line <= r.edits[2].loc.line
+}
+
+fn tir_inner_result_max_line(t: &! LsprRenameTable) -> bool with Mut, Div, Panic {
+    let id = lspr_add_symbol(t, "k")
+    lspr_add_ref(t, id, 1, 1, 0, 0, LSPR_KIND_DEF)
+    lspr_add_ref(t, id, 1, 50, 0, 0, LSPR_KIND_USE)
+    lspr_add_ref(t, id, 1, 25, 0, 0, LSPR_KIND_USE)
+    let r = lspr_rename(t, id, "kk")
+    lspr_result_max_line(&r) == 50
+}
+
+fn tir_inner_result_min_line(t: &! LsprRenameTable) -> bool with Mut, Div, Panic {
+    let id = lspr_add_symbol(t, "g")
+    lspr_add_ref(t, id, 1, 3, 0, 0, LSPR_KIND_DEF)
+    lspr_add_ref(t, id, 1, 8, 0, 0, LSPR_KIND_USE)
+    let r = lspr_rename(t, id, "h")
+    lspr_result_min_line(&r) == 3
+}
+
+fn tir_inner_file_count(t: &! LsprRenameTable) -> bool with Mut, Div, Panic {
+    let id = lspr_add_symbol(t, "multi")
+    lspr_add_ref(t, id, 1, 1, 0, 0, LSPR_KIND_DEF)
+    lspr_add_ref(t, id, 2, 1, 0, 0, LSPR_KIND_USE)
+    lspr_add_ref(t, id, 3, 1, 0, 0, LSPR_KIND_USE)
+    lspr_symbol_file_count(t, id) == 3
+}
+
+fn tir_inner_file_count_dedup(t: &! LsprRenameTable) -> bool with Mut, Div, Panic {
+    let id = lspr_add_symbol(t, "dup")
+    lspr_add_ref(t, id, 1, 1, 0, 0, LSPR_KIND_DEF)
+    lspr_add_ref(t, id, 1, 2, 0, 0, LSPR_KIND_USE)
+    lspr_add_ref(t, id, 2, 1, 0, 0, LSPR_KIND_USE)
+    lspr_symbol_file_count(t, id) == 2
+}
+
+fn tir_inner_symbol_ref_at(t: &! LsprRenameTable) -> bool with Mut, Div, Panic {
+    let id = lspr_add_symbol(t, "ref_test")
+    lspr_add_ref(t, id, 7, 42, 3, 12, LSPR_KIND_DEF)
+    let entry = lspr_symbol_ref_at(t, id, 0)
+    entry.loc.file_id == 7 && entry.loc.line == 42 && entry.kind == LSPR_KIND_DEF
+}
+
+fn tir_inner_symbol_ref_at_oob(t: &! LsprRenameTable) -> bool with Mut, Div, Panic {
+    let id = lspr_add_symbol(t, "r")
+    lspr_add_ref(t, id, 1, 1, 0, 0, LSPR_KIND_DEF)
+    let entry = lspr_symbol_ref_at(t, id, 99)
+    entry.loc.line == 0 && entry.loc.file_id == 0
+}
+
+fn tir_inner_result_edit_at(t: &! LsprRenameTable) -> bool with Mut, Div, Panic {
+    let id = lspr_add_symbol(t, "pp")
+    lspr_add_ref(t, id, 1, 10, 4, 5, LSPR_KIND_DEF)
+    let r = lspr_rename(t, id, "qq")
+    let e = lspr_result_edit_at(&r, 0)
+    e.loc.line == 10 && e.loc.col == 4 && str_eq(e.new_name, "qq")
+}
+
+fn tir_inner_result_edit_at_oob(t: &! LsprRenameTable) -> bool with Mut, Div, Panic {
+    let id = lspr_add_symbol(t, "s")
+    lspr_add_ref(t, id, 1, 1, 0, 0, LSPR_KIND_DEF)
+    let r = lspr_rename(t, id, "t")
+    let e = lspr_result_edit_at(&r, 999)
+    e.loc.line == 0
+}
+
+fn tir_inner_result_valid_true(t: &! LsprRenameTable) -> bool with Mut, Div, Panic {
+    let id = lspr_add_symbol(t, "a1")
+    lspr_add_ref(t, id, 1, 1, 0, 1, LSPR_KIND_DEF)
+    let r = lspr_rename(t, id, "b1")
+    lspr_result_valid(&r)
+}
+
+fn tir_inner_symbol_name(t: &! LsprRenameTable) -> bool with Mut, Div, Panic {
+    let id = lspr_add_symbol(t, "hello")
+    str_eq(lspr_symbol_name(t, id), "hello")
+}
+
+fn tir_inner_symbol_ref_count(t: &! LsprRenameTable) -> bool with Mut, Div, Panic {
+    let id = lspr_add_symbol(t, "cnt")
+    lspr_add_ref(t, id, 1, 1, 0, 0, LSPR_KIND_DEF)
+    lspr_add_ref(t, id, 1, 2, 0, 0, LSPR_KIND_USE)
+    lspr_symbol_ref_count(t, id) == 2
+}
+
+fn tir_inner_rename_type_ref(t: &! LsprRenameTable) -> bool with Mut, Div, Panic {
+    let id = lspr_add_symbol(t, "OldType")
+    lspr_add_ref(t, id, 1, 1, 0, 6, LSPR_KIND_DEF)
+    lspr_add_ref(t, id, 2, 5, 10, 16, LSPR_KIND_TYPE)
+    let r = lspr_rename(t, id, "NewType")
+    r.valid && r.count == 2
+}
+
+fn tir_inner_full_pipeline(t: &! LsprRenameTable) -> bool with Mut, Div, Panic {
+    let id = lspr_add_symbol(t, "compute")
+    lspr_add_ref(t, id, 1, 10, 0, 6, LSPR_KIND_DEF)
+    lspr_add_ref(t, id, 1, 3, 0, 6, LSPR_KIND_USE)
+    lspr_add_ref(t, id, 2, 1, 0, 6, LSPR_KIND_USE)
+    var r = lspr_rename(t, id, "evaluate")
+    lspr_sort_edits(&! r)
+    let safe = lspr_result_is_safe(&r)
+    let consistent = lspr_edits_consistent(&r)
+    let unique = lspr_edits_unique_locations(&r)
+    safe && consistent && unique && r.count == 3
+}
+
+// T01: lspr_table_new starts empty
+fn test_lspr_table_new_empty() -> bool {
+    let t = lspr_table_new()
+    t.count == 0
+}
+
+// T02: lspr_add_symbol returns 0 for first symbol
+fn test_lspr_add_symbol_first() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    let id = lspr_add_symbol(&! t, "foo")
+    id == 0
+}
+
+// T03: lspr_add_symbol increments count
+fn test_lspr_add_symbol_count() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_add_symbol_count(&! t)
+}
+
+// T04: lspr_find_symbol finds by name
+fn test_lspr_find_symbol_found() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_find_symbol_found(&! t)
+}
+
+// T05: lspr_find_symbol returns INVALID for unknown
+fn test_lspr_find_symbol_miss() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_find_symbol_miss(&! t)
+}
+
+// T06: lspr_find_symbol returns INVALID on empty table
+fn test_lspr_find_symbol_empty() -> bool {
+    let t = lspr_table_new()
+    lspr_find_symbol(&t, "x") == LSPR_INVALID
+}
+
+// T07: lspr_add_ref adds to symbol ref list
+fn test_lspr_add_ref_basic() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_add_ref_basic(&! t)
+}
+
+// T08: lspr_add_ref stores file_id correctly
+fn test_lspr_add_ref_file_id() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_add_ref_file_id(&! t)
+}
+
+// T09: lspr_add_ref stores line correctly
+fn test_lspr_add_ref_line() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_add_ref_line(&! t)
+}
+
+// T10: lspr_add_ref stores kind correctly
+fn test_lspr_add_ref_kind() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_add_ref_kind(&! t)
+}
+
+// T11: lspr_add_ref with invalid sym_id is a no-op
+fn test_lspr_add_ref_bad_id() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    lspr_add_ref(&! t, 99, 1, 1, 0, 2, LSPR_KIND_USE)
+    t.count == 0
+}
+
+// T12: multiple refs to same symbol
+fn test_lspr_add_ref_multiple() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_add_ref_multiple(&! t)
+}
+
+// T13: lspr_validate_name accepts simple identifier
+fn test_lspr_validate_name_simple() -> bool {
+    lspr_validate_name("foo") == true
+}
+
+// T14: lspr_validate_name accepts underscore-prefixed
+fn test_lspr_validate_name_underscore() -> bool {
+    lspr_validate_name("_foo") == true
+}
+
+// T15: lspr_validate_name accepts mixed case with digits
+fn test_lspr_validate_name_mixed() -> bool {
+    lspr_validate_name("Foo123") == true
+}
+
+// T16: lspr_validate_name rejects empty string
+fn test_lspr_validate_name_empty() -> bool {
+    lspr_validate_name("") == false
+}
+
+// T17: lspr_validate_name rejects digit start
+fn test_lspr_validate_name_digit_start() -> bool {
+    lspr_validate_name("1foo") == false
+}
+
+// T18: lspr_validate_name rejects space
+fn test_lspr_validate_name_space() -> bool {
+    lspr_validate_name("foo bar") == false
+}
+
+// T19: lspr_validate_name rejects dot
+fn test_lspr_validate_name_dot() -> bool {
+    lspr_validate_name("foo.bar") == false
+}
+
+// T20: lspr_validate_name rejects hyphen
+fn test_lspr_validate_name_hyphen() -> bool {
+    lspr_validate_name("foo-bar") == false
+}
+
+// T21: lspr_rename with invalid sym_id returns error
+fn test_lspr_rename_bad_id() -> bool {
+    let t = lspr_table_new()
+    let r = lspr_rename(&t, 99, "new_name")
+    r.valid == false
+}
+
+// T22: lspr_rename with invalid new_name returns error
+fn test_lspr_rename_bad_name() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_rename_bad_name(&! t)
+}
+
+// T23: lspr_rename with same name returns error
+fn test_lspr_rename_same_name() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_rename_same_name(&! t)
+}
+
+// T24: lspr_rename with conflicting name returns error
+fn test_lspr_rename_conflict() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_rename_conflict(&! t)
+}
+
+// T25: lspr_rename produces one edit per ref
+fn test_lspr_rename_edit_count() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_rename_edit_count(&! t)
+}
+
+// T26: lspr_rename edit has correct old_name
+fn test_lspr_rename_old_name() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_rename_old_name(&! t)
+}
+
+// T27: lspr_rename edit has correct new_name
+fn test_lspr_rename_new_name() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_rename_new_name(&! t)
+}
+
+// T28: lspr_rename edit has correct location
+fn test_lspr_rename_edit_location() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_rename_location(&! t)
+}
+
+// T29: lspr_rename with no refs produces 0 edits but is valid
+fn test_lspr_rename_no_refs() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_rename_no_refs(&! t)
+}
+
+// T30: lspr_rename_by_name finds symbol and renames
+fn test_lspr_rename_by_name() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_rename_by_name(&! t)
+}
+
+// T31: lspr_rename_by_name returns error for unknown symbol
+fn test_lspr_rename_by_name_miss() -> bool {
+    let t = lspr_table_new()
+    let r = lspr_rename_by_name(&t, "ghost", "new_name")
+    r.valid == false
+}
+
+// T32: lspr_location_new sets fields correctly
+fn test_lspr_location_new() -> bool {
+    let loc = lspr_location_new(5, 10, 3, 8)
+    loc.file_id == 5 && loc.line == 10 && loc.col == 3 && loc.end_col == 8
+}
+
+// T33: lspr_location_eq is true for identical locations
+fn test_lspr_location_eq_true() -> bool {
+    let a = lspr_location_new(1, 2, 3, 4)
+    let b = lspr_location_new(1, 2, 3, 4)
+    lspr_location_eq(&a, &b)
+}
+
+// T34: lspr_location_eq is false for different locations
+fn test_lspr_location_eq_false() -> bool {
+    let a = lspr_location_new(1, 2, 3, 4)
+    let b = lspr_location_new(1, 2, 3, 5)
+    lspr_location_eq(&a, &b) == false
+}
+
+// T35: lspr_location_span computes correctly
+fn test_lspr_location_span() -> bool {
+    let loc = lspr_location_new(1, 1, 4, 9)
+    lspr_location_span(&loc) == 6
+}
+
+// T36: lspr_location_contains_col true when inside
+fn test_lspr_location_contains_col_in() -> bool {
+    let loc = lspr_location_new(1, 1, 5, 10)
+    lspr_location_contains_col(&loc, 7)
+}
+
+// T37: lspr_location_contains_col false when outside
+fn test_lspr_location_contains_col_out() -> bool {
+    let loc = lspr_location_new(1, 1, 5, 10)
+    lspr_location_contains_col(&loc, 11) == false
+}
+
+// T38: lspr_table_total_refs counts across all symbols
+fn test_lspr_table_total_refs() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_table_total_refs(&! t)
+}
+
+// T39: lspr_table_used_symbols counts referenced symbols
+fn test_lspr_table_used_symbols() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_table_used_symbols(&! t)
+}
+
+// T40: lspr_table_unreferenced_symbols counts symbols without refs
+fn test_lspr_table_unreferenced_symbols() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_table_unreferenced(&! t)
+}
+
+// T41: lspr_table_most_referenced returns correct id
+fn test_lspr_table_most_referenced() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_table_most_referenced(&! t)
+}
+
+// T42: lspr_table_most_referenced on empty table returns INVALID
+fn test_lspr_table_most_referenced_empty() -> bool {
+    let t = lspr_table_new()
+    lspr_table_most_referenced(&t) == LSPR_INVALID
+}
+
+// T43: lspr_count_refs_of_kind counts DEF refs
+fn test_lspr_count_refs_of_kind_def() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_count_refs_def(&! t)
+}
+
+// T44: lspr_count_refs_of_kind counts USE refs
+fn test_lspr_count_refs_of_kind_use() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_count_refs_use(&! t)
+}
+
+// T45: lspr_count_refs_of_kind counts TYPE refs
+fn test_lspr_count_refs_of_kind_type() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_count_refs_type(&! t)
+}
+
+// T46: lspr_edits_consistent is true for matching edits
+fn test_lspr_edits_consistent_true() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_edits_consistent(&! t)
+}
+
+// T47: lspr_edits_unique_locations is true for unique refs
+fn test_lspr_edits_unique_locations_true() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_edits_unique(&! t)
+}
+
+// T48: lspr_result_is_safe is true for valid rename
+fn test_lspr_result_is_safe_true() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_result_is_safe(&! t)
+}
+
+// T49: lspr_result_is_safe is false for error result
+fn test_lspr_result_is_safe_error() -> bool {
+    let r = lspr_result_error("some error")
+    lspr_result_is_safe(&r) == false
+}
+
+// T50: lspr_filter_edits_by_file selects correct file
+fn test_lspr_filter_edits_by_file() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_filter_by_file(&! t)
+}
+
+// T51: lspr_result_edits_in_file counts per file
+fn test_lspr_result_edits_in_file() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_edits_in_file(&! t)
+}
+
+// T52: lspr_result_edits_on_line counts per line
+fn test_lspr_result_edits_on_line() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_edits_on_line(&! t)
+}
+
+// T53: lspr_sort_edits orders by line ascending
+fn test_lspr_sort_edits_by_line() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_sort_edits(&! t)
+}
+
+// T54: lspr_result_max_line finds largest line
+fn test_lspr_result_max_line() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_result_max_line(&! t)
+}
+
+// T55: lspr_result_min_line finds smallest line
+fn test_lspr_result_min_line() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_result_min_line(&! t)
+}
+
+// T56: lspr_symbol_file_count counts distinct files
+fn test_lspr_symbol_file_count() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_file_count(&! t)
+}
+
+// T57: lspr_symbol_file_count deduplicates files
+fn test_lspr_symbol_file_count_dedup() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_file_count_dedup(&! t)
+}
+
+// T58: lspr_symbol_ref_at returns correct entry
+fn test_lspr_symbol_ref_at() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_symbol_ref_at(&! t)
+}
+
+// T59: lspr_symbol_ref_at out-of-bounds returns zero entry
+fn test_lspr_symbol_ref_at_oob() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_symbol_ref_at_oob(&! t)
+}
+
+// T60: lspr_result_edit_at returns correct edit
+fn test_lspr_result_edit_at() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_result_edit_at(&! t)
+}
+
+// T61: lspr_result_edit_at out-of-bounds returns zero edit
+fn test_lspr_result_edit_at_oob() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_result_edit_at_oob(&! t)
+}
+
+// T62: lspr_result_valid is true for successful rename
+fn test_lspr_result_valid_true() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_result_valid_true(&! t)
+}
+
+// T63: lspr_result_valid is false for error result
+fn test_lspr_result_valid_false() -> bool {
+    let r = lspr_result_error("err")
+    lspr_result_valid(&r) == false
+}
+
+// T64: lspr_result_error_msg returns message
+fn test_lspr_result_error_msg() -> bool {
+    let r = lspr_result_error("symbol not found")
+    str_eq(lspr_result_error_msg(&r), "symbol not found")
+}
+
+// T65: lspr_validate_name accepts all-caps identifier
+fn test_lspr_validate_name_caps() -> bool {
+    lspr_validate_name("FOO_BAR") == true
+}
+
+// T66: lspr_validate_name rejects empty (double check)
+fn test_lspr_validate_name_empty2() -> bool {
+    lspr_validate_name("") == false
+}
+
+// T67: lspr_symbol_name returns correct name
+fn test_lspr_symbol_name() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_symbol_name(&! t)
+}
+
+// T68: lspr_symbol_ref_count returns correct count
+fn test_lspr_symbol_ref_count() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_symbol_ref_count(&! t)
+}
+
+// T69: rename with TYPE kind ref works
+fn test_lspr_rename_type_ref() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_rename_type_ref(&! t)
+}
+
+// T70: full pipeline: add, ref, rename, sort, verify
+fn test_lspr_full_pipeline() -> bool with Mut, Div, Panic {
+    var t = lspr_table_new()
+    tir_inner_full_pipeline(&! t)
+}
+
+// ============================================================================
+// Section 16: TEST RUNNER
+// ============================================================================
+
+fn lspr_run_all_tests() -> i64 with Mut, Div, Panic {
+    var passed: i64 = 0
+    var failed: i64 = 0
+
+    if test_lspr_table_new_empty()             { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_add_symbol_first()            { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_add_symbol_count()            { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_find_symbol_found()           { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_find_symbol_miss()            { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_find_symbol_empty()           { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_add_ref_basic()               { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_add_ref_file_id()             { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_add_ref_line()                { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_add_ref_kind()                { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_add_ref_bad_id()              { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_add_ref_multiple()            { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_validate_name_simple()        { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_validate_name_underscore()    { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_validate_name_mixed()         { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_validate_name_empty()         { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_validate_name_digit_start()   { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_validate_name_space()         { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_validate_name_dot()           { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_validate_name_hyphen()        { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_rename_bad_id()               { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_rename_bad_name()             { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_rename_same_name()            { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_rename_conflict()             { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_rename_edit_count()           { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_rename_old_name()             { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_rename_new_name()             { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_rename_edit_location()        { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_rename_no_refs()              { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_rename_by_name()              { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_rename_by_name_miss()         { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_location_new()                { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_location_eq_true()            { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_location_eq_false()           { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_location_span()               { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_location_contains_col_in()    { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_location_contains_col_out()   { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_table_total_refs()            { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_table_used_symbols()          { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_table_unreferenced_symbols()  { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_table_most_referenced()       { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_table_most_referenced_empty() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_count_refs_of_kind_def()      { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_count_refs_of_kind_use()      { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_count_refs_of_kind_type()     { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_edits_consistent_true()       { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_edits_unique_locations_true() { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_result_is_safe_true()         { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_result_is_safe_error()        { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_filter_edits_by_file()        { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_result_edits_in_file()        { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_result_edits_on_line()        { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_sort_edits_by_line()          { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_result_max_line()             { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_result_min_line()             { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_symbol_file_count()           { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_symbol_file_count_dedup()     { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_symbol_ref_at()               { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_symbol_ref_at_oob()           { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_result_edit_at()              { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_result_edit_at_oob()          { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_result_valid_true()           { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_result_valid_false()          { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_result_error_msg()            { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_validate_name_caps()          { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_validate_name_empty2()        { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_symbol_name()                 { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_symbol_ref_count()            { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_rename_type_ref()             { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspr_full_pipeline()               { passed = passed + 1 } else { failed = failed + 1 }
+
+    if failed == 0 {
+        return 0
+    }
+    failed
+}

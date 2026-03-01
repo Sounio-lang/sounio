@@ -1,0 +1,1274 @@
+// self-hosted::lsp::code_actions -- LSP code actions provider for Sounio
+//
+// Suggests quick fixes and refactorings based on the cursor position and
+// any diagnostics attached to that position.  All state lives in flat
+// fixed-size arenas -- no heap allocation, no recursive structures.
+//
+// Known action generators:
+//   - "Add missing import"    (triggered by error code 1001)
+//   - "Fix unused variable"   (triggered by warning code 2001)
+//   - "Add type annotation"   (triggered by info code 3001)
+//   - "Remove dead code"      (triggered by warning code 2002)
+//   - "Extract to function"   (refactor, cursor in expression)
+//   - "Inline variable"       (refactor, cursor on variable)
+//
+// Capacities:
+//   - Diagnostics per context: 64
+//   - Actions per list: 64
+//   - Edits per action: 16
+//
+// Prefix: lspca_
+
+// ============================================================================
+// Section 1: CONSTANTS
+// ============================================================================
+
+let LSPCA_MAX_DIAGS:   i64 = 64
+let LSPCA_MAX_ACTIONS: i64 = 64
+let LSPCA_MAX_EDITS:   i64 = 16
+let LSPCA_INVALID:     i64 = 0 - 1
+
+// Action kind codes
+let LSPCA_KIND_QUICKFIX:         i64 = 0
+let LSPCA_KIND_REFACTOR:         i64 = 1
+let LSPCA_KIND_REFACTOR_EXTRACT: i64 = 2
+let LSPCA_KIND_REFACTOR_INLINE:  i64 = 3
+let LSPCA_KIND_SOURCE:           i64 = 4
+
+// Known diagnostic codes that trigger actions
+let LSPCA_DIAG_MISSING_IMPORT:   i64 = 1001
+let LSPCA_DIAG_UNUSED_VAR:       i64 = 2001
+let LSPCA_DIAG_DEAD_CODE:        i64 = 2002
+let LSPCA_DIAG_TYPE_ANNOTATION:  i64 = 3001
+let LSPCA_DIAG_UNKNOWN_FIELD:    i64 = 1002
+let LSPCA_DIAG_TYPE_MISMATCH:    i64 = 1003
+
+// Priority values
+let LSPCA_PRIO_HIGH:   i64 = 100
+let LSPCA_PRIO_MEDIUM: i64 = 50
+let LSPCA_PRIO_LOW:    i64 = 10
+
+// ============================================================================
+// Section 2: CORE STRUCTS
+// ============================================================================
+
+struct LspcaRange {
+    start_line: i64,
+    start_col:  i64,
+    end_line:   i64,
+    end_col:    i64,
+}
+
+struct LspcaEdit {
+    file_id:  i64,
+    range:    LspcaRange,
+    new_text: string,
+}
+
+struct LspcaAction {
+    title:      string,
+    kind:       i64,
+    edits:      [LspcaEdit; 16],
+    edit_count: i64,
+    priority:   i64,
+}
+
+struct LspcaDiag {
+    code:    i64,
+    range:   LspcaRange,
+    message: string,
+}
+
+struct LspcaContext {
+    diags:       [LspcaDiag; 64],
+    count:       i64,
+    file_id:     i64,
+    cursor_line: i64,
+    cursor_col:  i64,
+}
+
+struct LspcaList {
+    actions: [LspcaAction; 64],
+    count:   i64,
+}
+
+// ============================================================================
+// Section 3: ZERO-VALUE CONSTRUCTORS (helpers must precede callers)
+// ============================================================================
+
+fn lspca_range_new(sl: i64, sc: i64, el: i64, ec: i64) -> LspcaRange {
+    LspcaRange {
+        start_line: sl,
+        start_col:  sc,
+        end_line:   el,
+        end_col:    ec,
+    }
+}
+
+fn lspca_range_zero() -> LspcaRange {
+    LspcaRange {
+        start_line: 0,
+        start_col:  0,
+        end_line:   0,
+        end_col:    0,
+    }
+}
+
+fn lspca_edit_zero() -> LspcaEdit {
+    LspcaEdit {
+        file_id:  0,
+        range:    lspca_range_zero(),
+        new_text: "",
+    }
+}
+
+fn lspca_action_zero() -> LspcaAction {
+    LspcaAction {
+        title:      "",
+        kind:       LSPCA_KIND_QUICKFIX,
+        edits:      [lspca_edit_zero(); 16],
+        edit_count: 0,
+        priority:   0,
+    }
+}
+
+fn lspca_diag_zero() -> LspcaDiag {
+    LspcaDiag {
+        code:    0,
+        range:   lspca_range_zero(),
+        message: "",
+    }
+}
+
+fn lspca_context_new(file_id: i64, line: i64, col: i64) -> LspcaContext {
+    LspcaContext {
+        diags:       [lspca_diag_zero(); 64],
+        count:       0,
+        file_id:     file_id,
+        cursor_line: line,
+        cursor_col:  col,
+    }
+}
+
+fn lspca_list_new() -> LspcaList {
+    LspcaList {
+        actions: [lspca_action_zero(); 64],
+        count:   0,
+    }
+}
+
+// ============================================================================
+// Section 4: CONTEXT OPERATIONS
+// ============================================================================
+
+// Add a diagnostic to the context.
+fn lspca_add_diag(ctx: &! LspcaContext, code: i64, start_line: i64, start_col: i64, end_line: i64, end_col: i64, msg: string) with Mut, Panic {
+    if ctx.count >= LSPCA_MAX_DIAGS {
+        return
+    }
+    let idx = ctx.count
+    ctx.diags[idx as usize] = LspcaDiag {
+        code:    code,
+        range:   lspca_range_new(start_line, start_col, end_line, end_col),
+        message: msg,
+    }
+    ctx.count = ctx.count + 1
+}
+
+// Count diagnostics in context.
+fn lspca_context_diag_count(ctx: &LspcaContext) -> i64 {
+    ctx.count
+}
+
+// Check if cursor is inside a given range.
+fn lspca_cursor_in_range(ctx: &LspcaContext, r: &LspcaRange) -> bool {
+    let line = ctx.cursor_line
+    let col  = ctx.cursor_col
+    if line < r.start_line { return false }
+    if line > r.end_line   { return false }
+    if r.start_line == r.end_line {
+        return col >= r.start_col && col <= r.end_col
+    }
+    if line == r.start_line { return col >= r.start_col }
+    if line == r.end_line   { return col <= r.end_col }
+    true
+}
+
+// Find a diagnostic whose range contains the cursor.  Returns its index or INVALID.
+fn lspca_find_diag_at_cursor(ctx: &LspcaContext) -> i64 {
+    var i: i64 = 0
+    while i < ctx.count {
+        if lspca_cursor_in_range(ctx, &ctx.diags[i as usize].range) {
+            return i
+        }
+        i = i + 1
+    }
+    LSPCA_INVALID
+}
+
+// Find a diagnostic with a specific code.  Returns its index or INVALID.
+fn lspca_find_diag_by_code(ctx: &LspcaContext, code: i64) -> i64 {
+    var i: i64 = 0
+    while i < ctx.count {
+        if ctx.diags[i as usize].code == code {
+            return i
+        }
+        i = i + 1
+    }
+    LSPCA_INVALID
+}
+
+// Count diagnostics with a specific code.
+fn lspca_count_diags_by_code(ctx: &LspcaContext, code: i64) -> i64 {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < ctx.count {
+        if ctx.diags[i as usize].code == code {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// ============================================================================
+// Section 5: ACTION LIST OPERATIONS
+// ============================================================================
+
+// Add a new action to the list.  Returns the action index.
+fn lspca_add_action(l: &! LspcaList, title: string, kind: i64, priority: i64) -> i64 with Mut, Panic {
+    if l.count >= LSPCA_MAX_ACTIONS {
+        return LSPCA_INVALID
+    }
+    let idx = l.count
+    l.actions[idx as usize] = LspcaAction {
+        title:      title,
+        kind:       kind,
+        edits:      [lspca_edit_zero(); 16],
+        edit_count: 0,
+        priority:   priority,
+    }
+    l.count = l.count + 1
+    idx
+}
+
+// Add an edit to an action.
+fn lspca_add_edit(l: &! LspcaList, action_idx: i64, file_id: i64, start_line: i64, start_col: i64, end_line: i64, end_col: i64, text: string) with Mut, Panic {
+    if action_idx < 0 || action_idx >= l.count {
+        return
+    }
+    let ec = l.actions[action_idx as usize].edit_count
+    if ec >= LSPCA_MAX_EDITS {
+        return
+    }
+    l.actions[action_idx as usize].edits[ec as usize] = LspcaEdit {
+        file_id:  file_id,
+        range:    lspca_range_new(start_line, start_col, end_line, end_col),
+        new_text: text,
+    }
+    l.actions[action_idx as usize].edit_count = ec + 1
+}
+
+// Get action title.
+fn lspca_action_title(l: &LspcaList, idx: i64) -> string with Panic {
+    if idx < 0 || idx >= l.count { return "" }
+    l.actions[idx as usize].title
+}
+
+// Get action kind.
+fn lspca_action_kind(l: &LspcaList, idx: i64) -> i64 with Panic {
+    if idx < 0 || idx >= l.count { return LSPCA_INVALID }
+    l.actions[idx as usize].kind
+}
+
+// Get action priority.
+fn lspca_action_priority(l: &LspcaList, idx: i64) -> i64 with Panic {
+    if idx < 0 || idx >= l.count { return 0 }
+    l.actions[idx as usize].priority
+}
+
+// Get action edit count.
+fn lspca_action_edit_count(l: &LspcaList, idx: i64) -> i64 with Panic {
+    if idx < 0 || idx >= l.count { return 0 }
+    l.actions[idx as usize].edit_count
+}
+
+// Get total action count.
+fn lspca_list_count(l: &LspcaList) -> i64 {
+    l.count
+}
+
+// Get an edit from an action.
+fn lspca_action_edit_at(l: &LspcaList, action_idx: i64, edit_idx: i64) -> LspcaEdit with Panic {
+    if action_idx < 0 || action_idx >= l.count { return lspca_edit_zero() }
+    let ec = l.actions[action_idx as usize].edit_count
+    if edit_idx < 0 || edit_idx >= ec { return lspca_edit_zero() }
+    l.actions[action_idx as usize].edits[edit_idx as usize]
+}
+
+// ============================================================================
+// Section 6: SORT
+// ============================================================================
+
+// Insertion-sort actions by priority descending.
+fn lspca_sort(l: &! LspcaList) with Mut, Div, Panic {
+    var i: i64 = 1
+    while i < l.count {
+        let key = l.actions[i as usize]
+        var j: i64 = i - 1
+        while j >= 0 {
+            // Sort descending: move elements with lower priority to the right
+            if l.actions[j as usize].priority < key.priority {
+                l.actions[(j + 1) as usize] = l.actions[j as usize]
+                j = j - 1
+            } else {
+                j = 0 - 1
+            }
+        }
+        l.actions[(j + 1) as usize] = key
+        i = i + 1
+    }
+}
+
+// ============================================================================
+// Section 7: RANGE UTILITIES
+// ============================================================================
+
+fn lspca_range_eq(a: &LspcaRange, b: &LspcaRange) -> bool {
+    a.start_line == b.start_line
+        && a.start_col == b.start_col
+        && a.end_line  == b.end_line
+        && a.end_col   == b.end_col
+}
+
+fn lspca_range_is_zero(r: &LspcaRange) -> bool {
+    r.start_line == 0 && r.start_col == 0 && r.end_line == 0 && r.end_col == 0
+}
+
+fn lspca_range_line_count(r: &LspcaRange) -> i64 {
+    r.end_line - r.start_line + 1
+}
+
+fn lspca_range_same_line(r: &LspcaRange) -> bool {
+    r.start_line == r.end_line
+}
+
+// ============================================================================
+// Section 8: KNOWN-ACTION GENERATORS
+// ============================================================================
+
+// Generate "Add missing import" quick fix.
+// Inserts an import line at the top of the file (line 0, col 0).
+fn lspca_gen_add_import(l: &! LspcaList, ctx: &LspcaContext, import_text: string) with Mut, Div, Panic {
+    let idx = lspca_add_action(l, "Add missing import", LSPCA_KIND_QUICKFIX, LSPCA_PRIO_HIGH)
+    if idx == LSPCA_INVALID { return }
+    lspca_add_edit(l, idx, ctx.file_id, 0, 0, 0, 0, import_text)
+}
+
+// Generate "Fix unused variable" quick fix.
+// Prefixes the variable name with _ to silence the warning.
+// The edit text is the prefixed name; range covers the variable name.
+fn lspca_gen_fix_unused_var(l: &! LspcaList, ctx: &LspcaContext, diag_idx: i64) with Mut, Div, Panic {
+    if diag_idx < 0 || diag_idx >= ctx.count { return }
+    let dr = ctx.diags[diag_idx as usize].range
+    let idx = lspca_add_action(l, "Fix unused variable", LSPCA_KIND_QUICKFIX, LSPCA_PRIO_MEDIUM)
+    if idx == LSPCA_INVALID { return }
+    lspca_add_edit(l, idx, ctx.file_id,
+        dr.start_line, dr.start_col, dr.end_line, dr.end_col,
+        "_unused")
+}
+
+// Generate "Add type annotation" action.
+// Inserts ": <type>" after the variable name.
+fn lspca_gen_add_type_annotation(l: &! LspcaList, ctx: &LspcaContext, diag_idx: i64) with Mut, Div, Panic {
+    if diag_idx < 0 || diag_idx >= ctx.count { return }
+    let dr = ctx.diags[diag_idx as usize].range
+    let idx = lspca_add_action(l, "Add type annotation", LSPCA_KIND_QUICKFIX, LSPCA_PRIO_LOW)
+    if idx == LSPCA_INVALID { return }
+    // Insert annotation at end of name token
+    lspca_add_edit(l, idx, ctx.file_id,
+        dr.end_line, dr.end_col, dr.end_line, dr.end_col,
+        ": _")
+}
+
+// Generate "Remove dead code" source action.
+// Deletes the range covered by the diagnostic.
+fn lspca_gen_remove_dead_code(l: &! LspcaList, ctx: &LspcaContext, diag_idx: i64) with Mut, Div, Panic {
+    if diag_idx < 0 || diag_idx >= ctx.count { return }
+    let dr = ctx.diags[diag_idx as usize].range
+    let idx = lspca_add_action(l, "Remove dead code", LSPCA_KIND_SOURCE, LSPCA_PRIO_LOW)
+    if idx == LSPCA_INVALID { return }
+    lspca_add_edit(l, idx, ctx.file_id,
+        dr.start_line, dr.start_col, dr.end_line, dr.end_col,
+        "")
+}
+
+// Generate "Extract to function" refactor.
+// Placeholder edit: wraps cursor line in a function skeleton.
+fn lspca_gen_extract_function(l: &! LspcaList, ctx: &LspcaContext) with Mut, Div, Panic {
+    let idx = lspca_add_action(l, "Extract to function", LSPCA_KIND_REFACTOR_EXTRACT, LSPCA_PRIO_MEDIUM)
+    if idx == LSPCA_INVALID { return }
+    lspca_add_edit(l, idx, ctx.file_id,
+        ctx.cursor_line, 0, ctx.cursor_line, 0,
+        "fn extracted() {\n")
+    lspca_add_edit(l, idx, ctx.file_id,
+        ctx.cursor_line + 1, 0, ctx.cursor_line + 1, 0,
+        "}\n")
+}
+
+// Generate "Inline variable" refactor.
+// Placeholder: marks the range for inlining.
+fn lspca_gen_inline_variable(l: &! LspcaList, ctx: &LspcaContext) with Mut, Div, Panic {
+    let idx = lspca_add_action(l, "Inline variable", LSPCA_KIND_REFACTOR_INLINE, LSPCA_PRIO_LOW)
+    if idx == LSPCA_INVALID { return }
+    lspca_add_edit(l, idx, ctx.file_id,
+        ctx.cursor_line, ctx.cursor_col, ctx.cursor_line, ctx.cursor_col,
+        "/* inline */")
+}
+
+// ============================================================================
+// Section 9: COMPUTE (main dispatch)
+// ============================================================================
+
+// Generate all applicable code actions for the given context.
+// Inspects each diagnostic and the cursor position.
+fn lspca_compute(ctx: &LspcaContext) -> LspcaList with Mut, Div, Panic {
+    var l = lspca_list_new()
+
+    // Walk each diagnostic and emit relevant actions
+    var i: i64 = 0
+    while i < ctx.count {
+        let code = ctx.diags[i as usize].code
+        if code == LSPCA_DIAG_MISSING_IMPORT {
+            lspca_gen_add_import(&! l, ctx, "use missing::module")
+        }
+        if code == LSPCA_DIAG_UNUSED_VAR {
+            lspca_gen_fix_unused_var(&! l, ctx, i)
+        }
+        if code == LSPCA_DIAG_TYPE_ANNOTATION {
+            lspca_gen_add_type_annotation(&! l, ctx, i)
+        }
+        if code == LSPCA_DIAG_DEAD_CODE {
+            lspca_gen_remove_dead_code(&! l, ctx, i)
+        }
+        i = i + 1
+    }
+
+    // Cursor-position-based refactors (always available)
+    lspca_gen_extract_function(&! l, ctx)
+    lspca_gen_inline_variable(&! l, ctx)
+
+    lspca_sort(&! l)
+    l
+}
+
+// ============================================================================
+// Section 10: QUERY HELPERS
+// ============================================================================
+
+// Find the first action in a list with a given kind.
+fn lspca_find_action_by_kind(l: &LspcaList, kind: i64) -> i64 {
+    var i: i64 = 0
+    while i < l.count {
+        if l.actions[i as usize].kind == kind {
+            return i
+        }
+        i = i + 1
+    }
+    LSPCA_INVALID
+}
+
+// Find the first action in a list with a given title prefix (exact match).
+fn lspca_find_action_by_title(l: &LspcaList, title: string) -> i64 {
+    var i: i64 = 0
+    while i < l.count {
+        if str_eq(l.actions[i as usize].title, title) {
+            return i
+        }
+        i = i + 1
+    }
+    LSPCA_INVALID
+}
+
+// Count actions of a specific kind.
+fn lspca_count_by_kind(l: &LspcaList, kind: i64) -> i64 {
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < l.count {
+        if l.actions[i as usize].kind == kind {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// Check that list is sorted by priority descending.
+fn lspca_is_sorted(l: &LspcaList) -> bool {
+    if l.count <= 1 { return true }
+    var i: i64 = 1
+    while i < l.count {
+        if l.actions[(i - 1) as usize].priority < l.actions[i as usize].priority {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Return the highest priority in the list.
+fn lspca_max_priority(l: &LspcaList) -> i64 {
+    if l.count == 0 { return 0 - 1 }
+    var best: i64 = l.actions[0].priority
+    var i: i64 = 1
+    while i < l.count {
+        if l.actions[i as usize].priority > best {
+            best = l.actions[i as usize].priority
+        }
+        i = i + 1
+    }
+    best
+}
+
+// Return the lowest priority in the list.
+fn lspca_min_priority(l: &LspcaList) -> i64 {
+    if l.count == 0 { return 0 - 1 }
+    var best: i64 = l.actions[0].priority
+    var i: i64 = 1
+    while i < l.count {
+        if l.actions[i as usize].priority < best {
+            best = l.actions[i as usize].priority
+        }
+        i = i + 1
+    }
+    best
+}
+
+// Count total edits across all actions.
+fn lspca_total_edits(l: &LspcaList) -> i64 {
+    var total: i64 = 0
+    var i: i64 = 0
+    while i < l.count {
+        total = total + l.actions[i as usize].edit_count
+        i = i + 1
+    }
+    total
+}
+
+// ============================================================================
+// Section 11: TESTS
+// ============================================================================
+
+// Inner helpers that encapsulate multi-borrow sequences within single &! borrow.
+
+fn tca_inner_add_action_count(l: &! LspcaList) -> bool with Mut, Div, Panic {
+    let _a = lspca_add_action(l, "A", LSPCA_KIND_QUICKFIX, 10)
+    let _b = lspca_add_action(l, "B", LSPCA_KIND_REFACTOR, 20)
+    l.count == 2
+}
+
+fn tca_inner_add_edit_count(l: &! LspcaList) -> bool with Mut, Div, Panic {
+    let idx = lspca_add_action(l, "Fix", LSPCA_KIND_QUICKFIX, 50)
+    lspca_add_edit(l, idx, 1, 0, 0, 0, 5, "import x")
+    l.actions[idx as usize].edit_count == 1
+}
+
+fn tca_inner_add_edit_file(l: &! LspcaList) -> bool with Mut, Div, Panic {
+    let idx = lspca_add_action(l, "Fix", LSPCA_KIND_QUICKFIX, 50)
+    lspca_add_edit(l, idx, 42, 0, 0, 0, 5, "text")
+    l.actions[idx as usize].edits[0].file_id == 42
+}
+
+fn tca_inner_add_edit_text(l: &! LspcaList) -> bool with Mut, Div, Panic {
+    let idx = lspca_add_action(l, "Fix", LSPCA_KIND_QUICKFIX, 50)
+    lspca_add_edit(l, idx, 1, 1, 0, 1, 3, "replacement")
+    str_eq(l.actions[idx as usize].edits[0].new_text, "replacement")
+}
+
+fn tca_inner_sort_desc(l: &! LspcaList) -> bool with Mut, Div, Panic {
+    let _a = lspca_add_action(l, "Low",  LSPCA_KIND_SOURCE,   10)
+    let _b = lspca_add_action(l, "High", LSPCA_KIND_QUICKFIX, 100)
+    let _c = lspca_add_action(l, "Mid",  LSPCA_KIND_REFACTOR, 50)
+    lspca_sort(l)
+    lspca_is_sorted(l)
+}
+
+fn tca_inner_max_priority(l: &! LspcaList) -> bool with Mut, Div, Panic {
+    let _a = lspca_add_action(l, "A", LSPCA_KIND_QUICKFIX, 30)
+    let _b = lspca_add_action(l, "B", LSPCA_KIND_QUICKFIX, 80)
+    let _c = lspca_add_action(l, "C", LSPCA_KIND_QUICKFIX, 55)
+    lspca_max_priority(l) == 80
+}
+
+fn tca_inner_min_priority(l: &! LspcaList) -> bool with Mut, Div, Panic {
+    let _a = lspca_add_action(l, "A", LSPCA_KIND_QUICKFIX, 30)
+    let _b = lspca_add_action(l, "B", LSPCA_KIND_QUICKFIX, 80)
+    lspca_min_priority(l) == 30
+}
+
+fn tca_inner_count_by_kind(l: &! LspcaList) -> bool with Mut, Div, Panic {
+    let _a = lspca_add_action(l, "A", LSPCA_KIND_QUICKFIX, 10)
+    let _b = lspca_add_action(l, "B", LSPCA_KIND_QUICKFIX, 20)
+    let _c = lspca_add_action(l, "C", LSPCA_KIND_REFACTOR, 30)
+    lspca_count_by_kind(l, LSPCA_KIND_QUICKFIX) == 2
+}
+
+fn tca_inner_total_edits(l: &! LspcaList) -> bool with Mut, Div, Panic {
+    let a = lspca_add_action(l, "A", LSPCA_KIND_QUICKFIX, 50)
+    let b = lspca_add_action(l, "B", LSPCA_KIND_REFACTOR, 30)
+    lspca_add_edit(l, a, 1, 0, 0, 0, 5, "x")
+    lspca_add_edit(l, a, 1, 1, 0, 1, 5, "y")
+    lspca_add_edit(l, b, 1, 2, 0, 2, 5, "z")
+    lspca_total_edits(l) == 3
+}
+
+fn tca_inner_find_by_title(l: &! LspcaList) -> bool with Mut, Div, Panic {
+    let _a = lspca_add_action(l, "Alpha", LSPCA_KIND_QUICKFIX, 10)
+    let _b = lspca_add_action(l, "Beta",  LSPCA_KIND_REFACTOR, 20)
+    lspca_find_action_by_title(l, "Beta") == 1
+}
+
+fn tca_inner_find_by_kind(l: &! LspcaList) -> bool with Mut, Div, Panic {
+    let _a = lspca_add_action(l, "A", LSPCA_KIND_SOURCE,   5)
+    let _b = lspca_add_action(l, "B", LSPCA_KIND_REFACTOR, 15)
+    lspca_find_action_by_kind(l, LSPCA_KIND_REFACTOR) == 1
+}
+
+fn tca_inner_action_edit_at(l: &! LspcaList) -> bool with Mut, Div, Panic {
+    let idx = lspca_add_action(l, "X", LSPCA_KIND_QUICKFIX, 50)
+    lspca_add_edit(l, idx, 7, 3, 1, 3, 8, "new text")
+    let e = lspca_action_edit_at(l, idx, 0)
+    e.file_id == 7 && str_eq(e.new_text, "new text")
+}
+
+fn tca_inner_action_edit_at_oob(l: &! LspcaList) -> bool with Mut, Div, Panic {
+    let idx = lspca_add_action(l, "X", LSPCA_KIND_QUICKFIX, 50)
+    lspca_add_edit(l, idx, 1, 1, 0, 1, 5, "t")
+    let e = lspca_action_edit_at(l, idx, 99)
+    e.file_id == 0 && str_len(e.new_text) == 0
+}
+
+fn tca_inner_action_title(l: &! LspcaList) -> bool with Mut, Div, Panic {
+    let idx = lspca_add_action(l, "Rename Symbol", LSPCA_KIND_REFACTOR, 50)
+    str_eq(lspca_action_title(l, idx), "Rename Symbol")
+}
+
+fn tca_inner_action_kind(l: &! LspcaList) -> bool with Mut, Div, Panic {
+    let idx = lspca_add_action(l, "Inline", LSPCA_KIND_REFACTOR_INLINE, 30)
+    lspca_action_kind(l, idx) == LSPCA_KIND_REFACTOR_INLINE
+}
+
+fn tca_inner_action_priority(l: &! LspcaList) -> bool with Mut, Div, Panic {
+    let idx = lspca_add_action(l, "High Prio", LSPCA_KIND_QUICKFIX, 100)
+    lspca_action_priority(l, idx) == 100
+}
+
+fn tca_inner_action_edit_count(l: &! LspcaList) -> bool with Mut, Div, Panic {
+    let idx = lspca_add_action(l, "Multi", LSPCA_KIND_QUICKFIX, 50)
+    lspca_add_edit(l, idx, 1, 1, 0, 1, 5, "a")
+    lspca_add_edit(l, idx, 1, 2, 0, 2, 5, "b")
+    lspca_action_edit_count(l, idx) == 2
+}
+
+fn tca_inner_sort_preserves(l: &! LspcaList) -> bool with Mut, Div, Panic {
+    let _a = lspca_add_action(l, "A", LSPCA_KIND_QUICKFIX, 30)
+    let _b = lspca_add_action(l, "B", LSPCA_KIND_QUICKFIX, 10)
+    let _c = lspca_add_action(l, "C", LSPCA_KIND_QUICKFIX, 20)
+    lspca_sort(l)
+    l.count == 3
+}
+
+fn tca_inner_sort_highest_first(l: &! LspcaList) -> bool with Mut, Div, Panic {
+    let _a = lspca_add_action(l, "Low",  LSPCA_KIND_QUICKFIX, 10)
+    let _b = lspca_add_action(l, "High", LSPCA_KIND_QUICKFIX, 100)
+    lspca_sort(l)
+    l.actions[0].priority == 100
+}
+
+fn tca_inner_list_count(l: &! LspcaList) -> bool with Mut, Div, Panic {
+    let _a = lspca_add_action(l, "A", LSPCA_KIND_QUICKFIX, 10)
+    let _b = lspca_add_action(l, "B", LSPCA_KIND_QUICKFIX, 20)
+    lspca_list_count(l) == 2
+}
+
+// T01: lspca_context_new initializes correctly
+fn test_lspca_context_new() -> bool {
+    let ctx = lspca_context_new(5, 10, 3)
+    ctx.file_id == 5 && ctx.cursor_line == 10 && ctx.cursor_col == 3 && ctx.count == 0
+}
+
+// T02: lspca_list_new starts empty
+fn test_lspca_list_new() -> bool {
+    let l = lspca_list_new()
+    l.count == 0
+}
+
+// T03: lspca_add_diag increments count
+fn test_lspca_add_diag_count() -> bool with Mut, Div, Panic {
+    var ctx = lspca_context_new(1, 1, 1)
+    lspca_add_diag(&! ctx, 1001, 1, 0, 1, 5, "missing import")
+    ctx.count == 1
+}
+
+// T04: lspca_add_diag stores code correctly
+fn test_lspca_add_diag_code() -> bool with Mut, Div, Panic {
+    var ctx = lspca_context_new(1, 1, 1)
+    lspca_add_diag(&! ctx, 2001, 1, 0, 1, 5, "unused var")
+    ctx.diags[0].code == 2001
+}
+
+// T05: lspca_add_diag stores range
+fn test_lspca_add_diag_range() -> bool with Mut, Div, Panic {
+    var ctx = lspca_context_new(1, 5, 2)
+    lspca_add_diag(&! ctx, 1001, 3, 4, 3, 10, "msg")
+    ctx.diags[0].range.start_line == 3 && ctx.diags[0].range.end_col == 10
+}
+
+// T06: lspca_add_diag stores message
+fn test_lspca_add_diag_msg() -> bool with Mut, Div, Panic {
+    var ctx = lspca_context_new(1, 1, 1)
+    lspca_add_diag(&! ctx, 1001, 1, 0, 1, 5, "hello world")
+    str_eq(ctx.diags[0].message, "hello world")
+}
+
+// T07: lspca_add_action returns 0 for first action
+fn test_lspca_add_action_first() -> bool with Mut, Div, Panic {
+    var l = lspca_list_new()
+    let idx = lspca_add_action(&! l, "Fix it", LSPCA_KIND_QUICKFIX, 50)
+    idx == 0
+}
+
+// T08: lspca_add_action increments count
+fn test_lspca_add_action_count() -> bool with Mut, Div, Panic {
+    var l = lspca_list_new()
+    tca_inner_add_action_count(&! l)
+}
+
+// T09: lspca_add_action stores title
+fn test_lspca_add_action_title() -> bool with Mut, Div, Panic {
+    var l = lspca_list_new()
+    tca_inner_action_title(&! l)
+}
+
+// T10: lspca_add_action stores kind
+fn test_lspca_add_action_kind() -> bool with Mut, Div, Panic {
+    var l = lspca_list_new()
+    tca_inner_action_kind(&! l)
+}
+
+// T11: lspca_add_action stores priority
+fn test_lspca_add_action_priority() -> bool with Mut, Div, Panic {
+    var l = lspca_list_new()
+    tca_inner_action_priority(&! l)
+}
+
+// T12: lspca_add_edit adds to action
+fn test_lspca_add_edit_count() -> bool with Mut, Div, Panic {
+    var l = lspca_list_new()
+    tca_inner_add_edit_count(&! l)
+}
+
+// T13: lspca_add_edit stores file_id
+fn test_lspca_add_edit_file() -> bool with Mut, Div, Panic {
+    var l = lspca_list_new()
+    tca_inner_add_edit_file(&! l)
+}
+
+// T14: lspca_add_edit stores new_text
+fn test_lspca_add_edit_text() -> bool with Mut, Div, Panic {
+    var l = lspca_list_new()
+    tca_inner_add_edit_text(&! l)
+}
+
+// T15: lspca_add_edit with bad action_idx is no-op
+fn test_lspca_add_edit_bad_idx() -> bool with Mut, Div, Panic {
+    var l = lspca_list_new()
+    lspca_add_edit(&! l, 99, 1, 0, 0, 0, 0, "text")
+    l.count == 0
+}
+
+// T16: lspca_cursor_in_range true when inside single-line range
+fn test_lspca_cursor_in_range_single() -> bool with Mut, Div, Panic {
+    var ctx = lspca_context_new(1, 5, 7)
+    let r = lspca_range_new(5, 3, 5, 12)
+    lspca_cursor_in_range(&ctx, &r)
+}
+
+// T17: lspca_cursor_in_range false when outside
+fn test_lspca_cursor_in_range_outside() -> bool with Mut, Div, Panic {
+    var ctx = lspca_context_new(1, 3, 1)
+    let r = lspca_range_new(5, 0, 5, 10)
+    lspca_cursor_in_range(&ctx, &r) == false
+}
+
+// T18: lspca_cursor_in_range true when on start of multi-line range
+fn test_lspca_cursor_in_range_multiline_start() -> bool with Mut, Div, Panic {
+    var ctx = lspca_context_new(1, 3, 5)
+    let r = lspca_range_new(3, 4, 5, 10)
+    lspca_cursor_in_range(&ctx, &r)
+}
+
+// T19: lspca_cursor_in_range false when before start col on start line
+fn test_lspca_cursor_in_range_before_start_col() -> bool with Mut, Div, Panic {
+    var ctx = lspca_context_new(1, 5, 1)
+    let r = lspca_range_new(5, 5, 5, 15)
+    lspca_cursor_in_range(&ctx, &r) == false
+}
+
+// T20: lspca_find_diag_at_cursor finds correct diag
+fn test_lspca_find_diag_at_cursor() -> bool with Mut, Div, Panic {
+    var ctx = lspca_context_new(1, 4, 5)
+    lspca_add_diag(&! ctx, 1001, 4, 3, 4, 10, "err")
+    lspca_find_diag_at_cursor(&ctx) == 0
+}
+
+// T21: lspca_find_diag_at_cursor returns INVALID when none match
+fn test_lspca_find_diag_at_cursor_miss() -> bool with Mut, Div, Panic {
+    var ctx = lspca_context_new(1, 1, 1)
+    lspca_add_diag(&! ctx, 1001, 5, 0, 5, 10, "far away")
+    lspca_find_diag_at_cursor(&ctx) == LSPCA_INVALID
+}
+
+// T22: lspca_find_diag_by_code finds correct index
+fn test_lspca_find_diag_by_code() -> bool with Mut, Div, Panic {
+    var ctx = lspca_context_new(1, 1, 1)
+    lspca_add_diag(&! ctx, 1001, 1, 0, 1, 5, "import")
+    lspca_add_diag(&! ctx, 2001, 2, 0, 2, 3, "unused")
+    lspca_find_diag_by_code(&ctx, 2001) == 1
+}
+
+// T23: lspca_find_diag_by_code returns INVALID for unknown code
+fn test_lspca_find_diag_by_code_miss() -> bool with Mut, Div, Panic {
+    var ctx = lspca_context_new(1, 1, 1)
+    lspca_add_diag(&! ctx, 1001, 1, 0, 1, 5, "x")
+    lspca_find_diag_by_code(&ctx, 9999) == LSPCA_INVALID
+}
+
+// T24: lspca_count_diags_by_code counts correctly
+fn test_lspca_count_diags_by_code() -> bool with Mut, Div, Panic {
+    var ctx = lspca_context_new(1, 1, 1)
+    lspca_add_diag(&! ctx, 2001, 1, 0, 1, 3, "a")
+    lspca_add_diag(&! ctx, 2001, 2, 0, 2, 3, "b")
+    lspca_add_diag(&! ctx, 1001, 3, 0, 3, 3, "c")
+    lspca_count_diags_by_code(&ctx, 2001) == 2
+}
+
+// T25: lspca_sort produces descending priority order
+fn test_lspca_sort_descending() -> bool with Mut, Div, Panic {
+    var l = lspca_list_new()
+    tca_inner_sort_desc(&! l)
+}
+
+fn tca_inner_sort_single(l: &! LspcaList) -> bool with Mut, Div, Panic {
+    let _a = lspca_add_action(l, "Only", LSPCA_KIND_QUICKFIX, 42)
+    lspca_sort(l)
+    lspca_is_sorted(l)
+}
+
+// T26: lspca_sort single element remains sorted
+fn test_lspca_sort_single() -> bool with Mut, Div, Panic {
+    var l = lspca_list_new()
+    tca_inner_sort_single(&! l)
+}
+
+// T27: lspca_sort empty list is sorted
+fn test_lspca_sort_empty() -> bool with Mut, Div, Panic {
+    var l = lspca_list_new()
+    lspca_sort(&! l)
+    lspca_is_sorted(&l)
+}
+
+// T28: lspca_max_priority correct
+fn test_lspca_max_priority() -> bool with Mut, Div, Panic {
+    var l = lspca_list_new()
+    tca_inner_max_priority(&! l)
+}
+
+// T29: lspca_min_priority correct
+fn test_lspca_min_priority() -> bool with Mut, Div, Panic {
+    var l = lspca_list_new()
+    tca_inner_min_priority(&! l)
+}
+
+// T30: lspca_max_priority on empty list returns INVALID
+fn test_lspca_max_priority_empty() -> bool {
+    let l = lspca_list_new()
+    lspca_max_priority(&l) == LSPCA_INVALID
+}
+
+// T31: lspca_count_by_kind counts correctly
+fn test_lspca_count_by_kind() -> bool with Mut, Div, Panic {
+    var l = lspca_list_new()
+    tca_inner_count_by_kind(&! l)
+}
+
+// T32: lspca_total_edits counts across all actions
+fn test_lspca_total_edits() -> bool with Mut, Div, Panic {
+    var l = lspca_list_new()
+    tca_inner_total_edits(&! l)
+}
+
+// T33: lspca_find_action_by_title finds correct index
+fn test_lspca_find_action_by_title() -> bool with Mut, Div, Panic {
+    var l = lspca_list_new()
+    tca_inner_find_by_title(&! l)
+}
+
+fn tca_inner_find_title_miss(l: &! LspcaList) -> bool with Mut, Div, Panic {
+    let _a = lspca_add_action(l, "Alpha", LSPCA_KIND_QUICKFIX, 10)
+    lspca_find_action_by_title(l, "Ghost") == LSPCA_INVALID
+}
+
+// T34: lspca_find_action_by_title returns INVALID for unknown
+fn test_lspca_find_action_by_title_miss() -> bool with Mut, Div, Panic {
+    var l = lspca_list_new()
+    tca_inner_find_title_miss(&! l)
+}
+
+// T35: lspca_find_action_by_kind finds first matching
+fn test_lspca_find_action_by_kind() -> bool with Mut, Div, Panic {
+    var l = lspca_list_new()
+    tca_inner_find_by_kind(&! l)
+}
+
+// T36: lspca_range_eq true for identical ranges
+fn test_lspca_range_eq_true() -> bool {
+    let a = lspca_range_new(1, 2, 3, 4)
+    let b = lspca_range_new(1, 2, 3, 4)
+    lspca_range_eq(&a, &b)
+}
+
+// T37: lspca_range_eq false for different ranges
+fn test_lspca_range_eq_false() -> bool {
+    let a = lspca_range_new(1, 2, 3, 4)
+    let b = lspca_range_new(1, 2, 3, 5)
+    lspca_range_eq(&a, &b) == false
+}
+
+// T38: lspca_range_line_count correct
+fn test_lspca_range_line_count() -> bool {
+    let r = lspca_range_new(3, 0, 6, 10)
+    lspca_range_line_count(&r) == 4
+}
+
+// T39: lspca_range_same_line true
+fn test_lspca_range_same_line_true() -> bool {
+    let r = lspca_range_new(5, 0, 5, 10)
+    lspca_range_same_line(&r)
+}
+
+// T40: lspca_range_same_line false
+fn test_lspca_range_same_line_false() -> bool {
+    let r = lspca_range_new(5, 0, 6, 10)
+    lspca_range_same_line(&r) == false
+}
+
+// T41: lspca_range_is_zero true for zero range
+fn test_lspca_range_is_zero_true() -> bool {
+    let r = lspca_range_zero()
+    lspca_range_is_zero(&r)
+}
+
+// T42: lspca_range_is_zero false for non-zero
+fn test_lspca_range_is_zero_false() -> bool {
+    let r = lspca_range_new(1, 0, 1, 5)
+    lspca_range_is_zero(&r) == false
+}
+
+// T43: lspca_gen_add_import generates action with correct title
+fn test_lspca_gen_add_import() -> bool with Mut, Div, Panic {
+    var l = lspca_list_new()
+    let ctx = lspca_context_new(1, 1, 1)
+    lspca_gen_add_import(&! l, &ctx, "use foo::bar")
+    l.count == 1 && str_eq(l.actions[0].title, "Add missing import")
+}
+
+// T44: lspca_gen_add_import edit has correct text
+fn test_lspca_gen_add_import_text() -> bool with Mut, Div, Panic {
+    var l = lspca_list_new()
+    let ctx = lspca_context_new(1, 1, 1)
+    lspca_gen_add_import(&! l, &ctx, "use foo::bar")
+    str_eq(l.actions[0].edits[0].new_text, "use foo::bar")
+}
+
+// T45: lspca_gen_fix_unused_var generates action
+fn test_lspca_gen_fix_unused_var() -> bool with Mut, Div, Panic {
+    var ctx = lspca_context_new(1, 2, 3)
+    lspca_add_diag(&! ctx, 2001, 2, 3, 2, 8, "unused var x")
+    var l = lspca_list_new()
+    lspca_gen_fix_unused_var(&! l, &ctx, 0)
+    l.count == 1 && str_eq(l.actions[0].title, "Fix unused variable")
+}
+
+// T46: lspca_gen_fix_unused_var edit text is _unused
+fn test_lspca_gen_fix_unused_var_text() -> bool with Mut, Div, Panic {
+    var ctx = lspca_context_new(1, 2, 3)
+    lspca_add_diag(&! ctx, 2001, 2, 3, 2, 8, "unused")
+    var l = lspca_list_new()
+    lspca_gen_fix_unused_var(&! l, &ctx, 0)
+    str_eq(l.actions[0].edits[0].new_text, "_unused")
+}
+
+// T47: lspca_gen_add_type_annotation generates action
+fn test_lspca_gen_add_type_annotation() -> bool with Mut, Div, Panic {
+    var ctx = lspca_context_new(1, 1, 1)
+    lspca_add_diag(&! ctx, 3001, 1, 4, 1, 7, "missing annotation")
+    var l = lspca_list_new()
+    lspca_gen_add_type_annotation(&! l, &ctx, 0)
+    str_eq(l.actions[0].title, "Add type annotation")
+}
+
+// T48: lspca_gen_remove_dead_code generates action
+fn test_lspca_gen_remove_dead_code() -> bool with Mut, Div, Panic {
+    var ctx = lspca_context_new(1, 5, 0)
+    lspca_add_diag(&! ctx, 2002, 5, 0, 7, 0, "dead code block")
+    var l = lspca_list_new()
+    lspca_gen_remove_dead_code(&! l, &ctx, 0)
+    str_eq(l.actions[0].edits[0].new_text, "")
+}
+
+// T49: lspca_gen_extract_function adds 2 edits
+fn test_lspca_gen_extract_function_edits() -> bool with Mut, Div, Panic {
+    var ctx = lspca_context_new(1, 10, 5)
+    var l = lspca_list_new()
+    lspca_gen_extract_function(&! l, &ctx)
+    l.actions[0].edit_count == 2
+}
+
+// T50: lspca_gen_inline_variable adds action
+fn test_lspca_gen_inline_variable() -> bool with Mut, Div, Panic {
+    var ctx = lspca_context_new(1, 3, 4)
+    var l = lspca_list_new()
+    lspca_gen_inline_variable(&! l, &ctx)
+    str_eq(l.actions[0].title, "Inline variable")
+}
+
+// T51: lspca_compute with missing import diag produces import action
+fn test_lspca_compute_missing_import() -> bool with Mut, Div, Panic {
+    var ctx = lspca_context_new(1, 1, 1)
+    lspca_add_diag(&! ctx, LSPCA_DIAG_MISSING_IMPORT, 1, 0, 1, 5, "missing")
+    let l = lspca_compute(&ctx)
+    lspca_find_action_by_title(&l, "Add missing import") != LSPCA_INVALID
+}
+
+// T52: lspca_compute with unused var diag produces fix action
+fn test_lspca_compute_unused_var() -> bool with Mut, Div, Panic {
+    var ctx = lspca_context_new(1, 2, 3)
+    lspca_add_diag(&! ctx, LSPCA_DIAG_UNUSED_VAR, 2, 0, 2, 5, "unused")
+    let l = lspca_compute(&ctx)
+    lspca_find_action_by_title(&l, "Fix unused variable") != LSPCA_INVALID
+}
+
+// T53: lspca_compute with dead code diag produces remove action
+fn test_lspca_compute_dead_code() -> bool with Mut, Div, Panic {
+    var ctx = lspca_context_new(1, 5, 0)
+    lspca_add_diag(&! ctx, LSPCA_DIAG_DEAD_CODE, 5, 0, 5, 10, "dead")
+    let l = lspca_compute(&ctx)
+    lspca_find_action_by_title(&l, "Remove dead code") != LSPCA_INVALID
+}
+
+// T54: lspca_compute always includes extract and inline actions
+fn test_lspca_compute_always_refactors() -> bool with Mut, Div, Panic {
+    var ctx = lspca_context_new(1, 1, 1)
+    let l = lspca_compute(&ctx)
+    let has_extract = lspca_find_action_by_title(&l, "Extract to function") != LSPCA_INVALID
+    let has_inline  = lspca_find_action_by_title(&l, "Inline variable") != LSPCA_INVALID
+    has_extract && has_inline
+}
+
+// T55: lspca_compute result is sorted
+fn test_lspca_compute_sorted() -> bool with Mut, Div, Panic {
+    var ctx = lspca_context_new(1, 1, 1)
+    lspca_add_diag(&! ctx, LSPCA_DIAG_MISSING_IMPORT, 1, 0, 1, 5, "x")
+    let l = lspca_compute(&ctx)
+    lspca_is_sorted(&l)
+}
+
+// T56: lspca_action_edit_at returns correct edit
+fn test_lspca_action_edit_at() -> bool with Mut, Div, Panic {
+    var l = lspca_list_new()
+    tca_inner_action_edit_at(&! l)
+}
+
+// T57: lspca_action_edit_at out-of-bounds returns zero edit
+fn test_lspca_action_edit_at_oob() -> bool with Mut, Div, Panic {
+    var l = lspca_list_new()
+    tca_inner_action_edit_at_oob(&! l)
+}
+
+// T58: lspca_action_title works
+fn test_lspca_action_title() -> bool with Mut, Div, Panic {
+    var l = lspca_list_new()
+    tca_inner_action_title(&! l)
+}
+
+// T59: lspca_action_kind works
+fn test_lspca_action_kind() -> bool with Mut, Div, Panic {
+    var l = lspca_list_new()
+    tca_inner_action_kind(&! l)
+}
+
+// T60: lspca_action_priority works
+fn test_lspca_action_priority() -> bool with Mut, Div, Panic {
+    var l = lspca_list_new()
+    tca_inner_action_priority(&! l)
+}
+
+// T61: lspca_action_edit_count works
+fn test_lspca_action_edit_count() -> bool with Mut, Div, Panic {
+    var l = lspca_list_new()
+    tca_inner_action_edit_count(&! l)
+}
+
+// T62: lspca_context_diag_count works
+fn test_lspca_context_diag_count() -> bool with Mut, Div, Panic {
+    var ctx = lspca_context_new(1, 1, 1)
+    lspca_add_diag(&! ctx, 1001, 1, 0, 1, 5, "a")
+    lspca_add_diag(&! ctx, 2001, 2, 0, 2, 3, "b")
+    lspca_context_diag_count(&ctx) == 2
+}
+
+// T63: multiple diags produce multiple actions in compute
+fn test_lspca_compute_multi_diag() -> bool with Mut, Div, Panic {
+    var ctx = lspca_context_new(1, 2, 0)
+    lspca_add_diag(&! ctx, LSPCA_DIAG_MISSING_IMPORT, 2, 0, 2, 5, "imp")
+    lspca_add_diag(&! ctx, LSPCA_DIAG_UNUSED_VAR, 3, 0, 3, 3, "var")
+    let l = lspca_compute(&ctx)
+    l.count >= 4
+}
+
+// T64: lspca_range_new stores values correctly
+fn test_lspca_range_new() -> bool {
+    let r = lspca_range_new(10, 5, 12, 8)
+    r.start_line == 10 && r.start_col == 5 && r.end_line == 12 && r.end_col == 8
+}
+
+// T65: lspca_compute with type annotation diag produces annotation action
+fn test_lspca_compute_type_annotation() -> bool with Mut, Div, Panic {
+    var ctx = lspca_context_new(1, 1, 1)
+    lspca_add_diag(&! ctx, LSPCA_DIAG_TYPE_ANNOTATION, 1, 4, 1, 7, "needs annotation")
+    let l = lspca_compute(&ctx)
+    lspca_find_action_by_title(&l, "Add type annotation") != LSPCA_INVALID
+}
+
+// T66: lspca_count_diags_by_code returns 0 for unknown code
+fn test_lspca_count_diags_by_code_zero() -> bool with Mut, Div, Panic {
+    var ctx = lspca_context_new(1, 1, 1)
+    lspca_add_diag(&! ctx, 1001, 1, 0, 1, 5, "x")
+    lspca_count_diags_by_code(&ctx, 9999) == 0
+}
+
+// T67: lspca_list_count works
+fn test_lspca_list_count() -> bool with Mut, Div, Panic {
+    var l = lspca_list_new()
+    tca_inner_list_count(&! l)
+}
+
+// T68: sort preserves action count
+fn test_lspca_sort_preserves_count() -> bool with Mut, Div, Panic {
+    var l = lspca_list_new()
+    tca_inner_sort_preserves(&! l)
+}
+
+// T69: highest priority action is first after sort
+fn test_lspca_sort_highest_first() -> bool with Mut, Div, Panic {
+    var l = lspca_list_new()
+    tca_inner_sort_highest_first(&! l)
+}
+
+// T70: full pipeline: context, multiple diags, compute, sort, verify
+fn test_lspca_full_pipeline() -> bool with Mut, Div, Panic {
+    var ctx = lspca_context_new(3, 7, 2)
+    lspca_add_diag(&! ctx, LSPCA_DIAG_MISSING_IMPORT, 7, 0, 7, 10, "missing")
+    lspca_add_diag(&! ctx, LSPCA_DIAG_UNUSED_VAR,    8, 4, 8, 9, "x unused")
+    let l = lspca_compute(&ctx)
+    let sorted = lspca_is_sorted(&l)
+    let has_import = lspca_find_action_by_title(&l, "Add missing import") != LSPCA_INVALID
+    let has_fix    = lspca_find_action_by_title(&l, "Fix unused variable") != LSPCA_INVALID
+    sorted && has_import && has_fix && l.count >= 4
+}
+
+// ============================================================================
+// Section 12: TEST RUNNER
+// ============================================================================
+
+fn lspca_run_all_tests() -> i64 with Mut, Div, Panic {
+    var passed: i64 = 0
+    var failed: i64 = 0
+
+    if test_lspca_context_new()                   { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_list_new()                       { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_add_diag_count()                 { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_add_diag_code()                  { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_add_diag_range()                 { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_add_diag_msg()                   { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_add_action_first()               { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_add_action_count()               { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_add_action_title()               { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_add_action_kind()                { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_add_action_priority()            { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_add_edit_count()                 { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_add_edit_file()                  { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_add_edit_text()                  { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_add_edit_bad_idx()               { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_cursor_in_range_single()         { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_cursor_in_range_outside()        { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_cursor_in_range_multiline_start(){ passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_cursor_in_range_before_start_col(){ passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_find_diag_at_cursor()            { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_find_diag_at_cursor_miss()       { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_find_diag_by_code()              { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_find_diag_by_code_miss()         { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_count_diags_by_code()            { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_sort_descending()                { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_sort_single()                    { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_sort_empty()                     { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_max_priority()                   { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_min_priority()                   { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_max_priority_empty()             { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_count_by_kind()                  { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_total_edits()                    { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_find_action_by_title()           { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_find_action_by_title_miss()      { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_find_action_by_kind()            { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_range_eq_true()                  { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_range_eq_false()                 { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_range_line_count()               { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_range_same_line_true()           { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_range_same_line_false()          { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_range_is_zero_true()             { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_range_is_zero_false()            { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_gen_add_import()                 { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_gen_add_import_text()            { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_gen_fix_unused_var()             { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_gen_fix_unused_var_text()        { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_gen_add_type_annotation()        { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_gen_remove_dead_code()           { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_gen_extract_function_edits()     { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_gen_inline_variable()            { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_compute_missing_import()         { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_compute_unused_var()             { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_compute_dead_code()              { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_compute_always_refactors()       { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_compute_sorted()                 { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_action_edit_at()                 { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_action_edit_at_oob()             { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_action_title()                   { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_action_kind()                    { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_action_priority()                { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_action_edit_count()              { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_context_diag_count()             { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_compute_multi_diag()             { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_range_new()                      { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_compute_type_annotation()        { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_count_diags_by_code_zero()       { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_list_count()                     { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_sort_preserves_count()           { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_sort_highest_first()             { passed = passed + 1 } else { failed = failed + 1 }
+    if test_lspca_full_pipeline()                  { passed = passed + 1 } else { failed = failed + 1 }
+
+    if failed == 0 {
+        return 0
+    }
+    failed
+}

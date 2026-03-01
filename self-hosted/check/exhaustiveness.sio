@@ -1,0 +1,1007 @@
+// self-hosted::check::exhaustiveness — Pattern match exhaustiveness checker
+//
+// Determines whether a match expression covers all possible values for a type.
+// Implements a simplified version of the algorithm from "Warnings for pattern
+// matching" (Maranget 2007): build a pattern matrix, then check exhaustiveness
+// by testing reachability of a wildcard row.
+//
+// Supported types:
+//   - bool (two constructors: true/false)
+//   - enum (named variants up to 64)
+//   - integers via literal coverage (bounded sets)
+//
+// Pattern kinds: EXH_WILDCARD, EXH_LITERAL, EXH_CONSTRUCTOR, EXH_VARIABLE
+// All functions prefixed exh_. All struct names prefixed Exh.
+
+// ============================================================================
+// Pattern kind constants
+// ============================================================================
+
+fn EXH_WILDCARD()    -> i64 { 0 }
+fn EXH_LITERAL()     -> i64 { 1 }
+fn EXH_CONSTRUCTOR() -> i64 { 2 }
+fn EXH_VARIABLE()    -> i64 { 3 }
+
+// ============================================================================
+// Core data structures
+// ============================================================================
+
+// A single pattern in the match matrix.
+// kind: one of EXH_WILDCARD / EXH_LITERAL / EXH_CONSTRUCTOR / EXH_VARIABLE
+// tag:  for LITERAL, the integer value; for CONSTRUCTOR, the variant index
+// name: for VARIABLE, the binding name; for CONSTRUCTOR, the variant name
+// sub_count: number of sub-patterns (for future nested extension)
+struct ExhPattern {
+    kind:      i64,
+    tag:       i64,
+    name:      string,
+    sub_count: i64,
+}
+
+// A pattern matrix: rows are match arms, each row has col_count patterns.
+// rows is a flat array of length row_count * col_count (row-major).
+struct ExhMatrix {
+    rows:      [ExhPattern; 512],
+    row_count: i64,
+    col_count: i64,
+}
+
+// Result of an exhaustiveness check.
+struct ExhResult {
+    exhaustive:    bool,
+    missing:       [string; 32],
+    missing_count: i64,
+}
+
+// Type descriptor for an enum.
+struct ExhTypeDef {
+    name:          string,
+    variant_count: i64,
+    variants:      [string; 64],
+}
+
+// ============================================================================
+// Pattern constructors
+// ============================================================================
+
+fn exh_wildcard_pattern() -> ExhPattern {
+    ExhPattern { kind: EXH_WILDCARD(), tag: 0, name: "_", sub_count: 0 }
+}
+
+fn exh_variable_pattern(name: string) -> ExhPattern {
+    ExhPattern { kind: EXH_VARIABLE(), tag: 0, name: name, sub_count: 0 }
+}
+
+fn exh_literal_pattern(tag: i64) -> ExhPattern {
+    ExhPattern { kind: EXH_LITERAL(), tag: tag, name: "", sub_count: 0 }
+}
+
+fn exh_constructor_pattern(tag: i64, name: string) -> ExhPattern {
+    ExhPattern { kind: EXH_CONSTRUCTOR(), tag: tag, name: name, sub_count: 0 }
+}
+
+fn exh_bool_true_pattern() -> ExhPattern {
+    ExhPattern { kind: EXH_CONSTRUCTOR(), tag: 1, name: "true", sub_count: 0 }
+}
+
+fn exh_bool_false_pattern() -> ExhPattern {
+    ExhPattern { kind: EXH_CONSTRUCTOR(), tag: 0, name: "false", sub_count: 0 }
+}
+
+fn exh_empty_pattern() -> ExhPattern {
+    ExhPattern { kind: EXH_WILDCARD(), tag: 0, name: "", sub_count: 0 }
+}
+
+// ============================================================================
+// Matrix and result constructors
+// ============================================================================
+
+fn exh_matrix_new(cols: i64) -> ExhMatrix {
+    ExhMatrix {
+        rows:      [exh_empty_pattern(); 512],
+        row_count: 0,
+        col_count: cols,
+    }
+}
+
+fn exh_result_ok() -> ExhResult {
+    ExhResult { exhaustive: true, missing: [""; 32], missing_count: 0 }
+}
+
+fn exh_result_missing(msg: string) -> ExhResult {
+    var r = ExhResult { exhaustive: false, missing: [""; 32], missing_count: 0 }
+    r.missing[0] = msg
+    r.missing_count = 1
+    r
+}
+
+fn exh_typedef_new(name: string) -> ExhTypeDef {
+    ExhTypeDef {
+        name:          name,
+        variant_count: 0,
+        variants:      [""; 64],
+    }
+}
+
+// ============================================================================
+// Matrix population
+// ============================================================================
+
+// Add a row of n patterns (from a fixed-size array of 8) to the matrix.
+fn exh_add_row(m: &! ExhMatrix, patterns: [ExhPattern; 8], n: i64) with Mut, Panic, Div {
+    let base = (*m).row_count * (*m).col_count
+    var j: i64 = 0
+    while j < n && j < (*m).col_count {
+        (*m).rows[(base + j) as usize] = patterns[j as usize]
+        j = j + 1
+    }
+    // Fill remaining columns with wildcards
+    while j < (*m).col_count {
+        (*m).rows[(base + j) as usize] = exh_wildcard_pattern()
+        j = j + 1
+    }
+    (*m).row_count = (*m).row_count + 1
+}
+
+// Get a pattern from the matrix at (row, col)
+fn exh_get(m: &ExhMatrix, row: i64, col: i64) -> ExhPattern {
+    let idx = row * (*m).col_count + col
+    (*m).rows[idx as usize]
+}
+
+// Add a type variant to a typedef
+fn exh_typedef_add_variant(td: &! ExhTypeDef, name: string) with Mut, Panic {
+    let idx = (*td).variant_count
+    if idx < 64 {
+        (*td).variants[idx as usize] = name
+        (*td).variant_count = idx + 1
+    }
+}
+
+// ============================================================================
+// Pattern matching predicates
+// ============================================================================
+
+// True if pattern is a wildcard or variable (matches anything)
+fn exh_pat_is_wildcard(p: &ExhPattern) -> bool {
+    (*p).kind == EXH_WILDCARD() || (*p).kind == EXH_VARIABLE()
+}
+
+// True if pattern matches a specific tag value
+fn exh_pat_matches_tag(p: &ExhPattern, tag: i64) -> bool {
+    if exh_pat_is_wildcard(p) { return true }
+    if (*p).kind == EXH_LITERAL() && (*p).tag == tag { return true }
+    if (*p).kind == EXH_CONSTRUCTOR() && (*p).tag == tag { return true }
+    false
+}
+
+// ============================================================================
+// Specialisation: filter matrix rows that match a given constructor tag
+// at column col, removing that column.
+// ============================================================================
+
+fn exh_specialise(m: &ExhMatrix, col: i64, tag: i64) -> ExhMatrix {
+    let new_cols = (*m).col_count - 1
+    var out = ExhMatrix {
+        rows:      [exh_empty_pattern(); 512],
+        row_count: 0,
+        col_count: new_cols,
+    }
+    if new_cols < 0 { return out }
+
+    var row: i64 = 0
+    while row < (*m).row_count {
+        let p = exh_get(m, row, col)
+        if exh_pat_matches_tag(&p, tag) {
+            // Copy all columns except col
+            let base_out = out.row_count * new_cols
+            var c: i64 = 0
+            var c_out: i64 = 0
+            while c < (*m).col_count {
+                if c != col {
+                    out.rows[(base_out + c_out) as usize] = exh_get(m, row, c)
+                    c_out = c_out + 1
+                }
+                c = c + 1
+            }
+            out.row_count = out.row_count + 1
+        }
+        row = row + 1
+    }
+    out
+}
+
+// ============================================================================
+// Default matrix: rows where column col is a wildcard.
+// Used for constructors not listed in the matrix.
+// ============================================================================
+
+fn exh_default_matrix(m: &ExhMatrix, col: i64) -> ExhMatrix {
+    let new_cols = (*m).col_count - 1
+    var out = ExhMatrix {
+        rows:      [exh_empty_pattern(); 512],
+        row_count: 0,
+        col_count: new_cols,
+    }
+    if new_cols < 0 { return out }
+
+    var row: i64 = 0
+    while row < (*m).row_count {
+        let p = exh_get(m, row, col)
+        if exh_pat_is_wildcard(&p) {
+            let base_out = out.row_count * new_cols
+            var c: i64 = 0
+            var c_out: i64 = 0
+            while c < (*m).col_count {
+                if c != col {
+                    out.rows[(base_out + c_out) as usize] = exh_get(m, row, c)
+                    c_out = c_out + 1
+                }
+                c = c + 1
+            }
+            out.row_count = out.row_count + 1
+        }
+        row = row + 1
+    }
+    out
+}
+
+// ============================================================================
+// Column signature: collect all constructor tags seen in a column
+// ============================================================================
+
+fn exh_col_tags(m: &ExhMatrix, col: i64, tags: &! [i64; 64], out_count: &! i64) with Mut, Panic, Div {
+    (*out_count) = 0
+    var row: i64 = 0
+    while row < (*m).row_count {
+        let p = exh_get(m, row, col)
+        if !exh_pat_is_wildcard(&p) {
+            let tag = p.tag
+            // Check if already in list
+            var found: bool = false
+            var k: i64 = 0
+            while k < (*out_count) {
+                if (*tags)[k as usize] == tag {
+                    found = true
+                    break
+                }
+                k = k + 1
+            }
+            if !found && (*out_count) < 64 {
+                (*tags)[(*out_count) as usize] = tag
+                (*out_count) = (*out_count) + 1
+            }
+        }
+        row = row + 1
+    }
+}
+
+// ============================================================================
+// Core exhaustiveness check: does the matrix cover all inputs?
+// Returns true if the matrix is exhaustive (every input is matched).
+// ============================================================================
+
+fn exh_matrix_is_exhaustive(m: &ExhMatrix) -> bool with Mut, Panic, Div {
+    // Base case 1: no rows => not exhaustive
+    if (*m).row_count == 0 { return false }
+
+    // Base case 2: no columns => the input tuple is empty.
+    //   If there's at least one row, it matches the empty tuple.
+    if (*m).col_count <= 0 { return true }
+
+    // Inductive case: look at column 0
+    let col: i64 = 0
+
+    // If any row has a wildcard/variable at column 0, it can catch anything.
+    // We need the default matrix to be exhaustive for remaining columns.
+    var has_total_wildcard: bool = false
+    var row: i64 = 0
+    while row < (*m).row_count {
+        let p = exh_get(m, row, col)
+        if exh_pat_is_wildcard(&p) {
+            has_total_wildcard = true
+        }
+        row = row + 1
+    }
+
+    // Collect constructor tags seen in col 0
+    var tags: [i64; 64] = [0; 64]
+    var tag_count: i64 = 0
+    exh_col_tags(m, col, &! tags, &! tag_count)
+
+    // If there are no constructors in col 0, we must have wildcards
+    if tag_count == 0 {
+        if has_total_wildcard {
+            let dm = exh_default_matrix(m, col)
+            return exh_matrix_is_exhaustive(&dm)
+        }
+        return false
+    }
+
+    // For each constructor tag, check that the specialised matrix is exhaustive
+    var i: i64 = 0
+    while i < tag_count {
+        let t = tags[i as usize]
+        let sm = exh_specialise(m, col, t)
+        if !exh_matrix_is_exhaustive(&sm) {
+            return false
+        }
+        i = i + 1
+    }
+
+    // If we have a wildcard, we also need to handle any constructors not listed
+    // But for finite enums with all constructors listed, we're done.
+    // We use a conservative approach: if there's no wildcard covering remaining
+    // constructors, and we can't enumerate all constructors (no type info here),
+    // we rely on the callers (exh_check_bool, exh_check_enum) which do full
+    // coverage testing.
+    true
+}
+
+// ============================================================================
+// Public API: bool exhaustiveness
+// ============================================================================
+
+// Check if a match on bool is exhaustive.
+// The matrix column 0 contains patterns for bool values.
+// bool has two tags: 0=false, 1=true
+fn exh_check_bool(m: &ExhMatrix) -> ExhResult with Mut, Panic, Div {
+    var has_true:     bool = false
+    var has_false:    bool = false
+    var has_wildcard: bool = false
+
+    var row: i64 = 0
+    while row < (*m).row_count {
+        let p = exh_get(m, row, 0)
+        if exh_pat_is_wildcard(&p) {
+            has_wildcard = true
+        } else if p.kind == EXH_CONSTRUCTOR() || p.kind == EXH_LITERAL() {
+            if p.tag == 0 { has_false = true }
+            if p.tag == 1 { has_true  = true }
+        }
+        row = row + 1
+    }
+
+    if has_wildcard {
+        return exh_result_ok()
+    }
+
+    if has_true && has_false {
+        return exh_result_ok()
+    }
+
+    if !has_true && !has_false {
+        var r = ExhResult { exhaustive: false, missing: [""; 32], missing_count: 0 }
+        r.missing[0] = "true"
+        r.missing[1] = "false"
+        r.missing_count = 2
+        return r
+    }
+
+    if !has_true {
+        return exh_result_missing("true")
+    }
+
+    exh_result_missing("false")
+}
+
+// ============================================================================
+// Public API: enum exhaustiveness
+// ============================================================================
+
+// Check if a match on an enum type is exhaustive.
+// Tests each variant: if none of the rows covers it, it is missing.
+fn exh_check_enum(m: &ExhMatrix, td: &ExhTypeDef) -> ExhResult with Mut, Panic, Div {
+    // First check for wildcard: if any row is wildcard in col 0, exhaustive
+    var row: i64 = 0
+    while row < (*m).row_count {
+        let p = exh_get(m, row, 0)
+        if exh_pat_is_wildcard(&p) {
+            return exh_result_ok()
+        }
+        row = row + 1
+    }
+
+    // For each variant, check if it is covered
+    var missing: [string; 32] = [""; 32]
+    var missing_count: i64 = 0
+
+    var v: i64 = 0
+    while v < (*td).variant_count {
+        let variant_name = (*td).variants[v as usize]
+        var covered: bool = false
+        row = 0
+        while row < (*m).row_count {
+            let p = exh_get(m, row, 0)
+            if exh_pat_is_wildcard(&p) {
+                covered = true
+            } else if (p.kind == EXH_CONSTRUCTOR() || p.kind == EXH_LITERAL()) && p.tag == v {
+                covered = true
+            }
+            row = row + 1
+        }
+        if !covered && missing_count < 32 {
+            missing[missing_count as usize] = variant_name
+            missing_count = missing_count + 1
+        }
+        v = v + 1
+    }
+
+    if missing_count == 0 {
+        exh_result_ok()
+    } else {
+        var r = ExhResult { exhaustive: false, missing: [""; 32], missing_count: 0 }
+        var k: i64 = 0
+        while k < missing_count {
+            r.missing[k as usize] = missing[k as usize]
+            k = k + 1
+        }
+        r.missing_count = missing_count
+        r
+    }
+}
+
+// ============================================================================
+// Utility: check if a result has a specific missing variant name
+// ============================================================================
+
+fn exh_result_has_missing(r: &ExhResult, name: string) -> bool {
+    var i: i64 = 0
+    while i < (*r).missing_count {
+        if str_eq((*r).missing[i as usize], name) {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// ============================================================================
+// Helper: build a single-column bool matrix with specific patterns
+// ============================================================================
+
+fn exh_build_bool_matrix_both() -> ExhMatrix with Mut, Panic, Div {
+    var m = exh_matrix_new(1)
+    var row0: [ExhPattern; 8] = [exh_empty_pattern(); 8]
+    row0[0] = exh_bool_true_pattern()
+    exh_add_row(&! m, row0, 1)
+    var row1: [ExhPattern; 8] = [exh_empty_pattern(); 8]
+    row1[0] = exh_bool_false_pattern()
+    exh_add_row(&! m, row1, 1)
+    m
+}
+
+fn exh_build_bool_matrix_true_only() -> ExhMatrix with Mut, Panic, Div {
+    var m = exh_matrix_new(1)
+    var row0: [ExhPattern; 8] = [exh_empty_pattern(); 8]
+    row0[0] = exh_bool_true_pattern()
+    exh_add_row(&! m, row0, 1)
+    m
+}
+
+fn exh_build_bool_matrix_wildcard() -> ExhMatrix with Mut, Panic, Div {
+    var m = exh_matrix_new(1)
+    var row0: [ExhPattern; 8] = [exh_empty_pattern(); 8]
+    row0[0] = exh_wildcard_pattern()
+    exh_add_row(&! m, row0, 1)
+    m
+}
+
+fn exh_build_enum_full(n: i64) -> ExhMatrix with Mut, Panic, Div {
+    var m = exh_matrix_new(1)
+    var i: i64 = 0
+    while i < n {
+        var row: [ExhPattern; 8] = [exh_empty_pattern(); 8]
+        row[0] = exh_constructor_pattern(i, "V")
+        exh_add_row(&! m, row, 1)
+        i = i + 1
+    }
+    m
+}
+
+fn exh_build_enum_partial(total: i64, skip: i64) -> ExhMatrix with Mut, Panic, Div {
+    var m = exh_matrix_new(1)
+    var i: i64 = 0
+    while i < total {
+        if i != skip {
+            var row: [ExhPattern; 8] = [exh_empty_pattern(); 8]
+            row[0] = exh_constructor_pattern(i, "V")
+            exh_add_row(&! m, row, 1)
+        }
+        i = i + 1
+    }
+    m
+}
+
+fn exh_build_test_typedef(n: i64) -> ExhTypeDef with Mut, Panic {
+    var td = exh_typedef_new("TestEnum")
+    // Add up to n variants with fixed names "0".."7"
+    if n > 0 { exh_typedef_add_variant(&! td, "0") }
+    if n > 1 { exh_typedef_add_variant(&! td, "1") }
+    if n > 2 { exh_typedef_add_variant(&! td, "2") }
+    if n > 3 { exh_typedef_add_variant(&! td, "3") }
+    if n > 4 { exh_typedef_add_variant(&! td, "4") }
+    if n > 5 { exh_typedef_add_variant(&! td, "5") }
+    if n > 6 { exh_typedef_add_variant(&! td, "6") }
+    if n > 7 { exh_typedef_add_variant(&! td, "7") }
+    td
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+fn exh_test_wildcard_kind_is_0() -> bool {
+    EXH_WILDCARD() == 0
+}
+
+fn exh_test_literal_kind_is_1() -> bool {
+    EXH_LITERAL() == 1
+}
+
+fn exh_test_constructor_kind_is_2() -> bool {
+    EXH_CONSTRUCTOR() == 2
+}
+
+fn exh_test_variable_kind_is_3() -> bool {
+    EXH_VARIABLE() == 3
+}
+
+fn exh_test_wildcard_pattern_kind() -> bool {
+    let p = exh_wildcard_pattern()
+    p.kind == EXH_WILDCARD()
+}
+
+fn exh_test_literal_pattern_tag() -> bool {
+    let p = exh_literal_pattern(42)
+    p.kind == EXH_LITERAL() && p.tag == 42
+}
+
+fn exh_test_constructor_pattern_tag() -> bool {
+    let p = exh_constructor_pattern(3, "Foo")
+    p.kind == EXH_CONSTRUCTOR() && p.tag == 3
+}
+
+fn exh_test_variable_pattern_kind() -> bool {
+    let p = exh_variable_pattern("x")
+    p.kind == EXH_VARIABLE()
+}
+
+fn exh_test_bool_true_tag_is_1() -> bool {
+    let p = exh_bool_true_pattern()
+    p.tag == 1
+}
+
+fn exh_test_bool_false_tag_is_0() -> bool {
+    let p = exh_bool_false_pattern()
+    p.tag == 0
+}
+
+fn exh_test_pat_is_wildcard_for_wildcard() -> bool {
+    let p = exh_wildcard_pattern()
+    exh_pat_is_wildcard(&p)
+}
+
+fn exh_test_pat_is_wildcard_for_variable() -> bool {
+    let p = exh_variable_pattern("x")
+    exh_pat_is_wildcard(&p)
+}
+
+fn exh_test_pat_is_wildcard_false_for_literal() -> bool {
+    let p = exh_literal_pattern(0)
+    !exh_pat_is_wildcard(&p)
+}
+
+fn exh_test_pat_matches_tag_wildcard() -> bool {
+    let p = exh_wildcard_pattern()
+    exh_pat_matches_tag(&p, 5)
+}
+
+fn exh_test_pat_matches_tag_literal_yes() -> bool {
+    let p = exh_literal_pattern(7)
+    exh_pat_matches_tag(&p, 7)
+}
+
+fn exh_test_pat_matches_tag_literal_no() -> bool {
+    let p = exh_literal_pattern(7)
+    !exh_pat_matches_tag(&p, 8)
+}
+
+fn exh_test_matrix_new_empty() -> bool {
+    let m = exh_matrix_new(1)
+    m.row_count == 0 && m.col_count == 1
+}
+
+fn exh_test_add_row_increments_count() -> bool with Mut, Panic, Div {
+    var m = exh_matrix_new(1)
+    var row: [ExhPattern; 8] = [exh_empty_pattern(); 8]
+    row[0] = exh_wildcard_pattern()
+    exh_add_row(&! m, row, 1)
+    m.row_count == 1
+}
+
+fn exh_test_get_returns_correct_pattern() -> bool with Mut, Panic, Div {
+    var m = exh_matrix_new(1)
+    var row: [ExhPattern; 8] = [exh_empty_pattern(); 8]
+    row[0] = exh_literal_pattern(99)
+    exh_add_row(&! m, row, 1)
+    let p = exh_get(&m, 0, 0)
+    p.tag == 99
+}
+
+fn exh_test_bool_both_arms_exhaustive() -> bool with Mut, Panic, Div {
+    var m = exh_build_bool_matrix_both()
+    let r = exh_check_bool(&m)
+    r.exhaustive
+}
+
+fn exh_test_bool_true_only_not_exhaustive() -> bool with Mut, Panic, Div {
+    var m = exh_build_bool_matrix_true_only()
+    let r = exh_check_bool(&m)
+    !r.exhaustive
+}
+
+fn exh_test_bool_true_only_missing_false() -> bool with Mut, Panic, Div {
+    var m = exh_build_bool_matrix_true_only()
+    let r = exh_check_bool(&m)
+    exh_result_has_missing(&r, "false")
+}
+
+fn exh_test_bool_wildcard_exhaustive() -> bool with Mut, Panic, Div {
+    var m = exh_build_bool_matrix_wildcard()
+    let r = exh_check_bool(&m)
+    r.exhaustive
+}
+
+fn exh_test_bool_empty_not_exhaustive() -> bool with Mut, Panic, Div {
+    var m = exh_matrix_new(1)
+    let r = exh_check_bool(&m)
+    !r.exhaustive
+}
+
+fn exh_test_bool_empty_missing_both() -> bool with Mut, Panic, Div {
+    var m = exh_matrix_new(1)
+    let r = exh_check_bool(&m)
+    exh_result_has_missing(&r, "true") && exh_result_has_missing(&r, "false")
+}
+
+fn exh_test_bool_false_only_missing_true() -> bool with Mut, Panic, Div {
+    var m = exh_matrix_new(1)
+    var row: [ExhPattern; 8] = [exh_empty_pattern(); 8]
+    row[0] = exh_bool_false_pattern()
+    exh_add_row(&! m, row, 1)
+    let r = exh_check_bool(&m)
+    exh_result_has_missing(&r, "true")
+}
+
+fn exh_test_enum_full_3_exhaustive() -> bool with Mut, Panic, Div {
+    var m = exh_build_enum_full(3)
+    var td = exh_build_test_typedef(3)
+    let r = exh_check_enum(&m, &td)
+    r.exhaustive
+}
+
+fn exh_test_enum_partial_3_not_exhaustive() -> bool with Mut, Panic, Div {
+    var m = exh_build_enum_partial(3, 1)
+    var td = exh_build_test_typedef(3)
+    let r = exh_check_enum(&m, &td)
+    !r.exhaustive
+}
+
+fn exh_test_enum_partial_3_missing_variant() -> bool with Mut, Panic, Div {
+    var m = exh_build_enum_partial(3, 1)
+    var td = exh_build_test_typedef(3)
+    let r = exh_check_enum(&m, &td)
+    r.missing_count == 1
+}
+
+fn exh_test_enum_wildcard_exhaustive() -> bool with Mut, Panic, Div {
+    var m = exh_matrix_new(1)
+    var row: [ExhPattern; 8] = [exh_empty_pattern(); 8]
+    row[0] = exh_wildcard_pattern()
+    exh_add_row(&! m, row, 1)
+    var td = exh_build_test_typedef(5)
+    let r = exh_check_enum(&m, &td)
+    r.exhaustive
+}
+
+fn exh_test_enum_variable_wildcard_exhaustive() -> bool with Mut, Panic, Div {
+    var m = exh_matrix_new(1)
+    var row: [ExhPattern; 8] = [exh_empty_pattern(); 8]
+    row[0] = exh_variable_pattern("x")
+    exh_add_row(&! m, row, 1)
+    var td = exh_build_test_typedef(4)
+    let r = exh_check_enum(&m, &td)
+    r.exhaustive
+}
+
+fn exh_test_enum_full_5_exhaustive() -> bool with Mut, Panic, Div {
+    var m = exh_build_enum_full(5)
+    var td = exh_build_test_typedef(5)
+    let r = exh_check_enum(&m, &td)
+    r.exhaustive
+}
+
+fn exh_test_enum_skip_last_missing() -> bool with Mut, Panic, Div {
+    var m = exh_build_enum_partial(4, 3)
+    var td = exh_build_test_typedef(4)
+    let r = exh_check_enum(&m, &td)
+    !r.exhaustive && r.missing_count == 1
+}
+
+fn exh_test_enum_empty_matrix_not_exhaustive() -> bool with Mut, Panic, Div {
+    var m = exh_matrix_new(1)
+    var td = exh_build_test_typedef(3)
+    let r = exh_check_enum(&m, &td)
+    !r.exhaustive
+}
+
+fn exh_test_enum_empty_matrix_all_missing() -> bool with Mut, Panic, Div {
+    var m = exh_matrix_new(1)
+    var td = exh_build_test_typedef(3)
+    let r = exh_check_enum(&m, &td)
+    r.missing_count == 3
+}
+
+fn exh_test_matrix_specialise_reduces_rows() -> bool with Mut, Panic, Div {
+    var m = exh_matrix_new(1)
+    var row0: [ExhPattern; 8] = [exh_empty_pattern(); 8]
+    row0[0] = exh_constructor_pattern(0, "A")
+    exh_add_row(&! m, row0, 1)
+    var row1: [ExhPattern; 8] = [exh_empty_pattern(); 8]
+    row1[0] = exh_constructor_pattern(1, "B")
+    exh_add_row(&! m, row1, 1)
+    let s = exh_specialise(&m, 0, 0)
+    // Only row 0 matched tag 0; specialised matrix has 1 row, 0 columns
+    s.row_count == 1
+}
+
+fn exh_test_matrix_specialise_wildcard_included() -> bool with Mut, Panic, Div {
+    var m = exh_matrix_new(1)
+    var row0: [ExhPattern; 8] = [exh_empty_pattern(); 8]
+    row0[0] = exh_wildcard_pattern()
+    exh_add_row(&! m, row0, 1)
+    var row1: [ExhPattern; 8] = [exh_empty_pattern(); 8]
+    row1[0] = exh_constructor_pattern(1, "B")
+    exh_add_row(&! m, row1, 1)
+    let s = exh_specialise(&m, 0, 0)
+    // Wildcard matches any tag including 0, so row0 is included
+    s.row_count == 1
+}
+
+fn exh_test_matrix_exhaustive_two_rows_two_tags() -> bool with Mut, Panic, Div {
+    var m = exh_matrix_new(1)
+    var row0: [ExhPattern; 8] = [exh_empty_pattern(); 8]
+    row0[0] = exh_constructor_pattern(0, "A")
+    exh_add_row(&! m, row0, 1)
+    var row1: [ExhPattern; 8] = [exh_empty_pattern(); 8]
+    row1[0] = exh_constructor_pattern(1, "B")
+    exh_add_row(&! m, row1, 1)
+    exh_matrix_is_exhaustive(&m)
+}
+
+fn exh_test_matrix_not_exhaustive_no_rows() -> bool with Mut, Panic, Div {
+    var m = exh_matrix_new(1)
+    !exh_matrix_is_exhaustive(&m)
+}
+
+fn exh_test_matrix_exhaustive_wildcard_one_row() -> bool with Mut, Panic, Div {
+    var m = exh_matrix_new(1)
+    var row0: [ExhPattern; 8] = [exh_empty_pattern(); 8]
+    row0[0] = exh_wildcard_pattern()
+    exh_add_row(&! m, row0, 1)
+    exh_matrix_is_exhaustive(&m)
+}
+
+fn exh_test_typedef_new_zero_variants() -> bool {
+    let td = exh_typedef_new("Foo")
+    td.variant_count == 0
+}
+
+fn exh_test_typedef_add_variant() -> bool with Mut, Panic {
+    var td = exh_typedef_new("Color")
+    exh_typedef_add_variant(&! td, "Red")
+    exh_typedef_add_variant(&! td, "Green")
+    td.variant_count == 2
+}
+
+fn exh_test_typedef_variant_name_stored() -> bool with Mut, Panic {
+    var td = exh_typedef_new("Color")
+    exh_typedef_add_variant(&! td, "Blue")
+    str_eq(td.variants[0], "Blue")
+}
+
+fn exh_test_result_ok_exhaustive() -> bool {
+    let r = exh_result_ok()
+    r.exhaustive
+}
+
+fn exh_test_result_missing_not_exhaustive() -> bool {
+    let r = exh_result_missing("Foo")
+    !r.exhaustive
+}
+
+fn exh_test_result_missing_count_one() -> bool {
+    let r = exh_result_missing("Foo")
+    r.missing_count == 1
+}
+
+fn exh_test_result_has_missing_true() -> bool {
+    let r = exh_result_missing("Bar")
+    exh_result_has_missing(&r, "Bar")
+}
+
+fn exh_test_result_has_missing_false() -> bool {
+    let r = exh_result_missing("Bar")
+    !exh_result_has_missing(&r, "Baz")
+}
+
+fn exh_test_default_matrix_keeps_wildcards() -> bool with Mut, Panic, Div {
+    var m = exh_matrix_new(2)
+    var row0: [ExhPattern; 8] = [exh_empty_pattern(); 8]
+    row0[0] = exh_wildcard_pattern()
+    row0[1] = exh_constructor_pattern(0, "A")
+    exh_add_row(&! m, row0, 2)
+    var row1: [ExhPattern; 8] = [exh_empty_pattern(); 8]
+    row1[0] = exh_constructor_pattern(1, "B")
+    row1[1] = exh_constructor_pattern(0, "A")
+    exh_add_row(&! m, row1, 2)
+    let dm = exh_default_matrix(&m, 0)
+    // Only row0 has wildcard at col 0
+    dm.row_count == 1
+}
+
+fn exh_test_col_tags_finds_two() -> bool with Mut, Panic, Div {
+    var m = exh_matrix_new(1)
+    var row0: [ExhPattern; 8] = [exh_empty_pattern(); 8]
+    row0[0] = exh_constructor_pattern(0, "A")
+    exh_add_row(&! m, row0, 1)
+    var row1: [ExhPattern; 8] = [exh_empty_pattern(); 8]
+    row1[0] = exh_constructor_pattern(1, "B")
+    exh_add_row(&! m, row1, 1)
+    var tags: [i64; 64] = [0; 64]
+    var tc: i64 = 0
+    exh_col_tags(&m, 0, &! tags, &! tc)
+    tc == 2
+}
+
+fn exh_test_col_tags_deduplicates() -> bool with Mut, Panic, Div {
+    var m = exh_matrix_new(1)
+    var row0: [ExhPattern; 8] = [exh_empty_pattern(); 8]
+    row0[0] = exh_constructor_pattern(0, "A")
+    exh_add_row(&! m, row0, 1)
+    var row1: [ExhPattern; 8] = [exh_empty_pattern(); 8]
+    row1[0] = exh_constructor_pattern(0, "A")
+    exh_add_row(&! m, row1, 1)
+    var tags: [i64; 64] = [0; 64]
+    var tc: i64 = 0
+    exh_col_tags(&m, 0, &! tags, &! tc)
+    tc == 1
+}
+
+fn exh_test_col_tags_skips_wildcards() -> bool with Mut, Panic, Div {
+    var m = exh_matrix_new(1)
+    var row0: [ExhPattern; 8] = [exh_empty_pattern(); 8]
+    row0[0] = exh_wildcard_pattern()
+    exh_add_row(&! m, row0, 1)
+    var tags: [i64; 64] = [0; 64]
+    var tc: i64 = 0
+    exh_col_tags(&m, 0, &! tags, &! tc)
+    tc == 0
+}
+
+fn exh_test_enum_two_skip_one_missing_count_1() -> bool with Mut, Panic, Div {
+    var m = exh_build_enum_partial(2, 0)
+    var td = exh_build_test_typedef(2)
+    let r = exh_check_enum(&m, &td)
+    !r.exhaustive && r.missing_count == 1
+}
+
+fn exh_test_matrix_2col_two_wildcards() -> bool with Mut, Panic, Div {
+    var m = exh_matrix_new(2)
+    var row0: [ExhPattern; 8] = [exh_empty_pattern(); 8]
+    row0[0] = exh_wildcard_pattern()
+    row0[1] = exh_wildcard_pattern()
+    exh_add_row(&! m, row0, 2)
+    exh_matrix_is_exhaustive(&m)
+}
+
+fn exh_test_literal_pattern_matches_same_tag() -> bool {
+    let p = exh_literal_pattern(5)
+    exh_pat_matches_tag(&p, 5)
+}
+
+fn exh_test_literal_pattern_no_match_diff_tag() -> bool {
+    let p = exh_literal_pattern(5)
+    !exh_pat_matches_tag(&p, 6)
+}
+
+fn exh_test_constructor_matches_tag() -> bool {
+    let p = exh_constructor_pattern(3, "Baz")
+    exh_pat_matches_tag(&p, 3)
+}
+
+fn exh_test_matrix_add_two_rows() -> bool with Mut, Panic, Div {
+    var m = exh_matrix_new(1)
+    var r0: [ExhPattern; 8] = [exh_empty_pattern(); 8]
+    r0[0] = exh_wildcard_pattern()
+    exh_add_row(&! m, r0, 1)
+    var r1: [ExhPattern; 8] = [exh_empty_pattern(); 8]
+    r1[0] = exh_literal_pattern(0)
+    exh_add_row(&! m, r1, 1)
+    m.row_count == 2
+}
+
+fn exh_test_enum_5_skip_2_missing_count_1() -> bool with Mut, Panic, Div {
+    var m = exh_build_enum_partial(5, 2)
+    var td = exh_build_test_typedef(5)
+    let r = exh_check_enum(&m, &td)
+    !r.exhaustive && r.missing_count == 1
+}
+
+fn exh_test_run_all() -> i64 with Mut, Panic, Div {
+    var pass: i64 = 0
+    var fail: i64 = 0
+
+    if exh_test_wildcard_kind_is_0() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_literal_kind_is_1() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_constructor_kind_is_2() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_variable_kind_is_3() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_wildcard_pattern_kind() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_literal_pattern_tag() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_constructor_pattern_tag() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_variable_pattern_kind() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_bool_true_tag_is_1() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_bool_false_tag_is_0() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_pat_is_wildcard_for_wildcard() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_pat_is_wildcard_for_variable() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_pat_is_wildcard_false_for_literal() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_pat_matches_tag_wildcard() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_pat_matches_tag_literal_yes() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_pat_matches_tag_literal_no() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_matrix_new_empty() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_add_row_increments_count() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_get_returns_correct_pattern() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_bool_both_arms_exhaustive() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_bool_true_only_not_exhaustive() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_bool_true_only_missing_false() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_bool_wildcard_exhaustive() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_bool_empty_not_exhaustive() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_bool_empty_missing_both() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_bool_false_only_missing_true() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_enum_full_3_exhaustive() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_enum_partial_3_not_exhaustive() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_enum_partial_3_missing_variant() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_enum_wildcard_exhaustive() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_enum_variable_wildcard_exhaustive() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_enum_full_5_exhaustive() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_enum_skip_last_missing() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_enum_empty_matrix_not_exhaustive() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_enum_empty_matrix_all_missing() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_matrix_specialise_reduces_rows() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_matrix_specialise_wildcard_included() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_matrix_exhaustive_two_rows_two_tags() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_matrix_not_exhaustive_no_rows() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_matrix_exhaustive_wildcard_one_row() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_typedef_new_zero_variants() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_typedef_add_variant() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_typedef_variant_name_stored() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_result_ok_exhaustive() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_result_missing_not_exhaustive() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_result_missing_count_one() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_result_has_missing_true() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_result_has_missing_false() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_default_matrix_keeps_wildcards() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_col_tags_finds_two() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_col_tags_deduplicates() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_col_tags_skips_wildcards() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_enum_two_skip_one_missing_count_1() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_matrix_2col_two_wildcards() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_literal_pattern_matches_same_tag() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_literal_pattern_no_match_diff_tag() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_constructor_matches_tag() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_matrix_add_two_rows() { pass = pass + 1 } else { fail = fail + 1 }
+    if exh_test_enum_5_skip_2_missing_count_1() { pass = pass + 1 } else { fail = fail + 1 }
+
+    pass
+}
